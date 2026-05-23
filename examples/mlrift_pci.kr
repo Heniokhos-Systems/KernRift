@@ -24,6 +24,7 @@ extern fn _printk(uint64 fmt) -> int32
 extern fn misc_register(uint64 dev) -> int32
 extern fn misc_deregister(uint64 dev) -> int32
 extern fn _copy_from_user(uint64 dst, uint64 src, uint64 n) -> uint64
+extern fn _copy_to_user(uint64 dst, uint64 src, uint64 n) -> uint64
 extern fn pci_get_domain_bus_and_slot(uint32 dom, uint32 bus, uint32 devfn) -> uint64
 extern fn pci_dev_put(uint64 pdev)
 extern fn remap_pfn_range(uint64 vma, uint64 addr, uint64 pfn, uint64 size, uint64 prot) -> int32
@@ -186,6 +187,11 @@ static uint64 IOCTL_MLRIFT_IOMMU_MAP = 0x40184D04
 // size }. = (1<<30)|(16<<16)|('M'<<8)|5 = 0x40104D05.
 static uint64 IOCTL_MLRIFT_IOMMU_UNMAP = 0x40104D05
 
+// MLRIFT_BAR_INFO = _IOWR('M', 6, char[16]): in: u32 bar_index @ +0;
+// out: u64 size @ +0, u64 phys_start @ +8. size 0 = BAR absent.
+// = (3<<30)|(16<<16)|('M'<<8)|6 = 0xC0104D06.
+static uint64 IOCTL_MLRIFT_BAR_INFO = 0xC0104D06
+
 // kernel constants
 static uint64 GFP_KERNEL_FLAGS = 0xcc0
 static uint64 FOLL_WRITE_FLAG  = 0x1
@@ -262,6 +268,9 @@ fn driver_ioctl(uint64 file, uint64 cmd, uint64 arg) -> int64 {
     if cmd == IOCTL_MLRIFT_IOMMU_UNMAP {
         return _iommu_unmap(arg)
     }
+    if cmd == IOCTL_MLRIFT_BAR_INFO {
+        return _bar_info(arg)
+    }
     _printk("mlrift_pci: unknown ioctl cmd\n")
     return 0xFFFFFFFFFFFFFFE7   // -ENOTTY = -25
 }
@@ -332,6 +341,35 @@ fn _pin_test(uint64 arg) -> int64 {
     dealloc(pages)
     _printk("mlrift_pci: PIN_TEST ok (pinned + SG built + freed)\n")
     return nents_ret
+}
+
+// Phase B.2 follow-up — report a BAR's size (and phys base) so userland
+// can mmap it without parsing /sys. arg -> in: u32 bar_index @ +0; out:
+// u64 size @ +0, u64 phys_start @ +8 (size 0 = BAR not present).
+fn _bar_info(uint64 arg) -> int64 {
+    uint64 pdev = _mlrift_pci_slot0
+    if pdev == 0 { return 0xFFFFFFFFFFFFFFEA }            // -EINVAL: open device first
+    uint8[16] req_arr
+    uint64 req = req_arr
+    uint64 zi = 0
+    while zi < 16 { unsafe { *((req + zi) as uint8) = 0 }; zi = zi + 1 }
+    uint64 not_copied = _copy_from_user(req, arg, 16)
+    if not_copied != 0 { return 0xFFFFFFFFFFFFFFF2 }      // -EFAULT
+    uint32 bar_index32 = 0; unsafe { *((req + 0) as uint32) -> bar_index32 }
+    uint64 bar_index = bar_index32
+    if bar_index > 5 { return 0xFFFFFFFFFFFFFFEA }
+
+    uint64 res = pdev + PCI_DEV_RESOURCE0_START + bar_index * PCI_RES_STRIDE
+    uint64 start = 0; unsafe { *((res + 0) as uint64) -> start }
+    uint64 end   = 0; unsafe { *((res + 8) as uint64) -> end }
+    uint64 size = 0
+    if start != 0 { size = end - start + 1 }              // 0 => BAR absent
+
+    unsafe { *((req + 0) as uint64) = size }
+    unsafe { *((req + 8) as uint64) = start }
+    uint64 nc2 = _copy_to_user(arg, req, 16)
+    if nc2 != 0 { return 0xFFFFFFFFFFFFFFF2 }              // -EFAULT
+    return 0
 }
 
 // Phase B.3.c — map a pinned userland buffer into our IOMMU paging
