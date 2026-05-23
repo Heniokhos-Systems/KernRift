@@ -26,15 +26,18 @@
 @module_description("Hello-world LKM emitted by the KernRift compiler")
 @module_name("hello_kr")
 
-extern fn printk(uint64 fmt) -> int32
+// On modern Linux (4.20+) the kernel exports `_printk` as the real
+// symbol; `printk` in C is a macro that forwards to `_printk`. Modules
+// referencing the unprefixed `printk` get "Unknown symbol" at load.
+extern fn _printk(uint64 fmt) -> int32
 
 @module_init
 fn hello_init() -> int32 {
-    printk("Hello from KernRift\n")
+    _printk("Hello from KernRift\n")
     return 0
 }
 
 @module_exit
 fn hello_exit() {
-    printk("Bye from KernRift\n")
+    _printk("Bye from KernRift\n")
 }

@@ -11427,6 +11427,12 @@ fn emit_elf_lkm(uint64 text_len, uint64 data_len, uint64 arch) {
     }
     out_len = 0
 
+    // Resolve user-supplied module name once, up front — both .modinfo
+    // (name= field) and .gnu.linkonce.this_module (struct module.name)
+    // need it.
+    uint64 user_name_start = module_info_name_start()
+    uint64 user_name_len = module_info_name_len()
+
     // ---- Build .modinfo content ----
     // Order: license, author, description, srcversion. We always emit a
     // srcversion (some kernel builds reject modules without one). license
@@ -11474,6 +11480,51 @@ fn emit_elf_lkm(uint64 text_len, uint64 data_len, uint64 arch) {
                                        "srcversion", 10,
                                        "KERNRIFT_PHASE_A1", 17)
 
+    // depends: empty for now (no module dependencies). The kernel reads
+    // this to resolve cross-module symbol references — empty means we
+    // rely only on the kernel's exported symbols (printk etc).
+    modinfo_len = _lkm_modinfo_kv_lit(modinfo_buf, modinfo_len,
+                                       "depends", 7, "", 0)
+
+    // name: the module name. The kernel cross-references this against
+    // struct module.name and against /proc/modules. Mirror whatever the
+    // user supplied via @module_name (or our default).
+    if user_name_len == 0 {
+        modinfo_len = _lkm_modinfo_kv_lit(modinfo_buf, modinfo_len,
+                                           "name", 4,
+                                           "kernrift_module", 15)
+    } else {
+        modinfo_len = _lkm_modinfo_kv(modinfo_buf, modinfo_len,
+                                       "name", 4,
+                                       user_name_start, user_name_len)
+    }
+
+    // retpoline=Y: declares that this module was built with retpoline
+    // support (CONFIG_RETPOLINE=y kernels reject modules built without
+    // retpoline awareness). Our codegen emits direct calls only, which
+    // are retpoline-compatible by construction.
+    modinfo_len = _lkm_modinfo_kv_lit(modinfo_buf, modinfo_len,
+                                       "retpoline", 9, "Y", 1)
+
+    // vermagic: the kernel rejects modules without a vermagic that
+    // matches its own (CONFIG_MODULE_VERIFY_ELF check). The string is
+    // built from kernel version + SMP/PREEMPT flags + ABI markers.
+    //
+    // HARDCODED for kernel 6.17.0-29-generic. A.1.5 will read this
+    // from /proc/version or /sys/module/kernel/parameters/version at
+    // compile time so we work on any host kernel without re-build.
+    // Trailing space is significant — matches what the running kernel
+    // produces internally via MODULE_VERMAGIC_*.
+    // NOTE: vermagic intentionally OMITS "modversions" — even with
+    // insmod -f's MODULE_INIT_IGNORE_MODVERSIONS, the kernel appears to
+    // require __versions to have at least a `module_layout` entry when
+    // the magic claims modversions. Until A.1.5 emits real CRCs, we
+    // declare a non-modversions vermagic; -f's IGNORE_VERMAGIC handles
+    // the rest. The trailing space is still significant.
+    modinfo_len = _lkm_modinfo_kv_lit(modinfo_buf, modinfo_len,
+                                       "vermagic", 8,
+                                       "6.17.0-29-generic SMP preempt mod_unload ", 41)
+
     // ---- Build .gnu.linkonce.this_module content (1280 bytes) ----
     uint64 sm_size = 1280
     uint64 sm_buf = alloc(sm_size)
@@ -11484,11 +11535,10 @@ fn emit_elf_lkm(uint64 text_len, uint64 data_len, uint64 arch) {
         sm_zi = sm_zi + 1
     }
     // name @ offset 24, up to 56 bytes. Truncate or use a default if
-    // the user didn't supply @module_name.
+    // the user didn't supply @module_name. (user_name_start/len were
+    // resolved at the top of this function.)
     uint64 name_off_in_sm = 24
     uint64 name_max = 55  // MODULE_NAME_LEN-1, reserve a byte for NUL
-    uint64 user_name_start = module_info_name_start()
-    uint64 user_name_len = module_info_name_len()
     if user_name_len == 0 {
         // Default name: "kernrift_module"
         uint64 dn = "kernrift_module"
@@ -11524,6 +11574,13 @@ fn emit_elf_lkm(uint64 text_len, uint64 data_len, uint64 arch) {
     uint64 has_relocs = 0
     if extern_call_count > 0 { has_relocs = 1 }
 
+    // shstrtab layout extension (Phase A.1.4): + four more section
+    // names for .note.Linux + __versions family. Empirically required
+    // by the kernel module loader on Linux 6.x even with -f:
+    //   .note.Linux\0 (12)
+    //   __versions\0  (11)
+    //   __version_ext_names\0 (20)
+    //   __version_ext_crcs\0  (19)
     uint64 shstr_base = 55
     uint64 shstr_rela_text_off = 55
     uint64 next_off = 55
@@ -11534,6 +11591,14 @@ fn emit_elf_lkm(uint64 text_len, uint64 data_len, uint64 arch) {
     next_off = next_off + 26
     uint64 shstr_rela_this_module_off = next_off
     next_off = next_off + 31
+    uint64 shstr_note_linux_off = next_off
+    next_off = next_off + 12
+    uint64 shstr_versions_off = next_off
+    next_off = next_off + 11
+    uint64 shstr_version_ext_names_off = next_off
+    next_off = next_off + 20
+    uint64 shstr_version_ext_crcs_off = next_off
+    next_off = next_off + 19
     uint64 shstrtab_size = next_off
 
     // ---- Build .strtab content ----
@@ -11675,11 +11740,30 @@ fn emit_elf_lkm(uint64 text_len, uint64 data_len, uint64 arch) {
     uint64 text_off = elf_hdr_size
     uint64 data_off = text_off + text_len
     uint64 modinfo_off = data_off + data_len
+    // .note.Linux content: two ELF notes (LTO_INFO + BUILD_SALT), 48
+    // bytes total. The kernel verifies the BUILD_SALT note against its
+    // own CONFIG_MODULE_SALT; empty-vs-empty matches on stock kernels.
+    // Aligned to 4 bytes per NOTE convention.
+    uint64 note_linux_size = 48
+    uint64 note_linux_off = modinfo_off + modinfo_len
+    uint64 note_linux_pad = (4 - (note_linux_off & 3)) & 3
+    note_linux_off = note_linux_off + note_linux_pad
     // .gnu.linkonce.this_module is 64-aligned (per real .ko samples).
-    uint64 this_module_off = modinfo_off + modinfo_len
+    uint64 this_module_off = note_linux_off + note_linux_size
     uint64 this_module_pad = (64 - (this_module_off & 63)) & 63
     this_module_off = this_module_off + this_module_pad
+    // __versions / __version_ext_names / __version_ext_crcs — empty
+    // placeholders. With MODULE_INIT_IGNORE_MODVERSIONS (insmod -f),
+    // the kernel checks for section presence but skips CRC matching.
+    // 32-byte alignment per real .ko. Size 0 is allowed; all three
+    // share the same file offset since they're zero-length.
+    uint64 versions_size = 0
+    uint64 version_ext_names_size = 0
+    uint64 version_ext_crcs_size = 0
     uint64 symtab_off = this_module_off + sm_size
+    uint64 versions_off = symtab_off    // share offset (size=0)
+    uint64 version_ext_names_off = symtab_off
+    uint64 version_ext_crcs_off = symtab_off
     uint64 strtab_off = symtab_off + symtab_size
     uint64 shstrtab_off = strtab_off + strtab_len
     uint64 rela_text_off = shstrtab_off + shstrtab_size
@@ -11693,8 +11777,14 @@ fn emit_elf_lkm(uint64 text_len, uint64 data_len, uint64 arch) {
     uint64 shdr_align_pad = (8 - (shdr_off & 7)) & 7
     shdr_off = shdr_off + shdr_align_pad
 
-    uint64 num_sections = 10
-    if has_relocs != 0 { num_sections = 11 }
+    // Sections 0-8 unchanged from A.1.3 layout. New sections 9-12:
+    //   9  .note.Linux
+    //  10  __versions
+    //  11  __version_ext_names
+    //  12  __version_ext_crcs
+    //  then .rela.text and .rela.gnu.linkonce.this_module appended.
+    uint64 num_sections = 14
+    if has_relocs != 0 { num_sections = 15 }
 
     // ---- Emit ELF header ----
     emit_byte(0x7F); emit_byte(69); emit_byte(76); emit_byte(70)
@@ -11750,6 +11840,30 @@ fn emit_elf_lkm(uint64 text_len, uint64 data_len, uint64 arch) {
         emit_byte(bb)
         ci = ci + 1
     }
+
+    // ---- Pad to 4-byte alignment for .note.Linux ----
+    pi = 0
+    while pi < note_linux_pad { emit_byte(0); pi = pi + 1 }
+
+    // ---- Emit .note.Linux (48 bytes — two ELF notes) ----
+    // Note 1: LINUX_ELFNOTE_LTO_INFO (type=0x101, descsz=4, desc=0).
+    //   Declares "module was NOT built with LTO". The kernel compares
+    //   against its own LTO state; both should be 0 on stock kernels.
+    emit_u32_le(6)         // namesz = 6 ("Linux\0")
+    emit_u32_le(4)         // descsz = 4
+    emit_u32_le(0x101)     // type = LINUX_ELFNOTE_LTO_INFO
+    emit_byte(76); emit_byte(105); emit_byte(110); emit_byte(117); emit_byte(120); emit_byte(0)  // "Linux\0"
+    emit_byte(0); emit_byte(0)  // pad to 4-byte name boundary
+    emit_u32_le(0)         // desc = 0 (LTO disabled)
+    // Note 2: LINUX_ELFNOTE_BUILD_SALT (type=0x100, descsz=1, desc=0).
+    //   Build salt for module ABI distinguishing. Empty matches stock
+    //   kernels built with CONFIG_MODULE_SALT="" (the Ubuntu default).
+    emit_u32_le(6)         // namesz
+    emit_u32_le(1)         // descsz
+    emit_u32_le(0x100)     // type = LINUX_ELFNOTE_BUILD_SALT
+    emit_byte(76); emit_byte(105); emit_byte(110); emit_byte(117); emit_byte(120); emit_byte(0)
+    emit_byte(0); emit_byte(0)  // pad name to 4-byte
+    emit_byte(0); emit_byte(0); emit_byte(0); emit_byte(0)  // desc=0 (1 byte) + 3 pad
 
     // ---- Pad to 64-byte alignment for .gnu.linkonce.this_module ----
     pi = 0
@@ -11818,6 +11932,21 @@ fn emit_elf_lkm(uint64 text_len, uint64 data_len, uint64 arch) {
         cur_sym_idx = cur_sym_idx + 1
     }
 
+    // Compute function sizes from fn_table offsets. The kernel module
+    // loader uses these for ELF validation — symbols with st_size==0
+    // can fall outside expected ranges and trigger silent -ENOEXEC.
+    // init function spans from init_code_off to exit_code_off (if exit
+    // follows init in .text), else to text_len. Similarly for exit.
+    uint64 init_module_size = 0
+    uint64 cleanup_module_size = 0
+    if exit_code_off > init_code_off {
+        init_module_size = exit_code_off - init_code_off
+        cleanup_module_size = text_len - exit_code_off
+    } else {
+        cleanup_module_size = init_code_off - exit_code_off
+        init_module_size = text_len - init_code_off
+    }
+
     // Global: init_module (alias for the @module_init function).
     uint64 init_module_sym_idx = cur_sym_idx
     emit_u32_le(init_module_name_off)
@@ -11825,7 +11954,7 @@ fn emit_elf_lkm(uint64 text_len, uint64 data_len, uint64 arch) {
     emit_byte(0)
     emit_u16_le(1)               // .text
     emit_u64_le(init_code_off)
-    emit_u64_le(0)
+    emit_u64_le(init_module_size)
     cur_sym_idx = cur_sym_idx + 1
 
     // Global: cleanup_module (alias for the @module_exit function).
@@ -11835,7 +11964,7 @@ fn emit_elf_lkm(uint64 text_len, uint64 data_len, uint64 arch) {
     emit_byte(0)
     emit_u16_le(1)               // .text
     emit_u64_le(exit_code_off)
-    emit_u64_le(0)
+    emit_u64_le(cleanup_module_size)
     cur_sym_idx = cur_sym_idx + 1
 
     // Global: __this_module (struct module instance).
@@ -11895,6 +12024,14 @@ fn emit_elf_lkm(uint64 text_len, uint64 data_len, uint64 arch) {
     emit_byte(46); emit_byte(103); emit_byte(110); emit_byte(117); emit_byte(46); emit_byte(108); emit_byte(105); emit_byte(110); emit_byte(107); emit_byte(111); emit_byte(110); emit_byte(99); emit_byte(101); emit_byte(46); emit_byte(116); emit_byte(104); emit_byte(105); emit_byte(115); emit_byte(95); emit_byte(109); emit_byte(111); emit_byte(100); emit_byte(117); emit_byte(108); emit_byte(101); emit_byte(0)
     // .rela.gnu.linkonce.this_module\0
     emit_byte(46); emit_byte(114); emit_byte(101); emit_byte(108); emit_byte(97); emit_byte(46); emit_byte(103); emit_byte(110); emit_byte(117); emit_byte(46); emit_byte(108); emit_byte(105); emit_byte(110); emit_byte(107); emit_byte(111); emit_byte(110); emit_byte(99); emit_byte(101); emit_byte(46); emit_byte(116); emit_byte(104); emit_byte(105); emit_byte(115); emit_byte(95); emit_byte(109); emit_byte(111); emit_byte(100); emit_byte(117); emit_byte(108); emit_byte(101); emit_byte(0)
+    // .note.Linux\0 (12 bytes)
+    emit_byte(46); emit_byte(110); emit_byte(111); emit_byte(116); emit_byte(101); emit_byte(46); emit_byte(76); emit_byte(105); emit_byte(110); emit_byte(117); emit_byte(120); emit_byte(0)
+    // __versions\0 (11 bytes)
+    emit_byte(95); emit_byte(95); emit_byte(118); emit_byte(101); emit_byte(114); emit_byte(115); emit_byte(105); emit_byte(111); emit_byte(110); emit_byte(115); emit_byte(0)
+    // __version_ext_names\0 (20 bytes)
+    emit_byte(95); emit_byte(95); emit_byte(118); emit_byte(101); emit_byte(114); emit_byte(115); emit_byte(105); emit_byte(111); emit_byte(110); emit_byte(95); emit_byte(101); emit_byte(120); emit_byte(116); emit_byte(95); emit_byte(110); emit_byte(97); emit_byte(109); emit_byte(101); emit_byte(115); emit_byte(0)
+    // __version_ext_crcs\0 (19 bytes)
+    emit_byte(95); emit_byte(95); emit_byte(118); emit_byte(101); emit_byte(114); emit_byte(115); emit_byte(105); emit_byte(111); emit_byte(110); emit_byte(95); emit_byte(101); emit_byte(120); emit_byte(116); emit_byte(95); emit_byte(99); emit_byte(114); emit_byte(99); emit_byte(115); emit_byte(0)
 
     // ---- Pad to .rela.text's 8-byte alignment ----
     pi = 0
@@ -12040,7 +12177,55 @@ fn emit_elf_lkm(uint64 text_len, uint64 data_len, uint64 arch) {
     emit_u64_le(1)
     emit_u64_le(0)
 
-    // Section 9: .rela.text (if has externs)
+    // Section 9: .note.Linux (PROGBITS-ish NOTE, SHF_ALLOC)
+    emit_u32_le(shstr_note_linux_off)
+    emit_u32_le(7)             // SHT_NOTE
+    emit_u64_le(2)             // SHF_ALLOC
+    emit_u64_le(0)
+    emit_u64_le(note_linux_off)
+    emit_u64_le(note_linux_size)
+    emit_u32_le(0)
+    emit_u32_le(0)
+    emit_u64_le(4)
+    emit_u64_le(0)
+
+    // Section 10: __versions (PROGBITS, SHF_ALLOC, empty placeholder)
+    emit_u32_le(shstr_versions_off)
+    emit_u32_le(1)             // SHT_PROGBITS
+    emit_u64_le(2)             // SHF_ALLOC
+    emit_u64_le(0)
+    emit_u64_le(versions_off)
+    emit_u64_le(versions_size)
+    emit_u32_le(0)
+    emit_u32_le(0)
+    emit_u64_le(32)
+    emit_u64_le(0)
+
+    // Section 11: __version_ext_names (PROGBITS, SHF_ALLOC, empty)
+    emit_u32_le(shstr_version_ext_names_off)
+    emit_u32_le(1)             // SHT_PROGBITS
+    emit_u64_le(2)             // SHF_ALLOC
+    emit_u64_le(0)
+    emit_u64_le(version_ext_names_off)
+    emit_u64_le(version_ext_names_size)
+    emit_u32_le(0)
+    emit_u32_le(0)
+    emit_u64_le(32)
+    emit_u64_le(0)
+
+    // Section 12: __version_ext_crcs (PROGBITS, SHF_ALLOC, empty)
+    emit_u32_le(shstr_version_ext_crcs_off)
+    emit_u32_le(1)             // SHT_PROGBITS
+    emit_u64_le(2)             // SHF_ALLOC
+    emit_u64_le(0)
+    emit_u64_le(version_ext_crcs_off)
+    emit_u64_le(version_ext_crcs_size)
+    emit_u32_le(0)
+    emit_u32_le(0)
+    emit_u64_le(32)
+    emit_u64_le(0)
+
+    // Section 13: .rela.text (if has externs)
     if has_relocs != 0 {
         emit_u32_le(shstr_rela_text_off)
         emit_u32_le(4)             // SHT_RELA
@@ -12054,7 +12239,7 @@ fn emit_elf_lkm(uint64 text_len, uint64 data_len, uint64 arch) {
         emit_u64_le(24)
     }
 
-    // Section 9 or 10: .rela.gnu.linkonce.this_module
+    // Section 13 or 14: .rela.gnu.linkonce.this_module
     emit_u32_le(shstr_rela_this_module_off)
     emit_u32_le(4)                 // SHT_RELA
     emit_u64_le(0x40)              // SHF_INFO_LINK
