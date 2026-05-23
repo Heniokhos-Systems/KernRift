@@ -11651,6 +11651,11 @@ fn emit_elf_lkm(uint64 text_len, uint64 data_len, uint64 arch) {
     uint64 pci_drv_name_len = module_info_pci_driver_len()
     uint64 pci_drv_mode = 0
     if pci_drv_name_len > 0 { pci_drv_mode = 1 }
+    // These fn_lookup results are used ONLY to validate that the probe/
+    // remove functions exist in fn_table (error out early if not). The
+    // actual .data relocations target the probe/remove symbol-table
+    // indices (resolved in the symtab loop), NOT these code offsets — so
+    // Task 3's init wiring must not reach for these vars.
     uint64 pci_probe_code_off = 0
     uint64 pci_remove_code_off = 0
     if pci_drv_mode != 0 {
