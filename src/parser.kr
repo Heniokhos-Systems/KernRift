@@ -1660,6 +1660,7 @@ fn parse_module() -> uint64 {
         uint64 ann_module_init = 0
         uint64 ann_module_exit = 0
         uint64 ann_lkm_ioctl_handler = 0
+        uint64 ann_lkm_mmap_handler = 0
         uint64 ann_section_start = 0
         uint64 ann_section_len = 0
         while kind == 21 {
@@ -1694,6 +1695,12 @@ fn parse_module() -> uint64 {
             // auto-emitted struct file_operations.
             if ann_len_v == 17 {
                 if tok_matches(ann_tok, "lkm_ioctl_handler", 17) != 0 { ann_lkm_ioctl_handler = 1 }
+            }
+            // @lkm_mmap_handler — per-function flag (Phase B.2.a, 16 chars).
+            // Tags the function as the .mmap handler in the auto-emitted
+            // struct file_operations (for BAR mapping via remap_pfn_range).
+            if ann_len_v == 16 {
+                if tok_matches(ann_tok, "lkm_mmap_handler", 16) != 0 { ann_lkm_mmap_handler = 1 }
             }
             // @module_license("...") / @module_author("...") /
             // @module_description("...") / @module_name("...") — module-wide
@@ -1797,6 +1804,9 @@ fn parse_module() -> uint64 {
             }
             if ann_lkm_ioctl_handler != 0 {
                 module_info_set_ioctl_handler_fn(wfn_name)
+            }
+            if ann_lkm_mmap_handler != 0 {
+                module_info_set_mmap_handler_fn(wfn_name)
             }
             // If the user wrote `@section("name")`, stash the (start, len)
             // pair in the side-table keyed by the function's name token.

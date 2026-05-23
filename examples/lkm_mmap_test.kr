@@ -1,0 +1,33 @@
+// lkm_mmap_test.kr - Phase B.2.a: @lkm_mmap_handler wiring proof.
+//
+// Demonstrates that emit_elf_lkm wires struct file_operations.mmap
+// (offset 0x60 on kernel 6.17 x86_64) to a KernRift @lkm_mmap_handler
+// function, so userland mmap() of the device dispatches into it.
+//
+// This handler does NOT call remap_pfn_range yet (B.2.b does that for
+// real BAR mapping) - it just logs that it was reached and returns
+// -EINVAL, so userland mmap() fails cleanly. Safe by construction.
+//
+// Test: insmod, mmap /dev/b2a_test from userland -> dmesg shows
+// "mmap handler reached", mmap returns MAP_FAILED/EINVAL, rmmod.
+
+@module_license("GPL")
+@module_name("b2a_test")
+@module_register_misc_device("b2a_test")
+
+extern fn _printk(uint64 fmt) -> int32
+extern fn misc_register(uint64 dev) -> int32
+extern fn misc_deregister(uint64 dev) -> int32
+
+@lkm_ioctl_handler
+fn drv_ioctl(uint64 file, uint64 cmd, uint64 arg) -> int64 {
+    return 0
+}
+
+// B.2.a: mmap handler reached but does NOT map (returns -EINVAL=-22).
+// Proves fops.mmap@0x60 wiring without remap_pfn_range.
+@lkm_mmap_handler
+fn drv_mmap(uint64 file, uint64 vma) -> int64 {
+    _printk("b2a_test: mmap handler reached\n")
+    return 0xFFFFFFFFFFFFFFEA
+}

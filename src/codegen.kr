@@ -1974,6 +1974,15 @@ fn module_info_set_misc_device(uint64 start, uint64 len) {
 fn module_info_set_ioctl_handler_fn(uint64 tok) { module_info_ioctl_handler_fn_tok_v = tok }
 @export fn module_info_ioctl_handler_fn_tok() -> uint64 { return module_info_ioctl_handler_fn_tok_v }
 
+// Phase B.2.a: optional mmap handler. When set, emit_elf_lkm wires the
+// auto-emitted struct file_operations' .mmap field (offset 0x60 on
+// kernel 6.17 x86_64) to this function, so userland mmap() of the
+// device dispatches into it (for BAR mapping via remap_pfn_range).
+static uint64 module_info_mmap_handler_fn_tok_v = 0
+@export
+fn module_info_set_mmap_handler_fn(uint64 tok) { module_info_mmap_handler_fn_tok_v = tok }
+@export fn module_info_mmap_handler_fn_tok() -> uint64 { return module_info_mmap_handler_fn_tok_v }
+
 fn fn_lookup(uint64 name_tok) -> uint64 {
     uint64 i = 0
     while i < fn_count {
@@ -11581,6 +11590,18 @@ fn emit_elf_lkm(uint64 text_len, uint64 data_len, uint64 arch) {
         }
     }
 
+    // Optional @lkm_mmap_handler (Phase B.2.a). Present only if the user
+    // tagged a function; wires fops.mmap @ 0x60.
+    uint64 mmap_handler_tok = module_info_mmap_handler_fn_tok()
+    uint64 has_mmap_handler = 0
+    if misc_dev_mode != 0 { if mmap_handler_tok != 0 { has_mmap_handler = 1 } }
+    if has_mmap_handler != 0 {
+        if fn_lookup(mmap_handler_tok) == 0xFFFFFFFF {
+            write(2, "krc: @lkm_mmap_handler function not found in fn_table\n", 54)
+            exit(1)
+        }
+    }
+
     // Misc-device mode: locate misc_register / misc_deregister in
     // extern_fn_table by name. User must declare them as extern fns.
     uint64 misc_register_extern_idx = 0
@@ -12168,6 +12189,8 @@ fn emit_elf_lkm(uint64 text_len, uint64 data_len, uint64 arch) {
     uint64 rela_data_off = rela_this_module_off + rela_this_module_size
     uint64 rela_data_size = 0
     if misc_dev_mode != 0 { rela_data_size = 4 * 24 }
+    // +1 reloc for fops.mmap @ 0x60 when an @lkm_mmap_handler is present.
+    if has_mmap_handler != 0 { rela_data_size = rela_data_size + 24 }
     uint64 shdr_off = rela_data_off + rela_data_size
     uint64 shdr_align_pad = (8 - (shdr_off & 7)) & 7
     shdr_off = shdr_off + shdr_align_pad
@@ -12348,6 +12371,7 @@ fn emit_elf_lkm(uint64 text_len, uint64 data_len, uint64 arch) {
     // Locals: all fn_count user functions except main.
     uint64 local_count = 1
     uint64 ioctl_handler_sym_idx = 0
+    uint64 mmap_handler_sym_idx = 0
     fi = 0
     while fi < fn_count {
         if fi != main_fn_idx {
@@ -12372,6 +12396,11 @@ fn emit_elf_lkm(uint64 text_len, uint64 data_len, uint64 arch) {
                 uint64 ws2 = stored_tok2
                 if tok_text_eq(ws2, ioctl_handler_tok) != 0 {
                     ioctl_handler_sym_idx = local_count
+                }
+                if has_mmap_handler != 0 {
+                    if tok_text_eq(ws2, mmap_handler_tok) != 0 {
+                        mmap_handler_sym_idx = local_count
+                    }
                 }
             }
             local_count = local_count + 1
@@ -12703,6 +12732,12 @@ fn emit_elf_lkm(uint64 text_len, uint64 data_len, uint64 arch) {
         emit_u64_le(misc_fops_data_off + 0x50)
         emit_u64_le((ioctl_handler_sym_idx << 32) | 1)
         emit_u64_le(0)
+        // fops.mmap @ 0x60 → @lkm_mmap_handler (Phase B.2.a, optional)
+        if has_mmap_handler != 0 {
+            emit_u64_le(misc_fops_data_off + 0x60)
+            emit_u64_le((mmap_handler_sym_idx << 32) | 1)
+            emit_u64_le(0)
+        }
     }
 
     // ---- Pad to section header alignment ----
