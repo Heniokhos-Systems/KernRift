@@ -76,6 +76,7 @@ static uint64 PCI_DEV_DEV = 0xc8
 // first MAP, attached to slot-0's device) + a single active mapping.
 // A multi-mapping table is a follow-up; one mapping proves the path.
 static uint64 _iommu_domain  = 0    // struct iommu_domain* (0 = none)
+static uint64 _iommu_dev     = 0    // struct device* the domain is attached to
 static uint64 _map_pages     = 0    // kmalloc'd struct page* array
 static uint64 _map_npages    = 0
 static uint64 _map_sgt       = 0    // kmalloc'd struct sg_table
@@ -224,7 +225,10 @@ fn driver_ioctl(uint64 file, uint64 cmd, uint64 arg) -> int64 {
         // arg is the slot index (0..3). Drop the pci_dev ref taken by
         // pci_get_domain_bus_and_slot and free the slot.
         uint64 idx = arg
-        if idx == 0 { if _mlrift_pci_slot0 != 0 { pci_dev_put(_mlrift_pci_slot0); _mlrift_pci_slot0 = 0; return 0 } }
+        // Closing slot 0 also tears down the IOMMU domain (we only ever
+        // attach slot 0's device), leaving it clean to rebind. Must run
+        // while the pci_dev (hence _iommu_dev) is still valid.
+        if idx == 0 { if _mlrift_pci_slot0 != 0 { _iommu_teardown(); pci_dev_put(_mlrift_pci_slot0); _mlrift_pci_slot0 = 0; return 0 } }
         if idx == 1 { if _mlrift_pci_slot1 != 0 { pci_dev_put(_mlrift_pci_slot1); _mlrift_pci_slot1 = 0; return 0 } }
         if idx == 2 { if _mlrift_pci_slot2 != 0 { pci_dev_put(_mlrift_pci_slot2); _mlrift_pci_slot2 = 0; return 0 } }
         if idx == 3 { if _mlrift_pci_slot3 != 0 { pci_dev_put(_mlrift_pci_slot3); _mlrift_pci_slot3 = 0; return 0 } }
@@ -354,6 +358,7 @@ fn _iommu_map(uint64 arg) -> int64 {
             return 0xFFFFFFFFFFFFFFFB                       // -EIO = -5
         }
         _iommu_domain = dom
+        _iommu_dev = dev
         _printk("mlrift_pci: paging domain allocated + attached\n")
     }
 
@@ -445,27 +450,36 @@ fn _iommu_unmap(uint64 arg) -> int64 {
 // was killed) would leak — keeping the device's refcount elevated so it
 // can't be cleanly unbound/rebound, which the VFIO-replacement path
 // needs. Heap-free; runs in kernel context.
-@module_exit
-fn driver_exit() -> int64 {
-    // B.3.c: tear down any live IOMMU mapping + detach/free the paging
-    // domain BEFORE releasing the pci_dev refs (detach needs the device
-    // pointer, and the device must be detached before it could rebind).
+// Tear down any live IOMMU mapping, then detach + free the paging
+// domain. Uses _iommu_dev (captured at attach) rather than the slot
+// table, so it stays correct even after CLOSE_PCI cleared the slot —
+// freeing a still-attached domain is a kernel BUG. Idempotent.
+fn _iommu_teardown() {
     if _map_pages != 0 {
         if _iommu_domain != 0 { iommu_unmap(_iommu_domain, _map_iova, _map_size) }
         if _map_sgt != 0 { sg_free_table(_map_sgt); dealloc(_map_sgt) }
         unpin_user_pages(_map_pages, _map_npages)
         dealloc(_map_pages)
         _map_pages = 0
+        _map_npages = 0
+        _map_sgt = 0
+        _map_iova = 0
+        _map_size = 0
     }
     if _iommu_domain != 0 {
-        if _mlrift_pci_slot0 != 0 {
-            uint64 dev = _mlrift_pci_slot0 + PCI_DEV_DEV
-            iommu_detach_device(_iommu_domain, dev)
-        }
+        if _iommu_dev != 0 { iommu_detach_device(_iommu_domain, _iommu_dev) }
         iommu_domain_free(_iommu_domain)
         _iommu_domain = 0
-        _printk("mlrift_pci: paging domain detached + freed on unload\n")
+        _iommu_dev = 0
+        _printk("mlrift_pci: paging domain detached + freed\n")
     }
+}
+
+@module_exit
+fn driver_exit() -> int64 {
+    // Detach + free the IOMMU domain BEFORE releasing the pci_dev refs
+    // (the device must be detached before it could be rebound).
+    _iommu_teardown()
     if _mlrift_pci_slot0 != 0 { pci_dev_put(_mlrift_pci_slot0); _mlrift_pci_slot0 = 0 }
     if _mlrift_pci_slot1 != 0 { pci_dev_put(_mlrift_pci_slot1); _mlrift_pci_slot1 = 0 }
     if _mlrift_pci_slot2 != 0 { pci_dev_put(_mlrift_pci_slot2); _mlrift_pci_slot2 = 0 }
