@@ -1917,6 +1917,28 @@ fn module_info_set_exit_fn(uint64 tok) { module_info_exit_fn_tok_v = tok }
 @export fn module_info_init_fn_tok() -> uint64   { return module_info_init_fn_tok_v }
 @export fn module_info_exit_fn_tok() -> uint64   { return module_info_exit_fn_tok_v }
 
+// Phase B.1.a: misc-device registration + IOCTL handler annotations.
+// When @module_register_misc_device("name") is present, emit_elf_lkm
+// auto-generates init_module/cleanup_module that call misc_register /
+// misc_deregister on an auto-emitted struct miscdevice. The handler
+// function tagged with @lkm_ioctl_handler is referenced from the
+// auto-emitted struct file_operations.
+static uint64 module_info_misc_device_start_v = 0
+static uint64 module_info_misc_device_len_v = 0
+static uint64 module_info_ioctl_handler_fn_tok_v = 0
+
+@export
+fn module_info_set_misc_device(uint64 start, uint64 len) {
+    module_info_misc_device_start_v = start
+    module_info_misc_device_len_v = len
+}
+@export fn module_info_misc_device_start() -> uint64 { return module_info_misc_device_start_v }
+@export fn module_info_misc_device_len() -> uint64   { return module_info_misc_device_len_v }
+
+@export
+fn module_info_set_ioctl_handler_fn(uint64 tok) { module_info_ioctl_handler_fn_tok_v = tok }
+@export fn module_info_ioctl_handler_fn_tok() -> uint64 { return module_info_ioctl_handler_fn_tok_v }
+
 fn fn_lookup(uint64 name_tok) -> uint64 {
     uint64 i = 0
     while i < fn_count {

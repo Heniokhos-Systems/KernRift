@@ -1659,6 +1659,7 @@ fn parse_module() -> uint64 {
         uint64 ann_export = 0
         uint64 ann_module_init = 0
         uint64 ann_module_exit = 0
+        uint64 ann_lkm_ioctl_handler = 0
         uint64 ann_section_start = 0
         uint64 ann_section_len = 0
         while kind == 21 {
@@ -1688,6 +1689,12 @@ fn parse_module() -> uint64 {
                 if tok_matches(ann_tok, "module_init", 11) != 0 { ann_module_init = 1 }
                 if tok_matches(ann_tok, "module_exit", 11) != 0 { ann_module_exit = 1 }
             }
+            // @lkm_ioctl_handler — per-function flag (Phase B.1.a, 17 chars).
+            // Tags the function as the unlocked_ioctl handler in the
+            // auto-emitted struct file_operations.
+            if ann_len_v == 17 {
+                if tok_matches(ann_tok, "lkm_ioctl_handler", 17) != 0 { ann_lkm_ioctl_handler = 1 }
+            }
             // @module_license("...") / @module_author("...") /
             // @module_description("...") / @module_name("...") — module-wide
             // string singletons. Captured here, dispatched into the
@@ -1708,10 +1715,20 @@ fn parse_module() -> uint64 {
             if ann_len_v == 11 {
                 if tok_matches(ann_tok, "module_name", 11) != 0 { is_module_name = 1 }
             }
+            // @module_register_misc_device("name") — module-wide string
+            // (Phase B.1.a, 27 chars). Triggers emit_elf_lkm to auto-
+            // generate init_module / cleanup_module that call
+            // misc_register / misc_deregister on a static miscdevice.
+            uint64 is_module_register_misc_device = 0
+            if ann_len_v == 27 {
+                if tok_matches(ann_tok, "module_register_misc_device", 27) != 0 {
+                    is_module_register_misc_device = 1
+                }
+            }
             // Annotation arguments: for @section + module string-form
             // annotations, capture the string literal (minus quotes).
             // For everything else, skip.
-            uint64 wants_string = is_section | is_module_license | is_module_author | is_module_description | is_module_name
+            uint64 wants_string = is_section | is_module_license | is_module_author | is_module_description | is_module_name | is_module_register_misc_device
             if eat(10) != 0 {
                 if wants_string != 0 && cur_kind() == 3 {
                     uint64 str_tok = advance_tok()
@@ -1739,6 +1756,9 @@ fn parse_module() -> uint64 {
                     }
                     if is_module_name != 0 {
                         module_info_set_name(captured_start, captured_len)
+                    }
+                    if is_module_register_misc_device != 0 {
+                        module_info_set_misc_device(captured_start, captured_len)
                     }
                 }
                 while cur_kind() != 11 && cur_kind() != 0 {
@@ -1774,6 +1794,9 @@ fn parse_module() -> uint64 {
             }
             if ann_module_exit != 0 {
                 module_info_set_exit_fn(wfn_name)
+            }
+            if ann_lkm_ioctl_handler != 0 {
+                module_info_set_ioctl_handler_fn(wfn_name)
             }
             // If the user wrote `@section("name")`, stash the (start, len)
             // pair in the side-table keyed by the function's name token.
