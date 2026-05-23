@@ -60,6 +60,16 @@ static uint64 PCI_DEV_RESOURCE0_START = 0x3e0
 static uint64 VMA_VM_START     = 0x00
 static uint64 VMA_VM_END       = 0x08
 static uint64 VMA_VM_PAGE_PROT = 0x18
+static uint64 VMA_VM_PGOFF     = 0x50
+// PCI BAR selection + noncached MMIO prot. Each struct resource is 0x20
+// bytes; resource[N].start = 0x3e0 + N*0x20, .end = 0x3e8 + N*0x20.
+// _PAGE_PCD (bit 4) = UC- on the default x86 PAT layout — matches what
+// pgprot_noncached/ioremap use for MMIO. mmap offset encodes the BAR:
+// byte_offset = pgoff<<12, bar_index = byte_offset>>40 = pgoff>>28.
+static uint64 PCI_RES_STRIDE   = 0x20
+static uint64 PAGE_PCD         = 0x10
+static uint64 BAR_PGOFF_SHIFT  = 28
+static uint64 BAR_INBAR_MASK   = 0x0FFFFFFF
 
 // Driver-internal table of open PCI devices. 4 slots is plenty for
 // development; LLM workloads typically use one dGPU at a time.
@@ -544,29 +554,45 @@ fn driver_exit() -> int64 {
     return 0
 }
 
-// Phase B.2.b: map the slot-0 device's BAR0 into the calling process.
-// Reads pci_dev->resource[0].start (offset 0x3e0) for the BAR physical
-// base, then remap_pfn_range's it over the userland VMA. Heap-free
-// (only stack + the .data slot table), so safe in kernel context.
+// Phase B.2.b + noncached follow-up: map a selected BAR of the slot-0
+// device into the calling process, as UNCACHED MMIO (UC-). The mmap
+// offset selects the BAR: byte_offset = vm_pgoff<<12, bar_index =
+// byte_offset>>40 (so userland passes mmap offset = bar_index<<40), and
+// the low bits are an offset within the BAR (usually 0 = whole BAR from
+// its base). Reads pci_dev->resource[bar_index] for the phys base/length
+// and bounds-checks the request. Heap-free → safe in kernel context.
 //
-// Open a device with MLRIFT_OPEN_PCI first (fills slot 0), then mmap
-// the device fd. NOTE: prot is left as vma->vm_page_prot (cached); for
-// real MMIO use this should be made noncached — fine for "does the
-// mapping succeed" validation as long as userland doesn't read MMIO.
+// Open a device with MLRIFT_OPEN_PCI first (fills slot 0), then mmap the
+// device fd. offset 0 maps BAR0 (back-compat with the B.2.b test).
 @lkm_mmap_handler
 fn driver_mmap(uint64 file, uint64 vma) -> int64 {
     uint64 pdev = _mlrift_pci_slot0
     if pdev == 0 { return 0xFFFFFFFFFFFFFFEA }            // -EINVAL: no device open
-    uint64 bar_phys = 0
-    unsafe { *((pdev + PCI_DEV_RESOURCE0_START) as uint64) -> bar_phys }
-    if bar_phys == 0 { return 0xFFFFFFFFFFFFFFEA }        // -EINVAL: device has no BAR0
+
+    uint64 pgoff = 0; unsafe { *((vma + VMA_VM_PGOFF) as uint64) -> pgoff }
+    uint64 bar_index = pgoff >> BAR_PGOFF_SHIFT
+    if bar_index > 5 { return 0xFFFFFFFFFFFFFFEA }        // -EINVAL: PCI has BARs 0..5
+    uint64 in_bar_off = (pgoff & BAR_INBAR_MASK) << 12    // byte offset within the BAR
+
+    // resource[bar_index]: start @ 0x3e0 + N*0x20, end @ +8.
+    uint64 res = pdev + PCI_DEV_RESOURCE0_START + bar_index * PCI_RES_STRIDE
+    uint64 bar_phys = 0; unsafe { *((res + 0) as uint64) -> bar_phys }
+    uint64 bar_end  = 0; unsafe { *((res + 8) as uint64) -> bar_end }
+    if bar_phys == 0 { return 0xFFFFFFFFFFFFFFEA }        // -EINVAL: BAR not present
+    uint64 bar_len = bar_end - bar_phys + 1
+
     uint64 vm_start = 0; unsafe { *((vma + VMA_VM_START) as uint64) -> vm_start }
     uint64 vm_end = 0;   unsafe { *((vma + VMA_VM_END) as uint64) -> vm_end }
     uint64 prot = 0;     unsafe { *((vma + VMA_VM_PAGE_PROT) as uint64) -> prot }
     uint64 size = vm_end - vm_start
-    uint64 pfn = bar_phys >> 12
+    if in_bar_off + size > bar_len { return 0xFFFFFFFFFFFFFFEA }  // -EINVAL: out of BAR
+
+    // Force UC- (noncached) for correct MMIO semantics.
+    prot = prot | PAGE_PCD
+    uint64 phys = bar_phys + in_bar_off
+    uint64 pfn = phys >> 12
     int32 rc = remap_pfn_range(vma, vm_start, pfn, size, prot)
     if rc != 0 { return 0xFFFFFFFFFFFFFFF2 }              // -EFAULT on map failure
-    _printk("mlrift_pci: BAR0 mapped into userland\n")
+    _printk("mlrift_pci: BAR mapped (noncached UC-) into userland\n")
     return 0
 }
