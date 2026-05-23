@@ -1,0 +1,40 @@
+// hello_lkm.kr — minimal Linux loadable kernel module written in KernRift.
+//
+// Compile (x86_64 Linux, kernel 6.x):
+//   krc --emit=lkm --arch=x86_64 --target=linux examples/hello_lkm.kr -o hello.ko
+//
+// Load (Ubuntu kernels are built with CONFIG_MODVERSIONS=y so the
+// initial Phase A.1.3 build needs --force; Phase A.1.5 will add a real
+// __versions section and drop the -f requirement):
+//   sudo insmod -f hello.ko
+//   dmesg | tail -5
+//   sudo rmmod hello_kr
+//
+// Expected dmesg lines:
+//   Hello from KernRift
+//   Bye from KernRift
+//
+// The annotations:
+//   @module_license — required by GPL-only kernel symbols (printk is one)
+//   @module_author / @module_description — surface in `modinfo`
+//   @module_name    — written into struct module.name at offset 24
+//   @module_init    — function the kernel calls at insmod time
+//   @module_exit    — function the kernel calls at rmmod time
+
+@module_license("GPL")
+@module_author("KernRift Phase A.1")
+@module_description("Hello-world LKM emitted by the KernRift compiler")
+@module_name("hello_kr")
+
+extern fn printk(uint64 fmt) -> int32
+
+@module_init
+fn hello_init() -> int32 {
+    printk("Hello from KernRift\n")
+    return 0
+}
+
+@module_exit
+fn hello_exit() {
+    printk("Bye from KernRift\n")
+}

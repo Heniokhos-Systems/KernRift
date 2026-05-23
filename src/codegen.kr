@@ -11284,11 +11284,787 @@ fn emit_elf_debug_footer(uint64 text_start, uint64 input_path) {
 //      (pointing at the struct module section)
 //   5. (A.1.5) Add a `__versions` section by reading Module.symvers and
 //      looking up CRCs for each extern symbol used
+// Build a key=value\0 string in `buf` at offset `off`. Pulls bytes for
+// `key` from a NUL-terminated literal and for `value` from cg_source
+// at [val_start, val_start+val_len). Writes a trailing 0 byte. Returns
+// the new offset past the trailing NUL.
+fn _lkm_modinfo_kv(uint64 buf, uint64 off, uint64 key_lit, uint64 key_len,
+                   uint64 val_start, uint64 val_len) -> uint64 {
+    uint64 i = 0
+    while i < key_len {
+        uint64 kp = key_lit + i
+        uint64 kc = 0
+        unsafe { *(kp as uint8) -> kc }
+        uint8 kb = kc
+        uint64 dp = buf + off + i
+        unsafe { *(dp as uint8) = kb }
+        i = i + 1
+    }
+    uint64 eq = 61
+    uint8 eb = eq
+    uint64 ep = buf + off + key_len
+    unsafe { *(ep as uint8) = eb }
+    off = off + key_len + 1
+    uint64 vi = 0
+    while vi < val_len {
+        uint64 vsp = cg_source + val_start + vi
+        uint64 vc = 0
+        unsafe { *(vsp as uint8) -> vc }
+        uint8 vb = vc
+        uint64 vdp = buf + off + vi
+        unsafe { *(vdp as uint8) = vb }
+        vi = vi + 1
+    }
+    uint64 ntp = buf + off + val_len
+    uint8 nb = 0
+    unsafe { *(ntp as uint8) = nb }
+    return off + val_len + 1
+}
+
+// Append a key=value\0 with the value drawn from a NUL-terminated
+// literal (used for srcversion which we hardcode for now).
+fn _lkm_modinfo_kv_lit(uint64 buf, uint64 off,
+                       uint64 key_lit, uint64 key_len,
+                       uint64 val_lit, uint64 val_len) -> uint64 {
+    uint64 i = 0
+    while i < key_len {
+        uint64 kp = key_lit + i
+        uint64 kc = 0
+        unsafe { *(kp as uint8) -> kc }
+        uint8 kb = kc
+        uint64 dp = buf + off + i
+        unsafe { *(dp as uint8) = kb }
+        i = i + 1
+    }
+    uint64 ep = buf + off + key_len
+    uint8 eb = 61
+    unsafe { *(ep as uint8) = eb }
+    off = off + key_len + 1
+    uint64 vi = 0
+    while vi < val_len {
+        uint64 vsp = val_lit + vi
+        uint64 vc = 0
+        unsafe { *(vsp as uint8) -> vc }
+        uint8 vb = vc
+        uint64 vdp = buf + off + vi
+        unsafe { *(vdp as uint8) = vb }
+        vi = vi + 1
+    }
+    uint64 ntp = buf + off + val_len
+    uint8 nb = 0
+    unsafe { *(ntp as uint8) = nb }
+    return off + val_len + 1
+}
+
+// Emit a Linux loadable kernel module (.ko). x86_64 + linux only.
+//
+// Layout (sections in file order):
+//   ELF hdr -> .text -> .data -> .modinfo -> .gnu.linkonce.this_module
+//   -> .symtab -> .strtab -> .shstrtab -> .rela.text? -> .rela.this_module
+//   -> section headers
+//
+// Section headers (10 or 11, depending on whether .rela.text is needed):
+//   0  null
+//   1  .text
+//   2  .data
+//   3  .modinfo
+//   4  .gnu.linkonce.this_module
+//   5  .symtab
+//   6  .strtab
+//   7  .shstrtab
+//   8  .note.GNU-stack
+//   9  .rela.text                          (only if has_externs)
+//   N  .rela.gnu.linkonce.this_module      (always)  — index 9 or 10
+//
+// `struct module` offsets for kernel 6.x x86_64 (verified against
+// /lib/modules/6.17.0-29-generic/.../ad525x_dpot-i2c.ko):
+//   sizeof(struct module) = 1280
+//   offsetof(name)        = 24
+//   offsetof(init)        = 0x138 (= 312)
+//   offsetof(exit)        = 0x4a8 (= 1192)
+// These are hardcoded for now; A.1.5 wires kernel-version probing.
 @export
 fn emit_elf_lkm(uint64 text_len, uint64 data_len, uint64 arch) {
-    write(2, "krc: --emit=lkm not yet implemented (Phase A.1.3 pending)\n", 58)
-    write(2, "krc: parser annotations + CLI flag wired in this build; emitter is the next step\n", 82)
-    exit(1)
+    if arch != 0 {
+        write(2, "krc: --emit=lkm currently supports x86_64 only\n", 47)
+        exit(1)
+    }
+
+    uint64 init_fn_tok = module_info_init_fn_tok()
+    uint64 exit_fn_tok = module_info_exit_fn_tok()
+    if init_fn_tok == 0 {
+        write(2, "krc: --emit=lkm requires a @module_init function\n", 49)
+        exit(1)
+    }
+    if exit_fn_tok == 0 {
+        write(2, "krc: --emit=lkm requires a @module_exit function\n", 49)
+        exit(1)
+    }
+
+    uint64 init_code_off = fn_lookup(init_fn_tok)
+    uint64 exit_code_off = fn_lookup(exit_fn_tok)
+    if init_code_off == 0xFFFFFFFF {
+        write(2, "krc: @module_init function not found in fn_table\n", 49)
+        exit(1)
+    }
+    if exit_code_off == 0xFFFFFFFF {
+        write(2, "krc: @module_exit function not found in fn_table\n", 49)
+        exit(1)
+    }
+
+    // Save the generated code+data blob.
+    uint64 blob_len = out_len
+    uint64 blob = alloc(blob_len + 16)
+    uint64 ci = 0
+    while ci < blob_len {
+        uint64 sp = out_buf + ci
+        uint64 dp = blob + ci
+        uint64 bv = 0
+        unsafe { *(sp as uint8) -> bv }
+        uint8 bb = bv
+        unsafe { *(dp as uint8) = bb }
+        ci = ci + 1
+    }
+    out_len = 0
+
+    // ---- Build .modinfo content ----
+    // Order: license, author, description, srcversion. We always emit a
+    // srcversion (some kernel builds reject modules without one). license
+    // is required by the kernel; default to "GPL" if user omitted.
+    uint64 modinfo_buf = alloc(1024)
+    uint64 mb_zi = 0
+    while mb_zi < 1024 {
+        uint8 zb = 0
+        unsafe { *((modinfo_buf + mb_zi) as uint8) = zb }
+        mb_zi = mb_zi + 1
+    }
+    uint64 modinfo_len = 0
+
+    uint64 lic_start = module_info_license_start()
+    uint64 lic_len = module_info_license_len()
+    if lic_len == 0 {
+        modinfo_len = _lkm_modinfo_kv_lit(modinfo_buf, modinfo_len,
+                                           "license", 7, "GPL", 3)
+    } else {
+        modinfo_len = _lkm_modinfo_kv(modinfo_buf, modinfo_len,
+                                       "license", 7, lic_start, lic_len)
+    }
+
+    uint64 aut_len = module_info_author_len()
+    if aut_len != 0 {
+        modinfo_len = _lkm_modinfo_kv(modinfo_buf, modinfo_len,
+                                       "author", 6,
+                                       module_info_author_start(), aut_len)
+    }
+
+    uint64 desc_len = module_info_description_len()
+    if desc_len != 0 {
+        modinfo_len = _lkm_modinfo_kv(modinfo_buf, modinfo_len,
+                                       "description", 11,
+                                       module_info_description_start(),
+                                       desc_len)
+    }
+
+    // srcversion: hardcode for now. A real implementation hashes the
+    // module's signature symbols (genksyms-style). The kernel only
+    // refuses to load if the running kernel was built with
+    // CONFIG_MODULE_SRCVERSION_ALL=y AND the value mismatches; on most
+    // distro kernels a placeholder is fine.
+    modinfo_len = _lkm_modinfo_kv_lit(modinfo_buf, modinfo_len,
+                                       "srcversion", 10,
+                                       "KERNRIFT_PHASE_A1", 17)
+
+    // ---- Build .gnu.linkonce.this_module content (1280 bytes) ----
+    uint64 sm_size = 1280
+    uint64 sm_buf = alloc(sm_size)
+    uint64 sm_zi = 0
+    while sm_zi < sm_size {
+        uint8 zb = 0
+        unsafe { *((sm_buf + sm_zi) as uint8) = zb }
+        sm_zi = sm_zi + 1
+    }
+    // name @ offset 24, up to 56 bytes. Truncate or use a default if
+    // the user didn't supply @module_name.
+    uint64 name_off_in_sm = 24
+    uint64 name_max = 55  // MODULE_NAME_LEN-1, reserve a byte for NUL
+    uint64 user_name_start = module_info_name_start()
+    uint64 user_name_len = module_info_name_len()
+    if user_name_len == 0 {
+        // Default name: "kernrift_module"
+        uint64 dn = "kernrift_module"
+        uint64 dnl = 15
+        uint64 dni = 0
+        while dni < dnl {
+            uint64 dnp = dn + dni
+            uint64 dnc = 0
+            unsafe { *(dnp as uint8) -> dnc }
+            uint8 dnb = dnc
+            unsafe { *((sm_buf + name_off_in_sm + dni) as uint8) = dnb }
+            dni = dni + 1
+        }
+    } else {
+        uint64 nc_len = user_name_len
+        if nc_len > name_max { nc_len = name_max }
+        uint64 nci = 0
+        while nci < nc_len {
+            uint64 nsp = cg_source + user_name_start + nci
+            uint64 nc = 0
+            unsafe { *(nsp as uint8) -> nc }
+            uint8 nb = nc
+            unsafe { *((sm_buf + name_off_in_sm + nci) as uint8) = nb }
+            nci = nci + 1
+        }
+    }
+
+    // ---- .shstrtab layout ----
+    // Same first 55 bytes as emit_elf_relocatable, then optionally
+    // .rela.text\0 (11 bytes), then .modinfo\0 (9), then
+    // .gnu.linkonce.this_module\0 (26), then
+    // .rela.gnu.linkonce.this_module\0 (31).
+    uint64 has_relocs = 0
+    if extern_call_count > 0 { has_relocs = 1 }
+
+    uint64 shstr_base = 55
+    uint64 shstr_rela_text_off = 55
+    uint64 next_off = 55
+    if has_relocs != 0 { next_off = 66 }
+    uint64 shstr_modinfo_off = next_off
+    next_off = next_off + 9
+    uint64 shstr_this_module_off = next_off
+    next_off = next_off + 26
+    uint64 shstr_rela_this_module_off = next_off
+    next_off = next_off + 31
+    uint64 shstrtab_size = next_off
+
+    // ---- Build .strtab content ----
+    // Same loop as emit_elf_relocatable for fn names + extern names,
+    // then add init_module, cleanup_module, __this_module.
+    uint64 strtab_buf = alloc(8192)
+    uint64 strtab_len = 1
+    uint64 sb0 = strtab_buf
+    uint8 nul = 0
+    unsafe { *(sb0 as uint8) = nul }
+
+    uint64 sym_count_user_fns = fn_count
+    uint64 name_offsets = alloc(fn_count * 8 + 8)
+    uint64 fi = 0
+    uint64 main_fn_idx = 0xFFFFFFFF
+    while fi < fn_count {
+        uint64 fentry = fn_table + fi * 8
+        uint32 stored_tok = 0
+        unsafe { *(fentry as uint32) -> stored_tok }
+        uint64 ws = stored_tok
+        uint64 no_ptr = name_offsets + fi * 8
+        unsafe { *(no_ptr as uint64) = strtab_len }
+        uint64 nstart = tok_text_start(ws)
+        uint64 nlen = tok_text_len(ws)
+        uint64 ni = 0
+        while ni < nlen {
+            uint64 src_p = cg_source + nstart + ni
+            uint64 dst_p = strtab_buf + strtab_len
+            uint64 ch = 0
+            unsafe { *(src_p as uint8) -> ch }
+            uint8 cb = ch
+            unsafe { *(dst_p as uint8) = cb }
+            strtab_len = strtab_len + 1
+            ni = ni + 1
+        }
+        uint64 ntp = strtab_buf + strtab_len
+        unsafe { *(ntp as uint8) = nul }
+        strtab_len = strtab_len + 1
+        if tok_matches(ws, "main", 4) != 0 {
+            main_fn_idx = fi
+        }
+        fi = fi + 1
+    }
+
+    uint64 extern_name_offsets = 0
+    if extern_fn_count > 0 {
+        extern_name_offsets = alloc(extern_fn_count * 8)
+        uint64 ei = 0
+        while ei < extern_fn_count {
+            uint64 xe = extern_fn_table + ei * 8
+            uint32 xtok = 0
+            unsafe { *(xe as uint32) -> xtok }
+            uint64 wxt = xtok
+            uint64 xno_ptr = extern_name_offsets + ei * 8
+            unsafe { *(xno_ptr as uint64) = strtab_len }
+            uint64 xnstart = tok_text_start(wxt)
+            uint64 xnlen = tok_text_len(wxt)
+            uint64 xni = 0
+            while xni < xnlen {
+                uint64 xsp = cg_source + xnstart + xni
+                uint64 xdp = strtab_buf + strtab_len
+                uint64 xc = 0
+                unsafe { *(xsp as uint8) -> xc }
+                uint8 xcb = xc
+                unsafe { *(xdp as uint8) = xcb }
+                strtab_len = strtab_len + 1
+                xni = xni + 1
+            }
+            uint64 xntp = strtab_buf + strtab_len
+            unsafe { *(xntp as uint8) = nul }
+            strtab_len = strtab_len + 1
+            ei = ei + 1
+        }
+    }
+
+    // Append init_module / cleanup_module / __this_module names.
+    uint64 init_module_name_off = strtab_len
+    uint64 imn = "init_module"
+    uint64 imn_len = 11
+    uint64 imi = 0
+    while imi < imn_len {
+        uint64 sp = imn + imi
+        uint64 cc = 0
+        unsafe { *(sp as uint8) -> cc }
+        uint8 cb = cc
+        uint64 dp = strtab_buf + strtab_len
+        unsafe { *(dp as uint8) = cb }
+        strtab_len = strtab_len + 1
+        imi = imi + 1
+    }
+    uint64 ntp1 = strtab_buf + strtab_len
+    unsafe { *(ntp1 as uint8) = nul }
+    strtab_len = strtab_len + 1
+
+    uint64 cleanup_module_name_off = strtab_len
+    uint64 cmn = "cleanup_module"
+    uint64 cmn_len = 14
+    uint64 cmi = 0
+    while cmi < cmn_len {
+        uint64 sp = cmn + cmi
+        uint64 cc = 0
+        unsafe { *(sp as uint8) -> cc }
+        uint8 cb = cc
+        uint64 dp = strtab_buf + strtab_len
+        unsafe { *(dp as uint8) = cb }
+        strtab_len = strtab_len + 1
+        cmi = cmi + 1
+    }
+    uint64 ntp2 = strtab_buf + strtab_len
+    unsafe { *(ntp2 as uint8) = nul }
+    strtab_len = strtab_len + 1
+
+    uint64 this_module_name_off = strtab_len
+    uint64 tmn = "__this_module"
+    uint64 tmn_len = 13
+    uint64 tmi = 0
+    while tmi < tmn_len {
+        uint64 sp = tmn + tmi
+        uint64 cc = 0
+        unsafe { *(sp as uint8) -> cc }
+        uint8 cb = cc
+        uint64 dp = strtab_buf + strtab_len
+        unsafe { *(dp as uint8) = cb }
+        strtab_len = strtab_len + 1
+        tmi = tmi + 1
+    }
+    uint64 ntp3 = strtab_buf + strtab_len
+    unsafe { *(ntp3 as uint8) = nul }
+    strtab_len = strtab_len + 1
+
+    // ---- Symtab count ----
+    // null + fn_count locals (or fn_count-1 if main exists) + main + 3
+    // LKM globals + extern_fn_count.
+    uint64 sym_count = 1 + fn_count + 3 + extern_fn_count
+    uint64 symtab_size = sym_count * 24
+
+    // ---- Layout offsets ----
+    uint64 elf_hdr_size = 64
+    uint64 text_off = elf_hdr_size
+    uint64 data_off = text_off + text_len
+    uint64 modinfo_off = data_off + data_len
+    // .gnu.linkonce.this_module is 64-aligned (per real .ko samples).
+    uint64 this_module_off = modinfo_off + modinfo_len
+    uint64 this_module_pad = (64 - (this_module_off & 63)) & 63
+    this_module_off = this_module_off + this_module_pad
+    uint64 symtab_off = this_module_off + sm_size
+    uint64 strtab_off = symtab_off + symtab_size
+    uint64 shstrtab_off = strtab_off + strtab_len
+    uint64 rela_text_off = shstrtab_off + shstrtab_size
+    uint64 rela_text_align_pad = (8 - (rela_text_off & 7)) & 7
+    rela_text_off = rela_text_off + rela_text_align_pad
+    uint64 rela_text_count = extern_call_count
+    uint64 rela_text_size = rela_text_count * 24
+    uint64 rela_this_module_off = rela_text_off + rela_text_size
+    uint64 rela_this_module_size = 2 * 24
+    uint64 shdr_off = rela_this_module_off + rela_this_module_size
+    uint64 shdr_align_pad = (8 - (shdr_off & 7)) & 7
+    shdr_off = shdr_off + shdr_align_pad
+
+    uint64 num_sections = 10
+    if has_relocs != 0 { num_sections = 11 }
+
+    // ---- Emit ELF header ----
+    emit_byte(0x7F); emit_byte(69); emit_byte(76); emit_byte(70)
+    emit_byte(2)   // ELFCLASS64
+    emit_byte(1)   // ELFDATA2LSB
+    emit_byte(1)   // EV_CURRENT
+    emit_byte(0)   // ELFOSABI_NONE
+    uint64 pi = 0
+    while pi < 8 { emit_byte(0); pi = pi + 1 }
+    emit_u16_le(1)        // e_type = ET_REL
+    emit_u16_le(0x3E)     // EM_X86_64
+    emit_u32_le(1)        // e_version
+    emit_u64_le(0)        // e_entry
+    emit_u64_le(0)        // e_phoff
+    emit_u64_le(shdr_off) // e_shoff
+    emit_u32_le(0)        // e_flags
+    emit_u16_le(64)       // e_ehsize
+    emit_u16_le(0)        // e_phentsize
+    emit_u16_le(0)        // e_phnum
+    emit_u16_le(64)       // e_shentsize
+    emit_u16_le(num_sections)
+    emit_u16_le(7)        // e_shstrndx = .shstrtab is section 7
+
+    // ---- Emit .text ----
+    ci = 0
+    while ci < text_len {
+        uint64 p = blob + ci
+        uint64 bv = 0
+        unsafe { *(p as uint8) -> bv }
+        uint8 bb = bv
+        emit_byte(bb)
+        ci = ci + 1
+    }
+
+    // ---- Emit .data ----
+    ci = 0
+    while ci < data_len {
+        uint64 p = blob + text_len + ci
+        uint64 bv = 0
+        unsafe { *(p as uint8) -> bv }
+        uint8 bb = bv
+        emit_byte(bb)
+        ci = ci + 1
+    }
+
+    // ---- Emit .modinfo ----
+    ci = 0
+    while ci < modinfo_len {
+        uint64 p = modinfo_buf + ci
+        uint64 bv = 0
+        unsafe { *(p as uint8) -> bv }
+        uint8 bb = bv
+        emit_byte(bb)
+        ci = ci + 1
+    }
+
+    // ---- Pad to 64-byte alignment for .gnu.linkonce.this_module ----
+    pi = 0
+    while pi < this_module_pad { emit_byte(0); pi = pi + 1 }
+
+    // ---- Emit .gnu.linkonce.this_module ----
+    ci = 0
+    while ci < sm_size {
+        uint64 p = sm_buf + ci
+        uint64 bv = 0
+        unsafe { *(p as uint8) -> bv }
+        uint8 bb = bv
+        emit_byte(bb)
+        ci = ci + 1
+    }
+
+    // ---- Emit .symtab ----
+    // Entry 0: null
+    uint64 si = 0
+    while si < 24 { emit_byte(0); si = si + 1 }
+
+    // Locals: all fn_count user functions except main.
+    uint64 local_count = 1
+    fi = 0
+    while fi < fn_count {
+        if fi != main_fn_idx {
+            uint64 no_ptr = name_offsets + fi * 8
+            uint64 name_off = 0
+            unsafe { *(no_ptr as uint64) -> name_off }
+            emit_u32_le(name_off)
+            emit_byte(0x02)      // STB_LOCAL << 4 | STT_FUNC
+            emit_byte(0)         // st_other
+            emit_u16_le(1)       // st_shndx = .text
+            uint64 fentry = fn_table + fi * 8
+            uint64 fe4 = fentry + 4
+            uint32 code_off = 0
+            unsafe { *(fe4 as uint32) -> code_off }
+            emit_u64_le(code_off)
+            emit_u64_le(0)       // st_size
+            local_count = local_count + 1
+        }
+        fi = fi + 1
+    }
+
+    // Track global symbol indexes so the .rela.this_module emitter
+    // knows where init_module / cleanup_module land.
+    uint64 cur_sym_idx = local_count
+    uint64 main_sym_idx = 0xFFFFFFFF
+
+    // Global: main (if it exists).
+    if main_fn_idx != 0xFFFFFFFF {
+        uint64 no_ptr = name_offsets + main_fn_idx * 8
+        uint64 name_off = 0
+        unsafe { *(no_ptr as uint64) -> name_off }
+        emit_u32_le(name_off)
+        emit_byte(0x12)          // STB_GLOBAL << 4 | STT_FUNC
+        emit_byte(0)
+        emit_u16_le(1)           // .text
+        uint64 fentry = fn_table + main_fn_idx * 8
+        uint64 fe4 = fentry + 4
+        uint32 code_off = 0
+        unsafe { *(fe4 as uint32) -> code_off }
+        emit_u64_le(code_off)
+        emit_u64_le(0)
+        main_sym_idx = cur_sym_idx
+        cur_sym_idx = cur_sym_idx + 1
+    }
+
+    // Global: init_module (alias for the @module_init function).
+    uint64 init_module_sym_idx = cur_sym_idx
+    emit_u32_le(init_module_name_off)
+    emit_byte(0x12)              // STB_GLOBAL << 4 | STT_FUNC
+    emit_byte(0)
+    emit_u16_le(1)               // .text
+    emit_u64_le(init_code_off)
+    emit_u64_le(0)
+    cur_sym_idx = cur_sym_idx + 1
+
+    // Global: cleanup_module (alias for the @module_exit function).
+    uint64 cleanup_module_sym_idx = cur_sym_idx
+    emit_u32_le(cleanup_module_name_off)
+    emit_byte(0x12)              // STB_GLOBAL << 4 | STT_FUNC
+    emit_byte(0)
+    emit_u16_le(1)               // .text
+    emit_u64_le(exit_code_off)
+    emit_u64_le(0)
+    cur_sym_idx = cur_sym_idx + 1
+
+    // Global: __this_module (struct module instance).
+    emit_u32_le(this_module_name_off)
+    emit_byte(0x11)              // STB_GLOBAL << 4 | STT_OBJECT
+    emit_byte(0)
+    emit_u16_le(4)               // .gnu.linkonce.this_module (section 4)
+    emit_u64_le(0)               // at start of section
+    emit_u64_le(sm_size)
+    cur_sym_idx = cur_sym_idx + 1
+
+    // Global UND: extern functions resolved by the kernel module loader
+    // against kernel-exported symbols (printk, etc).
+    uint64 extern_sym_base = cur_sym_idx
+    uint64 ei2 = 0
+    while ei2 < extern_fn_count {
+        uint64 xno_ptr2 = extern_name_offsets + ei2 * 8
+        uint64 xname_off = 0
+        unsafe { *(xno_ptr2 as uint64) -> xname_off }
+        emit_u32_le(xname_off)
+        emit_byte(0x10)          // STB_GLOBAL << 4 | STT_NOTYPE
+        emit_byte(0)
+        emit_u16_le(0)           // SHN_UNDEF
+        emit_u64_le(0)
+        emit_u64_le(0)
+        ei2 = ei2 + 1
+    }
+
+    // ---- Emit .strtab ----
+    ci = 0
+    while ci < strtab_len {
+        uint64 p = strtab_buf + ci
+        uint64 bv = 0
+        unsafe { *(p as uint8) -> bv }
+        uint8 bb = bv
+        emit_byte(bb)
+        ci = ci + 1
+    }
+
+    // ---- Emit .shstrtab ----
+    emit_byte(0)
+    emit_byte(46); emit_byte(116); emit_byte(101); emit_byte(120); emit_byte(116); emit_byte(0)     // .text
+    emit_byte(46); emit_byte(100); emit_byte(97); emit_byte(116); emit_byte(97); emit_byte(0)       // .data
+    emit_byte(46); emit_byte(115); emit_byte(121); emit_byte(109); emit_byte(116); emit_byte(97); emit_byte(98); emit_byte(0)  // .symtab
+    emit_byte(46); emit_byte(115); emit_byte(116); emit_byte(114); emit_byte(116); emit_byte(97); emit_byte(98); emit_byte(0)  // .strtab
+    emit_byte(46); emit_byte(115); emit_byte(104); emit_byte(115); emit_byte(116); emit_byte(114); emit_byte(116); emit_byte(97); emit_byte(98); emit_byte(0)  // .shstrtab
+    emit_byte(46); emit_byte(110); emit_byte(111); emit_byte(116); emit_byte(101)
+    emit_byte(46); emit_byte(71); emit_byte(78); emit_byte(85); emit_byte(45)
+    emit_byte(115); emit_byte(116); emit_byte(97); emit_byte(99); emit_byte(107); emit_byte(0)      // .note.GNU-stack
+    if has_relocs != 0 {
+        emit_byte(46); emit_byte(114); emit_byte(101); emit_byte(108); emit_byte(97)
+        emit_byte(46); emit_byte(116); emit_byte(101); emit_byte(120); emit_byte(116); emit_byte(0) // .rela.text
+    }
+    // .modinfo\0
+    emit_byte(46); emit_byte(109); emit_byte(111); emit_byte(100); emit_byte(105); emit_byte(110); emit_byte(102); emit_byte(111); emit_byte(0)
+    // .gnu.linkonce.this_module\0
+    emit_byte(46); emit_byte(103); emit_byte(110); emit_byte(117); emit_byte(46); emit_byte(108); emit_byte(105); emit_byte(110); emit_byte(107); emit_byte(111); emit_byte(110); emit_byte(99); emit_byte(101); emit_byte(46); emit_byte(116); emit_byte(104); emit_byte(105); emit_byte(115); emit_byte(95); emit_byte(109); emit_byte(111); emit_byte(100); emit_byte(117); emit_byte(108); emit_byte(101); emit_byte(0)
+    // .rela.gnu.linkonce.this_module\0
+    emit_byte(46); emit_byte(114); emit_byte(101); emit_byte(108); emit_byte(97); emit_byte(46); emit_byte(103); emit_byte(110); emit_byte(117); emit_byte(46); emit_byte(108); emit_byte(105); emit_byte(110); emit_byte(107); emit_byte(111); emit_byte(110); emit_byte(99); emit_byte(101); emit_byte(46); emit_byte(116); emit_byte(104); emit_byte(105); emit_byte(115); emit_byte(95); emit_byte(109); emit_byte(111); emit_byte(100); emit_byte(117); emit_byte(108); emit_byte(101); emit_byte(0)
+
+    // ---- Pad to .rela.text's 8-byte alignment ----
+    pi = 0
+    while pi < rela_text_align_pad { emit_byte(0); pi = pi + 1 }
+
+    // ---- Emit .rela.text (if has externs) ----
+    if has_relocs != 0 {
+        uint64 ri = 0
+        while ri < rela_text_count {
+            uint64 re = extern_call_sites + ri * 16
+            uint32 rco = 0
+            unsafe { *(re as uint32) -> rco }
+            uint64 re4 = re + 4
+            uint32 xidx = 0
+            unsafe { *(re4 as uint32) -> xidx }
+            uint64 wxi = xidx
+            uint64 sym_idx = extern_sym_base + wxi
+            emit_u64_le(rco)
+            uint64 rtype = 4   // R_X86_64_PLT32
+            uint64 r_info = (sym_idx << 32) | rtype
+            emit_u64_le(r_info)
+            // R_X86_64_PLT32 addend = -4 (two's complement)
+            emit_u64_le(0xFFFFFFFFFFFFFFFC)
+            ri = ri + 1
+        }
+    }
+
+    // ---- Emit .rela.gnu.linkonce.this_module (2 entries) ----
+    // Entry 0: struct module.init at offset 0x138 -> init_module
+    emit_u64_le(0x138)
+    uint64 r_info1 = (init_module_sym_idx << 32) | 1   // R_X86_64_64
+    emit_u64_le(r_info1)
+    emit_u64_le(0)
+    // Entry 1: struct module.exit at offset 0x4a8 -> cleanup_module
+    emit_u64_le(0x4a8)
+    uint64 r_info2 = (cleanup_module_sym_idx << 32) | 1
+    emit_u64_le(r_info2)
+    emit_u64_le(0)
+
+    // ---- Pad to section header alignment ----
+    pi = 0
+    while pi < shdr_align_pad { emit_byte(0); pi = pi + 1 }
+
+    // ---- Section Headers (10 or 11 entries) ----
+
+    // Section 0: SHN_UNDEF
+    si = 0
+    while si < 64 { emit_byte(0); si = si + 1 }
+
+    // Section 1: .text
+    emit_u32_le(1)
+    emit_u32_le(1)         // SHT_PROGBITS
+    emit_u64_le(6)         // SHF_ALLOC | SHF_EXECINSTR
+    emit_u64_le(0)
+    emit_u64_le(text_off)
+    emit_u64_le(text_len)
+    emit_u32_le(0)
+    emit_u32_le(0)
+    emit_u64_le(16)
+    emit_u64_le(0)
+
+    // Section 2: .data
+    emit_u32_le(7)
+    emit_u32_le(1)         // SHT_PROGBITS
+    emit_u64_le(3)         // SHF_ALLOC | SHF_WRITE
+    emit_u64_le(0)
+    emit_u64_le(data_off)
+    emit_u64_le(data_len)
+    emit_u32_le(0)
+    emit_u32_le(0)
+    emit_u64_le(8)
+    emit_u64_le(0)
+
+    // Section 3: .modinfo (PROGBITS, SHF_ALLOC)
+    emit_u32_le(shstr_modinfo_off)
+    emit_u32_le(1)         // SHT_PROGBITS
+    emit_u64_le(2)         // SHF_ALLOC
+    emit_u64_le(0)
+    emit_u64_le(modinfo_off)
+    emit_u64_le(modinfo_len)
+    emit_u32_le(0)
+    emit_u32_le(0)
+    emit_u64_le(1)
+    emit_u64_le(0)
+
+    // Section 4: .gnu.linkonce.this_module (PROGBITS, SHF_ALLOC|SHF_WRITE)
+    emit_u32_le(shstr_this_module_off)
+    emit_u32_le(1)         // SHT_PROGBITS
+    emit_u64_le(3)         // SHF_ALLOC | SHF_WRITE
+    emit_u64_le(0)
+    emit_u64_le(this_module_off)
+    emit_u64_le(sm_size)
+    emit_u32_le(0)
+    emit_u32_le(0)
+    emit_u64_le(64)
+    emit_u64_le(0)
+
+    // Section 5: .symtab
+    emit_u32_le(13)
+    emit_u32_le(2)         // SHT_SYMTAB
+    emit_u64_le(0)
+    emit_u64_le(0)
+    emit_u64_le(symtab_off)
+    emit_u64_le(symtab_size)
+    emit_u32_le(6)         // sh_link = .strtab (section 6)
+    emit_u32_le(local_count)
+    emit_u64_le(8)
+    emit_u64_le(24)
+
+    // Section 6: .strtab
+    emit_u32_le(21)
+    emit_u32_le(3)         // SHT_STRTAB
+    emit_u64_le(0)
+    emit_u64_le(0)
+    emit_u64_le(strtab_off)
+    emit_u64_le(strtab_len)
+    emit_u32_le(0)
+    emit_u32_le(0)
+    emit_u64_le(1)
+    emit_u64_le(0)
+
+    // Section 7: .shstrtab
+    emit_u32_le(29)
+    emit_u32_le(3)         // SHT_STRTAB
+    emit_u64_le(0)
+    emit_u64_le(0)
+    emit_u64_le(shstrtab_off)
+    emit_u64_le(shstrtab_size)
+    emit_u32_le(0)
+    emit_u32_le(0)
+    emit_u64_le(1)
+    emit_u64_le(0)
+
+    // Section 8: .note.GNU-stack
+    emit_u32_le(39)
+    emit_u32_le(1)         // SHT_PROGBITS
+    emit_u64_le(0)
+    emit_u64_le(0)
+    emit_u64_le(rela_text_off)   // sh_offset (reuse, 0 size)
+    emit_u64_le(0)
+    emit_u32_le(0)
+    emit_u32_le(0)
+    emit_u64_le(1)
+    emit_u64_le(0)
+
+    // Section 9: .rela.text (if has externs)
+    if has_relocs != 0 {
+        emit_u32_le(shstr_rela_text_off)
+        emit_u32_le(4)             // SHT_RELA
+        emit_u64_le(0x40)          // SHF_INFO_LINK
+        emit_u64_le(0)
+        emit_u64_le(rela_text_off)
+        emit_u64_le(rela_text_size)
+        emit_u32_le(5)             // sh_link = .symtab (section 5)
+        emit_u32_le(1)             // sh_info = .text (section 1)
+        emit_u64_le(8)
+        emit_u64_le(24)
+    }
+
+    // Section 9 or 10: .rela.gnu.linkonce.this_module
+    emit_u32_le(shstr_rela_this_module_off)
+    emit_u32_le(4)                 // SHT_RELA
+    emit_u64_le(0x40)              // SHF_INFO_LINK
+    emit_u64_le(0)
+    emit_u64_le(rela_this_module_off)
+    emit_u64_le(rela_this_module_size)
+    emit_u32_le(5)                 // sh_link = .symtab
+    emit_u32_le(4)                 // sh_info = .gnu.linkonce.this_module
+    emit_u64_le(8)
+    emit_u64_le(24)
 }
 
 // Emit an ELF relocatable object file (.o) wrapping the code already in out_buf.
