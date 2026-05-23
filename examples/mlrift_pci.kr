@@ -28,6 +28,17 @@ extern fn pci_get_domain_bus_and_slot(uint32 dom, uint32 bus, uint32 devfn) -> u
 extern fn pci_dev_put(uint64 pdev)
 extern fn remap_pfn_range(uint64 vma, uint64 addr, uint64 pfn, uint64 size, uint64 prot) -> int32
 
+// Phase B.3.b: user-page pinning + scatter-gather table. These prove
+// the DMA-buffer plumbing in kernel context WITHOUT touching the IOMMU
+// (B.3.c adds iommu_map_sg on top). Returns are kernel `int` (eax) — we
+// mask to 32 bits at the call site since the upper rax bits are
+// ABI-undefined. sg_alloc_table_from_pages_segment takes 7 args; the
+// 7th (gfp) spills to the stack (KernRift SysV path handles this).
+extern fn pin_user_pages_fast(uint64 start, uint32 nr_pages, uint32 gup_flags, uint64 pages) -> uint64
+extern fn unpin_user_pages(uint64 pages, uint64 npages)
+extern fn sg_alloc_table_from_pages_segment(uint64 sgt, uint64 pages, uint32 n_pages, uint32 offset, uint64 size, uint32 max_segment, uint64 gfp) -> uint64
+extern fn sg_free_table(uint64 sgt)
+
 // struct pci_dev field offset (kernel 6.17 x86_64): resource[0].start.
 // Each struct resource is 0x20 bytes; resource[N].start = 0x3e0 + N*0x20.
 static uint64 PCI_DEV_RESOURCE0_START = 0x3e0
@@ -122,6 +133,20 @@ static uint64 IOCTL_MLRIFT_OPEN_PCI = 0x400D4D01
 // (0..3) to release. = ('M'<<8) | 2 = 0x00004D02.
 static uint64 IOCTL_MLRIFT_CLOSE_PCI = 0x00004D02
 
+// MLRIFT_PIN_TEST = _IOW('M', 3, char[16]): arg points at a 16-byte
+// userland struct { u64 uaddr; u64 size }. Pins the buffer, builds a
+// scatter-gather table, returns the segment count (orig_nents), then
+// tears it all down. No IOMMU, no device touch — just proves the
+// pin + SG plumbing. = (1<<30)|(16<<16)|('M'<<8)|3 = 0x40104D03.
+static uint64 IOCTL_MLRIFT_PIN_TEST = 0x40104D03
+
+// kernel constants
+static uint64 GFP_KERNEL_FLAGS = 0xcc0
+static uint64 FOLL_WRITE_FLAG  = 0x1
+static uint64 SG_MAX_SEGMENT   = 0xFFFFF000   // UINT_MAX page-aligned
+static uint64 SGT_ORIG_NENTS   = 0x0c         // offsetof(struct sg_table, orig_nents)
+static uint64 PIN_TEST_MAX_PAGES = 256        // smoke cap: 1 MiB
+
 // Negative errno values returned to userland (linux/errno.h).
 // EFAULT = 14, EINVAL = 22, ENODEV = 19, EBUSY = 16.
 // We return -errno as signed 64-bit, so e.g. -EFAULT = 0xFFFFFFFFFFFFFFF2.
@@ -165,8 +190,79 @@ fn driver_ioctl(uint64 file, uint64 cmd, uint64 arg) -> int64 {
         if idx == 3 { if _mlrift_pci_slot3 != 0 { pci_dev_put(_mlrift_pci_slot3); _mlrift_pci_slot3 = 0; return 0 } }
         return 0xFFFFFFFFFFFFFFEA   // -EINVAL: bad slot or already closed
     }
+    if cmd == IOCTL_MLRIFT_PIN_TEST {
+        return _pin_test(arg)
+    }
     _printk("mlrift_pci: unknown ioctl cmd\n")
     return 0xFFFFFFFFFFFFFFE7   // -ENOTTY = -25
+}
+
+// Phase B.3.b — pin a userland buffer and build a scatter-gather table,
+// then tear it down. Proves pin_user_pages_fast + the 7-arg
+// sg_alloc_table_from_pages_segment in kernel context. NO IOMMU, NO
+// device access — safe to run with the dGPU still bound to vfio-pci.
+// `arg` -> { u64 uaddr; u64 size }. Returns sg orig_nents on success or
+// a negative errno. Heap use (page array) goes through kmalloc/kfree.
+fn _pin_test(uint64 arg) -> int64 {
+    uint8[16] req_arr
+    uint64 req = req_arr
+    uint64 zi = 0
+    while zi < 16 { unsafe { *((req + zi) as uint8) = 0 }; zi = zi + 1 }
+    uint64 not_copied = _copy_from_user(req, arg, 16)
+    if not_copied != 0 { return 0xFFFFFFFFFFFFFFF2 }   // -EFAULT
+    uint64 uaddr = 0; unsafe { *((req + 0) as uint64) -> uaddr }
+    uint64 size  = 0; unsafe { *((req + 8) as uint64) -> size }
+    if size == 0 { return 0xFFFFFFFFFFFFFFEA }          // -EINVAL
+
+    // Page span covering [uaddr, uaddr+size).
+    uint64 page_base = uaddr & 0xFFFFFFFFFFFFF000
+    uint64 off = uaddr - page_base
+    uint64 npages = (off + size + 4095) / 4096
+    if npages == 0 { return 0xFFFFFFFFFFFFFFEA }
+    if npages > PIN_TEST_MAX_PAGES { return 0xFFFFFFFFFFFFFFEA }
+
+    // struct page* array (kmalloc in kernel mode).
+    uint64 pages = alloc(npages * 8)
+    if pages == 0 { return 0xFFFFFFFFFFFFFFF4 }          // -ENOMEM = -12
+
+    uint32 npages32 = npages
+    uint64 pinned = pin_user_pages_fast(page_base, npages32, FOLL_WRITE_FLAG, pages)
+    pinned = pinned & 0xFFFFFFFF                          // low 32 = kernel int return
+    if pinned != npages {
+        // partial pin (small positive) -> unpin those; negative/zero -> nothing
+        if (pinned & 0x80000000) == 0 {
+            if pinned != 0 { unpin_user_pages(pages, pinned) }
+        }
+        dealloc(pages)
+        _printk("mlrift_pci: PIN_TEST pin_user_pages_fast failed\n")
+        return 0xFFFFFFFFFFFFFFF2
+    }
+
+    // Build the SG table (7-arg call; gfp spills to the stack).
+    uint8[16] sgt_arr
+    uint64 sgt = sgt_arr
+    uint64 si = 0
+    while si < 16 { unsafe { *((sgt + si) as uint8) = 0 }; si = si + 1 }
+    uint32 maxseg32 = SG_MAX_SEGMENT
+    uint64 rc = sg_alloc_table_from_pages_segment(sgt, pages, npages32, 0, size, maxseg32, GFP_KERNEL_FLAGS)
+    rc = rc & 0xFFFFFFFF
+    if rc != 0 {
+        unpin_user_pages(pages, npages)
+        dealloc(pages)
+        _printk("mlrift_pci: PIN_TEST sg_alloc_table_from_pages_segment failed\n")
+        return 0xFFFFFFFFFFFFFFF4
+    }
+
+    uint32 orig_nents = 0
+    unsafe { *((sgt + SGT_ORIG_NENTS) as uint32) -> orig_nents }
+    uint64 nents_ret = orig_nents
+
+    // Tear down — this is a smoke; B.3.c maps before unmapping.
+    sg_free_table(sgt)
+    unpin_user_pages(pages, npages)
+    dealloc(pages)
+    _printk("mlrift_pci: PIN_TEST ok (pinned + SG built + freed)\n")
+    return nents_ret
 }
 
 // Phase B.1.f: teardown hook. cleanup_module calls this BEFORE
