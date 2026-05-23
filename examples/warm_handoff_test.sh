@@ -33,12 +33,21 @@ cur_drv() { basename "$(readlink -f /sys/bus/pci/devices/$BDF/driver 2>/dev/null
 # SIGHUP/TERM from a crashing session) — never leave it stranded on mlrift_pci.
 restore() {
   trap - EXIT INT TERM HUP
-  say "restore: return dGPU to amdgpu"
+  say "restore: release mlrift_pci, try to rebind amdgpu"
   echo "$BDF" | sudo tee /sys/bus/pci/drivers/mlrift_pci/unbind >/dev/null 2>&1
   echo ""     | sudo tee "$ovr"                                >/dev/null 2>&1
   sudo rmmod mlrift_pci 2>/dev/null
   echo "$BDF" | sudo tee /sys/bus/pci/drivers/amdgpu/bind      >/dev/null 2>&1
-  sleep 1; lspci -nnks "$BDF" | sed -n '1p;/driver in use/p'
+  sleep 1
+  if [ "$(cur_drv)" = "amdgpu" ]; then
+    echo "  dGPU restored to amdgpu."
+  else
+    echo "  NOTE: dGPU is now unbound (driver='$(cur_drv)'). amdgpu re-bind is"
+    echo "  blocked by amdgpu's own leaked 'mem_info_preempt_used' sysfs attr"
+    echo "  (re-probe fails -17 EEXIST). Harmless. REBOOT to return it to amdgpu"
+    echo "  (it auto-binds at boot); a 2nd run also needs a reboot first (this"
+    echo "  script requires the dGPU to start warm on amdgpu)."
+  fi
 }
 
 # Precondition: dGPU must start on amdgpu (warm). Nothing to restore if not.
