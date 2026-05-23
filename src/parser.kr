@@ -1648,11 +1648,17 @@ fn parse_module() -> uint64 {
     while cur_kind() != 0 {
         uint32 kind = cur_kind()
 
-        // Parse annotations (@export, @noreturn, @naked, @packed, @section, etc)
+        // Parse annotations (@export, @noreturn, @naked, @packed, @section,
+        // @module_*, etc). Annotations preceding a `fn` apply to that
+        // function; @module_license / @module_author / @module_description
+        // / @module_name are module-wide singletons registered into a
+        // side-table that emit_elf_lkm reads at emit time.
         uint64 ann_noreturn = 0
         uint64 ann_naked = 0
         uint64 ann_packed = 0
         uint64 ann_export = 0
+        uint64 ann_module_init = 0
+        uint64 ann_module_exit = 0
         uint64 ann_section_start = 0
         uint64 ann_section_len = 0
         while kind == 21 {
@@ -1660,54 +1666,79 @@ fn parse_module() -> uint64 {
             // Read annotation name
             uint64 ann_tok = p_tok_pos
             advance_tok()
-            // Check for known annotations
-            uint64 ann_start = tok_start_at(ann_tok)
             uint64 ann_len_v = tok_len_at(ann_tok)
-            // Check noreturn (8 chars)
+            // Check for known annotations via tok_matches (defined in
+            // codegen.kr). Length is a fast pre-filter.
             if ann_len_v == 8 {
-                uint64 ann_a = src_ptr + ann_start
-                uint64 ann_ch = 0
-                unsafe { *(ann_a as uint8) -> ann_ch }
-                if ann_ch == 110 { ann_noreturn = 1 }
+                if tok_matches(ann_tok, "noreturn", 8) != 0 { ann_noreturn = 1 }
             }
-            // Check naked (5 chars, starts with 'n')
             if ann_len_v == 5 {
-                uint64 ann_a2 = src_ptr + ann_start
-                uint64 ann_ch2 = 0
-                unsafe { *(ann_a2 as uint8) -> ann_ch2 }
-                uint64 ann_a3 = src_ptr + ann_start + 1
-                uint64 ann_ch3 = 0
-                unsafe { *(ann_a3 as uint8) -> ann_ch3 }
-                if ann_ch2 == 110 && ann_ch3 == 97 { ann_naked = 1 }
+                if tok_matches(ann_tok, "naked", 5) != 0 { ann_naked = 1 }
             }
-            // Check packed (6 chars, starts with 'p')
             if ann_len_v == 6 {
-                uint64 ann_a4 = src_ptr + ann_start
-                uint64 ann_ch4 = 0
-                unsafe { *(ann_a4 as uint8) -> ann_ch4 }
-                if ann_ch4 == 112 { ann_packed = 1 }
-                // Check export (6 chars, starts with 'e' = 101)
-                if ann_ch4 == 101 { ann_export = 1 }
+                if tok_matches(ann_tok, "packed", 6) != 0 { ann_packed = 1 }
+                if tok_matches(ann_tok, "export", 6) != 0 { ann_export = 1 }
             }
-            // Check section (7 chars, starts with 's')
             uint64 is_section = 0
             if ann_len_v == 7 {
-                uint64 ann_a5 = src_ptr + ann_start
-                uint64 ann_ch5 = 0
-                unsafe { *(ann_a5 as uint8) -> ann_ch5 }
-                if ann_ch5 == 115 { is_section = 1 }  // 's' = 115
+                if tok_matches(ann_tok, "section", 7) != 0 { is_section = 1 }
             }
-            // Annotation arguments: for @section, capture the string
-            // literal (minus its quotes). For everything else, skip.
+            // @module_init / @module_exit — per-function flags. Length 11.
+            if ann_len_v == 11 {
+                if tok_matches(ann_tok, "module_init", 11) != 0 { ann_module_init = 1 }
+                if tok_matches(ann_tok, "module_exit", 11) != 0 { ann_module_exit = 1 }
+            }
+            // @module_license("...") / @module_author("...") /
+            // @module_description("...") / @module_name("...") — module-wide
+            // string singletons. Captured here, dispatched into the
+            // codegen-side module_info table once the string arg is parsed.
+            uint64 is_module_license = 0
+            uint64 is_module_author = 0
+            uint64 is_module_description = 0
+            uint64 is_module_name = 0
+            if ann_len_v == 14 {
+                if tok_matches(ann_tok, "module_license", 14) != 0 { is_module_license = 1 }
+            }
+            if ann_len_v == 13 {
+                if tok_matches(ann_tok, "module_author", 13) != 0 { is_module_author = 1 }
+            }
+            if ann_len_v == 18 {
+                if tok_matches(ann_tok, "module_description", 18) != 0 { is_module_description = 1 }
+            }
+            if ann_len_v == 11 {
+                if tok_matches(ann_tok, "module_name", 11) != 0 { is_module_name = 1 }
+            }
+            // Annotation arguments: for @section + module string-form
+            // annotations, capture the string literal (minus quotes).
+            // For everything else, skip.
+            uint64 wants_string = is_section | is_module_license | is_module_author | is_module_description | is_module_name
             if eat(10) != 0 {
-                if is_section != 0 && cur_kind() == 3 {
+                if wants_string != 0 && cur_kind() == 3 {
                     uint64 str_tok = advance_tok()
                     uint64 st_s = tok_start_at(str_tok)
                     uint64 st_l = tok_len_at(str_tok)
-                    // Token text includes the leading and trailing "; trim them.
+                    // Trim leading + trailing ".
+                    uint64 captured_start = 0
+                    uint64 captured_len = 0
                     if st_l >= 2 {
-                        ann_section_start = st_s + 1
-                        ann_section_len = st_l - 2
+                        captured_start = st_s + 1
+                        captured_len = st_l - 2
+                    }
+                    if is_section != 0 {
+                        ann_section_start = captured_start
+                        ann_section_len = captured_len
+                    }
+                    if is_module_license != 0 {
+                        module_info_set_license(captured_start, captured_len)
+                    }
+                    if is_module_author != 0 {
+                        module_info_set_author(captured_start, captured_len)
+                    }
+                    if is_module_description != 0 {
+                        module_info_set_description(captured_start, captured_len)
+                    }
+                    if is_module_name != 0 {
+                        module_info_set_name(captured_start, captured_len)
                     }
                 }
                 while cur_kind() != 11 && cur_kind() != 0 {
@@ -1720,18 +1751,35 @@ fn parse_module() -> uint64 {
 
         if kind == 60 {
             uint64 fn_node = parse_fn_decl()
-            // Store annotation flags in data4: bit 0 = noreturn, bit 1 = naked, bit 2 = export
-            uint32 ann_flags = ann_noreturn | (ann_naked << 1) | (ann_export << 2)
+            // data4 bit layout:
+            //   bit 0 = noreturn
+            //   bit 1 = naked
+            //   bit 2 = export
+            //   bit 3 = extern (set by the extern fn handler below)
+            //   bit 4 = module_init   (LKM entry point)
+            //   bit 5 = module_exit   (LKM exit point)
+            uint32 ann_flags = ann_noreturn | (ann_naked << 1) | (ann_export << 2) | (ann_module_init << 4) | (ann_module_exit << 5)
             if ann_flags != 0 {
                 ast_set_data4(fn_node, ann_flags)
+            }
+            // Register init/exit function name tokens with the module_info
+            // side-table. emit_elf_lkm uses these to rename the symbols
+            // to `init_module` / `cleanup_module` (kernel ABI) at .o emit
+            // time. We register the fn name token (not the AST node) so
+            // the lookup stays consistent with fn_table indexing.
+            uint32 fn_name_tok = ast_data1(fn_node)
+            uint64 wfn_name = fn_name_tok
+            if ann_module_init != 0 {
+                module_info_set_init_fn(wfn_name)
+            }
+            if ann_module_exit != 0 {
+                module_info_set_exit_fn(wfn_name)
             }
             // If the user wrote `@section("name")`, stash the (start, len)
             // pair in the side-table keyed by the function's name token.
             // The ELF relocatable writer will read this when it supports
             // multi-section emission.
             if ann_section_len != 0 {
-                uint32 fn_name_tok = ast_data1(fn_node)
-                uint64 wfn_name = fn_name_tok
                 fn_section_set(wfn_name, ann_section_start, ann_section_len)
             }
             ast_append_child(mod_node, fn_node)

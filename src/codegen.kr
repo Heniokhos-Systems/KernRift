@@ -1860,6 +1860,63 @@ fn fn_section_lookup(uint64 name_tok) -> uint64 {
     return 0
 }
 
+// =====================================================================
+// LKM (Linux Kernel Module) metadata. Populated by the parser when
+// it encounters @module_license/@module_author/@module_description/
+// @module_name annotations (module-wide singletons) and @module_init/
+// @module_exit (per-function markers). Consumed by emit_elf_lkm.
+// =====================================================================
+static uint64 module_info_license_start_v = 0
+static uint64 module_info_license_len_v = 0
+static uint64 module_info_author_start_v = 0
+static uint64 module_info_author_len_v = 0
+static uint64 module_info_description_start_v = 0
+static uint64 module_info_description_len_v = 0
+static uint64 module_info_name_start_v = 0
+static uint64 module_info_name_len_v = 0
+// Init / exit function name tokens. 0 = none registered yet. Stored
+// as uint64 (the 32-bit token index extended) so the API matches the
+// other side tables.
+static uint64 module_info_init_fn_tok_v = 0
+static uint64 module_info_exit_fn_tok_v = 0
+
+@export
+fn module_info_set_license(uint64 start, uint64 len) {
+    module_info_license_start_v = start
+    module_info_license_len_v = len
+}
+@export
+fn module_info_set_author(uint64 start, uint64 len) {
+    module_info_author_start_v = start
+    module_info_author_len_v = len
+}
+@export
+fn module_info_set_description(uint64 start, uint64 len) {
+    module_info_description_start_v = start
+    module_info_description_len_v = len
+}
+@export
+fn module_info_set_name(uint64 start, uint64 len) {
+    module_info_name_start_v = start
+    module_info_name_len_v = len
+}
+@export
+fn module_info_set_init_fn(uint64 tok) { module_info_init_fn_tok_v = tok }
+@export
+fn module_info_set_exit_fn(uint64 tok) { module_info_exit_fn_tok_v = tok }
+
+// Getters — consumed by emit_elf_lkm in this same file.
+@export fn module_info_license_start() -> uint64 { return module_info_license_start_v }
+@export fn module_info_license_len() -> uint64   { return module_info_license_len_v }
+@export fn module_info_author_start() -> uint64  { return module_info_author_start_v }
+@export fn module_info_author_len() -> uint64    { return module_info_author_len_v }
+@export fn module_info_description_start() -> uint64 { return module_info_description_start_v }
+@export fn module_info_description_len() -> uint64   { return module_info_description_len_v }
+@export fn module_info_name_start() -> uint64    { return module_info_name_start_v }
+@export fn module_info_name_len() -> uint64      { return module_info_name_len_v }
+@export fn module_info_init_fn_tok() -> uint64   { return module_info_init_fn_tok_v }
+@export fn module_info_exit_fn_tok() -> uint64   { return module_info_exit_fn_tok_v }
+
 fn fn_lookup(uint64 name_tok) -> uint64 {
     uint64 i = 0
     while i < fn_count {
@@ -11208,6 +11265,30 @@ fn emit_elf_debug_footer(uint64 text_start, uint64 input_path) {
                                 //          .debug_info, .symtab,
                                 //          .strtab, .shstrtab)
     patch_u16(62, 8)           // e_shstrndx — .shstrtab is idx 8
+}
+
+// Emit a Linux loadable kernel module (.ko). Phase A.1.3 — currently a
+// stub that errors out at emit time. The CLI flag (--emit=lkm) and the
+// parser-side @module_* annotations are already wired in A.1.1 + A.1.2;
+// the byte-level emitter below is the remaining work.
+//
+// When implemented this function will:
+//   1. Emit a relocatable ELF as in emit_elf_relocatable
+//   2. Add a `.modinfo` PROGBITS section with key=value strings built
+//      from module_info_*() getters
+//   3. Add a `.gnu.linkonce.this_module` PROGBITS section sized for the
+//      target kernel's `struct module` (1280 bytes on 6.x x86_64) with
+//      the module name written into the first 56 bytes
+//   4. Add three GLOBAL symbols: init_module (alias for the @module_init
+//      function), cleanup_module (alias for @module_exit), __this_module
+//      (pointing at the struct module section)
+//   5. (A.1.5) Add a `__versions` section by reading Module.symvers and
+//      looking up CRCs for each extern symbol used
+@export
+fn emit_elf_lkm(uint64 text_len, uint64 data_len, uint64 arch) {
+    write(2, "krc: --emit=lkm not yet implemented (Phase A.1.3 pending)\n", 58)
+    write(2, "krc: parser annotations + CLI flag wired in this build; emitter is the next step\n", 82)
+    exit(1)
 }
 
 // Emit an ELF relocatable object file (.o) wrapping the code already in out_buf.
