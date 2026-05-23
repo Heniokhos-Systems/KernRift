@@ -2347,10 +2347,20 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
     while (codegen_output_len() & 7) != 0 { emit_byte(0) }
     uint64 data_start = codegen_output_len()
     emit_static_data()
-    if arch == 0 {
-        resolve_static_fixups(data_start)
-    } else {
-        resolve_static_fixups_a64(data_start)
+    // For LKM output (emit_mode 7), DON'T bake static-var displacements
+    // here — static vars live in a separate .data section that loads at
+    // an independent kernel address, so the refs need R_X86_64_PC32
+    // relocations (emitted by emit_elf_lkm) instead. The kernel module
+    // loader also rejects PC32 relocations whose target field is
+    // nonzero ("Invalid relocation target, existing value is nonzero"),
+    // so the disp32 placeholders must stay 0. String-literal fixups are
+    // still resolved (they're intra-.text and position-independent).
+    if emit_mode != 7 {
+        if arch == 0 {
+            resolve_static_fixups(data_start)
+        } else {
+            resolve_static_fixups_a64(data_start)
+        }
     }
 
     uint64 text_size = codegen_output_len() - text_start
@@ -2396,8 +2406,18 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
         // LKM: relocatable ELF + .modinfo + struct module + init/exit
         // symbol aliases. Only x86_64 + linux is supported today; other
         // arch/target combinations are caught earlier in flag parsing.
-        uint64 total_code = codegen_output_len()
-        emit_elf_lkm(total_code, 0, arch)
+        //
+        // Split the blob at data_start: [code + string literals] go in
+        // .text (mapped RO+X by the kernel), [static variables] go in
+        // .data (RW). Without this split, static vars land in .text and
+        // any WRITE to them faults ("supervisor write, permissions
+        // violation"). String-literal refs stay intra-.text and need no
+        // relocation; static-var refs cross .text→.data and DO — see
+        // emit_elf_lkm's static-fixup relocation pass.
+        uint64 lkm_total = codegen_output_len()
+        uint64 lkm_text_len = data_start
+        uint64 lkm_data_len = lkm_total - data_start
+        emit_elf_lkm(lkm_text_len, lkm_data_len, arch)
         codegen_write_output(output_path)
 
         uint8[64] nb

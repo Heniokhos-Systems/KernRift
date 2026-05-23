@@ -1,30 +1,43 @@
-// Phase B.1.c — userland test for /dev/mlrift_pci.
-// Builds with: cc -O2 -o /tmp/mlrift_pci_test /tmp/mlrift_pci_test.c
+// Phase B.1.c+d — userland test for /dev/mlrift_pci.
 //
-// Opens /dev/mlrift_pci, calls one IOCTL, prints the return value.
-// The kernel-side handler in our LKM logs "mlrift_pci: ioctl called"
-// to dmesg and returns 0 — so this program prints "ioctl rc=0".
+// Build:  cc -O2 -o /tmp/mlrift_pci_test examples/mlrift_pci_test.c
+// Run:    /tmp/mlrift_pci_test [BDF]   (default BDF: 0000:00:00.0)
+//
+// Calls MLRIFT_OPEN_PCI on the given BDF. On success, prints the slot
+// index (0..3) returned by the driver. On failure, prints errno.
 
 #include <stdio.h>
 #include <fcntl.h>
+#include <string.h>
 #include <unistd.h>
 #include <sys/ioctl.h>
 #include <errno.h>
-#include <string.h>
 
-// MLRIFT_ECHO = _IOWR('M', 1, unsigned long) for the future B.1.d
-// shape. For now any number reaches our handler (which ignores cmd).
-#define MLRIFT_ECHO 0xC0084D01u
+// IOCTL number (must match examples/mlrift_pci.kr):
+//   MLRIFT_OPEN_PCI = _IOW('M', 1, char[13])
+//   = (1<<30) | (13<<16) | ('M'<<8) | 1 = 0x400D4D01
+#define MLRIFT_OPEN_PCI 0x400D4D01u
 
-int main(void) {
-    int fd = open("/dev/mlrift_pci", O_RDWR);
-    if (fd < 0) {
-        fprintf(stderr, "open /dev/mlrift_pci: %s\n", strerror(errno));
+int main(int argc, char **argv) {
+    const char *bdf = (argc >= 2) ? argv[1] : "0000:00:00.0";
+    if (strlen(bdf) != 12) {
+        fprintf(stderr, "BDF must be 12 chars (got %zu): %s\n", strlen(bdf), bdf);
         return 1;
     }
-    unsigned long arg = 42;
-    long rc = ioctl(fd, MLRIFT_ECHO, &arg);
-    printf("ioctl rc=%ld errno=%d (%s)\n", rc, errno, rc < 0 ? strerror(errno) : "ok");
+    int fd = open("/dev/mlrift_pci", O_RDWR);
+    if (fd < 0) { perror("open /dev/mlrift_pci"); return 1; }
+
+    char buf[13] = {0};
+    memcpy(buf, bdf, 12);
+
+    long rc = ioctl(fd, MLRIFT_OPEN_PCI, buf);
+    if (rc < 0) {
+        fprintf(stderr, "MLRIFT_OPEN_PCI(%s): rc=%ld errno=%d (%s)\n",
+                bdf, rc, errno, strerror(errno));
+        close(fd);
+        return 1;
+    }
+    printf("MLRIFT_OPEN_PCI(%s) -> slot %ld\n", bdf, rc);
     close(fd);
     return 0;
 }

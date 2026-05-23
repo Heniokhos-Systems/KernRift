@@ -11986,6 +11986,9 @@ fn emit_elf_lkm(uint64 text_len, uint64 data_len, uint64 arch) {
     // misc-device mode (_lkm_miscdev / _lkm_fops / _lkm_name_str).
     uint64 sym_count = 1 + fn_count + 3 + extern_fn_count
     if misc_dev_mode != 0 { sym_count = sym_count + 3 }
+    // +1 for the .data SECTION symbol used as the relocation target for
+    // static-variable references (only when there are any).
+    if static_fixup_count > 0 { sym_count = sym_count + 1 }
     uint64 symtab_size = sym_count * 24
 
     // ---- Layout offsets ----
@@ -12024,6 +12027,11 @@ fn emit_elf_lkm(uint64 text_len, uint64 data_len, uint64 arch) {
     rela_text_off = rela_text_off + rela_text_align_pad
     uint64 rela_text_count = extern_call_count
     if misc_dev_mode != 0 { rela_text_count = rela_text_count + 4 }
+    // Static-variable references (.text → .data) need R_X86_64_PC32
+    // relocations against the .data section symbol — without them the
+    // baked flat-layout displacements point into .text (read-only) and
+    // any write faults. One reloc per static fixup recorded by codegen.
+    rela_text_count = rela_text_count + static_fixup_count
     uint64 rela_text_size = rela_text_count * 24
     uint64 rela_this_module_off = rela_text_off + rela_text_size
     uint64 rela_this_module_size = 2 * 24
@@ -12275,6 +12283,19 @@ fn emit_elf_lkm(uint64 text_len, uint64 data_len, uint64 arch) {
         local_count = local_count + 3
     }
 
+    // .data SECTION symbol — relocation target for static-var refs.
+    // STT_SECTION (3) | STB_LOCAL (0), st_value 0, st_shndx 2 (.data).
+    uint64 data_section_sym_idx = local_count
+    if static_fixup_count > 0 {
+        emit_u32_le(0)               // st_name = 0 (section symbols are anonymous)
+        emit_byte(0x03)              // STB_LOCAL << 4 | STT_SECTION
+        emit_byte(0)
+        emit_u16_le(2)               // st_shndx = .data
+        emit_u64_le(0)               // st_value
+        emit_u64_le(0)               // st_size
+        local_count = local_count + 1
+    }
+
     // Track global symbol indexes so the .rela.this_module emitter
     // knows where init_module / cleanup_module land.
     uint64 cur_sym_idx = local_count
@@ -12457,6 +12478,30 @@ fn emit_elf_lkm(uint64 text_len, uint64 data_len, uint64 arch) {
         emit_u64_le(misc_exit_text_off + 12)
         emit_u64_le((md_sym_idx << 32) | 4)
         emit_u64_le(0xFFFFFFFFFFFFFFFC)
+    }
+    // Static-variable reference relocations (R_X86_64_PC32 → .data
+    // section symbol). data_off is the static's offset within .data
+    // (== its offset within the static-data region, which lands at
+    // .data offset 0). addend = data_off - 4 makes
+    //   target = rip_after_insn + (S + A - P)
+    //          = (P + 4) + (.data_base + data_off - 4 - P)
+    //          = .data_base + data_off  ✓
+    if static_fixup_count > 0 {
+        uint64 sfi = 0
+        while sfi < static_fixup_count {
+            uint64 fentry = static_fixups + sfi * 8
+            uint32 sf_code_off = 0
+            unsafe { *(fentry as uint32) -> sf_code_off }
+            uint64 fe4 = fentry + 4
+            uint32 sf_data_off = 0
+            unsafe { *(fe4 as uint32) -> sf_data_off }
+            uint64 wco = sf_code_off
+            uint64 wdo = sf_data_off
+            emit_u64_le(wco)                              // r_offset
+            emit_u64_le((data_section_sym_idx << 32) | 2) // R_X86_64_PC32
+            emit_u64_le(wdo - 4)                          // addend
+            sfi = sfi + 1
+        }
     }
 
     // ---- Emit .rela.gnu.linkonce.this_module (2 entries) ----

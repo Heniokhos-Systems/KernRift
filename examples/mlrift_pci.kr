@@ -6,15 +6,15 @@
 // Load / observe / unload:
 //   sudo insmod mlrift_pci.ko
 //   ls -la /dev/mlrift_pci          # character device appears (major 10)
+//   sudo chmod 666 /dev/mlrift_pci
+//   cc -O2 -o /tmp/test examples/mlrift_pci_test.c && /tmp/test
 //   sudo rmmod mlrift_pci
-//   ls -la /dev/mlrift_pci          # gone
 //
-// The `@module_register_misc_device("mlrift_pci")` annotation makes
-// emit_elf_lkm auto-generate init_module / cleanup_module bodies that
-// call misc_register / misc_deregister on a statically-emitted struct
-// miscdevice + struct file_operations. The user supplies only an
-// @lkm_ioctl_handler. @module_init / @module_exit are forbidden in
-// this mode (they would conflict with the auto-generation).
+// Phase B.1.d: implements MLRIFT_OPEN_PCI IOCTL. Userland passes a
+// 13-byte BDF string ("0000:03:00.0\0"); kernel resolves it via
+// pci_get_domain_bus_and_slot and stashes the pci_dev pointer in a
+// driver-internal slot table (max 4 open devices). Returns the slot
+// index (0..3) on success or negative errno on failure.
 
 @module_license("GPL")
 @module_name("mlrift_pci")
@@ -23,9 +23,125 @@
 extern fn _printk(uint64 fmt) -> int32
 extern fn misc_register(uint64 dev) -> int32
 extern fn misc_deregister(uint64 dev) -> int32
+extern fn _copy_from_user(uint64 dst, uint64 src, uint64 n) -> uint64
+extern fn pci_get_domain_bus_and_slot(uint32 dom, uint32 bus, uint32 devfn) -> uint64
+extern fn pci_dev_put(uint64 pdev)
 
+// Driver-internal table of open PCI devices. 4 slots is plenty for
+// development; LLM workloads typically use one dGPU at a time.
+static uint64 _mlrift_pci_slot0 = 0
+static uint64 _mlrift_pci_slot1 = 0
+static uint64 _mlrift_pci_slot2 = 0
+static uint64 _mlrift_pci_slot3 = 0
+
+// Parse a single hex digit (0..F, lower or upper). Returns 0..15 on
+// success or 0xFFFFFFFF on bad input.
+fn _hex_digit(uint64 c) -> uint64 {
+    if c >= 48 { if c <= 57 { return c - 48 } }          // '0'..'9'
+    if c >= 97 { if c <= 102 { return c - 97 + 10 } }    // 'a'..'f'
+    if c >= 65 { if c <= 70 { return c - 65 + 10 } }     // 'A'..'F'
+    return 0xFFFFFFFF
+}
+
+// Parse the BDF string "DDDD:BB:SS.F\0" from buf. Returns a packed
+// uint64: (dom << 16) | (bus << 8) | devfn (all fit in 32 bits), or
+// the sentinel 0xFFFFFFFFFFFFFFFF on parse error. No out-pointers so
+// the caller needs no heap — this code runs in kernel context where
+// alloc() (a userland mmap syscall) would panic.
+fn _parse_bdf(uint64 buf) -> uint64 {
+    // Bytes 0..3: domain hex (4 digits)
+    // Byte 4: ':'
+    // Bytes 5..6: bus hex (2 digits)
+    // Byte 7: ':'
+    // Bytes 8..9: slot hex (2 digits)
+    // Byte 10: '.'
+    // Byte 11: function (1 digit, 0..7)
+    // Byte 12: '\0'
+    uint64 d0 = 0; unsafe { *((buf + 0) as uint8) -> d0 }
+    uint64 d1 = 0; unsafe { *((buf + 1) as uint8) -> d1 }
+    uint64 d2 = 0; unsafe { *((buf + 2) as uint8) -> d2 }
+    uint64 d3 = 0; unsafe { *((buf + 3) as uint8) -> d3 }
+    uint64 b0 = 0; unsafe { *((buf + 5) as uint8) -> b0 }
+    uint64 b1 = 0; unsafe { *((buf + 6) as uint8) -> b1 }
+    uint64 s0 = 0; unsafe { *((buf + 8) as uint8) -> s0 }
+    uint64 s1 = 0; unsafe { *((buf + 9) as uint8) -> s1 }
+    uint64 f0 = 0; unsafe { *((buf + 11) as uint8) -> f0 }
+    uint64 D0 = _hex_digit(d0)
+    uint64 D1 = _hex_digit(d1)
+    uint64 D2 = _hex_digit(d2)
+    uint64 D3 = _hex_digit(d3)
+    uint64 B0 = _hex_digit(b0)
+    uint64 B1 = _hex_digit(b1)
+    uint64 S0 = _hex_digit(s0)
+    uint64 S1 = _hex_digit(s1)
+    uint64 F0 = _hex_digit(f0)
+    if D0 == 0xFFFFFFFF { return 0xFFFFFFFFFFFFFFFF }
+    if D1 == 0xFFFFFFFF { return 0xFFFFFFFFFFFFFFFF }
+    if D2 == 0xFFFFFFFF { return 0xFFFFFFFFFFFFFFFF }
+    if D3 == 0xFFFFFFFF { return 0xFFFFFFFFFFFFFFFF }
+    if B0 == 0xFFFFFFFF { return 0xFFFFFFFFFFFFFFFF }
+    if B1 == 0xFFFFFFFF { return 0xFFFFFFFFFFFFFFFF }
+    if S0 == 0xFFFFFFFF { return 0xFFFFFFFFFFFFFFFF }
+    if S1 == 0xFFFFFFFF { return 0xFFFFFFFFFFFFFFFF }
+    if F0 == 0xFFFFFFFF { return 0xFFFFFFFFFFFFFFFF }
+    uint64 dom = (D0 << 12) | (D1 << 8) | (D2 << 4) | D3
+    uint64 bus = (B0 << 4) | B1
+    uint64 slot = (S0 << 4) | S1
+    uint64 func = F0
+    uint64 devfn = (slot << 3) | (func & 7)
+    return (dom << 16) | (bus << 8) | devfn
+}
+
+// Store a pci_dev pointer in the first free slot. Returns slot index
+// 0..3 on success, or 0xFFFFFFFF if no slot is free.
+fn _alloc_slot(uint64 pdev) -> uint64 {
+    if _mlrift_pci_slot0 == 0 { _mlrift_pci_slot0 = pdev; return 0 }
+    if _mlrift_pci_slot1 == 0 { _mlrift_pci_slot1 = pdev; return 1 }
+    if _mlrift_pci_slot2 == 0 { _mlrift_pci_slot2 = pdev; return 2 }
+    if _mlrift_pci_slot3 == 0 { _mlrift_pci_slot3 = pdev; return 3 }
+    return 0xFFFFFFFF
+}
+
+// IOCTL command numbers — must match userland.
+//   MLRIFT_OPEN_PCI = _IOW('M', 1, char[13])
+//   = (write-only=1<<30) | (size=13<<16) | ('M'<<8) | 1
+//   = 0x4000'0000 | 0x000D'0000 | 0x0000'4D00 | 0x0000'0001
+//   = 0x400D'4D01
+static uint64 IOCTL_MLRIFT_OPEN_PCI = 0x400D4D01
+
+// Negative errno values returned to userland (linux/errno.h).
+// EFAULT = 14, EINVAL = 22, ENODEV = 19, EBUSY = 16.
+// We return -errno as signed 64-bit, so e.g. -EFAULT = 0xFFFFFFFFFFFFFFF2.
+
+// IMPORTANT: this function runs in KERNEL context. It MUST NOT call
+// alloc()/dealloc() — those are KernRift userland-heap builtins that
+// emit an mmap/munmap syscall, which panics the kernel from ring 0.
+// All scratch memory is stack-local (uint8[N] arrays) or .data statics.
 @lkm_ioctl_handler
 fn driver_ioctl(uint64 file, uint64 cmd, uint64 arg) -> int64 {
-    _printk("mlrift_pci: ioctl called\n")
-    return 0
+    if cmd == IOCTL_MLRIFT_OPEN_PCI {
+        // 16-byte stack buffer for the BDF + NUL (no heap).
+        uint8[16] buf_arr
+        uint64 buf = buf_arr
+        uint64 zi = 0
+        while zi < 16 { unsafe { *((buf + zi) as uint8) = 0 }; zi = zi + 1 }
+        uint64 not_copied = _copy_from_user(buf, arg, 13)
+        if not_copied != 0 { return 0xFFFFFFFFFFFFFFF2 }  // -EFAULT
+        uint64 packed = _parse_bdf(buf)
+        if packed == 0xFFFFFFFFFFFFFFFF { return 0xFFFFFFFFFFFFFFEA }  // -EINVAL
+        uint64 dom = (packed >> 16) & 0xFFFF
+        uint64 bus = (packed >> 8) & 0xFF
+        uint64 devfn = packed & 0xFF
+        uint32 dom32 = dom
+        uint32 bus32 = bus
+        uint32 devfn32 = devfn
+        uint64 pdev = pci_get_domain_bus_and_slot(dom32, bus32, devfn32)
+        if pdev == 0 { return 0xFFFFFFFFFFFFFFED }   // -ENODEV = -19
+        uint64 slot = _alloc_slot(pdev)
+        if slot == 0xFFFFFFFF { pci_dev_put(pdev); return 0xFFFFFFFFFFFFFFF0 }  // -EBUSY = -16
+        _printk("mlrift_pci: opened PCI device, slot allocated\n")
+        return slot
+    }
+    _printk("mlrift_pci: unknown ioctl cmd\n")
+    return 0xFFFFFFFFFFFFFFE7   // -ENOTTY = -25
 }
