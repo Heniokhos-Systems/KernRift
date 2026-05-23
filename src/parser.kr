@@ -1661,6 +1661,8 @@ fn parse_module() -> uint64 {
         uint64 ann_module_exit = 0
         uint64 ann_lkm_ioctl_handler = 0
         uint64 ann_lkm_mmap_handler = 0
+        uint64 ann_pci_probe = 0
+        uint64 ann_pci_remove = 0
         uint64 ann_section_start = 0
         uint64 ann_section_len = 0
         while kind == 21 {
@@ -1695,6 +1697,16 @@ fn parse_module() -> uint64 {
             // auto-emitted struct file_operations.
             if ann_len_v == 17 {
                 if tok_matches(ann_tok, "lkm_ioctl_handler", 17) != 0 { ann_lkm_ioctl_handler = 1 }
+                // @pci_probe_handler — per-function flag (Phase C.1, 17 chars).
+                // Tags the function as the .probe handler in the auto-emitted
+                // struct pci_driver.
+                if tok_matches(ann_tok, "pci_probe_handler", 17) != 0 { ann_pci_probe = 1 }
+            }
+            // @pci_remove_handler — per-function flag (Phase C.1, 18 chars).
+            // Tags the function as the .remove handler in the auto-emitted
+            // struct pci_driver.
+            if ann_len_v == 18 {
+                if tok_matches(ann_tok, "pci_remove_handler", 18) != 0 { ann_pci_remove = 1 }
             }
             // @lkm_mmap_handler — per-function flag (Phase B.2.a, 16 chars).
             // Tags the function as the .mmap handler in the auto-emitted
@@ -1732,10 +1744,20 @@ fn parse_module() -> uint64 {
                     is_module_register_misc_device = 1
                 }
             }
+            // @module_register_pci_driver("name") — module-wide string
+            // (Phase C.1, 26 chars). Will trigger emit_elf_lkm (later task)
+            // to auto-generate a struct pci_driver registered via
+            // __pci_register_driver / pci_unregister_driver.
+            uint64 is_module_register_pci_driver = 0
+            if ann_len_v == 26 {
+                if tok_matches(ann_tok, "module_register_pci_driver", 26) != 0 {
+                    is_module_register_pci_driver = 1
+                }
+            }
             // Annotation arguments: for @section + module string-form
             // annotations, capture the string literal (minus quotes).
             // For everything else, skip.
-            uint64 wants_string = is_section | is_module_license | is_module_author | is_module_description | is_module_name | is_module_register_misc_device
+            uint64 wants_string = is_section | is_module_license | is_module_author | is_module_description | is_module_name | is_module_register_misc_device | is_module_register_pci_driver
             if eat(10) != 0 {
                 if wants_string != 0 && cur_kind() == 3 {
                     uint64 str_tok = advance_tok()
@@ -1766,6 +1788,9 @@ fn parse_module() -> uint64 {
                     }
                     if is_module_register_misc_device != 0 {
                         module_info_set_misc_device(captured_start, captured_len)
+                    }
+                    if is_module_register_pci_driver != 0 {
+                        module_info_set_pci_driver(captured_start, captured_len)
                     }
                 }
                 while cur_kind() != 11 && cur_kind() != 0 {
@@ -1807,6 +1832,12 @@ fn parse_module() -> uint64 {
             }
             if ann_lkm_mmap_handler != 0 {
                 module_info_set_mmap_handler_fn(wfn_name)
+            }
+            if ann_pci_probe != 0 {
+                module_info_set_pci_probe_fn(wfn_name)
+            }
+            if ann_pci_remove != 0 {
+                module_info_set_pci_remove_fn(wfn_name)
             }
             // If the user wrote `@section("name")`, stash the (start, len)
             // pair in the side-table keyed by the function's name token.

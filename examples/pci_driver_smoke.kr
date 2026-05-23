@@ -1,0 +1,26 @@
+@module_license("GPL")
+@module_name("pci_drv_smoke")
+@module_register_misc_device("pci_drv_smoke")
+@module_register_pci_driver("pci_drv_smoke")
+
+extern fn _printk(uint64 fmt) -> int32
+extern fn misc_register(uint64 dev) -> int32
+extern fn misc_deregister(uint64 dev) -> int32
+extern fn __pci_register_driver(uint64 drv, uint64 owner, uint64 name) -> int32
+extern fn pci_unregister_driver(uint64 drv)
+
+@pci_probe_handler
+fn driver_probe(uint64 pdev, uint64 id) -> int64 {
+    _printk("pci_drv_smoke: probe\n")
+    return 0
+}
+
+@pci_remove_handler
+fn driver_remove(uint64 pdev) {
+    _printk("pci_drv_smoke: remove\n")
+}
+
+@lkm_ioctl_handler
+fn driver_ioctl(uint64 file, uint64 cmd, uint64 arg) -> int64 {
+    return 0xFFFFFFFFFFFFFFE7
+}

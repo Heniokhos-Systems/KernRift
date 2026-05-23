@@ -1983,6 +1983,30 @@ static uint64 module_info_mmap_handler_fn_tok_v = 0
 fn module_info_set_mmap_handler_fn(uint64 tok) { module_info_mmap_handler_fn_tok_v = tok }
 @export fn module_info_mmap_handler_fn_tok() -> uint64 { return module_info_mmap_handler_fn_tok_v }
 
+// Phase C.1: PCI-driver registration annotations. When
+// @module_register_pci_driver("name") is present, emit_elf_lkm will
+// (in a later task) auto-generate a struct pci_driver registered via
+// __pci_register_driver / pci_unregister_driver. The functions tagged
+// with @pci_probe_handler / @pci_remove_handler are referenced from the
+// auto-emitted struct pci_driver's .probe / .remove fields.
+static uint64 module_info_pci_driver_start_v = 0
+static uint64 module_info_pci_driver_len_v   = 0
+static uint64 module_info_pci_probe_fn_v      = 0
+static uint64 module_info_pci_remove_fn_v     = 0
+@export
+fn module_info_set_pci_driver(uint64 start, uint64 len) {
+    module_info_pci_driver_start_v = start
+    module_info_pci_driver_len_v = len
+}
+@export
+fn module_info_set_pci_probe_fn(uint64 tok)  { module_info_pci_probe_fn_v = tok }
+@export
+fn module_info_set_pci_remove_fn(uint64 tok) { module_info_pci_remove_fn_v = tok }
+@export fn module_info_pci_driver_start() -> uint64 { return module_info_pci_driver_start_v }
+@export fn module_info_pci_driver_len()   -> uint64 { return module_info_pci_driver_len_v }
+@export fn module_info_pci_probe_fn()  -> uint64 { return module_info_pci_probe_fn_v }
+@export fn module_info_pci_remove_fn() -> uint64 { return module_info_pci_remove_fn_v }
+
 fn fn_lookup(uint64 name_tok) -> uint64 {
     uint64 i = 0
     while i < fn_count {
