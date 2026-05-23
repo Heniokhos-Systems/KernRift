@@ -11669,6 +11669,15 @@ fn emit_elf_lkm(uint64 text_len, uint64 data_len, uint64 arch) {
             write(2, "krc: @pci_remove_handler function not found in fn_table\n", 56)
             exit(1)
         }
+        // The PCI cleanup_module relocations sit at fixed offsets
+        // (misc_exit_text_off+19/+24) that assume cleanup has NO prepended
+        // @module_exit hook. Enforce that invariant rather than leave it a
+        // comment — combining the two would shift those offsets by 5 and
+        // silently corrupt the .ko.
+        if has_exit_hook != 0 {
+            write(2, "krc: @module_register_pci_driver conflicts with @module_exit (cleanup reloc offsets assume no hook)\n", 100)
+            exit(1)
+        }
     }
 
     // Misc-device mode: locate misc_register / misc_deregister in
