@@ -54,6 +54,23 @@ extern fn iommu_map_sg(uint64 domain, uint64 iova, uint64 sg, uint32 nents, uint
 extern fn iommu_unmap(uint64 domain, uint64 iova, uint64 size) -> uint64
 extern fn iommu_iova_to_phys(uint64 domain, uint64 iova) -> uint64
 
+// Phase B.4: MSI-X interrupts. Generic PCI machinery (vendor-neutral —
+// works for AMD and NVIDIA alike). The device must be enabled +
+// bus-mastering so it can issue the MSI memory writes. Userland gets
+// notified through an eventfd the IRQ handler signals.
+extern fn pci_enable_device(uint64 pdev) -> uint64
+extern fn pci_disable_device(uint64 pdev)
+extern fn pci_set_master(uint64 pdev)
+extern fn pci_clear_master(uint64 pdev)
+extern fn pci_alloc_irq_vectors(uint64 pdev, uint32 min_vecs, uint32 max_vecs, uint32 flags) -> uint64
+extern fn pci_free_irq_vectors(uint64 pdev)
+extern fn pci_irq_vector(uint64 pdev, uint32 nr) -> uint64
+extern fn request_threaded_irq(uint64 irq, uint64 handler, uint64 thread_fn, uint64 flags, uint64 name, uint64 dev_id) -> uint64
+extern fn free_irq(uint64 irq, uint64 dev_id) -> uint64
+extern fn eventfd_ctx_fdget(uint32 fd) -> uint64
+extern fn eventfd_signal_mask(uint64 ctx, uint64 mask)
+extern fn eventfd_ctx_put(uint64 ctx)
+
 // struct pci_dev field offset (kernel 6.17 x86_64): resource[0].start
 // (the resource[17] array base). struct resource is 0x40 bytes, so
 // resource[N].start = 0x3e0 + N*PCI_RES_STRIDE (see below).
@@ -196,6 +213,35 @@ static uint64 IOCTL_MLRIFT_IOMMU_UNMAP = 0x40104D05
 // = (3<<30)|(16<<16)|('M'<<8)|6 = 0xC0104D06.
 static uint64 IOCTL_MLRIFT_BAR_INFO = 0xC0104D06
 
+// MSI-X interrupt ioctls (Phase B.4):
+//   MLRIFT_IRQ_ENABLE      = _IOW('M',7,char[4])  arg: u32 num_vectors
+//     -> enables the device + allocates MSI-X vectors; returns the count.
+//   MLRIFT_IRQ_SET_EVENTFD = _IOW('M',8,char[8])  arg: {u32 vector, u32 efd}
+//     -> requests the IRQ; the handler signals the given eventfd.
+//   MLRIFT_IRQ_DISABLE     = _IO('M',9)
+//     -> frees all IRQs + vectors, disables the device.
+//   MLRIFT_IRQ_FIRE_TEST   = _IOW('M',10,char[4]) arg: u32 vector
+//     -> software-signals the vector's eventfd (validates the userland
+//        notify path without the GPU actually firing — same call the
+//        hard-IRQ handler makes).
+static uint64 IOCTL_MLRIFT_IRQ_ENABLE      = 0x40044D07
+static uint64 IOCTL_MLRIFT_IRQ_SET_EVENTFD = 0x40084D08
+static uint64 IOCTL_MLRIFT_IRQ_DISABLE     = 0x00004D09
+static uint64 IOCTL_MLRIFT_IRQ_FIRE_TEST   = 0x40044D0A
+
+static uint64 PCI_IRQ_MSIX_FLAG = 0x4    // PCI_IRQ_MSIX = (1<<2)
+static uint64 IRQ_HANDLED_RET   = 0x1    // irqreturn IRQ_HANDLED
+static uint64 IRQ_MAX_VEC       = 16     // per-device vector cap (this driver)
+static uint64 IRQ_ENTRY_SIZE    = 16     // { u64 irq; u64 eventfd_ctx }
+static uint64 IRQ_TABLE_BYTES   = 256    // IRQ_MAX_VEC * IRQ_ENTRY_SIZE
+static uint64 IRQ_E_IRQ         = 0
+static uint64 IRQ_E_CTX         = 8
+
+// Phase B.4 IRQ state.
+static uint64 _irq_enabled = 0           // 1 once vectors are allocated
+static uint64 _irq_nvec    = 0           // MSI-X vectors allocated
+static uint64 _irq_table   = 0           // kmalloc'd IRQ_MAX_VEC*IRQ_ENTRY_SIZE
+
 // kernel constants
 static uint64 GFP_KERNEL_FLAGS = 0xcc0
 static uint64 FOLL_WRITE_FLAG  = 0x1
@@ -257,7 +303,7 @@ fn driver_ioctl(uint64 file, uint64 cmd, uint64 arg) -> int64 {
         // Closing slot 0 also tears down the IOMMU domain (we only ever
         // attach slot 0's device), leaving it clean to rebind. Must run
         // while the pci_dev (hence _iommu_dev) is still valid.
-        if idx == 0 { if _mlrift_pci_slot0 != 0 { _iommu_teardown(); pci_dev_put(_mlrift_pci_slot0); _mlrift_pci_slot0 = 0; return 0 } }
+        if idx == 0 { if _mlrift_pci_slot0 != 0 { _irq_teardown(); _iommu_teardown(); pci_dev_put(_mlrift_pci_slot0); _mlrift_pci_slot0 = 0; return 0 } }
         if idx == 1 { if _mlrift_pci_slot1 != 0 { pci_dev_put(_mlrift_pci_slot1); _mlrift_pci_slot1 = 0; return 0 } }
         if idx == 2 { if _mlrift_pci_slot2 != 0 { pci_dev_put(_mlrift_pci_slot2); _mlrift_pci_slot2 = 0; return 0 } }
         if idx == 3 { if _mlrift_pci_slot3 != 0 { pci_dev_put(_mlrift_pci_slot3); _mlrift_pci_slot3 = 0; return 0 } }
@@ -274,6 +320,19 @@ fn driver_ioctl(uint64 file, uint64 cmd, uint64 arg) -> int64 {
     }
     if cmd == IOCTL_MLRIFT_BAR_INFO {
         return _bar_info(arg)
+    }
+    if cmd == IOCTL_MLRIFT_IRQ_ENABLE {
+        return _irq_enable(arg)
+    }
+    if cmd == IOCTL_MLRIFT_IRQ_SET_EVENTFD {
+        return _irq_set_eventfd(arg)
+    }
+    if cmd == IOCTL_MLRIFT_IRQ_DISABLE {
+        _irq_teardown()
+        return 0
+    }
+    if cmd == IOCTL_MLRIFT_IRQ_FIRE_TEST {
+        return _irq_fire_test(arg)
     }
     _printk("mlrift_pci: unknown ioctl cmd\n")
     return 0xFFFFFFFFFFFFFFE7   // -ENOTTY = -25
@@ -373,6 +432,168 @@ fn _bar_info(uint64 arg) -> int64 {
     unsafe { *((req + 8) as uint64) = start }
     uint64 nc2 = _copy_to_user(arg, req, 16)
     if nc2 != 0 { return 0xFFFFFFFFFFFFFFF2 }              // -EFAULT
+    return 0
+}
+
+// Phase B.4 — MSI-X hard-IRQ handler. The kernel calls this (via the
+// fn_addr pointer passed to request_threaded_irq) in interrupt context
+// when the device fires the vector. dev_id is the eventfd ctx we
+// registered for this vector; signal it (IRQ-safe) and report HANDLED.
+// MUST NOT sleep / alloc.
+fn mlrift_irq_handler(uint64 irq, uint64 dev_id) -> uint64 {
+    if dev_id != 0 { eventfd_signal_mask(dev_id, 0) }
+    return IRQ_HANDLED_RET
+}
+
+// Free all registered IRQs + eventfd ctxs, release the vectors, and
+// disable the device. Uses _mlrift_pci_slot0 for the pci_dev (valid at
+// CLOSE/rmmod, called before pci_dev_put). Idempotent.
+fn _irq_teardown() {
+    if _irq_table != 0 {
+        uint64 i = 0
+        while i < IRQ_MAX_VEC {
+            uint64 e = _irq_table + i * IRQ_ENTRY_SIZE
+            uint64 ctx = 0; unsafe { *((e + IRQ_E_CTX) as uint64) -> ctx }
+            if ctx != 0 {
+                uint64 irq = 0; unsafe { *((e + IRQ_E_IRQ) as uint64) -> irq }
+                free_irq(irq, ctx)
+                eventfd_ctx_put(ctx)
+                unsafe { *((e + IRQ_E_CTX) as uint64) = 0 }
+            }
+            i = i + 1
+        }
+        dealloc(_irq_table)
+        _irq_table = 0
+    }
+    if _irq_enabled != 0 {
+        uint64 pdev = _mlrift_pci_slot0
+        if pdev != 0 {
+            pci_free_irq_vectors(pdev)
+            pci_clear_master(pdev)
+            pci_disable_device(pdev)
+        }
+        _irq_enabled = 0
+        _irq_nvec = 0
+    }
+}
+
+// MLRIFT_IRQ_ENABLE — enable the device + bus mastering, allocate up to
+// `num_vectors` MSI-X vectors. arg -> u32 num_vectors. Returns the count
+// actually allocated, or a negative errno.
+fn _irq_enable(uint64 arg) -> int64 {
+    uint64 pdev = _mlrift_pci_slot0
+    if pdev == 0 { return 0xFFFFFFFFFFFFFFEA }            // -EINVAL: open first
+    if _irq_enabled != 0 { return 0xFFFFFFFFFFFFFFF0 }    // -EBUSY
+
+    uint8[4] req_arr
+    uint64 req = req_arr
+    unsafe { *((req + 0) as uint32) = 0 }
+    uint64 not_copied = _copy_from_user(req, arg, 4)
+    if not_copied != 0 { return 0xFFFFFFFFFFFFFFF2 }
+    uint32 nreq32 = 0; unsafe { *((req + 0) as uint32) -> nreq32 }
+    uint64 nreq = nreq32
+    if nreq == 0 { return 0xFFFFFFFFFFFFFFEA }
+    if nreq > IRQ_MAX_VEC { nreq = IRQ_MAX_VEC }
+
+    uint64 ed = pci_enable_device(pdev)
+    ed = ed & 0xFFFFFFFF
+    if ed != 0 {
+        _printk("mlrift_pci: pci_enable_device failed\n")
+        return 0xFFFFFFFFFFFFFFFB                          // -EIO
+    }
+    pci_set_master(pdev)
+
+    uint32 nreq_w = nreq
+    uint64 n = pci_alloc_irq_vectors(pdev, 1, nreq_w, PCI_IRQ_MSIX_FLAG)
+    n = n & 0xFFFFFFFF
+    if (n & 0x80000000) != 0 {        // negative errno
+        pci_clear_master(pdev)
+        pci_disable_device(pdev)
+        _printk("mlrift_pci: pci_alloc_irq_vectors (MSI-X) failed\n")
+        return 0xFFFFFFFFFFFFFFFB
+    }
+    if n == 0 {
+        pci_clear_master(pdev)
+        pci_disable_device(pdev)
+        return 0xFFFFFFFFFFFFFFFB
+    }
+
+    uint64 t = alloc(IRQ_TABLE_BYTES)
+    if t == 0 {
+        pci_free_irq_vectors(pdev)
+        pci_clear_master(pdev)
+        pci_disable_device(pdev)
+        return 0xFFFFFFFFFFFFFFF4                          // -ENOMEM
+    }
+    uint64 ti = 0
+    while ti < IRQ_TABLE_BYTES { unsafe { *((t + ti) as uint8) = 0 }; ti = ti + 1 }
+    _irq_table = t
+    _irq_nvec = n
+    _irq_enabled = 1
+    _printk("mlrift_pci: MSI-X vectors allocated\n")
+    return n
+}
+
+// MLRIFT_IRQ_SET_EVENTFD — register the hard-IRQ handler for `vector`,
+// signalling the given eventfd. arg -> { u32 vector; u32 eventfd_fd }.
+fn _irq_set_eventfd(uint64 arg) -> int64 {
+    uint64 pdev = _mlrift_pci_slot0
+    if pdev == 0 { return 0xFFFFFFFFFFFFFFEA }
+    if _irq_enabled == 0 { return 0xFFFFFFFFFFFFFFEA }
+    if _irq_table == 0 { return 0xFFFFFFFFFFFFFFEA }
+
+    uint8[8] req_arr
+    uint64 req = req_arr
+    unsafe { *((req + 0) as uint64) = 0 }
+    uint64 not_copied = _copy_from_user(req, arg, 8)
+    if not_copied != 0 { return 0xFFFFFFFFFFFFFFF2 }
+    uint32 vec32 = 0; unsafe { *((req + 0) as uint32) -> vec32 }
+    uint32 efd32 = 0; unsafe { *((req + 4) as uint32) -> efd32 }
+    uint64 vector = vec32
+    if vector >= _irq_nvec { return 0xFFFFFFFFFFFFFFEA }
+
+    uint64 e = _irq_table + vector * IRQ_ENTRY_SIZE
+    uint64 existing = 0; unsafe { *((e + IRQ_E_CTX) as uint64) -> existing }
+    if existing != 0 { return 0xFFFFFFFFFFFFFFF0 }         // -EBUSY: already set
+
+    uint64 ctx = eventfd_ctx_fdget(efd32)
+    if ctx == 0 { return 0xFFFFFFFFFFFFFFF7 }              // -EBADF = -9
+    if ctx > ERR_PTR_FLOOR { return 0xFFFFFFFFFFFFFFF7 }   // ERR_PTR
+
+    uint64 irq = pci_irq_vector(pdev, vec32)
+    irq = irq & 0xFFFFFFFF
+    uint64 hptr = fn_addr("mlrift_irq_handler")
+    uint64 name = "mlrift_pci"
+    uint64 rc = request_threaded_irq(irq, hptr, 0, 0, name, ctx)
+    rc = rc & 0xFFFFFFFF
+    if rc != 0 {
+        eventfd_ctx_put(ctx)
+        _printk("mlrift_pci: request_threaded_irq failed\n")
+        return 0xFFFFFFFFFFFFFFFB                          // -EIO
+    }
+    unsafe { *((e + IRQ_E_IRQ) as uint64) = irq }
+    unsafe { *((e + IRQ_E_CTX) as uint64) = ctx }
+    _printk("mlrift_pci: IRQ handler + eventfd registered\n")
+    return 0
+}
+
+// MLRIFT_IRQ_FIRE_TEST — software-signal a vector's eventfd, exactly as
+// the hard-IRQ handler would. Lets userland validate the notify path
+// without the GPU firing. arg -> u32 vector.
+fn _irq_fire_test(uint64 arg) -> int64 {
+    if _irq_table == 0 { return 0xFFFFFFFFFFFFFFEA }
+    uint8[4] req_arr
+    uint64 req = req_arr
+    unsafe { *((req + 0) as uint32) = 0 }
+    uint64 not_copied = _copy_from_user(req, arg, 4)
+    if not_copied != 0 { return 0xFFFFFFFFFFFFFFF2 }
+    uint32 vec32 = 0; unsafe { *((req + 0) as uint32) -> vec32 }
+    uint64 vector = vec32
+    if vector >= _irq_nvec { return 0xFFFFFFFFFFFFFFEA }
+    uint64 e = _irq_table + vector * IRQ_ENTRY_SIZE
+    uint64 ctx = 0; unsafe { *((e + IRQ_E_CTX) as uint64) -> ctx }
+    if ctx == 0 { return 0xFFFFFFFFFFFFFFEA }              // no eventfd registered
+    eventfd_signal_mask(ctx, 0)
     return 0
 }
 
@@ -585,8 +806,10 @@ fn _iommu_teardown() {
 
 @module_exit
 fn driver_exit() -> int64 {
-    // Detach + free the IOMMU domain BEFORE releasing the pci_dev refs
-    // (the device must be detached before it could be rebound).
+    // Free IRQs/vectors + detach/free the IOMMU domain BEFORE releasing
+    // the pci_dev refs (both need the device pointer, and it must be
+    // detached/disabled before it could be rebound).
+    _irq_teardown()
     _iommu_teardown()
     if _mlrift_pci_slot0 != 0 { pci_dev_put(_mlrift_pci_slot0); _mlrift_pci_slot0 = 0 }
     if _mlrift_pci_slot1 != 0 { pci_dev_put(_mlrift_pci_slot1); _mlrift_pci_slot1 = 0 }
