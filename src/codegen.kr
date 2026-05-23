@@ -11704,22 +11704,68 @@ fn emit_elf_lkm(uint64 text_len, uint64 data_len, uint64 arch) {
         }
     }
 
+    // PCI-driver mode: locate __pci_register_driver / pci_unregister_driver
+    // in extern_fn_table by name (mirrors the misc_register lookup above).
+    // The init/cleanup auto-bodies emit PLT32 call relocations against these.
+    uint64 pci_register_extern_idx = 0
+    uint64 pci_unregister_extern_idx = 0
+    if pci_drv_mode != 0 {
+        uint64 found_preg = 0
+        uint64 found_punreg = 0
+        uint64 pei = 0
+        while pei < extern_fn_count {
+            uint64 pxe = extern_fn_table + pei * 8
+            uint32 pxtok = 0
+            unsafe { *(pxe as uint32) -> pxtok }
+            uint64 wpxt = pxtok
+            if tok_matches(wpxt, "__pci_register_driver", 21) != 0 {
+                pci_register_extern_idx = pei
+                found_preg = 1
+            }
+            if tok_matches(wpxt, "pci_unregister_driver", 21) != 0 {
+                pci_unregister_extern_idx = pei
+                found_punreg = 1
+            }
+            pei = pei + 1
+        }
+        if found_preg == 0 {
+            write(2, "krc: pci-driver mode requires `extern fn __pci_register_driver(uint64 drv, uint64 owner, uint64 name) -> int32`\n", 111)
+            exit(1)
+        }
+        if found_punreg == 0 {
+            write(2, "krc: pci-driver mode requires `extern fn pci_unregister_driver(uint64 drv)`\n", 76)
+            exit(1)
+        }
+    }
+
     // Compute size extensions from misc-device mode.
     // - text: two auto-generated functions, 21 bytes each = 42 bytes
     // - data: struct miscdevice (80) + struct file_operations (272) +
     //         device name string (name_len + 1 for NUL)
     uint64 misc_text_extra = 0
     uint64 misc_data_extra = 0
+    // PCI-driver mode prepends 3 leas + 1 call (26 bytes) to init_module
+    // and appends 1 lea + 1 call (12 bytes) to cleanup_module. These shift
+    // cleanup's start (misc_exit_text_off) by pci_init_extra.
+    uint64 pci_init_extra = 0
+    uint64 pci_cleanup_extra = 0
+    if pci_drv_mode != 0 {
+        pci_init_extra = 26
+        pci_cleanup_extra = 12
+    }
+    uint64 hook_extra = 0
+    if has_exit_hook != 0 { hook_extra = 5 }
     uint64 misc_init_text_off = text_len   // where auto-init lands in .text
-    uint64 misc_exit_text_off = text_len + 21
+    // cleanup_module follows init_module; init is (21 + pci_init_extra) bytes.
+    uint64 misc_exit_text_off = text_len + 21 + pci_init_extra
     uint64 misc_miscdev_data_off = data_len    // where miscdev lands in .data
     uint64 misc_fops_data_off = data_len + 80  // file_operations follows
     uint64 misc_name_data_off = data_len + 80 + 272
     if misc_dev_mode != 0 {
-        misc_text_extra = 42
-        // A teardown hook prepends a 5-byte `call` to cleanup_module
-        // (21 → 26 bytes), so the .text extra grows from 42 to 47.
-        if has_exit_hook != 0 { misc_text_extra = 47 }
+        // init = 21 + pci_init_extra, cleanup = 21 + hook_extra + pci_cleanup_extra.
+        // A teardown hook prepends a 5-byte `call` to cleanup_module (+5).
+        // PCI-driver mode adds 26 to init and 12 to cleanup.
+        misc_text_extra = (21 + pci_init_extra) + (21 + hook_extra + pci_cleanup_extra)
         misc_data_extra = 80 + 272 + misc_dev_name_len + 1
         // After adding our extras, init_code_off/exit_code_off point at
         // our auto-generated bodies — used later when emitting symbols.
@@ -12303,6 +12349,10 @@ fn emit_elf_lkm(uint64 text_len, uint64 data_len, uint64 arch) {
     rela_text_off = rela_text_off + rela_text_align_pad
     uint64 rela_text_count = extern_call_count
     if misc_dev_mode != 0 { rela_text_count = rela_text_count + 4 }
+    // PCI-driver mode adds 6 .rela.text entries: init's 3 leas (pci_drv,
+    // __this_module, pci_name) + __pci_register_driver call, and cleanup's
+    // pci_drv lea + pci_unregister_driver call.
+    if pci_drv_mode != 0 { rela_text_count = rela_text_count + 6 }
     // Static-variable references (.text → .data) need R_X86_64_PC32
     // relocations against the .data section symbol — without them the
     // baked flat-layout displacements point into .text (read-only) and
@@ -12382,13 +12432,28 @@ fn emit_elf_lkm(uint64 text_len, uint64 data_len, uint64 arch) {
         //   call misc_register                ; e8 00 00 00 00 — reloc
         //   add rsp, 8                        ; 48 83 c4 08
         //   ret                               ; c3
-        emit_byte(0x48); emit_byte(0x83); emit_byte(0xec); emit_byte(0x08)
-        emit_byte(0x48); emit_byte(0x8d); emit_byte(0x3d)
+        emit_byte(0x48); emit_byte(0x83); emit_byte(0xec); emit_byte(0x08)  // sub rsp, 8
+        if pci_drv_mode != 0 {
+            // PCI-driver mode: register the pci_driver before misc_register.
+            //   lea rdi, [rip+pci_drv]        ; 48 8d 3d <disp32> — reloc @ +7
+            //   lea rsi, [rip+__this_module]  ; 48 8d 35 <disp32> — reloc @ +14
+            //   lea rdx, [rip+pci_name]       ; 48 8d 15 <disp32> — reloc @ +21
+            //   call __pci_register_driver    ; e8 <disp32> — reloc @ +26
+            emit_byte(0x48); emit_byte(0x8d); emit_byte(0x3d)               // lea rdi, [rip+pci_drv]
+            emit_byte(0x00); emit_byte(0x00); emit_byte(0x00); emit_byte(0x00)
+            emit_byte(0x48); emit_byte(0x8d); emit_byte(0x35)               // lea rsi, [rip+__this_module]
+            emit_byte(0x00); emit_byte(0x00); emit_byte(0x00); emit_byte(0x00)
+            emit_byte(0x48); emit_byte(0x8d); emit_byte(0x15)               // lea rdx, [rip+pci_name]
+            emit_byte(0x00); emit_byte(0x00); emit_byte(0x00); emit_byte(0x00)
+            emit_byte(0xe8)                                                  // call __pci_register_driver
+            emit_byte(0x00); emit_byte(0x00); emit_byte(0x00); emit_byte(0x00)
+        }
+        emit_byte(0x48); emit_byte(0x8d); emit_byte(0x3d)                   // lea rdi, [rip+miscdev]
         emit_byte(0x00); emit_byte(0x00); emit_byte(0x00); emit_byte(0x00)
-        emit_byte(0xe8)
+        emit_byte(0xe8)                                                      // call misc_register
         emit_byte(0x00); emit_byte(0x00); emit_byte(0x00); emit_byte(0x00)
-        emit_byte(0x48); emit_byte(0x83); emit_byte(0xc4); emit_byte(0x08)
-        emit_byte(0xc3)
+        emit_byte(0x48); emit_byte(0x83); emit_byte(0xc4); emit_byte(0x08)  // add rsp, 8
+        emit_byte(0xc3)                                                      // ret
 
         // Auto-generated cleanup_module: same shape, calls
         // misc_deregister. If a @module_exit teardown hook is present, a
@@ -12406,6 +12471,15 @@ fn emit_elf_lkm(uint64 text_len, uint64 data_len, uint64 arch) {
         emit_byte(0x00); emit_byte(0x00); emit_byte(0x00); emit_byte(0x00)
         emit_byte(0xe8)                                                      // call misc_deregister
         emit_byte(0x00); emit_byte(0x00); emit_byte(0x00); emit_byte(0x00)
+        if pci_drv_mode != 0 {
+            // PCI-driver mode: unregister the pci_driver after misc_deregister.
+            //   lea rdi, [rip+pci_drv]        ; 48 8d 3d <disp32>
+            //   call pci_unregister_driver    ; e8 <disp32>
+            emit_byte(0x48); emit_byte(0x8d); emit_byte(0x3d)               // lea rdi, [rip+pci_drv]
+            emit_byte(0x00); emit_byte(0x00); emit_byte(0x00); emit_byte(0x00)
+            emit_byte(0xe8)                                                  // call pci_unregister_driver
+            emit_byte(0x00); emit_byte(0x00); emit_byte(0x00); emit_byte(0x00)
+        }
         emit_byte(0x48); emit_byte(0x83); emit_byte(0xc4); emit_byte(0x08)  // add rsp, 8
         emit_byte(0xc3)                                                      // ret
     }
@@ -12862,17 +12936,28 @@ fn emit_elf_lkm(uint64 text_len, uint64 data_len, uint64 arch) {
     if misc_dev_mode != 0 {
         uint64 mr_sym_idx = extern_sym_base + misc_register_extern_idx
         uint64 md_sym_idx = extern_sym_base + misc_deregister_extern_idx
-        // init_module + 7 → _lkm_miscdev (PC32)
-        emit_u64_le(misc_init_text_off + 7)
+        // In PCI-driver mode the init body prepends 26 bytes (3 leas + a
+        // call) before the misc_register lea/call, shifting those two from
+        // +7/+12 to +33/+38. Compute the misc displacement-field offsets
+        // accordingly. (PCI mode never co-occurs with @module_exit hooks.)
+        uint64 mi_lea_off = misc_init_text_off + 7
+        uint64 mi_call_off = misc_init_text_off + 12
+        if pci_drv_mode != 0 {
+            mi_lea_off = misc_init_text_off + 33
+            mi_call_off = misc_init_text_off + 38
+        }
+        // init_module: lea rdi → _lkm_miscdev (PC32)
+        emit_u64_le(mi_lea_off)
         emit_u64_le((lkm_miscdev_sym_idx << 32) | 2)  // R_X86_64_PC32 = 2
         emit_u64_le(0xFFFFFFFFFFFFFFFC)
-        // init_module + 12 → misc_register (PLT32)
-        emit_u64_le(misc_init_text_off + 12)
+        // init_module: call misc_register (PLT32)
+        emit_u64_le(mi_call_off)
         emit_u64_le((mr_sym_idx << 32) | 4)           // R_X86_64_PLT32 = 4
         emit_u64_le(0xFFFFFFFFFFFFFFFC)
         // cleanup_module lea → _lkm_miscdev (PC32) and call →
         // misc_deregister (PLT32). A teardown hook prepends a 5-byte
-        // call, shifting both displacement fields by 5.
+        // call, shifting both displacement fields by 5. (misc_exit_text_off
+        // is already shifted by the init body's pci_init_extra.)
         uint64 cu_lea_off = misc_exit_text_off + 7
         uint64 cu_call_off = misc_exit_text_off + 12
         if has_exit_hook != 0 {
@@ -12884,6 +12969,47 @@ fn emit_elf_lkm(uint64 text_len, uint64 data_len, uint64 arch) {
         emit_u64_le(0xFFFFFFFFFFFFFFFC)
         emit_u64_le(cu_call_off)
         emit_u64_le((md_sym_idx << 32) | 4)
+        emit_u64_le(0xFFFFFFFFFFFFFFFC)
+    }
+    // PCI-driver mode: 6 extra .rela.text entries.
+    //   init body (after sub rsp,8):
+    //     +7  lea rdi → _lkm_pci_drv      (PC32)
+    //     +14 lea rsi → __this_module     (PC32)
+    //     +21 lea rdx → _lkm_pci_name     (PC32)
+    //     +26 call    → __pci_register_driver (PLT32)
+    //   cleanup body (appended after call misc_deregister, which with
+    //   sub rsp,8(4)+lea(7)+call(5) ends at misc_exit_text_off+16):
+    //     +19 lea rdi → _lkm_pci_drv      (PC32)
+    //     +24 call    → pci_unregister_driver (PLT32)
+    if pci_drv_mode != 0 {
+        uint64 preg_sym_idx = extern_sym_base + pci_register_extern_idx
+        uint64 punreg_sym_idx = extern_sym_base + pci_unregister_extern_idx
+        // __this_module is the global emitted immediately after
+        // cleanup_module, so its symbol index is cleanup_module_sym_idx + 1.
+        uint64 pci_this_module_sym_idx = cleanup_module_sym_idx + 1
+        // init: lea rdi → _lkm_pci_drv
+        emit_u64_le(misc_init_text_off + 7)
+        emit_u64_le((lkm_pci_drv_sym_idx << 32) | 2)
+        emit_u64_le(0xFFFFFFFFFFFFFFFC)
+        // init: lea rsi → __this_module
+        emit_u64_le(misc_init_text_off + 14)
+        emit_u64_le((pci_this_module_sym_idx << 32) | 2)
+        emit_u64_le(0xFFFFFFFFFFFFFFFC)
+        // init: lea rdx → _lkm_pci_name
+        emit_u64_le(misc_init_text_off + 21)
+        emit_u64_le((lkm_pci_name_sym_idx << 32) | 2)
+        emit_u64_le(0xFFFFFFFFFFFFFFFC)
+        // init: call __pci_register_driver
+        emit_u64_le(misc_init_text_off + 26)
+        emit_u64_le((preg_sym_idx << 32) | 4)
+        emit_u64_le(0xFFFFFFFFFFFFFFFC)
+        // cleanup: lea rdi → _lkm_pci_drv
+        emit_u64_le(misc_exit_text_off + 19)
+        emit_u64_le((lkm_pci_drv_sym_idx << 32) | 2)
+        emit_u64_le(0xFFFFFFFFFFFFFFFC)
+        // cleanup: call pci_unregister_driver
+        emit_u64_le(misc_exit_text_off + 24)
+        emit_u64_le((punreg_sym_idx << 32) | 4)
         emit_u64_le(0xFFFFFFFFFFFFFFFC)
     }
     // Static-variable reference relocations (R_X86_64_PC32 → .data
