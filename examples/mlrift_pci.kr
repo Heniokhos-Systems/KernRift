@@ -1,0 +1,31 @@
+// mlrift_pci.kr — Phase B.1 example: misc-device-mode LKM in KernRift.
+//
+// Compile:
+//   krc --emit=lkm --arch=x86_64 --target=linux examples/mlrift_pci.kr -o mlrift_pci.ko
+//
+// Load / observe / unload:
+//   sudo insmod mlrift_pci.ko
+//   ls -la /dev/mlrift_pci          # character device appears (major 10)
+//   sudo rmmod mlrift_pci
+//   ls -la /dev/mlrift_pci          # gone
+//
+// The `@module_register_misc_device("mlrift_pci")` annotation makes
+// emit_elf_lkm auto-generate init_module / cleanup_module bodies that
+// call misc_register / misc_deregister on a statically-emitted struct
+// miscdevice + struct file_operations. The user supplies only an
+// @lkm_ioctl_handler. @module_init / @module_exit are forbidden in
+// this mode (they would conflict with the auto-generation).
+
+@module_license("GPL")
+@module_name("mlrift_pci")
+@module_register_misc_device("mlrift_pci")
+
+extern fn _printk(uint64 fmt) -> int32
+extern fn misc_register(uint64 dev) -> int32
+extern fn misc_deregister(uint64 dev) -> int32
+
+@lkm_ioctl_handler
+fn driver_ioctl(uint64 file, uint64 cmd, uint64 arg) -> int64 {
+    _printk("mlrift_pci: ioctl called\n")
+    return 0
+}

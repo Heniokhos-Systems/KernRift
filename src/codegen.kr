@@ -11438,25 +11438,123 @@ fn emit_elf_lkm(uint64 text_len, uint64 data_len, uint64 arch) {
 
     uint64 init_fn_tok = module_info_init_fn_tok()
     uint64 exit_fn_tok = module_info_exit_fn_tok()
-    if init_fn_tok == 0 {
-        write(2, "krc: --emit=lkm requires a @module_init function\n", 49)
-        exit(1)
+
+    // Phase B.1.b: misc-device mode. When @module_register_misc_device
+    // is set, emit_elf_lkm auto-generates init_module/cleanup_module
+    // function bodies that call misc_register/misc_deregister on a
+    // statically-emitted struct miscdevice. The user supplies only an
+    // @lkm_ioctl_handler — @module_init/@module_exit are forbidden in
+    // this mode (would conflict with our auto-generation).
+    uint64 misc_dev_name_start = module_info_misc_device_start()
+    uint64 misc_dev_name_len = module_info_misc_device_len()
+    uint64 misc_dev_mode = 0
+    if misc_dev_name_len > 0 { misc_dev_mode = 1 }
+    uint64 ioctl_handler_tok = module_info_ioctl_handler_fn_tok()
+
+    if misc_dev_mode != 0 {
+        if ioctl_handler_tok == 0 {
+            write(2, "krc: @module_register_misc_device requires an @lkm_ioctl_handler\n", 66)
+            exit(1)
+        }
+        if init_fn_tok != 0 {
+            write(2, "krc: @module_init conflicts with @module_register_misc_device (init is auto-generated)\n", 88)
+            exit(1)
+        }
+        if exit_fn_tok != 0 {
+            write(2, "krc: @module_exit conflicts with @module_register_misc_device (exit is auto-generated)\n", 88)
+            exit(1)
+        }
     }
-    if exit_fn_tok == 0 {
-        write(2, "krc: --emit=lkm requires a @module_exit function\n", 49)
-        exit(1)
+    if misc_dev_mode == 0 {
+        if init_fn_tok == 0 {
+            write(2, "krc: --emit=lkm requires a @module_init function (or use @module_register_misc_device)\n", 88)
+            exit(1)
+        }
+        if exit_fn_tok == 0 {
+            write(2, "krc: --emit=lkm requires a @module_exit function (or use @module_register_misc_device)\n", 88)
+            exit(1)
+        }
     }
 
-    uint64 init_code_off = fn_lookup(init_fn_tok)
-    uint64 exit_code_off = fn_lookup(exit_fn_tok)
-    if init_code_off == 0xFFFFFFFF {
-        write(2, "krc: @module_init function not found in fn_table\n", 49)
-        exit(1)
+    uint64 init_code_off = 0
+    uint64 exit_code_off = 0
+    if misc_dev_mode == 0 {
+        init_code_off = fn_lookup(init_fn_tok)
+        exit_code_off = fn_lookup(exit_fn_tok)
+        if init_code_off == 0xFFFFFFFF {
+            write(2, "krc: @module_init function not found in fn_table\n", 49)
+            exit(1)
+        }
+        if exit_code_off == 0xFFFFFFFF {
+            write(2, "krc: @module_exit function not found in fn_table\n", 49)
+            exit(1)
+        }
     }
-    if exit_code_off == 0xFFFFFFFF {
-        write(2, "krc: @module_exit function not found in fn_table\n", 49)
-        exit(1)
+
+    // Misc-device mode: locate the ioctl handler in fn_table.
+    uint64 ioctl_handler_code_off = 0
+    if misc_dev_mode != 0 {
+        ioctl_handler_code_off = fn_lookup(ioctl_handler_tok)
+        if ioctl_handler_code_off == 0xFFFFFFFF {
+            write(2, "krc: @lkm_ioctl_handler function not found in fn_table\n", 55)
+            exit(1)
+        }
     }
+
+    // Misc-device mode: locate misc_register / misc_deregister in
+    // extern_fn_table by name. User must declare them as extern fns.
+    uint64 misc_register_extern_idx = 0
+    uint64 misc_deregister_extern_idx = 0
+    if misc_dev_mode != 0 {
+        uint64 found_reg = 0
+        uint64 found_dereg = 0
+        uint64 ei = 0
+        while ei < extern_fn_count {
+            uint64 xe = extern_fn_table + ei * 8
+            uint32 xtok = 0
+            unsafe { *(xe as uint32) -> xtok }
+            uint64 wxt = xtok
+            if tok_matches(wxt, "misc_register", 13) != 0 {
+                misc_register_extern_idx = ei
+                found_reg = 1
+            }
+            if tok_matches(wxt, "misc_deregister", 15) != 0 {
+                misc_deregister_extern_idx = ei
+                found_dereg = 1
+            }
+            ei = ei + 1
+        }
+        if found_reg == 0 {
+            write(2, "krc: misc-device mode requires `extern fn misc_register(uint64 dev) -> int32`\n", 79)
+            exit(1)
+        }
+        if found_dereg == 0 {
+            write(2, "krc: misc-device mode requires `extern fn misc_deregister(uint64 dev) -> int32`\n", 81)
+            exit(1)
+        }
+    }
+
+    // Compute size extensions from misc-device mode.
+    // - text: two auto-generated functions, 21 bytes each = 42 bytes
+    // - data: struct miscdevice (80) + struct file_operations (272) +
+    //         device name string (name_len + 1 for NUL)
+    uint64 misc_text_extra = 0
+    uint64 misc_data_extra = 0
+    uint64 misc_init_text_off = text_len   // where auto-init lands in .text
+    uint64 misc_exit_text_off = text_len + 21
+    uint64 misc_miscdev_data_off = data_len    // where miscdev lands in .data
+    uint64 misc_fops_data_off = data_len + 80  // file_operations follows
+    uint64 misc_name_data_off = data_len + 80 + 272
+    if misc_dev_mode != 0 {
+        misc_text_extra = 42
+        misc_data_extra = 80 + 272 + misc_dev_name_len + 1
+        // After adding our extras, init_code_off/exit_code_off point at
+        // our auto-generated bodies — used later when emitting symbols.
+        init_code_off = misc_init_text_off
+        exit_code_off = misc_exit_text_off
+    }
+    text_len = text_len + misc_text_extra
+    data_len = data_len + misc_data_extra
 
     // Save the generated code+data blob.
     uint64 blob_len = out_len
@@ -11687,6 +11785,10 @@ fn emit_elf_lkm(uint64 text_len, uint64 data_len, uint64 arch) {
     next_off = next_off + 20
     uint64 shstr_version_ext_crcs_off = next_off
     next_off = next_off + 19
+    // .rela.data\0 (11 bytes) — only needed in misc-device mode but
+    // emitting it unconditionally simplifies bookkeeping.
+    uint64 shstr_rela_data_off = next_off
+    next_off = next_off + 11
     uint64 shstrtab_size = next_off
 
     // ---- Build .strtab content ----
@@ -11817,10 +11919,73 @@ fn emit_elf_lkm(uint64 text_len, uint64 data_len, uint64 arch) {
     unsafe { *(ntp3 as uint8) = nul }
     strtab_len = strtab_len + 1
 
+    // Misc-device mode: _lkm_miscdev / _lkm_fops / _lkm_name_str names
+    // for the static-data LOCAL symbols. Always reserved so layout math
+    // is consistent; only used if misc_dev_mode != 0.
+    uint64 lkm_miscdev_name_off = strtab_len
+    if misc_dev_mode != 0 {
+        uint64 mdn = "_lkm_miscdev"
+        uint64 mdn_len = 12
+        uint64 mdi = 0
+        while mdi < mdn_len {
+            uint64 sp = mdn + mdi
+            uint64 cc = 0
+            unsafe { *(sp as uint8) -> cc }
+            uint8 cb = cc
+            uint64 dp = strtab_buf + strtab_len
+            unsafe { *(dp as uint8) = cb }
+            strtab_len = strtab_len + 1
+            mdi = mdi + 1
+        }
+        uint64 mntp = strtab_buf + strtab_len
+        unsafe { *(mntp as uint8) = nul }
+        strtab_len = strtab_len + 1
+    }
+    uint64 lkm_fops_name_off = strtab_len
+    if misc_dev_mode != 0 {
+        uint64 fpn = "_lkm_fops"
+        uint64 fpn_len = 9
+        uint64 fpi = 0
+        while fpi < fpn_len {
+            uint64 sp = fpn + fpi
+            uint64 cc = 0
+            unsafe { *(sp as uint8) -> cc }
+            uint8 cb = cc
+            uint64 dp = strtab_buf + strtab_len
+            unsafe { *(dp as uint8) = cb }
+            strtab_len = strtab_len + 1
+            fpi = fpi + 1
+        }
+        uint64 fntp = strtab_buf + strtab_len
+        unsafe { *(fntp as uint8) = nul }
+        strtab_len = strtab_len + 1
+    }
+    uint64 lkm_name_str_name_off = strtab_len
+    if misc_dev_mode != 0 {
+        uint64 nsn = "_lkm_name_str"
+        uint64 nsn_len = 13
+        uint64 nsi = 0
+        while nsi < nsn_len {
+            uint64 sp = nsn + nsi
+            uint64 cc = 0
+            unsafe { *(sp as uint8) -> cc }
+            uint8 cb = cc
+            uint64 dp = strtab_buf + strtab_len
+            unsafe { *(dp as uint8) = cb }
+            strtab_len = strtab_len + 1
+            nsi = nsi + 1
+        }
+        uint64 sntp = strtab_buf + strtab_len
+        unsafe { *(sntp as uint8) = nul }
+        strtab_len = strtab_len + 1
+    }
+
     // ---- Symtab count ----
     // null + fn_count locals (or fn_count-1 if main exists) + main + 3
-    // LKM globals + extern_fn_count.
+    // LKM globals + extern_fn_count, plus 3 extra LOCAL OBJECTs in
+    // misc-device mode (_lkm_miscdev / _lkm_fops / _lkm_name_str).
     uint64 sym_count = 1 + fn_count + 3 + extern_fn_count
+    if misc_dev_mode != 0 { sym_count = sym_count + 3 }
     uint64 symtab_size = sym_count * 24
 
     // ---- Layout offsets ----
@@ -11858,10 +12023,17 @@ fn emit_elf_lkm(uint64 text_len, uint64 data_len, uint64 arch) {
     uint64 rela_text_align_pad = (8 - (rela_text_off & 7)) & 7
     rela_text_off = rela_text_off + rela_text_align_pad
     uint64 rela_text_count = extern_call_count
+    if misc_dev_mode != 0 { rela_text_count = rela_text_count + 4 }
     uint64 rela_text_size = rela_text_count * 24
     uint64 rela_this_module_off = rela_text_off + rela_text_size
     uint64 rela_this_module_size = 2 * 24
-    uint64 shdr_off = rela_this_module_off + rela_this_module_size
+    // .rela.data: 4 absolute-pointer relocations in misc-device mode
+    // (miscdev.name → name string, miscdev.fops → fops, fops.owner →
+    //  __this_module, fops.unlocked_ioctl → handler function).
+    uint64 rela_data_off = rela_this_module_off + rela_this_module_size
+    uint64 rela_data_size = 0
+    if misc_dev_mode != 0 { rela_data_size = 4 * 24 }
+    uint64 shdr_off = rela_data_off + rela_data_size
     uint64 shdr_align_pad = (8 - (shdr_off & 7)) & 7
     shdr_off = shdr_off + shdr_align_pad
 
@@ -11873,6 +12045,7 @@ fn emit_elf_lkm(uint64 text_len, uint64 data_len, uint64 arch) {
     //  then .rela.text and .rela.gnu.linkonce.this_module appended.
     uint64 num_sections = 14
     if has_relocs != 0 { num_sections = 15 }
+    if misc_dev_mode != 0 { num_sections = num_sections + 1 }
 
     // ---- Emit ELF header ----
     emit_byte(0x7F); emit_byte(69); emit_byte(76); emit_byte(70)
@@ -11897,8 +12070,11 @@ fn emit_elf_lkm(uint64 text_len, uint64 data_len, uint64 arch) {
     emit_u16_le(7)        // e_shstrndx = .shstrtab is section 7
 
     // ---- Emit .text ----
+    // First the user's code from the blob (text_len_orig bytes), then
+    // auto-generated init_module/cleanup_module in misc-device mode.
+    uint64 text_len_orig = text_len - misc_text_extra
     ci = 0
-    while ci < text_len {
+    while ci < text_len_orig {
         uint64 p = blob + ci
         uint64 bv = 0
         unsafe { *(p as uint8) -> bv }
@@ -11906,16 +12082,77 @@ fn emit_elf_lkm(uint64 text_len, uint64 data_len, uint64 arch) {
         emit_byte(bb)
         ci = ci + 1
     }
+    if misc_dev_mode != 0 {
+        // Auto-generated init_module (21 bytes):
+        //   sub rsp, 8                        ; 48 83 ec 08
+        //   lea rdi, [rip + miscdev_disp]     ; 48 8d 3d 00 00 00 00 — reloc
+        //   call misc_register                ; e8 00 00 00 00 — reloc
+        //   add rsp, 8                        ; 48 83 c4 08
+        //   ret                               ; c3
+        emit_byte(0x48); emit_byte(0x83); emit_byte(0xec); emit_byte(0x08)
+        emit_byte(0x48); emit_byte(0x8d); emit_byte(0x3d)
+        emit_byte(0x00); emit_byte(0x00); emit_byte(0x00); emit_byte(0x00)
+        emit_byte(0xe8)
+        emit_byte(0x00); emit_byte(0x00); emit_byte(0x00); emit_byte(0x00)
+        emit_byte(0x48); emit_byte(0x83); emit_byte(0xc4); emit_byte(0x08)
+        emit_byte(0xc3)
+
+        // Auto-generated cleanup_module (21 bytes): same shape, calls
+        // misc_deregister instead.
+        emit_byte(0x48); emit_byte(0x83); emit_byte(0xec); emit_byte(0x08)
+        emit_byte(0x48); emit_byte(0x8d); emit_byte(0x3d)
+        emit_byte(0x00); emit_byte(0x00); emit_byte(0x00); emit_byte(0x00)
+        emit_byte(0xe8)
+        emit_byte(0x00); emit_byte(0x00); emit_byte(0x00); emit_byte(0x00)
+        emit_byte(0x48); emit_byte(0x83); emit_byte(0xc4); emit_byte(0x08)
+        emit_byte(0xc3)
+    }
 
     // ---- Emit .data ----
+    // First user's static data from the blob (data_len_orig bytes),
+    // then auto-generated miscdevice+fops+name in misc-device mode.
+    uint64 data_len_orig = data_len - misc_data_extra
     ci = 0
-    while ci < data_len {
-        uint64 p = blob + text_len + ci
+    while ci < data_len_orig {
+        uint64 p = blob + text_len_orig + ci
         uint64 bv = 0
         unsafe { *(p as uint8) -> bv }
         uint8 bb = bv
         emit_byte(bb)
         ci = ci + 1
+    }
+    if misc_dev_mode != 0 {
+        // struct miscdevice (80 bytes) at .data offset misc_miscdev_data_off.
+        //   off 0..4: minor = 0xFF (MISC_DYNAMIC_MINOR)
+        //   off 4..8: zero padding
+        //   off 8..16: pointer to name string (relocation)
+        //   off 16..24: pointer to file_operations (relocation)
+        //   off 24..80: zero (list_head, parent, this_device, etc.)
+        emit_byte(0xff); emit_byte(0x00); emit_byte(0x00); emit_byte(0x00)  // minor = 255 (MISC_DYNAMIC_MINOR)
+        // 4 bytes pad + 8 bytes name ptr + 8 bytes fops ptr + 56 bytes zero = 76
+        uint64 zi = 0
+        while zi < 76 { emit_byte(0); zi = zi + 1 }
+
+        // struct file_operations (272 bytes) at offset misc_fops_data_off.
+        //   off 0..8: owner pointer (relocation to __this_module)
+        //   off 8..0x50: zero (38 fields × 8 bytes? actually fewer; padding)
+        //   off 0x50..0x58: unlocked_ioctl pointer (relocation to handler)
+        //   off 0x58..272: zero
+        // All 272 bytes start as zero; relocations will patch in pointers.
+        zi = 0
+        while zi < 272 { emit_byte(0); zi = zi + 1 }
+
+        // Device name string at offset misc_name_data_off.
+        uint64 nsi = 0
+        while nsi < misc_dev_name_len {
+            uint64 sp = cg_source + misc_dev_name_start + nsi
+            uint64 sc = 0
+            unsafe { *(sp as uint8) -> sc }
+            uint8 sb = sc
+            emit_byte(sb)
+            nsi = nsi + 1
+        }
+        emit_byte(0)   // NUL terminator
     }
 
     // ---- Emit .modinfo ----
@@ -11975,6 +12212,7 @@ fn emit_elf_lkm(uint64 text_len, uint64 data_len, uint64 arch) {
 
     // Locals: all fn_count user functions except main.
     uint64 local_count = 1
+    uint64 ioctl_handler_sym_idx = 0
     fi = 0
     while fi < fn_count {
         if fi != main_fn_idx {
@@ -11991,9 +12229,50 @@ fn emit_elf_lkm(uint64 text_len, uint64 data_len, uint64 arch) {
             unsafe { *(fe4 as uint32) -> code_off }
             emit_u64_le(code_off)
             emit_u64_le(0)       // st_size
+            // Track sym index of the @lkm_ioctl_handler function so
+            // .rela.data can reference it.
+            if misc_dev_mode != 0 {
+                uint32 stored_tok2 = 0
+                unsafe { *(fentry as uint32) -> stored_tok2 }
+                uint64 ws2 = stored_tok2
+                if tok_text_eq(ws2, ioctl_handler_tok) != 0 {
+                    ioctl_handler_sym_idx = local_count
+                }
+            }
             local_count = local_count + 1
         }
         fi = fi + 1
+    }
+
+    // Misc-device mode: 3 additional LOCAL OBJECT symbols pointing into
+    // .data — _lkm_miscdev, _lkm_fops, _lkm_name_str. .rela.data
+    // relocations and .rela.text lea relocations target these.
+    uint64 lkm_miscdev_sym_idx = local_count
+    uint64 lkm_fops_sym_idx = local_count + 1
+    uint64 lkm_name_str_sym_idx = local_count + 2
+    if misc_dev_mode != 0 {
+        // _lkm_miscdev: 80-byte OBJECT in .data at misc_miscdev_data_off
+        emit_u32_le(lkm_miscdev_name_off)
+        emit_byte(0x01)              // STB_LOCAL << 4 | STT_OBJECT
+        emit_byte(0)
+        emit_u16_le(2)               // st_shndx = .data (section 2)
+        emit_u64_le(misc_miscdev_data_off)
+        emit_u64_le(80)
+        // _lkm_fops: 272-byte OBJECT
+        emit_u32_le(lkm_fops_name_off)
+        emit_byte(0x01)
+        emit_byte(0)
+        emit_u16_le(2)
+        emit_u64_le(misc_fops_data_off)
+        emit_u64_le(272)
+        // _lkm_name_str: device name string + NUL
+        emit_u32_le(lkm_name_str_name_off)
+        emit_byte(0x01)
+        emit_byte(0)
+        emit_u16_le(2)
+        emit_u64_le(misc_name_data_off)
+        emit_u64_le(misc_dev_name_len + 1)
+        local_count = local_count + 3
     }
 
     // Track global symbol indexes so the .rela.this_module emitter
@@ -12120,6 +12399,8 @@ fn emit_elf_lkm(uint64 text_len, uint64 data_len, uint64 arch) {
     emit_byte(95); emit_byte(95); emit_byte(118); emit_byte(101); emit_byte(114); emit_byte(115); emit_byte(105); emit_byte(111); emit_byte(110); emit_byte(95); emit_byte(101); emit_byte(120); emit_byte(116); emit_byte(95); emit_byte(110); emit_byte(97); emit_byte(109); emit_byte(101); emit_byte(115); emit_byte(0)
     // __version_ext_crcs\0 (19 bytes)
     emit_byte(95); emit_byte(95); emit_byte(118); emit_byte(101); emit_byte(114); emit_byte(115); emit_byte(105); emit_byte(111); emit_byte(110); emit_byte(95); emit_byte(101); emit_byte(120); emit_byte(116); emit_byte(95); emit_byte(99); emit_byte(114); emit_byte(99); emit_byte(115); emit_byte(0)
+    // .rela.data\0 (11 bytes)
+    emit_byte(46); emit_byte(114); emit_byte(101); emit_byte(108); emit_byte(97); emit_byte(46); emit_byte(100); emit_byte(97); emit_byte(116); emit_byte(97); emit_byte(0)
 
     // ---- Pad to .rela.text's 8-byte alignment ----
     pi = 0
@@ -12127,8 +12408,9 @@ fn emit_elf_lkm(uint64 text_len, uint64 data_len, uint64 arch) {
 
     // ---- Emit .rela.text (if has externs) ----
     if has_relocs != 0 {
+        uint64 user_rela_count = extern_call_count
         uint64 ri = 0
-        while ri < rela_text_count {
+        while ri < user_rela_count {
             uint64 re = extern_call_sites + ri * 16
             uint32 rco = 0
             unsafe { *(re as uint32) -> rco }
@@ -12146,6 +12428,36 @@ fn emit_elf_lkm(uint64 text_len, uint64 data_len, uint64 arch) {
             ri = ri + 1
         }
     }
+    // Misc-device mode: 4 extra .rela.text entries for the auto-
+    // generated init_module + cleanup_module bodies' lea + call
+    // instructions. Layout per function (21 bytes):
+    //   offset 0..4:  sub rsp, 8
+    //   offset 4..6:  lea rdi opcode
+    //   offset 7..11: imm32 displacement → _lkm_miscdev (R_X86_64_PC32, -4)
+    //   offset 11..12: call opcode
+    //   offset 12..16: imm32 displacement → misc_register/_deregister
+    //                   (R_X86_64_PLT32, -4)
+    //   offset 16..21: add rsp, 8 + ret
+    if misc_dev_mode != 0 {
+        uint64 mr_sym_idx = extern_sym_base + misc_register_extern_idx
+        uint64 md_sym_idx = extern_sym_base + misc_deregister_extern_idx
+        // init_module + 7 → _lkm_miscdev (PC32)
+        emit_u64_le(misc_init_text_off + 7)
+        emit_u64_le((lkm_miscdev_sym_idx << 32) | 2)  // R_X86_64_PC32 = 2
+        emit_u64_le(0xFFFFFFFFFFFFFFFC)
+        // init_module + 12 → misc_register (PLT32)
+        emit_u64_le(misc_init_text_off + 12)
+        emit_u64_le((mr_sym_idx << 32) | 4)           // R_X86_64_PLT32 = 4
+        emit_u64_le(0xFFFFFFFFFFFFFFFC)
+        // cleanup_module + 7 → _lkm_miscdev (PC32)
+        emit_u64_le(misc_exit_text_off + 7)
+        emit_u64_le((lkm_miscdev_sym_idx << 32) | 2)
+        emit_u64_le(0xFFFFFFFFFFFFFFFC)
+        // cleanup_module + 12 → misc_deregister (PLT32)
+        emit_u64_le(misc_exit_text_off + 12)
+        emit_u64_le((md_sym_idx << 32) | 4)
+        emit_u64_le(0xFFFFFFFFFFFFFFFC)
+    }
 
     // ---- Emit .rela.gnu.linkonce.this_module (2 entries) ----
     // Entry 0: struct module.init at offset 0x138 -> init_module
@@ -12158,6 +12470,34 @@ fn emit_elf_lkm(uint64 text_len, uint64 data_len, uint64 arch) {
     uint64 r_info2 = (cleanup_module_sym_idx << 32) | 1
     emit_u64_le(r_info2)
     emit_u64_le(0)
+
+    // ---- Emit .rela.data (4 entries, misc-device mode only) ----
+    // All R_X86_64_64 (absolute 64-bit). Targets:
+    //   miscdev.name (offset +8)     → _lkm_name_str
+    //   miscdev.fops (offset +16)    → _lkm_fops
+    //   fops.owner (offset +0)       → __this_module
+    //   fops.unlocked_ioctl (offset +0x50) → @lkm_ioctl_handler fn
+    if misc_dev_mode != 0 {
+        // miscdev.name
+        emit_u64_le(misc_miscdev_data_off + 8)
+        emit_u64_le((lkm_name_str_sym_idx << 32) | 1)
+        emit_u64_le(0)
+        // miscdev.fops
+        emit_u64_le(misc_miscdev_data_off + 16)
+        emit_u64_le((lkm_fops_sym_idx << 32) | 1)
+        emit_u64_le(0)
+        // fops.owner — __this_module symbol idx already tracked
+        // implicitly as cleanup_module_sym_idx + 1 (next global after
+        // init/cleanup_module). Compute it explicitly:
+        uint64 this_module_sym_idx = cleanup_module_sym_idx + 1
+        emit_u64_le(misc_fops_data_off + 0)
+        emit_u64_le((this_module_sym_idx << 32) | 1)
+        emit_u64_le(0)
+        // fops.unlocked_ioctl
+        emit_u64_le(misc_fops_data_off + 0x50)
+        emit_u64_le((ioctl_handler_sym_idx << 32) | 1)
+        emit_u64_le(0)
+    }
 
     // ---- Pad to section header alignment ----
     pi = 0
@@ -12338,6 +12678,20 @@ fn emit_elf_lkm(uint64 text_len, uint64 data_len, uint64 arch) {
     emit_u32_le(4)                 // sh_info = .gnu.linkonce.this_module
     emit_u64_le(8)
     emit_u64_le(24)
+
+    // Section 14 or 15: .rela.data (misc-device mode only).
+    if misc_dev_mode != 0 {
+        emit_u32_le(shstr_rela_data_off)
+        emit_u32_le(4)                 // SHT_RELA
+        emit_u64_le(0x40)              // SHF_INFO_LINK
+        emit_u64_le(0)
+        emit_u64_le(rela_data_off)
+        emit_u64_le(rela_data_size)
+        emit_u32_le(5)                 // sh_link = .symtab
+        emit_u32_le(2)                 // sh_info = .data
+        emit_u64_le(8)
+        emit_u64_le(24)
+    }
 }
 
 // Emit an ELF relocatable object file (.o) wrapping the code already in out_buf.
