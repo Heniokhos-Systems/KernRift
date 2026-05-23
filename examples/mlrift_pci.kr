@@ -10,23 +10,26 @@
 //   cc -O2 -o /tmp/test examples/mlrift_pci_test.c && /tmp/test
 //   sudo rmmod mlrift_pci
 //
-// Phase B.1.d: implements MLRIFT_OPEN_PCI IOCTL. Userland passes a
-// 13-byte BDF string ("0000:03:00.0\0"); kernel resolves it via
-// pci_get_domain_bus_and_slot and stashes the pci_dev pointer in a
-// driver-internal slot table (max 4 open devices). Returns the slot
-// index (0..3) on success or negative errno on failure.
+// Phase C.4: registers as a real PCI driver (@module_register_pci_driver).
+// driver_probe claims + enables the device when the GPU is bound to
+// mlrift_pci; driver_remove releases it on unbind/rmmod. MLRIFT_OPEN_PCI
+// is now just a presence validator (returns -ENODEV if nothing is bound),
+// and MLRIFT_CLOSE_PCI tears down the per-session IRQ/IOMMU resources.
+// This fixes the -EBUSY "Resources present before probing" that blocked
+// vfio rebind under the old grab-by-BDF path.
 
 @module_license("GPL")
 @module_name("mlrift_pci")
 @module_register_misc_device("mlrift_pci")
+@module_register_pci_driver("mlrift_pci")
 
 extern fn _printk(uint64 fmt) -> int32
 extern fn misc_register(uint64 dev) -> int32
 extern fn misc_deregister(uint64 dev) -> int32
+extern fn __pci_register_driver(uint64 drv, uint64 owner, uint64 name) -> int32
+extern fn pci_unregister_driver(uint64 drv)
 extern fn _copy_from_user(uint64 dst, uint64 src, uint64 n) -> uint64
 extern fn _copy_to_user(uint64 dst, uint64 src, uint64 n) -> uint64
-extern fn pci_get_domain_bus_and_slot(uint32 dom, uint32 bus, uint32 devfn) -> uint64
-extern fn pci_dev_put(uint64 pdev)
 extern fn remap_pfn_range(uint64 vma, uint64 addr, uint64 pfn, uint64 size, uint64 prot) -> int32
 
 // Phase B.3.b: user-page pinning + scatter-gather table. These prove
@@ -93,12 +96,10 @@ static uint64 PAGE_PCD         = 0x10
 static uint64 BAR_PGOFF_SHIFT  = 28
 static uint64 BAR_INBAR_MASK   = 0x0FFFFFFF
 
-// Driver-internal table of open PCI devices. 4 slots is plenty for
-// development; LLM workloads typically use one dGPU at a time.
+// The single PCI device this driver owns. Set by driver_probe when the
+// GPU is bound to mlrift_pci; cleared by driver_remove on unbind. LLM
+// workloads use one dGPU at a time, so a single slot is sufficient.
 static uint64 _mlrift_pci_slot0 = 0
-static uint64 _mlrift_pci_slot1 = 0
-static uint64 _mlrift_pci_slot2 = 0
-static uint64 _mlrift_pci_slot3 = 0
 
 // struct pci_dev field offset (kernel 6.17 x86_64): embedded struct
 // device, used as the arg to all iommu_* calls.
@@ -112,74 +113,6 @@ static uint64 PCI_DEV_DEV = 0xc8
 static uint64 _iommu_domain  = 0    // struct iommu_domain* (0 = none)
 static uint64 _iommu_dev     = 0    // struct device* the domain is attached to
 static uint64 _map_table     = 0    // kmalloc'd MAP_MAX*MAP_ENTRY_SIZE (0 = none)
-
-// Parse a single hex digit (0..F, lower or upper). Returns 0..15 on
-// success or 0xFFFFFFFF on bad input.
-fn _hex_digit(uint64 c) -> uint64 {
-    if c >= 48 { if c <= 57 { return c - 48 } }          // '0'..'9'
-    if c >= 97 { if c <= 102 { return c - 97 + 10 } }    // 'a'..'f'
-    if c >= 65 { if c <= 70 { return c - 65 + 10 } }     // 'A'..'F'
-    return 0xFFFFFFFF
-}
-
-// Parse the BDF string "DDDD:BB:SS.F\0" from buf. Returns a packed
-// uint64: (dom << 16) | (bus << 8) | devfn (all fit in 32 bits), or
-// the sentinel 0xFFFFFFFFFFFFFFFF on parse error. No out-pointers so
-// the caller needs no heap — this code runs in kernel context where
-// alloc() (a userland mmap syscall) would panic.
-fn _parse_bdf(uint64 buf) -> uint64 {
-    // Bytes 0..3: domain hex (4 digits)
-    // Byte 4: ':'
-    // Bytes 5..6: bus hex (2 digits)
-    // Byte 7: ':'
-    // Bytes 8..9: slot hex (2 digits)
-    // Byte 10: '.'
-    // Byte 11: function (1 digit, 0..7)
-    // Byte 12: '\0'
-    uint64 d0 = 0; unsafe { *((buf + 0) as uint8) -> d0 }
-    uint64 d1 = 0; unsafe { *((buf + 1) as uint8) -> d1 }
-    uint64 d2 = 0; unsafe { *((buf + 2) as uint8) -> d2 }
-    uint64 d3 = 0; unsafe { *((buf + 3) as uint8) -> d3 }
-    uint64 b0 = 0; unsafe { *((buf + 5) as uint8) -> b0 }
-    uint64 b1 = 0; unsafe { *((buf + 6) as uint8) -> b1 }
-    uint64 s0 = 0; unsafe { *((buf + 8) as uint8) -> s0 }
-    uint64 s1 = 0; unsafe { *((buf + 9) as uint8) -> s1 }
-    uint64 f0 = 0; unsafe { *((buf + 11) as uint8) -> f0 }
-    uint64 D0 = _hex_digit(d0)
-    uint64 D1 = _hex_digit(d1)
-    uint64 D2 = _hex_digit(d2)
-    uint64 D3 = _hex_digit(d3)
-    uint64 B0 = _hex_digit(b0)
-    uint64 B1 = _hex_digit(b1)
-    uint64 S0 = _hex_digit(s0)
-    uint64 S1 = _hex_digit(s1)
-    uint64 F0 = _hex_digit(f0)
-    if D0 == 0xFFFFFFFF { return 0xFFFFFFFFFFFFFFFF }
-    if D1 == 0xFFFFFFFF { return 0xFFFFFFFFFFFFFFFF }
-    if D2 == 0xFFFFFFFF { return 0xFFFFFFFFFFFFFFFF }
-    if D3 == 0xFFFFFFFF { return 0xFFFFFFFFFFFFFFFF }
-    if B0 == 0xFFFFFFFF { return 0xFFFFFFFFFFFFFFFF }
-    if B1 == 0xFFFFFFFF { return 0xFFFFFFFFFFFFFFFF }
-    if S0 == 0xFFFFFFFF { return 0xFFFFFFFFFFFFFFFF }
-    if S1 == 0xFFFFFFFF { return 0xFFFFFFFFFFFFFFFF }
-    if F0 == 0xFFFFFFFF { return 0xFFFFFFFFFFFFFFFF }
-    uint64 dom = (D0 << 12) | (D1 << 8) | (D2 << 4) | D3
-    uint64 bus = (B0 << 4) | B1
-    uint64 slot = (S0 << 4) | S1
-    uint64 func = F0
-    uint64 devfn = (slot << 3) | (func & 7)
-    return (dom << 16) | (bus << 8) | devfn
-}
-
-// Store a pci_dev pointer in the first free slot. Returns slot index
-// 0..3 on success, or 0xFFFFFFFF if no slot is free.
-fn _alloc_slot(uint64 pdev) -> uint64 {
-    if _mlrift_pci_slot0 == 0 { _mlrift_pci_slot0 = pdev; return 0 }
-    if _mlrift_pci_slot1 == 0 { _mlrift_pci_slot1 = pdev; return 1 }
-    if _mlrift_pci_slot2 == 0 { _mlrift_pci_slot2 = pdev; return 2 }
-    if _mlrift_pci_slot3 == 0 { _mlrift_pci_slot3 = pdev; return 3 }
-    return 0xFFFFFFFF
-}
 
 // IOCTL command numbers — must match userland.
 //   MLRIFT_OPEN_PCI = _IOW('M', 1, char[13])
@@ -271,6 +204,34 @@ static uint64 E_SGT    = 32
 // EFAULT = 14, EINVAL = 22, ENODEV = 19, EBUSY = 16.
 // We return -errno as signed 64-bit, so e.g. -EFAULT = 0xFFFFFFFFFFFFFFF2.
 
+// Phase C.4 — PCI-driver probe/remove. When the GPU is bound to
+// mlrift_pci (via /sys/.../driver_override + bind), the kernel calls
+// driver_probe with the matching pci_dev. We claim it: enable + set
+// bus-master, then stash the pointer in slot 0. remove() (called on
+// unbind/rmmod) reverses it. This replaces the old "grab by BDF +
+// pci_enable_device without being the bound driver" path that left
+// resources present and blocked vfio rebind with -EBUSY.
+@pci_probe_handler
+fn driver_probe(uint64 pdev, uint64 id) -> int64 {
+    uint64 ed = pci_enable_device(pdev)
+    ed = ed & 0xFFFFFFFF
+    if ed != 0 { return ed | 0xFFFFFFFF00000000 }   // propagate -errno
+    pci_set_master(pdev)
+    _mlrift_pci_slot0 = pdev
+    _printk("mlrift_pci: probe — device claimed + enabled\n")
+    return 0
+}
+
+@pci_remove_handler
+fn driver_remove(uint64 pdev) {
+    _irq_teardown()
+    _iommu_teardown()
+    pci_clear_master(pdev)
+    pci_disable_device(pdev)
+    _mlrift_pci_slot0 = 0
+    _printk("mlrift_pci: remove — device released\n")
+}
+
 // IMPORTANT: this function runs in KERNEL context. It MUST NOT call
 // alloc()/dealloc() — those are KernRift userland-heap builtins that
 // emit an mmap/munmap syscall, which panics the kernel from ring 0.
@@ -278,40 +239,21 @@ static uint64 E_SGT    = 32
 @lkm_ioctl_handler
 fn driver_ioctl(uint64 file, uint64 cmd, uint64 arg) -> int64 {
     if cmd == IOCTL_MLRIFT_OPEN_PCI {
-        // 16-byte stack buffer for the BDF + NUL (no heap).
-        uint8[16] buf_arr
-        uint64 buf = buf_arr
-        uint64 zi = 0
-        while zi < 16 { unsafe { *((buf + zi) as uint8) = 0 }; zi = zi + 1 }
-        uint64 not_copied = _copy_from_user(buf, arg, 13)
-        if not_copied != 0 { return 0xFFFFFFFFFFFFFFF2 }  // -EFAULT
-        uint64 packed = _parse_bdf(buf)
-        if packed == 0xFFFFFFFFFFFFFFFF { return 0xFFFFFFFFFFFFFFEA }  // -EINVAL
-        uint64 dom = (packed >> 16) & 0xFFFF
-        uint64 bus = (packed >> 8) & 0xFF
-        uint64 devfn = packed & 0xFF
-        uint32 dom32 = dom
-        uint32 bus32 = bus
-        uint32 devfn32 = devfn
-        uint64 pdev = pci_get_domain_bus_and_slot(dom32, bus32, devfn32)
-        if pdev == 0 { return 0xFFFFFFFFFFFFFFED }   // -ENODEV = -19
-        uint64 slot = _alloc_slot(pdev)
-        if slot == 0xFFFFFFFF { pci_dev_put(pdev); return 0xFFFFFFFFFFFFFFF0 }  // -EBUSY = -16
-        _printk("mlrift_pci: opened PCI device, slot allocated\n")
-        return slot
+        // The device is now claimed by probe() when it binds to mlrift_pci
+        // (see driver_probe). OPEN_PCI is just a presence validator: it no
+        // longer parses a BDF or grabs a ref — that was the source of the
+        // -EBUSY "Resources present before probing" that blocked vfio rebind.
+        if _mlrift_pci_slot0 == 0 { return 0xFFFFFFFFFFFFFFED }   // -ENODEV: bind the GPU to mlrift_pci first
+        _printk("mlrift_pci: OPEN_PCI — device present (slot 0)\n")
+        return 0
     }
     if cmd == IOCTL_MLRIFT_CLOSE_PCI {
-        // arg is the slot index (0..3). Drop the pci_dev ref taken by
-        // pci_get_domain_bus_and_slot and free the slot.
-        uint64 idx = arg
-        // Closing slot 0 also tears down the IOMMU domain (we only ever
-        // attach slot 0's device), leaving it clean to rebind. Must run
-        // while the pci_dev (hence _iommu_dev) is still valid.
-        if idx == 0 { if _mlrift_pci_slot0 != 0 { _irq_teardown(); _iommu_teardown(); pci_dev_put(_mlrift_pci_slot0); _mlrift_pci_slot0 = 0; return 0 } }
-        if idx == 1 { if _mlrift_pci_slot1 != 0 { pci_dev_put(_mlrift_pci_slot1); _mlrift_pci_slot1 = 0; return 0 } }
-        if idx == 2 { if _mlrift_pci_slot2 != 0 { pci_dev_put(_mlrift_pci_slot2); _mlrift_pci_slot2 = 0; return 0 } }
-        if idx == 3 { if _mlrift_pci_slot3 != 0 { pci_dev_put(_mlrift_pci_slot3); _mlrift_pci_slot3 = 0; return 0 } }
-        return 0xFFFFFFFFFFFFFFEA   // -EINVAL: bad slot or already closed
+        // Session cleanup only: drop IRQ + IOMMU resources the userland
+        // session set up. The device stays claimed by probe() until the
+        // module is unbound (remove() owns the pci_dev release).
+        _irq_teardown()
+        _iommu_teardown()
+        return 0
     }
     if cmd == IOCTL_MLRIFT_PIN_TEST {
         return _pin_test(arg)
@@ -449,9 +391,10 @@ fn mlrift_irq_handler(uint64 irq, uint64 dev_id) -> uint64 {
     return IRQ_HANDLED_RET
 }
 
-// Free all registered IRQs + eventfd ctxs, release the vectors, and
-// disable the device. Uses _mlrift_pci_slot0 for the pci_dev (valid at
-// CLOSE/rmmod, called before pci_dev_put). Idempotent.
+// Free all registered IRQs + eventfd ctxs and release the vectors. Uses
+// _mlrift_pci_slot0 for the pci_dev, which stays valid until remove()
+// clears it. Device enable/master state is owned by probe()/remove(), so
+// this no longer disables the device. Idempotent.
 fn _irq_teardown() {
     if _irq_table != 0 {
         uint64 i = 0
@@ -473,17 +416,15 @@ fn _irq_teardown() {
         uint64 pdev = _mlrift_pci_slot0
         if pdev != 0 {
             pci_free_irq_vectors(pdev)
-            pci_clear_master(pdev)
-            pci_disable_device(pdev)
         }
         _irq_enabled = 0
         _irq_nvec = 0
     }
 }
 
-// MLRIFT_IRQ_ENABLE — enable the device + bus mastering, allocate up to
-// `num_vectors` MSI-X vectors. arg -> u32 num_vectors. Returns the count
-// actually allocated, or a negative errno.
+// MLRIFT_IRQ_ENABLE — allocate up to `num_vectors` MSI/MSI-X vectors on
+// the (already enabled + bus-mastering) device. arg -> u32 num_vectors.
+// Returns the count actually allocated, or a negative errno.
 fn _irq_enable(uint64 arg) -> int64 {
     uint64 pdev = _mlrift_pci_slot0
     if pdev == 0 { return 0xFFFFFFFFFFFFFFEA }            // -EINVAL: open first
@@ -499,36 +440,24 @@ fn _irq_enable(uint64 arg) -> int64 {
     if nreq == 0 { return 0xFFFFFFFFFFFFFFEA }
     if nreq > IRQ_MAX_VEC { nreq = IRQ_MAX_VEC }
 
-    uint64 ed = pci_enable_device(pdev)
-    ed = ed & 0xFFFFFFFF
-    if ed != 0 {
-        _printk("mlrift_pci: pci_enable_device failed\n")
-        return 0xFFFFFFFFFFFFFFFB                          // -EIO
-    }
-    pci_set_master(pdev)
-
+    // Device is already enabled + bus-mastering (probe() did both when it
+    // claimed the device); just allocate the vectors here.
     uint32 nreq_w = nreq
     uint64 n = pci_alloc_irq_vectors(pdev, 1, nreq_w, PCI_IRQ_MSIX_FLAG)
     n = n & 0xFFFFFFFF
     if (n & 0x80000000) != 0 {        // negative errno
-        pci_clear_master(pdev)
-        pci_disable_device(pdev)
         _printk("mlrift_pci: pci_alloc_irq_vectors (MSI/MSI-X) failed\n")
         // Surface the real errno (sign-extend the 32-bit negative return)
         // so userland sees e.g. -ENOSPC/-EINVAL rather than a generic EIO.
         return n | 0xFFFFFFFF00000000
     }
     if n == 0 {
-        pci_clear_master(pdev)
-        pci_disable_device(pdev)
         return 0xFFFFFFFFFFFFFFFB
     }
 
     uint64 t = alloc(IRQ_TABLE_BYTES)
     if t == 0 {
         pci_free_irq_vectors(pdev)
-        pci_clear_master(pdev)
-        pci_disable_device(pdev)
         return 0xFFFFFFFFFFFFFFF4                          // -ENOMEM
     }
     uint64 ti = 0
@@ -808,21 +737,6 @@ fn _iommu_teardown() {
         _iommu_dev = 0
         _printk("mlrift_pci: paging domain detached + freed\n")
     }
-}
-
-@module_exit
-fn driver_exit() -> int64 {
-    // Free IRQs/vectors + detach/free the IOMMU domain BEFORE releasing
-    // the pci_dev refs (both need the device pointer, and it must be
-    // detached/disabled before it could be rebound).
-    _irq_teardown()
-    _iommu_teardown()
-    if _mlrift_pci_slot0 != 0 { pci_dev_put(_mlrift_pci_slot0); _mlrift_pci_slot0 = 0 }
-    if _mlrift_pci_slot1 != 0 { pci_dev_put(_mlrift_pci_slot1); _mlrift_pci_slot1 = 0 }
-    if _mlrift_pci_slot2 != 0 { pci_dev_put(_mlrift_pci_slot2); _mlrift_pci_slot2 = 0 }
-    if _mlrift_pci_slot3 != 0 { pci_dev_put(_mlrift_pci_slot3); _mlrift_pci_slot3 = 0 }
-    _printk("mlrift_pci: released open PCI device refs on unload\n")
-    return 0
 }
 
 // Phase B.2.b + noncached follow-up: map a selected BAR of the slot-0
