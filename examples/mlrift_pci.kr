@@ -229,7 +229,11 @@ static uint64 IOCTL_MLRIFT_IRQ_SET_EVENTFD = 0x40084D08
 static uint64 IOCTL_MLRIFT_IRQ_DISABLE     = 0x00004D09
 static uint64 IOCTL_MLRIFT_IRQ_FIRE_TEST   = 0x40044D0A
 
-static uint64 PCI_IRQ_MSIX_FLAG = 0x4    // PCI_IRQ_MSIX = (1<<2)
+// PCI_IRQ_MSIX (1<<2) | PCI_IRQ_MSI (1<<1) = 6. The kernel tries MSI-X
+// first, falls back to MSI — AMD GPUs commonly expose MSI rather than a
+// usable MSI-X cap (amdgpu itself uses PCI_IRQ_ALL_TYPES), so MSI-X-only
+// returns -EINVAL. Our handler/eventfd path is identical for both.
+static uint64 PCI_IRQ_MSIX_FLAG = 0x6
 static uint64 IRQ_HANDLED_RET   = 0x1    // irqreturn IRQ_HANDLED
 static uint64 IRQ_MAX_VEC       = 16     // per-device vector cap (this driver)
 static uint64 IRQ_ENTRY_SIZE    = 16     // { u64 irq; u64 eventfd_ctx }
@@ -509,8 +513,10 @@ fn _irq_enable(uint64 arg) -> int64 {
     if (n & 0x80000000) != 0 {        // negative errno
         pci_clear_master(pdev)
         pci_disable_device(pdev)
-        _printk("mlrift_pci: pci_alloc_irq_vectors (MSI-X) failed\n")
-        return 0xFFFFFFFFFFFFFFFB
+        _printk("mlrift_pci: pci_alloc_irq_vectors (MSI/MSI-X) failed\n")
+        // Surface the real errno (sign-extend the 32-bit negative return)
+        // so userland sees e.g. -ENOSPC/-EINVAL rather than a generic EIO.
+        return n | 0xFFFFFFFF00000000
     }
     if n == 0 {
         pci_clear_master(pdev)
