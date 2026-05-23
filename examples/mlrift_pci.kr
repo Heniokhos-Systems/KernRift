@@ -73,15 +73,13 @@ static uint64 _mlrift_pci_slot3 = 0
 static uint64 PCI_DEV_DEV = 0xc8
 
 // Phase B.3.c IOMMU state. One paging domain (allocated lazily on the
-// first MAP, attached to slot-0's device) + a single active mapping.
-// A multi-mapping table is a follow-up; one mapping proves the path.
+// first MAP, attached to slot-0's device) + a table of active mappings.
+// The table is kmalloc'd lazily (KernRift static arrays are unreliable,
+// so we use the same manual-pointer-indexing pattern as the page array).
+// Each entry is MAP_ENTRY_SIZE bytes; a free entry has E_PAGES == 0.
 static uint64 _iommu_domain  = 0    // struct iommu_domain* (0 = none)
 static uint64 _iommu_dev     = 0    // struct device* the domain is attached to
-static uint64 _map_pages     = 0    // kmalloc'd struct page* array
-static uint64 _map_npages    = 0
-static uint64 _map_sgt       = 0    // kmalloc'd struct sg_table
-static uint64 _map_iova      = 0
-static uint64 _map_size      = 0
+static uint64 _map_table     = 0    // kmalloc'd MAP_MAX*MAP_ENTRY_SIZE (0 = none)
 
 // Parse a single hex digit (0..F, lower or upper). Returns 0..15 on
 // success or 0xFFFFFFFF on bad input.
@@ -187,6 +185,17 @@ static uint64 SGT_ORIG_NENTS   = 0x0c         // offsetof(struct sg_table, orig_
 static uint64 PIN_TEST_MAX_PAGES = 256        // smoke cap: 1 MiB
 static uint64 IOMMU_RW         = 0x3          // IOMMU_READ | IOMMU_WRITE
 static uint64 ERR_PTR_FLOOR    = 0xFFFFFFFFFFFFF000   // ptr > this = ERR_PTR
+
+// Mapping table layout. Entry: { u64 iova; u64 size; u64 pages; u64
+// npages; u64 sgt }. Free slot <=> pages == 0.
+static uint64 MAP_MAX        = 64
+static uint64 MAP_ENTRY_SIZE = 40
+static uint64 MAP_TABLE_BYTES = 2560          // MAP_MAX * MAP_ENTRY_SIZE
+static uint64 E_IOVA   = 0
+static uint64 E_SIZE   = 8
+static uint64 E_PAGES  = 16
+static uint64 E_NPAGES = 24
+static uint64 E_SGT    = 32
 
 // Negative errno values returned to userland (linux/errno.h).
 // EFAULT = 14, EINVAL = 22, ENODEV = 19, EBUSY = 16.
@@ -325,7 +334,6 @@ fn _pin_test(uint64 arg) -> int64 {
 fn _iommu_map(uint64 arg) -> int64 {
     uint64 pdev = _mlrift_pci_slot0
     if pdev == 0 { return 0xFFFFFFFFFFFFFFEA }            // -EINVAL: open device first
-    if _map_pages != 0 { return 0xFFFFFFFFFFFFFFF0 }      // -EBUSY: one mapping at a time
 
     uint8[24] req_arr
     uint64 req = req_arr
@@ -361,6 +369,30 @@ fn _iommu_map(uint64 arg) -> int64 {
         _iommu_dev = dev
         _printk("mlrift_pci: paging domain allocated + attached\n")
     }
+
+    // Lazily allocate the mapping table; find a free slot and reject a
+    // duplicate IOVA. (free_idx == MAP_MAX means no slot found.)
+    if _map_table == 0 {
+        uint64 t = alloc(MAP_TABLE_BYTES)
+        if t == 0 { return 0xFFFFFFFFFFFFFFF4 }           // -ENOMEM
+        uint64 ti = 0
+        while ti < MAP_TABLE_BYTES { unsafe { *((t + ti) as uint8) = 0 }; ti = ti + 1 }
+        _map_table = t
+    }
+    uint64 free_idx = MAP_MAX
+    uint64 mi = 0
+    while mi < MAP_MAX {
+        uint64 e = _map_table + mi * MAP_ENTRY_SIZE
+        uint64 e_pages = 0; unsafe { *((e + E_PAGES) as uint64) -> e_pages }
+        if e_pages == 0 {
+            if free_idx == MAP_MAX { free_idx = mi }
+        } else {
+            uint64 e_iova = 0; unsafe { *((e + E_IOVA) as uint64) -> e_iova }
+            if e_iova == iova { return 0xFFFFFFFFFFFFFFF0 }  // -EBUSY: iova already mapped
+        }
+        mi = mi + 1
+    }
+    if free_idx == MAP_MAX { return 0xFFFFFFFFFFFFFFE4 }   // -ENOSPC = -28: table full
 
     // Pin the user buffer.
     uint64 pages = alloc(npages * 8)
@@ -400,12 +432,14 @@ fn _iommu_map(uint64 arg) -> int64 {
         return 0xFFFFFFFFFFFFFFFB
     }
 
-    // Record the live mapping (kept pinned/mapped until UNMAP).
-    _map_pages  = pages
-    _map_npages = npages
-    _map_sgt    = sgt
-    _map_iova   = iova
-    _map_size   = size
+    // Record the live mapping in the free slot (kept pinned/mapped
+    // until UNMAP or teardown).
+    uint64 ent = _map_table + free_idx * MAP_ENTRY_SIZE
+    unsafe { *((ent + E_IOVA)   as uint64) = iova }
+    unsafe { *((ent + E_SIZE)   as uint64) = size }
+    unsafe { *((ent + E_PAGES)  as uint64) = pages }
+    unsafe { *((ent + E_NPAGES) as uint64) = npages }
+    unsafe { *((ent + E_SGT)    as uint64) = sgt }
     _printk("mlrift_pci: IOMMU_MAP ok\n")
 
     // Verify the mapping resolves; return the backing phys addr.
@@ -417,7 +451,7 @@ fn _iommu_map(uint64 arg) -> int64 {
 // iova; u64 size } and must match the active mapping.
 fn _iommu_unmap(uint64 arg) -> int64 {
     if _iommu_domain == 0 { return 0xFFFFFFFFFFFFFFEA }
-    if _map_pages == 0 { return 0xFFFFFFFFFFFFFFEA }      // nothing mapped
+    if _map_table == 0 { return 0xFFFFFFFFFFFFFFEA }      // nothing mapped
 
     uint8[16] req_arr
     uint64 req = req_arr
@@ -427,21 +461,33 @@ fn _iommu_unmap(uint64 arg) -> int64 {
     if not_copied != 0 { return 0xFFFFFFFFFFFFFFF2 }
     uint64 iova = 0; unsafe { *((req + 0) as uint64) -> iova }
     uint64 size = 0; unsafe { *((req + 8) as uint64) -> size }
-    if iova != _map_iova { return 0xFFFFFFFFFFFFFFEA }
-    if size != _map_size { return 0xFFFFFFFFFFFFFFEA }
 
-    iommu_unmap(_iommu_domain, iova, size)
-    sg_free_table(_map_sgt)
-    dealloc(_map_sgt)
-    unpin_user_pages(_map_pages, _map_npages)
-    dealloc(_map_pages)
-    _map_pages  = 0
-    _map_npages = 0
-    _map_sgt    = 0
-    _map_iova   = 0
-    _map_size   = 0
-    _printk("mlrift_pci: IOMMU_UNMAP ok\n")
-    return 0
+    // Find the entry matching {iova, size} and tear it down.
+    uint64 mi = 0
+    while mi < MAP_MAX {
+        uint64 e = _map_table + mi * MAP_ENTRY_SIZE
+        uint64 e_pages = 0; unsafe { *((e + E_PAGES) as uint64) -> e_pages }
+        if e_pages != 0 {
+            uint64 e_iova = 0; unsafe { *((e + E_IOVA) as uint64) -> e_iova }
+            uint64 e_size = 0; unsafe { *((e + E_SIZE) as uint64) -> e_size }
+            if e_iova == iova {
+                if e_size == size {
+                    uint64 e_npages = 0; unsafe { *((e + E_NPAGES) as uint64) -> e_npages }
+                    uint64 e_sgt = 0;    unsafe { *((e + E_SGT)    as uint64) -> e_sgt }
+                    iommu_unmap(_iommu_domain, iova, size)
+                    sg_free_table(e_sgt)
+                    dealloc(e_sgt)
+                    unpin_user_pages(e_pages, e_npages)
+                    dealloc(e_pages)
+                    unsafe { *((e + E_PAGES) as uint64) = 0 }   // free the slot
+                    _printk("mlrift_pci: IOMMU_UNMAP ok\n")
+                    return 0
+                }
+            }
+        }
+        mi = mi + 1
+    }
+    return 0xFFFFFFFFFFFFFFEA   // -EINVAL: no matching mapping
 }
 
 // Phase B.1.f: teardown hook. cleanup_module calls this BEFORE
@@ -455,16 +501,26 @@ fn _iommu_unmap(uint64 arg) -> int64 {
 // table, so it stays correct even after CLOSE_PCI cleared the slot —
 // freeing a still-attached domain is a kernel BUG. Idempotent.
 fn _iommu_teardown() {
-    if _map_pages != 0 {
-        if _iommu_domain != 0 { iommu_unmap(_iommu_domain, _map_iova, _map_size) }
-        if _map_sgt != 0 { sg_free_table(_map_sgt); dealloc(_map_sgt) }
-        unpin_user_pages(_map_pages, _map_npages)
-        dealloc(_map_pages)
-        _map_pages = 0
-        _map_npages = 0
-        _map_sgt = 0
-        _map_iova = 0
-        _map_size = 0
+    if _map_table != 0 {
+        uint64 mi = 0
+        while mi < MAP_MAX {
+            uint64 e = _map_table + mi * MAP_ENTRY_SIZE
+            uint64 e_pages = 0; unsafe { *((e + E_PAGES) as uint64) -> e_pages }
+            if e_pages != 0 {
+                uint64 e_iova = 0;   unsafe { *((e + E_IOVA)   as uint64) -> e_iova }
+                uint64 e_size = 0;   unsafe { *((e + E_SIZE)   as uint64) -> e_size }
+                uint64 e_npages = 0; unsafe { *((e + E_NPAGES) as uint64) -> e_npages }
+                uint64 e_sgt = 0;    unsafe { *((e + E_SGT)    as uint64) -> e_sgt }
+                if _iommu_domain != 0 { iommu_unmap(_iommu_domain, e_iova, e_size) }
+                if e_sgt != 0 { sg_free_table(e_sgt); dealloc(e_sgt) }
+                unpin_user_pages(e_pages, e_npages)
+                dealloc(e_pages)
+                unsafe { *((e + E_PAGES) as uint64) = 0 }
+            }
+            mi = mi + 1
+        }
+        dealloc(_map_table)
+        _map_table = 0
     }
     if _iommu_domain != 0 {
         if _iommu_dev != 0 { iommu_detach_device(_iommu_domain, _iommu_dev) }
