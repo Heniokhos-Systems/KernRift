@@ -10,13 +10,19 @@
 # Flow (NO vfio-pci anywhere — this avoids the vfio_pci_core_runtime_suspend
 # NULL-deref hard-hang that the old vfio<->amdgpu<->mlrift churn triggered):
 #   amdgpu(warm) -> unbind amdgpu -> bind mlrift_pci -> read warm markers
-#                -> restore (on ANY exit): unbind mlrift_pci, rmmod, rebind amdgpu
+#                -> restore (on ANY exit): release mlrift_pci, return to amdgpu
 #
-# HAZARD: under a LIVE KDE/Wayland session the amdgpu->mlrift unbind hot-removes
-# a GPU that KWin enumerated at boot, which MAY crash the compositor and log you
-# out. This script only WARNS (you opted to try live). If it logs you out, the
-# restore trap still puts the dGPU back on amdgpu; re-run from a text console
-# (Ctrl+Alt+F3) after `sudo systemctl stop sddm` for a guaranteed-clean run.
+# RESTORE / DEV LOOP: amdgpu can't simply re-bind in-session — its .remove leaks
+# a 'mem_info_preempt_used' sysfs attr, so re-probe fails -17 EEXIST. The fix is a
+# PCI remove+rescan, which re-probes amdgpu fresh and re-warms the card. But
+# rescan re-adds the GPU = a DRM hot-add, only safe with NO compositor running.
+# Therefore:
+#   * Live desktop: ONE run per boot. restore leaves the dGPU unbound; reboot to
+#     get amdgpu back. (The amdgpu->mlrift unbind itself is empirically survivable
+#     under KWin, but the rescan restore is not, so we don't attempt it live.)
+#   * DEV LOOP (recommended for iterating): `sudo systemctl stop sddm`, switch to
+#     a TTY (Ctrl+Alt+F3) or SSH in, then run this script repeatedly — restore
+#     auto-recovers via remove+rescan each time, no reboot. `start sddm` when done.
 #
 # Prereqs (build first):
 #   MLRift:  ./build/mlrc --arch=x86_64 --target=linux --emit=elfexe \
@@ -33,20 +39,41 @@ cur_drv() { basename "$(readlink -f /sys/bus/pci/devices/$BDF/driver 2>/dev/null
 # SIGHUP/TERM from a crashing session) — never leave it stranded on mlrift_pci.
 restore() {
   trap - EXIT INT TERM HUP
-  say "restore: release mlrift_pci, try to rebind amdgpu"
+  say "restore: release mlrift_pci, return dGPU to amdgpu"
   echo "$BDF" | sudo tee /sys/bus/pci/drivers/mlrift_pci/unbind >/dev/null 2>&1
   echo ""     | sudo tee "$ovr"                                >/dev/null 2>&1
   sudo rmmod mlrift_pci 2>/dev/null
   echo "$BDF" | sudo tee /sys/bus/pci/drivers/amdgpu/bind      >/dev/null 2>&1
   sleep 1
   if [ "$(cur_drv)" = "amdgpu" ]; then
-    echo "  dGPU restored to amdgpu."
+    echo "  dGPU restored to amdgpu (warm)."
+    return
+  fi
+  # amdgpu re-bind is blocked by its leaked 'mem_info_preempt_used' sysfs attr
+  # (-17 EEXIST). PCI remove+rescan destroys the leaked node and re-probes amdgpu
+  # fresh (re-warms). rescan = a DRM hot-add though, so only auto-recover when no
+  # compositor is running (the intended dev-loop mode).
+  if systemctl is-active --quiet display-manager 2>/dev/null; then
+    echo "  dGPU is now unbound; amdgpu rebind blocked by its -17 sysfs leak."
+    echo "  REBOOT to restore amdgpu — OR for an in-session dev loop, run with the"
+    echo "  display manager stopped ('sudo systemctl stop sddm') and this script"
+    echo "  will auto-recover via PCI remove+rescan (no reboot)."
+    return
+  fi
+  say "restore: clearing amdgpu -17 leak via PCI remove + rescan"
+  echo 1 | sudo tee /sys/bus/pci/devices/$BDF/remove >/dev/null 2>&1
+  sleep 1
+  echo 1 | sudo tee /sys/bus/pci/rescan              >/dev/null 2>&1
+  k=0
+  while [ "$k" -lt 25 ]; do
+    [ "$(cur_drv)" = "amdgpu" ] && break
+    sleep 1; k=$((k + 1))
+  done
+  if [ "$(cur_drv)" = "amdgpu" ]; then
+    echo "  dGPU re-warmed by amdgpu via remove+rescan — ready for another run."
   else
-    echo "  NOTE: dGPU is now unbound (driver='$(cur_drv)'). amdgpu re-bind is"
-    echo "  blocked by amdgpu's own leaked 'mem_info_preempt_used' sysfs attr"
-    echo "  (re-probe fails -17 EEXIST). Harmless. REBOOT to return it to amdgpu"
-    echo "  (it auto-binds at boot); a 2nd run also needs a reboot first (this"
-    echo "  script requires the dGPU to start warm on amdgpu)."
+    echo "  WARN: dGPU not on amdgpu after remove+rescan (driver='$(cur_drv)')."
+    echo "  Check 'sudo dmesg | tail'; reboot if needed."
   fi
 }
 
