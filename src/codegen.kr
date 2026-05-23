@@ -11549,10 +11549,9 @@ fn emit_elf_lkm(uint64 text_len, uint64 data_len, uint64 arch) {
             write(2, "krc: @module_init conflicts with @module_register_misc_device (init is auto-generated)\n", 88)
             exit(1)
         }
-        if exit_fn_tok != 0 {
-            write(2, "krc: @module_exit conflicts with @module_register_misc_device (exit is auto-generated)\n", 88)
-            exit(1)
-        }
+        // @module_exit is ALLOWED in misc-device mode: it becomes an
+        // optional teardown hook that cleanup_module calls before
+        // misc_deregister (Phase B.1.f). init stays fully auto-generated.
     }
     if misc_dev_mode == 0 {
         if init_fn_tok == 0 {
@@ -11602,6 +11601,23 @@ fn emit_elf_lkm(uint64 text_len, uint64 data_len, uint64 arch) {
         }
     }
 
+    // Phase B.1.f: optional @module_exit teardown hook in misc-device
+    // mode. cleanup_module calls it (intra-.text direct rel32, no
+    // relocation) BEFORE misc_deregister, so a driver can release
+    // resources (e.g. pci_dev refs) on rmmod. init stays auto-generated.
+    uint64 has_exit_hook = 0
+    uint64 exit_hook_code_off = 0
+    if misc_dev_mode != 0 {
+        if exit_fn_tok != 0 {
+            has_exit_hook = 1
+            exit_hook_code_off = fn_lookup(exit_fn_tok)
+            if exit_hook_code_off == 0xFFFFFFFF {
+                write(2, "krc: @module_exit teardown function not found in fn_table\n", 58)
+                exit(1)
+            }
+        }
+    }
+
     // Misc-device mode: locate misc_register / misc_deregister in
     // extern_fn_table by name. User must declare them as extern fns.
     uint64 misc_register_extern_idx = 0
@@ -11648,6 +11664,9 @@ fn emit_elf_lkm(uint64 text_len, uint64 data_len, uint64 arch) {
     uint64 misc_name_data_off = data_len + 80 + 272
     if misc_dev_mode != 0 {
         misc_text_extra = 42
+        // A teardown hook prepends a 5-byte `call` to cleanup_module
+        // (21 → 26 bytes), so the .text extra grows from 42 to 47.
+        if has_exit_hook != 0 { misc_text_extra = 47 }
         misc_data_extra = 80 + 272 + misc_dev_name_len + 1
         // After adding our extras, init_code_off/exit_code_off point at
         // our auto-generated bodies — used later when emitting symbols.
@@ -12255,15 +12274,24 @@ fn emit_elf_lkm(uint64 text_len, uint64 data_len, uint64 arch) {
         emit_byte(0x48); emit_byte(0x83); emit_byte(0xc4); emit_byte(0x08)
         emit_byte(0xc3)
 
-        // Auto-generated cleanup_module (21 bytes): same shape, calls
-        // misc_deregister instead.
-        emit_byte(0x48); emit_byte(0x83); emit_byte(0xec); emit_byte(0x08)
-        emit_byte(0x48); emit_byte(0x8d); emit_byte(0x3d)
+        // Auto-generated cleanup_module: same shape, calls
+        // misc_deregister. If a @module_exit teardown hook is present, a
+        // `call <hook>` (intra-.text direct rel32, no relocation) is
+        // prepended after the stack adjust, giving 26 bytes total.
+        emit_byte(0x48); emit_byte(0x83); emit_byte(0xec); emit_byte(0x08)  // sub rsp, 8
+        if has_exit_hook != 0 {
+            // call <exit hook>: e8 rel32, rel32 = target - next_insn_addr.
+            // call opcode is at misc_exit_text_off+4; next insn at +9.
+            emit_byte(0xe8)
+            uint64 hook_rel = exit_hook_code_off - (misc_exit_text_off + 9)
+            emit_u32_le(hook_rel)
+        }
+        emit_byte(0x48); emit_byte(0x8d); emit_byte(0x3d)                   // lea rdi, [rip+miscdev]
         emit_byte(0x00); emit_byte(0x00); emit_byte(0x00); emit_byte(0x00)
-        emit_byte(0xe8)
+        emit_byte(0xe8)                                                      // call misc_deregister
         emit_byte(0x00); emit_byte(0x00); emit_byte(0x00); emit_byte(0x00)
-        emit_byte(0x48); emit_byte(0x83); emit_byte(0xc4); emit_byte(0x08)
-        emit_byte(0xc3)
+        emit_byte(0x48); emit_byte(0x83); emit_byte(0xc4); emit_byte(0x08)  // add rsp, 8
+        emit_byte(0xc3)                                                      // ret
     }
 
     // ---- Emit .data ----
@@ -12660,12 +12688,19 @@ fn emit_elf_lkm(uint64 text_len, uint64 data_len, uint64 arch) {
         emit_u64_le(misc_init_text_off + 12)
         emit_u64_le((mr_sym_idx << 32) | 4)           // R_X86_64_PLT32 = 4
         emit_u64_le(0xFFFFFFFFFFFFFFFC)
-        // cleanup_module + 7 → _lkm_miscdev (PC32)
-        emit_u64_le(misc_exit_text_off + 7)
+        // cleanup_module lea → _lkm_miscdev (PC32) and call →
+        // misc_deregister (PLT32). A teardown hook prepends a 5-byte
+        // call, shifting both displacement fields by 5.
+        uint64 cu_lea_off = misc_exit_text_off + 7
+        uint64 cu_call_off = misc_exit_text_off + 12
+        if has_exit_hook != 0 {
+            cu_lea_off = misc_exit_text_off + 12
+            cu_call_off = misc_exit_text_off + 17
+        }
+        emit_u64_le(cu_lea_off)
         emit_u64_le((lkm_miscdev_sym_idx << 32) | 2)
         emit_u64_le(0xFFFFFFFFFFFFFFFC)
-        // cleanup_module + 12 → misc_deregister (PLT32)
-        emit_u64_le(misc_exit_text_off + 12)
+        emit_u64_le(cu_call_off)
         emit_u64_le((md_sym_idx << 32) | 4)
         emit_u64_le(0xFFFFFFFFFFFFFFFC)
     }

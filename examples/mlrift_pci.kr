@@ -118,6 +118,10 @@ fn _alloc_slot(uint64 pdev) -> uint64 {
 //   = 0x400D'4D01
 static uint64 IOCTL_MLRIFT_OPEN_PCI = 0x400D4D01
 
+// MLRIFT_CLOSE_PCI = _IO('M', 2): no data, arg carries the slot index
+// (0..3) to release. = ('M'<<8) | 2 = 0x00004D02.
+static uint64 IOCTL_MLRIFT_CLOSE_PCI = 0x00004D02
+
 // Negative errno values returned to userland (linux/errno.h).
 // EFAULT = 14, EINVAL = 22, ENODEV = 19, EBUSY = 16.
 // We return -errno as signed 64-bit, so e.g. -EFAULT = 0xFFFFFFFFFFFFFFF2.
@@ -151,8 +155,34 @@ fn driver_ioctl(uint64 file, uint64 cmd, uint64 arg) -> int64 {
         _printk("mlrift_pci: opened PCI device, slot allocated\n")
         return slot
     }
+    if cmd == IOCTL_MLRIFT_CLOSE_PCI {
+        // arg is the slot index (0..3). Drop the pci_dev ref taken by
+        // pci_get_domain_bus_and_slot and free the slot.
+        uint64 idx = arg
+        if idx == 0 { if _mlrift_pci_slot0 != 0 { pci_dev_put(_mlrift_pci_slot0); _mlrift_pci_slot0 = 0; return 0 } }
+        if idx == 1 { if _mlrift_pci_slot1 != 0 { pci_dev_put(_mlrift_pci_slot1); _mlrift_pci_slot1 = 0; return 0 } }
+        if idx == 2 { if _mlrift_pci_slot2 != 0 { pci_dev_put(_mlrift_pci_slot2); _mlrift_pci_slot2 = 0; return 0 } }
+        if idx == 3 { if _mlrift_pci_slot3 != 0 { pci_dev_put(_mlrift_pci_slot3); _mlrift_pci_slot3 = 0; return 0 } }
+        return 0xFFFFFFFFFFFFFFEA   // -EINVAL: bad slot or already closed
+    }
     _printk("mlrift_pci: unknown ioctl cmd\n")
     return 0xFFFFFFFFFFFFFFE7   // -ENOTTY = -25
+}
+
+// Phase B.1.f: teardown hook. cleanup_module calls this BEFORE
+// misc_deregister on rmmod. Without it, any pci_dev refs left in the
+// slot table (userland opened a device but never issued CLOSE_PCI, or
+// was killed) would leak — keeping the device's refcount elevated so it
+// can't be cleanly unbound/rebound, which the VFIO-replacement path
+// needs. Heap-free; runs in kernel context.
+@module_exit
+fn driver_exit() -> int64 {
+    if _mlrift_pci_slot0 != 0 { pci_dev_put(_mlrift_pci_slot0); _mlrift_pci_slot0 = 0 }
+    if _mlrift_pci_slot1 != 0 { pci_dev_put(_mlrift_pci_slot1); _mlrift_pci_slot1 = 0 }
+    if _mlrift_pci_slot2 != 0 { pci_dev_put(_mlrift_pci_slot2); _mlrift_pci_slot2 = 0 }
+    if _mlrift_pci_slot3 != 0 { pci_dev_put(_mlrift_pci_slot3); _mlrift_pci_slot3 = 0 }
+    _printk("mlrift_pci: released open PCI device refs on unload\n")
+    return 0
 }
 
 // Phase B.2.b: map the slot-0 device's BAR0 into the calling process.
