@@ -60,6 +60,36 @@ static uint64 extern_fn_count = 0
 static uint64 extern_call_sites = 0
 static uint64 extern_call_count = 0
 
+// Active emit mode (mirror of main.kr's `emit_mode` arg to compile()).
+// 7 == LKM (.ko). Used so the alloc()/dealloc() builtins can switch from
+// the userland mmap/munmap syscall path to the kernel slab allocator
+// (kmalloc/kfree) — a `syscall` instruction from ring 0 panics the kernel.
+// Set via set_emit_mode() before the AST walk.
+static uint64 cg_emit_mode = 0
+
+// LKM slab-allocator usage flags. When kernel-mode alloc()/dealloc() are
+// emitted, these record that __kmalloc_noprof / kfree must be added to the
+// .ko symtab as UND globals so the module loader resolves them. emit_elf_lkm
+// reads these to reserve the extra symbols, strtab names, and relocations.
+// The call sites themselves are recorded in extern_call_sites with the
+// sentinel extern indices below.
+static uint64 lkm_uses_kmalloc = 0
+static uint64 lkm_uses_kfree = 0
+
+// Sentinel extern indices stored in extern_call_sites for the auto-injected
+// kmalloc/kfree calls (they are NOT in extern_fn_table). emit_elf_lkm's
+// relocation pass detects these and maps them to the dedicated kmalloc/kfree
+// UND symbol indices instead of `extern_sym_base + idx`.
+static uint64 LKM_KMALLOC_SENTINEL = 0xF0000000
+static uint64 LKM_KFREE_SENTINEL   = 0xF0000001
+
+// GFP_KERNEL flags value for kernel 6.17 x86_64. Composed as
+//   __GFP_RECLAIM(___GFP_DIRECT_RECLAIM|___GFP_KSWAPD_RECLAIM = 0x400|0x800)
+//   | __GFP_IO(0x40) | __GFP_FS(0x80) = 0xcc0.
+// Verified against a C reference module's disassembly (mov esi,0xcc0 before
+// the kmalloc call). Passed as the 2nd arg (rsi) to __kmalloc_noprof.
+static uint64 LKM_GFP_KERNEL = 0xcc0
+
 // Return fixup table: jmp offsets that need patching to epilogue
 // [patch_offset(4)] × 64
 static uint64 ret_fixups = 0
@@ -134,6 +164,9 @@ static uint64 target_arch = 0
 
 @export
 fn set_target_arch(uint64 v) { target_arch = v }
+
+@export
+fn set_emit_mode(uint64 v) { cg_emit_mode = v }
 
 // Windows IAT call fixups: [patch_offset(4), iat_slot(4)] × 1024
 static uint64 win_iat_fixups = 0
@@ -296,6 +329,8 @@ fn codegen_init(uint64 capacity, uint64 source, uint64 tokens) {
     extern_fn_count = 0
     extern_call_sites = alloc(1024 * 16)
     extern_call_count = 0
+    lkm_uses_kmalloc = 0
+    lkm_uses_kfree = 0
     static_count = 0
     static_data_size = 0
     static_fixups = alloc(8192 * 8)
@@ -4702,6 +4737,32 @@ fn gen_expr(uint64 node) {
         if is_extern_call == 0 && tok_matches(wct, "alloc", 5) != 0 {
             uint32 first_arg = ast_child(node)
             uint64 wfa = first_arg
+
+            // Kernel-module mode: route through the kernel slab allocator.
+            // A `syscall` from ring 0 panics, so emit a call to the kernel's
+            // exported __kmalloc_noprof(size, GFP_KERNEL) instead of mmap.
+            // kfree tracks size internally → NO +8 size header (userland-only).
+            //   __kmalloc_noprof(size_t size /*rdi*/, gfp_t flags /*rsi*/)
+            //   returns the pointer directly in rax.
+            if cg_emit_mode == 7 {
+                gen_expr(wfa)
+                // rax = size → rdi (first arg)
+                emit_mov_rdi_rax()
+                // rsi = GFP_KERNEL (second arg)
+                emit_mov_rax_imm(LKM_GFP_KERNEL)
+                emit_mov_rsi_rax()
+                // call __kmalloc_noprof (rel32 patched by linker reloc)
+                emit_byte(0xE8)
+                uint64 km_fixup_off = out_len
+                emit_u32_le(0)
+                extern_call_record(km_fixup_off, LKM_KMALLOC_SENTINEL)
+                lkm_uses_kmalloc = 1
+                // rax holds the allocated pointer; return it directly.
+                rax_invalidate()
+                rax_cache = 0
+                return
+            }
+
             gen_expr(wfa)
             // Save original requested size
             emit_store_rax_to_stack(temp_slot_0)
@@ -5488,6 +5549,25 @@ fn gen_expr(uint64 node) {
             gen_expr(wfa)
             // rax = user pointer (ptr+8 from alloc)
             // Real base = rax - 8, size = [rax-8], total = size + 8
+
+            // Kernel-module mode: kfree(ptr). No size header was reserved by
+            // the kernel-mode alloc(), so the pointer is the slab pointer
+            // verbatim. A `syscall` from ring 0 panics → call kfree instead.
+            //   kfree(const void *objp /*rdi*/)
+            if cg_emit_mode == 7 {
+                // rax = ptr → rdi (first arg)
+                emit_mov_rdi_rax()
+                // call kfree (rel32 patched by linker reloc)
+                emit_byte(0xE8)
+                uint64 kf_fixup_off = out_len
+                emit_u32_le(0)
+                extern_call_record(kf_fixup_off, LKM_KFREE_SENTINEL)
+                lkm_uses_kfree = 1
+                rax_invalidate()
+                rax_cache = 0
+                return
+            }
+
             if target_os == 2 {
                 // Windows dealloc: VirtualFree(base, 0, MEM_RELEASE)
                 // rax = user ptr (ptr+8 from alloc), base = rax - 8
@@ -11980,12 +12060,59 @@ fn emit_elf_lkm(uint64 text_len, uint64 data_len, uint64 arch) {
         strtab_len = strtab_len + 1
     }
 
+    // Auto-injected slab-allocator extern names for kernel-mode alloc()/
+    // dealloc(). These are NOT user-declared externs; they get dedicated
+    // UND globals appended after the regular extern symbols. Names are
+    // always reserved in strtab (offsets recorded) but only emitted when
+    // the corresponding flag is set, so layout math stays consistent.
+    uint64 kmalloc_name_off = strtab_len
+    if lkm_uses_kmalloc != 0 {
+        uint64 kmn = "__kmalloc_noprof"
+        uint64 kmn_len = 16
+        uint64 kmi = 0
+        while kmi < kmn_len {
+            uint64 sp = kmn + kmi
+            uint64 cc = 0
+            unsafe { *(sp as uint8) -> cc }
+            uint8 cb = cc
+            uint64 dp = strtab_buf + strtab_len
+            unsafe { *(dp as uint8) = cb }
+            strtab_len = strtab_len + 1
+            kmi = kmi + 1
+        }
+        uint64 kmtp = strtab_buf + strtab_len
+        unsafe { *(kmtp as uint8) = nul }
+        strtab_len = strtab_len + 1
+    }
+    uint64 kfree_name_off = strtab_len
+    if lkm_uses_kfree != 0 {
+        uint64 kfn = "kfree"
+        uint64 kfn_len = 5
+        uint64 kfi = 0
+        while kfi < kfn_len {
+            uint64 sp = kfn + kfi
+            uint64 cc = 0
+            unsafe { *(sp as uint8) -> cc }
+            uint8 cb = cc
+            uint64 dp = strtab_buf + strtab_len
+            unsafe { *(dp as uint8) = cb }
+            strtab_len = strtab_len + 1
+            kfi = kfi + 1
+        }
+        uint64 kftp = strtab_buf + strtab_len
+        unsafe { *(kftp as uint8) = nul }
+        strtab_len = strtab_len + 1
+    }
+
     // ---- Symtab count ----
     // null + fn_count locals (or fn_count-1 if main exists) + main + 3
     // LKM globals + extern_fn_count, plus 3 extra LOCAL OBJECTs in
     // misc-device mode (_lkm_miscdev / _lkm_fops / _lkm_name_str).
     uint64 sym_count = 1 + fn_count + 3 + extern_fn_count
     if misc_dev_mode != 0 { sym_count = sym_count + 3 }
+    // +1 UND global per auto-injected slab-allocator symbol in use.
+    if lkm_uses_kmalloc != 0 { sym_count = sym_count + 1 }
+    if lkm_uses_kfree != 0 { sym_count = sym_count + 1 }
     // +1 for the .data SECTION symbol used as the relocation target for
     // static-variable references (only when there are any).
     if static_fixup_count > 0 { sym_count = sym_count + 1 }
@@ -12380,6 +12507,35 @@ fn emit_elf_lkm(uint64 text_len, uint64 data_len, uint64 arch) {
         emit_u64_le(0)
         ei2 = ei2 + 1
     }
+    // The extern loop above emits extern_fn_count symbols; advance the
+    // running symbol index past them so the auto-injected slab-allocator
+    // symbols below land at the correct indices.
+    cur_sym_idx = cur_sym_idx + extern_fn_count
+
+    // Global UND: auto-injected slab-allocator symbols for kernel-mode
+    // alloc()/dealloc(). Appended right after the user externs so their
+    // symbol indices are deterministic. The relocation pass below maps the
+    // LKM_KMALLOC/KFREE_SENTINEL call-site indices to these.
+    uint64 kmalloc_sym_idx = cur_sym_idx
+    if lkm_uses_kmalloc != 0 {
+        emit_u32_le(kmalloc_name_off)
+        emit_byte(0x10)          // STB_GLOBAL << 4 | STT_NOTYPE
+        emit_byte(0)
+        emit_u16_le(0)           // SHN_UNDEF
+        emit_u64_le(0)
+        emit_u64_le(0)
+        cur_sym_idx = cur_sym_idx + 1
+    }
+    uint64 kfree_sym_idx = cur_sym_idx
+    if lkm_uses_kfree != 0 {
+        emit_u32_le(kfree_name_off)
+        emit_byte(0x10)          // STB_GLOBAL << 4 | STT_NOTYPE
+        emit_byte(0)
+        emit_u16_le(0)           // SHN_UNDEF
+        emit_u64_le(0)
+        emit_u64_le(0)
+        cur_sym_idx = cur_sym_idx + 1
+    }
 
     // ---- Emit .strtab ----
     ci = 0
@@ -12439,7 +12595,12 @@ fn emit_elf_lkm(uint64 text_len, uint64 data_len, uint64 arch) {
             uint32 xidx = 0
             unsafe { *(re4 as uint32) -> xidx }
             uint64 wxi = xidx
+            // Map the auto-injected slab-allocator sentinels to their
+            // dedicated UND symbol indices; everything else is a normal
+            // user extern at extern_sym_base + idx.
             uint64 sym_idx = extern_sym_base + wxi
+            if wxi == LKM_KMALLOC_SENTINEL { sym_idx = kmalloc_sym_idx }
+            if wxi == LKM_KFREE_SENTINEL { sym_idx = kfree_sym_idx }
             emit_u64_le(rco)
             uint64 rtype = 4   // R_X86_64_PLT32
             uint64 r_info = (sym_idx << 32) | rtype

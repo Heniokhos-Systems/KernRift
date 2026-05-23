@@ -1,0 +1,45 @@
+// lkm_kmalloc_test.kr — Phase B.1 example: kernel-mode alloc()/dealloc().
+//
+// Demonstrates that KernRift's alloc()/dealloc() builtins now work inside
+// kernel-context functions (an @lkm_ioctl_handler here). In LKM mode
+// (--emit=lkm) they lower to calls to the kernel slab allocator
+// (__kmalloc_noprof / kfree) instead of the userland mmap/munmap syscalls
+// that panic from ring 0.
+//
+// Compile (static check only — DO NOT insmod without separate review):
+//   krc --emit=lkm --arch=x86_64 --target=linux examples/lkm_kmalloc_test.kr -o lkm_kmalloc_test.ko
+//
+// Verify statically:
+//   objdump -d -M intel lkm_kmalloc_test.ko | grep -c syscall   # must be 0
+//   readelf -r lkm_kmalloc_test.ko                              # PLT32 vs __kmalloc_noprof/kfree
+//   readelf -s lkm_kmalloc_test.ko | grep UND                   # lists both symbols
+
+@module_license("GPL")
+@module_name("lkm_kmalloc_test")
+@module_register_misc_device("lkm_kmalloc_test")
+
+extern fn _printk(uint64 fmt) -> int32
+extern fn misc_register(uint64 dev) -> int32
+extern fn misc_deregister(uint64 dev) -> int32
+
+// IOCTL: MLRIFT_KMALLOC_PING = _IO('K', 1) = ('K'<<8)|1 = 0x4B01
+static uint64 IOCTL_KMALLOC_PING = 0x4B01
+
+@lkm_ioctl_handler
+fn driver_ioctl(uint64 file, uint64 cmd, uint64 arg) -> int64 {
+    if cmd == IOCTL_KMALLOC_PING {
+        // Heap-allocate a small buffer via the kernel slab allocator,
+        // touch it, then free it. In LKM mode alloc() -> __kmalloc_noprof
+        // and dealloc() -> kfree; no syscall, no panic.
+        uint64 p = alloc(64)
+        if p == 0 { return 0xFFFFFFFFFFFFFFF4 }   // -ENOMEM = -12
+        unsafe { *((p + 0) as uint64) = 0xCAFEBABE }
+        uint64 v = 0
+        unsafe { *((p + 0) as uint64) -> v }
+        dealloc(p)
+        _printk("lkm_kmalloc_test: kmalloc/kfree round-trip ok\n")
+        return v & 0xFFFF
+    }
+    _printk("lkm_kmalloc_test: unknown ioctl cmd\n")
+    return 0xFFFFFFFFFFFFFFE7   // -ENOTTY = -25
+}

@@ -2148,6 +2148,10 @@ fn time_ns() -> uint64 {
 fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode) {
     uint64 t_start = time_ns()
     set_target_arch(arch)
+    // Inform codegen of the emit mode so the alloc()/dealloc() builtins can
+    // route through the kernel slab allocator (kmalloc/kfree) instead of the
+    // userland mmap/munmap syscalls when targeting an LKM (emit_mode == 7).
+    set_emit_mode(emit_mode)
     import_init()
     import_check_file(input_path)
     import_process(input_path)
