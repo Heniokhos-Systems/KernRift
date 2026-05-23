@@ -39,6 +39,20 @@ extern fn unpin_user_pages(uint64 pages, uint64 npages)
 extern fn sg_alloc_table_from_pages_segment(uint64 sgt, uint64 pages, uint32 n_pages, uint32 offset, uint64 size, uint32 max_segment, uint64 gfp) -> uint64
 extern fn sg_free_table(uint64 sgt)
 
+// Phase B.3.c: the actual IOMMU plumbing. We own an unmanaged paging
+// domain (like VFIO) and map pinned user pages into it at a chosen IOVA.
+// iommu_paging_domain_alloc_flags returns an ERR_PTR on failure (pointer
+// in [-4095,-1]); iommu_attach_device/_map_sg return kernel int/ssize_t
+// in eax (mask to 32 bits / check sign). The device arg is &pci_dev->dev
+// (struct device embedded at offset 0xc8).
+extern fn iommu_paging_domain_alloc_flags(uint64 dev, uint32 flags) -> uint64
+extern fn iommu_attach_device(uint64 domain, uint64 dev) -> uint64
+extern fn iommu_detach_device(uint64 domain, uint64 dev)
+extern fn iommu_domain_free(uint64 domain)
+extern fn iommu_map_sg(uint64 domain, uint64 iova, uint64 sg, uint32 nents, uint32 prot, uint64 gfp) -> uint64
+extern fn iommu_unmap(uint64 domain, uint64 iova, uint64 size) -> uint64
+extern fn iommu_iova_to_phys(uint64 domain, uint64 iova) -> uint64
+
 // struct pci_dev field offset (kernel 6.17 x86_64): resource[0].start.
 // Each struct resource is 0x20 bytes; resource[N].start = 0x3e0 + N*0x20.
 static uint64 PCI_DEV_RESOURCE0_START = 0x3e0
@@ -53,6 +67,20 @@ static uint64 _mlrift_pci_slot0 = 0
 static uint64 _mlrift_pci_slot1 = 0
 static uint64 _mlrift_pci_slot2 = 0
 static uint64 _mlrift_pci_slot3 = 0
+
+// struct pci_dev field offset (kernel 6.17 x86_64): embedded struct
+// device, used as the arg to all iommu_* calls.
+static uint64 PCI_DEV_DEV = 0xc8
+
+// Phase B.3.c IOMMU state. One paging domain (allocated lazily on the
+// first MAP, attached to slot-0's device) + a single active mapping.
+// A multi-mapping table is a follow-up; one mapping proves the path.
+static uint64 _iommu_domain  = 0    // struct iommu_domain* (0 = none)
+static uint64 _map_pages     = 0    // kmalloc'd struct page* array
+static uint64 _map_npages    = 0
+static uint64 _map_sgt       = 0    // kmalloc'd struct sg_table
+static uint64 _map_iova      = 0
+static uint64 _map_size      = 0
 
 // Parse a single hex digit (0..F, lower or upper). Returns 0..15 on
 // success or 0xFFFFFFFF on bad input.
@@ -140,12 +168,24 @@ static uint64 IOCTL_MLRIFT_CLOSE_PCI = 0x00004D02
 // pin + SG plumbing. = (1<<30)|(16<<16)|('M'<<8)|3 = 0x40104D03.
 static uint64 IOCTL_MLRIFT_PIN_TEST = 0x40104D03
 
+// MLRIFT_IOMMU_MAP = _IOW('M', 4, char[24]): arg -> { u64 uaddr; u64
+// iova; u64 size }. Pins the buffer and maps it into our paging domain
+// at `iova`. = (1<<30)|(24<<16)|('M'<<8)|4 = 0x40184D04.
+static uint64 IOCTL_MLRIFT_IOMMU_MAP = 0x40184D04
+
+// MLRIFT_IOMMU_UNMAP = _IOW('M', 5, char[16]): arg -> { u64 iova; u64
+// size }. = (1<<30)|(16<<16)|('M'<<8)|5 = 0x40104D05.
+static uint64 IOCTL_MLRIFT_IOMMU_UNMAP = 0x40104D05
+
 // kernel constants
 static uint64 GFP_KERNEL_FLAGS = 0xcc0
 static uint64 FOLL_WRITE_FLAG  = 0x1
 static uint64 SG_MAX_SEGMENT   = 0xFFFFF000   // UINT_MAX page-aligned
+static uint64 SGT_SGL          = 0x00         // offsetof(struct sg_table, sgl)
 static uint64 SGT_ORIG_NENTS   = 0x0c         // offsetof(struct sg_table, orig_nents)
 static uint64 PIN_TEST_MAX_PAGES = 256        // smoke cap: 1 MiB
+static uint64 IOMMU_RW         = 0x3          // IOMMU_READ | IOMMU_WRITE
+static uint64 ERR_PTR_FLOOR    = 0xFFFFFFFFFFFFF000   // ptr > this = ERR_PTR
 
 // Negative errno values returned to userland (linux/errno.h).
 // EFAULT = 14, EINVAL = 22, ENODEV = 19, EBUSY = 16.
@@ -192,6 +232,12 @@ fn driver_ioctl(uint64 file, uint64 cmd, uint64 arg) -> int64 {
     }
     if cmd == IOCTL_MLRIFT_PIN_TEST {
         return _pin_test(arg)
+    }
+    if cmd == IOCTL_MLRIFT_IOMMU_MAP {
+        return _iommu_map(arg)
+    }
+    if cmd == IOCTL_MLRIFT_IOMMU_UNMAP {
+        return _iommu_unmap(arg)
     }
     _printk("mlrift_pci: unknown ioctl cmd\n")
     return 0xFFFFFFFFFFFFFFE7   // -ENOTTY = -25
@@ -265,6 +311,134 @@ fn _pin_test(uint64 arg) -> int64 {
     return nents_ret
 }
 
+// Phase B.3.c — map a pinned userland buffer into our IOMMU paging
+// domain at a caller-chosen IOVA. This is the kernel-side replacement
+// for VFIO_IOMMU_MAP_DMA. Requires slot 0 opened (the target device)
+// AND that device unbound from vfio-pci (so iommu_attach_device can
+// take ownership of the domain). `arg` -> { u64 uaddr; u64 iova; u64
+// size }, all page-aligned. Returns the backing phys addr (via
+// iommu_iova_to_phys) on success, or a negative errno.
+fn _iommu_map(uint64 arg) -> int64 {
+    uint64 pdev = _mlrift_pci_slot0
+    if pdev == 0 { return 0xFFFFFFFFFFFFFFEA }            // -EINVAL: open device first
+    if _map_pages != 0 { return 0xFFFFFFFFFFFFFFF0 }      // -EBUSY: one mapping at a time
+
+    uint8[24] req_arr
+    uint64 req = req_arr
+    uint64 zi = 0
+    while zi < 24 { unsafe { *((req + zi) as uint8) = 0 }; zi = zi + 1 }
+    uint64 not_copied = _copy_from_user(req, arg, 24)
+    if not_copied != 0 { return 0xFFFFFFFFFFFFFFF2 }      // -EFAULT
+    uint64 uaddr = 0; unsafe { *((req + 0)  as uint64) -> uaddr }
+    uint64 iova  = 0; unsafe { *((req + 8)  as uint64) -> iova }
+    uint64 size  = 0; unsafe { *((req + 16) as uint64) -> size }
+    if size == 0 { return 0xFFFFFFFFFFFFFFEA }
+    if (iova & 0xFFF) != 0 { return 0xFFFFFFFFFFFFFFEA }  // iova must be page-aligned
+    if (uaddr & 0xFFF) != 0 { return 0xFFFFFFFFFFFFFFEA } // uaddr too (smoke simplification)
+    uint64 npages = (size + 4095) / 4096
+    if npages == 0 { return 0xFFFFFFFFFFFFFFEA }
+    if npages > PIN_TEST_MAX_PAGES { return 0xFFFFFFFFFFFFFFEA }
+
+    uint64 dev = pdev + PCI_DEV_DEV
+
+    // Lazily allocate + attach our own unmanaged paging domain.
+    if _iommu_domain == 0 {
+        uint64 dom = iommu_paging_domain_alloc_flags(dev, 0)
+        if dom == 0 { return 0xFFFFFFFFFFFFFFED }          // NULL -> -ENODEV
+        if dom > ERR_PTR_FLOOR { return 0xFFFFFFFFFFFFFFED } // ERR_PTR(-errno)
+        uint64 art = iommu_attach_device(dom, dev)
+        art = art & 0xFFFFFFFF
+        if art != 0 {
+            iommu_domain_free(dom)
+            _printk("mlrift_pci: iommu_attach_device failed (device still bound to vfio-pci?)\n")
+            return 0xFFFFFFFFFFFFFFFB                       // -EIO = -5
+        }
+        _iommu_domain = dom
+        _printk("mlrift_pci: paging domain allocated + attached\n")
+    }
+
+    // Pin the user buffer.
+    uint64 pages = alloc(npages * 8)
+    if pages == 0 { return 0xFFFFFFFFFFFFFFF4 }            // -ENOMEM
+    uint32 npages32 = npages
+    uint64 pinned = pin_user_pages_fast(uaddr, npages32, FOLL_WRITE_FLAG, pages)
+    pinned = pinned & 0xFFFFFFFF
+    if pinned != npages {
+        if (pinned & 0x80000000) == 0 { if pinned != 0 { unpin_user_pages(pages, pinned) } }
+        dealloc(pages)
+        return 0xFFFFFFFFFFFFFFF2
+    }
+
+    // Build a persistent SG table (kmalloc, freed at unmap).
+    uint64 sgt = alloc(16)
+    if sgt == 0 { unpin_user_pages(pages, npages); dealloc(pages); return 0xFFFFFFFFFFFFFFF4 }
+    uint64 si = 0
+    while si < 16 { unsafe { *((sgt + si) as uint8) = 0 }; si = si + 1 }
+    uint32 maxseg32 = SG_MAX_SEGMENT
+    uint64 rc = sg_alloc_table_from_pages_segment(sgt, pages, npages32, 0, size, maxseg32, GFP_KERNEL_FLAGS)
+    rc = rc & 0xFFFFFFFF
+    if rc != 0 {
+        dealloc(sgt); unpin_user_pages(pages, npages); dealloc(pages)
+        return 0xFFFFFFFFFFFFFFF4
+    }
+
+    // Map the scatterlist into the domain at `iova`. iommu_map_sg returns
+    // ssize_t: bytes mapped (== size) on success, negative errno on error.
+    uint64 sgl = 0;    unsafe { *((sgt + SGT_SGL)        as uint64) -> sgl }
+    uint32 nents = 0;  unsafe { *((sgt + SGT_ORIG_NENTS) as uint32) -> nents }
+    uint32 prot32 = IOMMU_RW
+    uint64 mapped = iommu_map_sg(_iommu_domain, iova, sgl, nents, prot32, GFP_KERNEL_FLAGS)
+    if mapped != size {
+        if (mapped & 0x8000000000000000) == 0 { if mapped != 0 { iommu_unmap(_iommu_domain, iova, mapped) } }
+        sg_free_table(sgt); dealloc(sgt); unpin_user_pages(pages, npages); dealloc(pages)
+        _printk("mlrift_pci: iommu_map_sg failed\n")
+        return 0xFFFFFFFFFFFFFFFB
+    }
+
+    // Record the live mapping (kept pinned/mapped until UNMAP).
+    _map_pages  = pages
+    _map_npages = npages
+    _map_sgt    = sgt
+    _map_iova   = iova
+    _map_size   = size
+    _printk("mlrift_pci: IOMMU_MAP ok\n")
+
+    // Verify the mapping resolves; return the backing phys addr.
+    uint64 phys = iommu_iova_to_phys(_iommu_domain, iova)
+    return phys
+}
+
+// Phase B.3.c — reverse a mapping made by _iommu_map. `arg` -> { u64
+// iova; u64 size } and must match the active mapping.
+fn _iommu_unmap(uint64 arg) -> int64 {
+    if _iommu_domain == 0 { return 0xFFFFFFFFFFFFFFEA }
+    if _map_pages == 0 { return 0xFFFFFFFFFFFFFFEA }      // nothing mapped
+
+    uint8[16] req_arr
+    uint64 req = req_arr
+    uint64 zi = 0
+    while zi < 16 { unsafe { *((req + zi) as uint8) = 0 }; zi = zi + 1 }
+    uint64 not_copied = _copy_from_user(req, arg, 16)
+    if not_copied != 0 { return 0xFFFFFFFFFFFFFFF2 }
+    uint64 iova = 0; unsafe { *((req + 0) as uint64) -> iova }
+    uint64 size = 0; unsafe { *((req + 8) as uint64) -> size }
+    if iova != _map_iova { return 0xFFFFFFFFFFFFFFEA }
+    if size != _map_size { return 0xFFFFFFFFFFFFFFEA }
+
+    iommu_unmap(_iommu_domain, iova, size)
+    sg_free_table(_map_sgt)
+    dealloc(_map_sgt)
+    unpin_user_pages(_map_pages, _map_npages)
+    dealloc(_map_pages)
+    _map_pages  = 0
+    _map_npages = 0
+    _map_sgt    = 0
+    _map_iova   = 0
+    _map_size   = 0
+    _printk("mlrift_pci: IOMMU_UNMAP ok\n")
+    return 0
+}
+
 // Phase B.1.f: teardown hook. cleanup_module calls this BEFORE
 // misc_deregister on rmmod. Without it, any pci_dev refs left in the
 // slot table (userland opened a device but never issued CLOSE_PCI, or
@@ -273,6 +447,25 @@ fn _pin_test(uint64 arg) -> int64 {
 // needs. Heap-free; runs in kernel context.
 @module_exit
 fn driver_exit() -> int64 {
+    // B.3.c: tear down any live IOMMU mapping + detach/free the paging
+    // domain BEFORE releasing the pci_dev refs (detach needs the device
+    // pointer, and the device must be detached before it could rebind).
+    if _map_pages != 0 {
+        if _iommu_domain != 0 { iommu_unmap(_iommu_domain, _map_iova, _map_size) }
+        if _map_sgt != 0 { sg_free_table(_map_sgt); dealloc(_map_sgt) }
+        unpin_user_pages(_map_pages, _map_npages)
+        dealloc(_map_pages)
+        _map_pages = 0
+    }
+    if _iommu_domain != 0 {
+        if _mlrift_pci_slot0 != 0 {
+            uint64 dev = _mlrift_pci_slot0 + PCI_DEV_DEV
+            iommu_detach_device(_iommu_domain, dev)
+        }
+        iommu_domain_free(_iommu_domain)
+        _iommu_domain = 0
+        _printk("mlrift_pci: paging domain detached + freed on unload\n")
+    }
     if _mlrift_pci_slot0 != 0 { pci_dev_put(_mlrift_pci_slot0); _mlrift_pci_slot0 = 0 }
     if _mlrift_pci_slot1 != 0 { pci_dev_put(_mlrift_pci_slot1); _mlrift_pci_slot1 = 0 }
     if _mlrift_pci_slot2 != 0 { pci_dev_put(_mlrift_pci_slot2); _mlrift_pci_slot2 = 0 }
