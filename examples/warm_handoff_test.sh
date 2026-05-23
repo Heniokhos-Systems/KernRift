@@ -1,16 +1,22 @@
 #!/usr/bin/env bash
-# Warm-handoff state-survival experiment. amdgpu boots the dGPU (warms it),
-# then we hand it to mlrift_pci and read the warm markers via our driver.
-# Run as root.
+# Warm-handoff state-survival experiment — amdgpu-RESIDENT variant.
 #
-# !! MUST be run from a TEXT CONSOLE with the display manager STOPPED. !!
-# Hot-binding amdgpu to the dGPU makes a running Wayland compositor (e.g. KWin)
-# grab the new /dev/dri/render* node; the subsequent unbind crashes it and logs
-# you out (incident 2026-05-23). The dGPU having no monitor does NOT make this
-# safe — the compositor enumerates ALL render nodes. Safe procedure:
-#   sudo systemctl stop sddm     # or: stop display-manager  (controlled logout)
-#   # switch to a TTY (Ctrl+Alt+F3) or SSH in, then run this script
-#   sudo systemctl start sddm    # bring the desktop back afterwards
+# Precondition: the dGPU boots OWNED BY amdgpu (the vfio reservation is
+# disabled). To set that up once:
+#   sudo mv /etc/modprobe.d/vfio-dgpu.conf{,.disabled}
+#   sudo update-initramfs -u && sudo reboot
+# After reboot, `lspci -nnks 03:00.0` must show "Kernel driver in use: amdgpu".
+#
+# Flow (NO vfio-pci anywhere — this avoids the vfio_pci_core_runtime_suspend
+# NULL-deref hard-hang that the old vfio<->amdgpu<->mlrift churn triggered):
+#   amdgpu(warm) -> unbind amdgpu -> bind mlrift_pci -> read warm markers
+#                -> restore (on ANY exit): unbind mlrift_pci, rmmod, rebind amdgpu
+#
+# HAZARD: under a LIVE KDE/Wayland session the amdgpu->mlrift unbind hot-removes
+# a GPU that KWin enumerated at boot, which MAY crash the compositor and log you
+# out. This script only WARNS (you opted to try live). If it logs you out, the
+# restore trap still puts the dGPU back on amdgpu; re-run from a text console
+# (Ctrl+Alt+F3) after `sudo systemctl stop sddm` for a guaranteed-clean run.
 #
 # Prereqs (build first):
 #   MLRift:  ./build/mlrc --arch=x86_64 --target=linux --emit=elfexe \
@@ -21,53 +27,48 @@ set -u
 BDF=${1:-0000:03:00.0}
 say() { printf '\n=== %s ===\n' "$*"; }
 ovr=/sys/bus/pci/devices/$BDF/driver_override
-BDF_RE="${BDF//./\\.}"
+cur_drv() { basename "$(readlink -f /sys/bus/pci/devices/$BDF/driver 2>/dev/null)" 2>/dev/null || echo none; }
 
-# Safety guard: refuse to run while a display manager is active — the hot
-# bind/unbind below would crash the live compositor and log the user out.
-# Override with FORCE=1 only if certain no Wayland/X compositor is running.
-if [ "${FORCE:-0}" != "1" ] && systemctl is-active --quiet display-manager 2>/dev/null; then
-  echo "REFUSING: a display manager is active — running this will crash your desktop session and log you out." >&2
-  echo "  Run from a text console with it stopped:" >&2
-  echo "    sudo systemctl stop sddm     # or: stop display-manager" >&2
-  echo "    # switch to a TTY (Ctrl+Alt+F3) or SSH in, then re-run this script" >&2
-  echo "    sudo systemctl start sddm    # restore the desktop afterwards" >&2
-  echo "  (set FORCE=1 to override if you are certain no compositor is enumerating GPU render nodes.)" >&2
+# Always put the dGPU back on amdgpu, however we exit (normal, error, or a
+# SIGHUP/TERM from a crashing session) — never leave it stranded on mlrift_pci.
+restore() {
+  trap - EXIT INT TERM HUP
+  say "restore: return dGPU to amdgpu"
+  echo "$BDF" | sudo tee /sys/bus/pci/drivers/mlrift_pci/unbind >/dev/null 2>&1
+  echo ""     | sudo tee "$ovr"                                >/dev/null 2>&1
+  sudo rmmod mlrift_pci 2>/dev/null
+  echo "$BDF" | sudo tee /sys/bus/pci/drivers/amdgpu/bind      >/dev/null 2>&1
+  sleep 1; lspci -nnks "$BDF" | sed -n '1p;/driver in use/p'
+}
+
+# Precondition: dGPU must start on amdgpu (warm). Nothing to restore if not.
+if [ "$(cur_drv)" != "amdgpu" ]; then
+  echo "ABORT: $BDF is bound to '$(cur_drv)', expected 'amdgpu'." >&2
+  echo "  The dGPU must boot owned by amdgpu (disable the vfio reservation):" >&2
+  echo "    sudo mv /etc/modprobe.d/vfio-dgpu.conf{,.disabled}; sudo update-initramfs -u; sudo reboot" >&2
   exit 1
 fi
 
-say "1) take dGPU off vfio-pci, bind amdgpu to warm it"
-echo "$BDF" | sudo tee /sys/bus/pci/drivers/vfio-pci/unbind 2>/dev/null
-echo amdgpu | sudo tee "$ovr"
-echo "$BDF" | sudo tee /sys/bus/pci/drivers/amdgpu/bind
+# Warn (do NOT block) if a compositor is live — see HAZARD note above.
+if systemctl is-active --quiet display-manager 2>/dev/null; then
+  echo "WARNING: a display manager is active. The amdgpu->mlrift unbind may crash"
+  echo "  your KDE session. If it does, the restore trap still rebinds amdgpu;"
+  echo "  re-run from a TTY after 'sudo systemctl stop sddm' for a clean run."
+  echo "  Continuing in 5s (Ctrl-C to abort)..."
+  sleep 5
+fi
 
-say "2) wait for amdgpu to finish init (poll dmesg, up to 30s)"
-matched=0
-for i in $(seq 1 30); do
-  if sudo dmesg | grep -qE "amdgpu $BDF_RE.*(ring .* test|initialized|GPU init|amdgpu_device_ip_init)"; then matched=1; break; fi
-  sleep 1
-done
-[ "$matched" -eq 0 ] && echo "WARNING: amdgpu init not confirmed in 30s — proceeding anyway (check dmesg)"
-sudo dmesg | grep -E "amdgpu $BDF_RE" | tail -5
-lspci -nnks "$BDF"   # expect: Kernel driver in use: amdgpu
+trap restore EXIT INT TERM HUP
 
-say "3) hand off: unbind amdgpu, bind mlrift_pci (probe claims the WARM card)"
-echo "$BDF" | sudo tee /sys/bus/pci/drivers/amdgpu/unbind
-echo mlrift_pci | sudo tee "$ovr"
+say "1) load mlrift_pci, hand off the WARM card (amdgpu -> mlrift_pci)"
 sudo insmod /tmp/mlrift_pci.ko 2>/dev/null || lsmod | grep -q mlrift_pci || { echo "insmod FAILED and module not loaded — aborting"; exit 1; }
 sudo chmod 666 /dev/mlrift_pci
-echo "$BDF" | sudo tee /sys/bus/pci/drivers/mlrift_pci/bind
+echo mlrift_pci | sudo tee "$ovr"                                  # force mlrift_pci to be the only binder
+echo "$BDF"     | sudo tee /sys/bus/pci/drivers/amdgpu/unbind
+echo "$BDF"     | sudo tee /sys/bus/pci/drivers/mlrift_pci/bind 2>/dev/null || true  # may already be auto-bound via override
 lspci -nnks "$BDF"   # expect: Kernel driver in use: mlrift_pci
 
-say "4) read warm markers via mlrift_pci"
+say "2) read warm markers via mlrift_pci"
 sudo /tmp/warm_handoff_explore
 
-say "5) restore: unbind mlrift_pci, rmmod, back to vfio-pci"
-echo "$BDF" | sudo tee /sys/bus/pci/drivers/mlrift_pci/unbind
-echo vfio-pci | sudo tee "$ovr"   # leave pinned to vfio-pci — MLRift's default driver for this dGPU
-sudo rmmod mlrift_pci
-echo "$BDF" | sudo tee /sys/bus/pci/drivers/vfio-pci/bind
-lspci -nnks "$BDF"   # expect: Kernel driver in use: vfio-pci
-
-say "dmesg tail"
-sudo dmesg | grep -E "mlrift_pci|amdgpu $BDF_RE" | tail -20
+say "3) done — restore trap returns the dGPU to amdgpu on exit"
