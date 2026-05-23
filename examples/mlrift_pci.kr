@@ -121,8 +121,9 @@ static uint64 _map_table     = 0    // kmalloc'd MAP_MAX*MAP_ENTRY_SIZE (0 = non
 //   = 0x400D'4D01
 static uint64 IOCTL_MLRIFT_OPEN_PCI = 0x400D4D01
 
-// MLRIFT_CLOSE_PCI = _IO('M', 2): no data, arg carries the slot index
-// (0..3) to release. = ('M'<<8) | 2 = 0x00004D02.
+// MLRIFT_CLOSE_PCI = _IO('M', 2): no data, no arg — tears down this
+// session's IRQ + IOMMU resources (the device itself stays claimed by
+// the PCI driver until unbind/remove). = ('M'<<8) | 2 = 0x00004D02.
 static uint64 IOCTL_MLRIFT_CLOSE_PCI = 0x00004D02
 
 // MLRIFT_PIN_TEST = _IOW('M', 3, char[16]): arg points at a 16-byte
@@ -698,12 +699,10 @@ fn _iommu_unmap(uint64 arg) -> int64 {
     return 0xFFFFFFFFFFFFFFEA   // -EINVAL: no matching mapping
 }
 
-// Phase B.1.f: teardown hook. cleanup_module calls this BEFORE
-// misc_deregister on rmmod. Without it, any pci_dev refs left in the
-// slot table (userland opened a device but never issued CLOSE_PCI, or
-// was killed) would leak — keeping the device's refcount elevated so it
-// can't be cleanly unbound/rebound, which the VFIO-replacement path
-// needs. Heap-free; runs in kernel context.
+// IOMMU session teardown. Called from driver_remove (on unbind) and
+// from MLRIFT_CLOSE_PCI / IRQ_DISABLE — NOT from cleanup_module (the PCI
+// driver model drives the device lifecycle now). Heap-free; runs in
+// process context (probe/remove/ioctl).
 // Tear down any live IOMMU mapping, then detach + free the paging
 // domain. Uses _iommu_dev (captured at attach) rather than the slot
 // table, so it stays correct even after CLOSE_PCI cleared the slot —
