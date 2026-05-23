@@ -54,20 +54,24 @@ extern fn iommu_map_sg(uint64 domain, uint64 iova, uint64 sg, uint32 nents, uint
 extern fn iommu_unmap(uint64 domain, uint64 iova, uint64 size) -> uint64
 extern fn iommu_iova_to_phys(uint64 domain, uint64 iova) -> uint64
 
-// struct pci_dev field offset (kernel 6.17 x86_64): resource[0].start.
-// Each struct resource is 0x20 bytes; resource[N].start = 0x3e0 + N*0x20.
+// struct pci_dev field offset (kernel 6.17 x86_64): resource[0].start
+// (the resource[17] array base). struct resource is 0x40 bytes, so
+// resource[N].start = 0x3e0 + N*PCI_RES_STRIDE (see below).
 static uint64 PCI_DEV_RESOURCE0_START = 0x3e0
 // struct vm_area_struct field offsets (kernel 6.17 x86_64).
 static uint64 VMA_VM_START     = 0x00
 static uint64 VMA_VM_END       = 0x08
 static uint64 VMA_VM_PAGE_PROT = 0x18
 static uint64 VMA_VM_PGOFF     = 0x50
-// PCI BAR selection + noncached MMIO prot. Each struct resource is 0x20
-// bytes; resource[N].start = 0x3e0 + N*0x20, .end = 0x3e8 + N*0x20.
+// PCI BAR selection + noncached MMIO prot. struct resource is 0x40
+// bytes (verified via pahole on /sys/kernel/btf: size 64); the
+// resource[17] array begins at pci_dev+0x3e0, so resource[N].start =
+// 0x3e0 + N*0x40, .end = +8. (NB: 64-bit BARs occupy resource[N] with
+// resource[N+1] empty — BAR0=res[0], BAR2=res[2], BAR5=res[5].)
 // _PAGE_PCD (bit 4) = UC- on the default x86 PAT layout — matches what
 // pgprot_noncached/ioremap use for MMIO. mmap offset encodes the BAR:
 // byte_offset = pgoff<<12, bar_index = byte_offset>>40 = pgoff>>28.
-static uint64 PCI_RES_STRIDE   = 0x20
+static uint64 PCI_RES_STRIDE   = 0x40
 static uint64 PAGE_PCD         = 0x10
 static uint64 BAR_PGOFF_SHIFT  = 28
 static uint64 BAR_INBAR_MASK   = 0x0FFFFFFF
