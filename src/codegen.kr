@@ -11515,15 +11515,23 @@ fn emit_elf_lkm(uint64 text_len, uint64 data_len, uint64 arch) {
     // compile time so we work on any host kernel without re-build.
     // Trailing space is significant — matches what the running kernel
     // produces internally via MODULE_VERMAGIC_*.
-    // NOTE: vermagic intentionally OMITS "modversions" — even with
-    // insmod -f's MODULE_INIT_IGNORE_MODVERSIONS, the kernel appears to
-    // require __versions to have at least a `module_layout` entry when
-    // the magic claims modversions. Until A.1.5 emits real CRCs, we
-    // declare a non-modversions vermagic; -f's IGNORE_VERMAGIC handles
-    // the rest. The trailing space is still significant.
+    // vermagic MUST match the kernel's exactly when loading without -f.
+    // Includes "modversions " because kernel was built with
+    // CONFIG_MODVERSIONS=y. The trailing space is significant.
+    //
+    // Critical: `insmod` (without -f) is the correct command. -f sets
+    // MODULE_INIT_IGNORE_MODVERSIONS which zeros the kernel's view of
+    // our __version_ext_* sections, then check_version falls through
+    // to try_to_force_load() which returns -ENOEXEC silently because
+    // Ubuntu's kernel has CONFIG_MODULE_FORCE_LOAD=n.
+    //
+    // With plain `insmod`, the kernel sees our __version_ext_crcs +
+    // __version_ext_names sections (even empty), iterates zero entries,
+    // hits pr_warn_once("no extended symbol version for module_layout"),
+    // and returns success. See kernel/module/version.c::check_version.
     modinfo_len = _lkm_modinfo_kv_lit(modinfo_buf, modinfo_len,
                                        "vermagic", 8,
-                                       "6.17.0-29-generic SMP preempt mod_unload ", 41)
+                                       "6.17.0-29-generic SMP preempt mod_unload modversions ", 53)
 
     // ---- Build .gnu.linkonce.this_module content (1280 bytes) ----
     uint64 sm_size = 1280

@@ -3,10 +3,12 @@
 // Compile (x86_64 Linux, kernel 6.x):
 //   krc --emit=lkm --arch=x86_64 --target=linux examples/hello_lkm.kr -o hello.ko
 //
-// Load (Ubuntu kernels are built with CONFIG_MODVERSIONS=y so the
-// initial Phase A.1.3 build needs --force; Phase A.1.5 will add a real
-// __versions section and drop the -f requirement):
-//   sudo insmod -f hello.ko
+// Load (no -f flag — Ubuntu kernels disable CONFIG_MODULE_FORCE_LOAD, so
+// -f triggers silent -ENOEXEC via try_to_force_load. With plain insmod,
+// the kernel sees our empty __version_ext_crcs section, iterates zero
+// entries, prints `no extended symbol version for module_layout`, then
+// proceeds normally):
+//   sudo insmod hello.ko
 //   dmesg | tail -5
 //   sudo rmmod hello_kr
 //
