@@ -11284,6 +11284,30 @@ fn emit_elf_debug_footer(uint64 text_start, uint64 input_path) {
 //      (pointing at the struct module section)
 //   5. (A.1.5) Add a `__versions` section by reading Module.symvers and
 //      looking up CRCs for each extern symbol used
+// Read /proc/sys/kernel/osrelease into `out_buf` (max `cap` bytes),
+// strip the trailing newline, and return the byte length written.
+// Returns 0 on any failure (file missing, read short, etc.) — caller
+// falls back to a compile-time-baked default.
+fn _lkm_read_osrelease(uint64 out_buf, uint64 cap) -> uint64 {
+    uint64 fd = file_open("/proc/sys/kernel/osrelease", 0)
+    if fd >= 0xFFFFFFFF { return 0 }
+    uint64 n = file_read(fd, out_buf, cap)
+    file_close(fd)
+    if n == 0 { return 0 }
+    if n >= 0xFFFFFFFF { return 0 }
+    // Trim trailing newline / NUL.
+    while n > 0 {
+        uint64 p = out_buf + n - 1
+        uint64 c = 0
+        unsafe { *(p as uint8) -> c }
+        if c == 10 { n = n - 1 }
+        if c == 13 { n = n - 1 }
+        if c == 0 { n = n - 1 }
+        if c != 10 { if c != 13 { if c != 0 { return n } } }
+    }
+    return n
+}
+
 // Build a key=value\0 string in `buf` at offset `off`. Pulls bytes for
 // `key` from a NUL-terminated literal and for `value` from cg_source
 // at [val_start, val_start+val_len). Writes a trailing 0 byte. Returns
@@ -11516,8 +11540,11 @@ fn emit_elf_lkm(uint64 text_len, uint64 data_len, uint64 arch) {
     // Trailing space is significant — matches what the running kernel
     // produces internally via MODULE_VERMAGIC_*.
     // vermagic MUST match the kernel's exactly when loading without -f.
-    // Includes "modversions " because kernel was built with
-    // CONFIG_MODVERSIONS=y. The trailing space is significant.
+    // Format: "<release> SMP preempt mod_unload modversions " — the
+    // suffix is fixed for Ubuntu/Debian builds; only the release prefix
+    // varies. Read the release dynamically from /proc/sys/kernel/osrelease
+    // so this works on any host kernel without recompiling KernRift.
+    // Trailing space is significant.
     //
     // Critical: `insmod` (without -f) is the correct command. -f sets
     // MODULE_INIT_IGNORE_MODVERSIONS which zeros the kernel's view of
@@ -11529,9 +11556,40 @@ fn emit_elf_lkm(uint64 text_len, uint64 data_len, uint64 arch) {
     // __version_ext_names sections (even empty), iterates zero entries,
     // hits pr_warn_once("no extended symbol version for module_layout"),
     // and returns success. See kernel/module/version.c::check_version.
+    uint64 release_buf = alloc(128)
+    uint64 release_len = _lkm_read_osrelease(release_buf, 127)
+    if release_len == 0 {
+        // Fallback: hardcoded value for the bootstrap host kernel.
+        // Should only fire in unusual environments (no /proc mounted).
+        uint64 fb = "6.17.0-29-generic"
+        uint64 fbi = 0
+        while fbi < 17 {
+            uint64 sp = fb + fbi
+            uint64 sc = 0
+            unsafe { *(sp as uint8) -> sc }
+            uint8 sb = sc
+            unsafe { *((release_buf + fbi) as uint8) = sb }
+            fbi = fbi + 1
+        }
+        release_len = 17
+    }
+    // Append the fixed Ubuntu/Debian-flavor suffix:
+    //   " SMP preempt mod_unload modversions " (36 bytes incl. trailing space)
+    uint64 vermagic_suffix = " SMP preempt mod_unload modversions "
+    uint64 vsi = 0
+    while vsi < 36 {
+        uint64 sp = vermagic_suffix + vsi
+        uint64 sc = 0
+        unsafe { *(sp as uint8) -> sc }
+        uint8 sb = sc
+        unsafe { *((release_buf + release_len + vsi) as uint8) = sb }
+        vsi = vsi + 1
+    }
+    uint64 vermagic_total_len = release_len + 36
     modinfo_len = _lkm_modinfo_kv_lit(modinfo_buf, modinfo_len,
                                        "vermagic", 8,
-                                       "6.17.0-29-generic SMP preempt mod_unload modversions ", 53)
+                                       release_buf, vermagic_total_len)
+    dealloc(release_buf)
 
     // ---- Build .gnu.linkonce.this_module content (1280 bytes) ----
     uint64 sm_size = 1280
