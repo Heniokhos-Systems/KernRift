@@ -26,6 +26,15 @@ extern fn misc_deregister(uint64 dev) -> int32
 extern fn _copy_from_user(uint64 dst, uint64 src, uint64 n) -> uint64
 extern fn pci_get_domain_bus_and_slot(uint32 dom, uint32 bus, uint32 devfn) -> uint64
 extern fn pci_dev_put(uint64 pdev)
+extern fn remap_pfn_range(uint64 vma, uint64 addr, uint64 pfn, uint64 size, uint64 prot) -> int32
+
+// struct pci_dev field offset (kernel 6.17 x86_64): resource[0].start.
+// Each struct resource is 0x20 bytes; resource[N].start = 0x3e0 + N*0x20.
+static uint64 PCI_DEV_RESOURCE0_START = 0x3e0
+// struct vm_area_struct field offsets (kernel 6.17 x86_64).
+static uint64 VMA_VM_START     = 0x00
+static uint64 VMA_VM_END       = 0x08
+static uint64 VMA_VM_PAGE_PROT = 0x18
 
 // Driver-internal table of open PCI devices. 4 slots is plenty for
 // development; LLM workloads typically use one dGPU at a time.
@@ -144,4 +153,31 @@ fn driver_ioctl(uint64 file, uint64 cmd, uint64 arg) -> int64 {
     }
     _printk("mlrift_pci: unknown ioctl cmd\n")
     return 0xFFFFFFFFFFFFFFE7   // -ENOTTY = -25
+}
+
+// Phase B.2.b: map the slot-0 device's BAR0 into the calling process.
+// Reads pci_dev->resource[0].start (offset 0x3e0) for the BAR physical
+// base, then remap_pfn_range's it over the userland VMA. Heap-free
+// (only stack + the .data slot table), so safe in kernel context.
+//
+// Open a device with MLRIFT_OPEN_PCI first (fills slot 0), then mmap
+// the device fd. NOTE: prot is left as vma->vm_page_prot (cached); for
+// real MMIO use this should be made noncached — fine for "does the
+// mapping succeed" validation as long as userland doesn't read MMIO.
+@lkm_mmap_handler
+fn driver_mmap(uint64 file, uint64 vma) -> int64 {
+    uint64 pdev = _mlrift_pci_slot0
+    if pdev == 0 { return 0xFFFFFFFFFFFFFFEA }            // -EINVAL: no device open
+    uint64 bar_phys = 0
+    unsafe { *((pdev + PCI_DEV_RESOURCE0_START) as uint64) -> bar_phys }
+    if bar_phys == 0 { return 0xFFFFFFFFFFFFFFEA }        // -EINVAL: device has no BAR0
+    uint64 vm_start = 0; unsafe { *((vma + VMA_VM_START) as uint64) -> vm_start }
+    uint64 vm_end = 0;   unsafe { *((vma + VMA_VM_END) as uint64) -> vm_end }
+    uint64 prot = 0;     unsafe { *((vma + VMA_VM_PAGE_PROT) as uint64) -> prot }
+    uint64 size = vm_end - vm_start
+    uint64 pfn = bar_phys >> 12
+    int32 rc = remap_pfn_range(vma, vm_start, pfn, size, prot)
+    if rc != 0 { return 0xFFFFFFFFFFFFFFF2 }              // -EFAULT on map failure
+    _printk("mlrift_pci: BAR0 mapped into userland\n")
+    return 0
 }
