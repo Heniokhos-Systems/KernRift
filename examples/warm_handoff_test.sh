@@ -20,9 +20,13 @@
 #   * Live desktop: ONE run per boot. restore leaves the dGPU unbound; reboot to
 #     get amdgpu back. (The amdgpu->mlrift unbind itself is empirically survivable
 #     under KWin, but the rescan restore is not, so we don't attempt it live.)
-#   * DEV LOOP (recommended for iterating): `sudo systemctl stop sddm`, switch to
-#     a TTY (Ctrl+Alt+F3) or SSH in, then run this script repeatedly — restore
-#     auto-recovers via remove+rescan each time, no reboot. `start sddm` when done.
+#   * DEV LOOP: needs NO compositor running. `systemctl stop sddm` is NOT enough —
+#     the desktop session survives in its own logind scope. Get truly headless via
+#     EITHER: boot to text mode (`sudo systemctl set-default multi-user.target` +
+#     reboot; later `set-default graphical.target` + reboot to get the desktop
+#     back), OR from a TTY end the graphical session (`loginctl terminate-session
+#     <wayland-id>`). Then run this script repeatedly — restore auto-recovers via
+#     remove+rescan, no per-run reboot.
 #
 # Prereqs (build first):
 #   MLRift:  ./build/mlrc --arch=x86_64 --target=linux --emit=elfexe \
@@ -34,6 +38,21 @@ BDF=${1:-0000:03:00.0}
 say() { printf '\n=== %s ===\n' "$*"; }
 ovr=/sys/bus/pci/devices/$BDF/driver_override
 cur_drv() { basename "$(readlink -f /sys/bus/pci/devices/$BDF/driver 2>/dev/null)" 2>/dev/null || echo none; }
+
+# True if a compositor may be holding the dGPU's DRM render node: either the
+# display manager is running, OR a graphical (wayland/x11) logind session is
+# live. IMPORTANT: `systemctl stop sddm` does NOT end an already-running desktop
+# session — it survives in its own logind scope — so checking the DM service
+# alone is NOT sufficient; we must inspect session types via loginctl.
+compositor_present() {
+  systemctl is-active --quiet display-manager 2>/dev/null && return 0
+  local s t
+  for s in $(loginctl list-sessions --no-legend 2>/dev/null | awk '{print $1}'); do
+    t=$(loginctl show-session "$s" -p Type --value 2>/dev/null)
+    case "$t" in wayland|x11|mir) return 0 ;; esac
+  done
+  return 1
+}
 
 # Always put the dGPU back on amdgpu, however we exit (normal, error, or a
 # SIGHUP/TERM from a crashing session) — never leave it stranded on mlrift_pci.
@@ -53,11 +72,13 @@ restore() {
   # (-17 EEXIST). PCI remove+rescan destroys the leaked node and re-probes amdgpu
   # fresh (re-warms). rescan = a DRM hot-add though, so only auto-recover when no
   # compositor is running (the intended dev-loop mode).
-  if systemctl is-active --quiet display-manager 2>/dev/null; then
+  if compositor_present; then
     echo "  dGPU is now unbound; amdgpu rebind blocked by its -17 sysfs leak."
-    echo "  REBOOT to restore amdgpu — OR for an in-session dev loop, run with the"
-    echo "  display manager stopped ('sudo systemctl stop sddm') and this script"
-    echo "  will auto-recover via PCI remove+rescan (no reboot)."
+    echo "  Not doing remove+rescan: a compositor is live and the DRM hot-add would"
+    echo "  crash it. REBOOT to restore amdgpu. For an in-session dev loop, NO"
+    echo "  compositor may run — note 'systemctl stop sddm' is NOT enough (the"
+    echo "  desktop session persists). Boot to multi-user.target, or from a TTY:"
+    echo "    loginctl terminate-session <your-wayland-session-id>"
     return
   fi
   say "restore: clearing amdgpu -17 leak via PCI remove + rescan"
@@ -85,11 +106,14 @@ if [ "$(cur_drv)" != "amdgpu" ]; then
   exit 1
 fi
 
-# Warn (do NOT block) if a compositor is live — see HAZARD note above.
-if systemctl is-active --quiet display-manager 2>/dev/null; then
-  echo "WARNING: a display manager is active. The amdgpu->mlrift unbind may crash"
-  echo "  your KDE session. If it does, the restore trap still rebinds amdgpu;"
-  echo "  re-run from a TTY after 'sudo systemctl stop sddm' for a clean run."
+# Warn (do NOT block) if a compositor is live — see DEV LOOP note above.
+if compositor_present; then
+  echo "WARNING: a graphical session is live. The amdgpu->mlrift unbind may crash"
+  echo "  your desktop, and restore will NOT auto-recover (remove+rescan is unsafe"
+  echo "  with a compositor up) — it'll leave the dGPU unbound for a reboot."
+  echo "  NOTE: 'systemctl stop sddm' does NOT end the session (it persists in its"
+  echo "  own logind scope). For a clean dev loop, boot to multi-user.target or run"
+  echo "  'loginctl terminate-session <wayland-id>' from a TTY first."
   echo "  Continuing in 5s (Ctrl-C to abort)..."
   sleep 5
 fi
