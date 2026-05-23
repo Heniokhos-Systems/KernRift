@@ -1,7 +1,16 @@
 #!/usr/bin/env bash
 # Warm-handoff state-survival experiment. amdgpu boots the dGPU (warms it),
 # then we hand it to mlrift_pci and read the warm markers via our driver.
-# Run as root. dGPU is not the primary display (iGPU is), so this is safe.
+# Run as root.
+#
+# !! MUST be run from a TEXT CONSOLE with the display manager STOPPED. !!
+# Hot-binding amdgpu to the dGPU makes a running Wayland compositor (e.g. KWin)
+# grab the new /dev/dri/render* node; the subsequent unbind crashes it and logs
+# you out (incident 2026-05-23). The dGPU having no monitor does NOT make this
+# safe — the compositor enumerates ALL render nodes. Safe procedure:
+#   sudo systemctl stop sddm     # or: stop display-manager  (controlled logout)
+#   # switch to a TTY (Ctrl+Alt+F3) or SSH in, then run this script
+#   sudo systemctl start sddm    # bring the desktop back afterwards
 #
 # Prereqs (build first):
 #   MLRift:  ./build/mlrc --arch=x86_64 --target=linux --emit=elfexe \
@@ -13,6 +22,19 @@ BDF=${1:-0000:03:00.0}
 say() { printf '\n=== %s ===\n' "$*"; }
 ovr=/sys/bus/pci/devices/$BDF/driver_override
 BDF_RE="${BDF//./\\.}"
+
+# Safety guard: refuse to run while a display manager is active — the hot
+# bind/unbind below would crash the live compositor and log the user out.
+# Override with FORCE=1 only if certain no Wayland/X compositor is running.
+if [ "${FORCE:-0}" != "1" ] && systemctl is-active --quiet display-manager 2>/dev/null; then
+  echo "REFUSING: a display manager is active — running this will crash your desktop session and log you out." >&2
+  echo "  Run from a text console with it stopped:" >&2
+  echo "    sudo systemctl stop sddm     # or: stop display-manager" >&2
+  echo "    # switch to a TTY (Ctrl+Alt+F3) or SSH in, then re-run this script" >&2
+  echo "    sudo systemctl start sddm    # restore the desktop afterwards" >&2
+  echo "  (set FORCE=1 to override if you are certain no compositor is enumerating GPU render nodes.)" >&2
+  exit 1
+fi
 
 say "1) take dGPU off vfio-pci, bind amdgpu to warm it"
 echo "$BDF" | sudo tee /sys/bus/pci/drivers/vfio-pci/unbind 2>/dev/null
