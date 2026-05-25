@@ -37,7 +37,8 @@ set -u
 BDF=${1:-0000:03:00.0}
 # Log everything to a file (survives a session crash) AND the console, from the
 # very start. Override path with LOG=/path before invoking.
-LOG=${LOG:-/tmp/warm_gmc_$(date +%Y%m%d-%H%M%S).log}
+LOG=${LOG:-/home/pantelis/mlrift_logs/warm_gmc_$(date +%Y%m%d-%H%M%S).log}
+mkdir -p "$(dirname "$LOG")"
 exec > >(tee -a "$LOG") 2>&1
 echo "logging to $LOG"
 say() { printf '\n=== %s ===\n' "$*"; }
