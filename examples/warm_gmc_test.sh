@@ -35,6 +35,11 @@
 #              examples/mlrift_pci.kr -o /tmp/mlrift_pci.ko
 set -u
 BDF=${1:-0000:03:00.0}
+# Log everything to a file (survives a session crash) AND the console, from the
+# very start. Override path with LOG=/path before invoking.
+LOG=${LOG:-/tmp/warm_gmc_$(date +%Y%m%d-%H%M%S).log}
+exec > >(tee -a "$LOG") 2>&1
+echo "logging to $LOG"
 say() { printf '\n=== %s ===\n' "$*"; }
 ovr=/sys/bus/pci/devices/$BDF/driver_override
 cur_drv() { basename "$(readlink -f /sys/bus/pci/devices/$BDF/driver 2>/dev/null)" 2>/dev/null || echo none; }
