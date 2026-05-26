@@ -88,7 +88,6 @@ restore() {
     return
   fi
   say "restore: FLR + PCI remove + rescan (GMC reprogrammed MMHUB; FLR resets it so amdgpu IP discovery can re-read)"
-  echo 1 | sudo tee /sys/bus/pci/devices/$BDF/reset  >/dev/null 2>&1   # function-level reset toward power-on
   sleep 1
   echo 1 | sudo tee /sys/bus/pci/devices/$BDF/remove >/dev/null 2>&1
   sleep 1
