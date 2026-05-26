@@ -140,3 +140,7 @@ say "2) GFX ring doorbell"
 sudo /home/pantelis/mlrift_bin/gfx_ring_doorbell
 
 say "3) done — restore trap returns the dGPU to amdgpu on exit"
+
+say "dmesg tail (kernel errors)"
+sudo dmesg | tail -40
+sync
