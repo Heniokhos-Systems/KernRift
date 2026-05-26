@@ -1,6 +1,6 @@
 # KernRift Language Support
 
-Language support for the [KernRift](https://github.com/Pantelis23/KernRift) systems programming language — version-locked to the compiler.
+Language support for the [KernRift](https://github.com/Rift-Intelligence/KernRift) systems programming language — version-locked to the compiler.
 
 ## Features
 
@@ -9,7 +9,7 @@ Language support for the [KernRift](https://github.com/Pantelis23/KernRift) syst
 - **LSP** powered by `krc check` — diagnostics, completions, hover docs, go-to-definition
 - Short type aliases: `u8`/`u16`/`u32`/`u64`, `i8`/`i16`/`i32`/`i64`
 - Long type forms: `uint8`..`int64`
-- v2.6 builtins highlighted as built-in functions:
+- v2.8 builtins highlighted as built-in functions:
   - **Pointer ops**: `load8`/`load16`/`load32`/`load64`, `store8/16/32/64`
   - **Volatile ops**: `vload8/16/32/64`, `vstore8/16/32/64`
   - **String output**: `print_str`, `println_str`
@@ -29,8 +29,11 @@ Language support for the [KernRift](https://github.com/Pantelis23/KernRift) syst
 
 ## About KernRift
 
-KernRift is a self-hosted, bare-metal systems language. It compiles itself in ~60ms, produces fat binaries with 7 platform slices, and runs on Linux, Windows, macOS, and Android on x86_64 and ARM64 — without any C toolchain, runtime, or libc.
+KernRift is a self-hosted, bare-metal systems language. It compiles itself ahead-of-time to native machine code — no VM, no interpreter, no runtime, no libc. One `.krbo` fat binary contains all **8 platform slices** (Linux / macOS / Windows / Android × x86_64 / ARM64); a small `kr` runner extracts the matching slice at startup and executes it. Self-host bootstrap fixed point is verified by CI on every push.
 
-- [GitHub](https://github.com/Pantelis23/KernRift)
+The compiler is written entirely in KernRift and includes an SSA IR backend, graph-coloring register allocator, constant folding / DCE / CSE, and per-target ELF / Mach-O / PE emitters — no LLVM, no external assembler, no external linker.
+
+- [GitHub](https://github.com/Rift-Intelligence/KernRift)
 - [Website](https://kernrift.org)
-- [Language Reference](https://github.com/Pantelis23/KernRift/blob/main/docs/LANGUAGE.md)
+- [Language Reference](https://github.com/Rift-Intelligence/KernRift/blob/main/docs/LANGUAGE.md)
+- [Living Compiler (`krc lc`)](https://kernrift.org/living-compiler.html)

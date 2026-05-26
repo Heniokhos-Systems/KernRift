@@ -30,7 +30,7 @@
 #
 # Prereqs (build first):
 #   MLRift:  ./build/mlrc --arch=x86_64 --target=linux --emit=elfexe \
-#              examples/kiq_doorbell_bringup.mlr -o /home/pantelis/mlrift_bin/gfx_ring
+#              examples/kiq_doorbell_bringup.mlr -o /home/pantelis/mlrift_bin/gfx_ring_doorbell
 #   KernRift: ./build/krc2 --emit=lkm --arch=x86_64 --target=linux \
 #              examples/mlrift_pci.kr -o /home/pantelis/mlrift_bin/mlrift_pci.ko
 set -u
@@ -137,6 +137,6 @@ echo "$BDF"     | sudo tee /sys/bus/pci/drivers/mlrift_pci/bind 2>/dev/null || t
 lspci -nnks "$BDF"   # expect: Kernel driver in use: mlrift_pci
 
 say "2) GFX ring doorbell"
-sudo /home/pantelis/mlrift_bin/gfx_ring
+sudo /home/pantelis/mlrift_bin/gfx_ring_doorbell
 
 say "3) done — restore trap returns the dGPU to amdgpu on exit"

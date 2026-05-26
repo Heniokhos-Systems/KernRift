@@ -9419,7 +9419,7 @@ var require_minimatch = __commonJS({
     module2.exports = minimatch;
     var path2 = require_path();
     minimatch.sep = path2.sep;
-    var GLOBSTAR = /* @__PURE__ */ Symbol("globstar **");
+    var GLOBSTAR = Symbol("globstar **");
     minimatch.GLOBSTAR = GLOBSTAR;
     var expand = require_brace_expansion();
     var plTypes = {
@@ -9483,7 +9483,7 @@ var require_minimatch = __commonJS({
         throw new TypeError("pattern is too long");
       }
     };
-    var SUBPARSE = /* @__PURE__ */ Symbol("subparse");
+    var SUBPARSE = Symbol("subparse");
     minimatch.makeRe = (pattern, options) => new Minimatch(pattern, options || {}).makeRe();
     minimatch.match = (list, pattern, options = {}) => {
       const mm = new Minimatch(pattern, options);
@@ -17027,7 +17027,7 @@ var require_cmp = __commonJS({
 var require_comparator = __commonJS({
   "node_modules/semver/classes/comparator.js"(exports2, module2) {
     "use strict";
-    var ANY = /* @__PURE__ */ Symbol("SemVer ANY");
+    var ANY = Symbol("SemVer ANY");
     var Comparator = class _Comparator {
       static get ANY() {
         return ANY;
