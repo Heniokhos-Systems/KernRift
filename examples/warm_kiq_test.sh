@@ -30,9 +30,9 @@
 #
 # Prereqs (build first):
 #   MLRift:  ./build/mlrc --arch=x86_64 --target=linux --emit=elfexe \
-#              examples/kiq_doorbell_bringup.mlr -o /tmp/kiq_doorbell
+#              examples/kiq_doorbell_bringup.mlr -o /home/pantelis/mlrift_bin/kiq_doorbell
 #   KernRift: ./build/krc2 --emit=lkm --arch=x86_64 --target=linux \
-#              examples/mlrift_pci.kr -o /tmp/mlrift_pci.ko
+#              examples/mlrift_pci.kr -o /home/pantelis/mlrift_bin/mlrift_pci.ko
 set -u
 BDF=${1:-0000:03:00.0}
 # Log everything to a file (survives a session crash) AND the console, from the
@@ -129,7 +129,7 @@ fi
 trap restore EXIT INT TERM HUP
 
 say "1) load mlrift_pci, hand off the WARM card (amdgpu -> mlrift_pci)"
-sudo insmod /tmp/mlrift_pci.ko 2>/dev/null || lsmod | grep -q mlrift_pci || { echo "insmod FAILED and module not loaded — aborting"; exit 1; }
+sudo insmod /home/pantelis/mlrift_bin/mlrift_pci.ko 2>/dev/null || lsmod | grep -q mlrift_pci || { echo "insmod FAILED and module not loaded — aborting"; exit 1; }
 sudo chmod 666 /dev/mlrift_pci
 echo mlrift_pci | sudo tee "$ovr"                                  # force mlrift_pci to be the only binder
 echo "$BDF"     | sudo tee /sys/bus/pci/drivers/amdgpu/unbind
@@ -137,6 +137,6 @@ echo "$BDF"     | sudo tee /sys/bus/pci/drivers/mlrift_pci/bind 2>/dev/null || t
 lspci -nnks "$BDF"   # expect: Kernel driver in use: mlrift_pci
 
 say "2) KIQ + doorbell"
-sudo /tmp/kiq_doorbell
+sudo /home/pantelis/mlrift_bin/kiq_doorbell
 
 say "3) done — restore trap returns the dGPU to amdgpu on exit"
