@@ -1092,6 +1092,7 @@ fn ir_lower_expr(uint64 node) -> uint64 {
         uint64 in_exp = 0
         uint64 exp_neg = 0
         uint64 exp_val = 0
+        uint64 frac_digits = 0
         uint64 fi = 0
         while fi < tlen {
             uint64 ch = tok_source_byte(wlt, fi)
@@ -1115,8 +1116,14 @@ fn ir_lower_expr(uint64 node) -> uint64 {
                 } else if past_dot == 0 {
                     int_val = int_val * 10 + (ch - 48)
                 } else {
-                    frac_val = frac_val * 10 + (ch - 48)
-                    frac_divisor = frac_divisor * 10
+                    // Stop accumulating after 15 frac digits: 10^15 < u64_max,
+                    // and f64 has only ~15-16 sig figs so extra digits are noise.
+                    // Beyond 18 digits frac_divisor * 10 would overflow u64.
+                    if frac_digits < 15 {
+                        frac_val = frac_val * 10 + (ch - 48)
+                        frac_divisor = frac_divisor * 10
+                        frac_digits = frac_digits + 1
+                    }
                 }
             }
             fi = fi + 1

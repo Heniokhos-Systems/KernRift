@@ -2030,6 +2030,7 @@ fn parse_module() -> uint64 {
                         uint64 fin_exp = 0
                         uint64 fexp_neg = 0
                         uint64 fexp_val = 0
+                        uint64 ffrac_digits = 0
                         uint64 fi2 = 0
                         while fi2 < ft_len {
                             uint64 fbp = src_ptr + ft_start + fi2
@@ -2056,8 +2057,14 @@ fn parse_module() -> uint64 {
                                 } else if fpast == 0 {
                                     fint = fint * 10 + (fch - 48)
                                 } else {
-                                    ffrac = ffrac * 10 + (fch - 48)
-                                    fdiv = fdiv * 10
+                                    // Stop accumulating after 15 frac digits: 10^15 < u64_max,
+                                    // and f64 has only ~15-16 sig figs so extra digits are noise.
+                                    // Beyond 18 digits fdiv * 10 would overflow u64.
+                                    if ffrac_digits < 15 {
+                                        ffrac = ffrac * 10 + (fch - 48)
+                                        fdiv = fdiv * 10
+                                        ffrac_digits = ffrac_digits + 1
+                                    }
                                 }
                             }
                             fi2 = fi2 + 1

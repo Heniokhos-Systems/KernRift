@@ -2434,6 +2434,15 @@ fn main() { f64 r = get_third(1, 2, 33.0); exit(f64_to_int(r)) }' 33
 # Float literal parsing
 run_test "f64_literal_zero" 'fn main() { f64 x = 0.0; exit(f64_to_int(x)) }' 0
 run_test "f64_literal_one" 'fn main() { f64 x = 1.0; exit(f64_to_int(x)) }' 1
+# Regression: long plain-decimal f32 literal was sign-flipped (frac_divisor overflowed u64
+# at >=19 frac digits; cvtsi2sd treated it as signed, producing a negative value).
+# 0.0037996768951416016f has 19 frac digits — this must parse positive and be in (0.003,0.004).
+run_test "f32_long_decimal_positive" 'fn main() { f32 v = 0.0037996768951416016f; i32 rc = 0; if v < 0.0f { rc = rc + 1 }; if v > 0.003f { if v < 0.004f { rc = rc + 2 } }; exit(rc) }' 2
+# Scientific notation must still work: 1e-8f and 1.5e-3f
+run_test "f32_sci_notation_neg_exp" 'fn main() { f32 v = 1e-8f; if v > 0.0f { exit(1) }; exit(0) }' 1
+run_test "f32_sci_notation_frac" 'fn main() { f32 v = 1.5e-3f; if v > 0.001f { if v < 0.002f { exit(1) } }; exit(0) }' 1
+# Short decimal must still work
+run_test "f32_short_decimal" 'fn main() { f32 v = 0.003799677f; if v > 0.003f { if v < 0.004f { exit(1) } }; exit(0) }' 1
 
 # Float reassignment
 run_test "f64_reassign2" 'fn main() { f64 x = int_to_f64(5); f64 y = int_to_f64(3); x = x + y; exit(f64_to_int(x)) }' 8
