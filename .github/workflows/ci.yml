@@ -19,10 +19,31 @@ jobs:
       - name: Download self-hosted compiler
         run: |
           mkdir -p build
-          # Download krc from pinned release — avoids CDN caching issues with /latest
-          curl -sL -o build/krc-bootstrap \
-            https://github.com/Pantelis23/KernRift/releases/download/v2.8.4/krc-linux-x86_64
+          # Download krc from pinned release — avoids CDN caching issues with /latest.
+          # Hardened 2026-05-28: --fail to error on HTTP non-2xx (curl was silently
+          # saving "Not Found" HTML and bash later parsed "Not" as a command), --retry
+          # to ride out transient redirect-chain blips from release-assets blob storage,
+          # and a post-download ELF magic + size sanity check before chmod. Canonical
+          # repo URL (Heniokhos-Systems/KernRift) is used directly to skip the rename
+          # redirect that fronts the older Pantelis23/ + Rift-Intelligence/ aliases.
+          curl --fail --location --silent --show-error \
+               --retry 5 --retry-delay 3 --retry-all-errors --connect-timeout 15 \
+               -o build/krc-bootstrap \
+               https://github.com/Heniokhos-Systems/KernRift/releases/download/v2.8.4/krc-linux-x86_64
+          # Sanity: must be an ELF ≥ 1 MiB. If not, dump the first bytes so future
+          # failures don't reduce to "Not: command not found" 40 lines later.
+          SIZE=$(wc -c < build/krc-bootstrap)
+          MAGIC=$(head -c 4 build/krc-bootstrap | xxd -p)
+          if [ "$MAGIC" != "7f454c46" ] || [ "$SIZE" -lt 1048576 ]; then
+            echo "FAIL: krc-bootstrap download is not a valid ELF"
+            echo "  size=$SIZE bytes (expected ≥ 1 MiB)"
+            echo "  magic=0x$MAGIC (expected 0x7f454c46)"
+            echo "--- first 256 bytes ---"
+            head -c 256 build/krc-bootstrap | cat -v
+            exit 1
+          fi
           chmod +x build/krc-bootstrap
+          echo "OK: krc-bootstrap is a valid ELF ($SIZE bytes)"
 
       - name: Build (self-compile)
         run: |

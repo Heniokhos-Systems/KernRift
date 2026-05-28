@@ -19,8 +19,18 @@ jobs:
       - name: Bootstrap build/krc2
         run: |
           mkdir -p build
-          curl -sL -o build/krc-bootstrap \
-            https://github.com/Pantelis23/KernRift/releases/download/v2.8.4/krc-linux-x86_64
+          # Hardened download (see ci.yml for rationale).
+          curl --fail --location --silent --show-error \
+               --retry 5 --retry-delay 3 --retry-all-errors --connect-timeout 15 \
+               -o build/krc-bootstrap \
+               https://github.com/Heniokhos-Systems/KernRift/releases/download/v2.8.4/krc-linux-x86_64
+          SIZE=$(wc -c < build/krc-bootstrap)
+          MAGIC=$(head -c 4 build/krc-bootstrap | xxd -p)
+          if [ "$MAGIC" != "7f454c46" ] || [ "$SIZE" -lt 1048576 ]; then
+            echo "FAIL: krc-bootstrap download is not a valid ELF (size=$SIZE magic=0x$MAGIC)"
+            head -c 256 build/krc-bootstrap | cat -v
+            exit 1
+          fi
           chmod +x build/krc-bootstrap
           cat src/lexer.kr src/ast.kr src/parser.kr src/codegen.kr \
               src/codegen_aarch64.kr src/ir.kr src/ir_aarch64.kr src/format_macho.kr src/format_pe.kr \
