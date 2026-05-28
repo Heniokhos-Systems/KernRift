@@ -1,0 +1,62 @@
+// Smoke test for the fmt_f32 / fmt_f64 NaN/Inf guard fix (KernRift).
+//
+// Background: prior to the fix in std/math_float.kr, calling fmt_f32 or
+// fmt_f64 with NaN/±Inf input caused the decimal-formatting math to
+// underflow `leading_zeros = decimals - frac_len` as u64 → runaway
+// write loop → SIGSEGV. Ported from MLRift fmt-nan-segfault-fix.
+//
+// Build:
+//   ./build/krc2 --emit=elfexe examples/fmt_nan_smoke.kr -o /tmp/fmt_nan_smoke_kr
+//   /tmp/fmt_nan_smoke_kr
+//
+// Expected output:
+//   nan_f32=NaN
+//   nan_f64=NaN
+//   pinf_f32=inf
+//   pinf_f64=inf
+//   ninf_f32=-inf
+//   ninf_f64=-inf
+//   finite_f32=1.5000000
+//   finite_f64=1.500000000000000
+//   ok
+
+import "../std/io.kr"
+import "../std/fmt.kr"
+import "../std/math_float.kr"
+
+fn put_pair(u64 label, u64 s) {
+    print_str(label); print_str("="); print_str(s); print_str("\n")
+    dealloc(s)
+}
+
+fn main() {
+    // ── NaN via 0/0 (portable manufacture).
+    f32 zero32 = 0.0f
+    f32 nan32 = zero32 / zero32
+    f64 zero64 = int_to_f64(0)
+    f64 one64 = int_to_f64(1)
+    f64 nan64 = zero64 / zero64
+
+    // ── ±Inf via 1/0 and -1/0.
+    f32 one32 = 1.0f
+    f32 pinf32 = one32 / zero32
+    f32 ninf32 = (zero32 - one32) / zero32
+    f64 pinf64 = one64 / zero64
+    f64 ninf64 = (zero64 - one64) / zero64
+
+    // Each of these would have crashed prior to the fix.
+    put_pair("nan_f32",  fmt_f32(nan32,  7))
+    put_pair("nan_f64",  fmt_f64(nan64,  15))
+    put_pair("pinf_f32", fmt_f32(pinf32, 7))
+    put_pair("pinf_f64", fmt_f64(pinf64, 15))
+    put_pair("ninf_f32", fmt_f32(ninf32, 7))
+    put_pair("ninf_f64", fmt_f64(ninf64, 15))
+
+    // Sanity: finite values still format correctly (no regression).
+    f32 finite32 = 1.5f
+    f64 finite64 = int_to_f64(3) / int_to_f64(2)
+    put_pair("finite_f32", fmt_f32(finite32, 7))
+    put_pair("finite_f64", fmt_f64(finite64, 15))
+
+    print_str("ok\n")
+}

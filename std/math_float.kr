@@ -223,6 +223,70 @@ fn pow_f(f64 x, f64 y) -> f64 { return pow_f64(x, y) }
 // Format a float as a decimal string with the given number of decimal places.
 // Returns a heap-allocated null-terminated string.
 
+// Allocate a heap copy of a short ASCII literal (NaN/inf/-inf).
+// Returns a null-terminated buffer compatible with the rest of fmt_*.
+fn fmt_float_literal(u64 b0, u64 b1, u64 b2, u64 b3) -> u64 {
+    // Determine length: trailing 0 bytes are treated as terminators
+    // (none of our literals contain embedded NULs).
+    u64 len = 0
+    if b0 != 0 { len = 1 }
+    if b1 != 0 { len = 2 }
+    if b2 != 0 { len = 3 }
+    if b3 != 0 { len = 4 }
+    u64 r = alloc(len + 1)
+    if len > 0 { store8(r, b0) }
+    if len > 1 { u64 p1 = r + 1; store8(p1, b1) }
+    if len > 2 { u64 p2 = r + 2; store8(p2, b2) }
+    if len > 3 { u64 p3 = r + 3; store8(p3, b3) }
+    u64 pn = r + len
+    store8(pn, 0)
+    return r
+}
+
+// IEEE-754 classification helpers. KernRift's float `!=` does NOT
+// return true for NaN (the canonical `x != x` idiom is broken),
+// so we MUST inspect bit patterns. Returns 0/1/2/3 = {finite, NaN,
+// +Inf, -Inf}.
+
+static u64 fmt_classify_scratch_f32 = 0
+static u64 fmt_classify_scratch_f64 = 0
+
+fn fmt_classify_f32(f32 v) -> u64 {
+    if fmt_classify_scratch_f32 == 0 { fmt_classify_scratch_f32 = alloc(4) }
+    u64 slot = fmt_classify_scratch_f32
+    unsafe { *(slot as f32) = v }
+    u32 bits = 0
+    unsafe { *(slot as u32) -> bits }
+    u64 b = bits
+    u64 exp = (b >> 23) & 0xFF
+    if exp != 0xFF { return 0 }
+    u64 mant = b & 0x7FFFFF
+    if mant != 0 { return 1 }
+    if (b >> 31) == 0 { return 2 }
+    return 3
+}
+
+fn fmt_classify_f64(f64 v) -> u64 {
+    if fmt_classify_scratch_f64 == 0 { fmt_classify_scratch_f64 = alloc(8) }
+    u64 slot = fmt_classify_scratch_f64
+    unsafe { *(slot as f64) = v }
+    u32 lo = 0
+    u32 hi = 0
+    u64 sl = slot
+    u64 sh = slot + 4
+    unsafe { *(sl as u32) -> lo }
+    unsafe { *(sh as u32) -> hi }
+    u64 hi64 = hi
+    u64 lo64 = lo
+    u64 exp = (hi64 >> 20) & 0x7FF
+    if exp != 0x7FF { return 0 }
+    u64 mant_hi = hi64 & 0xFFFFF
+    if mant_hi != 0 { return 1 }
+    if lo64 != 0 { return 1 }
+    if (hi64 >> 31) == 0 { return 2 }
+    return 3
+}
+
 fn fmt_f64_pos(f64 aval, u64 decimals, u64 negative) -> u64 {
     u64 int_part = f64_to_int(aval)
     f64 frac = aval - int_to_f64(int_part)
@@ -285,6 +349,18 @@ fn fmt_f64_pos(f64 aval, u64 decimals, u64 negative) -> u64 {
 }
 
 fn fmt_f64(f64 val, u64 decimals) -> u64 {
+    // NaN/Inf guard: fmt_f64_pos computes
+    //   leading_zeros = decimals - frac_len
+    // as unsigned u64. For NaN, f64_to_int(val) returns garbage and
+    // frac_len can exceed `decimals`, underflowing the subtraction to
+    // ~2^63 → runaway write loop → SIGSEGV. Return canonical literals
+    // "NaN" / "inf" / "-inf" instead. NOTE: KernRift's float `!=`
+    // does not return true for NaN, so we classify via bit
+    // inspection.
+    u64 cls = fmt_classify_f64(val)
+    if cls == 1 { return fmt_float_literal(78, 97, 78, 0) }   // 'N','a','N'
+    if cls == 2 { return fmt_float_literal(105, 110, 102, 0) } // 'i','n','f'
+    if cls == 3 { return fmt_float_literal(45, 105, 110, 102) } // '-','i','n','f'
     if decimals > 15 { decimals = 15 }
     if val < int_to_f64(0) {
         return fmt_f64_pos(abs_f64(val), decimals, 1)
@@ -293,6 +369,12 @@ fn fmt_f64(f64 val, u64 decimals) -> u64 {
 }
 
 fn fmt_f32(f32 val, u64 decimals) -> u64 {
+    // NaN/Inf early-out (mirror of fmt_f64). Bit-level classify
+    // because KernRift's float `!=` doesn't flag NaN.
+    u64 cls = fmt_classify_f32(val)
+    if cls == 1 { return fmt_float_literal(78, 97, 78, 0) }
+    if cls == 2 { return fmt_float_literal(105, 110, 102, 0) }
+    if cls == 3 { return fmt_float_literal(45, 105, 110, 102) }
     if decimals > 7 { decimals = 7 }
     return fmt_f64(f32_to_f64(val), decimals)
 }
