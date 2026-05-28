@@ -8734,7 +8734,17 @@ fn ir_emit_x86_insn(uint64 ii) {
             // ucomisd xmm0, xmm1: 66 0F 2E C1
             emit_byte(0x66); emit_byte(0x0F); emit_byte(0x2E); emit_byte(0xC1)
         }
-        // Set result based on comparison kind
+        // Set result based on comparison kind.
+        // IEEE-754 § 5.11: NaN compares unordered to everything. ucomi sets
+        // ZF=1, PF=1, CF=1 on an unordered operand pair, so the plain
+        // sete/setne/setb/setbe forms return the wrong polarity for NaN.
+        // Patch by combining with PF:
+        //   ==  → sete & setnp   (true only if equal AND ordered)
+        //   !=  → setne | setp   (true if non-equal OR unordered)
+        //   <   → setb & setnp   (true only if strictly less AND ordered)
+        //   <=  → setbe & setnp  (true only if less-or-equal AND ordered)
+        //   >   → seta is already NaN-safe (requires CF=0 AND ZF=0)
+        //   >=  → setae is already NaN-safe (requires CF=0)
         emit_byte(0x0F)
         if op == 24 { emit_byte(0x94) }    // sete  (==)
         if op == 99 { emit_byte(0x95) }    // setne (!=)
@@ -8743,6 +8753,18 @@ fn ir_emit_x86_insn(uint64 ii) {
         if op == 101 { emit_byte(0x97) }   // seta  (>)
         if op == 102 { emit_byte(0x93) }   // setae (>=)
         emit_byte(0xC0)
+        if op == 24 || op == 25 || op == 100 {
+            // setnp cl: 0F 9B C1
+            emit_byte(0x0F); emit_byte(0x9B); emit_byte(0xC1)
+            // and al, cl: 20 C8
+            emit_byte(0x20); emit_byte(0xC8)
+        }
+        if op == 99 {
+            // setp cl: 0F 9A C1
+            emit_byte(0x0F); emit_byte(0x9A); emit_byte(0xC1)
+            // or al, cl: 08 C8
+            emit_byte(0x08); emit_byte(0xC8)
+        }
         // movzx rax, al: 48 0F B6 C0
         emit_byte(0x48); emit_byte(0x0F); emit_byte(0xB6); emit_byte(0xC0)
         if dst_r != 0xFFFFFFFF {

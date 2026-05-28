@@ -2799,6 +2799,39 @@ fn emit_setcc(uint64 op_tok_kind) {
     emit_byte(0x0F); emit_byte(0xB6); emit_byte(0xC0) // movzx eax, al
 }
 
+// emit: IEEE-754-aware setCC al + movzx eax, al for a float compare whose
+// flags were just set by ucomiss/ucomisd. ucomi sets ZF=1, PF=1, CF=1 on an
+// unordered (NaN) compare; for IEEE-754 § 5.11 NaN must compare unordered
+// to everything, so:
+//   ==  → true only if equal AND ordered     (sete & setnp)
+//   !=  → true if not-equal OR unordered     (setne | setp)
+//   <   → true only if strictly less AND ordered (setb & setnp)
+//   <=  → true only if less-or-equal AND ordered (setbe & setnp)
+//   >   → seta already requires CF=0 AND ZF=0 — NaN → 0 (correct)
+//   >=  → setae already requires CF=0          — NaN → 0 (correct)
+// Clobbers cl in addition to al. Result lands in rax (zero-extended).
+fn emit_setcc_float(uint64 op_tok_kind) {
+    emit_byte(0x0F)
+    if op_tok_kind == 35 { emit_byte(0x94) }       // sete  (==)
+    else if op_tok_kind == 36 { emit_byte(0x95) }  // setne (!=)
+    else if op_tok_kind == 37 { emit_byte(0x92) }  // setb  (<)
+    else if op_tok_kind == 38 { emit_byte(0x96) }  // setbe (<=)
+    else if op_tok_kind == 39 { emit_byte(0x97) }  // seta  (>)
+    else if op_tok_kind == 40 { emit_byte(0x93) }  // setae (>=)
+    else { emit_byte(0x94) }
+    emit_byte(0xC0)
+    if op_tok_kind == 35 || op_tok_kind == 37 || op_tok_kind == 38 {
+        // setnp cl; and al, cl  — mask out unordered (NaN) → result false
+        emit_byte(0x0F); emit_byte(0x9B); emit_byte(0xC1)
+        emit_byte(0x20); emit_byte(0xC8)
+    } else if op_tok_kind == 36 {
+        // setp cl; or al, cl  — fold unordered into != as true
+        emit_byte(0x0F); emit_byte(0x9A); emit_byte(0xC1)
+        emit_byte(0x08); emit_byte(0xC8)
+    }
+    emit_byte(0x0F); emit_byte(0xB6); emit_byte(0xC0) // movzx eax, al
+}
+
 // Signed-aware setcc: signed inputs need setl/setle/setg/setge (0x9C/0x9E/
 // 0x9F/0x9D) instead of unsigned setb/setbe/seta/setae. Equality (==/!=)
 // stays bitwise — sign doesn't change those.
@@ -4487,7 +4520,7 @@ fn gen_expr(uint64 node) {
                 uint32 op_kind_fs = 0
                 unsafe { *(p_fs as uint32) -> op_kind_fs }
                 rax_invalidate()
-                emit_setcc(op_kind_fs)
+                emit_setcc_float(op_kind_fs)
                 expr_is_float = 0
                 return
             }
@@ -4532,7 +4565,7 @@ fn gen_expr(uint64 node) {
                 uint32 op_kind_fr = 0
                 unsafe { *(p_fr as uint32) -> op_kind_fr }
                 rax_invalidate()
-                emit_setcc(op_kind_fr)
+                emit_setcc_float(op_kind_fr)
                 expr_is_float = 0
                 return
             }
@@ -4580,7 +4613,7 @@ fn gen_expr(uint64 node) {
                 uint32 op_kind_fk = 0
                 unsafe { *(p_fk as uint32) -> op_kind_fk }
                 rax_invalidate()
-                emit_setcc(op_kind_fk)
+                emit_setcc_float(op_kind_fk)
                 expr_is_float = 0
                 return
             }

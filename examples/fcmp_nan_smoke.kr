@@ -1,0 +1,57 @@
+// fcmp_nan_smoke.kr — verify IR_FCMP_NE/EQ honor IEEE-754 NaN unordered semantics.
+//
+// Background: prior to the codegen fix, the x86_64 lowering of FCMP_NE/EQ
+// emitted only setne/sete after ucomiss/ucomisd. For NaN inputs ucomi sets
+// ZF=1 + PF=1 (unordered), so setne returns 0 and sete returns 1 — the
+// reverse of IEEE-754 § 5.11 which states NaN is unordered with everything
+// (so NaN != NaN must be TRUE and NaN == NaN must be FALSE). Ported from
+// MLRift fcmp-ne-codegen-fix.
+//
+// Build:
+//   ./build/krc2 --emit=elfexe examples/fcmp_nan_smoke.kr -o /tmp/fcmp_nan_smoke_kr
+//   /tmp/fcmp_nan_smoke_kr
+//
+// Expected output (post-fix):
+//   f32 != NaN PASS
+//   f64 != NaN PASS
+//   f32 == NaN (no branch) PASS
+//   f64 == NaN (no branch) PASS
+//   f32 == finite PASS
+//   f32 != finite PASS
+//   f64 == finite PASS
+//   f64 != finite PASS
+//   ALL TESTS PASS
+
+import "../std/io.kr"
+
+fn main() {
+    f32 z32 = 0.0f
+    f32 nan32 = z32 / z32
+    f64 z64 = 0.0
+    f64 nan64 = z64 / z64
+
+    uint64 fail = 0
+
+    // IEEE-754: NaN != NaN must be TRUE.
+    if nan32 != nan32 { print_str("f32 != NaN PASS\n") } else { print_str("f32 != NaN FAIL\n"); fail = fail + 1 }
+    if nan64 != nan64 { print_str("f64 != NaN PASS\n") } else { print_str("f64 != NaN FAIL\n"); fail = fail + 1 }
+
+    // IEEE-754: NaN == NaN must be FALSE.
+    if nan32 == nan32 { print_str("f32 == NaN FAIL\n"); fail = fail + 1 } else { print_str("f32 == NaN (no branch) PASS\n") }
+    if nan64 == nan64 { print_str("f64 == NaN FAIL\n"); fail = fail + 1 } else { print_str("f64 == NaN (no branch) PASS\n") }
+
+    // Sanity: finite values still compare correctly (no regression).
+    f32 a32 = 1.5f
+    f32 b32 = 1.5f
+    f32 c32 = 2.0f
+    if a32 == b32 { print_str("f32 == finite PASS\n") } else { print_str("f32 == finite FAIL\n"); fail = fail + 1 }
+    if a32 != c32 { print_str("f32 != finite PASS\n") } else { print_str("f32 != finite FAIL\n"); fail = fail + 1 }
+
+    f64 a64 = 1.5
+    f64 b64 = 1.5
+    f64 c64 = 2.0
+    if a64 == b64 { print_str("f64 == finite PASS\n") } else { print_str("f64 == finite FAIL\n"); fail = fail + 1 }
+    if a64 != c64 { print_str("f64 != finite PASS\n") } else { print_str("f64 != finite FAIL\n"); fail = fail + 1 }
+
+    if fail == 0 { print_str("ALL TESTS PASS\n") } else { print_str("SOME TESTS FAILED\n") }
+}
