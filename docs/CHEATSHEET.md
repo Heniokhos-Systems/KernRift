@@ -79,6 +79,15 @@ fn main() {
 
 Logical operators: `&&`, `||`, `!`. Comparisons: `==  !=  <  <=  >  >=`.
 
+```kr
+// ternary: cond ? then : else  (lowest precedence, right-associative)
+fn main() {
+    u64 x = 5
+    u64 y = x > 9 ? 3 : x > 4 ? 2 : 1   // → 2
+    exit(y)
+}
+```
+
 ## Compound assignment
 
 ```kr
