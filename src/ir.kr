@@ -2722,6 +2722,35 @@ fn ir_lower_expr(uint64 node) -> uint64 {
         return result
     }
 
+    // TernaryOp (53): cond ? then : else
+    // child=cond, data1=then_expr, data2=else_expr. Lowers to a branch with
+    // both arms writing the result vreg, then merging — same shape as the
+    // short-circuit operators above but with an explicit else block.
+    if kind == 53 {
+        uint32 cond_node = ast_child(node)
+        uint32 then_idx = ast_data1(node)
+        uint32 else_idx = ast_data2(node)
+        uint64 result = ir_new_vreg()
+        uint64 condv = ir_lower_expr(cond_node)
+        uint64 bb_then = ir_new_bb()
+        uint64 bb_else = ir_new_bb()
+        uint64 bb_merge = ir_new_bb()
+        ir_emit(IR_BR_COND, 0, condv, 0, bb_then, ir_current_bb)
+        ir_bb_set_succ(ir_current_bb, bb_else, bb_then)
+        ir_current_bb = bb_then
+        uint64 thenv = ir_lower_expr(then_idx)
+        ir_emit(IR_COPY, result, thenv, 0, 0, ir_current_bb)
+        ir_emit(IR_BR, 0, 0, 0, bb_merge, ir_current_bb)
+        ir_bb_set_succ(ir_current_bb, bb_merge, 0xFFFFFFFF)
+        ir_current_bb = bb_else
+        uint64 elsev = ir_lower_expr(else_idx)
+        ir_emit(IR_COPY, result, elsev, 0, 0, ir_current_bb)
+        ir_emit(IR_BR, 0, 0, 0, bb_merge, ir_current_bb)
+        ir_bb_set_succ(ir_current_bb, bb_merge, 0xFFFFFFFF)
+        ir_current_bb = bb_merge
+        return result
+    }
+
     // FieldAccess (36) — struct field read or enum constant lookup
     if kind == 36 {
         uint32 field_tok = ast_data2(node)

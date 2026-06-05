@@ -1356,6 +1356,15 @@ fn main() { exit(f(85)) }' 3
 run_test "elseif3_returns" 'fn f(u64 x) -> u64 { if x > 90 { return 5 } else if x > 80 { return 4 } else if x > 70 { return 3 } else if x > 60 { return 2 } else { return 1 } }
 fn main() { exit(f(65)) }' 2
 
+# Ternary conditional expression (Phase 2). Lowest precedence, right-associative,
+# lowers to the same branch IR as if/else.
+run_test "ternary_true"  'fn main() { u64 x = 5; u64 y = x > 3 ? 1 : 0; exit(y) }' 1
+run_test "ternary_false" 'fn main() { u64 x = 2; u64 y = x > 3 ? 1 : 0; exit(y) }' 0
+run_test "ternary_nested_right_assoc" 'fn main() { u64 x = 5; u64 y = x > 9 ? 3 : x > 4 ? 2 : 1; exit(y) }' 2
+run_test "ternary_in_return" 'fn pick(u64 a) -> u64 { return a > 0 ? 10 : 20 }
+fn main() { exit(pick(1)) }' 10
+run_test "ternary_lowest_prec" 'fn main() { u64 y = 1 + 2 > 2 ? 7 : 8; exit(y) }' 7
+
 # Negative: an else-if chain with NO final else must still be rejected (it can
 # fall through). Guards against the fix over-accepting non-exhaustive chains.
 TOTAL=$((TOTAL + 1))

@@ -80,6 +80,8 @@ enum AstKind {
                          // emits body (LIFO) before every return/fall-through
     RangePat = 52        // match range pattern: data1=lo_expr, data2=hi_expr,
                          // data3=inclusive_flag (1 = ..= inclusive, 0 = .. exclusive)
+    TernaryOp = 53       // cond ? then : else — child=cond_expr,
+                         // data1=then_expr_idx, data2=else_expr_idx, tok=? token
 }
 
 // ---------------------------------------------------------------------------

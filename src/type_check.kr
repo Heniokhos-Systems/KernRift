@@ -347,6 +347,17 @@ fn tc_check_expr(uint64 node) {
         return
     }
 
+    // TernaryOp (53): child=cond, data1=then, data2=else.
+    if wkind == 53 {
+        uint32 tcond = ast_child(node)
+        if tcond != 0 { tc_check_expr(tcond) }
+        uint32 tthen = ast_data1(node)
+        if tthen != 0 { tc_check_expr(tthen) }
+        uint32 telse = ast_data2(node)
+        if telse != 0 { tc_check_expr(telse) }
+        return
+    }
+
     // UnaryOp (34): child=operand.
     if wkind == 34 {
         uint32 op = ast_child(node)

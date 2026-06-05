@@ -553,7 +553,27 @@ fn is_comparison(uint32 kind) -> uint64 {
 
 @export
 fn parse_expr() -> uint64 {
-    return parse_expr_prec(1)
+    uint64 cond = parse_expr_prec(1)
+    // Ternary conditional: cond ? then : else. Lowest precedence (below ||),
+    // right-associative — both arms parse via parse_expr() so a ternary nests
+    // in either arm and `a ? b : c ? d : e` groups as `a ? b : (c ? d : e)`.
+    if cur_kind() == 28 {            // Question token
+        uint64 q_tok = advance_tok()
+        uint64 then_e = parse_expr()
+        expect(19)                   // Colon — errors with line number + exits on mismatch
+        uint64 else_e = parse_expr()
+        uint64 node = ast_alloc(AstKind.TernaryOp)
+        uint32 q32 = q_tok
+        ast_set_tok(node, q32)
+        uint32 c32 = cond
+        ast_set_child(node, c32)
+        uint32 t32 = then_e
+        ast_set_data1(node, t32)
+        uint32 e32 = else_e
+        ast_set_data2(node, e32)
+        return node
+    }
+    return cond
 }
 
 fn parse_expr_prec(uint32 min_prec) -> uint64 {
