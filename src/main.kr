@@ -2170,6 +2170,10 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
 
     // Semantic validation: check arg counts, missing returns, duplicate functions
     uint64 sema_errs = run_semantic_checks(root, source, my_tokens)
+    // `let` type inference: resolve every inferred local's type from its RHS
+    // and stash it in the AST. Runs unconditionally (the backends require a
+    // concrete type for each `let`), independent of type-checking.
+    resolve_inferred_types(root)
     if check_types_enabled != 0 {
         tc_check_module(root)
     }
@@ -2972,6 +2976,10 @@ fn compile_fat(uint64 input_path, uint64 output_path) {
 
     // Semantic validation: check arg counts, missing returns, duplicate functions
     uint64 sema_errs = run_semantic_checks(root, source, my_tokens)
+    // `let` type inference: resolve every inferred local's type from its RHS
+    // and stash it in the AST. Runs unconditionally (the backends require a
+    // concrete type for each `let`), independent of type-checking.
+    resolve_inferred_types(root)
     if check_types_enabled != 0 {
         tc_check_module(root)
     }

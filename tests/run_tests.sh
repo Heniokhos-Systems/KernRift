@@ -1331,6 +1331,23 @@ else
 fi
 rm -f /tmp/krc_err_$$.kr /tmp/krc_err_$$ /tmp/krc_stderr_$$
 
+# `let` with no initializer must be rejected (nothing to infer the type from).
+TOTAL=$((TOTAL + 1))
+printf 'fn main() { let x; exit(0) }\n' > /tmp/krc_err_$$.kr
+if $KRC $KRC_FLAGS /tmp/krc_err_$$.kr -o /tmp/krc_err_$$ 2>/tmp/krc_stderr_$$ ; then
+    echo "FAIL: let_no_init (should not compile)"
+    FAIL=$((FAIL + 1))
+else
+    if grep -qi "let" /tmp/krc_stderr_$$; then
+        PASS=$((PASS + 1))
+        echo "  let_no_init: PASS (error detected)"
+    else
+        echo "FAIL: let_no_init (wrong error)"
+        FAIL=$((FAIL + 1))
+    fi
+fi
+rm -f /tmp/krc_err_$$.kr /tmp/krc_err_$$ /tmp/krc_stderr_$$
+
 # Missing return in non-void function
 TOTAL=$((TOTAL + 1))
 printf 'fn get_val() -> uint64 { uint64 x = 42 }\nfn main() { exit(get_val()) }\n' > /tmp/krc_err_$$.kr
@@ -1391,6 +1408,23 @@ fn fb()->u64{return 9}
 fn main(){ u64 x=1; exit(match x { 1 => fa()  _ => fb() }) }' 7
 run_test "match_expr_arith_arms" 'fn main(){ u64 x=2; u64 r = match x { 1 => 3+4  2 => 6*7  _ => 0 }; exit(r) }' 42
 
+# Phase 4: `let` type inference — type inferred from the RHS expression.
+run_test "let_int"       'fn main(){ let x = 42; exit(x) }' 42
+run_test "let_arith"     'fn main(){ let a = 6 * 7; exit(a) }' 42
+run_test "let_from_var"  'fn main(){ u64 y = 9; let x = y; exit(x) }' 9
+run_test "let_from_call" 'fn f()->u64{return 42}
+fn main(){ let x = f(); exit(x) }' 42
+run_test "let_bool"      'fn main(){ let ok = 5 > 3; if ok { exit(7) } exit(0) }' 7
+run_test "let_chain"     'fn main(){ let a = 10; let b = a + 5; let c = b * 2; exit(c) }' 30
+run_test "let_in_loop"   'fn main(){ u64 s=0; for i in 0..5 { let d = i + 1; s = s + d } exit(s) }' 15
+run_test "let_ternary"   'fn main(){ let x = 5 > 3 ? 8 : 9; exit(x) }' 8
+run_test "let_match"     'fn main(){ u64 v=2; let r = match v { 1 => 10  2 => 20  _ => 0 }; exit(r) }' 20
+# Signed inference: i64 RHS → signed local → signed comparison picks the right branch.
+run_test "let_signed"    'fn main(){ i64 a = 0 - 5; let r = a; if r < 0 { exit(9) } exit(0) }' 9
+# Float inference: call returning f64 → local treated as f64 (stdout exercises the float path).
+run_test_output "let_float" 'import "std/math_float.kr"
+fn main(){ let x = int_to_f64(3); let y = int_to_f64(2); println_str(fmt_f64(x / y, 1)); exit(0) }' "1.5" 0
+
 # Legacy-backend ternary parity (the default IR path handles these above;
 # these compile with --legacy and must produce the SAME results). The legacy
 # x86 path is runnable on this host; legacy arm64 parity is covered in CI.
@@ -1423,6 +1457,15 @@ run_test_legacy "match_expr_legacy_multi"   'fn main(){ u64 x=3; exit(match x { 
 run_test_legacy "match_expr_legacy_call"    'fn fa()->u64{return 7}
 fn fb()->u64{return 9}
 fn main(){ u64 x=1; exit(match x { 1 => fa()  _ => fb() }) }' 7
+
+# Legacy-backend `let` type-inference parity (IR path covered above).
+run_test_legacy "let_legacy_int"   'fn main(){ let x = 42; exit(x) }' 42
+run_test_legacy "let_legacy_arith" 'fn main(){ let a = 6 * 7; exit(a) }' 42
+run_test_legacy "let_legacy_call"  'fn f()->u64{return 42}
+fn main(){ let x = f(); exit(x) }' 42
+run_test_legacy "let_legacy_bool"  'fn main(){ let ok = 5 > 3; exit(ok) }' 1
+run_test_legacy "let_legacy_loop"  'fn main(){ u64 s=0; for i in 0..5 { let d = i + 1; s = s + d } exit(s) }' 15
+run_test_legacy "let_legacy_signed" 'fn main(){ i64 a = 0 - 5; let r = a; if r < 0 { exit(9) } exit(0) }' 9
 
 # Short-circuit &&/|| parity: legacy must match IR (evaluate RHS only when
 # needed) AND match IR's value semantics: && = lhs?rhs:0, || = lhs?1:rhs.

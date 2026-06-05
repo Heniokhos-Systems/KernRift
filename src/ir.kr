@@ -3307,9 +3307,8 @@ fn ir_lower_stmt(uint64 node) {
         }
         uint32 init = ast_child(node)
         uint64 winit = init
-        // Check if type is float (f64=96, f32=95)
-        uint32 vd_type_tok = ast_data1(node)
-        uint64 vd_type_kind = tok_kind_at_raw(vd_type_tok)
+        // Resolved type kind (handles inferred `let`; see vardecl_resolved_kind).
+        uint64 vd_type_kind = vardecl_resolved_kind(node)
         uint64 vd_fk = 0
         if vd_type_kind == 96 { vd_fk = 1 }
         if vd_type_kind == 95 { vd_fk = 2 }

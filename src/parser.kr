@@ -781,6 +781,30 @@ fn parse_stmt() -> uint64 {
         }
     }
 
+    // `let` name = expr — type-inferred local. We emit a VarDecl with
+    // data1 = 0 (no type token); the always-run inference pre-pass
+    // (resolve_inferred_types) fills in the resolved type kind. `tok` is
+    // set to the `let` keyword so the pre-pass can tell a real `let` from a
+    // desugared for-loop iterator (which also leaves data1 == 0 but tok == 0).
+    if kind == 103 {
+        uint64 let_tok = advance_tok()
+        uint64 name_tok = expect(1)
+        if cur_kind() != 34 {
+            write(2, "error: `let` needs an initializer\n", 34)
+            exit(1)
+        }
+        advance_tok()                       // consume '='
+        uint64 init_expr = parse_expr()
+        uint64 node = ast_alloc(AstKind.VarDecl)
+        uint32 nt = name_tok
+        ast_set_data2(node, nt)
+        uint32 lt = let_tok
+        ast_set_tok(node, lt)
+        uint32 ie = init_expr
+        ast_set_child(node, ie)
+        return node
+    }
+
     // Variable declaration: TYPE name = expr  OR  TYPE[SIZE] name
     if is_type_keyword(kind) != 0 {
         uint64 type_tok = advance_tok()

@@ -4440,8 +4440,7 @@ fn gen_stmt_a64(uint64 node) {
             return
         }
         uint64 offset = var_declare(name_tok)
-        uint32 type_tok_vd = ast_data1(node)
-        uint64 wtype_a = tok_kind_at_raw(type_tok_vd)
+        uint64 wtype_a = vardecl_resolved_kind(node)
         var_type_register(name_tok, wtype_a)
         uint32 init_child = ast_child(node)
         uint64 wic = init_child

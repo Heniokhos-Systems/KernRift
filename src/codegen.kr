@@ -2372,6 +2372,24 @@ fn tok_kind_at_raw(uint64 tok_idx) -> uint64 {
     return wk
 }
 
+// Resolve a VarDecl's type KIND (lexer/type-kind code: 80..99 scalars,
+// 200+idx structs). Shared by every backend so they agree on `let`.
+//   - struct decls carry struct_idx+1 in data4
+//   - inferred `let` decls carry 0x80000000 | kind in data1 (written by the
+//     resolve_inferred_types pre-pass)
+//   - otherwise data1 is a type token, whose lexer kind is the type kind
+// A for-loop iterator that the pre-pass left untouched keeps data1 == 0 and
+// resolves via tok_kind_at_raw(0) exactly as it did before `let` existed.
+fn vardecl_resolved_kind(uint64 node) -> uint64 {
+    uint32 d4 = ast_data4(node)
+    uint64 wd4 = d4
+    if wd4 != 0 { return 200 + (wd4 - 1) }
+    uint32 d1 = ast_data1(node)
+    uint64 wd1 = d1
+    if (wd1 & 0x80000000) != 0 { return wd1 & 0x7FFFFFFF }
+    return tok_kind_at_raw(d1)
+}
+
 // Parse an x86_64 register name token into a 4-bit register code.
 // Returns 0..15 for recognised names, 0xFFFF for unknown.
 // Recognised: rax..rdi (0..7), r8..r15 (8..15).
@@ -8436,8 +8454,7 @@ fn gen_stmt(uint64 node) {
         }
 
         uint64 offset = var_declare(name_tok)
-        uint32 type_tok_vd = ast_data1(node)
-        uint64 wtype = tok_kind_at_raw(type_tok_vd)
+        uint64 wtype = vardecl_resolved_kind(node)
         var_type_register(name_tok, wtype)
         uint32 init_child = ast_child(node)
         uint64 wic = init_child

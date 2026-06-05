@@ -200,6 +200,25 @@ fn tc_expr_kind(uint64 node) -> uint64 {
         uint32 lhs = ast_child(node)
         return tc_expr_kind(lhs)
     }
+    // UnaryOp (34) — type of the operand.
+    if wkind == 34 {
+        uint32 op = ast_child(node)
+        return tc_expr_kind(op)
+    }
+    // TernaryOp (53) — type of the then-branch (both arms agree by construction).
+    if wkind == 53 {
+        uint32 tthen = ast_data1(node)
+        return tc_expr_kind(tthen)
+    }
+    // MatchExpr (54) — type of the first arm's value expression.
+    if wkind == 54 {
+        uint32 arm = ast_data1(node)
+        if arm != 0 {
+            uint32 av = ast_data2(arm)
+            return tc_expr_kind(av)
+        }
+        return 83
+    }
     // Call (35) — fn return type via fn_sig_table won't tell us the kind
     // directly (fn_sig only knows has_return:0/1), so consult the
     // codegen-side return-kind tables.
@@ -456,9 +475,12 @@ fn tc_check_stmt(uint64 node) {
         uint32 type_tok = ast_data1(node)
         uint32 name_tok = ast_data2(node)
         uint32 d4 = ast_data4(node)
+        uint64 wtt_tc = type_tok
         uint64 tk
         if d4 != 0 {
             tk = 200 + (d4 - 1)
+        } else if (wtt_tc & 0x80000000) != 0 {
+            tk = wtt_tc & 0x7FFFFFFF        // inferred `let` (resolve pre-pass)
         } else {
             tk = tc_kind_of_type_tok(type_tok)
         }
@@ -781,4 +803,150 @@ fn tc_check_module(uint64 root) {
     // entries were only needed during the walk.
     fn_ret_struct_count_set(saved_struct_count)
     fn_ret_float_count_set(saved_float_count)
+}
+
+// ---------------------------------------------------------------------------
+// `let` type inference — always-run pre-pass
+//
+// Unlike tc_check_module (gated behind check_types_enabled), the backends need
+// a concrete type for every `let`, so this runs unconditionally. For each
+// inferred decl (a VarDecl the parser left with data1 == 0 and the `let`
+// keyword in tok) we compute the RHS type kind and stash it back as
+// 0x80000000 | kind in data1; vardecl_resolved_kind() decodes it in every
+// backend. Desugared for-loop iterators (data1 == 0 but tok == 0) are left
+// untouched so their codegen stays byte-identical to before `let` existed.
+// ---------------------------------------------------------------------------
+
+fn resolve_vardecl_infer(uint64 node) {
+    uint32 name_tok = ast_data2(node)
+    uint32 d1 = ast_data1(node)
+    uint64 wd1 = d1
+    uint32 d4 = ast_data4(node)
+    uint64 wd4 = d4
+    // Explicit type (or struct marker): just record it so later `let`s that
+    // reference this variable can resolve its kind.
+    if wd1 != 0 || wd4 != 0 {
+        uint64 tk
+        if wd4 != 0 { tk = 200 + (wd4 - 1) } else { tk = tc_kind_of_type_tok(d1) }
+        tc_local_register(name_tok, tk)
+        return
+    }
+    // data1 == 0: inferred local (`let`) or desugared for-loop iterator.
+    uint32 tokf = ast_tok(node)
+    uint64 wtok = tokf
+    uint32 init = ast_child(node)
+    uint64 winit = init
+    uint64 ik = 83                          // default uint64
+    if winit != 0 {
+        uint64 inferred = tc_expr_kind(winit)
+        if inferred >= 200 && inferred != 0xFFFFFFFF {
+            // RHS is a struct value — not supported for `let` in this pass.
+            if wtok != 0 {
+                write(2, "error: `let` cannot infer struct types; use an explicit type\n", 61)
+                exit(1)
+            }
+        } else if inferred >= 80 && inferred <= 99 {
+            ik = inferred
+        }
+    }
+    tc_local_register(name_tok, ik)
+    // Tag real `let`s only; leave for-iterators at data1 == 0 (unchanged).
+    if wtok != 0 {
+        uint32 tagged = 0x80000000 | ik
+        ast_set_data1(node, tagged)
+    }
+}
+
+fn resolve_stmt_infer(uint64 node) {
+    if node == 0 { return }
+    uint32 k = ast_kind(node)
+    uint64 wk = k
+    if wk == 10 { resolve_vardecl_infer(node); return }
+    if wk == 15 {                           // Block
+        uint32 ch = ast_child(node)
+        uint64 wch = ch
+        while wch != 0 {
+            resolve_stmt_infer(wch)
+            uint32 nxt = ast_next(wch)
+            wch = nxt
+        }
+        return
+    }
+    if wk == 13 {                           // If: then=data1, else=data2
+        uint32 tb = ast_data1(node)
+        uint64 wtb = tb
+        resolve_stmt_infer(wtb)
+        uint32 eb = ast_data2(node)
+        uint64 web = eb
+        resolve_stmt_infer(web)
+        return
+    }
+    if wk == 14 {                           // While: body=data1
+        uint32 wb = ast_data1(node)
+        uint64 wwb = wb
+        resolve_stmt_infer(wwb)
+        return
+    }
+    if wk == 51 {                           // Defer: body=data1
+        uint32 db = ast_data1(node)
+        uint64 wdb = db
+        resolve_stmt_infer(wdb)
+        return
+    }
+    if wk == 19 {                           // Match statement: arm bodies in data2
+        uint32 arm = ast_data1(node)
+        uint64 wa = arm
+        while wa != 0 {
+            uint32 ak = ast_kind(wa)
+            if ak == 20 {
+                uint32 ab = ast_data2(wa)
+                uint64 wab = ab
+                resolve_stmt_infer(wab)
+            }
+            uint32 anx = ast_next(wa)
+            wa = anx
+        }
+        return
+    }
+}
+
+fn resolve_fn_infer(uint64 fn_node) {
+    tc_local_count = 0
+    // Register parameters so `let x = param` resolves.
+    uint32 param = ast_child(fn_node)
+    uint64 wp = param
+    while wp != 0 {
+        uint32 pkind = ast_kind(wp)
+        if pkind == 3 {
+            uint32 ptype_tok = ast_data1(wp)
+            uint32 pname_tok = ast_data2(wp)
+            tc_local_register(pname_tok, tc_kind_of_type_tok(ptype_tok))
+        }
+        uint32 nxt = ast_next(wp)
+        wp = nxt
+    }
+    uint32 b = ast_data3(fn_node)
+    uint64 body = b
+    if body != 0 { resolve_stmt_infer(body) }
+}
+
+@export
+fn resolve_inferred_types(uint64 root) {
+    tc_init()
+    // fn_ret_* tables are codegen-side and re-populated by codegen's own walk;
+    // snapshot/restore their counts so we leave no duplicates (mirrors
+    // tc_check_module's discipline).
+    uint64 saved_struct = fn_ret_struct_count_get()
+    uint64 saved_float = fn_ret_float_count_get()
+    tc_collect_signatures(root)
+    uint32 child = ast_child(root)
+    uint64 wc = child
+    while wc != 0 {
+        uint32 ck = ast_kind(wc)
+        if ck == 2 { resolve_fn_infer(wc) }
+        uint32 nxt = ast_next(wc)
+        wc = nxt
+    }
+    fn_ret_struct_count_set(saved_struct)
+    fn_ret_float_count_set(saved_float)
 }

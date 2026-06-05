@@ -121,6 +121,9 @@ enum TokenKind {
     StrPart = 101
     FStrEnd = 102
 
+    // `let` — type-inferred local declaration (`let x = expr`)
+    KwLet = 103
+
     // Error
     Error = 255
 }
@@ -409,6 +412,7 @@ fn classify_keyword(uint64 start, uint64 len) -> uint32 {
     if match_keyword(start, len, "true", 4) != 0 { return TokenKind.KwTrue }
     if match_keyword(start, len, "false", 5) != 0 { return TokenKind.KwFalse }
     if match_keyword(start, len, "match", 5) != 0 { return TokenKind.KwMatch }
+    if match_keyword(start, len, "let", 3) != 0 { return TokenKind.KwLet }
     if match_keyword(start, len, "type", 4) != 0 { return TokenKind.KwType }
     // Type keywords (long forms)
     if match_keyword(start, len, "uint8", 5) != 0 { return TokenKind.KwUint8 }

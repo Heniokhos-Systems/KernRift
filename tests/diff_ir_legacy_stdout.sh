@@ -64,6 +64,8 @@ dc "struct_array" 'struct P{u64 x;u64 y}
 fn main(){ P[3] ps; ps[0].x=1; ps[1].x=2; ps[2].x=3; println(ps[0].x+ps[1].x+ps[2].x); exit(0) }'
 dc "fstring"     'fn main(){ u64 n=42; println_str(f"n is {n}"); exit(0) }'
 dc "match_expr"  'fn main(){ u64 x=3; println(match x { 1 => 10  2 => 20  3 => 30  _ => 0 }); println(match x { 1,2,3 => 5  _ => 0 }); println(match x { 9 => 1 }); exit(0) }'
+dc "let_infer"   'fn f()->u64{return 9}
+fn main(){ let a = 6 * 7; let b = f(); let c = a + b; u64 t=0; for i in 0..4 { let d = i*2; t = t + d } println(a); println(b); println(c); println(t); exit(0) }'
 dc "many_println" 'fn main(){ u64 i=0; u64 s=1; while i<10{ s=s*2; i=i+1 } println(s); exit(0) }'
 dc "deep_recursion" 'fn sum(u64 n)->u64{ if n==0{return 0} return n+sum(n-1) }
 fn main(){ println(sum(100)); exit(0) }'
