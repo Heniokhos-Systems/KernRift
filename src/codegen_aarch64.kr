@@ -1699,6 +1699,38 @@ fn gen_expr_a64(uint64 node) {
         return
     }
 
+    // TernaryOp (53): cond ? then : else
+    // Mirrors the if-statement branch idiom, but the arms are expressions
+    // (each leaves its value in x0) and only one arm executes.
+    if kind == 53 {
+        uint32 tcond = ast_child(node)
+        uint64 wtcond = tcond
+        gen_expr_a64(wtcond)
+        // cbz x0, else (placeholder)
+        uint64 tcbz_patch = out_len
+        emit_a64_cbz(0, 0)
+        // then expr → x0
+        uint32 tthen = ast_data1(node)
+        uint64 wtthen = tthen
+        gen_expr_a64(wtthen)
+        // b end (placeholder)
+        uint64 tb_patch = out_len
+        emit_a64_b(0)
+        // patch cbz → else target
+        uint64 telse_target = out_len
+        uint64 tcbz_disp = telse_target - tcbz_patch
+        patch_u32(tcbz_patch, 0xB4000000 | (((tcbz_disp / 4) & 0x7FFFF) << 5) | 0)
+        // else expr → x0
+        uint32 telse = ast_data2(node)
+        uint64 wtelse = telse
+        gen_expr_a64(wtelse)
+        // patch b → end target
+        uint64 tend_target = out_len
+        uint64 tb_disp = tend_target - tb_patch
+        patch_u32(tb_patch, 0x14000000 | ((tb_disp / 4) & 0x3FFFFFF))
+        return
+    }
+
     // Function call
     if kind == 35 {
         uint32 callee_tok = ast_data1(node)

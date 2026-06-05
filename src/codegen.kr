@@ -4722,6 +4722,45 @@ fn gen_expr(uint64 node) {
         return
     }
 
+    // TernaryOp (53): cond ? then : else
+    // Same jump-patch shape as the if-statement codegen, but the arms are
+    // expressions (each leaves its value in rax) instead of blocks. Only one
+    // arm executes, so this is correctly short-circuiting.
+    if kind == 53 {
+        uint32 tcond = ast_child(node)
+        uint64 wtcond = tcond
+        gen_expr(wtcond)
+        // test eax, eax
+        emit_byte(0x85)
+        emit_byte(0xC0)
+        // jz else (placeholder)
+        emit_byte(0x0F)
+        emit_byte(0x84)
+        uint64 tjz_patch = out_len
+        emit_u32_le(0)
+        // then expr → rax
+        uint32 tthen = ast_data1(node)
+        uint64 wtthen = tthen
+        gen_expr(wtthen)
+        // jmp end (placeholder)
+        emit_byte(0xE9)
+        uint64 tjmp_patch = out_len
+        emit_u32_le(0)
+        // patch jz → else target
+        uint64 telse_target = out_len
+        uint64 tjz_disp = telse_target - tjz_patch - 4
+        patch_u32(tjz_patch, tjz_disp)
+        // else expr → rax
+        uint32 telse = ast_data2(node)
+        uint64 wtelse = telse
+        gen_expr(wtelse)
+        // patch jmp → end target
+        uint64 tend_target = out_len
+        uint64 tjmp_disp = tend_target - tjmp_patch - 4
+        patch_u32(tjmp_patch, tjmp_disp)
+        return
+    }
+
     // Function call: callee(args...)
     if kind == 35 {
         uint32 callee_tok = ast_data1(node)
@@ -10568,6 +10607,16 @@ fn dce_scan_node(uint64 node) {
         uint32 rhs = ast_data2(node)
         uint64 wr = rhs
         if wr != 0 { dce_scan_node(wr) }
+    }
+    // TernaryOp: child=cond (scanned above), data1=then_expr, data2=else_expr.
+    // Without this, calls in the arms are pruned as dead → "undefined function".
+    if kind == 53 {
+        uint32 tthen = ast_data1(node)
+        uint64 wtt = tthen
+        if wtt != 0 { dce_scan_node(wtt) }
+        uint32 telse = ast_data2(node)
+        uint64 wte = telse
+        if wte != 0 { dce_scan_node(wte) }
     }
     // Index: data1=array_name_tok (NOT a node), child=index_expr (handled above),
     //        data2=rhs_value (when used as assignment, 0 otherwise)

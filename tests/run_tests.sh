@@ -1364,6 +1364,35 @@ run_test "ternary_nested_right_assoc" 'fn main() { u64 x = 5; u64 y = x > 9 ? 3 
 run_test "ternary_in_return" 'fn pick(u64 a) -> u64 { return a > 0 ? 10 : 20 }
 fn main() { exit(pick(1)) }' 10
 run_test "ternary_lowest_prec" 'fn main() { u64 y = 1 + 2 > 2 ? 7 : 8; exit(y) }' 7
+# Regression: calls in ternary arms must not be pruned by DCE (dce_scan_node
+# has to recurse into the then/else expr nodes, not just the cond child).
+run_test "ternary_call_arms" 'fn fa()->u64{return 7}
+fn fb()->u64{return 9}
+fn main(){ exit(1 > 0 ? fa() : fb()) }' 7
+
+# Legacy-backend ternary parity (the default IR path handles these above;
+# these compile with --legacy and must produce the SAME results). The legacy
+# x86 path is runnable on this host; legacy arm64 parity is covered in CI.
+run_test_legacy() {
+    local name="$1"; local input="$2"; local expected="$3"
+    TOTAL=$((TOTAL + 1))
+    local REPO_ROOT="$DIR/.."
+    printf '%s\n' "$input" > "$REPO_ROOT/test_tmp_$$.kr"
+    if $KRC --arch=x86_64 --legacy "$REPO_ROOT/test_tmp_$$.kr" -o /tmp/krc_leg_$$ > /dev/null 2>&1; then
+        rm -f "$REPO_ROOT/test_tmp_$$.kr"; chmod +x /tmp/krc_leg_$$
+        local got=0; /tmp/krc_leg_$$ > /dev/null 2>&1 && got=0 || got=$?
+        if [ "$got" = "$expected" ]; then PASS=$((PASS + 1));
+        else echo "FAIL: $name (legacy: expected $expected, got $got)"; FAIL=$((FAIL + 1)); fi
+    else
+        echo "FAIL: $name (legacy compilation failed)"; FAIL=$((FAIL + 1))
+    fi
+    rm -f "$REPO_ROOT/test_tmp_$$.kr" /tmp/krc_leg_$$
+}
+run_test_legacy "ternary_legacy_true"   'fn main() { u64 x=5; exit(x>3 ? 1 : 0) }' 1
+run_test_legacy "ternary_legacy_false"  'fn main() { u64 x=2; exit(x>3 ? 1 : 0) }' 0
+run_test_legacy "ternary_legacy_nested" 'fn main() { u64 x=5; exit(x>9 ? 3 : x>4 ? 2 : 1) }' 2
+run_test_legacy "ternary_legacy_arg"    'fn id(u64 a)->u64{return a}
+fn main(){ exit(id(1>0 ? 9 : 4)) }' 9
 
 # Negative: an else-if chain with NO final else must still be rejected (it can
 # fall through). Guards against the fix over-accepting non-exhaustive chains.
