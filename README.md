@@ -149,6 +149,8 @@ fn divmod(u64 a, u64 b) -> u64 {
 
 Types: `u8/u16/u32/u64`, `i8/i16/i32/i64`, `f16/f32/f64` (long forms `uint8`..`int64` also work), structs, enums, fixed-size arrays, device blocks. Control: `if/else`, `while`, `for..in`, `break/continue`, `match`, recursion. Functions with method syntax (`fn Struct.method`), slice parameters (`fn foo([u8] data) { u64 n = data.len; ... }`), imports with recursive resolution.
 
+**New to KernRift?** See the [one-page cheatsheet](docs/CHEATSHEET.md) — every construct with a runnable example. Deeper references: [docs/LANGUAGE.md](docs/LANGUAGE.md), [docs/GRAMMAR.md](docs/GRAMMAR.md), and the tutorials ([B-tree](docs/tutorial-btree.md), [UART driver](docs/tutorial-uart-driver.md)).
+
 ## Kernel Features
 
 KernRift is designed for kernel and driver development. The two most
