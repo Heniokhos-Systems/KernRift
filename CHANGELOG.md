@@ -2,6 +2,33 @@
 
 All notable changes to `kernriftc` are documented in this file.
 
+## Unreleased — language ergonomics (2026-06)
+
+### New language features
+- **Ternary `cond ? then : else`** — lowest-precedence, right-associative,
+  short-circuiting conditional expression. Works on all four backends.
+- **`match` ergonomics** — arm bodies may be a single bare statement
+  (`1 => exit(1)`, braces optional); the `_ =>` default arm is documented and
+  supported; and **`match` works as an expression** (`let r = match x { 1 =>
+  10  _ => 0 }`), yielding the matching arm's value.
+- **`let` type inference** — `let name = expr` infers a local's type from its
+  initializer (required). Covers scalars, calls, arithmetic, comparisons,
+  ternaries and match expressions; struct values still need an explicit type.
+
+### Legacy-backend parity / correctness
+- Short-circuit `&&` / `||` and f-strings now behave identically on the
+  `--legacy` backends and the default IR backend (x86_64 and arm64).
+- **Legacy arm64 signed `/ % >>`** and **signed comparison operators**
+  (`< <= > >=` on `i64`) are now type-directed — they previously emitted
+  unsigned instructions on the legacy arm64 path only.
+- Calls to an undefined function are now rejected on arm64 (both backends)
+  with a clear error instead of hanging.
+- else-if chains of any length now pass return-path exhaustiveness analysis.
+
+All changes preserve the bootstrap fixed point (krc compiles itself bit-
+identically) and are validated by the full test suite plus IR-vs-legacy
+differential harnesses across x86_64 and arm64 (incl. real Pi 400 hardware).
+
 ## Licensing — 2026-05-19
 
 - Relicensed from MIT to Apache 2.0. See `LICENSE` and `NOTICE`.

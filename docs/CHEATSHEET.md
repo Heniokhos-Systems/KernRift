@@ -36,14 +36,19 @@ f32  f64                 // floats
 
 ```kr
 fn add(u64 a, u64 b) -> u64 {
-    u64 sum = a + b      // typed declaration (no inference yet — write the type)
-    return sum
+    u64 sum = a + b      // explicit type
+    let doubled = sum * 2  // `let` infers the type from the RHS (here u64)
+    return doubled
 }
 
 fn greet() {             // no return type = returns nothing
     println_str("hi")
 }
 ```
+
+`let name = expr` infers a local's type from its initializer (which is
+required). Use it for scalars/calls/arithmetic; keep explicit types for
+struct values and for parameters/fields/statics.
 
 ## Control flow
 
@@ -85,6 +90,26 @@ fn main() {
     u64 x = 5
     u64 y = x > 9 ? 3 : x > 4 ? 2 : 1   // → 2
     exit(y)
+}
+```
+
+```kr
+// match: top-to-bottom; `_` is the default; comma-lists and ranges allowed.
+// Arm bodies are a block or one bare statement; `match` also works as a value.
+fn classify(u64 c) -> u64 {
+    return match c {
+        0          => 0          // exact
+        1, 2, 3    => 1          // any of these
+        4..=9      => 2          // inclusive range (IR backend)
+        _          => 9          // default
+    }
+}
+
+fn main() {
+    match classify(7) {
+        2 => exit(2)             // bare statement arm (no braces)
+        _ => exit(0)
+    }
 }
 ```
 

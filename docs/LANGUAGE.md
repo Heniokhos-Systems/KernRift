@@ -145,6 +145,26 @@ u64 base   = 0x3F000000
 u8  byte   = 0xFF
 ```
 
+### `let` (type inference)
+
+`let name = expr` declares a local whose type is inferred from the
+initializer, so you don't repeat the type:
+
+```kr
+let count = 0              // u64
+let total = a + b          // type of a
+let ok    = x < limit      // bool
+let value = lookup(key)    // the function's return type
+let pi    = 3.14159        // f64
+```
+
+An initializer is required — there is nothing to infer from otherwise, so
+`let x` is a compile error. Inference covers integer/float/bool literals,
+identifiers, calls, arithmetic, comparisons, ternaries and match
+expressions. For a struct value, declare it with an explicit type (`Point p
+= ...`) rather than `let` for now. `let` is a local-only convenience;
+parameters, fields and statics still spell out their types.
+
 ### Compound assignment
 
 | Op | Meaning        |
@@ -212,6 +232,21 @@ if n < 0 {
 }
 ```
 
+### ternary (`? :`)
+
+`cond ? then_value : else_value` is an expression that picks one of two
+values. It has the lowest precedence (below `||`) and is right-associative,
+so it nests cleanly in either arm:
+
+```kr
+let max = a > b ? a : b
+let sign = n < 0 ? 0 - 1 : n > 0 ? 1 : 0
+exit(ok ? 0 : 1)
+```
+
+Only the chosen arm is evaluated — the other is short-circuited, so calls in
+the unused arm don't run.
+
 ### while
 
 ```kr
@@ -250,12 +285,38 @@ match opcode {
     1 => { println("one") }
     2 => { println("two") }
     3 => { println("three") }
+    _ => { println("other") }      // default arm: matches anything
 }
 ```
 
-Arms are tested top-to-bottom. Each arm matches an integer literal or a
-named integer constant. There is no default arm — if no arm matches, the
-match is a no-op.
+Arms are tested top-to-bottom. A pattern is an integer literal, a named
+integer constant, a comma-separated list (`1, 2, 3 => ...`), a range
+(`0..=31 => ...`, IR backend only), or `_` for a catch-all default arm. If
+no arm matches and there is no `_`, the match is a no-op.
+
+An arm body can be a brace block or a single bare statement — the braces are
+optional for one statement:
+
+```kr
+match code {
+    0 => return ok()
+    1 => exit(1)
+    _ => log("unknown")
+}
+```
+
+**`match` as an expression.** When used in value position, each arm is a
+single expression and the whole `match` yields the matching arm's value (or
+`0` if nothing matches and there is no `_`):
+
+```kr
+let name = match day {
+    0 => "Sun"
+    6 => "Sat"
+    _ => "weekday"
+}
+exit(match status { 0 => 0  _ => 1 })
+```
 
 ### return
 

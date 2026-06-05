@@ -41,7 +41,7 @@ grammar is referenced below.
 ## Keywords
 
 ```
-fn return if else while for in break continue match unsafe volatile asm
+fn return if else while for in break continue match let unsafe volatile asm
 static const struct enum type true false sizeof extern device at
 u8 u16 u32 u64 i8 i16 i32 i64 f32 f64 bool char float double
 ```
@@ -145,6 +145,8 @@ defer_stmt  = "defer" block
 
 var_decl        = type IDENT ("=" expr)?
                 | type "[" INT_LIT "]" IDENT    (* stack array *)
+                | "let" IDENT "=" expr          (* type inferred from RHS;
+                                                   the initializer is required *)
 struct_var_decl = IDENT IDENT ("=" expr)?       (* IDENT is known struct *)
                 | IDENT "[" INT_LIT "]" IDENT   (* struct array *)
 tuple_destruct  = "(" type IDENT "," type IDENT ("," type IDENT)? ")" "=" expr
@@ -163,10 +165,11 @@ break_stmt  = "break"
 continue_stmt = "continue"
 
 match_stmt  = "match" expr "{" match_arm* "}"
-match_arm   = pattern ("," pattern)* "=>" block
+match_arm   = pattern ("," pattern)* "=>" (block | stmt)
             (* Multiple comma-separated patterns fire the body if *any*
-               matches. Range patterns require the IR backend
-               (the default); --legacy rejects them. *)
+               matches. The arm body is a brace block or a single bare
+               statement (`1 => exit(1)`). Range patterns require the IR
+               backend (the default); --legacy rejects them. *)
 pattern     = expr
             | "_"                                  (* wildcard *)
             | expr ".." expr                       (* exclusive range *)
@@ -200,6 +203,7 @@ Precedence (low → high), all left-associative except as noted:
 
 | Prec | Operators                         | Kind       |
 |------|-----------------------------------|------------|
+|   0  | `?:`                              | ternary (right-assoc) |
 |   1  | `\|\|`                            | logical    |
 |   2  | `&&`                              | logical    |
 |   3  | `==` `!=`                         | equality   |
@@ -211,7 +215,10 @@ Precedence (low → high), all left-associative except as noted:
 |  —   | prefix `!` `-` `~`                | unary (right-assoc) |
 
 ```
-expr        = binary_expr
+expr        = ternary
+ternary     = binary_expr ("?" expr ":" expr)?    (* right-assoc; both arms
+                                                     are full exprs, so a
+                                                     ternary nests in either *)
 binary_expr = unary (binop unary)*                (* Pratt, see table *)
 unary       = ("!" | "-" | "~")* primary
 primary     = INT_LIT | FLOAT_LIT | STR_LIT | CHAR_LIT
@@ -219,7 +226,14 @@ primary     = INT_LIT | FLOAT_LIT | STR_LIT | CHAR_LIT
             | fstring
             | "(" expr ")"
             | "sizeof" "(" type ")"
+            | match_expr
             | postfix
+
+match_expr  = "match" expr "{" match_expr_arm* "}"   (* match in value position *)
+match_expr_arm = pattern ("," pattern)* "=>" expr    (* arm body is one expr;
+                                                        the match yields its
+                                                        value, or 0 if no arm
+                                                        matches and no `_` *)
 
 postfix     = IDENT call_suffix?
             | IDENT generics? "(" arg_list? ")"
