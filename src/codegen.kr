@@ -4645,80 +4645,66 @@ fn gen_expr(uint64 node) {
     }
 
     // LogicalAnd (&&): non-short-circuit, evaluate both, AND results
+    // LogicalAnd (&&): short-circuit. result = lhs_truthy ? rhs : 0
+    // (matches the IR lowering's value + control semantics exactly.)
     if kind == 39 {
         uint32 lhs_idx = ast_child(node)
         uint64 wlhs = lhs_idx
         gen_expr(wlhs)
-        uint64 and_temp = var_count * 8
-        var_count = var_count + 1
-        var_frame_size = var_count * 8
-        uint64 arem = var_frame_size & 15
-        if arem != 0 { var_frame_size = var_frame_size + 16 - arem }
-        emit_store_rax_to_stack(and_temp)
+        // test rax, rax ; jz L_false
+        emit_byte(0x48)
+        emit_byte(0x85)
+        emit_byte(0xC0)
+        emit_byte(0x0F)
+        emit_byte(0x84)
+        uint64 and_jz = out_len
+        emit_u32_le(0)
+        // lhs truthy: result = rhs (raw)
         uint32 rhs_idx = ast_data2(node)
         uint64 wrhs = rhs_idx
         gen_expr(wrhs)
-        // test both: rax = (lhs != 0) && (rhs != 0)
-        // test rax, rax → set ZF if rhs==0
+        emit_byte(0xE9)
+        uint64 and_jmp = out_len
+        emit_u32_le(0)
+        // L_false: result = 0
+        uint64 and_false = out_len
+        patch_u32(and_jz, and_false - and_jz - 4)
         emit_byte(0x48)
-        emit_byte(0x85)
+        emit_byte(0x31)
         emit_byte(0xC0)
-        // setne cl
-        emit_byte(0x0F)
-        emit_byte(0x95)
-        emit_byte(0xC1)
-        // load lhs, test
-        emit_load_rax_from_stack(and_temp)
-        emit_byte(0x48)
-        emit_byte(0x85)
-        emit_byte(0xC0)
-        // setne al
-        emit_byte(0x0F)
-        emit_byte(0x95)
-        emit_byte(0xC0)
-        // and al, cl
-        emit_byte(0x20)
-        emit_byte(0xC8)
-        // movzbl al, eax
-        emit_byte(0x0F)
-        emit_byte(0xB6)
-        emit_byte(0xC0)
+        // L_done:
+        uint64 and_done = out_len
+        patch_u32(and_jmp, and_done - and_jmp - 4)
         return
     }
 
-    // LogicalOr (||): non-short-circuit
+    // LogicalOr (||): short-circuit. result = lhs_truthy ? 1 : rhs
     if kind == 40 {
         uint32 lhs_idx = ast_child(node)
         uint64 wlhs = lhs_idx
         gen_expr(wlhs)
-        uint64 or_temp = var_count * 8
-        var_count = var_count + 1
-        var_frame_size = var_count * 8
-        uint64 orem = var_frame_size & 15
-        if orem != 0 { var_frame_size = var_frame_size + 16 - orem }
-        emit_store_rax_to_stack(or_temp)
-        uint32 rhs_idx = ast_data2(node)
-        uint64 wrhs = rhs_idx
-        gen_expr(wrhs)
-        // or lhs into rax, then test
-        emit_byte(0x48)
-        emit_byte(0x89)
-        emit_byte(0xC1)
-        emit_load_rax_from_stack(or_temp)
-        // or rcx, rax
-        emit_byte(0x48)
-        emit_byte(0x09)
-        emit_byte(0xC8)
-        // test rax, rax; setne al; movzbl
+        // test rax, rax ; jnz L_true
         emit_byte(0x48)
         emit_byte(0x85)
         emit_byte(0xC0)
         emit_byte(0x0F)
-        emit_byte(0x95)
-        emit_byte(0xC0)
-        emit_byte(0x0F)
-        emit_byte(0xB6)
-        emit_byte(0xC0)
+        emit_byte(0x85)
+        uint64 or_jnz = out_len
+        emit_u32_le(0)
+        // lhs falsy: result = rhs (raw)
+        uint32 rhs_idx = ast_data2(node)
+        uint64 wrhs = rhs_idx
+        gen_expr(wrhs)
+        emit_byte(0xE9)
+        uint64 or_jmp = out_len
+        emit_u32_le(0)
+        // L_true: result = 1
+        uint64 or_true = out_len
+        patch_u32(or_jnz, or_true - or_jnz - 4)
+        emit_mov_rax_imm(1)
+        // L_done:
+        uint64 or_done = out_len
+        patch_u32(or_jmp, or_done - or_jmp - 4)
         return
     }
 

@@ -1394,6 +1394,29 @@ run_test_legacy "ternary_legacy_nested" 'fn main() { u64 x=5; exit(x>9 ? 3 : x>4
 run_test_legacy "ternary_legacy_arg"    'fn id(u64 a)->u64{return a}
 fn main(){ exit(id(1>0 ? 9 : 4)) }' 9
 
+# Short-circuit &&/|| parity: legacy must match IR (evaluate RHS only when
+# needed) AND match IR's value semantics: && = lhs?rhs:0, || = lhs?1:rhs.
+# IR tests lock the contract; legacy tests were RED (non-short-circuit + normalized).
+run_test "and_value_truthy" 'fn main(){ exit(5 && 3) }' 3
+run_test "or_value_falsy"   'fn main(){ exit(0 || 3) }' 3
+run_test "and_value_falsy"  'fn main(){ exit(0 && 3) }' 0
+run_test "or_value_truthy"  'fn main(){ exit(5 || 3) }' 1
+run_test "and_shortcircuit" 'static u64 g = 0
+fn side()->u64{ g = 9; return 1 }
+fn main(){ u64 r = 0 && side(); exit(g) }' 0
+run_test "or_shortcircuit"  'static u64 g = 0
+fn side()->u64{ g = 9; return 1 }
+fn main(){ u64 r = 1 || side(); exit(g) }' 0
+run_test_legacy "and_value_truthy_legacy" 'fn main(){ exit(5 && 3) }' 3
+run_test_legacy "or_value_falsy_legacy"   'fn main(){ exit(0 || 3) }' 3
+run_test_legacy "or_value_truthy_legacy"  'fn main(){ exit(5 || 3) }' 1
+run_test_legacy "and_shortcircuit_legacy" 'static u64 g = 0
+fn side()->u64{ g = 9; return 1 }
+fn main(){ u64 r = 0 && side(); exit(g) }' 0
+run_test_legacy "or_shortcircuit_legacy"  'static u64 g = 0
+fn side()->u64{ g = 9; return 1 }
+fn main(){ u64 r = 1 || side(); exit(g) }' 0
+
 # Negative: an else-if chain with NO final else must still be rejected (it can
 # fall through). Guards against the fix over-accepting non-exhaustive chains.
 TOTAL=$((TOTAL + 1))
