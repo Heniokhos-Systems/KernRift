@@ -5668,6 +5668,16 @@ fn resolve_fixups_a64() {
             uint64 disp = target_off - wpo
             // Patch BL instruction: BL rel26
             patch_u32(wpo, 0x94000000 | ((disp / 4) & 0x3FFFFFF))
+        } else {
+            // Undefined function — mirror the x86 resolver. Without this the
+            // BL keeps its placeholder (BL #0 = branch to self) and the binary
+            // hangs at runtime instead of failing to compile.
+            write(2, "error: undefined function '", 27)
+            uint64 ts = tok_text_start(wtt)
+            uint64 tl = tok_text_len(wtt)
+            write(2, cg_source + ts, tl)
+            write(2, "'\n", 2)
+            exit(1)
         }
         i = i + 1
     }

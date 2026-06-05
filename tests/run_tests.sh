@@ -1435,6 +1435,24 @@ else
 fi
 rm -f /tmp/krc_err_$$.kr /tmp/krc_err_$$ /tmp/krc_stderr_$$
 
+# Undefined function on ARM64 must be detected at compile time (was: silently
+# emitted a BL-to-self placeholder -> hanging binary; x86 already errored).
+TOTAL=$((TOTAL + 1))
+printf 'fn main() { u64 x = nonexistent_fn(5); exit(x) }\n' > /tmp/krc_err_$$.kr
+if $KRC --arch=arm64 /tmp/krc_err_$$.kr -o /tmp/krc_err_$$ 2>/tmp/krc_stderr_$$ ; then
+    echo "FAIL: undefined_fn_arm64 (should not compile)"
+    FAIL=$((FAIL + 1))
+else
+    if grep -q "undefined function" /tmp/krc_stderr_$$; then
+        PASS=$((PASS + 1))
+        echo "  undefined_fn_arm64: PASS (error detected)"
+    else
+        echo "FAIL: undefined_fn_arm64 (wrong error)"
+        FAIL=$((FAIL + 1))
+    fi
+fi
+rm -f /tmp/krc_err_$$.kr /tmp/krc_err_$$ /tmp/krc_stderr_$$
+
 # Duplicate function definition
 TOTAL=$((TOTAL + 1))
 printf 'fn foo() { exit(1) }\nfn foo() { exit(2) }\nfn main() { foo() }\n' > /tmp/krc_err_$$.kr
