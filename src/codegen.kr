@@ -3241,19 +3241,11 @@ fn gen_expr(uint64 node) {
                         unsafe { *(fs_fe4 as uint32) = fs_so }
                         str_fixup_count = str_fixup_count + 1
                         emit_u32_le(0)
-                        // r10 = rsi (save src), rcx = strlen
-                        emit_byte(0x49); emit_byte(0x89); emit_byte(0xF2)  // mov r10, rsi
-                        emit_byte(0x48); emit_byte(0x31); emit_byte(0xC9)  // xor rcx, rcx
-                        uint64 fs_sl = out_len
-                        emit_byte(0x0F); emit_byte(0xB6); emit_byte(0x06)  // movzbl (%rsi), eax
-                        emit_byte(0x84); emit_byte(0xC0)                    // test al, al
-                        emit_byte(0x74); emit_byte(0x05)                    // jz +5
-                        emit_byte(0x48); emit_byte(0xFF); emit_byte(0xC1)   // inc rcx
-                        emit_byte(0x48); emit_byte(0xFF); emit_byte(0xC6)   // inc rsi
-                        uint64 fs_slb = fs_sl - out_len - 1
-                        uint8 fs_slbb = fs_slb; emit_byte(0xEB); emit_byte(fs_slbb)
-                        // rcx=len, r10=src. Compute dest = [rsp+fs_buf_off] + offset
-                        emit_byte(0x4C); emit_byte(0x89); emit_byte(0xD6)  // mov rsi, r10 (restore src)
+                        // String part length is known at compile time (fs_tlen):
+                        // no runtime strlen needed. rsi already points at the
+                        // source (lea above). rcx = fs_tlen ; rep movsb.
+                        emit_byte(0x48); emit_byte(0xC7); emit_byte(0xC1)   // mov rcx, imm32
+                        emit_u32_le(fs_tlen)
                         // lea rdi, [rsp + fs_buf_off]
                         if fs_buf_off < 128 {
                             emit_byte(0x48); emit_byte(0x8D); emit_byte(0x7C); emit_byte(0x24)
@@ -3262,7 +3254,7 @@ fn gen_expr(uint64 node) {
                             emit_byte(0x48); emit_byte(0x8D); emit_byte(0xBC); emit_byte(0x24)
                             emit_u32_le(fs_buf_off)
                         }
-                        // rax = offset from temp_slot_1
+                        // rax = offset from temp_slot_1 ; rdi += rax
                         emit_byte(0x48); emit_byte(0x8B)
                         if temp_slot_1 < 128 {
                             emit_byte(0x44); emit_byte(0x24); uint8 ts1a = temp_slot_1; emit_byte(ts1a)
@@ -3272,15 +3264,9 @@ fn gen_expr(uint64 node) {
                         emit_byte(0x48); emit_byte(0x01); emit_byte(0xC7)  // add rdi, rax
                         // rep movsb (rcx=len, rsi=src, rdi=dest)
                         emit_byte(0xF3); emit_byte(0xA4)
-                        // update offset: load temp_slot_1, add rcx (save in r10), store
-                        emit_byte(0x49); emit_byte(0x89); emit_byte(0xCA)  // mov r10, rcx
-                        emit_byte(0x48); emit_byte(0x8B)
-                        if temp_slot_1 < 128 {
-                            emit_byte(0x44); emit_byte(0x24); uint8 ts1b = temp_slot_1; emit_byte(ts1b)
-                        } else {
-                            emit_byte(0x84); emit_byte(0x24); emit_u32_le(temp_slot_1)
-                        }
-                        emit_byte(0x4C); emit_byte(0x01); emit_byte(0xD0)  // add rax, r10
+                        // update offset: temp_slot_1 += fs_tlen
+                        emit_load_rax_from_stack(temp_slot_1)
+                        emit_byte(0x48); emit_byte(0x05); emit_u32_le(fs_tlen)  // add rax, imm32
                         emit_store_rax_to_stack(temp_slot_1)
                     }
                 } else {
@@ -3356,33 +3342,53 @@ fn gen_expr(uint64 node) {
                 uint64 fs_jnz_t = out_len - fs_jnz - 4
                 uint32 fs_jnz_t32 = fs_jnz_t
                 unsafe { *((out_buf + fs_jnz) as uint32) = fs_jnz_t32 }
-                // nonzero: push digits, then pop to dest
-                emit_byte(0x49); emit_byte(0x89); emit_byte(0xFB)   // r11 = rdi (dest start)
+                // nonzero: extract digits onto the stack (reversed), then pop
+                // them back into the buffer in order. rel32 near jumps with
+                // placeholder+patch (robust; no hand-counted byte offsets).
+                emit_byte(0x49); emit_byte(0x89); emit_byte(0xFB)   // mov r11, rdi (dest start)
                 emit_byte(0x4D); emit_byte(0x31); emit_byte(0xD2)   // xor r10, r10 (count)
-                uint64 fs_dl = out_len
+                uint64 fs_dl = out_len                              // digit-loop top
                 emit_byte(0x48); emit_byte(0x85); emit_byte(0xC0)   // test rax, rax
-                emit_byte(0x74); emit_byte(0x0E)                     // jz dl_done
+                emit_byte(0x0F); emit_byte(0x84)                    // jz near dl_done
+                uint64 fs_dl_jz = out_len; emit_u32_le(0)
                 emit_byte(0x48); emit_byte(0x31); emit_byte(0xD2)   // xor rdx, rdx
                 emit_byte(0x48); emit_byte(0xB9); emit_u32_le(10); emit_u32_le(0) // mov rcx, 10
                 emit_byte(0x48); emit_byte(0xF7); emit_byte(0xF1)   // div rcx
                 emit_byte(0x48); emit_byte(0x83); emit_byte(0xC2); emit_byte(0x30) // add rdx, '0'
-                emit_byte(0x52)                                       // push rdx
+                emit_byte(0x52)                                     // push rdx
                 emit_byte(0x49); emit_byte(0xFF); emit_byte(0xC2)   // inc r10
-                uint64 fs_dlb = fs_dl - out_len - 1
-                uint8 fs_dlbb = fs_dlb; emit_byte(0xEB); emit_byte(fs_dlbb)
-                // pop digits to rdi in correct order
-                uint64 fs_pop = out_len
+                emit_byte(0xE9)                                     // jmp near fs_dl
+                uint64 fs_dl_back = out_len; emit_u32_le(0)
+                uint64 fs_dl_bd = fs_dl - fs_dl_back - 4
+                uint32 fs_dl_bd32 = fs_dl_bd
+                unsafe { *((out_buf + fs_dl_back) as uint32) = fs_dl_bd32 }
+                // dl_done: patch forward jz
+                uint64 fs_dl_done = out_len
+                uint64 fs_dl_jzd = fs_dl_done - fs_dl_jz - 4
+                uint32 fs_dl_jzd32 = fs_dl_jzd
+                unsafe { *((out_buf + fs_dl_jz) as uint32) = fs_dl_jzd32 }
+                // pop digits back into the buffer in correct order
+                uint64 fs_pop = out_len                             // pop-loop top
                 emit_byte(0x4D); emit_byte(0x85); emit_byte(0xD2)   // test r10, r10
-                emit_byte(0x74); emit_byte(0x07)                     // jz pop_done
-                emit_byte(0x59)                                       // pop rcx
-                emit_byte(0x88); emit_byte(0x0F)                     // mov [rdi], cl
+                emit_byte(0x0F); emit_byte(0x84)                    // jz near pop_done
+                uint64 fs_pop_jz = out_len; emit_u32_le(0)
+                emit_byte(0x59)                                     // pop rcx
+                emit_byte(0x88); emit_byte(0x0F)                    // mov [rdi], cl
                 emit_byte(0x48); emit_byte(0xFF); emit_byte(0xC7)   // inc rdi
                 emit_byte(0x49); emit_byte(0xFF); emit_byte(0xCA)   // dec r10
-                uint64 fs_popb = fs_pop - out_len - 1
-                uint8 fs_popbb = fs_popb; emit_byte(0xEB); emit_byte(fs_popbb)
-                // r10=0 now. len = rdi - r11
+                emit_byte(0xE9)                                     // jmp near fs_pop
+                uint64 fs_pop_back = out_len; emit_u32_le(0)
+                uint64 fs_pop_bd = fs_pop - fs_pop_back - 4
+                uint32 fs_pop_bd32 = fs_pop_bd
+                unsafe { *((out_buf + fs_pop_back) as uint32) = fs_pop_bd32 }
+                // pop_done: patch forward jz
+                uint64 fs_pop_done = out_len
+                uint64 fs_pop_jzd = fs_pop_done - fs_pop_jz - 4
+                uint32 fs_pop_jzd32 = fs_pop_jzd
+                unsafe { *((out_buf + fs_pop_jz) as uint32) = fs_pop_jzd32 }
+                // len = rdi - r11
                 emit_byte(0x4C); emit_byte(0x29); emit_byte(0xDF)   // sub rdi, r11
-                emit_byte(0x49); emit_byte(0x89); emit_byte(0xFA)   // r10 = rdi (len)
+                emit_byte(0x49); emit_byte(0x89); emit_byte(0xFA)   // mov r10, rdi (len)
                 uint64 fs_jfin_t = out_len - fs_jfin - 4
                 uint32 fs_jfin_t32 = fs_jfin_t
                 unsafe { *((out_buf + fs_jfin) as uint32) = fs_jfin_t32 }
