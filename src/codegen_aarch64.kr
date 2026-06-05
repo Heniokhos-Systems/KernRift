@@ -1440,7 +1440,9 @@ fn gen_expr_a64(uint64 node) {
                 uint64 cbnz_div_off = (out_len - cbnz_div) / 4
                 patch_u32(cbnz_div, 0xB5000000 | ((cbnz_div_off & 0x7FFFF) << 5) | 9)
             }
-            emit_a64_udiv(0, 0, 9)
+            // Signed operands → sdiv (matches IR + legacy x86, which use idiv).
+            if legacy_node_is_signed(node) != 0 { emit_a64_sdiv(0, 0, 9) }
+            else { emit_a64_udiv(0, 0, 9) }
         }
         else if op_kind == 33 {
             // modulo: x0 = x0 - (x0/x9)*x9
@@ -1454,14 +1456,20 @@ fn gen_expr_a64(uint64 node) {
                 uint64 cbnz_mod_off = (out_len - cbnz_mod) / 4
                 patch_u32(cbnz_mod, 0xB5000000 | ((cbnz_mod_off & 0x7FFFF) << 5) | 9)
             }
-            emit_a64_udiv(10, 0, 9)
+            // Signed operands → sdiv for the quotient step (then msub for remainder).
+            if legacy_node_is_signed(node) != 0 { emit_a64_sdiv(10, 0, 9) }
+            else { emit_a64_udiv(10, 0, 9) }
             emit_a64_msub(0, 10, 9, 0)
         }
         else if op_kind == 23 || op_kind == 50 { emit_a64_and(0, 0, 9) }
         else if op_kind == 24 || op_kind == 51 { emit_a64_orr(0, 0, 9) }
         else if op_kind == 25 || op_kind == 52 { emit_a64_eor(0, 0, 9) }
         else if op_kind == 43 { emit_a64_lsl(0, 0, 9) }
-        else if op_kind == 44 { emit_a64_lsr(0, 0, 9) }
+        else if op_kind == 44 {
+            // Signed operand → arithmetic shift right (asr); unsigned → lsr.
+            if legacy_node_is_signed(node) != 0 { emit_a64_asr(0, 0, 9) }
+            else { emit_a64_lsr(0, 0, 9) }
+        }
         return
     }
 
