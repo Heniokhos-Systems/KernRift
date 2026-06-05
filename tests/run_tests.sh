@@ -1370,6 +1370,12 @@ run_test "ternary_call_arms" 'fn fa()->u64{return 7}
 fn fb()->u64{return 9}
 fn main(){ exit(1 > 0 ? fa() : fb()) }' 7
 
+# Phase 3: match bare-statement arms (no braces required).
+run_test "match_bare_exit"   'fn main(){ u64 x=2; match x { 1 => exit(1)  2 => exit(2) } exit(0) }' 2
+run_test "match_bare_assign" 'fn main(){ u64 x=2; u64 r=0; match x { 1 => r=10  2 => r=20 } exit(r) }' 20
+run_test "match_bare_default" 'fn main(){ u64 x=9; match x { 1 => exit(1)  _ => exit(42) } }' 42
+run_test "match_mixed_arms"  'fn main(){ u64 x=1; u64 r=0; match x { 1 => r=5  2 => { r=6 } } exit(r) }' 5
+
 # Legacy-backend ternary parity (the default IR path handles these above;
 # these compile with --legacy and must produce the SAME results). The legacy
 # x86 path is runnable on this host; legacy arm64 parity is covered in CI.

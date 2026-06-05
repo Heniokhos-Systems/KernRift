@@ -977,7 +977,18 @@ fn parse_stmt() -> uint64 {
                 last_pat = more_pat
             }
             expect(29)  // =>
-            uint64 arm_body = parse_block()
+            // Arm body: a brace block `{ ... }`, or a single bare statement
+            // (`1 => exit(1)`) wrapped in a synthetic one-statement block so
+            // downstream codegen (which expects a Block in data2) is unchanged.
+            uint64 arm_body = 0
+            if cur_kind() == 12 {
+                arm_body = parse_block()
+            } else {
+                uint64 bare_blk = ast_alloc(AstKind.Block)
+                uint64 bare_stmt = parse_stmt()
+                ast_append_child(bare_blk, bare_stmt)
+                arm_body = bare_blk
+            }
             uint64 arm = ast_alloc(20)
             uint32 ve = first_pat
             ast_set_data1(arm, ve)
