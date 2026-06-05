@@ -1677,10 +1677,41 @@ fn sema_check_functions(uint64 root) {
     }
 }
 
-// Check if a block ends with a return statement (recursively through if/else)
+// Does a single statement guarantee a return on all paths through it?
+//   return-stmt              → yes
+//   if/else where BOTH the then-block and the else-branch return → yes
+//     (the else-branch may itself be an else-if, i.e. another if-node —
+//      that is handled by recursing at the STATEMENT level, not the block
+//      level; recursing via block_has_return on an if-node was the old bug,
+//      since block_has_return walks ast_child expecting a block and would
+//      read the if's condition expression instead of its branches.)
+//   anything else            → no
+// Mutually recursive with block_has_return; KernRift resolves cross-function
+// references across the compilation unit, so definition order is irrelevant.
+fn stmt_returns(uint64 stmt) -> uint64 {
+    if stmt == 0 { return 0 }
+    uint32 k = ast_kind(stmt)
+    uint64 wk = k
+    if wk == 12 { return 1 }
+    if wk == 13 {
+        uint32 then_blk = ast_data1(stmt)
+        uint64 wthen = then_blk
+        uint32 else_blk = ast_data2(stmt)
+        uint64 welse = else_blk
+        if welse == 0 { return 0 }
+        if block_has_return(wthen) == 0 { return 0 }
+        uint32 ek = ast_kind(welse)
+        uint64 wek = ek
+        if wek == 13 { return stmt_returns(welse) }   // else-if: recurse as statement
+        return block_has_return(welse)                // plain else: block
+    }
+    return 0
+}
+
+// A structured block (no goto in KernRift) returns on all paths iff its last
+// statement does.
 fn block_has_return(uint64 block_node) -> uint64 {
     if block_node == 0 { return 0 }
-    // Find last statement in block
     uint32 child = ast_child(block_node)
     uint64 wchild = child
     uint64 last = 0
@@ -1689,37 +1720,7 @@ fn block_has_return(uint64 block_node) -> uint64 {
         uint32 nxt = ast_next(wchild)
         wchild = nxt
     }
-    if last == 0 { return 0 }
-    uint32 lk = ast_kind(last)
-    if lk == 12 { return 1 }
-    if lk == 13 {
-        // If with else: check both branches
-        uint32 then_blk = ast_data1(last)
-        uint64 wthen = then_blk
-        uint32 else_blk = ast_data2(last)
-        uint64 welse = else_blk
-        if welse == 0 { return 0 }
-        uint64 then_ret = block_has_return(wthen)
-        if then_ret == 0 { return 0 }
-        uint32 ek = ast_kind(welse)
-        if ek == 13 {
-            // else-if chain: check recursively as a statement
-            // Wrap in a virtual check: the if-stmt itself must have return
-            uint32 eif_then = ast_data1(welse)
-            uint64 wet = eif_then
-            uint32 eif_else = ast_data2(welse)
-            uint64 wee = eif_else
-            if wee == 0 { return 0 }
-            uint64 et_ret = block_has_return(wet)
-            if et_ret == 0 { return 0 }
-            // Recurse on the else-if's else
-            uint32 eek = ast_kind(wee)
-            if eek == 13 { return block_has_return(wee) }
-            return block_has_return(wee)
-        }
-        return block_has_return(welse)
-    }
-    return 0
+    return stmt_returns(last)
 }
 
 // Check that all functions with return types actually return on all paths.
@@ -1737,7 +1738,7 @@ fn sema_check_returns(uint64 root) {
                 if block_has_return(wbody) == 0 {
                     uint32 name_tok = ast_data1(wchild)
                     uint64 wname = name_tok
-                    report_error_at(wname, "function with return type may not return a value on all paths")
+                    report_error_at(wname, "function may not return a value on all paths — add a final else/return after the conditional")
                     sema_errors = sema_errors + 1
                 }
             }

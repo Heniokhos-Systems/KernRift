@@ -1348,6 +1348,32 @@ else
 fi
 rm -f /tmp/krc_err_$$.kr /tmp/krc_err_$$ /tmp/krc_stderr_$$
 
+# else-if chain exhaustiveness (regression: >=2 else-if branches all returning
+# must be recognized as returning on all paths). Bug was in block_has_return
+# type-confusing block-node vs if-node when recursing into the else-if's else.
+run_test "elseif2_returns" 'fn f(u64 x) -> u64 { if x > 90 { return 4 } else if x > 80 { return 3 } else if x > 70 { return 2 } else { return 1 } }
+fn main() { exit(f(85)) }' 3
+run_test "elseif3_returns" 'fn f(u64 x) -> u64 { if x > 90 { return 5 } else if x > 80 { return 4 } else if x > 70 { return 3 } else if x > 60 { return 2 } else { return 1 } }
+fn main() { exit(f(65)) }' 2
+
+# Negative: an else-if chain with NO final else must still be rejected (it can
+# fall through). Guards against the fix over-accepting non-exhaustive chains.
+TOTAL=$((TOTAL + 1))
+printf 'fn f(u64 x) -> u64 { if x > 5 { return 1 } else if x > 2 { return 2 } }\nfn main() { exit(f(9)) }\n' > /tmp/krc_err_$$.kr
+if $KRC $KRC_FLAGS /tmp/krc_err_$$.kr -o /tmp/krc_err_$$ 2>/tmp/krc_stderr_$$ ; then
+    echo "FAIL: elseif_no_final_else (should not compile)"
+    FAIL=$((FAIL + 1))
+else
+    if grep -q "may not return" /tmp/krc_stderr_$$; then
+        PASS=$((PASS + 1))
+        echo "  elseif_no_final_else: PASS (error detected)"
+    else
+        echo "FAIL: elseif_no_final_else (wrong error)"
+        FAIL=$((FAIL + 1))
+    fi
+fi
+rm -f /tmp/krc_err_$$.kr /tmp/krc_err_$$ /tmp/krc_stderr_$$
+
 # Duplicate function definition
 TOTAL=$((TOTAL + 1))
 printf 'fn foo() { exit(1) }\nfn foo() { exit(2) }\nfn main() { foo() }\n' > /tmp/krc_err_$$.kr
