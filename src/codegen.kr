@@ -4753,6 +4753,113 @@ fn gen_expr(uint64 node) {
         return
     }
 
+    // MatchExpr (54): match in value position — result left in rax. Same
+    // compare-chain shape as the match statement (kind 19) but each arm body
+    // is a single value expr instead of a block, and after evaluating it we
+    // jump past a trailing `mov rax, 0` default (taken only when no arm hit).
+    if kind == 54 {
+        uint32 scrutinee = ast_child(node)
+        uint64 wscr = scrutinee
+        gen_expr(wscr)
+        uint64 match_temp = var_count * 8
+        var_count = var_count + 1
+        var_frame_size = var_count * 8
+        uint64 mrem = var_frame_size & 15
+        if mrem != 0 { var_frame_size = var_frame_size + 16 - mrem }
+        emit_store_rax_to_stack(match_temp)
+        uint64 saved_break = break_fixup_count
+        uint32 arm_idx = ast_data1(node)
+        uint64 warm = arm_idx
+        while warm != 0 {
+            uint32 val_idx = ast_data1(warm)
+            uint64 wval = val_idx
+            uint64 is_wild = 0
+            uint32 vk = ast_kind(wval)
+            if vk == 32 {
+                uint32 wild_tok = ast_data1(wval)
+                uint64 wwt = wild_tok
+                if tok_matches(wwt, "_", 1) != 0 { is_wild = 1 }
+            }
+            uint64 je_bodies = 0
+            uint64 je_count = 0
+            if is_wild == 0 {
+                je_bodies = alloc(64)
+                uint64 pat = wval
+                while pat != 0 {
+                    uint32 pat_k_raw = ast_kind(pat)
+                    uint64 pat_k = pat_k_raw
+                    if pat_k == 52 {
+                        write(2, "error: range patterns require the IR backend (drop --legacy)\n", 62)
+                        exit(1)
+                    }
+                    gen_expr(pat)
+                    emit_byte(0x48); emit_byte(0x89); emit_byte(0xC1)   // mov rcx, rax
+                    emit_load_rax_from_stack(match_temp)
+                    emit_byte(0x48); emit_byte(0x39); emit_byte(0xC8)   // cmp rax, rcx
+                    emit_byte(0x0F); emit_byte(0x84)
+                    uint64 je_p = out_len
+                    emit_u32_le(0)
+                    uint64 slot = je_bodies + je_count * 8
+                    unsafe { *(slot as uint64) = je_p }
+                    je_count = je_count + 1
+                    uint32 pnxt = ast_next(pat)
+                    pat = pnxt
+                }
+            }
+            uint64 skip_patch = 0
+            if is_wild == 0 {
+                emit_byte(0xE9)
+                skip_patch = out_len
+                emit_u32_le(0)
+            }
+            uint64 body_addr = out_len
+            uint64 ji = 0
+            while ji < je_count {
+                uint64 slot = je_bodies + ji * 8
+                uint64 jp = 0
+                unsafe { *(slot as uint64) -> jp }
+                patch_u32(jp, (body_addr - jp - 4) & 0xFFFFFFFF)
+                ji = ji + 1
+            }
+            // Arm body: evaluate the value expression → rax.
+            uint32 body_idx = ast_data2(warm)
+            uint64 wbody = body_idx
+            gen_expr(wbody)
+            if break_fixup_count >= 256 {
+                write(2, "error: break_fixups overflow (max 256)\n", 39)
+                exit(1)
+            }
+            emit_byte(0xE9)
+            uint64 end_patch = out_len
+            emit_u32_le(0)
+            uint64 bf = break_fixups + break_fixup_count * 4
+            uint32 ep32 = end_patch
+            unsafe { *(bf as uint32) = ep32 }
+            break_fixup_count = break_fixup_count + 1
+            if is_wild == 0 {
+                uint64 skip_target = out_len
+                patch_u32(skip_patch, (skip_target - skip_patch - 4) & 0xFFFFFFFF)
+            }
+            uint32 next_arm = ast_next(warm)
+            warm = next_arm
+        }
+        // No arm matched → default value 0.
+        emit_mov_rax_imm(0)
+        // Patch every arm's end-jump to here (just past the default).
+        uint64 end_addr = out_len
+        uint64 bi = saved_break
+        while bi < break_fixup_count {
+            uint64 bfe = break_fixups + bi * 4
+            uint32 bp32 = 0
+            unsafe { *(bfe as uint32) -> bp32 }
+            uint64 wbp = bp32
+            patch_u32(wbp, (end_addr - wbp - 4) & 0xFFFFFFFF)
+            bi = bi + 1
+        }
+        break_fixup_count = saved_break
+        return
+    }
+
     // Function call: callee(args...)
     if kind == 35 {
         uint32 callee_tok = ast_data1(node)
@@ -10557,8 +10664,10 @@ fn dce_scan_node(uint64 node) {
         uint64 wb = body
         if wb != 0 { dce_scan_node(wb) }
     }
-    // Match: data1=first_arm
-    if kind == 19 {
+    // Match (19) / MatchExpr (54): data1=first_arm. Both walk the arm chain;
+    // the MatchArm (20) handler below recurses into each arm's pattern + body,
+    // so calls in match-expr arm values aren't pruned as dead.
+    if kind == 19 || kind == 54 {
         uint32 arm = ast_data1(node)
         uint64 wa = arm
         while wa != 0 {

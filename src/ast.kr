@@ -82,6 +82,9 @@ enum AstKind {
                          // data3=inclusive_flag (1 = ..= inclusive, 0 = .. exclusive)
     TernaryOp = 53       // cond ? then : else — child=cond_expr,
                          // data1=then_expr_idx, data2=else_expr_idx, tok=? token
+    MatchExpr = 54       // match in value position — child=scrutinee_expr,
+                         // data1=first_arm_idx. Arms reuse MatchArm (20) but
+                         // data2 holds a value-EXPR (not a body block).
 }
 
 // ---------------------------------------------------------------------------

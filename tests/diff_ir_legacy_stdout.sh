@@ -63,6 +63,7 @@ fn main(){ Outer o; o.a.v=7; o.b=3; println(o.a.v+o.b); exit(0) }'
 dc "struct_array" 'struct P{u64 x;u64 y}
 fn main(){ P[3] ps; ps[0].x=1; ps[1].x=2; ps[2].x=3; println(ps[0].x+ps[1].x+ps[2].x); exit(0) }'
 dc "fstring"     'fn main(){ u64 n=42; println_str(f"n is {n}"); exit(0) }'
+dc "match_expr"  'fn main(){ u64 x=3; println(match x { 1 => 10  2 => 20  3 => 30  _ => 0 }); println(match x { 1,2,3 => 5  _ => 0 }); println(match x { 9 => 1 }); exit(0) }'
 dc "many_println" 'fn main(){ u64 i=0; u64 s=1; while i<10{ s=s*2; i=i+1 } println(s); exit(0) }'
 dc "deep_recursion" 'fn sum(u64 n)->u64{ if n==0{return 0} return n+sum(n-1) }
 fn main(){ println(sum(100)); exit(0) }'

@@ -1822,6 +1822,106 @@ fn gen_expr_a64(uint64 node) {
         return
     }
 
+    // MatchExpr (54): match in value position — result left in x0. Same
+    // compare-chain shape as the match statement (kind 19) but each arm body
+    // is a single value expr instead of a block; after evaluating it we branch
+    // past a trailing `mov x0, #0` default (taken only when no arm matched).
+    if kind == 54 {
+        uint32 scrutinee = ast_child(node)
+        uint64 wscr = scrutinee
+        gen_expr_a64(wscr)
+        uint64 match_temp = var_count * 8
+        var_count = var_count + 1
+        var_frame_size = var_count * 8
+        uint64 mrem = var_frame_size & 15
+        if mrem != 0 { var_frame_size = var_frame_size + 16 - mrem }
+        emit_a64_store_x0(match_temp)
+        uint64 saved_break = break_fixup_count
+        uint32 arm_idx = ast_data1(node)
+        uint64 warm = arm_idx
+        while warm != 0 {
+            uint32 val_idx = ast_data1(warm)
+            uint64 wval = val_idx
+            uint64 is_wild = 0
+            uint32 vk = ast_kind(wval)
+            if vk == 32 {
+                uint32 wild_tok = ast_data1(wval)
+                uint64 wwt = wild_tok
+                if tok_matches(wwt, "_", 1) != 0 { is_wild = 1 }
+            }
+            uint64 beq_patches = 0
+            uint64 beq_count = 0
+            uint64 skip_patch = 0
+            if is_wild == 0 {
+                beq_patches = alloc(64)
+                uint64 pat = wval
+                while pat != 0 {
+                    uint32 pat_k_raw = ast_kind(pat)
+                    uint64 pat_k = pat_k_raw
+                    if pat_k == 52 {
+                        write(2, "error: range patterns require the IR backend (drop --legacy)\n", 62)
+                        exit(1)
+                    }
+                    gen_expr_a64(pat)
+                    emit_a64_mov(9, 0)
+                    emit_a64_load_x0(match_temp)
+                    emit_a64_cmp(0, 9)
+                    uint64 beq_p = out_len
+                    emit_a64(0x54000000)   // B.EQ +0 (patched)
+                    uint64 slot = beq_patches + beq_count * 8
+                    unsafe { *(slot as uint64) = beq_p }
+                    beq_count = beq_count + 1
+                    uint32 pnxt = ast_next(pat)
+                    pat = pnxt
+                }
+                skip_patch = out_len
+                emit_a64(0x14000000)   // B +0 (patched)
+            }
+            uint64 body_addr = out_len
+            uint64 ji = 0
+            while ji < beq_count {
+                uint64 slot = beq_patches + ji * 8
+                uint64 jp = 0
+                unsafe { *(slot as uint64) -> jp }
+                uint64 boff = (body_addr - jp) >> 2
+                patch_u32(jp, 0x54000000 | ((boff & 0x7FFFF) << 5))
+                ji = ji + 1
+            }
+            // Arm body: evaluate the value expression → x0.
+            uint32 body_idx = ast_data2(warm)
+            uint64 wbody = body_idx
+            gen_expr_a64(wbody)
+            uint64 end_patch = out_len
+            emit_a64(0x14000000)  // B +0 (patched)
+            uint64 bf = break_fixups + break_fixup_count * 4
+            uint32 ep32 = end_patch
+            unsafe { *(bf as uint32) = ep32 }
+            break_fixup_count = break_fixup_count + 1
+            if is_wild == 0 {
+                uint64 skip_off = (out_len - skip_patch) >> 2
+                patch_u32(skip_patch, 0x14000000 | (skip_off & 0x3FFFFFF))
+            }
+            uint32 next_arm = ast_next(warm)
+            warm = next_arm
+        }
+        // No arm matched → default value 0.
+        emit_a64_mov_imm(0, 0)
+        // Patch every arm's end-branch to here (just past the default).
+        uint64 end_addr = out_len
+        uint64 bi = saved_break
+        while bi < break_fixup_count {
+            uint64 bfe = break_fixups + bi * 4
+            uint32 bp32 = 0
+            unsafe { *(bfe as uint32) -> bp32 }
+            uint64 wbp = bp32
+            uint64 b_off = (end_addr - wbp) >> 2
+            patch_u32(wbp, 0x14000000 | (b_off & 0x3FFFFFF))
+            bi = bi + 1
+        }
+        break_fixup_count = saved_break
+        return
+    }
+
     // Function call
     if kind == 35 {
         uint32 callee_tok = ast_data1(node)

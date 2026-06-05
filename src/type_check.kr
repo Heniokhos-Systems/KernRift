@@ -358,6 +358,27 @@ fn tc_check_expr(uint64 node) {
         return
     }
 
+    // MatchExpr (54): child=scrutinee, data1=first arm. Each arm (kind 20)
+    // holds a value EXPR in data2. Recurse into the scrutinee and each arm's
+    // value so sub-expressions get checked. Patterns are left unchecked here
+    // (they mirror the statement match, which validates them separately).
+    if wkind == 54 {
+        uint32 me_scrut = ast_child(node)
+        if me_scrut != 0 { tc_check_expr(me_scrut) }
+        uint32 me_arm = ast_data1(node)
+        uint64 wme_arm = me_arm
+        while wme_arm != 0 {
+            uint32 ak = ast_kind(wme_arm)
+            if ak == 20 {
+                uint32 me_val = ast_data2(wme_arm)
+                if me_val != 0 { tc_check_expr(me_val) }
+            }
+            uint32 nxt = ast_next(wme_arm)
+            wme_arm = nxt
+        }
+        return
+    }
+
     // UnaryOp (34): child=operand.
     if wkind == 34 {
         uint32 op = ast_child(node)

@@ -2751,6 +2751,93 @@ fn ir_lower_expr(uint64 node) -> uint64 {
         return result
     }
 
+    // MatchExpr (54): match scrutinee { pat => value ... } in value position.
+    // child=scrutinee, data1=first arm (MatchArm chain). Each arm's data2 is a
+    // value EXPR (not a block). Lowers to the same compare-chain as the match
+    // statement but every matching arm COPYs its value into a shared result
+    // vreg, then branches to a merge block. Unlike the statement form, value
+    // exprs don't mutate the var map, so no snapshot/restore dance is needed.
+    // If no arm matches (and there is no `_`), result keeps its default of 0.
+    if kind == 54 {
+        uint32 me_scrut = ast_child(node)
+        uint64 scrut_v = ir_lower_expr(me_scrut)
+        uint64 result = ir_new_vreg()
+        ir_emit(IR_CONST, result, 0, 0, 0, ir_current_bb)
+        uint32 arm_idx = ast_data1(node)
+        uint64 warm = arm_idx
+        uint64 bb_exit = ir_new_bb()
+        while warm != 0 {
+            uint32 ak = ast_kind(warm)
+            if ak == 20 {
+                uint32 val_expr = ast_data1(warm)
+                uint32 body_expr = ast_data2(warm)
+                uint64 is_wild = 0
+                uint32 vak = ast_kind(val_expr)
+                if vak == 32 {
+                    uint32 wild_tok = ast_data1(val_expr)
+                    uint64 wwt = wild_tok
+                    if tok_matches(wwt, "_", 1) != 0 { is_wild = 1 }
+                }
+                uint64 bb_body = ir_new_bb()
+                uint64 bb_next = ir_new_bb()
+                if is_wild == 0 {
+                    uint64 pat = val_expr
+                    while pat != 0 {
+                        uint32 nxt_pat = ast_next(pat)
+                        uint64 is_last_pat = 0
+                        if nxt_pat == 0 { is_last_pat = 1 }
+                        uint64 bb_on_fail = 0
+                        if is_last_pat != 0 { bb_on_fail = bb_next } else { bb_on_fail = ir_new_bb() }
+                        uint32 pat_kind_raw = ast_kind(pat)
+                        uint64 pat_kind = pat_kind_raw
+                        if pat_kind == 52 {
+                            uint32 lo_idx = ast_data1(pat)
+                            uint32 hi_idx = ast_data2(pat)
+                            uint32 inc_flag = ast_data3(pat)
+                            uint64 lo_v = ir_lower_expr(lo_idx)
+                            uint64 ge_v = ir_new_vreg()
+                            ir_emit(IR_CMP_GE, ge_v, scrut_v, lo_v, 0, ir_current_bb)
+                            uint64 bb_check_hi = ir_new_bb()
+                            ir_emit(IR_BR_COND, 0, ge_v, 0, bb_check_hi, ir_current_bb)
+                            ir_bb_set_succ(ir_current_bb, bb_on_fail, bb_check_hi)
+                            ir_current_bb = bb_check_hi
+                            uint64 hi_v = ir_lower_expr(hi_idx)
+                            uint64 cmp_v = ir_new_vreg()
+                            uint64 cmp_op = 16
+                            if inc_flag != 0 { cmp_op = 17 }
+                            ir_emit(cmp_op, cmp_v, scrut_v, hi_v, 0, ir_current_bb)
+                            ir_emit(IR_BR_COND, 0, cmp_v, 0, bb_body, ir_current_bb)
+                            ir_bb_set_succ(ir_current_bb, bb_on_fail, bb_body)
+                        } else {
+                            uint64 val_v = ir_lower_expr(pat)
+                            uint64 cmp_v = ir_new_vreg()
+                            ir_emit(IR_CMP_EQ, cmp_v, scrut_v, val_v, 0, ir_current_bb)
+                            ir_emit(IR_BR_COND, 0, cmp_v, 0, bb_body, ir_current_bb)
+                            ir_bb_set_succ(ir_current_bb, bb_on_fail, bb_body)
+                        }
+                        if is_last_pat == 0 { ir_current_bb = bb_on_fail }
+                        pat = nxt_pat
+                    }
+                } else {
+                    ir_emit(IR_BR, 0, 0, 0, bb_body, ir_current_bb)
+                    ir_bb_set_succ(ir_current_bb, bb_body, 0xFFFFFFFF)
+                }
+                ir_current_bb = bb_body
+                uint64 bodyv = ir_lower_expr(body_expr)
+                ir_emit(IR_COPY, result, bodyv, 0, 0, ir_current_bb)
+                ir_emit(IR_BR, 0, 0, 0, bb_exit, ir_current_bb)
+                ir_bb_set_succ(ir_current_bb, bb_exit, 0xFFFFFFFF)
+                ir_current_bb = bb_next
+            }
+            uint32 anxt = ast_next(warm)
+            warm = anxt
+        }
+        ir_emit(IR_BR, 0, 0, 0, bb_exit, ir_current_bb)
+        ir_bb_set_succ(ir_current_bb, bb_exit, 0xFFFFFFFF)
+        ir_current_bb = bb_exit
+        return result
+    }
+
     // FieldAccess (36) — struct field read or enum constant lookup
     if kind == 36 {
         uint32 field_tok = ast_data2(node)

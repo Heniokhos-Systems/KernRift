@@ -1376,6 +1376,21 @@ run_test "match_bare_assign" 'fn main(){ u64 x=2; u64 r=0; match x { 1 => r=10  
 run_test "match_bare_default" 'fn main(){ u64 x=9; match x { 1 => exit(1)  _ => exit(42) } }' 42
 run_test "match_mixed_arms"  'fn main(){ u64 x=1; u64 r=0; match x { 1 => r=5  2 => { r=6 } } exit(r) }' 5
 
+# Phase 3 (part 2): match-as-expression — match in value position yields a value.
+run_test "match_expr_basic"   'fn main(){ u64 x=2; u64 r = match x { 1 => 10  2 => 20  _ => 0 }; exit(r) }' 20
+run_test "match_expr_default" 'fn main(){ u64 x=9; u64 r = match x { 1 => 10  2 => 20  _ => 7 }; exit(r) }' 7
+run_test "match_expr_no_match" 'fn main(){ u64 x=9; u64 r = match x { 1 => 10  2 => 20 }; exit(r) }' 0
+run_test "match_expr_multi_pat" 'fn main(){ u64 x=3; u64 r = match x { 1, 2, 3 => 5  _ => 0 }; exit(r) }' 5
+run_test "match_expr_in_call"  'fn id(u64 a)->u64{return a}
+fn main(){ u64 x=1; exit(id(match x { 1 => 42  _ => 0 })) }' 42
+run_test "match_expr_in_return" 'fn pick(u64 a)->u64{ return match a { 0 => 100  _ => 200 } }
+fn main(){ exit(pick(0)) }' 100
+# DCE regression: calls in match-expr arm values must not be pruned.
+run_test "match_expr_call_arms" 'fn fa()->u64{return 7}
+fn fb()->u64{return 9}
+fn main(){ u64 x=1; exit(match x { 1 => fa()  _ => fb() }) }' 7
+run_test "match_expr_arith_arms" 'fn main(){ u64 x=2; u64 r = match x { 1 => 3+4  2 => 6*7  _ => 0 }; exit(r) }' 42
+
 # Legacy-backend ternary parity (the default IR path handles these above;
 # these compile with --legacy and must produce the SAME results). The legacy
 # x86 path is runnable on this host; legacy arm64 parity is covered in CI.
@@ -1399,6 +1414,15 @@ run_test_legacy "ternary_legacy_false"  'fn main() { u64 x=2; exit(x>3 ? 1 : 0) 
 run_test_legacy "ternary_legacy_nested" 'fn main() { u64 x=5; exit(x>9 ? 3 : x>4 ? 2 : 1) }' 2
 run_test_legacy "ternary_legacy_arg"    'fn id(u64 a)->u64{return a}
 fn main(){ exit(id(1>0 ? 9 : 4)) }' 9
+
+# Legacy-backend match-as-expression parity (IR path covered above).
+run_test_legacy "match_expr_legacy_basic"   'fn main(){ u64 x=2; exit(match x { 1 => 10  2 => 20  _ => 0 }) }' 20
+run_test_legacy "match_expr_legacy_default" 'fn main(){ u64 x=9; exit(match x { 1 => 10  _ => 7 }) }' 7
+run_test_legacy "match_expr_legacy_nomatch" 'fn main(){ u64 x=9; exit(match x { 1 => 10  2 => 20 }) }' 0
+run_test_legacy "match_expr_legacy_multi"   'fn main(){ u64 x=3; exit(match x { 1, 2, 3 => 5  _ => 0 }) }' 5
+run_test_legacy "match_expr_legacy_call"    'fn fa()->u64{return 7}
+fn fb()->u64{return 9}
+fn main(){ u64 x=1; exit(match x { 1 => fa()  _ => fb() }) }' 7
 
 # Short-circuit &&/|| parity: legacy must match IR (evaluate RHS only when
 # needed) AND match IR's value semantics: && = lhs?rhs:0, || = lhs?1:rhs.

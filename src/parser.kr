@@ -157,6 +157,51 @@ fn parser_init(uint64 tokens, uint64 count_val) {
 fn parse_primary() -> uint64 {
     uint32 kind = cur_kind()
 
+    // Match expression: match expr { pat => value  pat => value  ... }
+    // Value position — each arm body is a single expression and the whole
+    // match yields a value (mirrors ternary, generalised to N arms). The
+    // statement-position `match` is handled separately in parse_stmt; this
+    // case only fires where an expression is expected (RHS, arg, return).
+    if kind == 88 {
+        advance_tok()
+        uint64 me = ast_alloc(AstKind.MatchExpr)
+        uint64 scrut = parse_expr()
+        uint32 s32 = scrut
+        ast_set_child(me, s32)
+        expect(12)  // {
+        uint64 first_arm = 0
+        uint64 last_arm = 0
+        while cur_kind() != 13 && cur_kind() != 0 {
+            uint64 first_pat = parse_match_pattern()
+            uint64 last_pat = first_pat
+            while cur_kind() == 16 {            // comma-separated patterns
+                advance_tok()
+                uint64 more_pat = parse_match_pattern()
+                uint32 m32 = more_pat
+                ast_set_next(last_pat, m32)
+                last_pat = more_pat
+            }
+            expect(29)  // =>
+            uint64 arm_val = parse_expr()       // value expression (no braces)
+            uint64 arm = ast_alloc(20)
+            uint32 ve = first_pat
+            ast_set_data1(arm, ve)
+            uint32 av = arm_val
+            ast_set_data2(arm, av)
+            if first_arm == 0 {
+                first_arm = arm
+            } else {
+                uint32 a32 = arm
+                ast_set_next(last_arm, a32)
+            }
+            last_arm = arm
+        }
+        expect(13)  // }
+        uint32 fa32 = first_arm
+        ast_set_data1(me, fa32)
+        return me
+    }
+
     // Unary operators: !, -, ~
     if kind == 27 || kind == 31 || kind == 26 {
         uint64 op_tok = advance_tok()
