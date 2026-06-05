@@ -65,6 +65,12 @@ diff_case "signed_lt" 'fn main(){i64 a=0-3; if signed_lt(a,0){exit(1)} exit(0)}'
 diff_case "signed_div_neg" 'fn main(){i64 a=0-17; i64 b=5; exit((a/b) & 255)}'
 diff_case "signed_mod_neg" 'fn main(){i64 a=0-17; i64 b=5; exit((a%b) & 255)}'
 diff_case "signed_shr_neg" 'fn main(){i64 a=0-16; exit((a>>1) & 255)}'
+# ---- signed comparison OPERATORS (i64): <, <=, >, >= must be signed in ALL backends ----
+diff_case "signed_lt_op"   'fn main(){i64 a=0-5; i64 b=3; if a<b {exit(1)} exit(2)}'
+diff_case "signed_lt_zero" 'fn main(){i64 a=0-5; if a<0 {exit(1)} exit(2)}'
+diff_case "signed_gt_op"   'fn main(){i64 a=0-5; i64 b=3; if a>b {exit(1)} exit(2)}'
+diff_case "signed_le_op"   'fn main(){i64 a=0-5; i64 b=0-5; if a<=b {exit(1)} exit(2)}'
+diff_case "signed_ge_neg"  'fn main(){i64 a=0-2; i64 b=0-9; if a>=b {exit(1)} exit(2)}'
 # ---- control flow ----
 diff_case "if_else"  'fn main(){u64 x=5; if x>3{exit(1)}else{exit(0)}}'
 diff_case "elseif3"  'fn f(u64 x)->u64{if x>90{return 5}else if x>80{return 4}else if x>70{return 3}else{return 1}}
