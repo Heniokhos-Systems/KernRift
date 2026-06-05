@@ -925,80 +925,153 @@ fn gen_expr_a64(uint64 node) {
     // Returns x0 = pointer to null-terminated result.
     // Note: expression formatting uses a '?' placeholder for non-string types.
     if kind == 50 {
-        // Use str_buf to build a compile-time concatenation of all StrParts.
-        // For runtime expressions: store literal '?' as placeholder.
-        uint64 fs_soff = str_len
-        uint32 fs_ch2 = ast_child(node)
-        uint64 wfs_ch2 = fs_ch2
-        while wfs_ch2 != 0 {
-            uint32 fs_ck2 = ast_kind(wfs_ch2)
-            if fs_ck2 == 31 {
-                uint32 fs_raw2 = ast_data2(wfs_ch2)
-                uint64 wfs_raw2 = fs_raw2
-                if wfs_raw2 != 0 {
-                    // Raw StrPart
-                    uint32 fs_tok2 = ast_data1(wfs_ch2)
-                    uint64 wfs_tok2 = fs_tok2
-                    uint64 fs_tlen2 = tok_text_len(wfs_tok2)
-                    uint64 fs_si2 = 0
-                    while fs_si2 < fs_tlen2 {
-                        uint64 fs_ch3 = tok_source_byte(wfs_tok2, fs_si2)
+        // Runtime f-string builder. Reserve a result buffer + digit scratch in
+        // the frame (the prologue's `sub sp` is patched at function end, so
+        // growing var_frame_size here is safe), then for each segment copy the
+        // string bytes / format the interpolated integer into the buffer at a
+        // running offset (held in temp_slot_1). Returns x0 = buffer address.
+        uint64 fs_bufoff = var_count * 8         // 4096-byte result buffer
+        uint64 fs_ns = 512
+        uint64 fs_kk = 0
+        while fs_kk < fs_ns { var_count = var_count + 1; fs_kk = fs_kk + 1 }
+        uint64 fs_scroff = var_count * 8         // 32-byte digit scratch
+        var_count = var_count + 4
+        var_frame_size = var_count * 8
+        uint64 fs_alg = var_frame_size & 15
+        if fs_alg != 0 { var_frame_size = var_frame_size + 16 - fs_alg }
+        uint64 fs_buf_abs = a64_var_base + fs_bufoff
+        uint64 fs_scr_abs = a64_var_base + fs_scroff
+        uint64 fs_off_abs = a64_var_base + temp_slot_1
+
+        // running offset = 0
+        emit_a64_mov_imm(0, 0)
+        emit_a64_store_x0(temp_slot_1)
+
+        uint32 fs_c = ast_child(node)
+        uint64 wfs_c = fs_c
+        while wfs_c != 0 {
+            uint32 fs_k2 = ast_kind(wfs_c)
+            if fs_k2 == 31 {
+                // String segment: bake bytes into str_buf, then runtime-copy.
+                uint64 fs_soff = str_len
+                uint64 fs_len = 0
+                uint32 fs_tk = ast_data1(wfs_c)
+                uint64 wfs_tk = fs_tk
+                uint32 fs_rw = ast_data2(wfs_c)
+                uint64 wfs_rw = fs_rw
+                if wfs_rw != 0 {
+                    uint64 fs_tl = tok_text_len(wfs_tk)
+                    uint64 fs_i = 0
+                    while fs_i < fs_tl {
+                        uint64 fs_bb = tok_source_byte(wfs_tk, fs_i)
                         if str_len < 65535 {
-                            uint64 fs_sp2 = str_buf + str_len
-                            uint8 fs_cb2 = fs_ch3
-                            unsafe { *(fs_sp2 as uint8) = fs_cb2 }
+                            uint64 fs_dp = str_buf + str_len
+                            uint8 fs_dc = fs_bb
+                            unsafe { *(fs_dp as uint8) = fs_dc }
                             str_len = str_len + 1
+                            fs_len = fs_len + 1
                         }
-                        fs_si2 = fs_si2 + 1
+                        fs_i = fs_i + 1
                     }
                 } else {
-                    // StrLit — copy content (skip quotes)
-                    uint32 fs_tok3 = ast_data1(wfs_ch2)
-                    uint64 wfs_tok3 = fs_tok3
-                    uint64 fs_tlen3 = tok_text_len(wfs_tok3)
-                    uint64 fs_si3 = 1
-                    while fs_si3 < fs_tlen3 - 1 {
-                        uint64 fs_ch4 = tok_source_byte(wfs_tok3, fs_si3)
+                    uint64 fs_tl = tok_text_len(wfs_tk)
+                    uint64 fs_i = 1
+                    while fs_i < fs_tl - 1 {
+                        uint64 fs_bb = tok_source_byte(wfs_tk, fs_i)
                         if str_len < 65535 {
-                            uint64 fs_sp3 = str_buf + str_len
-                            uint8 fs_cb3 = fs_ch4
-                            unsafe { *(fs_sp3 as uint8) = fs_cb3 }
+                            uint64 fs_dp = str_buf + str_len
+                            uint8 fs_dc = fs_bb
+                            unsafe { *(fs_dp as uint8) = fs_dc }
                             str_len = str_len + 1
+                            fs_len = fs_len + 1
                         }
-                        fs_si3 = fs_si3 + 1
+                        fs_i = fs_i + 1
                     }
                 }
-            } else {
-                // Runtime expr: insert '?' placeholder
-                if str_len < 65535 {
-                    uint64 fs_qp = str_buf + str_len
-                    uint8 fs_q = 63  // '?'
-                    unsafe { *(fs_qp as uint8) = fs_q }
-                    str_len = str_len + 1
+                uint64 fs_nzp = str_buf + str_len
+                uint8 fs_nzc = 0
+                unsafe { *(fs_nzp as uint8) = fs_nzc }
+                str_len = str_len + 1
+                if fs_len != 0 {
+                    if str_fixup_count >= 4096 {
+                        write(2, "error: str_fixups overflow\n", 27)
+                        exit(1)
+                    }
+                    uint64 fs_fe = str_fixups + str_fixup_count * 8
+                    uint32 fs_cp = out_len
+                    unsafe { *(fs_fe as uint32) = fs_cp }
+                    uint64 fs_fe4 = fs_fe + 4
+                    uint32 fs_so32 = fs_soff
+                    unsafe { *(fs_fe4 as uint32) = fs_so32 }
+                    str_fixup_count = str_fixup_count + 1
+                    emit_a64(0x90000010)               // ADRP X16, #0   (src)
+                    emit_a64(0x91000200)               // ADD  X0, X16, #0
+                    // dest x4 = sp + buf_abs + offset
+                    emit_a64_add_imm(4, 31, fs_buf_abs)
+                    emit_a64_ldr(10, 31, fs_off_abs)
+                    emit_a64_add(4, 4, 10)
+                    emit_a64_mov_imm(2, fs_len)         // len
+                    // copy loop: cbz x2,done; ldrb w3,[x0],#1; strb w3,[x4],#1; sub; b
+                    uint64 fs_cl = out_len
+                    emit_a64(0xB4000000 | 2)            // cbz x2, done (patched)
+                    emit_a64(0x38401403)               // ldrb w3,[x0],#1
+                    emit_a64(0x38001483)               // strb w3,[x4],#1
+                    emit_a64(0xD1000442)               // sub x2,x2,#1
+                    uint64 fs_clbk = fs_cl - out_len
+                    emit_a64(0x14000000 | ((fs_clbk / 4) & 0x3FFFFFF))
+                    uint64 fs_cldone = out_len
+                    uint64 fs_cld = fs_cldone - fs_cl
+                    patch_u32(fs_cl, 0xB4000000 | (((fs_cld / 4) & 0x7FFFF) << 5) | 2)
+                    // offset += fs_len
+                    emit_a64_ldr(10, 31, fs_off_abs)
+                    emit_a64_add_imm(10, 10, fs_len)
+                    emit_a64_str(10, 31, fs_off_abs)
                 }
+            } else {
+                // Interpolated expression: format as decimal integer.
+                gen_expr_a64(wfs_c)                     // x0 = value
+                emit_a64_mov(1, 0)                      // x1 = value
+                emit_a64_add_imm(0, 31, fs_buf_abs)     // x0 = dest = sp+buf+off
+                emit_a64_ldr(10, 31, fs_off_abs)
+                emit_a64_add(0, 0, 10)
+                emit_a64_mov_imm(2, 0)                  // digit count
+                emit_a64_mov_imm(3, 10)                 // divisor
+                emit_a64_add_imm(12, 31, fs_scr_abs)    // scratch base
+                uint64 fu_loop = out_len
+                emit_a64_udiv(4, 1, 3)                  // x4 = val/10
+                emit_a64_msub(5, 4, 3, 1)               // x5 = val - x4*10
+                emit_a64_add_imm(5, 5, 48)              // += '0'
+                emit_a64(0x38226985)                    // strb w5,[x12,x2]
+                emit_a64_add_imm(2, 2, 1)
+                emit_a64_mov(1, 4)                      // val = quotient
+                uint64 fu_back = fu_loop - out_len
+                emit_a64(0xB5000000 | (((fu_back / 4) & 0x7FFFF) << 5) | 1) // cbnz x1
+                emit_a64_mov(6, 2)                      // x6 = digit count
+                uint64 fu_copy = out_len
+                emit_a64(0xB4000000 | 2)               // cbz x2, done (patched)
+                emit_a64(0xD1000442)                    // sub x2,x2,#1
+                emit_a64(0x38626985)                    // ldrb w5,[x12,x2]
+                emit_a64(0x38001405)                    // strb w5,[x0],#1
+                uint64 fu_cbk = fu_copy - out_len
+                emit_a64(0x14000000 | ((fu_cbk / 4) & 0x3FFFFFF))
+                uint64 fu_cdone = out_len
+                uint64 fu_cd = fu_cdone - fu_copy
+                patch_u32(fu_copy, 0xB4000000 | (((fu_cd / 4) & 0x7FFFF) << 5) | 2)
+                // offset += x6
+                emit_a64_ldr(10, 31, fs_off_abs)
+                emit_a64_add(10, 10, 6)
+                emit_a64_str(10, 31, fs_off_abs)
             }
-            uint32 fs_nxt2 = ast_next(wfs_ch2)
-            wfs_ch2 = fs_nxt2
+            uint32 fs_nx = ast_next(wfs_c)
+            wfs_c = fs_nx
         }
-        // Null-terminate
-        uint64 fs_nterm = str_buf + str_len
-        uint8 fs_ntz = 0
-        unsafe { *(fs_nterm as uint8) = fs_ntz }
-        str_len = str_len + 1
-        // Emit ADRP + ADD to load string address
-        if str_fixup_count >= 4096 {
-            write(2, "error: str_fixups overflow\n", 27)
-            exit(1)
-        }
-        uint64 fs_fea64 = str_fixups + str_fixup_count * 8
-        uint32 fs_cpa64 = out_len
-        unsafe { *(fs_fea64 as uint32) = fs_cpa64 }
-        uint64 fs_fe4a64 = fs_fea64 + 4
-        uint32 fs_soa64 = fs_soff
-        unsafe { *(fs_fe4a64 as uint32) = fs_soa64 }
-        str_fixup_count = str_fixup_count + 1
-        emit_a64(0x90000010)  // ADRP X16, #0
-        emit_a64(0x91000200)  // ADD X0, X16, #0
+        // null-terminate: [sp+buf+off] = 0
+        emit_a64_add_imm(4, 31, fs_buf_abs)
+        emit_a64_ldr(10, 31, fs_off_abs)
+        emit_a64_add(4, 4, 10)
+        emit_a64(0x3900009F)                           // strb wzr, [x4]
+        // return x0 = buffer address
+        emit_a64_add_imm(0, 31, fs_buf_abs)
         return
     }
 
