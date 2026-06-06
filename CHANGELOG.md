@@ -15,6 +15,15 @@ All notable changes to `kernriftc` are documented in this file.
   initializer (required). Covers scalars, calls, arithmetic, comparisons,
   ternaries and match expressions; struct values still need an explicit type.
 
+### Diagnostics
+- **Source spans with carets** for the common parser and codegen errors.
+  Syntax errors (`expect` / "unexpected … in expression"), undeclared
+  identifiers, undefined functions, and the `let` errors now print
+  `file:line:col: error: …` followed by the offending source line and a
+  `^~~~` underline — matching the format the type/semantic checker already
+  used. Errors routed through `report_error_at` (wrong-arg-count, redefinition,
+  type mismatches, "may not return", …) gained the column + span + caret too.
+
 ### Legacy-backend parity / correctness
 - Short-circuit `&&` / `||` and f-strings now behave identically on the
   `--legacy` backends and the default IR backend (x86_64 and arm64).
