@@ -842,8 +842,7 @@ fn resolve_vardecl_infer(uint64 node) {
         if inferred >= 200 && inferred != 0xFFFFFFFF {
             // RHS is a struct value — not supported for `let` in this pass.
             if wtok != 0 {
-                write(2, "error: `let` cannot infer struct types; use an explicit type\n", 61)
-                exit(1)
+                diag_fatal_at(wtok, "`let` cannot infer struct types; use an explicit type")
             }
         } else if inferred >= 80 && inferred <= 99 {
             ik = inferred

@@ -1348,6 +1348,35 @@ else
 fi
 rm -f /tmp/krc_err_$$.kr /tmp/krc_err_$$ /tmp/krc_stderr_$$
 
+# --- Diagnostics quality: errors must show source span + caret ---
+# Each case must (a) fail to compile, (b) print the message substring,
+# (c) print the source-line gutter " | ", and (d) print a caret "^".
+diag_span_test() {
+    local name="$1"; local src="$2"; local msg="$3"
+    TOTAL=$((TOTAL + 1))
+    printf '%s\n' "$src" > /tmp/krc_diag_$$.kr
+    if $KRC $KRC_FLAGS /tmp/krc_diag_$$.kr -o /tmp/krc_diag_bin_$$ 2>/tmp/krc_diag_err_$$ ; then
+        echo "FAIL: $name (should not compile)"; FAIL=$((FAIL + 1))
+    elif grep -qF "$msg" /tmp/krc_diag_err_$$ && grep -q ' | ' /tmp/krc_diag_err_$$ && grep -q '\^' /tmp/krc_diag_err_$$; then
+        PASS=$((PASS + 1))
+    else
+        echo "FAIL: $name (missing message / span / caret):"; sed 's/^/    /' /tmp/krc_diag_err_$$ | head -5
+        FAIL=$((FAIL + 1))
+    fi
+    rm -f /tmp/krc_diag_$$.kr /tmp/krc_diag_bin_$$ /tmp/krc_diag_err_$$
+}
+diag_span_test "diag_syntax"     'fn main() { exit( }' "expected"
+diag_span_test "diag_undeclared" 'fn main() { exit(nope) }' "undeclared identifier"
+diag_span_test "diag_undef_fn"   'fn main() { exit(missing_fn(1)) }' "undefined function"
+diag_span_test "diag_argcount"   'fn f(u64 a) -> u64 { return a }
+fn main() { exit(f(1, 2)) }' "wrong number of arguments"
+diag_span_test "diag_let_noinit" 'fn main() {
+    let x
+    exit(0)
+}' "let"
+diag_span_test "diag_missing_return" 'fn g() -> u64 { u64 x = 1 }
+fn main() { exit(g()) }' "may not return"
+
 # Missing return in non-void function
 TOTAL=$((TOTAL + 1))
 printf 'fn get_val() -> uint64 { uint64 x = 42 }\nfn main() { exit(get_val()) }\n' > /tmp/krc_err_$$.kr

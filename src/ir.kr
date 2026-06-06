@@ -1273,12 +1273,14 @@ fn ir_lower_expr(uint64 node) -> uint64 {
             if sfk != 0 { ir_vreg_fkind_set(dest, sfk) }
             return dest
         }
-        // Unknown identifier — report error
-        write(2, "error: use of undeclared identifier '", 36)
+        // Unknown identifier — report error with source span + caret.
+        diag_loc_head(wt, 0)
+        write(2, "use of undeclared identifier '", 30)
         uint64 ts = tok_text_start(wt)
         uint64 tl = tok_text_len(wt)
         write(2, cg_source + ts, tl)
         write(2, "'\n", 2)
+        diag_span_of(wt)
         exit(1)
     }
 

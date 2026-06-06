@@ -537,13 +537,23 @@ fn diag_emit_str(uint64 tok_idx, uint64 severity, uint64 msg_ptr) {
     if severity == 1 { diag_warn_count = diag_warn_count + 1 }
 }
 
+// The source buffer to read for diagnostics. During semantic checks
+// `sema_source` is set; during parsing it isn't yet, so fall back to
+// `cg_source` (set by codegen_init before parse_module). Both alias the
+// same import_buf, so either works once compilation is underway.
+fn diag_src() -> uint64 {
+    if sema_source != 0 { return sema_source }
+    return cg_source
+}
+
 // Column number = byte offset within the line (1-based).
 // Scan back from `start` to find the previous newline.
 fn diag_col_of(uint64 start) -> uint64 {
-    if sema_source == 0 { return 1 }
+    uint64 src = diag_src()
+    if src == 0 { return 1 }
     uint64 i = start
     while i > 0 {
-        uint64 p = sema_source + i - 1
+        uint64 p = src + i - 1
         uint8 c = 0
         unsafe { *(p as uint8) -> c }
         if c == 10 { break }    // '\n'
@@ -578,11 +588,12 @@ fn diag_print_carets(uint64 col, uint64 len) {
 //      42 | uint8 x = some_int64
 //         |            ^~~~~~~~~~~
 fn diag_print_source_line(uint64 start, uint64 len, uint64 line) {
-    if sema_source == 0 { return }
+    uint64 src = diag_src()
+    if src == 0 { return }
     // Find line bounds: scan back to '\n' or BOF, forward to '\n' or EOF.
     uint64 line_start = start
     while line_start > 0 {
-        uint64 p = sema_source + line_start - 1
+        uint64 p = src + line_start - 1
         uint8 c = 0
         unsafe { *(p as uint8) -> c }
         if c == 10 { break }
@@ -593,7 +604,7 @@ fn diag_print_source_line(uint64 start, uint64 len, uint64 line) {
     // walk forward conservatively.
     uint64 walk_cap = line_start + 4096
     while line_end < walk_cap {
-        uint64 p = sema_source + line_end
+        uint64 p = src + line_end
         uint8 c = 0
         unsafe { *(p as uint8) -> c }
         if c == 0 || c == 10 { break }
@@ -612,7 +623,7 @@ fn diag_print_source_line(uint64 start, uint64 len, uint64 line) {
     write(2, lbuf, llen)
     write(2, " | ", 3)
     uint64 lline = line_end - line_start
-    write(2, sema_source + line_start, lline)
+    write(2, src + line_start, lline)
     write(2, "\n", 1)
     // Print "       | <spaces>^~~~\n"
     write(2, "  ", 2)

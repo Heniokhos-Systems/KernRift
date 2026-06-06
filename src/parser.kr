@@ -100,13 +100,9 @@ fn tok_kind_name(uint64 kind) -> uint64 {
 
 fn expect(uint32 kind) -> uint64 {
     if cur_kind() != kind {
-        uint8[32] nb
-        uint32 line_num = tok_line_at(p_tok_pos)
-        uint64 wln = line_num
-        write(2, "error at line ", 14)
-        uint64 l = fmt_uint(nb, wln)
-        write(2, nb, l)
-        write(2, ": expected ", 11)
+        // "file:line:col: error: expected X, got Y 'text'" + source span/caret.
+        diag_loc_head(p_tok_pos, 0)
+        write(2, "expected ", 9)
         uint64 ename = tok_kind_name(kind)
         write(2, ename, str_len(ename))
         write(2, ", got ", 6)
@@ -121,6 +117,7 @@ fn expect(uint32 kind) -> uint64 {
             write(2, "'", 1)
         }
         write(2, "\n", 1)
+        diag_span_of(p_tok_pos)
         exit(1)
     }
     return advance_tok()
@@ -534,14 +531,9 @@ fn parse_primary() -> uint64 {
         return inner
     }
 
-    // Error
-    uint8[32] nb
-    uint32 err_line = tok_line_at(p_tok_pos)
-    uint64 werr = err_line
-    write(2, "error at line ", 14)
-    uint64 l = fmt_uint(nb, werr)
-    write(2, nb, l)
-    write(2, ": unexpected ", 13)
+    // Error — "file:line:col: error: unexpected X['text'] in expression" + span.
+    diag_loc_head(p_tok_pos, 0)
+    write(2, "unexpected ", 11)
     uint64 ename = tok_kind_name(kind)
     write(2, ename, str_len(ename))
     if kind == 1 || kind == 2 || kind == 3 {
@@ -552,6 +544,7 @@ fn parse_primary() -> uint64 {
         write(2, "'", 1)
     }
     write(2, " in expression\n", 15)
+    diag_span_of(p_tok_pos)
     exit(1)
     return 0
 }
@@ -790,8 +783,7 @@ fn parse_stmt() -> uint64 {
         uint64 let_tok = advance_tok()
         uint64 name_tok = expect(1)
         if cur_kind() != 34 {
-            write(2, "error: `let` needs an initializer\n", 34)
-            exit(1)
+            diag_fatal_at(name_tok, "`let` needs an initializer (`let name = expr`)")
         }
         advance_tok()                       // consume '='
         uint64 init_expr = parse_expr()

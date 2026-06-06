@@ -209,8 +209,9 @@ fn srcmap_line(uint64 byte_offset) -> uint64 {
     return line
 }
 
-@export
-fn report_error_at(uint64 tok_idx, uint64 msg) {
+// Print the "file:line:col: <severity>: " prefix for a token. Shared by the
+// immediate (write+exit) diagnostics so they match diag_report_all's format.
+fn diag_loc_head(uint64 tok_idx, uint64 severity) {
     uint64 tok_start = tok_text_start(tok_idx)
     uint64 file_path = srcmap_file(tok_start)
     if file_path != 0 {
@@ -220,25 +221,43 @@ fn report_error_at(uint64 tok_idx, uint64 msg) {
     uint8[24] lbuf
     uint64 llen = fmt_uint(lbuf, srcmap_line(tok_start))
     write(2, lbuf, llen)
-    write(2, ": error: ", 9)
+    write(2, ":", 1)
+    uint64 clen = fmt_uint(lbuf, diag_col_of(tok_start))
+    write(2, lbuf, clen)
+    if severity == 1 { write(2, ": warning: ", 11) } else { write(2, ": error: ", 9) }
+}
+
+// Print the source line + caret underline for a token (after a head+message).
+fn diag_span_of(uint64 tok_idx) {
+    uint64 tok_start = tok_text_start(tok_idx)
+    diag_print_source_line(tok_start, tok_text_len(tok_idx), srcmap_line(tok_start))
+}
+
+// Immediate fatal: "file:line:col: error: <msg>" + source span + caret, exit(1).
+// For the write+exit error sites in the parser and codegen.
+@export
+fn diag_fatal_at(uint64 tok_idx, uint64 msg) {
+    diag_loc_head(tok_idx, 0)
     write(2, msg, str_len(msg))
     write(2, "\n", 1)
+    diag_span_of(tok_idx)
+    exit(1)
+}
+
+@export
+fn report_error_at(uint64 tok_idx, uint64 msg) {
+    diag_loc_head(tok_idx, 0)
+    write(2, msg, str_len(msg))
+    write(2, "\n", 1)
+    diag_span_of(tok_idx)
 }
 
 @export
 fn report_warn_at(uint64 tok_idx, uint64 msg) {
-    uint64 tok_start = tok_text_start(tok_idx)
-    uint64 file_path = srcmap_file(tok_start)
-    if file_path != 0 {
-        write(2, file_path, str_len(file_path))
-    }
-    write(2, ":", 1)
-    uint8[24] lbuf
-    uint64 llen = fmt_uint(lbuf, srcmap_line(tok_start))
-    write(2, lbuf, llen)
-    write(2, ": warning: ", 11)
+    diag_loc_head(tok_idx, 1)
     write(2, msg, str_len(msg))
     write(2, "\n", 1)
+    diag_span_of(tok_idx)
     // Keep the end-of-compile summary accurate — same counter used
     // by diag_emit so 'N error(s), M warning(s)' reflects every warning.
     diag_warn_count = diag_warn_count + 1

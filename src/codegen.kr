@@ -3764,9 +3764,11 @@ fn gen_expr(uint64 node) {
             } else {
                 uint64 id_len = tok_text_len(tok)
                 if id_len != 0 {
-                    write(2, "error: use of undeclared identifier '", 37)
+                    diag_loc_head(tok, 0)
+                    write(2, "use of undeclared identifier '", 30)
                     write(2, cg_source + tok_text_start(tok), id_len)
                     write(2, "'\n", 2)
+                    diag_span_of(tok)
                     exit(1)
                 }
             }
@@ -10401,11 +10403,13 @@ fn resolve_fixups() {
             uint64 disp = target_off - wpo - 4
             patch_u32(wpo, disp)
         } else {
-            write(2, "error: undefined function '", 27)
+            diag_loc_head(wtt, 0)
+            write(2, "undefined function '", 20)
             uint64 ts = tok_text_start(wtt)
             uint64 tl = tok_text_len(wtt)
             write(2, cg_source + ts, tl)
             write(2, "'\n", 2)
+            diag_span_of(wtt)
             exit(1)
         }
         i = i + 1
