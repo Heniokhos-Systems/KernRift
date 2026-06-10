@@ -395,8 +395,11 @@ fn parse_primary() -> uint64 {
             uint32 ie = idx_expr
             ast_set_child(idx_node, ie)
             ast_set_tok(idx_node, t32)
-            // Optional .field access (for struct arrays: pts[i].field)
-            if cur_kind() == 17 {
+            // Optional .field access (for struct arrays: pts[i].field).
+            // A following `..` is the range operator, not field access —
+            // leave it for the surrounding range context (M11: `a[0]..a[1]`
+            // used to consume the second dot as a bogus field name).
+            if cur_kind() == 17 && tok_kind_at(p_tok_pos + 1) != 17 {
                 advance_tok()
                 uint64 sfield_tok = advance_tok()
                 uint64 fa_node = ast_alloc(AstKind.FieldAccess)
@@ -433,7 +436,7 @@ fn parse_primary() -> uint64 {
             uint64 last_field_tok = 0
             uint64 last_obj = 0
 
-            while cur_kind() == 17 {
+            while cur_kind() == 17 && tok_kind_at(p_tok_pos + 1) != 17 {
                 advance_tok()
                 uint64 field_tok = advance_tok()
 
@@ -2309,27 +2312,33 @@ fn parse_module() -> uint64 {
                     uint64 val_tok = advance_tok()
                     uint64 tstart = tok_start_at(val_tok)
                     uint64 tlen = tok_len_at(val_tok)
-                    // Parse integer from token
-                    uint64 val = 0
-                    uint64 vi = 0
-                    while vi < tlen {
-                        uint64 sp = p_tok_buf
-                        // Actually need to read from source, but we don't have source ptr here
-                        // Use parse_int_token from codegen? No, it uses cg_source/cg_tokens
-                        // Simplest: just use the token text from the source
-                        // We can compute the value from the token buffer
-                        vi = tlen
-                    }
-                    // For now, use a simpler approach: read digits from source
-                    // Actually, call parse_int_token-like logic inline
+                    // Parse the integer literal from source: decimal, or
+                    // 0x-prefixed hex (e.g. `FLAG = 0x10`). Previously this
+                    // ran an unconditional base-10 loop, so a hex literal
+                    // was misread digit-by-digit (`0x10` -> 7210).
                     next_val = 0
-                    vi = 0
+                    uint64 vi = 0
+                    uint64 vbase = 10
+                    uint64 c0 = 0
+                    uint64 a0 = src_ptr + tstart
+                    unsafe { *(a0 as uint8) -> c0 }
+                    if c0 == 48 && tlen >= 2 {
+                        uint64 a1 = src_ptr + tstart + 1
+                        uint64 c1 = 0
+                        unsafe { *(a1 as uint8) -> c1 }
+                        if c1 == 120 || c1 == 88 {
+                            vbase = 16
+                            vi = 2
+                        }
+                    }
                     while vi < tlen {
-                        // Read byte from source via src_ptr
                         uint64 baddr = src_ptr + tstart + vi
                         uint64 ch = 0
                         unsafe { *(baddr as uint8) -> ch }
-                        next_val = next_val * 10 + ch - 48
+                        uint64 d = ch - 48
+                        if ch >= 97 { d = ch - 87 }
+                        else if ch >= 65 { d = ch - 55 }
+                        next_val = next_val * vbase + d
                         vi = vi + 1
                     }
                 }

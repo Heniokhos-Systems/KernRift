@@ -1772,6 +1772,23 @@ fn stmt_returns(uint64 stmt) -> uint64 {
         if wek == 13 { return stmt_returns(welse) }   // else-if: recurse as statement
         return block_has_return(welse)                // plain else: block
     }
+    // exit(...) never returns to the caller, so a function whose last
+    // statement is an exit() call cannot fall off the end (M12).
+    if wk == 16 {
+        uint32 ec = ast_child(stmt)
+        uint32 eck = ast_kind(ec)
+        uint64 weck = eck
+        if weck == 35 {
+            uint32 callee = ast_data1(ec)
+            uint64 wcallee = callee
+            if sema_tok_matches(wcallee, "exit", 4) != 0 { return 1 }
+        }
+        return 0
+    }
+    // A match with a `_` default arm whose every arm returns on all paths
+    // is exhaustive and terminating (M12). Without a default arm we can't
+    // prove exhaustiveness over an integer scrutinee, so stay conservative.
+    if wk == 19 { return match_stmt_returns(stmt) }
     return 0
 }
 
@@ -1788,6 +1805,40 @@ fn block_has_return(uint64 block_node) -> uint64 {
         wchild = nxt
     }
     return stmt_returns(last)
+}
+
+// A `match` returns on all paths iff it has a `_` default arm AND every arm
+// body returns on all paths. The default arm is an Ident pattern (kind 32)
+// whose token is a single underscore, mirroring the backends' wildcard
+// detection. (M12 — previously a function ending in an exhaustive match was
+// wrongly flagged as falling off the end.)
+fn match_stmt_returns(uint64 match_node) -> uint64 {
+    uint32 arm = ast_data1(match_node)
+    uint64 warm = arm
+    if warm == 0 { return 0 }
+    uint64 has_default = 0
+    uint64 all_return = 1
+    while warm != 0 {
+        uint32 body = ast_data2(warm)
+        uint64 wbody = body
+        if block_has_return(wbody) == 0 { all_return = 0 }
+        uint32 pat = ast_data1(warm)
+        uint64 wpat = pat
+        while wpat != 0 {
+            uint32 pk = ast_kind(wpat)
+            if pk == 32 {
+                uint32 ptok = ast_data1(wpat)
+                uint64 wptok = ptok
+                if sema_tok_matches(wptok, "_", 1) != 0 { has_default = 1 }
+            }
+            uint32 pn = ast_next(wpat)
+            wpat = pn
+        }
+        uint32 an = ast_next(warm)
+        warm = an
+    }
+    if has_default != 0 && all_return != 0 { return 1 }
+    return 0
 }
 
 // Check that all functions with return types actually return on all paths.

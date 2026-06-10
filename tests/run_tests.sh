@@ -1402,6 +1402,52 @@ diag_span_test "diag_continue_in_for" 'fn main() {
     exit(s)
 }' "continue"
 
+# ---- Batch 12 (M10/M11/M12) ----
+# M10: enum initializers accept 0x-hex (were parsed base-10 digit-by-digit,
+# so `0x10` became 7210).
+run_test "enum_hex_init" 'enum F { LOW = 0x10, NEXT, HIGH = 0xFF }
+fn main() { exit(F.LOW + F.NEXT + (F.HIGH - 255)) }' "33"
+# M11: range endpoints may be index/field expressions, not just bare idents.
+# A trailing `..` used to be mis-consumed as struct-array `.field` access.
+run_test "range_index_endpoints" 'static u64[2] b
+fn main() { b[0] = 1
+    b[1] = 4
+    u64 s = 0
+    for i in b[0]..b[1] { s = s + i }
+    exit(s) }' "6"
+# M12: a function ending in exit() does not fall off the end.
+run_test "return_via_exit" 'fn pick(u64 x) -> u64 {
+    if x > 0 { return 1 }
+    exit(7)
+}
+fn main() { exit(pick(0)) }' "7"
+# M12: a function ending in an exhaustive `_`-default match returns on all paths.
+run_test "return_via_match" 'fn classify(u64 x) -> u64 {
+    match x {
+        0 => { return 10 }
+        1 => return 20
+        _ => { return 99 }
+    }
+}
+fn main() { exit(classify(5)) }' "99"
+# M12 soundness: a match WITHOUT a default arm cannot be proven exhaustive,
+# so the missing-return check must still fire.
+diag_span_test "diag_match_no_default" 'fn classify(u64 x) -> u64 {
+    match x {
+        0 => { return 10 }
+        1 => { return 20 }
+    }
+}
+fn main() { exit(classify(5)) }' "may not return"
+# M12 soundness: a default arm that does not itself return must still fire.
+diag_span_test "diag_match_arm_no_return" 'fn classify(u64 x) -> u64 {
+    match x {
+        0 => { return 10 }
+        _ => { u64 y = x }
+    }
+}
+fn main() { exit(classify(5)) }' "may not return"
+
 # C2 regression: `let` must be resolved on EVERY fat-binary slice, not just the
 # first. A signed `let` mis-resolved on a non-first slice flips the comparison.
 # We build a fat (.krbo) binary, then run its ARM64 slice (the 2nd slice — the
