@@ -677,6 +677,135 @@ fn tok_matches(uint64 tok_idx, uint64 str_ptr, uint64 str_len) -> uint64 {
 }
 
 // ---------------------------------------------------------------------------
+// "Did you mean?" suggestions for undeclared identifiers and undefined
+// functions. Classic two-row Levenshtein DP over the two tokens' source
+// bytes, capped at names <= 64 bytes, with an early-out once a whole DP
+// row exceeds 2 (hints are only shown for distance 1-2, so anything
+// larger can bail). Scratch rows live in one flat alloc. Error-path only.
+// ---------------------------------------------------------------------------
+
+static uint64 diag_lev_rows = 0
+
+fn diag_edit_distance(uint64 tok_a, uint64 tok_b) -> uint64 {
+    uint64 la = tok_text_len(tok_a)
+    uint64 lb = tok_text_len(tok_b)
+    if la > 64 { return 99 }
+    if lb > 64 { return 99 }
+    uint64 ldiff = 0
+    if la > lb { ldiff = la - lb } else { ldiff = lb - la }
+    if ldiff > 2 { return ldiff }
+    if diag_lev_rows == 0 { diag_lev_rows = alloc(2 * 65 * 8) }
+    uint64 prev = diag_lev_rows
+    uint64 cur = diag_lev_rows + 520
+    uint64 j = 0
+    while j <= lb {
+        uint64 initp = prev + j * 8
+        unsafe { *(initp as uint64) = j }
+        j = j + 1
+    }
+    uint64 i = 1
+    while i <= la {
+        uint64 c0 = cur
+        unsafe { *(c0 as uint64) = i }
+        uint64 row_min = i
+        uint64 ca = tok_source_byte(tok_a, i - 1)
+        j = 1
+        while j <= lb {
+            uint64 cb = tok_source_byte(tok_b, j - 1)
+            // deletion: prev[j] + 1
+            uint64 delp = prev + j * 8
+            uint64 del = 0
+            unsafe { *(delp as uint64) -> del }
+            del = del + 1
+            // insertion: cur[j-1] + 1
+            uint64 insp = cur + (j - 1) * 8
+            uint64 ins = 0
+            unsafe { *(insp as uint64) -> ins }
+            ins = ins + 1
+            // substitution: prev[j-1] + (ca != cb)
+            uint64 subp = prev + (j - 1) * 8
+            uint64 sub = 0
+            unsafe { *(subp as uint64) -> sub }
+            if ca != cb { sub = sub + 1 }
+            uint64 best = del
+            if ins < best { best = ins }
+            if sub < best { best = sub }
+            uint64 curp = cur + j * 8
+            unsafe { *(curp as uint64) = best }
+            if best < row_min { row_min = best }
+            j = j + 1
+        }
+        if row_min > 2 { return 3 }
+        uint64 tswap = prev
+        prev = cur
+        cur = tswap
+        i = i + 1
+    }
+    uint64 resp = prev + lb * 8
+    uint64 res = 0
+    unsafe { *(resp as uint64) -> res }
+    return res
+}
+
+// Best-candidate accumulator: {best_distance(8), best_tok(8)}. Reset, then
+// feed each symbol table via diag_sugg_scan; diag_sugg_print appends the
+// hint when a candidate landed within edit distance 2.
+static uint64 diag_sugg_cell = 0
+
+fn diag_sugg_reset() {
+    if diag_sugg_cell == 0 { diag_sugg_cell = alloc(16) }
+    uint64 bp = diag_sugg_cell
+    uint64 dmax = 3
+    unsafe { *(bp as uint64) = dmax }
+    uint64 tp = diag_sugg_cell + 8
+    uint64 none = 0xFFFFFFFF
+    unsafe { *(tp as uint64) = none }
+}
+
+// Scan a symbol table whose entries are 8 bytes with the name token in the
+// low u32 — ir_var_map, var_table, static_table and fn_table all share
+// this shape. Unknown names shorter than 3 bytes are too noisy to guess.
+fn diag_sugg_scan(uint64 tok, uint64 table, uint64 count) {
+    if diag_sugg_cell == 0 { return }
+    if table == 0 { return }
+    if tok_text_len(tok) < 3 { return }
+    uint64 i = 0
+    while i < count {
+        uint64 entry = table + i * 8
+        uint32 nt = 0
+        unsafe { *(entry as uint32) -> nt }
+        uint64 wnt = nt
+        uint64 d = diag_edit_distance(tok, wnt)
+        uint64 bp = diag_sugg_cell
+        uint64 best = 0
+        unsafe { *(bp as uint64) -> best }
+        if d != 0 && d < best {
+            unsafe { *(bp as uint64) = d }
+            uint64 tp = diag_sugg_cell + 8
+            unsafe { *(tp as uint64) = wnt }
+        }
+        i = i + 1
+    }
+}
+
+// Append "; did you mean 'X'?" (no newline) when a candidate is within
+// distance 2. Callers write the closing quote of the unknown name first,
+// then call this, then write the newline.
+fn diag_sugg_print() {
+    if diag_sugg_cell == 0 { return }
+    uint64 bp = diag_sugg_cell
+    uint64 best = 3
+    unsafe { *(bp as uint64) -> best }
+    if best > 2 { return }
+    uint64 tp = diag_sugg_cell + 8
+    uint64 cand = 0
+    unsafe { *(tp as uint64) -> cand }
+    write(2, "; did you mean '", 16)
+    write(2, cg_source + tok_text_start(cand), tok_text_len(cand))
+    write(2, "'?", 2)
+}
+
+// ---------------------------------------------------------------------------
 // Variable table
 // ---------------------------------------------------------------------------
 
@@ -3876,7 +4005,12 @@ fn gen_expr(uint64 node) {
                     diag_loc_head(tok, 0)
                     write(2, "use of undeclared identifier '", 30)
                     write(2, cg_source + tok_text_start(tok), id_len)
-                    write(2, "'\n", 2)
+                    write(2, "'", 1)
+                    diag_sugg_reset()
+                    diag_sugg_scan(tok, var_table, var_table_size)
+                    diag_sugg_scan(tok, static_table, static_count)
+                    diag_sugg_print()
+                    write(2, "\n", 1)
                     diag_span_of(tok)
                     exit(1)
                 }
@@ -10564,7 +10698,11 @@ fn resolve_fixups() {
             uint64 ts = tok_text_start(wtt)
             uint64 tl = tok_text_len(wtt)
             write(2, cg_source + ts, tl)
-            write(2, "'\n", 2)
+            write(2, "'", 1)
+            diag_sugg_reset()
+            diag_sugg_scan(wtt, fn_table, fn_count)
+            diag_sugg_print()
+            write(2, "\n", 1)
             diag_span_of(wtt)
             exit(1)
         }

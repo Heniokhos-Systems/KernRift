@@ -1288,13 +1288,20 @@ fn ir_lower_expr(uint64 node) -> uint64 {
             if sfk != 0 { ir_vreg_fkind_set(dest, sfk) }
             return dest
         }
-        // Unknown identifier — report error with source span + caret.
+        // Unknown identifier — report error with source span + caret,
+        // plus a "did you mean" hint from the closest in-scope name
+        // (current fn's locals + statics) within edit distance 2.
         diag_loc_head(wt, 0)
         write(2, "use of undeclared identifier '", 30)
         uint64 ts = tok_text_start(wt)
         uint64 tl = tok_text_len(wt)
         write(2, cg_source + ts, tl)
-        write(2, "'\n", 2)
+        write(2, "'", 1)
+        diag_sugg_reset()
+        diag_sugg_scan(wt, ir_var_map, ir_var_map_count)
+        diag_sugg_scan(wt, static_table, static_count)
+        diag_sugg_print()
+        write(2, "\n", 1)
         diag_span_of(wt)
         exit(1)
     }

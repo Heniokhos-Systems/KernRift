@@ -1414,6 +1414,35 @@ diag_span_test() {
 diag_span_test "diag_syntax"     'fn main() { exit( }' "expected"
 diag_span_test "diag_undeclared" 'fn main() { exit(nope) }' "undeclared identifier"
 diag_span_test "diag_undef_fn"   'fn main() { exit(missing_fn(1)) }' "undefined function"
+# "did you mean" suggestions: a near-miss identifier/function name within
+# edit distance 2 of an in-scope local / static / function is suggested.
+diag_span_test "diag_suggest_local" 'fn main() {
+    u64 counter = 5
+    exit(countr)
+}' "did you mean '"'counter'"'?"
+diag_span_test "diag_suggest_static" 'static uint64 total_bytes = 7
+fn main() { exit(total_byte) }' "did you mean '"'total_bytes'"'?"
+# helper must be genuinely retained (really called + not a pure single-expr
+# that the inliner folds away) for the fn-name table to still hold it.
+diag_span_test "diag_suggest_fn" 'fn helper(u64 a) -> u64 { u64 b = a + 1
+    return b }
+fn main() { u64 x = helper(2)
+    exit(helpr(x)) }' "did you mean '"'helper'"'?"
+# Legacy backend shares the did-you-mean helper — assert the hint there too.
+TOTAL=$((TOTAL + 1))
+printf '%s\n' 'fn main() {
+    u64 counter = 5
+    exit(countr)
+}' > /tmp/krc_dym_$$.kr
+if $KRC $KRC_FLAGS --legacy /tmp/krc_dym_$$.kr -o /tmp/krc_dym_bin_$$ 2>/tmp/krc_dym_err_$$ ; then
+    echo "FAIL: legacy_suggest_local (should not compile)"; FAIL=$((FAIL + 1))
+elif grep -qF "did you mean 'counter'?" /tmp/krc_dym_err_$$; then
+    PASS=$((PASS + 1))
+else
+    echo "FAIL: legacy_suggest_local (missing did-you-mean hint):"; sed 's/^/    /' /tmp/krc_dym_err_$$ | head -3
+    FAIL=$((FAIL + 1))
+fi
+rm -f /tmp/krc_dym_$$.kr /tmp/krc_dym_bin_$$ /tmp/krc_dym_err_$$
 diag_span_test "diag_argcount"   'fn f(u64 a) -> u64 { return a }
 fn main() { exit(f(1, 2)) }' "wrong number of arguments"
 diag_span_test "diag_let_noinit" 'fn main() {
