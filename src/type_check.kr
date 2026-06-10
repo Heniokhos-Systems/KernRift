@@ -394,6 +394,15 @@ fn tc_check_expr(uint64 node) {
         if tthen != 0 { tc_check_expr(tthen) }
         uint32 telse = ast_data2(node)
         if telse != 0 { tc_check_expr(telse) }
+        // Both arms feed one result vreg, so they must agree on float-ness;
+        // a float/int mix produces garbage on every backend.
+        uint64 tk_then = tc_expr_kind(tthen)
+        uint64 tk_else = tc_expr_kind(telse)
+        if tk_then != 0 && tk_then != 0xFFFFFFFF && tk_else != 0 && tk_else != 0xFFFFFFFF {
+            if tc_is_float_kind(tk_then) != tc_is_float_kind(tk_else) {
+                diag_fatal_at(ast_tok(node), "ternary arms mix float and integer types")
+            }
+        }
         return
     }
 
@@ -406,11 +415,23 @@ fn tc_check_expr(uint64 node) {
         if me_scrut != 0 { tc_check_expr(me_scrut) }
         uint32 me_arm = ast_data1(node)
         uint64 wme_arm = me_arm
+        uint64 me_first_fk = 2          // 2 = "not yet seen"
         while wme_arm != 0 {
             uint32 ak = ast_kind(wme_arm)
             if ak == 20 {
                 uint32 me_val = ast_data2(wme_arm)
-                if me_val != 0 { tc_check_expr(me_val) }
+                if me_val != 0 {
+                    tc_check_expr(me_val)
+                    uint64 mk = tc_expr_kind(me_val)
+                    if mk != 0 && mk != 0xFFFFFFFF {
+                        uint64 mfk = tc_is_float_kind(mk)
+                        if me_first_fk == 2 {
+                            me_first_fk = mfk
+                        } else if mfk != me_first_fk {
+                            diag_fatal_at(ast_tok(me_val), "match-expression arms mix float and integer types")
+                        }
+                    }
+                }
             }
             uint32 nxt = ast_next(wme_arm)
             wme_arm = nxt

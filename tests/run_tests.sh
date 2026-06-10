@@ -1381,6 +1381,11 @@ diag_span_test "diag_let_noinfer" 'fn main() {
     let x = mystery
     exit(0)
 }' "infer"
+# H3: ternary/match-expr arms that mix float and integer are rejected.
+diag_span_test "diag_ternary_mixed" 'fn main() {
+    println(1 == 1 ? 1.5 : 2)
+    exit(0)
+}' "mix float"
 
 # C2 regression: `let` must be resolved on EVERY fat-binary slice, not just the
 # first. A signed `let` mis-resolved on a non-first slice flips the comparison.
@@ -1497,6 +1502,21 @@ fn main(){ let x = K; exit(x) }' 5
 # Float inference: call returning f64 → local treated as f64 (stdout exercises the float path).
 run_test_output "let_float" 'import "std/math_float.kr"
 fn main(){ let x = int_to_f64(3); let y = int_to_f64(2); println_str(fmt_f64(x / y, 1)); exit(0) }' "1.5" 0
+
+# H3: ternary/match-expr result vregs must carry the arm value's type metadata
+# (float-ness, signedness), else float/signed uses of the value are wrong.
+run_test_output "ternary_float_value" 'import "std/math_float.kr"
+fn main(){ u64 c=1; println_str(fmt_f64(c==1 ? 1.5 : 2.5, 1)); exit(0) }' "1.5" 0
+run_test_output "matchexpr_float_value" 'import "std/math_float.kr"
+fn main(){ u64 c=1; println_str(fmt_f64(match c { 1 => 1.5  _ => 2.5 }, 1)); exit(0) }' "1.5" 0
+run_test "ternary_signed_value" 'fn main(){ i64 a = -5
+    i64 b = -3
+    if (1==1 ? a : b) < 0 { exit(9) }
+    exit(0) }' 9
+# H14: a function called ONLY from a `defer` body must not be DCE-pruned.
+run_test_output "defer_only_call" 'fn h(){ println(7) }
+fn run(){ defer { h() } }
+fn main(){ run(); exit(0) }' "7" 0
 
 # C1 regression: the IR w32-clean optimization must not elide `& 0xFFFFFFFF` on
 # a vreg redefined (>32-bit) at an if/while/match merge — default-opt must match

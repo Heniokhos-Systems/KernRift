@@ -1317,6 +1317,62 @@ fn sema_check_expr(uint64 node) {
         return
     }
 
+    // TernaryOp (53): child=cond, data1=then, data2=else. Without this, calls
+    // and variable uses inside the arms are invisible to arg-count / unused /
+    // use-before-init checks.
+    if kind == 53 {
+        uint32 t_cond = ast_child(node)
+        uint64 wtc = t_cond
+        sema_check_expr(wtc)
+        uint32 t_then = ast_data1(node)
+        uint64 wtt = t_then
+        sema_check_expr(wtt)
+        uint32 t_else = ast_data2(node)
+        uint64 wte = t_else
+        sema_check_expr(wte)
+        return
+    }
+
+    // MatchExpr (54): child=scrutinee, data1=first arm. Each arm (kind 20)
+    // has its patterns in data1 (linked via next) and a value EXPR in data2.
+    if kind == 54 {
+        uint32 me_scrut = ast_child(node)
+        uint64 wms = me_scrut
+        sema_check_expr(wms)
+        uint32 me_arm = ast_data1(node)
+        uint64 wma = me_arm
+        while wma != 0 {
+            uint32 ak = ast_kind(wma)
+            if ak == 20 {
+                uint32 pat = ast_data1(wma)
+                uint64 wpat = pat
+                while wpat != 0 {
+                    sema_check_expr(wpat)
+                    uint32 pnx = ast_next(wpat)
+                    wpat = pnx
+                }
+                uint32 mv = ast_data2(wma)
+                uint64 wmv = mv
+                sema_check_expr(wmv)
+            }
+            uint32 anx = ast_next(wma)
+            wma = anx
+        }
+        return
+    }
+
+    // FString (50): child = first segment (StrLit or expr), linked via next.
+    if kind == 50 {
+        uint32 seg = ast_child(node)
+        uint64 wseg = seg
+        while wseg != 0 {
+            sema_check_expr(wseg)
+            uint32 snx = ast_next(wseg)
+            wseg = snx
+        }
+        return
+    }
+
     // Ident: a bare variable reference. Mark the variable used so the
     // unused-variable warning knows to skip it when its scope ends.
     // Also check whether the variable has been written yet — a read of

@@ -2741,6 +2741,11 @@ fn ir_lower_expr(uint64 node) -> uint64 {
         ir_bb_set_succ(ir_current_bb, bb_else, bb_then)
         ir_current_bb = bb_then
         uint64 thenv = ir_lower_expr(then_idx)
+        // Propagate the value's type metadata to the shared result vreg, else
+        // float arithmetic / signed compares on a ternary value are wrong.
+        uint64 t_fk = ir_vreg_fkind_get(thenv)
+        if t_fk != 0 { ir_vreg_fkind_set(result, t_fk) }
+        if ir_vreg_signed_get(thenv) != 0 { ir_vreg_signed_set(result, 1) }
         ir_emit(IR_COPY, result, thenv, 0, 0, ir_current_bb)
         ir_emit(IR_BR, 0, 0, 0, bb_merge, ir_current_bb)
         ir_bb_set_succ(ir_current_bb, bb_merge, 0xFFFFFFFF)
@@ -2826,6 +2831,10 @@ fn ir_lower_expr(uint64 node) -> uint64 {
                 }
                 ir_current_bb = bb_body
                 uint64 bodyv = ir_lower_expr(body_expr)
+                // Propagate the arm value's type metadata to the result vreg.
+                uint64 b_fk = ir_vreg_fkind_get(bodyv)
+                if b_fk != 0 { ir_vreg_fkind_set(result, b_fk) }
+                if ir_vreg_signed_get(bodyv) != 0 { ir_vreg_signed_set(result, 1) }
                 ir_emit(IR_COPY, result, bodyv, 0, 0, ir_current_bb)
                 ir_emit(IR_BR, 0, 0, 0, bb_exit, ir_current_bb)
                 ir_bb_set_succ(ir_current_bb, bb_exit, 0xFFFFFFFF)
