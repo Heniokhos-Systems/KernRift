@@ -65,9 +65,11 @@ Everything a first-time user usually needs, in one place. Full details
 live in [LANGUAGE.md](LANGUAGE.md).
 
 **Operators** (tightest → loosest):
-`!` `~` `-` (prefix) · `*` `/` `%` · `+` `-` · `<<` `>>` · `<` `<=` `>` `>=`
-(unsigned — use `signed_lt`/`signed_gt`/`signed_le`/`signed_ge` for signed)
-· `==` `!=` · `&` · `^` · `|` · `&&` · `||`
+`!` `~` `-` (prefix) · `&` `|` `^` · `<<` `>>` · `*` `/` `%` · `+` `-`
+· `<` `<=` `>` `>=` (signed when an operand is `i8`..`i64`, unsigned
+otherwise; `signed_lt`/`signed_gt`/`signed_le`/`signed_ge` force signed)
+· `==` `!=` · `&&` · `||` · `?:` (ternary).
+Bitwise ops and shifts bind *tighter* than arithmetic — unlike C.
 Compound assigns: `+=` `-=` `*=` `/=` `%=` `&=` `|=` `^=` `<<=` `>>=`.
 
 **Scalar types** are `u8`/`u16`/`u32`/`u64` and their signed siblings

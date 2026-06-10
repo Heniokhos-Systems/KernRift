@@ -185,24 +185,32 @@ parameters, fields and statics still spell out their types.
 ## 4. Operators
 
 Expressions are parsed with a Pratt parser. Precedence from tightest to
-loosest:
+loosest (matching `binop_precedence` in `src/parser.kr` and the table in
+`docs/GRAMMAR.md`):
 
 | Precedence | Operators                        | Notes                    |
 |------------|----------------------------------|--------------------------|
-| 110 (prefix) | `!`, `~`, `-`                  | Logical not, bitwise not, negation |
-| 100        | `*`, `/`, `%`                    | Multiply, divide, remainder |
-| 90         | `+`, `-`                         | Add, subtract            |
-| 80         | `<<`, `>>`                       | Shift                    |
-| 70         | `<`, `<=`, `>`, `>=`             | Unsigned comparison      |
-| 60         | `==`, `!=`                       | Equality                 |
-| 50         | `&`                              | Bitwise AND              |
-| 40         | `^`                              | Bitwise XOR              |
-| 30         | `\|`                             | Bitwise OR               |
-| 20         | `&&`                             | Logical AND              |
-| 10         | `\|\|`                           | Logical OR               |
+| (prefix)   | `!`, `~`, `-`                    | Logical not, bitwise not, negation |
+| 8          | `&`, `\|`, `^`                   | Bitwise AND / OR / XOR   |
+| 7          | `<<`, `>>`                       | Shift                    |
+| 6          | `*`, `/`, `%`                    | Multiply, divide, remainder |
+| 5          | `+`, `-`                         | Add, subtract            |
+| 4          | `<`, `<=`, `>`, `>=`             | Comparison (signedness follows operand types) |
+| 3          | `==`, `!=`                       | Equality                 |
+| 2          | `&&`                             | Logical AND              |
+| 1          | `\|\|`                           | Logical OR               |
+| 0          | `?:`                             | Ternary (right-assoc, see §5) |
 
-`<`, `<=`, `>`, `>=` compare **unsigned**. For signed comparisons, use the
-`signed_lt` / `signed_gt` / `signed_le` / `signed_ge` built-ins.
+> **This differs from C.** Bitwise operators and shifts bind *tighter*
+> than arithmetic and comparisons: `1 << 2 * 3` is `(1 << 2) * 3` = 12,
+> `6 & 1 == 0` is `(6 & 1) == 0` (true), and `2 + 3 & 4` is `2 + (3 & 4)`
+> = 2. Parenthesize when porting C code.
+
+`<`, `<=`, `>`, `>=` are **type-directed**: when either operand has a
+signed type (`i8`..`i64`) the comparison is signed; otherwise it is
+unsigned. The `signed_lt` / `signed_gt` / `signed_le` / `signed_ge`
+built-ins force a signed comparison regardless of operand types (useful
+on raw `u64` bit patterns).
 
 ---
 
@@ -265,8 +273,9 @@ for i in 0..n {
 }
 ```
 
-`0..n` is an **exclusive** range — `i` takes values `0, 1, ..., n-1`. There
-is no inclusive `..=` form; use `0..n+1` when you need it.
+`0..n` is an **exclusive** range — `i` takes values `0, 1, ..., n-1`. The
+inclusive form `0..=n` visits `n` as well. The `in` keyword is optional:
+`for i 0..10` also parses.
 
 ### break and continue
 
@@ -275,6 +284,33 @@ while true {
     if done { break }
     if skip { continue }
     // ...
+}
+```
+
+### loop
+
+`loop { ... }` is an infinite loop — sugar for `while true`. Exit with
+`break` or `return`:
+
+```kr
+u64 n = 0
+loop {
+    n = n + 1
+    if n == 3 { break }
+}
+```
+
+### defer
+
+`defer { ... }` schedules a block to run at every function exit — each
+`return` (including tuple returns) and the implicit fall-through — in
+LIFO order when there are several. `exit(n)` bypasses defers. Requires
+the IR backend (the default); `--legacy` rejects it.
+
+```kr
+fn demo() {
+    defer { println_str("done") }   // runs at every exit point
+    println_str("working")          // prints "working" then "done"
 }
 ```
 
@@ -366,8 +402,9 @@ u64 r = add(2, 3)
 greet("world")
 ```
 
-Up to 8 arguments can be passed in registers (6 on Windows x64). Functions
-with more arguments pass the overflow on the stack.
+Up to 6 arguments are passed in registers on x86_64 (`rdi rsi rdx rcx r8
+r9`, on every OS) and up to 8 on arm64 (`x0..x7`). Functions with more
+arguments pass the overflow on the stack.
 
 ### Type parameters (generics)
 
@@ -391,11 +428,13 @@ instantiations — `max_t(3, 42)` and `max_t(struct_ptr_a, struct_ptr_b)`
 compile to the same machine code. Use the syntax when it makes the
 caller clearer; don't rely on it for type safety.
 
-### 2-tuple return and destructure
+### Tuple return and destructure (2 or 3 elements)
 
-A function can return a pair of values and the caller can destructure
-them in one statement. First iteration is exactly two elements — three
-or more requires a struct (or an out-pointer parameter).
+A function can return two or three values and the caller can destructure
+them in one statement — `return (a, b)` / `return (a, b, c)` paired with
+`(u64 x, u64 y) = call()` / `(u64 x, u64 y, u64 z) = call()`. Tuples are
+limited to exactly two or three elements — four or more requires a struct
+(or an out-pointer parameter).
 
 ```kr
 fn divmod(u64 x, u64 y) -> u64 {
@@ -411,10 +450,11 @@ fn main() {
 ```
 
 Runtime convention:
-- **x86_64** — first value in `rax`, second in `rdx`. Both registers
-  are caller-saved on the SysV ABI, so the second value flows through
-  the epilogue untouched.
-- **arm64** — first in `x0`, second in `x1`. Same AAPCS64 reasoning.
+- **x86_64** — first value in `rax`, second in `rdx`, third in `r8`.
+  All three are caller-saved on the SysV ABI, so the extra values flow
+  through the epilogue untouched.
+- **arm64** — first in `x0`, second in `x1`, third in `x2`. Same
+  AAPCS64 reasoning.
 
 The function's declared return type stays scalar (`-> u64` above) —
 the tuple shape lives entirely in the `return (a, b)` expression and
@@ -532,12 +572,13 @@ enum Color {
 in any integer context (assignments, comparisons, match arms, switch bases,
 etc.). Enums are a compile-time convenience; no runtime object is created.
 
-> **Reminder**: all struct and array comparisons done with `<`, `<=`,
-> `>`, `>=` are **unsigned** (see §4). If you need signed comparisons
-> — for example when computing an AVL balance factor or a graph
-> distance that can go negative — use the `signed_lt`/`signed_le`/
-> `signed_gt`/`signed_ge` builtins. This trips people up in tree and
-> heap code surprisingly often.
+> **Reminder**: `<`, `<=`, `>`, `>=` follow the operand types (see §4):
+> signed when an operand is `i8`..`i64`, unsigned otherwise. Values that
+> can go negative — an AVL balance factor, a graph distance — should be
+> declared with a signed type (`i64`), or compared with the
+> `signed_lt`/`signed_le`/`signed_gt`/`signed_ge` builtins when they
+> live in unsigned slots. This trips people up in tree and heap code
+> surprisingly often.
 
 ---
 
@@ -663,9 +704,13 @@ fn tick() {
 ```
 
 Static variables live in the data section for the lifetime of the program.
-They're initialized by the loader (BSS zero-fill; the `= value` initializer
-is currently parsed but treated as zero — set the value at startup if you
-need a non-zero default).
+A literal initializer — `= 42`, `= 0x3F200000`, `= 'A'`, `= true`, with an
+optional leading `-` or `~` — is honoured and emitted into the binary.
+Without an initializer the slot is zero (BSS). Non-literal initializers
+(calls, named constants, arithmetic such as `= 5 + 3`) are **not**
+evaluated: only a leading literal, if any, is kept and the rest is
+silently dropped (`= 5 + 3` stores 5; tracked as issue #53). Set those
+values at startup instead.
 
 ### const
 
@@ -713,8 +758,10 @@ unsafe { *(addr as u8)  = some_byte } // store
 
 The cast type determines access width. Supported cast types:
 `u8`, `u16`, `u32`, `u64`, `i8`, `i16`, `i32`, `i64` (plus the long
-forms `uint8`..`int64`). `unsafe { ... }` is just a marker block — it
-accepts one or more pointer statements.
+forms `uint8`..`int64`, and `f16`/`f32`/`f64` for float-typed access).
+`unsafe { ... }` is just a marker block — it accepts exactly **one**
+pointer statement (one load or one store). Use a separate `unsafe` block
+for each additional access.
 
 The `load*` / `store*` builtins are equivalent and much easier to read —
 prefer them unless you have a reason to use `unsafe` blocks.
@@ -1216,8 +1263,9 @@ manually-built buffer — reach for `print_str` / `println_str`.
 
 ### Signed comparison
 
-The normal `<`, `<=`, `>`, `>=` operators are unsigned. For signed
-comparisons:
+The normal `<`, `<=`, `>`, `>=` operators are type-directed — signed when
+an operand is `i8`..`i64`, unsigned otherwise (see §4). To force a signed
+comparison on unsigned operands (raw `u64` bit patterns):
 
 ```kr
 signed_lt(a, b)    signed_gt(a, b)
@@ -1580,11 +1628,12 @@ fn main() {
 
 ### Stack size warnings
 
-The compiler prints a warning to stderr when a function's stack frame
-exceeds 32768 bytes:
+The legacy backend (`--legacy`) prints a warning to stderr when a
+function's stack frame exceeds 49152 bytes (the default IR backend does
+not currently implement this warning):
 
 ```
-warning: large stack frame (49000 bytes) in function 'parse_module'
+warning: large stack frame (60032 bytes) in function 'parse_module'
 ```
 
 This catches accidental large local arrays that could overflow a kernel

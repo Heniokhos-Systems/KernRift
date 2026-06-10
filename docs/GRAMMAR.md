@@ -19,24 +19,28 @@ Notation:
 
 ```
 IDENT       = [A-Za-z_] [A-Za-z0-9_]*
-INT_LIT     = DEC_LIT | HEX_LIT | BIN_LIT | OCT_LIT
-DEC_LIT     = [0-9] ([0-9_]* [0-9])?
-HEX_LIT     = "0x" [0-9A-Fa-f] ([0-9A-Fa-f_]* [0-9A-Fa-f])?
-BIN_LIT     = "0b" [01] ([01_]* [01])?
-OCT_LIT     = "0o" [0-7] ([0-7_]* [0-7])?
-FLOAT_LIT   = [0-9]+ "." [0-9]+ ([eE] [+-]? [0-9]+)?
+INT_LIT     = DEC_LIT | HEX_LIT
+DEC_LIT     = [0-9]+
+HEX_LIT     = "0x" [0-9A-Fa-f]+
+FLOAT_LIT   = [0-9]+ "." [0-9]+ ([eE] [+-]? [0-9]+)? "f"?
+            | [0-9]+ [eE] [+-]? [0-9]+ "f"?
 STR_LIT     = '"' (char_escape | [^"\\])* '"'
 CHAR_LIT    = "'" (char_escape | [^'\\]) "'"
 FSTR        = f"..." with embedded { expr } holes  (see Expressions)
 char_escape = "\\" ( "n" | "t" | "r" | "\\" | "'" | '"' | "0"
-                   | "a" | "b" | "f" | "v" | "x" HEX HEX
-                   | "u{" HEX+ "}" )
+                   | "a" | "b" | "f" | "v" | "e"
+                   | "x" HEX HEX )
 COMMENT     = "//" [^\n]*  |  "/*" ... "*/"   (discarded)
 ```
 
 Whitespace (spaces, tabs, CR, LF) is a token separator; no significant
 indentation. The lexer emits ~112 token kinds; only the subset relevant to
 grammar is referenced below.
+
+Binary (`0b...`) and octal (`0o...`) literals, `_` digit separators, and
+`\u{...}` escapes are **not implemented**: `0b101` lexes as `0` followed
+by the identifier `b101`, `1_000` as `1` followed by `_000`, and
+`'\u{41}'` silently evaluates to `'u'` (117), not `'A'`.
 
 ## Keywords
 
@@ -293,7 +297,8 @@ The stdlib (`std/*.kr`) layers additional helpers (`str_len`, `opt_some`,
    `fn foo(uint64 x)` — there is no monomorphization and no type parameter
    lookup.
 4. **Static initializers accept literals only.** A non-literal RHS (including
-   `alloc(...)`) is silently discarded, leaving the slot zero-initialized.
+   `alloc(...)`) is silently discarded — the slot keeps a leading literal if
+   the expression starts with one (`= 5 + 3` stores 5) and is zero otherwise.
    Tracked as roadmap item #53.
 5. **Assignment is a statement, not an expression.** You cannot write
    `while (x = next()) != 0`; extract the assignment first.
@@ -302,7 +307,8 @@ The stdlib (`std/*.kr`) layers additional helpers (`str_len`, `opt_some`,
    keyword is optional (`for i 0..n` also parses), and the range can be
    inclusive (`..=`) or exclusive (`..`). Identifier endpoints work:
    `for i a..b` and `for i 0..=n` both parse correctly.
-7. **`match` requires `=>` and blocks.** `match x { 1 => { ... } 2 => { ... } }`
-   — no bare-expression arms. Arms do not fall through.
+7. **`match` arms don't fall through.** An arm body is a brace block, a
+   single bare statement (`1 => exit(1)`), or — in value position — a
+   single expression (see `match_expr` above). Exactly one arm runs.
 8. **`unsafe` / `volatile` blocks wrap exactly one pointer op.** They are
    statement forms, not expression wrappers.

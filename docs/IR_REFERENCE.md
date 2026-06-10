@@ -230,9 +230,12 @@ Results are `0` / `1`. Used whenever the surface syntax calls
 | 122 | `IR_SCMP_GT` | signed greater-than |
 | 123 | `IR_SCMP_GE` | signed greater-or-equal |
 
-Note that bare `<`, `<=`, `>`, `>=` at the surface lower to the
-**unsigned** compare opcodes (14–19). The signed variants only appear
-when the user explicitly calls the signed builtins.
+Bare `<`, `<=`, `>`, `>=` at the surface are type-directed: they lower
+to the **unsigned** compare opcodes (14–19) when the operands are
+unsigned, and to the signed variants (120–123) when an operand's vreg
+carries the signed flag (declared `i8`..`i64`; see `ir_vreg_signed_buf`
+in `src/ir.kr`). The `signed_lt`/`signed_le`/`signed_gt`/`signed_ge`
+builtins always lower to the signed opcodes.
 
 ## Typed formatting (124, 125)
 

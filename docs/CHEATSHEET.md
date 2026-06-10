@@ -144,16 +144,19 @@ fn main() {
 ```kr
 static u8[4] buf            // static fixed array
 
-fn total([u64] xs) -> u64 { // slice parameter; .len is the element count
+fn total([u8] xs) -> u64 {  // slice parameter; .len is the caller-passed length
     u64 s = 0
     u64 i = 0
     while i < xs.len {
-        s = s + xs[i]
+        s = s + xs[i]       // slice indexing is byte-addressed
         i = i + 1
     }
     return s
 }
 ```
+
+Slices are byte-addressed: `xs[i]` reads the byte at `xs + i`. For wider
+elements use the load builtins — e.g. `load64(xs + i * 8)` for `[u64]` data.
 
 ## Pointers — load / store
 
@@ -201,8 +204,8 @@ fn main() {
 ```kr
 fn main() {
     i64 a = 0 - 3
-    if signed_lt(a, 0) { exit(1) }   // signed_lt/gt/le/ge
-    exit(0)
+    if a < 0 { exit(1) }    // `<` is signed when an operand is i8..i64;
+    exit(0)                 // signed_lt/gt/le/ge force signed on u64 bits
 }
 ```
 

@@ -20,9 +20,9 @@ reasoning for anything non-obvious.
 
 | Operation                               | Status   | Notes |
 |-----------------------------------------|----------|-------|
-| `u64` / `u32` / `u16` / `u8` add / sub / mul overflow | Defined in release; trap under `--debug` | Two's-complement wrap in release. Under `--debug`, any overflow (signed or unsigned) traps with `exit(1)` via the `jno`-guarded overflow check. |
-| `i64` / `i32` / `i16` / `i8`  add / sub / mul overflow | Defined in release; trap under `--debug` | Same semantics as unsigned — two's-complement wrap in release, trap under `--debug`. |
-| Divide / modulo by zero                 | **Undefined** | x86 raises `#DE` (SIGFPE); ARM64 returns 0 for unsigned, traps for signed. No compiler check. |
+| `u64` / `u32` / `u16` / `u8` add / sub / mul overflow | Defined | Two's-complement wrap in all modes. The default IR backend emits no overflow checks even under `--debug`; the `--legacy` backend's `--debug` add/sub guard tests the *signed*-overflow flag (`jno` / `b.vc`), so unsigned carry never traps. |
+| `i64` / `i32` / `i16` / `i8`  add / sub / mul overflow | Defined in release; trap under `--legacy --debug` | Two's-complement wrap in release. Signed add/sub overflow traps with `exit(1)` only on the legacy backend under `--debug`; the default IR backend wraps in all modes. |
+| Divide / modulo by zero                 | **Undefined** | x86 raises `#DE` (SIGFPE); ARM64 returns 0 for both `udiv` and `sdiv` (ARMv8 division never traps). Under `--debug`, the ARM64 IR backend and the legacy backend (both arches) emit an explicit `exit(1)` guard; the x86_64 IR backend has no check (you get the hardware SIGFPE). |
 | Divide `INT_MIN / -1`                   | **Undefined** | x86 traps; ARM64 produces `INT_MIN`. |
 | Shift by amount `>= bit-width`          | **Undefined** | x86 masks the count mod 64 / 32; ARM64 masks mod 64 / 32. Results differ. |
 | Shift by negative amount                | **Undefined** | The count is treated as u64, so "negative" means a huge positive shift. |
@@ -154,6 +154,7 @@ Items tracked against the UB surface:
 - Bounds-checked slice indexing (opt-in `--safe` mode): not started; on
   the roadmap. Compile-time-sized array indexing already traps under
   `--debug` (both stack `T[N] name` and `static T[N] name`).
-- Dedicated `--check=signed-overflow` flag (signed-only, to separate
-  signed from unsigned overflow detection): not started. Today
-  `--debug` traps on both.
+- Dedicated `--check=signed-overflow` flag: not started. Today overflow
+  trapping exists only on the legacy backend under `--debug`, and its
+  add/sub guard (`jno`/`b.vc`) catches signed overflow only — unsigned
+  carry wraps silently. The default IR backend emits no overflow checks.
