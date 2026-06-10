@@ -16,7 +16,7 @@ SRCS = src/lexer.kr src/ast.kr src/parser.kr src/codegen.kr \
        src/format_archive.kr src/format_android.kr src/bcj.kr src/analysis.kr src/type_check.kr src/inliner.kr src/living.kr \
        src/runtime.kr src/formatter.kr src/main.kr
 
-.PHONY: all build kr-runner test install dist clean bootstrap
+.PHONY: all build kr-runner test install dist clean bootstrap check
 
 all: build kr-runner
 
@@ -81,7 +81,22 @@ build-import: build/krc2
 test: build/krc2
 	@echo "=== Running test suite ==="
 	@echo '#!/bin/bash' > /tmp/krc-test && echo 'exec ./build/krc2 --arch=x86_64 "$$@"' >> /tmp/krc-test && chmod +x /tmp/krc-test
-	@KRC=/tmp/krc-test bash tests/run_tests.sh || true
+	@KRC=/tmp/krc-test bash tests/run_tests.sh
+
+# Full CI gate: bootstrap fixed point + suite + both IR-vs-legacy differential
+# harnesses (x86_64 + arm64 via qemu). Any failure aborts (each step exits
+# non-zero on failure). Wire THIS into CI, not just `make test`.
+check: build/krc2 bootstrap test
+	@echo "=== IR vs legacy differential (exit codes) ==="
+	@KRC=./build/krc2 bash tests/diff_ir_legacy.sh
+	@echo "=== IR vs legacy differential (stdout) ==="
+	@KRC=./build/krc2 bash tests/diff_ir_legacy_stdout.sh
+	@echo "=== Token/AST cap headroom (fail >80%) ==="
+	@toks=$$(./build/krc2 --arch=x86_64 build/krc.kr -o /dev/null 2>&1 | grep -oE '^[0-9]+ tokens' | grep -oE '^[0-9]+'); \
+	 cap=524288; pct=$$(( toks * 100 / cap )); \
+	 echo "self-compile: $$toks / $$cap tokens ($$pct%)"; \
+	 if [ "$$pct" -ge 80 ]; then echo "FAIL: token cap >80% — raise max_tok"; exit 1; fi
+	@echo "=== check: all gates passed ==="
 
 # Verify bootstrap convergence
 bootstrap: build/krc2

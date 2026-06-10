@@ -139,4 +139,4 @@ diff_case "sizeof"    'fn main(){exit(sizeof(u64))}'
 
 echo "----"
 echo "Differential: $((TOTAL-DIV))/$TOTAL agree across backends, $DIV diverged."
-[ "$DIV" = "0" ] && echo "PARITY OK" || echo "PARITY GAPS FOUND"
+if [ "$DIV" = "0" ]; then echo "PARITY OK"; else echo "PARITY GAPS FOUND"; exit 1; fi

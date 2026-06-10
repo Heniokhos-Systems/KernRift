@@ -1608,12 +1608,16 @@ run_test_output "w32_mask_after_merge" 'fn main() { u64 x = 7
 # Legacy-backend ternary parity (the default IR path handles these above;
 # these compile with --legacy and must produce the SAME results). The legacy
 # x86 path is runnable on this host; legacy arm64 parity is covered in CI.
+# Legacy tests run for the HOST arch (was hardcoded --arch=x86_64, which on an
+# arm64 CI runner produced x86 binaries that can't execute -> all red). M15.
+LEGACY_ARCH="x86_64"
+if [ "$ARCH" = "aarch64" ] || [ "$ARCH" = "arm64" ]; then LEGACY_ARCH="arm64"; fi
 run_test_legacy() {
     local name="$1"; local input="$2"; local expected="$3"
     TOTAL=$((TOTAL + 1))
     local REPO_ROOT="$DIR/.."
     printf '%s\n' "$input" > "$REPO_ROOT/test_tmp_$$.kr"
-    if $KRC --arch=x86_64 --legacy "$REPO_ROOT/test_tmp_$$.kr" -o /tmp/krc_leg_$$ > /dev/null 2>&1; then
+    if $KRC --arch=$LEGACY_ARCH --legacy "$REPO_ROOT/test_tmp_$$.kr" -o /tmp/krc_leg_$$ > /dev/null 2>&1; then
         rm -f "$REPO_ROOT/test_tmp_$$.kr"; chmod +x /tmp/krc_leg_$$
         local got=0; /tmp/krc_leg_$$ > /dev/null 2>&1 && got=0 || got=$?
         if [ "$got" = "$expected" ]; then PASS=$((PASS + 1));

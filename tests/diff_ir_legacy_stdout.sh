@@ -72,4 +72,4 @@ fn main(){ println(sum(100)); exit(0) }'
 
 echo "----"
 echo "Stdout differential: $((TOTAL-DIV))/$TOTAL agree, $DIV diverged."
-[ "$DIV" = "0" ] && echo "PARITY OK" || echo "PARITY GAPS FOUND"
+if [ "$DIV" = "0" ]; then echo "PARITY OK"; else echo "PARITY GAPS FOUND"; exit 1; fi
