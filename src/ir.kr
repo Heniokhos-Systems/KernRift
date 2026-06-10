@@ -1059,6 +1059,21 @@ fn ir_lower_field_chain(uint64 node) -> uint64 {
 // Expression lowering
 // ---------------------------------------------------------------------------
 
+// Power-of-two test for strength reduction. Returns k+1 when v == 1<<k
+// (so 8 returns 4 and 1 returns 1), or 0 when v is zero or not a power
+// of two. The +1 keeps 0 free as the "no" answer since k itself can be 0.
+fn ir_is_pow2(uint64 v) -> uint64 {
+    if v == 0 { return 0 }
+    if (v & (v - 1)) != 0 { return 0 }
+    uint64 k = 0
+    uint64 t = v
+    while t > 1 {
+        t = t >> 1
+        k = k + 1
+    }
+    return k + 1
+}
+
 fn ir_lower_expr(uint64 node) -> uint64 {
     if node == 0 { return 0xFFFFFFFF }
     uint32 kind = ast_kind(node)
@@ -1352,6 +1367,48 @@ fn ir_lower_expr(uint64 node) -> uint64 {
             // unsigned → SHR (zero-fills). `int64 a = -8; a >> 1` should yield
             // -4, not 0x7FFFFFFFFFFFFFFC.
             if bin_use_signed != 0 { ir_op = IR_SAR } else { ir_op = IR_SHR }
+        }
+        // Strength reduction: UNSIGNED div/mod by a literal power of two
+        // lowers to shr/and — hardware div is ~20-40 cycles vs 1 for a
+        // shift, and for unsigned x the identities x/2^k == x>>k and
+        // x%2^k == x&(2^k-1) are bit-exact over all of uint64. Signed
+        // IR_SDIV/IR_SMOD are left alone (correct signed pow2 division
+        // needs a bias sequence). The divisor must be an IntLit node so
+        // its value is known here; the literal's IR_CONST already emitted
+        // into `rhs` goes dead and DCE sweeps it.
+        if ir_op == IR_DIV || ir_op == IR_MOD {
+            uint64 sr_rhs_n = rhs_node
+            uint32 sr_rk = ast_kind(sr_rhs_n)
+            uint64 sr_wrk = sr_rk
+            if sr_wrk == 30 {
+                uint32 sr_tok = ast_data1(sr_rhs_n)
+                uint64 sr_wtok = sr_tok
+                uint64 sr_c = parse_int_token(sr_wtok)
+                uint64 sr_p = ir_is_pow2(sr_c)
+                if sr_p != 0 {
+                    uint64 sr_k = sr_p - 1
+                    if ir_op == IR_DIV {
+                        if sr_k == 0 {
+                            // x / 1 == x
+                            ir_emit(IR_COPY, dest, lhs, 0, 0, ir_current_bb)
+                        } else {
+                            uint64 sr_amt = ir_new_vreg()
+                            ir_emit(IR_CONST, sr_amt, 0, 0, sr_k, ir_current_bb)
+                            ir_emit(IR_SHR, dest, lhs, sr_amt, 0, ir_current_bb)
+                        }
+                    } else {
+                        if sr_k == 0 {
+                            // x % 1 == 0
+                            ir_emit(IR_CONST, dest, 0, 0, 0, ir_current_bb)
+                        } else {
+                            uint64 sr_mask = ir_new_vreg()
+                            ir_emit(IR_CONST, sr_mask, 0, 0, sr_c - 1, ir_current_bb)
+                            ir_emit(IR_AND, dest, lhs, sr_mask, 0, ir_current_bb)
+                        }
+                    }
+                    return dest
+                }
+            }
         }
         ir_emit(ir_op, dest, lhs, rhs, 0, ir_current_bb)
         // ADD/SUB/MUL produce identical bits in two's complement, so the

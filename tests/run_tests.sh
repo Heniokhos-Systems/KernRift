@@ -94,6 +94,52 @@ run_test "mul" 'fn main() { exit(6 * 7) }' 42
 run_test "div" 'fn main() { exit(84 / 2) }' 42
 run_test "mod" 'fn main() { exit(47 % 5) }' 2
 
+# Strength reduction: unsigned div/mod by a power-of-two literal lowers to
+# shr/and on the IR backend. The loop makes x unknown to the const-folder
+# (per-BB tracking), so the shift actually executes at runtime.
+run_test "div_pow2_rt" 'fn main() {
+    u64 x = 0
+    u64 i = 0
+    while i < 200 { x = x + 1; i = i + 1 }
+    exit(x / 8)
+}' 25
+run_test "mod_pow2_rt" 'fn main() {
+    u64 x = 0
+    u64 i = 0
+    while i < 203 { x = x + 1; i = i + 1 }
+    exit(x % 8)
+}' 3
+run_test "div_by_1_rt" 'fn main() {
+    u64 x = 0
+    u64 i = 0
+    while i < 47 { x = x + 1; i = i + 1 }
+    exit(x / 1)
+}' 47
+run_test "mod_by_1_rt" 'fn main() {
+    u64 x = 0
+    u64 i = 0
+    while i < 47 { x = x + 1; i = i + 1 }
+    exit(x % 1)
+}' 0
+run_test "mod_pow2_2_rt" 'fn main() {
+    u64 x = 0
+    u64 i = 0
+    while i < 201 { x = x + 1; i = i + 1 }
+    exit(x % 2)
+}' 1
+run_test "div_nonpow2_rt" 'fn main() {
+    u64 x = 0
+    u64 i = 0
+    while i < 200 { x = x + 1; i = i + 1 }
+    exit(x / 24)
+}' 8
+run_test "div_pow2_fold" 'fn main() { exit(84 / 4) }' 21
+run_test "sdiv_pow2_neg" 'fn main() {
+    i64 a = 0 - 16
+    i64 b = a / 8
+    exit(b + 3)
+}' 1
+
 # --- Bitwise ---
 run_test "and" 'fn main() { exit(0xFF & 0x2A) }' 42
 run_test "or" 'fn main() { exit(0x20 | 0x0A) }' 42
