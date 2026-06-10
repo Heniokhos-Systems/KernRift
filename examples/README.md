@@ -32,6 +32,18 @@ kr hello.krbo
 | `echo.kr` | `scan_str` / `print_str` for stdin / stdout with variable strings. |
 | `extern_libc.kr` | `extern fn` — call libc (`strlen`, `write`) via ELF/Mach-O/COFF relocations. |
 | `linked_list.kr` | Canonical heap-struct pattern — `Node n = alloc(16)`, append, traverse. |
+| `modern.kr` | The v2.8.25 ergonomics in one program: `let` inference, ternary, `match` as an expression, `loop`, `defer`, `continue` in a `for`, inclusive `0..=`, and f-strings. (IR backend — `defer` needs the default backend.) |
+
+### Kernel modules (`--emit=lkm`)
+
+These compile to loadable Linux `.ko` modules — see [docs/LKM.md](../docs/LKM.md).
+
+| File | Demonstrates |
+|------|--------------|
+| `hello_lkm.kr` | Minimal module: `@module_init` / `@module_exit` printing to `dmesg`. |
+| `lkm_kmalloc_test.kr` | A misc character device with kernel `alloc`/`dealloc`. |
+| `lkm_mmap_test.kr` | An `@lkm_mmap_handler` mapping a buffer into userland. |
+| `pci_driver_smoke.kr` | A PCI driver: `@pci_probe_handler` / `@pci_remove_handler`. |
 
 ## Notes
 

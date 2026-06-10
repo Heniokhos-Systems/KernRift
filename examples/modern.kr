@@ -1,0 +1,43 @@
+// Modern KernRift features in one program (v2.8.25):
+//   let inference, ternary, match-as-expression, loop, defer,
+//   continue in a for loop, inclusive ranges, and f-strings.
+//
+//   krc --arch=x86_64 examples/modern.kr -o modern && ./modern
+
+fn classify(u64 n) -> u64 {
+    // match as an expression, with a `_` default arm
+    return match n {
+        0 => 0
+        1, 2, 3 => 1
+        _ => 2
+    }
+}
+
+fn main() {
+    // `let` infers the type from the initializer
+    let total = 0
+    let limit = 6 * 7          // = 42
+
+    // for + continue: skip multiples of 3, inclusive range visits 10
+    for i in 1..=10 {
+        if i % 3 == 0 { continue }
+        total = total + i
+    }
+    println_str(f"sum of 1..=10 skipping multiples of 3 = {total}")
+
+    // ternary
+    let parity = total % 2 == 0 ? 1 : 0
+    println_str(f"that sum is {parity} for even")
+
+    // defer runs at every function exit. Note `exit(n)` BYPASSES defers,
+    // so we let main fall through (which auto-exits 0) to see "done".
+    defer { println_str("done") }
+
+    // loop with an explicit break
+    let count = 0
+    loop {
+        count = count + 1
+        if count == 3 { break }
+    }
+    println_str(f"counted to {count}; classify(2) = {classify(2)}; limit = {limit}")
+}
