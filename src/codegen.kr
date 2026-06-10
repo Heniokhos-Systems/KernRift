@@ -708,6 +708,28 @@ fn var_type_init() {
 
 fn var_type_register(uint64 name_tok, uint64 type_kind) {
     var_type_init()
+    // A re-declaration of an existing name (legal in a different lexical
+    // scope) shares the variable's stack slot, so its recorded type must
+    // follow the LATEST declaration. Update in place: appending would leave
+    // var_type_lookup returning the FIRST declaration's type, so e.g.
+    // `int64 x` after an earlier `uint64 x` would emit unsigned div/cmp,
+    // and `f64 x` after a `uint64 x` would load via rax instead of xmm0.
+    // This mirrors the IR backend, where ir_var_set rebinds the name and
+    // type metadata lives on the new vreg. (M2)
+    uint64 vti = 0
+    while vti < var_type_count {
+        uint64 ventry = var_type_table + vti * 8
+        uint32 vnt = 0
+        unsafe { *(ventry as uint32) -> vnt }
+        uint64 wvnt = vnt
+        if tok_text_eq(wvnt, name_tok) != 0 {
+            uint64 ve4 = ventry + 4
+            uint32 vtk = type_kind
+            unsafe { *(ve4 as uint32) = vtk }
+            return
+        }
+        vti = vti + 1
+    }
     if var_type_count >= 1024 {
         write(2, "error: var_type_table overflow (max 1024)\n", 42)
         exit(1)

@@ -1775,6 +1775,38 @@ run_test_legacy "or_shortcircuit_legacy"  'static u64 g = 0
 fn side()->u64{ g = 9; return 1 }
 fn main(){ u64 r = 1 || side(); exit(g) }' 0
 
+# M2: a name re-declared in a different scope shares its stack slot in the
+# legacy backend; its TYPE must follow the LATEST declaration. Was: the first
+# declaration won, so `int64 x` after `uint64 x` did UNSIGNED division and
+# `f64 x` after `uint64 x` loaded through the integer path. Old legacy gave
+# 7/4; IR and fixed legacy give 42/10. Locked on both backends.
+run_test "redecl_signed_type" 'fn main() -> uint64 {
+    if 1 == 1 { uint64 x = 1
+        if x == 0 { return 9 } }
+    int64 x = 0 - 8
+    x = x / 2
+    if x == 0 - 4 { return 42 }
+    return 7 }' 42
+run_test_legacy "redecl_signed_type_legacy" 'fn main() -> uint64 {
+    if 1 == 1 { uint64 x = 1
+        if x == 0 { return 9 } }
+    int64 x = 0 - 8
+    x = x / 2
+    if x == 0 - 4 { return 42 }
+    return 7 }' 42
+run_test "redecl_float_type" 'fn main() -> uint64 {
+    if 1 == 1 { uint64 x = 3
+        if x == 0 { return 9 } }
+    f64 x = 2.5
+    f64 y = x * 4.0
+    return f64_to_int(y) }' 10
+run_test_legacy "redecl_float_type_legacy" 'fn main() -> uint64 {
+    if 1 == 1 { uint64 x = 3
+        if x == 0 { return 9 } }
+    f64 x = 2.5
+    f64 y = x * 4.0
+    return f64_to_int(y) }' 10
+
 # Negative: an else-if chain with NO final else must still be rejected (it can
 # fall through). Guards against the fix over-accepting non-exhaustive chains.
 TOTAL=$((TOTAL + 1))
