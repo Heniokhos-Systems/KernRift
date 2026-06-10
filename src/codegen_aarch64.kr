@@ -2004,7 +2004,11 @@ fn gen_expr_a64(uint64 node) {
                 // temp_slot_0 had fd, temp_slot_1 had buf — save them differently
                 // Actually: at this point x0=len, temp_slot_0=fd, temp_slot_1=buf
                 // We need all three. Use var_frame_size for len only.
-                uint64 wr_extra = var_frame_size
+                uint64 wr_extra = var_count * 8
+                var_count = var_count + 1
+                var_frame_size = var_count * 8
+                uint64 wr_etr = var_frame_size & 15
+                if wr_etr != 0 { var_frame_size = var_frame_size + 16 - wr_etr }
                 emit_a64_store_x0(wr_extra)
                 // GetStdHandle: x0 = -(10 + fd)
                 emit_a64_load_x0(temp_slot_0)
@@ -2175,7 +2179,11 @@ fn gen_expr_a64(uint64 node) {
                 // Windows ARM64: ReadFile(handle, buf, len, &bytesRead, NULL)
                 // Slots: temp_slot_0=handle, temp_slot_1=buf, x0=len
                 // Use temp_slot_1 for bytesRead output (reuse after buf is in x1)
-                uint64 rd_extra = var_frame_size
+                uint64 rd_extra = var_count * 8
+                var_count = var_count + 1
+                var_frame_size = var_count * 8
+                uint64 rd_etr = var_frame_size & 15
+                if rd_etr != 0 { var_frame_size = var_frame_size + 16 - rd_etr }
                 emit_a64_store_x0(rd_extra)       // save len
                 // Load buf into x1 first (before we reuse temp_slot_1)
                 emit_a64_load_x0(temp_slot_1)
@@ -2221,7 +2229,11 @@ fn gen_expr_a64(uint64 node) {
             gen_expr_a64(wa3)
             if target_os == 2 {
                 // Windows ARM64: WriteFile(handle, buf, len, NULL, NULL)
-                uint64 fw_extra = var_frame_size
+                uint64 fw_extra = var_count * 8
+                var_count = var_count + 1
+                var_frame_size = var_count * 8
+                uint64 fw_etr = var_frame_size & 15
+                if fw_etr != 0 { var_frame_size = var_frame_size + 16 - fw_etr }
                 emit_a64_store_x0(fw_extra)
                 emit_a64_mov_imm(4, 0)
                 emit_a64_mov_imm(3, 0)
@@ -2299,7 +2311,15 @@ fn gen_expr_a64(uint64 node) {
         if is_extern_call == 0 && tok_matches(wct, "println", 7) != 0 || is_extern_call == 0 && tok_matches(wct, "print", 5) != 0 {
             uint64 apv_is_pln = 0
             if tok_matches(wct, "println", 7) != 0 { apv_is_pln = 1 }
-            uint64 digit_buf = var_frame_size
+            // Reserve a 24-byte digit scratch INSIDE the frame (prologue
+            // `sub sp` is patched to the final frame size at function end).
+            // Using var_frame_size as the base put the buffer on the CALLER's
+            // saved x29/x30, smashing the return address on its return (H7).
+            uint64 digit_buf = var_count * 8
+            var_count = var_count + 3
+            var_frame_size = var_count * 8
+            uint64 a64_db_rem = var_frame_size & 15
+            if a64_db_rem != 0 { var_frame_size = var_frame_size + 16 - a64_db_rem }
             uint32 apv_warg = ast_child(node)
             uint64 apv_first = 1
             while apv_warg != 0 {

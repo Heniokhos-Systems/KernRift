@@ -3268,7 +3268,15 @@ fn gen_expr(uint64 node) {
     // formats expression values into a stack buffer at var_frame_size.
     // Returns rax = pointer to null-terminated result buffer.
     if kind == 50 {
-        uint64 fs_buf_off = var_frame_size  // scratch area above frame
+        // Reserve a 4096-byte result buffer INSIDE the frame (prologue sub rsp
+        // is patched to the final var_frame_size at function end). Using
+        // var_frame_size as the base overran saved rbx / the return addr (H7).
+        uint64 fs_buf_off = var_count * 8
+        uint64 fs_bkk = 0
+        while fs_bkk < 512 { var_count = var_count + 1; fs_bkk = fs_bkk + 1 }
+        var_frame_size = var_count * 8
+        uint64 fs_brem = var_frame_size & 15
+        if fs_brem != 0 { var_frame_size = var_frame_size + 16 - fs_brem }
         // zero the running offset: temp_slot_1 = 0
         emit_byte(0x48); emit_byte(0x31); emit_byte(0xC0)  // xor rax, rax
         emit_store_rax_to_stack(temp_slot_1)
@@ -4991,8 +4999,12 @@ fn gen_expr(uint64 node) {
             gen_expr(wa3)
             if target_os == 2 {
                 // Windows: GetStdHandle(-(10+fd)) then WriteFile(handle, buf, len, NULL, NULL)
-                // Save len to extra temp
-                uint64 extra_tmp = var_frame_size
+                // Save len to extra temp (reserved frame slot, not above-frame — H7)
+                uint64 extra_tmp = var_count * 8
+                var_count = var_count + 1
+                var_frame_size = var_count * 8
+                uint64 wr_etr = var_frame_size & 15
+                if wr_etr != 0 { var_frame_size = var_frame_size + 16 - wr_etr }
                 emit_store_rax_to_stack(extra_tmp)
                 // GetStdHandle: rcx = -(10 + fd)
                 emit_load_rax_from_stack(temp_slot_0)
@@ -5224,8 +5236,12 @@ fn gen_expr(uint64 node) {
             gen_expr(wa3)
             if target_os == 2 {
                 // Windows: ReadFile(handle, buf, len, &bytesRead, NULL)
-                // Use a frame slot for bytesRead output
-                uint64 extra_tmp = var_frame_size
+                // Reserve two frame slots: extra_tmp (len) + br_slot (bytesRead) — H7
+                uint64 extra_tmp = var_count * 8
+                var_count = var_count + 2
+                var_frame_size = var_count * 8
+                uint64 rd_etr = var_frame_size & 15
+                if rd_etr != 0 { var_frame_size = var_frame_size + 16 - rd_etr }
                 emit_store_rax_to_stack(extra_tmp)
                 uint64 br_slot = extra_tmp + 8
                 // Zero bytesRead slot
@@ -5278,7 +5294,11 @@ fn gen_expr(uint64 node) {
             gen_expr(wa3)
             if target_os == 2 {
                 // Windows: WriteFile(handle, buf, len, &bytesWritten, NULL)
-                uint64 extra_tmp = var_frame_size
+                uint64 extra_tmp = var_count * 8
+                var_count = var_count + 1
+                var_frame_size = var_count * 8
+                uint64 fw_etr = var_frame_size & 15
+                if fw_etr != 0 { var_frame_size = var_frame_size + 16 - fw_etr }
                 emit_store_rax_to_stack(extra_tmp)
                 emit_load_rax_from_stack(temp_slot_0)
                 emit_mov_rcx_rax()
@@ -5388,7 +5408,15 @@ fn gen_expr(uint64 node) {
         if is_extern_call == 0 && tok_matches(wct, "println", 7) != 0 || is_extern_call == 0 && tok_matches(wct, "print", 5) != 0 {
             uint64 pr_is_pln = 0
             if tok_matches(wct, "println", 7) != 0 { pr_is_pln = 1 }
-            uint64 digit_buf = var_frame_size
+            // Reserve a 24-byte digit scratch INSIDE the frame (prologue
+            // `sub rsp` is patched to the final var_frame_size at function end).
+            // Using var_frame_size as the base put the buffer on saved rbx /
+            // the return address, smashing it on return (H7).
+            uint64 digit_buf = var_count * 8
+            var_count = var_count + 3
+            var_frame_size = var_count * 8
+            uint64 db_rem = var_frame_size & 15
+            if db_rem != 0 { var_frame_size = var_frame_size + 16 - db_rem }
             uint32 pr_warg = ast_child(node)
             uint64 pr_first = 1
             while pr_warg != 0 {

@@ -1511,6 +1511,12 @@ fn main(){ let x = K; exit(x) }' 5
 run_test_output "let_float" 'import "std/math_float.kr"
 fn main(){ let x = int_to_f64(3); let y = int_to_f64(2); println_str(fmt_f64(x / y, 1)); exit(0) }' "1.5" 0
 
+# H7: a non-main function that prints a 5+ digit number (or an f-string) and
+# RETURNS must not smash its return address with the digit/f-string scratch
+# buffer. Was a deterministic SIGSEGV on the legacy backends.
+run_test "print_in_returning_fn" 'fn show(u64 n){ println(n) }
+fn main(){ show(123456789); exit(7) }' 7
+
 # H11: 2-byte struct fields must store/load 2 bytes (legacy used the 8-byte
 # path, clobbering neighbors). p.a=1 b=2 c=3 d=4 must survive independently.
 run_test_output "struct_u16_fields" 'struct P { u16 a; u16 b; u16 c; u16 d }
@@ -1621,6 +1627,10 @@ fn main(){ S s; s.v = 0 - 4
 run_test_legacy "high_bit_truthy_legacy" 'fn main(){ u64 x = 1 << 35
     if x { exit(1) }
     exit(2) }' 1
+run_test_legacy "print_in_returning_fn_legacy" 'fn show(u64 n){ println(n) }
+fn main(){ show(123456789); exit(7) }' 7
+run_test_legacy "fstring_in_returning_fn_legacy" 'fn show(u64 n){ print_str(f"value is {n} plus padding text to overflow saved regs") }
+fn main(){ show(42); exit(7) }' 7
 
 # Short-circuit &&/|| parity: legacy must match IR (evaluate RHS only when
 # needed) AND match IR's value semantics: && = lhs?rhs:0, || = lhs?1:rhs.
