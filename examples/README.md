@@ -39,5 +39,5 @@ kr hello.krbo
   than the long forms (`uint8` etc.).
 - `println(variable)` formats the variable as a decimal integer. For
   variables that hold string pointers, use `print_str` / `println_str`.
-- Range loops use the exclusive form `0..n`. The inclusive form `0..=n`
-  is not currently supported — use `0..n+1`.
+- Range loops default to the exclusive form `0..n`; the inclusive form
+  `0..=n` (visits `n`) is also supported.

@@ -89,13 +89,14 @@ flow: `if is_prime(n) { ... }`.
 zero. Remainder: `7 % 2 == 1`.
 
 **Ranges in `for` are half-open**: `for i in 0..10` iterates `0, 1, …, 9`
-(exactly like Python's `range(10)` or Rust's `0..10`). Write `0..n+1` if
-you want the upper bound included.
+(exactly like Python's `range(10)` or Rust's `0..10`). The inclusive form
+`for i in 0..=10` visits `10` too. The `in` keyword is optional
+(`for i 0..10` also parses).
 
-**Loops**: `while cond { ... }`, `for i in a..b { ... }`. Use `break` to
-exit a loop early and `continue` to skip to the next iteration. For an
-unbounded "loop forever" (until you `break` or `exit`), write
-`while 1 == 1 { ... }` — there is no dedicated `loop` keyword.
+**Loops**: `while cond { ... }`, `for i in a..b { ... }`, and
+`loop { ... }` (an infinite loop — sugar for `while true`). Use `break`
+to exit a loop early and `continue` to skip to the next iteration (in a
+`while`/`loop`; see the language reference for the `for` restriction).
 
 **Literals**: decimal `42`, hex `0x2A`, character `'A'` / `'\n'` / `'\t'`
 / `'\\'` / `'\''` / `'\0'` (evaluate to their byte value; use them

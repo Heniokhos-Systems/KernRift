@@ -4,8 +4,9 @@
 
 A self-hosted systems language compiler for kernel-first development. KernRift compiles itself — no Rust, no C, no LLVM, no external toolchain. It produces native executables for x86_64 and AArch64 on Linux, Windows, macOS, and Android, with BCJ+LZ-Rift-compressed fat binaries as the default output (8 platform slices per `.krbo`). The `kr` runner executes `.krbo` fat binaries on any supported platform. The compiler self-hosts on all 8 targets and is verified via CI on every push. The compiler ships with an **SSA-based IR backend** with liveness analysis, graph-coloring register allocation, an AST-level function inliner, Briggs/George copy coalescing, LICM, constant folding, DCE, and CSE — producing native machine code for all targets directly from the IR, no assembler in the loop.
 
-**v2.8.24 highlights** (full details in [CHANGELOG.md](CHANGELOG.md)):
+**v2.8.25 highlights** (full details in [CHANGELOG.md](CHANGELOG.md)):
 
+- **Language ergonomics.** Ternary `cond ? then : else`, `let` type inference (`let n = a + b`), `match` as an expression with bare-statement arms, `loop { }`, inclusive ranges `0..=n`, and `defer { }`. Parser/codegen errors now print a `file:line:col` header with the source line and a `^~~~` caret.
 - **Briggs/George copy coalescing, on by default.** The graph-colouring register allocator collapses `vN = copy vM` pairs whose live ranges don't interfere, so the redundant `mov rN, rN` is dropped at emit time. Briggs is the conservative gate (refuses if ≥ K neighbours of the merged class would have degree ≥ K); George is a less-conservative fallback gated to K ≥ 8. krc.kr self-compile vs `--no-coalesce`: x86_64 −72 B, arm64 −1592 B. `--no-coalesce` disables.
 - **AST-level function inliner.** Pure single-expression callees (`fn add(a, b) -> u64 { return a + b }`) are folded into their call sites; DCE then drops the unused originals. `--emit=obj` / `--emit=asm` / `--emit=ir` keep every top-level fn live so symbols still appear in the linker table / asm listing / IR dump.
 - **`--help` rewritten** to cover every flag the parser handles, grouped by output / code-gen / living-compiler / info. Previously `--legacy`, `--coalesce`, `--O0`, and the entire `lc` proposal surface were undocumented.
@@ -57,9 +58,9 @@ krc check module.kr
 krc lc program.kr
 ```
 
-### Self-compilation (v2.8.24, ~227K tokens, ~142K AST nodes, ~1.5 MB source)
+### Self-compilation (v2.8.25, ~253K tokens, ~159K AST nodes, ~2.0 MB source)
 
-All 8 targets self-compile. CI verifies bootstrap fixed point (krc3 == krc4) and runs **448 tests** on every push. Numbers below are on an AMD Ryzen 9 7900X — see [`benchmarks/BENCHMARKS.md`](benchmarks/BENCHMARKS.md) for the complete run including gcc / rustc comparisons.
+All 8 targets self-compile. CI verifies bootstrap fixed point (krc3 == krc4) and runs **566 tests** on every push. Numbers below are on an AMD Ryzen 9 7900X — see [`benchmarks/BENCHMARKS.md`](benchmarks/BENCHMARKS.md) for the complete run including gcc / rustc comparisons.
 
 | Target | Legacy codegen | IR codegen (default) | IR vs legacy |
 |--------|---------------:|---------------------:|-------------:|
@@ -149,7 +150,7 @@ fn divmod(u64 a, u64 b) -> u64 {
 
 Types: `u8/u16/u32/u64`, `i8/i16/i32/i64`, `f16/f32/f64` (long forms `uint8`..`int64` also work), structs, enums, fixed-size arrays, device blocks. Control: `if/else`, `while`, `for..in`, `break/continue`, `match`, recursion. Functions with method syntax (`fn Struct.method`), slice parameters (`fn foo([u8] data) { u64 n = data.len; ... }`), imports with recursive resolution.
 
-**New to KernRift?** See the [one-page cheatsheet](docs/CHEATSHEET.md) — every construct with a runnable example. Deeper references: [docs/LANGUAGE.md](docs/LANGUAGE.md), [docs/GRAMMAR.md](docs/GRAMMAR.md), and the tutorials ([B-tree](docs/tutorial-btree.md), [UART driver](docs/tutorial-uart-driver.md)).
+**New to KernRift?** Start with [Getting Started](docs/getting-started.md) (install → first program → running tests), then the [one-page cheatsheet](docs/CHEATSHEET.md). Deeper references: [docs/LANGUAGE.md](docs/LANGUAGE.md), [docs/GRAMMAR.md](docs/GRAMMAR.md), the [standard library](docs/STDLIB.md), and the tutorials ([B-tree](docs/tutorial-btree.md), [UART driver](docs/tutorial-uart-driver.md)). The full documentation index is [docs/README.md](docs/README.md).
 
 ## Kernel Features
 
