@@ -1377,6 +1377,32 @@ diag_span_test "diag_let_noinit" 'fn main() {
 diag_span_test "diag_missing_return" 'fn g() -> u64 { u64 x = 1 }
 fn main() { exit(g()) }' "may not return"
 
+# C2 regression: `let` must be resolved on EVERY fat-binary slice, not just the
+# first. A signed `let` mis-resolved on a non-first slice flips the comparison.
+# We build a fat (.krbo) binary, then run its ARM64 slice (the 2nd slice — the
+# one the bug skipped) via an arm64 runner under qemu.
+QEMU_A64="$(command -v qemu-aarch64-static || true)"
+if [ -n "$QEMU_A64" ]; then
+    TOTAL=$((TOTAL + 1))
+    printf 'fn main() { i64 a = 0 - 5\n let r = a\n if r < 0 { exit(9) }\n exit(0) }\n' > /tmp/krc_c2_$$.kr
+    cat "$DIR/../src/runner.kr" "$DIR/../src/bcj.kr" > /tmp/krc_c2run_$$.kr
+    if $KRC /tmp/krc_c2_$$.kr -o /tmp/krc_c2_$$.krbo >/dev/null 2>&1 \
+       && $KRC --arch=arm64 /tmp/krc_c2run_$$.kr -o /tmp/krc_c2run_$$ >/dev/null 2>&1; then
+        chmod +x /tmp/krc_c2run_$$
+        $QEMU_A64 /tmp/krc_c2run_$$ /tmp/krc_c2_$$.krbo >/dev/null 2>&1
+        c2got=$?
+        if [ "$c2got" = "9" ]; then
+            PASS=$((PASS + 1))
+        else
+            echo "FAIL: fat_slice_let_arm64 (expected 9, got $c2got — non-first slice didn't resolve let)"
+            FAIL=$((FAIL + 1))
+        fi
+    else
+        echo "FAIL: fat_slice_let_arm64 (build failed)"; FAIL=$((FAIL + 1))
+    fi
+    rm -f /tmp/krc_c2_$$.kr /tmp/krc_c2_$$.krbo /tmp/krc_c2run_$$.kr /tmp/krc_c2run_$$
+fi
+
 # Missing return in non-void function
 TOTAL=$((TOTAL + 1))
 printf 'fn get_val() -> uint64 { uint64 x = 42 }\nfn main() { exit(get_val()) }\n' > /tmp/krc_err_$$.kr
