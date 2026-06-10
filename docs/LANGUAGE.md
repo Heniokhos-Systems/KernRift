@@ -1280,8 +1280,10 @@ signed_le(a, b)    signed_ge(a, b)
 | `exit(code)` | Terminate the process with an exit code. |
 | `get_target_os()` | Host OS: `0`=Linux, `1`=macOS, `2`=Windows, `3`=Android. |
 | `get_arch_id()` | Compile-time arch ID: `1` Linux x86_64, `2` Linux arm64, `3` Win x86_64, `4` Win arm64, `5` macOS x86_64, `6` macOS arm64, `7` Android arm64, `8` Android x86_64. |
-| `exec_process(path)` | Spawn and wait for a process. Returns exit code. |
+| `exec_process(path)` | Spawn and wait for a process (argv = `{path, NULL}`). Returns exit code. |
+| `exec_process_argv(path, argv)` | Like `exec_process` but with an explicit NULL-terminated `argv` pointer array. |
 | `set_executable(path)` | `chmod +x` equivalent. |
+| `time_ns()` | Monotonic clock reading in nanoseconds (`CLOCK_MONOTONIC`). |
 | `get_module_path(buf, size)` | Write the current binary's path into `buf`. |
 | `fmt_uint(buf, val)` | Format `val` as decimal into `buf`. Returns length. |
 | `syscall_raw(nr, a1, a2, a3, a4, a5, a6)` | Raw syscall with up to 6 args. |

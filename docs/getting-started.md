@@ -95,8 +95,8 @@ zero. Remainder: `7 % 2 == 1`.
 
 **Loops**: `while cond { ... }`, `for i in a..b { ... }`, and
 `loop { ... }` (an infinite loop — sugar for `while true`). Use `break`
-to exit a loop early and `continue` to skip to the next iteration (in a
-`while`/`loop`; see the language reference for the `for` restriction).
+to exit a loop early and `continue` to skip to the next iteration
+(`continue` works in every loop form, including `for`).
 
 **Literals**: decimal `42`, hex `0x2A`, character `'A'` / `'\n'` / `'\t'`
 / `'\\'` / `'\''` / `'\0'` (evaluate to their byte value; use them

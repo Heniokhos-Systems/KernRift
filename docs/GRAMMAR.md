@@ -279,8 +279,12 @@ load8 load16 load32 load64  store8 store16 store32 store64
 vload8 vload16 vload32 vload64  vstore8 vstore16 vstore32 vstore64
 atomic_load atomic_store atomic_cas atomic_add atomic_sub atomic_and atomic_or atomic_xor
 dmb dsb isb  dcache_flush icache_invalidate
-time_ns  rdrand  cpuid
+sizeof  time_ns  exec_process exec_process_argv set_executable
+syscall syscall_raw  get_target_os get_arch_id get_module_path
 ```
+
+(`cpuid`/`rdrand` are *not* builtins — `cpuid` is only an inline-`asm`
+mnemonic. The canonical builtin list is `src/analysis.kr`.)
 
 The stdlib (`std/*.kr`) layers additional helpers (`str_len`, `opt_some`,
 `realloc`, `alloc_aligned`, …) on top of these.

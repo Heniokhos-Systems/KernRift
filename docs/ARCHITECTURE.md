@@ -9,7 +9,9 @@ src/
 ├── lexer.kr           Tokenizer (90+ token kinds)
 ├── ast.kr             Arena-based flat AST (32-byte nodes, 1-indexed)
 ├── parser.kr          Recursive descent + Pratt precedence climbing
-├── analysis.kr        Safety passes (ctx, eff, lock, caps, critical)
+├── analysis.kr        Semantic checks (missing return, unused/uninit, arg
+│                      counts) + diagnostics (spans/carets); effect passes
+├── type_check.kr      Type checker (default-on, fatal) + `let` inference
 ├── inliner.kr         AST-level inliner: pure single-expression callees → call sites
 ├── ir.kr              SSA IR + x86_64 emitter, liveness, graph-colour RA with
 │                      Briggs/George coalescer, LICM, CF/DCE/CSE
@@ -32,7 +34,7 @@ src/
 
 1. **Lex** — source text → flat token array (16 bytes per token)
 2. **Parse** — tokens → arena AST (32 bytes per node, child/sibling links)
-3. **Analyze** — effect/capability/locking passes over the AST
+3. **Check** — semantic validation (missing return, arg counts, unused/uninitialized) + the type checker (`type_check.kr`); `let` type inference resolves each inferred local. Errors here are fatal. The effect/capability/lock passes also run (advisory).
 4. **Inline** — AST-level pass folds pure single-expression callees into call sites; DCE drops the unused originals (translation-unit `--emit=obj/asm/ir` keep them)
 5. **Lower to IR** — AST → SSA IR instructions with virtual registers
 6. **Optimize IR** — constant folding → DCE → CSE → LICM → DCE
@@ -60,8 +62,9 @@ This bypasses the SELinux file-label transition Termux uses to block execve of u
 
 ## Key Design Decisions
 
-- **Flat AST**: 32-byte nodes in a contiguous arena. No pointers, just indices.
-- **SSA IR**: target-independent opcodes (90+), virtual registers, liveness, graph-coloring register allocator with Briggs/George copy coalescing, an AST-level inliner, LICM, constant folding, DCE, and CSE. Added in v2.8.2, replacing the "no IR" stance of earlier versions.
+- **Flat AST**: 32-byte nodes (8 fixed 4-byte slots: kind, data1–data4, tok, child, next) in a contiguous arena, 1-indexed. No pointers, just indices. Tokens are 16-byte records in a parallel arena.
+- **Fixed arenas with hard caps**: the token buffer is sized for 524288 tokens and the AST arena similarly; the self-compile sits near 48%, and `make check` fails if it crosses 80% (raise `max_tok` in `main.kr` before that). Most other tables (struct/device/var/fixup) have their own caps and fail loud on overflow.
+- **SSA IR**: target-independent opcodes (107 as of v2.8.25; see [IR_REFERENCE.md](IR_REFERENCE.md)), virtual registers, liveness, graph-coloring register allocator with Briggs/George copy coalescing, an AST-level inliner, LICM, constant folding, DCE, and CSE. Added in v2.8.2, replacing the "no IR" stance of earlier versions.
 - **Per-target emitters, shared IR**: Linux/macOS/Windows/Android syscall conventions, Mach-O argc/argv in x0/x1, Windows IAT calls — all handled at emission time from the same abstract opcodes.
 - **No external tools**: the compiler writes binaries directly; there is no assembler, linker, or libc in the build graph.
 - **Variable dedup**: same-named variables in different if-branches share a slot.
