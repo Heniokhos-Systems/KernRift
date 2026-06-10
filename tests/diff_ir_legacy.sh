@@ -79,6 +79,7 @@ fn main(){f64 n = int_to_f64(0)/int_to_f64(0); if n < int_to_f64(1) {exit(1)} ex
 diff_case "signed_param"   'fn isneg(i64 a)->u64{ if a<0 {return 1} return 0 }
 fn main(){exit(isneg(0-3))}'
 # ---- control flow ----
+diff_case "break_in_match" 'fn main(){u64 i=0; while i<10 { match i { 3 => { break } _ => {} } i=i+1 } exit(i)}'
 diff_case "if_else"  'fn main(){u64 x=5; if x>3{exit(1)}else{exit(0)}}'
 diff_case "elseif3"  'fn f(u64 x)->u64{if x>90{return 5}else if x>80{return 4}else if x>70{return 3}else{return 1}}
 fn main(){exit(f(75))}'

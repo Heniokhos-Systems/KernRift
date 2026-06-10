@@ -1511,6 +1511,22 @@ fn main(){ let x = K; exit(x) }' 5
 run_test_output "let_float" 'import "std/math_float.kr"
 fn main(){ let x = int_to_f64(3); let y = int_to_f64(2); println_str(fmt_f64(x / y, 1)); exit(0) }' "1.5" 0
 
+# H9: `break` inside a match arm must exit the ENCLOSING LOOP (legacy hijacked
+# it to only exit the match). M1: break/continue outside a loop is a no-op.
+run_test "break_in_match_while" 'fn main(){ u64 i=0
+    while i<10 { match i { 3 => { break } _ => {} } i=i+1 }
+    exit(i) }' 3
+run_test "break_in_nested_match" 'fn main(){ u64 i=0
+    u64 h=0
+    while i<10 { match i { 2 => { match i { 2 => { h=h+1 } _ => {} } } 5 => { break } _ => {} } i=i+1 }
+    exit(i*10+h) }' 51
+run_test "continue_in_match_while" 'fn main(){ u64 i=0
+    u64 s=0
+    while i<10 { i=i+1; match i { 3 => { continue } _ => {} } s=s+1 }
+    exit(s) }' 9
+run_test "break_outside_loop_noop" 'fn main(){ break
+    exit(5) }' 5
+
 # H7: a non-main function that prints a 5+ digit number (or an f-string) and
 # RETURNS must not smash its return address with the digit/f-string scratch
 # buffer. Was a deterministic SIGSEGV on the legacy backends.
@@ -1629,6 +1645,11 @@ run_test_legacy "high_bit_truthy_legacy" 'fn main(){ u64 x = 1 << 35
     exit(2) }' 1
 run_test_legacy "print_in_returning_fn_legacy" 'fn show(u64 n){ println(n) }
 fn main(){ show(123456789); exit(7) }' 7
+run_test_legacy "break_in_match_while_legacy" 'fn main(){ u64 i=0
+    while i<10 { match i { 3 => { break } _ => {} } i=i+1 }
+    exit(i) }' 3
+run_test_legacy "break_outside_loop_legacy" 'fn main(){ break
+    exit(5) }' 5
 run_test_legacy "fstring_in_returning_fn_legacy" 'fn show(u64 n){ print_str(f"value is {n} plus padding text to overflow saved regs") }
 fn main(){ show(42); exit(7) }' 7
 

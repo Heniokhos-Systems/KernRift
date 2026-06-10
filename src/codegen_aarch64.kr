@@ -1869,7 +1869,7 @@ fn gen_expr_a64(uint64 node) {
         uint64 mrem = var_frame_size & 15
         if mrem != 0 { var_frame_size = var_frame_size + 16 - mrem }
         emit_a64_store_x0(match_temp)
-        uint64 saved_break = break_fixup_count
+        uint64 saved_match_end = match_end_fixup_count
         uint32 arm_idx = ast_data1(node)
         uint64 warm = arm_idx
         while warm != 0 {
@@ -1926,10 +1926,10 @@ fn gen_expr_a64(uint64 node) {
             gen_expr_a64(wbody)
             uint64 end_patch = out_len
             emit_a64(0x14000000)  // B +0 (patched)
-            uint64 bf = break_fixups + break_fixup_count * 4
+            uint64 bf = match_end_fixups + match_end_fixup_count * 4
             uint32 ep32 = end_patch
             unsafe { *(bf as uint32) = ep32 }
-            break_fixup_count = break_fixup_count + 1
+            match_end_fixup_count = match_end_fixup_count + 1
             if is_wild == 0 {
                 uint64 skip_off = (out_len - skip_patch) >> 2
                 patch_u32(skip_patch, 0x14000000 | (skip_off & 0x3FFFFFF))
@@ -1941,9 +1941,9 @@ fn gen_expr_a64(uint64 node) {
         emit_a64_mov_imm(0, 0)
         // Patch every arm's end-branch to here (just past the default).
         uint64 end_addr = out_len
-        uint64 bi = saved_break
-        while bi < break_fixup_count {
-            uint64 bfe = break_fixups + bi * 4
+        uint64 bi = saved_match_end
+        while bi < match_end_fixup_count {
+            uint64 bfe = match_end_fixups + bi * 4
             uint32 bp32 = 0
             unsafe { *(bfe as uint32) -> bp32 }
             uint64 wbp = bp32
@@ -1951,7 +1951,7 @@ fn gen_expr_a64(uint64 node) {
             patch_u32(wbp, 0x14000000 | (b_off & 0x3FFFFFF))
             bi = bi + 1
         }
-        break_fixup_count = saved_break
+        match_end_fixup_count = saved_match_end
         return
     }
 
@@ -4794,6 +4794,9 @@ fn gen_stmt_a64(uint64 node) {
 
     // Break
     if kind == 17 {
+        // Outside any loop, `break` is a no-op (matches the IR backend;
+        // prevents a dangling break_fixups entry being re-patched later). M1.
+        if loop_depth == 0 { return }
         uint64 brk_off = out_len
         emit_a64_b(0)
         uint64 brk_entry = break_fixups + break_fixup_count * 4
@@ -4805,6 +4808,9 @@ fn gen_stmt_a64(uint64 node) {
 
     // Continue
     if kind == 18 {
+        // Outside any loop, `continue` is a no-op (matches IR; also avoids
+        // reading loop_stack[-1]). M1.
+        if loop_depth == 0 { return }
         uint64 lentry3 = loop_stack + (loop_depth - 1) * 16
         uint64 cont_target = 0
         unsafe { *(lentry3 as uint64) -> cont_target }
@@ -4824,7 +4830,7 @@ fn gen_stmt_a64(uint64 node) {
         uint64 mrem = var_frame_size & 15
         if mrem != 0 { var_frame_size = var_frame_size + 16 - mrem }
         emit_a64_store_x0(match_temp)
-        uint64 saved_break = break_fixup_count
+        uint64 saved_match_end = match_end_fixup_count
         uint32 arm_idx = ast_data1(node)
         uint64 warm = arm_idx
         while warm != 0 {
@@ -4886,13 +4892,15 @@ fn gen_stmt_a64(uint64 node) {
             uint32 body_idx = ast_data2(warm)
             uint64 wbody = body_idx
             gen_block_a64(wbody)
-            // B end_match (stored in break_fixups)
+            // B end_match (stored in match_end_fixups — NOT break_fixups, so a
+            // genuine `break` in the arm body still reaches the enclosing
+            // loop's patch pass). H9.
             uint64 end_patch = out_len
             emit_a64(0x14000000)  // B +0 (patched)
-            uint64 bf = break_fixups + break_fixup_count * 4
+            uint64 bf = match_end_fixups + match_end_fixup_count * 4
             uint32 ep32 = end_patch
             unsafe { *(bf as uint32) = ep32 }
-            break_fixup_count = break_fixup_count + 1
+            match_end_fixup_count = match_end_fixup_count + 1
             // Patch the fall-through B (none matched) to skip_arm = here.
             if is_wild == 0 {
                 uint64 skip_off = (out_len - skip_patch) >> 2
@@ -4903,9 +4911,9 @@ fn gen_stmt_a64(uint64 node) {
         }
         // Patch end-match jumps
         uint64 end_addr = out_len
-        uint64 bi = saved_break
-        while bi < break_fixup_count {
-            uint64 bfe = break_fixups + bi * 4
+        uint64 bi = saved_match_end
+        while bi < match_end_fixup_count {
+            uint64 bfe = match_end_fixups + bi * 4
             uint32 bp32 = 0
             unsafe { *(bfe as uint32) -> bp32 }
             uint64 wbp = bp32
@@ -4913,7 +4921,7 @@ fn gen_stmt_a64(uint64 node) {
             patch_u32(wbp, 0x14000000 | (b_off & 0x3FFFFFF))
             bi = bi + 1
         }
-        break_fixup_count = saved_break
+        match_end_fixup_count = saved_match_end
         return
     }
 

@@ -102,6 +102,12 @@ static uint64 loop_depth = 0
 // Break fixup list: [patch_offset(4)] × 256
 static uint64 break_fixups = 0
 static uint64 break_fixup_count = 0
+// Match arm-end fixup list: [patch_offset(4)] × 256. Jumps from the end of a
+// matched arm body past the whole match. Kept SEPARATE from break_fixups so a
+// genuine `break` inside a match arm stays visible to the enclosing loop's
+// patch pass instead of being hijacked to end-of-match (H9).
+static uint64 match_end_fixups = 0
+static uint64 match_end_fixup_count = 0
 
 // Fixup table: call sites that need patching after all functions emitted
 // [patch_offset(4), target_name_tok(4)] × 1024
@@ -320,6 +326,8 @@ fn codegen_init(uint64 capacity, uint64 source, uint64 tokens) {
     loop_depth = 0
     break_fixups = alloc(256 * 4)
     break_fixup_count = 0
+    match_end_fixups = alloc(256 * 4)
+    match_end_fixup_count = 0
     enum_table = alloc(512 * 16)
     enum_count = 0
     static_table = alloc(1024 * 8)
@@ -4860,7 +4868,7 @@ fn gen_expr(uint64 node) {
         uint64 mrem = var_frame_size & 15
         if mrem != 0 { var_frame_size = var_frame_size + 16 - mrem }
         emit_store_rax_to_stack(match_temp)
-        uint64 saved_break = break_fixup_count
+        uint64 saved_match_end = match_end_fixup_count
         uint32 arm_idx = ast_data1(node)
         uint64 warm = arm_idx
         while warm != 0 {
@@ -4918,17 +4926,17 @@ fn gen_expr(uint64 node) {
             uint32 body_idx = ast_data2(warm)
             uint64 wbody = body_idx
             gen_expr(wbody)
-            if break_fixup_count >= 256 {
-                write(2, "error: break_fixups overflow (max 256)\n", 39)
+            if match_end_fixup_count >= 256 {
+                write(2, "error: match_end_fixups overflow (max 256)\n", 43)
                 exit(1)
             }
             emit_byte(0xE9)
             uint64 end_patch = out_len
             emit_u32_le(0)
-            uint64 bf = break_fixups + break_fixup_count * 4
+            uint64 bf = match_end_fixups + match_end_fixup_count * 4
             uint32 ep32 = end_patch
             unsafe { *(bf as uint32) = ep32 }
-            break_fixup_count = break_fixup_count + 1
+            match_end_fixup_count = match_end_fixup_count + 1
             if is_wild == 0 {
                 uint64 skip_target = out_len
                 patch_u32(skip_patch, (skip_target - skip_patch - 4) & 0xFFFFFFFF)
@@ -4940,16 +4948,16 @@ fn gen_expr(uint64 node) {
         emit_mov_rax_imm(0)
         // Patch every arm's end-jump to here (just past the default).
         uint64 end_addr = out_len
-        uint64 bi = saved_break
-        while bi < break_fixup_count {
-            uint64 bfe = break_fixups + bi * 4
+        uint64 bi = saved_match_end
+        while bi < match_end_fixup_count {
+            uint64 bfe = match_end_fixups + bi * 4
             uint32 bp32 = 0
             unsafe { *(bfe as uint32) -> bp32 }
             uint64 wbp = bp32
             patch_u32(wbp, (end_addr - wbp - 4) & 0xFFFFFFFF)
             bi = bi + 1
         }
-        break_fixup_count = saved_break
+        match_end_fixup_count = saved_match_end
         return
     }
 
@@ -9119,6 +9127,10 @@ fn gen_stmt(uint64 node) {
 
     // Break
     if kind == 17 {
+        // Outside any loop, `break` is a no-op (matches the IR backend).
+        // Without this, the entry would linger in break_fixups and a later
+        // loop would re-patch it, corrupting emitted code (M1/H9).
+        if loop_depth == 0 { return }
         if break_fixup_count >= 256 {
             write(2, "error: break_fixups overflow (max 256)\n", 39)
             exit(1)
@@ -9135,6 +9147,9 @@ fn gen_stmt(uint64 node) {
 
     // Continue
     if kind == 18 {
+        // Outside any loop, `continue` is a no-op (matches IR; also avoids
+        // reading loop_stack[-1]). M1.
+        if loop_depth == 0 { return }
         // Jump back to loop_start
         uint64 lentry3 = loop_stack + (loop_depth - 1) * 16
         uint64 cont_target = 0
@@ -9157,8 +9172,10 @@ fn gen_stmt(uint64 node) {
         uint64 mrem = var_frame_size & 15
         if mrem != 0 { var_frame_size = var_frame_size + 16 - mrem }
         emit_store_rax_to_stack(match_temp)
-        // Track end-of-match jumps using break_fixups
-        uint64 saved_break = break_fixup_count
+        // Track end-of-match jumps in the dedicated match_end_fixups list (NOT
+        // break_fixups — a genuine `break` in an arm body must stay visible to
+        // the enclosing loop's patch pass). H9.
+        uint64 saved_match_end = match_end_fixup_count
         uint32 arm_idx = ast_data1(node)
         uint64 warm = arm_idx
         while warm != 0 {
@@ -9224,18 +9241,18 @@ fn gen_stmt(uint64 node) {
             uint32 body_idx = ast_data2(warm)
             uint64 wbody = body_idx
             gen_block(wbody)
-            // jmp end_match (stored in break_fixups)
-            if break_fixup_count >= 256 {
-                write(2, "error: break_fixups overflow (max 256)\n", 39)
+            // jmp end_match (stored in match_end_fixups)
+            if match_end_fixup_count >= 256 {
+                write(2, "error: match_end_fixups overflow (max 256)\n", 43)
                 exit(1)
             }
             emit_byte(0xE9)
             uint64 end_patch = out_len
             emit_u32_le(0)
-            uint64 bf = break_fixups + break_fixup_count * 4
+            uint64 bf = match_end_fixups + match_end_fixup_count * 4
             uint32 ep32 = end_patch
             unsafe { *(bf as uint32) = ep32 }
-            break_fixup_count = break_fixup_count + 1
+            match_end_fixup_count = match_end_fixup_count + 1
             // Patch the unconditional jmp (from "none matched") to land
             // here — the skip-arm position — only for non-wildcard arms.
             if is_wild == 0 {
@@ -9247,16 +9264,16 @@ fn gen_stmt(uint64 node) {
         }
         // Patch all end-match jumps to here
         uint64 end_addr = out_len
-        uint64 bi = saved_break
-        while bi < break_fixup_count {
-            uint64 bfe = break_fixups + bi * 4
+        uint64 bi = saved_match_end
+        while bi < match_end_fixup_count {
+            uint64 bfe = match_end_fixups + bi * 4
             uint32 bp32 = 0
             unsafe { *(bfe as uint32) -> bp32 }
             uint64 wbp = bp32
             patch_u32(wbp, (end_addr - wbp - 4) & 0xFFFFFFFF)
             bi = bi + 1
         }
-        break_fixup_count = saved_break
+        match_end_fixup_count = saved_match_end
         return
     }
 
