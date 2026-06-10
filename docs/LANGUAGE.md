@@ -1408,29 +1408,41 @@ krc <file.kr> --arch=x86_64 -o out   # single-arch native ELF
 krc <file.kr> --arch=arm64 -o out    # single-arch ARM64 ELF
 krc <file.kr> --targets=linux-x64,macos-arm64 -o out.krbo   # custom fat subset (v2.8.x)
 
+# Single target (one platform, host or cross) instead of a fat binary:
+krc <file.kr> --target=linux -o out
+krc <file.kr> --target=macos -o out
+krc <file.kr> --target=windows -o out.exe
+krc <file.kr> --target=android -o out
+
 # Emit format (aliased since v2.8.4):
-#   linux / linux-x86_64 / linux-arm64 / elfexe / elf   → Linux ELF
-#   windows / pe                                        → Windows PE
-#   macos / darwin / macho                              → macOS Mach-O
+#   elfexe / elf                                        → Linux ELF
+#   pe                                                  → Windows PE
+#   macho                                               → macOS Mach-O
 #   android                                             → Android PIE ELF
-#   obj                                                 → ELF relocatable (.o)
-#   asm                                                 → disassembled listing
+#   obj   (or -c)                                       → ELF relocatable (.o / .obj)
+#   lkm                                                 → Linux kernel module (.ko) — see docs/LKM.md
+#   asm                                                 → annotated assembly listing (to -o path)
+#   ir                                                  → SSA IR dump per function (to stdout)
 krc <file.kr> --emit=pe -o out.exe
 krc <file.kr> --emit=macho -o out
 krc <file.kr> --emit=android -o out
-krc <file.kr> --arch=x86_64 --emit=android -o out
+krc <file.kr> -c -o out.o            # shorthand for --emit=obj
+krc <file.kr> --emit=lkm -o mod.ko   # Linux loadable kernel module (x86_64 only)
 
-# Codegen backend
+# Codegen backend & optimization
 krc <file.kr> --arch=arm64           # default: IR (SSA + optimizer + regalloc)
 krc --legacy --arch=arm64 <file.kr>  # legacy direct-walking codegen
-krc --ir <file.kr>                   # force IR even where the release recipe falls back to legacy (e.g. ARM64 fat slices)
-krc -O0 <file.kr>                    # disable IR optimizer (useful for debugging miscompiles)
-krc --debug <file.kr>                # enable runtime div-by-zero + bounds traps
+krc --ir <file.kr>                   # force IR even where a recipe falls back to legacy
+krc --no-coalesce <file.kr>          # disable Briggs/George copy coalescing (default on)
+krc --no-check-types <file.kr>       # disable the type checker (default on)
+krc --O0 <file.kr>                   # disable the IR optimizer (CF/DCE/CSE/LICM)
+krc --debug <file.kr>                # runtime safety checks (bounds, null, some div-by-zero)
+krc -g <file.kr> -o out              # emit DWARF debug info (.debug_line/info/abbrev/str)
 
 # Non-compile modes
 krc --freestanding <file.kr> -o out  # no main trampoline, no auto-exit
-krc check <file.kr>                  # run semantic checks only
-krc fmt   <file.kr>                  # auto-format the file in place
+krc check <file.kr>                  # static checks only (semantic + type checker)
+krc fmt   <file.kr>                  # auto-format: prints formatted source to stdout
 krc lc <file.kr>                     # living compiler report (section 21)
 krc lc --fix <file.kr>               # apply auto-fixes in place
 krc lc --fix --dry-run <file.kr>     # preview auto-fixes without writing
@@ -1444,6 +1456,38 @@ krc --emit=ir <file.kr>              # dump the SSA IR for a single function
 krc --version                        # print the compiler version
 krc --help                           # usage info
 ```
+
+For debugging — `-g` DWARF in gdb, the `--debug` trap table, and the
+`--O0` → `--no-coalesce` → `--legacy` miscompile bisection ladder — see
+[docs/DEBUGGING.md](DEBUGGING.md).
+
+### Static checks: the type checker
+
+A static type checker runs by default on every compile (and under
+`krc check`). Its errors are **fatal** — they abort the build with a
+`file:line:col` message, source line, and caret. Pass `--no-check-types`
+to disable it (e.g. to compile a file it rejects while you investigate).
+
+It is a focused checker centred on struct/float/void misuse, not a full
+Hindley–Milner system — integer-width mismatches, for instance, are not
+flagged. What it catches:
+
+| Category | Example that is rejected |
+|----------|--------------------------|
+| Field access on a non-struct | `u64 n = 5` then `n.x` |
+| Unknown field on a struct | `p.nope` where `nope` isn't a field of `p`'s type |
+| Two different struct types mixed | `Q q = some_P` (init, assignment, argument, return, or match pattern) |
+| Arithmetic on a struct value | `p + q` |
+| Ordering comparison on a struct | `p < q` (`==`/`!=` are allowed — field-by-field equality) |
+| Void function used as a value | `u64 x = print_str(s)` |
+| Return value/void mismatch | `return x` in a void fn, or bare `return` in a value fn |
+| Float-kind mismatch on return | returning an `f32` from an `-> f64` function |
+| `match` on a float scrutinee | `match some_f64 { ... }` |
+| Ternary / `match`-expr arms mixing float and int | `c ? 1.5 : 2` |
+
+Because KernRift treats a struct-typed variable as a typed pointer, a
+struct and a raw pointer/`u64` mix freely (`P p = alloc(16)` is fine);
+only two *different* struct types clash.
 
 ### `kr` runner
 
