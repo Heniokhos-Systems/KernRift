@@ -69,13 +69,15 @@ fn tok_kind_name(uint64 kind) -> uint64 {
     if kind == 29 { return "'=>'" }
     if kind == 34 { return "'='" }
     if kind == 60 { return "'fn'" }
-    if kind == 61 { return "'if'" }
-    if kind == 62 { return "'else'" }
-    if kind == 63 { return "'while'" }
+    if kind == 61 { return "'return'" }
+    if kind == 62 { return "'if'" }
+    if kind == 63 { return "'else'" }
+    if kind == 64 { return "'while'" }
     if kind == 65 { return "'for'" }
+    if kind == 66 { return "'in'" }
     if kind == 67 { return "'break'" }
     if kind == 68 { return "'continue'" }
-    if kind == 69 { return "'return'" }
+    if kind == 69 { return "'loop'" }
     if kind == 70 { return "'const'" }
     if kind == 71 { return "'static'" }
     if kind == 72 { return "'struct'" }
@@ -95,6 +97,8 @@ fn tok_kind_name(uint64 kind) -> uint64 {
     if kind == 94 { return "'f16'" }
     if kind == 95 { return "'f32'" }
     if kind == 96 { return "'f64'" }
+    if kind == 79 { return "'defer'" }
+    if kind == 103 { return "'let'" }
     return "token"
 }
 
@@ -203,8 +207,10 @@ fn parse_primary() -> uint64 {
     // statement-position `match` is handled separately in parse_stmt; this
     // case only fires where an expression is expected (RHS, arg, return).
     if kind == 88 {
-        advance_tok()
+        uint64 match_kw = advance_tok()
         uint64 me = ast_alloc(AstKind.MatchExpr)
+        uint32 mkw = match_kw
+        ast_set_tok(me, mkw)
         uint64 scrut = parse_expr()
         uint32 s32 = scrut
         ast_set_child(me, s32)
@@ -1054,8 +1060,10 @@ fn parse_stmt() -> uint64 {
 
     // Match statement: match expr { val => { body } val => { body } ... }
     if kind == 88 {
-        advance_tok()
+        uint64 match_kw = advance_tok()
         uint64 match_node = ast_alloc(19)
+        uint32 mkw = match_kw
+        ast_set_tok(match_node, mkw)
         uint64 scrutinee = parse_expr()
         uint32 s32 = scrutinee
         ast_set_child(match_node, s32)

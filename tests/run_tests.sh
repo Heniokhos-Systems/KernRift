@@ -1448,6 +1448,25 @@ diag_span_test "diag_match_arm_no_return" 'fn classify(u64 x) -> u64 {
 }
 fn main() { exit(classify(5)) }' "may not return"
 
+# M13: `krc check` runs the real semantic checks (was a no-op that ran only
+# the inert annotation/effect/lock passes and reported OK for everything).
+TOTAL=$((TOTAL + 1))
+printf 'fn bad() -> u64 { u64 x = 1 }\nfn main() { exit(bad()) }\n' > /tmp/krc_chk_$$.kr
+if $KRC check /tmp/krc_chk_$$.kr >/dev/null 2>&1; then
+    echo "FAIL: krc_check_catches_error (should report missing return)"; FAIL=$((FAIL + 1))
+else
+    PASS=$((PASS + 1))
+fi
+rm -f /tmp/krc_chk_$$.kr
+TOTAL=$((TOTAL + 1))
+printf 'fn good(u64 x) -> u64 { return x + 1 }\nfn main() { exit(good(6)) }\n' > /tmp/krc_chkok_$$.kr
+if $KRC check /tmp/krc_chkok_$$.kr >/dev/null 2>&1; then
+    PASS=$((PASS + 1))
+else
+    echo "FAIL: krc_check_passes_clean (should report OK)"; FAIL=$((FAIL + 1))
+fi
+rm -f /tmp/krc_chkok_$$.kr
+
 # C2 regression: `let` must be resolved on EVERY fat-binary slice, not just the
 # first. A signed `let` mis-resolved on a non-first slice flips the comparison.
 # We build a fat (.krbo) binary, then run its ARM64 slice (the 2nd slice — the

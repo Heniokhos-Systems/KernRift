@@ -43,11 +43,11 @@ enum AstKind {
     BinOp = 33         // data1=operator_tok, child=lhs, data2=rhs_idx
     UnaryOp = 34       // data1=operator_tok, child=operand
     Call = 35          // data1=callee_tok, child=first_arg
-    FieldAccess = 36   // data1=object_tok, data2=field_tok
-    Index = 37         // child=array_expr, data1=index_expr_idx
+    FieldAccess = 36   // child=object_expr, data2=field_tok
+    Index = 37         // data1=array_name_tok, child=index_expr
     Compare = 38       // data1=operator_tok, child=lhs, data2=rhs_idx
-    LogicalAnd = 39    // child=lhs, data1=rhs_idx
-    LogicalOr = 40     // child=lhs, data1=rhs_idx
+    LogicalAnd = 39    // data1=operator_tok, child=lhs, data2=rhs_idx
+    LogicalOr = 40     // data1=operator_tok, child=lhs, data2=rhs_idx
 
     // Inline assembly
     AsmBlock = 43      // data1=first_str_tok, child=linked list of string nodes (each StrLit)

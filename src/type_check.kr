@@ -879,7 +879,16 @@ fn resolve_vardecl_infer(uint64 node) {
     // reference this variable can resolve its kind.
     if wd1 != 0 || wd4 != 0 {
         uint64 tk
-        if wd4 != 0 { tk = 200 + (wd4 - 1) } else { tk = tc_kind_of_type_tok(d1) }
+        if wd4 != 0 {
+            tk = 200 + (wd4 - 1)
+        } else if (wd1 & 0x80000000) != 0 {
+            // Already-resolved inferred `let` (tagged on a prior pass). Decode
+            // the kind directly — feeding the tag to tc_kind_of_type_tok would
+            // misread it as a token index. Keeps this pass idempotent.
+            tk = wd1 & 0x7FFFFFFF
+        } else {
+            tk = tc_kind_of_type_tok(d1)
+        }
         tc_local_register(name_tok, tk)
         return
     }

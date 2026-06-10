@@ -4642,20 +4642,31 @@ fn main() {
         codegen_init(1048576, source, my_tokens)
         parser_init(my_tokens, tcount)
         uint64 root = parse_module()
+        // run_analysis runs the annotation/effect/lock passes. These are
+        // currently inert: annotations are not parsed yet, so ann_register
+        // and lock_add_edge have no callers and the tables stay empty (M13).
+        // The genuinely-working checks — missing return, arg count, unused/
+        // unreachable code, undeclared identifiers — live in
+        // run_semantic_checks, the same pass a normal compile runs. Without
+        // it, `krc check` reported "OK" for every file. Run both and report
+        // the detailed diagnostics.
         uint64 errors = run_analysis(root)
+        uint64 sema_errs = run_semantic_checks(root, source, my_tokens)
+        diag_report_all()
+        errors = errors + sema_errs
         if errors > 0 {
             uint8[32] nb
             write(2, "\nkrc: ", 6)
             uint64 nl = fmt_uint(nb, errors)
             write(2, nb, nl)
-            write(2, " analysis error(s) found in ", 28)
+            write(2, " error(s) found in ", 19)
             write(2, input_path, str_len(input_path))
             write(2, "\n", 1)
             exit(1)
         }
         write(1, "krc check: ", 11)
         write(1, input_path, str_len(input_path))
-        write(1, " — OK\n", 6)
+        write(1, " - OK\n", 6)
         exit(0)
     }
 
