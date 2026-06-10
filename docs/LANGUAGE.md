@@ -1232,6 +1232,7 @@ manually-built buffer — reach for `print_str` / `println_str`.
 | `memset(dst, val, len)` | Fill `len` bytes with `val`. |
 | `str_len(s)` | Length of a null-terminated string. |
 | `str_eq(a, b)` | 1 if two null-terminated strings are equal, 0 otherwise. |
+| `sizeof(T)` | Compile-time byte size of a scalar type or struct. `sizeof(u64)` is 8; `sizeof(SomeStruct)` is its packed size (fields are laid out with no padding — see §7). Folds to a constant at compile time. |
 
 ### Pointer load/store
 
@@ -1389,13 +1390,15 @@ documents intent.
 }
 ```
 
-### `@section("name")`
+### Analysis annotations: `@ctx`, `@eff`, `@caps`, `@acquires` / `@releases`
 
-Parses and records a linker section name. Used with `--emit=obj` output.
-
-```kr
-@section(".text.init") fn early_start() { }
-```
+A separate family of annotations feeds the optional effect / capability /
+lock analysis passes (`krc check`): `@ctx(...)` declares an execution
+context, `@eff(...)` the effects a function may perform, `@caps(...)` the
+capabilities it requires, and `@acquires(...)` / `@releases(...)` track
+lock ownership for the deadlock-cycle check. They are advisory pre-1.0
+and do not affect codegen. See [EFFECT_SYSTEM.md](EFFECT_SYSTEM.md) for
+the full model.
 
 ---
 
