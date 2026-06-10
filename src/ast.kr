@@ -108,7 +108,12 @@ fn ast_init(uint64 max_nodes) {
 // Allocate a new AST node. Returns the node index (1-based, 0 = null).
 @export
 fn ast_alloc(uint64 kind) -> uint64 {
-    if ast_count >= ast_capacity { return 0 }
+    if ast_count >= ast_capacity {
+        // Fatal: returning 0 here let parsing continue against a truncated
+        // AST (node 0 also writes 32 bytes before the arena). Fail loud.
+        write(2, "error: AST node arena exhausted\n", 32)
+        exit(1)
+    }
     ast_count = ast_count + 1
     uint64 idx = ast_count
     uint64 base = ast_buf + (idx - 1) * 32

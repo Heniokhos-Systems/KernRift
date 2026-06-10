@@ -309,7 +309,13 @@ fn peek_at(uint64 offset) -> uint64 {
 }
 
 fn emit_token(uint64 kind, uint64 start, uint64 len, uint64 tok_line) {
-    if tok_count >= tok_capacity { return }
+    if tok_count >= tok_capacity {
+        // Fatal, never silent: a dropped token (incl. the final Eof) would
+        // truncate the program and "successfully" compile a different one —
+        // catastrophic for a compiler that must self-compile bit-identically.
+        write(2, "error: too many tokens (lexer buffer full)\n", 43)
+        exit(1)
+    }
     uint64 base = tok_count * 16
     uint64 buf = tok_buf
     // Write kind (4 bytes LE)
