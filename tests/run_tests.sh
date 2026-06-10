@@ -1503,6 +1503,15 @@ fn main(){ let x = K; exit(x) }' 5
 run_test_output "let_float" 'import "std/math_float.kr"
 fn main(){ let x = int_to_f64(3); let y = int_to_f64(2); println_str(fmt_f64(x / y, 1)); exit(0) }' "1.5" 0
 
+# H6: signed parameter comparison must be signed on all backends.
+run_test "signed_param" 'fn isneg(i64 a) -> u64 { if a < 0 { return 1 } return 0 }
+fn main(){ exit(isneg(0 - 3)) }' 1
+# H6: signed i64 struct field comparison must be signed on all backends.
+run_test "signed_field_i64" 'struct S { i64 v }
+fn main(){ S s; s.v = 0 - 4
+    if s.v < 0 { exit(5) }
+    exit(0) }' 5
+
 # H5: range patterns on a SIGNED scrutinee must use signed compares, else
 # negative bounds never match.
 run_test "match_range_signed" 'fn main(){ i64 x = -5
@@ -1579,6 +1588,13 @@ fn main(){ let x = f(); exit(x) }' 42
 run_test_legacy "let_legacy_bool"  'fn main(){ let ok = 5 > 3; exit(ok) }' 1
 run_test_legacy "let_legacy_loop"  'fn main(){ u64 s=0; for i in 0..5 { let d = i + 1; s = s + d } exit(s) }' 15
 run_test_legacy "let_legacy_signed" 'fn main(){ i64 a = 0 - 5; let r = a; if r < 0 { exit(9) } exit(0) }' 9
+# H6 legacy: signed param + signed i64 field comparisons (both backends).
+run_test_legacy "signed_param_legacy" 'fn isneg(i64 a) -> u64 { if a < 0 { return 1 } return 0 }
+fn main(){ exit(isneg(0 - 3)) }' 1
+run_test_legacy "signed_field_i64_legacy" 'struct S { i64 v }
+fn main(){ S s; s.v = 0 - 4
+    if s.v < 0 { exit(5) }
+    exit(0) }' 5
 
 # Short-circuit &&/|| parity: legacy must match IR (evaluate RHS only when
 # needed) AND match IR's value semantics: && = lhs?rhs:0, || = lhs?1:rhs.

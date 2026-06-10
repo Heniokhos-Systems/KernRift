@@ -780,6 +780,28 @@ fn legacy_node_is_signed(uint64 ast_node) -> uint64 {
         if tok_matches(wct, "f64_to_int", 10) != 0 { return 1 }
         return 0
     }
+    // FieldAccess (36): signed iff the field's declared type is int8..int64.
+    // The base object is the CHILD node (an Ident for simple `s.field`), and
+    // the field-name token is in data2.
+    if wnk == 36 {
+        uint32 obj_node = ast_child(ast_node)
+        uint64 wobj_node = obj_node
+        if wobj_node != 0 {
+            uint32 obj_k = ast_kind(wobj_node)
+            if obj_k == 32 {
+                uint32 obj_tok = ast_data1(wobj_node)
+                uint64 wobj = obj_tok
+                uint64 si = struct_var_lookup(wobj)
+                if si != 0xFFFFFFFF {
+                    uint32 fld_tok = ast_data2(ast_node)
+                    uint64 wfld = fld_tok
+                    uint64 fk = struct_field_type_kind_by_tok(si, wfld)
+                    if fk == 84 || fk == 85 || fk == 86 || fk == 87 { return 1 }
+                }
+            }
+        }
+        return 0
+    }
     return 0
 }
 
@@ -9668,12 +9690,12 @@ fn gen_function(uint64 fn_node) {
         if pk == 3 {
             uint32 param_name = ast_data2(wparam)
             uint64 ptr_off_x = var_declare(param_name)
-            // Register float type for float-typed params
+            // Register the param's type unconditionally (was float-only), so
+            // legacy_node_is_signed sees int8..int64 params as signed —
+            // otherwise `fn f(i64 a) { a < 0 }` compiles an unsigned compare.
             uint32 param_type_reg = ast_data1(wparam)
             uint64 pt_kind = tok_kind_at_raw(param_type_reg)
-            if is_float_type(pt_kind) != 0 {
-                var_type_register(param_name, pt_kind)
-            }
+            var_type_register(param_name, pt_kind)
             // Slice parameter: also reserve a length slot (no name)
             uint32 pflag = ast_data4(wparam)
             uint64 wpflag = pflag

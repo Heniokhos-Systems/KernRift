@@ -2893,6 +2893,7 @@ fn ir_lower_expr(uint64 node) -> uint64 {
                     ir_emit(IR_LOAD, dest, addr_v, fsz, 0, ir_current_bb)
                     if ftk == 96 { ir_vreg_fkind_set(dest, 1) }
                     if ftk == 95 { ir_vreg_fkind_set(dest, 2) }
+                    if ftk >= 84 && ftk <= 87 { ir_vreg_signed_set(dest, 1) }
                     ir_fa_struct_idx = 0xFFFFFFFF
                     return dest
                 }
@@ -2930,6 +2931,7 @@ fn ir_lower_expr(uint64 node) -> uint64 {
                     uint64 sftk_i = struct_field_type_kind_by_tok(sia, field_tok)
                     if sftk_i == 96 { ir_vreg_fkind_set(dest, 1) }
                     if sftk_i == 95 { ir_vreg_fkind_set(dest, 2) }
+                    if sftk_i >= 84 && sftk_i <= 87 { ir_vreg_signed_set(dest, 1) }
                     return dest
                 }
             }
@@ -2994,6 +2996,7 @@ fn ir_lower_expr(uint64 node) -> uint64 {
             // Set float kind if field is f64(96) or f32(95)
             if ftk == 96 { ir_vreg_fkind_set(dest, 1) }
             if ftk == 95 { ir_vreg_fkind_set(dest, 2) }
+            if ftk >= 84 && ftk <= 87 { ir_vreg_signed_set(dest, 1) }
             ir_fa_struct_idx = 0xFFFFFFFF
             return dest
         }
@@ -4512,6 +4515,8 @@ fn ir_lower_function(uint64 fn_node) {
             uint64 ptk = tok_kind_at_raw(wpt)
             if ptk == 96 { ir_vreg_fkind_set(pvreg, 1) }
             if ptk == 95 { ir_vreg_fkind_set(pvreg, 2) }
+            // int8..int64 params are signed, so `a < 0` etc. pick IR_SCMP_*.
+            if ptk == 84 || ptk == 85 || ptk == 86 || ptk == 87 { ir_vreg_signed_set(pvreg, 1) }
             // If param type is a struct, register it so field access works
             uint64 psi = struct_lookup(wpt)
             if psi != 0xFFFFFFFF {

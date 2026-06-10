@@ -5432,12 +5432,11 @@ fn gen_function_a64(uint64 fn_node) {
         if pk == 3 {
             uint32 param_name = ast_data2(wparam)
             uint64 ptr_off_a = var_declare(param_name)
-            // Register float type for float-typed params
+            // Register the param's type unconditionally (was float-only) so
+            // legacy_node_is_signed sees int8..int64 params as signed.
             uint32 param_type_reg_a = ast_data1(wparam)
             uint64 pt_kind_a = tok_kind_at_raw(param_type_reg_a)
-            if is_float_type(pt_kind_a) != 0 {
-                var_type_register(param_name, pt_kind_a)
-            }
+            var_type_register(param_name, pt_kind_a)
             // Slice parameter: also reserve a length slot (no name)
             uint32 pflag_a = ast_data4(wparam)
             uint64 wpflag_a = pflag_a
