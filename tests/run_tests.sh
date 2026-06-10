@@ -1503,6 +1503,12 @@ fn main(){ let x = K; exit(x) }' 5
 run_test_output "let_float" 'import "std/math_float.kr"
 fn main(){ let x = int_to_f64(3); let y = int_to_f64(2); println_str(fmt_f64(x / y, 1)); exit(0) }' "1.5" 0
 
+# H8: a condition truthy only in the high 32 bits must be truthy on legacy too
+# (legacy if/while/ternary used a 32-bit `test eax,eax`).
+run_test "high_bit_truthy" 'fn main(){ u64 x = 1 << 35
+    if x { exit(1) }
+    exit(2) }' 1
+
 # H6: signed parameter comparison must be signed on all backends.
 run_test "signed_param" 'fn isneg(i64 a) -> u64 { if a < 0 { return 1 } return 0 }
 fn main(){ exit(isneg(0 - 3)) }' 1
@@ -1595,6 +1601,9 @@ run_test_legacy "signed_field_i64_legacy" 'struct S { i64 v }
 fn main(){ S s; s.v = 0 - 4
     if s.v < 0 { exit(5) }
     exit(0) }' 5
+run_test_legacy "high_bit_truthy_legacy" 'fn main(){ u64 x = 1 << 35
+    if x { exit(1) }
+    exit(2) }' 1
 
 # Short-circuit &&/|| parity: legacy must match IR (evaluate RHS only when
 # needed) AND match IR's value semantics: && = lhs?rhs:0, || = lhs?1:rhs.

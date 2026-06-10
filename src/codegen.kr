@@ -4801,7 +4801,9 @@ fn gen_expr(uint64 node) {
         uint32 tcond = ast_child(node)
         uint64 wtcond = tcond
         gen_expr(wtcond)
-        // test eax, eax
+        // test rax, rax (64-bit — a condition like `x & (1<<35)` is truthy in
+        // the high bits; a 32-bit test would wrongly read it as false). H8.
+        emit_byte(0x48)
         emit_byte(0x85)
         emit_byte(0xC0)
         // jz else (placeholder)
@@ -8962,7 +8964,9 @@ fn gen_stmt(uint64 node) {
         uint64 wcond = cond
         gen_expr(wcond)
 
-        // test eax, eax
+        // test rax, rax (64-bit — a condition like `x & (1<<35)` is truthy in
+        // the high bits; a 32-bit test would wrongly read it as false). H8.
+        emit_byte(0x48)
         emit_byte(0x85)
         emit_byte(0xC0)
 
@@ -9031,7 +9035,9 @@ fn gen_stmt(uint64 node) {
         uint64 wcond = cond
         gen_expr(wcond)
 
-        // test eax, eax
+        // test rax, rax (64-bit — a condition like `x & (1<<35)` is truthy in
+        // the high bits; a 32-bit test would wrongly read it as false). H8.
+        emit_byte(0x48)
         emit_byte(0x85)
         emit_byte(0xC0)
 
