@@ -1394,6 +1394,13 @@ fn main() {
     u64 r = match x { 1 => 7  _ => 9 }
     exit(r)
 }' "float scrutinee"
+# H10: `continue` inside a `for` body is rejected (would hang) — was an
+# infinite loop on all backends.
+diag_span_test "diag_continue_in_for" 'fn main() {
+    u64 s = 0
+    for i in 0..5 { if i == 2 { continue } s = s + 1 }
+    exit(s)
+}' "continue"
 
 # C2 regression: `let` must be resolved on EVERY fat-binary slice, not just the
 # first. A signed `let` mis-resolved on a non-first slice flips the comparison.
@@ -1524,6 +1531,12 @@ run_test "continue_in_match_while" 'fn main(){ u64 i=0
     u64 s=0
     while i<10 { i=i+1; match i { 3 => { continue } _ => {} } s=s+1 }
     exit(s) }' 9
+# H10: `continue` in a while loop works (regression); in a for loop it would
+# skip the desugared increment and hang, so it is rejected (diag below).
+run_test "continue_in_while" 'fn main(){ u64 i=0
+    u64 s=0
+    while i<5 { i=i+1; if i==3 { continue } s=s+1 }
+    exit(s) }' 4
 run_test "break_outside_loop_noop" 'fn main(){ break
     exit(5) }' 5
 

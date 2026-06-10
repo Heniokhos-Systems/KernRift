@@ -151,6 +151,49 @@ fn parser_init(uint64 tokens, uint64 count_val) {
 // Expression parsing (Pratt-style precedence climbing)
 // ---------------------------------------------------------------------------
 
+// Does `node` contain a `continue` (kind 18) that belongs to the CURRENT loop —
+// i.e. reachable without crossing an inner loop boundary (While, kind 14, which
+// `for`/`loop` also desugar to)? Recurses through blocks, ifs, match arms and
+// defer bodies, but stops at any nested While. Used to reject `continue` inside
+// a `for` body, which the current desugar would turn into an infinite loop
+// (continue jumps to the condition, skipping the appended increment). (H10)
+fn for_body_has_continue(uint64 node) -> uint64 {
+    if node == 0 { return 0 }
+    uint32 k = ast_kind(node)
+    uint64 wk = k
+    if wk == 18 { return 1 }                 // Continue
+    if wk == 14 { return 0 }                 // While/loop — inner loop boundary
+    if wk == 15 {                            // Block: walk children
+        uint32 ch = ast_child(node)
+        uint64 wch = ch
+        while wch != 0 {
+            if for_body_has_continue(wch) != 0 { return 1 }
+            uint32 nx = ast_next(wch)
+            wch = nx
+        }
+        return 0
+    }
+    if wk == 13 {                            // If: then=data1, else=data2
+        if for_body_has_continue(ast_data1(node)) != 0 { return 1 }
+        if for_body_has_continue(ast_data2(node)) != 0 { return 1 }
+        return 0
+    }
+    if wk == 19 {                            // Match: arm bodies in data2
+        uint32 arm = ast_data1(node)
+        uint64 wa = arm
+        while wa != 0 {
+            if ast_kind(wa) == 20 {
+                if for_body_has_continue(ast_data2(wa)) != 0 { return 1 }
+            }
+            uint32 an = ast_next(wa)
+            wa = an
+        }
+        return 0
+    }
+    if wk == 51 { return for_body_has_continue(ast_data1(node)) }   // Defer
+    return 0
+}
+
 fn parse_primary() -> uint64 {
     uint32 kind = cur_kind()
 
@@ -1091,6 +1134,14 @@ fn parse_stmt() -> uint64 {
         }
         uint64 end_expr = parse_expr()
         uint64 body_block = parse_block()
+
+        // `continue` inside a `for` body would skip the desugared increment and
+        // loop forever, so reject it with a clear error rather than hang (H10).
+        // (A while-loop with a manual counter is the workaround until the for
+        // desugar grows a proper continue latch.)
+        if for_body_has_continue(body_block) != 0 {
+            diag_fatal_at(for_tok, "`continue` inside a `for` loop is not supported (it would skip the increment and loop forever); use a `while` loop with a manual counter")
+        }
 
         // Repurpose dot tokens for desugared AST:
         //   dot_tok  → '<' or '<=' operator token for the comparison
