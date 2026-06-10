@@ -2205,13 +2205,19 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
     // and stash it in the AST. Runs unconditionally (the backends require a
     // concrete type for each `let`), independent of type-checking.
     resolve_inferred_types(root)
+    uint64 pre_tc_errs = diag_error_count
     if check_types_enabled != 0 {
         tc_check_module(root)
     }
+    // Type-checker errors are fatal (issue #101). The struct/slice/`.len`
+    // false positives that previously forced this pass to be advisory-only
+    // are fixed, so a tc error now aborts the build like any other.
+    uint64 tc_errs = diag_error_count - pre_tc_errs
     diag_report_all()
-    if sema_errs != 0 {
+    uint64 total_errs = sema_errs + tc_errs
+    if total_errs != 0 {
         uint8[24] ebuf
-        uint64 elen = fmt_uint(ebuf, sema_errs)
+        uint64 elen = fmt_uint(ebuf, total_errs)
         write(2, ebuf, elen)
         write(2, " error(s) found\n", 16)
         exit(1)
@@ -3011,13 +3017,18 @@ fn compile_fat(uint64 input_path, uint64 output_path) {
     // and stash it in the AST. Runs unconditionally (the backends require a
     // concrete type for each `let`), independent of type-checking.
     resolve_inferred_types(root)
+    uint64 pre_tc_errs = diag_error_count
     if check_types_enabled != 0 {
         tc_check_module(root)
     }
+    // Type-checker errors are fatal (issue #101) — see the matching comment
+    // in the primary compile path above.
+    uint64 tc_errs = diag_error_count - pre_tc_errs
     diag_report_all()
-    if sema_errs != 0 {
+    uint64 total_errs = sema_errs + tc_errs
+    if total_errs != 0 {
         uint8[24] ebuf2
-        uint64 elen2 = fmt_uint(ebuf2, sema_errs)
+        uint64 elen2 = fmt_uint(ebuf2, total_errs)
         write(2, ebuf2, elen2)
         write(2, " error(s) found\n", 16)
         exit(1)

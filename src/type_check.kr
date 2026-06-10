@@ -326,10 +326,11 @@ fn tc_check_expr(uint64 node) {
                     if expected != 0 && actual != 0 && actual != 0xFFFFFFFF {
                         uint64 e_struct = tc_is_struct_kind(expected)
                         uint64 a_struct = tc_is_struct_kind(actual)
-                        if e_struct != a_struct {
-                            uint32 atok = ast_tok(wai)
-                            diag_emit_str(atok, 0, "argument struct/non-struct mismatch")
-                        } else if e_struct != 0 && expected != actual {
+                        // KernRift treats a struct-typed slot as a typed
+                        // pointer, so passing a raw pointer/u64 where a struct
+                        // is expected (and vice-versa) is legal. Only two
+                        // *different* struct types genuinely clash (#101).
+                        if e_struct != 0 && a_struct != 0 && expected != actual {
                             uint32 atok = ast_tok(wai)
                             diag_emit_str(atok, 0, "argument struct kind does not match parameter type")
                         }
@@ -359,11 +360,18 @@ fn tc_check_expr(uint64 node) {
                 diag_emit_str(ot, 0, "arithmetic operator on struct value")
             }
         }
-        // ---- B6: compare-on-struct (Phase 2, warning) ----
+        // ---- B6: ordering-comparison-on-struct ----
+        // Struct `==` / `!=` is supported (the backends emit field-by-field
+        // equality), so only ORDERING comparisons (`<`, `<=`, `>`, `>=`) on a
+        // struct value are meaningless. == is token kind 35, != is 36.
         if wkind == 38 {
-            if tc_is_struct_kind(lk) != 0 || tc_is_struct_kind(rk) != 0 {
-                uint32 ot = ast_tok(node)
-                diag_emit_str(ot, 0, "comparison with struct value (use field-by-field comparison)")
+            uint32 op_tok = ast_data1(node)
+            uint64 opk = tok_kind_at_raw(op_tok)
+            if opk != 35 && opk != 36 {
+                if tc_is_struct_kind(lk) != 0 || tc_is_struct_kind(rk) != 0 {
+                    uint32 ot = ast_tok(node)
+                    diag_emit_str(ot, 0, "ordering comparison on struct value (compare fields individually)")
+                }
             }
         }
         // ---- A5: void-fn-used-as-value (Phase 2, warning) ----
@@ -457,9 +465,22 @@ fn tc_check_expr(uint64 node) {
     if wkind == 36 {
         uint32 recv = ast_child(node)
         if recv != 0 { tc_check_expr(recv) }
+        // `.len` is a built-in pseudo-field on slices and arrays (`xs.len`),
+        // not a struct field — never a type error regardless of receiver.
+        uint32 fname0 = ast_data2(node)
+        uint64 wfname0 = fname0
+        if tok_matches(wfname0, "len", 3) != 0 { return }
         uint64 rk = tc_expr_kind(recv)
+        // The element type of an indexed expression isn't tracked, so
+        // tc_expr_kind(Index) is only a u64 guess. Don't accuse a struct-
+        // array element (`ps[i].field`) of being a non-struct value.
+        uint64 recv_is_index = 0
+        if recv != 0 {
+            uint32 recv_k = ast_kind(recv)
+            if recv_k == 37 { recv_is_index = 1 }
+        }
         // ---- A4: struct-field-of-non-struct ----
-        if rk != 0 && rk != 0xFFFFFFFF && tc_is_struct_kind(rk) == 0 {
+        if rk != 0 && rk != 0xFFFFFFFF && tc_is_struct_kind(rk) == 0 && recv_is_index == 0 {
             uint32 ft = ast_tok(node)
             diag_emit_str(ft, 0, "field access on non-struct value")
         }
@@ -476,11 +497,11 @@ fn tc_check_expr(uint64 node) {
         return
     }
 
-    // Index (37): child=array_expr, data1=index_expr.
+    // Index (37): data1=array_name_tok (a plain token, not an expr),
+    // child=index_expr. Only the index expression needs checking; reading
+    // data1 as a node used to recurse into a token index as if it were AST.
     if wkind == 37 {
-        uint32 arr = ast_child(node)
-        if arr != 0 { tc_check_expr(arr) }
-        uint32 idx = ast_data1(node)
+        uint32 idx = ast_child(node)
         if idx != 0 { tc_check_expr(idx) }
         return
     }
@@ -547,10 +568,10 @@ fn tc_check_stmt(uint64 node) {
             if ik != 0 && ik != 0xFFFFFFFF {
                 uint64 lhs_struct = tc_is_struct_kind(tk)
                 uint64 rhs_struct = tc_is_struct_kind(ik)
-                if lhs_struct != rhs_struct {
-                    uint32 it = ast_tok(node)
-                    diag_emit_str(it, 0, "initializer struct/non-struct mismatch")
-                } else if lhs_struct != 0 && rhs_struct != 0 && tk != ik {
+                // A struct-typed local may hold a struct of the same type OR
+                // a raw pointer (`P p = alloc(16)`), so a struct/non-struct
+                // mix is fine. Only two different struct types clash (#101).
+                if lhs_struct != 0 && rhs_struct != 0 && tk != ik {
                     uint32 it = ast_tok(node)
                     diag_emit_str(it, 0, "initializer struct kind does not match declared type")
                 }
@@ -577,10 +598,9 @@ fn tc_check_stmt(uint64 node) {
         if lk != 0 && rk != 0 && rk != 0xFFFFFFFF {
             uint64 lhs_struct = tc_is_struct_kind(lk)
             uint64 rhs_struct = tc_is_struct_kind(rk)
-            if lhs_struct != rhs_struct {
-                uint32 atok = ast_tok(node)
-                diag_emit_str(atok, 0, "assignment struct/non-struct mismatch")
-            } else if lhs_struct != 0 && rhs_struct != 0 && lk != rk {
+            // struct-typed slot ↔ raw pointer is legal (`cur = cur.next`);
+            // only two different struct types clash (#101).
+            if lhs_struct != 0 && rhs_struct != 0 && lk != rk {
                 uint32 atok = ast_tok(node)
                 diag_emit_str(atok, 0, "assignment struct kind does not match")
             }
@@ -617,10 +637,9 @@ fn tc_check_stmt(uint64 node) {
                 if rk != 0 && rk != 0xFFFFFFFF {
                     uint64 lhs_struct = tc_is_struct_kind(tc_current_ret_kind)
                     uint64 rhs_struct = tc_is_struct_kind(rk)
-                    if lhs_struct != rhs_struct {
-                        uint32 rt = ast_tok(node)
-                        diag_emit_str(rt, 0, "return value struct/non-struct mismatch")
-                    } else if lhs_struct != 0 && tc_current_ret_kind != rk {
+                    // struct return slot ↔ raw pointer is legal; only two
+                    // different struct types clash (#101).
+                    if lhs_struct != 0 && rhs_struct != 0 && tc_current_ret_kind != rk {
                         uint32 rt = ast_tok(node)
                         diag_emit_str(rt, 0, "return value struct kind does not match declared type")
                     }
@@ -710,10 +729,9 @@ fn tc_check_stmt(uint64 node) {
                                 && sk != 0 && sk != 0xFFFFFFFF {
                             uint64 s_struct = tc_is_struct_kind(sk)
                             uint64 p_struct = tc_is_struct_kind(pkk)
-                            if s_struct != p_struct {
-                                uint32 pt = ast_tok(wpat)
-                                diag_emit_str(pt, 0, "match-arm pattern struct/non-struct mismatch")
-                            } else if s_struct != 0 && sk != pkk {
+                            // struct scrutinee ↔ raw pointer pattern is legal;
+                            // only two different struct types clash (#101).
+                            if s_struct != 0 && p_struct != 0 && sk != pkk {
                                 uint32 pt = ast_tok(wpat)
                                 diag_emit_str(pt, 0, "match-arm pattern struct kind does not match scrutinee")
                             }

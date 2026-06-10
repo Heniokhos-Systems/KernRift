@@ -1448,6 +1448,23 @@ diag_span_test "diag_match_arm_no_return" 'fn classify(u64 x) -> u64 {
 }
 fn main() { exit(classify(5)) }' "may not return"
 
+# #101: type-checker errors are now fatal. A genuine struct-on-non-struct
+# field access must abort the build...
+diag_span_test "tc_fatal_field_on_int" 'fn main() {
+    u64 n = 5
+    exit(n.x)
+}' "field access on non-struct"
+# ...while the previously-false-positive forms must still compile cleanly.
+run_test "tc_slice_len_ok" 'fn total([u8] xs) -> u64 { u64 s = 0
+    u64 i = 0
+    while i < xs.len { s = s + xs[i] i = i + 1 } return s }
+fn main() { exit(0) }' "0"
+run_test "tc_struct_array_field_ok" 'struct P { u64 x u64 y }
+fn main() { P[3] ps
+    ps[0].x = 4
+    ps[1].x = 2
+    exit(ps[0].x + ps[1].x) }' "6"
+
 # M13: `krc check` runs the real semantic checks (was a no-op that ran only
 # the inert annotation/effect/lock passes and reported OK for everything).
 TOTAL=$((TOTAL + 1))
