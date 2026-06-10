@@ -1,0 +1,5 @@
+# Fuzzer regression database.
+#
+# run.sh records every miscompile witness (.kr + .expected) here and
+# replays them on every future fuzz run, so a fixed bug never re-slips.
+# This .gitkeep keeps the directory tracked even when empty.

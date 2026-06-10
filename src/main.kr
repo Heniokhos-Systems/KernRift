@@ -4447,7 +4447,7 @@ fn main() {
                 exit(0)
             } else if str_starts_with(arg, "--version", 9) != 0 {
                 uint64 msg = "krc 2.8.25 (KernRift self-hosted compiler)\n"
-                write(1, msg, 42)
+                write(1, msg, str_len(msg))
                 exit(0)
             } else if str_starts_with(arg, "--freestanding", 14) != 0 {
                 freestanding = 1
@@ -4663,8 +4663,18 @@ fn main() {
         // the detailed diagnostics.
         uint64 errors = run_analysis(root)
         uint64 sema_errs = run_semantic_checks(root, source, my_tokens)
+        // Mirror the compile path: resolve inferred `let` types, then run the
+        // (now-fatal) type checker, so `krc check` — and the VS Code LSP that
+        // shells out to it — surface the same struct-field / return-type /
+        // call-arg type errors a real build would, not just the sema checks.
+        resolve_inferred_types(root)
+        uint64 pre_tc = diag_error_count
+        if check_types_enabled != 0 {
+            tc_check_module(root)
+        }
+        uint64 tc_errs = diag_error_count - pre_tc
         diag_report_all()
-        errors = errors + sema_errs
+        errors = errors + sema_errs + tc_errs
         if errors > 0 {
             uint8[32] nb
             write(2, "\nkrc: ", 6)

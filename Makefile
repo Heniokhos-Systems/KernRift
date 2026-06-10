@@ -96,6 +96,14 @@ check: build/krc2 bootstrap test
 	 cap=524288; pct=$$(( toks * 100 / cap )); \
 	 echo "self-compile: $$toks / $$cap tokens ($$pct%)"; \
 	 if [ "$$pct" -ge 80 ]; then echo "FAIL: token cap >80% — raise max_tok"; exit 1; fi
+	@echo "=== Self-host warning invariant (no spurious used-before-init) ==="
+	@uninit=$$(./build/krc2 --arch=x86_64 build/krc.kr -o /dev/null 2>&1 | grep -c "used before initialization" || true); \
+	 echo "used-before-init warnings on self-compile: $$uninit"; \
+	 if [ "$$uninit" -ne 0 ]; then echo "FAIL: spurious used-before-init warnings — a working compiler never reads an uninitialized local"; exit 1; fi
+	@echo "=== Differential fuzz (deterministic seed, 20 programs + regressions) ==="
+	@if command -v python3 >/dev/null 2>&1; then \
+		KRC=./build/krc2 FUZZ_COUNT=20 bash tests/fuzz/run.sh; \
+	else echo "  (skipped: python3 not found)"; fi
 	@echo "=== check: all gates passed ==="
 
 # Verify bootstrap convergence

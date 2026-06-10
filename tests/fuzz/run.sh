@@ -52,6 +52,9 @@ record_regression() {
     local src_kr="$1"
     local src_exp="$2"
     local base="$(basename "$src_kr" .kr)"
+    # Ensure the regression DB exists — otherwise this cp fails exactly when
+    # the fuzzer finds its first witness, losing the very case we need.
+    mkdir -p "$DIR/regressions"
     local dst="$DIR/regressions/seed${FUZZ_SEED}_${base}"
     cp "$src_kr" "${dst}.kr"
     cp "$src_exp" "${dst}.expected"

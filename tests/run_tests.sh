@@ -1483,6 +1483,17 @@ else
     echo "FAIL: krc_check_passes_clean (should report OK)"; FAIL=$((FAIL + 1))
 fi
 rm -f /tmp/krc_chkok_$$.kr
+# `krc check` now also runs the type checker (resolve_inferred_types +
+# tc_check_module), so the LSP surfaces type errors. A struct-type mismatch
+# must be reported by check mode, not just full compilation.
+TOTAL=$((TOTAL + 1))
+printf 'struct P{u64 x}\nstruct Q{u64 y}\nfn main(){ P p\n Q q = p\n exit(0) }\n' > /tmp/krc_chktc_$$.kr
+if $KRC check /tmp/krc_chktc_$$.kr >/dev/null 2>&1; then
+    echo "FAIL: krc_check_runs_typechecker (should report struct-type mismatch)"; FAIL=$((FAIL + 1))
+else
+    PASS=$((PASS + 1))
+fi
+rm -f /tmp/krc_chktc_$$.kr
 
 # C2 regression: `let` must be resolved on EVERY fat-binary slice, not just the
 # first. A signed `let` mis-resolved on a non-first slice flips the comparison.

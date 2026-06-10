@@ -1523,8 +1523,20 @@ fn sema_check_stmt(uint64 node) {
         uint64 wvd_name = vd_name_tok
         if wvd_name != 0 {
             sema_var_declare(wvd_name, decl_type_kind, 0)
-            if winit != 0 && sema_var_count_v > 0 {
-                sema_var_mark_init(sema_var_count_v - 1)
+            // Mark initialized if it has an initializer, OR if it is an
+            // address-valued aggregate — an array (size in data3) or a struct
+            // (marker in data4). The bare name of such a variable evaluates
+            // to its stack address, so `fmt_uint(buf, n)` hands over a pointer
+            // to write into; it is not an uninitialized READ. Without this,
+            // every `uint8[N] buf` passed to a function warned spuriously.
+            uint32 vd_arr = ast_data3(node)
+            uint32 vd_struct = ast_data4(node)
+            uint64 wvd_arr = vd_arr
+            uint64 wvd_struct = vd_struct
+            if sema_var_count_v > 0 {
+                if winit != 0 || wvd_arr != 0 || wvd_struct != 0 {
+                    sema_var_mark_init(sema_var_count_v - 1)
+                }
             }
         }
         return
