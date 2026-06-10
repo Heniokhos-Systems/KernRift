@@ -1394,13 +1394,45 @@ fn main() {
     u64 r = match x { 1 => 7  _ => 9 }
     exit(r)
 }' "float scrutinee"
-# H10: `continue` inside a `for` body is rejected (would hang) — was an
-# infinite loop on all backends.
-diag_span_test "diag_continue_in_for" 'fn main() {
+# H10 (lifted): `continue` inside a `for` body now runs the desugared
+# increment then re-tests the condition (the parser rewrites each continue
+# into { i = i + 1; continue }). The sums prove the increment still ran —
+# a regression here would hang, which is the bug H10 originally guarded.
+run_test "for_continue_skip" 'fn main() {
     u64 s = 0
-    for i in 0..5 { if i == 2 { continue } s = s + 1 }
+    for i in 0..10 { if i == 3 { continue } s = s + i }
     exit(s)
-}' "continue"
+}' 42
+run_test "for_continue_inclusive" 'fn main() {
+    u64 s = 0
+    for i in 1..=5 { if i == 2 { continue } s = s + i }
+    exit(s)
+}' 13
+run_test "for_continue_nested" 'fn main() {
+    u64 s = 0
+    for i in 0..3 {
+        for j in 0..4 {
+            if j == 1 { continue }
+            s = s + j
+        }
+        if i == 1 { continue }
+        s = s + 10
+    }
+    exit(s)
+}' 35
+run_test "for_continue_in_match" 'fn main() {
+    u64 s = 0
+    for i in 0..6 {
+        match i { 2, 4 => { continue } _ => {} }
+        s = s + i
+    }
+    exit(s)
+}' 9
+run_test "for_continue_dead_tail" 'fn main() {
+    u64 s = 0
+    for i in 0..5 { if i < 9 { continue; s = s + 100 } s = s + 1 }
+    exit(s)
+}' 0
 
 # ---- Batch 12 (M10/M11/M12) ----
 # M10: enum initializers accept 0x-hex (were parsed base-10 digit-by-digit,
@@ -1758,6 +1790,19 @@ fn main(){ show(123456789); exit(7) }' 7
 run_test_legacy "break_in_match_while_legacy" 'fn main(){ u64 i=0
     while i<10 { match i { 3 => { break } _ => {} } i=i+1 }
     exit(i) }' 3
+# H10 lifted: for+continue parity on the legacy backend (IR path covered
+# above) — continue must run the desugared increment then re-test the cond.
+run_test_legacy "for_continue_legacy" 'fn main(){ u64 s=0
+    for i in 0..10 { if i == 3 { continue } s = s + i }
+    exit(s) }' 42
+run_test_legacy "for_continue_nested_legacy" 'fn main(){ u64 s=0
+    for i in 0..3 { for j in 0..4 { if j == 1 { continue } s = s + j }
+        if i == 1 { continue }
+        s = s + 10 }
+    exit(s) }' 35
+run_test_legacy "for_continue_match_legacy" 'fn main(){ u64 s=0
+    for i in 0..6 { match i { 2, 4 => { continue } _ => {} } s = s + i }
+    exit(s) }' 9
 run_test_legacy "break_outside_loop_legacy" 'fn main(){ break
     exit(5) }' 5
 run_test_legacy "fstring_in_returning_fn_legacy" 'fn show(u64 n){ print_str(f"value is {n} plus padding text to overflow saved regs") }

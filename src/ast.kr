@@ -146,6 +146,15 @@ fn ast_kind(uint64 idx) -> uint32 {
     return val
 }
 
+// Rewrite a node's kind in place. Used by the parser's for-desugar to turn
+// a Continue node into a Block { i = i + 1; continue } without needing a
+// parent back-pointer (the node's child/next links stay valid).
+@export
+fn ast_set_kind(uint64 idx, uint32 kind) {
+    uint64 p = node_base(idx)
+    unsafe { *(p as uint32) = kind }
+}
+
 @export
 fn ast_set_data1(uint64 idx, uint32 val) {
     uint64 p = node_base(idx) + 4

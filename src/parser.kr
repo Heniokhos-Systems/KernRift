@@ -155,47 +155,68 @@ fn parser_init(uint64 tokens, uint64 count_val) {
 // Expression parsing (Pratt-style precedence climbing)
 // ---------------------------------------------------------------------------
 
-// Does `node` contain a `continue` (kind 18) that belongs to the CURRENT loop —
-// i.e. reachable without crossing an inner loop boundary (While, kind 14, which
-// `for`/`loop` also desugar to)? Recurses through blocks, ifs, match arms and
-// defer bodies, but stops at any nested While. Used to reject `continue` inside
-// a `for` body, which the current desugar would turn into an infinite loop
-// (continue jumps to the condition, skipping the appended increment). (H10)
-fn for_body_has_continue(uint64 node) -> uint64 {
-    if node == 0 { return 0 }
+// Rewrite every `continue` (kind 18) that belongs to the CURRENT loop —
+// i.e. reachable without crossing an inner loop boundary (While, kind 14,
+// which `for`/`loop` also desugar to) — into a synthetic
+//   Block { IDENT = IDENT + 1; continue }
+// so a `continue` in a desugared `for` still runs the increment before
+// re-testing the condition. Recurses through blocks, ifs, match arms and
+// defer bodies, but stops at any nested While (inner loops own their own
+// continues; inner `for`s were already rewritten when they desugared).
+// The increment expression subtree (`inc_add`) is SHARED by every rewritten
+// site and by the loop-tail increment: expression nodes are referenced only
+// via child/data2 (their `next` field is never used), so sharing is safe.
+// Each site gets its OWN Assign + Continue nodes because statement siblings
+// link through `next`. Mutating the Continue node in place (kind 18 -> 15)
+// needs no parent pointer and keeps the original `next` chain intact, so
+// (dead) statements after the continue still compile as before. (H10)
+fn for_rewrite_continues(uint64 node, uint64 iter_name_tok, uint64 inc_add) {
+    if node == 0 { return }
     uint32 k = ast_kind(node)
     uint64 wk = k
-    if wk == 18 { return 1 }                 // Continue
-    if wk == 14 { return 0 }                 // While/loop — inner loop boundary
+    if wk == 18 {                            // Continue -> Block { inc; continue }
+        uint64 site_assign = ast_alloc(AstKind.Assign)
+        uint32 it32 = iter_name_tok
+        ast_set_data1(site_assign, it32)
+        uint32 ia32 = inc_add
+        ast_set_child(site_assign, ia32)
+        uint64 new_cont = ast_alloc(AstKind.Continue)
+        uint32 nc32 = new_cont
+        ast_set_next(site_assign, nc32)
+        ast_set_kind(node, 15)               // becomes a Block
+        uint32 sa32 = site_assign
+        ast_set_child(node, sa32)
+        return
+    }
+    if wk == 14 { return }                   // While/loop — inner loop boundary
     if wk == 15 {                            // Block: walk children
         uint32 ch = ast_child(node)
         uint64 wch = ch
         while wch != 0 {
-            if for_body_has_continue(wch) != 0 { return 1 }
+            for_rewrite_continues(wch, iter_name_tok, inc_add)
             uint32 nx = ast_next(wch)
             wch = nx
         }
-        return 0
+        return
     }
     if wk == 13 {                            // If: then=data1, else=data2
-        if for_body_has_continue(ast_data1(node)) != 0 { return 1 }
-        if for_body_has_continue(ast_data2(node)) != 0 { return 1 }
-        return 0
+        for_rewrite_continues(ast_data1(node), iter_name_tok, inc_add)
+        for_rewrite_continues(ast_data2(node), iter_name_tok, inc_add)
+        return
     }
     if wk == 19 {                            // Match: arm bodies in data2
         uint32 arm = ast_data1(node)
         uint64 wa = arm
         while wa != 0 {
             if ast_kind(wa) == 20 {
-                if for_body_has_continue(ast_data2(wa)) != 0 { return 1 }
+                for_rewrite_continues(ast_data2(wa), iter_name_tok, inc_add)
             }
             uint32 an = ast_next(wa)
             wa = an
         }
-        return 0
+        return
     }
-    if wk == 51 { return for_body_has_continue(ast_data1(node)) }   // Defer
-    return 0
+    if wk == 51 { for_rewrite_continues(ast_data1(node), iter_name_tok, inc_add) }   // Defer
 }
 
 fn parse_primary() -> uint64 {
@@ -1146,14 +1167,6 @@ fn parse_stmt() -> uint64 {
         uint64 end_expr = parse_expr()
         uint64 body_block = parse_block()
 
-        // `continue` inside a `for` body would skip the desugared increment and
-        // loop forever, so reject it with a clear error rather than hang (H10).
-        // (A while-loop with a manual counter is the workaround until the for
-        // desugar grows a proper continue latch.)
-        if for_body_has_continue(body_block) != 0 {
-            diag_fatal_at(for_tok, "`continue` inside a `for` loop is not supported (it would skip the increment and loop forever); use a `while` loop with a manual counter")
-        }
-
         // Repurpose dot tokens for desugared AST:
         //   dot_tok  → '<' or '<=' operator token for the comparison
         //   dot2_tok → '+' operator token for the increment
@@ -1226,6 +1239,13 @@ fn parse_stmt() -> uint64 {
         ast_set_child(inc_add, inci)
         uint32 ol = one_lit
         ast_set_data2(inc_add, ol)
+
+        // Rewrite every `continue` belonging to THIS loop into
+        // Block { IDENT = IDENT + 1; continue } so it still runs the
+        // increment before re-testing the condition. Must run BEFORE the
+        // loop-tail increment is appended to body_block below. (H10 lifted)
+        for_rewrite_continues(body_block, iter_tok, inc_add)
+
         uint64 inc_assign = ast_alloc(AstKind.Assign)
         ast_set_data1(inc_assign, tt)
         uint32 ia = inc_add

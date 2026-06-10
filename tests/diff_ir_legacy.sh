@@ -85,6 +85,7 @@ diff_case "elseif3"  'fn f(u64 x)->u64{if x>90{return 5}else if x>80{return 4}el
 fn main(){exit(f(75))}'
 diff_case "while_sum" 'fn main(){u64 i=0; u64 s=0; while i<10{s=s+i; i=i+1} exit(s)}'
 diff_case "for_sum"  'fn main(){u64 s=0; for i in 0..5{s=s+i} exit(s)}'
+diff_case "for_continue" 'fn main(){u64 s=0; for i in 0..10{ if i==3 { continue } s=s+i} exit(s)}'
 diff_case "break"    'fn main(){u64 i=0; while i<100{if i==7{break} i=i+1} exit(i)}'
 diff_case "continue" 'fn main(){u64 s=0; u64 i=0; while i<10{i=i+1; if i==3{continue} s=s+1} exit(s)}'
 diff_case "nested_if" 'fn main(){u64 x=8; if x>5{if x<10{exit(2)}} exit(0)}'
