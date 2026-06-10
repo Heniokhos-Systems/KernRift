@@ -1988,10 +1988,11 @@ fn parse_module() -> uint64 {
             // compile-time integer initializer. Only integer literal, hex
             // literal, char literal, and boolean keyword initializers are
             // supported; everything else is skipped (value stays 0).
-            advance_tok()
-            advance_tok()
+            advance_tok()                       // 'const'
+            uint64 ctype_tok = advance_tok()    // TYPE
             uint64 name_tok = expect(1)
             static_declare(name_tok)
+            static_set_kind_last(tok_kind_at(ctype_tok))
             if eat(34) != 0 {
                 // Accept literal initializers, including leading unary - or ~.
                 // Anything else (calls, named constants, expressions) is
@@ -2070,6 +2071,7 @@ fn parse_module() -> uint64 {
                 if wstk == 83 || wstk == 87 { elem_sz = 8 }
                 static_declare_array(name_tok, stsz_val * elem_sz)
                 static_set_elem_size_last(elem_sz)
+                static_set_kind_last(wstk)
                 // Record fkind so index reads propagate f64/f32 type-flow.
                 // KwFloat16=94, KwFloat32=95, KwFloat64=96.
                 if wstk == 96 { static_set_fkind_last(1) }
@@ -2090,6 +2092,7 @@ fn parse_module() -> uint64 {
                 // KwFloat16=94, KwFloat32=95, KwFloat64=96.
                 uint32 stk_s = tok_kind_at(stype_tok)
                 uint64 wstk_s = stk_s
+                static_set_kind_last(wstk_s)
                 if wstk_s == 96 { static_set_fkind_last(1) }
                 else if wstk_s == 95 { static_set_fkind_last(2) }
                 else if wstk_s == 94 { static_set_fkind_last(3) }

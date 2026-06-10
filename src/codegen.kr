@@ -189,6 +189,11 @@ static uint64 static_init_values = 0
 // of emitting integer arithmetic.
 static uint64 static_fkinds = 0
 
+// Per-static full type KIND (lexer kind 80..99) — parallel to static_table.
+// Recorded by the parser at declaration so `let x = some_static` can infer
+// the static's exact type (signedness, float-ness), not just float-ness.
+static uint64 static_kinds = 0
+
 // Local array element size table — records the per-element size of each
 // local `TYPE[N] name` declaration so that index reads/writes can scale the
 // index and use the right load/store width. Without this, u64[N]/u32[N]/
@@ -322,6 +327,7 @@ fn codegen_init(uint64 capacity, uint64 source, uint64 tokens) {
     static_init_values = alloc(1024 * 8)
     static_elem_sizes = alloc(1024 * 4)
     static_fkinds = alloc(1024 * 4)
+    static_kinds = alloc(1024 * 4)
     slice_len_table = alloc(32 * 8)
     device_table = alloc(64 * 16)
     device_field_table = alloc(256 * 16)
@@ -1210,6 +1216,37 @@ fn static_set_fkind_last(uint64 fk) {
     uint64 ep = static_fkinds + idx * 4
     uint32 fk32 = fk
     unsafe { *(ep as uint32) = fk32 }
+}
+
+// Record the full type kind (lexer kind 80..99) of the most recently
+// declared static — called by the parser alongside static_declare.
+@export
+fn static_set_kind_last(uint64 kind) {
+    if static_count == 0 { return }
+    uint64 idx = static_count - 1
+    uint64 ep = static_kinds + idx * 4
+    uint32 k32 = kind
+    unsafe { *(ep as uint32) = k32 }
+}
+
+// Look up the recorded type kind of a static by name_tok (0 if unknown).
+@export
+fn static_kind_of(uint64 name_tok) -> uint64 {
+    uint64 i = 0
+    while i < static_count {
+        uint64 entry = static_table + i * 8
+        uint32 stored_tok = 0
+        unsafe { *(entry as uint32) -> stored_tok }
+        uint64 ws = stored_tok
+        if tok_text_eq(ws, name_tok) != 0 {
+            uint64 ep = static_kinds + i * 4
+            uint32 k = 0
+            unsafe { *(ep as uint32) -> k }
+            return k
+        }
+        i = i + 1
+    }
+    return 0
 }
 
 // Look up the fkind (0/1/2/3) of a static by its name_tok. Returns 0

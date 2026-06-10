@@ -56,6 +56,10 @@ static uint64 tc_current_fn_tok = 0
 static uint64 tc_fn_node_table = 0
 static uint64 tc_fn_node_count = 0
 
+// (Module-level statics/consts resolve via the codegen-side static table —
+// see static_kind_of in codegen.kr. They are registered at parse time, not as
+// AST nodes, so there is nothing to collect here.)
+
 fn tc_fn_node_register(uint64 name_tok, uint64 fn_node) {
     if tc_fn_node_count >= 1024 { return }
     uint64 entry = tc_fn_node_table + tc_fn_node_count * 8
@@ -186,10 +190,13 @@ fn tc_expr_kind(uint64 node) -> uint64 {
     if wkind == 46 { return 96 }
     // StrLit (31): char* / uint64
     if wkind == 31 { return 83 }
-    // Ident (32) — canonical name token is in data1.
+    // Ident (32) — canonical name token is in data1. Locals/params first,
+    // then module-level statics/consts (so `let x = some_global` infers).
     if wkind == 32 {
         uint32 nt = ast_data1(node)
-        return tc_local_lookup(nt)
+        uint64 lk = tc_local_lookup(nt)
+        if lk != 0 { return lk }
+        return static_kind_of(nt)        // module-level static/const
     }
     // Compare (38), LogicalAnd/Or (39, 40)
     if wkind == 38 { return 98 }
@@ -232,7 +239,20 @@ fn tc_expr_kind(uint64 node) -> uint64 {
         // Struct return?
         uint64 sret = fn_ret_struct_lookup(wcallee)
         if sret != 0xFFFFFFFF { return 200 + sret }
-        return 83  // assume uint64 / pointer / default
+        // Integer/bool/char return: consult the function's declared return
+        // type so `let x = neg()` where neg returns i64 infers i64 (signed),
+        // not the unsigned u64 default that flipped comparisons.
+        uint64 fn_node = tc_fn_node_lookup(wcallee)
+        if fn_node != 0 {
+            uint32 ret_tok = ast_data2(fn_node)
+            uint64 wret = ret_tok
+            if wret != 0 {
+                uint64 rk = tc_kind_of_type_tok(ret_tok)
+                if rk >= 80 && rk <= 99 { return rk }
+                if rk >= 200 && rk != 0xFFFFFFFF { return rk }
+            }
+        }
+        return 83  // unknown callee / void: assume uint64 / pointer
     }
     // FieldAccess (36): receiver in child, field-name token in data2.
     if wkind == 36 {
@@ -846,7 +866,13 @@ fn resolve_vardecl_infer(uint64 node) {
             }
         } else if inferred >= 80 && inferred <= 99 {
             ik = inferred
+        } else if wtok != 0 {
+            // Genuinely unresolvable RHS (unknown identifier, void call, …) for
+            // a real `let` — fail loud instead of silently assuming u64, which
+            // would flip signed comparisons / misread floats with no diagnostic.
+            diag_fatal_at(wtok, "`let` cannot infer the type of this expression; use an explicit type")
         }
+        // A desugared for-iterator (wtok == 0) keeps the u64 default.
     }
     tc_local_register(name_tok, ik)
     // Tag real `let`s only; leave for-iterators at data1 == 0 (unchanged).
@@ -905,6 +931,26 @@ fn resolve_stmt_infer(uint64 node) {
             uint32 anx = ast_next(wa)
             wa = anx
         }
+        return
+    }
+    if wk == 44 {                           // TupleDestruct: register both names
+        uint32 t1 = ast_data1(node)
+        uint32 n1 = ast_data2(node)
+        uint32 t2 = ast_data3(node)
+        uint32 n2 = ast_data4(node)
+        tc_local_register(n1, tc_kind_of_type_tok(t1))
+        tc_local_register(n2, tc_kind_of_type_tok(t2))
+        return
+    }
+    if wk == 47 {                           // TupleDestruct3: 3 names (type3 lost by parser)
+        uint32 t1 = ast_data1(node)
+        uint32 n1 = ast_data2(node)
+        uint32 t2 = ast_data3(node)
+        uint32 n2 = ast_data4(node)
+        uint32 n3 = ast_tok(node)
+        tc_local_register(n1, tc_kind_of_type_tok(t1))
+        tc_local_register(n2, tc_kind_of_type_tok(t2))
+        tc_local_register(n3, 83)
         return
     }
 }

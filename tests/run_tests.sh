@@ -1376,6 +1376,11 @@ diag_span_test "diag_let_noinit" 'fn main() {
 }' "let"
 diag_span_test "diag_missing_return" 'fn g() -> u64 { u64 x = 1 }
 fn main() { exit(g()) }' "may not return"
+# H2: a `let` whose RHS type can't be inferred fails loud (was silently u64).
+diag_span_test "diag_let_noinfer" 'fn main() {
+    let x = mystery
+    exit(0)
+}' "infer"
 
 # C2 regression: `let` must be resolved on EVERY fat-binary slice, not just the
 # first. A signed `let` mis-resolved on a non-first slice flips the comparison.
@@ -1476,6 +1481,19 @@ run_test "let_ternary"   'fn main(){ let x = 5 > 3 ? 8 : 9; exit(x) }' 8
 run_test "let_match"     'fn main(){ u64 v=2; let r = match v { 1 => 10  2 => 20  _ => 0 }; exit(r) }' 20
 # Signed inference: i64 RHS → signed local → signed comparison picks the right branch.
 run_test "let_signed"    'fn main(){ i64 a = 0 - 5; let r = a; if r < 0 { exit(9) } exit(0) }' 9
+# H2: inferring from a call to an i64-returning fn must be SIGNED (was silently u64).
+run_test "let_call_signed" 'fn neg() -> i64 { return 0 - 5 }
+fn main(){ let r = neg(); if r < 0 { exit(9) } exit(0) }' 9
+run_test_legacy "let_call_signed_legacy" 'fn neg() -> i64 { return 0 - 5 }
+fn main(){ let r = neg(); if r < 0 { exit(9) } exit(0) }' 9
+# H2: inferring from a signed static/global must be SIGNED.
+run_test "let_static_signed" 'static i64 g = -7
+fn main(){ let r = g
+    if r < 0 { exit(8) }
+    exit(0) }' 8
+# H2: inferring from a const must still work (const has no AST node).
+run_test "let_from_const" 'const i64 K = 5
+fn main(){ let x = K; exit(x) }' 5
 # Float inference: call returning f64 → local treated as f64 (stdout exercises the float path).
 run_test_output "let_float" 'import "std/math_float.kr"
 fn main(){ let x = int_to_f64(3); let y = int_to_f64(2); println_str(fmt_f64(x / y, 1)); exit(0) }' "1.5" 0
