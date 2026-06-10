@@ -4517,13 +4517,16 @@ fn main() {
                 uint64 next_arg = 0
                 unsafe { *(next_ptr as uint64) -> next_arg }
                 lc_min_fitness = parse_uint_arg(next_arg)
-            } else if str_starts_with(arg, "check", 5) != 0 {
+            } else if str_starts_with(arg, "check", 5) != 0 && str_len(arg) == 5 {
                 mode = 1
-            } else if str_starts_with(arg, "lc", 2) != 0 {
+            } else if str_starts_with(arg, "lc", 2) != 0 && str_len(arg) == 2 {
                 mode = 2
-            } else if str_starts_with(arg, "fmt", 3) != 0 {
+            } else if str_starts_with(arg, "fmt", 3) != 0 && str_len(arg) == 3 {
                 mode = 3
             } else {
+                // Subcommands require an EXACT match (above); anything else —
+                // including a filename like `checksum.kr` or `lcd_driver.kr`
+                // that merely shares a prefix — is the input path, not a mode.
                 input_path = arg
             }
             i = i + 1
