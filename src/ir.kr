@@ -9604,7 +9604,45 @@ static uint64 ir_const_known = 0     // vreg -> 1 if constant is known
 // the 64-bit IR.
 static uint64 ir_w32_clean = 0
 
+// Per-vreg def count, capped at 2 (0=undefined, 1=single-def, 2=multi-def).
+// w32-clean is only sound for SINGLE-def vregs: the IR is not strict SSA at
+// if/while/match merges — ir_emit_copy_to_snapshot REDEFINES the snapshot
+// vreg via COPY, so a vreg first defined as a small CONST (w32-clean) can be
+// overwritten with a >32-bit value at the merge while its flag lingers,
+// unsoundly eliding a later `& 0xFFFFFFFF`. Gating every w32-clean SET on
+// single-def excludes exactly those merge targets. (critique C1)
+static uint64 ir_w32_multidef = 0
+
+fn ir_w32_single_def(uint64 v) -> uint64 {
+    if v == 0 { return 0 }
+    if v >= 65536 { return 0 }
+    uint64 mp = ir_w32_multidef + v
+    uint8 mv = 0
+    unsafe { *(mp as uint8) -> mv }
+    if mv == 1 { return 1 }
+    return 0
+}
+
 fn ir_opt_const_fold() {
+    // Recompute the per-vreg def count for this pass (LICM/CSE/rotate between
+    // const-fold runs add fresh single-def vregs at high indices).
+    if ir_w32_multidef == 0 { ir_w32_multidef = alloc(65536) }
+    memset(ir_w32_multidef, 0, 65536)
+    uint64 dscan = 0
+    while dscan < ir_insn_count {
+        uint64 dsop = ir_insn_opcode(dscan)
+        if dsop != 0 {
+            uint64 dsd = ir_insn_dest(dscan)
+            if dsd > 0 && dsd < 65536 {
+                uint64 mp = ir_w32_multidef + dsd
+                uint8 mv = 0
+                unsafe { *(mp as uint8) -> mv }
+                if mv == 0 { uint8 v1 = 1; unsafe { *(mp as uint8) = v1 } }
+                else if mv == 1 { uint8 v2 = 2; unsafe { *(mp as uint8) = v2 } }
+            }
+        }
+        dscan = dscan + 1
+    }
     uint64 ii = 0
     uint64 cur_bb = 0xFFFFFFFF
     while ii < ir_insn_count {
@@ -9633,8 +9671,8 @@ fn ir_opt_const_fold() {
                 uint64 k = ir_const_known + dest
                 uint8 one = 1
                 unsafe { *(k as uint8) = one }
-                // Constants with imm ≤ 0xFFFFFFFF are w32-clean.
-                if imm <= 0xFFFFFFFF {
+                // Constants with imm ≤ 0xFFFFFFFF are w32-clean (single-def only).
+                if imm <= 0xFFFFFFFF && ir_w32_single_def(dest) != 0 {
                     uint64 wp = ir_w32_clean + dest
                     uint8 wone = 1
                     unsafe { *(wp as uint8) = wone }
@@ -9684,7 +9722,7 @@ fn ir_opt_const_fold() {
                 uint64 sp = ir_w32_clean + s1
                 uint8 sv = 0
                 unsafe { *(sp as uint8) -> sv }
-                if sv != 0 {
+                if sv != 0 && ir_w32_single_def(dest) != 0 {
                     uint64 dp = ir_w32_clean + dest
                     uint8 one2 = 1
                     unsafe { *(dp as uint8) = one2 }
@@ -9725,7 +9763,7 @@ fn ir_opt_const_fold() {
             ir_insn_set_src2(ii, 0)
             ir_insn_set_imm(ii, 0)
             // Result is w32-clean (it's a copy of a w32-clean source).
-            if dest > 0 && dest < 65536 {
+            if dest > 0 && dest < 65536 && ir_w32_single_def(dest) != 0 {
                 uint64 dp = ir_w32_clean + dest
                 uint8 one3 = 1
                 unsafe { *(dp as uint8) = one3 }
@@ -10034,7 +10072,7 @@ fn ir_opt_const_fold() {
             // IR_ROR with width=32 emits a 32-bit ROR which auto-zeros
             // the upper 32 bits.
             if op == 137 && imm == 32 { mark = 1 }
-            if mark != 0 {
+            if mark != 0 && ir_w32_single_def(dest) != 0 {
                 uint64 dp = ir_w32_clean + dest
                 uint8 one4 = 1
                 unsafe { *(dp as uint8) = one4 }

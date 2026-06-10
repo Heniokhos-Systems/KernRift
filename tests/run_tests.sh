@@ -1480,6 +1480,14 @@ run_test "let_signed"    'fn main(){ i64 a = 0 - 5; let r = a; if r < 0 { exit(9
 run_test_output "let_float" 'import "std/math_float.kr"
 fn main(){ let x = int_to_f64(3); let y = int_to_f64(2); println_str(fmt_f64(x / y, 1)); exit(0) }' "1.5" 0
 
+# C1 regression: the IR w32-clean optimization must not elide `& 0xFFFFFFFF` on
+# a vreg redefined (>32-bit) at an if/while/match merge — default-opt must match
+# --O0/legacy. Before the fix, default-opt printed 8589934591 (mask elided).
+run_test_output "w32_mask_after_merge" 'fn main() { u64 x = 7
+    if 1 == 1 { x = 0x1FFFFFFFF }
+    println(x & 0xFFFFFFFF)
+    exit(0) }' "4294967295" 0
+
 # Legacy-backend ternary parity (the default IR path handles these above;
 # these compile with --legacy and must produce the SAME results). The legacy
 # x86 path is runnable on this host; legacy arm64 parity is covered in CI.
