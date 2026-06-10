@@ -150,5 +150,5 @@ fn net_addr_ipv4(u64 ip, u64 port) -> u64 {
 
 // Free a sockaddr allocated by net_addr_ipv4
 fn net_addr_free(u64 addr) {
-    dealloc(addr, 16)
+    dealloc(addr)
 }
