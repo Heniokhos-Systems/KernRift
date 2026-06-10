@@ -2803,7 +2803,11 @@ fn ir_lower_expr(uint64 node) -> uint64 {
                             uint32 inc_flag = ast_data3(pat)
                             uint64 lo_v = ir_lower_expr(lo_idx)
                             uint64 ge_v = ir_new_vreg()
-                            ir_emit(IR_CMP_GE, ge_v, scrut_v, lo_v, 0, ir_current_bb)
+                            // Signed scrutinee/bound -> signed range compares,
+                            // else negative bounds never match (critique H5).
+                            uint64 ge_op = IR_CMP_GE
+                            if ir_vreg_signed_get(scrut_v) != 0 || ir_vreg_signed_get(lo_v) != 0 { ge_op = IR_SCMP_GE }
+                            ir_emit(ge_op, ge_v, scrut_v, lo_v, 0, ir_current_bb)
                             uint64 bb_check_hi = ir_new_bb()
                             ir_emit(IR_BR_COND, 0, ge_v, 0, bb_check_hi, ir_current_bb)
                             ir_bb_set_succ(ir_current_bb, bb_on_fail, bb_check_hi)
@@ -2812,6 +2816,9 @@ fn ir_lower_expr(uint64 node) -> uint64 {
                             uint64 cmp_v = ir_new_vreg()
                             uint64 cmp_op = 16
                             if inc_flag != 0 { cmp_op = 17 }
+                            if ir_vreg_signed_get(scrut_v) != 0 || ir_vreg_signed_get(hi_v) != 0 {
+                                if inc_flag != 0 { cmp_op = IR_SCMP_LE } else { cmp_op = IR_SCMP_LT }
+                            }
                             ir_emit(cmp_op, cmp_v, scrut_v, hi_v, 0, ir_current_bb)
                             ir_emit(IR_BR_COND, 0, cmp_v, 0, bb_body, ir_current_bb)
                             ir_bb_set_succ(ir_current_bb, bb_on_fail, bb_body)
@@ -3730,6 +3737,21 @@ fn ir_lower_stmt(uint64 node) {
             if ak == 20 {
                 uint32 val_expr = ast_data1(warm)
                 uint32 body_block = ast_data2(warm)
+                // Restore the variable map to the pre-match snapshot BEFORE
+                // lowering this arm's pattern compares — otherwise they read
+                // vregs left in the map by the PREVIOUS arm's body BB, which
+                // don't dominate this arm's check (critique H4). Patterns are
+                // pure reads, so this single restore also covers the body.
+                mi = 0
+                while mi < match_snap_count {
+                    uint64 ms_h = match_snap + mi * 8
+                    uint64 md_h = ir_var_map + mi * 8
+                    uint64 mv_h = 0
+                    unsafe { *(ms_h as uint64) -> mv_h }
+                    unsafe { *(md_h as uint64) = mv_h }
+                    mi = mi + 1
+                }
+                ir_var_map_count = match_snap_count
                 // Wildcard: Ident named "_" — always matches. Bypass the
                 // compare / BR_COND and just lower the body in place.
                 uint64 is_wild = 0
@@ -3763,7 +3785,11 @@ fn ir_lower_stmt(uint64 node) {
                             uint32 inc_flag = ast_data3(pat)
                             uint64 lo_v = ir_lower_expr(lo_idx)
                             uint64 ge_v = ir_new_vreg()
-                            ir_emit(IR_CMP_GE, ge_v, scrut_v, lo_v, 0, ir_current_bb)
+                            // Signed scrutinee/bound -> signed range compares,
+                            // else negative bounds never match (critique H5).
+                            uint64 ge_op = IR_CMP_GE
+                            if ir_vreg_signed_get(scrut_v) != 0 || ir_vreg_signed_get(lo_v) != 0 { ge_op = IR_SCMP_GE }
+                            ir_emit(ge_op, ge_v, scrut_v, lo_v, 0, ir_current_bb)
                             uint64 bb_check_hi = ir_new_bb()
                             ir_emit(IR_BR_COND, 0, ge_v, 0, bb_check_hi, ir_current_bb)
                             ir_bb_set_succ(ir_current_bb, bb_on_fail, bb_check_hi)
@@ -3772,6 +3798,9 @@ fn ir_lower_stmt(uint64 node) {
                             uint64 cmp_v = ir_new_vreg()
                             uint64 cmp_op = 16              // IR_CMP_LT for .. exclusive
                             if inc_flag != 0 { cmp_op = 17 } // IR_CMP_LE for ..= inclusive
+                            if ir_vreg_signed_get(scrut_v) != 0 || ir_vreg_signed_get(hi_v) != 0 {
+                                if inc_flag != 0 { cmp_op = IR_SCMP_LE } else { cmp_op = IR_SCMP_LT }
+                            }
                             ir_emit(cmp_op, cmp_v, scrut_v, hi_v, 0, ir_current_bb)
                             ir_emit(IR_BR_COND, 0, cmp_v, 0, bb_body, ir_current_bb)
                             ir_bb_set_succ(ir_current_bb, bb_on_fail, bb_body)
@@ -3789,17 +3818,7 @@ fn ir_lower_stmt(uint64 node) {
                     ir_emit(IR_BR, 0, 0, 0, bb_body, ir_current_bb)
                     ir_bb_set_succ(ir_current_bb, bb_body, 0xFFFFFFFF)
                 }
-                // Restore variable map to pre-match state for this arm
-                mi = 0
-                while mi < match_snap_count {
-                    uint64 ms = match_snap + mi * 8
-                    uint64 md = ir_var_map + mi * 8
-                    uint64 mv = 0
-                    unsafe { *(ms as uint64) -> mv }
-                    unsafe { *(md as uint64) = mv }
-                    mi = mi + 1
-                }
-                ir_var_map_count = match_snap_count
+                // (var map already restored at the top of this arm — H4)
                 ir_current_bb = bb_body
                 uint64 wbody = body_block
                 if wbody != 0 { ir_lower_block(wbody) }
@@ -9920,6 +9939,10 @@ fn ir_opt_const_fold() {
             uint64 fits = 0
             if v2 <= 0x7FFFFFFF { fits = 1 }
             if v2 >= 0xFFFFFFFF80000000 { fits = 1 }
+            // SUB negates the displacement (disp = -imm); -(-2^31) = +2^31 does
+            // NOT fit signed-32 and wraps back to -2^31, so `x - (-2^31)` would
+            // miscompile as `x - 2^31`. Exclude it for SUB. (critique M4)
+            if op == 3 && v2 == 0xFFFFFFFF80000000 { fits = 0 }
             if fits != 0 {
                 uint64 new_op = 135      // IR_ADD_IMM
                 if op == 3 { new_op = 136 }  // IR_SUB_IMM
@@ -10109,7 +10132,10 @@ fn ir_opt_is_side_effect(uint64 op) -> uint64 {
     if op == 70 { return 1 }   // ALLOC
     if op == 71 { return 1 }   // DEALLOC
     if op == 72 { return 1 }   // MEMCPY
+    if op == 74 { return 1 }   // FMT_UINT  (writes digits through the buf pointer)
     if op == 76 { return 1 }   // MEMSET
+    if op == 124 { return 1 }  // FMT_BOOL  (writes through the buf pointer)
+    if op == 125 { return 1 }  // FMT_F64   (writes through the buf pointer)
     if op == 78 { return 1 }   // STATIC_STORE
     if op == 80 { return 1 }   // EXTRACT_RDX (must stay adjacent to CALL)
     if op == 81 { return 1 }   // EXTRACT_R8

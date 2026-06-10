@@ -1503,6 +1503,18 @@ fn main(){ let x = K; exit(x) }' 5
 run_test_output "let_float" 'import "std/math_float.kr"
 fn main(){ let x = int_to_f64(3); let y = int_to_f64(2); println_str(fmt_f64(x / y, 1)); exit(0) }' "1.5" 0
 
+# H5: range patterns on a SIGNED scrutinee must use signed compares, else
+# negative bounds never match.
+run_test "match_range_signed" 'fn main(){ i64 x = -5
+    let r = match x { -10..=0 => 7  _ => 0 }
+    exit(r) }' 7
+# M4: SUB of a -2^31 constant must not fuse into an LEA disp32 (negation
+# overflows). x - (-2^31) = x + 2^31.
+run_test_output "sub_neg_2pow31" 'fn main(){ u64 x = 2147483648
+    u64 r = x - (0 - 2147483648)
+    println(r)
+    exit(0) }' "4294967296" 0
+
 # H3: ternary/match-expr result vregs must carry the arm value's type metadata
 # (float-ness, signedness), else float/signed uses of the value are wrong.
 run_test_output "ternary_float_value" 'import "std/math_float.kr"
