@@ -7,8 +7,9 @@ record with fields `{opcode, dest, src1, src2, imm, bb}`. Virtual
 registers (vregs) are numbered from 1; vreg 0 is reserved for "no value"
 (void returns, stores). Basic blocks are numbered from 0.
 
-This reference documents every one of the 93 opcodes as of v2.8.14, so
-that:
+This reference documents the IR opcodes (107 as of v2.8.25; the canonical
+list is the `static uint64 IR_*` definitions at the top of `src/ir.kr`),
+so that:
 - The IR lowering can be validated (does `ast_lower_*` preserve semantics?).
 - Optimizer soundness can be reasoned about per pass (what does DCE assume?).
 - Backend ports can check for coverage (every opcode must be emittable).
@@ -246,6 +247,40 @@ builtins always lower to the signed opcodes.
 
 These back the typed `print` / `println` pipeline added in v2.8.3.
 
+## Memory barriers & cache maintenance (126–130)
+
+ARM64-meaningful; on x86 they lower to the nearest equivalent or a no-op.
+
+| # | Opcode | Semantics |
+|---|--------|-----------|
+| 126 | `IR_ISB` | instruction-sync barrier (ARM64 `ISB`; x86 no-op) |
+| 127 | `IR_DCACHE_FLUSH` | D-cache clean+invalidate by VA (ARM64 `DC CIVAC`; x86 `CLFLUSH`) |
+| 128 | `IR_ICACHE_INV` | I-cache invalidate by VA (ARM64 `IC IVAU`; x86 no-op) |
+| 129 | `IR_DSB` | data-sync barrier (ARM64 `DSB SY`; x86 `MFENCE`) |
+| 130 | `IR_DMB` | data-memory barrier (ARM64 `DMB ISH`; x86 `MFENCE`) |
+
+## Bounds check (131)
+
+| # | Opcode | Semantics |
+|---|--------|-----------|
+| 131 | `IR_ARR_CHECK` | under `--debug`, trap (`exit(1)`) if `src1` (index) `>= imm` (element count); emitted for compile-time-sized array indexing |
+
+## Signed & strength-reduced arithmetic (132–139)
+
+| # | Opcode | Semantics |
+|---|--------|-----------|
+| 132 | `IR_SDIV` | `dest = src1 / src2` signed (`cqo`+`idiv` on x86, `sdiv` on a64) |
+| 133 | `IR_SMOD` | `dest = src1 % src2` signed (`cqo`+`idiv` rdx on x86, `sdiv`+`msub` on a64) |
+| 134 | `IR_SAR` | `dest = src1 >> src2` arithmetic (sign-extending) shift |
+| 135 | `IR_ADD_IMM` | `dest = src1 + imm` (signed i32 immediate) |
+| 136 | `IR_SUB_IMM` | `dest = src1 - imm` |
+| 137 | `IR_ROR` | rotate-right `src1` by `src2` |
+| 138 | `IR_MUL_IMM` | `dest = src1 * imm` |
+| 139 | `IR_LEA_BIS` | `dest = src1 + src2 * imm`, `imm ∈ {1,2,4,8}` (x86 `lea` base+index*scale) |
+
+The signed compare opcodes are 120–123 (see above); bare `IR_DIV`/`IR_MOD`/
+`IR_SHR` (5/6/11) are the unsigned forms.
+
 ## Process / system (113–115, 119)
 
 | # | Opcode | Semantics |
@@ -258,7 +293,7 @@ These back the typed `print` / `println` pipeline added in v2.8.3.
 ## Side-effect set (who survives DCE)
 
 DCE removes instructions whose `dest` is dead UNLESS the opcode is in
-the side-effect set, defined in `src/ir.kr:7849-7860`:
+the side-effect set, defined in `ir_opt_is_side_effect()` (`src/ir.kr`):
 
 ```
 STORE, BR, BR_COND, RET, RET_VOID, CALL, ARG, SYSCALL, ALLOC, DEALLOC,
@@ -279,8 +314,9 @@ later passes benefit from earlier constant propagation.
 | Common subexpression elim | `ir_opt_cse()` | Hashes each pure op by `{opcode, src1, src2, imm}` and collapses duplicates within a basic block. Skips side-effectful ops. |
 | Dead code elim | `ir_opt_dce()` | Forward liveness: an op's dest is live if its uses are live. Two-phase mark (iteration-to-fixed-point). Side-effectful ops are always live. |
 | Branch fold | inline in `ir_opt_run` | Converts `IR_BR_COND src=const` to `IR_BR` to the taken block. Subsequent DCE removes the untaken block. |
+| Loop-invariant code motion | `ir_opt_licm` / `ir_licm_is_hoistable` | Hoists pure ops whose operands are all defined outside the loop into a pre-header (`src/ir.kr` ~3622). |
 
-`-O0` disables `ir_opt_run()` entirely; IR goes straight from lowering
+`--O0` disables `ir_opt_run()` entirely; IR goes straight from lowering
 to regalloc.
 
 ## Register allocator
@@ -301,6 +337,13 @@ Color-to-physical-register map:
 Callee-saved registers are saved/restored in the prologue/epilogue;
 caller-saved registers (rax, rcx, rdx, rsi, rdi, r8–r11 / x0–x18) are
 used as scratch during ops like CALL, SYSCALL, atomic RMW.
+
+**Copy coalescing** (on by default; `--no-coalesce` disables). Before
+coloring, `vN = copy vM` pairs whose live ranges don't interfere are
+merged so the redundant `mov` is never emitted. The Briggs test is the
+conservative gate (refuse if ≥ K neighbours of the merged class would
+have degree ≥ K); George is a less-conservative fallback at K ≥ 8. See
+`ir_coalesce_enabled` / the coalescing loop in `src/ir.kr`.
 
 Spill slot access uses `SP + slot*8` with a fallback to `MOV xN, imm ;
 ADD xN, sp, xN ; LDR` when the offset exceeds the imm12-scaled limit
