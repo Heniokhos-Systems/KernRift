@@ -126,6 +126,10 @@ fn import_is_seen(uint64 path) -> uint64 {
 }
 
 fn import_mark_seen(uint64 path) {
+    if import_seen_count >= 64 {
+        write(2, "error: import_seen overflow (max 64)\n", 37)
+        exit(1)
+    }
     uint64 plen = str_len(path)
     uint64 entry = import_seen + import_seen_count * 256
     uint64 i = 0
@@ -145,6 +149,14 @@ fn import_mark_seen(uint64 path) {
 }
 
 fn import_append(uint64 src, uint64 len, uint64 file_path) {
+    if srcmap_count >= 1024 {
+        write(2, "error: srcmap_table overflow (max 1024)\n", 40)
+        exit(1)
+    }
+    if import_buf_len + len + 1 > import_buf_cap {
+        write(2, "error: import_buf overflow (max 4194304)\n", 41)
+        exit(1)
+    }
     uint64 sm_entry = srcmap_table + srcmap_count * 16
     uint64 sm_off = import_buf_len
     unsafe { *(sm_entry as uint64) = sm_off }

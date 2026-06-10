@@ -896,6 +896,10 @@ fn struct_add_field(uint64 struct_idx, uint64 field_tok, uint64 field_size, uint
     uint32 fc = 0
     unsafe { *(fc_addr as uint32) -> fc }
     uint64 wfc = fc
+    if wfc >= 16 {
+        write(2, "error: struct fields overflow (max 16)\n", 39)
+        exit(1)
+    }
     // Compute field offset = current total_size (uint16 at offset 8)
     uint64 ts_addr = base + 8
     uint16 ts = 0
@@ -918,6 +922,10 @@ fn struct_add_field(uint64 struct_idx, uint64 field_tok, uint64 field_size, uint
     // Update field_count and total_size
     uint32 new_fc = wfc + 1
     unsafe { *(fc_addr as uint32) = new_fc }
+    if wts + field_size > 65535 {
+        write(2, "error: struct size overflow (max 65535)\n", 40)
+        exit(1)
+    }
     uint16 new_ts = wts + field_size
     unsafe { *(ts_addr as uint16) = new_ts }
 }
@@ -4900,6 +4908,10 @@ fn gen_expr(uint64 node) {
                     emit_byte(0x0F); emit_byte(0x84)
                     uint64 je_p = out_len
                     emit_u32_le(0)
+                    if je_count >= 8 {
+                        write(2, "error: je_bodies overflow (max 8)\n", 34)
+                        exit(1)
+                    }
                     uint64 slot = je_bodies + je_count * 8
                     unsafe { *(slot as uint64) = je_p }
                     je_count = je_count + 1
@@ -9212,6 +9224,10 @@ fn gen_stmt(uint64 node) {
                     emit_byte(0x0F); emit_byte(0x84)
                     uint64 je_p = out_len
                     emit_u32_le(0)
+                    if je_count >= 8 {
+                        write(2, "error: je_bodies overflow (max 8)\n", 34)
+                        exit(1)
+                    }
                     uint64 slot = je_bodies + je_count * 8
                     unsafe { *(slot as uint64) = je_p }
                     je_count = je_count + 1

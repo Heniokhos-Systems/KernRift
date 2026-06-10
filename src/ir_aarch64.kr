@@ -832,6 +832,10 @@ fn ir_emit_arm64_insn(uint64 ii) {
             // top of those slots — no SUB/ADD needed. Just STR the
             // arg value at [SP + (imm-8)*8].
             uint64 oi = imm - 8
+            if oi >= 16 {
+                write(2, "error: a64 overflow args overflow (max 16)\n", 43)
+                exit(1)
+            }
             if oi < 16 {
                 uint64 src_reg = ir_a64_resolve_src(s1_v, 9)
                 ir_a64_str_sp(src_reg, oi * 8)
@@ -848,6 +852,10 @@ fn ir_emit_arm64_insn(uint64 ii) {
         uint64 call_patch = out_len
         emit_a64(0x94000000)    // BL #0 (placeholder)
         // Record fixup: imm holds the callee token
+        if fixup_count >= 32768 {
+            write(2, "error: fixup_table overflow (max 32768)\n", 40)
+            exit(1)
+        }
         uint64 fentry = fixup_table + fixup_count * 8
         uint32 fo = call_patch
         unsafe { *(fentry as uint32) = fo }
@@ -1297,6 +1305,10 @@ fn ir_emit_arm64_insn(uint64 ii) {
     // ----- IR_FN_ADDR (86) -----
     if op == 86 {
         // ADRP + ADD, patched by fnaddr fixup resolver
+        if fnaddr_fixup_count >= 1024 {
+            write(2, "error: fnaddr_fixup_table overflow (max 1024)\n", 46)
+            exit(1)
+        }
         if fnaddr_fixup_count < 1024 {
             uint64 fentry_fa = fnaddr_fixup_table + fnaddr_fixup_count * 8
             uint32 fa_off = out_len

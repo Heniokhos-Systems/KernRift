@@ -1901,6 +1901,10 @@ fn gen_expr_a64(uint64 node) {
                     emit_a64_cmp(0, 9)
                     uint64 beq_p = out_len
                     emit_a64(0x54000000)   // B.EQ +0 (patched)
+                    if beq_count >= 8 {
+                        write(2, "error: beq_patches overflow (max 8)\n", 36)
+                        exit(1)
+                    }
                     uint64 slot = beq_patches + beq_count * 8
                     unsafe { *(slot as uint64) = beq_p }
                     beq_count = beq_count + 1
@@ -1924,6 +1928,10 @@ fn gen_expr_a64(uint64 node) {
             uint32 body_idx = ast_data2(warm)
             uint64 wbody = body_idx
             gen_expr_a64(wbody)
+            if match_end_fixup_count >= 256 {
+                write(2, "error: match_end_fixups overflow (max 256)\n", 43)
+                exit(1)
+            }
             uint64 end_patch = out_len
             emit_a64(0x14000000)  // B +0 (patched)
             uint64 bf = match_end_fixups + match_end_fixup_count * 4
@@ -2754,6 +2762,10 @@ fn gen_expr_a64(uint64 node) {
             emit_a64(0x90000000)  // ADRP x0, #0 (placeholder)
             emit_a64(0x91000000)  // ADD x0, x0, #0 (placeholder)
             // Record fixup
+            if fnaddr_fixup_count >= 1024 {
+                write(2, "error: fnaddr_fixup_table overflow (max 1024)\n", 46)
+                exit(1)
+            }
             uint64 fentry_fa = fnaddr_fixup_table + fnaddr_fixup_count * 8
             uint32 fa_off = fnaddr_a64_off
             unsafe { *(fentry_fa as uint32) = fa_off }
@@ -4377,6 +4389,10 @@ fn gen_expr_a64(uint64 node) {
         }
 
         // Record fixup (same table as x86_64 — resolve_fixups handles both)
+        if fixup_count >= 32768 {
+            write(2, "error: fixup_table overflow (max 32768)\n", 40)
+            exit(1)
+        }
         uint64 fentry = fixup_table + fixup_count * 8
         uint32 fo = fixup_off
         unsafe { *(fentry as uint32) = fo }
@@ -4752,6 +4768,10 @@ fn gen_stmt_a64(uint64 node) {
     // While
     if kind == 14 {
         uint64 loop_start = out_len
+        if loop_depth >= 16 {
+            write(2, "error: loop_stack overflow (max 16)\n", 36)
+            exit(1)
+        }
         uint64 lentry = loop_stack + loop_depth * 16
         unsafe { *(lentry as uint64) = loop_start }
         uint64 lentry8 = lentry + 8
@@ -4797,6 +4817,10 @@ fn gen_stmt_a64(uint64 node) {
         // Outside any loop, `break` is a no-op (matches the IR backend;
         // prevents a dangling break_fixups entry being re-patched later). M1.
         if loop_depth == 0 { return }
+        if break_fixup_count >= 256 {
+            write(2, "error: break_fixups overflow (max 256)\n", 39)
+            exit(1)
+        }
         uint64 brk_off = out_len
         emit_a64_b(0)
         uint64 brk_entry = break_fixups + break_fixup_count * 4
@@ -4867,6 +4891,10 @@ fn gen_stmt_a64(uint64 node) {
                     // B.EQ body (placeholder — cond = 0 = EQ)
                     uint64 beq_p = out_len
                     emit_a64(0x54000000)   // B.EQ +0 (patched)
+                    if beq_count >= 8 {
+                        write(2, "error: beq_patches overflow (max 8)\n", 36)
+                        exit(1)
+                    }
                     uint64 slot = beq_patches + beq_count * 8
                     unsafe { *(slot as uint64) = beq_p }
                     beq_count = beq_count + 1
@@ -4895,6 +4923,10 @@ fn gen_stmt_a64(uint64 node) {
             // B end_match (stored in match_end_fixups — NOT break_fixups, so a
             // genuine `break` in the arm body still reaches the enclosing
             // loop's patch pass). H9.
+            if match_end_fixup_count >= 256 {
+                write(2, "error: match_end_fixups overflow (max 256)\n", 43)
+                exit(1)
+            }
             uint64 end_patch = out_len
             emit_a64(0x14000000)  // B +0 (patched)
             uint64 bf = match_end_fixups + match_end_fixup_count * 4
@@ -5643,6 +5675,10 @@ fn gen_function_a64(uint64 fn_node) {
                         emit_a64_str(0, 31, a64_var_base + poff)
                         // Save patch location
                         uint64 opi = reg - 8
+                        if opi >= 16 {
+                            write(2, "error: a64_overflow_patches overflow (max 16)\n", 46)
+                            exit(1)
+                        }
                         uint64 op_entry = a64_overflow_patches + opi * 8
                         uint32 pl32 = patch_loc
                         unsafe { *(op_entry as uint32) = pl32 }

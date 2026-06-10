@@ -2623,6 +2623,10 @@ fn ir_lower_expr(uint64 node) -> uint64 {
             uint32 anxt = ast_next(warg)
             warg = anxt
         }
+        if warg != 0 {
+            write(2, "error: too many call arguments (max 32)\n", 40)
+            exit(1)
+        }
         // Now emit ARG instructions
         uint64 ai = 0
         while ai < arg_count {
@@ -3651,6 +3655,10 @@ fn ir_lower_stmt(uint64 node) {
             si = si + 1
         }
         // Push loop context for break/continue
+        if ir_loop_depth >= 32 {
+            write(2, "error: ir_loop_stack overflow (max 32)\n", 39)
+            exit(1)
+        }
         uint64 lp = ir_loop_exit_stack + ir_loop_depth * 8
         unsafe { *(lp as uint64) = bb_exit }
         uint64 lh = ir_loop_header_stack + ir_loop_depth * 8
@@ -7798,6 +7806,10 @@ fn ir_emit_x86_insn(uint64 ii) {
         uint64 call_patch = out_len
         emit_u32_le(0)
         // Record fixup: imm holds the callee token
+        if fixup_count >= 32768 {
+            write(2, "error: fixup_table overflow (max 32768)\n", 40)
+            exit(1)
+        }
         uint64 fentry = fixup_table + fixup_count * 8
         uint32 fo = call_patch
         unsafe { *(fentry as uint32) = fo }
@@ -7858,6 +7870,10 @@ fn ir_emit_x86_insn(uint64 ii) {
         uint64 fnaddr_patch = out_len
         emit_u32_le(0)
         // Record in fnaddr fixup table
+        if fnaddr_fixup_count >= 1024 {
+            write(2, "error: fnaddr_fixup_table overflow (max 1024)\n", 46)
+            exit(1)
+        }
         if fnaddr_fixup_count < 1024 {
             uint64 fentry_fa = fnaddr_fixup_table + fnaddr_fixup_count * 8
             uint32 fa_off = fnaddr_patch
