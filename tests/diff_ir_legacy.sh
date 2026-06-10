@@ -71,6 +71,13 @@ diff_case "signed_lt_zero" 'fn main(){i64 a=0-5; if a<0 {exit(1)} exit(2)}'
 diff_case "signed_gt_op"   'fn main(){i64 a=0-5; i64 b=3; if a>b {exit(1)} exit(2)}'
 diff_case "signed_le_op"   'fn main(){i64 a=0-5; i64 b=0-5; if a<=b {exit(1)} exit(2)}'
 diff_case "signed_ge_neg"  'fn main(){i64 a=0-2; i64 b=0-9; if a>=b {exit(1)} exit(2)}'
+# ---- legacy/arm64 backend parity (critique H8/H11/H13/M14/H6) ----
+diff_case "high_bit_cond"  'fn main(){u64 x = 1 << 35; if x {exit(1)} exit(2)}'
+diff_case "u16_fields"     'struct P{u16 a;u16 b} fn main(){P p; p.a=5; p.b=7; exit(p.a + p.b)}'
+diff_case "nan_lt"         'import "std/math_float.kr"
+fn main(){f64 n = int_to_f64(0)/int_to_f64(0); if n < int_to_f64(1) {exit(1)} exit(2)}'
+diff_case "signed_param"   'fn isneg(i64 a)->u64{ if a<0 {return 1} return 0 }
+fn main(){exit(isneg(0-3))}'
 # ---- control flow ----
 diff_case "if_else"  'fn main(){u64 x=5; if x>3{exit(1)}else{exit(0)}}'
 diff_case "elseif3"  'fn f(u64 x)->u64{if x>90{return 5}else if x>80{return 4}else if x>70{return 3}else{return 1}}

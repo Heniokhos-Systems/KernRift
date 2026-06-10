@@ -413,6 +413,13 @@ fn tc_check_expr(uint64 node) {
     if wkind == 54 {
         uint32 me_scrut = ast_child(node)
         if me_scrut != 0 { tc_check_expr(me_scrut) }
+        // Float scrutinee: float equality matching is ill-defined, and the
+        // legacy backends compare a stale integer register against the pattern
+        // bits (M14). Reject it.
+        uint64 me_sk = tc_expr_kind(me_scrut)
+        if me_sk != 0 && me_sk != 0xFFFFFFFF && tc_is_float_kind(me_sk) != 0 {
+            diag_fatal_at(ast_tok(me_scrut), "match on a float scrutinee is not supported (float equality is ill-defined); use if/else")
+        }
         uint32 me_arm = ast_data1(node)
         uint64 wme_arm = me_arm
         uint64 me_first_fk = 2          // 2 = "not yet seen"
@@ -670,6 +677,10 @@ fn tc_check_stmt(uint64 node) {
         uint64 wscrut = scrut
         if wscrut != 0 { tc_check_expr(wscrut) }
         uint64 sk = tc_expr_kind(wscrut)
+        // Float scrutinee: reject (same rationale as MatchExpr — M14).
+        if sk != 0 && sk != 0xFFFFFFFF && tc_is_float_kind(sk) != 0 {
+            diag_fatal_at(ast_tok(wscrut), "match on a float scrutinee is not supported (float equality is ill-defined); use if/else")
+        }
 
         uint32 arm = ast_data1(node)
         uint64 warm = arm

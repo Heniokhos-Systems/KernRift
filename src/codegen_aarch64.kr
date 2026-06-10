@@ -116,8 +116,19 @@ fn emit_a64_mov(uint64 rd, uint64 rn) {
 }
 
 // STR Xt, [Xn, #imm12*8] (store 64-bit, unsigned offset)
+// Offsets past 4095*8 = 32760 bytes don't fit imm12: the overflow bit lands in
+// the L (load) field and silently turns the STR into an LDR (H12). Fall back to
+// a register-offset STR via x16 (x17 if x16 is the data/base reg).
 fn emit_a64_str(uint64 rt, uint64 rn, uint64 offset) {
     uint64 imm12 = offset / 8
+    if imm12 > 4095 {
+        uint64 scr = 16
+        if rt == 16 || rn == 16 { scr = 17 }
+        emit_a64_mov_imm(scr, offset)
+        uint64 rinsn = 0xF8206800 | (scr << 16) | (rn << 5) | rt   // STR Xt, [Xn, Xm]
+        emit_a64(rinsn)
+        return
+    }
     uint64 insn = 0xF9000000 | (imm12 << 10) | (rn << 5) | rt
     emit_a64(insn)
 }
@@ -125,6 +136,14 @@ fn emit_a64_str(uint64 rt, uint64 rn, uint64 offset) {
 // LDR Xt, [Xn, #imm12*8] (load 64-bit, unsigned offset)
 fn emit_a64_ldr(uint64 rt, uint64 rn, uint64 offset) {
     uint64 imm12 = offset / 8
+    if imm12 > 4095 {
+        uint64 scr = 16
+        if rn == 16 { scr = 17 }
+        emit_a64_mov_imm(scr, offset)
+        uint64 rinsn = 0xF8606800 | (scr << 16) | (rn << 5) | rt   // LDR Xt, [Xn, Xm]
+        emit_a64(rinsn)
+        return
+    }
     uint64 insn = 0xF9400000 | (imm12 << 10) | (rn << 5) | rt
     emit_a64(insn)
 }
@@ -1702,8 +1721,8 @@ fn gen_expr_a64(uint64 node) {
             unsafe { *(pfc as uint32) -> op_kind_fc }
             if op_kind_fc == 35 { emit_a64_cset(0, 0) }       // == → eq
             else if op_kind_fc == 36 { emit_a64_cset(0, 1) }   // != → ne
-            else if op_kind_fc == 37 { emit_a64_cset(0, 0xB) } // < → lt (signed, works for float NZCV)
-            else if op_kind_fc == 38 { emit_a64_cset(0, 0xD) } // <= → le
+            else if op_kind_fc == 37 { emit_a64_cset(0, 4) }   // < → mi (NaN-safe: false on unordered, H13)
+            else if op_kind_fc == 38 { emit_a64_cset(0, 9) }   // <= → ls (NaN-safe: false on unordered, H13)
             else if op_kind_fc == 39 { emit_a64_cset(0, 0xC) } // > → gt
             else if op_kind_fc == 40 { emit_a64_cset(0, 0xA) } // >= → ge
             expr_is_float_a64 = 0

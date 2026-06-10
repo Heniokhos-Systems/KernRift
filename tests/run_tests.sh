@@ -1386,6 +1386,14 @@ diag_span_test "diag_ternary_mixed" 'fn main() {
     println(1 == 1 ? 1.5 : 2)
     exit(0)
 }' "mix float"
+# M14: matching on a float scrutinee is rejected (legacy compared a stale
+# integer register; float equality is ill-defined).
+diag_span_test "diag_float_match" 'import "std/math_float.kr"
+fn main() {
+    f64 x = int_to_f64(1)
+    u64 r = match x { 1 => 7  _ => 9 }
+    exit(r)
+}' "float scrutinee"
 
 # C2 regression: `let` must be resolved on EVERY fat-binary slice, not just the
 # first. A signed `let` mis-resolved on a non-first slice flips the comparison.
@@ -1502,6 +1510,15 @@ fn main(){ let x = K; exit(x) }' 5
 # Float inference: call returning f64 → local treated as f64 (stdout exercises the float path).
 run_test_output "let_float" 'import "std/math_float.kr"
 fn main(){ let x = int_to_f64(3); let y = int_to_f64(2); println_str(fmt_f64(x / y, 1)); exit(0) }' "1.5" 0
+
+# H11: 2-byte struct fields must store/load 2 bytes (legacy used the 8-byte
+# path, clobbering neighbors). p.a=1 b=2 c=3 d=4 must survive independently.
+run_test_output "struct_u16_fields" 'struct P { u16 a; u16 b; u16 c; u16 d }
+fn main(){ P p; p.a=9; p.b=2; p.c=3; p.d=4; p.a=1
+    println(p.a); println(p.b); println(p.c); println(p.d); exit(0) }' "1
+2
+3
+4" 0
 
 # H8: a condition truthy only in the high 32 bits must be truthy on legacy too
 # (legacy if/while/ternary used a 32-bit `test eax,eax`).

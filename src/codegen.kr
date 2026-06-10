@@ -3672,6 +3672,8 @@ fn gen_expr(uint64 node) {
                     }
                     if nfsz == 1 {
                         emit_byte(0x0F); emit_byte(0xB6); emit_byte(0x00)
+                    } else if nfsz == 2 {
+                        emit_byte(0x0F); emit_byte(0xB7); emit_byte(0x00)   // movzx eax, word [rax] (H11)
                     } else if nfsz == 4 {
                         emit_byte(0x8B); emit_byte(0x00)
                     } else {
@@ -3772,6 +3774,8 @@ fn gen_expr(uint64 node) {
             // Load field value based on size
             if fsz == 1 {
                 emit_byte(0x0F); emit_byte(0xB6); emit_byte(0x00)
+            } else if fsz == 2 {
+                emit_byte(0x0F); emit_byte(0xB7); emit_byte(0x00)   // movzx eax, word [rax] (H11)
             } else if fsz == 4 {
                 emit_byte(0x8B); emit_byte(0x00)
             } else {
@@ -8629,6 +8633,8 @@ fn gen_stmt(uint64 node) {
                         emit_load_rax_from_stack(temp_slot_0)
                         if nfsz_w == 1 {
                             emit_byte(0x88); emit_byte(0x01)
+                        } else if nfsz_w == 2 {
+                            emit_byte(0x66); emit_byte(0x89); emit_byte(0x01)  // mov word [rcx], ax (H11)
                         } else if nfsz_w == 4 {
                             emit_byte(0x89); emit_byte(0x01)
                         } else {
@@ -8710,6 +8716,8 @@ fn gen_stmt(uint64 node) {
                 // Store based on field size
                 if fsz == 1 {
                     emit_byte(0x88); emit_byte(0x01) // mov %al, (%rcx)
+                } else if fsz == 2 {
+                    emit_byte(0x66); emit_byte(0x89); emit_byte(0x01) // mov %ax, (%rcx) (H11)
                 } else if fsz == 4 {
                     emit_byte(0x89); emit_byte(0x01) // mov %eax, (%rcx)
                 } else {
