@@ -73,7 +73,47 @@ fn map_vals(u64 m) -> u64 {
     return vals
 }
 
+// Double the table and rehash. Called by map_set before the load factor
+// gets high enough to make linear probing spin (a full table never finds an
+// empty slot). Reinsertion lands at 50% load, so it never re-triggers growth.
+fn map_grow(u64 m) {
+    u64 old_cap = map_cap(m)
+    u64 old_keys = map_keys(m)
+    u64 old_vals = map_vals(m)
+    u64 new_cap = old_cap * 2
+    u64 new_keys = alloc(new_cap * 8)
+    memset(new_keys, 0, new_cap * 8)
+    u64 new_vals = alloc(new_cap * 8)
+    memset(new_vals, 0, new_cap * 8)
+    store64(m, new_cap)
+    u64 mk = m + 16
+    store64(mk, new_keys)
+    u64 mv = m + 24
+    store64(mv, new_vals)
+    u64 mlen = m + 8
+    u64 zero = 0
+    store64(mlen, zero)
+    u64 i = 0
+    while i < old_cap {
+        u64 okp = old_keys + i * 8
+        u64 k = load64(okp)
+        if k != 0 {
+            u64 ovp = old_vals + i * 8
+            u64 v = load64(ovp)
+            map_set(m, k, v)
+        }
+        i = i + 1
+    }
+    dealloc(old_keys)
+    dealloc(old_vals)
+}
+
 fn map_set(u64 m, u64 key, u64 val) {
+    // Grow before the table gets dangerously full — a full table makes the
+    // linear-probe loop below spin forever. Keep the load factor under ~75%.
+    if map_len(m) * 4 >= map_cap(m) * 3 {
+        map_grow(m)
+    }
     u64 cap = map_cap(m)
     u64 keys = map_keys(m)
     u64 vals = map_vals(m)

@@ -173,9 +173,16 @@ fn exp_f64(f64 x) -> f64 {
     f64 et10 = et9 * r / int_to_f64(10)
     f64 e10 = e9 + et10
 
-    // Multiply by 2^k (positive k only in V1)
+    // Scale by 2^k. k_f > 0 → double k times; k_f < 0 → divide by 2^|k|
+    // (previously the negative branch was missing, so exp(x) for x < 0
+    // returned exp(r) unscaled — e.g. exp(-1) gave 1.47 instead of 0.368).
     if k_f > int_to_f64(0) {
         return f64_double_n(e10, k)
+    }
+    if k_f < int_to_f64(0) {
+        u64 nk = f64_to_int(int_to_f64(0) - k_f)
+        f64 scale = f64_double_n(int_to_f64(1), nk)
+        return e10 / scale
     }
     return e10
 }

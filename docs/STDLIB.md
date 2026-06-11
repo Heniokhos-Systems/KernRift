@@ -237,7 +237,7 @@ Error-Handling Pattern 2.
 
 | Signature | Description |
 |---|---|
-| `fn read_file(u64 path) -> u64` | Read entire file into a fresh null-terminated buffer. Returns `0` for an empty file. Allocates. **Caveat (verified): a nonexistent path currently segfaults** — `file_open`'s `-errno` result is used as an fd unchecked. Guard with `file_open` + `is_errno` yourself if the file may be missing. |
+| `fn read_file(u64 path) -> u64` | Read entire file into a fresh null-terminated buffer. Returns `0` on failure (missing path or empty file). Allocates. |
 | `fn write_file(u64 path, u64 content)` | Create/overwrite file with a null-terminated string. |
 | `fn append_file(u64 path, u64 content)` | Read-concat-rewrite append (allocates intermediates). |
 
@@ -287,10 +287,9 @@ Internal helpers (don't call directly): `_log_ensure_level()`,
 ## `std/map.kr` — Hash map
 
 Open-addressing hash map (FNV-1a + linear probing), string keys → u64
-values. **Fixed capacity of 64 slots** (`static u64 MAP_CAP = 64`) — it
-does not grow; inserting more than 64 distinct keys will loop forever
-looking for a free slot. Keys are stored as raw pointers (not copied) —
-keep them alive. No deletion operation.
+values. Starts at 64 slots and **doubles + rehashes** when the load factor
+passes ~75%, so it holds any number of keys. Keys are stored as raw
+pointers (not copied) — keep them alive. No deletion operation.
 
 | Signature | Description |
 |---|---|
@@ -356,7 +355,7 @@ functions have short aliases (`sin` = `sin_f64`, etc.).
 | `fn sin_f64(f64 x) -> f64` (alias `sin`) | 7-term Taylor, range-reduced to [−π, π]. Verified: `sin(1)` ≈ 0.8414. |
 | `fn cos_f64(f64 x) -> f64` (alias `cos`) | `sin(x + π/2)`. |
 | `fn tan_f64(f64 x) -> f64` (alias `tan`) | `sin/cos`. |
-| `fn exp_f64(f64 x) -> f64` (alias `exp`) | 10-term Taylor + doubling. **Correct for x ≥ 0 only** — for negative `x` the `2^-k` scaling is skipped (verified: `exp(-1)` returns 1.4715, not 0.3679). |
+| `fn exp_f64(f64 x) -> f64` (alias `exp`) | 10-term Taylor with `2^k` range reduction; handles negative `x` (verified: `exp(-1)` ≈ 0.3679). |
 | `fn log_f64(f64 x) -> f64` (alias `log`) | Natural log via Newton on `exp` (10 iterations). Valid for x > 0; the initial guess table targets x up to a few hundred. |
 | `fn pow_f64(f64 x, f64 y) -> f64` (alias `pow_f`) | `exp(y * log(x))` — inherits both functions' domains (x > 0). |
 
