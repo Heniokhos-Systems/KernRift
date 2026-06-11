@@ -1469,6 +1469,28 @@ fn main() {
     u64 r = match x { 1 => 7  _ => 9 }
     exit(r)
 }' "float scrutinee"
+# Parser error recovery: TWO independent syntax errors in one file must BOTH
+# be reported in a single run (panic-mode recovery), the run must still fail,
+# and the parse-error summary line must appear.
+TOTAL=$((TOTAL + 1))
+printf '%s\n' 'fn a() {
+    u64 x = (1 + 2
+}
+fn main() {
+    let y = ]
+    exit(0)
+}' > /tmp/krc_perr_$$.kr
+if $KRC $KRC_FLAGS /tmp/krc_perr_$$.kr -o /tmp/krc_perr_bin_$$ 2>/tmp/krc_perr_err_$$ ; then
+    echo "FAIL: parse_recovery_multi (should not compile)"; FAIL=$((FAIL + 1))
+elif grep -qF "expected ')', got '}'" /tmp/krc_perr_err_$$ \
+  && grep -qF "unexpected ']' in expression" /tmp/krc_perr_err_$$ \
+  && grep -qF "parse error(s)" /tmp/krc_perr_err_$$ ; then
+    PASS=$((PASS + 1))
+else
+    echo "FAIL: parse_recovery_multi (missing one of the two errors):"; sed 's/^/    /' /tmp/krc_perr_err_$$ | head -8
+    FAIL=$((FAIL + 1))
+fi
+rm -f /tmp/krc_perr_$$.kr /tmp/krc_perr_bin_$$ /tmp/krc_perr_err_$$
 # H10 (lifted): `continue` inside a `for` body now runs the desugared
 # increment then re-tests the condition (the parser rewrites each continue
 # into { i = i + 1; continue }). The sums prove the increment still ran —

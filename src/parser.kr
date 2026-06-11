@@ -41,7 +41,14 @@ fn cur_tok() -> uint64 {
 
 fn advance_tok() -> uint64 {
     uint64 prev = p_tok_pos
-    p_tok_pos = p_tok_pos + 1
+    // Clamp at the final (EOF) token. Error recovery hands control back to
+    // call sites that advance unconditionally (e.g. sizeof's type token);
+    // without the clamp those could step past the EOF token and read off
+    // the end of the token buffer. A valid parse never advances at EOF, so
+    // this branch behaves identically on well-formed input.
+    if p_tok_pos + 1 < p_tok_count {
+        p_tok_pos = p_tok_pos + 1
+    }
     return prev
 }
 
@@ -105,24 +112,31 @@ fn tok_kind_name(uint64 kind) -> uint64 {
 fn expect(uint32 kind) -> uint64 {
     if cur_kind() != kind {
         // "file:line:col: error: expected X, got Y 'text'" + source span/caret.
-        diag_loc_head(p_tok_pos, 0)
-        write(2, "expected ", 9)
-        uint64 ename = tok_kind_name(kind)
-        write(2, ename, str_len(ename))
-        write(2, ", got ", 6)
-        uint64 gname = tok_kind_name(cur_kind())
-        write(2, gname, str_len(gname))
-        // Show the actual text of the unexpected token
-        if cur_kind() == 1 || cur_kind() == 2 || cur_kind() == 3 {
-            write(2, " '", 2)
-            uint64 ts = tok_text_start(p_tok_pos)
-            uint64 tl = tok_text_len(p_tok_pos)
-            write(2, cg_source + ts, tl)
-            write(2, "'", 1)
+        if parse_err_should_report() != 0 {
+            p_err_reported = p_err_reported + 1
+            diag_loc_head(p_tok_pos, 0)
+            write(2, "expected ", 9)
+            uint64 ename = tok_kind_name(kind)
+            write(2, ename, str_len(ename))
+            write(2, ", got ", 6)
+            uint64 gname = tok_kind_name(cur_kind())
+            write(2, gname, str_len(gname))
+            // Show the actual text of the unexpected token
+            if cur_kind() == 1 || cur_kind() == 2 || cur_kind() == 3 {
+                write(2, " '", 2)
+                uint64 ts = tok_text_start(p_tok_pos)
+                uint64 tl = tok_text_len(p_tok_pos)
+                write(2, cg_source + ts, tl)
+                write(2, "'", 1)
+            }
+            write(2, "\n", 1)
+            diag_span_of(p_tok_pos)
         }
-        write(2, "\n", 1)
-        diag_span_of(p_tok_pos)
-        exit(1)
+        // Panic-mode recovery: skip to a sync token and hand back the
+        // current token index as a poison value. parse_module()'s error
+        // gate exits before this AST can reach sema or codegen.
+        parse_recover_to_sync()
+        return p_tok_pos
     }
     return advance_tok()
 }
@@ -141,6 +155,79 @@ fn eat(uint32 kind) -> uint64 {
 }
 
 // ---------------------------------------------------------------------------
+// Parser error recovery (panic mode)
+//
+// On a syntax error we print the diagnostic (same format as before: location
+// head + message + source span + caret), skip forward to a synchronization
+// token, and return a poison value so the surrounding production keeps
+// going — one compile run can surface several syntax errors. parse_module()
+// exits(1) before returning if any parse error was recorded, so a poisoned
+// AST never reaches sema, type checking or codegen. None of these paths
+// execute on well-formed input.
+// ---------------------------------------------------------------------------
+
+static uint64 p_err_count = 0             // distinct parse errors (drives the gate)
+static uint64 p_err_reported = 0          // printed messages (capped at 20)
+static uint64 p_last_err_pos = 0xFFFFFFFF // token pos of the previous error
+
+// Tokens that plausibly start a new construct (or close the current one):
+// EOF, '}', ';', '@', and the top-level / statement keywords.
+fn parse_is_sync(uint64 k) -> uint64 {
+    if k == 0 { return 1 }     // end of file
+    if k == 13 { return 1 }    // '}'
+    if k == 18 { return 1 }    // ';'
+    if k == 21 { return 1 }    // '@' annotation
+    if k == 60 { return 1 }    // fn
+    if k == 61 { return 1 }    // return
+    if k == 62 { return 1 }    // if
+    if k == 64 { return 1 }    // while
+    if k == 65 { return 1 }    // for
+    if k == 67 { return 1 }    // break
+    if k == 68 { return 1 }    // continue
+    if k == 69 { return 1 }    // loop
+    if k == 70 { return 1 }    // const
+    if k == 71 { return 1 }    // static
+    if k == 72 { return 1 }    // struct
+    if k == 73 { return 1 }    // enum
+    if k == 74 { return 1 }    // extern
+    if k == 75 { return 1 }    // import
+    if k == 76 { return 1 }    // unsafe
+    if k == 79 { return 1 }    // defer
+    if k == 88 { return 1 }    // match
+    if k == 89 { return 1 }    // type
+    if k == 90 { return 1 }    // asm
+    if k == 103 { return 1 }   // let
+    return 0
+}
+
+// Should the error at the current token be printed? Suppresses repeats at
+// the same position (cascade noise after a recovery that could not advance,
+// and the return-tuple lookahead rewind) and everything past the cap of 20.
+fn parse_err_should_report() -> uint64 {
+    if p_tok_pos == p_last_err_pos { return 0 }
+    if p_err_reported >= 20 { return 0 }
+    return 1
+}
+
+// Record the error and skip ahead to the next sync token. Progress
+// guarantee: a repeat error at the same position force-consumes one token
+// (advance_tok is clamped at EOF), so the parser can never spin — every
+// error either moves p_tok_pos forward or arms the force-advance for the
+// next error at that position, and all parser loops terminate at EOF.
+fn parse_recover_to_sync() {
+    uint64 here = p_tok_pos
+    if here == p_last_err_pos {
+        if cur_kind() != 0 { advance_tok() }
+    } else {
+        p_err_count = p_err_count + 1
+    }
+    p_last_err_pos = here
+    while parse_is_sync(cur_kind()) == 0 {
+        advance_tok()
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Parser init
 // ---------------------------------------------------------------------------
 
@@ -149,6 +236,9 @@ fn parser_init(uint64 tokens, uint64 count_val) {
     p_tok_buf = tokens
     p_tok_count = count_val
     p_tok_pos = 0
+    p_err_count = 0
+    p_err_reported = 0
+    p_last_err_pos = 0xFFFFFFFF
 }
 
 // ---------------------------------------------------------------------------
@@ -605,21 +695,32 @@ fn parse_primary() -> uint64 {
     }
 
     // Error — "file:line:col: error: unexpected X['text'] in expression" + span.
-    diag_loc_head(p_tok_pos, 0)
-    write(2, "unexpected ", 11)
-    uint64 ename = tok_kind_name(kind)
-    write(2, ename, str_len(ename))
-    if kind == 1 || kind == 2 || kind == 3 {
-        write(2, " '", 2)
-        uint64 ts = tok_text_start(p_tok_pos)
-        uint64 tl = tok_text_len(p_tok_pos)
-        write(2, cg_source + ts, tl)
-        write(2, "'", 1)
+    if parse_err_should_report() != 0 {
+        p_err_reported = p_err_reported + 1
+        diag_loc_head(p_tok_pos, 0)
+        write(2, "unexpected ", 11)
+        uint64 ename = tok_kind_name(kind)
+        write(2, ename, str_len(ename))
+        if kind == 1 || kind == 2 || kind == 3 {
+            write(2, " '", 2)
+            uint64 ts = tok_text_start(p_tok_pos)
+            uint64 tl = tok_text_len(p_tok_pos)
+            write(2, cg_source + ts, tl)
+            write(2, "'", 1)
+        }
+        write(2, " in expression\n", 15)
+        diag_span_of(p_tok_pos)
     }
-    write(2, " in expression\n", 15)
-    diag_span_of(p_tok_pos)
-    exit(1)
-    return 0
+    // Panic-mode recovery: skip to a sync token and return a poison
+    // integer-literal node so the surrounding expression finishes parsing.
+    // The parse-error gate in parse_module() exits before sema/codegen
+    // could ever evaluate it.
+    parse_recover_to_sync()
+    uint64 poison = ast_alloc(AstKind.IntLit)
+    uint32 pt32 = p_tok_pos
+    ast_set_data1(poison, pt32)
+    ast_set_tok(poison, pt32)
+    return poison
 }
 
 fn binop_precedence(uint32 kind) -> uint32 {
@@ -2508,6 +2609,19 @@ fn parse_module() -> uint64 {
         } else {
             advance_tok()
         }
+    }
+
+    // Parse-error gate: if panic-mode recovery fired, report the total and
+    // stop — a poisoned AST must never reach sema, type checking or codegen.
+    // Every compile path (normal compile, every fat-binary slice compile,
+    // `krc check`, living-code analysis) goes through parse_module(), so
+    // this single gate covers them all.
+    if p_err_count > 0 {
+        uint8[24] ebuf
+        uint64 elen = fmt_uint(ebuf, p_err_count)
+        write(2, ebuf, elen)
+        write(2, " parse error(s)\n", 16)
+        exit(1)
     }
 
     return mod_node
