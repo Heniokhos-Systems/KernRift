@@ -224,37 +224,69 @@ fn emit_a64_add_sp_imm(uint64 imm) {
     }
 }
 
+// ---- Range-checked branch displacement encoders ----
+// Both take the BYTE displacement (target - branch_insn_offset) as a
+// two's-complement uint64 and return the masked immediate field. The
+// old open-coded `(disp / 4) & MASK` silently wrapped an out-of-range
+// displacement into a valid-looking instruction that branched somewhere
+// random; fail loudly instead. For every in-range displacement the
+// returned bits are identical to the old expression (unsigned /4 of a
+// wrapped negative keeps the low bits exact: 2^62 ≡ 0 mod 2^26), so
+// valid programs emit byte-for-byte identical code. The bias-and-wrap
+// compare needs no signed type: an in-range negative wraps to a small
+// value, anything else (either sign) lands at or above 2*BIAS.
+
+// imm26 (B/BL): byte displacement must be within ±128 MB.
+fn a64_check_b26(uint64 disp) -> uint64 {
+    uint64 biased = disp + 0x8000000
+    if biased >= 0x10000000 {
+        write(2, "internal error: aarch64 B/BL branch displacement out of range\n", 62)
+        exit(1)
+    }
+    return (disp / 4) & 0x3FFFFFF
+}
+
+// imm19 (B.cond/CBZ/CBNZ): byte displacement must be within ±1 MB.
+fn a64_check_b19(uint64 disp) -> uint64 {
+    uint64 biased = disp + 0x100000
+    if biased >= 0x200000 {
+        write(2, "internal error: aarch64 B.cond/CBZ/CBNZ displacement out of range\n", 66)
+        exit(1)
+    }
+    return (disp / 4) & 0x7FFFF
+}
+
 // BL offset (branch with link, rel26*4)
 fn emit_a64_bl(uint64 offset) {
-    uint64 rel26 = (offset / 4) & 0x3FFFFFF
+    uint64 rel26 = a64_check_b26(offset)
     uint64 insn = 0x94000000 | rel26
     emit_a64(insn)
 }
 
 // B offset (unconditional branch, rel26*4)
 fn emit_a64_b(uint64 offset) {
-    uint64 rel26 = (offset / 4) & 0x3FFFFFF
+    uint64 rel26 = a64_check_b26(offset)
     uint64 insn = 0x14000000 | rel26
     emit_a64(insn)
 }
 
 // B.cond offset (conditional branch, rel19*4)
 fn emit_a64_bcond(uint64 cond, uint64 offset) {
-    uint64 rel19 = (offset / 4) & 0x7FFFF
+    uint64 rel19 = a64_check_b19(offset)
     uint64 insn = 0x54000000 | (rel19 << 5) | cond
     emit_a64(insn)
 }
 
 // CBZ Xt, offset (compare and branch if zero)
 fn emit_a64_cbz(uint64 rt, uint64 offset) {
-    uint64 rel19 = (offset / 4) & 0x7FFFF
+    uint64 rel19 = a64_check_b19(offset)
     uint64 insn = 0xB4000000 | (rel19 << 5) | rt
     emit_a64(insn)
 }
 
 // CBNZ Xt, offset (compare and branch if non-zero)
 fn emit_a64_cbnz(uint64 rt, uint64 offset) {
-    uint64 rel19 = (offset / 4) & 0x7FFFF
+    uint64 rel19 = a64_check_b19(offset)
     uint64 insn = 0xB5000000 | (rel19 << 5) | rt
     emit_a64(insn)
 }
@@ -2367,7 +2399,7 @@ fn gen_expr_a64(uint64 node) {
                     emit_a64_cbz(10, 0)
                     emit_a64_add_imm(9, 9, 1)
                     uint64 apv_bk = apv_sl - out_len
-                    emit_a64_b(apv_bk & 0xFFFFFFFF)
+                    emit_a64_b(apv_bk)
                     uint64 apv_done = out_len
                     uint64 apv_fwd = apv_done - apv_cbz
                     patch_u32(apv_cbz, 0xB4000000 | (((apv_fwd / 4) & 0x7FFFF) << 5) | 10)
@@ -2504,7 +2536,7 @@ fn gen_expr_a64(uint64 node) {
             emit_a64_cbz(10, 0)
             emit_a64_add_imm(9, 9, 1)
             uint64 aps_bk = aps_loop - out_len
-            emit_a64_b(aps_bk & 0xFFFFFFFF)
+            emit_a64_b(aps_bk)
             uint64 aps_done = out_len
             uint64 aps_fwd = aps_done - aps_cbz
             patch_u32(aps_cbz, 0xB4000000 | (((aps_fwd / 4) & 0x7FFFF) << 5) | 10)
@@ -2572,7 +2604,7 @@ fn gen_expr_a64(uint64 node) {
             emit_a64_add_imm(9, 9, 1)
             // b loop
             uint64 asl_bk = asl_loop - out_len
-            emit_a64_b(asl_bk & 0xFFFFFFFF)
+            emit_a64_b(asl_bk)
             // done: len = x9 - x0
             uint64 asl_done = out_len
             uint64 asl_fwd = asl_done - asl_cbz
@@ -2616,7 +2648,7 @@ fn gen_expr_a64(uint64 node) {
             emit_a64_add_imm(10, 10, 1)
             // b loop
             uint64 ase_bk = ase_loop - out_len
-            emit_a64_b(ase_bk & 0xFFFFFFFF)
+            emit_a64_b(ase_bk)
             // not_equal: mov x0, #0
             uint64 ase_ne = out_len
             uint64 ase_ne_d = ase_ne - ase_bne
@@ -2702,7 +2734,7 @@ fn gen_expr_a64(uint64 node) {
             emit_a64(0xD1000400 | (11 << 5) | 11)
             // b loop
             uint64 amc_bk = amc_loop - out_len
-            emit_a64_b(amc_bk & 0xFFFFFFFF)
+            emit_a64_b(amc_bk)
             // done:
             uint64 amc_done = out_len
             uint64 amc_fwd = amc_done - amc_cbz
@@ -2743,7 +2775,7 @@ fn gen_expr_a64(uint64 node) {
             emit_a64(0xD1000400 | (11 << 5) | 11)
             // b loop
             uint64 ams_bk = ams_loop - out_len
-            emit_a64_b(ams_bk & 0xFFFFFFFF)
+            emit_a64_b(ams_bk)
             // done:
             uint64 ams_done = out_len
             uint64 ams_fwd = ams_done - ams_cbz
@@ -4788,7 +4820,7 @@ fn gen_stmt_a64(uint64 node) {
         gen_block_a64(wbody)
         // b loop_start
         uint64 back_disp = loop_start - out_len
-        emit_a64_b(back_disp & 0xFFFFFFFF)
+        emit_a64_b(back_disp)
         // Patch cbz to here
         uint64 loop_end = out_len
         uint64 fwd_disp = loop_end - cbz_patch
@@ -4839,7 +4871,7 @@ fn gen_stmt_a64(uint64 node) {
         uint64 cont_target = 0
         unsafe { *(lentry3 as uint64) -> cont_target }
         uint64 cont_disp = cont_target - out_len
-        emit_a64_b(cont_disp & 0xFFFFFFFF)
+        emit_a64_b(cont_disp)
         return
     }
 
@@ -5862,7 +5894,7 @@ fn resolve_fixups_a64() {
             uint64 wpo = patch_off
             uint64 disp = target_off - wpo
             // Patch BL instruction: BL rel26
-            patch_u32(wpo, 0x94000000 | ((disp / 4) & 0x3FFFFFF))
+            patch_u32(wpo, 0x94000000 | a64_check_b26(disp))
         } else {
             // Undefined function — mirror the x86 resolver. Without this the
             // BL keeps its placeholder (BL #0 = branch to self) and the binary

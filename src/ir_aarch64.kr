@@ -2726,7 +2726,6 @@ fn ir_emit_arm64_function(uint64 fn_node) {
         unsafe { *(tbp as uint64) -> target_off }
         uint64 wpo = patch_off
         uint64 disp = target_off - wpo
-        uint64 rel = disp / 4
         if is_cbnz != 0 {
             // Patch CBNZ: read existing instruction to get Rt
             uint64 insn_addr = out_buf + wpo
@@ -2734,11 +2733,11 @@ fn ir_emit_arm64_function(uint64 fn_node) {
             unsafe { *(insn_addr as uint32) -> old_insn }
             uint64 wo = old_insn
             uint64 rt = wo & 0x1F
-            uint64 new_insn = 0xB5000000 | ((rel & 0x7FFFF) << 5) | rt
+            uint64 new_insn = 0xB5000000 | (a64_check_b19(disp) << 5) | rt
             patch_u32(wpo, new_insn)
         } else {
             // Patch B
-            uint64 new_insn = 0x14000000 | (rel & 0x3FFFFFF)
+            uint64 new_insn = 0x14000000 | a64_check_b26(disp)
             patch_u32(wpo, new_insn)
         }
         fi = fi + 1
@@ -2753,8 +2752,7 @@ fn ir_emit_arm64_function(uint64 fn_node) {
         unsafe { *(rfp as uint32) -> rpatch }
         uint64 wrp = rpatch
         uint64 rdisp = epilogue_off - wrp
-        uint64 rrel = rdisp / 4
-        uint64 new_insn = 0x14000000 | (rrel & 0x3FFFFFF)
+        uint64 new_insn = 0x14000000 | a64_check_b26(rdisp)
         patch_u32(wrp, new_insn)
         ri2 = ri2 + 1
     }
