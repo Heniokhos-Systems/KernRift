@@ -4446,7 +4446,7 @@ fn main() {
                 write(1, "  --help, -h                show this help\n", 43)
                 exit(0)
             } else if str_starts_with(arg, "--version", 9) != 0 {
-                uint64 msg = "krc 2.8.25 (KernRift self-hosted compiler)\n"
+                uint64 msg = "krc 2.8.26 (KernRift self-hosted compiler)\n"
                 write(1, msg, str_len(msg))
                 exit(0)
             } else if str_starts_with(arg, "--freestanding", 14) != 0 {

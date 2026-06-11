@@ -32,7 +32,7 @@ kr hello.krbo
 | `echo.kr` | `scan_str` / `print_str` for stdin / stdout with variable strings. |
 | `extern_libc.kr` | `extern fn` — call libc (`strlen`, `write`) via ELF/Mach-O/COFF relocations. |
 | `linked_list.kr` | Canonical heap-struct pattern — `Node n = alloc(16)`, append, traverse. |
-| `modern.kr` | The v2.8.25 ergonomics in one program: `let` inference, ternary, `match` as an expression, `loop`, `defer`, `continue` in a `for`, inclusive `0..=`, and f-strings. (IR backend — `defer` needs the default backend.) |
+| `modern.kr` | The v2.8.26 ergonomics in one program: `let` inference, ternary, `match` as an expression, `loop`, `defer`, `continue` in a `for`, inclusive `0..=`, and f-strings. (IR backend — `defer` needs the default backend.) |
 
 ### Kernel modules (`--emit=lkm`)
 

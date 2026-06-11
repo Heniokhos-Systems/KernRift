@@ -64,7 +64,7 @@ This bypasses the SELinux file-label transition Termux uses to block execve of u
 
 - **Flat AST**: 32-byte nodes (8 fixed 4-byte slots: kind, data1–data4, tok, child, next) in a contiguous arena, 1-indexed. No pointers, just indices. Tokens are 16-byte records in a parallel arena.
 - **Fixed arenas with hard caps**: the token buffer is sized for 524288 tokens and the AST arena similarly; the self-compile sits near 48%, and `make check` fails if it crosses 80% (raise `max_tok` in `main.kr` before that). Most other tables (struct/device/var/fixup) have their own caps and fail loud on overflow.
-- **SSA IR**: target-independent opcodes (107 as of v2.8.25; see [IR_REFERENCE.md](IR_REFERENCE.md)), virtual registers, liveness, graph-coloring register allocator with Briggs/George copy coalescing, an AST-level inliner, LICM, constant folding, DCE, and CSE. Added in v2.8.2, replacing the "no IR" stance of earlier versions.
+- **SSA IR**: target-independent opcodes (107 as of v2.8.26; see [IR_REFERENCE.md](IR_REFERENCE.md)), virtual registers, liveness, graph-coloring register allocator with Briggs/George copy coalescing, an AST-level inliner, LICM, constant folding, DCE, and CSE. Added in v2.8.2, replacing the "no IR" stance of earlier versions.
 - **Per-target emitters, shared IR**: Linux/macOS/Windows/Android syscall conventions, Mach-O argc/argv in x0/x1, Windows IAT calls — all handled at emission time from the same abstract opcodes.
 - **No external tools**: the compiler writes binaries directly; there is no assembler, linker, or libc in the build graph.
 - **Variable dedup**: same-named variables in different if-branches share a slot.

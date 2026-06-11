@@ -7,7 +7,7 @@ record with fields `{opcode, dest, src1, src2, imm, bb}`. Virtual
 registers (vregs) are numbered from 1; vreg 0 is reserved for "no value"
 (void returns, stores). Basic blocks are numbered from 0.
 
-This reference documents the IR opcodes (107 as of v2.8.25; the canonical
+This reference documents the IR opcodes (107 as of v2.8.26; the canonical
 list is the `static uint64 IR_*` definitions at the top of `src/ir.kr`),
 so that:
 - The IR lowering can be validated (does `ast_lower_*` preserve semantics?).

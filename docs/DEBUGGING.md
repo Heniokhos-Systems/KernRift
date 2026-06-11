@@ -4,7 +4,7 @@ This is a practical guide for debugging KernRift programs — and for debugging
 the compiler itself when you think it has wronged you. It is organized by
 task: find the section that matches what's going wrong and follow the steps.
 Every flag and behavior described here has been verified against the shipped
-compiler (`krc 2.8.25`).
+compiler (`krc 2.8.26`).
 
 Quick map:
 

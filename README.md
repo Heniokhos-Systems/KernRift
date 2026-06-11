@@ -4,9 +4,12 @@
 
 A self-hosted systems language compiler for kernel-first development. KernRift compiles itself — no Rust, no C, no LLVM, no external toolchain. It produces native executables for x86_64 and AArch64 on Linux, Windows, macOS, and Android, with BCJ+LZ-Rift-compressed fat binaries as the default output (8 platform slices per `.krbo`). The `kr` runner executes `.krbo` fat binaries on any supported platform. The compiler self-hosts on all 8 targets and is verified via CI on every push. The compiler ships with an **SSA-based IR backend** with liveness analysis, graph-coloring register allocation, an AST-level function inliner, Briggs/George copy coalescing, LICM, constant folding, DCE, and CSE — producing native machine code for all targets directly from the IR, no assembler in the loop.
 
-**v2.8.25 highlights** (full details in [CHANGELOG.md](CHANGELOG.md)):
+**v2.8.26 highlights** (full details in [CHANGELOG.md](CHANGELOG.md)):
 
-- **Language ergonomics.** Ternary `cond ? then : else`, `let` type inference (`let n = a + b`), `match` as an expression with bare-statement arms, `loop { }`, inclusive ranges `0..=n`, and `defer { }`. Parser/codegen errors now print a `file:line:col` header with the source line and a `^~~~` caret.
+- **Language ergonomics.** Ternary `cond ? then : else`, `let` type inference (`let n = a + b`), `match` as an expression with bare-statement arms, `continue` inside `for`, `loop { }`, inclusive ranges `0..=n`, and `defer { }`.
+- **Diagnostics.** Parser error recovery (many syntax errors per run, not just the first), `file:line:col` headers with a source line and `^~~~` caret, and "did you mean?" suggestions on undeclared names. The type checker is now default-on and fatal.
+- **Codegen.** Power-of-two `/`/`%` strength-reduce to `shr`/`and`; every AArch64 branch displacement is range-checked instead of silently masked.
+- **A large correctness batch** across the IR and legacy backends, plus stdlib fixes (`map` growth, `read_file`, `exp` of negatives) — see the changelog.
 - **Briggs/George copy coalescing, on by default.** The graph-colouring register allocator collapses `vN = copy vM` pairs whose live ranges don't interfere, so the redundant `mov rN, rN` is dropped at emit time. Briggs is the conservative gate (refuses if ≥ K neighbours of the merged class would have degree ≥ K); George is a less-conservative fallback gated to K ≥ 8. krc.kr self-compile vs `--no-coalesce`: x86_64 −72 B, arm64 −1592 B. `--no-coalesce` disables.
 - **AST-level function inliner.** Pure single-expression callees (`fn add(a, b) -> u64 { return a + b }`) are folded into their call sites; DCE then drops the unused originals. `--emit=obj` / `--emit=asm` / `--emit=ir` keep every top-level fn live so symbols still appear in the linker table / asm listing / IR dump.
 - **`--help` rewritten** to cover every flag the parser handles, grouped by output / code-gen / living-compiler / info. Previously `--legacy`, `--coalesce`, `--O0`, and the entire `lc` proposal surface were undocumented.
@@ -58,9 +61,9 @@ krc check module.kr
 krc lc program.kr
 ```
 
-### Self-compilation (v2.8.25, ~253K tokens, ~159K AST nodes, ~2.0 MB source)
+### Self-compilation (v2.8.26, ~254K tokens, ~160K AST nodes, ~2.0 MB source)
 
-All 8 targets self-compile. CI verifies bootstrap fixed point (krc3 == krc4) and runs **566 tests** on every push. Numbers below are on an AMD Ryzen 9 7900X — see [`benchmarks/BENCHMARKS.md`](benchmarks/BENCHMARKS.md) for the complete run including gcc / rustc comparisons.
+All 8 targets self-compile. CI verifies bootstrap fixed point (krc3 == krc4) and runs **587 tests** on every push. Numbers below are on an AMD Ryzen 9 7900X — see [`benchmarks/BENCHMARKS.md`](benchmarks/BENCHMARKS.md) for the complete run including gcc / rustc comparisons.
 
 | Target | Legacy codegen | IR codegen (default) | IR vs legacy |
 |--------|---------------:|---------------------:|-------------:|

@@ -2,41 +2,74 @@
 
 All notable changes to `kernriftc` are documented in this file.
 
-## Unreleased — language ergonomics (2026-06)
+## v2.8.26 — 2026-06-11
+
+A large correctness, ergonomics, and tooling release. Every change preserves
+the bootstrap fixed point (krc compiles itself bit-identically) and is gated
+by `make check` (bootstrap + 587-test suite + IR-vs-legacy differential
+harnesses + a deterministic fuzz run), green across x86_64 and arm64
+(including native arm64 in CI).
 
 ### New language features
 - **Ternary `cond ? then : else`** — lowest-precedence, right-associative,
   short-circuiting conditional expression. Works on all four backends.
 - **`match` ergonomics** — arm bodies may be a single bare statement
-  (`1 => exit(1)`, braces optional); the `_ =>` default arm is documented and
-  supported; and **`match` works as an expression** (`let r = match x { 1 =>
-  10  _ => 0 }`), yielding the matching arm's value.
+  (`1 => exit(1)`, braces optional); the `_ =>` default arm is supported; and
+  **`match` works as an expression** (`let r = match x { 1 => 10  _ => 0 }`).
 - **`let` type inference** — `let name = expr` infers a local's type from its
-  initializer (required). Covers scalars, calls, arithmetic, comparisons,
-  ternaries and match expressions; struct values still need an explicit type.
+  initializer (scalars, calls, arithmetic, comparisons, ternaries, match
+  expressions; struct values still need an explicit type).
+- **`continue` inside `for` loops** — previously rejected; the desugar now
+  routes each `continue` through the loop increment so it can't spin.
 
-### Diagnostics
+### Diagnostics & static checks
+- **Parser error recovery** — many syntax errors are reported per run instead
+  of dying on the first (panic-mode recovery to synchronization tokens).
 - **Source spans with carets** for the common parser and codegen errors.
-  Syntax errors (`expect` / "unexpected … in expression"), undeclared
-  identifiers, undefined functions, and the `let` errors now print
-  `file:line:col: error: …` followed by the offending source line and a
-  `^~~~` underline — matching the format the type/semantic checker already
-  used. Errors routed through `report_error_at` (wrong-arg-count, redefinition,
-  type mismatches, "may not return", …) gained the column + span + caret too.
+- **"did you mean?"** suggestions (edit distance ≤ 2) on undeclared
+  identifiers and undefined functions, on every backend.
+- **Type checker is now default-on and fatal** — struct-field/return/argument/
+  ordering-comparison misuse aborts the build (`--no-check-types` to opt out).
+  The earlier struct/slice false positives that forced it to be advisory are
+  fixed. `krc check` now runs the full checker (so the LSP surfaces them).
 
-### Legacy-backend parity / correctness
-- Short-circuit `&&` / `||` and f-strings now behave identically on the
-  `--legacy` backends and the default IR backend (x86_64 and arm64).
-- **Legacy arm64 signed `/ % >>`** and **signed comparison operators**
-  (`< <= > >=` on `i64`) are now type-directed — they previously emitted
-  unsigned instructions on the legacy arm64 path only.
-- Calls to an undefined function are now rejected on arm64 (both backends)
-  with a clear error instead of hanging.
-- else-if chains of any length now pass return-path exhaustiveness analysis.
+### Optimizer & codegen
+- **Strength reduction** — unsigned `/` and `%` by a power-of-two literal lower
+  to `shr`/`and` instead of a hardware `div`.
+- **Range-checked AArch64 branch encoders** — every B/BL/B.cond/CBZ/CBNZ
+  displacement is range-checked; an out-of-range branch fails loudly instead
+  of silently masking into a wrong jump.
 
-All changes preserve the bootstrap fixed point (krc compiles itself bit-
-identically) and are validated by the full test suite plus IR-vs-legacy
-differential harnesses across x86_64 and arm64 (incl. real Pi 400 hardware).
+### Correctness (selected)
+- IR: fixed a sticky w32-clean miscompile, match var-map snapshot restore,
+  signed range patterns, signedness flow for params/struct fields, ternary/
+  match-expr result kinds, and `let` resolution on every fat-binary slice.
+- Legacy backends: scratch buffers no longer smash the return address; if/
+  while/ternary conditions test the full 64 bits; arm64 NaN compares, imm12
+  overflow, 2-byte fields, and signed `/ % >>`/comparisons are type-directed;
+  re-declared same-name locals use the latest declaration's type; `break`
+  inside `match` exits the loop; short-circuit `&&`/`||` and f-strings match
+  the IR backend.
+- Parser: enum hex initializers (`0x10`), range endpoints that are index/field
+  expressions (`a[0]..a[1]`), exit()/exhaustive-match return paths.
+- Arena overflow is now fatal (no silent truncation); caps raised 2×.
+
+### Tooling & CI
+- `make check` is the real gate: it can now actually fail, runs both
+  differential harnesses, a deterministic fuzzer (with a regression DB), and a
+  zero-spurious-warning invariant.
+- CLI subcommands require an exact match; `krc fmt`/`--version` fixed.
+
+### Standard library
+- `map` grows + rehashes past 64 keys (was a fixed cap that looped forever);
+  `read_file` returns 0 on a missing path (was a segfault); `exp(x)` is correct
+  for negative `x`; `net.kr` compiles again.
+
+### Documentation
+- New `STDLIB.md` (full per-function reference), `LKM.md` (kernel modules),
+  `DEBUGGING.md`, and a `docs/README.md` index. Corrected the operator-
+  precedence table, the CLI flag reference (incl. `-g` DWARF), the type-checker
+  rules, and the IR opcode list (107).
 
 ## Licensing — 2026-05-19
 
