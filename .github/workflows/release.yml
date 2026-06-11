@@ -32,10 +32,11 @@ jobs:
             exit 1
           fi
           chmod +x build/krc-bootstrap
-          cat src/lexer.kr src/ast.kr src/parser.kr src/codegen.kr \
-              src/codegen_aarch64.kr src/ir.kr src/ir_aarch64.kr src/format_macho.kr src/format_pe.kr \
-              src/format_archive.kr src/format_android.kr src/bcj.kr \
-              src/analysis.kr src/inliner.kr src/living.kr src/runtime.kr src/formatter.kr src/main.kr > build/krc.kr
+          # Concatenate sources via the Makefile target (single source of
+          # truth for SRCS) so this never drifts — a missing file here, e.g.
+          # type_check.kr, would only surface as a confusing "undefined
+          # function" at bootstrap time.
+          make build/krc.kr
           # Bootstrap: compile source with released krc (use --legacy for speed),
           # then re-compile with itself (which uses IR by default)
           ./build/krc-bootstrap --legacy --arch=x86_64 build/krc.kr -o build/krc2
