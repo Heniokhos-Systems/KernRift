@@ -1443,6 +1443,24 @@ else
     FAIL=$((FAIL + 1))
 fi
 rm -f /tmp/krc_dym_$$.kr /tmp/krc_dym_bin_$$ /tmp/krc_dym_err_$$
+# The arm64 backends have their own error sites (legacy Ident + the BL
+# fixup resolver), so assert the hint appears under --arch=arm64 too. This
+# is compile-only (the error is emitted at compile time), so it runs on any
+# host — catching arm64-only regressions without needing native arm64.
+TOTAL=$((TOTAL + 1))
+printf '%s\n' 'fn helper(u64 a) -> u64 { u64 b = a + 1
+    return b }
+fn main() { u64 x = helper(2)
+    exit(helpr(x)) }' > /tmp/krc_dyma_$$.kr
+if $KRC --arch=arm64 /tmp/krc_dyma_$$.kr -o /tmp/krc_dyma_bin_$$ 2>/tmp/krc_dyma_err_$$ ; then
+    echo "FAIL: arm64_suggest_fn (should not compile)"; FAIL=$((FAIL + 1))
+elif grep -qF "did you mean 'helper'?" /tmp/krc_dyma_err_$$; then
+    PASS=$((PASS + 1))
+else
+    echo "FAIL: arm64_suggest_fn (missing did-you-mean hint on arm64):"; sed 's/^/    /' /tmp/krc_dyma_err_$$ | head -3
+    FAIL=$((FAIL + 1))
+fi
+rm -f /tmp/krc_dyma_$$.kr /tmp/krc_dyma_bin_$$ /tmp/krc_dyma_err_$$
 diag_span_test "diag_argcount"   'fn f(u64 a) -> u64 { return a }
 fn main() { exit(f(1, 2)) }' "wrong number of arguments"
 diag_span_test "diag_let_noinit" 'fn main() {
