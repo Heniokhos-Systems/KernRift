@@ -163,7 +163,7 @@ jobs:
           ls -la /tmp/test-bins/
 
       - name: Upload test binaries
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v6
         with:
           name: test-bins
           path: /tmp/test-bins/
@@ -174,7 +174,7 @@ jobs:
     runs-on: macos-14
     steps:
       - name: Download binaries
-        uses: actions/download-artifact@v5
+        uses: actions/download-artifact@v7
         with:
           name: test-bins
           path: bins
@@ -230,7 +230,7 @@ jobs:
 
       - name: Upload macOS x86_64 debug log
         if: always()
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v6
         with:
           name: macos-x64-debug-log
           path: debug-kit/
@@ -330,7 +330,7 @@ jobs:
     runs-on: macos-14
     steps:
       - name: Download binaries
-        uses: actions/download-artifact@v5
+        uses: actions/download-artifact@v7
         with:
           name: test-bins
           path: bins
@@ -450,7 +450,7 @@ jobs:
 
       - name: Upload macOS ARM64 debug log
         if: always()
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v6
         with:
           name: macos-arm64-debug-log
           path: debug-kit/
@@ -470,7 +470,7 @@ jobs:
     runs-on: windows-latest
     steps:
       - name: Download binaries
-        uses: actions/download-artifact@v5
+        uses: actions/download-artifact@v7
         with:
           name: test-bins
           path: bins
@@ -619,7 +619,7 @@ jobs:
     runs-on: windows-11-arm
     steps:
       - name: Download binaries
-        uses: actions/download-artifact@v5
+        uses: actions/download-artifact@v7
         with:
           name: test-bins
           path: bins
