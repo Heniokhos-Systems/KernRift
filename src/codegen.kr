@@ -2480,6 +2480,22 @@ fn emit_load_xmmN_f64(uint64 reg, uint64 offset) {
     }
 }
 
+// movss xmmN, [rsp+offset] — load f32 into xmmN (N=0..7)
+fn emit_load_xmmN_f32(uint64 reg, uint64 offset) {
+    emit_byte(0xF3); emit_byte(0x0F); emit_byte(0x10)
+    uint8 reg3 = reg << 3
+    if offset < 128 {
+        uint8 mb = 0x44 | reg3
+        emit_byte(mb); emit_byte(0x24)
+        uint8 off8 = offset
+        emit_byte(off8)
+    } else {
+        uint8 mb = 0x84 | reg3
+        emit_byte(mb); emit_byte(0x24)
+        emit_u32_le(offset)
+    }
+}
+
 // movsd [rsp+offset], xmmN — store f64 from xmmN (N=0..7)
 fn emit_store_xmmN_f64(uint64 reg, uint64 offset) {
     emit_byte(0xF2); emit_byte(0x0F); emit_byte(0x11)
@@ -6342,61 +6358,118 @@ fn gen_expr(uint64 node) {
             gen_expr(wfa)
             emit_store_rax_to_stack(ptr_slot)
 
-            // Evaluate call arguments
+            // Evaluate call arguments. Record each arg's float-ness so f64/f32
+            // args go in xmm registers (SysV / Win x64 ABI) rather than GPRs —
+            // passing them in integer registers silently miscompiles any
+            // f64-taking callee reached through call_ptr.
+            uint64 cp_fkinds = alloc(arg_count * 8 + 8)
             uint64 weval = wca
             uint64 ai = 0
             while weval != 0 {
                 gen_expr(weval)
-                emit_store_rax_to_stack(arg_slots_base + ai * 8)
+                uint64 wfk = expr_is_float
+                uint64 fkp = cp_fkinds + ai * 8
+                unsafe { *(fkp as uint64) = wfk }
+                if expr_is_float != 0 {
+                    // store the float bits from xmm0
+                    if expr_is_float == 2 {
+                        emit_store_xmm0_f32(arg_slots_base + ai * 8)
+                    } else {
+                        emit_store_xmm0_f64(arg_slots_base + ai * 8)
+                    }
+                } else {
+                    emit_store_rax_to_stack(arg_slots_base + ai * 8)
+                }
                 ai = ai + 1
                 uint32 anxt = ast_next(weval)
                 weval = anxt
             }
 
-            // Load args into registers
+            // Load args into registers.
             if target_os == 2 {
-                // Windows x64: rcx, rdx, r8, r9
-                if arg_count >= 4 {
-                    emit_load_rax_from_stack(arg_slots_base + 24)
-                    emit_byte(0x49); emit_byte(0x89); emit_byte(0xC1) // mov r9, rax
-                }
-                if arg_count >= 3 {
-                    emit_load_rax_from_stack(arg_slots_base + 16)
-                    emit_mov_r8_rax()
-                }
-                if arg_count >= 2 {
-                    emit_load_rax_from_stack(arg_slots_base + 8)
-                    emit_mov_rdx_rax()
-                }
-                if arg_count >= 1 {
-                    emit_load_rax_from_stack(arg_slots_base)
-                    emit_mov_rcx_rax()
+                // Windows x64: positional — the Nth arg uses gpr[N] OR xmm[N]
+                // (rcx/xmm0, rdx/xmm1, r8/xmm2, r9/xmm3). Load high→low so a
+                // float arg never clobbers a not-yet-loaded slot via xmm0.
+                uint64 wi = arg_count
+                while wi > 0 {
+                    wi = wi - 1
+                    uint64 wfkp = cp_fkinds + wi * 8
+                    uint64 wfk2 = 0
+                    unsafe { *(wfkp as uint64) -> wfk2 }
+                    uint64 wsoff = arg_slots_base + wi * 8
+                    if wfk2 != 0 {
+                        // float arg → xmm[wi] (only first 4 are register args)
+                        if wi < 4 {
+                            if wfk2 == 2 {
+                                emit_load_xmmN_f32(wi, wsoff)
+                            } else {
+                                emit_load_xmmN_f64(wi, wsoff)
+                            }
+                        }
+                    } else {
+                        emit_load_rax_from_stack(wsoff)
+                        if wi == 0 { emit_mov_rcx_rax() }
+                        if wi == 1 { emit_mov_rdx_rax() }
+                        if wi == 2 { emit_mov_r8_rax() }
+                        if wi == 3 { emit_byte(0x49); emit_byte(0x89); emit_byte(0xC1) } // mov r9, rax
+                    }
                 }
             } else {
-                // SysV: rdi, rsi, rdx, rcx, r8, r9
-                if arg_count >= 6 {
-                    emit_load_rax_from_stack(arg_slots_base + 40)
-                    emit_byte(0x49); emit_byte(0x89); emit_byte(0xC1) // mov r9, rax
+                // SysV: independent counters — int args fill rdi,rsi,rdx,rcx,r8,r9
+                // and float args fill xmm0..xmm5, in source order.
+                // Determine per-arg int/float register index (source order).
+                uint64 cp_iidx = alloc(arg_count * 8 + 8)
+                uint64 cp_fidx = alloc(arg_count * 8 + 8)
+                uint64 nint = 0
+                uint64 nflt = 0
+                uint64 ci = 0
+                while ci < arg_count {
+                    uint64 cfkp = cp_fkinds + ci * 8
+                    uint64 cfk = 0
+                    unsafe { *(cfkp as uint64) -> cfk }
+                    uint64 iip = cp_iidx + ci * 8
+                    uint64 fip = cp_fidx + ci * 8
+                    if cfk != 0 {
+                        unsafe { *(fip as uint64) = nflt }
+                        unsafe { *(iip as uint64) = 0xFFFFFFFFFFFFFFFF }
+                        nflt = nflt + 1
+                    } else {
+                        unsafe { *(iip as uint64) = nint }
+                        unsafe { *(fip as uint64) = 0xFFFFFFFFFFFFFFFF }
+                        nint = nint + 1
+                    }
+                    ci = ci + 1
                 }
-                if arg_count >= 5 {
-                    emit_load_rax_from_stack(arg_slots_base + 32)
-                    emit_byte(0x49); emit_byte(0x89); emit_byte(0xC0) // mov r8, rax
-                }
-                if arg_count >= 4 {
-                    emit_load_rax_from_stack(arg_slots_base + 24)
-                    emit_byte(0x48); emit_byte(0x89); emit_byte(0xC1) // mov rcx, rax
-                }
-                if arg_count >= 3 {
-                    emit_load_rax_from_stack(arg_slots_base + 16)
-                    emit_mov_rdx_rax()
-                }
-                if arg_count >= 2 {
-                    emit_load_rax_from_stack(arg_slots_base + 8)
-                    emit_mov_rsi_rax()
-                }
-                if arg_count >= 1 {
-                    emit_load_rax_from_stack(arg_slots_base)
-                    emit_mov_rdi_rax()
+                uint64 si = arg_count
+                while si > 0 {
+                    si = si - 1
+                    uint64 sfkp = cp_fkinds + si * 8
+                    uint64 sfk = 0
+                    unsafe { *(sfkp as uint64) -> sfk }
+                    uint64 ssoff = arg_slots_base + si * 8
+                    if sfk != 0 {
+                        uint64 sfip = cp_fidx + si * 8
+                        uint64 sfi = 0
+                        unsafe { *(sfip as uint64) -> sfi }
+                        if sfi < 6 {
+                            if sfk == 2 {
+                                emit_load_xmmN_f32(sfi, ssoff)
+                            } else {
+                                emit_load_xmmN_f64(sfi, ssoff)
+                            }
+                        }
+                    } else {
+                        uint64 siip = cp_iidx + si * 8
+                        uint64 sii = 0
+                        unsafe { *(siip as uint64) -> sii }
+                        emit_load_rax_from_stack(ssoff)
+                        if sii == 0 { emit_mov_rdi_rax() }
+                        if sii == 1 { emit_mov_rsi_rax() }
+                        if sii == 2 { emit_mov_rdx_rax() }
+                        if sii == 3 { emit_byte(0x48); emit_byte(0x89); emit_byte(0xC1) } // mov rcx, rax
+                        if sii == 4 { emit_byte(0x49); emit_byte(0x89); emit_byte(0xC0) } // mov r8, rax
+                        if sii == 5 { emit_byte(0x49); emit_byte(0x89); emit_byte(0xC1) } // mov r9, rax
+                    }
                 }
             }
 
