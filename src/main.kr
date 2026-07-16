@@ -2354,6 +2354,7 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
         wchild = nxt
     }
 
+
     // Resolve call fixups
     if arch == 0 {
         resolve_fixups()

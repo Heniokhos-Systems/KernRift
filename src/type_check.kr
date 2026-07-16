@@ -71,20 +71,73 @@ fn tc_fn_node_register(uint64 name_tok, uint64 fn_node) {
     tc_fn_node_count = tc_fn_node_count + 1
 }
 
-fn tc_fn_node_lookup(uint64 name_tok) -> uint64 {
-    uint64 i = 0
-    while i < tc_fn_node_count {
-        uint64 entry = tc_fn_node_table + i * 8
+// Lazily-built hash index over tc_fn_node_table (append-only per compile).
+// 4096 slots x [name_tok u32, idx u32], idx 0xFFFFFFFF = empty, first-wins.
+static uint64 tc_fn_hash_tbl = 0
+static uint64 tc_fn_hash_built_n = 0
+
+fn tc_fn_hash_sync() {
+    if tc_fn_hash_tbl == 0 {
+        tc_fn_hash_tbl = alloc(4096 * 8)
+        uint64 ci = 0
+        while ci < 4096 {
+            uint64 sp = tc_fn_hash_tbl + ci * 8 + 4
+            uint32 ff = 0xFFFFFFFF
+            unsafe { *(sp as uint32) = ff }
+            ci = ci + 1
+        }
+    }
+    while tc_fn_hash_built_n < tc_fn_node_count {
+        uint64 entry = tc_fn_node_table + tc_fn_hash_built_n * 8
         uint32 nt = 0
         unsafe { *(entry as uint32) -> nt }
         uint64 wnt = nt
-        if tok_text_eq(wnt, name_tok) != 0 {
+        uint64 h = tok_text_hash(wnt) & 4095
+        uint64 placed = 0
+        while placed == 0 {
+            uint64 slot = tc_fn_hash_tbl + h * 8
+            uint64 s4 = slot + 4
+            uint32 sidx = 0
+            unsafe { *(s4 as uint32) -> sidx }
+            if sidx == 0xFFFFFFFF {
+                uint32 nt2 = nt
+                unsafe { *(slot as uint32) = nt2 }
+                uint32 mi = tc_fn_hash_built_n
+                unsafe { *(s4 as uint32) = mi }
+                placed = 1
+            } else {
+                uint32 snt = 0
+                unsafe { *(slot as uint32) -> snt }
+                uint64 wsnt = snt
+                if tok_text_eq(wsnt, wnt) != 0 { placed = 1 }
+                else { h = (h + 1) & 4095 }
+            }
+        }
+        tc_fn_hash_built_n = tc_fn_hash_built_n + 1
+    }
+}
+
+fn tc_fn_node_lookup(uint64 name_tok) -> uint64 {
+    tc_fn_hash_sync()
+    uint64 h = tok_text_hash(name_tok) & 4095
+    while 1 == 1 {
+        uint64 slot = tc_fn_hash_tbl + h * 8
+        uint64 s4 = slot + 4
+        uint32 sidx = 0
+        unsafe { *(s4 as uint32) -> sidx }
+        if sidx == 0xFFFFFFFF { return 0 }
+        uint32 snt = 0
+        unsafe { *(slot as uint32) -> snt }
+        uint64 wsnt = snt
+        if tok_text_eq(wsnt, name_tok) != 0 {
+            uint64 wi = sidx
+            uint64 entry = tc_fn_node_table + wi * 8
             uint64 e4 = entry + 4
             uint32 fn32 = 0
             unsafe { *(e4 as uint32) -> fn32 }
             return fn32
         }
-        i = i + 1
+        h = (h + 1) & 4095
     }
     return 0
 }
@@ -95,11 +148,46 @@ fn tc_init() {
         tc_local_cap = 4096
         tc_local_table = alloc(tc_local_cap * 8)
     }
-    tc_local_count = 0
+    tc_locals_reset()
     if tc_fn_node_table == 0 {
         tc_fn_node_table = alloc(1024 * 8)
     }
     tc_fn_node_count = 0
+}
+
+// Hash index over the per-function local table. Gen-stamped (bumped by
+// tc_locals_reset) so it never needs clearing. Register overwrites the
+// slot's typekind — equivalent to the old reverse scan's latest-wins
+// shadowing (the table is append-only within a function).
+// 16384 slots x [gen u32, name_tok u32, tk u32].
+static uint64 tc_local_hash_tbl = 0
+static uint64 tc_local_gen = 0
+
+fn tc_locals_reset() {
+    tc_local_count = 0
+    if tc_local_hash_tbl == 0 {
+        tc_local_hash_tbl = alloc(16384 * 12)
+        memset(tc_local_hash_tbl, 0, 16384 * 12)
+    }
+    tc_local_gen = tc_local_gen + 1
+}
+
+fn tc_local_find_slot(uint64 name_tok) -> uint64 {
+    uint64 h = tok_text_hash(name_tok) & 16383
+    uint32 cur_gen = tc_local_gen
+    while 1 == 1 {
+        uint64 slot = tc_local_hash_tbl + h * 12
+        uint32 g = 0
+        unsafe { *(slot as uint32) -> g }
+        if g != cur_gen { return slot }
+        uint64 s4 = slot + 4
+        uint32 nt = 0
+        unsafe { *(s4 as uint32) -> nt }
+        uint64 wnt = nt
+        if tok_text_eq(wnt, name_tok) != 0 { return slot }
+        h = (h + 1) & 16383
+    }
+    return 0
 }
 
 fn tc_local_register(uint64 name_tok, uint64 typekind) {
@@ -111,25 +199,25 @@ fn tc_local_register(uint64 name_tok, uint64 typekind) {
     uint32 tk = typekind
     unsafe { *(e4 as uint32) = tk }
     tc_local_count = tc_local_count + 1
+    uint64 slot = tc_local_find_slot(name_tok)
+    uint32 cur_gen = tc_local_gen
+    unsafe { *(slot as uint32) = cur_gen }
+    uint64 s4 = slot + 4
+    unsafe { *(s4 as uint32) = nt }
+    uint64 s8 = slot + 8
+    unsafe { *(s8 as uint32) = tk }
 }
 
 fn tc_local_lookup(uint64 name_tok) -> uint64 {
-    // Walk in REVERSE so inner scopes shadow outer ones if names collide.
-    uint64 i = tc_local_count
-    while i > 0 {
-        i = i - 1
-        uint64 entry = tc_local_table + i * 8
-        uint32 nt = 0
-        unsafe { *(entry as uint32) -> nt }
-        uint64 wnt = nt
-        if tok_text_eq(wnt, name_tok) != 0 {
-            uint64 e4 = entry + 4
-            uint32 tk = 0
-            unsafe { *(e4 as uint32) -> tk }
-            return tk
-        }
-    }
-    return 0
+    uint64 slot = tc_local_find_slot(name_tok)
+    uint32 g = 0
+    unsafe { *(slot as uint32) -> g }
+    uint32 cur_gen = tc_local_gen
+    if g != cur_gen { return 0 }
+    uint64 s8 = slot + 8
+    uint32 tk = 0
+    unsafe { *(s8 as uint32) -> tk }
+    return tk
 }
 
 // Map a type-keyword token (or struct-name token) to a TypeKind.
@@ -785,7 +873,7 @@ fn tc_check_stmt(uint64 node) {
 }
 
 fn tc_check_function(uint64 fn_node) {
-    tc_local_count = 0
+    tc_locals_reset()
     uint32 fn_tok = ast_data1(fn_node)
     uint32 ret_tok = ast_data2(fn_node)
     tc_current_fn_tok = fn_tok
@@ -1015,7 +1103,7 @@ fn resolve_stmt_infer(uint64 node) {
 }
 
 fn resolve_fn_infer(uint64 fn_node) {
-    tc_local_count = 0
+    tc_locals_reset()
     // Register parameters so `let x = param` resolves.
     uint32 param = ast_child(fn_node)
     uint64 wp = param

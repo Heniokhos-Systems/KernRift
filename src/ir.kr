@@ -21,6 +21,8 @@
 // Opcode constants
 // ---------------------------------------------------------------------------
 
+static uint64 ir_opt_rewrites = 0
+
 static uint64 IR_CONST = 1
 static uint64 IR_ADD = 2
 static uint64 IR_SUB = 3
@@ -824,27 +826,95 @@ fn ir_slice_len_get(uint64 name_tok) -> uint64 {
     return 0xFFFFFFFF
 }
 
+// Hash index over the var map: open-addressing, 4096 slots of
+// [gen u32, name_tok u32, map_idx u32]. Slots from an older generation
+// count as empty, so the table is never cleared between functions.
+// Truncation restores (`ir_var_map_count = snap`) can strand a slot whose
+// map_idx points past the count or at a recycled entry — validity is
+// re-checked against the array on every hit (slot.name_tok must equal
+// the array entry's name_tok and map_idx < count).
+static uint64 ir_var_hash_tbl = 0
+static uint64 ir_var_gen = 0
+
+fn ir_var_hash(uint64 name_tok) -> uint64 {
+    uint64 start = tok_text_start(name_tok)
+    uint64 len = tok_text_len(name_tok)
+    uint64 h = 2166136261
+    uint64 i = 0
+    while i < len {
+        uint64 p = cg_source + start + i
+        uint64 c = 0
+        unsafe { *(p as uint8) -> c }
+        h = (h ^ c) * 16777619
+        h = h & 0xFFFFFFFF
+        i = i + 1
+    }
+    h = h ^ (h >> 15)
+    return h & 4095
+}
+
+// Returns the slot address for name_tok: either the slot already holding
+// this name (by text) in the current generation, or the first
+// empty-for-this-generation slot along the probe chain.
+fn ir_var_find_slot(uint64 name_tok) -> uint64 {
+    uint64 h = ir_var_hash(name_tok)
+    uint32 cur_gen = ir_var_gen
+    while 1 == 1 {
+        uint64 slot = ir_var_hash_tbl + h * 12
+        uint32 g = 0
+        unsafe { *(slot as uint32) -> g }
+        if g != cur_gen { return slot }
+        uint64 s4 = slot + 4
+        uint32 nt = 0
+        unsafe { *(s4 as uint32) -> nt }
+        uint64 wnt = nt
+        if tok_text_eq(wnt, name_tok) != 0 { return slot }
+        h = (h + 1) & 4095
+    }
+    return 0
+}
+
+// Returns the valid map index for the slot, or 0xFFFFFFFF if the slot is
+// empty or stale (truncated away by a snapshot restore).
+fn ir_var_slot_idx(uint64 slot) -> uint64 {
+    uint32 g = 0
+    unsafe { *(slot as uint32) -> g }
+    uint32 cur_gen = ir_var_gen
+    if g != cur_gen { return 0xFFFFFFFF }
+    uint64 s8 = slot + 8
+    uint32 mi = 0
+    unsafe { *(s8 as uint32) -> mi }
+    uint64 wmi = mi
+    if wmi >= ir_var_map_count { return 0xFFFFFFFF }
+    uint64 s4 = slot + 4
+    uint32 snt = 0
+    unsafe { *(s4 as uint32) -> snt }
+    uint64 entry = ir_var_map + wmi * 8
+    uint32 ent = 0
+    unsafe { *(entry as uint32) -> ent }
+    if ent != snt { return 0xFFFFFFFF }
+    return wmi
+}
+
 fn ir_var_map_init() {
     if ir_var_map == 0 { ir_var_map = alloc(1024 * 8) }
+    if ir_var_hash_tbl == 0 {
+        ir_var_hash_tbl = alloc(4096 * 12)
+        memset(ir_var_hash_tbl, 0, 4096 * 12)
+    }
+    ir_var_gen = ir_var_gen + 1
     ir_var_map_count = 0
     ir_slice_len_count = 0
 }
 
 fn ir_var_set(uint64 name_tok, uint64 vreg) {
-    // Update existing or add new
-    uint64 i = 0
-    while i < ir_var_map_count {
-        uint64 entry = ir_var_map + i * 8
-        uint32 stored = 0
-        unsafe { *(entry as uint32) -> stored }
-        uint64 ws = stored
-        if tok_text_eq(ws, name_tok) != 0 {
-            uint64 e4 = entry + 4
-            uint32 vr = vreg
-            unsafe { *(e4 as uint32) = vr }
-            return
-        }
-        i = i + 1
+    uint64 slot = ir_var_find_slot(name_tok)
+    uint64 idx = ir_var_slot_idx(slot)
+    if idx != 0xFFFFFFFF {
+        uint64 e4 = ir_var_map + idx * 8 + 4
+        uint32 vr = vreg
+        unsafe { *(e4 as uint32) = vr }
+        return
     }
     // Add new entry
     if ir_var_map_count >= 1024 { return }
@@ -854,6 +924,14 @@ fn ir_var_set(uint64 name_tok, uint64 vreg) {
     uint64 e4 = entry + 4
     uint32 vr = vreg
     unsafe { *(e4 as uint32) = vr }
+    // Record in the hash index (reuse the probed slot).
+    uint32 cur_gen = ir_var_gen
+    unsafe { *(slot as uint32) = cur_gen }
+    uint64 s4 = slot + 4
+    unsafe { *(s4 as uint32) = nt }
+    uint64 s8 = slot + 8
+    uint32 mi = ir_var_map_count
+    unsafe { *(s8 as uint32) = mi }
     ir_var_map_count = ir_var_map_count + 1
 }
 
@@ -899,21 +977,13 @@ fn ir_snapshot_debug_vars() {
 }
 
 fn ir_var_get(uint64 name_tok) -> uint64 {
-    uint64 i = 0
-    while i < ir_var_map_count {
-        uint64 entry = ir_var_map + i * 8
-        uint32 stored = 0
-        unsafe { *(entry as uint32) -> stored }
-        uint64 ws = stored
-        if tok_text_eq(ws, name_tok) != 0 {
-            uint64 e4 = entry + 4
-            uint32 vr = 0
-            unsafe { *(e4 as uint32) -> vr }
-            return vr
-        }
-        i = i + 1
-    }
-    return 0xFFFFFFFF
+    uint64 slot = ir_var_find_slot(name_tok)
+    uint64 idx = ir_var_slot_idx(slot)
+    if idx == 0xFFFFFFFF { return 0xFFFFFFFF }
+    uint64 e4 = ir_var_map + idx * 8 + 4
+    uint32 vr = 0
+    unsafe { *(e4 as uint32) -> vr }
+    return vr
 }
 
 // Emit COPY instructions from current var map vregs to snapshot vregs,
@@ -4718,16 +4788,20 @@ fn ir_insn_has_def(uint64 ii) -> uint64 {
 @export
 fn ir_compute_liveness() {
     ir_liveness_init()
+    ir_build_bb_lists()
     uint64 set_bytes = ir_live_words * 8
     uint64 changed = 1
+    uint64 lv_iter = 0
     while changed != 0 {
         changed = 0
+        lv_iter = lv_iter + 1
         uint64 bi = ir_bb_count
         while bi > 0 {
             bi = bi - 1
             // Step 1: live_out[bi] = union of live_in[succ] for each successor
             uint64 s0 = ir_bb_succ0(bi)
             uint64 s1 = ir_bb_succ1(bi)
+            uint64 out_changed = 0
             uint64 wi = 0
             while wi < ir_live_words {
                 uint64 out_val = 0
@@ -4744,9 +4818,18 @@ fn ir_compute_liveness() {
                     out_val = out_val | v1
                 }
                 uint64 p_out = ir_live_out + bi * set_bytes + wi * 8
-                unsafe { *(p_out as uint64) = out_val }
+                uint64 out_old = 0
+                unsafe { *(p_out as uint64) -> out_old }
+                if out_old != out_val {
+                    unsafe { *(p_out as uint64) = out_val }
+                    out_changed = 1
+                }
                 wi = wi + 1
             }
+            // live_in = f(live_out, insns) and insns never change, so if
+            // this block's live_out is identical to the previous iteration
+            // its live_in is already correct — skip the transfer function.
+            if lv_iter > 1 && out_changed == 0 { continue }
 
             // Step 2: Start with live_out, walk instructions backwards
             // Copy live_out to a temp set. tmp is a static scratch buffer
@@ -4760,44 +4843,49 @@ fn ir_compute_liveness() {
             }
             uint64 tmp = ir_live_tmp
             uint64 ci = 0
+            uint64 out_base = ir_live_out + bi * set_bytes
             while ci < set_bytes {
-                uint64 ps = ir_live_out + bi * set_bytes + ci
+                uint64 ps = out_base + ci
                 uint64 pd = tmp + ci
                 uint64 bv = 0
-                unsafe { *(ps as uint8) -> bv }
-                uint8 bb = bv
-                unsafe { *(pd as uint8) = bb }
-                ci = ci + 1
+                unsafe { *(ps as uint64) -> bv }
+                unsafe { *(pd as uint64) = bv }
+                ci = ci + 8
             }
 
-            // Walk instructions in reverse order within this block.
-            // Used to assume consecutive indices (first_insn..last_insn),
-            // but LICM appends hoisted insns to the global tail and just
-            // splices them into the BB's linked list. Walk the actual
-            // linked list forward into a stack, then unwind.
-            uint64 blk_first = ir_bb_first_insn(bi)
-            uint64 lv_done = 0
-            if blk_first == 0xFFFFFFFF { lv_done = 1 }
-            if ir_walk_stack == 0 { ir_walk_stack = alloc(65536 * 4) }
-            uint64 lv_stack_n = 0
-            uint64 lv_walk = blk_first
-            while lv_walk != 0xFFFFFFFF && lv_stack_n < 65536 {
-                uint64 sp_ent = ir_walk_stack + lv_stack_n * 4
-                uint32 lw32 = lv_walk
-                unsafe { *(sp_ent as uint32) = lw32 }
-                lv_stack_n = lv_stack_n + 1
-                lv_walk = ir_insn_next(lv_walk)
-            }
-            while lv_stack_n > 0 && lv_done == 0 {
+            // Walk instructions in reverse order within this block using
+            // the flat per-BB lists prebuilt by ir_build_bb_lists() (the
+            // BB linked lists never change during the dataflow iteration).
+            uint64 lv_off_p = ir_bb_list_off + bi * 4
+            uint32 lv_off32 = 0
+            unsafe { *(lv_off_p as uint32) -> lv_off32 }
+            uint64 lv_end_p = ir_bb_list_off + (bi + 1) * 4
+            uint32 lv_end32 = 0
+            unsafe { *(lv_end_p as uint32) -> lv_end32 }
+            uint64 lv_off = lv_off32
+            uint64 lv_stack_n = lv_end32 - lv_off32
+            while lv_stack_n > 0 {
                 lv_stack_n = lv_stack_n - 1
-                uint64 sp_ent = ir_walk_stack + lv_stack_n * 4
+                uint64 sp_ent = ir_bb_list_buf + (lv_off + lv_stack_n) * 4
                 uint32 cur32 = 0
                 unsafe { *(sp_ent as uint32) -> cur32 }
-                uint64 cur_ii = cur32
+                // Manually inlined instruction-field loads (insn record is
+                // 32 bytes: op u32, dest u32, src1 u32, src2 u32, imm u64).
+                uint64 ins_p = ir_insn_buf + cur32 * 32
+                uint32 op32 = 0
+                unsafe { *(ins_p as uint32) -> op32 }
+                uint64 op = op32
+                if op == 0 {
+                    // LICM-elided slot — no def, no uses.
+                    continue
+                }
 
-                // Remove def
-                if ir_insn_has_def(cur_ii) != 0 {
-                    uint64 def_v = ir_insn_dest(cur_ii)
+                // Remove def (inline ir_insn_has_def's no-def op set)
+                if op != 40 && op != 41 && op != 43 && op != 31 && op != 51 && op != 71 && op != 78 && op != 82 && op != 83 && op != 90 && op != 94 {
+                    uint64 dp0 = ins_p + 4
+                    uint32 d32 = 0
+                    unsafe { *(dp0 as uint32) -> d32 }
+                    uint64 def_v = d32
                     if def_v < ir_vreg_next {
                         uint64 dw = def_v / 64
                         uint64 db = def_v & 63
@@ -4810,12 +4898,10 @@ fn ir_compute_liveness() {
                 }
 
                 // Add src1 use
-                uint64 op = ir_insn_opcode(cur_ii)
-                if op == 0 {
-                    // LICM-elided slot — no def, no uses.
-                    continue
-                }
-                uint64 use1 = ir_insn_src1(cur_ii)
+                uint64 s1p = ins_p + 8
+                uint32 s1_32 = 0
+                unsafe { *(s1p as uint32) -> s1_32 }
+                uint64 use1 = s1_32
                 if use1 < ir_vreg_next && op != 1 {
                     uint64 uw = use1 / 64
                     uint64 ub = use1 & 63
@@ -4827,7 +4913,10 @@ fn ir_compute_liveness() {
                 }
 
                 // Add src2 use
-                uint64 use2 = ir_insn_src2(cur_ii)
+                uint64 s2p = ins_p + 12
+                uint32 s2_32 = 0
+                unsafe { *(s2p as uint32) -> s2_32 }
+                uint64 use2 = s2_32
                 if use2 < ir_vreg_next && op != 1 && op != 12 && op != 13 && op != 30 && op != 42 && op != 61 && op != 135 && op != 136 && op != 138 {
                     uint64 uw = use2 / 64
                     uint64 ub = use2 & 63
@@ -4840,7 +4929,9 @@ fn ir_compute_liveness() {
 
                 // Add imm-as-vreg use for MEMCPY(72), MEMSET(76), RET3(83), ATOMIC_CAS(93), FFMA(98)
                 if op == 72 || op == 76 || op == 83 || op == 93 || op == 98 {
-                    uint64 use_imm = ir_insn_imm(cur_ii)
+                    uint64 imp = ins_p + 16
+                    uint64 use_imm = 0
+                    unsafe { *(imp as uint64) -> use_imm }
                     if use_imm < ir_vreg_next && use_imm > 0 {
                         uint64 iw = use_imm / 64
                         uint64 ib = use_imm & 63
@@ -4854,19 +4945,21 @@ fn ir_compute_liveness() {
 
             }
 
-            // Check if live_in changed
+            // Check if live_in changed (word-at-a-time)
             ci = 0
+            uint64 in_base = ir_live_in + bi * set_bytes
             while ci < set_bytes {
-                uint64 p_old = ir_live_in + bi * set_bytes + ci
+                uint64 p_old = in_base + ci
                 uint64 p_new = tmp + ci
                 uint64 ov = 0
                 uint64 nv = 0
-                unsafe { *(p_old as uint8) -> ov }
-                unsafe { *(p_new as uint8) -> nv }
-                if ov != nv { changed = 1 }
-                uint8 nb = nv
-                unsafe { *(p_old as uint8) = nb }
-                ci = ci + 1
+                unsafe { *(p_old as uint64) -> ov }
+                unsafe { *(p_new as uint64) -> nv }
+                if ov != nv {
+                    changed = 1
+                    unsafe { *(p_old as uint64) = nv }
+                }
+                ci = ci + 8
             }
         }
     }
@@ -4879,7 +4972,9 @@ fn ir_compute_liveness() {
 // the CMP+JCC fusion peephole.
 fn ir_compute_use_count() {
     if ir_use_count_buf == 0 { return }
-    memset(ir_use_count_buf, 0, ir_use_count_cap)
+    uint64 uc_clear = ir_vreg_next
+    if uc_clear > ir_use_count_cap { uc_clear = ir_use_count_cap }
+    memset(ir_use_count_buf, 0, uc_clear)
     uint64 i = 0
     while i < ir_insn_count {
         uint64 op = ir_insn_opcode(i)
@@ -5160,26 +5255,22 @@ fn ir_graph_color() {
             wi = wi + 1
         }
 
-        // Walk instructions in reverse order within this block.
-        // Walk linked list forward into a stack, then unwind — LICM
-        // hoists out-of-order in the global insn array, so consecutive
-        // index ranges don't reflect the BB membership.
+        // Walk instructions in reverse order within this block using the
+        // flat per-BB lists built by ir_compute_liveness (which always
+        // runs immediately before regalloc; the BB lists are unchanged).
         uint64 first = ir_bb_first_insn(bi)
         if first != 0xFFFFFFFF {
-            if ir_walk_stack == 0 { ir_walk_stack = alloc(65536 * 4) }
-            uint64 ig_stack_n = 0
-            uint64 ig_walk = first
-            while ig_walk != 0xFFFFFFFF && ig_stack_n < 65536 {
-                uint64 sp_ent = ir_walk_stack + ig_stack_n * 4
-                uint32 lw32 = ig_walk
-                unsafe { *(sp_ent as uint32) = lw32 }
-                ig_stack_n = ig_stack_n + 1
-                ig_walk = ir_insn_next(ig_walk)
-            }
-            uint64 ig_done = 0
-            while ig_stack_n > 0 && ig_done == 0 {
+            uint64 ig_off_p = ir_bb_list_off + bi * 4
+            uint32 ig_off32 = 0
+            unsafe { *(ig_off_p as uint32) -> ig_off32 }
+            uint64 ig_end_p = ir_bb_list_off + (bi + 1) * 4
+            uint32 ig_end32 = 0
+            unsafe { *(ig_end_p as uint32) -> ig_end32 }
+            uint64 ig_off = ig_off32
+            uint64 ig_stack_n = ig_end32 - ig_off32
+            while ig_stack_n > 0 {
                 ig_stack_n = ig_stack_n - 1
-                uint64 sp_ent = ir_walk_stack + ig_stack_n * 4
+                uint64 sp_ent = ir_bb_list_buf + (ig_off + ig_stack_n) * 4
                 uint32 ii32 = 0
                 unsafe { *(sp_ent as uint32) -> ii32 }
                 uint64 ii = ii32
@@ -5200,13 +5291,9 @@ fn ir_graph_color() {
                             // For each set bit, add interference
                             uint64 bits = lbits
                             while bits != 0 {
-                                // Find lowest set bit
-                                uint64 bit_pos = 0
-                                uint64 test = bits
-                                while (test & 1) == 0 {
-                                    test = test >> 1
-                                    bit_pos = bit_pos + 1
-                                }
+                                // Find lowest set bit (ctz via popcount)
+                                uint64 iso_b = bits & (0 - bits)
+                                uint64 bit_pos = ir_popcount64(iso_b - 1)
                                 uint64 other = lw * 64 + bit_pos
                                 if other != dv && other < vcount {
                                     // Set ig[dv][other] and ig[other][dv]
@@ -5375,9 +5462,8 @@ fn ir_graph_color() {
                             if (bw == keep / 64) { cb = cb & ~(1 << (keep & 63)) }
                             if (bw == drop / 64) { cb = cb & ~(1 << (drop & 63)) }
                             while cb != 0 {
-                                uint64 sp = 0
-                                uint64 st = cb
-                                while (st & 1) == 0 { st = st >> 1; sp = sp + 1 }
+                                uint64 iso_cb = cb & (0 - cb)
+                                uint64 sp = ir_popcount64(iso_cb - 1)
                                 uint64 nidx = bw * 64 + sp
                                 if nidx < vcount {
                                     uint64 nrep = ir_uf_find(nidx)
@@ -5425,9 +5511,8 @@ fn ir_graph_color() {
                                     if gw == g_b / 64 { gav = gav & ~(1 << (g_b & 63)) }
                                     if gw == g_a / 64 { gav = gav & ~(1 << (g_a & 63)) }
                                     while gav != 0 && ok != 0 {
-                                        uint64 sp = 0
-                                        uint64 st = gav
-                                        while (st & 1) == 0 { st = st >> 1; sp = sp + 1 }
+                                        uint64 iso_g = gav & (0 - gav)
+                                        uint64 sp = ir_popcount64(iso_g - 1)
                                         uint64 nidx = gw * 64 + sp
                                         if nidx < vcount {
                                             uint64 in_b = (gbv >> sp) & 1
@@ -5476,9 +5561,8 @@ fn ir_graph_color() {
                                 unsafe { *(da as uint64) = dav | sav }
                                 uint64 sb = sav
                                 while sb != 0 {
-                                    uint64 sp = 0
-                                    uint64 st = sb
-                                    while (st & 1) == 0 { st = st >> 1; sp = sp + 1 }
+                                    uint64 iso_s = sb & (0 - sb)
+                                    uint64 sp = ir_popcount64(iso_s - 1)
                                     uint64 nidx = mw * 64 + sp
                                     if nidx != keep && nidx < vcount {
                                         uint64 nrp = ig + nidx * row_bytes + (keep / 64) * 8
@@ -5547,9 +5631,8 @@ fn ir_graph_color() {
             uint64 nbits = 0
             unsafe { *(np as uint64) -> nbits }
             while nbits != 0 {
-                uint64 bp = 0
-                uint64 bt = nbits
-                while (bt & 1) == 0 { bt = bt >> 1; bp = bp + 1 }
+                uint64 iso_n = nbits & (0 - nbits)
+                uint64 bp = ir_popcount64(iso_n - 1)
                 uint64 neighbor = nw * 64 + bp
                 if neighbor < vcount {
                     // Look up rep's colour — followers haven't been
@@ -5597,7 +5680,6 @@ fn ir_graph_color() {
         }
         vi = vi + 1
     }
-
 }
 
 // ---------------------------------------------------------------------------
@@ -9740,7 +9822,9 @@ fn ir_opt_const_fold() {
     // Recompute the per-vreg def count for this pass (LICM/CSE/rotate between
     // const-fold runs add fresh single-def vregs at high indices).
     if ir_w32_multidef == 0 { ir_w32_multidef = alloc(65536) }
-    memset(ir_w32_multidef, 0, 65536)
+    uint64 ir_cf_clear = ir_vreg_next
+    if ir_cf_clear > 65536 { ir_cf_clear = 65536 }
+    memset(ir_w32_multidef, 0, ir_cf_clear)
     uint64 dscan = 0
     while dscan < ir_insn_count {
         uint64 dsop = ir_insn_opcode(dscan)
@@ -9767,7 +9851,7 @@ fn ir_opt_const_fold() {
         // uses in another BB (loop-carried values, merge points, etc.).
         uint64 bb = ir_insn_bb(ii)
         if bb != cur_bb {
-            memset(ir_const_known, 0, 65536)
+            memset(ir_const_known, 0, ir_cf_clear)
             cur_bb = bb
         }
 
@@ -10240,10 +10324,9 @@ fn ir_opt_is_side_effect(uint64 op) -> uint64 {
     return 0
 }
 
+static uint64 ir_dce_changed = 0
+
 fn ir_opt_dce_mark(uint64 vreg, uint64 changed_ptr) -> uint64 {
-    uint64 c = 0
-    uint64 cp = changed_ptr
-    unsafe { *(cp as uint64) -> c }
     if vreg > 0 && vreg < 65536 {
         uint64 lp = ir_dce_live + vreg
         uint8 old = 0
@@ -10251,31 +10334,35 @@ fn ir_opt_dce_mark(uint64 vreg, uint64 changed_ptr) -> uint64 {
         if old == 0 {
             uint8 one = 1
             unsafe { *(lp as uint8) = one }
-            c = 1
-            unsafe { *(cp as uint64) = c }
+            ir_dce_changed = 1
+            return 1
         }
     }
-    return c
+    return 0
 }
 
 fn ir_opt_dce() {
     if ir_dce_live == 0 { ir_dce_live = alloc(65536) }
-    memset(ir_dce_live, 0, 65536)
+    uint64 dce_clear = ir_vreg_next
+    if dce_clear > 65536 { dce_clear = 65536 }
+    memset(ir_dce_live, 0, dce_clear)
 
-    // Mark phase: iterate forward over instructions, marking live vregs.
-    // Because marks only propagate from dest-is-live to src-must-be-live, and
-    // a use may come before its def in linear order inside a loop, we iterate
-    // to a fixed point. Live set only grows — terminates in O(vregs) rounds.
+    // Mark phase: iterate BACKWARD over instructions, marking live vregs.
+    // SSA defs precede their uses in linear order, so a backward sweep
+    // propagates dest-live → src-live through whole chains in one pass;
+    // loop-carried uses may still need a second round, so iterate to a
+    // fixed point (typically 2 rounds instead of the forward walk's
+    // chain-depth rounds).
     uint64 changed = 1
-    uint64 changed_ptr = alloc(8)
     while changed != 0 {
         changed = 0
-        unsafe { *(changed_ptr as uint64) = changed }
+        ir_dce_changed = 0
 
-        uint64 ii = 0
-        while ii < ir_insn_count {
+        uint64 ii = ir_insn_count
+        while ii > 0 {
+            ii = ii - 1
             uint64 op = ir_insn_opcode(ii)
-            if op == 0 { ii = ii + 1; continue }
+            if op == 0 { continue }
 
             uint64 dest = ir_insn_dest(ii)
             uint64 s1 = ir_insn_src1(ii)
@@ -10291,25 +10378,22 @@ fn ir_opt_dce() {
             }
 
             if keep != 0 {
-                ir_opt_dce_mark(s1, changed_ptr)
+                ir_opt_dce_mark(s1, 0)
                 // src2 is a vreg for all ops EXCEPT the ones below.
                 // Add IR_ADD_IMM(135) / IR_SUB_IMM(136) — they encode the
                 // displacement in imm and don't use src2.
                 if op != 1 && op != 12 && op != 13 && op != 30 && op != 42 && op != 61 && op != 135 && op != 136 && op != 138 {
-                    ir_opt_dce_mark(s2, changed_ptr)
+                    ir_opt_dce_mark(s2, 0)
                 }
                 // imm-as-vreg for MEMCPY, MEMSET, RET3, ATOMIC_CAS, FFMA
                 if op == 72 || op == 76 || op == 83 || op == 93 || op == 98 {
-                    ir_opt_dce_mark(imm, changed_ptr)
+                    ir_opt_dce_mark(imm, 0)
                 }
             }
-
-            ii = ii + 1
         }
 
-        unsafe { *(changed_ptr as uint64) -> changed }
+        changed = ir_dce_changed
     }
-    dealloc(changed_ptr)
 
     // Sweep phase: NOP-out instructions whose dest is not live and which have
     // no side effects. We leave the BB linked list intact; the emitters treat
@@ -10350,6 +10434,11 @@ fn ir_opt_dce() {
 
 static uint64 ir_cse_table = 0
 static uint64 ir_cse_canon = 0   // per-BB canon[vreg] → canonical source vreg
+// Generation stamps: bumping ir_cse_gen invalidates table+canon in O(1)
+// instead of memsetting 419 KB at every BB boundary / STORE / CALL.
+static uint64 ir_cse_gen = 0
+static uint64 ir_cse_table_gen = 0   // uint32[4096]
+static uint64 ir_cse_canon_gen = 0   // uint32[65536]
 
 fn ir_cse_hash(uint64 op, uint64 s1, uint64 s2, uint64 imm) -> uint64 {
     uint64 h = op * 2654435761
@@ -10367,6 +10456,11 @@ fn ir_cse_hash(uint64 op, uint64 s1, uint64 s2, uint64 imm) -> uint64 {
 fn ir_cse_canon_of(uint64 v) -> uint64 {
     if v == 0 { return 0 }
     if v >= 65536 { return v }
+    uint64 gp = ir_cse_canon_gen + v * 4
+    uint32 g = 0
+    unsafe { *(gp as uint32) -> g }
+    uint32 cur_gen = ir_cse_gen
+    if g != cur_gen { return v }
     uint64 p = ir_cse_canon + v * 4
     uint32 c = 0
     unsafe { *(p as uint32) -> c }
@@ -10377,6 +10471,9 @@ fn ir_cse_canon_of(uint64 v) -> uint64 {
 fn ir_cse_canon_set(uint64 dest, uint64 canonical) {
     if dest == 0 { return }
     if dest >= 65536 { return }
+    uint64 gp = ir_cse_canon_gen + dest * 4
+    uint32 cur_gen = ir_cse_gen
+    unsafe { *(gp as uint32) = cur_gen }
     uint64 p = ir_cse_canon + dest * 4
     uint32 c = canonical
     unsafe { *(p as uint32) = c }
@@ -10411,8 +10508,15 @@ fn ir_opt_cse_is_pure(uint64 op) -> uint64 {
 fn ir_opt_cse() {
     if ir_cse_table == 0 { ir_cse_table = alloc(4096 * 40) }
     if ir_cse_canon == 0 { ir_cse_canon = alloc(65536 * 4) }
-    memset(ir_cse_table, 0, 4096 * 40)
-    memset(ir_cse_canon, 0, 65536 * 4)
+    if ir_cse_table_gen == 0 {
+        ir_cse_table_gen = alloc(4096 * 4)
+        memset(ir_cse_table_gen, 0, 4096 * 4)
+    }
+    if ir_cse_canon_gen == 0 {
+        ir_cse_canon_gen = alloc(65536 * 4)
+        memset(ir_cse_canon_gen, 0, 65536 * 4)
+    }
+    ir_cse_gen = ir_cse_gen + 1
 
     uint64 cur_bb = 0xFFFFFFFF
 
@@ -10423,8 +10527,7 @@ fn ir_opt_cse() {
 
         uint64 bb = ir_insn_bb(ii)
         if bb != cur_bb {
-            memset(ir_cse_table, 0, 4096 * 40)
-            memset(ir_cse_canon, 0, 65536 * 4)
+            ir_cse_gen = ir_cse_gen + 1
             cur_bb = bb
         }
 
@@ -10438,8 +10541,7 @@ fn ir_opt_cse() {
         }
 
         if ir_opt_cse_invalidates(op) != 0 {
-            memset(ir_cse_table, 0, 4096 * 40)
-            memset(ir_cse_canon, 0, 65536 * 4)
+            ir_cse_gen = ir_cse_gen + 1
             ii = ii + 1
             continue
         }
@@ -10464,6 +10566,12 @@ fn ir_opt_cse() {
 
         uint64 e_op = 0
         unsafe { *(entry as uint64) -> e_op }
+        // Stale entries from a previous generation never match.
+        uint64 e_gen_p = ir_cse_table_gen + h * 4
+        uint32 e_gen = 0
+        unsafe { *(e_gen_p as uint32) -> e_gen }
+        uint32 cur_gen32 = ir_cse_gen
+        if e_gen != cur_gen32 { e_op = 0 }
 
         if e_op == op {
             uint64 e_s1 = 0
@@ -10484,6 +10592,7 @@ fn ir_opt_cse() {
                 ir_insn_set_src1(ii, e_result)
                 ir_insn_set_src2(ii, 0)
                 ir_insn_set_imm(ii, 0)
+                ir_opt_rewrites = ir_opt_rewrites + 1
                 // dest now aliases to the earlier result's canonical form
                 ir_cse_canon_set(dest, ir_cse_canon_of(e_result))
                 ii = ii + 1
@@ -10492,6 +10601,7 @@ fn ir_opt_cse() {
         }
 
         // No match — record this expression
+        unsafe { *(e_gen_p as uint32) = cur_gen32 }
         uint64 p_s1w = entry + 8
         uint64 p_s2w = entry + 16
         uint64 p_immw = entry + 24
@@ -10537,6 +10647,39 @@ static uint64 ir_def_bb_cap = 0
 // LICM violates). Sized for the largest BB; we only need one buffer at a
 // time so the static lasts the entire compile.
 static uint64 ir_walk_stack = 0
+
+// Flat per-BB instruction lists (forward order), rebuilt once per function
+// by ir_build_bb_lists(). Both the liveness dataflow (which used to rebuild
+// a walk stack per BB per iteration) and the interference-graph builder
+// read these. off has bb_count+1 entries; buf holds every insn index once.
+static uint64 ir_bb_list_off = 0    // uint32[4097]
+static uint64 ir_bb_list_buf = 0    // uint32[65536]
+
+fn ir_build_bb_lists() {
+    if ir_bb_list_off == 0 {
+        ir_bb_list_off = alloc(4097 * 4)
+        ir_bb_list_buf = alloc(65536 * 4)
+    }
+    uint64 pos = 0
+    uint64 bi = 0
+    while bi < ir_bb_count {
+        uint64 op = ir_bb_list_off + bi * 4
+        uint32 pos32 = pos
+        unsafe { *(op as uint32) = pos32 }
+        uint64 walk = ir_bb_first_insn(bi)
+        while walk != 0xFFFFFFFF && pos < 65536 {
+            uint64 bp = ir_bb_list_buf + pos * 4
+            uint32 w32 = walk
+            unsafe { *(bp as uint32) = w32 }
+            pos = pos + 1
+            walk = ir_insn_next(walk)
+        }
+        bi = bi + 1
+    }
+    uint64 op_end = ir_bb_list_off + ir_bb_count * 4
+    uint32 pos_end = pos
+    unsafe { *(op_end as uint32) = pos_end }
+}
 
 // Stricter than ir_opt_cse_is_pure: hoisting an op out of a loop is only
 // safe AND profitable if (a) its result depends solely on its source
@@ -10734,6 +10877,7 @@ fn ir_opt_licm() {
     while iter < 8 {
         uint64 changed = ir_opt_licm_one_pass()
         if changed == 0 { return }
+        ir_opt_rewrites = ir_opt_rewrites + 1
         iter = iter + 1
     }
 }
@@ -10742,15 +10886,19 @@ fn ir_optimize() {
     if ir_const_values == 0 { ir_const_values = alloc(65536 * 8) }
     if ir_const_known == 0 { ir_const_known = alloc(65536) }
     if ir_w32_clean == 0 { ir_w32_clean = alloc(65536) }
-    memset(ir_const_known, 0, 65536)
-    memset(ir_w32_clean, 0, 65536)
+    uint64 opt_clear = ir_vreg_next
+    if opt_clear > 65536 { opt_clear = 65536 }
+    memset(ir_const_known, 0, opt_clear)
+    memset(ir_w32_clean, 0, opt_clear)
     ir_opt_const_fold()
     ir_opt_dce()
+    uint64 rw0 = ir_opt_rewrites
     ir_opt_cse()
     // CSE can leave the original computation alive only to feed a COPY that
     // then produces the same dest. If nothing else references the original
-    // dest, a second DCE pass cleans it up.
-    ir_opt_dce()
+    // dest, a second DCE pass cleans it up. (Skipped when CSE rewrote
+    // nothing — the preceding DCE already reached fixpoint.)
+    if ir_opt_rewrites != rw0 { ir_opt_dce() }
     // LICM after CSE: redundant computations are already merged, so LICM
     // sees one canonical instance per invariant expression to hoist.
     // Hoisted insns get appended to the global insn array (high indices)
@@ -10759,32 +10907,41 @@ fn ir_optimize() {
     // list (not consecutive index ranges) so the new defs/uses are seen
     // and the interference graph is correct.
     //
+    uint64 rw1 = ir_opt_rewrites
     ir_opt_licm()
-    ir_opt_dce()
+    if ir_opt_rewrites != rw1 { ir_opt_dce() }
     // ROR pattern recognition: collapse the canonical 32-bit rotation
     // idiom (`OR(AND(SHR(x,n), 0xFFFFFFFF), AND(SHL(x, 32-n), 0xFFFFFFFF))`)
     // into a single IR_ROR. After this pass, the inner ANDs / SHL / SHR /
     // CONST(0xFFFFFFFF) feed nothing live and DCE can clean them up. A
     // second const-fold pass sees the new IR_ROR (which is w32-clean) and
     // elides any consumer `& 0xFFFFFFFF` that the first pass left in.
+    uint64 rw2 = ir_opt_rewrites
     ir_opt_recognize_rotate()
-    ir_opt_const_fold()
-    ir_opt_dce()
+    // The follow-up fold+DCE only exists to clean the IR_ROR rewrite's
+    // dead AND/SHR/SHL chain and elide masks over the new w32-clean ROR.
+    // No rotation recognized -> nothing new to fold or kill.
+    if ir_opt_rewrites != rw2 {
+        ir_opt_const_fold()
+        ir_opt_dce()
+    }
     // LEA-base-index-scale: collapse `add(base, mul_imm(idx, K))` for
     // K ∈ {1,2,4,8} into a single x86 LEA. Runs after const-fold has
     // produced IR_MUL_IMM. Cleans up array-indexing patterns that
     // matmul/sort beat the IR allocator with.
+    uint64 rw3 = ir_opt_rewrites
     ir_opt_recognize_lea_bis()
-    ir_opt_dce()
+    if ir_opt_rewrites != rw3 { ir_opt_dce() }
     // FMA pattern recognition: collapse `FADD(FMUL(a,b), c)` into a
     // single IR_FFMA. The current FFMA emit isn't actually a hardware
     // FMA instruction — it just inlines mulsd+addsd back-to-back —
     // but skipping the GPR round-trip between the FMUL and FADD saves
     // 4 mov instructions per fused pair, which adds up in
     // mandelbrot's `two * x * y + y0` and similar.
+    uint64 rw4 = ir_opt_rewrites
     ir_compute_use_count()
     ir_opt_recognize_ffma()
-    ir_opt_dce()
+    if ir_opt_rewrites != rw4 { ir_opt_dce() }
 }
 
 // ---------------------------------------------------------------------------
@@ -10834,6 +10991,7 @@ fn ir_opt_recognize_ffma() {
             }
         }
         if mul_idx != 0xFFFFFFFF {
+            ir_opt_rewrites = ir_opt_rewrites + 1
             ir_insn_set_opcode(ii, 98)            // IR_FFMA
             ir_insn_set_src1(ii, a_v)
             ir_insn_set_src2(ii, b_v)
@@ -10884,6 +11042,7 @@ fn ir_opt_recognize_lea_bis() {
             }
         }
         if scale != 0 {
+            ir_opt_rewrites = ir_opt_rewrites + 1
             ir_insn_set_opcode(ii, 139)        // IR_LEA_BIS
             ir_insn_set_src1(ii, base_v)
             ir_insn_set_src2(ii, idx_v)
@@ -10908,9 +11067,13 @@ fn ir_build_def_idx() {
         ir_def_idx_cap = 65536
         ir_def_idx_buf = alloc(ir_def_idx_cap * 4)
     }
-    // 0xFFFFFFFF sentinel = no def found.
+    // 0xFFFFFFFF sentinel = no def found. Only clear the live vreg range —
+    // ir_def_idx guards vreg >= ir_vreg_next, so stale entries above the
+    // range are never read.
+    uint64 clear_n = ir_vreg_next
+    if clear_n > ir_def_idx_cap { clear_n = ir_def_idx_cap }
     uint64 i = 0
-    while i < ir_def_idx_cap {
+    while i < clear_n {
         uint64 p = ir_def_idx_buf + i * 4
         uint32 fff = 0xFFFFFFFF
         unsafe { *(p as uint32) = fff }
@@ -10935,6 +11098,7 @@ fn ir_build_def_idx() {
 // none was recorded.
 fn ir_def_idx(uint64 vreg) -> uint64 {
     if vreg == 0 || vreg >= ir_def_idx_cap { return 0xFFFFFFFF }
+    if vreg >= ir_vreg_next { return 0xFFFFFFFF }
     uint64 p = ir_def_idx_buf + vreg * 4
     uint32 v = 0
     unsafe { *(p as uint32) -> v }
@@ -11048,6 +11212,7 @@ fn ir_opt_recognize_rotate() {
         ir_insn_set_src1(ii, x)
         ir_insn_set_src2(ii, n)
         ir_insn_set_imm(ii, 32)
+        ir_opt_rewrites = ir_opt_rewrites + 1
         ii = ii + 1
     }
 }

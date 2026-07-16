@@ -1421,21 +1421,12 @@ fn static_set_kind_last(uint64 kind) {
 // Look up the recorded type kind of a static by name_tok (0 if unknown).
 @export
 fn static_kind_of(uint64 name_tok) -> uint64 {
-    uint64 i = 0
-    while i < static_count {
-        uint64 entry = static_table + i * 8
-        uint32 stored_tok = 0
-        unsafe { *(entry as uint32) -> stored_tok }
-        uint64 ws = stored_tok
-        if tok_text_eq(ws, name_tok) != 0 {
-            uint64 ep = static_kinds + i * 4
-            uint32 k = 0
-            unsafe { *(ep as uint32) -> k }
-            return k
-        }
-        i = i + 1
-    }
-    return 0
+    uint64 wi = static_index_of(name_tok)
+    if wi == 0xFFFFFFFF { return 0 }
+    uint64 ep = static_kinds + wi * 4
+    uint32 k = 0
+    unsafe { *(ep as uint32) -> k }
+    return k
 }
 
 // Look up the fkind (0/1/2/3) of a static by its name_tok. Returns 0
@@ -1694,22 +1685,103 @@ fn static_array_size_of(uint64 name_tok) -> uint64 {
     return 0xFFFFFFFF
 }
 
-fn static_lookup(uint64 name_tok) -> uint64 {
+// Hash index over static_table, built lazily so every registration path
+// (scalars, arrays) is covered without touching them. 4096 slots of
+// [name_tok u32, idx u32]; idx 0xFFFFFFFF = empty. First-wins on duplicate
+// names to preserve the linear scan's first-match semantics.
+static uint64 static_hash_tbl = 0
+static uint64 static_hash_built_n = 0
+
+fn tok_text_hash(uint64 name_tok) -> uint64 {
+    uint64 start = tok_text_start(name_tok)
+    uint64 len = tok_text_len(name_tok)
+    uint64 h = 2166136261
     uint64 i = 0
-    while i < static_count {
-        uint64 entry = static_table + i * 8
-        uint32 stored_tok = 0
-        unsafe { *(entry as uint32) -> stored_tok }
-        uint64 ws = stored_tok
-        if tok_text_eq(ws, name_tok) != 0 {
-            uint64 e4 = entry + 4
-            uint32 off = 0
-            unsafe { *(e4 as uint32) -> off }
-            return off
-        }
+    while i < len {
+        uint64 p = cg_source + start + i
+        uint64 c = 0
+        unsafe { *(p as uint8) -> c }
+        h = (h ^ c) * 16777619
+        h = h & 0xFFFFFFFF
         i = i + 1
     }
+    h = h ^ (h >> 15)
+    return h
+}
+
+fn static_hash_of(uint64 name_tok) -> uint64 {
+    return tok_text_hash(name_tok) & 4095
+}
+
+fn static_hash_sync() {
+    if static_hash_tbl == 0 {
+        static_hash_tbl = alloc(4096 * 8)
+        uint64 ci = 0
+        while ci < 4096 {
+            uint64 sp = static_hash_tbl + ci * 8 + 4
+            uint32 ff = 0xFFFFFFFF
+            unsafe { *(sp as uint32) = ff }
+            ci = ci + 1
+        }
+    }
+    while static_hash_built_n < static_count {
+        uint64 entry = static_table + static_hash_built_n * 8
+        uint32 nt = 0
+        unsafe { *(entry as uint32) -> nt }
+        uint64 wnt = nt
+        uint64 h = static_hash_of(wnt)
+        uint64 placed = 0
+        while placed == 0 {
+            uint64 slot = static_hash_tbl + h * 8
+            uint64 s4 = slot + 4
+            uint32 sidx = 0
+            unsafe { *(s4 as uint32) -> sidx }
+            if sidx == 0xFFFFFFFF {
+                uint32 nt2 = nt
+                unsafe { *(slot as uint32) = nt2 }
+                uint32 mi = static_hash_built_n
+                unsafe { *(s4 as uint32) = mi }
+                placed = 1
+            } else {
+                uint32 snt = 0
+                unsafe { *(slot as uint32) -> snt }
+                uint64 wsnt = snt
+                // Duplicate name: keep the first entry (first-match wins).
+                if tok_text_eq(wsnt, wnt) != 0 { placed = 1 }
+                else { h = (h + 1) & 4095 }
+            }
+        }
+        static_hash_built_n = static_hash_built_n + 1
+    }
+}
+
+// Returns the static_table index for name_tok, or 0xFFFFFFFF.
+fn static_index_of(uint64 name_tok) -> uint64 {
+    static_hash_sync()
+    uint64 h = static_hash_of(name_tok)
+    while 1 == 1 {
+        uint64 slot = static_hash_tbl + h * 8
+        uint64 s4 = slot + 4
+        uint32 sidx = 0
+        unsafe { *(s4 as uint32) -> sidx }
+        if sidx == 0xFFFFFFFF { return 0xFFFFFFFF }
+        uint32 snt = 0
+        unsafe { *(slot as uint32) -> snt }
+        uint64 wsnt = snt
+        if tok_text_eq(wsnt, name_tok) != 0 { return sidx }
+        h = (h + 1) & 4095
+    }
     return 0xFFFFFFFF
+}
+
+fn static_lookup(uint64 name_tok) -> uint64 {
+    uint64 wi = static_index_of(name_tok)
+    if wi == 0xFFFFFFFF { return 0xFFFFFFFF }
+    uint64 entry = static_table + wi * 8
+    uint64 e4 = entry + 4
+    uint32 off = 0
+    unsafe { *(e4 as uint32) -> off }
+    return off
 }
 
 // Look up a static by literal name (for generated code, not user code)
@@ -10879,6 +10951,8 @@ static uint64 dce_enabled = 0
 static uint64 dce_keep_all = 0
 
 @export
+static uint64 dce_hash_tbl = 0   // 8192 slots x u32 name_tok, 0xFFFFFFFF empty
+
 fn dce_init() {
     dce_table = alloc(2048 * 4)
     dce_count = 0
@@ -10886,6 +10960,14 @@ fn dce_init() {
     dce_fn_map_count = 0
     dce_enabled = 1
     dce_keep_all = 0
+    dce_hash_tbl = alloc(8192 * 4)
+    uint64 ci = 0
+    while ci < 8192 {
+        uint64 sp = dce_hash_tbl + ci * 4
+        uint32 ff = 0xFFFFFFFF
+        unsafe { *(sp as uint32) = ff }
+        ci = ci + 1
+    }
 }
 
 @export
@@ -10893,16 +10975,18 @@ fn dce_set_keep_all(uint64 v) {
     dce_keep_all = v
 }
 
-// Check if a function name token is already in the live set
+// Check if a function name token is already in the live set.
+// Hash-set probe by token text; 8192 slots, load <= 25%.
 fn dce_has(uint64 name_tok) -> uint64 {
-    uint64 i = 0
-    while i < dce_count {
-        uint64 entry = dce_table + i * 4
-        uint32 stored = 0
-        unsafe { *(entry as uint32) -> stored }
-        uint64 ws = stored
-        if tok_text_eq(ws, name_tok) != 0 { return 1 }
-        i = i + 1
+    uint64 h = tok_text_hash(name_tok) & 8191
+    while 1 == 1 {
+        uint64 slot = dce_hash_tbl + h * 4
+        uint32 snt = 0
+        unsafe { *(slot as uint32) -> snt }
+        if snt == 0xFFFFFFFF { return 0 }
+        uint64 wsnt = snt
+        if tok_text_eq(wsnt, name_tok) != 0 { return 1 }
+        h = (h + 1) & 8191
     }
     return 0
 }
@@ -10910,16 +10994,28 @@ fn dce_has(uint64 name_tok) -> uint64 {
 // Add a function name token to the live set (if not already present)
 // Returns 1 if newly added, 0 if already present
 fn dce_add(uint64 name_tok) -> uint64 {
-    if dce_has(name_tok) != 0 { return 0 }
-    if dce_count >= 2048 {
-        write(2, "error: dce_table overflow (max 2048)\n", 37)
-        exit(1)
+    uint64 h = tok_text_hash(name_tok) & 8191
+    while 1 == 1 {
+        uint64 slot = dce_hash_tbl + h * 4
+        uint32 snt = 0
+        unsafe { *(slot as uint32) -> snt }
+        if snt == 0xFFFFFFFF {
+            if dce_count >= 2048 {
+                write(2, "error: dce_table overflow (max 2048)\n", 37)
+                exit(1)
+            }
+            uint32 nt = name_tok
+            unsafe { *(slot as uint32) = nt }
+            uint64 entry = dce_table + dce_count * 4
+            unsafe { *(entry as uint32) = nt }
+            dce_count = dce_count + 1
+            return 1
+        }
+        uint64 wsnt = snt
+        if tok_text_eq(wsnt, name_tok) != 0 { return 0 }
+        h = (h + 1) & 8191
     }
-    uint64 entry = dce_table + dce_count * 4
-    uint32 nt = name_tok
-    unsafe { *(entry as uint32) = nt }
-    dce_count = dce_count + 1
-    return 1
+    return 0
 }
 
 // Add a function name by string (for fn_addr string literals)
@@ -11192,26 +11288,22 @@ fn dce_scan(uint64 mod_node) {
         wchild = nxt
     }
 
-    // Phase 2: Transitive closure — scan bodies of live functions
-    // Keep iterating until no new functions are added
-    uint64 prev_count = 0
-    while prev_count != dce_count {
-        prev_count = dce_count
-        uint64 i = 0
-        // Scan from the beginning each time (simple but correct)
-        while i < dce_count {
-            uint64 entry = dce_table + i * 4
-            uint32 live_tok = 0
-            unsafe { *(entry as uint32) -> live_tok }
-            uint64 wlt = live_tok
-            // Find the function body
-            uint64 fn_node = dce_lookup_fn(wlt)
-            if fn_node != 0 {
-                // Scan the function body (children after params)
-                dce_scan_node(fn_node)
-            }
-            i = i + 1
+    // Phase 2: Transitive closure — worklist. dce_table is an append-only
+    // queue: scan each newly-live function's body exactly once; dce_add
+    // appends discoveries which get processed as i catches up.
+    uint64 i = 0
+    while i < dce_count {
+        uint64 entry = dce_table + i * 4
+        uint32 live_tok = 0
+        unsafe { *(entry as uint32) -> live_tok }
+        uint64 wlt = live_tok
+        // Find the function body
+        uint64 fn_node = dce_lookup_fn(wlt)
+        if fn_node != 0 {
+            // Scan the function body (children after params)
+            dce_scan_node(fn_node)
         }
+        i = i + 1
     }
 }
 

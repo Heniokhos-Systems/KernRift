@@ -1,7 +1,18 @@
-// mlrift_pci.kr — Phase B.1 example: misc-device-mode LKM in KernRift.
+// mlrift_pci_warm.kr — WARM-handoff variant of the mlrift_pci substrate LKM.
+//
+// Sibling of examples/mlrift_pci_cold.kr. This is the driver for the
+// warm-handoff path: amdgpu (or a prior boot) has already cold-booted the
+// GPU — PSP loaded + verified all firmware, DRAM is trained, MEC/MES/SDMA
+// microcode is live — and we take over via VFIO-style ownership. It
+// DELIBERATELY stops short of engine/PSP state: amdgpu owns the live rings,
+// and touching them wedges the card. For the from-cold path (no amdgpu, we
+// own the whole bring-up) use mlrift_pci_cold.kr instead.
+//
+// NB: module name / device node stay "mlrift_pci" (not _warm) so the
+// existing warm_*_test.sh + C harnesses keep working unchanged.
 //
 // Compile:
-//   krc --emit=lkm --arch=x86_64 --target=linux examples/mlrift_pci.kr -o mlrift_pci.ko
+//   krc --emit=lkm --arch=x86_64 --target=linux examples/mlrift_pci_warm.kr -o mlrift_pci.ko
 //
 // Load / observe / unload:
 //   sudo insmod mlrift_pci.ko
@@ -758,7 +769,7 @@ fn driver_mmap(uint64 file, uint64 vma) -> int64 {
     if bar_index > 5 { return 0xFFFFFFFFFFFFFFEA }        // -EINVAL: PCI has BARs 0..5
     uint64 in_bar_off = (pgoff & BAR_INBAR_MASK) << 12    // byte offset within the BAR
 
-    // resource[bar_index]: start @ 0x3e0 + N*0x20, end @ +8.
+    // resource[bar_index]: start @ 0x3e0 + N*PCI_RES_STRIDE (0x40), end @ +8.
     uint64 res = pdev + PCI_DEV_RESOURCE0_START + bar_index * PCI_RES_STRIDE
     uint64 bar_phys = 0; unsafe { *((res + 0) as uint64) -> bar_phys }
     uint64 bar_end  = 0; unsafe { *((res + 8) as uint64) -> bar_end }
