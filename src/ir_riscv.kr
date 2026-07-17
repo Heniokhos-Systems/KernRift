@@ -683,6 +683,59 @@ fn rv_compress_function(uint64 start, uint64 fix_start, uint64 line_start, uint6
 }
 
 // ---------------------------------------------------------------------------
+// PC-relative address materialization (shared by IR_STR_CONST and, in later
+// tasks, IR_STATIC_ADDR/LOAD/STORE + IR_FN_ADDR). Emits the placeholder pair
+//     auipc rd, 0        @ site
+//     addi  rd, rd, 0    @ site+4
+// records {u32 site; u32 payload} into the selected shared fixup table
+// (table_sel: 0=str_fixups, 1=static_fixups, 2=fnaddr_fixup_table) exactly as
+// IR_CALL records into fixup_table, and marks BOTH words non-compressible so
+// the C-compression pass keeps them 4-byte and adjacent (the placeholder
+// `addi rd,rd,0` would otherwise match c.mv and be shrunk, tearing the pair
+// apart). The matching resolver re-encodes both words on the final layout
+// with disp = base + payload - site.
+fn rv_emit_pcrel_pair(uint64 rd, uint64 table_sel, uint64 payload) {
+    uint64 site = out_len
+    if table_sel == 0 {
+        if str_fixup_count >= 4096 {
+            rv_err("error: str_fixups overflow (max 4096)\n")
+        }
+        uint64 fe = str_fixups + str_fixup_count * 8
+        uint32 so = site
+        unsafe { *(fe as uint32) = so }
+        uint64 fe4 = fe + 4
+        uint32 py = payload
+        unsafe { *(fe4 as uint32) = py }
+        str_fixup_count = str_fixup_count + 1
+    } else if table_sel == 1 {
+        if static_fixup_count >= 8192 {
+            rv_err("error: static_fixups overflow (max 8192)\n")
+        }
+        uint64 fe = static_fixups + static_fixup_count * 8
+        uint32 so = site
+        unsafe { *(fe as uint32) = so }
+        uint64 fe4 = fe + 4
+        uint32 py = payload
+        unsafe { *(fe4 as uint32) = py }
+        static_fixup_count = static_fixup_count + 1
+    } else {
+        if fnaddr_fixup_count >= 1024 {
+            rv_err("error: fnaddr_fixups overflow (max 1024)\n")
+        }
+        uint64 fe = fnaddr_fixup_table + fnaddr_fixup_count * 8
+        uint32 so = site
+        unsafe { *(fe as uint32) = so }
+        uint64 fe4 = fe + 4
+        uint32 py = payload
+        unsafe { *(fe4 as uint32) = py }
+        fnaddr_fixup_count = fnaddr_fixup_count + 1
+    }
+    rv_u(0, rd, 0x17)             // auipc rd, 0     (placeholder)
+    rv_i(0, rd, 0, rd, 0x13)      // addi  rd, rd, 0 (placeholder)
+    rv_mark_noc(site, site + 8)   // both words stay 4-byte through compression
+}
+
+// ---------------------------------------------------------------------------
 // Per-instruction emitter
 // ---------------------------------------------------------------------------
 
@@ -1190,6 +1243,18 @@ fn ir_emit_riscv_insn(uint64 ii) {
         return
     }
 
+    // ----- IR_STR_CONST (79): dst = address of string literal -----
+    // imm = byte offset into the string-literal blob. Lower to the pcrel
+    // auipc+addi pair, recorded into str_fixups and resolved against
+    // str_start once the string data is laid out (resolve_string_fixups_riscv).
+    if op == 79 {
+        uint64 rd = dst_r
+        if rd == 0xFFFFFFFF { rd = RV_T5 }
+        rv_emit_pcrel_pair(rd, 0, imm)                // table_sel 0 = strings
+        if dst_r == 0xFFFFFFFF { rv_store_spill(rd, dest_v) }
+        return
+    }
+
     // Everything else lands in Stage 2+ (mul/div, syscalls, ...).
     rv_nyi_op(op)
 }
@@ -1554,6 +1619,55 @@ fn resolve_fixups_riscv() {
             diag_span_of(wtt)
             exit(1)
         }
+        i = i + 1
+    }
+}
+
+// ---------------------------------------------------------------------------
+// String-literal address fixup resolution — runs after emit_string_data()
+// laid down the string blob at file offset `str_start` (main.kr's arch==2
+// branch, same slot where arch 0/1 run resolve_string_fixups[_a64]).
+//
+// IR_STR_CONST recorded [auipc_offset:u32, str_offset:u32] into the shared
+// str_fixups table via rv_emit_pcrel_pair; each auipc offset has already been
+// remapped through this function's C-compression pass (rv_compress_function
+// step 4b), so it names the FINAL site of the placeholder pair
+//     auipc rd, %hi(disp)      @ site
+//     addi  rd, rd, %lo(disp)  @ site + 4
+// with disp = (str_start + str_offset) - site, pc-relative from the auipc.
+// The +0x800 hi-rounding compensates addi's sign-extension exactly as the
+// call resolver's jalr does (ir_riscv.kr:1414-1422). Pure file-offset math —
+// the flat raw image maps file offset 0 to VA 0x8000_0000, so no VA needed.
+// rd is recovered from the placeholder auipc word (the resolver is handed the
+// site, not rd). Both words are fully re-encoded, never read-modify-OR.
+fn rv_rd_at(uint64 off) -> uint64 {
+    uint64 p = out_buf + off
+    uint32 w = 0
+    unsafe { *(p as uint32) -> w }
+    uint64 ww = w
+    return (ww >> 7) & 0x1F
+}
+
+fn resolve_string_fixups_riscv(uint64 str_start) {
+    uint64 i = 0
+    while i < str_fixup_count {
+        uint64 e = str_fixups + i * 8
+        uint32 site = 0
+        unsafe { *(e as uint32) -> site }
+        uint64 e4 = e + 4
+        uint32 str_off = 0
+        unsafe { *(e4 as uint32) -> str_off }
+        uint64 wsite = site
+        uint64 woff = str_off
+        uint64 target = str_start + woff
+        uint64 disp = target - wsite
+        uint64 hi = (disp + 0x800) & 0xFFFFF000
+        uint64 lo = disp & 0xFFF
+        uint64 rd = rv_rd_at(wsite)
+        // auipc rd, hi   (U-type: imm[31:12] | rd<<7 | 0x17)
+        patch_u32(wsite, hi | (rd << 7) | 0x17)
+        // addi rd, rd, lo  (I-type: imm<<20 | rs1=rd<<15 | f3=0 | rd<<7 | 0x13)
+        patch_u32(wsite + 4, (lo << 20) | (rd << 15) | (rd << 7) | 0x13)
         i = i + 1
     }
 }

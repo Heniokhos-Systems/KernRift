@@ -1,0 +1,32 @@
+// RISC-V RV32IMC feature-gap Task 1: string-literal address (IR_STR_CONST).
+//
+// Takes the address of a string literal and writes its bytes to the virt
+// NS16550A UART until the NUL terminator, exercising the pcrel auipc+addi
+// address pair + the string-fixup resolver. Boots under:
+//   ./build/krc2 --arch=riscv32 --freestanding \
+//       examples/riscv-featuregap/t1_strconst.kr -o /tmp/t1.bin
+//   qemu-system-riscv32 -machine virt -nographic -bios /tmp/t1.bin
+// Expected output: hi
+
+device Uart at 0x10000000 {
+    thr at 0x00 : u8
+    lsr at 0x05 : u8
+}
+
+fn putc(u8 c) {
+    while (Uart.lsr & 0x20) == 0 { }
+    Uart.thr = c
+}
+
+fn main() {
+    // The string address is an IR_STR_CONST — held in a 32-bit slot on rv32.
+    u32 s = "hi\n"
+    u32 i = 0
+    u32 ch = load8(s + i)
+    while ch != 0 {
+        putc(ch)
+        i = i + 1
+        ch = load8(s + i)
+    }
+    loop { }
+}

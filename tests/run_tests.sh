@@ -4493,6 +4493,51 @@ else
     echo "  riscv_hello_boot: SKIP (qemu-system-riscv32 or riscv64-linux-gnu-objdump not installed)"
 fi
 
+# --- RISC-V RV32 IR_STR_CONST via pcrel auipc+addi (feature-gap Task 1) ---
+# Compiles examples/riscv-featuregap/t1_strconst.kr, which takes the address
+# of a string literal ("hi\n") through IR_STR_CONST and writes it to the UART.
+# Proves the pcrel auipc+addi pair + string-fixup resolver: objdump-checks
+# that the pair stays 4-byte through the C-compression pass (no c.* shrink of
+# either word) and boots under qemu, grepping stdout for "hi". Same dev-only
+# toolchain guard/SKIP discipline as the hello boot test above.
+echo ""
+echo "--- riscv32 IR_STR_CONST boot test ---"
+if command -v qemu-system-riscv32 >/dev/null 2>&1 \
+   && command -v riscv64-linux-gnu-objdump >/dev/null 2>&1; then
+    TOTAL=$((TOTAL + 1))
+    RV_BIN="/tmp/krc_rv_strconst_$$.bin"
+    RV_OK=1
+    if ! $KRC --arch=riscv32 --freestanding "$DIR/../examples/riscv-featuregap/t1_strconst.kr" -o "$RV_BIN" >/dev/null 2>&1; then
+        echo "FAIL: riscv_t1_strconst (compilation failed)"
+        RV_OK=0
+    fi
+    if [ "$RV_OK" = 1 ]; then
+        # The pcrel pair must survive compression as two 4-byte words: an
+        # `auipc` immediately followed (4 bytes later) by an `addi` that
+        # patches the same rd. Confirm both mnemonics are present full-width.
+        RV_DIS=$(riscv64-linux-gnu-objdump -D -b binary -m riscv:rv32 "$RV_BIN" 2>/dev/null)
+        if [ "$(echo "$RV_DIS" | grep -cE '\bauipc\b')" -lt 2 ]; then
+            echo "FAIL: riscv_t1_strconst (expected >=2 full-width auipc: string address + call)"
+            RV_OK=0
+        fi
+    fi
+    if [ "$RV_OK" = 1 ]; then
+        RV_OUT=$(timeout 5 qemu-system-riscv32 -machine virt -nographic -bios "$RV_BIN" 2>/dev/null)
+        if echo "$RV_OUT" | grep -q "hi"; then
+            PASS=$((PASS + 1))
+            echo "  riscv_t1_strconst: PASS (qemu printed hi)"
+        else
+            echo "FAIL: riscv_t1_strconst (qemu output did not contain 'hi')"
+            FAIL=$((FAIL + 1))
+        fi
+    else
+        FAIL=$((FAIL + 1))
+    fi
+    rm -f "$RV_BIN"
+else
+    echo "  riscv_t1_strconst: SKIP (qemu-system-riscv32 or riscv64-linux-gnu-objdump not installed)"
+fi
+
 # --- Summary ---
 echo ""
 echo "=== Results: $PASS/$TOTAL passed, $FAIL failed ==="

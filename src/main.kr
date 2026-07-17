@@ -2533,12 +2533,10 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
     } else if arch == 1 {
         resolve_string_fixups_a64(str_start)
     } else {
-        // riscv32: no string-fixup resolver yet. Refuse only when the
-        // program actually recorded string fixups — a string-free
-        // program must not be blocked from the raw flat-binary path.
-        if str_fixup_count != 0 {
-            riscv32_nyi("string fixup resolution")
-        }
+        // riscv32: patch each IR_STR_CONST pcrel auipc+addi pair to point
+        // at str_start + str_offset (ir_riscv.kr). Sites were already
+        // remapped through C-compression, and the string blob now exists.
+        resolve_string_fixups_riscv(str_start)
     }
     // Align the static-data section base to 8 bytes on both arches.
     // Without this, static uint64[N] arrays whose logical offset within
