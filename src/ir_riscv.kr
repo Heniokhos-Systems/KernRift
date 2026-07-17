@@ -17,6 +17,7 @@ static uint64 RV_ZERO = 0
 static uint64 RV_RA = 1
 static uint64 RV_SP = 2
 static uint64 RV_A0 = 10
+static uint64 RV_A1 = 11
 static uint64 RV_T5 = 30
 static uint64 RV_T6 = 31
 
@@ -1768,6 +1769,48 @@ fn ir_emit_riscv_insn(uint64 ii) {
         if rd == 0xFFFFFFFF { rd = RV_T5 }
         rv_emit_pcrel_pair(rd, 2, imm)                // table_sel 2 = fnaddr
         if dst_r == 0xFFFFFFFF { rv_store_spill(rd, dest_v) }
+        return
+    }
+
+    // ----- IR_ROR (137): dst = right-rotate(src1, src2) mod imm(=32) -----
+    // RV32IM has NO rotate instruction (Zbb's ror/rori is not in the
+    // accepted ISA), so synthesize per audit §7. Produced ONLY by the shared
+    // optimizer's ir_opt_recognize_rotate (ir.kr:11188) from the canonical
+    // `OR(AND(SHR(x,n),0xFFFFFFFF), AND(SHL(x,32-n),0xFFFFFFFF))` idiom; imm
+    // is always 32 today, so no 64-bit case. Contract (ir.kr:159):
+    //   dst = ((x >> n) | (x << (W - n))) & ((1<<W)-1),  W = 32.
+    // On rv32 the `& 0xFFFFFFFF` is free (registers ARE 32-bit).
+    //
+    // Sequence (a0/a1 are never allocated by rv_reg_for_color — s-regs only —
+    // so they are free scratch within this op; t5 is the spill-reload/dest
+    // scratch). We COPY x into a0 first so the two shifts can both read it even
+    // when src1 was reloaded into t5 (spilled) and t5 is then reused for the
+    // x>>>n temp:
+    //   mv   a0, x            ; a0 = x   (decouple from a possibly-t5 a_reg)
+    //   andi a1, n, 31        ; a1 = n mod 32
+    //   srl  t5, a0, a1       ; t5 = x >>> n
+    //   sub  a1, x0, a1       ; a1 = -n      (no neg helper: rv_r sub, rs1=x0)
+    //   andi a1, a1, 31       ; a1 = (32 - n) & 31   (explicit mask per the
+    //                         ;   documented (W - src2) semantics, NOT relying
+    //                         ;   on hardware shamt masking)
+    //   sll  a0, a0, a1       ; a0 = x << ((32-n)&31)
+    //   or   d,  t5, a0       ; d  = (x >>> n) | (x << (32-n))
+    // n==0: a1=0 -> srl by 0 = x, sll by 0 = x, OR yields x|x = x (identity).
+    // Spilled-dest aware: d falls back to t5 (the `or t5,t5,a0` self-write is
+    // legal — t5's old x>>>n value is consumed by that same OR) then spilled.
+    if op == 137 {
+        uint64 x_reg = rv_resolve_src(s1_v, RV_T5)     // value  (s-reg or t5)
+        uint64 n_reg = rv_resolve_src(s2_v, RV_T6)     // count  (s-reg or t6)
+        uint64 d = dst_r
+        if d == 0xFFFFFFFF { d = RV_T5 }
+        rv_i(0, x_reg, 0, RV_A0, 0x13)                 // mv   a0, x  (addi a0,x,0)
+        rv_i(31, n_reg, 7, RV_A1, 0x13)                // andi a1, n, 31
+        rv_r(0, RV_A1, RV_A0, 5, RV_T5, 0x33)          // srl  t5, a0, a1
+        rv_r(0x20, RV_A1, RV_ZERO, 0, RV_A1, 0x33)     // sub  a1, x0, a1  (neg)
+        rv_i(31, RV_A1, 7, RV_A1, 0x13)                // andi a1, a1, 31
+        rv_r(0, RV_A1, RV_A0, 1, RV_A0, 0x33)          // sll  a0, a0, a1
+        rv_r(0, RV_A0, RV_T5, 6, d, 0x33)              // or   d, t5, a0
+        if dst_r == 0xFFFFFFFF { rv_store_spill(RV_T5, dest_v) }
         return
     }
 

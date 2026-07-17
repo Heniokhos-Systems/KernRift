@@ -5012,6 +5012,63 @@ else
     echo "  riscv_t7_fnptr: SKIP (qemu-system-riscv32 or riscv64-linux-gnu-objdump not installed)"
 fi
 
+# Compiles examples/riscv-featuregap/t8_ror.kr, which rotates a runtime value.
+# The `rotr32` helper is AST-rotation-inlined into main; ir_opt_recognize_rotate
+# then rewrites the OR(AND(SHR),AND(SHL)) idiom to IR_ROR (137), which RV32IM
+# lowers (no rotate insn) to the srl/sub/andi/sll/or synthesis. This test is
+# NON-VACUOUS: the objdump assertion proves op 137 was lowered HERE (the
+# `sub aN,zero,aN` negate sandwiched between the shifts is emitted by NOTHING
+# except the IR_ROR handler — plain shift lowering never produces it), and the
+# boot asserts the rotate is bit-exact (0x81 ror 1 = 0x80000040 -> '@'; the
+# n==0 identity via a runtime count -> 'A').
+echo ""
+echo "--- riscv32 rotate (IR_ROR) boot test ---"
+if command -v qemu-system-riscv32 >/dev/null 2>&1 \
+   && command -v riscv64-linux-gnu-objdump >/dev/null 2>&1; then
+    TOTAL=$((TOTAL + 1))
+    RV_BIN="/tmp/krc_rv_t8_$$.bin"
+    RV_OK=1
+    if ! $KRC --arch=riscv32 --freestanding "$DIR/../examples/riscv-featuregap/t8_ror.kr" -o "$RV_BIN" >/dev/null 2>&1; then
+        echo "FAIL: riscv_t8_ror (compilation failed)"
+        RV_OK=0
+    fi
+    if [ "$RV_OK" = 1 ]; then
+        RV_DIS=$(riscv64-linux-gnu-objdump -D -b binary -m riscv:rv32 -M no-aliases "$RV_BIN" 2>/dev/null)
+        # Positive proof the IR_ROR handler ran (not that the optimizer folded
+        # the rotate to plain shifts): the negate `sub a1,zero,a1` between the
+        # two synthesized shifts is unique to op 137's lowering. Two call sites
+        # -> expect it twice. If the recognizer had failed to fire, there would
+        # be no IR_ROR and no such negate — the whole point of this assertion.
+        if [ "$(echo "$RV_DIS" | grep -cE '	sub	a1,zero,a1')" -lt 2 ]; then
+            echo "FAIL: riscv_t8_ror (IR_ROR synth 'sub a1,zero,a1' negate not found x2 -- recognizer may not have fired / op 137 not lowered here)"
+            RV_OK=0
+        fi
+        # And the surrounding srl/sll must be present (the rotate's two shifts).
+        if [ "$(echo "$RV_DIS" | grep -cE '	srl	t5,a0,a1')" -lt 2 ] \
+           || [ "$(echo "$RV_DIS" | grep -cE '	sll	a0,a0,a1')" -lt 2 ]; then
+            echo "FAIL: riscv_t8_ror (IR_ROR srl/sll synthesis shifts missing)"
+            RV_OK=0
+        fi
+    fi
+    if [ "$RV_OK" = 1 ]; then
+        RV_OUT=$(timeout 5 qemu-system-riscv32 -machine virt -nographic -bios "$RV_BIN" 2>/dev/null)
+        # 0x81 ror 1 = 0x80000040 (low byte '@'); 0x41 ror 0 = 'A' (n==0
+        # identity). Command substitution strips the trailing newline.
+        if [ "$RV_OUT" = "@A" ]; then
+            PASS=$((PASS + 1))
+            echo "  riscv_t8_ror: PASS (qemu printed @A -- rotate bit-exact incl. n==0 identity)"
+        else
+            echo "FAIL: riscv_t8_ror (qemu output was '$RV_OUT', want '@A')"
+            FAIL=$((FAIL + 1))
+        fi
+    else
+        FAIL=$((FAIL + 1))
+    fi
+    rm -f "$RV_BIN"
+else
+    echo "  riscv_t8_ror: SKIP (qemu-system-riscv32 or riscv64-linux-gnu-objdump not installed)"
+fi
+
 # --- Summary ---
 echo ""
 echo "=== Results: $PASS/$TOTAL passed, $FAIL failed ==="

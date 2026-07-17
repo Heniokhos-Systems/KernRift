@@ -1,0 +1,82 @@
+// RISC-V RV32IMC feature-gap Task 8: rotates — IR_ROR (137).
+//
+// IR_ROR is NEVER produced by lowering; it exists only via the optimizer.
+// The pipeline that plants it:
+//   1. AST rotation-shape inliner (inliner.kr:inline_is_rotation_shape)
+//      recognizes a 3-statement `rotr32(x,n)` helper of EXACTLY the form
+//        uint32 lo = (x >> n)        & 0xFFFFFFFF
+//        uint32 hi = (x << (32 - n)) & 0xFFFFFFFF
+//        return    (lo | hi)         & 0xFFFFFFFF
+//      and inlines its body into the caller (so the shifts land in the
+//      SAME function as the OR — a prerequisite for the IR matcher).
+//   2. ir_opt_recognize_rotate (ir.kr:11188) rewrites the resulting
+//        OR(AND(SHR(x,n),0xFFFFFFFF), AND(SHL(x,32-n),0xFFFFFFFF))
+//      into a single IR_ROR dest,x,n,imm=32.
+//   3. The riscv emitter (ir_riscv.kr op==137) synthesizes it from
+//      srl/sub/andi/sll/or — RV32IM has no rotate instruction (Zbb ror/rori
+//      is out of the accepted ISA).
+//
+// FRAGILITY: the IR matcher does NOT copy-skip the rotated value x itself
+// (ir.kr:11235-11236), and if x (or n) is a compile-time constant the whole
+// rotate const-folds away — no shifts, no IR_ROR (a vacuous pass). So x and
+// n are sourced through `ident()`, a deliberately NON-inlinable barrier
+// (multi-statement body -> inline_body_expr rejects it), which makes them
+// runtime-unknown to the optimizer while still carrying known values. That
+// keeps the SHR/SHL live so the matcher fires shape (a) (m = SUB(32,n)).
+//
+// Test values (right-rotate, W=32):
+//   rotr32(0x00000081, 1) = (0x81 >>> 1) | (0x81 << 31)
+//                         = 0x40 | 0x80000000 = 0x80000040
+//     low byte 0x40 = '@'   (first printed char)
+//   rotr32(0x41, 0)       = identity = 0x41 = 'A'   (n==0 handler path:
+//     n runtime==0 so SHR/SHL are NOT folded -> IR_ROR fires with n=0; the
+//     handler's explicit `andi ...,31` masks make x>>>0 | x<<0 = x|x = x).
+//
+// Expected UART output: "@A\n"
+//
+// Build:
+//   ./build/krc2 --arch=riscv32 --freestanding \
+//       examples/riscv-featuregap/t8_ror.kr -o /tmp/t8.bin
+// Run:
+//   timeout 5 qemu-system-riscv32 -machine virt -nographic -bios /tmp/t8.bin
+
+device Uart at 0x10000000 {
+    thr at 0x00 : u8
+    lsr at 0x05 : u8
+}
+
+fn putc(u8 c) {
+    while (Uart.lsr & 0x20) == 0 { }
+    Uart.thr = c
+}
+
+// Opaque identity barrier: multi-statement so the AST inliner refuses it
+// (inline_body_expr wants a single Return or the rotation idiom), leaving the
+// call result runtime-unknown to the IR const-folder. Returns v unchanged.
+fn ident(uint32 v) -> uint32 {
+    if v == 0 { return 0 }
+    return v
+}
+
+// EXACT rotation shape the AST inliner matches (3 statements; the trailing
+// `& 0xFFFFFFFF` masks are required by inline_is_rotation_shape).
+fn rotr32(uint32 x, uint32 n) -> uint32 {
+    uint32 lo = (x >> n) & 0xFFFFFFFF
+    uint32 hi = (x << (32 - n)) & 0xFFFFFFFF
+    return (lo | hi) & 0xFFFFFFFF
+}
+
+fn main() {
+    uint32 x1 = ident(0x81)
+    uint32 n1 = ident(1)
+    uint32 r = rotr32(x1, n1)      // 0x81 ror 1 = 0x80000040
+    putc(r & 0xFF)                 // 0x40 = '@'
+
+    uint32 x2 = ident(0x41)
+    uint32 n2 = ident(0)
+    uint32 s = rotr32(x2, n2)      // 0x41 ror 0 = 0x41 (n==0 identity)
+    putc(s & 0xFF)                 // 'A'
+
+    putc(10)                       // '\n'
+    loop { }
+}
