@@ -807,14 +807,32 @@ fn x86_modrm_extra(uint64 modrm) -> uint64 {
     return extra
 }
 
+// riscv32 (arch==2) backend is a stub until stage 3: every arch-dispatch
+// site routes arch==2 here explicitly instead of silently falling through
+// to the x86_64 or arm64 arm of a binary if/else. See task 0.2 audit.
+fn riscv32_nyi(uint64 what) {
+    uint64 pre = "error: riscv32 "
+    write(2, pre, str_len(pre))
+    write(2, what, str_len(what))
+    uint64 post = " not yet implemented (stage 3)\n"
+    write(2, post, str_len(post))
+    exit(1)
+}
+
 fn emit_asm_listing(uint64 output_path, uint64 arch, uint64 text_start, uint64 source, uint64 tokens) {
+    // arch==2 (riscv32): no disassembler yet — refuse before touching output.
+    if arch == 2 {
+        riscv32_nyi("asm listing")
+    }
     uint64 fd = file_open(output_path, 1)
     uint64 code_end = codegen_output_len()
     write(fd, "; KernRift assembly listing\n", 27)
     if arch == 0 {
         write(fd, "; Architecture: x86_64\n", 23)
-    } else {
+    } else if arch == 1 {
         write(fd, "; Architecture: ARM64\n", 22)
+    } else {
+        riscv32_nyi("asm listing")
     }
     write(fd, "\n", 1)
 
@@ -840,8 +858,10 @@ fn emit_asm_listing(uint64 output_path, uint64 arch, uint64 text_start, uint64 s
             write(fd, source + sect_start, sect_len)
             if arch == 0 {
                 write(fd, ",\"ax\",@progbits\n", 16)
-            } else {
+            } else if arch == 1 {
                 write(fd, ",\"ax\",%progbits\n", 16)
+            } else {
+                riscv32_nyi("asm listing")
             }
         }
         // Print function label
@@ -1326,7 +1346,7 @@ fn emit_asm_listing(uint64 output_path, uint64 arch, uint64 text_start, uint64 s
                 write(fd, "\n", 1)
                 pos = pos + 4
             }
-        } else {
+        } else if arch == 0 {
             // x86_64: variable length — hex dump with basic decode
             while pos < fn_end {
                 write(fd, "  ", 2)
@@ -2159,6 +2179,8 @@ fn emit_asm_listing(uint64 output_path, uint64 arch, uint64 text_start, uint64 s
                 }
                 write(fd, "\n", 1)
             }
+        } else {
+            riscv32_nyi("asm listing")
         }
         fi = fi + 1
     }
@@ -2276,23 +2298,30 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
         // ELF
         if arch == 0 {
             emit_elf_header()
-        } else {
+        } else if arch == 1 {
             emit_elf_header_a64()
+        } else {
+            // Do NOT emit an x86_64/arm64 ELF header for riscv32.
+            riscv32_nyi("ELF image emission")
         }
         emit_program_header(0)
     } else if emit_mode == 1 {
         // Mach-O
         if arch == 0 {
             header_size = emit_macho_headers_x64(0)
-        } else {
+        } else if arch == 1 {
             header_size = emit_macho_headers_a64(0)
+        } else {
+            riscv32_nyi("Mach-O image emission")
         }
     } else if emit_mode == 2 {
         // PE
         if arch == 0 {
             header_size = emit_pe_headers_x64(0)
-        } else {
+        } else if arch == 1 {
             header_size = emit_pe_headers_a64(0)
+        } else {
+            riscv32_nyi("PE image emission")
         }
     } else if emit_mode == 3 || emit_mode == 7 {
         // ELF relocatable (.o) or LKM (.ko) — no header at start,
@@ -2303,8 +2332,10 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
         // Android PIE ELF (ARM64 or x86_64)
         if arch == 0 {
             emit_elf_header_android_x86_64()
-        } else {
+        } else if arch == 1 {
             emit_elf_header_android_a64()
+        } else {
+            riscv32_nyi("Android image emission")
         }
         header_size = 1024
     } else if emit_mode == 5 {
@@ -2368,9 +2399,13 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
     if arch == 0 {
         resolve_fixups()
         resolve_fnaddr_fixups()
-    } else {
+    } else if arch == 1 {
         resolve_fixups_a64()
         resolve_fnaddr_fixups_a64()
+    } else {
+        // riscv32 fixups need their own resolver (AUIPC/JAL reach rules);
+        // running the arm64 one here would silently corrupt the output.
+        riscv32_nyi("call fixup resolution")
     }
 
     // Emit string data BEFORE static data so trailing zero bytes from
@@ -2384,13 +2419,19 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
     // trailing code bytes instead of its own value.
     if arch == 1 {
         while (codegen_output_len() & 7) != 0 { emit_byte(0) }
+    } else if arch == 2 {
+        // riscv32: 4-byte alignment (RV32 word loads / instruction
+        // alignment) — deliberately NOT the arm64 8-byte rule above.
+        while (codegen_output_len() & 3) != 0 { emit_byte(0) }
     }
     uint64 str_start = codegen_output_len()
     emit_string_data()
     if arch == 0 {
         resolve_string_fixups(str_start)
-    } else {
+    } else if arch == 1 {
         resolve_string_fixups_a64(str_start)
+    } else {
+        riscv32_nyi("string fixup resolution")
     }
     // Align the static-data section base to 8 bytes on both arches.
     // Without this, static uint64[N] arrays whose logical offset within
@@ -2413,8 +2454,10 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
     if emit_mode != 7 {
         if arch == 0 {
             resolve_static_fixups(data_start)
-        } else {
+        } else if arch == 1 {
             resolve_static_fixups_a64(data_start)
+        } else {
+            riscv32_nyi("static fixup resolution")
         }
     }
 
@@ -2427,6 +2470,12 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
     //   3 android → ELF
     //   4 freebsd → ELF
     if emit_mode == 3 {
+        // riscv32: no relocatable object writer yet (ELF e_machine=243,
+        // R_RISCV_* relocations). Refuse before the target_os dispatch
+        // below can hand arch=2 to an x86/arm64-only emitter.
+        if arch == 2 {
+            riscv32_nyi("relocatable (.o) emission")
+        }
         uint64 total_code = codegen_output_len()
         if target_os == 1 {
             emit_macho_relocatable(total_code, 0, arch)
@@ -2469,6 +2518,9 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
         // violation"). String-literal refs stay intra-.text and need no
         // relocation; static-var refs cross .text→.data and DO — see
         // emit_elf_lkm's static-fixup relocation pass.
+        if arch == 2 {
+            riscv32_nyi("LKM (.ko) emission")
+        }
         uint64 lkm_total = codegen_output_len()
         uint64 lkm_text_len = data_start
         uint64 lkm_data_len = lkm_total - data_start
@@ -2562,6 +2614,9 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
         // Mach-O
         uint64 page_size = 4096
         if arch == 1 { page_size = 16384 }
+        // arch==2 unreachable here (Mach-O header site already refused);
+        // keep it explicit so a future guard removal can't misroute.
+        if arch == 2 { riscv32_nyi("Mach-O image emission") }
         uint64 total_file = codegen_output_len()
         uint64 total_aligned = (total_file + page_size - 1) & ~(page_size - 1)
         while codegen_output_len() < total_aligned { emit_byte(0) }
@@ -2575,12 +2630,15 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
             uint64 entry_va = 0x100000000 + main_off_macho
             patch_u32(320, entry_va & 0xFFFFFFFF)
             patch_u32(324, (entry_va >> 32) & 0xFFFFFFFF)
-        } else {
+        } else if arch == 1 {
             // ARM64 LC_MAIN entryoff = file offset of main
             patch_u32(608, main_off_macho & 0xFFFFFFFF)
             patch_u32(612, (main_off_macho >> 32) & 0xFFFFFFFF)
+        } else {
+            riscv32_nyi("Mach-O image emission")
         }
         // ARM64 Mach-O: patch __text section + separate __DATA segment for W^X
+        // (arch==2 cannot reach this block — refused above.)
         if arch == 1 {
             // __text section size at offset 216
             uint64 m_textsz = total_aligned - 16384
@@ -2698,7 +2756,7 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
             patch_u32(0x90, image_size)
             // Resolve ARM64 IAT fixups
             resolve_a64_win_iat_fixups(text_start, iat_rva_val)
-        } else {
+        } else if arch == 0 {
             // x86_64 PE: statics in .text (RWX) — x86_64 allows this
             text_aligned = (text_size + 0x1FF) & ~0x1FF
             while codegen_output_len() < header_size + text_aligned { emit_byte(0) }
@@ -2724,6 +2782,9 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
             patch_u32(0x90, image_size)
             // Resolve x86_64 IAT fixups
             resolve_win_iat_fixups(text_start, iat_rva_val)
+        } else {
+            // arch==2 unreachable (PE header site already refused).
+            riscv32_nyi("PE image emission")
         }
     } else if emit_mode == 4 {
         // Android PIE ELF: separate RX code + RW data segments
@@ -2753,8 +2814,11 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
         // passing a_dfoff directly gives the right VA for the RW data copy.
         if arch == 0 {
             resolve_static_fixups(a_dfoff)
-        } else {
+        } else if arch == 1 {
             resolve_static_fixups_a64(a_dfoff)
+        } else {
+            // arch==2 unreachable (Android header site already refused).
+            riscv32_nyi("Android image emission")
         }
         // Patch PT_LOAD RW @288: p_offset, p_vaddr, p_paddr, p_filesz, p_memsz
         patch_u32(296, a_dfoff & 0xFFFFFFFF)
@@ -4779,6 +4843,14 @@ fn main() {
     // explicitly request a fat binary with `krc hello.kr -o hello.krbo`
     // via --emit=... if they want cross-platform output.
     // --targets=<list> always forces fat-binary emission (custom slice set).
+    // Fat binaries carry only x86_64/arm64 slices — combining --targets
+    // with --arch=riscv32 would silently drop the requested arch, so
+    // refuse instead of misrouting into compile_fat.
+    if arch == 2 && target_mask != 0 {
+        uint64 tmsg = "error: fat binaries (--targets) have no riscv32 slice; use --arch=riscv32 without --targets\n"
+        write(2, tmsg, str_len(tmsg))
+        exit(1)
+    }
     if target_mask != 0 || (arch_set == 0 && emit_set == 0 && cli_argc > 0) {
         compile_fat(input_path, output_path)
     } else {
