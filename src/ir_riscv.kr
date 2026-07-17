@@ -394,6 +394,34 @@ fn ir_emit_riscv_insn(uint64 ii) {
         return
     }
 
+    // ----- RV32M group: IR_MUL(4) IR_DIV(5) IR_MOD(6) IR_SDIV(132)
+    // ----- IR_SMOD(133), all reg-reg R-type (op=0x33, funct7=0x01).
+    // IR_DIV/IR_MOD are UNSIGNED (mirrors arm64's udiv, ir_aarch64.kr:448
+    // and its udiv+msub synthesis at :474); IR_SDIV/IR_SMOD are SIGNED
+    // (arm64 sdiv, ir_aarch64.kr:499/:521). A signed/unsigned mixup here
+    // silently corrupts negative-number division/remainder, so keep this
+    // mapping in lockstep with the arm64 handlers if either changes.
+    // RISC-V has native rem/remu (f3=6/7) — unlike arm64, there is no
+    // div+msub synthesis needed for remainder.
+    // NOTE: unlike x86 (#DE trap) and arm64 (--debug exit(1) guard above),
+    // RV32M div/rem-by-zero do NOT trap: divu/div by 0 return all-ones
+    // (0xFFFFFFFF), remu/rem by 0 return the dividend unchanged. No
+    // --debug guard is emitted here (parity deferral, out of scope).
+    if op == 4 || op == 5 || op == 6 || op == 132 || op == 133 {
+        uint64 a_reg = rv_resolve_src(s1_v, RV_T5)
+        uint64 b_reg = rv_resolve_src(s2_v, RV_T6)
+        uint64 d = dst_r
+        if d == 0xFFFFFFFF { d = RV_T5 }
+        uint64 f3 = 0                              // mul
+        if op == 5 { f3 = 5 }                      // divu (unsigned)
+        if op == 6 { f3 = 7 }                      // remu (unsigned)
+        if op == 132 { f3 = 4 }                    // div (signed)
+        if op == 133 { f3 = 6 }                    // rem (signed)
+        rv_r(0x01, b_reg, a_reg, f3, d, 0x33)
+        if dst_r == 0xFFFFFFFF { rv_store_spill(RV_T5, dest_v) }
+        return
+    }
+
     // ----- IR_ADD_IMM (135) / IR_SUB_IMM (136): dst = src1 ± imm -----
     // Fused by ir_optimize when src2 was a known constant (src2 field is
     // 0; the constant lives in imm — same contract as the x86 LEA path,
