@@ -51,13 +51,18 @@ fn rv_s(uint64 imm, uint64 rs2, uint64 rs1, uint64 f3, uint64 op) {
 // B-type: imm[12][31] imm[10:5][30:25] rs2[24:20] rs1[19:15] funct3[14:12]
 //         imm[4:1][11:8] imm[11][7] op[6:0]. imm is a byte displacement,
 //         always even (bit 0 is not stored).
-fn rv_b(uint64 imm, uint64 rs2, uint64 rs1, uint64 f3, uint64 op) {
+// rv_b_word builds the instruction word without emitting — the branch
+// fixup patcher needs the bare word for patch_u32 (same split as rv_j_word).
+fn rv_b_word(uint64 imm, uint64 rs2, uint64 rs1, uint64 f3, uint64 op) -> uint64 {
     uint64 b12 = (imm >> 12) & 1
     uint64 b11 = (imm >> 11) & 1
     uint64 b10_5 = (imm >> 5) & 0x3F
     uint64 b4_1 = (imm >> 1) & 0xF
-    uint64 insn = (b12 << 31) | (b10_5 << 25) | ((rs2 & 0x1F) << 20) | ((rs1 & 0x1F) << 15) | ((f3 & 7) << 12) | (b4_1 << 8) | (b11 << 7) | (op & 0x7F)
-    emit_u32_le(insn)
+    return (b12 << 31) | (b10_5 << 25) | ((rs2 & 0x1F) << 20) | ((rs1 & 0x1F) << 15) | ((f3 & 7) << 12) | (b4_1 << 8) | (b11 << 7) | (op & 0x7F)
+}
+
+fn rv_b(uint64 imm, uint64 rs2, uint64 rs1, uint64 f3, uint64 op) {
+    emit_u32_le(rv_b_word(imm, rs2, rs1, f3, op))
 }
 
 // U-type: imm[31:12] rd[11:7] op[6:0]. imm is the FULL 32-bit value whose
@@ -246,6 +251,26 @@ fn rv_fits_imm12(uint64 imm) -> uint64 {
     return 0
 }
 
+// B-type (conditional branch) displacement must fit signed 13 bits
+// (−4096..+4094, ±4 KiB), even. disp arrives as a two's-complement uint64
+// (negative back-branch = huge value), so re-bias into [0, 0x2000) to
+// range-check, exactly like rv_check_j21 below. Returns the checked,
+// fully-encoded instruction word — the fixup patcher hands it straight to
+// patch_u32 (same check-then-encode shape as arm64's a64_check_b19).
+// Overflow is a HARD ERROR for milestone 1 (small functions): the
+// invert-condition + jal trampoline is a documented future enhancement —
+// never silently truncate a displacement.
+fn rv_b_checked(uint64 disp, uint64 rs2, uint64 rs1, uint64 f3, uint64 op) -> uint64 {
+    uint64 biased = disp + 0x1000
+    if biased >= 0x2000 {
+        rv_err("error: riscv32: B-type branch displacement out of range\n")
+    }
+    if (disp & 1) != 0 {
+        rv_err("error: riscv32: odd B-type branch displacement\n")
+    }
+    return rv_b_word(disp, rs2, rs1, f3, op)
+}
+
 // jal displacement must fit signed 21 bits (±1 MiB), even. disp arrives
 // as a two's-complement uint64 (negative = huge), so re-bias into
 // [0, 0x200000) to range-check.
@@ -305,12 +330,20 @@ fn ir_emit_riscv_insn(uint64 ii) {
     if op == 1 {
         // >32-bit constant backstop (carry-forward from Task 0.4): a
         // 64-bit literal that slipped past sema under --no-check-types.
+        // EXCEPT sign-extended 32-bit negatives: the shared optimizer
+        // const-folds in 64-bit arithmetic, so `int32 a = 0 - 5` reaches
+        // here as 0xFFFFFFFFFFFFFFFB. When bits 63:32 are the sign
+        // extension of bit 31 the low 32 bits ARE the exact rv32 value —
+        // truncate and materialize. Anything else is a genuine 64-bit
+        // constant and still errors.
         if imm > 0xFFFFFFFF {
-            rv_err("error: 64-bit constant not supported on riscv32\n")
+            if imm < 0xFFFFFFFF80000000 {
+                rv_err("error: 64-bit constant not supported on riscv32\n")
+            }
         }
         uint64 d = dst_r
         if d == 0xFFFFFFFF { d = RV_T5 }
-        rv_li(d, imm)
+        rv_li(d, imm & 0xFFFFFFFF)
         if dst_r == 0xFFFFFFFF { rv_store_spill(RV_T5, dest_v) }
         return
     }
@@ -413,6 +446,66 @@ fn ir_emit_riscv_insn(uint64 ii) {
             ifield = 0x400 | shamt
         }
         rv_i(ifield, a_reg, f3, d, 0x13)
+        if dst_r == 0xFFFFFFFF { rv_store_spill(RV_T5, dest_v) }
+        return
+    }
+
+    // ----- Compares: unsigned IR_CMP_EQ(14)..IR_CMP_GE(19), signed
+    // ----- IR_SCMP_LT(120)..IR_SCMP_GE(123). dest = (src1 OP src2) → 0/1.
+    // Mirrors arm64's cmp+cset pairs (ir_aarch64.kr:646-687), but RV32I has
+    // no flags register — lower to slt/sltu plus fixups:
+    //   EQ (14):        sub d,a,b ; sltiu d,d,1     (seqz — sign-agnostic)
+    //   NE (15):        sub d,a,b ; sltu  d,x0,d    (snez — sign-agnostic)
+    //   LT (16/120):    slt[u] d,a,b
+    //   LE (17/121):    slt[u] d,b,a ; xori d,d,1   (= !(b<a))
+    //   GT (18/122):    slt[u] d,b,a                (swap operands)
+    //   GE (19/123):    slt[u] d,a,b ; xori d,d,1   (= !(a<b))
+    // Signedness picks the funct3: slt (f3=2) for IR_SCMP_*, sltu (f3=3)
+    // for IR_CMP_LT..GE. Equality has no signed variant anywhere in the
+    // IR — ir.kr:1604 emits IR_CMP_EQ/NE for == and != regardless of
+    // use_signed — so 14/15 serve both families.
+    // Using d itself as the sub scratch (EQ/NE) and as the slt dest before
+    // the xori is safe even when d aliases a_reg/b_reg (spilled dest → d =
+    // t5 = a_reg's scratch): every RV32 instruction reads both sources
+    // before writing rd, and nothing below re-reads a source after d is
+    // written.
+    uint64 is_cmp = 0
+    if op >= 14 && op <= 19 { is_cmp = 1 }
+    if op >= 120 && op <= 123 { is_cmp = 1 }
+    if is_cmp != 0 {
+        uint64 a_reg = rv_resolve_src(s1_v, RV_T5)
+        uint64 b_reg = rv_resolve_src(s2_v, RV_T6)
+        uint64 d = dst_r
+        if d == 0xFFFFFFFF { d = RV_T5 }
+        if op == 14 {
+            rv_r(0x20, b_reg, a_reg, 0, d, 0x33)  // sub d, a, b
+            rv_i(1, d, 3, d, 0x13)                // sltiu d, d, 1 (seqz)
+        } else if op == 15 {
+            rv_r(0x20, b_reg, a_reg, 0, d, 0x33)  // sub d, a, b
+            rv_r(0, d, RV_ZERO, 3, d, 0x33)       // sltu d, x0, d (snez)
+        } else {
+            uint64 f3 = 3                         // sltu (unsigned 16..19)
+            if op >= 120 { f3 = 2 }               // slt (signed 120..123)
+            uint64 lhs = a_reg
+            uint64 rhs = b_reg
+            uint64 invert = 0
+            if op == 17 || op == 121 {            // LE: !(b < a)
+                lhs = b_reg
+                rhs = a_reg
+                invert = 1
+            }
+            if op == 18 || op == 122 {            // GT: (b < a)
+                lhs = b_reg
+                rhs = a_reg
+            }
+            if op == 19 || op == 123 {            // GE: !(a < b)
+                invert = 1
+            }
+            rv_r(0, rhs, lhs, f3, d, 0x33)        // slt/sltu d, lhs, rhs
+            if invert != 0 {
+                rv_i(1, d, 4, d, 0x13)            // xori d, d, 1
+            }
+        }
         if dst_r == 0xFFFFFFFF { rv_store_spill(RV_T5, dest_v) }
         return
     }
@@ -737,17 +830,49 @@ fn ir_riscv_gen(uint64 fn_node) {
                 }
             }
             if last_op == 41 {
-                // IR_BR_COND: Task 1.3+ (bne + fixup kind bit, like
-                // arm64's CBNZ encoding at ir_aarch64.kr:2677).
-                rv_nyi_op(41)
+                // IR_BR_COND: cond boolean vreg in src1, TRUE-target block
+                // id in imm, FALSE target = this block's succ0 (fall-through
+                // elided when == bi+1). Exact mirror of arm64's CBNZ scheme
+                // (ir_aarch64.kr:2676-2704): branch-if-true via
+                // `bne cond, x0, true_target`, then an unconditional
+                // `jal x0, false_target` only when the false edge doesn't
+                // fall through. Fixup kind is encoded in bit 31 of the
+                // target field (1 = conditional B-type patch site); the
+                // patcher recovers the cond register from the placeholder's
+                // rs1 field, like arm64 recovers CBNZ's Rt.
+                uint64 cond_v = ir_insn_src1(last)
+                uint64 cond_r = rv_resolve_src(cond_v, RV_T5)
+                uint64 target_true = ir_insn_imm(last)
+                uint64 fp = ir_br_fixups + ir_br_fixup_count * 8
+                uint32 po = out_len
+                unsafe { *(fp as uint32) = po }
+                uint64 fp4 = fp + 4
+                uint32 tb = target_true | 0x80000000
+                unsafe { *(fp4 as uint32) = tb }
+                ir_br_fixup_count = ir_br_fixup_count + 1
+                rv_b(0, RV_ZERO, cond_r, 1, 0x63)   // bne cond_r, x0, #0 (placeholder)
+                uint64 target_false = ir_bb_succ0(bi)
+                if target_false != 0xFFFFFFFF && target_false != bi + 1 {
+                    uint64 fp2 = ir_br_fixups + ir_br_fixup_count * 8
+                    uint32 po2 = out_len
+                    unsafe { *(fp2 as uint32) = po2 }
+                    uint64 fp24 = fp2 + 4
+                    uint32 tb2 = target_false
+                    unsafe { *(fp24 as uint32) = tb2 }
+                    ir_br_fixup_count = ir_br_fixup_count + 1
+                    rv_j(0, RV_ZERO, 0x6F)          // jal x0, #0 (placeholder)
+                }
             }
         }
 
         bi = bi + 1
     }
 
-    // 9. Patch branch fixups (all plain jal x0 for now; IR_BR_COND will
-    //    add a fixup-kind bit like arm64's CBNZ scheme when it lands)
+    // 9. Patch branch fixups. Bit 31 of the recorded target field selects
+    //    the patch kind (mirror of arm64's CBNZ bit, ir_aarch64.kr:2721):
+    //    1 = conditional `bne rs1, x0, disp` (B-type, ±4 KiB via
+    //    rv_b_checked — rs1 recovered from the placeholder's bits [19:15]),
+    //    0 = unconditional `jal x0, disp` (J-type, ±1 MiB via rv_check_j21).
     uint64 fi = 0
     while fi < ir_br_fixup_count {
         uint64 fp = ir_br_fixups + fi * 8
@@ -756,14 +881,25 @@ fn ir_riscv_gen(uint64 fn_node) {
         uint64 fp4 = fp + 4
         uint32 target_bb_raw = 0
         unsafe { *(fp4 as uint32) -> target_bb_raw }
-        uint64 wtb = target_bb_raw
+        uint64 wraw = target_bb_raw
+        uint64 is_cond = wraw & 0x80000000
+        uint64 wtb = wraw & 0x7FFFFFFF
         uint64 tbp = ir_block_offsets + wtb * 8
         uint64 target_off = 0
         unsafe { *(tbp as uint64) -> target_off }
         uint64 wpo = patch_off
         uint64 disp = target_off - wpo
-        rv_check_j21(disp)
-        patch_u32(wpo, rv_j_word(disp, RV_ZERO, 0x6F))
+        if is_cond != 0 {
+            uint64 insn_addr = out_buf + wpo
+            uint32 old_insn = 0
+            unsafe { *(insn_addr as uint32) -> old_insn }
+            uint64 wo = old_insn
+            uint64 rs1 = (wo >> 15) & 0x1F
+            patch_u32(wpo, rv_b_checked(disp, RV_ZERO, rs1, 1, 0x63))
+        } else {
+            rv_check_j21(disp)
+            patch_u32(wpo, rv_j_word(disp, RV_ZERO, 0x6F))
+        }
         fi = fi + 1
     }
 
