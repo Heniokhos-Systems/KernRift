@@ -4799,6 +4799,109 @@ else
     echo "  riscv_t4_memblk: SKIP (qemu-system-riscv32 or riscv64-linux-gnu-objdump not installed)"
 fi
 
+# --- RISC-V RV32 number formatting + frame scratchpad (feature-gap Task 5) ---
+# Compiles examples/riscv-featuregap/t5_fmtuint.kr, which exercises
+# IR_FMT_UINT (op 74) against a GLOBAL static byte buffer (same
+# STATIC_ADDR-array-decay constraint as Task 4 -- IR_STACK_ADDR/Task 6
+# still isn't implemented) plus the new fixed 32-byte frame scratchpad
+# (RV_SCRATCH_SIZE / ir_rv_scratch_off, ir_riscv.kr) FMT_UINT stages its
+# reversed digits through. fmt_uint(buf,12345) drives a full 5-iteration
+# divide-by-10 digit-extraction loop (divu+remu, RV32M native remainder --
+# no msub synthesis needed, unlike arm64) writing LEAST-significant-first
+# into the scratchpad, then a second loop copies the digits into buf
+# MOST-significant-first. Both loops bake branch displacements directly
+# between instructions (digit loop: backward bnez; copy loop: forward
+# beqz + backward j) -- same audit §4 CRITICAL trap as every other
+# hand-emitted riscv loop -- so rv_mark_noc wraps the whole span from the
+# digit loop's first instruction through the copy loop's exit patch.
+# Correctness is checked two ways: (1) qemu must print exactly "123455" --
+# "12345" (the 5 formatted digits, in the correct left-to-right order,
+# which a reversal-loop bug would scramble) followed by "5" (len+'0', a
+# len-count sanity check an off-by-one in the reversal loop would corrupt
+# too), and (2) the loop-interior addi/mv words -- the only loop mnemonics
+# that opcode-wise COULD compress to c.addi/c.mv -- must still be full
+# 8-hex-digit (4-byte) encodings in the disassembly; a compressed 4-digit
+# (2-byte) form at any of those sites would mean the noc region missed
+# something. (divu/remu/add/sb/lbu/beqz/bnez/j can never compress
+# regardless of noc: rv_try_compress only handles opcodes 0x13/0x33 f3=0
+# and 0x03/0x23 f3=2 -- divu/remu are 0x33 f3=5/7, add is 0x33 f3=0 but
+# rs1!=rd so it never matches c.mv/c.add's shape, sb/lbu are 0x23 f3=0 /
+# 0x03 f3=4, and branches/jal never compress at all -- so asserting their
+# width proves nothing about the noc mechanism.)
+echo ""
+echo "--- riscv32 FMT_UINT + frame-scratchpad boot test ---"
+if command -v qemu-system-riscv32 >/dev/null 2>&1 \
+   && command -v riscv64-linux-gnu-objdump >/dev/null 2>&1; then
+    TOTAL=$((TOTAL + 1))
+    RV_BIN="/tmp/krc_rv_fmtuint_$$.bin"
+    RV_OK=1
+    if ! $KRC --arch=riscv32 --freestanding "$DIR/../examples/riscv-featuregap/t5_fmtuint.kr" -o "$RV_BIN" >/dev/null 2>&1; then
+        echo "FAIL: riscv_t5_fmtuint (compilation failed)"
+        RV_OK=0
+    fi
+    if [ "$RV_OK" = 1 ]; then
+        RV_DIS=$(riscv64-linux-gnu-objdump -D -b binary -m riscv:rv32 "$RV_BIN" 2>/dev/null)
+        if [ "$(echo "$RV_DIS" | grep -cE '	divu	')" -lt 1 ]; then
+            echo "FAIL: riscv_t5_fmtuint (expected >=1 divu: digit-extraction loop)"
+            RV_OK=0
+        fi
+        if [ "$(echo "$RV_DIS" | grep -cE '	remu	')" -lt 1 ]; then
+            echo "FAIL: riscv_t5_fmtuint (expected >=1 remu: digit-extraction loop)"
+            RV_OK=0
+        fi
+        # The correctness gate: match each loop by its structural mnemonic
+        # sequence (not hardcoded hex offsets) and assert every
+        # compressible-opcode-shaped word in the noc-protected span stayed
+        # full-width:
+        #   Digit loop: divu, remu, addi, add, sb, addi, mv, bnez
+        #   Copy loop:  beqz, addi, add, lbu, sb, addi, j
+        NOC_BAD=$(echo "$RV_DIS" | awk -F'\t' '
+            { m=$3; h=$2; gsub(/ /,"",h); n++; mnem[n]=m; hexlen[n]=length(h); line[n]=$0 }
+            END {
+                digit_found=0; copy_found=0
+                for (i=1; i<=n; i++) {
+                    if (i+7<=n && mnem[i]=="divu" && mnem[i+1]=="remu" && mnem[i+2]=="addi" && mnem[i+3]=="add" && mnem[i+4]=="sb" && mnem[i+5]=="addi" && mnem[i+6]=="mv" && mnem[i+7]=="bnez") {
+                        digit_found++
+                        if (hexlen[i]!=8) print "FMT_UINT digit-loop divu compressed: " line[i]
+                        if (hexlen[i+1]!=8) print "FMT_UINT digit-loop remu compressed: " line[i+1]
+                        if (hexlen[i+2]!=8) print "FMT_UINT digit-loop digit-byte addi compressed: " line[i+2]
+                        if (hexlen[i+5]!=8) print "FMT_UINT digit-loop count addi compressed: " line[i+5]
+                        if (hexlen[i+6]!=8) print "FMT_UINT digit-loop quotient mv compressed: " line[i+6]
+                        if (hexlen[i+7]!=8) print "FMT_UINT digit-loop bnez compressed: " line[i+7]
+                    }
+                    if (!copy_found && i+6<=n && mnem[i]=="beqz" && mnem[i+1]=="addi" && mnem[i+2]=="add" && mnem[i+3]=="lbu" && mnem[i+4]=="sb" && mnem[i+5]=="addi" && mnem[i+6]=="j") {
+                        copy_found=1
+                        if (hexlen[i+1]!=8) print "FMT_UINT copy-loop count addi compressed: " line[i+1]
+                        if (hexlen[i+5]!=8) print "FMT_UINT copy-loop pointer addi compressed: " line[i+5]
+                    }
+                }
+                if (digit_found<1) print "FMT_UINT digit-loop instruction pattern (divu,remu,addi,add,sb,addi,mv,bnez) not found in disassembly"
+                if (!copy_found) print "FMT_UINT copy-loop instruction pattern (beqz,addi,add,lbu,sb,addi,j) not found in disassembly"
+            }
+        ')
+        if [ -n "$NOC_BAD" ]; then
+            echo "FAIL: riscv_t5_fmtuint (compressible loop-interior word(s) found -- noc region missed a loop instruction)"
+            echo "$NOC_BAD"
+            RV_OK=0
+        fi
+    fi
+    if [ "$RV_OK" = 1 ]; then
+        RV_OUT=$(timeout 5 qemu-system-riscv32 -machine virt -nographic -bios "$RV_BIN" 2>/dev/null)
+        if [ "$RV_OUT" = "123455" ]; then
+            PASS=$((PASS + 1))
+            echo "  riscv_t5_fmtuint: PASS (qemu printed 123455 -- digits '12345' + len sanity '5', loops stayed 4-byte)"
+        else
+            echo "FAIL: riscv_t5_fmtuint (qemu output was '$RV_OUT', want '123455')"
+            FAIL=$((FAIL + 1))
+        fi
+    else
+        FAIL=$((FAIL + 1))
+    fi
+    rm -f "$RV_BIN"
+else
+    echo "  riscv_t5_fmtuint: SKIP (qemu-system-riscv32 or riscv64-linux-gnu-objdump not installed)"
+fi
+
 # --- Summary ---
 echo ""
 echo "=== Results: $PASS/$TOTAL passed, $FAIL failed ==="

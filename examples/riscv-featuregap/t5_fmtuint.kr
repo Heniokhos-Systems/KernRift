@@ -1,0 +1,58 @@
+// RISC-V RV32IMC feature-gap Task 5: number formatting (IR_FMT_UINT, op 74)
+// + the frame scratchpad region (mirrors arm64's ir_a64_scratch_off, a
+// fixed 32-byte slice reserved in every non-@naked frame between the
+// stack-array region and the callee-saved block — see ir_riscv.kr's
+// RV_SCRATCH_SIZE / ir_rv_scratch_off).
+//
+// fmt_uint(buf, val) formats `val` as decimal ASCII digits directly into
+// `buf` (correct left-to-right order — the internal divide-by-10 loop
+// produces digits least-significant-first into the frame scratchpad, then
+// a second pass copies them into `buf` in reverse) and returns the digit
+// count. Semantics confirmed against ir.kr's emit site (ir.kr:2190-2199,
+// "fmt_uint(buf, val) -> IR_FMT_UINT": dest = digit count, src1 = buf
+// pointer, src2 = value) and both existing twins (x86 ir.kr:7414-7488,
+// arm64 ir_aarch64.kr:1058-1116) — same buf-out/dest-count-in contract on
+// every backend.
+//
+// The destination is a GLOBAL `static` byte buffer (Task 2's STATIC_ADDR
+// array-decay path), deliberately NOT a local array — IR_STACK_ADDR
+// (op 32) is not implemented yet on riscv, so a local array decl would
+// abort with "IR op 32 not yet implemented" (same constraint Task 4's
+// t4_memblk.kr documents). 12345 exercises a full 5-iteration digit loop
+// (multi-digit, no leading/trailing zero-digit edge cases masking a
+// reversal bug) and is printed via 5 literal-index putc calls, the same
+// fixed-index-read pattern t4_memblk.kr already proved works for statics.
+//
+// Build:
+//   ./build/krc2 --arch=riscv32 --freestanding \
+//       examples/riscv-featuregap/t5_fmtuint.kr -o /tmp/t5.bin
+// Run:
+//   qemu-system-riscv32 -machine virt -nographic -bios /tmp/t5.bin
+// Expected output: 12345
+
+device Uart at 0x10000000 {
+    thr at 0x00 : u8
+    lsr at 0x05 : u8
+}
+
+fn putc(u8 c) {
+    while (Uart.lsr & 0x20) == 0 { }
+    Uart.thr = c
+}
+
+static uint8[12] buf = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+
+fn main() {
+    uint32 len = fmt_uint(buf, 12345)
+    putc(buf[0])   // '1'
+    putc(buf[1])   // '2'
+    putc(buf[2])   // '3'
+    putc(buf[3])   // '4'
+    putc(buf[4])   // '5'
+    // Sanity: 5 digits -> '0' + len == '5'. If the digit count were wrong
+    // (e.g. off-by-one in the reversal loop) this would print something
+    // other than '5', catching a length bug that fixed-index reads alone
+    // would not.
+    putc(len + 48)
+    loop { }
+}

@@ -185,6 +185,19 @@ fn rv_vreg_is_float(uint64 vreg) -> uint64 {
 // 64 = 16 slots * 4 bytes, matching IR_ARG's max-16 overflow guard.
 static uint64 RV_OVERFLOW_RESERVE = 64
 
+// Fixed scratchpad slice in every non-@naked frame, mirroring arm64's
+// 32-byte scratchpad (ir_a64_scratch_off, ir_aarch64.kr:17/2507). Ops that
+// need a small hand-addressed byte buffer (e.g. FMT_UINT's reversed-digit
+// staging area — a 32-bit uint is at most 10 decimal digits) use this
+// instead of stealing a stack-array slot. 32 bytes comfortably covers 10
+// digits with room to spare, same as arm64. ir_rv_scratch_off is the
+// SP-relative byte offset of its base, set once per function in
+// ir_riscv_gen's frame-size computation (mirrors ir_a64_scratch_off's
+// per-function assignment) and consumed by op handlers emitted later in
+// the same function (ir_emit_riscv_insn runs after the frame is sized).
+static uint64 RV_SCRATCH_SIZE = 32
+static uint64 ir_rv_scratch_off = 0
+
 // Spilled vregs (colour >= IR_NUM_REGS) live just above the overflow
 // reserve: slot i at [SP + RV_OVERFLOW_RESERVE + i*4], stable across
 // calls. RV32 word size is 4 bytes (uint64/int64/float are rejected on
@@ -1555,6 +1568,82 @@ fn ir_emit_riscv_insn(uint64 ii) {
         return
     }
 
+    // ----- IR_FMT_UINT (74): format uint to buffer -----
+    // Semantics (ir.kr:2190-2199, "fmt_uint(buf, val) -> IR_FMT_UINT"):
+    // dest = digit count, src1 = output buffer pointer, src2 = value.
+    // Confirmed identical on both existing twins: x86 ir.kr:7414-7488
+    // ("IR_FMT_UINT: buf in src1, val in src2" ... "rax = digit count
+    // (return value)") and arm64 ir_aarch64.kr:1058-1116 ("format uint to
+    // buffer" ... "Return digit count (x6)"). Mirrors arm64's two-pass
+    // shape: digit-extraction loop divides by 10, writing ASCII digits
+    // LEAST-significant-first into the frame scratchpad (RV32M has native
+    // remu — unlike arm64's udiv+msub synthesis — so each digit is one
+    // divu + one remu, no msub needed), then a second loop copies them
+    // into the caller's buf in reverse (most-significant-first), producing
+    // correctly-ordered output. a0-a7 are free scratch (never colour-
+    // mapped, audit §4); a3 holds the scratchpad base for BOTH loops and
+    // is never overwritten. Both loops bake branch displacements directly
+    // (digit loop: backward bnez; copy loop: forward beqz + backward j,
+    // same shape as MEMCPY/MEMSET above) — same audit §4 CRITICAL trap as
+    // every other hand-emitted riscv loop, so the whole span from the
+    // digit loop's first instruction through the copy loop's exit patch
+    // is wrapped in ONE rv_mark_noc call (mirrors STR_EQ/MEMCMP's
+    // whole-tail span, not just the back-edges).
+    if op == 74 {
+        uint64 fu_buf = rv_resolve_src(s1_v, RV_T5)
+        uint64 fu_val = rv_resolve_src(s2_v, RV_T6)
+        rv_mv(10, fu_buf)                  // a0 = buf (output cursor)
+        rv_mv(11, fu_val)                  // a1 = val (quotient each iter)
+        rv_li(12, 0)                       // a2 = digit count = 0
+        rv_i(ir_rv_scratch_off, RV_SP, 0, 13, 0x13)   // addi a3, sp, scratch_off
+        rv_li(16, 10)                      // a6 = 10 (divisor)
+
+        uint64 loop_start = out_len
+        // Digit loop L: a4 = a1/10, a5 = a1%10 + '0', store at
+        // scratch[a2], a2++, a1 = a4, loop while a1 != 0 (at least one
+        // iteration always runs, so val==0 still emits digit '0').
+        rv_r(0x01, 16, 11, 5, 14, 0x33)    // divu a4, a1, a6
+        rv_r(0x01, 16, 11, 7, 15, 0x33)    // remu a5, a1, a6
+        rv_i(48, 15, 0, 15, 0x13)          // addi a5, a5, 48 ('0')
+        rv_r(0, 12, 13, 0, 17, 0x33)       // add a7, a3, a2 (scratch write addr)
+        rv_s(0, 15, 17, 0, 0x23)           // sb a5, 0(a7)
+        rv_i(1, 12, 0, 12, 0x13)           // addi a2, a2, 1
+        rv_mv(11, 14)                      // a1 = a4 (quotient)
+        uint64 bnez_site = out_len
+        uint64 back_disp = loop_start - bnez_site
+        emit_u32_le(rv_b_checked(back_disp, RV_ZERO, 11, 1, 0x63))  // bnez a1, L
+
+        rv_mv(16, 12)                      // a6 = saved digit count (return value)
+
+        // Copy loop: walk the scratch digits backward (most-significant
+        // first) into buf forward. Count tested at the TOP of the loop
+        // (mirrors MEMCPY/MEMSET's CBZ-before-first-access shape) — a2==0
+        // falls straight through, never underflows.
+        uint64 copy_start = out_len
+        uint64 beqz_site = out_len
+        rv_b(0, RV_ZERO, 12, 0, 0x63)      // beqz a2, DONE (placeholder)
+        rv_i(0 - 1, 12, 0, 12, 0x13)       // addi a2, a2, -1
+        rv_r(0, 12, 13, 0, 17, 0x33)       // add a7, a3, a2 (scratch read addr)
+        rv_i(0, 17, 4, 15, 0x03)           // lbu a5, 0(a7)
+        rv_s(0, 15, 10, 0, 0x23)           // sb a5, 0(a0)
+        rv_i(1, 10, 0, 10, 0x13)           // addi a0, a0, 1
+        uint64 j_site = out_len
+        uint64 cback_disp = copy_start - j_site
+        rv_check_j21(cback_disp)
+        rv_j(cback_disp, RV_ZERO, 0x6F)    // j copy_start
+        uint64 done_off = out_len
+        uint64 fwd_disp = done_off - beqz_site
+        patch_u32(beqz_site, rv_b_checked(fwd_disp, RV_ZERO, 12, 0, 0x63))
+        rv_mark_noc(loop_start, done_off)
+
+        // DONE: dest = digit count (a6)
+        uint64 d = dst_r
+        if d == 0xFFFFFFFF { d = RV_T5 }
+        rv_mv(d, 16)
+        if dst_r == 0xFFFFFFFF { rv_store_spill(RV_T5, dest_v) }
+        return
+    }
+
     // Everything else lands in Stage 2+ (mul/div, syscalls, ...).
     rv_nyi_op(op)
 }
@@ -1625,6 +1714,9 @@ fn ir_riscv_gen(uint64 fn_node) {
     //      [SP + 0 .. RV_OVERFLOW_RESERVE) — outgoing calls' args 9+
     //      [spill slots ...]               — spilled vregs (4 bytes each)
     //      [stack arrays ...]              — compile-time-sized local arrays
+    //      [scratchpad ...]                — RV_SCRATCH_SIZE fixed bytes
+    //                                         (ir_rv_scratch_off points at
+    //                                         its base; FMT_UINT etc.)
     //      [cs_base ...]                   — used s-registers (4 bytes each)
     //      [SP + total_frame - 4]          — ra
     //    With the overflow reserve at the bottom, IR_ARG can sw outgoing
@@ -1638,7 +1730,14 @@ fn ir_riscv_gen(uint64 fn_node) {
         if ((used_mask >> mc) & 1) != 0 { nsaved = nsaved + 1 }
         mc = mc + 1
     }
-    uint64 cs_base = RV_OVERFLOW_RESERVE + spill_size + ir_stack_array_bytes
+    // Scratchpad sits between the stack-array region and the callee-saved
+    // block. Every downstream offset (cs_base, the s-register save/restore
+    // loops, ra, total_frame) is derived FROM ir_rv_scratch_off, so it
+    // shifts automatically with the frame — nothing else needs updating.
+    // RV_SCRATCH_SIZE=32 is a multiple of 4, so 16-byte alignment of
+    // total_frame is unaffected by inserting it.
+    ir_rv_scratch_off = RV_OVERFLOW_RESERVE + spill_size + ir_stack_array_bytes
+    uint64 cs_base = ir_rv_scratch_off + RV_SCRATCH_SIZE
     uint64 total_frame = cs_base + nsaved * 4 + 4
     if (total_frame & 15) != 0 { total_frame = total_frame + 16 - (total_frame & 15) }
     if is_naked != 0 { total_frame = 0 }
