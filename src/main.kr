@@ -2251,10 +2251,41 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
     // definitions still appear in the output.
     inline_pass(root)
 
+    // Raw flat-binary mode: arch==2 (riscv32) + --freestanding + default
+    // image emission (emit_mode 0). There is no riscv ELF writer yet, and
+    // the QEMU `virt -bios` loader wants a headerless image anyway, so the
+    // freestanding flag doubles as the raw-binary trigger — no new --emit
+    // value needed. x86/arm64 can never set this: the raw path is
+    // arch==2-only by construction (bootstrap byte-identity depends on it).
+    uint64 rv_raw = 0
+    if arch == 2 && emit_mode == 0 && freestanding != 0 {
+        rv_raw = 1
+    }
+
     // Dead code elimination: scan AST for reachable functions
     dce_init()
     if emit_mode == 3 || emit_mode == 5 || emit_mode == 6 || emit_mode == 7 {
         dce_set_keep_all(1)
+    }
+    // Raw riscv: dce_scan only seeds `main` + @export, so a freestanding
+    // entry named `_start` would be pruned before it can be placed at
+    // offset 0. Seed it explicitly here (dce_scan's phase-2 closure then
+    // walks its callees like any other root).
+    if rv_raw != 0 {
+        uint32 rvs_child = ast_child(root)
+        uint64 rvs_w = rvs_child
+        while rvs_w != 0 {
+            uint32 rvs_k = ast_kind(rvs_w)
+            if rvs_k == 2 {
+                uint32 rvs_name = ast_data1(rvs_w)
+                uint64 rvs_wn = rvs_name
+                if tok_matches(rvs_wn, "_start", 6) != 0 {
+                    dce_add(rvs_wn)
+                }
+            }
+            uint32 rvs_nx = ast_next(rvs_w)
+            rvs_w = rvs_nx
+        }
     }
     dce_scan(root)
 
@@ -2300,11 +2331,20 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
             emit_elf_header()
         } else if arch == 1 {
             emit_elf_header_a64()
+        } else if rv_raw != 0 {
+            // riscv32 --freestanding: raw flat binary. No container
+            // header at all — out_buf starts with the first instruction
+            // and QEMU's `virt -bios` loader jumps to file offset 0.
+            header_size = 0
         } else {
             // Do NOT emit an x86_64/arm64 ELF header for riscv32.
-            riscv32_nyi("ELF image emission")
+            // (A hosted riscv32 ELF image needs the e_machine=243
+            // writer; only the --freestanding raw path exists today.)
+            riscv32_nyi("ELF image emission (only --freestanding raw binaries are supported)")
         }
-        emit_program_header(0)
+        if arch != 2 {
+            emit_program_header(0)
+        }
     } else if emit_mode == 1 {
         // Mach-O
         if arch == 0 {
@@ -2345,6 +2385,56 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
 
     uint64 text_start = codegen_output_len()
 
+    // Raw flat binary: QEMU's -bios loader begins execution at
+    // 0x8000_0000 = byte offset 0 of the image, so the entry function
+    // must be the FIRST thing emitted, ahead of source order. Emission
+    // order is otherwise free — calls resolve through the fixup table
+    // (resolve_fixups_riscv patches the auipc+jalr pairs after every
+    // function is registered), so hoisting the entry cannot break call
+    // resolution. Entry = a live `_start` if one exists, else `main`.
+    // Chosen over a `jal x0, entry` trampoline: zero extra bytes, no
+    // new fixup kind, and no ±1 MiB jal range limit to worry about.
+    uint64 rv_entry_node = 0
+    if rv_raw != 0 {
+        uint64 rv_main_node = 0
+        uint32 rve_child = ast_child(root)
+        uint64 rve_w = rve_child
+        while rve_w != 0 {
+            uint32 rve_k = ast_kind(rve_w)
+            if rve_k == 2 {
+                uint32 rve_name = ast_data1(rve_w)
+                uint64 rve_wn = rve_name
+                if dce_is_live(rve_wn) != 0 {
+                    if tok_matches(rve_wn, "_start", 6) != 0 {
+                        if rv_entry_node == 0 {
+                            rv_entry_node = rve_w
+                        }
+                    } else if tok_matches(rve_wn, "main", 4) != 0 {
+                        if rv_main_node == 0 {
+                            rv_main_node = rve_w
+                        }
+                    }
+                }
+            }
+            uint32 rve_nx = ast_next(rve_w)
+            rve_w = rve_nx
+        }
+        if rv_entry_node == 0 {
+            rv_entry_node = rv_main_node
+        }
+        if rv_entry_node == 0 {
+            uint64 rve_msg = "error: freestanding riscv32 needs an entry function ('_start' or 'main')\n"
+            write(2, rve_msg, str_len(rve_msg))
+            exit(1)
+        }
+        uint32 rve_ename = ast_data1(rv_entry_node)
+        uint64 rve_wen = rve_ename
+        fn_register(rve_wen, out_len)
+        line_table_record_fn_entry(rve_wen)
+        ir_init()
+        ir_riscv_gen(rv_entry_node)
+    }
+
     // Generate code for each function (skip dead functions via DCE)
     uint32 child = ast_child(root)
     uint64 wchild = child
@@ -2374,10 +2464,14 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
                     // path exists, so this branch is unconditional on
                     // emit_ir_mode (mirrors where arch==1 calls
                     // ir_emit_arm64_function above).
-                    fn_register(fn_name, out_len)
-                    line_table_record_fn_entry(fn_name)
-                    ir_init()
-                    ir_riscv_gen(wchild)
+                    // Raw mode already emitted the entry function at
+                    // offset 0 above — don't register/emit it twice.
+                    if wchild != rv_entry_node {
+                        fn_register(fn_name, out_len)
+                        line_table_record_fn_entry(fn_name)
+                        ir_init()
+                        ir_riscv_gen(wchild)
+                    }
                 } else if arch == 0 {
                     // Legacy x86: gen_function registers internally.
                     // Record the entry-address line first so DWARF sees it.
@@ -2432,7 +2526,12 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
     } else if arch == 1 {
         resolve_string_fixups_a64(str_start)
     } else {
-        riscv32_nyi("string fixup resolution")
+        // riscv32: no string-fixup resolver yet. Refuse only when the
+        // program actually recorded string fixups — a string-free
+        // program must not be blocked from the raw flat-binary path.
+        if str_fixup_count != 0 {
+            riscv32_nyi("string fixup resolution")
+        }
     }
     // Align the static-data section base to 8 bytes on both arches.
     // Without this, static uint64[N] arrays whose logical offset within
@@ -2458,7 +2557,11 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
         } else if arch == 1 {
             resolve_static_fixups_a64(data_start)
         } else {
-            riscv32_nyi("static fixup resolution")
+            // riscv32: same rule as string fixups above — only refuse
+            // when static-var fixups were actually recorded.
+            if static_fixup_count != 0 {
+                riscv32_nyi("static fixup resolution")
+            }
         }
     }
 
@@ -2572,14 +2675,24 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
         return
     }
 
-    // Patch headers
-    uint64 entry_off = find_main_offset()
-    if entry_off == 0xFFFFFFFF {
-        write(2, "error: no 'main' function found\n", 32)
-        write(2, "Every KernRift program needs: fn main() { ... }\n", 49)
-        exit(1)
+    // Patch headers.
+    // Raw riscv flat binary: there IS no header — patch_u32 on offsets
+    // 24/96/... would stomp the instruction bytes at the start of the
+    // image. The entry is at offset 0 by construction (emitted first),
+    // its existence was validated before codegen, and the whole buffer
+    // is written verbatim below. Skip the entire patch block. Also skip
+    // find_main_offset: a raw image whose entry is `_start` legitimately
+    // has no `main`.
+    uint64 entry_off = 0
+    if rv_raw == 0 {
+        entry_off = find_main_offset()
+        if entry_off == 0xFFFFFFFF {
+            write(2, "error: no 'main' function found\n", 32)
+            write(2, "Every KernRift program needs: fn main() { ... }\n", 49)
+            exit(1)
+        }
     }
-    if emit_mode == 0 {
+    if emit_mode == 0 && rv_raw == 0 {
         // ELF entry point
         uint64 entry_va = 0x400000 + entry_off
         patch_u32(24, entry_va & 0xFFFFFFFF)
