@@ -4602,11 +4602,13 @@ fi
 # (audit §4 CRITICAL trap) -- rv_mark_noc protects each loop's full
 # baked-displacement span. Proves this two ways: (1) qemu prints the
 # arithmetically-correct "31", which a miscompiled displacement would not
-# produce, and (2) every lbu/beqz/bne inside the loops must still be a
-# full 8-hex-digit (4-byte) encoding in the disassembly -- a compressed
-# 4-digit (2-byte) form at any of those sites would mean the noc region
-# missed something. Same dev-only toolchain guard/SKIP discipline as the
-# tests above.
+# produce, and (2) the loop-interior pointer-bump `addi`s and STR_EQ's
+# NE/EQ result-set `li`s -- the only loop mnemonics that opcode-wise
+# COULD compress to c.addi/c.li -- must still be full 8-hex-digit (4-byte)
+# encodings in the disassembly; a compressed 4-digit (2-byte) form at any
+# of those sites would mean the noc region missed something. (lbu/beqz/bne
+# can never compress regardless of noc, so they aren't useful signals
+# here.) Same dev-only toolchain guard/SKIP discipline as the tests above.
 #
 # IR_MEMCMP (op 88) is also implemented by this task but is not exercised
 # by a boot test here: its only IR emit site is struct `==`, which always
@@ -4638,18 +4640,44 @@ if command -v qemu-system-riscv32 >/dev/null 2>&1 \
             echo "FAIL: riscv_t3_strloops (expected >=1 bne: str_eq mismatch check)"
             RV_OK=0
         fi
-        # The correctness gate: every lbu/beqz/bne must be a full 4-byte
-        # (8 hex digit) encoding -- these are exactly the mnemonics that
-        # sit inside the two rv_mark_noc-protected loop regions (plus the
-        # UART poll's beqz, itself never inside a noc region but also
-        # never eligible for c.* since beqz/bne are branches, which never
-        # compress at all -- so this check is really about lbu, the one
-        # loop-interior mnemonic that COULD compress if noc failed to
-        # cover it).
-        BAD_COMPRESSED=$(echo "$RV_DIS" | awk -F'\t' '{gsub(/ /,"",$2)} $3=="lbu"||$3=="beqz"||$3=="bne" {if (length($2)!=8) print}')
-        if [ -n "$BAD_COMPRESSED" ]; then
-            echo "FAIL: riscv_t3_strloops (found a compressed lbu/beqz/bne -- noc region missed a loop instruction)"
-            echo "$BAD_COMPRESSED"
+        # The correctness gate: lbu/beqz/bne can NEVER compress regardless
+        # of noc (rv_try_compress only handles opcodes 0x13/0x33/0x03
+        # f3=2/0x23 f3=2 -- lbu is 0x03 f3=4, and branches/jal never
+        # compress at all), so asserting their width proves nothing about
+        # the noc mechanism. The instructions that WOULD shrink to
+        # c.addi/c.li if rv_mark_noc failed to cover the loop are the
+        # loop-interior pointer bumps (`addi a0,a0,1` / `addi a1,a1,1`)
+        # and the STR_EQ NE/EQ result-set words (`li d,0` / `li d,1`) --
+        # those are what this gate must, and does, check. Loop shapes are
+        # matched structurally by mnemonic sequence (not hardcoded hex
+        # offsets), so this stays robust to any future codegen/prologue
+        # change that shifts addresses without touching the loops:
+        #   STRLEN: lbu, beqz, addi, j            (back-edge)
+        #   STR_EQ: lbu, lbu, bne, beqz, addi, addi, j, li, j, li
+        NOC_BAD=$(echo "$RV_DIS" | awk -F'\t' '
+            { m=$3; h=$2; gsub(/ /,"",h); n++; mnem[n]=m; hexlen[n]=length(h); line[n]=$0 }
+            END {
+                strlen_found=0; streq_found=0
+                for (i=1; i<=n; i++) {
+                    if (!strlen_found && i+3<=n && mnem[i]=="lbu" && mnem[i+1]=="beqz" && mnem[i+2]=="addi" && mnem[i+3]=="j") {
+                        strlen_found=1
+                        if (hexlen[i+2]!=8) print "STRLEN loop pointer-bump addi compressed: " line[i+2]
+                    }
+                    if (!streq_found && i+9<=n && mnem[i]=="lbu" && mnem[i+1]=="lbu" && mnem[i+2]=="bne" && mnem[i+3]=="beqz" && mnem[i+4]=="addi" && mnem[i+5]=="addi" && mnem[i+6]=="j" && mnem[i+7]=="li" && mnem[i+8]=="j" && mnem[i+9]=="li") {
+                        streq_found=1
+                        if (hexlen[i+4]!=8) print "STR_EQ loop pointer-bump addi (a0) compressed: " line[i+4]
+                        if (hexlen[i+5]!=8) print "STR_EQ loop pointer-bump addi (a1) compressed: " line[i+5]
+                        if (hexlen[i+7]!=8) print "STR_EQ NE-tail li (mismatch result) compressed: " line[i+7]
+                        if (hexlen[i+9]!=8) print "STR_EQ EQ-tail li (match result) compressed: " line[i+9]
+                    }
+                }
+                if (!strlen_found) print "STRLEN loop instruction pattern (lbu,beqz,addi,j) not found in disassembly"
+                if (!streq_found) print "STR_EQ loop instruction pattern (lbu,lbu,bne,beqz,addi,addi,j,li,j,li) not found in disassembly"
+            }
+        ')
+        if [ -n "$NOC_BAD" ]; then
+            echo "FAIL: riscv_t3_strloops (compressible loop-interior addi/li word(s) found -- noc region missed a loop instruction)"
+            echo "$NOC_BAD"
             RV_OK=0
         fi
     fi
