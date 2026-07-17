@@ -210,8 +210,12 @@ static uint64 ir_rv_scratch_off = 0
 fn rv_spill_offset(uint64 vreg) -> uint64 {
     uint64 slot = vreg - IR_NUM_REGS - 1
     uint64 off = RV_OVERFLOW_RESERVE + slot * 4
-    // lw/sw offsets are imm12: -2048..2047. The whole frame is capped at
-    // 2032 below, so this should be unreachable — keep it as a guard.
+    // lw/sw offsets are imm12: -2048..2047. The overall frame is no longer
+    // capped (Task 6 lifted that via t5-assisted SP arithmetic for large
+    // frames), but spill slots are deliberately NOT — lw/sw have no
+    // big-offset form here, so a function with enough spills to push this
+    // slot past imm12 (~495+ spilled vregs) loud-fails by design rather
+    // than silently truncating/miscompiling the offset.
     if off > 2047 {
         rv_err("error: riscv32: spill offset exceeds imm12 range\n")
     }
@@ -1543,8 +1547,9 @@ fn ir_emit_riscv_insn(uint64 ii) {
     // even be ra-adjacent scratch. imm==1 flags an f64 return
     // (call_ptr_f64); floats are rejected on riscv32 by sema and the
     // fkind backstop above, so no special case is needed here. (Function
-    // POINTERS can't be materialized yet — IR_FN_ADDR (86) is still NYI —
-    // but the call form itself is complete.)
+    // pointers are materialized via IR_FN_ADDR (86, see below), which lowers
+    // to the same pcrel auipc+addi pair as STR_CONST/STATIC_ADDR — this call
+    // form just consumes whatever vreg that produced.)
     if op == 87 {
         uint64 ptr_r = rv_resolve_src(s1_v, RV_T5)
         rv_i(0, ptr_r, 0, RV_RA, 0x67)                 // jalr ra, 0(ptr)
@@ -1814,7 +1819,10 @@ fn ir_emit_riscv_insn(uint64 ii) {
         uint64 d = dst_r
         if d == 0xFFFFFFFF { d = RV_T5 }
         rv_mv(d, 14)
-        if dst_r == 0xFFFFFFFF { rv_store_spill(RV_T5, dest_v) }
+        // dest_v==0 for the statement-form lowering (return value discarded,
+        // ir.kr passes no dest vreg) — nothing to spill-store in that case;
+        // storing anyway would be a dead write into the overflow-reserve slot.
+        if dst_r == 0xFFFFFFFF && dest_v != 0 { rv_store_spill(RV_T5, dest_v) }
         return
     }
 
@@ -1864,7 +1872,10 @@ fn ir_emit_riscv_insn(uint64 ii) {
         uint64 d = dst_r
         if d == 0xFFFFFFFF { d = RV_T5 }
         rv_mv(d, 13)
-        if dst_r == 0xFFFFFFFF { rv_store_spill(RV_T5, dest_v) }
+        // dest_v==0 for the statement-form lowering (return value discarded,
+        // ir.kr passes no dest vreg) — nothing to spill-store in that case;
+        // storing anyway would be a dead write into the overflow-reserve slot.
+        if dst_r == 0xFFFFFFFF && dest_v != 0 { rv_store_spill(RV_T5, dest_v) }
         return
     }
 
@@ -1974,6 +1985,7 @@ fn ir_emit_riscv_insn(uint64 ii) {
     // stack via IR_STACK_ADDR.
     if op == 70 {
         rv_nyi_op(op)
+        return
     }
 
     // ----- IR_FN_ADDR (86): dst = address of a named function -----
@@ -2022,6 +2034,11 @@ fn ir_emit_riscv_insn(uint64 ii) {
     // Spilled-dest aware: d falls back to t5 (the `or t5,t5,a0` self-write is
     // legal — t5's old x>>>n value is consumed by that same OR) then spilled.
     if op == 137 {
+        // Defensive: only W==32 is ever emitted today (ir_opt_recognize_rotate
+        // always produces imm=32 per the contract above), but the sequence
+        // below hardcodes the mod-32 mask — guard against a future W!=32
+        // producer silently miscompiling instead of failing loud.
+        if imm != 32 { rv_err("error: riscv32: IR_ROR width != 32 not supported\n") }
         uint64 x_reg = rv_resolve_src(s1_v, RV_T5)     // value  (s-reg or t5)
         uint64 n_reg = rv_resolve_src(s2_v, RV_T6)     // count  (s-reg or t6)
         uint64 d = dst_r
