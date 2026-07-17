@@ -1,0 +1,42 @@
+// RISC-V RV32IMC feature-gap Task 7: function pointers — IR_FN_ADDR (86)
+// materialization, paired with the already-working IR_CALL_IND (87).
+//
+// `fn_addr("inc")` takes the address of `inc` via the pcrel auipc+addi
+// pair (rv_emit_pcrel_pair, table_sel=2 = fnaddr_fixup_table); the pair is
+// resolved by resolve_fnaddr_fixups_riscv() once every function's code
+// offset is known (main.kr's arch==2 branch, run alongside the call
+// resolver). `call_ptr(f, 64)` then does an indirect call through the
+// materialized pointer (jalr through a resolved-at-runtime register).
+//
+// inc(x) returns x+1, so calling through the pointer with 64 ('@') should
+// produce 65 ('A').
+//
+// Expected UART output: "A\n"
+//
+// Build:
+//   ./build/krc2 --arch=riscv32 --freestanding \
+//       examples/riscv-featuregap/t7_fnptr.kr -o /tmp/t7.bin
+// Run:
+//   timeout 5 qemu-system-riscv32 -machine virt -nographic -bios /tmp/t7.bin
+
+device Uart at 0x10000000 {
+    thr at 0x00 : u8
+    lsr at 0x05 : u8
+}
+
+fn putc(u8 c) {
+    while (Uart.lsr & 0x20) == 0 { }
+    Uart.thr = c
+}
+
+fn inc(uint32 x) -> uint32 {
+    return x + 1
+}
+
+fn main() {
+    uint32 f = fn_addr("inc")
+    uint32 result = call_ptr(f, 64)   // inc(64) = 65 = 'A'
+    putc(result)
+    putc(10)
+    loop { }
+}

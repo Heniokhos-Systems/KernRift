@@ -1752,6 +1752,25 @@ fn ir_emit_riscv_insn(uint64 ii) {
         rv_nyi_op(op)
     }
 
+    // ----- IR_FN_ADDR (86): dst = address of a named function -----
+    // imm = the STRING-LITERAL TOKEN of the quoted function name (e.g. the
+    // `"inc"` in `fn_addr("inc")` — ir.kr:2536-2543). This is NOT an
+    // interned name id and NOT the callee-name token IR_CALL's fixups use,
+    // so it can't be resolved via fn_lookup(); resolve_fnaddr_fixups_riscv()
+    // below strips the quotes and byte-scans fn_table, exactly like
+    // resolve_fnaddr_fixups_a64 (codegen_aarch64.kr:5925-5999). Lower to the
+    // same pcrel auipc+addi pair as STR_CONST/STATIC_ADDR (table_sel=2 =
+    // fnaddr_fixup_table) — full auipc+addi, NOT arm64's ADR+NOP shortcut:
+    // riscv has no single-instruction ±1 MiB pcrel-address op, and jal is a
+    // jump, not an address load (audit §6f).
+    if op == 86 {
+        uint64 rd = dst_r
+        if rd == 0xFFFFFFFF { rd = RV_T5 }
+        rv_emit_pcrel_pair(rd, 2, imm)                // table_sel 2 = fnaddr
+        if dst_r == 0xFFFFFFFF { rv_store_spill(rd, dest_v) }
+        return
+    }
+
     // Everything else lands in Stage 2+ (mul/div, syscalls, ...).
     rv_nyi_op(op)
 }
@@ -2221,6 +2240,114 @@ fn resolve_static_fixups_riscv(uint64 data_start) {
         patch_u32(wsite, hi | (rd << 7) | 0x17)
         // addi rd, rd, lo  (I-type: imm<<20 | rs1=rd<<15 | f3=0 | rd<<7 | 0x13)
         patch_u32(wsite + 4, (lo << 20) | (rd << 15) | (rd << 7) | 0x13)
+        i = i + 1
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Function-address fixup resolution — runs ALONGSIDE resolve_fixups_riscv(),
+// immediately after all functions are laid out (main.kr's arch==2 branch),
+// NOT with the string/static resolvers above. Rationale: this resolver's
+// target is a CODE offset (a function's start), exactly like the call
+// resolver's callee offset — both are available the moment fn_register()
+// has recorded every function's start offset, which happens as each
+// function is emitted, well before the string blob / static-data area (laid
+// out afterward) even have a base address. Resolving fnaddr fixups with the
+// data resolvers would be needlessly late (though not wrong, since fnaddr
+// doesn't depend on str_start/data_start) and would separate it from the
+// other code-target resolver it conceptually belongs beside.
+//
+// IR_FN_ADDR recorded [auipc_offset:u32, str_tok:u32] into the shared
+// fnaddr_fixup_table via rv_emit_pcrel_pair (table_sel=2); each auipc offset
+// has already been remapped through its function's C-compression pass (4d
+// above), so it names the FINAL site of the placeholder pair
+//     auipc rd, %hi(disp)      @ site
+//     addi  rd, rd, %lo(disp)  @ site + 4
+// with disp = fn_offset - site, pc-relative from the auipc — identical
+// +0x800 hi/lo split to resolve_string_fixups_riscv/resolve_static_fixups_riscv.
+//
+// Unlike the call resolver, the payload is NOT the callee's name token —
+// fn_addr("name") records the STRING-LITERAL token of the quoted name
+// (ir.kr:2536-2543), so fn_lookup(token) is NOT usable here: fn_table is
+// keyed by the identifier token from each `fn name(...)` declaration, and
+// fn_lookup compares token IDENTITY against that table, not raw source
+// bytes against an arbitrary string-literal payload. Strip the quotes and
+// byte-compare against fn_table instead — ported from
+// resolve_fnaddr_fixups_a64 (codegen_aarch64.kr:5925-5999), identical to
+// the x86 resolver (codegen.kr:10871-10938).
+fn resolve_fnaddr_fixups_riscv() {
+    uint64 i = 0
+    while i < fnaddr_fixup_count {
+        uint64 fentry = fnaddr_fixup_table + i * 8
+        uint32 patch_off = 0
+        unsafe { *(fentry as uint32) -> patch_off }
+        uint64 fe4 = fentry + 4
+        uint32 str_tok = 0
+        unsafe { *(fe4 as uint32) -> str_tok }
+
+        // str_tok's text includes the surrounding quotes; strip them to
+        // get the bare function name (mirrors codegen_aarch64.kr:5938-5939).
+        uint64 wst = str_tok
+        uint64 sstart = tok_text_start(wst)
+        uint64 slen = tok_text_len(wst)
+        uint64 name_start = sstart + 1
+        uint64 name_len = slen - 2
+
+        // Linear-scan fn_table, byte-comparing against the quoted name.
+        uint64 found = 0
+        uint64 target_off = 0
+        uint64 fi = 0
+        while fi < fn_count {
+            uint64 fentry2 = fn_table + fi * 8
+            uint32 fn_name_tok = 0
+            unsafe { *(fentry2 as uint32) -> fn_name_tok }
+            uint64 wfn = fn_name_tok
+            uint64 fn_start = tok_text_start(wfn)
+            uint64 fn_len = tok_text_len(wfn)
+            if fn_len == name_len {
+                uint64 eq = 1
+                uint64 ci = 0
+                while ci < name_len {
+                    uint64 ca = cg_source + name_start + ci
+                    uint64 cb = cg_source + fn_start + ci
+                    uint64 va = 0
+                    uint64 vb = 0
+                    unsafe { *(ca as uint8) -> va }
+                    unsafe { *(cb as uint8) -> vb }
+                    if va != vb { eq = 0 }
+                    ci = ci + 1
+                }
+                if eq != 0 {
+                    uint64 fe4_2 = fentry2 + 4
+                    uint32 foff = 0
+                    unsafe { *(fe4_2 as uint32) -> foff }
+                    target_off = foff
+                    found = 1
+                }
+            }
+            fi = fi + 1
+        }
+
+        if found != 0 {
+            uint64 wpo = patch_off
+            uint64 disp = target_off - wpo
+            uint64 hi = (disp + 0x800) & 0xFFFFF000
+            uint64 lo = disp & 0xFFF
+            uint64 rd = rv_rd_at(wpo)
+            // auipc rd, hi   (U-type: imm[31:12] | rd<<7 | 0x17)
+            patch_u32(wpo, hi | (rd << 7) | 0x17)
+            // addi rd, rd, lo  (I-type: imm<<20 | rs1=rd<<15 | f3=0 | rd<<7 | 0x13)
+            patch_u32(wpo + 4, (lo << 20) | (rd << 15) | (rd << 7) | 0x13)
+        } else {
+            // Undefined function — mirror the x86/arm64 fn_addr resolvers
+            // (codegen.kr:10930-10934, codegen_aarch64.kr:5991-5996): without
+            // this the placeholder pair would silently resolve to disp=0
+            // (pointing at its own auipc) instead of failing to compile.
+            write(2, "error: fn_addr: undefined function '", 36)
+            write(2, cg_source + name_start, name_len)
+            write(2, "'\n", 2)
+            exit(1)
+        }
         i = i + 1
     }
 }

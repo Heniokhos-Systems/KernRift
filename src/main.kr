@@ -2504,10 +2504,13 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
         resolve_fixups_a64()
         resolve_fnaddr_fixups_a64()
     } else {
-        // riscv32: patch the auipc+jalr call pairs (ir_riscv.kr). No
-        // fnaddr resolver yet — IR_FN_ADDR (86) is still NYI in the
-        // riscv emitter, so no riscv fnaddr fixups can exist.
+        // riscv32: patch the auipc+jalr call pairs (ir_riscv.kr), then the
+        // fn_addr() auipc+addi pairs (resolve_fnaddr_fixups_riscv). Both
+        // resolve CODE offsets and must run here — after every function is
+        // laid out — NOT down with the string/static resolvers below, which
+        // wait on the data-area base offsets these two never need.
         resolve_fixups_riscv()
+        resolve_fnaddr_fixups_riscv()
     }
 
     // Emit string data BEFORE static data so trailing zero bytes from

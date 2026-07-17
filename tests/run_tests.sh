@@ -4956,6 +4956,62 @@ else
     echo "  riscv_t6_stackarray: SKIP (qemu-system-riscv32 or riscv64-linux-gnu-objdump not installed)"
 fi
 
+# --- RISC-V RV32 function pointers via IR_FN_ADDR (feature-gap Task 7) ---
+# Compiles examples/riscv-featuregap/t7_fnptr.kr, which takes the address of
+# `inc` via fn_addr("inc") (IR_FN_ADDR -> pcrel auipc+addi pair, resolved by
+# resolve_fnaddr_fixups_riscv against the function's code offset) and calls
+# through it with call_ptr (IR_CALL_IND, an indirect jalr). inc(64) = 65 =
+# 'A', so a correct resolution is the only way the UART prints 'A': any
+# wrong disp would jalr into garbage or hang. We also objdump-confirm the
+# fn_addr pcrel pair stayed a full-width auipc+addi (not compressed/torn
+# apart) and that the call site is a genuine indirect jalr (zero immediate,
+# non-ra base register) rather than the direct-call auipc+jalr shape.
+echo ""
+echo "--- riscv32 function-pointer (IR_FN_ADDR) boot test ---"
+if command -v qemu-system-riscv32 >/dev/null 2>&1 \
+   && command -v riscv64-linux-gnu-objdump >/dev/null 2>&1; then
+    TOTAL=$((TOTAL + 1))
+    RV_BIN="/tmp/krc_rv_t7_$$.bin"
+    RV_OK=1
+    if ! $KRC --arch=riscv32 --freestanding "$DIR/../examples/riscv-featuregap/t7_fnptr.kr" -o "$RV_BIN" >/dev/null 2>&1; then
+        echo "FAIL: riscv_t7_fnptr (compilation failed)"
+        RV_OK=0
+    fi
+    if [ "$RV_OK" = 1 ]; then
+        RV_DIS=$(riscv64-linux-gnu-objdump -D -b binary -m riscv:rv32 -M no-aliases "$RV_BIN" 2>/dev/null)
+        # fn_addr materialization + the two direct calls to putc all emit a
+        # full-width auipc -- confirm none were shrunk/elided.
+        if [ "$(echo "$RV_DIS" | grep -cE '	auipc	')" -lt 2 ]; then
+            echo "FAIL: riscv_t7_fnptr (expected >=2 full-width auipc: fn_addr + call)"
+            RV_OK=0
+        fi
+        # The indirect call through the materialized pointer is `jalr
+        # ra,0(sN)` -- zero immediate off a non-ra base register. Direct
+        # calls are always `jalr ra,imm(ra)` off their own auipc, so this
+        # pattern can only come from IR_CALL_IND through a resolved fn_addr.
+        if [ "$(echo "$RV_DIS" | grep -cE '	jalr	ra,0\(s')" -lt 1 ]; then
+            echo "FAIL: riscv_t7_fnptr (no indirect jalr through materialized fn pointer)"
+            RV_OK=0
+        fi
+    fi
+    if [ "$RV_OK" = 1 ]; then
+        RV_OUT=$(timeout 5 qemu-system-riscv32 -machine virt -nographic -bios "$RV_BIN" 2>/dev/null)
+        # Command substitution strips the trailing newline, leaving "A".
+        if [ "$RV_OUT" = "A" ]; then
+            PASS=$((PASS + 1))
+            echo "  riscv_t7_fnptr: PASS (qemu printed A -- inc(64) called through fn_addr pointer)"
+        else
+            echo "FAIL: riscv_t7_fnptr (qemu output was '$RV_OUT', want 'A')"
+            FAIL=$((FAIL + 1))
+        fi
+    else
+        FAIL=$((FAIL + 1))
+    fi
+    rm -f "$RV_BIN"
+else
+    echo "  riscv_t7_fnptr: SKIP (qemu-system-riscv32 or riscv64-linux-gnu-objdump not installed)"
+fi
+
 # --- Summary ---
 echo ""
 echo "=== Results: $PASS/$TOTAL passed, $FAIL failed ==="
