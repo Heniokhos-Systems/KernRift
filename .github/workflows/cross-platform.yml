@@ -23,7 +23,7 @@ jobs:
           curl --fail --location --silent --show-error \
                --retry 5 --retry-delay 3 --retry-all-errors --connect-timeout 15 \
                -o build/krc-bootstrap \
-               https://github.com/Heniokhos-Systems/KernRift/releases/download/v2.8.4/krc-linux-x86_64
+               https://github.com/Heniokhos-Systems/KernRift/releases/download/v2.8.26/krc-linux-x86_64
           SIZE=$(wc -c < build/krc-bootstrap)
           MAGIC=$(head -c 4 build/krc-bootstrap | xxd -p)
           if [ "$MAGIC" != "7f454c46" ] || [ "$SIZE" -lt 1048576 ]; then
