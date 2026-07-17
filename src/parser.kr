@@ -2624,7 +2624,12 @@ fn parse_module() -> uint64 {
                 // riscv32: device MMIO fields wider than 32 bits (or float)
                 // are unsupported.
                 tc_riscv32_reject_kind(wftk, ft_tok)
-                uint64 fsize = 8
+                // Float kinds keep the historical 8-byte slot on every arch
+                // (byte-identity with the old literal 8); everything else
+                // scales with the target word size (same rule as struct/
+                // static/alias field defaults above).
+                uint64 fsize = 0
+                if wftk == 94 || wftk == 95 || wftk == 96 { fsize = 8 } else { fsize = target_word_size() }
                 if wftk == 80 || wftk == 84 || wftk == 98 || wftk == 99 { fsize = 1 }
                 if wftk == 81 || wftk == 85 { fsize = 2 }
                 if wftk == 82 || wftk == 86 { fsize = 4 }

@@ -1317,7 +1317,11 @@ fn ir_riscv_gen(uint64 fn_node) {
     //     MUST run before steps 9-10 so displacements are computed once,
     //     on the final offsets — control flow stays 4-byte, so no
     //     relaxation iteration exists.
-    rv_compress_function(fn_code_start, fn_fixup_start, fn_line_start)
+    //     @naked bodies are never compressed: like control-flow opcodes,
+    //     they demand precise layout, so the whole body stays as emitted.
+    if is_naked == 0 {
+        rv_compress_function(fn_code_start, fn_fixup_start, fn_line_start)
+    }
 
     // 9. Patch branch fixups. Bit 31 of the recorded target field selects
     //    the patch kind (mirror of arm64's CBNZ bit, ir_aarch64.kr:2721):

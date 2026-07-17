@@ -4520,8 +4520,6 @@ fn main() {
                     arch = 1
                 } else if str_starts_with(arch_str, "aarch64", 7) != 0 {
                     arch = 1
-                } else if str_starts_with(arch_str, "riscv32", 7) != 0 {
-                    arch = 2
                 } else if str_starts_with(arch_str, "riscv", 5) != 0 {
                     arch = 2
                 } else if str_starts_with(arch_str, "x86_64", 6) != 0 {
@@ -4612,7 +4610,7 @@ fn main() {
                 write(1, "and execs the matching slice at startup.\n\n", 42)
 
                 write(1, "output:\n", 8)
-                write(1, "  --arch=x86_64|arm64       single-arch binary (no fat-binary wrap)\n", 68)
+                write(1, "  --arch=x86_64|arm64|riscv32   single-arch binary (no fat-binary wrap)\n", 72)
                 write(1, "  --target=linux|macos|windows|android   single-target binary\n", 62)
                 write(1, "  --targets=<list>          custom fat binary subset\n", 53)
                 write(1, "                              e.g. linux-x64,macos-arm64,win-x64\n", 65)
