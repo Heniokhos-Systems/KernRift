@@ -293,6 +293,79 @@ fn rv_fits_imm12(uint64 imm) -> uint64 {
     return 0
 }
 
+// ---------------------------------------------------------------------------
+// Large-frame SP arithmetic (Task 6)
+//
+// The frame used to be hard-capped at 2032 bytes so every sp-relative
+// offset (and `addi sp,sp,±N`) fit an imm12. Once that cap is lifted (a
+// ~2.5 KiB local array now compiles) an offset can exceed ±2047 and no
+// longer fits an addi/lw/sw immediate. These helpers fall back to
+// materializing the offset in RV_T5 and forming the address with a
+// register add. RV_T5 (x30) is a reserved spill-reload scratch, never
+// allocated and never live across an IR op, so it is dead at every call
+// site here — verified per-site in the Task-6 report:
+//   * prologue/epilogue: no IR value is live (function entry/exit);
+//   * STACK_ADDR: the op has no source operands;
+//   * IR_COPY overflow-param load: src1==0, nothing resolved into t5;
+//   * FMT_UINT scratchpad accessor: the buffer/value were already copied
+//     out of t5/t6 into a0/a1 before the accessor runs.
+// The one caller-visible rule: for rv_sw_sp_big the *value* register `rs`
+// must not be RV_T5 (all callers pass ra or an s-register), and for
+// rv_lw_sp_big/rv_addi_sp_big the dest may legitimately BE RV_T5 (spilled
+// dest computes straight into it — reads-before-writes keeps that safe).
+
+// rd = sp + off
+fn rv_addi_sp_big(uint64 rd, uint64 off) {
+    if rv_fits_imm12(off) != 0 {
+        rv_i(off, RV_SP, 0, rd, 0x13)            // addi rd, sp, off
+        return
+    }
+    rv_li(RV_T5, off)                            // t5 = off
+    rv_r(0, RV_T5, RV_SP, 0, rd, 0x33)           // add rd, sp, t5
+}
+
+// rd = *(sp + off)   (word load)
+fn rv_lw_sp_big(uint64 rd, uint64 off) {
+    if rv_fits_imm12(off) != 0 {
+        rv_i(off, RV_SP, 2, rd, 0x03)            // lw rd, off(sp)
+        return
+    }
+    rv_li(RV_T5, off)                            // t5 = off
+    rv_r(0, RV_T5, RV_SP, 0, RV_T5, 0x33)        // add t5, sp, t5
+    rv_i(0, RV_T5, 2, rd, 0x03)                  // lw rd, 0(t5)
+}
+
+// *(sp + off) = rs   (word store); rs must not be RV_T5
+fn rv_sw_sp_big(uint64 rs, uint64 off) {
+    if rv_fits_imm12(off) != 0 {
+        rv_s(off, rs, RV_SP, 2, 0x23)            // sw rs, off(sp)
+        return
+    }
+    rv_li(RV_T5, off)                            // t5 = off
+    rv_r(0, RV_T5, RV_SP, 0, RV_T5, 0x33)        // add t5, sp, t5
+    rv_s(0, rs, RV_T5, 2, 0x23)                  // sw rs, 0(t5)
+}
+
+// sp -= n
+fn rv_sp_sub(uint64 n) {
+    if rv_fits_imm12(0 - n) != 0 {
+        rv_i(0 - n, RV_SP, 0, RV_SP, 0x13)       // addi sp, sp, -n
+        return
+    }
+    rv_li(RV_T5, n)                              // t5 = n
+    rv_r(0x20, RV_T5, RV_SP, 0, RV_SP, 0x33)     // sub sp, sp, t5
+}
+
+// sp += n
+fn rv_sp_add(uint64 n) {
+    if rv_fits_imm12(n) != 0 {
+        rv_i(n, RV_SP, 0, RV_SP, 0x13)           // addi sp, sp, n
+        return
+    }
+    rv_li(RV_T5, n)                              // t5 = n
+    rv_r(0, RV_T5, RV_SP, 0, RV_SP, 0x33)        // add sp, sp, t5
+}
+
 // B-type (conditional branch) displacement must fit signed 13 bits
 // (−4096..+4094, ±4 KiB), even. disp arrives as a two's-complement uint64
 // (negative back-branch = huge value), so re-bias into [0, 0x2000) to
@@ -1134,13 +1207,16 @@ fn ir_emit_riscv_insn(uint64 ii) {
                 rv_store_spill(RV_T5, dest_v)
             }
         } else {
+            // Load from the CALLER's frame at [SP + ir_frame_size +
+            // (imm-8)*4]. With the 2032 cap lifted, ir_frame_size can push
+            // this past imm12, so use rv_lw_sp_big (t5-assisted). t5 is dead
+            // on this path: src1==0, nothing was resolved into it. When the
+            // dest is spilled, d == RV_T5 and rv_lw_sp_big loads t5 through
+            // t5 (reads base before writing result) — safe.
             uint64 overflow_off = ir_frame_size + (imm - 8) * 4
-            if overflow_off > 2047 {
-                rv_err("error: riscv32: overflow-param offset exceeds imm12 range\n")
-            }
             uint64 d = dst_r
             if d == 0xFFFFFFFF { d = RV_T5 }
-            rv_i(overflow_off, RV_SP, 2, d, 0x03)     // lw d, off(sp)
+            rv_lw_sp_big(d, overflow_off)             // lw d, off(sp)
             if dst_r == 0xFFFFFFFF { rv_store_spill(RV_T5, dest_v) }
         }
         return
@@ -1595,7 +1671,7 @@ fn ir_emit_riscv_insn(uint64 ii) {
         rv_mv(10, fu_buf)                  // a0 = buf (output cursor)
         rv_mv(11, fu_val)                  // a1 = val (quotient each iter)
         rv_li(12, 0)                       // a2 = digit count = 0
-        rv_i(ir_rv_scratch_off, RV_SP, 0, 13, 0x13)   // addi a3, sp, scratch_off
+        rv_addi_sp_big(13, ir_rv_scratch_off)          // addi a3, sp, scratch_off (t5 if big)
         rv_li(16, 10)                      // a6 = 10 (divisor)
 
         uint64 loop_start = out_len
@@ -1642,6 +1718,38 @@ fn ir_emit_riscv_insn(uint64 ii) {
         rv_mv(d, 16)
         if dst_r == 0xFFFFFFFF { rv_store_spill(RV_T5, dest_v) }
         return
+    }
+
+    // ----- IR_STACK_ADDR (32): dst = address of a compile-time local array -----
+    // imm = byte offset within this function's stack-array region (rel_off,
+    // assigned by ir.kr:3414). The region sits directly above the overflow
+    // reserve and the spill slots, below the scratchpad — exactly matching
+    // the frame layout computed in ir_riscv_gen:
+    //     base_off = RV_OVERFLOW_RESERVE + ir_spill_count*4 + imm
+    // Spill slots are 4 bytes on rv32 (NOT arm64's *8 — using *8 would place
+    // the array 4 bytes-per-spill too high and corrupt every frame that has
+    // spills). Once the 2032 frame cap is lifted, base_off can exceed imm12
+    // for a large local array, so materialize via rv_addi_sp_big (t5-assisted).
+    // t5 is dead here: STACK_ADDR has no source operands, and for a spilled
+    // dest we compute straight into t5 (li scratch == result) before storing.
+    if op == 32 {
+        uint64 base_off = RV_OVERFLOW_RESERVE + ir_spill_count * 4 + imm
+        uint64 d = dst_r
+        if d == 0xFFFFFFFF { d = RV_T5 }
+        rv_addi_sp_big(d, base_off)                   // addi/li+add: d = sp + base_off
+        if dst_r == 0xFFFFFFFF { rv_store_spill(RV_T5, dest_v) }
+        return
+    }
+
+    // ----- IR_ALLOC (70): dynamic / >4 KiB local allocation -----
+    // ir.kr:3420 routes arrays larger than the 4096-byte stack threshold
+    // here. On a hosted target this lowers to an mmap/VirtualAlloc syscall;
+    // in a freestanding rv32 image there is no OS to service it, so it is
+    // inherently unsupportable. Fail loud rather than silently miscompile —
+    // large local buffers must fit the (now un-capped, but still physical)
+    // stack via IR_STACK_ADDR.
+    if op == 70 {
+        rv_nyi_op(op)
     }
 
     // Everything else lands in Stage 2+ (mul/div, syscalls, ...).
@@ -1741,26 +1849,32 @@ fn ir_riscv_gen(uint64 fn_node) {
     uint64 total_frame = cs_base + nsaved * 4 + 4
     if (total_frame & 15) != 0 { total_frame = total_frame + 16 - (total_frame & 15) }
     if is_naked != 0 { total_frame = 0 }
-    // Keep every SP-relative offset (and addi sp,sp,±N itself) inside
-    // imm12. 2032 is the largest 16-aligned value <= 2047. Lifting this
-    // needs t5-assisted address arithmetic — a later task.
-    if total_frame > 2032 {
-        rv_err("error: riscv32: frame larger than 2032 bytes not yet supported\n")
-    }
-
+    // Large frames (Task 6): the frame is no longer capped at 2032. When
+    // total_frame (or any derived sp-relative offset) exceeds imm12, the
+    // prologue/epilogue and every sp-relative access below fall back to
+    // t5-assisted address arithmetic (rv_sp_sub/rv_sp_add, rv_sw_sp_big,
+    // rv_lw_sp_big, rv_addi_sp_big). RV_T5 is dead at each of those sites
+    // (function entry/exit, or an op with no live t5) — see the helper
+    // comments. The only remaining bounded sites are spill slots
+    // (rv_spill_offset, below the array region so still tiny) and outgoing
+    // overflow args ([SP+oi*4], max 64 bytes) — both keep their imm12
+    // guards since a stack array cannot push them out of range.
     ir_frame_size = total_frame
 
     // 6. Emit prologue (skip for @naked)
     if is_naked == 0 {
-        rv_i(0 - total_frame, RV_SP, 0, RV_SP, 0x13)          // addi sp, sp, -N
-        rv_s(total_frame - 4, RV_RA, RV_SP, 2, 0x23)          // sw ra, N-4(sp)
+        rv_sp_sub(total_frame)                                // sp -= N (t5 if big)
+        rv_sw_sp_big(RV_RA, total_frame - 4)                  // sw ra, N-4(sp)
         // Save only the s-registers regalloc actually used (colour mask),
-        // packed from cs_base upward in ascending colour order.
+        // packed from cs_base upward in ascending colour order. cs_base sits
+        // above the stack-array region, so it is the FIRST offset to break
+        // imm12 with a large array — rv_sw_sp_big handles it (t5 dead here:
+        // nothing is live at function entry).
         uint64 pc = 0
         uint64 pslot = 0
         while pc < 12 {
             if ((used_mask >> pc) & 1) != 0 {
-                rv_s(cs_base + pslot * 4, rv_reg_for_color(pc), RV_SP, 2, 0x23)
+                rv_sw_sp_big(rv_reg_for_color(pc), cs_base + pslot * 4)
                 pslot = pslot + 1
             }
             pc = pc + 1
@@ -1940,13 +2054,17 @@ fn ir_riscv_gen(uint64 fn_node) {
         uint64 eslot = 0
         while ec < 12 {
             if ((used_mask >> ec) & 1) != 0 {
-                rv_i(cs_base + eslot * 4, RV_SP, 2, rv_reg_for_color(ec), 0x03)
+                rv_lw_sp_big(rv_reg_for_color(ec), cs_base + eslot * 4)
                 eslot = eslot + 1
             }
             ec = ec + 1
         }
-        rv_i(total_frame - 4, RV_SP, 2, RV_RA, 0x03)          // lw ra, N-4(sp)
-        rv_i(total_frame, RV_SP, 0, RV_SP, 0x13)              // addi sp, sp, N
+        // Load ra and restore sp LAST — every sp-relative load above must
+        // read against the low (in-frame) sp before it is unwound. t5 is
+        // dead throughout the epilogue (all IR ops are done), so the
+        // big-offset forms are safe.
+        rv_lw_sp_big(RV_RA, total_frame - 4)                  // lw ra, N-4(sp)
+        rv_sp_add(total_frame)                                // sp += N (t5 if big)
         rv_i(0, RV_RA, 0, RV_ZERO, 0x67)                      // ret = jalr x0, 0(ra)
     }
 

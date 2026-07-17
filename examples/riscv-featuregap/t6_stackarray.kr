@@ -1,0 +1,62 @@
+// RISC-V RV32IMC feature-gap Task 6: stack arrays (IR_STACK_ADDR) + large
+// frames (t5-assisted SP arithmetic when total_frame > 2032).
+//
+// Two cases, both proven by what QEMU prints over the virt UART:
+//   (a) small local array  uint8[8]  — total_frame stays in imm12; a single
+//       `addi d,sp,off` STACK_ADDR + in-imm12 prologue.
+//   (b) large local array  uint8[2600] — total_frame > 2032, so the frame no
+//       longer fits imm12: the prologue must materialize the frame size in
+//       t5 (`lui/addi t5` + `sub sp,sp,t5`), the s-register saves must use
+//       the t5-assisted big-offset store, and STACK_ADDR's own address
+//       compute must use `li t5; add d,sp,t5`. We write a byte near the TOP
+//       of the 2600-byte array (index 2599) and read it back — if any
+//       sp-relative site were miscomputed for the large frame the value
+//       would land in the wrong slot and the readback would differ.
+//
+// Expected UART output: "AZ\n"  ('A' from case a, 'Z' from case b)
+//
+// Build:
+//   ./build/krc2 --arch=riscv32 --freestanding \
+//       examples/riscv-featuregap/t6_stackarray.kr -o /tmp/t6.bin
+// Run:
+//   timeout 5 qemu-system-riscv32 -machine virt -nographic -bios /tmp/t6.bin
+
+device Uart at 0x10000000 {
+    thr at 0x00 : u8
+    lsr at 0x05 : u8
+}
+
+fn putc(u8 c) {
+    while (Uart.lsr & 0x20) == 0 { }
+    Uart.thr = c
+}
+
+// Case (a): small stack array — frame stays inside imm12.
+fn small_case() -> u8 {
+    uint8[8] a
+    a[3] = 65        // 'A'
+    return a[3]
+}
+
+// Case (b): large stack array (2600 bytes) — forces total_frame > 2032, so
+// the whole prologue/epilogue + STACK_ADDR path must use t5-assisted SP math.
+// Touching index 2599 exercises the top of the array region.
+fn large_case() -> u8 {
+    uint8[2600] big
+    // `tail` is declared AFTER `big`, so its stack-array-region offset is
+    // ~2600 and its STACK_ADDR base_off (RV_OVERFLOW_RESERVE + 0 spills +
+    // 2600 = 2664) EXCEEDS imm12 — this forces STACK_ADDR's OWN t5-assisted
+    // `li t5; add d,sp,t5` form (not just the prologue/epilogue SP math).
+    uint8[8] tail
+    big[2599] = 90   // 'Z'
+    big[0] = 88      // 'X' (also poke the bottom, to be sure both ends work)
+    tail[3] = big[2599]   // read big[2599] via its address, store into tail
+    return tail[3]        // read back through tail's >imm12 STACK_ADDR
+}
+
+fn main() {
+    putc(small_case())   // 'A'
+    putc(large_case())   // 'Z'
+    putc(10)             // '\n'
+    loop { }
+}

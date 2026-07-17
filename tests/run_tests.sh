@@ -4902,6 +4902,60 @@ else
     echo "  riscv_t5_fmtuint: SKIP (qemu-system-riscv32 or riscv64-linux-gnu-objdump not installed)"
 fi
 
+# ============================================================================
+# riscv32 stack arrays (IR_STACK_ADDR) + large frames (t5-assisted SP math)
+# ============================================================================
+# Compiles examples/riscv-featuregap/t6_stackarray.kr: a small local array
+# (frame stays in imm12) prints 'A', and a ~2.6 KB local array (total_frame
+# > 2032) prints 'Z'. The large case forces the t5-assisted SP arithmetic in
+# the prologue/epilogue and in STACK_ADDR itself; if any sp-relative site were
+# miscomputed for the large frame, the array readback (or the saved ra/s-regs)
+# would corrupt and the program would not print "AZ" cleanly. We also assert
+# the disassembly shows `sub sp,sp,t5` in the large-frame prologue (proof the
+# 2032 cap was actually lifted, not just skirted).
+echo "--- riscv32 stack-array + large-frame boot test ---"
+if command -v qemu-system-riscv32 >/dev/null 2>&1 \
+   && command -v riscv64-linux-gnu-objdump >/dev/null 2>&1; then
+    TOTAL=$((TOTAL + 1))
+    RV_BIN="/tmp/krc_rv_t6_$$.bin"
+    RV_OK=1
+    if ! $KRC --arch=riscv32 --freestanding "$DIR/../examples/riscv-featuregap/t6_stackarray.kr" -o "$RV_BIN" >/dev/null 2>&1; then
+        echo "FAIL: riscv_t6_stackarray (compilation failed)"
+        RV_OK=0
+    fi
+    if [ "$RV_OK" = 1 ]; then
+        RV_DIS=$(riscv64-linux-gnu-objdump -D -b binary -m riscv:rv32 -M no-aliases "$RV_BIN" 2>/dev/null)
+        # Large-frame proof: the prologue must materialize the frame size in
+        # t5 and subtract it from sp (the 2032 cap is gone). A small-frame-only
+        # build would never emit `sub sp,sp,t5`.
+        if [ "$(echo "$RV_DIS" | grep -cE '	sub	sp,sp,t5')" -lt 1 ]; then
+            echo "FAIL: riscv_t6_stackarray (no 'sub sp,sp,t5' -- large frame not t5-assisted)"
+            RV_OK=0
+        fi
+        # STACK_ADDR's own >imm12 base_off must use the t5-assisted add form.
+        if [ "$(echo "$RV_DIS" | grep -cE '	add	s[0-9]+,sp,t5')" -lt 1 ]; then
+            echo "FAIL: riscv_t6_stackarray (no 't5-assisted STACK_ADDR (add sX,sp,t5)')"
+            RV_OK=0
+        fi
+    fi
+    if [ "$RV_OK" = 1 ]; then
+        RV_OUT=$(timeout 5 qemu-system-riscv32 -machine virt -nographic -bios "$RV_BIN" 2>/dev/null)
+        # Command substitution strips the trailing newline, leaving "AZ".
+        if [ "$RV_OUT" = "AZ" ]; then
+            PASS=$((PASS + 1))
+            echo "  riscv_t6_stackarray: PASS (qemu printed AZ -- small array 'A' + large-frame array 'Z')"
+        else
+            echo "FAIL: riscv_t6_stackarray (qemu output was '$RV_OUT', want 'AZ')"
+            FAIL=$((FAIL + 1))
+        fi
+    else
+        FAIL=$((FAIL + 1))
+    fi
+    rm -f "$RV_BIN"
+else
+    echo "  riscv_t6_stackarray: SKIP (qemu-system-riscv32 or riscv64-linux-gnu-objdump not installed)"
+fi
+
 # --- Summary ---
 echo ""
 echo "=== Results: $PASS/$TOTAL passed, $FAIL failed ==="
