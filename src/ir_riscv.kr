@@ -281,11 +281,12 @@ fn ir_emit_riscv_insn(uint64 ii) {
     // ----- Float backstop (carry-forward from Task 0.4) -----
     // Trap on the float opcodes themselves, and on any float-kinded vreg
     // operand (catches e.g. an f64 IR_CONST bit pattern before the 64-bit
-    // constant backstop would fire a misleading error). IR_STORE (31)
-    // carries a store WIDTH in dest_v and IR_LOAD (30) may carry one in
-    // src2 — those fields are not vregs, so skip the fkind probe there.
+    // constant backstop would fire a misleading error). IR_STORE (31) and
+    // IR_VSTORE (94) carry a store WIDTH in dest_v, and IR_LOAD (30) may
+    // carry one in src2 (struct-field loads) — those fields are not vregs,
+    // so skip the fkind probe there.
     if rv_op_is_float(op) != 0 { rv_float_trap() }
-    if op != 31 {
+    if op != 31 && op != 94 {
         if rv_vreg_is_float(dest_v) != 0 { rv_float_trap() }
     }
     if rv_vreg_is_float(s1_v) != 0 { rv_float_trap() }
@@ -293,7 +294,12 @@ fn ir_emit_riscv_insn(uint64 ii) {
         if rv_vreg_is_float(s2_v) != 0 { rv_float_trap() }
     }
 
-    uint64 dst_r = ir_get_phys_reg(dest_v)
+    // T1.2-review Minor (carried to this task): dest_v is a width field
+    // (1/2/4/8), NOT a vreg, for IR_STORE (31) and IR_VSTORE (94) — do not
+    // resolve it through ir_get_phys_reg (colour -> phys reg) for those
+    // two ops. Every other op's dest_v is a real vreg (or 0 = "no dest").
+    uint64 dst_r = 0xFFFFFFFF
+    if op != 31 && op != 94 { dst_r = ir_get_phys_reg(dest_v) }
 
     // ----- IR_CONST (1): dst = imm -----
     if op == 1 {
@@ -407,6 +413,100 @@ fn ir_emit_riscv_insn(uint64 ii) {
             ifield = 0x400 | shamt
         }
         rv_i(ifield, a_reg, f3, d, 0x13)
+        if dst_r == 0xFFFFFFFF { rv_store_spill(RV_T5, dest_v) }
+        return
+    }
+
+    // ----- IR_LOAD (30): dest = *(src1), width in imm -----
+    // Mirror of ir_aarch64.kr:689. Offset is always 0 — struct/array
+    // offsets are folded into a prior ADD by the IR lowering, so the
+    // address is entirely in src1. Width can arrive in imm OR src2 (struct
+    // field loads reuse the src2 slot the same way the x86/arm64 backends
+    // read it — ir_aarch64.kr:692, ir.kr:7005); the float-backstop block
+    // above already skips the s2 fkind probe for this op for the same
+    // reason. IR has no signed-load marking anywhere in ir.kr — x86 uses
+    // movzx and arm64 uses ldrb/ldrh (never a sign-extending load) for
+    // every narrow load in the tree, so lbu/lhu/lw (zero-extending) cover
+    // every width; there is no lb/lh case to reach.
+    if op == 30 {
+        uint64 width = imm
+        if width == 0 && s2_v != 0 { width = s2_v }
+        if width == 8 {
+            rv_err("error: riscv32: 64-bit load not supported\n")
+        }
+        uint64 addr_reg = rv_resolve_src(s1_v, RV_T6)
+        uint64 d = dst_r
+        if d == 0xFFFFFFFF { d = RV_T5 }
+        uint64 f3 = 2                              // lw (width 4, default)
+        if width == 1 { f3 = 4 }                   // lbu
+        if width == 2 { f3 = 5 }                   // lhu
+        rv_i(0, addr_reg, f3, d, 0x03)              // l{bu,hu,w} d, 0(addr_reg)
+        if dst_r == 0xFFFFFFFF { rv_store_spill(RV_T5, dest_v) }
+        return
+    }
+
+    // ----- IR_STORE (31): *(src1) = src2, width in dest_v -----
+    // Mirror of ir_aarch64.kr:710. dest_v here is a WIDTH (1/2/4/8), not a
+    // vreg — dst_r above was deliberately left at the sentinel for this op
+    // (see the narrowed dst_r assignment / T1.2-review Minor) and MUST NOT
+    // be used below. Offset is always 0, address entirely in src1 (same as
+    // IR_LOAD).
+    if op == 31 {
+        uint64 width = dest_v
+        if width == 8 {
+            rv_err("error: riscv32: 64-bit store not supported\n")
+        }
+        uint64 addr_reg = rv_resolve_src(s1_v, RV_T5)
+        uint64 val_reg = rv_resolve_src(s2_v, RV_T6)
+        uint64 f3 = 2                              // sw (width 4, default)
+        if width == 1 { f3 = 0 }                   // sb
+        if width == 2 { f3 = 1 }                   // sh
+        rv_s(0, val_reg, addr_reg, f3, 0x23)        // s{b,h,w} val_reg, 0(addr_reg)
+        return
+    }
+
+    // ----- IR_VSTORE (94) / IR_VLOAD (95): volatile MMIO store/load -----
+    // Same operand shape as IR_STORE/IR_LOAD (confirmed against every
+    // ir_emit(IR_VLOAD/IR_VSTORE, ...) call site in ir.kr: width is always
+    // in dest_v for VSTORE, always in imm — never src2 — for VLOAD).
+    // arm64 lowers these to stlr/ldar because AArch64 has acquire/release
+    // load-reserved forms "for free"; RV32I's nearest equivalent is a
+    // `fence` around a plain access. This backend has no instruction
+    // scheduler — every IR op (this one included) emits exactly the bytes
+    // below in program order, one straight-line instruction per op, so
+    // there is no local reordering hazard for `fence` to fix, and qemu's
+    // `virt`-machine 16550 UART model does not require RV32 fence ordering
+    // from a single in-order hart. Emitting plain sb/sh/sw and lbu/lhu/lw
+    // (identical to IR_STORE/IR_LOAD) is therefore correct for the target
+    // this task verifies against; an unverified fence encoding would be
+    // pure risk with no verified benefit. (Not reordering/eliminating a
+    // volatile access across other IR ops is an ir_optimize()-level
+    // concern shared by every backend, out of scope here.)
+    if op == 94 {
+        uint64 width = dest_v
+        if width == 8 {
+            rv_err("error: riscv32: 64-bit volatile store not supported\n")
+        }
+        uint64 addr_reg = rv_resolve_src(s1_v, RV_T5)
+        uint64 val_reg = rv_resolve_src(s2_v, RV_T6)
+        uint64 f3 = 2                              // sw
+        if width == 1 { f3 = 0 }                   // sb
+        if width == 2 { f3 = 1 }                   // sh
+        rv_s(0, val_reg, addr_reg, f3, 0x23)
+        return
+    }
+    if op == 95 {
+        uint64 width = imm
+        if width == 8 {
+            rv_err("error: riscv32: 64-bit volatile load not supported\n")
+        }
+        uint64 addr_reg = rv_resolve_src(s1_v, RV_T6)
+        uint64 d = dst_r
+        if d == 0xFFFFFFFF { d = RV_T5 }
+        uint64 f3 = 2                              // lw
+        if width == 1 { f3 = 4 }                   // lbu
+        if width == 2 { f3 = 5 }                   // lhu
+        rv_i(0, addr_reg, f3, d, 0x03)
         if dst_r == 0xFFFFFFFF { rv_store_spill(RV_T5, dest_v) }
         return
     }
