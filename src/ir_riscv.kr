@@ -69,13 +69,18 @@ fn rv_u(uint64 imm, uint64 rd, uint64 op) {
 
 // J-type: imm[20][31] imm[10:1][30:21] imm[11][20] imm[19:12][19:12]
 //         rd[11:7] op[6:0]. imm is a byte displacement, always even.
-fn rv_j(uint64 imm, uint64 rd, uint64 op) {
+// rv_j_word builds the instruction word without emitting — the branch
+// fixup patcher needs the bare word for patch_u32.
+fn rv_j_word(uint64 imm, uint64 rd, uint64 op) -> uint64 {
     uint64 b20 = (imm >> 20) & 1
     uint64 b10_1 = (imm >> 1) & 0x3FF
     uint64 b11 = (imm >> 11) & 1
     uint64 b19_12 = (imm >> 12) & 0xFF
-    uint64 insn = (b20 << 31) | (b10_1 << 21) | (b11 << 20) | (b19_12 << 12) | ((rd & 0x1F) << 7) | (op & 0x7F)
-    emit_u32_le(insn)
+    return (b20 << 31) | (b10_1 << 21) | (b11 << 20) | (b19_12 << 12) | ((rd & 0x1F) << 7) | (op & 0x7F)
+}
+
+fn rv_j(uint64 imm, uint64 rd, uint64 op) {
+    emit_u32_le(rv_j_word(imm, rd, op))
 }
 
 // ---------------------------------------------------------------------------
@@ -115,26 +120,430 @@ fn ir_regalloc_init_riscv() {
 }
 
 // ---------------------------------------------------------------------------
+// Error backstops
+// ---------------------------------------------------------------------------
+
+fn rv_err(uint64 msg) {
+    write(2, msg, str_len(msg))
+    exit(1)
+}
+
+// Any IR op the riscv32 backend does not lower yet: name the opcode so
+// Task 1.3+ can see exactly what a given test program needs.
+fn rv_nyi_op(uint64 op) {
+    uint8[24] nbuf
+    uint64 pre = "error: riscv32: IR op "
+    write(2, pre, str_len(pre))
+    uint64 nlen = fmt_uint(nbuf, op)
+    write(2, nbuf, nlen)
+    uint64 post = " not yet implemented\n"
+    write(2, post, str_len(post))
+    exit(1)
+}
+
+fn rv_float_trap() {
+    rv_err("error: float not supported on riscv32 (no hardware FPU)\n")
+}
+
+// Float IR opcodes (see ir.kr's opcode list). Includes the int<->float
+// conversions (IR_ITOF/IR_FTOI and 32-bit variants) — they produce or
+// consume float bit patterns, which RV32IMC has no hardware for.
+fn rv_op_is_float(uint64 op) -> uint64 {
+    if op >= 20 && op <= 27 { return 1 }    // FADD..FCMP_LT, ITOF, FTOI
+    if op >= 97 && op <= 108 { return 1 }   // FSQRT..FTOI32 (FFMA, FCMPs, cvts)
+    if op == 118 { return 1 }               // FSQRT32
+    if op == 125 { return 1 }               // FMT_F64
+    return 0
+}
+
+// fkind 1 = f64, 2 = f32 (see ir.kr FKIND_*). fkind 3 (bool) and 4 (char)
+// are integer classes — must NOT trap, so this is deliberately not a
+// blanket fkind != 0 test.
+fn rv_vreg_is_float(uint64 vreg) -> uint64 {
+    if vreg == 0 { return 0 }
+    uint64 fk = ir_vreg_fkind_get(vreg)
+    if fk == 1 { return 1 }
+    if fk == 2 { return 1 }
+    return 0
+}
+
+// ---------------------------------------------------------------------------
+// Spill slots
+//
+// Spilled vregs (colour >= IR_NUM_REGS) live at the bottom of the frame:
+// slot i at [SP + i*4]. RV32 word size is 4 bytes (uint64/int64/float are
+// rejected on riscv32 by sema, so every value fits one 4-byte slot).
+// t5(x30)/t6(x31) are reserved as spill-reload scratch — never allocated,
+// never live across an IR op.
+// ---------------------------------------------------------------------------
+
+fn rv_spill_offset(uint64 vreg) -> uint64 {
+    uint64 slot = vreg - IR_NUM_REGS - 1
+    uint64 off = slot * 4
+    // lw/sw offsets are imm12: -2048..2047. The whole frame is capped at
+    // 2032 below, so this should be unreachable — keep it as a guard.
+    if off > 2047 {
+        rv_err("error: riscv32: spill offset exceeds imm12 range\n")
+    }
+    return off
+}
+
+fn rv_store_spill(uint64 reg, uint64 vreg) {
+    rv_s(rv_spill_offset(vreg), reg, RV_SP, 2, 0x23)      // sw reg, off(sp)
+}
+
+fn rv_load_spill(uint64 scratch, uint64 vreg) {
+    rv_i(rv_spill_offset(vreg), RV_SP, 2, scratch, 0x03)  // lw scratch, off(sp)
+}
+
+// Mirror of ir_a64_resolve_src (ir_aarch64.kr:159): coloured vregs resolve
+// through the shared ir_get_phys_reg() (colour -> ir_phys_regs[], which
+// ir_regalloc_init_riscv filled via rv_reg_for_color); spilled vregs are
+// reloaded into the caller-provided scratch (t5 or t6).
+fn rv_resolve_src(uint64 vreg, uint64 scratch) -> uint64 {
+    if vreg == 0 { return scratch }
+    uint64 phys = ir_get_phys_reg(vreg)
+    if phys != 0xFFFFFFFF { return phys }
+    rv_load_spill(scratch, vreg)
+    return scratch
+}
+
+// ---------------------------------------------------------------------------
+// Pseudo-instruction helpers
+// ---------------------------------------------------------------------------
+
+// mv rd, rs = addi rd, rs, 0
+fn rv_mv(uint64 rd, uint64 rs) {
+    rv_i(0, rs, 0, rd, 0x13)
+}
+
+// li rd, imm — materialize a 32-bit constant.
+// Small values ([-2048, 2047] as a signed 32-bit number) fit a single
+// `addi rd, x0, imm` (addi sign-extends imm12, so 0xFFFFF800..0xFFFFFFFF
+// encode as their low 12 bits). Everything else takes lui+addi. The addi
+// in that pair ALSO sign-extends its imm12: when the low 12 bits are
+// >= 0x800 the addi subtracts (0x1000 - lo) instead of adding lo, so the
+// lui immediate must be rounded UP by one page — adding 0x800 before
+// masking to 0xFFFFF000 does exactly that.
+fn rv_li(uint64 rd, uint64 imm) {
+    if imm < 0x800 || imm >= 0xFFFFF800 {
+        rv_i(imm, 0, 0, rd, 0x13)                // addi rd, x0, imm
+        return
+    }
+    uint64 hi = (imm + 0x800) & 0xFFFFF000
+    rv_u(hi, rd, 0x37)                           // lui rd, %hi(imm)
+    rv_i(imm & 0xFFF, rd, 0, rd, 0x13)           // addi rd, rd, %lo(imm)
+}
+
+// jal displacement must fit signed 21 bits (±1 MiB), even. disp arrives
+// as a two's-complement uint64 (negative = huge), so re-bias into
+// [0, 0x200000) to range-check.
+fn rv_check_j21(uint64 disp) {
+    uint64 biased = disp + 0x100000
+    if biased >= 0x200000 {
+        rv_err("error: riscv32: jal displacement out of range\n")
+    }
+    if (disp & 1) != 0 {
+        rv_err("error: riscv32: odd jal displacement\n")
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Per-instruction emitter
+// ---------------------------------------------------------------------------
+
+fn ir_emit_riscv_insn(uint64 ii) {
+    uint64 op = ir_insn_opcode(ii)
+    // Opcode 0 = NOP: LICM-elided / nop-marked slots (see ir.kr). The
+    // arm64 emitter skips these by falling through its dispatch chain;
+    // here the catch-all errors, so skip explicitly.
+    if op == 0 { return }
+    uint64 dest_v = ir_insn_dest(ii)
+    uint64 s1_v = ir_insn_src1(ii)
+    uint64 s2_v = ir_insn_src2(ii)
+    uint64 imm = ir_insn_imm(ii)
+
+    // DWARF line-table recording — same hook as the x86/arm64 emitters.
+    uint64 ir_src_tok = ir_insn_src_tok_at(ii)
+    if ir_src_tok != 0 { line_table_record(ir_src_tok) }
+
+    // ----- Float backstop (carry-forward from Task 0.4) -----
+    // Trap on the float opcodes themselves, and on any float-kinded vreg
+    // operand (catches e.g. an f64 IR_CONST bit pattern before the 64-bit
+    // constant backstop would fire a misleading error). IR_STORE (31)
+    // carries a store WIDTH in dest_v and IR_LOAD (30) may carry one in
+    // src2 — those fields are not vregs, so skip the fkind probe there.
+    if rv_op_is_float(op) != 0 { rv_float_trap() }
+    if op != 31 {
+        if rv_vreg_is_float(dest_v) != 0 { rv_float_trap() }
+    }
+    if rv_vreg_is_float(s1_v) != 0 { rv_float_trap() }
+    if op != 30 {
+        if rv_vreg_is_float(s2_v) != 0 { rv_float_trap() }
+    }
+
+    uint64 dst_r = ir_get_phys_reg(dest_v)
+
+    // ----- IR_CONST (1): dst = imm -----
+    if op == 1 {
+        // >32-bit constant backstop (carry-forward from Task 0.4): a
+        // 64-bit literal that slipped past sema under --no-check-types.
+        if imm > 0xFFFFFFFF {
+            rv_err("error: 64-bit constant not supported on riscv32\n")
+        }
+        uint64 d = dst_r
+        if d == 0xFFFFFFFF { d = RV_T5 }
+        rv_li(d, imm)
+        if dst_r == 0xFFFFFFFF { rv_store_spill(RV_T5, dest_v) }
+        return
+    }
+
+    // ----- IR_RET (42): move result to a0, branch to epilogue -----
+    if op == 42 {
+        uint64 ret_r = rv_resolve_src(s1_v, RV_T5)
+        if ret_r != RV_A0 { rv_mv(RV_A0, ret_r) }
+        uint64 rfp = ir_ret_fixups + ir_ret_fixup_count * 4
+        uint32 rpo = out_len
+        unsafe { *(rfp as uint32) = rpo }
+        ir_ret_fixup_count = ir_ret_fixup_count + 1
+        rv_j(0, RV_ZERO, 0x6F)                    // jal x0, epilogue (patched)
+        return
+    }
+
+    // ----- IR_RET_VOID (43): a0 = 0, branch to epilogue -----
+    if op == 43 {
+        // Default a0 to 0 so void main() exits with status 0 once the
+        // auto-exit lands (mirrors ir_aarch64.kr:807's x0 = 0).
+        rv_li(RV_A0, 0)
+        uint64 rfp = ir_ret_fixups + ir_ret_fixup_count * 4
+        uint32 rpo = out_len
+        unsafe { *(rfp as uint32) = rpo }
+        ir_ret_fixup_count = ir_ret_fixup_count + 1
+        rv_j(0, RV_ZERO, 0x6F)                    // jal x0, epilogue (patched)
+        return
+    }
+
+    // Everything else lands in Task 1.3+.
+    rv_nyi_op(op)
+}
+
+// ---------------------------------------------------------------------------
 // Function-level emitter
 // ---------------------------------------------------------------------------
 
-// Mirrors ir_emit_arm64_function(uint64 fn_node)'s signature exactly, so
+// Mirrors ir_emit_arm64_function(uint64 fn_node) (ir_aarch64.kr:2449), so
 // the arch==2 branch in main.kr's codegen dispatch loop can call this the
 // same way arch==1 calls ir_emit_arm64_function.
 fn ir_riscv_gen(uint64 fn_node) {
-    // IR_NUM_REGS is a shared static consumed by the graph colourer and
-    // ir_get_phys_reg(). Mirror ir_emit_arm64_function's discipline
-    // (ir_aarch64.kr:2466/2807): save on entry, pin to 12 while the shared
-    // colourer/emitter would run, restore on exit so x86_64/arm64 functions
-    // compiled later in the same process see their own value.
+    // Check for @naked attribute (same flag bit as arm64)
+    uint32 ann_flags = ast_data4(fn_node)
+    uint64 is_naked = ann_flags & 2
+
+    // 1. Lower AST to IR
+    ir_lower_function(fn_node)
+
+    // 1a. Optimize
+    if ir_opt_level > 0 {
+        ir_optimize()
+    }
+
+    // 2. Compute liveness
+    ir_compute_liveness()
+
+    // 3. Set up the riscv register allocator (12 callee-saved regs,
+    //    colour c -> s-register via rv_reg_for_color). IR_NUM_REGS is a
+    //    shared static consumed by the colourer and ir_get_phys_reg():
+    //    save on entry, pin to 12 through emission, restore on exit so
+    //    x86_64/arm64 functions compiled later see their own value.
     uint64 saved_num_regs = IR_NUM_REGS
     IR_NUM_REGS = 12
     ir_regalloc_init_riscv()
+    ir_graph_color()
 
-    // Task 1.3+: ir_lower_function / ir_compute_liveness / ir_graph_color /
-    // per-op lowering go here, exactly like ir_emit_arm64_function.
+    // 4. Compute spill count
+    ir_spill_count = 0
+    if ir_vreg_next > IR_NUM_REGS + 1 {
+        ir_spill_count = ir_vreg_next - IR_NUM_REGS - 1
+    }
 
+    // 4a. Snapshot the function's var map for DWARF (if -g)
+    ir_snapshot_debug_vars()
+
+    // 5. Compute frame size — 4-byte slots (RV32), 16-byte aligned SP
+    //    (RISC-V psABI). Layout from SP upward:
+    //      [SP + 0 .. spill_size)          — spill slots (4 bytes each)
+    //      [stack arrays ...]              — compile-time-sized local arrays
+    //      [cs_base ...]                   — used s-registers (4 bytes each)
+    //      [SP + total_frame - 4]          — ra
+    //    No outgoing-arg overflow reserve yet (IR_CALL is Task 1.3+); it
+    //    slots in below the spill area when calls land, like arm64's
+    //    IR_A64_OVERFLOW_RESERVE.
+    uint64 spill_size = ir_spill_count * 4
+    uint64 used_mask = ir_used_color_mask()
+    uint64 nsaved = 0
+    uint64 mc = 0
+    while mc < 12 {
+        if ((used_mask >> mc) & 1) != 0 { nsaved = nsaved + 1 }
+        mc = mc + 1
+    }
+    uint64 cs_base = spill_size + ir_stack_array_bytes
+    uint64 total_frame = cs_base + nsaved * 4 + 4
+    if (total_frame & 15) != 0 { total_frame = total_frame + 16 - (total_frame & 15) }
+    if is_naked != 0 { total_frame = 0 }
+    // Keep every SP-relative offset (and addi sp,sp,±N itself) inside
+    // imm12. 2032 is the largest 16-aligned value <= 2047. Lifting this
+    // needs t5-assisted address arithmetic — a later task.
+    if total_frame > 2032 {
+        rv_err("error: riscv32: frame larger than 2032 bytes not yet supported\n")
+    }
+
+    ir_frame_size = total_frame
+
+    // 6. Emit prologue (skip for @naked)
+    if is_naked == 0 {
+        rv_i(0 - total_frame, RV_SP, 0, RV_SP, 0x13)          // addi sp, sp, -N
+        rv_s(total_frame - 4, RV_RA, RV_SP, 2, 0x23)          // sw ra, N-4(sp)
+        // Save only the s-registers regalloc actually used (colour mask),
+        // packed from cs_base upward in ascending colour order.
+        uint64 pc = 0
+        uint64 pslot = 0
+        while pc < 12 {
+            if ((used_mask >> pc) & 1) != 0 {
+                rv_s(cs_base + pslot * 4, rv_reg_for_color(pc), RV_SP, 2, 0x23)
+                pslot = pslot + 1
+            }
+            pc = pc + 1
+        }
+    }
+
+    // 7. Allocate branch/return fixup tracking — same grow-as-needed
+    //    shared buffers the x86/arm64 emitters use (see ir.kr).
+    uint64 bo_need = ir_bb_count
+    if bo_need < 4096 { bo_need = 4096 }
+    if bo_need > ir_block_offsets_cap {
+        if ir_block_offsets != 0 { dealloc(ir_block_offsets) }
+        ir_block_offsets = alloc(bo_need * 8)
+        ir_block_offsets_cap = bo_need
+    }
+    uint64 br_need = ir_bb_count * 4
+    if br_need < 2048 { br_need = 2048 }
+    if br_need > ir_br_fixups_cap {
+        if ir_br_fixups != 0 { dealloc(ir_br_fixups) }
+        ir_br_fixups = alloc(br_need * 8)
+        ir_br_fixups_cap = br_need
+    }
+    uint64 ret_need = ir_bb_count
+    if ret_need < 1024 { ret_need = 1024 }
+    if ret_need > ir_ret_fixups_cap {
+        if ir_ret_fixups != 0 { dealloc(ir_ret_fixups) }
+        ir_ret_fixups = alloc(ret_need * 4)
+        ir_ret_fixups_cap = ret_need
+    }
+    ir_br_fixup_count = 0
+    ir_ret_fixup_count = 0
+
+    // 8. Emit all basic blocks
+    uint64 bi = 0
+    while bi < ir_bb_count {
+        // Record this block's code offset
+        uint64 bop = ir_block_offsets + bi * 8
+        unsafe { *(bop as uint64) = out_len }
+
+        // Emit non-terminator instructions
+        uint64 ii = ir_bb_first_insn(bi)
+        while ii != 0xFFFFFFFF {
+            uint64 iop = ir_insn_opcode(ii)
+            if iop != 40 && iop != 41 {
+                ir_emit_riscv_insn(ii)
+            }
+            ii = ir_insn_next(ii)
+        }
+
+        // Emit block terminator
+        uint64 last = ir_bb_last_insn(bi)
+        if last != 0xFFFFFFFF {
+            uint64 last_op = ir_insn_opcode(last)
+            if last_op == 40 {
+                // IR_BR: unconditional branch to target_bb (fall-through
+                // elided). Placeholder jal x0, patched in step 9.
+                uint64 target = ir_insn_imm(last)
+                if target != bi + 1 {
+                    uint64 fp = ir_br_fixups + ir_br_fixup_count * 8
+                    uint32 po = out_len
+                    unsafe { *(fp as uint32) = po }
+                    uint64 fp4 = fp + 4
+                    uint32 tb = target
+                    unsafe { *(fp4 as uint32) = tb }
+                    ir_br_fixup_count = ir_br_fixup_count + 1
+                    rv_j(0, RV_ZERO, 0x6F)        // jal x0, #0 (placeholder)
+                }
+            }
+            if last_op == 41 {
+                // IR_BR_COND: Task 1.3+ (bne + fixup kind bit, like
+                // arm64's CBNZ encoding at ir_aarch64.kr:2677).
+                rv_nyi_op(41)
+            }
+        }
+
+        bi = bi + 1
+    }
+
+    // 9. Patch branch fixups (all plain jal x0 for now; IR_BR_COND will
+    //    add a fixup-kind bit like arm64's CBNZ scheme when it lands)
+    uint64 fi = 0
+    while fi < ir_br_fixup_count {
+        uint64 fp = ir_br_fixups + fi * 8
+        uint32 patch_off = 0
+        unsafe { *(fp as uint32) -> patch_off }
+        uint64 fp4 = fp + 4
+        uint32 target_bb_raw = 0
+        unsafe { *(fp4 as uint32) -> target_bb_raw }
+        uint64 wtb = target_bb_raw
+        uint64 tbp = ir_block_offsets + wtb * 8
+        uint64 target_off = 0
+        unsafe { *(tbp as uint64) -> target_off }
+        uint64 wpo = patch_off
+        uint64 disp = target_off - wpo
+        rv_check_j21(disp)
+        patch_u32(wpo, rv_j_word(disp, RV_ZERO, 0x6F))
+        fi = fi + 1
+    }
+
+    // 10. Patch return fixups — all point to epilogue
+    uint64 epilogue_off = out_len
+    uint64 ri = 0
+    while ri < ir_ret_fixup_count {
+        uint64 rfp = ir_ret_fixups + ri * 4
+        uint32 rpatch = 0
+        unsafe { *(rfp as uint32) -> rpatch }
+        uint64 wrp = rpatch
+        uint64 rdisp = epilogue_off - wrp
+        rv_check_j21(rdisp)
+        patch_u32(wrp, rv_j_word(rdisp, RV_ZERO, 0x6F))
+        ri = ri + 1
+    }
+
+    // 11. Epilogue (skip for @naked). NOTE: no auto exit-syscall for
+    //     main() yet — that lands with IR_SYSCALL (riscv32 Linux exit=93),
+    //     alongside argc/argv setup. Until then a linked main would ret
+    //     into an undefined ra, but nothing links riscv32 output before
+    //     Task 3.1 anyway.
+    if is_naked == 0 {
+        // Restore used s-registers (mirror of the prologue)
+        uint64 ec = 0
+        uint64 eslot = 0
+        while ec < 12 {
+            if ((used_mask >> ec) & 1) != 0 {
+                rv_i(cs_base + eslot * 4, RV_SP, 2, rv_reg_for_color(ec), 0x03)
+                eslot = eslot + 1
+            }
+            ec = ec + 1
+        }
+        rv_i(total_frame - 4, RV_SP, 2, RV_RA, 0x03)          // lw ra, N-4(sp)
+        rv_i(total_frame, RV_SP, 0, RV_SP, 0x13)              // addi sp, sp, N
+        rv_i(0, RV_RA, 0, RV_ZERO, 0x67)                      // ret = jalr x0, 0(ra)
+    }
+
+    // Restore IR_NUM_REGS for x86_64/arm64 functions compiled later
     IR_NUM_REGS = saved_num_regs
-    write(2, "riscv32 backend: not yet implemented\n", 37)
-    exit(1)
 }
