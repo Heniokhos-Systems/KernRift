@@ -1,0 +1,17 @@
+// KernRift self-hosted compiler -- RISC-V RV32IMC IR backend
+//
+// Reads the shared SSA IR (ir.kr) and will emit little-endian RV32IMC
+// machine code, mirroring src/ir_aarch64.kr's structure. target_arch==2.
+//
+// Stub: the real encoder/regalloc/lowering lands in later tasks. For now
+// this entry point exists purely to complete the arch==2 plumbing (CLI
+// parsing, SRCS wiring, codegen dispatch) without touching the x86_64 or
+// arm64 code paths.
+
+// Mirrors ir_emit_arm64_function(uint64 fn_node)'s signature exactly, so
+// the arch==2 branch in main.kr's codegen dispatch loop can call this the
+// same way arch==1 calls ir_emit_arm64_function.
+fn ir_riscv_gen(uint64 fn_node) {
+    write(2, "riscv32 backend: not yet implemented\n", 37)
+    exit(1)
+}

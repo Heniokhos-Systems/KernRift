@@ -2338,6 +2338,15 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
                     line_table_record_fn_entry(fn_name)
                     ir_init()
                     ir_emit_arm64_function(wchild)
+                } else if arch == 2 {
+                    // RISC-V RV32IMC — IR-only backend, no legacy codegen
+                    // path exists, so this branch is unconditional on
+                    // emit_ir_mode (mirrors where arch==1 calls
+                    // ir_emit_arm64_function above).
+                    fn_register(fn_name, out_len)
+                    line_table_record_fn_entry(fn_name)
+                    ir_init()
+                    ir_riscv_gen(wchild)
                 } else if arch == 0 {
                     // Legacy x86: gen_function registers internally.
                     // Record the entry-address line first so DWARF sees it.
@@ -4326,8 +4335,21 @@ fn main() {
                     arch = 1
                 } else if str_starts_with(arch_str, "aarch64", 7) != 0 {
                     arch = 1
-                } else {
+                } else if str_starts_with(arch_str, "riscv32", 7) != 0 {
+                    arch = 2
+                } else if str_starts_with(arch_str, "riscv", 5) != 0 {
+                    arch = 2
+                } else if str_starts_with(arch_str, "x86_64", 6) != 0 {
                     arch = 0
+                } else if str_starts_with(arch_str, "x86-64", 6) != 0 {
+                    arch = 0
+                } else if str_starts_with(arch_str, "amd64", 5) != 0 {
+                    arch = 0
+                } else if str_starts_with(arch_str, "x64", 3) != 0 {
+                    arch = 0
+                } else {
+                    write(2, "error: unknown --arch (use x86_64|arm64|riscv32)\n", 49)
+                    exit(1)
                 }
             } else if str_starts_with(arg, "--emit=", 7) != 0 {
                 emit_set = 1
