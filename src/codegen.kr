@@ -2739,6 +2739,81 @@ fn x86_reg_code(uint64 name_tok) -> uint64 {
     return 0xFFFF
 }
 
+// RISC-V inline-asm constraint register-name -> 0..31 hardware number.
+// Accepts the numeric x0-x31 form and the RV32 ABI aliases (zero, ra, sp,
+// gp, tp, t0-t6, s0-s11, a0-a7, fp=x8). Homed here beside x86_reg_code
+// because the IR constraint-binding sites (ir.kr) call it exactly like they
+// call x86_reg_code; it only needs tok_matches / tok_text_* (this file).
+//
+// Fail-loud discipline (project never-miscompile rule, audit §M2): an
+// UNKNOWN register name is a HARD ERROR, not the 0xFFFF silent-skip sentinel
+// that x86_reg_code returns. A mistyped inline-asm constraint register must
+// break the build rather than be silently dropped from the binding.
+fn rv_reg_code(uint64 name_tok) -> uint64 {
+    // ABI aliases (fp is an alias for s0/x8).
+    if tok_matches(name_tok, "zero", 4) != 0 { return 0 }
+    if tok_matches(name_tok, "ra", 2) != 0 { return 1 }
+    if tok_matches(name_tok, "sp", 2) != 0 { return 2 }
+    if tok_matches(name_tok, "gp", 2) != 0 { return 3 }
+    if tok_matches(name_tok, "tp", 2) != 0 { return 4 }
+    if tok_matches(name_tok, "t0", 2) != 0 { return 5 }
+    if tok_matches(name_tok, "t1", 2) != 0 { return 6 }
+    if tok_matches(name_tok, "t2", 2) != 0 { return 7 }
+    if tok_matches(name_tok, "fp", 2) != 0 { return 8 }
+    if tok_matches(name_tok, "s0", 2) != 0 { return 8 }
+    if tok_matches(name_tok, "s1", 2) != 0 { return 9 }
+    if tok_matches(name_tok, "a0", 2) != 0 { return 10 }
+    if tok_matches(name_tok, "a1", 2) != 0 { return 11 }
+    if tok_matches(name_tok, "a2", 2) != 0 { return 12 }
+    if tok_matches(name_tok, "a3", 2) != 0 { return 13 }
+    if tok_matches(name_tok, "a4", 2) != 0 { return 14 }
+    if tok_matches(name_tok, "a5", 2) != 0 { return 15 }
+    if tok_matches(name_tok, "a6", 2) != 0 { return 16 }
+    if tok_matches(name_tok, "a7", 2) != 0 { return 17 }
+    if tok_matches(name_tok, "s2", 2) != 0 { return 18 }
+    if tok_matches(name_tok, "s3", 2) != 0 { return 19 }
+    if tok_matches(name_tok, "s4", 2) != 0 { return 20 }
+    if tok_matches(name_tok, "s5", 2) != 0 { return 21 }
+    if tok_matches(name_tok, "s6", 2) != 0 { return 22 }
+    if tok_matches(name_tok, "s7", 2) != 0 { return 23 }
+    if tok_matches(name_tok, "s8", 2) != 0 { return 24 }
+    if tok_matches(name_tok, "s9", 2) != 0 { return 25 }
+    if tok_matches(name_tok, "s10", 3) != 0 { return 26 }
+    if tok_matches(name_tok, "s11", 3) != 0 { return 27 }
+    if tok_matches(name_tok, "t3", 2) != 0 { return 28 }
+    if tok_matches(name_tok, "t4", 2) != 0 { return 29 }
+    if tok_matches(name_tok, "t5", 2) != 0 { return 30 }
+    if tok_matches(name_tok, "t6", 2) != 0 { return 31 }
+    // Numeric x0..x31 form (parse the digits after 'x', validate < 32).
+    uint64 tlen = tok_text_len(name_tok)
+    uint64 tstart = tok_text_start(name_tok)
+    if tlen >= 2 && tlen <= 3 {
+        uint64 p0 = cg_source + tstart
+        uint64 c0 = 0
+        unsafe { *(p0 as uint8) -> c0 }
+        if c0 == 120 {
+            uint64 num = 0
+            uint64 ok = 1
+            uint64 k = 1
+            while k < tlen {
+                uint64 pk = cg_source + tstart + k
+                uint64 ck = 0
+                unsafe { *(pk as uint8) -> ck }
+                if ck < 48 || ck > 57 { ok = 0 }
+                num = num * 10 + (ck - 48)
+                k = k + 1
+            }
+            if ok != 0 && num < 32 { return num }
+        }
+    }
+    // Unknown name — fail the build loudly.
+    write(2, "error: riscv32: unknown inline-asm constraint register '", 56)
+    write(2, cg_source + tstart, tlen)
+    write(2, "' (want x0-x31 or zero/ra/sp/gp/tp/t0-t6/s0-s11/a0-a7/fp)\n", 58)
+    exit(1)
+    return 0
+}
+
 // Emit `mov dst, src` for any two 64-bit registers (0..15).
 // ModR/M: mod=3, reg=src, rm=dst. REX.W always; REX.R if src>=8; REX.B if dst>=8.
 fn emit_mov_reg_reg(uint64 dst, uint64 src) {

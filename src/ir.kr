@@ -4209,9 +4209,21 @@ fn ir_lower_stmt(uint64 node) {
                     var_v = ir_new_vreg()
                     ir_emit(IR_CONST, var_v, 0, 0, 0, ir_current_bb)
                 }
-                // Store the vreg as src in the instruction imm (via IR_ARG)
+                // Store the vreg as src in the instruction imm (via IR_ARG).
+                // Register-name resolution is arch-specific: riscv32 (arch 2)
+                // uses rv_reg_code (a0-a7/s0-s11/x0-x31, fails loud on an
+                // unknown name); x86 (arch 0) and arm64 (arch 1) keep the
+                // pre-existing x86_reg_code path byte-for-byte (arm64 IR-mode
+                // inheriting the x86 lookup here is a pre-existing bug, audit
+                // §11 — deliberately left unchanged so the bootstrap stays
+                // identical; only the arch==2 branch is new).
                 uint32 rtok = ast_data2(wci)
-                uint64 rcode = x86_reg_code(rtok)
+                uint64 rcode = 0
+                if target_arch == 2 {
+                    rcode = rv_reg_code(rtok)
+                } else {
+                    rcode = x86_reg_code(rtok)
+                }
                 if rcode != 0xFFFF {
                     // Move var value to the target physical register
                     ir_emit(IR_ARG, 0, var_v, 0, rcode + 100, ir_current_bb)
@@ -4234,7 +4246,14 @@ fn ir_lower_stmt(uint64 node) {
                 // out constraint: capture register value into variable
                 uint32 rtok2 = ast_data2(wco)
                 uint32 vtok2 = ast_data3(wco)
-                uint64 rcode2 = x86_reg_code(rtok2)
+                // Same arch-gated dispatch as the IN site above: riscv32 uses
+                // rv_reg_code (fail-loud); arch 0/1 unchanged.
+                uint64 rcode2 = 0
+                if target_arch == 2 {
+                    rcode2 = rv_reg_code(rtok2)
+                } else {
+                    rcode2 = x86_reg_code(rtok2)
+                }
                 if rcode2 != 0xFFFF {
                     uint64 out_v = ir_new_vreg()
                     // Use IR_COPY with a special marker: src1=0, imm=rcode+100

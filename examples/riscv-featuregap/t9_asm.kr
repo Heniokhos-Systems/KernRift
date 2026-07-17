@@ -1,0 +1,50 @@
+// RISC-V RV32IMC feature-gap Task 9: inline assembly — IR_ASM_BLOCK (96).
+//
+// Exercises the three inline-asm mechanisms the riscv backend supports:
+//   1. RAW HEX WORD passthrough (asm_emit_rv):  asm("0x00150513") is the
+//      encoding of `addi a0, a0, 1`. It is deliberately a COMPRESSIBLE word
+//      (rd==rs1==a0, simm6 imm -> would fold to c.addi), so the objdump
+//      assertion that it stays a full 4-byte `addi a0,a0,1` proves the
+//      IR_ASM_BLOCK handler marked the emitted range non-compressible.
+//   2. CONSTRAINT BINDING (rv_reg_code via ir.kr:4214/4237):
+//        in(base -> a0)   lowers to IR_ARG(imm = rv_reg_code("a0")+100)
+//        out(a0 -> result) lowers to IR_COPY(imm = rv_reg_code("a0")+100)
+//      so `base` is moved into physical a0 before the block and physical a0
+//      is captured into `result` after it — the raw word runs a0 = a0 + 1.
+//   3. A FIXED INTRINSIC / CSR read: asm("csrr t0, mhartid") emits the
+//      csrrs t0,mhartid,x0 encoding (objdump-verified; t0 is caller-saved
+//      and unallocated so it disturbs nothing), plus asm("nop").
+//
+// base = 0x40 ('@'); a0+1 = 0x41 -> 'A'. Expected UART output: "A".
+//
+// Build:
+//   ./build/krc2 --arch=riscv32 --freestanding \
+//       examples/riscv-featuregap/t9_asm.kr -o /tmp/t9.bin
+// Run:
+//   timeout 5 qemu-system-riscv32 -machine virt -nographic -bios /tmp/t9.bin
+
+device Uart at 0x10000000 {
+    thr at 0x00 : u8
+    lsr at 0x05 : u8
+}
+
+fn putc(u8 c) {
+    while (Uart.lsr & 0x20) == 0 { }
+    Uart.thr = c
+}
+
+fn main() {
+    // Fixed intrinsics — CSR read (objdump-verified) and a nop. t0 is dead.
+    asm("csrr t0, mhartid")
+    asm("nop")
+
+    // Raw hex word + constrained in/out. The word is `addi a0, a0, 1`.
+    u32 base = 0x40                 // '@'
+    u32 result = 0
+    asm("0x00150513")
+        in(base -> a0)
+        out(a0 -> result)
+    putc(result)                    // 0x41 = 'A'
+
+    loop { }
+}

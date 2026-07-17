@@ -5069,6 +5069,61 @@ else
     echo "  riscv_t8_ror: SKIP (qemu-system-riscv32 or riscv64-linux-gnu-objdump not installed)"
 fi
 
+# Compiles examples/riscv-featuregap/t9_asm.kr, which exercises inline asm
+# (IR_ASM_BLOCK 96): a raw hex word `asm("0x00150513")` = `addi a0,a0,1` bound
+# to a variable via in()/out() constraints (rv_reg_code path at ir.kr:4214/
+# 4237), plus a `csrr t0,mhartid` intrinsic. NON-VACUOUS on two counts: the
+# raw word is a COMPRESSIBLE encoding (rd==rs1, simm6 imm) so its objdump
+# survival as a full 4-byte `addi a0,a0,1` proves the handler marked the range
+# non-compressible; and the boot proves in/out constraint binding actually
+# moved base->a0 and captured a0->result (a0+1 = 0x41 = 'A').
+echo ""
+echo "--- riscv32 inline asm (IR_ASM_BLOCK) boot test ---"
+if command -v qemu-system-riscv32 >/dev/null 2>&1 \
+   && command -v riscv64-linux-gnu-objdump >/dev/null 2>&1; then
+    TOTAL=$((TOTAL + 1))
+    RV_BIN="/tmp/krc_rv_t9_$$.bin"
+    RV_OK=1
+    if ! $KRC --arch=riscv32 --freestanding "$DIR/../examples/riscv-featuregap/t9_asm.kr" -o "$RV_BIN" >/dev/null 2>&1; then
+        echo "FAIL: riscv_t9_asm (compilation failed)"
+        RV_OK=0
+    fi
+    if [ "$RV_OK" = 1 ]; then
+        RV_DIS=$(riscv64-linux-gnu-objdump -D -b binary -m riscv:rv32 -M no-aliases "$RV_BIN" 2>/dev/null)
+        # Raw asm word emitted verbatim AND left uncompressed (full 4-byte).
+        if [ "$(echo "$RV_DIS" | grep -cE '	addi	a0,a0,1')" -lt 1 ]; then
+            echo "FAIL: riscv_t9_asm (raw asm word 'addi a0,a0,1' not emitted verbatim)"
+            RV_OK=0
+        fi
+        # Must NOT have been shrunk to c.addi (noc region protects it).
+        if [ "$(echo "$RV_DIS" | grep -cE 'c\.addi	a0,1')" -ne 0 ]; then
+            echo "FAIL: riscv_t9_asm (raw asm word was compressed to c.addi -- noc region missed it)"
+            RV_OK=0
+        fi
+        # csrr intrinsic emitted the right CSR (mhartid = 0xf14).
+        if [ "$(echo "$RV_DIS" | grep -c 'mhartid')" -lt 1 ]; then
+            echo "FAIL: riscv_t9_asm (csrr intrinsic did not emit mhartid CSR read)"
+            RV_OK=0
+        fi
+    fi
+    if [ "$RV_OK" = 1 ]; then
+        RV_OUT=$(timeout 5 qemu-system-riscv32 -machine virt -nographic -bios "$RV_BIN" 2>/dev/null)
+        # in(base=0x40 -> a0); raw word a0=a0+1=0x41; out(a0 -> result); putc.
+        if [ "$RV_OUT" = "A" ]; then
+            PASS=$((PASS + 1))
+            echo "  riscv_t9_asm: PASS (qemu printed A -- raw word ran, in/out constraint bound, word stayed 4-byte)"
+        else
+            echo "FAIL: riscv_t9_asm (qemu output was '$RV_OUT', want 'A')"
+            FAIL=$((FAIL + 1))
+        fi
+    else
+        FAIL=$((FAIL + 1))
+    fi
+    rm -f "$RV_BIN"
+else
+    echo "  riscv_t9_asm: SKIP (qemu-system-riscv32 or riscv64-linux-gnu-objdump not installed)"
+fi
+
 # --- Summary ---
 echo ""
 echo "=== Results: $PASS/$TOTAL passed, $FAIL failed ==="

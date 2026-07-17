@@ -823,6 +823,229 @@ fn rv_emit_pcrel_pair(uint64 rd, uint64 table_sel, uint64 payload) {
 }
 
 // ---------------------------------------------------------------------------
+// Inline assembly (IR_ASM_BLOCK, op 96)
+//
+// asm_emit_rv is the riscv twin of asm_emit_a64 (codegen.kr:8541). Like it,
+// this is NOT a general assembler — it is a raw-hex-word passthrough plus a
+// small fixed intrinsic/CSR table. Accepted forms:
+//   1. "0xXXXXXXXX"       -> one 32-bit word, emitted verbatim (escape hatch).
+//   2. nullary intrinsics -> nop/ecall/ebreak/wfi/mret/fence/fence.i.
+//   3. "csrr rd, csr"     -> csrrs rd, csr, x0.
+//      "csrrw rd, csr, rs"-> csrrw rd, csr, rs.
+//   4. anything else      -> hard error with the raw-hex hint.
+// The IR_ASM_BLOCK handler marks every emitted word non-compressible so a
+// user's raw word that happens to look like a c.* form is never shrunk.
+// ---------------------------------------------------------------------------
+
+// Compare the len-byte window [sptr+off, ...) to the kwlen-byte keyword kw.
+fn rv_asm_bytes_eq(uint64 sptr, uint64 off, uint64 len, uint64 kw, uint64 kwlen) -> uint64 {
+    if len != kwlen { return 0 }
+    uint64 i = 0
+    while i < kwlen {
+        uint64 a = 0
+        uint64 pa = sptr + off + i
+        unsafe { *(pa as uint8) -> a }
+        uint64 b = 0
+        uint64 pb = kw + i
+        unsafe { *(pb as uint8) -> b }
+        if a != b { return 0 }
+        i = i + 1
+    }
+    return 1
+}
+
+// Register NAME occupying the len-byte window [off,...) in the asm string ->
+// 0..31 hardware number. Same name set as codegen.kr's rv_reg_code but over
+// raw string bytes rather than a source token. Unknown -> hard error.
+fn rv_asm_regnum(uint64 sptr, uint64 off, uint64 len) -> uint64 {
+    if rv_asm_bytes_eq(sptr, off, len, "zero", 4) != 0 { return 0 }
+    if rv_asm_bytes_eq(sptr, off, len, "ra", 2) != 0 { return 1 }
+    if rv_asm_bytes_eq(sptr, off, len, "sp", 2) != 0 { return 2 }
+    if rv_asm_bytes_eq(sptr, off, len, "gp", 2) != 0 { return 3 }
+    if rv_asm_bytes_eq(sptr, off, len, "tp", 2) != 0 { return 4 }
+    if rv_asm_bytes_eq(sptr, off, len, "t0", 2) != 0 { return 5 }
+    if rv_asm_bytes_eq(sptr, off, len, "t1", 2) != 0 { return 6 }
+    if rv_asm_bytes_eq(sptr, off, len, "t2", 2) != 0 { return 7 }
+    if rv_asm_bytes_eq(sptr, off, len, "fp", 2) != 0 { return 8 }
+    if rv_asm_bytes_eq(sptr, off, len, "s0", 2) != 0 { return 8 }
+    if rv_asm_bytes_eq(sptr, off, len, "s1", 2) != 0 { return 9 }
+    if rv_asm_bytes_eq(sptr, off, len, "a0", 2) != 0 { return 10 }
+    if rv_asm_bytes_eq(sptr, off, len, "a1", 2) != 0 { return 11 }
+    if rv_asm_bytes_eq(sptr, off, len, "a2", 2) != 0 { return 12 }
+    if rv_asm_bytes_eq(sptr, off, len, "a3", 2) != 0 { return 13 }
+    if rv_asm_bytes_eq(sptr, off, len, "a4", 2) != 0 { return 14 }
+    if rv_asm_bytes_eq(sptr, off, len, "a5", 2) != 0 { return 15 }
+    if rv_asm_bytes_eq(sptr, off, len, "a6", 2) != 0 { return 16 }
+    if rv_asm_bytes_eq(sptr, off, len, "a7", 2) != 0 { return 17 }
+    if rv_asm_bytes_eq(sptr, off, len, "s2", 2) != 0 { return 18 }
+    if rv_asm_bytes_eq(sptr, off, len, "s3", 2) != 0 { return 19 }
+    if rv_asm_bytes_eq(sptr, off, len, "s4", 2) != 0 { return 20 }
+    if rv_asm_bytes_eq(sptr, off, len, "s5", 2) != 0 { return 21 }
+    if rv_asm_bytes_eq(sptr, off, len, "s6", 2) != 0 { return 22 }
+    if rv_asm_bytes_eq(sptr, off, len, "s7", 2) != 0 { return 23 }
+    if rv_asm_bytes_eq(sptr, off, len, "s8", 2) != 0 { return 24 }
+    if rv_asm_bytes_eq(sptr, off, len, "s9", 2) != 0 { return 25 }
+    if rv_asm_bytes_eq(sptr, off, len, "s10", 3) != 0 { return 26 }
+    if rv_asm_bytes_eq(sptr, off, len, "s11", 3) != 0 { return 27 }
+    if rv_asm_bytes_eq(sptr, off, len, "t3", 2) != 0 { return 28 }
+    if rv_asm_bytes_eq(sptr, off, len, "t4", 2) != 0 { return 29 }
+    if rv_asm_bytes_eq(sptr, off, len, "t5", 2) != 0 { return 30 }
+    if rv_asm_bytes_eq(sptr, off, len, "t6", 2) != 0 { return 31 }
+    // Numeric xN form.
+    if len >= 2 && len <= 3 {
+        uint64 c0 = 0
+        uint64 p0 = sptr + off
+        unsafe { *(p0 as uint8) -> c0 }
+        if c0 == 120 {
+            uint64 num = 0
+            uint64 ok = 1
+            uint64 k = 1
+            while k < len {
+                uint64 ck = 0
+                uint64 pk = sptr + off + k
+                unsafe { *(pk as uint8) -> ck }
+                if ck < 48 || ck > 57 { ok = 0 }
+                num = num * 10 + (ck - 48)
+                k = k + 1
+            }
+            if ok != 0 && num < 32 { return num }
+        }
+    }
+    rv_err("error: riscv32: unknown register in inline csr asm (want x0-x31 / ABI name)\n")
+    return 0
+}
+
+// CSR NAME window -> its 12-bit address. Small machine-mode table (audit §11).
+fn rv_asm_csr(uint64 sptr, uint64 off, uint64 len) -> uint64 {
+    if rv_asm_bytes_eq(sptr, off, len, "mstatus", 7) != 0 { return 0x300 }
+    if rv_asm_bytes_eq(sptr, off, len, "mie", 3) != 0 { return 0x304 }
+    if rv_asm_bytes_eq(sptr, off, len, "mtvec", 5) != 0 { return 0x305 }
+    if rv_asm_bytes_eq(sptr, off, len, "mepc", 4) != 0 { return 0x341 }
+    if rv_asm_bytes_eq(sptr, off, len, "mcause", 6) != 0 { return 0x342 }
+    if rv_asm_bytes_eq(sptr, off, len, "mip", 3) != 0 { return 0x344 }
+    if rv_asm_bytes_eq(sptr, off, len, "mhartid", 7) != 0 { return 0xF14 }
+    rv_err("error: riscv32: unknown CSR name in inline asm (mstatus/mtvec/mepc/mcause/mie/mip/mhartid)\n")
+    return 0
+}
+
+// Scan a comma-separated field: given a start offset, skip leading spaces,
+// then read up to the next space or ',' or end; return the packed
+// (start << 16) | length of the trimmed name, and leave the caller to find
+// the next field after the comma. RISC-V asm operand strings are short so a
+// 16-bit field width is ample.
+fn rv_asm_field(uint64 sptr, uint64 from, uint64 slen) -> uint64 {
+    uint64 o = from
+    // skip leading spaces
+    while o < slen {
+        uint64 c = 0
+        uint64 p = sptr + o
+        unsafe { *(p as uint8) -> c }
+        if c != 32 { break }
+        o = o + 1
+    }
+    uint64 e = o
+    while e < slen {
+        uint64 c = 0
+        uint64 p = sptr + e
+        unsafe { *(p as uint8) -> c }
+        if c == 32 || c == 44 { break }
+        e = e + 1
+    }
+    return (o << 16) | (e - o)
+}
+
+// Offset of the byte after the next ',' at or after `from` (or slen if none).
+fn rv_asm_after_comma(uint64 sptr, uint64 from, uint64 slen) -> uint64 {
+    uint64 o = from
+    while o < slen {
+        uint64 c = 0
+        uint64 p = sptr + o
+        unsafe { *(p as uint8) -> c }
+        if c == 44 { return o + 1 }
+        o = o + 1
+    }
+    return slen
+}
+
+fn asm_emit_rv(uint64 str_tok) {
+    uint64 tstart = tok_text_start(str_tok)
+    uint64 tlen = tok_text_len(str_tok)
+    uint64 sptr = cg_source + tstart + 1     // skip opening quote
+    uint64 slen = tlen - 2                    // drop both quotes
+    if slen == 0 { return }
+
+    // ----- Raw hex word: "0xXXXXXXXX" -> one 32-bit word (LE). Primary
+    //       escape hatch; identical scan to asm_emit_a64 (codegen.kr:8548). -----
+    uint64 fc = 0
+    unsafe { *(sptr as uint8) -> fc }
+    if fc == 48 && slen >= 4 {
+        uint64 sc = 0
+        uint64 sptr1 = sptr + 1
+        unsafe { *(sptr1 as uint8) -> sc }
+        if sc == 120 {
+            uint64 val = 0
+            uint64 hi = 2
+            while hi < slen {
+                uint64 haddr = sptr + hi
+                uint64 hc = 0
+                unsafe { *(haddr as uint8) -> hc }
+                if hc == 32 { hi = hi + 1; continue }
+                uint64 d = 0
+                if hc >= 48 && hc <= 57 { d = hc - 48 }
+                if hc >= 97 && hc <= 102 { d = hc - 87 }
+                if hc >= 65 && hc <= 70 { d = hc - 55 }
+                val = val * 16 + d
+                hi = hi + 1
+            }
+            emit_u32_le(val)
+            return
+        }
+    }
+
+    // ----- Nullary intrinsics (fixed 32-bit words) -----
+    if asm_match(sptr, 0, "nop", 3) != 0 && slen == 3 { rv_i(0, 0, 0, 0, 0x13); return }   // addi x0,x0,0
+    if asm_match(sptr, 0, "ecall", 5) != 0 && slen == 5 { emit_u32_le(0x00000073); return }
+    if asm_match(sptr, 0, "ebreak", 6) != 0 && slen == 6 { emit_u32_le(0x00100073); return }
+    if asm_match(sptr, 0, "wfi", 3) != 0 && slen == 3 { emit_u32_le(0x10500073); return }
+    if asm_match(sptr, 0, "mret", 4) != 0 && slen == 4 { emit_u32_le(0x30200073); return }
+    if asm_match(sptr, 0, "fence.i", 7) != 0 && slen == 7 { emit_u32_le(0x0000100F); return }
+    if asm_match(sptr, 0, "fence", 5) != 0 && slen == 5 { emit_u32_le(0x0FF0000F); return }  // fence iorw,iorw
+
+    // ----- csrrw rd, csr, rs -> I-type, funct3=1 (checked BEFORE csrr:
+    //       "csrr " won't match "csrrw..." since byte 4 is 'w' not ' ',
+    //       but order it first for clarity). -----
+    if asm_match(sptr, 0, "csrrw ", 6) != 0 {
+        uint64 f1 = rv_asm_field(sptr, 6, slen)
+        uint64 rd = rv_asm_regnum(sptr, f1 >> 16, f1 & 0xFFFF)
+        uint64 a2 = rv_asm_after_comma(sptr, 6, slen)
+        uint64 f2 = rv_asm_field(sptr, a2, slen)
+        uint64 csr = rv_asm_csr(sptr, f2 >> 16, f2 & 0xFFFF)
+        uint64 a3 = rv_asm_after_comma(sptr, a2, slen)
+        uint64 f3 = rv_asm_field(sptr, a3, slen)
+        uint64 rs = rv_asm_regnum(sptr, f3 >> 16, f3 & 0xFFFF)
+        rv_i(csr, rs, 1, rd, 0x73)                // csrrw rd, csr, rs
+        return
+    }
+    // ----- csrr rd, csr -> csrrs rd, csr, x0 (funct3=2) -----
+    if asm_match(sptr, 0, "csrr ", 5) != 0 {
+        uint64 f1 = rv_asm_field(sptr, 5, slen)
+        uint64 rd = rv_asm_regnum(sptr, f1 >> 16, f1 & 0xFFFF)
+        uint64 a2 = rv_asm_after_comma(sptr, 5, slen)
+        uint64 f2 = rv_asm_field(sptr, a2, slen)
+        uint64 csr = rv_asm_csr(sptr, f2 >> 16, f2 & 0xFFFF)
+        rv_i(csr, 0, 2, rd, 0x73)                 // csrrs rd, csr, x0
+        return
+    }
+
+    // Unrecognized mnemonic — hard error with the raw-hex hint.
+    write(2, "error: riscv32: unrecognized asm instruction '", 46)
+    write(2, sptr, slen)
+    write(2, "'\n", 2)
+    write(2, "  hint: use a raw hex word instead, e.g. asm(\"0x00150513\")\n", 59)
+    exit(1)
+}
+
+// ---------------------------------------------------------------------------
 // Per-instruction emitter
 // ---------------------------------------------------------------------------
 
@@ -1811,6 +2034,42 @@ fn ir_emit_riscv_insn(uint64 ii) {
         rv_r(0, RV_A1, RV_A0, 1, RV_A0, 0x33)          // sll  a0, a0, a1
         rv_r(0, RV_A0, RV_T5, 6, d, 0x33)              // or   d, t5, a0
         if dst_r == 0xFFFFFFFF { rv_store_spill(RV_T5, dest_v) }
+        return
+    }
+
+    // ----- IR_ASM_BLOCK (96): inline asm passthrough -----
+    // Mirror of ir_aarch64.kr:1508-1524: walk the AsmBlock node's string
+    // children (data1 = single-line form; child list = multi-line form) and
+    // hand each to asm_emit_rv. I/O constraints are NOT handled here — they
+    // were already lowered to IR_ARG(imm=regcode+100) before this block and
+    // IR_COPY(imm=regcode+100) after it (ir.kr:4189, using rv_reg_code on
+    // arch 2), which the op 51 / op 61 handlers above already implement. The
+    // asm text itself is opaque passthrough.
+    //
+    // Non-compressibility: the emitted words must survive rv_compress_function
+    // verbatim — a user's raw 0x... word that happens to look like a
+    // compressible addi/mv (or a csrr that aliases a c.* form by accident)
+    // must NOT be shrunk, or their hand-laid byte sequence would shift. Mark
+    // the whole emitted range non-compressible (audit §11), the same
+    // mechanism the pcrel auipc+addi pairs use (rv_emit_pcrel_pair).
+    if op == 96 {
+        uint64 asm_start = out_len
+        uint64 asm_node = s1_v
+        uint32 single_tok = ast_data1(asm_node)
+        uint64 ws = single_tok
+        if ws != 0 {
+            asm_emit_rv(ws)
+        }
+        uint32 child_str = ast_child(asm_node)
+        uint64 wcs = child_str
+        while wcs != 0 {
+            uint32 stk = ast_data1(wcs)
+            uint64 wstk = stk
+            asm_emit_rv(wstk)
+            uint32 nxt = ast_next(wcs)
+            wcs = nxt
+        }
+        if out_len > asm_start { rv_mark_noc(asm_start, out_len) }
         return
     }
 
