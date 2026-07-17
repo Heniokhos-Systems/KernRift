@@ -47,9 +47,7 @@ jobs:
 
       - name: Build (self-compile)
         run: |
-          cat src/lexer.kr src/ast.kr src/parser.kr src/codegen.kr src/codegen_aarch64.kr \
-              src/ir.kr src/ir_aarch64.kr src/format_macho.kr src/format_pe.kr src/format_archive.kr src/format_android.kr \
-              src/bcj.kr src/analysis.kr src/type_check.kr src/inliner.kr src/living.kr src/runtime.kr src/formatter.kr src/main.kr > build/krc.kr
+          make build/krc.kr
           # Bootstrap: compile source with released krc (use --legacy for speed),
           # then re-compile with itself (which uses IR by default)
           ./build/krc-bootstrap --legacy --arch=x86_64 build/krc.kr -o build/krc2
@@ -383,9 +381,7 @@ jobs:
           echo
 
           echo "=== concatenate source ==="
-          cat src/lexer.kr src/ast.kr src/parser.kr src/codegen.kr src/codegen_aarch64.kr \
-              src/ir.kr src/ir_aarch64.kr src/format_macho.kr src/format_pe.kr src/format_archive.kr src/format_android.kr \
-              src/bcj.kr src/analysis.kr src/type_check.kr src/inliner.kr src/living.kr src/runtime.kr src/formatter.kr src/main.kr > build/krc.kr
+          make build/krc.kr
           wc -l build/krc.kr
           echo
 
