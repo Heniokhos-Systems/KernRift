@@ -2250,8 +2250,11 @@ fn parse_module() -> uint64 {
                 // Compute element size from type keyword kind
                 uint32 stk = tok_kind_at(stype_tok)
                 uint64 wstk = stk
-                // Default (non-integer element type): one machine word — 8, or 4 on riscv32.
-                uint64 elem_sz = target_word_size()
+                // Float element types (f16=94/f32=95/f64=96) keep the historical
+                // 8-byte slot on every arch (byte-identity with the old literal 8);
+                // only pointer/unknown element types scale with the target word size.
+                uint64 elem_sz = 0
+                if wstk == 94 || wstk == 95 || wstk == 96 { elem_sz = 8 } else { elem_sz = target_word_size() }
                 if wstk == 80 || wstk == 84 || wstk == 98 || wstk == 99 { elem_sz = 1 }
                 if wstk == 81 || wstk == 85 { elem_sz = 2 }
                 if wstk == 82 || wstk == 86 { elem_sz = 4 }
@@ -2407,9 +2410,12 @@ fn parse_module() -> uint64 {
                 uint64 field_name_tok = expect(1)
                 // Determine field size from type
                 uint32 ftk = tok_kind_at(field_type_tok)
-                // Default (unrecognized field type): one machine word — 8, or 4 on riscv32.
-                uint64 fsize = target_word_size()
                 uint64 wftk = ftk
+                // Float field types (f16=94/f32=95/f64=96) keep the historical
+                // 8-byte slot on every arch (byte-identity with the old literal 8);
+                // only pointer/unknown field types scale with the target word size.
+                uint64 fsize = 0
+                if wftk == 94 || wftk == 95 || wftk == 96 { fsize = 8 } else { fsize = target_word_size() }
                 if wftk == 80 { fsize = 1 }
                 if wftk == 81 { fsize = 2 }
                 if wftk == 82 { fsize = 4 }
@@ -2489,9 +2495,12 @@ fn parse_module() -> uint64 {
             // Parse target type keyword — determine size
             uint32 target_kind = cur_kind()
             advance_tok()
-            // Default (unrecognized alias target): one machine word — 8, or 4 on riscv32.
-            uint64 tsize = target_word_size()
             uint64 wtk = target_kind
+            // Float alias targets (f16=94/f32=95/f64=96) keep the historical
+            // 8-byte slot on every arch (byte-identity with the old literal 8);
+            // only pointer/unknown alias targets scale with the target word size.
+            uint64 tsize = 0
+            if wtk == 94 || wtk == 95 || wtk == 96 { tsize = 8 } else { tsize = target_word_size() }
             if wtk == 80 { tsize = 1 }
             if wtk == 81 { tsize = 2 }
             if wtk == 82 { tsize = 4 }
