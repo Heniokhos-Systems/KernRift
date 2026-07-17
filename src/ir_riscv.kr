@@ -314,6 +314,292 @@ fn rv_check_j21(uint64 disp) {
 }
 
 // ---------------------------------------------------------------------------
+// Compressed (C) extension — non-control-flow peephole post-pass (RV32IMC)
+//
+// After a function's blocks are fully emitted (still all 4-byte words),
+// rv_compress_function() rewrites every eligible word to its 2-byte c.*
+// form and compacts the stream in place, then remaps every recorded code
+// offset (block offsets, branch/ret fixup sites, call fixup sites, DWARF
+// line-table entries) through an old->new map so the SINGLE fixup
+// resolution that follows computes displacements on the final layout.
+//
+// SAFE SUBSET: control flow stays 32-bit. Branches/jumps/calls
+// (op 0x63 beq..bgeu, 0x6F jal, 0x67 jalr, 0x17 auipc) are never
+// compressed — every branch-fixup placeholder, ret-fixup jal, and
+// auipc+jalr call pair keeps its 4-byte slot (and the call pair keeps
+// its +4 adjacency), so patch_u32 on the remapped site still patches a
+// full-width instruction and NO branch-relaxation iteration is needed:
+// compressing a c.j/c.beqz/c.bnez/c.jal would change the branch's own
+// size and cascade into a fixed-point problem. That branch compression
+// (and c.lwsp/c.swsp/c.addi16sp/c.addi4spn stack forms) is deliberately
+// DEFERRED to a future task.
+//
+// Emitted forms (verified against the ISA manual C chapter + objdump):
+//   c.li c.addi c.mv c.add c.slli   (CI/CR, any rd != x0)
+//   c.srli c.srai c.andi c.sub      (CB/CA, regs limited to x8..x15)
+//   c.lw c.sw                       (CL/CS, regs x8..x15, off 0..124 %4)
+// ---------------------------------------------------------------------------
+
+// rd/rs in the RVC 3-bit register window x8..x15 (s0,s1,a0-a5)?
+fn rv_c_reg_ok(uint64 r) -> uint64 {
+    if r >= 8 && r <= 15 { return 1 }
+    return 0
+}
+
+// Does a 12-bit I-type immediate FIELD value sit inside the CI-format's
+// sign-extended 6-bit immediate [-32,31]? (Field values 0x000..0x01F are
+// 0..31; 0xFE0..0xFFF are -32..-1; anything between needs 12 bits.)
+fn rv_c_simm6_ok(uint64 imm12) -> uint64 {
+    if imm12 < 0x20 { return 1 }
+    if imm12 >= 0xFE0 { return 1 }
+    return 0
+}
+
+// Match one 32-bit instruction word against the safe-subset c.* forms.
+// Returns the 16-bit compressed encoding, or 0 for "leave at 4 bytes"
+// (0x0000 is the RVC illegal instruction — never a valid compression, so
+// 0 is a safe sentinel). Encodings follow the RVC quadrant layouts:
+//   CI: [15:13]f3 [12]imm5 [11:7]rd [6:2]imm4:0 [1:0]op
+//   CR: [15:12]f4 [11:7]rd [6:2]rs2 [1:0]10
+//   CB(shift/andi): [15:13]100 [12]imm5 [11:10]kind [9:7]rd' [6:2]imm [1:0]01
+//   CA: [15:10]100011 [9:7]rd' [6:5]kind [4:2]rs2' [1:0]01
+//   CL/CS: [15:13]f3 [12:10]off[5:3] [9:7]rs1' [6]off[2] [5]off[6] [4:2]rd'/rs2' [1:0]00
+fn rv_try_compress(uint64 w) -> uint64 {
+    uint64 op = w & 0x7F
+    uint64 rd = (w >> 7) & 0x1F
+    uint64 f3 = (w >> 12) & 7
+    uint64 rs1 = (w >> 15) & 0x1F
+    uint64 rs2 = (w >> 20) & 0x1F
+    uint64 imm12 = (w >> 20) & 0xFFF
+
+    // ----- OP-IMM (0x13): addi / slli / srli / srai / andi -----
+    if op == 0x13 {
+        if f3 == 0 {
+            uint64 i5 = (imm12 >> 5) & 1
+            uint64 i40 = imm12 & 0x1F
+            if rd != 0 && rs1 == 0 && rv_c_simm6_ok(imm12) != 0 {
+                return 0x4001 | (i5 << 12) | (rd << 7) | (i40 << 2)      // c.li rd, imm
+            }
+            if rd != 0 && rs1 == rd && imm12 != 0 && rv_c_simm6_ok(imm12) != 0 {
+                return 0x0001 | (i5 << 12) | (rd << 7) | (i40 << 2)      // c.addi rd, imm
+            }
+            if rd != 0 && rs1 != 0 && imm12 == 0 {
+                return 0x8002 | (rd << 7) | (rs1 << 2)                   // c.mv rd, rs1
+            }
+            return 0
+        }
+        if f3 == 1 {
+            // slli: imm12[11:5] must be 0 (the encoded funct7); shamt != 0
+            // (shamt 0 is a HINT encoding in RVC — leave it wide).
+            uint64 sh = imm12 & 0x1F
+            if (imm12 >> 5) == 0 && rd != 0 && rs1 == rd && sh != 0 {
+                return 0x0002 | (rd << 7) | (sh << 2)                    // c.slli rd, sh
+            }
+            return 0
+        }
+        if f3 == 5 {
+            // srli (imm12[11:5]=0) / srai (imm12[11:5]=0x20), rd' window
+            uint64 sh = imm12 & 0x1F
+            uint64 hi7 = imm12 >> 5
+            if rd == rs1 && rv_c_reg_ok(rd) != 0 && sh != 0 {
+                if hi7 == 0 { return 0x8001 | ((rd - 8) << 7) | (sh << 2) }     // c.srli rd', sh
+                if hi7 == 0x20 { return 0x8401 | ((rd - 8) << 7) | (sh << 2) }  // c.srai rd', sh
+            }
+            return 0
+        }
+        if f3 == 7 {
+            if rd == rs1 && rv_c_reg_ok(rd) != 0 && rv_c_simm6_ok(imm12) != 0 {
+                uint64 i5 = (imm12 >> 5) & 1
+                uint64 i40 = imm12 & 0x1F
+                return 0x8801 | (i5 << 12) | ((rd - 8) << 7) | (i40 << 2)       // c.andi rd', imm
+            }
+            return 0
+        }
+        return 0
+    }
+
+    // ----- OP (0x33): add / sub (mul/div/slt/etc have no c.* form) -----
+    if op == 0x33 {
+        uint64 f7 = (w >> 25) & 0x7F
+        if f3 == 0 && f7 == 0 {
+            if rd != 0 {
+                if rs1 == 0 && rs2 != 0 { return 0x8002 | (rd << 7) | (rs2 << 2) }   // c.mv rd, rs2
+                if rs2 == 0 && rs1 != 0 { return 0x8002 | (rd << 7) | (rs1 << 2) }   // c.mv rd, rs1
+                if rs1 == rd && rs2 != 0 { return 0x9002 | (rd << 7) | (rs2 << 2) }  // c.add rd, rs2
+                if rs2 == rd && rs1 != 0 { return 0x9002 | (rd << 7) | (rs1 << 2) }  // c.add rd, rs1
+            }
+            return 0
+        }
+        if f3 == 0 && f7 == 0x20 {
+            if rd == rs1 && rv_c_reg_ok(rd) != 0 && rv_c_reg_ok(rs2) != 0 {
+                return 0x8C01 | ((rd - 8) << 7) | ((rs2 - 8) << 2)       // c.sub rd', rs2'
+            }
+            return 0
+        }
+        return 0
+    }
+
+    // ----- lw (0x03/f3=2): both regs in x8..x15, offset 0..124, 4-aligned -----
+    if op == 0x03 && f3 == 2 {
+        if rv_c_reg_ok(rd) != 0 && rv_c_reg_ok(rs1) != 0 && imm12 < 0x80 && (imm12 & 3) == 0 {
+            return 0x4000 | (((imm12 >> 3) & 7) << 10) | ((rs1 - 8) << 7) | (((imm12 >> 2) & 1) << 6) | (((imm12 >> 6) & 1) << 5) | ((rd - 8) << 2)   // c.lw rd', off(rs1')
+        }
+        return 0
+    }
+
+    // ----- sw (0x23/f3=2): S-type imm reassembled from its split fields -----
+    if op == 0x23 && f3 == 2 {
+        uint64 soff = (((w >> 25) & 0x7F) << 5) | ((w >> 7) & 0x1F)
+        if rv_c_reg_ok(rs1) != 0 && rv_c_reg_ok(rs2) != 0 && soff < 0x80 && (soff & 3) == 0 {
+            return 0xC000 | (((soff >> 3) & 7) << 10) | ((rs1 - 8) << 7) | (((soff >> 2) & 1) << 6) | (((soff >> 6) & 1) << 5) | ((rs2 - 8) << 2)     // c.sw rs2', off(rs1')
+        }
+        return 0
+    }
+
+    // Everything else — including ALL control flow (0x63 branches, 0x6F
+    // jal, 0x67 jalr, 0x17 auipc) and 0x37 lui — stays 4 bytes. That
+    // guarantee is what lets the fixup resolution below patch full 32-bit
+    // words at remapped sites without any relaxation iteration.
+    return 0
+}
+
+// Translate one pre-compression code offset (which MUST be a 4-byte
+// instruction boundary inside [start, old_end]) to its post-compression
+// offset via the map built by rv_compress_function. A miss here means a
+// recorded offset the relayout didn't cover — hard error, never a silent
+// wrong branch.
+fn rv_c_remap(uint64 map, uint64 start, uint64 nwords, uint64 old) -> uint64 {
+    if old < start {
+        rv_err("error: riscv32: compression remap below function start\n")
+    }
+    uint64 delta = old - start
+    if (delta & 3) != 0 {
+        rv_err("error: riscv32: compression remap on unaligned offset\n")
+    }
+    uint64 idx = delta / 4
+    if idx > nwords {
+        rv_err("error: riscv32: compression remap beyond function end\n")
+    }
+    uint64 mp = map + idx * 4
+    uint32 v = 0
+    unsafe { *(mp as uint32) -> v }
+    return v
+}
+
+// The relayout pass. Called from ir_riscv_gen AFTER all blocks are
+// emitted (step 8) and BEFORE branch/ret fixup patching (steps 9-10), so
+// every displacement is computed exactly once, on the final layout.
+//   start      = out_len at function entry (== fn_register offset)
+//   fix_start  = fixup_count at function entry (call sites this fn added)
+//   line_start = line_table_count at function entry (-g line records)
+// Compaction is in place: the write cursor never passes the read cursor
+// (2-or-4 bytes written per 4 read). out_buf is not resized (the stream
+// only shrinks). With the C extension, 32-bit instructions may land on
+// 2-byte boundaries (IALIGN=16) — legal on any RVC hart, and patch_u32/
+// patch_u16 are byte-wise so unaligned patch sites are safe host-side.
+fn rv_compress_function(uint64 start, uint64 fix_start, uint64 line_start) {
+    if out_len <= start { return }
+    uint64 nwords = (out_len - start) / 4
+    // map[i] = new ABSOLUTE offset of the instruction that was at
+    // start + i*4; map[nwords] = new end-of-function offset (a block
+    // offset or line record taken at the old end must remap too).
+    uint64 map = alloc((nwords + 1) * 4)
+    uint64 rd_off = start
+    uint64 wr_off = start
+    uint64 i = 0
+    while i < nwords {
+        uint64 p = out_buf + rd_off
+        uint32 w32 = 0
+        unsafe { *(p as uint32) -> w32 }
+        uint64 w = w32
+        uint64 mp = map + i * 4
+        uint32 no = wr_off
+        unsafe { *(mp as uint32) = no }
+        uint64 cw = rv_try_compress(w)
+        if cw != 0 {
+            patch_u16(wr_off, cw)
+            wr_off = wr_off + 2
+        } else {
+            patch_u32(wr_off, w)
+            wr_off = wr_off + 4
+        }
+        rd_off = rd_off + 4
+        i = i + 1
+    }
+    uint64 mpe = map + nwords * 4
+    uint32 eo = wr_off
+    unsafe { *(mpe as uint32) = eo }
+    out_len = wr_off
+
+    // --- Remap EVERY structure that recorded a code offset during this
+    // --- function. (Function START offsets need no remap: fn_register
+    // --- ran before emission and compression never moves `start`.)
+
+    // 1. Block offsets (u64 entries) — branch fixup targets resolve
+    //    through these in step 9.
+    uint64 bi = 0
+    while bi < ir_bb_count {
+        uint64 bop = ir_block_offsets + bi * 8
+        uint64 bo = 0
+        unsafe { *(bop as uint64) -> bo }
+        uint64 nb = rv_c_remap(map, start, nwords, bo)
+        unsafe { *(bop as uint64) = nb }
+        bi = bi + 1
+    }
+    // 2. Branch fixup patch sites (u32 at +0 of each 8-byte entry).
+    uint64 fi = 0
+    while fi < ir_br_fixup_count {
+        uint64 fp = ir_br_fixups + fi * 8
+        uint32 po = 0
+        unsafe { *(fp as uint32) -> po }
+        uint64 wpo = po
+        uint32 np = rv_c_remap(map, start, nwords, wpo)
+        unsafe { *(fp as uint32) = np }
+        fi = fi + 1
+    }
+    // 3. Return fixup patch sites (u32 entries) — patched to the
+    //    epilogue, whose offset is taken from post-compression out_len.
+    uint64 ri = 0
+    while ri < ir_ret_fixup_count {
+        uint64 rfp = ir_ret_fixups + ri * 4
+        uint32 rpo = 0
+        unsafe { *(rfp as uint32) -> rpo }
+        uint64 wrp = rpo
+        uint32 nr = rv_c_remap(map, start, nwords, wrp)
+        unsafe { *(rfp as uint32) = nr }
+        ri = ri + 1
+    }
+    // 4. Call fixup sites this function appended to the SHARED
+    //    fixup_table (auipc offsets; resolve_fixups_riscv patches the
+    //    auipc at site and the jalr at site+4 — both stay 4-byte and
+    //    adjacent because 0x17/0x67 are never compressed).
+    uint64 ci = fix_start
+    while ci < fixup_count {
+        uint64 fentry = fixup_table + ci * 8
+        uint32 co = 0
+        unsafe { *(fentry as uint32) -> co }
+        uint64 wco = co
+        uint32 nc = rv_c_remap(map, start, nwords, wco)
+        unsafe { *(fentry as uint32) = nc }
+        ci = ci + 1
+    }
+    // 5. DWARF line-table entries recorded during this function's body
+    //    (-g only; the count doesn't move when debug_info_mode == 0).
+    //    The fn-entry record predates line_start and sits at `start`.
+    uint64 li = line_start
+    while li < line_table_count {
+        uint64 entry = line_table + li * 16
+        uint32 lo = 0
+        unsafe { *(entry as uint32) -> lo }
+        uint64 wlo = lo
+        uint32 nl = rv_c_remap(map, start, nwords, wlo)
+        unsafe { *(entry as uint32) = nl }
+        li = li + 1
+    }
+    dealloc(map)
+}
+
+// ---------------------------------------------------------------------------
 // Per-instruction emitter
 // ---------------------------------------------------------------------------
 
@@ -837,6 +1123,14 @@ fn ir_riscv_gen(uint64 fn_node) {
     uint32 ann_flags = ast_data4(fn_node)
     uint64 is_naked = ann_flags & 2
 
+    // Watermarks for the C-extension relayout (rv_compress_function,
+    // called between steps 8 and 9): the function's first code byte and
+    // how many call-fixup / line-table entries existed before this
+    // function, so the remap touches exactly the offsets recorded here.
+    uint64 fn_code_start = out_len
+    uint64 fn_fixup_start = fixup_count
+    uint64 fn_line_start = line_table_count
+
     // 1. Lower AST to IR
     ir_lower_function(fn_node)
 
@@ -1016,6 +1310,14 @@ fn ir_riscv_gen(uint64 fn_node) {
 
         bi = bi + 1
     }
+
+    // 8a. Compressed-extension relayout: shrink eligible words to c.*
+    //     forms and remap every recorded offset (block offsets, branch/
+    //     ret/call fixup sites, line table) to the compacted layout.
+    //     MUST run before steps 9-10 so displacements are computed once,
+    //     on the final offsets — control flow stays 4-byte, so no
+    //     relaxation iteration exists.
+    rv_compress_function(fn_code_start, fn_fixup_start, fn_line_start)
 
     // 9. Patch branch fixups. Bit 31 of the recorded target field selects
     //    the patch kind (mirror of arm64's CBNZ bit, ir_aarch64.kr:2721):
