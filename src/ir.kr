@@ -170,6 +170,20 @@ static uint64 IR_MUL_IMM = 138      // dest = src1 * imm (signed i32)
 // matmul / sort hot loops that pun on byte-offset address math.
 static uint64 IR_LEA_BIS = 139      // dest = src1 + src2 * imm  (imm ∈ {1,2,4,8})
 
+// RISC-V immediate-fused logical/shift ops (riscv32 only, target_arch==2).
+// Same shape as IR_ADD_IMM/IR_SUB_IMM: src2 is unused (0), imm holds the
+// constant. Const-fold rewrites the reg-reg form when src2 is a known
+// constant that fits the RV32 I-type: sign-extended imm12 (−2048..2047)
+// for and/or/xor, 5-bit shamt (0..31) for the shifts. The riscv backend
+// emits a single andi/ori/xori/slli/srli/srai instead of li+R-type.
+// x86/arm64 never see these opcodes (fusion is arch-gated).
+static uint64 IR_AND_IMM = 140      // dest = src1 & imm (imm12)
+static uint64 IR_OR_IMM = 141       // dest = src1 | imm (imm12)
+static uint64 IR_XOR_IMM = 142      // dest = src1 ^ imm (imm12)
+static uint64 IR_SHL_IMM = 143      // dest = src1 << imm (shamt 0..31)
+static uint64 IR_SHR_IMM = 144      // dest = src1 >> imm logical (shamt 0..31)
+static uint64 IR_SAR_IMM = 145      // dest = src1 >> imm arithmetic (shamt 0..31)
+
 // ---------------------------------------------------------------------------
 // Instruction arena
 // ---------------------------------------------------------------------------
@@ -4917,7 +4931,7 @@ fn ir_compute_liveness() {
                 uint32 s2_32 = 0
                 unsafe { *(s2p as uint32) -> s2_32 }
                 uint64 use2 = s2_32
-                if use2 < ir_vreg_next && op != 1 && op != 12 && op != 13 && op != 30 && op != 42 && op != 61 && op != 135 && op != 136 && op != 138 {
+                if use2 < ir_vreg_next && op != 1 && op != 12 && op != 13 && op != 30 && op != 42 && op != 61 && op != 135 && op != 136 && op != 138 && (op < 140 || op > 145) {
                     uint64 uw = use2 / 64
                     uint64 ub = use2 & 63
                     uint64 up = tmp + uw * 8
@@ -4991,7 +5005,7 @@ fn ir_compute_use_count() {
             }
         }
         uint64 s2 = ir_insn_src2(i)
-        if s2 != 0 && s2 < ir_vreg_next && s2 < ir_use_count_cap && op != 1 && op != 12 && op != 13 && op != 30 && op != 42 && op != 61 && op != 135 && op != 136 && op != 138 {
+        if s2 != 0 && s2 < ir_vreg_next && s2 < ir_use_count_cap && op != 1 && op != 12 && op != 13 && op != 30 && op != 42 && op != 61 && op != 135 && op != 136 && op != 138 && (op < 140 || op > 145) {
             uint64 p = ir_use_count_buf + s2
             uint8 c = 0
             unsafe { *(p as uint8) -> c }
@@ -5336,7 +5350,7 @@ fn ir_graph_color() {
                     unsafe { *(up as uint64) = uv }
                 }
                 uint64 u2 = ir_insn_src2(ii)
-                if u2 > 0 && u2 < vcount && op != 1 && op != 12 && op != 13 && op != 30 && op != 42 && op != 61 && op != 135 && op != 136 && op != 138 {
+                if u2 > 0 && u2 < vcount && op != 1 && op != 12 && op != 13 && op != 30 && op != 42 && op != 61 && op != 135 && op != 136 && op != 138 && (op < 140 || op > 145) {
                     uint64 uw = u2 / 64
                     uint64 ub = u2 & 63
                     uint64 up = tmp + uw * 8
@@ -10095,16 +10109,19 @@ fn ir_opt_const_fold() {
         }
 
         // LEA fusion: ADD/SUB with a constant src2 → IR_ADD_IMM/IR_SUB_IMM.
-        // x86-only — ARM64 already lowers small-imm arithmetic efficiently
-        // via emit_a64_add (reg-reg) after the IR_CONST loads into a reg,
-        // and `add Xd, Xn, #imm` doesn't shorten the same way LEA does on
-        // x86. The constant must fit in signed 32-bit because LEA's
+        // x86 and riscv32 — NOT arm64: ARM64 already lowers small-imm
+        // arithmetic efficiently via emit_a64_add (reg-reg) after the
+        // IR_CONST loads into a reg, and `add Xd, Xn, #imm` doesn't shorten
+        // the same way LEA does on x86. On riscv32 the win is real again:
+        // `addi rd,rs,imm` absorbs the constant (the backend falls back to
+        // li t6 + R-type when it exceeds imm12), saving the li and a
+        // register. The constant must fit in signed 32-bit because LEA's
         // displacement is sign-extended from 32 bits. v2 is uint64; check
         // both representations (positive ≤ 0x7FFFFFFF or negative ≥
         // 0xFFFFFFFF80000000). Skip v2==0 since `x ± 0` should be a copy,
         // and our LEA emitter assumes disp != 0 (to avoid the
         // RIP-relative encoding collision when src is rbp/r13).
-        if target_arch == 0 && (op == 2 || op == 3) && s2_known != 0 && v2 != 0 {
+        if (target_arch == 0 || target_arch == 2) && (op == 2 || op == 3) && s2_known != 0 && v2 != 0 {
             uint64 fits = 0
             if v2 <= 0x7FFFFFFF { fits = 1 }
             if v2 >= 0xFFFFFFFF80000000 { fits = 1 }
@@ -10245,6 +10262,44 @@ fn ir_opt_const_fold() {
             }
         }
 
+        // RISC-V immediate fusion (riscv32 only): fold a known-constant
+        // src2 into the I-type immediate field. Placed AFTER the identity
+        // elisions above so v2==0 / v2==all-ones cases become COPY/CONST
+        // first. AND/OR/XOR fuse only when v2 fits the sign-extended
+        // imm12 of andi/ori/xori (−2048..2047, checked by re-biasing the
+        // two's-complement uint64 into [0, 0x1000)); shifts fuse for
+        // shamt 0..31 (rv32 slli/srli/srai take a 5-bit shamt; v2 ≥ 32
+        // stays reg-reg so sll/srl/sra's hardware masking decides).
+        // ADD/SUB fusion is handled by the shared IR_ADD_IMM/IR_SUB_IMM
+        // block above (gated for arch 0 and 2).
+        if target_arch == 2 && s2_known != 0 {
+            if op == 7 || op == 8 || op == 9 {
+                uint64 rv_biased = v2 + 0x800
+                if rv_biased < 0x1000 {
+                    uint64 rv_lop = 140              // IR_AND_IMM
+                    if op == 8 { rv_lop = 141 }      // IR_OR_IMM
+                    if op == 9 { rv_lop = 142 }      // IR_XOR_IMM
+                    ir_insn_set_opcode(ii, rv_lop)
+                    ir_insn_set_src2(ii, 0)
+                    ir_insn_set_imm(ii, v2)
+                    ii = ii + 1
+                    continue
+                }
+            }
+            if op == 10 || op == 11 || op == 134 {
+                if v2 < 32 {
+                    uint64 rv_sop = 143              // IR_SHL_IMM
+                    if op == 11 { rv_sop = 144 }     // IR_SHR_IMM
+                    if op == 134 { rv_sop = 145 }    // IR_SAR_IMM
+                    ir_insn_set_opcode(ii, rv_sop)
+                    ir_insn_set_src2(ii, 0)
+                    ir_insn_set_imm(ii, v2)
+                    ii = ii + 1
+                    continue
+                }
+            }
+        }
+
         // Propagate w32-clean to dest based on the surviving op. Only
         // operations that provably keep the result ≤ 0xFFFFFFFF mark
         // their dest. Conservative defaults (ADD/SUB/MUL/SHL) leave the
@@ -10381,8 +10436,9 @@ fn ir_opt_dce() {
                 ir_opt_dce_mark(s1, 0)
                 // src2 is a vreg for all ops EXCEPT the ones below.
                 // Add IR_ADD_IMM(135) / IR_SUB_IMM(136) — they encode the
-                // displacement in imm and don't use src2.
-                if op != 1 && op != 12 && op != 13 && op != 30 && op != 42 && op != 61 && op != 135 && op != 136 && op != 138 {
+                // displacement in imm and don't use src2. Same for the
+                // riscv-fused 140-145 (AND/OR/XOR/SHL/SHR/SAR _IMM).
+                if op != 1 && op != 12 && op != 13 && op != 30 && op != 42 && op != 61 && op != 135 && op != 136 && op != 138 && (op < 140 || op > 145) {
                     ir_opt_dce_mark(s2, 0)
                 }
                 // imm-as-vreg for MEMCPY, MEMSET, RET3, ATOMIC_CAS, FFMA

@@ -235,6 +235,17 @@ fn rv_li(uint64 rd, uint64 imm) {
     rv_i(imm & 0xFFF, rd, 0, rd, 0x13)           // addi rd, rd, %lo(imm)
 }
 
+// Does a two's-complement uint64 value fit the I-type's sign-extended
+// imm12 (−2048..2047)? Re-bias into [0, 0x1000): negative values wrap
+// (e.g. −7 = 0xFFFF...FFF9 + 0x800 = 0x7F9 < 0x1000 → fits; −2049 and
+// +2048 both land on 0x1000 → rejected). This is THE immediate-vs-
+// register decision point Tasks 1.4-1.6 reuse for lw/sw offsets etc.
+fn rv_fits_imm12(uint64 imm) -> uint64 {
+    uint64 biased = imm + 0x800
+    if biased < 0x1000 { return 1 }
+    return 0
+}
+
 // jal displacement must fit signed 21 bits (±1 MiB), even. disp arrives
 // as a two's-complement uint64 (negative = huge), so re-bias into
 // [0, 0x200000) to range-check.
@@ -295,6 +306,153 @@ fn ir_emit_riscv_insn(uint64 ii) {
         if d == 0xFFFFFFFF { d = RV_T5 }
         rv_li(d, imm)
         if dst_r == 0xFFFFFFFF { rv_store_spill(RV_T5, dest_v) }
+        return
+    }
+
+    // ----- R-type ALU group: IR_ADD(2) IR_SUB(3) IR_AND(7) IR_OR(8)
+    // ----- IR_XOR(9) IR_SHL(10) IR_SHR(11) IR_SAR(134), all reg-reg.
+    // Mirrors the arm64 handlers (ir_aarch64.kr:409-620): resolve src1
+    // into t5 / src2 into t6 when spilled, dest falls back to t5 + spill
+    // store. In the IR these ops NEVER carry an immediate operand — a
+    // constant src2 arrives either as a separate IR_CONST def (reg-reg
+    // here, exactly like arm64) or already fused by ir_optimize into the
+    // *_IMM opcodes handled below. funct3/funct7 per the RV32I table:
+    // add(0,0) sub(0,0x20) sll(1) xor(4) srl(5,0) sra(5,0x20) or(6) and(7).
+    if op == 2 || op == 3 || op == 7 || op == 8 || op == 9 || op == 10 || op == 11 || op == 134 {
+        uint64 a_reg = rv_resolve_src(s1_v, RV_T5)
+        uint64 b_reg = rv_resolve_src(s2_v, RV_T6)
+        uint64 d = dst_r
+        if d == 0xFFFFFFFF { d = RV_T5 }
+        uint64 f3 = 0
+        uint64 f7 = 0
+        if op == 3 { f7 = 0x20 }                  // sub
+        if op == 7 { f3 = 7 }                     // and
+        if op == 8 { f3 = 6 }                     // or
+        if op == 9 { f3 = 4 }                     // xor
+        if op == 10 { f3 = 1 }                    // sll
+        if op == 11 { f3 = 5 }                    // srl
+        if op == 134 {
+            f3 = 5                                // sra
+            f7 = 0x20
+        }
+        rv_r(f7, b_reg, a_reg, f3, d, 0x33)
+        if dst_r == 0xFFFFFFFF { rv_store_spill(RV_T5, dest_v) }
+        return
+    }
+
+    // ----- IR_ADD_IMM (135) / IR_SUB_IMM (136): dst = src1 ± imm -----
+    // Fused by ir_optimize when src2 was a known constant (src2 field is
+    // 0; the constant lives in imm — same contract as the x86 LEA path,
+    // ir.kr:6453). There is no `subi` in RV32I: SUB_IMM negates and uses
+    // addi. An immediate outside −2048..2047 (or a SUB_IMM of −2048,
+    // whose negation +2048 doesn't fit) is materialized into t5 with
+    // rv_li and emitted as the R-type — never truncated. The li masks to
+    // 32 bits: on rv32 the 64-bit two's-complement imm and its 32-bit
+    // pattern are the same value.
+    if op == 135 || op == 136 {
+        uint64 a_reg = rv_resolve_src(s1_v, RV_T6)
+        uint64 d = dst_r
+        if d == 0xFFFFFFFF { d = RV_T5 }
+        uint64 av = imm
+        if op == 136 { av = 0 - imm }
+        if rv_fits_imm12(av) != 0 {
+            rv_i(av, a_reg, 0, d, 0x13)           // addi d, a, ±imm
+        } else {
+            rv_li(RV_T5, imm & 0xFFFFFFFF)
+            uint64 f7 = 0
+            if op == 136 { f7 = 0x20 }            // sub
+            rv_r(f7, RV_T5, a_reg, 0, d, 0x33)    // add/sub d, a, t5
+        }
+        if dst_r == 0xFFFFFFFF { rv_store_spill(RV_T5, dest_v) }
+        return
+    }
+
+    // ----- IR_AND_IMM (140) / IR_OR_IMM (141) / IR_XOR_IMM (142) -----
+    // The riscv fusion only creates these when imm fits the sign-extended
+    // imm12 (andi/ori/xori sign-extend, matching the 64-bit IR value's
+    // 32-bit truncation on rv32). Defensive fallback anyway: materialize
+    // into t5 + R-type rather than truncate.
+    if op == 140 || op == 141 || op == 142 {
+        uint64 a_reg = rv_resolve_src(s1_v, RV_T6)
+        uint64 d = dst_r
+        if d == 0xFFFFFFFF { d = RV_T5 }
+        uint64 f3 = 7                             // andi
+        if op == 141 { f3 = 6 }                   // ori
+        if op == 142 { f3 = 4 }                   // xori
+        if rv_fits_imm12(imm) != 0 {
+            rv_i(imm, a_reg, f3, d, 0x13)
+        } else {
+            rv_li(RV_T5, imm & 0xFFFFFFFF)
+            rv_r(0, RV_T5, a_reg, f3, d, 0x33)    // and/or/xor d, a, t5
+        }
+        if dst_r == 0xFFFFFFFF { rv_store_spill(RV_T5, dest_v) }
+        return
+    }
+
+    // ----- IR_SHL_IMM (143) / IR_SHR_IMM (144) / IR_SAR_IMM (145) -----
+    // Shift-immediate I-type: shamt in imm[4:0]; imm[11:5] selects the
+    // variant — 0 for slli/srli, 0x20 for srai. In the 12-bit imm FIELD
+    // that 0x20 lands at bit 10: field = 0x400 | shamt (rv_i masks the
+    // field to 12 bits, so the 0x400 survives into insn[30]).
+    if op == 143 || op == 144 || op == 145 {
+        uint64 a_reg = rv_resolve_src(s1_v, RV_T5)
+        uint64 d = dst_r
+        if d == 0xFFFFFFFF { d = RV_T5 }
+        uint64 shamt = imm & 0x1F
+        uint64 f3 = 1                             // slli
+        uint64 ifield = shamt
+        if op == 144 { f3 = 5 }                   // srli
+        if op == 145 {
+            f3 = 5                                // srai
+            ifield = 0x400 | shamt
+        }
+        rv_i(ifield, a_reg, f3, d, 0x13)
+        if dst_r == 0xFFFFFFFF { rv_store_spill(RV_T5, dest_v) }
+        return
+    }
+
+    // ----- IR_COPY (61): dst = src1, or param/phys-reg init -----
+    // Mirror of ir_aarch64.kr:742. src1 != 0: plain mv. src1 == 0 selects
+    // on imm: < 8 = incoming param in a0..a7 (RV32 psABI, x10+i, same
+    // slot discipline as AAPCS64's x0-x7); >= 100 = ASM-block output read
+    // from physical register imm-100; 8..99 = overflow param loaded from
+    // the CALLER's frame at [SP + frame_size + (imm-8)*4] (4-byte slots
+    // on rv32 — the caller-side push half lands with IR_CALL/IR_ARG).
+    if op == 61 {
+        if s1_v != 0 {
+            uint64 src_reg = rv_resolve_src(s1_v, RV_T5)
+            if dst_r != 0xFFFFFFFF {
+                rv_mv(dst_r, src_reg)
+            } else {
+                if src_reg != RV_T5 { rv_mv(RV_T5, src_reg) }
+                rv_store_spill(RV_T5, dest_v)
+            }
+        } else if imm < 8 {
+            uint64 pr = RV_A0 + imm
+            if dst_r != 0xFFFFFFFF {
+                rv_mv(dst_r, pr)
+            } else {
+                rv_mv(RV_T5, pr)
+                rv_store_spill(RV_T5, dest_v)
+            }
+        } else if imm >= 100 {
+            uint64 phys_src = imm - 100
+            if dst_r != 0xFFFFFFFF {
+                rv_mv(dst_r, phys_src)
+            } else {
+                rv_mv(RV_T5, phys_src)
+                rv_store_spill(RV_T5, dest_v)
+            }
+        } else {
+            uint64 overflow_off = ir_frame_size + (imm - 8) * 4
+            if overflow_off > 2047 {
+                rv_err("error: riscv32: overflow-param offset exceeds imm12 range\n")
+            }
+            uint64 d = dst_r
+            if d == 0xFFFFFFFF { d = RV_T5 }
+            rv_i(overflow_off, RV_SP, 2, d, 0x03)     // lw d, off(sp)
+            if dst_r == 0xFFFFFFFF { rv_store_spill(RV_T5, dest_v) }
+        }
         return
     }
 

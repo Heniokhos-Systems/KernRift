@@ -265,21 +265,30 @@ ARM64-meaningful; on x86 they lower to the nearest equivalent or a no-op.
 |---|--------|-----------|
 | 131 | `IR_ARR_CHECK` | under `--debug`, trap (`exit(1)`) if `src1` (index) `>= imm` (element count); emitted for compile-time-sized array indexing |
 
-## Signed & strength-reduced arithmetic (132–139)
+## Signed & strength-reduced arithmetic (132–145)
 
 | # | Opcode | Semantics |
 |---|--------|-----------|
 | 132 | `IR_SDIV` | `dest = src1 / src2` signed (`cqo`+`idiv` on x86, `sdiv` on a64) |
 | 133 | `IR_SMOD` | `dest = src1 % src2` signed (`cqo`+`idiv` rdx on x86, `sdiv`+`msub` on a64) |
 | 134 | `IR_SAR` | `dest = src1 >> src2` arithmetic (sign-extending) shift |
-| 135 | `IR_ADD_IMM` | `dest = src1 + imm` (signed i32 immediate) |
-| 136 | `IR_SUB_IMM` | `dest = src1 - imm` |
+| 135 | `IR_ADD_IMM` | `dest = src1 + imm` (signed i32 immediate; fused on x86 and riscv32) |
+| 136 | `IR_SUB_IMM` | `dest = src1 - imm` (fused on x86 and riscv32) |
 | 137 | `IR_ROR` | rotate-right `src1` by `src2` |
 | 138 | `IR_MUL_IMM` | `dest = src1 * imm` |
 | 139 | `IR_LEA_BIS` | `dest = src1 + src2 * imm`, `imm ∈ {1,2,4,8}` (x86 `lea` base+index*scale) |
+| 140 | `IR_AND_IMM` | `dest = src1 & imm` (riscv32-only fusion; imm fits sign-extended imm12) |
+| 141 | `IR_OR_IMM` | `dest = src1 \| imm` (riscv32-only, imm12) |
+| 142 | `IR_XOR_IMM` | `dest = src1 ^ imm` (riscv32-only, imm12) |
+| 143 | `IR_SHL_IMM` | `dest = src1 << imm` (riscv32-only, shamt 0–31) |
+| 144 | `IR_SHR_IMM` | `dest = src1 >> imm` logical (riscv32-only, shamt 0–31) |
+| 145 | `IR_SAR_IMM` | `dest = src1 >> imm` arithmetic (riscv32-only, shamt 0–31) |
 
 The signed compare opcodes are 120–123 (see above); bare `IR_DIV`/`IR_MOD`/
-`IR_SHR` (5/6/11) are the unsigned forms.
+`IR_SHR` (5/6/11) are the unsigned forms. Like 135/136/138, opcodes 140–145
+leave `src2` unused (0) and carry the constant in `imm`; they are produced
+only by the const-fold fusion pass (arch-gated) and lower to RV32I I-type
+`andi/ori/xori/slli/srli/srai` in `src/ir_riscv.kr`.
 
 ## Process / system (113–115, 119)
 
