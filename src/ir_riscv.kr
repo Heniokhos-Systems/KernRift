@@ -1302,6 +1302,152 @@ fn ir_emit_riscv_insn(uint64 ii) {
         return
     }
 
+    // ----- IR_STRLEN (73): byte scan loop -----
+    // Semantics (ir.kr:76/171): dest = length, src1 = NUL-terminated string
+    // pointer. Mirrors ir_aarch64.kr:1034-1056: a0 = cur ptr, a1 = start ptr
+    // (both from src1), loop scans a0 forward until a NUL byte, then
+    // dest = a0 - a1. a0-a2 are free scratch (never colour-mapped, audit
+    // §4). Branch targets are resolved by emit-placeholder-then-patch_u32
+    // (not hand-counted instruction offsets) so the displacements are
+    // always exactly right regardless of how many words rv_li/rv_mv end up
+    // emitting — the ONLY thing that must hold is that every word between
+    // loop_start and loop_end stays 4 bytes through compression, which is
+    // exactly what rv_mark_noc guarantees (audit §4 CRITICAL trap).
+    if op == 73 {
+        uint64 sl_str = rv_resolve_src(s1_v, RV_T5)
+        rv_mv(10, sl_str)              // a0 = str (cur)
+        rv_mv(11, sl_str)              // a1 = str (start)
+        uint64 loop_start = out_len
+        // L:
+        rv_i(0, 10, 4, 12, 0x03)       // lbu a2, 0(a0)
+        uint64 beqz_site = out_len
+        rv_b(0, RV_ZERO, 12, 0, 0x63)  // beqz a2, END (placeholder)
+        rv_i(1, 10, 0, 10, 0x13)       // addi a0, a0, 1
+        uint64 j_site = out_len
+        uint64 back_disp = loop_start - j_site
+        rv_check_j21(back_disp)
+        rv_j(back_disp, RV_ZERO, 0x6F) // j L
+        uint64 loop_end = out_len      // END target
+        uint64 fwd_disp = loop_end - beqz_site
+        patch_u32(beqz_site, rv_b_checked(fwd_disp, RV_ZERO, 12, 0, 0x63))
+        rv_mark_noc(loop_start, loop_end)
+        // END: dest = a0 - a1
+        uint64 d = dst_r
+        if d == 0xFFFFFFFF { d = RV_T5 }
+        rv_r(0x20, 11, 10, 0, d, 0x33) // sub d, a0, a1
+        if dst_r == 0xFFFFFFFF { rv_store_spill(RV_T5, dest_v) }
+        return
+    }
+
+    // ----- IR_STR_EQ (75): byte-by-byte string compare, no flags -----
+    // Semantics (ir.kr:78/179): dest = 1 if equal else 0, src1/src2 =
+    // pointers. Mirrors ir_aarch64.kr:1118-1164 but riscv has no condition
+    // flags, so the CMP+B.NE pair becomes a direct `bne`. Loop body:
+    // lbu both bytes, bne -> NE (mismatch), beqz -> EQ (both hit NUL
+    // together = equal), else advance both pointers and loop. a0-a3 free
+    // scratch. The non-compressible region MUST cover everything from L
+    // through the final `li d,1` (not just the back-edge loop) — the bne's
+    // target (NE) and beqz's target (EQ) both live in the NE/EQ resolution
+    // tail, and DONE's `j` target sits right after it; if any instruction
+    // in that tail were allowed to compress, the baked branch immediates
+    // would silently desync from the actual layout (audit §4 CRITICAL
+    // trap generalizes past the "loop" to any baked-displacement span).
+    if op == 75 {
+        uint64 se_a = rv_resolve_src(s1_v, RV_T5)
+        uint64 se_b = rv_resolve_src(s2_v, RV_T6)
+        rv_mv(10, se_a)                // a0 = a
+        rv_mv(11, se_b)                // a1 = b
+        uint64 loop_start = out_len
+        // L:
+        rv_i(0, 10, 4, 12, 0x03)       // lbu a2, 0(a0)
+        rv_i(0, 11, 4, 13, 0x03)       // lbu a3, 0(a1)
+        uint64 bne_site = out_len
+        rv_b(0, 13, 12, 1, 0x63)       // bne a2, a3, NE (placeholder)
+        uint64 beqz_site = out_len
+        rv_b(0, RV_ZERO, 12, 0, 0x63)  // beqz a2, EQ (placeholder)
+        rv_i(1, 10, 0, 10, 0x13)       // addi a0, a0, 1
+        rv_i(1, 11, 0, 11, 0x13)       // addi a1, a1, 1
+        uint64 j_site = out_len
+        uint64 back_disp = loop_start - j_site
+        rv_check_j21(back_disp)
+        rv_j(back_disp, RV_ZERO, 0x6F) // j L
+        uint64 ne_off = out_len
+        uint64 bne_disp = ne_off - bne_site
+        patch_u32(bne_site, rv_b_checked(bne_disp, 13, 12, 1, 0x63))
+        // NE:
+        uint64 d = dst_r
+        if d == 0xFFFFFFFF { d = RV_T5 }
+        rv_li(d, 0)                    // d = 0 (not equal)
+        uint64 jd_site = out_len
+        rv_j(0, RV_ZERO, 0x6F)         // j DONE (placeholder)
+        uint64 eq_off = out_len
+        uint64 beqz_disp = eq_off - beqz_site
+        patch_u32(beqz_site, rv_b_checked(beqz_disp, RV_ZERO, 12, 0, 0x63))
+        // EQ:
+        rv_li(d, 1)                    // d = 1 (equal)
+        uint64 done_off = out_len
+        uint64 jd_disp = done_off - jd_site
+        rv_check_j21(jd_disp)
+        patch_u32(jd_site, rv_j_word(jd_disp, RV_ZERO, 0x6F))
+        // DONE:
+        rv_mark_noc(loop_start, done_off)
+        if dst_r == 0xFFFFFFFF { rv_store_spill(d, dest_v) }
+        return
+    }
+
+    // ----- IR_MEMCMP (88): fixed-length byte compare -----
+    // Semantics (ir.kr:91/8095): dest = (memcmp(src1, src2, imm) == 0) ? 1
+    // : 0. src1/src2 = pointers, imm = a COMPILE-TIME byte count (not a
+    // vreg — struct_total_size() folded in at the one emit site, ir.kr:
+    // 1548). Mirrors ir_aarch64.kr:1344-1384: assume-equal result
+    // pre-set, loop counts down a byte counter, any mismatch jumps to a
+    // tail that clears the result; loop-exhaustion (len==0) falls straight
+    // through to DONE, leaving the assumed-equal result untouched. No
+    // post-increment addressing on rv32 (unlike arm64's LDRB ...,#1), so
+    // the pointer bumps are separate addi's after both loads. a0-a4 free
+    // scratch (a4=x14, still outside the colour-mapped set). Same
+    // whole-block noc requirement as STR_EQ: beqz's target (DONE) sits
+    // past the mismatch tail's `li d,0`, so the region must span from the
+    // loop's first instruction through that final li, not just the
+    // back-edge loop.
+    if op == 88 {
+        uint64 mc_a = rv_resolve_src(s1_v, RV_T5)
+        uint64 mc_b = rv_resolve_src(s2_v, RV_T6)
+        rv_mv(10, mc_a)                // a0 = ptr a
+        rv_mv(11, mc_b)                // a1 = ptr b
+        rv_li(12, imm)                 // a2 = remaining byte count
+        uint64 d = dst_r
+        if d == 0xFFFFFFFF { d = RV_T5 }
+        rv_li(d, 1)                    // assume equal
+        uint64 loop_start = out_len
+        // L:
+        uint64 beqz_site = out_len
+        rv_b(0, RV_ZERO, 12, 0, 0x63)  // beqz a2, DONE (placeholder; len==0)
+        rv_i(0, 10, 4, 13, 0x03)       // lbu a3, 0(a0)
+        rv_i(0, 11, 4, 14, 0x03)       // lbu a4, 0(a1)
+        uint64 bne_site = out_len
+        rv_b(0, 14, 13, 1, 0x63)       // bne a3, a4, NE (placeholder)
+        rv_i(1, 10, 0, 10, 0x13)       // addi a0, a0, 1
+        rv_i(1, 11, 0, 11, 0x13)       // addi a1, a1, 1
+        rv_i(0 - 1, 12, 0, 12, 0x13)   // addi a2, a2, -1
+        uint64 j_site = out_len
+        uint64 back_disp = loop_start - j_site
+        rv_check_j21(back_disp)
+        rv_j(back_disp, RV_ZERO, 0x6F) // j L
+        uint64 ne_off = out_len
+        uint64 bne_disp = ne_off - bne_site
+        patch_u32(bne_site, rv_b_checked(bne_disp, 14, 13, 1, 0x63))
+        // NE:
+        rv_li(d, 0)                    // d = 0 (mismatch found)
+        uint64 done_off = out_len
+        uint64 beqz_disp = done_off - beqz_site
+        patch_u32(beqz_site, rv_b_checked(beqz_disp, RV_ZERO, 12, 0, 0x63))
+        // DONE:
+        rv_mark_noc(loop_start, done_off)
+        if dst_r == 0xFFFFFFFF { rv_store_spill(d, dest_v) }
+        return
+    }
+
     // Everything else lands in Stage 2+ (mul/div, syscalls, ...).
     rv_nyi_op(op)
 }

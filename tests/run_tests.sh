@@ -4592,6 +4592,84 @@ else
     echo "  riscv_t2_static: SKIP (qemu-system-riscv32 or riscv64-linux-gnu-objdump not installed)"
 fi
 
+# --- RISC-V RV32 string/compare inline loops (feature-gap Task 3) ---
+# Compiles examples/riscv-featuregap/t3_strloops.kr, which exercises the two
+# hand-emitted byte loops IR_STRLEN (op 73, str_len("abc") -> 3) and
+# IR_STR_EQ (op 75, str_eq("ab","ab") -> 1) and prints both results as ASCII
+# digits. Both loops bake branch displacements directly between
+# instructions (no ir_br_fixups entry), so the C-compression pass could
+# silently desync them if any interior instruction were allowed to shrink
+# (audit §4 CRITICAL trap) -- rv_mark_noc protects each loop's full
+# baked-displacement span. Proves this two ways: (1) qemu prints the
+# arithmetically-correct "31", which a miscompiled displacement would not
+# produce, and (2) every lbu/beqz/bne inside the loops must still be a
+# full 8-hex-digit (4-byte) encoding in the disassembly -- a compressed
+# 4-digit (2-byte) form at any of those sites would mean the noc region
+# missed something. Same dev-only toolchain guard/SKIP discipline as the
+# tests above.
+#
+# IR_MEMCMP (op 88) is also implemented by this task but is not exercised
+# by a boot test here: its only IR emit site is struct `==`, which always
+# lowers through IR_ALLOC (op 70, NYI on riscv32 and incompatible with
+# --freestanding). It was validated separately (qemu + objdump, including
+# with real interior compression elsewhere in the function) via a
+# temporary, reverted stand-in for IR_ALLOC -- see t3_strloops.kr's header
+# comment and .superpowers/sdd/task-3-report.md.
+echo ""
+echo "--- riscv32 STRLEN/STR_EQ inline-loop boot test ---"
+if command -v qemu-system-riscv32 >/dev/null 2>&1 \
+   && command -v riscv64-linux-gnu-objdump >/dev/null 2>&1; then
+    TOTAL=$((TOTAL + 1))
+    RV_BIN="/tmp/krc_rv_strloops_$$.bin"
+    RV_OK=1
+    if ! $KRC --arch=riscv32 --freestanding "$DIR/../examples/riscv-featuregap/t3_strloops.kr" -o "$RV_BIN" >/dev/null 2>&1; then
+        echo "FAIL: riscv_t3_strloops (compilation failed)"
+        RV_OK=0
+    fi
+    if [ "$RV_OK" = 1 ]; then
+        RV_DIS=$(riscv64-linux-gnu-objdump -D -b binary -m riscv:rv32 "$RV_BIN" 2>/dev/null)
+        # 4x lbu (1 strlen + 2 str_eq body + 1 UART lsr poll), 2x beqz
+        # (strlen end + str_eq equal-check), 1x bne (str_eq mismatch check).
+        if [ "$(echo "$RV_DIS" | grep -cE '	lbu	')" -lt 4 ]; then
+            echo "FAIL: riscv_t3_strloops (expected >=4 lbu: strlen + str_eq x2 + uart poll)"
+            RV_OK=0
+        fi
+        if [ "$(echo "$RV_DIS" | grep -cE '	bne	')" -lt 1 ]; then
+            echo "FAIL: riscv_t3_strloops (expected >=1 bne: str_eq mismatch check)"
+            RV_OK=0
+        fi
+        # The correctness gate: every lbu/beqz/bne must be a full 4-byte
+        # (8 hex digit) encoding -- these are exactly the mnemonics that
+        # sit inside the two rv_mark_noc-protected loop regions (plus the
+        # UART poll's beqz, itself never inside a noc region but also
+        # never eligible for c.* since beqz/bne are branches, which never
+        # compress at all -- so this check is really about lbu, the one
+        # loop-interior mnemonic that COULD compress if noc failed to
+        # cover it).
+        BAD_COMPRESSED=$(echo "$RV_DIS" | awk -F'\t' '{gsub(/ /,"",$2)} $3=="lbu"||$3=="beqz"||$3=="bne" {if (length($2)!=8) print}')
+        if [ -n "$BAD_COMPRESSED" ]; then
+            echo "FAIL: riscv_t3_strloops (found a compressed lbu/beqz/bne -- noc region missed a loop instruction)"
+            echo "$BAD_COMPRESSED"
+            RV_OK=0
+        fi
+    fi
+    if [ "$RV_OK" = 1 ]; then
+        RV_OUT=$(timeout 5 qemu-system-riscv32 -machine virt -nographic -bios "$RV_BIN" 2>/dev/null)
+        if echo "$RV_OUT" | grep -q "31"; then
+            PASS=$((PASS + 1))
+            echo "  riscv_t3_strloops: PASS (qemu printed 31, loops stayed 4-byte)"
+        else
+            echo "FAIL: riscv_t3_strloops (qemu output did not contain '31')"
+            FAIL=$((FAIL + 1))
+        fi
+    else
+        FAIL=$((FAIL + 1))
+    fi
+    rm -f "$RV_BIN"
+else
+    echo "  riscv_t3_strloops: SKIP (qemu-system-riscv32 or riscv64-linux-gnu-objdump not installed)"
+fi
+
 # --- Summary ---
 echo ""
 echo "=== Results: $PASS/$TOTAL passed, $FAIL failed ==="

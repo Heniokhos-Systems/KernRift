@@ -1,0 +1,57 @@
+// RISC-V RV32IMC feature-gap Task 3: string/compare inline loops
+// (IR_STRLEN op 73, IR_STR_EQ op 75).
+//
+// Exercises the two hand-emitted byte loops that bake branch displacements
+// directly between instructions (no ir_br_fixups entry — self-contained,
+// which is exactly why they need C-compression protection). Each loop is
+// wrapped in a non-compressible region via rv_mark_noc so the C-extension
+// peephole pass (rv_compress_function) cannot shrink an interior
+// instruction and shift a baked displacement out from under its branch
+// (audit §4 CRITICAL trap; the fix landed in Task 1).
+//
+// str_len("abc") -> 3, str_eq("ab","ab") -> 1: printed as ASCII digits
+// over the virt NS16550A UART. Boots under:
+//   ./build/krc2 --arch=riscv32 --freestanding \
+//       examples/riscv-featuregap/t3_strloops.kr -o /tmp/t3.bin
+//   qemu-system-riscv32 -machine virt -nographic -bios /tmp/t3.bin
+// Expected output: 31
+//
+// IR_MEMCMP (op 88) is ALSO implemented in this task (ir_riscv.kr,
+// mirroring ir_aarch64.kr:1344-1384, same noc-wrapped-loop shape as
+// str_eq) but is deliberately NOT exercised by this boot test: the IR's
+// only MEMCMP emit site is the struct `==`/`!=` comparison (ir.kr:1548),
+// and every source-level path to a struct value (a local `Pt p` decl, or
+// passing a struct-typed identifier as a call argument) lowers through
+// IR_ALLOC (op 70) first — an mmap/VirtualAlloc-style syscall that is (a)
+// not implemented on riscv32 yet and (b) fundamentally incompatible with
+// --freestanding (no OS, no mmap syscall to lower to). This is a real
+// cross-op dependency, not a shortcut: IR_MEMCMP was validated end-to-end
+// under qemu (correct 1/0 results, loop bytes proven to survive
+// compression via objdump, including with real interior compression
+// elsewhere in the same function) using a temporary, throwaway
+// bump-allocator stand-in for IR_ALLOC that was reverted before this
+// commit — see .superpowers/sdd/task-3-report.md for the full transcript.
+// Wiring a real local-struct-capable riscv test into this suite needs
+// IR_ALLOC (or an IR_STACK_ADDR-style compile-time-sized fallback for
+// structs) implemented first, which is out of Task 3's declared scope
+// (STRLEN/STR_EQ/MEMCMP only).
+
+device Uart at 0x10000000 {
+    thr at 0x00 : u8
+    lsr at 0x05 : u8
+}
+
+fn putc(u8 c) {
+    while (Uart.lsr & 0x20) == 0 { }
+    Uart.thr = c
+}
+
+fn main() {
+    u32 n = str_len("abc")
+    putc(48 + n)
+
+    u32 e = str_eq("ab", "ab")
+    putc(48 + e)
+
+    loop { }
+}
