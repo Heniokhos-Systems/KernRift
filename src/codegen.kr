@@ -171,6 +171,18 @@ static uint64 target_arch = 0
 @export
 fn set_target_arch(uint64 v) { target_arch = v }
 
+// Bytes per pointer / machine word on the active target: 4 on riscv32
+// (target_arch == 2), 8 on x86_64/arm64. The parser's layout math
+// (struct-field offsets, array element stride, default access width)
+// calls this instead of hardcoding 8 so 32-bit targets lay out
+// correctly. Safe at parse time: main.kr calls set_target_arch before
+// every parse_module (single-arch and each compile_fat slice alike).
+@export
+fn target_word_size() -> uint64 {
+    if target_arch == 2 { return 4 }
+    return 8
+}
+
 @export
 fn set_emit_mode(uint64 v) { cg_emit_mode = v }
 

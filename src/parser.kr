@@ -379,7 +379,8 @@ fn parse_primary() -> uint64 {
         uint64 arg_tok = advance_tok()
         uint32 arg_kind = tok_kind_at(arg_tok)
         expect(11)
-        uint64 size = 8
+        // Default (unknown type): one machine word — 8, or 4 on riscv32.
+        uint64 size = target_word_size()
         if arg_kind == 80 || arg_kind == 84 || arg_kind == 98 || arg_kind == 99 { size = 1 }
         else if arg_kind == 81 || arg_kind == 85 { size = 2 }
         else if arg_kind == 82 || arg_kind == 86 { size = 4 }
@@ -1485,7 +1486,8 @@ fn parse_stmt() -> uint64 {
         expect(1)
         uint32 type_kind = cur_kind()
         advance_tok()
-        uint64 type_size = 8
+        // Default (unrecognized cast type): word-sized access — 8, or 4 on riscv32.
+        uint64 type_size = target_word_size()
         if type_kind == 80 || type_kind == 84 || type_kind == 98 || type_kind == 99 { type_size = 1 }
         if type_kind == 81 || type_kind == 85 { type_size = 2 }
         if type_kind == 82 || type_kind == 86 { type_size = 4 }
@@ -1542,7 +1544,8 @@ fn parse_stmt() -> uint64 {
         // Parse type keyword → determine size
         uint32 type_kind = cur_kind()
         advance_tok()
-        uint64 type_size = 8
+        // Default (unrecognized cast type): word-sized access — 8, or 4 on riscv32.
+        uint64 type_size = target_word_size()
         if type_kind == 80 || type_kind == 84 || type_kind == 98 || type_kind == 99 { type_size = 1 }
         if type_kind == 81 || type_kind == 85 { type_size = 2 }
         if type_kind == 82 || type_kind == 86 { type_size = 4 }
@@ -2247,7 +2250,8 @@ fn parse_module() -> uint64 {
                 // Compute element size from type keyword kind
                 uint32 stk = tok_kind_at(stype_tok)
                 uint64 wstk = stk
-                uint64 elem_sz = 8
+                // Default (non-integer element type): one machine word — 8, or 4 on riscv32.
+                uint64 elem_sz = target_word_size()
                 if wstk == 80 || wstk == 84 || wstk == 98 || wstk == 99 { elem_sz = 1 }
                 if wstk == 81 || wstk == 85 { elem_sz = 2 }
                 if wstk == 82 || wstk == 86 { elem_sz = 4 }
@@ -2403,7 +2407,8 @@ fn parse_module() -> uint64 {
                 uint64 field_name_tok = expect(1)
                 // Determine field size from type
                 uint32 ftk = tok_kind_at(field_type_tok)
-                uint64 fsize = 8
+                // Default (unrecognized field type): one machine word — 8, or 4 on riscv32.
+                uint64 fsize = target_word_size()
                 uint64 wftk = ftk
                 if wftk == 80 { fsize = 1 }
                 if wftk == 81 { fsize = 2 }
@@ -2484,7 +2489,8 @@ fn parse_module() -> uint64 {
             // Parse target type keyword — determine size
             uint32 target_kind = cur_kind()
             advance_tok()
-            uint64 tsize = 8
+            // Default (unrecognized alias target): one machine word — 8, or 4 on riscv32.
+            uint64 tsize = target_word_size()
             uint64 wtk = target_kind
             if wtk == 80 { tsize = 1 }
             if wtk == 81 { tsize = 2 }
