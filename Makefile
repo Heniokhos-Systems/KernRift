@@ -153,6 +153,9 @@ dist: build/krc2
 	@# Source distribution
 	cp build/krc.kr $(DIST_DIR)/krc-source.kr
 	@echo "  krc-source.kr"
+	@# License + attribution (Apache 2.0 §4a/§4d — travel with every copy)
+	cp LICENSE NOTICE $(DIST_DIR)/
+	@echo "  LICENSE + NOTICE"
 	@echo ""
 	@ls -la $(DIST_DIR)/
 	@echo ""

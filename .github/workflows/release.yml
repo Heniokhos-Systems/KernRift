@@ -90,9 +90,16 @@ jobs:
           cp kr-windows-x86_64.exe  _bundle_x64/kr.exe
           cp krc-windows-arm64.exe  _bundle_arm64/krc.exe
           cp kr-windows-arm64.exe   _bundle_arm64/kr.exe
-          (cd _bundle_x64   && zip -q ../krc-windows-x86_64.zip krc.exe kr.exe)
-          (cd _bundle_arm64 && zip -q ../krc-windows-arm64.zip  krc.exe kr.exe)
+          # Apache 2.0 §4(a)/§4(d): a copy of the License and the NOTICE
+          # attribution must travel with every redistributed copy.
+          cp ../LICENSE ../NOTICE _bundle_x64/
+          cp ../LICENSE ../NOTICE _bundle_arm64/
+          (cd _bundle_x64   && zip -q ../krc-windows-x86_64.zip krc.exe kr.exe LICENSE NOTICE)
+          (cd _bundle_arm64 && zip -q ../krc-windows-arm64.zip  krc.exe kr.exe LICENSE NOTICE)
           rm -rf _bundle_x64 _bundle_arm64
+          # Standalone copies so the bare single-file binary downloads are
+          # accompanied by the license and attribution too.
+          cp ../LICENSE ../NOTICE .
 
       - name: Verify binaries
         run: |
@@ -111,7 +118,7 @@ jobs:
                     kr-windows-x86_64.exe kr-windows-arm64.exe \
                     kr-macos-x86_64 kr-macos-arm64 \
                     kr-android-arm64 kr-android-x86_64 \
-                    krc.krbo krc-source.kr > SHA256SUMS
+                    krc.krbo krc-source.kr LICENSE NOTICE > SHA256SUMS
 
       - name: Upload release assets
         uses: softprops/action-gh-release@v3
@@ -137,6 +144,8 @@ jobs:
             dist/kr-android-x86_64
             dist/krc.krbo
             dist/krc-source.kr
+            dist/LICENSE
+            dist/NOTICE
             dist/SHA256SUMS
           generate_release_notes: true
 
