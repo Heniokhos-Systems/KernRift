@@ -1,0 +1,58 @@
+// RISC-V RV32IMC feature-gap Task 4: memory-block inline loops
+// (IR_MEMSET op 76, IR_MEMCPY op 72).
+//
+// Exercises the two hand-emitted byte loops that bake branch displacements
+// directly between instructions (no ir_br_fixups entry — self-contained,
+// same shape as Task 3's STRLEN/STR_EQ/MEMCMP), each wrapped in a
+// non-compressible region via rv_mark_noc so the C-extension peephole pass
+// (rv_compress_function) cannot shrink an interior instruction and shift a
+// baked displacement out from under its branch (audit §4 CRITICAL trap).
+//
+// Destinations are GLOBAL `static` byte buffers (Task 2's STATIC_ADDR /
+// STATIC array-decay-to-address path), deliberately NOT local arrays —
+// IR_STACK_ADDR (Task 6) is not implemented yet, so a local array decl
+// would abort with "IR op 32 not yet implemented". Using statics keeps
+// this test fully independent of Task 6.
+//
+// Also proves length==0 is handled correctly: both MEMSET and MEMCPY
+// test their count at the TOP of the loop (mirroring arm64's CBZ-before-
+// first-access shape), so a zero-length call must be a clean no-op —
+// never underflow the decrementing counter into a giant loop.
+//
+// Build:
+//   ./build/krc2 --arch=riscv32 --freestanding \
+//       examples/riscv-featuregap/t4_memblk.kr -o /tmp/t4.bin
+// Run:
+//   qemu-system-riscv32 -machine virt -nographic -bios /tmp/t4.bin
+// Expected output: AAZk
+
+device Uart at 0x10000000 {
+    thr at 0x00 : u8
+    lsr at 0x05 : u8
+}
+
+fn putc(u8 c) {
+    while (Uart.lsr & 0x20) == 0 { }
+    Uart.thr = c
+}
+
+static uint8[8] setbuf = [0, 0, 0, 0, 0, 0, 0, 0]
+static uint8[8] cpybuf = [0, 0, 0, 0, 0, 0, 0, 0]
+
+fn main() {
+    // MEMSET: fill the first 4 bytes of setbuf with 'A' (65).
+    memset(setbuf, 65, 4)
+    putc(setbuf[0])          // 'A'
+
+    // MEMSET with length 0: must be a true no-op (no underflow/hang) —
+    // setbuf[0] stays 'A', not overwritten with 'Z' (90).
+    memset(setbuf, 90, 0)
+    putc(setbuf[0])          // still 'A'
+
+    // MEMCPY: copy a 2-byte string literal into cpybuf.
+    memcpy(cpybuf, "Zk", 2)
+    putc(cpybuf[0])          // 'Z'
+    putc(cpybuf[1])          // 'k'
+
+    loop { }
+}

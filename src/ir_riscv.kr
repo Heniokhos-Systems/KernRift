@@ -1448,6 +1448,113 @@ fn ir_emit_riscv_insn(uint64 ii) {
         return
     }
 
+    // ----- IR_MEMCPY (72): byte copy loop -----
+    // Semantics (ir.kr:75, emit sites e.g. ir.kr:2167): dest = returned dst
+    // pointer, src1 = dst ptr, src2 = src ptr, imm = the COUNT VREG'S ID
+    // (not a literal — confirmed against both x86 (ir.kr:7334-7335) and
+    // arm64 (ir_aarch64.kr:991-1004) twins' identical comment/resolution:
+    // "len vreg in imm" / "Resolve len from imm (stored as vreg index)").
+    // Mirrors ir_aarch64.kr:992-1032: a0=dst(cur), a1=src(cur), a2=len,
+    // count-tested at the TOP of the loop (arm64's CBZ x2,done before the
+    // first LDRB) so a zero-length call falls straight through without
+    // underflowing the decrement — same shape MEMCMP already uses on this
+    // backend. a4 saves the original dst for the return value (a0 gets
+    // walked forward). a0-a4 are free scratch (never colour-mapped).
+    // Baked branch displacements (beqz forward to DONE, j back to L) make
+    // this span non-compressible exactly like STRLEN/STR_EQ/MEMCMP —
+    // rv_mark_noc(loop_start, loop_end) below (audit §4 CRITICAL trap).
+    if op == 72 {
+        uint64 mc_dst = rv_resolve_src(s1_v, RV_T5)
+        uint64 mc_src = rv_resolve_src(s2_v, RV_T6)
+        rv_mv(10, mc_dst)              // a0 = dst (cur)
+        rv_mv(11, mc_src)              // a1 = src (cur)
+        // Resolve len from imm (stored as vreg index, not a literal).
+        uint64 mc_len_vreg = imm
+        uint64 mc_len = RV_ZERO
+        if mc_len_vreg > 0 && mc_len_vreg < ir_vreg_next {
+            mc_len = ir_get_phys_reg(mc_len_vreg)
+            if mc_len == 0xFFFFFFFF {
+                rv_load_spill(RV_T5, mc_len_vreg)
+                mc_len = RV_T5
+            }
+        }
+        rv_mv(12, mc_len)              // a2 = len
+        rv_mv(14, 10)                  // a4 = saved original dst (for return)
+        uint64 loop_start = out_len
+        // L:
+        uint64 beqz_site = out_len
+        rv_b(0, RV_ZERO, 12, 0, 0x63)  // beqz a2, DONE (placeholder; len==0)
+        rv_i(0, 11, 4, 13, 0x03)       // lbu a3, 0(a1)
+        rv_s(0, 13, 10, 0, 0x23)       // sb a3, 0(a0)
+        rv_i(1, 10, 0, 10, 0x13)       // addi a0, a0, 1
+        rv_i(1, 11, 0, 11, 0x13)       // addi a1, a1, 1
+        rv_i(0 - 1, 12, 0, 12, 0x13)   // addi a2, a2, -1
+        uint64 j_site = out_len
+        uint64 back_disp = loop_start - j_site
+        rv_check_j21(back_disp)
+        rv_j(back_disp, RV_ZERO, 0x6F) // j L
+        uint64 loop_end = out_len      // DONE target
+        uint64 fwd_disp = loop_end - beqz_site
+        patch_u32(beqz_site, rv_b_checked(fwd_disp, RV_ZERO, 12, 0, 0x63))
+        rv_mark_noc(loop_start, loop_end)
+        // DONE: return original dst
+        uint64 d = dst_r
+        if d == 0xFFFFFFFF { d = RV_T5 }
+        rv_mv(d, 14)
+        if dst_r == 0xFFFFFFFF { rv_store_spill(RV_T5, dest_v) }
+        return
+    }
+
+    // ----- IR_MEMSET (76): byte fill loop -----
+    // Semantics (ir.kr:79, emit sites e.g. ir.kr:2179): dest = returned dst
+    // pointer, src1 = dst ptr, src2 = fill-byte VALUE, imm = the COUNT
+    // VREG'S ID (same "len vreg in imm" convention as MEMCPY above —
+    // confirmed against x86 ir.kr:7574-7575 and arm64 ir_aarch64.kr:
+    // 1166-1178's identical comment). Mirrors ir_aarch64.kr:1167-1200:
+    // a0=dst(cur), a1=val, a2=len, count-tested at the TOP of the loop
+    // (CBZ x2,done before the first STRB) so a zero-length call is a
+    // no-op. a3 saves the original dst for the return value. a0-a3 are
+    // free scratch. Same non-compressible-span requirement as MEMCPY.
+    if op == 76 {
+        uint64 ms_dst = rv_resolve_src(s1_v, RV_T5)
+        uint64 ms_val = rv_resolve_src(s2_v, RV_T6)
+        rv_mv(10, ms_dst)              // a0 = dst (cur)
+        rv_mv(11, ms_val)              // a1 = fill byte value
+        // Resolve len from imm (stored as vreg index, not a literal).
+        uint64 ms_len_vreg = imm
+        uint64 ms_len = RV_ZERO
+        if ms_len_vreg > 0 && ms_len_vreg < ir_vreg_next {
+            ms_len = ir_get_phys_reg(ms_len_vreg)
+            if ms_len == 0xFFFFFFFF {
+                rv_load_spill(RV_T5, ms_len_vreg)
+                ms_len = RV_T5
+            }
+        }
+        rv_mv(12, ms_len)              // a2 = len
+        rv_mv(13, 10)                  // a3 = saved original dst (for return)
+        uint64 loop_start = out_len
+        // L:
+        uint64 beqz_site = out_len
+        rv_b(0, RV_ZERO, 12, 0, 0x63)  // beqz a2, DONE (placeholder; len==0)
+        rv_s(0, 11, 10, 0, 0x23)       // sb a1, 0(a0)
+        rv_i(1, 10, 0, 10, 0x13)       // addi a0, a0, 1
+        rv_i(0 - 1, 12, 0, 12, 0x13)   // addi a2, a2, -1
+        uint64 j_site = out_len
+        uint64 back_disp = loop_start - j_site
+        rv_check_j21(back_disp)
+        rv_j(back_disp, RV_ZERO, 0x6F) // j L
+        uint64 loop_end = out_len      // DONE target
+        uint64 fwd_disp = loop_end - beqz_site
+        patch_u32(beqz_site, rv_b_checked(fwd_disp, RV_ZERO, 12, 0, 0x63))
+        rv_mark_noc(loop_start, loop_end)
+        // DONE: return original dst
+        uint64 d = dst_r
+        if d == 0xFFFFFFFF { d = RV_T5 }
+        rv_mv(d, 13)
+        if dst_r == 0xFFFFFFFF { rv_store_spill(RV_T5, dest_v) }
+        return
+    }
+
     // Everything else lands in Stage 2+ (mul/div, syscalls, ...).
     rv_nyi_op(op)
 }

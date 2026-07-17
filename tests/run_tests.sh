@@ -4698,6 +4698,107 @@ else
     echo "  riscv_t3_strloops: SKIP (qemu-system-riscv32 or riscv64-linux-gnu-objdump not installed)"
 fi
 
+# --- RISC-V RV32 memory-block inline loops (feature-gap Task 4) ---
+# Compiles examples/riscv-featuregap/t4_memblk.kr, which exercises the two
+# hand-emitted byte loops IR_MEMSET (op 76) and IR_MEMCPY (op 72) against
+# GLOBAL static byte buffers (Task 2's STATIC_ADDR array-decay path --
+# deliberately not local arrays, since IR_STACK_ADDR/Task 6 isn't
+# implemented yet). Both loops bake branch displacements directly between
+# instructions (no ir_br_fixups entry, same shape as Task 3's
+# STRLEN/STR_EQ/MEMCMP), so the C-compression pass could silently desync
+# them if any interior instruction were allowed to shrink (audit §4
+# CRITICAL trap) -- rv_mark_noc protects each loop's full baked-
+# displacement span. The test also proves length==0 is a true no-op (both
+# loops test their count at the TOP of the loop, mirroring arm64's
+# CBZ-before-first-access shape): memset(setbuf,90,0) must NOT overwrite
+# setbuf[0], which the "AA" (not "AZ") in the expected output checks.
+# Proves this two ways: (1) qemu prints the arithmetically-correct "AAZk",
+# which a miscompiled displacement OR a zero-length underflow would not
+# produce, and (2) the loop-interior pointer-bump `addi`s -- the only loop
+# mnemonics that opcode-wise COULD compress to c.addi -- must still be
+# full 8-hex-digit (4-byte) encodings in the disassembly; a compressed
+# 4-digit (2-byte) form at any of those sites would mean the noc region
+# missed something. (lbu/sb/beqz/j can never compress regardless of noc:
+# rv_try_compress only handles opcodes 0x13/0x33 f3=0 and 0x03/0x23 f3=2
+# -- lbu is 0x03 f3=4, sb is 0x23 f3=0, and branches/jal never compress at
+# all -- so asserting their width proves nothing about the noc mechanism.)
+echo ""
+echo "--- riscv32 MEMSET/MEMCPY inline-loop boot test ---"
+if command -v qemu-system-riscv32 >/dev/null 2>&1 \
+   && command -v riscv64-linux-gnu-objdump >/dev/null 2>&1; then
+    TOTAL=$((TOTAL + 1))
+    RV_BIN="/tmp/krc_rv_memblk_$$.bin"
+    RV_OK=1
+    if ! $KRC --arch=riscv32 --freestanding "$DIR/../examples/riscv-featuregap/t4_memblk.kr" -o "$RV_BIN" >/dev/null 2>&1; then
+        echo "FAIL: riscv_t4_memblk (compilation failed)"
+        RV_OK=0
+    fi
+    if [ "$RV_OK" = 1 ]; then
+        RV_DIS=$(riscv64-linux-gnu-objdump -D -b binary -m riscv:rv32 "$RV_BIN" 2>/dev/null)
+        # 3x sb (memset fill loop + memset zero-len loop + memcpy loop) +
+        # 1x sb for the UART Uart.thr write in putc.
+        if [ "$(echo "$RV_DIS" | grep -cE '	sb	')" -lt 3 ]; then
+            echo "FAIL: riscv_t4_memblk (expected >=3 sb: 2x memset loop + memcpy loop)"
+            RV_OK=0
+        fi
+        # 1x lbu in the memcpy loop body + 4x lbu reading buffer bytes back
+        # (setbuf[0] x2, cpybuf[0], cpybuf[1]) + 1x lbu for the UART lsr poll.
+        if [ "$(echo "$RV_DIS" | grep -cE '	lbu	')" -lt 5 ]; then
+            echo "FAIL: riscv_t4_memblk (expected >=5 lbu: memcpy loop + 4x buffer readback)"
+            RV_OK=0
+        fi
+        # The correctness gate: match each loop by its structural mnemonic
+        # sequence (not hardcoded hex offsets, so this stays robust to any
+        # future codegen/prologue change that shifts addresses without
+        # touching the loops) and assert every word in the noc-protected
+        # span stayed full-width:
+        #   MEMSET (both the fill call and the zero-length call use the
+        #   identical loop shape): beqz, sb, addi, addi, j
+        #   MEMCPY: beqz, lbu, sb, addi, addi, addi, j
+        NOC_BAD=$(echo "$RV_DIS" | awk -F'\t' '
+            { m=$3; h=$2; gsub(/ /,"",h); n++; mnem[n]=m; hexlen[n]=length(h); line[n]=$0 }
+            END {
+                memset_found=0; memcpy_found=0
+                for (i=1; i<=n; i++) {
+                    if (i+4<=n && mnem[i]=="beqz" && mnem[i+1]=="sb" && mnem[i+2]=="addi" && mnem[i+3]=="addi" && mnem[i+4]=="j") {
+                        memset_found++
+                        if (hexlen[i+2]!=8) print "MEMSET loop pointer-bump addi (a0) compressed: " line[i+2]
+                        if (hexlen[i+3]!=8) print "MEMSET loop length-decrement addi (a2) compressed: " line[i+3]
+                    }
+                    if (!memcpy_found && i+6<=n && mnem[i]=="beqz" && mnem[i+1]=="lbu" && mnem[i+2]=="sb" && mnem[i+3]=="addi" && mnem[i+4]=="addi" && mnem[i+5]=="addi" && mnem[i+6]=="j") {
+                        memcpy_found=1
+                        if (hexlen[i+3]!=8) print "MEMCPY loop pointer-bump addi (a0) compressed: " line[i+3]
+                        if (hexlen[i+4]!=8) print "MEMCPY loop pointer-bump addi (a1) compressed: " line[i+4]
+                        if (hexlen[i+5]!=8) print "MEMCPY loop length-decrement addi (a2) compressed: " line[i+5]
+                    }
+                }
+                if (memset_found<2) print "MEMSET loop instruction pattern (beqz,sb,addi,addi,j) found " memset_found " time(s), expected 2 (fill call + zero-length call)"
+                if (!memcpy_found) print "MEMCPY loop instruction pattern (beqz,lbu,sb,addi,addi,addi,j) not found in disassembly"
+            }
+        ')
+        if [ -n "$NOC_BAD" ]; then
+            echo "FAIL: riscv_t4_memblk (compressible loop-interior addi word(s) found -- noc region missed a loop instruction)"
+            echo "$NOC_BAD"
+            RV_OK=0
+        fi
+    fi
+    if [ "$RV_OK" = 1 ]; then
+        RV_OUT=$(timeout 5 qemu-system-riscv32 -machine virt -nographic -bios "$RV_BIN" 2>/dev/null)
+        if echo "$RV_OUT" | grep -q "AAZk"; then
+            PASS=$((PASS + 1))
+            echo "  riscv_t4_memblk: PASS (qemu printed AAZk, loops stayed 4-byte)"
+        else
+            echo "FAIL: riscv_t4_memblk (qemu output was '$RV_OUT', want 'AAZk')"
+            FAIL=$((FAIL + 1))
+        fi
+    else
+        FAIL=$((FAIL + 1))
+    fi
+    rm -f "$RV_BIN"
+else
+    echo "  riscv_t4_memblk: SKIP (qemu-system-riscv32 or riscv64-linux-gnu-objdump not installed)"
+fi
+
 # --- Summary ---
 echo ""
 echo "=== Results: $PASS/$TOTAL passed, $FAIL failed ==="
