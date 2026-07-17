@@ -2403,9 +2403,10 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
         resolve_fixups_a64()
         resolve_fnaddr_fixups_a64()
     } else {
-        // riscv32 fixups need their own resolver (AUIPC/JAL reach rules);
-        // running the arm64 one here would silently corrupt the output.
-        riscv32_nyi("call fixup resolution")
+        // riscv32: patch the auipc+jalr call pairs (ir_riscv.kr). No
+        // fnaddr resolver yet — IR_FN_ADDR (86) is still NYI in the
+        // riscv emitter, so no riscv fnaddr fixups can exist.
+        resolve_fixups_riscv()
     }
 
     // Emit string data BEFORE static data so trailing zero bytes from
