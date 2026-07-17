@@ -251,6 +251,24 @@ fn rv_li(uint64 rd, uint64 imm) {
     rv_i(imm & 0xFFF, rd, 0, rd, 0x13)           // addi rd, rd, %lo(imm)
 }
 
+// Raw flat-binary boot preamble (arch==2 --freestanding only; called from
+// main.kr's rv_raw path immediately before the entry function is emitted
+// at what becomes offset 8). QEMU's `virt -bios` loader starts executing
+// at 0x8000_0000 = file offset 0 in M-mode with sp = 0, and the entry
+// prologue's first instruction is `addi sp,sp,-N` + stores through sp —
+// with sp = 0 that traps before main ever runs (the Task 3.1 blocker).
+// Emit `lui sp,%hi(TOP)` + `addi sp,sp,%lo(TOP)` as the FIRST two
+// instructions of the image so sp is valid before any prologue runs.
+// TOP = 0x8020_0000: 2 MiB into virt's DRAM (base 0x8000_0000, >=128 MiB
+// by default) — far above any image this backend emits today, and the
+// stack grows DOWN from there so it cannot collide with the code below
+// it until it has 2 MiB - image_size of headroom. rv_li emits exactly
+// the lui+addi pair for this value (it is outside the single-addi range),
+// giving a fixed 8-byte preamble.
+fn rv_emit_raw_sp_preamble() {
+    rv_li(RV_SP, 0x80200000)
+}
+
 // Does a two's-complement uint64 value fit the I-type's sign-extended
 // imm12 (−2048..2047)? Re-bias into [0, 0x1000): negative values wrap
 // (e.g. −7 = 0xFFFF...FFF9 + 0x800 = 0x7F9 < 0x1000 → fits; −2049 and

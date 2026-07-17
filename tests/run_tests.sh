@@ -4446,6 +4446,53 @@ else
 fi
 rm -f "$REPO_ROOT/test_tmp_$$.kr"
 
+# --- RISC-V RV32 freestanding UART hello (boots under qemu — milestone 1) ---
+# Compiles examples/riscv-hello-uart/hello.kr with --arch=riscv32
+# --freestanding (raw flat binary), checks the 8-byte sp preamble via
+# objdump (lui sp,0x80200 must be the FIRST instruction), then boots it
+# under qemu-system-riscv32 -machine virt and greps stdout for "hello".
+# qemu/objdump are dev-only toolchain: SKIP cleanly when absent so their
+# absence can never fail the suite (mirrors the asm_hex x86-only skips).
+# Note: a later --arch= flag overrides an earlier one, so this works
+# through the `make test` wrapper that bakes in --arch=x86_64.
+echo ""
+echo "--- riscv32 freestanding boot test ---"
+if command -v qemu-system-riscv32 >/dev/null 2>&1 \
+   && command -v riscv64-linux-gnu-objdump >/dev/null 2>&1; then
+    TOTAL=$((TOTAL + 1))
+    RV_BIN="/tmp/krc_rv_hello_$$.bin"
+    RV_OK=1
+    if ! $KRC --arch=riscv32 --freestanding "$DIR/../examples/riscv-hello-uart/hello.kr" -o "$RV_BIN" >/dev/null 2>&1; then
+        echo "FAIL: riscv_hello_boot (compilation failed)"
+        RV_OK=0
+    fi
+    if [ "$RV_OK" = 1 ]; then
+        RV_FIRST=$(riscv64-linux-gnu-objdump -D -b binary -m riscv:rv32 -M no-aliases "$RV_BIN" 2>/dev/null | awk '/^ +0:/{print $3, $4; exit}')
+        if [ "$RV_FIRST" != "lui sp,0x80200" ]; then
+            echo "FAIL: riscv_hello_boot (first insn is '$RV_FIRST', want 'lui sp,0x80200')"
+            RV_OK=0
+        fi
+    fi
+    if [ "$RV_OK" = 1 ]; then
+        # hello loops forever after printing (freestanding), so qemu always
+        # runs until the timeout kills it — 5s is the fixed cost, plenty
+        # for the ~instant UART output.
+        RV_OUT=$(timeout 5 qemu-system-riscv32 -machine virt -nographic -bios "$RV_BIN" 2>/dev/null)
+        if echo "$RV_OUT" | grep -q "hello"; then
+            PASS=$((PASS + 1))
+            echo "  riscv_hello_boot: PASS (qemu printed hello)"
+        else
+            echo "FAIL: riscv_hello_boot (qemu output did not contain 'hello')"
+            FAIL=$((FAIL + 1))
+        fi
+    else
+        FAIL=$((FAIL + 1))
+    fi
+    rm -f "$RV_BIN"
+else
+    echo "  riscv_hello_boot: SKIP (qemu-system-riscv32 or riscv64-linux-gnu-objdump not installed)"
+fi
+
 # --- Summary ---
 echo ""
 echo "=== Results: $PASS/$TOTAL passed, $FAIL failed ==="

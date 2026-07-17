@@ -1,0 +1,42 @@
+// RISC-V RV32IMC milestone 1: boot under QEMU and print "hello" over UART.
+//
+// Target: qemu-system-riscv32 -machine virt, which loads a `-bios` image
+// at 0x8000_0000 and starts executing it at offset 0 in M-mode. The
+// compiler's raw-mode preamble (src/ir_riscv.kr rv_emit_raw_sp_preamble)
+// sets sp = 0x8020_0000 before main's prologue runs.
+//
+// The virt machine emulates an NS16550A UART at 0x1000_0000:
+//   THR (transmit holding register)  byte at offset 0, write to send
+//   LSR (line status register)       byte at offset 5, bit 0x20 = THR empty
+//
+// Build:
+//   ./build/krc2 --arch=riscv32 --freestanding examples/riscv-hello-uart/hello.kr -o hello.bin
+// Run (Ctrl-A x to exit):
+//   qemu-system-riscv32 -machine virt -nographic -bios hello.bin
+//
+// Expected output: hello
+
+device Uart at 0x10000000 {
+    thr at 0x00 : u8
+    lsr at 0x05 : u8
+}
+
+fn putc(u8 c) {
+    // Spin until the transmit holding register is empty (LSR bit 5).
+    // Both accesses are volatile (vload8/vstore8) — never reordered,
+    // never fused, never dead-code-eliminated.
+    while (Uart.lsr & 0x20) == 0 { }
+    Uart.thr = c
+}
+
+fn main() {
+    putc(104)   // 'h'
+    putc(101)   // 'e'
+    putc(108)   // 'l'
+    putc(108)   // 'l'
+    putc(111)   // 'o'
+    putc(10)    // '\n'
+    // Freestanding: there is nothing to return to — falling off main
+    // would execute whatever bytes follow. Park the hart forever.
+    loop { }
+}

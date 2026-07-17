@@ -2429,6 +2429,13 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
         }
         uint32 rve_ename = ast_data1(rv_entry_node)
         uint64 rve_wen = rve_ename
+        // Boot preamble FIRST: QEMU virt -bios enters at offset 0 with
+        // sp = 0, so set sp = 0x8020_0000 (see rv_emit_raw_sp_preamble)
+        // before the entry function's prologue touches the stack. The
+        // entry is then registered at offset 8 and execution falls
+        // through into it. Raw-mode/arch==2-only by construction —
+        // x86/arm64 never reach this block.
+        rv_emit_raw_sp_preamble()
         fn_register(rve_wen, out_len)
         line_table_record_fn_entry(rve_wen)
         ir_init()
