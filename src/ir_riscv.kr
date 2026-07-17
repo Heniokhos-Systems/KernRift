@@ -1255,6 +1255,53 @@ fn ir_emit_riscv_insn(uint64 ii) {
         return
     }
 
+    // ----- IR_STATIC_ADDR (84): dst = address of static/global slot -----
+    // imm = byte offset into the static-data area (assigned at parse time
+    // by static_declare*, shared across arches — 8-byte slots, do not
+    // touch). Same pcrel-pair shape as STR_CONST, just table_sel 1
+    // (statics) and resolved later against data_start
+    // (resolve_static_fixups_riscv).
+    if op == 84 {
+        uint64 rd = dst_r
+        if rd == 0xFFFFFFFF { rd = RV_T5 }
+        rv_emit_pcrel_pair(rd, 1, imm)                // table_sel 1 = statics
+        if dst_r == 0xFFFFFFFF { rv_store_spill(rd, dest_v) }
+        return
+    }
+
+    // ----- IR_STATIC_LOAD (77): dst = *(static base + imm) -----
+    // imm = byte offset into the static-data area. Statics are fixed
+    // 8-byte slots (shared parse-time layout, arch-independent); the low
+    // 4 bytes hold the rv32 value (little-endian, zero-filled by
+    // emit_static_data), so a plain `lw` off the materialized base is
+    // correct — see audit §3. Base is materialized into t6 (scratch, not
+    // the dest colour) via the same pcrel pair as STATIC_ADDR/STR_CONST;
+    // the `lw` itself is a fresh, compressible instruction (not part of
+    // the patched pair).
+    if op == 77 {
+        rv_emit_pcrel_pair(RV_T6, 1, imm)             // base -> t6
+        uint64 d = dst_r
+        if d == 0xFFFFFFFF { d = RV_T5 }
+        rv_i(0, RV_T6, 2, d, 0x03)                    // lw d, 0(t6)
+        if dst_r == 0xFFFFFFFF { rv_store_spill(d, dest_v) }
+        return
+    }
+
+    // ----- IR_STATIC_STORE (78): *(static base + imm) = src1 -----
+    // src1 = value vreg, imm = byte offset; no dest. Order matters: resolve
+    // the value into t5 FIRST, then materialize the address pair into t6 —
+    // reversing this would let rv_emit_pcrel_pair's placeholder addi land
+    // in t6 while rv_resolve_src independently wants t5, which is fine,
+    // but doing it value-first guarantees t5/t6 never alias regardless of
+    // which register rv_resolve_src happens to pick (audit §3 scratch
+    // trap).
+    if op == 78 {
+        uint64 val_reg = rv_resolve_src(s1_v, RV_T5)  // value -> t5 first
+        rv_emit_pcrel_pair(RV_T6, 1, imm)             // base -> t6 second
+        rv_s(0, val_reg, RV_T6, 2, 0x23)              // sw val_reg, 0(t6)
+        return
+    }
+
     // Everything else lands in Stage 2+ (mul/div, syscalls, ...).
     rv_nyi_op(op)
 }
@@ -1660,6 +1707,42 @@ fn resolve_string_fixups_riscv(uint64 str_start) {
         uint64 wsite = site
         uint64 woff = str_off
         uint64 target = str_start + woff
+        uint64 disp = target - wsite
+        uint64 hi = (disp + 0x800) & 0xFFFFF000
+        uint64 lo = disp & 0xFFF
+        uint64 rd = rv_rd_at(wsite)
+        // auipc rd, hi   (U-type: imm[31:12] | rd<<7 | 0x17)
+        patch_u32(wsite, hi | (rd << 7) | 0x17)
+        // addi rd, rd, lo  (I-type: imm<<20 | rs1=rd<<15 | f3=0 | rd<<7 | 0x13)
+        patch_u32(wsite + 4, (lo << 20) | (rd << 15) | (rd << 7) | 0x13)
+        i = i + 1
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Static/global data address fixup resolution — runs after emit_static_data()
+// laid down the static-data segment at file offset `data_start` (main.kr's
+// arch==2 branch, same slot where arch 0/1 run
+// resolve_static_fixups[_a64]).
+//
+// IR_STATIC_ADDR/LOAD/STORE all record [auipc_offset:u32, data_offset:u32]
+// into the shared static_fixups table via rv_emit_pcrel_pair (table_sel=1);
+// each auipc offset has already been remapped through its function's
+// C-compression pass, so it names the FINAL site of the placeholder pair,
+// exactly like resolve_string_fixups_riscv above — same math, different
+// base and table.
+fn resolve_static_fixups_riscv(uint64 data_start) {
+    uint64 i = 0
+    while i < static_fixup_count {
+        uint64 e = static_fixups + i * 8
+        uint32 site = 0
+        unsafe { *(e as uint32) -> site }
+        uint64 e4 = e + 4
+        uint32 data_off = 0
+        unsafe { *(e4 as uint32) -> data_off }
+        uint64 wsite = site
+        uint64 woff = data_off
+        uint64 target = data_start + woff
         uint64 disp = target - wsite
         uint64 hi = (disp + 0x800) & 0xFFFFF000
         uint64 lo = disp & 0xFFF

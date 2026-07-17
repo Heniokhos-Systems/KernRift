@@ -2562,11 +2562,11 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
         } else if arch == 1 {
             resolve_static_fixups_a64(data_start)
         } else {
-            // riscv32: same rule as string fixups above — only refuse
-            // when static-var fixups were actually recorded.
-            if static_fixup_count != 0 {
-                riscv32_nyi("static fixup resolution")
-            }
+            // riscv32: patch each IR_STATIC_ADDR/LOAD/STORE pcrel
+            // auipc+addi pair to point at data_start + data_offset
+            // (ir_riscv.kr). Sites were already remapped through
+            // C-compression, and the static-data segment now exists.
+            resolve_static_fixups_riscv(data_start)
         }
     }
 

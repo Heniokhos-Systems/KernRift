@@ -1,0 +1,30 @@
+// RISC-V RV32IMC feature-gap Task 2: static-global load/store/address
+// (IR_STATIC_ADDR/LOAD/STORE, ops 84/77/78).
+//
+// Increments a mutable global static and prints it as a single ASCII
+// digit over the virt NS16550A UART, exercising the pcrel auipc+addi
+// address pair against the static-data segment + the static-fixup
+// resolver (distinct from the string-fixup resolver Task 1 added — see
+// resolve_static_fixups_riscv in ir_riscv.kr). Boots under:
+//   ./build/krc2 --arch=riscv32 --freestanding \
+//       examples/riscv-featuregap/t2_static.kr -o /tmp/t2.bin
+//   qemu-system-riscv32 -machine virt -nographic -bios /tmp/t2.bin
+// Expected output: 9
+
+device Uart at 0x10000000 {
+    thr at 0x00 : u8
+    lsr at 0x05 : u8
+}
+
+fn putc(u8 c) {
+    while (Uart.lsr & 0x20) == 0 { }
+    Uart.thr = c
+}
+
+static uint32 counter = 8
+
+fn main() {
+    counter = counter + 1        // IR_STATIC_LOAD + IR_STATIC_STORE
+    putc(counter + 48)           // IR_STATIC_LOAD, then '0' + 9 = '9'
+    loop { }
+}

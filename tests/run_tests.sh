@@ -4538,6 +4538,60 @@ else
     echo "  riscv_t1_strconst: SKIP (qemu-system-riscv32 or riscv64-linux-gnu-objdump not installed)"
 fi
 
+# --- RISC-V RV32 static-global load/store/addr via pcrel (feature-gap Task 2) ---
+# Compiles examples/riscv-featuregap/t2_static.kr, which increments a mutable
+# global static (IR_STATIC_LOAD + IR_STATIC_STORE) and prints it as a single
+# ASCII digit via IR_STATIC_ADDR-style base materialization. Proves the pcrel
+# auipc+addi pair against the STATIC data segment (a separate fixup table/
+# resolver from Task 1's string fixups) plus the plain lw/sw off the
+# materialized base. Same dev-only toolchain guard/SKIP discipline as the
+# tests above.
+echo ""
+echo "--- riscv32 static-global load/store/addr boot test ---"
+if command -v qemu-system-riscv32 >/dev/null 2>&1 \
+   && command -v riscv64-linux-gnu-objdump >/dev/null 2>&1; then
+    TOTAL=$((TOTAL + 1))
+    RV_BIN="/tmp/krc_rv_static_$$.bin"
+    RV_OK=1
+    if ! $KRC --arch=riscv32 --freestanding "$DIR/../examples/riscv-featuregap/t2_static.kr" -o "$RV_BIN" >/dev/null 2>&1; then
+        echo "FAIL: riscv_t2_static (compilation failed)"
+        RV_OK=0
+    fi
+    if [ "$RV_OK" = 1 ]; then
+        # Three pcrel address materializations (load, store, load-again for
+        # the putc arg) must each survive compression as two full-width
+        # 4-byte words, and the load/store themselves must be plain lw/sw.
+        RV_DIS=$(riscv64-linux-gnu-objdump -D -b binary -m riscv:rv32 "$RV_BIN" 2>/dev/null)
+        if [ "$(echo "$RV_DIS" | grep -cE '\bauipc\b')" -lt 3 ]; then
+            echo "FAIL: riscv_t2_static (expected >=3 full-width auipc: 2x static load + static store)"
+            RV_OK=0
+        fi
+        if ! echo "$RV_DIS" | grep -qE '\blw\b'; then
+            echo "FAIL: riscv_t2_static (expected a plain lw off the materialized static base)"
+            RV_OK=0
+        fi
+        if ! echo "$RV_DIS" | grep -qE '\bsw\b'; then
+            echo "FAIL: riscv_t2_static (expected a plain sw off the materialized static base)"
+            RV_OK=0
+        fi
+    fi
+    if [ "$RV_OK" = 1 ]; then
+        RV_OUT=$(timeout 5 qemu-system-riscv32 -machine virt -nographic -bios "$RV_BIN" 2>/dev/null)
+        if echo "$RV_OUT" | grep -q "9"; then
+            PASS=$((PASS + 1))
+            echo "  riscv_t2_static: PASS (qemu printed 9)"
+        else
+            echo "FAIL: riscv_t2_static (qemu output did not contain '9')"
+            FAIL=$((FAIL + 1))
+        fi
+    else
+        FAIL=$((FAIL + 1))
+    fi
+    rm -f "$RV_BIN"
+else
+    echo "  riscv_t2_static: SKIP (qemu-system-riscv32 or riscv64-linux-gnu-objdump not installed)"
+fi
+
 # --- Summary ---
 echo ""
 echo "=== Results: $PASS/$TOTAL passed, $FAIL failed ==="
