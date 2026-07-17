@@ -415,6 +415,8 @@ fn parse_primary() -> uint64 {
     // Float literal
     if kind == 5 {
         uint64 tok = advance_tok()
+        // riscv32: no FPU — a float literal is rejected at the source.
+        tc_riscv32_reject_kind(96, tok)
         uint64 node = ast_alloc(46)
         uint32 t32 = tok
         ast_set_data1(node, t32)
@@ -1485,7 +1487,12 @@ fn parse_stmt() -> uint64 {
         uint64 addr_expr = parse_expr()
         expect(1)
         uint32 type_kind = cur_kind()
-        advance_tok()
+        uint64 vcast_tok = advance_tok()
+        // riscv32: 8-byte (uint64/int64) and float pointer casts are
+        // unsupported — the cast type token dies here (only a size survives
+        // into the AST), so this is the only place it can be rejected.
+        uint64 wvck = type_kind
+        tc_riscv32_reject_kind(wvck, vcast_tok)
         // Default (unrecognized cast type): word-sized access — 8, or 4 on riscv32.
         uint64 type_size = target_word_size()
         if type_kind == 80 || type_kind == 84 || type_kind == 98 || type_kind == 99 { type_size = 1 }
@@ -1543,7 +1550,12 @@ fn parse_stmt() -> uint64 {
         expect(1)
         // Parse type keyword → determine size
         uint32 type_kind = cur_kind()
-        advance_tok()
+        uint64 ucast_tok = advance_tok()
+        // riscv32: 8-byte (uint64/int64) and float pointer casts are
+        // unsupported — the cast type token dies here (only a size survives
+        // into the AST), so this is the only place it can be rejected.
+        uint64 wuck = type_kind
+        tc_riscv32_reject_kind(wuck, ucast_tok)
         // Default (unrecognized cast type): word-sized access — 8, or 4 on riscv32.
         uint64 type_size = target_word_size()
         if type_kind == 80 || type_kind == 84 || type_kind == 98 || type_kind == 99 { type_size = 1 }
@@ -2178,6 +2190,10 @@ fn parse_module() -> uint64 {
             uint64 ctype_tok = advance_tok()    // TYPE
             uint64 name_tok = expect(1)
             static_declare(name_tok)
+            // riscv32: uint64/int64/float consts are unsupported.
+            uint32 ctk = tok_kind_at(ctype_tok)
+            uint64 wctk = ctk
+            tc_riscv32_reject_kind(wctk, ctype_tok)
             static_set_kind_last(tok_kind_at(ctype_tok))
             if eat(34) != 0 {
                 // Accept literal initializers, including leading unary - or ~.
@@ -2250,6 +2266,8 @@ fn parse_module() -> uint64 {
                 // Compute element size from type keyword kind
                 uint32 stk = tok_kind_at(stype_tok)
                 uint64 wstk = stk
+                // riscv32: static arrays of uint64/int64/float are unsupported.
+                tc_riscv32_reject_kind(wstk, stype_tok)
                 // Float element types (f16=94/f32=95/f64=96) keep the historical
                 // 8-byte slot on every arch (byte-identity with the old literal 8);
                 // only pointer/unknown element types scale with the target word size.
@@ -2282,6 +2300,8 @@ fn parse_module() -> uint64 {
                 // KwFloat16=94, KwFloat32=95, KwFloat64=96.
                 uint32 stk_s = tok_kind_at(stype_tok)
                 uint64 wstk_s = stk_s
+                // riscv32: scalar statics of uint64/int64/float are unsupported.
+                tc_riscv32_reject_kind(wstk_s, stype_tok)
                 static_set_kind_last(wstk_s)
                 if wstk_s == 96 { static_set_fkind_last(1) }
                 else if wstk_s == 95 { static_set_fkind_last(2) }
@@ -2411,6 +2431,9 @@ fn parse_module() -> uint64 {
                 // Determine field size from type
                 uint32 ftk = tok_kind_at(field_type_tok)
                 uint64 wftk = ftk
+                // riscv32: struct fields are registered at parse time (never
+                // reach sema), so reject uint64/int64/float fields here.
+                tc_riscv32_reject_kind(wftk, field_type_tok)
                 // Float field types (f16=94/f32=95/f64=96) keep the historical
                 // 8-byte slot on every arch (byte-identity with the old literal 8);
                 // only pointer/unknown field types scale with the target word size.
@@ -2494,8 +2517,11 @@ fn parse_module() -> uint64 {
             expect(34)
             // Parse target type keyword — determine size
             uint32 target_kind = cur_kind()
-            advance_tok()
+            uint64 alias_target_tok = advance_tok()
             uint64 wtk = target_kind
+            // riscv32: an alias to uint64/int64/float would smuggle the type
+            // past sema (aliases resolve by size only) — reject at the source.
+            tc_riscv32_reject_kind(wtk, alias_target_tok)
             // Float alias targets (f16=94/f32=95/f64=96) keep the historical
             // 8-byte slot on every arch (byte-identity with the old literal 8);
             // only pointer/unknown alias targets scale with the target word size.
@@ -2595,6 +2621,9 @@ fn parse_module() -> uint64 {
                 uint64 ft_tok = advance_tok()
                 uint32 ftk = tok_kind_at(ft_tok)
                 uint64 wftk = ftk
+                // riscv32: device MMIO fields wider than 32 bits (or float)
+                // are unsupported.
+                tc_riscv32_reject_kind(wftk, ft_tok)
                 uint64 fsize = 8
                 if wftk == 80 || wftk == 84 || wftk == 98 || wftk == 99 { fsize = 1 }
                 if wftk == 81 || wftk == 85 { fsize = 2 }

@@ -226,8 +226,11 @@ fn tc_kind_of_type_tok(uint64 type_tok) -> uint64 {
     if type_tok == 0 { return 1 }   // void
     uint64 k = tok_kind_at_raw(type_tok)
     // Builtin numeric / bool / char keywords land in 80..99 ranges.
-    if k >= 80 && k <= 87 { return k }
-    if k >= 94 && k <= 96 { return k }
+    // riscv32: uint64/int64 (83/87) and floats (94..96) are rejected here —
+    // this is the funnel for every explicitly-annotated local, param,
+    // tuple-destructure, StructLit type, and callee return type.
+    if k >= 80 && k <= 87 { tc_riscv32_reject_kind(k, type_tok); return k }
+    if k >= 94 && k <= 96 { tc_riscv32_reject_kind(k, type_tok); return k }
     if k == 98 || k == 99 { return k }
     // Struct name (Ident token kind == 1).
     if k == 1 {
@@ -245,6 +248,29 @@ fn tc_is_struct_kind(uint64 tk) -> uint64 {
 fn tc_is_float_kind(uint64 tk) -> uint64 {
     if tk >= 94 && tk <= 96 { return 1 }
     return 0
+}
+
+// ---- riscv32 (target_arch == 2) type restrictions ----
+// RV32IMC is a 32-bit dialect: no 64-bit GPRs and no hardware FPU, so
+// uint64/int64 and f16/f32/f64 are unsupported. Rejection lives HERE at the
+// sema/parse layer because KernRift's IR is a 64-bit-word model: by IR-emit
+// time a register-only uint64 is indistinguishable from a uint32, so an
+// emit-side width check would be incomplete (it would silently mis-compile
+// 64-bit arithmetic as 32-bit). `kind` is a lexer type-keyword token kind
+// (KwUint64=83, KwInt64=87, KwFloat16/32/64=94/95/96); `tok` locates the
+// error. No-op off riscv32, so x86_64/arm64 behavior is unchanged.
+// Called from tc_kind_of_type_tok / tc_collect_signatures (decl sites that
+// reach sema) AND from parser.kr for the type tokens that are consumed at
+// parse time and never reach sema: unsafe/volatile pointer casts, struct
+// fields, statics, consts, type aliases, and device fields.
+fn tc_riscv32_reject_kind(uint64 kind, uint64 tok) {
+    if target_arch != 2 { return }
+    if kind == 83 || kind == 87 {
+        diag_fatal_at(tok, "64-bit integers not supported on riscv32; use uint32")
+    }
+    if kind >= 94 && kind <= 96 {
+        diag_fatal_at(tok, "float (f16/f32/f64) not supported on riscv32 (no hardware FPU)")
+    }
 }
 
 // 1 iff `node` is a Call expression whose callee is known and returns void.
@@ -377,6 +403,17 @@ fn tc_check_expr(uint64 node) {
     if node == 0 { return }
     uint32 kind = ast_kind(node)
     uint64 wkind = kind
+
+    // riscv32: an integer literal that needs more than 32 bits is a
+    // uint64-only value — the IR would silently truncate it. (Char/bool
+    // tagged IntLits parse to small values, so no false positives.)
+    if wkind == 30 && target_arch == 2 {
+        uint32 lt32 = ast_data1(node)
+        uint64 lt = lt32
+        if parse_int_token(lt) > 0xFFFFFFFF {
+            diag_fatal_at(lt, "integer literal does not fit in 32 bits (64-bit integers not supported on riscv32)")
+        }
+    }
 
     // Per-kind explicit walking. Following ast_next blindly walks into
     // stale pointers from prior list memberships.
@@ -918,6 +955,10 @@ fn tc_collect_signatures(uint64 root) {
             tc_fn_node_register(wname, wc)
             if wret != 0 {
                 uint64 rk = tok_kind_at_raw(wret)
+                // riscv32: reject uint64/int64/float RETURN types. This runs
+                // in the always-on resolve_inferred_types pre-pass, so it
+                // fires even with type-checking disabled.
+                tc_riscv32_reject_kind(rk, wret)
                 if rk == 96 { fn_ret_float_register(wname, 1) }
                 if rk == 95 { fn_ret_float_register(wname, 2) }
                 // Struct name (Ident token): register return-struct.
@@ -1020,6 +1061,13 @@ fn resolve_vardecl_infer(uint64 node) {
             diag_fatal_at(wtok, "`let` cannot infer the type of this expression; use an explicit type")
         }
         // A desugared for-iterator (wtok == 0) keeps the u64 default.
+    }
+    // riscv32: a real `let` that inferred a FLOAT kind (float-returning
+    // builtin, float static, …) cannot be honored — no FPU. The inferred
+    // integer default (83) stays legal: it is the polymorphic word kind,
+    // not an explicit uint64 annotation.
+    if wtok != 0 && tc_is_float_kind(ik) != 0 {
+        tc_riscv32_reject_kind(ik, wtok)
     }
     tc_local_register(name_tok, ik)
     // Tag real `let`s only; leave for-iterators at data1 == 0 (unchanged).
