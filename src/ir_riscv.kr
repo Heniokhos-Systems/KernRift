@@ -3,15 +3,138 @@
 // Reads the shared SSA IR (ir.kr) and will emit little-endian RV32IMC
 // machine code, mirroring src/ir_aarch64.kr's structure. target_arch==2.
 //
-// Stub: the real encoder/regalloc/lowering lands in later tasks. For now
-// this entry point exists purely to complete the arch==2 plumbing (CLI
-// parsing, SRCS wiring, codegen dispatch) without touching the x86_64 or
-// arm64 code paths.
+// This file currently provides the bit-exact base-ISA instruction encoders
+// (R/I/S/B/U/J formats, verified against riscv64-linux-gnu-objdump), the
+// colour -> callee-saved-register map (s0-s11), and the IR_NUM_REGS=12
+// save/restore discipline. Per-IR-op lowering lands in later tasks.
+
+// ---------------------------------------------------------------------------
+// Register numbers (RV32I integer register file)
+//   zero=x0 ra=x1 sp=x2 gp=x3 tp=x4 t0-t2=x5-x7 s0=x8 s1=x9
+//   a0-a7=x10-x17 s2-s11=x18-x27 t3-t6=x28-x31
+// ---------------------------------------------------------------------------
+static uint64 RV_ZERO = 0
+static uint64 RV_RA = 1
+static uint64 RV_SP = 2
+static uint64 RV_A0 = 10
+static uint64 RV_T5 = 30
+static uint64 RV_T6 = 31
+
+// ---------------------------------------------------------------------------
+// Base-format encoders. All immediates are taken as raw two's-complement
+// bit patterns (callers pass negative displacements as uint64 wrap-around;
+// each field extractor masks exactly the bits the format stores). Fields
+// beyond bit 31 are discarded by emit_u32_le, but every field is masked
+// here anyway so a bad caller can't smear into neighbouring fields.
+// ---------------------------------------------------------------------------
+
+// R-type: funct7[31:25] rs2[24:20] rs1[19:15] funct3[14:12] rd[11:7] op[6:0]
+fn rv_r(uint64 f7, uint64 rs2, uint64 rs1, uint64 f3, uint64 rd, uint64 op) {
+    uint64 insn = ((f7 & 0x7F) << 25) | ((rs2 & 0x1F) << 20) | ((rs1 & 0x1F) << 15) | ((f3 & 7) << 12) | ((rd & 0x1F) << 7) | (op & 0x7F)
+    emit_u32_le(insn)
+}
+
+// I-type: imm[11:0][31:20] rs1[19:15] funct3[14:12] rd[11:7] op[6:0]
+fn rv_i(uint64 imm, uint64 rs1, uint64 f3, uint64 rd, uint64 op) {
+    uint64 insn = ((imm & 0xFFF) << 20) | ((rs1 & 0x1F) << 15) | ((f3 & 7) << 12) | ((rd & 0x1F) << 7) | (op & 0x7F)
+    emit_u32_le(insn)
+}
+
+// S-type: imm[11:5][31:25] rs2[24:20] rs1[19:15] funct3[14:12] imm[4:0][11:7] op[6:0]
+fn rv_s(uint64 imm, uint64 rs2, uint64 rs1, uint64 f3, uint64 op) {
+    uint64 hi = (imm >> 5) & 0x7F
+    uint64 lo = imm & 0x1F
+    uint64 insn = (hi << 25) | ((rs2 & 0x1F) << 20) | ((rs1 & 0x1F) << 15) | ((f3 & 7) << 12) | (lo << 7) | (op & 0x7F)
+    emit_u32_le(insn)
+}
+
+// B-type: imm[12][31] imm[10:5][30:25] rs2[24:20] rs1[19:15] funct3[14:12]
+//         imm[4:1][11:8] imm[11][7] op[6:0]. imm is a byte displacement,
+//         always even (bit 0 is not stored).
+fn rv_b(uint64 imm, uint64 rs2, uint64 rs1, uint64 f3, uint64 op) {
+    uint64 b12 = (imm >> 12) & 1
+    uint64 b11 = (imm >> 11) & 1
+    uint64 b10_5 = (imm >> 5) & 0x3F
+    uint64 b4_1 = (imm >> 1) & 0xF
+    uint64 insn = (b12 << 31) | (b10_5 << 25) | ((rs2 & 0x1F) << 20) | ((rs1 & 0x1F) << 15) | ((f3 & 7) << 12) | (b4_1 << 8) | (b11 << 7) | (op & 0x7F)
+    emit_u32_le(insn)
+}
+
+// U-type: imm[31:12] rd[11:7] op[6:0]. imm is the FULL 32-bit value whose
+// low 12 bits are dropped (pass e.g. 0x12345000 for `lui rd,0x12345`).
+fn rv_u(uint64 imm, uint64 rd, uint64 op) {
+    uint64 insn = (imm & 0xFFFFF000) | ((rd & 0x1F) << 7) | (op & 0x7F)
+    emit_u32_le(insn)
+}
+
+// J-type: imm[20][31] imm[10:1][30:21] imm[11][20] imm[19:12][19:12]
+//         rd[11:7] op[6:0]. imm is a byte displacement, always even.
+fn rv_j(uint64 imm, uint64 rd, uint64 op) {
+    uint64 b20 = (imm >> 20) & 1
+    uint64 b10_1 = (imm >> 1) & 0x3FF
+    uint64 b11 = (imm >> 11) & 1
+    uint64 b19_12 = (imm >> 12) & 0xFF
+    uint64 insn = (b20 << 31) | (b10_1 << 21) | (b11 << 20) | (b19_12 << 12) | ((rd & 0x1F) << 7) | (op & 0x7F)
+    emit_u32_le(insn)
+}
+
+// ---------------------------------------------------------------------------
+// Register allocator setup for RV32
+//
+// 12 allocatable callee-saved registers: colour 0 -> s0(x8), 1 -> s1(x9),
+// 2..11 -> s2..s11 (x18..x27). Callee-saved keeps calls cheap the same way
+// x19-x28 does on arm64.
+// ---------------------------------------------------------------------------
+
+fn rv_reg_for_color(uint64 color) -> uint64 {
+    if color == 0 { return 8 }
+    if color == 1 { return 9 }
+    return 18 + (color - 2)
+}
+
+// Nonzero once ir_phys_regs points at a buffer with >= 12 slots. The x86
+// and arm64 inits allocate only 10 slots, so the riscv init must NOT write
+// 12 entries into a buffer it didn't size itself; it allocates a fresh
+// 12-slot buffer once (the old one just leaks into the arena — later
+// x86/arm64 inits reuse the bigger buffer, writing only their 10 entries).
+static uint64 ir_rv_phys_regs_sized = 0
+
+fn ir_regalloc_init_riscv() {
+    IR_NUM_REGS = 12
+    if ir_rv_phys_regs_sized == 0 {
+        ir_phys_regs = alloc(12 * 8)
+        ir_rv_phys_regs_sized = 1
+    }
+    uint64 c = 0
+    while c < 12 {
+        uint64 p = ir_phys_regs + c * 8
+        uint64 phys = rv_reg_for_color(c)
+        unsafe { *(p as uint64) = phys }
+        c = c + 1
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Function-level emitter
+// ---------------------------------------------------------------------------
 
 // Mirrors ir_emit_arm64_function(uint64 fn_node)'s signature exactly, so
 // the arch==2 branch in main.kr's codegen dispatch loop can call this the
 // same way arch==1 calls ir_emit_arm64_function.
 fn ir_riscv_gen(uint64 fn_node) {
+    // IR_NUM_REGS is a shared static consumed by the graph colourer and
+    // ir_get_phys_reg(). Mirror ir_emit_arm64_function's discipline
+    // (ir_aarch64.kr:2466/2807): save on entry, pin to 12 while the shared
+    // colourer/emitter would run, restore on exit so x86_64/arm64 functions
+    // compiled later in the same process see their own value.
+    uint64 saved_num_regs = IR_NUM_REGS
+    IR_NUM_REGS = 12
+    ir_regalloc_init_riscv()
+
+    // Task 1.3+: ir_lower_function / ir_compute_liveness / ir_graph_color /
+    // per-op lowering go here, exactly like ir_emit_arm64_function.
+
+    IR_NUM_REGS = saved_num_regs
     write(2, "riscv32 backend: not yet implemented\n", 37)
     exit(1)
 }
