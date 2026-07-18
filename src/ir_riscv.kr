@@ -1049,6 +1049,28 @@ fn asm_emit_rv(uint64 str_tok) {
     exit(1)
 }
 
+// Maps an abstract (x86_64-shaped) syscall number to its rv32/rv64 Linux
+// number. RV32 and RV64 Linux share the asm-generic syscall table, which is
+// identical to arm64 Linux (see ir_a64_syscall_nr in ir_aarch64.kr) — the
+// same open(2)->openat(56) note applies (arg shift handled at the call site).
+fn ir_rv32_syscall_nr(uint64 abstract_nr) -> uint64 {
+    // RV32/RV64 Linux share the asm-generic table (identical to arm64 Linux).
+    if abstract_nr == 231 { return 93 }    // exit_group -> exit
+    if abstract_nr == 1 { return 64 }      // write
+    if abstract_nr == 0 { return 63 }      // read
+    if abstract_nr == 2 { return 56 }      // open -> openat
+    if abstract_nr == 3 { return 57 }      // close
+    if abstract_nr == 8 { return 62 }      // lseek
+    if abstract_nr == 9 { return 222 }     // mmap -> mmap2
+    if abstract_nr == 11 { return 215 }    // munmap
+    if abstract_nr == 59 { return 221 }    // execve
+    if abstract_nr == 228 { return 113 }   // clock_gettime
+    if abstract_nr == 15 { return 53 }     // chmod -> fchmodat
+    if abstract_nr == 90 { return 53 }     // fchmod -> fchmodat
+    if abstract_nr == 257 { return 56 }    // openat
+    return abstract_nr
+}
+
 // ---------------------------------------------------------------------------
 // Per-instruction emitter
 // ---------------------------------------------------------------------------
@@ -2087,6 +2109,34 @@ fn ir_emit_riscv_insn(uint64 ii) {
             wcs = nxt
         }
         if out_len > asm_start { rv_mark_noc(asm_start, out_len) }
+        return
+    }
+
+    // ----- IR_SYSCALL (52): hosted Linux syscall -----
+    if op == 52 {
+        // Args already placed in a0-a5 by IR_ARG. open(2) -> openat(56)
+        // needs the AT_FDCWD arg shift (mirror ir_aarch64.kr:886-891).
+        if imm == 2 {
+            rv_mv(13, 12)                  // a3 = mode (was a2)
+            rv_mv(12, 11)                  // a2 = flags (was a1)
+            rv_mv(11, 10)                  // a1 = path (was a0)
+            rv_li(10, 0xFFFFFF9C)          // a0 = AT_FDCWD (-100)
+        }
+        uint64 real_nr = ir_rv32_syscall_nr(imm)
+        rv_li(17, real_nr)                 // a7 = syscall number
+        emit_u32_le(0x00000073)            // ecall
+        if dst_r != 0xFFFFFFFF && dst_r != RV_A0 { rv_mv(dst_r, RV_A0) }
+        if dst_r == 0xFFFFFFFF { rv_store_spill(RV_A0, dest_v) }
+        return
+    }
+
+    // ----- IR_SYSCALL_RAW (85): src1 = number vreg, args in a0-a5 -----
+    if op == 85 {
+        uint64 nr_r = rv_resolve_src(s1_v, RV_T5)
+        rv_mv(17, nr_r)                    // a7 = number
+        emit_u32_le(0x00000073)            // ecall
+        if dst_r != 0xFFFFFFFF && dst_r != RV_A0 { rv_mv(dst_r, RV_A0) }
+        if dst_r == 0xFFFFFFFF { rv_store_spill(RV_A0, dest_v) }
         return
     }
 

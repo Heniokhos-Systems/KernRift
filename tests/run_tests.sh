@@ -5157,6 +5157,36 @@ else
     echo "  riscv_hosted_exit_code: SKIP (qemu-riscv32-static not installed)"
 fi
 
+# Compiles examples/riscv-hosted/hello.kr, which is the Task 2 hosted-syscall
+# smoke test: `write(1, "hello riscv\n", 12)` followed by `return 0` compiled
+# WITHOUT --freestanding must produce a hosted Elf32 ET_EXEC that, when run
+# under qemu-riscv32-static, actually invokes the Linux write(2) syscall
+# (a7=64 ecall) and prints the string to stdout. Distinct from
+# riscv_hosted_exit_code above: that test only exercises the auto-exit path;
+# this one exercises IR_SYSCALL (op 52) lowering in ir_riscv.kr.
+echo ""
+echo "--- riscv32 hosted syscall (write) test ---"
+if command -v qemu-riscv32-static >/dev/null 2>&1; then
+    TOTAL=$((TOTAL + 1))
+    RV_BIN="/tmp/krc_rv_hello_$$.bin"
+    if ! $KRC --arch=riscv32 "$DIR/../examples/riscv-hosted/hello.kr" -o "$RV_BIN" >/dev/null 2>&1; then
+        echo "FAIL: riscv_hosted_hello (compilation failed)"
+        FAIL=$((FAIL + 1))
+    else
+        RV_OUT=$(qemu-riscv32-static "$RV_BIN" 2>/dev/null)
+        if [ "$RV_OUT" = "hello riscv" ]; then
+            PASS=$((PASS + 1))
+            echo "  riscv_hosted_hello: PASS (qemu-riscv32-static printed 'hello riscv')"
+        else
+            echo "FAIL: riscv_hosted_hello (got '$RV_OUT', want 'hello riscv')"
+            FAIL=$((FAIL + 1))
+        fi
+    fi
+    rm -f "$RV_BIN"
+else
+    echo "  riscv_hosted_hello: SKIP (qemu-riscv32-static not installed)"
+fi
+
 # --- Summary ---
 echo ""
 echo "=== Results: $PASS/$TOTAL passed, $FAIL failed ==="

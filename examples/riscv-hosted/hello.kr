@@ -1,0 +1,4 @@
+fn main() -> uint32 {
+    write(1, "hello riscv\n", 12)
+    return 0
+}
