@@ -74,12 +74,14 @@ fn xt_sll(uint64 rd, uint64 rs) { xt_rrr(0, 0, rs, rd, 1, 0xA) }
 fn xt_srl(uint64 rd, uint64 rs) { xt_rrr(0, rs, 0, rd, 1, 0x9) }
 fn xt_sra(uint64 rd, uint64 rs) { xt_rrr(0, rs, 0, rd, 1, 0xB) }
 
-// Immediate shifts (op0=0, op1=1). SRLI/SRAI: s=sa (direct, 0-15).
-// SLLI: t=(16-sa)&0xF (documented ISA quirk — verified for sa in 1..15,
-// the only range this MVP needs; sa==0/16..31 are out of scope here).
+// Immediate shifts (op0=0, op1=1). SRLI: s=sa (4-bit, 0-15 — no high bit).
+// SRAI: s=sa[3:0], and sa[4] rides op2 bit0 (op2=0x2 for sa<16, 0x3 for sa>=16)
+// — byte-exact across the full 0..31 range (verified vs xtensa-lx106-elf-as).
+// SLLI: t=(16-sa)&0xF (ISA quirk — verified for sa 1..15, the only range this
+// MVP needs; sa==0/17..31 are out of scope here).
 fn xt_slli(uint64 rd, uint64 rs, uint64 sa) { xt_rrr(0, (16 - sa) & 0xF, rs, rd, 1, 0x1) }
 fn xt_srli(uint64 rd, uint64 rs, uint64 sa) { xt_rrr(0, rs, sa & 0xF, rd, 1, 0x4) }
-fn xt_srai(uint64 rd, uint64 rs, uint64 sa) { xt_rrr(0, rs, sa & 0xF, rd, 1, 0x2) }
+fn xt_srai(uint64 rd, uint64 rs, uint64 sa) { xt_rrr(0, rs, sa & 0xF, rd, 1, 0x2 | ((sa >> 4) & 1)) }
 
 // MEMW: fixed encoding, no operands (op0=0,t=0xC,s=0,r=2,op1=0,op2=0)
 fn xt_memw() { xt_rrr(0, 0xC, 0, 2, 0, 0) }
