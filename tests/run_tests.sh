@@ -5402,6 +5402,56 @@ else
     echo "  riscv_hosted_asm: SKIP (riscv64-linux-gnu-objdump not installed)"
 fi
 
+# --- RISC-V RV32IMC system/fence/CSR disasm golden-parity test ---
+# Same methodology as riscv_hosted_asm above, but for asm_sysfence_sample.kr
+# (fence, fence.i, wfi, mret, csrrw/csrrs/csrrc, csrrwi/csrrsi/csrrci) — the
+# SYSTEM (0x73) / MISC-MEM (0x0F) decode arms added to rv_disasm_word for the
+# hosted-emission follow-up minors.
+echo ""
+echo "--- riscv32 hosted system/fence/CSR disasm objdump-parity test ---"
+if command -v riscv64-linux-gnu-objdump >/dev/null 2>&1; then
+    TOTAL=$((TOTAL + 1))
+    RV_SF_ASM="/tmp/krc_rv_sf_asm_$$.s"
+    RV_SF_OBJ="/tmp/krc_rv_sf_asm_$$.o"
+    RV_SF_OBJMN="/tmp/krc_rv_sf_obj_$$.txt"
+    RV_SF_OURMN="/tmp/krc_rv_sf_our_$$.txt"
+    RV_SF_OK=1
+    if ! $KRC --arch=riscv32 --emit=asm "$DIR/../examples/riscv-hosted/asm_sysfence_sample.kr" -o "$RV_SF_ASM" >/dev/null 2>&1; then
+        echo "FAIL: riscv_hosted_sysfence_asm (--emit=asm failed)"
+        RV_SF_OK=0
+    fi
+    if [ "$RV_SF_OK" = 1 ] && ! $KRC --arch=riscv32 -c "$DIR/../examples/riscv-hosted/asm_sysfence_sample.kr" -o "$RV_SF_OBJ" >/dev/null 2>&1; then
+        echo "FAIL: riscv_hosted_sysfence_asm (-c object emission failed)"
+        RV_SF_OK=0
+    fi
+    if [ "$RV_SF_OK" = 1 ]; then
+        riscv64-linux-gnu-objdump -M no-aliases -d "$RV_SF_OBJ" \
+            | grep -P '^\s+[0-9a-f]+:\t' | awk -F'\t' '{print $3}' \
+            | grep -vE '^(c\.unimp|unimp|\.unknown)$' > "$RV_SF_OBJMN"
+        grep -E '^  [0-9a-f]+: ' "$RV_SF_ASM" | awk '{print $3}' \
+            | grep -vE '^(c\.unimp|unimp|\.unknown)$' > "$RV_SF_OURMN"
+        if [ ! -s "$RV_SF_OBJMN" ]; then
+            echo "FAIL: riscv_hosted_sysfence_asm (objdump produced no mnemonics)"
+            FAIL=$((FAIL + 1))
+        elif ! grep -qE '^(fence|fence\.i|wfi|mret|csrrw|csrrs|csrrc|csrrwi|csrrsi|csrrci)$' "$RV_SF_OBJMN"; then
+            echo "FAIL: riscv_hosted_sysfence_asm (golden sample emitted no system/fence/CSR mnemonics)"
+            FAIL=$((FAIL + 1))
+        elif diff -q "$RV_SF_OBJMN" "$RV_SF_OURMN" >/dev/null 2>&1; then
+            PASS=$((PASS + 1))
+            echo "  riscv_hosted_sysfence_asm: PASS ($(wc -l < "$RV_SF_OURMN" | tr -d ' ') mnemonics match objdump -M no-aliases)"
+        else
+            echo "FAIL: riscv_hosted_sysfence_asm (mnemonic mismatch vs objdump)"
+            diff "$RV_SF_OBJMN" "$RV_SF_OURMN" | head -20
+            FAIL=$((FAIL + 1))
+        fi
+    else
+        FAIL=$((FAIL + 1))
+    fi
+    rm -f "$RV_SF_ASM" "$RV_SF_OBJ" "$RV_SF_OBJMN" "$RV_SF_OURMN"
+else
+    echo "  riscv_hosted_sysfence_asm: SKIP (riscv64-linux-gnu-objdump not installed)"
+fi
+
 # --- Summary ---
 echo ""
 echo "=== Results: $PASS/$TOTAL passed, $FAIL failed ==="

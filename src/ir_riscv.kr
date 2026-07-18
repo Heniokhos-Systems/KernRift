@@ -1577,6 +1577,7 @@ fn ir_emit_riscv_insn(uint64 ii) {
             } else {
                 rv_store_spill(RV_A0, dest_v)
             }
+            ir_overflow_arg_count = 0
             return
         }
         if fixup_count >= 32768 {
@@ -2582,7 +2583,7 @@ fn ir_riscv_gen(uint64 fn_node) {
     //     codegen_aarch64.kr:5777-5783. Freestanding keeps the bare ret.
     uint32 fn_name_tok_rv = ast_data1(fn_node)
     uint64 wnt_rv_ep = fn_name_tok_rv
-    if tok_matches(wnt_rv_ep, "main", 4) != 0 && freestanding == 0 {
+    if tok_matches(wnt_rv_ep, "main", 4) != 0 && freestanding == 0 && is_naked == 0 {
         rv_li(17, 93)                 // a7 = 93 (asm-generic exit)
         emit_u32_le(0x00000073)       // ecall
     }

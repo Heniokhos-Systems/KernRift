@@ -122,8 +122,6 @@ fn emit_elf_relocatable_rv32(uint64 text_len, uint64 data_len) {
     // Also track name offsets for symtab
     uint64 name_offsets = alloc(fn_count * 8)
     uint64 fi = 0
-    // Track which function index is "main" for making it GLOBAL
-    uint64 main_fn_idx = 0xFFFFFFFF
     while fi < fn_count {
         uint64 fentry = fn_table + fi * 8
         uint32 stored_tok = 0
@@ -150,10 +148,6 @@ fn emit_elf_relocatable_rv32(uint64 text_len, uint64 data_len) {
         uint64 ntp = strtab_buf + strtab_len
         unsafe { *(ntp as uint8) = nul }
         strtab_len = strtab_len + 1
-        // Check if this is "main"
-        if tok_matches(ws, "main", 4) != 0 {
-            main_fn_idx = fi
-        }
         fi = fi + 1
     }
 
@@ -620,6 +614,34 @@ fn rv_write_hexpfx(uint64 fd, uint64 v) {
     rv_write_hexmin(fd, v)
 }
 
+// CSR address -> name, mirror of rv_asm_csr's table (ir_riscv.kr) so every
+// CSR our own inline-asm encoder can name also disassembles back to that
+// name (objdump does the same for its larger built-in CSR table). Unknown
+// addresses (reachable via the raw-hex asm escape hatch) fall back to
+// objdump's own fallback: the numeric address in hex.
+fn rv_write_csr(uint64 fd, uint64 csr) {
+    if csr == 0x300 { write(fd, "mstatus", 7) return }
+    if csr == 0x304 { write(fd, "mie", 3) return }
+    if csr == 0x305 { write(fd, "mtvec", 5) return }
+    if csr == 0x341 { write(fd, "mepc", 4) return }
+    if csr == 0x342 { write(fd, "mcause", 6) return }
+    if csr == 0x344 { write(fd, "mip", 3) return }
+    if csr == 0xF14 { write(fd, "mhartid", 7) return }
+    rv_write_hexpfx(fd, csr)
+}
+
+// FENCE pred/succ 4-bit set -> "iorw" letter subset (bit3=i,bit2=o,bit1=r,
+// bit0=w), matching `objdump -M no-aliases`. An all-zero set prints
+// "unknown" (objdump's own label for it — not reachable via asm_emit_rv's
+// fixed `fence` encoding, but the raw-hex escape can produce it).
+fn rv_write_fence_set(uint64 fd, uint64 v) {
+    if v == 0 { write(fd, "unknown", 7) return }
+    if (v & 8) != 0 { write(fd, "i", 1) }
+    if (v & 4) != 0 { write(fd, "o", 1) }
+    if (v & 2) != 0 { write(fd, "r", 1) }
+    if (v & 1) != 0 { write(fd, "w", 1) }
+}
+
 // Decode a 16-bit compressed instruction `h` -> one mnemonic + operands.
 fn rv_disasm_c(uint64 fd, uint64 h) {
     if h == 0 { write(fd, "c.unimp", 7) return }
@@ -911,10 +933,56 @@ fn rv_disasm_word(uint64 fd, uint64 insn, uint64 addr) {
         return
     }
 
-    // ----- SYSTEM (0x73): ecall / ebreak -----
+    // ----- MISC-MEM (0x0F): fence / fence.i -----
+    if op == 0x0F {
+        if f3 == 0 {
+            uint64 pred = (insn >> 24) & 0xF
+            uint64 succ = (insn >> 20) & 0xF
+            write(fd, "fence ", 6)
+            rv_write_fence_set(fd, pred)
+            write(fd, ",", 1)
+            rv_write_fence_set(fd, succ)
+            return
+        }
+        if f3 == 1 && insn == 0x0000100F { write(fd, "fence.i", 7) return }
+        write(fd, ".unknown", 8)
+        return
+    }
+
+    // ----- SYSTEM (0x73): ecall/ebreak/wfi/mret + CSR ops -----
     if op == 0x73 {
-        if insn == 0x73 { write(fd, "ecall", 5) return }
-        if insn == 0x00100073 { write(fd, "ebreak", 6) return }
+        if f3 == 0 {
+            if rd == 0 && rs1 == 0 {
+                if immI == 0 { write(fd, "ecall", 5) return }
+                if immI == 1 { write(fd, "ebreak", 6) return }
+                if immI == 0x105 { write(fd, "wfi", 3) return }
+                if immI == 0x302 { write(fd, "mret", 4) return }
+            }
+            write(fd, ".unknown", 8)
+            return
+        }
+        if f3 == 1 || f3 == 2 || f3 == 3 {
+            if f3 == 1 { write(fd, "csrrw ", 6) }
+            else if f3 == 2 { write(fd, "csrrs ", 6) }
+            else { write(fd, "csrrc ", 6) }
+            rv_regname(fd, rd)
+            write(fd, ",", 1)
+            rv_write_csr(fd, immI)
+            write(fd, ",", 1)
+            rv_regname(fd, rs1)
+            return
+        }
+        if f3 == 5 || f3 == 6 || f3 == 7 {
+            if f3 == 5 { write(fd, "csrrwi ", 7) }
+            else if f3 == 6 { write(fd, "csrrsi ", 7) }
+            else { write(fd, "csrrci ", 7) }
+            rv_regname(fd, rd)
+            write(fd, ",", 1)
+            rv_write_csr(fd, immI)
+            write(fd, ",", 1)
+            rv_write_udec(fd, rs1)
+            return
+        }
         write(fd, ".unknown", 8)
         return
     }

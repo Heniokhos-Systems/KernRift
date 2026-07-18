@@ -1,0 +1,21 @@
+// asm_sysfence_sample.kr — RV32IMC disassembler system/fence/CSR golden
+// sample. Exercises the SYSTEM (0x73) and MISC-MEM (0x0F) decode arms added
+// to rv_disasm_word (codegen_riscv.kr) for the hosted-emission follow-up:
+// fence, fence.i, wfi, mret, and the CSR ops reachable via asm_emit_rv
+// (ir_riscv.kr) — csrrw/csrr (-> csrrs) by mnemonic, plus csrrc and the
+// immediate csrrwi/csrrsi/csrrci forms via the raw-hex escape hatch, since
+// those are only reachable that way (asm_emit_rv has no mnemonic for them).
+// Checked against `riscv64-linux-gnu-objdump -M no-aliases -d` on the same
+// bytes — same methodology as asm_sample.kr's Task 7 golden sample.
+fn main() -> uint32 {
+    asm("fence")
+    asm("fence.i")
+    asm("wfi")
+    asm("mret")
+    asm("csrrw a0, mstatus, a1")
+    asm("csrr a0, mie")
+    asm("0x3442b573")   // csrrc a0, mip, t0     (no asm_emit_rv mnemonic)
+    asm("0x3053d5f3")   // csrrwi a1, mtvec, 7   (no asm_emit_rv mnemonic)
+    asm("0x1231e673")   // csrrsi a2, 0x123, 3   (unknown CSR -> hex fallback)
+    return 0
+}
