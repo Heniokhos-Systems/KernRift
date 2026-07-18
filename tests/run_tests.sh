@@ -4493,6 +4493,53 @@ else
     echo "  riscv_hello_boot: SKIP (qemu-system-riscv32 or riscv64-linux-gnu-objdump not installed)"
 fi
 
+# --- Xtensa LX6 first-compilable-leaf disassembly test (Task 3) ---
+# Compiles examples/xtensa/ret42.kr (fn main -> uint32 { return 42 }) with
+# --arch=xtensa --freestanding (raw flat blob — the boot ELF is Task 8), then
+# disassembles with xtensa-lx106-elf-objdump and asserts the CALL0 leaf shape:
+# the constant 42 is materialised (movi), it reaches the return reg a2 (mov.n),
+# and the function returns (ret.n). No qemu run yet — objdump on the emitted
+# bytes is the check. objdump is dev-only toolchain: SKIP cleanly when absent
+# (mirrors the riscv boot-test skip discipline).
+echo ""
+echo "--- xtensa LX6 ret42 disasm test ---"
+if command -v xtensa-lx106-elf-objdump >/dev/null 2>&1; then
+    TOTAL=$((TOTAL + 1))
+    XT_BIN="/tmp/krc_xt_ret42_$$.bin"
+    XT_OK=1
+    if ! $KRC --arch=xtensa --freestanding "$DIR/../examples/xtensa/ret42.kr" -o "$XT_BIN" >/dev/null 2>&1; then
+        echo "FAIL: xtensa_ret42_disasm (compilation failed)"
+        XT_OK=0
+    fi
+    if [ "$XT_OK" = 1 ]; then
+        XT_DIS=$(xtensa-lx106-elf-objdump -b binary -m xtensa -D "$XT_BIN" 2>/dev/null)
+        # 42 materialised into an a-register…
+        if ! echo "$XT_DIS" | grep -Eq 'movi[[:space:]]+a1?[0-9], ?42'; then
+            echo "FAIL: xtensa_ret42_disasm (no 'movi aN, 42' — 42 not materialised)"
+            XT_OK=0
+        fi
+        # …reaching the CALL0 return register a2…
+        if [ "$XT_OK" = 1 ] && ! echo "$XT_DIS" | grep -Eq '(mov(\.n)?|movi)[[:space:]]+a2,'; then
+            echo "FAIL: xtensa_ret42_disasm (value never reaches return reg a2)"
+            XT_OK=0
+        fi
+        # …and the function returns.
+        if [ "$XT_OK" = 1 ] && ! echo "$XT_DIS" | grep -Eq '\bret(\.n)?\b'; then
+            echo "FAIL: xtensa_ret42_disasm (no ret/ret.n)"
+            XT_OK=0
+        fi
+    fi
+    if [ "$XT_OK" = 1 ]; then
+        PASS=$((PASS + 1))
+        echo "  xtensa_ret42_disasm: PASS (movi + mov.n a2 + ret.n)"
+    else
+        FAIL=$((FAIL + 1))
+    fi
+    rm -f "$XT_BIN"
+else
+    echo "  xtensa_ret42_disasm: SKIP (xtensa-lx106-elf-objdump not installed)"
+fi
+
 # --- RISC-V RV32 IR_STR_CONST via pcrel auipc+addi (feature-gap Task 1) ---
 # Compiles examples/riscv-featuregap/t1_strconst.kr, which takes the address
 # of a string literal ("hi\n") through IR_STR_CONST and writes it to the UART.

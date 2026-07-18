@@ -225,3 +225,460 @@ fn xt_movi_n(uint64 rd, uint64 imm) {
 // RET.N / NOP.N: fixed 16-bit encodings, no operands.
 fn xt_ret_n() { xt_emit16(0xF00D) }
 fn xt_nop_n() { xt_emit16(0xF03D) }
+
+// ===========================================================================
+// Task 3: per-function codegen driver (mirror of ir_riscv_gen).
+//
+// CALL0 register roles used below: a0=return address, a1=SP, a2=arg0/retval,
+// a2-a7=args, a8/a9=caller-saved scratch (spill reload), a12-a15=callee-saved
+// (the register-allocator colour file). RISC-V's t5/t6 scratch pair maps to
+// a8/a9 here; RISC-V's s0-s11 colour file (12 regs) maps to a12-a15 (4 regs).
+// ===========================================================================
+
+// --- Register allocation -------------------------------------------------
+// Colour 0..3 -> a12..a15 (callee-saved). Only four allocatable colours: the
+// Xtensa AR file is narrow once a2-a7 (args) and a8-a11 (caller temps) are
+// carved out. IR_NUM_REGS = 4 for xtensa (flagged narrow in the spec).
+fn xt_reg_for_color(uint64 color) -> uint64 {
+    return 12 + color        // color 0..3 -> a12..a15
+}
+
+// Nonzero once ir_phys_regs points at a >= 4-slot buffer this init sized
+// itself (mirror of ir_rv_phys_regs_sized). x86/arm64 inits allocate 10
+// slots, riscv 12, xtensa needs only 4 — so we can reuse a bigger buffer if
+// one already exists; we only allocate our own the first time.
+static uint64 ir_xt_phys_regs_sized = 0
+
+fn ir_regalloc_init_xtensa() {
+    IR_NUM_REGS = 4
+    if ir_xt_phys_regs_sized == 0 {
+        if ir_phys_regs == 0 { ir_phys_regs = alloc(4 * 8) }
+        ir_xt_phys_regs_sized = 1
+    }
+    uint64 c = 0
+    while c < 4 {
+        uint64 p = ir_phys_regs + c * 8
+        uint64 phys = xt_reg_for_color(c)
+        unsafe { *(p as uint64) = phys }
+        c = c + 1
+    }
+}
+
+// --- Immediate classification -------------------------------------------
+// Does a 32-bit value fit MOVI's sign-extended 12-bit immediate (-2048..2047)?
+// movi sign-extends imm12 to 32 bits, so a 32-bit two's-complement value whose
+// signed magnitude is in range materialises in one instruction. Re-bias into
+// [0,0x1000): 42 -> 0x82A (fits); -5 = 0xFFFFFFFB -> 0x7FB (fits); 0x800=2048
+// -> 0x1000 (rejected, needs a literal). Mirror of rv_fits_imm12.
+fn xt_fits_movi(uint64 v) -> uint64 {
+    uint64 biased = (v + 0x800) & 0xFFFFFFFF
+    if biased < 0x1000 { return 1 }
+    return 0
+}
+
+// --- Per-function literal pool ------------------------------------------
+// L32R is backward-only (the literal word must precede the instruction), so
+// the pool is emitted FIRST, before any code, at the function's start. Its
+// contents are known only after scanning the lowered IR — hence the pre-scan
+// in ir_xtensa_gen interns every needed literal here, then flushes the
+// word-aligned pool, then code emission consumes the same interned slots.
+//
+// This is the divergence from riscv: because the pool precedes the code, the
+// function's entry offset (what fn_register records for e_entry / call
+// targets) is code_start = pool_end, NOT out_len at function entry. So
+// ir_xtensa_gen registers the function ITSELF (main.kr's arch-3 loop must not
+// pre-register). Address-literals (call target / str / static / fnaddr,
+// arriving in later tasks) reserve a slot holding a placeholder word that the
+// fixup resolvers patch into the POOL word rather than an inline instruction.
+static uint64 xt_lit_buf = 0        // uint64[] of interned literal values
+static uint64 xt_lit_cap = 0
+static uint64 xt_lit_count = 0
+static uint64 xt_lit_base = 0       // file offset of pool word 0 (set by flush)
+
+fn xt_lit_reset() {
+    xt_lit_count = 0
+}
+
+// Intern a literal value, deduplicating by value. Returns its slot index
+// (pool word i lives at xt_lit_base + i*4). Called once per needed literal in
+// the pre-scan and again at each use site — the dedup makes both agree.
+fn xt_lit_intern(uint64 value) -> uint64 {
+    uint64 v = value & 0xFFFFFFFF
+    uint64 i = 0
+    while i < xt_lit_count {
+        uint64 p = xt_lit_buf + i * 8
+        uint64 ev = 0
+        unsafe { *(p as uint64) -> ev }
+        if ev == v { return i }
+        i = i + 1
+    }
+    if xt_lit_count >= xt_lit_cap {
+        uint64 new_cap = xt_lit_cap * 2
+        if new_cap < 64 { new_cap = 64 }
+        uint64 nb = alloc(new_cap * 8)
+        if xt_lit_buf != 0 {
+            memcpy(nb, xt_lit_buf, xt_lit_count * 8)
+            dealloc(xt_lit_buf)
+        }
+        xt_lit_buf = nb
+        xt_lit_cap = new_cap
+    }
+    uint64 slot = xt_lit_count
+    uint64 sp = xt_lit_buf + slot * 8
+    unsafe { *(sp as uint64) = v }
+    xt_lit_count = xt_lit_count + 1
+    return slot
+}
+
+// Emit the word-aligned pool at the current output offset and record its base.
+// Each L32R target must be 4-byte-aligned (imm16 is word-scaled off
+// ((PC+3)&~3)), so pad to a 4-byte boundary before laying the words down.
+// With an empty pool, xt_lit_base is simply the code start (no padding).
+fn xt_lit_flush() {
+    if xt_lit_count == 0 {
+        xt_lit_base = out_len
+        return
+    }
+    while (out_len & 3) != 0 { emit_byte(0) }
+    xt_lit_base = out_len
+    uint64 i = 0
+    while i < xt_lit_count {
+        uint64 p = xt_lit_buf + i * 8
+        uint64 ev = 0
+        unsafe { *(p as uint64) -> ev }
+        emit_u32_le(ev & 0xFFFFFFFF)
+        i = i + 1
+    }
+}
+
+// --- Spill slots ---------------------------------------------------------
+// Spilled vregs (colour >= IR_NUM_REGS) live at the BOTTOM of the frame:
+// slot i at [a1 + i*4]. 4-byte words (uint64/float are rejected on xtensa by
+// sema, so every value is one 4-byte slot). a8/a9 are the reserved reload
+// scratch — never allocated, never live across an IR op.
+fn xt_spill_offset(uint64 vreg) -> uint64 {
+    uint64 slot = vreg - IR_NUM_REGS - 1
+    uint64 off = slot * 4
+    // s32i/l32i offsets are (imm8 << 2), max 1020. A function with enough
+    // spills to push a slot past that loud-fails rather than truncating.
+    if off > 1020 {
+        xt_err("error: xtensa: spill offset exceeds l32i/s32i range\n")
+    }
+    return off
+}
+
+fn xt_store_spill(uint64 reg, uint64 vreg) {
+    xt_s32i(reg, XT_SP, xt_spill_offset(vreg))
+}
+fn xt_load_spill(uint64 scratch, uint64 vreg) {
+    xt_l32i(scratch, XT_SP, xt_spill_offset(vreg))
+}
+
+// Coloured vregs resolve through ir_get_phys_reg (colour -> ir_phys_regs[],
+// filled by ir_regalloc_init_xtensa); spilled vregs reload into the
+// caller-provided scratch (a8 or a9). Mirror of rv_resolve_src.
+fn xt_resolve_src(uint64 vreg, uint64 scratch) -> uint64 {
+    if vreg == 0 { return scratch }
+    uint64 phys = ir_get_phys_reg(vreg)
+    if phys != 0xFFFFFFFF { return phys }
+    xt_load_spill(scratch, vreg)
+    return scratch
+}
+
+// mov rd, rs — MOV.N (16-bit).
+fn xt_mv(uint64 rd, uint64 rs) {
+    if rd == rs { return }
+    xt_mov_n(rd, rs)
+}
+
+// --- 24-bit patch + J re-encode (return-fixup patcher) -------------------
+// J is 3 bytes; patch_u32 would clobber a 4th byte (the next instruction), so
+// patch exactly three. Return sites emit a `j #0` placeholder; step 10
+// re-encodes each to jump to the epilogue.
+fn xt_patch24(uint64 off, uint64 w) {
+    uint64 p = out_buf + off
+    unsafe { *(p as uint8) = w & 0xFF }
+    uint64 p1 = p + 1
+    unsafe { *(p1 as uint8) = (w >> 8) & 0xFF }
+    uint64 p2 = p + 2
+    unsafe { *(p2 as uint8) = (w >> 16) & 0xFF }
+}
+
+// J word for a jump at `site` to `target`: target = PC+4+imm18 (byte offset),
+// so imm18 = target - (site+4). ±128 KiB reach (unchecked here — leaf
+// functions only; range check lands with T6 relaxation).
+fn xt_j_word(uint64 site, uint64 target) -> uint64 {
+    uint64 diff = target - (site + 4)
+    uint64 imm18 = diff & 0x3FFFF
+    return 0x6 | (imm18 << 6)
+}
+
+// --- Per-instruction emission -------------------------------------------
+fn ir_emit_xtensa_insn(uint64 ii) {
+    uint64 op = ir_insn_opcode(ii)
+    if op == 0 { return }            // NOP (LICM-elided slot)
+    uint64 dest_v = ir_insn_dest(ii)
+    uint64 s1_v = ir_insn_src1(ii)
+    uint64 imm = ir_insn_imm(ii)
+
+    // DWARF line-table hook (same as the x86/arm64/riscv emitters).
+    uint64 ir_src_tok = ir_insn_src_tok_at(ii)
+    if ir_src_tok != 0 { line_table_record(ir_src_tok) }
+
+    uint64 dst_r = 0xFFFFFFFF
+    if dest_v != 0 { dst_r = ir_get_phys_reg(dest_v) }
+
+    // ----- IR_CONST (1): dst = imm -----
+    if op == 1 {
+        // >32-bit constant backstop (mirror of ir_riscv.kr:1147): reject a
+        // genuine 64-bit literal, but accept a sign-extended 32-bit negative
+        // (the shared optimiser const-folds in 64-bit, so `int32 a = 0 - 5`
+        // arrives as 0xFFFFFFFFFFFFFFFB — its low 32 bits are the value).
+        if imm > 0xFFFFFFFF {
+            if imm < 0xFFFFFFFF80000000 {
+                xt_err("error: 64-bit constant not supported on xtensa\n")
+            }
+        }
+        uint64 v = imm & 0xFFFFFFFF
+        uint64 d = dst_r
+        if d == 0xFFFFFFFF { d = XT_A8 }
+        if xt_fits_movi(v) != 0 {
+            xt_movi(d, v)
+        } else {
+            uint64 slot = xt_lit_intern(v)
+            xt_l32r(d, xt_lit_base + slot * 4)
+        }
+        if dst_r == 0xFFFFFFFF { xt_store_spill(XT_A8, dest_v) }
+        return
+    }
+
+    // ----- IR_RET (42): move result to a2, branch to epilogue -----
+    if op == 42 {
+        uint64 ret_r = xt_resolve_src(s1_v, XT_A8)
+        if ret_r != XT_A2 { xt_mv(XT_A2, ret_r) }
+        uint64 rfp = ir_ret_fixups + ir_ret_fixup_count * 4
+        uint32 rpo = out_len
+        unsafe { *(rfp as uint32) = rpo }
+        ir_ret_fixup_count = ir_ret_fixup_count + 1
+        xt_emit24(0x6)                            // j #0 (patched to epilogue)
+        return
+    }
+
+    // ----- IR_RET_VOID (43): a2 = 0, branch to epilogue -----
+    if op == 43 {
+        xt_movi(XT_A2, 0)
+        uint64 rfp = ir_ret_fixups + ir_ret_fixup_count * 4
+        uint32 rpo = out_len
+        unsafe { *(rfp as uint32) = rpo }
+        ir_ret_fixup_count = ir_ret_fixup_count + 1
+        xt_emit24(0x6)                            // j #0 (patched to epilogue)
+        return
+    }
+
+    // Everything else lands in later tasks (ALU=T4, mem/call=T5, branches=T6).
+    xt_nyi_op(op)
+}
+
+// --- Codegen driver ------------------------------------------------------
+// Mirror of ir_riscv_gen (ir_riscv.kr:2255), minus the C-compression pass
+// (there is no compressed relayout on xtensa) and plus the literal-pool
+// emission + self-registration described above.
+fn ir_xtensa_gen(uint64 fn_node) {
+    uint32 ann_flags = ast_data4(fn_node)
+    uint64 is_naked = ann_flags & 2
+
+    // 1. Lower AST to IR
+    ir_lower_function(fn_node)
+
+    // 1a. Optimise
+    if ir_opt_level > 0 {
+        ir_optimize()
+    }
+
+    // 2. Liveness
+    ir_compute_liveness()
+
+    // 3. Xtensa register allocator (4 callee-saved colours a12..a15).
+    //    IR_NUM_REGS is shared; save/pin/restore around emission.
+    uint64 saved_num_regs = IR_NUM_REGS
+    IR_NUM_REGS = 4
+    ir_regalloc_init_xtensa()
+    ir_graph_color()
+
+    // 4. Spill count
+    ir_spill_count = 0
+    if ir_vreg_next > IR_NUM_REGS + 1 {
+        ir_spill_count = ir_vreg_next - IR_NUM_REGS - 1
+    }
+
+    // 4a. Snapshot the function's var map for DWARF (if -g)
+    ir_snapshot_debug_vars()
+
+    // 5. Frame — 4-byte slots, 16-byte-aligned SP. Layout from a1 upward:
+    //      [a1 + 0 .. spill_size)          spilled vregs
+    //      [stack arrays ...]              compile-time-sized local arrays
+    //      [cs_base ...]                   saved a12-a15 (used colours)
+    //      [a1 + total_frame - 4]          saved a0 (return address)
+    uint64 spill_size = ir_spill_count * 4
+    uint64 used_mask = ir_used_color_mask()
+    uint64 nsaved = 0
+    uint64 mc = 0
+    while mc < 4 {
+        if ((used_mask >> mc) & 1) != 0 { nsaved = nsaved + 1 }
+        mc = mc + 1
+    }
+    uint64 cs_base = spill_size + ir_stack_array_bytes
+    uint64 total_frame = cs_base + nsaved * 4 + 4
+    if (total_frame & 15) != 0 { total_frame = total_frame + 16 - (total_frame & 15) }
+    if is_naked != 0 { total_frame = 0 }
+    // Large frames are a later task; s32i(a0) offset is (imm8<<2) <= 1020 and
+    // MOVI-materialised frames must fit signed-12. Guard both loudly for now.
+    if is_naked == 0 {
+        if total_frame > 2047 {
+            xt_err("error: xtensa: frame exceeds 2047 bytes (large-frame support is a later task)\n")
+        }
+        if total_frame - 4 > 1020 {
+            xt_err("error: xtensa: return-slot offset exceeds l32i/s32i range\n")
+        }
+    }
+    ir_frame_size = total_frame
+
+    // 6. Literal pool FIRST (before any code). Pre-scan the lowered+optimised
+    //    IR for every IR_CONST that does not fit MOVI; intern each. (Address-
+    //    literals — call/str/static/fnaddr — reserve slots here in later
+    //    tasks.) Then flush the word-aligned pool. code_start follows it.
+    xt_lit_reset()
+    uint64 sbi = 0
+    while sbi < ir_bb_count {
+        uint64 sii = ir_bb_first_insn(sbi)
+        while sii != 0xFFFFFFFF {
+            if ir_insn_opcode(sii) == 1 {
+                uint64 cimm = ir_insn_imm(sii)
+                // Only 32-bit-representable constants reach the pool; genuine
+                // 64-bit literals are rejected at emit time (loud), so the
+                // pre-scan need not pool them.
+                uint64 pool_ok = 1
+                if cimm > 0xFFFFFFFF {
+                    if cimm < 0xFFFFFFFF80000000 { pool_ok = 0 }
+                }
+                if pool_ok != 0 {
+                    uint64 cv = cimm & 0xFFFFFFFF
+                    if xt_fits_movi(cv) == 0 { xt_lit_intern(cv) }
+                }
+            }
+            sii = ir_insn_next(sii)
+        }
+        sbi = sbi + 1
+    }
+    xt_lit_flush()
+
+    // 6a. Self-register at code_start (past the pool) so find_main_offset /
+    //     fn_lookup return the entry, not the pool. main.kr must NOT pre-
+    //     register (unlike the riscv arch-2 branch).
+    uint64 code_start = out_len
+    uint32 fn_name_tok = ast_data1(fn_node)
+    fn_register(fn_name_tok, code_start)
+    line_table_record_fn_entry(fn_name_tok)
+
+    // 7. Prologue (skip for @naked). CALL0: lower SP, save a0 (return addr)
+    //    at [a1 + total_frame - 4], save used a12-a15. addi is signed-8, so a
+    //    single-instruction adjust needs |delta| <= 127 (both -N in the
+    //    prologue and +N in the epilogue); larger frames materialise N in a8.
+    if is_naked == 0 {
+        if total_frame <= 127 {
+            xt_addi(XT_SP, XT_SP, (0 - total_frame) & 0xFF)   // addi a1, a1, -N
+        } else {
+            xt_movi(XT_A8, total_frame)
+            xt_sub(XT_SP, XT_SP, XT_A8)                        // a1 = a1 - a8
+        }
+        xt_s32i(XT_A0, XT_SP, total_frame - 4)                // s32i a0, a1, N-4
+        uint64 pc = 0
+        uint64 pslot = 0
+        while pc < 4 {
+            if ((used_mask >> pc) & 1) != 0 {
+                xt_s32i(xt_reg_for_color(pc), XT_SP, cs_base + pslot * 4)
+                pslot = pslot + 1
+            }
+            pc = pc + 1
+        }
+    }
+
+    // 8. Branch/return fixup tracking (shared grow-as-needed buffers).
+    uint64 bo_need = ir_bb_count
+    if bo_need < 4096 { bo_need = 4096 }
+    if bo_need > ir_block_offsets_cap {
+        if ir_block_offsets != 0 { dealloc(ir_block_offsets) }
+        ir_block_offsets = alloc(bo_need * 8)
+        ir_block_offsets_cap = bo_need
+    }
+    uint64 ret_need = ir_bb_count
+    if ret_need < 1024 { ret_need = 1024 }
+    if ret_need > ir_ret_fixups_cap {
+        if ir_ret_fixups != 0 { dealloc(ir_ret_fixups) }
+        ir_ret_fixups = alloc(ret_need * 4)
+        ir_ret_fixups_cap = ret_need
+    }
+    ir_ret_fixup_count = 0
+
+    // 9. Emit basic blocks. IR_RET/IR_RET_VOID are non-terminators here (like
+    //    riscv) — emitted in the insn loop. IR_BR/IR_BR_COND terminators are
+    //    branch relaxation (T6); a leaf never has them, so loud-fail if seen.
+    uint64 bi = 0
+    while bi < ir_bb_count {
+        uint64 bop = ir_block_offsets + bi * 8
+        unsafe { *(bop as uint64) = out_len }
+        uint64 ii = ir_bb_first_insn(bi)
+        while ii != 0xFFFFFFFF {
+            uint64 iop = ir_insn_opcode(ii)
+            if iop != 40 && iop != 41 {
+                ir_emit_xtensa_insn(ii)
+            }
+            ii = ir_insn_next(ii)
+        }
+        uint64 last = ir_bb_last_insn(bi)
+        if last != 0xFFFFFFFF {
+            uint64 last_op = ir_insn_opcode(last)
+            if last_op == 40 || last_op == 41 {
+                xt_err("error: xtensa: branch codegen (IR_BR/IR_BR_COND) is a later task\n")
+            }
+        }
+        bi = bi + 1
+    }
+
+    // 10. Patch return fixups — all jump to the epilogue.
+    uint64 epilogue_off = out_len
+    uint64 ri = 0
+    while ri < ir_ret_fixup_count {
+        uint64 rfp = ir_ret_fixups + ri * 4
+        uint32 rpatch = 0
+        unsafe { *(rfp as uint32) -> rpatch }
+        uint64 wrp = rpatch
+        xt_patch24(wrp, xt_j_word(wrp, epilogue_off))
+        ri = ri + 1
+    }
+
+    // 11. Epilogue (skip for @naked): restore a12-a15, restore a0, unwind SP,
+    //     ret.n. No auto-exit trampoline yet (runtime is T8).
+    if is_naked == 0 {
+        uint64 ec = 0
+        uint64 eslot = 0
+        while ec < 4 {
+            if ((used_mask >> ec) & 1) != 0 {
+                xt_l32i(xt_reg_for_color(ec), XT_SP, cs_base + eslot * 4)
+                eslot = eslot + 1
+            }
+            ec = ec + 1
+        }
+        xt_l32i(XT_A0, XT_SP, total_frame - 4)                // l32i a0, a1, N-4
+        if total_frame <= 127 {
+            xt_addi(XT_SP, XT_SP, total_frame & 0xFF)         // addi a1, a1, N
+        } else {
+            xt_movi(XT_A8, total_frame)
+            xt_add(XT_SP, XT_SP, XT_A8)                        // a1 = a1 + a8
+        }
+        xt_ret_n()
+    }
+
+    // Restore IR_NUM_REGS for functions compiled later on other arches.
+    IR_NUM_REGS = saved_num_regs
+}

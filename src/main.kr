@@ -2280,6 +2280,16 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
     if arch == 2 && emit_mode == 0 && freestanding != 0 {
         rv_raw = 1
     }
+    // Xtensa (Task 3): --arch=xtensa --freestanding emits a raw, headerless
+    // code blob so `xtensa-lx106-elf-objdump -b binary -m xtensa` can inspect
+    // the bytes before the boot-ELF writer exists (that lands in Task 8). This
+    // path writes out_buf and exits right after codegen — it never reaches the
+    // arch-3 fixup/ELF NYIs below. Gated on arch==3, so arch 0/1/2 are
+    // untouched (bootstrap byte-identity holds).
+    uint64 xt_raw = 0
+    if arch == 3 && emit_mode == 0 && freestanding != 0 {
+        xt_raw = 1
+    }
 
     // Dead code elimination: scan AST for reachable functions
     dce_init()
@@ -2359,6 +2369,10 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
             // riscv32 hosted: Elf32 executable header + program header.
             emit_elf_header_rv32()
             header_size = 84
+        } else if xt_raw != 0 {
+            // xtensa --freestanding: raw flat blob for objdump (Task 3). No
+            // container header; out_buf starts with the first function's pool.
+            header_size = 0
         } else if arch == 3 {
             xtensa_nyi("ELF image emission")
         }
@@ -2514,7 +2528,17 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
                     line_table_record_fn_entry(fn_name)
                     gen_function(wchild)
                 } else if arch == 3 {
-                    xtensa_nyi("codegen")
+                    // Xtensa LX6 — IR-only backend. Unlike the riscv arch-2
+                    // branch, do NOT pre-register the function here:
+                    // ir_xtensa_gen registers it itself at code_start (past
+                    // its literal pool), so the recorded entry is the code,
+                    // not the pool. Extern declarations have no body — skip.
+                    uint32 xt_ann_flags = ast_data4(wchild)
+                    uint64 xt_is_extern = xt_ann_flags & 8
+                    if xt_is_extern == 0 {
+                        ir_init()
+                        ir_xtensa_gen(wchild)
+                    }
                 } else {
                     // Legacy ARM64: gen_function_a64 registers internally.
                     line_table_record_fn_entry(fn_name)
@@ -2524,6 +2548,23 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
         }
         uint32 nxt = ast_next(wchild)
         wchild = nxt
+    }
+
+    // Xtensa raw mode (Task 3): the whole post-codegen pipeline below
+    // (call/string/static fixups, ELF headers, BSS truncation) is still
+    // xtensa_nyi. Leaf functions need none of it — write the raw code blob and
+    // exit here so objdump can disassemble it. This early-out is arch-3-only,
+    // so it cannot perturb arch 0/1/2 output.
+    if xt_raw != 0 {
+        codegen_write_output(output_path)
+        set_executable(output_path)
+        uint8[64] xnb
+        uint64 xtl = fmt_uint(xnb, codegen_output_len())
+        write(1, xnb, xtl)
+        write(1, " bytes -> ", 10)
+        write(1, output_path, str_len(output_path))
+        write(1, "\n", 1)
+        exit(0)
     }
 
 
