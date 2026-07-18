@@ -5332,6 +5332,59 @@ else
     echo "  riscv_hosted_link: SKIP (qemu-riscv32-static or riscv64-linux-gnu-ld not installed)"
 fi
 
+# --- RISC-V RV32IMC --emit=asm disassembler golden-parity test (Task 7) ---
+# Compiles examples/riscv-hosted/asm_sample.kr two ways from the SAME codegen:
+# (1) `--emit=asm` -> our RV32IMC listing, and (2) `-c` -> a relocatable .o
+# whose .text objdump can disassemble (the hosted ELF exe carries no section
+# headers, so objdump needs the .o). Both share one deterministic instruction
+# stream, so their mnemonic columns must agree token-for-token. objdump runs
+# with `-M no-aliases` (raw forms, no li/mv/ret/j pseudo-ops) so our raw
+# decoder can match it directly. 0x0000 tail padding (objdump: c.unimp / `...`)
+# is filtered from both sides. Dev-only toolchain guard/SKIP as elsewhere.
+echo ""
+echo "--- riscv32 hosted --emit=asm objdump-parity test ---"
+if command -v riscv64-linux-gnu-objdump >/dev/null 2>&1; then
+    TOTAL=$((TOTAL + 1))
+    RV_ASM="/tmp/krc_rv_asm_$$.s"
+    RV_OBJ="/tmp/krc_rv_asm_$$.o"
+    RV_OBJMN="/tmp/krc_rv_asm_obj_$$.txt"
+    RV_OURMN="/tmp/krc_rv_asm_our_$$.txt"
+    RV_OK=1
+    if ! $KRC --arch=riscv32 --emit=asm "$DIR/../examples/riscv-hosted/asm_sample.kr" -o "$RV_ASM" >/dev/null 2>&1; then
+        echo "FAIL: riscv_hosted_asm (--emit=asm failed)"
+        RV_OK=0
+    fi
+    if [ "$RV_OK" = 1 ] && ! $KRC --arch=riscv32 -c "$DIR/../examples/riscv-hosted/asm_sample.kr" -o "$RV_OBJ" >/dev/null 2>&1; then
+        echo "FAIL: riscv_hosted_asm (-c object emission failed)"
+        RV_OK=0
+    fi
+    if [ "$RV_OK" = 1 ]; then
+        # Golden mnemonic column: objdump's 3rd tab-field on instruction lines.
+        riscv64-linux-gnu-objdump -M no-aliases -d "$RV_OBJ" \
+            | grep -P '^\s+[0-9a-f]+:\t' | awk -F'\t' '{print $3}' \
+            | grep -vE '^(c\.unimp|unimp|\.unknown)$' > "$RV_OBJMN"
+        # Our listing's 3rd whitespace-field on "  <off>: <hex>  <mnem>" lines.
+        grep -E '^  [0-9a-f]+: ' "$RV_ASM" | awk '{print $3}' \
+            | grep -vE '^(c\.unimp|unimp|\.unknown)$' > "$RV_OURMN"
+        if [ ! -s "$RV_OBJMN" ]; then
+            echo "FAIL: riscv_hosted_asm (objdump produced no mnemonics)"
+            FAIL=$((FAIL + 1))
+        elif diff -q "$RV_OBJMN" "$RV_OURMN" >/dev/null 2>&1; then
+            PASS=$((PASS + 1))
+            echo "  riscv_hosted_asm: PASS ($(wc -l < "$RV_OURMN" | tr -d ' ') mnemonics match objdump -M no-aliases)"
+        else
+            echo "FAIL: riscv_hosted_asm (mnemonic mismatch vs objdump)"
+            diff "$RV_OBJMN" "$RV_OURMN" | head -20
+            FAIL=$((FAIL + 1))
+        fi
+    else
+        FAIL=$((FAIL + 1))
+    fi
+    rm -f "$RV_ASM" "$RV_OBJ" "$RV_OBJMN" "$RV_OURMN"
+else
+    echo "  riscv_hosted_asm: SKIP (riscv64-linux-gnu-objdump not installed)"
+fi
+
 # --- Summary ---
 echo ""
 echo "=== Results: $PASS/$TOTAL passed, $FAIL failed ==="

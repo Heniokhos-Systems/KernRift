@@ -1,0 +1,33 @@
+// asm_sample.kr — Task 7 golden sample for `--arch=riscv32 --emit=asm`.
+// Exercises a spread of RV32IMC forms so the disassembler listing has real
+// variety to check against `riscv64-linux-gnu-objdump -M no-aliases -d` on
+// the same emitted bytes: R-type arithmetic + RV32M mul/div/rem, OP-IMM
+// (addi/andi/ori/xori/shifts), loads/stores (spills -> lw/sw), U-type
+// (lui/auipc for large constants + call materialization), and calls
+// (auipc+jalr / jal). The compressor rewrites eligible words to their c.*
+// forms (c.li/c.addi/c.mv/c.add/c.lw/c.sw/c.slli/c.srli/c.andi/c.sub), so
+// the listing must decode both widths. Hosted riscv uses uint32.
+fn add3(uint32 a, uint32 b, uint32 c) -> uint32 {
+    return a + b + c
+}
+
+fn arith(uint32 x, uint32 y) -> uint32 {
+    uint32 s = x + y
+    uint32 d = x - y
+    uint32 m = x * y
+    uint32 q = x / y
+    uint32 r = x % y
+    uint32 sh = x << 3
+    uint32 sr = y >> 1
+    uint32 an = x & 15
+    uint32 o = x | y
+    uint32 xr = x ^ y
+    uint32 big = x + 100000
+    return s + d + m + q + r + sh + sr + an + o + xr + big
+}
+
+fn main() -> uint32 {
+    uint32 t = arith(20, 6)
+    uint32 u = add3(10, t, 12)
+    return u
+}

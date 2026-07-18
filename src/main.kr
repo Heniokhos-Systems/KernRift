@@ -820,10 +820,6 @@ fn riscv32_nyi(uint64 what) {
 }
 
 fn emit_asm_listing(uint64 output_path, uint64 arch, uint64 text_start, uint64 source, uint64 tokens) {
-    // arch==2 (riscv32): no disassembler yet — refuse before touching output.
-    if arch == 2 {
-        riscv32_nyi("asm listing")
-    }
     uint64 fd = file_open(output_path, 1)
     uint64 code_end = codegen_output_len()
     write(fd, "; KernRift assembly listing\n", 27)
@@ -831,6 +827,8 @@ fn emit_asm_listing(uint64 output_path, uint64 arch, uint64 text_start, uint64 s
         write(fd, "; Architecture: x86_64\n", 23)
     } else if arch == 1 {
         write(fd, "; Architecture: ARM64\n", 22)
+    } else if arch == 2 {
+        write(fd, "; Architecture: RV32IMC\n", 24)
     } else {
         riscv32_nyi("asm listing")
     }
@@ -860,6 +858,8 @@ fn emit_asm_listing(uint64 output_path, uint64 arch, uint64 text_start, uint64 s
                 write(fd, ",\"ax\",@progbits\n", 16)
             } else if arch == 1 {
                 write(fd, ",\"ax\",%progbits\n", 16)
+            } else if arch == 2 {
+                write(fd, ",\"ax\",@progbits\n", 16)
             } else {
                 riscv32_nyi("asm listing")
             }
@@ -2178,6 +2178,13 @@ fn emit_asm_listing(uint64 output_path, uint64 arch, uint64 text_start, uint64 s
                     pos = pos + cnt
                 }
                 write(fd, "\n", 1)
+            }
+        } else if arch == 2 {
+            // RV32IMC: mixed 2-/4-byte instructions — step by the length
+            // rv_disasm_at reports (2 compressed, 4 full), never a fixed 4.
+            while pos < fn_end {
+                uint64 step = rv_disasm_at(fd, pos, text_start)
+                pos = pos + step
             }
         } else {
             riscv32_nyi("asm listing")

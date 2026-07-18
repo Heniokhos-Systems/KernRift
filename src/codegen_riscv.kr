@@ -516,3 +516,435 @@ fn emit_elf_relocatable_rv32(uint64 text_len, uint64 data_len) {
         emit_u32_le(12)         // sh_entsize = sizeof(Elf32_Rela)
     }
 }
+
+// ===========================================================================
+// RV32IMC disassembler for `--emit=asm` (Task 7).
+//
+// Decodes EXACTLY the subset the encoder emits into an objdump-parity listing:
+//   * ir_riscv.kr full-width forms: U-type (lui/auipc), J-type (jal), I-type
+//     (jalr, loads, OP-IMM incl. slli/srli/srai), S-type (stores), B-type
+//     (branches), R-type OP (+ RV32M mul..remu when funct7==0x01), ecall.
+//   * every c.* form rv_try_compress() produces: c.li c.addi c.mv c.add
+//     c.slli c.srli c.srai c.andi c.sub c.lw c.sw.
+// Any word outside that set decodes to `.unknown` (the objdump golden diff in
+// tests/run_tests.sh is the backstop). Mnemonics/operands follow
+// `riscv64-linux-gnu-objdump -M no-aliases -d` (raw forms, no pseudo-ops).
+// Reads the emitted stream from out_buf; calls write / write_hex32 / fmt_uint
+// / hex_nibble (defined in main.kr / runtime.kr — resolved whole-program).
+// ===========================================================================
+
+// ABI name for integer register x0..x31, written to fd.
+fn rv_regname(uint64 fd, uint64 n) {
+    if n == 0 { write(fd, "zero", 4) return }
+    if n == 1 { write(fd, "ra", 2) return }
+    if n == 2 { write(fd, "sp", 2) return }
+    if n == 3 { write(fd, "gp", 2) return }
+    if n == 4 { write(fd, "tp", 2) return }
+    if n == 5 { write(fd, "t0", 2) return }
+    if n == 6 { write(fd, "t1", 2) return }
+    if n == 7 { write(fd, "t2", 2) return }
+    if n == 8 { write(fd, "s0", 2) return }
+    if n == 9 { write(fd, "s1", 2) return }
+    uint8[4] rb
+    uint64 rl = 0
+    if n >= 10 && n <= 17 {
+        write(fd, "a", 1)
+        rl = fmt_uint(rb, n - 10)      // a0..a7
+        write(fd, rb, rl)
+        return
+    }
+    if n >= 18 && n <= 27 {
+        write(fd, "s", 1)
+        rl = fmt_uint(rb, n - 16)      // s2..s11
+        write(fd, rb, rl)
+        return
+    }
+    write(fd, "t", 1)
+    rl = fmt_uint(rb, n - 25)          // t3..t6 (x28..x31)
+    write(fd, rb, rl)
+}
+
+// Print `imm` (a `bits`-wide field) as a signed decimal, sign-extended.
+fn rv_write_simm(uint64 fd, uint64 imm, uint64 bits) {
+    uint64 m = 1 << bits
+    uint64 signbit = m >> 1
+    uint64 low = imm & (m - 1)
+    uint8[24] nb
+    uint64 nl = 0
+    if (low & signbit) != 0 {
+        uint64 mag = m - low
+        write(fd, "-", 1)
+        nl = fmt_uint(nb, mag)
+        write(fd, nb, nl)
+        return
+    }
+    nl = fmt_uint(nb, low)
+    write(fd, nb, nl)
+}
+
+// Print unsigned decimal.
+fn rv_write_udec(uint64 fd, uint64 v) {
+    uint8[24] nb
+    uint64 nl = fmt_uint(nb, v)
+    write(fd, nb, nl)
+}
+
+// Print a 32-bit value in minimal lowercase hex (no leading zeros, no 0x),
+// matching objdump's branch/jump target formatting.
+fn rv_write_hexmin(uint64 fd, uint64 v) {
+    uint8[16] hb
+    uint64 idx = 0
+    uint64 started = 0
+    uint64 shift = 28
+    while shift > 0 {
+        uint64 nib = (v >> shift) & 0xF
+        if nib != 0 || started != 0 {
+            started = 1
+            uint8 c = hex_nibble(nib)
+            uint64 pp = hb + idx
+            unsafe { *(pp as uint8) = c }
+            idx = idx + 1
+        }
+        shift = shift - 4
+    }
+    uint8 c0 = hex_nibble(v & 0xF)
+    uint64 pp0 = hb + idx
+    unsafe { *(pp0 as uint8) = c0 }
+    idx = idx + 1
+    write(fd, hb, idx)
+}
+
+// Print "0x" + minimal hex (objdump shift-amount style, e.g. slli rd,rs,0x3).
+fn rv_write_hexpfx(uint64 fd, uint64 v) {
+    write(fd, "0x", 2)
+    rv_write_hexmin(fd, v)
+}
+
+// Decode a 16-bit compressed instruction `h` -> one mnemonic + operands.
+fn rv_disasm_c(uint64 fd, uint64 h) {
+    if h == 0 { write(fd, "c.unimp", 7) return }
+    uint64 op = h & 3
+    uint64 f3 = (h >> 13) & 7
+    uint64 rd = (h >> 7) & 0x1F
+    uint64 imm6 = ((h >> 2) & 0x1F) | (((h >> 12) & 1) << 5)
+
+    if op == 1 {
+        if f3 == 0 {
+            write(fd, "c.addi ", 7)
+            rv_regname(fd, rd)
+            write(fd, ",", 1)
+            rv_write_simm(fd, imm6, 6)
+            return
+        }
+        if f3 == 2 {
+            write(fd, "c.li ", 5)
+            rv_regname(fd, rd)
+            write(fd, ",", 1)
+            rv_write_simm(fd, imm6, 6)
+            return
+        }
+        if f3 == 4 {
+            uint64 sub = (h >> 10) & 3
+            uint64 rdp = ((h >> 7) & 7) + 8
+            if sub == 0 {
+                write(fd, "c.srli ", 7)
+                rv_regname(fd, rdp)
+                write(fd, ",", 1)
+                rv_write_hexpfx(fd, imm6)
+                return
+            }
+            if sub == 1 {
+                write(fd, "c.srai ", 7)
+                rv_regname(fd, rdp)
+                write(fd, ",", 1)
+                rv_write_hexpfx(fd, imm6)
+                return
+            }
+            if sub == 2 {
+                write(fd, "c.andi ", 7)
+                rv_regname(fd, rdp)
+                write(fd, ",", 1)
+                rv_write_simm(fd, imm6, 6)
+                return
+            }
+            // sub == 3: CA group; encoder only emits c.sub (bits[6:5]==00).
+            uint64 rs2p = ((h >> 2) & 7) + 8
+            if ((h >> 5) & 3) == 0 && ((h >> 12) & 1) == 0 {
+                write(fd, "c.sub ", 6)
+                rv_regname(fd, rdp)
+                write(fd, ",", 1)
+                rv_regname(fd, rs2p)
+                return
+            }
+            write(fd, ".unknown", 8)
+            return
+        }
+        write(fd, ".unknown", 8)
+        return
+    }
+
+    if op == 2 {
+        if f3 == 0 {
+            write(fd, "c.slli ", 7)
+            rv_regname(fd, rd)
+            write(fd, ",", 1)
+            rv_write_hexpfx(fd, imm6)
+            return
+        }
+        if f3 == 4 {
+            uint64 rs2 = (h >> 2) & 0x1F
+            if ((h >> 12) & 1) == 0 {
+                write(fd, "c.mv ", 5)
+            } else {
+                write(fd, "c.add ", 6)
+            }
+            rv_regname(fd, rd)
+            write(fd, ",", 1)
+            rv_regname(fd, rs2)
+            return
+        }
+        write(fd, ".unknown", 8)
+        return
+    }
+
+    if op == 0 {
+        uint64 rs1p = ((h >> 7) & 7) + 8
+        uint64 rdp = ((h >> 2) & 7) + 8
+        // CL/CS offset: [12:10]=off[5:3], [6]=off[2], [5]=off[6]
+        uint64 off = (((h >> 10) & 7) << 3) | (((h >> 6) & 1) << 2) | (((h >> 5) & 1) << 6)
+        if f3 == 2 {
+            write(fd, "c.lw ", 5)
+            rv_regname(fd, rdp)
+            write(fd, ",", 1)
+            rv_write_udec(fd, off)
+            write(fd, "(", 1)
+            rv_regname(fd, rs1p)
+            write(fd, ")", 1)
+            return
+        }
+        if f3 == 6 {
+            write(fd, "c.sw ", 5)
+            rv_regname(fd, rdp)
+            write(fd, ",", 1)
+            rv_write_udec(fd, off)
+            write(fd, "(", 1)
+            rv_regname(fd, rs1p)
+            write(fd, ")", 1)
+            return
+        }
+        write(fd, ".unknown", 8)
+        return
+    }
+    write(fd, ".unknown", 8)
+}
+
+// Decode a 32-bit instruction `insn` (at listing offset `addr`) -> mnemonic.
+fn rv_disasm_word(uint64 fd, uint64 insn, uint64 addr) {
+    uint64 op = insn & 0x7F
+    uint64 rd = (insn >> 7) & 0x1F
+    uint64 f3 = (insn >> 12) & 7
+    uint64 rs1 = (insn >> 15) & 0x1F
+    uint64 rs2 = (insn >> 20) & 0x1F
+    uint64 f7 = (insn >> 25) & 0x7F
+    uint64 immI = (insn >> 20) & 0xFFF
+
+    // ----- U-type: lui / auipc -----
+    if op == 0x37 || op == 0x17 {
+        if op == 0x37 { write(fd, "lui ", 4) } else { write(fd, "auipc ", 6) }
+        rv_regname(fd, rd)
+        write(fd, ",", 1)
+        rv_write_hexpfx(fd, (insn >> 12) & 0xFFFFF)
+        return
+    }
+
+    // ----- J-type: jal -----
+    if op == 0x6F {
+        uint64 j = (((insn >> 31) & 1) << 20) | (((insn >> 12) & 0xFF) << 12) | (((insn >> 20) & 1) << 11) | (((insn >> 21) & 0x3FF) << 1)
+        // sign-extend 21-bit and add to addr
+        uint64 tgt = 0
+        if (j & (1 << 20)) != 0 {
+            tgt = addr - ((1 << 21) - j)
+        } else {
+            tgt = addr + j
+        }
+        write(fd, "jal ", 4)
+        rv_regname(fd, rd)
+        write(fd, ",", 1)
+        rv_write_hexmin(fd, tgt)
+        return
+    }
+
+    // ----- I-type: jalr -----
+    if op == 0x67 {
+        write(fd, "jalr ", 5)
+        rv_regname(fd, rd)
+        write(fd, ",", 1)
+        rv_write_simm(fd, immI, 12)
+        write(fd, "(", 1)
+        rv_regname(fd, rs1)
+        write(fd, ")", 1)
+        return
+    }
+
+    // ----- B-type: branches -----
+    if op == 0x63 {
+        if f3 == 0 { write(fd, "beq ", 4) }
+        else if f3 == 1 { write(fd, "bne ", 4) }
+        else if f3 == 4 { write(fd, "blt ", 4) }
+        else if f3 == 5 { write(fd, "bge ", 4) }
+        else if f3 == 6 { write(fd, "bltu ", 5) }
+        else if f3 == 7 { write(fd, "bgeu ", 5) }
+        else { write(fd, ".unknown", 8) return }
+        uint64 b = (((insn >> 31) & 1) << 12) | (((insn >> 7) & 1) << 11) | (((insn >> 25) & 0x3F) << 5) | (((insn >> 8) & 0xF) << 1)
+        uint64 tgt = 0
+        if (b & (1 << 12)) != 0 {
+            tgt = addr - ((1 << 13) - b)
+        } else {
+            tgt = addr + b
+        }
+        rv_regname(fd, rs1)
+        write(fd, ",", 1)
+        rv_regname(fd, rs2)
+        write(fd, ",", 1)
+        rv_write_hexmin(fd, tgt)
+        return
+    }
+
+    // ----- I-type: loads -----
+    if op == 0x03 {
+        if f3 == 0 { write(fd, "lb ", 3) }
+        else if f3 == 1 { write(fd, "lh ", 3) }
+        else if f3 == 2 { write(fd, "lw ", 3) }
+        else if f3 == 4 { write(fd, "lbu ", 4) }
+        else if f3 == 5 { write(fd, "lhu ", 4) }
+        else { write(fd, ".unknown", 8) return }
+        rv_regname(fd, rd)
+        write(fd, ",", 1)
+        rv_write_simm(fd, immI, 12)
+        write(fd, "(", 1)
+        rv_regname(fd, rs1)
+        write(fd, ")", 1)
+        return
+    }
+
+    // ----- S-type: stores -----
+    if op == 0x23 {
+        if f3 == 0 { write(fd, "sb ", 3) }
+        else if f3 == 1 { write(fd, "sh ", 3) }
+        else if f3 == 2 { write(fd, "sw ", 3) }
+        else { write(fd, ".unknown", 8) return }
+        uint64 immS = (((insn >> 25) & 0x7F) << 5) | ((insn >> 7) & 0x1F)
+        rv_regname(fd, rs2)
+        write(fd, ",", 1)
+        rv_write_simm(fd, immS, 12)
+        write(fd, "(", 1)
+        rv_regname(fd, rs1)
+        write(fd, ")", 1)
+        return
+    }
+
+    // ----- OP-IMM (0x13) -----
+    if op == 0x13 {
+        if f3 == 1 {
+            // slli: shamt in immI[4:0]
+            write(fd, "slli ", 5)
+            rv_regname(fd, rd)
+            write(fd, ",", 1)
+            rv_regname(fd, rs1)
+            write(fd, ",", 1)
+            rv_write_hexpfx(fd, immI & 0x1F)
+            return
+        }
+        if f3 == 5 {
+            if (immI >> 5) == 0x20 { write(fd, "srai ", 5) } else { write(fd, "srli ", 5) }
+            rv_regname(fd, rd)
+            write(fd, ",", 1)
+            rv_regname(fd, rs1)
+            write(fd, ",", 1)
+            rv_write_hexpfx(fd, immI & 0x1F)
+            return
+        }
+        if f3 == 0 { write(fd, "addi ", 5) }
+        else if f3 == 2 { write(fd, "slti ", 5) }
+        else if f3 == 3 { write(fd, "sltiu ", 6) }
+        else if f3 == 4 { write(fd, "xori ", 5) }
+        else if f3 == 6 { write(fd, "ori ", 4) }
+        else { write(fd, "andi ", 5) }
+        rv_regname(fd, rd)
+        write(fd, ",", 1)
+        rv_regname(fd, rs1)
+        write(fd, ",", 1)
+        rv_write_simm(fd, immI, 12)
+        return
+    }
+
+    // ----- OP (0x33): R-type + RV32M -----
+    if op == 0x33 {
+        if f7 == 0x01 {
+            if f3 == 0 { write(fd, "mul ", 4) }
+            else if f3 == 1 { write(fd, "mulh ", 5) }
+            else if f3 == 2 { write(fd, "mulhsu ", 7) }
+            else if f3 == 3 { write(fd, "mulhu ", 6) }
+            else if f3 == 4 { write(fd, "div ", 4) }
+            else if f3 == 5 { write(fd, "divu ", 5) }
+            else if f3 == 6 { write(fd, "rem ", 4) }
+            else { write(fd, "remu ", 5) }
+        } else {
+            if f3 == 0 {
+                if f7 == 0x20 { write(fd, "sub ", 4) } else { write(fd, "add ", 4) }
+            }
+            else if f3 == 1 { write(fd, "sll ", 4) }
+            else if f3 == 2 { write(fd, "slt ", 4) }
+            else if f3 == 3 { write(fd, "sltu ", 5) }
+            else if f3 == 4 { write(fd, "xor ", 4) }
+            else if f3 == 5 {
+                if f7 == 0x20 { write(fd, "sra ", 4) } else { write(fd, "srl ", 4) }
+            }
+            else if f3 == 6 { write(fd, "or ", 3) }
+            else { write(fd, "and ", 4) }
+        }
+        rv_regname(fd, rd)
+        write(fd, ",", 1)
+        rv_regname(fd, rs1)
+        write(fd, ",", 1)
+        rv_regname(fd, rs2)
+        return
+    }
+
+    // ----- SYSTEM (0x73): ecall / ebreak -----
+    if op == 0x73 {
+        if insn == 0x73 { write(fd, "ecall", 5) return }
+        if insn == 0x00100073 { write(fd, "ebreak", 6) return }
+        write(fd, ".unknown", 8)
+        return
+    }
+
+    write(fd, ".unknown", 8)
+}
+
+// Decode the instruction at out_buf offset `pos`, write one listing line
+// "  <off>: <hex>  <mnemonic> <operands>\n" to fd, return bytes consumed
+// (2 for a compressed halfword, 4 for a full word). `(insn & 3) != 3` marks
+// a 16-bit compressed instruction; otherwise it is a 32-bit instruction.
+fn rv_disasm_at(uint64 fd, uint64 pos, uint64 text_start) -> uint64 {
+    uint64 bp = out_buf + pos
+    uint64 lo16 = 0
+    unsafe { *(bp as uint16) -> lo16 }
+    write(fd, "  ", 2)
+    write_hex32(fd, pos - text_start)
+    write(fd, ": ", 2)
+    if (lo16 & 3) != 3 {
+        write_hex32(fd, lo16 & 0xFFFF)
+        write(fd, "  ", 2)
+        rv_disasm_c(fd, lo16 & 0xFFFF)
+        write(fd, "\n", 1)
+        return 2
+    }
+    uint64 insn = 0
+    unsafe { *(bp as uint32) -> insn }
+    write_hex32(fd, insn)
+    write(fd, "  ", 2)
+    rv_disasm_word(fd, insn, pos - text_start)
+    write(fd, "\n", 1)
+    return 4
+}
