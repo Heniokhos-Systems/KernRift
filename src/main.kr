@@ -2583,14 +2583,11 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
     //   3 android → ELF
     //   4 freebsd → ELF
     if emit_mode == 3 {
-        // riscv32: no relocatable object writer yet (ELF e_machine=243,
-        // R_RISCV_* relocations). Refuse before the target_os dispatch
-        // below can hand arch=2 to an x86/arm64-only emitter.
-        if arch == 2 {
-            riscv32_nyi("relocatable (.o) emission")
-        }
         uint64 total_code = codegen_output_len()
-        if target_os == 1 {
+        if arch == 2 {
+            // riscv is Linux-ELF only — bypass the target_os Mach-O/COFF split.
+            emit_elf_relocatable_rv32(total_code, 0)
+        } else if target_os == 1 {
             emit_macho_relocatable(total_code, 0, arch)
         } else if target_os == 2 {
             emit_coff_relocatable(total_code, 0, arch)

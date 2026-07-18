@@ -5248,6 +5248,45 @@ else
     echo "  riscv_hosted_heap: SKIP (qemu-riscv32-static not installed)"
 fi
 
+# Compiles examples/riscv-hosted/obj_single.kr with --emit=obj (equiv `-c`),
+# the Task 5 hosted Elf32 relocatable (.o) writer test: `main` calls
+# `helper` in the same translation unit, so there are no extern calls and
+# no relocations (has_relocs stays 0, .rela.text is skipped entirely) —
+# this proves the Elf32 container/symtab/shdr layout in isolation before
+# Task 6 adds cross-object extern-call relocations. Needs both
+# riscv64-linux-gnu-ld (to link the freestanding .o into a runnable image)
+# and qemu-riscv32-static. Distinct from riscv_hosted_exit_code/hello/argv/
+# heap above: those compile straight to a hosted ET_EXEC; this one goes
+# through emit_elf_relocatable_rv32()'s ET_REL container and a real link
+# step.
+echo ""
+echo "--- riscv32 hosted Elf32 relocatable (.o) test ---"
+if command -v qemu-riscv32-static >/dev/null 2>&1 && command -v riscv64-linux-gnu-ld >/dev/null 2>&1; then
+    TOTAL=$((TOTAL + 1))
+    RV_OBJ="/tmp/krc_rv_obj_$$.o"
+    RV_LINKED="/tmp/krc_rv_obj_$$"
+    if ! $KRC --arch=riscv32 -c "$DIR/../examples/riscv-hosted/obj_single.kr" -o "$RV_OBJ" >/dev/null 2>&1; then
+        echo "FAIL: riscv_hosted_obj_single (compilation failed)"
+        FAIL=$((FAIL + 1))
+    elif ! riscv64-linux-gnu-ld -m elf32lriscv -e main "$RV_OBJ" -o "$RV_LINKED" >/dev/null 2>&1; then
+        echo "FAIL: riscv_hosted_obj_single (link failed)"
+        FAIL=$((FAIL + 1))
+    else
+        qemu-riscv32-static "$RV_LINKED" >/dev/null 2>&1
+        rc=$?
+        if [ "$rc" = "42" ]; then
+            PASS=$((PASS + 1))
+            echo "  riscv_hosted_obj_single: PASS (qemu-riscv32-static exited 42)"
+        else
+            echo "FAIL: riscv_hosted_obj_single (got exit $rc, want 42)"
+            FAIL=$((FAIL + 1))
+        fi
+    fi
+    rm -f "$RV_OBJ" "$RV_LINKED"
+else
+    echo "  riscv_hosted_obj_single: SKIP (qemu-riscv32-static or riscv64-linux-gnu-ld not installed)"
+fi
+
 # --- Summary ---
 echo ""
 echo "=== Results: $PASS/$TOTAL passed, $FAIL failed ==="

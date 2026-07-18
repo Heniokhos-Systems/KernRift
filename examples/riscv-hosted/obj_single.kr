@@ -1,0 +1,20 @@
+// obj_single.kr — Task 5 hosted Elf32 relocatable (.o) writer smoke test:
+// a `main` that calls a `helper` defined in the SAME translation unit, with
+// no extern calls at all. Compiled with `--emit=obj` (equivalently `-c`),
+// this must produce a self-contained Elf32 ET_REL object
+// (emit_elf_relocatable_rv32() in codegen_riscv.kr) whose internal
+// `main -> helper` call resolves without any relocation record: has_relocs
+// stays 0 and the .rela.text section is entirely skipped. Linking with
+// `riscv64-linux-gnu-ld -m elf32lriscv -e main` and running under
+// qemu-riscv32-static must exit 42 (helper(41) == 42). Distinct from the
+// riscv_hosted_* executable tests: those exercise emit_elf_header_rv32()'s
+// ET_EXEC container; this one exercises the ET_REL container + .symtab
+// (local `helper` + global `main`) in isolation, ahead of Task 6's
+// cross-object extern-call relocations.
+fn helper(uint32 x) -> uint32 {
+    return x + 1
+}
+
+fn main() -> uint32 {
+    return helper(41)
+}
