@@ -1,0 +1,53 @@
+// Xtensa LX6 Task 5: loads / stores / IR_COPY.
+//
+// Widths 1/2/4 through the load8/16/32 and store8/16/32 pointer builtins
+// (ir.kr:1701-1774): no devices (a device field write lowers to IR_VSTORE,
+// a different op — codegen_riscv.kr's device stores are a separate
+// handler class, not this one), no static/stack arrays (IR_STATIC_ADDR /
+// IR_STACK_ADDR aren't implemented on xtensa yet), no heap alloc()
+// (IR_ALLOC needs a syscall ABI not built for this arch) — so a bare
+// integer literal stands in for the pointer value. This program is
+// objdump-verified only (no qemu run), so the address is never actually
+// dereferenced for real; xtensa-lx106-elf-objdump just needs to see the
+// expected mnemonics/encodings in the emitted bytes.
+//
+// Addresses and values are deliberately kept inside MOVI's signed-12-bit
+// range (-2048..2047, xt_fits_movi) so this function needs NO literal
+// pool: every constant materialises with a single `movi`, and the raw
+// blob's code starts at byte 0 with no leading pool data for a linear
+// disassembler to lose sync on (a genuine landmine here — the RED pass
+// with an 0x20000-range address/0xAABBCCDD value produced a pool-prefixed
+// blob that xtensa-lx106-elf-objdump misaligned while decoding, since it
+// doesn't know where 24-bit-word data ends and 16/24-bit code begins).
+//
+// The loaded values (a, b, c below) are genuine runtime values (not
+// compile-time constants), so they are never constant-folded away — the
+// same "no non-foldable value source yet (params/loads land in Task 5)"
+// observation from alu.kr's comment, now resolved: loads ARE that source.
+//
+// Every named local (a, b, c, d below) forces an IR_COPY (op 61): `uint32
+// a = load8(...)` lowers to (IR_LOAD -> fresh vreg) then (IR_COPY dest=a's
+// vreg, src1=that fresh vreg) — this is the mechanism that "unblocks
+// named-local variables" per the task brief. Most of those copies land on
+// a vreg the colourer happens to assign the SAME physical register as its
+// source, so xt_mv's `if rd == rs return` correctly elides the
+// instruction (verified separately by inspection — the handler still ran,
+// it just had nothing to emit). `d = a`, below, is deliberately written so
+// the copy's source (`a`) stays live PAST the copy (`a` is read again in
+// the final sum) — `a` and `d` are simultaneously live and therefore
+// interfere, so the register allocator MUST colour them apart, forcing a
+// genuine `mov`/`mov.n` into the emitted bytes (not an elided no-op).
+fn main() -> uint32 {
+    store8(0x100, 90)
+    uint32 a = load8(0x100)
+
+    store16(0x110, 1234)
+    uint32 b = load16(0x110)
+
+    store32(0x120, 2000)
+    uint32 c = load32(0x120)
+
+    uint32 d = a
+
+    return a + b + c + d
+}

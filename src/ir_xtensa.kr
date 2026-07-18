@@ -695,7 +695,80 @@ fn ir_emit_xtensa_insn(uint64 ii) {
         return
     }
 
-    // Everything else lands in later tasks (mem/call=T5, branches=T6).
+    // ----- IR_LOAD (30): dest = *(src1), width in imm (or src2) -----
+    // Mirror of ir_riscv.kr:1363. Offset is always 0 — struct/array offsets
+    // are folded into a prior ADD by the IR lowering, so the address is
+    // entirely in src1. Width can arrive in imm OR src2 (struct field
+    // loads reuse the src2 slot — ir.kr:3045/3081/3147 — the same as the
+    // riscv/arm64 backends read it). IR has no signed-load marking
+    // anywhere in ir.kr (riscv's comment at the same site: x86 uses movzx,
+    // arm64 ldrb/ldrh, never a sign-extending load, for every narrow load
+    // in the tree) — l8ui/l16ui/l32i (zero-extending, matching riscv's
+    // lbu/lhu/lw) cover every width. l16si is defined and golden-diff
+    // verified (Task 2) but has no IR_LOAD caller to reach it — kept for a
+    // future signed-load IR shape, unused here exactly as riscv's `lh`
+    // would be.
+    if op == 30 {
+        uint64 width = imm
+        if width == 0 && s2_v != 0 { width = s2_v }
+        if width == 8 {
+            xt_err("error: xtensa: 64-bit load not supported\n")
+        }
+        uint64 addr_reg = xt_resolve_src(s1_v, XT_A8)
+        uint64 d = dst_r
+        if d == 0xFFFFFFFF { d = XT_A8 }
+        if width == 1 { xt_l8ui(d, addr_reg, 0) }
+        else if width == 2 { xt_l16ui(d, addr_reg, 0) }
+        else { xt_l32i(d, addr_reg, 0) }
+        if dst_r == 0xFFFFFFFF { xt_store_spill(XT_A8, dest_v) }
+        return
+    }
+
+    // ----- IR_STORE (31): *(src1) = src2, width in dest_v -----
+    // Mirror of ir_riscv.kr:1383. dest_v here is a WIDTH (1/2/4/8), not a
+    // vreg — the generic `dst_r = ir_get_phys_reg(dest_v)` computed at the
+    // top of this function is garbage for this op and MUST NOT be used
+    // below (same caveat riscv documents at its own IR_STORE). Offset is
+    // always 0, address entirely in src1 (same as IR_LOAD).
+    if op == 31 {
+        uint64 width = dest_v
+        if width == 8 {
+            xt_err("error: xtensa: 64-bit store not supported\n")
+        }
+        uint64 addr_reg = xt_resolve_src(s1_v, XT_A8)
+        uint64 val_reg = xt_resolve_src(s2_v, XT_A9)
+        if width == 1 { xt_s8i(val_reg, addr_reg, 0) }
+        else if width == 2 { xt_s16i(val_reg, addr_reg, 0) }
+        else { xt_s32i(val_reg, addr_reg, 0) }
+        return
+    }
+
+    // ----- IR_COPY (61): dst = src1 (register move) -----
+    // Mirror of ir_riscv.kr:1451's plain-mv arm ONLY (src1 != 0 — bind a
+    // named local/temp to an existing vreg; this is exactly what `uint32 x
+    // = expr` lowers to, per the alu.kr comment on why named locals need
+    // Task 5). riscv's IR_COPY also handles src1==0 (imm<8 incoming CALL0
+    // arg register, imm>=100 ASM-block physical-register read, 8..99
+    // overflow-param frame load) — those all need CALL0
+    // argument-register/frame wiring that isn't built for xtensa yet, and
+    // no surface syntax reaches them on this arch today (no function
+    // calls/params compile here). Loud-fail rather than silently reading
+    // whatever garbage is in the a8 scratch register.
+    if op == 61 {
+        if s1_v == 0 {
+            xt_err("error: xtensa: IR_COPY param/phys-reg source not yet implemented\n")
+        }
+        uint64 src_reg = xt_resolve_src(s1_v, XT_A8)
+        if dst_r != 0xFFFFFFFF {
+            xt_mv(dst_r, src_reg)
+        } else {
+            if src_reg != XT_A8 { xt_mv(XT_A8, src_reg) }
+            xt_store_spill(XT_A8, dest_v)
+        }
+        return
+    }
+
+    // Everything else lands in later tasks (call=T5.1/T5.2, branches=T6).
     xt_nyi_op(op)
 }
 

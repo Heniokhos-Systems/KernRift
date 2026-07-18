@@ -4626,6 +4626,129 @@ else
     echo "  xtensa_alu_disasm: SKIP (xtensa-lx106-elf-objdump not installed)"
 fi
 
+# --- Xtensa LX6 loads/stores/IR_COPY disassembly test (Task 5) ---
+# Compiles examples/xtensa/mem.kr, which touches every width (1/2/4)
+# through the load8/16/32 and store8/16/32 pointer builtins, plus a named
+# local (`uint32 d = a`, with `a` read again afterward so it interferes
+# with `d` and the register allocator must colour them apart) to force a
+# genuine mov/mov.n out of IR_COPY. Every address/value is kept inside
+# MOVI's signed-12-bit range on purpose — a literal-pool-sized constant
+# would put pool data before the code in the raw blob, which desynced
+# xtensa-lx106-elf-objdump's linear decoder during development (see the
+# comment in mem.kr).
+echo ""
+echo "--- xtensa LX6 loads/stores/IR_COPY disasm test ---"
+if command -v xtensa-lx106-elf-objdump >/dev/null 2>&1; then
+    TOTAL=$((TOTAL + 1))
+    XT_MEM_BIN="/tmp/krc_xt_mem_$$.bin"
+    XT_MEM_OK=1
+    if ! $KRC --arch=xtensa --freestanding "$DIR/../examples/xtensa/mem.kr" -o "$XT_MEM_BIN" >/dev/null 2>&1; then
+        echo "FAIL: xtensa_mem_disasm (compilation failed)"
+        XT_MEM_OK=0
+    fi
+    if [ "$XT_MEM_OK" = 1 ]; then
+        XT_MEM_DIS=$(xtensa-lx106-elf-objdump -b binary -m xtensa -D --show-raw-insn "$XT_MEM_BIN" 2>/dev/null)
+        for MN in 'l8ui[[:space:]]+a[0-9]+, ?a[0-9]+, ?[0-9]+' \
+                  'l16ui[[:space:]]+a[0-9]+, ?a[0-9]+, ?[0-9]+' \
+                  'l32i[[:space:]]+a[0-9]+, ?a[0-9]+, ?[0-9]+' \
+                  's8i[[:space:]]+a[0-9]+, ?a[0-9]+, ?[0-9]+' \
+                  's16i[[:space:]]+a[0-9]+, ?a[0-9]+, ?[0-9]+' \
+                  's32i[[:space:]]+a[0-9]+, ?a[0-9]+, ?[0-9]+' \
+                  'mov\.n[[:space:]]+a[0-9]+, ?a[0-9]+'; do
+            if ! echo "$XT_MEM_DIS" | grep -Eq "$MN"; then
+                echo "FAIL: xtensa_mem_disasm (missing mnemonic pattern: $MN)"
+                XT_MEM_OK=0
+            fi
+        done
+        # mov.n must appear at least twice: once for IR_RET's move into a2,
+        # once for IR_COPY's `d = a` (the two are otherwise indistinguishable
+        # by mnemonic alone, so require the count instead of a single match).
+        if [ "$XT_MEM_OK" = 1 ]; then
+            MOVN_COUNT=$(echo "$XT_MEM_DIS" | grep -Ec 'mov\.n[[:space:]]+a[0-9]+, ?a[0-9]+')
+            if [ "$MOVN_COUNT" -lt 2 ]; then
+                echo "FAIL: xtensa_mem_disasm (expected >=2 mov.n — IR_RET move + IR_COPY's d=a, got $MOVN_COUNT)"
+                XT_MEM_OK=0
+            fi
+        fi
+    fi
+    if [ "$XT_MEM_OK" = 1 ]; then
+        PASS=$((PASS + 1))
+        echo "  xtensa_mem_disasm: PASS (l8ui/l16ui/l32i + s8i/s16i/s32i + IR_COPY mov.n mnemonics)"
+    else
+        FAIL=$((FAIL + 1))
+    fi
+    rm -f "$XT_MEM_BIN"
+else
+    echo "  xtensa_mem_disasm: SKIP (xtensa-lx106-elf-objdump not installed)"
+fi
+
+# --- Xtensa LX6 signed ALU ops disassembly test (Task 5 bonus) ---
+# Compiles examples/xtensa/mem_signed.kr with --O0. A named int32 local
+# (only possible now that IR_COPY exists) carries a signed-typed operand
+# into `/`, `%`, `>>`, exercising IR_SDIV/IR_SMOD/IR_SAR (QUOS/REMS/ssr+
+# sra) — unreachable from Task 4's alu.kr, which had no way to produce a
+# signed-typed vreg. QUOS/REMS are hand-encoded (same lx106-lacks-DIV32
+# situation as alu.kr's QUOU/REMU) so a python3 byte-level scan checks
+# them directly; ssr/sra are ordinary mnemonic matches.
+echo ""
+echo "--- xtensa LX6 signed ALU ops disasm test ---"
+if command -v xtensa-lx106-elf-objdump >/dev/null 2>&1; then
+    TOTAL=$((TOTAL + 1))
+    XT_SGN_BIN="/tmp/krc_xt_signed_$$.bin"
+    XT_SGN_OK=1
+    if ! $KRC --arch=xtensa --freestanding --O0 "$DIR/../examples/xtensa/mem_signed.kr" -o "$XT_SGN_BIN" >/dev/null 2>&1; then
+        echo "FAIL: xtensa_signed_disasm (compilation failed)"
+        XT_SGN_OK=0
+    fi
+    if [ "$XT_SGN_OK" = 1 ]; then
+        XT_SGN_DIS=$(xtensa-lx106-elf-objdump -b binary -m xtensa -D --show-raw-insn "$XT_SGN_BIN" 2>/dev/null)
+        for MN in 'ssr[[:space:]]+a[0-9]+' 'sra[[:space:]]+a[0-9]+, ?a[0-9]+'; do
+            if ! echo "$XT_SGN_DIS" | grep -Eq "$MN"; then
+                echo "FAIL: xtensa_signed_disasm (missing mnemonic pattern: $MN)"
+                XT_SGN_OK=0
+            fi
+        done
+    fi
+    if [ "$XT_SGN_OK" = 1 ] && command -v python3 >/dev/null 2>&1; then
+        if ! python3 -c "
+import sys
+data = open('$XT_SGN_BIN', 'rb').read()
+def decode_rrr(off):
+    b0, b1, b2 = data[off], data[off+1], data[off+2]
+    w = b0 | (b1 << 8) | (b2 << 16)
+    return (w & 0xF), (w>>16)&0xF, (w>>20)&0xF   # op0, op1, op2
+
+found_d = False  # QUOS (n / 3)
+found_f = False  # REMS (n % 3)
+i = 0
+while i + 3 <= len(data):
+    op0, op1, op2 = decode_rrr(i)
+    if op0 == 0 and op1 == 2:
+        if op2 == 0xD: found_d = True
+        if op2 == 0xF: found_f = True
+    i += 1
+if not found_d:
+    print('missing QUOS (op1=2,op2=0xD) encoding for /')
+    sys.exit(1)
+if not found_f:
+    print('missing REMS (op1=2,op2=0xF) encoding for %')
+    sys.exit(1)
+" ; then
+            echo "FAIL: xtensa_signed_disasm (QUOS/REMS byte-level check)"
+            XT_SGN_OK=0
+        fi
+    fi
+    if [ "$XT_SGN_OK" = 1 ]; then
+        PASS=$((PASS + 1))
+        echo "  xtensa_signed_disasm: PASS (ssr/sra mnemonics + QUOS/REMS byte-level check)"
+    else
+        FAIL=$((FAIL + 1))
+    fi
+    rm -f "$XT_SGN_BIN"
+else
+    echo "  xtensa_signed_disasm: SKIP (xtensa-lx106-elf-objdump not installed)"
+fi
+
 # --- RISC-V RV32 IR_STR_CONST via pcrel auipc+addi (feature-gap Task 1) ---
 # Compiles examples/riscv-featuregap/t1_strconst.kr, which takes the address
 # of a string literal ("hi\n") through IR_STR_CONST and writes it to the UART.
