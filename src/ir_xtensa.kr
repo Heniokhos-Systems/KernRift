@@ -172,6 +172,7 @@ fn xt_call0(uint64 target_off) {
     uint64 pc = codegen_output_len()
     uint64 base = (pc + 4) & ~3
     uint64 diff = target_off - base
+    xt_check_call18(diff)
     uint64 imm18 = (diff >> 2) & 0x3FFFF
     uint64 w = 0x5 | (imm18 << 6)
     xt_emit24(w)
@@ -184,6 +185,7 @@ fn xt_call0(uint64 target_off) {
 fn xt_j(uint64 target_off) {
     uint64 pc = codegen_output_len()
     uint64 diff = target_off - (pc + 4)
+    xt_check_j18(diff)
     uint64 imm18 = diff & 0x3FFFF
     uint64 w = 0x6 | (imm18 << 6)
     xt_emit24(w)
@@ -448,7 +450,7 @@ fn xt_materialize(uint64 v, uint64 scratch) {
         xt_movi(scratch, vv)
     } else {
         uint64 slot = xt_lit_intern(vv)
-        xt_l32r(scratch, xt_lit_base + slot * 4)
+        xt_emit_l32r_pooled(scratch, slot)
     }
 }
 
@@ -466,12 +468,434 @@ fn xt_patch24(uint64 off, uint64 w) {
 }
 
 // J word for a jump at `site` to `target`: target = PC+4+imm18 (byte offset),
-// so imm18 = target - (site+4). ±128 KiB reach (unchecked here — leaf
-// functions only; range check lands with T6 relaxation).
+// so imm18 = target - (site+4). ±128 KiB reach. The range check (deferred
+// from T3) now lands here — J is unconditional and never relaxed, so an
+// overflow is a genuine (MVP-unreachable) hard error.
 fn xt_j_word(uint64 site, uint64 target) -> uint64 {
     uint64 diff = target - (site + 4)
+    xt_check_j18(diff)
     uint64 imm18 = diff & 0x3FFFF
     return 0x6 | (imm18 << 6)
+}
+
+// ===========================================================================
+// Task 6: compares + branches + bounded-iterative branch relaxation.
+//
+// Xtensa's only compare mechanism is the fused compare-and-branch: BRI8
+// two-register compares (beq/bne/blt/bge/bltu/bgeu) reach ±128 B, BRI12
+// reg-vs-zero (beqz/bnez) reach ±2 KiB, J reaches ±128 KiB. There is no
+// `slt`-style set instruction on core LX6, so an IR compare whose result is
+// used as a value materialises 0/1 through a local (always-in-range) branch
+// (see the compare handler in ir_emit_xtensa_insn). Control-flow branches
+// (IR_BR/IR_BR_COND terminators) are emitted as placeholders + fixups and,
+// when a conditional target is out of BRI12 range, rewritten as
+// `Binv cond, .+6 ; j target` (invert the condition to skip a 3-byte J that
+// carries the real ±128 KiB displacement). Inserting those 3 bytes shifts
+// every later offset, so the relaxation set is solved to a fixed point
+// (below) before any bytes move, then all recorded offsets are remapped
+// through xt_remap (the rv_c_remap analog).
+// ---------------------------------------------------------------------------
+
+// Displacement range checks (deferred from T3). J's imm18 is a signed BYTE
+// offset (±128 KiB); CALL0's imm18 is signed WORD-scaled (±512 KiB). `disp`
+// arrives as a two's-complement uint64 (backward = huge), so re-bias to
+// range-check, exactly like rv_check_j21.
+fn xt_check_j18(uint64 disp) {
+    uint64 biased = disp + 0x20000
+    if biased >= 0x40000 {
+        xt_err("error: xtensa: J displacement out of range (+/-128 KiB)\n")
+    }
+}
+fn xt_check_call18(uint64 disp) {
+    uint64 biased = disp + 0x80000
+    if biased >= 0x100000 {
+        xt_err("error: xtensa: CALL0 displacement out of range (+/-512 KiB)\n")
+    }
+}
+
+// Signed-range fits checks on a branch displacement (disp = target-(site+4)).
+fn xt_fits_bri8(uint64 disp) -> uint64 {
+    uint64 biased = disp + 0x80
+    if biased < 0x100 { return 1 }
+    return 0
+}
+fn xt_fits_bri12(uint64 disp) -> uint64 {
+    uint64 biased = disp + 0x800
+    if biased < 0x1000 { return 1 }
+    return 0
+}
+
+// Explicit-site word builders (the emit-time xt_beq/... use out_len; these
+// take the site so the fixup patcher can re-encode on the final layout).
+fn xt_bri8_word(uint64 cond, uint64 rs, uint64 rt, uint64 site, uint64 target) -> uint64 {
+    uint64 diff = target - (site + 4)
+    uint64 imm8 = diff & 0xFF
+    return 0x7 | ((rt & 0xF) << 4) | ((rs & 0xF) << 8) | ((cond & 0xF) << 12) | ((imm8 & 0xFF) << 16)
+}
+fn xt_bri12_word(uint64 m, uint64 reg, uint64 site, uint64 target) -> uint64 {
+    uint64 diff = target - (site + 4)
+    uint64 imm12 = diff & 0xFFF
+    uint64 nib1 = ((m & 0x3) << 2) | 0x1
+    return 0x6 | (nib1 << 4) | ((reg & 0xF) << 8) | ((imm12 & 0xFFF) << 12)
+}
+
+// --- Branch-kind enum + explicit invert table ---------------------------
+// One kind per emittable conditional branch, plus J for the unconditional
+// fixup. The invert table below lists EVERY invertible pair the MVP knows;
+// a to-be-relaxed opcode not in the table is a hard error (guards against a
+// future non-invertible branch like BANY/BBCI being added without a
+// relaxation path). Today only BNEZ (from IR_BR_COND) flows through
+// relaxation — the two-register kinds exist for a future fused compare+
+// branch and keep the invert table / word dispatcher complete.
+static uint64 XT_BK_BEQ  = 0
+static uint64 XT_BK_BNE  = 1
+static uint64 XT_BK_BLT  = 2
+static uint64 XT_BK_BGE  = 3
+static uint64 XT_BK_BLTU = 4
+static uint64 XT_BK_BGEU = 5
+static uint64 XT_BK_BEQZ = 6
+static uint64 XT_BK_BNEZ = 7
+static uint64 XT_BK_BGEZ = 8
+static uint64 XT_BK_BLTZ = 9
+static uint64 XT_BK_J    = 10
+
+fn xt_invert_branch(uint64 bk) -> uint64 {
+    if bk == XT_BK_BEQ  { return XT_BK_BNE }
+    if bk == XT_BK_BNE  { return XT_BK_BEQ }
+    if bk == XT_BK_BLT  { return XT_BK_BGE }
+    if bk == XT_BK_BGE  { return XT_BK_BLT }
+    if bk == XT_BK_BLTU { return XT_BK_BGEU }
+    if bk == XT_BK_BGEU { return XT_BK_BLTU }
+    if bk == XT_BK_BEQZ { return XT_BK_BNEZ }
+    if bk == XT_BK_BNEZ { return XT_BK_BEQZ }
+    if bk == XT_BK_BGEZ { return XT_BK_BLTZ }
+    if bk == XT_BK_BLTZ { return XT_BK_BGEZ }
+    xt_err("error: xtensa: branch opcode has no invert (cannot relax)\n")
+    return 0
+}
+
+// Does branch kind `bk`'s displacement fit its native range?
+fn xt_fits_cond(uint64 bk, uint64 disp) -> uint64 {
+    if bk == XT_BK_BEQZ || bk == XT_BK_BNEZ || bk == XT_BK_BGEZ || bk == XT_BK_BLTZ {
+        return xt_fits_bri12(disp)
+    }
+    return xt_fits_bri8(disp)
+}
+
+// Encode a conditional branch of kind `bk` (rs/rt registers; rt unused for
+// the BRI12 reg-vs-zero kinds) at `site` to `target`.
+fn xt_cond_word(uint64 bk, uint64 rs, uint64 rt, uint64 site, uint64 target) -> uint64 {
+    if bk == XT_BK_BEQ  { return xt_bri8_word(0x1, rs, rt, site, target) }
+    if bk == XT_BK_BNE  { return xt_bri8_word(0x9, rs, rt, site, target) }
+    if bk == XT_BK_BLT  { return xt_bri8_word(0x2, rs, rt, site, target) }
+    if bk == XT_BK_BGE  { return xt_bri8_word(0xA, rs, rt, site, target) }
+    if bk == XT_BK_BLTU { return xt_bri8_word(0x3, rs, rt, site, target) }
+    if bk == XT_BK_BGEU { return xt_bri8_word(0xB, rs, rt, site, target) }
+    if bk == XT_BK_BEQZ { return xt_bri12_word(0, rs, site, target) }
+    if bk == XT_BK_BNEZ { return xt_bri12_word(1, rs, site, target) }
+    xt_err("error: xtensa: unencodable cond branch kind\n")
+    return 0
+}
+
+// --- Branch fixup table (24-byte entries) -------------------------------
+//   [0]  patch_off (u32)   [4]  target_bb (u32)   [8]  bk (u32)
+//   [12] rs (u32)          [16] rt (u32)          [20] relaxed (u32)
+static uint64 xt_br_fixups = 0
+static uint64 xt_br_fixups_cap = 0
+static uint64 xt_br_fixup_count = 0
+
+// Fused compare+branch handoff (mirror of x86's ir_fused_jcc_code). Xtensa
+// branches ARE fused compare-and-branch, so when a compare is the last non-
+// terminator of its block and single-use by the BR_COND terminator (checked
+// via the shared ir_cmp_fuse_code), the compare emits NOTHING and stashes
+// its op + operand vregs here; the terminator emits the two-register BRI8
+// branch directly. `op == 0` means no pending fusion (reset per block).
+static uint64 xt_fused_cmp_op = 0
+static uint64 xt_fused_cmp_s1 = 0
+static uint64 xt_fused_cmp_s2 = 0
+
+fn xt_fx_get(uint64 idx, uint64 field) -> uint64 {
+    uint64 e = xt_br_fixups + idx * 24 + field
+    uint32 v = 0
+    unsafe { *(e as uint32) -> v }
+    return v
+}
+fn xt_fx_set(uint64 idx, uint64 field, uint64 val) {
+    uint64 e = xt_br_fixups + idx * 24 + field
+    uint32 v = val
+    unsafe { *(e as uint32) = v }
+}
+fn xt_add_fixup(uint64 patch_off, uint64 target_bb, uint64 bk, uint64 rs, uint64 rt) {
+    if xt_br_fixup_count >= xt_br_fixups_cap {
+        uint64 nc = xt_br_fixups_cap * 2
+        if nc < 256 { nc = 256 }
+        uint64 nb = alloc(nc * 24)
+        if xt_br_fixups != 0 {
+            memcpy(nb, xt_br_fixups, xt_br_fixup_count * 24)
+            dealloc(xt_br_fixups)
+        }
+        xt_br_fixups = nb
+        xt_br_fixups_cap = nc
+    }
+    uint64 idx = xt_br_fixup_count
+    xt_fx_set(idx, 0, patch_off)
+    xt_fx_set(idx, 4, target_bb)
+    xt_fx_set(idx, 8, bk)
+    xt_fx_set(idx, 12, rs)
+    xt_fx_set(idx, 16, rt)
+    xt_fx_set(idx, 20, 0)
+    xt_br_fixup_count = idx + 1
+}
+
+// --- Pool (L32R) fixup table (8-byte entries: {u32 site; u32 slot}) ------
+// An L32R references a word in the per-function literal pool that precedes
+// all code (a FIXED offset). If relaxation shifts the L32R instruction, its
+// PC changes while the pool word does not, so the encoded imm16 is stale and
+// must be re-derived on the final layout. Every L32R emitted during block
+// code is recorded here for the post-relaxation re-patch.
+static uint64 xt_pool_fixups = 0
+static uint64 xt_pool_fixups_cap = 0
+static uint64 xt_pool_fixup_count = 0
+
+fn xt_add_pool_fixup(uint64 site, uint64 slot) {
+    if xt_pool_fixup_count >= xt_pool_fixups_cap {
+        uint64 nc = xt_pool_fixups_cap * 2
+        if nc < 256 { nc = 256 }
+        uint64 nb = alloc(nc * 8)
+        if xt_pool_fixups != 0 {
+            memcpy(nb, xt_pool_fixups, xt_pool_fixup_count * 8)
+            dealloc(xt_pool_fixups)
+        }
+        xt_pool_fixups = nb
+        xt_pool_fixups_cap = nc
+    }
+    uint64 e = xt_pool_fixups + xt_pool_fixup_count * 8
+    uint32 so = site
+    unsafe { *(e as uint32) = so }
+    uint64 e4 = e + 4
+    uint32 sl = slot
+    unsafe { *(e4 as uint32) = sl }
+    xt_pool_fixup_count = xt_pool_fixup_count + 1
+}
+
+// Emit an L32R into `rd` for pool slot `slot`, recording the site so
+// relaxation can re-derive its displacement (pool is backward + fixed).
+fn xt_emit_l32r_pooled(uint64 rd, uint64 slot) {
+    uint64 site = out_len
+    xt_l32r(rd, xt_lit_base + slot * 4)
+    xt_add_pool_fixup(site, slot)
+}
+
+// --- Offset-remap after relaxation (rv_c_remap analog) ------------------
+// The relaxed set is the ascending list of ORIGINAL patch offsets of the
+// conditional branches chosen for `Binv; J` rewriting. Each inserts 3 bytes
+// at its site, so an original offset `old` shifts by 3 for every relaxed
+// branch strictly before it. (num relaxed branches is tiny — linear scan.)
+static uint64 xt_relaxed = 0
+static uint64 xt_relaxed_cap = 0
+static uint64 xt_relaxed_count = 0
+
+fn xt_remap(uint64 old) -> uint64 {
+    uint64 add = 0
+    uint64 i = 0
+    while i < xt_relaxed_count {
+        uint64 p = xt_relaxed + i * 8
+        uint64 f = 0
+        unsafe { *(p as uint64) -> f }
+        if f < old { add = add + 3 }
+        i = i + 1
+    }
+    return old + add
+}
+
+// Rebuild the ascending relaxed-offset list from the fixups' relaxed flags.
+// Fixups are recorded in ascending patch_off order (blocks emit in order,
+// cond-before-uncond within a block), so a forward scan yields ascending
+// offsets with no sort.
+fn xt_build_relaxed() {
+    xt_relaxed_count = 0
+    uint64 fi = 0
+    while fi < xt_br_fixup_count {
+        if xt_fx_get(fi, 20) != 0 {
+            if xt_relaxed_count >= xt_relaxed_cap {
+                uint64 nc = xt_relaxed_cap * 2
+                if nc < 256 { nc = 256 }
+                uint64 nb = alloc(nc * 8)
+                if xt_relaxed != 0 {
+                    memcpy(nb, xt_relaxed, xt_relaxed_count * 8)
+                    dealloc(xt_relaxed)
+                }
+                xt_relaxed = nb
+                xt_relaxed_cap = nc
+            }
+            uint64 f = xt_fx_get(fi, 0)
+            uint64 p = xt_relaxed + xt_relaxed_count * 8
+            unsafe { *(p as uint64) = f }
+            xt_relaxed_count = xt_relaxed_count + 1
+        }
+        fi = fi + 1
+    }
+}
+
+// The relaxation pass. Runs after all blocks are emitted (step 9), before
+// branch/ret fixup patching. `code_start` = function entry offset (past the
+// pool); `line_start` = line_table_count at entry (only this function's -g
+// records shift). On return: out_len is the final size, and every recorded
+// offset (block offsets, branch/ret fixup sites, this function's line
+// records) is remapped to the relaxed layout; pooled L32R words are
+// re-patched. Each fixup's relaxed flag says whether the patcher should
+// emit `Binv; J` or the direct branch.
+fn xt_relax_function(uint64 code_start, uint64 line_start) {
+    // 1. Fixed-point planning. Clear flags, then repeatedly measure each
+    //    still-direct conditional branch on the CURRENT relaxed layout and
+    //    mark any out-of-range one. Marking is monotone (never un-relaxed)
+    //    and each mark can only push LATER branches out, so this converges
+    //    in <= #fixups passes; cap + hard-error on non-convergence.
+    uint64 cf = 0
+    while cf < xt_br_fixup_count {
+        xt_fx_set(cf, 20, 0)
+        cf = cf + 1
+    }
+    xt_relaxed_count = 0
+    uint64 cap_iter = xt_br_fixup_count + 4
+    uint64 iter = 0
+    uint64 changed = 1
+    while changed != 0 {
+        if iter > cap_iter {
+            xt_err("error: xtensa: branch relaxation did not converge\n")
+        }
+        xt_build_relaxed()
+        changed = 0
+        uint64 fi = 0
+        while fi < xt_br_fixup_count {
+            uint64 bk = xt_fx_get(fi, 8)
+            uint64 already = xt_fx_get(fi, 20)
+            if bk != XT_BK_J && already == 0 {
+                uint64 f = xt_fx_get(fi, 0)
+                uint64 tbb = xt_fx_get(fi, 4)
+                uint64 bop = ir_block_offsets + tbb * 8
+                uint64 bo = 0
+                unsafe { *(bop as uint64) -> bo }
+                uint64 nt = xt_remap(bo)
+                uint64 nf = xt_remap(f)
+                uint64 disp = nt - (nf + 4)
+                if xt_fits_cond(bk, disp) == 0 {
+                    xt_fx_set(fi, 20, 1)
+                    changed = 1
+                }
+            }
+            fi = fi + 1
+        }
+        iter = iter + 1
+    }
+    xt_build_relaxed()
+
+    // 2. Physically expand each relaxed branch from 3 to 6 bytes. The
+    //    function body is the tail of out_buf (epilogue not yet emitted),
+    //    so copy it to scratch and re-emit with 6-byte gaps at the relaxed
+    //    sites (append-only; avoids overlap). The gap bytes are patched in
+    //    step 4 (caller). New branch start == xt_remap(original site).
+    uint64 old_end = out_len
+    if xt_relaxed_count > 0 {
+        uint64 body_len = old_end - code_start
+        uint64 scratch = alloc(body_len)
+        memcpy(scratch, out_buf + code_start, body_len)
+        out_len = code_start
+        uint64 prev = code_start
+        uint64 k = 0
+        while k < xt_relaxed_count {
+            uint64 pp = xt_relaxed + k * 8
+            uint64 f = 0
+            unsafe { *(pp as uint64) -> f }
+            uint64 j = prev
+            while j < f {
+                uint64 sp = scratch + (j - code_start)
+                uint8 b = 0
+                unsafe { *(sp as uint8) -> b }
+                emit_byte(b)
+                j = j + 1
+            }
+            // 6 placeholder bytes: Binv (3) + J (3), patched by the caller.
+            emit_byte(0)
+            emit_byte(0)
+            emit_byte(0)
+            emit_byte(0)
+            emit_byte(0)
+            emit_byte(0)
+            prev = f + 3
+            k = k + 1
+        }
+        uint64 j2 = prev
+        while j2 < old_end {
+            uint64 sp = scratch + (j2 - code_start)
+            uint8 b = 0
+            unsafe { *(sp as uint8) -> b }
+            emit_byte(b)
+            j2 = j2 + 1
+        }
+        dealloc(scratch)
+    }
+
+    // 3. Remap every recorded offset to the relaxed layout.
+    uint64 bi = 0
+    while bi < ir_bb_count {
+        uint64 bop = ir_block_offsets + bi * 8
+        uint64 bo = 0
+        unsafe { *(bop as uint64) -> bo }
+        uint64 nb = xt_remap(bo)
+        unsafe { *(bop as uint64) = nb }
+        bi = bi + 1
+    }
+    uint64 fi2 = 0
+    while fi2 < xt_br_fixup_count {
+        uint64 f = xt_fx_get(fi2, 0)
+        xt_fx_set(fi2, 0, xt_remap(f))
+        fi2 = fi2 + 1
+    }
+    uint64 ri = 0
+    while ri < ir_ret_fixup_count {
+        uint64 rfp = ir_ret_fixups + ri * 4
+        uint32 rpo = 0
+        unsafe { *(rfp as uint32) -> rpo }
+        uint64 nr = xt_remap(rpo)
+        uint32 nrp = nr
+        unsafe { *(rfp as uint32) = nrp }
+        ri = ri + 1
+    }
+    uint64 li = line_start
+    while li < line_table_count {
+        uint64 entry = line_table + li * 16
+        uint32 lo = 0
+        unsafe { *(entry as uint32) -> lo }
+        uint64 nl = xt_remap(lo)
+        uint32 nlp = nl
+        unsafe { *(entry as uint32) = nlp }
+        li = li + 1
+    }
+
+    // 4. Re-derive each pooled L32R's imm16 on the final layout (pool word
+    //    is fixed at xt_lit_base + slot*4; only the instruction PC moved).
+    //    Preserve the op0|rd low byte already in place; replace imm16 only.
+    uint64 pi = 0
+    while pi < xt_pool_fixup_count {
+        uint64 e = xt_pool_fixups + pi * 8
+        uint32 so = 0
+        unsafe { *(e as uint32) -> so }
+        uint64 e4 = e + 4
+        uint32 sl = 0
+        unsafe { *(e4 as uint32) -> sl }
+        uint64 nsite = xt_remap(so)
+        uint64 target = xt_lit_base + sl * 4
+        uint64 base = (nsite + 3) & ~3
+        uint64 diff = target - base
+        uint64 imm16 = (diff >> 2) & 0xFFFF
+        uint64 lp = out_buf + nsite
+        uint8 b0 = 0
+        unsafe { *(lp as uint8) -> b0 }
+        uint64 w = (b0 & 0xFF) | ((imm16 & 0xFFFF) << 8)
+        xt_patch24(nsite, w)
+        pi = pi + 1
+    }
 }
 
 // --- Per-instruction emission -------------------------------------------
@@ -508,7 +932,7 @@ fn ir_emit_xtensa_insn(uint64 ii) {
             xt_movi(d, v)
         } else {
             uint64 slot = xt_lit_intern(v)
-            xt_l32r(d, xt_lit_base + slot * 4)
+            xt_emit_l32r_pooled(d, slot)
         }
         if dst_r == 0xFFFFFFFF { xt_store_spill(XT_A8, dest_v) }
         return
@@ -768,7 +1192,64 @@ fn ir_emit_xtensa_insn(uint64 ii) {
         return
     }
 
-    // Everything else lands in later tasks (call=T5.1/T5.2, branches=T6).
+    // ----- Compares: IR_CMP_EQ(14) NE(15) LTU(16) LEU(17) GTU(18) GEU(19)
+    // ----- signed LT(120) LE(121) GT(122) GE(123). Xtensa has no slt-style
+    // set instruction on core LX6 — the only compare is the fused compare-
+    // and-branch — so materialise a 0/1 boolean via a local branch. The IR
+    // feeds the boolean vreg into IR_BR_COND (src1) exactly as riscv does
+    // (rv_resolve_src at ir_riscv.kr:2491), so this backend mirrors riscv's
+    // "materialise 0/1, then branch on it" shape rather than fusing.
+    //
+    // Sequence (all displacements tiny + fixed, never relaxed):
+    //     bcc  a, b, Ltrue     ; if (a CC b) goto Ltrue   (reads a,b FIRST)
+    //     movi d, 0            ; false case
+    //     j    Lend
+    //   Ltrue: movi d, 1       ; true case
+    //   Lend:
+    // The compare-branch reads both sources before d is written, so d may
+    // safely alias a_reg/b_reg (a coalesced/spilled dest sharing a8). Each
+    // op maps to a two-register branch with the operand order that makes
+    // "branch taken" mean "condition true": LE/GT/GEU/... swap operands
+    // and/or pick the >= form, the same algebra as riscv's slt lowering.
+    uint64 is_cmp = 0
+    if op >= 14 && op <= 19 { is_cmp = 1 }
+    if op >= 120 && op <= 123 { is_cmp = 1 }
+    if is_cmp != 0 {
+        // Fusion: if this compare is the last non-terminator of its block and
+        // single-use by the BR_COND terminator (ir_cmp_fuse_code applies the
+        // exact criteria the x86 backend uses), emit nothing here — stash the
+        // op + operands and let the terminator emit the fused compare-branch.
+        if ir_cmp_fuse_code(ii) != 0 {
+            xt_fused_cmp_op = op
+            xt_fused_cmp_s1 = s1_v
+            xt_fused_cmp_s2 = s2_v
+            return
+        }
+        uint64 a_reg = xt_resolve_src(s1_v, XT_A8)
+        uint64 b_reg = xt_resolve_src(s2_v, XT_A9)
+        uint64 d = dst_r
+        if d == 0xFFFFFFFF { d = XT_A8 }
+        uint64 p = codegen_output_len()
+        uint64 ltrue = p + 9         // bcc(3) + movi(3) + j(3)
+        uint64 lend = p + 12         // + movi(3)
+        if op == 14 { xt_beq(a_reg, b_reg, ltrue) }
+        else if op == 15 { xt_bne(a_reg, b_reg, ltrue) }
+        else if op == 16 { xt_bltu(a_reg, b_reg, ltrue) }
+        else if op == 17 { xt_bgeu(b_reg, a_reg, ltrue) }   // a<=b == b>=a (u)
+        else if op == 18 { xt_bltu(b_reg, a_reg, ltrue) }   // a>b  == b<a  (u)
+        else if op == 19 { xt_bgeu(a_reg, b_reg, ltrue) }   // a>=b
+        else if op == 120 { xt_blt(a_reg, b_reg, ltrue) }
+        else if op == 121 { xt_bge(b_reg, a_reg, ltrue) }   // a<=b == b>=a (s)
+        else if op == 122 { xt_blt(b_reg, a_reg, ltrue) }   // a>b  == b<a  (s)
+        else { xt_bge(a_reg, b_reg, ltrue) }                // a>=b (123)
+        xt_movi(d, 0)
+        xt_j(lend)
+        xt_movi(d, 1)
+        if dst_r == 0xFFFFFFFF { xt_store_spill(XT_A8, dest_v) }
+        return
+    }
+
+    // Everything else lands in later tasks (call=T5.1/T5.2).
     xt_nyi_op(op)
 }
 
@@ -788,8 +1269,11 @@ fn ir_xtensa_gen(uint64 fn_node) {
         ir_optimize()
     }
 
-    // 2. Liveness
+    // 2. Liveness + per-vreg use counts (the latter feeds ir_cmp_fuse_code,
+    //    which proves a compare's boolean is single-use before the terminator
+    //    fuses it into a compare-branch).
     ir_compute_liveness()
+    ir_compute_use_count()
 
     // 3. Xtensa register allocator (4 callee-saved colours a12..a15).
     //    IR_NUM_REGS is shared; save/pin/restore around emission.
@@ -894,6 +1378,9 @@ fn ir_xtensa_gen(uint64 fn_node) {
     uint32 fn_name_tok = ast_data1(fn_node)
     fn_register(fn_name_tok, code_start)
     line_table_record_fn_entry(fn_name_tok)
+    // -g line records from here on shift under relaxation; the fn-entry
+    // record above sits at code_start (which never moves) so is excluded.
+    uint64 fn_line_start = line_table_count
 
     // 7. Prologue (skip for @naked). CALL0: lower SP, save a0 (return addr)
     //    at [a1 + total_frame - 4], save used a12-a15. addi is signed-8, so a
@@ -934,14 +1421,20 @@ fn ir_xtensa_gen(uint64 fn_node) {
         ir_ret_fixups_cap = ret_need
     }
     ir_ret_fixup_count = 0
+    xt_br_fixup_count = 0
+    xt_pool_fixup_count = 0
 
     // 9. Emit basic blocks. IR_RET/IR_RET_VOID are non-terminators here (like
-    //    riscv) — emitted in the insn loop. IR_BR/IR_BR_COND terminators are
-    //    branch relaxation (T6); a leaf never has them, so loud-fail if seen.
+    //    riscv) — emitted in the insn loop. IR_BR/IR_BR_COND terminators emit
+    //    a placeholder branch + a fixup record (mirror of ir_riscv.kr:2461);
+    //    displacements are resolved after relaxation (step 9a) so the layout
+    //    is final. Conditional branches are BNEZ on the compare's 0/1 boolean
+    //    (src1) — the non-fused shape riscv uses.
     uint64 bi = 0
     while bi < ir_bb_count {
         uint64 bop = ir_block_offsets + bi * 8
         unsafe { *(bop as uint64) = out_len }
+        xt_fused_cmp_op = 0            // clear any stale fusion handoff
         uint64 ii = ir_bb_first_insn(bi)
         while ii != 0xFFFFFFFF {
             uint64 iop = ir_insn_opcode(ii)
@@ -953,14 +1446,124 @@ fn ir_xtensa_gen(uint64 fn_node) {
         uint64 last = ir_bb_last_insn(bi)
         if last != 0xFFFFFFFF {
             uint64 last_op = ir_insn_opcode(last)
-            if last_op == 40 || last_op == 41 {
-                xt_err("error: xtensa: branch codegen (IR_BR/IR_BR_COND) is a later task\n")
+            if last_op == 40 {
+                // IR_BR: unconditional J to target_bb (fall-through elided).
+                uint64 target = ir_insn_imm(last)
+                if target != bi + 1 {
+                    uint64 po = out_len
+                    xt_add_fixup(po, target, XT_BK_J, 0, 0)
+                    xt_emit24(0x6)                     // j #0 placeholder
+                }
+            }
+            if last_op == 41 {
+                // IR_BR_COND: TRUE target = imm, FALSE target = succ0. Both
+                // fall-through edges are elided, and when the TRUE edge is the
+                // fall-through the branch is INVERTED to target FALSE (drops
+                // the extra J riscv keeps). This inversion is what puts a
+                // conditional branch across a large body: in a `while` the
+                // TRUE edge is the loop body (bi+1), so the header branches to
+                // the (far) exit — the branch step 9a must relax.
+                uint64 target_true = ir_insn_imm(last)
+                uint64 target_false = ir_bb_succ0(bi)
+                uint64 bk = 0
+                uint64 rs = 0
+                uint64 rt = 0
+                if xt_fused_cmp_op != 0 {
+                    // Fused: emit the two-register BRI8 compare-branch. Map the
+                    // compare op to the branch kind + operand order that is
+                    // TAKEN exactly when the compare is TRUE (same swap algebra
+                    // as the non-fused materialize path). ±128 B reach — this
+                    // is the branch that relaxes across a >128 B body.
+                    uint64 cop = xt_fused_cmp_op
+                    uint64 a_reg = xt_resolve_src(xt_fused_cmp_s1, XT_A8)
+                    uint64 b_reg = xt_resolve_src(xt_fused_cmp_s2, XT_A9)
+                    rs = a_reg
+                    rt = b_reg
+                    if cop == 14 { bk = XT_BK_BEQ }
+                    else if cop == 15 { bk = XT_BK_BNE }
+                    else if cop == 16 { bk = XT_BK_BLTU }
+                    else if cop == 17 { bk = XT_BK_BGEU
+                        rs = b_reg
+                        rt = a_reg }
+                    else if cop == 18 { bk = XT_BK_BLTU
+                        rs = b_reg
+                        rt = a_reg }
+                    else if cop == 19 { bk = XT_BK_BGEU }
+                    else if cop == 120 { bk = XT_BK_BLT }
+                    else if cop == 121 { bk = XT_BK_BGE
+                        rs = b_reg
+                        rt = a_reg }
+                    else if cop == 122 { bk = XT_BK_BLT
+                        rs = b_reg
+                        rt = a_reg }
+                    else { bk = XT_BK_BGE }
+                    xt_fused_cmp_op = 0
+                } else {
+                    // Non-fused: cond is a materialised 0/1 in src1; branch on
+                    // "cond != 0" (BNEZ) or its inverse (BEQZ).
+                    uint64 cond_v = ir_insn_src1(last)
+                    rs = xt_resolve_src(cond_v, XT_A8)
+                    rt = 0
+                    bk = XT_BK_BNEZ
+                }
+                if target_true == bi + 1 {
+                    if target_false != 0xFFFFFFFF && target_false != bi + 1 {
+                        uint64 ibk = xt_invert_branch(bk)
+                        uint64 po = out_len
+                        xt_add_fixup(po, target_false, ibk, rs, rt)
+                        xt_emit24(xt_cond_word(ibk, rs, rt, po, po))
+                    }
+                } else {
+                    uint64 po = out_len
+                    xt_add_fixup(po, target_true, bk, rs, rt)
+                    xt_emit24(xt_cond_word(bk, rs, rt, po, po))
+                    if target_false != 0xFFFFFFFF && target_false != bi + 1 {
+                        uint64 po2 = out_len
+                        xt_add_fixup(po2, target_false, XT_BK_J, 0, 0)
+                        xt_emit24(0x6)                                // j #0
+                    }
+                }
             }
         }
         bi = bi + 1
     }
 
-    // 10. Patch return fixups — all jump to the epilogue.
+    // 9a. Branch relaxation: solve the out-of-range conditional set to a
+    //     fixed point, expand each to `Binv; J`, and remap every recorded
+    //     offset (block offsets, branch/ret fixup sites, line records) +
+    //     re-patch pooled L32R words. After this, out_len is final.
+    xt_relax_function(code_start, fn_line_start)
+
+    // 9b. Patch branch fixups on the final layout. Unconditional -> J.
+    //     Conditional -> BNEZ direct, or (if relaxed) inverted BEQZ that
+    //     skips a J carrying the real ±128 KiB displacement.
+    uint64 fbi = 0
+    while fbi < xt_br_fixup_count {
+        uint64 np = xt_fx_get(fbi, 0)
+        uint64 tbb = xt_fx_get(fbi, 4)
+        uint64 bk = xt_fx_get(fbi, 8)
+        uint64 rs = xt_fx_get(fbi, 12)
+        uint64 rt = xt_fx_get(fbi, 16)
+        uint64 relaxed = xt_fx_get(fbi, 20)
+        uint64 tbp = ir_block_offsets + tbb * 8
+        uint64 nt = 0
+        unsafe { *(tbp as uint64) -> nt }
+        if bk == XT_BK_J {
+            xt_patch24(np, xt_j_word(np, nt))
+        } else {
+            if relaxed != 0 {
+                uint64 inv = xt_invert_branch(bk)
+                xt_patch24(np, xt_cond_word(inv, rs, rt, np, np + 6))
+                xt_patch24(np + 3, xt_j_word(np + 3, nt))
+            } else {
+                xt_patch24(np, xt_cond_word(bk, rs, rt, np, nt))
+            }
+        }
+        fbi = fbi + 1
+    }
+
+    // 10. Patch return fixups — all jump to the epilogue (offsets already
+    //     remapped by step 9a).
     uint64 epilogue_off = out_len
     uint64 ri = 0
     while ri < ir_ret_fixup_count {

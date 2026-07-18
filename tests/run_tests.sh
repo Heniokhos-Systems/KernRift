@@ -4749,6 +4749,75 @@ else
     echo "  xtensa_signed_disasm: SKIP (xtensa-lx106-elf-objdump not installed)"
 fi
 
+# --- Xtensa LX6 compares + branches + relaxation disasm test (Task 6) ---
+# Compiles examples/xtensa/branch.kr (--O0): a short while + if/else whose
+# single-use compares FUSE into two-register compare-branches (in BRI8's
+# +/-128 B, encoded directly), then a while with a large body whose fused
+# exit branch must jump past +/-128 B and is REWRITTEN by the relaxation
+# pass as `Binv .+6 ; j exit`. Structural checks:
+#   1. >=3 direct fused compare-branches (beq/bne/blt/bge/bltu/bgeu) in range.
+#   2. The relaxation pattern: a conditional branch to `.+6` (skips exactly a
+#      3-byte J) immediately followed by a `j` to a far target — i.e. the
+#      invert+J rewrite. A python3 byte scan confirms a BRI8 branch (op0=7)
+#      with imm8==2 sits 3 bytes before a J (op0=6).
+echo ""
+echo "--- xtensa LX6 compares + branches + relaxation disasm test ---"
+if command -v xtensa-lx106-elf-objdump >/dev/null 2>&1; then
+    TOTAL=$((TOTAL + 1))
+    XT_BR_BIN="/tmp/krc_xt_branch_$$.bin"
+    XT_BR_OK=1
+    if ! $KRC --arch=xtensa --freestanding --O0 "$DIR/../examples/xtensa/branch.kr" -o "$XT_BR_BIN" >/dev/null 2>&1; then
+        echo "FAIL: xtensa_branch_disasm (compilation failed)"
+        XT_BR_OK=0
+    fi
+    if [ "$XT_BR_OK" = 1 ]; then
+        XT_BR_DIS=$(xtensa-lx106-elf-objdump -b binary -m xtensa -D --show-raw-insn "$XT_BR_BIN" 2>/dev/null)
+        # (1) at least three in-range fused two-register compare-branches.
+        FUSED_CNT=$(echo "$XT_BR_DIS" | grep -Ec 'b(eq|ne|lt|ge|ltu|geu)[[:space:]]+a[0-9]+, ?a[0-9]+, ?0x[0-9a-f]+')
+        if [ "$FUSED_CNT" -lt 3 ]; then
+            echo "FAIL: xtensa_branch_disasm (expected >=3 fused compare-branches, got $FUSED_CNT)"
+            XT_BR_OK=0
+        fi
+    fi
+    if [ "$XT_BR_OK" = 1 ] && command -v python3 >/dev/null 2>&1; then
+        # (2) invert+J relaxation pattern: a BRI8 branch (op0=7) whose imm8==2
+        # (target = PC+4+2 = PC+6, i.e. skip the following 3-byte J), directly
+        # followed by a J (op0=6). This is exactly the `Binv .+6 ; j target`
+        # rewrite the relaxation pass emits for an out-of-range conditional.
+        if ! python3 -c "
+import sys
+data = open('$XT_BR_BIN','rb').read()
+def w24(o): return data[o] | (data[o+1]<<8) | (data[o+2]<<16)
+found = False
+i = 0
+while i + 6 <= len(data):
+    w = w24(i)
+    if (w & 0xF) == 0x7:                 # BRI8 two-register compare-branch
+        imm8 = (w >> 16) & 0xFF
+        nxt = w24(i+3)
+        if imm8 == 2 and (nxt & 0xF) == 0x6:   # branch to .+6, then a J
+            found = True
+            break
+    i += 1
+if not found:
+    print('no invert+J relaxation pattern (BRI8 imm8==2 followed by J)')
+    sys.exit(1)
+" ; then
+            echo "FAIL: xtensa_branch_disasm (relaxation invert+J pattern not found)"
+            XT_BR_OK=0
+        fi
+    fi
+    if [ "$XT_BR_OK" = 1 ]; then
+        PASS=$((PASS + 1))
+        echo "  xtensa_branch_disasm: PASS (fused compare-branches in range + invert+J relaxation)"
+    else
+        FAIL=$((FAIL + 1))
+    fi
+    rm -f "$XT_BR_BIN"
+else
+    echo "  xtensa_branch_disasm: SKIP (xtensa-lx106-elf-objdump not installed)"
+fi
+
 # --- RISC-V RV32 IR_STR_CONST via pcrel auipc+addi (feature-gap Task 1) ---
 # Compiles examples/riscv-featuregap/t1_strconst.kr, which takes the address
 # of a string literal ("hi\n") through IR_STR_CONST and writes it to the UART.

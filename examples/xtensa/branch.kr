@@ -1,0 +1,120 @@
+// Xtensa LX6 Task 6: compares + conditional/unconditional branches +
+// the bounded-iterative branch-relaxation pass.
+//
+// Compiled with --O0 so every operator lowers to a genuine IR instruction
+// (no constant folding / _IMM fusion), matching the other examples/xtensa
+// files. Two regions exercise the branch machinery:
+//
+//   1. A short `while` + an `if/else`. Each condition is a single-use
+//      compare feeding the block's BR_COND, so it FUSES into a two-register
+//      compare-and-branch (beq/bne/blt/bge/bltu/bgeu). The TRUE edge is the
+//      fall-through block, so the branch is inverted to target the (near)
+//      exit/else — all within BRI8's +/-128 B, encoded directly.
+//
+//   2. A `while` whose body is deliberately large (dozens of statements).
+//      Its header's fused exit branch must jump PAST the whole body, beyond
+//      BRI8's +/-128 B reach, so the relaxation pass rewrites it as
+//      `Binv .+6 ; j exit` (invert the compare-branch to skip a J that
+//      carries the real +/-128 KiB displacement). Inserting those 3 bytes
+//      shifts later offsets, so the pass iterates to a fixed point before
+//      patching. Runtime correctness of control flow is confirmed at Task 8;
+//      this file's gate is objdump-structural (short fused branches in range,
+//      the invert+J pattern where forced).
+fn main() -> uint32 {
+    uint32 x = 3
+    uint32 s = 0
+    while (x < 10) {
+        s = s + x
+        x = x + 1
+    }
+    if (s < 100) {
+        s = s + 1
+    } else {
+        s = s + 2
+    }
+    uint32 i = 0
+    while (i < 2) {
+        s = s + 1
+        s = s + 1
+        s = s + 1
+        s = s + 1
+        s = s + 1
+        s = s + 1
+        s = s + 1
+        s = s + 1
+        s = s + 1
+        s = s + 1
+        s = s + 1
+        s = s + 1
+        s = s + 1
+        s = s + 1
+        s = s + 1
+        s = s + 1
+        s = s + 1
+        s = s + 1
+        s = s + 1
+        s = s + 1
+        s = s + 1
+        s = s + 1
+        s = s + 1
+        s = s + 1
+        s = s + 1
+        s = s + 1
+        s = s + 1
+        s = s + 1
+        s = s + 1
+        s = s + 1
+        s = s + 1
+        s = s + 1
+        s = s + 1
+        s = s + 1
+        s = s + 1
+        s = s + 1
+        s = s + 1
+        s = s + 1
+        s = s + 1
+        s = s + 1
+        s = s + 1
+        s = s + 1
+        s = s + 1
+        s = s + 1
+        s = s + 1
+        s = s + 1
+        s = s + 1
+        s = s + 1
+        s = s + 1
+        s = s + 1
+        s = s + 1
+        s = s + 1
+        s = s + 1
+        s = s + 1
+        s = s + 1
+        s = s + 1
+        s = s + 1
+        s = s + 1
+        s = s + 1
+        s = s + 1
+        s = s + 1
+        s = s + 1
+        s = s + 1
+        s = s + 1
+        s = s + 1
+        s = s + 1
+        s = s + 1
+        s = s + 1
+        s = s + 1
+        s = s + 1
+        s = s + 1
+        s = s + 1
+        s = s + 1
+        s = s + 1
+        s = s + 1
+        s = s + 1
+        s = s + 1
+        s = s + 1
+        s = s + 1
+        s = s + 1
+        i = i + 1
+    }
+    return s
+}
