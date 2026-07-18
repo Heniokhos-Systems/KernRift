@@ -1,0 +1,15 @@
+// heap.kr — Task 4 hosted-heap smoke test: alloc()/dealloc() lower to a
+// Linux mmap2 syscall (op 70, IR_ALLOC) on hosted riscv32. Writes a value
+// into the allocated buffer, reads it back through the same pointer, and
+// prints "ok" if the round trip matches. Distinct from riscv_hosted_hello
+// and riscv_hosted_argv: this exercises IR_ALLOC lowering, not IR_SYSCALL
+// or the main-entry trampoline.
+fn main() -> uint32 {
+    uint32 buf = alloc(16)
+    unsafe { *(buf as uint32) = 1234 }
+    uint32 got = 0
+    unsafe { *(buf as uint32) -> got }
+    dealloc(buf)
+    if got == 1234 { write(1, "ok\n", 3) } else { write(1, "no\n", 3) }
+    return 0
+}

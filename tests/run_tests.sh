@@ -5217,6 +5217,37 @@ else
     echo "  riscv_hosted_argv: SKIP (qemu-riscv32-static not installed)"
 fi
 
+# Compiles examples/riscv-hosted/heap.kr, the Task 4 hosted-heap test:
+# alloc()/dealloc() lower to a Linux mmap2 syscall (a7=222 ecall) via
+# IR_ALLOC (op 70) on hosted riscv32. Writes a value into the allocated
+# buffer, reads it back through the returned pointer, and prints "ok" if
+# the round trip matches. Distinct from riscv_hosted_hello/riscv_hosted_argv:
+# this exercises IR_ALLOC lowering, not IR_SYSCALL or the main-entry
+# trampoline. Freestanding riscv has no OS to service mmap and keeps
+# IR_ALLOC as a loud NYI (see ir_riscv.kr op 70 gate on `freestanding`).
+echo ""
+echo "--- riscv32 hosted heap (mmap2) test ---"
+if command -v qemu-riscv32-static >/dev/null 2>&1; then
+    TOTAL=$((TOTAL + 1))
+    RV_BIN="/tmp/krc_rv_heap_$$.bin"
+    if ! $KRC --arch=riscv32 "$DIR/../examples/riscv-hosted/heap.kr" -o "$RV_BIN" >/dev/null 2>&1; then
+        echo "FAIL: riscv_hosted_heap (compilation failed)"
+        FAIL=$((FAIL + 1))
+    else
+        RV_OUT=$(qemu-riscv32-static "$RV_BIN" 2>/dev/null)
+        if [ "$RV_OUT" = "ok" ]; then
+            PASS=$((PASS + 1))
+            echo "  riscv_hosted_heap: PASS (qemu-riscv32-static printed 'ok')"
+        else
+            echo "FAIL: riscv_hosted_heap (got '$RV_OUT', want 'ok')"
+            FAIL=$((FAIL + 1))
+        fi
+    fi
+    rm -f "$RV_BIN"
+else
+    echo "  riscv_hosted_heap: SKIP (qemu-riscv32-static not installed)"
+fi
+
 # --- Summary ---
 echo ""
 echo "=== Results: $PASS/$TOTAL passed, $FAIL failed ==="

@@ -2006,7 +2006,61 @@ fn ir_emit_riscv_insn(uint64 ii) {
     // large local buffers must fit the (now un-capped, but still physical)
     // stack via IR_STACK_ADDR.
     if op == 70 {
-        rv_nyi_op(op)
+        // Dynamic buffer via mmap2 (anon, RW). Hosted only — a freestanding
+        // rv32 image has no OS to service mmap, so keep the loud NYI there.
+        if freestanding != 0 {
+            rv_nyi_op(op)
+            return
+        }
+        // size: src1 vreg if present, else imm constant.
+        uint64 size_reg = 0
+        if s1_v != 0 {
+            size_reg = rv_resolve_src(s1_v, RV_T5)
+        } else {
+            rv_li(RV_T5, imm)
+            size_reg = RV_T5
+        }
+        // Stash size in t6 (Linux syscalls preserve every reg except a0), so
+        // it survives the ecall and can be written into the [ptr] header.
+        rv_mv(RV_T6, size_reg)                 // t6 = size
+        rv_li(10, 0)                           // a0 = addr = NULL
+        rv_i(8, RV_T6, 0, 11, 0x13)            // a1 = size + 8  (addi a1,t6,8)
+        rv_li(12, 3)                           // a2 = PROT_READ|PROT_WRITE
+        rv_li(13, 0x22)                        // a3 = MAP_PRIVATE|MAP_ANONYMOUS
+        rv_li(14, 0xFFFFFFFF)                  // a4 = fd = -1
+        rv_li(15, 0)                           // a5 = offset = 0 (pages; moot)
+        rv_li(17, 222)                         // a7 = mmap2
+        emit_u32_le(0x00000073)                // ecall  (ptr in a0)
+        rv_s(0, RV_T6, RV_A0, 2, 0x23)         // sw t6, 0(a0)   store size header
+        rv_i(8, RV_A0, 0, RV_A0, 0x13)         // a0 = a0 + 8    (past header)
+        if dst_r != 0xFFFFFFFF && dst_r != RV_A0 { rv_mv(dst_r, RV_A0) }
+        if dst_r == 0xFFFFFFFF { rv_store_spill(RV_A0, dest_v) }
+        return
+    }
+
+    // ----- IR_DEALLOC (71): inline munmap, frees an IR_ALLOC (70) buffer -----
+    // Not in the Task 4 brief's verbatim transcription (which covers only
+    // IR_ALLOC), but required for the brief's own heap.kr smoke test:
+    // dealloc(ptr) lowers unconditionally to IR_DEALLOC regardless of
+    // target arch (ir.kr:1692-1700, no arch gate), and riscv had zero
+    // handling for op 71 before this — it fell through to the generic
+    // rv_nyi_op catch-all at the bottom of this dispatch, so `dealloc()`
+    // could never compile on riscv at all. Mirrors arm64's Linux path
+    // (ir_aarch64.kr:967-987) with no OS branch: riscv hosted targets are
+    // Linux-only ELF (Tasks 1-3), there is no Windows/macOS riscv backend.
+    // Gated on `freestanding` exactly like op 70 above — a freestanding
+    // rv32 image has no OS to service munmap either.
+    if op == 71 {
+        if freestanding != 0 {
+            rv_nyi_op(op)
+            return
+        }
+        uint64 ptr_reg = rv_resolve_src(s1_v, RV_T5)
+        rv_i(0 - 8, ptr_reg, 0, RV_A0, 0x13)   // addi a0, ptr_reg, -8  (real base)
+        rv_i(0, RV_A0, 2, 11, 0x03)            // lw a1, 0(a0)          (stored size)
+        rv_i(8, 11, 0, 11, 0x13)               // addi a1, a1, 8        (total length)
+        rv_li(17, ir_rv32_syscall_nr(11))      // a7 = munmap syscall nr
+        emit_u32_le(0x00000073)                // ecall
         return
     }
 
