@@ -23,3 +23,203 @@ fn xt_nyi_op(uint64 op) {
     write(2, t, str_len(t))
     exit(1)
 }
+
+// ---------------------------------------------------------------------------
+// Instruction encoders (Task 2). All fields verified byte-exact against
+// `xtensa-lx106-elf-as --no-transform` via scripts/xt-golden.sh — see
+// .superpowers/sdd/task-2-xtensa-report.md for the golden-diff evidence.
+//
+// ENDIANNESS: xtensa-lx106-elf-objdump -d --show-raw-insn prints each
+// instruction as a WORD, MSB-first (e.g. `movi a2,100` prints `64a022`),
+// but the actual little-endian memory bytes are the reverse (`22 a0 64`).
+// Every encoder here builds the word W exactly as objdump prints it, then
+// xt_emit24/xt_emit16 emit it LITTLE-ENDIAN (low byte first). Do not emit
+// bytes in objdump's printed order.
+// ---------------------------------------------------------------------------
+
+fn xt_emit24(uint64 w) {
+    emit_byte(w & 0xFF)
+    emit_byte((w >> 8) & 0xFF)
+    emit_byte((w >> 16) & 0xFF)
+}
+
+fn xt_emit16(uint64 w) {
+    emit_byte(w & 0xFF)
+    emit_byte((w >> 8) & 0xFF)
+}
+
+// ---------------------------------------------------------------------------
+// RRR format (24-bit): op0[3:0] | t[7:4] | s[11:8] | r[15:12] | op1[19:16] | op2[23:20]
+// ---------------------------------------------------------------------------
+fn xt_rrr(uint64 op0, uint64 t, uint64 s, uint64 r, uint64 op1, uint64 op2) {
+    uint64 w = (op0 & 0xF) | ((t & 0xF) << 4) | ((s & 0xF) << 8) | ((r & 0xF) << 12) | ((op1 & 0xF) << 16) | ((op2 & 0xF) << 20)
+    xt_emit24(w)
+}
+
+// Arithmetic/logical (op0=0, op1=0): r=ar(dest), s=as, t=at
+fn xt_add(uint64 rd, uint64 rs, uint64 rt) { xt_rrr(0, rt, rs, rd, 0, 0x8) }
+fn xt_sub(uint64 rd, uint64 rs, uint64 rt) { xt_rrr(0, rt, rs, rd, 0, 0xC) }
+fn xt_and(uint64 rd, uint64 rs, uint64 rt) { xt_rrr(0, rt, rs, rd, 0, 0x1) }
+fn xt_or(uint64 rd, uint64 rs, uint64 rt)  { xt_rrr(0, rt, rs, rd, 0, 0x2) }
+fn xt_xor(uint64 rd, uint64 rs, uint64 rt) { xt_rrr(0, rt, rs, rd, 0, 0x3) }
+// Multiply option (op0=0, op1=2): MULL
+fn xt_mull(uint64 rd, uint64 rs, uint64 rt) { xt_rrr(0, rt, rs, rd, 2, 0x8) }
+
+// Shift-amount-register ops (op0=0, op1=0, op2=4): s=as, r selects SSR(0)/SSL(1)
+fn xt_ssr(uint64 rs) { xt_rrr(0, 0, rs, 0, 0, 0x4) }
+fn xt_ssl(uint64 rs) { xt_rrr(0, 0, rs, 1, 0, 0x4) }
+
+// Variable shifts (op0=0, op1=1): shift amount comes from SAR (set via ssl/ssr)
+fn xt_sll(uint64 rd, uint64 rs) { xt_rrr(0, 0, rs, rd, 1, 0xA) }
+fn xt_srl(uint64 rd, uint64 rs) { xt_rrr(0, rs, 0, rd, 1, 0x9) }
+fn xt_sra(uint64 rd, uint64 rs) { xt_rrr(0, rs, 0, rd, 1, 0xB) }
+
+// Immediate shifts (op0=0, op1=1). SRLI/SRAI: s=sa (direct, 0-15).
+// SLLI: t=(16-sa)&0xF (documented ISA quirk — verified for sa in 1..15,
+// the only range this MVP needs; sa==0/16..31 are out of scope here).
+fn xt_slli(uint64 rd, uint64 rs, uint64 sa) { xt_rrr(0, (16 - sa) & 0xF, rs, rd, 1, 0x1) }
+fn xt_srli(uint64 rd, uint64 rs, uint64 sa) { xt_rrr(0, rs, sa & 0xF, rd, 1, 0x4) }
+fn xt_srai(uint64 rd, uint64 rs, uint64 sa) { xt_rrr(0, rs, sa & 0xF, rd, 1, 0x2) }
+
+// MEMW: fixed encoding, no operands (op0=0,t=0xC,s=0,r=2,op1=0,op2=0)
+fn xt_memw() { xt_rrr(0, 0xC, 0, 2, 0, 0) }
+
+// RSR/WSR (op0=0, op1=3): special-register number sr split as r=sr[7:4], s=sr[3:0]
+fn xt_rsr(uint64 sr, uint64 rt) { xt_rrr(0, rt, sr & 0xF, (sr >> 4) & 0xF, 3, 0x0) }
+fn xt_wsr(uint64 sr, uint64 rt) { xt_rrr(0, rt, sr & 0xF, (sr >> 4) & 0xF, 3, 0x1) }
+static uint64 XT_SR_SAR = 3
+
+// CALLX0 (op0=0,op1=0,op2=0): t=0xC (fixed selector), s=target reg
+fn xt_callx0(uint64 rs) { xt_rrr(0, 0xC, rs, 0, 0, 0) }
+
+// ---------------------------------------------------------------------------
+// RRI8 format (24-bit): op0[3:0] | t[7:4] | s[11:8] | r[15:12] | imm8[23:16]
+// ---------------------------------------------------------------------------
+fn xt_rri8(uint64 op0, uint64 t, uint64 s, uint64 r, uint64 imm8) {
+    uint64 w = (op0 & 0xF) | ((t & 0xF) << 4) | ((s & 0xF) << 8) | ((r & 0xF) << 12) | ((imm8 & 0xFF) << 16)
+    xt_emit24(w)
+}
+
+fn xt_addi(uint64 rd, uint64 rs, uint64 imm) { xt_rri8(2, rd, rs, 0xC, imm) }
+fn xt_l8ui(uint64 rt, uint64 rs, uint64 off)  { xt_rri8(2, rt, rs, 0x0, off) }
+fn xt_l16ui(uint64 rt, uint64 rs, uint64 off) { xt_rri8(2, rt, rs, 0x1, off >> 1) }
+fn xt_l32i(uint64 rt, uint64 rs, uint64 off)  { xt_rri8(2, rt, rs, 0x2, off >> 2) }
+fn xt_s8i(uint64 rt, uint64 rs, uint64 off)   { xt_rri8(2, rt, rs, 0x4, off) }
+fn xt_s16i(uint64 rt, uint64 rs, uint64 off)  { xt_rri8(2, rt, rs, 0x5, off >> 1) }
+fn xt_s32i(uint64 rt, uint64 rs, uint64 off)  { xt_rri8(2, rt, rs, 0x6, off >> 2) }
+fn xt_l16si(uint64 rt, uint64 rs, uint64 off) { xt_rri8(2, rt, rs, 0x9, off >> 1) }
+
+// MOVI ar, imm12 (op0=2, r=0xA fixed): t=ar, s=imm12[11:8], imm8=imm12[7:0]
+fn xt_movi(uint64 rd, uint64 imm12) { xt_rri8(2, rd, (imm12 >> 8) & 0xF, 0xA, imm12 & 0xFF) }
+
+// ---------------------------------------------------------------------------
+// RI16 format (24-bit): op0[3:0] | t[7:4] | imm16[23:8]  — L32R only.
+// Target = ((PC+3) & ~3) + (imm16 - 0x10000) * 4, i.e. imm16 = (target-base)>>2
+// masked to 16 bits (two's-complement wraparound gives the correct field
+// for backward-only displacements, which is all L32R ever needs).
+// ---------------------------------------------------------------------------
+fn xt_l32r(uint64 rd, uint64 target_off) {
+    uint64 pc = codegen_output_len()
+    uint64 base = (pc + 3) & ~3
+    uint64 diff = target_off - base
+    uint64 imm16 = (diff >> 2) & 0xFFFF
+    uint64 w = 0x1 | ((rd & 0xF) << 4) | ((imm16 & 0xFFFF) << 8)
+    xt_emit24(w)
+}
+
+// ---------------------------------------------------------------------------
+// CALL0 (24-bit, op0=5, n=00 fixed at bits[5:4]): imm18 = bits[23:6].
+// Target = ((PC+4) & ~3) + imm18*4 (call targets are always word-aligned).
+// ---------------------------------------------------------------------------
+fn xt_call0(uint64 target_off) {
+    uint64 pc = codegen_output_len()
+    uint64 base = (pc + 4) & ~3
+    uint64 diff = target_off - base
+    uint64 imm18 = (diff >> 2) & 0x3FFFF
+    uint64 w = 0x5 | (imm18 << 6)
+    xt_emit24(w)
+}
+
+// ---------------------------------------------------------------------------
+// J (24-bit, op0=6, n=00 fixed at bits[5:4]): imm18 = bits[23:6], byte offset
+// (not word-scaled). Target = PC + 4 + imm18.
+// ---------------------------------------------------------------------------
+fn xt_j(uint64 target_off) {
+    uint64 pc = codegen_output_len()
+    uint64 diff = target_off - (pc + 4)
+    uint64 imm18 = diff & 0x3FFFF
+    uint64 w = 0x6 | (imm18 << 6)
+    xt_emit24(w)
+}
+
+// ---------------------------------------------------------------------------
+// BRI8 format (24-bit, two-register compare branches): op0=7,
+// t[7:4]=at, s[11:8]=as, r[15:12]=condition code, imm8[23:16].
+// Target = PC + 4 + imm8 (signed byte displacement).
+// Condition codes: BEQ=1, BLT=2, BLTU=3, BGE=(BLT|8)=0xA, BGEU=0xB, BNE=(BEQ|8)=9.
+// ---------------------------------------------------------------------------
+fn xt_bri8(uint64 cond, uint64 rs, uint64 rt, uint64 target_off) {
+    uint64 pc = codegen_output_len()
+    uint64 diff = target_off - (pc + 4)
+    uint64 imm8 = diff & 0xFF
+    uint64 w = 0x7 | ((rt & 0xF) << 4) | ((rs & 0xF) << 8) | ((cond & 0xF) << 12) | ((imm8 & 0xFF) << 16)
+    xt_emit24(w)
+}
+fn xt_beq(uint64 rs, uint64 rt, uint64 target_off)  { xt_bri8(0x1, rs, rt, target_off) }
+fn xt_bne(uint64 rs, uint64 rt, uint64 target_off)  { xt_bri8(0x9, rs, rt, target_off) }
+fn xt_blt(uint64 rs, uint64 rt, uint64 target_off)  { xt_bri8(0x2, rs, rt, target_off) }
+fn xt_bge(uint64 rs, uint64 rt, uint64 target_off)  { xt_bri8(0xA, rs, rt, target_off) }
+fn xt_bltu(uint64 rs, uint64 rt, uint64 target_off) { xt_bri8(0x3, rs, rt, target_off) }
+fn xt_bgeu(uint64 rs, uint64 rt, uint64 target_off) { xt_bri8(0xB, rs, rt, target_off) }
+
+// ---------------------------------------------------------------------------
+// BRI12 format (24-bit, reg-vs-zero branches): op0=6, n[5:4]=1 (fixed,
+// distinguishes from J's n=0), m[7:6]=0(BEQZ)/1(BNEZ), s[11:8]=register,
+// imm12[23:12]. Target = PC + 4 + imm12 (signed).
+// ---------------------------------------------------------------------------
+fn xt_bri12(uint64 m, uint64 reg, uint64 target_off) {
+    uint64 pc = codegen_output_len()
+    uint64 diff = target_off - (pc + 4)
+    uint64 imm12 = diff & 0xFFF
+    uint64 nib1 = ((m & 0x3) << 2) | 0x1
+    uint64 w = 0x6 | (nib1 << 4) | ((reg & 0xF) << 8) | ((imm12 & 0xFFF) << 12)
+    xt_emit24(w)
+}
+fn xt_beqz(uint64 reg, uint64 target_off) { xt_bri12(0, reg, target_off) }
+fn xt_bnez(uint64 reg, uint64 target_off) { xt_bri12(1, reg, target_off) }
+
+// ---------------------------------------------------------------------------
+// Density (.N) forms — 16-bit, emitted via xt_emit16.
+// ---------------------------------------------------------------------------
+
+// ADD.N (op0=0xA): r[7:4]=at(src2), s[11:8]=as(src1), t[15:12]=ar(dest).
+fn xt_add_n(uint64 rd, uint64 rs, uint64 rt) {
+    uint64 w = 0xA | ((rt & 0xF) << 4) | ((rs & 0xF) << 8) | ((rd & 0xF) << 12)
+    xt_emit16(w)
+}
+// MOV.N (op0=0xD): r[7:4]=ar(dest), s[11:8]=as(src), t[15:12]=0.
+fn xt_mov_n(uint64 rd, uint64 rs) {
+    uint64 w = 0xD | ((rd & 0xF) << 4) | ((rs & 0xF) << 8)
+    xt_emit16(w)
+}
+// L32I.N (op0=8): r[7:4]=at(dest), s[11:8]=as(base), t[15:12]=off>>2 (0-60).
+fn xt_l32i_n(uint64 rt, uint64 rs, uint64 off) {
+    uint64 w = 0x8 | ((rt & 0xF) << 4) | ((rs & 0xF) << 8) | (((off >> 2) & 0xF) << 12)
+    xt_emit16(w)
+}
+// S32I.N (op0=9): same field layout as L32I.N.
+fn xt_s32i_n(uint64 rt, uint64 rs, uint64 off) {
+    uint64 w = 0x9 | ((rt & 0xF) << 4) | ((rs & 0xF) << 8) | (((off >> 2) & 0xF) << 12)
+    xt_emit16(w)
+}
+// MOVI.N ar, imm7 (op0=0xC, range -32..95): s[11:8]=ar, r[7:4]=imm7[6:4], t[15:12]=imm7[3:0].
+fn xt_movi_n(uint64 rd, uint64 imm) {
+    uint64 imm7 = imm & 0x7F
+    uint64 r = (imm7 >> 4) & 0xF
+    uint64 t = imm7 & 0xF
+    uint64 w = 0xC | (r << 4) | ((rd & 0xF) << 8) | (t << 12)
+    xt_emit16(w)
+}
+// RET.N / NOP.N: fixed 16-bit encodings, no operands.
+fn xt_ret_n() { xt_emit16(0xF00D) }
+fn xt_nop_n() { xt_emit16(0xF03D) }
