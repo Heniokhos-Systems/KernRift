@@ -5287,6 +5287,51 @@ else
     echo "  riscv_hosted_obj_single: SKIP (qemu-riscv32-static or riscv64-linux-gnu-ld not installed)"
 fi
 
+# Compiles examples/riscv-hosted/link_a.kr and link_b.kr as SEPARATE
+# translation units with --emit=obj (equiv `-c`), the Task 6 cross-object
+# extern-call test. link_a's main() calls `addfive`, declared `extern fn`
+# (defined in link_b) — so link_a.o cannot resolve it internally and must
+# instead record a linker relocation: the riscv IR_CALL handler recognizes
+# the extern via extern_fn_lookup, calls extern_call_record, and
+# emit_elf_relocatable_rv32 emits one R_RISCV_CALL_PLT (type 19) against
+# symbol `addfive` at the auipc call site (has_relocs flips to 1, .rela.text
+# is emitted). Linking both objects with `riscv64-linux-gnu-ld -m elf32lriscv
+# -e main` and running under qemu-riscv32-static must exit 42 (addfive(37) ==
+# 42). Distinct from riscv_hosted_obj_single: that object has no extern calls
+# and skips .rela.text entirely; this pair proves the relocation is recorded,
+# emitted, and honored by a real cross-object link.
+echo ""
+echo "--- riscv32 hosted cross-object extern-call link test ---"
+if command -v qemu-riscv32-static >/dev/null 2>&1 && command -v riscv64-linux-gnu-ld >/dev/null 2>&1; then
+    TOTAL=$((TOTAL + 1))
+    RV_LA="/tmp/krc_rv_la_$$.o"
+    RV_LB="/tmp/krc_rv_lb_$$.o"
+    RV_LINKED="/tmp/krc_rv_link_$$"
+    if ! $KRC --arch=riscv32 -c "$DIR/../examples/riscv-hosted/link_a.kr" -o "$RV_LA" >/dev/null 2>&1; then
+        echo "FAIL: riscv_hosted_link (link_a.kr compilation failed)"
+        FAIL=$((FAIL + 1))
+    elif ! $KRC --arch=riscv32 -c "$DIR/../examples/riscv-hosted/link_b.kr" -o "$RV_LB" >/dev/null 2>&1; then
+        echo "FAIL: riscv_hosted_link (link_b.kr compilation failed)"
+        FAIL=$((FAIL + 1))
+    elif ! riscv64-linux-gnu-ld -m elf32lriscv -e main "$RV_LA" "$RV_LB" -o "$RV_LINKED" >/dev/null 2>&1; then
+        echo "FAIL: riscv_hosted_link (link failed)"
+        FAIL=$((FAIL + 1))
+    else
+        qemu-riscv32-static "$RV_LINKED" >/dev/null 2>&1
+        rc=$?
+        if [ "$rc" = "42" ]; then
+            PASS=$((PASS + 1))
+            echo "  riscv_hosted_link: PASS (qemu-riscv32-static exited 42)"
+        else
+            echo "FAIL: riscv_hosted_link (got exit $rc, want 42)"
+            FAIL=$((FAIL + 1))
+        fi
+    fi
+    rm -f "$RV_LA" "$RV_LB" "$RV_LINKED"
+else
+    echo "  riscv_hosted_link: SKIP (qemu-riscv32-static or riscv64-linux-gnu-ld not installed)"
+fi
+
 # --- Summary ---
 echo ""
 echo "=== Results: $PASS/$TOTAL passed, $FAIL failed ==="

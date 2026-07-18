@@ -631,7 +631,7 @@ fn rv_c_remap(uint64 map, uint64 start, uint64 nwords, uint64 old) -> uint64 {
 // only shrinks). With the C extension, 32-bit instructions may land on
 // 2-byte boundaries (IALIGN=16) — legal on any RVC hart, and patch_u32/
 // patch_u16 are byte-wise so unaligned patch sites are safe host-side.
-fn rv_compress_function(uint64 start, uint64 fix_start, uint64 line_start, uint64 strfx_start, uint64 statfx_start, uint64 fnaddrfx_start) {
+fn rv_compress_function(uint64 start, uint64 fix_start, uint64 line_start, uint64 strfx_start, uint64 statfx_start, uint64 fnaddrfx_start, uint64 extfx_start) {
     if out_len <= start { return }
     uint64 nwords = (out_len - start) / 4
     // map[i] = new ABSOLUTE offset of the instruction that was at
@@ -720,6 +720,23 @@ fn rv_compress_function(uint64 start, uint64 fix_start, uint64 line_start, uint6
         uint32 nc = rv_c_remap(map, start, nwords, wco)
         unsafe { *(fentry as uint32) = nc }
         ci = ci + 1
+    }
+    // 4a2. Extern-call relocation sites this function appended to the SHARED
+    //      extern_call_sites table (auipc offsets recorded by op 50's extern
+    //      branch; codegen_riscv.kr's .rela.text loop emits an R_RISCV_CALL_PLT
+    //      at each). Entries are 16 bytes: {u32 code_off; u32 extern_idx; ...}
+    //      — remap only the u32 code_off through the compaction map, exactly
+    //      like the internal call fixups above (the auipc/jalr stay 4-byte and
+    //      adjacent, 0x17/0x67 never compress).
+    uint64 xci = extfx_start
+    while xci < extern_call_count {
+        uint64 xentry = extern_call_sites + xci * 16
+        uint32 xco = 0
+        unsafe { *(xentry as uint32) -> xco }
+        uint64 wxco = xco
+        uint32 nxc = rv_c_remap(map, start, nwords, wxco)
+        unsafe { *(xentry as uint32) = nxc }
+        xci = xci + 1
     }
     // 4b. String-literal address fixup sites this function appended to the
     //     SHARED str_fixups table (auipc offsets of pcrel pairs recorded by
@@ -1541,6 +1558,27 @@ fn ir_emit_riscv_insn(uint64 ii) {
         uint64 call_patch = out_len
         rv_u(0, RV_RA, 0x17)                           // auipc ra, 0
         rv_i(0, RV_RA, 0, RV_RA, 0x67)                 // jalr ra, 0(ra)
+        // If the callee is an extern (undefined-in-this-TU) fn AND we're
+        // emitting a relocatable object, record a linker relocation instead
+        // of an internal fixup. R_RISCV_CALL_PLT at the auipc (call_patch)
+        // covers both the auipc and the jalr. Mirror of
+        // codegen_aarch64.kr:4421-4426. Use cg_emit_mode (the readable global,
+        // codegen.kr:68, set by set_emit_mode), NOT the compile()-local
+        // emit_mode which is not in scope here; cg_emit_mode == 3 is --emit=obj.
+        // This returns BEFORE the internal fixup_table append, so extern calls
+        // never reach resolve_fixups_riscv — which still hard-errors on a
+        // genuinely undefined internal call (non-obj mode leaves cg_emit_mode
+        // != 3, so an extern there correctly falls through to that error).
+        uint64 ext_idx_rv = extern_fn_lookup(imm)
+        if ext_idx_rv != 0xFFFFFFFF && cg_emit_mode == 3 {
+            extern_call_record(call_patch, ext_idx_rv)
+            if dst_r != 0xFFFFFFFF {
+                if dst_r != RV_A0 { rv_mv(dst_r, RV_A0) }
+            } else {
+                rv_store_spill(RV_A0, dest_v)
+            }
+            return
+        }
         if fixup_count >= 32768 {
             write(2, "error: fixup_table overflow (max 32768)\n", 40)
             exit(1)
@@ -2223,6 +2261,12 @@ fn ir_riscv_gen(uint64 fn_node) {
     uint64 fn_strfx_start = str_fixup_count
     uint64 fn_statfx_start = static_fixup_count
     uint64 fn_fnaddrfx_start = fnaddr_fixup_count
+    // Watermark for the shared extern-call relocation table: like the call
+    // fixups above, the auipc offsets recorded by extern_call_record (op 50's
+    // extern branch) must follow the C-compression compaction, or the emitted
+    // R_RISCV_CALL_PLT would point 2 bytes past the real auipc when a
+    // preceding instruction compressed.
+    uint64 fn_extfx_start = extern_call_count
     // Reset the per-function non-compressible-region list. Ranges recorded
     // during this function's emission are consumed by the compression call
     // (step 8a) and then discarded.
@@ -2472,7 +2516,7 @@ fn ir_riscv_gen(uint64 fn_node) {
     //     @naked bodies are never compressed: like control-flow opcodes,
     //     they demand precise layout, so the whole body stays as emitted.
     if is_naked == 0 {
-        rv_compress_function(fn_code_start, fn_fixup_start, fn_line_start, fn_strfx_start, fn_statfx_start, fn_fnaddrfx_start)
+        rv_compress_function(fn_code_start, fn_fixup_start, fn_line_start, fn_strfx_start, fn_statfx_start, fn_fnaddrfx_start, fn_extfx_start)
     }
 
     // 9. Patch branch fixups. Bit 31 of the recorded target field selects

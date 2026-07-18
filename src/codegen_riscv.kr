@@ -288,50 +288,28 @@ fn emit_elf_relocatable_rv32(uint64 text_len, uint64 data_len) {
     uint64 si = 0
     while si < 16 { emit_byte(0); si = si + 1 }
 
-    // Entries for each function
-    fi = 0
-    // Count local symbols: everything except main (which is GLOBAL)
-    // STB_LOCAL symbols must come before STB_GLOBAL in symtab
-    // info field = (binding << 4) | type
-    // We emit locals first, then globals.
-    // First pass: emit LOCAL functions (not main)
-    uint64 local_count = 1  // include null symbol
+    // Entries for each function. ALL defined functions are emitted GLOBAL
+    // (STB_GLOBAL << 4 | STT_FUNC = 0x12), not just `main`. This is required
+    // for cross-object linking: a callee like `addfive`, defined in one .o
+    // and called (via an R_RISCV_CALL_PLT relocation) from another, must be a
+    // GLOBAL symbol so the linker can satisfy the reference — a LOCAL symbol
+    // is file-scoped and invisible across objects. It mirrors the C default
+    // that top-level functions have external linkage (KernRift has no
+    // `static`/private-fn modifier). `main` is no longer special-cased; it was
+    // already GLOBAL. Only the null symbol is LOCAL, so all functions may be
+    // emitted in a single pass while still honouring the ELF rule that
+    // STB_LOCAL symbols precede STB_GLOBAL (local_count stays 1, and the
+    // .symtab sh_info below points one past the null symbol, at the first fn).
+    uint64 local_count = 1  // null symbol only (STB_LOCAL by convention)
     fi = 0
     while fi < fn_count {
-        if fi != main_fn_idx {
-            uint64 no_ptr = name_offsets + fi * 8
-            uint64 name_off = 0
-            unsafe { *(no_ptr as uint64) -> name_off }
-            // st_name
-            emit_u32_le(name_off)
-            // st_value = offset within .text section
-            uint64 fentry = fn_table + fi * 8
-            uint64 fe4 = fentry + 4
-            uint32 code_off = 0
-            unsafe { *(fe4 as uint32) -> code_off }
-            emit_u32_le(code_off)
-            // st_size = 0
-            emit_u32_le(0)
-            // st_info = STB_LOCAL(0) << 4 | STT_FUNC(2) = 0x02
-            emit_byte(0x02)
-            // st_other = 0
-            emit_byte(0)
-            // st_shndx = 1 (.text section)
-            emit_u16_le(1)
-            local_count = local_count + 1
-        }
-        fi = fi + 1
-    }
-
-    // Second pass: emit GLOBAL functions (main)
-    if main_fn_idx != 0xFFFFFFFF {
-        uint64 no_ptr = name_offsets + main_fn_idx * 8
+        uint64 no_ptr = name_offsets + fi * 8
         uint64 name_off = 0
         unsafe { *(no_ptr as uint64) -> name_off }
         // st_name
         emit_u32_le(name_off)
-        // st_value = offset within .text
-        uint64 fentry = fn_table + main_fn_idx * 8
+        // st_value = offset within .text section
+        uint64 fentry = fn_table + fi * 8
         uint64 fe4 = fentry + 4
         uint32 code_off = 0
         unsafe { *(fe4 as uint32) -> code_off }
@@ -344,12 +322,14 @@ fn emit_elf_relocatable_rv32(uint64 text_len, uint64 data_len) {
         emit_byte(0)
         // st_shndx = 1 (.text section)
         emit_u16_le(1)
+        fi = fi + 1
     }
 
-    // Third pass: emit extern function symbols (GLOBAL, STT_NOTYPE, SHN_UNDEF).
-    // The linker resolves these when producing the final executable.
-    uint64 extern_sym_base = local_count
-    if main_fn_idx != 0xFFFFFFFF { extern_sym_base = extern_sym_base + 1 }
+    // Extern function symbols (GLOBAL, STT_NOTYPE, SHN_UNDEF) follow all
+    // defined functions. The linker resolves these when producing the final
+    // executable. extern_sym_base is the symbol-table index of the first
+    // extern (used by the .rela.text loop's r_info): null + all fn symbols.
+    uint64 extern_sym_base = local_count + fn_count
     uint64 ei2 = 0
     while ei2 < extern_fn_count {
         uint64 xno_ptr2 = extern_name_offsets + ei2 * 8

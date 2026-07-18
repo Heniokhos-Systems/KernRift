@@ -1,0 +1,10 @@
+// link_b.kr — Task 6 cross-object linking test, callee side. Defines the
+// function `addfive` that link_a.kr calls across the object boundary. Compiled
+// on its own with `--emit=obj` (`-c`) into an Elf32 ET_REL object; `addfive`
+// is a GLOBAL symbol in its .symtab so the linker can satisfy link_a's
+// R_RISCV_CALL_PLT relocation against it. uint32 (ILP32) to match the other
+// riscv-hosted examples. addfive(37) == 42 drives the linked program's exit
+// code.
+fn addfive(uint32 x) -> uint32 {
+    return x + 5
+}

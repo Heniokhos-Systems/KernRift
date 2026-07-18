@@ -1,0 +1,14 @@
+// link_a.kr — Task 6 cross-object linking test, caller side. Declares
+// `addfive` as an `extern fn` (defined in link_b.kr) and calls it from main.
+// Compiled on its own with `--emit=obj` (`-c`): the extern call must NOT be
+// resolved internally (resolve_fixups_riscv would error "undefined function")
+// but recorded as a linker relocation — the riscv IR_CALL handler emits the
+// auipc+jalr pair and calls extern_call_record(), which emit_elf_relocatable_rv32
+// turns into one R_RISCV_CALL_PLT against symbol `addfive` at the call site.
+// Linking link_a.o + link_b.o with `riscv64-linux-gnu-ld -m elf32lriscv -e main`
+// and running under qemu-riscv32-static must exit 42 (addfive(37) == 42).
+extern fn addfive(uint32 x) -> uint32
+
+fn main() -> uint32 {
+    return addfive(37)
+}

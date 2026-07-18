@@ -2472,9 +2472,16 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
                     // path exists, so this branch is unconditional on
                     // emit_ir_mode (mirrors where arch==1 calls
                     // ir_emit_arm64_function above).
+                    // Extern declarations (data4 bit 3) have no body — skip
+                    // codegen so no local stub/symbol is emitted; the call
+                    // site records an R_RISCV_CALL_PLT relocation instead
+                    // (mirror of gen_function/gen_function_a64's extern
+                    // early-return, codegen.kr:10028 / codegen_aarch64.kr:5408).
+                    uint32 rv_ann_flags = ast_data4(wchild)
+                    uint64 rv_is_extern = rv_ann_flags & 8
                     // Raw mode already emitted the entry function at
                     // offset 0 above — don't register/emit it twice.
-                    if wchild != rv_entry_node {
+                    if rv_is_extern == 0 && wchild != rv_entry_node {
                         fn_register(fn_name, out_len)
                         line_table_record_fn_entry(fn_name)
                         ir_init()
