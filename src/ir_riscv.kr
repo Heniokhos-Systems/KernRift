@@ -2206,6 +2206,10 @@ fn ir_emit_riscv_insn(uint64 ii) {
 
     // ----- IR_SYSCALL (52): hosted Linux syscall -----
     if op == 52 {
+        if freestanding != 0 {
+            rv_nyi_op(op)
+            return
+        }
         // Args already placed in a0-a5 by IR_ARG. open(2) -> openat(56)
         // needs the AT_FDCWD arg shift (mirror ir_aarch64.kr:886-891).
         if imm == 2 {
@@ -2224,6 +2228,10 @@ fn ir_emit_riscv_insn(uint64 ii) {
 
     // ----- IR_SYSCALL_RAW (85): src1 = number vreg, args in a0-a5 -----
     if op == 85 {
+        if freestanding != 0 {
+            rv_nyi_op(op)
+            return
+        }
         uint64 nr_r = rv_resolve_src(s1_v, RV_T5)
         rv_mv(17, nr_r)                    // a7 = number
         emit_u32_le(0x00000073)            // ecall

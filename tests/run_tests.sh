@@ -5187,6 +5187,23 @@ else
     echo "  riscv_hosted_hello: SKIP (qemu-riscv32-static not installed)"
 fi
 
+# Same hello.kr as riscv_hosted_hello above, but WITH --freestanding: a
+# bare-metal rv32 image has no OS to service write(2), so IR_SYSCALL (op 52)
+# must fail loud with an NYI error instead of silently emitting a
+# meaningless Linux ecall (mirrors the op 70/71 IR_ALLOC freestanding gate
+# tested implicitly by riscv_hosted_heap's header comment above). No qemu
+# needed -- this only checks the compiler's own diagnostic, not codegen.
+TOTAL=$((TOTAL + 1))
+RV_ERR=$($KRC --arch=riscv32 --freestanding "$DIR/../examples/riscv-hosted/hello.kr" -o /tmp/krc_rv_fs_syscall_$$.bin 2>&1)
+if echo "$RV_ERR" | grep -q "op 52 not yet implemented"; then
+    PASS=$((PASS + 1))
+    echo "  riscv_freestanding_syscall_nyi: PASS (op 52 gated loud on freestanding)"
+else
+    echo "FAIL: riscv_freestanding_syscall_nyi (got '$RV_ERR', want NYI on op 52)"
+    FAIL=$((FAIL + 1))
+fi
+rm -f /tmp/krc_rv_fs_syscall_$$.bin
+
 # Compiles examples/riscv-hosted/echo_argv.kr, the Task 3 main-entry
 # trampoline test: a hosted main() reads argv[1] back through the cli_argv
 # static that ir_riscv_gen's prologue trampoline populates from the process
