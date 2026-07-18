@@ -1,0 +1,25 @@
+// ir_xtensa.kr — Xtensa LX6 IR-only backend (target_arch == 3). Mirrors
+// ir_riscv.kr. CALL0 ABI, literal-pool + L32R, branch relaxation.
+
+// CALL0 register roles: a0=ret addr, a1=SP, a2=arg0/retval, a2-a7=args,
+// a8-a11=caller temps, a12-a15=callee-saved.
+static uint64 XT_A0 = 0
+static uint64 XT_SP = 1        // a1
+static uint64 XT_A2 = 2
+static uint64 XT_A8 = 8        // scratch
+static uint64 XT_A9 = 9        // scratch
+
+fn xt_err(uint64 msg) {
+    write(2, msg, str_len(msg))
+    exit(1)
+}
+fn xt_nyi_op(uint64 op) {
+    uint64 m = "error: xtensa: IR op "
+    write(2, m, str_len(m))
+    uint8[16] nb
+    uint64 nl = fmt_uint(nb, op)
+    write(2, nb, nl)
+    uint64 t = " not yet implemented\n"
+    write(2, t, str_len(t))
+    exit(1)
+}

@@ -819,6 +819,18 @@ fn riscv32_nyi(uint64 what) {
     exit(1)
 }
 
+// xtensa (arch==3) backend is a stub during Milestone 1: every arch-dispatch
+// site routes arch==3 here explicitly instead of silently falling through
+// to the riscv32 or x86_64/arm64 arm of a binary if/else. See task 1 audit.
+fn xtensa_nyi(uint64 what) {
+    uint64 pre = "error: xtensa "
+    write(2, pre, str_len(pre))
+    write(2, what, str_len(what))
+    uint64 post = " not yet implemented\n"
+    write(2, post, str_len(post))
+    exit(1)
+}
+
 fn emit_asm_listing(uint64 output_path, uint64 arch, uint64 text_start, uint64 source, uint64 tokens) {
     uint64 fd = file_open(output_path, 1)
     uint64 code_end = codegen_output_len()
@@ -2343,14 +2355,16 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
             // header at all — out_buf starts with the first instruction
             // and QEMU's `virt -bios` loader jumps to file offset 0.
             header_size = 0
-        } else {
+        } else if arch == 2 {
             // riscv32 hosted: Elf32 executable header + program header.
             emit_elf_header_rv32()
             header_size = 84
+        } else if arch == 3 {
+            xtensa_nyi("ELF image emission")
         }
-        if arch != 2 {
+        if arch == 0 || arch == 1 {
             emit_program_header(0)
-        } else if rv_raw == 0 {
+        } else if arch == 2 && rv_raw == 0 {
             emit_program_header_rv32(0)
         }
     } else if emit_mode == 1 {
@@ -2499,6 +2513,8 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
                     // Record the entry-address line first so DWARF sees it.
                     line_table_record_fn_entry(fn_name)
                     gen_function(wchild)
+                } else if arch == 3 {
+                    xtensa_nyi("codegen")
                 } else {
                     // Legacy ARM64: gen_function_a64 registers internally.
                     line_table_record_fn_entry(fn_name)
@@ -2518,7 +2534,7 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
     } else if arch == 1 {
         resolve_fixups_a64()
         resolve_fnaddr_fixups_a64()
-    } else {
+    } else if arch == 2 {
         // riscv32: patch the auipc+jalr call pairs (ir_riscv.kr), then the
         // fn_addr() auipc+addi pairs (resolve_fnaddr_fixups_riscv). Both
         // resolve CODE offsets and must run here — after every function is
@@ -2526,6 +2542,8 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
         // wait on the data-area base offsets these two never need.
         resolve_fixups_riscv()
         resolve_fnaddr_fixups_riscv()
+    } else if arch == 3 {
+        xtensa_nyi("fixup resolution")
     }
 
     // Emit string data BEFORE static data so trailing zero bytes from
@@ -2543,6 +2561,9 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
         // riscv32: 4-byte alignment (RV32 word loads / instruction
         // alignment) — deliberately NOT the arm64 8-byte rule above.
         while (codegen_output_len() & 3) != 0 { emit_byte(0) }
+    } else if arch == 3 {
+        // xtensa: 4-byte alignment (instruction-fetch alignment).
+        while (codegen_output_len() & 3) != 0 { emit_byte(0) }
     }
     uint64 str_start = codegen_output_len()
     emit_string_data()
@@ -2550,11 +2571,13 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
         resolve_string_fixups(str_start)
     } else if arch == 1 {
         resolve_string_fixups_a64(str_start)
-    } else {
+    } else if arch == 2 {
         // riscv32: patch each IR_STR_CONST pcrel auipc+addi pair to point
         // at str_start + str_offset (ir_riscv.kr). Sites were already
         // remapped through C-compression, and the string blob now exists.
         resolve_string_fixups_riscv(str_start)
+    } else if arch == 3 {
+        xtensa_nyi("fixup resolution")
     }
     // Align the static-data section base to 8 bytes on both arches.
     // Without this, static uint64[N] arrays whose logical offset within
@@ -2579,12 +2602,14 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
             resolve_static_fixups(data_start)
         } else if arch == 1 {
             resolve_static_fixups_a64(data_start)
-        } else {
+        } else if arch == 2 {
             // riscv32: patch each IR_STATIC_ADDR/LOAD/STORE pcrel
             // auipc+addi pair to point at data_start + data_offset
             // (ir_riscv.kr). Sites were already remapped through
             // C-compression, and the static-data segment now exists.
             resolve_static_fixups_riscv(data_start)
+        } else if arch == 3 {
+            xtensa_nyi("fixup resolution")
         }
     }
 
@@ -2601,6 +2626,8 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
         if arch == 2 {
             // riscv is Linux-ELF only — bypass the target_os Mach-O/COFF split.
             emit_elf_relocatable_rv32(total_code, 0)
+        } else if arch == 3 {
+            xtensa_nyi("relocatable (.o) emission")
         } else if target_os == 1 {
             emit_macho_relocatable(total_code, 0, arch)
         } else if target_os == 2 {
@@ -2644,6 +2671,8 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
         // emit_elf_lkm's static-fixup relocation pass.
         if arch == 2 {
             riscv32_nyi("LKM (.ko) emission")
+        } else if arch == 3 {
+            xtensa_nyi("LKM (.ko) emission")
         }
         uint64 lkm_total = codegen_output_len()
         uint64 lkm_text_len = data_start
@@ -2712,7 +2741,7 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
             exit(1)
         }
     }
-    if emit_mode == 0 && rv_raw == 0 && arch != 2 {
+    if emit_mode == 0 && rv_raw == 0 && (arch == 0 || arch == 1) {
         // ELF entry point
         uint64 entry_va = 0x400000 + entry_off
         patch_u32(24, entry_va & 0xFFFFFFFF)
@@ -4553,6 +4582,8 @@ fn main() {
                     arch = 1
                 } else if str_starts_with(arch_str, "riscv", 5) != 0 {
                     arch = 2
+                } else if str_starts_with(arch_str, "xtensa", 6) != 0 {
+                    arch = 3
                 } else if str_starts_with(arch_str, "x86_64", 6) != 0 {
                     arch = 0
                 } else if str_starts_with(arch_str, "x86-64", 6) != 0 {
@@ -4562,7 +4593,7 @@ fn main() {
                 } else if str_starts_with(arch_str, "x64", 3) != 0 {
                     arch = 0
                 } else {
-                    write(2, "error: unknown --arch (use x86_64|arm64|riscv32)\n", 49)
+                    write(2, "error: unknown --arch (use x86_64|arm64|riscv32|xtensa)\n", 56)
                     exit(1)
                 }
             } else if str_starts_with(arg, "--emit=", 7) != 0 {
@@ -4641,7 +4672,7 @@ fn main() {
                 write(1, "and execs the matching slice at startup.\n\n", 42)
 
                 write(1, "output:\n", 8)
-                write(1, "  --arch=x86_64|arm64|riscv32   single-arch binary (no fat-binary wrap)\n", 72)
+                write(1, "  --arch=x86_64|arm64|riscv32|xtensa   single-arch binary (no fat-binary wrap)\n", 79)
                 write(1, "  --target=linux|macos|windows|android   single-target binary\n", 62)
                 write(1, "  --targets=<list>          custom fat binary subset\n", 53)
                 write(1, "                              e.g. linux-x64,macos-arm64,win-x64\n", 65)
@@ -4999,6 +5030,11 @@ fn main() {
     if arch == 2 && target_mask != 0 {
         uint64 tmsg = "error: fat binaries (--targets) have no riscv32 slice; use --arch=riscv32 without --targets\n"
         write(2, tmsg, str_len(tmsg))
+        exit(1)
+    }
+    if arch == 3 && target_mask != 0 {
+        uint64 xtmsg = "error: fat binaries (--targets) have no xtensa slice; use --arch=xtensa without --targets\n"
+        write(2, xtmsg, str_len(xtmsg))
         exit(1)
     }
     if target_mask != 0 || (arch_set == 0 && emit_set == 0 && cli_argc > 0) {

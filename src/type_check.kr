@@ -264,7 +264,7 @@ fn tc_is_float_kind(uint64 tk) -> uint64 {
 // parse time and never reach sema: unsafe/volatile pointer casts, struct
 // fields, statics, consts, type aliases, and device fields.
 fn tc_riscv32_reject_kind(uint64 kind, uint64 tok) {
-    if target_arch != 2 { return }
+    if target_arch != 2 && target_arch != 3 { return }
     if kind == 83 || kind == 87 {
         diag_fatal_at(tok, "64-bit integers not supported on riscv32; use uint32")
     }
@@ -407,7 +407,7 @@ fn tc_check_expr(uint64 node) {
     // riscv32: an integer literal that needs more than 32 bits is a
     // uint64-only value — the IR would silently truncate it. (Char/bool
     // tagged IntLits parse to small values, so no false positives.)
-    if wkind == 30 && target_arch == 2 {
+    if wkind == 30 && (target_arch == 2 || target_arch == 3) {
         uint32 lt32 = ast_data1(node)
         uint64 lt = lt32
         if parse_int_token(lt) > 0xFFFFFFFF {
