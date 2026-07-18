@@ -5187,6 +5187,36 @@ else
     echo "  riscv_hosted_hello: SKIP (qemu-riscv32-static not installed)"
 fi
 
+# Compiles examples/riscv-hosted/echo_argv.kr, the Task 3 main-entry
+# trampoline test: a hosted main() reads argv[1] back through the cli_argv
+# static that ir_riscv_gen's prologue trampoline populates from the process
+# stack ([sp]=argc, [sp+4]=&argv[0], ILP32 4-byte slots). Running the binary
+# with an argument must echo that argument to stdout. Distinct from
+# riscv_hosted_hello: this exercises the argc/argv/envp capture in the
+# main prologue, not just a bare write().
+echo ""
+echo "--- riscv32 hosted main entry trampoline (argv) test ---"
+if command -v qemu-riscv32-static >/dev/null 2>&1; then
+    TOTAL=$((TOTAL + 1))
+    RV_BIN="/tmp/krc_rv_echo_$$.bin"
+    if ! $KRC --arch=riscv32 "$DIR/../examples/riscv-hosted/echo_argv.kr" -o "$RV_BIN" >/dev/null 2>&1; then
+        echo "FAIL: riscv_hosted_argv (compilation failed)"
+        FAIL=$((FAIL + 1))
+    else
+        RV_OUT=$(qemu-riscv32-static "$RV_BIN" HELLO 2>/dev/null)
+        if [ "$RV_OUT" = "HELLO" ]; then
+            PASS=$((PASS + 1))
+            echo "  riscv_hosted_argv: PASS (qemu-riscv32-static echoed 'HELLO')"
+        else
+            echo "FAIL: riscv_hosted_argv (got '$RV_OUT', want 'HELLO')"
+            FAIL=$((FAIL + 1))
+        fi
+    fi
+    rm -f "$RV_BIN"
+else
+    echo "  riscv_hosted_argv: SKIP (qemu-riscv32-static not installed)"
+fi
+
 # --- Summary ---
 echo ""
 echo "=== Results: $PASS/$TOTAL passed, $FAIL failed ==="

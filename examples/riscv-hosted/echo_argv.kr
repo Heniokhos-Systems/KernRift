@@ -1,0 +1,25 @@
+// RISC-V RV32 hosted argv readback (Task 3: main entry trampoline).
+//
+// Declares the cli_* statics the entry trampoline populates from the
+// process stack at main's prologue: [sp]=argc, [sp+4]=&argv[0] on ILP32
+// (4-byte slots). Reads argv[1] back through cli_argv and echoes it, so
+// `qemu-riscv32-static <bin> HELLO` must print "HELLO\n".
+//
+// Statics are uint32 (rv32 is ILP32 — pointers and argc are 4 bytes; the
+// trampoline stores a word to each). Before the trampoline exists,
+// cli_argc stays 0, so `cli_argc < 2` returns 1 with no output — TDD RED.
+
+static uint32 cli_argc = 0
+static uint32 cli_argv = 0
+static uint32 cli_envp = 0
+
+fn main() -> uint32 {
+    if cli_argc < 2 { return 1 }
+    uint32 p = cli_argv + 4          // &argv[1] (4-byte pointers on ILP32)
+    uint32 arg1 = 0
+    unsafe { *((p) as uint32) -> arg1 }
+    uint32 len = str_len(arg1)
+    write(1, arg1, len)
+    write(1, "\n", 1)
+    return 0
+}

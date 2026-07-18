@@ -2267,6 +2267,45 @@ fn ir_riscv_gen(uint64 fn_node) {
             }
             pc = pc + 1
         }
+
+        // main entry trampoline (hosted only): capture argc/argv/envp from the
+        // process stack into the program's cli_* statics. At _start, [sp]=argc,
+        // [sp+4]=&argv[0] (ILP32, 4-byte slots). The prologue already lowered sp
+        // by total_frame, so argc/argv live at sp+total_frame+{0,4}. Stores go to
+        // the data-segment statics via the pcrel pair (table_sel 1 = statics),
+        // exactly like IR_STATIC_STORE (ir_riscv.kr:1638-1644) — NOT sp-relative.
+        // Mirror of codegen_aarch64.kr:5491-5531 (Linux branch), 4-byte words.
+        uint32 fn_name_tok_tr = ast_data1(fn_node)
+        uint64 wnt_tr = fn_name_tok_tr
+        if tok_matches(wnt_tr, "main", 4) != 0 && freestanding == 0 {
+            // argc -> cli_argc
+            uint64 argc_off = static_lookup_by_name("cli_argc", 8)
+            if argc_off != 0xFFFFFFFF {
+                rv_lw_sp_big(RV_T6, total_frame)             // t6 = argc
+                rv_emit_pcrel_pair(RV_T5, 1, argc_off)       // t5 = &cli_argc
+                rv_s(0, RV_T6, RV_T5, 2, 0x23)               // sw t6, 0(t5)
+            }
+            // &argv[0] = sp + total_frame + 4 -> cli_argv
+            uint64 argv_off = static_lookup_by_name("cli_argv", 8)
+            if argv_off != 0xFFFFFFFF {
+                rv_addi_sp_big(RV_T6, total_frame + 4)       // t6 = sp + tf + 4
+                rv_emit_pcrel_pair(RV_T5, 1, argv_off)       // t5 = &cli_argv
+                rv_s(0, RV_T6, RV_T5, 2, 0x23)               // sw t6, 0(t5)
+            }
+            // envp = sp + total_frame + 4 + (argc+1)*4 -> cli_envp
+            uint64 envp_off = static_lookup_by_name("cli_envp", 8)
+            if envp_off != 0xFFFFFFFF {
+                // Compute the base into t6 FIRST — rv_addi_sp_big clobbers t5 on
+                // big frames, so it must run before t5 holds (argc+1)*4.
+                rv_addi_sp_big(RV_T6, total_frame + 4)       // t6 = sp + tf + 4
+                rv_lw_sp_big(RV_T5, total_frame)             // t5 = argc
+                rv_i(1, RV_T5, 0, RV_T5, 0x13)               // t5 = argc + 1
+                rv_i(2, RV_T5, 1, RV_T5, 0x13)               // t5 = (argc+1) << 2  (slli t5,t5,2)
+                rv_r(0, RV_T5, RV_T6, 0, RV_T6, 0x33)        // t6 = t6 + t5 = envp
+                rv_emit_pcrel_pair(RV_T5, 1, envp_off)       // t5 = &cli_envp
+                rv_s(0, RV_T6, RV_T5, 2, 0x23)               // sw t6, 0(t5)
+            }
+        }
     }
 
     // 7. Allocate branch/return fixup tracking — same grow-as-needed
