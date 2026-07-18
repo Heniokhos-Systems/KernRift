@@ -2381,11 +2381,16 @@ fn ir_riscv_gen(uint64 fn_node) {
         ri = ri + 1
     }
 
-    // 11. Epilogue (skip for @naked). NOTE: no auto exit-syscall for
-    //     main() yet — that lands with IR_SYSCALL (riscv32 Linux exit=93),
-    //     alongside argc/argv setup. Until then a linked main would ret
-    //     into an undefined ra, but nothing links riscv32 output before
-    //     Task 3.1 anyway.
+    // 11. Epilogue. Auto-exit for hosted main(): a0 already holds the
+    //     return value (IR_RET / IR_RET_VOID set it before jumping here).
+    //     exit(93) so main does not `ret` into an undefined ra. Mirrors
+    //     codegen_aarch64.kr:5777-5783. Freestanding keeps the bare ret.
+    uint32 fn_name_tok_rv = ast_data1(fn_node)
+    uint64 wnt_rv_ep = fn_name_tok_rv
+    if tok_matches(wnt_rv_ep, "main", 4) != 0 && freestanding == 0 {
+        rv_li(17, 93)                 // a7 = 93 (asm-generic exit)
+        emit_u32_le(0x00000073)       // ecall
+    }
     if is_naked == 0 {
         // Restore used s-registers (mirror of the prologue)
         uint64 ec = 0

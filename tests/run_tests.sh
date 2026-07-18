@@ -5124,6 +5124,39 @@ else
     echo "  riscv_t9_asm: SKIP (qemu-system-riscv32 or riscv64-linux-gnu-objdump not installed)"
 fi
 
+# Compiles examples/riscv-hosted/exit_code.kr, which is the Task 1
+# hosted-emission smoke test: `fn main() -> uint32 { return 42 }` compiled
+# WITHOUT --freestanding must produce a real Elf32 ET_EXEC (e_machine=243)
+# that runs directly under qemu-riscv32-static (the user-mode emulator, as
+# opposed to qemu-system-riscv32 -bios used by the freestanding checks
+# above) and exits with the returned value. Distinct from the freestanding
+# suite: no UART, no -bios boot -- this exercises emit_elf_header_rv32() /
+# emit_program_header_rv32() in main.kr's arch-2 header dispatch and the
+# auto-exit ecall main() gets in ir_riscv.kr's epilogue.
+echo ""
+echo "--- riscv32 hosted ELF (exit code) test ---"
+if command -v qemu-riscv32-static >/dev/null 2>&1; then
+    TOTAL=$((TOTAL + 1))
+    RV_BIN="/tmp/krc_rv_exit_$$.bin"
+    if ! $KRC --arch=riscv32 "$DIR/../examples/riscv-hosted/exit_code.kr" -o "$RV_BIN" >/dev/null 2>&1; then
+        echo "FAIL: riscv_hosted_exit_code (compilation failed)"
+        FAIL=$((FAIL + 1))
+    else
+        qemu-riscv32-static "$RV_BIN" >/dev/null 2>&1
+        rc=$?
+        if [ "$rc" = "42" ]; then
+            PASS=$((PASS + 1))
+            echo "  riscv_hosted_exit_code: PASS (qemu-riscv32-static exited 42)"
+        else
+            echo "FAIL: riscv_hosted_exit_code (got exit $rc, want 42)"
+            FAIL=$((FAIL + 1))
+        fi
+    fi
+    rm -f "$RV_BIN"
+else
+    echo "  riscv_hosted_exit_code: SKIP (qemu-riscv32-static not installed)"
+fi
+
 # --- Summary ---
 echo ""
 echo "=== Results: $PASS/$TOTAL passed, $FAIL failed ==="

@@ -1,0 +1,46 @@
+// codegen_riscv.kr — hosted RV32 emission for target_arch == 2 (riscv32):
+// Elf32 executable headers (Task 1), Elf32 relocatable .o writer (Task 5),
+// and the RV32IMC disassembler for --emit=asm (Task 7). Mirrors
+// codegen_aarch64.kr. The freestanding flat-binary path stays in
+// ir_riscv.kr / main.kr and never calls into here.
+
+// Elf32_Ehdr (52 bytes). e_entry is patched by main.kr's arch-2 entry
+// branch (offset 24). e_flags = EF_RISCV_RVC (0x1) because the
+// C-compression pass emits compressed instructions; float-ABI bits are 0
+// (soft-float ILP32).
+fn emit_elf_header_rv32() {
+    emit_byte(0x7F); emit_byte(69); emit_byte(76); emit_byte(70)  // \x7F E L F
+    emit_byte(1); emit_byte(1); emit_byte(1); emit_byte(0)        // ELFCLASS32, LSB, EV_CURRENT, OSABI
+    uint64 i = 0
+    while i < 8 { emit_byte(0); i = i + 1 }                       // e_ident padding
+    emit_u16_le(2)          // e_type = ET_EXEC
+    emit_u16_le(243)        // e_machine = EM_RISCV
+    emit_u32_le(1)          // e_version
+    emit_u32_le(0)          // e_entry  (u32; patched)
+    emit_u32_le(52)         // e_phoff  = 52
+    emit_u32_le(0)          // e_shoff  = 0
+    emit_u32_le(1)          // e_flags  = EF_RISCV_RVC
+    emit_u16_le(52)         // e_ehsize
+    emit_u16_le(32)         // e_phentsize
+    emit_u16_le(1)          // e_phnum
+    emit_u16_le(0)          // e_shentsize
+    emit_u16_le(0)          // e_shnum
+    emit_u16_le(0)          // e_shstrndx
+}
+
+// Elf32_Phdr (32 bytes). WARNING: field order differs from Elf64_Phdr —
+// p_flags sits AFTER p_memsz here (offset 24 into the phdr = file offset
+// 84), NOT right after p_type. p_filesz/p_memsz (file offsets 68/72) are
+// patched by main.kr's arch-2 entry/BSS branch. Single PT_LOAD, RWX, maps
+// file offset 0 -> vaddr 0x10000 so byte F lives at vaddr 0x10000+F.
+fn emit_program_header_rv32(uint64 text_size) {
+    uint64 total = 84 + text_size          // placeholder; patched later
+    emit_u32_le(1)          // p_type = PT_LOAD
+    emit_u32_le(0)          // p_offset = 0
+    emit_u32_le(0x10000)    // p_vaddr = load base
+    emit_u32_le(0x10000)    // p_paddr
+    emit_u32_le(total)      // p_filesz  (offset 68; patched)
+    emit_u32_le(total)      // p_memsz   (offset 72; patched)
+    emit_u32_le(7)          // p_flags = RWX
+    emit_u32_le(0x1000)     // p_align
+}

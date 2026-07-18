@@ -2337,13 +2337,14 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
             // and QEMU's `virt -bios` loader jumps to file offset 0.
             header_size = 0
         } else {
-            // Do NOT emit an x86_64/arm64 ELF header for riscv32.
-            // (A hosted riscv32 ELF image needs the e_machine=243
-            // writer; only the --freestanding raw path exists today.)
-            riscv32_nyi("ELF image emission (only --freestanding raw binaries are supported)")
+            // riscv32 hosted: Elf32 executable header + program header.
+            emit_elf_header_rv32()
+            header_size = 84
         }
         if arch != 2 {
             emit_program_header(0)
+        } else if rv_raw == 0 {
+            emit_program_header_rv32(0)
         }
     } else if emit_mode == 1 {
         // Mach-O
@@ -2700,7 +2701,7 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
             exit(1)
         }
     }
-    if emit_mode == 0 && rv_raw == 0 {
+    if emit_mode == 0 && rv_raw == 0 && arch != 2 {
         // ELF entry point
         uint64 entry_va = 0x400000 + entry_off
         patch_u32(24, entry_va & 0xFFFFFFFF)
@@ -2732,6 +2733,24 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
         if debug_info_mode != 0 {
             emit_elf_debug_footer(text_start, input_path)
         }
+    } else if emit_mode == 0 && rv_raw == 0 && arch == 2 {
+        // RV32 hosted: Elf32 entry + BSS patch. Distinct offsets from the
+        // Elf64 path above — e_entry is a single u32 at 24 (offset 28 is
+        // e_phoff in Elf32); p_filesz/p_memsz live at 68/72.
+        uint64 entry_va_rv = 0x10000 + entry_off
+        patch_u32(24, entry_va_rv)
+        uint64 total_size_rv = header_size + text_size
+        uint64 p_filesz_rv = total_size_rv
+        if debug_info_mode == 0 {
+            uint64 tail_start_rv = codegen_last_nonzero_end()
+            uint64 bss_bytes_rv = total_size_rv - tail_start_rv
+            if bss_bytes_rv >= 4096 {
+                codegen_truncate(tail_start_rv)
+                p_filesz_rv = tail_start_rv
+            }
+        }
+        patch_u32(68, p_filesz_rv)     // Elf32_Phdr p_filesz
+        patch_u32(72, total_size_rv)   // Elf32_Phdr p_memsz
     } else if emit_mode == 1 {
         // Mach-O
         uint64 page_size = 4096
