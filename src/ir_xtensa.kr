@@ -65,6 +65,41 @@ fn xt_xor(uint64 rd, uint64 rs, uint64 rt) { xt_rrr(0, rt, rs, rd, 0, 0x3) }
 // Multiply option (op0=0, op1=2): MULL
 fn xt_mull(uint64 rd, uint64 rs, uint64 rt) { xt_rrr(0, rt, rs, rd, 2, 0x8) }
 
+// DIV32 option (op0=0, op1=2, op2=0xC..0xF): QUOU/QUOS/REMU/REMS. Hand-
+// encoded — `xtensa-lx106-elf-as`/`-objdump` REJECT these (the LX106 core
+// config lacks the DIV32 option, so Task 2's golden-diff harness cannot
+// exercise them the way every other encoder in this file was verified).
+// Encoding provenance for Task 4 (two independent sources, both agree):
+//   1. Real binutils source, host-binutils-2.43.1's bfd/xtensa-modules.c:
+//      Opcode_quou_Slot_inst_encode -> slotbuf[0] = 0xc20000
+//      Opcode_quos_Slot_inst_encode -> slotbuf[0] = 0xd20000
+//      Opcode_remu_Slot_inst_encode -> slotbuf[0] = 0xe20000
+//      Opcode_rems_Slot_inst_encode -> slotbuf[0] = 0xf20000
+//      (compare Opcode_mull_Slot_inst_encode -> 0x820000, matching xt_mull
+//      above exactly: same op1=2 field, only op2 differs.) These words are
+//      op0=0,t=0,s=0,r=0,op1=2,op2={0xC,0xD,0xE,0xF} — i.e.
+//      xt_rrr(0, 0, 0, 0, 2, 0xC..0xF), confirming the op1/op2 fields.
+//      The same file's disassembly switch (Field_op2_Slot_inst_get, case
+//      2 i.e. op1=2) maps op2 12/13/14/15 -> quou/quos/remu/rems.
+//      Iclass_xt_iclass_div_args = { arr:'o', ars:'i', art:'i' }: assembly
+//      order is `quou ar, as, at` meaning ar <- as OP at (as=dividend in
+//      the `s` field, at=divisor in the `t` field) — the SAME s/t
+//      convention as xt_sub (ar <- as - at) above, hence the (rd, rs, rt)
+//      argument order below mirrors xt_sub's exactly.
+//   2. GBATEK's Xtensa opcode encoding tables (RRR op1=2 "RST2" group):
+//      op2 8=MULL 9=reserved A=MULUH B=MULSH C=QUOU D=QUOS E=REMU F=REMS.
+// Runtime note: LX6/ESP32 (unlike LX106) DOES implement DIV32, so these
+// are real, executable instructions on the target — only the dev-host
+// toolchain's assembler/disassembler (built for LX106) can't handle them.
+// No local qemu-system-xtensa / xtensa-esp32-elf-objdump was available to
+// runtime- or disassembly-verify beyond the two independent ISA sources
+// above; T8 (qemu boot) is the first point a runtime check becomes
+// possible for these four opcodes.
+fn xt_quou(uint64 rd, uint64 rs, uint64 rt) { xt_rrr(0, rt, rs, rd, 2, 0xC) }
+fn xt_quos(uint64 rd, uint64 rs, uint64 rt) { xt_rrr(0, rt, rs, rd, 2, 0xD) }
+fn xt_remu(uint64 rd, uint64 rs, uint64 rt) { xt_rrr(0, rt, rs, rd, 2, 0xE) }
+fn xt_rems(uint64 rd, uint64 rs, uint64 rt) { xt_rrr(0, rt, rs, rd, 2, 0xF) }
+
 // Shift-amount-register ops (op0=0, op1=0, op2=4): s=as, r selects SSR(0)/SSL(1)
 fn xt_ssr(uint64 rs) { xt_rrr(0, 0, rs, 0, 0, 0x4) }
 fn xt_ssl(uint64 rs) { xt_rrr(0, 0, rs, 1, 0, 0x4) }
@@ -276,6 +311,14 @@ fn xt_fits_movi(uint64 v) -> uint64 {
     return 0
 }
 
+// Does a 32-bit value fit ADDI's sign-extended 8-bit immediate (-128..127)?
+// Same re-bias trick as xt_fits_movi, threshold 0x100 instead of 0x1000.
+fn xt_fits_addi(uint64 v) -> uint64 {
+    uint64 biased = (v + 0x80) & 0xFFFFFFFF
+    if biased < 0x100 { return 1 }
+    return 0
+}
+
 // --- Per-function literal pool ------------------------------------------
 // L32R is backward-only (the literal word must precede the instruction), so
 // the pool is emitted FIRST, before any code, at the function's start. Its
@@ -391,6 +434,24 @@ fn xt_mv(uint64 rd, uint64 rs) {
     xt_mov_n(rd, rs)
 }
 
+// Materialize an arbitrary 32-bit value into `scratch` — movi if it fits
+// the sign-extended 12-bit immediate, else via the literal pool (exact
+// mirror of IR_CONST's own materialize path in ir_emit_xtensa_insn).
+// Every call site that can reach the literal-pool branch MUST have
+// interned the same value in ir_xtensa_gen's pre-scan (step 6) first: the
+// pool is flushed to its final file offset before any code is emitted, so
+// a fresh xt_lit_intern here (past the flush) would allocate a slot with
+// no backing word in the file.
+fn xt_materialize(uint64 v, uint64 scratch) {
+    uint64 vv = v & 0xFFFFFFFF
+    if xt_fits_movi(vv) != 0 {
+        xt_movi(scratch, vv)
+    } else {
+        uint64 slot = xt_lit_intern(vv)
+        xt_l32r(scratch, xt_lit_base + slot * 4)
+    }
+}
+
 // --- 24-bit patch + J re-encode (return-fixup patcher) -------------------
 // J is 3 bytes; patch_u32 would clobber a 4th byte (the next instruction), so
 // patch exactly three. Return sites emit a `j #0` placeholder; step 10
@@ -419,6 +480,7 @@ fn ir_emit_xtensa_insn(uint64 ii) {
     if op == 0 { return }            // NOP (LICM-elided slot)
     uint64 dest_v = ir_insn_dest(ii)
     uint64 s1_v = ir_insn_src1(ii)
+    uint64 s2_v = ir_insn_src2(ii)
     uint64 imm = ir_insn_imm(ii)
 
     // DWARF line-table hook (same as the x86/arm64/riscv emitters).
@@ -475,7 +537,165 @@ fn ir_emit_xtensa_insn(uint64 ii) {
         return
     }
 
-    // Everything else lands in later tasks (ALU=T4, mem/call=T5, branches=T6).
+    // ----- R-type arith/logic: IR_ADD(2) IR_SUB(3) IR_AND(7) IR_OR(8)
+    // ----- IR_XOR(9), reg-reg. Resolve src1 into a8 / src2 into a9 when
+    // spilled (mirror of rv_resolve_src's t5/t6 pair), dest falls back to
+    // a8 + spill store — same "dest scratch aliases src1 scratch" safety
+    // argument as riscv (ir_riscv.kr:1168): every RRR instruction here
+    // reads both sources before writing rd, so d==a_reg is fine even when
+    // both fall back to a8.
+    if op == 2 || op == 3 || op == 7 || op == 8 || op == 9 {
+        uint64 a_reg = xt_resolve_src(s1_v, XT_A8)
+        uint64 b_reg = xt_resolve_src(s2_v, XT_A9)
+        uint64 d = dst_r
+        if d == 0xFFFFFFFF { d = XT_A8 }
+        if op == 2 { xt_add(d, a_reg, b_reg) }
+        if op == 3 { xt_sub(d, a_reg, b_reg) }
+        if op == 7 { xt_and(d, a_reg, b_reg) }
+        if op == 8 { xt_or(d, a_reg, b_reg) }
+        if op == 9 { xt_xor(d, a_reg, b_reg) }
+        if dst_r == 0xFFFFFFFF { xt_store_spill(XT_A8, dest_v) }
+        return
+    }
+
+    // ----- IR_MUL (4): hardware MULL, reg-reg. -----
+    if op == 4 {
+        uint64 a_reg = xt_resolve_src(s1_v, XT_A8)
+        uint64 b_reg = xt_resolve_src(s2_v, XT_A9)
+        uint64 d = dst_r
+        if d == 0xFFFFFFFF { d = XT_A8 }
+        xt_mull(d, a_reg, b_reg)
+        if dst_r == 0xFFFFFFFF { xt_store_spill(XT_A8, dest_v) }
+        return
+    }
+
+    // ----- Hardware divide/remainder: IR_DIV(5) unsigned -> QUOU,
+    // ----- IR_MOD(6) unsigned -> REMU, IR_SDIV(132) signed -> QUOS,
+    // ----- IR_SMOD(133) signed -> REMS. ESP32/LX6 has the DIV32 option;
+    // encoding provenance + s/t (dividend/divisor) convention documented
+    // at xt_quou's definition above. Signed/unsigned mapping mirrors the
+    // riscv/arm64 handlers (ir_riscv.kr:1190-1216) — a mixup here silently
+    // corrupts negative-number division, so keep this in lockstep with
+    // those if either changes.
+    if op == 5 || op == 6 || op == 132 || op == 133 {
+        uint64 a_reg = xt_resolve_src(s1_v, XT_A8)
+        uint64 b_reg = xt_resolve_src(s2_v, XT_A9)
+        uint64 d = dst_r
+        if d == 0xFFFFFFFF { d = XT_A8 }
+        if op == 5 { xt_quou(d, a_reg, b_reg) }
+        if op == 6 { xt_remu(d, a_reg, b_reg) }
+        if op == 132 { xt_quos(d, a_reg, b_reg) }
+        if op == 133 { xt_rems(d, a_reg, b_reg) }
+        if dst_r == 0xFFFFFFFF { xt_store_spill(XT_A8, dest_v) }
+        return
+    }
+
+    // ----- IR_ADD_IMM (135) / IR_SUB_IMM (136): dst = src1 ± imm -----
+    // addi's imm8 field is signed −128..127. Outside that range,
+    // materialize imm into a9 (xt_materialize: movi or literal pool) and
+    // fall back to the R-type add/sub — mirrors riscv's li+R-type fallback
+    // (ir_riscv.kr:1218). No `subi` exists on Xtensa, so SUB_IMM negates
+    // for the addi fast path (dst = src1 + (-imm)) but passes the ORIGINAL
+    // imm to the materialize+sub fallback (xt_sub does the subtraction).
+    if op == 135 || op == 136 {
+        uint64 a_reg = xt_resolve_src(s1_v, XT_A8)
+        uint64 d = dst_r
+        if d == 0xFFFFFFFF { d = XT_A8 }
+        uint64 addi_val = imm
+        if op == 136 { addi_val = 0 - imm }
+        if xt_fits_addi(addi_val) != 0 {
+            xt_addi(d, a_reg, addi_val & 0xFF)
+        } else {
+            xt_materialize(imm & 0xFFFFFFFF, XT_A9)
+            if op == 135 { xt_add(d, a_reg, XT_A9) }
+            if op == 136 { xt_sub(d, a_reg, XT_A9) }
+        }
+        if dst_r == 0xFFFFFFFF { xt_store_spill(XT_A8, dest_v) }
+        return
+    }
+
+    // ----- IR_AND_IMM (140) / IR_OR_IMM (141) / IR_XOR_IMM (142) -----
+    // Core Xtensa has no andi/ori/xori — always materialize the immediate
+    // into a9 and do the R-type. No encoding-savings vs. leaving these as
+    // reg-reg AND/OR/XOR (both paths cost 2 instructions), but a fused
+    // _IMM op could still arrive from a future shared-optimizer change, so
+    // handle it defensively rather than fall through to xt_nyi_op.
+    if op == 140 || op == 141 || op == 142 {
+        uint64 a_reg = xt_resolve_src(s1_v, XT_A8)
+        uint64 d = dst_r
+        if d == 0xFFFFFFFF { d = XT_A8 }
+        xt_materialize(imm & 0xFFFFFFFF, XT_A9)
+        if op == 140 { xt_and(d, a_reg, XT_A9) }
+        if op == 141 { xt_or(d, a_reg, XT_A9) }
+        if op == 142 { xt_xor(d, a_reg, XT_A9) }
+        if dst_r == 0xFFFFFFFF { xt_store_spill(XT_A8, dest_v) }
+        return
+    }
+
+    // ----- IR_SHL_IMM (143) / IR_SHR_IMM (144) / IR_SAR_IMM (145) -----
+    // SRAI is byte-exact-verified across the full 0..31 range (Task 2), so
+    // IR_SAR_IMM always uses it directly. SLLI is only verified for sa
+    // 1..15 and SRLI only for sa 0..15 (Task 2 comments at their
+    // definitions) — sa==0 for SHL is a plain copy, and every other
+    // out-of-verified-range case (SHL sa 16..31, SHR sa 16..31) falls back
+    // to the variable-shift sequence (materialize sa into a9, ssl/ssr, then
+    // sll/srl), which is correct for the full 0..31 range — so no
+    // truly-unencodable case remains here to loud-fail on.
+    if op == 143 || op == 144 || op == 145 {
+        uint64 a_reg = xt_resolve_src(s1_v, XT_A8)
+        uint64 d = dst_r
+        if d == 0xFFFFFFFF { d = XT_A8 }
+        uint64 sa = imm & 0x1F
+        if op == 145 {
+            xt_srai(d, a_reg, sa)
+        } else if op == 143 && sa == 0 {
+            xt_mv(d, a_reg)
+        } else if op == 143 && sa <= 15 {
+            xt_slli(d, a_reg, sa)
+        } else if op == 144 && sa <= 15 {
+            xt_srli(d, a_reg, sa)
+        } else {
+            xt_movi(XT_A9, sa)
+            if op == 143 {
+                xt_ssl(XT_A9)
+                xt_sll(d, a_reg)
+            } else {
+                xt_ssr(XT_A9)
+                xt_srl(d, a_reg)
+            }
+        }
+        if dst_r == 0xFFFFFFFF { xt_store_spill(XT_A8, dest_v) }
+        return
+    }
+
+    // ----- Variable shifts: IR_SHL(10) IR_SHR(11) IR_SAR(134), reg-reg.
+    // ----- SSL/SSR load the shift amount from a register into the SAR
+    // special register (SSL encodes it as 32-minus-amount internally, SSR
+    // directly — both are pure hardware idiom, xt_ssl/xt_ssr already
+    // encapsulate the difference), then SLL/SRL/SRA shift using SAR. SSL/
+    // SSR write only the special SAR register, never a8/a9, so resolving
+    // src1 into a8 and src2 into a9 first and reading them after is safe
+    // regardless of spill/alias.
+    if op == 10 || op == 11 || op == 134 {
+        uint64 a_reg = xt_resolve_src(s1_v, XT_A8)
+        uint64 b_reg = xt_resolve_src(s2_v, XT_A9)
+        uint64 d = dst_r
+        if d == 0xFFFFFFFF { d = XT_A8 }
+        if op == 10 {
+            xt_ssl(b_reg)
+            xt_sll(d, a_reg)
+        } else if op == 11 {
+            xt_ssr(b_reg)
+            xt_srl(d, a_reg)
+        } else {
+            xt_ssr(b_reg)
+            xt_sra(d, a_reg)
+        }
+        if dst_r == 0xFFFFFFFF { xt_store_spill(XT_A8, dest_v) }
+        return
+    }
+
+    // Everything else lands in later tasks (mem/call=T5, branches=T6).
     xt_nyi_op(op)
 }
 
@@ -546,13 +766,24 @@ fn ir_xtensa_gen(uint64 fn_node) {
     // 6. Literal pool FIRST (before any code). Pre-scan the lowered+optimised
     //    IR for every IR_CONST that does not fit MOVI; intern each. (Address-
     //    literals — call/str/static/fnaddr — reserve slots here in later
-    //    tasks.) Then flush the word-aligned pool. code_start follows it.
+    //    tasks.) Also pre-scan the ALU immediate ops (Task 4) whose emit-time
+    //    handler falls back to xt_materialize when the fast immediate
+    //    encoding doesn't fit: IR_ADD_IMM/IR_SUB_IMM(135/136) miss addi's
+    //    imm8, IR_AND_IMM/IR_OR_IMM/IR_XOR_IMM(140/141/142) always
+    //    materialize (no andi/ori/xori on core Xtensa). Mirror the exact
+    //    fits-check + value each handler uses below, so the same
+    //    xt_lit_intern call (dedup by value) reserves the same slot the
+    //    handler's xt_materialize will later resolve — the pool is flushed
+    //    to a fixed file offset right after this scan, so any literal
+    //    needed at emit time MUST be interned here first. Then flush the
+    //    word-aligned pool. code_start follows it.
     xt_lit_reset()
     uint64 sbi = 0
     while sbi < ir_bb_count {
         uint64 sii = ir_bb_first_insn(sbi)
         while sii != 0xFFFFFFFF {
-            if ir_insn_opcode(sii) == 1 {
+            uint64 sop = ir_insn_opcode(sii)
+            if sop == 1 {
                 uint64 cimm = ir_insn_imm(sii)
                 // Only 32-bit-representable constants reach the pool; genuine
                 // 64-bit literals are rejected at emit time (loud), so the
@@ -565,6 +796,17 @@ fn ir_xtensa_gen(uint64 fn_node) {
                     uint64 cv = cimm & 0xFFFFFFFF
                     if xt_fits_movi(cv) == 0 { xt_lit_intern(cv) }
                 }
+            } else if sop == 135 || sop == 136 {
+                uint64 aimm = ir_insn_imm(sii)
+                uint64 addi_val = aimm
+                if sop == 136 { addi_val = 0 - aimm }
+                if xt_fits_addi(addi_val) == 0 {
+                    uint64 amv = aimm & 0xFFFFFFFF
+                    if xt_fits_movi(amv) == 0 { xt_lit_intern(amv) }
+                }
+            } else if sop == 140 || sop == 141 || sop == 142 {
+                uint64 limm = ir_insn_imm(sii) & 0xFFFFFFFF
+                if xt_fits_movi(limm) == 0 { xt_lit_intern(limm) }
             }
             sii = ir_insn_next(sii)
         }

@@ -1,0 +1,38 @@
+// Xtensa LX6 Task 4: ALU ops (arithmetic, logic, shifts, hardware mul/div).
+//
+// Compiled with --O0 (disables constant folding/fusion): every operator
+// below lowers to a genuine reg-reg IR instruction (IR_ADD/IR_SUB/...)
+// instead of being folded away, since every operand here is otherwise a
+// compile-time literal and xtensa has no non-foldable value source yet
+// (params/loads land in Task 5, so under default -O1 this whole function
+// constant-propagates to a single `movi`+`ret.n`).
+//
+// No named local variables: `uint32 x = expr` lowers to an extra IR_COPY
+// (op 61) binding the declared name to a fresh vreg — plumbing needed for
+// ANY local variable, not just function parameters — and IR_COPY isn't
+// implemented for xtensa yet (also T5, alongside CALL0 argument passing).
+// A single nested expression avoids it entirely (verified via `--emit=ir`:
+// no v_n = copy v_m appears below), which is also why the signed divide/
+// mod/shift-arithmetic opcodes (IR_SDIV/IR_SMOD/IR_SAR) aren't exercised
+// here — reaching them needs an int32-typed operand, and every source of
+// one (a named int32 local, or an int32 function parameter) requires
+// IR_COPY. See the task report for how IR_SDIV/IR_SMOD/IR_SAR/the *_IMM
+// forms were verified instead (encoding-provenance + code-path sharing
+// with the operators below, since the handlers are structurally
+// identical modulo which already-verified encoder they call).
+//
+// `/ 7` and `% 5` use non-power-of-two divisors so the shared lowering's
+// unsigned-div-by-pow2 -> shr/and strength reduction (ir.kr:1470,
+// unconditional at lowering time regardless of opt level) does not
+// intercept them — the only way to reach the hardware QUOU/REMU path.
+//
+// `<<`/`>>` are both reg-reg (IR_SHL/IR_SHR): under --O0 the shift amount
+// is itself a real vreg (fed by its own IR_CONST), so these exercise the
+// SSL/SSR + SLL/SRL variable-shift sequence, not the slli/srli immediate
+// encoders (those need IR_SHL_IMM/IR_SHR_IMM fusion, which — like the
+// other *_IMM forms — the shared optimizer doesn't yet wire up for
+// xtensa; see the report).
+fn main() -> uint32 {
+    return ((((((((100 + 7) - 3) & 240) | 15) ^ 51) * 3) / 7) % 5)
+         + ((100 << 3) + (100 >> 2))
+}

@@ -4540,6 +4540,92 @@ else
     echo "  xtensa_ret42_disasm: SKIP (xtensa-lx106-elf-objdump not installed)"
 fi
 
+# --- Xtensa LX6 ALU ops disassembly test (Task 4) ---
+# Compiles examples/xtensa/alu.kr with --O0 (constant folding/fusion would
+# otherwise collapse the whole literal-only expression to a single `movi`)
+# and asserts every reachable non-immediate ALU op's mnemonic/encoding:
+#   add/sub/and/or/xor/mull (R-type, objdump mnemonic match) and the
+#   ssl+sll / ssr+srl variable-shift sequences (objdump mnemonic match).
+# IR_DIV/IR_MOD (hardware QUOU/REMU, hand-encoded — see task-4 report for
+# encoding provenance) can't be mnemonic-matched: xtensa-lx106-elf-objdump
+# is built for the LX106 core, which lacks the DIV32 option and decodes
+# that op1=2/op2=0xC..0xF bit pattern as a different LX106-only instruction
+# (EXCW) instead. So for those two, a python3 byte-level check decodes the
+# raw RRR fields directly from the emitted binary and asserts op1==2 and
+# op2 in {0xC,0xE} (QUOU/REMU) at the two expected instruction slots,
+# independent of what any host disassembler makes of them.
+echo ""
+echo "--- xtensa LX6 ALU ops disasm test ---"
+if command -v xtensa-lx106-elf-objdump >/dev/null 2>&1; then
+    TOTAL=$((TOTAL + 1))
+    XT_ALU_BIN="/tmp/krc_xt_alu_$$.bin"
+    XT_ALU_OK=1
+    if ! $KRC --arch=xtensa --freestanding --O0 "$DIR/../examples/xtensa/alu.kr" -o "$XT_ALU_BIN" >/dev/null 2>&1; then
+        echo "FAIL: xtensa_alu_disasm (compilation failed)"
+        XT_ALU_OK=0
+    fi
+    if [ "$XT_ALU_OK" = 1 ]; then
+        XT_ALU_DIS=$(xtensa-lx106-elf-objdump -b binary -m xtensa -D --show-raw-insn "$XT_ALU_BIN" 2>/dev/null)
+        for MN in 'add[[:space:]]+a[0-9]+, ?a[0-9]+, ?a[0-9]+' \
+                  'sub[[:space:]]+a[0-9]+, ?a[0-9]+, ?a[0-9]+' \
+                  'and[[:space:]]+a[0-9]+, ?a[0-9]+, ?a[0-9]+' \
+                  '\bor[[:space:]]+a[0-9]+, ?a[0-9]+, ?a[0-9]+' \
+                  'xor[[:space:]]+a[0-9]+, ?a[0-9]+, ?a[0-9]+' \
+                  'mull[[:space:]]+a[0-9]+, ?a[0-9]+, ?a[0-9]+' \
+                  'ssl[[:space:]]+a[0-9]+' \
+                  'sll[[:space:]]+a[0-9]+, ?a[0-9]+' \
+                  'ssr[[:space:]]+a[0-9]+' \
+                  'srl[[:space:]]+a[0-9]+, ?a[0-9]+'; do
+            if ! echo "$XT_ALU_DIS" | grep -Eq "$MN"; then
+                echo "FAIL: xtensa_alu_disasm (missing mnemonic pattern: $MN)"
+                XT_ALU_OK=0
+            fi
+        done
+    fi
+    if [ "$XT_ALU_OK" = 1 ] && command -v python3 >/dev/null 2>&1; then
+        if ! python3 -c "
+import sys
+data = open('$XT_ALU_BIN', 'rb').read()
+def decode_rrr(off):
+    b0, b1, b2 = data[off], data[off+1], data[off+2]
+    w = b0 | (b1 << 8) | (b2 << 16)
+    return (w & 0xF), (w>>16)&0xF, (w>>20)&0xF   # op0, op1, op2
+
+# Every op1=2,op2 in {0xC,0xD,0xE,0xF} RRR word in the blob is a DIV32 op
+# (QUOU/QUOS/REMU/REMS) — alu.kr's only op1=2 instructions besides MULL
+# (op2=8) are the / and % it emits, so require at least one op2==0xC
+# (QUOU, from '/ 7') and one op2==0xE (REMU, from '% 5').
+found_c = False
+found_e = False
+i = 0
+while i + 3 <= len(data):
+    op0, op1, op2 = decode_rrr(i)
+    if op0 == 0 and op1 == 2:
+        if op2 == 0xC: found_c = True
+        if op2 == 0xE: found_e = True
+    i += 1
+if not found_c:
+    print('missing QUOU (op1=2,op2=0xC) encoding for /')
+    sys.exit(1)
+if not found_e:
+    print('missing REMU (op1=2,op2=0xE) encoding for %')
+    sys.exit(1)
+" ; then
+            echo "FAIL: xtensa_alu_disasm (DIV32 byte-level check)"
+            XT_ALU_OK=0
+        fi
+    fi
+    if [ "$XT_ALU_OK" = 1 ]; then
+        PASS=$((PASS + 1))
+        echo "  xtensa_alu_disasm: PASS (add/sub/and/or/xor/mull + ssl/sll/ssr/srl mnemonics + QUOU/REMU byte-level check)"
+    else
+        FAIL=$((FAIL + 1))
+    fi
+    rm -f "$XT_ALU_BIN"
+else
+    echo "  xtensa_alu_disasm: SKIP (xtensa-lx106-elf-objdump not installed)"
+fi
+
 # --- RISC-V RV32 IR_STR_CONST via pcrel auipc+addi (feature-gap Task 1) ---
 # Compiles examples/riscv-featuregap/t1_strconst.kr, which takes the address
 # of a string literal ("hi\n") through IR_STR_CONST and writes it to the UART.
