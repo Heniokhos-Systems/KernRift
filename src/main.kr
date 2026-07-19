@@ -2523,6 +2523,11 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
             write(2, xte_msg, str_len(xte_msg))
             exit(1)
         }
+        // Assign the __xt_pcbase name token BEFORE the emit loop so every
+        // `call0 __xt_pcbase` fixup recorded during PIC emission carries the
+        // right token. The helper body itself is emitted conditionally in the
+        // finalize block below (only when a PIC site exists — H2 / spec M6).
+        xt_setup_pcbase_tok()
     }
 
     // Generate code for each function (skip dead functions via DCE)
@@ -2603,6 +2608,21 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
     // exit here so objdump can disassemble it. This early-out is arch-3-only,
     // so it cannot perturb arch 0/1/2 output.
     if xt_raw != 0 {
+        // H2: emit + register the shared __xt_pcbase helper (a single ret.n)
+        // ONCE, here at the FUNCTION BOUNDARY — after ALL functions are laid out,
+        // never mid-body from a PIC handler (which would splice bytes into the
+        // current function). Gated on xt_addr_fixup_count so a program with NO
+        // PIC sites (no string/static/fn-address material — e.g. hello/stress/
+        // call.kr) is byte-identical to before (spec §D1 M6: "emitted once if
+        // any PIC site exists"). Registered BEFORE resolve_fixups_xtensa so the
+        // `call0 __xt_pcbase` sites recorded during emission resolve through the
+        // normal fn_lookup path. e_entry patches to the ENTRY fn's own code_start
+        // below, so __xt_pcbase's position is immaterial. Anchor offsets + pool
+        // words were finalized during each function's own relaxation, so this
+        // late emission cannot perturb them.
+        if xt_addr_fixup_count > 0 {
+            xt_emit_pcbase_fn()
+        }
         // Patch call0 targets now — every function is laid out and
         // fn_register recorded each entry offset. This raw early-out returns
         // before the arch-3 fixup branch further down (the string/static/ELF
@@ -2624,8 +2644,18 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
             exit(1)
         }
         patch_u32(24, 0xd0000000 + xt_entry_code)      // Elf32_Ehdr e_entry
+
+        // Data blobs after all code. Strings first (byte-accessed, no align
+        // needed); the static blob + BSS arrive in Tasks 2-3. Record str_start,
+        // then patch each STR_CONST site's delta pool word against it (H1/H2).
+        uint64 xt_str_start = codegen_output_len()
+        emit_string_data()
+        resolve_addr_fixups_xtensa(xt_str_start, 0)
+
         uint64 xt_total = codegen_output_len()
-        patch_u32(68, xt_total)                         // Elf32_Phdr p_filesz
+        // p_filesz drops trailing zero fill (none yet, but keeps the invariant
+        // for Tasks 2-3's real BSS); p_memsz spans the full in-memory image.
+        patch_u32(68, codegen_last_nonzero_end())       // Elf32_Phdr p_filesz
         patch_u32(72, xt_total)                         // Elf32_Phdr p_memsz
 
         codegen_write_output(output_path)

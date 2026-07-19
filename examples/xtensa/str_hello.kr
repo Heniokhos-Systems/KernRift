@@ -1,0 +1,4 @@
+device Uart at 0xfd050020 { thr at 0x00 : u32  lsr at 0x14 : u8 }
+fn putc(u8 c) { while (Uart.lsr & 0x20) == 0 { }  Uart.thr = c }
+fn puts(u32 s) { u32 i = 0  while 1 == 1 { u8 c = 0  unsafe { *((s + i) as u8) -> c }  if c == 0 { return }  putc(c)  i = i + 1 } }
+fn main() { puts("xtensa strings ok")  putc(10)  loop { } }

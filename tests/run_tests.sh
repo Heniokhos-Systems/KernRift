@@ -4990,6 +4990,43 @@ else
     echo "  xtensa_stress_boot: SKIP (qemu-system-xtensa not installed)"
 fi
 
+# --- Xtensa LX6 string literals (IR_STR_CONST via PIC) boot test ---
+# str_hello.kr takes the address of a string literal ("xtensa strings ok")
+# through IR_STR_CONST and prints it byte-by-byte over the UART. This is the
+# first consumer of the per-function PC-anchor (real PIC) address materialization
+# — call0 __xt_pcbase / l32r a9,<pool:delta> / add dst,a0,a9. Full-output
+# equality (not a grep): a wrong delta or a stale anchor after relaxation would
+# print garbage or fault. loop{} keeps the core busy until the timeout.
+echo ""
+echo "--- xtensa LX6 string-literal boot test ---"
+if command -v qemu-system-xtensa >/dev/null 2>&1; then
+    TOTAL=$((TOTAL + 1))
+    XT_STR_ELF="/tmp/krc_xt_str_$$.elf"
+    XT_STR_OK=1
+    if ! $KRC --arch=xtensa --freestanding "$DIR/../examples/xtensa/str_hello.kr" -o "$XT_STR_ELF" >/dev/null 2>&1; then
+        echo "FAIL: xtensa_str_boot (compilation failed)"
+        XT_STR_OK=0
+    fi
+    if [ "$XT_STR_OK" = 1 ]; then
+        XT_STR_EXP="xtensa strings ok"
+        XT_STR_OUT=$(timeout 8 qemu-system-xtensa -M lx60 -nographic -kernel "$XT_STR_ELF" 2>/dev/null | tr -d '\r')
+        if [ "$XT_STR_OUT" = "$XT_STR_EXP" ]; then
+            PASS=$((PASS + 1))
+            echo "  xtensa_str_boot: PASS (string literal materialized + printed)"
+        else
+            echo "FAIL: xtensa_str_boot (output mismatch)"
+            echo "    expected: $XT_STR_EXP"
+            echo "    got:      $XT_STR_OUT"
+            FAIL=$((FAIL + 1))
+        fi
+    else
+        FAIL=$((FAIL + 1))
+    fi
+    rm -f "$XT_STR_ELF"
+else
+    echo "  xtensa_str_boot: SKIP (qemu-system-xtensa not installed)"
+fi
+
 # --- RISC-V RV32 IR_STR_CONST via pcrel auipc+addi (feature-gap Task 1) ---
 # Compiles examples/riscv-featuregap/t1_strconst.kr, which takes the address
 # of a string literal ("hi\n") through IR_STR_CONST and writes it to the UART.
