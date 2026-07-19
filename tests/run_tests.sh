@@ -4891,6 +4891,60 @@ else
     echo "  xtensa_call_disasm: SKIP (xtensa-lx106-elf-objdump not installed)"
 fi
 
+# --- Xtensa LX6 freestanding UART hello (boots under qemu — MILESTONE 1) ---
+# Compiles examples/xtensa/hello.kr with --arch=xtensa --freestanding (Elf32
+# boot image, load base 0xd0000000), then boots it under
+# qemu-system-xtensa -M lx60 and greps stdout for "hello". qemu is a dev-only
+# toolchain: SKIP cleanly when absent so its absence can never fail the suite
+# (mirrors the riscv_hello_boot test above). Note: a later --arch= flag
+# overrides an earlier one, so this works through the `make test` wrapper that
+# bakes in --arch=x86_64.
+echo ""
+echo "--- xtensa LX6 freestanding boot test ---"
+if command -v qemu-system-xtensa >/dev/null 2>&1; then
+    TOTAL=$((TOTAL + 1))
+    XT_HELLO_ELF="/tmp/krc_xt_hello_$$.elf"
+    XT_HELLO_OK=1
+    if ! $KRC --arch=xtensa --freestanding "$DIR/../examples/xtensa/hello.kr" -o "$XT_HELLO_ELF" >/dev/null 2>&1; then
+        echo "FAIL: xtensa_hello_boot (compilation failed)"
+        XT_HELLO_OK=0
+    fi
+    # Optional entry-point sanity: e_entry must decode to the SP-init preamble
+    # (l32r a1, ...), proving it skips the entry fn's literal pool. Only when
+    # readelf/objdump are present; never a hard gate on their absence.
+    if [ "$XT_HELLO_OK" = 1 ] && command -v readelf >/dev/null 2>&1 \
+       && command -v xtensa-lx106-elf-objdump >/dev/null 2>&1; then
+        XT_ENTRY=$(readelf -h "$XT_HELLO_ELF" 2>/dev/null | awk '/Entry point/{print $NF}')
+        XT_EOFF=$(( XT_ENTRY - 0xd0000000 ))
+        XT_ESTOP=$(( XT_EOFF + 3 ))
+        if ! xtensa-lx106-elf-objdump -b binary -m xtensa -D \
+             --start-address=$XT_EOFF --stop-address=$XT_ESTOP "$XT_HELLO_ELF" 2>/dev/null \
+             | grep -qE 'l32r[[:space:]]+a1'; then
+            echo "FAIL: xtensa_hello_boot (e_entry does not decode to 'l32r a1' SP preamble)"
+            XT_HELLO_OK=0
+        fi
+    fi
+    if [ "$XT_HELLO_OK" = 1 ]; then
+        # hello loops forever after printing (freestanding), so qemu always
+        # runs until the timeout kills it — 5s is the fixed cost, plenty for
+        # the ~instant UART output. Command substitution captures the full
+        # stdout before the SIGTERM (a pipe to `head` can lose it).
+        XT_OUT=$(timeout 5 qemu-system-xtensa -M lx60 -nographic -kernel "$XT_HELLO_ELF" 2>/dev/null)
+        if echo "$XT_OUT" | grep -q "hello"; then
+            PASS=$((PASS + 1))
+            echo "  xtensa_hello_boot: PASS (qemu printed hello)"
+        else
+            echo "FAIL: xtensa_hello_boot (qemu output did not contain 'hello')"
+            FAIL=$((FAIL + 1))
+        fi
+    else
+        FAIL=$((FAIL + 1))
+    fi
+    rm -f "$XT_HELLO_ELF"
+else
+    echo "  xtensa_hello_boot: SKIP (qemu-system-xtensa not installed)"
+fi
+
 # --- RISC-V RV32 IR_STR_CONST via pcrel auipc+addi (feature-gap Task 1) ---
 # Compiles examples/riscv-featuregap/t1_strconst.kr, which takes the address
 # of a string literal ("hi\n") through IR_STR_CONST and writes it to the UART.

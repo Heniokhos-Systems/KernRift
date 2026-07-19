@@ -24,6 +24,19 @@ static uint64 XT_NUM_ARG_REGS = 6
 // clobber a live spill across the call.
 static uint64 XT_OVERFLOW_RESERVE = 64
 
+// Freestanding boot (Task 8). xt_entry_node is the entry function AST node
+// (a live `_start` if present, else `main`) selected in main.kr's xt_raw path.
+// It is non-zero ONLY under --arch=xtensa --freestanding, so ir_xtensa_gen can
+// gate the SP-init preamble on `fn_node == xt_entry_node` with no separate raw
+// flag. The preamble is emitted as the entry fn's FIRST code (past its pool),
+// so e_entry (= code_start) lands on it. XT_STACK_TOP is the initial SP: the
+// stack grows DOWN from here, so it must sit above the (tiny) boot image in the
+// lx60 cached DRAM window (load base 0xd0000000, see codegen_xtensa.kr).
+// 0xd0040000 = 256 KiB into that window — pinned against qemu-system-xtensa
+// -M lx60 (see task-8 report).
+static uint64 xt_entry_node = 0
+static uint64 XT_STACK_TOP = 0xd0040000
+
 fn xt_err(uint64 msg) {
     write(2, msg, str_len(msg))
     exit(1)
@@ -701,6 +714,22 @@ fn xt_emit_l32r_pooled(uint64 rd, uint64 slot) {
     xt_add_pool_fixup(site, slot)
 }
 
+// Freestanding boot SP preamble (Task 8, --arch=xtensa --freestanding only),
+// emitted as the entry fn's FIRST code inside ir_xtensa_gen — so e_entry
+// (= code_start, past the pool) is this instruction. At reset a1 (SP) is
+// UNDEFINED and a2 holds the bootparam pointer (NOT an argument — leave it).
+// PS.WOE=0 at reset, so flat CALL0 needs no PS/window setup (nothing to do
+// here). Load XT_STACK_TOP from the pool word interned in ir_xtensa_gen's
+// pre-scan into a1. Deliberately does NOT record a pool fixup: this L32R sits
+// at code_start, ahead of every branch, so relaxation never shifts it and the
+// pool (below code_start) never moves — the emit-time displacement stays valid
+// (recording a fixup would be wiped by ir_xtensa_gen's per-fn fixup reset,
+// which runs after this preamble).
+fn xt_emit_raw_sp_preamble() {
+    uint64 slot = xt_lit_intern(XT_STACK_TOP)     // deduped: the pre-scan's slot
+    xt_l32r(XT_SP, xt_lit_base + slot * 4)         // l32r a1, <pool[XT_STACK_TOP]>
+}
+
 // --- Offset-remap after relaxation (rv_c_remap analog) ------------------
 // The relaxed set is the ascending list of ORIGINAL patch offsets of the
 // conditional branches chosen for `Binv; J` rewriting. Each inserts 3 bytes
@@ -1290,6 +1319,43 @@ fn ir_emit_xtensa_insn(uint64 ii) {
         return
     }
 
+    // ----- IR_VSTORE (94) / IR_VLOAD (95): volatile MMIO store/load -----
+    // Same operand shape as IR_STORE/IR_LOAD (mirror of ir_riscv.kr:1414):
+    // width in dest_v for VSTORE, in imm for VLOAD; address entirely in src1,
+    // offset 0. Unlike riscv (which relies on the in-order hart alone), emit a
+    // MEMW fence before each access (spec §6, xt_memw) so an MMIO access is
+    // ordered against surrounding memory ops — the UART poll loop reads LSR and
+    // then writes THR, and MEMW keeps that ordering explicit on the LX6
+    // pipeline. Width 8 loud-fails (no 64-bit access on xtensa).
+    if op == 94 {
+        uint64 width = dest_v
+        if width == 8 {
+            xt_err("error: xtensa: 64-bit volatile store not supported\n")
+        }
+        uint64 addr_reg = xt_resolve_src(s1_v, XT_A8)
+        uint64 val_reg = xt_resolve_src(s2_v, XT_A9)
+        xt_memw()
+        if width == 1 { xt_s8i(val_reg, addr_reg, 0) }
+        else if width == 2 { xt_s16i(val_reg, addr_reg, 0) }
+        else { xt_s32i(val_reg, addr_reg, 0) }
+        return
+    }
+    if op == 95 {
+        uint64 width = imm
+        if width == 8 {
+            xt_err("error: xtensa: 64-bit volatile load not supported\n")
+        }
+        uint64 addr_reg = xt_resolve_src(s1_v, XT_A8)
+        uint64 d = dst_r
+        if d == 0xFFFFFFFF { d = XT_A8 }
+        xt_memw()
+        if width == 1 { xt_l8ui(d, addr_reg, 0) }
+        else if width == 2 { xt_l16ui(d, addr_reg, 0) }
+        else { xt_l32i(d, addr_reg, 0) }
+        if dst_r == 0xFFFFFFFF { xt_store_spill(XT_A8, dest_v) }
+        return
+    }
+
     // ----- IR_COPY (61): dst = src1, or param/phys-reg init -----
     // Mirror of ir_riscv.kr:1451. src1 != 0: plain mv (bind a named
     // local/temp to an existing vreg — what `uint32 x = expr` lowers to).
@@ -1527,6 +1593,13 @@ fn ir_xtensa_gen(uint64 fn_node) {
         }
         sbi = sbi + 1
     }
+    // Freestanding entry fn: reserve the pool word the SP-init preamble loads.
+    // Must be interned BEFORE the flush (like every other literal) so its slot
+    // has a backing word; xt_emit_raw_sp_preamble re-interns (deduped) to get
+    // the same slot.
+    if fn_node == xt_entry_node {
+        xt_lit_intern(XT_STACK_TOP)
+    }
     xt_lit_flush()
 
     // 6a. Self-register at code_start (past the pool) so find_main_offset /
@@ -1539,6 +1612,16 @@ fn ir_xtensa_gen(uint64 fn_node) {
     // -g line records from here on shift under relaxation; the fn-entry
     // record above sits at code_start (which never moves) so is excluded.
     uint64 fn_line_start = line_table_count
+
+    // 6b. Freestanding entry preamble (Task 8): init a1 (SP) as the FIRST code
+    //     — before the prologue, so e_entry == code_start lands on it and the
+    //     prologue's stack stores run against a valid SP. Only the selected
+    //     entry fn; a no-op for every other function and for hosted builds
+    //     (xt_entry_node == 0). See xt_emit_raw_sp_preamble for why this L32R
+    //     records no pool fixup.
+    if fn_node == xt_entry_node {
+        xt_emit_raw_sp_preamble()
+    }
 
     // 7. Prologue (skip for @naked). CALL0: lower SP, save a0 (return addr)
     //    at [a1 + total_frame - 4], save used a12-a15. addi is signed-8, so a

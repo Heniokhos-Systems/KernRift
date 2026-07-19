@@ -1,0 +1,45 @@
+// Xtensa LX6 milestone 1: boot under QEMU and print "hello" over UART.
+//
+// Target: qemu-system-xtensa -M lx60 -kernel img.elf, which loads the Elf32
+// image by its program header (load base 0x00000000 — the DC232B lx60 DRAM is
+// at phys 0x0) and starts executing at e_entry. The compiler's freestanding
+// preamble (src/ir_xtensa.kr xt_emit_raw_sp_preamble) sets a1 (SP) to
+// 0x00040000 before main's prologue runs (a1 is undefined at reset; a2 is the
+// bootparam pointer, left untouched).
+//
+// The lx60 board emulates a 16550 UART at 0xfd050020 with registers on a
+// 4-byte stride (reg-shift 2):
+//   THR (transmit holding register)  word at 0x00, write low byte to send
+//   LSR (line status register)       byte at 0x14, bit 0x20 = THR empty (THRE)
+//
+// Build:
+//   ./build/krc2 --arch=xtensa --freestanding examples/xtensa/hello.kr -o hello.elf
+// Run (Ctrl-A x to exit):
+//   qemu-system-xtensa -M lx60 -nographic -kernel hello.elf
+//
+// Expected output: hello
+
+device Uart at 0xfd050020 {
+    thr at 0x00 : u32
+    lsr at 0x14 : u8
+}
+
+fn putc(u8 c) {
+    // Spin until the transmit holding register is empty (LSR bit 5, THRE).
+    // Both accesses are volatile (vload8 / vstore32) — never reordered,
+    // fused, or dead-code-eliminated; each carries a MEMW fence.
+    while (Uart.lsr & 0x20) == 0 { }
+    Uart.thr = c
+}
+
+fn main() {
+    putc(104)   // 'h'
+    putc(101)   // 'e'
+    putc(108)   // 'l'
+    putc(108)   // 'l'
+    putc(111)   // 'o'
+    putc(10)    // '\n'
+    // Freestanding: there is nothing to return to — falling off main would
+    // execute whatever bytes follow. Park the core forever.
+    loop { }
+}

@@ -1,1 +1,54 @@
-// codegen_xtensa.kr — Xtensa LX6 codegen (target_arch == 3). Placeholder; real content lands in a later task.
+// codegen_xtensa.kr — hosted Elf32 boot-image headers for target_arch == 3
+// (xtensa LX6). Task 8: the freestanding path (--arch=xtensa --freestanding)
+// emits a real Elf32 executable because `qemu-system-xtensa -M lx60 -kernel`
+// loads by ELF program header and jumps to e_entry (a raw headerless blob has
+// no entry to jump to). Adapted byte-for-byte from emit_elf_header_rv32 /
+// emit_program_header_rv32 (codegen_riscv.kr:11) — the Elf32 layout is
+// identical; only e_machine and e_flags differ.
+//
+// The image is patched by main.kr's xt_raw finalize block: e_entry@24,
+// p_filesz@68, p_memsz@72 (header_size 84 = 52-byte Ehdr + 32-byte Phdr).
+
+// Elf32_Ehdr (52 bytes). e_entry (offset 24) is patched to the entry fn's
+// code_start (past its literal pool). e_machine = 94 (EM_XTENSA); e_flags = 0
+// (no RVC/float-ABI bits — unlike riscv's EF_RISCV_RVC).
+fn emit_elf_header_xtensa() {
+    emit_byte(0x7F); emit_byte(69); emit_byte(76); emit_byte(70)  // \x7F E L F
+    emit_byte(1); emit_byte(1); emit_byte(1); emit_byte(0)        // ELFCLASS32, LSB, EV_CURRENT, OSABI
+    uint64 i = 0
+    while i < 8 { emit_byte(0); i = i + 1 }                       // e_ident padding
+    emit_u16_le(2)          // e_type = ET_EXEC
+    emit_u16_le(94)         // e_machine = EM_XTENSA
+    emit_u32_le(1)          // e_version
+    emit_u32_le(0)          // e_entry  (u32; patched at offset 24)
+    emit_u32_le(52)         // e_phoff  = 52
+    emit_u32_le(0)          // e_shoff  = 0
+    emit_u32_le(0)          // e_flags  = 0 (no EF_RISCV_RVC analogue on xtensa)
+    emit_u16_le(52)         // e_ehsize
+    emit_u16_le(32)         // e_phentsize
+    emit_u16_le(1)          // e_phnum
+    emit_u16_le(0)          // e_shentsize
+    emit_u16_le(0)          // e_shnum
+    emit_u16_le(0)          // e_shstrndx
+}
+
+// Elf32_Phdr (32 bytes). WARNING: field order matches Elf32 (not Elf64) —
+// p_flags sits AFTER p_memsz (offset 24 into the phdr = file offset 84).
+// p_filesz/p_memsz (file offsets 68/72) are patched by main.kr. Single
+// PT_LOAD, RWX, mapping file offset 0 -> vaddr 0xd0000000 (RISK #2, pinned
+// empirically: the DC232B lx60 DRAM at phys 0x0 is reachable as EXECUTABLE
+// cached memory only through the 0xd0000000 window — VECBASE=0xd0000000 at
+// reset. With p_vaddr=0 the qemu -kernel loader jumps into unmapped space and
+// traps on `ill`; loading at 0xd0000000 puts code + entry in cached RAM.) So
+// byte F lives at vaddr 0xd0000000+F and e_entry = 0xd0000000 + code_start.
+fn emit_program_header_xtensa(uint64 text_size) {
+    uint64 total = 84 + text_size          // placeholder; patched later
+    emit_u32_le(1)          // p_type = PT_LOAD
+    emit_u32_le(0)          // p_offset = 0
+    emit_u32_le(0xd0000000) // p_vaddr = load base 0xd0000000 (cached DRAM)
+    emit_u32_le(0xd0000000) // p_paddr
+    emit_u32_le(total)      // p_filesz  (offset 68; patched)
+    emit_u32_le(total)      // p_memsz   (offset 72; patched)
+    emit_u32_le(7)          // p_flags = RWX
+    emit_u32_le(0x1000)     // p_align
+}
