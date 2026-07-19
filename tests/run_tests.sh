@@ -5101,6 +5101,44 @@ else
     echo "  xtensa_globals_boot: SKIP (qemu-system-xtensa not installed)"
 fi
 
+# --- Xtensa LX6 function pointers (Task 7): IR_FN_ADDR(86) + CALL_IND(87) ---
+# fnptr.kr materializes dbl's code address via fn_addr("dbl") — the PC-anchor
+# PIC pair (call0 __xt_pcbase / l32r a9,<pool:delta> / add) with table_sel 2
+# (fn addrs), resolved against dbl's code offset in resolve_addr_fixups_xtensa
+# (quote-stripping fn_table scan, NO remap). call_ptr(f, 21) then invokes it
+# through the CALL_IND lowering; dbl(21) = 42. A desynced PIC pool word, a wrong
+# delta, or a broken resolver would fault or print the wrong number. Full-output
+# equality; loop{} keeps the core busy till timeout.
+echo ""
+echo "--- xtensa LX6 function-pointer boot test ---"
+if command -v qemu-system-xtensa >/dev/null 2>&1; then
+    TOTAL=$((TOTAL + 1))
+    XT_FP_ELF="/tmp/krc_xt_fnptr_$$.elf"
+    XT_FP_OK=1
+    if ! $KRC --arch=xtensa --freestanding "$DIR/../examples/xtensa/fnptr.kr" -o "$XT_FP_ELF" >/dev/null 2>&1; then
+        echo "FAIL: xtensa_fnptr_boot (compilation failed)"
+        XT_FP_OK=0
+    fi
+    if [ "$XT_FP_OK" = 1 ]; then
+        XT_FP_EXP="42"
+        XT_FP_OUT=$(timeout 8 qemu-system-xtensa -M lx60 -nographic -kernel "$XT_FP_ELF" 2>/dev/null | tr -d '\r')
+        if [ "$XT_FP_OUT" = "$XT_FP_EXP" ]; then
+            PASS=$((PASS + 1))
+            echo "  xtensa_fnptr_boot: PASS (fn_addr + call_ptr = 42)"
+        else
+            echo "FAIL: xtensa_fnptr_boot (output mismatch)"
+            echo "    expected: $XT_FP_EXP"
+            echo "    got:      $XT_FP_OUT"
+            FAIL=$((FAIL + 1))
+        fi
+    else
+        FAIL=$((FAIL + 1))
+    fi
+    rm -f "$XT_FP_ELF"
+else
+    echo "  xtensa_fnptr_boot: SKIP (qemu-system-xtensa not installed)"
+fi
+
 # --- Xtensa LX6 real BSS (p_memsz > p_filesz) + .bss-zeroing preamble (Task 3) ---
 # bss.kr has an initialized `static u32 marker = 42` (in .data) and an
 # uninitialized `static u32[1024] buf` (4096 B). 4096 >= the 4 KiB truncation

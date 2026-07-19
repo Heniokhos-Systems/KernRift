@@ -1734,6 +1734,21 @@ fn ir_emit_xtensa_insn(uint64 ii) {
         return
     }
 
+    // ----- IR_FN_ADDR (86): dst = code address of a named function -----
+    // imm = the fn_addr("name") STRING-LITERAL token (ir.kr:2541). Same PIC
+    // sequence as STR_CONST/STATIC_ADDR, table_sel 2 (fn addrs), resolved
+    // against the function's code offset in resolve_addr_fixups_xtensa (NO
+    // remap — code_start is final, H1). One PIC site → one reserved pool word
+    // (pre-scan opcode set includes 86). Mirror of ir_riscv.kr op==86. The
+    // materialized pointer is then called through CALL_IND(87), already done.
+    if op == 86 {
+        uint64 rd = dst_r
+        if rd == 0xFFFFFFFF { rd = XT_A8 }
+        xt_emit_pic_addr(rd, 2, imm)                  // table_sel 2 = fn addrs
+        if dst_r == 0xFFFFFFFF { xt_store_spill(rd, dest_v) }
+        return
+    }
+
     // ----- IR_STATIC_LOAD (77): dst = *(static base + imm) -----
     // imm = byte offset into the static-data blob. Statics are fixed 8-byte
     // slots (shared parse-time layout); the low 4 bytes hold the 32-bit value
@@ -2314,7 +2329,7 @@ fn ir_xtensa_gen(uint64 fn_node) {
         uint64 pii = ir_bb_first_insn(pbi)
         while pii != 0xFFFFFFFF {
             uint64 pop = ir_insn_opcode(pii)
-            if pop == 79 || pop == 84 || pop == 77 || pop == 78 {
+            if pop == 79 || pop == 84 || pop == 77 || pop == 78 || pop == 86 {
                 xt_lit_reserve()
             }
             pii = ir_insn_next(pii)
@@ -2670,9 +2685,10 @@ fn resolve_fixups_xtensa() {
 // and the target = 0xd0000000 + base + payload, so a0 + delta = target exactly.
 //   table_sel 0 -> str_start + payload   (strings; this task)
 //   table_sel 1 -> data_start + payload  (statics; Task 2)
-//   table_sel 2 -> fn_lookup(payload)    (fn addrs; Task 7)
-// Only table_sel 0 is produced this task; 1/2 are wired in later tasks. Mirror
-// of resolve_static_fixups_riscv:2743 (the fixup-table + patch shape).
+//   table_sel 2 -> fn_table code offset (fn addrs; Task 7) — payload is the
+//                  fn_addr("name") StrLit token, resolved by a quote-stripping
+//                  byte-scan of fn_table (NOT fn_lookup; see the else branch).
+// Mirror of resolve_static_fixups_riscv:2743 (the fixup-table + patch shape).
 fn resolve_addr_fixups_xtensa(uint64 str_start, uint64 data_start) {
     uint64 i = 0
     while i < xt_addr_fixup_count {
@@ -2686,12 +2702,56 @@ fn resolve_addr_fixups_xtensa(uint64 str_start, uint64 data_start) {
         } else if table_sel == 1 {
             target = data_start + payload
         } else {
-            uint64 wtok = payload
-            uint64 fo = fn_lookup(wtok)
-            if fo == 0xFFFFFFFF {
+            // table_sel 2 = fn addrs. payload is the fn_addr("name") STRING-
+            // LITERAL token (ir.kr:2541), whose text carries the surrounding
+            // quotes ("dbl" = 5 bytes), so fn_lookup — which byte-compares via
+            // tok_text_eq (length-first) against the bare fn identifier ("dbl"
+            // = 3 bytes) — NEVER matches. Strip the quotes and byte-scan
+            // fn_table directly. Ported from resolve_fnaddr_fixups_riscv
+            // (ir_riscv.kr:2798). NO xt_remap: fn_table code offsets are final
+            // (code_start never moves — H1).
+            uint64 wst = payload
+            uint64 sstart = tok_text_start(wst)
+            uint64 slen = tok_text_len(wst)
+            uint64 name_start = sstart + 1
+            uint64 name_len = slen - 2
+            uint64 found = 0
+            uint64 target2 = 0
+            uint64 fi = 0
+            while fi < fn_count {
+                uint64 fe = fn_table + fi * 8
+                uint32 fn_name_tok = 0
+                unsafe { *(fe as uint32) -> fn_name_tok }
+                uint64 wfn = fn_name_tok
+                uint64 fn_start = tok_text_start(wfn)
+                uint64 fn_len = tok_text_len(wfn)
+                if fn_len == name_len {
+                    uint64 eq = 1
+                    uint64 ci = 0
+                    while ci < name_len {
+                        uint64 ca = cg_source + name_start + ci
+                        uint64 cb = cg_source + fn_start + ci
+                        uint64 va = 0
+                        uint64 vb = 0
+                        unsafe { *(ca as uint8) -> va }
+                        unsafe { *(cb as uint8) -> vb }
+                        if va != vb { eq = 0 }
+                        ci = ci + 1
+                    }
+                    if eq != 0 {
+                        uint64 fe4 = fe + 4
+                        uint32 foff = 0
+                        unsafe { *(fe4 as uint32) -> foff }
+                        target2 = foff
+                        found = 1
+                    }
+                }
+                fi = fi + 1
+            }
+            if found == 0 {
                 xt_err("error: xtensa: fn_addr references an undefined function\n")
             }
-            target = fo
+            target = target2
         }
         uint64 delta = (target - anchor_off) & 0xFFFFFFFF
         patch_u32(pool_word_off, delta)

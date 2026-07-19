@@ -1,0 +1,40 @@
+// Xtensa LX6 function-pointer boot test (Task 7) — exercises IR_FN_ADDR (86).
+// `fn_addr("dbl")` materializes the code address of `dbl` via the per-function
+// PC-anchor PIC sequence (call0 __xt_pcbase / l32r a9,<pool:delta> / add) with
+// table_sel 2 (fn addrs), resolved against dbl's code offset in
+// resolve_addr_fixups_xtensa (NO remap — code_start is final). The materialized
+// pointer is then invoked through the already-working CALL_IND(87) lowering of
+// `call_ptr(f, 21)`. dbl(21) = 42. Expected output under
+// `qemu-system-xtensa -M lx60`:
+//   42
+
+device Uart at 0xfd050020 {
+    thr at 0x00 : u32
+    lsr at 0x14 : u8
+}
+
+fn putc(u8 c) {
+    while (Uart.lsr & 0x20) == 0 { }
+    Uart.thr = c
+}
+
+fn nl() { putc(10) }
+
+// Recursive unsigned printer (the print_uint idiom from stress.kr).
+fn print_uint(u32 n) {
+    if n >= 10 {
+        print_uint(n / 10)
+    }
+    putc(48 + (n % 10))
+}
+
+fn dbl(u32 x) -> u32 {
+    return x * 2
+}
+
+fn main() {
+    u32 f = fn_addr("dbl")     // IR_FN_ADDR (86)
+    u32 r = call_ptr(f, 21)    // CALL_IND (87) -> dbl(21) = 42
+    print_uint(r)   nl()
+    loop { }
+}
