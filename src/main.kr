@@ -2662,10 +2662,44 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
         resolve_addr_fixups_xtensa(xt_str_start, xt_data_start)
 
         uint64 xt_total = codegen_output_len()
-        // p_filesz drops trailing zero fill (none yet, but keeps the invariant
-        // for Tasks 2-3's real BSS); p_memsz spans the full in-memory image.
-        patch_u32(68, codegen_last_nonzero_end())       // Elf32_Phdr p_filesz
-        patch_u32(72, xt_total)                         // Elf32_Phdr p_memsz
+        // [M-4] Real BSS: drop the trailing zero fill from uninitialised static
+        // arrays out of the FILE when the gap is worth a page, exactly like the
+        // riscv path (main.kr BSS gate): p_filesz = last-nonzero-end, p_memsz =
+        // full image, and physically truncate the output. p_memsz > p_filesz is
+        // the layout the entry preamble's zero-loop / a real loader relies on.
+        // Below the 4 KiB threshold the zeros stay in-file (p_filesz == p_memsz,
+        // no gap) — matches the riscv >= 4096 gate byte-for-byte.
+        uint64 xt_filesz = xt_total
+        uint64 xt_tail = codegen_last_nonzero_end()
+        // Round the file/BSS boundary UP to 4 bytes. The preamble's zero loop
+        // starts its s32i stores at 0xd0000000 + p_filesz, and LX6 s32i TRAPS on
+        // an unaligned base — so p_filesz MUST be word-aligned or the very first
+        // store faults at boot. Rounding UP (never down) keeps every initialized
+        // byte in the file: the up-to-3 bytes below the boundary are the last
+        // live word's own trailing zeros. (The riscv/x86 paths need no alignment
+        // — their ELF loader zero-fills [p_filesz,p_memsz); Xtensa freestanding
+        // has no loader, so the preamble owns the gap and inherits the s32i
+        // alignment rule.) xt_total is already 8-aligned, so hi-lo stays a
+        // multiple of 4 and the loop's `bltu a8,a9` hits a9 exactly.
+        xt_tail = (xt_tail + 3) & ~3
+        uint64 xt_bss = xt_total - xt_tail
+        if xt_bss >= 4096 {
+            codegen_truncate(xt_tail)
+            xt_filesz = xt_tail
+        }
+        patch_u32(68, xt_filesz)                         // Elf32_Phdr p_filesz
+        patch_u32(72, xt_total)                          // Elf32_Phdr p_memsz
+        // [M-4] Patch the two pool words the entry preamble's .bss-zeroing loop
+        // loads: lo = 0xd0000000 + p_filesz (loop start), hi = 0xd0000000 +
+        // p_memsz (loop end). Load base is 0xd0000000 (DRAM window). Both offsets
+        // are code-region (< xt_tail), so codegen_truncate never touches them.
+        // Guard on the entry fn having reserved them (always true under
+        // --freestanding, where xt_entry_node selects an entry fn); a hosted xtensa
+        // build with no entry preamble leaves them 0 and skips the patch.
+        if xt_bss_lo_pool_off != 0 {
+            patch_u32(xt_bss_lo_pool_off, 0xd0000000 + xt_filesz)
+            patch_u32(xt_bss_hi_pool_off, 0xd0000000 + xt_total)
+        }
 
         codegen_write_output(output_path)
         set_executable(output_path)

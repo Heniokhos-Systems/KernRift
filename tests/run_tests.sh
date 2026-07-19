@@ -5066,6 +5066,81 @@ else
     echo "  xtensa_globals_boot: SKIP (qemu-system-xtensa not installed)"
 fi
 
+# --- Xtensa LX6 real BSS (p_memsz > p_filesz) + .bss-zeroing preamble (Task 3) ---
+# bss.kr has an initialized `static u32 marker = 42` (in .data) and an
+# uninitialized `static u32[1024] buf` (4096 B). 4096 >= the 4 KiB truncation
+# threshold, so the zeros are dropped from the file (p_filesz = last-nonzero-end,
+# rounded up to 4 for the s32i alignment the loop needs) while p_memsz keeps the
+# full span: readelf must show p_memsz > p_filesz. main prints marker (42),
+# buf[0] (0), then writes buf[500]=99 and prints it (99) -> "42 0 99".
+#
+# [M-3] qemu backs guest DRAM with host ZERO pages, so buf[0] reads 0 whether or
+# not the zero-loop ran. This boot therefore proves: (i) boot with a real gap,
+# (ii) the loop did NOT clobber .data (marker survives = 42), (iii) the loop
+# wrote ZERO not garbage (buf[0]==0), (iv) BSS is writable (buf[500] round-trips
+# to 99). The loop's actual zeroing of dirty DRAM is NOT provable under qemu, so
+# loop PRESENCE is asserted STRUCTURALLY via objdump (an `s32i` inside a backward
+# `bltu` loop, AFTER the SP-init `l32r a1`); true dirty-DRAM zeroing is deferred
+# to ESP32 hardware. Full-output equality; loop{} keeps the core busy to timeout.
+echo ""
+echo "--- xtensa LX6 real-BSS + zeroing-preamble boot test ---"
+if command -v qemu-system-xtensa >/dev/null 2>&1; then
+    TOTAL=$((TOTAL + 1))
+    XT_BSS_ELF="/tmp/krc_xt_bss_$$.elf"
+    XT_BSS_OK=1
+    if ! $KRC --arch=xtensa --freestanding "$DIR/../examples/xtensa/bss.kr" -o "$XT_BSS_ELF" >/dev/null 2>&1; then
+        echo "FAIL: xtensa_bss_boot (compilation failed)"
+        XT_BSS_OK=0
+    fi
+    # Layout gate: p_memsz MUST exceed p_filesz (real BSS gap). Only when readelf
+    # is present; never a hard gate on its absence.
+    if [ "$XT_BSS_OK" = 1 ] && command -v readelf >/dev/null 2>&1; then
+        XT_LOAD=$(readelf -l "$XT_BSS_ELF" 2>/dev/null | grep -m1 'LOAD')
+        XT_FSZ=$(echo "$XT_LOAD" | awk '{print $5}')
+        XT_MSZ=$(echo "$XT_LOAD" | awk '{print $6}')
+        if [ $(( XT_MSZ )) -le $(( XT_FSZ )) ]; then
+            echo "FAIL: xtensa_bss_boot (no BSS gap: p_filesz=$XT_FSZ p_memsz=$XT_MSZ)"
+            XT_BSS_OK=0
+        fi
+    fi
+    # Structural gate: the entry preamble must carry the zero loop — the SP-init
+    # `l32r a1` FIRST, then an `s32i` inside a backward `bltu` loop. Only when
+    # readelf+objdump are present.
+    if [ "$XT_BSS_OK" = 1 ] && command -v readelf >/dev/null 2>&1 \
+       && command -v xtensa-lx106-elf-objdump >/dev/null 2>&1; then
+        XT_BENTRY=$(readelf -h "$XT_BSS_ELF" 2>/dev/null | awk '/Entry point/{print $NF}')
+        XT_BOFF=$(( XT_BENTRY - 0xd0000000 ))
+        XT_BPRE=$(xtensa-lx106-elf-objdump -b binary -m xtensa -D \
+                  --start-address=$XT_BOFF --stop-address=$(( XT_BOFF + 24 )) \
+                  "$XT_BSS_ELF" 2>/dev/null)
+        if ! echo "$XT_BPRE" | grep -qE 'l32r[[:space:]]+a1'; then
+            echo "FAIL: xtensa_bss_boot (entry does not start with SP-init 'l32r a1')"
+            XT_BSS_OK=0
+        elif ! echo "$XT_BPRE" | grep -qE 's32i' || ! echo "$XT_BPRE" | grep -qE 'bltu'; then
+            echo "FAIL: xtensa_bss_boot (no s32i/bltu zero loop in entry preamble)"
+            XT_BSS_OK=0
+        fi
+    fi
+    if [ "$XT_BSS_OK" = 1 ]; then
+        XT_BSS_EXP="42 0 99"
+        XT_BSS_OUT=$(timeout 8 qemu-system-xtensa -M lx60 -nographic -kernel "$XT_BSS_ELF" 2>/dev/null | tr -d '\r')
+        if [ "$XT_BSS_OUT" = "$XT_BSS_EXP" ]; then
+            PASS=$((PASS + 1))
+            echo "  xtensa_bss_boot: PASS (real BSS gap + zero loop; marker/buf = 42 0 99)"
+        else
+            echo "FAIL: xtensa_bss_boot (output mismatch)"
+            echo "    expected: $XT_BSS_EXP"
+            echo "    got:      $XT_BSS_OUT"
+            FAIL=$((FAIL + 1))
+        fi
+    else
+        FAIL=$((FAIL + 1))
+    fi
+    rm -f "$XT_BSS_ELF"
+else
+    echo "  xtensa_bss_boot: SKIP (qemu-system-xtensa not installed)"
+fi
+
 # --- RISC-V RV32 IR_STR_CONST via pcrel auipc+addi (feature-gap Task 1) ---
 # Compiles examples/riscv-featuregap/t1_strconst.kr, which takes the address
 # of a string literal ("hi\n") through IR_STR_CONST and writes it to the UART.

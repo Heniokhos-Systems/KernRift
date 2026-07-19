@@ -8,6 +8,7 @@ static uint64 XT_SP = 1        // a1
 static uint64 XT_A2 = 2
 static uint64 XT_A8 = 8        // scratch
 static uint64 XT_A9 = 9        // scratch
+static uint64 XT_A10 = 10      // scratch (zero source in the .bss-zeroing preamble)
 
 // CALL0 has SIX argument registers a2..a7 (regs 2..7) — narrower than the
 // eight a0-a7 riscv/arm64 use. arg index 0..5 -> a2..a7; index 6+ overflows
@@ -808,6 +809,16 @@ static uint64 xt_pic_base = 0
 static uint64 xt_pic_k = 0
 static uint64 xt_cur_is_naked = 0
 
+// [M-6] Absolute file offsets of the TWO pool words the entry preamble's
+// .bss-zeroing loop loads: xt_bss_lo_pool_off holds `0xd0000000 + p_filesz`
+// (loop start) and xt_bss_hi_pool_off holds `0xd0000000 + p_memsz` (loop end).
+// Reserved in the entry fn's pre-scan AFTER the PIC reserves (so they never
+// shift xt_pic_base or collide with the xt_pic_k running index) and captured
+// once xt_lit_base is known (post-flush). BOTH the preamble l32r's (below) and
+// the main.kr finalize patch (M-4) reference these same two words.
+static uint64 xt_bss_lo_pool_off = 0
+static uint64 xt_bss_hi_pool_off = 0
+
 // Assign __xt_pcbase's name token identity — called ONCE before the per-fn emit
 // loop (main.kr), so every `call0 __xt_pcbase` fixup recorded during emission
 // carries the right token (the body itself is emitted later, conditionally).
@@ -898,6 +909,25 @@ fn xt_emit_pic_addr(uint64 dst, uint64 table_sel, uint64 payload) {
 fn xt_emit_raw_sp_preamble() {
     uint64 slot = xt_lit_intern(XT_STACK_TOP)     // deduped: the pre-scan's slot
     xt_l32r(XT_SP, xt_lit_base + slot * 4)         // l32r a1, <pool[XT_STACK_TOP]>
+    // [D2/L-3/M-4] .bss-zeroing loop over [p_filesz, p_memsz). The SP-init l32r
+    // above MUST stay FIRST (L-4: e_entry decodes to `l32r a1`). The two bounds
+    // are unknown at emit time (data is laid out at finalize), so they live in
+    // two pool words reserved in the pre-scan and patched by main.kr with the
+    // absolute addresses 0xd0000000 + p_filesz / + p_memsz. Like the SP-init
+    // l32r, these two l32r's sit at code_start ahead of every branch, so
+    // relaxation never shifts them (no pool fixup). a0 is undefined/unused at
+    // reset, so a8/a9/a10 are free. The backward branch is HAND-EMITTED (never a
+    // tracked fixup, L-3): both endpoints are inside this preamble, ahead of any
+    // relaxable body branch, so a later 3-byte insertion can't invalidate its
+    // displacement. When there is no gap (p_filesz == p_memsz) the do-while
+    // stores one zero word at [p_memsz] — free DRAM just past the image, benign.
+    xt_l32r(XT_A8, xt_bss_lo_pool_off)             // l32r a8, <lo = 0xd0000000+p_filesz>
+    xt_l32r(XT_A9, xt_bss_hi_pool_off)             // l32r a9, <hi = 0xd0000000+p_memsz>
+    xt_movi(XT_A10, 0)                             // movi a10, 0  (the zero source)
+    uint64 top = out_len
+    xt_s32i(XT_A10, XT_A8, 0)                       // top: s32i a10, a8, 0
+    xt_addi(XT_A8, XT_A8, 4)                        //      addi a8, a8, 4
+    xt_bltu(XT_A8, XT_A9, top)                      //      bltu a8, a9, top
 }
 
 // --- Offset-remap after relaxation (rv_c_remap analog) ------------------
@@ -1875,6 +1905,19 @@ fn ir_xtensa_gen(uint64 fn_node) {
         }
         pbi = pbi + 1
     }
+    // [M-6] Entry-fn only: reserve the TWO .bss-bound pool words AFTER the PIC
+    // reserves. Because xt_pic_base was captured BEFORE the PIC loop and the PIC
+    // running index (xt_pic_k) only ever reaches n-1 (n = PIC-site count), these
+    // two words — which land at slots xt_pic_base+n and xt_pic_base+n+1, the
+    // tail of the pool — are NEVER consumed by a PIC site. Their absolute file
+    // offsets are captured post-flush (below), once xt_lit_base is final; the
+    // preamble loads them and main.kr patches them at finalize (M-4).
+    uint64 xt_bss_lo_slot = 0
+    uint64 xt_bss_hi_slot = 0
+    if fn_node == xt_entry_node {
+        xt_bss_lo_slot = xt_lit_reserve()
+        xt_bss_hi_slot = xt_lit_reserve()
+    }
     // CALL0 targets — and thus every function's code_start (= e_entry / the
     // call destination) — must be 4-byte aligned: the LX6 computes the target
     // as ((PC+4) & ~3) + imm18*4, so the low two bits of any call destination
@@ -1885,6 +1928,12 @@ fn ir_xtensa_gen(uint64 fn_node) {
     // the pool (L32R word targets) and code_start land on a word boundary.
     while (out_len & 3) != 0 { emit_byte(0) }
     xt_lit_flush()
+    // [M-6] Now that xt_lit_base is final, turn the two reserved slots into the
+    // absolute file offsets the preamble l32r's and the finalize patch share.
+    if fn_node == xt_entry_node {
+        xt_bss_lo_pool_off = xt_lit_base + xt_bss_lo_slot * 4
+        xt_bss_hi_pool_off = xt_lit_base + xt_bss_hi_slot * 4
+    }
 
     // 6a. Self-register at code_start (past the pool) so find_main_offset /
     //     fn_lookup return the entry, not the pool. main.kr must NOT pre-

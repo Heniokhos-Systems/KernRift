@@ -1,0 +1,50 @@
+// Xtensa LX6 real-BSS boot test (Task 3) — exercises p_memsz > p_filesz plus
+// the .bss-zeroing entry preamble.
+//
+//   static u32 marker = 42          initialized  -> lives in .data (in-file)
+//   static u32 buf[1024]            uninitialized -> 4096 B of trailing zeros
+//
+// 4096 B >= the 4 KiB BSS-truncation threshold, so the zeros are dropped from
+// the file (p_filesz = last-nonzero-end) and the loader/preamble must supply
+// them in memory: readelf shows p_memsz > p_filesz. The entry preamble's zero
+// loop clears [p_filesz, p_memsz) on real hardware; qemu backs DRAM with zero
+// pages so buf[0] reads 0 here regardless — what this boot proves is (i) boot
+// with a real gap, (ii) the loop did NOT clobber .data (marker survives = 42),
+// (iii) the loop wrote zero not garbage (buf[0] == 0), (iv) BSS is writable
+// (buf[500] round-trips to 99). Structural loop-presence is asserted by objdump
+// in the harness; true dirty-DRAM zeroing is deferred to ESP32 hardware.
+//
+// Expected output under `qemu-system-xtensa -M lx60`:
+//   42 0 99
+
+device Uart at 0xfd050020 {
+    thr at 0x00 : u32
+    lsr at 0x14 : u8
+}
+
+fn putc(u8 c) {
+    while (Uart.lsr & 0x20) == 0 { }
+    Uart.thr = c
+}
+
+fn nl() { putc(10) }
+fn space() { putc(32) }
+
+// Recursive unsigned printer (the print_uint idiom from stress.kr/globals.kr).
+fn print_uint(u32 n) {
+    if n >= 10 {
+        print_uint(n / 10)
+    }
+    putc(48 + (n % 10))
+}
+
+static u32 marker = 42
+static u32[1024] buf
+
+fn main() {
+    print_uint(marker)      space()   // .data survived the zero loop -> 42
+    print_uint(buf[0])      space()   // BSS reads zero -> 0
+    buf[500] = 99                      // BSS is writable
+    print_uint(buf[500])    nl()      // round-trip -> 99
+    loop { }
+}
