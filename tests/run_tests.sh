@@ -5353,6 +5353,48 @@ else
     echo "  xtensa_asm_boot: SKIP (qemu-system-xtensa not installed)"
 fi
 
+# --- Xtensa LX6 CAPSTONE: every freestanding op in one boot image ---
+# capstone.kr composes all 8 tasks' proven idioms (each copied verbatim from
+# its own example) into a single program/function table/static-data blob/
+# stack frame: STR_CONST(79) via puts byte-loop, STATIC_LOAD/STORE/ADDR
+# (77/78/84) RMW, a real BSS gap (static u32[1024], >=4096 B), STACK_ADDR(32)
+# + implicit MEMSET zero-init on a local u32[4] (fill+sum), explicit
+# MEMSET(76)+MEMCPY(72) on u8 buffers, STRLEN(73), STR_EQ(75) (equal then
+# unequal), FMT_UINT(74) buffer print, MEMCMP(88) via struct `==` over
+# struct-typed params on two static u32[2] arrays (equal then unequal),
+# FN_ADDR(86)+CALL_IND(87) (dbl(21)=42), and ASM_BLOCK(96) (operand-less
+# memw/nop bracketed by X/Y). Full-output equality; loop{} keeps the core
+# busy till timeout.
+echo ""
+echo "--- xtensa LX6 CAPSTONE boot test (all freestanding ops) ---"
+if command -v qemu-system-xtensa >/dev/null 2>&1; then
+    TOTAL=$((TOTAL + 1))
+    XT_CAP_ELF="/tmp/krc_xt_capstone_$$.elf"
+    XT_CAP_OK=1
+    if ! $KRC --arch=xtensa --freestanding "$DIR/../examples/xtensa/capstone.kr" -o "$XT_CAP_ELF" >/dev/null 2>&1; then
+        echo "FAIL: xtensa_capstone_boot (compilation failed)"
+        XT_CAP_OK=0
+    fi
+    if [ "$XT_CAP_OK" = 1 ]; then
+        XT_CAP_EXP=$(printf 'xtensa capstone ok\n42\n0\n0\n10\nA\n4\n1\n0\n60705\n1\n0\n42\nXY')
+        XT_CAP_OUT=$(timeout 10 qemu-system-xtensa -M lx60 -nographic -kernel "$XT_CAP_ELF" 2>/dev/null | tr -d '\r')
+        if [ "$XT_CAP_OUT" = "$XT_CAP_EXP" ]; then
+            PASS=$((PASS + 1))
+            echo "  xtensa_capstone_boot: PASS (all freestanding ops: str_const/static/bss/stack+memset/memcpy/strlen/str_eq/fmt_uint/memcmp/fn_addr+call_ind/asm_block)"
+        else
+            echo "FAIL: xtensa_capstone_boot (output mismatch)"
+            echo "    expected: $XT_CAP_EXP"
+            echo "    got:      $XT_CAP_OUT"
+            FAIL=$((FAIL + 1))
+        fi
+    else
+        FAIL=$((FAIL + 1))
+    fi
+    rm -f "$XT_CAP_ELF"
+else
+    echo "  xtensa_capstone_boot: SKIP (qemu-system-xtensa not installed)"
+fi
+
 # --- RISC-V RV32 IR_STR_CONST via pcrel auipc+addi (feature-gap Task 1) ---
 # Compiles examples/riscv-featuregap/t1_strconst.kr, which takes the address
 # of a string literal ("hi\n") through IR_STR_CONST and writes it to the UART.
