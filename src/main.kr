@@ -2645,12 +2645,21 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
         }
         patch_u32(24, 0xd0000000 + xt_entry_code)      // Elf32_Ehdr e_entry
 
-        // Data blobs after all code. Strings first (byte-accessed, no align
-        // needed); the static blob + BSS arrive in Tasks 2-3. Record str_start,
-        // then patch each STR_CONST site's delta pool word against it (H1/H2).
+        // Data blobs after all code. Strings first (byte-accessed, so no align
+        // needed). Then the static blob: STATIC_LOAD/STORE use `l32i/s32i base,0`
+        // and LX6 traps on an unaligned l32i base, so [M-2] align out_len to 8
+        // (matching the arm64 static rule below) BEFORE emit_static_data so
+        // data_start — and thus every 8-byte static slot — is word-aligned.
+        // Record both bases and patch each PIC site's delta pool word: STR_CONST
+        // sites against str_start (table_sel 0), STATIC_* sites against data_start
+        // (table_sel 1). (BSS truncation is handled by codegen_last_nonzero_end
+        // for p_filesz below — trailing zero-init static bytes drop from the file.)
         uint64 xt_str_start = codegen_output_len()
         emit_string_data()
-        resolve_addr_fixups_xtensa(xt_str_start, 0)
+        while (codegen_output_len() & 7) != 0 { emit_byte(0) }
+        uint64 xt_data_start = codegen_output_len()
+        emit_static_data()
+        resolve_addr_fixups_xtensa(xt_str_start, xt_data_start)
 
         uint64 xt_total = codegen_output_len()
         // p_filesz drops trailing zero fill (none yet, but keeps the invariant

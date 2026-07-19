@@ -5027,6 +5027,45 @@ else
     echo "  xtensa_str_boot: SKIP (qemu-system-xtensa not installed)"
 fi
 
+# --- Xtensa LX6 static globals (IR_STATIC_ADDR/LOAD/STORE) boot test ---
+# globals.kr has an initialized `static u32 counter = 41`, then main does
+# counter = counter + 1 (STATIC_LOAD 77 + STATIC_STORE 78) and prints it
+# (another STATIC_LOAD) via the recursive print_uint idiom. This is the first
+# consumer of the static-data blob: each access materializes data_start through
+# the PC-anchor PIC pair (call0 __xt_pcbase / l32r a9,<pool:delta> / add) and
+# then l32i/s32i off the 8-aligned blob. A wrong delta, a desynced pool word
+# (pre-scan/emit lockstep bug), or an unaligned data_start would fault or print
+# the wrong number. Full-output equality; loop{} keeps the core busy till timeout.
+echo ""
+echo "--- xtensa LX6 static-globals boot test ---"
+if command -v qemu-system-xtensa >/dev/null 2>&1; then
+    TOTAL=$((TOTAL + 1))
+    XT_GLB_ELF="/tmp/krc_xt_globals_$$.elf"
+    XT_GLB_OK=1
+    if ! $KRC --arch=xtensa --freestanding "$DIR/../examples/xtensa/globals.kr" -o "$XT_GLB_ELF" >/dev/null 2>&1; then
+        echo "FAIL: xtensa_globals_boot (compilation failed)"
+        XT_GLB_OK=0
+    fi
+    if [ "$XT_GLB_OK" = 1 ]; then
+        XT_GLB_EXP="42"
+        XT_GLB_OUT=$(timeout 8 qemu-system-xtensa -M lx60 -nographic -kernel "$XT_GLB_ELF" 2>/dev/null | tr -d '\r')
+        if [ "$XT_GLB_OUT" = "$XT_GLB_EXP" ]; then
+            PASS=$((PASS + 1))
+            echo "  xtensa_globals_boot: PASS (static load/store + print = 42)"
+        else
+            echo "FAIL: xtensa_globals_boot (output mismatch)"
+            echo "    expected: $XT_GLB_EXP"
+            echo "    got:      $XT_GLB_OUT"
+            FAIL=$((FAIL + 1))
+        fi
+    else
+        FAIL=$((FAIL + 1))
+    fi
+    rm -f "$XT_GLB_ELF"
+else
+    echo "  xtensa_globals_boot: SKIP (qemu-system-xtensa not installed)"
+fi
+
 # --- RISC-V RV32 IR_STR_CONST via pcrel auipc+addi (feature-gap Task 1) ---
 # Compiles examples/riscv-featuregap/t1_strconst.kr, which takes the address
 # of a string literal ("hi\n") through IR_STR_CONST and writes it to the UART.

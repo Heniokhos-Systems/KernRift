@@ -1,0 +1,36 @@
+// Xtensa LX6 static-globals boot test (Task 2) — exercises the IR_STATIC_*
+// lowering: an initialized `static u32 counter = 41` is read (STATIC_LOAD 77),
+// incremented, written back (STATIC_STORE 78), then read again for printing.
+// Each static access materializes the data base via the per-function PC-anchor
+// PIC sequence (call0 __xt_pcbase / l32r a9,<pool:delta> / add) and then
+// l32i/s32i off the aligned static blob (data_start 8-aligned so l32i never
+// traps). Expected output under `qemu-system-xtensa -M lx60`:
+//   42
+
+device Uart at 0xfd050020 {
+    thr at 0x00 : u32
+    lsr at 0x14 : u8
+}
+
+fn putc(u8 c) {
+    while (Uart.lsr & 0x20) == 0 { }
+    Uart.thr = c
+}
+
+fn nl() { putc(10) }
+
+// Recursive unsigned printer (the print_uint idiom from stress.kr).
+fn print_uint(u32 n) {
+    if n >= 10 {
+        print_uint(n / 10)
+    }
+    putc(48 + (n % 10))
+}
+
+static u32 counter = 41
+
+fn main() {
+    counter = counter + 1      // STATIC_LOAD + STATIC_STORE
+    print_uint(counter)   nl() // STATIC_LOAD -> 42
+    loop { }
+}

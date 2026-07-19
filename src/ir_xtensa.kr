@@ -1668,6 +1668,53 @@ fn ir_emit_xtensa_insn(uint64 ii) {
         return
     }
 
+    // ----- IR_STATIC_ADDR (84): dst = address of static/global slot -----
+    // imm = byte offset into the static-data blob (assigned at parse time by
+    // static_declare*, arch-shared 8-byte slots — do not touch). Same PIC
+    // sequence as STR_CONST, just table_sel 1 (statics), resolved against
+    // data_start (resolve_addr_fixups_xtensa). Mirror of ir_riscv.kr op==84.
+    if op == 84 {
+        uint64 rd = dst_r
+        if rd == 0xFFFFFFFF { rd = XT_A8 }
+        xt_emit_pic_addr(rd, 1, imm)                  // table_sel 1 = statics
+        if dst_r == 0xFFFFFFFF { xt_store_spill(rd, dest_v) }
+        return
+    }
+
+    // ----- IR_STATIC_LOAD (77): dst = *(static base + imm) -----
+    // imm = byte offset into the static-data blob. Statics are fixed 8-byte
+    // slots (shared parse-time layout); the low 4 bytes hold the 32-bit value
+    // little-endian (emit_static_data), so a plain `l32i dst, base, 0` off the
+    // materialized base is correct. Base -> a8 via the PIC pair (offset folded
+    // into the delta pool word); the l32i is a fresh instruction. data_start is
+    // 8-aligned at finalize (M-2), so the base a8 is word-aligned and l32i never
+    // traps. Mirror of ir_riscv.kr op==77.
+    if op == 77 {
+        xt_emit_pic_addr(XT_A8, 1, imm)               // base -> a8
+        uint64 d = dst_r
+        if d == 0xFFFFFFFF { d = XT_A8 }
+        xt_l32i(d, XT_A8, 0)                           // l32i d, a8, 0
+        if dst_r == 0xFFFFFFFF { xt_store_spill(d, dest_v) }
+        return
+    }
+
+    // ----- IR_STATIC_STORE (78): *(static base + imm) = src1 -----
+    // src1 = value vreg, imm = byte offset; no dest. [M-5] Pin the value into
+    // a8, evaluating it FIRST, so it never aliases the base register a9 or the
+    // anchor a0 that xt_emit_pic_addr uses. __xt_pcbase is a ret.n-only leaf, so
+    // the `call0 __xt_pcbase` inside xt_emit_pic_addr clobbers only a0 — a8
+    // survives across it. Then s32i a8, a9, 0 (value a8 != base a9 != anchor a0).
+    // Base a9's low 2 bits are zero (data_start 8-aligned + imm folded, slot
+    // offsets are multiples of 8), so s32i never traps. Mirror of ir_riscv.kr
+    // op==78 (value-first), adapted to the register-pinning M-5 requires.
+    if op == 78 {
+        uint64 val_reg = xt_resolve_src(s1_v, XT_A8)  // value -> a8 first
+        if val_reg != XT_A8 { xt_mv(XT_A8, val_reg) }
+        xt_emit_pic_addr(XT_A9, 1, imm)               // base -> a9 second
+        xt_s32i(XT_A8, XT_A9, 0)                       // s32i a8, a9, 0
+        return
+    }
+
     // Everything else lands in later tasks (call=T5.1/T5.2).
     xt_nyi_op(op)
 }
@@ -1807,15 +1854,21 @@ fn ir_xtensa_gen(uint64 fn_node) {
     // STR_CONST site (contiguous, so site k -> slot xt_pic_base + k). Emission
     // recovers each slot by a running index (xt_pic_k), never a second reserve —
     // a reserve after the flush would point the delta word into code bytes (H1).
-    // Reserved LAST so the STR words stay contiguous; the emit-time recovery in
-    // xt_emit_pic_addr matches this pre-scan walk exactly. (STATIC_*/FN_ADDR
-    // sites join this same contiguous run in later tasks.)
+    // Reserved LAST so the address words stay contiguous; the emit-time recovery
+    // in xt_emit_pic_addr matches this pre-scan walk exactly. Every opcode listed
+    // here calls xt_emit_pic_addr EXACTLY ONCE per site during emission, so one
+    // reserved word per site keeps the running index (xt_pic_k) in lockstep with
+    // the reservation order (H1 — a mismatch corrupts the pool words). The set
+    // must stay identical to the emit-side dispatch: STR_CONST(79),
+    // STATIC_ADDR(84), STATIC_LOAD(77), STATIC_STORE(78). (FN_ADDR joins this
+    // same contiguous run in a later task.)
     xt_pic_base = xt_lit_count
     uint64 pbi = 0
     while pbi < ir_bb_count {
         uint64 pii = ir_bb_first_insn(pbi)
         while pii != 0xFFFFFFFF {
-            if ir_insn_opcode(pii) == 79 {
+            uint64 pop = ir_insn_opcode(pii)
+            if pop == 79 || pop == 84 || pop == 77 || pop == 78 {
                 xt_lit_reserve()
             }
             pii = ir_insn_next(pii)
