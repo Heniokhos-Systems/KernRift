@@ -1,0 +1,14 @@
+// XT7 acceptance: a function call with argument marshalling.
+// main() calls helper(a, b) which returns a + b; the CALL0 ABI passes
+// arg0/arg1 in a2/a3 and returns the result in a2. helper has a two-
+// statement body so the AST inliner (inliner.kr, single-return pure
+// helpers only) leaves it as a real call0. Compiled with --arch=xtensa
+// --freestanding (raw blob) for objdump inspection.
+fn helper(uint32 a, uint32 b) -> uint32 {
+    uint32 s = a + b
+    return s
+}
+
+fn main() -> uint32 {
+    return helper(7, 35)
+}

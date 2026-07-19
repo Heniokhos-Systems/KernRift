@@ -4818,6 +4818,79 @@ else
     echo "  xtensa_branch_disasm: SKIP (xtensa-lx106-elf-objdump not installed)"
 fi
 
+# --- Xtensa LX6 calls (CALL0 + IR_ARG marshalling + fixups) disasm test (Task 7) ---
+# Compiles examples/xtensa/call.kr (main calls helper(a,b) -> a+b) with
+# --arch=xtensa --freestanding (raw blob) and asserts the CALL0 ABI shape:
+# args marshalled into a2/a3, a `call0` reaching the helper, and the callee's
+# params read from a2/a3. Also golden-diffs the patched call0's encoding
+# against `xtensa-lx106-elf-as --no-transform` — the CALL0 PC-rounding
+# (imm18 = (target-((pc+4)&~3))>>2) is the fragile part. Same objdump dev-only
+# SKIP discipline as the other xtensa tests.
+echo ""
+echo "--- xtensa LX6 calls (CALL0 + IR_ARG) disasm test ---"
+if command -v xtensa-lx106-elf-objdump >/dev/null 2>&1; then
+    TOTAL=$((TOTAL + 1))
+    XT_CALL_BIN="/tmp/krc_xt_call_$$.bin"
+    XT_CALL_OK=1
+    if ! $KRC --arch=xtensa --freestanding "$DIR/../examples/xtensa/call.kr" -o "$XT_CALL_BIN" >/dev/null 2>&1; then
+        echo "FAIL: xtensa_call_disasm (compilation failed)"
+        XT_CALL_OK=0
+    fi
+    if [ "$XT_CALL_OK" = 1 ]; then
+        XT_CALL_DIS=$(xtensa-lx106-elf-objdump -b binary -m xtensa -D --show-raw-insn "$XT_CALL_BIN" 2>/dev/null)
+        # A call0 must be present (the call to helper)…
+        if ! echo "$XT_CALL_DIS" | grep -Eq '\bcall0\b'; then
+            echo "FAIL: xtensa_call_disasm (no call0 — call not emitted / was inlined)"
+            XT_CALL_OK=0
+        fi
+        # …args marshalled into a2 and a3 before the call…
+        if [ "$XT_CALL_OK" = 1 ] && ! echo "$XT_CALL_DIS" | grep -Eq 'mov(\.n)?[[:space:]]+a3,'; then
+            echo "FAIL: xtensa_call_disasm (arg1 not marshalled into a3)"
+            XT_CALL_OK=0
+        fi
+        # …and the callee reads its params back out of a2/a3.
+        if [ "$XT_CALL_OK" = 1 ] && ! echo "$XT_CALL_DIS" | grep -Eq 'mov(\.n)?[[:space:]]+a1?[0-9], ?a3'; then
+            echo "FAIL: xtensa_call_disasm (callee never reads param from a3)"
+            XT_CALL_OK=0
+        fi
+        # Golden-diff the patched call0 encoding: extract the call0's site +
+        # target from objdump, hand-assemble the same displacement with
+        # --no-transform, and byte-compare. Pins the CALL0 PC-rounding.
+        if [ "$XT_CALL_OK" = 1 ] && command -v xtensa-lx106-elf-as >/dev/null 2>&1 \
+           && command -v xtensa-lx106-elf-objcopy >/dev/null 2>&1; then
+            CALL_LINE=$(echo "$XT_CALL_DIS" | grep -E '\bcall0\b' | head -1)
+            CALL_SITE=$(echo "$CALL_LINE" | sed -E 's/^[[:space:]]*([0-9a-f]+):.*/\1/')
+            CALL_TGT=$(echo "$CALL_LINE" | sed -E 's/.*call0[[:space:]]+0x([0-9a-f]+).*/\1/')
+            OUR_BYTES=$(od -An -tx1 -j $((0x$CALL_SITE)) -N 3 "$XT_CALL_BIN" | tr -d ' \n')
+            GS="/tmp/krc_xt_call_gold_$$.s"
+            GO="/tmp/krc_xt_call_gold_$$.o"
+            GB="/tmp/krc_xt_call_gold_$$.bin"
+            # target at 0, call0 at CALL_SITE bytes in (only valid when the
+            # callee is at offset 0 — which it is: helper is emitted first).
+            printf '\t.text\ntarget:\n\t.space 0x%s\n\tcall0 target\n' "$CALL_SITE" > "$GS"
+            if [ "$CALL_TGT" = "0" ] \
+               && xtensa-lx106-elf-as --no-transform -o "$GO" "$GS" >/dev/null 2>&1 \
+               && xtensa-lx106-elf-objcopy -O binary --only-section=.text "$GO" "$GB" >/dev/null 2>&1; then
+                GOLD_BYTES=$(od -An -tx1 -j $((0x$CALL_SITE)) -N 3 "$GB" | tr -d ' \n')
+                if [ "$OUR_BYTES" != "$GOLD_BYTES" ]; then
+                    echo "FAIL: xtensa_call_disasm (call0 encoding $OUR_BYTES != golden $GOLD_BYTES)"
+                    XT_CALL_OK=0
+                fi
+            fi
+            rm -f "$GS" "$GO" "$GB"
+        fi
+    fi
+    if [ "$XT_CALL_OK" = 1 ]; then
+        PASS=$((PASS + 1))
+        echo "  xtensa_call_disasm: PASS (call0 + a2/a3 arg marshalling + golden-diffed call0 encoding)"
+    else
+        FAIL=$((FAIL + 1))
+    fi
+    rm -f "$XT_CALL_BIN"
+else
+    echo "  xtensa_call_disasm: SKIP (xtensa-lx106-elf-objdump not installed)"
+fi
+
 # --- RISC-V RV32 IR_STR_CONST via pcrel auipc+addi (feature-gap Task 1) ---
 # Compiles examples/riscv-featuregap/t1_strconst.kr, which takes the address
 # of a string literal ("hi\n") through IR_STR_CONST and writes it to the UART.

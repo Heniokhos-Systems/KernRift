@@ -9,6 +9,21 @@ static uint64 XT_A2 = 2
 static uint64 XT_A8 = 8        // scratch
 static uint64 XT_A9 = 9        // scratch
 
+// CALL0 has SIX argument registers a2..a7 (regs 2..7) — narrower than the
+// eight a0-a7 riscv/arm64 use. arg index 0..5 -> a2..a7; index 6+ overflows
+// to the stack (mirror of ir_riscv.kr's imm<8 split, but the boundary is 6).
+static uint64 XT_ARG0 = 2      // a2 (also the return-value register)
+static uint64 XT_NUM_ARG_REGS = 6
+
+// Fixed outgoing-argument overflow region at the BOTTOM of every frame
+// (mirror of ir_riscv.kr's RV_OVERFLOW_RESERVE = 64). The caller stores the
+// 7th+ arg at [a1 + oi*4] with no SP adjustment; the callee reads it back at
+// [a1 + callee_frame + oi*4] (IR_COPY imm 6..99). 64 bytes = 16 slots, so the
+// IR_ARG overflow guard caps oi at 16 exactly as riscv does. Spill slots sit
+// ABOVE this region (xt_spill_offset adds it in), so outgoing args never
+// clobber a live spill across the call.
+static uint64 XT_OVERFLOW_RESERVE = 64
+
 fn xt_err(uint64 msg) {
     write(2, msg, str_len(msg))
     exit(1)
@@ -403,7 +418,7 @@ fn xt_lit_flush() {
 // scratch — never allocated, never live across an IR op.
 fn xt_spill_offset(uint64 vreg) -> uint64 {
     uint64 slot = vreg - IR_NUM_REGS - 1
-    uint64 off = slot * 4
+    uint64 off = XT_OVERFLOW_RESERVE + slot * 4
     // s32i/l32i offsets are (imm8 << 2), max 1020. A function with enough
     // spills to push a slot past that loud-fails rather than truncating.
     if off > 1020 {
@@ -862,6 +877,25 @@ fn xt_relax_function(uint64 code_start, uint64 line_start) {
         unsafe { *(rfp as uint32) = nrp }
         ri = ri + 1
     }
+    // Call-site fixups (shared fixup_table) recorded during THIS function's
+    // emission also shift when a relaxed branch inserts bytes before them.
+    // Only remap entries at/after code_start: earlier functions' call sites
+    // are all below code_start, hence below every relaxed offset (which are
+    // in this function), so xt_remap would leave them unchanged anyway — the
+    // >= code_start guard makes that explicit. resolve_fixups_xtensa (run
+    // after all functions) then patches these final offsets.
+    uint64 cfi = 0
+    while cfi < fixup_count {
+        uint64 cfe = fixup_table + cfi * 8
+        uint32 cfo = 0
+        unsafe { *(cfe as uint32) -> cfo }
+        uint64 wcfo = cfo
+        if wcfo >= code_start {
+            uint32 ncfo = xt_remap(wcfo)
+            unsafe { *(cfe as uint32) = ncfo }
+        }
+        cfi = cfi + 1
+    }
     uint64 li = line_start
     while li < line_table_count {
         uint64 entry = line_table + li * 16
@@ -958,6 +992,95 @@ fn ir_emit_xtensa_insn(uint64 ii) {
         unsafe { *(rfp as uint32) = rpo }
         ir_ret_fixup_count = ir_ret_fixup_count + 1
         xt_emit24(0x6)                            // j #0 (patched to epilogue)
+        return
+    }
+
+    // ----- IR_ARG (51): move value to CALL0 arg register a2..a7 -----
+    // Mirror of ir_riscv.kr:1523. imm is the 0-based arg index (ir.kr:2784):
+    // < 6 = register arg in a2..a7 (CALL0 ABI — six arg registers, vs
+    // riscv's eight a0-a7); >= 100 = direct physical AR target (ASM I/O
+    // constraints); 6..99 = overflow arg (the 7th+), stored to the pre-
+    // reserved bottom-of-frame slots (XT_OVERFLOW_RESERVE) at [a1 + oi*4].
+    // a2 (XT_ARG0) is BOTH arg0 and the return-value register; the caller's
+    // ARG-then-CALL sequencing (ir.kr emits all ARGs, then the CALL) writes
+    // a2 as arg0 before the call, and IR_CALL reads the result back out of
+    // a2 after — no aliasing hazard because nothing reads a2 as arg0 after
+    // the call returns.
+    if op == 51 {
+        if imm < XT_NUM_ARG_REGS {
+            uint64 target = XT_ARG0 + imm
+            uint64 src_reg = xt_resolve_src(s1_v, XT_A8)
+            xt_mv(target, src_reg)
+        } else if imm >= 100 {
+            uint64 phys_target = imm - 100
+            uint64 src_reg = xt_resolve_src(s1_v, XT_A8)
+            xt_mv(phys_target, src_reg)
+        } else {
+            // Overflow arg: the frame reserves XT_OVERFLOW_RESERVE bytes at
+            // [a1 + 0), so SP at the upcoming call sits exactly on the slots
+            // — no SP adjustment, just s32i at [a1 + (imm-6)*4]. The callee's
+            // IR_COPY (imm 6..99) reads it back at [a1 + callee_frame +
+            // (imm-6)*4]. 4-byte slots.
+            uint64 oi = imm - XT_NUM_ARG_REGS
+            if oi >= 16 {
+                xt_err("error: xtensa: overflow args overflow (max 16)\n")
+            }
+            uint64 src_reg = xt_resolve_src(s1_v, XT_A8)
+            xt_s32i(src_reg, XT_SP, oi * 4)           // s32i src, oi*4(a1)
+        }
+        return
+    }
+
+    // ----- IR_CALL (50): call0 <target> with a callee-name fixup -----
+    // Mirror of ir_riscv.kr:1557, but xtensa reaches the callee in a single
+    // `call0` (24-bit, PC-relative ±512 KiB) rather than an auipc+jalr pair.
+    // src1 is the ARG COUNT (ir.kr:2788), NOT a vreg — never resolve it. imm
+    // is the callee's name token. Emit a placeholder call0 (imm18=0) and
+    // record [call0_site:u32, callee_tok:u32] into the shared fixup_table;
+    // resolve_fixups_xtensa() patches the imm18 after every function is laid
+    // out (fn_register recorded each function's code_start). The result
+    // comes back in a2 (XT_ARG0) -> move to dst / spill.
+    if op == 50 {
+        uint64 call_patch = out_len
+        xt_emit24(0x5)                                 // call0 #0 (patched)
+        if fixup_count >= 32768 {
+            write(2, "error: fixup_table overflow (max 32768)\n", 40)
+            exit(1)
+        }
+        uint64 fentry = fixup_table + fixup_count * 8
+        uint32 fo = call_patch
+        unsafe { *(fentry as uint32) = fo }
+        uint64 fe4 = fentry + 4
+        uint32 ct = imm
+        unsafe { *(fe4 as uint32) = ct }
+        fixup_count = fixup_count + 1
+        ir_overflow_arg_count = 0
+        // Result in a2. Allocatable regs are a12-a15, so dst_r can never BE
+        // a2 — the guard just skips a no-op mv.
+        if dst_r != 0xFFFFFFFF {
+            if dst_r != XT_ARG0 { xt_mv(dst_r, XT_ARG0) }
+        } else {
+            xt_store_spill(XT_ARG0, dest_v)
+        }
+        return
+    }
+
+    // ----- IR_CALL_IND (87): callx0 <reg> — indirect through a pointer ----
+    // Mirror of ir_riscv.kr:1614 (jalr through a vreg). fn-pointer vreg in
+    // src1, result in a2. callx0 reads the target register before writing a0
+    // (return addr), so the pointer may live in the a8 scratch. imm==1 flags
+    // an f64 return on other arches; floats are rejected on xtensa by sema,
+    // so no special case is needed. (Function pointers are materialized via
+    // IR_FN_ADDR, a pool address-literal — a later task — this form just
+    // consumes whatever vreg produced the target address.)
+    if op == 87 {
+        uint64 ptr_r = xt_resolve_src(s1_v, XT_A8)
+        xt_callx0(ptr_r)
+        if dst_r != 0xFFFFFFFF {
+            if dst_r != XT_ARG0 { xt_mv(dst_r, XT_ARG0) }
+        } else {
+            xt_store_spill(XT_ARG0, dest_v)
+        }
         return
     }
 
@@ -1167,27 +1290,58 @@ fn ir_emit_xtensa_insn(uint64 ii) {
         return
     }
 
-    // ----- IR_COPY (61): dst = src1 (register move) -----
-    // Mirror of ir_riscv.kr:1451's plain-mv arm ONLY (src1 != 0 — bind a
-    // named local/temp to an existing vreg; this is exactly what `uint32 x
-    // = expr` lowers to, per the alu.kr comment on why named locals need
-    // Task 5). riscv's IR_COPY also handles src1==0 (imm<8 incoming CALL0
-    // arg register, imm>=100 ASM-block physical-register read, 8..99
-    // overflow-param frame load) — those all need CALL0
-    // argument-register/frame wiring that isn't built for xtensa yet, and
-    // no surface syntax reaches them on this arch today (no function
-    // calls/params compile here). Loud-fail rather than silently reading
-    // whatever garbage is in the a8 scratch register.
+    // ----- IR_COPY (61): dst = src1, or param/phys-reg init -----
+    // Mirror of ir_riscv.kr:1451. src1 != 0: plain mv (bind a named
+    // local/temp to an existing vreg — what `uint32 x = expr` lowers to).
+    // src1 == 0 selects on imm: < 6 = incoming CALL0 param in a2..a7
+    // (arg index i -> a2+i, the same slot the caller's IR_ARG wrote; the
+    // boundary is 6, not riscv's 8, because CALL0 has six arg registers);
+    // >= 100 = ASM-block output read from physical AR imm-100; 6..99 =
+    // overflow param loaded from the CALLER's frame at
+    // [a1 + ir_frame_size + (imm-6)*4] (4-byte slots — IR_ARG's overflow
+    // path stored it at caller [a1 + oi*4], which is this frame's
+    // [a1 + ir_frame_size + oi*4]). Param regs a2..a7 are never clobbered
+    // between the prologue and these leading IR_COPYs (the prologue touches
+    // only a0/a1/a8/a12..a15), so reading them here is safe.
     if op == 61 {
-        if s1_v == 0 {
-            xt_err("error: xtensa: IR_COPY param/phys-reg source not yet implemented\n")
-        }
-        uint64 src_reg = xt_resolve_src(s1_v, XT_A8)
-        if dst_r != 0xFFFFFFFF {
-            xt_mv(dst_r, src_reg)
+        if s1_v != 0 {
+            uint64 src_reg = xt_resolve_src(s1_v, XT_A8)
+            if dst_r != 0xFFFFFFFF {
+                xt_mv(dst_r, src_reg)
+            } else {
+                if src_reg != XT_A8 { xt_mv(XT_A8, src_reg) }
+                xt_store_spill(XT_A8, dest_v)
+            }
+        } else if imm < XT_NUM_ARG_REGS {
+            uint64 pr = XT_ARG0 + imm
+            if dst_r != 0xFFFFFFFF {
+                xt_mv(dst_r, pr)
+            } else {
+                xt_mv(XT_A8, pr)
+                xt_store_spill(XT_A8, dest_v)
+            }
+        } else if imm >= 100 {
+            uint64 phys_src = imm - 100
+            if dst_r != 0xFFFFFFFF {
+                xt_mv(dst_r, phys_src)
+            } else {
+                xt_mv(XT_A8, phys_src)
+                xt_store_spill(XT_A8, dest_v)
+            }
         } else {
-            if src_reg != XT_A8 { xt_mv(XT_A8, src_reg) }
-            xt_store_spill(XT_A8, dest_v)
+            // Overflow param: load from the caller's frame at
+            // [a1 + ir_frame_size + (imm-6)*4]. l32i's offset is (imm8<<2)
+            // <= 1020; a frame large enough to push this past that loud-
+            // fails rather than truncating (large-frame sp arithmetic is a
+            // later task, same as the spill-offset guard).
+            uint64 overflow_off = ir_frame_size + (imm - XT_NUM_ARG_REGS) * 4
+            if overflow_off > 1020 {
+                xt_err("error: xtensa: overflow-param offset exceeds l32i range\n")
+            }
+            uint64 d = dst_r
+            if d == 0xFFFFFFFF { d = XT_A8 }
+            xt_l32i(d, XT_SP, overflow_off)
+            if dst_r == 0xFFFFFFFF { xt_store_spill(XT_A8, dest_v) }
         }
         return
     }
@@ -1292,10 +1446,14 @@ fn ir_xtensa_gen(uint64 fn_node) {
     ir_snapshot_debug_vars()
 
     // 5. Frame — 4-byte slots, 16-byte-aligned SP. Layout from a1 upward:
-    //      [a1 + 0 .. spill_size)          spilled vregs
+    //      [a1 + 0 .. XT_OVERFLOW_RESERVE)  outgoing calls' args 7+
+    //      [spill slots ...]               spilled vregs (4 bytes each)
     //      [stack arrays ...]              compile-time-sized local arrays
     //      [cs_base ...]                   saved a12-a15 (used colours)
     //      [a1 + total_frame - 4]          saved a0 (return address)
+    //    With the overflow reserve at the bottom, IR_ARG stores outgoing args
+    //    at [a1 + oi*4] with no SP adjustment — the callee reads them at
+    //    [a1 + callee_frame + oi*4] (IR_COPY imm 6..99), exactly as riscv does.
     uint64 spill_size = ir_spill_count * 4
     uint64 used_mask = ir_used_color_mask()
     uint64 nsaved = 0
@@ -1304,7 +1462,7 @@ fn ir_xtensa_gen(uint64 fn_node) {
         if ((used_mask >> mc) & 1) != 0 { nsaved = nsaved + 1 }
         mc = mc + 1
     }
-    uint64 cs_base = spill_size + ir_stack_array_bytes
+    uint64 cs_base = XT_OVERFLOW_RESERVE + spill_size + ir_stack_array_bytes
     uint64 total_frame = cs_base + nsaved * 4 + 4
     if (total_frame & 15) != 0 { total_frame = total_frame + 16 - (total_frame & 15) }
     if is_naked != 0 { total_frame = 0 }
@@ -1599,4 +1757,67 @@ fn ir_xtensa_gen(uint64 fn_node) {
 
     // Restore IR_NUM_REGS for functions compiled later on other arches.
     IR_NUM_REGS = saved_num_regs
+}
+
+// ---------------------------------------------------------------------------
+// Call fixup resolution — runs after ALL functions are laid out (the arch-3
+// branch of main.kr, same slot where arch 0/1/2 run
+// resolve_fixups/resolve_fixups_a64/resolve_fixups_riscv).
+//
+// IR_CALL recorded [call0_site:u32, callee_name_token:u32] entries in the
+// shared fixup_table (codegen.kr:114). fn_register(name, code_start) recorded
+// each function's entry offset (past its literal pool), so fn_lookup(token)
+// yields the callee's code offset. Each call site is a single
+//     call0 <target>        @ site  (24-bit)
+// whose imm18 is WORD-scaled off a PC that is first rounded DOWN to a 4-byte
+// boundary: the LX6 hardware computes target = ((PC+4) & ~3) + imm18*4, so
+//     imm18 = (target - ((site+4) & ~3)) >> 2
+// This is byte-for-byte the same formula xt_call0() uses at emit time (Task 2,
+// golden-diff verified against `xtensa-lx106-elf-as --no-transform`); it is
+// replicated here rather than called because xt_call0() derives PC from the
+// live out_len, whereas the patcher must use the recorded `site`. Pure file-
+// offset math: a flat image maps file offset 0 to a 4-byte-aligned load VA, so
+// the (PC+4)&~3 rounding is identical whether computed on the file offset or
+// the runtime PC. call0 is patched with xt_patch24 (3 bytes) — NOT patch_u32,
+// which would clobber the following instruction's first byte. If the callee is
+// undefined, loud-fail exactly like resolve_fixups_riscv.
+fn resolve_fixups_xtensa() {
+    uint64 i = 0
+    while i < fixup_count {
+        uint64 fentry = fixup_table + i * 8
+        uint32 patch_off = 0
+        unsafe { *(fentry as uint32) -> patch_off }
+        uint64 fe4 = fentry + 4
+        uint32 target_tok = 0
+        unsafe { *(fe4 as uint32) -> target_tok }
+
+        uint64 wtt = target_tok
+        uint64 target_off = fn_lookup(wtt)
+        if target_off != 0xFFFFFFFF {
+            uint64 wpo = patch_off
+            uint64 base = (wpo + 4) & ~3
+            uint64 diff = target_off - base
+            xt_check_call18(diff)
+            uint64 imm18 = (diff >> 2) & 0x3FFFF
+            uint64 w = 0x5 | (imm18 << 6)
+            xt_patch24(wpo, w)
+        } else {
+            // Undefined function — mirror resolve_fixups_riscv
+            // (ir_riscv.kr:2661): without this the placeholder call0 would
+            // reach its own (rounded) PC at runtime.
+            diag_loc_head(wtt, 0)
+            write(2, "undefined function '", 20)
+            uint64 ts = tok_text_start(wtt)
+            uint64 tl = tok_text_len(wtt)
+            write(2, cg_source + ts, tl)
+            write(2, "'", 1)
+            diag_sugg_reset()
+            diag_sugg_scan(wtt, fn_table, fn_count)
+            diag_sugg_print()
+            write(2, "\n", 1)
+            diag_span_of(wtt)
+            exit(1)
+        }
+        i = i + 1
+    }
 }

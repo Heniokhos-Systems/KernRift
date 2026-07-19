@@ -2556,6 +2556,13 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
     // exit here so objdump can disassemble it. This early-out is arch-3-only,
     // so it cannot perturb arch 0/1/2 output.
     if xt_raw != 0 {
+        // Patch call0 targets now — every function is laid out and
+        // fn_register recorded each entry offset. This raw early-out returns
+        // before the arch-3 fixup branch further down (the string/static/ELF
+        // pipeline there is still NYI for xtensa), so resolution must happen
+        // here or call0 placeholders would ship unpatched. Same shared
+        // fixup_table the riscv/x86/arm64 resolvers consume.
+        resolve_fixups_xtensa()
         codegen_write_output(output_path)
         set_executable(output_path)
         uint8[64] xnb
@@ -2584,7 +2591,9 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
         resolve_fixups_riscv()
         resolve_fnaddr_fixups_riscv()
     } else if arch == 3 {
-        xtensa_nyi("fixup resolution")
+        // xtensa: patch the call0 sites (ir_xtensa.kr). fn_addr() pool
+        // address-literals are a later task, so no resolve_fnaddr here yet.
+        resolve_fixups_xtensa()
     }
 
     // Emit string data BEFORE static data so trailing zero bytes from
