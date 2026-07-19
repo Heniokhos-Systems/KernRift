@@ -1,0 +1,76 @@
+// Xtensa LX6 string/format intrinsics boot test (Task 6) — exercises
+// IR_STRLEN (73), IR_STR_EQ (75), IR_FMT_UINT (74), plus the new per-function
+// scratchpad region FMT_UINT needs (XT_SCRATCH_SIZE / ir_xt_scratch_off,
+// mirroring ir_riscv.kr's RV_SCRATCH_SIZE / ir_rv_scratch_off — same fixed
+// 32-byte slice, inserted between the stack-array region and the
+// callee-saved block).
+//
+// str_len("abcd") -> 4: byte-scan-to-NUL loop (mirror of ir_riscv.kr:1684,
+// STRLEN "abcd" already materializes fine via Task 1's STR_CONST — STRLEN
+// is the first genuinely NEW op this test hits).
+//
+// str_eq("hi","hi") -> 1, str_eq("hi","ho") -> 0: byte-by-byte compare loop
+// (mirror of ir_riscv.kr:1721), no condition flags on this ISA so the
+// CMP+B.NE pair becomes a direct two-register `bne`/`beqz` pair.
+//
+// fmt_uint(buf, 60705) -> writes "60705" (5 ASCII digits, correct
+// left-to-right order) into a LOCAL `u8[8] buf` (exercises Task 4's
+// IR_STACK_ADDR together with the new scratchpad) and returns the digit
+// count (5). 60705 has no repeated or trailing-zero digit pattern that
+// would mask an off-by-one in the digit-loop/copy-loop reversal (mirrors
+// riscv's t5_fmtuint.kr choosing 12345 for the same reason — every digit
+// position is distinct). The returned count (not a NUL scan) drives how
+// many bytes of buf get printed, matching FMT_UINT's actual contract
+// (ir.kr:2190-2199: "dest = digit count").
+//
+// Expected output under `qemu-system-xtensa -M lx60`:
+//   4
+//   1
+//   0
+//   60705
+
+device Uart at 0xfd050020 {
+    thr at 0x00 : u32
+    lsr at 0x14 : u8
+}
+
+fn putc(u8 c) {
+    while (Uart.lsr & 0x20) == 0 { }
+    Uart.thr = c
+}
+
+fn nl() { putc(10) }
+
+// Recursive unsigned printer (the print_uint idiom from stress.kr /
+// mem_stack.kr).
+fn print_uint(u32 n) {
+    if n >= 10 {
+        print_uint(n / 10)
+    }
+    putc(48 + (n % 10))
+}
+
+// Print `n` raw bytes starting at pointer `s` (no NUL scan — FMT_UINT's
+// output is not NUL-terminated, only `n` bytes are meaningful).
+fn puts_n(u32 s, u32 n) {
+    u32 i = 0
+    while i < n {
+        u8 c = 0
+        unsafe { *((s + i) as u8) -> c }
+        putc(c)
+        i = i + 1
+    }
+}
+
+fn main() {
+    print_uint(str_len("abcd"))          nl()   // 4
+
+    print_uint(str_eq("hi", "hi"))       nl()   // 1
+    print_uint(str_eq("hi", "ho"))       nl()   // 0
+
+    u8[8] buf
+    u32 count = fmt_uint(buf, 60705)
+    puts_n(buf, count)                   nl()   // 60705
+
+    loop { }
+}

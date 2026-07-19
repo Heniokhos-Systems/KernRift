@@ -4826,18 +4826,51 @@ fi
 # against `xtensa-lx106-elf-as --no-transform` — the CALL0 PC-rounding
 # (imm18 = (target-((pc+4)&~3))>>2) is the fragile part. Same objdump dev-only
 # SKIP discipline as the other xtensa tests.
+#
+# The compiled output is a full ELF (Ehdr + one Phdr, p_offset=0 covering the
+# whole file — this minimal freestanding ELF has NO section headers, so a
+# proper `objdump -d` finds nothing and `-b binary` is the only way to get
+# any disassembly at all). Feeding the WHOLE file (header included) to `-b
+# binary` makes objdump linearly decode the Ehdr/Phdr bytes themselves as
+# bogus instructions first; whether that garbage decode happens to land back
+# on the true code/instruction boundary by the time it reaches real code is
+# an accident of the specific header byte values — NOT guaranteed, and
+# (Task 6) it stopped landing correctly the moment an unrelated, legitimate
+# frame-size change perturbed a nearby immediate byte. Fix: slice off the
+# Ehdr+Phdr span (e_phoff + e_phnum*e_phentsize, read via `readelf -h`, not
+# hardcoded — stable across any single-PT_LOAD freestanding xtensa ELF) and
+# disassemble ONLY the real code, so decode always starts instruction-aligned
+# regardless of what the frame-size immediates happen to be. The golden-diff
+# byte extraction below reads from the ORIGINAL (unsliced) file, so its
+# offset is CALL_SITE + the same header length.
 echo ""
 echo "--- xtensa LX6 calls (CALL0 + IR_ARG) disasm test ---"
-if command -v xtensa-lx106-elf-objdump >/dev/null 2>&1; then
+if command -v xtensa-lx106-elf-objdump >/dev/null 2>&1 && command -v readelf >/dev/null 2>&1; then
     TOTAL=$((TOTAL + 1))
     XT_CALL_BIN="/tmp/krc_xt_call_$$.bin"
+    XT_CALL_CODE="/tmp/krc_xt_call_code_$$.bin"
     XT_CALL_OK=1
     if ! $KRC --arch=xtensa --freestanding "$DIR/../examples/xtensa/call.kr" -o "$XT_CALL_BIN" >/dev/null 2>&1; then
         echo "FAIL: xtensa_call_disasm (compilation failed)"
         XT_CALL_OK=0
     fi
+    XT_HDR_LEN=0
     if [ "$XT_CALL_OK" = 1 ]; then
-        XT_CALL_DIS=$(xtensa-lx106-elf-objdump -b binary -m xtensa -D --show-raw-insn "$XT_CALL_BIN" 2>/dev/null)
+        XT_EH=$(readelf -h "$XT_CALL_BIN" 2>/dev/null)
+        XT_PHOFF=$(echo "$XT_EH" | sed -nE 's/.*Start of program headers: *([0-9]+).*/\1/p')
+        XT_PHENTSZ=$(echo "$XT_EH" | sed -nE 's/.*Size of program headers: *([0-9]+).*/\1/p')
+        XT_PHNUM=$(echo "$XT_EH" | sed -nE 's/.*Number of program headers: *([0-9]+).*/\1/p')
+        if [ -n "$XT_PHOFF" ] && [ -n "$XT_PHENTSZ" ] && [ -n "$XT_PHNUM" ]; then
+            XT_HDR_LEN=$((XT_PHOFF + XT_PHENTSZ * XT_PHNUM))
+        fi
+        if [ "$XT_HDR_LEN" -le 0 ]; then
+            echo "FAIL: xtensa_call_disasm (could not determine ELF header length via readelf)"
+            XT_CALL_OK=0
+        fi
+    fi
+    if [ "$XT_CALL_OK" = 1 ]; then
+        tail -c "+$((XT_HDR_LEN + 1))" "$XT_CALL_BIN" > "$XT_CALL_CODE"
+        XT_CALL_DIS=$(xtensa-lx106-elf-objdump -b binary -m xtensa -D --show-raw-insn "$XT_CALL_CODE" 2>/dev/null)
         # A call0 must be present (the call to helper)…
         if ! echo "$XT_CALL_DIS" | grep -Eq '\bcall0\b'; then
             echo "FAIL: xtensa_call_disasm (no call0 — call not emitted / was inlined)"
@@ -4856,12 +4889,14 @@ if command -v xtensa-lx106-elf-objdump >/dev/null 2>&1; then
         # Golden-diff the patched call0 encoding: extract the call0's site +
         # target from objdump, hand-assemble the same displacement with
         # --no-transform, and byte-compare. Pins the CALL0 PC-rounding.
+        # CALL_SITE is relative to XT_CALL_CODE (header already sliced off);
+        # add XT_HDR_LEN back to index into the original XT_CALL_BIN.
         if [ "$XT_CALL_OK" = 1 ] && command -v xtensa-lx106-elf-as >/dev/null 2>&1 \
            && command -v xtensa-lx106-elf-objcopy >/dev/null 2>&1; then
             CALL_LINE=$(echo "$XT_CALL_DIS" | grep -E '\bcall0\b' | head -1)
             CALL_SITE=$(echo "$CALL_LINE" | sed -E 's/^[[:space:]]*([0-9a-f]+):.*/\1/')
             CALL_TGT=$(echo "$CALL_LINE" | sed -E 's/.*call0[[:space:]]+0x([0-9a-f]+).*/\1/')
-            OUR_BYTES=$(od -An -tx1 -j $((0x$CALL_SITE)) -N 3 "$XT_CALL_BIN" | tr -d ' \n')
+            OUR_BYTES=$(od -An -tx1 -j $((XT_HDR_LEN + 0x$CALL_SITE)) -N 3 "$XT_CALL_BIN" | tr -d ' \n')
             GS="/tmp/krc_xt_call_gold_$$.s"
             GO="/tmp/krc_xt_call_gold_$$.o"
             GB="/tmp/krc_xt_call_gold_$$.bin"
@@ -4886,9 +4921,9 @@ if command -v xtensa-lx106-elf-objdump >/dev/null 2>&1; then
     else
         FAIL=$((FAIL + 1))
     fi
-    rm -f "$XT_CALL_BIN"
+    rm -f "$XT_CALL_BIN" "$XT_CALL_CODE"
 else
-    echo "  xtensa_call_disasm: SKIP (xtensa-lx106-elf-objdump not installed)"
+    echo "  xtensa_call_disasm: SKIP (xtensa-lx106-elf-objdump/readelf not installed)"
 fi
 
 # --- Xtensa LX6 freestanding UART hello (boots under qemu — MILESTONE 1) ---
@@ -5186,6 +5221,47 @@ A
     rm -f "$XT_MS_ELF"
 else
     echo "  xtensa_memstack_boot: SKIP (qemu-system-xtensa not installed)"
+fi
+
+# --- Xtensa LX6 string/format intrinsics (Task 6) boot test ---
+# str_intrin.kr exercises IR_STRLEN (73), IR_STR_EQ (75), IR_FMT_UINT (74),
+# plus the new per-function scratchpad region FMT_UINT needs (mirrors
+# ir_riscv.kr's RV_SCRATCH_SIZE / ir_rv_scratch_off). str_len("abcd") -> 4,
+# str_eq("hi","hi") -> 1, str_eq("hi","ho") -> 0, fmt_uint(buf, 60705) into a
+# LOCAL `u8[8] buf` (Task 4's IR_STACK_ADDR) -> "60705" printed via the
+# returned digit count (not a NUL scan). Full-output equality; loop{} keeps
+# the core busy till timeout.
+echo ""
+echo "--- xtensa LX6 string/format intrinsics boot test ---"
+if command -v qemu-system-xtensa >/dev/null 2>&1; then
+    TOTAL=$((TOTAL + 1))
+    XT_SI_ELF="/tmp/krc_xt_strintrin_$$.elf"
+    XT_SI_OK=1
+    if ! $KRC --arch=xtensa --freestanding "$DIR/../examples/xtensa/str_intrin.kr" -o "$XT_SI_ELF" >/dev/null 2>&1; then
+        echo "FAIL: xtensa_strfmt_boot (compilation failed)"
+        XT_SI_OK=0
+    fi
+    if [ "$XT_SI_OK" = 1 ]; then
+        XT_SI_EXP="4
+1
+0
+60705"
+        XT_SI_OUT=$(timeout 8 qemu-system-xtensa -M lx60 -nographic -kernel "$XT_SI_ELF" 2>/dev/null | tr -d '\r')
+        if [ "$XT_SI_OUT" = "$XT_SI_EXP" ]; then
+            PASS=$((PASS + 1))
+            echo "  xtensa_strfmt_boot: PASS (str_len/str_eq/fmt_uint = 4/1/0/60705)"
+        else
+            echo "FAIL: xtensa_strfmt_boot (output mismatch)"
+            echo "    expected: $XT_SI_EXP"
+            echo "    got:      $XT_SI_OUT"
+            FAIL=$((FAIL + 1))
+        fi
+    else
+        FAIL=$((FAIL + 1))
+    fi
+    rm -f "$XT_SI_ELF"
+else
+    echo "  xtensa_strfmt_boot: SKIP (qemu-system-xtensa not installed)"
 fi
 
 # --- RISC-V RV32 IR_STR_CONST via pcrel auipc+addi (feature-gap Task 1) ---
