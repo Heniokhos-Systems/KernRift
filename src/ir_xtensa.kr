@@ -916,18 +916,30 @@ fn xt_emit_raw_sp_preamble() {
     // absolute addresses 0xd0000000 + p_filesz / + p_memsz. Like the SP-init
     // l32r, these two l32r's sit at code_start ahead of every branch, so
     // relaxation never shifts them (no pool fixup). a0 is undefined/unused at
-    // reset, so a8/a9/a10 are free. The backward branch is HAND-EMITTED (never a
-    // tracked fixup, L-3): both endpoints are inside this preamble, ahead of any
-    // relaxable body branch, so a later 3-byte insertion can't invalidate its
-    // displacement. When there is no gap (p_filesz == p_memsz) the do-while
-    // stores one zero word at [p_memsz] — free DRAM just past the image, benign.
+    // reset, so a8/a9/a10 are free. Both hand-emitted branches (never tracked
+    // fixups, L-3) have BOTH endpoints inside this preamble, ahead of any
+    // relaxable body branch, so a later 3-byte insertion can't invalidate a
+    // displacement. This is a PRE-CHECKED while, not a do-while: when there is
+    // no gap (p_filesz == p_memsz, i.e. lo >= hi) the forward `bgeu` guard skips
+    // the body entirely, so a no-gap image NEVER stores past p_memsz (a do-while
+    // would write one word at [p_memsz], outside the declared LOAD segment —
+    // benign on qemu lx60 but a hardware-latent defect on ESP32). The guard's
+    // forward target (`done`, the insn after the backward `bltu`) is unknown
+    // until the body is laid out, so emit a placeholder `bgeu` (disp 0), record
+    // its site, emit the body, then backpatch the imm8 with the real target.
     xt_l32r(XT_A8, xt_bss_lo_pool_off)             // l32r a8, <lo = 0xd0000000+p_filesz>
     xt_l32r(XT_A9, xt_bss_hi_pool_off)             // l32r a9, <hi = 0xd0000000+p_memsz>
+    uint64 guard_site = out_len                    // bgeu site (backpatched below)
+    xt_bgeu(XT_A8, XT_A9, guard_site + 4)          // bgeu a8, a9, done  (placeholder: disp 0)
     xt_movi(XT_A10, 0)                             // movi a10, 0  (the zero source)
     uint64 top = out_len
     xt_s32i(XT_A10, XT_A8, 0)                       // top: s32i a10, a8, 0
     xt_addi(XT_A8, XT_A8, 4)                        //      addi a8, a8, 4
     xt_bltu(XT_A8, XT_A9, top)                      //      bltu a8, a9, top
+    uint64 done = out_len                          // done: first insn after the loop
+    // Backpatch the guard: imm8 = done - (guard_site+4). BGEU cond = 0xB; the
+    // whole preamble is < 128 B so the signed byte displacement always fits.
+    xt_patch24(guard_site, xt_bri8_word(0xB, XT_A8, XT_A9, guard_site, done))
 }
 
 // --- Offset-remap after relaxation (rv_c_remap analog) ------------------
