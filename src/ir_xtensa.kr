@@ -9,6 +9,7 @@ static uint64 XT_A2 = 2
 static uint64 XT_A8 = 8        // scratch
 static uint64 XT_A9 = 9        // scratch
 static uint64 XT_A10 = 10      // scratch (zero source in the .bss-zeroing preamble)
+static uint64 XT_A11 = 11      // scratch (byte tmp in the memcpy loop)
 
 // CALL0 has SIX argument registers a2..a7 (regs 2..7) — narrower than the
 // eight a0-a7 riscv/arm64 use. arg index 0..5 -> a2..a7; index 6+ overflows
@@ -1754,6 +1755,209 @@ fn ir_emit_xtensa_insn(uint64 ii) {
         if val_reg != XT_A8 { xt_mv(XT_A8, val_reg) }
         xt_emit_pic_addr(XT_A9, 1, imm)               // base -> a9 second
         xt_s32i(XT_A8, XT_A9, 0)                       // s32i a8, a9, 0
+        return
+    }
+
+    // ----- IR_STACK_ADDR (32): dst = address of a compile-time local array -----
+    // imm = byte offset within this function's stack-array region (rel_off,
+    // assigned by ir.kr:3414). The region sits directly above the spill
+    // slots — exactly matching the frame layout already folded into
+    // cs_base/total_frame above (ir_xtensa_gen step 5):
+    //     base_off = XT_OVERFLOW_RESERVE + ir_spill_count*4 + imm
+    // Not a PIC op: no pool/pre-scan/fixup involvement (the emit-side PIC set
+    // above is {77,78,79,84}; op 32 never joins it). The frame cap enforced
+    // in step 5 (total_frame <= 2047) keeps base_off well inside xt_movi's
+    // signed-12 range, so the xt_movi+add fallback below never needs the
+    // literal pool — a plain xt_movi suffices (mirrors the total_frame
+    // materialize at :1979, not xt_materialize's pool path).
+    // Mirror of ir_riscv.kr:2019-2038 (rv_addi_sp_big), adapted to Xtensa's
+    // addi imm8 range via xt_fits_addi / xt_movi+xt_add. STACK_ADDR has no
+    // source operands, so a8/a9 are both free scratch here.
+    if op == 32 {
+        uint64 base_off = XT_OVERFLOW_RESERVE + ir_spill_count * 4 + imm
+        uint64 d = dst_r
+        if d == 0xFFFFFFFF { d = XT_A8 }
+        if xt_fits_addi(base_off) != 0 {
+            xt_addi(d, XT_SP, base_off & 0xFF)         // addi d, sp, base_off
+        } else {
+            xt_movi(XT_A9, base_off)                    // a9 = base_off
+            xt_add(d, XT_SP, XT_A9)                      // d = sp + a9
+        }
+        if dst_r == 0xFFFFFFFF { xt_store_spill(XT_A8, dest_v) }
+        return
+    }
+
+    // ----- IR_MEMCMP (88): fixed-length byte compare -----
+    // Semantics (ir.kr:91/8095, mirror of ir_riscv.kr:1777-1828): dest =
+    // (memcmp(src1, src2, imm) == 0) ? 1 : 0. src1/src2 = pointers, imm = a
+    // COMPILE-TIME byte count (not a vreg — struct_total_size() folded in at
+    // the one emit site, ir.kr:1548). Assume-equal result preset AFTER the
+    // loop (not before, unlike the riscv/arm64 twins): every write to `d`
+    // happens only at the two converging exit points (natural loop
+    // exhaustion / len==0 guard-skip -> both "equal") or at the mismatch
+    // tail (NE -> "not equal"), so `d` is dormant during the hot loop body
+    // and can safely reuse ptrA's register (a8, dead once the loop is
+    // exited) as the spilled-dest fallback — sidestepping the register
+    // pressure a preset-before-the-loop `d` would hit (5 live temps for the
+    // loop body already exhausts a8/a9/a10/a11 + one caller temp; riscv can
+    // afford a 6th because rv has far more free a/t regs than xtensa's
+    // documented a8-a11 caller-temp set). a5 is a caller temp per the
+    // top-of-file ABI comment (a2-a7=args, a8-a11=caller temps) and this op
+    // never calls out, so it is free scratch here alongside a8-a11.
+    if op == 88 {
+        uint64 mc_a = xt_resolve_src(s1_v, XT_A8)
+        uint64 ptrA = XT_A8
+        if mc_a != ptrA { xt_mv(ptrA, mc_a) }
+        uint64 mc_b = xt_resolve_src(s2_v, XT_A9)
+        uint64 ptrB = XT_A9
+        if mc_b != ptrB { xt_mv(ptrB, mc_b) }
+        uint64 lenC = XT_A10
+        // imm is a compile-time literal (struct byte size), never a vreg —
+        // loud-fail rather than risk xt_materialize's un-prescanned pool path.
+        if xt_fits_movi(imm) != 0 {
+            xt_movi(lenC, imm)
+        } else {
+            xt_err("error: xtensa: memcmp compile-time length exceeds MOVI range\n")
+        }
+        uint64 byteA = XT_A11
+        uint64 byteB = 5                // a5: free caller-temp scratch (no call in this op)
+        uint64 guard_site = out_len
+        xt_beqz(lenC, guard_site + 4)   // len==0 -> EQ (placeholder; patched below)
+        uint64 top = out_len
+        // L:
+        xt_l8ui(byteA, ptrA, 0)         // l8ui byteA, ptrA, 0
+        xt_l8ui(byteB, ptrB, 0)         // l8ui byteB, ptrB, 0
+        uint64 bne_site = out_len
+        xt_bne(byteA, byteB, bne_site + 4) // mismatch -> NE (placeholder)
+        xt_addi(ptrA, ptrA, 1)          // addi ptrA, ptrA, 1
+        xt_addi(ptrB, ptrB, 1)          // addi ptrB, ptrB, 1
+        xt_addi(lenC, lenC, 0 - 1)      // addi lenC, lenC, -1
+        xt_bnez(lenC, top)              // loop while lenC != 0 (backward, direct)
+        // EQ: (loop exhausted, all bytes matched)
+        uint64 eq_off = out_len
+        uint64 d = dst_r
+        if d == 0xFFFFFFFF { d = XT_A8 }  // ptrA is dead here (loop exited)
+        xt_movi(d, 1)                    // d = 1 (equal)
+        uint64 jd_site = out_len
+        xt_j(jd_site + 4)                // j DONE (placeholder)
+        // NE:
+        uint64 ne_off = out_len
+        xt_movi(d, 0)                    // d = 0 (mismatch found)
+        uint64 done_off = out_len
+        // Backpatch: guard (beqz) -> EQ, bne -> NE, j -> DONE.
+        xt_patch24(guard_site, xt_bri12_word(0, lenC, guard_site, eq_off))
+        xt_patch24(bne_site, xt_bri8_word(0x9, byteA, byteB, bne_site, ne_off))
+        xt_patch24(jd_site, xt_j_word(jd_site, done_off))
+        if dst_r == 0xFFFFFFFF { xt_store_spill(XT_A8, dest_v) }
+        return
+    }
+
+    // ----- IR_MEMCPY (72): byte copy loop -----
+    // Semantics (ir.kr:75, mirror of ir_riscv.kr:1830-1888): dest = returned
+    // dst pointer, src1 = dst ptr, src2 = src ptr, imm = the COUNT VREG'S ID
+    // (not a literal — same "len vreg in imm" convention riscv/arm64 use).
+    // End-pointer loop (cur < end via bltu) rather than riscv's decrement
+    // style: xtensa's BLTU is a native two-register compare-branch, so
+    // comparing against a fixed `end` costs nothing extra and avoids
+    // needing a separate always-live length register. cur_dst=a8, cur_src=
+    // a9, end=a10, byte tmp=a11 (l8ui/s8ui may alias src/dst register with
+    // itself — never needed here since cur_dst != cur_src). The return
+    // value is NOT threaded through the loop in a saved register (unlike
+    // riscv's a4): since the loop only mutates its OWN scratch copies
+    // (a8/a9), the original dst (s1_v's colour reg or spill slot) is never
+    // touched, so it is simply re-resolved fresh after the loop — sidesteps
+    // needing a 5th scratch register purely to babysit the return value.
+    if op == 72 {
+        uint64 mc_dst = xt_resolve_src(s1_v, XT_A8)
+        uint64 cur_dst = XT_A8
+        if mc_dst != cur_dst { xt_mv(cur_dst, mc_dst) }
+        uint64 mc_src = xt_resolve_src(s2_v, XT_A9)
+        uint64 cur_src = XT_A9
+        if mc_src != cur_src { xt_mv(cur_src, mc_src) }
+        // Resolve len from imm (stored as vreg index, not a literal).
+        uint64 mc_len_vreg = imm
+        uint64 len_reg = XT_A10
+        if mc_len_vreg > 0 && mc_len_vreg < ir_vreg_next {
+            uint64 p = ir_get_phys_reg(mc_len_vreg)
+            if p != 0xFFFFFFFF {
+                len_reg = p
+            } else {
+                xt_load_spill(XT_A10, mc_len_vreg)
+            }
+        } else {
+            xt_movi(XT_A10, 0)
+        }
+        uint64 end = XT_A10
+        xt_add(end, cur_dst, len_reg)   // end = cur_dst + len (in-place-safe if len_reg==a10)
+        uint64 guard_site = out_len
+        xt_bgeu(cur_dst, end, guard_site + 4) // cur_dst>=end (len==0) -> DONE (placeholder)
+        uint64 top = out_len
+        // L:
+        xt_l8ui(XT_A11, cur_src, 0)     // l8ui a11, cur_src, 0
+        xt_s8i(XT_A11, cur_dst, 0)      // s8i  a11, cur_dst, 0
+        xt_addi(cur_dst, cur_dst, 1)    // addi cur_dst, cur_dst, 1
+        xt_addi(cur_src, cur_src, 1)    // addi cur_src, cur_src, 1
+        xt_bltu(cur_dst, end, top)      // loop while cur_dst < end (backward, direct)
+        uint64 done = out_len
+        xt_patch24(guard_site, xt_bri8_word(0xB, cur_dst, end, guard_site, done))
+        // DONE: return original dst (re-resolved fresh — never mutated above)
+        uint64 d = dst_r
+        if d == 0xFFFFFFFF { d = XT_A8 }
+        uint64 od = xt_resolve_src(s1_v, d)
+        if od != d { xt_mv(d, od) }
+        // dest_v==0 for the statement-form lowering (return value discarded) —
+        // nothing to spill-store in that case; storing anyway would be a dead
+        // write into the overflow-reserve slot. Mirror of ir_riscv.kr:1886.
+        if dst_r == 0xFFFFFFFF && dest_v != 0 { xt_store_spill(XT_A8, dest_v) }
+        return
+    }
+
+    // ----- IR_MEMSET (76): byte fill loop -----
+    // Semantics (ir.kr:79, mirror of ir_riscv.kr:1890-1941): dest = returned
+    // dst pointer, src1 = dst ptr, src2 = fill-byte VALUE, imm = the COUNT
+    // VREG'S ID (same convention as MEMCPY above). End-pointer loop like
+    // MEMCPY: cur=a8, end=a10; the fill value never mutates so it stays in
+    // whatever register xt_resolve_src hands back (a9 if spilled, else its
+    // live colour register) with no extra copy needed. Return value handled
+    // exactly as MEMCPY: re-resolve s1_v fresh after the loop instead of
+    // threading a saved-dst register through it.
+    if op == 76 {
+        uint64 ms_dst = xt_resolve_src(s1_v, XT_A8)
+        uint64 cur = XT_A8
+        if ms_dst != cur { xt_mv(cur, ms_dst) }
+        uint64 val_reg = xt_resolve_src(s2_v, XT_A9)   // fill byte value (never mutated)
+        // Resolve len from imm (stored as vreg index, not a literal).
+        uint64 ms_len_vreg = imm
+        uint64 len_reg = XT_A10
+        if ms_len_vreg > 0 && ms_len_vreg < ir_vreg_next {
+            uint64 p = ir_get_phys_reg(ms_len_vreg)
+            if p != 0xFFFFFFFF {
+                len_reg = p
+            } else {
+                xt_load_spill(XT_A10, ms_len_vreg)
+            }
+        } else {
+            xt_movi(XT_A10, 0)
+        }
+        uint64 end = XT_A10
+        xt_add(end, cur, len_reg)       // end = cur + len (in-place-safe if len_reg==a10)
+        uint64 guard_site = out_len
+        xt_bgeu(cur, end, guard_site + 4) // cur>=end (len==0) -> DONE (placeholder)
+        uint64 top = out_len
+        // L:
+        xt_s8i(val_reg, cur, 0)         // s8i val, cur, 0
+        xt_addi(cur, cur, 1)            // addi cur, cur, 1
+        xt_bltu(cur, end, top)          // loop while cur < end (backward, direct)
+        uint64 done = out_len
+        xt_patch24(guard_site, xt_bri8_word(0xB, cur, end, guard_site, done))
+        // DONE: return original dst (re-resolved fresh — never mutated above)
+        uint64 d = dst_r
+        if d == 0xFFFFFFFF { d = XT_A8 }
+        uint64 od = xt_resolve_src(s1_v, d)
+        if od != d { xt_mv(d, od) }
+        // dest_v==0 for the statement-form lowering (return value discarded) —
+        // nothing to spill-store in that case. Mirror of ir_riscv.kr:1939.
+        if dst_r == 0xFFFFFFFF && dest_v != 0 { xt_store_spill(XT_A8, dest_v) }
         return
     }
 

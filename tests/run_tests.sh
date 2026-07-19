@@ -5141,6 +5141,53 @@ else
     echo "  xtensa_bss_boot: SKIP (qemu-system-xtensa not installed)"
 fi
 
+# --- Xtensa LX6 stack arrays + memory intrinsics (merged Task 4+5) boot test ---
+# mem_stack.kr exercises IR_STACK_ADDR (32) together with IR_MEMSET (76) /
+# IR_MEMCPY (72) / IR_MEMCMP (88) — ir.kr:3419 emits IR_STACK_ADDR only ever
+# paired with an unconditional IR_MEMSET zero-init for every local array, so
+# the two can't be tested apart. Part 1: `u32[4] a` prints a[0] BEFORE any
+# write (proves the implicit zero-init), fills a[i]=i+1, prints the sum.
+# Part 2: explicit `memset(b,65,8)` + `memcpy(c,b,4)` builtins, c[0] printed
+# as a raw char. Part 3: struct `==` -> MEMCMP, reached via struct-typed
+# function PARAMETERS over two `static u32[2]` arrays (a local struct would
+# need IR_ALLOC, unimplemented on freestanding xtensa; a `static Point`
+# scalar never registers as a struct var — see mem_stack.kr's header comment
+# for the x86-host probe that found this). Full-output equality; loop{}
+# keeps the core busy till timeout.
+echo ""
+echo "--- xtensa LX6 stack-array + memory-intrinsics boot test ---"
+if command -v qemu-system-xtensa >/dev/null 2>&1; then
+    TOTAL=$((TOTAL + 1))
+    XT_MS_ELF="/tmp/krc_xt_memstack_$$.elf"
+    XT_MS_OK=1
+    if ! $KRC --arch=xtensa --freestanding "$DIR/../examples/xtensa/mem_stack.kr" -o "$XT_MS_ELF" >/dev/null 2>&1; then
+        echo "FAIL: xtensa_memstack_boot (compilation failed)"
+        XT_MS_OK=0
+    fi
+    if [ "$XT_MS_OK" = 1 ]; then
+        XT_MS_EXP="0
+10
+A
+1
+0"
+        XT_MS_OUT=$(timeout 8 qemu-system-xtensa -M lx60 -nographic -kernel "$XT_MS_ELF" 2>/dev/null | tr -d '\r')
+        if [ "$XT_MS_OUT" = "$XT_MS_EXP" ]; then
+            PASS=$((PASS + 1))
+            echo "  xtensa_memstack_boot: PASS (stack array + memset/memcpy/memcmp)"
+        else
+            echo "FAIL: xtensa_memstack_boot (output mismatch)"
+            echo "    expected: $XT_MS_EXP"
+            echo "    got:      $XT_MS_OUT"
+            FAIL=$((FAIL + 1))
+        fi
+    else
+        FAIL=$((FAIL + 1))
+    fi
+    rm -f "$XT_MS_ELF"
+else
+    echo "  xtensa_memstack_boot: SKIP (qemu-system-xtensa not installed)"
+fi
+
 # --- RISC-V RV32 IR_STR_CONST via pcrel auipc+addi (feature-gap Task 1) ---
 # Compiles examples/riscv-featuregap/t1_strconst.kr, which takes the address
 # of a string literal ("hi\n") through IR_STR_CONST and writes it to the UART.

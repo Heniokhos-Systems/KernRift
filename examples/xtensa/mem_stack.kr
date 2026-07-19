@@ -1,0 +1,113 @@
+// Xtensa LX6 stack-array + memory-intrinsics boot test (merged Task 4+5) —
+// exercises IR_STACK_ADDR (32) together with IR_MEMSET (76) / IR_MEMCPY (72)
+// / IR_MEMCMP (88), since ir.kr:3419 emits IR_STACK_ADDR only ever paired
+// with an unconditional IR_MEMSET zero-init for every local array — the two
+// ops can't be exercised separately.
+//
+// Part 1 (STACK_ADDR + implicit MEMSET): `u32[4] a` gets its address via
+// STACK_ADDR and its zero-init via the compiler-inserted MEMSET(a,0,16)
+// ir.kr:3428 always emits right after the STACK_ADDR. Printing a[0] BEFORE
+// any explicit write proves the implicit zero-init actually ran (part of
+// the exact-match expected output below, not a separate assert mechanism).
+// Filling a[i]=i+1 and summing exercises ordinary stack-array load/store
+// through the STACK_ADDR base.
+//
+// Part 2 (explicit MEMSET + MEMCPY builtins): `u8[8] b` filled via the
+// `memset(b, 65, 8)` builtin (a genuine non-zero fill value + a length that
+// is itself a vreg, not a literal — the "COUNT VREG'S ID in imm" operand
+// convention ir_riscv.kr documents), then `memcpy(c, b, 4)` copies the
+// first 4 bytes into `u8[4] c`. c[0] prints as the raw char 'A' (65).
+//
+// Part 3 (MEMCMP via struct ==): local struct instances would need IR_ALLOC
+// (unimplemented on freestanding xtensa — no OS to service the mmap-style
+// allocation), and a `static Point` scalar slot never registers as a
+// struct var (the parser's `static TYPE name` path only calls
+// static_declare(), never struct_var_register() — confirmed by probing on
+// the x86 host backend: a static-struct `==` silently degrades to a
+// scalar-load compare of just the first field, never reaching IR_MEMCMP at
+// all). The form that DOES reach MEMCMP without touching IR_ALLOC: struct
+// pointers arrive through ordinary FUNCTION PARAMETERS (ir.kr:4696-4698
+// registers a struct-typed param for field access regardless of what
+// pointer value the caller passed), so two `static u32[2]` arrays (already
+// proven via STATIC_ADDR/array machinery, byte-identical in layout to
+// `struct Point { u32 x; u32 y }`) are passed straight into `eq(Point,
+// Point)`, which does `p1 == p2` and returns 1/0. Verified against the x86
+// host backend first (prints 1 then 0, sensitive to BOTH fields — not just
+// a first-field scalar compare) before trusting it on xtensa.
+//
+// Expected output under `qemu-system-xtensa -M lx60`:
+//   0
+//   10
+//   A
+//   1
+//   0
+
+device Uart at 0xfd050020 {
+    thr at 0x00 : u32
+    lsr at 0x14 : u8
+}
+
+fn putc(u8 c) {
+    while (Uart.lsr & 0x20) == 0 { }
+    Uart.thr = c
+}
+
+fn nl() { putc(10) }
+
+// Recursive unsigned printer (the print_uint idiom from stress.kr).
+fn print_uint(u32 n) {
+    if n >= 10 {
+        print_uint(n / 10)
+    }
+    putc(48 + (n % 10))
+}
+
+struct Point {
+    u32 x
+    u32 y
+}
+
+fn eq(Point p1, Point p2) -> u32 {
+    if p1 == p2 { return 1 }
+    return 0
+}
+
+static u32[2] g1data
+static u32[2] g2data
+
+fn main() {
+    // Part 1: STACK_ADDR + implicit MEMSET zero-init.
+    u32[4] a
+    print_uint(a[0])   nl()     // implicit zero-init -> 0
+
+    u32 i = 0
+    while i < 4 {
+        a[i] = i + 1
+        i = i + 1
+    }
+    u32 sum = 0
+    i = 0
+    while i < 4 {
+        sum = sum + a[i]
+        i = i + 1
+    }
+    print_uint(sum)    nl()     // 1+2+3+4 = 10
+
+    // Part 2: explicit MEMSET + MEMCPY builtins.
+    u8[8] b
+    u8[4] c
+    memset(b, 65, 8)            // b = "AAAAAAAA"
+    memcpy(c, b, 4)             // c[0..4) = "AAAA"
+    putc(c[0])         nl()     // 'A'
+
+    // Part 3: struct == -> MEMCMP, via struct-typed params over static arrays.
+    g1data[0] = 1
+    g1data[1] = 2
+    g2data[0] = 1
+    g2data[1] = 2
+    print_uint(eq(g1data, g2data))   nl()   // equal -> 1
+    g2data[1] = 3
+    print_uint(eq(g1data, g2data))   nl()   // unequal -> 0
+
+    loop { }
+}
