@@ -4945,6 +4945,51 @@ else
     echo "  xtensa_hello_boot: SKIP (qemu-system-xtensa not installed)"
 fi
 
+# --- Xtensa LX6 complex program boots and computes correctly (regression) ---
+# hello.kr has only main (entry) + putc (leaf), both of which happen to land on
+# word boundaries, so it never exercised a NON-entry function at a misaligned
+# code_start. CALL0 targets are implicitly word-aligned (target = ((PC+4)&~3) +
+# imm18*4); a pool-less function inheriting an unaligned out_len as its
+# code_start would have every call0 to it round down into the tail of the
+# preceding function. stress.kr has many functions (recursion, register-pressure
+# spilling, signed division with a negative dividend — the QUOS/REMS path that
+# xtensa-lx106-elf-as cannot even assemble, so only qemu proves it) whose entry
+# offsets do NOT all align naturally; it boots and prints eight hand-verifiable
+# results. This is a full-output equality check, not a grep — a miscompile in
+# any exercised path (nested-call frame, div/mod sign, spills) changes a digit.
+echo ""
+echo "--- xtensa LX6 complex-program boot test ---"
+if command -v qemu-system-xtensa >/dev/null 2>&1; then
+    TOTAL=$((TOTAL + 1))
+    XT_STRESS_ELF="/tmp/krc_xt_stress_$$.elf"
+    XT_STRESS_OK=1
+    if ! $KRC --arch=xtensa --freestanding "$DIR/../examples/xtensa/stress.kr" -o "$XT_STRESS_ELF" >/dev/null 2>&1; then
+        echo "FAIL: xtensa_stress_boot (compilation failed)"
+        XT_STRESS_OK=0
+    fi
+    if [ "$XT_STRESS_OK" = 1 ]; then
+        XT_ST_EXP=$(printf '120\n3628800\n6765\n142857\n1\n-13\n-6\n4524')
+        # stress.kr loops forever after printing, so qemu runs until the timeout.
+        # fib(20) is ~21.9k calls — microseconds under qemu; 8s is ample headroom.
+        # Strip CR so the compare is newline-exact regardless of UART line endings.
+        XT_ST_OUT=$(timeout 8 qemu-system-xtensa -M lx60 -nographic -kernel "$XT_STRESS_ELF" 2>/dev/null | tr -d '\r')
+        if [ "$XT_ST_OUT" = "$XT_ST_EXP" ]; then
+            PASS=$((PASS + 1))
+            echo "  xtensa_stress_boot: PASS (recursion + spills + signed div all correct)"
+        else
+            echo "FAIL: xtensa_stress_boot (output mismatch)"
+            echo "    expected: $(echo "$XT_ST_EXP" | tr '\n' ' ')"
+            echo "    got:      $(echo "$XT_ST_OUT" | tr '\n' ' ')"
+            FAIL=$((FAIL + 1))
+        fi
+    else
+        FAIL=$((FAIL + 1))
+    fi
+    rm -f "$XT_STRESS_ELF"
+else
+    echo "  xtensa_stress_boot: SKIP (qemu-system-xtensa not installed)"
+fi
+
 # --- RISC-V RV32 IR_STR_CONST via pcrel auipc+addi (feature-gap Task 1) ---
 # Compiles examples/riscv-featuregap/t1_strconst.kr, which takes the address
 # of a string literal ("hi\n") through IR_STR_CONST and writes it to the UART.

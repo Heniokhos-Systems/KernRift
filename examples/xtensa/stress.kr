@@ -1,0 +1,100 @@
+// Xtensa LX6 stress test — exercises the runtime paths golden-diff can't:
+// recursion (deep + exponential), register spilling (10 live locals vs 4 regs),
+// signed division with a NEGATIVE dividend (QUOS/REMS — the DIV32 ops that
+// xtensa-lx106-elf-as can't assemble, so only qemu proves them), nested
+// control flow, and unsigned div/mod. Prints hand-verifiable results.
+//
+// Expected output under `qemu-system-xtensa -M lx60`:
+//   120
+//   3628800
+//   6765
+//   142857
+//   1
+//   -13
+//   -6
+//   4524
+
+device Uart at 0xfd050020 {
+    thr at 0x00 : u32
+    lsr at 0x14 : u8
+}
+
+fn putc(u8 c) {
+    while (Uart.lsr & 0x20) == 0 { }
+    Uart.thr = c
+}
+
+fn nl() { putc(10) }
+
+// Recursive UNSIGNED printer (u32 operands → quou/remu). No buffer needed.
+fn print_uint(u32 n) {
+    if n >= 10 {
+        print_uint(n / 10)
+    }
+    putc(48 + (n % 10))
+}
+
+// Recursive printer for a non-negative int32 (signed div/mod by 10 == correct
+// digits for a positive value → exercises quos/rems on positive input too).
+fn print_upos(int32 n) {
+    if n >= 10 {
+        print_upos(n / 10)
+    }
+    putc(48 + (n % 10))
+}
+
+// Signed printer: emit '-' then the magnitude. Magnitude via 0 - x (SUB, not
+// a unary-neg op which xtensa doesn't lower).
+fn print_int(int32 x) {
+    if x < 0 {
+        putc(45)
+        print_upos(0 - x)
+    } else {
+        print_upos(x)
+    }
+}
+
+// Deep-ish recursion + hardware multiply.
+fn fact(u32 n) -> u32 {
+    if n <= 1 { return 1 }
+    return n * fact(n - 1)
+}
+
+// Exponential recursion — ~21.9k calls for fib(20): CALL0 frame save/restore
+// + return-value flow under real pressure.
+fn fib(u32 n) -> u32 {
+    if n < 2 { return n }
+    return fib(n - 1) + fib(n - 2)
+}
+
+// 10 simultaneously-live locals (a..j all used in the final sum) — only
+// a12-a15 are allocatable, so this forces spills to the frame.
+fn poly(u32 x) -> u32 {
+    u32 a = x + 1
+    u32 b = x * 3
+    u32 c = a + b
+    u32 d = c * x
+    u32 e = d - a
+    u32 f = e + b
+    u32 g = f * c
+    u32 h = g - d
+    u32 i = h + e
+    u32 j = i * f
+    return a + b + c + d + e + f + g + h + i + j
+}
+
+fn main() {
+    print_uint(fact(5))    nl()    // 120
+    print_uint(fact(10))   nl()    // 3628800
+    print_uint(fib(20))    nl()    // 6765
+    print_uint(1000000 / 7) nl()   // 142857
+    print_uint(1000000 % 7) nl()   // 1
+
+    int32 neg = 3 - 100            // -97 via SUB (a negative int32 dividend)
+    print_int(neg / 7)     nl()    // -13  (trunc toward zero)
+    print_int(neg % 7)     nl()    // -6   (C remainder sign follows dividend)
+
+    print_uint(poly(2))    nl()    // 4524
+
+    loop { }
+}

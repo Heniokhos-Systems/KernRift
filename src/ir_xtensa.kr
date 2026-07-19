@@ -1600,6 +1600,15 @@ fn ir_xtensa_gen(uint64 fn_node) {
     if fn_node == xt_entry_node {
         xt_lit_intern(XT_STACK_TOP)
     }
+    // CALL0 targets — and thus every function's code_start (= e_entry / the
+    // call destination) — must be 4-byte aligned: the LX6 computes the target
+    // as ((PC+4) & ~3) + imm18*4, so the low two bits of any call destination
+    // are implicitly zero. xt_lit_flush aligns out_len only when the pool is
+    // non-empty (it early-returns otherwise); a pool-less function would then
+    // inherit the previous function's unaligned end and every call0 to it would
+    // round down into the tail of the preceding function. Align here so both
+    // the pool (L32R word targets) and code_start land on a word boundary.
+    while (out_len & 3) != 0 { emit_byte(0) }
     xt_lit_flush()
 
     // 6a. Self-register at code_start (past the pool) so find_main_offset /
