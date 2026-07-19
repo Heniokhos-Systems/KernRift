@@ -1,9 +1,13 @@
 // Xtensa LX6 inline-assembly boot test (Task 8) — exercises IR_ASM_BLOCK(96).
-// main prints 'X', then an operand-less `asm { "memw" }` block (a memory-barrier
-// nop that must assemble to the fixed 24-bit MEMW word and NOT perturb the
-// surrounding code stream), then prints 'Y'. Expected output under
-// `qemu-system-xtensa -M lx60`:
+// main prints 'X', then an operand-less multi-line `asm { }` block assembling two
+// nullary mnemonics — `memw` (fixed 24-bit MEMW word) and `nop` (NOP.N) — then
+// prints 'Y'. Expected output under `qemu-system-xtensa -M lx60`:
 //   XY
+//
+// Test discriminator: `putc` emits its own `memw` MMIO barriers, so a `memw` grep
+// can't prove the block was assembled. `nop` is emitted by NOTHING else in the
+// backend, so the test asserts a `nop` is present — an elided/dropped block would
+// leave zero nops and fail. The block also exercises the multi-line StrLit walk.
 //
 // Scope note: the IR inline-asm constraint binding hardcodes x86 register codes
 // (a known upstream all-arch limitation), so this block is deliberately
@@ -22,7 +26,10 @@ fn putc(u8 c) {
 
 fn main() {
     putc(88)            // 'X'
-    asm { "memw" }      // IR_ASM_BLOCK(96): fixed MEMW word, operand-less
+    asm {               // IR_ASM_BLOCK(96): operand-less, multi-line
+        "memw"          //   fixed MEMW barrier word
+        "nop"           //   NOP.N — unique in the image, proves the block emitted
+    }
     putc(89)            // 'Y'
     loop { }
 }

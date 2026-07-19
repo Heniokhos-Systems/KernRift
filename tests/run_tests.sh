@@ -5303,14 +5303,16 @@ else
 fi
 
 # --- Xtensa LX6 inline assembly (Task 8): IR_ASM_BLOCK(96) ---
-# inline_asm.kr prints 'X', then an operand-less `asm { "memw" }` block, then
-# 'Y'. Boot equality (XY) is the real gate: it proves the block ASSEMBLED (the
-# MEMW word landed in the stream) AND did not perturb the surrounding putc calls.
-# The block is deliberately operand-less — the upstream constraint binding
-# hardcodes x86 reg codes (ir.kr:4225), out of scope here. Optional objdump
-# structural gate (when the xtensa objdump is present): a `memw` must appear in
-# main between the two putc `call0`s. LOAD is at file offset 0 / vaddr
-# 0xd0000000, so the ELF file can be disassembled as a raw binary directly.
+# inline_asm.kr prints 'X', then an operand-less multi-line `asm { "memw" "nop" }`
+# block, then 'Y'. Boot equality (XY) proves the block did not perturb the
+# surrounding putc calls. The block is deliberately operand-less — the upstream
+# constraint binding hardcodes x86 reg codes (ir.kr:4225), out of scope here.
+# Structural gate (when the xtensa objdump is present): assert a `nop` is emitted.
+# A `memw` grep would NOT discriminate — putc emits its own MEMW MMIO barriers on
+# every device access — but NOTHING else in the backend emits `nop`, so a present
+# `nop` uniquely proves the inline block was assembled (an elided block → zero
+# nops → FAIL). LOAD is at file offset 0 / vaddr 0xd0000000, so the ELF file can
+# be disassembled as a raw binary directly.
 echo ""
 echo "--- xtensa LX6 inline-asm (IR_ASM_BLOCK) boot test ---"
 if command -v qemu-system-xtensa >/dev/null 2>&1; then
@@ -5321,12 +5323,13 @@ if command -v qemu-system-xtensa >/dev/null 2>&1; then
         echo "FAIL: xtensa_asm_boot (compilation failed)"
         XT_ASM_OK=0
     fi
-    # Structural gate: the inline-asm MEMW word must be emitted. Only when the
+    # Structural gate: the inline-asm `nop` must be emitted (unique in the image —
+    # putc's own MEMW barriers mean `memw` can't discriminate). Only when the
     # xtensa objdump is present; never a hard gate on its absence.
     if [ "$XT_ASM_OK" = 1 ] && command -v xtensa-lx106-elf-objdump >/dev/null 2>&1; then
         XT_ASM_DIS=$(xtensa-lx106-elf-objdump -b binary -m xtensa -D "$XT_ASM_ELF" 2>/dev/null)
-        if ! echo "$XT_ASM_DIS" | grep -qE '[[:space:]]memw'; then
-            echo "FAIL: xtensa_asm_boot (inline-asm 'memw' word not emitted)"
+        if ! echo "$XT_ASM_DIS" | grep -qE '\bnop(\.n)?\b'; then
+            echo "FAIL: xtensa_asm_boot (inline-asm 'nop' word not emitted — block elided)"
             XT_ASM_OK=0
         fi
     fi
@@ -5335,7 +5338,7 @@ if command -v qemu-system-xtensa >/dev/null 2>&1; then
         XT_ASM_OUT=$(timeout 8 qemu-system-xtensa -M lx60 -nographic -kernel "$XT_ASM_ELF" 2>/dev/null | tr -d '\r')
         if [ "$XT_ASM_OUT" = "$XT_ASM_EXP" ]; then
             PASS=$((PASS + 1))
-            echo "  xtensa_asm_boot: PASS (asm block assembled + did not perturb output = XY)"
+            echo "  xtensa_asm_boot: PASS (asm block assembled: nop present + output = XY)"
         else
             echo "FAIL: xtensa_asm_boot (output mismatch)"
             echo "    expected: $XT_ASM_EXP"
