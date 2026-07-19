@@ -1200,6 +1200,33 @@ fn xt_relax_function(uint64 code_start, uint64 line_start) {
     }
 }
 
+// --- Inline-asm mnemonic assembler --------------------------------------
+// Assembles ONE quoted asm string token into the code stream. Mirrors
+// asm_emit_rv (ir_riscv.kr:991) but for Xtensa. Scope is deliberately tight
+// (audit: constraint-binding hardcodes x86 reg codes upstream, ir.kr:4225):
+// operand-less nullary mnemonics only — the register conventions the boot
+// test exercises. Xtensa has no intra-instruction compression pass, so unlike
+// riscv there is no non-compressible range to mark (rv_mark_noc has no analog).
+fn asm_emit_xt(uint64 str_tok) {
+    uint64 tstart = tok_text_start(str_tok)
+    uint64 tlen = tok_text_len(str_tok)
+    uint64 sptr = cg_source + tstart + 1     // skip opening quote
+    uint64 slen = tlen - 2                    // drop both quotes
+    if slen == 0 { return }
+
+    // Nullary intrinsics (fixed-width words; NOP.N = 16-bit, MEMW = 24-bit).
+    if asm_match(sptr, 0, "nop", 3) != 0 && slen == 3 { xt_nop_n(); return }
+    if asm_match(sptr, 0, "memw", 4) != 0 && slen == 4 { xt_memw(); return }
+
+    // Unrecognized mnemonic — hard error (loud, like the riscv path). Operand
+    // and raw-hex forms are out of scope for this MVP (widths are ambiguous on
+    // Xtensa's variable-length ISA); extend here when a consumer needs them.
+    write(2, "error: xtensa: unrecognized asm instruction '", 45)
+    write(2, sptr, slen)
+    write(2, "'\n", 2)
+    exit(1)
+}
+
 // --- Per-instruction emission -------------------------------------------
 fn ir_emit_xtensa_insn(uint64 ii) {
     uint64 op = ir_insn_opcode(ii)
@@ -2163,6 +2190,34 @@ fn ir_emit_xtensa_insn(uint64 ii) {
         if d == 0xFFFFFFFF { d = XT_A8 }   // buf is dead here (copy loop exited)
         xt_mv(d, saved_count)
         if dst_r == 0xFFFFFFFF { xt_store_spill(XT_A8, dest_v) }
+        return
+    }
+
+    // ----- IR_ASM_BLOCK (96): inline asm passthrough -----
+    // Mirror of ir_riscv.kr:2172 / ir_aarch64.kr:1508: walk the AsmBlock node's
+    // string children (data1 = single-line `asm("...")` form; child list =
+    // multi-line `asm { "..."; ... }` form) and hand each to asm_emit_xt. I/O
+    // constraints are NOT handled here (the block is operand-less by scope — the
+    // upstream binding hardcodes x86 reg codes, ir.kr:4225). The asm text is
+    // opaque passthrough. No non-compressible marking is needed (Xtensa has no
+    // intra-instruction compression pass, so the emitted words are never
+    // rewritten after the fact — unlike riscv's rv_compress_function).
+    if op == 96 {
+        uint64 asm_node = s1_v
+        uint32 single_tok = ast_data1(asm_node)
+        uint64 ws = single_tok
+        if ws != 0 {
+            asm_emit_xt(ws)
+        }
+        uint32 child_str = ast_child(asm_node)
+        uint64 wcs = child_str
+        while wcs != 0 {
+            uint32 stk = ast_data1(wcs)
+            uint64 wstk = stk
+            asm_emit_xt(wstk)
+            uint32 nxt = ast_next(wcs)
+            wcs = nxt
+        }
         return
     }
 

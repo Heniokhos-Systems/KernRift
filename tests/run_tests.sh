@@ -5302,6 +5302,54 @@ else
     echo "  xtensa_strfmt_boot: SKIP (qemu-system-xtensa not installed)"
 fi
 
+# --- Xtensa LX6 inline assembly (Task 8): IR_ASM_BLOCK(96) ---
+# inline_asm.kr prints 'X', then an operand-less `asm { "memw" }` block, then
+# 'Y'. Boot equality (XY) is the real gate: it proves the block ASSEMBLED (the
+# MEMW word landed in the stream) AND did not perturb the surrounding putc calls.
+# The block is deliberately operand-less — the upstream constraint binding
+# hardcodes x86 reg codes (ir.kr:4225), out of scope here. Optional objdump
+# structural gate (when the xtensa objdump is present): a `memw` must appear in
+# main between the two putc `call0`s. LOAD is at file offset 0 / vaddr
+# 0xd0000000, so the ELF file can be disassembled as a raw binary directly.
+echo ""
+echo "--- xtensa LX6 inline-asm (IR_ASM_BLOCK) boot test ---"
+if command -v qemu-system-xtensa >/dev/null 2>&1; then
+    TOTAL=$((TOTAL + 1))
+    XT_ASM_ELF="/tmp/krc_xt_asm_$$.elf"
+    XT_ASM_OK=1
+    if ! $KRC --arch=xtensa --freestanding "$DIR/../examples/xtensa/inline_asm.kr" -o "$XT_ASM_ELF" >/dev/null 2>&1; then
+        echo "FAIL: xtensa_asm_boot (compilation failed)"
+        XT_ASM_OK=0
+    fi
+    # Structural gate: the inline-asm MEMW word must be emitted. Only when the
+    # xtensa objdump is present; never a hard gate on its absence.
+    if [ "$XT_ASM_OK" = 1 ] && command -v xtensa-lx106-elf-objdump >/dev/null 2>&1; then
+        XT_ASM_DIS=$(xtensa-lx106-elf-objdump -b binary -m xtensa -D "$XT_ASM_ELF" 2>/dev/null)
+        if ! echo "$XT_ASM_DIS" | grep -qE '[[:space:]]memw'; then
+            echo "FAIL: xtensa_asm_boot (inline-asm 'memw' word not emitted)"
+            XT_ASM_OK=0
+        fi
+    fi
+    if [ "$XT_ASM_OK" = 1 ]; then
+        XT_ASM_EXP="XY"
+        XT_ASM_OUT=$(timeout 8 qemu-system-xtensa -M lx60 -nographic -kernel "$XT_ASM_ELF" 2>/dev/null | tr -d '\r')
+        if [ "$XT_ASM_OUT" = "$XT_ASM_EXP" ]; then
+            PASS=$((PASS + 1))
+            echo "  xtensa_asm_boot: PASS (asm block assembled + did not perturb output = XY)"
+        else
+            echo "FAIL: xtensa_asm_boot (output mismatch)"
+            echo "    expected: $XT_ASM_EXP"
+            echo "    got:      $XT_ASM_OUT"
+            FAIL=$((FAIL + 1))
+        fi
+    else
+        FAIL=$((FAIL + 1))
+    fi
+    rm -f "$XT_ASM_ELF"
+else
+    echo "  xtensa_asm_boot: SKIP (qemu-system-xtensa not installed)"
+fi
+
 # --- RISC-V RV32 IR_STR_CONST via pcrel auipc+addi (feature-gap Task 1) ---
 # Compiles examples/riscv-featuregap/t1_strconst.kr, which takes the address
 # of a string literal ("hi\n") through IR_STR_CONST and writes it to the UART.

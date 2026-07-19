@@ -1,0 +1,28 @@
+// Xtensa LX6 inline-assembly boot test (Task 8) — exercises IR_ASM_BLOCK(96).
+// main prints 'X', then an operand-less `asm { "memw" }` block (a memory-barrier
+// nop that must assemble to the fixed 24-bit MEMW word and NOT perturb the
+// surrounding code stream), then prints 'Y'. Expected output under
+// `qemu-system-xtensa -M lx60`:
+//   XY
+//
+// Scope note: the IR inline-asm constraint binding hardcodes x86 register codes
+// (a known upstream all-arch limitation), so this block is deliberately
+// operand-less — no in()/out() clauses. The handler is a pure passthrough that
+// assembles the block's nullary Xtensa mnemonics into the code stream.
+
+device Uart at 0xfd050020 {
+    thr at 0x00 : u32
+    lsr at 0x14 : u8
+}
+
+fn putc(u8 c) {
+    while (Uart.lsr & 0x20) == 0 { }
+    Uart.thr = c
+}
+
+fn main() {
+    putc(88)            // 'X'
+    asm { "memw" }      // IR_ASM_BLOCK(96): fixed MEMW word, operand-less
+    putc(89)            // 'Y'
+    loop { }
+}
