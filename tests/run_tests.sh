@@ -6354,6 +6354,54 @@ else
     echo "  riscv_hosted_sysfence_asm: SKIP (riscv64-linux-gnu-objdump not installed)"
 fi
 
+# --- SHA-256 (std/sha256.kr) — FIPS 180-4 test vectors ---
+# Vector 3 is exactly 56 bytes: padding must spill into a second 64-byte
+# block (0x80 + 55 zero-fill bytes would leave no room for the 8-byte
+# length trailer), the classic off-by-one every SHA-256 implementation
+# has to get right.
+run_test_output "sha256_vectors" 'import "std/sha256.kr"
+
+fn digest_to_hex(u64 out32) -> u64 {
+    u64 hexbuf = alloc(65)
+    u64 i = 0
+    while i < 32 {
+        u64 b = load8(out32 + i)
+        u64 hi = (b >> 4) & 0xF
+        u64 lo = b & 0xF
+        u64 hi_ch = hi + 48
+        if hi >= 10 { hi_ch = hi - 10 + 97 }
+        u64 lo_ch = lo + 48
+        if lo >= 10 { lo_ch = lo - 10 + 97 }
+        u8 hc = hi_ch
+        u8 lc = lo_ch
+        store8(hexbuf + i * 2, hc)
+        store8(hexbuf + i * 2 + 1, lc)
+        i = i + 1
+    }
+    u8 z = 0
+    store8(hexbuf + 64, z)
+    return hexbuf
+}
+
+fn hash_and_print(u64 data, u64 len) {
+    u64 ctx = alloc(SHA256_CTX_SIZE)
+    u64 out = alloc(32)
+    sha256_init(ctx)
+    sha256_update(ctx, data, len)
+    sha256_final(ctx, out)
+    println_str(digest_to_hex(out))
+}
+
+fn main() {
+    hash_and_print("", 0)
+    hash_and_print("abc", 3)
+    u64 v3 = "abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq"
+    hash_and_print(v3, 56)
+    exit(0)
+}' 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad
+248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1'
+
 # --- Summary ---
 echo ""
 echo "=== Results: $PASS/$TOTAL passed, $FAIL failed ==="

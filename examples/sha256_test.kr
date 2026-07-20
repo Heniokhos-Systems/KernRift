@@ -1,0 +1,64 @@
+// SHA-256 vector test — host x86_64
+//
+// Hashes three known FIPS 180-4 test vectors and prints each digest as
+// 64 lowercase hex characters (one per line). Vector 3 is exactly 56
+// bytes long: the padding must spill into a second 64-byte block (the
+// classic off-by-one in every SHA-256 implementation), so it's the one
+// that actually exercises the two-block path.
+
+import "../std/sha256.kr"
+
+// Render 32 raw digest bytes as 64 lowercase hex characters into a
+// freshly-allocated null-terminated buffer.
+fn digest_to_hex(u64 out32) -> u64 {
+    u64 hexbuf = alloc(65)
+    u64 i = 0
+    while i < 32 {
+        u64 b = load8(out32 + i)
+        u64 hi = (b >> 4) & 0xF
+        u64 lo = b & 0xF
+        u64 hi_ch = hi + 48
+        if hi >= 10 { hi_ch = hi - 10 + 97 }
+        u64 lo_ch = lo + 48
+        if lo >= 10 { lo_ch = lo - 10 + 97 }
+        u8 hc = hi_ch
+        u8 lc = lo_ch
+        store8(hexbuf + i * 2, hc)
+        store8(hexbuf + i * 2 + 1, lc)
+        i = i + 1
+    }
+    u8 z = 0
+    store8(hexbuf + 64, z)
+    return hexbuf
+}
+
+fn print_digest(u64 out32) {
+    u64 hexstr = digest_to_hex(out32)
+    println_str(hexstr)
+    dealloc(hexstr)
+}
+
+fn hash_and_print(u64 data, u64 len) {
+    u64 ctx = alloc(SHA256_CTX_SIZE)
+    u64 out = alloc(32)
+    sha256_init(ctx)
+    sha256_update(ctx, data, len)
+    sha256_final(ctx, out)
+    print_digest(out)
+    dealloc(ctx)
+    dealloc(out)
+}
+
+fn main() {
+    // Vector 1: empty string
+    hash_and_print("", 0)
+
+    // Vector 2: "abc"
+    hash_and_print("abc", 3)
+
+    // Vector 3: 56-byte input — padding spills into a second block.
+    u64 v3 = "abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq"
+    hash_and_print(v3, 56)
+
+    exit(0)
+}
