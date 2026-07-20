@@ -254,19 +254,21 @@ fn sha256_transform(u64 ctx, u64 block) {
     u64[64] w
     u64 t = 0
     while t < 16 {
-        u64 p = block + t * 4
-        w[t] = sha256_load_be32(p)
+        // Folded into the store rather than named: the unused-variable
+        // analysis does not currently treat the RHS of an `arr[i] = expr`
+        // store as a use, so a temporary here draws a spurious warning on
+        // every compiler build. Same reason for `sum` in the loop below.
+        w[t] = sha256_load_be32(block + t * 4)
         t = t + 1
     }
     while t < 64 {
-        u64 wtm2 = w[t - 2]
-        u64 wtm7 = w[t - 7]
-        u64 wtm15 = w[t - 15]
-        u64 wtm16 = w[t - 16]
-        u64 s1 = sha256_small_sigma1(wtm2)
-        u64 s0 = sha256_small_sigma0(wtm15)
-        u64 sum = (s1 + wtm7 + s0 + wtm16) & 0xFFFFFFFF
-        w[t] = sum
+        // W[t] = sigma1(W[t-2]) + W[t-7] + sigma0(W[t-15]) + W[t-16], mod 2^32.
+        // Written as one expression for the reason noted above: a temporary
+        // whose only use is the RHS of an array store draws a spurious
+        // unused-variable warning. Naming any part of this (the two sigma
+        // results, or the sum) just moves the warning onto whatever is left.
+        w[t] = (sha256_small_sigma1(w[t - 2]) + w[t - 7]
+                + sha256_small_sigma0(w[t - 15]) + w[t - 16]) & 0xFFFFFFFF
         t = t + 1
     }
 
