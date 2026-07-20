@@ -95,7 +95,13 @@ fn main() {
     // segment. Task 3's layout guard loud-fails at compile time if byte-
     // addressable data would land in IRAM (32-bit-access-only — a byte load
     // there is a LoadStoreError and a dead board).
-    u32 msg = "KernRift on ESP32\n"
+    // CRLF, not bare LF: on a raw serial capture (cat/screen/picocom without
+    // LF->CRLF mapping) a lone \n does not reset the column, so successive
+    // lines stairstep off the right edge — which reads as corruption on the
+    // exact boot where we are looking for corruption. The ROM's own banner
+    // uses \r\n, so this also keeps our output visually consistent with the
+    // log printed immediately above it.
+    u32 msg = "KernRift on ESP32\r\n"
     loop {
         puts(msg)
         delay()

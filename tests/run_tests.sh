@@ -6882,6 +6882,15 @@ if [ "$ESP_H_OK" = 1 ] && command -v xtensa-lx106-elf-objdump >/dev/null 2>&1; t
             if (m ~ /^l32i/) { gsub(/,/, "", op1); delete reg[op1] }
             next
         }
+        # Any other instruction that REDEFINES a register must drop its mapping,
+        # or we keep attributing later stores to a stale l32r value. The .bss
+        # zero loop does exactly this (l32r a8,<addr> ... addi a8,a8,4), and
+        # while that address is harmless today, stale over-attribution could
+        # later manufacture a spurious APB-UART-STORE verdict.
+        m ~ /^(movi|mov|add|addi|sub|addx|and|or|xor|srl|sll|sra|neg)/ {
+            gsub(/,/, "", op1); delete reg[op1]
+            next
+        }
         # Conservative: forget everything at any branch/call/return boundary.
         m ~ /^(j|jx|call0|callx0|ret|ret\.n|b)/ { delete reg; next }
         END {
@@ -6892,6 +6901,17 @@ if [ "$ESP_H_OK" = 1 ] && command -v xtensa-lx106-elf-objdump >/dev/null 2>&1; t
                 if (a ~ /^0x3ff400/) { print "APB-UART-STORE:" a; ok = 0 }
             if (ok) print "OK"
         }' "$ESP_H_DIS")
+    # Tripwire: the 1 Hz heartbeat is a plain counted loop with no volatile
+    # touch, so a future DCE / strength-reduction pass could legally delete it,
+    # turning the heartbeat into a ~640 line/s flood. That is not merely
+    # cosmetic — it would drown out a stray reset banner or a garbled character,
+    # i.e. degrade the debug channel exactly when it matters. Assert the loop
+    # bound literal survives; if this fails, harden delay() with a volatile MMIO
+    # read and retune the count (see the esp32 spec's validation notes).
+    if ! grep -q '(0x3d0900)' "$ESP_H_DIS"; then
+        echo "FAIL: esp32_hello_image (delay() loop bound 4000000 absent — DCE ate the heartbeat)"
+        ESP_H_OK=0
+    fi
     case "$ESP_H_VERDICT" in
         OK) ;;
         *)
