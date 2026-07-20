@@ -673,6 +673,7 @@ fn a64_reg_code(uint64 name_tok) -> uint64 {
 
 // ARM64 static access: emit MOVZ/MOVK to load address into x10, then LDR/STR
 fn emit_a64_static_load(uint64 data_offset) {
+    static_fixups_ensure()
     uint64 fentry = static_fixups + static_fixup_count * 8
     uint32 cp = out_len
     unsafe { *(fentry as uint32) = cp }
@@ -690,6 +691,7 @@ fn emit_a64_static_load(uint64 data_offset) {
 // Uses ADRP + ADD (page_base + page_offset). The fixup resolver detects
 // the ADD opcode and patches both instructions accordingly.
 fn emit_a64_static_lea(uint64 data_offset) {
+    static_fixups_ensure()
     uint64 fentry = static_fixups + static_fixup_count * 8
     uint32 cp = out_len
     unsafe { *(fentry as uint32) = cp }
@@ -704,6 +706,7 @@ fn emit_a64_static_lea(uint64 data_offset) {
 fn emit_a64_static_store(uint64 data_offset) {
     // Save x0 to temp register first
     emit_a64_mov(9, 0)
+    static_fixups_ensure()
     uint64 fentry = static_fixups + static_fixup_count * 8
     uint32 cp = out_len
     unsafe { *(fentry as uint32) = cp }
@@ -922,6 +925,7 @@ fn gen_expr_a64(uint64 node) {
         uint64 wtok = tok
         uint64 tstart = tok_text_start(wtok)
         uint64 tlen = tok_text_len(wtok)
+        str_buf_ensure(str_len + tlen + 1)
         uint64 str_offset = str_len
         uint64 si = 1
         while si < tlen - 1 {
@@ -952,6 +956,7 @@ fn gen_expr_a64(uint64 node) {
         // ADRP + ADD to load string address (placeholder, patched later)
         // For now, use a simpler approach: store offset in str_fixups
         // and emit a 2-instruction sequence (8 bytes)
+        str_fixups_ensure()
         uint64 fentry = str_fixups + str_fixup_count * 8
         uint32 cp = out_len
         unsafe { *(fentry as uint32) = cp }
@@ -1012,30 +1017,28 @@ fn gen_expr_a64(uint64 node) {
                 uint64 wfs_rw = fs_rw
                 if wfs_rw != 0 {
                     uint64 fs_tl = tok_text_len(wfs_tk)
+                    str_buf_ensure(str_len + fs_tl + 1)
                     uint64 fs_i = 0
                     while fs_i < fs_tl {
                         uint64 fs_bb = tok_source_byte(wfs_tk, fs_i)
-                        if str_len < 65535 {
-                            uint64 fs_dp = str_buf + str_len
-                            uint8 fs_dc = fs_bb
-                            unsafe { *(fs_dp as uint8) = fs_dc }
-                            str_len = str_len + 1
-                            fs_len = fs_len + 1
-                        }
+                        uint64 fs_dp = str_buf + str_len
+                        uint8 fs_dc = fs_bb
+                        unsafe { *(fs_dp as uint8) = fs_dc }
+                        str_len = str_len + 1
+                        fs_len = fs_len + 1
                         fs_i = fs_i + 1
                     }
                 } else {
                     uint64 fs_tl = tok_text_len(wfs_tk)
+                    str_buf_ensure(str_len + fs_tl + 1)
                     uint64 fs_i = 1
                     while fs_i < fs_tl - 1 {
                         uint64 fs_bb = tok_source_byte(wfs_tk, fs_i)
-                        if str_len < 65535 {
-                            uint64 fs_dp = str_buf + str_len
-                            uint8 fs_dc = fs_bb
-                            unsafe { *(fs_dp as uint8) = fs_dc }
-                            str_len = str_len + 1
-                            fs_len = fs_len + 1
-                        }
+                        uint64 fs_dp = str_buf + str_len
+                        uint8 fs_dc = fs_bb
+                        unsafe { *(fs_dp as uint8) = fs_dc }
+                        str_len = str_len + 1
+                        fs_len = fs_len + 1
                         fs_i = fs_i + 1
                     }
                 }
@@ -1044,10 +1047,7 @@ fn gen_expr_a64(uint64 node) {
                 unsafe { *(fs_nzp as uint8) = fs_nzc }
                 str_len = str_len + 1
                 if fs_len != 0 {
-                    if str_fixup_count >= 4096 {
-                        write(2, "error: str_fixups overflow\n", 27)
-                        exit(1)
-                    }
+                    str_fixups_ensure()
                     uint64 fs_fe = str_fixups + str_fixup_count * 8
                     uint32 fs_cp = out_len
                     unsafe { *(fs_fe as uint32) = fs_cp }
@@ -2828,10 +2828,7 @@ fn gen_expr_a64(uint64 node) {
             emit_a64(0x90000000)  // ADRP x0, #0 (placeholder)
             emit_a64(0x91000000)  // ADD x0, x0, #0 (placeholder)
             // Record fixup
-            if fnaddr_fixup_count >= 1024 {
-                write(2, "error: fnaddr_fixup_table overflow (max 1024)\n", 46)
-                exit(1)
-            }
+            fnaddr_fixups_ensure()
             uint64 fentry_fa = fnaddr_fixup_table + fnaddr_fixup_count * 8
             uint32 fa_off = fnaddr_a64_off
             unsafe { *(fentry_fa as uint32) = fa_off }
@@ -4465,10 +4462,7 @@ fn gen_expr_a64(uint64 node) {
         }
 
         // Record fixup (same table as x86_64 — resolve_fixups handles both)
-        if fixup_count >= 32768 {
-            write(2, "error: fixup_table overflow (max 32768)\n", 40)
-            exit(1)
-        }
+        fixup_table_ensure()
         uint64 fentry = fixup_table + fixup_count * 8
         uint32 fo = fixup_off
         unsafe { *(fentry as uint32) = fo }

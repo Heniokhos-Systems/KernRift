@@ -113,11 +113,13 @@ static uint64 match_end_fixup_count = 0
 // [patch_offset(4), target_name_tok(4)] × 1024
 static uint64 fixup_table = 0
 static uint64 fixup_count = 0
+static uint64 fixup_cap = 0
 
 // fn_addr fixup table: LEA instructions that need patching to function addresses
 // [patch_offset(4), str_tok(4)] × 256
 static uint64 fnaddr_fixup_table = 0
 static uint64 fnaddr_fixup_count = 0
+static uint64 fnaddr_fixup_cap = 0
 
 // Static variable table: maps name token → data offset in data section
 // [name_tok_idx(4), data_offset(4)] × 256
@@ -152,13 +154,16 @@ static uint64 static_elem_sizes = 0
 // [code_patch_offset(4), static_data_offset(4)] × 2048
 static uint64 static_fixups = 0
 static uint64 static_fixup_count = 0
+static uint64 static_fixup_cap = 0
 
 // String literal table: raw string bytes stored contiguously
 static uint64 str_buf = 0
 static uint64 str_len = 0
+static uint64 str_buf_cap = 0
 // String fixup table: [code_patch_offset(4), str_data_offset(4)] × 1024
 static uint64 str_fixups = 0
 static uint64 str_fixup_count = 0
+static uint64 str_fixup_cap = 0
 
 // Target OS: 0=linux, 1=macos, 2=windows
 static uint64 target_os = 0
@@ -315,6 +320,62 @@ fn debug_var_record_loc(uint64 fn_idx, uint64 name_tok, uint64 loc_value, uint64
     debug_var_count = debug_var_count + 1
 }
 
+// ---------------------------------------------------------------------------
+// Growable-buffer support
+//
+// alloc() lowers straight to mmap/VirtualAlloc — there is no realloc, so
+// growth is always: fresh mapping at the new size, copy the live bytes,
+// dealloc the old mapping. Callers MUST re-read the buffer base static after
+// any call that can grow (never cache a pointer INTO a growable buffer
+// across a growth point — the old mapping is gone).
+// ---------------------------------------------------------------------------
+
+fn grow_buf(uint64 old_ptr, uint64 used_bytes, uint64 new_bytes) -> uint64 {
+    uint64 np = alloc(new_bytes)
+    memcpy(np, old_ptr, used_bytes)
+    dealloc(old_ptr)
+    return np
+}
+
+// Ensure one free [u32,u32] slot in fixup_table. Doubles on demand.
+fn fixup_table_ensure() {
+    if fixup_count < fixup_cap { return }
+    fixup_table = grow_buf(fixup_table, fixup_cap * 8, fixup_cap * 16)
+    fixup_cap = fixup_cap * 2
+}
+
+// Ensure one free [u32,u32] slot in str_fixups. Doubles on demand.
+fn str_fixups_ensure() {
+    if str_fixup_count < str_fixup_cap { return }
+    str_fixups = grow_buf(str_fixups, str_fixup_cap * 8, str_fixup_cap * 16)
+    str_fixup_cap = str_fixup_cap * 2
+}
+
+// Ensure one free [u32,u32] slot in fnaddr_fixup_table. Doubles on demand.
+fn fnaddr_fixups_ensure() {
+    if fnaddr_fixup_count < fnaddr_fixup_cap { return }
+    fnaddr_fixup_table = grow_buf(fnaddr_fixup_table, fnaddr_fixup_cap * 8,
+                                  fnaddr_fixup_cap * 16)
+    fnaddr_fixup_cap = fnaddr_fixup_cap * 2
+}
+
+// Ensure one free [u32,u32] slot in static_fixups. Doubles on demand.
+fn static_fixups_ensure() {
+    if static_fixup_count < static_fixup_cap { return }
+    static_fixups = grow_buf(static_fixups, static_fixup_cap * 8,
+                             static_fixup_cap * 16)
+    static_fixup_cap = static_fixup_cap * 2
+}
+
+// Ensure str_buf can hold `needed` total bytes. Doubles until it fits.
+fn str_buf_ensure(uint64 needed) {
+    if needed <= str_buf_cap { return }
+    uint64 ncap = str_buf_cap
+    while ncap < needed { ncap = ncap * 2 }
+    str_buf = grow_buf(str_buf, str_len, ncap)
+    str_buf_cap = ncap
+}
+
 @export
 fn codegen_init(uint64 capacity, uint64 source, uint64 tokens) {
     out_buf = alloc(capacity)
@@ -328,6 +389,7 @@ fn codegen_init(uint64 capacity, uint64 source, uint64 tokens) {
     fn_count = 0
     fixup_table = alloc(32768 * 8)
     fixup_count = 0
+    fixup_cap = 32768
     ret_fixups = alloc(256 * 4)
     ret_fixup_count = 0
     struct_table = alloc(64 * 272)
@@ -361,10 +423,13 @@ fn codegen_init(uint64 capacity, uint64 source, uint64 tokens) {
     static_data_size = 0
     static_fixups = alloc(8192 * 8)
     static_fixup_count = 0
+    static_fixup_cap = 8192
     str_buf = alloc(65536)
     str_len = 0
+    str_buf_cap = 65536
     str_fixups = alloc(4096 * 8)
     str_fixup_count = 0
+    str_fixup_cap = 4096
     a64_var_base = 32
     win_iat_fixups = alloc(4096 * 8)
     win_iat_fixup_count = 0
@@ -377,6 +442,7 @@ fn codegen_init(uint64 capacity, uint64 source, uint64 tokens) {
     arr_elem_count = 0
     fnaddr_fixup_table = alloc(1024 * 8)
     fnaddr_fixup_count = 0
+    fnaddr_fixup_cap = 1024
     pin_param0_offset = 0xFFFFFFFF
     pin_param1_offset = 0xFFFFFFFF
     fn_ret_float_table = alloc(512 * 8)
@@ -402,10 +468,7 @@ fn emit_byte(uint8 b) {
         // hard swap with the old fixed cap.
         uint64 new_cap = out_cap * 2
         if new_cap < 4096 { new_cap = 4096 }
-        uint64 new_buf = alloc(new_cap)
-        memcpy(new_buf, out_buf, out_len)
-        dealloc(out_buf)
-        out_buf = new_buf
+        out_buf = grow_buf(out_buf, out_len, new_cap)
         out_cap = new_cap
     }
     uint64 p = out_buf + out_len
@@ -1961,10 +2024,7 @@ fn arr_count_lookup(uint64 name_tok) -> uint64 {
 
 // Emit: load static at data_offset into rax (RIP-relative, placeholder)
 fn emit_static_load(uint64 data_offset) {
-    if static_fixup_count >= 8192 {
-        write(2, "error: static_fixups overflow (max 8192)\n", 41)
-        exit(1)
-    }
+    static_fixups_ensure()
     // mov disp32(%rip), %rax → 48 8B 05 [disp32]
     emit_byte(0x48)
     emit_byte(0x8B)
@@ -1983,10 +2043,7 @@ fn emit_static_load(uint64 data_offset) {
 // Emit: lea rax, [rip + disp32] — RIP-relative address of a static
 // Used for static arrays to put the address of the data in rax.
 fn emit_static_lea(uint64 data_offset) {
-    if static_fixup_count >= 8192 {
-        write(2, "error: static_fixups overflow (max 8192)\n", 41)
-        exit(1)
-    }
+    static_fixups_ensure()
     // lea rax, [rip + disp32] → 48 8D 05 [disp32]
     emit_byte(0x48)
     emit_byte(0x8D)
@@ -2005,10 +2062,7 @@ fn emit_static_lea(uint64 data_offset) {
 
 // Emit: store rax to static at data_offset (RIP-relative, placeholder)
 fn emit_static_store(uint64 data_offset) {
-    if static_fixup_count >= 8192 {
-        write(2, "error: static_fixups overflow (max 8192)\n", 41)
-        exit(1)
-    }
+    static_fixups_ensure()
     // mov %rax, disp32(%rip) → 48 89 05 [disp32]
     emit_byte(0x48)
     emit_byte(0x89)
@@ -3139,10 +3193,7 @@ fn resolver_add_str(uint64 s) -> uint64 {
     uint64 ch = 0
     unsafe { *(p as uint8) -> ch }
     while ch != 0 {
-        if str_len >= 65536 {
-            write(2, "error: str_buf overflow (max 65536)\n", 36)
-            exit(1)
-        }
+        str_buf_ensure(str_len + 1)
         uint8 cb = ch
         uint64 dp = str_buf + str_len
         unsafe { *(dp as uint8) = cb }
@@ -3151,10 +3202,7 @@ fn resolver_add_str(uint64 s) -> uint64 {
         p = s + i
         unsafe { *(p as uint8) -> ch }
     }
-    if str_len >= 65536 {
-        write(2, "error: str_buf overflow (max 65536)\n", 36)
-        exit(1)
-    }
+    str_buf_ensure(str_len + 1)
     uint64 dp = str_buf + str_len
     uint8 nz = 0
     unsafe { *(dp as uint8) = nz }
@@ -3164,10 +3212,7 @@ fn resolver_add_str(uint64 s) -> uint64 {
 
 // Helper: emit lea rdx, [rip+disp32] with string fixup
 fn emit_lea_rdx_str(uint64 str_offset) {
-    if str_fixup_count >= 4096 {
-        write(2, "error: str_fixups overflow (max 4096)\n", 38)
-        exit(1)
-    }
+    str_fixups_ensure()
     emit_byte(0x48); emit_byte(0x8D); emit_byte(0x15)
     uint64 fentry = str_fixups + str_fixup_count * 8
     uint32 cp = out_len
@@ -3181,10 +3226,7 @@ fn emit_lea_rdx_str(uint64 str_offset) {
 
 // Helper: emit lea rcx, [rip+disp32] with string fixup
 fn emit_lea_rcx_str(uint64 str_offset) {
-    if str_fixup_count >= 4096 {
-        write(2, "error: str_fixups overflow (max 4096)\n", 38)
-        exit(1)
-    }
+    str_fixups_ensure()
     emit_byte(0x48); emit_byte(0x8D); emit_byte(0x0D)
     uint64 fentry = str_fixups + str_fixup_count * 8
     uint32 cp = out_len
@@ -3600,10 +3642,7 @@ fn gen_expr(uint64 node) {
         uint64 tstart = tok_text_start(wtok)
         uint64 tlen = tok_text_len(wtok)
         // Check str_buf capacity before copying
-        if str_len + tlen >= 65536 {
-            write(2, "error: str_buf overflow (max 65536)\n", 36)
-            exit(1)
-        }
+        str_buf_ensure(str_len + tlen + 1)
         // String data offset in str_buf
         uint64 str_offset = str_len
         // Copy string bytes (skip opening quote, process escapes, skip closing quote)
@@ -3636,10 +3675,7 @@ fn gen_expr(uint64 node) {
         unsafe { *(sp as uint8) = zero }
         str_len = str_len + 1
         // Emit: lea disp32(%rip), %rax → 48 8D 05 [disp32]
-        if str_fixup_count >= 4096 {
-            write(2, "error: str_fixups overflow (max 4096)\n", 38)
-            exit(1)
-        }
+        str_fixups_ensure()
         emit_byte(0x48)
         emit_byte(0x8D)
         emit_byte(0x05)
@@ -3686,10 +3722,7 @@ fn gen_expr(uint64 node) {
                     uint64 wfs_tok = fs_tok
                     uint64 fs_tlen = tok_text_len(wfs_tok)
                     if fs_tlen != 0 {
-                        if str_len + fs_tlen >= 65536 {
-                            write(2, "error: str_buf overflow\n", 24)
-                            exit(1)
-                        }
+                        str_buf_ensure(str_len + fs_tlen + 1)
                         uint64 fs_soff = str_len
                         uint64 fs_si = 0
                         while fs_si < fs_tlen {
@@ -3704,10 +3737,7 @@ fn gen_expr(uint64 node) {
                         uint8 fs_nz = 0
                         unsafe { *(fs_nsp as uint8) = fs_nz }
                         str_len = str_len + 1
-                        if str_fixup_count >= 4096 {
-                            write(2, "error: str_fixups overflow\n", 27)
-                            exit(1)
-                        }
+                        str_fixups_ensure()
                         // lea rsi, [rip + fs_soff]  (source)
                         emit_byte(0x48); emit_byte(0x8D); emit_byte(0x35)
                         uint64 fs_fe = str_fixups + str_fixup_count * 8
@@ -6547,10 +6577,7 @@ fn gen_expr(uint64 node) {
             emit_u32_le(0)
             // Record in fixup table — we store the token of the string literal
             // resolve_fixups_fnaddr will handle these
-            if fnaddr_fixup_count >= 1024 {
-                write(2, "error: fnaddr_fixup_table overflow (max 1024)\n", 46)
-                exit(1)
-            }
+            fnaddr_fixups_ensure()
             uint64 fentry_fa = fnaddr_fixup_table + fnaddr_fixup_count * 8
             uint32 fa_off = fnaddr_fixup_off
             unsafe { *(fentry_fa as uint32) = fa_off }
@@ -8555,10 +8582,7 @@ fn gen_expr(uint64 node) {
         }
 
         // Record fixup
-        if fixup_count >= 32768 {
-            write(2, "error: fixup_table overflow (max 32768)\n", 40)
-            exit(1)
-        }
+        fixup_table_ensure()
         uint64 fentry = fixup_table + fixup_count * 8
         uint32 fo = fixup_off
         unsafe { *(fentry as uint32) = fo }

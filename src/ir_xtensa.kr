@@ -967,10 +967,7 @@ fn xt_emit_pic_addr(uint64 dst, uint64 table_sel, uint64 payload) {
     // resolve_fixups_xtensa patches its imm18 once every function is laid out.
     uint64 call_patch = out_len
     xt_emit24(0x5)                                  // call0 #0 (patched)
-    if fixup_count >= 32768 {
-        write(2, "error: fixup_table overflow (max 32768)\n", 40)
-        exit(1)
-    }
+    fixup_table_ensure()
     uint64 fentry = fixup_table + fixup_count * 8
     uint32 fo = call_patch
     unsafe { *(fentry as uint32) = fo }
@@ -1499,10 +1496,7 @@ fn ir_emit_xtensa_insn(uint64 ii) {
     if op == 50 {
         uint64 call_patch = out_len
         xt_emit24(0x5)                                 // call0 #0 (patched)
-        if fixup_count >= 32768 {
-            write(2, "error: fixup_table overflow (max 32768)\n", 40)
-            exit(1)
-        }
+        fixup_table_ensure()
         uint64 fentry = fixup_table + fixup_count * 8
         uint32 fo = call_patch
         unsafe { *(fentry as uint32) = fo }
