@@ -1978,6 +1978,62 @@ run_test_legacy "redecl_float_type_legacy" 'fn main() -> uint64 {
     f64 y = x * 4.0
     return f64_to_int(y) }' 10
 
+# Legacy-path parity for struct-arg by-value uniformity + by-reference
+# method self (fix/struct-param-writes). The legacy Index lowering used to
+# load 8 garbage bytes for a struct-sized array element, and method self
+# was received as a by-value copy (writes silently lost).
+run_test_legacy "struct_arg_elem_data_legacy" 'struct P { u64 x; u64 y }
+fn sum(P c) -> u64 { return c.x + c.y }
+fn main() {
+    P[3] arr
+    arr[2].x = 30; arr[2].y = 12
+    exit(sum(arr[2]))
+}' 42
+
+run_test_legacy "struct_arg_elem_byval_legacy" 'struct P { u64 x; u64 y }
+fn poke(P c) -> u64 { c.x = 99; return c.x }
+fn main() {
+    P[3] arr
+    arr[1].x = 42; arr[1].y = 2
+    u64 r = poke(arr[1])
+    exit(arr[1].x)
+}' 42
+
+run_test_legacy "method_self_mutation_legacy" 'struct P { u64 x; u64 y }
+fn P.bump(P self) { self.x = 42 }
+fn main() {
+    P p; p.x = 1; p.y = 2
+    p.bump()
+    exit(p.x)
+}' 42
+
+run_test_legacy "method_self_nested_recv_legacy" 'struct P { u64 x; u64 y }
+struct W { P p; u64 z }
+fn P.setx(P self, u64 v) { self.x = v }
+fn main() {
+    W w; w.p.x = 1
+    w.p.setx(42)
+    exit(w.p.x)
+}' 42
+
+run_test_legacy "method_self_elem_recv_legacy" 'struct P { u64 x; u64 y }
+fn P.setx(P self, u64 v) { self.x = v }
+fn main() {
+    P[3] arr
+    arr[2].x = 1
+    arr[2].setx(42)
+    exit(arr[2].x)
+}' 42
+
+# Semantics lock: plain struct params stay by-value on the legacy path.
+run_test_legacy "struct_arg_no_alias_legacy" 'struct P { u64 x; u64 y }
+fn poke(P c) -> u64 { c.x = 99; return c.x }
+fn main() {
+    P p; p.x = 42; p.y = 2
+    u64 r = poke(p)
+    exit(p.x)
+}' 42
+
 # Negative: an else-if chain with NO final else must still be rejected (it can
 # fall through). Guards against the fix over-accepting non-exhaustive chains.
 TOTAL=$((TOTAL + 1))
@@ -2443,6 +2499,26 @@ fn main() { P a; a.x = 10; a.y = 32; exit(sum(a)) }' 42
     run_test_a64 "a64_struct_pass_2arg" 'struct P { uint64 x; uint64 y }
 fn add(P a, P b) -> uint64 { return a.x + b.y }
 fn main() { P p1; p1.x = 10; p1.y = 0; P p2; p2.x = 0; p2.y = 32; exit(add(p1, p2)) }' 42
+
+    # Struct-arg by-value uniformity + by-reference method self on arm64
+    # (fix/struct-param-writes; shared IR lowering, but exercised under qemu
+    # so the arm64 emitters are proven too).
+    run_test_a64 "a64_struct_arg_nested_byval" 'struct I { uint64 a; uint64 b }
+struct O { I inn; uint64 z }
+fn poke(I c) -> uint64 { c.a = 99; return c.a }
+fn main() { O o; o.inn.a = 42; uint64 r = poke(o.inn); exit(o.inn.a) }' 42
+
+    run_test_a64 "a64_struct_arg_elem_byval" 'struct P { uint64 x; uint64 y }
+fn poke(P c) -> uint64 { c.x = 99; return c.x }
+fn main() { P[3] arr; arr[1].x = 42; uint64 r = poke(arr[1]); exit(arr[1].x) }' 42
+
+    run_test_a64 "a64_method_self_mutation" 'struct P { uint64 x; uint64 y }
+fn P.bump(P self) { self.x = 42 }
+fn main() { P p; p.x = 1; p.bump(); exit(p.x) }' 42
+
+    run_test_a64 "a64_method_self_elem_recv" 'struct P { uint64 x; uint64 y }
+fn P.setx(P self, uint64 v) { self.x = v }
+fn main() { P[3] arr; arr[2].x = 1; arr[2].setx(42); exit(arr[2].x) }' 42
 
     run_test_a64 "a64_struct_return" 'struct P { uint64 x; uint64 y }
 fn make() -> P { P r; r.x = 10; r.y = 32; return r }
@@ -3391,6 +3467,123 @@ fn main() {
     uint64 r = modify(a)
     exit(a.x)
 }' 10
+
+# --- Struct arg by-value uniformity (fix/struct-param-writes) ---
+# By-value must hold for EVERY struct-lvalue argument form, not just bare
+# Idents. The IR path used to copy only Ident args: a nested-struct field
+# arg leaked BY REFERENCE (callee writes persisted), and a struct array
+# element arg was lowered as an oversized IR_LOAD (garbage pointer,
+# segfault at the callee's first field write).
+run_test "struct_arg_nested_byval" 'struct I { uint64 a; uint64 b }
+struct O { I inn; uint64 z }
+fn poke(I c) -> uint64 { c.a = 99; return c.a }
+fn main() {
+    O o; o.inn.a = 42; o.inn.b = 2
+    uint64 r = poke(o.inn)
+    exit(o.inn.a)
+}' 42
+
+run_test "struct_arg_elem_byval" 'struct P { uint64 x; uint64 y }
+fn poke(P c) -> uint64 { c.x = 99; return c.x }
+fn main() {
+    P[3] arr
+    arr[1].x = 42; arr[1].y = 2
+    uint64 r = poke(arr[1])
+    exit(arr[1].x)
+}' 42
+
+# Data integrity: the callee must see the element/field CONTENTS (the
+# legacy path used to load 8 garbage bytes for a struct-sized element).
+run_test "struct_arg_elem_data" 'struct P { uint64 x; uint64 y }
+fn sum(P c) -> uint64 { return c.x + c.y }
+fn main() {
+    P[3] arr
+    arr[2].x = 30; arr[2].y = 12
+    exit(sum(arr[2]))
+}' 42
+
+run_test "struct_arg_nested_data" 'struct I { uint64 a; uint64 b }
+struct O { I inn; uint64 z }
+fn sum(I c) -> uint64 { return c.a + c.b }
+fn main() {
+    O o; o.inn.a = 40; o.inn.b = 2; o.z = 9
+    exit(sum(o.inn))
+}' 42
+
+# --- Method `self` is BY REFERENCE (LANGUAGE.md §7) ---
+# `fn Struct.m(Struct self)` receives self as a reference to the caller''s
+# storage: writes through self must persist. This regressed to a silent
+# by-value copy when struct-by-value passing landed (v2.7.0).
+run_test "method_self_mutation" 'struct P { uint64 x; uint64 y }
+fn P.bump(P self) { self.x = 42 }
+fn main() {
+    P p; p.x = 1; p.y = 2
+    p.bump()
+    exit(p.x)
+}' 42
+
+run_test "method_self_mutation_arg" 'struct P { uint64 x; uint64 y }
+fn P.setx(P self, uint64 v) { self.x = v }
+fn P.getx(P self) -> uint64 { return self.x }
+fn main() {
+    P p; p.x = 1
+    p.setx(41)
+    exit(p.getx() + 1)
+}' 42
+
+# Nested-field receiver: w.p.setx(...) mutates the inner struct in place.
+run_test "method_self_nested_recv" 'struct P { uint64 x; uint64 y }
+struct W { P p; uint64 z }
+fn P.setx(P self, uint64 v) { self.x = v }
+fn main() {
+    W w; w.p.x = 1
+    w.p.setx(42)
+    exit(w.p.x)
+}' 42
+
+# Array-element receiver: arr[i].setx(...) used to parse as a bare field
+# access with the argument list silently DROPPED (no call, no diagnostic).
+run_test "method_self_elem_recv" 'struct P { uint64 x; uint64 y }
+fn P.setx(P self, uint64 v) { self.x = v }
+fn main() {
+    P[3] arr
+    arr[2].x = 1
+    arr[2].setx(42)
+    exit(arr[2].x)
+}' 42
+
+# Semantics locks (pass before and after the fix — they pin the spec):
+# a HEAP-backed struct variable passed as a plain param is still COPIED
+# (value semantics do not depend on where the struct lives), and plain
+# params never alias even when re-passed through a second call.
+run_test "struct_arg_heap_byval" 'struct P { uint64 x; uint64 y }
+fn poke(P c) -> uint64 { c.x = 99; return c.x }
+fn main() {
+    P h = alloc(16)
+    h.x = 42; h.y = 2
+    uint64 r = poke(h)
+    exit(h.x)
+}' 42
+
+run_test "struct_arg_chain_byval" 'struct P { uint64 x; uint64 y }
+fn inner(P c) { c.x = 99 }
+fn outer(P c) -> uint64 { inner(c); return c.x }
+fn main() {
+    P p; p.x = 42; p.y = 2
+    uint64 r = outer(p)
+    exit(p.x)
+}' 42
+
+# Struct VarDecl initialized from an array element rides the same
+# address+tracker contract (used to segfault: garbage oversized load).
+run_test "struct_decl_from_elem" 'struct P { uint64 x; uint64 y }
+fn main() {
+    P[3] arr
+    arr[1].x = 40; arr[1].y = 2
+    P c = arr[1]
+    c.x = c.x + 2
+    exit(c.x + arr[1].y - 2 + (arr[1].x - 40))
+}' 42
 
 # --- Struct return by value tests ---
 run_test "struct_return_small" 'struct P { uint64 x; uint64 y }
@@ -6087,6 +6280,62 @@ if command -v qemu-riscv32-static >/dev/null 2>&1; then
     rm -f "$RV_BIN"
 else
     echo "  riscv_hosted_hello: SKIP (qemu-riscv32-static not installed)"
+fi
+
+# --- riscv32 hosted struct-arg by-value + by-reference method self ---
+# fix/struct-param-writes parity on the rv32 dialect (u32 fields — the
+# dialect rejects 64-bit types). One image covers: nested-field arg copied
+# (by-value), array-element arg copied AND data-correct, method self
+# mutation persists (by-reference), array-element method receiver.
+# Exit code packs the checks: each adds a distinct value, total 42.
+echo ""
+echo "--- riscv32 hosted struct-param semantics test ---"
+if command -v qemu-riscv32-static >/dev/null 2>&1; then
+    TOTAL=$((TOTAL + 1))
+    RV_SP_KR="/tmp/krc_rv_structparam_$$.kr"
+    RV_SP_BIN="/tmp/krc_rv_structparam_$$.bin"
+    cat > "$RV_SP_KR" <<'RVSP'
+struct P { u32 x; u32 y }
+struct O { P inn; u32 z }
+fn poke(P c) -> u32 { c.x = 99; return c.x }
+fn sum(P c) -> u32 { return c.x + c.y }
+fn P.setx(P self, u32 v) { self.x = v }
+fn main() {
+    u32 score = 0
+    O o; o.inn.x = 7; o.inn.y = 0
+    u32 r1 = poke(o.inn)
+    if o.inn.x == 7 { score = score + 10 }       // nested arg stayed by-value
+    P[3] arr
+    arr[1].x = 5; arr[1].y = 6
+    u32 r2 = poke(arr[1])
+    if arr[1].x == 5 { score = score + 10 }      // element arg stayed by-value
+    if sum(arr[1]) == 11 { score = score + 10 }  // element arg data correct
+    P p; p.x = 1
+    p.setx(4)
+    if p.x == 4 { score = score + 6 }            // self write persisted
+    arr[2].x = 1
+    arr[2].setx(9)
+    if arr[2].x == 9 { score = score + 6 }       // element receiver persisted
+    exit(score)
+}
+RVSP
+    if ! $KRC --arch=riscv32 "$RV_SP_KR" -o "$RV_SP_BIN" >/dev/null 2>&1; then
+        echo "FAIL: riscv_hosted_struct_param (compilation failed)"
+        FAIL=$((FAIL + 1))
+    else
+        qemu-riscv32-static "$RV_SP_BIN" >/dev/null 2>&1
+        rc=$?
+        if [ "$rc" = "42" ]; then
+            PASS=$((PASS + 1))
+            echo "  riscv_hosted_struct_param: PASS (all 5 semantics checks, exit 42)"
+        else
+            echo "FAIL: riscv_hosted_struct_param (got exit $rc, want 42)"
+            FAIL=$((FAIL + 1))
+        fi
+    fi
+    rm -f "$RV_SP_KR" "$RV_SP_BIN"
+else
+    echo "  riscv_hosted_struct_param: SKIP (qemu-riscv32-static not installed)"
 fi
 
 # Same hello.kr as riscv_hosted_hello above, but WITH --freestanding: a

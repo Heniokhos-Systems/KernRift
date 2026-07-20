@@ -1374,6 +1374,35 @@ fn gen_expr_a64(uint64 node) {
         uint64 warrta = arr_tok
         uint64 arr_offset = var_lookup(arr_tok)
         uint64 elem_sz_r = arr_elem_lookup(arr_tok)
+        // Struct array element as a VALUE expression (e.g. `f(arr[i])`,
+        // `arr[i].method(...)`): the shifted load below only knows
+        // 1/2/4/8-byte elements, so a struct-sized element read produced
+        // garbage. Produce the element ADDRESS in x0 and set
+        // expr_is_struct_a64 instead — the same contract struct variables
+        // and nested-field reads follow.
+        uint64 idx_arr_si_a = struct_var_lookup(warrta)
+        if idx_arr_si_a != 0xFFFFFFFF {
+            uint64 idx_stride_a = struct_total_size(idx_arr_si_a)
+            uint32 sidx_child_a = ast_child(node)
+            uint64 wsi_ca = sidx_child_a
+            gen_expr_a64(wsi_ca)
+            // x0 = index. x0 = x0 * stride, save to x11, add base.
+            emit_a64_mov_imm(10, idx_stride_a)
+            uint64 mul_sa = 0x9B007C00 | (10 << 16) | (0 << 5) | 0
+            emit_a64(mul_sa)
+            emit_a64_mov(11, 0)
+            if arr_offset != 0xFFFFFFFF {
+                emit_a64_load_x0(arr_offset)
+            } else {
+                uint64 soff_saa = static_lookup(warrta)
+                if soff_saa != 0xFFFFFFFF {
+                    emit_a64_static_lea(soff_saa)
+                }
+            }
+            emit_a64_add(0, 0, 11)
+            expr_is_struct_a64 = idx_arr_si_a
+            return
+        }
         uint32 idx_child = ast_child(node)
         uint64 wi = idx_child
         gen_expr_a64(wi)
@@ -4165,6 +4194,16 @@ fn gen_expr_a64(uint64 node) {
             weval = anxt
         }
 
+        // Method call: `self` (argument 0) is BY REFERENCE (LANGUAGE.md §7).
+        // Slot 0 already holds a pointer to the caller's struct storage;
+        // clearing its struct flag makes the register-load phase pass that
+        // pointer as a plain integer argument instead of an AAPCS64
+        // by-value copy. The callee mirrors this in its param spill loop.
+        if fn_method_lookup(callee_tok) != 0 {
+            uint64 self_ptr_flag_a = 0xFFFFFFFF
+            unsafe { *(arg_struct_flags_a as uint64) = self_ptr_flag_a }
+        }
+
         // Load args into registers from temp slots
         // AAPCS64: int args → x0-x7 (independent counter)
         //          float args → d0-d7 (independent counter)
@@ -5605,6 +5644,13 @@ fn gen_function_a64(uint64 fn_node) {
 
     // Spill params to stack (x0-x7 for int, d0-d7 for float)
     // AAPCS64: separate int/float register counters
+    // Method `self` (param ordinal 0) arrives as a POINTER to the caller's
+    // struct — by-reference, LANGUAGE.md §7 — so it is spilled as a plain
+    // integer (slot holds the pointer), not received by value. The caller
+    // mirrors this (arg_struct_flags_a slot 0 cleared for method calls).
+    uint32 gf_d4_ma = ast_data4(fn_node)
+    uint64 gf_is_method_a = gf_d4_ma & 64
+    uint64 spill_ordinal_a = 0
     uint64 pidx = 0
     uint64 int_pidx_a = 0
     uint64 float_pidx_a = 0
@@ -5623,6 +5669,9 @@ fn gen_function_a64(uint64 fn_node) {
             if poff != 0xFFFFFFFF {
                 // Check for struct parameter (by-value receiving, AAPCS64)
                 uint64 param_si_spill_a = struct_lookup(pt_spill_a)
+                if gf_is_method_a != 0 && spill_ordinal_a == 0 {
+                    param_si_spill_a = 0xFFFFFFFF
+                }
                 if param_si_spill_a != 0xFFFFFFFF && abi_struct_pass_by_val != 0 {
                     // AAPCS64 struct by value: allocate struct-sized area on stack
                     uint64 sv_ssize_a = struct_total_size(param_si_spill_a)
@@ -5737,6 +5786,7 @@ fn gen_function_a64(uint64 fn_node) {
                 pidx = pidx + 1
             }
         }
+        if pk2 == 3 { spill_ordinal_a = spill_ordinal_a + 1 }
         uint32 pn3 = ast_next(wp2)
         wp2 = pn3
     }

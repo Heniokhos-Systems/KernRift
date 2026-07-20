@@ -2657,6 +2657,56 @@ fn fn_ret_struct_register(uint64 name_tok, uint64 struct_idx) {
     fn_ret_struct_count = fn_ret_struct_count + 1
 }
 
+// ---------------------------------------------------------------------------
+// Method table — name tokens of `fn StructName.method` declarations.
+//
+// Methods receive `self` (param 0) BY REFERENCE (LANGUAGE.md §7): the caller
+// passes the address of the receiver's storage, not a copy, so `self.field =
+// v` writes the caller's struct. Plain struct parameters keep value
+// semantics (struct-by-value design spec §9.2). Call sites consult this
+// table (by callee name token) to skip the by-value copy / eightbyte load
+// for argument 0; the callee side uses the FnDecl's data4 bit 6.
+//
+// Populated by tc_collect_signatures (always-on pre-pass, runs once per
+// parse root before any backend), reset at its start so re-runs and
+// multi-target fat builds stay idempotent.
+// ---------------------------------------------------------------------------
+static uint64 fn_method_table = 0
+static uint64 fn_method_count = 0
+
+@export
+fn fn_method_reset() { fn_method_count = 0 }
+
+@export
+fn fn_method_register(uint64 name_tok) {
+    if fn_method_table == 0 { fn_method_table = alloc(512 * 4) }
+    if fn_method_count >= 512 {
+        write(2, "error: fn_method_table overflow (max 512)\n", 42)
+        exit(1)
+    }
+    uint64 entry = fn_method_table + fn_method_count * 4
+    uint32 nt = name_tok
+    unsafe { *(entry as uint32) = nt }
+    fn_method_count = fn_method_count + 1
+}
+
+// 1 = name_tok names a method (self is by-reference), 0 = plain function
+@export
+fn fn_method_lookup(uint64 name_tok) -> uint64 {
+    uint64 i = 0
+    while i < fn_method_count {
+        uint64 entry = fn_method_table + i * 4
+        uint32 nt = 0
+        unsafe { *(entry as uint32) -> nt }
+        uint64 wnt = nt
+        if tok_text_eq(wnt, name_tok) != 0 {
+            return 1
+        }
+        i = i + 1
+    }
+    return 0
+}
+
 // Look up a function's struct return type: 0xFFFFFFFF = not struct, else struct_idx
 fn fn_ret_struct_lookup(uint64 name_tok) -> uint64 {
     uint64 i = 0
@@ -3867,6 +3917,37 @@ fn gen_expr(uint64 node) {
         uint64 warrt = arr_tok
         uint64 arr_offset = var_lookup(arr_tok)
         uint64 elem_sz = arr_elem_lookup(arr_tok)
+        // Struct array element as a VALUE expression (e.g. `f(arr[i])`,
+        // `arr[i].method(...)`): the scaled SIB load below only knows
+        // 1/2/4/8-byte elements, so a struct-sized element read produced
+        // garbage. Produce the element ADDRESS in rax and set
+        // expr_is_struct instead — the same contract struct variables and
+        // nested-field reads follow.
+        uint64 idx_arr_si = struct_var_lookup(warrt)
+        if idx_arr_si != 0xFFFFFFFF {
+            uint64 idx_stride = struct_total_size(idx_arr_si)
+            uint32 sidx_child = ast_child(node)
+            uint64 wsi_c = sidx_child
+            gen_expr(wsi_c)
+            // rcx = index; rax = stride; imul rax, rcx → rax = i*stride
+            emit_mov_rcx_rax()
+            emit_mov_rax_imm(idx_stride)
+            emit_byte(0x48); emit_byte(0x0F); emit_byte(0xAF); emit_byte(0xC1)
+            emit_mov_rcx_rax()
+            if arr_offset != 0xFFFFFFFF {
+                emit_load_rax_from_stack(arr_offset)
+            } else {
+                uint64 soff_sa = static_lookup(warrt)
+                if soff_sa != 0xFFFFFFFF {
+                    emit_static_lea(soff_sa)
+                }
+            }
+            // add rax, rcx → element address
+            emit_byte(0x48); emit_byte(0x01); emit_byte(0xC8)
+            rax_cache = 0
+            expr_is_struct = idx_arr_si
+            return
+        }
         // Evaluate index expression
         uint32 idx_child = ast_child(node)
         uint64 wi = idx_child
@@ -8024,6 +8105,18 @@ fn gen_expr(uint64 node) {
             weval = anxt
         }
 
+        // Method call: `self` (argument 0) is BY REFERENCE (LANGUAGE.md §7).
+        // The receiver's evaluated value in slot 0 is already a pointer to
+        // the caller's struct storage; clearing its struct flag makes every
+        // downstream path (SysV eightbyte load, Windows positional regs,
+        // register counting) pass that pointer as a plain integer argument
+        // instead of loading a by-value copy. The callee side mirrors this
+        // by spilling `self` as a plain pointer (see the param spill loop).
+        if fn_method_lookup(callee_tok) != 0 {
+            uint64 self_ptr_flag = 0xFFFFFFFF
+            unsafe { *(arg_struct_flags as uint64) = self_ptr_flag }
+        }
+
         // Load args into registers from temp slots
         // SysV: int args → rdi, rsi, rdx, rcx, r8, r9 (independent counter)
         //       float args → xmm0, xmm1, xmm2, ... (independent counter)
@@ -10293,6 +10386,16 @@ fn gen_function(uint64 fn_node) {
         }
     }
 
+    // Method `self` (param ordinal 0) arrives as a POINTER to the caller's
+    // struct — by-reference, LANGUAGE.md §7 — so it must be spilled as a
+    // plain integer (the slot then holds the pointer, which is exactly how
+    // struct field access resolves the variable), NOT received by value
+    // into a local struct area. The caller mirrors this (arg_struct_flags
+    // slot 0 cleared for method calls).
+    uint32 gf_d4_m = ast_data4(fn_node)
+    uint64 gf_is_method = gf_d4_m & 64
+    uint64 spill_ordinal = 0
+
     uint64 wp2 = first_param
     while wp2 != 0 {
         uint32 pk2 = ast_kind(wp2)
@@ -10310,6 +10413,9 @@ fn gen_function(uint64 fn_node) {
                 uint8 po8 = poff
                 // Check for struct parameter (by-value receiving)
                 uint64 param_si_spill = struct_lookup(pt_spill)
+                if gf_is_method != 0 && spill_ordinal == 0 {
+                    param_si_spill = 0xFFFFFFFF
+                }
                 if param_si_spill != 0xFFFFFFFF && abi_struct_pass_by_val != 0 && target_os != 2 {
                     // SysV struct by value: allocate struct-sized area on stack
                     uint64 sv_ssize = struct_total_size(param_si_spill)
@@ -10768,6 +10874,7 @@ fn gen_function(uint64 fn_node) {
                 }
             }
         }
+        if pk2 == 3 { spill_ordinal = spill_ordinal + 1 }
         uint32 pn3 = ast_next(wp2)
         wp2 = pn3
     }

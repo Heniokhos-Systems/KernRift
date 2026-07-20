@@ -522,6 +522,30 @@ fn parse_primary() -> uint64 {
             if cur_kind() == 17 && tok_kind_at(p_tok_pos + 1) != 17 {
                 advance_tok()
                 uint64 sfield_tok = advance_tok()
+                // Method call on an array element: arr[i].method(args) —
+                // sugar for method(arr[i], args), same as the Ident chain
+                // below. Previously this fell through to a bare FieldAccess
+                // and the trailing `(args)` was silently dropped: the call
+                // never happened, with no diagnostic.
+                if cur_kind() == 10 {
+                    advance_tok()
+                    uint64 mcall_node = ast_alloc(AstKind.Call)
+                    uint32 mt_i = sfield_tok
+                    ast_set_data1(mcall_node, mt_i)
+                    ast_set_tok(mcall_node, mt_i)
+                    uint32 self_arg = idx_node
+                    ast_append_child(mcall_node, self_arg)
+                    if cur_kind() != 11 {
+                        uint64 marg = parse_expr()
+                        ast_append_child(mcall_node, marg)
+                        while eat(16) != 0 {
+                            marg = parse_expr()
+                            ast_append_child(mcall_node, marg)
+                        }
+                    }
+                    expect(11)
+                    return mcall_node
+                }
                 uint64 fa_node = ast_alloc(AstKind.FieldAccess)
                 uint32 ic = idx_node
                 ast_set_child(fa_node, ic)
@@ -1901,15 +1925,25 @@ fn parse_fn_decl() -> uint64 {
     }
 
     // Method syntax: fn StructName.method(...) -> registered as method
+    uint64 is_method = 0
     if cur_kind() == 17 {
         advance_tok()
         uint64 method_tok = expect(1)
         name_tok = method_tok
+        is_method = 1
     }
 
     uint64 node = ast_alloc(AstKind.FnDecl)
     uint32 nt = name_tok
     ast_set_data1(node, nt)
+    // Mark methods with data4 bit 6 so codegen gives `self` (param 0)
+    // REFERENCE semantics — LANGUAGE.md §7: "The method receives `self` as
+    // a reference to the struct on the caller's stack". parse_module ORs
+    // its annotation flags into data4, preserving this bit.
+    if is_method != 0 {
+        uint32 mflag = 64
+        ast_set_data4(node, mflag)
+    }
     ast_set_tok(node, nt)
 
     uint64 params = parse_param_list()
@@ -2100,7 +2134,11 @@ fn parse_module() -> uint64 {
             //   bit 3 = extern (set by the extern fn handler below)
             //   bit 4 = module_init   (LKM entry point)
             //   bit 5 = module_exit   (LKM exit point)
+            //   bit 6 = method (fn StructName.name — set by parse_fn_decl;
+            //           OR-preserved here, do not overwrite)
             uint32 ann_flags = ann_noreturn | (ann_naked << 1) | (ann_export << 2) | (ann_module_init << 4) | (ann_module_exit << 5)
+            uint32 prev_d4 = ast_data4(fn_node)
+            ann_flags = ann_flags | prev_d4
             if ann_flags != 0 {
                 ast_set_data4(fn_node, ann_flags)
             }
