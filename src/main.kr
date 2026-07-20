@@ -2370,13 +2370,22 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
             emit_elf_header_rv32()
             header_size = 84
         } else if xt_raw != 0 {
-            // xtensa --freestanding: Elf32 boot image. qemu-system-xtensa
-            // -M lx60 -kernel loads by program header and jumps to e_entry, so
-            // (unlike riscv's raw -bios blob) this needs a real ELF container.
-            // Finalized (e_entry/p_filesz/p_memsz patch) in the xt_raw block
-            // below, which self-contains the whole arch-3 image path.
-            emit_elf_header_xtensa()
-            header_size = 84
+            if machine_target == 1 {
+                // xtensa --freestanding --target=esp32: no container header at
+                // all — the flat blob starts with the first code byte (file
+                // offset == IRAM offset) and the esp-image container is
+                // assembled around it at finalize (esp32 branch of the xt_raw
+                // block below) via format_espimage.kr.
+                header_size = 0
+            } else {
+                // xtensa --freestanding: Elf32 boot image. qemu-system-xtensa
+                // -M lx60 -kernel loads by program header and jumps to e_entry, so
+                // (unlike riscv's raw -bios blob) this needs a real ELF container.
+                // Finalized (e_entry/p_filesz/p_memsz patch) in the xt_raw block
+                // below, which self-contains the whole arch-3 image path.
+                emit_elf_header_xtensa()
+                header_size = 84
+            }
         } else if arch == 3 {
             xtensa_nyi("ELF image emission")
         }
@@ -2384,7 +2393,7 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
             emit_program_header(0)
         } else if arch == 2 && rv_raw == 0 {
             emit_program_header_rv32(0)
-        } else if xt_raw != 0 {
+        } else if xt_raw != 0 && machine_target == 0 {
             emit_program_header_xtensa(0)
         }
     } else if emit_mode == 1 {
@@ -2643,6 +2652,97 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
             write(2, "error: xtensa: entry function has no code offset\n", 49)
             exit(1)
         }
+
+        // ===== ESP32 (--target=esp32): two-segment esp-image finalize =====
+        // The flat blob layout matches the lx60 path except there is no ELF
+        // header, so FILE OFFSET == IRAM OFFSET: code (pools + bodies +
+        // __xt_pcbase) occupies [0, esp_code_end) and loads at 0x40080400.
+        // Byte-addressable data (strings + statics + bss) is laid out AFTER
+        // the code in the file but loads as a SEPARATE segment at DRAM
+        // 0x3FFB0000 — [M2] ESP32 IRAM supports only aligned 32-bit accesses;
+        // a single l8ui against a string left in IRAM raises LoadStoreError =
+        // silently dead board. Only code and the 4-byte-aligned literal-pool
+        // words (read by l32r) stay in IRAM. The pure-file-offset call0/l32r
+        // patch math above stays valid because both load bases are == 0 mod 4
+        // (the (PC+4)&~3 rounding is identical on file offsets and VAs).
+        if machine_target == 1 {
+            uint64 esp_code_end = codegen_output_len()
+            // DRAM segment file base. Pad to 8 so every in-segment offset has
+            // the same alignment at its DRAM VA as in the file (0x3FFB0000 is
+            // 8-aligned): the static blob below re-aligns to 8 and
+            // STATIC_LOAD/STORE's l32i/s32i trap on unaligned bases.
+            while (codegen_output_len() & 7) != 0 { emit_byte(0) }
+            uint64 esp_data_file = codegen_output_len()
+            emit_string_data()
+            while (codegen_output_len() & 7) != 0 { emit_byte(0) }
+            uint64 esp_static_file = codegen_output_len()
+            emit_static_data()
+            uint64 esp_total = codegen_output_len()
+
+            // PIC deltas cross segments here: delta = target VA - anchor VA
+            // (anchors run at IRAM base + code offset; data lives at DRAM base
+            // + segment offset). The resolver also owns the [M2] per-datum
+            // guard: any string/static whose VA computes into the IRAM range
+            // is a hard compile error, never an emitted image.
+            resolve_addr_fixups_xtensa_esp32(esp_data_file, esp_data_file, esp_static_file)
+
+            // Real BSS: drop the data area's trailing zero bytes from the
+            // image unconditionally (esp-image carries file data only — no
+            // per-segment memsz>filesz — so the entry preamble's zero loop
+            // recreates them; no 4 KiB gate here, flash bytes are pure cost).
+            // Round the boundary UP to 4: s32i traps on an unaligned base,
+            // and rounding up keeps every initialized byte in the image.
+            // esp_total is 8-aligned (data base padded to 8 + 8-byte static
+            // slots), so the loop's `bltu lo,hi` hits hi exactly.
+            uint64 esp_tail = codegen_last_nonzero_end()
+            esp_tail = (esp_tail + 3) & ~3
+            if esp_tail < esp_data_file { esp_tail = esp_data_file }
+            uint64 esp_data_len = esp_tail - esp_data_file
+            uint64 esp_data_memsz = esp_total - esp_data_file
+
+            // [M2] Segment-layout guard (hard errors, ir_xtensa.kr): code +
+            // entry inside IRAM [0x40080400, 0x400A0000), data + bss inside
+            // the DRAM window [0x3FFB0000, 0x3FFE0000).
+            xt_esp32_check_layout(esp_code_end, esp_data_memsz, xt_entry_code)
+
+            // Patch the entry preamble's .bss zero-loop bounds with DRAM
+            // addresses: [base+data_len, base+memsz) — the zeros dropped from
+            // the image. (The lx60 path patches 0xd0000000+p_filesz/p_memsz
+            // here; the esp32 data segment has its own base.)
+            if xt_bss_lo_pool_off != 0 {
+                patch_u32(xt_bss_lo_pool_off, XT_ESP32_DRAM_BASE + esp_data_len)
+                patch_u32(xt_bss_hi_pool_off, XT_ESP32_DRAM_BASE + esp_data_memsz)
+            }
+
+            // Assemble the container (format_espimage.kr): segments ascending
+            // by load address (DRAM data first, IRAM code second — esptool's
+            // order, our byte-comparability oracle), SKIPPING a zero-length
+            // data segment entirely (esptool omits empty sections; an
+            // [addr][0] record would break comparability with elf2image).
+            uint64 esp_seg_count = 2
+            if esp_data_len == 0 { esp_seg_count = 1 }
+            esp_image_begin(XT_ESP32_IRAM_BASE + xt_entry_code, esp_seg_count)
+            if esp_data_len != 0 {
+                esp_image_segment(XT_ESP32_DRAM_BASE, out_buf + esp_data_file, esp_data_len)
+            }
+            esp_image_segment(XT_ESP32_IRAM_BASE, out_buf, esp_code_end)
+            esp_image_finish()
+
+            // Write the container buffer (NOT out_buf — the blob was raw
+            // material for the segments). A flash image is data, not a host
+            // executable: no set_executable.
+            uint64 esp_fd = file_open(output_path, 1)
+            write(esp_fd, esp_image_buf, esp_image_len)
+            file_close(esp_fd)
+            uint8[64] esnb
+            uint64 estl = fmt_uint(esnb, esp_image_len)
+            write(1, esnb, estl)
+            write(1, " bytes -> ", 10)
+            write(1, output_path, str_len(output_path))
+            write(1, "\n", 1)
+            exit(0)
+        }
+
         patch_u32(24, 0xd0000000 + xt_entry_code)      // Elf32_Ehdr e_entry
 
         // Data blobs after all code. Strings first (byte-accessed, so no align
@@ -4716,6 +4816,13 @@ static uint64 lc_deprecate_name = 0
 static uint64 lc_reject_name = 0
 static uint64 freestanding = 0
 
+// Machine target (--target=esp32): 0 = none, 1 = ESP32 (Xtensa LX6 esp-image
+// at ESP32 load addresses). Orthogonal to target_os — --target= is overloaded:
+// OS names set target_os, machine names set this. Only meaningful with
+// --arch=xtensa --freestanding (validated after arg parsing, so flag order
+// doesn't matter).
+static uint64 machine_target = 0
+
 fn parse_uint_arg(uint64 s) -> uint64 {
     uint64 val = 0
     uint64 i = 0
@@ -4851,6 +4958,11 @@ fn main() {
                 } else if str_starts_with(tgt_str, "android", 7) != 0 {
                     target_os = 3
                     emit_mode = 4
+                } else if str_starts_with(tgt_str, "esp32", 5) != 0 {
+                    // Machine target, not an OS: ESP32 (Xtensa LX6) esp-image.
+                    // Requires --arch=xtensa --freestanding — validated after
+                    // the arg loop so flag order doesn't matter.
+                    machine_target = 1
                 }
             } else if str_starts_with(arg, "--help", 6) != 0 || str_eq_full(arg, "-h") != 0 {
                 write(1, "usage: krc [options] <file.kr> [-o output]\n", 43)
@@ -4997,6 +5109,22 @@ fn main() {
     if emit_mode == 4 && target_os == 0 { target_os = 3 }
     // emit_mode=4 (android): default to arm64 unless --arch was explicitly set
     if emit_mode == 4 && arch_set == 0 { arch = 1 }
+
+    // --target=esp32 is only meaningful on the xtensa freestanding ELF path
+    // (arch 3, emit_mode 0). Any other combination is a hard error — loud-fail
+    // over silently emitting a qemu-lx60-shaped image that cannot boot on the
+    // chip (spec §8: loud-fail over silent miscompile).
+    if machine_target == 1 {
+        if arch != 3 || freestanding == 0 || emit_mode != 0 {
+            uint64 esp_tgt_msg = "error: --target=esp32 requires --arch=xtensa --freestanding\n"
+            write(2, esp_tgt_msg, str_len(esp_tgt_msg))
+            exit(1)
+        }
+        // ESP32 initial SP: top of the DRAM window, 16-byte aligned (spec §3),
+        // instead of the qemu-lx60 stack top. Assigned BEFORE codegen so the
+        // entry preamble's pre-scan interns the right pool literal.
+        XT_STACK_TOP = XT_ESP32_STACK_TOP
+    }
 
     // Derive output name from input if not specified with -o
     if str_eq_full(output_path, "a.krbo") != 0 && input_path != 0 {

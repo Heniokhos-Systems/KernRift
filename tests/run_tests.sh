@@ -6506,6 +6506,120 @@ else
 fi
 rm -f "$ESP_SRC" "$ESP_BIN" "$ESP_OUT"
 
+# --- esp32 machine target: --target=esp32 image structure + IRAM/DRAM guard ---
+# Task 3 of the ESP32 machine-target plan. Compiles examples/esp32/minimal.kr
+# with --arch=xtensa --freestanding --target=esp32 and asserts the esp-image
+# structure with od ONLY (no esptool — must run in CI):
+#   byte 0 = 0xE9 (magic), byte 1 = 0x02 (two segments), byte 2 = 0x02 (DIO),
+#   byte 3 = 0x20 (4MB @ 40MHz), entry (bytes 4-7 LE) inside IRAM
+#   [0x40080400, 0x400A0000), segment 0 load_addr (0x18-0x1B LE) = 0x3FFB0000
+#   (DRAM data — ascending load order, matching esptool), segment 1 load_addr
+#   = 0x40080400 (IRAM code). Segment 1's header offset is DERIVED from
+#   segment 0's data_len (header at 0x20 + seg0_len) — never hardcoded, it
+#   moves with the data size.
+echo ""
+echo "--- esp32 machine-target image structure test ---"
+TOTAL=$((TOTAL + 1))
+ESP_MIN_BIN="/tmp/krc_esp_min_$$.bin"
+ESP_ST_OK=1
+esp_field() { od -An -tu4 -j "$2" -N 4 "$1" 2>/dev/null | tr -d ' '; }
+if ! $KRC --arch=xtensa --freestanding --target=esp32 \
+     "$DIR/../examples/esp32/minimal.kr" -o "$ESP_MIN_BIN" >/dev/null 2>&1; then
+    echo "FAIL: esp32_image_structure (compilation failed)"
+    $KRC --arch=xtensa --freestanding --target=esp32 \
+        "$DIR/../examples/esp32/minimal.kr" -o "$ESP_MIN_BIN" 2>&1 | head -3
+    ESP_ST_OK=0
+else
+    ESP_HDR=$(od -An -tx1 -j 0 -N 4 "$ESP_MIN_BIN" | tr -d ' ')
+    if [ "$ESP_HDR" != "e9020220" ]; then
+        echo "FAIL: esp32_image_structure (header bytes 0-3 = '$ESP_HDR', want 'e9020220')"
+        ESP_ST_OK=0
+    fi
+    ESP_ENTRY=$(esp_field "$ESP_MIN_BIN" 4)
+    if [ -z "$ESP_ENTRY" ] || [ "$ESP_ENTRY" -lt $((0x40080400)) ] \
+       || [ "$ESP_ENTRY" -ge $((0x400A0000)) ]; then
+        echo "FAIL: esp32_image_structure (entry $ESP_ENTRY outside IRAM [0x40080400,0x400A0000))"
+        ESP_ST_OK=0
+    fi
+    ESP_SEG0_LOAD=$(esp_field "$ESP_MIN_BIN" $((0x18)))
+    ESP_SEG0_LEN=$(esp_field "$ESP_MIN_BIN" $((0x1C)))
+    if [ "$ESP_SEG0_LOAD" != "$((0x3FFB0000))" ]; then
+        echo "FAIL: esp32_image_structure (segment 0 load_addr $ESP_SEG0_LOAD != 0x3FFB0000 DRAM data)"
+        ESP_ST_OK=0
+    fi
+    # Segment 1's header follows segment 0's payload: 0x20 + seg0_len.
+    if [ -n "$ESP_SEG0_LEN" ]; then
+        ESP_SEG1_LOAD=$(esp_field "$ESP_MIN_BIN" $((0x20 + ESP_SEG0_LEN)))
+        if [ "$ESP_SEG1_LOAD" != "$((0x40080400))" ]; then
+            echo "FAIL: esp32_image_structure (segment 1 load_addr $ESP_SEG1_LOAD != 0x40080400 IRAM code)"
+            ESP_ST_OK=0
+        fi
+    else
+        echo "FAIL: esp32_image_structure (segment 0 data_len unreadable)"
+        ESP_ST_OK=0
+    fi
+fi
+if [ "$ESP_ST_OK" = 1 ]; then
+    PASS=$((PASS + 1))
+    echo "  esp32_image_structure: PASS (e9/02/02/20, entry in IRAM, DRAM@0x3FFB0000 + IRAM@0x40080400 ascending)"
+else
+    FAIL=$((FAIL + 1))
+fi
+rm -f "$ESP_MIN_BIN"
+
+# --- esp32 guard tests: unsupported combos must be COMPILE errors ---
+# (1) --target=esp32 without --arch=xtensa --freestanding is rejected.
+# (2) A program whose data+bss exceeds the DRAM window [0x3FFB0000,0x3FFE0000)
+#     must LOUD-FAIL at compile time, never emit an image: past the window the
+#     next addresses are ROM-reserved RAM and then (at 0x40000000+) IRAM, which
+#     is 32-bit-access-only — a byte-addressed datum there is a LoadStoreError
+#     and a silently dead board (spec §5/M2). Prefer a false positive that
+#     blocks a build over a false negative that bricks a board.
+echo ""
+echo "--- esp32 guard tests (bad combos are compile errors) ---"
+TOTAL=$((TOTAL + 1))
+ESP_G_OK=1
+ESP_G_BIN="/tmp/krc_esp_guard_$$.bin"
+ESP_G_SRC="$DIR/../test_tmp_espguard_$$.kr"
+rm -f "$ESP_G_BIN"
+if $KRC --arch=riscv32 --freestanding --target=esp32 \
+     "$DIR/../examples/esp32/minimal.kr" -o "$ESP_G_BIN" >/dev/null 2>&1; then
+    echo "FAIL: esp32_guards (--target=esp32 accepted without --arch=xtensa)"
+    ESP_G_OK=0
+fi
+if $KRC --arch=xtensa --target=esp32 \
+     "$DIR/../examples/esp32/minimal.kr" -o "$ESP_G_BIN" >/dev/null 2>&1; then
+    echo "FAIL: esp32_guards (--target=esp32 accepted without --freestanding)"
+    ESP_G_OK=0
+fi
+# 256 KiB static array: memsz 0x40000 > DRAM window size 0x30000 — the layout
+# guard must refuse to emit. Also confirm no output file is left behind.
+cat > "$ESP_G_SRC" <<'ESP_G_EOF'
+static u32[65536] big
+static u32 sentinel = 7
+
+fn main() {
+    big[0] = sentinel
+    loop { }
+}
+ESP_G_EOF
+rm -f "$ESP_G_BIN"
+if $KRC --arch=xtensa --freestanding --target=esp32 \
+     "$ESP_G_SRC" -o "$ESP_G_BIN" >/dev/null 2>&1; then
+    echo "FAIL: esp32_guards (256 KiB data accepted — exceeds the DRAM window, would overlap reserved RAM/IRAM)"
+    ESP_G_OK=0
+elif [ -f "$ESP_G_BIN" ]; then
+    echo "FAIL: esp32_guards (guard errored but still left an output image behind)"
+    ESP_G_OK=0
+fi
+if [ "$ESP_G_OK" = 1 ]; then
+    PASS=$((PASS + 1))
+    echo "  esp32_guards: PASS (arch/freestanding combos + DRAM-window overflow all rejected at compile time)"
+else
+    FAIL=$((FAIL + 1))
+fi
+rm -f "$ESP_G_SRC" "$ESP_G_BIN"
+
 # --- Summary ---
 echo ""
 echo "=== Results: $PASS/$TOTAL passed, $FAIL failed ==="

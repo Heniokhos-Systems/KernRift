@@ -49,6 +49,32 @@ static uint64 ir_xt_scratch_off = 0
 static uint64 xt_entry_node = 0
 static uint64 XT_STACK_TOP = 0xd0040000
 
+// --- ESP32 machine target (--target=esp32) memory map -----------------------
+// Spec §3 (docs/superpowers/specs/2026-07-20-esp32-machine-target-design.md),
+// every value HARDWARE-CONFIRMED 2026-07-20 (the IDF 2nd-stage bootloader
+// itself loads at 0x40080400 in the captured ROM boot log). Do not "improve"
+// any constant. Code loads in IRAM (0x40080400, 1 KiB clear of the vector
+// area, limit 0x400A0000); byte-addressable data loads in DRAM (0x3FFB0000,
+// must stay below 0x3FFE0000); initial SP = 0x3FFE0000 (16-byte aligned, the
+// stack grows DOWN from the top of the DRAM window, clear of ROM-reserved
+// 0x3FFE0000-0x3FFE0440 which sits ABOVE it). main.kr assigns XT_STACK_TOP =
+// XT_ESP32_STACK_TOP before codegen when the esp32 target is active, so the
+// entry preamble's pre-scan interns the right pool literal.
+//
+// ⚠️ [M2] HARD INVARIANT the constants below enforce: ESP32 IRAM supports
+// ONLY aligned 32-bit accesses. A byte load (l8ui — exactly how puts/strlen/
+// memcpy read strings) from an IRAM address raises LoadStoreError = silently
+// dead board, no output, no JTAG. Therefore ALL byte-addressable data
+// (string literals, statics, .bss) must live in the DRAM segment; only code
+// and 4-byte-aligned literal-pool words (read by l32r) may live in IRAM.
+// resolve_addr_fixups_xtensa_esp32 + xt_esp32_check_layout below turn any
+// violation into a hard COMPILE error — never an emitted image.
+static uint64 XT_ESP32_IRAM_BASE = 0x40080400
+static uint64 XT_ESP32_IRAM_LIMIT = 0x400A0000
+static uint64 XT_ESP32_DRAM_BASE = 0x3FFB0000
+static uint64 XT_ESP32_DRAM_LIMIT = 0x3FFE0000
+static uint64 XT_ESP32_STACK_TOP = 0x3FFE0000
+
 fn xt_err(uint64 msg) {
     write(2, msg, str_len(msg))
     exit(1)
@@ -2757,59 +2783,148 @@ fn resolve_addr_fixups_xtensa(uint64 str_start, uint64 data_start) {
         } else if table_sel == 1 {
             target = data_start + payload
         } else {
-            // table_sel 2 = fn addrs. payload is the fn_addr("name") STRING-
-            // LITERAL token (ir.kr:2541), whose text carries the surrounding
-            // quotes ("dbl" = 5 bytes), so fn_lookup — which byte-compares via
-            // tok_text_eq (length-first) against the bare fn identifier ("dbl"
-            // = 3 bytes) — NEVER matches. Strip the quotes and byte-scan
-            // fn_table directly. Ported from resolve_fnaddr_fixups_riscv
-            // (ir_riscv.kr:2798). NO xt_remap: fn_table code offsets are final
-            // (code_start never moves — H1).
-            uint64 wst = payload
-            uint64 sstart = tok_text_start(wst)
-            uint64 slen = tok_text_len(wst)
-            uint64 name_start = sstart + 1
-            uint64 name_len = slen - 2
-            uint64 found = 0
-            uint64 target2 = 0
-            uint64 fi = 0
-            while fi < fn_count {
-                uint64 fe = fn_table + fi * 8
-                uint32 fn_name_tok = 0
-                unsafe { *(fe as uint32) -> fn_name_tok }
-                uint64 wfn = fn_name_tok
-                uint64 fn_start = tok_text_start(wfn)
-                uint64 fn_len = tok_text_len(wfn)
-                if fn_len == name_len {
-                    uint64 eq = 1
-                    uint64 ci = 0
-                    while ci < name_len {
-                        uint64 ca = cg_source + name_start + ci
-                        uint64 cb = cg_source + fn_start + ci
-                        uint64 va = 0
-                        uint64 vb = 0
-                        unsafe { *(ca as uint8) -> va }
-                        unsafe { *(cb as uint8) -> vb }
-                        if va != vb { eq = 0 }
-                        ci = ci + 1
-                    }
-                    if eq != 0 {
-                        uint64 fe4 = fe + 4
-                        uint32 foff = 0
-                        unsafe { *(fe4 as uint32) -> foff }
-                        target2 = foff
-                        found = 1
-                    }
-                }
-                fi = fi + 1
-            }
-            if found == 0 {
-                xt_err("error: xtensa: fn_addr references an undefined function\n")
-            }
-            target = target2
+            target = xt_fnaddr_code_off(payload)
         }
         uint64 delta = (target - anchor_off) & 0xFFFFFFFF
         patch_u32(pool_word_off, delta)
         i = i + 1
+    }
+}
+
+// table_sel 2 = fn addrs. payload is the fn_addr("name") STRING-LITERAL
+// token (ir.kr:2541), whose text carries the surrounding quotes ("dbl" = 5
+// bytes), so fn_lookup — which byte-compares via tok_text_eq (length-first)
+// against the bare fn identifier ("dbl" = 3 bytes) — NEVER matches. Strip
+// the quotes and byte-scan fn_table directly. Ported from
+// resolve_fnaddr_fixups_riscv (ir_riscv.kr:2798). NO xt_remap: fn_table code
+// offsets are final (code_start never moves — H1). Returns the named
+// function's code offset; loud-fails if undefined. Shared by the lx60
+// resolver above and the esp32 resolver below (pure extraction — the math
+// and the failure mode are byte-for-byte the lx60 path's).
+fn xt_fnaddr_code_off(uint64 payload) -> uint64 {
+    uint64 wst = payload
+    uint64 sstart = tok_text_start(wst)
+    uint64 slen = tok_text_len(wst)
+    uint64 name_start = sstart + 1
+    uint64 name_len = slen - 2
+    uint64 found = 0
+    uint64 target2 = 0
+    uint64 fi = 0
+    while fi < fn_count {
+        uint64 fe = fn_table + fi * 8
+        uint32 fn_name_tok = 0
+        unsafe { *(fe as uint32) -> fn_name_tok }
+        uint64 wfn = fn_name_tok
+        uint64 fn_start = tok_text_start(wfn)
+        uint64 fn_len = tok_text_len(wfn)
+        if fn_len == name_len {
+            uint64 eq = 1
+            uint64 ci = 0
+            while ci < name_len {
+                uint64 ca = cg_source + name_start + ci
+                uint64 cb = cg_source + fn_start + ci
+                uint64 va = 0
+                uint64 vb = 0
+                unsafe { *(ca as uint8) -> va }
+                unsafe { *(cb as uint8) -> vb }
+                if va != vb { eq = 0 }
+                ci = ci + 1
+            }
+            if eq != 0 {
+                uint64 fe4 = fe + 4
+                uint32 foff = 0
+                unsafe { *(fe4 as uint32) -> foff }
+                target2 = foff
+                found = 1
+            }
+        }
+        fi = fi + 1
+    }
+    if found == 0 {
+        xt_err("error: xtensa: fn_addr references an undefined function\n")
+    }
+    return target2
+}
+
+// ---------------------------------------------------------------------------
+// ESP32 (--target=esp32) address-fixup resolution — the cross-segment twin of
+// resolve_addr_fixups_xtensa above, run from main.kr's esp32 finalize AFTER
+// the data blobs are laid out. Two differences from the lx60 path:
+//
+//  1. TWO load bases. Code (with every PIC anchor in it) runs at
+//     XT_ESP32_IRAM_BASE + file offset (the esp32 image has no ELF header, so
+//     file offset == IRAM offset); byte-addressable data loads at
+//     XT_ESP32_DRAM_BASE + (file offset - data_file_base). The delta pool
+//     word therefore holds target_VA - anchor_VA (a compile-time constant that
+//     spans the two windows); at runtime a0 = anchor_VA and a0 + delta =
+//     target_VA exactly, same 32-bit wraparound algebra as the lx60 path.
+//
+//  2. ⚠️ THE [M2] GUARD. Every table_sel 0/1 fixup is a BYTE-ADDRESSABLE
+//     datum (string literal / static) about to be handed to l8ui-shaped code.
+//     Its computed VA must land inside the DRAM window — if it computes into
+//     the IRAM range (or anywhere outside DRAM), that is the
+//     LoadStoreError-dead-board failure mode, and we LOUD-FAIL the compile
+//     instead of emitting the image. A false positive that blocks a build
+//     beats a false negative that bricks a board. (What this can't catch:
+//     byte access through a runtime-computed pointer to a hardcoded IRAM
+//     address — that never flows through an address fixup.)
+//
+// table_sel 2 (fn addrs) targets CODE — an IRAM VA is exactly right there;
+// the pointer is jumped through (callx0), never byte-loaded.
+fn resolve_addr_fixups_xtensa_esp32(uint64 data_file_base, uint64 str_file_start, uint64 static_file_start) {
+    uint64 i = 0
+    while i < xt_addr_fixup_count {
+        uint64 anchor_off = xt_af_get(i, 0)
+        uint64 table_sel = xt_af_get(i, 4)
+        uint64 payload = xt_af_get(i, 8)
+        uint64 pool_word_off = xt_af_get(i, 12)
+        uint64 target_va = 0
+        if table_sel == 0 {
+            target_va = XT_ESP32_DRAM_BASE + (str_file_start - data_file_base) + payload
+        } else if table_sel == 1 {
+            target_va = XT_ESP32_DRAM_BASE + (static_file_start - data_file_base) + payload
+        } else {
+            target_va = XT_ESP32_IRAM_BASE + xt_fnaddr_code_off(payload)
+        }
+        if table_sel == 0 || table_sel == 1 {
+            // [M2] byte-addressable datum: must be a DRAM address. Check the
+            // IRAM range first for the specific (scariest) diagnostic, then
+            // the DRAM window bounds.
+            if target_va >= 0x40000000 && target_va < XT_ESP32_IRAM_LIMIT {
+                xt_err("error: xtensa/esp32: byte-addressable data (string/static) would land in IRAM, which is 32-bit-access-only — refusing to emit an image that dies with LoadStoreError on first byte access\n")
+            }
+            if target_va < XT_ESP32_DRAM_BASE || target_va >= XT_ESP32_DRAM_LIMIT {
+                xt_err("error: xtensa/esp32: data address falls outside the DRAM window 0x3FFB0000..0x3FFE0000\n")
+            }
+        }
+        uint64 anchor_va = XT_ESP32_IRAM_BASE + anchor_off
+        uint64 delta = (target_va - anchor_va) & 0xFFFFFFFF
+        patch_u32(pool_word_off, delta)
+        i = i + 1
+    }
+}
+
+// ESP32 segment-layout guard (spec §5 / §8: loud-fail over silent
+// miscompile). Called from main.kr's esp32 finalize with the final segment
+// sizes, BEFORE any image byte is written:
+//   - code (+ literal pools) must fit IRAM  [0x40080400, 0x400A0000)
+//   - entry must sit inside the code segment, 4-byte aligned (call0/ROM
+//     jump targets are word targets)
+//   - data + bss must fit the DRAM window   [0x3FFB0000, 0x3FFE0000) — past
+//     it lie ROM-reserved RAM and then IRAM (the [M2] brick range); the
+//     stack also grows DOWN from 0x3FFE0000 into this window, so a data
+//     area that reaches the limit has ZERO stack headroom and dies anyway.
+fn xt_esp32_check_layout(uint64 code_len, uint64 data_memsz, uint64 entry_off) {
+    if XT_ESP32_IRAM_BASE + code_len > XT_ESP32_IRAM_LIMIT {
+        xt_err("error: xtensa/esp32: code segment exceeds the IRAM limit 0x400A0000\n")
+    }
+    if entry_off >= code_len {
+        xt_err("error: xtensa/esp32: entry offset falls outside the code segment\n")
+    }
+    if (entry_off & 3) != 0 {
+        xt_err("error: xtensa/esp32: entry address is not 4-byte aligned\n")
+    }
+    if XT_ESP32_DRAM_BASE + data_memsz > XT_ESP32_DRAM_LIMIT {
+        xt_err("error: xtensa/esp32: data+bss exceed the DRAM window 0x3FFB0000..0x3FFE0000 (would overlap ROM-reserved RAM / the 32-bit-only IRAM range)\n")
     }
 }
