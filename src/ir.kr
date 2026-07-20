@@ -2748,6 +2748,9 @@ fn ir_lower_expr(uint64 node) -> uint64 {
         uint32 arg = ast_child(node)
         uint64 warg = arg
         uint64 arg_count = 0
+        // Method call: `self` (argument 0) is BY REFERENCE (LANGUAGE.md §7)
+        // — pass the receiver's real address, never a copy.
+        uint64 callee_is_method = fn_method_lookup(callee_tok)
         while warg != 0 && arg_count < 32 {
             // Reset the struct-expression tracker so a stale value left by
             // an earlier lowering can never be mistaken for this argument.
@@ -2773,6 +2776,10 @@ fn ir_lower_expr(uint64 node) -> uint64 {
                 // (and only when) the expression denotes a struct value;
                 // av is then the struct's address in the caller's storage.
                 s_si = ir_fa_struct_idx
+            }
+            if callee_is_method != 0 && arg_count == 0 {
+                // Receiver stays a pointer to the caller's storage.
+                s_si = 0xFFFFFFFF
             }
             if s_si != 0xFFFFFFFF {
                 uint64 ssize = struct_total_size(s_si)

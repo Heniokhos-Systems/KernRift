@@ -943,6 +943,12 @@ fn tc_check_function(uint64 fn_node) {
 // type-checker's name → fn_node lookup table (so Call argument
 // type-checking can find the callee's params without a full module scan).
 fn tc_collect_signatures(uint64 root) {
+    // Rebuild the method-name table (fn StructName.method — FnDecl data4
+    // bit 6) from scratch. Unlike the fn_ret_* tables this one is NOT
+    // rolled back by our callers — codegen never re-registers methods —
+    // so resetting here keeps double invocation (resolve_inferred_types +
+    // tc_check_module) and multi-target fat builds idempotent.
+    fn_method_reset()
     uint32 child = ast_child(root)
     uint64 wc = child
     while wc != 0 {
@@ -953,6 +959,11 @@ fn tc_collect_signatures(uint64 root) {
             uint64 wname = fname
             uint64 wret = ret_tok
             tc_fn_node_register(wname, wc)
+            uint32 fd4 = ast_data4(wc)
+            uint64 wfd4 = fd4
+            if (wfd4 & 64) != 0 {
+                fn_method_register(wname)
+            }
             if wret != 0 {
                 uint64 rk = tok_kind_at_raw(wret)
                 // riscv32: reject uint64/int64/float RETURN types. This runs
