@@ -6717,6 +6717,30 @@ else
 fi
 rm -f "$ESP_G_SRC" "$ESP_G_BIN"
 
+# --- --target= argument validation -------------------------------------------
+# Two separate bugs live here, and BOTH are silent-wrong-output bugs, so both
+# get a negative test.
+#
+#  (1) NEAR-MISS CHIP NAMES. --target=esp32 must be matched EXACTLY, not by
+#      prefix. "esp32s3" and "esp32c3" are different chips with different
+#      memory maps (the C3 is RISC-V, not Xtensa even). A prefix match lets
+#      --target=esp32s3 quietly produce an ESP32 image with load addresses
+#      that are wrong for that chip: a board that does not boot, diagnosed
+#      over ~2-minute flash cycles with no JTAG.
+#
+#  (2) TYPOS. An unrecognised --target= must be a hard error. It used to fall
+#      off the end of the if-chain and be SILENTLY IGNORED, so `--target=widnows`
+#      handed back a default-target binary with no warning at all.
+#
+# Both cases use otherwise-valid flag combinations, so the ONLY thing that can
+# reject them is the target-string check itself.
+echo ""
+echo "--- --target= argument validation ---"
+TOTAL=$((TOTAL + 1))
+ESP_T_OK=1
+ESP_T_BIN="/tmp/krc_esp_targ_$$.bin"
+for ESP_T_BAD in esp32s3 esp32c3; do
+    rm -f "$ESP_T_BIN"
     ESP_T_ERR=$($KRC --arch=xtensa --freestanding "--target=$ESP_T_BAD" \
                 "$DIR/../examples/esp32/minimal.kr" -o "$ESP_T_BIN" 2>&1)
     if [ $? -eq 0 ]; then
