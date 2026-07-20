@@ -6426,6 +6426,86 @@ ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad
 41c907495210b51aa9575a7e43e7546e3c25eb15d34bbb6a828b42c830d1dc5f
 41c907495210b51aa9575a7e43e7546e3c25eb15d34bbb6a828b42c830d1dc5f'
 
+# --- esp32 esp-image container writer — byte-identity vs esptool golden ---
+# tests/golden/esp32_ref_image.bin was produced ONCE by esptool v5.3.1
+# (`esptool --chip esp32 elf2image --flash-mode dio --flash-freq 40m
+# --flash-size 4MB`) from tests/golden/esp32_ref_image.s (see that file's
+# header for the exact reproduction commands). The harness below feeds
+# esp_image_begin/segment/finish the exact same entry point, segment order
+# (esptool sorts ascending by load address: DRAM 0x3FFB0000 first, then
+# IRAM 0x40080400) and raw section payloads (7 bytes each — NOT a multiple
+# of 4, so the writer's zero-pad-to-4 path is exercised), then requires the
+# result to be BYTE-IDENTICAL to esptool's output. Any diff = a wrong field
+# = an image the ESP32 boot ROM may silently refuse to boot.
+echo ""
+echo "--- esp32 esp-image container byte-identity test ---"
+TOTAL=$((TOTAL + 1))
+ESP_SRC="$DIR/../test_tmp_esp_$$.kr"
+ESP_BIN="/tmp/krc_esp_$$"
+ESP_OUT="/tmp/our_image.bin"
+ESP_GOLD="$DIR/golden/esp32_ref_image.bin"
+cat > "$ESP_SRC" <<'ESP_EOF'
+import "std/sha256.kr"
+import "src/format_espimage.kr"
+
+fn esp_put8(u64 p, u64 v) {
+    u8 b = v
+    store8(p, b)
+}
+
+fn main() {
+    // .data section of tests/golden/esp32_ref_image.s — 7 raw bytes.
+    u64 dat = alloc(7)
+    esp_put8(dat + 0, 0x11)
+    esp_put8(dat + 1, 0x22)
+    esp_put8(dat + 2, 0x33)
+    esp_put8(dat + 3, 0x44)
+    esp_put8(dat + 4, 0x55)
+    esp_put8(dat + 5, 0x66)
+    esp_put8(dat + 6, 0x77)
+    // .text section (movi.n a2,42 / nop.n / memw) — 7 raw bytes.
+    u64 txt = alloc(7)
+    esp_put8(txt + 0, 0x2C)
+    esp_put8(txt + 1, 0xA2)
+    esp_put8(txt + 2, 0x3D)
+    esp_put8(txt + 3, 0xF0)
+    esp_put8(txt + 4, 0xC0)
+    esp_put8(txt + 5, 0x20)
+    esp_put8(txt + 6, 0x00)
+
+    esp_image_begin(0x40080400, 2)
+    esp_image_segment(0x3FFB0000, dat, 7)
+    esp_image_segment(0x40080400, txt, 7)
+    esp_image_finish()
+
+    u64 fd = file_open("/tmp/our_image.bin", 1)
+    write(fd, esp_image_buf, esp_image_len)
+    file_close(fd)
+    exit(0)
+}
+ESP_EOF
+if [ ! -f "$ESP_GOLD" ]; then
+    echo "FAIL: esp32_image_format (golden reference $ESP_GOLD missing)"
+    FAIL=$((FAIL + 1))
+elif ! $KRC $KRC_FLAGS "$ESP_SRC" -o "$ESP_BIN" >/dev/null 2>&1; then
+    echo "FAIL: esp32_image_format (harness compilation failed)"
+    $KRC $KRC_FLAGS "$ESP_SRC" -o "$ESP_BIN" 2>&1 | head -3
+    FAIL=$((FAIL + 1))
+else
+    chmod +x "$ESP_BIN"
+    rm -f "$ESP_OUT"
+    "$ESP_BIN" >/dev/null 2>&1
+    if cmp -s "$ESP_OUT" "$ESP_GOLD"; then
+        PASS=$((PASS + 1))
+        echo "  esp32_image_format: PASS ($(wc -c < "$ESP_GOLD" | tr -d ' ') bytes byte-identical to esptool reference)"
+    else
+        echo "FAIL: esp32_image_format (image differs from esptool golden reference)"
+        cmp "$ESP_OUT" "$ESP_GOLD" 2>&1 | head -3
+        FAIL=$((FAIL + 1))
+    fi
+fi
+rm -f "$ESP_SRC" "$ESP_BIN" "$ESP_OUT"
+
 # --- Summary ---
 echo ""
 echo "=== Results: $PASS/$TOTAL passed, $FAIL failed ==="
