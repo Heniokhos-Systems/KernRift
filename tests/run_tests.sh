@@ -7523,6 +7523,103 @@ else
 fi
 rm -f "$ESP_H_BIN" "$ESP_H_PAY" "$ESP_H_CODE" "$ESP_H_DIS"
 
+# --- builtin shadowing tests ---
+# A user fn whose name matches a recognized built-in used to shadow it
+# SILENTLY — and inconsistently: the user body won only when the inliner
+# picked it up (tiny bodies), otherwise builtin dispatch won. That silence
+# let a stub time_ns() { return 0 } disable the compiler's own "(X.XX ms)"
+# timer for 20+ releases. Now: unannotated shadowing is a hard sema error;
+# @builtin_override makes the user body win at EVERY call site on every
+# backend (IR + legacy).
+echo ""
+echo "--- builtin shadowing tests ---"
+
+# 1. Unannotated definition matching a built-in name must be REJECTED.
+#    Discriminating mutation: remove the is_builtin check in
+#    sema_collect_signatures (analysis.kr) — this compiles again and the
+#    test fails with "should not compile" (that is the pre-fix behavior).
+TOTAL=$((TOTAL + 1))
+printf 'fn time_ns() -> uint64 { return 0 }\nfn main() { exit(0) }\n' > /tmp/krc_shadow_$$.kr
+if $KRC $KRC_FLAGS /tmp/krc_shadow_$$.kr -o /tmp/krc_shadow_$$ 2>/tmp/krc_shadow_err_$$ ; then
+    echo "FAIL: builtin_shadow_rejected (should not compile)"
+    FAIL=$((FAIL + 1))
+else
+    if grep -q "shadows a built-in" /tmp/krc_shadow_err_$$ && grep -q "builtin_override" /tmp/krc_shadow_err_$$; then
+        PASS=$((PASS + 1))
+        echo "  builtin_shadow_rejected: PASS (error names the fix)"
+    else
+        echo "FAIL: builtin_shadow_rejected (wrong error)"
+        head -2 /tmp/krc_shadow_err_$$
+        FAIL=$((FAIL + 1))
+    fi
+fi
+rm -f /tmp/krc_shadow_$$.kr /tmp/krc_shadow_$$ /tmp/krc_shadow_err_$$
+
+# 2. Same program WITH @builtin_override must compile and the USER body must
+#    win at the call site. Deterministic: the monotonic clock is never 0, so
+#    exit(42) proves the user body (computes 0 via a loop) ran, not the
+#    built-in. The loop matters: it makes the body NON-inlineable, so this
+#    cannot pass by the pre-fix inlining accident — it isolates the
+#    dispatch gate itself. Discriminating mutation: drop the
+#    builtin_override_lookup gate at the top of ir.kr's call lowering —
+#    the built-in then wins and this exits 1 (verified: also fails on the
+#    pre-fix compiler for the same reason).
+TOTAL=$((TOTAL + 1))
+printf '@builtin_override\nfn time_ns() -> uint64 {\n    uint64 acc = 0\n    uint64 i = 0\n    while i < 3 { acc = acc + 1 i = i + 1 }\n    return acc - 3\n}\nfn main() { uint64 t = time_ns() if t == 0 { exit(42) } exit(1) }\n' > /tmp/krc_shadow_$$.kr
+if $KRC $KRC_FLAGS /tmp/krc_shadow_$$.kr -o /tmp/krc_shadow_$$ > /dev/null 2>&1; then
+    chmod +x /tmp/krc_shadow_$$
+    /tmp/krc_shadow_$$ ; got=$?
+    if [ "$got" = "42" ]; then
+        PASS=$((PASS + 1))
+        echo "  builtin_override_user_wins_ir: PASS (user body won)"
+    else
+        echo "FAIL: builtin_override_user_wins_ir (exit $got — built-in won over annotated user fn)"
+        FAIL=$((FAIL + 1))
+    fi
+else
+    echo "FAIL: builtin_override_user_wins_ir (compilation failed)"
+    FAIL=$((FAIL + 1))
+fi
+rm -f /tmp/krc_shadow_$$.kr /tmp/krc_shadow_$$
+
+# 3. Same, legacy backend (separate dispatch chain in codegen.kr).
+TOTAL=$((TOTAL + 1))
+printf '@builtin_override\nfn time_ns() -> uint64 {\n    uint64 acc = 0\n    uint64 i = 0\n    while i < 3 { acc = acc + 1 i = i + 1 }\n    return acc - 3\n}\nfn main() { uint64 t = time_ns() if t == 0 { exit(42) } exit(1) }\n' > /tmp/krc_shadow_$$.kr
+if $KRC $KRC_FLAGS --legacy /tmp/krc_shadow_$$.kr -o /tmp/krc_shadow_$$ > /dev/null 2>&1; then
+    chmod +x /tmp/krc_shadow_$$
+    /tmp/krc_shadow_$$ ; got=$?
+    if [ "$got" = "42" ]; then
+        PASS=$((PASS + 1))
+        echo "  builtin_override_user_wins_legacy: PASS (user body won)"
+    else
+        echo "FAIL: builtin_override_user_wins_legacy (exit $got — built-in won over annotated user fn)"
+        FAIL=$((FAIL + 1))
+    fi
+else
+    echo "FAIL: builtin_override_user_wins_legacy (compilation failed)"
+    FAIL=$((FAIL + 1))
+fi
+rm -f /tmp/krc_shadow_$$.kr /tmp/krc_shadow_$$
+
+# 4. The compile-timer tail must be present on a successful compile. This
+#    feature shipped dead for 20+ releases precisely because nothing
+#    asserted it — the shadowing stub pinned t_start to 0 and the tail was
+#    skipped. Assert the "  (X.XX ms)" shape on normal compiler stdout.
+#    Discriminating mutation: restore the old `fn time_ns() { return 0 }`
+#    stub in src/main.kr (annotated, to get past the sema error) and
+#    rebuild — the tail disappears and this fails.
+TOTAL=$((TOTAL + 1))
+printf 'fn main() { exit(0) }\n' > /tmp/krc_shadow_$$.kr
+timer_out=$($KRC $KRC_FLAGS /tmp/krc_shadow_$$.kr -o /tmp/krc_shadow_$$ 2>/dev/null)
+if printf '%s\n' "$timer_out" | grep -qE ' \([0-9]+\.[0-9]{2} ms\)$'; then
+    PASS=$((PASS + 1))
+    echo "  compile_timer_tail: PASS ($(printf '%s' "$timer_out" | grep -oE '\([0-9]+\.[0-9]{2} ms\)'))"
+else
+    echo "FAIL: compile_timer_tail (no '(X.XX ms)' tail in: $timer_out)"
+    FAIL=$((FAIL + 1))
+fi
+rm -f /tmp/krc_shadow_$$.kr /tmp/krc_shadow_$$
+
 # --- Summary ---
 echo ""
 echo "=== Results: $PASS/$TOTAL passed, $FAIL failed ==="

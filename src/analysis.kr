@@ -1025,6 +1025,29 @@ fn sema_collect_signatures(uint64 root) {
                 uint32 pnxt = ast_next(wpchild)
                 wpchild = pnxt
             }
+            // Builtin-shadowing check. A user-defined function used to shadow
+            // a built-in of the same name SILENTLY — and inconsistently: the
+            // user body won only when the inliner picked it up (tiny bodies;
+            // inliner.kr), otherwise the builtin-dispatch chains won. That
+            // silence let a stub time_ns() { return 0 } disable the
+            // compiler's own timer for 20+ releases — so unannotated
+            // shadowing is a hard error, not a warning (a 47th warning would
+            // be invisible). Deliberate shadowing is opted into with
+            // @builtin_override (data4 bit 7): the user body then wins at
+            // every call site on every backend.
+            // Exempt:
+            //   extern fns (data4 bit 3) — `extern fn write(...)` shadowing
+            //     the built-in is a documented feature (LANGUAGE.md §24);
+            //   methods (data4 bit 6) — `fn Struct.name` is called via dot
+            //     syntax and can never collide with builtin call dispatch.
+            uint32 shadow_flags = ast_data4(wchild)
+            uint64 wsf = shadow_flags
+            if (wsf & 8) == 0 && (wsf & 64) == 0 && (wsf & 128) == 0 {
+                if is_builtin(wname) != 0 {
+                    report_error_at(wname, "function definition shadows a built-in of the same name (the user body would silently win at every call site); rename it, or annotate with @builtin_override to shadow it deliberately")
+                    sema_errors = sema_errors + 1
+                }
+            }
             // Check for duplicate
             uint64 existing = fn_sig_lookup(wname)
             if existing != 0xFFFFFFFF {

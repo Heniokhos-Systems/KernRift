@@ -52,6 +52,15 @@ static uint64 fn_count = 0
 static uint64 extern_fn_table = 0
 static uint64 extern_fn_count = 0
 
+// @builtin_override fns — user definitions that deliberately shadow a
+// built-in of the same name. Call sites must resolve to the user body,
+// so every builtin-dispatch chain (legacy x86_64, legacy arm64, IR
+// lowering) is disabled for these names. Registered at parse time from
+// the annotation handler, same pattern as extern_fn_table. Each entry
+// is 8 bytes: [name_tok(4), pad(4)]. Max 64 overrides.
+static uint64 builtin_override_table = 0
+static uint64 builtin_override_count = 0
+
 // Extern call sites — per-call-site record of where to emit a linker
 // relocation. Each entry is 16 bytes:
 //   [code_off(4), extern_idx(4), pad(8)]
@@ -353,6 +362,8 @@ fn codegen_init(uint64 capacity, uint64 source, uint64 tokens) {
     device_field_table = alloc(256 * 16)
     extern_fn_table = alloc(256 * 8)
     extern_fn_count = 0
+    builtin_override_table = alloc(64 * 8)
+    builtin_override_count = 0
     extern_call_sites = alloc(1024 * 16)
     extern_call_count = 0
     lkm_uses_kmalloc = 0
@@ -2348,6 +2359,36 @@ fn extern_fn_register(uint64 name_tok) -> uint64 {
     unsafe { *(entry as uint32) = nt }
     extern_fn_count = extern_fn_count + 1
     return idx
+}
+
+// Register a @builtin_override fn name. Called from the parser's
+// annotation handler (parse_module), same as extern_fn_register.
+@export
+fn builtin_override_register(uint64 name_tok) {
+    if builtin_override_count >= 64 {
+        write(2, "error: builtin_override_table overflow (max 64)\n", 48)
+        exit(1)
+    }
+    uint64 entry = builtin_override_table + builtin_override_count * 8
+    uint32 nt = name_tok
+    unsafe { *(entry as uint32) = nt }
+    builtin_override_count = builtin_override_count + 1
+}
+
+// Returns 1 if name_tok names a @builtin_override fn (compared by token
+// text, so any token spelling the same identifier matches), else 0.
+@export
+fn builtin_override_lookup(uint64 name_tok) -> uint64 {
+    uint64 i = 0
+    while i < builtin_override_count {
+        uint64 entry = builtin_override_table + i * 8
+        uint32 stored_tok = 0
+        unsafe { *(entry as uint32) -> stored_tok }
+        uint64 ws = stored_tok
+        if tok_text_eq(ws, name_tok) != 0 { return 1 }
+        i = i + 1
+    }
+    return 0
 }
 
 // Return the extern index for a given name_tok, or 0xFFFFFFFF if not extern.
@@ -5395,6 +5436,10 @@ fn gen_expr(uint64 node) {
         uint64 ext_pre = extern_fn_lookup(wct_pre)
         uint64 is_extern_call = 0
         if ext_pre != 0xFFFFFFFF { is_extern_call = 1 }
+        // @builtin_override fns win over builtins the same way extern fns
+        // do: skip the builtin chain below. The call tail then emits a
+        // normal user call (its own extern_fn_lookup still misses).
+        if builtin_override_lookup(wct_pre) != 0 { is_extern_call = 1 }
 
         // Check for built-in: exit(code)
         uint64 wct = callee_tok

@@ -1410,6 +1410,28 @@ The compiler omits the epilogue.
 }
 ```
 
+### `@builtin_override`
+
+Defining a function whose name matches a recognized built-in (`str_len`,
+`time_ns`, `memcpy`, ...) is a **compile error**: the user body would win
+at every call site, and silent shadowing has produced invisible bugs.
+Annotating the definition with `@builtin_override` declares the shadowing
+deliberate — calls then resolve to the user body on every backend.
+
+```kr
+@builtin_override
+fn str_len(uint64 s) -> uint64 {
+    // custom implementation; calls to str_len() use this body,
+    // not the built-in
+    ...
+}
+```
+
+`extern fn` declarations are exempt and keep their documented behavior:
+`extern fn write(...)` shadows the built-in without any annotation
+(see section 24). Struct methods (`fn Type.name`) never collide with
+built-ins — they dispatch via dot syntax — so they need no annotation.
+
 ### `@packed`
 
 Accepted on struct declarations. KernRift structs are *already* packed
