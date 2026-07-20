@@ -61,12 +61,12 @@ static uint64 XT_STACK_TOP = 0xd0040000
 // XT_ESP32_STACK_TOP before codegen when the esp32 target is active, so the
 // entry preamble's pre-scan interns the right pool literal.
 //
-// ⚠️ [M2] HARD INVARIANT the constants below enforce: ESP32 IRAM supports
-// ONLY aligned 32-bit accesses. A byte load (l8ui — exactly how puts/strlen/
-// memcpy read strings) from an IRAM address raises LoadStoreError = silently
-// dead board, no output, no JTAG. Therefore ALL byte-addressable data
-// (string literals, statics, .bss) must live in the DRAM segment; only code
-// and 4-byte-aligned literal-pool words (read by l32r) may live in IRAM.
+// ⚠️ THE IRAM BYTE-ACCESS INVARIANT the constants below enforce: ESP32 IRAM
+// supports ONLY aligned 32-bit accesses. A byte load (l8ui — exactly how
+// puts/strlen/memcpy read strings) from an IRAM address raises LoadStoreError
+// = silently dead board, no output, no JTAG. Therefore ALL byte-addressable
+// data (string literals, statics, .bss) must live in the DRAM segment; only
+// code and 4-byte-aligned literal-pool words (read by l32r) may live in IRAM.
 // resolve_addr_fixups_xtensa_esp32 + xt_esp32_check_layout below turn any
 // violation into a hard COMPILE error — never an emitted image.
 static uint64 XT_ESP32_IRAM_BASE = 0x40080400
@@ -74,6 +74,16 @@ static uint64 XT_ESP32_IRAM_LIMIT = 0x400A0000
 static uint64 XT_ESP32_DRAM_BASE = 0x3FFB0000
 static uint64 XT_ESP32_DRAM_LIMIT = 0x3FFE0000
 static uint64 XT_ESP32_STACK_TOP = 0x3FFE0000
+// Stack headroom reserved below XT_ESP32_STACK_TOP, i.e. the number of bytes
+// at the top of the DRAM window that .data+.bss may NOT claim. The stack
+// grows DOWN from XT_ESP32_STACK_TOP, which is the SAME address as
+// XT_ESP32_DRAM_LIMIT — without this reservation a program whose statics fill
+// the window compiles clean and then has its .bss tail scribbled on by the
+// entry prologue's first frame push. 4 KiB is the smallest figure that covers
+// this backend's worst-case single frame (2047-byte cap) plus a few nested
+// call0 frames; it is a floor, not a promise that 4 KiB is enough stack for
+// any given program. Enforced by xt_esp32_check_layout.
+static uint64 XT_ESP32_MIN_STACK = 4096
 
 // --- ESP32 startup stub (Task 4) ---------------------------------------------
 // xt_esp32_target: set to 1 by main.kr alongside XT_STACK_TOP when
@@ -3052,16 +3062,20 @@ fn resolve_addr_fixups_xtensa_esp32(uint64 data_file_base, uint64 str_file_start
     }
 }
 
-// ESP32 segment-layout guard (spec §5 / §8: loud-fail over silent
-// miscompile). Called from main.kr's esp32 finalize with the final segment
-// sizes, BEFORE any image byte is written:
+// ESP32 segment-layout guard. Design rule this enforces: when a program
+// cannot be laid out safely on the chip, LOUD-FAIL the compile rather than
+// emit an image that miscompiles silently — on a JTAG-less board a wrong
+// image is indistinguishable from dead hardware. Called from main.kr's esp32
+// finalize with the final segment sizes, BEFORE any image byte is written:
 //   - code (+ literal pools) must fit IRAM  [0x40080400, 0x400A0000)
 //   - entry must sit inside the code segment, 4-byte aligned (call0/ROM
 //     jump targets are word targets)
-//   - data + bss must fit the DRAM window   [0x3FFB0000, 0x3FFE0000) — past
-//     it lie ROM-reserved RAM and then IRAM (the [M2] brick range); the
-//     stack also grows DOWN from 0x3FFE0000 into this window, so a data
-//     area that reaches the limit has ZERO stack headroom and dies anyway.
+//   - data + bss must fit the DRAM window   [0x3FFB0000, 0x3FFE0000) with at
+//     least XT_ESP32_MIN_STACK bytes left over — past the window lie
+//     ROM-reserved RAM and then IRAM (the byte-access brick range documented
+//     at the top of this file), and the stack grows DOWN from 0x3FFE0000
+//     into this same window, so statics that reach the limit are overwritten
+//     by the very first frame push. See XT_ESP32_MIN_STACK.
 fn xt_esp32_check_layout(uint64 code_len, uint64 data_memsz, uint64 entry_off) {
     if XT_ESP32_IRAM_BASE + code_len > XT_ESP32_IRAM_LIMIT {
         xt_err("error: xtensa/esp32: code segment exceeds the IRAM limit 0x400A0000\n")
@@ -3074,5 +3088,15 @@ fn xt_esp32_check_layout(uint64 code_len, uint64 data_memsz, uint64 entry_off) {
     }
     if XT_ESP32_DRAM_BASE + data_memsz > XT_ESP32_DRAM_LIMIT {
         xt_err("error: xtensa/esp32: data+bss exceed the DRAM window 0x3FFB0000..0x3FFE0000 (would overlap ROM-reserved RAM / the 32-bit-only IRAM range)\n")
+    }
+    // Stack headroom. XT_ESP32_STACK_TOP == XT_ESP32_DRAM_LIMIT, so the check
+    // above alone would happily let .data+.bss end exactly at the initial SP.
+    // The entry prologue's very first act is `s32i a0, a1, total_frame-4`,
+    // which then lands ON TOP of the tail of .bss — and it happens AFTER the
+    // preamble's zero loop has already run, so nothing ever restores those
+    // bytes. That is silent data corruption on a board with no debugger: the
+    // exact failure class this target's guards exist to make impossible.
+    if XT_ESP32_DRAM_BASE + data_memsz + XT_ESP32_MIN_STACK > XT_ESP32_DRAM_LIMIT {
+        xt_err("error: xtensa/esp32: data+bss leave less than 4 KiB below the initial stack pointer 0x3FFE0000 — the entry prologue's frame push would overwrite the tail of .bss after the zero loop has run (silent corruption). Shrink the statics, or move the bulk of them into a runtime-allocated region.\n")
     }
 }
