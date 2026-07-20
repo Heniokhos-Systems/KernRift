@@ -14,7 +14,7 @@
 //   ... forever, roughly once per second.
 //
 // ─────────────────────────────────────────────────────────────────────────
-// Why TWO device blocks — this is deliberate, NOT a typo (spec §4)
+// Why TWO device blocks — this is deliberate, NOT a typo
 // ─────────────────────────────────────────────────────────────────────────
 // `putc` polls one address and writes a DIFFERENT one:
 //
@@ -40,7 +40,7 @@
 // which is the hand-off state; M1 never touches the PLL.)
 //
 // ─────────────────────────────────────────────────────────────────────────
-// Why it LOOPS instead of printing once (spec §6 [M4])
+// Why it LOOPS instead of printing once
 // ─────────────────────────────────────────────────────────────────────────
 // A single print cannot distinguish "worked" from "worked, then silently
 // reset" — and a reset loop is exactly what a missed watchdog looks like.

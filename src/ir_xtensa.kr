@@ -95,7 +95,7 @@ static uint64 XT_ESP32_MIN_STACK = 4096
 // `l32r a1` FIRST.
 static uint64 xt_esp32_target = 0
 //
-// Watchdogs — THE footgun (spec §4, hardware-confirmed): the mask ROM hands
+// Watchdogs — THE footgun (confirmed on real silicon): the mask ROM hands
 // off with RWDT and MWDT0 ARMED in flash-boot mode; MWDT1's flash-boot bit
 // also defaults to 1, so it is cleared defensively. The stub must write 0 to
 // the WHOLE CONFIG0 register, not just the enable bit: TIMG_WDT_FLASHBOOT_
@@ -939,7 +939,7 @@ fn xt_setup_pcbase_tok() {
 // Emit + register the __xt_pcbase body (a single ret.n) ONCE, at the function
 // boundary (main.kr, after all functions are laid out). Body is 4-aligned and
 // 4-padded so the following data stays aligned (the 5f97006 invariant). Only
-// called when at least one PIC site exists (spec §D1 M6), so a program with no
+// called when at least one PIC site exists, so a program with no
 // string/static/fn-address material stays byte-identical. xt_pcbase_tok was
 // already assigned by xt_setup_pcbase_tok before the emit loop, so the call0
 // fixups recorded during emission resolve to this registration.
@@ -1012,8 +1012,9 @@ fn xt_esp32_wdt_pair(uint64 wprot, uint64 cfg0) {
 
 // ESP32 stub head (--target=esp32 only): the VERY FIRST instructions after
 // the ROM hand-off — before SP init, before .bss zeroing, before everything
-// (spec §4/§5: RWDT + MWDT0 arrive ARMED; a stub that does anything else
-// first loses the race and the board reboots with no output). Then pin PS
+// (RWDT + MWDT0 arrive from the mask ROM already ARMED; a stub that does
+// anything else first loses the race and the board reboots with no
+// output). Then pin PS
 // (XT_ESP32_PS rationale at its definition) instead of inheriting the ROM's,
 // with the architecturally required rsync after the wsr. a8/a9/a10 are free:
 // at hand-off only a2 (bootparam, deliberately untouched) carries state.
@@ -1749,7 +1750,7 @@ fn ir_emit_xtensa_insn(uint64 ii) {
     // Same operand shape as IR_STORE/IR_LOAD (mirror of ir_riscv.kr:1414):
     // width in dest_v for VSTORE, in imm for VLOAD; address entirely in src1,
     // offset 0. Unlike riscv (which relies on the in-order hart alone), emit a
-    // MEMW fence before each access (spec §6, xt_memw) so an MMIO access is
+    // MEMW fence before each access (xt_memw) so an MMIO access is
     // ordered against surrounding memory ops — the UART poll loop reads LSR and
     // then writes THR, and MEMW keeps that ordering explicit on the LX6
     // pipeline. Width 8 loud-fails (no 64-bit access on xtensa).
@@ -3031,7 +3032,7 @@ fn xt_fnaddr_code_off(uint64 payload) -> uint64 {
 //     spans the two windows); at runtime a0 = anchor_VA and a0 + delta =
 //     target_VA exactly, same 32-bit wraparound algebra as the lx60 path.
 //
-//  2. ⚠️ THE [M2] GUARD. Every table_sel 0/1 fixup is a BYTE-ADDRESSABLE
+//  2. ⚠️ THE IRAM BYTE-ACCESS GUARD. Every table_sel 0/1 fixup is a BYTE-ADDRESSABLE
 //     datum (string literal / static) about to be handed to l8ui-shaped code.
 //     Its computed VA must land inside the DRAM window — if it computes into
 //     the IRAM range (or anywhere outside DRAM), that is the
@@ -3059,7 +3060,7 @@ fn resolve_addr_fixups_xtensa_esp32(uint64 data_file_base, uint64 str_file_start
             target_va = XT_ESP32_IRAM_BASE + xt_fnaddr_code_off(payload)
         }
         if table_sel == 0 || table_sel == 1 {
-            // [M2] byte-addressable datum: must be a DRAM address. Check the
+            // Byte-addressable datum: must be a DRAM address. Check the
             // IRAM range first for the specific (scariest) diagnostic, then
             // the DRAM window bounds.
             if target_va >= 0x40000000 && target_va < XT_ESP32_IRAM_LIMIT {

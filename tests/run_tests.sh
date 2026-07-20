@@ -6942,7 +6942,7 @@ rm -f "$ESP_B_SRC" "$ESP_B_BIN"
 # --- esp32 startup stub: WDT disable + PS + trailing park loop (Task 4) ---
 # The mask ROM jumps straight to e_entry with RWDT and MWDT0 ARMED (flash-boot
 # mode): if the stub does not disable them FIRST, the board reboots ~1s in
-# with no output (spec §2/§4). Asserts on the DISASSEMBLY of the IRAM code
+# with no output. Asserts on the DISASSEMBLY of the IRAM code
 # segment of examples/esp32/minimal.kr:
 #   (1) the unlock key 0x50D83AA1 and all six WDT register addresses are
 #       present as literal-pool words (od -tx4 — pool words are 4-aligned);
@@ -7059,7 +7059,7 @@ fi
 # --- esp32 hello image: full container + errata-safe UART0 putc (Task 5) ---
 # The artifact that gets flashed to real silicon. Everything here is checked
 # with od/dd (+ objdump when present) so it runs in CI — esptool is an ORACLE
-# used by hand (`image-info`), never a build/test dependency (spec §0/§6).
+# used by hand (`image-info`), never a build/test dependency.
 #
 # Container asserts (independent of the code):
 #   magic/mode/size bytes e9 02 02 20, EXACTLY 2 segments, entry in IRAM,
@@ -7068,7 +7068,7 @@ fi
 #   that way), and the checksum byte at len-33 equals the 0xEF-seeded XOR of
 #   every segment payload byte, RECOMPUTED here rather than trusted.
 #
-# Code asserts (spec §4, errata CPU-3.3) — the important ones:
+# Code asserts (errata CPU-3.3) — the important ones:
 #   `putc` must POLL 0x3FF4001C (APB UART_STATUS_REG, TXFIFO_CNT bits 23:16)
 #   and WRITE the byte to 0x60000000 (the AHB TX-FIFO mirror). Consecutive
 #   APB writes to UART0's FIFO "may be lost" per the errata, so a store to an

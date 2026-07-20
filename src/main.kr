@@ -2535,7 +2535,7 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
         // Assign the __xt_pcbase name token BEFORE the emit loop so every
         // `call0 __xt_pcbase` fixup recorded during PIC emission carries the
         // right token. The helper body itself is emitted conditionally in the
-        // finalize block below (only when a PIC site exists — H2 / spec M6).
+        // finalize block below (only when a PIC site exists).
         xt_setup_pcbase_tok()
     }
 
@@ -2622,8 +2622,9 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
         // never mid-body from a PIC handler (which would splice bytes into the
         // current function). Gated on xt_addr_fixup_count so a program with NO
         // PIC sites (no string/static/fn-address material — e.g. hello/stress/
-        // call.kr) is byte-identical to before (spec §D1 M6: "emitted once if
-        // any PIC site exists"). Registered BEFORE resolve_fixups_xtensa so the
+        // call.kr) is byte-identical to before: the helper body is emitted
+        // exactly once, and only if some PIC site exists. Registered BEFORE
+        // resolve_fixups_xtensa so the
         // `call0 __xt_pcbase` sites recorded during emission resolve through the
         // normal fn_lookup path. e_entry patches to the ENTRY fn's own code_start
         // below, so __xt_pcbase's position is immaterial. Anchor offsets + pool
@@ -2659,7 +2660,7 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
         // __xt_pcbase) occupies [0, esp_code_end) and loads at 0x40080400.
         // Byte-addressable data (strings + statics + bss) is laid out AFTER
         // the code in the file but loads as a SEPARATE segment at DRAM
-        // 0x3FFB0000 — [M2] ESP32 IRAM supports only aligned 32-bit accesses;
+        // 0x3FFB0000 — ESP32 IRAM supports only aligned 32-bit accesses;
         // a single l8ui against a string left in IRAM raises LoadStoreError =
         // silently dead board. Only code and the 4-byte-aligned literal-pool
         // words (read by l32r) stay in IRAM. The pure-file-offset call0/l32r
@@ -2681,7 +2682,7 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
 
             // PIC deltas cross segments here: delta = target VA - anchor VA
             // (anchors run at IRAM base + code offset; data lives at DRAM base
-            // + segment offset). The resolver also owns the [M2] per-datum
+            // + segment offset). The resolver also owns the per-datum
             // guard: any string/static whose VA computes into the IRAM range
             // is a hard compile error, never an emitted image.
             resolve_addr_fixups_xtensa_esp32(esp_data_file, esp_data_file, esp_static_file)
@@ -2700,7 +2701,7 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
             uint64 esp_data_len = esp_tail - esp_data_file
             uint64 esp_data_memsz = esp_total - esp_data_file
 
-            // [M2] Segment-layout guard (hard errors, ir_xtensa.kr): code +
+            // Segment-layout guard (hard errors, ir_xtensa.kr): code +
             // entry inside IRAM [0x40080400, 0x400A0000), data + bss inside
             // the DRAM window [0x3FFB0000, 0x3FFE0000).
             xt_esp32_check_layout(esp_code_end, esp_data_memsz, xt_entry_code)
@@ -5133,14 +5134,14 @@ fn main() {
     // --target=esp32 is only meaningful on the xtensa freestanding ELF path
     // (arch 3, emit_mode 0). Any other combination is a hard error — loud-fail
     // over silently emitting a qemu-lx60-shaped image that cannot boot on the
-    // chip (spec §8: loud-fail over silent miscompile).
+    // chip: loud-fail rather than silently emit the wrong thing.
     if machine_target == 1 {
         if arch != 3 || freestanding == 0 || emit_mode != 0 {
             uint64 esp_tgt_msg = "error: --target=esp32 requires --arch=xtensa --freestanding\n"
             write(2, esp_tgt_msg, str_len(esp_tgt_msg))
             exit(1)
         }
-        // ESP32 initial SP: top of the DRAM window, 16-byte aligned (spec §3),
+        // ESP32 initial SP: top of the DRAM window, 16-byte aligned,
         // instead of the qemu-lx60 stack top. Assigned BEFORE codegen so the
         // entry preamble's pre-scan interns the right pool literal.
         XT_STACK_TOP = XT_ESP32_STACK_TOP
