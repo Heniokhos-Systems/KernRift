@@ -3867,6 +3867,37 @@ fn gen_expr(uint64 node) {
         uint64 warrt = arr_tok
         uint64 arr_offset = var_lookup(arr_tok)
         uint64 elem_sz = arr_elem_lookup(arr_tok)
+        // Struct array element as a VALUE expression (e.g. `f(arr[i])`,
+        // `arr[i].method(...)`): the scaled SIB load below only knows
+        // 1/2/4/8-byte elements, so a struct-sized element read produced
+        // garbage. Produce the element ADDRESS in rax and set
+        // expr_is_struct instead — the same contract struct variables and
+        // nested-field reads follow.
+        uint64 idx_arr_si = struct_var_lookup(warrt)
+        if idx_arr_si != 0xFFFFFFFF {
+            uint64 idx_stride = struct_total_size(idx_arr_si)
+            uint32 sidx_child = ast_child(node)
+            uint64 wsi_c = sidx_child
+            gen_expr(wsi_c)
+            // rcx = index; rax = stride; imul rax, rcx → rax = i*stride
+            emit_mov_rcx_rax()
+            emit_mov_rax_imm(idx_stride)
+            emit_byte(0x48); emit_byte(0x0F); emit_byte(0xAF); emit_byte(0xC1)
+            emit_mov_rcx_rax()
+            if arr_offset != 0xFFFFFFFF {
+                emit_load_rax_from_stack(arr_offset)
+            } else {
+                uint64 soff_sa = static_lookup(warrt)
+                if soff_sa != 0xFFFFFFFF {
+                    emit_static_lea(soff_sa)
+                }
+            }
+            // add rax, rcx → element address
+            emit_byte(0x48); emit_byte(0x01); emit_byte(0xC8)
+            rax_cache = 0
+            expr_is_struct = idx_arr_si
+            return
+        }
         // Evaluate index expression
         uint32 idx_child = ast_child(node)
         uint64 wi = idx_child

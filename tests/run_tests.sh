@@ -1978,6 +1978,34 @@ run_test_legacy "redecl_float_type_legacy" 'fn main() -> uint64 {
     f64 y = x * 4.0
     return f64_to_int(y) }' 10
 
+# Legacy-path parity for struct-arg by-value uniformity. The legacy Index
+# lowering used to load 8 garbage bytes for a struct-sized array element.
+run_test_legacy "struct_arg_elem_data_legacy" 'struct P { u64 x; u64 y }
+fn sum(P c) -> u64 { return c.x + c.y }
+fn main() {
+    P[3] arr
+    arr[2].x = 30; arr[2].y = 12
+    exit(sum(arr[2]))
+}' 42
+
+run_test_legacy "struct_arg_elem_byval_legacy" 'struct P { u64 x; u64 y }
+fn poke(P c) -> u64 { c.x = 99; return c.x }
+fn main() {
+    P[3] arr
+    arr[1].x = 42; arr[1].y = 2
+    u64 r = poke(arr[1])
+    exit(arr[1].x)
+}' 42
+
+# Semantics lock: plain struct params stay by-value on the legacy path.
+run_test_legacy "struct_arg_no_alias_legacy" 'struct P { u64 x; u64 y }
+fn poke(P c) -> u64 { c.x = 99; return c.x }
+fn main() {
+    P p; p.x = 42; p.y = 2
+    u64 r = poke(p)
+    exit(p.x)
+}' 42
+
 # Negative: an else-if chain with NO final else must still be rejected (it can
 # fall through). Guards against the fix over-accepting non-exhaustive chains.
 TOTAL=$((TOTAL + 1))
@@ -2443,6 +2471,18 @@ fn main() { P a; a.x = 10; a.y = 32; exit(sum(a)) }' 42
     run_test_a64 "a64_struct_pass_2arg" 'struct P { uint64 x; uint64 y }
 fn add(P a, P b) -> uint64 { return a.x + b.y }
 fn main() { P p1; p1.x = 10; p1.y = 0; P p2; p2.x = 0; p2.y = 32; exit(add(p1, p2)) }' 42
+
+    # Struct-arg by-value uniformity on arm64 (fix/struct-param-writes;
+    # shared IR lowering, but exercised under qemu so the arm64 emitters
+    # are proven too).
+    run_test_a64 "a64_struct_arg_nested_byval" 'struct I { uint64 a; uint64 b }
+struct O { I inn; uint64 z }
+fn poke(I c) -> uint64 { c.a = 99; return c.a }
+fn main() { O o; o.inn.a = 42; uint64 r = poke(o.inn); exit(o.inn.a) }' 42
+
+    run_test_a64 "a64_struct_arg_elem_byval" 'struct P { uint64 x; uint64 y }
+fn poke(P c) -> uint64 { c.x = 99; return c.x }
+fn main() { P[3] arr; arr[1].x = 42; uint64 r = poke(arr[1]); exit(arr[1].x) }' 42
 
     run_test_a64 "a64_struct_return" 'struct P { uint64 x; uint64 y }
 fn make() -> P { P r; r.x = 10; r.y = 32; return r }
@@ -3391,6 +3431,70 @@ fn main() {
     uint64 r = modify(a)
     exit(a.x)
 }' 10
+
+# --- Struct arg by-value uniformity (fix/struct-param-writes) ---
+# By-value must hold for EVERY struct-lvalue argument form, not just bare
+# Idents. The IR path used to copy only Ident args: a nested-struct field
+# arg leaked BY REFERENCE (callee writes persisted), and a struct array
+# element arg was lowered as an oversized IR_LOAD (garbage pointer,
+# segfault at the callee's first field write).
+run_test "struct_arg_nested_byval" 'struct I { uint64 a; uint64 b }
+struct O { I inn; uint64 z }
+fn poke(I c) -> uint64 { c.a = 99; return c.a }
+fn main() {
+    O o; o.inn.a = 42; o.inn.b = 2
+    uint64 r = poke(o.inn)
+    exit(o.inn.a)
+}' 42
+
+run_test "struct_arg_elem_byval" 'struct P { uint64 x; uint64 y }
+fn poke(P c) -> uint64 { c.x = 99; return c.x }
+fn main() {
+    P[3] arr
+    arr[1].x = 42; arr[1].y = 2
+    uint64 r = poke(arr[1])
+    exit(arr[1].x)
+}' 42
+
+# Data integrity: the callee must see the element/field CONTENTS (the
+# legacy path used to load 8 garbage bytes for a struct-sized element).
+run_test "struct_arg_elem_data" 'struct P { uint64 x; uint64 y }
+fn sum(P c) -> uint64 { return c.x + c.y }
+fn main() {
+    P[3] arr
+    arr[2].x = 30; arr[2].y = 12
+    exit(sum(arr[2]))
+}' 42
+
+run_test "struct_arg_nested_data" 'struct I { uint64 a; uint64 b }
+struct O { I inn; uint64 z }
+fn sum(I c) -> uint64 { return c.a + c.b }
+fn main() {
+    O o; o.inn.a = 40; o.inn.b = 2; o.z = 9
+    exit(sum(o.inn))
+}' 42
+
+# Semantics locks (pass before and after the fix — they pin the spec):
+# a HEAP-backed struct variable passed as a plain param is still COPIED
+# (value semantics do not depend on where the struct lives), and plain
+# params never alias even when re-passed through a second call.
+run_test "struct_arg_heap_byval" 'struct P { uint64 x; uint64 y }
+fn poke(P c) -> uint64 { c.x = 99; return c.x }
+fn main() {
+    P h = alloc(16)
+    h.x = 42; h.y = 2
+    uint64 r = poke(h)
+    exit(h.x)
+}' 42
+
+run_test "struct_arg_chain_byval" 'struct P { uint64 x; uint64 y }
+fn inner(P c) { c.x = 99 }
+fn outer(P c) -> uint64 { inner(c); return c.x }
+fn main() {
+    P p; p.x = 42; p.y = 2
+    uint64 r = outer(p)
+    exit(p.x)
+}' 42
 
 # --- Struct return by value tests ---
 run_test "struct_return_small" 'struct P { uint64 x; uint64 y }

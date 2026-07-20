@@ -2749,22 +2749,41 @@ fn ir_lower_expr(uint64 node) -> uint64 {
         uint64 warg = arg
         uint64 arg_count = 0
         while warg != 0 && arg_count < 32 {
+            // Reset the struct-expression tracker so a stale value left by
+            // an earlier lowering can never be mistaken for this argument.
+            ir_fa_struct_idx = 0xFFFFFFFF
             uint64 av = ir_lower_expr(warg)
-            // Check if this is a struct variable — copy to avoid aliasing
+            // Struct arguments are BY VALUE (value semantics, see the
+            // 2026-04-14 struct-by-value design spec §9.2): the caller
+            // passes a pointer to a fresh COPY, never to the original
+            // storage. This must hold for EVERY expression form that
+            // denotes a struct lvalue — a bare struct variable (Ident), a
+            // nested-struct field (FieldAccess, which lowers to the field's
+            // address), and a struct array element (Index, which lowers to
+            // the element's address). Copying only the Ident form leaked
+            // by-reference semantics for the other two.
             uint32 ak = ast_kind(warg)
+            uint64 s_si = 0xFFFFFFFF
             if ak == 32 {
                 uint32 atk = ast_data1(warg)
-                uint64 s_si = struct_var_lookup(atk)
-                if s_si != 0xFFFFFFFF {
-                    uint64 ssize = struct_total_size(s_si)
-                    uint64 copy_v = ir_new_vreg()
-                    ir_emit(IR_ALLOC, copy_v, 0, 0, ssize, ir_current_bb)
-                    uint64 sz_v = ir_new_vreg()
-                    ir_emit(IR_CONST, sz_v, 0, 0, ssize, ir_current_bb)
-                    ir_emit(IR_MEMCPY, 0, copy_v, av, sz_v, ir_current_bb)
-                    av = copy_v
-                }
+                s_si = struct_var_lookup(atk)
             }
+            if ak == 36 || ak == 37 {
+                // FieldAccess / Index lowering set ir_fa_struct_idx when
+                // (and only when) the expression denotes a struct value;
+                // av is then the struct's address in the caller's storage.
+                s_si = ir_fa_struct_idx
+            }
+            if s_si != 0xFFFFFFFF {
+                uint64 ssize = struct_total_size(s_si)
+                uint64 copy_v = ir_new_vreg()
+                ir_emit(IR_ALLOC, copy_v, 0, 0, ssize, ir_current_bb)
+                uint64 sz_v = ir_new_vreg()
+                ir_emit(IR_CONST, sz_v, 0, 0, ssize, ir_current_bb)
+                ir_emit(IR_MEMCPY, 0, copy_v, av, sz_v, ir_current_bb)
+                av = copy_v
+            }
+            ir_fa_struct_idx = 0xFFFFFFFF
             uint64 avp = call_arg_vregs + arg_count * 8
             unsafe { *(avp as uint64) = av }
             arg_count = arg_count + 1
@@ -3202,6 +3221,18 @@ fn ir_lower_expr(uint64 node) -> uint64 {
         } else {
             addr_v = ir_new_vreg()
             ir_emit(IR_ADD, addr_v, base_v, idx_v, 0, ir_current_bb)
+        }
+        // Struct array element as a VALUE expression (e.g. `f(arr[i])`).
+        // An IR_LOAD of a struct-sized element is meaningless — the emitters
+        // only know 1/2/4/8-byte loads, so this produced garbage that was
+        // then dereferenced as a pointer (segfault). Return the element
+        // ADDRESS and record the struct index in ir_fa_struct_idx — the
+        // same convention nested-struct FieldAccess uses — so consumers
+        // (call-arg copy-in, struct VarDecl init) treat it as a struct.
+        uint64 arr_si = struct_var_lookup(warrt)
+        if arr_si != 0xFFFFFFFF {
+            ir_fa_struct_idx = arr_si
+            return addr_v
         }
         // Load element
         uint64 dest = ir_new_vreg()

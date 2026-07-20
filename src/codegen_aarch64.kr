@@ -1374,6 +1374,35 @@ fn gen_expr_a64(uint64 node) {
         uint64 warrta = arr_tok
         uint64 arr_offset = var_lookup(arr_tok)
         uint64 elem_sz_r = arr_elem_lookup(arr_tok)
+        // Struct array element as a VALUE expression (e.g. `f(arr[i])`,
+        // `arr[i].method(...)`): the shifted load below only knows
+        // 1/2/4/8-byte elements, so a struct-sized element read produced
+        // garbage. Produce the element ADDRESS in x0 and set
+        // expr_is_struct_a64 instead — the same contract struct variables
+        // and nested-field reads follow.
+        uint64 idx_arr_si_a = struct_var_lookup(warrta)
+        if idx_arr_si_a != 0xFFFFFFFF {
+            uint64 idx_stride_a = struct_total_size(idx_arr_si_a)
+            uint32 sidx_child_a = ast_child(node)
+            uint64 wsi_ca = sidx_child_a
+            gen_expr_a64(wsi_ca)
+            // x0 = index. x0 = x0 * stride, save to x11, add base.
+            emit_a64_mov_imm(10, idx_stride_a)
+            uint64 mul_sa = 0x9B007C00 | (10 << 16) | (0 << 5) | 0
+            emit_a64(mul_sa)
+            emit_a64_mov(11, 0)
+            if arr_offset != 0xFFFFFFFF {
+                emit_a64_load_x0(arr_offset)
+            } else {
+                uint64 soff_saa = static_lookup(warrta)
+                if soff_saa != 0xFFFFFFFF {
+                    emit_a64_static_lea(soff_saa)
+                }
+            }
+            emit_a64_add(0, 0, 11)
+            expr_is_struct_a64 = idx_arr_si_a
+            return
+        }
         uint32 idx_child = ast_child(node)
         uint64 wi = idx_child
         gen_expr_a64(wi)
