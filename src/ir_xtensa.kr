@@ -2623,6 +2623,20 @@ fn ir_xtensa_gen(uint64 fn_node) {
     //     (xt_entry_node == 0). See xt_emit_raw_sp_preamble for why this L32R
     //     records no pool fixup.
     if fn_node == xt_entry_node {
+        // ⚠️ @naked voids the ESP32 preamble's a0-park safety net, so refuse
+        // the combination outright. The preamble emits `l32r a0, &park` so
+        // that if the entry function ever returns, its epilogue restores that
+        // a0 and `ret.n` lands on a self-branch — a visible hang — instead of
+        // decoding whatever follows (an illegal instruction on silicon,
+        // which raises an exception and reboots in a loop that is
+        // indistinguishable from a watchdog failure). That only works
+        // because the prologue frame-saves a0 immediately afterwards. @naked
+        // skips the prologue, so a0 is never saved and the FIRST call0 in
+        // the body clobbers the park address — silently turning the one
+        // diagnosable failure mode back into the undiagnosable one.
+        if is_naked != 0 && xt_esp32_target != 0 {
+            xt_err("error: xtensa/esp32: the entry function may not be @naked — the entry preamble parks a0 on a self-branch so a returning entry hangs visibly instead of rebooting in a loop, and @naked skips the prologue that saves a0, so the first call0 destroys it. Drop @naked from the entry function.\n")
+        }
         xt_emit_raw_sp_preamble()
     }
 

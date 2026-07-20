@@ -6728,6 +6728,27 @@ awk 'BEGIN {
 }' > "$ESP_G_SRC"
 esp_guard_expect "~192 KiB of code (overflows the 127 KiB IRAM window)" \
     "code segment exceeds the IRAM limit" "$ESP_G_SRC"
+# @naked on the ENTRY function silently voids the a0-park safety net: the
+# preamble still emits `l32r a0, &park`, but @naked skips the prologue that
+# frame-saves a0, so the body's first call0 overwrites it. A returning entry
+# then decodes garbage — an exception and a reboot loop indistinguishable from
+# a watchdog failure — which is exactly what parking a0 exists to prevent.
+cat > "$ESP_G_SRC" <<'ESP_G_EOF'
+@naked
+fn main() {
+    loop { }
+}
+ESP_G_EOF
+esp_guard_expect "@naked entry function" \
+    "entry function may not be @naked" "$ESP_G_SRC"
+# ...but the guard must be scoped to the esp32 target: @naked is legal on the
+# generic lx60 xtensa path, which has no preamble and no park address.
+rm -f "$ESP_G_BIN"
+if ! $KRC --arch=xtensa --freestanding "$ESP_G_SRC" -o "$ESP_G_BIN" >/dev/null 2>&1; then
+    echo "FAIL: esp32_guards (@naked entry rejected on the generic lx60 xtensa path — the guard is esp32-only)"
+    ESP_G_OK=0
+fi
+rm -f "$ESP_G_BIN"
 if [ "$ESP_G_OK" = 1 ]; then
     PASS=$((PASS + 1))
     echo "  esp32_guards: PASS (arch/freestanding combos, IRAM byte-access, per-datum overflow, whole-segment span, stack starvation, IRAM code overflow — each rejected by its OWN guard)"
