@@ -556,7 +556,39 @@ fn main() {
 ```
 
 The method receives `self` as a reference to the struct on the caller's
-stack — `self.field` reads and writes work normally.
+stack — `self.field` reads and writes work normally, and writes through
+`self` are visible to the caller after the method returns. This also
+holds when the receiver is a nested struct field (`w.p.set(…)`) or a
+struct array element (`arr[i].set(…)`).
+
+### Struct parameters are passed by value
+
+A *plain* struct parameter (any parameter other than a method's `self`)
+receives a **copy** of the argument — C-style value semantics:
+
+```kr
+fn poke(Point p) {
+    p.x = 99          // writes the callee's local copy
+}
+
+fn main() {
+    Point a
+    a.x = 1
+    poke(a)
+    println(a.x)      // 1 — the caller's struct is unchanged
+    exit(0)
+}
+```
+
+Writes to the parameter work normally *inside* the callee, but are
+never visible to the caller. This holds uniformly for every argument
+form — a struct variable, a nested struct field (`o.inner`), a struct
+array element (`arr[i]`), and heap-backed struct variables (the
+*contents* are copied, so the callee cannot mutate the heap object
+through a plain parameter either).
+
+To let a function mutate a struct, make it a method — `self` is the
+language's by-reference struct parameter.
 
 ### Enums
 
