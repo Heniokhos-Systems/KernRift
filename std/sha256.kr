@@ -26,10 +26,17 @@
 //   * The 64-bit total bit-length required by the padding trailer is never
 //     assembled into one 64-bit value. It's carried as two 32-bit halves
 //     (byte count lo/hi) that get shifted into a bit count lo/hi pair at
-//     finalize time. This keeps the whole module free of any "real"
-//     64-bit quantity, which is what makes it portable to the 32-bit
-//     dialects (RV32, Xtensa) that a later task targets — even though
-//     this file itself only needs to run on x86_64 for now.
+//     finalize time, so the ALGORITHM never needs a "real" 64-bit quantity.
+//
+//     NOTE — this file does NOT compile for riscv32/xtensa as written: every
+//     declaration here is `u64`, and those dialects reject 64-bit types
+//     outright (`error: 64-bit integers not supported`). Host-only is correct
+//     for its purpose — the esp-image hash is computed at COMPILE time, by the
+//     compiler, on the host; nothing hashes on the ESP32. Because the algorithm
+//     carries no true 64-bit value, porting to a 32-bit dialect would be a
+//     mechanical `u64` -> `uint32` substitution (plus `u64[64] w` becoming a
+//     256-byte `uint32[64]`) — but that port has NOT been done. Do not assume
+//     this is drop-in for a 32-bit target.
 //
 //   * The context is a caller-provided flat byte buffer, not a struct —
 //     KernRift struct field writes through a function parameter do not
