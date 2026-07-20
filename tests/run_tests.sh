@@ -6620,6 +6620,119 @@ else
 fi
 rm -f "$ESP_G_SRC" "$ESP_G_BIN"
 
+# --- esp32 startup stub: WDT disable + PS + trailing park loop (Task 4) ---
+# The mask ROM jumps straight to e_entry with RWDT and MWDT0 ARMED (flash-boot
+# mode): if the stub does not disable them FIRST, the board reboots ~1s in
+# with no output (spec §2/§4). Asserts on the DISASSEMBLY of the IRAM code
+# segment of examples/esp32/minimal.kr:
+#   (1) the unlock key 0x50D83AA1 and all six WDT register addresses are
+#       present as literal-pool words (od -tx4 — pool words are 4-aligned);
+#   (2) the WDT sequence runs BEFORE the SP init: >= 6 s32i stores (3 unlock +
+#       3 config0-clear) and the wsr.ps appear before the first `l32r a1`;
+#   (3) the stub contains a genuine self-branch (`j .` — target == own
+#       address) so a returning main parks instead of decoding garbage (the
+#       lx60 tail idiom is an illegal insn on silicon -> exception -> reset
+#       loop that mimics a watchdog failure exactly).
+# The IRAM segment is FOUND by walking the segment table (seg0 header at 0x18,
+# payload at 0x20, seg1 header at 0x20+seg0_len; IRAM = load >= 0x40000000),
+# never hardcoded. Entry offset within the payload = entry_addr - 0x40080400.
+# SKIP cleanly when the disassembler is absent (dev-only toolchain).
+echo ""
+echo "--- esp32 startup stub test ---"
+if command -v xtensa-lx106-elf-objdump >/dev/null 2>&1; then
+    TOTAL=$((TOTAL + 1))
+    ESP_STUB_BIN="/tmp/krc_esp_stub_$$.bin"
+    ESP_STUB_CODE="/tmp/krc_esp_stub_code_$$.bin"
+    ESP_STUB_DIS="/tmp/krc_esp_stub_dis_$$.txt"
+    ESP_STUB_OK=1
+    esp_stub_field() { od -An -tu4 -j "$2" -N 4 "$1" 2>/dev/null | tr -d ' '; }
+    if ! $KRC --arch=xtensa --freestanding --target=esp32 \
+         "$DIR/../examples/esp32/minimal.kr" -o "$ESP_STUB_BIN" >/dev/null 2>&1; then
+        echo "FAIL: esp32_startup_stub (compilation failed)"
+        ESP_STUB_OK=0
+    fi
+    ESP_STUB_CODE_OFF=0
+    ESP_STUB_CODE_LEN=0
+    if [ "$ESP_STUB_OK" = 1 ]; then
+        ESP_STUB_ENTRY=$(esp_stub_field "$ESP_STUB_BIN" 4)
+        ESP_STUB_NSEG=$(od -An -tu1 -j 1 -N 1 "$ESP_STUB_BIN" | tr -d ' ')
+        ESP_STUB_SOFF=$((0x18))
+        ESP_STUB_I=0
+        while [ "$ESP_STUB_I" -lt "${ESP_STUB_NSEG:-0}" ]; do
+            ESP_STUB_LOAD=$(esp_stub_field "$ESP_STUB_BIN" "$ESP_STUB_SOFF")
+            ESP_STUB_LEN=$(esp_stub_field "$ESP_STUB_BIN" $((ESP_STUB_SOFF + 4)))
+            if [ -z "$ESP_STUB_LOAD" ] || [ -z "$ESP_STUB_LEN" ]; then break; fi
+            if [ "$ESP_STUB_LOAD" -ge $((0x40000000)) ]; then
+                ESP_STUB_CODE_OFF=$((ESP_STUB_SOFF + 8))
+                ESP_STUB_CODE_LEN=$ESP_STUB_LEN
+                break
+            fi
+            ESP_STUB_SOFF=$((ESP_STUB_SOFF + 8 + ESP_STUB_LEN))
+            ESP_STUB_I=$((ESP_STUB_I + 1))
+        done
+        if [ "$ESP_STUB_CODE_LEN" = 0 ]; then
+            echo "FAIL: esp32_startup_stub (no IRAM segment with load_addr >= 0x40000000 found)"
+            ESP_STUB_OK=0
+        fi
+    fi
+    if [ "$ESP_STUB_OK" = 1 ]; then
+        dd if="$ESP_STUB_BIN" of="$ESP_STUB_CODE" bs=1 \
+           skip="$ESP_STUB_CODE_OFF" count="$ESP_STUB_CODE_LEN" 2>/dev/null
+        # (1) key + all six WDT addresses present as pool words
+        ESP_STUB_WORDS=$(od -An -tx4 "$ESP_STUB_CODE")
+        for ESP_STUB_W in 50d83aa1 3ff480a4 3ff4808c 3ff5f064 3ff5f048 3ff60064 3ff60048; do
+            if ! echo "$ESP_STUB_WORDS" | grep -qw "$ESP_STUB_W"; then
+                echo "FAIL: esp32_startup_stub (pool word $ESP_STUB_W missing — WDT sequence not emitted)"
+                ESP_STUB_OK=0
+            fi
+        done
+    fi
+    if [ "$ESP_STUB_OK" = 1 ]; then
+        # (2) ordering: disassemble from the entry; everything before the
+        # first `l32r a1` (SP init) must already contain the 6 WDT stores
+        # and the wsr.ps.
+        ESP_STUB_EOFF=$((ESP_STUB_ENTRY - 0x40080400))
+        xtensa-lx106-elf-objdump -b binary -m xtensa -D \
+            --start-address=$ESP_STUB_EOFF "$ESP_STUB_CODE" > "$ESP_STUB_DIS" 2>/dev/null
+        ESP_STUB_PRE=$(sed -n "1,/l32r[[:space:]]*a1,/p" "$ESP_STUB_DIS")
+        ESP_STUB_NS32I=$(echo "$ESP_STUB_PRE" | grep -cE '[[:space:]]s32i(\.n)?[[:space:]]')
+        if [ "$ESP_STUB_NS32I" -lt 6 ]; then
+            echo "FAIL: esp32_startup_stub (only $ESP_STUB_NS32I s32i before the SP-init l32r a1 — WDT disable must come FIRST)"
+            ESP_STUB_OK=0
+        fi
+        if ! echo "$ESP_STUB_PRE" | grep -qE '[[:space:]]wsr'; then
+            echo "FAIL: esp32_startup_stub (no wsr.ps before the SP-init l32r a1)"
+            ESP_STUB_OK=0
+        fi
+        # (3) a genuine self-branch: a `j` whose target == its own address
+        ESP_STUB_PARK=0
+        while IFS= read -r ESP_STUB_LN; do
+            ESP_STUB_A=$(printf '%s' "$ESP_STUB_LN" | sed -n 's/^ *\([0-9a-f][0-9a-f]*\):.*/\1/p')
+            ESP_STUB_T=$(printf '%s' "$ESP_STUB_LN" | sed -n 's/.*[[:space:]]j[[:space:]][[:space:]]*0*x\{0,1\}\([0-9a-f][0-9a-f]*\)[[:space:]]*$/\1/p')
+            if [ -n "$ESP_STUB_A" ] && [ -n "$ESP_STUB_T" ]; then
+                if [ $((0x$ESP_STUB_A)) -eq $((0x$ESP_STUB_T)) ]; then
+                    ESP_STUB_PARK=1
+                fi
+            fi
+        done <<ESP_STUB_EOF
+$(grep -E '[[:space:]]j[[:space:]]+(0x)?[0-9a-f]+[[:space:]]*$' "$ESP_STUB_DIS")
+ESP_STUB_EOF
+        if [ "$ESP_STUB_PARK" != 1 ]; then
+            echo "FAIL: esp32_startup_stub (no self-branch 'j .' — a returning main would decode garbage and mimic a WDT reset loop)"
+            ESP_STUB_OK=0
+        fi
+    fi
+    if [ "$ESP_STUB_OK" = 1 ]; then
+        PASS=$((PASS + 1))
+        echo "  esp32_startup_stub: PASS (WDT unlock+clear x3 before SP init, wsr.ps, self-branch park)"
+    else
+        FAIL=$((FAIL + 1))
+    fi
+    rm -f "$ESP_STUB_BIN" "$ESP_STUB_CODE" "$ESP_STUB_DIS"
+else
+    echo "  esp32_startup_stub: SKIP (xtensa-lx106-elf-objdump not installed)"
+fi
+
 # --- Summary ---
 echo ""
 echo "=== Results: $PASS/$TOTAL passed, $FAIL failed ==="

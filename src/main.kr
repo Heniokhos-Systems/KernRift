@@ -5144,6 +5144,10 @@ fn main() {
         // instead of the qemu-lx60 stack top. Assigned BEFORE codegen so the
         // entry preamble's pre-scan interns the right pool literal.
         XT_STACK_TOP = XT_ESP32_STACK_TOP
+        // Gate the entry-stub additions (Task 4: WDT disable + PS pin + park
+        // self-branch) in ir_xtensa.kr — it precedes main.kr in the concat
+        // build so it cannot read machine_target itself.
+        xt_esp32_target = 1
     }
 
     // Derive output name from input if not specified with -o
