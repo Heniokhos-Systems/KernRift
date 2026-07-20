@@ -7153,6 +7153,28 @@ if [ "$ESP_H_OK" = 1 ]; then
         echo "FAIL: esp32_hello_image (no IRAM segment with load_addr >= 0x40000000 found)"
         ESP_H_OK=0
     fi
+    # The trailing 32 bytes are a SHA-256 over the whole image up to that
+    # point. The ROM verifies it, so a wrong digest is a silently unbootable
+    # image. Recompute it with sha256sum — an outside oracle — rather than
+    # reading the stored bytes back and comparing them to themselves.
+    #
+    # This lives HERE, on the 576-byte hello image, specifically because the
+    # esp-image byte-identity golden is a 64-byte body: hardcoding the update
+    # length to 64 in format_espimage.kr reproduced the golden exactly and
+    # passed the whole suite. One image size proves nothing about a hash.
+    if command -v sha256sum >/dev/null 2>&1; then
+        ESP_H_DGOT=$(dd if="$ESP_H_BIN" bs=1 count=$((ESP_H_LEN - 32)) 2>/dev/null \
+                     | sha256sum | cut -d' ' -f1)
+        ESP_H_DWANT=$(od -An -tx1 -j $((ESP_H_LEN - 32)) -N 32 -v "$ESP_H_BIN" \
+                      | tr -d ' \n')
+        if [ "$ESP_H_DGOT" != "$ESP_H_DWANT" ]; then
+            echo "FAIL: esp32_hello_image (trailing SHA-256 is $ESP_H_DWANT, but sha256sum over the first $((ESP_H_LEN - 32)) bytes gives $ESP_H_DGOT)"
+            ESP_H_OK=0
+        fi
+        ESP_H_HASH_NOTE=", SHA-256 recomputed over all $((ESP_H_LEN - 32)) body bytes"
+    else
+        ESP_H_HASH_NOTE=" (SHA-256 recompute SKIPPED — no sha256sum)"
+    fi
 fi
 # Errata CPU-3.3 direction check — needs the disassembler; skip cleanly if the
 # dev-only toolchain is absent, but never skip the container asserts above.
@@ -7225,7 +7247,7 @@ else
 fi
 if [ "$ESP_H_OK" = 1 ]; then
     PASS=$((PASS + 1))
-    echo "  esp32_hello_image: PASS (e9/02/02/20, 2 segments, entry in IRAM, checksum recomputed, 16-aligned+hash$ESP_H_DIS_NOTE)"
+    echo "  esp32_hello_image: PASS (e9/02/02/20, 2 segments, entry in IRAM, checksum recomputed, 16-aligned+hash$ESP_H_HASH_NOTE$ESP_H_DIS_NOTE)"
 else
     FAIL=$((FAIL + 1))
 fi
