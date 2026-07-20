@@ -6691,7 +6691,11 @@ if command -v xtensa-lx106-elf-objdump >/dev/null 2>&1; then
         # (2) ordering: disassemble from the entry; everything before the
         # first `l32r a1` (SP init) must already contain the 6 WDT stores
         # and the wsr.ps.
-        ESP_STUB_EOFF=$((ESP_STUB_ENTRY - 0x40080400))
+        # Offset of the entry within the IRAM payload. Derive it from the
+        # segment's own load_addr (already discovered by the walk above) rather
+        # than re-hardcoding the base — a future base change would otherwise
+        # silently disassemble from the wrong offset and still "pass".
+        ESP_STUB_EOFF=$((ESP_STUB_ENTRY - ESP_STUB_LOAD))
         xtensa-lx106-elf-objdump -b binary -m xtensa -D \
             --start-address=$ESP_STUB_EOFF "$ESP_STUB_CODE" > "$ESP_STUB_DIS" 2>/dev/null
         ESP_STUB_PRE=$(sed -n "1,/l32r[[:space:]]*a1,/p" "$ESP_STUB_DIS")

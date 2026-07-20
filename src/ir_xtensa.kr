@@ -1076,9 +1076,20 @@ fn xt_emit_raw_sp_preamble() {
     // returning main falls into a genuine self-branch instead of the lx60
     // tail idiom (an illegal instruction on silicon -> exception -> reset
     // loop that mimics a WDT failure exactly). a0 is undefined at hand-off
-    // and the prologue immediately frame-saves it, so a recursive entry fn
-    // still returns normally through inner frames — only the OUTERMOST
-    // return lands on the park. Both hand-emitted j's have both endpoints
+    // and the prologue immediately frame-saves it, so a normal (non-recursive)
+    // main parks on its return.
+    //
+    // NOTE — RECURSION INTO THE ENTRY FN IS UNSUPPORTED (pre-existing, both
+    // targets). fn_register records code_start BEFORE this preamble is
+    // emitted, so a recursive call to the entry fn re-enters at the PREAMBLE,
+    // not the body: SP is reset to the stack top (destroying all outer
+    // frames), .bss is re-zeroed (destroying state), and a0 is overwritten
+    // with &park before the prologue saves it — so the FIRST inner return
+    // parks. This was already fatal on lx60 (the SP/.bss reset) before the
+    // park existed; the park does not change it. Do not read the park as
+    // making recursive entry work.
+    //
+    // Both hand-emitted j's have both endpoints
     // inside the preamble, ahead of every relaxable branch (the L-3/M-4
     // stability argument above), so the emit-time offsets — including the
     // absolute park address patched into the pool word — are final.
