@@ -6737,6 +6737,182 @@ else
     echo "  esp32_startup_stub: SKIP (xtensa-lx106-elf-objdump not installed)"
 fi
 
+# --- esp32 hello image: full container + errata-safe UART0 putc (Task 5) ---
+# The artifact that gets flashed to real silicon. Everything here is checked
+# with od/dd (+ objdump when present) so it runs in CI — esptool is an ORACLE
+# used by hand (`image-info`), never a build/test dependency (spec §0/§6).
+#
+# Container asserts (independent of the code):
+#   magic/mode/size bytes e9 02 02 20, EXACTLY 2 segments, entry in IRAM,
+#   (len - 32) % 16 == 0  — the payload is 16-padded and a 32-byte SHA-256
+#   appended, so total-minus-hash must be a multiple of 16 (the ROM reads it
+#   that way), and the checksum byte at len-33 equals the 0xEF-seeded XOR of
+#   every segment payload byte, RECOMPUTED here rather than trusted.
+#
+# Code asserts (spec §4, errata CPU-3.3) — the important ones:
+#   `putc` must POLL 0x3FF4001C (APB UART_STATUS_REG, TXFIFO_CNT bits 23:16)
+#   and WRITE the byte to 0x60000000 (the AHB TX-FIFO mirror). Consecutive
+#   APB writes to UART0's FIFO "may be lost" per the errata, so a store to an
+#   APB UART address would give intermittently garbled output on the board's
+#   ONLY debug channel. The test therefore checks the DIRECTION of each
+#   access, not just that the constants appear: it tracks `l32r aN,<pool>`
+#   into a register map and then classifies the `s32i`/`l32i` that use aN as
+#   a base. A store off an APB UART base is a hard FAIL.
+# The segment table is WALKED (seg0 header at 0x18, len at 0x1C, payload at
+# 0x20; seg1 header at 0x20+seg0_len) — no offset is hardcoded.
+echo ""
+echo "--- esp32 hello image test ---"
+TOTAL=$((TOTAL + 1))
+ESP_H_BIN="/tmp/krc_esp_hello_$$.bin"
+ESP_H_PAY="/tmp/krc_esp_hello_pay_$$.bin"
+ESP_H_CODE="/tmp/krc_esp_hello_code_$$.bin"
+ESP_H_DIS="/tmp/krc_esp_hello_dis_$$.txt"
+ESP_H_OK=1
+esp_h_field() { od -An -tu4 -j "$2" -N 4 "$1" 2>/dev/null | tr -d ' '; }
+rm -f "$ESP_H_BIN" "$ESP_H_PAY"
+if ! $KRC --arch=xtensa --freestanding --target=esp32 \
+     "$DIR/../examples/esp32/hello.kr" -o "$ESP_H_BIN" >/dev/null 2>&1; then
+    echo "FAIL: esp32_hello_image (compilation failed)"
+    $KRC --arch=xtensa --freestanding --target=esp32 \
+        "$DIR/../examples/esp32/hello.kr" -o "$ESP_H_BIN" 2>&1 | head -3
+    ESP_H_OK=0
+fi
+ESP_H_CODE_OFF=0
+ESP_H_CODE_LEN=0
+ESP_H_CODE_LOAD=0
+if [ "$ESP_H_OK" = 1 ]; then
+    ESP_H_LEN=$(wc -c < "$ESP_H_BIN" | tr -d ' ')
+    ESP_H_HDR=$(od -An -tx1 -j 0 -N 4 "$ESP_H_BIN" | tr -d ' ')
+    if [ "$ESP_H_HDR" != "e9020220" ]; then
+        echo "FAIL: esp32_hello_image (header bytes 0-3 = '$ESP_H_HDR', want 'e9020220')"
+        ESP_H_OK=0
+    fi
+    ESP_H_NSEG=$(od -An -tu1 -j 1 -N 1 "$ESP_H_BIN" | tr -d ' ')
+    if [ "$ESP_H_NSEG" != 2 ]; then
+        echo "FAIL: esp32_hello_image (segment count $ESP_H_NSEG != 2 — DRAM string + IRAM code expected)"
+        ESP_H_OK=0
+    fi
+    ESP_H_ENTRY=$(esp_h_field "$ESP_H_BIN" 4)
+    if [ -z "$ESP_H_ENTRY" ] || [ "$ESP_H_ENTRY" -lt $((0x40080400)) ] \
+       || [ "$ESP_H_ENTRY" -ge $((0x400A0000)) ]; then
+        echo "FAIL: esp32_hello_image (entry $ESP_H_ENTRY outside IRAM [0x40080400,0x400A0000))"
+        ESP_H_OK=0
+    fi
+    # (len - 32) must be a multiple of 16: 32 bytes of appended SHA-256 over a
+    # 16-padded (checksum-terminated) body.
+    if [ $(( (ESP_H_LEN - 32) % 16 )) -ne 0 ]; then
+        echo "FAIL: esp32_hello_image (len $ESP_H_LEN: (len-32) % 16 = $(( (ESP_H_LEN - 32) % 16 )), want 0)"
+        ESP_H_OK=0
+    fi
+fi
+if [ "$ESP_H_OK" = 1 ]; then
+    # Walk the segment table: concatenate every payload for the checksum and
+    # remember the IRAM one for disassembly.
+    ESP_H_SOFF=$((0x18))
+    ESP_H_I=0
+    : > "$ESP_H_PAY"
+    while [ "$ESP_H_I" -lt "$ESP_H_NSEG" ]; do
+        ESP_H_LOAD=$(esp_h_field "$ESP_H_BIN" "$ESP_H_SOFF")
+        ESP_H_SLEN=$(esp_h_field "$ESP_H_BIN" $((ESP_H_SOFF + 4)))
+        if [ -z "$ESP_H_LOAD" ] || [ -z "$ESP_H_SLEN" ]; then
+            echo "FAIL: esp32_hello_image (segment $ESP_H_I header unreadable at offset $ESP_H_SOFF)"
+            ESP_H_OK=0
+            break
+        fi
+        dd if="$ESP_H_BIN" bs=1 skip=$((ESP_H_SOFF + 8)) count="$ESP_H_SLEN" \
+           >> "$ESP_H_PAY" 2>/dev/null
+        if [ "$ESP_H_LOAD" -ge $((0x40000000)) ]; then
+            ESP_H_CODE_OFF=$((ESP_H_SOFF + 8))
+            ESP_H_CODE_LEN=$ESP_H_SLEN
+            ESP_H_CODE_LOAD=$ESP_H_LOAD
+        fi
+        ESP_H_SOFF=$((ESP_H_SOFF + 8 + ESP_H_SLEN))
+        ESP_H_I=$((ESP_H_I + 1))
+    done
+fi
+if [ "$ESP_H_OK" = 1 ]; then
+    # Recompute the 0xEF-seeded XOR over all segment payloads and compare with
+    # the stored byte at len-33 (last byte before the 32-byte hash). POSIX awk
+    # has no xor(), so it is done bitwise by hand.
+    ESP_H_WANT=$(od -An -tu1 -j $((ESP_H_LEN - 33)) -N 1 "$ESP_H_BIN" | tr -d ' ')
+    ESP_H_GOT=$(od -An -tu1 -v "$ESP_H_PAY" | awk '
+        function xor8(a, b,   i, m, r) {
+            r = 0; m = 1
+            for (i = 0; i < 8; i++) {
+                if (int(a / m) % 2 != int(b / m) % 2) r += m
+                m *= 2
+            }
+            return r
+        }
+        BEGIN { c = 239 }
+        { for (i = 1; i <= NF; i++) c = xor8(c, $i + 0) }
+        END { print c }')
+    if [ "$ESP_H_GOT" != "$ESP_H_WANT" ]; then
+        echo "FAIL: esp32_hello_image (checksum byte at len-33 is $ESP_H_WANT, recomputed 0xEF-XOR is $ESP_H_GOT)"
+        ESP_H_OK=0
+    fi
+    if [ "$ESP_H_CODE_LEN" = 0 ]; then
+        echo "FAIL: esp32_hello_image (no IRAM segment with load_addr >= 0x40000000 found)"
+        ESP_H_OK=0
+    fi
+fi
+# Errata CPU-3.3 direction check — needs the disassembler; skip cleanly if the
+# dev-only toolchain is absent, but never skip the container asserts above.
+if [ "$ESP_H_OK" = 1 ] && command -v xtensa-lx106-elf-objdump >/dev/null 2>&1; then
+    dd if="$ESP_H_BIN" of="$ESP_H_CODE" bs=1 \
+       skip="$ESP_H_CODE_OFF" count="$ESP_H_CODE_LEN" 2>/dev/null
+    xtensa-lx106-elf-objdump -b binary -m xtensa -D "$ESP_H_CODE" > "$ESP_H_DIS" 2>/dev/null
+    ESP_H_VERDICT=$(awk '
+        # Track `l32r aN, <slot> (0xVALUE)` so a later s32i/l32i off aN can be
+        # attributed to a concrete absolute address. Any control transfer
+        # invalidates the map, so nothing is attributed across a branch.
+        { m = $3; op1 = $4; op2 = $5 }
+        m == "l32r" {
+            gsub(/,/, "", op1); v = $6
+            gsub(/[()]/, "", v)
+            reg[op1] = v
+            next
+        }
+        m ~ /^(s32i|l32i)(\.n)?$/ {
+            gsub(/,/, "", op2)
+            if (op2 in reg) {
+                if (m ~ /^s32i/) store[reg[op2]] = 1
+                else             loadf[reg[op2]] = 1
+            }
+            if (m ~ /^l32i/) { gsub(/,/, "", op1); delete reg[op1] }
+            next
+        }
+        # Conservative: forget everything at any branch/call/return boundary.
+        m ~ /^(j|jx|call0|callx0|ret|ret\.n|b)/ { delete reg; next }
+        END {
+            ok = 1
+            if (!("0x60000000" in store)) { print "no-ahb-fifo-store"; ok = 0 }
+            if (!("0x3ff4001c" in loadf))  { print "no-apb-status-load"; ok = 0 }
+            for (a in store)
+                if (a ~ /^0x3ff400/) { print "APB-UART-STORE:" a; ok = 0 }
+            if (ok) print "OK"
+        }' "$ESP_H_DIS")
+    case "$ESP_H_VERDICT" in
+        OK) ;;
+        *)
+            echo "FAIL: esp32_hello_image (UART access pattern wrong: $ESP_H_VERDICT)"
+            echo "      want: l32i from 0x3ff4001c (APB status poll) + s32i to 0x60000000 (AHB FIFO,"
+            echo "      errata CPU-3.3); a store to any 0x3ff400xx UART address may silently drop bytes"
+            ESP_H_OK=0
+            ;;
+    esac
+    ESP_H_DIS_NOTE=" + AHB/APB direction"
+else
+    ESP_H_DIS_NOTE=" (disasm direction check SKIPPED — no xtensa-lx106-elf-objdump)"
+fi
+if [ "$ESP_H_OK" = 1 ]; then
+    PASS=$((PASS + 1))
+    echo "  esp32_hello_image: PASS (e9/02/02/20, 2 segments, entry in IRAM, checksum recomputed, 16-aligned+hash$ESP_H_DIS_NOTE)"
+else
+    FAIL=$((FAIL + 1))
+fi
+rm -f "$ESP_H_BIN" "$ESP_H_PAY" "$ESP_H_CODE" "$ESP_H_DIS"
+
 # --- Summary ---
 echo ""
 echo "=== Results: $PASS/$TOTAL passed, $FAIL failed ==="

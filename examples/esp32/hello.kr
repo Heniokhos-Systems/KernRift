@@ -1,0 +1,103 @@
+// examples/esp32/hello.kr — the ESP32 machine-target acceptance program.
+// This is the image Rung 3 of the validation ladder flashes to real silicon
+// (design doc §4 UART0, §6 validation ladder).
+//
+// Build:
+//   krc --arch=xtensa --freestanding --target=esp32 \
+//       examples/esp32/hello.kr -o hello.bin
+//   esptool --port /dev/ttyAMA0 --before no-reset --after no-reset \
+//       write-flash 0x1000 hello.bin      # BOOT+EN held manually
+//
+// Expected on the wire at 115200 (after the ROM's own boot log):
+//   KernRift on ESP32
+//   KernRift on ESP32
+//   ... forever, roughly once per second.
+//
+// ─────────────────────────────────────────────────────────────────────────
+// Why TWO device blocks — this is deliberate, NOT a typo (spec §4)
+// ─────────────────────────────────────────────────────────────────────────
+// `putc` polls one address and writes a DIFFERENT one:
+//
+//   poll  UART_STATUS_REG  0x3FF4_001C  (APB)  TXFIFO_CNT = bits 23:16
+//   write UART0 TX FIFO    0x6000_0000  (AHB)  32-bit store of the byte
+//
+// ESP32 errata **CPU-3.3**: consecutive writes to FIFO addresses through the
+// APB bus "may be lost", and UART0's FIFO is named explicitly. The documented
+// workaround is to write the FIFO at its AHB mirror — exactly what ESP-IDF's
+// `uart_ll_write_txfifo` does ("Write fifo, we use AHB address"). Writing the
+// FIFO via APB would intermittently drop characters, which on a board with no
+// JTAG — where this UART is the ONLY debug channel — is the worst possible
+// failure mode: garbage that looks like a codegen bug but is a bus erratum.
+//
+// A single `device Uart at <base>` block cannot express "poll here, write
+// there", so there are two blocks. They reuse the ordinary MMIO lowering
+// (vload32 / vstore32 with MEMW fences) rather than hand-rolled `unsafe`
+// volatile accesses.
+//
+// No UART init is performed, and none is needed: the mask ROM leaves UART0
+// configured at 115200 — hardware-confirmed, we read `ets Jul 29 2019` off
+// this exact board cleanly. (Valid only while APB stays at the 40 MHz XTAL,
+// which is the hand-off state; M1 never touches the PLL.)
+//
+// ─────────────────────────────────────────────────────────────────────────
+// Why it LOOPS instead of printing once (spec §6 [M4])
+// ─────────────────────────────────────────────────────────────────────────
+// A single print cannot distinguish "worked" from "worked, then silently
+// reset" — and a reset loop is exactly what a missed watchdog looks like.
+// Steady repeating output for >10 s simultaneously proves the RWDT/MWDT0/
+// MWDT1 disable sequence took, that SP and .bss are sane, and that the whole
+// image chain (writer → segments → stub → entry) works. At 40 MHz the exact
+// period is irrelevant; a plain counted busy-wait is enough.
+
+// UART_STATUS_REG — APB. Poll only; never write the FIFO through this block.
+device UartStatus at 0x3FF40000 {
+    status at 0x1C : u32
+}
+
+// UART0 TX FIFO — AHB mirror. Errata CPU-3.3: the byte MUST go here.
+device UartFifo at 0x60000000 {
+    fifo at 0x00 : u32
+}
+
+fn putc(u8 c) {
+    // TXFIFO_CNT is bits 23:16 of UART_STATUS_REG. Wait while the 128-deep
+    // FIFO holds >= 126 bytes, leaving headroom rather than filling it.
+    //
+    // ⚠️ KernRift precedence: `&` binds TIGHTER than `>>` (the opposite of C),
+    // so the shift MUST be parenthesized. Written bare, `status >> 16 & 0xFF`
+    // would parse as `status >> (16 & 0xFF)` — a silently wrong mask.
+    while ((UartStatus.status >> 16) & 0xFF) >= 126 { }
+    UartFifo.fifo = c
+}
+
+fn puts(u32 s) {
+    u32 i = 0
+    u32 ch = load8(s + i)
+    while ch != 0 {
+        putc(ch)
+        i = i + 1
+        ch = load8(s + i)
+    }
+}
+
+// Counted busy-wait. At 40 MHz with a few cycles per iteration this lands in
+// the "roughly a second" ballpark, which is all Rung 3 needs — we are timing
+// a human watching a terminal, not a protocol.
+fn delay() {
+    u32 i = 0
+    while i < 4000000 {
+        i = i + 1
+    }
+}
+
+fn main() {
+    // The literal is byte-addressed (load8), so it MUST live in the DRAM
+    // segment. Task 3's layout guard loud-fails at compile time if byte-
+    // addressable data would land in IRAM (32-bit-access-only — a byte load
+    // there is a LoadStoreError and a dead board).
+    u32 msg = "KernRift on ESP32\n"
+    loop {
+        puts(msg)
+        delay()
+    }
+}
