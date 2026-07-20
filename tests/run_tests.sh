@@ -6569,12 +6569,45 @@ rm -f "$ESP_MIN_BIN"
 
 # --- esp32 guard tests: unsupported combos must be COMPILE errors ---
 # (1) --target=esp32 without --arch=xtensa --freestanding is rejected.
-# (2) A program whose data+bss exceeds the DRAM window [0x3FFB0000,0x3FFE0000)
-#     must LOUD-FAIL at compile time, never emit an image: past the window the
-#     next addresses are ROM-reserved RAM and then (at 0x40000000+) IRAM, which
-#     is 32-bit-access-only — a byte-addressed datum there is a LoadStoreError
-#     and a silently dead board (spec §5/M2). Prefer a false positive that
-#     blocks a build over a false negative that bricks a board.
+# (2) Programs that cannot be laid out safely in the ESP32 memory map must
+#     LOUD-FAIL at compile time and leave NO output file behind. Past the DRAM
+#     window [0x3FFB0000,0x3FFE0000) the next addresses are ROM-reserved RAM
+#     and then (at 0x40000000+) IRAM, which is 32-bit-access-only — a
+#     byte-addressed datum there raises LoadStoreError and the board is dead
+#     with no output and no JTAG. Prefer a false positive that blocks a build
+#     over a false negative that bricks a board.
+#
+# ⚠️ Each case below asserts on the SPECIFIC error text, because there are
+# THREE distinct guards that all reject an oversized program and it is very
+# easy to write a case that looks like it covers one while actually tripping
+# another. They are, in the order they fire:
+#   (a) resolve_addr_fixups_xtensa_esp32, per-datum, "would land in IRAM" —
+#       one datum's own address computes into the IRAM range;
+#   (b) resolve_addr_fixups_xtensa_esp32, per-datum, "falls outside the DRAM
+#       window" — one datum's own address is past the window;
+#   (c) xt_esp32_check_layout, whole-segment, "data+bss exceed the DRAM
+#       window" / "less than 4 KiB below the initial stack pointer" — the
+#       total memsz does not fit, even though every individual base does.
+# A case that only trips (a) or (b) leaves (c) completely untested.
+esp_guard_expect() {
+    # $1 = case label, $2 = expected error substring, $3 = source file
+    rm -f "$ESP_G_BIN"
+    ESP_G_ERR=$($KRC --arch=xtensa --freestanding --target=esp32 \
+                "$3" -o "$ESP_G_BIN" 2>&1)
+    if [ $? -eq 0 ]; then
+        echo "FAIL: esp32_guards ($1 accepted — expected a compile error)"
+        ESP_G_OK=0
+    elif [ -f "$ESP_G_BIN" ]; then
+        echo "FAIL: esp32_guards ($1 errored but still left an output image behind)"
+        ESP_G_OK=0
+    elif ! printf '%s' "$ESP_G_ERR" | grep -qF "$2"; then
+        echo "FAIL: esp32_guards ($1 rejected by the WRONG guard)"
+        echo "  expected error to contain: $2"
+        echo "  actual error: $ESP_G_ERR"
+        ESP_G_OK=0
+    fi
+    rm -f "$ESP_G_BIN"
+}
 echo ""
 echo "--- esp32 guard tests (bad combos are compile errors) ---"
 TOTAL=$((TOTAL + 1))
@@ -6592,8 +6625,9 @@ if $KRC --arch=xtensa --target=esp32 \
     echo "FAIL: esp32_guards (--target=esp32 accepted without --freestanding)"
     ESP_G_OK=0
 fi
-# 256 KiB static array: memsz 0x40000 > DRAM window size 0x30000 — the layout
-# guard must refuse to emit. Also confirm no output file is left behind.
+# (b) 256 KiB array + a trailing datum. `sentinel` is laid out AFTER `big`, so
+# its own base address is 0x3FFB0000 + 0x40000, already past the window — this
+# case is caught PER-DATUM and never reaches the whole-segment layout guard.
 cat > "$ESP_G_SRC" <<'ESP_G_EOF'
 static u32[65536] big
 static u32 sentinel = 7
@@ -6603,22 +6637,125 @@ fn main() {
     loop { }
 }
 ESP_G_EOF
-rm -f "$ESP_G_BIN"
-if $KRC --arch=xtensa --freestanding --target=esp32 \
-     "$ESP_G_SRC" -o "$ESP_G_BIN" >/dev/null 2>&1; then
-    echo "FAIL: esp32_guards (256 KiB data accepted — exceeds the DRAM window, would overlap reserved RAM/IRAM)"
-    ESP_G_OK=0
-elif [ -f "$ESP_G_BIN" ]; then
-    echo "FAIL: esp32_guards (guard errored but still left an output image behind)"
-    ESP_G_OK=0
-fi
+esp_guard_expect "256 KiB data (per-datum address past the window)" \
+    "data address falls outside the DRAM window" "$ESP_G_SRC"
+# (c) 200 KiB array and NOTHING after it. Every datum base is in-window (the
+# array starts at 0x3FFB0000 itself), so neither per-datum check fires; only
+# the whole-segment memsz check in xt_esp32_check_layout can catch that the
+# array SPANS past 0x3FFE0000. This is the case that makes that guard live.
+cat > "$ESP_G_SRC" <<'ESP_G_EOF'
+static u32[51200] big
+
+fn main() {
+    big[0] = 1
+    loop { }
+}
+ESP_G_EOF
+esp_guard_expect "200 KiB array spanning past the window (base in-window)" \
+    "data+bss exceed the DRAM window" "$ESP_G_SRC"
+# (c2) 189.8 KiB array: FITS the raw DRAM window (0x2F6E0 < 0x30000) but
+# leaves under 4 KiB below the initial SP. The stack grows DOWN from
+# 0x3FFE0000, which is the same address the window ends at, so the entry
+# prologue's first `s32i a0, a1, N-4` writes the saved return address on top
+# of the .bss tail — AFTER the zero loop has run, so nothing restores it.
+# Without XT_ESP32_MIN_STACK this program compiles clean and corrupts itself
+# on real silicon.
+cat > "$ESP_G_SRC" <<'ESP_G_EOF'
+static u32[48600] big
+
+fn main() {
+    big[0] = 1
+    loop { }
+}
+ESP_G_EOF
+esp_guard_expect "190 KiB statics (fits the window, starves the stack)" \
+    "less than 4 KiB below the initial stack pointer" "$ESP_G_SRC"
+# (a) THE IRAM BYTE-ACCESS GUARD — the whole justification for splitting code
+# and data across two load addresses. IRAM services only aligned 32-bit
+# accesses, so an l8ui (which is how every string read, strlen and memcpy
+# touches memory) against an IRAM address raises LoadStoreError: no output, no
+# JTAG, board indistinguishable from dead. 360 KiB of leading statics pushes
+# the NEXT datum's computed address past 0x40000000 and into IRAM, which is
+# what this guard exists to refuse. Rejected per-datum, before the
+# whole-segment checks ever run.
+cat > "$ESP_G_SRC" <<'ESP_G_EOF'
+static u32[90000] pad
+static u32 tail_datum = 7
+
+fn main() {
+    pad[0] = 1
+    tail_datum = 2
+    loop { }
+}
+ESP_G_EOF
+esp_guard_expect "360 KiB of statics (next datum computes into IRAM)" \
+    "would land in IRAM" "$ESP_G_SRC"
+# The IRAM code-overflow branch. Usable IRAM is 0x400A0000 - 0x40080400 =
+# 127 KiB; this generates a ~192 KiB chain of functions, ~1.5x over, so the
+# case stays over the limit even if codegen gets meaningfully tighter. A chain
+# (each fn tail-calls the next) rather than 1000 calls from main, because a
+# main with 1000 call sites blows the 2047-byte frame cap and would fail for
+# an unrelated reason. Compiles in well under a second — the limit is hit
+# during layout, long before anything is written.
+awk 'BEGIN {
+    n = 1000; m = 12
+    for (i = 0; i < n; i++) {
+        printf "fn g%d(u32 x) -> u32 {\n", i
+        for (j = 0; j < m; j++) printf "    x = x * %d + %d\n", (j % 13) + 3, i + j
+        if (i == n - 1) printf "    return x\n}\n"
+        else printf "    return g%d(x)\n}\n", i + 1
+    }
+    printf "fn main() {\n    u32 a = g0(1)\n    a = a + 1\n    loop { }\n}\n"
+}' > "$ESP_G_SRC"
+esp_guard_expect "~192 KiB of code (overflows the 127 KiB IRAM window)" \
+    "code segment exceeds the IRAM limit" "$ESP_G_SRC"
 if [ "$ESP_G_OK" = 1 ]; then
     PASS=$((PASS + 1))
-    echo "  esp32_guards: PASS (arch/freestanding combos + DRAM-window overflow all rejected at compile time)"
+    echo "  esp32_guards: PASS (arch/freestanding combos, IRAM byte-access, per-datum overflow, whole-segment span, stack starvation, IRAM code overflow — each rejected by its OWN guard)"
 else
     FAIL=$((FAIL + 1))
 fi
 rm -f "$ESP_G_SRC" "$ESP_G_BIN"
+
+    ESP_T_ERR=$($KRC --arch=xtensa --freestanding "--target=$ESP_T_BAD" \
+                "$DIR/../examples/esp32/minimal.kr" -o "$ESP_T_BIN" 2>&1)
+    if [ $? -eq 0 ]; then
+        echo "FAIL: target_arg_validation (--target=$ESP_T_BAD accepted — a near-miss chip name must NOT prefix-match esp32 and emit an ESP32 image)"
+        ESP_T_OK=0
+    elif ! printf '%s' "$ESP_T_ERR" | grep -qF "unknown --target="; then
+        echo "FAIL: target_arg_validation (--target=$ESP_T_BAD rejected, but not by the unknown-target check: $ESP_T_ERR)"
+        ESP_T_OK=0
+    fi
+done
+for ESP_T_BAD in bogus widnows lin ""; do
+    rm -f "$ESP_T_BIN"
+    ESP_T_ERR=$($KRC "--target=$ESP_T_BAD" "$DIR/smoke/div_mod.kr" \
+                -o "$ESP_T_BIN" 2>&1)
+    if [ $? -eq 0 ]; then
+        echo "FAIL: target_arg_validation (--target=$ESP_T_BAD accepted — an unknown target must be a hard error, never silently ignored)"
+        ESP_T_OK=0
+    elif ! printf '%s' "$ESP_T_ERR" | grep -qF "unknown --target="; then
+        echo "FAIL: target_arg_validation (--target=$ESP_T_BAD rejected, but not by the unknown-target check: $ESP_T_ERR)"
+        ESP_T_OK=0
+    fi
+done
+# ...and the accepted names must still be accepted (so the check above cannot
+# be "fixed" by rejecting everything).
+for ESP_T_GOOD in linux macos darwin windows win; do
+    rm -f "$ESP_T_BIN"
+    if ! $KRC "--target=$ESP_T_GOOD" "$DIR/smoke/div_mod.kr" \
+         -o "$ESP_T_BIN" >/dev/null 2>&1; then
+        echo "FAIL: target_arg_validation (--target=$ESP_T_GOOD rejected — it is a documented, accepted target name)"
+        ESP_T_OK=0
+    fi
+done
+if [ "$ESP_T_OK" = 1 ]; then
+    PASS=$((PASS + 1))
+    echo "  target_arg_validation: PASS (near-miss chip names and typos are hard errors; documented names still accepted)"
+else
+    FAIL=$((FAIL + 1))
+fi
+rm -f "$ESP_T_BIN"
 
 # --- esp32 startup stub: WDT disable + PS + trailing park loop (Task 4) ---
 # The mask ROM jumps straight to e_entry with RWDT and MWDT0 ARMED (flash-boot
