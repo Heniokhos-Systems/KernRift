@@ -3574,6 +3574,17 @@ fn main() {
     exit(p.x)
 }' 42
 
+# Struct VarDecl initialized from an array element rides the same
+# address+tracker contract (used to segfault: garbage oversized load).
+run_test "struct_decl_from_elem" 'struct P { uint64 x; uint64 y }
+fn main() {
+    P[3] arr
+    arr[1].x = 40; arr[1].y = 2
+    P c = arr[1]
+    c.x = c.x + 2
+    exit(c.x + arr[1].y - 2 + (arr[1].x - 40))
+}' 42
+
 # --- Struct return by value tests ---
 run_test "struct_return_small" 'struct P { uint64 x; uint64 y }
 fn make(uint64 x, uint64 y) -> P {
