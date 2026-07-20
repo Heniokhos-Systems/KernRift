@@ -4958,11 +4958,31 @@ fn main() {
                 } else if str_starts_with(tgt_str, "android", 7) != 0 {
                     target_os = 3
                     emit_mode = 4
-                } else if str_starts_with(tgt_str, "esp32", 5) != 0 {
+                } else if str_eq_full(tgt_str, "esp32") != 0 {
                     // Machine target, not an OS: ESP32 (Xtensa LX6) esp-image.
                     // Requires --arch=xtensa --freestanding — validated after
                     // the arg loop so flag order doesn't matter.
+                    //
+                    // EXACT match, deliberately NOT str_starts_with: the OS
+                    // names above can afford a prefix match, but "esp32s3" and
+                    // "esp32c3" are DIFFERENT CHIPS with different memory maps
+                    // (and C3 is RISC-V, not Xtensa). A prefix match would let
+                    // --target=esp32s3 silently masquerade as an ESP32 and emit
+                    // an image with wrong-for-that-chip load addresses — i.e. a
+                    // board that does not boot, diagnosed over ~2-minute flash
+                    // cycles with no JTAG. Unknown targets hit the loud error
+                    // below rather than being silently ignored.
                     machine_target = 1
+                } else {
+                    // Unknown --target=: fail loud. Previously this fell off the
+                    // if-chain and was SILENTLY IGNORED, so a typo (or a
+                    // near-miss like "esp32s3") produced a default-target binary
+                    // with no warning at all. Mirrors the existing behaviour for
+                    // an unknown --arch, and matches the project rule of loud
+                    // failure over silently emitting the wrong thing.
+                    uint64 tgt_err = "error: unknown --target= value (expected: linux, macos/darwin, windows/win, android, esp32)\n"
+                    write(2, tgt_err, str_len(tgt_err))
+                    exit(1)
                 }
             } else if str_starts_with(arg, "--help", 6) != 0 || str_eq_full(arg, "-h") != 0 {
                 write(1, "usage: krc [options] <file.kr> [-o output]\n", 43)
