@@ -1,0 +1,463 @@
+// KernRift Standard Library — SHA-256 (FIPS 180-4)
+//
+// A from-scratch, dependency-free SHA-256 implementation. Streaming API:
+// init / update (any number of times, any chunk size) / final.
+//
+// Design notes (read before touching this file):
+//
+//   * All 32-bit arithmetic is explicitly masked with `& 0xFFFFFFFF` after
+//     every add, shift, and rotate. The host word is 64 bits, so an
+//     unmasked add silently produces a wrong digest that only shows up as
+//     a failed test vector — there is no crash to catch it.
+//
+//   * KernRift's bitwise operators (`&`, `|`, `^`) bind *tighter* than
+//     `+`/`-` and even tighter than `<<`/`>>` (see docs/LANGUAGE.md §4 —
+//     this is the opposite of C). Every multi-operator expression below is
+//     therefore fully parenthesized rather than relying on precedence;
+//     don't "simplify" the parens away.
+//
+//   * The message block is read/written purely with load8/store8 in
+//     explicit big-endian order. load32/store32 round-trip a value but
+//     make no promise about the underlying byte order, so they are only
+//     used for the context's *internal* 32-bit scalars (H words, buffered
+//     length, byte counters) where we always write and read back through
+//     the same pair of calls ourselves.
+//
+//   * The 64-bit total bit-length required by the padding trailer is never
+//     assembled into one 64-bit value. It's carried as two 32-bit halves
+//     (byte count lo/hi) that get shifted into a bit count lo/hi pair at
+//     finalize time, so the ALGORITHM never needs a "real" 64-bit quantity.
+//
+//     NOTE — this file does NOT compile for riscv32/xtensa as written: every
+//     declaration here is `u64`, and those dialects reject 64-bit types
+//     outright (`error: 64-bit integers not supported`). Host-only is correct
+//     for its purpose — the esp-image hash is computed at COMPILE time, by the
+//     compiler, on the host; nothing hashes on the ESP32. Because the algorithm
+//     carries no true 64-bit value, porting to a 32-bit dialect would be a
+//     mechanical `u64` -> `uint32` substitution (plus `u64[64] w` becoming a
+//     256-byte `uint32[64]`) — but that port has NOT been done. Do not assume
+//     this is drop-in for a 32-bit target.
+//
+//   * The context is a caller-provided flat byte buffer, not a struct —
+//     KernRift struct field writes through a function parameter do not
+//     reliably persist, so every field access here goes through explicit
+//     byte-offset load8/store8/load32/store32 calls instead.
+
+// ---------------------------------------------------------------------------
+// Context layout (SHA256_CTX_SIZE = 112 bytes total):
+//
+//   offset   size   field
+//   0        32     H[0..7]   — eight 32-bit state words (4 bytes each)
+//   32       64     block     — partial-block scratch buffer
+//   96       4      buflen    — bytes currently buffered in `block` (0..63)
+//   100      4      len_lo    — total message length in bytes, low 32 bits
+//   104      4      len_hi    — total message length in bytes, high 32 bits
+//   108      4      (reserved, unused — keeps the layout round and leaves
+//                    room for future extension without changing the size)
+// ---------------------------------------------------------------------------
+
+static uint64 SHA256_CTX_SIZE = 112
+
+const u64 SHA256_OFF_H      = 0
+const u64 SHA256_OFF_BLOCK  = 32
+const u64 SHA256_OFF_BUFLEN = 96
+const u64 SHA256_OFF_LENLO  = 100
+const u64 SHA256_OFF_LENHI  = 104
+
+// ---------------------------------------------------------------------------
+// Round-constant table (FIPS 180-4), lazily allocated once and cached —
+// mirrors the std/font.kr pattern of a static pointer plus a first-call
+// guard so repeated hashing doesn't repeatedly re-populate it.
+// ---------------------------------------------------------------------------
+
+static u64 sha256_k_ptr = 0
+
+fn sha256_k_table() -> u64 {
+    if sha256_k_ptr != 0 { return sha256_k_ptr }
+    u64 k = alloc(256)
+    store32(k + 0, 0x428a2f98)
+    store32(k + 4, 0x71374491)
+    store32(k + 8, 0xb5c0fbcf)
+    store32(k + 12, 0xe9b5dba5)
+    store32(k + 16, 0x3956c25b)
+    store32(k + 20, 0x59f111f1)
+    store32(k + 24, 0x923f82a4)
+    store32(k + 28, 0xab1c5ed5)
+    store32(k + 32, 0xd807aa98)
+    store32(k + 36, 0x12835b01)
+    store32(k + 40, 0x243185be)
+    store32(k + 44, 0x550c7dc3)
+    store32(k + 48, 0x72be5d74)
+    store32(k + 52, 0x80deb1fe)
+    store32(k + 56, 0x9bdc06a7)
+    store32(k + 60, 0xc19bf174)
+    store32(k + 64, 0xe49b69c1)
+    store32(k + 68, 0xefbe4786)
+    store32(k + 72, 0x0fc19dc6)
+    store32(k + 76, 0x240ca1cc)
+    store32(k + 80, 0x2de92c6f)
+    store32(k + 84, 0x4a7484aa)
+    store32(k + 88, 0x5cb0a9dc)
+    store32(k + 92, 0x76f988da)
+    store32(k + 96, 0x983e5152)
+    store32(k + 100, 0xa831c66d)
+    store32(k + 104, 0xb00327c8)
+    store32(k + 108, 0xbf597fc7)
+    store32(k + 112, 0xc6e00bf3)
+    store32(k + 116, 0xd5a79147)
+    store32(k + 120, 0x06ca6351)
+    store32(k + 124, 0x14292967)
+    store32(k + 128, 0x27b70a85)
+    store32(k + 132, 0x2e1b2138)
+    store32(k + 136, 0x4d2c6dfc)
+    store32(k + 140, 0x53380d13)
+    store32(k + 144, 0x650a7354)
+    store32(k + 148, 0x766a0abb)
+    store32(k + 152, 0x81c2c92e)
+    store32(k + 156, 0x92722c85)
+    store32(k + 160, 0xa2bfe8a1)
+    store32(k + 164, 0xa81a664b)
+    store32(k + 168, 0xc24b8b70)
+    store32(k + 172, 0xc76c51a3)
+    store32(k + 176, 0xd192e819)
+    store32(k + 180, 0xd6990624)
+    store32(k + 184, 0xf40e3585)
+    store32(k + 188, 0x106aa070)
+    store32(k + 192, 0x19a4c116)
+    store32(k + 196, 0x1e376c08)
+    store32(k + 200, 0x2748774c)
+    store32(k + 204, 0x34b0bcb5)
+    store32(k + 208, 0x391c0cb3)
+    store32(k + 212, 0x4ed8aa4a)
+    store32(k + 216, 0x5b9cca4f)
+    store32(k + 220, 0x682e6ff3)
+    store32(k + 224, 0x748f82ee)
+    store32(k + 228, 0x78a5636f)
+    store32(k + 232, 0x84c87814)
+    store32(k + 236, 0x8cc70208)
+    store32(k + 240, 0x90befffa)
+    store32(k + 244, 0xa4506ceb)
+    store32(k + 248, 0xbef9a3f7)
+    store32(k + 252, 0xc67178f2)
+    sha256_k_ptr = k
+    return k
+}
+
+// ---------------------------------------------------------------------------
+// 32-bit bit-manipulation primitives. Every one masks its result to 32
+// bits before returning — callers never have to re-mask a primitive's
+// output, only the sums they build out of several of them.
+// ---------------------------------------------------------------------------
+
+// Rotate `x` right by `n` bits within a 32-bit word (1 <= n <= 31 for all
+// call sites in this file — never called with n == 0, which would shift
+// by 32 and hit hardware shift-amount masking).
+fn sha256_rotr(u64 x, u64 n) -> u64 {
+    u64 xm = x & 0xFFFFFFFF
+    u64 left = xm >> n
+    u64 right = (xm << (32 - n)) & 0xFFFFFFFF
+    return (left | right) & 0xFFFFFFFF
+}
+
+fn sha256_shr(u64 x, u64 n) -> u64 {
+    return (x & 0xFFFFFFFF) >> n
+}
+
+fn sha256_ch(u64 e, u64 f, u64 g) -> u64 {
+    u64 t1 = e & f
+    u64 not_e = (~e) & 0xFFFFFFFF
+    u64 t2 = not_e & g
+    return (t1 ^ t2) & 0xFFFFFFFF
+}
+
+fn sha256_maj(u64 a, u64 b, u64 c) -> u64 {
+    u64 t1 = a & b
+    u64 t2 = a & c
+    u64 t3 = b & c
+    u64 x = t1 ^ t2
+    return (x ^ t3) & 0xFFFFFFFF
+}
+
+// Big Sigma 0 (used on `a` in the compression round).
+fn sha256_big_sigma0(u64 x) -> u64 {
+    u64 r1 = sha256_rotr(x, 2)
+    u64 r2 = sha256_rotr(x, 13)
+    u64 r3 = sha256_rotr(x, 22)
+    u64 t = r1 ^ r2
+    return (t ^ r3) & 0xFFFFFFFF
+}
+
+// Big Sigma 1 (used on `e` in the compression round).
+fn sha256_big_sigma1(u64 x) -> u64 {
+    u64 r1 = sha256_rotr(x, 6)
+    u64 r2 = sha256_rotr(x, 11)
+    u64 r3 = sha256_rotr(x, 25)
+    u64 t = r1 ^ r2
+    return (t ^ r3) & 0xFFFFFFFF
+}
+
+// Small sigma 0 (message schedule).
+fn sha256_small_sigma0(u64 x) -> u64 {
+    u64 r1 = sha256_rotr(x, 7)
+    u64 r2 = sha256_rotr(x, 18)
+    u64 r3 = sha256_shr(x, 3)
+    u64 t = r1 ^ r2
+    return (t ^ r3) & 0xFFFFFFFF
+}
+
+// Small sigma 1 (message schedule).
+fn sha256_small_sigma1(u64 x) -> u64 {
+    u64 r1 = sha256_rotr(x, 17)
+    u64 r2 = sha256_rotr(x, 19)
+    u64 r3 = sha256_shr(x, 10)
+    u64 t = r1 ^ r2
+    return (t ^ r3) & 0xFFFFFFFF
+}
+
+// Write `val`'s low 32 bits to `p` as 4 big-endian bytes.
+fn sha256_store_be32(u64 p, u64 val) {
+    u64 b0 = (val >> 24) & 0xFF
+    u64 b1 = (val >> 16) & 0xFF
+    u64 b2 = (val >> 8) & 0xFF
+    u64 b3 = val & 0xFF
+    u8 bb0 = b0
+    u8 bb1 = b1
+    u8 bb2 = b2
+    u8 bb3 = b3
+    store8(p, bb0)
+    store8(p + 1, bb1)
+    store8(p + 2, bb2)
+    store8(p + 3, bb3)
+}
+
+// Read 4 big-endian bytes at `p` as a 32-bit value.
+fn sha256_load_be32(u64 p) -> u64 {
+    u64 b0 = load8(p)
+    u64 b1 = load8(p + 1)
+    u64 b2 = load8(p + 2)
+    u64 b3 = load8(p + 3)
+    u64 s0 = (b0 << 24) & 0xFFFFFFFF
+    u64 s1 = (b1 << 16) & 0xFFFFFFFF
+    u64 s2 = (b2 << 8) & 0xFFFFFFFF
+    u64 acc = s0 | s1
+    acc = acc | s2
+    acc = acc | b3
+    return acc & 0xFFFFFFFF
+}
+
+// ---------------------------------------------------------------------------
+// Core compression function — processes exactly one 64-byte block sitting
+// at `block` and folds it into the running state in `ctx`.
+// ---------------------------------------------------------------------------
+
+fn sha256_transform(u64 ctx, u64 block) {
+    u64[64] w
+    u64 t = 0
+    while t < 16 {
+        // Folded into the store rather than named: the unused-variable
+        // analysis does not currently treat the RHS of an `arr[i] = expr`
+        // store as a use, so a temporary here draws a spurious warning on
+        // every compiler build. Same reason for `sum` in the loop below.
+        w[t] = sha256_load_be32(block + t * 4)
+        t = t + 1
+    }
+    while t < 64 {
+        // W[t] = sigma1(W[t-2]) + W[t-7] + sigma0(W[t-15]) + W[t-16], mod 2^32.
+        // Written as one expression for the reason noted above: a temporary
+        // whose only use is the RHS of an array store draws a spurious
+        // unused-variable warning. Naming any part of this (the two sigma
+        // results, or the sum) just moves the warning onto whatever is left.
+        w[t] = (sha256_small_sigma1(w[t - 2]) + w[t - 7]
+                + sha256_small_sigma0(w[t - 15]) + w[t - 16]) & 0xFFFFFFFF
+        t = t + 1
+    }
+
+    u64 a = load32(ctx + SHA256_OFF_H + 0)
+    u64 b = load32(ctx + SHA256_OFF_H + 4)
+    u64 c = load32(ctx + SHA256_OFF_H + 8)
+    u64 d = load32(ctx + SHA256_OFF_H + 12)
+    u64 e = load32(ctx + SHA256_OFF_H + 16)
+    u64 f = load32(ctx + SHA256_OFF_H + 20)
+    u64 g = load32(ctx + SHA256_OFF_H + 24)
+    u64 h = load32(ctx + SHA256_OFF_H + 28)
+
+    u64 kk = sha256_k_table()
+
+    t = 0
+    while t < 64 {
+        u64 kt = load32(kk + t * 4)
+        u64 wt = w[t]
+        u64 bs1 = sha256_big_sigma1(e)
+        u64 chv = sha256_ch(e, f, g)
+        u64 temp1 = (h + bs1 + chv + kt + wt) & 0xFFFFFFFF
+        u64 bs0 = sha256_big_sigma0(a)
+        u64 majv = sha256_maj(a, b, c)
+        u64 temp2 = (bs0 + majv) & 0xFFFFFFFF
+
+        h = g
+        g = f
+        f = e
+        e = (d + temp1) & 0xFFFFFFFF
+        d = c
+        c = b
+        b = a
+        a = (temp1 + temp2) & 0xFFFFFFFF
+
+        t = t + 1
+    }
+
+    u64 h0 = (load32(ctx + SHA256_OFF_H + 0) + a) & 0xFFFFFFFF
+    u64 h1 = (load32(ctx + SHA256_OFF_H + 4) + b) & 0xFFFFFFFF
+    u64 h2 = (load32(ctx + SHA256_OFF_H + 8) + c) & 0xFFFFFFFF
+    u64 h3 = (load32(ctx + SHA256_OFF_H + 12) + d) & 0xFFFFFFFF
+    u64 h4 = (load32(ctx + SHA256_OFF_H + 16) + e) & 0xFFFFFFFF
+    u64 h5 = (load32(ctx + SHA256_OFF_H + 20) + f) & 0xFFFFFFFF
+    u64 h6 = (load32(ctx + SHA256_OFF_H + 24) + g) & 0xFFFFFFFF
+    u64 h7 = (load32(ctx + SHA256_OFF_H + 28) + h) & 0xFFFFFFFF
+
+    store32(ctx + SHA256_OFF_H + 0, h0)
+    store32(ctx + SHA256_OFF_H + 4, h1)
+    store32(ctx + SHA256_OFF_H + 8, h2)
+    store32(ctx + SHA256_OFF_H + 12, h3)
+    store32(ctx + SHA256_OFF_H + 16, h4)
+    store32(ctx + SHA256_OFF_H + 20, h5)
+    store32(ctx + SHA256_OFF_H + 24, h6)
+    store32(ctx + SHA256_OFF_H + 28, h7)
+}
+
+// ---------------------------------------------------------------------------
+// Public streaming API
+// ---------------------------------------------------------------------------
+
+// Initialize (or reset) a context. `ctx` must point to SHA256_CTX_SIZE
+// bytes owned by the caller.
+fn sha256_init(u64 ctx) {
+    store32(ctx + SHA256_OFF_H + 0, 0x6a09e667)
+    store32(ctx + SHA256_OFF_H + 4, 0xbb67ae85)
+    store32(ctx + SHA256_OFF_H + 8, 0x3c6ef372)
+    store32(ctx + SHA256_OFF_H + 12, 0xa54ff53a)
+    store32(ctx + SHA256_OFF_H + 16, 0x510e527f)
+    store32(ctx + SHA256_OFF_H + 20, 0x9b05688c)
+    store32(ctx + SHA256_OFF_H + 24, 0x1f83d9ab)
+    store32(ctx + SHA256_OFF_H + 28, 0x5be0cd19)
+    store32(ctx + SHA256_OFF_BUFLEN, 0)
+    store32(ctx + SHA256_OFF_LENLO, 0)
+    store32(ctx + SHA256_OFF_LENHI, 0)
+}
+
+// Add `nbytes` to the context's running total message length (a 64-bit
+// byte count carried as two 32-bit halves — see the file header comment).
+fn sha256_add_len(u64 ctx, u64 nbytes) {
+    u64 lo = load32(ctx + SHA256_OFF_LENLO)
+    u64 hi = load32(ctx + SHA256_OFF_LENHI)
+    u64 sum = lo + nbytes
+    u64 new_lo = sum & 0xFFFFFFFF
+    u64 carry = sum >> 32
+    u64 new_hi = (hi + carry) & 0xFFFFFFFF
+    store32(ctx + SHA256_OFF_LENLO, new_lo)
+    store32(ctx + SHA256_OFF_LENHI, new_hi)
+}
+
+// Feed `len` bytes at `data` into the running hash. May be called any
+// number of times with arbitrary chunk sizes; partial blocks are buffered
+// in the context between calls.
+fn sha256_update(u64 ctx, u64 data, u64 len) {
+    if len == 0 { return }
+    sha256_add_len(ctx, len)
+
+    u64 block = ctx + SHA256_OFF_BLOCK
+    u64 buflen = load32(ctx + SHA256_OFF_BUFLEN)
+    u64 i = 0
+
+    if buflen > 0 {
+        u64 need = 64 - buflen
+        u64 take = need
+        if take > len { take = len }
+        memcpy(block + buflen, data, take)
+        buflen = buflen + take
+        i = take
+        if buflen == 64 {
+            sha256_transform(ctx, block)
+            buflen = 0
+        }
+    }
+
+    while (len - i) >= 64 {
+        memcpy(block, data + i, 64)
+        sha256_transform(ctx, block)
+        i = i + 64
+    }
+
+    if i < len {
+        u64 rem = len - i
+        memcpy(block + buflen, data + i, rem)
+        buflen = buflen + rem
+    }
+
+    store32(ctx + SHA256_OFF_BUFLEN, buflen)
+}
+
+// Finalize the hash: apply FIPS 180-4 padding, process the trailing
+// block(s), and write the 32-byte raw digest to `out32`. The context must
+// not be reused after this call without a fresh sha256_init.
+fn sha256_final(u64 ctx, u64 out32) {
+    u64 block = ctx + SHA256_OFF_BLOCK
+    u64 buflen = load32(ctx + SHA256_OFF_BUFLEN)
+    u64 len_lo = load32(ctx + SHA256_OFF_LENLO)
+    u64 len_hi = load32(ctx + SHA256_OFF_LENHI)
+
+    // 64-bit bit-length, built from the 64-bit byte-length's two 32-bit
+    // halves without ever forming one true 64-bit value:
+    //   bit_lo = (byte_lo << 3) & 0xFFFFFFFF
+    //   bit_hi = (byte_hi << 3) | (byte_lo >> 29)     -- no overlap: the
+    //     low 3 bits of (byte_hi << 3) are always zero, and byte_lo >> 29
+    //     only ever occupies bits 0..2, so OR is exact addition here.
+    u64 bit_lo = (len_lo << 3) & 0xFFFFFFFF
+    u64 hi_from_hi = (len_hi << 3) & 0xFFFFFFFF
+    u64 hi_from_lo = len_lo >> 29
+    u64 bit_hi = (hi_from_hi | hi_from_lo) & 0xFFFFFFFF
+
+    u8 pad80 = 0x80
+    store8(block + buflen, pad80)
+    buflen = buflen + 1
+
+    if buflen > 56 {
+        u64 zi = buflen
+        while zi < 64 {
+            u8 zb = 0
+            store8(block + zi, zb)
+            zi = zi + 1
+        }
+        sha256_transform(ctx, block)
+        buflen = 0
+    }
+
+    u64 zi2 = buflen
+    while zi2 < 56 {
+        u8 zb2 = 0
+        store8(block + zi2, zb2)
+        zi2 = zi2 + 1
+    }
+
+    sha256_store_be32(block + 56, bit_hi)
+    sha256_store_be32(block + 60, bit_lo)
+
+    sha256_transform(ctx, block)
+
+    u64 wi = 0
+    while wi < 8 {
+        u64 hv = load32(ctx + SHA256_OFF_H + wi * 4)
+        sha256_store_be32(out32 + wi * 4, hv)
+        wi = wi + 1
+    }
+}
+
+// Convenience one-shot: hash `len` bytes at `data` and write the 32-byte
+// digest to `out32` without the caller having to manage a context.
+fn sha256_hash(u64 data, u64 len, u64 out32) {
+    u64 ctx = alloc(SHA256_CTX_SIZE)
+    sha256_init(ctx)
+    sha256_update(ctx, data, len)
+    sha256_final(ctx, out32)
+    dealloc(ctx)
+}

@@ -1,0 +1,27 @@
+// examples/esp32/minimal.kr — the smallest --target=esp32 program, used by
+// tests/run_tests.sh `esp32_image_structure` to inspect the esp-image the
+// compiler emits (design doc §1/§3: two RAM segments the ESP32 mask ROM
+// loads directly from flash offset 0x1000).
+//
+// Build:
+//   krc --arch=xtensa --freestanding --target=esp32 \
+//       examples/esp32/minimal.kr -o minimal.bin
+//
+// Expected image shape (asserted by the structure test with od only):
+//   segment 0 = DRAM data @ 0x3FFB0000   (strings + statics — byte-addressable)
+//   segment 1 = IRAM code @ 0x40080400   (code + literal pools ONLY)
+//   entry inside [0x40080400, 0x400A0000)
+//
+// The one INITIALIZED static below is deliberate, not decoration: esptool
+// omits empty sections, so the compiler skips zero-length segments to stay
+// byte-comparable with `elf2image` output. A truly empty program would
+// legitimately produce a 1-segment image; `marker = 42` keeps the DRAM
+// segment non-empty so the 2-segment assertion holds.
+
+static u32 marker = 42
+
+fn main() {
+    marker = marker + 1     // STATIC_LOAD/STORE — a real DRAM data reference
+    // Freestanding: nothing to return to. Park the core forever.
+    loop { }
+}

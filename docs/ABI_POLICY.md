@@ -74,11 +74,29 @@ Currently frozen: all helpers documented in `docs/ERROR_HANDLING.md`
 | Flag                     | Stability |
 |--------------------------|-----------|
 | `--emit=exe/obj/asm/ir`  | Stable    |
-| `--target=<triple>`      | Stable    |
+| `--target=<name>`        | Stable    |
 | `--legacy`               | Stable during the IR migration; may become a no-op later. |
 | `--coalesce` / `--no-coalesce` | Stable surface — the heuristic may change. |
 | `--O0` / `--O1`          | Stable surface — the underlying optimizations may change. |
 | `--check=<list>`         | Experimental — not yet present; reserved. |
+
+`--target=` takes a **name**, not an LLVM-style triple. The accepted values
+are exactly:
+
+| Value | Meaning |
+|-------|---------|
+| `linux` | Linux (the default) |
+| `macos`, `darwin` | macOS |
+| `windows`, `win` | Windows |
+| `android` | Android |
+| `esp32` | ESP32 (Xtensa LX6) esp-image; requires `--arch=xtensa --freestanding` |
+
+Anything else is a hard error. A triple such as `aarch64-linux-android` has
+never been accepted — before v2.8 it matched nothing, fell through the
+dispatch chain and was silently ignored, producing a default-target binary.
+It is now rejected outright. Note that `--target=` selects the **OS** (or, for
+`esp32`, the machine target); the instruction set is selected separately with
+`--arch=`.
 
 Removing or renaming a flag requires a minor-version bump. Changing the
 *default* value of a flag (e.g., `--O1` becoming `--O2`) also requires a

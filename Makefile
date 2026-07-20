@@ -14,6 +14,7 @@ DIST_DIR = dist
 SRCS = src/lexer.kr src/ast.kr src/parser.kr src/codegen.kr \
        src/codegen_aarch64.kr src/ir.kr src/ir_aarch64.kr src/ir_riscv.kr src/codegen_riscv.kr src/ir_xtensa.kr src/codegen_xtensa.kr src/format_macho.kr src/format_pe.kr \
        src/format_archive.kr src/format_android.kr src/bcj.kr src/analysis.kr src/type_check.kr src/inliner.kr src/living.kr \
+       std/sha256.kr src/format_espimage.kr \
        src/runtime.kr src/formatter.kr src/main.kr
 
 .PHONY: all build kr-runner test install dist clean bootstrap check

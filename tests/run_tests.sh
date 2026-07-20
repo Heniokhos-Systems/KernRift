@@ -6354,6 +6354,926 @@ else
     echo "  riscv_hosted_sysfence_asm: SKIP (riscv64-linux-gnu-objdump not installed)"
 fi
 
+# --- SHA-256 (std/sha256.kr) — FIPS 180-4 test vectors ---
+# Vector 3 is exactly 56 bytes: padding must spill into a second 64-byte
+# block (0x80 + 55 zero-fill bytes would leave no room for the 8-byte
+# length trailer), the classic off-by-one every SHA-256 implementation
+# has to get right.
+run_test_output "sha256_vectors" 'import "std/sha256.kr"
+
+fn digest_to_hex(u64 out32) -> u64 {
+    u64 hexbuf = alloc(65)
+    u64 i = 0
+    while i < 32 {
+        u64 b = load8(out32 + i)
+        u64 hi = (b >> 4) & 0xF
+        u64 lo = b & 0xF
+        u64 hi_ch = hi + 48
+        if hi >= 10 { hi_ch = hi - 10 + 97 }
+        u64 lo_ch = lo + 48
+        if lo >= 10 { lo_ch = lo - 10 + 97 }
+        u8 hc = hi_ch
+        u8 lc = lo_ch
+        store8(hexbuf + i * 2, hc)
+        store8(hexbuf + i * 2 + 1, lc)
+        i = i + 1
+    }
+    u8 z = 0
+    store8(hexbuf + 64, z)
+    return hexbuf
+}
+
+fn hash_and_print(u64 data, u64 len) {
+    u64 ctx = alloc(SHA256_CTX_SIZE)
+    u64 out = alloc(32)
+    sha256_init(ctx)
+    sha256_update(ctx, data, len)
+    sha256_final(ctx, out)
+    println_str(digest_to_hex(out))
+}
+
+fn hash_chunked_and_print(u64 data, u64 len, u64 chunk) {
+    u64 ctx = alloc(SHA256_CTX_SIZE)
+    u64 out = alloc(32)
+    sha256_init(ctx)
+    u64 off = 0
+    while off < len {
+        u64 n = chunk
+        if off + n > len { n = len - off }
+        sha256_update(ctx, data + off, n)
+        off = off + n
+    }
+    sha256_final(ctx, out)
+    println_str(digest_to_hex(out))
+}
+
+fn main() {
+    hash_and_print("", 0)
+    hash_and_print("abc", 3)
+    u64 v3 = "abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq"
+    hash_and_print(v3, 56)
+    hash_chunked_and_print("abc", 3, 1)
+    hash_chunked_and_print(v3, 56, 5)
+    // Padding-boundary vectors (all-'a' messages of 55/64/128 bytes):
+    //   55  -> after the 0x80 pad byte buflen is exactly 56, which still
+    //          leaves room for the 8-byte length trailer, so NO extra block
+    //          is needed. Distinguishes `buflen > 56` from `buflen >= 56`.
+    //   64  -> an exact multiple of the block size, so the update loop must
+    //          still consume the final full block. Distinguishes
+    //          `(len - i) >= 64` from `(len - i) > 64`.
+    //   128 -> two whole blocks, same boundary one iteration further in.
+    u64 va = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    hash_and_print(va, 55)
+    hash_and_print(va, 64)
+    hash_and_print(va, 128)
+    hash_chunked_and_print(va, 64, 16)
+    hash_chunked_and_print(va, 128, 33)
+    u64 v6 = "0123456789abcdefghijklmnopqrstuvwxyz0123456789abcdefghijklmnopqrstuvwxyz0123456789abcdefghijklmnopqrstuvwxyz0123456789abcdefghijklmnopqrstuvwxyz0123456789abcdefghijklmnopqrstuvwxyz0123456789abcdefghij"
+    hash_and_print(v6, 200)
+    hash_chunked_and_print(v6, 200, 7)
+    exit(0)
+}' 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad
+248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1
+ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad
+248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1
+9f4390f8d30c2dd92ec9f095b65e2b9ae9b0a925a5258e241c9f1e910f734318
+ffe054fe7ae0cb6dc65c3af9b61d5209f439851db43d0ba5997337df154668eb
+6836cf13bac400e9105071cd6af47084dfacad4e5e302c94bfed24e013afb73e
+ffe054fe7ae0cb6dc65c3af9b61d5209f439851db43d0ba5997337df154668eb
+6836cf13bac400e9105071cd6af47084dfacad4e5e302c94bfed24e013afb73e
+41c907495210b51aa9575a7e43e7546e3c25eb15d34bbb6a828b42c830d1dc5f
+41c907495210b51aa9575a7e43e7546e3c25eb15d34bbb6a828b42c830d1dc5f'
+
+# --- esp32 esp-image container writer — byte-identity vs esptool golden ---
+# tests/golden/esp32_ref_image.bin was produced ONCE by esptool v5.3.1
+# (`esptool --chip esp32 elf2image --flash-mode dio --flash-freq 40m
+# --flash-size 4MB`) from tests/golden/esp32_ref_image.s (see that file's
+# header for the exact reproduction commands). The harness below feeds
+# esp_image_begin/segment/finish the exact same entry point, segment order
+# (esptool sorts ascending by load address: DRAM 0x3FFB0000 first, then
+# IRAM 0x40080400) and raw section payloads (7 bytes each — NOT a multiple
+# of 4, so the writer's zero-pad-to-4 path is exercised), then requires the
+# result to be BYTE-IDENTICAL to esptool's output. Any diff = a wrong field
+# = an image the ESP32 boot ROM may silently refuse to boot.
+echo ""
+echo "--- esp32 esp-image container byte-identity test ---"
+TOTAL=$((TOTAL + 1))
+ESP_SRC="$DIR/../test_tmp_esp_$$.kr"
+ESP_BIN="/tmp/krc_esp_$$"
+ESP_OUT="/tmp/our_image.bin"
+ESP_GOLD="$DIR/golden/esp32_ref_image.bin"
+cat > "$ESP_SRC" <<'ESP_EOF'
+import "std/sha256.kr"
+import "src/format_espimage.kr"
+
+fn esp_put8(u64 p, u64 v) {
+    u8 b = v
+    store8(p, b)
+}
+
+fn main() {
+    // .data section of tests/golden/esp32_ref_image.s — 7 raw bytes.
+    u64 dat = alloc(7)
+    esp_put8(dat + 0, 0x11)
+    esp_put8(dat + 1, 0x22)
+    esp_put8(dat + 2, 0x33)
+    esp_put8(dat + 3, 0x44)
+    esp_put8(dat + 4, 0x55)
+    esp_put8(dat + 5, 0x66)
+    esp_put8(dat + 6, 0x77)
+    // .text section (movi.n a2,42 / nop.n / memw) — 7 raw bytes.
+    u64 txt = alloc(7)
+    esp_put8(txt + 0, 0x2C)
+    esp_put8(txt + 1, 0xA2)
+    esp_put8(txt + 2, 0x3D)
+    esp_put8(txt + 3, 0xF0)
+    esp_put8(txt + 4, 0xC0)
+    esp_put8(txt + 5, 0x20)
+    esp_put8(txt + 6, 0x00)
+
+    esp_image_begin(0x40080400, 2)
+    esp_image_segment(0x3FFB0000, dat, 7)
+    esp_image_segment(0x40080400, txt, 7)
+    esp_image_finish()
+
+    u64 fd = file_open("/tmp/our_image.bin", 1)
+    write(fd, esp_image_buf, esp_image_len)
+    file_close(fd)
+    exit(0)
+}
+ESP_EOF
+if [ ! -f "$ESP_GOLD" ]; then
+    echo "FAIL: esp32_image_format (golden reference $ESP_GOLD missing)"
+    FAIL=$((FAIL + 1))
+elif ! $KRC $KRC_FLAGS "$ESP_SRC" -o "$ESP_BIN" >/dev/null 2>&1; then
+    echo "FAIL: esp32_image_format (harness compilation failed)"
+    $KRC $KRC_FLAGS "$ESP_SRC" -o "$ESP_BIN" 2>&1 | head -3
+    FAIL=$((FAIL + 1))
+else
+    chmod +x "$ESP_BIN"
+    rm -f "$ESP_OUT"
+    "$ESP_BIN" >/dev/null 2>&1
+    if cmp -s "$ESP_OUT" "$ESP_GOLD"; then
+        PASS=$((PASS + 1))
+        echo "  esp32_image_format: PASS ($(wc -c < "$ESP_GOLD" | tr -d ' ') bytes byte-identical to esptool reference)"
+    else
+        echo "FAIL: esp32_image_format (image differs from esptool golden reference)"
+        cmp "$ESP_OUT" "$ESP_GOLD" 2>&1 | head -3
+        FAIL=$((FAIL + 1))
+    fi
+fi
+rm -f "$ESP_SRC" "$ESP_BIN" "$ESP_OUT"
+
+# --- esp32 machine target: --target=esp32 image structure + IRAM/DRAM guard ---
+# Task 3 of the ESP32 machine-target plan. Compiles examples/esp32/minimal.kr
+# with --arch=xtensa --freestanding --target=esp32 and asserts the esp-image
+# structure with od ONLY (no esptool — must run in CI):
+#   byte 0 = 0xE9 (magic), byte 1 = 0x02 (two segments), byte 2 = 0x02 (DIO),
+#   byte 3 = 0x20 (4MB @ 40MHz), entry (bytes 4-7 LE) inside IRAM
+#   [0x40080400, 0x400A0000), segment 0 load_addr (0x18-0x1B LE) = 0x3FFB0000
+#   (DRAM data — ascending load order, matching esptool), segment 1 load_addr
+#   = 0x40080400 (IRAM code). Segment 1's header offset is DERIVED from
+#   segment 0's data_len (header at 0x20 + seg0_len) — never hardcoded, it
+#   moves with the data size.
+echo ""
+echo "--- esp32 machine-target image structure test ---"
+TOTAL=$((TOTAL + 1))
+ESP_MIN_BIN="/tmp/krc_esp_min_$$.bin"
+ESP_ST_OK=1
+esp_field() { od -An -tu4 -j "$2" -N 4 "$1" 2>/dev/null | tr -d ' '; }
+if ! $KRC --arch=xtensa --freestanding --target=esp32 \
+     "$DIR/../examples/esp32/minimal.kr" -o "$ESP_MIN_BIN" >/dev/null 2>&1; then
+    echo "FAIL: esp32_image_structure (compilation failed)"
+    $KRC --arch=xtensa --freestanding --target=esp32 \
+        "$DIR/../examples/esp32/minimal.kr" -o "$ESP_MIN_BIN" 2>&1 | head -3
+    ESP_ST_OK=0
+else
+    ESP_HDR=$(od -An -tx1 -j 0 -N 4 "$ESP_MIN_BIN" | tr -d ' ')
+    if [ "$ESP_HDR" != "e9020220" ]; then
+        echo "FAIL: esp32_image_structure (header bytes 0-3 = '$ESP_HDR', want 'e9020220')"
+        ESP_ST_OK=0
+    fi
+    ESP_ENTRY=$(esp_field "$ESP_MIN_BIN" 4)
+    if [ -z "$ESP_ENTRY" ] || [ "$ESP_ENTRY" -lt $((0x40080400)) ] \
+       || [ "$ESP_ENTRY" -ge $((0x400A0000)) ]; then
+        echo "FAIL: esp32_image_structure (entry $ESP_ENTRY outside IRAM [0x40080400,0x400A0000))"
+        ESP_ST_OK=0
+    fi
+    ESP_SEG0_LOAD=$(esp_field "$ESP_MIN_BIN" $((0x18)))
+    ESP_SEG0_LEN=$(esp_field "$ESP_MIN_BIN" $((0x1C)))
+    if [ "$ESP_SEG0_LOAD" != "$((0x3FFB0000))" ]; then
+        echo "FAIL: esp32_image_structure (segment 0 load_addr $ESP_SEG0_LOAD != 0x3FFB0000 DRAM data)"
+        ESP_ST_OK=0
+    fi
+    # Segment 1's header follows segment 0's payload: 0x20 + seg0_len.
+    if [ -n "$ESP_SEG0_LEN" ]; then
+        ESP_SEG1_LOAD=$(esp_field "$ESP_MIN_BIN" $((0x20 + ESP_SEG0_LEN)))
+        if [ "$ESP_SEG1_LOAD" != "$((0x40080400))" ]; then
+            echo "FAIL: esp32_image_structure (segment 1 load_addr $ESP_SEG1_LOAD != 0x40080400 IRAM code)"
+            ESP_ST_OK=0
+        fi
+    else
+        echo "FAIL: esp32_image_structure (segment 0 data_len unreadable)"
+        ESP_ST_OK=0
+    fi
+fi
+if [ "$ESP_ST_OK" = 1 ]; then
+    PASS=$((PASS + 1))
+    echo "  esp32_image_structure: PASS (e9/02/02/20, entry in IRAM, DRAM@0x3FFB0000 + IRAM@0x40080400 ascending)"
+else
+    FAIL=$((FAIL + 1))
+fi
+rm -f "$ESP_MIN_BIN"
+
+# --- esp32 guard tests: unsupported combos must be COMPILE errors ---
+# (1) --target=esp32 without --arch=xtensa --freestanding is rejected.
+# (2) Programs that cannot be laid out safely in the ESP32 memory map must
+#     LOUD-FAIL at compile time and leave NO output file behind. Past the DRAM
+#     window [0x3FFB0000,0x3FFE0000) the next addresses are ROM-reserved RAM
+#     and then (at 0x40000000+) IRAM, which is 32-bit-access-only — a
+#     byte-addressed datum there raises LoadStoreError and the board is dead
+#     with no output and no JTAG. Prefer a false positive that blocks a build
+#     over a false negative that bricks a board.
+#
+# ⚠️ Each case below asserts on the SPECIFIC error text, because there are
+# THREE distinct guards that all reject an oversized program and it is very
+# easy to write a case that looks like it covers one while actually tripping
+# another. They are, in the order they fire:
+#   (a) resolve_addr_fixups_xtensa_esp32, per-datum, "would land in IRAM" —
+#       one datum's own address computes into the IRAM range;
+#   (b) resolve_addr_fixups_xtensa_esp32, per-datum, "falls outside the DRAM
+#       window" — one datum's own address is past the window;
+#   (c) xt_esp32_check_layout, whole-segment, "data+bss exceed the DRAM
+#       window" / "less than 4 KiB below the initial stack pointer" — the
+#       total memsz does not fit, even though every individual base does.
+# A case that only trips (a) or (b) leaves (c) completely untested.
+esp_guard_expect() {
+    # $1 = case label, $2 = expected error substring, $3 = source file
+    rm -f "$ESP_G_BIN"
+    ESP_G_ERR=$($KRC --arch=xtensa --freestanding --target=esp32 \
+                "$3" -o "$ESP_G_BIN" 2>&1)
+    if [ $? -eq 0 ]; then
+        echo "FAIL: esp32_guards ($1 accepted — expected a compile error)"
+        ESP_G_OK=0
+    elif [ -f "$ESP_G_BIN" ]; then
+        echo "FAIL: esp32_guards ($1 errored but still left an output image behind)"
+        ESP_G_OK=0
+    elif ! printf '%s' "$ESP_G_ERR" | grep -qF "$2"; then
+        echo "FAIL: esp32_guards ($1 rejected by the WRONG guard)"
+        echo "  expected error to contain: $2"
+        echo "  actual error: $ESP_G_ERR"
+        ESP_G_OK=0
+    fi
+    rm -f "$ESP_G_BIN"
+}
+echo ""
+echo "--- esp32 guard tests (bad combos are compile errors) ---"
+TOTAL=$((TOTAL + 1))
+ESP_G_OK=1
+ESP_G_BIN="/tmp/krc_esp_guard_$$.bin"
+ESP_G_SRC="$DIR/../test_tmp_espguard_$$.kr"
+rm -f "$ESP_G_BIN"
+if $KRC --arch=riscv32 --freestanding --target=esp32 \
+     "$DIR/../examples/esp32/minimal.kr" -o "$ESP_G_BIN" >/dev/null 2>&1; then
+    echo "FAIL: esp32_guards (--target=esp32 accepted without --arch=xtensa)"
+    ESP_G_OK=0
+fi
+if $KRC --arch=xtensa --target=esp32 \
+     "$DIR/../examples/esp32/minimal.kr" -o "$ESP_G_BIN" >/dev/null 2>&1; then
+    echo "FAIL: esp32_guards (--target=esp32 accepted without --freestanding)"
+    ESP_G_OK=0
+fi
+# (b) 256 KiB array + a trailing datum. `sentinel` is laid out AFTER `big`, so
+# its own base address is 0x3FFB0000 + 0x40000, already past the window — this
+# case is caught PER-DATUM and never reaches the whole-segment layout guard.
+cat > "$ESP_G_SRC" <<'ESP_G_EOF'
+static u32[65536] big
+static u32 sentinel = 7
+
+fn main() {
+    big[0] = sentinel
+    loop { }
+}
+ESP_G_EOF
+esp_guard_expect "256 KiB data (per-datum address past the window)" \
+    "data address falls outside the DRAM window" "$ESP_G_SRC"
+# (c) 200 KiB array and NOTHING after it. Every datum base is in-window (the
+# array starts at 0x3FFB0000 itself), so neither per-datum check fires; only
+# the whole-segment memsz check in xt_esp32_check_layout can catch that the
+# array SPANS past 0x3FFE0000. This is the case that makes that guard live.
+cat > "$ESP_G_SRC" <<'ESP_G_EOF'
+static u32[51200] big
+
+fn main() {
+    big[0] = 1
+    loop { }
+}
+ESP_G_EOF
+esp_guard_expect "200 KiB array spanning past the window (base in-window)" \
+    "data+bss exceed the DRAM window" "$ESP_G_SRC"
+# (c2) 189.8 KiB array: FITS the raw DRAM window (0x2F6E0 < 0x30000) but
+# leaves under 4 KiB below the initial SP. The stack grows DOWN from
+# 0x3FFE0000, which is the same address the window ends at, so the entry
+# prologue's first `s32i a0, a1, N-4` writes the saved return address on top
+# of the .bss tail — AFTER the zero loop has run, so nothing restores it.
+# Without XT_ESP32_MIN_STACK this program compiles clean and corrupts itself
+# on real silicon.
+cat > "$ESP_G_SRC" <<'ESP_G_EOF'
+static u32[48600] big
+
+fn main() {
+    big[0] = 1
+    loop { }
+}
+ESP_G_EOF
+esp_guard_expect "190 KiB statics (fits the window, starves the stack)" \
+    "less than 4 KiB below the initial stack pointer" "$ESP_G_SRC"
+# (a) THE IRAM BYTE-ACCESS GUARD — the whole justification for splitting code
+# and data across two load addresses. IRAM services only aligned 32-bit
+# accesses, so an l8ui (which is how every string read, strlen and memcpy
+# touches memory) against an IRAM address raises LoadStoreError: no output, no
+# JTAG, board indistinguishable from dead. 360 KiB of leading statics pushes
+# the NEXT datum's computed address past 0x40000000 and into IRAM, which is
+# what this guard exists to refuse. Rejected per-datum, before the
+# whole-segment checks ever run.
+cat > "$ESP_G_SRC" <<'ESP_G_EOF'
+static u32[90000] pad
+static u32 tail_datum = 7
+
+fn main() {
+    pad[0] = 1
+    tail_datum = 2
+    loop { }
+}
+ESP_G_EOF
+esp_guard_expect "360 KiB of statics (next datum computes into IRAM)" \
+    "would land in IRAM" "$ESP_G_SRC"
+# The IRAM code-overflow branch. Usable IRAM is 0x400A0000 - 0x40080400 =
+# 127 KiB; this generates a ~192 KiB chain of functions, ~1.5x over, so the
+# case stays over the limit even if codegen gets meaningfully tighter. A chain
+# (each fn tail-calls the next) rather than 1000 calls from main, because a
+# main with 1000 call sites blows the 2047-byte frame cap and would fail for
+# an unrelated reason. Compiles in well under a second — the limit is hit
+# during layout, long before anything is written.
+awk 'BEGIN {
+    n = 1000; m = 12
+    for (i = 0; i < n; i++) {
+        printf "fn g%d(u32 x) -> u32 {\n", i
+        for (j = 0; j < m; j++) printf "    x = x * %d + %d\n", (j % 13) + 3, i + j
+        if (i == n - 1) printf "    return x\n}\n"
+        else printf "    return g%d(x)\n}\n", i + 1
+    }
+    printf "fn main() {\n    u32 a = g0(1)\n    a = a + 1\n    loop { }\n}\n"
+}' > "$ESP_G_SRC"
+esp_guard_expect "~192 KiB of code (overflows the 127 KiB IRAM window)" \
+    "code segment exceeds the IRAM limit" "$ESP_G_SRC"
+# @naked on the ENTRY function silently voids the a0-park safety net: the
+# preamble still emits `l32r a0, &park`, but @naked skips the prologue that
+# frame-saves a0, so the body's first call0 overwrites it. A returning entry
+# then decodes garbage — an exception and a reboot loop indistinguishable from
+# a watchdog failure — which is exactly what parking a0 exists to prevent.
+cat > "$ESP_G_SRC" <<'ESP_G_EOF'
+@naked
+fn main() {
+    loop { }
+}
+ESP_G_EOF
+esp_guard_expect "@naked entry function" \
+    "entry function may not be @naked" "$ESP_G_SRC"
+# ...but the guard must be scoped to the esp32 target: @naked is legal on the
+# generic lx60 xtensa path, which has no preamble and no park address.
+rm -f "$ESP_G_BIN"
+if ! $KRC --arch=xtensa --freestanding "$ESP_G_SRC" -o "$ESP_G_BIN" >/dev/null 2>&1; then
+    echo "FAIL: esp32_guards (@naked entry rejected on the generic lx60 xtensa path — the guard is esp32-only)"
+    ESP_G_OK=0
+fi
+rm -f "$ESP_G_BIN"
+if [ "$ESP_G_OK" = 1 ]; then
+    PASS=$((PASS + 1))
+    echo "  esp32_guards: PASS (arch/freestanding combos, IRAM byte-access, per-datum overflow, whole-segment span, stack starvation, IRAM code overflow — each rejected by its OWN guard)"
+else
+    FAIL=$((FAIL + 1))
+fi
+rm -f "$ESP_G_SRC" "$ESP_G_BIN"
+
+# --- --target= argument validation -------------------------------------------
+# Two separate bugs live here, and BOTH are silent-wrong-output bugs, so both
+# get a negative test.
+#
+#  (1) NEAR-MISS CHIP NAMES. --target=esp32 must be matched EXACTLY, not by
+#      prefix. "esp32s3" and "esp32c3" are different chips with different
+#      memory maps (the C3 is RISC-V, not Xtensa even). A prefix match lets
+#      --target=esp32s3 quietly produce an ESP32 image with load addresses
+#      that are wrong for that chip: a board that does not boot, diagnosed
+#      over ~2-minute flash cycles with no JTAG.
+#
+#  (2) TYPOS. An unrecognised --target= must be a hard error. It used to fall
+#      off the end of the if-chain and be SILENTLY IGNORED, so `--target=widnows`
+#      handed back a default-target binary with no warning at all.
+#
+# Both cases use otherwise-valid flag combinations, so the ONLY thing that can
+# reject them is the target-string check itself.
+echo ""
+echo "--- --target= argument validation ---"
+TOTAL=$((TOTAL + 1))
+ESP_T_OK=1
+ESP_T_BIN="/tmp/krc_esp_targ_$$.bin"
+for ESP_T_BAD in esp32s3 esp32c3; do
+    rm -f "$ESP_T_BIN"
+    ESP_T_ERR=$($KRC --arch=xtensa --freestanding "--target=$ESP_T_BAD" \
+                "$DIR/../examples/esp32/minimal.kr" -o "$ESP_T_BIN" 2>&1)
+    if [ $? -eq 0 ]; then
+        echo "FAIL: target_arg_validation (--target=$ESP_T_BAD accepted — a near-miss chip name must NOT prefix-match esp32 and emit an ESP32 image)"
+        ESP_T_OK=0
+    elif ! printf '%s' "$ESP_T_ERR" | grep -qF "unknown --target="; then
+        echo "FAIL: target_arg_validation (--target=$ESP_T_BAD rejected, but not by the unknown-target check: $ESP_T_ERR)"
+        ESP_T_OK=0
+    fi
+done
+for ESP_T_BAD in bogus widnows lin ""; do
+    rm -f "$ESP_T_BIN"
+    ESP_T_ERR=$($KRC "--target=$ESP_T_BAD" "$DIR/smoke/div_mod.kr" \
+                -o "$ESP_T_BIN" 2>&1)
+    if [ $? -eq 0 ]; then
+        echo "FAIL: target_arg_validation (--target=$ESP_T_BAD accepted — an unknown target must be a hard error, never silently ignored)"
+        ESP_T_OK=0
+    elif ! printf '%s' "$ESP_T_ERR" | grep -qF "unknown --target="; then
+        echo "FAIL: target_arg_validation (--target=$ESP_T_BAD rejected, but not by the unknown-target check: $ESP_T_ERR)"
+        ESP_T_OK=0
+    fi
+done
+# ...and the accepted names must still be accepted (so the check above cannot
+# be "fixed" by rejecting everything).
+for ESP_T_GOOD in linux macos darwin windows win; do
+    rm -f "$ESP_T_BIN"
+    if ! $KRC "--target=$ESP_T_GOOD" "$DIR/smoke/div_mod.kr" \
+         -o "$ESP_T_BIN" >/dev/null 2>&1; then
+        echo "FAIL: target_arg_validation (--target=$ESP_T_GOOD rejected — it is a documented, accepted target name)"
+        ESP_T_OK=0
+    fi
+done
+if [ "$ESP_T_OK" = 1 ]; then
+    PASS=$((PASS + 1))
+    echo "  target_arg_validation: PASS (near-miss chip names and typos are hard errors; documented names still accepted)"
+else
+    FAIL=$((FAIL + 1))
+fi
+rm -f "$ESP_T_BIN"
+
+# --- esp32 .bss zero-loop bounds -------------------------------------------
+# The entry preamble zeroes [bss_lo, bss_hi) from two literal-pool words that
+# main.kr patches at finalize time. esp32_startup_stub greps the six WDT
+# addresses and the unlock key but never looks at these two words, so patching
+# them with XT_ESP32_IRAM_BASE instead of XT_ESP32_DRAM_BASE passed the whole
+# suite — and the stub would then zero its OWN code at 0x40080400 on the way
+# up. That is a bricked flash cycle with no diagnostic, so assert the bounds
+# directly.
+#
+# Both bounds are derivable from the image, so nothing here is hardcoded:
+#   bss_lo == 0x3FFB0000 + seg0_len   (bss starts where the DRAM segment's
+#                                      file payload ends — the zeros dropped
+#                                      from the image are what the loop
+#                                      recreates)
+#   bss_hi  = the one remaining DRAM-window pool word strictly below the
+#             0x3FFE0000 stack top, and hi-lo must match the .bss the test
+#             program actually declares (4 KiB, plus alignment padding).
+# Both must be 4-aligned: the loop stores with s32i, which traps on an
+# unaligned base.
+echo ""
+echo "--- esp32 .bss zero-loop bounds test ---"
+TOTAL=$((TOTAL + 1))
+ESP_B_OK=1
+ESP_B_SRC="$DIR/../test_tmp_espbss_$$.kr"
+ESP_B_BIN="/tmp/krc_esp_bss_$$.bin"
+# One small initialized datum (so the DRAM segment is non-empty) followed by a
+# 4 KiB array that is never initialized (so .bss is non-empty and lo != hi).
+cat > "$ESP_B_SRC" <<'ESP_B_EOF'
+static u32 init_val = 0xABCD1234
+static u32[1024] zeros
+
+fn main() {
+    zeros[0] = init_val
+    zeros[1023] = init_val
+    loop { }
+}
+ESP_B_EOF
+if ! $KRC --arch=xtensa --freestanding --target=esp32 \
+     "$ESP_B_SRC" -o "$ESP_B_BIN" >/dev/null 2>&1; then
+    echo "FAIL: esp32_bss_bounds (compilation failed)"
+    ESP_B_OK=0
+fi
+if [ "$ESP_B_OK" = 1 ]; then
+    ESP_B_DRAM_BASE=$((0x3FFB0000))
+    ESP_B_DRAM_LIMIT=$((0x3FFE0000))
+    esp_b_field() { od -An -tu4 -j "$2" -N 4 "$1" 2>/dev/null | tr -d ' '; }
+    # Walk the segment table for the DRAM segment length and the IRAM payload.
+    ESP_B_NSEG=$(od -An -tu1 -j 1 -N 1 "$ESP_B_BIN" | tr -d ' ')
+    ESP_B_SOFF=$((0x18))
+    ESP_B_DLEN=""
+    ESP_B_COFF=0
+    ESP_B_CLEN=0
+    ESP_B_I=0
+    while [ "$ESP_B_I" -lt "${ESP_B_NSEG:-0}" ]; do
+        ESP_B_LOAD=$(esp_b_field "$ESP_B_BIN" "$ESP_B_SOFF")
+        ESP_B_LEN=$(esp_b_field "$ESP_B_BIN" $((ESP_B_SOFF + 4)))
+        if [ -z "$ESP_B_LOAD" ] || [ -z "$ESP_B_LEN" ]; then break; fi
+        if [ "$ESP_B_LOAD" = "$ESP_B_DRAM_BASE" ]; then ESP_B_DLEN=$ESP_B_LEN; fi
+        if [ "$ESP_B_LOAD" -ge $((0x40000000)) ]; then
+            ESP_B_COFF=$((ESP_B_SOFF + 8)); ESP_B_CLEN=$ESP_B_LEN
+        fi
+        ESP_B_SOFF=$((ESP_B_SOFF + 8 + ESP_B_LEN))
+        ESP_B_I=$((ESP_B_I + 1))
+    done
+    if [ -z "$ESP_B_DLEN" ] || [ "$ESP_B_CLEN" = 0 ]; then
+        echo "FAIL: esp32_bss_bounds (could not locate both the DRAM and IRAM segments)"
+        ESP_B_OK=0
+    fi
+fi
+if [ "$ESP_B_OK" = 1 ]; then
+    ESP_B_LO=$((ESP_B_DRAM_BASE + ESP_B_DLEN))
+    # Every literal-pool word in the code segment that falls in the DRAM window.
+    ESP_B_WORDS=$(dd if="$ESP_B_BIN" bs=1 skip="$ESP_B_COFF" count="$ESP_B_CLEN" \
+                     2>/dev/null | od -An -tu4 -v | tr -s ' ' '\n' | grep -v '^$')
+    ESP_B_SEEN_LO=0
+    ESP_B_HI=0
+    for ESP_B_W in $ESP_B_WORDS; do
+        if [ "$ESP_B_W" -lt "$ESP_B_DRAM_BASE" ] || [ "$ESP_B_W" -gt "$ESP_B_DRAM_LIMIT" ]; then
+            continue
+        fi
+        if [ "$ESP_B_W" = "$ESP_B_LO" ]; then ESP_B_SEEN_LO=1; fi
+        if [ "$ESP_B_W" -gt "$ESP_B_LO" ] && [ "$ESP_B_W" -lt "$ESP_B_DRAM_LIMIT" ]; then
+            ESP_B_HI=$ESP_B_W
+        fi
+    done
+    if [ "$ESP_B_SEEN_LO" != 1 ]; then
+        echo "FAIL: esp32_bss_bounds (no pool word equals the expected bss_lo $ESP_B_LO = 0x3FFB0000 + DRAM seg len $ESP_B_DLEN — the zero loop is not bounded by DRAM addresses)"
+        ESP_B_OK=0
+    fi
+    if [ "$ESP_B_HI" = 0 ]; then
+        echo "FAIL: esp32_bss_bounds (no bss_hi pool word in (bss_lo, 0x3FFE0000) — the zero loop's upper bound is not a DRAM address)"
+        ESP_B_OK=0
+    else
+        ESP_B_SPAN=$((ESP_B_HI - ESP_B_LO))
+        # The program declares exactly 4096 bytes of .bss; allow a little
+        # alignment padding, but nothing like a whole wrong base.
+        if [ "$ESP_B_SPAN" -lt 4096 ] || [ "$ESP_B_SPAN" -gt 4160 ]; then
+            echo "FAIL: esp32_bss_bounds (bss span $ESP_B_SPAN bytes, expected ~4096 for the declared u32[1024])"
+            ESP_B_OK=0
+        fi
+        if [ $((ESP_B_HI & 3)) != 0 ]; then
+            echo "FAIL: esp32_bss_bounds (bss_hi $ESP_B_HI is not 4-byte aligned — s32i traps on an unaligned base)"
+            ESP_B_OK=0
+        fi
+    fi
+    if [ $((ESP_B_LO & 3)) != 0 ]; then
+        echo "FAIL: esp32_bss_bounds (bss_lo $ESP_B_LO is not 4-byte aligned — s32i traps on an unaligned base)"
+        ESP_B_OK=0
+    fi
+fi
+if [ "$ESP_B_OK" = 1 ]; then
+    PASS=$((PASS + 1))
+    echo "  esp32_bss_bounds: PASS (zero-loop bounds are DRAM addresses, 4-aligned, spanning exactly the declared .bss)"
+else
+    FAIL=$((FAIL + 1))
+fi
+rm -f "$ESP_B_SRC" "$ESP_B_BIN"
+
+# --- esp32 startup stub: WDT disable + PS + trailing park loop (Task 4) ---
+# The mask ROM jumps straight to e_entry with RWDT and MWDT0 ARMED (flash-boot
+# mode): if the stub does not disable them FIRST, the board reboots ~1s in
+# with no output. Asserts on the DISASSEMBLY of the IRAM code
+# segment of examples/esp32/minimal.kr:
+#   (1) the unlock key 0x50D83AA1 and all six WDT register addresses are
+#       present as literal-pool words (od -tx4 — pool words are 4-aligned);
+#   (2) the WDT sequence runs BEFORE the SP init: >= 6 s32i stores (3 unlock +
+#       3 config0-clear) and the wsr.ps appear before the first `l32r a1`;
+#   (3) the stub contains a genuine self-branch (`j .` — target == own
+#       address) so a returning main parks instead of decoding garbage (the
+#       lx60 tail idiom is an illegal insn on silicon -> exception -> reset
+#       loop that mimics a watchdog failure exactly).
+# The IRAM segment is FOUND by walking the segment table (seg0 header at 0x18,
+# payload at 0x20, seg1 header at 0x20+seg0_len; IRAM = load >= 0x40000000),
+# never hardcoded. Entry offset within the payload = entry_addr - 0x40080400.
+# SKIP cleanly when the disassembler is absent (dev-only toolchain).
+echo ""
+echo "--- esp32 startup stub test ---"
+if command -v xtensa-lx106-elf-objdump >/dev/null 2>&1; then
+    TOTAL=$((TOTAL + 1))
+    ESP_STUB_BIN="/tmp/krc_esp_stub_$$.bin"
+    ESP_STUB_CODE="/tmp/krc_esp_stub_code_$$.bin"
+    ESP_STUB_DIS="/tmp/krc_esp_stub_dis_$$.txt"
+    ESP_STUB_OK=1
+    esp_stub_field() { od -An -tu4 -j "$2" -N 4 "$1" 2>/dev/null | tr -d ' '; }
+    if ! $KRC --arch=xtensa --freestanding --target=esp32 \
+         "$DIR/../examples/esp32/minimal.kr" -o "$ESP_STUB_BIN" >/dev/null 2>&1; then
+        echo "FAIL: esp32_startup_stub (compilation failed)"
+        ESP_STUB_OK=0
+    fi
+    ESP_STUB_CODE_OFF=0
+    ESP_STUB_CODE_LEN=0
+    if [ "$ESP_STUB_OK" = 1 ]; then
+        ESP_STUB_ENTRY=$(esp_stub_field "$ESP_STUB_BIN" 4)
+        ESP_STUB_NSEG=$(od -An -tu1 -j 1 -N 1 "$ESP_STUB_BIN" | tr -d ' ')
+        ESP_STUB_SOFF=$((0x18))
+        ESP_STUB_I=0
+        while [ "$ESP_STUB_I" -lt "${ESP_STUB_NSEG:-0}" ]; do
+            ESP_STUB_LOAD=$(esp_stub_field "$ESP_STUB_BIN" "$ESP_STUB_SOFF")
+            ESP_STUB_LEN=$(esp_stub_field "$ESP_STUB_BIN" $((ESP_STUB_SOFF + 4)))
+            if [ -z "$ESP_STUB_LOAD" ] || [ -z "$ESP_STUB_LEN" ]; then break; fi
+            if [ "$ESP_STUB_LOAD" -ge $((0x40000000)) ]; then
+                ESP_STUB_CODE_OFF=$((ESP_STUB_SOFF + 8))
+                ESP_STUB_CODE_LEN=$ESP_STUB_LEN
+                break
+            fi
+            ESP_STUB_SOFF=$((ESP_STUB_SOFF + 8 + ESP_STUB_LEN))
+            ESP_STUB_I=$((ESP_STUB_I + 1))
+        done
+        if [ "$ESP_STUB_CODE_LEN" = 0 ]; then
+            echo "FAIL: esp32_startup_stub (no IRAM segment with load_addr >= 0x40000000 found)"
+            ESP_STUB_OK=0
+        fi
+    fi
+    if [ "$ESP_STUB_OK" = 1 ]; then
+        dd if="$ESP_STUB_BIN" of="$ESP_STUB_CODE" bs=1 \
+           skip="$ESP_STUB_CODE_OFF" count="$ESP_STUB_CODE_LEN" 2>/dev/null
+        # (1) key + all six WDT addresses present as pool words
+        ESP_STUB_WORDS=$(od -An -tx4 "$ESP_STUB_CODE")
+        for ESP_STUB_W in 50d83aa1 3ff480a4 3ff4808c 3ff5f064 3ff5f048 3ff60064 3ff60048; do
+            if ! echo "$ESP_STUB_WORDS" | grep -qw "$ESP_STUB_W"; then
+                echo "FAIL: esp32_startup_stub (pool word $ESP_STUB_W missing — WDT sequence not emitted)"
+                ESP_STUB_OK=0
+            fi
+        done
+    fi
+    if [ "$ESP_STUB_OK" = 1 ]; then
+        # (2) ordering: disassemble from the entry; everything before the
+        # first `l32r a1` (SP init) must already contain the 6 WDT stores
+        # and the wsr.ps.
+        # Offset of the entry within the IRAM payload. Derive it from the
+        # segment's own load_addr (already discovered by the walk above) rather
+        # than re-hardcoding the base — a future base change would otherwise
+        # silently disassemble from the wrong offset and still "pass".
+        ESP_STUB_EOFF=$((ESP_STUB_ENTRY - ESP_STUB_LOAD))
+        xtensa-lx106-elf-objdump -b binary -m xtensa -D \
+            --start-address=$ESP_STUB_EOFF "$ESP_STUB_CODE" > "$ESP_STUB_DIS" 2>/dev/null
+        ESP_STUB_PRE=$(sed -n "1,/l32r[[:space:]]*a1,/p" "$ESP_STUB_DIS")
+        ESP_STUB_NS32I=$(echo "$ESP_STUB_PRE" | grep -cE '[[:space:]]s32i(\.n)?[[:space:]]')
+        if [ "$ESP_STUB_NS32I" -lt 6 ]; then
+            echo "FAIL: esp32_startup_stub (only $ESP_STUB_NS32I s32i before the SP-init l32r a1 — WDT disable must come FIRST)"
+            ESP_STUB_OK=0
+        fi
+        if ! echo "$ESP_STUB_PRE" | grep -qE '[[:space:]]wsr'; then
+            echo "FAIL: esp32_startup_stub (no wsr.ps before the SP-init l32r a1)"
+            ESP_STUB_OK=0
+        fi
+        # (3) a genuine self-branch: a `j` whose target == its own address
+        ESP_STUB_PARK=0
+        while IFS= read -r ESP_STUB_LN; do
+            ESP_STUB_A=$(printf '%s' "$ESP_STUB_LN" | sed -n 's/^ *\([0-9a-f][0-9a-f]*\):.*/\1/p')
+            ESP_STUB_T=$(printf '%s' "$ESP_STUB_LN" | sed -n 's/.*[[:space:]]j[[:space:]][[:space:]]*0*x\{0,1\}\([0-9a-f][0-9a-f]*\)[[:space:]]*$/\1/p')
+            if [ -n "$ESP_STUB_A" ] && [ -n "$ESP_STUB_T" ]; then
+                if [ $((0x$ESP_STUB_A)) -eq $((0x$ESP_STUB_T)) ]; then
+                    ESP_STUB_PARK=1
+                fi
+            fi
+        done <<ESP_STUB_EOF
+$(grep -E '[[:space:]]j[[:space:]]+(0x)?[0-9a-f]+[[:space:]]*$' "$ESP_STUB_DIS")
+ESP_STUB_EOF
+        if [ "$ESP_STUB_PARK" != 1 ]; then
+            echo "FAIL: esp32_startup_stub (no self-branch 'j .' — a returning main would decode garbage and mimic a WDT reset loop)"
+            ESP_STUB_OK=0
+        fi
+    fi
+    if [ "$ESP_STUB_OK" = 1 ]; then
+        PASS=$((PASS + 1))
+        echo "  esp32_startup_stub: PASS (WDT unlock+clear x3 before SP init, wsr.ps, self-branch park)"
+    else
+        FAIL=$((FAIL + 1))
+    fi
+    rm -f "$ESP_STUB_BIN" "$ESP_STUB_CODE" "$ESP_STUB_DIS"
+else
+    echo "  esp32_startup_stub: SKIP (xtensa-lx106-elf-objdump not installed)"
+fi
+
+# --- esp32 hello image: full container + errata-safe UART0 putc (Task 5) ---
+# The artifact that gets flashed to real silicon. Everything here is checked
+# with od/dd (+ objdump when present) so it runs in CI — esptool is an ORACLE
+# used by hand (`image-info`), never a build/test dependency.
+#
+# Container asserts (independent of the code):
+#   magic/mode/size bytes e9 02 02 20, EXACTLY 2 segments, entry in IRAM,
+#   (len - 32) % 16 == 0  — the payload is 16-padded and a 32-byte SHA-256
+#   appended, so total-minus-hash must be a multiple of 16 (the ROM reads it
+#   that way), and the checksum byte at len-33 equals the 0xEF-seeded XOR of
+#   every segment payload byte, RECOMPUTED here rather than trusted.
+#
+# Code asserts (errata CPU-3.3) — the important ones:
+#   `putc` must POLL 0x3FF4001C (APB UART_STATUS_REG, TXFIFO_CNT bits 23:16)
+#   and WRITE the byte to 0x60000000 (the AHB TX-FIFO mirror). Consecutive
+#   APB writes to UART0's FIFO "may be lost" per the errata, so a store to an
+#   APB UART address would give intermittently garbled output on the board's
+#   ONLY debug channel. The test therefore checks the DIRECTION of each
+#   access, not just that the constants appear: it tracks `l32r aN,<pool>`
+#   into a register map and then classifies the `s32i`/`l32i` that use aN as
+#   a base. A store off an APB UART base is a hard FAIL.
+# The segment table is WALKED (seg0 header at 0x18, len at 0x1C, payload at
+# 0x20; seg1 header at 0x20+seg0_len) — no offset is hardcoded.
+echo ""
+echo "--- esp32 hello image test ---"
+TOTAL=$((TOTAL + 1))
+ESP_H_BIN="/tmp/krc_esp_hello_$$.bin"
+ESP_H_PAY="/tmp/krc_esp_hello_pay_$$.bin"
+ESP_H_CODE="/tmp/krc_esp_hello_code_$$.bin"
+ESP_H_DIS="/tmp/krc_esp_hello_dis_$$.txt"
+ESP_H_OK=1
+esp_h_field() { od -An -tu4 -j "$2" -N 4 "$1" 2>/dev/null | tr -d ' '; }
+rm -f "$ESP_H_BIN" "$ESP_H_PAY"
+if ! $KRC --arch=xtensa --freestanding --target=esp32 \
+     "$DIR/../examples/esp32/hello.kr" -o "$ESP_H_BIN" >/dev/null 2>&1; then
+    echo "FAIL: esp32_hello_image (compilation failed)"
+    $KRC --arch=xtensa --freestanding --target=esp32 \
+        "$DIR/../examples/esp32/hello.kr" -o "$ESP_H_BIN" 2>&1 | head -3
+    ESP_H_OK=0
+fi
+ESP_H_CODE_OFF=0
+ESP_H_CODE_LEN=0
+ESP_H_CODE_LOAD=0
+if [ "$ESP_H_OK" = 1 ]; then
+    ESP_H_LEN=$(wc -c < "$ESP_H_BIN" | tr -d ' ')
+    ESP_H_HDR=$(od -An -tx1 -j 0 -N 4 "$ESP_H_BIN" | tr -d ' ')
+    if [ "$ESP_H_HDR" != "e9020220" ]; then
+        echo "FAIL: esp32_hello_image (header bytes 0-3 = '$ESP_H_HDR', want 'e9020220')"
+        ESP_H_OK=0
+    fi
+    ESP_H_NSEG=$(od -An -tu1 -j 1 -N 1 "$ESP_H_BIN" | tr -d ' ')
+    if [ "$ESP_H_NSEG" != 2 ]; then
+        echo "FAIL: esp32_hello_image (segment count $ESP_H_NSEG != 2 — DRAM string + IRAM code expected)"
+        ESP_H_OK=0
+    fi
+    ESP_H_ENTRY=$(esp_h_field "$ESP_H_BIN" 4)
+    if [ -z "$ESP_H_ENTRY" ] || [ "$ESP_H_ENTRY" -lt $((0x40080400)) ] \
+       || [ "$ESP_H_ENTRY" -ge $((0x400A0000)) ]; then
+        echo "FAIL: esp32_hello_image (entry $ESP_H_ENTRY outside IRAM [0x40080400,0x400A0000))"
+        ESP_H_OK=0
+    fi
+    # (len - 32) must be a multiple of 16: 32 bytes of appended SHA-256 over a
+    # 16-padded (checksum-terminated) body.
+    if [ $(( (ESP_H_LEN - 32) % 16 )) -ne 0 ]; then
+        echo "FAIL: esp32_hello_image (len $ESP_H_LEN: (len-32) % 16 = $(( (ESP_H_LEN - 32) % 16 )), want 0)"
+        ESP_H_OK=0
+    fi
+fi
+if [ "$ESP_H_OK" = 1 ]; then
+    # Walk the segment table: concatenate every payload for the checksum and
+    # remember the IRAM one for disassembly.
+    ESP_H_SOFF=$((0x18))
+    ESP_H_I=0
+    : > "$ESP_H_PAY"
+    while [ "$ESP_H_I" -lt "$ESP_H_NSEG" ]; do
+        ESP_H_LOAD=$(esp_h_field "$ESP_H_BIN" "$ESP_H_SOFF")
+        ESP_H_SLEN=$(esp_h_field "$ESP_H_BIN" $((ESP_H_SOFF + 4)))
+        if [ -z "$ESP_H_LOAD" ] || [ -z "$ESP_H_SLEN" ]; then
+            echo "FAIL: esp32_hello_image (segment $ESP_H_I header unreadable at offset $ESP_H_SOFF)"
+            ESP_H_OK=0
+            break
+        fi
+        dd if="$ESP_H_BIN" bs=1 skip=$((ESP_H_SOFF + 8)) count="$ESP_H_SLEN" \
+           >> "$ESP_H_PAY" 2>/dev/null
+        if [ "$ESP_H_LOAD" -ge $((0x40000000)) ]; then
+            ESP_H_CODE_OFF=$((ESP_H_SOFF + 8))
+            ESP_H_CODE_LEN=$ESP_H_SLEN
+            ESP_H_CODE_LOAD=$ESP_H_LOAD
+        fi
+        ESP_H_SOFF=$((ESP_H_SOFF + 8 + ESP_H_SLEN))
+        ESP_H_I=$((ESP_H_I + 1))
+    done
+fi
+if [ "$ESP_H_OK" = 1 ]; then
+    # Recompute the 0xEF-seeded XOR over all segment payloads and compare with
+    # the stored byte at len-33 (last byte before the 32-byte hash). POSIX awk
+    # has no xor(), so it is done bitwise by hand.
+    ESP_H_WANT=$(od -An -tu1 -j $((ESP_H_LEN - 33)) -N 1 "$ESP_H_BIN" | tr -d ' ')
+    ESP_H_GOT=$(od -An -tu1 -v "$ESP_H_PAY" | awk '
+        function xor8(a, b,   i, m, r) {
+            r = 0; m = 1
+            for (i = 0; i < 8; i++) {
+                if (int(a / m) % 2 != int(b / m) % 2) r += m
+                m *= 2
+            }
+            return r
+        }
+        BEGIN { c = 239 }
+        { for (i = 1; i <= NF; i++) c = xor8(c, $i + 0) }
+        END { print c }')
+    if [ "$ESP_H_GOT" != "$ESP_H_WANT" ]; then
+        echo "FAIL: esp32_hello_image (checksum byte at len-33 is $ESP_H_WANT, recomputed 0xEF-XOR is $ESP_H_GOT)"
+        ESP_H_OK=0
+    fi
+    if [ "$ESP_H_CODE_LEN" = 0 ]; then
+        echo "FAIL: esp32_hello_image (no IRAM segment with load_addr >= 0x40000000 found)"
+        ESP_H_OK=0
+    fi
+    # The trailing 32 bytes are a SHA-256 over the whole image up to that
+    # point. The ROM verifies it, so a wrong digest is a silently unbootable
+    # image. Recompute it with sha256sum — an outside oracle — rather than
+    # reading the stored bytes back and comparing them to themselves.
+    #
+    # This lives HERE, on the 576-byte hello image, specifically because the
+    # esp-image byte-identity golden is a 64-byte body: hardcoding the update
+    # length to 64 in format_espimage.kr reproduced the golden exactly and
+    # passed the whole suite. One image size proves nothing about a hash.
+    if command -v sha256sum >/dev/null 2>&1; then
+        ESP_H_DGOT=$(dd if="$ESP_H_BIN" bs=1 count=$((ESP_H_LEN - 32)) 2>/dev/null \
+                     | sha256sum | cut -d' ' -f1)
+        ESP_H_DWANT=$(od -An -tx1 -j $((ESP_H_LEN - 32)) -N 32 -v "$ESP_H_BIN" \
+                      | tr -d ' \n')
+        if [ "$ESP_H_DGOT" != "$ESP_H_DWANT" ]; then
+            echo "FAIL: esp32_hello_image (trailing SHA-256 is $ESP_H_DWANT, but sha256sum over the first $((ESP_H_LEN - 32)) bytes gives $ESP_H_DGOT)"
+            ESP_H_OK=0
+        fi
+        ESP_H_HASH_NOTE=", SHA-256 recomputed over all $((ESP_H_LEN - 32)) body bytes"
+    else
+        ESP_H_HASH_NOTE=" (SHA-256 recompute SKIPPED — no sha256sum)"
+    fi
+fi
+# Errata CPU-3.3 direction check — needs the disassembler; skip cleanly if the
+# dev-only toolchain is absent, but never skip the container asserts above.
+if [ "$ESP_H_OK" = 1 ] && command -v xtensa-lx106-elf-objdump >/dev/null 2>&1; then
+    dd if="$ESP_H_BIN" of="$ESP_H_CODE" bs=1 \
+       skip="$ESP_H_CODE_OFF" count="$ESP_H_CODE_LEN" 2>/dev/null
+    xtensa-lx106-elf-objdump -b binary -m xtensa -D "$ESP_H_CODE" > "$ESP_H_DIS" 2>/dev/null
+    ESP_H_VERDICT=$(awk '
+        # Track `l32r aN, <slot> (0xVALUE)` so a later s32i/l32i off aN can be
+        # attributed to a concrete absolute address. Any control transfer
+        # invalidates the map, so nothing is attributed across a branch.
+        { m = $3; op1 = $4; op2 = $5 }
+        m == "l32r" {
+            gsub(/,/, "", op1); v = $6
+            gsub(/[()]/, "", v)
+            reg[op1] = v
+            next
+        }
+        m ~ /^(s32i|l32i)(\.n)?$/ {
+            gsub(/,/, "", op2)
+            if (op2 in reg) {
+                if (m ~ /^s32i/) store[reg[op2]] = 1
+                else             loadf[reg[op2]] = 1
+            }
+            if (m ~ /^l32i/) { gsub(/,/, "", op1); delete reg[op1] }
+            next
+        }
+        # Any other instruction that REDEFINES a register must drop its mapping,
+        # or we keep attributing later stores to a stale l32r value. The .bss
+        # zero loop does exactly this (l32r a8,<addr> ... addi a8,a8,4), and
+        # while that address is harmless today, stale over-attribution could
+        # later manufacture a spurious APB-UART-STORE verdict.
+        m ~ /^(movi|mov|add|addi|sub|addx|and|or|xor|srl|sll|sra|neg)/ {
+            gsub(/,/, "", op1); delete reg[op1]
+            next
+        }
+        # Conservative: forget everything at any branch/call/return boundary.
+        m ~ /^(j|jx|call0|callx0|ret|ret\.n|b)/ { delete reg; next }
+        END {
+            ok = 1
+            if (!("0x60000000" in store)) { print "no-ahb-fifo-store"; ok = 0 }
+            if (!("0x3ff4001c" in loadf))  { print "no-apb-status-load"; ok = 0 }
+            for (a in store)
+                if (a ~ /^0x3ff400/) { print "APB-UART-STORE:" a; ok = 0 }
+            if (ok) print "OK"
+        }' "$ESP_H_DIS")
+    # Tripwire: the 1 Hz heartbeat is a plain counted loop with no volatile
+    # touch, so a future DCE / strength-reduction pass could legally delete it,
+    # turning the heartbeat into a ~640 line/s flood. That is not merely
+    # cosmetic — it would drown out a stray reset banner or a garbled character,
+    # i.e. degrade the debug channel exactly when it matters. Assert the loop
+    # bound literal survives; if this fails, harden delay() with a volatile MMIO
+    # read and retune the count (see the esp32 spec's validation notes).
+    if ! grep -q '(0x3d0900)' "$ESP_H_DIS"; then
+        echo "FAIL: esp32_hello_image (delay() loop bound 4000000 absent — DCE ate the heartbeat)"
+        ESP_H_OK=0
+    fi
+    case "$ESP_H_VERDICT" in
+        OK) ;;
+        *)
+            echo "FAIL: esp32_hello_image (UART access pattern wrong: $ESP_H_VERDICT)"
+            echo "      want: l32i from 0x3ff4001c (APB status poll) + s32i to 0x60000000 (AHB FIFO,"
+            echo "      errata CPU-3.3); a store to any 0x3ff400xx UART address may silently drop bytes"
+            ESP_H_OK=0
+            ;;
+    esac
+    ESP_H_DIS_NOTE=" + AHB/APB direction"
+else
+    ESP_H_DIS_NOTE=" (disasm direction check SKIPPED — no xtensa-lx106-elf-objdump)"
+fi
+if [ "$ESP_H_OK" = 1 ]; then
+    PASS=$((PASS + 1))
+    echo "  esp32_hello_image: PASS (e9/02/02/20, 2 segments, entry in IRAM, checksum recomputed, 16-aligned+hash$ESP_H_HASH_NOTE$ESP_H_DIS_NOTE)"
+else
+    FAIL=$((FAIL + 1))
+fi
+rm -f "$ESP_H_BIN" "$ESP_H_PAY" "$ESP_H_CODE" "$ESP_H_DIS"
+
 # --- Summary ---
 echo ""
 echo "=== Results: $PASS/$TOTAL passed, $FAIL failed ==="
