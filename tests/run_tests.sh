@@ -6392,15 +6392,39 @@ fn hash_and_print(u64 data, u64 len) {
     println_str(digest_to_hex(out))
 }
 
+fn hash_chunked_and_print(u64 data, u64 len, u64 chunk) {
+    u64 ctx = alloc(SHA256_CTX_SIZE)
+    u64 out = alloc(32)
+    sha256_init(ctx)
+    u64 off = 0
+    while off < len {
+        u64 n = chunk
+        if off + n > len { n = len - off }
+        sha256_update(ctx, data + off, n)
+        off = off + n
+    }
+    sha256_final(ctx, out)
+    println_str(digest_to_hex(out))
+}
+
 fn main() {
     hash_and_print("", 0)
     hash_and_print("abc", 3)
     u64 v3 = "abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq"
     hash_and_print(v3, 56)
+    hash_chunked_and_print("abc", 3, 1)
+    hash_chunked_and_print(v3, 56, 5)
+    u64 v6 = "0123456789abcdefghijklmnopqrstuvwxyz0123456789abcdefghijklmnopqrstuvwxyz0123456789abcdefghijklmnopqrstuvwxyz0123456789abcdefghijklmnopqrstuvwxyz0123456789abcdefghijklmnopqrstuvwxyz0123456789abcdefghij"
+    hash_and_print(v6, 200)
+    hash_chunked_and_print(v6, 200, 7)
     exit(0)
 }' 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
 ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad
-248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1'
+248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1
+ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad
+248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1
+41c907495210b51aa9575a7e43e7546e3c25eb15d34bbb6a828b42c830d1dc5f
+41c907495210b51aa9575a7e43e7546e3c25eb15d34bbb6a828b42c830d1dc5f'
 
 # --- Summary ---
 echo ""

@@ -49,6 +49,28 @@ fn hash_and_print(u64 data, u64 len) {
     dealloc(out)
 }
 
+// Hash `data` by feeding it through sha256_update in arbitrary-sized chunks,
+// proving the streaming/buffering path agrees with a single-shot hash. The
+// esp-image writer hashes incrementally, so this is the path it actually uses —
+// a buffering bug across block boundaries would pass every single-shot vector
+// and only surface later as a corrupt image hash.
+fn hash_chunked_and_print(u64 data, u64 len, u64 chunk) {
+    u64 ctx = alloc(SHA256_CTX_SIZE)
+    u64 out = alloc(32)
+    sha256_init(ctx)
+    u64 off = 0
+    while off < len {
+        u64 n = chunk
+        if off + n > len { n = len - off }
+        sha256_update(ctx, data + off, n)
+        off = off + n
+    }
+    sha256_final(ctx, out)
+    print_digest(out)
+    dealloc(ctx)
+    dealloc(out)
+}
+
 fn main() {
     // Vector 1: empty string
     hash_and_print("", 0)
@@ -59,6 +81,21 @@ fn main() {
     // Vector 3: 56-byte input — padding spills into a second block.
     u64 v3 = "abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq"
     hash_and_print(v3, 56)
+
+    // Vector 4: "abc" fed one byte at a time -> must equal vector 2.
+    hash_chunked_and_print("abc", 3, 1)
+
+    // Vector 5: the 56-byte input in 5-byte chunks -> must equal vector 3.
+    // 5 does not divide 56 or 64, so partial blocks are buffered and the
+    // block boundary is crossed mid-chunk — the case that breaks naive
+    // buffering.
+    hash_chunked_and_print(v3, 56, 5)
+
+    // Vector 6: a 200-byte input (multi-block) in 7-byte chunks, compared
+    // against the same input hashed single-shot. Both lines must match.
+    u64 v6 = "0123456789abcdefghijklmnopqrstuvwxyz0123456789abcdefghijklmnopqrstuvwxyz0123456789abcdefghijklmnopqrstuvwxyz0123456789abcdefghijklmnopqrstuvwxyz0123456789abcdefghijklmnopqrstuvwxyz0123456789abcdefghij"
+    hash_and_print(v6, 200)
+    hash_chunked_and_print(v6, 200, 7)
 
     exit(0)
 }
