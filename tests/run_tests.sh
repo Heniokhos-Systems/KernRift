@@ -6781,6 +6781,124 @@ else
 fi
 rm -f "$ESP_T_BIN"
 
+# --- esp32 .bss zero-loop bounds -------------------------------------------
+# The entry preamble zeroes [bss_lo, bss_hi) from two literal-pool words that
+# main.kr patches at finalize time. esp32_startup_stub greps the six WDT
+# addresses and the unlock key but never looks at these two words, so patching
+# them with XT_ESP32_IRAM_BASE instead of XT_ESP32_DRAM_BASE passed the whole
+# suite — and the stub would then zero its OWN code at 0x40080400 on the way
+# up. That is a bricked flash cycle with no diagnostic, so assert the bounds
+# directly.
+#
+# Both bounds are derivable from the image, so nothing here is hardcoded:
+#   bss_lo == 0x3FFB0000 + seg0_len   (bss starts where the DRAM segment's
+#                                      file payload ends — the zeros dropped
+#                                      from the image are what the loop
+#                                      recreates)
+#   bss_hi  = the one remaining DRAM-window pool word strictly below the
+#             0x3FFE0000 stack top, and hi-lo must match the .bss the test
+#             program actually declares (4 KiB, plus alignment padding).
+# Both must be 4-aligned: the loop stores with s32i, which traps on an
+# unaligned base.
+echo ""
+echo "--- esp32 .bss zero-loop bounds test ---"
+TOTAL=$((TOTAL + 1))
+ESP_B_OK=1
+ESP_B_SRC="$DIR/../test_tmp_espbss_$$.kr"
+ESP_B_BIN="/tmp/krc_esp_bss_$$.bin"
+# One small initialized datum (so the DRAM segment is non-empty) followed by a
+# 4 KiB array that is never initialized (so .bss is non-empty and lo != hi).
+cat > "$ESP_B_SRC" <<'ESP_B_EOF'
+static u32 init_val = 0xABCD1234
+static u32[1024] zeros
+
+fn main() {
+    zeros[0] = init_val
+    zeros[1023] = init_val
+    loop { }
+}
+ESP_B_EOF
+if ! $KRC --arch=xtensa --freestanding --target=esp32 \
+     "$ESP_B_SRC" -o "$ESP_B_BIN" >/dev/null 2>&1; then
+    echo "FAIL: esp32_bss_bounds (compilation failed)"
+    ESP_B_OK=0
+fi
+if [ "$ESP_B_OK" = 1 ]; then
+    ESP_B_DRAM_BASE=$((0x3FFB0000))
+    ESP_B_DRAM_LIMIT=$((0x3FFE0000))
+    esp_b_field() { od -An -tu4 -j "$2" -N 4 "$1" 2>/dev/null | tr -d ' '; }
+    # Walk the segment table for the DRAM segment length and the IRAM payload.
+    ESP_B_NSEG=$(od -An -tu1 -j 1 -N 1 "$ESP_B_BIN" | tr -d ' ')
+    ESP_B_SOFF=$((0x18))
+    ESP_B_DLEN=""
+    ESP_B_COFF=0
+    ESP_B_CLEN=0
+    ESP_B_I=0
+    while [ "$ESP_B_I" -lt "${ESP_B_NSEG:-0}" ]; do
+        ESP_B_LOAD=$(esp_b_field "$ESP_B_BIN" "$ESP_B_SOFF")
+        ESP_B_LEN=$(esp_b_field "$ESP_B_BIN" $((ESP_B_SOFF + 4)))
+        if [ -z "$ESP_B_LOAD" ] || [ -z "$ESP_B_LEN" ]; then break; fi
+        if [ "$ESP_B_LOAD" = "$ESP_B_DRAM_BASE" ]; then ESP_B_DLEN=$ESP_B_LEN; fi
+        if [ "$ESP_B_LOAD" -ge $((0x40000000)) ]; then
+            ESP_B_COFF=$((ESP_B_SOFF + 8)); ESP_B_CLEN=$ESP_B_LEN
+        fi
+        ESP_B_SOFF=$((ESP_B_SOFF + 8 + ESP_B_LEN))
+        ESP_B_I=$((ESP_B_I + 1))
+    done
+    if [ -z "$ESP_B_DLEN" ] || [ "$ESP_B_CLEN" = 0 ]; then
+        echo "FAIL: esp32_bss_bounds (could not locate both the DRAM and IRAM segments)"
+        ESP_B_OK=0
+    fi
+fi
+if [ "$ESP_B_OK" = 1 ]; then
+    ESP_B_LO=$((ESP_B_DRAM_BASE + ESP_B_DLEN))
+    # Every literal-pool word in the code segment that falls in the DRAM window.
+    ESP_B_WORDS=$(dd if="$ESP_B_BIN" bs=1 skip="$ESP_B_COFF" count="$ESP_B_CLEN" \
+                     2>/dev/null | od -An -tu4 -v | tr -s ' ' '\n' | grep -v '^$')
+    ESP_B_SEEN_LO=0
+    ESP_B_HI=0
+    for ESP_B_W in $ESP_B_WORDS; do
+        if [ "$ESP_B_W" -lt "$ESP_B_DRAM_BASE" ] || [ "$ESP_B_W" -gt "$ESP_B_DRAM_LIMIT" ]; then
+            continue
+        fi
+        if [ "$ESP_B_W" = "$ESP_B_LO" ]; then ESP_B_SEEN_LO=1; fi
+        if [ "$ESP_B_W" -gt "$ESP_B_LO" ] && [ "$ESP_B_W" -lt "$ESP_B_DRAM_LIMIT" ]; then
+            ESP_B_HI=$ESP_B_W
+        fi
+    done
+    if [ "$ESP_B_SEEN_LO" != 1 ]; then
+        echo "FAIL: esp32_bss_bounds (no pool word equals the expected bss_lo $ESP_B_LO = 0x3FFB0000 + DRAM seg len $ESP_B_DLEN — the zero loop is not bounded by DRAM addresses)"
+        ESP_B_OK=0
+    fi
+    if [ "$ESP_B_HI" = 0 ]; then
+        echo "FAIL: esp32_bss_bounds (no bss_hi pool word in (bss_lo, 0x3FFE0000) — the zero loop's upper bound is not a DRAM address)"
+        ESP_B_OK=0
+    else
+        ESP_B_SPAN=$((ESP_B_HI - ESP_B_LO))
+        # The program declares exactly 4096 bytes of .bss; allow a little
+        # alignment padding, but nothing like a whole wrong base.
+        if [ "$ESP_B_SPAN" -lt 4096 ] || [ "$ESP_B_SPAN" -gt 4160 ]; then
+            echo "FAIL: esp32_bss_bounds (bss span $ESP_B_SPAN bytes, expected ~4096 for the declared u32[1024])"
+            ESP_B_OK=0
+        fi
+        if [ $((ESP_B_HI & 3)) != 0 ]; then
+            echo "FAIL: esp32_bss_bounds (bss_hi $ESP_B_HI is not 4-byte aligned — s32i traps on an unaligned base)"
+            ESP_B_OK=0
+        fi
+    fi
+    if [ $((ESP_B_LO & 3)) != 0 ]; then
+        echo "FAIL: esp32_bss_bounds (bss_lo $ESP_B_LO is not 4-byte aligned — s32i traps on an unaligned base)"
+        ESP_B_OK=0
+    fi
+fi
+if [ "$ESP_B_OK" = 1 ]; then
+    PASS=$((PASS + 1))
+    echo "  esp32_bss_bounds: PASS (zero-loop bounds are DRAM addresses, 4-aligned, spanning exactly the declared .bss)"
+else
+    FAIL=$((FAIL + 1))
+fi
+rm -f "$ESP_B_SRC" "$ESP_B_BIN"
+
 # --- esp32 startup stub: WDT disable + PS + trailing park loop (Task 4) ---
 # The mask ROM jumps straight to e_entry with RWDT and MWDT0 ARMED (flash-boot
 # mode): if the stub does not disable them FIRST, the board reboots ~1s in
