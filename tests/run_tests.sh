@@ -6414,6 +6414,20 @@ fn main() {
     hash_and_print(v3, 56)
     hash_chunked_and_print("abc", 3, 1)
     hash_chunked_and_print(v3, 56, 5)
+    // Padding-boundary vectors (all-'a' messages of 55/64/128 bytes):
+    //   55  -> after the 0x80 pad byte buflen is exactly 56, which still
+    //          leaves room for the 8-byte length trailer, so NO extra block
+    //          is needed. Distinguishes `buflen > 56` from `buflen >= 56`.
+    //   64  -> an exact multiple of the block size, so the update loop must
+    //          still consume the final full block. Distinguishes
+    //          `(len - i) >= 64` from `(len - i) > 64`.
+    //   128 -> two whole blocks, same boundary one iteration further in.
+    u64 va = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    hash_and_print(va, 55)
+    hash_and_print(va, 64)
+    hash_and_print(va, 128)
+    hash_chunked_and_print(va, 64, 16)
+    hash_chunked_and_print(va, 128, 33)
     u64 v6 = "0123456789abcdefghijklmnopqrstuvwxyz0123456789abcdefghijklmnopqrstuvwxyz0123456789abcdefghijklmnopqrstuvwxyz0123456789abcdefghijklmnopqrstuvwxyz0123456789abcdefghijklmnopqrstuvwxyz0123456789abcdefghij"
     hash_and_print(v6, 200)
     hash_chunked_and_print(v6, 200, 7)
@@ -6423,6 +6437,11 @@ ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad
 248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1
 ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad
 248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1
+9f4390f8d30c2dd92ec9f095b65e2b9ae9b0a925a5258e241c9f1e910f734318
+ffe054fe7ae0cb6dc65c3af9b61d5209f439851db43d0ba5997337df154668eb
+6836cf13bac400e9105071cd6af47084dfacad4e5e302c94bfed24e013afb73e
+ffe054fe7ae0cb6dc65c3af9b61d5209f439851db43d0ba5997337df154668eb
+6836cf13bac400e9105071cd6af47084dfacad4e5e302c94bfed24e013afb73e
 41c907495210b51aa9575a7e43e7546e3c25eb15d34bbb6a828b42c830d1dc5f
 41c907495210b51aa9575a7e43e7546e3c25eb15d34bbb6a828b42c830d1dc5f'
 
