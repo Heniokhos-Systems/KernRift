@@ -3314,7 +3314,7 @@ fn ir_lower_expr(uint64 node) -> uint64 {
                 fsize = struct_field_size(si, wfn)
             } else {
                 // Positional: use field index to get offset/size from struct table
-                uint64 fbase = struct_table + si * 272 + 16 + fidx * 16
+                uint64 fbase = struct_table + si * struct_entry_size + 16 + fidx * 16
                 uint64 foff_addr = fbase + 4
                 uint32 fo32 = 0
                 unsafe { *(foff_addr as uint32) -> fo32 }

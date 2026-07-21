@@ -799,7 +799,7 @@ fn gen_expr_a64(uint64 node) {
                 foff = struct_field_offset(si, wfn)
                 fsize = struct_field_size(si, wfn)
             } else {
-                uint64 fbase = struct_table + si * 272 + 16 + fidx * 16
+                uint64 fbase = struct_table + si * struct_entry_size + 16 + fidx * 16
                 uint64 foff_addr = fbase + 4
                 uint32 fo32 = 0
                 unsafe { *(foff_addr as uint32) -> fo32 }

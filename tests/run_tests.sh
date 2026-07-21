@@ -7933,6 +7933,52 @@ for SMOKE_SRC in "$DIR"/smoke/*.kr; do
     rm -f "$SMOKE_BIN"
 done
 
+# --- struct table growth (old caps: 64 structs, 16 fields) ---
+# Both were size-scaling caps missed when the other buffers were converted.
+# The field cap was nearly exhausted in-tree already (an example struct used
+# 14 of 16). Discriminating mutation: restore either hard cap -> the matching
+# case fails to compile with "struct_table overflow" / "struct fields overflow".
+# NOTE the third case: it registers 100 structs BEFORE declaring a wide one, so
+# widening the field count has to RE-BASE a populated table (the entry stride
+# changes, so entries cannot be block-copied). A fix that only reallocated
+# would pass the first two cases and corrupt this one.
+# Field names avoid f16/f32/f64 — those are TYPE KEYWORDS, not usable as names.
+echo ""
+echo "--- struct table growth ---"
+ST_DIR=$(mktemp -d /tmp/krc_struct_XXXXXX)
+
+TOTAL=$((TOTAL + 1))
+{ for si in $(seq 0 199); do printf 'struct S%d { u64 a  u64 b }\n' "$si"; done
+  printf 'fn main() {\n    S0 x\n    S199 y\n    x.a = 20\n    y.b = 22\n    exit(x.a + y.b)\n}\n'
+} > "$ST_DIR/many.kr"
+if $KRC $KRC_FLAGS "$ST_DIR/many.kr" -o "$ST_DIR/many" >/dev/null 2>&1; then
+    chmod +x "$ST_DIR/many"; "$ST_DIR/many" >/dev/null 2>&1; ST_EC=$?
+else ST_EC="compile-failed"; fi
+if [ "$ST_EC" = 42 ]; then PASS=$((PASS + 1)); echo "  struct_count_200: PASS (old cap 64)"
+else FAIL=$((FAIL + 1)); echo "FAIL: struct_count_200 (expected 42, got $ST_EC)"; fi
+
+TOTAL=$((TOTAL + 1))
+{ printf 'struct Huge {\n'; for si in $(seq 0 99); do printf '    u64 q%d\n' "$si"; done; printf '}\n'
+  printf 'fn main() {\n    Huge h\n    h.q0 = 11\n    h.q99 = 31\n    exit(h.q0 + h.q99)\n}\n'
+} > "$ST_DIR/wide.kr"
+if $KRC $KRC_FLAGS "$ST_DIR/wide.kr" -o "$ST_DIR/wide" >/dev/null 2>&1; then
+    chmod +x "$ST_DIR/wide"; "$ST_DIR/wide" >/dev/null 2>&1; ST_EC2=$?
+else ST_EC2="compile-failed"; fi
+if [ "$ST_EC2" = 42 ]; then PASS=$((PASS + 1)); echo "  struct_fields_100: PASS (old cap 16)"
+else FAIL=$((FAIL + 1)); echo "FAIL: struct_fields_100 (expected 42, got $ST_EC2)"; fi
+
+TOTAL=$((TOTAL + 1))
+{ for si in $(seq 0 99); do printf 'struct T%d { u64 a  u64 b }\n' "$si"; done
+  printf 'struct Big {\n'; for si in $(seq 0 39); do printf '    u64 q%d\n' "$si"; done; printf '}\n'
+  printf 'fn main() {\n    T0 t\n    Big b\n    t.a = 20\n    b.q39 = 22\n    exit(t.a + b.q39)\n}\n'
+} > "$ST_DIR/restride.kr"
+if $KRC $KRC_FLAGS "$ST_DIR/restride.kr" -o "$ST_DIR/restride" >/dev/null 2>&1; then
+    chmod +x "$ST_DIR/restride"; "$ST_DIR/restride" >/dev/null 2>&1; ST_EC3=$?
+else ST_EC3="compile-failed"; fi
+if [ "$ST_EC3" = 42 ]; then PASS=$((PASS + 1)); echo "  struct_restride_populated: PASS (re-base 100 entries to a wider stride)"
+else FAIL=$((FAIL + 1)); echo "FAIL: struct_restride_populated (expected 42, got $ST_EC3)"; fi
+rm -rf "$ST_DIR"
+
 # --- Summary ---
 echo ""
 echo "=== Results: $PASS/$TOTAL passed, $FAIL failed ==="

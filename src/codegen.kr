@@ -143,6 +143,17 @@ static uint64 static_array_sizes = 0
 // Followed by field entries: [field_name_tok(4), field_offset(4), field_size(4), pad(4)]
 // Max 64 structs, each with max 16 fields
 static uint64 struct_table = 0
+// Struct table geometry. Entry = 16-byte header + struct_fields_max * 16.
+// Both the struct count and the per-struct field count grow on demand; they
+// were fixed at 64/16 and were missed when the other size-scaling buffers were
+// converted. The field cap in particular was nearly exhausted -- an example
+// struct already carried 14 of 16 fields.
+// NOTE: 272 also appears in this file as the size of Linux's struct
+// file_operations for LKM emission. That is a DIFFERENT 272 and must not be
+// tied to this geometry.
+static uint64 struct_cap = 64
+static uint64 struct_fields_max = 16
+static uint64 struct_entry_size = 272
 static uint64 struct_count = 0
 
 // Struct variable type tracking: maps var name_tok → struct index
@@ -401,7 +412,7 @@ fn codegen_init(uint64 capacity, uint64 source, uint64 tokens) {
     fixup_cap = 32768
     ret_fixups = alloc(256 * 4)
     ret_fixup_count = 0
-    struct_table = alloc(64 * 272)
+    struct_table = alloc(struct_cap * struct_entry_size)
     struct_count = 0
     struct_var_table = alloc(1024 * 8)
     struct_var_count = 0
@@ -1108,13 +1119,39 @@ fn var_lookup(uint64 name_tok) -> uint64 {
 // ---------------------------------------------------------------------------
 
 // Each struct entry is 16 bytes header + 16 bytes per field = 16 + 16*16 = 272 max
+// Double the number of struct SLOTS. Entry stride is unchanged, so this is a
+// plain realloc-and-copy. alloc() is mmap-backed and therefore zero-filled,
+// which the field-count/-offset readers rely on for fresh entries.
+fn struct_table_ensure() {
+    if struct_count < struct_cap { return }
+    struct_table = grow_buf(struct_table, struct_cap * struct_entry_size, struct_cap * 2 * struct_entry_size)
+    struct_cap = struct_cap * 2
+}
+
+// Double the number of FIELDS per struct. This changes the entry stride, so
+// every existing entry has to be re-based into the wider layout rather than
+// block-copied.
+fn struct_fields_ensure(uint64 needed) {
+    if needed < struct_fields_max { return }
+    uint64 new_fields = struct_fields_max
+    while needed >= new_fields { new_fields = new_fields * 2 }
+    uint64 new_entry = 16 + new_fields * 16
+    uint64 nt = alloc(struct_cap * new_entry)
+    uint64 i = 0
+    while i < struct_count {
+        memcpy(nt + i * new_entry, struct_table + i * struct_entry_size, struct_entry_size)
+        i = i + 1
+    }
+    dealloc(struct_table)
+    struct_table = nt
+    struct_entry_size = new_entry
+    struct_fields_max = new_fields
+}
+
 @export
 fn struct_register(uint64 name_tok) -> uint64 {
-    if struct_count >= 64 {
-        write(2, "error: struct_table overflow (max 64)\n", 38)
-        exit(1)
-    }
-    uint64 base = struct_table + struct_count * 272
+    struct_table_ensure()
+    uint64 base = struct_table + struct_count * struct_entry_size
     uint32 nt = name_tok
     unsafe { *(base as uint32) = nt }
     // field_count = 0 initially
@@ -1128,15 +1165,15 @@ fn struct_register(uint64 name_tok) -> uint64 {
 
 @export
 fn struct_add_field(uint64 struct_idx, uint64 field_tok, uint64 field_size, uint64 field_type_kind) {
-    uint64 base = struct_table + struct_idx * 272
+    uint64 base = struct_table + struct_idx * struct_entry_size
     uint64 fc_addr = base + 4
     uint32 fc = 0
     unsafe { *(fc_addr as uint32) -> fc }
     uint64 wfc = fc
-    if wfc >= 16 {
-        write(2, "error: struct fields overflow (max 16)\n", 39)
-        exit(1)
-    }
+    struct_fields_ensure(wfc)
+    // re-derive: struct_fields_ensure may have re-based the table
+    base = struct_table + struct_idx * struct_entry_size
+    fc_addr = base + 4
     // Compute field offset = current total_size (uint16 at offset 8)
     uint64 ts_addr = base + 8
     uint16 ts = 0
@@ -1170,7 +1207,7 @@ fn struct_add_field(uint64 struct_idx, uint64 field_tok, uint64 field_size, uint
 fn struct_lookup(uint64 name_tok) -> uint64 {
     uint64 i = 0
     while i < struct_count {
-        uint64 base = struct_table + i * 272
+        uint64 base = struct_table + i * struct_entry_size
         uint32 stored = 0
         unsafe { *(base as uint32) -> stored }
         uint64 ws = stored
@@ -1183,14 +1220,14 @@ fn struct_lookup(uint64 name_tok) -> uint64 {
 }
 
 fn struct_total_size(uint64 struct_idx) -> uint64 {
-    uint64 base = struct_table + struct_idx * 272 + 8
+    uint64 base = struct_table + struct_idx * struct_entry_size + 8
     uint16 ts = 0
     unsafe { *(base as uint16) -> ts }
     return ts
 }
 
 fn struct_field_offset(uint64 struct_idx, uint64 field_tok) -> uint64 {
-    uint64 base = struct_table + struct_idx * 272
+    uint64 base = struct_table + struct_idx * struct_entry_size
     uint64 fc_addr = base + 4
     uint32 fc = 0
     unsafe { *(fc_addr as uint32) -> fc }
@@ -1213,7 +1250,7 @@ fn struct_field_offset(uint64 struct_idx, uint64 field_tok) -> uint64 {
 }
 
 fn struct_field_size(uint64 struct_idx, uint64 field_tok) -> uint64 {
-    uint64 base = struct_table + struct_idx * 272
+    uint64 base = struct_table + struct_idx * struct_entry_size
     uint64 fc_addr = base + 4
     uint32 fc = 0
     unsafe { *(fc_addr as uint32) -> fc }
@@ -1236,7 +1273,7 @@ fn struct_field_size(uint64 struct_idx, uint64 field_tok) -> uint64 {
 }
 
 fn struct_field_type_kind(uint64 struct_idx, uint64 field_idx) -> uint64 {
-    uint64 base = struct_table + struct_idx * 272
+    uint64 base = struct_table + struct_idx * struct_entry_size
     uint64 fentry = base + 16 + field_idx * 16 + 12
     uint32 val = 0
     unsafe { *(fentry as uint32) -> val }
@@ -1244,7 +1281,7 @@ fn struct_field_type_kind(uint64 struct_idx, uint64 field_idx) -> uint64 {
 }
 
 fn struct_field_type_kind_by_tok(uint64 struct_idx, uint64 field_tok) -> uint64 {
-    uint64 base = struct_table + struct_idx * 272
+    uint64 base = struct_table + struct_idx * struct_entry_size
     uint64 fc_addr = base + 4
     uint32 fc = 0
     unsafe { *(fc_addr as uint32) -> fc }
@@ -1268,7 +1305,7 @@ fn struct_field_type_kind_by_tok(uint64 struct_idx, uint64 field_tok) -> uint64 
 
 @export
 fn struct_classify_abi(uint64 struct_idx) {
-    uint64 base = struct_table + struct_idx * 272
+    uint64 base = struct_table + struct_idx * struct_entry_size
     uint64 size = struct_total_size(struct_idx)
 
     if size > 16 {
@@ -1339,21 +1376,21 @@ fn struct_classify_abi(uint64 struct_idx) {
 }
 
 fn struct_abi_class0(uint64 struct_idx) -> uint64 {
-    uint64 base = struct_table + struct_idx * 272 + 12
+    uint64 base = struct_table + struct_idx * struct_entry_size + 12
     uint16 val = 0
     unsafe { *(base as uint16) -> val }
     return val
 }
 
 fn struct_abi_class1(uint64 struct_idx) -> uint64 {
-    uint64 base = struct_table + struct_idx * 272 + 14
+    uint64 base = struct_table + struct_idx * struct_entry_size + 14
     uint16 val = 0
     unsafe { *(base as uint16) -> val }
     return val
 }
 
 fn struct_abi_flags(uint64 struct_idx) -> uint64 {
-    uint64 base = struct_table + struct_idx * 272 + 10
+    uint64 base = struct_table + struct_idx * struct_entry_size + 10
     uint16 val = 0
     unsafe { *(base as uint16) -> val }
     return val
@@ -3513,7 +3550,7 @@ fn gen_expr(uint64 node) {
                 fsize = struct_field_size(si, wfn)
             } else {
                 // Positional: use field index to get offset/size from struct table
-                uint64 fbase = struct_table + si * 272 + 16 + fidx * 16
+                uint64 fbase = struct_table + si * struct_entry_size + 16 + fidx * 16
                 uint64 foff_addr = fbase + 4
                 uint32 fo32 = 0
                 unsafe { *(foff_addr as uint32) -> fo32 }
