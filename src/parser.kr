@@ -1981,6 +1981,7 @@ fn parse_module() -> uint64 {
         uint64 ann_naked = 0
         uint64 ann_packed = 0
         uint64 ann_export = 0
+        uint64 ann_builtin_override = 0
         uint64 ann_module_init = 0
         uint64 ann_module_exit = 0
         uint64 ann_lkm_ioctl_handler = 0
@@ -2037,6 +2038,16 @@ fn parse_module() -> uint64 {
             // struct file_operations (for BAR mapping via remap_pfn_range).
             if ann_len_v == 16 {
                 if tok_matches(ann_tok, "lkm_mmap_handler", 16) != 0 { ann_lkm_mmap_handler = 1 }
+                // @builtin_override — per-function flag (16 chars). Declares
+                // that this function deliberately shadows a built-in of the
+                // same name; the user body then wins at every call site on
+                // every backend. Without it, defining a function whose name
+                // matches a built-in is a hard sema error: silent shadowing
+                // produced invisible bugs (a stub time_ns() disabled the
+                // compile timer for 20+ releases). Loud failure over silently
+                // doing the wrong thing — same rationale as lexer.kr's
+                // unknown-escape fatal.
+                if tok_matches(ann_tok, "builtin_override", 16) != 0 { ann_builtin_override = 1 }
             }
             // @module_license("...") / @module_author("...") /
             // @module_description("...") / @module_name("...") — module-wide
@@ -2136,7 +2147,8 @@ fn parse_module() -> uint64 {
             //   bit 5 = module_exit   (LKM exit point)
             //   bit 6 = method (fn StructName.name — set by parse_fn_decl;
             //           OR-preserved here, do not overwrite)
-            uint32 ann_flags = ann_noreturn | (ann_naked << 1) | (ann_export << 2) | (ann_module_init << 4) | (ann_module_exit << 5)
+            //   bit 7 = builtin_override (deliberate shadowing of a built-in)
+            uint32 ann_flags = ann_noreturn | (ann_naked << 1) | (ann_export << 2) | (ann_module_init << 4) | (ann_module_exit << 5) | (ann_builtin_override << 7)
             uint32 prev_d4 = ast_data4(fn_node)
             ann_flags = ann_flags | prev_d4
             if ann_flags != 0 {
@@ -2149,6 +2161,14 @@ fn parse_module() -> uint64 {
             // the lookup stays consistent with fn_table indexing.
             uint32 fn_name_tok = ast_data1(fn_node)
             uint64 wfn_name = fn_name_tok
+            // @builtin_override: register the name so every builtin-dispatch
+            // chain (legacy x86_64/arm64, IR lowering) routes calls to the
+            // user body instead of the built-in. Methods are excluded: they
+            // dispatch via dot syntax and registering one would wrongly
+            // disable the builtin for bare calls of the same name.
+            if ann_builtin_override != 0 && (ann_flags & 64) == 0 {
+                builtin_override_register(wfn_name)
+            }
             if ann_module_init != 0 {
                 module_info_set_init_fn(wfn_name)
             }

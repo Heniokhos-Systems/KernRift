@@ -2039,6 +2039,10 @@ fn gen_expr_a64(uint64 node) {
         uint64 ext_pre_a = extern_fn_lookup(wct_pre_a)
         uint64 is_extern_call = 0
         if ext_pre_a != 0xFFFFFFFF { is_extern_call = 1 }
+        // @builtin_override fns win over builtins the same way extern fns
+        // do: skip the builtin chain below. The call tail then emits a
+        // normal user call (its own extern_fn_lookup still misses).
+        if builtin_override_lookup(wct_pre_a) != 0 { is_extern_call = 1 }
 
         // Built-in: exit(code)
         if is_extern_call == 0 && tok_matches(wct, "exit", 4) != 0 {

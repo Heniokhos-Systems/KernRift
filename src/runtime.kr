@@ -1,5 +1,8 @@
 // KernRift self-hosted compiler — Runtime helpers
 
+// Deliberately shadows the fmt_uint built-in: this is the real
+// implementation the compiler itself uses on every target.
+@builtin_override
 fn fmt_uint(uint64 buf, uint64 val) -> uint64 {
     if val == 0 {
         uint8 zero = 48

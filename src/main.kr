@@ -65,6 +65,10 @@ fn win_init_args() {
     cli_argv = argv_buf
 }
 
+// Deliberately shadows the str_len built-in: the compiler wants ONE
+// definition it fully controls on every target (including ones where the
+// built-in lowering differs), and call sites resolve to this body.
+@builtin_override
 fn str_len(uint64 s) -> uint64 {
     uint64 i = 0
     uint64 p = s + i
@@ -368,12 +372,6 @@ fn import_check_import_line(uint64 buf, uint64 size, uint64 pos) -> uint64 {
 // Stdlib search paths for imports not found relative to source file
 static uint64 import_search_paths = 0
 static uint64 import_search_count = 0
-
-// Stub for bootstrap: overridden by get_module_path built-in in new compiler
-fn get_module_path(uint64 buf, uint64 size) -> uint64 { return 0 }
-
-// Stub for bootstrap: overridden by exec_process built-in in new compiler
-fn exec_process(uint64 path) { exit(1) }
 
 fn import_read_home() -> uint64 {
     // Read HOME from /proc/self/environ (Linux-specific)
@@ -2220,15 +2218,6 @@ fn emit_asm_listing(uint64 output_path, uint64 arch, uint64 text_start, uint64 s
         fi = fi + 1
     }
     file_close(fd)
-}
-
-// time_ns — monotonic nanoseconds. Recognized as a built-in by krc ≥ 2.6.2
-// (emits inline clock_gettime on Linux x86_64). This fallback body exists
-// only so that pre-2.6.2 compilers can resolve the symbol during bootstrap;
-// in the new compiler the built-in dispatch matches first and this body is
-// never reached.
-fn time_ns() -> uint64 {
-    return 0
 }
 
 // arch: 0=x86_64, 1=arm64

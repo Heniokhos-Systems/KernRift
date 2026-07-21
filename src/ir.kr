@@ -1654,8 +1654,14 @@ fn ir_lower_expr(uint64 node) -> uint64 {
     if kind == 35 {
         uint32 callee_tok = ast_data1(node)
         uint64 wct = callee_tok
+        // @builtin_override: a user fn that deliberately shadows a built-in
+        // must win at every call site, so the whole builtin-matching chain
+        // below is disabled for registered names and the call falls through
+        // to the normal user-call (IR_CALL) path. Mirrors the extern-fn
+        // shadowing gate in the legacy backends.
+        uint64 skip_builtin = builtin_override_lookup(wct)
         // Check for exit() builtin
-        if tok_matches(wct, "exit", 4) != 0 {
+        if skip_builtin == 0 && tok_matches(wct, "exit", 4) != 0 {
             uint32 arg = ast_child(node)
             uint64 av = ir_lower_expr(arg)
             ir_emit(IR_ARG, 0, av, 0, 0, ir_current_bb)
@@ -1664,7 +1670,7 @@ fn ir_lower_expr(uint64 node) -> uint64 {
             return dest
         }
         // write(fd, buf, len) → syscall 1
-        if tok_matches(wct, "write", 5) != 0 {
+        if skip_builtin == 0 && tok_matches(wct, "write", 5) != 0 {
             uint32 arg1 = ast_child(node)
             uint64 fd = ir_lower_expr(arg1)
             uint32 arg2 = ast_next(arg1)
@@ -1679,7 +1685,7 @@ fn ir_lower_expr(uint64 node) -> uint64 {
             return dest
         }
         // alloc(size) → IR_ALLOC
-        if tok_matches(wct, "alloc", 5) != 0 {
+        if skip_builtin == 0 && tok_matches(wct, "alloc", 5) != 0 {
             uint32 arg1 = ast_child(node)
             uint64 size_v = ir_lower_expr(arg1)
             uint64 dest = ir_new_vreg()
@@ -1687,7 +1693,7 @@ fn ir_lower_expr(uint64 node) -> uint64 {
             return dest
         }
         // dealloc(ptr) → IR_DEALLOC
-        if tok_matches(wct, "dealloc", 7) != 0 {
+        if skip_builtin == 0 && tok_matches(wct, "dealloc", 7) != 0 {
             uint32 arg1 = ast_child(node)
             uint64 ptr_v = ir_lower_expr(arg1)
             ir_emit(IR_DEALLOC, 0, ptr_v, 0, 0, ir_current_bb)
@@ -1696,7 +1702,7 @@ fn ir_lower_expr(uint64 node) -> uint64 {
             return dest
         }
         // store64(ptr, val) → IR_STORE
-        if tok_matches(wct, "store64", 7) != 0 {
+        if skip_builtin == 0 && tok_matches(wct, "store64", 7) != 0 {
             uint32 arg1 = ast_child(node)
             uint64 ptr_v = ir_lower_expr(arg1)
             uint32 arg2 = ast_next(arg1)
@@ -1707,7 +1713,7 @@ fn ir_lower_expr(uint64 node) -> uint64 {
             return dest
         }
         // load64(ptr) → IR_LOAD
-        if tok_matches(wct, "load64", 6) != 0 {
+        if skip_builtin == 0 && tok_matches(wct, "load64", 6) != 0 {
             uint32 arg1 = ast_child(node)
             uint64 ptr_v = ir_lower_expr(arg1)
             uint64 dest = ir_new_vreg()
@@ -1715,7 +1721,7 @@ fn ir_lower_expr(uint64 node) -> uint64 {
             return dest
         }
         // store32(ptr, val) → IR_STORE width 4
-        if tok_matches(wct, "store32", 7) != 0 {
+        if skip_builtin == 0 && tok_matches(wct, "store32", 7) != 0 {
             uint32 arg1 = ast_child(node)
             uint64 ptr_v = ir_lower_expr(arg1)
             uint32 arg2 = ast_next(arg1)
@@ -1726,7 +1732,7 @@ fn ir_lower_expr(uint64 node) -> uint64 {
             return dest
         }
         // load32(ptr) → IR_LOAD width 4
-        if tok_matches(wct, "load32", 6) != 0 {
+        if skip_builtin == 0 && tok_matches(wct, "load32", 6) != 0 {
             uint32 arg1 = ast_child(node)
             uint64 ptr_v = ir_lower_expr(arg1)
             uint64 dest = ir_new_vreg()
@@ -1734,7 +1740,7 @@ fn ir_lower_expr(uint64 node) -> uint64 {
             return dest
         }
         // store8(ptr, val) → IR_STORE width 1
-        if tok_matches(wct, "store8", 6) != 0 {
+        if skip_builtin == 0 && tok_matches(wct, "store8", 6) != 0 {
             uint32 arg1 = ast_child(node)
             uint64 ptr_v = ir_lower_expr(arg1)
             uint32 arg2 = ast_next(arg1)
@@ -1745,7 +1751,7 @@ fn ir_lower_expr(uint64 node) -> uint64 {
             return dest
         }
         // load8(ptr) → IR_LOAD width 1
-        if tok_matches(wct, "load8", 5) != 0 {
+        if skip_builtin == 0 && tok_matches(wct, "load8", 5) != 0 {
             uint32 arg1 = ast_child(node)
             uint64 ptr_v = ir_lower_expr(arg1)
             uint64 dest = ir_new_vreg()
@@ -1753,7 +1759,7 @@ fn ir_lower_expr(uint64 node) -> uint64 {
             return dest
         }
         // store16(ptr, val) → IR_STORE width 2
-        if tok_matches(wct, "store16", 7) != 0 {
+        if skip_builtin == 0 && tok_matches(wct, "store16", 7) != 0 {
             uint32 arg1 = ast_child(node)
             uint64 ptr_v = ir_lower_expr(arg1)
             uint32 arg2 = ast_next(arg1)
@@ -1764,7 +1770,7 @@ fn ir_lower_expr(uint64 node) -> uint64 {
             return dest
         }
         // load16(ptr) → IR_LOAD width 2
-        if tok_matches(wct, "load16", 6) != 0 {
+        if skip_builtin == 0 && tok_matches(wct, "load16", 6) != 0 {
             uint32 arg1 = ast_child(node)
             uint64 ptr_v = ir_lower_expr(arg1)
             uint64 dest = ir_new_vreg()
@@ -1772,7 +1778,7 @@ fn ir_lower_expr(uint64 node) -> uint64 {
             return dest
         }
         // vstore32(ptr, val) → IR_VSTORE width 4
-        if tok_matches(wct, "vstore32", 8) != 0 {
+        if skip_builtin == 0 && tok_matches(wct, "vstore32", 8) != 0 {
             uint32 arg1 = ast_child(node)
             uint64 ptr_v = ir_lower_expr(arg1)
             uint32 arg2 = ast_next(arg1)
@@ -1783,7 +1789,7 @@ fn ir_lower_expr(uint64 node) -> uint64 {
             return dest
         }
         // vstore64(ptr, val) → IR_VSTORE width 8
-        if tok_matches(wct, "vstore64", 8) != 0 {
+        if skip_builtin == 0 && tok_matches(wct, "vstore64", 8) != 0 {
             uint32 arg1 = ast_child(node)
             uint64 ptr_v = ir_lower_expr(arg1)
             uint32 arg2 = ast_next(arg1)
@@ -1794,7 +1800,7 @@ fn ir_lower_expr(uint64 node) -> uint64 {
             return dest
         }
         // vload32(ptr) → IR_VLOAD width 4
-        if tok_matches(wct, "vload32", 7) != 0 {
+        if skip_builtin == 0 && tok_matches(wct, "vload32", 7) != 0 {
             uint32 arg1 = ast_child(node)
             uint64 ptr_v = ir_lower_expr(arg1)
             uint64 dest = ir_new_vreg()
@@ -1802,7 +1808,7 @@ fn ir_lower_expr(uint64 node) -> uint64 {
             return dest
         }
         // vload64(ptr) → IR_VLOAD width 8
-        if tok_matches(wct, "vload64", 7) != 0 {
+        if skip_builtin == 0 && tok_matches(wct, "vload64", 7) != 0 {
             uint32 arg1 = ast_child(node)
             uint64 ptr_v = ir_lower_expr(arg1)
             uint64 dest = ir_new_vreg()
@@ -1810,7 +1816,7 @@ fn ir_lower_expr(uint64 node) -> uint64 {
             return dest
         }
         // atomic_store(ptr, val) → IR_ATOMIC_STORE
-        if tok_matches(wct, "atomic_store", 12) != 0 {
+        if skip_builtin == 0 && tok_matches(wct, "atomic_store", 12) != 0 {
             uint32 arg1 = ast_child(node)
             uint64 ptr_v = ir_lower_expr(arg1)
             uint32 arg2 = ast_next(arg1)
@@ -1821,7 +1827,7 @@ fn ir_lower_expr(uint64 node) -> uint64 {
             return dest
         }
         // atomic_load(ptr) → IR_ATOMIC_LOAD
-        if tok_matches(wct, "atomic_load", 11) != 0 {
+        if skip_builtin == 0 && tok_matches(wct, "atomic_load", 11) != 0 {
             uint32 arg1 = ast_child(node)
             uint64 ptr_v = ir_lower_expr(arg1)
             uint64 dest = ir_new_vreg()
@@ -1829,7 +1835,7 @@ fn ir_lower_expr(uint64 node) -> uint64 {
             return dest
         }
         // atomic_add(ptr, val) → IR_ATOMIC_ADD (returns old value)
-        if tok_matches(wct, "atomic_add", 10) != 0 {
+        if skip_builtin == 0 && tok_matches(wct, "atomic_add", 10) != 0 {
             uint32 arg1 = ast_child(node)
             uint64 ptr_v = ir_lower_expr(arg1)
             uint32 arg2 = ast_next(arg1)
@@ -1839,7 +1845,7 @@ fn ir_lower_expr(uint64 node) -> uint64 {
             return dest
         }
         // atomic_cas(ptr, expected, desired) → IR_ATOMIC_CAS (returns 1 if swapped, 0 if not)
-        if tok_matches(wct, "atomic_cas", 10) != 0 {
+        if skip_builtin == 0 && tok_matches(wct, "atomic_cas", 10) != 0 {
             uint32 arg1 = ast_child(node)
             uint64 ptr_v = ir_lower_expr(arg1)
             uint32 arg2 = ast_next(arg1)
@@ -1851,7 +1857,7 @@ fn ir_lower_expr(uint64 node) -> uint64 {
             return dest
         }
         // atomic_sub(ptr, val) → IR_ATOMIC_SUB (returns old value)
-        if tok_matches(wct, "atomic_sub", 10) != 0 {
+        if skip_builtin == 0 && tok_matches(wct, "atomic_sub", 10) != 0 {
             uint32 arg1 = ast_child(node)
             uint64 ptr_v = ir_lower_expr(arg1)
             uint32 arg2 = ast_next(arg1)
@@ -1861,7 +1867,7 @@ fn ir_lower_expr(uint64 node) -> uint64 {
             return dest
         }
         // atomic_and(ptr, val) → IR_ATOMIC_AND (returns old value)
-        if tok_matches(wct, "atomic_and", 10) != 0 {
+        if skip_builtin == 0 && tok_matches(wct, "atomic_and", 10) != 0 {
             uint32 arg1 = ast_child(node)
             uint64 ptr_v = ir_lower_expr(arg1)
             uint32 arg2 = ast_next(arg1)
@@ -1871,7 +1877,7 @@ fn ir_lower_expr(uint64 node) -> uint64 {
             return dest
         }
         // atomic_or(ptr, val) → IR_ATOMIC_OR (returns old value)
-        if tok_matches(wct, "atomic_or", 9) != 0 {
+        if skip_builtin == 0 && tok_matches(wct, "atomic_or", 9) != 0 {
             uint32 arg1 = ast_child(node)
             uint64 ptr_v = ir_lower_expr(arg1)
             uint32 arg2 = ast_next(arg1)
@@ -1881,7 +1887,7 @@ fn ir_lower_expr(uint64 node) -> uint64 {
             return dest
         }
         // atomic_xor(ptr, val) → IR_ATOMIC_XOR (returns old value)
-        if tok_matches(wct, "atomic_xor", 10) != 0 {
+        if skip_builtin == 0 && tok_matches(wct, "atomic_xor", 10) != 0 {
             uint32 arg1 = ast_child(node)
             uint64 ptr_v = ir_lower_expr(arg1)
             uint32 arg2 = ast_next(arg1)
@@ -1891,7 +1897,7 @@ fn ir_lower_expr(uint64 node) -> uint64 {
             return dest
         }
         // exec_process_argv(path, argv) → IR_EXEC_ARGV
-        if tok_matches(wct, "exec_process_argv", 17) != 0 {
+        if skip_builtin == 0 && tok_matches(wct, "exec_process_argv", 17) != 0 {
             uint32 arg1 = ast_child(node)
             uint64 path_v = ir_lower_expr(arg1)
             uint32 arg2 = ast_next(arg1)
@@ -1901,15 +1907,23 @@ fn ir_lower_expr(uint64 node) -> uint64 {
             return dest
         }
         // exec_process(path) → IR_EXEC
-        if tok_matches(wct, "exec_process", 12) != 0 {
+        if skip_builtin == 0 && tok_matches(wct, "exec_process", 12) != 0 {
             uint32 arg1 = ast_child(node)
             uint64 path_v = ir_lower_expr(arg1)
             uint64 dest = ir_new_vreg()
             ir_emit(IR_EXEC, dest, path_v, 0, 0, ir_current_bb)
             return dest
         }
-        // get_module_path(buf, size) → returns 0 on Linux (no-op)
-        if tok_matches(wct, "get_module_path", 15) != 0 {
+        // get_module_path(buf, size) → returns 0 on EVERY target — including
+        // Windows, which is a KNOWN GAP: the legacy backend implements the
+        // Windows path correctly (GetModuleFileNameA via IAT slot 12, see
+        // codegen.kr get_module_path), but this IR lowering never grew the
+        // target_os == 2 branch, so PE binaries built with the default IR
+        // backend get len=0 and Windows stdlib import resolution fails.
+        // Verified empirically on Windows 10.0.26200 (IR: len=0, legacy:
+        // correct path). Fix requires a dedicated IR op with x86_64 + arm64
+        // Windows emission — tracked as a follow-up, out of scope here.
+        if skip_builtin == 0 && tok_matches(wct, "get_module_path", 15) != 0 {
             uint32 arg1 = ast_child(node)
             ir_lower_expr(arg1)
             uint32 arg2 = ast_next(arg1)
@@ -1919,7 +1933,7 @@ fn ir_lower_expr(uint64 node) -> uint64 {
             return dest
         }
         // set_executable(path) → IR_SET_EXEC
-        if tok_matches(wct, "set_executable", 14) != 0 {
+        if skip_builtin == 0 && tok_matches(wct, "set_executable", 14) != 0 {
             uint32 arg1 = ast_child(node)
             uint64 path_v = ir_lower_expr(arg1)
             ir_emit(IR_SET_EXEC, 0, path_v, 0, 0, ir_current_bb)
@@ -1928,7 +1942,7 @@ fn ir_lower_expr(uint64 node) -> uint64 {
             return dest
         }
         // sqrt_f32(x) → IR_FSQRT32
-        if tok_matches(wct, "sqrt_f32", 8) != 0 {
+        if skip_builtin == 0 && tok_matches(wct, "sqrt_f32", 8) != 0 {
             uint32 first_arg = ast_child(node)
             uint64 src_v = ir_lower_expr(first_arg)
             uint64 dest = ir_new_vreg()
@@ -1937,7 +1951,7 @@ fn ir_lower_expr(uint64 node) -> uint64 {
             return dest
         }
         // time_ns() → IR_TIME_NS
-        if tok_matches(wct, "time_ns", 7) != 0 {
+        if skip_builtin == 0 && tok_matches(wct, "time_ns", 7) != 0 {
             uint64 dest = ir_new_vreg()
             ir_emit(IR_TIME_NS, dest, 0, 0, 0, ir_current_bb)
             return dest
@@ -1946,7 +1960,7 @@ fn ir_lower_expr(uint64 node) -> uint64 {
         // to RAM. Maps to ISB on ARM64; x86 keeps I- and D-cache coherent
         // automatically, so the emitter issues no instruction there — the
         // builtin exists so portable code can compile on both archs.
-        if tok_matches(wct, "isb", 3) != 0 {
+        if skip_builtin == 0 && tok_matches(wct, "isb", 3) != 0 {
             ir_emit(IR_ISB, 0, 0, 0, 0, ir_current_bb)
             uint64 dest = ir_new_vreg()
             ir_emit(IR_CONST, dest, 0, 0, 0, ir_current_bb)
@@ -1954,7 +1968,7 @@ fn ir_lower_expr(uint64 node) -> uint64 {
         }
         // dsb() → IR_DSB. Data-sync barrier. ARM64: DSB SY — waits for
         // every load/store by this PE to complete. x86: MFENCE.
-        if tok_matches(wct, "dsb", 3) != 0 {
+        if skip_builtin == 0 && tok_matches(wct, "dsb", 3) != 0 {
             ir_emit(IR_DSB, 0, 0, 0, 0, ir_current_bb)
             uint64 dest = ir_new_vreg()
             ir_emit(IR_CONST, dest, 0, 0, 0, ir_current_bb)
@@ -1963,7 +1977,7 @@ fn ir_lower_expr(uint64 node) -> uint64 {
         // dmb() → IR_DMB. Data-memory barrier, inner-shareable. ARM64:
         // DMB ISH. x86: MFENCE. Cheaper than DSB because it orders but
         // does not wait for completion.
-        if tok_matches(wct, "dmb", 3) != 0 {
+        if skip_builtin == 0 && tok_matches(wct, "dmb", 3) != 0 {
             ir_emit(IR_DMB, 0, 0, 0, 0, ir_current_bb)
             uint64 dest = ir_new_vreg()
             ir_emit(IR_CONST, dest, 0, 0, 0, ir_current_bb)
@@ -1974,7 +1988,7 @@ fn ir_lower_expr(uint64 node) -> uint64 {
         // fresh data. Use after DMA or before handing a buffer to a
         // different coherency domain. ARM64: DC CIVAC + DSB + ISB. x86:
         // CLFLUSH + MFENCE.
-        if tok_matches(wct, "dcache_flush", 12) != 0 {
+        if skip_builtin == 0 && tok_matches(wct, "dcache_flush", 12) != 0 {
             uint32 arg1 = ast_child(node)
             uint64 addr_v = ir_lower_expr(arg1)
             ir_emit(IR_DCACHE_FLUSH, 0, addr_v, 0, 0, ir_current_bb)
@@ -1986,7 +2000,7 @@ fn ir_lower_expr(uint64 node) -> uint64 {
         // instruction-cache line so the next fetch sees freshly
         // written code. ARM64: IC IVAU + DSB + ISB. x86: no-op
         // (I-cache is kept coherent by the hardware).
-        if tok_matches(wct, "icache_invalidate", 17) != 0 {
+        if skip_builtin == 0 && tok_matches(wct, "icache_invalidate", 17) != 0 {
             uint32 arg1 = ast_child(node)
             uint64 addr_v = ir_lower_expr(arg1)
             ir_emit(IR_ICACHE_INV, 0, addr_v, 0, 0, ir_current_bb)
@@ -1995,7 +2009,7 @@ fn ir_lower_expr(uint64 node) -> uint64 {
             return dest
         }
         // vload8(ptr) → IR_VLOAD width 1
-        if tok_matches(wct, "vload8", 6) != 0 {
+        if skip_builtin == 0 && tok_matches(wct, "vload8", 6) != 0 {
             uint32 arg1 = ast_child(node)
             uint64 ptr_v = ir_lower_expr(arg1)
             uint64 dest = ir_new_vreg()
@@ -2003,7 +2017,7 @@ fn ir_lower_expr(uint64 node) -> uint64 {
             return dest
         }
         // vload16(ptr) → IR_VLOAD width 2
-        if tok_matches(wct, "vload16", 7) != 0 {
+        if skip_builtin == 0 && tok_matches(wct, "vload16", 7) != 0 {
             uint32 arg1 = ast_child(node)
             uint64 ptr_v = ir_lower_expr(arg1)
             uint64 dest = ir_new_vreg()
@@ -2011,7 +2025,7 @@ fn ir_lower_expr(uint64 node) -> uint64 {
             return dest
         }
         // vstore8(ptr, val) → IR_VSTORE width 1
-        if tok_matches(wct, "vstore8", 7) != 0 {
+        if skip_builtin == 0 && tok_matches(wct, "vstore8", 7) != 0 {
             uint32 arg1 = ast_child(node)
             uint64 ptr_v = ir_lower_expr(arg1)
             uint32 arg2 = ast_next(arg1)
@@ -2022,7 +2036,7 @@ fn ir_lower_expr(uint64 node) -> uint64 {
             return dest
         }
         // vstore16(ptr, val) → IR_VSTORE width 2
-        if tok_matches(wct, "vstore16", 8) != 0 {
+        if skip_builtin == 0 && tok_matches(wct, "vstore16", 8) != 0 {
             uint32 arg1 = ast_child(node)
             uint64 ptr_v = ir_lower_expr(arg1)
             uint32 arg2 = ast_next(arg1)
@@ -2033,7 +2047,7 @@ fn ir_lower_expr(uint64 node) -> uint64 {
             return dest
         }
         // bit_range(val, start, width) → (val >> start) & ((1 << width) - 1)
-        if tok_matches(wct, "bit_range", 9) != 0 {
+        if skip_builtin == 0 && tok_matches(wct, "bit_range", 9) != 0 {
             uint32 arg1 = ast_child(node)
             uint64 val_v = ir_lower_expr(arg1)
             uint32 arg2 = ast_next(arg1)
@@ -2055,7 +2069,7 @@ fn ir_lower_expr(uint64 node) -> uint64 {
             return dest
         }
         // bit_insert(val, start, width, bits) → (val & ~(mask << start)) | ((bits & mask) << start)
-        if tok_matches(wct, "bit_insert", 10) != 0 {
+        if skip_builtin == 0 && tok_matches(wct, "bit_insert", 10) != 0 {
             uint32 arg1 = ast_child(node)
             uint64 val_v = ir_lower_expr(arg1)
             uint32 arg2 = ast_next(arg1)
@@ -2090,7 +2104,7 @@ fn ir_lower_expr(uint64 node) -> uint64 {
             return dest
         }
         // print_str(s) → write strlen, write the string
-        if tok_matches(wct, "print_str", 9) != 0 {
+        if skip_builtin == 0 && tok_matches(wct, "print_str", 9) != 0 {
             uint32 first_arg = ast_child(node)
             uint64 s_v = ir_lower_expr(first_arg)
             uint64 len_v = ir_new_vreg()
@@ -2107,7 +2121,7 @@ fn ir_lower_expr(uint64 node) -> uint64 {
             return zero
         }
         // println_str(s) → print_str + newline
-        if tok_matches(wct, "println_str", 11) != 0 {
+        if skip_builtin == 0 && tok_matches(wct, "println_str", 11) != 0 {
             uint32 first_arg = ast_child(node)
             uint64 s_v = ir_lower_expr(first_arg)
             uint64 len_v = ir_new_vreg()
@@ -2138,7 +2152,7 @@ fn ir_lower_expr(uint64 node) -> uint64 {
             return zero
         }
         // read(fd, buf, len) → syscall 0
-        if tok_matches(wct, "read", 4) != 0 {
+        if skip_builtin == 0 && tok_matches(wct, "read", 4) != 0 {
             uint32 arg1 = ast_child(node)
             uint64 fd = ir_lower_expr(arg1)
             uint32 arg2 = ast_next(arg1)
@@ -2153,7 +2167,7 @@ fn ir_lower_expr(uint64 node) -> uint64 {
             return dest
         }
         // memcpy(dst, src, len) → IR_MEMCPY
-        if tok_matches(wct, "memcpy", 6) != 0 {
+        if skip_builtin == 0 && tok_matches(wct, "memcpy", 6) != 0 {
             uint32 arg1 = ast_child(node)
             uint64 dst_v = ir_lower_expr(arg1)
             uint32 arg2 = ast_next(arg1)
@@ -2165,7 +2179,7 @@ fn ir_lower_expr(uint64 node) -> uint64 {
             return dest
         }
         // memset(dst, val, len) → IR_MEMSET
-        if tok_matches(wct, "memset", 6) != 0 {
+        if skip_builtin == 0 && tok_matches(wct, "memset", 6) != 0 {
             uint32 arg1 = ast_child(node)
             uint64 dst_v = ir_lower_expr(arg1)
             uint32 arg2 = ast_next(arg1)
@@ -2177,7 +2191,7 @@ fn ir_lower_expr(uint64 node) -> uint64 {
             return dest
         }
         // str_len(s) → IR_STRLEN
-        if tok_matches(wct, "str_len", 7) != 0 {
+        if skip_builtin == 0 && tok_matches(wct, "str_len", 7) != 0 {
             uint32 arg1 = ast_child(node)
             uint64 str_v = ir_lower_expr(arg1)
             uint64 dest = ir_new_vreg()
@@ -2185,7 +2199,7 @@ fn ir_lower_expr(uint64 node) -> uint64 {
             return dest
         }
         // fmt_uint(buf, val) → IR_FMT_UINT
-        if tok_matches(wct, "fmt_uint", 8) != 0 {
+        if skip_builtin == 0 && tok_matches(wct, "fmt_uint", 8) != 0 {
             uint32 arg1 = ast_child(node)
             uint64 buf_v = ir_lower_expr(arg1)
             uint32 arg2 = ast_next(arg1)
@@ -2196,7 +2210,7 @@ fn ir_lower_expr(uint64 node) -> uint64 {
         }
         // str_eq(a, b) → IR_STR_EQ
         // Signed comparison builtins
-        if tok_matches(wct, "signed_lt", 9) != 0 {
+        if skip_builtin == 0 && tok_matches(wct, "signed_lt", 9) != 0 {
             uint32 arg1 = ast_child(node)
             uint64 a_v = ir_lower_expr(arg1)
             uint32 arg2 = ast_next(arg1)
@@ -2205,7 +2219,7 @@ fn ir_lower_expr(uint64 node) -> uint64 {
             ir_emit(IR_SCMP_LT, dest, a_v, b_v, 0, ir_current_bb)
             return dest
         }
-        if tok_matches(wct, "signed_gt", 9) != 0 {
+        if skip_builtin == 0 && tok_matches(wct, "signed_gt", 9) != 0 {
             uint32 arg1 = ast_child(node)
             uint64 a_v = ir_lower_expr(arg1)
             uint32 arg2 = ast_next(arg1)
@@ -2214,7 +2228,7 @@ fn ir_lower_expr(uint64 node) -> uint64 {
             ir_emit(IR_SCMP_GT, dest, a_v, b_v, 0, ir_current_bb)
             return dest
         }
-        if tok_matches(wct, "signed_le", 9) != 0 {
+        if skip_builtin == 0 && tok_matches(wct, "signed_le", 9) != 0 {
             uint32 arg1 = ast_child(node)
             uint64 a_v = ir_lower_expr(arg1)
             uint32 arg2 = ast_next(arg1)
@@ -2223,7 +2237,7 @@ fn ir_lower_expr(uint64 node) -> uint64 {
             ir_emit(IR_SCMP_LE, dest, a_v, b_v, 0, ir_current_bb)
             return dest
         }
-        if tok_matches(wct, "signed_ge", 9) != 0 {
+        if skip_builtin == 0 && tok_matches(wct, "signed_ge", 9) != 0 {
             uint32 arg1 = ast_child(node)
             uint64 a_v = ir_lower_expr(arg1)
             uint32 arg2 = ast_next(arg1)
@@ -2234,7 +2248,7 @@ fn ir_lower_expr(uint64 node) -> uint64 {
         }
 
         // file_open/file_close/file_read/file_write builtins
-        if tok_matches(wct, "file_open", 9) != 0 {
+        if skip_builtin == 0 && tok_matches(wct, "file_open", 9) != 0 {
             uint32 arg1 = ast_child(node)
             uint64 path_v = ir_lower_expr(arg1)
             uint32 arg2 = ast_next(arg1)
@@ -2266,7 +2280,7 @@ fn ir_lower_expr(uint64 node) -> uint64 {
             ir_emit(IR_SYSCALL, dest, 0, 0, 2, ir_current_bb)
             return dest
         }
-        if tok_matches(wct, "file_close", 10) != 0 {
+        if skip_builtin == 0 && tok_matches(wct, "file_close", 10) != 0 {
             uint32 arg1 = ast_child(node)
             uint64 fd_v = ir_lower_expr(arg1)
             ir_emit(IR_ARG, 0, fd_v, 0, 0, ir_current_bb)
@@ -2274,7 +2288,7 @@ fn ir_lower_expr(uint64 node) -> uint64 {
             ir_emit(IR_SYSCALL, dest, 0, 0, 3, ir_current_bb)
             return dest
         }
-        if tok_matches(wct, "file_write", 10) != 0 {
+        if skip_builtin == 0 && tok_matches(wct, "file_write", 10) != 0 {
             uint32 arg1 = ast_child(node)
             uint64 fd_v = ir_lower_expr(arg1)
             uint32 arg2 = ast_next(arg1)
@@ -2288,7 +2302,7 @@ fn ir_lower_expr(uint64 node) -> uint64 {
             ir_emit(IR_SYSCALL, dest, 0, 0, 1, ir_current_bb)
             return dest
         }
-        if tok_matches(wct, "file_read", 9) != 0 {
+        if skip_builtin == 0 && tok_matches(wct, "file_read", 9) != 0 {
             uint32 arg1 = ast_child(node)
             uint64 fd_v = ir_lower_expr(arg1)
             uint32 arg2 = ast_next(arg1)
@@ -2304,7 +2318,7 @@ fn ir_lower_expr(uint64 node) -> uint64 {
         }
 
         // file_size(fd) — lseek(fd, 0, SEEK_END) then lseek(fd, 0, SEEK_SET)
-        if tok_matches(wct, "file_size", 9) != 0 {
+        if skip_builtin == 0 && tok_matches(wct, "file_size", 9) != 0 {
             uint32 arg1 = ast_child(node)
             uint64 fd_v = ir_lower_expr(arg1)
             uint64 zero_v = ir_new_vreg()
@@ -2327,7 +2341,7 @@ fn ir_lower_expr(uint64 node) -> uint64 {
         }
 
         // print(arg, ...) / println(arg, ...) — variadic, space-separated args
-        if tok_matches(wct, "println", 7) != 0 || tok_matches(wct, "print", 5) != 0 {
+        if skip_builtin == 0 && (tok_matches(wct, "println", 7) != 0 || tok_matches(wct, "print", 5) != 0) {
             uint64 is_println = tok_matches(wct, "println", 7)
             uint64 buf_v = ir_new_vreg()
             ir_emit(IR_ALLOC, buf_v, 0, 0, 4096, ir_current_bb)
@@ -2424,7 +2438,7 @@ fn ir_lower_expr(uint64 node) -> uint64 {
             return zero
         }
 
-        if tok_matches(wct, "str_eq", 6) != 0 {
+        if skip_builtin == 0 && tok_matches(wct, "str_eq", 6) != 0 {
             uint32 arg1 = ast_child(node)
             uint64 a_v = ir_lower_expr(arg1)
             uint32 arg2 = ast_next(arg1)
@@ -2435,7 +2449,7 @@ fn ir_lower_expr(uint64 node) -> uint64 {
         }
 
         // syscall_raw(nr, a0, a1, a2, a3, a4, a5) → raw Linux syscall
-        if tok_matches(wct, "syscall_raw", 11) != 0 {
+        if skip_builtin == 0 && tok_matches(wct, "syscall_raw", 11) != 0 {
             // Evaluate all 7 args
             uint64[7] sc_vregs
             uint32 sc_arg = ast_child(node)
@@ -2468,7 +2482,7 @@ fn ir_lower_expr(uint64 node) -> uint64 {
         }
 
         // bit_get(val, pos) → (val >> pos) & 1
-        if tok_matches(wct, "bit_get", 7) != 0 {
+        if skip_builtin == 0 && tok_matches(wct, "bit_get", 7) != 0 {
             uint32 arg1 = ast_child(node)
             uint64 val_v = ir_lower_expr(arg1)
             uint32 arg2 = ast_next(arg1)
@@ -2483,7 +2497,7 @@ fn ir_lower_expr(uint64 node) -> uint64 {
         }
 
         // bit_set(val, pos) → val | (1 << pos)
-        if tok_matches(wct, "bit_set", 7) != 0 {
+        if skip_builtin == 0 && tok_matches(wct, "bit_set", 7) != 0 {
             uint32 arg1 = ast_child(node)
             uint64 val_v = ir_lower_expr(arg1)
             uint32 arg2 = ast_next(arg1)
@@ -2498,7 +2512,7 @@ fn ir_lower_expr(uint64 node) -> uint64 {
         }
 
         // bit_clear(val, pos) → val & ~(1 << pos)
-        if tok_matches(wct, "bit_clear", 9) != 0 {
+        if skip_builtin == 0 && tok_matches(wct, "bit_clear", 9) != 0 {
             uint32 arg1 = ast_child(node)
             uint64 val_v = ir_lower_expr(arg1)
             uint32 arg2 = ast_next(arg1)
@@ -2515,7 +2529,7 @@ fn ir_lower_expr(uint64 node) -> uint64 {
         }
 
         // bit_toggle(val, pos) → val ^ (1 << pos)
-        if tok_matches(wct, "bit_toggle", 10) != 0 {
+        if skip_builtin == 0 && tok_matches(wct, "bit_toggle", 10) != 0 {
             uint32 arg1 = ast_child(node)
             uint64 val_v = ir_lower_expr(arg1)
             uint32 arg2 = ast_next(arg1)
@@ -2530,7 +2544,7 @@ fn ir_lower_expr(uint64 node) -> uint64 {
         }
 
         // fn_addr("name") → address of named function
-        if tok_matches(wct, "fn_addr", 7) != 0 {
+        if skip_builtin == 0 && tok_matches(wct, "fn_addr", 7) != 0 {
             uint32 name_arg = ast_child(node)
             uint64 wna = name_arg
             uint32 str_tok = ast_data1(wna)
@@ -2551,8 +2565,8 @@ fn ir_lower_expr(uint64 node) -> uint64 {
         // `-> f64`; otherwise prefer the plain `call_ptr`.
         uint64 is_call_ptr = 0
         uint64 is_call_ptr_f64 = 0
-        if tok_matches(wct, "call_ptr", 8) != 0 { is_call_ptr = 1 }
-        if tok_matches(wct, "call_ptr_f64", 12) != 0 { is_call_ptr_f64 = 1 }
+        if skip_builtin == 0 && tok_matches(wct, "call_ptr", 8) != 0 { is_call_ptr = 1 }
+        if skip_builtin == 0 && tok_matches(wct, "call_ptr_f64", 12) != 0 { is_call_ptr_f64 = 1 }
         if is_call_ptr != 0 || is_call_ptr_f64 != 0 {
             uint32 first_arg = ast_child(node)
             uint64 wfa = first_arg
@@ -2599,7 +2613,7 @@ fn ir_lower_expr(uint64 node) -> uint64 {
         // ---------------------------------------------------------------
 
         // int_to_f64(x): convert integer to f64, return f64 bit pattern
-        if tok_matches(wct, "int_to_f64", 10) != 0 {
+        if skip_builtin == 0 && tok_matches(wct, "int_to_f64", 10) != 0 {
             uint32 first_arg = ast_child(node)
             uint64 src_v = ir_lower_expr(first_arg)
             uint64 dest = ir_new_vreg()
@@ -2609,7 +2623,7 @@ fn ir_lower_expr(uint64 node) -> uint64 {
         }
 
         // f64_to_int(x): convert f64 bit pattern to integer
-        if tok_matches(wct, "f64_to_int", 10) != 0 {
+        if skip_builtin == 0 && tok_matches(wct, "f64_to_int", 10) != 0 {
             uint32 first_arg = ast_child(node)
             uint64 src_v = ir_lower_expr(first_arg)
             uint64 dest = ir_new_vreg()
@@ -2622,7 +2636,7 @@ fn ir_lower_expr(uint64 node) -> uint64 {
         }
 
         // int_to_f32(x): convert integer to f32, return f32 bit pattern
-        if tok_matches(wct, "int_to_f32", 10) != 0 {
+        if skip_builtin == 0 && tok_matches(wct, "int_to_f32", 10) != 0 {
             uint32 first_arg = ast_child(node)
             uint64 src_v = ir_lower_expr(first_arg)
             uint64 dest = ir_new_vreg()
@@ -2632,7 +2646,7 @@ fn ir_lower_expr(uint64 node) -> uint64 {
         }
 
         // f32_to_int(x): convert f32 bit pattern to integer
-        if tok_matches(wct, "f32_to_int", 10) != 0 {
+        if skip_builtin == 0 && tok_matches(wct, "f32_to_int", 10) != 0 {
             uint32 first_arg = ast_child(node)
             uint64 src_v = ir_lower_expr(first_arg)
             uint64 dest = ir_new_vreg()
@@ -2642,7 +2656,7 @@ fn ir_lower_expr(uint64 node) -> uint64 {
         }
 
         // sqrt(x) / sqrt_f64(x): f64 square root
-        if tok_matches(wct, "sqrt_f64", 8) != 0 || tok_matches(wct, "sqrt", 4) != 0 {
+        if skip_builtin == 0 && (tok_matches(wct, "sqrt_f64", 8) != 0 || tok_matches(wct, "sqrt", 4) != 0) {
             uint32 first_arg = ast_child(node)
             uint64 src_v = ir_lower_expr(first_arg)
             uint64 dest = ir_new_vreg()
@@ -2652,7 +2666,7 @@ fn ir_lower_expr(uint64 node) -> uint64 {
         }
 
         // fma_f64(a, b, c): a*b + c in f64
-        if tok_matches(wct, "fma_f64", 7) != 0 {
+        if skip_builtin == 0 && tok_matches(wct, "fma_f64", 7) != 0 {
             uint32 arg_a = ast_child(node)
             uint64 wa_a = arg_a
             uint32 arg_b = ast_next(wa_a)
@@ -2669,7 +2683,7 @@ fn ir_lower_expr(uint64 node) -> uint64 {
         }
 
         // f32_to_f64(x): widen f32 to f64
-        if tok_matches(wct, "f32_to_f64", 10) != 0 {
+        if skip_builtin == 0 && tok_matches(wct, "f32_to_f64", 10) != 0 {
             uint32 first_arg = ast_child(node)
             uint64 src_v = ir_lower_expr(first_arg)
             uint64 dest = ir_new_vreg()
@@ -2679,7 +2693,7 @@ fn ir_lower_expr(uint64 node) -> uint64 {
         }
 
         // f64_to_f32(x): narrow f64 to f32
-        if tok_matches(wct, "f64_to_f32", 10) != 0 {
+        if skip_builtin == 0 && tok_matches(wct, "f64_to_f32", 10) != 0 {
             uint32 first_arg = ast_child(node)
             uint64 src_v = ir_lower_expr(first_arg)
             uint64 dest = ir_new_vreg()
@@ -2689,7 +2703,7 @@ fn ir_lower_expr(uint64 node) -> uint64 {
         }
 
         // f32_to_f16(x): convert f32 bits to f16 bits (integer result)
-        if tok_matches(wct, "f32_to_f16", 10) != 0 {
+        if skip_builtin == 0 && tok_matches(wct, "f32_to_f16", 10) != 0 {
             uint32 first_arg = ast_child(node)
             uint64 src_v = ir_lower_expr(first_arg)
             uint64 dest = ir_new_vreg()
@@ -2699,7 +2713,7 @@ fn ir_lower_expr(uint64 node) -> uint64 {
         }
 
         // f16_to_f32(x): convert f16 bits to f32 bits
-        if tok_matches(wct, "f16_to_f32", 10) != 0 {
+        if skip_builtin == 0 && tok_matches(wct, "f16_to_f32", 10) != 0 {
             uint32 first_arg = ast_child(node)
             uint64 src_v = ir_lower_expr(first_arg)
             uint64 dest = ir_new_vreg()
@@ -2709,7 +2723,7 @@ fn ir_lower_expr(uint64 node) -> uint64 {
         }
 
         // get_target_os() → compile-time OS constant
-        if tok_matches(wct, "get_target_os", 13) != 0 {
+        if skip_builtin == 0 && tok_matches(wct, "get_target_os", 13) != 0 {
             uint64 dest = ir_new_vreg()
             ir_emit(IR_CONST, dest, 0, 0, target_os, ir_current_bb)
             return dest
@@ -2720,7 +2734,7 @@ fn ir_lower_expr(uint64 node) -> uint64 {
         //   x86_64:  linux=1, windows=3, macos=5, android=8
         //   arm64:   linux=2, windows=4, macos=6, android=7
         // target_arch is 0 for x86_64, 1 for arm64 (set from main.kr).
-        if tok_matches(wct, "get_arch_id", 11) != 0 {
+        if skip_builtin == 0 && tok_matches(wct, "get_arch_id", 11) != 0 {
             uint64 arch_id = 1
             if target_arch == 1 {
                 arch_id = 2
