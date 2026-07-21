@@ -7633,6 +7633,29 @@ else
     FAIL=$((FAIL + 1))
     echo "FAIL: grow_fixup_table_33k (expected exit 232, got $GROW_EC)"
 fi
+
+# 4) ir_insn arena: the same 33000-call program on the DEFAULT IR path
+#    (no --legacy). One call statement lowers to several instructions, so
+#    main() alone exceeds the old fixed cap of 65536 insns. Discriminating
+#    mutation (verified pre-fix): without ir_insn_ensure() the compile dies
+#    with "error: IR instruction overflow" — this is exactly why test 3
+#    above needs --legacy to reach the fixup table at all. Exit 232 proves
+#    every call executed correctly against the regrown arena (a stale
+#    ir_insn_buf/ir_insn_src_tok base after growth would corrupt the code).
+TOTAL=$((TOTAL + 1))
+GROW_EC2=1
+if $KRC $KRC_FLAGS "$GROW_DIR/fixup_grow.kr" -o "$GROW_DIR/insn_grow" >/dev/null 2>&1; then
+    chmod +x "$GROW_DIR/insn_grow"
+    "$GROW_DIR/insn_grow" >/dev/null 2>&1
+    GROW_EC2=$?
+fi
+if [ "$GROW_EC2" = 232 ]; then
+    PASS=$((PASS + 1))
+    echo "  grow_ir_insn_33k: PASS (33000 calls, default IR path, old cap 65536)"
+else
+    FAIL=$((FAIL + 1))
+    echo "FAIL: grow_ir_insn_33k (expected exit 232, got $GROW_EC2)"
+fi
 rm -rf "$GROW_DIR"
 
 # --- builtin shadowing tests ---

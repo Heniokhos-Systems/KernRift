@@ -516,14 +516,25 @@ fn ir_insn_set_imm(uint64 idx, uint64 val) {
 // Emit an instruction
 // ---------------------------------------------------------------------------
 
+// Ensure one free 32-byte slot in the instruction arena. Doubles on demand
+// via the shared grow_buf helper (codegen.kr). The parallel src-tok table
+// grows in lockstep — it shares ir_insn_cap so per-insn indexing matches.
+// grow_buf is mmap-backed (fresh mapping + copy + dealloc), so the old base
+// is garbage after growth: callers must never cache a pointer INTO the
+// instruction arena across an ir_emit call — always recompute from
+// ir_insn_buf / ir_insn_base(idx) after any call that can emit.
+fn ir_insn_ensure() {
+    if ir_insn_count < ir_insn_cap { return }
+    ir_insn_buf = grow_buf(ir_insn_buf, ir_insn_cap * 32, ir_insn_cap * 64)
+    ir_insn_src_tok = grow_buf(ir_insn_src_tok, ir_insn_cap * 4, ir_insn_cap * 8)
+    ir_insn_cap = ir_insn_cap * 2
+}
+
 // Create a new instruction, append it to the given basic block, and return
 // the instruction index (0-based).
 @export
 fn ir_emit(uint64 opcode, uint64 dest, uint64 src1, uint64 src2, uint64 imm64, uint64 bb) -> uint64 {
-    if ir_insn_count >= ir_insn_cap {
-        write(2, "error: IR instruction overflow\n", 31)
-        exit(1)
-    }
+    ir_insn_ensure()
 
     uint64 idx = ir_insn_count
     // Parallel-table the current statement's source token. Per-insn
