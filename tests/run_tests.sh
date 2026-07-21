@@ -7979,6 +7979,56 @@ if [ "$ST_EC3" = 42 ]; then PASS=$((PASS + 1)); echo "  struct_restride_populate
 else FAIL=$((FAIL + 1)); echo "FAIL: struct_restride_populated (expected 42, got $ST_EC3)"; fi
 rm -rf "$ST_DIR"
 
+# --- LKM (--emit=lkm) ---
+# The suite had NO coverage of LKM emission at all, despite it being a shipped
+# feature that lays out kernel ABI structs by hand. That gap surfaced when a
+# struct-table change had to be hand-verified against the 272-byte
+# struct file_operations, because codegen.kr uses 272 for BOTH that and the
+# struct-table entry stride. tests/helpers/lkm_check.py asserts the fops size
+# directly, so the two can never be silently conflated again.
+#
+# Checks are pure-python ELF parsing rather than readelf/objdump: gating on an
+# external toolchain would SKIP silently on a bare runner, which is how the
+# ESP32 disassembly checks lost their coverage.
+#
+# Discriminating mutation: --emit=obj output (no .modinfo, no init_module)
+# is rejected by the same checker.
+echo ""
+echo "--- LKM emission ---"
+LKM_DIR=$(mktemp -d /tmp/krc_lkm_XXXXXX)
+
+TOTAL=$((TOTAL + 1))
+if $KRC --arch=x86_64 --emit=lkm "$DIR/../examples/hello_lkm.kr" -o "$LKM_DIR/hello.ko" >/dev/null 2>&1 \
+   && python3 "$DIR/helpers/lkm_check.py" "$LKM_DIR/hello.ko" basic >/dev/null 2>&1; then
+    PASS=$((PASS + 1))
+    echo "  lkm_hello_structure: PASS (ET_REL, .modinfo license, init_module/cleanup_module/__this_module GLOBAL)"
+else
+    FAIL=$((FAIL + 1))
+    echo "FAIL: lkm_hello_structure ($(python3 "$DIR/helpers/lkm_check.py" "$LKM_DIR/hello.ko" basic 2>&1 | tail -1))"
+fi
+
+TOTAL=$((TOTAL + 1))
+if $KRC --arch=x86_64 --emit=lkm "$DIR/../examples/lkm_mmap_test.kr" -o "$LKM_DIR/misc.ko" >/dev/null 2>&1 \
+   && python3 "$DIR/helpers/lkm_check.py" "$LKM_DIR/misc.ko" misc >/dev/null 2>&1; then
+    PASS=$((PASS + 1))
+    echo "  lkm_misc_device_abi: PASS (file_operations 272 B, miscdevice 80 B, misc_register undefined)"
+else
+    FAIL=$((FAIL + 1))
+    echo "FAIL: lkm_misc_device_abi ($(python3 "$DIR/helpers/lkm_check.py" "$LKM_DIR/misc.ko" misc 2>&1 | tail -1))"
+fi
+
+# The checker must REJECT a plain relocatable object, else it proves nothing.
+TOTAL=$((TOTAL + 1))
+$KRC --arch=x86_64 --emit=obj "$DIR/../examples/hello.kr" -o "$LKM_DIR/plain.o" >/dev/null 2>&1
+if python3 "$DIR/helpers/lkm_check.py" "$LKM_DIR/plain.o" basic >/dev/null 2>&1; then
+    FAIL=$((FAIL + 1))
+    echo "FAIL: lkm_checker_discriminates (accepted a non-LKM object)"
+else
+    PASS=$((PASS + 1))
+    echo "  lkm_checker_discriminates: PASS (plain .o correctly rejected)"
+fi
+rm -rf "$LKM_DIR"
+
 # --- Summary ---
 echo ""
 echo "=== Results: $PASS/$TOTAL passed, $FAIL failed ==="
