@@ -727,6 +727,45 @@ else
 fi
 rm -f "$DIR/../test_tmp_uvu_$$.kr" /tmp/krc_uvu_$$
 
+# --- Store-statement RHS counts as a use (analysis walker) ---
+# The stmt walker used to skip Index-store (arr[i] = v) and FieldAccess-store
+# (obj.f = v) statements entirely, so a variable whose only consumer was such
+# a store was falsely reported unused. Each case below must compile with NO
+# unused-variable warning AND produce the right exit code.
+run_store_use_test() {
+    local name="$1"
+    local src="$2"
+    local expected="$3"
+    TOTAL=$((TOTAL + 1))
+    printf '%s\n' "$src" > "$DIR/../test_tmp_su_$$.kr"
+    local su_out
+    su_out=$($KRC $KRC_FLAGS "$DIR/../test_tmp_su_$$.kr" -o /tmp/krc_su_$$ 2>&1)
+    if echo "$su_out" | grep -q "unused variable"; then
+        echo "FAIL: $name (false unused-variable warning)"; FAIL=$((FAIL + 1))
+    else
+        local got=0
+        /tmp/krc_su_$$ > /dev/null 2>&1 && got=0 || got=$?
+        if [ "$got" = "$expected" ]; then
+            PASS=$((PASS + 1))
+        else
+            echo "FAIL: $name (expected exit $expected, got $got)"; FAIL=$((FAIL + 1))
+        fi
+    fi
+    rm -f "$DIR/../test_tmp_su_$$.kr" /tmp/krc_su_$$
+}
+run_store_use_test "idx_store_rhs_use" \
+    'fn main() { u64[4] a; u64 v = 7; a[0] = v; exit(a[0]) }' 7
+run_store_use_test "idx_store_index_use" \
+    'fn main() { u64[4] a; u64 i = 1; a[i] = 3; exit(a[1]) }' 3
+run_store_use_test "idx_store_nested_rhs_use" \
+    'fn add2(u64 x, u64 y) -> u64 { return x + y } fn main() { u64[4] a; u64 s0 = 2; u64 s1 = 3; a[0] = (s0 + s1) & 255; u64 c = 12; a[1] = add2(c, 2); exit(a[0] + a[1]) }' 19
+run_store_use_test "idx_store_compound_rhs_use" \
+    'fn main() { u64[4] a; a[0] = 1; u64 v = 6; a[0] += v; exit(a[0]) }' 7
+run_store_use_test "field_store_rhs_use" \
+    'struct SuP { u64 x  u64 y } fn main() { SuP p; u64 v = 9; p.x = v; exit(p.x) }' 9
+run_store_use_test "idx_field_store_rhs_use" \
+    'struct SuQ { u64 x  u64 y } fn main() { SuQ[4] q; u64 v = 5; q[0].x = v; exit(q[0].x) }' 5
+
 # --- Uninitialized-read warning ---
 TOTAL=$((TOTAL + 1))
 printf 'fn main() { u64 stale; exit(stale) }\n' > "$DIR/../test_tmp_ur_$$.kr"
@@ -7594,7 +7633,94 @@ else
     FAIL=$((FAIL + 1))
     echo "FAIL: grow_fixup_table_33k (expected exit 232, got $GROW_EC)"
 fi
+
+# 4) ir_insn arena: the same 33000-call program on the DEFAULT IR path
+#    (no --legacy). One call statement lowers to several instructions, so
+#    main() alone exceeds the old fixed cap of 65536 insns. Discriminating
+#    mutation (verified pre-fix): without ir_insn_ensure() the compile dies
+#    with "error: IR instruction overflow" — this is exactly why test 3
+#    above needs --legacy to reach the fixup table at all. Exit 232 proves
+#    every call executed correctly against the regrown arena (a stale
+#    ir_insn_buf/ir_insn_src_tok base after growth would corrupt the code).
+TOTAL=$((TOTAL + 1))
+GROW_EC2=1
+if $KRC $KRC_FLAGS "$GROW_DIR/fixup_grow.kr" -o "$GROW_DIR/insn_grow" >/dev/null 2>&1; then
+    chmod +x "$GROW_DIR/insn_grow"
+    "$GROW_DIR/insn_grow" >/dev/null 2>&1
+    GROW_EC2=$?
+fi
+if [ "$GROW_EC2" = 232 ]; then
+    PASS=$((PASS + 1))
+    echo "  grow_ir_insn_33k: PASS (33000 calls, default IR path, old cap 65536)"
+else
+    FAIL=$((FAIL + 1))
+    echo "FAIL: grow_ir_insn_33k (expected exit 232, got $GROW_EC2)"
+fi
 rm -rf "$GROW_DIR"
+
+# --- Import path length tests ---
+# import_mark_seen used to copy paths into fixed 256-byte entries,
+# silently truncating at 255 chars. Two distinct consequences, one test
+# each (both verified failing on the pre-fix compiler):
+#   1) dedup broke for ANY >255-char resolved path — is_seen compares the
+#      full path against the truncated entry and never matches, so a
+#      module imported from two files was appended twice:
+#      "error: redefinition of function".
+#   2) a 255-char path equal to a longer path's truncated entry was
+#      falsely "already seen" and its import silently skipped:
+#      "error: undefined function".
+# Entries are now u64 pointers to exact-size heap copies (no length
+# cliff at any size).
+echo "--- import path length tests ---"
+LP_DIR=$(mktemp -d /tmp/krc_lp_XXXXXX)
+LP_D1=$(printf 'd%.0s' $(seq 1 80))
+LP_D2=$(printf 'e%.0s' $(seq 1 200))
+mkdir -p "$LP_DIR/$LP_D1/$LP_D2"
+printf 'fn deep_mod() -> uint64 { return 41 }\n' > "$LP_DIR/$LP_D1/$LP_D2/deepmod.kr"
+
+# 1) Diamond import through a >255-char resolved path must dedup.
+TOTAL=$((TOTAL + 1))
+printf 'import "%s/%s/deepmod.kr"\nfn use_a() -> uint64 { return deep_mod() }\n' "$LP_D1" "$LP_D2" > "$LP_DIR/a.kr"
+printf 'import "%s/%s/deepmod.kr"\nfn use_b() -> uint64 { return deep_mod() + 1 }\n' "$LP_D1" "$LP_D2" > "$LP_DIR/b.kr"
+printf 'import "a.kr"\nimport "b.kr"\nfn main() { exit(use_a() + use_b() - 41) }\n' > "$LP_DIR/main.kr"
+LP_EC=1
+if $KRC $KRC_FLAGS "$LP_DIR/main.kr" -o "$LP_DIR/dedup" >/dev/null 2>&1; then
+    chmod +x "$LP_DIR/dedup"
+    "$LP_DIR/dedup" >/dev/null 2>&1
+    LP_EC=$?
+fi
+if [ "$LP_EC" = 42 ]; then
+    PASS=$((PASS + 1))
+    echo "  import_longpath_dedup: PASS (>255-char path imported once from two files)"
+else
+    FAIL=$((FAIL + 1))
+    echo "FAIL: import_longpath_dedup (expected exit 42, got $LP_EC)"
+fi
+
+# 2) A distinct 255-char path sharing the long path's 255-char prefix
+#    must still be imported (pre-fix: silently skipped as already-seen).
+#    The 80/200 directory lengths guarantee char 255 of the full path
+#    lands inside the second directory-name run for any sane tmpdir.
+TOTAL=$((TOTAL + 1))
+LP_FULL="$LP_DIR/$LP_D1/$LP_D2/deepmod.kr"
+LP_P255=$(printf '%s' "$LP_FULL" | cut -c1-255)
+LP_REL2=${LP_P255#"$LP_DIR/"}
+printf 'fn prefix_mod() -> uint64 { return 7 }\n' > "$LP_DIR/$LP_REL2"
+printf 'import "%s/%s/deepmod.kr"\nimport "%s"\nfn main() { exit(deep_mod() + prefix_mod()) }\n' "$LP_D1" "$LP_D2" "$LP_REL2" > "$LP_DIR/main2.kr"
+LP_EC2=1
+if $KRC $KRC_FLAGS "$LP_DIR/main2.kr" -o "$LP_DIR/collide" >/dev/null 2>&1; then
+    chmod +x "$LP_DIR/collide"
+    "$LP_DIR/collide" >/dev/null 2>&1
+    LP_EC2=$?
+fi
+if [ "$LP_EC2" = 48 ]; then
+    PASS=$((PASS + 1))
+    echo "  import_longpath_prefix_collision: PASS (255-char prefix twin not skipped)"
+else
+    FAIL=$((FAIL + 1))
+    echo "FAIL: import_longpath_prefix_collision (expected exit 48, got $LP_EC2)"
+fi
+rm -rf "$LP_DIR"
 
 # --- builtin shadowing tests ---
 # A user fn whose name matches a recognized built-in used to shadow it

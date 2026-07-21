@@ -1731,6 +1731,42 @@ fn sema_check_stmt(uint64 node) {
         return
     }
 
+    // Index store: arr[i] = rhs. The parser reuses the kind-37 Index
+    // node as the statement itself: child=index_expr, data1=array_tok,
+    // data2=rhs_expr, data3=1 (store marker). Reuse the expression
+    // walker for the array-name use + index expression, then walk the
+    // RHS — without this, a variable used only as the stored value (or
+    // only inside the index) was falsely reported unused, and nested /
+    // compound RHS expressions were invisible to arg-count checks too.
+    if kind == 37 {
+        sema_check_expr(node)
+        uint32 ixs_flag = ast_data3(node)
+        uint64 wixs_flag = ixs_flag
+        if wixs_flag == 1 {
+            uint32 ixs_rhs = ast_data2(node)
+            uint64 wixs_rhs = ixs_rhs
+            if wixs_rhs != 0 { sema_check_expr(wixs_rhs) }
+        }
+        return
+    }
+
+    // Field store: obj.field = rhs (also covers pts[i].field = rhs and
+    // device-field stores). Same reuse trick: the kind-36 FieldAccess
+    // node is the statement, with data3=rhs_expr and data4=1 (store
+    // marker). Walk the object chain via the expression walker (marks
+    // the base variable used), then the RHS.
+    if kind == 36 {
+        sema_check_expr(node)
+        uint32 fas_flag = ast_data4(node)
+        uint64 wfas_flag = fas_flag
+        if wfas_flag == 1 {
+            uint32 fas_rhs = ast_data3(node)
+            uint64 wfas_rhs = fas_rhs
+            if wfas_rhs != 0 { sema_check_expr(wfas_rhs) }
+        }
+        return
+    }
+
     // Match: child=scrutinee, data1=first_arm
     if kind == 19 {
         uint32 scrut = ast_child(node)
