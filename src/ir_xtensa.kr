@@ -9,7 +9,10 @@ static uint64 XT_A2 = 2
 static uint64 XT_A5 = 5        // scratch (arg reg a5, but free whenever the op makes no call)
 static uint64 XT_A8 = 8        // scratch
 static uint64 XT_A9 = 9        // scratch
-static uint64 XT_A10 = 10      // scratch (zero source in the .bss-zeroing preamble)
+static uint64 XT_A10 = 10      // scratch (zero source in the .bss-zeroing preamble;
+                               // dedicated address-formation scratch for large-frame
+                               // SP stores — see xt_s32i_sp. Never allocated, never
+                               // live across an IR op.)
 static uint64 XT_A11 = 11      // scratch (byte tmp in the memcpy loop)
 
 // CALL0 has SIX argument registers a2..a7 (regs 2..7) — narrower than the
@@ -79,9 +82,10 @@ static uint64 XT_ESP32_STACK_TOP = 0x3FFE0000
 // grows DOWN from XT_ESP32_STACK_TOP, which is the SAME address as
 // XT_ESP32_DRAM_LIMIT — without this reservation a program whose statics fill
 // the window compiles clean and then has its .bss tail scribbled on by the
-// entry prologue's first frame push. 4 KiB is the smallest figure that covers
-// this backend's worst-case single frame (2047-byte cap) plus a few nested
-// call0 frames; it is a floor, not a promise that 4 KiB is enough stack for
+// entry prologue's first frame push. 4 KiB covers a typical frame (the old
+// 2047-byte cap) plus a few nested call0 frames; since the large-frame work
+// a single frame may legitimately reach 32752 bytes, which this floor does
+// NOT cover — it is a floor, not a promise that 4 KiB is enough stack for
 // any given program. Enforced by xt_esp32_check_layout.
 static uint64 XT_ESP32_MIN_STACK = 4096
 
@@ -260,6 +264,14 @@ fn xt_rri8(uint64 op0, uint64 t, uint64 s, uint64 r, uint64 imm8) {
 }
 
 fn xt_addi(uint64 rd, uint64 rs, uint64 imm) { xt_rri8(2, rd, rs, 0xC, imm) }
+// ADDMI at, as, imm — ADDI's RRI8 twin (r=0xD instead of 0xC) whose imm8 is
+// shifted left 8: adds a signed multiple of 256 in -32768..32512. `imm` is
+// the BYTE value (must be a multiple of 256; callers guarantee it — the low
+// 8 bits are simply not encodable and would be silently dropped otherwise).
+// Verified byte-exact against `xtensa-lx106-elf-as --no-transform` via
+// scripts/xt-golden.sh: addmi a10,a1,0x400 -> 04d1a2, a1,0x7f00 -> 7fd1a2,
+// a1,-32768 -> 80d1a2 (large-frame task).
+fn xt_addmi(uint64 rd, uint64 rs, uint64 imm) { xt_rri8(2, rd, rs, 0xD, (imm >> 8) & 0xFF) }
 fn xt_l8ui(uint64 rt, uint64 rs, uint64 off)  { xt_rri8(2, rt, rs, 0x0, off) }
 fn xt_l16ui(uint64 rt, uint64 rs, uint64 off) { xt_rri8(2, rt, rs, 0x1, off >> 1) }
 fn xt_l32i(uint64 rt, uint64 rs, uint64 off)  { xt_rri8(2, rt, rs, 0x2, off >> 2) }
@@ -443,6 +455,100 @@ fn xt_fits_addi(uint64 v) -> uint64 {
     return 0
 }
 
+// --- Large-frame SP-relative access (ADDMI path) --------------------------
+// l32i/s32i offsets are imm8<<2 (max 1020) and MOVI is signed-12 (max 2047),
+// so any frame slot past those needs runtime address formation. This is the
+// x11 pattern of ir_aarch64.kr's ir_a64_ldr_sp/ir_a64_str_sp, built on ADDMI
+// instead of a materialized offset: ADDMI adds a signed multiple of 256
+// (imm8<<8, up to 32512) in ONE instruction, and the residue (< 256 and
+// 4-aligned, so <= 252) rides the l32i/s32i offset field. Deliberately NO
+// literal pool anywhere in this path: the pool is flushed to its final file
+// offset before any code is emitted, so an emit-time intern that the
+// pre-scan didn't perform corrupts it silently (the original Xtensa work's
+// "emit-time reserve past the flush" HIGH finding). ADDMI removes that
+// hazard class entirely — nothing here can ever disagree with the pre-scan
+// because nothing here touches the pool. Cost: frames cap at 32752 bytes
+// (guard in ir_xtensa_gen step 5) — already several times the ESP32 target's
+// whole 4 KiB minimum stack reservation. Anything larger loud-fails; no
+// offset is ever silently truncated.
+//
+// a10 is the dedicated address-formation scratch for the STORE helper: it is
+// not in the allocatable colour file (a12-a15), not the reload scratch pair
+// (a8/a9), and — like ARM64's x11 — it is formed immediately before the
+// access and never lives across an IR op. The LOAD helper needs no scratch
+// at all: it forms the address in the destination register itself.
+static uint64 XT_SP_OFF_MAX = 32764   // 32512 (max ADDMI) + 252 (max 4-aligned residue)
+
+fn xt_check_sp_off(uint64 off) {
+    if off > XT_SP_OFF_MAX {
+        xt_err("error: xtensa: SP-relative offset exceeds the ADDMI large-frame range (32764)\n")
+    }
+    // Every frame slot (spill, callee-saved, a0, overflow param) is 4-aligned
+    // by construction; an unaligned offset would silently lose its low bits
+    // in both the ADDMI high part and the l32i/s32i offset field, so guard
+    // loudly rather than truncate.
+    if (off & 3) != 0 {
+        xt_err("error: xtensa: unaligned SP-relative offset in large-frame path\n")
+    }
+}
+
+// SP-relative word load at any offset up to XT_SP_OFF_MAX. off <= 1020 emits
+// the exact single l32i it always did (byte-identity for small frames).
+// The large path forms the address IN rt ITSELF (addmi rt, a1, hi; l32i rt,
+// rt, lo), clobbering nothing beyond what the load clobbers anyway — safe at
+// every xt_load_spill call site, including those with a8-a11 temporaries
+// live around it (e.g. IR_FMT_UINT resolves a spilled value while its
+// scratch base sits in a10).
+fn xt_l32i_sp(uint64 rt, uint64 off) {
+    if off <= 1020 {
+        xt_l32i(rt, XT_SP, off)
+        return
+    }
+    xt_check_sp_off(off)
+    uint64 lo = off & 0xFF
+    xt_addmi(rt, XT_SP, off - lo)
+    xt_l32i(rt, rt, lo)
+}
+
+// SP-relative word store at any offset up to XT_SP_OFF_MAX. off <= 1020
+// emits the exact single s32i it always did. The large path must preserve
+// the value register, so the address forms in a10 (see the block comment
+// above); the addmi/s32i pair is adjacent — a10 is dead again one
+// instruction later and never crosses an IR op boundary. rt == a10 would
+// silently store the formed address over the value, so it loud-fails (no
+// current caller ever passes a10; this guards future ops).
+fn xt_s32i_sp(uint64 rt, uint64 off) {
+    if off <= 1020 {
+        xt_s32i(rt, XT_SP, off)
+        return
+    }
+    xt_check_sp_off(off)
+    if rt == XT_A10 {
+        xt_err("error: xtensa: cannot spill a10 through the large-frame path (a10 is the address scratch)\n")
+    }
+    uint64 lo = off & 0xFF
+    xt_addmi(XT_A10, XT_SP, off - lo)
+    xt_s32i(rt, XT_A10, lo)
+}
+
+// Materialize a frame-layout constant (an SP delta or in-frame offset,
+// 0..32767) into `reg` with NO literal pool: plain movi when it fits the
+// signed-12 immediate (byte-identity with the old movi-only path for every
+// pre-existing frame), else movi of the low byte + addmi of the high part.
+// Pool-free by design — the frame code can never drift from the pre-scan.
+fn xt_movi_frame(uint64 reg, uint64 v) {
+    if xt_fits_movi(v) != 0 {
+        xt_movi(reg, v)
+        return
+    }
+    if v > 32767 {
+        xt_err("error: xtensa: frame constant exceeds the ADDMI range (32767)\n")
+    }
+    uint64 lo = v & 0xFF
+    xt_movi(reg, lo)
+    xt_addmi(reg, reg, v - lo)
+}
+
 // --- Per-function literal pool ------------------------------------------
 // L32R is backward-only (the literal word must precede the instruction), so
 // the pool is emitted FIRST, before any code, at the function's start. Its
@@ -554,20 +660,17 @@ fn xt_lit_reserve() -> uint64 {
 // scratch — never allocated, never live across an IR op.
 fn xt_spill_offset(uint64 vreg) -> uint64 {
     uint64 slot = vreg - IR_NUM_REGS - 1
-    uint64 off = XT_OVERFLOW_RESERVE + slot * 4
-    // s32i/l32i offsets are (imm8 << 2), max 1020. A function with enough
-    // spills to push a slot past that loud-fails rather than truncating.
-    if off > 1020 {
-        xt_err("error: xtensa: spill offset exceeds l32i/s32i range\n")
-    }
-    return off
+    // Offsets past 1020 (s32i/l32i's imm8<<2 max) take the ADDMI large-frame
+    // path inside xt_s32i_sp/xt_l32i_sp; a genuinely unrepresentable offset
+    // (> 32764) loud-fails there rather than truncating.
+    return XT_OVERFLOW_RESERVE + slot * 4
 }
 
 fn xt_store_spill(uint64 reg, uint64 vreg) {
-    xt_s32i(reg, XT_SP, xt_spill_offset(vreg))
+    xt_s32i_sp(reg, xt_spill_offset(vreg))
 }
 fn xt_load_spill(uint64 scratch, uint64 vreg) {
-    xt_l32i(scratch, XT_SP, xt_spill_offset(vreg))
+    xt_l32i_sp(scratch, xt_spill_offset(vreg))
 }
 
 // Coloured vregs resolve through ir_get_phys_reg (colour -> ir_phys_regs[],
@@ -1817,17 +1920,14 @@ fn ir_emit_xtensa_insn(uint64 ii) {
             }
         } else {
             // Overflow param: load from the caller's frame at
-            // [a1 + ir_frame_size + (imm-6)*4]. l32i's offset is (imm8<<2)
-            // <= 1020; a frame large enough to push this past that loud-
-            // fails rather than truncating (large-frame sp arithmetic is a
-            // later task, same as the spill-offset guard).
+            // [a1 + ir_frame_size + (imm-6)*4]. Offsets past l32i's 1020
+            // take the ADDMI large-frame path inside xt_l32i_sp (address
+            // formed in d itself — no scratch); an offset past 32764
+            // (near-max frame + a high overflow index) loud-fails there.
             uint64 overflow_off = ir_frame_size + (imm - XT_NUM_ARG_REGS) * 4
-            if overflow_off > 1020 {
-                xt_err("error: xtensa: overflow-param offset exceeds l32i range\n")
-            }
             uint64 d = dst_r
             if d == 0xFFFFFFFF { d = XT_A8 }
-            xt_l32i(d, XT_SP, overflow_off)
+            xt_l32i_sp(d, overflow_off)
             if dst_r == 0xFFFFFFFF { xt_store_spill(XT_A8, dest_v) }
         }
         return
@@ -1972,14 +2072,14 @@ fn ir_emit_xtensa_insn(uint64 ii) {
     // cs_base/total_frame above (ir_xtensa_gen step 5):
     //     base_off = XT_OVERFLOW_RESERVE + ir_spill_count*4 + imm
     // Not a PIC op: no pool/pre-scan/fixup involvement (the emit-side PIC set
-    // above is {77,78,79,84}; op 32 never joins it). The frame cap enforced
-    // in step 5 (total_frame <= 2047) keeps base_off well inside xt_movi's
-    // signed-12 range, so the xt_movi+add fallback below never needs the
-    // literal pool — a plain xt_movi suffices (mirrors the total_frame
-    // materialize at :1979, not xt_materialize's pool path).
-    // Mirror of ir_riscv.kr:2019-2038 (rv_addi_sp_big), adapted to Xtensa's
-    // addi imm8 range via xt_fits_addi / xt_movi+xt_add. STACK_ADDR has no
-    // source operands, so a8/a9 are both free scratch here.
+    // above is {77,78,79,84}; op 32 never joins it). base_off materializes
+    // through xt_movi_frame — plain movi inside signed-12 (byte-identity with
+    // the old path for every pre-existing frame), movi+addmi past it, NEVER
+    // the literal pool (nothing here can drift from the pre-scan), loud-fail
+    // past the ADDMI range. Mirror of ir_riscv.kr:2019-2038 (rv_addi_sp_big),
+    // adapted to Xtensa's addi imm8 range via xt_fits_addi / xt_movi_frame +
+    // xt_add. STACK_ADDR has no source operands, so a8/a9 are both free
+    // scratch here.
     if op == 32 {
         uint64 base_off = XT_OVERFLOW_RESERVE + ir_spill_count * 4 + imm
         uint64 d = dst_r
@@ -1987,7 +2087,7 @@ fn ir_emit_xtensa_insn(uint64 ii) {
         if xt_fits_addi(base_off) != 0 {
             xt_addi(d, XT_SP, base_off & 0xFF)         // addi d, sp, base_off
         } else {
-            xt_movi(XT_A9, base_off)                    // a9 = base_off
+            xt_movi_frame(XT_A9, base_off)              // a9 = base_off (movi / movi+addmi)
             xt_add(d, XT_SP, XT_A9)                      // d = sp + a9
         }
         if dst_r == 0xFFFFFFFF { xt_store_spill(XT_A8, dest_v) }
@@ -2285,7 +2385,7 @@ fn ir_emit_xtensa_insn(uint64 ii) {
         if xt_fits_addi(ir_xt_scratch_off) != 0 {
             xt_addi(base, XT_SP, ir_xt_scratch_off & 0xFF)
         } else {
-            xt_movi(XT_A9, ir_xt_scratch_off)
+            xt_movi_frame(XT_A9, ir_xt_scratch_off)   // movi / movi+addmi (never pool)
             xt_add(base, XT_SP, XT_A9)
         }
         uint64 wptr = XT_A11
@@ -2452,14 +2552,16 @@ fn ir_xtensa_gen(uint64 fn_node) {
     uint64 total_frame = cs_base + nsaved * 4 + 4
     if (total_frame & 15) != 0 { total_frame = total_frame + 16 - (total_frame & 15) }
     if is_naked != 0 { total_frame = 0 }
-    // Large frames are a later task; s32i(a0) offset is (imm8<<2) <= 1020 and
-    // MOVI-materialised frames must fit signed-12. Guard both loudly for now.
+    // Large-frame regime: every SP-relative slot access goes through
+    // xt_l32i_sp/xt_s32i_sp (ADDMI + 4-aligned residue, max offset 32764)
+    // and the prologue/epilogue SP adjust through xt_movi_frame (movi +
+    // addmi, max 32767) — no literal pool anywhere, so nothing can drift
+    // from the pre-scan. 32752 is the largest 16-aligned frame whose a0
+    // slot (total_frame - 4) and ADDMI high part both stay in range.
+    // Genuinely bigger frames loud-fail — never truncate.
     if is_naked == 0 {
-        if total_frame > 2047 {
-            xt_err("error: xtensa: frame exceeds 2047 bytes (large-frame support is a later task)\n")
-        }
-        if total_frame - 4 > 1020 {
-            xt_err("error: xtensa: return-slot offset exceeds l32i/s32i range\n")
+        if total_frame > 32752 {
+            xt_err("error: xtensa: frame exceeds 32752 bytes (ADDMI large-frame limit)\n")
         }
     }
     ir_frame_size = total_frame
@@ -2637,21 +2739,26 @@ fn ir_xtensa_gen(uint64 fn_node) {
 
     // 7. Prologue (skip for @naked). CALL0: lower SP, save a0 (return addr)
     //    at [a1 + total_frame - 4], save used a12-a15. addi is signed-8, so a
-    //    single-instruction adjust needs |delta| <= 127 (both -N in the
-    //    prologue and +N in the epilogue); larger frames materialise N in a8.
+    //    single-instruction adjust needs |delta| <= 127; larger frames
+    //    materialise N in a8 (movi, or movi+addmi past signed-12 — never the
+    //    pool). Slot stores past s32i's 1020 go through xt_s32i_sp's a10
+    //    address path: a10 is caller-saved and dead here (the entry
+    //    preamble's uses of it are complete before the prologue runs), and
+    //    each addmi/s32i pair is adjacent, so a10 never carries a value
+    //    across anything.
     if is_naked == 0 {
         if total_frame <= 127 {
             xt_addi(XT_SP, XT_SP, (0 - total_frame) & 0xFF)   // addi a1, a1, -N
         } else {
-            xt_movi(XT_A8, total_frame)
+            xt_movi_frame(XT_A8, total_frame)
             xt_sub(XT_SP, XT_SP, XT_A8)                        // a1 = a1 - a8
         }
-        xt_s32i(XT_A0, XT_SP, total_frame - 4)                // s32i a0, a1, N-4
+        xt_s32i_sp(XT_A0, total_frame - 4)                    // s32i a0, a1, N-4
         uint64 pc = 0
         uint64 pslot = 0
         while pc < 4 {
             if ((used_mask >> pc) & 1) != 0 {
-                xt_s32i(xt_reg_for_color(pc), XT_SP, cs_base + pslot * 4)
+                xt_s32i_sp(xt_reg_for_color(pc), cs_base + pslot * 4)
                 pslot = pslot + 1
             }
             pc = pc + 1
@@ -2834,22 +2941,27 @@ fn ir_xtensa_gen(uint64 fn_node) {
     }
 
     // 11. Epilogue (skip for @naked): restore a12-a15, restore a0, unwind SP,
-    //     ret.n. No auto-exit trampoline yet (runtime is T8).
+    //     ret.n. No auto-exit trampoline yet (runtime is T8). Large-frame
+    //     restores go through xt_l32i_sp, which forms each address in the
+    //     DESTINATION register itself (addmi rt,a1,hi; l32i rt,rt,lo) — so
+    //     the a0 restore never needs a scratch and nothing already-restored
+    //     is disturbed; the SP unwind materialises N in a8 (dead here) via
+    //     movi/movi+addmi AFTER a0 is back, clobbering neither.
     if is_naked == 0 {
         uint64 ec = 0
         uint64 eslot = 0
         while ec < 4 {
             if ((used_mask >> ec) & 1) != 0 {
-                xt_l32i(xt_reg_for_color(ec), XT_SP, cs_base + eslot * 4)
+                xt_l32i_sp(xt_reg_for_color(ec), cs_base + eslot * 4)
                 eslot = eslot + 1
             }
             ec = ec + 1
         }
-        xt_l32i(XT_A0, XT_SP, total_frame - 4)                // l32i a0, a1, N-4
+        xt_l32i_sp(XT_A0, total_frame - 4)                    // l32i a0, a1, N-4
         if total_frame <= 127 {
             xt_addi(XT_SP, XT_SP, total_frame & 0xFF)         // addi a1, a1, N
         } else {
-            xt_movi(XT_A8, total_frame)
+            xt_movi_frame(XT_A8, total_frame)
             xt_add(XT_SP, XT_SP, XT_A8)                        // a1 = a1 + a8
         }
         xt_ret_n()
