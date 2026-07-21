@@ -84,7 +84,7 @@ krc lc program.kr
 
 ### Self-compilation (v2.8.26, ~254K tokens, ~160K AST nodes, ~2.0 MB source)
 
-All 8 targets self-compile. CI verifies bootstrap fixed point (krc3 == krc4) and runs **686 tests** on every push. Numbers below are on an AMD Ryzen 9 7900X — see [`benchmarks/BENCHMARKS.md`](benchmarks/BENCHMARKS.md) for the complete run including gcc / rustc comparisons.
+All 8 targets self-compile. CI verifies bootstrap fixed point (krc3 == krc4) and runs **688 tests** on every push. Numbers below are on an AMD Ryzen 9 7900X — see [`benchmarks/BENCHMARKS.md`](benchmarks/BENCHMARKS.md) for the complete run including gcc / rustc comparisons.
 
 | Target | Legacy codegen | IR codegen (default) | IR vs legacy |
 |--------|---------------:|---------------------:|-------------:|
@@ -281,7 +281,7 @@ See the [`examples/`](examples/) directory for runnable programs covering every 
 
 ## Architecture
 
-~61 100 lines of KernRift across 25 source files + 19 stdlib modules. Self-compiles to a 1.15 MB x86_64 native binary in ~1.1 s (IR, default), a 0.83 MB ARM64 binary, or an 8-slice fat binary (BCJ + LZ-Rift compression) in ~9.2 s on an AMD Ryzen 9 7900X. **686 tests** pass, bootstrap fixed point verified on all 8 targets — Linux, macOS, Windows, and Android on both x86_64 and ARM64. See [`benchmarks/BENCHMARKS.md`](benchmarks/BENCHMARKS.md) for micro-benchmarks vs gcc / rustc and peak-memory numbers.
+~61 100 lines of KernRift across 25 source files + 19 stdlib modules. Self-compiles to a 1.15 MB x86_64 native binary in ~1.1 s (IR, default), a 0.83 MB ARM64 binary, or an 8-slice fat binary (BCJ + LZ-Rift compression) in ~9.2 s on an AMD Ryzen 9 7900X. **688 tests** pass, bootstrap fixed point verified on all 8 targets — Linux, macOS, Windows, and Android on both x86_64 and ARM64. See [`benchmarks/BENCHMARKS.md`](benchmarks/BENCHMARKS.md) for micro-benchmarks vs gcc / rustc and peak-memory numbers.
 
 | File | Purpose |
 |------|---------|

@@ -6,7 +6,7 @@ All notable changes to `kernriftc` are documented in this file.
 
 The embedded release. Two new backends (Xtensa LX6, hosted RISC-V), the ESP32
 machine target, and a batch of correctness fixes — several of which were silent
-miscompiles rather than crashes. 686 tests pass; the bootstrap fixed point holds.
+miscompiles rather than crashes. 688 tests pass; the bootstrap fixed point holds.
 
 ### New backend: Xtensa LX6
 
