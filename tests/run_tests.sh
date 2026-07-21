@@ -7658,6 +7658,70 @@ else
 fi
 rm -rf "$GROW_DIR"
 
+# --- Import path length tests ---
+# import_mark_seen used to copy paths into fixed 256-byte entries,
+# silently truncating at 255 chars. Two distinct consequences, one test
+# each (both verified failing on the pre-fix compiler):
+#   1) dedup broke for ANY >255-char resolved path — is_seen compares the
+#      full path against the truncated entry and never matches, so a
+#      module imported from two files was appended twice:
+#      "error: redefinition of function".
+#   2) a 255-char path equal to a longer path's truncated entry was
+#      falsely "already seen" and its import silently skipped:
+#      "error: undefined function".
+# Entries are now u64 pointers to exact-size heap copies (no length
+# cliff at any size).
+echo "--- import path length tests ---"
+LP_DIR=$(mktemp -d /tmp/krc_lp_XXXXXX)
+LP_D1=$(printf 'd%.0s' $(seq 1 80))
+LP_D2=$(printf 'e%.0s' $(seq 1 200))
+mkdir -p "$LP_DIR/$LP_D1/$LP_D2"
+printf 'fn deep_mod() -> uint64 { return 41 }\n' > "$LP_DIR/$LP_D1/$LP_D2/deepmod.kr"
+
+# 1) Diamond import through a >255-char resolved path must dedup.
+TOTAL=$((TOTAL + 1))
+printf 'import "%s/%s/deepmod.kr"\nfn use_a() -> uint64 { return deep_mod() }\n' "$LP_D1" "$LP_D2" > "$LP_DIR/a.kr"
+printf 'import "%s/%s/deepmod.kr"\nfn use_b() -> uint64 { return deep_mod() + 1 }\n' "$LP_D1" "$LP_D2" > "$LP_DIR/b.kr"
+printf 'import "a.kr"\nimport "b.kr"\nfn main() { exit(use_a() + use_b() - 41) }\n' > "$LP_DIR/main.kr"
+LP_EC=1
+if $KRC $KRC_FLAGS "$LP_DIR/main.kr" -o "$LP_DIR/dedup" >/dev/null 2>&1; then
+    chmod +x "$LP_DIR/dedup"
+    "$LP_DIR/dedup" >/dev/null 2>&1
+    LP_EC=$?
+fi
+if [ "$LP_EC" = 42 ]; then
+    PASS=$((PASS + 1))
+    echo "  import_longpath_dedup: PASS (>255-char path imported once from two files)"
+else
+    FAIL=$((FAIL + 1))
+    echo "FAIL: import_longpath_dedup (expected exit 42, got $LP_EC)"
+fi
+
+# 2) A distinct 255-char path sharing the long path's 255-char prefix
+#    must still be imported (pre-fix: silently skipped as already-seen).
+#    The 80/200 directory lengths guarantee char 255 of the full path
+#    lands inside the second directory-name run for any sane tmpdir.
+TOTAL=$((TOTAL + 1))
+LP_FULL="$LP_DIR/$LP_D1/$LP_D2/deepmod.kr"
+LP_P255=$(printf '%s' "$LP_FULL" | cut -c1-255)
+LP_REL2=${LP_P255#"$LP_DIR/"}
+printf 'fn prefix_mod() -> uint64 { return 7 }\n' > "$LP_DIR/$LP_REL2"
+printf 'import "%s/%s/deepmod.kr"\nimport "%s"\nfn main() { exit(deep_mod() + prefix_mod()) }\n' "$LP_D1" "$LP_D2" "$LP_REL2" > "$LP_DIR/main2.kr"
+LP_EC2=1
+if $KRC $KRC_FLAGS "$LP_DIR/main2.kr" -o "$LP_DIR/collide" >/dev/null 2>&1; then
+    chmod +x "$LP_DIR/collide"
+    "$LP_DIR/collide" >/dev/null 2>&1
+    LP_EC2=$?
+fi
+if [ "$LP_EC2" = 48 ]; then
+    PASS=$((PASS + 1))
+    echo "  import_longpath_prefix_collision: PASS (255-char prefix twin not skipped)"
+else
+    FAIL=$((FAIL + 1))
+    echo "FAIL: import_longpath_prefix_collision (expected exit 48, got $LP_EC2)"
+fi
+rm -rf "$LP_DIR"
+
 # --- builtin shadowing tests ---
 # A user fn whose name matches a recognized built-in used to shadow it
 # SILENTLY — and inconsistently: the user body won only when the inliner
