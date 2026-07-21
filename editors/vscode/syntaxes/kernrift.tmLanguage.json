@@ -79,7 +79,7 @@
       "patterns": [
         {
           "comment": "Annotation with args: @section(\"name\")",
-          "match": "(@)(export|noreturn|naked|packed|section)(\\()([^)]*)(\\))",
+          "match": "(@)(export|noreturn|naked|packed|section|builtin_override|module_init|module_exit|module_name|module_license|module_author|module_description|module_register_misc_device|module_register_pci_driver|lkm_ioctl_handler|lkm_mmap_handler|pci_probe_handler|pci_remove_handler)(\\()([^)]*)(\\))",
           "captures": {
             "1": { "name": "constant.character.kr" },
             "2": { "name": "support.function.kr" },
@@ -90,7 +90,7 @@
         },
         {
           "comment": "Annotation without args: @export, @noreturn, @naked, @packed",
-          "match": "(@)(export|noreturn|naked|packed|section)\\b",
+          "match": "(@)(export|noreturn|naked|packed|section|builtin_override|module_init|module_exit|module_name|module_license|module_author|module_description|module_register_misc_device|module_register_pci_driver|lkm_ioctl_handler|lkm_mmap_handler|pci_probe_handler|pci_remove_handler)\\b",
           "captures": {
             "1": { "name": "constant.character.kr" },
             "2": { "name": "support.function.kr" }
@@ -306,7 +306,7 @@
         },
         {
           "comment": "Built-in platform/process",
-          "match": "\\b(get_target_os|get_arch_id|get_module_path|exec_process|set_executable|syscall_raw|fn_addr|call_ptr)\\s*\\(",
+          "match": "\\b(get_target_os|get_arch_id|get_module_path|bit_toggle|call_ptr_f64|dcache_flush|dmb|dsb|exec_process_argv|f16_to_f32|f32_to_f16|f32_to_f64|f32_to_int|f64_to_f32|f64_to_int|fma_f64|icache_invalidate|int_to_f32|int_to_f64|isb|read|sqrt|sqrt_f32|sqrt_f64|time_ns|exec_process|set_executable|syscall_raw|fn_addr|call_ptr)\\s*\\(",
           "captures": { "1": { "name": "support.function.builtin.kr" } }
         },
         {
