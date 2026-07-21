@@ -41,10 +41,17 @@ build/kr-runner.kr: src/runner.kr src/bcj.kr
 	@mkdir -p build
 	cat src/runner.kr src/bcj.kr > build/kr-runner.kr
 
+# Host architecture for the native runner. This rule hardcoded --arch=x86_64
+# while claiming to build a "host-native" binary, so on an ARM64 host it
+# produced an x86_64 binary that could not execute at all. CI's native ARM64
+# job surfaced it once the suite started running `kr --version`.
+HOST_UNAME_M := $(shell uname -m)
+KR_HOST_ARCH := $(if $(filter aarch64 arm64,$(HOST_UNAME_M)),arm64,x86_64)
+
 build/kr-bin: build/kr-runner.kr build/krc2
-	./build/krc2 --arch=x86_64 build/kr-runner.kr -o build/kr-bin
+	./build/krc2 --arch=$(KR_HOST_ARCH) build/kr-runner.kr -o build/kr-bin
 	chmod +x build/kr-bin
-	@echo "Built build/kr-bin (host-native runner binary)"
+	@echo "Built build/kr-bin ($(KR_HOST_ARCH) native runner binary)"
 
 build/kr: packaging/kr.sh
 	@mkdir -p build
