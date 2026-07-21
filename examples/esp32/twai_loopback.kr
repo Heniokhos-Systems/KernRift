@@ -1,0 +1,246 @@
+// examples/esp32/twai_loopback.kr — TWAI (CAN) self-test loopback.
+//
+// HARDWARE-VALIDATED on an ESP32-D0WD-V3 (2026-07-21): sends ID 0x123 DLC 2
+// data AB CD and receives all six fields back identical.
+//
+// Kept in-tree as a BUILD GUARD. The full CAN sniffer and all vehicle
+// reverse-engineering live in a separate repository; this file stays here so
+// the ESP32 backend keeps a demanding in-tree consumer — it exercises MMIO
+// device blocks, the GPIO matrix, peripheral clock gating, bit-timing
+// arithmetic and the esp-image writer in one program. Same reasoning as the
+// MLRift PCI drivers guarding the LKM backend.
+//
+// Needs NO transceiver, NO second node and NO vehicle: see below.
+//
+//
+// Transmits a CAN frame and receives it back, with NO transceiver, NO second
+// node and NO vehicle. Two mechanisms make that possible:
+//   * Self-test mode (MOD.STM) + Self Reception Request (CMR.SRR): the
+//     controller completes a transmission without requiring an ACK from
+//     another node, and receives its own frame.
+//   * The GPIO matrix loops TWAI_TX (signal 123) out to GPIO21 and feeds
+//     GPIO21 back into TWAI_RX (signal 94), so the bit stream really does go
+//     through the pad and back -- this exercises bit timing for real rather
+//     than short-circuiting it inside the core.
+//
+// EVERY register value below comes from ESP-IDF v5.2 headers, not memory:
+//   soc/reg_base.h      DPORT 0x3ff00000, CAN/TWAI 0x3ff6B000,
+//                       GPIO 0x3ff44000, IO_MUX 0x3ff49000
+//   soc/twai_struct.h   mode 0x00 (rm0 lom1 stm2 afm3), cmd 0x04 (tr0 at1
+//                       rrb2 cdo3 srr4), status 0x08 (rbs0 dos1 tbs2 tcs3
+//                       rs4 ts5 es6 bs7), btim0 0x18 (brp[5:0] sjw[7:6]),
+//                       btim1 0x1C (tseg1[3:0] tseg2[6:4] sam7),
+//                       tx/rx buffer 0x40 stride 4, clkdiv 0x7C (cm bit 7)
+//   soc/gpio_sig_map.h  TWAI_TX_IDX 123, TWAI_RX_IDX 94
+//   soc/gpio_reg.h      ENABLE 0x20, FUNC_IN_SEL 0x130+4*sig,
+//                       FUNC_OUT_SEL 0x530+4*pin
+//   hal/twai_ll.h       brp field = (brp/2)-1; sjw/tseg1/tseg2 fields = n-1
+//
+// ─────────────────────────────────────────────────────────────────────────
+// Bit timing at 40 MHz — derived, NOT copied from a table
+// ─────────────────────────────────────────────────────────────────────────
+// M1 never touches the PLL, so APB runs from the 40 MHz crystal. Every
+// published ESP32 CAN timing table assumes 80 MHz and is therefore wrong by
+// exactly 2x here -- a table value would give 250 kbit/s, which looks like a
+// wiring fault rather than a config error.
+//
+//   bit_rate = f_APB / (brp * tq),  tq = 1(sync) + tseg1 + tseg2
+//   want 500000 = 40e6 / (brp * tq)  ->  brp * tq = 80
+//   take tq = 20 (tseg1=15, tseg2=4) -> sample point (1+15)/20 = 80%
+//   -> brp = 4
+//
+//   register encoding (twai_ll.h): field = (brp/2)-1 = 1, sjw-1 = 2,
+//                                  tseg1-1 = 14, tseg2-1 = 3
+//   BTIM0 = (sjw<<6)|brp  = (2<<6)|1  = 0x81
+//   BTIM1 = (tseg2<<4)|ts1 = (3<<4)|14 = 0x3E
+//
+// Cross-check: IDF's 80 MHz 500 kbit config uses brp=8 with the same
+// segments. Ours is exactly half the prescaler, as it must be.
+
+device Dport at 0x3FF00000 {
+    clk_en at 0xC0 : u32
+    rst_en at 0xC4 : u32
+}
+
+device Twai at 0x3FF6B000 {
+    mode   at 0x00 : u32
+    cmd    at 0x04 : u32
+    status at 0x08 : u32
+    btim0  at 0x18 : u32
+    btim1  at 0x1C : u32
+    b0 at 0x40 : u32
+    b1 at 0x44 : u32
+    b2 at 0x48 : u32
+    b3 at 0x4C : u32
+    b4 at 0x50 : u32
+    b5 at 0x54 : u32
+    b6 at 0x58 : u32
+    b7 at 0x5C : u32
+    clkdiv at 0x7C : u32
+}
+
+// IO_MUX register for GPIO21 = IO_MUX base + 0x7C.
+device IoMux at 0x3FF49000 {
+    gpio21 at 0x7C : u32
+}
+
+// GPIO matrix. in_sel_94  = 0x130 + 4*94 = 0x2A8  (TWAI_RX source)
+//              out_sel_21 = 0x530 + 4*21 = 0x584  (what drives GPIO21)
+device Gpio at 0x3FF44000 {
+    enable     at 0x20  : u32
+    in_sel_94  at 0x2A8 : u32
+    out_sel_21 at 0x584 : u32
+}
+
+device UartStatus at 0x3FF40000 { status at 0x1C : u32 }
+device UartFifo   at 0x60000000 { fifo   at 0x00 : u32 }
+
+fn putc(u8 c) {
+    while ((UartStatus.status >> 16) & 0xFF) >= 126 { }
+    UartFifo.fifo = c
+}
+
+fn puts(u32 s) {
+    u32 i = 0
+    u32 ch = load8(s + i)
+    while ch != 0 {
+        putc(ch)
+        i = i + 1
+        ch = load8(s + i)
+    }
+}
+
+fn hex8(u32 v) {
+    u32 hi = (v >> 4) & 0xF
+    u32 lo = v & 0xF
+    if hi < 10 { putc(48 + hi) }
+    if hi >= 10 { putc(55 + hi) }
+    if lo < 10 { putc(48 + lo) }
+    if lo >= 10 { putc(55 + lo) }
+}
+
+fn label_hex(u32 s, u32 v) {
+    puts(s)
+    puts("0x")
+    hex8(v)
+    puts("\r\n")
+}
+
+// NOTE ON STRUCTURE: this is split into small functions on purpose. The
+// Xtensa backend currently caps a frame at 2047 bytes with the return slot
+// within l32i/s32i range (<=1020), documented in ir_xtensa.kr as "large frames
+// are a later task". Writing this as one long main() exceeds that and fails to
+// compile -- loudly, which is the right behaviour, but it does mean embedded
+// code has to keep functions small for now.
+
+fn twai_clock_on() {
+    Dport.clk_en = Dport.clk_en | 0x80000
+    Dport.rst_en = Dport.rst_en & 0xFFF7FFFF
+}
+
+// Loop TWAI_TX (123) out to GPIO21 and feed GPIO21 back into TWAI_RX (94).
+// MCU_SEL (bits 14:12) = 2 picks the plain GPIO function; FUN_IE (bit 9)
+// enables the input buffer so the pad can be read while it is driven.
+fn gpio_loopback() {
+    IoMux.gpio21 = (2 << 12) | (1 << 9)
+    Gpio.enable = Gpio.enable | (1 << 21)
+    Gpio.out_sel_21 = 123
+    Gpio.in_sel_94 = 21 | (1 << 7)
+}
+
+// Bit timing and the acceptance filter are only writable in reset mode.
+fn twai_config() {
+    Twai.mode = 0x01
+    Twai.clkdiv = 0x80
+    Twai.btim0 = 0x81
+    Twai.btim1 = 0x3E
+    // Accept everything: ACR = 0, AMR = all ones (a set mask bit is
+    // "don't care"). ACR0..3 at 0x40..0x4C, AMR0..3 at 0x50..0x5C.
+    Twai.b0 = 0
+    Twai.b1 = 0
+    Twai.b2 = 0
+    Twai.b3 = 0
+    Twai.b4 = 0xFF
+    Twai.b5 = 0xFF
+    Twai.b6 = 0xFF
+    Twai.b7 = 0xFF
+    Twai.mode = 0x04
+}
+
+// Standard frame, ID 0x123, DLC 2, data AB CD, sent with Self Reception
+// Request so no second node needs to ACK it.
+fn twai_send() {
+    Twai.b0 = 0x02
+    Twai.b1 = 0x123 >> 3
+    Twai.b2 = (0x123 & 0x7) << 5
+    Twai.b3 = 0xAB
+    Twai.b4 = 0xCD
+    Twai.cmd = 0x10
+}
+
+fn wait_tx_free() -> u32 {
+    u32 spin = 0
+    while ((Twai.status >> 2) & 1) == 0 {
+        spin = spin + 1
+        if spin > 200000 { return 0 }
+    }
+    return 1
+}
+
+fn wait_rx() -> u32 {
+    u32 spin = 0
+    while (Twai.status & 1) == 0 {
+        spin = spin + 1
+        if spin > 400000 { return 0 }
+    }
+    return 1
+}
+
+fn report() -> u32 {
+    u32 rinfo = Twai.b0 & 0xFF
+    u32 rid = ((Twai.b1 & 0xFF) << 3) | ((Twai.b2 & 0xFF) >> 5)
+    u32 rd0 = Twai.b3 & 0xFF
+    u32 rd1 = Twai.b4 & 0xFF
+    puts("--- received ---\r\n")
+    label_hex("frame info     : ", rinfo)
+    label_hex("id hi          : ", (rid >> 8) & 0xFF)
+    label_hex("id lo          : ", rid & 0xFF)
+    label_hex("dlc            : ", rinfo & 0xF)
+    label_hex("data[0]        : ", rd0)
+    label_hex("data[1]        : ", rd1)
+    if rid != 0x123 { return 0 }
+    if (rinfo & 0xF) != 2 { return 0 }
+    if rd0 != 0xAB { return 0 }
+    if rd1 != 0xCD { return 0 }
+    return 1
+}
+
+fn main() {
+    puts("\r\n=== TWAI loopback (self-test, 500k @ 40MHz APB) ===\r\n")
+    twai_clock_on()
+    gpio_loopback()
+    twai_config()
+    label_hex("btim0 readback : ", Twai.btim0 & 0xFF)
+    label_hex("btim1 readback : ", Twai.btim1 & 0xFF)
+    label_hex("mode after exit: ", Twai.mode & 0xFF)
+    label_hex("status         : ", Twai.status & 0xFF)
+
+    if wait_tx_free() == 0 {
+        puts("FAIL: TX buffer never became free\r\n")
+        loop { }
+    }
+    twai_send()
+    if wait_rx() == 0 {
+        puts("FAIL: no frame received\r\n")
+        label_hex("  status      : ", Twai.status & 0xFF)
+        loop { }
+    }
+    // Call ONCE: report() both prints and reads the RX buffer, so invoking it
+    // per branch would duplicate the output and re-read the frame.
+    u32 ok = report()
+    if ok == 1 { puts("VERDICT: loopback OK - id/dlc/data all match\r\n") }
+    if ok == 0 { puts("VERDICT: MISMATCH\r\n") }
+    Twai.cmd = 0x04
+    puts("=== done ===\r\n")
+    loop { }
+}

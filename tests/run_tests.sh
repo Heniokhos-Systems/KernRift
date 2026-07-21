@@ -8113,6 +8113,72 @@ else
     echo "FAIL: version_kr_binary_matches (build/kr-bin missing — run 'make kr-runner'; not skipping, the point is to check the built artifact)"
 fi
 
+# --- esp32 TWAI loopback example ---
+# Build guard for examples/esp32/twai_loopback.kr, which is hardware-validated
+# (sends ID 0x123 DLC 2 data AB CD through the GPIO matrix and receives all six
+# fields back on an ESP32-D0WD-V3). The full CAN sniffer lives in its own repo;
+# this stays in-tree so the ESP32 backend keeps a demanding consumer under CI.
+#
+# It exercises, in one program: MMIO device blocks at four different peripheral
+# bases, peripheral clock gating via DPORT, GPIO matrix signal routing, the
+# bit-timing arithmetic, and the esp-image writer.
+#
+# Not executed — that needs the chip. Asserts the image is structurally sound,
+# plus a SOURCE-level check that the derived 40 MHz bit-timing constants have
+# not been edited: BTIM0=0x81, BTIM1=0x3E. Published ESP32 timing tables assume
+# an 80 MHz APB and are off by 2x here, so a "helpful" correction to a table
+# value would silently produce a 250 kbit/s bus.
+#
+# The timing check is deliberately on the SOURCE, not the emitted bytes. An
+# earlier version scanned the code segment for the byte 0x81 — which passes
+# whatever the source says, because 0x81 occurs incidentally in Xtensa
+# encodings. Verified by mutating BTIM0 to 0x83: the byte scan still passed.
+# Proving the constants reach the binary needs a disassembler, and gating on
+# one would make this SKIP on a bare runner.
+echo ""
+echo "--- esp32 TWAI loopback ---"
+TWAI_DIR=$(mktemp -d /tmp/krc_twai_XXXXXX)
+TOTAL=$((TOTAL + 1))
+if $KRC --arch=xtensa --freestanding --target=esp32 "$DIR/../examples/esp32/twai_loopback.kr" \
+     -o "$TWAI_DIR/twai.bin" >/dev/null 2>&1 \
+   && python3 - "$TWAI_DIR/twai.bin" <<'PYEOF'
+import sys
+d = open(sys.argv[1], 'rb').read()
+assert d[0] == 0xE9, "bad esp-image magic"
+assert d[1] == 2, "expected 2 segments, got %d" % d[1]
+entry = int.from_bytes(d[4:8], 'little')
+assert 0x40080400 <= entry < 0x400A0000, "entry 0x%08x not in IRAM" % entry
+off, segs = 24, []
+for _ in range(d[1]):
+    la = int.from_bytes(d[off:off+4], 'little')
+    ln = int.from_bytes(d[off+4:off+8], 'little')
+    segs.append((la, ln, d[off+8:off+8+ln]))
+    off += 8 + ln
+assert segs[0][0] == 0x3FFB0000, "seg0 not DRAM"
+assert segs[1][0] == 0x40080400, "seg1 not IRAM"
+PYEOF
+then
+    if grep -q 'Twai.btim0 = 0x81' "$DIR/../examples/esp32/twai_loopback.kr" \
+       && grep -q 'Twai.btim1 = 0x3E' "$DIR/../examples/esp32/twai_loopback.kr"; then
+        TWAI_TIMING_OK=1
+    else
+        TWAI_TIMING_OK=0
+    fi
+else
+    TWAI_TIMING_OK=-1
+fi
+if [ "$TWAI_TIMING_OK" = "1" ]; then
+    PASS=$((PASS + 1))
+    echo "  esp32_twai_loopback: PASS (2 segments, entry in IRAM, 40MHz timing 0x81/0x3E in source)"
+elif [ "$TWAI_TIMING_OK" = "0" ]; then
+    FAIL=$((FAIL + 1))
+    echo "FAIL: esp32_twai_loopback (bit-timing constants changed — 40MHz needs BTIM0=0x81 BTIM1=0x3E)"
+else
+    FAIL=$((FAIL + 1))
+    echo "FAIL: esp32_twai_loopback (build or structural check failed)"
+fi
+rm -rf "$TWAI_DIR"
+
 # --- Summary ---
 echo ""
 echo "=== Results: $PASS/$TOTAL passed, $FAIL failed ==="
