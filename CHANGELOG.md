@@ -441,8 +441,9 @@ Both fixes are also pulled in by the v0.1.1 MLRift port.
   (`(X.XX ms)`) on Windows. Wired through the IAT as
   `QueryPerformanceCounter + QueryPerformanceFrequency`, with an
   overflow-safe split-and-recombine so counter × 1e9 doesn't wrap
-  after ~29 days of uptime. ARM64 Windows still returns 0 (no WoA
-  test hardware available); the print-gate falls back gracefully.
+  after ~29 days of uptime. ARM64 Windows is implemented too
+  (`src/ir_aarch64.kr`, QueryPerformanceFrequency/Counter), but has
+  never been executed — no Windows-on-ARM hardware is available.
 - **Fat-binary compile also prints `(X.XX ms)`.** `compile_fat` now
   tail-reports its total wall time the same way single-file compile
   already did, so you don't need to wrap with external `time` /

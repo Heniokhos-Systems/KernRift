@@ -7725,6 +7725,51 @@ else
 fi
 rm -rf "$IMP_DIR"
 
+# --- tests/smoke/*.kr ---
+# These files existed for a long time but NOTHING RAN THEM: only div_mod.kr was
+# referenced anywhere, and only as a convenient source file for the esp32
+# --target= validation test, so its own assertions were never checked either.
+# tests/smoke/time_ns.kr in particular was written to catch "Windows PE
+# time_ns() returns 0" and had never once executed.
+#
+# Contract: each file declares its expected exit code in a header comment
+# (`expected: N`). This loop discovers files automatically, so a new smoke test
+# is picked up by dropping it in the directory — no wiring step to forget.
+#
+# NOTE ON COVERAGE: this runs them for the HOST arch only. Every historical
+# time_ns bug was on a cross-target (Windows PE, macOS arm64, Windows ARM64),
+# none of which execute here, so this protects the host path and nothing more.
+echo ""
+echo "--- tests/smoke/*.kr ---"
+for SMOKE_SRC in "$DIR"/smoke/*.kr; do
+    [ -f "$SMOKE_SRC" ] || continue
+    SMOKE_NAME=$(basename "$SMOKE_SRC" .kr)
+    SMOKE_EXP=$(head -3 "$SMOKE_SRC" | grep -o 'expected: *[0-9]*' | head -1 | grep -o '[0-9]*')
+    TOTAL=$((TOTAL + 1))
+    if [ -z "$SMOKE_EXP" ]; then
+        FAIL=$((FAIL + 1))
+        echo "FAIL: smoke_$SMOKE_NAME (no 'expected: N' header — cannot assert)"
+        continue
+    fi
+    SMOKE_BIN="/tmp/krc_smoke_${SMOKE_NAME}_$$"
+    if ! $KRC $KRC_FLAGS "$SMOKE_SRC" -o "$SMOKE_BIN" >/dev/null 2>&1; then
+        FAIL=$((FAIL + 1))
+        echo "FAIL: smoke_$SMOKE_NAME (compile failed)"
+        continue
+    fi
+    chmod +x "$SMOKE_BIN" 2>/dev/null
+    "$SMOKE_BIN" >/dev/null 2>&1
+    SMOKE_EC=$?
+    if [ "$SMOKE_EC" -eq "$SMOKE_EXP" ]; then
+        PASS=$((PASS + 1))
+        echo "  smoke_$SMOKE_NAME: PASS (exit $SMOKE_EC)"
+    else
+        FAIL=$((FAIL + 1))
+        echo "FAIL: smoke_$SMOKE_NAME (exit $SMOKE_EC, expected $SMOKE_EXP)"
+    fi
+    rm -f "$SMOKE_BIN"
+done
+
 # --- Summary ---
 echo ""
 echo "=== Results: $PASS/$TOTAL passed, $FAIL failed ==="
