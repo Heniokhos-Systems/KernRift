@@ -8057,6 +8057,62 @@ done
 
 rm -rf "$LKM_DIR"
 
+# --- version consistency ---
+# v2.8.28 shipped with BOTH binaries self-reporting 2.8.27. Nothing tied the
+# hardcoded strings to the tag, and the release was cut without touching them.
+# krc and kr are built from separate source sets (runner.kr + bcj.kr has no
+# main.kr), so they cannot share a constant -- the only thing that can keep
+# them aligned is a check.
+#
+# Asserts the BUILT BINARY's output, not just the source text. Grepping the
+# source is precisely what missed it: the runner's string had been bumped
+# earlier the same day and was stale again by the time the tag was cut.
+#
+# Discriminating mutation: change any one of the four strings, or add a
+# CHANGELOG heading without bumping them, and this fails.
+echo ""
+echo "--- version consistency ---"
+VER_CHANGELOG=$(grep -m1 -oE "^## v[0-9]+\.[0-9]+\.[0-9]+" "$DIR/../CHANGELOG.md" | grep -oE "[0-9]+\.[0-9]+\.[0-9]+")
+
+TOTAL=$((TOTAL + 1))
+VER_KRC=$($KRC --version 2>/dev/null | grep -oE "[0-9]+\.[0-9]+\.[0-9]+" | head -1)
+if [ -n "$VER_CHANGELOG" ] && [ "$VER_KRC" = "$VER_CHANGELOG" ]; then
+    PASS=$((PASS + 1))
+    echo "  version_krc_matches_changelog: PASS (krc reports $VER_KRC)"
+else
+    FAIL=$((FAIL + 1))
+    echo "FAIL: version_krc_matches_changelog (krc says '$VER_KRC', CHANGELOG says '$VER_CHANGELOG')"
+fi
+
+# All three runner strings must agree with each other AND with the changelog.
+TOTAL=$((TOTAL + 1))
+VER_RUNNER_SET=$(grep -oE "kr [0-9]+\.[0-9]+\.[0-9]+ \(KernRift fat binary runner\)" "$DIR/../src/runner.kr" \
+                 | grep -oE "[0-9]+\.[0-9]+\.[0-9]+" | sort -u)
+VER_RUNNER_COUNT=$(printf '%s\n' "$VER_RUNNER_SET" | grep -c .)
+if [ "$VER_RUNNER_COUNT" = "1" ] && [ "$VER_RUNNER_SET" = "$VER_CHANGELOG" ]; then
+    PASS=$((PASS + 1))
+    echo "  version_runner_matches_changelog: PASS (all 3 kr strings say $VER_RUNNER_SET)"
+else
+    FAIL=$((FAIL + 1))
+    echo "FAIL: version_runner_matches_changelog (kr strings: $(printf '%s' "$VER_RUNNER_SET" | tr '\n' ' '); CHANGELOG: $VER_CHANGELOG)"
+fi
+
+# The built runner binary, when present, must agree too. Built by `make kr-runner`.
+TOTAL=$((TOTAL + 1))
+if [ -x "$DIR/../build/kr-bin" ]; then
+    VER_KRBIN=$("$DIR/../build/kr-bin" --version 2>/dev/null | grep -oE "[0-9]+\.[0-9]+\.[0-9]+" | head -1)
+    if [ "$VER_KRBIN" = "$VER_CHANGELOG" ]; then
+        PASS=$((PASS + 1))
+        echo "  version_kr_binary_matches: PASS (kr binary reports $VER_KRBIN)"
+    else
+        FAIL=$((FAIL + 1))
+        echo "FAIL: version_kr_binary_matches (kr binary says '$VER_KRBIN', CHANGELOG says '$VER_CHANGELOG')"
+    fi
+else
+    FAIL=$((FAIL + 1))
+    echo "FAIL: version_kr_binary_matches (build/kr-bin missing — run 'make kr-runner'; not skipping, the point is to check the built artifact)"
+fi
+
 # --- Summary ---
 echo ""
 echo "=== Results: $PASS/$TOTAL passed, $FAIL failed ==="

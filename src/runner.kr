@@ -255,7 +255,7 @@ fn main() {
     if arg_offset == 16 { eff_argc = cli_argc - 1 }
 
     if eff_argc < 2 {
-        write(1, "kr 2.8.27 (KernRift fat binary runner)\n", 39)
+        write(1, "kr 2.8.28 (KernRift fat binary runner)\n", 39)
         write(1, "usage: kr <program.krbo> [args...]\n\n", 36)
         uint64 kr_desc = "Runs .krbo fat binaries (BCJ+LZ-Rift-compressed, 8 platform slices).\n"
         write(1, kr_desc, str_len(kr_desc))
@@ -284,12 +284,12 @@ fn main() {
             unsafe { *(kp2 as uint8) -> tc }
             if tc == 118 {
                 // --version
-                write(1, "kr 2.8.27 (KernRift fat binary runner)\n", 39)
+                write(1, "kr 2.8.28 (KernRift fat binary runner)\n", 39)
                 exit(0)
             }
             if tc == 104 {
                 // --help
-                write(1, "kr 2.8.27 (KernRift fat binary runner)\n", 39)
+                write(1, "kr 2.8.28 (KernRift fat binary runner)\n", 39)
                 write(1, "usage: kr <program.krbo> [args...]\n\n", 36)
                 uint64 kr_desc = "Runs .krbo fat binaries (BCJ+LZ-Rift-compressed, 8 platform slices).\n"
         write(1, kr_desc, str_len(kr_desc))
