@@ -1067,6 +1067,27 @@ fn sema_collect_signatures(uint64 root) {
 
 // Check if a token refers to a builtin function
 fn is_builtin(uint64 tok_idx) -> uint64 {
+    // These were dispatched in the lowering chains but missing from this list,
+    // so defining a function with one of these names shadowed the built-in
+    // SILENTLY — the exact hole the shadowing error exists to close. Verified
+    // before adding: no definition of any of them exists anywhere in the repo,
+    // so this cannot break existing code. A deliberate override still works
+    // via @builtin_override.
+    if sema_tok_matches(tok_idx, "bit_toggle", 10) != 0 { return 1 }
+    if sema_tok_matches(tok_idx, "call_ptr_f64", 12) != 0 { return 1 }
+    if sema_tok_matches(tok_idx, "f16_to_f32", 10) != 0 { return 1 }
+    if sema_tok_matches(tok_idx, "f32_to_f16", 10) != 0 { return 1 }
+    if sema_tok_matches(tok_idx, "f32_to_f64", 10) != 0 { return 1 }
+    if sema_tok_matches(tok_idx, "f32_to_int", 10) != 0 { return 1 }
+    if sema_tok_matches(tok_idx, "f64_to_f32", 10) != 0 { return 1 }
+    if sema_tok_matches(tok_idx, "f64_to_int", 10) != 0 { return 1 }
+    if sema_tok_matches(tok_idx, "fma_f64", 7) != 0 { return 1 }
+    if sema_tok_matches(tok_idx, "int_to_f32", 10) != 0 { return 1 }
+    if sema_tok_matches(tok_idx, "int_to_f64", 10) != 0 { return 1 }
+    if sema_tok_matches(tok_idx, "read", 4) != 0 { return 1 }
+    if sema_tok_matches(tok_idx, "sqrt", 4) != 0 { return 1 }
+    if sema_tok_matches(tok_idx, "sqrt_f32", 8) != 0 { return 1 }
+    if sema_tok_matches(tok_idx, "sqrt_f64", 8) != 0 { return 1 }
     if sema_tok_matches(tok_idx, "exit", 4) != 0 { return 1 }
     if sema_tok_matches(tok_idx, "print", 5) != 0 { return 1 }
     if sema_tok_matches(tok_idx, "println", 7) != 0 { return 1 }
