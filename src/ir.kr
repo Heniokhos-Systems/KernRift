@@ -1301,10 +1301,7 @@ fn ir_lower_expr(uint64 node) -> uint64 {
         uint64 wtok = tok
         uint64 tstart = tok_text_start(wtok)
         uint64 tlen = tok_text_len(wtok)
-        if str_len + tlen >= 65536 {
-            write(2, "error: str_buf overflow (max 65536)\n", 36)
-            exit(1)
-        }
+        str_buf_ensure(str_len + tlen + 1)
         uint64 str_offset = str_len
         // Copy string bytes (skip quotes, process escapes). Escape table
         // lives in codegen.kr via escape_char_to_byte + hex_digit_pair_to_byte;
@@ -3340,10 +3337,7 @@ fn ir_lower_expr(uint64 node) -> uint64 {
                     ir_emit(IR_CONST, len_v, 0, 0, 0, ir_current_bb)
                 } else if wfraw != 0 {
                     // Raw StrPart: copy bytes from source directly (no quote strip)
-                    if str_len + ftlen >= 65536 {
-                        write(2, "error: str_buf overflow\n", 24)
-                        exit(1)
-                    }
+                    str_buf_ensure(str_len + ftlen + 1)
                     uint64 fstr_offset = str_len
                     uint64 fsi = 0
                     while fsi < ftlen {
@@ -6420,10 +6414,7 @@ fn ir_emit_x86_insn(uint64 ii) {
         uint64 lea_modrm = 0x05 | ((lea_dst & 7) << 3)
         uint8 lea_m = lea_modrm
         emit_byte(lea_m)
-        if str_fixup_count >= 4096 {
-            write(2, "error: str_fixups overflow (max 4096)\n", 38)
-            exit(1)
-        }
+        str_fixups_ensure()
         uint64 fentry = str_fixups + str_fixup_count * 8
         uint32 cp = out_len
         unsafe { *(fentry as uint32) = cp }
@@ -8023,10 +8014,7 @@ fn ir_emit_x86_insn(uint64 ii) {
         uint64 call_patch = out_len
         emit_u32_le(0)
         // Record fixup: imm holds the callee token
-        if fixup_count >= 32768 {
-            write(2, "error: fixup_table overflow (max 32768)\n", 40)
-            exit(1)
-        }
+        fixup_table_ensure()
         uint64 fentry = fixup_table + fixup_count * 8
         uint32 fo = call_patch
         unsafe { *(fentry as uint32) = fo }
@@ -8087,11 +8075,8 @@ fn ir_emit_x86_insn(uint64 ii) {
         uint64 fnaddr_patch = out_len
         emit_u32_le(0)
         // Record in fnaddr fixup table
-        if fnaddr_fixup_count >= 1024 {
-            write(2, "error: fnaddr_fixup_table overflow (max 1024)\n", 46)
-            exit(1)
-        }
-        if fnaddr_fixup_count < 1024 {
+        fnaddr_fixups_ensure()
+        if fnaddr_fixup_count < fnaddr_fixup_cap {
             uint64 fentry_fa = fnaddr_fixup_table + fnaddr_fixup_count * 8
             uint32 fa_off = fnaddr_patch
             unsafe { *(fentry_fa as uint32) = fa_off }

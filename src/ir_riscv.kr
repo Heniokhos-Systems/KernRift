@@ -805,9 +805,7 @@ fn rv_compress_function(uint64 start, uint64 fix_start, uint64 line_start, uint6
 fn rv_emit_pcrel_pair(uint64 rd, uint64 table_sel, uint64 payload) {
     uint64 site = out_len
     if table_sel == 0 {
-        if str_fixup_count >= 4096 {
-            rv_err("error: str_fixups overflow (max 4096)\n")
-        }
+        str_fixups_ensure()
         uint64 fe = str_fixups + str_fixup_count * 8
         uint32 so = site
         unsafe { *(fe as uint32) = so }
@@ -816,9 +814,7 @@ fn rv_emit_pcrel_pair(uint64 rd, uint64 table_sel, uint64 payload) {
         unsafe { *(fe4 as uint32) = py }
         str_fixup_count = str_fixup_count + 1
     } else if table_sel == 1 {
-        if static_fixup_count >= 8192 {
-            rv_err("error: static_fixups overflow (max 8192)\n")
-        }
+        static_fixups_ensure()
         uint64 fe = static_fixups + static_fixup_count * 8
         uint32 so = site
         unsafe { *(fe as uint32) = so }
@@ -827,9 +823,7 @@ fn rv_emit_pcrel_pair(uint64 rd, uint64 table_sel, uint64 payload) {
         unsafe { *(fe4 as uint32) = py }
         static_fixup_count = static_fixup_count + 1
     } else {
-        if fnaddr_fixup_count >= 1024 {
-            rv_err("error: fnaddr_fixups overflow (max 1024)\n")
-        }
+        fnaddr_fixups_ensure()
         uint64 fe = fnaddr_fixup_table + fnaddr_fixup_count * 8
         uint32 so = site
         unsafe { *(fe as uint32) = so }
@@ -1580,10 +1574,7 @@ fn ir_emit_riscv_insn(uint64 ii) {
             ir_overflow_arg_count = 0
             return
         }
-        if fixup_count >= 32768 {
-            write(2, "error: fixup_table overflow (max 32768)\n", 40)
-            exit(1)
-        }
+        fixup_table_ensure()
         uint64 fentry = fixup_table + fixup_count * 8
         uint32 fo = call_patch
         unsafe { *(fentry as uint32) = fo }

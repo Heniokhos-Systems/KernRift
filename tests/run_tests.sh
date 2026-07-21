@@ -7523,6 +7523,79 @@ else
 fi
 rm -f "$ESP_H_BIN" "$ESP_H_PAY" "$ESP_H_CODE" "$ESP_H_DIS"
 
+# --- Growable-buffer regression tests ---
+# Each input exceeds an OLD fixed capacity that the compiler used to refuse
+# loudly. The discriminating mutations (verified against the pre-fix
+# compiler):
+#   imports100:  "error: import_seen overflow (max 64)"
+#   strbuf_grow: "error: str_buf overflow (max 65536)"
+#   fixup_grow:  "error: fixup_table overflow (max 32768)"  (via --legacy;
+#                the IR path hits the separate ir_insn cap first)
+# With growable buffers all three must compile AND the binaries must run
+# correctly (growth that corrupts data would show up as a wrong exit code).
+echo "--- growable buffer tests ---"
+GROW_DIR=$(mktemp -d /tmp/krc_grow_XXXXXX)
+
+# 1) import_seen: 100 imported modules (old cap: 64 files)
+TOTAL=$((TOTAL + 1))
+for gi in $(seq 0 99); do
+    printf 'fn m%d() -> uint64 { return %d }\n' "$gi" "$gi" > "$GROW_DIR/m$gi.kr"
+done
+{ for gi in $(seq 0 99); do printf 'import "m%d.kr"\n' "$gi"; done
+  printf 'fn main() {\n    exit(m0() + m99() - 99)\n}\n'
+} > "$GROW_DIR/imports100.kr"
+if $KRC $KRC_FLAGS "$GROW_DIR/imports100.kr" -o "$GROW_DIR/imports100" >/dev/null 2>&1 \
+   && chmod +x "$GROW_DIR/imports100" && "$GROW_DIR/imports100" >/dev/null 2>&1; then
+    PASS=$((PASS + 1))
+    echo "  grow_import_seen_100: PASS (100 imports, old cap 64)"
+else
+    FAIL=$((FAIL + 1))
+    echo "FAIL: grow_import_seen_100 (100 imports must compile and exit 0)"
+fi
+
+# 2) str_buf: 300 string literals x 256 bytes = ~77 KB (old cap: 65536)
+TOTAL=$((TOTAL + 1))
+GROW_LONG=$(printf 'a%.0s' $(seq 1 256))
+{ printf 'fn main() {\n'
+  for gi in $(seq 0 299); do printf '    uint64 s%d = "%s"\n' "$gi" "$GROW_LONG"; done
+  printf '    write(1, s299, 3)\n    exit(0)\n}\n'
+} > "$GROW_DIR/strbuf_grow.kr"
+GROW_OUT=""
+if $KRC $KRC_FLAGS "$GROW_DIR/strbuf_grow.kr" -o "$GROW_DIR/strbuf_grow" >/dev/null 2>&1; then
+    chmod +x "$GROW_DIR/strbuf_grow"
+    GROW_OUT=$("$GROW_DIR/strbuf_grow" 2>/dev/null)
+fi
+if [ "$GROW_OUT" = "aaa" ]; then
+    PASS=$((PASS + 1))
+    echo "  grow_str_buf_77k: PASS (77 KB of literals, old cap 64 KB)"
+else
+    FAIL=$((FAIL + 1))
+    echo "FAIL: grow_str_buf_77k (expected output 'aaa', got '$GROW_OUT')"
+fi
+
+# 3) fixup_table: 33000 call sites through the legacy x86 emitter
+#    (old cap: 32768). Exit code 232 == 33000 - 32768 proves every call
+#    executed against the grown table.
+TOTAL=$((TOTAL + 1))
+{ printf 'fn f(uint64 x) -> uint64 {\n    uint64 y = x + 1\n    return y\n}\nfn main() {\n    uint64 t = 0\n'
+  for gi in $(seq 1 33000); do printf '    t = f(t)\n'; done
+  printf '    exit(t - 32768)\n}\n'
+} > "$GROW_DIR/fixup_grow.kr"
+GROW_EC=1
+if $KRC $KRC_FLAGS --legacy "$GROW_DIR/fixup_grow.kr" -o "$GROW_DIR/fixup_grow" >/dev/null 2>&1; then
+    chmod +x "$GROW_DIR/fixup_grow"
+    "$GROW_DIR/fixup_grow" >/dev/null 2>&1
+    GROW_EC=$?
+fi
+if [ "$GROW_EC" = 232 ]; then
+    PASS=$((PASS + 1))
+    echo "  grow_fixup_table_33k: PASS (33000 calls, old cap 32768)"
+else
+    FAIL=$((FAIL + 1))
+    echo "FAIL: grow_fixup_table_33k (expected exit 232, got $GROW_EC)"
+fi
+rm -rf "$GROW_DIR"
+
 # --- Summary ---
 echo ""
 echo "=== Results: $PASS/$TOTAL passed, $FAIL failed ==="

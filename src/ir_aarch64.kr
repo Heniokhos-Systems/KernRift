@@ -373,10 +373,7 @@ fn ir_emit_arm64_insn(uint64 ii) {
         uint64 str_offset = imm
         // emit_a64_static_lea puts address in x0
         // Record string fixup
-        if str_fixup_count >= 4096 {
-            write(2, "error: str_fixups overflow (max 4096)\n", 38)
-            exit(1)
-        }
+        str_fixups_ensure()
         uint64 fentry = str_fixups + str_fixup_count * 8
         uint32 cp = out_len
         unsafe { *(fentry as uint32) = cp }
@@ -852,10 +849,7 @@ fn ir_emit_arm64_insn(uint64 ii) {
         uint64 call_patch = out_len
         emit_a64(0x94000000)    // BL #0 (placeholder)
         // Record fixup: imm holds the callee token
-        if fixup_count >= 32768 {
-            write(2, "error: fixup_table overflow (max 32768)\n", 40)
-            exit(1)
-        }
+        fixup_table_ensure()
         uint64 fentry = fixup_table + fixup_count * 8
         uint32 fo = call_patch
         unsafe { *(fentry as uint32) = fo }
@@ -1305,11 +1299,8 @@ fn ir_emit_arm64_insn(uint64 ii) {
     // ----- IR_FN_ADDR (86) -----
     if op == 86 {
         // ADRP + ADD, patched by fnaddr fixup resolver
-        if fnaddr_fixup_count >= 1024 {
-            write(2, "error: fnaddr_fixup_table overflow (max 1024)\n", 46)
-            exit(1)
-        }
-        if fnaddr_fixup_count < 1024 {
+        fnaddr_fixups_ensure()
+        if fnaddr_fixup_count < fnaddr_fixup_cap {
             uint64 fentry_fa = fnaddr_fixup_table + fnaddr_fixup_count * 8
             uint32 fa_off = out_len
             unsafe { *(fentry_fa as uint32) = fa_off }

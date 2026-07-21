@@ -135,6 +135,17 @@ fn ast_alloc(uint64 kind) -> uint64 {
 
 // Accessors — read/write node fields by index
 fn node_base(uint64 idx) -> uint64 {
+    if idx == 0 {
+        // Fatal, never silent: index 0 is the null sentinel, so idx-1
+        // addresses 32 bytes BEFORE the arena. alloc() is raw mmap with no
+        // chunk header; consecutive mappings pack 8 KiB apart, so that write
+        // usually lands silently inside a neighbouring compiler buffer
+        // (token buffer / string table / IR arena) instead of faulting —
+        // catastrophic for a compiler that must self-compile bit-identically.
+        // Same loud-fail convention as emit_token (lexer.kr).
+        write(2, "error: AST accessor on null node (idx 0)\n", 41)
+        exit(1)
+    }
     return ast_buf + (idx - 1) * 32
 }
 
