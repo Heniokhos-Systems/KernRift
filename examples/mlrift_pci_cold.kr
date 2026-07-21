@@ -1,0 +1,856 @@
+// mlrift_pci_cold.kr — COLD-boot variant of the mlrift_pci substrate LKM.
+//
+// Sibling of examples/mlrift_pci_warm.kr. Same kernel substrate (BAR mmap,
+// IOMMU map at a caller-chosen IOVA, MSI-X/eventfd, PCI probe), but with a
+// different mission: it owns a GPU that NOTHING has initialised — no amdgpu,
+// no vfio pre-warm. The card is truly cold (PSP has run its on-die boot ROM
+// and is idle at the BL prompt; DRAM is UNtrained; MEC/MES/SDMA have no
+// microcode yet). This driver is the substrate that lets userland MLRift
+// drive the full from-cold bring-up.
+//
+// WARM vs COLD — what differs, and why this is (mostly) the same substrate:
+//   * The cold-boot LOGIC (NBIO MC-access + doorbell selfring, GMC system-
+//     aperture identity, the PSP BL chain LOAD_KDB..LOAD_SOSDRV, driving SOS
+//     to SoL, and the post-SoL engine bring-up) is all just MMIO r/w + DMA.
+//     It already exists and is proven under vfio in MLRift:
+//       std/nbio.mlr   — nbio_mc_access_enable / nbio_init_doorbell_selfring
+//       std/gmc.mlr    — gmc_init_aperture_identity (the ε.0c LOAD_KDB unblock)
+//       std/psp.mlr    — psp_load_component / the BL chain (C2PMSG_35/36)
+//     So it lives in USERLAND, driven through this driver's substrate:
+//       - BAR5 mmap  -> C2PMSG mailbox + GMC/NBIO/MMHUB registers
+//       - BAR2 mmap  -> doorbells (post-SoL engine submission)
+//       - IOMMU map at a fixed IOVA -> the firmware buffer whose GPU bus
+//         address feeds C2PMSG_36 (gpu_va>>20); == vfio's alloc_sysmem_at_iova.
+//   * warm deliberately STOPS SHORT of engine state (amdgpu owns the live
+//     rings — touching them wedges the card). cold OWNS everything: there is
+//     no live state to preserve, so the post-SoL engine cold-start (own the
+//     queue via MES_ADD_QUEUE, fenced-WPTR doorbell, NOP+RELEASE_MEM(EOP)
+//     fence probe) is on THIS side of the line. See "COLD ENGINE BRING-UP".
+//
+// Fencing note (reviewer flagged "KernRift needs an explicit fence emit"):
+// KernRift already provides it — dsb() emits MFENCE on x86 / DSB SY on ARM64,
+// and vstore64() is a volatile store WITH a barrier. The doorbell ring is
+// therefore: store WPTR to the shadow, dsb(), then vstore64(doorbell,wptr).
+//
+// Compile:
+//   krc --emit=lkm --arch=x86_64 --target=linux examples/mlrift_pci_cold.kr -o mlrift_pci_cold.ko
+// Load (mutually exclusive with the warm driver — both claim the GPU via
+// driver_override, so bind only one):
+//   sudo insmod mlrift_pci_cold.ko
+//   echo mlrift_pci_cold | sudo tee /sys/bus/pci/devices/0000:03:00.0/driver_override
+//   echo 0000:03:00.0    | sudo tee /sys/bus/pci/drivers/mlrift_pci_cold/bind
+
+@module_license("GPL")
+@module_name("mlrift_pci_cold")
+@module_register_misc_device("mlrift_pci_cold")
+@module_register_pci_driver("mlrift_pci_cold")
+
+extern fn _printk(uint64 fmt) -> int32
+extern fn misc_register(uint64 dev) -> int32
+extern fn misc_deregister(uint64 dev) -> int32
+extern fn __pci_register_driver(uint64 drv, uint64 owner, uint64 name) -> int32
+extern fn pci_unregister_driver(uint64 drv)
+extern fn _copy_from_user(uint64 dst, uint64 src, uint64 n) -> uint64
+extern fn _copy_to_user(uint64 dst, uint64 src, uint64 n) -> uint64
+extern fn remap_pfn_range(uint64 vma, uint64 addr, uint64 pfn, uint64 size, uint64 prot) -> int32
+
+// Phase B.3.b: user-page pinning + scatter-gather table. These prove
+// the DMA-buffer plumbing in kernel context WITHOUT touching the IOMMU
+// (B.3.c adds iommu_map_sg on top). Returns are kernel `int` (eax) — we
+// mask to 32 bits at the call site since the upper rax bits are
+// ABI-undefined. sg_alloc_table_from_pages_segment takes 7 args; the
+// 7th (gfp) spills to the stack (KernRift SysV path handles this).
+extern fn pin_user_pages_fast(uint64 start, uint32 nr_pages, uint32 gup_flags, uint64 pages) -> uint64
+extern fn unpin_user_pages(uint64 pages, uint64 npages)
+extern fn sg_alloc_table_from_pages_segment(uint64 sgt, uint64 pages, uint32 n_pages, uint32 offset, uint64 size, uint32 max_segment, uint64 gfp) -> uint64
+extern fn sg_free_table(uint64 sgt)
+
+// Phase B.3.c: the actual IOMMU plumbing. We own an unmanaged paging
+// domain (like VFIO) and map pinned user pages into it at a chosen IOVA.
+// iommu_paging_domain_alloc_flags returns an ERR_PTR on failure (pointer
+// in [-4095,-1]); iommu_attach_device/_map_sg return kernel int/ssize_t
+// in eax (mask to 32 bits / check sign). The device arg is &pci_dev->dev
+// (struct device embedded at offset 0xc8).
+extern fn iommu_paging_domain_alloc_flags(uint64 dev, uint32 flags) -> uint64
+extern fn iommu_attach_device(uint64 domain, uint64 dev) -> uint64
+extern fn iommu_detach_device(uint64 domain, uint64 dev)
+extern fn iommu_domain_free(uint64 domain)
+extern fn iommu_map_sg(uint64 domain, uint64 iova, uint64 sg, uint32 nents, uint32 prot, uint64 gfp) -> uint64
+extern fn iommu_unmap(uint64 domain, uint64 iova, uint64 size) -> uint64
+extern fn iommu_iova_to_phys(uint64 domain, uint64 iova) -> uint64
+
+// Phase B.4: MSI-X interrupts. Generic PCI machinery (vendor-neutral —
+// works for AMD and NVIDIA alike). The device must be enabled +
+// bus-mastering so it can issue the MSI memory writes. Userland gets
+// notified through an eventfd the IRQ handler signals.
+extern fn pci_enable_device(uint64 pdev) -> uint64
+extern fn pci_disable_device(uint64 pdev)
+extern fn pci_set_master(uint64 pdev)
+extern fn pci_clear_master(uint64 pdev)
+extern fn pci_alloc_irq_vectors(uint64 pdev, uint32 min_vecs, uint32 max_vecs, uint32 flags) -> uint64
+extern fn pci_free_irq_vectors(uint64 pdev)
+extern fn pci_irq_vector(uint64 pdev, uint32 nr) -> uint64
+extern fn request_threaded_irq(uint64 irq, uint64 handler, uint64 thread_fn, uint64 flags, uint64 name, uint64 dev_id) -> uint64
+extern fn free_irq(uint64 irq, uint64 dev_id) -> uint64
+extern fn eventfd_ctx_fdget(uint32 fd) -> uint64
+extern fn eventfd_signal_mask(uint64 ctx, uint64 mask)
+extern fn eventfd_ctx_put(uint64 ctx)
+
+// struct pci_dev field offset (kernel 6.17 x86_64): resource[0].start
+// (the resource[17] array base). struct resource is 0x40 bytes, so
+// resource[N].start = 0x3e0 + N*PCI_RES_STRIDE (see below).
+static uint64 PCI_DEV_RESOURCE0_START = 0x3e0
+// struct vm_area_struct field offsets (kernel 6.17 x86_64).
+static uint64 VMA_VM_START     = 0x00
+static uint64 VMA_VM_END       = 0x08
+static uint64 VMA_VM_PAGE_PROT = 0x18
+static uint64 VMA_VM_PGOFF     = 0x50
+// PCI BAR selection + noncached MMIO prot. struct resource is 0x40
+// bytes (verified via pahole on /sys/kernel/btf: size 64); the
+// resource[17] array begins at pci_dev+0x3e0, so resource[N].start =
+// 0x3e0 + N*0x40, .end = +8. (NB: 64-bit BARs occupy resource[N] with
+// resource[N+1] empty — BAR0=res[0], BAR2=res[2], BAR5=res[5].)
+// _PAGE_PCD (bit 4) = UC- on the default x86 PAT layout — matches what
+// pgprot_noncached/ioremap use for MMIO. mmap offset encodes the BAR:
+// byte_offset = pgoff<<12, bar_index = byte_offset>>40 = pgoff>>28.
+static uint64 PCI_RES_STRIDE   = 0x40
+static uint64 PAGE_PCD         = 0x10
+static uint64 BAR_PGOFF_SHIFT  = 28
+static uint64 BAR_INBAR_MASK   = 0x0FFFFFFF
+
+// struct resource.flags (offset 0x18) type bits. Every hardcoded pci_dev
+// offset here (0x3e0 resource[] base, 0xc8 struct device) is kernel-version
+// + config fragile; on a COLD card nothing (no amdgpu) has pre-validated the
+// layout, so a drifted 0x3e0 would read a neighbour field and remap_pfn_range
+// a bogus PFN into userland. Cross-check: a populated BAR's flags must carry a
+// real resource type (MEM/IO). Garbage type => offset drift => reject.
+static uint64 RES_FLAGS_OFF        = 0x18
+static uint64 IORESOURCE_TYPE_BITS = 0x1F00
+static uint64 IORESOURCE_MEM       = 0x0200
+static uint64 IORESOURCE_IO        = 0x0100
+
+// The single PCI device this driver owns. Set by driver_probe when the
+// GPU is bound to mlrift_pci; cleared by driver_remove on unbind. LLM
+// workloads use one dGPU at a time, so a single slot is sufficient.
+static uint64 _mlrift_pci_slot0 = 0
+
+// struct pci_dev field offset (kernel 6.17 x86_64): embedded struct
+// device, used as the arg to all iommu_* calls.
+static uint64 PCI_DEV_DEV = 0xc8
+
+// Phase B.3.c IOMMU state. One paging domain (allocated lazily on the
+// first MAP, attached to slot-0's device) + a table of active mappings.
+// The table is kmalloc'd lazily (KernRift static arrays are unreliable,
+// so we use the same manual-pointer-indexing pattern as the page array).
+// Each entry is MAP_ENTRY_SIZE bytes; a free entry has E_PAGES == 0.
+static uint64 _iommu_domain  = 0    // struct iommu_domain* (0 = none)
+static uint64 _iommu_dev     = 0    // struct device* the domain is attached to
+static uint64 _map_table     = 0    // kmalloc'd MAP_MAX*MAP_ENTRY_SIZE (0 = none)
+
+// IOCTL command numbers — must match userland.
+//   MLRIFT_OPEN_PCI = _IOW('M', 1, char[13])
+//   = (write-only=1<<30) | (size=13<<16) | ('M'<<8) | 1
+//   = 0x4000'0000 | 0x000D'0000 | 0x0000'4D00 | 0x0000'0001
+//   = 0x400D'4D01
+static uint64 IOCTL_MLRIFT_OPEN_PCI = 0x400D4D01
+
+// MLRIFT_CLOSE_PCI = _IO('M', 2): no data, no arg — tears down this
+// session's IRQ + IOMMU resources (the device itself stays claimed by
+// the PCI driver until unbind/remove). = ('M'<<8) | 2 = 0x00004D02.
+static uint64 IOCTL_MLRIFT_CLOSE_PCI = 0x00004D02
+
+// MLRIFT_PIN_TEST = _IOW('M', 3, char[16]): arg points at a 16-byte
+// userland struct { u64 uaddr; u64 size }. Pins the buffer, builds a
+// scatter-gather table, returns the segment count (orig_nents), then
+// tears it all down. No IOMMU, no device touch — just proves the
+// pin + SG plumbing. = (1<<30)|(16<<16)|('M'<<8)|3 = 0x40104D03.
+static uint64 IOCTL_MLRIFT_PIN_TEST = 0x40104D03
+
+// MLRIFT_IOMMU_MAP = _IOW('M', 4, char[24]): arg -> { u64 uaddr; u64
+// iova; u64 size }. Pins the buffer and maps it into our paging domain
+// at `iova`. = (1<<30)|(24<<16)|('M'<<8)|4 = 0x40184D04.
+static uint64 IOCTL_MLRIFT_IOMMU_MAP = 0x40184D04
+
+// MLRIFT_IOMMU_UNMAP = _IOW('M', 5, char[16]): arg -> { u64 iova; u64
+// size }. = (1<<30)|(16<<16)|('M'<<8)|5 = 0x40104D05.
+static uint64 IOCTL_MLRIFT_IOMMU_UNMAP = 0x40104D05
+
+// MLRIFT_BAR_INFO = _IOWR('M', 6, char[16]): in: u32 bar_index @ +0;
+// out: u64 size @ +0, u64 phys_start @ +8. size 0 = BAR absent.
+// = (3<<30)|(16<<16)|('M'<<8)|6 = 0xC0104D06.
+static uint64 IOCTL_MLRIFT_BAR_INFO = 0xC0104D06
+
+// MSI-X interrupt ioctls (Phase B.4):
+//   MLRIFT_IRQ_ENABLE      = _IOW('M',7,char[4])  arg: u32 num_vectors
+//     -> enables the device + allocates MSI-X vectors; returns the count.
+//   MLRIFT_IRQ_SET_EVENTFD = _IOW('M',8,char[8])  arg: {u32 vector, u32 efd}
+//     -> requests the IRQ; the handler signals the given eventfd.
+//   MLRIFT_IRQ_DISABLE     = _IO('M',9)
+//     -> frees all IRQs + vectors, disables the device.
+//   MLRIFT_IRQ_FIRE_TEST   = _IOW('M',10,char[4]) arg: u32 vector
+//     -> software-signals the vector's eventfd (validates the userland
+//        notify path without the GPU actually firing — same call the
+//        hard-IRQ handler makes).
+static uint64 IOCTL_MLRIFT_IRQ_ENABLE      = 0x40044D07
+static uint64 IOCTL_MLRIFT_IRQ_SET_EVENTFD = 0x40084D08
+static uint64 IOCTL_MLRIFT_IRQ_DISABLE     = 0x00004D09
+static uint64 IOCTL_MLRIFT_IRQ_FIRE_TEST   = 0x40044D0A
+
+// PCI_IRQ_MSIX (1<<2) | PCI_IRQ_MSI (1<<1) = 6. The kernel tries MSI-X
+// first, falls back to MSI — AMD GPUs commonly expose MSI rather than a
+// usable MSI-X cap (amdgpu itself uses PCI_IRQ_ALL_TYPES), so MSI-X-only
+// returns -EINVAL. Our handler/eventfd path is identical for both.
+static uint64 PCI_IRQ_MSIX_FLAG = 0x6
+static uint64 IRQ_HANDLED_RET   = 0x1    // irqreturn IRQ_HANDLED
+static uint64 IRQ_MAX_VEC       = 16     // per-device vector cap (this driver)
+static uint64 IRQ_ENTRY_SIZE    = 16     // { u64 irq; u64 eventfd_ctx }
+static uint64 IRQ_TABLE_BYTES   = 256    // IRQ_MAX_VEC * IRQ_ENTRY_SIZE
+static uint64 IRQ_E_IRQ         = 0
+static uint64 IRQ_E_CTX         = 8
+
+// Phase B.4 IRQ state.
+static uint64 _irq_enabled = 0           // 1 once vectors are allocated
+static uint64 _irq_nvec    = 0           // MSI-X vectors allocated
+static uint64 _irq_table   = 0           // kmalloc'd IRQ_MAX_VEC*IRQ_ENTRY_SIZE
+
+// kernel constants
+static uint64 GFP_KERNEL_FLAGS = 0xcc0
+static uint64 FOLL_WRITE_FLAG  = 0x1
+static uint64 SG_MAX_SEGMENT   = 0xFFFFF000   // UINT_MAX page-aligned
+static uint64 SGT_SGL          = 0x00         // offsetof(struct sg_table, sgl)
+static uint64 SGT_ORIG_NENTS   = 0x0c         // offsetof(struct sg_table, orig_nents)
+static uint64 PIN_TEST_MAX_PAGES = 256        // smoke cap: 1 MiB
+static uint64 IOMMU_RW         = 0x3          // IOMMU_READ | IOMMU_WRITE
+static uint64 ERR_PTR_FLOOR    = 0xFFFFFFFFFFFFF000   // ptr > this = ERR_PTR
+
+// Mapping table layout. Entry: { u64 iova; u64 size; u64 pages; u64
+// npages; u64 sgt }. Free slot <=> pages == 0.
+static uint64 MAP_MAX        = 64
+static uint64 MAP_ENTRY_SIZE = 40
+static uint64 MAP_TABLE_BYTES = 2560          // MAP_MAX * MAP_ENTRY_SIZE
+static uint64 E_IOVA   = 0
+static uint64 E_SIZE   = 8
+static uint64 E_PAGES  = 16
+static uint64 E_NPAGES = 24
+static uint64 E_SGT    = 32
+
+// Negative errno values returned to userland (linux/errno.h).
+// EFAULT = 14, EINVAL = 22, ENODEV = 19, EBUSY = 16.
+// We return -errno as signed 64-bit, so e.g. -EFAULT = 0xFFFFFFFFFFFFFFF2.
+
+// Phase C.4 — PCI-driver probe/remove. When the GPU is bound to
+// mlrift_pci (via /sys/.../driver_override + bind), the kernel calls
+// driver_probe with the matching pci_dev. We claim it: enable + set
+// bus-master, then stash the pointer in slot 0. remove() (called on
+// unbind/rmmod) reverses it. This replaces the old "grab by BDF +
+// pci_enable_device without being the bound driver" path that left
+// resources present and blocked vfio rebind with -EBUSY.
+@pci_probe_handler
+fn driver_probe(uint64 pdev, uint64 id) -> int64 {
+    uint64 ed = pci_enable_device(pdev)
+    ed = ed & 0xFFFFFFFF
+    if ed != 0 { return ed | 0xFFFFFFFF00000000 }   // propagate -errno
+    pci_set_master(pdev)
+    _mlrift_pci_slot0 = pdev
+    _printk("mlrift_pci: probe — device claimed + enabled\n")
+    return 0
+}
+
+@pci_remove_handler
+fn driver_remove(uint64 pdev) {
+    _irq_teardown()
+    _iommu_teardown()
+    pci_clear_master(pdev)
+    pci_disable_device(pdev)
+    _mlrift_pci_slot0 = 0
+    _printk("mlrift_pci: remove — device released\n")
+}
+
+// IMPORTANT: this function runs in KERNEL context. It MUST NOT call
+// alloc()/dealloc() — those are KernRift userland-heap builtins that
+// emit an mmap/munmap syscall, which panics the kernel from ring 0.
+// All scratch memory is stack-local (uint8[N] arrays) or .data statics.
+@lkm_ioctl_handler
+fn driver_ioctl(uint64 file, uint64 cmd, uint64 arg) -> int64 {
+    if cmd == IOCTL_MLRIFT_OPEN_PCI {
+        // The device is now claimed by probe() when it binds to mlrift_pci
+        // (see driver_probe). OPEN_PCI is just a presence validator: it no
+        // longer parses a BDF or grabs a ref — that was the source of the
+        // -EBUSY "Resources present before probing" that blocked vfio rebind.
+        if _mlrift_pci_slot0 == 0 { return 0xFFFFFFFFFFFFFFED }   // -ENODEV: bind the GPU to mlrift_pci first
+        _printk("mlrift_pci: OPEN_PCI — device present (slot 0)\n")
+        return 0
+    }
+    if cmd == IOCTL_MLRIFT_CLOSE_PCI {
+        // Session cleanup only: drop IRQ + IOMMU resources the userland
+        // session set up. The device stays claimed by probe() until the
+        // module is unbound (remove() owns the pci_dev release).
+        _irq_teardown()
+        _iommu_teardown()
+        return 0
+    }
+    if cmd == IOCTL_MLRIFT_PIN_TEST {
+        return _pin_test(arg)
+    }
+    if cmd == IOCTL_MLRIFT_IOMMU_MAP {
+        return _iommu_map(arg)
+    }
+    if cmd == IOCTL_MLRIFT_IOMMU_UNMAP {
+        return _iommu_unmap(arg)
+    }
+    if cmd == IOCTL_MLRIFT_BAR_INFO {
+        return _bar_info(arg)
+    }
+    if cmd == IOCTL_MLRIFT_IRQ_ENABLE {
+        return _irq_enable(arg)
+    }
+    if cmd == IOCTL_MLRIFT_IRQ_SET_EVENTFD {
+        return _irq_set_eventfd(arg)
+    }
+    if cmd == IOCTL_MLRIFT_IRQ_DISABLE {
+        _irq_teardown()
+        return 0
+    }
+    if cmd == IOCTL_MLRIFT_IRQ_FIRE_TEST {
+        return _irq_fire_test(arg)
+    }
+    _printk("mlrift_pci: unknown ioctl cmd\n")
+    return 0xFFFFFFFFFFFFFFE7   // -ENOTTY = -25
+}
+
+// Phase B.3.b — pin a userland buffer and build a scatter-gather table,
+// then tear it down. Proves pin_user_pages_fast + the 7-arg
+// sg_alloc_table_from_pages_segment in kernel context. NO IOMMU, NO
+// device access — safe to run with the dGPU still bound to vfio-pci.
+// `arg` -> { u64 uaddr; u64 size }. Returns sg orig_nents on success or
+// a negative errno. Heap use (page array) goes through kmalloc/kfree.
+fn _pin_test(uint64 arg) -> int64 {
+    uint8[16] req_arr
+    uint64 req = req_arr
+    uint64 zi = 0
+    while zi < 16 { unsafe { *((req + zi) as uint8) = 0 }; zi = zi + 1 }
+    uint64 not_copied = _copy_from_user(req, arg, 16)
+    if not_copied != 0 { return 0xFFFFFFFFFFFFFFF2 }   // -EFAULT
+    uint64 uaddr = 0; unsafe { *((req + 0) as uint64) -> uaddr }
+    uint64 size  = 0; unsafe { *((req + 8) as uint64) -> size }
+    if size == 0 { return 0xFFFFFFFFFFFFFFEA }          // -EINVAL
+
+    // Page span covering [uaddr, uaddr+size).
+    uint64 page_base = uaddr & 0xFFFFFFFFFFFFF000
+    uint64 off = uaddr - page_base
+    uint64 npages = (off + size + 4095) / 4096
+    if npages == 0 { return 0xFFFFFFFFFFFFFFEA }
+    if npages > PIN_TEST_MAX_PAGES { return 0xFFFFFFFFFFFFFFEA }
+
+    // struct page* array (kmalloc in kernel mode).
+    uint64 pages = alloc(npages * 8)
+    if pages == 0 { return 0xFFFFFFFFFFFFFFF4 }          // -ENOMEM = -12
+
+    uint32 npages32 = npages
+    uint64 pinned = pin_user_pages_fast(page_base, npages32, FOLL_WRITE_FLAG, pages)
+    pinned = pinned & 0xFFFFFFFF                          // low 32 = kernel int return
+    if pinned != npages {
+        // partial pin (small positive) -> unpin those; negative/zero -> nothing
+        if (pinned & 0x80000000) == 0 {
+            if pinned != 0 { unpin_user_pages(pages, pinned) }
+        }
+        dealloc(pages)
+        _printk("mlrift_pci: PIN_TEST pin_user_pages_fast failed\n")
+        return 0xFFFFFFFFFFFFFFF2
+    }
+
+    // Build the SG table (7-arg call; gfp spills to the stack).
+    uint8[16] sgt_arr
+    uint64 sgt = sgt_arr
+    uint64 si = 0
+    while si < 16 { unsafe { *((sgt + si) as uint8) = 0 }; si = si + 1 }
+    uint32 maxseg32 = SG_MAX_SEGMENT
+    uint64 rc = sg_alloc_table_from_pages_segment(sgt, pages, npages32, 0, size, maxseg32, GFP_KERNEL_FLAGS)
+    rc = rc & 0xFFFFFFFF
+    if rc != 0 {
+        unpin_user_pages(pages, npages)
+        dealloc(pages)
+        _printk("mlrift_pci: PIN_TEST sg_alloc_table_from_pages_segment failed\n")
+        return 0xFFFFFFFFFFFFFFF4
+    }
+
+    uint32 orig_nents = 0
+    unsafe { *((sgt + SGT_ORIG_NENTS) as uint32) -> orig_nents }
+    uint64 nents_ret = orig_nents
+
+    // Tear down — this is a smoke; B.3.c maps before unmapping.
+    sg_free_table(sgt)
+    unpin_user_pages(pages, npages)
+    dealloc(pages)
+    _printk("mlrift_pci: PIN_TEST ok (pinned + SG built + freed)\n")
+    return nents_ret
+}
+
+// Phase B.2 follow-up — report a BAR's size (and phys base) so userland
+// can mmap it without parsing /sys. arg -> in: u32 bar_index @ +0; out:
+// u64 size @ +0, u64 phys_start @ +8 (size 0 = BAR not present).
+fn _bar_info(uint64 arg) -> int64 {
+    uint64 pdev = _mlrift_pci_slot0
+    if pdev == 0 { return 0xFFFFFFFFFFFFFFEA }            // -EINVAL: open device first
+    uint8[16] req_arr
+    uint64 req = req_arr
+    uint64 zi = 0
+    while zi < 16 { unsafe { *((req + zi) as uint8) = 0 }; zi = zi + 1 }
+    uint64 not_copied = _copy_from_user(req, arg, 16)
+    if not_copied != 0 { return 0xFFFFFFFFFFFFFFF2 }      // -EFAULT
+    uint32 bar_index32 = 0; unsafe { *((req + 0) as uint32) -> bar_index32 }
+    uint64 bar_index = bar_index32
+    if bar_index > 5 { return 0xFFFFFFFFFFFFFFEA }
+
+    uint64 res = pdev + PCI_DEV_RESOURCE0_START + bar_index * PCI_RES_STRIDE
+    uint64 start = 0; unsafe { *((res + 0) as uint64) -> start }
+    uint64 end   = 0; unsafe { *((res + 8) as uint64) -> end }
+    // Offset-drift guard (see RES_FLAGS_OFF): a populated BAR must be MEM/IO.
+    uint64 flags = 0; unsafe { *((res + RES_FLAGS_OFF) as uint64) -> flags }
+    uint64 rtype = flags & IORESOURCE_TYPE_BITS
+    if start != 0 {
+        if rtype != IORESOURCE_MEM { if rtype != IORESOURCE_IO { return 0xFFFFFFFFFFFFFFEA } }
+    }
+    uint64 size = 0
+    if start != 0 { size = end - start + 1 }              // 0 => BAR absent
+
+    unsafe { *((req + 0) as uint64) = size }
+    unsafe { *((req + 8) as uint64) = start }
+    uint64 nc2 = _copy_to_user(arg, req, 16)
+    if nc2 != 0 { return 0xFFFFFFFFFFFFFFF2 }              // -EFAULT
+    return 0
+}
+
+// Phase B.4 — MSI-X hard-IRQ handler. The kernel calls this (via the
+// fn_addr pointer passed to request_threaded_irq) in interrupt context
+// when the device fires the vector. dev_id is the eventfd ctx we
+// registered for this vector; signal it (IRQ-safe) and report HANDLED.
+// MUST NOT sleep / alloc.
+fn mlrift_irq_handler(uint64 irq, uint64 dev_id) -> uint64 {
+    if dev_id != 0 { eventfd_signal_mask(dev_id, 0) }
+    return IRQ_HANDLED_RET
+}
+
+// Free all registered IRQs + eventfd ctxs and release the vectors. Uses
+// _mlrift_pci_slot0 for the pci_dev, which stays valid until remove()
+// clears it. Device enable/master state is owned by probe()/remove(), so
+// this no longer disables the device. Idempotent.
+fn _irq_teardown() {
+    if _irq_table != 0 {
+        uint64 i = 0
+        while i < IRQ_MAX_VEC {
+            uint64 e = _irq_table + i * IRQ_ENTRY_SIZE
+            uint64 ctx = 0; unsafe { *((e + IRQ_E_CTX) as uint64) -> ctx }
+            if ctx != 0 {
+                uint64 irq = 0; unsafe { *((e + IRQ_E_IRQ) as uint64) -> irq }
+                free_irq(irq, ctx)
+                eventfd_ctx_put(ctx)
+                unsafe { *((e + IRQ_E_CTX) as uint64) = 0 }
+            }
+            i = i + 1
+        }
+        dealloc(_irq_table)
+        _irq_table = 0
+    }
+    if _irq_enabled != 0 {
+        uint64 pdev = _mlrift_pci_slot0
+        if pdev != 0 {
+            pci_free_irq_vectors(pdev)
+        }
+        _irq_enabled = 0
+        _irq_nvec = 0
+    }
+}
+
+// MLRIFT_IRQ_ENABLE — allocate up to `num_vectors` MSI/MSI-X vectors on
+// the (already enabled + bus-mastering) device. arg -> u32 num_vectors.
+// Returns the count actually allocated, or a negative errno.
+fn _irq_enable(uint64 arg) -> int64 {
+    uint64 pdev = _mlrift_pci_slot0
+    if pdev == 0 { return 0xFFFFFFFFFFFFFFEA }            // -EINVAL: open first
+    if _irq_enabled != 0 { return 0xFFFFFFFFFFFFFFF0 }    // -EBUSY
+
+    uint8[4] req_arr
+    uint64 req = req_arr
+    unsafe { *((req + 0) as uint32) = 0 }
+    uint64 not_copied = _copy_from_user(req, arg, 4)
+    if not_copied != 0 { return 0xFFFFFFFFFFFFFFF2 }
+    uint32 nreq32 = 0; unsafe { *((req + 0) as uint32) -> nreq32 }
+    uint64 nreq = nreq32
+    if nreq == 0 { return 0xFFFFFFFFFFFFFFEA }
+    if nreq > IRQ_MAX_VEC { nreq = IRQ_MAX_VEC }
+
+    // Device is already enabled + bus-mastering (probe() did both when it
+    // claimed the device); just allocate the vectors here.
+    uint32 nreq_w = nreq
+    uint64 n = pci_alloc_irq_vectors(pdev, 1, nreq_w, PCI_IRQ_MSIX_FLAG)
+    n = n & 0xFFFFFFFF
+    if (n & 0x80000000) != 0 {        // negative errno
+        _printk("mlrift_pci: pci_alloc_irq_vectors (MSI/MSI-X) failed\n")
+        // Surface the real errno (sign-extend the 32-bit negative return)
+        // so userland sees e.g. -ENOSPC/-EINVAL rather than a generic EIO.
+        return n | 0xFFFFFFFF00000000
+    }
+    if n == 0 {
+        return 0xFFFFFFFFFFFFFFFB
+    }
+
+    uint64 t = alloc(IRQ_TABLE_BYTES)
+    if t == 0 {
+        pci_free_irq_vectors(pdev)
+        return 0xFFFFFFFFFFFFFFF4                          // -ENOMEM
+    }
+    uint64 ti = 0
+    while ti < IRQ_TABLE_BYTES { unsafe { *((t + ti) as uint8) = 0 }; ti = ti + 1 }
+    _irq_table = t
+    _irq_nvec = n
+    _irq_enabled = 1
+    _printk("mlrift_pci: MSI-X vectors allocated\n")
+    return n
+}
+
+// MLRIFT_IRQ_SET_EVENTFD — register the hard-IRQ handler for `vector`,
+// signalling the given eventfd. arg -> { u32 vector; u32 eventfd_fd }.
+fn _irq_set_eventfd(uint64 arg) -> int64 {
+    uint64 pdev = _mlrift_pci_slot0
+    if pdev == 0 { return 0xFFFFFFFFFFFFFFEA }
+    if _irq_enabled == 0 { return 0xFFFFFFFFFFFFFFEA }
+    if _irq_table == 0 { return 0xFFFFFFFFFFFFFFEA }
+
+    uint8[8] req_arr
+    uint64 req = req_arr
+    unsafe { *((req + 0) as uint64) = 0 }
+    uint64 not_copied = _copy_from_user(req, arg, 8)
+    if not_copied != 0 { return 0xFFFFFFFFFFFFFFF2 }
+    uint32 vec32 = 0; unsafe { *((req + 0) as uint32) -> vec32 }
+    uint32 efd32 = 0; unsafe { *((req + 4) as uint32) -> efd32 }
+    uint64 vector = vec32
+    if vector >= _irq_nvec { return 0xFFFFFFFFFFFFFFEA }
+
+    uint64 e = _irq_table + vector * IRQ_ENTRY_SIZE
+    uint64 existing = 0; unsafe { *((e + IRQ_E_CTX) as uint64) -> existing }
+    if existing != 0 { return 0xFFFFFFFFFFFFFFF0 }         // -EBUSY: already set
+
+    uint64 ctx = eventfd_ctx_fdget(efd32)
+    if ctx == 0 { return 0xFFFFFFFFFFFFFFF7 }              // -EBADF = -9
+    if ctx > ERR_PTR_FLOOR { return 0xFFFFFFFFFFFFFFF7 }   // ERR_PTR
+
+    uint64 irq = pci_irq_vector(pdev, vec32)
+    irq = irq & 0xFFFFFFFF
+    uint64 hptr = fn_addr("mlrift_irq_handler")
+    uint64 name = "mlrift_pci"
+    uint64 rc = request_threaded_irq(irq, hptr, 0, 0, name, ctx)
+    rc = rc & 0xFFFFFFFF
+    if rc != 0 {
+        eventfd_ctx_put(ctx)
+        _printk("mlrift_pci: request_threaded_irq failed\n")
+        return 0xFFFFFFFFFFFFFFFB                          // -EIO
+    }
+    unsafe { *((e + IRQ_E_IRQ) as uint64) = irq }
+    unsafe { *((e + IRQ_E_CTX) as uint64) = ctx }
+    _printk("mlrift_pci: IRQ handler + eventfd registered\n")
+    return 0
+}
+
+// MLRIFT_IRQ_FIRE_TEST — software-signal a vector's eventfd, exactly as
+// the hard-IRQ handler would. Lets userland validate the notify path
+// without the GPU firing. arg -> u32 vector.
+fn _irq_fire_test(uint64 arg) -> int64 {
+    if _irq_table == 0 { return 0xFFFFFFFFFFFFFFEA }
+    uint8[4] req_arr
+    uint64 req = req_arr
+    unsafe { *((req + 0) as uint32) = 0 }
+    uint64 not_copied = _copy_from_user(req, arg, 4)
+    if not_copied != 0 { return 0xFFFFFFFFFFFFFFF2 }
+    uint32 vec32 = 0; unsafe { *((req + 0) as uint32) -> vec32 }
+    uint64 vector = vec32
+    if vector >= _irq_nvec { return 0xFFFFFFFFFFFFFFEA }
+    uint64 e = _irq_table + vector * IRQ_ENTRY_SIZE
+    uint64 ctx = 0; unsafe { *((e + IRQ_E_CTX) as uint64) -> ctx }
+    if ctx == 0 { return 0xFFFFFFFFFFFFFFEA }              // no eventfd registered
+    eventfd_signal_mask(ctx, 0)
+    return 0
+}
+
+// Phase B.3.c — map a pinned userland buffer into our IOMMU paging
+// domain at a caller-chosen IOVA. This is the kernel-side replacement
+// for VFIO_IOMMU_MAP_DMA. Requires slot 0 opened (the target device)
+// AND that device unbound from vfio-pci (so iommu_attach_device can
+// take ownership of the domain). `arg` -> { u64 uaddr; u64 iova; u64
+// size }, all page-aligned. Returns the backing phys addr (via
+// iommu_iova_to_phys) on success, or a negative errno.
+fn _iommu_map(uint64 arg) -> int64 {
+    uint64 pdev = _mlrift_pci_slot0
+    if pdev == 0 { return 0xFFFFFFFFFFFFFFEA }            // -EINVAL: open device first
+
+    uint8[24] req_arr
+    uint64 req = req_arr
+    uint64 zi = 0
+    while zi < 24 { unsafe { *((req + zi) as uint8) = 0 }; zi = zi + 1 }
+    uint64 not_copied = _copy_from_user(req, arg, 24)
+    if not_copied != 0 { return 0xFFFFFFFFFFFFFFF2 }      // -EFAULT
+    uint64 uaddr = 0; unsafe { *((req + 0)  as uint64) -> uaddr }
+    uint64 iova  = 0; unsafe { *((req + 8)  as uint64) -> iova }
+    uint64 size  = 0; unsafe { *((req + 16) as uint64) -> size }
+    if size == 0 { return 0xFFFFFFFFFFFFFFEA }
+    if (iova & 0xFFF) != 0 { return 0xFFFFFFFFFFFFFFEA }  // iova must be page-aligned
+    if (uaddr & 0xFFF) != 0 { return 0xFFFFFFFFFFFFFFEA } // uaddr too (smoke simplification)
+    uint64 npages = (size + 4095) / 4096
+    if npages == 0 { return 0xFFFFFFFFFFFFFFEA }
+    if npages > PIN_TEST_MAX_PAGES { return 0xFFFFFFFFFFFFFFEA }
+
+    uint64 dev = pdev + PCI_DEV_DEV
+
+    // Lazily allocate + attach our own unmanaged paging domain.
+    if _iommu_domain == 0 {
+        uint64 dom = iommu_paging_domain_alloc_flags(dev, 0)
+        if dom == 0 { return 0xFFFFFFFFFFFFFFED }          // NULL -> -ENODEV
+        if dom > ERR_PTR_FLOOR { return 0xFFFFFFFFFFFFFFED } // ERR_PTR(-errno)
+        uint64 art = iommu_attach_device(dom, dev)
+        art = art & 0xFFFFFFFF
+        if art != 0 {
+            iommu_domain_free(dom)
+            _printk("mlrift_pci: iommu_attach_device failed (device still bound to vfio-pci?)\n")
+            return 0xFFFFFFFFFFFFFFFB                       // -EIO = -5
+        }
+        _iommu_domain = dom
+        _iommu_dev = dev
+        _printk("mlrift_pci: paging domain allocated + attached\n")
+    }
+
+    // Lazily allocate the mapping table; find a free slot and reject a
+    // duplicate IOVA. (free_idx == MAP_MAX means no slot found.)
+    if _map_table == 0 {
+        uint64 t = alloc(MAP_TABLE_BYTES)
+        if t == 0 { return 0xFFFFFFFFFFFFFFF4 }           // -ENOMEM
+        uint64 ti = 0
+        while ti < MAP_TABLE_BYTES { unsafe { *((t + ti) as uint8) = 0 }; ti = ti + 1 }
+        _map_table = t
+    }
+    uint64 free_idx = MAP_MAX
+    uint64 mi = 0
+    while mi < MAP_MAX {
+        uint64 e = _map_table + mi * MAP_ENTRY_SIZE
+        uint64 e_pages = 0; unsafe { *((e + E_PAGES) as uint64) -> e_pages }
+        if e_pages == 0 {
+            if free_idx == MAP_MAX { free_idx = mi }
+        } else {
+            uint64 e_iova = 0; unsafe { *((e + E_IOVA) as uint64) -> e_iova }
+            if e_iova == iova { return 0xFFFFFFFFFFFFFFF0 }  // -EBUSY: iova already mapped
+        }
+        mi = mi + 1
+    }
+    if free_idx == MAP_MAX { return 0xFFFFFFFFFFFFFFE4 }   // -ENOSPC = -28: table full
+
+    // Pin the user buffer.
+    uint64 pages = alloc(npages * 8)
+    if pages == 0 { return 0xFFFFFFFFFFFFFFF4 }            // -ENOMEM
+    uint32 npages32 = npages
+    uint64 pinned = pin_user_pages_fast(uaddr, npages32, FOLL_WRITE_FLAG, pages)
+    pinned = pinned & 0xFFFFFFFF
+    if pinned != npages {
+        if (pinned & 0x80000000) == 0 { if pinned != 0 { unpin_user_pages(pages, pinned) } }
+        dealloc(pages)
+        return 0xFFFFFFFFFFFFFFF2
+    }
+
+    // Build a persistent SG table (kmalloc, freed at unmap).
+    uint64 sgt = alloc(16)
+    if sgt == 0 { unpin_user_pages(pages, npages); dealloc(pages); return 0xFFFFFFFFFFFFFFF4 }
+    uint64 si = 0
+    while si < 16 { unsafe { *((sgt + si) as uint8) = 0 }; si = si + 1 }
+    uint32 maxseg32 = SG_MAX_SEGMENT
+    uint64 rc = sg_alloc_table_from_pages_segment(sgt, pages, npages32, 0, size, maxseg32, GFP_KERNEL_FLAGS)
+    rc = rc & 0xFFFFFFFF
+    if rc != 0 {
+        dealloc(sgt); unpin_user_pages(pages, npages); dealloc(pages)
+        return 0xFFFFFFFFFFFFFFF4
+    }
+
+    // Map the scatterlist into the domain at `iova`. iommu_map_sg returns
+    // ssize_t: bytes mapped (== size) on success, negative errno on error.
+    uint64 sgl = 0;    unsafe { *((sgt + SGT_SGL)        as uint64) -> sgl }
+    uint32 nents = 0;  unsafe { *((sgt + SGT_ORIG_NENTS) as uint32) -> nents }
+    uint32 prot32 = IOMMU_RW
+    uint64 mapped = iommu_map_sg(_iommu_domain, iova, sgl, nents, prot32, GFP_KERNEL_FLAGS)
+    if mapped != size {
+        if (mapped & 0x8000000000000000) == 0 { if mapped != 0 { iommu_unmap(_iommu_domain, iova, mapped) } }
+        sg_free_table(sgt); dealloc(sgt); unpin_user_pages(pages, npages); dealloc(pages)
+        _printk("mlrift_pci: iommu_map_sg failed\n")
+        return 0xFFFFFFFFFFFFFFFB
+    }
+
+    // Record the live mapping in the free slot (kept pinned/mapped
+    // until UNMAP or teardown).
+    uint64 ent = _map_table + free_idx * MAP_ENTRY_SIZE
+    unsafe { *((ent + E_IOVA)   as uint64) = iova }
+    unsafe { *((ent + E_SIZE)   as uint64) = size }
+    unsafe { *((ent + E_PAGES)  as uint64) = pages }
+    unsafe { *((ent + E_NPAGES) as uint64) = npages }
+    unsafe { *((ent + E_SGT)    as uint64) = sgt }
+    _printk("mlrift_pci: IOMMU_MAP ok\n")
+
+    // Verify the mapping resolves; return the backing phys addr.
+    uint64 phys = iommu_iova_to_phys(_iommu_domain, iova)
+    return phys
+}
+
+// Phase B.3.c — reverse a mapping made by _iommu_map. `arg` -> { u64
+// iova; u64 size } and must match the active mapping.
+fn _iommu_unmap(uint64 arg) -> int64 {
+    if _iommu_domain == 0 { return 0xFFFFFFFFFFFFFFEA }
+    if _map_table == 0 { return 0xFFFFFFFFFFFFFFEA }      // nothing mapped
+
+    uint8[16] req_arr
+    uint64 req = req_arr
+    uint64 zi = 0
+    while zi < 16 { unsafe { *((req + zi) as uint8) = 0 }; zi = zi + 1 }
+    uint64 not_copied = _copy_from_user(req, arg, 16)
+    if not_copied != 0 { return 0xFFFFFFFFFFFFFFF2 }
+    uint64 iova = 0; unsafe { *((req + 0) as uint64) -> iova }
+    uint64 size = 0; unsafe { *((req + 8) as uint64) -> size }
+
+    // Find the entry matching {iova, size} and tear it down.
+    uint64 mi = 0
+    while mi < MAP_MAX {
+        uint64 e = _map_table + mi * MAP_ENTRY_SIZE
+        uint64 e_pages = 0; unsafe { *((e + E_PAGES) as uint64) -> e_pages }
+        if e_pages != 0 {
+            uint64 e_iova = 0; unsafe { *((e + E_IOVA) as uint64) -> e_iova }
+            uint64 e_size = 0; unsafe { *((e + E_SIZE) as uint64) -> e_size }
+            if e_iova == iova {
+                if e_size == size {
+                    uint64 e_npages = 0; unsafe { *((e + E_NPAGES) as uint64) -> e_npages }
+                    uint64 e_sgt = 0;    unsafe { *((e + E_SGT)    as uint64) -> e_sgt }
+                    iommu_unmap(_iommu_domain, iova, size)
+                    sg_free_table(e_sgt)
+                    dealloc(e_sgt)
+                    unpin_user_pages(e_pages, e_npages)
+                    dealloc(e_pages)
+                    unsafe { *((e + E_PAGES) as uint64) = 0 }   // free the slot
+                    _printk("mlrift_pci: IOMMU_UNMAP ok\n")
+                    return 0
+                }
+            }
+        }
+        mi = mi + 1
+    }
+    return 0xFFFFFFFFFFFFFFEA   // -EINVAL: no matching mapping
+}
+
+// IOMMU session teardown. Called from driver_remove (on unbind) and
+// from MLRIFT_CLOSE_PCI / IRQ_DISABLE — NOT from cleanup_module (the PCI
+// driver model drives the device lifecycle now). Heap-free; runs in
+// process context (probe/remove/ioctl).
+// Tear down any live IOMMU mapping, then detach + free the paging
+// domain. Uses _iommu_dev (captured at attach) rather than the slot
+// table, so it stays correct even after CLOSE_PCI cleared the slot —
+// freeing a still-attached domain is a kernel BUG. Idempotent.
+fn _iommu_teardown() {
+    if _map_table != 0 {
+        uint64 mi = 0
+        while mi < MAP_MAX {
+            uint64 e = _map_table + mi * MAP_ENTRY_SIZE
+            uint64 e_pages = 0; unsafe { *((e + E_PAGES) as uint64) -> e_pages }
+            if e_pages != 0 {
+                uint64 e_iova = 0;   unsafe { *((e + E_IOVA)   as uint64) -> e_iova }
+                uint64 e_size = 0;   unsafe { *((e + E_SIZE)   as uint64) -> e_size }
+                uint64 e_npages = 0; unsafe { *((e + E_NPAGES) as uint64) -> e_npages }
+                uint64 e_sgt = 0;    unsafe { *((e + E_SGT)    as uint64) -> e_sgt }
+                if _iommu_domain != 0 { iommu_unmap(_iommu_domain, e_iova, e_size) }
+                if e_sgt != 0 { sg_free_table(e_sgt); dealloc(e_sgt) }
+                unpin_user_pages(e_pages, e_npages)
+                dealloc(e_pages)
+                unsafe { *((e + E_PAGES) as uint64) = 0 }
+            }
+            mi = mi + 1
+        }
+        dealloc(_map_table)
+        _map_table = 0
+    }
+    if _iommu_domain != 0 {
+        if _iommu_dev != 0 { iommu_detach_device(_iommu_domain, _iommu_dev) }
+        iommu_domain_free(_iommu_domain)
+        _iommu_domain = 0
+        _iommu_dev = 0
+        _printk("mlrift_pci: paging domain detached + freed\n")
+    }
+}
+
+// ===================== COLD ENGINE BRING-UP (post-SoL) =====================
+// Once the userland BL chain has driven SOS to sign-of-life (C2PMSG_81 != 0)
+// and the PSP has loaded MEC/MES microcode, the compute engine is idle with
+// NO queue mapped. Unlike the warm path (which inherits amdgpu's live rings),
+// we own the first queue ourselves. Safe ordering — to keep the card cold-and-
+// recoverable rather than wedging it into a reset:
+//
+//   1. Own the queue via MES, not by poking HQD MMIO directly. Build a
+//      MES_ADD_QUEUE packet (type COMPUTE; our MQD + doorbell offset + WPTR-
+//      shadow, all in IOMMU-mapped sysmem) and submit it on the MES ring.
+//      Firmware sets up the HQD/doorbell mapping; direct CP_HQD_* writes
+//      desync MES and hang the engine (the SP2 doorbell wall lives here).
+//   2. Fenced doorbell ring — reversed, the CP reads a stale WPTR. KernRift
+//      already has the fence the reviewer asked for:
+//          unsafe { *(wptr_shadow as uint64) = wptr }   // WB store to shadow
+//          dsb()                                        // MFENCE: shadow first
+//          vstore64(doorbell_va, wptr)                  // volatile store rings it
+//      (doorbell_va = in-kernel map of BAR2 + the queue's doorbell offset.)
+//   3. Validate with a harmless submission: PACKET3_NOP + RELEASE_MEM (EOP,
+//      BOTTOM_OF_PIPE_TS / CACHE_FLUSH_AND_INV_TS) writing a known fence value
+//      to the ring's fence slot; spin on it. NOP+EOP cannot corrupt engine
+//      state, so a no-show is recoverable by re-submit, not a GPU reset — the
+//      cold-path smoke gate before any real dispatch.
+//
+// Needs an in-kernel BAR2 map (doorbell) + a ring/MQD in the paging domain;
+// it is the next build on top of the substrate below and is intentionally NOT
+// implemented yet. MES_ADD_QUEUE + EOP packet layouts come from the MLRift PM4
+// smokes (examples/kiq_doorbell_bringup.mlr, gfx_ring_doorbell.mlr,
+// psp_fuzz/legacy_examples/phase3_pm4_*).
+// ===========================================================================
+
+// Phase B.2.b + noncached follow-up: map a selected BAR of the slot-0
+// device into the calling process, as UNCACHED MMIO (UC-). The mmap
+// offset selects the BAR: byte_offset = vm_pgoff<<12, bar_index =
+// byte_offset>>40 (so userland passes mmap offset = bar_index<<40), and
+// the low bits are an offset within the BAR (usually 0 = whole BAR from
+// its base). Reads pci_dev->resource[bar_index] for the phys base/length
+// and bounds-checks the request. Heap-free → safe in kernel context.
+//
+// Open a device with MLRIFT_OPEN_PCI first (fills slot 0), then mmap the
+// device fd. offset 0 maps BAR0 (back-compat with the B.2.b test).
+@lkm_mmap_handler
+fn driver_mmap(uint64 file, uint64 vma) -> int64 {
+    uint64 pdev = _mlrift_pci_slot0
+    if pdev == 0 { return 0xFFFFFFFFFFFFFFEA }            // -EINVAL: no device open
+
+    uint64 pgoff = 0; unsafe { *((vma + VMA_VM_PGOFF) as uint64) -> pgoff }
+    uint64 bar_index = pgoff >> BAR_PGOFF_SHIFT
+    if bar_index > 5 { return 0xFFFFFFFFFFFFFFEA }        // -EINVAL: PCI has BARs 0..5
+    uint64 in_bar_off = (pgoff & BAR_INBAR_MASK) << 12    // byte offset within the BAR
+
+    // resource[bar_index]: start @ 0x3e0 + N*PCI_RES_STRIDE (0x40), end @ +8.
+    uint64 res = pdev + PCI_DEV_RESOURCE0_START + bar_index * PCI_RES_STRIDE
+    uint64 bar_phys = 0; unsafe { *((res + 0) as uint64) -> bar_phys }
+    uint64 bar_end  = 0; unsafe { *((res + 8) as uint64) -> bar_end }
+    if bar_phys == 0 { return 0xFFFFFFFFFFFFFFEA }        // -EINVAL: BAR not present
+    // Offset-drift guard: we map this as MMIO, so it must be a MEM resource.
+    // Garbage type bits => the hardcoded 0x3e0 no longer matches the kernel.
+    uint64 flags = 0; unsafe { *((res + RES_FLAGS_OFF) as uint64) -> flags }
+    if (flags & IORESOURCE_TYPE_BITS) != IORESOURCE_MEM { return 0xFFFFFFFFFFFFFFEA }
+    uint64 bar_len = bar_end - bar_phys + 1
+
+    uint64 vm_start = 0; unsafe { *((vma + VMA_VM_START) as uint64) -> vm_start }
+    uint64 vm_end = 0;   unsafe { *((vma + VMA_VM_END) as uint64) -> vm_end }
+    uint64 prot = 0;     unsafe { *((vma + VMA_VM_PAGE_PROT) as uint64) -> prot }
+    uint64 size = vm_end - vm_start
+    if in_bar_off + size > bar_len { return 0xFFFFFFFFFFFFFFEA }  // -EINVAL: out of BAR
+
+    // Force UC- (noncached) for correct MMIO semantics.
+    prot = prot | PAGE_PCD
+    uint64 phys = bar_phys + in_bar_off
+    uint64 pfn = phys >> 12
+    int32 rc = remap_pfn_range(vma, vm_start, pfn, size, prot)
+    if rc != 0 { return 0xFFFFFFFFFFFFFFF2 }              // -EFAULT on map failure
+    _printk("mlrift_pci: BAR mapped (noncached UC-) into userland\n")
+    return 0
+}

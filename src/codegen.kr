@@ -142,6 +142,14 @@ static uint64 static_array_sizes = 0
 // For each struct: [name_tok(4), field_count(4), total_size(4), pad(4)]
 // Followed by field entries: [field_name_tok(4), field_offset(4), field_size(4), pad(4)]
 // Max 64 structs, each with max 16 fields
+// Linux kernel ABI struct sizes, fixed by the kernel headers for the targeted
+// version. These are NOT KernRift's own layout and must never be derived from
+// or unified with struct_entry_size below, which happens to start at the same
+// 272 and GROWS on demand. Conflating them silently corrupts module emission,
+// and tests/helpers/lkm_check.py asserts these exact sizes for that reason.
+static uint64 LINUX_FILE_OPERATIONS_SIZE = 272   // struct file_operations
+static uint64 LINUX_MISCDEVICE_SIZE = 80         // struct miscdevice
+
 static uint64 struct_table = 0
 // Struct table geometry. Entry = 16-byte header + struct_fields_max * 16.
 // Both the struct count and the per-struct field count grow on demand; they
@@ -12756,13 +12764,13 @@ fn emit_elf_lkm(uint64 text_len, uint64 data_len, uint64 arch) {
     uint64 misc_exit_text_off = text_len + 21 + pci_init_extra
     uint64 misc_miscdev_data_off = data_len    // where miscdev lands in .data
     uint64 misc_fops_data_off = data_len + 80  // file_operations follows
-    uint64 misc_name_data_off = data_len + 80 + 272
+    uint64 misc_name_data_off = data_len + LINUX_MISCDEVICE_SIZE + LINUX_FILE_OPERATIONS_SIZE
     if misc_dev_mode != 0 {
         // init = 21 + pci_init_extra, cleanup = 21 + hook_extra + pci_cleanup_extra.
         // A teardown hook prepends a 5-byte `call` to cleanup_module (+5).
         // PCI-driver mode adds 26 to init and 12 to cleanup.
         misc_text_extra = (21 + pci_init_extra) + (21 + hook_extra + pci_cleanup_extra)
-        misc_data_extra = 80 + 272 + misc_dev_name_len + 1
+        misc_data_extra = LINUX_MISCDEVICE_SIZE + LINUX_FILE_OPERATIONS_SIZE + misc_dev_name_len + 1
         // After adding our extras, init_code_off/exit_code_off point at
         // our auto-generated bodies — used later when emitting symbols.
         init_code_off = misc_init_text_off
@@ -13513,7 +13521,7 @@ fn emit_elf_lkm(uint64 text_len, uint64 data_len, uint64 arch) {
         //   off 0x58..272: zero
         // All 272 bytes start as zero; relocations will patch in pointers.
         zi = 0
-        while zi < 272 { emit_byte(0); zi = zi + 1 }
+        while zi < LINUX_FILE_OPERATIONS_SIZE { emit_byte(0); zi = zi + 1 }
 
         // Device name string at offset misc_name_data_off.
         uint64 nsi = 0
@@ -13684,7 +13692,7 @@ fn emit_elf_lkm(uint64 text_len, uint64 data_len, uint64 arch) {
         emit_byte(0)
         emit_u16_le(2)
         emit_u64_le(misc_fops_data_off)
-        emit_u64_le(272)
+        emit_u64_le(LINUX_FILE_OPERATIONS_SIZE)
         // _lkm_name_str: device name string + NUL
         emit_u32_le(lkm_name_str_name_off)
         emit_byte(0x01)

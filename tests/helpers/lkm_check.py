@@ -86,4 +86,18 @@ if mode == 'misc':
         if syms[ext]['shndx'] != 0:
             die("%s must be UNDEFINED (resolved by the kernel at load)" % ext)
 
+if mode == 'pci':
+    # struct pci_driver is 280 bytes. Same reasoning as file_operations above:
+    # these are kernel ABI sizes, pinned so a codegen change cannot drift them.
+    if '_lkm_pci_drv' not in syms:
+        die("PCI module has no _lkm_pci_drv object")
+    if syms['_lkm_pci_drv']['size'] != 280:
+        die("_lkm_pci_drv is %d bytes, kernel struct pci_driver is 280"
+            % syms['_lkm_pci_drv']['size'])
+    for ext in ('__pci_register_driver', 'pci_unregister_driver'):
+        if ext not in syms:
+            die("missing extern %s" % ext)
+        if syms[ext]['shndx'] != 0:
+            die("%s must be UNDEFINED (resolved by the kernel at load)" % ext)
+
 print("OK")

@@ -8027,6 +8027,34 @@ else
     PASS=$((PASS + 1))
     echo "  lkm_checker_discriminates: PASS (plain .o correctly rejected)"
 fi
+
+# Real-world LKM drivers. These are work-in-progress PCI substrate modules for
+# MLRift (BAR mmap, IOMMU map at a caller-chosen IOVA, MSI-X/eventfd, PCI
+# probe), ~800 lines each, importing 31 kernel symbols. They are the strongest
+# evidence the LKM backend handles more than a hello-world: struct pci_driver
+# (280 B), file_operations (272 B) and miscdevice (80 B) are all laid out by
+# hand and pinned here, so a codegen change cannot drift a kernel ABI size
+# without CI saying so.
+#
+# NOT loaded or executed — that needs matching kernel headers and real
+# hardware. This asserts the module is structurally well-formed, nothing more.
+for LKM_DRV in mlrift_pci_warm mlrift_pci_cold; do
+    TOTAL=$((TOTAL + 1))
+    if [ ! -f "$DIR/../examples/$LKM_DRV.kr" ]; then
+        echo "  lkm_driver_$LKM_DRV: SKIP (example not present)"
+        TOTAL=$((TOTAL - 1))
+        continue
+    fi
+    if $KRC --arch=x86_64 --emit=lkm "$DIR/../examples/$LKM_DRV.kr" -o "$LKM_DIR/$LKM_DRV.ko" >/dev/null 2>&1 \
+       && python3 "$DIR/helpers/lkm_check.py" "$LKM_DIR/$LKM_DRV.ko" pci >/dev/null 2>&1; then
+        PASS=$((PASS + 1))
+        echo "  lkm_driver_$LKM_DRV: PASS (pci_driver 280 B, fops 272 B, miscdev 80 B, kernel syms undefined)"
+    else
+        FAIL=$((FAIL + 1))
+        echo "FAIL: lkm_driver_$LKM_DRV ($(python3 "$DIR/helpers/lkm_check.py" "$LKM_DIR/$LKM_DRV.ko" pci 2>&1 | tail -1))"
+    fi
+done
+
 rm -rf "$LKM_DIR"
 
 # --- Summary ---
