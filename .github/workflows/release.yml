@@ -94,8 +94,18 @@ jobs:
           # attribution must travel with every redistributed copy.
           cp ../LICENSE ../NOTICE _bundle_x64/
           cp ../LICENSE ../NOTICE _bundle_arm64/
-          (cd _bundle_x64   && zip -q ../krc-windows-x86_64.zip krc.exe kr.exe LICENSE NOTICE)
-          (cd _bundle_arm64 && zip -q ../krc-windows-arm64.zip  krc.exe kr.exe LICENSE NOTICE)
+          # The standard library MUST travel with the binaries. Without it a
+          # winget install could not resolve `import "std/..."` at all: krc
+          # locates the stdlib relative to its own exe, and the package had no
+          # std/ to find. Every other packaging (deb, AUR, Homebrew, Scoop,
+          # install.sh, install.ps1) already ships it; the zip did not.
+          # Placed at the archive ROOT, beside krc.exe, which matches the
+          # <exe_dir> search path. (install.ps1 uses the other supported
+          # layout, bin\krc.exe with std\ as a sibling, via <exe_dir>..\.)
+          cp -r ../std _bundle_x64/std
+          cp -r ../std _bundle_arm64/std
+          (cd _bundle_x64   && zip -qr ../krc-windows-x86_64.zip krc.exe kr.exe LICENSE NOTICE std)
+          (cd _bundle_arm64 && zip -qr ../krc-windows-arm64.zip  krc.exe kr.exe LICENSE NOTICE std)
           rm -rf _bundle_x64 _bundle_arm64
           # Standalone copies so the bare single-file binary downloads are
           # accompanied by the license and attribution too.
