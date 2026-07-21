@@ -10825,12 +10825,31 @@ static uint64 ir_walk_stack = 0
 // a walk stack per BB per iteration) and the interference-graph builder
 // read these. off has bb_count+1 entries; buf holds every insn index once.
 static uint64 ir_bb_list_off = 0    // uint32[4097]
-static uint64 ir_bb_list_buf = 0    // uint32[65536]
+static uint64 ir_bb_list_buf = 0    // uint32[ir_bb_list_cap]
+static uint64 ir_bb_list_cap = 0
 
+// MUST hold EVERY instruction of the function: liveness and the
+// interference-graph builder both read these lists, so an instruction missing
+// from them is invisible to both. This buffer used to be a fixed uint32[65536]
+// whose fill loop silently stopped at 65536 — and that produced WRONG CODE, not
+// a diagnostic: past the limit the allocator saw the tail's values as dead and
+// handed a live value's register to a later constant (observed on ARM64 as
+// `mov x19, x0` immediately followed by `movz x19, #255`, so `t % 256` returned
+// 255 instead of 254). It was unreachable while the instruction arena was itself
+// capped at 65536; making the arena growable exposed it. Grow in lockstep with
+// the arena, and keep a loud backstop so a future divergence fails visibly
+// instead of miscompiling.
 fn ir_build_bb_lists() {
     if ir_bb_list_off == 0 {
         ir_bb_list_off = alloc(4097 * 4)
-        ir_bb_list_buf = alloc(65536 * 4)
+        ir_bb_list_cap = 65536
+        ir_bb_list_buf = alloc(ir_bb_list_cap * 4)
+    }
+    if ir_insn_count > ir_bb_list_cap {
+        uint64 newcap = ir_bb_list_cap
+        while newcap < ir_insn_count { newcap = newcap * 2 }
+        ir_bb_list_buf = grow_buf(ir_bb_list_buf, ir_bb_list_cap * 4, newcap * 4)
+        ir_bb_list_cap = newcap
     }
     uint64 pos = 0
     uint64 bi = 0
@@ -10839,7 +10858,7 @@ fn ir_build_bb_lists() {
         uint32 pos32 = pos
         unsafe { *(op as uint32) = pos32 }
         uint64 walk = ir_bb_first_insn(bi)
-        while walk != 0xFFFFFFFF && pos < 65536 {
+        while walk != 0xFFFFFFFF && pos < ir_bb_list_cap {
             uint64 bp = ir_bb_list_buf + pos * 4
             uint32 w32 = walk
             unsafe { *(bp as uint32) = w32 }
@@ -10847,6 +10866,10 @@ fn ir_build_bb_lists() {
             walk = ir_insn_next(walk)
         }
         bi = bi + 1
+    }
+    if pos > ir_bb_list_cap {
+        write(2, "error: bb instruction list overflow\n", 36)
+        exit(1)
     }
     uint64 op_end = ir_bb_list_off + ir_bb_count * 4
     uint32 pos_end = pos

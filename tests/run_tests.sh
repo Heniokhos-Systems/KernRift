@@ -7651,28 +7651,48 @@ else
     echo "FAIL: grow_fixup_table_33k (expected exit 232, got $GROW_EC)"
 fi
 
-# 4) ir_insn arena: the same 33000-call program on the DEFAULT IR path
-#    (no --legacy). One call statement lowers to several instructions, so
-#    main() alone exceeds the old fixed cap of 65536 insns. Discriminating
-#    mutation (verified pre-fix): without ir_insn_ensure() the compile dies
-#    with "error: IR instruction overflow" — this is exactly why test 3
-#    above needs --legacy to reach the fixup table at all. Exit 232 proves
-#    every call executed correctly against the regrown arena (a stale
-#    ir_insn_buf/ir_insn_src_tok base after growth would corrupt the code).
+# 4) ir_insn arena + BB-list growth: one function with >65536 IR instructions
+#    on the DEFAULT IR path. 33000 calls == ~66k insns, just past the old
+#    65536 cap. Exit 1 proves every call executed and the tail arithmetic
+#    survived register allocation.
+#
+#    This single case guards TWO defects that only appear past 65536 insns:
+#      (a) the instruction arena used to be a hard cap -> "IR instruction
+#          overflow" and no binary at all;
+#      (b) ir_build_bb_lists() silently truncated its instruction list at
+#          65536. Liveness and the interference graph both read that list, so
+#          the tail's values looked DEAD and the allocator handed a live
+#          value's register to a later constant. On arm64 that emitted
+#          `mov x19, x0` followed immediately by `movz x19, #255`, so the
+#          result was silently wrong; on x86_64 the same truncation showed up
+#          as a segfault once print() was involved. (b) was UNREACHABLE while
+#          (a) existed, which is why fixing the arena alone made things worse.
+#
+#    Must run on every arch the suite covers: x86_64 was CORRECT for the
+#    exit-code form while arm64 was wrong, so a single-arch check would have
+#    missed it — CI's native arm64 job is what caught it.
 TOTAL=$((TOTAL + 1))
-GROW_EC2=1
-if $KRC $KRC_FLAGS "$GROW_DIR/fixup_grow.kr" -o "$GROW_DIR/insn_grow" >/dev/null 2>&1; then
+{ printf 'fn f(uint64 x) -> uint64 {\n    uint64 y = x + 1\n    return y\n}\nfn main() {\n    uint64 t = 0\n'
+  for gi in $(seq 1 33000); do printf '    t = f(t)\n'; done
+  printf '    exit(t - 33000 + 1)\n}\n'
+} > "$GROW_DIR/insn_grow.kr"
+GROW_EC2=0
+if $KRC $KRC_FLAGS "$GROW_DIR/insn_grow.kr" -o "$GROW_DIR/insn_grow" >/dev/null 2>&1; then
     chmod +x "$GROW_DIR/insn_grow"
     "$GROW_DIR/insn_grow" >/dev/null 2>&1
     GROW_EC2=$?
+else
+    GROW_EC2="compile-failed"
 fi
-if [ "$GROW_EC2" = 232 ]; then
+if [ "$GROW_EC2" = 1 ]; then
     PASS=$((PASS + 1))
-    echo "  grow_ir_insn_33k: PASS (33000 calls, default IR path, old cap 65536)"
+    echo "  grow_ir_insn_66k: PASS (33000 calls, ~66k insns, arena + bb-list growth)"
 else
     FAIL=$((FAIL + 1))
-    echo "FAIL: grow_ir_insn_33k (expected exit 232, got $GROW_EC2)"
+    echo "FAIL: grow_ir_insn_66k (expected exit 1, got $GROW_EC2)"
 fi
+
+
 rm -rf "$GROW_DIR"
 
 # --- Import path length tests ---
