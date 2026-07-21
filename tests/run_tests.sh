@@ -5644,6 +5644,88 @@ else
     echo "  xtensa_capstone_boot: SKIP (qemu-system-xtensa not installed)"
 fi
 
+# --- Xtensa LX6 large-frame boot test (ADDMI large-frame support) ---
+# bigframe.kr exercises every path the old 1020/2047-byte frame guards used
+# to reject: a just-over-1KB frame (a0 slot past s32i's 1020 -> ADDMI store
+# path), 12 KB of stack arrays (frame constant + STACK_ADDR bases past
+# MOVI's 2047 -> movi+addmi), an 80-deep all-live local chain (spill slots
+# past 1020 in BOTH directions), and an 8-arg callee whose overflow-param
+# reads land past 1020. Full-output equality of six precomputed sums — a
+# single wrong SP-relative address changes a digit (mutation-verified: a
+# residue-split bug in the store helper kills every line after the first).
+# The old compiler loud-fails this file; under1k (line 1) doubles as the
+# just-under-the-cap runtime check.
+echo ""
+echo "--- xtensa LX6 large-frame boot test ---"
+if command -v qemu-system-xtensa >/dev/null 2>&1; then
+    TOTAL=$((TOTAL + 1))
+    XT_BF_ELF="/tmp/krc_xt_bigframe_$$.elf"
+    XT_BF_OK=1
+    if ! $KRC --arch=xtensa --freestanding "$DIR/../examples/xtensa/bigframe.kr" -o "$XT_BF_ELF" >/dev/null 2>&1; then
+        echo "FAIL: xtensa_bigframe_boot (compilation failed)"
+        XT_BF_OK=0
+    fi
+    if [ "$XT_BF_OK" = 1 ]; then
+        XT_BF_EXP=$(printf '61100\n5559680\n1499500\n928296122\n45353\n79800')
+        XT_BF_OUT=$(timeout 8 qemu-system-xtensa -M lx60 -nographic -kernel "$XT_BF_ELF" 2>/dev/null | tr -d '\r')
+        if [ "$XT_BF_OUT" = "$XT_BF_EXP" ]; then
+            PASS=$((PASS + 1))
+            echo "  xtensa_bigframe_boot: PASS (1K/12K frames + deep spills + overflow params all correct)"
+        else
+            echo "FAIL: xtensa_bigframe_boot (output mismatch)"
+            echo "    expected: $(echo "$XT_BF_EXP" | tr '\n' ' ')"
+            echo "    got:      $(echo "$XT_BF_OUT" | tr '\n' ' ')"
+            FAIL=$((FAIL + 1))
+        fi
+    else
+        FAIL=$((FAIL + 1))
+    fi
+    rm -f "$XT_BF_ELF"
+else
+    echo "  xtensa_bigframe_boot: SKIP (qemu-system-xtensa not installed)"
+fi
+
+# --- Xtensa frame-cap loud guard (large frames stay loud past ADDMI range) ---
+# The large-frame work caps total_frame at 32752 bytes (the largest
+# 16-aligned frame whose a0 slot and ADDMI high part both encode). A frame
+# past the cap must still be a LOUD compile error — never a silent
+# truncation. Nine 4 KB stack arrays = ~36 KB of frame.
+echo ""
+echo "--- xtensa frame-cap guard test ---"
+TOTAL=$((TOTAL + 1))
+XT_CAP_KR="/tmp/krc_xt_framecap_$$.kr"
+XT_CAP_BIN="/tmp/krc_xt_framecap_$$.bin"
+cat > "$XT_CAP_KR" <<'XTCAPEOF'
+fn huge() -> u32 {
+    u32[1024] a1
+    u32[1024] a2
+    u32[1024] a3
+    u32[1024] a4
+    u32[1024] a5
+    u32[1024] a6
+    u32[1024] a7
+    u32[1024] a8
+    u32[1024] a9
+    a1[0] = 1
+    a9[1023] = 2
+    return a1[0] + a9[1023]
+}
+fn main() -> u32 {
+    return huge()
+}
+XTCAPEOF
+XT_CAP_ERR=$($KRC --arch=xtensa --freestanding "$XT_CAP_KR" -o "$XT_CAP_BIN" 2>&1 >/dev/null)
+XT_CAP_RC=$?
+if [ $XT_CAP_RC -ne 0 ] && echo "$XT_CAP_ERR" | grep -q "frame exceeds 32752"; then
+    PASS=$((PASS + 1))
+    echo "  xtensa_framecap_guard: PASS (36 KB frame rejected loudly)"
+else
+    echo "FAIL: xtensa_framecap_guard (rc=$XT_CAP_RC, err='$XT_CAP_ERR')"
+    FAIL=$((FAIL + 1))
+fi
+rm -f "$XT_CAP_KR" "$XT_CAP_BIN"
+
+
 # --- RISC-V RV32 IR_STR_CONST via pcrel auipc+addi (feature-gap Task 1) ---
 # Compiles examples/riscv-featuregap/t1_strconst.kr, which takes the address
 # of a string literal ("hi\n") through IR_STR_CONST and writes it to the UART.

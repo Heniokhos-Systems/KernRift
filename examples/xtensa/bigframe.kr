@@ -1,0 +1,346 @@
+// Xtensa LX6 large-frame boot test (large-frame task) — exercises every path
+// the old 1020/2047-byte guards used to reject, with hand-verifiable sums so
+// a single wrong SP-relative address changes a printed digit:
+//
+//   under1k   frame ~ 1 KB (just under the old cap)   -> 61100
+//   over1k    u32[256] = 1024 B array (just over)     -> 5559680
+//   big12k    3x u32[1000] = 12 KB of stack arrays    -> 1499500
+//   spill_big 80-deep all-live local chain (spill
+//             offsets past 1020) + two arrays whose
+//             STACK_ADDR bases exceed MOVI's 2047     -> 928296122
+//   deep8     8 params (2 overflow) + a large callee
+//             frame: overflow-param reads at
+//             [a1 + frame + oi*4] > 1020              -> 45353
+//   main      u32[400] in the ENTRY fn: large-frame
+//             prologue after the .bss preamble        -> 79800
+//
+// The old compiler loud-fails this whole file ("return-slot offset exceeds
+// l32i/s32i range"); the boot test is a full-output equality check.
+//
+// Expected output under `qemu-system-xtensa -M lx60`:
+//   61100
+//   5559680
+//   1499500
+//   928296122
+//   45353
+//   79800
+
+device Uart at 0xfd050020 {
+    thr at 0x00 : u32
+    lsr at 0x14 : u8
+}
+
+fn putc(u8 c) {
+    while (Uart.lsr & 0x20) == 0 { }
+    Uart.thr = c
+}
+
+fn nl() { putc(10) }
+
+fn print_uint(u32 n) {
+    if n >= 10 {
+        print_uint(n / 10)
+    }
+    putc(48 + (n % 10))
+}
+
+// Just under the old 1024-byte cap: the small-frame path at its edge.
+fn under1k() -> u32 {
+    u32[200] a
+    u32 i = 0
+    while i < 200 {
+        a[i] = i * 3 + 7
+        i = i + 1
+    }
+    u32 s = 0
+    i = 0
+    while i < 200 {
+        s = s + a[i]
+        i = i + 1
+    }
+    return s
+}
+
+// Just over: 1024 bytes of array pushes total_frame past the old cap, so the
+// a0 save/restore slot sits above 1020 — the first ADDMI consumer.
+fn over1k() -> u32 {
+    u32[256] a
+    u32 i = 0
+    while i < 256 {
+        a[i] = i * i
+        i = i + 1
+    }
+    u32 s = 0
+    i = 0
+    while i < 256 {
+        s = s + a[i]
+        i = i + 1
+    }
+    return s
+}
+
+// Far over: 12 KB of stack arrays. Cross-array mixing (c[i] = a[i] + b[i])
+// means a wrong STACK_ADDR base for ANY of the three corrupts the sum.
+fn big12k() -> u32 {
+    u32[1000] a
+    u32[1000] b
+    u32[1000] c
+    u32 i = 0
+    while i < 1000 {
+        a[i] = i
+        b[i] = i * 2 + 1
+        i = i + 1
+    }
+    i = 0
+    while i < 1000 {
+        c[i] = a[i] + b[i]
+        i = i + 1
+    }
+    u32 s = 0
+    i = 0
+    while i < 1000 {
+        s = s + c[i]
+        i = i + 1
+    }
+    return s
+}
+
+// Heavy spills AND large stack arrays in one function: 80 locals all live
+// until the end (spill slots run past offset 1020 -> ADDMI spill path) plus
+// two arrays whose STACK_ADDR base offsets exceed MOVI's 2047 range
+// (-> xt_movi_frame's movi+addmi path). Every value feeds acc, so one bad
+// spill slot or array base changes the output.
+fn spill_big(u32 x0) -> u32 {
+    u32 v1 = x0 + 1
+    u32 v2 = v1 * 3 + 2
+    u32 v3 = v2 * 3 + 3
+    u32 v4 = v3 * 3 + 4
+    u32 v5 = v4 * 3 + 5
+    u32 v6 = v5 * 3 + 6
+    u32 v7 = v6 * 3 + 7
+    u32 v8 = v7 * 3 + 8
+    u32 v9 = v8 * 3 + 9
+    u32 v10 = v9 * 3 + 10
+    u32 v11 = v10 * 3 + 11
+    u32 v12 = v11 * 3 + 12
+    u32 v13 = v12 * 3 + 13
+    u32 v14 = v13 * 3 + 14
+    u32 v15 = v14 * 3 + 15
+    u32 v16 = v15 * 3 + 16
+    u32 v17 = v16 * 3 + 17
+    u32 v18 = v17 * 3 + 18
+    u32 v19 = v18 * 3 + 19
+    u32 v20 = v19 * 3 + 20
+    u32 v21 = v20 * 3 + 21
+    u32 v22 = v21 * 3 + 22
+    u32 v23 = v22 * 3 + 23
+    u32 v24 = v23 * 3 + 24
+    u32 v25 = v24 * 3 + 25
+    u32 v26 = v25 * 3 + 26
+    u32 v27 = v26 * 3 + 27
+    u32 v28 = v27 * 3 + 28
+    u32 v29 = v28 * 3 + 29
+    u32 v30 = v29 * 3 + 30
+    u32 v31 = v30 * 3 + 31
+    u32 v32 = v31 * 3 + 32
+    u32 v33 = v32 * 3 + 33
+    u32 v34 = v33 * 3 + 34
+    u32 v35 = v34 * 3 + 35
+    u32 v36 = v35 * 3 + 36
+    u32 v37 = v36 * 3 + 37
+    u32 v38 = v37 * 3 + 38
+    u32 v39 = v38 * 3 + 39
+    u32 v40 = v39 * 3 + 40
+    u32 v41 = v40 * 3 + 41
+    u32 v42 = v41 * 3 + 42
+    u32 v43 = v42 * 3 + 43
+    u32 v44 = v43 * 3 + 44
+    u32 v45 = v44 * 3 + 45
+    u32 v46 = v45 * 3 + 46
+    u32 v47 = v46 * 3 + 47
+    u32 v48 = v47 * 3 + 48
+    u32 v49 = v48 * 3 + 49
+    u32 v50 = v49 * 3 + 50
+    u32 v51 = v50 * 3 + 51
+    u32 v52 = v51 * 3 + 52
+    u32 v53 = v52 * 3 + 53
+    u32 v54 = v53 * 3 + 54
+    u32 v55 = v54 * 3 + 55
+    u32 v56 = v55 * 3 + 56
+    u32 v57 = v56 * 3 + 57
+    u32 v58 = v57 * 3 + 58
+    u32 v59 = v58 * 3 + 59
+    u32 v60 = v59 * 3 + 60
+    u32 v61 = v60 * 3 + 61
+    u32 v62 = v61 * 3 + 62
+    u32 v63 = v62 * 3 + 63
+    u32 v64 = v63 * 3 + 64
+    u32 v65 = v64 * 3 + 65
+    u32 v66 = v65 * 3 + 66
+    u32 v67 = v66 * 3 + 67
+    u32 v68 = v67 * 3 + 68
+    u32 v69 = v68 * 3 + 69
+    u32 v70 = v69 * 3 + 70
+    u32 v71 = v70 * 3 + 71
+    u32 v72 = v71 * 3 + 72
+    u32 v73 = v72 * 3 + 73
+    u32 v74 = v73 * 3 + 74
+    u32 v75 = v74 * 3 + 75
+    u32 v76 = v75 * 3 + 76
+    u32 v77 = v76 * 3 + 77
+    u32 v78 = v77 * 3 + 78
+    u32 v79 = v78 * 3 + 79
+    u32 v80 = v79 * 3 + 80
+    u32 acc = v1
+    acc = acc + v2
+    acc = acc + v3
+    acc = acc + v4
+    acc = acc + v5
+    acc = acc + v6
+    acc = acc + v7
+    acc = acc + v8
+    acc = acc + v9
+    acc = acc + v10
+    acc = acc + v11
+    acc = acc + v12
+    acc = acc + v13
+    acc = acc + v14
+    acc = acc + v15
+    acc = acc + v16
+    acc = acc + v17
+    acc = acc + v18
+    acc = acc + v19
+    acc = acc + v20
+    acc = acc + v21
+    acc = acc + v22
+    acc = acc + v23
+    acc = acc + v24
+    acc = acc + v25
+    acc = acc + v26
+    acc = acc + v27
+    acc = acc + v28
+    acc = acc + v29
+    acc = acc + v30
+    acc = acc + v31
+    acc = acc + v32
+    acc = acc + v33
+    acc = acc + v34
+    acc = acc + v35
+    acc = acc + v36
+    acc = acc + v37
+    acc = acc + v38
+    acc = acc + v39
+    acc = acc + v40
+    acc = acc + v41
+    acc = acc + v42
+    acc = acc + v43
+    acc = acc + v44
+    acc = acc + v45
+    acc = acc + v46
+    acc = acc + v47
+    acc = acc + v48
+    acc = acc + v49
+    acc = acc + v50
+    acc = acc + v51
+    acc = acc + v52
+    acc = acc + v53
+    acc = acc + v54
+    acc = acc + v55
+    acc = acc + v56
+    acc = acc + v57
+    acc = acc + v58
+    acc = acc + v59
+    acc = acc + v60
+    acc = acc + v61
+    acc = acc + v62
+    acc = acc + v63
+    acc = acc + v64
+    acc = acc + v65
+    acc = acc + v66
+    acc = acc + v67
+    acc = acc + v68
+    acc = acc + v69
+    acc = acc + v70
+    acc = acc + v71
+    acc = acc + v72
+    acc = acc + v73
+    acc = acc + v74
+    acc = acc + v75
+    acc = acc + v76
+    acc = acc + v77
+    acc = acc + v78
+    acc = acc + v79
+    acc = acc + v80
+    u32[600] arr1
+    u32[500] arr2
+    u32 j = 0
+    while j < 600 {
+        arr1[j] = j * 5 + 3
+        j = j + 1
+    }
+    j = 0
+    while j < 500 {
+        arr2[j] = j * 7 + 1
+        j = j + 1
+    }
+    u32 s1 = 0
+    j = 0
+    while j < 600 {
+        s1 = s1 + arr1[j]
+        j = j + 1
+    }
+    u32 s2 = 0
+    j = 0
+    while j < 500 {
+        s2 = s2 + arr2[j]
+        j = j + 1
+    }
+    return acc + s1 + s2
+}
+
+// 8 params: the 7th/8th overflow to the caller's frame slots, and THIS
+// callee's 1.2 KB frame pushes the overflow-param read offset
+// [a1 + ir_frame_size + oi*4] past l32i's 1020 -> xt_l32i_sp path.
+fn deep8(u32 a, u32 b, u32 c, u32 d, u32 e, u32 f, u32 g, u32 h) -> u32 {
+    u32[300] arr
+    u32 i = 0
+    while i < 300 {
+        arr[i] = i + a
+        i = i + 1
+    }
+    u32 s = 0
+    i = 0
+    while i < 300 {
+        s = s + arr[i]
+        i = i + 1
+    }
+    return s + b * 2 + c * 3 + d * 4 + e * 5 + f * 6 + g * 7 + h * 8
+}
+
+fn main() {
+    print_uint(under1k())    nl()
+    print_uint(over1k())     nl()
+    print_uint(big12k())     nl()
+    print_uint(spill_big(5)) nl()
+    print_uint(deep8(1, 2, 3, 4, 5, 6, 7, 8)) nl()
+
+    // The entry function itself gets a >1 KB frame: its prologue runs AFTER
+    // the .bss-zeroing preamble (which uses a10 as the zero source), so this
+    // also proves the preamble's a10 use and the prologue's a10 address
+    // scratch never collide.
+    u32[400] m
+    u32 i = 0
+    while i < 400 {
+        m[i] = i
+        i = i + 1
+    }
+    u32 s = 0
+    i = 0
+    while i < 400 {
+        s = s + m[i]
+        i = i + 1
+    }
+    print_uint(s)            nl()
+
+    loop { }
+}
