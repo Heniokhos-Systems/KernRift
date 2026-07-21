@@ -58,6 +58,13 @@ jobs:
 
       - name: Test suite
         run: |
+          # The suite asserts the kr runner's reported version against the
+          # changelog, and FAILS rather than skips when build/kr-bin is absent
+          # (a check that quietly never runs is indistinguishable from one that
+          # passes -- which is how v2.8.28 shipped binaries labelled 2.8.27).
+          # This job invokes run_tests.sh directly rather than `make test`, so
+          # the Makefile dependency does not apply here; build it explicitly.
+          make build/kr-bin
           echo '#!/bin/bash' > /tmp/krc-test
           echo 'exec ./build/krc2 --arch=x86_64 "$@"' >> /tmp/krc-test
           chmod +x /tmp/krc-test
@@ -418,6 +425,8 @@ jobs:
           echo
 
           echo "=== test suite ==="
+          # Needed by the runner-version assertion; see the x86_64 job above.
+          make build/kr-bin || true
           echo '#!/bin/bash' > /tmp/krc-test
           echo 'exec ./build/krc3 --arch=arm64 "$@"' >> /tmp/krc-test
           chmod +x /tmp/krc-test
