@@ -727,6 +727,45 @@ else
 fi
 rm -f "$DIR/../test_tmp_uvu_$$.kr" /tmp/krc_uvu_$$
 
+# --- Store-statement RHS counts as a use (analysis walker) ---
+# The stmt walker used to skip Index-store (arr[i] = v) and FieldAccess-store
+# (obj.f = v) statements entirely, so a variable whose only consumer was such
+# a store was falsely reported unused. Each case below must compile with NO
+# unused-variable warning AND produce the right exit code.
+run_store_use_test() {
+    local name="$1"
+    local src="$2"
+    local expected="$3"
+    TOTAL=$((TOTAL + 1))
+    printf '%s\n' "$src" > "$DIR/../test_tmp_su_$$.kr"
+    local su_out
+    su_out=$($KRC $KRC_FLAGS "$DIR/../test_tmp_su_$$.kr" -o /tmp/krc_su_$$ 2>&1)
+    if echo "$su_out" | grep -q "unused variable"; then
+        echo "FAIL: $name (false unused-variable warning)"; FAIL=$((FAIL + 1))
+    else
+        local got=0
+        /tmp/krc_su_$$ > /dev/null 2>&1 && got=0 || got=$?
+        if [ "$got" = "$expected" ]; then
+            PASS=$((PASS + 1))
+        else
+            echo "FAIL: $name (expected exit $expected, got $got)"; FAIL=$((FAIL + 1))
+        fi
+    fi
+    rm -f "$DIR/../test_tmp_su_$$.kr" /tmp/krc_su_$$
+}
+run_store_use_test "idx_store_rhs_use" \
+    'fn main() { u64[4] a; u64 v = 7; a[0] = v; exit(a[0]) }' 7
+run_store_use_test "idx_store_index_use" \
+    'fn main() { u64[4] a; u64 i = 1; a[i] = 3; exit(a[1]) }' 3
+run_store_use_test "idx_store_nested_rhs_use" \
+    'fn add2(u64 x, u64 y) -> u64 { return x + y } fn main() { u64[4] a; u64 s0 = 2; u64 s1 = 3; a[0] = (s0 + s1) & 255; u64 c = 12; a[1] = add2(c, 2); exit(a[0] + a[1]) }' 19
+run_store_use_test "idx_store_compound_rhs_use" \
+    'fn main() { u64[4] a; a[0] = 1; u64 v = 6; a[0] += v; exit(a[0]) }' 7
+run_store_use_test "field_store_rhs_use" \
+    'struct SuP { u64 x  u64 y } fn main() { SuP p; u64 v = 9; p.x = v; exit(p.x) }' 9
+run_store_use_test "idx_field_store_rhs_use" \
+    'struct SuQ { u64 x  u64 y } fn main() { SuQ[4] q; u64 v = 5; q[0].x = v; exit(q[0].x) }' 5
+
 # --- Uninitialized-read warning ---
 TOTAL=$((TOTAL + 1))
 printf 'fn main() { u64 stale; exit(stale) }\n' > "$DIR/../test_tmp_ur_$$.kr"
