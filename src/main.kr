@@ -116,6 +116,7 @@ static uint64 srcmap_count = 0
 static uint64 srcmap_cap = 0
 
 fn import_init() {
+    import_failed = 0
     import_buf_cap = 4194304
     import_buf = alloc(import_buf_cap)
     import_buf_len = 0
@@ -437,21 +438,31 @@ fn import_init_search_paths() {
                 unsafe { *(cp as uint8) -> ch }
                 if ch == 92 { dir_len = dir_len + 1; break }
             }
-            // Try <exe_dir>..\std\ (install.ps1 puts std next to bin)
-            uint64 up_std = alloc(dir_len + 8)
+            // A search path is the PARENT of std\, not std\ itself.
+            // import_resolve_stdlib concatenates base + the import path
+            // verbatim, and imports are written `import "std/io.kr"` — the
+            // "std" component is already in the import path. Registering
+            // <exe_dir>..\std\ here produced ...\std\std/io.kr, which never
+            // opens, so stdlib resolution failed on Windows for every import.
+            // Verified on Windows 10.0.26200:
+            //   C:\krtest\bin\..\std\std/io.kr  -> fails
+            //   C:\krtest\bin\..\std/io.kr      -> opens
+            // The Linux/macOS branch below already gets this right: it
+            // registers .../kernrift/ while install.sh puts the modules in
+            // .../kernrift/std, so base + "std/io.kr" composes correctly.
+            // Try <exe_dir>..\ (install.ps1 puts std next to bin)
+            uint64 up_std = alloc(dir_len + 4)
             memcpy(up_std, exe_buf, dir_len)
-            uint64 suffix = "..\\std\\"
-            memcpy(up_std + dir_len, suffix, 7)
+            uint64 suffix = "..\\"
+            memcpy(up_std + dir_len, suffix, 3)
             uint8 z = 0
-            uint64 tp = up_std + dir_len + 7
+            uint64 tp = up_std + dir_len + 3
             unsafe { *(tp as uint8) = z }
             import_add_search_path(up_std)
-            // Also try <exe_dir>std\ (alternative layout)
-            uint64 dir_std = alloc(dir_len + 5)
+            // Also try <exe_dir> itself (std\ sitting beside the exe)
+            uint64 dir_std = alloc(dir_len + 1)
             memcpy(dir_std, exe_buf, dir_len)
-            uint64 suffix2 = "std\\"
-            memcpy(dir_std + dir_len, suffix2, 4)
-            uint64 tp2 = dir_std + dir_len + 4
+            uint64 tp2 = dir_std + dir_len
             unsafe { *(tp2 as uint8) = z }
             import_add_search_path(dir_std)
         }
@@ -537,8 +548,12 @@ fn import_process(uint64 file_path) {
         write(2, msg, 27)
         write(2, file_path, str_len(file_path))
         write(2, "\n", 1)
-        // Don't exit — let compilation continue with what we have
-        // This allows the parser to report the actual error
+        // Don't exit here — let compilation continue so the parser can report
+        // the downstream errors this missing module causes. But record the
+        // failure: codegen_write_output refuses to emit a binary if this is
+        // set. Previously neither happened, so an import failure that did not
+        // break the parse produced a binary and exit 0.
+        import_failed = 1
         return
     }
     uint64 size = file_size(fd)

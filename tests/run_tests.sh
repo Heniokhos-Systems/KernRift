@@ -7693,6 +7693,38 @@ else
 fi
 rm -f /tmp/krc_shadow_$$.kr /tmp/krc_shadow_$$
 
+# --- import failure must abort, not emit a binary ---
+# A failed import used to print "cannot open import" and then CONTINUE, so a
+# file whose missing module happened not to break the parse (e.g. it only used
+# built-ins) compiled "successfully", exited 0, and produced a wrong binary.
+# Discriminating mutation: drop the `import_failed` check in
+# codegen_write_output -> krc exits 0 and the binary appears.
+echo "--- import failure aborts ---"
+TOTAL=$((TOTAL + 1))
+IMP_DIR=$(mktemp -d /tmp/krc_imp_XXXXXX)
+# uses ONLY built-ins, so the missing import does not break the parse
+printf 'import "no/such/module.kr"\nfn main() {\n    print_str("x")\n    exit(0)\n}\n' > "$IMP_DIR/badimp.kr"
+$KRC $KRC_FLAGS "$IMP_DIR/badimp.kr" -o "$IMP_DIR/badimp" >/dev/null 2>&1
+IMP_EC=$?
+if [ "$IMP_EC" -ne 0 ] && [ ! -f "$IMP_DIR/badimp" ]; then
+    PASS=$((PASS + 1))
+    echo "  import_failure_aborts: PASS (exit $IMP_EC, no binary emitted)"
+else
+    FAIL=$((FAIL + 1))
+    echo "FAIL: import_failure_aborts (exit=$IMP_EC, binary present=$([ -f "$IMP_DIR/badimp" ] && echo yes || echo no))"
+fi
+# control: a VALID stdlib import must still resolve and run
+TOTAL=$((TOTAL + 1))
+if $KRC $KRC_FLAGS examples/sha256_test.kr -o "$IMP_DIR/shaok" >/dev/null 2>&1 \
+   && "$IMP_DIR/shaok" 2>/dev/null | head -1 | grep -q "^e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855$"; then
+    PASS=$((PASS + 1))
+    echo "  import_success_control: PASS (std import resolves, FIPS vector correct)"
+else
+    FAIL=$((FAIL + 1))
+    echo "FAIL: import_success_control (valid std import must still work)"
+fi
+rm -rf "$IMP_DIR"
+
 # --- Summary ---
 echo ""
 echo "=== Results: $PASS/$TOTAL passed, $FAIL failed ==="
