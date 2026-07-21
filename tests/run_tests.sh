@@ -3023,25 +3023,42 @@ run_test "const_neg"    'const i64 X = -42; fn main() { exit(0 - X) }' 42
 echo ""
 echo "--- import after comment (regression) ---"
 TOTAL=$((TOTAL + 1))
-cat > /tmp/imp_test_$$.kr <<'KREOF'
-// leading comment should not break imports
-import "std/io.kr"
-fn main() { println("imp_ok"); exit(0) }
+# Hermetic on purpose. This used to write the source to /tmp and
+# `import "std/io.kr"`, which cannot resolve relatively from /tmp and fell back
+# to the SYSTEM search paths (/usr/local/share/kernrift/ etc). Those exist on a
+# developer box with KernRift installed but not in CI — so in CI the import
+# silently failed. The test still passed there because `println` is a BUILT-IN,
+# not a symbol from io.kr: the program compiled and printed the expected text
+# with the import having done nothing at all. It only surfaced once a failed
+# import began aborting the compile instead of being ignored.
+# Now it imports a module it creates itself and calls a function that exists
+# ONLY in that module, so the assertion cannot be satisfied unless the import
+# genuinely resolved.
+IMPC_DIR=$(mktemp -d /tmp/krc_impc_XXXXXX)
+cat > "$IMPC_DIR/impmod.kr" <<'KREOF'
+fn imp_after_comment_helper() -> uint64 { return 7 }
 KREOF
-if $KRC $KRC_FLAGS /tmp/imp_test_$$.kr -o /tmp/imp_test_bin_$$ > /dev/null 2>&1; then
-    got=$(/tmp/imp_test_bin_$$ 2>/dev/null)
-    if [ "$got" = "imp_ok" ]; then
+cat > "$IMPC_DIR/impmain.kr" <<'KREOF'
+// leading comment should not break imports
+import "impmod.kr"
+fn main() { exit(imp_after_comment_helper() + 35) }
+KREOF
+if $KRC $KRC_FLAGS "$IMPC_DIR/impmain.kr" -o "$IMPC_DIR/impbin" > /dev/null 2>&1; then
+    chmod +x "$IMPC_DIR/impbin"
+    "$IMPC_DIR/impbin" > /dev/null 2>&1
+    imp_ec=$?
+    if [ "$imp_ec" -eq 42 ]; then
         PASS=$((PASS + 1))
-        echo "  import_after_comment: PASS"
+        echo "  import_after_comment: PASS (imported symbol resolved, exit 42)"
     else
         FAIL=$((FAIL + 1))
-        echo "  import_after_comment: FAIL (got: $got)"
+        echo "  import_after_comment: FAIL (exit $imp_ec, expected 42)"
     fi
 else
     FAIL=$((FAIL + 1))
     echo "  import_after_comment: FAIL (compile)"
 fi
-rm -f /tmp/imp_test_$$.kr /tmp/imp_test_bin_$$
+rm -rf "$IMPC_DIR"
 
 echo ""
 echo "--- char literals ---"
