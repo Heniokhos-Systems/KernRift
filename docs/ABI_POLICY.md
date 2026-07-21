@@ -169,5 +169,5 @@ $ kernriftc --emit=asm file.kr -o file.s
 $ # compare the generated prologue / epilogue against the ABI spec
 ```
 
-File at https://github.com/Pantelis23/KernRift with both the `.kr` source,
-the `.s` output, and the target triple.
+File at https://github.com/Pantelis23/KernRift with the `.kr` source, the `.s`
+output, and the `--arch=` / `--target=` flags you used.

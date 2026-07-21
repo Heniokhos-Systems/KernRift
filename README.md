@@ -4,6 +4,14 @@
 
 A self-hosted systems language compiler for kernel-first development. KernRift compiles itself — no Rust, no C, no LLVM, no external toolchain. It produces native executables for x86_64 and AArch64 on Linux, Windows, macOS, and Android, with BCJ+LZ-Rift-compressed fat binaries as the default output (8 platform slices per `.krbo`). The `kr` runner executes `.krbo` fat binaries on any supported platform. The compiler self-hosts on all 8 targets and is verified via CI on every push. The compiler ships with an **SSA-based IR backend** with liveness analysis, graph-coloring register allocation, an AST-level function inliner, Briggs/George copy coalescing, LICM, constant folding, DCE, and CSE — producing native machine code for all targets directly from the IR, no assembler in the loop.
 
+Beyond the eight hosted platform targets, the same IR feeds three **embedded
+backends** — 32-bit RISC-V (`--arch=riscv32`), Xtensa LX6 (`--arch=xtensa`),
+and the **ESP32** machine target (`--target=esp32`), which emits a direct-boot
+image the mask ROM loads straight from flash. These backends are a deliberate
+subset of the language, not a second full implementation: see
+[Embedded targets](#embedded-targets-riscv32--xtensa--esp32) for exactly what
+is and is not supported.
+
 **v2.8.26 highlights** (full details in [CHANGELOG.md](CHANGELOG.md)):
 
 - **Language ergonomics.** Ternary `cond ? then : else`, `let` type inference (`let n = a + b`), `match` as an expression with bare-statement arms, `continue` inside `for`, `loop { }`, inclusive ranges `0..=n`, and `defer { }`.
@@ -20,6 +28,8 @@ A self-hosted systems language compiler for kernel-first development. KernRift c
 - **Self-hosting** — the compiler compiles itself to a fixed point. No Rust, no C, no LLVM in the build.
 - **SSA IR backend** — target-independent intermediate representation with liveness analysis, graph-coloring register allocation with Briggs/George copy coalescing, an AST-level function inliner, LICM, constant folding, DCE, and CSE. Emits x86_64 and AArch64 machine code directly — no assembler, no linker in the loop. `--legacy` falls back to the original direct codegen.
 - **Cross-platform** — Linux, Windows, macOS, Android on x86_64 and ARM64 from a single source tree.
+- **Embedded backends** — 32-bit RISC-V (RV32IMC) and Xtensa LX6 from the same IR, plus an ESP32 direct-boot image writer. Reduced feature set (no floats, no 64-bit integers); see [Embedded targets](#embedded-targets-riscv32--xtensa--esp32).
+- **Linux kernel modules** — `--emit=lkm` produces a loadable `.ko` relocatable object. See [docs/LKM.md](docs/LKM.md).
 - **Floating-point** — `f32` and `f64` types with full arithmetic, comparisons, conversions, and a math library (`sin`, `cos`, `exp`, `log`, `pow`, `sqrt`, `fmt_f64`). `f16` for storage. Hardware `sqrt`, software trig/exp/log.
 - **Multi-return** — `return (a, b)` and `(u64 x, u64 y) = call()` for 2-tuple destructuring.
 - **Inline asm I/O** — `asm { "rdtsc" } out(rax -> lo, rdx -> hi)` with in/out/clobbers clauses.
@@ -51,6 +61,17 @@ kr hello.krbo
 krc --arch=x86_64 hello.kr -o hello
 krc --arch=arm64 hello.kr -o hello
 
+# Embedded: 32-bit RISC-V, hosted (Linux ELF32) and freestanding (flat blob)
+krc --arch=riscv32 hello.kr -o hello-rv32
+krc --arch=riscv32 --freestanding kernel.kr -o kernel.bin
+
+# Embedded: Xtensa LX6 (freestanding only) and a bootable ESP32 flash image
+krc --arch=xtensa --freestanding blink.kr -o blink.bin
+krc --arch=xtensa --freestanding --target=esp32 hello.kr -o hello.bin
+
+# Linux loadable kernel module (.ko)
+krc --emit=lkm driver.kr -o driver.ko
+
 # Multi-file projects — imports resolved automatically
 krc main.kr -o program    # main.kr can import "utils.kr", etc.
 
@@ -63,7 +84,7 @@ krc lc program.kr
 
 ### Self-compilation (v2.8.26, ~254K tokens, ~160K AST nodes, ~2.0 MB source)
 
-All 8 targets self-compile. CI verifies bootstrap fixed point (krc3 == krc4) and runs **587 tests** on every push. Numbers below are on an AMD Ryzen 9 7900X — see [`benchmarks/BENCHMARKS.md`](benchmarks/BENCHMARKS.md) for the complete run including gcc / rustc comparisons.
+All 8 targets self-compile. CI verifies bootstrap fixed point (krc3 == krc4) and runs **686 tests** on every push. Numbers below are on an AMD Ryzen 9 7900X — see [`benchmarks/BENCHMARKS.md`](benchmarks/BENCHMARKS.md) for the complete run including gcc / rustc comparisons.
 
 | Target | Legacy codegen | IR codegen (default) | IR vs legacy |
 |--------|---------------:|---------------------:|-------------:|
@@ -221,7 +242,7 @@ Compiler intrinsics — no imports needed.
 
 ## Standard Library
 
-18 modules (~4 100 lines) in `std/`:
+19 modules (~4 700 lines) in `std/`:
 
 | Module | Functions |
 |--------|-----------|
@@ -243,6 +264,7 @@ Compiler intrinsics — no imports needed.
 | `std/log.kr` | `log_set_level`, `log_debug`, `log_info`, `log_warn`, `log_error`, `log_info_kv`, `log_error_int` |
 | `std/math_float.kr` | `sqrt`, `sin`, `cos`, `tan`, `exp`, `log`, `pow`, `floor`, `ceil`, `abs_f`, `fmt_f64`, `fmt_f32`, `f64_pi`, `f64_e` |
 | `std/net.kr` | `net_socket`, `net_bind`, `net_listen`, `net_accept`, `net_connect`, `net_send`, `net_recv`, `net_close`, `net_htons`, `net_addr_ipv4` |
+| `std/sha256.kr` | `sha256_init`, `sha256_update`, `sha256_final`, `sha256_hash` — FIPS 180-4, streaming. **Host-only**: every declaration is `u64`, so it does not compile for riscv32/xtensa. |
 
 Import with `import "std/string.kr"` etc. The compiler searches `~/.local/share/kernrift/` automatically.
 
@@ -259,7 +281,7 @@ See the [`examples/`](examples/) directory for runnable programs covering every 
 
 ## Architecture
 
-~45 700 lines of KernRift across 19 source files + 18 stdlib modules (227 K tokens, 142 K AST nodes on self-compile). Self-compiles to a 1.15 MB x86_64 native binary in ~1.1 s (IR, default), a 0.83 MB ARM64 binary, or an 8-slice fat binary (BCJ + LZ-Rift compression) in ~9.2 s on an AMD Ryzen 9 7900X. **448 tests** pass, bootstrap fixed point verified on all 8 targets — Linux, macOS, Windows, and Android on both x86_64 and ARM64. See [`benchmarks/BENCHMARKS.md`](benchmarks/BENCHMARKS.md) for micro-benchmarks vs gcc / rustc and peak-memory numbers.
+~61 100 lines of KernRift across 25 source files + 19 stdlib modules. Self-compiles to a 1.15 MB x86_64 native binary in ~1.1 s (IR, default), a 0.83 MB ARM64 binary, or an 8-slice fat binary (BCJ + LZ-Rift compression) in ~9.2 s on an AMD Ryzen 9 7900X. **686 tests** pass, bootstrap fixed point verified on all 8 targets — Linux, macOS, Windows, and Android on both x86_64 and ARM64. See [`benchmarks/BENCHMARKS.md`](benchmarks/BENCHMARKS.md) for micro-benchmarks vs gcc / rustc and peak-memory numbers.
 
 | File | Purpose |
 |------|---------|
@@ -267,6 +289,9 @@ See the [`examples/`](examples/) directory for runnable programs covering every 
 | `parser.kr` | Recursive descent + Pratt precedence |
 | `ir.kr` | SSA IR + x86_64 emitter (Linux / macOS / Windows / Android), liveness, graph-colour RA, Briggs/George coalescer, LICM, CF/DCE/CSE |
 | `ir_aarch64.kr` | AArch64 emitter fed from the same IR |
+| `ir_riscv.kr` / `codegen_riscv.kr` | RV32IMC emitter + C-compression peephole and RV32IMC disassembler |
+| `ir_xtensa.kr` / `codegen_xtensa.kr` | Xtensa LX6 emitter (literal pools, CALL0 frames) + ESP32 layout guards |
+| `format_espimage.kr` | ESP32 esp-image container writer (byte-identical to `esptool`) |
 | `inliner.kr` | AST-level pass that folds pure single-expression callees into call sites |
 | `codegen.kr` | Legacy direct x86_64 codegen (`--legacy` fallback) |
 | `codegen_aarch64.kr` | Legacy direct AArch64 codegen |
@@ -276,7 +301,7 @@ See the [`examples/`](examples/) directory for runnable programs covering every 
 | `bcj.kr` | BCJ filters (x86_64 + AArch64) for compression |
 | `format_*.kr` | ELF, Mach-O, PE, AR, KRBO, KrboFat |
 | `runner.kr` | `kr` — fat-binary slice extractor / launcher |
-| `std/*.kr` | Standard library (18 modules, ~4 100 lines) |
+| `std/*.kr` | Standard library (19 modules, ~4 700 lines) |
 
 ## Bootstrap
 
@@ -300,6 +325,107 @@ A released `krc` binary compiles the current source into the next `krc`. No Rust
 | Windows ARM64 | ✅ | ✅ | ✅ | ✅ | ✅ fixed point |
 | Android ARM64 | ✅ | ✅ | ✅ | ✅ | ✅ self-compiled on phone |
 | Android x86_64 | ✅ | ✅ | ✅ | ✅ | ✅ verified |
+
+## Embedded targets: riscv32 / xtensa / ESP32
+
+The same SSA IR that feeds the eight hosted platforms also drives three
+embedded backends. **These are a subset of the language, not a second full
+implementation.** The table below is the honest support matrix — every cell was
+established by compiling a program that exercises the feature.
+
+| | x86_64 / arm64 | riscv32 hosted | riscv32 `--freestanding` | xtensa (freestanding only) |
+|---|---|---|---|---|
+| Arithmetic, control flow, calls | Yes | Yes | Yes | Yes |
+| String literals, `str_len`/`str_eq` | Yes | Yes | Yes | Yes |
+| Static globals, MMIO `device` blocks | Yes | Yes | Yes | Yes |
+| Structs / `alloc()` | Yes | Yes | **No** | **No** |
+| `f16` / `f32` / `f64` | Yes | **No** | **No** | **No** |
+| 64-bit integers (`u64` / `i64`) | Yes | **No** | **No** | **No** |
+| `exit()`, syscalls | Yes | Yes | **No** | **No** |
+
+The limitations are hard compile errors, not silent miscompiles:
+
+- **No floating point.** `f16`/`f32`/`f64` are rejected outright — neither
+  target has a hardware FPU and there is no soft-float library.
+  There is no workaround short of fixed-point arithmetic
+  (see [`std/fixedpoint.kr`](docs/STDLIB.md)).
+- **No 64-bit integers.** The word size is 4 bytes; `u64`/`i64` are rejected at
+  the declaration site. Use `u32`. This is the limitation that bites first when
+  porting existing KernRift code, because `u64` is the language's integer
+  default.
+- **No structs or `alloc()` when freestanding.** Both lower to `IR_ALLOC`,
+  which is implemented only for the hosted RISC-V path (via `mmap2`). Under
+  `--freestanding` the compiler stops with
+  `error: riscv32: IR op 70 not yet implemented`. Use static globals and fixed
+  arrays instead.
+- **Xtensa is freestanding-only.** `--arch=xtensa` without `--freestanding`
+  reports `xtensa ELF image emission not yet implemented`.
+
+### The freestanding programming model
+
+Freestanding targets have no operating system underneath them, so there is no
+`exit()` to call — it lowers to a syscall that these backends deliberately
+refuse to emit. A freestanding program is instead shaped as a function that
+**returns** its result, or one that never returns at all:
+
+```kr
+// Returns a value — the harness/debugger reads it out of the return register.
+fn main() -> uint32 {
+    return 42
+}
+```
+
+```kr
+// Or: never return. On real silicon there is nothing to return *to*.
+fn main() {
+    loop { }
+}
+```
+
+Hosted RISC-V uses the same `fn main() -> uint32` shape, but there the return
+value becomes the process exit status:
+
+```sh
+krc --arch=riscv32 examples/riscv-hosted/exit_code.kr -o exit_code
+qemu-riscv32-static ./exit_code ; echo $?    # 42
+```
+
+### ESP32
+
+`--target=esp32` is a **machine** target, not just an architecture. It emits an
+esp-image container that the ESP32 mask ROM loads directly from flash offset
+`0x1000` — there is no second-stage bootloader and no flash XIP. It requires
+`--arch=xtensa --freestanding`; any other combination is a hard error.
+
+```sh
+krc --arch=xtensa --freestanding --target=esp32 examples/esp32/hello.kr -o hello.bin
+esptool --port /dev/ttyUSB0 write-flash 0x1000 hello.bin
+```
+
+This is the **M1 (RAM-only)** milestone. The whole program must fit in RAM:
+
+| Region | Window | Size | Holds |
+|---|---|---|---|
+| IRAM | `0x40080400`–`0x400A0000` | 127 KiB | code + literal pools |
+| DRAM | `0x3FFB0000`–`0x3FFE0000` | 192 KiB | data, `.bss`, stack |
+
+4 KiB of the DRAM window is reserved as stack headroom; the compiler fails the
+build rather than emit an image whose statics leave less than that.
+
+**IRAM is 32-bit-access-only.** Any byte-addressable datum — a string literal,
+a `u8` static — must live in DRAM, and the compiler enforces this at compile
+time rather than letting the chip raise `LoadStoreError` at first touch:
+
+```
+error: xtensa/esp32: byte-addressable data (string/static) would land in IRAM,
+which is 32-bit-access-only — refusing to emit an image that dies with
+LoadStoreError on first byte access
+```
+
+Hardware-validated on an ESP32-D0WD-V3: `examples/esp32/hello.kr` boots from
+flash and prints over UART0 at 115200. See [`examples/esp32/`](examples/esp32/)
+for the annotated source, including why the UART FIFO is written through its
+AHB mirror (errata CPU-3.3).
 
 ## License
 

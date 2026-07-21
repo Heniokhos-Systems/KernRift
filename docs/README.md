@@ -14,6 +14,21 @@ contributors and the curious; **Project** tracks direction and process.
 - [Tutorial: UART driver](tutorial-uart-driver.md) — `device` blocks and
   memory-mapped I/O.
 
+## Embedded & bare metal
+
+- [Embedded targets](../README.md#embedded-targets-riscv32--xtensa--esp32) —
+  the riscv32 / xtensa / ESP32 backends: the verified support matrix (no
+  floats, no 64-bit integers, no structs when freestanding), the freestanding
+  `fn main() -> uint32` programming model, and the ESP32 IRAM/DRAM budget.
+- [Freestanding mode](LANGUAGE.md#23-freestanding-mode) — the same ground from
+  the language side: what `--freestanding` changes, the embedded-target subset,
+  and which constructs survive it.
+- [`examples/esp32/`](../examples/esp32/) — the annotated ESP32 boot image that
+  was validated on real silicon.
+
+  (Loadable Linux kernel modules are covered by [Kernel Modules](LKM.md) under
+  Reference.)
+
 ## Reference
 
 - [Language Reference](LANGUAGE.md) — the complete language: types,

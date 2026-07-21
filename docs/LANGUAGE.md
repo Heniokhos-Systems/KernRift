@@ -1744,6 +1744,86 @@ stack. Big dispatch functions with many mutually exclusive branches
 legitimately allocate slots across branches; the threshold is set high
 enough to let those pass.
 
+### Embedded targets: riscv32 and xtensa
+
+On x86_64 and arm64, `--freestanding` only removes the startup glue — the whole
+language is still available. On the 32-bit embedded backends
+(`--arch=riscv32`, `--arch=xtensa`) the *language itself* is a subset, and the
+restrictions are hard compile errors rather than silent miscompiles:
+
+| Construct | riscv32 hosted | riscv32 `--freestanding` | xtensa |
+|---|---|---|---|
+| Arithmetic, control flow, calls, `device` blocks | Yes | Yes | Yes |
+| String literals, `str_len` / `str_eq` | Yes | Yes | Yes |
+| `static` globals, fixed arrays | Yes | Yes | Yes |
+| Structs, `alloc()` | Yes | **No** | **No** |
+| `f16` / `f32` / `f64` | **No** | **No** | **No** |
+| `u64` / `i64` | **No** | **No** | **No** |
+| `exit()`, `syscall_raw` | Yes | **No** | **No** |
+
+```
+error: 64-bit integers not supported on riscv32; use uint32
+error: float (f16/f32/f64) not supported on riscv32 (no hardware FPU)
+error: riscv32: IR op 70 not yet implemented        // IR_ALLOC: struct or alloc()
+```
+
+The 64-bit restriction is the one that bites first when porting existing code,
+because `u64` is the language's integer default (§3). On these targets the word
+is 4 bytes; write `u32` (or `uint32`) everywhere.
+
+### The `fn main() -> uint32` shape
+
+Because a freestanding program has no OS beneath it, there is nothing for
+`exit()` to talk to, and the embedded backends refuse to emit it. A freestanding
+program instead **returns** its result, or never returns at all:
+
+```kr
+// Return a value. The harness or debugger reads it from the return register.
+fn main() -> uint32 {
+    return 42
+}
+```
+
+```kr
+// Or never return — on real silicon there is nothing to return to.
+fn main() {
+    loop { }
+}
+```
+
+Hosted riscv32 uses the same shape, but there the returned value becomes the
+process exit status:
+
+```sh
+krc --arch=riscv32 examples/riscv-hosted/exit_code.kr -o exit_code
+qemu-riscv32-static ./exit_code ; echo $?    # 42
+```
+
+Note that `@noreturn fn main()` (the x86/arm64 kernel idiom shown above) still
+applies to the embedded targets — it is the `loop { }` form.
+
+### Talking to hardware
+
+MMIO is the same on every target: declare a `device` block (§13) and read/write
+its fields, which lower to volatile accesses with the appropriate barriers
+(§12). Nothing about `device` blocks is target-specific, and they are fully
+supported on riscv32 and xtensa:
+
+```kr
+device UART0 at 0x3FF40000 {
+    status at 0x1C : u32
+}
+
+fn wait_tx_ready() {
+    while (UART0.status & 0xFF0000) == 0 { }
+}
+```
+
+For the ESP32 machine target (`--target=esp32`), its flash-image layout, and its
+IRAM/DRAM budget, see the
+[README](../README.md#embedded-targets-riscv32--xtensa--esp32) and the annotated
+[`examples/esp32/hello.kr`](../examples/esp32/hello.kr).
+
 ---
 
 ## 24. Extern functions

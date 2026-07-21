@@ -13,6 +13,30 @@ krc check hello.kr                     # semantic check only
 krc lc hello.kr                        # Living Compiler report
 ```
 
+Embedded & bare metal:
+
+```sh
+# 32-bit RISC-V — hosted (Linux ELF32) then freestanding (flat blob, entry at 0)
+krc --arch=riscv32 hello.kr -o hello-rv32
+krc --arch=riscv32 --freestanding kernel.kr -o kernel.bin
+
+# Xtensa LX6 — freestanding only
+krc --arch=xtensa --freestanding blink.kr -o blink.bin
+
+# ESP32 bootable flash image (needs --arch=xtensa --freestanding)
+krc --arch=xtensa --freestanding --target=esp32 hello.kr -o hello.bin
+esptool --port /dev/ttyUSB0 write-flash 0x1000 hello.bin
+
+# Linux loadable kernel module
+krc --emit=lkm driver.kr -o driver.ko
+```
+
+On riscv32/xtensa the language is a **subset**: no `f32`/`f64`, no `u64`/`i64`
+(the word is 4 bytes — use `u32`), and no structs or `alloc()` when
+freestanding. Freestanding programs have no `exit()`; they use
+`fn main() -> uint32 { return N }` or `loop { }`. Full matrix:
+[README](../README.md#embedded-targets-riscv32--xtensa--esp32).
+
 ## Hello world
 
 ```kr
@@ -215,7 +239,14 @@ fn main() {
 @export            fn api() { }          // keep symbol in output
 @noreturn          fn panic() { exit(1) }
 @naked @section("name")  // also available
+
+@builtin_override  fn str_len(u64 s) -> u64 { ... }  // deliberately shadow a built-in
 ```
+
+Defining a function whose name matches a built-in (`str_len`, `memcpy`,
+`time_ns`, …) is a **compile error** — the user body would silently win at
+every call site. `@builtin_override` declares the shadowing deliberate. See
+[LANGUAGE.md §19](LANGUAGE.md#19-annotations).
 
 ## Strings & output
 

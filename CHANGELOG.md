@@ -2,6 +2,173 @@
 
 All notable changes to `kernriftc` are documented in this file.
 
+## v2.8.28 — unreleased
+
+The embedded release. Two new backends (Xtensa LX6, hosted RISC-V), the ESP32
+machine target, and a batch of correctness fixes — several of which were silent
+miscompiles rather than crashes. 686 tests pass; the bootstrap fixed point holds.
+
+### New backend: Xtensa LX6
+
+Freestanding feature-complete, fed by the same SSA IR as every other target.
+
+- RRR/RRI8/RI16/CALL/BRI/RSR encoders plus the density (16-bit) forms,
+  golden-diff verified against `xtensa-lx106-elf-objdump`.
+- Literal pools and CALL0 frames; ALU ops with hardware `MULL` and
+  synthesized `QUOS`/`QUOU`/`REMS`/`REMU`; loads/stores at widths 1/2/4;
+  compares and branches with bounded-iterative branch relaxation.
+- PIC address infrastructure, string constants, static globals, real `.bss`
+  (`memsz > filesz`) with a `.bss`-zeroing entry preamble, stack arrays,
+  function pointers, and inline asm (`IR_ASM_BLOCK`).
+- `STRLEN` / `STR_EQ` / `FMT_UINT` / `MEMSET` / `MEMCPY` / `MEMCMP` intrinsics.
+- Boots under `qemu-system-xtensa`; a capstone integration test exercises every
+  freestanding op in one boot image.
+
+### New machine target: ESP32 (M1, RAM-only)
+
+`--arch=xtensa --freestanding --target=esp32` emits an esp-image that the ESP32
+mask ROM loads directly from flash offset `0x1000` — no second-stage
+bootloader, no flash XIP.
+
+- esp-image container writer, byte-identical to the `esptool` / `elf2image`
+  reference output.
+- IRAM/DRAM segment split: code + literal pools in IRAM
+  `0x40080400`–`0x400A0000` (127 KiB), data + `.bss` + stack in DRAM
+  `0x3FFB0000`–`0x3FFE0000` (192 KiB), with 4 KiB reserved as stack headroom.
+  Overflowing either window is a compile-time error.
+- **IRAM byte-access guard.** IRAM is 32-bit-access-only, so any
+  byte-addressable datum (string literal, `u8` static) that would land there is
+  a hard compile error rather than a `LoadStoreError` on first touch.
+- Startup stub: watchdog disable (RWDT/MWDT0/MWDT1), `PS` setup, `.bss` zero
+  loop, and a trailing park loop.
+- UART0 hello image writing the TX FIFO through its AHB mirror, per errata
+  CPU-3.3 (an APB-side FIFO write intermittently drops characters).
+- `@naked` on the entry function is now rejected on xtensa/esp32.
+- Hardware-validated on an ESP32-D0WD-V3.
+
+### RISC-V: hosted mode
+
+v2.8.27 shipped the freestanding RV32IMC backend; this release adds the hosted
+path.
+
+- ELF32 executable header, `main` entry trampoline (argc/argv/envp), and
+  auto-exit.
+- Syscall lowering (`IR_SYSCALL` / `IR_SYSCALL_RAW`); on freestanding these are
+  now gated to fail loudly instead of silently emitting an `ecall`.
+- `IR_ALLOC` via `mmap2`, which is what makes structs and `alloc()` work on
+  hosted riscv32 (they remain unavailable freestanding).
+- Elf32 relocatable `.o` writer and an extern-call subsystem using
+  `R_RISCV_CALL_PLT` for cross-object linking.
+- RV32IMC disassembler for `--emit=asm`, objdump-verified.
+
+### Correctness
+
+- **IR basic-block instruction lists were silently truncated at 65536**,
+  producing wrong code with no diagnostic. The lists now grow on demand.
+- **Struct parameter passing.** Struct arguments are passed by value for *all*
+  lvalue forms, not just bare identifiers; and mutating methods work again —
+  writes through `self` persist, which had been broken since v2.7.0. A struct
+  `VarDecl` initialized from an array element (`P c = arr[i]`) previously
+  segfaulted.
+- **Builtin shadowing is now a hard error.** Defining a function whose name
+  matches a built-in silently won at every call site; it now fails the build,
+  with `@builtin_override` as the deliberate opt-in. A follow-up closed the
+  same hole for 15 built-ins that were left unguarded.
+- **Windows `get_module_path()` returned 0**, and the Windows stdlib search
+  paths were wrong. Both fixed; `set_executable` is now guarded.
+- **A failed import no longer exits 0** — the process aborts with a non-zero
+  status instead of continuing with a partial module set.
+- AST null-node accesses are guarded.
+- `analysis.kr` now counts store-statement operands as uses, so a variable used
+  only as the value of a store is no longer reported unused.
+
+### Growable buffers
+
+Several hard caps that failed (or, worse, truncated) on large inputs now grow on
+demand via the shared `grow_buf` helper:
+
+- the IR instruction arena and its parallel source-token table (was fatal at
+  65536 instructions),
+- IR basic-block instruction lists (see above),
+- the struct table and each struct's field list (were 64 structs / 16 fields),
+- the import seen-set, search-path table, and path buffer (was a 255-character
+  path cliff and a 64-import cap).
+
+### Standard library
+
+- **`std/sha256.kr`** — FIPS 180-4 SHA-256 with a streaming
+  init/update/final API, vector-tested, plus coverage for the chunked-update
+  path the esp-image writer uses. **Host-only**: every declaration is `u64`, so
+  it does not compile for riscv32/xtensa. The esp-image hash is computed at
+  compile time on the host; nothing hashes on the ESP32.
+
+### Tests & tooling
+
+- `--emit=lkm` had **no test coverage at all**; it now has some, via
+  `tests/helpers/lkm_check.py`.
+- The ten files in `tests/smoke/` were dead — nothing ran them. They are now
+  discovered and executed by a loop keyed on the `expected: N` header each file
+  already carried. Coverage is honest about its limit: this runs the host arch
+  only, and every historical `time_ns` bug was on a cross-target that does not
+  execute there.
+- `--target=` argument validation is tested in both directions, and the ESP32
+  image tests assert layout, `.bss` bounds, and a recomputed SHA-256.
+- The `(X.XX ms)` compile-time tail works again on normal compiles; it had been
+  dead for 20+ releases. (It is not printed on the `--target=esp32` or
+  `--emit=lkm` paths.)
+
+### Documentation
+
+- The README, docs index, language reference, architecture doc, cheatsheet, and
+  getting-started guide previously contained **zero** mentions of riscv32,
+  xtensa, or ESP32. All now document the embedded targets, including the
+  limitations: no floats, no 64-bit integers, and no structs or `alloc()` on
+  the freestanding paths.
+- `--target=` takes a name (`linux`, `macos`, `windows`, `android`, `esp32`),
+  not an LLVM-style triple; `docs/ABI_POLICY.md` corrected.
+
+## v2.8.27 — 2026-07-17
+
+The RISC-V release, plus a large self-compile speedup. (This section was
+missing from the changelog; reconstructed from the v2.8.26..v2.8.27 history.)
+
+### New backend: RISC-V RV32IMC (freestanding)
+
+The first non-64-bit target, and the change that made the compiler
+word-size-parametric.
+
+- `--arch=riscv32` plumbing with an explicit arch dispatch (no silent
+  fall-through) and a clear error on unknown architectures.
+- Arch-parameterized word/pointer size — 4 bytes on riscv32, 8 elsewhere.
+- R/I/S/B/U/J encoders, an s0–s11 colour map, and `IR_NUM_REGS = 12`.
+- RV32I ALU ops, loads/stores at widths 1/2/4, volatile MMIO load/store,
+  signed and unsigned compares, branches with range-checked fixups, calls with
+  argument marshalling, and RV32M `mul`/`div`/`divu`/`rem`/`remu`.
+- The **C compressed extension** as a non-branch peephole (RV32IMC), with a
+  non-compressible-region mechanism so address fixups remap correctly through
+  compression.
+- Raw flat-binary emit mode for freestanding, entry at offset 0.
+- A UART hello that boots under `qemu-system-riscv32 -machine virt`.
+- **64-bit integer and float types are rejected on riscv32** with explicit
+  errors — there is no FPU and the word is 4 bytes.
+
+### Performance
+
+- **3.3× faster self-compile** — 1342 ms → 406 ms, via IR, register-allocator,
+  and front-end fixes.
+
+### Fixes
+
+- Legacy codegen `call_ptr` passes `f64` arguments in xmm registers.
+
+### Packaging
+
+- Every distribution now bundles `LICENSE` and `NOTICE` (Apache 2.0 §4a/§4d).
+- Debian packaging auto-fetches the latest version and ships a per-arch `kr`
+  runner.
+- CI bootstrap seed bumped v2.8.4 → v2.8.26 (the v2.8.4 parser can no longer
+  build the current source).
+
 ## v2.8.26 — 2026-06-11
 
 A large correctness, ergonomics, and tooling release. Every change preserves

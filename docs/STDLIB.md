@@ -1,7 +1,7 @@
 # KernRift Standard Library Reference
 
-The standard library lives in `std/*.kr` — **18 modules, 289 functions**
-(274 public + 15 underscore-prefixed internal helpers, listed for
+The standard library lives in `std/*.kr` — **19 modules, 307 functions**
+(292 public + 15 underscore-prefixed internal helpers, listed for
 completeness). Import a module with its `std/` path:
 
 ```kr
@@ -449,6 +449,60 @@ Internal helpers: `_net_nr_socket()`, `_net_nr_bind()`,
 `_net_nr_sendto()`, `_net_nr_recvfrom()`, `_net_nr_close()`,
 `_net_nr_setsockopt()` — each `() -> u64`, returning the per-arch
 syscall number.
+
+---
+
+## `std/sha256.kr` — SHA-256
+
+A dependency-free SHA-256 (FIPS 180-4) with a streaming API. Verified against
+the standard test vectors, including the 56-byte case whose padding spills into
+a second block.
+
+> **Host-only.** Every declaration in this module is `u64`, and riscv32/xtensa
+> reject 64-bit integers — so this file does not compile for those targets. The
+> algorithm itself never needs a true 64-bit quantity (the message bit-length is
+> carried as two 32-bit halves), so a port would be a mechanical `u64` →
+> `uint32` substitution, **but that port has not been done.** Do not assume it
+> is drop-in for a 32-bit target. The ESP32 image hash is computed at compile
+> time, on the host, by the compiler; nothing hashes on the device.
+
+The context is a caller-provided flat byte buffer of `SHA256_CTX_SIZE`
+(112) bytes — not a struct. Digests are written as 32 raw bytes into a
+caller-provided buffer.
+
+| Function | Purpose |
+|---|---|
+| `fn sha256_init(u64 ctx)` | Initialize a context buffer (caller allocates `SHA256_CTX_SIZE` bytes). |
+| `fn sha256_update(u64 ctx, u64 data, u64 len)` | Absorb `len` bytes. Callable any number of times with any chunk sizes. |
+| `fn sha256_final(u64 ctx, u64 out32)` | Finish and write the 32-byte digest to `out32`. |
+| `fn sha256_hash(u64 data, u64 len, u64 out32)` | One-shot convenience: init + update + final. |
+
+```kr
+import "std/sha256.kr"
+
+fn main() {
+    u64 out = alloc(32)
+    sha256_hash("abc", 3, out)
+    // out now holds ba7816bf 8f01cfea 414140de 5dae2223
+    //               b00361a3 96177a9c b410ff61 f20015ad
+    exit(0)
+}
+```
+
+Streaming form, for data you do not have all at once:
+
+```kr
+u64 ctx = alloc(SHA256_CTX_SIZE)
+sha256_init(ctx)
+sha256_update(ctx, chunk1, len1)
+sha256_update(ctx, chunk2, len2)
+sha256_final(ctx, out)
+```
+
+The remaining `sha256_*` symbols (`sha256_transform`, `sha256_ch`,
+`sha256_maj`, the sigma functions, `sha256_load_be32` / `sha256_store_be32`,
+`sha256_k_table`, `sha256_add_len`, `sha256_rotr`, `sha256_shr`) are internal
+to the implementation.
 
 ---
 

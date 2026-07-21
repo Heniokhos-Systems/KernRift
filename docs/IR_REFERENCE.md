@@ -1,18 +1,28 @@
 # IR Opcode Reference
 
 KernRift's intermediate representation is a flat SSA form produced by
-`src/ir.kr` (AST → IR lowering) and consumed by `src/ir.kr` (x86_64 emitter)
-and `src/ir_aarch64.kr` (AArch64 emitter). Each instruction is a 32-byte
+`src/ir.kr` (AST → IR lowering) and consumed by four machine-code emitters:
+`src/ir.kr` (x86_64), `src/ir_aarch64.kr` (AArch64), `src/ir_riscv.kr`
+(RV32IMC), and `src/ir_xtensa.kr` (Xtensa LX6). Each instruction is a 32-byte
 record with fields `{opcode, dest, src1, src2, imm, bb}`. Virtual
 registers (vregs) are numbered from 1; vreg 0 is reserved for "no value"
 (void returns, stores). Basic blocks are numbered from 0.
 
-This reference documents the IR opcodes (107 as of v2.8.26; the canonical
+This reference documents the IR opcodes (114 as of v2.8.28; the canonical
 list is the `static uint64 IR_*` definitions at the top of `src/ir.kr`),
 so that:
 - The IR lowering can be validated (does `ast_lower_*` preserve semantics?).
 - Optimizer soundness can be reasoned about per pass (what does DCE assume?).
-- Backend ports can check for coverage (every opcode must be emittable).
+- Backend ports can check for coverage.
+
+Coverage is **not** uniform across the four emitters. x86_64 and AArch64
+implement the whole set; the two 32-bit embedded emitters implement a subset
+and abort with `error: <arch>: IR op <N> not yet implemented` on anything they
+do not handle — deliberately loud, never a silent fallback. `IR_ALLOC` (70) is
+the most visible gap: it is implemented only on the hosted RISC-V path, which
+is why structs and `alloc()` are unavailable on freestanding riscv32 and on
+xtensa. See the
+[embedded support matrix](../README.md#embedded-targets-riscv32--xtensa--esp32).
 
 Opcodes are grouped by category; the numeric values in the table below
 match the constants defined in `src/ir.kr`.
@@ -283,6 +293,7 @@ ARM64-meaningful; on x86 they lower to the nearest equivalent or a no-op.
 | 143 | `IR_SHL_IMM` | `dest = src1 << imm` (riscv32-only, shamt 0–31) |
 | 144 | `IR_SHR_IMM` | `dest = src1 >> imm` logical (riscv32-only, shamt 0–31) |
 | 145 | `IR_SAR_IMM` | `dest = src1 >> imm` arithmetic (riscv32-only, shamt 0–31) |
+| 146 | `IR_MODULE_PATH` | `get_module_path(buf, size)` — path of the running executable |
 
 The signed compare opcodes are 120–123 (see above); bare `IR_DIV`/`IR_MOD`/
 `IR_SHR` (5/6/11) are the unsigned forms. Like 135/136/138, opcodes 140–145

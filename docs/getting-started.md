@@ -2,7 +2,8 @@
 
 **KernRift** is a self-hosted systems programming language and compiler
 created by Pantelis Christou. It produces native binaries for Linux,
-Windows, macOS, and Android on x86_64 and ARM64.
+Windows, macOS, and Android on x86_64 and ARM64, plus bare-metal images for
+32-bit RISC-V, Xtensa LX6, and the ESP32.
 
 This guide walks through installing the compiler, writing and running your
 first program, and the language features you'll use in day-to-day code.
@@ -50,6 +51,12 @@ Compile and run:
 ```sh
 krc hello.kr --arch=x86_64 -o hello
 ./hello
+```
+
+A successful compile reports what it produced and how long it took:
+
+```
+15 tokens, 9 nodes, 264 bytes -> hello  (0.61 ms)
 ```
 
 Or build a cross-platform fat binary and run it through `kr`:
@@ -326,6 +333,11 @@ won't sneak in behind your back, even as the language evolves. See the
 |------|--------------|
 | `krc <file.kr>` | Compile a source file (to a fat binary by default). |
 | `krc --arch=x86_64 <file.kr>` | Compile for a single architecture — native ELF. |
+| `krc --arch=riscv32 <file.kr>` | Compile for 32-bit RISC-V (hosted Linux ELF32). |
+| `krc --arch=riscv32 --freestanding <file.kr>` | Bare-metal RV32IMC flat blob, entry at offset 0. |
+| `krc --arch=xtensa --freestanding <file.kr>` | Bare-metal Xtensa LX6 blob (xtensa is freestanding-only). |
+| `krc --arch=xtensa --freestanding --target=esp32 <file.kr>` | Bootable ESP32 flash image (write to flash `0x1000`). |
+| `krc --emit=lkm <file.kr>` | Loadable Linux kernel module (`.ko`). |
 | `krc --emit=asm <file.kr>` | Emit a disassembled listing with function labels. |
 | `krc check <file.kr>` | Run semantic analysis only. |
 | `krc fmt <file.kr>` | Auto-format the file in place. |
@@ -347,6 +359,29 @@ won't sneak in behind your back, even as the language evolves. See the
 | Android x86_64| Yes     | Yes     | —         |
 | macOS x86_64  | Yes     | Yes     | Yes       |
 | macOS ARM64   | Yes     | Partial | —         |
+
+### Embedded targets
+
+These run the same compiler front end but a reduced language — **no floats, no
+64-bit integers**, and no structs or `alloc()` when freestanding. The full
+matrix and the freestanding `fn main() -> uint32` model are in the
+[README](../README.md#embedded-targets-riscv32--xtensa--esp32).
+
+| Target | Mode | Output |
+|--------|------|--------|
+| riscv32 (RV32IMC) | hosted | Linux ELF32 executable |
+| riscv32 (RV32IMC) | `--freestanding` | flat blob, entry at offset 0 |
+| Xtensa LX6 | `--freestanding` only | flat blob |
+| ESP32 | `--target=esp32` | esp-image, flashed at `0x1000` |
+
+```sh
+# Build and run a hosted riscv32 program under qemu
+krc --arch=riscv32 examples/riscv-hosted/hello.kr -o hello-rv32
+qemu-riscv32-static ./hello-rv32          # prints "hello riscv"
+
+# Build the ESP32 image that was validated on real silicon
+krc --arch=xtensa --freestanding --target=esp32 examples/esp32/hello.kr -o hello.bin
+```
 
 ## Standard library
 
