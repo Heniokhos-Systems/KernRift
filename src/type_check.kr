@@ -265,11 +265,20 @@ fn tc_is_float_kind(uint64 tk) -> uint64 {
 // fields, statics, consts, type aliases, and device fields.
 fn tc_riscv32_reject_kind(uint64 kind, uint64 tok) {
     if target_arch != 2 && target_arch != 3 { return }
+    // arch 2 = riscv32, arch 3 = xtensa. Both reach here, so the message has
+    // to name the arch actually being compiled -- it previously said "riscv32"
+    // unconditionally, which is baffling when you passed --arch=xtensa.
     if kind == 83 || kind == 87 {
-        diag_fatal_at(tok, "64-bit integers not supported on riscv32; use uint32")
+        if target_arch == 2 {
+            diag_fatal_at(tok, "64-bit integers not supported on riscv32; use uint32")
+        }
+        diag_fatal_at(tok, "64-bit integers not supported on xtensa; use uint32")
     }
     if kind >= 94 && kind <= 96 {
-        diag_fatal_at(tok, "float (f16/f32/f64) not supported on riscv32 (no hardware FPU)")
+        if target_arch == 2 {
+            diag_fatal_at(tok, "float (f16/f32/f64) not supported on riscv32 (no hardware FPU)")
+        }
+        diag_fatal_at(tok, "float (f16/f32/f64) not supported on xtensa (no hardware FPU)")
     }
 }
 
@@ -411,7 +420,10 @@ fn tc_check_expr(uint64 node) {
         uint32 lt32 = ast_data1(node)
         uint64 lt = lt32
         if parse_int_token(lt) > 0xFFFFFFFF {
-            diag_fatal_at(lt, "integer literal does not fit in 32 bits (64-bit integers not supported on riscv32)")
+            if target_arch == 2 {
+                diag_fatal_at(lt, "integer literal does not fit in 32 bits (64-bit integers not supported on riscv32)")
+            }
+            diag_fatal_at(lt, "integer literal does not fit in 32 bits (64-bit integers not supported on xtensa)")
         }
     }
 

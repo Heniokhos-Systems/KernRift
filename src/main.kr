@@ -5037,7 +5037,8 @@ fn main() {
 
                 write(1, "output:\n", 8)
                 write(1, "  --arch=x86_64|arm64|riscv32|xtensa   single-arch binary (no fat-binary wrap)\n", 79)
-                write(1, "  --target=linux|macos|windows|android   single-target binary\n", 62)
+                uint64 tgt_help = "  --target=linux|macos|windows|android|esp32   single-target binary\n"
+                write(1, tgt_help, str_len(tgt_help))
                 write(1, "  --targets=<list>          custom fat binary subset\n", 53)
                 write(1, "                              e.g. linux-x64,macos-arm64,win-x64\n", 65)
                 write(1, "  --emit=elfexe|macho|pe|android        single-target executable\n", 65)
