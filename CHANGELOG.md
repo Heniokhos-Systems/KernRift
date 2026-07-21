@@ -2,7 +2,7 @@
 
 All notable changes to `kernriftc` are documented in this file.
 
-## v2.8.28 — unreleased
+## v2.8.28 — 2026-07-21
 
 The embedded release. Two new backends (Xtensa LX6, hosted RISC-V), the ESP32
 machine target, and a batch of correctness fixes — several of which were silent
