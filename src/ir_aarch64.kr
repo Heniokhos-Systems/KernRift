@@ -1804,6 +1804,30 @@ fn ir_emit_arm64_insn(uint64 ii) {
         return
     }
 
+    // ----- IR_MODULE_PATH (146): GetModuleFileNameA(NULL, buf, size) -----
+    // Windows arm64 only; the lowering emits this solely when target_os == 2.
+    // Mirrors the legacy arm64 path in src/codegen_aarch64.kr.
+    if op == 146 {
+        if target_os == 2 {
+            uint64 mp_buf_r = ir_a64_resolve_src(s1_v, 9)
+            emit_a64_mov(9, mp_buf_r)             // x9 = buf (survive 2nd resolve)
+            uint64 mp_size_r = ir_a64_resolve_src(s2_v, 10)
+            emit_a64_mov(2, mp_size_r)            // x2 = size
+            emit_a64_mov(1, 9)                    // x1 = buf
+            emit_a64_mov_imm(0, 0)                // x0 = NULL (this module)
+            emit_a64_win_call_iat(12)             // GetModuleFileNameA
+        } else {
+            emit_a64_mov_imm(0, 0)
+        }
+        if dst_r != 0xFFFFFFFF && dst_r != 0 {
+            emit_a64_mov(dst_r, 0)
+        }
+        if dst_r == 0xFFFFFFFF {
+            ir_a64_emit_store_spill(0, dest_v)
+        }
+        return
+    }
+
     // ----- IR_TIME_NS (119): clock_gettime -> nanoseconds -----
     if op == 119 {
         if target_os == 0 || target_os == 3 {

@@ -183,6 +183,10 @@ static uint64 IR_XOR_IMM = 142      // dest = src1 ^ imm (imm12)
 static uint64 IR_SHL_IMM = 143      // dest = src1 << imm (shamt 0..31)
 static uint64 IR_SHR_IMM = 144      // dest = src1 >> imm logical (shamt 0..31)
 static uint64 IR_SAR_IMM = 145      // dest = src1 >> imm arithmetic (shamt 0..31)
+// dest = GetModuleFileNameA(NULL, src1=buf, src2=size). Windows-only: the
+// lowering only emits this when target_os == 2, so the freestanding backends
+// (RISC-V, Xtensa) never have to know about it.
+static uint64 IR_MODULE_PATH = 146
 
 // ---------------------------------------------------------------------------
 // Instruction arena
@@ -1914,22 +1918,25 @@ fn ir_lower_expr(uint64 node) -> uint64 {
             ir_emit(IR_EXEC, dest, path_v, 0, 0, ir_current_bb)
             return dest
         }
-        // get_module_path(buf, size) → returns 0 on EVERY target — including
-        // Windows, which is a KNOWN GAP: the legacy backend implements the
-        // Windows path correctly (GetModuleFileNameA via IAT slot 12, see
-        // codegen.kr get_module_path), but this IR lowering never grew the
-        // target_os == 2 branch, so PE binaries built with the default IR
-        // backend get len=0 and Windows stdlib import resolution fails.
-        // Verified empirically on Windows 10.0.26200 (IR: len=0, legacy:
-        // correct path). Fix requires a dedicated IR op with x86_64 + arm64
-        // Windows emission — tracked as a follow-up, out of scope here.
+        // get_module_path(buf, size) → GetModuleFileNameA on Windows, 0 elsewhere.
+        // This used to fold to IR_CONST 0 unconditionally, with no target_os
+        // check at all — so on Windows the IR backend (the default) returned 0
+        // while the legacy backend returned the real path. That silently
+        // disabled krc's whole stdlib import search-path setup on Windows
+        // (src/main.kr's import_init_search_paths only runs `if exe_len > 0`).
+        // Gate in the lowering, not the backend, so the freestanding targets
+        // keep seeing a plain constant — same shape as the file_open fix above.
         if skip_builtin == 0 && tok_matches(wct, "get_module_path", 15) != 0 {
             uint32 arg1 = ast_child(node)
-            ir_lower_expr(arg1)
+            uint64 buf_v = ir_lower_expr(arg1)
             uint32 arg2 = ast_next(arg1)
-            ir_lower_expr(arg2)
+            uint64 size_v = ir_lower_expr(arg2)
             uint64 dest = ir_new_vreg()
-            ir_emit(IR_CONST, dest, 0, 0, 0, ir_current_bb)
+            if target_os == 2 {
+                ir_emit(IR_MODULE_PATH, dest, buf_v, size_v, 0, ir_current_bb)
+            } else {
+                ir_emit(IR_CONST, dest, 0, 0, 0, ir_current_bb)
+            }
             return dest
         }
         // set_executable(path) → IR_SET_EXEC
@@ -8793,17 +8800,59 @@ fn ir_emit_x86_insn(uint64 ii) {
     }
 
     if op == 115 {
-        // IR_SET_EXEC: chmod(path, 0755) via syscall 90
-        uint64 path_r = ir_resolve_src(s1_v, 0)
-        // rdi = path
-        ir_emit_mov_r64_r64(7, path_r)
-        // rsi = 0x1ED (0755 octal)
-        ir_emit_mov_r64_imm64(6, 0x1ED)
-        // rax = 90 (chmod) — OS-aware
-        uint64 chmod_nr = ir_x86_syscall_nr(90)
-        ir_emit_mov_r64_imm64(0, chmod_nr)
-        // syscall: 0F 05
-        emit_byte(0x0F); emit_byte(0x05)
+        // IR_SET_EXEC: chmod(path, 0755) via syscall 90 on Linux/macOS/Android.
+        // No-op on Windows, which has no chmod — matching the legacy backend
+        // (src/codegen.kr, `if target_os != 2`) and the arm64 IR backend
+        // (src/ir_aarch64.kr op 115, which already guards). Without this
+        // guard the x86_64 IR path executed a bare `syscall` on Windows,
+        // landing in the NT dispatcher with rax=90 and whatever happened to
+        // be in the argument registers — the same hazard called out in the
+        // IR_TIME_NS comment below.
+        if target_os != 2 {
+            uint64 path_r = ir_resolve_src(s1_v, 0)
+            // rdi = path
+            ir_emit_mov_r64_r64(7, path_r)
+            // rsi = 0x1ED (0755 octal)
+            ir_emit_mov_r64_imm64(6, 0x1ED)
+            // rax = 90 (chmod) — OS-aware
+            uint64 chmod_nr = ir_x86_syscall_nr(90)
+            ir_emit_mov_r64_imm64(0, chmod_nr)
+            // syscall: 0F 05
+            emit_byte(0x0F); emit_byte(0x05)
+        }
+        return
+    }
+
+    if op == 146 {
+        // IR_MODULE_PATH: GetModuleFileNameA(NULL, buf, size) -> length in eax.
+        // Win64 ABI: rcx = hModule (NULL = this exe), rdx = buf, r8 = size.
+        // Only emitted when target_os == 2 (see the lowering), but keep the
+        // guard so a stray op can never fall through into a bogus call.
+        if target_os == 2 {
+            // Park both operands in caller-saved scratch regs before touching
+            // rcx/rdx/r8, so resolving the second source can't clobber the first.
+            uint64 mp_buf_r = ir_resolve_src(s1_v, 0)
+            ir_emit_mov_r64_r64(10, mp_buf_r)     // r10 = buf
+            uint64 mp_size_r = ir_resolve_src(s2_v, 1)
+            ir_emit_mov_r64_r64(11, mp_size_r)    // r11 = size
+            ir_emit_mov_r64_r64(2, 10)            // rdx = buf
+            ir_emit_mov_r64_r64(8, 11)            // r8  = size
+            emit_byte(0x48); emit_byte(0x31); emit_byte(0xC9)   // xor rcx, rcx (NULL)
+            emit_win_alloc_stack(0x20)            // shadow space
+            emit_win_call_iat(12)                 // GetModuleFileNameA
+            emit_win_free_stack(0x20)
+            // Returns DWORD; the upper 32 bits of rax are undefined, so
+            // zero-extend before it escapes as a uint64 length.
+            emit_byte(0x89); emit_byte(0xC0)      // mov eax, eax
+        } else {
+            ir_emit_mov_r64_imm64(0, 0)
+        }
+        if dst_r != 0xFFFFFFFF && dst_r != 0 {
+            ir_emit_mov_r64_r64(dst_r, 0)
+        }
+        if dst_r == 0xFFFFFFFF {
+            ir_emit_store_spill(0, dest_v)
+        }
         return
     }
 
