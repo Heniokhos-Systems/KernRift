@@ -79,7 +79,12 @@ build-import: build/krc2
 	chmod +x build/krc-import
 
 # Run test suite
-test: build/krc2
+# Depends on build/kr-bin because the suite asserts the RUNNER's reported
+# version matches the changelog. That check deliberately fails rather than
+# skips when the binary is absent, so the binary has to be built here --
+# otherwise the check silently never runs, which is the failure mode it exists
+# to prevent.
+test: build/krc2 build/kr-bin
 	@echo "=== Running test suite ==="
 	@echo '#!/bin/bash' > /tmp/krc-test && echo 'exec ./build/krc2 --arch=x86_64 "$$@"' >> /tmp/krc-test && chmod +x /tmp/krc-test
 	@KRC=/tmp/krc-test bash tests/run_tests.sh
