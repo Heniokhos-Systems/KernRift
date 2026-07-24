@@ -103,6 +103,15 @@ The IR path now produces smaller binaries than legacy on both architectures. Two
 curl -sSf https://raw.githubusercontent.com/Pantelis23/KernRift/main/install.sh | sh
 ```
 
+**Debian / Ubuntu** — `apt` (signed repository, amd64 + arm64):
+```bash
+curl -fsSL https://apt.kernrift.org/kernrift-archive-keyring.gpg \
+  | sudo tee /usr/share/keyrings/kernrift-archive-keyring.gpg >/dev/null
+echo "deb [signed-by=/usr/share/keyrings/kernrift-archive-keyring.gpg] https://apt.kernrift.org/ ./" \
+  | sudo tee /etc/apt/sources.list.d/kernrift.list
+sudo apt update && sudo apt install kernrift
+```
+
 **Windows** — `winget` (recommended):
 ```powershell
 winget install Pantelis23.KernRift
