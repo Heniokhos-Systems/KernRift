@@ -2,6 +2,31 @@
 
 All notable changes to `kernriftc` are documented in this file.
 
+## v2.8.30 — 2026-07-24
+
+A packaging and build-hygiene release.
+
+### Packaging
+
+- **apt.** A signed Debian/Ubuntu repository is now published at
+  `apt.kernrift.org` (amd64 + arm64). See the README for the one-line install.
+- **Homebrew.** `krc` now searches the Homebrew prefixes — `/opt/homebrew` on
+  Apple Silicon and `/home/linuxbrew/.linuxbrew` — for the standard library, so
+  a `brew`-installed compiler finds `std/` without configuration. Intel-mac
+  Homebrew already worked via `/usr/local`; `pacman`/AUR use `/usr/share` and
+  Scoop resolves relative to `krc.exe`, so neither needed a change.
+
+### Build
+
+- The import-based compile of the compiler (`krc src/main.kr`) works again.
+  `main.kr`'s import list had drifted out of sync with the concatenation build,
+  omitting six backend sources, so it failed on the first cross-file reference.
+  The import-built compiler is now byte-identical to the concatenated build.
+  Also threads the Xtensa entry node as a parameter (matching RISC-V) instead of
+  reaching across files for a global.
+
+694 tests pass; the bootstrap fixed point holds.
+
 ## v2.8.29 — 2026-07-24
 
 A small follow-up to the embedded release. It lifts the Xtensa stack-frame size
