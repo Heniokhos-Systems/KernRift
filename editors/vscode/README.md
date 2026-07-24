@@ -1,6 +1,6 @@
 # KernRift Language Support
 
-Language support for the [KernRift](https://github.com/Rift-Intelligence/KernRift) systems programming language — version-locked to the compiler.
+Language support for the [KernRift](https://github.com/Heniokhos-Systems/KernRift) systems programming language — version-locked to the compiler.
 
 ## Features
 
@@ -33,7 +33,7 @@ KernRift is a self-hosted, bare-metal systems language. It compiles itself ahead
 
 The compiler is written entirely in KernRift and includes an SSA IR backend, graph-coloring register allocator, constant folding / DCE / CSE, and per-target ELF / Mach-O / PE emitters — no LLVM, no external assembler, no external linker.
 
-- [GitHub](https://github.com/Rift-Intelligence/KernRift)
+- [GitHub](https://github.com/Heniokhos-Systems/KernRift)
 - [Website](https://kernrift.org)
-- [Language Reference](https://github.com/Rift-Intelligence/KernRift/blob/main/docs/LANGUAGE.md)
+- [Language Reference](https://github.com/Heniokhos-Systems/KernRift/blob/main/docs/LANGUAGE.md)
 - [Living Compiler (`krc lc`)](https://kernrift.org/living-compiler.html)

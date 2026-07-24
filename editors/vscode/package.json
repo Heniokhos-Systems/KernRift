@@ -1,8 +1,18 @@
 {
   "name": "kernrift",
   "displayName": "KernRift",
-  "description": "Language support for KernRift systems language (.kr files)",
+  "description": "Syntax highlighting, live diagnostics, and IntelliSense (completions, hover, go-to-definition) for KernRift — the self-hosted, bare-metal systems language (.kr).",
   "version": "2.8.30",
+  "keywords": [
+    "kernrift",
+    "kr",
+    "systems programming",
+    "bare-metal",
+    "kernel",
+    "compiler",
+    "freestanding",
+    "embedded"
+  ],
   "publisher": "Pantelis23",
   "license": "Apache-2.0",
   "repository": {
