@@ -1,5 +1,13 @@
 # Changelog
 
+## 2.8.31
+
+- Marketplace listing polish: accurate description and keywords, a rewritten
+  README (Requirements + Extension Settings sections, `f16`/`f32`/`f64` in the
+  type list, no version-dated wording), and a screenshot. No code changes over
+  2.8.30 — the version was bumped only because the Marketplace will not replace
+  an already-published version.
+
 ## 2.8.30
 
 - **Diagnostics fixed.** `krc`'s error format changed to
