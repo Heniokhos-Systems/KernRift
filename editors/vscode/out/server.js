@@ -9159,7 +9159,11 @@ var TYPES = [
   "i8",
   "i16",
   "i32",
-  "i64"
+  "i64",
+  // Floating point
+  "f16",
+  "f32",
+  "f64"
 ];
 var BUILTINS = {
   // Core I/O

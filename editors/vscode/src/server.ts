@@ -33,7 +33,9 @@ const TYPES = [
     'int8', 'int16', 'int32', 'int64',
     // Short aliases
     'u8', 'u16', 'u32', 'u64',
-    'i8', 'i16', 'i32', 'i64'
+    'i8', 'i16', 'i32', 'i64',
+    // Floating point
+    'f16', 'f32', 'f64'
 ];
 
 const BUILTINS: Record<string, { sig: string, doc: string }> = {
