@@ -4,6 +4,8 @@ Editor support for the [KernRift](https://github.com/Heniokhos-Systems/KernRift)
 systems programming language — syntax highlighting plus a language server that
 drives live diagnostics and IntelliSense from the real compiler.
 
+![KernRift syntax highlighting and file icons in VS Code](https://raw.githubusercontent.com/Heniokhos-Systems/KernRift/main/editors/Images/VScode.png)
+
 ## Features
 
 - **Syntax highlighting** for `.kr` files, with a file icon (blue cracked K) in
