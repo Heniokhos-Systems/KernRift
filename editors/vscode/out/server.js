@@ -3081,8 +3081,8 @@ var require_main = __commonJS({
     exports2.createMessageConnection = exports2.createServerSocketTransport = exports2.createClientSocketTransport = exports2.createServerPipeTransport = exports2.createClientPipeTransport = exports2.generateRandomPipeName = exports2.StreamMessageWriter = exports2.StreamMessageReader = exports2.SocketMessageWriter = exports2.SocketMessageReader = exports2.PortMessageWriter = exports2.PortMessageReader = exports2.IPCMessageWriter = exports2.IPCMessageReader = void 0;
     var ril_1 = require_ril();
     ril_1.default.install();
-    var path = require("path");
-    var os = require("os");
+    var path2 = require("path");
+    var os2 = require("os");
     var crypto_1 = require("crypto");
     var net_1 = require("net");
     var api_1 = require_api();
@@ -3217,9 +3217,9 @@ var require_main = __commonJS({
       }
       let result;
       if (XDG_RUNTIME_DIR) {
-        result = path.join(XDG_RUNTIME_DIR, `vscode-ipc-${randomSuffix}.sock`);
+        result = path2.join(XDG_RUNTIME_DIR, `vscode-ipc-${randomSuffix}.sock`);
       } else {
-        result = path.join(os.tmpdir(), `vscode-${randomSuffix}.sock`);
+        result = path2.join(os2.tmpdir(), `vscode-${randomSuffix}.sock`);
       }
       const limit = safeIpcPathLengths.get(process.platform);
       if (limit !== void 0 && result.length > limit) {
@@ -8309,8 +8309,8 @@ var require_files = __commonJS({
     Object.defineProperty(exports2, "__esModule", { value: true });
     exports2.resolveModulePath = exports2.FileSystem = exports2.resolveGlobalYarnPath = exports2.resolveGlobalNodePath = exports2.resolve = exports2.uriToFilePath = void 0;
     var url = require("url");
-    var path = require("path");
-    var fs = require("fs");
+    var path2 = require("path");
+    var fs2 = require("fs");
     var child_process_1 = require("child_process");
     function uriToFilePath(uri) {
       let parsed = url.parse(uri);
@@ -8328,7 +8328,7 @@ var require_files = __commonJS({
           segments.shift();
         }
       }
-      return path.normalize(segments.join("/"));
+      return path2.normalize(segments.join("/"));
     }
     exports2.uriToFilePath = uriToFilePath;
     function isWindows() {
@@ -8357,9 +8357,9 @@ var require_files = __commonJS({
         let env = process.env;
         let newEnv = /* @__PURE__ */ Object.create(null);
         Object.keys(env).forEach((key) => newEnv[key] = env[key]);
-        if (nodePath && fs.existsSync(nodePath)) {
+        if (nodePath && fs2.existsSync(nodePath)) {
           if (newEnv[nodePathKey]) {
-            newEnv[nodePathKey] = nodePath + path.delimiter + newEnv[nodePathKey];
+            newEnv[nodePathKey] = nodePath + path2.delimiter + newEnv[nodePathKey];
           } else {
             newEnv[nodePathKey] = nodePath;
           }
@@ -8432,9 +8432,9 @@ var require_files = __commonJS({
         }
         if (prefix.length > 0) {
           if (isWindows()) {
-            return path.join(prefix, "node_modules");
+            return path2.join(prefix, "node_modules");
           } else {
-            return path.join(prefix, "lib", "node_modules");
+            return path2.join(prefix, "lib", "node_modules");
           }
         }
         return void 0;
@@ -8474,7 +8474,7 @@ var require_files = __commonJS({
           try {
             let yarn = JSON.parse(line);
             if (yarn.type === "log") {
-              return path.join(yarn.data, "node_modules");
+              return path2.join(yarn.data, "node_modules");
             }
           } catch (e) {
           }
@@ -8497,24 +8497,24 @@ var require_files = __commonJS({
         if (process.platform === "win32") {
           _isCaseSensitive = false;
         } else {
-          _isCaseSensitive = !fs.existsSync(__filename.toUpperCase()) || !fs.existsSync(__filename.toLowerCase());
+          _isCaseSensitive = !fs2.existsSync(__filename.toUpperCase()) || !fs2.existsSync(__filename.toLowerCase());
         }
         return _isCaseSensitive;
       }
       FileSystem2.isCaseSensitive = isCaseSensitive;
       function isParent(parent, child) {
         if (isCaseSensitive()) {
-          return path.normalize(child).indexOf(path.normalize(parent)) === 0;
+          return path2.normalize(child).indexOf(path2.normalize(parent)) === 0;
         } else {
-          return path.normalize(child).toLowerCase().indexOf(path.normalize(parent).toLowerCase()) === 0;
+          return path2.normalize(child).toLowerCase().indexOf(path2.normalize(parent).toLowerCase()) === 0;
         }
       }
       FileSystem2.isParent = isParent;
     })(FileSystem || (exports2.FileSystem = FileSystem = {}));
     function resolveModulePath(workspaceRoot, moduleName, nodePath, tracer) {
       if (nodePath) {
-        if (!path.isAbsolute(nodePath)) {
-          nodePath = path.join(workspaceRoot, nodePath);
+        if (!path2.isAbsolute(nodePath)) {
+          nodePath = path2.join(workspaceRoot, nodePath);
         }
         return resolve(moduleName, nodePath, nodePath, tracer).then((value) => {
           if (FileSystem.isParent(nodePath, value)) {
@@ -9104,11 +9104,16 @@ function getWellformedEdit(textEdit) {
 
 // src/server.ts
 var import_child_process = require("child_process");
+var path = __toESM(require("path"));
+var os = __toESM(require("os"));
+var fs = __toESM(require("fs"));
 var connection = (0, import_node.createConnection)(import_node.ProposedFeatures.all);
 var documents = new import_node.TextDocuments(TextDocument);
 var krcPath = "krc";
+var tmpSeq = 0;
 var KEYWORDS = [
   "fn",
+  "let",
   "struct",
   "enum",
   "static",
@@ -9128,6 +9133,7 @@ var KEYWORDS = [
   "break",
   "continue",
   "loop",
+  "defer",
   "return",
   "match",
   "true",
@@ -9238,57 +9244,52 @@ connection.onInitialize((params) => {
     }
   };
 });
+var KRC_DIAG = /^.*?:(\d+):(\d+): (error|warning): (.+)$/gm;
+function parseKrcDiagnostics(output, lines) {
+  const diagnostics = [];
+  KRC_DIAG.lastIndex = 0;
+  let match;
+  while ((match = KRC_DIAG.exec(output)) !== null) {
+    const line = parseInt(match[1], 10) - 1;
+    const col = Math.max(0, parseInt(match[2], 10) - 1);
+    const severity = match[3] === "warning" ? import_node.DiagnosticSeverity.Warning : import_node.DiagnosticSeverity.Error;
+    const message = match[4];
+    if (line < 0 || line >= lines.length) continue;
+    diagnostics.push({
+      severity,
+      range: {
+        start: { line, character: col },
+        end: { line, character: lines[line]?.length || col + 1 }
+      },
+      message,
+      source: "krc"
+    });
+  }
+  return diagnostics;
+}
 function validateDocument(doc) {
   const text = doc.getText();
   const uri = doc.uri;
-  const filePath = uri.replace("file://", "");
-  const diagnostics = [];
-  const errorRegex = /error at line (\d+): (.+)/g;
   const lines = text.split("\n");
+  let diagnostics = [];
+  const tmpFile = path.join(os.tmpdir(), `krc_lsp_${process.pid}_${tmpSeq++}.kr`);
   try {
-    const tmpFile = `/tmp/krc_lsp_${process.pid}.kr`;
-    require("fs").writeFileSync(tmpFile, text);
-    const result = (0, import_child_process.execSync)(`${krcPath} check ${tmpFile} 2>&1`, {
-      timeout: 5e3,
-      encoding: "utf8"
-    });
-    let match;
-    while ((match = errorRegex.exec(result)) !== null) {
-      const line = parseInt(match[1]) - 1;
-      const message = match[2];
-      diagnostics.push({
-        severity: import_node.DiagnosticSeverity.Error,
-        range: {
-          start: { line, character: 0 },
-          end: { line, character: lines[line]?.length || 0 }
-        },
-        message,
-        source: "krc"
+    fs.writeFileSync(tmpFile, text);
+    let output = "";
+    try {
+      output = (0, import_child_process.execSync)(`"${krcPath}" check "${tmpFile}" 2>&1`, {
+        timeout: 5e3,
+        encoding: "utf8"
       });
+    } catch (e) {
+      output = e.stdout || e.stderr || e.message || "";
     }
-    require("fs").unlinkSync(tmpFile);
-  } catch (e) {
-    const output = e.stdout || e.stderr || e.message || "";
-    let match;
-    while ((match = errorRegex.exec(output)) !== null) {
-      const line = parseInt(match[1]) - 1;
-      const message = match[2];
-      if (line >= 0 && line < lines.length) {
-        diagnostics.push({
-          severity: import_node.DiagnosticSeverity.Error,
-          range: {
-            start: { line, character: 0 },
-            end: { line, character: lines[line]?.length || 0 }
-          },
-          message,
-          source: "krc"
-        });
-      }
-    }
-  }
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i].trim();
-    if (line.match(/^\s*fn\s+/) && !line.includes("{") && !line.includes(";") && !lines[i + 1]?.trim().startsWith("{")) {
+    diagnostics = parseKrcDiagnostics(output, lines);
+  } catch {
+  } finally {
+    try {
+      fs.unlinkSync(tmpFile);
+    } catch {
     }
   }
   connection.sendDiagnostics({ uri, diagnostics });

@@ -2,12 +2,12 @@
   "name": "kernrift",
   "displayName": "KernRift",
   "description": "Language support for KernRift systems language (.kr files)",
-  "version": "2.8.27",
+  "version": "2.8.30",
   "publisher": "Pantelis23",
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
-    "url": "https://github.com/Rift-Intelligence/KernRift"
+    "url": "https://github.com/Heniokhos-Systems/KernRift"
   },
   "icon": "logo.png",
   "engines": {

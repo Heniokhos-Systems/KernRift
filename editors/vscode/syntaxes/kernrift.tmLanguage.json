@@ -235,11 +235,11 @@
       "patterns": [
         {
           "name": "keyword.control.kr",
-          "match": "\\b(if|else|while|for|in|break|continue|loop|return|match)\\b"
+          "match": "\\b(if|else|while|for|in|break|continue|loop|return|match|defer)\\b"
         },
         {
           "name": "keyword.declaration.kr",
-          "match": "\\b(fn|struct|enum|static|const|type|unsafe|volatile|asm|import|device|at)\\b"
+          "match": "\\b(fn|let|struct|enum|static|const|type|unsafe|volatile|asm|import|device|at)\\b"
         },
         {
           "name": "constant.language.boolean.kr",

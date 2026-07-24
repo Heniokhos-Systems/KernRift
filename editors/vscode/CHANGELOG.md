@@ -1,5 +1,29 @@
 # Changelog
 
+## 2.8.30
+
+- **Diagnostics fixed.** `krc`'s error format changed to
+  `file:line:col: error: message` (with a source line and `^~~~` caret), but
+  the language server still matched the old `error at line N:` shape — so it
+  surfaced **no** diagnostics at all. The parser now reads the current format,
+  including the column (squiggle starts at the real position) and
+  `warning:` severity.
+- **`kernrift.compilerPath` now works.** The setting was never forwarded to
+  the language server, so a custom `krc` path was silently ignored; the client
+  now passes it through `initializationOptions`.
+- **Cross-platform temp files.** The server wrote its scratch file to a
+  hard-coded `/tmp/…`, which failed on Windows. It now uses the OS temp dir,
+  a per-request unique name (no collisions between concurrent checks), and
+  always cleans up.
+- **Syntax + completion coverage.** Added `let` and `defer` (v2.8.26 keywords)
+  to the grammar and the completion/hover list.
+- **License corrected** to Apache-2.0 (the file was stale MIT though the
+  manifest already declared Apache-2.0); `NOTICE` added.
+- Version realigned with the compiler (2.8.27 → 2.8.30) and repository URL
+  updated to `Heniokhos-Systems/KernRift`.
+- Dependency fix: `brace-expansion` bumped out of the GHSA-3jxr-9vmj-r5cp
+  (high, ReDoS) range via `npm audit fix`.
+
 ## 2.8.27
 
 - Syntax highlighting for all 18 annotations, up from 5. Adds the kernel-module

@@ -8,18 +8,22 @@ import {
 import { TextDocument } from 'vscode-languageserver-textdocument';
 import { execSync } from 'child_process';
 import * as path from 'path';
+import * as os from 'os';
+import * as fs from 'fs';
 
 const connection = createConnection(ProposedFeatures.all);
 const documents = new TextDocuments(TextDocument);
 
 let krcPath = 'krc';
+// Per-server counter so concurrent validations don't collide on one temp file.
+let tmpSeq = 0;
 
 // --- Keywords and builtins ---
 
 const KEYWORDS = [
-    'fn', 'struct', 'enum', 'static', 'const', 'type', 'unsafe', 'volatile',
+    'fn', 'let', 'struct', 'enum', 'static', 'const', 'type', 'unsafe', 'volatile',
     'asm', 'import', 'device', 'at',
-    'if', 'else', 'while', 'for', 'in', 'break', 'continue', 'loop',
+    'if', 'else', 'while', 'for', 'in', 'break', 'continue', 'loop', 'defer',
     'return', 'match', 'true', 'false', 'extern', 'export'
 ];
 
@@ -131,70 +135,64 @@ connection.onInitialize((params: InitializeParams): InitializeResult => {
 
 // --- Diagnostics via krc check ---
 
+// Parse krc's diagnostic output. Current krc format (v2.8.x) is:
+//   <file>:<line>:<col>: error: <message>
+//        3 |     return 0
+//          |     ^~~~~~
+//   1 parse error(s)
+// so we match the header line and ignore the source/caret/summary lines.
+const KRC_DIAG = /^.*?:(\d+):(\d+): (error|warning): (.+)$/gm;
+
+function parseKrcDiagnostics(output: string, lines: string[]): Diagnostic[] {
+    const diagnostics: Diagnostic[] = [];
+    KRC_DIAG.lastIndex = 0;
+    let match: RegExpExecArray | null;
+    while ((match = KRC_DIAG.exec(output)) !== null) {
+        const line = parseInt(match[1], 10) - 1;
+        const col = Math.max(0, parseInt(match[2], 10) - 1);
+        const severity = match[3] === 'warning'
+            ? DiagnosticSeverity.Warning
+            : DiagnosticSeverity.Error;
+        const message = match[4];
+        if (line < 0 || line >= lines.length) continue;
+        diagnostics.push({
+            severity,
+            range: {
+                start: { line, character: col },
+                end: { line, character: lines[line]?.length || col + 1 }
+            },
+            message,
+            source: 'krc'
+        });
+    }
+    return diagnostics;
+}
+
 function validateDocument(doc: TextDocument): void {
     const text = doc.getText();
     const uri = doc.uri;
-    const filePath = uri.replace('file://', '');
-    const diagnostics: Diagnostic[] = [];
-
-    // Parse error patterns: "error at line N: message"
-    const errorRegex = /error at line (\d+): (.+)/g;
-    // Also check for common issues ourselves
     const lines = text.split('\n');
+    let diagnostics: Diagnostic[] = [];
 
-    // Try running krc check if available
+    // Run `krc check` on a temp copy of the buffer. krc exits non-zero when it
+    // finds problems, so execSync throws and the output arrives via e.stdout.
+    const tmpFile = path.join(os.tmpdir(), `krc_lsp_${process.pid}_${tmpSeq++}.kr`);
     try {
-        const tmpFile = `/tmp/krc_lsp_${process.pid}.kr`;
-        require('fs').writeFileSync(tmpFile, text);
-        const result = execSync(`${krcPath} check ${tmpFile} 2>&1`, {
-            timeout: 5000,
-            encoding: 'utf8'
-        });
-
-        let match;
-        while ((match = errorRegex.exec(result)) !== null) {
-            const line = parseInt(match[1]) - 1;
-            const message = match[2];
-            diagnostics.push({
-                severity: DiagnosticSeverity.Error,
-                range: {
-                    start: { line, character: 0 },
-                    end: { line, character: lines[line]?.length || 0 }
-                },
-                message,
-                source: 'krc'
+        fs.writeFileSync(tmpFile, text);
+        let output = '';
+        try {
+            output = execSync(`"${krcPath}" check "${tmpFile}" 2>&1`, {
+                timeout: 5000,
+                encoding: 'utf8'
             });
+        } catch (e: any) {
+            output = e.stdout || e.stderr || e.message || '';
         }
-
-        require('fs').unlinkSync(tmpFile);
-    } catch (e: any) {
-        // Parse compiler error output
-        const output = e.stdout || e.stderr || e.message || '';
-        let match;
-        while ((match = errorRegex.exec(output)) !== null) {
-            const line = parseInt(match[1]) - 1;
-            const message = match[2];
-            if (line >= 0 && line < lines.length) {
-                diagnostics.push({
-                    severity: DiagnosticSeverity.Error,
-                    range: {
-                        start: { line, character: 0 },
-                        end: { line, character: lines[line]?.length || 0 }
-                    },
-                    message,
-                    source: 'krc'
-                });
-            }
-        }
-    }
-
-    // Quick local checks
-    for (let i = 0; i < lines.length; i++) {
-        const line = lines[i].trim();
-        // Check for unclosed braces (simple heuristic)
-        if (line.match(/^\s*fn\s+/) && !line.includes('{') && !line.includes(';') && !lines[i + 1]?.trim().startsWith('{')) {
-            // Might be missing opening brace — skip, krc check handles this
-        }
+        diagnostics = parseKrcDiagnostics(output, lines);
+    } catch {
+        // krc missing / unrunnable: leave diagnostics empty rather than throw.
+    } finally {
+        try { fs.unlinkSync(tmpFile); } catch { /* already gone */ }
     }
 
     connection.sendDiagnostics({ uri, diagnostics });

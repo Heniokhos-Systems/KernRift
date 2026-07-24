@@ -16,6 +16,10 @@ export function activate(context: ExtensionContext) {
         documentSelector: [{ scheme: 'file', language: 'kernrift' }],
         synchronize: {
             fileEvents: workspace.createFileSystemWatcher('**/*.kr')
+        },
+        // Forward the configured compiler path so `kernrift.compilerPath` works.
+        initializationOptions: {
+            compilerPath: workspace.getConfiguration('kernrift').get('compilerPath', 'krc')
         }
     };
 
