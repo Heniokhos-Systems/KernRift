@@ -1,0 +1,53 @@
+name: aur-test
+
+on:
+  push:
+    paths: ["packaging/aur/**", ".github/workflows/aur.yml"]
+  pull_request:
+    paths: ["packaging/aur/**"]
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    container: archlinux:latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install toolchain
+        run: pacman -Syu --noconfirm --needed base-devel namcap
+
+      - name: Stage PKGBUILD for a non-root build (makepkg refuses root)
+        run: |
+          useradd -m builder
+          install -d /home/builder/b
+          cp packaging/aur/PKGBUILD packaging/aur/.SRCINFO /home/builder/b/
+          chown -R builder /home/builder/b
+
+      - name: .SRCINFO is in sync with PKGBUILD
+        run: |
+          cd /home/builder/b
+          su builder -c "makepkg --printsrcinfo" > .SRCINFO.gen
+          if ! diff -u .SRCINFO .SRCINFO.gen; then
+            echo "::error::.SRCINFO is stale -- regenerate with: makepkg --printsrcinfo > .SRCINFO"
+            exit 1
+          fi
+
+      - name: Lint (namcap)
+        run: |
+          cd /home/builder/b
+          namcap PKGBUILD
+
+      - name: Build (verifies all source checksums)
+        run: |
+          cd /home/builder/b
+          su builder -c "makepkg -f"
+
+      - name: Install + stdlib import test
+        run: |
+          cd /home/builder/b
+          pacman -U --noconfirm ./kernrift-*.pkg.tar.zst
+          krc --version
+          printf 'import "std/io.kr"\nfn main() -> uint64 {\n    return 0\n}\n' > /tmp/t.kr
+          krc /tmp/t.kr -o /tmp/t.krbo
+          test -f /tmp/t.krbo && echo "PASS: std/io.kr resolved from /usr/share/kernrift"

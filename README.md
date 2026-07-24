@@ -112,6 +112,11 @@ echo "deb [signed-by=/usr/share/keyrings/kernrift-archive-keyring.gpg] https://a
 sudo apt update && sudo apt install kernrift
 ```
 
+**Arch Linux** — AUR (amd64 + arm64):
+```bash
+yay -S kernrift
+```
+
 **macOS / Linux** — Homebrew:
 ```bash
 brew install heniokhos-systems/kernrift/kernrift
