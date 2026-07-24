@@ -1,0 +1,39 @@
+name: scoop-test
+
+on:
+  push:
+    paths: ["bucket/**", ".github/workflows/scoop.yml"]
+  pull_request:
+    paths: ["bucket/**"]
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Scoop
+        shell: pwsh
+        run: |
+          # GitHub runners are admin; Scoop needs -RunAsAdmin to install there.
+          iex "& {$(irm get.scoop.sh)} -RunAsAdmin"
+          "$env:USERPROFILE\scoop\shims" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+
+      - name: Install kernrift from the local manifest
+        shell: pwsh
+        run: scoop install .\bucket\kernrift.json
+
+      - name: Verify + stdlib import test (proves exe-relative std discovery survives the Scoop shim)
+        shell: pwsh
+        run: |
+          krc --version
+          @'
+          import "std/io.kr"
+          fn main() -> uint64 {
+              return 0
+          }
+          '@ | Out-File -Encoding ascii imp.kr
+          krc imp.kr -o imp.krbo
+          if (-not (Test-Path imp.krbo)) { throw "stdlib import did NOT resolve under Scoop" }
+          Write-Host "stdlib import resolved via Scoop shim"
