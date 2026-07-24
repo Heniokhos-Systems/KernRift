@@ -2,6 +2,41 @@
 
 All notable changes to `kernriftc` are documented in this file.
 
+## v2.8.29 — 2026-07-24
+
+A small follow-up to the embedded release. It lifts the Xtensa stack-frame size
+limit, hardens the release tooling, and — the reason this release exists — makes
+the binaries actually report their own version: v2.8.28 shipped with both `krc`
+and `kr` self-reporting `2.8.27`, because nothing tied the hardcoded strings to
+the tag.
+
+### Xtensa: large stack frames
+
+The Xtensa backend no longer caps a function's stack frame at 1020/2047 bytes.
+Frame setup and every spill/reload now go through `ADDMI` when the offset
+exceeds the `l32i`/`s32i` immediate range, so large frames are addressed
+directly with no literal-pool round trip — pre-scan and emit agree by
+construction. A `main()` too large to compile before (it failed loudly rather
+than miscompiling) now builds and runs. Covered by a large-frame boot test under
+`qemu-system-xtensa` and a guard test asserting the old cap is genuinely gone.
+
+### Release & build hardening
+
+- **Version-drift guard.** A test now asserts the *built* `krc` and all three
+  `kr` runner strings agree with this CHANGELOG's version. Grepping the source
+  is exactly what missed the v2.8.28 drift, so the check runs the binaries.
+- `make test` now depends on `build/kr-bin`, and the `kr` runner is built for the
+  host architecture instead of always x86_64 — so the fat-binary round-trip and
+  the version checks actually run on ARM64 hosts.
+- The hardware-validated ESP32 TWAI loopback ships under `examples/` and doubles
+  as a build guard keeping the ESP32 backend exercised.
+
+### Fixed
+
+- `krc` and `kr` now self-report **2.8.29** (was a stale `2.8.27` in v2.8.28).
+
+694 tests pass; the bootstrap fixed point holds.
+
 ## v2.8.28 — 2026-07-21
 
 The embedded release. Two new backends (Xtensa LX6, hosted RISC-V), the ESP32
