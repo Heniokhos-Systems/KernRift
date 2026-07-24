@@ -107,7 +107,7 @@ fi
 # Download standard library
 echo "Installing standard library..."
 mkdir -p "$STD_DIR"
-for mod in string io math fmt mem vec map color fb fixedpoint font memfast widget time log net; do
+for mod in alloc string io math math_float fmt mem memfast vec map color fb fixedpoint font widget time log net sha256; do
     curl -sL -o "$STD_DIR/$mod.kr" \
         "https://raw.githubusercontent.com/Pantelis23/KernRift/main/std/$mod.kr"
 done
