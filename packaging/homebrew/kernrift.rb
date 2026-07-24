@@ -71,14 +71,18 @@ class Kernrift < Formula
   end
 
   test do
-    (testpath/"hello.kr").write <<~KR
+    # Importing a stdlib module is the real test: it only compiles if the
+    # formula installed std/ where krc searches (the Homebrew prefix — the
+    # reason v2.8.30 added that path). A builtin-only program would pass even
+    # with the stdlib missing, so it must import.
+    (testpath/"t.kr").write <<~KR
+      import "std/io.kr"
       fn main() -> uint64 {
-          print("hello from kernrift")
           return 0
       }
     KR
-    system bin/"krc", "hello.kr", "-o", "hello.krbo"
-    assert_predicate testpath/"hello.krbo", :exist?
+    system bin/"krc", "t.kr", "-o", "t.krbo"
+    assert_predicate testpath/"t.krbo", :exist?
     assert_match "2.8.30", shell_output("#{bin}/krc --version")
   end
 end
