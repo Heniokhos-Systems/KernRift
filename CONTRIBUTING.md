@@ -3,7 +3,7 @@
 ## Prerequisites
 
 - **Bootstrap compiler** — needed only once to go from nothing to a
-  working `krc`: `cargo install --git https://github.com/Pantelis23/KernRift-bootstrap kernriftc`
+  working `krc`: `cargo install --git https://github.com/Heniokhos-Systems/KernRift-bootstrap kernriftc`
 - After the first build, `krc` compiles itself — no Rust, C, or LLVM
   needed for any subsequent build.
 

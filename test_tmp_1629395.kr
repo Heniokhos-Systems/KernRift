@@ -1,0 +1,3 @@
+#lang stable
+
+fn main() { exit(42) }

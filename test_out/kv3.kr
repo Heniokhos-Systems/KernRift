@@ -1,0 +1,5 @@
+fn main() -> uint64 {
+    uint64 c = 0
+    c = '\u{41}'
+    return c
+}

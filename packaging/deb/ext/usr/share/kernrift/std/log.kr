@@ -1,0 +1,156 @@
+// KernRift Standard Library — Structured Logging
+//
+// Writes structured log messages to stderr (fd 2).
+// Log levels: 0=debug, 1=info, 2=warn, 3=error (default: info)
+// Output format: [LEVEL] message\n
+//        or:     [LEVEL] message key=value\n
+
+static u64 log_level = 0
+static u64 log_level_set = 0
+
+// Set minimum log level (0=debug, 1=info, 2=warn, 3=error)
+fn log_set_level(u64 level) {
+    log_level = level
+    log_level_set = 1
+}
+
+fn _log_ensure_level() {
+    if log_level_set == 0 {
+        log_level = 1
+        log_level_set = 1
+    }
+}
+
+// --- internal helpers ---
+
+// Write a string to stderr
+fn _log_write(u64 s) {
+    u64 len = str_len(s)
+    write(2, s, len)
+}
+
+// Write the level prefix tag to stderr
+fn _log_prefix(u64 level) {
+    if level == 0 { write(2, "[DEBUG] ", 8) }
+    if level == 1 { write(2, "[INFO] ", 7) }
+    if level == 2 { write(2, "[WARN] ", 7) }
+    if level == 3 { write(2, "[ERROR] ", 8) }
+}
+
+// Convert u64 to decimal string in a static buffer (no heap alloc)
+// Returns pointer to the static buffer, length written into len_out ptr
+fn _log_itoa(u64 val, u64 buf, u64 buf_size) -> u64 {
+    if val == 0 {
+        u64 p = buf + buf_size - 1
+        u8 z = 48
+        store8(p, z)
+        return 1
+    }
+    u64 len = 0
+    u64 tmp = val
+    while tmp > 0 {
+        u64 digit = tmp - tmp / 10 * 10
+        u8 db = digit + 48
+        u64 p = buf + buf_size - 1 - len
+        store8(p, db)
+        len = len + 1
+        tmp = tmp / 10
+    }
+    return len
+}
+
+// --- core logging ---
+
+fn log_debug(u64 msg) {
+    _log_ensure_level()
+    if log_level > 0 { return }
+    _log_prefix(0)
+    _log_write(msg)
+    write(2, "\n", 1)
+}
+
+fn log_info(u64 msg) {
+    _log_ensure_level()
+    if log_level > 1 { return }
+    _log_prefix(1)
+    _log_write(msg)
+    write(2, "\n", 1)
+}
+
+fn log_warn(u64 msg) {
+    _log_ensure_level()
+    if log_level > 2 { return }
+    _log_prefix(2)
+    _log_write(msg)
+    write(2, "\n", 1)
+}
+
+fn log_error(u64 msg) {
+    _log_ensure_level()
+    if log_level > 3 { return }
+    _log_prefix(3)
+    _log_write(msg)
+    write(2, "\n", 1)
+}
+
+// --- logging with key=value (string value) ---
+
+fn _log_kv(u64 level, u64 msg, u64 key, u64 val) {
+    _log_prefix(level)
+    _log_write(msg)
+    write(2, " ", 1)
+    _log_write(key)
+    write(2, "=", 1)
+    _log_write(val)
+    write(2, "\n", 1)
+}
+
+fn log_debug_kv(u64 msg, u64 key, u64 val) {
+    _log_ensure_level()
+    if log_level > 0 { return }
+    _log_kv(0, msg, key, val)
+}
+
+fn log_info_kv(u64 msg, u64 key, u64 val) {
+    _log_ensure_level()
+    if log_level > 1 { return }
+    _log_kv(1, msg, key, val)
+}
+
+fn log_warn_kv(u64 msg, u64 key, u64 val) {
+    _log_ensure_level()
+    if log_level > 2 { return }
+    _log_kv(2, msg, key, val)
+}
+
+fn log_error_kv(u64 msg, u64 key, u64 val) {
+    _log_ensure_level()
+    if log_level > 3 { return }
+    _log_kv(3, msg, key, val)
+}
+
+// --- logging with key=<integer> ---
+
+fn _log_int(u64 level, u64 msg, u64 key, u64 val) {
+    _log_prefix(level)
+    _log_write(msg)
+    write(2, " ", 1)
+    _log_write(key)
+    write(2, "=", 1)
+    // Format integer into a stack buffer (max 20 digits for u64)
+    u8[20] num_buf
+    u64 len = _log_itoa(val, num_buf, 20)
+    u64 start = 20 - len
+    write(2, num_buf + start, len)
+    write(2, "\n", 1)
+}
+
+fn log_info_int(u64 msg, u64 key, u64 val) {
+    if log_level > 1 { return }
+    _log_int(1, msg, key, val)
+}
+
+fn log_error_int(u64 msg, u64 key, u64 val) {
+    if log_level > 3 { return }
+    _log_int(3, msg, key, val)
+}

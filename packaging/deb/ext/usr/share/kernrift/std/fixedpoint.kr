@@ -1,0 +1,89 @@
+// KernRift standard library — 16.16 fixed-point math
+// Format: upper 48 bits = integer, lower 16 bits = fraction
+// Unit 1.0 = 0x10000 (65536)
+
+fn FP_ONE() -> u64 { return 65536 }
+fn FP_HALF() -> u64 { return 32768 }
+
+fn fp_from_int(u64 n) -> u64 {
+    return n << 16
+}
+
+fn fp_to_int(u64 fp) -> u64 {
+    return fp >> 16
+}
+
+fn fp_from_frac(u64 num, u64 den) -> u64 {
+    return (num << 16) / den
+}
+
+fn fp_frac(u64 fp) -> u64 {
+    return fp & 0xFFFF
+}
+
+fn fp_floor(u64 fp) -> u64 {
+    return fp & 0xFFFFFFFFFFFF0000
+}
+
+fn fp_ceil(u64 fp) -> u64 {
+    return (fp + 0xFFFF) & 0xFFFFFFFFFFFF0000
+}
+
+fn fp_round(u64 fp) -> u64 {
+    return (fp + 0x8000) & 0xFFFFFFFFFFFF0000
+}
+
+fn fp_add(u64 a, u64 b) -> u64 {
+    return a + b
+}
+
+fn fp_sub(u64 a, u64 b) -> u64 {
+    return a - b
+}
+
+fn fp_mul(u64 a, u64 b) -> u64 {
+    return (a * b) >> 16
+}
+
+fn fp_div(u64 a, u64 b) -> u64 {
+    return (a << 16) / b
+}
+
+fn fp_abs(u64 fp) -> u64 {
+    if signed_lt(fp, 0) { return 0 - fp }
+    return fp
+}
+
+fn fp_min(u64 a, u64 b) -> u64 {
+    if signed_lt(a, b) { return a }
+    return b
+}
+
+fn fp_max(u64 a, u64 b) -> u64 {
+    if signed_gt(a, b) { return a }
+    return b
+}
+
+fn fp_clamp(u64 val, u64 lo, u64 hi) -> u64 {
+    if signed_lt(val, lo) { return lo }
+    if signed_gt(val, hi) { return hi }
+    return val
+}
+
+fn fp_lerp(u64 a, u64 b, u64 t) -> u64 {
+    return fp_add(a, fp_mul(fp_sub(b, a), t))
+}
+
+fn fp_sqrt(u64 x) -> u64 {
+    if x == 0 { return 0 }
+    u64 guess = x >> 1
+    if guess == 0 { guess = 1 }
+    u64 i = 0
+    while i < 32 {
+        u64 next = (guess + fp_div(x, guess)) >> 1
+        if next == guess { return guess }
+        guess = next
+        i = i + 1
+    }
+    return guess
+}

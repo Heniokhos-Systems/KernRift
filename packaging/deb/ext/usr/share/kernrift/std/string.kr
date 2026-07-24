@@ -1,0 +1,1142 @@
+// KernRift Standard Library — String Operations
+//
+// Strings are null-terminated byte sequences (u64 = pointer to first byte).
+// All functions that return strings allocate new memory via alloc().
+
+// Concatenate two strings: str_cat("hello", " world") → "hello world"
+fn str_cat(u64 a, u64 b) -> u64 {
+    u64 la = str_len(a)
+    u64 lb = str_len(b)
+    u64 total = la + lb + 1
+    u64 result = alloc(total)
+    memcpy(result, a, la)
+    u64 dp = result + la
+    memcpy(dp, b, lb)
+    u64 tp = result + la + lb
+    u8 z = 0
+    store8(tp, z)
+    return result
+}
+
+// Copy a string: returns new allocated copy
+fn str_copy(u64 s) -> u64 {
+    u64 len = str_len(s)
+    u64 result = alloc(len + 1)
+    memcpy(result, s, len + 1)
+    return result
+}
+
+// Check if string starts with prefix
+fn str_starts(u64 s, u64 prefix) -> u64 {
+    u64 plen = str_len(prefix)
+    u64 slen = str_len(s)
+    if plen > slen { return 0 }
+    u64 i = 0
+    while i < plen {
+        u64 sp = s + i
+        u64 pp = prefix + i
+        u64 sc = 0
+        u64 pc = 0
+        sc = load8(sp)
+        pc = load8(pp)
+        if sc != pc { return 0 }
+        i = i + 1
+    }
+    return 1
+}
+
+// Check if string ends with suffix
+fn str_ends(u64 s, u64 suffix) -> u64 {
+    u64 slen = str_len(s)
+    u64 xlen = str_len(suffix)
+    if xlen > slen { return 0 }
+    u64 offset = slen - xlen
+    u64 i = 0
+    while i < xlen {
+        u64 sp = s + offset + i
+        u64 xp = suffix + i
+        u64 sc = 0
+        u64 xc = 0
+        sc = load8(sp)
+        xc = load8(xp)
+        if sc != xc { return 0 }
+        i = i + 1
+    }
+    return 1
+}
+
+// Find first occurrence of byte in string, returns index or 0xFFFFFFFFFFFFFFFF
+fn str_find_byte(u64 s, u64 byte_val) -> u64 {
+    u64 i = 0
+    u64 p = s
+    u64 ch = 0
+    ch = load8(p)
+    while ch != 0 {
+        if ch == byte_val { return i }
+        i = i + 1
+        p = s + i
+        ch = load8(p)
+    }
+    return 0xFFFFFFFFFFFFFFFF
+}
+
+// Check if string contains a substring
+fn str_contains(u64 haystack, u64 needle) -> u64 {
+    u64 hlen = str_len(haystack)
+    u64 nlen = str_len(needle)
+    if nlen == 0 { return 1 }
+    if nlen > hlen { return 0 }
+    u64 i = 0
+    while i <= hlen - nlen {
+        u64 j = 0
+        u64 found = 1
+        while j < nlen {
+            u64 hp = haystack + i + j
+            u64 np = needle + j
+            u64 hc = 0
+            u64 nc = 0
+            hc = load8(hp)
+            nc = load8(np)
+            if hc != nc { found = 0; j = nlen }
+            j = j + 1
+        }
+        if found != 0 { return 1 }
+        i = i + 1
+    }
+    return 0
+}
+
+// Get substring: str_sub("hello world", 6, 5) → "world"
+fn str_sub(u64 s, u64 start, u64 len) -> u64 {
+    u64 result = alloc(len + 1)
+    u64 sp = s + start
+    memcpy(result, sp, len)
+    u64 tp = result + len
+    u8 z = 0
+    store8(tp, z)
+    return result
+}
+
+// Get character at index (returns byte value)
+fn str_at(u64 s, u64 idx) -> u64 {
+    u64 p = s + idx
+    u64 ch = 0
+    ch = load8(p)
+    return ch
+}
+
+// Convert string to integer: str_to_int("42") → 42
+fn str_to_int(u64 s) -> u64 {
+    u64 result = 0
+    u64 i = 0
+    u64 neg = 0
+    u64 p = s
+    u64 ch = 0
+    ch = load8(p)
+    if ch == 45 { neg = 1; i = 1 }
+    p = s + i
+    ch = load8(p)
+    while ch >= 48 && ch <= 57 {
+        result = result * 10 + ch - 48
+        i = i + 1
+        p = s + i
+        ch = load8(p)
+    }
+    if neg != 0 { return 0 - result }
+    return result
+}
+
+// Convert integer to string: int_to_str(42) → "42"
+fn int_to_str(u64 val) -> u64 {
+    if val == 0 {
+        u64 r = alloc(2)
+        u8 z0 = 48
+        store8(r, z0)
+        u64 r1 = r + 1
+        u8 zz = 0
+        store8(r1, zz)
+        return r
+    }
+    u8[20] buf
+    u64 len = 0
+    u64 tmp = val
+    while tmp > 0 {
+        u64 digit = tmp - tmp / 10 * 10
+        u8 db = digit + 48
+        buf[len] = db
+        len = len + 1
+        tmp = tmp / 10
+    }
+    u64 result = alloc(len + 1)
+    u64 i = 0
+    while i < len {
+        u64 si = len - 1 - i
+        u64 dp = result + i
+        u64 bv = buf[si]
+        u8 bb = bv
+        store8(dp, bb)
+        i = i + 1
+    }
+    u64 tp = result + len
+    u8 z = 0
+    store8(tp, z)
+    return result
+}
+
+// Repeat a string: str_repeat("ab", 3) → "ababab"
+fn str_repeat(u64 s, u64 count) -> u64 {
+    u64 slen = str_len(s)
+    u64 total = slen * count
+    u64 result = alloc(total + 1)
+    u64 i = 0
+    while i < count {
+        u64 dp = result + i * slen
+        memcpy(dp, s, slen)
+        i = i + 1
+    }
+    u64 tp = result + total
+    u8 z = 0
+    store8(tp, z)
+    return result
+}
+
+// Trim leading and trailing whitespace
+fn str_trim(u64 s) -> u64 {
+    u64 len = str_len(s)
+    u64 start = 0
+    u64 ch = 0
+    u64 p = s + start
+    ch = load8(p)
+    while start < len && (ch == 32 || ch == 9 || ch == 10 || ch == 13) {
+        start = start + 1
+        p = s + start
+        if start < len { ch = load8(p) }
+    }
+    u64 end = len
+    while end > start {
+        p = s + end - 1
+        ch = load8(p)
+        if ch != 32 && ch != 9 && ch != 10 && ch != 13 { break }
+        end = end - 1
+    }
+    return str_sub(s, start, end - start)
+}
+
+// ---------------------------------------------------------------------------
+// opt_* helpers for Pattern 1 of the error-handling convention
+// (docs/ERROR_HANDLING.md). The sentinel is 0xFFFFFFFFFFFFFFFF ("all ones"),
+// chosen so it's unreachable as a legitimate index / offset / byte-count.
+// ---------------------------------------------------------------------------
+
+// The sentinel value representing "no result".
+fn opt_none() -> u64 {
+    return 0xFFFFFFFFFFFFFFFF
+}
+
+// Wrap a value. Aborts if the value already equals the sentinel.
+fn opt_some(u64 v) -> u64 {
+    if v == 0xFFFFFFFFFFFFFFFF {
+        write(2, "opt_some: value equals sentinel\n", 32)
+        exit(1)
+    }
+    return v
+}
+
+// 1 if `v` is a real value, 0 if it's the sentinel.
+fn opt_is_some(u64 v) -> u64 {
+    if v == 0xFFFFFFFFFFFFFFFF { return 0 }
+    return 1
+}
+
+// Extract the value or abort.
+fn opt_unwrap(u64 v) -> u64 {
+    if v == 0xFFFFFFFFFFFFFFFF {
+        write(2, "opt_unwrap: sentinel\n", 21)
+        exit(1)
+    }
+    return v
+}
+
+// ---------------------------------------------------------------------------
+// Added in v2.8.11 — the "missing" stdlib string operations that previously
+// required every caller to roll their own. All functions that return strings
+// allocate fresh memory via `alloc()`; callers own the result.
+// ---------------------------------------------------------------------------
+
+// Find first occurrence of `needle` in `haystack`, return byte index or
+// 0xFFFFFFFFFFFFFFFF (-1 as u64) when absent. Empty needle returns 0.
+fn str_index_of(u64 haystack, u64 needle) -> u64 {
+    u64 hlen = str_len(haystack)
+    u64 nlen = str_len(needle)
+    if nlen == 0 { return 0 }
+    if nlen > hlen { return 0xFFFFFFFFFFFFFFFF }
+    u64 limit = hlen - nlen + 1
+    u64 i = 0
+    while i < limit {
+        u64 j = 0
+        u64 ok = 1
+        while j < nlen && ok != 0 {
+            u64 hp = haystack + i + j
+            u64 np = needle + j
+            u64 hc = load8(hp)
+            u64 nc = load8(np)
+            if hc != nc { ok = 0 }
+            j = j + 1
+        }
+        if ok != 0 { return i }
+        i = i + 1
+    }
+    return 0xFFFFFFFFFFFFFFFF
+}
+
+// Signed lexicographic compare. Returns -1, 0, or +1 as a u64 (so
+// 0xFFFFFFFFFFFFFFFF represents -1). Use `signed_lt(str_compare(a, b), 0)`
+// or compare the result against `0` with the signed helpers.
+fn str_compare(u64 a, u64 b) -> u64 {
+    u64 i = 0
+    u64 ac = 0
+    u64 bc = 0
+    while 1 == 1 {
+        u64 ap = a + i
+        u64 bp = b + i
+        ac = load8(ap)
+        bc = load8(bp)
+        if ac == 0 && bc == 0 { return 0 }
+        if ac == 0 { return 0xFFFFFFFFFFFFFFFF }
+        if bc == 0 { return 1 }
+        if ac < bc { return 0xFFFFFFFFFFFFFFFF }
+        if ac > bc { return 1 }
+        i = i + 1
+    }
+    return 0
+}
+
+// Return a lowercased copy (ASCII only — codepoints outside 'A'..'Z' are
+// copied verbatim, so valid UTF-8 passes through unchanged).
+fn str_lower(u64 s) -> u64 {
+    u64 len = str_len(s)
+    u64 result = alloc(len + 1)
+    u64 i = 0
+    while i < len {
+        u64 sp = s + i
+        u64 dp = result + i
+        u64 c = load8(sp)
+        if c >= 65 && c <= 90 { c = c + 32 }
+        u8 cb = c
+        store8(dp, cb)
+        i = i + 1
+    }
+    u64 tp = result + len
+    u8 z = 0
+    store8(tp, z)
+    return result
+}
+
+// Return an uppercased copy (ASCII only).
+fn str_upper(u64 s) -> u64 {
+    u64 len = str_len(s)
+    u64 result = alloc(len + 1)
+    u64 i = 0
+    while i < len {
+        u64 sp = s + i
+        u64 dp = result + i
+        u64 c = load8(sp)
+        if c >= 97 && c <= 122 { c = c - 32 }
+        u8 cb = c
+        store8(dp, cb)
+        i = i + 1
+    }
+    u64 tp = result + len
+    u8 z = 0
+    store8(tp, z)
+    return result
+}
+
+// Replace every occurrence of `from` (non-empty) with `to` in `haystack`.
+// Allocates a fresh string. Empty `from` returns a copy of `haystack` so
+// the function never loops forever.
+fn str_replace(u64 haystack, u64 from, u64 to) -> u64 {
+    u64 hlen = str_len(haystack)
+    u64 flen = str_len(from)
+    u64 tlen = str_len(to)
+    if flen == 0 { return str_copy(haystack) }
+
+    // First pass: count matches so we can size the output buffer.
+    u64 matches = 0
+    u64 i = 0
+    while i + flen <= hlen {
+        u64 j = 0
+        u64 ok = 1
+        while j < flen && ok != 0 {
+            u64 hp = haystack + i + j
+            u64 fp = from + j
+            if load8(hp) != load8(fp) { ok = 0 }
+            j = j + 1
+        }
+        if ok != 0 {
+            matches = matches + 1
+            i = i + flen
+        } else {
+            i = i + 1
+        }
+    }
+
+    u64 out_len = hlen + matches * tlen - matches * flen
+    u64 result = alloc(out_len + 1)
+    u64 si = 0
+    u64 di = 0
+    while si < hlen {
+        u64 try_match = 0
+        if si + flen <= hlen { try_match = 1 }
+        if try_match != 0 {
+            u64 j = 0
+            u64 ok = 1
+            while j < flen && ok != 0 {
+                u64 hp = haystack + si + j
+                u64 fp = from + j
+                if load8(hp) != load8(fp) { ok = 0 }
+                j = j + 1
+            }
+            if ok != 0 {
+                u64 dp = result + di
+                memcpy(dp, to, tlen)
+                di = di + tlen
+                si = si + flen
+            } else {
+                u64 sp = haystack + si
+                u64 dp = result + di
+                u8 cb = load8(sp)
+                store8(dp, cb)
+                si = si + 1
+                di = di + 1
+            }
+        } else {
+            u64 sp = haystack + si
+            u64 dp = result + di
+            u8 cb = load8(sp)
+            store8(dp, cb)
+            si = si + 1
+            di = di + 1
+        }
+    }
+    u64 tp = result + di
+    u8 z = 0
+    store8(tp, z)
+    return result
+}
+
+// Split `s` on a single-byte delimiter. Writes pointers to freshly-alloc'd
+// substrings into `out_parts` (caller supplies a u64[] large enough) and
+// returns the number of parts produced. "a,b,c" with ',' yields 3 parts:
+// "a", "b", "c"; an empty string yields 1 part (""); leading or trailing
+// delimiters produce empty segments ("a,,b" → ["a", "", "b"]).
+fn str_split(u64 s, u64 delim_byte, u64 out_parts, u64 max_parts) -> u64 {
+    u64 len = str_len(s)
+    u64 count = 0
+    u64 start = 0
+    u64 i = 0
+    while i <= len && count < max_parts {
+        u64 p = s + i
+        u64 ch = 0
+        if i < len { ch = load8(p) }
+        u64 at_end = 0
+        if i == len { at_end = 1 }
+        if at_end != 0 || ch == delim_byte {
+            u64 part = str_sub(s, start, i - start)
+            u64 slot = out_parts + count * 8
+            store64(slot, part)
+            count = count + 1
+            start = i + 1
+            if at_end != 0 { i = i + 1; break }
+        }
+        i = i + 1
+    }
+    return count
+}
+
+// Join `count` strings with `sep` between each pair. Caller passes a u64
+// array of pointers (same shape str_split writes). Empty count returns "".
+fn str_join(u64 parts, u64 count, u64 sep) -> u64 {
+    if count == 0 {
+        u64 empty = alloc(1)
+        u8 z0 = 0
+        store8(empty, z0)
+        return empty
+    }
+    u64 sep_len = str_len(sep)
+    u64 total = 0
+    u64 i = 0
+    while i < count {
+        u64 slot = parts + i * 8
+        u64 pp = 0
+        unsafe { *(slot as uint64) -> pp }
+        total = total + str_len(pp)
+        i = i + 1
+    }
+    total = total + sep_len * (count - 1)
+
+    u64 result = alloc(total + 1)
+    u64 di = 0
+    i = 0
+    while i < count {
+        u64 slot = parts + i * 8
+        u64 pp = 0
+        unsafe { *(slot as uint64) -> pp }
+        u64 pl = str_len(pp)
+        u64 dp = result + di
+        memcpy(dp, pp, pl)
+        di = di + pl
+        if i + 1 < count {
+            u64 sp = result + di
+            memcpy(sp, sep, sep_len)
+            di = di + sep_len
+        }
+        i = i + 1
+    }
+    u64 tp = result + di
+    u8 z = 0
+    store8(tp, z)
+    return result
+}
+
+// Parse a decimal floating-point string. Accepts optional leading sign,
+// an integer part, optional '.' with fractional digits, and an optional
+// 'e'/'E' exponent (also with optional sign). Digits outside '0'..'9'
+// terminate parsing. Returns the f64 bit pattern as a u64.
+//
+// Not a full C strtod (no hex floats, no locale, no "inf"/"nan" literals),
+// but covers 99 % of what you want from `str_to_float("-3.14e2")`.
+fn str_to_float(u64 s) -> f64 {
+    u64 i = 0
+    u64 neg = 0
+    u64 p = s + i
+    u64 ch = load8(p)
+    if ch == 45 { neg = 1; i = i + 1 }
+    else if ch == 43 { i = i + 1 }
+
+    f64 result = int_to_f64(0)
+    f64 ten = int_to_f64(10)
+    u64 have_digit = 0
+
+    // Integer part
+    p = s + i
+    ch = load8(p)
+    while ch >= 48 && ch <= 57 {
+        f64 d = int_to_f64(ch - 48)
+        result = result * ten + d
+        have_digit = 1
+        i = i + 1
+        p = s + i
+        ch = load8(p)
+    }
+
+    // Fractional part
+    if ch == 46 {
+        i = i + 1
+        f64 frac_scale = int_to_f64(1)
+        f64 frac_value = int_to_f64(0)
+        p = s + i
+        ch = load8(p)
+        while ch >= 48 && ch <= 57 {
+            f64 d = int_to_f64(ch - 48)
+            frac_value = frac_value * ten + d
+            frac_scale = frac_scale * ten
+            have_digit = 1
+            i = i + 1
+            p = s + i
+            ch = load8(p)
+        }
+        result = result + frac_value / frac_scale
+    }
+
+    // Exponent
+    if ch == 101 || ch == 69 {
+        i = i + 1
+        u64 exp_neg = 0
+        p = s + i
+        ch = load8(p)
+        if ch == 45 { exp_neg = 1; i = i + 1; p = s + i; ch = load8(p) }
+        else if ch == 43 { i = i + 1; p = s + i; ch = load8(p) }
+        u64 exp_val = 0
+        while ch >= 48 && ch <= 57 {
+            exp_val = exp_val * 10 + ch - 48
+            i = i + 1
+            p = s + i
+            ch = load8(p)
+        }
+        f64 base = ten
+        if exp_neg != 0 { base = int_to_f64(1) / ten }
+        u64 k = 0
+        while k < exp_val {
+            result = result * base
+            k = k + 1
+        }
+    }
+
+    if have_digit == 0 { return int_to_f64(0) }
+    if neg != 0 { return int_to_f64(0) - result }
+    return result
+}
+
+// ---------------------------------------------------------------------------
+// UTF-8 codepoint iteration
+//
+// KernRift strings are just byte arrays, and `str_at(s, i)` / `str_sub`
+// operate on bytes, not Unicode codepoints. The helpers below decode the
+// next codepoint starting at byte offset `i`, or encode a codepoint into
+// a buffer. Byte-oriented string operations (copy, concat, equality,
+// index-of with multi-byte needles) preserve UTF-8 correctness without
+// these — you only need them when you want to iterate *codepoints*.
+// ---------------------------------------------------------------------------
+
+// Decode the UTF-8 codepoint starting at byte offset `i`. Writes the
+// byte length of the sequence to `out_width` (1..4) and returns the
+// codepoint. Invalid bytes return the raw byte with width 1 so callers
+// can step past corruption without looping forever.
+fn utf8_decode_at(u64 s, u64 i, u64 out_width) -> u64 {
+    u64 p = s + i
+    u64 b0 = load8(p)
+    // ASCII / single byte
+    if b0 < 128 {
+        store64(out_width, 1)
+        return b0
+    }
+    // Leading byte patterns: 110xxxxx(2) 1110xxxx(3) 11110xxx(4)
+    if (b0 & 0xE0) == 0xC0 {
+        u64 p1 = s + i + 1
+        u64 b1 = load8(p1)
+        if (b1 & 0xC0) != 0x80 { store64(out_width, 1); return b0 }
+        store64(out_width, 2)
+        return ((b0 & 0x1F) << 6) | (b1 & 0x3F)
+    }
+    if (b0 & 0xF0) == 0xE0 {
+        u64 p1 = s + i + 1
+        u64 p2 = s + i + 2
+        u64 b1 = load8(p1)
+        u64 b2 = load8(p2)
+        if (b1 & 0xC0) != 0x80 { store64(out_width, 1); return b0 }
+        if (b2 & 0xC0) != 0x80 { store64(out_width, 1); return b0 }
+        store64(out_width, 3)
+        return ((b0 & 0x0F) << 12) | ((b1 & 0x3F) << 6) | (b2 & 0x3F)
+    }
+    if (b0 & 0xF8) == 0xF0 {
+        u64 p1 = s + i + 1
+        u64 p2 = s + i + 2
+        u64 p3 = s + i + 3
+        u64 b1 = load8(p1)
+        u64 b2 = load8(p2)
+        u64 b3 = load8(p3)
+        if (b1 & 0xC0) != 0x80 { store64(out_width, 1); return b0 }
+        if (b2 & 0xC0) != 0x80 { store64(out_width, 1); return b0 }
+        if (b3 & 0xC0) != 0x80 { store64(out_width, 1); return b0 }
+        store64(out_width, 4)
+        return ((b0 & 0x07) << 18) | ((b1 & 0x3F) << 12) | ((b2 & 0x3F) << 6) | (b3 & 0x3F)
+    }
+    // Stray continuation byte — treat as width-1 raw byte
+    store64(out_width, 1)
+    return b0
+}
+
+// Encode a codepoint into `buf`. Returns the number of bytes written
+// (1..4). Does not null-terminate. Codepoints >= 0x110000 are silently
+// clamped into replacement character U+FFFD.
+fn utf8_encode(u64 cp, u64 buf) -> u64 {
+    if cp >= 1114112 { cp = 65533 }
+    if cp < 128 {
+        u8 b = cp
+        store8(buf, b)
+        return 1
+    }
+    if cp < 2048 {
+        u8 b0 = 0xC0 | (cp >> 6)
+        u8 b1 = 0x80 | (cp & 0x3F)
+        store8(buf, b0)
+        u64 p1 = buf + 1
+        store8(p1, b1)
+        return 2
+    }
+    if cp < 65536 {
+        u8 b0 = 0xE0 | (cp >> 12)
+        u8 b1 = 0x80 | ((cp >> 6) & 0x3F)
+        u8 b2 = 0x80 | (cp & 0x3F)
+        store8(buf, b0)
+        u64 p1 = buf + 1; store8(p1, b1)
+        u64 p2 = buf + 2; store8(p2, b2)
+        return 3
+    }
+    u8 b0 = 0xF0 | (cp >> 18)
+    u8 b1 = 0x80 | ((cp >> 12) & 0x3F)
+    u8 b2 = 0x80 | ((cp >> 6) & 0x3F)
+    u8 b3 = 0x80 | (cp & 0x3F)
+    store8(buf, b0)
+    u64 p1 = buf + 1; store8(p1, b1)
+    u64 p2 = buf + 2; store8(p2, b2)
+    u64 p3 = buf + 3; store8(p3, b3)
+    return 4
+}
+
+// Count codepoints in a UTF-8 string (≠ byte length). Invalid bytes
+// count as one codepoint each, matching utf8_decode_at's policy.
+fn str_codepoint_count(u64 s) -> u64 {
+    u64 len = str_len(s)
+    u64 count = 0
+    u64 i = 0
+    u64[1] w
+    u64 w_ptr = w
+    while i < len {
+        utf8_decode_at(s, i, w_ptr)
+        u64 ww = 0
+        unsafe { *(w_ptr as uint64) -> ww }
+        i = i + ww
+        count = count + 1
+    }
+    return count
+}
+
+// Is `cp` a combining mark that visually attaches to the previous grapheme?
+// Covers the two main combining-diacritical ranges (U+0300..U+036F and
+// U+20D0..U+20FF) plus zero-width joiner / non-joiner. Enough for most
+// Latin / Greek / Cyrillic text that uses precomposed plus trailing
+// combining accents. Indic scripts, Arabic joiners, emoji ZWJ sequences
+// etc. need the full Unicode break-property tables — tracked separately.
+fn utf8_is_combining(u64 cp) -> u64 {
+    if cp >= 0x0300 && cp <= 0x036F { return 1 }  // Combining Diacriticals
+    if cp >= 0x20D0 && cp <= 0x20FF { return 1 }  // Combining Diacriticals Supplement
+    if cp == 0x200C { return 1 }                  // Zero-Width Non-Joiner
+    if cp == 0x200D { return 1 }                  // Zero-Width Joiner
+    if cp == 0xFEFF { return 1 }                  // Zero-Width No-Break Space / BOM
+    return 0
+}
+
+// Count grapheme clusters in a UTF-8 string. A grapheme here is "one
+// non-combining codepoint plus any combining codepoints that follow"
+// using utf8_is_combining's conservative definition. `"cafe\u0301"`
+// counts as 4 graphemes, same as `"café"`.
+fn str_grapheme_count(u64 s) -> u64 {
+    u64 len = str_len(s)
+    u64 count = 0
+    u64 i = 0
+    u64[1] w
+    u64 w_ptr = w
+    while i < len {
+        u64 cp = utf8_decode_at(s, i, w_ptr)
+        u64 ww = 0
+        unsafe { *(w_ptr as uint64) -> ww }
+        if utf8_is_combining(cp) == 0 {
+            count = count + 1
+        }
+        i = i + ww
+    }
+    return count
+}
+
+// ---------------------------------------------------------------------------
+// UTF-8-aware case folding
+//
+// Covered blocks:
+//   • ASCII (A-Z / a-z)
+//   • Latin-1 Supplement (À-Þ / à-þ)                    — common Western text
+//   • Greek and Coptic, modern subset (U+0370..U+03FF)  — modern Greek only
+//
+// Codepoints outside those ranges pass through unchanged — use the
+// ASCII-only `str_lower` / `str_upper` if you need guaranteed locale
+// stability.
+//
+// Explicitly out of scope (documented so nobody's surprised):
+//   • Polytonic Greek (U+1F00..U+1FFF) — the ~230 entries used for
+//     classical Greek with breathings and circumflexes.
+//   • Cyrillic, Armenian, Georgian, Cherokee, Adlam, Vai, Warang Citi,
+//     Deseret, Osage. Full Unicode case folding is ~1 500 entries.
+//   • One-to-many folds like German ß -> SS, Turkish İ -> i̇, Dutch IJ.
+//     Each mapping here is a 1-codepoint -> 1-codepoint transform.
+//   • Locale-aware transforms (Turkish dotless i, Lithuanian accented i).
+// ---------------------------------------------------------------------------
+
+// Return the lowercase form of `cp` for ASCII, Latin-1 Supplement, and
+// modern Greek. Codepoints outside those ranges pass through unchanged.
+fn utf8_lower_codepoint(u64 cp) -> u64 {
+    // ASCII A-Z
+    if cp >= 65 && cp <= 90 { return cp + 32 }
+    // Latin-1 Supplement À-Þ (skip × at 0xD7)
+    if cp >= 0xC0 && cp <= 0xDE && cp != 0xD7 { return cp + 32 }
+    // Greek accented uppercase with tonos / dialytika
+    if cp == 0x0386 { return 0x03AC }                      // Ά -> ά
+    if cp >= 0x0388 && cp <= 0x038A { return cp + 0x25 }   // Έ-Ί -> έ-ί
+    if cp == 0x038C { return 0x03CC }                      // Ό -> ό
+    if cp >= 0x038E && cp <= 0x038F { return cp + 0x3F }   // Ύ-Ώ -> ύ-ώ
+    // Greek main uppercase Α-Ρ and Σ-Ω (0x3A2 is unassigned, skip it)
+    if cp >= 0x0391 && cp <= 0x03A1 { return cp + 32 }     // Α-Ρ -> α-ρ
+    if cp >= 0x03A3 && cp <= 0x03AB { return cp + 32 }     // Σ-Ϋ -> σ-ϋ
+    return cp
+}
+
+// Return the uppercase form of `cp` with the same coverage as
+// utf8_lower_codepoint. ß (U+00DF) is 1->2 in real Unicode (SS) and
+// therefore stays ß here; use ASCII-only str_upper on strings that
+// might contain it. Final sigma ς (U+03C2) upper-cases to Σ — the
+// "end of word" information is lost, as with every Unicode case fold.
+fn utf8_upper_codepoint(u64 cp) -> u64 {
+    // ASCII a-z
+    if cp >= 97 && cp <= 122 { return cp - 32 }
+    // Latin-1 Supplement à-þ (skip ÷ at 0xF7)
+    if cp >= 0xE0 && cp <= 0xFE && cp != 0xF7 { return cp - 32 }
+    // Greek accented lowercase -> accented uppercase
+    if cp == 0x03AC { return 0x0386 }                      // ά -> Ά
+    if cp >= 0x03AD && cp <= 0x03AF { return cp - 0x25 }   // έ-ί -> Έ-Ί
+    if cp == 0x03CC { return 0x038C }                      // ό -> Ό
+    if cp >= 0x03CD && cp <= 0x03CE { return cp - 0x3F }   // ύ-ώ -> Ύ-Ώ
+    // Greek main lowercase α-ρ and final sigma ς
+    if cp >= 0x03B1 && cp <= 0x03C1 { return cp - 32 }     // α-ρ -> Α-Ρ
+    if cp == 0x03C2 { return 0x03A3 }                      // ς -> Σ
+    if cp >= 0x03C3 && cp <= 0x03CB { return cp - 32 }     // σ-ϋ -> Σ-Ϋ
+    return cp
+}
+
+// Lowercase every Latin codepoint in `s` (UTF-8-aware). Allocates a
+// fresh buffer; length stays within 2× input because each Latin-1
+// codepoint is at most 2 bytes UTF-8 and case folds don't change the
+// byte length for this coverage.
+fn str_lower_utf8(u64 s) -> u64 {
+    u64 len = str_len(s)
+    u64 result = alloc(len + 1)
+    u64 si = 0
+    u64 di = 0
+    u64[1] w
+    u64 wp = w
+    while si < len {
+        u64 cp = utf8_decode_at(s, si, wp)
+        u64 ww = 0
+        unsafe { *(wp as uint64) -> ww }
+        u64 folded = utf8_lower_codepoint(cp)
+        u64 dp = result + di
+        di = di + utf8_encode(folded, dp)
+        si = si + ww
+    }
+    u64 tp = result + di
+    u8 z = 0
+    store8(tp, z)
+    return result
+}
+
+// Uppercase every Latin codepoint in `s` (UTF-8-aware). Same caveats as
+// utf8_lower_codepoint's — German ß and Turkish İ are not handled.
+fn str_upper_utf8(u64 s) -> u64 {
+    u64 len = str_len(s)
+    u64 result = alloc(len + 1)
+    u64 si = 0
+    u64 di = 0
+    u64[1] w
+    u64 wp = w
+    while si < len {
+        u64 cp = utf8_decode_at(s, si, wp)
+        u64 ww = 0
+        unsafe { *(wp as uint64) -> ww }
+        u64 folded = utf8_upper_codepoint(cp)
+        u64 dp = result + di
+        di = di + utf8_encode(folded, dp)
+        si = si + ww
+    }
+    u64 tp = result + di
+    u8 z = 0
+    store8(tp, z)
+    return result
+}
+
+// ---------------------------------------------------------------------------
+// String builder (v2.8.11)
+//
+// The go-to pattern when you'd reach for sprintf elsewhere. A builder is
+// an alloc'd block with a 16-byte header:
+//   [0..8]   capacity (u64)
+//   [8..16]  length   (u64)
+//   [16..]   byte buffer
+// All sb_* functions grow the buffer when capacity runs out (doubling
+// policy). sb_finish returns a freshly-alloc'd null-terminated string
+// with just the used bytes; sb_free releases the builder itself.
+//
+// Typical use:
+//
+//   u64 sb = sb_new(64)
+//   sb_append_str(sb, "x = ")
+//   sb_append_int(sb, 42)
+//   sb_append_str(sb, ", y = ")
+//   sb_append_hex(sb, 0xFF)
+//   u64 s = sb_finish(sb)     // "x = 42, y = 0xFF"
+//   sb_free(sb)
+//   // use s, then dealloc(s) when done
+// ---------------------------------------------------------------------------
+
+// Create a string builder with an initial capacity. Use 64 as a default
+// when you don't have a better estimate.
+fn sb_new(u64 cap) -> u64 {
+    if cap < 16 { cap = 16 }
+    u64 sb = alloc(16 + cap)
+    store64(sb, cap)
+    u64 lp = sb + 8
+    store64(lp, 0)
+    return sb
+}
+
+// Ensure the builder has room for `extra` more bytes. Grows by doubling
+// if necessary. Returns the (possibly new) builder handle — callers MUST
+// reassign: `sb = sb_reserve(sb, n)`.
+fn sb_reserve(u64 sb, u64 extra) -> u64 {
+    u64 cap = 0
+    u64 ln = 0
+    unsafe { *(sb as uint64) -> cap }
+    u64 lp = sb + 8
+    unsafe { *(lp as uint64) -> ln }
+    u64 need = ln + extra
+    if need <= cap { return sb }
+
+    u64 new_cap = cap
+    while new_cap < need {
+        new_cap = new_cap * 2
+        if new_cap < 32 { new_cap = 32 }
+    }
+    u64 new_sb = alloc(16 + new_cap)
+    memcpy(new_sb, sb, 16 + ln)
+    store64(new_sb, new_cap)
+    dealloc(sb)
+    return new_sb
+}
+
+// Append a single byte. Returns the (possibly new) handle.
+fn sb_append_byte(u64 sb, u64 b) -> u64 {
+    sb = sb_reserve(sb, 1)
+    u64 ln = 0
+    u64 lp = sb + 8
+    unsafe { *(lp as uint64) -> ln }
+    u64 bp = sb + 16 + ln
+    u8 bb = b
+    store8(bp, bb)
+    store64(lp, ln + 1)
+    return sb
+}
+
+// Append a null-terminated string.
+fn sb_append_str(u64 sb, u64 s) -> u64 {
+    u64 slen = str_len(s)
+    sb = sb_reserve(sb, slen)
+    u64 ln = 0
+    u64 lp = sb + 8
+    unsafe { *(lp as uint64) -> ln }
+    u64 bp = sb + 16 + ln
+    memcpy(bp, s, slen)
+    store64(lp, ln + slen)
+    return sb
+}
+
+// Append `n` as decimal digits.
+fn sb_append_int(u64 sb, u64 n) -> u64 {
+    u64 tmp = int_to_str(n)
+    sb = sb_append_str(sb, tmp)
+    dealloc(tmp)
+    return sb
+}
+
+// Append `n` as lowercase hex with a leading `0x` — mirrors the existing
+// std/fmt.kr `fmt_hex` format.
+fn sb_append_hex(u64 sb, u64 n) -> u64 {
+    sb = sb_append_str(sb, "0x")
+    if n == 0 { return sb_append_byte(sb, 48) }
+    u8[16] buf
+    u64 len = 0
+    u64 tmp = n
+    while tmp > 0 {
+        u64 d = tmp & 0xF
+        u8 ch = 0
+        if d < 10 { ch = d + 48 }
+        else { ch = d + 87 }
+        buf[len] = ch
+        len = len + 1
+        tmp = tmp >> 4
+    }
+    sb = sb_reserve(sb, len)
+    u64 ln = 0
+    u64 lp = sb + 8
+    unsafe { *(lp as uint64) -> ln }
+    u64 i = 0
+    while i < len {
+        u64 dp = sb + 16 + ln + i
+        u8 b = buf[len - 1 - i]
+        store8(dp, b)
+        i = i + 1
+    }
+    store64(lp, ln + len)
+    return sb
+}
+
+// Append an `f64` with `decimals` fractional digits. Requires
+// `import "std/math_float.kr"` in the caller for `fmt_f64`.
+fn sb_append_float(u64 sb, f64 v, u64 decimals) -> u64 {
+    u64 s = fmt_f64(v, decimals)
+    sb = sb_append_str(sb, s)
+    dealloc(s)
+    return sb
+}
+
+// Append `true` or `false`.
+fn sb_append_bool(u64 sb, u64 b) -> u64 {
+    if b != 0 { return sb_append_str(sb, "true") }
+    return sb_append_str(sb, "false")
+}
+
+// Append a UTF-8-encoded codepoint.
+fn sb_append_codepoint(u64 sb, u64 cp) -> u64 {
+    sb = sb_reserve(sb, 4)
+    u64 ln = 0
+    u64 lp = sb + 8
+    unsafe { *(lp as uint64) -> ln }
+    u64 bp = sb + 16 + ln
+    u64 w = utf8_encode(cp, bp)
+    store64(lp, ln + w)
+    return sb
+}
+
+// Current length in bytes.
+fn sb_len(u64 sb) -> u64 {
+    u64 ln = 0
+    u64 lp = sb + 8
+    unsafe { *(lp as uint64) -> ln }
+    return ln
+}
+
+// Finalize: copy the accumulated bytes into a fresh null-terminated
+// string and return it. Does NOT free the builder — call sb_free
+// when you're done with it. The returned string is owned by the caller
+// and should be `dealloc`'d when no longer needed.
+fn sb_finish(u64 sb) -> u64 {
+    u64 ln = 0
+    u64 lp = sb + 8
+    unsafe { *(lp as uint64) -> ln }
+    u64 out = alloc(ln + 1)
+    u64 bp = sb + 16
+    memcpy(out, bp, ln)
+    u64 tp = out + ln
+    u8 z = 0
+    store8(tp, z)
+    return out
+}
+
+// Release the builder's memory.
+fn sb_free(u64 sb) {
+    dealloc(sb)
+}
+
+// ---------------------------------------------------------------------------
+// Scalar-to-string helpers (v2.8.11)
+//
+// Thin wrappers so you can get a u64 string pointer from any scalar type
+// without threading a buffer yourself. `int_to_str` already covers the
+// integer case. These wrappers require their respective fmt_* modules to
+// be imported.
+// ---------------------------------------------------------------------------
+
+// Format `v` as "[-]INT.FRAC" with `decimals` fractional digits.
+// Requires `import "std/math_float.kr"` in the caller.
+fn str_from_float(f64 v, u64 decimals) -> u64 {
+    return fmt_f64(v, decimals)
+}
+
+// Format `b` as the literal "true" or "false". Always returns a fresh
+// allocation so callers can dealloc it uniformly.
+fn str_from_bool(u64 b) -> u64 {
+    u64 len = 0
+    u64 src = 0
+    if b != 0 { src = "true"; len = 4 }
+    else { src = "false"; len = 5 }
+    u64 out = alloc(len + 1)
+    memcpy(out, src, len)
+    u64 tp = out + len
+    u8 z = 0
+    store8(tp, z)
+    return out
+}
+
+// Format `cp` as a UTF-8 string holding exactly one codepoint.
+fn str_from_codepoint(u64 cp) -> u64 {
+    u64 out = alloc(5)
+    u64 w = utf8_encode(cp, out)
+    u64 tp = out + w
+    u8 z = 0
+    store8(tp, z)
+    return out
+}
+
+// ---------------------------------------------------------------------------
+// ASCII character predicates and case-conversion helpers.
+// Each takes a byte (u64 holding 0..=255) and returns 0/1. For non-ASCII
+// input the answer is always 0 — use str_lower_utf8 / str_upper_utf8 if
+// you need locale-aware case folding.
+// ---------------------------------------------------------------------------
+
+fn is_digit(u64 c) -> u64 {
+    if c >= 48 && c <= 57 { return 1 }
+    return 0
+}
+
+fn is_lower(u64 c) -> u64 {
+    if c >= 97 && c <= 122 { return 1 }
+    return 0
+}
+
+fn is_upper(u64 c) -> u64 {
+    if c >= 65 && c <= 90 { return 1 }
+    return 0
+}
+
+fn is_alpha(u64 c) -> u64 {
+    if is_lower(c) != 0 { return 1 }
+    if is_upper(c) != 0 { return 1 }
+    return 0
+}
+
+fn is_alnum(u64 c) -> u64 {
+    if is_alpha(c) != 0 { return 1 }
+    if is_digit(c) != 0 { return 1 }
+    return 0
+}
+
+// Whitespace: space, \t, \n, \v, \f, \r (same set as C's isspace).
+fn is_space(u64 c) -> u64 {
+    if c == 32 { return 1 }
+    if c >= 9 && c <= 13 { return 1 }
+    return 0
+}
+
+fn is_hex_digit(u64 c) -> u64 {
+    if is_digit(c) != 0 { return 1 }
+    if c >= 97 && c <= 102 { return 1 }  // a-f
+    if c >= 65 && c <= 70 { return 1 }   // A-F
+    return 0
+}
+
+// Printable ASCII: space (32) through '~' (126). Excludes control codes
+// and DEL; newline/tab are not printable in this sense.
+fn is_print(u64 c) -> u64 {
+    if c >= 32 && c <= 126 { return 1 }
+    return 0
+}
+
+// Return the uppercase form of an ASCII letter; other bytes pass through
+// unchanged. For UTF-8 use str_upper_utf8 / utf8_upper_codepoint.
+fn to_upper_ch(u64 c) -> u64 {
+    if is_lower(c) != 0 { return c - 32 }
+    return c
+}
+
+fn to_lower_ch(u64 c) -> u64 {
+    if is_upper(c) != 0 { return c + 32 }
+    return c
+}
+
+// Parse a hex digit (0-9, a-f, A-F) as its numeric value. Returns
+// 0xFFFFFFFFFFFFFFFF on invalid input (Pattern-1 sentinel from
+// docs/ERROR_HANDLING.md).
+fn hex_digit_val(u64 c) -> u64 {
+    if c >= 48 && c <= 57 { return c - 48 }
+    if c >= 97 && c <= 102 { return c - 87 }
+    if c >= 65 && c <= 70 { return c - 55 }
+    return 0xFFFFFFFFFFFFFFFF
+}

@@ -13,7 +13,7 @@ first program, and the language features you'll use in day-to-day code.
 ### Linux / macOS
 
 ```bash
-curl -sSf https://raw.githubusercontent.com/Pantelis23/KernRift/main/install.sh | sh
+curl -sSf https://raw.githubusercontent.com/Heniokhos-Systems/KernRift/main/install.sh | sh
 ```
 
 Installs `krc` (compiler) and `kr` (runner) to `~/.local/bin/`, and the
@@ -23,7 +23,7 @@ is on your `PATH`.
 ### Windows
 
 ```powershell
-irm https://raw.githubusercontent.com/Pantelis23/KernRift/main/install.ps1 | iex
+irm https://raw.githubusercontent.com/Heniokhos-Systems/KernRift/main/install.ps1 | iex
 ```
 
 Installs to `%LOCALAPPDATA%\KernRift\bin\` and adds it to `PATH`.

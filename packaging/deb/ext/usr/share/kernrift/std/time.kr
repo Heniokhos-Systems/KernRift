@@ -1,0 +1,47 @@
+// KernRift Standard Library — Time Operations
+//
+// Monotonic clock and sleep using raw syscalls (Linux only).
+// Uses get_arch_id() to select the correct syscall numbers:
+//   1 = x86_64 Linux, 2 = ARM64 Linux, 7 = Android ARM64
+
+// Returns monotonic time in nanoseconds
+fn time_now() -> u64 {
+    u64 buf = alloc(16)  // timespec: {tv_sec: u64, tv_nsec: u64}
+    u64 nr = 228  // clock_gettime on x86_64
+    u64 aid = get_arch_id()
+    if aid == 2 || aid == 7 { nr = 113 }  // ARM64
+    syscall_raw(nr, 1, buf, 0, 0, 0, 0)  // CLOCK_MONOTONIC = 1
+    u64 sec = 0
+    sec = load64(buf)
+    u64 nsec = 0
+    u64 bp8 = buf + 8
+    nsec = load64(bp8)
+    dealloc(buf)
+    return sec * 1000000000 + nsec
+}
+
+// Sleep for ns nanoseconds
+fn time_sleep_ns(u64 ns) {
+    u64 buf = alloc(16)  // timespec: {tv_sec: u64, tv_nsec: u64}
+    u64 sec = ns / 1000000000
+    u64 nsec = ns - sec * 1000000000
+    store64(buf, sec)
+    u64 bp8 = buf + 8
+    store64(bp8, nsec)
+    u64 nr = 35  // nanosleep on x86_64
+    u64 aid = get_arch_id()
+    if aid == 2 || aid == 7 { nr = 101 }  // ARM64
+    syscall_raw(nr, buf, 0, 0, 0, 0, 0)
+    dealloc(buf)
+}
+
+// Sleep for ms milliseconds
+fn time_sleep_ms(u64 ms) {
+    time_sleep_ns(ms * 1000000)
+}
+
+// Returns nanoseconds elapsed since start (from time_now)
+fn time_elapsed(u64 start) -> u64 {
+    u64 now = time_now()
+    return now - start
+}

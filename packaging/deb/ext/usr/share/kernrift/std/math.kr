@@ -1,0 +1,64 @@
+// KernRift Standard Library — Math Operations
+
+fn min(u64 a, u64 b) -> u64 {
+    if a < b { return a }
+    return b
+}
+
+fn max(u64 a, u64 b) -> u64 {
+    if a > b { return a }
+    return b
+}
+
+fn abs(u64 val) -> u64 {
+    if val >> 63 != 0 { return 0 - val }
+    return val
+}
+
+fn clamp(u64 val, u64 lo, u64 hi) -> u64 {
+    if val < lo { return lo }
+    if val > hi { return hi }
+    return val
+}
+
+fn pow(u64 base, u64 exp) -> u64 {
+    u64 result = 1
+    u64 i = 0
+    while i < exp {
+        result = result * base
+        i = i + 1
+    }
+    return result
+}
+
+fn sqrt_int(u64 n) -> u64 {
+    if n == 0 { return 0 }
+    u64 x = n
+    u64 y = (x + 1) / 2
+    while y < x {
+        x = y
+        y = (x + n / x) / 2
+    }
+    return x
+}
+
+fn gcd(u64 a, u64 b) -> u64 {
+    while b != 0 {
+        u64 t = b
+        b = a - a / b * b
+        a = t
+    }
+    return a
+}
+
+fn is_prime(u64 n) -> u64 {
+    if n <= 1 { return 0 }
+    if n <= 3 { return 1 }
+    if n - n / 2 * 2 == 0 { return 0 }
+    u64 i = 3
+    while i * i <= n {
+        if n - n / i * i == 0 { return 0 }
+        i = i + 2
+    }
+    return 1
+}

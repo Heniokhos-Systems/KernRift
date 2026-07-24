@@ -1,0 +1,170 @@
+// KernRift standard library — framebuffer primitives
+// Framebuffer descriptor: 5 x u64 = [addr, width, height, stride, bpp]
+
+fn fb_init(u64 addr, u64 w, u64 h, u64 stride, u64 bpp) -> u64 {
+    u64 fb = alloc(40)
+    store64(fb, addr)
+    u64 p1 = fb + 8
+    store64(p1, w)
+    u64 p2 = fb + 16
+    store64(p2, h)
+    u64 p3 = fb + 24
+    store64(p3, stride)
+    u64 p4 = fb + 32
+    store64(p4, bpp)
+    return fb
+}
+
+fn fb_addr(u64 fb) -> u64 {
+    u64 v = 0
+    v = load64(fb)
+    return v
+}
+
+fn fb_width(u64 fb) -> u64 {
+    u64 v = 0
+    u64 p = fb + 8
+    v = load64(p)
+    return v
+}
+
+fn fb_height(u64 fb) -> u64 {
+    u64 v = 0
+    u64 p = fb + 16
+    v = load64(p)
+    return v
+}
+
+fn fb_stride(u64 fb) -> u64 {
+    u64 v = 0
+    u64 p = fb + 24
+    v = load64(p)
+    return v
+}
+
+fn fb_bpp(u64 fb) -> u64 {
+    u64 v = 0
+    u64 p = fb + 32
+    v = load64(p)
+    return v
+}
+
+fn fb_pixel(u64 fb, u64 x, u64 y, u64 color) {
+    u64 addr = fb_addr(fb)
+    u64 stride = fb_stride(fb)
+    u64 bpp = fb_bpp(fb)
+    u64 bytes_pp = bpp / 8
+    u64 offset = addr + y * stride + x * bytes_pp
+    if bpp == 32 {
+        u32 c = color
+        store32(offset, c)
+    } else if bpp == 16 {
+        u16 c = color
+        store16(offset, c)
+    } else if bpp == 24 {
+        u8 r = color >> 16
+        u8 g = color >> 8
+        u8 b = color
+        store8(offset, b)
+        u64 o1 = offset + 1
+        store8(o1, g)
+        u64 o2 = offset + 2
+        store8(o2, r)
+    } else {
+        u8 c = color
+        store8(offset, c)
+    }
+}
+
+fn fb_rect(u64 fb, u64 x, u64 y, u64 w, u64 h, u64 color) {
+    u64 addr = fb_addr(fb)
+    u64 stride = fb_stride(fb)
+    u64 bpp = fb_bpp(fb)
+    u64 bytes_pp = bpp / 8
+    u64 iy = 0
+    while iy < h {
+        u64 row = addr + (y + iy) * stride + x * bytes_pp
+        if bpp == 32 {
+            u32 c = color
+            u64 ix = 0
+            while ix < w {
+                u64 p = row + ix * 4
+                store32(p, c)
+                ix = ix + 1
+            }
+        } else {
+            u64 ix = 0
+            while ix < w {
+                fb_pixel(fb, x + ix, y + iy, color)
+                ix = ix + 1
+            }
+        }
+        iy = iy + 1
+    }
+}
+
+fn fb_fill(u64 fb, u64 color) {
+    fb_rect(fb, 0, 0, fb_width(fb), fb_height(fb), color)
+}
+
+fn fb_clear(u64 fb) {
+    fb_fill(fb, 0)
+}
+
+fn fb_hline(u64 fb, u64 x, u64 y, u64 w, u64 color) {
+    fb_rect(fb, x, y, w, 1, color)
+}
+
+fn fb_vline(u64 fb, u64 x, u64 y, u64 h, u64 color) {
+    fb_rect(fb, x, y, 1, h, color)
+}
+
+fn fb_line(u64 fb, u64 x0, u64 y0, u64 x1, u64 y1, u64 color) {
+    // Bresenham's line algorithm using signed comparisons
+    u64 dx = 0
+    u64 dy = 0
+    u64 sx = 1
+    u64 sy = 1
+    if signed_lt(x1, x0) { dx = x0 - x1; sx = 0 - 1 } else { dx = x1 - x0 }
+    if signed_lt(y1, y0) { dy = y0 - y1; sy = 0 - 1 } else { dy = y1 - y0 }
+    u64 err = 0
+    if signed_gt(dx, dy) { err = dx } else { err = 0 - dy }
+    err = err / 2 - (0 - err) / 2
+    // Use signed err: positive if dx > dy
+    if signed_ge(dx, dy) { err = dx } else { err = 0 - dy }
+    u64 e2 = 0
+    u64 cx = x0
+    u64 cy = y0
+    while 1 {
+        fb_pixel(fb, cx, cy, color)
+        if cx == x1 && cy == y1 { break }
+        e2 = err + err
+        if signed_gt(e2, 0 - dy) {
+            err = err - dy
+            cx = cx + sx
+        }
+        if signed_lt(e2, dx) {
+            err = err + dx
+            cy = cy + sy
+        }
+    }
+}
+
+fn fb_rect_outline(u64 fb, u64 x, u64 y, u64 w, u64 h, u64 color) {
+    fb_hline(fb, x, y, w, color)
+    fb_hline(fb, x, y + h - 1, w, color)
+    fb_vline(fb, x, y, h, color)
+    fb_vline(fb, x + w - 1, y, h, color)
+}
+
+fn fb_blit(u64 fb, u64 x, u64 y, u64 src, u64 src_w, u64 src_h) {
+    u64 addr = fb_addr(fb)
+    u64 stride = fb_stride(fb)
+    u64 iy = 0
+    while iy < src_h {
+        u64 dst_row = addr + (y + iy) * stride + x * 4
+        u64 src_row = src + iy * src_w * 4
+        memcpy(dst_row, src_row, src_w * 4)
+        iy = iy + 1
+    }
+}

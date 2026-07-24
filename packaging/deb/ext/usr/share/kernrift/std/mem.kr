@@ -1,0 +1,96 @@
+// KernRift Standard Library — Memory Operations
+
+// Reallocate: grow a buffer, copy existing content
+fn realloc(u64 ptr, u64 old_size, u64 new_size) -> u64 {
+    u64 new_buf = alloc(new_size)
+    u64 copy_size = old_size
+    if new_size < old_size { copy_size = new_size }
+    memcpy(new_buf, ptr, copy_size)
+    return new_buf
+}
+
+// Allocate a `size`-byte buffer whose start address is a multiple of
+// `align`. `align` must be a power of two (8, 16, 32, 64, 128, …); the
+// helper asserts that at runtime. The returned pointer is NOT the
+// original allocation base, so you cannot pass it back to `dealloc`
+// directly — use `alloc_aligned_free` below which stashes the offset
+// one slot before the returned pointer and reverses it on free.
+//
+// Primary use case: DMA buffers that must be cache-line aligned
+// (typically 64 B on modern ARMv8 cores) or page-aligned MMIO targets.
+fn alloc_aligned(u64 size, u64 align) -> u64 {
+    // Power-of-two check: align & (align-1) == 0, and align > 0.
+    if align == 0 || (align & (align - 1)) != 0 {
+        write(2, "alloc_aligned: align must be a power of two\n", 44)
+        exit(1)
+    }
+    // Request enough slack to find an aligned start, plus a header u64
+    // to remember the original base for later free.
+    u64 raw = alloc(size + align + 8)
+    u64 hdr = raw + 8
+    u64 mask = align - 1
+    u64 aligned = (hdr + mask) & ~mask
+    // Stash the original raw pointer in the 8 bytes before `aligned`.
+    u64 slot = aligned - 8
+    store64(slot, raw)
+    return aligned
+}
+
+// Free a buffer returned by alloc_aligned. Reads the stashed raw base
+// from the 8 bytes preceding `ptr` and calls dealloc on it. Passing a
+// pointer NOT obtained from alloc_aligned is undefined behaviour.
+fn alloc_aligned_free(u64 ptr) {
+    u64 slot = ptr - 8
+    u64 raw = 0
+    unsafe { *(slot as uint64) -> raw }
+    dealloc(raw)
+}
+
+// Compare two memory regions, returns 0 if equal
+fn memcmp(u64 a, u64 b, u64 len) -> u64 {
+    u64 i = 0
+    while i < len {
+        u64 pa = a + i
+        u64 pb = b + i
+        u64 ca = 0
+        u64 cb = 0
+        ca = load8(pa)
+        cb = load8(pb)
+        if ca != cb { return 1 }
+        i = i + 1
+    }
+    return 0
+}
+
+// Zero a memory region
+fn memzero(u64 ptr, u64 len) {
+    memset(ptr, 0, len)
+}
+
+// Copy `len` bytes from src to dst, correctly handling the case where the
+// two regions overlap. When they don't overlap or dst < src, we scan
+// forward (same as memcpy). When dst > src and the regions overlap,
+// we scan backwards so the source bytes aren't trampled before we
+// read them. memcpy's behavior on overlap is undefined — use this when
+// you can't guarantee disjointness.
+fn memmove(u64 dst, u64 src, u64 len) {
+    if dst == src || len == 0 { return }
+    if dst < src {
+        // Forward copy is safe — any dst byte we've just written is
+        // at a lower address than the next src byte we read.
+        memcpy(dst, src, len)
+        return
+    }
+    // dst > src: scan backwards, byte by byte. A bulk word copy would
+    // need length/alignment accounting we don't need for correctness;
+    // memcpy handles the non-overlapping fast paths already.
+    u64 i = len
+    while i > 0 {
+        i = i - 1
+        u64 sp = src + i
+        u64 dp = dst + i
+        u64 b = load8(sp)
+        store8(dp, b)
+    }
+}
+

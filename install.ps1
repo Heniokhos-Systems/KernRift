@@ -1,8 +1,8 @@
 # KernRift Self-Hosted Compiler Installer for Windows
-# Run: irm https://raw.githubusercontent.com/Pantelis23/KernRift/main/install.ps1 | iex
+# Run: irm https://raw.githubusercontent.com/Heniokhos-Systems/KernRift/main/install.ps1 | iex
 
 $ErrorActionPreference = "Stop"
-$Repo = "Pantelis23/KernRift"
+$Repo = "Heniokhos-Systems/KernRift"
 $InstallDir = "$env:LOCALAPPDATA\KernRift\bin"
 
 Write-Host "=== KernRift Self-Hosted Compiler Installer ==="
@@ -60,7 +60,7 @@ if (!(Test-Path $StdDir)) {
     New-Item -ItemType Directory -Path $StdDir -Force | Out-Null
 }
 Write-Host "Installing standard library..."
-foreach ($mod in @("string", "io", "math", "fmt", "mem", "vec", "map", "color", "fb", "fixedpoint", "font", "memfast", "widget", "time", "log", "net")) {
+foreach ($mod in @("alloc", "string", "io", "math", "math_float", "fmt", "mem", "memfast", "vec", "map", "color", "fb", "fixedpoint", "font", "widget", "time", "log", "net", "sha256")) {
     $modUrl = "https://raw.githubusercontent.com/$Repo/main/std/$mod.kr"
     try {
         Invoke-WebRequest -Uri $modUrl -OutFile "$StdDir\$mod.kr" -UseBasicParsing

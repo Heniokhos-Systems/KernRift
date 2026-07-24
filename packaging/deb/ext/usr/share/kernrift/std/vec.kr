@@ -1,0 +1,127 @@
+// KernRift Standard Library — Dynamic Array (Vec of u64)
+//
+// A Vec is 3 uint64s stored contiguously: [data_ptr, length, capacity]
+// Usage:
+//   u64 v = vec_new()
+//   vec_push(v, 42)
+//   u64 val = vec_get(v, 0)    // 42
+//   u64 len = vec_len(v)       // 1
+//   vec_free(v)
+
+fn vec_new() -> u64 {
+    u64 v = alloc(24)
+    u64 data = alloc(64)
+    store64(v, data)
+    u64 vlen = v + 8
+    u64 zero = 0
+    store64(vlen, zero)
+    u64 vcap = v + 16
+    u64 cap = 8
+    store64(vcap, cap)
+    return v
+}
+
+fn vec_len(u64 v) -> u64 {
+    u64 vlen = v + 8
+    u64 len = 0
+    len = load64(vlen)
+    return len
+}
+
+fn vec_cap(u64 v) -> u64 {
+    u64 vcap = v + 16
+    u64 cap = 0
+    cap = load64(vcap)
+    return cap
+}
+
+fn vec_data(u64 v) -> u64 {
+    u64 data = 0
+    data = load64(v)
+    return data
+}
+
+fn vec_push(u64 v, u64 val) {
+    u64 len = vec_len(v)
+    u64 cap = vec_cap(v)
+    if len >= cap {
+        // Grow: double capacity
+        u64 new_cap = cap * 2
+        u64 old_data = vec_data(v)
+        u64 new_data = alloc(new_cap * 8)
+        memcpy(new_data, old_data, len * 8)
+        store64(v, new_data)
+        u64 vcap = v + 16
+        store64(vcap, new_cap)
+    }
+    u64 data = vec_data(v)
+    u64 slot = data + len * 8
+    store64(slot, val)
+    u64 new_len = len + 1
+    u64 vlen = v + 8
+    store64(vlen, new_len)
+}
+
+fn vec_get(u64 v, u64 idx) -> u64 {
+    u64 data = vec_data(v)
+    u64 slot = data + idx * 8
+    u64 val = 0
+    val = load64(slot)
+    return val
+}
+
+fn vec_set(u64 v, u64 idx, u64 val) {
+    u64 data = vec_data(v)
+    u64 slot = data + idx * 8
+    store64(slot, val)
+}
+
+fn vec_pop(u64 v) -> u64 {
+    u64 len = vec_len(v)
+    if len == 0 { return 0 }
+    u64 new_len = len - 1
+    u64 vlen = v + 8
+    store64(vlen, new_len)
+    return vec_get(v, new_len)
+}
+
+fn vec_last(u64 v) -> u64 {
+    u64 len = vec_len(v)
+    if len == 0 { return 0 }
+    return vec_get(v, len - 1)
+}
+
+fn vec_clear(u64 v) {
+    u64 vlen = v + 8
+    u64 zero = 0
+    store64(vlen, zero)
+}
+
+fn vec_contains(u64 v, u64 val) -> u64 {
+    u64 len = vec_len(v)
+    u64 i = 0
+    while i < len {
+        if vec_get(v, i) == val { return 1 }
+        i = i + 1
+    }
+    return 0
+}
+
+fn vec_remove(u64 v, u64 idx) {
+    u64 len = vec_len(v)
+    u64 data = vec_data(v)
+    u64 i = idx
+    while i < len - 1 {
+        u64 next = vec_get(v, i + 1)
+        vec_set(v, i, next)
+        i = i + 1
+    }
+    u64 new_len = len - 1
+    u64 vlen = v + 8
+    store64(vlen, new_len)
+}
+
+fn vec_free(u64 v) {
+    dealloc(vec_data(v))
+    dealloc(v)
+}

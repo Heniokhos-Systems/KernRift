@@ -4,7 +4,7 @@
 # Produces: kernrift_VERSION_amd64.deb and kernrift_VERSION_arm64.deb
 set -e
 
-REPO="Pantelis23/KernRift"
+REPO="Heniokhos-Systems/KernRift"
 
 if [ -z "${1:-}" ]; then
     echo "Fetching latest version from GitHub..."

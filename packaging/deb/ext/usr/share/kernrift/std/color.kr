@@ -1,0 +1,66 @@
+// KernRift standard library — color utilities
+// Colors are packed as 0xAARRGGBB (32-bit ARGB)
+
+fn rgb(u64 r, u64 g, u64 b) -> u64 {
+    return 0xFF000000 | (r << 16) | (g << 8) | b
+}
+
+fn rgba(u64 r, u64 g, u64 b, u64 a) -> u64 {
+    return (a << 24) | (r << 16) | (g << 8) | b
+}
+
+fn color_r(u64 c) -> u64 { return (c >> 16) & 0xFF }
+fn color_g(u64 c) -> u64 { return (c >> 8) & 0xFF }
+fn color_b(u64 c) -> u64 { return c & 0xFF }
+fn color_a(u64 c) -> u64 { return (c >> 24) & 0xFF }
+
+fn alpha_blend(u64 fg, u64 bg) -> u64 {
+    u64 a = color_a(fg)
+    if a == 255 { return fg }
+    if a == 0 { return bg }
+    u64 inv_a = 255 - a
+    u64 r = (color_r(fg) * a + color_r(bg) * inv_a) / 255
+    u64 g = (color_g(fg) * a + color_g(bg) * inv_a) / 255
+    u64 b = (color_b(fg) * a + color_b(bg) * inv_a) / 255
+    return rgb(r, g, b)
+}
+
+fn color_lerp(u64 c1, u64 c2, u64 t) -> u64 {
+    u64 inv_t = 255 - t
+    u64 r = (color_r(c1) * inv_t + color_r(c2) * t) / 255
+    u64 g = (color_g(c1) * inv_t + color_g(c2) * t) / 255
+    u64 b = (color_b(c1) * inv_t + color_b(c2) * t) / 255
+    return rgb(r, g, b)
+}
+
+fn color_darken(u64 c, u64 amount) -> u64 {
+    u64 r = color_r(c)
+    u64 g = color_g(c)
+    u64 b = color_b(c)
+    if r > amount { r = r - amount } else { r = 0 }
+    if g > amount { g = g - amount } else { g = 0 }
+    if b > amount { b = b - amount } else { b = 0 }
+    return rgb(r, g, b)
+}
+
+fn color_lighten(u64 c, u64 amount) -> u64 {
+    u64 r = color_r(c) + amount
+    u64 g = color_g(c) + amount
+    u64 b = color_b(c) + amount
+    if r > 255 { r = 255 }
+    if g > 255 { g = 255 }
+    if b > 255 { b = 255 }
+    return rgb(r, g, b)
+}
+
+fn COLOR_BLACK() -> u64 { return 0xFF000000 }
+fn COLOR_WHITE() -> u64 { return 0xFFFFFFFF }
+fn COLOR_RED() -> u64 { return 0xFFFF0000 }
+fn COLOR_GREEN() -> u64 { return 0xFF00FF00 }
+fn COLOR_BLUE() -> u64 { return 0xFF0000FF }
+fn COLOR_YELLOW() -> u64 { return 0xFFFFFF00 }
+fn COLOR_CYAN() -> u64 { return 0xFF00FFFF }
+fn COLOR_MAGENTA() -> u64 { return 0xFFFF00FF }
+fn COLOR_GRAY() -> u64 { return 0xFF808080 }
+fn COLOR_DARK_GRAY() -> u64 { return 0xFF404040 }
+fn COLOR_LIGHT_GRAY() -> u64 { return 0xFFC0C0C0 }

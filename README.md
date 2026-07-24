@@ -49,7 +49,7 @@ is and is not supported.
 
 ```bash
 # Install (gets krc compiler, kr runner, and stdlib)
-curl -sSf https://raw.githubusercontent.com/Pantelis23/KernRift/main/install.sh | sh
+curl -sSf https://raw.githubusercontent.com/Heniokhos-Systems/KernRift/main/install.sh | sh
 
 # Compile to fat binary (default: 8 platform slices, BCJ+LZ-Rift-compressed)
 krc hello.kr -o hello.krbo
@@ -100,7 +100,7 @@ The IR path now produces smaller binaries than legacy on both architectures. Two
 
 **Linux / macOS / Android (Termux)** — install script:
 ```bash
-curl -sSf https://raw.githubusercontent.com/Pantelis23/KernRift/main/install.sh | sh
+curl -sSf https://raw.githubusercontent.com/Heniokhos-Systems/KernRift/main/install.sh | sh
 ```
 
 **Debian / Ubuntu** — `apt` (signed repository, amd64 + arm64):
@@ -138,9 +138,9 @@ scoop install kernrift
 powershell -ExecutionPolicy Bypass -File install.ps1
 ```
 
-**From source** (requires [bootstrap compiler](https://github.com/Pantelis23/KernRift-bootstrap)):
+**From source** (requires [bootstrap compiler](https://github.com/Heniokhos-Systems/KernRift-bootstrap)):
 ```bash
-cargo install --git https://github.com/Pantelis23/KernRift-bootstrap kernriftc
+cargo install --git https://github.com/Heniokhos-Systems/KernRift-bootstrap kernriftc
 make build && make install
 ```
 

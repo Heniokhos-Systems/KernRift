@@ -1,0 +1,156 @@
+// KernRift Standard Library — Formatting
+
+// Format integer as hex string: fmt_hex(255) → "0xFF"
+fn fmt_hex(u64 val) -> u64 {
+    if val == 0 {
+        u64 r = alloc(4)
+        u8 z0 = 48; u8 z1 = 120; u8 z2 = 48; u8 z3 = 0
+        store8(r, z0)
+        u64 r1 = r + 1; store8(r1, z1)
+        u64 r2 = r + 2; store8(r2, z2)
+        u64 r3 = r + 3; store8(r3, z3)
+        return r
+    }
+    u8[16] buf
+    u64 len = 0
+    u64 tmp = val
+    while tmp > 0 {
+        u64 digit = tmp & 0xF
+        u8 ch = 0
+        if digit < 10 { ch = digit + 48 }
+        else { ch = digit - 10 + 97 }
+        buf[len] = ch
+        len = len + 1
+        tmp = tmp >> 4
+    }
+    u64 result = alloc(len + 3)
+    u8 p0 = 48; u8 p1 = 120
+    store8(result, p0)
+    u64 rp1 = result + 1
+    store8(rp1, p1)
+    u64 i = 0
+    while i < len {
+        u64 si = len - 1 - i
+        u64 dp = result + 2 + i
+        u64 bv = buf[si]
+        u8 bb = bv
+        store8(dp, bb)
+        i = i + 1
+    }
+    u64 tp = result + 2 + len
+    u8 z = 0
+    store8(tp, z)
+    return result
+}
+
+// Format an unsigned integer as a decimal string: fmt_dec(42) → "42".
+// Returns a heap-allocated null-terminated buffer. To print it, pair with
+// the compiler's built-in `print_str` / `println_str` — these are
+// intrinsics, no import required:
+//   print_str("x = "); println_str(fmt_dec(x))
+fn fmt_dec(u64 val) -> u64 {
+    if val == 0 {
+        u64 r = alloc(2)
+        store8(r, 48)
+        store8(r + 1, 0)
+        return r
+    }
+    u64 buf = alloc(24)
+    u64 len = 0
+    u64 tmp = val
+    while tmp > 0 {
+        store8(buf + len, (tmp % 10) + 48)
+        len = len + 1
+        tmp = tmp / 10
+    }
+    u64 result = alloc(len + 1)
+    u64 i = 0
+    while i < len {
+        u64 b = load8(buf + (len - 1 - i))
+        store8(result + i, b)
+        i = i + 1
+    }
+    store8(result + len, 0)
+    dealloc(buf)
+    return result
+}
+
+
+// Format integer as binary: fmt_bin(10) → "0b1010"
+fn fmt_bin(u64 val) -> u64 {
+    if val == 0 {
+        u64 r = alloc(4)
+        u8 z0 = 48; u8 z1 = 98; u8 z2 = 48; u8 z3 = 0
+        store8(r, z0)
+        u64 r1 = r + 1; store8(r1, z1)
+        u64 r2 = r + 2; store8(r2, z2)
+        u64 r3 = r + 3; store8(r3, z3)
+        return r
+    }
+    u8[64] buf
+    u64 len = 0
+    u64 tmp = val
+    while tmp > 0 {
+        u8 bit = tmp & 1
+        buf[len] = bit + 48
+        len = len + 1
+        tmp = tmp >> 1
+    }
+    u64 result = alloc(len + 3)
+    u8 p0 = 48; u8 p1 = 98
+    store8(result, p0)
+    u64 rp1 = result + 1
+    store8(rp1, p1)
+    u64 i = 0
+    while i < len {
+        u64 si = len - 1 - i
+        u64 dp = result + 2 + i
+        u64 bv = buf[si]
+        u8 bb = bv
+        store8(dp, bb)
+        i = i + 1
+    }
+    u64 tp = result + 2 + len
+    u8 z = 0
+    store8(tp, z)
+    return result
+}
+
+// Pad string on the left: pad_left("42", 5, ' ') → "   42"
+fn pad_left(u64 s, u64 width, u64 pad_char) -> u64 {
+    u64 slen = str_len(s)
+    if slen >= width { return str_copy(s) }
+    u64 pad_count = width - slen
+    u64 result = alloc(width + 1)
+    u8 pc = pad_char
+    u64 i = 0
+    while i < pad_count {
+        u64 p = result + i
+        store8(p, pc)
+        i = i + 1
+    }
+    memcpy(result + pad_count, s, slen)
+    u64 tp = result + width
+    u8 z = 0
+    store8(tp, z)
+    return result
+}
+
+// Pad string on the right: pad_right("42", 5, ' ') → "42   "
+fn pad_right(u64 s, u64 width, u64 pad_char) -> u64 {
+    u64 slen = str_len(s)
+    if slen >= width { return str_copy(s) }
+    u64 result = alloc(width + 1)
+    memcpy(result, s, slen)
+    u8 pc = pad_char
+    u64 i = slen
+    while i < width {
+        u64 p = result + i
+        store8(p, pc)
+        i = i + 1
+    }
+    u64 tp = result + width
+    u8 z = 0
+    store8(tp, z)
+    return result
+}

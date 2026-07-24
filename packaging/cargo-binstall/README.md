@@ -9,7 +9,7 @@ Use one of the following methods:
 
 ### Shell installer (Linux / macOS)
 ```sh
-curl -sSf https://raw.githubusercontent.com/Pantelis23/KernRift/main/install.sh | sh
+curl -sSf https://raw.githubusercontent.com/Heniokhos-Systems/KernRift/main/install.sh | sh
 ```
 
 ### Homebrew (macOS / Linux)
@@ -19,7 +19,7 @@ brew install kernrift
 
 ### Scoop (Windows)
 ```powershell
-scoop bucket add kernrift https://github.com/Pantelis23/KernRift
+scoop bucket add kernrift https://github.com/Heniokhos-Systems/KernRift
 scoop install kernrift
 ```
 
@@ -35,4 +35,4 @@ winget install Pantelis23.KernRift
 
 ### Manual download
 Prebuilt binaries for all platforms are available at:
-https://github.com/Pantelis23/KernRift/releases
+https://github.com/Heniokhos-Systems/KernRift/releases

@@ -1,18 +1,18 @@
 #!/bin/sh
 # KernRift Installer — download and install krc + kr from GitHub releases
-# Usage: curl -sSf https://raw.githubusercontent.com/Pantelis23/KernRift/main/install.sh | sh
+# Usage: curl -sSf https://raw.githubusercontent.com/Heniokhos-Systems/KernRift/main/install.sh | sh
 #
 # Alternative installation methods:
-#   Homebrew (macOS/Linux):  brew install kernrift
-#   Scoop (Windows):         scoop bucket add kernrift https://github.com/Pantelis23/KernRift && scoop install kernrift
+#   Homebrew (macOS/Linux):  brew install heniokhos-systems/kernrift/kernrift
+#   Scoop (Windows):         scoop bucket add kernrift https://github.com/Heniokhos-Systems/KernRift && scoop install kernrift
 #   Winget (Windows):        winget install Pantelis23.KernRift
 #   Debian/Ubuntu (.deb):    curl -sSLO https://github.com/.../kernrift_2.5.0_amd64.deb && sudo dpkg -i kernrift_*.deb
 #   AUR (Arch Linux):        yay -S kernrift
-#   PowerShell (Windows):    irm https://raw.githubusercontent.com/Pantelis23/KernRift/main/install.ps1 | iex
+#   PowerShell (Windows):    irm https://raw.githubusercontent.com/Heniokhos-Systems/KernRift/main/install.ps1 | iex
 #
 set -e
 
-REPO="Pantelis23/KernRift"
+REPO="Heniokhos-Systems/KernRift"
 
 # Detect platform
 ARCH=$(uname -m)
@@ -109,7 +109,7 @@ echo "Installing standard library..."
 mkdir -p "$STD_DIR"
 for mod in alloc string io math math_float fmt mem memfast vec map color fb fixedpoint font widget time log net sha256; do
     curl -sL -o "$STD_DIR/$mod.kr" \
-        "https://raw.githubusercontent.com/Pantelis23/KernRift/main/std/$mod.kr"
+        "https://raw.githubusercontent.com/Heniokhos-Systems/KernRift/main/std/$mod.kr"
 done
 echo "Standard library: $STD_DIR"
 

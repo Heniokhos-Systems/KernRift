@@ -1,0 +1,1 @@
+static i64 X = -1; fn main() { exit(X) }

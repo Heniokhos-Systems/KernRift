@@ -1,0 +1,46 @@
+// KernRift standard library — fast block memory operations
+
+fn memcpy32(u64 dst, u64 src, u64 count) {
+    u64 i = 0
+    while i < count {
+        u64 sp = src + i * 4
+        u64 dp = dst + i * 4
+        u32 v = 0
+        v = load32(sp)
+        u64 wv = v
+        u32 sv = wv
+        store32(dp, sv)
+        i = i + 1
+    }
+}
+
+fn memcpy64(u64 dst, u64 src, u64 count) {
+    u64 i = 0
+    while i < count {
+        u64 sp = src + i * 8
+        u64 dp = dst + i * 8
+        u64 v = 0
+        v = load64(sp)
+        store64(dp, v)
+        i = i + 1
+    }
+}
+
+fn memset32(u64 dst, u64 val, u64 count) {
+    u32 sv = val
+    u64 i = 0
+    while i < count {
+        u64 dp = dst + i * 4
+        store32(dp, sv)
+        i = i + 1
+    }
+}
+
+fn memset64(u64 dst, u64 val, u64 count) {
+    u64 i = 0
+    while i < count {
+        u64 dp = dst + i * 8
+        store64(dp, val)
+        i = i + 1
+    }
+}

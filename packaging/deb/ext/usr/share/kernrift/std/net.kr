@@ -1,0 +1,154 @@
+// KernRift Standard Library — Network Operations
+//
+// Raw socket syscalls for TCP/UDP networking (Linux only).
+// Uses get_arch_id() to select the correct syscall numbers:
+//   1 = x86_64 Linux, 2 = ARM64 Linux, 7 = Android ARM64
+
+// --- syscall number helpers ---
+
+fn _net_nr_socket() -> u64 {
+    u64 aid = get_arch_id()
+    if aid == 2 || aid == 7 { return 198 }
+    return 41
+}
+
+fn _net_nr_bind() -> u64 {
+    u64 aid = get_arch_id()
+    if aid == 2 || aid == 7 { return 200 }
+    return 49
+}
+
+fn _net_nr_listen() -> u64 {
+    u64 aid = get_arch_id()
+    if aid == 2 || aid == 7 { return 201 }
+    return 50
+}
+
+fn _net_nr_accept() -> u64 {
+    u64 aid = get_arch_id()
+    if aid == 2 || aid == 7 { return 202 }
+    return 43
+}
+
+fn _net_nr_connect() -> u64 {
+    u64 aid = get_arch_id()
+    if aid == 2 || aid == 7 { return 203 }
+    return 42
+}
+
+fn _net_nr_sendto() -> u64 {
+    u64 aid = get_arch_id()
+    if aid == 2 || aid == 7 { return 206 }
+    return 44
+}
+
+fn _net_nr_recvfrom() -> u64 {
+    u64 aid = get_arch_id()
+    if aid == 2 || aid == 7 { return 207 }
+    return 45
+}
+
+fn _net_nr_close() -> u64 {
+    u64 aid = get_arch_id()
+    if aid == 2 || aid == 7 { return 57 }
+    return 3
+}
+
+fn _net_nr_setsockopt() -> u64 {
+    u64 aid = get_arch_id()
+    if aid == 2 || aid == 7 { return 208 }
+    return 54
+}
+
+// --- public API ---
+
+// Create a socket. domain: 2=AF_INET. type: 1=SOCK_STREAM, 2=SOCK_DGRAM
+fn net_socket(u64 domain, u64 sock_type, u64 protocol) -> u64 {
+    u64 nr = _net_nr_socket()
+    return syscall_raw(nr, domain, sock_type, protocol, 0, 0, 0)
+}
+
+// Bind socket to address
+fn net_bind(u64 fd, u64 addr, u64 addr_len) -> u64 {
+    u64 nr = _net_nr_bind()
+    return syscall_raw(nr, fd, addr, addr_len, 0, 0, 0)
+}
+
+// Listen for connections
+fn net_listen(u64 fd, u64 backlog) -> u64 {
+    u64 nr = _net_nr_listen()
+    return syscall_raw(nr, fd, backlog, 0, 0, 0, 0)
+}
+
+// Accept connection (returns new fd)
+fn net_accept(u64 fd) -> u64 {
+    u64 nr = _net_nr_accept()
+    return syscall_raw(nr, fd, 0, 0, 0, 0, 0)
+}
+
+// Connect to address
+fn net_connect(u64 fd, u64 addr, u64 addr_len) -> u64 {
+    u64 nr = _net_nr_connect()
+    return syscall_raw(nr, fd, addr, addr_len, 0, 0, 0)
+}
+
+// Send data (returns bytes sent)
+fn net_send(u64 fd, u64 buf, u64 len) -> u64 {
+    u64 nr = _net_nr_sendto()
+    return syscall_raw(nr, fd, buf, len, 0, 0, 0)
+}
+
+// Receive data (returns bytes received)
+fn net_recv(u64 fd, u64 buf, u64 len) -> u64 {
+    u64 nr = _net_nr_recvfrom()
+    return syscall_raw(nr, fd, buf, len, 0, 0, 0)
+}
+
+// Close socket
+fn net_close(u64 fd) {
+    u64 nr = _net_nr_close()
+    syscall_raw(nr, fd, 0, 0, 0, 0, 0)
+}
+
+// Set socket option
+fn net_setsockopt(u64 fd, u64 level, u64 optname, u64 optval, u64 optlen) -> u64 {
+    u64 nr = _net_nr_setsockopt()
+    return syscall_raw(nr, fd, level, optname, optval, optlen, 0)
+}
+
+// --- address helpers ---
+
+// Convert port to network byte order (big-endian, 16-bit)
+fn net_htons(u64 port) -> u64 {
+    u64 lo = port & 255
+    u64 hi = (port >> 8) & 255
+    return (lo << 8) | hi
+}
+
+// Build sockaddr_in for IPv4.
+// ip: 4 bytes packed in host order (e.g., 0x7F000001 = 127.0.0.1)
+// port: port number in host byte order
+// Returns pointer to 16-byte sockaddr_in (caller must dealloc with net_addr_free)
+fn net_addr_ipv4(u64 ip, u64 port) -> u64 {
+    u64 addr = alloc(16)
+    // Zero the whole struct
+    memset(addr, 0, 16)
+    // sin_family = AF_INET (2) at offset 0 as u16
+    u16 family = 2
+    store16(addr, family)
+    // sin_port at offset 2 as u16 (network byte order)
+    u64 nport = net_htons(port)
+    u16 p16 = nport
+    u64 port_ptr = addr + 2
+    store16(port_ptr, p16)
+    // sin_addr at offset 4 as u32 (already in network byte order for packed IP)
+    u32 ip32 = ip
+    u64 ip_ptr = addr + 4
+    store32(ip_ptr, ip32)
+    return addr
+}
+
+// Free a sockaddr allocated by net_addr_ipv4
+fn net_addr_free(u64 addr) {
+    dealloc(addr)
+}
