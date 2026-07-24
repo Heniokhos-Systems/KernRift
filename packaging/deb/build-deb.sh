@@ -41,12 +41,16 @@ Priority: optional
 Architecture: $arch
 Maintainer: Pantelis Christou <contact@heniokhos.com>
 Homepage: https://kernrift.org
-Description: Self-hosted systems language compiler for kernel development
- KernRift is a self-hosting systems language compiler that produces
- native executables for x86_64 and AArch64. It compiles itself to a
- fixed point in 55ms on modern hardware. Features include inline assembly, naked
- functions, packed structs, signed comparisons, bitfield operations,
- volatile memory access, and freestanding mode for bare-metal targets.
+Description: Self-hosted systems language compiler for kernel and bare-metal development
+ KernRift is a self-hosting systems language compiler with an SSA IR backend
+ that emits native machine code directly -- no LLVM, no C, no external
+ assembler. It produces native executables for x86_64 and AArch64 and
+ cross-compiles bare-metal for RISC-V 32 and Xtensa LX6, including direct-boot
+ ESP32 images and Linux kernel modules. It self-compiles in about half a second
+ on modern hardware, reaching a bit-identical bootstrap fixed point. Kernel-first
+ features include device blocks for typed MMIO, inline assembly, atomic and
+ bitfield operations, signed comparisons, slice parameters, and a freestanding
+ mode for targets with no operating system.
  .
  The compiler is a single static binary with zero dependencies.
 EOF
