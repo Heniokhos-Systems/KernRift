@@ -122,6 +122,12 @@ brew install heniokhos-systems/kernrift/kernrift
 winget install Pantelis23.KernRift
 ```
 
+**Windows** — `scoop`:
+```powershell
+scoop bucket add kernrift https://github.com/Heniokhos-Systems/KernRift
+scoop install kernrift
+```
+
 **Windows** — install script (alternative):
 ```powershell
 powershell -ExecutionPolicy Bypass -File install.ps1
