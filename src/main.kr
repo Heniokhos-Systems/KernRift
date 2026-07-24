@@ -487,6 +487,14 @@ fn import_init_search_paths() {
         // Linux/macOS: system paths
         import_add_search_path("/usr/local/share/kernrift/")
         import_add_search_path("/usr/share/kernrift/")
+        // Homebrew prefixes. /usr/local (Intel macOS Homebrew) is already
+        // covered above; /opt/homebrew is Apple Silicon and
+        // /home/linuxbrew/.linuxbrew is the Linux Homebrew default. Neither is
+        // an FHS path, so `brew install` would otherwise land the stdlib where
+        // krc never looks. (pacman/AUR use /usr/share, and Scoop resolves
+        // relative to krc.exe on Windows -- both already covered.)
+        import_add_search_path("/opt/homebrew/share/kernrift/")
+        import_add_search_path("/home/linuxbrew/.linuxbrew/share/kernrift/")
         // Add user path: $HOME/.local/share/kernrift/
         uint64 home = import_read_home()
         if home != 0 {
