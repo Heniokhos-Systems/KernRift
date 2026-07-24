@@ -66,7 +66,7 @@ EOF
     chmod 755 "$PKG/usr/bin/kr"
 
     # Download stdlib
-    for mod in string io math fmt mem vec map color fb fixedpoint font memfast widget time log net; do
+    for mod in alloc string io math math_float fmt mem memfast vec map color fb fixedpoint font widget time log net sha256; do
         echo "  Downloading std/$mod.kr..."
         curl -sSLf -o "$PKG/usr/share/kernrift/std/$mod.kr" "$RAW/std/$mod.kr"
     done
