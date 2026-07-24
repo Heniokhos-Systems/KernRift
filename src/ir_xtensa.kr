@@ -39,17 +39,19 @@ static uint64 XT_OVERFLOW_RESERVE = 64
 static uint64 XT_SCRATCH_SIZE = 32
 static uint64 ir_xt_scratch_off = 0
 
-// Freestanding boot (Task 8). xt_entry_node is the entry function AST node
-// (a live `_start` if present, else `main`) selected in main.kr's xt_raw path.
-// It is non-zero ONLY under --arch=xtensa --freestanding, so ir_xtensa_gen can
-// gate the SP-init preamble on `fn_node == xt_entry_node` with no separate raw
-// flag. The preamble is emitted as the entry fn's FIRST code (past its pool),
-// so e_entry (= code_start) lands on it. XT_STACK_TOP is the initial SP: the
-// stack grows DOWN from here, so it must sit above the (tiny) boot image in the
-// lx60 cached DRAM window (load base 0xd0000000, see codegen_xtensa.kr).
-// 0xd0040000 = 256 KiB into that window — pinned against qemu-system-xtensa
-// -M lx60 (see task-8 report).
-static uint64 xt_entry_node = 0
+// Freestanding boot (Task 8). The entry function AST node (a live `_start` if
+// present, else `main`) is selected in main.kr's xt_raw path and passed to
+// ir_xtensa_gen as its `xt_entry_node` parameter — mirroring riscv's
+// rv_entry_node, a threaded value rather than a cross-file global, so the
+// reference resolves under both the concatenated and import builds. It is
+// non-zero ONLY under --arch=xtensa --freestanding, so ir_xtensa_gen gates the
+// SP-init preamble on `fn_node == xt_entry_node` with no separate raw flag. The
+// preamble is emitted as the entry fn's FIRST code (past its pool), so e_entry
+// (= code_start) lands on it. XT_STACK_TOP is the initial SP: the stack grows
+// DOWN from here, so it must sit above the (tiny) boot image in the lx60 cached
+// DRAM window (load base 0xd0000000, see codegen_xtensa.kr). 0xd0040000 = 256
+// KiB into that window — pinned against qemu-system-xtensa -M lx60 (see task-8
+// report).
 static uint64 XT_STACK_TOP = 0xd0040000
 
 // --- ESP32 machine target (--target=esp32) memory map -----------------------
@@ -2484,7 +2486,7 @@ fn ir_emit_xtensa_insn(uint64 ii) {
 // Mirror of ir_riscv_gen (ir_riscv.kr:2255), minus the C-compression pass
 // (there is no compressed relayout on xtensa) and plus the literal-pool
 // emission + self-registration described above.
-fn ir_xtensa_gen(uint64 fn_node) {
+fn ir_xtensa_gen(uint64 fn_node, uint64 xt_entry_node) {
     uint32 ann_flags = ast_data4(fn_node)
     uint64 is_naked = ann_flags & 2
     // Current-function @naked flag for the PIC emitter's H3 guard: a PIC site in

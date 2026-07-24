@@ -5,6 +5,10 @@ import "codegen.kr"
 import "codegen_aarch64.kr"
 import "ir.kr"
 import "ir_aarch64.kr"
+import "ir_riscv.kr"
+import "codegen_riscv.kr"
+import "ir_xtensa.kr"
+import "codegen_xtensa.kr"
 import "format_macho.kr"
 import "format_pe.kr"
 import "format_archive.kr"
@@ -14,6 +18,8 @@ import "analysis.kr"
 import "type_check.kr"
 import "inliner.kr"
 import "living.kr"
+import "../std/sha256.kr"
+import "format_espimage.kr"
 import "runtime.kr"
 import "formatter.kr"
 
@@ -2537,12 +2543,16 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
     }
 
     // Xtensa freestanding: select the entry function (a live `_start` if one
-    // exists, else `main`) and stash it in the ir_xtensa.kr global xt_entry_node
-    // so ir_xtensa_gen emits the SP-init preamble as its first code (Task 8
-    // Step 3). Unlike riscv, the entry is NOT hoisted to offset 0 — e_entry is
-    // patched to its code_start (past the pool) in the xt_raw finalize block, so
-    // emission order stays free (calls resolve through the fixup table). Arch-3
-    // + raw-only by construction: xt_entry_node stays 0 on every other path.
+    // exists, else `main`) and pass it to ir_xtensa_gen so it emits the SP-init
+    // preamble as that function's first code (Task 8 Step 3). Held in a local and
+    // threaded as a parameter — like riscv's rv_entry_node — rather than a
+    // cross-file global in ir_xtensa.kr, so the reference resolves under both the
+    // concatenated and import builds. Unlike riscv, the entry is NOT hoisted to
+    // offset 0 — e_entry is patched to its code_start (past the pool) in the
+    // xt_raw finalize block, so emission order stays free (calls resolve through
+    // the fixup table). Arch-3 + raw-only by construction: xt_entry_node stays 0
+    // on every other path.
+    uint64 xt_entry_node = 0
     if xt_raw != 0 {
         uint64 xt_main_node = 0
         uint32 xte_child = ast_child(root)
@@ -2641,7 +2651,7 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
                     uint64 xt_is_extern = xt_ann_flags & 8
                     if xt_is_extern == 0 {
                         ir_init()
-                        ir_xtensa_gen(wchild)
+                        ir_xtensa_gen(wchild, xt_entry_node)
                     }
                 } else {
                     // Legacy ARM64: gen_function_a64 registers internally.
