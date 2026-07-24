@@ -29,6 +29,26 @@ Thumbs.db
 /.tools/
 .worktrees/
 
+# Node / editor extension build deps
+node_modules/
+
+# Local build + test output (regenerable; never commit)
+/krc
+/dist_new/
+/test_out/
+/benchmarks/sort
+*.tmp
+test_tmp_*.kr
+test_while.kr
+bt_test.kr
+
+# Built packages
+packaging/deb/*.deb
+packaging/deb/ext/
+
+# Local-only working docs (planning/scope notes are not shipped)
+/docs/MLRIFT_PORT_SCOPE.md
+
 # Website (deployed separately)
 /website/
 
