@@ -1955,6 +1955,15 @@ fn parse_fn_decl() -> uint64 {
         uint64 ret_tok = advance_tok()
         uint32 rt = ret_tok
         ast_set_data2(node, rt)
+        // Record signed integer returns (kinds 84..87 = i8/i16/i32/i64) so a
+        // call's result vreg can be tagged signed at lowering. Done here, at
+        // parse time, so the table is complete before any function is lowered
+        // — registering during lowering would only catch callees that happen
+        // to be defined earlier in the file.
+        uint64 ret_kind_p = tok_kind_at_raw(ret_tok)
+        if ret_kind_p >= 84 && ret_kind_p <= 87 {
+            fn_ret_signed_register(nt)
+        }
     }
 
     // Body

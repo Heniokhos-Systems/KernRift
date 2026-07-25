@@ -297,6 +297,18 @@ static uint64 sret_slot = 0xFFFFFFFF
 static uint64 fn_ret_float_table = 0
 static uint64 fn_ret_float_count = 0
 
+// Function return-type SIGNED table: maps fn name_tok → 1 if the declared
+// return type is a signed integer (kinds 84..87: i8/i16/i32/i64).
+// Without this, `neg() >> 1` / `neg() / 3` / `neg() % 3` on a fn returning a
+// signed type picked the UNSIGNED opcode (SHR/DIV/MOD instead of
+// SAR/SDIV/SMOD) — a silent miscompile for negative values, because the
+// signedness lived only on the vreg and a call's result vreg was never
+// tagged. Populated in the parser (parse_fn_decl), so it is complete before
+// any lowering runs and does not depend on declaration order.
+// [name_tok(4), signed(4)] × 512
+static uint64 fn_ret_signed_table = 0
+static uint64 fn_ret_signed_count = 0
+
 // Function return-type struct table: maps fn name_tok → struct index
 // [name_tok(4), struct_idx(4)] × 512
 static uint64 fn_ret_struct_table = 0
@@ -476,6 +488,7 @@ fn codegen_init(uint64 capacity, uint64 source, uint64 tokens) {
     pin_param0_offset = 0xFFFFFFFF
     pin_param1_offset = 0xFFFFFFFF
     fn_ret_float_table = alloc(512 * 8)
+    fn_ret_signed_table = alloc(512 * 8)
     fn_ret_float_count = 0
     fn_ret_struct_table = alloc(512 * 8)
     fn_ret_struct_count = 0
@@ -2776,6 +2789,37 @@ fn fn_ret_float_lookup(uint64 name_tok) -> uint64 {
             unsafe { *(e4 as uint32) -> fk }
             uint64 wfk = fk
             return wfk
+        }
+        i = i + 1
+    }
+    return 0
+}
+
+// Record that a function's declared return type is a signed integer.
+fn fn_ret_signed_register(uint64 name_tok) {
+    if fn_ret_signed_count >= 512 {
+        write(2, "error: fn_ret_signed_table overflow (max 512)\n", 46)
+        exit(1)
+    }
+    uint64 entry = fn_ret_signed_table + fn_ret_signed_count * 8
+    uint32 nt = name_tok
+    unsafe { *(entry as uint32) = nt }
+    uint64 e4 = entry + 4
+    uint32 one = 1
+    unsafe { *(e4 as uint32) = one }
+    fn_ret_signed_count = fn_ret_signed_count + 1
+}
+
+// 1 iff the function returns a signed integer type (i8/i16/i32/i64).
+fn fn_ret_signed_lookup(uint64 name_tok) -> uint64 {
+    uint64 i = 0
+    while i < fn_ret_signed_count {
+        uint64 entry = fn_ret_signed_table + i * 8
+        uint32 nt = 0
+        unsafe { *(entry as uint32) -> nt }
+        uint64 wnt = nt
+        if tok_text_eq(wnt, name_tok) != 0 {
+            return 1
         }
         i = i + 1
     }

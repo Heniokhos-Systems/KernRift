@@ -856,6 +856,41 @@ else
     echo "  asm_hex: SKIP (x86-only)"; PASS=$((PASS+1)); TOTAL=$((TOTAL+1))
 fi
 
+# Signedness must survive a CALL RESULT used directly as an operand.
+# Regression: the signed flag lived only on a vreg, and a call's result vreg
+# was never tagged from the callee's declared return type — so `neg() >> 1`
+# emitted SHR (logical) instead of SAR, and `/` `%` chose DIV/MOD over
+# SDIV/SMOD. Silently wrong for negatives. Worse, a pure single-expression
+# callee is INLINED (even at --O0), splicing an untyped body in, which loses
+# the signedness before the IR sees a call at all. Assigning to a typed local
+# first always worked, which is what masked it. Each case exits 0 only if the
+# direct-call form agrees with the via-local form.
+run_test "signed_ret_shift_i32" 'fn neg() -> i32 { return 0 - 32 }
+fn main() {
+    i32 a = neg()
+    i32 viaLocal = a >> 1
+    i32 direct = neg() >> 1
+    if viaLocal != direct { exit(1) }
+    if direct != (0 - 16) { exit(2) }
+    exit(0)
+}' 0
+
+run_test "signed_ret_shift_i64" 'fn neg() -> i64 { return 0 - 32 }
+fn main() {
+    i64 a = neg()
+    if (a >> 1) != (neg() >> 1) { exit(1) }
+    if (neg() >> 1) != (0 - 16) { exit(2) }
+    exit(0)
+}' 0
+
+run_test "signed_ret_divmod" 'fn neg() -> i64 { return 0 - 10 }
+fn main() {
+    i64 a = neg()
+    if (a / 3) != (neg() / 3) { exit(1) }
+    if (a % 3) != (neg() % 3) { exit(2) }
+    exit(0)
+}' 0
+
 # Signed comparisons: signed_lt with negative-like values
 run_test "signed_lt_true" 'fn main() {
     uint64 a = 0xFFFFFFFFFFFFFFFF

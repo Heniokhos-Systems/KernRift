@@ -380,6 +380,20 @@ fn inline_collect(uint64 root) {
             if tok_matches(wnt, "main", 4) != 0 { skip = 1 }
             if ast_data4(fn_n) != 0 { skip = 1 }
             if fn_section_lookup(wnt) != 0 { skip = 1 }
+            // Skip callees returning a SIGNED integer (kinds 84..87). Inlining
+            // splices the callee's body expression into the caller, and that
+            // expression carries no declared type — so the signedness of the
+            // return is lost and the caller's BinOp lowering picks the
+            // unsigned opcode. `fn neg() -> i32 { return 0 - 32 }` inlined into
+            // `neg() >> 1` became a logical shift (SHR), yielding a huge
+            // positive instead of -16; likewise `/` and `%` chose DIV/MOD over
+            // SDIV/SMOD. Correctness beats inlining a signed-returning helper.
+            uint32 ret_tok_i = ast_data2(fn_n)
+            uint64 wrt_i = ret_tok_i
+            if wrt_i != 0 {
+                uint64 rk_i = tok_kind_at_raw(wrt_i)
+                if rk_i >= 84 && rk_i <= 87 { skip = 1 }
+            }
 
             if skip == 0 {
                 uint64 body_expr = inline_body_expr(fn_n)

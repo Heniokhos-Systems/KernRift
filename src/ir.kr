@@ -2849,6 +2849,12 @@ fn ir_lower_expr(uint64 node) -> uint64 {
         // so fkind only gates op selection, not register class.
         uint64 ret_fk_call = fn_ret_float_lookup(callee_tok)
         if ret_fk_call != 0 { ir_vreg_fkind_set(dest, ret_fk_call) }
+        // Same idea for signedness: tag the result vreg when the callee
+        // returns a signed integer. Without it the BinOp lowering saw an
+        // unsigned operand and picked SHR/DIV/MOD instead of SAR/SDIV/SMOD,
+        // so `neg() >> 1`, `neg() / 3` and `neg() % 3` were silently wrong
+        // for negative values (while `i32 c = neg(); c >> 1` was correct).
+        if fn_ret_signed_lookup(callee_tok) != 0 { ir_vreg_signed_set(dest, 1) }
         // Check if callee returns a struct (small, <=16 bytes, via rax/rdx)
         uint64 ret_si = fn_ret_struct_lookup(callee_tok)
         if ret_si != 0xFFFFFFFF {
