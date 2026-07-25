@@ -2,6 +2,52 @@
 
 All notable changes to `kernriftc` are documented in this file.
 
+## v2.8.31 — 2026-07-25
+
+A correctness release. **Anyone using a signed return type in an expression
+should upgrade** — v2.8.30 and earlier miscompile it silently.
+
+### Fixed
+
+- **Signed return types were lost at call sites.** Calling a function that
+  returns a signed integer produced an *unsigned* result, so using it directly
+  as an operand chose the wrong opcode:
+
+  ```kr
+  fn neg() -> i32 { return 0 - 32 }
+  neg() >> 1     // 1152921504606846960, not -16   (SHR instead of SAR)
+  neg() / 3      // wrong for negatives            (DIV  instead of SDIV)
+  neg() % 3      // wrong for negatives            (MOD  instead of SMOD)
+  ```
+
+  No diagnostic; the wrong answer just propagates. Assigning to a typed local
+  first (`i32 c = neg(); c >> 1`) was always correct, which is what hid it.
+
+  There were two independent causes. Signedness was tracked only on the IR
+  vreg and a call's result vreg was never tagged from the callee's declared
+  return type; that is now recorded at parse time (so it does not depend on
+  definition order) and applied at the call lowering. The larger cause was the
+  inliner: a pure single-expression callee is spliced into the caller as an
+  untyped expression, losing the return type before the IR ever sees a call —
+  and inlining is not gated by `-O`, so this bit even at `--O0`. Callees
+  returning a signed integer are no longer inlined.
+
+  Consequence: programs that call signed-returning pure helpers change emitted
+  bytes. Correctness beats the inline.
+
+- **`install.sh` and `install.ps1` installed only 16 of the 19 standard-library
+  modules** — `alloc`, `math_float` and `sha256` were missing, so any program
+  importing them failed to compile after a `curl | sh` install.
+
+### Changed
+
+- Installer scripts, docs and packaging now reference the current
+  `Heniokhos-Systems` repository path rather than relying on GitHub's rename
+  redirect. The `Pantelis23.KernRift` winget identifier is unchanged.
+- `install.sh` advertises the Homebrew tap form (`brew install
+  heniokhos-systems/kernrift/kernrift`); a bare `brew install kernrift` is
+  rejected by Homebrew 6.x.
+
 ## v2.8.30 — 2026-07-24
 
 A packaging and build-hygiene release.
