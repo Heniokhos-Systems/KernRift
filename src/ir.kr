@@ -5266,6 +5266,46 @@ fn ir_color_ceil_set(uint64 vreg, uint64 maxc) {
     if vreg + 1 > ir_color_ceil_used { ir_color_ceil_used = vreg + 1 }
 }
 
+// Raw ceiling as stored: 0 means "unset". ir_color_ceil_get folds unset into
+// IR_NUM_REGS, which is the right answer for the colourer but useless for
+// combining ceilings, hence this separate accessor.
+fn ir_color_ceil_raw(uint64 vreg) -> uint64 {
+    if ir_color_ceil == 0 { return 0 }
+    if vreg >= ir_color_ceil_cap { return 0 }
+    uint64 p = ir_color_ceil + vreg * 4
+    uint32 mc = 0
+    unsafe { *(p as uint32) -> mc }
+    uint64 wmc = mc
+    return wmc
+}
+
+// Push every vreg's ceiling onto its union-find representative, keeping the
+// TIGHTEST. Copy coalescing colours representatives only and then propagates
+// the rep's colour to its followers, so without this a capped vreg coalesced
+// with an uncapped one would inherit a colour its own ceiling forbids — on
+// xtensa that means a value a call is about to destroy quietly ends up in a
+// caller-saved register. Must run after coalescing is final and before the
+// greedy loop.
+fn ir_color_ceil_to_reps(uint64 vcount) {
+    if ir_color_ceil == 0 { return }
+    uint64 v = 1
+    while v < vcount {
+        uint64 c = ir_color_ceil_raw(v)
+        if c != 0 {
+            uint64 r = ir_uf_find(v)
+            if r != v {
+                uint64 rc = ir_color_ceil_raw(r)
+                if rc == 0 {
+                    ir_color_ceil_set(r, c)
+                } else if c < rc {
+                    ir_color_ceil_set(r, c)
+                }
+            }
+        }
+        v = v + 1
+    }
+}
+
 // Highest colour+1 that `vreg` may take. IR_NUM_REGS unless a backend
 // narrowed it.
 fn ir_color_ceil_get(uint64 vreg) -> uint64 {
@@ -5780,6 +5820,10 @@ fn ir_graph_color() {
         }
         cii = cii + 1
     }
+
+    // Coalescing is final now, so fold every follower's colour ceiling into
+    // its representative before anything is coloured.
+    ir_color_ceil_to_reps(vcount)
 
     // Greedy coloring: for each vreg, assign the lowest color not used
     // by any interfering neighbor. Followers (uf_find(vi) != vi) are

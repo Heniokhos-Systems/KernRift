@@ -437,35 +437,41 @@ fn ir_regalloc_init_xtensa() {
     }
 }
 
-// --- Leaf-function colour file -------------------------------------------
-// Four colours is brutally tight, and it is tight in exactly the wrong place:
-// the int8 NN dot kernel (a 4x-unrolled MAC loop, MLRift std/nn_int8.mlr)
-// carries five values across its loop and spills 113 times in a function that
-// makes no calls at all.
+// --- Wide colour file ----------------------------------------------------
+// Four colours is brutally tight, and it is tight in exactly the wrong place.
+// Measured on an ESP32 at 240 MHz: eight int8 MACs written inline in a
+// four-colour function cost 771 cycles, while the SAME eight MACs inside a
+// nine-colour one cost 306 — calling out to a wider-coloured helper beat
+// inlining the arithmetic by 2.5x, which is register pressure and nothing else.
 //
-// A function that emits no call0 and contains no inline asm holds nothing of
-// its caller's in a2..a7 and needs none of them for outgoing arguments, so on
-// top of the four callee-saved colours it may also allocate the CALL0 argument
-// registers. Two exclusions:
+// The CALL0 argument registers a2..a7 are the only slack available (a0/a1 are
+// reserved and all of a8..a11 are within-op scratch), so they join the four
+// callee-saved colours to make NINE. Three exclusions carry the correctness:
 //
 //   a5 stays out. Two op handlers (the memcpy byte tmp, IR_FMT_UINT's `ten`)
-//   take it as within-op scratch on the strength of "no call in this op" —
-//   which is still true in a leaf, so they would clobber an allocated value.
+//   take it as within-op scratch on the strength of "no call in this op", which
+//   stays true — so they would clobber an allocated value.
 //
-//   PARAMETER vregs stay on the callee-saved prefix (ir_color_ceil, capped to
-//   4). a2..a7 arrive holding the incoming arguments and the leading param
+//   PARAMETER vregs are capped to the callee-saved prefix (ir_color_ceil).
+//   a2..a7 arrive holding the incoming arguments and the leading param
 //   IR_COPYs read them one at a time, so a param homed in an arg register that
 //   a LATER param has yet to read would be clobbered. Capping the params is
 //   enough and needs no parallel-move sequencing; the loop-carried locals that
 //   actually want the extra registers are separate vregs (`i32 s = acc` and
 //   friends), and they get the full file.
 //
-// Caller-saved registers need no prologue save/restore here precisely because
-// there are no calls: nothing else can observe them. The prologue's
-// callee-save loop counts colours 0..3 only, so it already ignores these.
-static uint64 XT_LEAF_NUM_REGS = 9
+//   Anything a CALL could clobber is capped the same way — see
+//   xt_seed_call_ceilings. That is what makes this safe in a function that
+//   calls out: a2..a7 are only handed to values that no call can observe, so
+//   there is nothing to save or restore around a call0. Blocks with no call in
+//   them are untouched, and those are the inner loops that matter.
+//
+// Inline asm disqualifies a function outright (it can name physical ARs), as
+// does @naked (no frame to spill into). The prologue's callee-save loop counts
+// colours 0..3 only, so it already ignores the caller-saved ones.
+static uint64 XT_WIDE_NUM_REGS = 9
 
-fn xt_leaf_reg_for_color(uint64 color) -> uint64 {
+fn xt_wide_reg_for_color(uint64 color) -> uint64 {
     if color < 4 { return 12 + color }     // 0..3 -> a12..a15 (callee-saved)
     if color == 4 { return 2 }             // 4..8 -> a2,a3,a4,a6,a7 (arg regs)
     if color == 5 { return 3 }
@@ -474,40 +480,100 @@ fn xt_leaf_reg_for_color(uint64 color) -> uint64 {
     return 7
 }
 
-fn ir_regalloc_init_xtensa_leaf() {
-    IR_NUM_REGS = XT_LEAF_NUM_REGS
+fn ir_regalloc_init_xtensa_wide() {
+    IR_NUM_REGS = XT_WIDE_NUM_REGS
     if ir_xt_phys_regs_sized == 0 {
         if ir_phys_regs == 0 { ir_phys_regs = alloc(10 * 8) }
         ir_xt_phys_regs_sized = 1
     }
     uint64 c = 0
-    while c < XT_LEAF_NUM_REGS {
+    while c < XT_WIDE_NUM_REGS {
         uint64 p = ir_phys_regs + c * 8
-        uint64 phys = xt_leaf_reg_for_color(c)
+        uint64 phys = xt_wide_reg_for_color(c)
         unsafe { *(p as uint64) = phys }
         c = c + 1
     }
 }
 
-// Does this function qualify for the wide colour file? Scans the lowered IR
-// for the two things that would make a2..a7 unsafe to allocate:
-//   op 50  IR_CALL       — a call0 clobbers every caller-saved register
-//   op 96  IR_ASM_BLOCK  — inline asm can name physical ARs directly
-// A `call0 __xt_pcbase` from a PIC site is deliberately NOT disqualifying:
-// that helper is a lone ret.n and clobbers only a0 (see xt_emit_pic_addr).
-fn xt_fn_is_leaf() -> uint64 {
+// Does this function qualify for the wide colour file? Only inline asm
+// disqualifies outright (op 96 IR_ASM_BLOCK), because asm can name physical ARs
+// directly and the allocator has no idea which. Calls do NOT disqualify: a
+// function with calls still gets the wide file, and xt_seed_call_ceilings caps
+// exactly the vregs a call could clobber. A `call0 __xt_pcbase` from a PIC site
+// is harmless either way — that helper is a lone ret.n and clobbers only a0
+// (see xt_emit_pic_addr).
+fn xt_fn_wide_ok() -> uint64 {
     uint64 b = 0
     while b < ir_bb_count {
         uint64 i = ir_bb_first_insn(b)
         while i != 0xFFFFFFFF {
-            uint64 o = ir_insn_opcode(i)
-            if o == 50 { return 0 }
-            if o == 96 { return 0 }
+            if ir_insn_opcode(i) == 96 { return 0 }
             i = ir_insn_next(i)
         }
         b = b + 1
     }
     return 1
+}
+
+// Cap every vreg that a call could clobber to the callee-saved colours.
+//
+// A call0 destroys a2..a7, and so does the IR_ARG sequence that loads the
+// outgoing arguments into them just before it. So any vreg that is live
+// anywhere across such a point must not live in one of those registers.
+//
+// The rule applied here is deliberately a conservative OVER-approximation, and
+// the direction matters: capping a vreg that did not need it only costs a
+// register, while MISSING one is a miscompile. For every basic block that
+// contains an IR_ARG (51), IR_CALL (50) or IR_CALL_IND (87), cap
+//     live_in[bb]  U  live_out[bb]  U  {every vreg named by any insn in bb}
+// which is a superset of "live at the call". No instruction-level liveness and
+// no operand-semantics knowledge is needed — in particular nothing has to know
+// that IR_CALL's src1 is an argument COUNT rather than a vreg, because naming
+// it merely caps it.
+//
+// Crucially this leaves call-FREE blocks completely alone, and those are the
+// blocks that matter: a tight inner loop containing no calls gets the full
+// colour file even in a function that calls out elsewhere. Measured on an
+// ESP32: eight int8 MACs written inline in a 4-colour non-leaf cost 771 cycles
+// against 306 for the same MACs inside a 9-colour leaf.
+fn xt_seed_call_ceilings() {
+    uint64 b = 0
+    while b < ir_bb_count {
+        // Does this block contain a call or an outgoing-argument setup?
+        uint64 has_call = 0
+        uint64 i = ir_bb_first_insn(b)
+        while i != 0xFFFFFFFF {
+            uint64 o = ir_insn_opcode(i)
+            // 50 IR_CALL, 51 IR_ARG, 87 IR_CALL_IND (callx0). 87 is easy to
+            // forget and neither compiler's own test suite catches its absence.
+            if o == 50 || o == 51 || o == 87 { has_call = 1 }
+            i = ir_insn_next(i)
+        }
+        if has_call != 0 {
+            // Everything live in or out of the block.
+            uint64 v = 1
+            while v < ir_vreg_next {
+                if ir_live_test(ir_live_in, b, v) != 0 {
+                    ir_color_ceil_set(v, 4)
+                } else if ir_live_test(ir_live_out, b, v) != 0 {
+                    ir_color_ceil_set(v, 4)
+                }
+                v = v + 1
+            }
+            // Plus everything the block names, live-set or not.
+            i = ir_bb_first_insn(b)
+            while i != 0xFFFFFFFF {
+                uint64 d = ir_insn_dest(i)
+                if d != 0 { ir_color_ceil_set(d, 4) }
+                uint64 s1 = ir_insn_src1(i)
+                if s1 != 0 { ir_color_ceil_set(s1, 4) }
+                uint64 s2 = ir_insn_src2(i)
+                if s2 != 0 { ir_color_ceil_set(s2, 4) }
+                i = ir_insn_next(i)
+            }
+        }
+        b = b + 1
+    }
 }
 
 // Cap every vreg that receives an incoming argument register to the
@@ -1713,8 +1779,11 @@ fn ir_emit_xtensa_insn(uint64 ii) {
         unsafe { *(fe4 as uint32) = ct }
         fixup_count = fixup_count + 1
         ir_overflow_arg_count = 0
-        // Result in a2. Allocatable regs are a12-a15, so dst_r can never BE
-        // a2 — the guard just skips a no-op mv.
+        // Result in a2. a2 IS allocatable now (it is one of the wide colour
+        // file's caller-saved colours), so this guard is load-bearing rather
+        // than a no-op skip: dst_r really can be a2. Any OTHER vreg coloured a2
+        // is dead here — xt_seed_call_ceilings caps everything live across a
+        // call to the callee-saved colours.
         if dst_r != 0xFFFFFFFF {
             if dst_r != XT_ARG0 { xt_mv(dst_r, XT_ARG0) }
         } else {
@@ -2610,22 +2679,26 @@ fn ir_xtensa_gen(uint64 fn_node, uint64 xt_entry_node) {
     ir_compute_liveness()
     ir_compute_use_count()
 
-    // 3. Xtensa register allocator (4 callee-saved colours a12..a15).
+    // 3. Xtensa register allocator. Nine colours (a12..a15 callee-saved plus
+    //    the CALL0 argument registers bar a5) wherever that is safe, four
+    //    otherwise — see ir_regalloc_init_xtensa_wide.
     //    IR_NUM_REGS is shared; save/pin/restore around emission.
     uint64 saved_num_regs = IR_NUM_REGS
-    // A leaf gets the wide colour file (9 colours: the four callee-saved
-    // registers plus the CALL0 argument registers bar a5); everything else
-    // keeps the four callee-saved colours it has always had. Non-leaf register
-    // ASSIGNMENT is therefore unchanged, though frame offsets shift for every
-    // function because the spill region is now one slot per vreg.
-    // See ir_regalloc_init_xtensa_leaf.
-    // @naked is excluded: it gets no frame at all (total_frame = 0), so the
-    // param ceiling forcing a spill would store outside any frame. Four
-    // colours and no ceiling is what naked bodies have always had.
+    // The wide colour file (9 colours: the four callee-saved registers plus the
+    // CALL0 argument registers bar a5) applies to every function that contains
+    // no inline asm. Calls no longer disqualify a function: xt_seed_call_ceilings
+    // caps the vregs a call could clobber back to the callee-saved four, which
+    // leaves call-FREE blocks — the inner loops that actually matter — with the
+    // full file. See ir_regalloc_init_xtensa_wide.
+    //
+    // @naked is excluded: it gets no frame at all (total_frame = 0), so a
+    // ceiling forcing a spill would store outside any frame. Four colours and
+    // no ceiling is what naked bodies have always had.
     ir_color_ceil_reset()
-    if xt_fn_is_leaf() != 0 && is_naked == 0 {
-        ir_regalloc_init_xtensa_leaf()
+    if xt_fn_wide_ok() != 0 && is_naked == 0 {
+        ir_regalloc_init_xtensa_wide()
         xt_seed_param_ceilings()
+        xt_seed_call_ceilings()
     } else {
         IR_NUM_REGS = 4
         ir_regalloc_init_xtensa()
