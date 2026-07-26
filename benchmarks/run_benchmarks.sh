@@ -11,6 +11,18 @@ echo "Date: $(date -u)" | tee -a "$RESULTS"
 echo "CPU: $(lscpu | grep 'Model name' | sed 's/.*: *//')" | tee -a "$RESULTS"
 echo "" | tee -a "$RESULTS"
 
+# Warm the toolchains before timing anything. Compile timings are single-shot,
+# so without this the FIRST benchmark absorbs the cold page-cache cost of
+# loading gcc/rustc/krc and reports 2-3x its true figure — fib used to claim
+# gcc -O0 at 73ms against a true ~26ms, and rustc debug at 307ms against ~130ms.
+echo "  (warming toolchains...)" >&2
+gcc -O0 -o /tmp/.bench_warm "$DIR/fib.c" 2>/dev/null || true
+gcc -O2 -o /tmp/.bench_warm "$DIR/fib.c" 2>/dev/null || true
+rustc -o /tmp/.bench_warm "$DIR/fib.rs" 2>/dev/null || true
+rustc -C opt-level=2 -o /tmp/.bench_warm "$DIR/fib.rs" 2>/dev/null || true
+$KRC --arch=x86_64 "$DIR/fib.kr" -o /tmp/.bench_warm 2>/dev/null || true
+rm -f /tmp/.bench_warm
+
 # Time a command, print result in ms
 bench() {
     local label="$1"
@@ -19,6 +31,7 @@ bench() {
     local times=()
     for run in 1 2 3; do
         local start=$(date +%s%N)
+        if [ ! -x "$1" ]; then echo "$label: MISSING BINARY"; return; fi
         "$@" >/dev/null 2>&1 || true
         local end=$(date +%s%N)
         local ms=$(( (end - start) / 1000000 ))
@@ -26,7 +39,10 @@ bench() {
     done
     # Sort and take median
     IFS=$'\n' sorted=($(sort -n <<<"${times[*]}")); unset IFS
-    echo "$label: ${sorted[1]}ms (runs: ${times[0]}, ${times[1]}, ${times[2]})"
+    # Emit a real markdown row: the header is "| Binary | Time |", so the row
+    # needs the same two columns. It used to print "| krc: 423ms (runs: ...)",
+    # which renders as prose rather than a table.
+    echo "| $label | ${sorted[1]}ms (${times[0]}, ${times[1]}, ${times[2]}) |"
 }
 
 compile_bench() {
@@ -96,11 +112,11 @@ compile_bench() {
     echo "**Runtime (median of 3):**" | tee -a "$RESULTS"
     echo "| Binary | Time |" | tee -a "$RESULTS"
     echo "|--------|------|" | tee -a "$RESULTS"
-    bench "| krc" "$DIR/$name.krc.bin" | tee -a "$RESULTS"
-    bench "| gcc -O0" "$DIR/$name.c.O0.bin" | tee -a "$RESULTS"
-    bench "| gcc -O2" "$DIR/$name.c.O2.bin" | tee -a "$RESULTS"
-    bench "| rustc debug" "$DIR/$name.rs.dbg.bin" | tee -a "$RESULTS"
-    bench "| rustc -O2" "$DIR/$name.rs.rel.bin" | tee -a "$RESULTS"
+    bench "krc" "$DIR/$name.krc.bin" | tee -a "$RESULTS"
+    bench "gcc -O0" "$DIR/$name.c.O0.bin" | tee -a "$RESULTS"
+    bench "gcc -O2" "$DIR/$name.c.O2.bin" | tee -a "$RESULTS"
+    bench "rustc debug" "$DIR/$name.rs.dbg.bin" | tee -a "$RESULTS"
+    bench "rustc -O2" "$DIR/$name.rs.rel.bin" | tee -a "$RESULTS"
     echo "" | tee -a "$RESULTS"
 }
 

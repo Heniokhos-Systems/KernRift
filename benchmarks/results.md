@@ -1,5 +1,5 @@
 === KernRift Benchmark Suite ===
-Date: Fri May  8 01:18:22 AM UTC 2026
+Date: Sun Jul 26 04:04:44 PM UTC 2026
 CPU: AMD Ryzen 9 7900X 12-Core Processor
 
 --- fib ---
@@ -11,9 +11,9 @@ CPU: AMD Ryzen 9 7900X 12-Core Processor
 |----------|------|
 | krc (self-hosted) | 1ms |
 | gcc -O0 | 25ms |
-| gcc -O2 | 36ms |
-| rustc (debug) | 61ms |
-| rustc -O2 | 66ms |
+| gcc -O2 | 43ms |
+| rustc (debug) | 71ms |
+| rustc -O2 | 80ms |
 
 **Binary size:**
 | Binary | Size |
@@ -27,11 +27,11 @@ CPU: AMD Ryzen 9 7900X 12-Core Processor
 **Runtime (median of 3):**
 | Binary | Time |
 |--------|------|
-| krc: 416ms (runs: 416, 415, 416)
-| gcc -O0: 386ms (runs: 386, 387, 385)
-| gcc -O2: 80ms (runs: 80, 80, 80)
-| rustc debug: 388ms (runs: 394, 386, 388)
-| rustc -O2: 164ms (runs: 164, 164, 164)
+| krc | 441ms (436, 441, 442) |
+| gcc -O0 | 405ms (405, 405, 405) |
+| gcc -O2 | 85ms (84, 85, 86) |
+| rustc debug | 412ms (410, 416, 412) |
+| rustc -O2 | 170ms (170, 172, 169) |
 
 --- sort ---
 
@@ -41,15 +41,15 @@ CPU: AMD Ryzen 9 7900X 12-Core Processor
 | Compiler | Time |
 |----------|------|
 | krc (self-hosted) | 2ms |
-| gcc -O0 | 23ms |
-| gcc -O2 | 30ms |
-| rustc (debug) | 70ms |
-| rustc -O2 | 87ms |
+| gcc -O0 | 28ms |
+| gcc -O2 | 32ms |
+| rustc (debug) | 91ms |
+| rustc -O2 | 100ms |
 
 **Binary size:**
 | Binary | Size |
 |--------|------|
-| krc | 472 B |
+| krc | 464 B |
 | gcc -O0 | 15960 B |
 | gcc -O2 | 15960 B |
 | rustc debug | 3905344 B |
@@ -58,11 +58,11 @@ CPU: AMD Ryzen 9 7900X 12-Core Processor
 **Runtime (median of 3):**
 | Binary | Time |
 |--------|------|
-| krc: 79ms (runs: 79, 80, 77)
-| gcc -O0: 151ms (runs: 155, 150, 151)
-| gcc -O2: 274ms (runs: 274, 274, 274)
-| rustc debug: 2663ms (runs: 2667, 2663, 2650)
-| rustc -O2: 44ms (runs: 44, 44, 47)
+| krc | 81ms (81, 81, 80) |
+| gcc -O0 | 158ms (156, 158, 159) |
+| gcc -O2 | 279ms (283, 279, 279) |
+| rustc debug | 2854ms (2854, 2896, 2820) |
+| rustc -O2 | 48ms (48, 49, 48) |
 
 --- sieve ---
 
@@ -72,10 +72,10 @@ CPU: AMD Ryzen 9 7900X 12-Core Processor
 | Compiler | Time |
 |----------|------|
 | krc (self-hosted) | 2ms |
-| gcc -O0 | 25ms |
-| gcc -O2 | 29ms |
-| rustc (debug) | 73ms |
-| rustc -O2 | 85ms |
+| gcc -O0 | 28ms |
+| gcc -O2 | 34ms |
+| rustc (debug) | 94ms |
+| rustc -O2 | 107ms |
 
 **Binary size:**
 | Binary | Size |
@@ -89,11 +89,11 @@ CPU: AMD Ryzen 9 7900X 12-Core Processor
 **Runtime (median of 3):**
 | Binary | Time |
 |--------|------|
-| krc: 3ms (runs: 3, 3, 3)
-| gcc -O0: 4ms (runs: 4, 4, 3)
-| gcc -O2: 2ms (runs: 2, 2, 2)
-| rustc debug: 21ms (runs: 21, 21, 21)
-| rustc -O2: 2ms (runs: 2, 2, 2)
+| krc | 3ms (3, 3, 3) |
+| gcc -O0 | 5ms (5, 5, 4) |
+| gcc -O2 | 2ms (2, 2, 2) |
+| rustc debug | 23ms (23, 23, 24) |
+| rustc -O2 | 2ms (2, 2, 2) |
 
 --- matmul ---
 
@@ -103,15 +103,15 @@ CPU: AMD Ryzen 9 7900X 12-Core Processor
 | Compiler | Time |
 |----------|------|
 | krc (self-hosted) | 2ms |
-| gcc -O0 | 25ms |
-| gcc -O2 | 32ms |
-| rustc (debug) | 71ms |
-| rustc -O2 | 83ms |
+| gcc -O0 | 30ms |
+| gcc -O2 | 34ms |
+| rustc (debug) | 85ms |
+| rustc -O2 | 111ms |
 
 **Binary size:**
 | Binary | Size |
 |--------|------|
-| krc | 1112 B |
+| krc | 1104 B |
 | gcc -O0 | 15960 B |
 | gcc -O2 | 15960 B |
 | rustc debug | 3900272 B |
@@ -120,11 +120,11 @@ CPU: AMD Ryzen 9 7900X 12-Core Processor
 **Runtime (median of 3):**
 | Binary | Time |
 |--------|------|
-| krc: 26ms (runs: 26, 26, 25)
-| gcc -O0: 16ms (runs: 15, 16, 16)
-| gcc -O2: 4ms (runs: 4, 4, 4)
-| rustc debug: 124ms (runs: 124, 125, 124)
-| rustc -O2: 3ms (runs: 3, 3, 3)
+| krc | 25ms (25, 25, 25) |
+| gcc -O0 | 16ms (16, 17, 16) |
+| gcc -O2 | 4ms (4, 4, 4) |
+| rustc debug | 133ms (132, 133, 135) |
+| rustc -O2 | 4ms (4, 4, 4) |
 
 --- mandelbrot ---
 
@@ -133,16 +133,16 @@ CPU: AMD Ryzen 9 7900X 12-Core Processor
 **Compile time:**
 | Compiler | Time |
 |----------|------|
-| krc (self-hosted) | 3ms |
-| gcc -O0 | 22ms |
-| gcc -O2 | 27ms |
-| rustc (debug) | 62ms |
-| rustc -O2 | 68ms |
+| krc (self-hosted) | 2ms |
+| gcc -O0 | 31ms |
+| gcc -O2 | 32ms |
+| rustc (debug) | 85ms |
+| rustc -O2 | 93ms |
 
 **Binary size:**
 | Binary | Size |
 |--------|------|
-| krc | 1936 B |
+| krc | 1824 B |
 | gcc -O0 | 15968 B |
 | gcc -O2 | 15976 B |
 | rustc debug | 3896840 B |
@@ -151,11 +151,11 @@ CPU: AMD Ryzen 9 7900X 12-Core Processor
 **Runtime (median of 3):**
 | Binary | Time |
 |--------|------|
-| krc: 1774ms (runs: 1774, 1777, 1768)
-| gcc -O0: 1395ms (runs: 1400, 1394, 1395)
-| gcc -O2: 487ms (runs: 488, 487, 485)
-| rustc debug: 1089ms (runs: 1088, 1091, 1089)
-| rustc -O2: 481ms (runs: 480, 481, 482)
+| krc | 1786ms (1792, 1786, 1778) |
+| gcc -O0 | 1427ms (1427, 1433, 1422) |
+| gcc -O2 | 497ms (496, 497, 500) |
+| rustc debug | 1122ms (1125, 1117, 1122) |
+| rustc -O2 | 497ms (497, 497, 494) |
 
 --- sha256 ---
 
@@ -164,16 +164,16 @@ CPU: AMD Ryzen 9 7900X 12-Core Processor
 **Compile time:**
 | Compiler | Time |
 |----------|------|
-| krc (self-hosted) | 6ms |
-| gcc -O0 | 28ms |
-| gcc -O2 | 44ms |
-| rustc (debug) | 77ms |
-| rustc -O2 | 95ms |
+| krc (self-hosted) | 3ms |
+| gcc -O0 | 33ms |
+| gcc -O2 | 53ms |
+| rustc (debug) | 97ms |
+| rustc -O2 | 110ms |
 
 **Binary size:**
 | Binary | Size |
 |--------|------|
-| krc | 6272 B |
+| krc | 6096 B |
 | gcc -O0 | 16240 B |
 | gcc -O2 | 16176 B |
 | rustc debug | 3916688 B |
@@ -182,10 +182,10 @@ CPU: AMD Ryzen 9 7900X 12-Core Processor
 **Runtime (median of 3):**
 | Binary | Time |
 |--------|------|
-| krc: 430ms (runs: 430, 437, 428)
-| gcc -O0: 197ms (runs: 197, 199, 194)
-| gcc -O2: 39ms (runs: 40, 39, 39)
-| rustc debug: 530ms (runs: 535, 527, 530)
-| rustc -O2: 47ms (runs: 47, 47, 47)
+| krc | 416ms (428, 416, 415) |
+| gcc -O0 | 206ms (210, 206, 200) |
+| gcc -O2 | 41ms (42, 41, 41) |
+| rustc debug | 555ms (555, 544, 558) |
+| rustc -O2 | 48ms (48, 48, 49) |
 
 === Done ===
