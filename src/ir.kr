@@ -5712,6 +5712,19 @@ fn ir_graph_color() {
                         // the colourer and likely force a spill. Followers'
                         // own deg slots are stale (zeroed at drop time), so
                         // every degree lookup goes through ir_uf_find first.
+                        // K for THIS merge is the tightest ceiling of the two
+                        // nodes, not the global IR_NUM_REGS. A vreg capped by
+                        // ir_color_ceil (xtensa gives call-crossing values and
+                        // parameters only the callee-saved prefix) can take
+                        // fewer colours than the file has, so judging the merge
+                        // against the full file would approve one whose result
+                        // cannot be coloured — and the merged node then spills.
+                        // ir_color_ceil_get returns IR_NUM_REGS when unset, so
+                        // this is identical to the old behaviour for every
+                        // uncapped merge and on every arch that sets no ceilings.
+                        uint64 keff = ir_color_ceil_get(keep)
+                        uint64 deff = ir_color_ceil_get(drop)
+                        if deff < keff { keff = deff }
                         uint64 hd = 0
                         uint64 bw = 0
                         while bw < row_words {
@@ -5740,7 +5753,7 @@ fn ir_graph_color() {
                             }
                             bw = bw + 1
                         }
-                        if hd >= IR_NUM_REGS {
+                        if hd >= keff {
                             // George fallback: less conservative than Briggs.
                             // Try both directions: for every neighbour t of A
                             // (excluding B), t must interfere with B OR have
@@ -5755,7 +5768,7 @@ fn ir_graph_color() {
                             // colourer has too little slack to absorb the new
                             // edges. ARM64 (K=10) sees ~800 B extra win from
                             // George; x86 sees ~900 B regression.
-                            if IR_NUM_REGS < 8 {
+                            if keff < 8 {
                                 cii = cii + 1
                                 continue
                             }
