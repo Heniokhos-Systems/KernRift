@@ -2,6 +2,50 @@
 
 All notable changes to `kernriftc` are documented in this file.
 
+## v2.8.32 — 2026-07-26
+
+A correctness release with a large 32-bit performance improvement.
+**Anyone targeting riscv32 or xtensa should upgrade** — v2.8.31 and earlier
+silently miscompile unsigned variables there.
+
+### Fixed
+
+- **A variable's signedness came from its value, not its declaration.** Two
+  places let the signed flag leak from an initialiser or an assigned value onto
+  an explicitly unsigned variable:
+
+  ```
+  u32 ux = <i32 expr>      // vardecl: copied the RHS's flag
+  u32 ux = 7; ux = <i32>   // assign:  passed the rvalue's flag through
+  ```
+
+  `ux` and everything derived from it then used SIGNED operations: `ux >> 1`
+  lowered to an arithmetic shift and comparisons became signed. Invisible on
+  x86_64 and arm64, where a `u32` occupies a 64-bit slot and never reaches the
+  sign bit — but wrong on the 32-bit backends, where `0x80000000 >> 31` produced
+  `0xFFFFFFFF` instead of `1`. A declared type is now authoritative in both
+  directions: a store cannot retype a variable.
+
+- **Copy coalescing could approve a merge its own result could not satisfy**,
+  judging the merge against the whole register file rather than the merged
+  node's colour ceiling. Latent — the consequence was a spill, not wrong code.
+
+### Performance
+
+Measured end to end on real ESP32 silicon (YuNet face detection, 96px input),
+with every output value byte-identical to the previous release at each step:
+
+| change | cumulative |
+|---|---|
+| xtensa: 9 register colours instead of 4, in leaf functions | 1.44x |
+| xtensa: extend that to functions that make calls | 1.58x |
+| xtensa/riscv32: ADD/SUB immediate fusion (was x86-only) | 1.85x |
+| all targets: stop staging loop back-edge copies through temps | 1.90x |
+
+**1.90x overall** — 4.58s to 2.44s per inference. The back-edge copy change is
+in shared IR and shrinks every target, including the compiler itself: `krc`
+self-compiles to 1,334,832 bytes against 1,351,600.
+
 ## v2.8.31 — 2026-07-25
 
 A correctness release. **Anyone using a signed return type in an expression
