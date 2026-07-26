@@ -4,23 +4,43 @@ set -e
 
 DIR="$(cd "$(dirname "$0")" && pwd)"
 KRC="${KRC:-$DIR/../build/krc2}"
+
+# krc must target the HOST, not a hardcoded x86_64. This was `--arch=x86_64`
+# unconditionally, so on an ARM64 box it emitted x86-64 binaries that died with
+# "Exec format error" — and because bench swallowed the failure, every benchmark
+# reported the ~16ms cost of failing to launch as though it were a result.
+# Override with KR_ARCH to cross-benchmark deliberately.
+HOST_M="$(uname -m)"
+case "$HOST_M" in
+    aarch64|arm64) KR_ARCH="${KR_ARCH:-arm64}" ;;
+    *)             KR_ARCH="${KR_ARCH:-x86_64}" ;;
+esac
 RESULTS="$DIR/results.md"
 
 echo "=== KernRift Benchmark Suite ===" | tee "$RESULTS"
 echo "Date: $(date -u)" | tee -a "$RESULTS"
-echo "CPU: $(lscpu | grep 'Model name' | sed 's/.*: *//')" | tee -a "$RESULTS"
+echo "CPU: $(lscpu | grep -m1 'Model name' | sed 's/.*: *//') ($(uname -m), krc --arch=$KR_ARCH)" | tee -a "$RESULTS"
 echo "" | tee -a "$RESULTS"
 
 # Warm the toolchains before timing anything. Compile timings are single-shot,
 # so without this the FIRST benchmark absorbs the cold page-cache cost of
 # loading gcc/rustc/krc and reports 2-3x its true figure — fib used to claim
 # gcc -O0 at 73ms against a true ~26ms, and rustc debug at 307ms against ~130ms.
+# Rust is not installed everywhere this suite is useful (the Raspberry Pi 400
+# ARM64 box, for one). Detect it once and report n/a rather than aborting under
+# `set -e` — a missing optional toolchain should not cost us the gcc comparison.
+HAVE_RUSTC=1
+command -v rustc >/dev/null 2>&1 || HAVE_RUSTC=0
+[ "$HAVE_RUSTC" = 0 ] && echo "  (rustc not found — reporting n/a for Rust columns)" >&2
+
 echo "  (warming toolchains...)" >&2
 gcc -O0 -o /tmp/.bench_warm "$DIR/fib.c" 2>/dev/null || true
 gcc -O2 -o /tmp/.bench_warm "$DIR/fib.c" 2>/dev/null || true
-rustc -o /tmp/.bench_warm "$DIR/fib.rs" 2>/dev/null || true
-rustc -C opt-level=2 -o /tmp/.bench_warm "$DIR/fib.rs" 2>/dev/null || true
-$KRC --arch=x86_64 "$DIR/fib.kr" -o /tmp/.bench_warm 2>/dev/null || true
+if [ "$HAVE_RUSTC" = 1 ]; then
+  rustc -o /tmp/.bench_warm "$DIR/fib.rs" 2>/dev/null || true
+  rustc -C opt-level=2 -o /tmp/.bench_warm "$DIR/fib.rs" 2>/dev/null || true
+fi
+$KRC --arch=$KR_ARCH "$DIR/fib.kr" -o /tmp/.bench_warm 2>/dev/null || true
 rm -f /tmp/.bench_warm
 
 # Time a command, print result in ms
@@ -31,8 +51,23 @@ bench() {
     local times=()
     for run in 1 2 3; do
         local start=$(date +%s%N)
-        if [ ! -x "$1" ]; then echo "$label: MISSING BINARY"; return; fi
-        "$@" >/dev/null 2>&1 || true
+        if [ ! -x "$1" ]; then echo "| $label | MISSING BINARY |"; return; fi
+        # `|| rc=$?` keeps set -e from killing this function when the benchmark
+        # exits non-zero — which is the NORMAL case here, since each one returns
+        # its result through the exit code. A bare call plus `local rc=$?` looks
+        # equivalent and is not: bench runs inside a `| tee` pipeline, so set -e
+        # tears the subshell down before anything is printed and the row simply
+        # vanishes from the table.
+        local rc=0
+        "$@" >/dev/null 2>&1 || rc=$?
+        # 126 = cannot execute (wrong architecture), 127 = not found. Those mean
+        # we are timing a failure, not work. NOTE: do NOT treat rc > 128 as a
+        # signal death — every benchmark here deliberately returns its result via
+        # the exit code (fib(40) & 0xFF is 203), and a real exit(203) is
+        # indistinguishable from being killed by signal 75.
+        if [ $rc -eq 126 ] || [ $rc -eq 127 ]; then
+            echo "| $label | FAILED TO RUN (exit $rc) |"; return
+        fi
         local end=$(date +%s%N)
         local ms=$(( (end - start) / 1000000 ))
         times+=($ms)
@@ -52,7 +87,7 @@ compile_bench() {
     # Compile KernRift
     echo "  Compiling KernRift..."
     local start=$(date +%s%N)
-    $KRC --arch=x86_64 "$DIR/$name.kr" -o "$DIR/$name.krc.bin" 2>/dev/null
+    $KRC --arch=$KR_ARCH "$DIR/$name.kr" -o "$DIR/$name.krc.bin" 2>/dev/null
     local end=$(date +%s%N)
     local kr_compile_ms=$(( (end - start) / 1000000 ))
     chmod +x "$DIR/$name.krc.bin"
@@ -69,22 +104,25 @@ compile_bench() {
     local c_O2_compile_ms=$(( (end - start) / 1000000 ))
 
     # Compile Rust (debug and release)
-    local start=$(date +%s%N)
-    rustc -o "$DIR/$name.rs.dbg.bin" "$DIR/$name.rs" 2>/dev/null
-    local end=$(date +%s%N)
-    local rs_dbg_compile_ms=$(( (end - start) / 1000000 ))
+    local rs_dbg_compile_ms="n/a" rs_rel_compile_ms="n/a"
+    if [ "$HAVE_RUSTC" = 1 ]; then
+        local start=$(date +%s%N)
+        rustc -o "$DIR/$name.rs.dbg.bin" "$DIR/$name.rs" 2>/dev/null
+        local end=$(date +%s%N)
+        rs_dbg_compile_ms="$(( (end - start) / 1000000 ))ms"
 
-    local start=$(date +%s%N)
-    rustc -C opt-level=2 -o "$DIR/$name.rs.rel.bin" "$DIR/$name.rs" 2>/dev/null
-    local end=$(date +%s%N)
-    local rs_rel_compile_ms=$(( (end - start) / 1000000 ))
+        start=$(date +%s%N)
+        rustc -C opt-level=2 -o "$DIR/$name.rs.rel.bin" "$DIR/$name.rs" 2>/dev/null
+        end=$(date +%s%N)
+        rs_rel_compile_ms="$(( (end - start) / 1000000 ))ms"
+    fi
 
     # Binary sizes
     local kr_size=$(stat -c%s "$DIR/$name.krc.bin" 2>/dev/null || echo 0)
     local c_O0_size=$(stat -c%s "$DIR/$name.c.O0.bin" 2>/dev/null || echo 0)
     local c_O2_size=$(stat -c%s "$DIR/$name.c.O2.bin" 2>/dev/null || echo 0)
-    local rs_dbg_size=$(stat -c%s "$DIR/$name.rs.dbg.bin" 2>/dev/null || echo 0)
-    local rs_rel_size=$(stat -c%s "$DIR/$name.rs.rel.bin" 2>/dev/null || echo 0)
+    local rs_dbg_size=$(stat -c%s "$DIR/$name.rs.dbg.bin" 2>/dev/null || echo "n/a")
+    local rs_rel_size=$(stat -c%s "$DIR/$name.rs.rel.bin" 2>/dev/null || echo "n/a")
 
     echo "" | tee -a "$RESULTS"
     echo "### $name" | tee -a "$RESULTS"
@@ -95,8 +133,8 @@ compile_bench() {
     echo "| krc (self-hosted) | ${kr_compile_ms}ms |" | tee -a "$RESULTS"
     echo "| gcc -O0 | ${c_O0_compile_ms}ms |" | tee -a "$RESULTS"
     echo "| gcc -O2 | ${c_O2_compile_ms}ms |" | tee -a "$RESULTS"
-    echo "| rustc (debug) | ${rs_dbg_compile_ms}ms |" | tee -a "$RESULTS"
-    echo "| rustc -O2 | ${rs_rel_compile_ms}ms |" | tee -a "$RESULTS"
+    echo "| rustc (debug) | ${rs_dbg_compile_ms} |" | tee -a "$RESULTS"
+    echo "| rustc -O2 | ${rs_rel_compile_ms} |" | tee -a "$RESULTS"
     echo "" | tee -a "$RESULTS"
 
     echo "**Binary size:**" | tee -a "$RESULTS"
