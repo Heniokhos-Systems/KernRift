@@ -5224,6 +5224,61 @@ fn ir_regalloc_init() {
 // Register assignment table: [color(4)] x vreg_count. 0xFFFFFFFF = spilled
 static uint64 ir_reg_assign = 0
 static uint64 ir_reg_assign_cap = 0
+
+// Per-vreg colour ceiling. Entry v holds "vreg v may only take colours
+// < this value"; 0 means "no restriction, use IR_NUM_REGS". Lets a backend
+// carve its colour file into classes without teaching the colourer about
+// registers: xtensa's leaf mode (ir_xtensa.kr) appends the CALL0 argument
+// registers to the colour file, but the incoming-argument copies read a2..a7
+// one at a time, so a PARAMETER whose home were a later param's source
+// register would clobber it. Capping param vregs to the callee-saved prefix
+// is enough, and needs no parallel-move sequencing.
+//
+// Only ever populated by the xtensa driver; every other arch leaves the
+// buffer null and the greedy loop below behaves exactly as before.
+static uint64 ir_color_ceil = 0
+static uint64 ir_color_ceil_cap = 0
+static uint64 ir_color_ceil_used = 0
+
+// Clear the ceilings recorded for the previous function. Cheap: only the
+// prefix an earlier function actually touched is zeroed.
+fn ir_color_ceil_reset() {
+    if ir_color_ceil == 0 { return }
+    uint64 i = 0
+    while i < ir_color_ceil_used {
+        uint64 p = ir_color_ceil + i * 4
+        uint32 z = 0
+        unsafe { *(p as uint32) = z }
+        i = i + 1
+    }
+    ir_color_ceil_used = 0
+}
+
+fn ir_color_ceil_set(uint64 vreg, uint64 maxc) {
+    if ir_color_ceil_cap == 0 {
+        ir_color_ceil_cap = 65536
+        ir_color_ceil = alloc(ir_color_ceil_cap * 4)
+    }
+    if vreg >= ir_color_ceil_cap { return }
+    uint64 p = ir_color_ceil + vreg * 4
+    uint32 mc = maxc
+    unsafe { *(p as uint32) = mc }
+    if vreg + 1 > ir_color_ceil_used { ir_color_ceil_used = vreg + 1 }
+}
+
+// Highest colour+1 that `vreg` may take. IR_NUM_REGS unless a backend
+// narrowed it.
+fn ir_color_ceil_get(uint64 vreg) -> uint64 {
+    if ir_color_ceil == 0 { return IR_NUM_REGS }
+    if vreg >= ir_color_ceil_cap { return IR_NUM_REGS }
+    uint64 p = ir_color_ceil + vreg * 4
+    uint32 mc = 0
+    unsafe { *(p as uint32) -> mc }
+    uint64 wmc = mc
+    if wmc == 0 { return IR_NUM_REGS }
+    if wmc > IR_NUM_REGS { return IR_NUM_REGS }
+    return wmc
+}
 static uint64 ir_ig_buf = 0
 static uint64 ir_ig_cap = 0
 static uint64 ir_color_tmp_buf = 0
@@ -5771,14 +5826,17 @@ fn ir_graph_color() {
             nw = nw + 1
         }
 
-        // Find lowest available color
+        // Find lowest available color, honouring this vreg's ceiling (see
+        // ir_color_ceil). A vreg whose whole permitted range is taken stays
+        // 0xFFFFFFFF and spills, exactly as if the file were that narrow.
+        uint64 ceil_vi = ir_color_ceil_get(vi)
         uint64 color = 0
-        while color < IR_NUM_REGS {
+        while color < ceil_vi {
             if (used_colors & (1 << color)) == 0 {
                 uint64 arp = ir_reg_assign + vi * 4
                 uint32 cv = color
                 unsafe { *(arp as uint32) = cv }
-                color = IR_NUM_REGS  // break
+                color = ceil_vi  // break
             }
             color = color + 1
         }
