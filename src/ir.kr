@@ -10362,7 +10362,14 @@ fn ir_opt_const_fold() {
         // 0xFFFFFFFF80000000). Skip v2==0 since `x ± 0` should be a copy,
         // and our LEA emitter assumes disp != 0 (to avoid the
         // RIP-relative encoding collision when src is rbp/r13).
-        if (target_arch == 0 || target_arch == 2) && (op == 2 || op == 3) && s2_known != 0 && v2 != 0 {
+        // xtensa (3) is in for the same reason riscv32 is: its backend already
+        // implements IR_ADD_IMM/IR_SUB_IMM as `addi` and already pre-scans their
+        // literals for the pool (ir_xtensa: "pre-scan the ALU immediate ops"),
+        // so the opcode was wired end to end and only this gate left it out.
+        // Absorbing the constant removes a whole MOVI per constant-add, and the
+        // int8 kernels are full of them — the 4x-unrolled dot loop alone does
+        // ip+1..ip+3, wp+1..wp+3, ip+4, wp+4 and k-4 every iteration.
+        if (target_arch == 0 || target_arch == 2 || target_arch == 3) && (op == 2 || op == 3) && s2_known != 0 && v2 != 0 {
             uint64 fits = 0
             if v2 <= 0x7FFFFFFF { fits = 1 }
             if v2 >= 0xFFFFFFFF80000000 { fits = 1 }
