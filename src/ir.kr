@@ -1020,6 +1020,9 @@ fn ir_var_get(uint64 name_tok) -> uint64 {
 // Phase 1: snapshot all changed values into fresh vregs (reads before writes).
 // Phase 2: copy from fresh vregs to target vregs.
 fn ir_emit_copy_to_snapshot(uint64 snap_buf, uint64 snap_count, uint64 bb) {
+    // Collect the (target = snapshot vreg, source = current vreg) pairs for
+    // every variable the body actually changed. NOTE the source recorded here
+    // is the live vreg itself, NOT a staging temp — see the conflict test below.
     uint64 pairs = alloc(snap_count * 16)
     uint64 pcnt = 0
     uint64 ci = 0
@@ -1033,16 +1036,62 @@ fn ir_emit_copy_to_snapshot(uint64 snap_buf, uint64 snap_count, uint64 bb) {
         uint64 wsv = snap_vreg
         uint64 wcv = cur_vreg
         if wsv != wcv && wsv != 0xFFFFFFFF {
-            uint64 fresh = ir_new_vreg()
-            ir_emit(IR_COPY, fresh, wcv, 0, 0, bb)
             uint64 pp = pairs + pcnt * 16
             unsafe { *(pp as uint64) = wsv }
             uint64 pp8 = pp + 8
-            unsafe { *(pp8 as uint64) = fresh }
+            unsafe { *(pp8 as uint64) = wcv }
             pcnt = pcnt + 1
         }
         ci = ci + 1
     }
+
+    // This is a PARALLEL move: every target is written as if simultaneously.
+    // Writing them one by one is only wrong when a target is also somebody
+    // else's source, because the write would destroy a value still to be read.
+    // That is the only case needing staging temps.
+    //
+    // It used to stage unconditionally — a fresh vreg per variable, so TWO
+    // copies each instead of one. That is real per-iteration cost at every loop
+    // back edge: on an ESP32 each loop-carried value measured ~4-5 cycles per
+    // iteration, and it survived --no-coalesce, so the extra copy was reaching
+    // the machine rather than being merged away. Conflicts are rare — the
+    // sources are freshly computed values (`i + 1`), not other variables'
+    // snapshots — so the common path is now one copy per variable, which the
+    // colourer can then coalesce into nothing at all.
+    uint64 conflict = 0
+    uint64 qi = 0
+    while qi < pcnt {
+        uint64 qp = pairs + qi * 16 + 8
+        uint64 qsrc = 0
+        unsafe { *(qp as uint64) -> qsrc }
+        uint64 qj = 0
+        while qj < pcnt {
+            if qj != qi {
+                uint64 tp = pairs + qj * 16
+                uint64 qtgt = 0
+                unsafe { *(tp as uint64) -> qtgt }
+                if qsrc == qtgt { conflict = 1 }
+            }
+            qj = qj + 1
+        }
+        qi = qi + 1
+    }
+
+    if conflict != 0 {
+        // Staged form: read every source into a fresh vreg first, then write
+        // the targets. Correct for any permutation, including cycles.
+        ci = 0
+        while ci < pcnt {
+            uint64 pp = pairs + ci * 16 + 8
+            uint64 source = 0
+            unsafe { *(pp as uint64) -> source }
+            uint64 fresh = ir_new_vreg()
+            ir_emit(IR_COPY, fresh, source, 0, 0, bb)
+            unsafe { *(pp as uint64) = fresh }
+            ci = ci + 1
+        }
+    }
+
     ci = 0
     while ci < pcnt {
         uint64 pp = pairs + ci * 16
