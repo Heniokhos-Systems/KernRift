@@ -4730,6 +4730,50 @@ else
 fi
 rm -f "$REPO_ROOT/test_tmp_$$.kr"
 
+# --- declared-type signedness must not be inherited from the initialiser ---
+# Regression: `u32 ux = <i32>` inherited the RHS signed flag, so ux (and
+# everything derived from it) used SIGNED ops -- `ux >> 1` became an
+# ARITHMETIC shift and comparisons became signed. Invisible on x86_64/arm64,
+# where a u32 occupies a 64-bit slot and never reaches the sign bit, but
+# silently wrong on the 32-bit backends: 0x80000000 >> 31 gave 0xFFFFFFFF
+# instead of 1. Checked in the IR, because a host run cannot see it.
+TOTAL=$((TOTAL + 1))
+printf 'fn main() -> uint64 {\n    i32 acc = 0 - 5\n    u32 ux = acc\n    u32 sh = ux >> 1\n    return sh\n}\n' > "$REPO_ROOT/test_tmp_$$.kr"
+SGN_OUT=$($KRC --emit=ir --arch=x86_64 "$REPO_ROOT/test_tmp_$$.kr" 2>/dev/null)
+rm -f "$REPO_ROOT/test_tmp_$$.kr"
+# and the converse: a genuinely signed i32 shift must still be arithmetic
+printf 'fn main() -> uint64 {\n    i32 a = 0 - 8\n    i32 b = a >> 1\n    return 0\n}\n' > "$REPO_ROOT/test_tmp_$$.kr"
+SGN_OUT2=$($KRC --emit=ir --arch=x86_64 "$REPO_ROOT/test_tmp_$$.kr" 2>/dev/null)
+rm -f "$REPO_ROOT/test_tmp_$$.kr"
+if echo "$SGN_OUT" | grep -q "shr" && ! echo "$SGN_OUT" | grep -q "sar" \
+   && echo "$SGN_OUT2" | grep -q "sar"; then
+    PASS=$((PASS + 1))
+    echo "  decl_type_signedness: PASS (u32 from i32 -> shr; i32 -> sar)"
+else
+    echo "FAIL: decl_type_signedness (u32-from-i32 shift: $(echo "$SGN_OUT" | grep -oE 'shr|sar' | head -1), i32 shift: $(echo "$SGN_OUT2" | grep -oE 'shr|sar' | head -1))"
+    FAIL=$((FAIL + 1))
+fi
+
+# --- same, on the ASSIGNMENT path: a store cannot retype the variable ---
+# `u32 ux = 7; ux = <i32>` let the rvalue's signed flag through, so ux became
+# signed from that point on. The LHS local's flag is authoritative in both
+# directions now. Second half checks the direction that must NOT break:
+# a signed local stays signed across `x = x - n`, so `x < 0` keeps SCMP.
+TOTAL=$((TOTAL + 1))
+printf 'fn main() -> uint64 {\n    i32 acc = 0 - 5\n    u32 ux = 7\n    ux = acc\n    u32 sh = ux >> 1\n    return sh\n}\n' > "$REPO_ROOT/test_tmp_$$.kr"
+ASG_OUT=$($KRC --emit=ir --arch=x86_64 "$REPO_ROOT/test_tmp_$$.kr" 2>/dev/null)
+printf 'fn main() -> uint64 {\n    i64 x = 3\n    x = x - 5\n    if x < 0 { return 1 }\n    return 0\n}\n' > "$REPO_ROOT/test_tmp_$$.kr"
+ASG_OUT2=$($KRC --emit=ir --arch=x86_64 "$REPO_ROOT/test_tmp_$$.kr" 2>/dev/null)
+rm -f "$REPO_ROOT/test_tmp_$$.kr"
+if echo "$ASG_OUT" | grep -q "shr" && ! echo "$ASG_OUT" | grep -q "sar" \
+   && echo "$ASG_OUT2" | grep -qi "scmp"; then
+    PASS=$((PASS + 1))
+    echo "  assign_type_signedness: PASS (u32 = i32 -> shr; signed local keeps scmp)"
+else
+    echo "FAIL: assign_type_signedness (u32=i32 shift: $(echo "$ASG_OUT" | grep -oE 'shr|sar' | head -1), signed cmp: $(echo "$ASG_OUT2" | grep -oiE 'scmp_[a-z]+|cmp_[a-z]+' | head -1))"
+    FAIL=$((FAIL + 1))
+fi
+
 # --- RISC-V RV32 freestanding UART hello (boots under qemu — milestone 1) ---
 # Compiles examples/riscv-hello-uart/hello.kr with --arch=riscv32
 # --freestanding (raw flat binary), checks the 8-byte sp preamble via
