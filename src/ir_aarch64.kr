@@ -43,17 +43,21 @@ fn ir_a64_ldp_sp(uint64 rt1, uint64 rt2, uint64 off) {
 
 // Save (restore==0) or restore (restore==1) the function's callee-saved
 // register set at [SP + cs_base ...]. `mask` holds the allocator colours
-// actually used (bit c -> x19+c); `save_lr` appends x29/x30 for non-leaf
-// functions. Both the prologue and the epilogue call THIS function with
-// identical arguments, so the two sequences are mirror images by
-// construction: same registers, same slots, in the same colour-ascending
-// order (restore order does not matter for SP-relative slots — only the
-// reg<->slot pairing does). Registers are packed pairwise into STP/LDP
-// when every pair base fits the imm7 range (<= 504); otherwise fall back
-// to per-register STR/LDR via ir_a64_str_sp/ir_a64_ldr_sp, which handle
-// arbitrary offsets through a scratch register (x11 — caller-saved, dead
-// in both the prologue and the epilogue).
-fn ir_a64_emit_callee_frame(uint64 mask, uint64 cs_base, uint64 save_lr, uint64 restore) {
+// actually used (bit c -> x19+c); `dmask` the d-homes actually used (bit
+// i -> d8+i, from ir_a64_fpr_used_mask); `save_lr` appends x29/x30 for
+// non-leaf functions. Both the prologue and the epilogue call THIS
+// function with identical arguments, so the two sequences are mirror
+// images by construction: same registers, same slots, in the same
+// colour-ascending order (restore order does not matter for SP-relative
+// slots — only the reg<->slot pairing does). Registers are packed
+// pairwise into STP/LDP when every pair base fits the imm7 range;
+// otherwise fall back to per-register STR/LDR via ir_a64_str_sp /
+// ir_a64_ldr_sp / their _d_ variants, which handle arbitrary offsets
+// through a scratch register (x11 — caller-saved, dead in both the
+// prologue and the epilogue). GPRs and d-registers are paired within
+// their own class only (STP Xt and STP Dt are different encodings), so
+// the slot order is: used colours, x29/x30, used d-homes.
+fn ir_a64_emit_callee_frame(uint64 mask, uint64 dmask, uint64 cs_base, uint64 save_lr, uint64 restore) {
     uint64 n = 0
     uint64 c = 0
     while c < 10 {
@@ -61,11 +65,17 @@ fn ir_a64_emit_callee_frame(uint64 mask, uint64 cs_base, uint64 save_lr, uint64 
         c = c + 1
     }
     if save_lr != 0 { n = n + 2 }
+    uint64 dc = 0
+    while dc < 8 {
+        if ((dmask >> dc) & 1) != 0 { n = n + 1 }
+        dc = dc + 1
+    }
     if n == 0 { return }
     uint64 use_pairs = 0
     if cs_base + n * 8 <= 512 { use_pairs = 1 }
     uint64 off = cs_base
     uint64 pend = 0xFFFFFFFF
+    // GPR phase: used colours ascending, then x29/x30 for non-leaf.
     c = 0
     while c < 12 {
         uint64 r = 0xFFFFFFFF
@@ -96,6 +106,34 @@ fn ir_a64_emit_callee_frame(uint64 mask, uint64 cs_base, uint64 save_lr, uint64 
     if pend != 0xFFFFFFFF {
         if restore == 0 { ir_a64_str_sp(pend, off) }
         else { ir_a64_ldr_sp(pend, off) }
+        off = off + 8
+        pend = 0xFFFFFFFF
+    }
+    // FP phase: used d-homes ascending, paired within the FP class.
+    dc = 0
+    while dc < 8 {
+        if ((dmask >> dc) & 1) != 0 {
+            uint64 dr = 8 + dc
+            if use_pairs != 0 {
+                if pend == 0xFFFFFFFF {
+                    pend = dr
+                } else {
+                    if restore == 0 { ir_a64_stp_d_sp(pend, dr, off) }
+                    else { ir_a64_ldp_d_sp(pend, dr, off) }
+                    off = off + 16
+                    pend = 0xFFFFFFFF
+                }
+            } else {
+                if restore == 0 { ir_a64_str_d_sp(dr, off) }
+                else { ir_a64_ldr_d_sp(dr, off) }
+                off = off + 8
+            }
+        }
+        dc = dc + 1
+    }
+    if pend != 0xFFFFFFFF {
+        if restore == 0 { ir_a64_str_d_sp(pend, off) }
+        else { ir_a64_ldr_d_sp(pend, off) }
     }
 }
 
@@ -149,6 +187,243 @@ static uint64 IR_A64_OVERFLOW_RESERVE = 128
 fn ir_a64_spill_offset(uint64 vreg) -> uint64 {
     uint64 slot = vreg - IR_NUM_REGS - 1
     return IR_A64_OVERFLOW_RESERVE + slot * 8
+}
+
+// ---------------------------------------------------------------------------
+// f64 FP-register residency (d8-d15)
+// ---------------------------------------------------------------------------
+// An f64 vreg (fkind == 1) whose colour is 0..7 lives in d8+colour instead
+// of x19+colour. The colour namespace is shared with the integer file: two
+// vregs with the same colour never interfere, so parking float vregs in a
+// parallel callee-saved FP bank is safe — an int vreg with the same colour
+// uses the x-register, the float vreg the d-register, and they are never
+// live at the same time... and even if a copy connects them, the copy is
+// emitted as a real fmov (see IR_COPY).
+//
+// Invariant: EVERY read of a d-homed vreg goes through ir_a64_resolve_src
+// (generic: bounce bits to the x-scratch) or ir_a64_resolve_src_d (FP ops:
+// use the d-register directly), and EVERY write goes through
+// ir_a64_emit_store_spill (generic: fmov home, x-scratch — the per-insn
+// dst_r is forced to the "spilled" path for d-homed dests) or
+// ir_a64_store_dest_d. fmov x<->d is bit-exact, so a mis-tagged vreg that
+// carries integer bits through a d-register is still correct.
+//
+// f32 (fkind 2), bool (3) and char (4) vregs are untouched: GPR as before.
+
+static uint64 ir_a64_uses_fpr = 0
+
+// fmov dN, xM (bit move GPR -> FP)
+fn emit_a64_fmov_dx(uint64 dn, uint64 xm) {
+    emit_a64(0x9E670000 | (xm << 5) | dn)
+}
+
+// fmov xN, dM (bit move FP -> GPR)
+fn emit_a64_fmov_xd(uint64 xn, uint64 dm) {
+    emit_a64(0x9E660000 | (dm << 5) | xn)
+}
+
+// fmov dN, dM — self-move elided like emit_a64_mov
+fn emit_a64_fmov_dd(uint64 dn, uint64 dm) {
+    if dn == dm { return }
+    emit_a64(0x1E604000 | (dm << 5) | dn)
+}
+
+// Per-vreg d-register assignment, built by ir_a64_fpr_alloc after the
+// shared colouring. One byte per vreg: 0 = no d-home, else 8..15.
+static uint64 ir_a64_fpr_map = 0
+static uint64 ir_a64_fpr_map_cap = 0
+
+// D-register home for a vreg, or 0xFFFFFFFF when it has none.
+fn ir_a64_fpr_home(uint64 vreg) -> uint64 {
+    if vreg == 0 { return 0xFFFFFFFF }
+    if vreg >= ir_vreg_next { return 0xFFFFFFFF }
+    if ir_a64_fpr_map == 0 { return 0xFFFFFFFF }
+    uint64 p = ir_a64_fpr_map + vreg
+    uint8 c = 0
+    unsafe { *(p as uint8) -> c }
+    uint64 wc = c
+    if wc == 0 { return 0xFFFFFFFF }
+    return wc
+}
+
+// Dedicated f64 colouring over d8-d15. Runs after ir_graph_color, reusing
+// its interference graph (ir_ig_buf; coalescing already merged follower
+// rows into their representatives) and union-find. Float vregs get their
+// d-homes from THIS pass, independent of the shared 10-colour integer
+// file — so up to 8 simultaneously-live f64 values are register-resident
+// no matter how much integer pressure the function has.
+//
+// Reps are coloured highest-vreg-first: loop-carried values created deep
+// in the function beat the early-declared constants to the 8 homes, and a
+// spilled constant costs only a dependency-free ldr d at each use while a
+// spilled loop variable would put a str/ldr round-trip on the critical
+// path. Any order is CORRECT (greedy only constrains against
+// already-coloured interfering neighbours); the order is just a weight.
+//
+// Sets ir_a64_uses_fpr when at least one home was handed out.
+fn ir_a64_fpr_alloc() {
+    uint64 vcount = ir_vreg_next
+    ir_a64_uses_fpr = 0
+    if ir_a64_fpr_map == 0 {
+        ir_a64_fpr_map_cap = 65536
+        ir_a64_fpr_map = alloc(ir_a64_fpr_map_cap)
+    }
+    if vcount > ir_a64_fpr_map_cap { return }
+    memset(ir_a64_fpr_map, 0, vcount)
+    if vcount < 2 { return }
+    // Interference-graph geometry — must mirror ir_graph_color exactly.
+    uint64 row_words = (vcount + 63) / 64
+    uint64 row_bytes = row_words * 8
+    uint64 ig = ir_ig_buf
+    if ig == 0 { return }
+    uint64 vi = vcount - 1
+    while vi >= 1 {
+        if ir_vreg_fkind_get(vi) != 1 { vi = vi - 1; continue }
+        if ir_uf_find(vi) != vi { vi = vi - 1; continue }
+        // Collect d-colours already taken by interfering neighbours.
+        uint64 used = 0
+        uint64 nw = 0
+        while nw < row_words {
+            uint64 np = ig + vi * row_bytes + nw * 8
+            uint64 nbits = 0
+            unsafe { *(np as uint64) -> nbits }
+            while nbits != 0 {
+                uint64 iso = nbits & (0 - nbits)
+                uint64 bp = ir_popcount64(iso - 1)
+                uint64 neighbor = nw * 64 + bp
+                if neighbor < vcount {
+                    uint64 nrep = ir_uf_find(neighbor)
+                    uint64 ncp = ir_a64_fpr_map + nrep
+                    uint8 nc8 = 0
+                    unsafe { *(ncp as uint8) -> nc8 }
+                    uint64 nc = nc8
+                    if nc != 0 { used = used | (1 << (nc - 8)) }
+                }
+                nbits = nbits & ~(1 << bp)
+            }
+            nw = nw + 1
+        }
+        uint64 fc = 0
+        while fc < 8 {
+            if ((used >> fc) & 1) == 0 {
+                uint64 mp = ir_a64_fpr_map + vi
+                uint8 mv = 8 + fc
+                unsafe { *(mp as uint8) = mv }
+                ir_a64_uses_fpr = 1
+                fc = 8
+            } else {
+                fc = fc + 1
+            }
+        }
+        vi = vi - 1
+    }
+    // Propagate rep homes to float followers. A float follower whose rep
+    // is an integer vreg (mixed-class coalesce) stays home-less and keeps
+    // its shared-colour x-register — the connecting copy is emitted as a
+    // real fmov by IR_COPY, so the classes never silently alias.
+    uint64 fv = 1
+    while fv < vcount {
+        if ir_vreg_fkind_get(fv) == 1 {
+            uint64 rep = ir_uf_find(fv)
+            if rep != fv {
+                uint64 rp2 = ir_a64_fpr_map + rep
+                uint8 rc2 = 0
+                unsafe { *(rp2 as uint8) -> rc2 }
+                uint64 fp2 = ir_a64_fpr_map + fv
+                unsafe { *(fp2 as uint8) = rc2 }
+            }
+        }
+        fv = fv + 1
+    }
+}
+
+// Used-d-home mask: bit i set iff some f64 vreg was homed in d8+i by
+// ir_a64_fpr_alloc. The prologue/epilogue save only these — the FP
+// analogue of ir_used_color_mask, so a function using two d-homes saves
+// two d-registers, not eight.
+fn ir_a64_fpr_used_mask() -> uint64 {
+    if ir_a64_uses_fpr == 0 { return 0 }
+    uint64 m = 0
+    uint64 v = 1
+    while v < ir_vreg_next {
+        uint64 dh = ir_a64_fpr_home(v)
+        if dh != 0xFFFFFFFF { m = m | (1 << (dh - 8)) }
+        v = v + 1
+    }
+    return m
+}
+
+// LDR Dt, [SP, #off] / STR Dt, [SP, #off] — large-offset-safe like
+// ir_a64_ldr_sp/str_sp. x11 is the address scratch for huge frames.
+fn ir_a64_ldr_d_sp(uint64 dt, uint64 off) {
+    if off <= 32760 {
+        emit_a64(0xFD400000 | (((off / 8) & 0xFFF) << 10) | (31 << 5) | dt)
+    } else {
+        emit_a64_mov_imm(11, off)
+        ir_a64_add_sp_reg(11, 11)
+        emit_a64(0xFD400000 | (11 << 5) | dt)
+    }
+}
+
+fn ir_a64_str_d_sp(uint64 dt, uint64 off) {
+    if off <= 32760 {
+        emit_a64(0xFD000000 | (((off / 8) & 0xFFF) << 10) | (31 << 5) | dt)
+    } else {
+        emit_a64_mov_imm(11, off)
+        ir_a64_add_sp_reg(11, 11)
+        emit_a64(0xFD000000 | (11 << 5) | dt)
+    }
+}
+
+// STP/LDP Dt1, Dt2, [SP, #off] for the prologue/epilogue d8-d15 save.
+fn ir_a64_stp_d_sp(uint64 rt1, uint64 rt2, uint64 off) {
+    uint64 imm7 = (off / 8) & 0x7F
+    emit_a64(0x6D000000 | (imm7 << 15) | (rt2 << 10) | (31 << 5) | rt1)
+}
+
+fn ir_a64_ldp_d_sp(uint64 rt1, uint64 rt2, uint64 off) {
+    uint64 imm7 = (off / 8) & 0x7F
+    emit_a64(0x6D400000 | (imm7 << 15) | (rt2 << 10) | (31 << 5) | rt1)
+}
+
+// Resolve a vreg for use as an f64 operand: its d-home if it has one,
+// otherwise materialise the bits into the FP scratch (d0/d1/d2). Spilled
+// f64 vregs load straight from the slot into the FP file — no GPR bounce.
+fn ir_a64_resolve_src_d(uint64 vreg, uint64 dscratch) -> uint64 {
+    if vreg == 0 { return dscratch }
+    uint64 dh = ir_a64_fpr_home(vreg)
+    if dh != 0xFFFFFFFF { return dh }
+    uint64 phys = ir_get_phys_reg(vreg)
+    if phys != 0xFFFFFFFF {
+        emit_a64_fmov_dx(dscratch, phys)
+        return dscratch
+    }
+    ir_a64_ldr_d_sp(dscratch, ir_a64_spill_offset(vreg))
+    return dscratch
+}
+
+// Where an FP op should compute its f64 result: the dest's d-home when it
+// has one (result lands directly, ir_a64_store_dest_d is then a no-op),
+// else the FP scratch.
+fn ir_a64_fpr_dest(uint64 vreg, uint64 dscratch) -> uint64 {
+    uint64 dh = ir_a64_fpr_home(vreg)
+    if dh != 0xFFFFFFFF { return dh }
+    return dscratch
+}
+
+// Finish an FP op whose f64 result sits in dsrc.
+fn ir_a64_store_dest_d(uint64 vreg, uint64 dsrc) {
+    uint64 dh = ir_a64_fpr_home(vreg)
+    if dh != 0xFFFFFFFF {
+        emit_a64_fmov_dd(dh, dsrc)
+        return
+    }
+    uint64 phys = ir_get_phys_reg(vreg)
+    if phys != 0xFFFFFFFF {
+        emit_a64_fmov_xd(phys, dsrc)
+        return
+    }
+    ir_a64_str_d_sp(dsrc, ir_a64_spill_offset(vreg))
 }
 
 // Peephole tracking for spill-reload elision (same pattern as the x86
@@ -205,6 +480,12 @@ fn ir_a64_cmp_imm(uint64 rn, uint64 imm) {
 // ARM64 LDR Xt,[Xn,#imm] uses a 12-bit scaled field: max offset = 4095*8 = 32760.
 // For larger offsets, use a scratch register to form the address.
 fn ir_a64_load_spill(uint64 scratch, uint64 vreg) {
+    // d-homed f64 vreg: the value lives in a d-register, not a slot.
+    uint64 dh = ir_a64_fpr_home(vreg)
+    if dh != 0xFFFFFFFF {
+        emit_a64_fmov_xd(scratch, dh)
+        return
+    }
     // Peephole: if the prior emission was `store_spill scratch, vreg`
     // and nothing's been emitted since, the value is still in scratch.
     if vreg == ir_a64_last_spill_vreg && scratch == ir_a64_last_spill_reg && out_len == ir_a64_last_spill_end {
@@ -217,6 +498,14 @@ fn ir_a64_load_spill(uint64 scratch, uint64 vreg) {
 
 // Store a register to the spill slot for vreg.
 fn ir_a64_emit_store_spill(uint64 reg, uint64 vreg) {
+    // d-homed f64 vreg: its home is a d-register — move the bits there
+    // instead of touching the stack. Skip the peephole record: no slot
+    // was written.
+    uint64 dh = ir_a64_fpr_home(vreg)
+    if dh != 0xFFFFFFFF {
+        emit_a64_fmov_dx(dh, reg)
+        return
+    }
     uint64 off = ir_a64_spill_offset(vreg)
     ir_a64_str_sp(reg, off)
     ir_a64_last_spill_vreg = vreg
@@ -250,6 +539,11 @@ fn ir_a64_str_sp(uint64 rt, uint64 off) {
 // Resolve a vreg to a physical register. If spilled, load into scratch (9 or 10).
 fn ir_a64_resolve_src(uint64 vreg, uint64 scratch) -> uint64 {
     if vreg == 0 { return scratch }
+    uint64 dh = ir_a64_fpr_home(vreg)
+    if dh != 0xFFFFFFFF {
+        emit_a64_fmov_xd(scratch, dh)
+        return scratch
+    }
     uint64 phys = ir_get_phys_reg(vreg)
     if phys != 0xFFFFFFFF { return phys }
     ir_a64_load_spill(scratch, vreg)
@@ -484,6 +778,11 @@ fn ir_emit_arm64_insn(uint64 ii) {
     if ir_src_tok != 0 { line_table_record(ir_src_tok) }
 
     uint64 dst_r = ir_get_phys_reg(dest_v)
+    // A d-homed f64 dest must never be written through its colour's
+    // x-register: force the generic dest writes down the
+    // ir_a64_emit_store_spill path, which lands the bits in the d-home.
+    // (FP ops below check the d-home themselves and write it directly.)
+    if ir_a64_fpr_home(dest_v) != 0xFFFFFFFF { dst_r = 0xFFFFFFFF }
 
     // ----- IR_STR_CONST (79): dst = lea string data -----
     if op == 79 {
@@ -853,6 +1152,14 @@ fn ir_emit_arm64_insn(uint64 ii) {
     if op == 30 {
         uint64 addr_reg = ir_a64_resolve_src(s1_v, 10)
         if imm == 0 && s2_v != 0 { imm = s2_v }
+        // f64 dest with a d-home: load straight into the FP file.
+        if imm == 8 {
+            uint64 ld_dh = ir_a64_fpr_home(dest_v)
+            if ld_dh != 0xFFFFFFFF {
+                emit_a64(0xFD400000 | (addr_reg << 5) | ld_dh)   // ldr dH, [addr]
+                return
+            }
+        }
         uint64 d = dst_r
         if d == 0xFFFFFFFF { d = 9 }
         if imm == 8 {
@@ -872,6 +1179,16 @@ fn ir_emit_arm64_insn(uint64 ii) {
 
     // ----- IR_STORE (31): *(src1) = src2, width in dest_v -----
     if op == 31 {
+        uint64 st_width = dest_v
+        // d-homed f64 value: store straight from the FP file.
+        if st_width == 8 {
+            uint64 st_dh = ir_a64_fpr_home(s2_v)
+            if st_dh != 0xFFFFFFFF {
+                uint64 st_addr = ir_a64_resolve_src(s1_v, 9)
+                emit_a64(0xFD000000 | (st_addr << 5) | st_dh)    // str dH, [addr]
+                return
+            }
+        }
         uint64 addr_reg = ir_a64_resolve_src(s1_v, 9)
         uint64 val_reg = ir_a64_resolve_src(s2_v, 10)
         uint64 width = dest_v
@@ -905,6 +1222,25 @@ fn ir_emit_arm64_insn(uint64 ii) {
     // ----- IR_COPY (61) -----
     if op == 61 {
         if s1_v != 0 {
+            // f64 fast paths: keep register-to-register copies inside the
+            // FP file. When src and dest coalesced onto the same d-home
+            // this emits nothing (fmov_dd elides self-moves).
+            uint64 cp_dh = ir_a64_fpr_home(dest_v)
+            if cp_dh != 0xFFFFFFFF {
+                uint64 cp_s = ir_a64_resolve_src_d(s1_v, 0)
+                emit_a64_fmov_dd(cp_dh, cp_s)
+                return
+            }
+            uint64 cp_sh = ir_a64_fpr_home(s1_v)
+            if cp_sh != 0xFFFFFFFF {
+                if dst_r != 0xFFFFFFFF {
+                    emit_a64_fmov_xd(dst_r, cp_sh)
+                } else {
+                    emit_a64_fmov_xd(9, cp_sh)
+                    ir_a64_emit_store_spill(9, dest_v)
+                }
+                return
+            }
             uint64 src_reg = ir_a64_resolve_src(s1_v, 9)
             if dst_r != 0xFFFFFFFF {
                 emit_a64_mov(dst_r, src_reg)
@@ -950,8 +1286,13 @@ fn ir_emit_arm64_insn(uint64 ii) {
 
     // ----- IR_RET (42): move result to x0 then branch to epilogue -----
     if op == 42 {
-        uint64 ret_r = ir_a64_resolve_src(s1_v, 9)
-        if ret_r != 0 { emit_a64_mov(0, ret_r) }
+        uint64 ret_dh = ir_a64_fpr_home(s1_v)
+        if ret_dh != 0xFFFFFFFF {
+            emit_a64_fmov_xd(0, ret_dh)
+        } else {
+            uint64 ret_r = ir_a64_resolve_src(s1_v, 9)
+            if ret_r != 0 { emit_a64_mov(0, ret_r) }
+        }
         // B to epilogue (patched later)
         uint64 rfp = ir_ret_fixups + ir_ret_fixup_count * 4
         uint32 rpo = out_len
@@ -981,8 +1322,13 @@ fn ir_emit_arm64_insn(uint64 ii) {
         // AAPCS64: x0-x7 for first 8 arguments
         if imm < 8 {
             uint64 target = imm
-            uint64 src_reg = ir_a64_resolve_src(s1_v, 9)
-            emit_a64_mov(target, src_reg)
+            uint64 arg_dh = ir_a64_fpr_home(s1_v)
+            if arg_dh != 0xFFFFFFFF {
+                emit_a64_fmov_xd(target, arg_dh)
+            } else {
+                uint64 src_reg = ir_a64_resolve_src(s1_v, 9)
+                emit_a64_mov(target, src_reg)
+            }
         } else if imm >= 100 {
             // Direct register target (ASM I/O constraints)
             uint64 phys_target = imm - 100
@@ -1156,11 +1502,7 @@ fn ir_emit_arm64_insn(uint64 ii) {
         uint64 mc_len_vreg = imm
         uint64 mc_len = 0
         if mc_len_vreg > 0 && mc_len_vreg < ir_vreg_next {
-            mc_len = ir_get_phys_reg(mc_len_vreg)
-            if mc_len == 0xFFFFFFFF {
-                ir_a64_load_spill(11, mc_len_vreg)
-                mc_len = 11
-            }
+            mc_len = ir_a64_resolve_src(mc_len_vreg, 11)
         }
         // x0 = dst, x1 = src, x2 = len
         emit_a64_mov(0, mc_dst)
@@ -1330,11 +1672,7 @@ fn ir_emit_arm64_insn(uint64 ii) {
         uint64 ms_len_vreg = imm
         uint64 ms_len = 0
         if ms_len_vreg > 0 && ms_len_vreg < ir_vreg_next {
-            ms_len = ir_get_phys_reg(ms_len_vreg)
-            if ms_len == 0xFFFFFFFF {
-                ir_a64_load_spill(11, ms_len_vreg)
-                ms_len = 11
-            }
+            ms_len = ir_a64_resolve_src(ms_len_vreg, 11)
         }
         // x0 = dst, x1 = val, x2 = len
         emit_a64_mov(0, ms_dst)
@@ -1428,11 +1766,7 @@ fn ir_emit_arm64_insn(uint64 ii) {
         uint64 r3_vreg = imm
         uint64 r3_src = 0
         if r3_vreg > 0 && r3_vreg < ir_vreg_next {
-            r3_src = ir_get_phys_reg(r3_vreg)
-            if r3_src == 0xFFFFFFFF {
-                ir_a64_load_spill(11, r3_vreg)
-                r3_src = 11
-            }
+            r3_src = ir_a64_resolve_src(r3_vreg, 11)
         }
         emit_a64_mov(2, r3_src)
         uint64 r2_src83 = ir_a64_resolve_src(s2_v, 10)
@@ -1599,11 +1933,7 @@ fn ir_emit_arm64_insn(uint64 ii) {
         // desired is in imm (vreg index)
         uint64 des_r = 0
         if imm > 0 && imm < ir_vreg_next {
-            des_r = ir_get_phys_reg(imm)
-            if des_r == 0xFFFFFFFF {
-                ir_a64_load_spill(13, imm)
-                des_r = 13
-            }
+            des_r = ir_a64_resolve_src(imm, 13)
         }
         // retry:
         uint64 cas_retry = out_len
@@ -2149,13 +2479,13 @@ fn ir_emit_arm64_insn(uint64 ii) {
 
     // ----- IR_FADD (20), IR_FSUB (21), IR_FMUL (22), IR_FDIV (23) -----
     if op >= 20 && op <= 23 {
-        uint64 a = ir_a64_resolve_src(s1_v, 9)
-        uint64 b = ir_a64_resolve_src(s2_v, 10)
-        uint64 d = dst_r
-        if d == 0xFFFFFFFF { d = 9 }
         uint64 fk = imm
         if fk == 2 {
             // f32: fmov s0, wA; fmov s1, wB; op s0, s0, s1; fmov wDst, s0
+            uint64 a = ir_a64_resolve_src(s1_v, 9)
+            uint64 b = ir_a64_resolve_src(s2_v, 10)
+            uint64 d = dst_r
+            if d == 0xFFFFFFFF { d = 9 }
             emit_a64(0x1E270000 | (a << 5) | 0)       // fmov s0, wA
             emit_a64(0x1E270000 | (b << 5) | 1)       // fmov s1, wB
             if op == 20 { emit_a64(0x1E202800 | (1 << 16) | (0 << 5) | 0) }  // fadd s0, s0, s1
@@ -2163,34 +2493,37 @@ fn ir_emit_arm64_insn(uint64 ii) {
             if op == 22 { emit_a64(0x1E200800 | (1 << 16) | (0 << 5) | 0) }  // fmul s0, s0, s1
             if op == 23 { emit_a64(0x1E201800 | (1 << 16) | (0 << 5) | 0) }  // fdiv s0, s0, s1
             emit_a64(0x1E260000 | (0 << 5) | d)       // fmov wDst, s0
-        } else {
-            // f64: fmov d0, xA; fmov d1, xB; op d0, d0, d1; fmov xDst, d0
-            emit_a64(0x9E670000 | (a << 5) | 0)       // fmov d0, xA
-            emit_a64(0x9E670000 | (b << 5) | 1)       // fmov d1, xB
-            if op == 20 { emit_a64(0x1E602800 | (1 << 16) | (0 << 5) | 0) }  // fadd d0, d0, d1
-            if op == 21 { emit_a64(0x1E603800 | (1 << 16) | (0 << 5) | 0) }  // fsub d0, d0, d1
-            if op == 22 { emit_a64(0x1E600800 | (1 << 16) | (0 << 5) | 0) }  // fmul d0, d0, d1
-            if op == 23 { emit_a64(0x1E601800 | (1 << 16) | (0 << 5) | 0) }  // fdiv d0, d0, d1
-            emit_a64(0x9E660000 | (0 << 5) | d)       // fmov xDst, d0
+            if dst_r == 0xFFFFFFFF { ir_a64_emit_store_spill(9, dest_v) }
+            return
         }
-        if dst_r == 0xFFFFFFFF { ir_a64_emit_store_spill(9, dest_v) }
+        // f64: operate on d-registers directly. Homed operands are used in
+        // place, others are materialised into d0/d1; the result is computed
+        // straight into the dest's d-home when it has one.
+        uint64 a_d = ir_a64_resolve_src_d(s1_v, 0)
+        uint64 b_d = ir_a64_resolve_src_d(s2_v, 1)
+        uint64 t = ir_a64_fpr_dest(dest_v, 0)
+        if op == 20 { emit_a64(0x1E602800 | (b_d << 16) | (a_d << 5) | t) }  // fadd t, a, b
+        if op == 21 { emit_a64(0x1E603800 | (b_d << 16) | (a_d << 5) | t) }  // fsub t, a, b
+        if op == 22 { emit_a64(0x1E600800 | (b_d << 16) | (a_d << 5) | t) }  // fmul t, a, b
+        if op == 23 { emit_a64(0x1E601800 | (b_d << 16) | (a_d << 5) | t) }  // fdiv t, a, b
+        ir_a64_store_dest_d(dest_v, t)
         return
     }
 
     // ----- Float comparisons: IR_FCMP_EQ (24), IR_FCMP_LT (25), IR_FCMP_NE (99),
     //       IR_FCMP_LE (100), IR_FCMP_GT (101), IR_FCMP_GE (102) -----
     if op == 24 || op == 25 || op == 99 || op == 100 || op == 101 || op == 102 {
-        uint64 a = ir_a64_resolve_src(s1_v, 9)
-        uint64 b = ir_a64_resolve_src(s2_v, 10)
         uint64 fk = imm
         if fk == 2 {
+            uint64 a = ir_a64_resolve_src(s1_v, 9)
+            uint64 b = ir_a64_resolve_src(s2_v, 10)
             emit_a64(0x1E270000 | (a << 5) | 0)       // fmov s0, wA
             emit_a64(0x1E270000 | (b << 5) | 1)       // fmov s1, wB
             emit_a64(0x1E202000 | (1 << 16) | (0 << 5))  // fcmp s0, s1
         } else {
-            emit_a64(0x9E670000 | (a << 5) | 0)       // fmov d0, xA
-            emit_a64(0x9E670000 | (b << 5) | 1)       // fmov d1, xB
-            emit_a64(0x1E602000 | (1 << 16) | (0 << 5))  // fcmp d0, d1
+            uint64 a_d = ir_a64_resolve_src_d(s1_v, 0)
+            uint64 b_d = ir_a64_resolve_src_d(s2_v, 1)
+            emit_a64(0x1E602000 | (b_d << 16) | (a_d << 5))  // fcmp a, b
         }
         // ARM64 float condition codes after fcmp (NaN-safe: MI/LS are false on
         // unordered; the integer LT(11)/LE(13) would be TRUE for NaN — H13):
@@ -2212,79 +2545,65 @@ fn ir_emit_arm64_insn(uint64 ii) {
     // ----- IR_ITOF (26): int64 to f64 -----
     if op == 26 {
         uint64 a = ir_a64_resolve_src(s1_v, 9)
-        uint64 d = dst_r
-        if d == 0xFFFFFFFF { d = 9 }
-        emit_a64(0x9E620000 | (a << 5) | 0)           // scvtf d0, xA
-        emit_a64(0x9E660000 | (0 << 5) | d)           // fmov xDst, d0
-        if dst_r == 0xFFFFFFFF { ir_a64_emit_store_spill(9, dest_v) }
+        uint64 t = ir_a64_fpr_dest(dest_v, 0)
+        emit_a64(0x9E620000 | (a << 5) | t)           // scvtf t, xA
+        ir_a64_store_dest_d(dest_v, t)
         return
     }
 
     // ----- IR_FTOI (27): f64 to int64 (truncating) -----
     if op == 27 {
-        uint64 a = ir_a64_resolve_src(s1_v, 9)
+        uint64 a_d = ir_a64_resolve_src_d(s1_v, 0)
         uint64 d = dst_r
         if d == 0xFFFFFFFF { d = 9 }
-        emit_a64(0x9E670000 | (a << 5) | 0)           // fmov d0, xA
-        emit_a64(0x9E780000 | (0 << 5) | d)           // fcvtzs xDst, d0
+        emit_a64(0x9E780000 | (a_d << 5) | d)         // fcvtzs xDst, a
         if dst_r == 0xFFFFFFFF { ir_a64_emit_store_spill(9, dest_v) }
         return
     }
 
     // ----- IR_FSQRT (97): f64 square root -----
     if op == 97 {
-        uint64 a = ir_a64_resolve_src(s1_v, 9)
-        uint64 d = dst_r
-        if d == 0xFFFFFFFF { d = 9 }
-        emit_a64(0x9E670000 | (a << 5) | 0)           // fmov d0, xA
-        emit_a64(0x1E61C000 | (0 << 5) | 0)           // fsqrt d0, d0
-        emit_a64(0x9E660000 | (0 << 5) | d)           // fmov xDst, d0
-        if dst_r == 0xFFFFFFFF { ir_a64_emit_store_spill(9, dest_v) }
+        uint64 a_d = ir_a64_resolve_src_d(s1_v, 0)
+        uint64 t = ir_a64_fpr_dest(dest_v, 0)
+        emit_a64(0x1E61C000 | (a_d << 5) | t)         // fsqrt t, a
+        ir_a64_store_dest_d(dest_v, t)
         return
     }
 
-    // ----- IR_FFMA (98): fused multiply-add: a*b + c -----
+    // ----- IR_FFMA (98): multiply-add: a*b + c (NOT fused — must stay
+    // bit-identical to the x86 mulsd+addsd lowering) -----
     if op == 98 {
-        uint64 a = ir_a64_resolve_src(s1_v, 9)
-        uint64 b = ir_a64_resolve_src(s2_v, 10)
+        uint64 a_d = ir_a64_resolve_src_d(s1_v, 0)
+        uint64 b_d = ir_a64_resolve_src_d(s2_v, 1)
         uint64 c_vreg = imm
-        uint64 c = 9
+        uint64 c_d = 2
         if c_vreg > 0 && c_vreg < ir_vreg_next {
-            c = ir_a64_resolve_src(c_vreg, 11)
+            c_d = ir_a64_resolve_src_d(c_vreg, 2)
         }
-        uint64 d = dst_r
-        if d == 0xFFFFFFFF { d = 9 }
-        // fmov d0, xA; fmov d1, xB; fmul d0, d0, d1
-        emit_a64(0x9E670000 | (a << 5) | 0)
-        emit_a64(0x9E670000 | (b << 5) | 1)
-        emit_a64(0x1E600800 | (1 << 16) | (0 << 5) | 0)  // fmul d0, d0, d1
-        // fmov d1, xC; fadd d0, d0, d1
-        emit_a64(0x9E670000 | (c << 5) | 1)
-        emit_a64(0x1E602800 | (1 << 16) | (0 << 5) | 0)  // fadd d0, d0, d1
-        emit_a64(0x9E660000 | (0 << 5) | d)               // fmov xDst, d0
-        if dst_r == 0xFFFFFFFF { ir_a64_emit_store_spill(9, dest_v) }
+        // product into d0 (a_d/b_d already consumed; c_d is never d0)
+        emit_a64(0x1E600800 | (b_d << 16) | (a_d << 5) | 0)  // fmul d0, a, b
+        uint64 t = ir_a64_fpr_dest(dest_v, 0)
+        emit_a64(0x1E602800 | (c_d << 16) | (0 << 5) | t)    // fadd t, d0, c
+        ir_a64_store_dest_d(dest_v, t)
         return
     }
 
     // ----- IR_F32TOF64 (103): f32 to f64 -----
     if op == 103 {
         uint64 a = ir_a64_resolve_src(s1_v, 9)
-        uint64 d = dst_r
-        if d == 0xFFFFFFFF { d = 9 }
         emit_a64(0x1E270000 | (a << 5) | 0)           // fmov s0, wA
-        emit_a64(0x1E22C000 | (0 << 5) | 0)           // fcvt d0, s0
-        emit_a64(0x9E660000 | (0 << 5) | d)           // fmov xDst, d0
-        if dst_r == 0xFFFFFFFF { ir_a64_emit_store_spill(9, dest_v) }
+        uint64 t = ir_a64_fpr_dest(dest_v, 0)
+        emit_a64(0x1E22C000 | (0 << 5) | t)           // fcvt t, s0
+        ir_a64_store_dest_d(dest_v, t)
         return
     }
 
     // ----- IR_F64TOF32 (104): f64 to f32 -----
     if op == 104 {
-        uint64 a = ir_a64_resolve_src(s1_v, 9)
+        uint64 a_d = ir_a64_resolve_src_d(s1_v, 0)
         uint64 d = dst_r
         if d == 0xFFFFFFFF { d = 9 }
-        emit_a64(0x9E670000 | (a << 5) | 0)           // fmov d0, xA
-        emit_a64(0x1E624000 | (0 << 5) | 0)           // fcvt s0, d0
+        emit_a64(0x1E624000 | (a_d << 5) | 0)         // fcvt s0, a
         emit_a64(0x1E260000 | (0 << 5) | d)           // fmov wDst, s0
         if dst_r == 0xFFFFFFFF { ir_a64_emit_store_spill(9, dest_v) }
         return
@@ -2660,6 +2979,10 @@ fn ir_emit_arm64_function(uint64 fn_node) {
     ir_regalloc_init_arm64()
     ir_graph_color()
 
+    // 3a. Dedicated f64 colouring over d8-d15 (sets ir_a64_uses_fpr,
+    // which gates the FP callee-saved bank in the prologue/epilogue).
+    ir_a64_fpr_alloc()
+
     // 4. Compute spill count
     ir_spill_count = 0
     if ir_vreg_next > IR_NUM_REGS + 1 {
@@ -2733,6 +3056,19 @@ fn ir_emit_arm64_function(uint64 fn_node) {
         a64_mc = a64_mc + 1
     }
 
+    // FP callee-saved bank: only the d8-d15 homes ir_a64_fpr_alloc (step
+    // 3a) actually handed out. An ASM block could clobber any d-register,
+    // so has_asm forces the full bank whenever d-homes exist — the same
+    // conservative fallback as the all-colours GPR mask above.
+    uint64 a64_dmask = ir_a64_fpr_used_mask()
+    if a64_has_asm != 0 && a64_dmask != 0 { a64_dmask = 0xFF }
+    uint64 a64_dsave = 0
+    uint64 a64_dc = 0
+    while a64_dc < 8 {
+        if ((a64_dmask >> a64_dc) & 1) != 0 { a64_dsave = a64_dsave + 1 }
+        a64_dc = a64_dc + 1
+    }
+
     // 4a. Snapshot the function's var map for DWARF (if -g)
     ir_snapshot_debug_vars()
 
@@ -2740,9 +3076,12 @@ fn ir_emit_arm64_function(uint64 fn_node) {
     // uses it to distinguish colors from spills. Restore AFTER emission completes.
 
     // 5. Compute frame size
-    // Callee-saved area: only the colours actually used, plus x29/x30
-    // for non-leaf functions (a BL clobbers x30; a leaf never touches it).
-    uint64 callee_save_size = a64_nsave * 8
+    // Callee-saved area: only the GPR colours actually used, plus x29/x30
+    // for non-leaf functions (a BL clobbers x30; a leaf never touches it),
+    // plus only the d8-d15 homes ir_a64_fpr_alloc actually handed out
+    // (AAPCS64: d8-d15 must be preserved). A function using two d-homes
+    // saves two d-registers, not eight.
+    uint64 callee_save_size = a64_nsave * 8 + a64_dsave * 8
     if a64_save_lr != 0 { callee_save_size = callee_save_size + 16 }
     uint64 spill_size = ir_spill_count * 8
     // 32-byte scratchpad for mid-function temp buffers (fmt_uint digits,
@@ -2845,7 +3184,7 @@ fn ir_emit_arm64_function(uint64 fn_node) {
     if is_naked == 0 {
         // SUB SP, SP, #total_frame
         emit_a64_sub_sp_imm(total_frame)
-        ir_a64_emit_callee_frame(a64_used_mask, cs_base, a64_save_lr, 0)
+        ir_a64_emit_callee_frame(a64_used_mask, a64_dmask, cs_base, a64_save_lr, 0)
     }
 
     // 7. Allocate branch/return fixup tracking — see ir_block_offsets_cap
@@ -3064,8 +3403,9 @@ fn ir_emit_arm64_function(uint64 fn_node) {
             }
         }
         // Restore callee-saved registers. Exact mirror of the prologue:
-        // same helper, same arguments -> same regs, same slots.
-        ir_a64_emit_callee_frame(a64_used_mask, cs_base, a64_save_lr, 1)
+        // same helper, same arguments -> same regs, same slots (GPR
+        // colours, then x29/x30, then the used d8-d15 homes).
+        ir_a64_emit_callee_frame(a64_used_mask, a64_dmask, cs_base, a64_save_lr, 1)
         // ADD SP, SP, #total_frame
         emit_a64_add_sp_imm(total_frame)
         // RET
