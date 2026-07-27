@@ -416,18 +416,11 @@ fn xt_reg_for_color(uint64 color) -> uint64 {
     return 12 + color        // color 0..3 -> a12..a15
 }
 
-// Nonzero once ir_phys_regs points at a >= 4-slot buffer this init sized
-// itself (mirror of ir_rv_phys_regs_sized). x86/arm64 inits allocate 10
-// slots, riscv 12, xtensa needs only 4 — so we can reuse a bigger buffer if
-// one already exists; we only allocate our own the first time.
-static uint64 ir_xt_phys_regs_sized = 0
-
 fn ir_regalloc_init_xtensa() {
     IR_NUM_REGS = 4
-    if ir_xt_phys_regs_sized == 0 {
-        if ir_phys_regs == 0 { ir_phys_regs = alloc(10 * 8) }
-        ir_xt_phys_regs_sized = 1
-    }
+    // Sizing is centralised in ir_phys_regs_ensure (ir.kr) — always big
+    // enough for the largest colour file of ANY arch.
+    ir_phys_regs_ensure()
     uint64 c = 0
     while c < 4 {
         uint64 p = ir_phys_regs + c * 8
@@ -482,10 +475,7 @@ fn xt_wide_reg_for_color(uint64 color) -> uint64 {
 
 fn ir_regalloc_init_xtensa_wide() {
     IR_NUM_REGS = XT_WIDE_NUM_REGS
-    if ir_xt_phys_regs_sized == 0 {
-        if ir_phys_regs == 0 { ir_phys_regs = alloc(10 * 8) }
-        ir_xt_phys_regs_sized = 1
-    }
+    ir_phys_regs_ensure()
     uint64 c = 0
     while c < XT_WIDE_NUM_REGS {
         uint64 p = ir_phys_regs + c * 8

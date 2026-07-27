@@ -5254,8 +5254,21 @@ static uint64 ir_used_callee_mask = 0
 // bytes plus the return address to reach the caller's stack args.
 static uint64 ir_callee_save_bytes = 0
 
+// Colour->physical-register table, shared by every backend. Sized once for
+// the LARGEST colour file any of them uses (arm64 wide: 23), so an arch
+// that allocated first can never undersize the buffer for a later one
+// (fat builds interleave arches through this same static).
+static uint64 ir_phys_regs_cap = 0
+
+fn ir_phys_regs_ensure() {
+    if ir_phys_regs_cap >= 32 { return }
+    ir_phys_regs = alloc(32 * 8)
+    ir_phys_regs_cap = 32
+}
+
 fn ir_regalloc_init() {
-    if ir_phys_regs == 0 { ir_phys_regs = alloc(10 * 8) }
+    IR_NUM_REGS = 6
+    ir_phys_regs_ensure()
     uint64 p0 = ir_phys_regs
     unsafe { *(p0 as uint64) = 3 }
     uint64 p1 = ir_phys_regs + 8
@@ -5268,6 +5281,297 @@ fn ir_regalloc_init() {
     unsafe { *(p4 as uint64) = 15 }
     uint64 p5 = ir_phys_regs + 40
     unsafe { *(p5 as uint64) = 5 }       // rbp
+}
+
+// --- Wide x86_64 colour file ----------------------------------------------
+// The 6-colour callee-saved-only file drowns hot loops in spill traffic
+// (sha256's compression round: 138 of 202 instructions were sp-relative
+// loads/stores). SysV gives us six more registers that are only ever
+// scratch today: rsi, rdi, r8-r11. They join the file as colours 6..11,
+// AFTER the callee-saved prefix, so the prologue/epilogue (which only
+// look at colours 0-5) need no change and the colour ceiling for values
+// that must survive a call is simply 6.
+//
+// rax, rcx, rdx stay OUT of the file: rax/rcx are the universal spill-
+// reload scratch pair (ir_resolve_src), rcx is the variable-shift count
+// (CL) and rdx is div/mod's implicit high half plus IR_FFMA's third-
+// operand scratch. Excluding all three keeps every whitelisted op handler
+// (see ir_x86_op_widesafe) correct without a single handler change.
+//
+// Safety mirrors the xtensa recipe (xt_seed_call_ceilings): any block
+// containing an op that is NOT on the audited whitelist gets every vreg
+// it touches or that is live through it capped to the callee-saved
+// prefix, so caller-saved homes only ever hold values whose entire live
+// range sits in whitelisted-only blocks — which is exactly the call-free
+// inner loops that need them.
+static uint64 IR_X86_WIDE_NUM_REGS = 12
+
+fn ir_regalloc_init_x86_wide() {
+    IR_NUM_REGS = IR_X86_WIDE_NUM_REGS
+    ir_phys_regs_ensure()
+    uint64 p0 = ir_phys_regs
+    unsafe { *(p0 as uint64) = 3 }        // colour 0  -> rbx
+    uint64 p1 = ir_phys_regs + 8
+    unsafe { *(p1 as uint64) = 12 }       // colour 1  -> r12
+    uint64 p2 = ir_phys_regs + 16
+    unsafe { *(p2 as uint64) = 13 }       // colour 2  -> r13
+    uint64 p3 = ir_phys_regs + 24
+    unsafe { *(p3 as uint64) = 14 }       // colour 3  -> r14
+    uint64 p4 = ir_phys_regs + 32
+    unsafe { *(p4 as uint64) = 15 }       // colour 4  -> r15
+    uint64 p5 = ir_phys_regs + 40
+    unsafe { *(p5 as uint64) = 5 }        // colour 5  -> rbp
+    uint64 p6 = ir_phys_regs + 48
+    unsafe { *(p6 as uint64) = 6 }        // colour 6  -> rsi
+    uint64 p7 = ir_phys_regs + 56
+    unsafe { *(p7 as uint64) = 7 }        // colour 7  -> rdi
+    uint64 p8 = ir_phys_regs + 64
+    unsafe { *(p8 as uint64) = 8 }        // colour 8  -> r8
+    uint64 p9 = ir_phys_regs + 72
+    unsafe { *(p9 as uint64) = 9 }        // colour 9  -> r9
+    uint64 p10 = ir_phys_regs + 80
+    unsafe { *(p10 as uint64) = 10 }      // colour 10 -> r10
+    uint64 p11 = ir_phys_regs + 88
+    unsafe { *(p11 as uint64) = 11 }      // colour 11 -> r11
+}
+
+// Is this opcode's x86 handler audited safe for the wide colour file?
+// "Safe" means: the emitted code touches NO physical register outside
+// {rax, rcx, rdx, xmm0/xmm1} beyond the operands the allocator handed it
+// (trap-then-exit paths like ARR_CHECK's out-of-bounds exit may clobber
+// anything — the process is gone). The audit is per-handler, against the
+// code in ir_emit_x86_insn / the block-terminator emitter. Anything not
+// listed — calls, syscalls, memcpy/strlen/fmt helpers, atomics, exec,
+// tuple returns, Windows IAT ops — caps its whole block instead
+// (ir_x86_seed_wide_ceilings), so a wrong DEFAULT here is a lost
+// optimisation, never a miscompile. Direction matters: only ADD to this
+// list after reading the handler.
+fn ir_x86_op_widesafe(uint64 o) -> uint64 {
+    if o == 0 { return 1 }                    // elided slot
+    if o >= 1 && o <= 19 { return 1 }         // const, alu, div/mod (rdx excluded), shifts (CL), cmps
+    if o >= 20 && o <= 27 { return 1 }        // float arith/cmp/conv via rax+xmm
+    if o >= 30 && o <= 32 { return 1 }        // load, store, stack_addr
+    if o >= 40 && o <= 43 { return 1 }        // br, br_cond, ret (rax), ret_void
+    if o == 61 { return 1 }                   // copy (param homes capped separately)
+    if o == 77 || o == 78 || o == 79 { return 1 }  // static load/store, str_const (rax + rip-rel)
+    if o == 84 || o == 86 { return 1 }        // static_addr, fn_addr (rax + rip-rel)
+    if o >= 97 && o <= 104 { return 1 }       // fsqrt, ffma (rdx excluded), fcmps, f32/f64 conv
+    if o == 107 || o == 108 { return 1 }      // itof32, ftoi32
+    if o == 118 { return 1 }                  // fsqrt32
+    if o >= 120 && o <= 123 { return 1 }      // signed cmps
+    if o == 131 { return 1 }                  // arr_check (trap path exits the process)
+    if o >= 132 && o <= 139 { return 1 }      // sdiv/smod (rdx excl), sar, add/sub_imm, ror (CL), mul_imm, lea_bis
+    if o == 143 { return 1 }                  // shl_imm
+    return 0
+}
+
+// Does this function qualify for the wide x86 colour file? Inline asm
+// (op 96) can name any physical register, so it disqualifies outright —
+// same rule as xtensa's xt_fn_wide_ok.
+fn ir_x86_fn_wide_ok() -> uint64 {
+    uint64 b = 0
+    while b < ir_bb_count {
+        uint64 i = ir_bb_first_insn(b)
+        while i != 0xFFFFFFFF {
+            if ir_insn_opcode(i) == 96 { return 0 }
+            i = ir_insn_next(i)
+        }
+        b = b + 1
+    }
+    return 1
+}
+
+// --- Instruction-level wide-ceiling seeding -------------------------------
+// Cap every vreg that a non-whitelisted ("dirty") op could clobber to the
+// callee-saved colour prefix. Refinement of xt_seed_call_ceilings' block
+// granularity: sha256's whole 64-round compression body is ONE block with
+// two small calls in the middle, so block-level capping surrendered every
+// register in exactly the code this feature exists for. Here a backward
+// per-instruction liveness walk caps, at each dirty instruction, the set
+// live AFTER it, the set live BEFORE it, and its own named operands —
+// precisely the values a clobber could destroy. Short-lived temporaries
+// whose whole life sits between two dirty points keep the full file.
+//
+// Safety argument for values that are NOT live at any dirty point but are
+// defined in the same block: a caller-saved register only gets clobbered
+// by the dirty op itself, and the lowering emits every IR_ARG of a call
+// contiguously, immediately before its IR_CALL/IR_CALL_IND/IR_SYSCALL
+// (argument expressions are fully evaluated first — see the arg_vregs
+// buffering in the Call lowering). So no allocatable def ever executes
+// while outgoing argument registers are already loaded; the only insns
+// inside an ARG..CALL span are the ARGs and the call, and every operand
+// of those is capped here as a dirty-insn operand. Optimizer passes only
+// rewrite in place or elide (op 0) — nothing inserts between ARG and CALL.
+//
+// The live-set update rules MIRROR ir_graph_color's interference builder
+// exactly (same src1/src2 vreg-vs-payload exclusions, same imm-as-vreg
+// ops); diverging from them would under-approximate liveness and
+// miscompile. Uses the flat per-BB lists built by ir_compute_liveness,
+// which runs immediately before seeding.
+static uint64 ir_seed_live_buf = 0
+static uint64 ir_seed_live_cap = 0
+
+// Cap every vreg present in the bitset `live` to colours < cap.
+fn ir_seed_cap_live_set(uint64 live, uint64 cap) {
+    uint64 w = 0
+    while w < ir_live_words {
+        uint64 p = live + w * 8
+        uint64 bits = 0
+        unsafe { *(p as uint64) -> bits }
+        while bits != 0 {
+            uint64 iso = bits & (0 - bits)
+            uint64 bp = ir_popcount64(iso - 1)
+            uint64 v = w * 64 + bp
+            if v > 0 && v < ir_vreg_next { ir_color_ceil_set(v, cap) }
+            bits = bits & ~(1 << bp)
+        }
+        w = w + 1
+    }
+}
+
+// arch_a64 selects the per-arch handler whitelist; cap is the length of
+// the callee-saved colour prefix (6 on x86_64, 10 on arm64).
+fn ir_seed_wide_ceilings_generic(uint64 arch_a64, uint64 cap) {
+    uint64 vcount = ir_vreg_next
+    if vcount == 0 { return }
+    uint64 set_bytes = ir_live_words * 8
+    if ir_seed_live_buf == 0 {
+        ir_seed_live_cap = 1024 * 8
+        ir_seed_live_buf = alloc(ir_seed_live_cap)
+    }
+    if set_bytes > ir_seed_live_cap {
+        write(2, "error: seed live buffer overflow\n", 33)
+        exit(1)
+    }
+    uint64 tmp = ir_seed_live_buf
+
+    uint64 b = 0
+    while b < ir_bb_count {
+        // Fast scan: any dirty op in this block at all?
+        uint64 dirty = 0
+        uint64 i = ir_bb_first_insn(b)
+        while i != 0xFFFFFFFF {
+            uint64 o = ir_insn_opcode(i)
+            uint64 safe = 0
+            if arch_a64 != 0 { safe = ir_a64_op_widesafe(o) }
+            else { safe = ir_x86_op_widesafe(o) }
+            if safe == 0 { dirty = 1 }
+            i = ir_insn_next(i)
+        }
+        if dirty != 0 {
+            // live = live_out[bb]
+            uint64 wi = 0
+            while wi < ir_live_words {
+                uint64 sp = ir_live_out + b * set_bytes + wi * 8
+                uint64 dp = tmp + wi * 8
+                uint64 v = 0
+                unsafe { *(sp as uint64) -> v }
+                unsafe { *(dp as uint64) = v }
+                wi = wi + 1
+            }
+            // Backward walk over the block's flat instruction list.
+            uint64 off_p = ir_bb_list_off + b * 4
+            uint32 off32 = 0
+            unsafe { *(off_p as uint32) -> off32 }
+            uint64 end_p = ir_bb_list_off + (b + 1) * 4
+            uint32 end32 = 0
+            unsafe { *(end_p as uint32) -> end32 }
+            uint64 loff = off32
+            uint64 n = end32 - off32
+            while n > 0 {
+                n = n - 1
+                uint64 ent = ir_bb_list_buf + (loff + n) * 4
+                uint32 ii32 = 0
+                unsafe { *(ent as uint32) -> ii32 }
+                uint64 ii = ii32
+                uint64 op = ir_insn_opcode(ii)
+                if op == 0 { continue }
+                uint64 insn_safe = 0
+                if arch_a64 != 0 { insn_safe = ir_a64_op_widesafe(op) }
+                else { insn_safe = ir_x86_op_widesafe(op) }
+                if insn_safe == 0 {
+                    // Everything live AFTER the dirty op, plus its result.
+                    ir_seed_cap_live_set(tmp, cap)
+                    uint64 dd = ir_insn_dest(ii)
+                    if dd != 0 && dd < vcount { ir_color_ceil_set(dd, cap) }
+                }
+                // Live-set update — mirror of ir_graph_color's builder.
+                if ir_insn_has_def(ii) != 0 {
+                    uint64 dv = ir_insn_dest(ii)
+                    if dv > 0 && dv < vcount {
+                        uint64 dw = dv / 64
+                        uint64 dp2 = tmp + dw * 8
+                        uint64 dval = 0
+                        unsafe { *(dp2 as uint64) -> dval }
+                        dval = dval & ~(1 << (dv & 63))
+                        unsafe { *(dp2 as uint64) = dval }
+                    }
+                }
+                uint64 u1 = ir_insn_src1(ii)
+                if u1 > 0 && u1 < vcount && op != 1 && op != 79 {
+                    uint64 up = tmp + (u1 / 64) * 8
+                    uint64 uv = 0
+                    unsafe { *(up as uint64) -> uv }
+                    uv = uv | (1 << (u1 & 63))
+                    unsafe { *(up as uint64) = uv }
+                }
+                uint64 u2 = ir_insn_src2(ii)
+                if u2 > 0 && u2 < vcount && op != 1 && op != 12 && op != 13 && op != 30 && op != 42 && op != 61 && op != 135 && op != 136 && op != 138 && (op < 140 || op > 145) {
+                    uint64 up = tmp + (u2 / 64) * 8
+                    uint64 uv = 0
+                    unsafe { *(up as uint64) -> uv }
+                    uv = uv | (1 << (u2 & 63))
+                    unsafe { *(up as uint64) = uv }
+                }
+                if op == 72 || op == 76 || op == 83 || op == 93 || op == 98 {
+                    uint64 uimm = ir_insn_imm(ii)
+                    if uimm > 0 && uimm < vcount {
+                        uint64 up = tmp + (uimm / 64) * 8
+                        uint64 uv = 0
+                        unsafe { *(up as uint64) -> uv }
+                        uv = uv | (1 << (uimm & 63))
+                        unsafe { *(up as uint64) = uv }
+                    }
+                }
+                if insn_safe == 0 {
+                    // Everything live BEFORE the dirty op (covers all of
+                    // its own source operands, including imm-as-vreg).
+                    ir_seed_cap_live_set(tmp, cap)
+                }
+            }
+        }
+        b = b + 1
+    }
+}
+
+fn ir_x86_seed_wide_ceilings() {
+    ir_seed_wide_ceilings_generic(0, 6)
+}
+
+// Cap every vreg that receives a register-passed parameter to the
+// callee-saved colours. The leading param copies read rdi/rsi/rdx/rcx/
+// r8/r9 one at a time in ascending param order, so a param homed in an
+// arg register that a LATER param copy still has to read would be
+// clobbered. Capping the params (imm < 6) is enough — overflow params
+// (imm 6..99) load from the caller's stack after every arg register has
+// been consumed, and imm >= 100 only occurs in asm-block functions,
+// which never get the wide file.
+fn ir_x86_seed_param_ceilings() {
+    uint64 b = 0
+    while b < ir_bb_count {
+        uint64 i = ir_bb_first_insn(b)
+        while i != 0xFFFFFFFF {
+            if ir_insn_opcode(i) == 61 {
+                if ir_insn_src1(i) == 0 {
+                    if ir_insn_imm(i) < 6 {
+                        ir_color_ceil_set(ir_insn_dest(i), 6)
+                    }
+                }
+            }
+            i = ir_insn_next(i)
+        }
+        b = b + 1
+    }
 }
 
 // Register assignment table: [color(4)] x vreg_count. 0xFFFFFFFF = spilled
@@ -5372,6 +5676,10 @@ static uint64 ir_ig_buf = 0
 static uint64 ir_ig_cap = 0
 static uint64 ir_color_tmp_buf = 0
 static uint64 ir_color_tmp_cap = 0
+// Greedy-colouring priority order (rep vregs, hottest first) — sized to
+// the ir_reg_assign vreg cap, filled per function by counting sort on
+// the saturating use counts.
+static uint64 ir_color_order_buf = 0
 
 // Union-find for copy coalescing. parent[v] == v means v is its own
 // representative; otherwise follow parent[v] to its rep. After
@@ -5898,12 +6206,75 @@ fn ir_graph_color() {
         vi = vi + 1
     }
 
+    // Colouring ORDER is a spill-cost heuristic. The old ascending-index
+    // walk let function-lifetime vregs (created first during lowering)
+    // seize every colour before the loop-carried values created deep in
+    // the function got a look-in — exactly backwards for hot loops.
+    // Order reps by saturating use count (ir_compute_use_count, 0..255)
+    // DESCENDING instead: a value read 60 times beats one read twice.
+    // Stable within a weight class (ascending index), so functions whose
+    // vregs all have equal counts colour exactly as before. Any order is
+    // CORRECT: interference rows are symmetric and every neighbour
+    // lookup resolves through the union-find rep, so whichever endpoint
+    // colours second sees the first's colour; the order is only a
+    // priority. Counting sort keeps this O(vcount).
+    if ir_color_order_buf == 0 {
+        ir_color_order_buf = alloc(65536 * 4)
+    }
+    uint64[256] uc_start
+    uint64 wci = 0
+    while wci < 256 {
+        uint64 wcp = uc_start + wci * 8
+        unsafe { *(wcp as uint64) = 0 }
+        wci = wci + 1
+    }
+    // Pass 1: histogram of rep weights.
     vi = 1
     while vi < vcount {
-        if ir_uf_find(vi) != vi {
-            vi = vi + 1
-            continue
+        if ir_uf_find(vi) == vi {
+            uint64 w = ir_use_count_get(vi)
+            uint64 wcp = uc_start + w * 8
+            uint64 wcv = 0
+            unsafe { *(wcp as uint64) -> wcv }
+            unsafe { *(wcp as uint64) = wcv + 1 }
         }
+        vi = vi + 1
+    }
+    // Descending prefix sums: weight 255 first.
+    uint64 uc_pos = 0
+    uint64 wdi = 256
+    while wdi > 0 {
+        wdi = wdi - 1
+        uint64 wcp = uc_start + wdi * 8
+        uint64 wcv = 0
+        unsafe { *(wcp as uint64) -> wcv }
+        unsafe { *(wcp as uint64) = uc_pos }
+        uc_pos = uc_pos + wcv
+    }
+    uint64 order_n = uc_pos
+    // Pass 2: place reps, ascending index within each weight class.
+    vi = 1
+    while vi < vcount {
+        if ir_uf_find(vi) == vi {
+            uint64 w = ir_use_count_get(vi)
+            uint64 wcp = uc_start + w * 8
+            uint64 slot = 0
+            unsafe { *(wcp as uint64) -> slot }
+            uint64 op2 = ir_color_order_buf + slot * 4
+            uint32 vi32 = vi
+            unsafe { *(op2 as uint32) = vi32 }
+            unsafe { *(wcp as uint64) = slot + 1 }
+        }
+        vi = vi + 1
+    }
+
+    uint64 oi2 = 0
+    while oi2 < order_n {
+        uint64 oep = ir_color_order_buf + oi2 * 4
+        uint32 ov32 = 0
+        unsafe { *(oep as uint32) -> ov32 }
+        vi = ov32
+        oi2 = oi2 + 1
         // Collect colors used by interfering neighbors
         uint64 used_colors = 0
         uint64 nw = 0
@@ -5946,8 +6317,6 @@ fn ir_graph_color() {
             }
             color = color + 1
         }
-
-        vi = vi + 1
     }
 
     // Propagate rep colours to followers so ir_get_phys_reg works
@@ -6179,8 +6548,12 @@ static uint64 ir_spill_base = 0
 static uint64 ir_spill_count = 0
 
 fn ir_spill_offset(uint64 vreg) -> uint64 {
-    // vreg >= (IR_NUM_REGS+1) are spilled (vregs are 1-based)
-    uint64 slot = vreg - IR_NUM_REGS - 1
+    // One slot per vreg (vregs are 1-based). The old vreg-IR_NUM_REGS-1
+    // mapping assumed a vreg numbered <= IR_NUM_REGS could never spill;
+    // a colour ceiling (wide-file mode) can spill ANY vreg, and the
+    // subtraction would underflow — the exact bug the xtensa wide file
+    // hit first (see xt_spill_offset's note).
+    uint64 slot = vreg - 1
     return ir_spill_base + slot * 8
 }
 
@@ -8223,7 +8596,8 @@ fn ir_emit_x86_insn(uint64 ii) {
                 } else {
                     // Value is spilled — need to load from adjusted offset
                     // Original spill at [rsp + spill_off], now at [rsp + stack_bytes + spill_off]
-                    uint64 spill_off = (arg_vreg - IR_NUM_REGS - 1) * 8
+                    // (must mirror ir_spill_offset's one-slot-per-vreg mapping)
+                    uint64 spill_off = (arg_vreg - 1) * 8
                     uint64 adj_off = stack_bytes + spill_off
                     // mov rax, [rsp + adj_off]
                     emit_byte(0x48); emit_byte(0x8B)
@@ -11746,15 +12120,34 @@ fn ir_emit_x86_function(uint64 fn_node) {
     // 2. Compute liveness
     ir_compute_liveness()
 
-    // 3. Register allocation
-    ir_regalloc_init()
+    // 3. Register allocation. The wide 12-colour file (callee-saved six
+    // plus rsi/rdi/r8-r11) applies to every function without inline asm
+    // and not @naked; ir_x86_seed_wide_ceilings caps everything a
+    // non-whitelisted op could clobber back to the callee-saved prefix,
+    // so call-free inner loops get the caller-saved registers and
+    // everything else behaves exactly as before. @naked is excluded: it
+    // gets no frame (frame_size forced 0), so a ceiling-forced spill
+    // would store outside any frame.
+    // Use counts feed the greedy colourer's spill-cost ordering (they are
+    // recomputed at step 4b for the CMP fusion peephole — idempotent).
+    ir_compute_use_count()
+    ir_color_ceil_reset()
+    if ir_x86_fn_wide_ok() != 0 && is_naked == 0 {
+        ir_regalloc_init_x86_wide()
+        ir_x86_seed_param_ceilings()
+        ir_x86_seed_wide_ceilings()
+    } else {
+        ir_regalloc_init()
+    }
     ir_graph_color()
 
 
-    // 4. Compute spill count
+    // 4. Compute spill count — one slot per vreg, matching
+    // ir_spill_offset's vreg-indexed mapping (a colour ceiling can spill
+    // ANY vreg, including low-numbered ones).
     ir_spill_count = 0
-    if ir_vreg_next > IR_NUM_REGS + 1 {
-        ir_spill_count = ir_vreg_next - IR_NUM_REGS - 1
+    if ir_vreg_next > 1 {
+        ir_spill_count = ir_vreg_next - 1
     }
 
     // 4a. Snapshot the function's var map for DWARF (if -g)

@@ -103,19 +103,12 @@ fn rv_reg_for_color(uint64 color) -> uint64 {
     return 18 + (color - 2)
 }
 
-// Nonzero once ir_phys_regs points at a buffer with >= 12 slots. The x86
-// and arm64 inits allocate only 10 slots, so the riscv init must NOT write
-// 12 entries into a buffer it didn't size itself; it allocates a fresh
-// 12-slot buffer once (the old one just leaks into the arena — later
-// x86/arm64 inits reuse the bigger buffer, writing only their 10 entries).
-static uint64 ir_rv_phys_regs_sized = 0
-
 fn ir_regalloc_init_riscv() {
     IR_NUM_REGS = 12
-    if ir_rv_phys_regs_sized == 0 {
-        ir_phys_regs = alloc(12 * 8)
-        ir_rv_phys_regs_sized = 1
-    }
+    // Sizing is centralised in ir_phys_regs_ensure (ir.kr) — it always
+    // allocates enough slots for the largest colour file of ANY arch, so
+    // the historical who-allocated-first hazard is gone.
+    ir_phys_regs_ensure()
     uint64 c = 0
     while c < 12 {
         uint64 p = ir_phys_regs + c * 8
