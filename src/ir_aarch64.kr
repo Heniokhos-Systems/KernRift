@@ -142,10 +142,10 @@ fn ir_a64_emit_callee_frame(uint64 mask, uint64 dmask, uint64 cs_base, uint64 sa
 // ---------------------------------------------------------------------------
 
 fn ir_regalloc_init_arm64() {
-    // Allocate or reuse the phys_regs table (10 entries for ARM64; x86's
-    // ir_regalloc_init now also allocates 10 so the buffer is reusable).
+    // Allocate or reuse the phys_regs table (sized centrally by
+    // ir_phys_regs_ensure for the largest colour file any arch uses).
     IR_NUM_REGS = 10
-    if ir_phys_regs == 0 { ir_phys_regs = alloc(10 * 8) }
+    ir_phys_regs_ensure()
     uint64 p0 = ir_phys_regs
     unsafe { *(p0 as uint64) = 19 }       // color 0 -> x19
     uint64 p1 = ir_phys_regs + 8
@@ -168,6 +168,121 @@ fn ir_regalloc_init_arm64() {
     unsafe { *(p9 as uint64) = 28 }       // color 9 -> x28
 }
 
+// --- Wide ARM64 colour file -----------------------------------------------
+// Same recipe as x86's ir_regalloc_init_x86_wide and xtensa's
+// ir_regalloc_init_xtensa_wide: the AAPCS caller-saved registers join the
+// file AFTER the callee-saved prefix, so the prologue/epilogue (which
+// only look at colours 0-9) need no change and the ceiling for values
+// that must survive a non-whitelisted op is simply 10.
+//
+// Thirteen additions, colours 10..22: x0-x8 and x12-x15. Exclusions that
+// carry the correctness:
+//   x9/x10 — the universal spill-reload / second-operand scratch pair
+//            (ir_a64_resolve_src); within-op everywhere.
+//   x11   — IR_MOD/IR_SMOD's quotient temp and the large-frame address
+//            scratch in ir_a64_ldr_sp/str_sp/_d_ variants.
+//   x16/x17 — linker veneer scratch (and x16 is the ADRP target of the
+//            static/str-const fixup sequences plus macOS's syscall nr).
+//   x18   — platform-reserved.
+// x0-x7 arrive holding incoming arguments: parameter vregs are capped to
+// the callee-saved prefix (ir_a64_seed_param_ceilings) so the leading
+// param copies can never clobber a later param's source. x8 is only ever
+// written by capped blocks (syscalls) or by trap-then-exit paths.
+static uint64 IR_A64_WIDE_NUM_REGS = 23
+
+fn ir_a64_wide_reg_for_color(uint64 color) -> uint64 {
+    if color < 10 { return 19 + color }    // 0..9  -> x19..x28 (callee-saved)
+    if color < 19 { return color - 10 }    // 10..18 -> x0..x8
+    return color - 7                       // 19..22 -> x12..x15
+}
+
+fn ir_regalloc_init_arm64_wide() {
+    IR_NUM_REGS = IR_A64_WIDE_NUM_REGS
+    ir_phys_regs_ensure()
+    uint64 c = 0
+    while c < IR_A64_WIDE_NUM_REGS {
+        uint64 p = ir_phys_regs + c * 8
+        uint64 phys = ir_a64_wide_reg_for_color(c)
+        unsafe { *(p as uint64) = phys }
+        c = c + 1
+    }
+}
+
+// Is this opcode's ARM64 handler audited safe for the wide colour file?
+// "Safe" = the emitted code touches NO physical register outside
+// {x9, x10, x11, d0-d2/s0-s1} beyond allocator-assigned operands
+// (trap-then-exit paths may clobber anything). Differs from the x86 list
+// by EXCLUDING 77/78/79/84/86: the arm64 static-data/str-const/fn-addr
+// sequences materialise through X16 *and X0* (ADRP X16; ADD X0, X16),
+// so they cap their block instead. Anything not listed caps its block
+// (ir_a64_seed_wide_ceilings) — a wrong default is a lost optimisation,
+// never a miscompile.
+fn ir_a64_op_widesafe(uint64 o) -> uint64 {
+    if o == 0 { return 1 }                    // elided slot
+    if o >= 1 && o <= 19 { return 1 }         // const, alu, div/mod (x11), shifts, cmps
+    if o >= 20 && o <= 27 { return 1 }        // float arith/cmp/conv via d0-d2/s0-s1
+    if o >= 30 && o <= 32 { return 1 }        // load, store, stack_addr
+    if o >= 40 && o <= 43 { return 1 }        // br, br_cond, ret (x0 at terminator), ret_void
+    if o == 61 { return 1 }                   // copy (param homes capped separately)
+    if o >= 97 && o <= 104 { return 1 }       // fsqrt, ffma, fcmps, f32/f64 conv
+    if o == 107 || o == 108 { return 1 }      // itof32, ftoi32
+    if o == 118 { return 1 }                  // fsqrt32
+    if o >= 120 && o <= 123 { return 1 }      // signed cmps
+    if o == 131 { return 1 }                  // arr_check (trap path exits the process)
+    if o >= 132 && o <= 139 { return 1 }      // sdiv, smod (x11), sar, add/sub_imm (x10), ror, mul_imm, lea_bis
+    if o == 143 { return 1 }                  // shl_imm
+    return 0
+}
+
+// Does this function qualify for the wide colour file? Inline asm (op 96)
+// can name any physical register — disqualify, as on every other arch.
+fn ir_a64_fn_wide_ok() -> uint64 {
+    uint64 b = 0
+    while b < ir_bb_count {
+        uint64 i = ir_bb_first_insn(b)
+        while i != 0xFFFFFFFF {
+            if ir_insn_opcode(i) == 96 { return 0 }
+            i = ir_insn_next(i)
+        }
+        b = b + 1
+    }
+    return 1
+}
+
+// Cap every vreg a non-whitelisted op could clobber to the callee-saved
+// colours (0..9). Instruction-level: see ir_seed_wide_ceilings_generic
+// in ir.kr — at each dirty instruction the sets live before and after it
+// plus its own operands are capped; temporaries living entirely between
+// dirty points keep the full 23-colour file.
+fn ir_a64_seed_wide_ceilings() {
+    ir_seed_wide_ceilings_generic(1, 10)
+}
+
+// Cap every vreg that receives a register-passed parameter (x0-x7) to
+// the callee-saved colours: the leading param copies read the arg
+// registers one at a time in ascending param order, so a param homed in
+// an arg register a LATER param copy still has to read would be
+// clobbered. Overflow params (imm 8..99) load from the caller's frame
+// after every arg register is consumed; imm >= 100 only occurs in
+// asm-block functions, which never get the wide file.
+fn ir_a64_seed_param_ceilings() {
+    uint64 b = 0
+    while b < ir_bb_count {
+        uint64 i = ir_bb_first_insn(b)
+        while i != 0xFFFFFFFF {
+            if ir_insn_opcode(i) == 61 {
+                if ir_insn_src1(i) == 0 {
+                    if ir_insn_imm(i) < 8 {
+                        ir_color_ceil_set(ir_insn_dest(i), 10)
+                    }
+                }
+            }
+            i = ir_insn_next(i)
+        }
+        b = b + 1
+    }
+}
+
 // ---------------------------------------------------------------------------
 // ARM64 spill helpers
 // ---------------------------------------------------------------------------
@@ -185,7 +300,11 @@ static uint64 IR_A64_OVERFLOW_RESERVE = 128
 // above the overflow-arg reservation so they remain addressable at a
 // stable offset across calls.
 fn ir_a64_spill_offset(uint64 vreg) -> uint64 {
-    uint64 slot = vreg - IR_NUM_REGS - 1
+    // One slot per vreg (vregs are 1-based) — a colour ceiling can spill
+    // ANY vreg, so the old vreg-IR_NUM_REGS-1 mapping would underflow
+    // for a low-numbered capped vreg (see ir_spill_offset in ir.kr and
+    // xt_spill_offset's original note).
+    uint64 slot = vreg - 1
     return IR_A64_OVERFLOW_RESERVE + slot * 8
 }
 
@@ -3011,20 +3130,33 @@ fn ir_emit_arm64_function(uint64 fn_node) {
     // exactly one consumer (the BR_COND terminator).
     ir_compute_use_count()
 
-    // 3. Set up ARM64 register allocator (10 regs)
+    // 3. Set up ARM64 register allocator. The wide 23-colour file
+    // (x19-x28 plus x0-x8/x12-x15) applies to every function without
+    // inline asm and not @naked; ir_a64_seed_wide_ceilings caps
+    // everything a non-whitelisted op could clobber back to the
+    // callee-saved ten, so call-free inner loops get the caller-saved
+    // registers and everything else behaves exactly as before.
     uint64 saved_num_regs = IR_NUM_REGS
-    IR_NUM_REGS = 10
-    ir_regalloc_init_arm64()
+    ir_color_ceil_reset()
+    if ir_a64_fn_wide_ok() != 0 && is_naked == 0 {
+        ir_regalloc_init_arm64_wide()
+        ir_a64_seed_param_ceilings()
+        ir_a64_seed_wide_ceilings()
+    } else {
+        ir_regalloc_init_arm64()
+    }
     ir_graph_color()
 
     // 3a. Dedicated f64 colouring over d8-d15 (sets ir_a64_uses_fpr,
     // which gates the FP callee-saved bank in the prologue/epilogue).
     ir_a64_fpr_alloc()
 
-    // 4. Compute spill count
+    // 4. Compute spill count — one slot per vreg, matching
+    // ir_a64_spill_offset's vreg-indexed mapping (a colour ceiling can
+    // spill ANY vreg, including low-numbered ones).
     ir_spill_count = 0
-    if ir_vreg_next > IR_NUM_REGS + 1 {
-        ir_spill_count = ir_vreg_next - IR_NUM_REGS - 1
+    if ir_vreg_next > 1 {
+        ir_spill_count = ir_vreg_next - 1
     }
 
     // 4b. Pre-scan the (post-optimization) IR: leafness, outgoing
