@@ -344,6 +344,16 @@ fn emit_a64_lsl(uint64 rd, uint64 rn, uint64 rm) {
     emit_a64(insn)
 }
 
+// LSL Xd, Xn, #shift (alias for UBFM Xd, Xn, #((64-shift) mod 64), #(63-shift)).
+// shift must be 0..63. Sanity anchor: `lsl x0, x0, #1` == 0xD37FF800
+// (immr=63, imms=62), which this formula reproduces.
+fn emit_a64_lsl_imm(uint64 rd, uint64 rn, uint64 shift) {
+    uint64 immr = (64 - shift) & 63
+    uint64 imms = 63 - shift
+    uint64 insn = 0xD3400000 | (immr << 16) | (imms << 10) | (rn << 5) | rd
+    emit_a64(insn)
+}
+
 // LSR Xd, Xn, Xm (alias for LSRV)
 fn emit_a64_lsr(uint64 rd, uint64 rn, uint64 rm) {
     uint64 insn = 0x9AC02400 | (rm << 16) | (rn << 5) | rd

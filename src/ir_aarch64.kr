@@ -1032,6 +1032,44 @@ fn ir_emit_arm64_insn(uint64 ii) {
         return
     }
 
+    // ----- IR_SHL_IMM (143): dst = src1 << imm  (imm 0..63) -----
+    // Produced by the shared const-fold's pow2-MUL strength reduction.
+    // One instruction, no constant materialisation, unlike the reg-count
+    // IR_SHL above (which costs a mov_imm + LSLV when the count is a
+    // constant).
+    if op == 143 {
+        uint64 a_reg = ir_a64_resolve_src(s1_v, 9)
+        uint64 d = dst_r
+        if d == 0xFFFFFFFF { d = 9 }
+        emit_a64_lsl_imm(d, a_reg, imm & 63)
+        if dst_r == 0xFFFFFFFF {
+            ir_a64_emit_store_spill(9, dest_v)
+        }
+        return
+    }
+
+    // ----- IR_LEA_BIS (139): dst = src1 + src2 * scale, scale ∈ {2,4,8} --
+    // Produced by ir_opt_recognize_lea_bis (gated to arches 0/1). arm64's
+    // shifted-register ADD absorbs the whole scaled-index computation:
+    // `add Xd, Xbase, Xidx, LSL #log2(scale)` — one instruction where the
+    // old lowering spent mov_imm + mul + add. Scale 1 maps to shift 0
+    // (plain add); the matcher only feeds 2/4/8 today.
+    if op == 139 {
+        uint64 a_reg = ir_a64_resolve_src(s1_v, 9)
+        uint64 b_reg = ir_a64_resolve_src(s2_v, 10)
+        uint64 d = dst_r
+        if d == 0xFFFFFFFF { d = 9 }
+        uint64 lb_sh = 0
+        if imm == 2 { lb_sh = 1 }
+        if imm == 4 { lb_sh = 2 }
+        if imm == 8 { lb_sh = 3 }
+        emit_a64_add_lsl(d, a_reg, b_reg, lb_sh)
+        if dst_r == 0xFFFFFFFF {
+            ir_a64_emit_store_spill(9, dest_v)
+        }
+        return
+    }
+
     // ----- IR_ROR (137): dst = right-rotate(src1, src2 mod imm) -----
     // imm is the rotation WIDTH (ir.kr:159); the shared
     // ir_opt_recognize_rotate pass only ever produces imm=32 today.
