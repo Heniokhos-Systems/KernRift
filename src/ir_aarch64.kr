@@ -41,6 +41,64 @@ fn ir_a64_ldp_sp(uint64 rt1, uint64 rt2, uint64 off) {
     emit_a64(insn)
 }
 
+// Save (restore==0) or restore (restore==1) the function's callee-saved
+// register set at [SP + cs_base ...]. `mask` holds the allocator colours
+// actually used (bit c -> x19+c); `save_lr` appends x29/x30 for non-leaf
+// functions. Both the prologue and the epilogue call THIS function with
+// identical arguments, so the two sequences are mirror images by
+// construction: same registers, same slots, in the same colour-ascending
+// order (restore order does not matter for SP-relative slots — only the
+// reg<->slot pairing does). Registers are packed pairwise into STP/LDP
+// when every pair base fits the imm7 range (<= 504); otherwise fall back
+// to per-register STR/LDR via ir_a64_str_sp/ir_a64_ldr_sp, which handle
+// arbitrary offsets through a scratch register (x11 — caller-saved, dead
+// in both the prologue and the epilogue).
+fn ir_a64_emit_callee_frame(uint64 mask, uint64 cs_base, uint64 save_lr, uint64 restore) {
+    uint64 n = 0
+    uint64 c = 0
+    while c < 10 {
+        if ((mask >> c) & 1) != 0 { n = n + 1 }
+        c = c + 1
+    }
+    if save_lr != 0 { n = n + 2 }
+    if n == 0 { return }
+    uint64 use_pairs = 0
+    if cs_base + n * 8 <= 512 { use_pairs = 1 }
+    uint64 off = cs_base
+    uint64 pend = 0xFFFFFFFF
+    c = 0
+    while c < 12 {
+        uint64 r = 0xFFFFFFFF
+        if c < 10 {
+            if ((mask >> c) & 1) != 0 { r = 19 + c }
+        } else {
+            // c == 10 -> x29, c == 11 -> x30 (only for non-leaf)
+            if save_lr != 0 { r = 19 + c }
+        }
+        if r != 0xFFFFFFFF {
+            if use_pairs != 0 {
+                if pend == 0xFFFFFFFF {
+                    pend = r
+                } else {
+                    if restore == 0 { ir_a64_stp_sp(pend, r, off) }
+                    else { ir_a64_ldp_sp(pend, r, off) }
+                    off = off + 16
+                    pend = 0xFFFFFFFF
+                }
+            } else {
+                if restore == 0 { ir_a64_str_sp(r, off) }
+                else { ir_a64_ldr_sp(r, off) }
+                off = off + 8
+            }
+        }
+        c = c + 1
+    }
+    if pend != 0xFFFFFFFF {
+        if restore == 0 { ir_a64_str_sp(pend, off) }
+        else { ir_a64_ldr_sp(pend, off) }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Register allocator setup for ARM64
 // ---------------------------------------------------------------------------
@@ -107,6 +165,40 @@ fn ir_a64_peephole_reset() {
     ir_a64_last_spill_vreg = 0xFFFFFFFF
     ir_a64_last_spill_reg = 0xFFFFFFFF
     ir_a64_last_spill_end = 0xFFFFFFFFFFFFFFFF
+}
+
+// CMP+B.cond fusion handoff (same shape as xtensa's xt_fused_cmp_op):
+// when ir_cmp_fuse_code says a compare's only consumer is the block's
+// BR_COND terminator, the compare handler emits NOTHING and stashes its
+// operands here; the terminator emits `cmp` + `b.<cond>` directly —
+// one branch on flags instead of cset + cbnz + b.
+static uint64 ir_a64_fused_cmp_op = 0
+static uint64 ir_a64_fused_cmp_s1 = 0
+static uint64 ir_a64_fused_cmp_s2 = 0
+static uint64 ir_a64_fused_cmp_imm = 0
+
+// Map an integer compare opcode to the AArch64 condition code that is
+// TRUE exactly when the compare is true. Unsigned: EQ NE LO LS HI HS;
+// signed: LT LE GT GE. Inversion (for branching on the false edge) is
+// cond ^ 1 — architectural for every code except AL/NV, which never
+// appear here.
+fn ir_a64_cmp_cond(uint64 op) -> uint64 {
+    if op == 14 { return 0 }    // EQ
+    if op == 15 { return 1 }    // NE
+    if op == 16 { return 3 }    // LO (unsigned <)
+    if op == 17 { return 9 }    // LS (unsigned <=)
+    if op == 18 { return 8 }    // HI (unsigned >)
+    if op == 19 { return 2 }    // HS (unsigned >=)
+    if op == 120 { return 11 }  // LT
+    if op == 121 { return 13 }  // LE
+    if op == 122 { return 12 }  // GT
+    return 10                   // GE (123)
+}
+
+// CMP Xn, #imm12 (alias for SUBS XZR, Xn, #imm). Caller guarantees
+// imm <= 4095 (the optimizer's arm64 cmp-imm gate only folds that range).
+fn ir_a64_cmp_imm(uint64 rn, uint64 imm) {
+    emit_a64(0xF100001F | (imm << 10) | (rn << 5))
 }
 
 // Load a spilled vreg into scratch register (x9 or x10).
@@ -697,40 +789,57 @@ fn ir_emit_arm64_insn(uint64 ii) {
         return
     }
 
-    // ----- IR_CMP_EQ (14) through IR_CMP_GE (19) -----
-    if op >= 14 && op <= 19 {
+    // ----- IR_ADD_IMM (135) / IR_SUB_IMM (136): dst = src1 ± imm -----
+    // imm is a signed-32 value in two's complement (optimizer gate).
+    // Normalize to one effective addend e (negated for SUB_IMM), then use
+    // the native immediate form: `add Xd, Xn, #e` for 0..4095, `sub Xd,
+    // Xn, #-e` for small negatives — one instruction instead of the old
+    // mov+add pair. Anything larger materializes into x10 (x9 may hold a
+    // spilled src1) and falls back to the register form; 64-bit wrap
+    // makes add-of-negative exactly equal sub-of-magnitude.
+    if op == 135 || op == 136 {
         uint64 a_reg = ir_a64_resolve_src(s1_v, 9)
-        uint64 b_reg = ir_a64_resolve_src(s2_v, 10)
-        emit_a64_cmp(a_reg, b_reg)
-        // ARM64 condition codes for unsigned comparisons:
-        // EQ=0, NE=1, LO(CC)=3, LS=9, HI=8, HS(CS)=2
-        uint64 cond = 0
-        if op == 14 { cond = 0 }   // EQ
-        if op == 15 { cond = 1 }   // NE
-        if op == 16 { cond = 3 }   // LO (unsigned <)
-        if op == 17 { cond = 9 }   // LS (unsigned <=)
-        if op == 18 { cond = 8 }   // HI (unsigned >)
-        if op == 19 { cond = 2 }   // HS (unsigned >=)
         uint64 d = dst_r
         if d == 0xFFFFFFFF { d = 9 }
-        emit_a64_cset(d, cond)
+        uint64 e = imm
+        if op == 136 { e = 0 - imm }
+        uint64 neg = 0 - e
+        if e <= 4095 {
+            emit_a64(0x91000000 | (e << 10) | (a_reg << 5) | d)      // ADD Xd, Xn, #e
+        } else if neg <= 4095 {
+            emit_a64(0xD1000000 | (neg << 10) | (a_reg << 5) | d)    // SUB Xd, Xn, #-e
+        } else {
+            emit_a64_mov_imm(10, e)
+            emit_a64_add(d, a_reg, 10)
+        }
         if dst_r == 0xFFFFFFFF {
             ir_a64_emit_store_spill(9, dest_v)
         }
         return
     }
 
-    // ----- IR_SCMP_LT (120) through IR_SCMP_GE (123) -----
-    if op >= 120 && op <= 123 {
+    // ----- IR_CMP_EQ (14) through IR_CMP_GE (19), IR_SCMP_LT (120)
+    // ----- through IR_SCMP_GE (123) -----
+    // src2 == 0 means the optimizer folded a constant into imm (arm64
+    // gate: 0..4095, always fits CMP's imm12). If the compare's single
+    // consumer is this block's BR_COND terminator, defer it entirely —
+    // the terminator emits `cmp` + `b.<cond>` (see fusion handoff above).
+    if (op >= 14 && op <= 19) || (op >= 120 && op <= 123) {
+        if ir_cmp_fuse_code(ii) != 0 {
+            ir_a64_fused_cmp_op = op
+            ir_a64_fused_cmp_s1 = s1_v
+            ir_a64_fused_cmp_s2 = s2_v
+            ir_a64_fused_cmp_imm = imm
+            return
+        }
         uint64 a_reg = ir_a64_resolve_src(s1_v, 9)
-        uint64 b_reg = ir_a64_resolve_src(s2_v, 10)
-        emit_a64_cmp(a_reg, b_reg)
-        // Signed condition codes: LT=11, LE=13, GT=12, GE=10
-        uint64 cond = 0
-        if op == 120 { cond = 11 }  // LT
-        if op == 121 { cond = 13 }  // LE
-        if op == 122 { cond = 12 }  // GT
-        if op == 123 { cond = 10 }  // GE
+        if s2_v == 0 {
+            ir_a64_cmp_imm(a_reg, imm)
+        } else {
+            uint64 b_reg = ir_a64_resolve_src(s2_v, 10)
+            emit_a64_cmp(a_reg, b_reg)
+        }
+        uint64 cond = ir_a64_cmp_cond(op)
         uint64 d = dst_r
         if d == 0xFFFFFFFF { d = 9 }
         emit_a64_cset(d, cond)
@@ -2540,6 +2649,11 @@ fn ir_emit_arm64_function(uint64 fn_node) {
     // 2. Compute liveness
     ir_compute_liveness()
 
+    // 2a. Per-vreg use counts — consumed by ir_cmp_fuse_code so the
+    // CMP+B.cond fusion below only fires when the compare's boolean has
+    // exactly one consumer (the BR_COND terminator).
+    ir_compute_use_count()
+
     // 3. Set up ARM64 register allocator (10 regs)
     uint64 saved_num_regs = IR_NUM_REGS
     IR_NUM_REGS = 10
@@ -2552,6 +2666,73 @@ fn ir_emit_arm64_function(uint64 fn_node) {
         ir_spill_count = ir_vreg_next - IR_NUM_REGS - 1
     }
 
+    // 4b. Pre-scan the (post-optimization) IR: leafness, outgoing
+    // overflow-arg needs, and physical callee-saved registers written
+    // directly by ASM argument constraints.
+    //   - a64_has_call: IR_CALL(50) / IR_CALL_IND(87) emit BL/BLR, so x30
+    //     must be saved. On Windows (target_os==2) nearly every lowered op
+    //     may call through the IAT (BLR x16), so treat everything as
+    //     non-leaf there.
+    //   - a64_has_asm: an IR_ASM_BLOCK(96) can contain anything (BL,
+    //     clobbers of any callee-saved reg, stack use), so fall back to
+    //     the old maximally-conservative frame: save all 10 colours +
+    //     x29/x30 and keep the full 128-byte overflow reserve.
+    //   - a64_ovf_slots: highest outgoing stack-arg slot used by IR_ARG
+    //     (imm 8..99) — sizes the bottom-of-frame overflow reserve.
+    //   - a64_forced_mask: IR_ARG with a direct register target (imm >=
+    //     100) that lands on x19-x28 clobbers a callee-saved reg the
+    //     allocator never handed out; force it into the save mask.
+    uint64 a64_has_call = 0
+    uint64 a64_has_asm = 0
+    uint64 a64_ovf_slots = 0
+    uint64 a64_forced_mask = 0
+    if target_os == 2 { a64_has_call = 1 }
+    uint64 psb = 0
+    while psb < ir_bb_count {
+        uint64 psi = ir_bb_first_insn(psb)
+        while psi != 0xFFFFFFFF {
+            uint64 pso = ir_insn_opcode(psi)
+            if pso == 50 || pso == 87 { a64_has_call = 1 }
+            if pso == 96 { a64_has_asm = 1 }
+            if pso == 51 {
+                uint64 psimm = ir_insn_imm(psi)
+                if psimm >= 8 && psimm < 100 {
+                    uint64 slots = psimm - 7
+                    if slots > a64_ovf_slots { a64_ovf_slots = slots }
+                }
+                if psimm >= 100 {
+                    uint64 pt = psimm - 100
+                    if pt >= 19 && pt <= 28 {
+                        a64_forced_mask = a64_forced_mask | (1 << (pt - 19))
+                    }
+                }
+            }
+            psi = ir_insn_next(psi)
+        }
+        psb = psb + 1
+    }
+    uint64 a64_save_lr = 0
+    if a64_has_call != 0 { a64_save_lr = 1 }
+    if a64_has_asm != 0 { a64_save_lr = 1 }
+
+    // Size the overflow-arg reserve to what this function's calls need.
+    // MUST be set before ir_snapshot_debug_vars and before any emission:
+    // ir_a64_spill_offset and IR_STACK_ADDR read the static. Windows and
+    // ASM-block functions keep the historical full reserve (Windows
+    // lowering writes stack args outside the IR_ARG path).
+    IR_A64_OVERFLOW_RESERVE = a64_ovf_slots * 8
+    if a64_has_asm != 0 || target_os == 2 { IR_A64_OVERFLOW_RESERVE = 128 }
+
+    // Callee-saved colours actually used by this function.
+    uint64 a64_used_mask = ir_used_color_mask() | a64_forced_mask
+    if a64_has_asm != 0 { a64_used_mask = 0x3FF }
+    uint64 a64_nsave = 0
+    uint64 a64_mc = 0
+    while a64_mc < 10 {
+        if ((a64_used_mask >> a64_mc) & 1) != 0 { a64_nsave = a64_nsave + 1 }
+        a64_mc = a64_mc + 1
+    }
+
     // 4a. Snapshot the function's var map for DWARF (if -g)
     ir_snapshot_debug_vars()
 
@@ -2559,8 +2740,10 @@ fn ir_emit_arm64_function(uint64 fn_node) {
     // uses it to distinguish colors from spills. Restore AFTER emission completes.
 
     // 5. Compute frame size
-    // Callee-saved area: x29/x30 (16) + x19-x28 (80) = 96 bytes
-    uint64 callee_save_size = 96
+    // Callee-saved area: only the colours actually used, plus x29/x30
+    // for non-leaf functions (a BL clobbers x30; a leaf never touches it).
+    uint64 callee_save_size = a64_nsave * 8
+    if a64_save_lr != 0 { callee_save_size = callee_save_size + 16 }
     uint64 spill_size = ir_spill_count * 8
     // 32-byte scratchpad for mid-function temp buffers (fmt_uint digits,
     // clock_gettime timespec, execve argv, etc). Using a fixed offset avoids
@@ -2654,36 +2837,15 @@ fn ir_emit_arm64_function(uint64 fn_node) {
     }
 
     // 6. Emit prologue (skip for @naked)
+    // Save only the callee-saved colours this function actually uses
+    // (plus x29/x30 when non-leaf) — ir_a64_emit_callee_frame packs them
+    // into STP pairs and is called with identical arguments from the
+    // epilogue, so save and restore mirror by construction.
+    uint64 cs_base = IR_A64_OVERFLOW_RESERVE + spill_size + ir_stack_array_bytes + scratch_size
     if is_naked == 0 {
         // SUB SP, SP, #total_frame
         emit_a64_sub_sp_imm(total_frame)
-        // Save FP/LR and callee-saved regs after spill+scratch area.
-        // Pair them with STP — halves the instruction count vs per-reg
-        // STRs. STP's offset is imm7 scaled by 8, capped at 504; fall
-        // back to individual STR for large frames to stay correct.
-        uint64 cs_base = IR_A64_OVERFLOW_RESERVE + spill_size + ir_stack_array_bytes + scratch_size
-        uint64 fp_off = cs_base + 80
-        if fp_off + 8 <= 504 {
-            ir_a64_stp_sp(19, 20, cs_base)
-            ir_a64_stp_sp(21, 22, cs_base + 16)
-            ir_a64_stp_sp(23, 24, cs_base + 32)
-            ir_a64_stp_sp(25, 26, cs_base + 48)
-            ir_a64_stp_sp(27, 28, cs_base + 64)
-            ir_a64_stp_sp(29, 30, fp_off)
-        } else {
-            ir_a64_str_sp(29, fp_off)
-            ir_a64_str_sp(30, fp_off + 8)
-            ir_a64_str_sp(19, cs_base)
-            ir_a64_str_sp(20, cs_base + 8)
-            ir_a64_str_sp(21, cs_base + 16)
-            ir_a64_str_sp(22, cs_base + 24)
-            ir_a64_str_sp(23, cs_base + 32)
-            ir_a64_str_sp(24, cs_base + 40)
-            ir_a64_str_sp(25, cs_base + 48)
-            ir_a64_str_sp(26, cs_base + 56)
-            ir_a64_str_sp(27, cs_base + 64)
-            ir_a64_str_sp(28, cs_base + 72)
-        }
+        ir_a64_emit_callee_frame(a64_used_mask, cs_base, a64_save_lr, 0)
     }
 
     // 7. Allocate branch/return fixup tracking — see ir_block_offsets_cap
@@ -2719,8 +2881,10 @@ fn ir_emit_arm64_function(uint64 fn_node) {
         uint64 bop = ir_block_offsets + bi * 8
         unsafe { *(bop as uint64) = out_len }
         // Reset the spill-reload peephole at every BB boundary so a
-        // branch target never lands mid-pattern.
+        // branch target never lands mid-pattern; clear any stale
+        // compare-fusion handoff for the same reason.
         ir_a64_peephole_reset()
+        ir_a64_fused_cmp_op = 0
 
         // Emit non-terminator instructions
         uint64 ii = ir_bb_first_insn(bi)
@@ -2752,33 +2916,81 @@ fn ir_emit_arm64_function(uint64 fn_node) {
                 }
             }
             if last_op == 41 {
-                // IR_BR_COND: cbnz cond_vreg, true_target; fallthrough or B false_target
-                uint64 cond_v = ir_insn_src1(last)
-                uint64 cond_r = ir_a64_resolve_src(cond_v, 9)
+                // IR_BR_COND. TRUE target = imm, FALSE target = succ0.
+                // Three shapes, cheapest first:
+                //   - fused compare handoff: emit `cmp` here and branch
+                //     directly on flags with B.<cond> — no cset, no cbnz,
+                //     and when the TRUE edge is the fall-through the
+                //     condition is INVERTED to target FALSE, dropping the
+                //     trailing unconditional B entirely (one branch per
+                //     loop iteration, like gcc).
+                //   - non-fused with TRUE edge falling through: CBZ
+                //     cond, false_target (inverted, again no B).
+                //   - non-fused otherwise: CBNZ cond, true; B false.
+                // All conditional placeholders carry their final opcode +
+                // Rt/cond bits; the patcher only fills the imm19 field
+                // (fixup tag bit 31).
                 uint64 target_true = ir_insn_imm(last)
-                // Record fixup for CBNZ -> true target
-                // We encode type=1 (CBNZ) in high bit of target_bb
-                uint64 fp = ir_br_fixups + ir_br_fixup_count * 8
-                uint32 po = out_len
-                unsafe { *(fp as uint32) = po }
-                uint64 fp4 = fp + 4
-                // Encode: bit 31 = 1 for CBNZ, bits 0-30 = target_bb, store cond_r in the insn
-                uint32 tb = target_true | 0x80000000
-                unsafe { *(fp4 as uint32) = tb }
-                ir_br_fixup_count = ir_br_fixup_count + 1
-                // CBNZ cond_r, #0 (placeholder)
-                emit_a64(0xB5000000 | cond_r)
-                // Emit B to false target if not fall-through
                 uint64 target_false = ir_bb_succ0(bi)
-                if target_false != 0xFFFFFFFF && target_false != bi + 1 {
-                    uint64 fp2 = ir_br_fixups + ir_br_fixup_count * 8
-                    uint32 po2 = out_len
-                    unsafe { *(fp2 as uint32) = po2 }
-                    uint64 fp24 = fp2 + 4
-                    uint32 tb2 = target_false
-                    unsafe { *(fp24 as uint32) = tb2 }
+                uint64 br_insn = 0
+                if ir_a64_fused_cmp_op != 0 {
+                    uint64 fa_reg = ir_a64_resolve_src(ir_a64_fused_cmp_s1, 9)
+                    if ir_a64_fused_cmp_s2 == 0 {
+                        ir_a64_cmp_imm(fa_reg, ir_a64_fused_cmp_imm)
+                    } else {
+                        uint64 fb_reg = ir_a64_resolve_src(ir_a64_fused_cmp_s2, 10)
+                        emit_a64_cmp(fa_reg, fb_reg)
+                    }
+                    uint64 fcond = ir_a64_cmp_cond(ir_a64_fused_cmp_op)
+                    ir_a64_fused_cmp_op = 0
+                    // B.cond placeholder — invert if branching to FALSE.
+                    if target_true == bi + 1 {
+                        br_insn = 0x54000000 | (fcond ^ 1)
+                    } else {
+                        br_insn = 0x54000000 | fcond
+                    }
+                } else {
+                    uint64 cond_v = ir_insn_src1(last)
+                    uint64 cond_r = ir_a64_resolve_src(cond_v, 9)
+                    if target_true == bi + 1 {
+                        br_insn = 0xB4000000 | cond_r     // CBZ -> false
+                    } else {
+                        br_insn = 0xB5000000 | cond_r     // CBNZ -> true
+                    }
+                }
+                if target_true == bi + 1 {
+                    // TRUE edge falls through: single inverted branch to
+                    // FALSE (or nothing if FALSE also falls through).
+                    if target_false != 0xFFFFFFFF && target_false != bi + 1 {
+                        uint64 fp = ir_br_fixups + ir_br_fixup_count * 8
+                        uint32 po = out_len
+                        unsafe { *(fp as uint32) = po }
+                        uint64 fp4 = fp + 4
+                        uint32 tb = target_false | 0x80000000
+                        unsafe { *(fp4 as uint32) = tb }
+                        ir_br_fixup_count = ir_br_fixup_count + 1
+                        emit_a64(br_insn)
+                    }
+                } else {
+                    uint64 fp = ir_br_fixups + ir_br_fixup_count * 8
+                    uint32 po = out_len
+                    unsafe { *(fp as uint32) = po }
+                    uint64 fp4 = fp + 4
+                    uint32 tb = target_true | 0x80000000
+                    unsafe { *(fp4 as uint32) = tb }
                     ir_br_fixup_count = ir_br_fixup_count + 1
-                    emit_a64(0x14000000)    // B #0 (placeholder)
+                    emit_a64(br_insn)
+                    // B to false target if not fall-through
+                    if target_false != 0xFFFFFFFF && target_false != bi + 1 {
+                        uint64 fp2 = ir_br_fixups + ir_br_fixup_count * 8
+                        uint32 po2 = out_len
+                        unsafe { *(fp2 as uint32) = po2 }
+                        uint64 fp24 = fp2 + 4
+                        uint32 tb2 = target_false
+                        unsafe { *(fp24 as uint32) = tb2 }
+                        ir_br_fixup_count = ir_br_fixup_count + 1
+                        emit_a64(0x14000000)    // B #0 (placeholder)
+                    }
                 }
             }
         }
@@ -2796,7 +3008,7 @@ fn ir_emit_arm64_function(uint64 fn_node) {
         uint32 target_bb_raw = 0
         unsafe { *(fp4 as uint32) -> target_bb_raw }
         uint64 wraw = target_bb_raw
-        uint64 is_cbnz = wraw & 0x80000000
+        uint64 is_imm19 = wraw & 0x80000000
         uint64 wtb = wraw & 0x7FFFFFFF
         // Get target block offset
         uint64 tbp = ir_block_offsets + wtb * 8
@@ -2804,14 +3016,15 @@ fn ir_emit_arm64_function(uint64 fn_node) {
         unsafe { *(tbp as uint64) -> target_off }
         uint64 wpo = patch_off
         uint64 disp = target_off - wpo
-        if is_cbnz != 0 {
-            // Patch CBNZ: read existing instruction to get Rt
+        if is_imm19 != 0 {
+            // imm19-class branch (CBNZ/CBZ/B.cond): the placeholder
+            // already carries its opcode and Rt/cond bits — fill in only
+            // the displacement field (bits 5-23).
             uint64 insn_addr = out_buf + wpo
             uint32 old_insn = 0
             unsafe { *(insn_addr as uint32) -> old_insn }
             uint64 wo = old_insn
-            uint64 rt = wo & 0x1F
-            uint64 new_insn = 0xB5000000 | (a64_check_b19(disp) << 5) | rt
+            uint64 new_insn = (wo & 0xFF00001F) | (a64_check_b19(disp) << 5)
             patch_u32(wpo, new_insn)
         } else {
             // Patch B
@@ -2850,31 +3063,9 @@ fn ir_emit_arm64_function(uint64 fn_node) {
                 emit_a64_svc()
             }
         }
-        // Restore callee-saved registers. Mirror the prologue: LDP
-        // pairs when the frame fits, individual LDRs otherwise.
-        uint64 cs_base_e = IR_A64_OVERFLOW_RESERVE + spill_size + ir_stack_array_bytes + scratch_size
-        uint64 fp_off_e = cs_base_e + 80
-        if fp_off_e + 8 <= 504 {
-            ir_a64_ldp_sp(19, 20, cs_base_e)
-            ir_a64_ldp_sp(21, 22, cs_base_e + 16)
-            ir_a64_ldp_sp(23, 24, cs_base_e + 32)
-            ir_a64_ldp_sp(25, 26, cs_base_e + 48)
-            ir_a64_ldp_sp(27, 28, cs_base_e + 64)
-            ir_a64_ldp_sp(29, 30, fp_off_e)
-        } else {
-            ir_a64_ldr_sp(19, cs_base_e)
-            ir_a64_ldr_sp(20, cs_base_e + 8)
-            ir_a64_ldr_sp(21, cs_base_e + 16)
-            ir_a64_ldr_sp(22, cs_base_e + 24)
-            ir_a64_ldr_sp(23, cs_base_e + 32)
-            ir_a64_ldr_sp(24, cs_base_e + 40)
-            ir_a64_ldr_sp(25, cs_base_e + 48)
-            ir_a64_ldr_sp(26, cs_base_e + 56)
-            ir_a64_ldr_sp(27, cs_base_e + 64)
-            ir_a64_ldr_sp(28, cs_base_e + 72)
-            ir_a64_ldr_sp(29, fp_off_e)
-            ir_a64_ldr_sp(30, fp_off_e + 8)
-        }
+        // Restore callee-saved registers. Exact mirror of the prologue:
+        // same helper, same arguments -> same regs, same slots.
+        ir_a64_emit_callee_frame(a64_used_mask, cs_base, a64_save_lr, 1)
         // ADD SP, SP, #total_frame
         emit_a64_add_sp_imm(total_frame)
         // RET
