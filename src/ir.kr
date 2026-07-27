@@ -10371,16 +10371,22 @@ fn ir_opt_const_fold() {
 
         // CMP/SCMP with constant src2 → encode the immediate in the
         // insn's imm field and zero src2 (sentinel for imm-mode at
-        // codegen). x86-only: ARM64 codegen still expects src2 to be a
-        // vreg. x86 has `cmp r/m64, imm8` (4 bytes) and
+        // codegen). x86 has `cmp r/m64, imm8` (4 bytes) and
         // `cmp r/m64, imm32` (7 bytes), both shorter than the current
         // `mov r12d, imm; cmp rbx, r12` (6 + 3 = 9 bytes). For imm == 0
         // the codegen swaps to the even shorter `test r, r` (3 bytes).
-        if target_arch == 0 && ((op >= 14 && op <= 19) || (op >= 120 && op <= 123)) {
+        // arm64 folds too, but only 0..4095: that is CMP's imm12 range,
+        // so the backend (ir_a64_cmp_imm) never needs a fallback and a
+        // loop head's `cmp Xn, #imm` is always a single instruction.
+        if (target_arch == 0 || target_arch == 1) && ((op >= 14 && op <= 19) || (op >= 120 && op <= 123)) {
             if s2_known != 0 {
                 uint64 fits = 0
                 if v2 <= 0x7FFFFFFF { fits = 1 }
                 if v2 >= 0xFFFFFFFF80000000 { fits = 1 }
+                if target_arch == 1 {
+                    fits = 0
+                    if v2 <= 4095 { fits = 1 }
+                }
                 if fits != 0 {
                     ir_insn_set_src2(ii, 0)
                     ir_insn_set_imm(ii, v2)
@@ -10412,10 +10418,11 @@ fn ir_opt_const_fold() {
         }
 
         // LEA fusion: ADD/SUB with a constant src2 → IR_ADD_IMM/IR_SUB_IMM.
-        // x86 and riscv32 — NOT arm64: ARM64 already lowers small-imm
-        // arithmetic efficiently via emit_a64_add (reg-reg) after the
-        // IR_CONST loads into a reg, and `add Xd, Xn, #imm` doesn't shorten
-        // the same way LEA does on x86. On riscv32 the win is real again:
+        // arm64 is in as of the loop-head fix: `add Xd, Xn, #imm12` (or
+        // `sub` for small negatives) absorbs the constant, killing the
+        // per-iteration `mov xN, #1; add` pair the old reg-reg lowering
+        // produced; larger constants fall back to materialize-into-x10 in
+        // the backend, no worse than before. On riscv32 the win is real:
         // `addi rd,rs,imm` absorbs the constant (the backend falls back to
         // li t6 + R-type when it exceeds imm12), saving the li and a
         // register. The constant must fit in signed 32-bit because LEA's
@@ -10431,7 +10438,7 @@ fn ir_opt_const_fold() {
         // Absorbing the constant removes a whole MOVI per constant-add, and the
         // int8 kernels are full of them — the 4x-unrolled dot loop alone does
         // ip+1..ip+3, wp+1..wp+3, ip+4, wp+4 and k-4 every iteration.
-        if (target_arch == 0 || target_arch == 2 || target_arch == 3) && (op == 2 || op == 3) && s2_known != 0 && v2 != 0 {
+        if (target_arch == 0 || target_arch == 1 || target_arch == 2 || target_arch == 3) && (op == 2 || op == 3) && s2_known != 0 && v2 != 0 {
             uint64 fits = 0
             if v2 <= 0x7FFFFFFF { fits = 1 }
             if v2 >= 0xFFFFFFFF80000000 { fits = 1 }
