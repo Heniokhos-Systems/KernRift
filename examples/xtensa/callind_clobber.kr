@@ -1,0 +1,91 @@
+// Xtensa LX6 CALL_IND caller-saved-clobber regression test.
+//
+// WHY THIS EXISTS: xt_seed_call_ceilings (src/ir_xtensa.kr) must treat a block
+// containing IR_CALL_IND (87) as call-bearing, exactly like IR_CALL (50) and
+// IR_ARG (51), so every vreg live across the indirect call is capped to the
+// callee-saved colours (a12..a15). When the wide register file landed, the
+// has_call test initially checked ONLY 50/51 and omitted 87 — and the entire
+// KernRift suite still passed 699/699. The miscompile (live values allocated
+// into the CALL0 caller-saved a2..a7 across a callx0, coming back trashed) was
+// only caught by a sibling project's numeric bit-exactness tests. This program
+// is built so that exact omission produces a wrong checksum under qemu.
+//
+// The trap it avoids: call_ptr WITH arguments emits IR_ARG (51) into the same
+// block, which flags the block even without the op-87 check — masking the bug.
+// So `harness` makes a ZERO-ARG indirect call, in a straight-line function
+// whose only call of any kind is the callx0 itself: the block contains op 87
+// and nothing else call-shaped. Eight independent values derived from a static
+// (unfoldable) are live across that call — more than the four callee-saved
+// colours, so without the ceiling some MUST land in a2..a7. The zero-arg
+// callee `churn` keeps ten mutually-live values, forcing its own allocation
+// into every caller-saved colour, so whatever the caller left in a2..a7 is
+// guaranteed to come back trashed and the printed checksum changes.
+//
+// Expected output under `qemu-system-xtensa -M lx60`:
+//   32529
+
+device Uart at 0xfd050020 {
+    thr at 0x00 : u32
+    lsr at 0x14 : u8
+}
+
+fn putc(u8 c) {
+    while (Uart.lsr & 0x20) == 0 { }
+    Uart.thr = c
+}
+
+fn nl() { putc(10) }
+
+// Recursive unsigned printer (the print_uint idiom from stress.kr).
+fn print_uint(u32 n) {
+    if n >= 10 {
+        print_uint(n / 10)
+    }
+    putc(48 + (n % 10))
+}
+
+static u32 seed = 7
+
+// Zero-arg indirect-call target. Ten mutually-live locals (all used by the
+// weighted sum) exceed the nine wide colours, so churn's own allocation uses
+// every caller-saved colour a2,a3,a4,a6,a7 — clobbering whatever the caller
+// wrongly left there. With seed = 7: c_i = 7 + 11*i, sum(c_i * i) = 4620.
+fn churn() -> u32 {
+    u32 c1 = seed + 11
+    u32 c2 = seed + 22
+    u32 c3 = seed + 33
+    u32 c4 = seed + 44
+    u32 c5 = seed + 55
+    u32 c6 = seed + 66
+    u32 c7 = seed + 77
+    u32 c8 = seed + 88
+    u32 c9 = seed + 99
+    u32 c10 = seed + 110
+    return (c1 * 1) + (c2 * 2) + (c3 * 3) + (c4 * 4) + (c5 * 5)
+         + (c6 * 6) + (c7 * 7) + (c8 * 8) + (c9 * 9) + (c10 * 10)
+}
+
+// Straight-line, no direct calls: the only call-shaped op in this function's
+// blocks is the IR_CALL_IND itself. v1..v8 are computed from the static
+// `seed` (so nothing constant-folds away), are all live across the indirect
+// call, and are combined with distinct prime weights afterwards so any single
+// clobbered register changes the checksum.
+fn harness() -> u32 {
+    u32 v1 = seed * 3          // 21
+    u32 v2 = seed + 100        // 107
+    u32 v3 = seed * seed       // 49
+    u32 v4 = seed * 16         // 112
+    u32 v5 = seed - 2          // 5
+    u32 v6 = seed * 13         // 91
+    u32 v7 = seed + 1000       // 1007
+    u32 v8 = seed * 31         // 217
+    u32 f = fn_addr("churn")   // IR_FN_ADDR (86)
+    u32 r = call_ptr(f)        // IR_CALL_IND (87), ZERO args -> no IR_ARG
+    return r + (v1 * 3) + (v2 * 5) + (v3 * 7) + (v4 * 11)
+             + (v5 * 13) + (v6 * 17) + (v7 * 19) + (v8 * 23)
+}
+
+fn main() {
+    print_uint(harness())   nl()
+    loop { }
+}

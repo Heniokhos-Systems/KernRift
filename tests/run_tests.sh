@@ -5467,6 +5467,51 @@ else
     echo "  xtensa_fnptr_boot: SKIP (qemu-system-xtensa not installed)"
 fi
 
+# --- Xtensa LX6 CALL_IND caller-saved-clobber regression (call ceilings) ---
+# WHY THIS EXISTS: xt_seed_call_ceilings' has_call test (src/ir_xtensa.kr) must
+# include IR_CALL_IND (87) alongside IR_CALL (50) / IR_ARG (51). When the wide
+# register file landed it initially checked only 50/51 — and this suite still
+# passed 699/699 with that live miscompile in; a sibling project's numeric
+# bit-exactness tests caught it. This boot image is built so that exact
+# omission changes the printed checksum: harness() keeps 8 static-derived
+# values live across a ZERO-ARG call_ptr (zero args so no IR_ARG masks the
+# missing op-87 check; no direct calls in the function so nothing else flags
+# the block), and the callee churn() holds 10 mutually-live values so its own
+# allocation writes every caller-saved colour a2,a3,a4,a6,a7. Without the
+# op-87 ceiling some of the caller's live values land in a2..a7, come back
+# trashed, and the weighted checksum is wrong (observed 65015 vs 32529 with
+# the check reverted). Full-output equality; loop{} keeps the core busy till
+# timeout.
+echo ""
+echo "--- xtensa LX6 CALL_IND clobber-ceiling regression boot test ---"
+if command -v qemu-system-xtensa >/dev/null 2>&1; then
+    TOTAL=$((TOTAL + 1))
+    XT_CI_ELF="/tmp/krc_xt_callind_$$.elf"
+    XT_CI_OK=1
+    if ! $KRC --arch=xtensa --freestanding "$DIR/../examples/xtensa/callind_clobber.kr" -o "$XT_CI_ELF" >/dev/null 2>&1; then
+        echo "FAIL: xtensa_callind_clobber_boot (compilation failed)"
+        XT_CI_OK=0
+    fi
+    if [ "$XT_CI_OK" = 1 ]; then
+        XT_CI_EXP="32529"
+        XT_CI_OUT=$(timeout 8 qemu-system-xtensa -M lx60 -nographic -kernel "$XT_CI_ELF" 2>/dev/null | tr -d '\r')
+        if [ "$XT_CI_OUT" = "$XT_CI_EXP" ]; then
+            PASS=$((PASS + 1))
+            echo "  xtensa_callind_clobber_boot: PASS (8 live-across-callx0 values survive = 32529)"
+        else
+            echo "FAIL: xtensa_callind_clobber_boot (output mismatch — CALL_IND missing from xt_seed_call_ceilings?)"
+            echo "    expected: $XT_CI_EXP"
+            echo "    got:      $XT_CI_OUT"
+            FAIL=$((FAIL + 1))
+        fi
+    else
+        FAIL=$((FAIL + 1))
+    fi
+    rm -f "$XT_CI_ELF"
+else
+    echo "  xtensa_callind_clobber_boot: SKIP (qemu-system-xtensa not installed)"
+fi
+
 # --- Xtensa LX6 real BSS (p_memsz > p_filesz) + .bss-zeroing preamble (Task 3) ---
 # bss.kr has an initialized `static u32 marker = 42` (in .data) and an
 # uninitialized `static u32[1024] buf` (4096 B). 4096 >= the 4 KiB truncation
