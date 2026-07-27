@@ -8258,6 +8258,53 @@ else
     echo "FAIL: version_runner_matches_changelog (kr strings: $(printf '%s' "$VER_RUNNER_SET" | tr '\n' ' '); CHANGELOG: $VER_CHANGELOG)"
 fi
 
+# --- packaging/aur/.SRCINFO must be in sync with its PKGBUILD ---------------
+# The AUR job in CI regenerates .SRCINFO and diffs it, but CI only runs AFTER a
+# tag is pushed — which is exactly too late. v2.8.32 was tagged with a PKGBUILD
+# at 2.8.32 and a .SRCINFO still at 2.8.31, and that tag now carries a
+# permanently red job, because a tag is a fixed pointer and moving a published
+# one is worse than the badge it would fix. So the same check runs here, where
+# it fails before anything is tagged.
+#
+# .SRCINFO is regenerated the way makepkg does it (source the PKGBUILD, emit the
+# fields in order) rather than by calling makepkg, which does not exist off Arch.
+# That equivalence is not assumed: the file this generator produced is the one
+# CI's makepkg-based job accepted.
+TOTAL=$((TOTAL + 1))
+SRCINFO_PKGBUILD="$DIR/../packaging/aur/PKGBUILD"
+SRCINFO_FILE="$DIR/../packaging/aur/.SRCINFO"
+if [ ! -f "$SRCINFO_PKGBUILD" ] || [ ! -f "$SRCINFO_FILE" ]; then
+    PASS=$((PASS + 1))
+    echo "  aur_srcinfo_in_sync: SKIP (no packaging/aur/ in this checkout)"
+else
+    SRCINFO_GEN=$(bash -c '
+        set -e
+        source "'"$SRCINFO_PKGBUILD"'"
+        printf "pkgbase = %s\n" "$pkgname"
+        printf "\tpkgdesc = %s\n" "$pkgdesc"
+        printf "\tpkgver = %s\n" "$pkgver"
+        printf "\tpkgrel = %s\n" "$pkgrel"
+        printf "\turl = %s\n" "$url"
+        for a in "${arch[@]}"; do printf "\tarch = %s\n" "$a"; done
+        for l in "${license[@]}"; do printf "\tlicense = %s\n" "$l"; done
+        for pr in "${provides[@]}"; do printf "\tprovides = %s\n" "$pr"; done
+        for o in "${options[@]}"; do printf "\toptions = %s\n" "$o"; done
+        for x in "${source_x86_64[@]}"; do printf "\tsource_x86_64 = %s\n" "$x"; done
+        for x in "${sha256sums_x86_64[@]}"; do printf "\tsha256sums_x86_64 = %s\n" "$x"; done
+        for x in "${source_aarch64[@]}"; do printf "\tsource_aarch64 = %s\n" "$x"; done
+        for x in "${sha256sums_aarch64[@]}"; do printf "\tsha256sums_aarch64 = %s\n" "$x"; done
+        printf "\npkgname = %s\n" "$pkgname"
+    ' 2>/dev/null)
+    if [ "$SRCINFO_GEN" = "$(cat "$SRCINFO_FILE")" ]; then
+        PASS=$((PASS + 1))
+        echo "  aur_srcinfo_in_sync: PASS (.SRCINFO matches PKGBUILD at $(grep -m1 '^pkgver=' "$SRCINFO_PKGBUILD" | cut -d= -f2))"
+    else
+        FAIL=$((FAIL + 1))
+        echo "FAIL: aur_srcinfo_in_sync (.SRCINFO is stale -- regenerate it; PKGBUILD says $(grep -m1 '^pkgver=' "$SRCINFO_PKGBUILD" | cut -d= -f2), .SRCINFO says $(grep -m1 'pkgver = ' "$SRCINFO_FILE" | sed 's/.*= //'))"
+        diff <(printf '%s\n' "$SRCINFO_GEN") "$SRCINFO_FILE" | head -6
+    fi
+fi
+
 # The built runner binary, when present, must agree too. Built by `make kr-runner`.
 TOTAL=$((TOTAL + 1))
 if [ -x "$DIR/../build/kr-bin" ]; then
