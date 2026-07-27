@@ -2648,6 +2648,33 @@ fn main() {
     V4 v; v.a = 10.0; v.b = 11.0; v.c = 12.0; v.d = 9.0
     exit(f64_to_int(sum4(v)))
 }' 42
+
+    # Regression (v2.8.32 silent miscompile): ir_opt_recognize_rotate collapses
+    # the 32-bit rotation idiom into IR_ROR on EVERY target, but the arm64
+    # backend had no IR_ROR handler and silently emitted NOTHING for it — the
+    # dest was never written and sha256 produced a garbage digest under qemu
+    # while x86_64 was fine. The loop makes acc data-dependent so const-fold
+    # cannot pre-compute the rotates; both idiom shapes are exercised
+    # (variable `32 - n` and constant complementary shifts, like sha256).
+    # Expected value precomputed with Python's matching semantics:
+    #   acc = 0x592D7436, s = 0x3A9A6225.
+    run_test_a64 "a64_ror_recognize_rotate" 'fn rotr32(uint64 x, uint64 n) -> uint64 {
+    uint64 lo = (x >> n) & 0xFFFFFFFF
+    uint64 hi = (x << (32 - n)) & 0xFFFFFFFF
+    return lo | hi
+}
+fn main() {
+    uint64 acc = 0x12345678
+    uint64 i = 1
+    while i < 9 {
+        acc = rotr32(acc ^ i, i)
+        i = i + 1
+    }
+    uint64 s = (rotr32(acc, 7) ^ rotr32(acc, 18) ^ (acc >> 3)) & 0xFFFFFFFF
+    if acc != 0x592D7436 { exit(1) }
+    if s != 0x3A9A6225 { exit(2) }
+    exit(42)
+}' 42
 fi
 
 # --- v2.6 feature tests ---

@@ -1089,8 +1089,8 @@ fn ir_rv32_syscall_nr(uint64 abstract_nr) -> uint64 {
 fn ir_emit_riscv_insn(uint64 ii) {
     uint64 op = ir_insn_opcode(ii)
     // Opcode 0 = NOP: LICM-elided / nop-marked slots (see ir.kr). The
-    // arm64 emitter skips these by falling through its dispatch chain;
-    // here the catch-all errors, so skip explicitly.
+    // catch-all errors on unknown ops (as do the arm64 and xtensa
+    // emitters), so skip explicitly.
     if op == 0 { return }
     uint64 dest_v = ir_insn_dest(ii)
     uint64 s1_v = ir_insn_src1(ii)

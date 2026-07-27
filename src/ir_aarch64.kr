@@ -165,6 +165,27 @@ fn ir_a64_resolve_src(uint64 vreg, uint64 scratch) -> uint64 {
 }
 
 // ---------------------------------------------------------------------------
+// Error backstops
+// ---------------------------------------------------------------------------
+
+// Any IR op the arm64 backend does not lower yet MUST fail loud. Before
+// this backstop existed, ir_emit_arm64_insn silently fell off the end of
+// its dispatch chain and emitted NOTHING — the dest register/spill slot
+// was never written and the program read garbage (the shared
+// ir_opt_recognize_rotate pass's IR_ROR shipped miscompiled this way in
+// v2.8.32). Mirrors rv_nyi_op / xt_nyi_op.
+fn a64_nyi_op(uint64 op) {
+    uint8[24] nbuf
+    uint64 pre = "error: arm64: IR op "
+    write(2, pre, str_len(pre))
+    uint64 nlen = fmt_uint(nbuf, op)
+    write(2, nbuf, nlen)
+    uint64 post = " not yet implemented\n"
+    write(2, post, str_len(post))
+    exit(1)
+}
+
+// ---------------------------------------------------------------------------
 // ARM64 syscall number mapping
 // ---------------------------------------------------------------------------
 // The IR uses x86_64 Linux abstract syscall numbers. Map to ARM64 Linux.
@@ -357,6 +378,10 @@ fn ir_emit_arm64_win_syscall(uint64 abstract_nr, uint64 dest_v, uint64 dst_r) {
 
 fn ir_emit_arm64_insn(uint64 ii) {
     uint64 op = ir_insn_opcode(ii)
+    // Opcode 0 = NOP: LICM-elided / nop-marked slots (see ir.kr). Must be
+    // skipped explicitly now that the end of the dispatch chain is a loud
+    // a64_nyi_op backstop instead of a silent fallthrough.
+    if op == 0 { return }
     uint64 dest_v = ir_insn_dest(ii)
     uint64 s1_v = ir_insn_src1(ii)
     uint64 s2_v = ir_insn_src2(ii)
@@ -610,6 +635,38 @@ fn ir_emit_arm64_insn(uint64 ii) {
         uint64 d = dst_r
         if d == 0xFFFFFFFF { d = 9 }
         emit_a64_asr(d, a_reg, b_reg)
+        if dst_r == 0xFFFFFFFF {
+            ir_a64_emit_store_spill(9, dest_v)
+        }
+        return
+    }
+
+    // ----- IR_ROR (137): dst = right-rotate(src1, src2 mod imm) -----
+    // imm is the rotation WIDTH (ir.kr:159); the shared
+    // ir_opt_recognize_rotate pass only ever produces imm=32 today.
+    // Width 32 uses the 32-bit RORV (`ror wD, wN, wM`): it reads only the
+    // low 32 bits of src1, rotates by src2 mod 32, and zeroes the upper
+    // half — bit-identical to x86's `ROR r32, cl` lowering, so the result
+    // is w32-clean and downstream `& 0xFFFFFFFF` masks stay elided
+    // (const-fold relies on that, see ir.kr:10638). The hardware count is
+    // taken mod datasize, matching the documented `src2 mod imm` contract
+    // without an explicit mask (unlike riscv, which must AND with 31).
+    if op == 137 {
+        if imm != 32 && imm != 64 {
+            // Loud-fail on a width no backend defines, mirroring riscv:
+            // a future producer must not silently miscompile here.
+            write(2, "error: arm64: IR_ROR width must be 32 or 64\n", 44)
+            exit(1)
+        }
+        uint64 a_reg = ir_a64_resolve_src(s1_v, 9)
+        uint64 b_reg = ir_a64_resolve_src(s2_v, 10)
+        uint64 d = dst_r
+        if d == 0xFFFFFFFF { d = 9 }
+        if imm == 32 {
+            emit_a64_ror_w(d, a_reg, b_reg)
+        } else {
+            emit_a64_ror(d, a_reg, b_reg)
+        }
         if dst_r == 0xFFFFFFFF {
             ir_a64_emit_store_spill(9, dest_v)
         }
@@ -2454,6 +2511,12 @@ fn ir_emit_arm64_insn(uint64 ii) {
         if dst_r == 0xFFFFFFFF { ir_a64_emit_store_spill(9, dest_v) }
         return
     }
+
+    // Catch-all: every reachable opcode above ends in `return`. Anything
+    // that falls through here is an IR op this backend does not lower —
+    // emitting nothing would leave the dest unwritten and silently
+    // miscompile (exactly how IR_ROR shipped broken in v2.8.32).
+    a64_nyi_op(op)
 }
 
 // ---------------------------------------------------------------------------

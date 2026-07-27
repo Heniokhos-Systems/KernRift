@@ -356,6 +356,20 @@ fn emit_a64_asr(uint64 rd, uint64 rn, uint64 rm) {
     emit_a64(insn)
 }
 
+// ROR Xd, Xn, Xm (alias for RORV) — right-rotate by Xm mod 64.
+fn emit_a64_ror(uint64 rd, uint64 rn, uint64 rm) {
+    uint64 insn = 0x9AC02C00 | (rm << 16) | (rn << 5) | rd
+    emit_a64(insn)
+}
+
+// ROR Wd, Wn, Wm (alias for RORV with sf=0) — rotates the LOW 32 bits
+// right by Wm mod 32 and zeroes the upper half, so the result is
+// w32-clean (matches x86's `ROR r32, cl` used for IR_ROR width=32).
+fn emit_a64_ror_w(uint64 rd, uint64 rn, uint64 rm) {
+    uint64 insn = 0x1AC02C00 | (rm << 16) | (rn << 5) | rd
+    emit_a64(insn)
+}
+
 // UDIV Xd, Xn, Xm
 fn emit_a64_udiv(uint64 rd, uint64 rn, uint64 rm) {
     uint64 insn = 0x9AC00800 | (rm << 16) | (rn << 5) | rd
