@@ -23,7 +23,7 @@ jobs:
           curl --fail --location --silent --show-error \
                --retry 5 --retry-delay 3 --retry-all-errors --connect-timeout 15 \
                -o build/krc-bootstrap \
-               https://github.com/Heniokhos-Systems/KernRift/releases/download/v2.8.26/krc-linux-x86_64
+               https://github.com/Heniokhos-Systems/KernRift/releases/download/v2.8.33/krc-linux-x86_64
           SIZE=$(wc -c < build/krc-bootstrap)
           MAGIC=$(head -c 4 build/krc-bootstrap | xxd -p)
           if [ "$MAGIC" != "7f454c46" ] || [ "$SIZE" -lt 1048576 ]; then
@@ -37,13 +37,9 @@ jobs:
           # type_check.kr, would only surface as a confusing "undefined
           # function" at bootstrap time.
           make build/krc.kr
-          # Two-stage bootstrap. The pinned v2.8.26 seed has fixed-size compiler
-          # tables baked in and can no longer build current main; stage 1 builds
-          # an intermediate compiler that can. See scripts/ci-bootstrap-stage1.sh
-          # for the rationale and for how to collapse this back to one stage once
-          # v2.8.33 is released.
-          bash scripts/ci-bootstrap-stage1.sh
-          ./build/krc-inter --arch=x86_64 build/krc.kr -o build/krc2
+          # Bootstrap: compile source with the pinned release krc (--legacy for
+          # speed), then re-compile with itself (which uses IR by default).
+          ./build/krc-bootstrap --legacy --arch=x86_64 build/krc.kr -o build/krc2
           chmod +x build/krc2
           ./build/krc2 --arch=x86_64 build/krc.kr -o build/krc2.stable
           mv build/krc2.stable build/krc2

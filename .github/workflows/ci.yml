@@ -29,7 +29,7 @@ jobs:
           curl --fail --location --silent --show-error \
                --retry 5 --retry-delay 3 --retry-all-errors --connect-timeout 15 \
                -o build/krc-bootstrap \
-               https://github.com/Heniokhos-Systems/KernRift/releases/download/v2.8.26/krc-linux-x86_64
+               https://github.com/Heniokhos-Systems/KernRift/releases/download/v2.8.33/krc-linux-x86_64
           # Sanity: must be an ELF ≥ 1 MiB. If not, dump the first bytes so future
           # failures don't reduce to "Not: command not found" 40 lines later.
           SIZE=$(wc -c < build/krc-bootstrap)
@@ -48,13 +48,9 @@ jobs:
       - name: Build (self-compile)
         run: |
           make build/krc.kr
-          # Two-stage bootstrap. The pinned v2.8.26 seed has fixed-size compiler
-          # tables baked in and can no longer build current main; stage 1 builds
-          # an intermediate compiler that can. See scripts/ci-bootstrap-stage1.sh
-          # for the full rationale and for how to collapse this back to one stage
-          # once v2.8.33 is released.
-          bash scripts/ci-bootstrap-stage1.sh
-          ./build/krc-inter --arch=x86_64 build/krc.kr -o build/krc2
+          # Bootstrap: compile source with the pinned release krc (--legacy for
+          # speed), then re-compile with itself (which uses IR by default).
+          ./build/krc-bootstrap --legacy --arch=x86_64 build/krc.kr -o build/krc2
           chmod +x build/krc2
           ./build/krc2 --arch=x86_64 build/krc.kr -o build/krc2.stable
           mv build/krc2.stable build/krc2
@@ -396,11 +392,10 @@ jobs:
           wc -l build/krc.kr
           echo
 
-          # No stage-1 bootstrap here, unlike the other jobs: this job's seed is
-          # build/krc-arm64, freshly cross-compiled by the x86_64 job above with
-          # the CURRENT compiler, so it already has the growable tables. (It is
-          # also an arm64 binary — scripts/ci-bootstrap-stage1.sh produces an
-          # x86_64 one, which this runner cannot execute.)
+          # Note: unlike the other jobs, this one does NOT seed from the pinned
+          # release. Its seed is build/krc-arm64, freshly cross-compiled by the
+          # x86_64 job above, and it is an arm64 binary because this runner is
+          # arm64. Anything added here must respect both facts.
           echo "=== self-compile pass 1 ==="
           timeout 120 ./build/krc-bootstrap --arch=arm64 build/krc.kr -o build/krc2
           SC1=$?
