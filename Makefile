@@ -142,30 +142,38 @@ install: build/krc2
 	@echo "Ensure $(INSTALL_DIR) is in your PATH"
 
 # Create distribution binaries
+# Build a release artifact and PROVE it was produced.
+#
+# Every cross-compile here used to end in `2>/dev/null` with an unconditional
+# success echo on the next line. A failed build was therefore invisible: the
+# error went to /dev/null, make carried on, and the previous run's file was
+# still sitting in dist/ to be shipped as though it were fresh. That is how a
+# release ends up carrying a stale binary. Errors are now shown, the artifact
+# must exist and be non-empty, and dist_build removes the old file FIRST so a
+# stale one can never survive a failure.
+define dist_build
+	@rm -f $(2)
+	@$(1) || { echo "FAIL: $(2) — compile error above"; exit 1; }
+	@test -s $(2) || { echo "FAIL: $(2) — no artifact produced (or empty)"; exit 1; }
+	@echo "  $(notdir $(2))  ($$(stat -c%s $(2)) bytes)"
+endef
+
 dist: build/krc2
 	@mkdir -p $(DIST_DIR)
 	@echo "=== Building distribution ==="
 	@# x86_64 Linux ELF
-	cp build/krc2 $(DIST_DIR)/krc-linux-x86_64
-	chmod +x $(DIST_DIR)/krc-linux-x86_64
-	@echo "  krc-linux-x86_64"
+	$(call dist_build,cp build/krc2 $(DIST_DIR)/krc-linux-x86_64 && chmod +x $(DIST_DIR)/krc-linux-x86_64,$(DIST_DIR)/krc-linux-x86_64)
 	@# ARM64 Linux ELF (cross-compiled). R1 fix landed — IR ARM64 now
 	@# handles 9+ arg calls correctly so the previous --legacy override
 	@# is no longer needed. Validated natively on Redmi Note 8 Pro.
-	./build/krc2 --arch=arm64 build/krc.kr -o $(DIST_DIR)/krc-linux-arm64 2>/dev/null
-	chmod +x $(DIST_DIR)/krc-linux-arm64
-	@echo "  krc-linux-arm64"
+	$(call dist_build,./build/krc2 --arch=arm64 build/krc.kr -o $(DIST_DIR)/krc-linux-arm64 && chmod +x $(DIST_DIR)/krc-linux-arm64,$(DIST_DIR)/krc-linux-arm64)
 	@# Windows PE (cross-compiled)
-	./build/krc2 --arch=x86_64 --emit=pe build/krc.kr -o $(DIST_DIR)/krc-windows-x86_64.exe 2>/dev/null
-	@echo "  krc-windows-x86_64.exe"
-	./build/krc2 --arch=arm64 --emit=pe build/krc.kr -o $(DIST_DIR)/krc-windows-arm64.exe 2>/dev/null
-	@echo "  krc-windows-arm64.exe"
+	$(call dist_build,./build/krc2 --arch=x86_64 --emit=pe build/krc.kr -o $(DIST_DIR)/krc-windows-x86_64.exe,$(DIST_DIR)/krc-windows-x86_64.exe)
+	$(call dist_build,./build/krc2 --arch=arm64 --emit=pe build/krc.kr -o $(DIST_DIR)/krc-windows-arm64.exe,$(DIST_DIR)/krc-windows-arm64.exe)
 	@# Fat binary (default)
-	./build/krc2 build/krc.kr -o $(DIST_DIR)/krc.krbo 2>/dev/null
-	@echo "  krc.krbo (x86_64 + arm64)"
+	$(call dist_build,./build/krc2 build/krc.kr -o $(DIST_DIR)/krc.krbo,$(DIST_DIR)/krc.krbo)
 	@# Source distribution
-	cp build/krc.kr $(DIST_DIR)/krc-source.kr
-	@echo "  krc-source.kr"
+	$(call dist_build,cp build/krc.kr $(DIST_DIR)/krc-source.kr,$(DIST_DIR)/krc-source.kr)
 	@# License + attribution (Apache 2.0 §4a/§4d — travel with every copy)
 	cp LICENSE NOTICE $(DIST_DIR)/
 	@echo "  LICENSE + NOTICE"
