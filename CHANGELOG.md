@@ -2,6 +2,57 @@
 
 All notable changes to `kernriftc` are documented in this file.
 
+## v2.8.33 — 2026-07-28
+
+A correctness release with a large floating-point performance improvement.
+
+> **Anyone who compiled for ARM64 with v2.8.26 through v2.8.32 should upgrade and
+> recompile.** Those releases silently miscompile 32-bit rotations on ARM64.
+> Rotations are the core primitive of SHA-2, MD5, ChaCha, most PRNGs and many
+> checksums, so the visible symptom is *wrong hashes*, not a crash. x86_64 was
+> never affected.
+
+### Fixed
+
+- **An unhandled IR opcode emitted nothing instead of failing the build.** This is
+  the root cause of the ARM64 rotation bug above: `IR_ROR` had no ARM64 handler,
+  and the instruction dispatch ended without a catch-all, so the destination
+  register was simply never written and the program read garbage. The opcode is
+  now implemented, and — more importantly — **every backend now aborts the build
+  on an opcode it does not know.** x86_64 was the last one that could still fail
+  silently; it now has the same guard ARM64, RISC-V and Xtensa carry. Auditing
+  with the guard active found no further missing opcodes on any target.
+
+- **Four compiler tables were fixed-size and could not grow.** `dce_fn_map` (1024
+  entries), `dce_table` (2048), `dce_hash_tbl` (8192 slots) and `fn_table` (1024).
+  Two were already load-bearing: the compiler's own source registered 1015
+  `dce_fn_map` entries, nine short of being unable to build itself, and
+  `fn_table`'s cap meant **no program with more than 1024 functions could be
+  compiled at all**, regardless of the compiler's size. All four now grow on
+  demand; the loud error remains only as a runaway backstop.
+
+- **`make dist` could publish stale binaries.** Every cross-compile was silenced
+  with `2>/dev/null` followed by an unconditional success message, so a failed
+  build left the previous run's file in `dist/` to be released as though it were
+  fresh. Artifacts are now removed before rebuild, errors are shown, and each
+  result must exist and be non-empty before it counts as built.
+
+### Performance
+
+- **f64 values now live in XMM registers on x86_64.** Every floating-point
+  operation previously kept its operands as bit patterns in general-purpose
+  registers and bounced them through `xmm0`/`xmm1` for each individual op. A
+  dedicated register class over `xmm2`–`xmm15` removes that round trip.
+
+  | benchmark | before | after | |
+  |---|---:|---:|---|
+  | mandelbrot | 1771 ms | **551 ms** | **3.2× faster** |
+
+  That closes the gap with `gcc -O2` on mandelbrot from 3.6× behind to **1.11×**.
+  Integer benchmarks are unchanged. Note that unlike ARM64's callee-saved
+  `d8`–`d15` bank, *every* x86-64 XMM register is caller-saved, so values live
+  across a call deliberately keep their previous handling.
+
 ## v2.8.32 — 2026-07-26
 
 A correctness release with a large 32-bit performance improvement.

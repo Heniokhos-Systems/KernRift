@@ -82,15 +82,15 @@ krc check module.kr
 krc lc program.kr
 ```
 
-### Self-compilation (v2.8.26, ~254K tokens, ~160K AST nodes, ~2.0 MB source)
+### Self-compilation (~304K tokens, ~190K AST nodes, ~2.6 MB source)
 
-All 8 targets self-compile. CI verifies bootstrap fixed point (krc3 == krc4) and runs **688 tests** on every push. Numbers below are on an AMD Ryzen 9 7900X — see [`benchmarks/BENCHMARKS.md`](benchmarks/BENCHMARKS.md) for the complete run including gcc / rustc comparisons.
+All 8 targets self-compile. CI verifies bootstrap fixed point (krc3 == krc4) and runs **703 tests** on every push. Numbers below are on an AMD Ryzen 9 7900X — see [`benchmarks/BENCHMARKS.md`](benchmarks/BENCHMARKS.md) for the complete run including gcc / rustc comparisons.
 
 | Target | Legacy codegen | IR codegen (default) | IR vs legacy |
 |--------|---------------:|---------------------:|-------------:|
-| linux   x86_64 ELF    |  ~290 ms / 1.20 MB | ~1 135 ms / 1.15 MB | **−4 %** size |
-| linux   arm64  ELF    |  ~290 ms / 1.04 MB | ~1 130 ms / 0.83 MB | **−20 %** size |
-| **Fat binary (all 8)**| — | **~9.2 s / 3.84 MB** | (IR all 8 slices) |
+| linux   x86_64 ELF    |  ~204 ms / 1.68 MB | ~411 ms / 1.12 MB | **−33 %** size |
+| linux   arm64  ELF    |  ~196 ms / 1.47 MB | ~422 ms / 0.93 MB | **−36 %** size |
+| **Fat binary (all 8)**| — | **~2.95 s / 3.99 MB** | (IR all 8 slices) |
 
 The IR path now produces smaller binaries than legacy on both architectures. Two things landed since v2.8.8 to flip the size story: a partial used-callee-save prologue + cross-register spill-reload peephole (v2.8.21 RA work), and v2.8.24's Briggs/George copy coalescer. The function inliner (v2.8.24) also folds pure single-expression callees so DCE can drop the originals.
 
@@ -306,7 +306,7 @@ See the [`examples/`](examples/) directory for runnable programs covering every 
 
 ## Architecture
 
-~61 100 lines of KernRift across 25 source files + 19 stdlib modules. Self-compiles to a 1.15 MB x86_64 native binary in ~1.1 s (IR, default), a 0.83 MB ARM64 binary, or an 8-slice fat binary (BCJ + LZ-Rift compression) in ~9.2 s on an AMD Ryzen 9 7900X. **688 tests** pass, bootstrap fixed point verified on all 8 targets — Linux, macOS, Windows, and Android on both x86_64 and ARM64. See [`benchmarks/BENCHMARKS.md`](benchmarks/BENCHMARKS.md) for micro-benchmarks vs gcc / rustc and peak-memory numbers.
+~63 500 lines of KernRift across 25 source files + 19 stdlib modules. Self-compiles to a 1.12 MB x86_64 native binary in ~0.41 s (IR, default), a 0.93 MB ARM64 binary, or an 8-slice fat binary (BCJ + LZ-Rift compression) in ~2.95 s on an AMD Ryzen 9 7900X. **703 tests** pass, bootstrap fixed point verified on all 8 targets — Linux, macOS, Windows, and Android on both x86_64 and ARM64. See [`benchmarks/BENCHMARKS.md`](benchmarks/BENCHMARKS.md) for micro-benchmarks vs gcc / rustc and peak-memory numbers.
 
 | File | Purpose |
 |------|---------|
