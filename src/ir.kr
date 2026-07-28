@@ -6978,8 +6978,26 @@ fn ir_emit_asm_in_group(uint64 start_ii) {
     }
 }
 
+// Loud failure for an opcode the x86_64 dispatch does not handle. A build
+// error is always better than silently emitting nothing.
+fn x86_nyi_op(uint64 op) {
+    uint8[24] nbuf
+    uint64 pre = "error: x86_64: IR op "
+    write(2, pre, str_len(pre))
+    uint64 nlen = fmt_uint(nbuf, op)
+    write(2, nbuf, nlen)
+    uint64 post = " not yet implemented\n"
+    write(2, post, str_len(post))
+    exit(1)
+}
+
 fn ir_emit_x86_insn(uint64 ii) {
     uint64 op = ir_insn_opcode(ii)
+    // NOP: LICM blanks an instruction in place rather than removing it, so
+    // op 0 legitimately reaches here and emits nothing. Previously this fell
+    // through the whole dispatch by accident; the catch-all at the bottom
+    // makes the intent explicit. (arm64 and xtensa already return early.)
+    if op == 0 { return }
     uint64 dest_v = ir_insn_dest(ii)
     uint64 s1_v = ir_insn_src1(ii)
     uint64 s2_v = ir_insn_src2(ii)
@@ -10460,6 +10478,16 @@ fn ir_emit_x86_insn(uint64 ii) {
         // IR_BR_COND: handled in block emission
         return
     }
+
+    // Catch-all. Without this, an opcode this dispatch does not know emits
+    // NOTHING: the destination register / spill slot is never written and the
+    // program silently reads garbage. That is exactly how a missing IR_ROR
+    // handler in the arm64 backend miscompiled every 32-bit rotation --
+    // and so every SHA-2/MD5/ChaCha-style hash -- across seven releases
+    // (v2.8.26 through v2.8.32) without a single build failure.
+    // arm64, riscv and xtensa each grew such a guard; x86_64 was the last
+    // backend still able to fail silently.
+    x86_nyi_op(op)
 }
 
 // ---------------------------------------------------------------------------
