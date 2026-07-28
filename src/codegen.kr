@@ -11308,7 +11308,7 @@ static uint64 dce_hash_tbl = 0   // 8192 slots x u32 name_tok, 0xFFFFFFFF empty
 fn dce_init() {
     dce_table = alloc(2048 * 4)
     dce_count = 0
-    dce_fn_map = alloc(1024 * 8)
+    dce_fn_map = alloc(4096 * 8)
     dce_fn_map_count = 0
     dce_enabled = 1
     dce_keep_all = 0
@@ -11412,8 +11412,8 @@ fn dce_add_by_str(uint64 str_tok) {
 
 // Register a function in the DCE function map
 fn dce_register_fn(uint64 name_tok, uint64 fn_node) {
-    if dce_fn_map_count >= 1024 {
-        write(2, "error: dce_fn_map overflow (max 1024)\n", 38)
+    if dce_fn_map_count >= 4096 {
+        write(2, "error: dce_fn_map overflow (max 4096)\n", 38)
         exit(1)
     }
     uint64 entry = dce_fn_map + dce_fn_map_count * 8

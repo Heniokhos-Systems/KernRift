@@ -6541,6 +6541,474 @@ fn ir_emit_not_r64(uint64 reg) {
 }
 
 // ---------------------------------------------------------------------------
+// XMM register class — f64 homes in xmm2..xmm15 (x86_64)
+// ---------------------------------------------------------------------------
+// Mirror of the arm64 d8-d15 register class (ir_a64_fpr_alloc): a second
+// greedy colouring over the SAME interference graph ir_graph_color built,
+// restricted to f64 vregs, handing out xmm2..xmm15 homes. xmm0/xmm1 stay
+// reserved as the float scratch pair every float handler already uses
+// (and xmm0 is the SysV float-return register).
+//
+// THE x86 DIFFERENCE FROM ARM64: SysV x86-64 has NO callee-saved XMM
+// registers — a call may destroy all of xmm0-xmm15. So an xmm home is
+// only sound for a vreg that is never live across an instruction that
+// can reach a call. ir_x86_xmm_mark_unsafe walks liveness at INSTRUCTION
+// level (block level is not enough — same lesson as
+// ir_seed_wide_ceilings_generic) and disqualifies every vreg live across
+// a non-widesafe op: the audited whitelist ir_x86_op_widesafe guarantees
+// a listed op touches nothing outside {rax, rcx, rdx, xmm0, xmm1} plus
+// allocator-owned operands, so in particular it never touches
+// xmm2-xmm15; everything else (calls, syscalls, helper loops, Windows
+// IAT ops, asm blocks) is treated as clobbering the whole XMM file.
+// The upside of all-caller-saved homes: prologue/epilogue need no
+// changes at all.
+//
+// Enforcement is funnel-based, not per-handler: a homed vreg has its GPR
+// colour forcibly cleared to "spilled" (step 5 of ir_x86_xmm_alloc), so
+// every one of the ~70 op handlers reads it through ir_resolve_src /
+// ir_emit_load_spill and writes it through ir_emit_store_spill — and
+// those funnels redirect to the xmm home (movq) instead of the stack
+// slot. The float handlers additionally use the FP funnels
+// (ir_resolve_src_x / ir_xmm_dest_x / ir_store_dest_x) so f64 arithmetic
+// runs xmm-to-xmm with no GPR bounce. The ONE audited emitter that reads
+// spill slots directly instead of going through the funnels — the
+// >6-arg overflow path in IR_CALL — has an explicit home check at the
+// site. (The asm in()-group pusher also reads slots directly, but asm
+// functions never get xmm homes: same gate as the wide GPR file.)
+static uint64 ir_xmm_map = 0
+static uint64 ir_xmm_map_cap = 0
+static uint64 ir_xmm_on = 0
+static uint64 ir_xmm_block_buf = 0
+static uint64 ir_xmm_block_cap = 0
+
+// XMM home for a vreg (2..15), or 0xFFFFFFFF when it has none.
+fn ir_x86_xmm_home(uint64 vreg) -> uint64 {
+    if ir_xmm_on == 0 { return 0xFFFFFFFF }
+    if vreg == 0 { return 0xFFFFFFFF }
+    if vreg >= ir_vreg_next { return 0xFFFFFFFF }
+    uint64 p = ir_xmm_map + vreg
+    uint8 c = 0
+    unsafe { *(p as uint8) -> c }
+    uint64 wc = c
+    if wc == 0 { return 0xFFFFFFFF }
+    return wc
+}
+
+// movq xmm, r64 (66 REX.W 0F 6E /r) — GPR bit pattern into an XMM reg.
+fn ir_emit_movq_x_r(uint64 xr, uint64 gr) {
+    uint8 rex = 0x48
+    if xr >= 8 { rex = rex | 4 }
+    if gr >= 8 { rex = rex | 1 }
+    emit_byte(0x66)
+    emit_byte(rex)
+    emit_byte(0x0F)
+    emit_byte(0x6E)
+    uint64 m = 0xC0 | ((xr & 7) << 3) | (gr & 7)
+    uint8 mb = m
+    emit_byte(mb)
+}
+
+// movq r64, xmm (66 REX.W 0F 7E /r) — XMM low 64 bits into a GPR.
+fn ir_emit_movq_r_x(uint64 gr, uint64 xr) {
+    uint8 rex = 0x48
+    if xr >= 8 { rex = rex | 4 }
+    if gr >= 8 { rex = rex | 1 }
+    emit_byte(0x66)
+    emit_byte(rex)
+    emit_byte(0x0F)
+    emit_byte(0x7E)
+    uint64 m = 0xC0 | ((xr & 7) << 3) | (gr & 7)
+    uint8 mb = m
+    emit_byte(mb)
+}
+
+// Generic SSE reg,reg emitter: [pfx] [REX] 0F opc modrm. pfx 0 = none.
+// The optional REX (only when a register is xmm8+) must sit BETWEEN the
+// mandatory prefix and 0F, which is why the prefix is passed in.
+fn ir_emit_sse_rr(uint64 pfx, uint64 opc, uint64 xd, uint64 xs) {
+    if pfx != 0 {
+        uint8 pb = pfx
+        emit_byte(pb)
+    }
+    uint64 rex = 0x40
+    if xd >= 8 { rex = rex | 4 }
+    if xs >= 8 { rex = rex | 1 }
+    if rex != 0x40 {
+        uint8 rb = rex
+        emit_byte(rb)
+    }
+    emit_byte(0x0F)
+    uint8 ob = opc
+    emit_byte(ob)
+    uint64 m = 0xC0 | ((xd & 7) << 3) | (xs & 7)
+    uint8 mb = m
+    emit_byte(mb)
+}
+
+// movaps xdst, xsrc — full-register XMM copy, self-move elided.
+fn ir_emit_movaps_x_x(uint64 xd, uint64 xs) {
+    if xd == xs { return }
+    ir_emit_sse_rr(0, 0x28, xd, xs)
+}
+
+// movsd xmm, [rsp+off] — spilled f64 straight into the FP file.
+fn ir_emit_movsd_x_sp(uint64 xr, uint64 off) {
+    emit_byte(0xF2)
+    if xr >= 8 { emit_byte(0x44) }
+    emit_byte(0x0F)
+    emit_byte(0x10)
+    if off < 128 {
+        uint64 m = 0x44 | ((xr & 7) << 3)
+        uint8 mb = m
+        emit_byte(mb)
+        emit_byte(0x24)
+        uint8 o8 = off
+        emit_byte(o8)
+    } else {
+        uint64 m = 0x84 | ((xr & 7) << 3)
+        uint8 mb = m
+        emit_byte(mb)
+        emit_byte(0x24)
+        emit_u32_le(off)
+    }
+}
+
+// movsd [rsp+off], xmm — spill an f64 without a GPR bounce.
+fn ir_emit_movsd_sp_x(uint64 off, uint64 xr) {
+    emit_byte(0xF2)
+    if xr >= 8 { emit_byte(0x44) }
+    emit_byte(0x0F)
+    emit_byte(0x11)
+    if off < 128 {
+        uint64 m = 0x44 | ((xr & 7) << 3)
+        uint8 mb = m
+        emit_byte(mb)
+        emit_byte(0x24)
+        uint8 o8 = off
+        emit_byte(o8)
+    } else {
+        uint64 m = 0x84 | ((xr & 7) << 3)
+        uint8 mb = m
+        emit_byte(mb)
+        emit_byte(0x24)
+        emit_u32_le(off)
+    }
+}
+
+// Resolve a vreg for use as a float operand in an XMM register: its home
+// when it has one, else materialise into the given scratch (0=xmm0,
+// 1=xmm1). Spilled floats load slot→XMM directly. (Safe against the GPR
+// spill peephole: ir_emit_store_spill always writes memory before it
+// records, so the slot is never stale.)
+fn ir_resolve_src_x(uint64 vreg, uint64 xscratch) -> uint64 {
+    if vreg == 0 { return xscratch }
+    uint64 xh = ir_x86_xmm_home(vreg)
+    if xh != 0xFFFFFFFF { return xh }
+    uint64 phys = ir_get_phys_reg(vreg)
+    if phys != 0xFFFFFFFF {
+        ir_emit_movq_x_r(xscratch, phys)
+        return xscratch
+    }
+    ir_emit_movsd_x_sp(xscratch, ir_spill_offset(vreg))
+    return xscratch
+}
+
+// Where an FP op should compute its result: the dest's home if any
+// (ir_store_dest_x is then a movaps-elided no-op), else the scratch.
+fn ir_xmm_dest_x(uint64 vreg, uint64 xscratch) -> uint64 {
+    uint64 xh = ir_x86_xmm_home(vreg)
+    if xh != 0xFFFFFFFF { return xh }
+    return xscratch
+}
+
+// Finish an FP op whose result sits in xsrc.
+fn ir_store_dest_x(uint64 vreg, uint64 xsrc) {
+    uint64 xh = ir_x86_xmm_home(vreg)
+    if xh != 0xFFFFFFFF {
+        ir_emit_movaps_x_x(xh, xsrc)
+        return
+    }
+    uint64 phys = ir_get_phys_reg(vreg)
+    if phys != 0xFFFFFFFF {
+        ir_emit_movq_r_x(phys, xsrc)
+        return
+    }
+    ir_emit_movsd_sp_x(ir_spill_offset(vreg), xsrc)
+}
+
+// Disqualify from XMM homes every vreg live ACROSS an xmm-dirty
+// instruction — any op NOT on the ir_x86_op_widesafe whitelist may reach
+// a call, and every XMM register is caller-saved on SysV x86-64. Marks
+// union-find REPRESENTATIVES in ir_xmm_block_buf.
+//
+// Backward instruction-level walk cloned from
+// ir_seed_wide_ceilings_generic. The live-set update rules MUST mirror
+// ir_graph_color's interference builder (same src1/src2 payload
+// exclusions, same imm-as-vreg ops) — keep all three in sync — or
+// liveness is under-approximated and a home gets handed to a value a
+// call destroys.
+//
+// The dirty insn's own dest is exempt: its value is written AFTER the
+// clobber (a call result moves out of rax after the call returns), and
+// every operand read the emitted code performs happens before the call
+// instruction itself (ARG moves / pointer resolves all precede it).
+fn ir_x86_xmm_mark_unsafe() {
+    uint64 vcount = ir_vreg_next
+    uint64 set_bytes = ir_live_words * 8
+    if ir_seed_live_buf == 0 {
+        ir_seed_live_cap = 1024 * 8
+        ir_seed_live_buf = alloc(ir_seed_live_cap)
+    }
+    if set_bytes > ir_seed_live_cap {
+        write(2, "error: xmm live buffer overflow\n", 32)
+        exit(1)
+    }
+    uint64 tmp = ir_seed_live_buf
+    uint64 b = 0
+    while b < ir_bb_count {
+        // Fast scan: any dirty op in this block at all?
+        uint64 dirty = 0
+        uint64 i = ir_bb_first_insn(b)
+        while i != 0xFFFFFFFF {
+            if ir_x86_op_widesafe(ir_insn_opcode(i)) == 0 { dirty = 1 }
+            i = ir_insn_next(i)
+        }
+        if dirty != 0 {
+            // live = live_out[bb]
+            uint64 wi = 0
+            while wi < ir_live_words {
+                uint64 sp = ir_live_out + b * set_bytes + wi * 8
+                uint64 dp = tmp + wi * 8
+                uint64 v = 0
+                unsafe { *(sp as uint64) -> v }
+                unsafe { *(dp as uint64) = v }
+                wi = wi + 1
+            }
+            // Backward walk over the block's flat instruction list.
+            uint64 off_p = ir_bb_list_off + b * 4
+            uint32 off32 = 0
+            unsafe { *(off_p as uint32) -> off32 }
+            uint64 end_p = ir_bb_list_off + (b + 1) * 4
+            uint32 end32 = 0
+            unsafe { *(end_p as uint32) -> end32 }
+            uint64 loff = off32
+            uint64 n = end32 - off32
+            while n > 0 {
+                n = n - 1
+                uint64 ent = ir_bb_list_buf + (loff + n) * 4
+                uint32 ii32 = 0
+                unsafe { *(ent as uint32) -> ii32 }
+                uint64 ii = ii32
+                uint64 op = ir_insn_opcode(ii)
+                if op == 0 { continue }
+                if ir_x86_op_widesafe(op) == 0 {
+                    // Everything live AFTER the dirty op, except its
+                    // own dest, loses XMM-home eligibility.
+                    uint64 dd = 0
+                    if ir_insn_has_def(ii) != 0 { dd = ir_insn_dest(ii) }
+                    uint64 mw = 0
+                    while mw < ir_live_words {
+                        uint64 mp = tmp + mw * 8
+                        uint64 mbits = 0
+                        unsafe { *(mp as uint64) -> mbits }
+                        while mbits != 0 {
+                            uint64 iso = mbits & (0 - mbits)
+                            uint64 bp = ir_popcount64(iso - 1)
+                            uint64 mv = mw * 64 + bp
+                            if mv > 0 && mv < vcount && mv != dd {
+                                uint64 mrep = ir_uf_find(mv)
+                                uint64 bp2 = ir_xmm_block_buf + mrep
+                                uint8 mone = 1
+                                unsafe { *(bp2 as uint8) = mone }
+                            }
+                            mbits = mbits & ~(1 << bp)
+                        }
+                        mw = mw + 1
+                    }
+                }
+                // Live-set update — mirror of ir_graph_color's builder.
+                if ir_insn_has_def(ii) != 0 {
+                    uint64 dv = ir_insn_dest(ii)
+                    if dv > 0 && dv < vcount {
+                        uint64 dw = dv / 64
+                        uint64 dp2 = tmp + dw * 8
+                        uint64 dval = 0
+                        unsafe { *(dp2 as uint64) -> dval }
+                        dval = dval & ~(1 << (dv & 63))
+                        unsafe { *(dp2 as uint64) = dval }
+                    }
+                }
+                uint64 u1 = ir_insn_src1(ii)
+                if u1 > 0 && u1 < vcount && op != 1 && op != 79 {
+                    uint64 up = tmp + (u1 / 64) * 8
+                    uint64 uv = 0
+                    unsafe { *(up as uint64) -> uv }
+                    uv = uv | (1 << (u1 & 63))
+                    unsafe { *(up as uint64) = uv }
+                }
+                uint64 u2 = ir_insn_src2(ii)
+                if u2 > 0 && u2 < vcount && op != 1 && op != 12 && op != 13 && op != 30 && op != 42 && op != 61 && op != 135 && op != 136 && op != 138 && (op < 140 || op > 145) {
+                    uint64 up = tmp + (u2 / 64) * 8
+                    uint64 uv = 0
+                    unsafe { *(up as uint64) -> uv }
+                    uv = uv | (1 << (u2 & 63))
+                    unsafe { *(up as uint64) = uv }
+                }
+                if op == 72 || op == 76 || op == 83 || op == 93 || op == 98 {
+                    uint64 uimm = ir_insn_imm(ii)
+                    if uimm > 0 && uimm < vcount {
+                        uint64 up = tmp + (uimm / 64) * 8
+                        uint64 uv = 0
+                        unsafe { *(up as uint64) -> uv }
+                        uv = uv | (1 << (uimm & 63))
+                        unsafe { *(up as uint64) = uv }
+                    }
+                }
+            }
+        }
+        b = b + 1
+    }
+}
+
+// Hand out xmm2..xmm15 homes to eligible f64 representatives, propagate
+// to followers, then evict homed vregs from the GPR file so every
+// existing handler funnels through the (redirecting) spill helpers.
+// `enable` is 0 for @naked / inline-asm functions — the same gate as the
+// wide GPR file (an asm block can name any xmm register).
+//
+// Runs for EVERY x86 function, even all-integer ones (then it only
+// clears the map — cheap), so a stale map from the previous function
+// can never leak into this one.
+fn ir_x86_xmm_alloc(uint64 enable) {
+    uint64 vcount = ir_vreg_next
+    ir_xmm_on = 0
+    if ir_xmm_map == 0 {
+        ir_xmm_map_cap = 65536
+        ir_xmm_map = alloc(ir_xmm_map_cap)
+    }
+    if vcount > ir_xmm_map_cap { return }
+    memset(ir_xmm_map, 0, vcount)
+    if enable == 0 { return }
+    if vcount < 2 { return }
+    if ir_ig_buf == 0 { return }
+    if ir_xmm_block_buf == 0 {
+        ir_xmm_block_cap = 65536
+        ir_xmm_block_buf = alloc(ir_xmm_block_cap)
+    }
+    if vcount > ir_xmm_block_cap { return }
+    memset(ir_xmm_block_buf, 0, vcount)
+    // 1. Coalition purity: a rep whose coalition contains ANY non-f64
+    //    member is barred. A mixed coalition shares one storage
+    //    location; homing its float side in an xmm while the integer
+    //    side keeps the shared GPR would split the value into two
+    //    disagreeing homes. The connecting IR_COPY instead emits a real
+    //    movq through the funnels, so the classes never silently alias.
+    uint64 pv = 1
+    while pv < vcount {
+        if ir_vreg_fkind_get(pv) != 1 {
+            uint64 pr = ir_uf_find(pv)
+            uint64 pp = ir_xmm_block_buf + pr
+            uint8 pone = 1
+            unsafe { *(pp as uint8) = pone }
+        }
+        pv = pv + 1
+    }
+    // 2. Call-liveness bar — the x86-only step (no callee-saved XMM
+    //    bank exists; see the section header).
+    ir_x86_xmm_mark_unsafe()
+    // 3. Greedy colouring of reps, highest-vreg-first (same weighting
+    //    rationale as ir_a64_fpr_alloc: loop-carried values born deep in
+    //    the function beat early-declared constants to the homes; a
+    //    spilled constant reloads dependency-free while a spilled loop
+    //    variable puts a round-trip on the critical path). Geometry must
+    //    mirror ir_graph_color exactly.
+    uint64 row_words = (vcount + 63) / 64
+    uint64 row_bytes = row_words * 8
+    uint64 ig = ir_ig_buf
+    uint64 vi = vcount - 1
+    while vi >= 1 {
+        if ir_vreg_fkind_get(vi) != 1 { vi = vi - 1; continue }
+        if ir_uf_find(vi) != vi { vi = vi - 1; continue }
+        uint64 bq = ir_xmm_block_buf + vi
+        uint8 b8 = 0
+        unsafe { *(bq as uint8) -> b8 }
+        uint64 blk = b8
+        if blk != 0 { vi = vi - 1; continue }
+        // Collect xmm colours already taken by interfering neighbours.
+        uint64 used = 0
+        uint64 nw = 0
+        while nw < row_words {
+            uint64 np = ig + vi * row_bytes + nw * 8
+            uint64 nbits = 0
+            unsafe { *(np as uint64) -> nbits }
+            while nbits != 0 {
+                uint64 iso = nbits & (0 - nbits)
+                uint64 bp = ir_popcount64(iso - 1)
+                uint64 neighbor = nw * 64 + bp
+                if neighbor < vcount {
+                    uint64 nrep = ir_uf_find(neighbor)
+                    uint64 ncp = ir_xmm_map + nrep
+                    uint8 nc8 = 0
+                    unsafe { *(ncp as uint8) -> nc8 }
+                    uint64 nc = nc8
+                    if nc != 0 { used = used | (1 << (nc - 2)) }
+                }
+                nbits = nbits & ~(1 << bp)
+            }
+            nw = nw + 1
+        }
+        uint64 fc = 0
+        while fc < 14 {
+            if ((used >> fc) & 1) == 0 {
+                uint64 mp = ir_xmm_map + vi
+                uint8 mv = 2 + fc
+                unsafe { *(mp as uint8) = mv }
+                ir_xmm_on = 1
+                fc = 14
+            } else {
+                fc = fc + 1
+            }
+        }
+        vi = vi - 1
+    }
+    if ir_xmm_on == 0 { return }
+    // 4. Propagate rep homes to f64 followers. (Non-f64 followers cannot
+    //    exist in a homed coalition — step 1 barred mixed coalitions.)
+    uint64 fv = 1
+    while fv < vcount {
+        if ir_vreg_fkind_get(fv) == 1 {
+            uint64 rep = ir_uf_find(fv)
+            if rep != fv {
+                uint64 rp2 = ir_xmm_map + rep
+                uint8 rc2 = 0
+                unsafe { *(rp2 as uint8) -> rc2 }
+                uint64 fp2 = ir_xmm_map + fv
+                unsafe { *(fp2 as uint8) = rc2 }
+            }
+        }
+        fv = fv + 1
+    }
+    // 5. Evict homed vregs from the GPR file: force their colour to
+    //    "spilled" so every dest-write and src-read in the ~70 op
+    //    handlers funnels through ir_emit_store_spill /
+    //    ir_emit_load_spill / ir_resolve_src, which all redirect to the
+    //    home. Without this a handler that sees dst_r != 0xFFFFFFFF
+    //    writes the GPR directly and the home would go stale.
+    uint64 cv = 1
+    while cv < vcount {
+        uint64 cp = ir_xmm_map + cv
+        uint8 cc = 0
+        unsafe { *(cp as uint8) -> cc }
+        if cc != 0 {
+            uint64 ap = ir_reg_assign + cv * 4
+            uint32 spilled = 0xFFFFFFFF
+            unsafe { *(ap as uint32) = spilled }
+        }
+        cv = cv + 1
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Spill helpers
 // ---------------------------------------------------------------------------
 
@@ -6575,6 +7043,15 @@ fn ir_peephole_reset() {
 }
 
 fn ir_emit_load_spill(uint64 dst_reg, uint64 vreg) {
+    // XMM-homed f64 vreg: the value lives in an XMM register, not a
+    // slot — pull the bits from there. Checked BEFORE the peephole:
+    // homed vregs never record spill stores, so the peephole state can
+    // never legitimately refer to one.
+    uint64 xh = ir_x86_xmm_home(vreg)
+    if xh != 0xFFFFFFFF {
+        ir_emit_movq_r_x(dst_reg, xh)
+        return
+    }
     // Peephole: if the last emission was exactly `store_spill
     // src_reg=dst_reg, src_vreg=vreg` and nothing was emitted after
     // it, the value is still in dst_reg — skip the reload entirely.
@@ -6622,6 +7099,14 @@ fn ir_emit_load_spill(uint64 dst_reg, uint64 vreg) {
 }
 
 fn ir_emit_store_spill(uint64 src_reg, uint64 vreg) {
+    // XMM-homed f64 vreg: its home is an XMM register — move the bits
+    // there instead of touching the stack. Skip the peephole record:
+    // no slot was written.
+    uint64 xh = ir_x86_xmm_home(vreg)
+    if xh != 0xFFFFFFFF {
+        ir_emit_movq_x_r(xh, src_reg)
+        return
+    }
     // mov [rsp + spill_offset], src_reg
     uint64 off = ir_spill_offset(vreg)
     uint8 rex = 0x48
@@ -8398,6 +8883,19 @@ fn ir_emit_x86_insn(uint64 ii) {
     if op == 61 {
         // IR_COPY: if src1 != 0, it's a reg-reg copy; if src1 == 0, it's a param load
         if s1_v != 0 {
+            // Float fast path: if either side has an XMM home, move
+            // within the FP file (movaps / movq / movsd) instead of
+            // bouncing through rax. This is also the mixed-class
+            // coalesce guarantee: a copy connecting an XMM-homed f64 to
+            // a GPR-resident value emits a REAL movq here, so the two
+            // register classes never silently alias.
+            uint64 cp_xs = ir_x86_xmm_home(s1_v)
+            uint64 cp_xd = ir_x86_xmm_home(dest_v)
+            if cp_xs != 0xFFFFFFFF || cp_xd != 0xFFFFFFFF {
+                uint64 cpx = ir_resolve_src_x(s1_v, 0)
+                ir_store_dest_x(dest_v, cpx)
+                return
+            }
             // Regular copy
             uint64 src_reg = ir_resolve_src(s1_v, 0)
             if dst_r != 0xFFFFFFFF {
@@ -8574,6 +9072,18 @@ fn ir_emit_x86_insn(uint64 ii) {
                 // If spilled, the spill is at [old_rsp + spill_off] = [new_rsp + stack_bytes + spill_off]
                 // We need to adjust the spill load. Let's just check the physical reg:
                 uint64 arg_r = ir_get_phys_reg(arg_vreg)
+                // XMM-homed f64 arg: this is the one emitter that reads
+                // spill slots directly instead of via the funnels, so it
+                // needs its own home check — the slot of a homed vreg is
+                // never written. Pull the bits into rax and let the
+                // register path below store them to the outgoing slot.
+                if arg_r == 0xFFFFFFFF {
+                    uint64 arg_xh = ir_x86_xmm_home(arg_vreg)
+                    if arg_xh != 0xFFFFFFFF {
+                        ir_emit_movq_r_x(0, arg_xh)
+                        arg_r = 0
+                    }
+                }
                 if arg_r != 0xFFFFFFFF {
                     // Value is in a register — just mov to [rsp + oi*8]
                     uint64 soff = oi * 8
@@ -9639,29 +10149,33 @@ fn ir_emit_x86_insn(uint64 ii) {
     // ---------------------------------------------------------------
 
     if op == 26 {
-        // IR_ITOF: cvtsi2sd xmm0, rax; movq rax, xmm0
+        // IR_ITOF: cvtsi2sd (dest home or xmm0), src_gpr — the f64
+        // result lands in its XMM home directly when it has one.
         uint64 a_reg = ir_resolve_src(s1_v, 0)
-        ir_emit_mov_r64_r64(0, a_reg)
-        // cvtsi2sd xmm0, rax: F2 48 0F 2A C0
-        emit_byte(0xF2); emit_byte(0x48); emit_byte(0x0F); emit_byte(0x2A); emit_byte(0xC0)
-        // movq rax, xmm0: 66 48 0F 7E C0
-        emit_byte(0x66); emit_byte(0x48); emit_byte(0x0F); emit_byte(0x7E); emit_byte(0xC0)
-        if dst_r != 0xFFFFFFFF {
-            ir_emit_mov_r64_r64(dst_r, 0)
-        } else {
-            ir_emit_store_spill(0, dest_v)
-        }
+        uint64 xd = ir_xmm_dest_x(dest_v, 0)
+        // cvtsi2sd xd, a_reg: F2 REX.W 0F 2A /r
+        uint8 cv_rex = 0x48
+        if xd >= 8 { cv_rex = cv_rex | 4 }
+        if a_reg >= 8 { cv_rex = cv_rex | 1 }
+        emit_byte(0xF2); emit_byte(cv_rex); emit_byte(0x0F); emit_byte(0x2A)
+        uint64 cv_m = 0xC0 | ((xd & 7) << 3) | (a_reg & 7)
+        uint8 cv_mb = cv_m
+        emit_byte(cv_mb)
+        ir_store_dest_x(dest_v, xd)
         return
     }
 
     if op == 27 {
-        // IR_FTOI: movq xmm0, rax; cvttsd2si rax, xmm0
-        uint64 a_reg = ir_resolve_src(s1_v, 0)
-        ir_emit_mov_r64_r64(0, a_reg)
-        // movq xmm0, rax: 66 48 0F 6E C0
-        emit_byte(0x66); emit_byte(0x48); emit_byte(0x0F); emit_byte(0x6E); emit_byte(0xC0)
-        // cvttsd2si rax, xmm0: F2 48 0F 2C C0
-        emit_byte(0xF2); emit_byte(0x48); emit_byte(0x0F); emit_byte(0x2C); emit_byte(0xC0)
+        // IR_FTOI: cvttsd2si rax, (src home or xmm0) — no GPR bounce
+        // for the f64 operand.
+        uint64 xa = ir_resolve_src_x(s1_v, 0)
+        // cvttsd2si rax, xa: F2 REX.W 0F 2C /r
+        uint8 ct_rex = 0x48
+        if xa >= 8 { ct_rex = ct_rex | 1 }
+        emit_byte(0xF2); emit_byte(ct_rex); emit_byte(0x0F); emit_byte(0x2C)
+        uint64 ct_m = 0xC0 | (xa & 7)
+        uint8 ct_mb = ct_m
+        emit_byte(ct_mb)
         if dst_r != 0xFFFFFFFF {
             ir_emit_mov_r64_r64(dst_r, 0)
         } else {
@@ -9704,38 +10218,37 @@ fn ir_emit_x86_insn(uint64 ii) {
 
     // Float arithmetic: FADD(20), FSUB(21), FMUL(22), FDIV(23)
     // imm holds float kind: 1=f64, 2=f32
-    // Values are bit patterns in GPRs; move to xmm for computation, back to GPR
+    // Operands resolve via the FP funnels: XMM-homed f64 values are used
+    // in place, homeless ones materialise into the xmm0/xmm1 scratch
+    // pair — no GPR round-trip on the dependency chain.
     if op >= 20 && op <= 23 {
-        uint64 a_reg = ir_resolve_src(s1_v, 0)
-        uint64 b_reg = ir_resolve_src(s2_v, 1)
         uint64 fk = imm
-        // movq xmm0, a_reg: 66 48 0F 6E C0 (rax->xmm0)
-        ir_emit_mov_r64_r64(0, a_reg)
-        emit_byte(0x66); emit_byte(0x48); emit_byte(0x0F); emit_byte(0x6E); emit_byte(0xC0)
-        // movq xmm1, b_reg: 66 48 0F 6E C8 (rax->xmm1)
-        ir_emit_mov_r64_r64(0, b_reg)
-        emit_byte(0x66); emit_byte(0x48); emit_byte(0x0F); emit_byte(0x6E); emit_byte(0xC8)
-        // Perform operation
-        if fk == 2 {
-            // f32 ops: prefix F3
-            if op == 20 { emit_byte(0xF3); emit_byte(0x0F); emit_byte(0x58); emit_byte(0xC1) } // addss
-            if op == 21 { emit_byte(0xF3); emit_byte(0x0F); emit_byte(0x5C); emit_byte(0xC1) } // subss
-            if op == 22 { emit_byte(0xF3); emit_byte(0x0F); emit_byte(0x59); emit_byte(0xC1) } // mulss
-            if op == 23 { emit_byte(0xF3); emit_byte(0x0F); emit_byte(0x5E); emit_byte(0xC1) } // divss
+        uint64 xa = ir_resolve_src_x(s1_v, 0)
+        uint64 xb = ir_resolve_src_x(s2_v, 1)
+        uint64 xd = ir_xmm_dest_x(dest_v, 0)
+        uint64 fpfx = 0xF2                        // f64: F2 (sd)
+        if fk == 2 { fpfx = 0xF3 }                // f32: F3 (ss)
+        uint64 fopc = 0x58                        // add
+        if op == 21 { fopc = 0x5C }               // sub
+        if op == 22 { fopc = 0x59 }               // mul
+        if op == 23 { fopc = 0x5E }               // div
+        // Two-address SSE: build the result without clobbering a live
+        // operand. When xd == xb (both necessarily homes: a homeless
+        // dest computes in xmm0, and xb resolves to a home or xmm1,
+        // never xmm0) the op runs in the then-free xmm1 scratch to
+        // preserve operand order — no commutation, so NaN behaviour
+        // matches the old hardcoded xmm0/xmm1 path exactly.
+        if xd == xa {
+            ir_emit_sse_rr(fpfx, fopc, xd, xb)
+        } else if xd == xb {
+            ir_emit_movaps_x_x(1, xa)
+            ir_emit_sse_rr(fpfx, fopc, 1, xb)
+            ir_emit_movaps_x_x(xd, 1)
         } else {
-            // f64 ops: prefix F2
-            if op == 20 { emit_byte(0xF2); emit_byte(0x0F); emit_byte(0x58); emit_byte(0xC1) } // addsd
-            if op == 21 { emit_byte(0xF2); emit_byte(0x0F); emit_byte(0x5C); emit_byte(0xC1) } // subsd
-            if op == 22 { emit_byte(0xF2); emit_byte(0x0F); emit_byte(0x59); emit_byte(0xC1) } // mulsd
-            if op == 23 { emit_byte(0xF2); emit_byte(0x0F); emit_byte(0x5E); emit_byte(0xC1) } // divsd
+            ir_emit_movaps_x_x(xd, xa)
+            ir_emit_sse_rr(fpfx, fopc, xd, xb)
         }
-        // movq rax, xmm0: 66 48 0F 7E C0
-        emit_byte(0x66); emit_byte(0x48); emit_byte(0x0F); emit_byte(0x7E); emit_byte(0xC0)
-        if dst_r != 0xFFFFFFFF {
-            ir_emit_mov_r64_r64(dst_r, 0)
-        } else {
-            ir_emit_store_spill(0, dest_v)
-        }
+        ir_store_dest_x(dest_v, xd)
         return
     }
 
@@ -9743,22 +10256,15 @@ fn ir_emit_x86_insn(uint64 ii) {
     //                     FCMP_GT(101), FCMP_GE(102)
     // imm holds float kind: 1=f64, 2=f32
     if op == 24 || op == 25 || op == 99 || op == 100 || op == 101 || op == 102 {
-        uint64 a_reg = ir_resolve_src(s1_v, 0)
-        uint64 b_reg = ir_resolve_src(s2_v, 1)
         uint64 fk = imm
-        // movq xmm0, a_reg
-        ir_emit_mov_r64_r64(0, a_reg)
-        emit_byte(0x66); emit_byte(0x48); emit_byte(0x0F); emit_byte(0x6E); emit_byte(0xC0)
-        // movq xmm1, b_reg
-        ir_emit_mov_r64_r64(0, b_reg)
-        emit_byte(0x66); emit_byte(0x48); emit_byte(0x0F); emit_byte(0x6E); emit_byte(0xC8)
-        // ucomisd/ucomiss xmm0, xmm1
+        uint64 xa = ir_resolve_src_x(s1_v, 0)
+        uint64 xb = ir_resolve_src_x(s2_v, 1)
+        // ucomisd/ucomiss xa, xb — reads homes in place, writes nothing
+        // but flags.
         if fk == 2 {
-            // ucomiss xmm0, xmm1: 0F 2E C1
-            emit_byte(0x0F); emit_byte(0x2E); emit_byte(0xC1)
+            ir_emit_sse_rr(0, 0x2E, xa, xb)       // ucomiss
         } else {
-            // ucomisd xmm0, xmm1: 66 0F 2E C1
-            emit_byte(0x66); emit_byte(0x0F); emit_byte(0x2E); emit_byte(0xC1)
+            ir_emit_sse_rr(0x66, 0x2E, xa, xb)    // ucomisd
         }
         // Set result based on comparison kind.
         // IEEE-754 § 5.11: NaN compares unordered to everything. ucomi sets
@@ -9802,78 +10308,51 @@ fn ir_emit_x86_insn(uint64 ii) {
     }
 
     if op == 97 {
-        // IR_FSQRT: movq xmm0, rax; sqrtsd xmm0, xmm0; movq rax, xmm0
-        uint64 a_reg = ir_resolve_src(s1_v, 0)
-        ir_emit_mov_r64_r64(0, a_reg)
-        // movq xmm0, rax: 66 48 0F 6E C0
-        emit_byte(0x66); emit_byte(0x48); emit_byte(0x0F); emit_byte(0x6E); emit_byte(0xC0)
-        // sqrtsd xmm0, xmm0: F2 0F 51 C0
-        emit_byte(0xF2); emit_byte(0x0F); emit_byte(0x51); emit_byte(0xC0)
-        // movq rax, xmm0: 66 48 0F 7E C0
-        emit_byte(0x66); emit_byte(0x48); emit_byte(0x0F); emit_byte(0x7E); emit_byte(0xC0)
-        if dst_r != 0xFFFFFFFF {
-            ir_emit_mov_r64_r64(dst_r, 0)
-        } else {
-            ir_emit_store_spill(0, dest_v)
-        }
+        // IR_FSQRT: sqrtsd (dest home or xmm0), (src home or xmm0)
+        uint64 xa = ir_resolve_src_x(s1_v, 0)
+        uint64 xd = ir_xmm_dest_x(dest_v, 0)
+        ir_emit_sse_rr(0xF2, 0x51, xd, xa)        // sqrtsd xd, xa
+        ir_store_dest_x(dest_v, xd)
         return
     }
 
     if op == 98 {
-        // IR_FFMA: a*b + c, all f64 bit patterns in GPRs
-        // src1=a, src2=b, imm=c (vreg)
-        uint64 a_reg = ir_resolve_src(s1_v, 0)
-        uint64 b_reg = ir_resolve_src(s2_v, 1)
-        uint64 c_reg = ir_resolve_src(imm, 2)
-        // movq xmm0, a_reg
-        ir_emit_mov_r64_r64(0, a_reg)
-        emit_byte(0x66); emit_byte(0x48); emit_byte(0x0F); emit_byte(0x6E); emit_byte(0xC0)
-        // movq xmm1, b_reg
-        ir_emit_mov_r64_r64(0, b_reg)
-        emit_byte(0x66); emit_byte(0x48); emit_byte(0x0F); emit_byte(0x6E); emit_byte(0xC8)
-        // mulsd xmm0, xmm1: F2 0F 59 C1
-        emit_byte(0xF2); emit_byte(0x0F); emit_byte(0x59); emit_byte(0xC1)
-        // movq xmm1, c_reg
-        ir_emit_mov_r64_r64(0, c_reg)
-        emit_byte(0x66); emit_byte(0x48); emit_byte(0x0F); emit_byte(0x6E); emit_byte(0xC8)
-        // addsd xmm0, xmm1: F2 0F 58 C1
-        emit_byte(0xF2); emit_byte(0x0F); emit_byte(0x58); emit_byte(0xC1)
-        // movq rax, xmm0: 66 48 0F 7E C0
-        emit_byte(0x66); emit_byte(0x48); emit_byte(0x0F); emit_byte(0x7E); emit_byte(0xC0)
-        if dst_r != 0xFFFFFFFF {
-            ir_emit_mov_r64_r64(dst_r, 0)
-        } else {
-            ir_emit_store_spill(0, dest_v)
-        }
+        // IR_FFMA: a*b + c. src1=a, src2=b, imm=c (vreg).
+        // Accumulate in xmm0: xb never resolves to xmm0 (its scratch is
+        // xmm1), so copying a into xmm0 cannot clobber it. c resolves
+        // AFTER the mul — xb is dead by then, so its scratch is
+        // reusable.
+        uint64 xa = ir_resolve_src_x(s1_v, 0)
+        uint64 xb = ir_resolve_src_x(s2_v, 1)
+        ir_emit_movaps_x_x(0, xa)
+        ir_emit_sse_rr(0xF2, 0x59, 0, xb)         // mulsd xmm0, xb
+        uint64 xc = ir_resolve_src_x(imm, 1)
+        ir_emit_sse_rr(0xF2, 0x58, 0, xc)         // addsd xmm0, xc
+        ir_store_dest_x(dest_v, 0)
         return
     }
 
     if op == 103 {
-        // IR_F32TOF64: movq xmm0, rax; cvtss2sd xmm0, xmm0; movq rax, xmm0
-        uint64 a_reg = ir_resolve_src(s1_v, 0)
-        ir_emit_mov_r64_r64(0, a_reg)
-        emit_byte(0x66); emit_byte(0x48); emit_byte(0x0F); emit_byte(0x6E); emit_byte(0xC0)
-        // cvtss2sd xmm0, xmm0: F3 0F 5A C0
-        emit_byte(0xF3); emit_byte(0x0F); emit_byte(0x5A); emit_byte(0xC0)
-        // movq rax, xmm0: 66 48 0F 7E C0
-        emit_byte(0x66); emit_byte(0x48); emit_byte(0x0F); emit_byte(0x7E); emit_byte(0xC0)
-        if dst_r != 0xFFFFFFFF {
-            ir_emit_mov_r64_r64(dst_r, 0)
-        } else {
-            ir_emit_store_spill(0, dest_v)
-        }
+        // IR_F32TOF64: cvtss2sd (dest home or xmm0), src — the f32
+        // source is never XMM-homed (homes are f64-only), so it
+        // materialises via the funnel's movq; only its low 32 bits are
+        // read.
+        uint64 xa = ir_resolve_src_x(s1_v, 0)
+        uint64 xd = ir_xmm_dest_x(dest_v, 0)
+        ir_emit_sse_rr(0xF3, 0x5A, xd, xa)        // cvtss2sd xd, xa
+        ir_store_dest_x(dest_v, xd)
         return
     }
 
     if op == 104 {
-        // IR_F64TOF32: movq xmm0, rax; cvtsd2ss xmm0, xmm0; movq rax, xmm0
-        uint64 a_reg = ir_resolve_src(s1_v, 0)
-        ir_emit_mov_r64_r64(0, a_reg)
-        emit_byte(0x66); emit_byte(0x48); emit_byte(0x0F); emit_byte(0x6E); emit_byte(0xC0)
-        // cvtsd2ss xmm0, xmm0: F2 0F 5A C0
-        emit_byte(0xF2); emit_byte(0x0F); emit_byte(0x5A); emit_byte(0xC0)
-        // movq rax, xmm0: 66 48 0F 7E C0
-        emit_byte(0x66); emit_byte(0x48); emit_byte(0x0F); emit_byte(0x7E); emit_byte(0xC0)
+        // IR_F64TOF32: cvtsd2ss xmm0, (src home or xmm0); movd eax, xmm0.
+        // movd (no REX.W) zero-extends, so the f32 bit pattern in the
+        // GPR is deterministic — the old movq form carried whatever sat
+        // in the upper source bits.
+        uint64 xa = ir_resolve_src_x(s1_v, 0)
+        ir_emit_sse_rr(0xF2, 0x5A, 0, xa)         // cvtsd2ss xmm0, xa
+        // movd eax, xmm0: 66 0F 7E C0
+        emit_byte(0x66); emit_byte(0x0F); emit_byte(0x7E); emit_byte(0xC0)
         if dst_r != 0xFFFFFFFF {
             ir_emit_mov_r64_r64(dst_r, 0)
         } else {
@@ -12132,7 +12611,9 @@ fn ir_emit_x86_function(uint64 fn_node) {
     // recomputed at step 4b for the CMP fusion peephole — idempotent).
     ir_compute_use_count()
     ir_color_ceil_reset()
+    uint64 x86_xmm_ok = 0
     if ir_x86_fn_wide_ok() != 0 && is_naked == 0 {
+        x86_xmm_ok = 1
         ir_regalloc_init_x86_wide()
         ir_x86_seed_param_ceilings()
         ir_x86_seed_wide_ceilings()
@@ -12140,6 +12621,14 @@ fn ir_emit_x86_function(uint64 fn_node) {
         ir_regalloc_init()
     }
     ir_graph_color()
+
+    // 3b. XMM register class: f64 homes in xmm2..xmm15, a second
+    // colouring over the same interference graph (see ir_x86_xmm_alloc).
+    // Must run unconditionally — with enable=0 it still clears the map,
+    // so a stale map from the previous function can never leak here.
+    // Runs BEFORE ir_used_color_mask below: it evicts homed vregs from
+    // the GPR file, which can shrink the callee-save push set.
+    ir_x86_xmm_alloc(x86_xmm_ok)
 
 
     // 4. Compute spill count — one slot per vreg, matching
