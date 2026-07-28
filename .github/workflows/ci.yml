@@ -396,11 +396,13 @@ jobs:
           wc -l build/krc.kr
           echo
 
-          echo "=== stage-1 bootstrap (pinned seed cannot build current main) ==="
-          bash scripts/ci-bootstrap-stage1.sh
-
+          # No stage-1 bootstrap here, unlike the other jobs: this job's seed is
+          # build/krc-arm64, freshly cross-compiled by the x86_64 job above with
+          # the CURRENT compiler, so it already has the growable tables. (It is
+          # also an arm64 binary — scripts/ci-bootstrap-stage1.sh produces an
+          # x86_64 one, which this runner cannot execute.)
           echo "=== self-compile pass 1 ==="
-          timeout 120 ./build/krc-inter --arch=arm64 build/krc.kr -o build/krc2
+          timeout 120 ./build/krc-bootstrap --arch=arm64 build/krc.kr -o build/krc2
           SC1=$?
           chmod +x build/krc2 2>/dev/null
           ls -la build/krc2 2>/dev/null
