@@ -201,7 +201,11 @@ static uint64 ir_rv_scratch_off = 0
 // ---------------------------------------------------------------------------
 
 fn rv_spill_offset(uint64 vreg) -> uint64 {
-    uint64 slot = vreg - IR_NUM_REGS - 1
+    // One slot per vreg (vregs are 1-based). The old vreg-IR_NUM_REGS-1
+    // mapping assumed a vreg numbered <= IR_NUM_REGS could never spill --
+    // true only under an ascending-index colouring walk, which is not what
+    // the colourer does any more. Otherwise the subtraction UNDERFLOWS.
+    uint64 slot = vreg - 1
     uint64 off = RV_OVERFLOW_RESERVE + slot * 4
     // lw/sw offsets are imm12: -2048..2047. The overall frame is no longer
     // capped (Task 6 lifted that via t5-assisted SP arithmetic for large
@@ -2288,8 +2292,8 @@ fn ir_riscv_gen(uint64 fn_node) {
 
     // 4. Compute spill count
     ir_spill_count = 0
-    if ir_vreg_next > IR_NUM_REGS + 1 {
-        ir_spill_count = ir_vreg_next - IR_NUM_REGS - 1
+    if ir_vreg_next > 1 {
+        ir_spill_count = ir_vreg_next - 1
     }
 
     // 4a. Snapshot the function's var map for DWARF (if -g)
