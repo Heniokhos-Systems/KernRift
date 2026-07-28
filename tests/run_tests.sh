@@ -4801,6 +4801,47 @@ else
     FAIL=$((FAIL + 1))
 fi
 
+# --- compiler tables must grow instead of hitting fixed walls ---
+# Four append-only tables were fixed-size with a loud abort:
+#   dce_fn_map (1024), dce_table (2048), dce_hash_tbl (8192 slots), fn_table (1024)
+# The compiler's own source reached 1015 dce_fn_map entries -- NINE short of
+# being unable to build itself -- and fn_table's cap meant no program with
+# more than 1024 emitted functions could be compiled at all. All four now
+# double on demand. 4200 functions crosses every threshold, including at
+# least one dce_hash_tbl rehash (which matters because dce_add's probe loop
+# is `while 1 == 1` and terminates only while the load factor stays <= 50%).
+# The bodies contain a loop so the inliner cannot fold the calls away and
+# leave the growth paths unexercised.
+TOTAL=$((TOTAL + 1))
+REPO_ROOT="$DIR/.."
+MANYFN="$REPO_ROOT/test_tmp_manyfn_$$.kr"
+MANYBIN="$REPO_ROOT/test_tmp_manyfn_$$.bin"
+awk 'BEGIN {
+    for (i = 0; i < 4200; i++)
+        printf "fn g%d() -> uint64 { uint64 s = 0 uint64 j = 0 while j < 2 { s = s + 1 j = j + 1 } return s }\n", i
+    print "fn main() -> uint64 {"
+    print "    uint64 t = 0"
+    for (i = 0; i < 4200; i++) printf "    t = t + g%d()\n", i
+    print "    println(t)"
+    print "    return 0"
+    print "}"
+}' > "$MANYFN"
+rm -f "$MANYBIN"
+$KRC $KRC_FLAGS "$MANYFN" -o "$MANYBIN" >/dev/null 2>&1
+MANYOUT=""
+if [ -f "$MANYBIN" ]; then
+    chmod +x "$MANYBIN"
+    MANYOUT=$("$MANYBIN" 2>/dev/null)
+fi
+rm -f "$MANYFN" "$MANYBIN"
+if [ "$MANYOUT" = "8400" ]; then
+    PASS=$((PASS + 1))
+    echo "  growable_tables_4200_fns: PASS (dce_fn_map/dce_table/dce_hash/fn_table all grew)"
+else
+    echo "FAIL: growable_tables_4200_fns (expected 8400, got '${MANYOUT:-<no output/compile failed>}')"
+    FAIL=$((FAIL + 1))
+fi
+
 # --- RISC-V RV32 freestanding UART hello (boots under qemu — milestone 1) ---
 # Compiles examples/riscv-hello-uart/hello.kr with --arch=riscv32
 # --freestanding (raw flat binary), checks the 8-byte sp preamble via
