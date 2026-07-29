@@ -10186,6 +10186,20 @@ fn ir_emit_x86_insn(uint64 ii) {
     if op == 27 {
         // IR_FTOI: cvttsd2si rax, (src home or xmm0) — no GPR bounce
         // for the f64 operand.
+        //
+        // SATURATING semantics, matching arm64's FCVTZS, WebAssembly's
+        // trunc_sat and Rust:  NaN -> 0, +overflow -> INT64_MAX,
+        // -overflow -> INT64_MIN.
+        //
+        // Raw cvttsd2si instead returns the "integer indefinite" value
+        // INT64_MIN for ALL THREE of those cases, so x86 and arm64
+        // silently disagreed on every out-of-range conversion. Only two
+        // of the three need fixing: INT64_MIN is already the right answer
+        // for negative overflow.
+        //
+        // The fix is a compare against the sentinel plus a rarely-taken
+        // branch, so in-range conversions (the overwhelming majority) pay
+        // one cmp and one well-predicted not-taken jump.
         uint64 xa = ir_resolve_src_x(s1_v, 0)
         // cvttsd2si rax, xa: F2 REX.W 0F 2C /r
         uint8 ct_rex = 0x48
@@ -10194,6 +10208,76 @@ fn ir_emit_x86_insn(uint64 ii) {
         uint64 ct_m = 0xC0 | (xa & 7)
         uint8 ct_mb = ct_m
         emit_byte(ct_mb)
+
+        // rcx = INT64_MIN ; cmp rax, rcx
+        // movabs rcx, 0x8000000000000000: 48 B9 imm64
+        emit_byte(0x48); emit_byte(0xB9)
+        emit_u32_le(0)
+        emit_u32_le(0x80000000)
+        // cmp rax, rcx: 48 39 C8
+        emit_byte(0x48); emit_byte(0x39); emit_byte(0xC8)
+        // jne .done (rel8) — the common, in-range path
+        emit_byte(0x75)
+        uint64 ft_done_patch = out_len
+        emit_byte(0)
+
+        // Sentinel path: distinguish NaN from a genuine overflow.
+        // ucomisd xa, xa sets PF when the operand is unordered (NaN).
+        uint8 uc_rex = 0
+        if xa >= 8 { uc_rex = 0x44 }
+        emit_byte(0x66)
+        if uc_rex != 0 { emit_byte(uc_rex) }
+        emit_byte(0x0F); emit_byte(0x2E)
+        uint64 uc_m = 0xC0 | ((xa & 7) << 3) | (xa & 7)
+        uint8 uc_mb = uc_m
+        emit_byte(uc_mb)
+        // jnp .not_nan (rel8)
+        emit_byte(0x7B)
+        uint64 ft_notnan_patch = out_len
+        emit_byte(0)
+        // NaN: xor eax, eax  -> 0
+        emit_byte(0x31); emit_byte(0xC0)
+        // jmp .done (rel8)
+        emit_byte(0xEB)
+        uint64 ft_nanjmp_patch = out_len
+        emit_byte(0)
+
+        // .not_nan: overflow. Negative overflow already holds INT64_MIN,
+        // so only a POSITIVE operand needs rewriting to INT64_MAX.
+        uint64 ft_notnan = out_len
+        // pxor xmm1, xmm1 : 66 0F EF C9
+        emit_byte(0x66); emit_byte(0x0F); emit_byte(0xEF); emit_byte(0xC9)
+        // comisd xa, xmm1 : 66 [REX.R] 0F 2F /r   (xa is the reg operand)
+        emit_byte(0x66)
+        if xa >= 8 { emit_byte(0x44) }
+        emit_byte(0x0F); emit_byte(0x2F)
+        uint64 cm_m = 0xC0 | ((xa & 7) << 3) | 1
+        uint8 cm_mb = cm_m
+        emit_byte(cm_mb)
+        // jbe .done  — operand <= 0, keep INT64_MIN
+        emit_byte(0x76)
+        uint64 ft_neg_patch = out_len
+        emit_byte(0)
+        // movabs rax, 0x7FFFFFFFFFFFFFFF: 48 B8 imm64
+        emit_byte(0x48); emit_byte(0xB8)
+        emit_u32_le(0xFFFFFFFF)
+        emit_u32_le(0x7FFFFFFF)
+
+        // .done: patch the three forward jumps.
+        uint64 ft_done = out_len
+        uint8 d1 = ft_done - ft_done_patch - 1
+        uint64 p1 = out_buf + ft_done_patch
+        unsafe { *(p1 as uint8) = d1 }
+        uint8 d2 = ft_notnan - ft_notnan_patch - 1
+        uint64 p2 = out_buf + ft_notnan_patch
+        unsafe { *(p2 as uint8) = d2 }
+        uint8 d3 = ft_done - ft_nanjmp_patch - 1
+        uint64 p3 = out_buf + ft_nanjmp_patch
+        unsafe { *(p3 as uint8) = d3 }
+        uint8 d4 = ft_done - ft_neg_patch - 1
+        uint64 p4 = out_buf + ft_neg_patch
+        unsafe { *(p4 as uint8) = d4 }
+
         if dst_r != 0xFFFFFFFF {
             ir_emit_mov_r64_r64(dst_r, 0)
         } else {
