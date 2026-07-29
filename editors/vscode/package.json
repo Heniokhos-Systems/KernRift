@@ -44,8 +44,8 @@
         ],
         "configuration": "./language-configuration.json",
         "icon": {
-          "light": "./icons/kr-file.svg",
-          "dark": "./icons/kr-file.svg"
+          "light": "./icons/kr-file.png",
+          "dark": "./icons/kr-file.png"
         }
       }
     ],

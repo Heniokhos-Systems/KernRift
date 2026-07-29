@@ -253,8 +253,8 @@ jobs:
           V="${{ github.ref_name }}"
           # Release-upload can be eventually consistent; retry briefly.
           for url in \
-            "https://github.com/Pantelis23/KernRift/releases/download/$V/krc-windows-x86_64.zip" \
-            "https://github.com/Pantelis23/KernRift/releases/download/$V/krc-windows-arm64.zip"; do
+            "https://github.com/Heniokhos-Systems/KernRift/releases/download/$V/krc-windows-x86_64.zip" \
+            "https://github.com/Heniokhos-Systems/KernRift/releases/download/$V/krc-windows-arm64.zip"; do
             for i in 1 2 3 4 5; do
               if curl -fsSL -o "/tmp/$(basename "$url")" "$url"; then break; fi
               sleep 10
@@ -309,7 +309,7 @@ jobs:
               PortableCommandAlias: krc
             - RelativeFilePath: kr.exe
               PortableCommandAlias: kr
-            InstallerUrl: https://github.com/Pantelis23/KernRift/releases/download/$VERSION/krc-windows-x86_64.zip
+            InstallerUrl: https://github.com/Heniokhos-Systems/KernRift/releases/download/$VERSION/krc-windows-x86_64.zip
             InstallerSha256: $X64_SHA
           - Architecture: arm64
             NestedInstallerFiles:
@@ -317,7 +317,7 @@ jobs:
               PortableCommandAlias: krc
             - RelativeFilePath: kr.exe
               PortableCommandAlias: kr
-            InstallerUrl: https://github.com/Pantelis23/KernRift/releases/download/$VERSION/krc-windows-arm64.zip
+            InstallerUrl: https://github.com/Heniokhos-Systems/KernRift/releases/download/$VERSION/krc-windows-arm64.zip
             InstallerSha256: $ARM64_SHA
           ManifestType: installer
           ManifestVersion: 1.10.0
@@ -332,13 +332,13 @@ jobs:
           PackageVersion: $VERSION
           PackageLocale: en-US
           Publisher: Pantelis Christou
-          PublisherUrl: https://github.com/Pantelis23/KernRift
-          PublisherSupportUrl: https://github.com/Pantelis23/KernRift/issues
+          PublisherUrl: https://github.com/Heniokhos-Systems/KernRift
+          PublisherSupportUrl: https://github.com/Heniokhos-Systems/KernRift/issues
           Author: Pantelis Christou
           PackageName: KernRift
-          PackageUrl: https://github.com/Pantelis23/KernRift
+          PackageUrl: https://github.com/Heniokhos-Systems/KernRift
           License: Apache-2.0
-          LicenseUrl: https://github.com/Pantelis23/KernRift/blob/HEAD/LICENSE
+          LicenseUrl: https://github.com/Heniokhos-Systems/KernRift/blob/HEAD/LICENSE
           Copyright: Copyright (c) 2025 Pantelis Christou
           ShortDescription: Self-hosted bare-metal systems programming language and compiler
           Description: KernRift is a zero-dependency self-hosted compiler. The package installs two portable command-line tools — krc (the compiler) and kr (the fat-binary runner). It compiles to native x86_64 and ARM64 binaries for Linux, Windows, macOS, and Android. The compiler is written entirely in KernRift itself and produces ELF, PE, Mach-O, and fat binaries.
@@ -353,8 +353,8 @@ jobs:
             - self-hosted
             - systems-programming
             - x86_64
-          ReleaseNotes: 'Full Changelog: https://github.com/Pantelis23/KernRift/releases/tag/$VERSION'
-          ReleaseNotesUrl: https://github.com/Pantelis23/KernRift/releases/tag/$VERSION
+          ReleaseNotes: 'Full Changelog: https://github.com/Heniokhos-Systems/KernRift/releases/tag/$VERSION'
+          ReleaseNotesUrl: https://github.com/Heniokhos-Systems/KernRift/releases/tag/$VERSION
           InstallationNotes: The install directory is added to PATH automatically by winget (portable nested installer). Run 'krc --version' and 'kr --version' to verify.
           ManifestType: defaultLocale
           ManifestVersion: 1.10.0

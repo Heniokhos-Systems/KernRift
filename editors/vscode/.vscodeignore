@@ -11,3 +11,4 @@ package-lock.json
 **/tsconfig.json
 *.vsix
 .gitignore
+icons/make-file-icon.py

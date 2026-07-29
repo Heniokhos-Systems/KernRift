@@ -8,7 +8,7 @@ PublisherUrl: https://github.com/Pantelis23
 PackageName: KernRift
 PackageUrl: https://kernrift.org
 License: Apache-2.0
-LicenseUrl: https://github.com/Pantelis23/KernRift/blob/main/LICENSE
+LicenseUrl: https://github.com/Heniokhos-Systems/KernRift/blob/main/LICENSE
 ShortDescription: Self-hosted systems language compiler for kernel development
 Description: |-
   KernRift is a self-hosted systems programming language and compiler designed
@@ -20,16 +20,16 @@ Tags:
   - kernel
   - language
 Moniker: kernrift
-ReleaseNotesUrl: https://github.com/Pantelis23/KernRift/releases/tag/v2.5.0
+ReleaseNotesUrl: https://github.com/Heniokhos-Systems/KernRift/releases/tag/v2.5.0
 Installers:
   - Architecture: x64
-    InstallerUrl: https://github.com/Pantelis23/KernRift/releases/latest/download/krc-windows-x86_64.exe
+    InstallerUrl: https://github.com/Heniokhos-Systems/KernRift/releases/latest/download/krc-windows-x86_64.exe
     InstallerSha256: PLACEHOLDER_WINDOWS_X86_64_SHA256
     InstallerType: portable
     Commands:
       - krc
   - Architecture: arm64
-    InstallerUrl: https://github.com/Pantelis23/KernRift/releases/latest/download/krc-windows-arm64.exe
+    InstallerUrl: https://github.com/Heniokhos-Systems/KernRift/releases/latest/download/krc-windows-arm64.exe
     InstallerSha256: PLACEHOLDER_WINDOWS_ARM64_SHA256
     InstallerType: portable
     Commands:

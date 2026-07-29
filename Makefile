@@ -74,7 +74,7 @@ build/krc2: build/krc.kr
 		mv build/krc2.new build/krc2; \
 	else \
 		echo "No self-hosted compiler found. Bootstrap from Rust:"; \
-		echo "  cargo install --git https://github.com/Pantelis23/KernRift-bootstrap kernriftc"; \
+		echo "  cargo install --git https://github.com/Heniokhos-Systems/KernRift-bootstrap kernriftc"; \
 		echo "  $(KERNRIFTC) --emit=hostexe build/krc.kr -o build/krc"; \
 		echo "  cp build/krc.kr test_input.kr && ./build/krc && mv a.out build/krc2"; \
 		exit 1; \
