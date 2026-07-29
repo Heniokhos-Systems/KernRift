@@ -454,4 +454,4 @@ AHB mirror (errata CPU-3.3).
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+Apache-2.0 — see [LICENSE](LICENSE).

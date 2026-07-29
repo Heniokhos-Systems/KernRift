@@ -7,7 +7,7 @@ Publisher: Pantelis Christou
 PublisherUrl: https://github.com/Pantelis23
 PackageName: KernRift
 PackageUrl: https://kernrift.org
-License: MIT
+License: Apache-2.0
 LicenseUrl: https://github.com/Pantelis23/KernRift/blob/main/LICENSE
 ShortDescription: Self-hosted systems language compiler for kernel development
 Description: |-
