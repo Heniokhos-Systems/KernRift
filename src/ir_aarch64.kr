@@ -231,6 +231,7 @@ fn ir_a64_op_widesafe(uint64 o) -> uint64 {
     if o == 131 { return 1 }                  // arr_check (trap path exits the process)
     if o >= 132 && o <= 139 { return 1 }      // sdiv, smod (x11), sar, add/sub_imm (x10), ror, mul_imm, lea_bis
     if o == 143 { return 1 }                  // shl_imm
+    if o == 147 || o == 148 { return 1 }      // load_bis/store_bis (x9/x10/x11 + operands only)
     return 0
 }
 
@@ -1357,6 +1358,78 @@ fn ir_emit_arm64_insn(uint64 ii) {
             emit_a64_strh(val_reg, addr_reg, 0)
         } else {
             emit_a64_strb(val_reg, addr_reg, 0)
+        }
+        return
+    }
+
+    // ----- IR_LOAD_BIS (147): dest = *(src1 + src2 << k), width in imm --
+    // Register-offset addressing produced by ir_opt_fuse_lea_mem: the
+    // scaled-index add is folded into the access itself, so the 2-cycle
+    // shifted-register ADD disappears from the address dependency chain.
+    // The pass guarantees width ∈ {4, 8} with shift = log2(width).
+    // Encodings verified against GNU as on Cortex-A72:
+    //   ldr Xt, [Xn, Xm, LSL #3] = 0xF8607800 | (Rm<<16) | (Rn<<5) | Rt
+    //   ldr Wt, [Xn, Xm, LSL #2] = 0xB8607800 | (Rm<<16) | (Rn<<5) | Rt
+    //   ldr Dt, [Xn, Xm, LSL #3] = 0xFC607800 | (Rm<<16) | (Rn<<5) | Dt
+    if op == 147 {
+        if imm != 4 && imm != 8 {
+            // Loud-fail on a width/shift pair the encodings above don't
+            // cover — a future producer must not silently miscompile.
+            write(2, "error: arm64: IR_LOAD_BIS width must be 4 or 8\n", 47)
+            exit(1)
+        }
+        uint64 lb_base = ir_a64_resolve_src(s1_v, 9)
+        uint64 lb_idx = ir_a64_resolve_src(s2_v, 10)
+        if imm == 8 {
+            // f64 dest with a d-home: load straight into the FP file.
+            uint64 lb_dh = ir_a64_fpr_home(dest_v)
+            if lb_dh != 0xFFFFFFFF {
+                emit_a64(0xFC607800 | (lb_idx << 16) | (lb_base << 5) | lb_dh)
+                return
+            }
+        }
+        uint64 d = dst_r
+        if d == 0xFFFFFFFF { d = 9 }
+        if imm == 8 {
+            emit_a64(0xF8607800 | (lb_idx << 16) | (lb_base << 5) | d)
+        } else {
+            emit_a64(0xB8607800 | (lb_idx << 16) | (lb_base << 5) | d)
+        }
+        if dst_r == 0xFFFFFFFF {
+            ir_a64_emit_store_spill(9, dest_v)
+        }
+        return
+    }
+
+    // ----- IR_STORE_BIS (148): *(src1 + imm(vreg) << k) = src2 ---------
+    // Width in dest_v (same shape as IR_STORE); imm holds the INDEX VREG.
+    // Scratch order matters: base→x9, idx→x10, value→x11 LAST, because
+    // resolving a spill offset > 32760 clobbers x11 internally
+    // (ir_a64_ldr_sp) — the value must be the final resolve.
+    //   str Xt, [Xn, Xm, LSL #3] = 0xF8207800 | (Rm<<16) | (Rn<<5) | Rt
+    //   str Wt, [Xn, Xm, LSL #2] = 0xB8207800 | (Rm<<16) | (Rn<<5) | Rt
+    //   str Dt, [Xn, Xm, LSL #3] = 0xFC207800 | (Rm<<16) | (Rn<<5) | Dt
+    if op == 148 {
+        uint64 sb_w = dest_v
+        if sb_w != 4 && sb_w != 8 {
+            write(2, "error: arm64: IR_STORE_BIS width must be 4 or 8\n", 48)
+            exit(1)
+        }
+        uint64 sb_base = ir_a64_resolve_src(s1_v, 9)
+        uint64 sb_idx = ir_a64_resolve_src(imm, 10)
+        if sb_w == 8 {
+            // d-homed f64 value: store straight from the FP file.
+            uint64 sb_dh = ir_a64_fpr_home(s2_v)
+            if sb_dh != 0xFFFFFFFF {
+                emit_a64(0xFC207800 | (sb_idx << 16) | (sb_base << 5) | sb_dh)
+                return
+            }
+        }
+        uint64 sb_val = ir_a64_resolve_src(s2_v, 11)
+        if sb_w == 8 {
+            emit_a64(0xF8207800 | (sb_idx << 16) | (sb_base << 5) | sb_val)
+        } else {
+            emit_a64(0xB8207800 | (sb_idx << 16) | (sb_base << 5) | sb_val)
         }
         return
     }

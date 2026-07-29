@@ -188,6 +188,24 @@ static uint64 IR_SAR_IMM = 145      // dest = src1 >> imm arithmetic (shamt 0..3
 // (RISC-V, Xtensa) never have to know about it.
 static uint64 IR_MODULE_PATH = 146
 
+// arm64 register-offset addressing (target_arch == 1 only; produced by
+// ir_opt_fuse_lea_mem, which folds an IR_LEA_BIS's scaled address straight
+// into its consuming loads/stores). On Cortex-A72 the shifted-register ADD
+// that IR_LEA_BIS lowers to costs 2 cycles and sits in the address
+// dependency chain; `ldr Xt, [Xn, Xm, LSL #k]` removes that ADD entirely.
+// Width is restricted to 4/8 with shift == log2(width) — the two forms the
+// arm64 backend emits (encodings verified against GNU as on Cortex-A72).
+// No other backend ever sees these opcodes; their nyi guards would fail
+// loudly if one did.
+//   IR_LOAD_BIS:  dest = *(src1 + src2 << log2(imm)); imm = width (4 or 8)
+//   IR_STORE_BIS: *(src1 + imm << log2(dest)) = src2; imm = INDEX VREG,
+//                 dest = width (4 or 8) — same dest-is-width shape as
+//                 IR_STORE(31), so it joins 31 in every no-def list, and
+//                 imm joins the imm-as-vreg lists (like IR_FFMA's third
+//                 operand) for liveness/use-count/DCE/interference.
+static uint64 IR_LOAD_BIS = 147
+static uint64 IR_STORE_BIS = 148
+
 // ---------------------------------------------------------------------------
 // Instruction arena
 // ---------------------------------------------------------------------------
@@ -4550,6 +4568,8 @@ fn ir_opcode_name(uint64 op) -> uint64 {
     if op == 27 { return "ftoi" }
     if op == 30 { return "load" }
     if op == 31 { return "store" }
+    if op == 147 { return "load_bis" }
+    if op == 148 { return "store_bis" }
     if op == 32 { return "stack_addr" }
     if op == 40 { return "br" }
     if op == 41 { return "br_cond" }
@@ -4641,7 +4661,7 @@ fn ir_dump() {
             uint64 imm = ir_insn_imm(ii)
             write(1, "    ", 4)
             // Print dest for value-producing ops
-            if op != 40 && op != 41 && op != 43 && op != 31 && op != 51 {
+            if op != 40 && op != 41 && op != 43 && op != 31 && op != 51 && op != 148 {
                 write(1, "v", 1)
                 nlen = fmt_uint(nbuf, dest)
                 write(1, nbuf, nlen)
@@ -4942,6 +4962,7 @@ fn ir_insn_has_def(uint64 ii) -> uint64 {
     if op == 41 { return 0 }   // br_cond
     if op == 43 { return 0 }   // ret_void
     if op == 31 { return 0 }   // store
+    if op == 148 { return 0 }  // store_bis (dest holds the WIDTH, like store)
     if op == 51 { return 0 }   // arg (no value produced)
     if op == 71 { return 0 }   // dealloc (no value produced)
     // memset DOES produce a value (returns dst pointer); do NOT mark it as no-def
@@ -5050,7 +5071,7 @@ fn ir_compute_liveness() {
                 }
 
                 // Remove def (inline ir_insn_has_def's no-def op set)
-                if op != 40 && op != 41 && op != 43 && op != 31 && op != 51 && op != 71 && op != 78 && op != 82 && op != 83 && op != 90 && op != 94 {
+                if op != 40 && op != 41 && op != 43 && op != 31 && op != 51 && op != 71 && op != 78 && op != 82 && op != 83 && op != 90 && op != 94 && op != 148 {
                     uint64 dp0 = ins_p + 4
                     uint32 d32 = 0
                     unsafe { *(dp0 as uint32) -> d32 }
@@ -5097,7 +5118,7 @@ fn ir_compute_liveness() {
                 }
 
                 // Add imm-as-vreg use for MEMCPY(72), MEMSET(76), RET3(83), ATOMIC_CAS(93), FFMA(98)
-                if op == 72 || op == 76 || op == 83 || op == 93 || op == 98 {
+                if op == 72 || op == 76 || op == 83 || op == 93 || op == 98 || op == 148 {
                     uint64 imp = ins_p + 16
                     uint64 use_imm = 0
                     unsafe { *(imp as uint64) -> use_imm }
@@ -5171,7 +5192,7 @@ fn ir_compute_use_count() {
                 unsafe { *(p as uint8) = nc8 }
             }
         }
-        if op == 72 || op == 76 || op == 83 || op == 93 || op == 98 {
+        if op == 72 || op == 76 || op == 83 || op == 93 || op == 98 || op == 148 {
             uint64 s3 = ir_insn_imm(i)
             if s3 != 0 && s3 < ir_vreg_next && s3 < ir_use_count_cap {
                 uint64 p = ir_use_count_buf + s3
@@ -5523,7 +5544,7 @@ fn ir_seed_wide_ceilings_generic(uint64 arch_a64, uint64 cap) {
                     uv = uv | (1 << (u2 & 63))
                     unsafe { *(up as uint64) = uv }
                 }
-                if op == 72 || op == 76 || op == 83 || op == 93 || op == 98 {
+                if op == 72 || op == 76 || op == 83 || op == 93 || op == 98 || op == 148 {
                     uint64 uimm = ir_insn_imm(ii)
                     if uimm > 0 && uimm < vcount {
                         uint64 up = tmp + (uimm / 64) * 8
@@ -5919,7 +5940,7 @@ fn ir_graph_color() {
                 }
 
                 // Add imm-as-vreg use for MEMCPY(72), MEMSET(76), RET3(83), ATOMIC_CAS(93), FFMA(98)
-                if op == 72 || op == 76 || op == 83 || op == 93 || op == 98 {
+                if op == 72 || op == 76 || op == 83 || op == 93 || op == 98 || op == 148 {
                     uint64 uimm = ir_insn_imm(ii)
                     if uimm > 0 && uimm < vcount {
                         uint64 uw = uimm / 64
@@ -6854,7 +6875,7 @@ fn ir_x86_xmm_mark_unsafe() {
                     uv = uv | (1 << (u2 & 63))
                     unsafe { *(up as uint64) = uv }
                 }
-                if op == 72 || op == 76 || op == 83 || op == 93 || op == 98 {
+                if op == 72 || op == 76 || op == 83 || op == 93 || op == 98 || op == 148 {
                     uint64 uimm = ir_insn_imm(ii)
                     if uimm > 0 && uimm < vcount {
                         uint64 up = tmp + (uimm / 64) * 8
@@ -11695,6 +11716,7 @@ static uint64 ir_dce_live = 0
 // anything externally observable.
 fn ir_opt_is_side_effect(uint64 op) -> uint64 {
     if op == 31 { return 1 }   // STORE
+    if op == 148 { return 1 }  // STORE_BIS (memory write, same as STORE)
     if op == 40 { return 1 }   // BR
     if op == 41 { return 1 }   // BR_COND
     if op == 42 { return 1 }   // RET
@@ -11790,8 +11812,9 @@ fn ir_opt_dce() {
                 if op != 1 && op != 12 && op != 13 && op != 30 && op != 42 && op != 61 && op != 135 && op != 136 && op != 138 && (op < 140 || op > 145) {
                     ir_opt_dce_mark(s2, 0)
                 }
-                // imm-as-vreg for MEMCPY, MEMSET, RET3, ATOMIC_CAS, FFMA
-                if op == 72 || op == 76 || op == 83 || op == 93 || op == 98 {
+                // imm-as-vreg for MEMCPY, MEMSET, RET3, ATOMIC_CAS, FFMA,
+                // STORE_BIS (index vreg)
+                if op == 72 || op == 76 || op == 83 || op == 93 || op == 98 || op == 148 {
                     ir_opt_dce_mark(imm, 0)
                 }
             }
@@ -12372,6 +12395,16 @@ fn ir_optimize() {
     uint64 rw3 = ir_opt_rewrites
     ir_opt_recognize_lea_bis()
     if ir_opt_rewrites != rw3 { ir_opt_dce() }
+    // arm64 only: fold LEA_BIS's scaled address straight into consuming
+    // loads/stores (register-offset addressing, `ldr Xt, [Xn, Xm, LSL #k]`).
+    // Use counts feed the all-uses-matched check and the DCE above just
+    // changed them, so recompute right before the pass.
+    if target_arch == 1 {
+        uint64 rw3a = ir_opt_rewrites
+        ir_compute_use_count()
+        ir_opt_fuse_lea_mem()
+        if ir_opt_rewrites != rw3a { ir_opt_dce() }
+    }
     // FMA pattern recognition: collapse `FADD(FMUL(a,b), c)` into a
     // single IR_FFMA. The current FFMA emit isn't actually a hardware
     // FMA instruction — it just inlines mulsd+addsd back-to-back —
@@ -12513,6 +12546,214 @@ fn ir_opt_recognize_lea_bis() {
             ir_insn_set_imm(ii, scale)
         }
         ii = ii + 1
+    }
+}
+
+// ---------------------------------------------------------------------------
+// arm64 register-offset addressing fusion (target_arch == 1 only).
+//
+// IR_LEA_BIS lowers to `add Xd, Xbase, Xidx, LSL #k` on arm64 — a
+// shifted-register ALU op that costs 2 cycles on Cortex-A72 and sits
+// squarely in the address dependency chain of the load/store it feeds
+// (measured 13% pessimisation on matmul vs splitting the shift out). But
+// arm64 loads/stores have a register-offset-with-shift addressing mode
+// that absorbs the whole scaled-index computation: when every consumer of
+// a LEA_BIS is a LOAD/STORE of exactly matching width, the address `add`
+// can be removed ENTIRELY by rewriting the consumers to IR_LOAD_BIS /
+// IR_STORE_BIS and deleting the LEA — additive, not a trade.
+//
+// Safety conditions, all required:
+//   - scale ∈ {4, 8} and every consumer's access width == scale (the only
+//     shift/width pairs the backend emits; a mismatch would be a silent
+//     wrong-address bug, so anything else falls back to the LEA).
+//   - ALL uses of the LEA dest are matched consumers found by a forward
+//     scan in the SAME BLOCK (via the intra-block ir_insn_next chain),
+//     verified by requiring matched == ir_use_count_get(dest) with a
+//     non-saturated count. Any other reader — including uses in other
+//     blocks, before the LEA, or as a store's VALUE operand — fails the
+//     equality and the LEA stays materialised.
+//   - The scan stops at any redefinition of dest/base/idx (later uses
+//     belong to a different value → count mismatch → no fuse) and aborts
+//     outright at IR_ASM_BLOCK (opaque reads).
+//   - Rewritten consumers reference base/idx directly, so liveness (which
+//     runs AFTER ir_optimize) naturally extends their ranges to the
+//     consumers; no stale-liveness hazard.
+//   - A commit changes the true use counts of base/idx (and zeroes
+//     dest's), so those vregs are marked dirty and any later LEA_BIS
+//     whose dest is dirty is skipped rather than trusted against the
+//     stale count table.
+// ---------------------------------------------------------------------------
+
+static uint64 ir_lea_mem_matched = 0   // uint32[256] matched consumer indices
+static uint64 ir_lea_mem_dirty = 0     // byte[65536]: stale-use-count vregs
+
+// Does insn `ii` read vreg `v`? Mirrors ir_compute_use_count's operand
+// rules exactly (src1 unless CONST; src2 unless in the not-a-vreg list;
+// imm for the imm-as-vreg ops). Divergence in either direction is safe:
+// the caller aborts on any unmatched read it sees, and the matched-vs-
+// use-count equality catches any read it misses.
+fn ir_lea_mem_reads(uint64 ii, uint64 v) -> uint64 {
+    uint64 op = ir_insn_opcode(ii)
+    if op == 0 { return 0 }
+    if op != 1 && ir_insn_src1(ii) == v { return 1 }
+    if ir_insn_src2(ii) == v {
+        if op != 1 && op != 12 && op != 13 && op != 30 && op != 42 && op != 61 && op != 135 && op != 136 && op != 138 && (op < 140 || op > 145) { return 1 }
+    }
+    if op == 72 || op == 76 || op == 83 || op == 93 || op == 98 || op == 148 {
+        if ir_insn_imm(ii) == v { return 1 }
+    }
+    return 0
+}
+
+fn ir_opt_fuse_lea_mem() {
+    if ir_lea_mem_matched == 0 { ir_lea_mem_matched = alloc(256 * 4) }
+    if ir_lea_mem_dirty == 0 { ir_lea_mem_dirty = alloc(65536) }
+    uint64 lm_clear = ir_vreg_next
+    if lm_clear > 65536 { lm_clear = 65536 }
+    memset(ir_lea_mem_dirty, 0, lm_clear)
+
+    uint64 li = 0
+    while li < ir_insn_count {
+        if ir_insn_opcode(li) != 139 { li = li + 1; continue }
+        uint64 d = ir_insn_dest(li)
+        uint64 base = ir_insn_src1(li)
+        uint64 idx = ir_insn_src2(li)
+        uint64 s = ir_insn_imm(li)
+        // Backend emits exactly two forms: X-reg with LSL #3 (width 8)
+        // and W-reg with LSL #2 (width 4). Scale 2 keeps the LEA.
+        if s != 4 && s != 8 { li = li + 1; continue }
+        if d == 0 || base == 0 || idx == 0 { li = li + 1; continue }
+        if d >= 65536 || base >= 65536 || idx >= 65536 { li = li + 1; continue }
+        // dest aliasing an input would fold the LEA's own src1/src2 read
+        // into dest's use count — not worth disentangling.
+        if d == base || d == idx { li = li + 1; continue }
+        // Skip if a previous commit made d's use count stale.
+        uint64 lm_dp = ir_lea_mem_dirty + d
+        uint8 lm_dirty = 0
+        unsafe { *(lm_dp as uint8) -> lm_dirty }
+        if lm_dirty != 0 { li = li + 1; continue }
+        uint64 uc = ir_use_count_get(d)
+        if uc == 0 || uc >= 255 { li = li + 1; continue }
+
+        // Forward scan to end of block: collect consumers, abort on any
+        // other read of the tracked vreg, stop at redefinitions of
+        // tracked/base/idx.
+        //
+        // Lowering assigns the LEA to a TEMP and then IR_COPYs it into the
+        // named variable's vreg (`bkj_p = B + ...`); the consumers read
+        // the VARIABLE. Coalescing elides the copy in emitted code, but at
+        // vreg level the LEA's only use is the copy. So: when the tracked
+        // vreg's SOLE use is a copy (before any consumer matched), follow
+        // it — track the copy's dest instead and mark the copy for
+        // deletion alongside the LEA. All safety checks (count equality,
+        // redefinition stops, dirty skip) then apply to the alias, so a
+        // variable that is read anywhere else — including by the next
+        // loop iteration — fails the count equality and nothing fuses.
+        uint64 trk = d
+        uint64 n = 0
+        uint64 aborted = 0
+        uint64 ncopies = 0
+        uint64 copy0 = 0
+        uint64 copy1 = 0
+        uint64 cur = ir_insn_next(li)
+        while cur != 0xFFFFFFFF {
+            uint64 cop = ir_insn_opcode(cur)
+            if cop == 0 { cur = ir_insn_next(cur); continue }
+            if cop == 96 { aborted = 1; break }    // asm: opaque reads
+            if cop == 61 && ir_insn_src1(cur) == trk && n == 0 && ncopies < 2 && uc == 1 {
+                // Sole-use copy: follow the alias.
+                uint64 av = ir_insn_dest(cur)
+                if av == 0 || av >= 65536 || av == base || av == idx || av == trk {
+                    aborted = 1
+                    break
+                }
+                uint64 lm_ap = ir_lea_mem_dirty + av
+                uint8 lm_adirty = 0
+                unsafe { *(lm_ap as uint8) -> lm_adirty }
+                if lm_adirty != 0 { aborted = 1; break }
+                uint64 auc = ir_use_count_get(av)
+                if auc == 0 || auc >= 255 { aborted = 1; break }
+                if ncopies == 0 { copy0 = cur } else { copy1 = cur }
+                ncopies = ncopies + 1
+                trk = av
+                uc = auc
+                cur = ir_insn_next(cur)
+                continue
+            }
+            if cop == 30 && ir_insn_src1(cur) == trk {
+                // LOAD consumer. Width lives in imm, or in src2 for the
+                // legacy width-in-src2 lowering shape.
+                uint64 lw = ir_insn_imm(cur)
+                if lw == 0 && ir_insn_src2(cur) != 0 { lw = ir_insn_src2(cur) }
+                if lw != s { aborted = 1; break }
+                uint64 mp1 = ir_lea_mem_matched + n * 4
+                uint32 cur32a = cur
+                unsafe { *(mp1 as uint32) = cur32a }
+                n = n + 1
+                if n == uc { break }               // all uses accounted for
+                if n >= 255 { aborted = 1; break }
+                // The load's own result may clobber base/idx/tracked:
+                // later consumers would read the wrong value, so stop
+                // here and let the count equality decide.
+                uint64 cd = ir_insn_dest(cur)
+                if cd == trk || cd == base || cd == idx { break }
+            } else if cop == 31 && ir_insn_src1(cur) == trk {
+                // STORE consumer (address only — trk as the VALUE aborts).
+                if ir_insn_src2(cur) == trk { aborted = 1; break }
+                if ir_insn_dest(cur) != s { aborted = 1; break }   // width
+                uint64 mp2 = ir_lea_mem_matched + n * 4
+                uint32 cur32b = cur
+                unsafe { *(mp2 as uint32) = cur32b }
+                n = n + 1
+                if n == uc { break }
+                if n >= 255 { aborted = 1; break }
+            } else {
+                if ir_lea_mem_reads(cur, trk) != 0 { aborted = 1; break }
+                if ir_insn_has_def(cur) != 0 {
+                    uint64 cd2 = ir_insn_dest(cur)
+                    if cd2 == trk || cd2 == base || cd2 == idx { break }
+                }
+            }
+            cur = ir_insn_next(cur)
+        }
+        if aborted != 0 || n == 0 || n != uc { li = li + 1; continue }
+
+        // Commit: rewrite every matched consumer, delete the LEA.
+        uint64 mi = 0
+        while mi < n {
+            uint64 mp3 = ir_lea_mem_matched + mi * 4
+            uint32 m32 = 0
+            unsafe { *(mp3 as uint32) -> m32 }
+            uint64 m = m32
+            if ir_insn_opcode(m) == 30 {
+                ir_insn_set_opcode(m, 147)     // IR_LOAD_BIS
+                ir_insn_set_src1(m, base)
+                ir_insn_set_src2(m, idx)
+                ir_insn_set_imm(m, s)          // width normalised into imm
+            } else {
+                ir_insn_set_opcode(m, 148)     // IR_STORE_BIS
+                ir_insn_set_src1(m, base)
+                ir_insn_set_imm(m, idx)        // index vreg in imm
+                // dest (width) and src2 (value) unchanged
+            }
+            mi = mi + 1
+        }
+        ir_insn_set_opcode(li, 0)              // LEA is dead — NOP it
+        // Followed copies are dead too: their only reader chain ended in
+        // the rewritten consumers.
+        if ncopies >= 1 { ir_insn_set_opcode(copy0, 0) }
+        if ncopies >= 2 { ir_insn_set_opcode(copy1, 0) }
+        ir_opt_rewrites = ir_opt_rewrites + 1
+        uint8 lm_one = 1
+        uint64 lm_p1 = ir_lea_mem_dirty + d
+        unsafe { *(lm_p1 as uint8) = lm_one }
+        uint64 lm_p2 = ir_lea_mem_dirty + base
+        unsafe { *(lm_p2 as uint8) = lm_one }
+        uint64 lm_p3 = ir_lea_mem_dirty + idx
+        unsafe { *(lm_p3 as uint8) = lm_one }
+        uint64 lm_p4 = ir_lea_mem_dirty + trk
+        unsafe { *(lm_p4 as uint8) = lm_one }
+        li = li + 1
     }
 }
 
