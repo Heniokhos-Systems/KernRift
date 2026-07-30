@@ -1128,6 +1128,32 @@ run_test "atomic_cas_fail" 'fn main() {
     exit(0)
 }' 42
 
+# atomic_cas_hit_then_miss: the same HIT/MISS/CELL sequence as
+# tests/esp32/cas_single.mlr (100 -> 200 succeeds, then 100 -> 300 fails
+# because the cell is now 200), reduced to one exit code. This is the
+# x86_64 regression coverage for Task 7 (IR_ATOMIC_CAS / xtensa S32C1I):
+# no test exercises op 93 on xtensa itself (KernRift has no
+# std/esp32_clk.kr / esp32_uart.kr for a standalone esp32 fixture yet),
+# so this proves the shared front-end contract both backends rely on --
+# imm-as-vreg desired operand, BOOLEAN 1/0 (not old-value) result, and a
+# second CAS on the same cell not corrupting what the first one wrote.
+# A broken emitter fails this: returning the old word instead of a
+# boolean makes ok_hit=100 (!= 1) or ok_miss=200 (!= 0); a reversed
+# comparison polarity flips which of ok_hit/ok_miss is 1 vs 0; and reusing
+# the caller's `desired` register instead of a scratch (the S32C1I
+# destructive-register bug this port specifically guards against) would
+# leave v with a stale value after the second call. Any of those makes
+# the `if` condition false and the test exits 0, not 42.
+run_test "atomic_cas_hit_then_miss" 'fn main() {
+    uint64 buf = alloc(64)
+    atomic_store(buf, 100)
+    uint64 ok_hit = atomic_cas(buf, 100, 200)
+    uint64 ok_miss = atomic_cas(buf, 100, 300)
+    uint64 v = atomic_load(buf)
+    if ok_hit == 1 && ok_miss == 0 && v == 200 { exit(42) }
+    exit(0)
+}' 42
+
 # --- Volatile blocks ---
 run_test "volatile_store_load" 'fn main() {
     uint64 buf = alloc(64)
