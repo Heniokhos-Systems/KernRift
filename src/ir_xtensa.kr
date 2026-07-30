@@ -281,6 +281,13 @@ fn xt_s8i(uint64 rt, uint64 rs, uint64 off)   { xt_rri8(2, rt, rs, 0x4, off) }
 fn xt_s16i(uint64 rt, uint64 rs, uint64 off)  { xt_rri8(2, rt, rs, 0x5, off >> 1) }
 fn xt_s32i(uint64 rt, uint64 rs, uint64 off)  { xt_rri8(2, rt, rs, 0x6, off >> 2) }
 fn xt_l16si(uint64 rt, uint64 rs, uint64 off) { xt_rri8(2, rt, rs, 0x9, off >> 1) }
+// S32C1I rt, rs, off : store-conditional. RRI8 op0=2, r=0xE. Like every RRI8
+// word access the 8-bit field is the offset in WORDS, hence >> 2. Encoding
+// verified against the Xtensa opcode tables (GBATEK's Xtensa reverse-
+// engineered opcode reference, ROOT\LSAI subtable: op0=2, r=E -> S32C1I),
+// consistent with QEMU's xtensa target decoding S32C1I as RRI8 case 14
+// (0xE) in the same op0=2 load/store-immediate group as S32I (r=0x6, :282).
+fn xt_s32c1i(uint64 rt, uint64 rs, uint64 off) { xt_rri8(2, rt, rs, 0xE, off >> 2) }
 
 // MOVI ar, imm12 (op0=2, r=0xA fixed): t=ar, s=imm12[11:8], imm8=imm12[7:0]
 fn xt_movi(uint64 rd, uint64 imm12) { xt_rri8(2, rd, (imm12 >> 8) & 0xF, 0xA, imm12 & 0xFF) }
@@ -2040,6 +2047,46 @@ fn ir_emit_xtensa_insn(uint64 ii) {
         if width == 1 { xt_l8ui(d, addr_reg, 0) }
         else if width == 2 { xt_l16ui(d, addr_reg, 0) }
         else { xt_l32i(d, addr_reg, 0) }
+        if dst_r == 0xFFFFFFFF { xt_store_spill(XT_A8, dest_v) }
+        return
+    }
+
+    // ----- IR_ATOMIC_CAS (93): atomic_cas(ptr, expected, desired) -> 1|0 -----
+    // Operands: ptr in src1, expected in src2, desired in `imm` (the imm-as-vreg
+    // convention — resolve it through xt_resolve_src like any other vreg).
+    //
+    // S32C1I at, as, 0 : SCOMPARE1 holds `expected`; `at` supplies `desired` on
+    // entry and receives the OLD memory word on exit. So `at` is DESTRUCTIVE —
+    // never hand it the caller's `desired` register; copy into a scratch first.
+    //
+    // KernRift's contract is a BOOLEAN (matching MLRift's ir.mlr:2039 / this
+    // dialect's ir.kr equivalent), not the old value, so compare the returned
+    // word against `expected` and materialise 0/1. Returning the old value
+    // would make `while atomic_cas(p, old, old+1) == 0` spin forever when
+    // old == 0, and would treat every failing CAS with a non-zero old value
+    // as success.
+    //
+    // SCOMPARE1 is special register 12. There is no XT_SR_* constant for it.
+    if op == 93 {
+        uint64 addr_reg = xt_resolve_src(s1_v, XT_A8)
+        uint64 exp_reg  = xt_resolve_src(s2_v, XT_A9)
+        uint64 des_reg  = xt_resolve_src(imm,  XT_A10)
+        xt_memw()
+        xt_wsr(12, exp_reg)          // WSR.SCOMPARE1
+        xt_rsync()
+        xt_mv(XT_A10, des_reg)       // scratch we own; S32C1I overwrites it
+        xt_s32c1i(XT_A10, addr_reg, 0)
+        // A10 now holds the OLD word. swapped == (old == expected).
+        uint64 d = dst_r
+        if d == 0xFFFFFFFF { d = XT_A8 }
+        // Branch-over-two-movi, exactly the compare pattern at :2140-2153.
+        // The +9/+12 displacements are the encoded sizes of what follows:
+        // beq(3) + movi(3) + j(3) = 9 to the true arm, + movi(3) = 12 to the end.
+        uint64 p = codegen_output_len()
+        xt_beq(XT_A10, exp_reg, p + 9)
+        xt_movi(d, 0)
+        xt_j(p + 12)
+        xt_movi(d, 1)
         if dst_r == 0xFFFFFFFF { xt_store_spill(XT_A8, dest_v) }
         return
     }
