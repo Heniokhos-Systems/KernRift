@@ -3486,6 +3486,40 @@ fn ir_lower_expr(uint64 node) -> uint64 {
                 } else if fk == 4 {
                     ir_emit(IR_STORE, 1, slot_v, val_v, 0, ir_current_bb)
                     ir_emit(IR_CONST, len_v, 0, 0, 1, ir_current_bb)
+                } else if ir_vreg_signed_get(val_v) != 0 {
+                    // Signed integer: IR_FMT_UINT alone printed the raw
+                    // two's-complement pattern, so `i64 n = -42` rendered as
+                    // 18446744073709551574. Emit the sign BRANCHLESSLY so no
+                    // new opcode and no extra basic block is needed (every
+                    // backend already implements SAR/AND/XOR/SUB/ADD/STORE):
+                    //
+                    //   sign = val >> 63        (arithmetic)  -> 0 or -1
+                    //   adv  = sign & 1                       -> 0 or 1
+                    //   abs  = (val ^ sign) - sign
+                    //
+                    // '-' is stored unconditionally at the slot; when the
+                    // value is non-negative adv is 0 and the first digit
+                    // simply overwrites it. Length is adv + digit count.
+                    uint64 fs_63 = ir_new_vreg()
+                    ir_emit(IR_CONST, fs_63, 0, 0, 63, ir_current_bb)
+                    uint64 fs_sign = ir_new_vreg()
+                    ir_emit(IR_SAR, fs_sign, val_v, fs_63, 0, ir_current_bb)
+                    uint64 fs_one = ir_new_vreg()
+                    ir_emit(IR_CONST, fs_one, 0, 0, 1, ir_current_bb)
+                    uint64 fs_adv = ir_new_vreg()
+                    ir_emit(IR_AND, fs_adv, fs_sign, fs_one, 0, ir_current_bb)
+                    uint64 fs_xor = ir_new_vreg()
+                    ir_emit(IR_XOR, fs_xor, val_v, fs_sign, 0, ir_current_bb)
+                    uint64 fs_abs = ir_new_vreg()
+                    ir_emit(IR_SUB, fs_abs, fs_xor, fs_sign, 0, ir_current_bb)
+                    uint64 fs_minus = ir_new_vreg()
+                    ir_emit(IR_CONST, fs_minus, 0, 0, 45, ir_current_bb)
+                    ir_emit(IR_STORE, 1, slot_v, fs_minus, 0, ir_current_bb)
+                    uint64 fs_slot2 = ir_new_vreg()
+                    ir_emit(IR_ADD, fs_slot2, slot_v, fs_adv, 0, ir_current_bb)
+                    uint64 fs_dlen = ir_new_vreg()
+                    ir_emit(IR_FMT_UINT, fs_dlen, fs_slot2, fs_abs, 0, ir_current_bb)
+                    ir_emit(IR_ADD, len_v, fs_dlen, fs_adv, 0, ir_current_bb)
                 } else {
                     ir_emit(IR_FMT_UINT, len_v, slot_v, val_v, 0, ir_current_bb)
                 }
