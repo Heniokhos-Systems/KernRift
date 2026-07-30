@@ -2482,6 +2482,31 @@ fn ir_lower_expr(uint64 node) -> uint64 {
                         // char -> single byte
                         ir_emit(IR_STORE, 1, slot_v, val_v, 0, ir_current_bb)
                         ir_emit(IR_CONST, len_v, 0, 0, 1, ir_current_bb)
+                    } else if ir_vreg_signed_get(val_v) != 0 {
+                        // Signed integer — same branchless sign handling as
+                        // the FString lowering below; see the comment there.
+                        // This is the variadic print path (println("n=", n)),
+                        // which had the identical bug.
+                        uint64 pv_63 = ir_new_vreg()
+                        ir_emit(IR_CONST, pv_63, 0, 0, 63, ir_current_bb)
+                        uint64 pv_sign = ir_new_vreg()
+                        ir_emit(IR_SAR, pv_sign, val_v, pv_63, 0, ir_current_bb)
+                        uint64 pv_one = ir_new_vreg()
+                        ir_emit(IR_CONST, pv_one, 0, 0, 1, ir_current_bb)
+                        uint64 pv_adv = ir_new_vreg()
+                        ir_emit(IR_AND, pv_adv, pv_sign, pv_one, 0, ir_current_bb)
+                        uint64 pv_xor = ir_new_vreg()
+                        ir_emit(IR_XOR, pv_xor, val_v, pv_sign, 0, ir_current_bb)
+                        uint64 pv_abs = ir_new_vreg()
+                        ir_emit(IR_SUB, pv_abs, pv_xor, pv_sign, 0, ir_current_bb)
+                        uint64 pv_minus = ir_new_vreg()
+                        ir_emit(IR_CONST, pv_minus, 0, 0, 45, ir_current_bb)
+                        ir_emit(IR_STORE, 1, slot_v, pv_minus, 0, ir_current_bb)
+                        uint64 pv_slot2 = ir_new_vreg()
+                        ir_emit(IR_ADD, pv_slot2, slot_v, pv_adv, 0, ir_current_bb)
+                        uint64 pv_dlen = ir_new_vreg()
+                        ir_emit(IR_FMT_UINT, pv_dlen, pv_slot2, pv_abs, 0, ir_current_bb)
+                        ir_emit(IR_ADD, len_v, pv_dlen, pv_adv, 0, ir_current_bb)
                     } else {
                         // integer
                         ir_emit(IR_FMT_UINT, len_v, slot_v, val_v, 0, ir_current_bb)
