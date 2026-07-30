@@ -2,6 +2,52 @@
 
 All notable changes to `kernriftc` are documented in this file.
 
+## v2.8.34 — 2026-07-30
+
+A correctness release. Three of these fixes produce wrong output or a silently
+missing artifact rather than a crash, so they are worth reading before you skip
+an upgrade.
+
+### Correctness
+
+- **Signed integers printed as raw two's complement.** `i64 n = -42` rendered as
+  `18446744073709551574` in both `println("n=", n)` and `f"n={n}"`. Since
+  `std/fmt` is `u64`-only and there is no `print_int` builtin, there was in
+  effect no way to print a negative number. Fixed on both the IR and `--legacy`
+  backends, on x86_64 and ARM64, including `INT64_MIN` — whose absolute value
+  does not fit in `i64`.
+- **A failed output file reported success.** Compiling to a path whose directory
+  does not exist printed the usual `N tokens, M nodes, K bytes -> path` line and
+  exited 0, having written nothing: `file_open`'s failure return was unchecked,
+  so the following write went to a bogus descriptor. A build script writing into
+  a `dist/` it had not created yet got a green build and no artifact. Now fails
+  loudly, checked at a single choke point so no future emit path can skip it.
+- **`f64` → integer conversion now saturates on x86_64**, matching ARM64 and
+  WebAssembly. Out-of-range and NaN conversions previously diverged between
+  architectures.
+- **RISC-V: one spill slot per vreg.** The previous mapping could underflow.
+- **The project is Apache-2.0, and now says so.** The README's License section,
+  the winget manifest and the winget-PR generator all claimed MIT while
+  `LICENSE` has always been Apache-2.0.
+
+### Performance
+
+- **ARM64 shifted-index addressing** on loads and stores
+  (`ldr Xd, [Xbase, Xidx, LSL #3]`), which the backend previously never emitted.
+  On a Cortex-A72, best-of-9: matmul 67 → 58 ms, sha256 936 → 917 ms, sort
+  352 → 334 ms.
+
+### Tooling
+
+- **The VS Code extension shipped a DoS-vulnerable `brace-expansion`.** It
+  arrived via `vscode-languageclient` → `minimatch`, a *runtime* dependency that
+  esbuild bundles into the published `.vsix`. Now on `vscode-languageclient`
+  10.1.0; `engines.vscode` moves to `^1.91.0` accordingly.
+- The `.kr` file icon is derived from the real logo instead of a hand-drawn
+  approximation.
+- Packaging and CI URLs now use the canonical `Heniokhos-Systems` org rather
+  than a name that only resolved through a GitHub redirect.
+
 ## v2.8.33 — 2026-07-28
 
 A correctness release with a large floating-point performance improvement.
