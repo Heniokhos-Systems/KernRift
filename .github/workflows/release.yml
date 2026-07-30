@@ -296,8 +296,12 @@ jobs:
           PackageVersion: $VERSION
           InstallerType: zip
           NestedInstallerType: portable
+          # Extensions the package SUPPORTS (i.e. can open), per the winget
+          # schema — not the extension of its own binaries. This is a
+          # compiler: it consumes .kr source. It said 'exe' for several
+          # releases, which claimed the package handles executables.
           FileExtensions:
-          - exe
+          - kr
           Commands:
           - krc
           - kr
