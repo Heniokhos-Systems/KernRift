@@ -8981,6 +8981,30 @@ var FullTextDocument = class _FullTextDocument {
     const offset = Math.min(lineOffset + position.character, nextLineOffset);
     return this.ensureBeforeEOL(offset, lineOffset);
   }
+  getLineRange(line) {
+    const lineOffsets = this.getLineOffsets();
+    if (line >= lineOffsets.length) {
+      const lastLine = lineOffsets.length - 1;
+      return { start: { line: lastLine, character: 0 }, end: { line: lastLine, character: this._content.length - lineOffsets[lastLine] } };
+    } else if (line < 0) {
+      return { start: { line: 0, character: 0 }, end: { line: 0, character: 0 } };
+    }
+    const startOffset = lineOffsets[line];
+    const nextLineOffset = line + 1 < lineOffsets.length ? lineOffsets[line + 1] : this._content.length;
+    const endOffset = this.ensureBeforeEOL(nextLineOffset, startOffset);
+    return { start: { line, character: 0 }, end: { line, character: endOffset - startOffset } };
+  }
+  getEOLCharacters(line) {
+    const lineOffsets = this.getLineOffsets();
+    if (line >= lineOffsets.length) {
+      return "";
+    } else if (line < 0) {
+      return "";
+    }
+    const nextLineOffset = line + 1 < lineOffsets.length ? lineOffsets[line + 1] : this._content.length;
+    const eolOffset = this.ensureBeforeEOL(nextLineOffset, lineOffsets[line]);
+    return this._content.substring(eolOffset, nextLineOffset);
+  }
   ensureBeforeEOL(offset, lineOffset) {
     while (offset > lineOffset && isEOL(this._content.charCodeAt(offset - 1))) {
       offset--;
