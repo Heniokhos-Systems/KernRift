@@ -587,7 +587,7 @@ fn import_process(uint64 file_path) {
         write(2, "\n", 1)
         // Don't exit here — let compilation continue so the parser can report
         // the downstream errors this missing module causes. But record the
-        // failure: codegen_write_output refuses to emit a binary if this is
+        // failure: open_output_or_die refuses to emit a binary if this is
         // set. Previously neither happened, so an import failure that did not
         // break the parse produced a binary and exit 0.
         import_failed = 1

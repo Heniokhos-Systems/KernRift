@@ -8556,6 +8556,34 @@ else
 fi
 rm -f "$ESP_IMP_SRC" "$ESP_IMP_BIN"
 
+# --- esp32 import-free build: positive control for the test above ---
+# Minor finding 7 (final review): esp32_import_failure_aborts above asserts
+# exit 1 + no file, but never proves the esp32 path can exit 0 + write a file
+# AT ALL. If the esp32 build path ever starts exiting 1 for some unrelated
+# reason (e.g. a bug in a completely different check), the test above would
+# keep passing vacuously -- even with the import_failed guard deleted
+# entirely. Pair it with the same-shape build MINUS the bad import, asserting
+# the opposite: exit 0 and a file present.
+echo ""
+echo "--- esp32 import-free build succeeds (positive control) ---"
+ESP_IMP_OK_SRC="/tmp/krc_esp32_import_ok_src_$$.kr"
+ESP_IMP_OK_BIN="/tmp/krc_esp32_import_ok_bin_$$.bin"
+printf 'fn main() { loop { } }\n' > "$ESP_IMP_OK_SRC"
+rm -f "$ESP_IMP_OK_BIN"
+$KRC --arch=xtensa --freestanding --target=esp32 "$ESP_IMP_OK_SRC" -o "$ESP_IMP_OK_BIN" >/dev/null 2>&1
+ESP_IMP_OK_EXIT=$?
+TOTAL=$((TOTAL + 1))
+if [ "$ESP_IMP_OK_EXIT" = 0 ] && [ -e "$ESP_IMP_OK_BIN" ] && [ -s "$ESP_IMP_OK_BIN" ]; then
+    PASS=$((PASS + 1))
+    echo "  esp32_import_free_build_ok: PASS (exit=0, $(wc -c < "$ESP_IMP_OK_BIN" | tr -d ' ')B image written)"
+else
+    ESP_IMP_OK_HAVE_FILE="no"
+    [ -e "$ESP_IMP_OK_BIN" ] && ESP_IMP_OK_HAVE_FILE="yes"
+    echo "FAIL: esp32_import_free_build_ok (expected exit 0 and an output file, got exit=$ESP_IMP_OK_EXIT, file written=$ESP_IMP_OK_HAVE_FILE)"
+    FAIL=$((FAIL + 1))
+fi
+rm -f "$ESP_IMP_OK_SRC" "$ESP_IMP_OK_BIN"
+
 # --- Summary ---
 echo ""
 echo "=== Results: $PASS/$TOTAL passed, $FAIL failed ==="
