@@ -8500,6 +8500,36 @@ else
 fi
 rm -rf "$TWAI_DIR"
 
+# --- esp32 import failure must abort with exit 1, not exit 0 + a written image ---
+# Regression for the import_failed bypass (parity with MLRift): codegen_write_output
+# checked import_failed, but the esp32 freestanding image path (and the
+# asm-listing path) call open_output_or_die directly and never went through
+# codegen_write_output, so a build with an unresolvable import printed
+# "error: cannot open import: ..." to stderr, wrote an image anyway, and
+# exited 0 -- a build script watching $? saw success. Assert the compiler's
+# own exit code and that no file was written, not the error text: the error
+# text already printed before the fix, so a text-only check would pass
+# against the broken compiler and prove nothing.
+echo ""
+echo "--- esp32 import failure aborts (exit code, not just error text) ---"
+ESP_IMP_SRC="/tmp/krc_esp32_import_fail_src_$$.kr"
+ESP_IMP_BIN="/tmp/krc_esp32_import_fail_bin_$$.bin"
+printf 'import "std/__import_failure_regression_nonexistent.kr"\nfn main() { loop { } }\n' > "$ESP_IMP_SRC"
+rm -f "$ESP_IMP_BIN"
+$KRC --arch=xtensa --freestanding --target=esp32 "$ESP_IMP_SRC" -o "$ESP_IMP_BIN" >/dev/null 2>&1
+ESP_IMP_EXIT=$?
+TOTAL=$((TOTAL + 1))
+if [ "$ESP_IMP_EXIT" = 1 ] && [ ! -e "$ESP_IMP_BIN" ]; then
+    PASS=$((PASS + 1))
+    echo "  esp32_import_failure_aborts: PASS (exit=$ESP_IMP_EXIT, no output file written)"
+else
+    ESP_IMP_HAVE_FILE="no"
+    [ -e "$ESP_IMP_BIN" ] && ESP_IMP_HAVE_FILE="yes"
+    echo "FAIL: esp32_import_failure_aborts (expected exit 1 and no output file, got exit=$ESP_IMP_EXIT, file written=$ESP_IMP_HAVE_FILE)"
+    FAIL=$((FAIL + 1))
+fi
+rm -f "$ESP_IMP_SRC" "$ESP_IMP_BIN"
+
 # --- Summary ---
 echo ""
 echo "=== Results: $PASS/$TOTAL passed, $FAIL failed ==="

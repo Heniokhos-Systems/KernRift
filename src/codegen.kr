@@ -15613,8 +15613,10 @@ fn emit_coff_relocatable(uint64 text_len, uint64 data_len, uint64 arch) {
 // binary: an import whose absence happens not to break the parse (e.g. the
 // file only used built-ins) previously compiled "successfully" and exited 0,
 // so a build script saw a green result and a silently wrong artifact.
-// Checked here rather than at the six codegen_write_output call sites, so no
-// future emit path can forget it.
+// Checked in open_output_or_die below, not in codegen_write_output: that is
+// the one choke point every output path shares (asm listing and the esp32
+// image writer in main.kr both call it directly and never touch
+// codegen_write_output), so no future emit path can forget it.
 static uint64 import_failed = 0
 
 // file_open returns >= 0xFFFFFFFF on failure — the output directory does not
@@ -15623,7 +15625,17 @@ static uint64 import_failed = 0
 // its usual "N tokens, M nodes, K bytes -> path" line and exited 0 having
 // produced NO FILE. A release script that writes into a dist/ it has not
 // created yet therefore got a green build and no artifact.
+//
+// Checked HERE, not in codegen_write_output: main.kr:901 (asm listing) and
+// main.kr:2796 (esp32 image) call this directly and bypass
+// codegen_write_output entirely. This is the one choke point every output
+// path shares, so a new writer cannot forget it.
 fn open_output_or_die(uint64 output_path) -> uint64 {
+    if import_failed != 0 {
+        uint64 imp_err = "error: compilation aborted: one or more imports could not be opened\n"
+        write(2, imp_err, str_len(imp_err))
+        exit(1)
+    }
     uint64 fd = file_open(output_path, 1)
     if fd >= 0xFFFFFFFF {
         uint64 oerr = "error: cannot open output file for writing: "
@@ -15636,11 +15648,6 @@ fn open_output_or_die(uint64 output_path) -> uint64 {
 }
 
 fn codegen_write_output(uint64 output_path) {
-    if import_failed != 0 {
-        uint64 imp_err = "error: compilation aborted: one or more imports could not be opened\n"
-        write(2, imp_err, str_len(imp_err))
-        exit(1)
-    }
     uint64 fd = open_output_or_die(output_path)
     file_write(fd, out_buf, out_len)
     file_close(fd)
