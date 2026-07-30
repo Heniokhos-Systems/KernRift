@@ -1,5 +1,19 @@
 # Changelog
 
+## 2.8.34
+
+- **Security**: `vscode-languageclient` 9 pulled a DoS-vulnerable
+  `brace-expansion` through `minimatch`. That is a *runtime* dependency which
+  esbuild bundles into the published `.vsix`, so the vulnerable code shipped —
+  it was not confined to build tooling. Now on `vscode-languageclient` 10.1.0
+  (`npm audit` clean).
+- **Requires VS Code 1.91 or later** (was 1.90). This is the minimum the new
+  language client supports.
+- The `.kr` file icon is now derived from the real logo rather than a
+  hand-drawn approximation, cropped to the glyph so it stays legible at the
+  16px the explorer actually renders.
+- Repository URLs point at the canonical `Heniokhos-Systems` org.
+
 ## 2.8.31
 
 - Marketplace listing polish: accurate description and keywords, a rewritten

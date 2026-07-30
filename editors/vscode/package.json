@@ -2,7 +2,7 @@
   "name": "kernrift",
   "displayName": "KernRift",
   "description": "Syntax highlighting, live diagnostics, and IntelliSense (completions, hover, go-to-definition) for KernRift — the self-hosted, bare-metal systems language (.kr).",
-  "version": "2.8.31",
+  "version": "2.8.34",
   "keywords": [
     "kernrift",
     "kr",
