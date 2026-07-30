@@ -1109,6 +1109,24 @@ fn gen_expr_a64(uint64 node) {
                 emit_a64_add_imm(0, 31, fs_buf_abs)     // x0 = dest = sp+buf+off
                 emit_a64_ldr(10, 31, fs_off_abs)
                 emit_a64_add(0, 0, 10)
+                // Signed values: same branchless sign handling as the IR
+                // backend (f341a32/0041ba2) — sign = val>>63 (arithmetic,
+                // 0 or -1), adv = -sign (0 or 1), abs = (val^sign)-sign.
+                // '-' is stored unconditionally at dest; when non-negative
+                // adv is 0 and the first digit overwrites it. x8 (adv) is
+                // folded into the digit count below. Unsigned values are
+                // untouched (fs_c_signed stays 0, none of this emits).
+                uint64 fs_c_signed = legacy_node_is_signed(wfs_c)
+                if fs_c_signed != 0 {
+                    emit_a64_mov_imm(9, 63)
+                    emit_a64_asr(7, 1, 9)                // x7 = sign (0 or -1)
+                    emit_a64_sub(8, 31, 7)                // x8 = adv = -sign (0 or 1)
+                    emit_a64_mov_imm(9, 45)               // '-'
+                    emit_a64(0x39000009)                  // strb w9, [x0]
+                    emit_a64_eor(1, 1, 7)                 // x1 ^= sign
+                    emit_a64_sub(1, 1, 7)                 // x1 -= sign  (x1 = abs)
+                    emit_a64_add(0, 0, 8)                 // x0 += adv
+                }
                 emit_a64_mov_imm(2, 0)                  // digit count
                 emit_a64_mov_imm(3, 10)                 // divisor
                 emit_a64_add_imm(12, 31, fs_scr_abs)    // scratch base
@@ -1122,6 +1140,9 @@ fn gen_expr_a64(uint64 node) {
                 uint64 fu_back = fu_loop - out_len
                 emit_a64(0xB5000000 | (a64_check_b19(fu_back) << 5) | 1) // cbnz x1
                 emit_a64_mov(6, 2)                      // x6 = digit count
+                if fs_c_signed != 0 {
+                    emit_a64_add(6, 6, 8)                // x6 += adv (include the '-')
+                }
                 uint64 fu_copy = out_len
                 emit_a64(0xB4000000 | 2)               // cbz x2, done (patched)
                 emit_a64(0xD1000442)                    // sub x2,x2,#1
@@ -2517,6 +2538,21 @@ fn gen_expr_a64(uint64 node) {
                     uint64 apv_nzd = apv_nz - apv_cbz2
                     patch_u32(apv_cbz2, 0xB5000000 | (a64_check_b19(apv_nzd) << 5) | 0)
                     emit_a64_load_x0(temp_slot_0)
+                    // Signed values: negate to the magnitude before the
+                    // unsigned div-by-10 loop below, and keep x14 as the
+                    // "was negative" flag (0 or -1 from an arithmetic
+                    // shift) so a '-' can be prepended after the digits
+                    // are laid down (this buffer fills right-to-left from
+                    // a fixed end anchor, so the sign is written last, one
+                    // byte to the left of the first digit). Unsigned
+                    // values are untouched (apv_signed stays 0).
+                    uint64 apv_signed = legacy_node_is_signed(apv_warg)
+                    if apv_signed != 0 {
+                        emit_a64_mov_imm(15, 63)
+                        emit_a64_asr(14, 0, 15)       // x14 = sign (0 or -1)
+                        emit_a64_eor(0, 0, 14)
+                        emit_a64_sub(0, 0, 14)        // x0 = abs(value)
+                    }
                     emit_a64_add_imm(9, 31, a64_var_base + digit_buf + 19)
                     emit_a64_mov_imm(10, 0)
                     emit_a64_mov_imm(11, 10)
@@ -2531,6 +2567,21 @@ fn gen_expr_a64(uint64 node) {
                     uint64 apv_divbk = apv_div - out_len
                     emit_a64(0xB5000000 | (a64_check_b19(apv_divbk) << 5) | 0)
                     emit_a64_add_imm(9, 9, 1)
+                    // If negative (x14 != 0, set above), prepend '-' one
+                    // byte to the left of the digits just written and
+                    // count it. Max signed magnitude is 19 digits, so
+                    // digit_buf+0 is always free (mirrors the x86_64
+                    // legacy backend's identical reasoning).
+                    if apv_signed != 0 {
+                        uint64 apv_nosign_j = out_len
+                        emit_a64_cbz(14, 0)
+                        emit_a64(0xD1000400 | (9 << 5) | 9)  // sub x9, x9, #1
+                        emit_a64_mov_imm(15, 45)              // '-'
+                        emit_a64_strb(15, 9, 0)
+                        emit_a64_add_imm(10, 10, 1)           // len += 1
+                        uint64 apv_nosign_d = out_len - apv_nosign_j
+                        patch_u32(apv_nosign_j, 0xB4000000 | (a64_check_b19(apv_nosign_d) << 5) | 14)
+                    }
                     emit_a64_mov(1, 9)
                     emit_a64_mov(2, 10)
                     if target_os == 2 {

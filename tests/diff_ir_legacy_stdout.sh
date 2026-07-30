@@ -47,6 +47,8 @@ dc "int_to_str"  'import "std/string.kr"
 fn main(){ u64 s=int_to_str(98765); println_str(s); exit(0) }'
 dc "print_loop"  'fn main(){ u64 i=0; while i<5{ println(i); i=i+1 } exit(0) }'
 dc "neg_print"   'fn main(){ i64 n=0-42; println(n); exit(0) }'
+dc "neg_print_labeled" 'fn main(){ i64 n=0-42; println("x=", n); exit(0) }'
+dc "neg_fstring"       'fn main(){ i64 n=0-42; println(f"x={n}"); exit(0) }'
 dc "fmt_f64"     'import "std/math_float.kr"
 fn main(){ f64 x=int_to_f64(1); f64 y=int_to_f64(3); println_str(fmt_f64(x/y, 6)); exit(0) }'
 dc "fmt_f64_neg" 'import "std/math_float.kr"

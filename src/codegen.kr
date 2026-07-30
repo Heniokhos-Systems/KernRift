@@ -3978,6 +3978,24 @@ fn gen_expr(uint64 node) {
                 emit_byte(0x48); emit_byte(0x01); emit_byte(0xCF)  // add rdi, rcx
                 // rdi = dest. Load value.
                 emit_load_rax_from_stack(temp_slot_0)
+                // Signed values: same branchless sign handling as the IR
+                // backend (f341a32/0041ba2) — sign = val>>63 (arithmetic,
+                // 0 or -1), adv = sign&1 (0 or 1), abs = (val^sign)-sign.
+                // '-' is stored unconditionally at dest; when non-negative
+                // adv is 0 and the first digit overwrites it. r8 holds adv
+                // and is folded into the length below. Unsigned values are
+                // untouched (fs_signed stays 0, none of this emits).
+                uint64 fs_signed = legacy_node_is_signed(wfs_child)
+                if fs_signed != 0 {
+                    emit_byte(0x49); emit_byte(0x89); emit_byte(0xC1)   // mov r9, rax
+                    emit_byte(0x49); emit_byte(0xC1); emit_byte(0xF9); emit_byte(0x3F)  // sar r9, 63
+                    emit_byte(0x4D); emit_byte(0x89); emit_byte(0xC8)   // mov r8, r9
+                    emit_byte(0x49); emit_byte(0x83); emit_byte(0xE0); emit_byte(0x01)  // and r8, 1
+                    emit_byte(0xC6); emit_byte(0x07); emit_byte(0x2D)   // mov byte [rdi], '-'
+                    emit_byte(0x4C); emit_byte(0x31); emit_byte(0xC8)   // xor rax, r9
+                    emit_byte(0x4C); emit_byte(0x29); emit_byte(0xC8)   // sub rax, r9  (rax = abs)
+                    emit_byte(0x4C); emit_byte(0x01); emit_byte(0xC7)   // add rdi, r8  (rdi = dest + adv)
+                }
                 // zero check
                 emit_byte(0x48); emit_byte(0x85); emit_byte(0xC0)
                 emit_byte(0x0F); emit_byte(0x85)
@@ -4037,6 +4055,9 @@ fn gen_expr(uint64 node) {
                 // len = rdi - r11
                 emit_byte(0x4C); emit_byte(0x29); emit_byte(0xDF)   // sub rdi, r11
                 emit_byte(0x49); emit_byte(0x89); emit_byte(0xFA)   // mov r10, rdi (len)
+                if fs_signed != 0 {
+                    emit_byte(0x4D); emit_byte(0x01); emit_byte(0xC2)  // add r10, r8 (len += adv)
+                }
                 uint64 fs_jfin_t = out_len - fs_jfin - 4
                 uint32 fs_jfin_t32 = fs_jfin_t
                 unsafe { *((out_buf + fs_jfin) as uint32) = fs_jfin_t32 }
@@ -6174,6 +6195,21 @@ fn gen_expr(uint64 node) {
                     uint64 pr_nz = out_len
                     patch_u32(pr_jnz, pr_nz - pr_jnz - 4)
                     emit_load_rax_from_stack(temp_slot_0)
+                    // Signed values: negate to the magnitude before the
+                    // unsigned div-by-10 loop below, and keep r9 as the
+                    // "was negative" flag (0 or -1 from an arithmetic shift)
+                    // so a '-' can be prepended after the digits are laid
+                    // down (this buffer fills right-to-left from a fixed
+                    // end anchor, so the sign is written last, one byte to
+                    // the left of the first digit). Unsigned values are
+                    // untouched (pr_signed stays 0, none of this emits).
+                    uint64 pr_signed = legacy_node_is_signed(pr_warg)
+                    if pr_signed != 0 {
+                        emit_byte(0x49); emit_byte(0x89); emit_byte(0xC1)   // mov r9, rax
+                        emit_byte(0x49); emit_byte(0xC1); emit_byte(0xF9); emit_byte(0x3F)  // sar r9, 63
+                        emit_byte(0x4C); emit_byte(0x31); emit_byte(0xC8)   // xor rax, r9
+                        emit_byte(0x4C); emit_byte(0x29); emit_byte(0xC8)   // sub rax, r9  (rax = abs)
+                    }
                     emit_byte(0x48); emit_byte(0x8D)
                     uint64 pr_dend = digit_buf + 19
                     if pr_dend < 128 {
@@ -6195,6 +6231,23 @@ fn gen_expr(uint64 node) {
                     uint64 pr_dlb2 = pr_dloop - out_len - 1
                     uint8 pr_dlbb2 = pr_dlb2; emit_byte(pr_dlbb2)
                     emit_byte(0x48); emit_byte(0xFF); emit_byte(0xC7)
+                    // If negative (r9 != 0, set above), prepend '-' one byte
+                    // to the left of the digits just written and count it.
+                    // Max signed magnitude is 19 digits (INT64_MIN's abs is
+                    // 9223372036854775808), so digit_buf+0 is always free
+                    // when pr_dend = digit_buf+19 (unsigned's 20-digit max
+                    // fills digit_buf+0..+19 exactly, leaving no slack, but
+                    // unsigned never sets r9/pr_signed so it never reaches
+                    // this branch).
+                    if pr_signed != 0 {
+                        emit_byte(0x4D); emit_byte(0x85); emit_byte(0xC9)   // test r9, r9
+                        emit_byte(0x0F); emit_byte(0x84)                     // jz near no_sign
+                        uint64 pr_nosign_j = out_len; emit_u32_le(0)
+                        emit_byte(0x48); emit_byte(0xFF); emit_byte(0xCF)   // dec rdi
+                        emit_byte(0xC6); emit_byte(0x07); emit_byte(0x2D)   // mov byte [rdi], '-'
+                        emit_byte(0xFF); emit_byte(0xC1)                    // inc ecx (len += 1)
+                        patch_u32(pr_nosign_j, out_len - pr_nosign_j - 4)
+                    }
                     if target_os == 2 {
                         emit_byte(0x57); emit_byte(0x51)
                         emit_mov_rax_imm(0xFFFFFFFFFFFFFFF5)
