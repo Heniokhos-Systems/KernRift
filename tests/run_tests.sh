@@ -5943,6 +5943,29 @@ else
 fi
 rm -f "$XT_CAP_KR" "$XT_CAP_BIN"
 
+echo ""
+echo "--- xtensa simcall encoding ---"
+TOTAL=$((TOTAL + 1))
+XT_SC_SRC="/tmp/krc_xt_simcall_$$.kr"
+XT_SC_BIN="/tmp/krc_xt_simcall_$$.elf"
+XT_SC_CTL="/tmp/krc_xt_simctl_$$.kr"
+XT_SC_CBIN="/tmp/krc_xt_simctl_$$.elf"
+# Differential: the SAME program with and without the simcall. Grepping one
+# image alone could match 00 51 00 occurring by chance in unrelated bytes.
+printf '@naked fn s() { asm("simcall") }\nfn main() { s() }\n' > "$XT_SC_SRC"
+printf '@naked fn s() { asm("nop") }\nfn main() { s() }\n'     > "$XT_SC_CTL"
+if $KRC --arch=xtensa --freestanding "$XT_SC_SRC" -o "$XT_SC_BIN"  >/dev/null 2>&1 \
+   && $KRC --arch=xtensa --freestanding "$XT_SC_CTL" -o "$XT_SC_CBIN" >/dev/null 2>&1 \
+   && xxd -p "$XT_SC_BIN"  | tr -d '\n' | grep -q "005100" \
+   && ! xxd -p "$XT_SC_CBIN" | tr -d '\n' | grep -q "005100"; then
+    PASS=$((PASS + 1))
+    echo "  xtensa_simcall_encoding: PASS (0x005100 present only with simcall)"
+else
+    echo "FAIL: xtensa_simcall_encoding (expected 00 51 00 with simcall and absent without)"
+    FAIL=$((FAIL + 1))
+fi
+rm -f "$XT_SC_SRC" "$XT_SC_BIN" "$XT_SC_CTL" "$XT_SC_CBIN"
+
 
 # --- RISC-V RV32 IR_STR_CONST via pcrel auipc+addi (feature-gap Task 1) ---
 # Compiles examples/riscv-featuregap/t1_strconst.kr, which takes the address

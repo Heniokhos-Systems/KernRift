@@ -244,6 +244,14 @@ fn xt_srai(uint64 rd, uint64 rs, uint64 sa) { xt_rrr(0, rs, sa & 0xF, rd, 1, 0x2
 
 // MEMW: fixed encoding, no operands (op0=0,t=0xC,s=0,r=2,op1=0,op2=0)
 fn xt_memw() { xt_rrr(0, 0xC, 0, 2, 0, 0) }
+// SIMCALL — qemu semihosting entry. a2 = call number (SYS_exit = 1),
+// a3 = status. 0x005100 => t=0, s=1, r=5 in xt_rrr's
+// op0 | t<<4 | s<<8 | r<<12 | op1<<16 | op2<<20 layout (compare xt_memw,
+// which is xt_rrr(0,0xC,0,2,0,0) = 0x0020C0).
+//
+// Under qemu WITHOUT -semihosting this instruction is a silent NO-OP,
+// not a trap: an image that relies on it to exit will simply run forever.
+fn xt_simcall() { xt_rrr(0, 0, 1, 5, 0, 0) }
 // RSYNC: same RRR group as MEMW, t=1 (word 0x002010) — waits for a WSR to a
 // special register (PS here) to take effect before dependent instructions.
 fn xt_rsync() { xt_rrr(0, 1, 0, 2, 0, 0) }
@@ -1646,6 +1654,7 @@ fn asm_emit_xt(uint64 str_tok) {
     // Nullary intrinsics (fixed-width words; NOP.N = 16-bit, MEMW = 24-bit).
     if asm_match(sptr, 0, "nop", 3) != 0 && slen == 3 { xt_nop_n(); return }
     if asm_match(sptr, 0, "memw", 4) != 0 && slen == 4 { xt_memw(); return }
+    if asm_match(sptr, 0, "simcall", 7) != 0 && slen == 7 { xt_simcall(); return }
 
     // Unrecognized mnemonic — hard error (loud, like the riscv path). Operand
     // and raw-hex forms are out of scope for this MVP (widths are ambiguous on
