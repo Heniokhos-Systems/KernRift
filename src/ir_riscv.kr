@@ -2195,7 +2195,51 @@ fn ir_emit_riscv_insn(uint64 ii) {
 
     // ----- IR_SYSCALL (52): hosted Linux syscall -----
     if op == 52 {
+        if freestanding != 0 && imm == 231 {
+            // Bare metal on qemu's `virt` machine: there is no kernel to
+            // ecall into. Terminate the emulator through the sifive_test
+            // device at 0x00100000, whose fail word is 0x3333 | (code << 16)
+            // and which exits qemu with `code`.
+            //
+            // Gated on imm == 231 (exit_group) specifically: op 52 also
+            // carries write/read/open/etc in hosted mode, and none of
+            // those have a bare-metal lowering yet, so they must still
+            // fall through to the NYI error below rather than being
+            // silently mis-lowered as an exit.
+            //
+            // The code is NOT in `imm` — `imm` is 231, the exit_group syscall
+            // number (ir.kr:1751). The code arrives in a0 via IR_ARG (op 51,
+            // ir_riscv.kr:1516 places arg i at RV_A0 + i), so the magic word
+            // must be built at RUNTIME from a0.
+            //
+            // Only the fail encoding is used: 0x3333 | (0 << 16) exits qemu
+            // with status 0 (measured), so exit(0) needs no special case and
+            // the dedicated 0x5555 pass word is unnecessary.
+            //
+            // ⚠️ Hard-codes a `virt`-only MMIO address. riscv32 freestanding
+            // has no machine/board flag today, so every artifact in the repo
+            // is a virt image. Adding a riscv32 `--target=` would invalidate
+            // this and must revisit it.
+            //
+            // No spill store for dst_r == 0xFFFFFFFF: op 52 carries a dest
+            // vreg and hosted callers read it (ir.kr:1751), but this path
+            // never returns, so the value is unreachable. A reader will
+            // otherwise expect the op-94/95 spill idiom.
+            emit_u32_le(0x01051293)    // slli t0, a0, 16
+            rv_li(6, 0x3333)           // li   t1, 0x3333
+            emit_u32_le(0x0062E2B3)    // or   t0, t0, t1
+            rv_li(11, 0x100000)        // li   a1, sifive_test
+            emit_u32_le(0x0055A023)    // sw   t0, 0(a1)
+            // A value the device ignores leaves qemu running and execution
+            // would fall through into whatever bytes follow. Trap instead.
+            emit_u32_le(0x00100073)    // ebreak
+            return
+        }
         if freestanding != 0 {
+            // Any other syscall (write, read, open, ...) has no bare-metal
+            // lowering yet — fail loud rather than fall into the hosted
+            // ecall path below, which would silently emit a meaningless
+            // Linux syscall on qemu `virt`.
             rv_nyi_op(op)
             return
         }

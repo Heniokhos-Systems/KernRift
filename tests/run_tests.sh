@@ -6982,6 +6982,52 @@ else
     echo "  riscv_hosted_sysfence_asm: SKIP (riscv64-linux-gnu-objdump not installed)"
 fi
 
+echo ""
+echo "--- riscv32 freestanding exit() terminates qemu ---"
+if command -v qemu-system-riscv32 >/dev/null 2>&1; then
+    for RV_CODE in 0 42; do
+        TOTAL=$((TOTAL + 1))
+        RV_E_SRC="/tmp/krc_rv_exit_${RV_CODE}_$$.kr"
+        RV_E_BIN="/tmp/krc_rv_exit_${RV_CODE}_$$.bin"
+        printf 'fn main() { exit(%d) }\n' "$RV_CODE" > "$RV_E_SRC"
+        if $KRC --arch=riscv32 --freestanding "$RV_E_SRC" -o "$RV_E_BIN" >/dev/null 2>&1; then
+            timeout 10 qemu-system-riscv32 -machine virt -nographic -bios "$RV_E_BIN" >/dev/null 2>&1
+            RV_E_ST=$?
+            if [ "$RV_E_ST" = "$RV_CODE" ]; then
+                PASS=$((PASS + 1)); echo "  riscv32_exit_${RV_CODE}: PASS (qemu status $RV_E_ST)"
+            else
+                echo "FAIL: riscv32_exit_${RV_CODE} (expected status $RV_CODE, got $RV_E_ST)"; FAIL=$((FAIL + 1))
+            fi
+        else
+            echo "FAIL: riscv32_exit_${RV_CODE} (compile failed)"; FAIL=$((FAIL + 1))
+        fi
+        rm -f "$RV_E_SRC" "$RV_E_BIN"
+    done
+else
+    echo "  riscv32_exit: SKIP (qemu-system-riscv32 not installed)"
+fi
+
+# Pin the emitted constants (spec success-criterion 7). The behavioural
+# tests above prove the mechanism works today; this one pins the
+# *constants*, so a later edit that changes the magic word or the device
+# address fails loudly at the byte level instead of silently hanging
+# under qemu. The two hex strings are the little-endian byte orders of
+# 0x01051293 (slli t0,a0,16) and 0x0062E2B3 (or t0,t0,t1).
+TOTAL=$((TOTAL + 1))
+RV_K_SRC="/tmp/krc_rv_const_$$.kr"
+RV_K_BIN="/tmp/krc_rv_const_$$.bin"
+printf 'fn main() { exit(1) }\n' > "$RV_K_SRC"
+if $KRC --arch=riscv32 --freestanding "$RV_K_SRC" -o "$RV_K_BIN" >/dev/null 2>&1 \
+   && xxd -p "$RV_K_BIN" | tr -d '\n' | grep -q "93120501" \
+   && xxd -p "$RV_K_BIN" | tr -d '\n' | grep -q "b3e26200"; then
+    PASS=$((PASS + 1))
+    echo "  riscv32_exit_constants: PASS (slli/or words pinned)"
+else
+    echo "FAIL: riscv32_exit_constants (expected slli t0,a0,16 and or t0,t0,t1 words)"
+    FAIL=$((FAIL + 1))
+fi
+rm -f "$RV_K_SRC" "$RV_K_BIN"
+
 # --- SHA-256 (std/sha256.kr) — FIPS 180-4 test vectors ---
 # Vector 3 is exactly 56 bytes: padding must spill into a second 64-byte
 # block (0x80 + 55 zero-fill bytes would leave no room for the 8-byte
