@@ -898,7 +898,7 @@ fn xtensa_nyi(uint64 what) {
 }
 
 fn emit_asm_listing(uint64 output_path, uint64 arch, uint64 text_start, uint64 source, uint64 tokens) {
-    uint64 fd = file_open(output_path, 1)
+    uint64 fd = open_output_or_die(output_path)
     uint64 code_end = codegen_output_len()
     write(fd, "; KernRift assembly listing\n", 27)
     if arch == 0 {
@@ -2793,7 +2793,7 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
             // Write the container buffer (NOT out_buf — the blob was raw
             // material for the segments). A flash image is data, not a host
             // executable: no set_executable.
-            uint64 esp_fd = file_open(output_path, 1)
+            uint64 esp_fd = open_output_or_die(output_path)
             write(esp_fd, esp_image_buf, esp_image_len)
             file_close(esp_fd)
             uint8[64] esnb

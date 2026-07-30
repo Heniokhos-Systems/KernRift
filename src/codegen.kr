@@ -15564,13 +15564,31 @@ fn emit_coff_relocatable(uint64 text_len, uint64 data_len, uint64 arch) {
 // future emit path can forget it.
 static uint64 import_failed = 0
 
+// file_open returns >= 0xFFFFFFFF on failure — the output directory does not
+// exist, is not writable, or the path is a directory. Unchecked, the write()
+// that follows goes to a bogus fd and does nothing, so the compiler printed
+// its usual "N tokens, M nodes, K bytes -> path" line and exited 0 having
+// produced NO FILE. A release script that writes into a dist/ it has not
+// created yet therefore got a green build and no artifact.
+fn open_output_or_die(uint64 output_path) -> uint64 {
+    uint64 fd = file_open(output_path, 1)
+    if fd >= 0xFFFFFFFF {
+        uint64 oerr = "error: cannot open output file for writing: "
+        write(2, oerr, str_len(oerr))
+        write(2, output_path, str_len(output_path))
+        write(2, "\n", 1)
+        exit(1)
+    }
+    return fd
+}
+
 fn codegen_write_output(uint64 output_path) {
     if import_failed != 0 {
         uint64 imp_err = "error: compilation aborted: one or more imports could not be opened\n"
         write(2, imp_err, str_len(imp_err))
         exit(1)
     }
-    uint64 fd = file_open(output_path, 1)
+    uint64 fd = open_output_or_die(output_path)
     file_write(fd, out_buf, out_len)
     file_close(fd)
 }
