@@ -109,6 +109,13 @@ fn vec_contains(u64 v, u64 val) -> u64 {
 
 fn vec_remove(u64 v, u64 idx) {
     u64 len = vec_len(v)
+    // Guard both the empty-vector case (len - 1 underflows u64 to
+    // ~2^64, turning the loop bound below into a runaway OOB read/write
+    // -> SIGSEGV) and any out-of-range idx on a non-empty vector (silently
+    // decrementing the length without actually removing anything). Both
+    // are no-ops: nothing to remove.
+    if len == 0 { return }
+    if idx >= len { return }
     u64 data = vec_data(v)
     u64 i = idx
     while i < len - 1 {

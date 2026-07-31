@@ -34,7 +34,22 @@ fn pow(u64 base, u64 exp) -> u64 {
 fn sqrt_int(u64 n) -> u64 {
     if n == 0 { return 0 }
     u64 x = n
-    u64 y = (x + 1) / 2
+    // (x + 1) / 2 overflows only when x == u64::MAX: x + 1 wraps to 0,
+    // so y becomes 0, and the next iteration divides n/x by zero ->
+    // SIGFPE. That is the ONLY value of x for which x + 1 overflows a
+    // u64, so special-case it directly with the exact value (u64::MAX +
+    // 1) / 2 would have produced, rather than approximating (an
+    // approximation like x/2 + 1 changes the seed for ordinary even x
+    // too — e.g. sqrt_int(2) would seed y=2 and the loop would never
+    // run, returning 2 instead of 1). Every other n is untouched and
+    // behaves exactly as before (verified against Python's
+    // math.isqrt across a range of inputs, including u64::MAX).
+    u64 y = 0
+    if x == 0xFFFFFFFFFFFFFFFF {
+        y = 0x8000000000000000
+    } else {
+        y = (x + 1) / 2
+    }
     while y < x {
         x = y
         y = (x + n / x) / 2
