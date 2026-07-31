@@ -9028,6 +9028,137 @@ else
 fi
 rm -f "$CA_SRC" "$CA_BIN"
 
+echo ""
+echo "--- float literal return kinds ---"
+# tc_expr_kind reported EVERY FloatLit as f64, ignoring the `f` suffix, so the
+# C7 return-kind check rejected `fn f() -> f32 { return 1.5f }` while the very
+# same literal bound to an `f32` local first sailed through. std/gguf.kr routes
+# every f32 return through a local for exactly this reason, and because sema
+# checks every function in an imported file whether or not it is called, one
+# un-worked-around `return 0.0f` made every importer fail to build.
+#
+# The functions below are self-recursive ON PURPOSE: a straight-line version
+# gets erased by the AST inliner (which runs even at -O0), the IR_CALL/IR_RET
+# path never executes, and the returned bits are never actually tested. Do not
+# "simplify" the recursion away.
+#
+# This asserts VALUES, not just "it compiles": a fix that silenced the
+# diagnostic while leaving f64 bits in xmm0 would still fail here.
+FR_SRC="/tmp/krc_fret_$$.kr"
+FR_BIN="/tmp/krc_fret_$$.bin"
+cat > "$FR_SRC" <<'KREOF'
+fn f32_lit_pos(uint64 n) -> f32 {
+    if n > 1000000 { return f32_lit_pos(n - 1) }
+    return 42.5f
+}
+fn f32_var_pos(uint64 n) -> f32 {
+    if n > 1000000 { return f32_var_pos(n - 1) }
+    f32 z = 42.5f
+    return z
+}
+fn f32_lit_neg(uint64 n) -> f32 {
+    if n > 1000000 { return f32_lit_neg(n - 1) }
+    return -7.25f
+}
+fn f32_var_neg(uint64 n) -> f32 {
+    if n > 1000000 { return f32_var_neg(n - 1) }
+    f32 z = -7.25f
+    return z
+}
+fn f32_lit_zero(uint64 n) -> f32 {
+    if n > 1000000 { return f32_lit_zero(n - 1) }
+    return 0.0f
+}
+fn f32_lit_sci(uint64 n) -> f32 {
+    if n > 1000000 { return f32_lit_sci(n - 1) }
+    return 1.25e2f
+}
+fn f64_lit_pos(uint64 n) -> f64 {
+    if n > 1000000 { return f64_lit_pos(n - 1) }
+    return 42.5
+}
+fn f64_var_pos(uint64 n) -> f64 {
+    if n > 1000000 { return f64_var_pos(n - 1) }
+    f64 z = 42.5
+    return z
+}
+fn f64_lit_neg(uint64 n) -> f64 {
+    if n > 1000000 { return f64_lit_neg(n - 1) }
+    return -7.25
+}
+fn f64_var_neg(uint64 n) -> f64 {
+    if n > 1000000 { return f64_var_neg(n - 1) }
+    f64 z = -7.25
+    return z
+}
+fn f64_lit_zero(uint64 n) -> f64 {
+    if n > 1000000 { return f64_lit_zero(n - 1) }
+    return 0.0
+}
+fn fret_fail(uint64 rc, uint64 id) -> uint64 {
+    if rc != 0 { return rc }
+    return id
+}
+fn main() {
+    uint64 rc = 0
+    f32 s4 = 4.0f
+    f64 d4 = 4.0
+    if f32_to_int(f32_lit_pos(1) * s4) != 170 { rc = fret_fail(rc, 1) }
+    if f32_to_int(f32_var_pos(1) * s4) != 170 { rc = fret_fail(rc, 2) }
+    if f32_to_int(f32_lit_neg(1) * s4) != -29 { rc = fret_fail(rc, 3) }
+    if f32_to_int(f32_var_neg(1) * s4) != -29 { rc = fret_fail(rc, 4) }
+    f32 zf = f32_lit_zero(1)
+    if f32_to_int(zf) != 0 { rc = fret_fail(rc, 5) }
+    if zf > 0.0f { rc = fret_fail(rc, 6) }
+    if zf < 0.0f { rc = fret_fail(rc, 7) }
+    if f32_to_int(f32_lit_sci(1)) != 125 { rc = fret_fail(rc, 8) }
+    if f64_to_int(f64_lit_pos(1) * d4) != 170 { rc = fret_fail(rc, 9) }
+    if f64_to_int(f64_var_pos(1) * d4) != 170 { rc = fret_fail(rc, 10) }
+    if f64_to_int(f64_lit_neg(1) * d4) != -29 { rc = fret_fail(rc, 11) }
+    if f64_to_int(f64_var_neg(1) * d4) != -29 { rc = fret_fail(rc, 12) }
+    f64 zd = f64_lit_zero(1)
+    if f64_to_int(zd) != 0 { rc = fret_fail(rc, 13) }
+    if zd > 0.0 { rc = fret_fail(rc, 14) }
+    if zd < 0.0 { rc = fret_fail(rc, 15) }
+    exit(rc)
+}
+KREOF
+TOTAL=$((TOTAL + 1))
+FR_ERR=$($KRC --arch=x86_64 "$FR_SRC" -o "$FR_BIN" 2>&1); FR_ST=$?
+if [ "$FR_ST" = "0" ] && [ -s "$FR_BIN" ]; then
+    chmod +x "$FR_BIN"; "$FR_BIN"; FR_RUN=$?
+    if [ "$FR_RUN" = "0" ]; then
+        PASS=$((PASS + 1)); echo "  float_literal_return_values: PASS (15 checks)"
+    else
+        echo "FAIL: float_literal_return_values (check #$FR_RUN returned the wrong value)"
+        FAIL=$((FAIL + 1))
+    fi
+else
+    echo "FAIL: float_literal_return_values (should compile: '$FR_ERR')"; FAIL=$((FAIL + 1))
+fi
+# Negative controls: the C7 check must still FIRE on a genuine kind mismatch.
+# Both directions were silent miscompiles, not harmless: a non-inlined
+# `-> f64 { return 1.5f }` put f32 bits in xmm0 and the caller read 0.0.
+TOTAL=$((TOTAL + 1))
+printf 'fn g(uint64 n) -> f64 {\n if n > 1000000 { return g(n - 1) }\n return 1.5f\n}\nfn main() { exit(f64_to_int(g(1))) }\n' > "$FR_SRC"
+FR_ERR=$($KRC --arch=x86_64 "$FR_SRC" -o "$FR_BIN" 2>&1); FR_ST=$?
+if [ "$FR_ST" != "0" ] && echo "$FR_ERR" | grep -q "return value float kind does not match"; then
+    PASS=$((PASS + 1)); echo "  f32_literal_in_f64_fn_rejected: PASS (exit $FR_ST)"
+else
+    echo "FAIL: f32_literal_in_f64_fn_rejected (expected the C7 diagnostic, got exit $FR_ST: '$FR_ERR')"
+    FAIL=$((FAIL + 1))
+fi
+TOTAL=$((TOTAL + 1))
+printf 'fn g(uint64 n) -> f32 {\n if n > 1000000 { return g(n - 1) }\n return 1.5\n}\nfn main() { exit(f32_to_int(g(1))) }\n' > "$FR_SRC"
+FR_ERR=$($KRC --arch=x86_64 "$FR_SRC" -o "$FR_BIN" 2>&1); FR_ST=$?
+if [ "$FR_ST" != "0" ] && echo "$FR_ERR" | grep -q "return value float kind does not match"; then
+    PASS=$((PASS + 1)); echo "  f64_literal_in_f32_fn_rejected: PASS (exit $FR_ST)"
+else
+    echo "FAIL: f64_literal_in_f32_fn_rejected (expected the C7 diagnostic, got exit $FR_ST: '$FR_ERR')"
+    FAIL=$((FAIL + 1))
+fi
+rm -f "$FR_SRC" "$FR_BIN"
+
 echo "--- --emit / --target value validation ---"
 EV_SRC="/tmp/krc_ev_$$.kr"
 EV_BIN="/tmp/krc_ev_$$.bin"

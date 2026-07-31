@@ -4,6 +4,20 @@ All notable changes to `kernriftc` are documented in this file.
 
 ## Unreleased
 
+### Fixed
+
+- **`fn f() -> f32 { return 1.5f }` no longer fails type checking.** Sema
+  reported every float literal as `f64` regardless of the `f` suffix, so the
+  return-kind check saw f32-declared against f64-actual and rejected it —
+  while the identical literal bound to an `f32` local first passed, because
+  there the local's declared kind was consulted. The `f` suffix now types the
+  literal as `f32`, matching what the IR already does (it lowers a suffixed
+  literal with an explicit `IR_F64TOF32`).
+  - As a consequence the check now also fires on the reverse mismatch,
+    `fn f() -> f64 { return 1.5f }`, which previously compiled and was a
+    silent miscompile: the callee left f32 bits in `xmm0` and a non-inlined
+    caller read them as `f64` (returned `0.0` for `1.5f`).
+
 ### Breaking
 
 - **CLI flag values (`--arch=`, `--emit=`, `--target=`, `--target-arch=`) now

@@ -297,6 +297,30 @@ fn tc_call_returns_void(uint64 node) -> uint64 {
 
 // Derive the TypeKind of an expression node. Returns 0 on unknown,
 // 0xFFFFFFFF on poisoned (suppresses follow-on diagnostics).
+//
+// A float literal carrying the `f` suffix (`1.5f`, `2e5f`) is an f32 VALUE,
+// not an f64: the FloatLit arm of ir_lower_expr narrows it with an explicit
+// IR_F64TOF32 and tags the result vreg fkind=2. tc_expr_kind used to report
+// f64 (96) for every FloatLit, so the C7 return check saw f32-declared vs
+// f64-actual and rejected `fn f() -> f32 { return 1.5f }` — while the exact
+// same literal bound to an `f32` local first passed, because the local's
+// declared kind was consulted instead. That is why every f32-returning
+// function in std/gguf routes through a local. This scan mirrors the IR's:
+// any 'f' byte in the token text means f32 (the dialect has no hex floats,
+// so 'f' can only be the suffix).
+fn tc_float_lit_kind(uint64 node) -> uint64 {
+    uint32 lit_tok = ast_data1(node)
+    uint64 wlt = lit_tok
+    uint64 tlen = tok_text_len(wlt)
+    uint64 fi = 0
+    while fi < tlen {
+        uint64 ch = tok_source_byte(wlt, fi)
+        if ch == 102 { return 95 }          // 'f' suffix -> f32
+        fi = fi + 1
+    }
+    return 96                                // plain literal -> f64
+}
+
 fn tc_expr_kind(uint64 node) -> uint64 {
     if node == 0 { return 0 }
     uint32 kind = ast_kind(node)
@@ -309,8 +333,8 @@ fn tc_expr_kind(uint64 node) -> uint64 {
         if wd4 == 99 { return 99 }    // char
         return 83                       // uint64 default
     }
-    // FloatLit (46)
-    if wkind == 46 { return 96 }
+    // FloatLit (46): f32 when suffixed, else f64 (see tc_float_lit_kind).
+    if wkind == 46 { return tc_float_lit_kind(node) }
     // StrLit (31): char* / uint64
     if wkind == 31 { return 83 }
     // Ident (32) — canonical name token is in data1. Locals/params first,
