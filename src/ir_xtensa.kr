@@ -21,13 +21,30 @@ static uint64 XT_A11 = 11      // scratch (byte tmp in the memcpy loop)
 static uint64 XT_ARG0 = 2      // a2 (also the return-value register)
 static uint64 XT_NUM_ARG_REGS = 6
 
-// Fixed outgoing-argument overflow region at the BOTTOM of every frame
-// (mirror of ir_riscv.kr's RV_OVERFLOW_RESERVE = 64). The caller stores the
-// 7th+ arg at [a1 + oi*4] with no SP adjustment; the callee reads it back at
-// [a1 + callee_frame + oi*4] (IR_COPY imm 6..99). 64 bytes = 16 slots, so the
-// IR_ARG overflow guard caps oi at 16 exactly as riscv does. Spill slots sit
+// Outgoing-argument overflow region at the BOTTOM of every frame. The caller
+// stores the 7th+ arg at [a1 + oi*4] with no SP adjustment; the callee reads
+// it back at [a1 + callee_frame + oi*4] (IR_COPY imm 6..99). Spill slots sit
 // ABOVE this region (xt_spill_offset adds it in), so outgoing args never
 // clobber a live spill across the call.
+//
+// PER-FUNCTION, not a constant — ir_xtensa_gen step 4a re-sizes it from this
+// function's own IR_ARG scan before frame layout (port of ir_aarch64.kr's
+// a64_ovf_slots / IR_A64_OVERFLOW_RESERVE, :3253/:3289). A leaf reserves 0; a
+// function whose widest call passes N overflow args reserves exactly N*4. It
+// used to be a fixed 64 (16 slots, riscv's RV_OVERFLOW_RESERVE mirrored), which
+// both wasted 64 bytes in every leaf frame on a 8 KiB ESP32 stack AND capped
+// every call at 6 + 16 = 22 arguments.
+//
+// Safe because the callee never needs to know the caller's reserve SIZE, only
+// its position: the callee reads [a1 + its_own_frame + oi*4], which lands at
+// the caller's [a1 + oi*4] — the bottom of the caller's frame — whatever the
+// caller reserved. The caller's reserve only has to be big enough that its own
+// spill slots start above the args it writes, which is exactly what the scan
+// guarantees. The IR_ARG handler re-asserts that invariant (loud-fail).
+//
+// The value is READ at emit time by xt_spill_offset and IR_STACK_ADDR, so it
+// MUST be set before any emission and before frame layout — same ordering trap
+// as the asm callee-saved mask below (step 5).
 static uint64 XT_OVERFLOW_RESERVE = 64
 
 // Per-function scratchpad (Task 6): fixed byte region FMT_UINT uses to stage
@@ -1754,9 +1771,16 @@ fn ir_emit_xtensa_insn(uint64 ii) {
             // — no SP adjustment, just s32i at [a1 + (imm-6)*4]. The callee's
             // IR_COPY (imm 6..99) reads it back at [a1 + callee_frame +
             // (imm-6)*4]. 4-byte slots.
+            //
+            // The reserve is now sized per function by ir_xtensa_gen step 4a
+            // from a scan of these very instructions, so this is an INVARIANT
+            // CHECK, not an ABI cap: a slot past the reserve means the scan and
+            // this handler disagree (a new IR_ARG-emitting path that runs after
+            // step 4a, or a missed opcode), and the store would silently land
+            // in the spill region. Loud-fail instead.
             uint64 oi = imm - XT_NUM_ARG_REGS
-            if oi >= 16 {
-                xt_err("error: xtensa: overflow args overflow (max 16)\n")
+            if (oi * 4) + 4 > XT_OVERFLOW_RESERVE {
+                xt_err("error: xtensa: outgoing overflow arg past the frame's reserved region (pre-scan/emit mismatch)\n")
             }
             uint64 src_reg = xt_resolve_src(s1_v, XT_A8)
             xt_s32i(src_reg, XT_SP, oi * 4)           // s32i src, oi*4(a1)
@@ -2806,7 +2830,49 @@ fn ir_xtensa_gen(uint64 fn_node, uint64 xt_entry_node) {
         ir_spill_count = ir_vreg_next - 1
     }
 
-    // 4a. Snapshot the function's var map for DWARF (if -g)
+    // 4a. Outgoing-argument overflow reserve — sized to THIS function.
+    //     Port of ir_aarch64.kr:3244-3290 (a64_ovf_slots). Scan the lowered +
+    //     optimised IR for IR_ARG(51) whose imm selects the overflow path:
+    //     imm < XT_NUM_ARG_REGS is a register arg (a2..a7) and imm >= 100 is a
+    //     direct physical AR (ASM I/O constraints) — only 6..99 reaches the
+    //     bottom-of-frame slots, at oi = imm - XT_NUM_ARG_REGS, 4 bytes each.
+    //     A function with no such arg (every leaf, and every caller passing
+    //     <= 6 args) now reserves ZERO bytes instead of the historical 64.
+    //
+    //     ASM ESCAPE HATCH, mirroring ir_aarch64.kr:3290: an IR_ASM_BLOCK body
+    //     is opaque to this scan and can store outgoing stack args itself, so
+    //     an asm-containing function keeps at least the full historical 64-byte
+    //     reserve. (aarch64 assigns its 128 flat; here it is a floor, so an asm
+    //     function that ALSO passes more than 16 overflow args through the
+    //     normal path still gets what that path needs.)
+    //
+    //     ORDERING IS LOAD-BEARING: xt_spill_offset, IR_STACK_ADDR and the
+    //     step-5 frame layout (ir_xt_scratch_off, cs_base, total_frame) all
+    //     read this static. Setting it after any of them would leave the
+    //     prologue and the slot accessors indexing off different bases —
+    //     exactly the trap the asm callee-saved mask hit in step 5.
+    uint64 xt_ovf_slots = 0
+    uint64 psb = 0
+    while psb < ir_bb_count {
+        uint64 psi = ir_bb_first_insn(psb)
+        while psi != 0xFFFFFFFF {
+            if ir_insn_opcode(psi) == 51 {
+                uint64 psimm = ir_insn_imm(psi)
+                if psimm >= XT_NUM_ARG_REGS && psimm < 100 {
+                    uint64 slots = psimm - XT_NUM_ARG_REGS + 1
+                    if slots > xt_ovf_slots { xt_ovf_slots = slots }
+                }
+            }
+            psi = ir_insn_next(psi)
+        }
+        psb = psb + 1
+    }
+    XT_OVERFLOW_RESERVE = xt_ovf_slots * 4
+    if ir_fn_has_asm_block() != 0 {
+        if XT_OVERFLOW_RESERVE < 64 { XT_OVERFLOW_RESERVE = 64 }
+    }
+
+    // 4b. Snapshot the function's var map for DWARF (if -g)
     ir_snapshot_debug_vars()
 
     // 5. Frame — 4-byte slots, 16-byte-aligned SP. Layout from a1 upward:
@@ -2821,6 +2887,8 @@ fn ir_xtensa_gen(uint64 fn_node, uint64 xt_entry_node) {
     //    With the overflow reserve at the bottom, IR_ARG stores outgoing args
     //    at [a1 + oi*4] with no SP adjustment — the callee reads them at
     //    [a1 + callee_frame + oi*4] (IR_COPY imm 6..99), exactly as riscv does.
+    //    XT_OVERFLOW_RESERVE is whatever step 4a measured for THIS function
+    //    (0 for a leaf), so every offset below shifts with it automatically.
     uint64 spill_size = ir_spill_count * 4
     uint64 used_mask = ir_used_color_mask()
     // Same hole the x86_64 and riscv prologues had: an asm block can write a

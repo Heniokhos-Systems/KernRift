@@ -1,0 +1,85 @@
+// Xtensa LX6 many-argument test — the outgoing-arg overflow reserve.
+//
+// The reserve at the bottom of every frame used to be a FIXED 64 bytes = 16
+// slots, so 6 (CALL0 arg registers a2..a7) + 16 = 22 was a hard ceiling and
+// every leaf paid 64 bytes it could not use. ir_xtensa_gen step 4a now scans
+// each function's own IR_ARG instructions and reserves exactly what its widest
+// call needs (zero for a leaf).
+//
+// sum24 passes 18 overflow args — past the old 16-slot cap, so this file did
+// not compile at all before that change. It also declares a stack array, whose
+// IR_STACK_ADDR offset is measured FROM the reserve: if the pre-scan and the
+// accessors ever disagree, buf aliases the outgoing args or the spill slots and
+// the printed sums change.
+//
+// sum7 passes exactly ONE overflow arg (a 4-byte reserve — the smallest
+// non-zero one), and leafsq passes none at all (a zero-byte reserve). Both
+// frame shapes are new; neither existed while the reserve was fixed.
+//
+// Expected output under `qemu-system-xtensa -M lx60 -semihosting`:
+//   319
+//   30
+//   385
+// then exit(42).
+
+device Uart at 0xfd050020 {
+    thr at 0x00 : u32
+    lsr at 0x14 : u8
+}
+
+fn putc(u8 c) {
+    while (Uart.lsr & 0x20) == 0 { }
+    Uart.thr = c
+}
+
+fn nl() { putc(10) }
+
+fn print_uint(u32 n) {
+    if n >= 10 {
+        print_uint(n / 10)
+    }
+    putc(48 + (n % 10))
+}
+
+// 24 params: p1..p6 in a2..a7, p7..p24 (18 slots, 72 bytes) in the caller's
+// bottom-of-frame reserve. Self-recursive so the AST inliner cannot erase the
+// call and quietly skip the overflow path — an inlined probe "passes" at any
+// argument count.
+fn sum24(u32 p1, u32 p2, u32 p3, u32 p4, u32 p5, u32 p6, u32 p7, u32 p8, u32 p9, u32 p10, u32 p11, u32 p12, u32 p13, u32 p14, u32 p15, u32 p16, u32 p17, u32 p18, u32 p19, u32 p20, u32 p21, u32 p22, u32 p23, u32 p24) -> u32 {
+    u32[4] buf
+    u32 i = 0
+    while i < 4 {
+        buf[i] = p1 + i
+        i = i + 1
+    }
+    if p1 > 1 {
+        return sum24(p1 - 1, p2, p3, p4, p5, p6, p7, p8, p9, p10, p11, p12, p13, p14, p15, p16, p17, p18, p19, p20, p21, p22, p23, p24) + buf[2]
+    }
+    return p1 + p2 + p3 + p4 + p5 + p6 + p7 + p8 + p9 + p10 + p11 + p12 + p13 + p14 + p15 + p16 + p17 + p18 + p19 + p20 + p21 + p22 + p23 + p24 + buf[3]
+}
+
+// Exactly one overflow arg -> a 4-byte reserve.
+fn sum7(u32 a, u32 b, u32 c, u32 d, u32 e, u32 f, u32 g) -> u32 {
+    if a > 1 {
+        return sum7(a - 1, b, c, d, e, f, g) + 1
+    }
+    return a + b + c + d + e + f + g
+}
+
+// No call at all -> a zero-byte reserve.
+fn leafsq(u32 n) -> u32 {
+    u32 acc = 0
+    u32 i = 0
+    while i <= n {
+        acc = acc + i * i
+        i = i + 1
+    }
+    return acc
+}
+
+fn main() {
+    print_uint(sum24(4, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24))   nl()
+    print_uint(sum7(3, 2, 3, 4, 5, 6, 7))   nl()
+    print_uint(leafsq(10))   nl()
+    exit(42)
+}
