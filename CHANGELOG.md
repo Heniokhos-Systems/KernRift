@@ -2,6 +2,34 @@
 
 All notable changes to `kernriftc` are documented in this file.
 
+## Unreleased
+
+### Breaking
+
+- **CLI flag values (`--arch=`, `--emit=`, `--target=`, `--target-arch=`) now
+  match exactly instead of by prefix.** Previously `str_starts_with` accepted
+  any value beginning with a known spelling, so `--arch=arm64BANANA` silently
+  built for ARM64 instead of erroring. Every accepted value is now checked
+  with `str_eq_full` against an explicit list of arms, with a hard error for
+  anything else.
+  - **`--arch=riscv64` is now a hard error**, with a message pointing at
+    `--arch=riscv32`: this compiler targets RV32, and previously the prefix
+    match let `riscv64` silently compile as RV32 with no indication that
+    64-bit support wasn't actually being used.
+  - **Bare `--arch=riscv` is gone.** It happened to work before only because
+    it is a prefix of `riscv32`; there is no longer a partial-name arm to
+    catch it.
+  - **`--target=` no longer accepts the emit-style suffixed aliases**, e.g.
+    `--target=linux-x86_64`. Those spellings previously worked by accident
+    because `--target=linux` was prefix-matched; `--target=` now has its own
+    exact arm list, disjoint from `--emit=`'s.
+  - **All 24 `--emit=` aliases are preserved exactly as before**
+    (`elf`, `elf-arm64`, `elf-x86_64`, `elfexe`, `linux`, `linux-x86_64`,
+    `linux-arm64`, `linux-x86-64`, `macho`, `mac`, `macos`, `mac-x64`,
+    `mac-arm64`, `darwin`, `windows`, `windows-x64`, `windows-arm64`, `win`,
+    `win-x64`, `win-arm64`, `pe`, `obj`, `android`, `asm`) — this change is
+    about rejecting garbage suffixes, not about narrowing the alias surface.
+
 ## v2.8.34 — 2026-07-30
 
 A correctness release. Three of these fixes produce wrong output or a silently

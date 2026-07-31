@@ -8732,7 +8732,7 @@ echo "--- --arch value validation ---"
 ARCHV_SRC="/tmp/krc_archv_$$.kr"
 ARCHV_BIN="/tmp/krc_archv_$$.bin"
 printf 'fn main() { uint32 x = 3\n exit(x) }\n' > "$ARCHV_SRC"
-for BAD in riscv64 riscv riscvBANANA arm64BANANA x86_64BANANA xtensaBANANA; do
+for BAD in riscv64 riscv riscvBANANA arm64BANANA x86_64BANANA; do
     TOTAL=$((TOTAL + 1))
     $KRC --arch=$BAD "$ARCHV_SRC" -o "$ARCHV_BIN" >/dev/null 2>&1; AV_ST=$?
     if [ "$AV_ST" != "0" ]; then
@@ -8741,6 +8741,16 @@ for BAD in riscv64 riscv riscvBANANA arm64BANANA x86_64BANANA xtensaBANANA; do
         echo "FAIL: arch_reject_$BAD (expected non-zero exit, got 0)"; FAIL=$((FAIL + 1))
     fi
 done
+# NOTE (final review, item 5): xtensaBANANA is deliberately NOT in the loop
+# above. `--arch=xtensa` alone already exits 1 ("xtensa ELF image emission
+# not yet implemented") for a reason unrelated to flag parsing -- the
+# xtensa ELF emitter is simply unfinished. That means a
+# arch_reject_xtensaBANANA test would pass whether or not str_eq_full
+# actually rejects the misspelling; it cannot distinguish correct parsing
+# from a backend that hard-fails on every xtensa value. It was vacuous and
+# has been removed rather than kept as false evidence. If the xtensa
+# emitter is ever finished, re-add xtensaBANANA to the BAD list above --
+# at that point it will actually test something.
 TOTAL=$((TOTAL + 1))
 if $KRC --arch=riscv64 "$ARCHV_SRC" -o /dev/null 2>&1 | grep -q "riscv32"; then
     PASS=$((PASS + 1)); echo "  arch_riscv64_names_riscv32: PASS"
@@ -8781,15 +8791,45 @@ for BAD in macosBANANA windowsBANANA; do
         echo "FAIL: target_reject_$BAD (expected non-zero exit, got 0)"; FAIL=$((FAIL + 1))
     fi
 done
-# ALIAS PRESERVATION — the contract. Every spelling that works today must still work.
+# ALIAS PRESERVATION — the contract. Every spelling that works today must still work,
+# AND must produce the format its name promises, not merely "some non-empty file"
+# (a compiler that collapsed every alias to one format would still pass an [ -s ]
+# only check). Assert the container magic bytes: ELF 7f454c46, Mach-O cffaedfe,
+# PE 4d5a0000, asm is text (no fixed magic, so just check for '; ' comment lead-in).
+emit_expected_magic() {
+    case "$1" in
+        elf|elf-arm64|elf-x86_64|elfexe|linux|linux-x86_64|linux-arm64|linux-x86-64|obj|android)
+            echo "7f454c46" ;;
+        macho|mac|macos|mac-x64|mac-arm64|darwin)
+            echo "cffaedfe" ;;
+        windows|windows-x64|windows-arm64|win|win-x64|win-arm64|pe)
+            echo "4d5a0000" ;;
+        asm)
+            echo "TEXT" ;;
+    esac
+}
 for GOOD in elf elf-arm64 elf-x86_64 elfexe linux linux-x86_64 linux-arm64 linux-x86-64 \
             macho mac macos mac-x64 mac-arm64 darwin \
             windows windows-x64 windows-arm64 win win-x64 win-arm64 pe \
             obj android asm; do
     TOTAL=$((TOTAL + 1))
     rm -f "$EV_BIN"
+    EXP_MAGIC=$(emit_expected_magic "$GOOD")
     if $KRC --emit=$GOOD "$EV_SRC" -o "$EV_BIN" >/dev/null 2>&1 && [ -s "$EV_BIN" ]; then
-        PASS=$((PASS + 1)); echo "  emit_accept_$GOOD: PASS"
+        if [ "$EXP_MAGIC" = "TEXT" ]; then
+            if head -c2 "$EV_BIN" | grep -q '; '; then
+                PASS=$((PASS + 1)); echo "  emit_accept_$GOOD: PASS (text asm)"
+            else
+                echo "FAIL: emit_accept_$GOOD (expected text asm output)"; FAIL=$((FAIL + 1))
+            fi
+        else
+            GOT_MAGIC=$(xxd -p -l4 "$EV_BIN")
+            if [ "$GOT_MAGIC" = "$EXP_MAGIC" ]; then
+                PASS=$((PASS + 1)); echo "  emit_accept_$GOOD: PASS (magic $GOT_MAGIC)"
+            else
+                echo "FAIL: emit_accept_$GOOD (expected magic $EXP_MAGIC, got $GOT_MAGIC)"; FAIL=$((FAIL + 1))
+            fi
+        fi
     else
         echo "FAIL: emit_accept_$GOOD (alias must keep working)"; FAIL=$((FAIL + 1))
     fi
