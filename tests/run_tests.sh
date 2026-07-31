@@ -8758,6 +8758,44 @@ for GOOD in x86_64 x86-64 amd64 x64 arm64 aarch64 riscv32; do
 done
 rm -f "$ARCHV_SRC" "$ARCHV_BIN"
 
+echo ""
+echo "--- --emit / --target value validation ---"
+EV_SRC="/tmp/krc_ev_$$.kr"
+EV_BIN="/tmp/krc_ev_$$.bin"
+printf 'fn main() { uint32 x = 3\n exit(x) }\n' > "$EV_SRC"
+for BAD in elfBANANA winBANANA asmBANANA macBANANA; do
+    TOTAL=$((TOTAL + 1))
+    $KRC --emit=$BAD "$EV_SRC" -o "$EV_BIN" >/dev/null 2>&1; EV_ST=$?
+    if [ "$EV_ST" != "0" ]; then
+        PASS=$((PASS + 1)); echo "  emit_reject_$BAD: PASS (exit $EV_ST)"
+    else
+        echo "FAIL: emit_reject_$BAD (expected non-zero exit, got 0)"; FAIL=$((FAIL + 1))
+    fi
+done
+for BAD in macosBANANA windowsBANANA; do
+    TOTAL=$((TOTAL + 1))
+    $KRC --target=$BAD "$EV_SRC" -o "$EV_BIN" >/dev/null 2>&1; TV_ST=$?
+    if [ "$TV_ST" != "0" ]; then
+        PASS=$((PASS + 1)); echo "  target_reject_$BAD: PASS (exit $TV_ST)"
+    else
+        echo "FAIL: target_reject_$BAD (expected non-zero exit, got 0)"; FAIL=$((FAIL + 1))
+    fi
+done
+# ALIAS PRESERVATION — the contract. Every spelling that works today must still work.
+for GOOD in elf elf-arm64 elf-x86_64 elfexe linux linux-x86_64 linux-arm64 linux-x86-64 \
+            macho mac macos mac-x64 mac-arm64 darwin \
+            windows windows-x64 windows-arm64 win win-x64 win-arm64 pe \
+            obj android asm; do
+    TOTAL=$((TOTAL + 1))
+    rm -f "$EV_BIN"
+    if $KRC --emit=$GOOD "$EV_SRC" -o "$EV_BIN" >/dev/null 2>&1 && [ -s "$EV_BIN" ]; then
+        PASS=$((PASS + 1)); echo "  emit_accept_$GOOD: PASS"
+    else
+        echo "FAIL: emit_accept_$GOOD (alias must keep working)"; FAIL=$((FAIL + 1))
+    fi
+done
+rm -f "$EV_SRC" "$EV_BIN"
+
 # --- Summary ---
 echo ""
 echo "=== Results: $PASS/$TOTAL passed, $FAIL failed ==="

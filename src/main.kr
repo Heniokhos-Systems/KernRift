@@ -4959,38 +4959,50 @@ fn main() {
             } else if str_starts_with(arg, "--emit=", 7) != 0 {
                 emit_set = 1
                 uint64 emit_str = arg + 7
-                if str_starts_with(emit_str, "elfexe", 6) != 0 {
+                if str_eq_full(emit_str, "elfexe") != 0 {
                     emit_mode = 0
-                } else if str_starts_with(emit_str, "elf", 3) != 0 {
-                    // "elf" / "elf-arm64" / "elf-x86_64" aliases for ELF
+                } else if str_eq_full(emit_str, "elf") != 0
+                       || str_eq_full(emit_str, "elf-arm64") != 0
+                       || str_eq_full(emit_str, "elf-x86_64") != 0 {
+                    // "elf" / "elf-arm64" / "elf-x86_64" spellings for ELF
                     emit_mode = 0
-                } else if str_starts_with(emit_str, "linux", 5) != 0 {
+                } else if str_eq_full(emit_str, "linux") != 0
+                       || str_eq_full(emit_str, "linux-x86_64") != 0
+                       || str_eq_full(emit_str, "linux-arm64") != 0
+                       || str_eq_full(emit_str, "linux-x86-64") != 0 {
                     // "linux", "linux-x86_64", "linux-arm64", "linux-x86-64" all alias to ELF
                     emit_mode = 0
-                } else if str_starts_with(emit_str, "macho", 5) != 0 {
+                } else if str_eq_full(emit_str, "macho") != 0 {
                     emit_mode = 1
-                } else if str_starts_with(emit_str, "mac", 3) != 0 {
-                    // "macos", "mac-x64", "mac-arm64" alias to Mach-O
+                } else if str_eq_full(emit_str, "mac") != 0
+                       || str_eq_full(emit_str, "macos") != 0
+                       || str_eq_full(emit_str, "mac-x64") != 0
+                       || str_eq_full(emit_str, "mac-arm64") != 0 {
+                    // "mac", "macos", "mac-x64", "mac-arm64" alias to Mach-O
                     emit_mode = 1
-                } else if str_starts_with(emit_str, "darwin", 6) != 0 {
+                } else if str_eq_full(emit_str, "darwin") != 0 {
                     emit_mode = 1
-                } else if str_starts_with(emit_str, "windows", 7) != 0 {
+                } else if str_eq_full(emit_str, "windows") != 0
+                       || str_eq_full(emit_str, "windows-x64") != 0
+                       || str_eq_full(emit_str, "windows-arm64") != 0 {
                     // "windows", "windows-x64", "windows-arm64" alias to PE
                     emit_mode = 2
-                } else if str_starts_with(emit_str, "win", 3) != 0 {
+                } else if str_eq_full(emit_str, "win") != 0
+                       || str_eq_full(emit_str, "win-x64") != 0
+                       || str_eq_full(emit_str, "win-arm64") != 0 {
                     // "win", "win-x64", "win-arm64" alias to PE
                     emit_mode = 2
-                } else if str_starts_with(emit_str, "pe", 2) != 0 {
+                } else if str_eq_full(emit_str, "pe") != 0 {
                     emit_mode = 2
-                } else if str_starts_with(emit_str, "obj", 3) != 0 {
+                } else if str_eq_full(emit_str, "obj") != 0 {
                     emit_mode = 3
-                } else if str_starts_with(emit_str, "android", 7) != 0 {
+                } else if str_eq_full(emit_str, "android") != 0 {
                     emit_mode = 4
-                } else if str_starts_with(emit_str, "asm", 3) != 0 {
+                } else if str_eq_full(emit_str, "asm") != 0 {
                     emit_mode = 5
-                } else if str_starts_with(emit_str, "ir", 2) != 0 {
+                } else if str_eq_full(emit_str, "ir") != 0 {
                     emit_mode = 6
-                } else if str_starts_with(emit_str, "lkm", 3) != 0 {
+                } else if str_eq_full(emit_str, "lkm") != 0 {
                     // Linux loadable kernel module — relocatable ELF (.ko)
                     // with .modinfo, struct module, init_module /
                     // cleanup_module symbols. Phase A.1.
@@ -5010,17 +5022,17 @@ fn main() {
                 parse_targets_arg(arg + 10)
             } else if str_starts_with(arg, "--target=", 9) != 0 {
                 uint64 tgt_str = arg + 9
-                if str_starts_with(tgt_str, "macos", 5) != 0 {
+                if str_eq_full(tgt_str, "macos") != 0 {
                     target_os = 1
-                } else if str_starts_with(tgt_str, "darwin", 6) != 0 {
+                } else if str_eq_full(tgt_str, "darwin") != 0 {
                     target_os = 1
-                } else if str_starts_with(tgt_str, "windows", 7) != 0 {
+                } else if str_eq_full(tgt_str, "windows") != 0 {
                     target_os = 2
-                } else if str_starts_with(tgt_str, "win", 3) != 0 {
+                } else if str_eq_full(tgt_str, "win") != 0 {
                     target_os = 2
-                } else if str_starts_with(tgt_str, "linux", 5) != 0 {
+                } else if str_eq_full(tgt_str, "linux") != 0 {
                     target_os = 0
-                } else if str_starts_with(tgt_str, "android", 7) != 0 {
+                } else if str_eq_full(tgt_str, "android") != 0 {
                     target_os = 3
                     emit_mode = 4
                 } else if str_eq_full(tgt_str, "esp32") != 0 {
