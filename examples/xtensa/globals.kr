@@ -4,7 +4,7 @@
 // Each static access materializes the data base via the per-function PC-anchor
 // PIC sequence (call0 __xt_pcbase / l32r a9,<pool:delta> / add) and then
 // l32i/s32i off the aligned static blob (data_start 8-aligned so l32i never
-// traps). Expected output under `qemu-system-xtensa -M lx60`:
+// traps). Expected output under `qemu-system-xtensa -M lx60 -semihosting`:
 //   42
 
 device Uart at 0xfd050020 {

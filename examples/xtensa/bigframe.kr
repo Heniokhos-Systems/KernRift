@@ -17,7 +17,7 @@
 // The old compiler loud-fails this whole file ("return-slot offset exceeds
 // l32i/s32i range"); the boot test is a full-output equality check.
 //
-// Expected output under `qemu-system-xtensa -M lx60`:
+// Expected output under `qemu-system-xtensa -M lx60 -semihosting`:
 //   61100
 //   5559680
 //   1499500

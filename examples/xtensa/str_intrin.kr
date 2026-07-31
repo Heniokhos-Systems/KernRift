@@ -23,7 +23,7 @@
 // many bytes of buf get printed, matching FMT_UINT's actual contract
 // (ir.kr:2190-2199: "dest = digit count").
 //
-// Expected output under `qemu-system-xtensa -M lx60`:
+// Expected output under `qemu-system-xtensa -M lx60 -semihosting`:
 //   4
 //   1
 //   0

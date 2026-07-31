@@ -21,7 +21,7 @@
 // into every caller-saved colour, so whatever the caller left in a2..a7 is
 // guaranteed to come back trashed and the printed checksum changes.
 //
-// Expected output under `qemu-system-xtensa -M lx60`:
+// Expected output under `qemu-system-xtensa -M lx60 -semihosting`:
 //   32529
 
 device Uart at 0xfd050020 {

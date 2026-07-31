@@ -17,7 +17,7 @@
 //   str_hello.kr     — STR_CONST(79) via a `puts` byte-loop
 //   inline_asm.kr    — ASM_BLOCK(96), operand-less nullary mnemonics
 //
-// Expected output under `qemu-system-xtensa -M lx60` (one result per line,
+// Expected output under `qemu-system-xtensa -M lx60 -semihosting` (one result per line,
 // verified by hand against each op's known-correct value — see the per-line
 // comments in main() below):
 //   xtensa capstone ok

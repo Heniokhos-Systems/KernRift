@@ -4,7 +4,7 @@
 // xtensa-lx106-elf-as can't assemble, so only qemu proves them), nested
 // control flow, and unsigned div/mod. Prints hand-verifiable results.
 //
-// Expected output under `qemu-system-xtensa -M lx60`:
+// Expected output under `qemu-system-xtensa -M lx60 -semihosting`:
 //   120
 //   3628800
 //   6765

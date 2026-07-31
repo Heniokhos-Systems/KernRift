@@ -35,7 +35,7 @@
 // host backend first (prints 1 then 0, sensitive to BOTH fields — not just
 // a first-field scalar compare) before trusting it on xtensa.
 //
-// Expected output under `qemu-system-xtensa -M lx60`:
+// Expected output under `qemu-system-xtensa -M lx60 -semihosting`:
 //   0
 //   10
 //   A

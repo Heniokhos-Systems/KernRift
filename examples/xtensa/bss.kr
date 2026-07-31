@@ -14,7 +14,7 @@
 // (buf[500] round-trips to 99). Structural loop-presence is asserted by objdump
 // in the harness; true dirty-DRAM zeroing is deferred to ESP32 hardware.
 //
-// Expected output under `qemu-system-xtensa -M lx60`:
+// Expected output under `qemu-system-xtensa -M lx60 -semihosting`:
 //   42 0 99
 
 device Uart at 0xfd050020 {

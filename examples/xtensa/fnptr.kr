@@ -5,7 +5,7 @@
 // resolve_addr_fixups_xtensa (NO remap — code_start is final). The materialized
 // pointer is then invoked through the already-working CALL_IND(87) lowering of
 // `call_ptr(f, 21)`. dbl(21) = 42. Expected output under
-// `qemu-system-xtensa -M lx60`:
+// `qemu-system-xtensa -M lx60 -semihosting`:
 //   42
 
 device Uart at 0xfd050020 {

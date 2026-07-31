@@ -1,7 +1,7 @@
 // Xtensa LX6 inline-assembly boot test (Task 8) — exercises IR_ASM_BLOCK(96).
 // main prints 'X', then an operand-less multi-line `asm { }` block assembling two
 // nullary mnemonics — `memw` (fixed 24-bit MEMW word) and `nop` (NOP.N) — then
-// prints 'Y'. Expected output under `qemu-system-xtensa -M lx60`:
+// prints 'Y'. Expected output under `qemu-system-xtensa -M lx60 -semihosting`:
 //   XY
 //
 // Test discriminator: `putc` emits its own `memw` MMIO barriers, so a `memw` grep

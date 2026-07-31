@@ -1,3 +1,7 @@
+// Xtensa LX6 STR_CONST(79) boot test — puts() walks a string literal byte by
+// byte via a `puts` loop and prints it over UART, then exit(32)s via SIMCALL.
+// Expected output under `qemu-system-xtensa -M lx60 -semihosting`:
+//   xtensa strings ok
 device Uart at 0xfd050020 { thr at 0x00 : u32  lsr at 0x14 : u8 }
 fn putc(u8 c) { while (Uart.lsr & 0x20) == 0 { }  Uart.thr = c }
 fn puts(u32 s) { u32 i = 0  while 1 == 1 { u8 c = 0  unsafe { *((s + i) as u8) -> c }  if c == 0 { return }  putc(c)  i = i + 1 } }

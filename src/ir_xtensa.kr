@@ -2714,12 +2714,12 @@ fn ir_emit_xtensa_insn(uint64 ii) {
             xt_nyi_op(op)
             return
         }
-        if xt_esp32_target != 0 {
-            xt_err("error: xtensa/esp32: exit() has no meaning on bare metal — there is no OS to return an exit status to. End a freestanding ESP32 image with `loop { }` instead. (On the lx60 qemu target exit() works, because the emulator can terminate.)\n")
-        }
         if freestanding == 0 {
             xt_nyi_op(op)
             return
+        }
+        if xt_esp32_target != 0 {
+            xt_err("error: xtensa/esp32: exit() has no meaning on bare metal — there is no OS to return an exit status to. End a freestanding ESP32 image with `loop { }` instead. (On the lx60 qemu target exit() works, because the emulator can terminate.)\n")
         }
         // SIMCALL: a2 = call number (SYS_exit = 1), a3 = status.
         //
