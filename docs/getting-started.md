@@ -424,7 +424,7 @@ Available modules:
 
 | Module | Highlights |
 |--------|-----------|
-| `std/string.kr` | `str_cat(a,b)`, `str_copy(s)`, `str_sub(s,start,len)`, `str_to_int(s)`, `int_to_str(v)`, `str_trim(s)` — all return newly allocated strings |
+| `std/string.kr` | `str_cat(a,b)`, `str_copy(s)`, `str_sub(s,start,len)`, `int_to_str(v)`, `str_trim(s)` — these return newly allocated strings. Parsers return numbers: `str_to_int(s) -> u64`, `str_to_float(s) -> f64` (accepts `[±]INT[.FRAC][e±EXP]`; `0` / `0.0` when there are no digits; no hex, `inf` or `nan` forms) |
 | `std/io.kr` | `read_file`, `write_file`, `read_line`, `scan_int`, `scan_str`, `print_kv`, `print_indent` |
 | `std/math.kr` | `min`, `max`, `abs`, `clamp`, `pow`, `sqrt_int`, `gcd`, `is_prime` |
 | `std/fmt.kr` | `fmt_hex`, `fmt_bin`, `pad_left`, `pad_right` |
