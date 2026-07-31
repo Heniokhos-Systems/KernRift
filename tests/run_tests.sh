@@ -9056,6 +9056,108 @@ done
 rm -f "$ARCHV_SRC" "$ARCHV_BIN"
 
 echo ""
+echo "--- std/alloc.kr + std/io.kr regression tests ---"
+# Five allocator bugs + one I/O bug, all verified against a pre-fix copy of
+# std/alloc.kr / std/io.kr (each test genuinely FAILED before its fix and
+# PASSES after — see the task notes for the paste of the pre-fix failures).
+
+# Bug 1: guard pages never guard anything. arena_new's guard_addr was
+# base+40+capacity, page-aligned (so mprotect succeeds) only when capacity
+# happens to leave the right residue mod 4096 -- true for almost no
+# requested capacity. mprotect's return value was never checked, so the
+# EINVAL failure was silent and the "guard" was a no-op. capacity=100 is
+# deliberately NOT the coincidentally-aligned case.
+#
+# The guard page, once correctly placed, starts at round_up(raw_end, 4096)
+# -- somewhere in [raw_end, raw_end+4095] -- and is 4096 bytes wide. Probing
+# at offsets 0 and 4096 from raw_end is enough to guarantee landing inside
+# that window regardless of the exact rounding remainder: if the remainder
+# is 0 the window is [raw_end, raw_end+4096) and offset 0 hits it; if the
+# remainder is d>0 the window is [raw_end+d, raw_end+d+4096) and offset
+# 4096 always falls inside it (d <= 4095 < 4096 < d+4096). Both offsets
+# stay well inside the slab's actual mmap'd pages either way (mmap always
+# rounds the reservation up to whole pages, so even the smaller pre-fix
+# reservation covers this), so a fault here is unambiguously the guard
+# page firing, not an unrelated out-of-bounds access past the mapping.
+# Pre-fix, mprotect silently no-ops and both stores succeed, reaching
+# exit(0); post-fix, one of them must SIGSEGV (rc=139).
+run_test "alloc_guard_page_protects_unaligned_capacity" 'import "std/alloc.kr"
+fn main() {
+    uint64 a = arena_new(100)
+    uint64 cap = load64(a)
+    uint64 raw_end = a + 40 + cap
+    store8(raw_end, 1)
+    store8(raw_end + 4096, 1)
+    exit(0)
+}' 139
+
+# Bug 2: heap_new(capacity < 40) underflows `capacity - 40` on u64,
+# producing a phantom ~2^64-byte free block instead of rejecting the
+# nonsensical request. Pre-fix this "succeeds" (exit 0); post-fix it must
+# be rejected up front.
+run_test "alloc_heap_new_rejects_underflow_capacity" 'import "std/alloc.kr"
+fn main() {
+    uint64 h = heap_new(10)
+    exit(0)
+}' 1
+
+# Bug 3: pool_new(size, 0) sets free_head to a slot address unconditionally,
+# even when count == 0 (so there are no real slots) -- pool_alloc then
+# hands out that phantom slot instead of correctly reporting "out of
+# slots". Pre-fix, pool_alloc succeeds and the program reaches exit(0).
+run_test "alloc_pool_new_zero_count_no_phantom_slot" 'import "std/alloc.kr"
+fn main() {
+    uint64 p = pool_new(16, 0)
+    uint64 s = pool_alloc(p)
+    exit(0)
+}' 1
+
+# Bug 4: heap_free only coalesces forward (into the next physical block),
+# never backward (into the preceding one). Allocate 40/40/80 out of a
+# 280-byte heap (exactly filling it, no leftover tail block), then free
+# the middle block, then the first (forward-merges into one 120-byte free
+# block), then the last (the only adjacent free block is BEHIND it, which
+# forward coalescing cannot see). Without backward merging the free list
+# ends up with two blocks (120 and 80) neither large enough for a 150-byte
+# request, even though 200+ contiguous bytes are free -- heap_alloc aborts
+# "out of memory" (exit 1). With backward merging the whole heap reunites
+# into one free block and the allocation succeeds (exit 0).
+run_test "alloc_heap_free_backward_coalesce" 'import "std/alloc.kr"
+fn main() {
+    uint64 h = heap_new(280)
+    uint64 a = heap_alloc(h, 40)
+    uint64 b = heap_alloc(h, 40)
+    uint64 c = heap_alloc(h, 80)
+    heap_free(h, b)
+    heap_free(h, a)
+    heap_free(h, c)
+    uint64 d = heap_alloc(h, 150)
+    exit(0)
+}' 0
+
+# Bug 5: read_file returned 0 both when `path` could not be opened AND
+# when it opened fine but was zero-length -- the two were indistinguishable.
+# Create a genuinely empty (but existing) file, then check read_file
+# returns non-zero for it while still returning 0 for a path that does not
+# exist at all. Pre-fix, the empty-file case incorrectly returns 0 too
+# (exit 1 below); post-fix both checks pass (exit 0).
+run_test "io_read_file_empty_vs_missing" 'import "std/io.kr"
+fn main() {
+    uint64 empty_path = "/tmp/krc_test_read_file_bug5_empty.txt"
+    uint64 missing_path = "/tmp/krc_test_read_file_bug5_does_not_exist_xyz.txt"
+    uint64 fd = file_open(empty_path, 1)
+    file_close(fd)
+    uint64 empty_buf = read_file(empty_path)
+    uint64 missing_buf = read_file(missing_path)
+    if empty_buf == 0 {
+        exit(1)
+    }
+    if missing_buf != 0 {
+        exit(2)
+    }
+    exit(0)
+}' 0
+
 echo ""
 echo "--- call-argument capacity ---"
 # call_arg_vregs holds 32 slots. The arg-collection loop stops at 32; without
