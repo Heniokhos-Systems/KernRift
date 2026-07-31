@@ -36,6 +36,38 @@ run_test() {
     rm -f "$REPO_ROOT/test_tmp_$$.kr" /tmp/krc_test_$$
 }
 
+# Like run_test, but bounds wall-clock time. A timeout is reported distinctly
+# from a wrong exit code, because "took too long" and "computed the wrong
+# answer" are different failures and conflating them hides regressions.
+run_test_timed() {
+    local name="$1"
+    local input="$2"
+    local expected="$3"
+    local secs="$4"
+    TOTAL=$((TOTAL + 1))
+
+    local REPO_ROOT="$DIR/.."
+    printf '%s\n' "$input" > "$REPO_ROOT/test_tmp_$$.kr"
+    if $KRC $KRC_FLAGS "$REPO_ROOT/test_tmp_$$.kr" -o /tmp/krc_test_$$ > /dev/null 2>&1; then
+        chmod +x /tmp/krc_test_$$
+        local got=0
+        timeout "$secs" /tmp/krc_test_$$ > /dev/null 2>&1 && got=0 || got=$?
+        if [ "$got" = "124" ]; then
+            echo "FAIL: $name (exceeded ${secs}s wall clock)"
+            FAIL=$((FAIL + 1))
+        elif [ "$got" = "$expected" ]; then
+            PASS=$((PASS + 1))
+        else
+            echo "FAIL: $name (expected $expected, got $got)"
+            FAIL=$((FAIL + 1))
+        fi
+    else
+        echo "FAIL: $name (compilation failed)"
+        FAIL=$((FAIL + 1))
+    fi
+    rm -f "$REPO_ROOT/test_tmp_$$.kr" /tmp/krc_test_$$
+}
+
 run_test_output() {
     local name="$1"
     local input="$2"
@@ -442,13 +474,67 @@ fn main() {
     if str_to_float("-3.14e2") == 0.0 - 314.0 { exit(0) }
     exit(1)
 }' 0
-# The exponent loop is clamped at 400 because 10^309 is already +inf. Without
-# the clamp this input spins for a billion iterations.
-run_test "str_to_float_exp_clamped" 'import "std/string.kr"
+# The exponent loop is clamped at 400 because 10^309 is already +inf. This is
+# TIMED, not just checked for exit code: without the clamp the loop still
+# terminates, it just takes ~0.58 s per parse (measured), so a plain exit-code
+# test passes against the unfixed stdlib and proves nothing. 50 parses is
+# ~29 s unclamped versus instant clamped.
+run_test_timed "str_to_float_exp_clamped" 'import "std/string.kr"
 fn main() {
-    f64 v = str_to_float("1e999999999")
-    if v > 1.0 { exit(0) }
+    u64 n = 0
+    u64 hits = 0
+    while n < 50 {
+        f64 v = str_to_float("1e999999999")
+        if v > 1.0 { hits = hits + 1 }
+        n = n + 1
+    }
+    if hits == 50 { exit(0) }
     exit(1)
+}' 0 5
+# Exactness across the negative-exponent range. Every one of these is a
+# distinct number of compounding steps in the old implementation.
+run_test "str_to_float_neg_exp_range" 'import "std/string.kr"
+fn main() {
+    if str_to_float("1e-1") != 0.1 { exit(1) }
+    if str_to_float("1e-2") != 0.01 { exit(2) }
+    if str_to_float("1e-3") != 0.001 { exit(3) }
+    if str_to_float("1e-4") != 0.0001 { exit(4) }
+    if str_to_float("1e-5") != 0.00001 { exit(5) }
+    if str_to_float("1e-6") != 0.000001 { exit(6) }
+    if str_to_float("1e-7") != 0.0000001 { exit(7) }
+    exit(0)
+}' 0
+# Mantissa/exponent combinations, and the equivalent spellings of one value.
+run_test "str_to_float_equivalent_spellings" 'import "std/string.kr"
+fn main() {
+    f64 a = str_to_float("0.015")
+    if str_to_float("1.5e-2") != a { exit(1) }
+    if str_to_float("15e-3")  != a { exit(2) }
+    if str_to_float("150e-4") != a { exit(3) }
+    if str_to_float("1.5E-2") != a { exit(4) }
+    exit(0)
+}' 0
+# Accepted syntax that is easy to regress: leading +, bare .5, trailing .,
+# capital E, explicit +exponent, and a trailing-garbage stop.
+run_test "str_to_float_syntax_forms" 'import "std/string.kr"
+fn main() {
+    if str_to_float("+3.5")   != 3.5   { exit(1) }
+    if str_to_float(".5")     != 0.5   { exit(2) }
+    if str_to_float("5.")     != 5.0   { exit(3) }
+    if str_to_float("1E3")    != 1000.0 { exit(4) }
+    if str_to_float("1e+3")   != 1000.0 { exit(5) }
+    if str_to_float("3.5abc") != 3.5   { exit(6) }
+    if str_to_float("0e0")    != 0.0   { exit(7) }
+    exit(0)
+}' 0
+# No-digit inputs return 0.0 rather than reading past the string.
+run_test "str_to_float_no_digits" 'import "std/string.kr"
+fn main() {
+    if str_to_float("")    != 0.0 { exit(1) }
+    if str_to_float("abc") != 0.0 { exit(2) }
+    if str_to_float("e5")  != 0.0 { exit(3) }
+    if str_to_float("-")   != 0.0 { exit(4) }
+    exit(0)
 }' 0
 run_test_output "str_replace_longer" 'import "std/string.kr"
 fn main() { println_str(str_replace("hi world hi", "hi", "HELLO")) }' "HELLO world HELLO"
