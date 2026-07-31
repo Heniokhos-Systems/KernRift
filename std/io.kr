@@ -1,7 +1,11 @@
 // KernRift Standard Library — I/O Operations
 
 // Read entire file into a string (allocates buffer, returns pointer)
-// Returns 0 on failure
+// Returns 0 only if `path` could not be opened. A path that opens
+// successfully but is zero-length returns a valid pointer to an
+// allocated empty (zero-length, null-terminated) string — NOT 0 — so
+// callers can tell "no such file" apart from "file exists and is
+// empty" (the two used to share the 0 sentinel).
 fn read_file(u64 path) -> u64 {
     u64 fd = file_open(path, 0)
     // file_open returns a negative errno (a huge unsigned value) on failure
@@ -9,7 +13,6 @@ fn read_file(u64 path) -> u64 {
     // bail out with 0 as the doc promises.
     if is_errno(fd) != 0 { return 0 }
     u64 size = file_size(fd)
-    if size == 0 { file_close(fd); return 0 }
     u64 buf = alloc(size + 1)
     file_read(fd, buf, size)
     file_close(fd)

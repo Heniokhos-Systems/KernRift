@@ -4,8 +4,17 @@
 import "fmt.kr"
 
 fn arena_new(u64 capacity) -> u64 {
-    // Allocate slab: 40 (header) + capacity + 4096 (guard page)
-    u64 total = capacity + 40 + 4096
+    // Allocate slab: 40 (header) + capacity + 8192 slack.
+    // The guard page must start on a page boundary (mprotect requires an
+    // aligned addr), but base+40+capacity is only page-aligned when
+    // capacity happens to leave the right residue — true for almost no
+    // requested capacity. So we reserve a full extra page of rounding
+    // slack (4096) on top of the actual guard page (4096) and round the
+    // guard's start UP to the next page boundary: this guarantees the
+    // 4096-byte protected region always lands fully inside the slab, and
+    // never starts before base+40+capacity (which would incorrectly trap
+    // legitimate in-capacity writes).
+    u64 total = capacity + 40 + 8192
     u64 base = alloc(total)
     // base points to user region of alloc (after alloc's own 8-byte header)
     // Store arena header
@@ -15,12 +24,20 @@ fn arena_new(u64 capacity) -> u64 {
     store64(base + 24, 0)         // [24] alloc_total = 0
     store64(base + 32, 1)         // [32] guard = 1
 
-    // Set up guard page: mprotect the last 4096 bytes as PROT_NONE
+    // Set up guard page: mprotect one page as PROT_NONE, starting at the
+    // first page boundary at or after the end of the usable capacity.
     // Only on Linux x86_64 for V1 (syscall_raw)
-    u64 guard_addr = base + 40 + capacity
+    u64 raw_guard = base + 40 + capacity
+    u64 guard_addr = (raw_guard + 4095) & ~4095
     // mprotect(addr, len, prot): Linux syscall 10
     // prot = 0 (PROT_NONE)
-    syscall_raw(10, guard_addr, 4096, 0, 0, 0, 0)
+    u64 mp_ret = syscall_raw(10, guard_addr, 4096, 0, 0, 0, 0)
+    if mp_ret != 0 {
+        // A guard that silently isn't there is worse than no guard at
+        // all, since it reads as protection. Fail loud instead.
+        write(2, "arena: mprotect guard page failed\n", 34)
+        exit(1)
+    }
 
     return base
 }
@@ -76,7 +93,11 @@ fn pool_new(u64 obj_size, u64 count) -> u64 {
     u64 aligned = (obj_size + 7) & 0xFFFFFFFFFFFFFFF8
     if aligned < 16 { aligned = 16 }
     u64 data_size = aligned * count
-    u64 total = 56 + data_size + 4096
+    // See arena_new for why this needs 8192 of slack rather than a flat
+    // 4096: base+56+data_size is not page-aligned in general, and
+    // mprotect requires an aligned addr, so we round the guard start UP
+    // and need room for both the rounding slop and the guard page itself.
+    u64 total = 56 + data_size + 8192
     u64 base = alloc(total)
     // Header
     store64(base, aligned)            // obj_size
@@ -86,9 +107,14 @@ fn pool_new(u64 obj_size, u64 count) -> u64 {
     store64(base + 40, 0)             // free_count
     store64(base + 48, 1)             // guard
 
-    // Guard page
-    u64 guard_addr = base + 56 + data_size
-    syscall_raw(10, guard_addr, 4096, 0, 0, 0, 0)
+    // Guard page: round up to the next page boundary at/after the data.
+    u64 raw_guard = base + 56 + data_size
+    u64 guard_addr = (raw_guard + 4095) & ~4095
+    u64 mp_ret = syscall_raw(10, guard_addr, 4096, 0, 0, 0, 0)
+    if mp_ret != 0 {
+        write(2, "pool: mprotect guard page failed\n", 33)
+        exit(1)
+    }
 
     // Initialize free list: chain all slots
     u64 slot_base = base + 56
@@ -104,7 +130,15 @@ fn pool_new(u64 obj_size, u64 count) -> u64 {
         store64(slot + 8, 0)               // canary = 0 (clean)
         i = i + 1
     }
-    store64(base + 16, slot_base)     // free_head = first slot
+    // free_head must be NULL for an empty pool (count == 0) — otherwise
+    // slot_base (which points past the header into the guard/slack
+    // region, not to any real slot) would be handed out by pool_alloc as
+    // a phantom slot.
+    if count > 0 {
+        store64(base + 16, slot_base)     // free_head = first slot
+    } else {
+        store64(base + 16, 0)             // free_head = NULL, pool is empty
+    }
 
     return base
 }
@@ -191,7 +225,17 @@ fn pool_stats(u64 pool) -> u64 {
 // Heap: general-purpose variable-size allocator with free list, coalescing, leak detection
 
 fn heap_new(u64 capacity) -> u64 {
-    u64 total = 56 + capacity + 4096
+    // capacity must cover at least one block header (40 bytes), or
+    // `capacity - 40` below underflows on u64 and produces a phantom
+    // free block of ~2^64 bytes that heap_alloc will happily hand out
+    // pointers from — far outside the actual mmap'd slab.
+    if capacity < 40 {
+        write(2, "heap_new: capacity must be at least 40 bytes\n", 45)
+        exit(1)
+    }
+    // See arena_new for why this needs 8192 of slack rather than a flat
+    // 4096 (page-alignment rounding room for the guard page).
+    u64 total = 56 + capacity + 8192
     u64 base = alloc(total)
     // Heap header
     store64(base, capacity)
@@ -201,9 +245,14 @@ fn heap_new(u64 capacity) -> u64 {
     store64(base + 40, 0)   // free_total
     store64(base + 48, 1)   // guard
 
-    // Guard page
-    u64 guard_addr = base + 56 + capacity
-    syscall_raw(10, guard_addr, 4096, 0, 0, 0, 0)
+    // Guard page: round up to the next page boundary at/after capacity.
+    u64 raw_guard = base + 56 + capacity
+    u64 guard_addr = (raw_guard + 4095) & ~4095
+    u64 mp_ret = syscall_raw(10, guard_addr, 4096, 0, 0, 0, 0)
+    if mp_ret != 0 {
+        write(2, "heap: mprotect guard page failed\n", 33)
+        exit(1)
+    }
 
     // Initialize one big free block covering the entire capacity
     u64 block = base + 56
@@ -317,6 +366,40 @@ fn heap_free(u64 heap, u64 ptr) {
 
             bsize = load64(block)  // updated size after merge
         }
+    }
+
+    // Backward coalescing: check for a free block that physically ends
+    // exactly where this block begins. The block header has no prev-size
+    // / boundary-tag field, so unlike the forward case above we cannot
+    // jump straight to the preceding block — instead scan the free list
+    // (already the allocator's only index of free blocks; first-fit
+    // allocation above walks it the same O(n) way) for one whose end
+    // address matches this block's start.
+    u64 prev_match = 0
+    u64 scan = load64(heap + 8)   // free_head
+    while scan != 0 {
+        u64 scan_size = load64(scan)
+        if scan + 40 + scan_size == block {
+            prev_match = scan
+            scan = 0
+        } else {
+            scan = load64(scan + 24)   // next_free
+        }
+    }
+
+    if prev_match != 0 {
+        // Absorb this block into its physical predecessor. prev_match is
+        // already in the free list at the right position, so it does not
+        // need to be reinserted — only its size grows to cover the
+        // freed block (header included).
+        u64 prev_size = load64(prev_match)
+        store64(prev_match, prev_size + 40 + bsize)
+
+        u64 fc2 = load64(heap + 24)
+        store64(heap + 24, fc2 + 1)
+        u64 ft2 = load64(heap + 40)
+        store64(heap + 40, ft2 + bsize)
+        return
     }
 
     // Mark free
