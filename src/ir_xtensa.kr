@@ -2696,6 +2696,53 @@ fn ir_emit_xtensa_insn(uint64 ii) {
         return
     }
 
+    // ----- IR_SYSCALL (52): exit() -----
+    // Bare metal in both configurations, but they differ in what is possible:
+    //   lx60 under qemu -> SIMCALL semihosting can terminate the emulator
+    //   real ESP32      -> nothing to exit to; refuse at compile time
+    // Gate on `freestanding && !esp32`, NOT on `!esp32` alone: hosted xtensa
+    // is unimplemented today, so when it lands this must not silently turn a
+    // hosted exit() into a semihosting call.
+    if op == 52 {
+        // op 52 carries EVERY syscall, not just exit() — write/read/open
+        // all arrive here with a different `imm`. Gate the exit lowering on
+        // imm == 231 (exit_group) or a freestanding write() silently compiles
+        // to the exit sequence, and the esp32 refusal below would fire for a
+        // write() call while blaming exit(). Task 3 hit exactly this on the
+        // riscv side; KernRift's riscv_freestanding_syscall_nyi test caught it.
+        if imm != 231 {
+            xt_nyi_op(op)
+            return
+        }
+        if xt_esp32_target != 0 {
+            xt_err("error: xtensa/esp32: exit() has no meaning on bare metal — there is no OS to return an exit status to. End a freestanding ESP32 image with `loop { }` instead. (On the lx60 qemu target exit() works, because the emulator can terminate.)\n")
+        }
+        if freestanding == 0 {
+            xt_nyi_op(op)
+            return
+        }
+        // SIMCALL: a2 = call number (SYS_exit = 1), a3 = status.
+        //
+        // The status is NOT in `imm` — `imm` is 231, the exit_group syscall
+        // number (ir.kr:1751). The status arrives in a2 via IR_ARG (op 51),
+        // because XT_ARG0 = 2 and CALL0 passes arg0 in a2 (ir_xtensa.kr:21).
+        //
+        // ORDER IS LOAD-BEARING: copy a2 into a3 BEFORE overwriting a2 with
+        // the call number, or the status is destroyed and every exit reports
+        // 1. There is no third register to stage through.
+        //
+        // Without `-semihosting` on the qemu command line this instruction
+        // is a SILENT NO-OP, not a trap — the image runs forever. Every test
+        // booting an image that relies on this must pass -semihosting.
+        xt_mv(3, XT_ARG0)          // a3 = status (from a2) — MUST be first
+        xt_movi(XT_ARG0, 1)        // a2 = SYS_exit
+        xt_simcall()
+        // If semihosting was not enabled the SIMCALL did nothing; park rather
+        // than fall through into whatever bytes follow.
+        xt_j(codegen_output_len())
+        return
+    }
+
     // Everything else lands in later tasks (call=T5.1/T5.2).
     xt_nyi_op(op)
 }

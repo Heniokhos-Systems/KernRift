@@ -7028,6 +7028,37 @@ else
 fi
 rm -f "$RV_K_SRC" "$RV_K_BIN"
 
+echo ""
+echo "--- xtensa exit() ---"
+TOTAL=$((TOTAL + 1))
+XT_E_SRC="/tmp/krc_xt_exit_$$.kr"
+printf 'fn main() { exit(42) }\n' > "$XT_E_SRC"
+# esp32 must REFUSE, with the new wording
+if $KRC --arch=xtensa --freestanding --target=esp32 "$XT_E_SRC" -o /dev/null 2>&1 \
+     | grep -q "no OS to return an exit status to"; then
+    PASS=$((PASS + 1)); echo "  xtensa_esp32_exit_refused: PASS"
+else
+    echo "FAIL: xtensa_esp32_exit_refused (expected an error mentioning 'no OS to return an exit status to')"; FAIL=$((FAIL + 1))
+fi
+# lx60 must terminate qemu with 42
+if command -v qemu-system-xtensa >/dev/null 2>&1; then
+    TOTAL=$((TOTAL + 1))
+    XT_E_BIN="/tmp/krc_xt_exit_$$.elf"
+    if $KRC --arch=xtensa --freestanding "$XT_E_SRC" -o "$XT_E_BIN" >/dev/null 2>&1; then
+        timeout 10 qemu-system-xtensa -M lx60 -nographic -semihosting -kernel "$XT_E_BIN" >/dev/null 2>&1
+        XT_E_ST=$?
+        if [ "$XT_E_ST" = "42" ]; then
+            PASS=$((PASS + 1)); echo "  xtensa_lx60_exit_42: PASS"
+        else
+            echo "FAIL: xtensa_lx60_exit_42 (expected 42, got $XT_E_ST)"; FAIL=$((FAIL + 1))
+        fi
+    else
+        echo "FAIL: xtensa_lx60_exit_42 (compile failed)"; FAIL=$((FAIL + 1))
+    fi
+    rm -f "$XT_E_BIN"
+fi
+rm -f "$XT_E_SRC"
+
 # --- SHA-256 (std/sha256.kr) — FIPS 180-4 test vectors ---
 # Vector 3 is exactly 56 bytes: padding must spill into a second 64-byte
 # block (0x80 + 55 zero-fill bytes would leave no room for the 8-byte
