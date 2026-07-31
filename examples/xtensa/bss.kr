@@ -46,5 +46,5 @@ fn main() {
     print_uint(buf[0])      space()   // BSS reads zero -> 0
     buf[500] = 99                      // BSS is writable
     print_uint(buf[500])    nl()      // round-trip -> 99
-    loop { }
+    exit(36)
 }

@@ -53,5 +53,5 @@ fn main() {
     u32 e = str_eq("ab", "ab")
     putc(48 + e)
 
-    loop { }
+    exit(22)
 }

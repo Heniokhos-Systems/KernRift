@@ -87,5 +87,5 @@ fn harness() -> u32 {
 
 fn main() {
     print_uint(harness())   nl()
-    loop { }
+    exit(35)
 }

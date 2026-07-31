@@ -38,5 +38,5 @@ fn main() {
     uint32 result = call_ptr(f, 64)   // inc(64) = 65 = 'A'
     putc(result)
     putc(10)
-    loop { }
+    exit(26)
 }

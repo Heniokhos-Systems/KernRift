@@ -58,5 +58,5 @@ fn main() {
     putc(small_case())   // 'A'
     putc(large_case())   // 'Z'
     putc(10)             // '\n'
-    loop { }
+    exit(25)
 }

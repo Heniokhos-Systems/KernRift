@@ -31,5 +31,5 @@ fn main() {
         "nop"           //   NOP.N — unique in the image, proves the block emitted
     }
     putc(89)            // 'Y'
-    loop { }
+    exit(39)
 }

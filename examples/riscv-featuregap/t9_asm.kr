@@ -46,5 +46,5 @@ fn main() {
         out(a0 -> result)
     putc(result)                    // 0x41 = 'A'
 
-    loop { }
+    exit(28)
 }

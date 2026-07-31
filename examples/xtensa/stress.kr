@@ -96,5 +96,5 @@ fn main() {
 
     print_uint(poly(2))    nl()    // 4524
 
-    loop { }
+    exit(31)
 }

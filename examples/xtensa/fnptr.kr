@@ -36,5 +36,5 @@ fn main() {
     u32 f = fn_addr("dbl")     // IR_FN_ADDR (86)
     u32 r = call_ptr(f, 21)    // CALL_IND (87) -> dbl(21) = 42
     print_uint(r)   nl()
-    loop { }
+    exit(34)
 }

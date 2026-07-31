@@ -11,10 +11,10 @@
 //
 // Build:
 //   ./build/krc2 --arch=riscv32 --freestanding examples/riscv-hello-uart/hello.kr -o hello.bin
-// Run (Ctrl-A x to exit):
+// Run:
 //   qemu-system-riscv32 -machine virt -nographic -bios hello.bin
 //
-// Expected output: hello
+// Expected output: hello, then qemu exits with status 10 (exit(10)).
 
 device Uart at 0x10000000 {
     thr at 0x00 : u8
@@ -36,7 +36,8 @@ fn main() {
     putc(108)   // 'l'
     putc(111)   // 'o'
     putc(10)    // '\n'
-    // Freestanding: there is nothing to return to — falling off main
-    // would execute whatever bytes follow. Park the hart forever.
-    loop { }
+    // Freestanding: exit(N) terminates qemu via the sifive_test finisher
+    // device (src/ir_riscv.kr) — status 10 proves the hart reached here
+    // rather than trapping or looping.
+    exit(10)
 }

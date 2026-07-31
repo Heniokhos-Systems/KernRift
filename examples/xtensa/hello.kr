@@ -39,7 +39,7 @@ fn main() {
     putc(108)   // 'l'
     putc(111)   // 'o'
     putc(10)    // '\n'
-    // Freestanding: there is nothing to return to — falling off main would
-    // execute whatever bytes follow. Park the core forever.
-    loop { }
+    // Freestanding: exit(N) terminates qemu via SIMCALL (requires -semihosting)
+    // — status 30 proves the core reached here rather than trapping.
+    exit(30)
 }

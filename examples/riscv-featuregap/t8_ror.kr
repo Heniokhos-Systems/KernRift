@@ -78,5 +78,5 @@ fn main() {
     putc(s & 0xFF)                 // 'A'
 
     putc(10)                       // '\n'
-    loop { }
+    exit(27)
 }

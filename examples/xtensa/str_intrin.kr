@@ -72,5 +72,5 @@ fn main() {
     u32 count = fmt_uint(buf, 60705)
     puts_n(buf, count)                   nl()   // 60705
 
-    loop { }
+    exit(38)
 }

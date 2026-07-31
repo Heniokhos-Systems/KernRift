@@ -28,5 +28,5 @@ fn main() {
         i = i + 1
         ch = load8(s + i)
     }
-    loop { }
+    exit(77)
 }

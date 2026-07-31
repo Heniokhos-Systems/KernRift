@@ -26,5 +26,5 @@ static uint32 counter = 8
 fn main() {
     counter = counter + 1        // IR_STATIC_LOAD + IR_STATIC_STORE
     putc(counter + 48)           // IR_STATIC_LOAD, then '0' + 9 = '9'
-    loop { }
+    exit(21)
 }

@@ -54,5 +54,5 @@ fn main() {
     putc(cpybuf[0])          // 'Z'
     putc(cpybuf[1])          // 'k'
 
-    loop { }
+    exit(23)
 }

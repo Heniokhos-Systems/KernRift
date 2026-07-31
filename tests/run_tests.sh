@@ -4896,15 +4896,16 @@ if command -v qemu-system-riscv32 >/dev/null 2>&1 \
         fi
     fi
     if [ "$RV_OK" = 1 ]; then
-        # hello loops forever after printing (freestanding), so qemu always
-        # runs until the timeout kills it — 5s is the fixed cost, plenty
-        # for the ~instant UART output.
-        RV_OUT=$(timeout 5 qemu-system-riscv32 -machine virt -nographic -bios "$RV_BIN" 2>/dev/null)
-        if echo "$RV_OUT" | grep -q "hello"; then
+        # hello now exit(10)s after printing (freestanding), so qemu
+        # terminates itself via the sifive_test finisher instead of running
+        # out the clock — 10s is generous headroom over the ~instant UART
+        # output + exit.
+        RV_OUT=$(timeout 10 qemu-system-riscv32 -machine virt -nographic -bios "$RV_BIN" 2>/dev/null); RV_ST=$?
+        if [ "$RV_ST" = "10" ] && echo "$RV_OUT" | grep -q "hello"; then
             PASS=$((PASS + 1))
-            echo "  riscv_hello_boot: PASS (qemu printed hello)"
+            echo "  riscv_hello_boot: PASS (qemu printed hello, exited 10)"
         else
-            echo "FAIL: riscv_hello_boot (qemu output did not contain 'hello')"
+            echo "FAIL: riscv_hello_boot (status $RV_ST, output did not contain 'hello', or both)"
             FAIL=$((FAIL + 1))
         fi
     else
@@ -5382,16 +5383,17 @@ if command -v qemu-system-xtensa >/dev/null 2>&1; then
         fi
     fi
     if [ "$XT_HELLO_OK" = 1 ]; then
-        # hello loops forever after printing (freestanding), so qemu always
-        # runs until the timeout kills it — 5s is the fixed cost, plenty for
-        # the ~instant UART output. Command substitution captures the full
-        # stdout before the SIGTERM (a pipe to `head` can lose it).
-        XT_OUT=$(timeout 5 qemu-system-xtensa -M lx60 -nographic -kernel "$XT_HELLO_ELF" 2>/dev/null)
-        if echo "$XT_OUT" | grep -q "hello"; then
+        # hello now exit(30)s after printing (freestanding), so qemu
+        # terminates itself via SIMCALL instead of running out the clock.
+        # -semihosting is required or SIMCALL is a silent no-op and this
+        # times out at 124 instead of asserting. Command substitution
+        # captures the full stdout before qemu exits.
+        XT_OUT=$(timeout 10 qemu-system-xtensa -M lx60 -nographic -semihosting -kernel "$XT_HELLO_ELF" 2>/dev/null); XT_ST=$?
+        if [ "$XT_ST" = "30" ] && echo "$XT_OUT" | grep -q "hello"; then
             PASS=$((PASS + 1))
-            echo "  xtensa_hello_boot: PASS (qemu printed hello)"
+            echo "  xtensa_hello_boot: PASS (qemu printed hello, exited 30)"
         else
-            echo "FAIL: xtensa_hello_boot (qemu output did not contain 'hello')"
+            echo "FAIL: xtensa_hello_boot (status $XT_ST, output did not contain 'hello', or both)"
             FAIL=$((FAIL + 1))
         fi
     else
@@ -5426,15 +5428,17 @@ if command -v qemu-system-xtensa >/dev/null 2>&1; then
     fi
     if [ "$XT_STRESS_OK" = 1 ]; then
         XT_ST_EXP=$(printf '120\n3628800\n6765\n142857\n1\n-13\n-6\n4524')
-        # stress.kr loops forever after printing, so qemu runs until the timeout.
+        # stress.kr now exit(31)s after printing, so qemu terminates itself via
+        # SIMCALL (-semihosting required) instead of running out the timeout.
         # fib(20) is ~21.9k calls — microseconds under qemu; 8s is ample headroom.
         # Strip CR so the compare is newline-exact regardless of UART line endings.
-        XT_ST_OUT=$(timeout 8 qemu-system-xtensa -M lx60 -nographic -kernel "$XT_STRESS_ELF" 2>/dev/null | tr -d '\r')
-        if [ "$XT_ST_OUT" = "$XT_ST_EXP" ]; then
+        XT_ST_RAW=$(timeout 8 qemu-system-xtensa -M lx60 -nographic -semihosting -kernel "$XT_STRESS_ELF" 2>/dev/null); XT_ST_STATUS=$?
+        XT_ST_OUT=$(echo "$XT_ST_RAW" | tr -d '\r')
+        if [ "$XT_ST_STATUS" = "31" ] && [ "$XT_ST_OUT" = "$XT_ST_EXP" ]; then
             PASS=$((PASS + 1))
-            echo "  xtensa_stress_boot: PASS (recursion + spills + signed div all correct)"
+            echo "  xtensa_stress_boot: PASS (recursion + spills + signed div all correct, exited 31)"
         else
-            echo "FAIL: xtensa_stress_boot (output mismatch)"
+            echo "FAIL: xtensa_stress_boot (output mismatch or status $XT_ST_STATUS != 31)"
             echo "    expected: $(echo "$XT_ST_EXP" | tr '\n' ' ')"
             echo "    got:      $(echo "$XT_ST_OUT" | tr '\n' ' ')"
             FAIL=$((FAIL + 1))
@@ -5466,12 +5470,13 @@ if command -v qemu-system-xtensa >/dev/null 2>&1; then
     fi
     if [ "$XT_STR_OK" = 1 ]; then
         XT_STR_EXP="xtensa strings ok"
-        XT_STR_OUT=$(timeout 8 qemu-system-xtensa -M lx60 -nographic -kernel "$XT_STR_ELF" 2>/dev/null | tr -d '\r')
-        if [ "$XT_STR_OUT" = "$XT_STR_EXP" ]; then
+        XT_STR_RAW=$(timeout 8 qemu-system-xtensa -M lx60 -nographic -semihosting -kernel "$XT_STR_ELF" 2>/dev/null); XT_STR_STATUS=$?
+        XT_STR_OUT=$(echo "$XT_STR_RAW" | tr -d '\r')
+        if [ "$XT_STR_STATUS" = "32" ] && [ "$XT_STR_OUT" = "$XT_STR_EXP" ]; then
             PASS=$((PASS + 1))
-            echo "  xtensa_str_boot: PASS (string literal materialized + printed)"
+            echo "  xtensa_str_boot: PASS (string literal materialized + printed, exited 32)"
         else
-            echo "FAIL: xtensa_str_boot (output mismatch)"
+            echo "FAIL: xtensa_str_boot (output mismatch or status $XT_STR_STATUS != 32)"
             echo "    expected: $XT_STR_EXP"
             echo "    got:      $XT_STR_OUT"
             FAIL=$((FAIL + 1))
@@ -5505,12 +5510,13 @@ if command -v qemu-system-xtensa >/dev/null 2>&1; then
     fi
     if [ "$XT_GLB_OK" = 1 ]; then
         XT_GLB_EXP="42"
-        XT_GLB_OUT=$(timeout 8 qemu-system-xtensa -M lx60 -nographic -kernel "$XT_GLB_ELF" 2>/dev/null | tr -d '\r')
-        if [ "$XT_GLB_OUT" = "$XT_GLB_EXP" ]; then
+        XT_GLB_RAW=$(timeout 8 qemu-system-xtensa -M lx60 -nographic -semihosting -kernel "$XT_GLB_ELF" 2>/dev/null); XT_GLB_STATUS=$?
+        XT_GLB_OUT=$(echo "$XT_GLB_RAW" | tr -d '\r')
+        if [ "$XT_GLB_STATUS" = "33" ] && [ "$XT_GLB_OUT" = "$XT_GLB_EXP" ]; then
             PASS=$((PASS + 1))
-            echo "  xtensa_globals_boot: PASS (static load/store + print = 42)"
+            echo "  xtensa_globals_boot: PASS (static load/store + print = 42, exited 33)"
         else
-            echo "FAIL: xtensa_globals_boot (output mismatch)"
+            echo "FAIL: xtensa_globals_boot (output mismatch or status $XT_GLB_STATUS != 33)"
             echo "    expected: $XT_GLB_EXP"
             echo "    got:      $XT_GLB_OUT"
             FAIL=$((FAIL + 1))
@@ -5543,12 +5549,13 @@ if command -v qemu-system-xtensa >/dev/null 2>&1; then
     fi
     if [ "$XT_FP_OK" = 1 ]; then
         XT_FP_EXP="42"
-        XT_FP_OUT=$(timeout 8 qemu-system-xtensa -M lx60 -nographic -kernel "$XT_FP_ELF" 2>/dev/null | tr -d '\r')
-        if [ "$XT_FP_OUT" = "$XT_FP_EXP" ]; then
+        XT_FP_RAW=$(timeout 8 qemu-system-xtensa -M lx60 -nographic -semihosting -kernel "$XT_FP_ELF" 2>/dev/null); XT_FP_STATUS=$?
+        XT_FP_OUT=$(echo "$XT_FP_RAW" | tr -d '\r')
+        if [ "$XT_FP_STATUS" = "34" ] && [ "$XT_FP_OUT" = "$XT_FP_EXP" ]; then
             PASS=$((PASS + 1))
-            echo "  xtensa_fnptr_boot: PASS (fn_addr + call_ptr = 42)"
+            echo "  xtensa_fnptr_boot: PASS (fn_addr + call_ptr = 42, exited 34)"
         else
-            echo "FAIL: xtensa_fnptr_boot (output mismatch)"
+            echo "FAIL: xtensa_fnptr_boot (output mismatch or status $XT_FP_STATUS != 34)"
             echo "    expected: $XT_FP_EXP"
             echo "    got:      $XT_FP_OUT"
             FAIL=$((FAIL + 1))
@@ -5588,12 +5595,13 @@ if command -v qemu-system-xtensa >/dev/null 2>&1; then
     fi
     if [ "$XT_CI_OK" = 1 ]; then
         XT_CI_EXP="32529"
-        XT_CI_OUT=$(timeout 8 qemu-system-xtensa -M lx60 -nographic -kernel "$XT_CI_ELF" 2>/dev/null | tr -d '\r')
-        if [ "$XT_CI_OUT" = "$XT_CI_EXP" ]; then
+        XT_CI_RAW=$(timeout 8 qemu-system-xtensa -M lx60 -nographic -semihosting -kernel "$XT_CI_ELF" 2>/dev/null); XT_CI_STATUS=$?
+        XT_CI_OUT=$(echo "$XT_CI_RAW" | tr -d '\r')
+        if [ "$XT_CI_STATUS" = "35" ] && [ "$XT_CI_OUT" = "$XT_CI_EXP" ]; then
             PASS=$((PASS + 1))
-            echo "  xtensa_callind_clobber_boot: PASS (8 live-across-callx0 values survive = 32529)"
+            echo "  xtensa_callind_clobber_boot: PASS (8 live-across-callx0 values survive = 32529, exited 35)"
         else
-            echo "FAIL: xtensa_callind_clobber_boot (output mismatch — CALL_IND missing from xt_seed_call_ceilings?)"
+            echo "FAIL: xtensa_callind_clobber_boot (output mismatch or status $XT_CI_STATUS != 35 — CALL_IND missing from xt_seed_call_ceilings?)"
             echo "    expected: $XT_CI_EXP"
             echo "    got:      $XT_CI_OUT"
             FAIL=$((FAIL + 1))
@@ -5663,12 +5671,13 @@ if command -v qemu-system-xtensa >/dev/null 2>&1; then
     fi
     if [ "$XT_BSS_OK" = 1 ]; then
         XT_BSS_EXP="42 0 99"
-        XT_BSS_OUT=$(timeout 8 qemu-system-xtensa -M lx60 -nographic -kernel "$XT_BSS_ELF" 2>/dev/null | tr -d '\r')
-        if [ "$XT_BSS_OUT" = "$XT_BSS_EXP" ]; then
+        XT_BSS_RAW=$(timeout 8 qemu-system-xtensa -M lx60 -nographic -semihosting -kernel "$XT_BSS_ELF" 2>/dev/null); XT_BSS_STATUS=$?
+        XT_BSS_OUT=$(echo "$XT_BSS_RAW" | tr -d '\r')
+        if [ "$XT_BSS_STATUS" = "36" ] && [ "$XT_BSS_OUT" = "$XT_BSS_EXP" ]; then
             PASS=$((PASS + 1))
-            echo "  xtensa_bss_boot: PASS (real BSS gap + zero loop; marker/buf = 42 0 99)"
+            echo "  xtensa_bss_boot: PASS (real BSS gap + zero loop; marker/buf = 42 0 99, exited 36)"
         else
-            echo "FAIL: xtensa_bss_boot (output mismatch)"
+            echo "FAIL: xtensa_bss_boot (output mismatch or status $XT_BSS_STATUS != 36)"
             echo "    expected: $XT_BSS_EXP"
             echo "    got:      $XT_BSS_OUT"
             FAIL=$((FAIL + 1))
@@ -5710,12 +5719,13 @@ if command -v qemu-system-xtensa >/dev/null 2>&1; then
 A
 1
 0"
-        XT_MS_OUT=$(timeout 8 qemu-system-xtensa -M lx60 -nographic -kernel "$XT_MS_ELF" 2>/dev/null | tr -d '\r')
-        if [ "$XT_MS_OUT" = "$XT_MS_EXP" ]; then
+        XT_MS_RAW=$(timeout 8 qemu-system-xtensa -M lx60 -nographic -semihosting -kernel "$XT_MS_ELF" 2>/dev/null); XT_MS_STATUS=$?
+        XT_MS_OUT=$(echo "$XT_MS_RAW" | tr -d '\r')
+        if [ "$XT_MS_STATUS" = "37" ] && [ "$XT_MS_OUT" = "$XT_MS_EXP" ]; then
             PASS=$((PASS + 1))
-            echo "  xtensa_memstack_boot: PASS (stack array + memset/memcpy/memcmp)"
+            echo "  xtensa_memstack_boot: PASS (stack array + memset/memcpy/memcmp, exited 37)"
         else
-            echo "FAIL: xtensa_memstack_boot (output mismatch)"
+            echo "FAIL: xtensa_memstack_boot (output mismatch or status $XT_MS_STATUS != 37)"
             echo "    expected: $XT_MS_EXP"
             echo "    got:      $XT_MS_OUT"
             FAIL=$((FAIL + 1))
@@ -5751,12 +5761,13 @@ if command -v qemu-system-xtensa >/dev/null 2>&1; then
 1
 0
 60705"
-        XT_SI_OUT=$(timeout 8 qemu-system-xtensa -M lx60 -nographic -kernel "$XT_SI_ELF" 2>/dev/null | tr -d '\r')
-        if [ "$XT_SI_OUT" = "$XT_SI_EXP" ]; then
+        XT_SI_RAW=$(timeout 8 qemu-system-xtensa -M lx60 -nographic -semihosting -kernel "$XT_SI_ELF" 2>/dev/null); XT_SI_STATUS=$?
+        XT_SI_OUT=$(echo "$XT_SI_RAW" | tr -d '\r')
+        if [ "$XT_SI_STATUS" = "38" ] && [ "$XT_SI_OUT" = "$XT_SI_EXP" ]; then
             PASS=$((PASS + 1))
-            echo "  xtensa_strfmt_boot: PASS (str_len/str_eq/fmt_uint = 4/1/0/60705)"
+            echo "  xtensa_strfmt_boot: PASS (str_len/str_eq/fmt_uint = 4/1/0/60705, exited 38)"
         else
-            echo "FAIL: xtensa_strfmt_boot (output mismatch)"
+            echo "FAIL: xtensa_strfmt_boot (output mismatch or status $XT_SI_STATUS != 38)"
             echo "    expected: $XT_SI_EXP"
             echo "    got:      $XT_SI_OUT"
             FAIL=$((FAIL + 1))
@@ -5802,12 +5813,13 @@ if command -v qemu-system-xtensa >/dev/null 2>&1; then
     fi
     if [ "$XT_ASM_OK" = 1 ]; then
         XT_ASM_EXP="XY"
-        XT_ASM_OUT=$(timeout 8 qemu-system-xtensa -M lx60 -nographic -kernel "$XT_ASM_ELF" 2>/dev/null | tr -d '\r')
-        if [ "$XT_ASM_OUT" = "$XT_ASM_EXP" ]; then
+        XT_ASM_RAW=$(timeout 8 qemu-system-xtensa -M lx60 -nographic -semihosting -kernel "$XT_ASM_ELF" 2>/dev/null); XT_ASM_STATUS=$?
+        XT_ASM_OUT=$(echo "$XT_ASM_RAW" | tr -d '\r')
+        if [ "$XT_ASM_STATUS" = "39" ] && [ "$XT_ASM_OUT" = "$XT_ASM_EXP" ]; then
             PASS=$((PASS + 1))
-            echo "  xtensa_asm_boot: PASS (asm block assembled: nop present + output = XY)"
+            echo "  xtensa_asm_boot: PASS (asm block assembled: nop present + output = XY, exited 39)"
         else
-            echo "FAIL: xtensa_asm_boot (output mismatch)"
+            echo "FAIL: xtensa_asm_boot (output mismatch or status $XT_ASM_STATUS != 39)"
             echo "    expected: $XT_ASM_EXP"
             echo "    got:      $XT_ASM_OUT"
             FAIL=$((FAIL + 1))
@@ -5844,12 +5856,13 @@ if command -v qemu-system-xtensa >/dev/null 2>&1; then
     fi
     if [ "$XT_CAP_OK" = 1 ]; then
         XT_CAP_EXP=$(printf 'xtensa capstone ok\n42\n0\n0\n10\nA\n4\n1\n0\n60705\n1\n0\n42\nXY')
-        XT_CAP_OUT=$(timeout 10 qemu-system-xtensa -M lx60 -nographic -kernel "$XT_CAP_ELF" 2>/dev/null | tr -d '\r')
-        if [ "$XT_CAP_OUT" = "$XT_CAP_EXP" ]; then
+        XT_CAP_RAW=$(timeout 10 qemu-system-xtensa -M lx60 -nographic -semihosting -kernel "$XT_CAP_ELF" 2>/dev/null); XT_CAP_STATUS=$?
+        XT_CAP_OUT=$(echo "$XT_CAP_RAW" | tr -d '\r')
+        if [ "$XT_CAP_STATUS" = "40" ] && [ "$XT_CAP_OUT" = "$XT_CAP_EXP" ]; then
             PASS=$((PASS + 1))
-            echo "  xtensa_capstone_boot: PASS (all freestanding ops: str_const/static/bss/stack+memset/memcpy/strlen/str_eq/fmt_uint/memcmp/fn_addr+call_ind/asm_block)"
+            echo "  xtensa_capstone_boot: PASS (all freestanding ops: str_const/static/bss/stack+memset/memcpy/strlen/str_eq/fmt_uint/memcmp/fn_addr+call_ind/asm_block, exited 40)"
         else
-            echo "FAIL: xtensa_capstone_boot (output mismatch)"
+            echo "FAIL: xtensa_capstone_boot (output mismatch or status $XT_CAP_STATUS != 40)"
             echo "    expected: $XT_CAP_EXP"
             echo "    got:      $XT_CAP_OUT"
             FAIL=$((FAIL + 1))
@@ -5885,12 +5898,13 @@ if command -v qemu-system-xtensa >/dev/null 2>&1; then
     fi
     if [ "$XT_BF_OK" = 1 ]; then
         XT_BF_EXP=$(printf '61100\n5559680\n1499500\n928296122\n45353\n79800')
-        XT_BF_OUT=$(timeout 8 qemu-system-xtensa -M lx60 -nographic -kernel "$XT_BF_ELF" 2>/dev/null | tr -d '\r')
-        if [ "$XT_BF_OUT" = "$XT_BF_EXP" ]; then
+        XT_BF_RAW=$(timeout 8 qemu-system-xtensa -M lx60 -nographic -semihosting -kernel "$XT_BF_ELF" 2>/dev/null); XT_BF_STATUS=$?
+        XT_BF_OUT=$(echo "$XT_BF_RAW" | tr -d '\r')
+        if [ "$XT_BF_STATUS" = "41" ] && [ "$XT_BF_OUT" = "$XT_BF_EXP" ]; then
             PASS=$((PASS + 1))
-            echo "  xtensa_bigframe_boot: PASS (1K/12K frames + deep spills + overflow params all correct)"
+            echo "  xtensa_bigframe_boot: PASS (1K/12K frames + deep spills + overflow params all correct, exited 41)"
         else
-            echo "FAIL: xtensa_bigframe_boot (output mismatch)"
+            echo "FAIL: xtensa_bigframe_boot (output mismatch or status $XT_BF_STATUS != 41)"
             echo "    expected: $(echo "$XT_BF_EXP" | tr '\n' ' ')"
             echo "    got:      $(echo "$XT_BF_OUT" | tr '\n' ' ')"
             FAIL=$((FAIL + 1))
@@ -5996,12 +6010,12 @@ if command -v qemu-system-riscv32 >/dev/null 2>&1 \
         fi
     fi
     if [ "$RV_OK" = 1 ]; then
-        RV_OUT=$(timeout 5 qemu-system-riscv32 -machine virt -nographic -bios "$RV_BIN" 2>/dev/null)
-        if echo "$RV_OUT" | grep -q "hi"; then
+        RV_OUT=$(timeout 10 qemu-system-riscv32 -machine virt -nographic -bios "$RV_BIN" 2>/dev/null); RV_ST=$?
+        if [ "$RV_ST" = "77" ] && echo "$RV_OUT" | grep -q "hi"; then
             PASS=$((PASS + 1))
-            echo "  riscv_t1_strconst: PASS (qemu printed hi)"
+            echo "  riscv_t1_strconst: PASS (qemu printed hi, exited 77)"
         else
-            echo "FAIL: riscv_t1_strconst (qemu output did not contain 'hi')"
+            echo "FAIL: riscv_t1_strconst (status $RV_ST, output did not contain 'hi', or both)"
             FAIL=$((FAIL + 1))
         fi
     else
@@ -6050,12 +6064,12 @@ if command -v qemu-system-riscv32 >/dev/null 2>&1 \
         fi
     fi
     if [ "$RV_OK" = 1 ]; then
-        RV_OUT=$(timeout 5 qemu-system-riscv32 -machine virt -nographic -bios "$RV_BIN" 2>/dev/null)
-        if echo "$RV_OUT" | grep -q "9"; then
+        RV_OUT=$(timeout 10 qemu-system-riscv32 -machine virt -nographic -bios "$RV_BIN" 2>/dev/null); RV_ST=$?
+        if [ "$RV_ST" = "21" ] && echo "$RV_OUT" | grep -q "9"; then
             PASS=$((PASS + 1))
-            echo "  riscv_t2_static: PASS (qemu printed 9)"
+            echo "  riscv_t2_static: PASS (qemu printed 9, exited 21)"
         else
-            echo "FAIL: riscv_t2_static (qemu output did not contain '9')"
+            echo "FAIL: riscv_t2_static (status $RV_ST, output did not contain '9', or both)"
             FAIL=$((FAIL + 1))
         fi
     else
@@ -6156,12 +6170,12 @@ if command -v qemu-system-riscv32 >/dev/null 2>&1 \
         fi
     fi
     if [ "$RV_OK" = 1 ]; then
-        RV_OUT=$(timeout 5 qemu-system-riscv32 -machine virt -nographic -bios "$RV_BIN" 2>/dev/null)
-        if echo "$RV_OUT" | grep -q "31"; then
+        RV_OUT=$(timeout 10 qemu-system-riscv32 -machine virt -nographic -bios "$RV_BIN" 2>/dev/null); RV_ST=$?
+        if [ "$RV_ST" = "22" ] && echo "$RV_OUT" | grep -q "31"; then
             PASS=$((PASS + 1))
-            echo "  riscv_t3_strloops: PASS (qemu printed 31, loops stayed 4-byte)"
+            echo "  riscv_t3_strloops: PASS (qemu printed 31, loops stayed 4-byte, exited 22)"
         else
-            echo "FAIL: riscv_t3_strloops (qemu output did not contain '31')"
+            echo "FAIL: riscv_t3_strloops (status $RV_ST, output did not contain '31', or both)"
             FAIL=$((FAIL + 1))
         fi
     else
@@ -6257,12 +6271,12 @@ if command -v qemu-system-riscv32 >/dev/null 2>&1 \
         fi
     fi
     if [ "$RV_OK" = 1 ]; then
-        RV_OUT=$(timeout 5 qemu-system-riscv32 -machine virt -nographic -bios "$RV_BIN" 2>/dev/null)
-        if echo "$RV_OUT" | grep -q "AAZk"; then
+        RV_OUT=$(timeout 10 qemu-system-riscv32 -machine virt -nographic -bios "$RV_BIN" 2>/dev/null); RV_ST=$?
+        if [ "$RV_ST" = "23" ] && echo "$RV_OUT" | grep -q "AAZk"; then
             PASS=$((PASS + 1))
-            echo "  riscv_t4_memblk: PASS (qemu printed AAZk, loops stayed 4-byte)"
+            echo "  riscv_t4_memblk: PASS (qemu printed AAZk, loops stayed 4-byte, exited 23)"
         else
-            echo "FAIL: riscv_t4_memblk (qemu output was '$RV_OUT', want 'AAZk')"
+            echo "FAIL: riscv_t4_memblk (status $RV_ST, qemu output was '$RV_OUT', want 'AAZk' + status 23)"
             FAIL=$((FAIL + 1))
         fi
     else
@@ -6360,12 +6374,12 @@ if command -v qemu-system-riscv32 >/dev/null 2>&1 \
         fi
     fi
     if [ "$RV_OK" = 1 ]; then
-        RV_OUT=$(timeout 5 qemu-system-riscv32 -machine virt -nographic -bios "$RV_BIN" 2>/dev/null)
-        if [ "$RV_OUT" = "123455" ]; then
+        RV_OUT=$(timeout 10 qemu-system-riscv32 -machine virt -nographic -bios "$RV_BIN" 2>/dev/null); RV_ST=$?
+        if [ "$RV_ST" = "24" ] && [ "$RV_OUT" = "123455" ]; then
             PASS=$((PASS + 1))
-            echo "  riscv_t5_fmtuint: PASS (qemu printed 123455 -- digits '12345' + len sanity '5', loops stayed 4-byte)"
+            echo "  riscv_t5_fmtuint: PASS (qemu printed 123455 -- digits '12345' + len sanity '5', loops stayed 4-byte, exited 24)"
         else
-            echo "FAIL: riscv_t5_fmtuint (qemu output was '$RV_OUT', want '123455')"
+            echo "FAIL: riscv_t5_fmtuint (status $RV_ST, qemu output was '$RV_OUT', want '123455' + status 24)"
             FAIL=$((FAIL + 1))
         fi
     else
@@ -6413,13 +6427,13 @@ if command -v qemu-system-riscv32 >/dev/null 2>&1 \
         fi
     fi
     if [ "$RV_OK" = 1 ]; then
-        RV_OUT=$(timeout 5 qemu-system-riscv32 -machine virt -nographic -bios "$RV_BIN" 2>/dev/null)
+        RV_OUT=$(timeout 10 qemu-system-riscv32 -machine virt -nographic -bios "$RV_BIN" 2>/dev/null); RV_ST=$?
         # Command substitution strips the trailing newline, leaving "AZ".
-        if [ "$RV_OUT" = "AZ" ]; then
+        if [ "$RV_ST" = "25" ] && [ "$RV_OUT" = "AZ" ]; then
             PASS=$((PASS + 1))
-            echo "  riscv_t6_stackarray: PASS (qemu printed AZ -- small array 'A' + large-frame array 'Z')"
+            echo "  riscv_t6_stackarray: PASS (qemu printed AZ -- small array 'A' + large-frame array 'Z', exited 25)"
         else
-            echo "FAIL: riscv_t6_stackarray (qemu output was '$RV_OUT', want 'AZ')"
+            echo "FAIL: riscv_t6_stackarray (status $RV_ST, qemu output was '$RV_OUT', want 'AZ' + status 25)"
             FAIL=$((FAIL + 1))
         fi
     else
@@ -6469,13 +6483,13 @@ if command -v qemu-system-riscv32 >/dev/null 2>&1 \
         fi
     fi
     if [ "$RV_OK" = 1 ]; then
-        RV_OUT=$(timeout 5 qemu-system-riscv32 -machine virt -nographic -bios "$RV_BIN" 2>/dev/null)
+        RV_OUT=$(timeout 10 qemu-system-riscv32 -machine virt -nographic -bios "$RV_BIN" 2>/dev/null); RV_ST=$?
         # Command substitution strips the trailing newline, leaving "A".
-        if [ "$RV_OUT" = "A" ]; then
+        if [ "$RV_ST" = "26" ] && [ "$RV_OUT" = "A" ]; then
             PASS=$((PASS + 1))
-            echo "  riscv_t7_fnptr: PASS (qemu printed A -- inc(64) called through fn_addr pointer)"
+            echo "  riscv_t7_fnptr: PASS (qemu printed A -- inc(64) called through fn_addr pointer, exited 26)"
         else
-            echo "FAIL: riscv_t7_fnptr (qemu output was '$RV_OUT', want 'A')"
+            echo "FAIL: riscv_t7_fnptr (status $RV_ST, qemu output was '$RV_OUT', want 'A' + status 26)"
             FAIL=$((FAIL + 1))
         fi
     else
@@ -6525,14 +6539,14 @@ if command -v qemu-system-riscv32 >/dev/null 2>&1 \
         fi
     fi
     if [ "$RV_OK" = 1 ]; then
-        RV_OUT=$(timeout 5 qemu-system-riscv32 -machine virt -nographic -bios "$RV_BIN" 2>/dev/null)
+        RV_OUT=$(timeout 10 qemu-system-riscv32 -machine virt -nographic -bios "$RV_BIN" 2>/dev/null); RV_ST=$?
         # 0x81 ror 1 = 0x80000040 (low byte '@'); 0x41 ror 0 = 'A' (n==0
         # identity). Command substitution strips the trailing newline.
-        if [ "$RV_OUT" = "@A" ]; then
+        if [ "$RV_ST" = "27" ] && [ "$RV_OUT" = "@A" ]; then
             PASS=$((PASS + 1))
-            echo "  riscv_t8_ror: PASS (qemu printed @A -- rotate bit-exact incl. n==0 identity)"
+            echo "  riscv_t8_ror: PASS (qemu printed @A -- rotate bit-exact incl. n==0 identity, exited 27)"
         else
-            echo "FAIL: riscv_t8_ror (qemu output was '$RV_OUT', want '@A')"
+            echo "FAIL: riscv_t8_ror (status $RV_ST, qemu output was '$RV_OUT', want '@A' + status 27)"
             FAIL=$((FAIL + 1))
         fi
     else
@@ -6581,13 +6595,13 @@ if command -v qemu-system-riscv32 >/dev/null 2>&1 \
         fi
     fi
     if [ "$RV_OK" = 1 ]; then
-        RV_OUT=$(timeout 5 qemu-system-riscv32 -machine virt -nographic -bios "$RV_BIN" 2>/dev/null)
+        RV_OUT=$(timeout 10 qemu-system-riscv32 -machine virt -nographic -bios "$RV_BIN" 2>/dev/null); RV_ST=$?
         # in(base=0x40 -> a0); raw word a0=a0+1=0x41; out(a0 -> result); putc.
-        if [ "$RV_OUT" = "A" ]; then
+        if [ "$RV_ST" = "28" ] && [ "$RV_OUT" = "A" ]; then
             PASS=$((PASS + 1))
-            echo "  riscv_t9_asm: PASS (qemu printed A -- raw word ran, in/out constraint bound, word stayed 4-byte)"
+            echo "  riscv_t9_asm: PASS (qemu printed A -- raw word ran, in/out constraint bound, word stayed 4-byte, exited 28)"
         else
-            echo "FAIL: riscv_t9_asm (qemu output was '$RV_OUT', want 'A')"
+            echo "FAIL: riscv_t9_asm (status $RV_ST, qemu output was '$RV_OUT', want 'A' + status 28)"
             FAIL=$((FAIL + 1))
         fi
     else

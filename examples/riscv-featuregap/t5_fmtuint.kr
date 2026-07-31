@@ -54,5 +54,5 @@ fn main() {
     // other than '5', catching a length bug that fixed-index reads alone
     // would not.
     putc(len + 48)
-    loop { }
+    exit(24)
 }

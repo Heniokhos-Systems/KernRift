@@ -32,5 +32,5 @@ static u32 counter = 41
 fn main() {
     counter = counter + 1      // STATIC_LOAD + STATIC_STORE
     print_uint(counter)   nl() // STATIC_LOAD -> 42
-    loop { }
+    exit(33)
 }

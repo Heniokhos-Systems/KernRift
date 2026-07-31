@@ -178,5 +178,5 @@ fn main() {
     putc(89)                                     // 'Y'
     nl()                                          // "XY"
 
-    loop { }
+    exit(40)
 }

@@ -109,5 +109,5 @@ fn main() {
     g2data[1] = 3
     print_uint(eq(g1data, g2data))   nl()   // unequal -> 0
 
-    loop { }
+    exit(37)
 }
