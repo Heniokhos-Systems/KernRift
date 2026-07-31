@@ -8860,6 +8860,54 @@ done
 rm -f "$ARCHV_SRC" "$ARCHV_BIN"
 
 echo ""
+echo ""
+echo "--- call-argument capacity ---"
+# call_arg_vregs holds 32 slots. The arg-collection loop stops at 32; without
+# the post-loop guard the extra arguments are silently DROPPED and the callee
+# reads garbage — a 33-arg call returned sum(1..32) with no diagnostic.
+# MLRift had drifted without this guard while KernRift always had it.
+# `many` is self-recursive ON PURPOSE: a non-recursive version gets erased by
+# the AST inliner, the IR_CALL path never runs, and the test passes vacuously
+# against an unguarded compiler. Do not "simplify" the recursion away.
+CA_SRC="/tmp/krc_callargs_$$.kr"
+CA_BIN="/tmp/krc_callargs_$$.bin"
+gen_call_args() {   # $1 = arg count -> writes CA_SRC
+    { printf 'fn many('
+      i=1; while [ $i -le $1 ]; do [ $i -gt 1 ] && printf ', '; printf 'uint64 p%s' $i; i=$((i+1)); done
+      printf ') -> uint64 {\n    if p1 > 1000000 {\n        return many('
+      i=1; while [ $i -le $1 ]; do [ $i -gt 1 ] && printf ', '; printf 'p%s - 1' $i; i=$((i+1)); done
+      printf ')\n    }\n    return p1 + p%s\n}\n' $1
+      printf 'fn main() {\n    uint64 r = many('
+      i=1; while [ $i -le $1 ]; do [ $i -gt 1 ] && printf ', '; printf '%s' $i; i=$((i+1)); done
+      printf ')\n    exit(r)\n}\n'
+    } > "$CA_SRC"
+}
+TOTAL=$((TOTAL + 1))
+gen_call_args 33
+CA_ERR=$($KRC --arch=x86_64 "$CA_SRC" -o "$CA_BIN" 2>&1); CA_ST=$?
+if [ "$CA_ST" != "0" ] && echo "$CA_ERR" | grep -q "too many call arguments (max 32)"; then
+    PASS=$((PASS + 1)); echo "  call_args_33_rejected: PASS (exit $CA_ST, clean diagnostic)"
+else
+    echo "FAIL: call_args_33_rejected (expected non-zero + 'too many call arguments', got exit $CA_ST: '$CA_ERR')"
+    FAIL=$((FAIL + 1))
+fi
+# Positive control: 32 must still compile AND run correctly. Without this, a
+# parser that rejected every call would pass the test above.
+TOTAL=$((TOTAL + 1))
+gen_call_args 32
+rm -f "$CA_BIN"
+if $KRC --arch=x86_64 "$CA_SRC" -o "$CA_BIN" >/dev/null 2>&1 && [ -s "$CA_BIN" ]; then
+    chmod +x "$CA_BIN"; "$CA_BIN"; CA_RUN=$?
+    if [ "$CA_RUN" = "33" ]; then    # p1 + p32 = 1 + 32
+        PASS=$((PASS + 1)); echo "  call_args_32_accepted: PASS (compiles and returns 33)"
+    else
+        echo "FAIL: call_args_32_accepted (ran but returned $CA_RUN, want 33)"; FAIL=$((FAIL + 1))
+    fi
+else
+    echo "FAIL: call_args_32_accepted (should compile to a non-empty artifact)"; FAIL=$((FAIL + 1))
+fi
+rm -f "$CA_SRC" "$CA_BIN"
+
 echo "--- --emit / --target value validation ---"
 EV_SRC="/tmp/krc_ev_$$.kr"
 EV_BIN="/tmp/krc_ev_$$.bin"
