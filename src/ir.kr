@@ -5445,19 +5445,38 @@ fn ir_x86_op_widesafe(uint64 o) -> uint64 {
     return 0
 }
 
-// Does this function qualify for the wide x86 colour file? Inline asm
-// (op 96) can name any physical register, so it disqualifies outright —
-// same rule as xtensa's xt_fn_wide_ok.
-fn ir_x86_fn_wide_ok() -> uint64 {
+// Does the current function's IR contain an IR_ASM_BLOCK (96)?
+//
+// Two consumers, both of which must be conservative about an asm block:
+//   1. the wide colour file (an asm block can name any physical register),
+//   2. the callee-save mask in the prologue/epilogue.
+//
+// (2) is why this must stay a whole-body scan and NOT a scan of the
+// `in`/`out`/`clobbers` constraint lists. The asm TEXT is opaque
+// passthrough — a raw instruction inside the body can write any register
+// without appearing in any constraint list at all, and that shape occurs
+// in real code (MLRift's std/vec_f64_dispatch CPUID block wrote r13 with
+// no constraint naming it, and survived only because r13 happened to be
+// dead at the two exercised call sites). Anything precise enough to look
+// only at the constraints misses exactly that case, silently.
+fn ir_fn_has_asm_block() -> uint64 {
     uint64 b = 0
     while b < ir_bb_count {
         uint64 i = ir_bb_first_insn(b)
         while i != 0xFFFFFFFF {
-            if ir_insn_opcode(i) == 96 { return 0 }
+            if ir_insn_opcode(i) == 96 { return 1 }
             i = ir_insn_next(i)
         }
         b = b + 1
     }
+    return 0
+}
+
+// Does this function qualify for the wide x86 colour file? Inline asm
+// (op 96) can name any physical register, so it disqualifies outright —
+// same rule as xtensa's xt_fn_wide_ok.
+fn ir_x86_fn_wide_ok() -> uint64 {
+    if ir_fn_has_asm_block() != 0 { return 0 }
     return 1
 }
 
@@ -13023,6 +13042,9 @@ fn ir_emit_x86_function(uint64 fn_node) {
     // recomputed at step 4b for the CMP fusion peephole — idempotent).
     ir_compute_use_count()
     ir_color_ceil_reset()
+    // Scanned once here (post-optimize, so the IR is final) and reused by
+    // the callee-save mask at step 5.
+    uint64 x86_has_asm = ir_fn_has_asm_block()
     uint64 x86_xmm_ok = 0
     if ir_x86_fn_wide_ok() != 0 && is_naked == 0 {
         x86_xmm_ok = 1
@@ -13115,6 +13137,23 @@ fn ir_emit_x86_function(uint64 fn_node) {
     uint64 push_count = 0
     if is_naked == 0 {
         used_mask = ir_used_color_mask()
+        // An inline-asm block can write ANY callee-saved register — through
+        // an `in(var -> r15)` constraint (IR_ARG imm >= 100 moves straight
+        // to the physical register) or through a raw instruction in the
+        // opaque asm text, which no constraint list mentions. Neither shows
+        // up as a colour the allocator handed out, so ir_used_color_mask
+        // leaves it out of the push set and the function silently destroys
+        // its caller's value (confirmed: MLRift tp_spawn_raw's
+        // `in(flags -> r15)` SIGSEGV'd thread_pool_init once the x86
+        // allocator widened enough to keep a live value in r15).
+        //
+        // Force the full callee-saved set, the same maximally-conservative
+        // fallback ir_aarch64.kr already takes (a64_has_asm -> 0x3FF).
+        // Set BEFORE the pushes below so the prologue, ir_used_callee_mask,
+        // ir_callee_save_bytes and the epilogue all agree on one mask —
+        // a disagreement is a mismatched push/pop count, i.e. worse than
+        // the bug being fixed. @naked is untouched: it gets no prologue.
+        if x86_has_asm != 0 { used_mask = used_mask | 0x3F }
         // Color → physical reg encoding:
         //   color 0 → rbx (0x53)
         //   color 1 → r12 (0x41 0x54)

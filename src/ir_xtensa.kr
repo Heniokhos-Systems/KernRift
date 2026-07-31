@@ -2823,6 +2823,19 @@ fn ir_xtensa_gen(uint64 fn_node, uint64 xt_entry_node) {
     //    [a1 + callee_frame + oi*4] (IR_COPY imm 6..99), exactly as riscv does.
     uint64 spill_size = ir_spill_count * 4
     uint64 used_mask = ir_used_color_mask()
+    // Same hole the x86_64 and riscv prologues had: an asm block can write a
+    // callee-saved AR without the allocator ever colouring it, so the mask
+    // below misses it and a12-a15 are neither saved here nor restored in the
+    // epilogue. xt_fn_wide_ok only keeps such a function out of the WIDE
+    // colour file; it does nothing for the save set.
+    //
+    // Reachable today despite asm_emit_xt's nullary-only mnemonic scope: the
+    // constraint binder (ir.kr) only routes arch 2 through rv_reg_code, so an
+    // xtensa `in(v -> r15)` falls through to x86_reg_code, yields 15, and
+    // emits IR_ARG imm 115 -> xt_mv(15, src), i.e. a write to a15 = colour 3.
+    // Force the full four, mirroring ir_aarch64.kr's a64_has_asm -> 0x3FF.
+    // Set BEFORE nsaved/cs_base/total_frame derive from it.
+    if ir_fn_has_asm_block() != 0 { used_mask = used_mask | 0xF }
     uint64 nsaved = 0
     uint64 mc = 0
     while mc < 4 {

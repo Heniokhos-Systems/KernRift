@@ -2359,6 +2359,16 @@ fn ir_riscv_gen(uint64 fn_node) {
     //    [SP + callee_frame + oi*4] = our slots (IR_COPY imm 8..99).
     uint64 spill_size = ir_spill_count * 4
     uint64 used_mask = ir_used_color_mask()
+    // Inline asm can write any s-register — via an `in(v -> s3)` constraint
+    // (op 51, imm >= 100, rv_mv straight to the physical register) or via a
+    // raw instruction in the opaque asm text that no constraint mentions.
+    // Neither is a colour the allocator handed out, so ir_used_color_mask
+    // misses it and the s-register is neither saved by the prologue below
+    // nor restored by the epilogue. Force the full 12-colour callee-saved
+    // set (s0/s1 + s2-s11 = colours 0..11), mirroring ir_aarch64.kr's
+    // a64_has_asm -> 0x3FF. Must be set here, BEFORE nsaved/cs_base/
+    // total_frame are derived from it, so prologue and epilogue agree.
+    if ir_fn_has_asm_block() != 0 { used_mask = used_mask | 0xFFF }
     uint64 nsaved = 0
     uint64 mc = 0
     while mc < 12 {

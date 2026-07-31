@@ -2286,6 +2286,51 @@ run_test "asm_shl_in_out" 'fn shl_by(uint64 v, uint64 n) -> uint64 {
     return r
 }
 fn main() { exit(shl_by(3, 4)) }' 48
+
+# --- asm blocks must not destroy the CALLER's callee-saved registers ---
+# The prologue's push set used to be built purely from colours the register
+# allocator handed out, so a callee-saved register touched only by an asm
+# block was neither pushed nor popped (MLRift tp_spawn_raw's `in(flags ->
+# r15)` SIGSEGV'd its caller for exactly this reason). Both shapes below
+# must survive; each caller keeps six values live across the call, which
+# forces the allocator to fill rbx/r12/r13/r14/r15/rbp.
+#
+# `body` is the one that matters most: r15 is written by a raw instruction
+# INSIDE the opaque asm text and named in no constraint list, so only a
+# whole-function "has asm -> save everything" rule catches it.
+run_test "asm_callee_saved_body_write" 'fn clobber(uint64 x) -> uint64 {
+    uint64 r = 0
+    asm { "0x49 0x89 0xC7" } in(x -> rax) out(rax -> r)
+    return r
+}
+fn caller(uint64 seed) -> uint64 {
+    uint64 a = seed + 1
+    uint64 b = seed + 2
+    uint64 c = seed + 3
+    uint64 d = seed + 4
+    uint64 e = seed + 5
+    uint64 f = seed + 6
+    uint64 t = clobber(seed)
+    return a + b + c + d + e + f + t
+}
+fn main() { exit(caller(1)) }' 28
+
+run_test "asm_callee_saved_in_constraint" 'fn clobber(uint64 x) -> uint64 {
+    uint64 r = 0
+    asm { "0x4C 0x89 0xF8" } in(x -> r15) out(rax -> r)
+    return r
+}
+fn caller(uint64 seed) -> uint64 {
+    uint64 a = seed + 1
+    uint64 b = seed + 2
+    uint64 c = seed + 3
+    uint64 d = seed + 4
+    uint64 e = seed + 5
+    uint64 f = seed + 6
+    uint64 t = clobber(seed)
+    return a + b + c + d + e + f + t
+}
+fn main() { exit(caller(1)) }' 28
 fi
 
 # nop with no constraints — ensures backward-compat with existing asm blocks.
