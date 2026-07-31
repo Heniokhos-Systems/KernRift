@@ -564,13 +564,27 @@ fn str_to_float(u64 s) -> f64 {
             p = s + i
             ch = load8(p)
         }
-        f64 base = ten
-        if exp_neg != 0 { base = int_to_f64(1) / ten }
+        // Build 10^|exp| once, then apply it with a single multiply or a
+        // single divide. The previous form multiplied by `1/10` repeatedly
+        // for negative exponents, and 1/10 is not representable in binary, so
+        // the error compounded once per exponent digit:
+        // str_to_float("1.5e-2") did not equal the literal 0.015 (one
+        // multiply survived it, two did not). Dividing by an exactly-built
+        // power of ten keeps every |exp| <= 22 exact, since 10^22 is the
+        // largest power of ten an f64 holds exactly.
+        //
+        // The clamp bounds the loop: 10^309 already overflows to +inf, so
+        // anything past that multiplies or divides by inf regardless. Without
+        // it an input like "1e999999999" spins for a billion iterations.
+        if exp_val > 400 { exp_val = 400 }
+        f64 pow10 = int_to_f64(1)
         u64 k = 0
         while k < exp_val {
-            result = result * base
+            pow10 = pow10 * ten
             k = k + 1
         }
+        if exp_neg != 0 { result = result / pow10 }
+        else { result = result * pow10 }
     }
 
     if have_digit == 0 { return int_to_f64(0) }

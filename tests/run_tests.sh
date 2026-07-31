@@ -416,6 +416,40 @@ run_test_output "str_upper_basic" 'import "std/string.kr"
 fn main() { println_str(str_upper("HeLLo 123")) }' "HELLO 123"
 run_test_output "str_replace_basic" 'import "std/string.kr"
 fn main() { println_str(str_replace("a.b.c.d", ".", "-")) }' "a-b-c-d"
+
+# --- str_to_float exponent handling ---
+# Negative exponents used to multiply by 1/10 once per digit. 1/10 is inexact
+# in binary, so the error compounded: one multiply survived, two did not.
+# These two cases both failed before the exactly-built power-of-ten fix.
+run_test "str_to_float_neg_exp" 'import "std/string.kr"
+fn main() {
+    if str_to_float("1.5e-2") == 0.015 { exit(0) }
+    exit(1)
+}' 0
+run_test "str_to_float_neg_exp_alt" 'import "std/string.kr"
+fn main() {
+    if str_to_float("15e-3") == 0.015 { exit(0) }
+    exit(1)
+}' 0
+# Positive controls: these passed before and must keep passing.
+run_test "str_to_float_pos_exp" 'import "std/string.kr"
+fn main() {
+    if str_to_float("1e2") == 100.0 { exit(0) }
+    exit(1)
+}' 0
+run_test "str_to_float_signed" 'import "std/string.kr"
+fn main() {
+    if str_to_float("-3.14e2") == 0.0 - 314.0 { exit(0) }
+    exit(1)
+}' 0
+# The exponent loop is clamped at 400 because 10^309 is already +inf. Without
+# the clamp this input spins for a billion iterations.
+run_test "str_to_float_exp_clamped" 'import "std/string.kr"
+fn main() {
+    f64 v = str_to_float("1e999999999")
+    if v > 1.0 { exit(0) }
+    exit(1)
+}' 0
 run_test_output "str_replace_longer" 'import "std/string.kr"
 fn main() { println_str(str_replace("hi world hi", "hi", "HELLO")) }' "HELLO world HELLO"
 run_test_output "str_replace_noop" 'import "std/string.kr"
