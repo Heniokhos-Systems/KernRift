@@ -5012,7 +5012,7 @@ fn main() {
                     uint64 esl = str_len(emit_str)
                     write(2, emit_str, esl)
                     write(2, "'\n", 2)
-                    write(2, "valid: elfexe, linux, macho, mac, pe, windows, win, obj, android, asm, ir, lkm\n", 79)
+                    write(2, "valid: elfexe, elf, linux, macho, mac, darwin, pe, windows, win, obj, android, asm, ir, lkm\n", 92)
                     exit(1)
                 }
             } else if str_eq_full(arg, "-c") != 0 {

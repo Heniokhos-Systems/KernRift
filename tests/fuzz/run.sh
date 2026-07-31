@@ -20,7 +20,8 @@
 #   FUZZ_COUNT=<N>     programs to generate (default: 50)
 #   FUZZ_SEED=<S>      rng seed (default: 0xDEADBEEF, so CI runs are
 #                      reproducible unless explicitly overridden)
-#   KRC_ARCH=...       arch flag (default: --arch=host)
+#   KRC_ARCH=...       arch flag (default: derived from `uname -m`,
+#                      e.g. --arch=x86_64 or --arch=arm64 — see below)
 #   FUZZ_RUNNER=<cmd>  wrapper to exec binaries under (e.g. qemu-...)
 
 set -u
