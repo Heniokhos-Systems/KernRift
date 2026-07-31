@@ -298,16 +298,63 @@ fn fmt_f64_pos(f64 aval, u64 decimals, u64 negative) -> u64 {
     u64 int_part = f64_to_int(aval)
     f64 frac = aval - int_to_f64(int_part)
 
+    // f64_to_int saturates for |aval| >= 2^63 (see project_f64_arch_divergence).
+    // When it does, int_part no longer reconstructs aval's true integer part,
+    // so `frac` can land outside [0,1) — e.g. wildly negative. Left alone,
+    // frac*scale then produces a frac_int with far more digits than
+    // `decimals`, and the copy loop below writes past the `total`
+    // allocation (heap corruption / SIGSEGV). Clamp to a safe in-range
+    // value: this makes such extreme-magnitude inputs print a
+    // wrong-but-harmless fractional part instead of corrupting memory.
+    // (The integer part itself is unaffected — it's copied byte-for-byte
+    // from fmt_dec(int_part) using its own real length, so it's already
+    // safe, just numerically wrong for saturated magnitudes.)
+    if frac < int_to_f64(0) { frac = int_to_f64(0) }
+    if frac >= int_to_f64(1) { frac = int_to_f64(0) }
+
+    // Format integer part
+    u64 int_str = fmt_dec(int_part)
+    u64 int_len = str_len(int_str)
+
+    // decimals == 0: emit no decimal point and no fractional section at
+    // all (matches printf "%.0f": fmt_f64(7.0, 0) == "7"). Continuing
+    // into the general path below would compute
+    //   leading_zeros = decimals - frac_len
+    // with decimals=0 and frac_len>=1 (fmt_dec(0) == "0"), underflowing
+    // the unsigned subtraction to ~2^64 and looping the zero-pad write
+    // far past the allocated buffer — this was the reported SIGSEGV.
+    if decimals == 0 {
+        u64 total0 = int_len + 1
+        if negative != 0 { total0 = total0 + 1 }
+        u64 result0 = alloc(total0)
+        u64 pos0 = 0
+        if negative != 0 {
+            store8(result0 + pos0, 45)  // '-'
+            pos0 = pos0 + 1
+        }
+        u64 j0 = 0
+        while j0 < int_len {
+            u64 b0 = load8(int_str + j0)
+            store8(result0 + pos0, b0)
+            pos0 = pos0 + 1
+            j0 = j0 + 1
+        }
+        store8(result0 + pos0, 0)
+        return result0
+    }
+
     // Multiply frac by 10^decimals using recursive helper
     f64 scale = f64_scale10(int_to_f64(1), decimals)
     u64 frac_int = f64_to_int(frac * scale)
 
-    // Format integer and fractional parts
-    u64 int_str = fmt_dec(int_part)
-    u64 int_len = str_len(int_str)
-
     u64 frac_str = fmt_dec(frac_int)
     u64 frac_len = str_len(frac_str)
+    // frac is clamped to [0,1) above, so frac*scale < 10^decimals and
+    // frac_len should never exceed `decimals` — but clamp defensively in
+    // case of a rounding edge (frac*scale rounding up to exactly `scale`),
+    // so leading_zeros below can never underflow and the copy loop can
+    // never run past `total`.
+    if frac_len > decimals { frac_len = decimals }
 
     // Total: sign(0-1) + int_len + '.' + decimals + '\0'
     u64 total = int_len + 1 + decimals + 1
@@ -342,7 +389,8 @@ fn fmt_f64_pos(f64 aval, u64 decimals, u64 negative) -> u64 {
         lz = lz + 1
     }
 
-    // Copy fractional digits
+    // Copy fractional digits (bounded by frac_len <= decimals, so this
+    // can never run past the `total` allocation above)
     j = 0
     while j < frac_len {
         u64 b = load8(frac_str + j)
