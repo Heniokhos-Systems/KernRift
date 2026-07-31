@@ -8727,6 +8727,37 @@ else
 fi
 rm -f "$ESP_IMP_OK_SRC" "$ESP_IMP_OK_BIN"
 
+echo ""
+echo "--- --arch value validation ---"
+ARCHV_SRC="/tmp/krc_archv_$$.kr"
+ARCHV_BIN="/tmp/krc_archv_$$.bin"
+printf 'fn main() { uint32 x = 3\n exit(x) }\n' > "$ARCHV_SRC"
+for BAD in riscv64 riscv riscvBANANA arm64BANANA x86_64BANANA xtensaBANANA; do
+    TOTAL=$((TOTAL + 1))
+    $KRC --arch=$BAD "$ARCHV_SRC" -o "$ARCHV_BIN" >/dev/null 2>&1; AV_ST=$?
+    if [ "$AV_ST" != "0" ]; then
+        PASS=$((PASS + 1)); echo "  arch_reject_$BAD: PASS (exit $AV_ST)"
+    else
+        echo "FAIL: arch_reject_$BAD (expected non-zero exit, got 0)"; FAIL=$((FAIL + 1))
+    fi
+done
+TOTAL=$((TOTAL + 1))
+if $KRC --arch=riscv64 "$ARCHV_SRC" -o /dev/null 2>&1 | grep -q "riscv32"; then
+    PASS=$((PASS + 1)); echo "  arch_riscv64_names_riscv32: PASS"
+else
+    echo "FAIL: arch_riscv64_names_riscv32 (message should name riscv32)"; FAIL=$((FAIL + 1))
+fi
+for GOOD in x86_64 x86-64 amd64 x64 arm64 aarch64 riscv32; do
+    TOTAL=$((TOTAL + 1))
+    rm -f "$ARCHV_BIN"
+    if $KRC --arch=$GOOD "$ARCHV_SRC" -o "$ARCHV_BIN" >/dev/null 2>&1 && [ -s "$ARCHV_BIN" ]; then
+        PASS=$((PASS + 1)); echo "  arch_accept_$GOOD: PASS"
+    else
+        echo "FAIL: arch_accept_$GOOD (should compile and produce a non-empty artifact)"; FAIL=$((FAIL + 1))
+    fi
+done
+rm -f "$ARCHV_SRC" "$ARCHV_BIN"
+
 # --- Summary ---
 echo ""
 echo "=== Results: $PASS/$TOTAL passed, $FAIL failed ==="
