@@ -12582,6 +12582,50 @@ fn emit_elf_debug_footer(uint64 text_start, uint64 input_path) {
     patch_u16(62, 8)           // e_shstrndx — .shstrtab is idx 8
 }
 
+// Bytes needed for a relocatable object's symbol string table: every
+// fn_table and extern_fn_table name, NUL-terminated, plus slack for the
+// leading NUL / 4-byte length field and the "_" prefix Mach-O puts on every
+// symbol.
+//
+// All four relocatable emitters (LKM, ELF, Mach-O, COFF) used to build this
+// table in a fixed alloc(8192). KernRift's own .strtab is 16886 bytes, so
+// any unit with more than 8 KB of symbol names overflowed that buffer into
+// whatever mmap had placed next -- silently, since the section headers are
+// computed from the real (post-overflow) length and stay internally
+// consistent even though the write already ran off the end of the
+// allocation. Depending on heap layout the overrun lands on unrelated freed
+// memory (harmless) or on a live buffer -- observed corrupting the start of
+// .text with symbol-name bytes instead of code.
+fn reloc_strtab_bytes() -> uint64 {
+    uint64 total = 16
+    uint64 fi_n = 0
+    while fi_n < fn_count {
+        uint64 fe_n = fn_table + fi_n * 8
+        uint32 st_n = 0
+        unsafe { *(fe_n as uint32) -> st_n }
+        uint64 w_n = st_n
+        total = total + tok_text_len(w_n) + 2
+        fi_n = fi_n + 1
+    }
+    uint64 xi_n = 0
+    while xi_n < extern_fn_count {
+        uint64 xe_n = extern_fn_table + xi_n * 8
+        uint32 xt_n = 0
+        unsafe { *(xe_n as uint32) -> xt_n }
+        uint64 wx_n = xt_n
+        total = total + tok_text_len(wx_n) + 2
+        xi_n = xi_n + 1
+    }
+    return total
+}
+
+// emit_elf_lkm's .strtab additionally appends three fixed symbol names
+// (init_module, cleanup_module, __this_module) after the fn/extern names
+// already covered by reloc_strtab_bytes().
+fn lkm_strtab_bytes() -> uint64 {
+    return reloc_strtab_bytes() + 11 + 1 + 14 + 1 + 13 + 1
+}
+
 // Emit a Linux loadable kernel module (.ko). Phase A.1.3 — currently a
 // stub that errors out at emit time. The CLI flag (--emit=lkm) and the
 // parser-side @module_* annotations are already wired in A.1.1 + A.1.2;
@@ -13215,7 +13259,7 @@ fn emit_elf_lkm(uint64 text_len, uint64 data_len, uint64 arch) {
     // ---- Build .strtab content ----
     // Same loop as emit_elf_relocatable for fn names + extern names,
     // then add init_module, cleanup_module, __this_module.
-    uint64 strtab_buf = alloc(8192)
+    uint64 strtab_buf = alloc(lkm_strtab_bytes())
     uint64 strtab_len = 1
     uint64 sb0 = strtab_buf
     uint8 nul = 0
@@ -14534,7 +14578,7 @@ fn emit_elf_relocatable(uint64 text_len, uint64 data_len, uint64 arch) {
     // idx 1: function names from fn_table, each null-terminated
     // We'll also compute symtab entries count.
     // Allocate temp buffer for strtab content
-    uint64 strtab_buf = alloc(8192)
+    uint64 strtab_buf = alloc(reloc_strtab_bytes())
     uint64 strtab_len = 1  // start at 1 (index 0 = null byte)
     uint64 sb0 = strtab_buf
     uint8 nul = 0
@@ -15012,7 +15056,7 @@ fn emit_macho_relocatable(uint64 text_len, uint64 data_len, uint64 arch) {
     //   idx 0: \0 (null)
     //   idx 1: _<fn_name>\0 for each local/main
     //   idx N: _<extern_name>\0 for each extern
-    uint64 strtab_buf = alloc(8192)
+    uint64 strtab_buf = alloc(reloc_strtab_bytes())
     uint64 strtab_len = 1
     uint64 sb0 = strtab_buf
     uint8 nul = 0
@@ -15343,7 +15387,7 @@ fn emit_coff_relocatable(uint64 text_len, uint64 data_len, uint64 arch) {
 
     // Build string table up front so we know its size.
     // String table starts with a 4-byte length field (inclusive of itself).
-    uint64 strtab_buf = alloc(8192)
+    uint64 strtab_buf = alloc(reloc_strtab_bytes())
     uint64 strtab_len = 4  // reserve first 4 bytes for length
     // Store 4 bytes of zeros initially (we'll fill at the end)
     uint64 sb0 = strtab_buf

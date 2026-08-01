@@ -1605,6 +1605,115 @@ else
 fi
 rm -f /tmp/krc_obj_$$.kr /tmp/krc_obj_$$.o /tmp/krc_obj_c_$$.o
 
+# --- ELF relocatable: large symbol table structural test (regression) ---
+# Every --emit=obj test above compiles a two-function toy program, whose
+# .strtab is a few hundred bytes. That never approached the .strtab buffer's
+# cap (a fixed alloc(8192) in all four relocatable emitters, fixed in
+# commit "size the relocatable .strtab from the actual symbol names"), so
+# none of them could have caught the overflow: writing symbol names past
+# that 8192-byte allocation stomps whatever memory the allocator placed
+# next, up to and including the code buffer itself. KernRift's own object
+# file (.strtab ~16.9 KB against the 8192 cap) happens not to show visible
+# corruption today -- that is heap-layout luck, not correctness, so
+# self-compiling isn't a reliable regression input either.
+#
+# This test instead generates 100 functions with deliberately long (~600
+# byte) distinct names, pushing .strtab to roughly 60 KB -- about 7x the
+# cap -- which reproduces real corruption deterministically against the
+# pre-fix compiler on this allocator (mmap-per-alloc, no guard pages): the
+# overrun lands on a live buffer and the emitted .text begins with symbol
+# name bytes instead of machine code. It then validates structure two ways:
+#   1. No two sections' [sh_offset, sh_offset+sh_size) ranges overlap --
+#      catches this whole bug class (a buffer overrunning into another
+#      region), not just this one instance.
+#   2. .text's first bytes are not printable ASCII identifier characters --
+#      the precise signature this bug produces.
+echo ""
+echo "--- ELF relocatable large symbol table structure (regression) ---"
+TOTAL=$((TOTAL + 1))
+BIGSYM_KR=/tmp/krc_bigsym_$$.kr
+BIGSYM_O=/tmp/krc_bigsym_$$.o
+if command -v python3 > /dev/null 2>&1; then
+    xcount=$((600 - 4 - 1 - 6))
+    xs=$(printf 'x%.0s' $(seq 1 $xcount))
+    i=0
+    while [ $i -lt 100 ]; do
+        pad=$(printf '%06d' $i)
+        r=$((i % 97))
+        printf 'fn sym_%s_%s(uint64 a) -> uint64 { return a + %d }\n' "$xs" "$pad" "$r"
+        i=$((i + 1))
+    done > "$BIGSYM_KR"
+    printf 'fn main() { exit(0) }\n' >> "$BIGSYM_KR"
+
+    if $KRC $KRC_FLAGS --emit=obj "$BIGSYM_KR" -o "$BIGSYM_O" > /dev/null 2>&1; then
+        if python3 -c "
+import struct, sys
+
+d = open('$BIGSYM_O', 'rb').read()
+shoff = struct.unpack_from('<Q', d, 0x28)[0]
+shnum = struct.unpack_from('<H', d, 0x3C)[0]
+shstrndx = struct.unpack_from('<H', d, 0x3E)[0]
+
+SHT_NOBITS = 8
+secs = []
+for i in range(shnum):
+    base = shoff + i * 64
+    name_off, stype, flags, addr, offset, size = struct.unpack_from('<IIQQQQ', d, base)
+    secs.append((name_off, stype, offset, size))
+
+shstr_off = secs[shstrndx][2]
+def secname(name_off):
+    end = d.index(b'\x00', shstr_off + name_off)
+    return d[shstr_off + name_off:end].decode()
+
+# 1) No two sections with file content overlap in [offset, offset+size).
+ranges = sorted(
+    (off, off + size, secname(nm))
+    for (nm, st, off, size) in secs
+    if size > 0 and st != SHT_NOBITS
+)
+overlap = None
+for a, b in zip(ranges, ranges[1:]):
+    if a[1] > b[0]:
+        overlap = (a, b)
+        break
+if overlap:
+    print('FAIL: sections overlap:', overlap)
+    sys.exit(1)
+
+# 2) .text must start with code, not identifier text.
+text = None
+for (nm, st, off, size) in secs:
+    if secname(nm) == '.text':
+        text = d[off:off + 8]
+        break
+if text is None:
+    print('FAIL: no .text section found')
+    sys.exit(1)
+def is_ident_byte(b):
+    return (65 <= b <= 90) or (97 <= b <= 122) or (48 <= b <= 57) or b == 0x5F
+if all(is_ident_byte(b) for b in text):
+    print('FAIL: .text starts with identifier text, not code:', text)
+    sys.exit(1)
+
+print('OK: sections non-overlapping, .text = ' + text.hex())
+"; then
+            PASS=$((PASS + 1))
+            echo "  emit_obj_large_symtab_structure: PASS"
+        else
+            FAIL=$((FAIL + 1))
+            echo "  emit_obj_large_symtab_structure: FAIL (corrupted/overlapping object, see above)"
+        fi
+    else
+        FAIL=$((FAIL + 1))
+        echo "  emit_obj_large_symtab_structure: FAIL (compilation failed)"
+    fi
+else
+    PASS=$((PASS + 1))
+    echo "  emit_obj_large_symtab_structure: SKIP (no python3)"
+fi
+rm -f "$BIGSYM_KR" "$BIGSYM_O"
+
 # --- Generics (monomorphization) ---
 run_test "generic_fn_single" 'fn max_gen<T>(T a, T b) -> T {
     if a > b { return a }
