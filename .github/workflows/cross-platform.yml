@@ -158,12 +158,6 @@ jobs:
           done
           cat /tmp/test-bins/smoke/manifest.txt
 
-          # TEMPORARY: syscall_raw diagnostic for the macOS ARM64 guard-page
-          # failure. Not in the smoke manifest — it is run explicitly by the
-          # macOS jobs and its full output lands in the debug-kit artifact.
-          ./build/krc2 --arch=x86_64 --emit=macho tests/diag/syscall_probe.kr -o /tmp/test-bins/mac-x64-syscall_probe
-          ./build/krc2 --arch=arm64  --emit=macho tests/diag/syscall_probe.kr -o /tmp/test-bins/mac-arm-syscall_probe
-
           ls -la /tmp/test-bins/
 
       - name: Upload test binaries
@@ -338,94 +332,6 @@ jobs:
         with:
           name: test-bins
           path: bins
-
-      # TEMPORARY: guard-page / syscall_raw ground truth for Apple silicon.
-      # Everything below is written to debug-kit/syscall-probe-arm64.log and
-      # uploaded, so the numbers can be downloaded and read rather than
-      # grepped out of the job console.
-      - name: syscall_raw + guard-page diagnostic (ARM64)
-        continue-on-error: true
-        run: |
-          set +e
-          mkdir -p debug-kit
-          LOG=debug-kit/syscall-probe-arm64.log
-          exec > >(tee -a "$LOG") 2>&1
-
-          echo "=== independent page-size oracles ==="
-          echo "getconf PAGESIZE      : $(getconf PAGESIZE)"
-          echo "getconf PAGE_SIZE     : $(getconf PAGE_SIZE)"
-          echo "sysctl hw.pagesize    : $(sysctl -n hw.pagesize)"
-          echo "sysctl hw.pagesize32  : $(sysctl -n hw.pagesize32 2>/dev/null)"
-          echo "sysctl vm.pagesize    : $(sysctl -n vm.pagesize 2>/dev/null)"
-          echo "uname -m              : $(uname -m)"
-          echo
-
-          echo "=== clang/libc oracle (independent of KernRift codegen) ==="
-          cat > /tmp/oracle.c <<'CEOF'
-          #include <stdio.h>
-          #include <stdlib.h>
-          #include <string.h>
-          #include <errno.h>
-          #include <unistd.h>
-          #include <sys/mman.h>
-          #include <sys/wait.h>
-
-          static void try_mp(const char *what, void *addr, size_t len, int prot) {
-              errno = 0;
-              int r = mprotect(addr, len, prot);
-              printf("  %-28s ret=%d errno=%d (%s)\n", what, r, errno, strerror(errno));
-          }
-
-          int main(void) {
-              printf("getpagesize()      = %d\n", getpagesize());
-              printf("sysconf(_SC_PAGESIZE) = %ld\n", sysconf(_SC_PAGESIZE));
-              size_t sz = 262144;
-              char *p = mmap(NULL, sz, PROT_READ|PROT_WRITE,
-                             MAP_PRIVATE|MAP_ANON, -1, 0);
-              if (p == MAP_FAILED) { perror("mmap"); return 1; }
-              unsigned long a = ((unsigned long)p + 65535UL) & ~65535UL;
-              printf("mmap base = %p, aligned base = 0x%lx\n", p, a);
-              printf("PROT_NONE (0):\n");
-              try_mp("off 4096  len 4096",  (void*)(a + 4096),  4096,  PROT_NONE);
-              try_mp("off 16384 len 16384", (void*)(a + 16384), 16384, PROT_NONE);
-              try_mp("off 65536 len 65536", (void*)(a + 65536), 65536, PROT_NONE);
-              try_mp("off 16384+17 len 16384", (void*)(a + 16384 + 17), 16384, PROT_NONE);
-
-              /* Does PROT_NONE actually trap? Ask a child, so the answer
-                 survives to be printed. */
-              unsigned long guard = a + 131072;
-              errno = 0;
-              int gr = mprotect((void*)guard, 16384, PROT_NONE);
-              printf("guard mprotect ret=%d errno=%d\n", gr, errno);
-              pid_t pid = fork();
-              if (pid == 0) { *(volatile long *)(guard + 8) = 1; _exit(0); }
-              int st = 0; waitpid(pid, &st, 0);
-              if (WIFSIGNALED(st)) printf("child SIGNALLED by %d (%s) -> guard is REAL\n",
-                                          WTERMSIG(st), strsignal(WTERMSIG(st)));
-              else printf("child exited %d -> guard did NOT trap\n", WEXITSTATUS(st));
-              return 0;
-          }
-          CEOF
-          clang -O0 -arch arm64 -o /tmp/oracle /tmp/oracle.c
-          echo "clang build exit: $?"
-          /tmp/oracle
-          echo "oracle exit: $?"
-          echo
-
-          echo "=== KernRift syscall_probe (arm64) ==="
-          chmod +x bins/mac-arm-syscall_probe
-          xattr -cr bins/mac-arm-syscall_probe 2>/dev/null || true
-          codesign -f -s - bins/mac-arm-syscall_probe 2>/dev/null || true
-          bins/mac-arm-syscall_probe
-          echo "syscall_probe(arm64) exit: $?  (0 = ran to the end unguarded;"
-          echo "  138 = SIGBUS, 139 = SIGSEGV, i.e. the PROT_NONE page trapped)"
-          echo
-
-          echo "=== KernRift syscall_probe (x86_64 under Rosetta, for contrast) ==="
-          chmod +x bins/mac-x64-syscall_probe
-          xattr -cr bins/mac-x64-syscall_probe 2>/dev/null || true
-          bins/mac-x64-syscall_probe
-          echo "syscall_probe(x86_64) exit: $?"
 
       - name: Run diagnostics and tests (capture everything to log)
         continue-on-error: true
