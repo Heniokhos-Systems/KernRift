@@ -5,6 +5,14 @@ DIR="$(cd "$(dirname "$0")" && pwd)"
 KRC="${KRC:-$DIR/../build/krc3}"
 ARCH=$(uname -m)
 KRC_FLAGS="${KRC_FLAGS:---arch=$ARCH}"
+# Arch for tests that COMPILE AND THEN EXECUTE the artifact. Hardcoding
+# --arch=x86_64 in those makes an arm64 runner produce a binary it cannot run:
+# the shell returns 126 ("cannot execute"), which a test then misreports as a
+# wrong answer -- float_literal_return_values announced "check #126 failed"
+# when there is no check 126. Use --arch=x86_64 only where the artifact is
+# inspected rather than run (--emit=ir/obj/lkm/android).
+RUN_ARCH="x86_64"
+if [ "$ARCH" = "aarch64" ] || [ "$ARCH" = "arm64" ]; then RUN_ARCH="arm64"; fi
 PASS=0
 FAIL=0
 TOTAL=0
@@ -9405,7 +9413,7 @@ gen_call_args() {   # $1 = arg count -> writes CA_SRC
 }
 TOTAL=$((TOTAL + 1))
 gen_call_args 33
-CA_ERR=$($KRC --arch=x86_64 "$CA_SRC" -o "$CA_BIN" 2>&1); CA_ST=$?
+CA_ERR=$($KRC --arch=$RUN_ARCH "$CA_SRC" -o "$CA_BIN" 2>&1); CA_ST=$?
 if [ "$CA_ST" != "0" ] && echo "$CA_ERR" | grep -q "too many call arguments (max 32)"; then
     PASS=$((PASS + 1)); echo "  call_args_33_rejected: PASS (exit $CA_ST, clean diagnostic)"
 else
@@ -9417,7 +9425,7 @@ fi
 TOTAL=$((TOTAL + 1))
 gen_call_args 32
 rm -f "$CA_BIN"
-if $KRC --arch=x86_64 "$CA_SRC" -o "$CA_BIN" >/dev/null 2>&1 && [ -s "$CA_BIN" ]; then
+if $KRC --arch=$RUN_ARCH "$CA_SRC" -o "$CA_BIN" >/dev/null 2>&1 && [ -s "$CA_BIN" ]; then
     chmod +x "$CA_BIN"; "$CA_BIN"; CA_RUN=$?
     if [ "$CA_RUN" = "33" ]; then    # p1 + p32 = 1 + 32
         PASS=$((PASS + 1)); echo "  call_args_32_accepted: PASS (compiles and returns 33)"
@@ -9426,6 +9434,54 @@ if $KRC --arch=x86_64 "$CA_SRC" -o "$CA_BIN" >/dev/null 2>&1 && [ -s "$CA_BIN" ]
     fi
 else
     echo "FAIL: call_args_32_accepted (should compile to a non-empty artifact)"; FAIL=$((FAIL + 1))
+fi
+# The same 32-arg call, cross-compiled to arm64. AAPCS64 passes 8 in x0-x7, so
+# 32 args need 24 outgoing stack slots; the arm64 IR_ARG lowering capped them
+# at 16 (24 args) and aborted with "a64 overflow args overflow (max 16)" while
+# the front end advertised "max 32". The cap is now 24 so the advertised limit
+# is true on both arches -- it cannot be made arch-specific, because one .kr
+# compiles to all 8 fat-binary slices at once and a 25-arg call would build
+# the x86 slices and then abort the build on the arm64 one.
+# Compile-only is already discriminating (the old compiler exited 1 here);
+# the qemu run additionally proves the stack args land where the callee looks.
+TOTAL=$((TOTAL + 1))
+rm -f "$CA_BIN"
+CA_A64_ERR=$($KRC --arch=arm64 "$CA_SRC" -o "$CA_BIN" 2>&1); CA_A64_ST=$?
+if [ "$CA_A64_ST" = "0" ] && [ -s "$CA_BIN" ]; then
+    PASS=$((PASS + 1)); echo "  call_args_32_accepted_arm64: PASS (cross-compiles)"
+else
+    echo "FAIL: call_args_32_accepted_arm64 (exit $CA_A64_ST: '$CA_A64_ERR')"; FAIL=$((FAIL + 1))
+fi
+CA_QEMU="$(command -v qemu-aarch64-static || true)"
+if [ -n "$CA_QEMU" ] && [ -s "$CA_BIN" ]; then
+    TOTAL=$((TOTAL + 1))
+    chmod +x "$CA_BIN"; "$CA_QEMU" "$CA_BIN" >/dev/null 2>&1; CA_RUN=$?
+    if [ "$CA_RUN" = "33" ]; then
+        PASS=$((PASS + 1)); echo "  call_args_32_runs_arm64: PASS (returns 33 under qemu)"
+    else
+        echo "FAIL: call_args_32_runs_arm64 (returned $CA_RUN, want 33)"; FAIL=$((FAIL + 1))
+    fi
+fi
+# Boundary: 25 args = the first count that needs a 17th stack slot, i.e. the
+# exact case the old cap rejected. 24 always worked, so a test at 24 proves
+# nothing.
+TOTAL=$((TOTAL + 1))
+gen_call_args 25
+rm -f "$CA_BIN"
+CA_A64_ERR=$($KRC --arch=arm64 "$CA_SRC" -o "$CA_BIN" 2>&1); CA_A64_ST=$?
+if [ "$CA_A64_ST" = "0" ] && [ -s "$CA_BIN" ]; then
+    if [ -n "$CA_QEMU" ]; then
+        chmod +x "$CA_BIN"; "$CA_QEMU" "$CA_BIN" >/dev/null 2>&1; CA_RUN=$?
+        if [ "$CA_RUN" = "26" ]; then
+            PASS=$((PASS + 1)); echo "  call_args_25_arm64: PASS (17th stack slot, returns 26)"
+        else
+            echo "FAIL: call_args_25_arm64 (returned $CA_RUN, want 26)"; FAIL=$((FAIL + 1))
+        fi
+    else
+        PASS=$((PASS + 1)); echo "  call_args_25_arm64: PASS (cross-compiles; no qemu to run it)"
+    fi
+else
+    echo "FAIL: call_args_25_arm64 (exit $CA_A64_ST: '$CA_A64_ERR')"; FAIL=$((FAIL + 1))
 fi
 rm -f "$CA_SRC" "$CA_BIN"
 
@@ -9525,7 +9581,7 @@ fn main() {
 }
 KREOF
 TOTAL=$((TOTAL + 1))
-FR_ERR=$($KRC --arch=x86_64 "$FR_SRC" -o "$FR_BIN" 2>&1); FR_ST=$?
+FR_ERR=$($KRC --arch=$RUN_ARCH "$FR_SRC" -o "$FR_BIN" 2>&1); FR_ST=$?
 if [ "$FR_ST" = "0" ] && [ -s "$FR_BIN" ]; then
     chmod +x "$FR_BIN"; "$FR_BIN"; FR_RUN=$?
     if [ "$FR_RUN" = "0" ]; then
@@ -9542,7 +9598,7 @@ fi
 # `-> f64 { return 1.5f }` put f32 bits in xmm0 and the caller read 0.0.
 TOTAL=$((TOTAL + 1))
 printf 'fn g(uint64 n) -> f64 {\n if n > 1000000 { return g(n - 1) }\n return 1.5f\n}\nfn main() { exit(f64_to_int(g(1))) }\n' > "$FR_SRC"
-FR_ERR=$($KRC --arch=x86_64 "$FR_SRC" -o "$FR_BIN" 2>&1); FR_ST=$?
+FR_ERR=$($KRC --arch=$RUN_ARCH "$FR_SRC" -o "$FR_BIN" 2>&1); FR_ST=$?
 if [ "$FR_ST" != "0" ] && echo "$FR_ERR" | grep -q "return value float kind does not match"; then
     PASS=$((PASS + 1)); echo "  f32_literal_in_f64_fn_rejected: PASS (exit $FR_ST)"
 else
@@ -9551,7 +9607,7 @@ else
 fi
 TOTAL=$((TOTAL + 1))
 printf 'fn g(uint64 n) -> f32 {\n if n > 1000000 { return g(n - 1) }\n return 1.5\n}\nfn main() { exit(f32_to_int(g(1))) }\n' > "$FR_SRC"
-FR_ERR=$($KRC --arch=x86_64 "$FR_SRC" -o "$FR_BIN" 2>&1); FR_ST=$?
+FR_ERR=$($KRC --arch=$RUN_ARCH "$FR_SRC" -o "$FR_BIN" 2>&1); FR_ST=$?
 if [ "$FR_ST" != "0" ] && echo "$FR_ERR" | grep -q "return value float kind does not match"; then
     PASS=$((PASS + 1)); echo "  f64_literal_in_f32_fn_rejected: PASS (exit $FR_ST)"
 else
@@ -9559,6 +9615,108 @@ else
     FAIL=$((FAIL + 1))
 fi
 rm -f "$FR_SRC" "$FR_BIN"
+
+# --- float call result in the LEFT operand position (arm64 regression) ---
+# arm64 lowered `f32_fn() * s` to an INTEGER mul of two float bit patterns and
+# printed 0 instead of 170, while `s * f32_fn()` was correct. The BinOp
+# lowering only consults the LEFT operand's float kind, and the call result's
+# fkind comes from the fn_ret_float table -- which ir_emit_arm64_function
+# never populated (only ir_emit_x86_function did). Every slice after the
+# first also started from an empty table because the per-slice reset cleared
+# it, and the per-function registration only ever caught callees defined
+# EARLIER in the file, so a forward reference miscompiled on x86 too.
+# The table is now seeded once at parse time, like fn_ret_signed.
+#
+# The callees are self-recursive ON PURPOSE: a non-recursive one is erased by
+# the AST inliner (which runs even at -O0), the IR_CALL path never executes,
+# and the test passes against a broken compiler. Do not simplify them away.
+#
+# Both operand positions and both float widths are covered, because only the
+# left-operand form was wrong -- a test that checked `s * f32_fn()` alone
+# would have been green throughout.
+echo ""
+echo "--- float call result operand position ---"
+FCO_SRC="/tmp/krc_fcall_$$.kr"
+FCO_BIN="/tmp/krc_fcall_$$.bin"
+FCO_WANT="170
+170
+46
+170
+170
+170"
+cat > "$FCO_SRC" <<'KREOF'
+fn g32(uint64 n) -> f32 { if n > 1000000 { return g32(n - 1) }  return 42.5f }
+fn g64(uint64 n) -> f64 { if n > 1000000 { return g64(n - 1) }  return 42.5 }
+fn main() {
+    f32 s = 4.0f
+    f64 d = 4.0
+    println(f32_to_int(g32(1) * s))     // call LEFT, f32 var  -> 170
+    println(f32_to_int(s * g32(1)))     // call RIGHT, f32 var -> 170
+    println(f32_to_int(g32(1) + s))     // call LEFT, '+'      -> 46
+    println(f64_to_int(g64(1) * d))     // call LEFT, f64 var  -> 170
+    println(f64_to_int(d * g64(1)))     // call RIGHT, f64 var -> 170
+    println(f32_to_int(g32(1) * 4.0f))  // call LEFT, literal  -> 170
+    exit(0)
+}
+KREOF
+TOTAL=$((TOTAL + 1))
+if $KRC --arch=$RUN_ARCH "$FCO_SRC" -o "$FCO_BIN" >/dev/null 2>&1 && [ -s "$FCO_BIN" ]; then
+    chmod +x "$FCO_BIN"; FCO_GOT=$("$FCO_BIN" 2>&1)
+    if [ "$FCO_GOT" = "$FCO_WANT" ]; then
+        PASS=$((PASS + 1)); echo "  float_call_operand_position_host: PASS (6 forms, $RUN_ARCH)"
+    else
+        echo "FAIL: float_call_operand_position_host (want '$(echo $FCO_WANT)', got '$(echo $FCO_GOT)')"
+        FAIL=$((FAIL + 1))
+    fi
+else
+    echo "FAIL: float_call_operand_position_host (should compile)"; FAIL=$((FAIL + 1))
+fi
+# Cross-compile the same program to arm64 and run it under qemu. Without this
+# the whole defect is invisible to an x86_64 runner -- the host check above
+# only ever exercises one backend.
+FCO_QEMU="$(command -v qemu-aarch64-static || true)"
+if [ -n "$FCO_QEMU" ]; then
+    TOTAL=$((TOTAL + 1))
+    rm -f "$FCO_BIN"
+    if $KRC --arch=arm64 "$FCO_SRC" -o "$FCO_BIN" >/dev/null 2>&1 && [ -s "$FCO_BIN" ]; then
+        chmod +x "$FCO_BIN"; FCO_GOT=$("$FCO_QEMU" "$FCO_BIN" 2>&1)
+        if [ "$FCO_GOT" = "$FCO_WANT" ]; then
+            PASS=$((PASS + 1)); echo "  float_call_operand_position_arm64: PASS (6 forms under qemu)"
+        else
+            echo "FAIL: float_call_operand_position_arm64 (want '$(echo $FCO_WANT)', got '$(echo $FCO_GOT)')"
+            FAIL=$((FAIL + 1))
+        fi
+    else
+        echo "FAIL: float_call_operand_position_arm64 (should cross-compile)"; FAIL=$((FAIL + 1))
+    fi
+fi
+# Forward reference: the callee is defined AFTER main. Registering the return
+# kind during lowering only caught callees defined earlier, so this form was
+# wrong on BOTH arches (exit 0 instead of 170).
+cat > "$FCO_SRC" <<'KREOF'
+fn main() {
+    f32 s = 4.0f
+    f64 d = 4.0
+    if f32_to_int(fwd32(1) * s) != 170 { exit(1) }
+    if f64_to_int(fwd64(1) * d) != 170 { exit(2) }
+    exit(0)
+}
+fn fwd32(uint64 n) -> f32 { if n > 1000000 { return fwd32(n - 1) }  return 42.5f }
+fn fwd64(uint64 n) -> f64 { if n > 1000000 { return fwd64(n - 1) }  return 42.5 }
+KREOF
+TOTAL=$((TOTAL + 1))
+rm -f "$FCO_BIN"
+if $KRC --arch=$RUN_ARCH "$FCO_SRC" -o "$FCO_BIN" >/dev/null 2>&1 && [ -s "$FCO_BIN" ]; then
+    chmod +x "$FCO_BIN"; "$FCO_BIN"; FCO_RUN=$?
+    if [ "$FCO_RUN" = "0" ]; then
+        PASS=$((PASS + 1)); echo "  float_call_forward_declared: PASS"
+    else
+        echo "FAIL: float_call_forward_declared (check #$FCO_RUN wrong; f32=1 f64=2)"; FAIL=$((FAIL + 1))
+    fi
+else
+    echo "FAIL: float_call_forward_declared (should compile)"; FAIL=$((FAIL + 1))
+fi
+rm -f "$FCO_SRC" "$FCO_BIN"
 
 echo "--- --emit / --target value validation ---"
 EV_SRC="/tmp/krc_ev_$$.kr"

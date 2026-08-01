@@ -3741,7 +3741,13 @@ fn compile_fat(uint64 input_path, uint64 output_path) {
     enum_count = 0
     type_alias_count = 0
     arr_elem_count = 0
-    fn_ret_float_count = 0
+    // fn_ret_float_count is deliberately NOT reset here. The float-return
+    // table is seeded once at parse time (parser.kr, parse_fn_decl) — same
+    // as fn_ret_signed, which this reset never touched either. Clearing it
+    // per slice left every slice after the first with an empty table, and
+    // only the x86 IR emitter re-registered as it went; the arm64 emitter
+    // never did, so `f32_fn() * x` lowered to an integer MUL there.
+    // fn_ret_float_register is idempotent, so nothing accumulates.
     fn_ret_struct_count = 0
     line_table_count = 0
     last_recorded_line = 0
@@ -3848,7 +3854,13 @@ fn compile_fat(uint64 input_path, uint64 output_path) {
     enum_count = 0
     type_alias_count = 0
     arr_elem_count = 0
-    fn_ret_float_count = 0
+    // fn_ret_float_count is deliberately NOT reset here. The float-return
+    // table is seeded once at parse time (parser.kr, parse_fn_decl) — same
+    // as fn_ret_signed, which this reset never touched either. Clearing it
+    // per slice left every slice after the first with an empty table, and
+    // only the x86 IR emitter re-registered as it went; the arm64 emitter
+    // never did, so `f32_fn() * x` lowered to an integer MUL there.
+    // fn_ret_float_register is idempotent, so nothing accumulates.
     fn_ret_struct_count = 0
     line_table_count = 0
     last_recorded_line = 0
@@ -3957,7 +3969,13 @@ fn compile_fat(uint64 input_path, uint64 output_path) {
     enum_count = 0
     type_alias_count = 0
     arr_elem_count = 0
-    fn_ret_float_count = 0
+    // fn_ret_float_count is deliberately NOT reset here. The float-return
+    // table is seeded once at parse time (parser.kr, parse_fn_decl) — same
+    // as fn_ret_signed, which this reset never touched either. Clearing it
+    // per slice left every slice after the first with an empty table, and
+    // only the x86 IR emitter re-registered as it went; the arm64 emitter
+    // never did, so `f32_fn() * x` lowered to an integer MUL there.
+    // fn_ret_float_register is idempotent, so nothing accumulates.
     fn_ret_struct_count = 0
     line_table_count = 0
     last_recorded_line = 0
@@ -4089,7 +4107,13 @@ fn compile_fat(uint64 input_path, uint64 output_path) {
     enum_count = 0
     type_alias_count = 0
     arr_elem_count = 0
-    fn_ret_float_count = 0
+    // fn_ret_float_count is deliberately NOT reset here. The float-return
+    // table is seeded once at parse time (parser.kr, parse_fn_decl) — same
+    // as fn_ret_signed, which this reset never touched either. Clearing it
+    // per slice left every slice after the first with an empty table, and
+    // only the x86 IR emitter re-registered as it went; the arm64 emitter
+    // never did, so `f32_fn() * x` lowered to an integer MUL there.
+    // fn_ret_float_register is idempotent, so nothing accumulates.
     fn_ret_struct_count = 0
     line_table_count = 0
     last_recorded_line = 0
@@ -4189,7 +4213,13 @@ fn compile_fat(uint64 input_path, uint64 output_path) {
     enum_count = 0
     type_alias_count = 0
     arr_elem_count = 0
-    fn_ret_float_count = 0
+    // fn_ret_float_count is deliberately NOT reset here. The float-return
+    // table is seeded once at parse time (parser.kr, parse_fn_decl) — same
+    // as fn_ret_signed, which this reset never touched either. Clearing it
+    // per slice left every slice after the first with an empty table, and
+    // only the x86 IR emitter re-registered as it went; the arm64 emitter
+    // never did, so `f32_fn() * x` lowered to an integer MUL there.
+    // fn_ret_float_register is idempotent, so nothing accumulates.
     fn_ret_struct_count = 0
     line_table_count = 0
     last_recorded_line = 0
@@ -4325,7 +4355,13 @@ fn compile_fat(uint64 input_path, uint64 output_path) {
     enum_count = 0
     type_alias_count = 0
     arr_elem_count = 0
-    fn_ret_float_count = 0
+    // fn_ret_float_count is deliberately NOT reset here. The float-return
+    // table is seeded once at parse time (parser.kr, parse_fn_decl) — same
+    // as fn_ret_signed, which this reset never touched either. Clearing it
+    // per slice left every slice after the first with an empty table, and
+    // only the x86 IR emitter re-registered as it went; the arm64 emitter
+    // never did, so `f32_fn() * x` lowered to an integer MUL there.
+    // fn_ret_float_register is idempotent, so nothing accumulates.
     fn_ret_struct_count = 0
     line_table_count = 0
     last_recorded_line = 0
@@ -4444,7 +4480,13 @@ fn compile_fat(uint64 input_path, uint64 output_path) {
     enum_count = 0
     type_alias_count = 0
     arr_elem_count = 0
-    fn_ret_float_count = 0
+    // fn_ret_float_count is deliberately NOT reset here. The float-return
+    // table is seeded once at parse time (parser.kr, parse_fn_decl) — same
+    // as fn_ret_signed, which this reset never touched either. Clearing it
+    // per slice left every slice after the first with an empty table, and
+    // only the x86 IR emitter re-registered as it went; the arm64 emitter
+    // never did, so `f32_fn() * x` lowered to an integer MUL there.
+    // fn_ret_float_register is idempotent, so nothing accumulates.
     fn_ret_struct_count = 0
     line_table_count = 0
     last_recorded_line = 0
