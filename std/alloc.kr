@@ -3,18 +3,165 @@
 
 import "fmt.kr"
 
+// ---------------------------------------------------------------------------
+// Guard-page platform layer
+//
+// The guard pages below used to be installed with a bare
+// `syscall_raw(10, addr, 4096, ...)`. Both halves of that were host
+// assumptions dressed up as constants:
+//
+//   1. Syscall 10 is mprotect on Linux **x86_64 only**. aarch64 Linux uses
+//      the asm-generic table, where 10 is fgetxattr and mprotect is 226; the
+//      BSD table macOS uses puts it at 74 (with the 0x2000000 class prefix on
+//      Intel). So on Linux ARM64 the "guard page" call was really
+//      fgetxattr(guard_addr, 4096, NULL, 0) -> -EFAULT. Every arena/pool/heap
+//      constructor took the failure branch and exit(1)'d.
+//   2. The page size is not 4096 everywhere. Linux ARM64 is routinely built
+//      with 16 KiB or 64 KiB pages, and mprotect rejects a merely
+//      4096-aligned addr there with EINVAL.
+//
+// The table below settles (1), and measuring settles (2). But a table is
+// exactly the kind of artefact that produced the bug in the first place, so
+// nothing here trusts it: alloc_probe() confirms at runtime that the number it
+// was handed behaves like mprotect before any guard is installed on it, and
+// the platforms this file cannot verify degrade to "no guard" rather than to a
+// wrong guard or a dead allocator.
+
+// mprotect syscall number for this target, or 0 when there is no raw-syscall
+// mprotect reachable from here. get_arch_id() is a compile-time constant:
+//   x86_64: linux=1, windows=3, macos=5, android=8
+//   arm64:  linux=2, windows=4, macos=6, android=7
+//
+// The macOS entries follow the convention this repo's own codegen already
+// uses for macOS — codegen.kr emits 0x2000001/0x2000004/0x20000C5 for
+// exit/write/mmap on Intel (BSD number | SYSCALL_CLASS_UNIX << 24), and
+// codegen_aarch64.kr emits the bare 4/197 for the same calls on Apple
+// silicon — applied to BSD mprotect, which is 74. That is corroboration from
+// numbers macOS CI actually executes, not verification: no macOS machine ran
+// these two values. alloc_probe() is what makes being wrong survivable.
+fn alloc_mprotect_nr() -> u64 {
+    u64 id = get_arch_id()
+    if id == 1 { return 10 }            // Linux x86_64
+    if id == 8 { return 10 }            // Android x86_64 (Linux table)
+    if id == 2 { return 226 }           // Linux arm64 (asm-generic table)
+    if id == 7 { return 226 }           // Android arm64
+    if id == 5 { return 0x200004A }     // macOS x86_64: BSD 74 | class prefix
+    if id == 6 { return 74 }            // macOS arm64: bare BSD number
+    return 0                            // Windows: guards go through
+                                        // VirtualProtect, not syscalls
+}
+
+// Measured page size; 0 until alloc_probe() has run. Writable on purpose so a
+// test can pre-seed a page size this host does not have and drive the rest of
+// the arithmetic for it.
+static u64 alloc_page_size_cache = 0
+// 0 = not probed yet, 1 = guards usable, 2 = guards unavailable here.
+static u64 alloc_guard_state = 0
+
+// Runs once per process. Costs one scratch mapping and at most four syscalls,
+// which is not worth repeating on every arena_new.
+fn alloc_probe() {
+    if alloc_guard_state != 0 { return }
+    u64 nr = alloc_mprotect_nr()
+    if nr == 0 {
+        // Nothing to ask, and nothing wrong: this target has no raw-syscall
+        // mprotect at all (Windows would need VirtualProtect through the
+        // IAT). Guards are unavailable, which is a property of the platform
+        // rather than a failure to report, so the allocators run unguarded
+        // and say so in their header. Slack stays at the minimum, since no
+        // guard will be placed in it.
+        alloc_guard_state = 2
+        if alloc_page_size_cache == 0 { alloc_page_size_cache = 4096 }
+        return
+    }
+    // mprotect demands a page-aligned addr and returns EINVAL for anything
+    // else, which makes it its own page-size oracle AND its own identity
+    // check. Take a scratch mapping, step up to an address aligned to 65536
+    // (a multiple of every page size in use, so it is page-aligned whatever
+    // the answer turns out to be), and offer progressively coarser candidate
+    // offsets. The smallest one accepted is the page size.
+    u64 scratch = alloc(262144)
+    u64 a = (scratch + 65535) & 0xFFFFFFFFFFFF0000
+    u64 ps = 0
+    if syscall_raw(nr, a + 4096, 4096, 0, 0, 0, 0) == 0 {
+        ps = 4096
+    } else {
+        if syscall_raw(nr, a + 16384, 16384, 0, 0, 0, 0) == 0 {
+            ps = 16384
+        } else {
+            if syscall_raw(nr, a + 65536, 65536, 0, 0, 0, 0) == 0 { ps = 65536 }
+        }
+    }
+    // Accepting some alignment is not enough on its own — plenty of syscalls
+    // return 0 for arguments that happen to be valid for them. A real
+    // mprotect must also REJECT an address that is aligned to nothing. A
+    // number that accepts both is not mprotect (or is not behaving like it),
+    // so decline to build guards on it rather than build fake ones.
+    u64 usable = 0
+    if ps != 0 {
+        usable = 1
+        if syscall_raw(nr, a + ps + 17, ps, 0, 0, 0, 0) == 0 { usable = 0 }
+    }
+    dealloc(scratch)
+    if usable == 0 {
+        alloc_guard_state = 2
+        if alloc_page_size_cache == 0 { alloc_page_size_cache = 4096 }
+        return
+    }
+    alloc_guard_state = 1
+    if alloc_page_size_cache == 0 { alloc_page_size_cache = ps }
+}
+
+fn alloc_page_size() -> u64 {
+    alloc_probe()
+    // Never 0: slab sizing multiplies by this, and a 0 would silently
+    // remove the rounding slack the guard is placed in.
+    if alloc_page_size_cache == 0 { return 4096 }
+    return alloc_page_size_cache
+}
+
+// 1 when this target can install guard pages at all, 0 when it cannot. The
+// distinction matters: "this platform has no guard mechanism" is not the same
+// event as "the guard mechanism exists and failed", and only the second is a
+// reason to abort.
+fn alloc_guard_supported() -> u64 {
+    alloc_probe()
+    if alloc_guard_state == 1 { return 1 }
+    return 0
+}
+
+// Protect one page starting at the first page boundary at or after `raw_end`,
+// the first byte past the slab's usable region. Rounding UP is what keeps the
+// guard from ever covering a legitimate in-capacity address. Returns the guard
+// address, or 0 on failure. Callers must only reach this when
+// alloc_guard_supported() is 1, and must treat 0 as fatal there, because at
+// that point the mechanism is known to work and a guard that silently isn't
+// there reads as protection.
+fn alloc_install_guard(u64 raw_end) -> u64 {
+    if alloc_guard_supported() == 0 { return 0 }
+    u64 nr = alloc_mprotect_nr()
+    u64 ps = alloc_page_size()
+    u64 mask = 0 - ps
+    u64 guard_addr = (raw_end + ps - 1) & mask
+    u64 mp_ret = syscall_raw(nr, guard_addr, ps, 0, 0, 0, 0)
+    if mp_ret != 0 { return 0 }
+    return guard_addr
+}
+
 fn arena_new(u64 capacity) -> u64 {
-    // Allocate slab: 40 (header) + capacity + 8192 slack.
+    // Allocate slab: 40 (header) + capacity + two pages of slack.
     // The guard page must start on a page boundary (mprotect requires an
     // aligned addr), but base+40+capacity is only page-aligned when
     // capacity happens to leave the right residue — true for almost no
     // requested capacity. So we reserve a full extra page of rounding
-    // slack (4096) on top of the actual guard page (4096) and round the
-    // guard's start UP to the next page boundary: this guarantees the
-    // 4096-byte protected region always lands fully inside the slab, and
-    // never starts before base+40+capacity (which would incorrectly trap
-    // legitimate in-capacity writes).
-    u64 total = capacity + 40 + 8192
+    // slack on top of the actual guard page and round the guard's start UP
+    // to the next page boundary: this guarantees the protected region
+    // always lands fully inside the slab, and never starts before
+    // base+40+capacity (which would incorrectly trap legitimate
+    // in-capacity writes). The page size is measured, not assumed — see
+    // alloc_page_size() above.
+    u64 page = alloc_page_size()
+    u64 total = capacity + 40 + page + page
     u64 base = alloc(total)
     // base points to user region of alloc (after alloc's own 8-byte header)
     // Store arena header
@@ -22,22 +169,23 @@ fn arena_new(u64 capacity) -> u64 {
     store64(base + 8, 0)          // [8]  used = 0
     store64(base + 16, 0)         // [16] alloc_count = 0
     store64(base + 24, 0)         // [24] alloc_total = 0
-    store64(base + 32, 1)         // [32] guard = 1
 
     // Set up guard page: mprotect one page as PROT_NONE, starting at the
     // first page boundary at or after the end of the usable capacity.
-    // Only on Linux x86_64 for V1 (syscall_raw)
-    u64 raw_guard = base + 40 + capacity
-    u64 guard_addr = (raw_guard + 4095) & ~4095
-    // mprotect(addr, len, prot): Linux syscall 10
-    // prot = 0 (PROT_NONE)
-    u64 mp_ret = syscall_raw(10, guard_addr, 4096, 0, 0, 0, 0)
-    if mp_ret != 0 {
-        // A guard that silently isn't there is worse than no guard at
-        // all, since it reads as protection. Fail loud instead.
-        write(2, "arena: mprotect guard page failed\n", 34)
-        exit(1)
+    // Where the mechanism exists, a guard that silently isn't there is
+    // worse than no guard at all, since it reads as protection — so fail
+    // loud. Where it does not exist there is nothing to fail at: [32]
+    // carries 0, which is the header saying "unguarded" rather than the
+    // allocator pretending.
+    u64 guard = 0
+    if alloc_guard_supported() != 0 {
+        if alloc_install_guard(base + 40 + capacity) == 0 {
+            write(2, "arena: mprotect guard page failed\n", 34)
+            exit(1)
+        }
+        guard = 1
     }
+    store64(base + 32, guard)     // [32] guard
 
     return base
 }
@@ -93,11 +241,12 @@ fn pool_new(u64 obj_size, u64 count) -> u64 {
     u64 aligned = (obj_size + 7) & 0xFFFFFFFFFFFFFFF8
     if aligned < 16 { aligned = 16 }
     u64 data_size = aligned * count
-    // See arena_new for why this needs 8192 of slack rather than a flat
-    // 4096: base+56+data_size is not page-aligned in general, and
-    // mprotect requires an aligned addr, so we round the guard start UP
-    // and need room for both the rounding slop and the guard page itself.
-    u64 total = 56 + data_size + 8192
+    // See arena_new for why this needs two pages of slack rather than one:
+    // base+56+data_size is not page-aligned in general, and mprotect
+    // requires an aligned addr, so we round the guard start UP and need
+    // room for both the rounding slop and the guard page itself.
+    u64 page = alloc_page_size()
+    u64 total = 56 + data_size + page + page
     u64 base = alloc(total)
     // Header
     store64(base, aligned)            // obj_size
@@ -105,16 +254,19 @@ fn pool_new(u64 obj_size, u64 count) -> u64 {
     store64(base + 24, 0)             // used_count
     store64(base + 32, 0)             // alloc_count
     store64(base + 40, 0)             // free_count
-    store64(base + 48, 1)             // guard
 
     // Guard page: round up to the next page boundary at/after the data.
-    u64 raw_guard = base + 56 + data_size
-    u64 guard_addr = (raw_guard + 4095) & ~4095
-    u64 mp_ret = syscall_raw(10, guard_addr, 4096, 0, 0, 0, 0)
-    if mp_ret != 0 {
-        write(2, "pool: mprotect guard page failed\n", 33)
-        exit(1)
+    // See arena_new for why an absent mechanism is recorded rather than
+    // treated as a failure.
+    u64 guard = 0
+    if alloc_guard_supported() != 0 {
+        if alloc_install_guard(base + 56 + data_size) == 0 {
+            write(2, "pool: mprotect guard page failed\n", 33)
+            exit(1)
+        }
+        guard = 1
     }
+    store64(base + 48, guard)         // guard
 
     // Initialize free list: chain all slots
     u64 slot_base = base + 56
@@ -233,9 +385,10 @@ fn heap_new(u64 capacity) -> u64 {
         write(2, "heap_new: capacity must be at least 40 bytes\n", 45)
         exit(1)
     }
-    // See arena_new for why this needs 8192 of slack rather than a flat
-    // 4096 (page-alignment rounding room for the guard page).
-    u64 total = 56 + capacity + 8192
+    // See arena_new for why this needs two pages of slack rather than one
+    // (page-alignment rounding room for the guard page).
+    u64 page = alloc_page_size()
+    u64 total = 56 + capacity + page + page
     u64 base = alloc(total)
     // Heap header
     store64(base, capacity)
@@ -243,16 +396,19 @@ fn heap_new(u64 capacity) -> u64 {
     store64(base + 24, 0)   // free_count
     store64(base + 32, 0)   // alloc_total
     store64(base + 40, 0)   // free_total
-    store64(base + 48, 1)   // guard
 
     // Guard page: round up to the next page boundary at/after capacity.
-    u64 raw_guard = base + 56 + capacity
-    u64 guard_addr = (raw_guard + 4095) & ~4095
-    u64 mp_ret = syscall_raw(10, guard_addr, 4096, 0, 0, 0, 0)
-    if mp_ret != 0 {
-        write(2, "heap: mprotect guard page failed\n", 33)
-        exit(1)
+    // See arena_new for why an absent mechanism is recorded rather than
+    // treated as a failure.
+    u64 guard = 0
+    if alloc_guard_supported() != 0 {
+        if alloc_install_guard(base + 56 + capacity) == 0 {
+            write(2, "heap: mprotect guard page failed\n", 33)
+            exit(1)
+        }
+        guard = 1
     }
+    store64(base + 48, guard)   // guard
 
     // Initialize one big free block covering the entire capacity
     u64 block = base + 56

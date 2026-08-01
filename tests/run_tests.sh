@@ -9177,26 +9177,140 @@ echo "--- std/alloc.kr + std/io.kr regression tests ---"
 # EINVAL failure was silent and the "guard" was a no-op. capacity=100 is
 # deliberately NOT the coincidentally-aligned case.
 #
-# The guard page, once correctly placed, starts at round_up(raw_end, 4096)
-# -- somewhere in [raw_end, raw_end+4095] -- and is 4096 bytes wide. Probing
-# at offsets 0 and 4096 from raw_end is enough to guarantee landing inside
+# The guard page, once correctly placed, starts at round_up(raw_end, page)
+# -- somewhere in [raw_end, raw_end+page-1] -- and is one page wide. Probing
+# at offsets 0 and page from raw_end is enough to guarantee landing inside
 # that window regardless of the exact rounding remainder: if the remainder
-# is 0 the window is [raw_end, raw_end+4096) and offset 0 hits it; if the
-# remainder is d>0 the window is [raw_end+d, raw_end+d+4096) and offset
-# 4096 always falls inside it (d <= 4095 < 4096 < d+4096). Both offsets
+# is 0 the window is [raw_end, raw_end+page) and offset 0 hits it; if the
+# remainder is d>0 the window is [raw_end+d, raw_end+d+page) and offset
+# page always falls inside it (d <= page-1 < page < d+page). Both offsets
 # stay well inside the slab's actual mmap'd pages either way (mmap always
 # rounds the reservation up to whole pages, so even the smaller pre-fix
 # reservation covers this), so a fault here is unambiguously the guard
 # page firing, not an unrelated out-of-bounds access past the mapping.
 # Pre-fix, mprotect silently no-ops and both stores succeed, reaching
 # exit(0); post-fix, one of them must SIGSEGV (rc=139).
+#
+# The offsets are the RUNTIME page size, not a hardcoded 4096. Hardcoding
+# it is how the ARM64 breakage below hid for as long as it did.
 run_test "alloc_guard_page_protects_unaligned_capacity" 'import "std/alloc.kr"
 fn main() {
+    uint64 page = alloc_page_size()
     uint64 a = arena_new(100)
     uint64 cap = load64(a)
     uint64 raw_end = a + 40 + cap
     store8(raw_end, 1)
-    store8(raw_end + 4096, 1)
+    store8(raw_end + page, 1)
+    exit(0)
+}' 139
+
+# Bug 1b: the guard was installed with a hardcoded `syscall_raw(10, addr,
+# 4096, ...)`. BOTH constants were host assumptions:
+#
+#   * 10 is mprotect on Linux x86_64 only. aarch64 Linux uses the
+#     asm-generic table where 10 is fgetxattr and mprotect is 226. So on
+#     Linux ARM64 the guard call was fgetxattr(guard_addr, 4096, NULL, 0)
+#     -> -EFAULT, and once bug 1 made the return value honest, all nine
+#     arena/pool/heap tests became exit(1). tests/smoke/alloc_guard.kr
+#     covers that half, because the smoke corpus is what the x86_64 CI job
+#     runs against the ARM64 target under qemu.
+#
+#   * 4096 is not the page size everywhere. Linux ARM64 is routinely built
+#     with 16 KiB or 64 KiB pages, where a merely 4096-aligned addr is
+#     rejected with EINVAL.
+#
+# The two tests below pin each half down on any host. The first checks the
+# page size the allocators use really is the granularity mprotect enforces
+# -- if it were not, every guard would sit at an address the kernel had
+# quietly rounded somewhere else. The second drives the whole 64 KiB code
+# path on a 4 KiB host by pre-seeding the measured-page-size cache: 65536
+# is a multiple of 4096, so a 4 KiB kernel accepts the larger alignment and
+# the placement arithmetic gets exercised for real. Against the pre-fix
+# std/alloc.kr, whose slab reserved a flat 8192 of slack and whose guard
+# was pinned to a 4096 grid, a 64 KiB page cannot be accommodated at all.
+run_test "alloc_page_size_matches_mprotect_alignment" 'import "std/alloc.kr"
+fn main() {
+    uint64 ps = alloc_page_size()
+    uint64 nr = alloc_mprotect_nr()
+    if nr == 0 { exit(0) }
+    uint64 scratch = alloc(262144)
+    uint64 base = (scratch + 65535) & 0xFFFFFFFFFFFF0000
+    if syscall_raw(nr, base + ps, ps, 0, 0, 0, 0) != 0 { exit(1) }
+    if ps > 4096 {
+        if syscall_raw(nr, base + ps + ps / 2, ps, 0, 0, 0, 0) == 0 { exit(2) }
+    }
+    if syscall_raw(nr, base + ps + 17, ps, 0, 0, 0, 0) == 0 { exit(3) }
+    exit(0)
+}' 0
+
+# Windows has no syscall mprotect at all -- a guard there would have to go
+# through VirtualProtect -- so alloc_mprotect_nr() returns 0 for it. That
+# must mean "constructs unguarded, and says so in the header", NOT "every
+# arena/pool/heap aborts on a supported platform". The two events are
+# different: a platform with no guard mechanism is not a guard mechanism
+# that failed, and only the second is a reason to exit(1).
+#
+# Forcing alloc_guard_state to 2 drives exactly the branch Windows takes,
+# on a host that can actually execute it. It is the Windows logic, not the
+# Windows ABI -- no Windows machine ran this -- but it is the half that was
+# broken, and the PE binaries are additionally exercised by
+# tests/smoke/alloc_guard.kr under the cross-platform workflow.
+run_test "alloc_unguarded_platform_still_allocates" 'import "std/alloc.kr"
+fn main() {
+    alloc_guard_state = 2
+    uint64 a = arena_new(4096)
+    uint64 p1 = arena_alloc(a, 64)
+    store64(p1, 7)
+    if load64(p1) != 7 { exit(1) }
+    if load64(a + 32) != 0 { exit(2) }
+    uint64 p = pool_new(64, 8)
+    uint64 s = pool_alloc(p)
+    if s == 0 { exit(3) }
+    if load64(p + 48) != 0 { exit(4) }
+    uint64 h = heap_new(4096)
+    uint64 hp = heap_alloc(h, 64)
+    if hp == 0 { exit(5) }
+    if load64(h + 48) != 0 { exit(6) }
+    // Nothing was protected, so the slack past capacity is plain memory.
+    store8(a + 40 + 4096, 1)
+    exit(0)
+}' 0
+
+# macOS ARM64 runs 16 KiB pages, so it takes the probe branch between the
+# 4 KiB and 64 KiB cases. A 4 KiB host cannot make mprotect reject a
+# 4096-aligned address, so the *probe* branch is unreachable here, but the
+# placement and sizing arithmetic downstream of it is exactly what a 16 KiB
+# page exercises -- and that is what this drives.
+run_test "alloc_guard_page_at_16k_page_size" 'import "std/alloc.kr"
+fn main() {
+    alloc_page_size_cache = 16384
+    uint64 a = arena_new(100)
+    uint64 p = arena_alloc(a, 96)
+    store8(p, 1)
+    store8(p + 95, 1)
+    store8(a + 40 + 99, 1)
+    uint64 cap = load64(a)
+    uint64 raw_end = a + 40 + cap
+    store8(raw_end, 1)
+    store8(raw_end + 16384, 1)
+    exit(0)
+}' 139
+
+run_test "alloc_guard_page_at_64k_page_size" 'import "std/alloc.kr"
+fn main() {
+    alloc_page_size_cache = 65536
+    uint64 a = arena_new(100)
+    // Every byte of the requested capacity must still be writable: a
+    // guard rounded the wrong way, or a slab sized for 4 KiB slack while
+    // aligning to 64 KiB, would swallow part of it.
+    uint64 p = arena_alloc(a, 96)
+    store8(p, 1)
+    store8(p + 95, 1)
+    store8(a + 40 + 99, 1)
+    uint64 cap = load64(a)
+    uint64 raw_end = a + 40 + cap
+    store8(raw_end, 1)
+    store8(raw_end + 65536, 1)
     exit(0)
 }' 139
 

@@ -1,0 +1,59 @@
+// expected: 42
+// Smoke test: the std allocators can actually construct on this target.
+//
+// arena_new/pool_new/heap_new each install a PROT_NONE guard page and
+// exit(1) if the mprotect fails, so simply reaching exit(42) proves the
+// guard syscall went through with a number and an alignment this platform
+// accepts. That is exactly what regressed: the guard used a hardcoded
+// `syscall_raw(10, addr, 4096, ...)`, and 10 is mprotect on Linux x86_64
+// only — on aarch64 Linux 10 is fgetxattr (mprotect is 226) and on macOS
+// it is unlink (mprotect is 74). All nine allocator tests turned into
+// exit(1) on Linux ARM64 while every 4 KiB x86_64 job stayed green.
+//
+// This lives in the smoke corpus, not the main suite, because the smoke
+// corpus is the only thing the x86_64 CI job runs against the ARM64
+// target under qemu — which is where a per-target syscall mistake has to
+// be caught, since the native ARM64 job runs later and downstream. The
+// cross-platform workflow globs this same corpus, so this file is also
+// built for Windows x64/ARM64 and macOS x64/ARM64 and executed there.
+import "../../std/alloc.kr"
+
+fn main() {
+    u64 a = arena_new(4096)
+    u64 p1 = arena_alloc(a, 64)
+    store64(p1, 1)
+    if load64(p1) != 1 { exit(1) }
+
+    u64 p = pool_new(64, 8)
+    u64 s = pool_alloc(p)
+    store64(s, 2)
+    if load64(s) != 2 { exit(2) }
+    pool_free(p, s)
+
+    u64 h = heap_new(4096)
+    u64 hp = heap_alloc(h, 64)
+    store64(hp, 3)
+    if load64(hp) != 3 { exit(3) }
+    heap_free(h, hp)
+
+    // Guard pages need mprotect, which Windows does not expose as a
+    // syscall — a guard there would have to go through VirtualProtect.
+    // So on Windows the allocators must construct UNguarded and say so,
+    // and everywhere else they must construct guarded and say so. Both
+    // halves are asserted; neither platform is merely skipped.
+    //
+    // The status is read straight out of the headers (arena [32], pool
+    // [48], heap [48]) rather than from the new helpers, which keeps this
+    // whole file inside the API that existed before the fix: it compiles
+    // against the broken std/alloc.kr too, so its failure there is a real
+    // exit(1) rather than a compile error. The page-size half of the bug
+    // is pinned down separately, by
+    // alloc_page_size_matches_mprotect_alignment in tests/run_tests.sh.
+    u64 want = 1
+    if get_target_os() == 2 { want = 0 }
+    if load64(a + 32) != want { exit(4) }
+    if load64(p + 48) != want { exit(5) }
+    if load64(h + 48) != want { exit(6) }
+
+    exit(42)
+}
