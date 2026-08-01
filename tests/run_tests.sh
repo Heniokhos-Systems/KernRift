@@ -8016,6 +8016,78 @@ for M in lkm android; do
         echo "FAIL: target_none_refuses_emit_$M (exit $TN_ST: '$TN_ERR')"; FAIL=$((FAIL + 1))
     fi
 done
+
+# 5. --target=none must never reach the fat-binary path. freestanding is a
+#    static global that persists across all 8 hosted slices inside
+#    compile_fat, so a fat build under target_os==4 used to strip
+#    startup/exit from every slice: exit status 0, no diagnostic, and every
+#    slice crashes at runtime. Assert by inspecting the artifact's header
+#    (a fat binary starts with the 8-byte magic "KRBOFAT\0") rather than by
+#    exit status alone, since exit status was 0 for this exact bug — a
+#    correct fix might refuse outright (no file at all) or might default to
+#    a single-arch binary (a valid non-fat file); either is acceptable here,
+#    a KRBOFAT header is not.
+TN_FAT_MAGIC="4b52424f46415400"
+# 5a. No --arch at all: the default-fat-binary path. $KRC under `make test`
+#     is a wrapper that unconditionally injects --arch=x86_64 ahead of every
+#     test's own args (see Makefile:96), which would mask exactly the
+#     "arch_set == 0" entrance this case exists to catch. Use the raw
+#     compiler binary instead, same fallback `build/krc2` then `build/krc3`
+#     already used for this reason by the governance test above.
+if [ -f "$DIR/../build/krc2" ]; then
+    TN_RAW_KRC=$(cd "$DIR/../build" && pwd)/krc2
+elif [ -f "$DIR/../build/krc3" ]; then
+    TN_RAW_KRC=$(cd "$DIR/../build" && pwd)/krc3
+else
+    TN_RAW_KRC=""
+fi
+TOTAL=$((TOTAL + 1))
+rm -f /tmp/krc_tnone_nf1_$$
+if [ -n "$TN_RAW_KRC" ]; then
+    "$TN_RAW_KRC" --target=none "$TN_SRC" -o /tmp/krc_tnone_nf1_$$ >/dev/null 2>&1
+fi
+TN_NF1_MAGIC=""
+if [ -f /tmp/krc_tnone_nf1_$$ ]; then
+    TN_NF1_MAGIC=$(head -c8 /tmp/krc_tnone_nf1_$$ | od -An -tx1 | tr -d ' \n')
+fi
+if [ -z "$TN_RAW_KRC" ]; then
+    echo "FAIL: target_none_no_arch_not_fat (no raw compiler binary found)"; FAIL=$((FAIL + 1))
+elif [ "$TN_NF1_MAGIC" = "$TN_FAT_MAGIC" ]; then
+    echo "FAIL: target_none_no_arch_not_fat (produced a KRBOFAT fat binary)"; FAIL=$((FAIL + 1))
+else
+    PASS=$((PASS + 1)); echo "  target_none_no_arch_not_fat: PASS"
+fi
+rm -f /tmp/krc_tnone_nf1_$$
+
+# 5b. An explicit --targets=<list> that does not spell "none" as one of its
+#     elements — the --targets=...,none refusal above cannot see this one.
+TOTAL=$((TOTAL + 1))
+rm -f /tmp/krc_tnone_nf2_$$
+$KRC --target=none --targets=linux-x64 "$TN_SRC" -o /tmp/krc_tnone_nf2_$$ >/dev/null 2>&1
+TN_NF2_MAGIC=""
+if [ -f /tmp/krc_tnone_nf2_$$ ]; then
+    TN_NF2_MAGIC=$(head -c8 /tmp/krc_tnone_nf2_$$ | od -An -tx1 | tr -d ' \n')
+fi
+if [ "$TN_NF2_MAGIC" = "$TN_FAT_MAGIC" ]; then
+    echo "FAIL: target_none_targets_list_not_fat (produced a KRBOFAT fat binary)"; FAIL=$((FAIL + 1))
+else
+    PASS=$((PASS + 1)); echo "  target_none_targets_list_not_fat: PASS"
+fi
+rm -f /tmp/krc_tnone_nf2_$$
+
+# 6. The general --target= conflict rule (added so esp32/none composition
+#    cannot be silent) is a user-visible behaviour change for HOSTED targets
+#    too: --target=linux --target=windows previously took last-wins and now
+#    errors. Byte-identity cannot see this (both spellings still produce a
+#    valid binary), so it needs its own test.
+TOTAL=$((TOTAL + 1))
+TN_ERR=$($KRC --arch=x86_64 --target=linux --target=windows "$TN_SRC" -o /tmp/krc_tnone_bin_$$ 2>&1); TN_ST=$?
+if [ "$TN_ST" != "0" ] && echo "$TN_ERR" | grep -q "conflicting --target"; then
+    PASS=$((PASS + 1)); echo "  target_hosted_conflict: PASS"
+else
+    echo "FAIL: target_hosted_conflict (exit $TN_ST: '$TN_ERR')"; FAIL=$((FAIL + 1))
+fi
+
 rm -f "$TN_SRC" /tmp/krc_tnone_bin_$$
 
 # --- esp32 .bss zero-loop bounds -------------------------------------------

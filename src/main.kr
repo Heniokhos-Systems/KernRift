@@ -5582,6 +5582,22 @@ fn main() {
         exit(1)
     }
     if target_mask != 0 || (arch_set == 0 && emit_set == 0 && cli_argc > 0) {
+        // --target=none must never reach compile_fat, from ANY entrance
+        // (no --arch given at all, or an explicit --targets=<list> that
+        // does not happen to spell "none" as one of its elements — the
+        // :3495 refusal above only catches the latter spelling). Checked
+        // here, at the single point that actually decides fat-vs-single,
+        // rather than per-entrance: freestanding is a static global, and
+        // compile_fat compiles all 8 hosted slices in one process without
+        // resetting it between them, so a bare-metal build's freestanding=1
+        // would strip startup/exit from every hosted slice — a fat binary
+        // that builds cleanly (exit 0, no diagnostic) and crashes at
+        // runtime on every architecture.
+        if target_os == 4 {
+            uint64 tnf_msg = "error: --target=none cannot build a fat binary: pass --arch=<arch> for a single bare-metal binary (a fat binary bundles 8 hosted OS slices and there is no OS here to run any of them)\n"
+            write(2, tnf_msg, str_len(tnf_msg))
+            exit(1)
+        }
         compile_fat(input_path, output_path)
     } else {
         compile(input_path, output_path, arch, emit_mode)
