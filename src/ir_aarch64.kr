@@ -1570,15 +1570,23 @@ fn ir_emit_arm64_insn(uint64 ii) {
             // the bottom, so SP at the upcoming BL will sit exactly on
             // top of those slots — no SUB/ADD needed. Just STR the
             // arg value at [SP + (imm-8)*8].
+            // 24 slots, not 16: the front end advertises `too many call
+            // arguments (max 32)` and AAPCS64 puts the first 8 in x0-x7,
+            // so 32 - 8 = 24 stack slots is the number that makes the
+            // advertised limit true. The old 16 was a leftover from when
+            // IR_A64_OVERFLOW_RESERVE was a fixed 128 bytes; it is now
+            // sized from a64_ovf_slots, so the reserve grows to fit.
+            // An arch-specific limit is not an option here: one .kr
+            // compiles to all 8 fat-binary slices at once, so a 25-arg
+            // call would build the x86 slices and then abort the build on
+            // the arm64 one.
             uint64 oi = imm - 8
-            if oi >= 16 {
-                write(2, "error: a64 overflow args overflow (max 16)\n", 43)
+            if oi >= 24 {
+                write(2, "error: a64 overflow args overflow (max 24)\n", 43)
                 exit(1)
             }
-            if oi < 16 {
-                uint64 src_reg = ir_a64_resolve_src(s1_v, 9)
-                ir_a64_str_sp(src_reg, oi * 8)
-            }
+            uint64 src_reg = ir_a64_resolve_src(s1_v, 9)
+            ir_a64_str_sp(src_reg, oi * 8)
         }
         return
     }
@@ -3308,7 +3316,12 @@ fn ir_emit_arm64_function(uint64 fn_node) {
     // ASM-block functions keep the historical full reserve (Windows
     // lowering writes stack args outside the IR_ARG path).
     IR_A64_OVERFLOW_RESERVE = a64_ovf_slots * 8
-    if a64_has_asm != 0 || target_os == 2 { IR_A64_OVERFLOW_RESERVE = 128 }
+    // For ASM/Windows the historical 128 bytes is a FLOOR, not an override:
+    // with up to 24 outgoing stack args (192 bytes) a hard 128 would let
+    // IR_ARG store past the reserve and into the spill area.
+    if a64_has_asm != 0 || target_os == 2 {
+        if IR_A64_OVERFLOW_RESERVE < 128 { IR_A64_OVERFLOW_RESERVE = 128 }
+    }
 
     // Callee-saved colours actually used by this function.
     uint64 a64_used_mask = ir_used_color_mask() | a64_forced_mask

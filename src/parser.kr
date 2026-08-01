@@ -1964,6 +1964,21 @@ fn parse_fn_decl() -> uint64 {
         if ret_kind_p >= 84 && ret_kind_p <= 87 {
             fn_ret_signed_register(nt)
         }
+        // Same treatment for float returns (96 = f64, 95 = f32). The BinOp
+        // lowering picks IR_FMUL/IR_FADD only when an operand carries an
+        // fkind, and a call's result vreg gets its fkind from this table
+        // (ir.kr, IR_CALL lowering). Registering here rather than inside a
+        // backend's per-function emitter is what makes it complete:
+        //   - ir_emit_arm64_function never registered at all, so on arm64
+        //     EVERY call result was fkind 0 and `f32_fn() * s` lowered to an
+        //     integer MUL of two float bit patterns (silent wrong answer,
+        //     0 instead of 170). Only the LHS fkind is consulted, which is
+        //     why `s * f32_fn()` looked fine.
+        //   - even on x86, the per-function registration only caught callees
+        //     defined EARLIER in the file, so a forward reference had the
+        //     same miscompile.
+        if ret_kind_p == 96 { fn_ret_float_register(nt, 1) }
+        if ret_kind_p == 95 { fn_ret_float_register(nt, 2) }
     }
 
     // Body
