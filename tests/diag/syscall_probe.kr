@@ -1,0 +1,79 @@
+// expected: 0
+// TEMPORARY DIAGNOSTIC — not part of any suite. Cross-compiled by the
+// cross-platform workflow and run on macOS x86_64 and macOS ARM64 so the
+// raw return values of syscall_raw() on Apple silicon can be READ rather
+// than guessed at. Deleted once the guard-page failure is understood.
+//
+// Deliberately imports nothing: std/alloc.kr's own probe must not run
+// before these measurements, and std/fmt.kr pulls it in transitively.
+// print() dispatches on the STATIC type of its argument, so every label
+// is an inline literal rather than a u64 parameter.
+
+fn main() {
+    println("=== KernRift syscall_raw diagnostic ===")
+    print("arch_id = ")
+    println(get_arch_id())
+    print("target_os = ")
+    println(get_target_os())
+
+    // ---- Oracle 1: getpid. BSD 20, or 20 | 0x2000000 with the Intel
+    // class prefix. A syscall_raw that actually reaches the kernel with
+    // the number it was handed returns a plausible pid here; anything
+    // else is proof the number is not arriving.
+    print("getpid_bare_20 = ")
+    println(syscall_raw(20, 0, 0, 0, 0, 0, 0))
+    print("getpid_prefixed_0x2000014 = ")
+    println(syscall_raw(0x2000014, 0, 0, 0, 0, 0, 0))
+
+    // ---- Oracle 2: write(1, "SYSCALL-WRITE-OK\n", 17). BSD 4. If the
+    // marker line appears in the log the syscall path works end to end.
+    u64 msg = "SYSCALL-WRITE-OK\n"
+    print("write_bare_4_ret = ")
+    println(syscall_raw(4, 1, msg, 17, 0, 0, 0))
+    print("write_prefixed_0x2000004_ret = ")
+    println(syscall_raw(0x2000004, 1, msg, 17, 0, 0, 0))
+
+    // ---- The actual guard-page probe, printed value by value.
+    u64 scratch = alloc(262144)
+    u64 a = (scratch + 65535) & 0xFFFFFFFFFFFF0000
+    print("scratch = ")
+    println(scratch)
+    print("aligned_base = ")
+    println(a)
+
+    println("-- mprotect bare 74, PROT_NONE --")
+    print("nr74_off4096_len4096 = ")
+    println(syscall_raw(74, a + 4096, 4096, 0, 0, 0, 0))
+    print("nr74_off16384_len16384 = ")
+    println(syscall_raw(74, a + 16384, 16384, 0, 0, 0, 0))
+    print("nr74_off65536_len65536 = ")
+    println(syscall_raw(74, a + 65536, 65536, 0, 0, 0, 0))
+    print("nr74_misaligned_p17 = ")
+    println(syscall_raw(74, a + 16384 + 17, 16384, 0, 0, 0, 0))
+
+    println("-- mprotect prefixed 0x200004A, PROT_NONE --")
+    print("nrP_off4096_len4096 = ")
+    println(syscall_raw(0x200004A, a + 4096, 4096, 0, 0, 0, 0))
+    print("nrP_off16384_len16384 = ")
+    println(syscall_raw(0x200004A, a + 16384, 16384, 0, 0, 0, 0))
+    print("nrP_off65536_len65536 = ")
+    println(syscall_raw(0x200004A, a + 65536, 65536, 0, 0, 0, 0))
+    print("nrP_misaligned_p17 = ")
+    println(syscall_raw(0x200004A, a + 16384 + 17, 16384, 0, 0, 0, 0))
+
+    println("-- mprotect bare 74, PROT_READ(1) instead of PROT_NONE --")
+    print("nr74_prot1_off16384 = ")
+    println(syscall_raw(74, a + 16384, 16384, 1, 0, 0, 0))
+
+    // ---- Does a PROT_NONE region actually trap? Re-protect a page well
+    // inside the scratch mapping and store into it. A live guard kills
+    // the process with a signal; reaching the next line means the
+    // "guard" is decoration. Last, because it is expected to be fatal.
+    u64 guard = a + 131072
+    print("trap_setup_ret = ")
+    println(syscall_raw(74, guard, 16384, 0, 0, 0, 0))
+    println("ABOUT-TO-STORE-INTO-GUARD")
+    store64(guard + 8, 1)
+    println("GUARD-DID-NOT-TRAP")
+    exit(0)
+}
