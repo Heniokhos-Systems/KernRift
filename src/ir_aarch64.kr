@@ -2013,9 +2013,30 @@ fn ir_emit_arm64_insn(uint64 ii) {
 
     // ----- IR_SYSCALL_RAW (85) -----
     if op == 85 {
-        // src1 = nr vreg, args already in x0-x5
+        // src1 = nr vreg, args already in x0-x5.
+        //
+        // The number register is NOT x8 everywhere: Linux/Android aarch64
+        // read it from x8, Darwin reads it from x16 (and traps on `svc
+        // #0x80`, which emit_a64_svc already handles). Hardcoding x8 here
+        // meant every syscall_raw() on Apple silicon executed `svc #0x80`
+        // with whatever stale value x16 happened to hold, so the kernel
+        // answered EINVAL(22) to every call — getpid, write and mprotect
+        // alike — and std/alloc.kr's guard probe correctly concluded that
+        // nothing it could see behaved like mprotect. macOS x86_64 was
+        // unaffected because its number register is rax either way.
+        //
+        // emit_a64_syscall_nr() encodes the same rule for the compiler's
+        // own built-in syscalls, which is why alloc()/write() worked on
+        // this target while syscall_raw() did not. x16 is excluded from
+        // both arm64 colour files (it is the linker-veneer / ADRP scratch),
+        // and op 85 is not in ir_a64_op_widesafe, so writing it here cannot
+        // clobber an allocated value.
         uint64 nr_r = ir_a64_resolve_src(s1_v, 9)
-        emit_a64_mov(8, nr_r)
+        if target_os == 1 {
+            emit_a64_mov(16, nr_r)
+        } else {
+            emit_a64_mov(8, nr_r)
+        }
         emit_a64_svc()
         if dst_r != 0xFFFFFFFF && dst_r != 0 {
             emit_a64_mov(dst_r, 0)
