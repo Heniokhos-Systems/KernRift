@@ -3484,6 +3484,17 @@ fn parse_targets_arg(uint64 list) {
         if tok_len > 0 {
             if targets_name_eq(tok_start, tok_len, "all") != 0 {
                 mask = mask | 0xFF
+            } else if targets_name_eq(tok_start, tok_len, "none") != 0 {
+                // --target=none is a bare-metal, no-OS image: the fat-binary
+                // runner extracts one of the 8 hosted slices and execs it
+                // under a live OS, and a bare-metal image has neither an OS
+                // to exec it nor a slice ID of its own. This must be a hard
+                // error, not the generic "unknown --targets name" warning
+                // below (which lets the build proceed with mask 0 and
+                // silently falls through to building all 8 hosted slices).
+                uint64 tn_msg = "error: --targets=...,none: 'none' cannot appear in a fat binary; use --arch=<arch> --target=none for a single bare-metal binary instead\n"
+                write(2, tn_msg, str_len(tn_msg))
+                exit(1)
             } else {
                 uint64 bit = parse_target_name(tok_start, tok_len)
                 if bit != 0xFF {
@@ -4956,6 +4967,15 @@ fn main() {
     uint64 emit_mode = 0
     uint64 arch_set = 0
     uint64 emit_set = 0
+    // Tracks what the last --target= flag resolved to, so a second, different
+    // --target= is a conflict rather than last-wins (e.g. --target=esp32
+    // already implies bare metal on Xtensa; composing it with an OS name or
+    // with --target=none must not silently pick whichever parsed last).
+    // 0 = not given yet; 1 linux, 2 macos, 3 windows, 4 android, 5 esp32,
+    // 6 none.
+    uint64 target_arg_seen = 0
+    uint64 target_arg_kind = 0
+    uint64 target_arg_str = 0
 
     if cli_argc > 1 {
         uint64 i = 1
@@ -5064,19 +5084,19 @@ fn main() {
                 parse_targets_arg(arg + 10)
             } else if str_starts_with(arg, "--target=", 9) != 0 {
                 uint64 tgt_str = arg + 9
+                uint64 tgt_kind = 0
                 if str_eq_full(tgt_str, "macos") != 0 {
-                    target_os = 1
+                    tgt_kind = 2
                 } else if str_eq_full(tgt_str, "darwin") != 0 {
-                    target_os = 1
+                    tgt_kind = 2
                 } else if str_eq_full(tgt_str, "windows") != 0 {
-                    target_os = 2
+                    tgt_kind = 3
                 } else if str_eq_full(tgt_str, "win") != 0 {
-                    target_os = 2
+                    tgt_kind = 3
                 } else if str_eq_full(tgt_str, "linux") != 0 {
-                    target_os = 0
+                    tgt_kind = 1
                 } else if str_eq_full(tgt_str, "android") != 0 {
-                    target_os = 3
-                    emit_mode = 4
+                    tgt_kind = 4
                 } else if str_eq_full(tgt_str, "esp32") != 0 {
                     // Machine target, not an OS: ESP32 (Xtensa LX6) esp-image.
                     // Requires --arch=xtensa --freestanding — validated after
@@ -5091,7 +5111,18 @@ fn main() {
                     // board that does not boot, diagnosed over ~2-minute flash
                     // cycles with no JTAG. Unknown targets hit the loud error
                     // below rather than being silently ignored.
-                    machine_target = 1
+                    tgt_kind = 5
+                } else if str_eq_full(tgt_str, "none") != 0 {
+                    // Bare metal: no operating system. Forces freestanding
+                    // (main's prologue/epilogue only emit OS startup/exit code
+                    // when freestanding == 0, ir.kr:13084 and :13405) so
+                    // --target=none alone is enough — the user does not also
+                    // have to pass --freestanding. Lowering for target_os == 4
+                    // beyond this flag surface is later work; this only
+                    // records the value and refuses combinations that are
+                    // nonsense today (fat-binary slice, esp32, lkm/android
+                    // emit modes).
+                    tgt_kind = 6
                 } else {
                     // Unknown --target=: fail loud. Previously this fell off the
                     // if-chain and was SILENTLY IGNORED, so a typo (or a
@@ -5099,9 +5130,45 @@ fn main() {
                     // with no warning at all. Mirrors the existing behaviour for
                     // an unknown --arch, and matches the project rule of loud
                     // failure over silently emitting the wrong thing.
-                    uint64 tgt_err = "error: unknown --target= value (expected: linux, macos/darwin, windows/win, android, esp32)\n"
+                    uint64 tgt_err = "error: unknown --target= value (expected: linux, macos/darwin, windows/win, android, esp32, none)\n"
                     write(2, tgt_err, str_len(tgt_err))
                     exit(1)
+                }
+
+                // A second, different --target= is a conflict, not last-wins.
+                // Verified broken before this check existed: --target=esp32
+                // composed silently with a preceding OS name (or --target=
+                // none), each order building byte-identical to plain esp32
+                // with the other flag's value swallowed with no warning.
+                if target_arg_seen != 0 && target_arg_kind != tgt_kind {
+                    uint64 tc_msg1 = "error: conflicting --target= values: '"
+                    write(2, tc_msg1, str_len(tc_msg1))
+                    write(2, target_arg_str, str_len(target_arg_str))
+                    uint64 tc_msg2 = "' and '"
+                    write(2, tc_msg2, str_len(tc_msg2))
+                    write(2, tgt_str, str_len(tgt_str))
+                    uint64 tc_msg3 = "' - pass --target= once\n"
+                    write(2, tc_msg3, str_len(tc_msg3))
+                    exit(1)
+                }
+                target_arg_seen = 1
+                target_arg_kind = tgt_kind
+                target_arg_str = tgt_str
+
+                if tgt_kind == 1 {
+                    target_os = 0
+                } else if tgt_kind == 2 {
+                    target_os = 1
+                } else if tgt_kind == 3 {
+                    target_os = 2
+                } else if tgt_kind == 4 {
+                    target_os = 3
+                    emit_mode = 4
+                } else if tgt_kind == 5 {
+                    machine_target = 1
+                } else if tgt_kind == 6 {
+                    target_os = 4
+                    freestanding = 1
                 }
             } else if str_starts_with(arg, "--help", 6) != 0 || str_eq_full(arg, "-h") != 0 {
                 write(1, "usage: krc [options] <file.kr> [-o output]\n", 43)
@@ -5112,7 +5179,7 @@ fn main() {
 
                 write(1, "output:\n", 8)
                 write(1, "  --arch=x86_64|arm64|riscv32|xtensa   single-arch binary (no fat-binary wrap)\n", 79)
-                uint64 tgt_help = "  --target=linux|macos|windows|android|esp32   single-target binary\n"
+                uint64 tgt_help = "  --target=linux|macos|windows|android|esp32|none   single-target binary\n"
                 write(1, tgt_help, str_len(tgt_help))
                 write(1, "  --targets=<list>          custom fat binary subset\n", 53)
                 write(1, "                              e.g. linux-x64,macos-arm64,win-x64\n", 65)
@@ -5249,6 +5316,23 @@ fn main() {
     if emit_mode == 4 && target_os == 0 { target_os = 3 }
     // emit_mode=4 (android): default to arm64 unless --arch was explicitly set
     if emit_mode == 4 && arch_set == 0 { arch = 1 }
+
+    // --target=none is a bare-metal image: no kernel to load a loadable
+    // kernel module into, no Android runtime to host an APK payload. Refuse
+    // both explicitly rather than emitting a container that nothing on that
+    // target can ever load.
+    if target_os == 4 {
+        if emit_mode == 7 {
+            uint64 lkm_msg = "error: --emit=lkm conflicts with --target=none: a loadable kernel module has no kernel to load into\n"
+            write(2, lkm_msg, str_len(lkm_msg))
+            exit(1)
+        }
+        if emit_mode == 4 {
+            uint64 and_msg = "error: --emit=android conflicts with --target=none: android is an OS target, not a bare-metal one\n"
+            write(2, and_msg, str_len(and_msg))
+            exit(1)
+        }
+    }
 
     // --target=esp32 is only meaningful on the xtensa freestanding ELF path
     // (arch 3, emit_mode 0). Any other combination is a hard error — loud-fail

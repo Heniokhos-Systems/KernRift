@@ -194,7 +194,8 @@ static uint64 str_fixups = 0
 static uint64 str_fixup_count = 0
 static uint64 str_fixup_cap = 0
 
-// Target OS: 0=linux, 1=macos, 2=windows
+// Target OS: 0=linux, 1=macos, 2=windows, 3=android, 4=none (bare metal,
+// --target=none; no operating system, always paired with freestanding=1)
 static uint64 target_os = 0
 // Active target arch: 0 = x86_64, 1 = arm64. Settable from main.kr
 // via set_target_arch so ir.kr's get_arch_id lowering can pick the

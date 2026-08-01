@@ -7973,6 +7973,51 @@ else
 fi
 rm -f "$ESP_T_BIN"
 
+echo ""
+echo "--- --target=none flag surface ---"
+TN_SRC="/tmp/krc_tnone_$$.kr"
+printf 'fn main() { loop { } }\n' > "$TN_SRC"
+
+# 1. Accepted on all four arches.
+for A in x86_64 arm64 riscv32 xtensa; do
+    TOTAL=$((TOTAL + 1))
+    if $KRC --arch=$A --target=none "$TN_SRC" -o /tmp/krc_tnone_bin_$$ >/dev/null 2>&1; then
+        PASS=$((PASS + 1)); echo "  target_none_accepted_$A: PASS"
+    else
+        echo "FAIL: target_none_accepted_$A"; FAIL=$((FAIL + 1))
+    fi
+done
+
+# 2. Cannot be a fat-binary slice: no runner extracts it, no OS execs it.
+TOTAL=$((TOTAL + 1))
+TN_ERR=$($KRC --targets=linux-x64,none "$TN_SRC" -o /tmp/krc_tnone_bin_$$ 2>&1); TN_ST=$?
+if [ "$TN_ST" != "0" ] && echo "$TN_ERR" | grep -q "cannot appear in a fat binary"; then
+    PASS=$((PASS + 1)); echo "  target_none_refused_in_fat: PASS"
+else
+    echo "FAIL: target_none_refused_in_fat (exit $TN_ST: '$TN_ERR')"; FAIL=$((FAIL + 1))
+fi
+
+# 3. --target=esp32 already implies bare metal; composing must not be silent.
+TOTAL=$((TOTAL + 1))
+TN_ERR=$($KRC --arch=xtensa --target=none --target=esp32 "$TN_SRC" -o /tmp/krc_tnone_bin_$$ 2>&1); TN_ST=$?
+if [ "$TN_ST" != "0" ] && echo "$TN_ERR" | grep -q "conflicting --target"; then
+    PASS=$((PASS + 1)); echo "  target_none_esp32_conflict: PASS"
+else
+    echo "FAIL: target_none_esp32_conflict (exit $TN_ST: '$TN_ERR')"; FAIL=$((FAIL + 1))
+fi
+
+# 4. Contradictory emit modes.
+for M in lkm android; do
+    TOTAL=$((TOTAL + 1))
+    TN_ERR=$($KRC --arch=x86_64 --target=none --emit=$M "$TN_SRC" -o /tmp/krc_tnone_bin_$$ 2>&1); TN_ST=$?
+    if [ "$TN_ST" != "0" ] && echo "$TN_ERR" | grep -q "target=none"; then
+        PASS=$((PASS + 1)); echo "  target_none_refuses_emit_$M: PASS"
+    else
+        echo "FAIL: target_none_refuses_emit_$M (exit $TN_ST: '$TN_ERR')"; FAIL=$((FAIL + 1))
+    fi
+done
+rm -f "$TN_SRC" /tmp/krc_tnone_bin_$$
+
 # --- esp32 .bss zero-loop bounds -------------------------------------------
 # The entry preamble zeroes [bss_lo, bss_hi) from two literal-pool words that
 # main.kr patches at finalize time. esp32_startup_stub greps the six WDT
