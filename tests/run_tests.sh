@@ -9627,6 +9627,86 @@ for GOOD in elf elf-arm64 elf-x86_64 elfexe linux linux-x86_64 linux-arm64 linux
 done
 rm -f "$EV_SRC" "$EV_BIN"
 
+# --- syscall_raw number register per ARM64 ABI (artifact inspection) ---
+# aarch64 takes the syscall number in x8 on Linux/Android and in x16 on
+# Darwin. Both facts already lived in emit_a64_syscall_nr(), but the IR
+# backend's IR_SYSCALL_RAW handler hardcoded x8, so every syscall_raw() in
+# a macOS arm64 binary executed `svc #0x80` with a stale x16 and the kernel
+# answered EINVAL(22) to all of them — getpid, write and mprotect alike.
+# std/alloc.kr's guard probe then correctly concluded nothing behaved like
+# mprotect and declined guard pages, which is how it surfaced (macOS ARM64
+# smoke.alloc_guard exit 4). Nothing that runs on this host can see that:
+# the check has to be made against the emitted bytes.
+#
+# Decode: `svc #0x80` is 0xD4001001 and `svc #0` is 0xD4000001; the word
+# before each one is the instruction that loads the number register, whose
+# Rd is its low 5 bits. Asserting "no svc is preceded by a write to the
+# WRONG register" (rather than pattern-matching one encoding) survives
+# register allocation and MOVZ-vs-MOV differences.
+echo ""
+echo "--- ARM64 syscall_raw number register ---"
+SR_SRC=/tmp/krc_sysreg_$$.kr
+SR_BIN=/tmp/krc_sysreg_bin_$$
+cat > "$SR_SRC" <<'SREOF'
+fn main() {
+    u64 msg = "x\n"
+    syscall_raw(4, 1, msg, 2, 0, 0, 0)
+    exit(0)
+}
+SREOF
+# $1 = binary, $2 = svc word (big-endian hex), $3 = required Rd,
+# $4 = forbidden Rd. Prints "<good> <bad> <total>".
+sysreg_scan() {
+    xxd -p -c 4 "$1" | awk -v svc="$2" -v want="$3" -v bad="$4" '
+        BEGIN { for (i = 0; i < 16; i++) h[sprintf("%x", i)] = i }
+        {
+            # xxd -p -c 4 emits file order; ARM64 is little-endian.
+            w = substr($0,7,2) substr($0,5,2) substr($0,3,2) substr($0,1,2)
+            if (w == svc && NR > 1) {
+                rd = (h[substr(prev,7,1)] * 16 + h[substr(prev,8,1)]) % 32
+                total++
+                if (rd == want) good++
+                if (rd == bad) badcnt++
+            }
+            prev = w
+        }
+        END { printf "%d %d %d\n", good+0, badcnt+0, total+0 }'
+}
+# macOS arm64: number in x16, `svc #0x80`.
+TOTAL=$((TOTAL + 1))
+if $KRC --arch=arm64 --emit=macho "$SR_SRC" -o "$SR_BIN" >/dev/null 2>&1; then
+    read -r SR_GOOD SR_BAD SR_TOT <<EOF
+$(sysreg_scan "$SR_BIN" d4001001 16 8)
+EOF
+    if [ "$SR_BAD" = "0" ] && [ "${SR_GOOD:-0}" -ge 1 ]; then
+        PASS=$((PASS + 1))
+        echo "  arm64_syscall_nr_macos_x16: PASS ($SR_GOOD/$SR_TOT svc sites load x16, 0 load x8)"
+    else
+        echo "FAIL: arm64_syscall_nr_macos_x16 ($SR_BAD of $SR_TOT svc #0x80 sites take the number from x8; Darwin reads x16)"
+        FAIL=$((FAIL + 1))
+    fi
+else
+    echo "FAIL: arm64_syscall_nr_macos_x16 (compile failed)"; FAIL=$((FAIL + 1))
+fi
+# Linux arm64: number in x8, `svc #0`. The same check the other way round,
+# so a fix aimed at Darwin cannot quietly break the Linux table.
+TOTAL=$((TOTAL + 1))
+if $KRC --arch=arm64 "$SR_SRC" -o "$SR_BIN" >/dev/null 2>&1; then
+    read -r SR_GOOD SR_BAD SR_TOT <<EOF
+$(sysreg_scan "$SR_BIN" d4000001 8 16)
+EOF
+    if [ "$SR_BAD" = "0" ] && [ "${SR_GOOD:-0}" -ge 1 ]; then
+        PASS=$((PASS + 1))
+        echo "  arm64_syscall_nr_linux_x8: PASS ($SR_GOOD/$SR_TOT svc sites load x8, 0 load x16)"
+    else
+        echo "FAIL: arm64_syscall_nr_linux_x8 ($SR_BAD of $SR_TOT svc #0 sites take the number from x16; Linux reads x8)"
+        FAIL=$((FAIL + 1))
+    fi
+else
+    echo "FAIL: arm64_syscall_nr_linux_x8 (compile failed)"; FAIL=$((FAIL + 1))
+fi
+rm -f "$SR_SRC" "$SR_BIN"
+
 # --- Summary ---
 echo ""
 echo "=== Results: $PASS/$TOTAL passed, $FAIL failed ==="
