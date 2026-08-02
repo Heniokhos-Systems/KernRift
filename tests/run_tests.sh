@@ -8487,6 +8487,322 @@ for A in riscv32 xtensa; do
 done
 rm -rf "$AU_D"
 
+# --- --target=none @builtin_override providers ------------------------------
+#
+# Everything above this point REFUSES. This block is where bare-metal code
+# first gets to do something: std/uart_16550.kr and std/uart_pl011.kr supply
+# `write`, std/heap_bump.kr supplies `alloc`/`dealloc`, and importing one is
+# the whole of the user-visible change.
+#
+# `println` is ITS OWN BUILTIN (src/ir.kr) emitting IR_ALLOC + IR_SYSCALL
+# directly -- it does not call the `write` builtin. So an `@builtin_override
+# fn write` does not reroute it on its own, and a stdlib-only version of this
+# work would ship permanently red. The routing lives in the compiler: under
+# target_os == 4 the print/println/print_str/println_str lowerings resolve
+# their output through the same override lookup `write` uses, so one provider
+# serves all four plus `write` itself.
+#
+# THE ASSERTIONS ARE ON THE ARTIFACT AND ON THE IR, NEVER ON EXIT CODE ALONE.
+# A bare-metal image cannot be run here, and "krc exited 0" is satisfied by a
+# compiler that quietly emitted nothing at all. Three independent legs:
+#   * --emit=ir: `main` must contain a `call` and NO `syscall` and NO `alloc`.
+#     Arch-neutral and decisive -- it names the mechanism, not a side effect.
+#   * objdump (x86_64): the bytes must contain `out %al,(%dx)`, i.e. the UART
+#     store itself, absent from the same program built without the print.
+#   * size: the import-only build must be SMALLER, i.e. DCE really did prune
+#     the provider when nothing reached it, so its presence above is caused by
+#     the print and is not the seed keeping it alive unconditionally.
+echo ""
+echo "--- --target=none @builtin_override providers ---"
+#
+# The test programs live in a directory INSIDE the repo and import
+# "../std/...": imports resolve relative to the importing file's own
+# directory, then against the INSTALLED stdlib. A program in /tmp importing
+# "std/uart_16550.kr" would therefore either fail to resolve or silently pick
+# up whatever ~/.local/share/kernrift/std happens to contain, which is not the
+# tree under test.
+PV_D=$(mktemp -d "$DIR/../krc_pv_XXXXXX")
+# Raw compiler binary, not $KRC: under `make test` $KRC is a wrapper that
+# injects --arch=x86_64 ahead of every argument (Makefile), and the --arch and
+# --target combinations below have to be exactly what is written here.
+if [ -f "$DIR/../build/krc2" ]; then
+    PV_KRC=$(cd "$DIR/../build" && pwd)/krc2
+elif [ -f "$DIR/../build/krc3" ]; then
+    PV_KRC=$(cd "$DIR/../build" && pwd)/krc3
+else
+    PV_KRC=""
+fi
+
+pv_mod() {
+    if [ "$1" = "x86_64" ]; then echo "../std/uart_16550.kr"; else echo "../std/uart_pl011.kr"; fi
+}
+
+# Each of the four print builtins, plus write() itself, must reach the
+# provider. They are separate lowerings with separate syscall sites; covering
+# only println would leave three of them refusing.
+for A in x86_64 arm64; do
+    PV_M=$(pv_mod "$A")
+    pv_i=0
+    for PV_CALL in 'println("hi", 7)' 'print("hi", 7)' 'println_str("hi")' 'print_str("hi")' 'write(1, "hi", 2)'; do
+        pv_i=$((pv_i + 1))
+        TOTAL=$((TOTAL + 1))
+        printf 'import "%s"\nfn main() {\n    %s\n    loop { }\n}\n' "$PV_M" "$PV_CALL" > "$PV_D/r.kr"
+        rm -f "$PV_D/r.out"
+        PV_ERR=$("$PV_KRC" --arch=$A --target=none "$PV_D/r.kr" -o "$PV_D/r.out" 2>&1); PV_ST=$?
+        PV_IR=$("$PV_KRC" --arch=$A --target=none --emit=ir "$PV_D/r.kr" 2>&1)
+        if [ "$PV_ST" != "0" ] || [ ! -f "$PV_D/r.out" ]; then
+            echo "FAIL: provider_route_${pv_i}_$A (exit $PV_ST, no artifact: '$PV_ERR')"; FAIL=$((FAIL + 1))
+        elif echo "$PV_IR" | grep -q "syscall"; then
+            echo "FAIL: provider_route_${pv_i}_$A (IR still contains a syscall -- the lowering was not rerouted)"; FAIL=$((FAIL + 1))
+        elif echo "$PV_IR" | grep -q "= alloc"; then
+            echo "FAIL: provider_route_${pv_i}_$A (IR still contains IR_ALLOC -- the formatting buffer is still a heap call)"; FAIL=$((FAIL + 1))
+        elif ! echo "$PV_IR" | grep -q "call @"; then
+            echo "FAIL: provider_route_${pv_i}_$A (IR contains no call -- nothing reaches the provider)"; FAIL=$((FAIL + 1))
+        else
+            PASS=$((PASS + 1)); echo "  provider_route_${pv_i}_$A: PASS"
+        fi
+        rm -f "$PV_D/r.out"
+    done
+done
+
+# DCE (R3). The provider is reached ONLY through override resolution during IR
+# lowering; dce_scan runs on the AST and cannot see that edge, so without an
+# explicit seed the body is pruned and the call resolves to nothing. Proven
+# both ways: present when a print reaches it, ABSENT when nothing does. The
+# second half is what stops the first being satisfied by a seed that keeps
+# every override alive regardless.
+for A in x86_64 arm64; do
+    PV_M=$(pv_mod "$A")
+    TOTAL=$((TOTAL + 1))
+    printf 'import "%s"\nfn main() {\n    loop { }\n}\n' "$PV_M" > "$PV_D/n.kr"
+    printf 'import "%s"\nfn main() {\n    println("hi")\n    loop { }\n}\n' "$PV_M" > "$PV_D/y.kr"
+    rm -f "$PV_D/n.out" "$PV_D/y.out"
+    "$PV_KRC" --arch=$A --target=none "$PV_D/n.kr" -o "$PV_D/n.out" >/dev/null 2>&1
+    "$PV_KRC" --arch=$A --target=none "$PV_D/y.kr" -o "$PV_D/y.out" >/dev/null 2>&1
+    if [ ! -f "$PV_D/n.out" ] || [ ! -f "$PV_D/y.out" ]; then
+        echo "FAIL: provider_dce_$A (one of the two builds produced no artifact)"; FAIL=$((FAIL + 1))
+    else
+        PV_NS=$(wc -c < "$PV_D/n.out"); PV_YS=$(wc -c < "$PV_D/y.out")
+        if [ "$PV_YS" -gt "$PV_NS" ]; then
+            PASS=$((PASS + 1)); echo "  provider_dce_$A: PASS (import-only $PV_NS B, with println $PV_YS B)"
+        else
+            echo "FAIL: provider_dce_$A (println pulled in no provider body: $PV_NS B vs $PV_YS B)"; FAIL=$((FAIL + 1))
+        fi
+    fi
+done
+
+# The bytes themselves. objdump is x86_64-only on a stock binutils, and that
+# is enough: it is the leg that proves the artifact contains the actual UART
+# store rather than merely "some call". Asserted in BOTH directions so a
+# disassembler that silently prints nothing cannot pass it.
+TOTAL=$((TOTAL + 1))
+if command -v objdump >/dev/null 2>&1; then
+    PV_HAS=$(objdump -D -b binary -m i386:x86-64 "$PV_D/y.out" 2>/dev/null | grep -c "out    %al,(%dx)")
+    printf 'import "../std/uart_16550.kr"\nfn main() {\n    loop { }\n}\n' > "$PV_D/n86.kr"
+    printf 'import "../std/uart_16550.kr"\nfn main() {\n    println("hi")\n    loop { }\n}\n' > "$PV_D/y86.kr"
+    rm -f "$PV_D/n86.out" "$PV_D/y86.out"
+    "$PV_KRC" --arch=x86_64 --target=none "$PV_D/n86.kr" -o "$PV_D/n86.out" >/dev/null 2>&1
+    "$PV_KRC" --arch=x86_64 --target=none "$PV_D/y86.kr" -o "$PV_D/y86.out" >/dev/null 2>&1
+    PV_HAS=$(objdump -D -b binary -m i386:x86-64 "$PV_D/y86.out" 2>/dev/null | grep -c "out    %al,(%dx)")
+    PV_NOT=$(objdump -D -b binary -m i386:x86-64 "$PV_D/n86.out" 2>/dev/null | grep -c "out    %al,(%dx)")
+    if [ "$PV_HAS" -ge 1 ] && [ "$PV_NOT" = "0" ]; then
+        PASS=$((PASS + 1)); echo "  provider_uart_store_in_bytes: PASS ($PV_HAS out instructions, 0 without the println)"
+    else
+        echo "FAIL: provider_uart_store_in_bytes (with println: $PV_HAS, without: $PV_NOT)"; FAIL=$((FAIL + 1))
+    fi
+else
+    echo "FAIL: provider_uart_store_in_bytes (objdump not installed -- this leg is the artifact proof, not an optional extra)"
+    FAIL=$((FAIL + 1))
+fi
+
+# Omitting the import must still refuse, and the refusal must NAME WHAT TO
+# IMPORT. Checked to the final character: a hand-counted write() length would
+# truncate the module names off the end, which is precisely the half of the
+# message that makes it actionable.
+for PV_B in println print println_str print_str write; do
+    TOTAL=$((TOTAL + 1))
+    case "$PV_B" in
+        write) PV_C='sink = write(1, "x", 1)' ;;
+        print_str|println_str) PV_C="$PV_B(\"x\")" ;;
+        *) PV_C="$PV_B(1)" ;;
+    esac
+    printf 'static uint64 sink = 0\nfn main() {\n    %s\n    loop { }\n}\n' "$PV_C" > "$PV_D/no.kr"
+    rm -f "$PV_D/no.out"
+    PV_ERR=$("$PV_KRC" --arch=x86_64 --target=none "$PV_D/no.kr" -o "$PV_D/no.out" 2>&1); PV_ST=$?
+    if [ "$PV_ST" = "0" ] || [ -f "$PV_D/no.out" ]; then
+        echo "FAIL: provider_missing_refuses_$PV_B (compiled with no provider)"; FAIL=$((FAIL + 1))
+    elif ! echo "$PV_ERR" | grep -q "error: --target=none: '$PV_B' is not available on bare metal"; then
+        echo "FAIL: provider_missing_refuses_$PV_B (refusal does not name '$PV_B': '$PV_ERR')"; FAIL=$((FAIL + 1))
+    elif ! echo "$PV_ERR" | grep -q 'import "std/uart_16550.kr" (x86_64 COM1) or "std/uart_pl011.kr" (arm64 PL011), or drop the call$'; then
+        echo "FAIL: provider_missing_refuses_$PV_B (refusal does not name what to import: '$PV_ERR')"; FAIL=$((FAIL + 1))
+    else
+        PASS=$((PASS + 1)); echo "  provider_missing_refuses_$PV_B: PASS"
+    fi
+    rm -f "$PV_D/no.out"
+done
+
+# heap_bump: alloc/dealloc through the same mechanism. The IR must show a call
+# and no IR_ALLOC/IR_DEALLOC -- an alloc that stayed an IR_ALLOC is an mmap
+# that the emitter guard would then refuse.
+for A in x86_64 arm64; do
+    TOTAL=$((TOTAL + 1))
+    cat > "$PV_D/hb.kr" <<'PVEOF'
+import "../std/heap_bump.kr"
+fn main() {
+    heap_bump_init(0x200000, 0x100000)
+    uint64 p = alloc(64)
+    store64(p, 7)
+    dealloc(p)
+    loop { }
+}
+PVEOF
+    rm -f "$PV_D/hb.out"
+    PV_ERR=$("$PV_KRC" --arch=$A --target=none "$PV_D/hb.kr" -o "$PV_D/hb.out" 2>&1); PV_ST=$?
+    PV_IR=$("$PV_KRC" --arch=$A --target=none --emit=ir "$PV_D/hb.kr" 2>&1)
+    if [ "$PV_ST" != "0" ] || [ ! -f "$PV_D/hb.out" ]; then
+        echo "FAIL: provider_heap_bump_$A (exit $PV_ST: '$PV_ERR')"; FAIL=$((FAIL + 1))
+    elif echo "$PV_IR" | grep -qE "= alloc|dealloc v"; then
+        echo "FAIL: provider_heap_bump_$A (IR still contains IR_ALLOC/IR_DEALLOC)"; FAIL=$((FAIL + 1))
+    else
+        PASS=$((PASS + 1)); echo "  provider_heap_bump_$A: PASS"
+    fi
+    rm -f "$PV_D/hb.out"
+done
+
+# Both providers in one program: a UART for output and a bump heap for
+# storage is the shape a real bare-metal program has, and nothing about
+# registering two overrides may interfere with either.
+for A in x86_64 arm64; do
+    PV_M=$(pv_mod "$A")
+    TOTAL=$((TOTAL + 1))
+    printf 'import "%s"\nimport "../std/heap_bump.kr"\nfn main() {\n    heap_bump_init(0x200000, 0x100000)\n    uint64 p = alloc(32)\n    store64(p, 5)\n    println("v=", load64(p))\n    dealloc(p)\n    loop { }\n}\n' "$PV_M" > "$PV_D/both.kr"
+    rm -f "$PV_D/both.out"
+    PV_ERR=$("$PV_KRC" --arch=$A --target=none "$PV_D/both.kr" -o "$PV_D/both.out" 2>&1); PV_ST=$?
+    if [ "$PV_ST" = "0" ] && [ -f "$PV_D/both.out" ]; then
+        PASS=$((PASS + 1)); echo "  provider_uart_plus_heap_$A: PASS"
+    else
+        echo "FAIL: provider_uart_plus_heap_$A (exit $PV_ST: '$PV_ERR')"; FAIL=$((FAIL + 1))
+    fi
+    rm -f "$PV_D/both.out"
+done
+
+# Import order must not matter. The risk is real and specific: a module that
+# calls println and is PARSED BEFORE the provider module would see no
+# registration yet if the routing decision were made during parsing. It is
+# made during lowering, after every file is parsed, and this pins that.
+cat > "$PV_D/user_mod.kr" <<'PVEOF'
+fn greet_twice() {
+    println("from the other module")
+    print_str("and again\n")
+}
+PVEOF
+for A in x86_64 arm64; do
+    PV_M=$(pv_mod "$A")
+    for PV_ORDER in first last; do
+        TOTAL=$((TOTAL + 1))
+        if [ "$PV_ORDER" = "first" ]; then
+            printf 'import "%s"\nimport "user_mod.kr"\nfn main() {\n    greet_twice()\n    loop { }\n}\n' "$PV_M" > "$PV_D/ord.kr"
+        else
+            printf 'import "user_mod.kr"\nimport "%s"\nfn main() {\n    greet_twice()\n    loop { }\n}\n' "$PV_M" > "$PV_D/ord.kr"
+        fi
+        rm -f "$PV_D/ord.out"
+        PV_ERR=$("$PV_KRC" --arch=$A --target=none "$PV_D/ord.kr" -o "$PV_D/ord.out" 2>&1); PV_ST=$?
+        if [ "$PV_ST" = "0" ] && [ -f "$PV_D/ord.out" ]; then
+            PASS=$((PASS + 1)); echo "  provider_import_order_${PV_ORDER}_$A: PASS"
+        else
+            echo "FAIL: provider_import_order_${PV_ORDER}_$A (exit $PV_ST: '$PV_ERR')"; FAIL=$((FAIL + 1))
+        fi
+        rm -f "$PV_D/ord.out"
+    done
+done
+
+# HOSTED BUILDS MUST NOT MOVE. The routing is keyed on target_os == 4, so a
+# hosted program that defines `@builtin_override fn write` must keep println
+# on the syscall path (otherwise every hosted program that overrides write
+# silently loses its output) while `write()` itself still resolves to the
+# override. This one CAN be run, so it is: the assertion is on observed
+# stdout and on the override's return value, not on the artifact.
+TOTAL=$((TOTAL + 1))
+cat > "$PV_D/hosted.kr" <<'PVEOF'
+@builtin_override
+fn write(uint64 fd, uint64 buf, uint64 len) -> uint64 {
+    return 99
+}
+fn main() {
+    println("HOSTEDOK")
+    uint64 r = write(1, "zz", 2)
+    if r != 99 { exit(1) }
+    exit(0)
+}
+PVEOF
+rm -f "$PV_D/hosted.out"
+if "$PV_KRC" --arch=$ARCH "$PV_D/hosted.kr" -o "$PV_D/hosted.out" >/dev/null 2>&1 \
+   && chmod +x "$PV_D/hosted.out" \
+   && [ "$("$PV_D/hosted.out" 2>/dev/null)" = "HOSTEDOK" ]; then
+    PASS=$((PASS + 1)); echo "  provider_hosted_undisturbed: PASS"
+else
+    echo "FAIL: provider_hosted_undisturbed (hosted println lost its output, or the override was not called)"
+    FAIL=$((FAIL + 1))
+fi
+rm -f "$PV_D/hosted.out"
+
+# --legacy and --emit=obj never call ir_lower_expr: they have their own
+# builtin dispatch in src/codegen.kr / src/codegen_aarch64.kr, so the routing
+# added to the IR lowering misses them BY CONSTRUCTION. That is the failure
+# shape this sub-project has already shipped twice. It must therefore refuse
+# in a way that says so, rather than falling through to the generic
+# "SYSCALL reached the emitter" backstop, which names the wrong builtin
+# (println reported 'print') and gives no remedy.
+for PV_FLAG in --legacy --emit=obj; do
+    for A in x86_64 arm64; do
+        for PV_B in println print println_str print_str; do
+            TOTAL=$((TOTAL + 1))
+            PV_M=$(pv_mod "$A")
+            case "$PV_B" in
+                print_str|println_str) PV_C="$PV_B(\"x\")" ;;
+                *) PV_C="$PV_B(1)" ;;
+            esac
+            printf 'import "%s"\nfn main() {\n    %s\n    loop { }\n}\n' "$PV_M" "$PV_C" > "$PV_D/lg.kr"
+            rm -f "$PV_D/lg.out"
+            PV_ERR=$("$PV_KRC" $PV_FLAG --arch=$A --target=none "$PV_D/lg.kr" -o "$PV_D/lg.out" 2>&1); PV_ST=$?
+            PV_TAG=$(echo "$PV_FLAG" | tr -d '-' | tr '=' '_')
+            if [ "$PV_ST" = "0" ] || [ -f "$PV_D/lg.out" ]; then
+                echo "FAIL: provider_legacy_${PV_B}_${PV_TAG}_$A (compiled -- the legacy backend does not route to the provider, so it must refuse)"
+                FAIL=$((FAIL + 1))
+            elif echo "$PV_ERR" | grep -q "reached the emitter"; then
+                echo "FAIL: provider_legacy_${PV_B}_${PV_TAG}_$A (generic choke-point message -- the legacy lowering has no --target=none arm)"
+                FAIL=$((FAIL + 1))
+            elif ! echo "$PV_ERR" | grep -q "error: --target=none: '$PV_B' is not available on bare metal"; then
+                echo "FAIL: provider_legacy_${PV_B}_${PV_TAG}_$A (refusal does not name '$PV_B': '$PV_ERR')"
+                FAIL=$((FAIL + 1))
+            elif ! echo "$PV_ERR" | grep -q "drop --legacy / --emit=obj"; then
+                echo "FAIL: provider_legacy_${PV_B}_${PV_TAG}_$A (refusal does not say the IR backend supports it: '$PV_ERR')"
+                FAIL=$((FAIL + 1))
+            else
+                PASS=$((PASS + 1)); echo "  provider_legacy_${PV_B}_${PV_TAG}_$A: PASS"
+            fi
+            rm -f "$PV_D/lg.out"
+        done
+        # write/alloc/dealloc DO work on the legacy backends: their override
+        # gate predates this task (is_extern_call in the legacy dispatch), and
+        # this pins it so the refusal added above cannot be widened by
+        # accident into "no bare-metal legacy build works at all".
+        TOTAL=$((TOTAL + 1))
+        PV_M=$(pv_mod "$A")
+        printf 'import "%s"\nimport "../std/heap_bump.kr"\nstatic uint64 sink = 0\nfn main() {\n    heap_bump_init(0x200000, 0x100000)\n    sink = write(1, "x", 1)\n    uint64 p = alloc(16)\n    dealloc(p)\n    loop { }\n}\n' "$PV_M" > "$PV_D/lgw.kr"
+        rm -f "$PV_D/lgw.out"
+        PV_ERR=$("$PV_KRC" $PV_FLAG --arch=$A --target=none "$PV_D/lgw.kr" -o "$PV_D/lgw.out" 2>&1); PV_ST=$?
+        PV_TAG=$(echo "$PV_FLAG" | tr -d '-' | tr '=' '_')
+        if [ "$PV_ST" = "0" ] && [ -f "$PV_D/lgw.out" ]; then
+            PASS=$((PASS + 1)); echo "  provider_legacy_write_alloc_${PV_TAG}_$A: PASS"
+        else
+            echo "FAIL: provider_legacy_write_alloc_${PV_TAG}_$A (exit $PV_ST: '$PV_ERR')"; FAIL=$((FAIL + 1))
+        fi
+        rm -f "$PV_D/lgw.out"
+    done
+done
+rm -rf "$PV_D"
+
 # --- compile-time constants must not report Linux under --target=none ------
 #
 # THESE TESTS INSPECT THE ARTIFACT. THEY NEVER RUN IT. Under --target=none

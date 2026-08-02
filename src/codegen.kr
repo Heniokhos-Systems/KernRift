@@ -670,6 +670,25 @@ fn bare_metal_builtin_refused(uint64 name, uint64 fix) {
 fn bm_fix_io() -> uint64 {
     return "supply a bare-metal replacement with @builtin_override (a UART driver, say), or drop the call"
 }
+// The output family -- write, print, println, print_str, println_str -- all
+// resolve through ONE provider under --target=none, so they all give the same
+// advice, and it names the modules that already implement it rather than
+// leaving the reader to work out what an @builtin_override of `write` should
+// look like. The two names are the two the tree ships; a different board
+// means copying one of them, which the module headers say.
+fn bm_fix_write() -> uint64 {
+    return "supply `@builtin_override fn write(uint64 fd, uint64 buf, uint64 len) -> uint64` -- import \"std/uart_16550.kr\" (x86_64 COM1) or \"std/uart_pl011.kr\" (arm64 PL011), or drop the call"
+}
+// Same family, reached through the LEGACY backends (--legacy and --emit=obj),
+// which have their own builtin dispatch in this file and in
+// src/codegen_aarch64.kr and never call ir_lower_expr. The provider routing
+// lives in the IR lowering only, so these two flags cannot honour it, and
+// saying so is the whole value of the message: the generic emitter backstop
+// that used to catch these named the wrong builtin (println reported 'print')
+// and offered no remedy at all.
+fn bm_fix_write_legacy() -> uint64 {
+    return "the @builtin_override `write` provider is honoured by the IR backend only -- drop --legacy / --emit=obj and rebuild, or drop the call"
+}
 fn bm_fix_nofs() -> uint64 {
     return "a bare-metal image has no filesystem, so there is nothing for this builtin to act on"
 }
@@ -2665,6 +2684,34 @@ fn builtin_override_lookup(uint64 name_tok) -> uint64 {
         i = i + 1
     }
     return 0
+}
+
+// Return the DEFINITION token of the @builtin_override fn spelled `name`, or
+// 0xFFFFFFFF if no such override was registered.
+//
+// builtin_override_lookup answers a yes/no question about a call site's token;
+// this answers "which token names the definition", which is what a lowering
+// needs when it wants to CALL an override that the source it is lowering
+// never mentions. IR_CALL carries a token index that the fixup pass resolves
+// by comparing text against cg_source, so a synthesised name with no token
+// cannot be called at all -- the definition's own token is a real one and
+// resolves like any other.
+//
+// This is the mechanism behind bare-metal print: under --target=none the
+// print/println/print_str/println_str lowerings emit calls to the `write`
+// provider, and this is how they find it.
+@export
+fn builtin_override_tok_of(uint64 name, uint64 name_len) -> uint64 {
+    uint64 i = 0
+    while i < builtin_override_count {
+        uint64 entry = builtin_override_table + i * 8
+        uint32 stored_tok = 0
+        unsafe { *(entry as uint32) -> stored_tok }
+        uint64 ws = stored_tok
+        if tok_matches(ws, name, name_len) != 0 { return ws }
+        i = i + 1
+    }
+    return 0xFFFFFFFF
 }
 
 // Return the extern index for a given name_tok, or 0xFFFFFFFF if not extern.
@@ -6188,6 +6235,30 @@ fn gen_expr(uint64 node) {
         if is_extern_call == 0 && tok_matches(wct, "println", 7) != 0 || is_extern_call == 0 && tok_matches(wct, "print", 5) != 0 {
             uint64 pr_is_pln = 0
             if tok_matches(wct, "println", 7) != 0 { pr_is_pln = 1 }
+            // --target=none: the @builtin_override `write` routing that makes
+            // print/println work on bare metal lives in the IR lowering
+            // (src/ir.kr), which this backend never calls. Refuse HERE and say
+            // so. Without this arm the lowering below falls through to the
+            // Linux write(2) and the generic emitter backstop catches it --
+            // reporting "SYSCALL reached the emitter from 'print'" even for a
+            // println, with no remedy. Placed after the is_extern_call gate so
+            // a program that overrides println itself is unaffected.
+            //
+            // CONDITIONAL ON A PROVIDER EXISTING, deliberately. The advice
+            // this arm gives is "drop --legacy and the provider you supplied
+            // will be honoured", which is only true when there IS one. A
+            // program with no provider has nothing --legacy is failing to
+            // honour; it simply has no output on bare metal, and the generic
+            // emitter backstop is the right thing to catch it. Keeping that
+            // case at the backstop also keeps choke_point_names_print_str_
+            // legacy testing what it was written to test -- that the emitter
+            // guard names the builtin that reached it -- rather than having it
+            // deleted because a new arm got in front of it.
+            if target_os == 4 && builtin_override_tok_of("write", 5) != 0xFFFFFFFF {
+                uint64 bmlp = "print"
+                if pr_is_pln != 0 { bmlp = "println" }
+                bare_metal_builtin_refused(bmlp, bm_fix_write_legacy())
+            }
             // Reserve a 24-byte digit scratch INSIDE the frame (prologue
             // `sub rsp` is patched to the final var_frame_size at function end).
             // Using var_frame_size as the base put the buffer on saved rbx /
@@ -6485,6 +6556,15 @@ fn gen_expr(uint64 node) {
         if is_extern_call == 0 && tok_matches(wct, "print_str", 9) != 0 || tok_matches(wct, "println_str", 11) != 0 {
             uint64 is_println = 0
             if is_extern_call == 0 && tok_matches(wct, "println_str", 11) != 0 { is_println = 1 }
+            // --target=none: see the print/println arm above. Same reason,
+            // same remedy, same "only when a provider exists" gate; the
+            // backstop named 'print_str' for println_str, which is one of the
+            // things this arm fixes when it does fire.
+            if target_os == 4 && builtin_override_tok_of("write", 5) != 0xFFFFFFFF {
+                uint64 bmlps = "print_str"
+                if is_println != 0 { bmlps = "println_str" }
+                bare_metal_builtin_refused(bmlps, bm_fix_write_legacy())
+            }
             uint32 first_arg = ast_child(node)
             uint64 wfa = first_arg
             gen_expr(wfa)
@@ -11804,6 +11884,34 @@ fn dce_scan_node(uint64 node) {
         } else {
             // Regular call — add callee name to live set
             dce_add(wct)
+        }
+        // Under --target=none the print family is LOWERED TO CALLS of the
+        // @builtin_override `write` provider (src/ir.kr). That edge is created
+        // during IR lowering, which runs long after this AST scan, so nothing
+        // here can see it: a program whose only use of the provider is a
+        // println() would have the provider body pruned, and the IR_CALL would
+        // then resolve to a function that is not in the output. Same class of
+        // problem as the freestanding `_start` seed in src/main.kr, and the
+        // same fix -- seed the root explicitly.
+        //
+        // Seeded ONLY for a call that will actually be rerouted: gated on
+        // target_os == 4, on the callee really being one of the four print
+        // builtins, and on that name not being overridden itself (an
+        // @builtin_override fn println is a plain user call and reroutes
+        // nothing). A blanket "keep every override alive" seed would work too
+        // and would be wrong to write: it would make the artifact carry a
+        // driver for a program that never prints, and it would make the test
+        // that proves this seed is load-bearing pass vacuously.
+        if target_os == 4 && builtin_override_lookup(wct) == 0 {
+            uint64 dce_is_print = 0
+            if tok_matches(wct, "print", 5) != 0 { dce_is_print = 1 }
+            if tok_matches(wct, "println", 7) != 0 { dce_is_print = 1 }
+            if tok_matches(wct, "print_str", 9) != 0 { dce_is_print = 1 }
+            if tok_matches(wct, "println_str", 11) != 0 { dce_is_print = 1 }
+            if dce_is_print != 0 {
+                uint64 dce_wtok = builtin_override_tok_of("write", 5)
+                if dce_wtok != 0xFFFFFFFF { dce_add(dce_wtok) }
+            }
         }
     }
 

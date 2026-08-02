@@ -1294,6 +1294,215 @@ fn ir_is_pow2(uint64 v) -> uint64 {
     return k + 1
 }
 
+// ---------------------------------------------------------------------------
+// Bare-metal (--target=none) output routing
+// ---------------------------------------------------------------------------
+//
+// `write` is a builtin that lowers to a syscall, so under --target=none it is
+// refused and a program supplies a replacement with @builtin_override. That
+// mechanism already worked at 448a115: the whole builtin-matching chain is
+// skipped for registered names and the call falls through to a normal
+// IR_CALL.
+//
+// It does not, on its own, make a bare-metal program able to PRINT. `print`,
+// `println`, `print_str` and `println_str` are SEPARATE BUILTINS. Each one
+// emits its own IR_SYSCALL directly and none of them calls the `write`
+// builtin, so an override named `write` reroutes none of them and all four
+// keep refusing. That is why this task could not be stdlib-only.
+//
+// The four are rerouted here instead: under target_os == 4 they resolve their
+// output through the same override the `write` builtin does, and emit a CALL
+// to it. One provider therefore serves all five entry points and a program
+// needs nothing but the import.
+//
+// Two consequences follow from doing it in the lowering rather than in a
+// library, and both are deliberate:
+//
+//   * The formatting buffer stops being a heap allocation. The hosted
+//     lowering allocates 4096 bytes with IR_ALLOC, which is mmap/VirtualAlloc
+//     and is itself refused on bare metal -- so routing only the write would
+//     have moved the refusal from 'println' to 'alloc' and told the
+//     programmer to supply an allocator they do not need. The bare-metal path
+//     formats each argument into a 64-byte STACK scratch (IR_STACK_ADDR) and
+//     writes it out immediately, so importing a UART is genuinely sufficient
+//     and a heap is optional.
+//
+//   * Nesting is safe by construction. The scratch is per-function and
+//     reused, which would corrupt output if two prints could be live at once
+//     in one frame. They cannot: the scratch is only live between formatting
+//     ONE argument and writing it, and nothing is lowered in between. An
+//     inner println() in an outer println()'s argument list has completely
+//     finished before the outer touches the scratch again.
+//
+// LEGACY IS NOT COVERED, BY CONSTRUCTION. --legacy and --emit=obj have their
+// own builtin dispatch in src/codegen.kr and src/codegen_aarch64.kr and never
+// call ir_lower_expr. They refuse explicitly there (bm_fix_write_legacy)
+// rather than falling into the generic emitter backstop.
+
+// The 64-byte per-function scratch used to format one argument at a time.
+// 64 is comfortably above the widest thing that can be formatted into it:
+// IR_FMT_UINT writes at most 20 digits, and IR_FMT_F64 gives up at |x| >= 1e18
+// so its widest output is sign + 18 digits + '.' + 6 fraction digits = 26.
+//
+// Reserved lazily so a function that never prints pays nothing, and reserved
+// ONCE so a function with fifty printlns does not grow a 3 KB frame. The
+// ADDRESS is recomputed at each use with a fresh IR_STACK_ADDR rather than
+// holding one vreg across basic blocks -- an lea is cheaper than reasoning
+// about cross-block liveness of a frame pointer, and cannot be wrong.
+static uint64 ir_bm_scratch_off = 0xFFFFFFFF
+
+fn ir_bm_scratch_reserve() -> uint64 {
+    if ir_bm_scratch_off == 0xFFFFFFFF {
+        ir_bm_scratch_off = ir_stack_array_bytes
+        ir_stack_array_bytes = ir_stack_array_bytes + 64
+    }
+    return ir_bm_scratch_off
+}
+
+fn ir_bm_scratch_addr() -> uint64 {
+    uint64 off = ir_bm_scratch_reserve()
+    uint64 dest = ir_new_vreg()
+    ir_emit(IR_STACK_ADDR, dest, 0, 0, off, ir_current_bb)
+    return dest
+}
+
+// Intern `n` bytes of compiler-owned text as a string constant in the output
+// and return a vreg holding its address. Same storage the StrLit lowering
+// uses; this variant takes a pointer and a length because the bytes come from
+// the compiler (a separator, a newline) rather than from a source token.
+fn ir_bm_str_const(uint64 s, uint64 n) -> uint64 {
+    str_buf_ensure(str_len + n + 1)
+    uint64 str_offset = str_len
+    uint64 i = 0
+    while i < n {
+        uint64 sp = s + i
+        uint8 cb = 0
+        unsafe { *(sp as uint8) -> cb }
+        uint64 dp = str_buf + str_len
+        unsafe { *(dp as uint8) = cb }
+        str_len = str_len + 1
+        i = i + 1
+    }
+    uint64 zp = str_buf + str_len
+    uint8 zb = 0
+    unsafe { *(zp as uint8) = zb }
+    str_len = str_len + 1
+    uint64 dest = ir_new_vreg()
+    ir_emit(IR_STR_CONST, dest, 0, 0, str_offset, ir_current_bb)
+    return dest
+}
+
+// Emit `write(1, ptr, len)` as a call to the provider whose definition token
+// is `wtok`. fd is always 1: a board with one UART has one output, and the
+// providers in std/ ignore fd for exactly that reason.
+fn ir_bm_emit_write(uint64 wtok, uint64 ptr_v, uint64 len_v) {
+    uint64 fd_v = ir_new_vreg()
+    ir_emit(IR_CONST, fd_v, 0, 0, 1, ir_current_bb)
+    ir_emit(IR_ARG, 0, fd_v, 0, 0, ir_current_bb)
+    ir_emit(IR_ARG, 0, ptr_v, 0, 1, ir_current_bb)
+    ir_emit(IR_ARG, 0, len_v, 0, 2, ir_current_bb)
+    uint64 wr = ir_new_vreg()
+    ir_emit(IR_CALL, wr, 3, 0, wtok, ir_current_bb)
+}
+
+// Write `n` compiler-owned bytes (a separator, a newline).
+fn ir_bm_emit_write_lit(uint64 wtok, uint64 s, uint64 n) {
+    uint64 s_v = ir_bm_str_const(s, n)
+    uint64 n_v = ir_new_vreg()
+    ir_emit(IR_CONST, n_v, 0, 0, n, ir_current_bb)
+    ir_bm_emit_write(wtok, s_v, n_v)
+}
+
+// The definition token of the `write` provider, or 0xFFFFFFFF if the program
+// supplied none. Callers refuse on 0xFFFFFFFF; they must NOT fall back to the
+// syscall lowering, which is the whole point of --target=none.
+fn ir_bm_write_provider() -> uint64 {
+    return builtin_override_tok_of("write", 5)
+}
+
+// The bare-metal body of print()/println(). Mirrors the hosted lowering's
+// per-argument dispatch exactly -- same IR_FMT_* selection, same branchless
+// sign handling -- and differs only in where the bytes go: into the 64-byte
+// scratch and straight out through the provider, one argument at a time,
+// instead of accumulating into a 4096-byte heap buffer for a single write.
+//
+// The visible difference is that a bare-metal print is several UART writes
+// rather than one syscall. That is not a regression: a UART is a byte-at-a-
+// time device, so a single buffered write would have been decomposed into the
+// same byte loop inside the provider anyway.
+fn ir_lower_print_bare_metal(uint64 node, uint64 is_println, uint64 wtok) {
+    uint32 warg = ast_child(node)
+    uint64 first = 1
+    while warg != 0 {
+        if first == 0 {
+            ir_bm_emit_write_lit(wtok, " ", 1)
+        }
+        first = 0
+        uint32 arg_kind = ast_kind(warg)
+        if arg_kind == 31 || arg_kind == 50 {
+            // String literal or FString: already a pointer to bytes.
+            uint64 s_v = ir_lower_expr(warg)
+            uint64 slen_v = ir_new_vreg()
+            ir_emit(IR_STRLEN, slen_v, s_v, 0, 0, ir_current_bb)
+            ir_bm_emit_write(wtok, s_v, slen_v)
+        } else {
+            uint64 val_v = ir_lower_expr(warg)
+            // The scratch address is taken AFTER the argument is lowered:
+            // lowering it may itself print (a nested call), and that print
+            // uses the same scratch.
+            uint64 slot_v = ir_bm_scratch_addr()
+            uint64 len_v = ir_new_vreg()
+            uint64 fk = ir_vreg_fkind_get(val_v)
+            if fk == 1 {
+                ir_emit(IR_FMT_F64, len_v, slot_v, val_v, 0, ir_current_bb)
+            } else if fk == 2 {
+                uint64 f64v = ir_new_vreg()
+                ir_emit(IR_F32TOF64, f64v, val_v, 0, 0, ir_current_bb)
+                ir_vreg_fkind_set(f64v, 1)
+                ir_emit(IR_FMT_F64, len_v, slot_v, f64v, 0, ir_current_bb)
+            } else if fk == 3 {
+                ir_emit(IR_FMT_BOOL, len_v, slot_v, val_v, 0, ir_current_bb)
+            } else if fk == 4 {
+                ir_emit(IR_STORE, 1, slot_v, val_v, 0, ir_current_bb)
+                ir_emit(IR_CONST, len_v, 0, 0, 1, ir_current_bb)
+            } else if ir_vreg_signed_get(val_v) != 0 {
+                // Branchless sign: write '-' unconditionally, then advance the
+                // write pointer past it only when the value is negative, so
+                // the digits overwrite it for a non-negative value. Same
+                // sequence as the hosted lowering; see the comment there.
+                uint64 pv_63 = ir_new_vreg()
+                ir_emit(IR_CONST, pv_63, 0, 0, 63, ir_current_bb)
+                uint64 pv_sign = ir_new_vreg()
+                ir_emit(IR_SAR, pv_sign, val_v, pv_63, 0, ir_current_bb)
+                uint64 pv_one = ir_new_vreg()
+                ir_emit(IR_CONST, pv_one, 0, 0, 1, ir_current_bb)
+                uint64 pv_adv = ir_new_vreg()
+                ir_emit(IR_AND, pv_adv, pv_sign, pv_one, 0, ir_current_bb)
+                uint64 pv_xor = ir_new_vreg()
+                ir_emit(IR_XOR, pv_xor, val_v, pv_sign, 0, ir_current_bb)
+                uint64 pv_abs = ir_new_vreg()
+                ir_emit(IR_SUB, pv_abs, pv_xor, pv_sign, 0, ir_current_bb)
+                uint64 pv_minus = ir_new_vreg()
+                ir_emit(IR_CONST, pv_minus, 0, 0, 45, ir_current_bb)
+                ir_emit(IR_STORE, 1, slot_v, pv_minus, 0, ir_current_bb)
+                uint64 pv_slot2 = ir_new_vreg()
+                ir_emit(IR_ADD, pv_slot2, slot_v, pv_adv, 0, ir_current_bb)
+                uint64 pv_dlen = ir_new_vreg()
+                ir_emit(IR_FMT_UINT, pv_dlen, pv_slot2, pv_abs, 0, ir_current_bb)
+                ir_emit(IR_ADD, len_v, pv_dlen, pv_adv, 0, ir_current_bb)
+            } else {
+                ir_emit(IR_FMT_UINT, len_v, slot_v, val_v, 0, ir_current_bb)
+            }
+            ir_bm_emit_write(wtok, slot_v, len_v)
+        }
+        uint32 nxt = ast_next(warg)
+        warg = nxt
+    }
+    if is_println != 0 {
+        ir_bm_emit_write_lit(wtok, "\n", 1)
+    }
+}
+
 fn ir_lower_expr(uint64 node) -> uint64 {
     if node == 0 { return 0xFFFFFFFF }
     uint32 kind = ast_kind(node)
@@ -1822,7 +2031,7 @@ fn ir_lower_expr(uint64 node) -> uint64 {
         if skip_builtin == 0 && tok_matches(wct, "write", 5) != 0 {
             if target_os == 4 {
                 uint64 bmw = "write"
-                bare_metal_builtin_refused(bmw, bm_fix_io())
+                bare_metal_builtin_refused(bmw, bm_fix_write())
             }
             uint32 arg1 = ast_child(node)
             uint64 fd = ir_lower_expr(arg1)
@@ -2325,8 +2534,20 @@ fn ir_lower_expr(uint64 node) -> uint64 {
         // print_str(s) → write strlen, write the string
         if skip_builtin == 0 && tok_matches(wct, "print_str", 9) != 0 {
             if target_os == 4 {
-                uint64 bmps = "print_str"
-                bare_metal_builtin_refused(bmps, bm_fix_io())
+                uint64 ps_wtok = ir_bm_write_provider()
+                if ps_wtok == 0xFFFFFFFF {
+                    uint64 bmps = "print_str"
+                    bare_metal_builtin_refused(bmps, bm_fix_write())
+                }
+                // No buffer at all: the string is already bytes in memory.
+                uint32 ps_arg = ast_child(node)
+                uint64 ps_s = ir_lower_expr(ps_arg)
+                uint64 ps_len = ir_new_vreg()
+                ir_emit(IR_STRLEN, ps_len, ps_s, 0, 0, ir_current_bb)
+                ir_bm_emit_write(ps_wtok, ps_s, ps_len)
+                uint64 ps_zero = ir_new_vreg()
+                ir_emit(IR_CONST, ps_zero, 0, 0, 0, ir_current_bb)
+                return ps_zero
             }
             uint32 first_arg = ast_child(node)
             uint64 s_v = ir_lower_expr(first_arg)
@@ -2346,8 +2567,23 @@ fn ir_lower_expr(uint64 node) -> uint64 {
         // println_str(s) → print_str + newline
         if skip_builtin == 0 && tok_matches(wct, "println_str", 11) != 0 {
             if target_os == 4 {
-                uint64 bmpls = "println_str"
-                bare_metal_builtin_refused(bmpls, bm_fix_io())
+                uint64 pls_wtok = ir_bm_write_provider()
+                if pls_wtok == 0xFFFFFFFF {
+                    uint64 bmpls = "println_str"
+                    bare_metal_builtin_refused(bmpls, bm_fix_write())
+                }
+                // The hosted lowering allocates a one-byte heap buffer to hold
+                // the newline; here it is a string constant, so println_str
+                // needs no allocator either.
+                uint32 pls_arg = ast_child(node)
+                uint64 pls_s = ir_lower_expr(pls_arg)
+                uint64 pls_len = ir_new_vreg()
+                ir_emit(IR_STRLEN, pls_len, pls_s, 0, 0, ir_current_bb)
+                ir_bm_emit_write(pls_wtok, pls_s, pls_len)
+                ir_bm_emit_write_lit(pls_wtok, "\n", 1)
+                uint64 pls_zero = ir_new_vreg()
+                ir_emit(IR_CONST, pls_zero, 0, 0, 0, ir_current_bb)
+                return pls_zero
             }
             uint32 first_arg = ast_child(node)
             uint64 s_v = ir_lower_expr(first_arg)
@@ -2602,9 +2838,16 @@ fn ir_lower_expr(uint64 node) -> uint64 {
             // programmer actually wrote is what makes the diagnostic
             // actionable.
             if target_os == 4 {
-                uint64 bmpr = "print"
-                if is_println != 0 { bmpr = "println" }
-                bare_metal_builtin_refused(bmpr, bm_fix_io())
+                uint64 pr_wtok = ir_bm_write_provider()
+                if pr_wtok == 0xFFFFFFFF {
+                    uint64 bmpr = "print"
+                    if is_println != 0 { bmpr = "println" }
+                    bare_metal_builtin_refused(bmpr, bm_fix_write())
+                }
+                ir_lower_print_bare_metal(node, is_println, pr_wtok)
+                uint64 pr_zero = ir_new_vreg()
+                ir_emit(IR_CONST, pr_zero, 0, 0, 0, ir_current_bb)
+                return pr_zero
             }
             uint64 buf_v = ir_new_vreg()
             ir_emit(IR_ALLOC, buf_v, 0, 0, 4096, ir_current_bb)
@@ -5115,6 +5358,11 @@ fn ir_lower_function(uint64 fn_node) {
     // examples/codegen_struct_var_collision.kr.
     struct_var_count = 0
     ir_stack_array_bytes = 0
+    // The bare-metal print scratch is a slice of this function's stack-array
+    // region, so its offset is meaningless in the next function. Not resetting
+    // it would hand function N+1 an offset measured against function N's
+    // frame -- a store into whatever that address lands on.
+    ir_bm_scratch_off = 0xFFFFFFFF
     ir_current_bb = ir_new_bb()  // entry block
 
     // Register parameters

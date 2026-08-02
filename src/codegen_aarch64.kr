@@ -2461,6 +2461,16 @@ fn gen_expr_a64(uint64 node) {
         if is_extern_call == 0 && tok_matches(wct, "println", 7) != 0 || is_extern_call == 0 && tok_matches(wct, "print", 5) != 0 {
             uint64 apv_is_pln = 0
             if tok_matches(wct, "println", 7) != 0 { apv_is_pln = 1 }
+            // --target=none: the @builtin_override `write` routing lives in
+            // the IR lowering (src/ir.kr), which this backend never calls.
+            // Refuse here rather than falling through to the Linux write(2)
+            // and the generic "SVC reached the emitter" backstop. Mirrors the
+            // x86_64 legacy arm in src/codegen.kr.
+            if target_os == 4 && builtin_override_tok_of("write", 5) != 0xFFFFFFFF {
+                uint64 bmlpa = "print"
+                if apv_is_pln != 0 { bmlpa = "println" }
+                bare_metal_builtin_refused(bmlpa, bm_fix_write_legacy())
+            }
             // Reserve a 24-byte digit scratch INSIDE the frame (prologue
             // `sub sp` is patched to the final frame size at function end).
             // Using var_frame_size as the base put the buffer on the CALLER's
@@ -2664,6 +2674,12 @@ fn gen_expr_a64(uint64 node) {
         if is_extern_call == 0 && tok_matches(wct, "print_str", 9) != 0 || tok_matches(wct, "println_str", 11) != 0 {
             uint64 a_is_pln = 0
             if is_extern_call == 0 && tok_matches(wct, "println_str", 11) != 0 { a_is_pln = 1 }
+            // --target=none: see the print/println arm above.
+            if target_os == 4 && builtin_override_tok_of("write", 5) != 0xFFFFFFFF {
+                uint64 bmlpsa = "print_str"
+                if a_is_pln != 0 { bmlpsa = "println_str" }
+                bare_metal_builtin_refused(bmlpsa, bm_fix_write_legacy())
+            }
             uint32 first_arg = ast_child(node)
             uint64 wfa = first_arg
             gen_expr_a64(wfa)
