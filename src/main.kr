@@ -4959,6 +4959,85 @@ fn parse_uint_arg(uint64 s) -> uint64 {
     return val
 }
 
+// Legal --arch x --target(OS) pairs, ENUMERATED.
+//
+//   arch: 0 x86_64, 1 arm64, 2 riscv32, 3 xtensa
+//   os:   0 linux,  1 macos, 2 windows, 3 android, 4 none
+//
+// Deliberately an allow-list with a `return 0` fall-through, NOT a blacklist
+// of the pairs that are broken today. A blacklist passes every test the day
+// it is written and then silently admits whichever arch or OS is added next
+// — which is the same "else, assume POSIX" shape that put a Linux exit
+// syscall inside a bare-metal image and that this whole sub-project exists to
+// remove. Adding an arch here without adding its row is a hard error at the
+// first build, not a nonsense artifact.
+//
+// Before this existed there was no arch/OS validation at all: `--arch=riscv32
+// --target=windows` exited 0 and wrote a 296-byte RISC-V *ELF* — a PE was
+// requested, an ELF was produced, and neither the requested OS nor the
+// requested container appeared anywhere in the output.
+fn arch_os_pair_supported(uint64 arch, uint64 os) -> uint64 {
+    if arch == 0 {
+        // x86_64 — all four hosted OSes (it is one of the two fat-binary
+        // slice arches, so every hosted OS must build) plus bare metal.
+        if os == 0 { return 1 }
+        if os == 1 { return 1 }
+        if os == 2 { return 1 }
+        if os == 3 { return 1 }
+        if os == 4 { return 1 }
+        return 0
+    }
+    if arch == 1 {
+        // arm64 — the other fat-binary slice arch; same five.
+        if os == 0 { return 1 }
+        if os == 1 { return 1 }
+        if os == 2 { return 1 }
+        if os == 3 { return 1 }
+        if os == 4 { return 1 }
+        return 0
+    }
+    if arch == 2 {
+        // riscv32 — hosted RV32 Linux ELF, and bare metal. There is no
+        // macOS, Windows or Android on RV32 for this compiler to target: no
+        // Mach-O/PE writer accepts an RV32 machine type, and the Android
+        // path is arm64/x86_64 only.
+        if os == 0 { return 1 }
+        if os == 4 { return 1 }
+        return 0
+    }
+    if arch == 3 {
+        // xtensa — bare metal, and os == 0 because 0 is the DEFAULT value of
+        // target_os: every existing `--arch=xtensa --freestanding` and
+        // `--target=esp32` invocation carries it without ever naming an OS,
+        // so rejecting the pair here would reject all of them. It does not
+        // mean hosted Xtensa Linux works — that still fails downstream with
+        // "xtensa ELF image emission not yet implemented", which is the
+        // accurate diagnostic for it.
+        if os == 0 { return 1 }
+        if os == 4 { return 1 }
+        return 0
+    }
+    return 0
+}
+
+// Spellings for the pair diagnostic. These are the --arch= / --target= values
+// a user actually types, so the message can be copy-edited back into a
+// working command line.
+fn arch_flag_name(uint64 arch) -> uint64 {
+    if arch == 1 { return "arm64" }
+    if arch == 2 { return "riscv32" }
+    if arch == 3 { return "xtensa" }
+    return "x86_64"
+}
+
+fn target_os_flag_name(uint64 os) -> uint64 {
+    if os == 1 { return "macos" }
+    if os == 2 { return "windows" }
+    if os == 3 { return "android" }
+    if os == 4 { return "none" }
+    return "linux"
+}
+
 @export
 fn main() {
     // Windows: parse raw GetCommandLineA result into argc/argv
@@ -5334,6 +5413,11 @@ fn main() {
     // kernel module into, no Android runtime to host an APK payload. Refuse
     // both explicitly rather than emitting a container that nothing on that
     // target can ever load.
+    //
+    // Every refusal in this block NAMES BOTH FLAGS. A message that says only
+    // "--target=none" leaves the user to guess which of the other flags on
+    // the line to drop, and these combinations are reached by flags that are
+    // individually correct.
     if target_os == 4 {
         if emit_mode == 7 {
             uint64 lkm_msg = "error: --emit=lkm conflicts with --target=none: a loadable kernel module has no kernel to load into\n"
@@ -5345,6 +5429,103 @@ fn main() {
             write(2, and_msg, str_len(and_msg))
             exit(1)
         }
+        // Mach-O and PE are OS CONTAINERS, not just byte layouts: a Mach-O
+        // image is loaded by dyld through LC_MAIN and its segments are mapped
+        // by the macOS kernel; a PE image is loaded by the Windows loader
+        // through an import table and a subsystem field. Nothing on bare
+        // metal reads either. Before this, `--emit=macho --target=none`
+        // exited 0 and wrote a real 8192-byte Mach-O (2048-byte PE) full of
+        // bare-metal codegen — a file no macOS and no bare-metal machine can
+        // load. Keyed on the resolved emit_mode, not on the spelling, so the
+        // aliases (darwin/mac/mac-arm64, win/win-x64/windows-arm64) are
+        // covered by the same two checks.
+        if emit_mode == 1 {
+            uint64 mo_msg = "error: --emit=macho conflicts with --target=none: a Mach-O image is an OS container (dyld, LC_MAIN, segments mapped by the macOS kernel) and nothing on bare metal loads one; use the default ELF, or --emit=obj for a relocatable object to link yourself\n"
+            write(2, mo_msg, str_len(mo_msg))
+            exit(1)
+        }
+        if emit_mode == 2 {
+            uint64 pe_msg = "error: --emit=pe conflicts with --target=none: a PE image is an OS container (the Windows loader, an import table, a subsystem field) and nothing on bare metal loads one; use the default ELF, or --emit=obj for a relocatable object to link yourself\n"
+            write(2, pe_msg, str_len(pe_msg))
+            exit(1)
+        }
+        // --debug inlines a per-OS `exit(1)` trap into every function that
+        // indexes an array (IR_ARR_CHECK), dereferences a pointer (the
+        // load/store null checks) or does checked arithmetic. Measured: 3
+        // syscalls in a --debug bare-metal build against 1 without. The Task
+        // 2 emitter guards did catch it, so it never shipped silently — but
+        // they reported "SYSCALL reached the emitter from 'array bounds check
+        // (--debug)'", which names something that is not a builtin, blames
+        // the emitter for a decision made by a flag, and offers no remedy.
+        // Worse, it only fired for programs that HAPPEN to use an array or a
+        // pointer: an array-free bare-metal program compiled clean under
+        // --debug, so the restriction surfaced on whichever function the user
+        // wrote next. Refuse here, once, for every program and every arch.
+        //
+        // This is a refusal and not a lowering because there is nowhere for a
+        // failed check to GO on bare metal: no kernel to exit to, no stderr,
+        // no debugger. It becomes implementable when a bare-metal panic path
+        // exists (a user-supplied @builtin_override panic handler, or the
+        // halt loop that sub-project B's entry code will establish).
+        if debug_mode != 0 {
+            uint64 dbg_msg = "error: --debug conflicts with --target=none: the runtime safety checks inline a per-OS exit(1) trap into every function that indexes an array or dereferences a pointer, and bare metal has no kernel to trap into. Drop --debug until a bare-metal panic path exists.\n"
+            write(2, dbg_msg, str_len(dbg_msg))
+            exit(1)
+        }
+        // The legacy backend (src/codegen.kr, src/codegen_aarch64.kr — ~220
+        // target_os sites between them) has its own builtin dispatch and does
+        // not go through ir_lower_expr at all, so the @builtin_override
+        // routing that makes print/println/print_str/println_str work on bare
+        // metal is absent there BY CONSTRUCTION. Those four refuse on the
+        // legacy path rather than misbehaving, so this is not a correctness
+        // hole — it is that `--legacy --target=none` silently selects the
+        // strictly less capable of two backends for no gain. Refuse the
+        // request instead.
+        //
+        // Refused even with --emit=obj, where --legacy is redundant (obj
+        // always uses the legacy codegen): --legacy is an explicit request
+        // for a backend, and under --target=none that request is refused
+        // whatever else is on the line. --emit=obj on its own remains
+        // ALLOWED — see the note there — so every bare-metal assertion about
+        // the legacy codegen still has a live path to run through.
+        if emit_ir_mode == 0 {
+            uint64 lg_msg = "error: --legacy conflicts with --target=none: the legacy backend has no @builtin_override routing, so print/println/print_str/println_str cannot be provided on bare metal there. Drop --legacy (the IR backend is the default and supports them); --emit=obj still uses the legacy codegen and is still allowed.\n"
+            write(2, lg_msg, str_len(lg_msg))
+            exit(1)
+        }
+        // --emit=obj, --emit=asm, --emit=ir and the default --emit=elfexe are
+        // all ALLOWED under --target=none, and that is a decision rather than
+        // an omission:
+        //   obj    — a relocatable object is the normal bare-metal
+        //            deliverable (linked with the user's own script at the
+        //            user's own load address) and is the only relocatable
+        //            output this compiler produces. It is also the surviving
+        //            path into the legacy codegen, which is what keeps the
+        //            legacy backend's bare-metal guards reachable and tested.
+        //   asm/ir — text describing the build. Nothing loads them, and
+        //            --emit=ir under --target=none is already the oracle the
+        //            provider-routing tests read.
+        //   elfexe — the default, and the format --target=none emits.
+    }
+
+    // arch x OS validation. This runs AFTER the emit_mode -> target_os
+    // auto-set above, on the RESOLVED pair, so `--arch=riscv32 --emit=pe`
+    // (which asks for Windows without ever typing --target=) is caught by the
+    // same check as `--arch=riscv32 --target=windows`. Names both flags with
+    // the spellings a user types, so the message can be edited back into a
+    // working command line.
+    if arch_os_pair_supported(arch, target_os) == 0 {
+        uint64 xo_a = arch_flag_name(arch)
+        uint64 xo_o = target_os_flag_name(target_os)
+        uint64 xo1 = "error: --arch="
+        write(2, xo1, str_len(xo1))
+        write(2, xo_a, str_len(xo_a))
+        uint64 xo2 = " --target="
+        write(2, xo2, str_len(xo2))
+        write(2, xo_o, str_len(xo_o))
+        uint64 xo3 = " is not a supported target pair: x86_64 and arm64 build for linux, macos, windows, android or none; riscv32 and xtensa build for linux or none. (--emit=macho and --emit=pe select macos and windows even when --target= is absent.)\n"
+        write(2, xo3, str_len(xo3))
+        exit(1)
     }
 
     // --target=esp32 is only meaningful on the xtensa freestanding ELF path

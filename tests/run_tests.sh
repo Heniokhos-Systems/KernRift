@@ -8090,6 +8090,276 @@ fi
 
 rm -f "$TN_SRC" /tmp/krc_tnone_bin_$$
 
+
+# --- --debug, --legacy, emit modes and arch x OS pairs (Task 6) ------------
+#
+# Four loose ends, each of which is a combination the compiler ACCEPTED and
+# turned into nonsense rather than refusing.
+#
+#  1. --debug inlines a per-OS exit(1) trap (IR_ARR_CHECK, plus the null and
+#     overflow checks) into every function that indexes an array or
+#     dereferences a pointer. Measured before this task: 3 syscalls in a
+#     --debug bare-metal build against 1 without. It did not fail silently --
+#     the Task 2 emitter guard caught it -- but it reported
+#     "SYSCALL reached the emitter from 'array bounds check (--debug)'", which
+#     names a thing that is not a builtin, blames the wrong layer and offers no
+#     remedy. And it only fired for programs that HAPPEN to use an array:
+#     the same flags on an array-free program compiled clean, so the user
+#     learns about the restriction from whichever function they write next.
+#  2. --legacy is a second builtin dispatch (src/codegen.kr,
+#     src/codegen_aarch64.kr, ~220 target_os sites between them) with no
+#     @builtin_override routing, so the whole print family is unavailable
+#     there on bare metal. --emit=obj reaches the SAME codegen and is kept, so
+#     none of the legacy bare-metal coverage below is lost -- see the note on
+#     the choke-point and provider blocks.
+#  3. --emit= never sets target_os, so macho/pe/obj/asm/ir each had no defined
+#     outcome under --target=none. macho and pe produced a real OS container
+#     (an 8192-byte Mach-O, a 2048-byte PE) full of bare-metal codegen, which
+#     nothing on either side can load.
+#  4. There was NO arch x OS validation at all: `--arch=riscv32
+#     --target=windows` exited 0 and wrote a 296-byte RISC-V *ELF*. The check
+#     added is an ENUMERATION of the legal pairs, not a blacklist -- a
+#     blacklist admits whatever pair is added next, which is the same
+#     "else, assume POSIX" shape this sub-project exists to remove.
+echo ""
+echo "--- --debug / --legacy / emit modes / arch x OS pairs ---"
+# Raw compiler binary: under `make test` $KRC is a wrapper (Makefile:96) that
+# injects --arch=x86_64 ahead of every test's own arguments, which would mask
+# every --arch case in this block. Same build/krc2 then build/krc3 fallback
+# the blocks below use.
+if [ -f "$DIR/../build/krc2" ]; then
+    T6_KRC=$(cd "$DIR/../build" && pwd)/krc2
+elif [ -f "$DIR/../build/krc3" ]; then
+    T6_KRC=$(cd "$DIR/../build" && pwd)/krc3
+else
+    T6_KRC=""
+fi
+T6_D=$(mktemp -d)
+# Array-free: proves the refusals below come from FLAG VALIDATION, not from
+# the emitter backstop firing on a bounds check that happens to be present.
+printf 'static uint32 acc = 0\nfn main() {\n    uint32 i = 0\n    while i < 4 { acc = acc + i\n i = i + 1 }\n    loop { }\n}\n' > "$T6_D/plain.kr"
+# Uses an array, so --debug really does inline IR_ARR_CHECK here.
+printf 'static uint32 acc = 0\nfn main() {\n    uint32[8] t\n    uint32 i = 0\n    while i < 8 { t[i] = i\n i = i + 1 }\n    acc = t[3]\n    loop { }\n}\n' > "$T6_D/arr.kr"
+
+# t6_refuses <name> <expect-substring-1> <expect-substring-2> -- <krc args...>
+# Asserts a NON-ZERO exit, NO artifact, both substrings present, and that the
+# message is not the generic emitter backstop. Both substrings are named
+# because "refuse, naming both flags" is the requirement: a message that says
+# only "--target=none" leaves the user guessing which of their other flags to
+# drop.
+t6_refuses() {
+    local name="$1" want1="$2" want2="$3"; shift 4
+    TOTAL=$((TOTAL + 1))
+    rm -f "$T6_D/out"
+    local err st
+    err=$("$T6_KRC" "$@" -o "$T6_D/out" 2>&1); st=$?
+    if [ -z "$T6_KRC" ]; then
+        echo "FAIL: $name (no raw compiler binary found)"; FAIL=$((FAIL + 1))
+    elif [ "$st" = "0" ] || [ -f "$T6_D/out" ]; then
+        echo "FAIL: $name (accepted: exit $st, artifact $([ -f "$T6_D/out" ] && echo present || echo absent))"
+        FAIL=$((FAIL + 1))
+    elif echo "$err" | grep -q "reached the emitter"; then
+        echo "FAIL: $name (generic emitter backstop, not a flag refusal: '$err')"; FAIL=$((FAIL + 1))
+    elif ! echo "$err" | grep -q -- "$want1"; then
+        echo "FAIL: $name (message does not name '$want1': '$err')"; FAIL=$((FAIL + 1))
+    elif ! echo "$err" | grep -q -- "$want2"; then
+        echo "FAIL: $name (message does not name '$want2': '$err')"; FAIL=$((FAIL + 1))
+    else
+        PASS=$((PASS + 1)); echo "  $name: PASS"
+    fi
+    rm -f "$T6_D/out"
+}
+
+# t6_builds <name> -- <krc args...>: exit 0 and an artifact on disk.
+t6_builds() {
+    local name="$1"; shift 2
+    TOTAL=$((TOTAL + 1))
+    rm -f "$T6_D/out"
+    local err st
+    err=$("$T6_KRC" "$@" -o "$T6_D/out" 2>&1); st=$?
+    if [ -n "$T6_KRC" ] && [ "$st" = "0" ] && [ -f "$T6_D/out" ]; then
+        PASS=$((PASS + 1)); echo "  $name: PASS"
+    else
+        echo "FAIL: $name (exit $st: '$err')"; FAIL=$((FAIL + 1))
+    fi
+    rm -f "$T6_D/out"
+}
+
+# 1. --debug + --target=none. On ALL FOUR arches and, critically, on the
+#    array-FREE program too: the old behaviour compiled that one clean.
+for A in x86_64 arm64 riscv32 xtensa; do
+    t6_refuses "t6_debug_tnone_plain_$A" "--debug" "--target=none" -- \
+        --arch=$A --target=none --debug "$T6_D/plain.kr"
+    t6_refuses "t6_debug_tnone_arr_$A" "--debug" "--target=none" -- \
+        --arch=$A --target=none --debug "$T6_D/arr.kr"
+done
+# Flag order must not matter: validation runs after the whole arg loop.
+t6_refuses "t6_debug_tnone_order" "--debug" "--target=none" -- \
+    --debug --target=none --arch=x86_64 "$T6_D/arr.kr"
+
+# ... and --debug is UNTOUCHED everywhere else. This is the half of the
+# change that a too-broad refusal breaks: --debug is a working, tested flag on
+# every hosted target and on freestanding riscv32/xtensa, and the array
+# program is the one that actually exercises IR_ARR_CHECK.
+for A in x86_64 arm64; do
+    for OS in linux macos windows; do
+        t6_builds "t6_debug_hosted_${OS}_$A" -- --arch=$A --target=$OS --debug "$T6_D/arr.kr"
+    done
+done
+t6_builds "t6_debug_freestanding_x86_64" -- --arch=x86_64 --freestanding --debug "$T6_D/plain.kr"
+t6_builds "t6_debug_freestanding_riscv32" -- --arch=riscv32 --freestanding --debug "$T6_D/plain.kr"
+t6_builds "t6_debug_freestanding_xtensa" -- --arch=xtensa --freestanding --debug "$T6_D/plain.kr"
+
+# 2. --legacy + --target=none. The legacy backend has its own builtin
+#    dispatch and no @builtin_override routing, so print/println/print_str/
+#    println_str cannot work there on bare metal at all. Refused explicitly
+#    rather than left to fail per-builtin, so that a bare-metal build never
+#    silently selects the strictly less capable of two backends.
+for A in x86_64 arm64 riscv32 xtensa; do
+    t6_refuses "t6_legacy_tnone_$A" "--legacy" "--target=none" -- \
+        --legacy --arch=$A --target=none "$T6_D/plain.kr"
+done
+# --legacy is meaningless alongside --emit=obj (obj always uses the legacy
+# codegen). Refused anyway: the flag is an explicit request for a backend, and
+# under --target=none that request is refused whatever else is on the line.
+t6_refuses "t6_legacy_obj_tnone" "--legacy" "--target=none" -- \
+    --legacy --emit=obj --arch=x86_64 --target=none "$T6_D/plain.kr"
+# --legacy elsewhere is untouched.
+for A in x86_64 arm64; do
+    t6_builds "t6_legacy_hosted_$A" -- --legacy --arch=$A --target=linux "$T6_D/plain.kr"
+    t6_builds "t6_legacy_freestanding_$A" -- --legacy --arch=$A --freestanding "$T6_D/plain.kr"
+done
+
+# 3. Every remaining --emit= mode gets a DEFINED outcome under --target=none.
+#    macho and pe are OS containers -- a Mach-O needs dyld and LC_MAIN, a PE
+#    needs the Windows loader and an import table -- and before this both
+#    produced one, filled with bare-metal codegen, exit 0.
+t6_refuses "t6_emit_macho_tnone" "--emit=macho" "--target=none" -- \
+    --emit=macho --arch=x86_64 --target=none "$T6_D/plain.kr"
+t6_refuses "t6_emit_pe_tnone" "--emit=pe" "--target=none" -- \
+    --emit=pe --arch=x86_64 --target=none "$T6_D/plain.kr"
+# The macos/darwin and windows/win/win-x64 spellings alias to the same
+# emit_mode, so they must refuse too -- a check keyed on the spelling rather
+# than on the resolved mode would let --emit=darwin through.
+t6_refuses "t6_emit_darwin_tnone" "--emit=macho" "--target=none" -- \
+    --emit=darwin --arch=x86_64 --target=none "$T6_D/plain.kr"
+t6_refuses "t6_emit_winx64_tnone" "--emit=pe" "--target=none" -- \
+    --emit=win-x64 --arch=arm64 --target=none "$T6_D/plain.kr"
+#    obj is ALLOWED and that is a decision, not an omission: a relocatable
+#    object is the normal bare-metal deliverable (you link it with your own
+#    script at your own load address), it is the only relocatable output this
+#    compiler has, and it is the path that keeps the legacy codegen's
+#    bare-metal guards reachable -- every legacy assertion in the blocks below
+#    runs through --emit=obj for exactly that reason.
+t6_builds "t6_emit_obj_tnone_x86_64" -- --emit=obj --arch=x86_64 --target=none "$T6_D/plain.kr"
+t6_builds "t6_emit_obj_tnone_arm64" -- --emit=obj --arch=arm64 --target=none "$T6_D/plain.kr"
+t6_builds "t6_emit_obj_tnone_c_shorthand" -- -c --arch=x86_64 --target=none "$T6_D/plain.kr"
+#    elfexe is the default and stays the default.
+t6_builds "t6_emit_elfexe_tnone" -- --emit=elfexe --arch=x86_64 --target=none "$T6_D/plain.kr"
+#    asm and ir are TEXT: they describe the build, they are not loaded by
+#    anything, and --emit=ir under --target=none is already the oracle the
+#    provider-routing tests read. Assert the content, not just the exit code:
+#    an empty stream would satisfy exit 0.
+TOTAL=$((TOTAL + 1))
+T6_OUT=$("$T6_KRC" --emit=asm --arch=x86_64 --target=none "$T6_D/plain.kr" -o "$T6_D/a.s" 2>&1)
+if [ -f "$T6_D/a.s" ] && grep -q "main" "$T6_D/a.s"; then
+    PASS=$((PASS + 1)); echo "  t6_emit_asm_tnone: PASS"
+else
+    echo "FAIL: t6_emit_asm_tnone (no listing naming main: '$T6_OUT')"; FAIL=$((FAIL + 1))
+fi
+rm -f "$T6_D/a.s"
+TOTAL=$((TOTAL + 1))
+T6_OUT=$("$T6_KRC" --emit=ir --arch=x86_64 --target=none "$T6_D/plain.kr" 2>&1)
+if echo "$T6_OUT" | grep -q "^function main:"; then
+    PASS=$((PASS + 1)); echo "  t6_emit_ir_tnone: PASS"
+else
+    echo "FAIL: t6_emit_ir_tnone (no IR dump for main: '$T6_OUT')"; FAIL=$((FAIL + 1))
+fi
+# lkm and android were already refused (Task 1) and stay refused -- pinned
+# here alongside their siblings so the emit-mode table is complete in one
+# place rather than split across two blocks.
+t6_refuses "t6_emit_lkm_tnone" "--emit=lkm" "--target=none" -- \
+    --emit=lkm --arch=x86_64 --target=none "$T6_D/plain.kr"
+t6_refuses "t6_emit_android_tnone" "--emit=android" "--target=none" -- \
+    --emit=android --arch=arm64 --target=none "$T6_D/plain.kr"
+
+# 4. arch x OS pairs. `--arch=riscv32 --target=windows` exited 0 and wrote a
+#    RISC-V ELF; nothing anywhere validated the combination.
+for OS in macos windows android; do
+    t6_refuses "t6_pair_riscv32_$OS" "--arch=riscv32" "--target=$OS" -- \
+        --arch=riscv32 --target=$OS "$T6_D/plain.kr"
+    t6_refuses "t6_pair_xtensa_$OS" "--arch=xtensa" "--target=$OS" -- \
+        --arch=xtensa --target=$OS "$T6_D/plain.kr"
+done
+# --emit=macho / --emit=pe set target_os with no --target= on the line at all,
+# so the check has to run on the RESOLVED OS, after that auto-set, or these
+# two slip through.
+t6_refuses "t6_pair_riscv32_emit_pe" "--arch=riscv32" "--target=windows" -- \
+    --arch=riscv32 --emit=pe "$T6_D/plain.kr"
+t6_refuses "t6_pair_xtensa_emit_macho" "--arch=xtensa" "--target=macos" -- \
+    --arch=xtensa --emit=macho "$T6_D/plain.kr"
+# Every LEGAL pair still passes validation. x86_64/arm64 x 5 build outright.
+for A in x86_64 arm64; do
+    for OS in linux macos windows android none; do
+        t6_builds "t6_pair_ok_${A}_$OS" -- --arch=$A --target=$OS "$T6_D/plain.kr"
+    done
+done
+# riscv32 x {linux, none} build outright. xtensa x none builds; xtensa x linux
+# is legal to REQUEST -- it is the default OS value every `--arch=xtensa
+# --freestanding` build already carries -- but hosted Xtensa ELF emission is
+# still NYI, so it must fail with THAT message and not with the pair message.
+# Asserting which failure it is, rather than skipping it, is the point: a
+# pair check that rejected it would break every existing xtensa invocation.
+t6_builds "t6_pair_ok_riscv32_linux" -- --arch=riscv32 --target=linux "$T6_D/plain.kr"
+t6_builds "t6_pair_ok_riscv32_none" -- --arch=riscv32 --target=none "$T6_D/plain.kr"
+t6_builds "t6_pair_ok_xtensa_none" -- --arch=xtensa --target=none "$T6_D/plain.kr"
+t6_builds "t6_pair_ok_xtensa_freestanding" -- --arch=xtensa --freestanding "$T6_D/plain.kr"
+TOTAL=$((TOTAL + 1))
+T6_OUT=$("$T6_KRC" --arch=xtensa --target=linux "$T6_D/plain.kr" -o "$T6_D/out" 2>&1)
+if echo "$T6_OUT" | grep -q "not a supported target pair"; then
+    echo "FAIL: t6_pair_ok_xtensa_linux (rejected by the pair check; every --arch=xtensa --freestanding build carries target_os=0)"
+    FAIL=$((FAIL + 1))
+elif echo "$T6_OUT" | grep -q "xtensa ELF image emission not yet implemented"; then
+    PASS=$((PASS + 1)); echo "  t6_pair_ok_xtensa_linux: PASS"
+else
+    echo "FAIL: t6_pair_ok_xtensa_linux (unexpected: '$T6_OUT')"; FAIL=$((FAIL + 1))
+fi
+rm -f "$T6_D/out"
+
+# The pair table must stay an ALLOW-list. A blacklist ("reject riscv32+macos,
+# riscv32+windows, ...") passes every test above and silently admits the next
+# arch or OS someone adds -- which is the same else-assume-POSIX shape that
+# put a Linux exit syscall in a bare-metal image in the first place. Assert
+# the SHAPE of the function: every `return 1` in it is guarded by an explicit
+# `if os == <n>`, and the function ends by returning 0.
+TOTAL=$((TOTAL + 1))
+T6_BAD=$(SRCDIR="$DIR/../src" python3 - <<'T6PY'
+import os, re
+src = open(os.path.join(os.environ["SRCDIR"], "main.kr")).read()
+m = re.search(r"\nfn arch_os_pair_supported\(.*?\n\}\n", src, re.S)
+bad = []
+if not m:
+    bad.append("arch_os_pair_supported not found in main.kr")
+else:
+    body = m.group(0)
+    lines = [l.split("//")[0].rstrip() for l in body.splitlines()]
+    for i, l in enumerate(lines):
+        if "return 1" in l and not re.search(r"if\s+os\s*==\s*\d+\s*\{\s*return 1\s*\}", l):
+            bad.append("unguarded `return 1` at body line %d: %r" % (i, l.strip()))
+    tail = [l.strip() for l in lines if l.strip()]
+    if tail[-1] != "}" or tail[-2] != "return 0":
+        bad.append("function does not end in `return 0`; tail is %r" % tail[-3:])
+print("; ".join(bad))
+T6PY
+)
+if [ -z "$T6_BAD" ]; then
+    PASS=$((PASS + 1)); echo "  t6_pair_table_is_allowlist: PASS"
+else
+    echo "FAIL: t6_pair_table_is_allowlist ($T6_BAD)"; FAIL=$((FAIL + 1))
+fi
+
+rm -rf "$T6_D"
+
 # --- syscall choke points under --target=none ------------------------------
 # The per-OS dispatch in this codebase is "special-case Windows/macOS, else
 # fall through to POSIX", so target_os == 4 (--target=none) silently inherits
@@ -8137,7 +8407,17 @@ done
 # --emit=obj and --emit=lkm all route through. Before the shared choke point
 # existed, `--legacy --target=none` and `--emit=obj --target=none` both
 # compiled cleanly and put `mov eax,231; syscall` in a bare-metal artifact.
-for CP_FLAG in --legacy --emit=obj; do
+#
+# --legacy is no longer in this list because Task 6 refuses it at flag
+# validation under --target=none (asserted by t6_legacy_tnone_* above).
+# --emit=obj is: it reaches the SAME src/codegen.kr and
+# src/codegen_aarch64.kr dispatch on both arches -- x86_64 through the
+# `emit_mode != 3` guard at src/main.kr:2611 and arm64 through the one at
+# :2621 -- so retargeting these assertions onto it keeps every legacy
+# bare-metal guard live and tested rather than turning them into unreachable
+# code with no coverage. That is also why --emit=obj is ALLOWED on bare metal
+# and --legacy is not: dropping both would have deleted this block.
+for CP_FLAG in --emit=obj; do
     TOTAL=$((TOTAL + 1))
     CP_ERR=$("$CP_KRC" $CP_FLAG --arch=x86_64 --target=none "$CP_SRC" -o /tmp/krc_choke_bin_$$ 2>&1); CP_ST=$?
     CP_NAME=$(echo "$CP_FLAG" | tr -d '-' | tr '=' '_')
@@ -8154,8 +8434,16 @@ done
 # longer what a user sees. It still has to WORK, though -- the legacy backend
 # reaches it for real, and the IR emitter guard remains the backstop for any
 # lowering that gets added without a --target=none arm. Assert it through
-# --legacy, which has its own builtin dispatch in src/codegen.kr and does not
-# go through ir_lower_expr at all.
+# --emit=obj, which has its own builtin dispatch in src/codegen.kr and does
+# not go through ir_lower_expr at all.
+#
+# This block asserted through --legacy until Task 6 refused that flag under
+# --target=none. --emit=obj reaches the identical src/codegen.kr dispatch and
+# the identical emitter, so the assertion is unchanged in substance -- it is
+# the same bytes, requested by a different flag. Keeping --emit=obj legal on
+# bare metal is what makes that true; had both flags been refused, this whole
+# block would have become unreachable and the emitter's name plumbing would
+# have no coverage on any path at all.
 #
 # This is not free: IR_SYSCALL carries the canonical Linux syscall NUMBER, and
 # that number is many-to-one with builtins (nr 1 is
@@ -8167,8 +8455,13 @@ done
 # "print_str" for both, and its time_ns() body reaches the emitter through the
 # surrounding exit() first -- so asserting either name here would be asserting
 # something untrue. Both builtins ARE covered, on both arches, by the
-# target_none_audit_* block below, which tests the IR lowering. Legacy backend
-# naming belongs to Task 6.
+# target_none_audit_* block below, which tests the IR lowering.
+#
+# Task 6 revisited the "legacy backend naming" question left open here and
+# left the case list as it stands: print_str/println_str share one legacy
+# lowering (so one name for two builtins is the truth, not a defect), and the
+# print family never reaches this emitter at all any more -- Task 5's legacy
+# refusal fires first, asserted by provider_legacy_* below.
 CP_CASE_NAMES="exit write print_str file_open file_close file_write file_read file_size"
 for CP_B in $CP_CASE_NAMES; do
     case $CP_B in
@@ -8183,11 +8476,11 @@ for CP_B in $CP_CASE_NAMES; do
     esac
     printf 'fn main() { %s }\n' "$CP_BODY" > "$CP_SRC"
     TOTAL=$((TOTAL + 1))
-    CP_ERR=$("$CP_KRC" --legacy --arch=x86_64 --target=none "$CP_SRC" -o /tmp/krc_choke_bin_$$ 2>&1)
+    CP_ERR=$("$CP_KRC" --emit=obj --arch=x86_64 --target=none "$CP_SRC" -o /tmp/krc_choke_bin_$$ 2>&1)
     if echo "$CP_ERR" | grep -q "reached the emitter from '$CP_B'"; then
-        PASS=$((PASS + 1)); echo "  choke_point_names_${CP_B}_legacy: PASS"
+        PASS=$((PASS + 1)); echo "  choke_point_names_${CP_B}_obj: PASS"
     else
-        echo "FAIL: choke_point_names_${CP_B}_legacy (got '$CP_ERR')"; FAIL=$((FAIL + 1))
+        echo "FAIL: choke_point_names_${CP_B}_obj (got '$CP_ERR')"; FAIL=$((FAIL + 1))
     fi
     rm -f /tmp/krc_choke_bin_$$
 done
@@ -8198,10 +8491,11 @@ printf 'fn main() { exit(0) }\n' > "$CP_SRC"
 # because a wrong count truncates the one message that explains a silent
 # syscall -- and a tree-wide scan finds 30 pre-existing write(fd,"lit",N)
 # sites whose N does not match the literal. Assert on the wire: the last
-# characters of the message must survive to stderr. Via --legacy for the same
-# reason as the block above: the IR path refuses earlier now.
+# characters of the message must survive to stderr. Via --emit=obj for the
+# same reason as the block above: the IR path refuses earlier now, and
+# --legacy is refused at flag validation.
 TOTAL=$((TOTAL + 1))
-CP_ERR=$("$CP_KRC" --legacy --arch=arm64 --target=none "$CP_SRC" -o /tmp/krc_choke_bin_$$ 2>&1)
+CP_ERR=$("$CP_KRC" --emit=obj --arch=arm64 --target=none "$CP_SRC" -o /tmp/krc_choke_bin_$$ 2>&1)
 if echo "$CP_ERR" | grep -q "before it can be used in a freestanding image\.$"; then
     PASS=$((PASS + 1)); echo "  choke_point_diag_not_truncated: PASS"
 else
@@ -8451,7 +8745,14 @@ rm -f /tmp/krc_au_pos_$$
 # AN ARTIFACT containing a constant zero where a timestamp belongs. No trap
 # instruction, so the emitter guard could not see it; no ir_lower_expr, so the
 # lowering refusal did not run. A silent wrong answer that ships.
-for AU_FLAG in --legacy --emit=obj; do
+#
+# --legacy left this list in Task 6, which refuses it at flag validation under
+# --target=none (t6_legacy_tnone_*). --emit=obj reaches the SAME
+# src/codegen.kr / src/codegen_aarch64.kr dispatch on both arches, so the
+# `else { mov rax/x0, 0 }` regression this test exists to catch is still
+# caught on the identical code path -- nothing about the legacy time_ns
+# coverage is lost by the refusal.
+for AU_FLAG in --emit=obj; do
     for A in x86_64 arm64; do
         TOTAL=$((TOTAL + 1))
         AU_OUT="/tmp/krc_au_lg_$$"
@@ -8971,7 +9272,14 @@ rm -f "$PV_D/hosted.out"
 # in a way that says so, rather than falling through to the generic
 # "SYSCALL reached the emitter" backstop, which names the wrong builtin
 # (println reported 'print') and gives no remedy.
-for PV_FLAG in --legacy --emit=obj; do
+#
+# --legacy left this list in Task 6, which refuses it outright under
+# --target=none -- for exactly the reason this block documents: the legacy
+# dispatch has no @builtin_override routing, so the print family can never
+# work there. --emit=obj reaches that identical dispatch and stays legal
+# (a relocatable object is the normal bare-metal deliverable), so every
+# assertion below still runs against the real legacy lowering on both arches.
+for PV_FLAG in --emit=obj; do
     for A in x86_64 arm64; do
         for PV_B in println print println_str print_str; do
             TOTAL=$((TOTAL + 1))
@@ -9078,8 +9386,11 @@ tn_const_is tn_target_os_x86_64  'get_target_os()' 4 --arch=x86_64 --target=none
 tn_const_is tn_target_os_arm64   'get_target_os()' 4 --arch=arm64   --target=none
 tn_const_is tn_target_os_riscv32 'get_target_os()' 4 --arch=riscv32 --target=none
 tn_const_is tn_target_os_xtensa  'get_target_os()' 4 --arch=xtensa  --target=none
-tn_const_is tn_target_os_legacy_x86_64 'get_target_os()' 4 --legacy --arch=x86_64 --target=none
-tn_const_is tn_target_os_legacy_arm64  'get_target_os()' 4 --legacy --arch=arm64  --target=none
+# The --legacy rows that stood here were removed by Task 6, which refuses
+# --legacy under --target=none. They are not dropped coverage: --emit=obj
+# routes through the SAME src/codegen.kr / src/codegen_aarch64.kr lowering of
+# this builtin on the same two arches, so the rows below exercise the identical
+# code. --legacy's own refusal is asserted by t6_legacy_tnone_* above.
 tn_const_is tn_target_os_obj_x86_64 'get_target_os()' 4 --emit=obj --arch=x86_64 --target=none
 tn_const_is tn_target_os_obj_arm64  'get_target_os()' 4 --emit=obj --arch=arm64  --target=none
 
@@ -9096,8 +9407,8 @@ tn_const_is tn_arch_id_xtensa  'get_arch_id()' 12 --arch=xtensa  --target=none
 # builtin dispatch in src/codegen.kr / src/codegen_aarch64.kr. A fix that
 # lives only in ir.kr leaves them reporting Linux, which is exactly how the
 # legacy time_ns constant zero shipped in an artifact at 563b0f3.
-tn_const_is tn_arch_id_legacy_x86_64 'get_arch_id()'  9 --legacy --arch=x86_64 --target=none
-tn_const_is tn_arch_id_legacy_arm64  'get_arch_id()' 10 --legacy --arch=arm64  --target=none
+# Same as above: the --legacy rows are gone with the flag, and --emit=obj
+# covers the identical legacy lowering on both arches.
 tn_const_is tn_arch_id_obj_x86_64 'get_arch_id()'  9 --emit=obj --arch=x86_64 --target=none
 tn_const_is tn_arch_id_obj_arm64  'get_arch_id()' 10 --emit=obj --arch=arm64  --target=none
 
@@ -9124,11 +9435,21 @@ tn_const_is tn_arch_id_obj_arm64  'get_arch_id()' 10 --emit=obj --arch=arm64  --
 # link 2 being vacuous -- Windows is the only target that lowers to a real
 # GetModuleFileNameA call, so it proves the target_os dispatch in this
 # lowering is live rather than the whole thing having been folded away. On
-# x86_64/arm64 that shows up as a DIFFERENT artifact. On riscv32/xtensa there
-# is no Windows backend at all, so it shows up as the build FAILING on
-# `IR op 146 not yet implemented` (146 = IR_MODULE_PATH) -- which is the same
-# proof, and is asserted rather than skipped, because a skipped leg is a
-# finding you decided not to have.
+# x86_64/arm64 that shows up as a DIFFERENT artifact.
+#
+# On riscv32/xtensa the Windows leg USED to be `--target=windows` failing on
+# `IR op 146 not yet implemented` (146 = IR_MODULE_PATH). Task 6's arch x OS
+# validation makes that pair unrequestable -- `--arch=riscv32
+# --target=windows` used to exit 0 and write a RISC-V ELF, so refusing it is
+# the point of that task -- and the leg is asserted as the PAIR REFUSAL
+# instead. That would be a vacuous leg on its own, so it is paired with a
+# source assertion (tn_module_path_dispatch_single_sited, below) that the
+# `target_os == 2` branch of this builtin exists exactly once, in
+# ir_lower_expr, ahead of any backend selection. One site means the x86_64 and
+# arm64 legs execute literally the same `if` that riscv32 and xtensa would:
+# proving it live there proves it live for all four. The leg is asserted
+# rather than skipped, because a skipped leg is a finding you decided not to
+# have.
 if [ "$ARCH" = "x86_64" ]; then
     TOTAL=$((TOTAL + 1))
     printf 'static uint64 mbuf = 0\nfn main() {\n    mbuf = alloc(512)\n    println(get_module_path(mbuf, 512))\n    exit(0)\n}\n' > "$TN_D/mprun.kr"
@@ -9157,7 +9478,8 @@ tn_mp_same_as_linux() { # name, win-mode(artifact|nyi), flags...
     if [ "$winmode" = "artifact" ]; then
         [ -f "$TN_D/mp_w" ] && ! cmp -s "$TN_D/mp_n" "$TN_D/mp_w" && winok=1
     else
-        [ ! -f "$TN_D/mp_w" ] && echo "$werr" | grep -q "IR op 146 not yet implemented" && winok=1
+        # riscv32/xtensa: the pair is refused up front, by name.
+        [ ! -f "$TN_D/mp_w" ] && echo "$werr" | grep -q "not a supported target pair" && winok=1
     fi
     if [ ! -f "$TN_D/mp_n" ] || [ ! -f "$TN_D/mp_l" ]; then
         echo "FAIL: $name (the bare-metal or Linux build produced no artifact)"; FAIL=$((FAIL + 1))
@@ -9171,10 +9493,34 @@ tn_mp_same_as_linux() { # name, win-mode(artifact|nyi), flags...
 }
 tn_mp_same_as_linux tn_module_path_x86_64  artifact --arch=x86_64
 tn_mp_same_as_linux tn_module_path_arm64   artifact --arch=arm64
-tn_mp_same_as_linux tn_module_path_riscv32 nyi      --arch=riscv32
-tn_mp_same_as_linux tn_module_path_xtensa  nyi      --arch=xtensa
-tn_mp_same_as_linux tn_module_path_legacy_x86_64 artifact --legacy --arch=x86_64
-tn_mp_same_as_linux tn_module_path_legacy_arm64  artifact --legacy --arch=arm64
+tn_mp_same_as_linux tn_module_path_riscv32 pair     --arch=riscv32
+tn_mp_same_as_linux tn_module_path_xtensa  pair     --arch=xtensa
+
+# The claim the two `pair` legs above lean on, made an assertion: the Windows
+# branch of get_module_path exists exactly ONCE, in the shared IR lowering,
+# so it is arch-independent by construction. If a backend ever grows its own
+# copy, this fails and the two legs above stop being sufficient.
+TOTAL=$((TOTAL + 1))
+TN_MPSITES=$(SRCDIR="$DIR/../src" python3 - <<'MPPY'
+import os, re, glob
+src = os.environ["SRCDIR"]
+hits = []
+for path in sorted(glob.glob(os.path.join(src, "*.kr"))):
+    lines = open(path).read().splitlines()
+    for i, l in enumerate(lines):
+        if "ir_emit(IR_MODULE_PATH" in l.split("//")[0]:
+            hits.append("%s:%d" % (os.path.basename(path), i + 1))
+print(" ".join(hits))
+MPPY
+)
+if [ "$(echo "$TN_MPSITES" | wc -w)" = "1" ] && echo "$TN_MPSITES" | grep -q "^ir\.kr:"; then
+    PASS=$((PASS + 1)); echo "  tn_module_path_dispatch_single_sited: PASS ($TN_MPSITES)"
+else
+    echo "FAIL: tn_module_path_dispatch_single_sited (want exactly 1 site in ir.kr, got '$TN_MPSITES')"
+    FAIL=$((FAIL + 1))
+fi
+tn_mp_same_as_linux tn_module_path_obj_x86_64 artifact --emit=obj --arch=x86_64
+tn_mp_same_as_linux tn_module_path_obj_arm64  artifact --emit=obj --arch=arm64
 
 # The hosted ids must not move. --target=none is an ADDITION to the arch_id
 # ABI, not a renumbering, and these are the values docs/LANGUAGE.md and the
