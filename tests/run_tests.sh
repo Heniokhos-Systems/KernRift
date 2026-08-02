@@ -8315,11 +8315,17 @@ rm -f "$CP_SRC"
 #   3. The generic choke-point message is ABSENT -- reaching it means a
 #      lowering has no --target=none arm and only the backstop caught it.
 #
-# Every program is written so the result is CONSUMED (stored to a static).
-# Without that, dead-code elimination removes the builtin call outright and
-# the whole corpus passes while testing nothing: measured, `uint64 p =
-# alloc(64) loop { }` compiled clean under --target=none purely because `p`
-# was unused.
+# Every program stores its result to a static so the call is unambiguously
+# live. That is belt-and-braces, NOT a workaround for a known pruning bug:
+# verified at 563b0f3 that `uint64 p = alloc(64)  loop { }` refuses correctly
+# with `p` unused, on both arches. An earlier draft of this block claimed dead-
+# code elimination was deleting such calls; that was wrong, and the way it was
+# wrong is worth keeping. The claim came from a scratch harness that piped the
+# compiler through `head -4`. Warnings print a four-line block (message, source
+# line, caret, blank) and the refusal lands on line 6, so the harness silently
+# cut off the very diagnostic it was testing for and the programs looked clean.
+# If you are ever about to conclude "the compiler did not diagnose this", print
+# the WHOLE output first.
 echo ""
 echo "--- --target=none refusals are builtin-specific ---"
 AU_D=$(mktemp -d)
@@ -8341,6 +8347,7 @@ au_gen file_write       'sink = file_write(3, "x", 1)'
 au_gen file_size        'sink = file_size(3)'
 au_gen set_executable   'sink = set_executable("x")'
 au_gen exec_process     'sink = exec_process("x")'
+au_gen exec_process_argv 'sink = exec_process_argv("x", sink)'
 au_gen syscall_raw      'sink = syscall_raw(60, 0, 0, 0, 0, 0, 0)'
 for A in x86_64 arm64; do
     for AU_F in "$AU_D"/a_*.kr; do
@@ -8432,6 +8439,35 @@ else
     echo "FAIL: audit_builtin_free_program_compiles (a program using no OS builtin was rejected)"; FAIL=$((FAIL + 1))
 fi
 rm -f /tmp/krc_au_pos_$$
+
+# THE LEGACY BACKEND IS NOT COVERED BY THE BLOCK ABOVE. --legacy and
+# --emit=obj have their own builtin dispatch in src/codegen.kr /
+# src/codegen_aarch64.kr and never call ir_lower_expr, so every refusal added
+# to the IR lowering misses them entirely.
+#
+# time_ns is the case that proves it and the reason this block exists: its
+# legacy chain ended in `else { mov rax/x0, 0 }`, so all four of
+# {--legacy, --emit=obj} x {x86_64, arm64} compiled clean at exit 0 and WROTE
+# AN ARTIFACT containing a constant zero where a timestamp belongs. No trap
+# instruction, so the emitter guard could not see it; no ir_lower_expr, so the
+# lowering refusal did not run. A silent wrong answer that ships.
+for AU_FLAG in --legacy --emit=obj; do
+    for A in x86_64 arm64; do
+        TOTAL=$((TOTAL + 1))
+        AU_OUT="/tmp/krc_au_lg_$$"
+        rm -f "$AU_OUT"
+        AU_ERR=$("$CP_KRC" $AU_FLAG --arch=$A --target=none "$AU_D/a_time_ns.kr" -o "$AU_OUT" 2>&1); AU_ST=$?
+        AU_TAG=$(echo "$AU_FLAG" | tr -d '-' | tr '=' '_')
+        if [ "$AU_ST" != "0" ] && [ ! -f "$AU_OUT" ] \
+           && echo "$AU_ERR" | grep -q "error: --target=none: 'time_ns' is not available on bare metal"; then
+            PASS=$((PASS + 1)); echo "  audit_time_ns_${AU_TAG}_$A: PASS"
+        else
+            echo "FAIL: audit_time_ns_${AU_TAG}_$A (exit $AU_ST, artifact=$([ -f "$AU_OUT" ] && echo yes || echo no): '$AU_ERR')"
+            FAIL=$((FAIL + 1))
+        fi
+        rm -f "$AU_OUT"
+    done
+done
 
 # The refusals are keyed on target_os == 4 ONLY. Plain --freestanding on
 # riscv32/xtensa keeps its pre-existing "IR op N not yet implemented" refusal

@@ -2569,7 +2569,7 @@ fn ir_emit_arm64_insn(uint64 ii) {
             // the chmod syscall. No trap instruction is emitted on that path,
             // so Task 2's emitter guards structurally could not see it.
             uint64 bmse_a = "set_executable"
-            ir_bare_metal_builtin_refused(bmse_a, "a bare-metal image has no filesystem, so there is nothing for this builtin to act on")
+            bare_metal_builtin_refused(bmse_a, "a bare-metal image has no filesystem, so there is nothing for this builtin to act on")
         }
         return
     }
@@ -2680,7 +2680,7 @@ fn ir_emit_arm64_insn(uint64 ii) {
             // worse than a missing one, and no trap instruction is emitted on
             // this path for Task 2's emitter guards to catch.
             uint64 bmt_a = "time_ns"
-            ir_bare_metal_builtin_refused(bmt_a, "there is no OS clock; read the platform's cycle counter with inline asm, or supply time_ns with @builtin_override")
+            bare_metal_builtin_refused(bmt_a, "there is no OS clock; read the platform's cycle counter with inline asm, or supply time_ns with @builtin_override")
         } else {
             emit_a64_mov_imm(0, 0)
         }

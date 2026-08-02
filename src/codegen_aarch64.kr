@@ -4097,6 +4097,14 @@ fn gen_expr_a64(uint64 node) {
                 emit_a64_udiv(10, 10, 12)
                 // x0 = secs*1e9 + frac*1e9/freq
                 emit_a64_add(0, 9, 10)
+            } else if target_os == 4 {
+                // Bare metal. Same silent constant zero as the x86_64 legacy
+                // backend (src/codegen.kr) -- see the full note there. This
+                // arm replaces an `else { mov x0, #0 }` that let
+                // `--legacy --target=none` and `--emit=obj --target=none`
+                // ship an artifact reporting a timestamp of 0 forever.
+                uint64 bmt_la = "time_ns"
+                bare_metal_builtin_refused(bmt_la, "there is no OS clock; read the platform's cycle counter with inline asm, or supply time_ns with @builtin_override")
             } else {
                 emit_a64_mov_imm(0, 0)
             }

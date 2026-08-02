@@ -594,6 +594,86 @@ fn emit_x86_syscall_insn(uint64 what) {
     emit_byte(0x05)
 }
 
+// ---------------------------------------------------------------------------
+// Bare-metal (--target=none) builtin refusal, at the LOWERING
+// ---------------------------------------------------------------------------
+//
+// Task 2 put a guard on every trap-instruction EMITTER, which is what stops a
+// syscall reaching a bare-metal artifact. This is the complementary half, and
+// it exists because an emitter guard has two blind spots that no amount of
+// care at the emitter can close:
+//
+//   * It can only name the builtin that happened to emit the instruction
+//     FIRST. print()/println() allocate a formatting buffer before writing,
+//     so IR_ALLOC reached the emitter first and the refusal read
+//     "from 'alloc'" for a program that never wrote alloc.
+//
+//   * It cannot see a fall-through that emits NO TRAP AT ALL. This is the
+//     dangerous one: the builtin does not fail, it answers WRONGLY, and the
+//     artifact ships. Three instances were measured at 563b0f3, all of the
+//     same shape -- a `target_os` chain covering 0/3, then 1, then 2, with
+//     target_os == 4 falling off the end:
+//        set_executable  IR backend, arm64. Emitted zero instructions: the
+//                        chmod simply never happened, and the builtin still
+//                        returned 0, which is also what success returns.
+//        time_ns         IR backend, arm64. Fell into `else { mov x0, #0 }`
+//                        and returned a constant zero on every call.
+//        time_ns         LEGACY backend, BOTH arches, reached by --legacy and
+//                        by --emit=obj. Same `else { mov rax/x0, 0 }`. All
+//                        four of {--legacy, --emit=obj} x {x86_64, arm64}
+//                        compiled clean at exit 0 and WROTE AN ARTIFACT
+//                        containing a hard-coded zero where a timestamp
+//                        belongs.
+//     No trap instruction is emitted on any of these paths, so no emitter
+//     guard could ever see them. A silently wrong answer is worse than a
+//     missing one.
+//
+// Refusing at the lowering runs ONCE for all four architectures on the IR
+// backend, and is the only place that knows enough to suggest a REPLACEMENT
+// -- the actionable half of the message, and the reason this is not merely a
+// louder spelling of the emitter guard.
+//
+// It lives in codegen.kr rather than ir.kr because the LEGACY backend needs it
+// too: --legacy and --emit=obj have their own builtin dispatch in this file
+// and never call ir_lower_expr, so an ir.kr-only refusal leaves them
+// unguarded. That is exactly how the legacy time_ns zero survived the first
+// pass of this audit.
+//
+// PLACEMENT IS LOAD-BEARING. Every call sits inside an
+// `if skip_builtin == 0 && tok_matches(...)` arm, i.e. AFTER
+// builtin_override_lookup has had its say. A program that supplies its own
+// `println` through @builtin_override never reaches this refusal, which is
+// precisely how a bare-metal driver module is meant to displace a builtin.
+// Moving these checks earlier (to the top of the call-lowering, say) would
+// make every such module unusable.
+//
+// Every length is derived with str_len(), never counted.
+// The phrase "no operating system" is shared verbatim with
+// bare_metal_trap_refused above so a caller can assert that SOME
+// bare-metal refusal fired without having to know which of the two layers
+// caught it -- which layer that is legitimately differs between the IR and
+// legacy backends.
+fn bare_metal_builtin_refused(uint64 name, uint64 fix) {
+    uint64 bm1 = "error: --target=none: '"
+    write(2, bm1, str_len(bm1))
+    write(2, name, str_len(name))
+    uint64 bm2 = "' is not available on bare metal: there is no operating system to provide it. "
+    write(2, bm2, str_len(bm2))
+    write(2, fix, str_len(fix))
+    uint64 bm3 = "\n"
+    write(2, bm3, str_len(bm3))
+    exit(1)
+}
+
+// The three shared remedies, spelled once so every builtin in a family gives
+// the same advice. A per-builtin string is used where the advice differs.
+fn bm_fix_io() -> uint64 {
+    return "supply a bare-metal replacement with @builtin_override (a UART driver, say), or drop the call"
+}
+fn bm_fix_nofs() -> uint64 {
+    return "a bare-metal image has no filesystem, so there is nothing for this builtin to act on"
+}
+
 fn emit_u32_le(uint64 val) {
     uint8 b0 = val & 0xFF
     uint8 b1 = (val >> 8) & 0xFF
@@ -8104,6 +8184,21 @@ fn gen_expr(uint64 node) {
                 emit_byte(0x4D); emit_byte(0x0F); emit_byte(0xAF); emit_byte(0xD1)                   // imul r10, r9
                 emit_byte(0x4C); emit_byte(0x01); emit_byte(0xD0)                                    // add rax, r10
                 emit_byte(0x48); emit_byte(0x83); emit_byte(0xC4); emit_byte(0x30)                   // add rsp, 0x30
+            } else if target_os == 4 {
+                // Bare metal. THIS ARM SHIPPED A SILENT CONSTANT ZERO. The
+                // chain covers 0/3, then 1, then 2, and target_os == 4 fell
+                // into the `else` below, so `--legacy --target=none` and
+                // `--emit=obj --target=none` (which also routes here) both
+                // compiled time_ns() clean at exit 0 and wrote an artifact
+                // containing `mov rax, 0` where a timestamp belongs.
+                //
+                // No trap instruction is emitted on that path, so Task 2's
+                // emitter guard could not see it, and the IR backend's
+                // lowering refusal does not run here because --legacy never
+                // calls ir_lower_expr. Measured on all four of
+                // {--legacy, --emit=obj} x {x86_64, arm64}.
+                uint64 bmt_l = "time_ns"
+                bare_metal_builtin_refused(bmt_l, "there is no OS clock; read the platform's cycle counter with inline asm, or supply time_ns with @builtin_override")
             } else {
                 emit_mov_rax_imm(0)
             }

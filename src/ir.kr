@@ -658,74 +658,6 @@ fn ir_emit_syscall(uint64 dest, uint64 nr, uint64 bb, uint64 builtin) -> uint64 
 }
 
 // ---------------------------------------------------------------------------
-// Bare-metal (--target=none) builtin refusal, at the LOWERING
-// ---------------------------------------------------------------------------
-//
-// Task 2 put a guard on every trap-instruction EMITTER, which is what stops a
-// syscall reaching a bare-metal artifact. This is the complementary half, and
-// it exists because an emitter guard has two blind spots that no amount of
-// care at the emitter can close:
-//
-//   * It can only name the builtin that happened to emit the instruction
-//     FIRST. print()/println() allocate a formatting buffer before writing,
-//     so IR_ALLOC reached the emitter first and the refusal read
-//     "from 'alloc'" for a program that never wrote alloc.
-//
-//   * It cannot see a fall-through that emits NO TRAP AT ALL. arm64's
-//     IR_SET_EXEC and IR_TIME_NS gate on `target_os == 0 || target_os == 3`
-//     and then `else if == 1` / `else if == 2`, so target_os == 4 fell past
-//     every arm. Measured at 563b0f3, `--arch=arm64 --target=none` compiled
-//     both builtins CLEAN, exit 0, no diagnostic, while `--arch=x86_64
-//     --target=none` refused both at their syscall:
-//        set_executable  emitted zero instructions -- the chmod simply never
-//                        happened, and the builtin still returned 0, which is
-//                        also what success returns.
-//        time_ns         fell into a final `else { mov x0, #0 }` and so
-//                        returned a constant zero on every call.
-//     Neither path emits a trap instruction, so no emitter guard could ever
-//     see either one. A silently wrong answer is worse than a missing one.
-//
-// Refusing at the lowering also runs ONCE for all four architectures, and is
-// the only place that knows enough to suggest a REPLACEMENT -- which is the
-// actionable half of the message and the reason this is not merely a louder
-// spelling of the emitter guard.
-//
-// PLACEMENT IS LOAD-BEARING. Every call sits inside an
-// `if skip_builtin == 0 && tok_matches(...)` arm, i.e. AFTER
-// builtin_override_lookup has had its say. A program that supplies its own
-// `println` through @builtin_override never reaches this refusal, which is
-// precisely how a bare-metal driver module is meant to displace a builtin.
-// Moving these checks earlier (to the top of the call-lowering, say) would
-// make every such module unusable.
-//
-// Every length is derived with str_len(), never counted.
-// The phrase "no operating system" is shared verbatim with
-// bare_metal_trap_refused (src/codegen.kr) so a caller can assert that SOME
-// bare-metal refusal fired without having to know which of the two layers
-// caught it -- which layer that is legitimately differs between the IR and
-// legacy backends.
-fn ir_bare_metal_builtin_refused(uint64 name, uint64 fix) {
-    uint64 bm1 = "error: --target=none: '"
-    write(2, bm1, str_len(bm1))
-    write(2, name, str_len(name))
-    uint64 bm2 = "' is not available on bare metal: there is no operating system to provide it. "
-    write(2, bm2, str_len(bm2))
-    write(2, fix, str_len(fix))
-    uint64 bm3 = "\n"
-    write(2, bm3, str_len(bm3))
-    exit(1)
-}
-
-// The three shared remedies, spelled once so every builtin in a family gives
-// the same advice. A per-builtin string is used where the advice differs.
-fn ir_bm_fix_io() -> uint64 {
-    return "supply a bare-metal replacement with @builtin_override (a UART driver, say), or drop the call"
-}
-fn ir_bm_fix_nofs() -> uint64 {
-    return "a bare-metal image has no filesystem, so there is nothing for this builtin to act on"
-}
-
-// ---------------------------------------------------------------------------
 // Basic block helpers (internal)
 // ---------------------------------------------------------------------------
 
@@ -1877,7 +1809,7 @@ fn ir_lower_expr(uint64 node) -> uint64 {
             // lowering: there, exit() is a syscall and nothing else.
             if target_os == 4 && (target_arch == 0 || target_arch == 1) {
                 uint64 bmx = "exit"
-                ir_bare_metal_builtin_refused(bmx, "end main with `loop { }` instead -- there is no parent process to return a status to")
+                bare_metal_builtin_refused(bmx, "end main with `loop { }` instead -- there is no parent process to return a status to")
             }
             uint32 arg = ast_child(node)
             uint64 av = ir_lower_expr(arg)
@@ -1890,7 +1822,7 @@ fn ir_lower_expr(uint64 node) -> uint64 {
         if skip_builtin == 0 && tok_matches(wct, "write", 5) != 0 {
             if target_os == 4 {
                 uint64 bmw = "write"
-                ir_bare_metal_builtin_refused(bmw, ir_bm_fix_io())
+                bare_metal_builtin_refused(bmw, bm_fix_io())
             }
             uint32 arg1 = ast_child(node)
             uint64 fd = ir_lower_expr(arg1)
@@ -1909,7 +1841,7 @@ fn ir_lower_expr(uint64 node) -> uint64 {
         if skip_builtin == 0 && tok_matches(wct, "alloc", 5) != 0 {
             if target_os == 4 {
                 uint64 bma = "alloc"
-                ir_bare_metal_builtin_refused(bma, "supply a bare-metal allocator with @builtin_override, or use static storage instead of a heap -- alloc() is mmap/VirtualAlloc and there is no kernel to serve it")
+                bare_metal_builtin_refused(bma, "supply a bare-metal allocator with @builtin_override, or use static storage instead of a heap -- alloc() is mmap/VirtualAlloc and there is no kernel to serve it")
             }
             uint32 arg1 = ast_child(node)
             uint64 size_v = ir_lower_expr(arg1)
@@ -1921,7 +1853,7 @@ fn ir_lower_expr(uint64 node) -> uint64 {
         if skip_builtin == 0 && tok_matches(wct, "dealloc", 7) != 0 {
             if target_os == 4 {
                 uint64 bmd = "dealloc"
-                ir_bare_metal_builtin_refused(bmd, "supply a bare-metal allocator with @builtin_override, or use static storage instead of a heap -- dealloc() is munmap/VirtualFree and there is no kernel to serve it")
+                bare_metal_builtin_refused(bmd, "supply a bare-metal allocator with @builtin_override, or use static storage instead of a heap -- dealloc() is munmap/VirtualFree and there is no kernel to serve it")
             }
             uint32 arg1 = ast_child(node)
             uint64 ptr_v = ir_lower_expr(arg1)
@@ -2129,7 +2061,7 @@ fn ir_lower_expr(uint64 node) -> uint64 {
         if skip_builtin == 0 && tok_matches(wct, "exec_process_argv", 17) != 0 {
             if target_os == 4 {
                 uint64 bmea = "exec_process_argv"
-                ir_bare_metal_builtin_refused(bmea, "a bare-metal image has no process model and nothing to exec into")
+                bare_metal_builtin_refused(bmea, "a bare-metal image has no process model and nothing to exec into")
             }
             uint32 arg1 = ast_child(node)
             uint64 path_v = ir_lower_expr(arg1)
@@ -2143,7 +2075,7 @@ fn ir_lower_expr(uint64 node) -> uint64 {
         if skip_builtin == 0 && tok_matches(wct, "exec_process", 12) != 0 {
             if target_os == 4 {
                 uint64 bme = "exec_process"
-                ir_bare_metal_builtin_refused(bme, "a bare-metal image has no process model and nothing to exec into")
+                bare_metal_builtin_refused(bme, "a bare-metal image has no process model and nothing to exec into")
             }
             uint32 arg1 = ast_child(node)
             uint64 path_v = ir_lower_expr(arg1)
@@ -2181,7 +2113,7 @@ fn ir_lower_expr(uint64 node) -> uint64 {
             // clean, while x86_64 refused at the chmod syscall.
             if target_os == 4 {
                 uint64 bmse = "set_executable"
-                ir_bare_metal_builtin_refused(bmse, ir_bm_fix_nofs())
+                bare_metal_builtin_refused(bmse, bm_fix_nofs())
             }
             uint32 arg1 = ast_child(node)
             uint64 path_v = ir_lower_expr(arg1)
@@ -2201,16 +2133,20 @@ fn ir_lower_expr(uint64 node) -> uint64 {
         }
         // time_ns() → IR_TIME_NS
         if skip_builtin == 0 && tok_matches(wct, "time_ns", 7) != 0 {
-            // Same arm64 fall-through as set_executable above: ir_aarch64.kr's
-            // IR_TIME_NS gates on `target_os == 0 || target_os == 3`, then
-            // `else if == 1`, `else if == 2`, and target_os == 4 fell off the
-            // end emitting nothing -- so the destination register held
-            // whatever was in x0, and the program compiled clean. x86_64
-            // refused at the clock_gettime syscall. Neither behaviour is
-            // right; both are replaced by this one refusal.
+            // Same arm64 fall-through as set_executable above, with one
+            // difference worth stating precisely: ir_aarch64.kr's IR_TIME_NS
+            // gates on `target_os == 0 || target_os == 3`, then
+            // `else if == 1`, `else if == 2`, and target_os == 4 fell into a
+            // final `else { mov x0, #0 }`. So it did NOT leave a garbage
+            // register -- it returned a CONSTANT ZERO on every call, and the
+            // program compiled clean. (set_executable is the one that emitted
+            // nothing at all.) x86_64 refused at the clock_gettime syscall.
+            // Neither behaviour is right; both are replaced by this refusal.
+            // The legacy backend had the identical zero on both arches --
+            // see src/codegen.kr's bare_metal_builtin_refused header.
             if target_os == 4 {
                 uint64 bmt = "time_ns"
-                ir_bare_metal_builtin_refused(bmt, "there is no OS clock; read the platform's cycle counter with inline asm, or supply time_ns with @builtin_override")
+                bare_metal_builtin_refused(bmt, "there is no OS clock; read the platform's cycle counter with inline asm, or supply time_ns with @builtin_override")
             }
             uint64 dest = ir_new_vreg()
             ir_emit(IR_TIME_NS, dest, 0, 0, 0, ir_current_bb)
@@ -2367,7 +2303,7 @@ fn ir_lower_expr(uint64 node) -> uint64 {
         if skip_builtin == 0 && tok_matches(wct, "print_str", 9) != 0 {
             if target_os == 4 {
                 uint64 bmps = "print_str"
-                ir_bare_metal_builtin_refused(bmps, ir_bm_fix_io())
+                bare_metal_builtin_refused(bmps, bm_fix_io())
             }
             uint32 first_arg = ast_child(node)
             uint64 s_v = ir_lower_expr(first_arg)
@@ -2388,7 +2324,7 @@ fn ir_lower_expr(uint64 node) -> uint64 {
         if skip_builtin == 0 && tok_matches(wct, "println_str", 11) != 0 {
             if target_os == 4 {
                 uint64 bmpls = "println_str"
-                ir_bare_metal_builtin_refused(bmpls, ir_bm_fix_io())
+                bare_metal_builtin_refused(bmpls, bm_fix_io())
             }
             uint32 first_arg = ast_child(node)
             uint64 s_v = ir_lower_expr(first_arg)
@@ -2423,7 +2359,7 @@ fn ir_lower_expr(uint64 node) -> uint64 {
         if skip_builtin == 0 && tok_matches(wct, "read", 4) != 0 {
             if target_os == 4 {
                 uint64 bmr = "read"
-                ir_bare_metal_builtin_refused(bmr, ir_bm_fix_io())
+                bare_metal_builtin_refused(bmr, bm_fix_io())
             }
             uint32 arg1 = ast_child(node)
             uint64 fd = ir_lower_expr(arg1)
@@ -2523,7 +2459,7 @@ fn ir_lower_expr(uint64 node) -> uint64 {
         if skip_builtin == 0 && tok_matches(wct, "file_open", 9) != 0 {
             if target_os == 4 {
                 uint64 bmfo = "file_open"
-                ir_bare_metal_builtin_refused(bmfo, ir_bm_fix_nofs())
+                bare_metal_builtin_refused(bmfo, bm_fix_nofs())
             }
             uint32 arg1 = ast_child(node)
             uint64 path_v = ir_lower_expr(arg1)
@@ -2559,7 +2495,7 @@ fn ir_lower_expr(uint64 node) -> uint64 {
         if skip_builtin == 0 && tok_matches(wct, "file_close", 10) != 0 {
             if target_os == 4 {
                 uint64 bmfc = "file_close"
-                ir_bare_metal_builtin_refused(bmfc, ir_bm_fix_nofs())
+                bare_metal_builtin_refused(bmfc, bm_fix_nofs())
             }
             uint32 arg1 = ast_child(node)
             uint64 fd_v = ir_lower_expr(arg1)
@@ -2571,7 +2507,7 @@ fn ir_lower_expr(uint64 node) -> uint64 {
         if skip_builtin == 0 && tok_matches(wct, "file_write", 10) != 0 {
             if target_os == 4 {
                 uint64 bmfw = "file_write"
-                ir_bare_metal_builtin_refused(bmfw, ir_bm_fix_nofs())
+                bare_metal_builtin_refused(bmfw, bm_fix_nofs())
             }
             uint32 arg1 = ast_child(node)
             uint64 fd_v = ir_lower_expr(arg1)
@@ -2589,7 +2525,7 @@ fn ir_lower_expr(uint64 node) -> uint64 {
         if skip_builtin == 0 && tok_matches(wct, "file_read", 9) != 0 {
             if target_os == 4 {
                 uint64 bmfr = "file_read"
-                ir_bare_metal_builtin_refused(bmfr, ir_bm_fix_nofs())
+                bare_metal_builtin_refused(bmfr, bm_fix_nofs())
             }
             uint32 arg1 = ast_child(node)
             uint64 fd_v = ir_lower_expr(arg1)
@@ -2609,7 +2545,7 @@ fn ir_lower_expr(uint64 node) -> uint64 {
         if skip_builtin == 0 && tok_matches(wct, "file_size", 9) != 0 {
             if target_os == 4 {
                 uint64 bmfs = "file_size"
-                ir_bare_metal_builtin_refused(bmfs, ir_bm_fix_nofs())
+                bare_metal_builtin_refused(bmfs, bm_fix_nofs())
             }
             uint32 arg1 = ast_child(node)
             uint64 fd_v = ir_lower_expr(arg1)
@@ -2645,7 +2581,7 @@ fn ir_lower_expr(uint64 node) -> uint64 {
             if target_os == 4 {
                 uint64 bmpr = "print"
                 if is_println != 0 { bmpr = "println" }
-                ir_bare_metal_builtin_refused(bmpr, ir_bm_fix_io())
+                bare_metal_builtin_refused(bmpr, bm_fix_io())
             }
             uint64 buf_v = ir_new_vreg()
             ir_emit(IR_ALLOC, buf_v, 0, 0, 4096, ir_current_bb)
@@ -2789,7 +2725,7 @@ fn ir_lower_expr(uint64 node) -> uint64 {
             // emit_x86_syscall_insn in src/codegen.kr).
             if target_os == 4 {
                 uint64 bmsr = "syscall_raw"
-                ir_bare_metal_builtin_refused(bmsr, "there is no kernel to trap into; use inline asm if the target really needs that raw instruction")
+                bare_metal_builtin_refused(bmsr, "there is no kernel to trap into; use inline asm if the target really needs that raw instruction")
             }
             // Evaluate all 7 args
             uint64[7] sc_vregs
