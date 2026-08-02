@@ -8686,6 +8686,44 @@ for A in x86_64 arm64; do
     rm -f "$PV_D/both.out"
 done
 
+# f-strings need the OTHER provider. An f-string's value is a pointer that may
+# outlive the frame, so its buffer cannot become a stack slot the way print's
+# formatting scratch does -- it stays a heap allocation and therefore needs
+# std/heap_bump.kr as well as a UART. Asserted in both directions: refused with
+# the UART alone, and NAMING 'f-string' rather than the 'alloc' the emitter
+# backstop used to report for a program containing no alloc() at all.
+for A in x86_64 arm64; do
+    PV_M=$(pv_mod "$A")
+    TOTAL=$((TOTAL + 1))
+    printf 'import "%s"\nfn main() {\n    uint64 y = 5\n    println(f"x {y}")\n    loop { }\n}\n' "$PV_M" > "$PV_D/fs1.kr"
+    rm -f "$PV_D/fs1.out"
+    PV_ERR=$("$PV_KRC" --arch=$A --target=none "$PV_D/fs1.kr" -o "$PV_D/fs1.out" 2>&1); PV_ST=$?
+    if [ "$PV_ST" = "0" ] || [ -f "$PV_D/fs1.out" ]; then
+        echo "FAIL: provider_fstring_needs_alloc_$A (compiled with no allocator)"; FAIL=$((FAIL + 1))
+    elif echo "$PV_ERR" | grep -q "reached the emitter"; then
+        echo "FAIL: provider_fstring_needs_alloc_$A (generic choke-point message, and it names 'alloc' for a program with no alloc())"; FAIL=$((FAIL + 1))
+    elif ! echo "$PV_ERR" | grep -q "error: --target=none: 'f-string' is not available on bare metal"; then
+        echo "FAIL: provider_fstring_needs_alloc_$A (refusal does not name 'f-string': '$PV_ERR')"; FAIL=$((FAIL + 1))
+    else
+        PASS=$((PASS + 1)); echo "  provider_fstring_needs_alloc_$A: PASS"
+    fi
+    rm -f "$PV_D/fs1.out"
+
+    TOTAL=$((TOTAL + 1))
+    printf 'import "%s"\nimport "../std/heap_bump.kr"\nfn main() {\n    heap_bump_init(0x200000, 0x100000)\n    uint64 y = 5\n    println(f"x {y}")\n    loop { }\n}\n' "$PV_M" > "$PV_D/fs2.kr"
+    rm -f "$PV_D/fs2.out"
+    PV_ERR=$("$PV_KRC" --arch=$A --target=none "$PV_D/fs2.kr" -o "$PV_D/fs2.out" 2>&1); PV_ST=$?
+    PV_IR=$("$PV_KRC" --arch=$A --target=none --emit=ir "$PV_D/fs2.kr" 2>&1)
+    if [ "$PV_ST" != "0" ] || [ ! -f "$PV_D/fs2.out" ]; then
+        echo "FAIL: provider_fstring_with_alloc_$A (exit $PV_ST: '$PV_ERR')"; FAIL=$((FAIL + 1))
+    elif echo "$PV_IR" | grep -qE "syscall|= alloc"; then
+        echo "FAIL: provider_fstring_with_alloc_$A (IR still contains a syscall or IR_ALLOC)"; FAIL=$((FAIL + 1))
+    else
+        PASS=$((PASS + 1)); echo "  provider_fstring_with_alloc_$A: PASS"
+    fi
+    rm -f "$PV_D/fs2.out"
+done
+
 # Import order must not matter. The risk is real and specific: a module that
 # calls println and is PARSED BEFORE the provider module would see no
 # registration yet if the routing decision were made during parsing. It is

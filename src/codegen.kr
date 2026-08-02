@@ -11915,6 +11915,15 @@ fn dce_scan_node(uint64 node) {
         }
     }
 
+    // Same problem, other provider: an FString (kind 50) allocates its result
+    // buffer, and under --target=none that IR_ALLOC becomes a call to the
+    // `alloc` override (src/ir.kr). No Call node exists for it in the AST, so
+    // without this the allocator is pruned and the f-string calls nothing.
+    if kind == 50 && target_os == 4 {
+        uint64 dce_atok = builtin_override_tok_of("alloc", 5)
+        if dce_atok != 0xFFFFFFFF { dce_add(dce_atok) }
+    }
+
     // Recurse into children
     uint32 ch = ast_child(node)
     uint64 wch = ch

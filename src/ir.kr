@@ -3914,7 +3914,35 @@ fn ir_lower_expr(uint64 node) -> uint64 {
     // FString (50) — build interpolated string in a 4096-byte stack buffer
     if kind == 50 {
         uint64 buf_v = ir_new_vreg()
-        ir_emit(IR_ALLOC, buf_v, 0, 0, 4096, ir_current_bb)
+        // --target=none: IR_ALLOC is mmap/VirtualAlloc, which the emitter
+        // guard refuses. Routed to the `alloc` @builtin_override instead, the
+        // same way the print family is routed to `write`.
+        //
+        // Unlike print's formatting buffer, this one CANNOT become a stack
+        // slot: an f-string is an expression whose value is a pointer, and the
+        // caller may store it somewhere that outlives the frame. Heap
+        // semantics are the semantics f-strings already have, so the heap is
+        // what a bare-metal f-string needs -- import "std/heap_bump.kr" and
+        // call heap_bump_init.
+        //
+        // Refusing here rather than at the emitter is the difference between
+        // "'f-string' needs an allocator on bare metal" and "SYSCALL reached
+        // the emitter from 'alloc'" for a program whose source contains no
+        // alloc() at all -- the same wrong-name failure that made print's own
+        // refusal necessary at 563b0f3.
+        if target_os == 4 {
+            uint64 fs_atok = builtin_override_tok_of("alloc", 5)
+            if fs_atok == 0xFFFFFFFF {
+                uint64 bmfs = "f-string"
+                bare_metal_builtin_refused(bmfs, "an f-string builds its result in a heap buffer, and the result may outlive the frame, so a stack slot will not do -- supply `@builtin_override fn alloc(uint64 n) -> uint64` (import \"std/heap_bump.kr\" and call heap_bump_init), or format with print()/println() instead, which needs no allocator")
+            }
+            uint64 fs_size = ir_new_vreg()
+            ir_emit(IR_CONST, fs_size, 0, 0, 4096, ir_current_bb)
+            ir_emit(IR_ARG, 0, fs_size, 0, 0, ir_current_bb)
+            ir_emit(IR_CALL, buf_v, 1, 0, fs_atok, ir_current_bb)
+        } else {
+            ir_emit(IR_ALLOC, buf_v, 0, 0, 4096, ir_current_bb)
+        }
         uint64 off_v = ir_new_vreg()
         ir_emit(IR_CONST, off_v, 0, 0, 0, ir_current_bb)
 
