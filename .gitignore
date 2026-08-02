@@ -41,6 +41,12 @@ node_modules/
 test_tmp_*.kr
 test_while.kr
 bt_test.kr
+# The --target=none provider tests need their programs INSIDE the repo:
+# imports resolve relative to the importing file, so a program in /tmp would
+# either fail to resolve "../std/uart_16550.kr" or silently pick up an
+# installed stdlib instead of the tree under test. The directory is removed at
+# the end of the block; this covers an aborted run.
+/krc_pv_*/
 
 # Built packages
 packaging/deb/*.deb
