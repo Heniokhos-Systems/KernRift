@@ -318,9 +318,10 @@ fn emit_a64_cset(uint64 rd, uint64 cond) {
 // immediate). Normalising them is a macOS behaviour change and is NOT done here.
 //
 // Inline `asm { "svc #N" }` never reaches this function: the asm string
-// matcher (codegen.kr) assembles the word itself. That is deliberate and
-// matches x86/riscv32 -- an instruction the programmer typed is an explicit
-// escape hatch, not a silent injection by a builtin.
+// matcher (codegen.kr) assembles the word itself, so it still emits an SVC
+// under --target=none. That is INTENTIONAL and matches x86/riscv32/xtensa --
+// see emit_x86_syscall_insn (codegen.kr) for the full rationale. Inline asm is
+// the one path that bypasses every one of these guards, on purpose.
 fn emit_a64_svc_word(uint64 word, uint64 what) {
     if target_os == 4 {
         uint64 a64svc = "SVC"

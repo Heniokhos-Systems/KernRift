@@ -222,6 +222,23 @@ static uint64 ir_insn_src_tok = 0
 // during a given statement's lowering inherits the same line.
 static uint64 ir_current_src_tok = 0
 
+// Parallel table of "reaching builtin" name pointers per instruction, in the
+// same shape as ir_insn_src_tok above (index-keyed, insn layout untouched).
+//
+// IR_SYSCALL carries the canonical Linux syscall NUMBER in imm, and that
+// number is not a builtin: nr 1 is emitted by write(), print(), println(),
+// print_str(), println_str() and file_write(); nr 0 by read() and
+// file_read(); nr 8 twice by file_size(). So the emitter cannot recover which
+// builtin it is serving from imm alone, and a --target=none refusal would
+// have to say "syscall" six different ways. The lowering records the name
+// here instead (via ir_emit_syscall), and the trap emitters on all three IR
+// backends read it back, so the refusal names the construct the programmer
+// actually wrote. That is what makes the guard's output a worklist.
+//
+// Zero means "no name recorded" and every reader falls back to a generic
+// label -- never a guessed one: a wrong attribution is worse than a vague one.
+static uint64 ir_insn_origin = 0
+
 @export
 fn ir_set_current_src_tok(uint64 tok) { ir_current_src_tok = tok }
 
@@ -277,6 +294,11 @@ fn ir_init() {
         // 4 bytes per insn — enough for a u32 token index. Shares the
         // same cap as the main insn buf so indexing matches.
         ir_insn_src_tok = alloc(ir_insn_cap * 4)
+        // 8 bytes per insn — a pointer to a static name literal. Same cap,
+        // same indexing. ir_emit zeroes each slot as it is claimed, so a
+        // stale name from a previously-compiled function can never be read
+        // back (ir_init resets ir_insn_count but does not clear the arena).
+        ir_insn_origin = alloc(ir_insn_cap * 8)
     }
     ir_insn_count = 0
     ir_current_src_tok = 0
@@ -442,6 +464,17 @@ fn ir_insn_src_tok_at(uint64 idx) -> uint64 {
     return v
 }
 
+// The builtin name recorded for instruction `idx`, or 0 if none was recorded.
+// Read by the --target=none trap emitters on all three IR backends.
+@export
+fn ir_insn_origin_at(uint64 idx) -> uint64 {
+    if ir_insn_origin == 0 { return 0 }
+    uint64 slot = ir_insn_origin + idx * 8
+    uint64 v = 0
+    unsafe { *(slot as uint64) -> v }
+    return v
+}
+
 fn ir_insn_opcode(uint64 idx) -> uint64 {
     uint64 p = ir_insn_base(idx)
     uint32 val = 0
@@ -545,6 +578,7 @@ fn ir_insn_ensure() {
     if ir_insn_count < ir_insn_cap { return }
     ir_insn_buf = grow_buf(ir_insn_buf, ir_insn_cap * 32, ir_insn_cap * 64)
     ir_insn_src_tok = grow_buf(ir_insn_src_tok, ir_insn_cap * 4, ir_insn_cap * 8)
+    ir_insn_origin = grow_buf(ir_insn_origin, ir_insn_cap * 8, ir_insn_cap * 16)
     ir_insn_cap = ir_insn_cap * 2
 }
 
@@ -561,6 +595,12 @@ fn ir_emit(uint64 opcode, uint64 dest, uint64 src1, uint64 src2, uint64 imm64, u
     uint64 st_slot = ir_insn_src_tok + idx * 4
     uint32 st = ir_current_src_tok
     unsafe { *(st_slot as uint32) = st }
+    // Claim the origin slot as "no name recorded". ir_emit_syscall overwrites
+    // it immediately after; every other opcode leaves it zero. Zeroing here
+    // rather than in ir_init is what keeps a stale pointer from the previous
+    // function out of this one.
+    uint64 og_slot = ir_insn_origin + idx * 8
+    unsafe { *(og_slot as uint64) = 0 }
     ir_insn_count = ir_insn_count + 1
     uint64 base = ir_insn_base(idx)
 
@@ -600,6 +640,20 @@ fn ir_emit(uint64 opcode, uint64 dest, uint64 src1, uint64 src2, uint64 imm64, u
     // Append this instruction to the basic block's list
     ir_bb_append_insn(bb, idx)
 
+    return idx
+}
+
+// Emit an IR_SYSCALL and record which builtin lowered to it.
+//
+// EVERY IR_SYSCALL must go through here rather than ir_emit directly, because
+// imm (the canonical Linux syscall number) does not identify the builtin --
+// see the ir_insn_origin comment above. `builtin` is a pointer to a static
+// name literal; it must name what the programmer wrote (`file_write`, not
+// `write`), since the --target=none refusal quotes it verbatim.
+fn ir_emit_syscall(uint64 dest, uint64 nr, uint64 bb, uint64 builtin) -> uint64 {
+    uint64 idx = ir_emit(IR_SYSCALL, dest, 0, 0, nr, bb)
+    uint64 og_slot = ir_insn_origin + idx * 8
+    unsafe { *(og_slot as uint64) = builtin }
     return idx
 }
 
@@ -1748,7 +1802,7 @@ fn ir_lower_expr(uint64 node) -> uint64 {
             uint64 av = ir_lower_expr(arg)
             ir_emit(IR_ARG, 0, av, 0, 0, ir_current_bb)
             uint64 dest = ir_new_vreg()
-            ir_emit(IR_SYSCALL, dest, 0, 0, 231, ir_current_bb)
+            ir_emit_syscall(dest, 231, ir_current_bb, "exit")
             return dest
         }
         // write(fd, buf, len) → syscall 1
@@ -1763,7 +1817,7 @@ fn ir_lower_expr(uint64 node) -> uint64 {
             ir_emit(IR_ARG, 0, buf, 0, 1, ir_current_bb)
             ir_emit(IR_ARG, 0, len, 0, 2, ir_current_bb)
             uint64 dest = ir_new_vreg()
-            ir_emit(IR_SYSCALL, dest, 0, 0, 1, ir_current_bb)
+            ir_emit_syscall(dest, 1, ir_current_bb, "write")
             return dest
         }
         // alloc(size) → IR_ALLOC
@@ -2200,7 +2254,7 @@ fn ir_lower_expr(uint64 node) -> uint64 {
             ir_emit(IR_ARG, 0, s_v, 0, 1, ir_current_bb)
             ir_emit(IR_ARG, 0, len_v, 0, 2, ir_current_bb)
             uint64 wr = ir_new_vreg()
-            ir_emit(IR_SYSCALL, wr, 0, 0, 1, ir_current_bb)
+            ir_emit_syscall(wr, 1, ir_current_bb, "print_str")
             uint64 zero = ir_new_vreg()
             ir_emit(IR_CONST, zero, 0, 0, 0, ir_current_bb)
             return zero
@@ -2217,7 +2271,7 @@ fn ir_lower_expr(uint64 node) -> uint64 {
             ir_emit(IR_ARG, 0, s_v, 0, 1, ir_current_bb)
             ir_emit(IR_ARG, 0, len_v, 0, 2, ir_current_bb)
             uint64 wr = ir_new_vreg()
-            ir_emit(IR_SYSCALL, wr, 0, 0, 1, ir_current_bb)
+            ir_emit_syscall(wr, 1, ir_current_bb, "println_str")
             // Write newline
             uint64 nl_v = ir_new_vreg()
             ir_emit(IR_CONST, nl_v, 0, 0, 10, ir_current_bb)
@@ -2230,7 +2284,7 @@ fn ir_lower_expr(uint64 node) -> uint64 {
             ir_emit(IR_ARG, 0, nlbuf, 0, 1, ir_current_bb)
             ir_emit(IR_ARG, 0, one_v, 0, 2, ir_current_bb)
             uint64 wr2 = ir_new_vreg()
-            ir_emit(IR_SYSCALL, wr2, 0, 0, 1, ir_current_bb)
+            ir_emit_syscall(wr2, 1, ir_current_bb, "println_str")
             ir_emit(IR_DEALLOC, 0, nlbuf, 0, 0, ir_current_bb)
             uint64 zero = ir_new_vreg()
             ir_emit(IR_CONST, zero, 0, 0, 0, ir_current_bb)
@@ -2248,7 +2302,7 @@ fn ir_lower_expr(uint64 node) -> uint64 {
             ir_emit(IR_ARG, 0, buf, 0, 1, ir_current_bb)
             ir_emit(IR_ARG, 0, len, 0, 2, ir_current_bb)
             uint64 dest = ir_new_vreg()
-            ir_emit(IR_SYSCALL, dest, 0, 0, 0, ir_current_bb)
+            ir_emit_syscall(dest, 0, ir_current_bb, "read")
             return dest
         }
         // memcpy(dst, src, len) → IR_MEMCPY
@@ -2362,7 +2416,7 @@ fn ir_lower_expr(uint64 node) -> uint64 {
             ir_emit(IR_ARG, 0, flags_v, 0, 1, ir_current_bb)
             ir_emit(IR_ARG, 0, perm_v, 0, 2, ir_current_bb)
             uint64 dest = ir_new_vreg()
-            ir_emit(IR_SYSCALL, dest, 0, 0, 2, ir_current_bb)
+            ir_emit_syscall(dest, 2, ir_current_bb, "file_open")
             return dest
         }
         if skip_builtin == 0 && tok_matches(wct, "file_close", 10) != 0 {
@@ -2370,7 +2424,7 @@ fn ir_lower_expr(uint64 node) -> uint64 {
             uint64 fd_v = ir_lower_expr(arg1)
             ir_emit(IR_ARG, 0, fd_v, 0, 0, ir_current_bb)
             uint64 dest = ir_new_vreg()
-            ir_emit(IR_SYSCALL, dest, 0, 0, 3, ir_current_bb)
+            ir_emit_syscall(dest, 3, ir_current_bb, "file_close")
             return dest
         }
         if skip_builtin == 0 && tok_matches(wct, "file_write", 10) != 0 {
@@ -2384,7 +2438,7 @@ fn ir_lower_expr(uint64 node) -> uint64 {
             ir_emit(IR_ARG, 0, buf_v, 0, 1, ir_current_bb)
             ir_emit(IR_ARG, 0, len_v, 0, 2, ir_current_bb)
             uint64 dest = ir_new_vreg()
-            ir_emit(IR_SYSCALL, dest, 0, 0, 1, ir_current_bb)
+            ir_emit_syscall(dest, 1, ir_current_bb, "file_write")
             return dest
         }
         if skip_builtin == 0 && tok_matches(wct, "file_read", 9) != 0 {
@@ -2398,7 +2452,7 @@ fn ir_lower_expr(uint64 node) -> uint64 {
             ir_emit(IR_ARG, 0, buf_v, 0, 1, ir_current_bb)
             ir_emit(IR_ARG, 0, len_v, 0, 2, ir_current_bb)
             uint64 dest = ir_new_vreg()
-            ir_emit(IR_SYSCALL, dest, 0, 0, 0, ir_current_bb)
+            ir_emit_syscall(dest, 0, ir_current_bb, "file_read")
             return dest
         }
 
@@ -2415,13 +2469,13 @@ fn ir_lower_expr(uint64 node) -> uint64 {
             ir_emit(IR_ARG, 0, zero_v, 0, 1, ir_current_bb)
             ir_emit(IR_ARG, 0, two_v, 0, 2, ir_current_bb)
             uint64 size_v = ir_new_vreg()
-            ir_emit(IR_SYSCALL, size_v, 0, 0, 8, ir_current_bb)
+            ir_emit_syscall(size_v, 8, ir_current_bb, "file_size")
             // lseek(fd, 0, SEEK_SET=0) -> rewind
             ir_emit(IR_ARG, 0, fd_v, 0, 0, ir_current_bb)
             ir_emit(IR_ARG, 0, zero_v, 0, 1, ir_current_bb)
             ir_emit(IR_ARG, 0, zero_v, 0, 2, ir_current_bb)
             uint64 dummy = ir_new_vreg()
-            ir_emit(IR_SYSCALL, dummy, 0, 0, 8, ir_current_bb)
+            ir_emit_syscall(dummy, 8, ir_current_bb, "file_size")
             return size_v
         }
 
@@ -2541,7 +2595,11 @@ fn ir_lower_expr(uint64 node) -> uint64 {
             ir_emit(IR_ARG, 0, buf_v, 0, 1, ir_current_bb)
             ir_emit(IR_ARG, 0, off_v, 0, 2, ir_current_bb)
             uint64 wr = ir_new_vreg()
-            ir_emit(IR_SYSCALL, wr, 0, 0, 1, ir_current_bb)
+            // print() and println() share this lowering (println just appends a
+            // newline to the same buffer), so name whichever one was written.
+            uint64 pr_builtin = "print"
+            if is_println != 0 { pr_builtin = "println" }
+            ir_emit_syscall(wr, 1, ir_current_bb, pr_builtin)
             ir_emit(IR_DEALLOC, 0, buf_v, 0, 0, ir_current_bb)
             uint64 zero = ir_new_vreg()
             ir_emit(IR_CONST, zero, 0, 0, 0, ir_current_bb)
@@ -9121,7 +9179,13 @@ fn ir_emit_x86_insn(uint64 ii) {
         // Linux (0), macOS (1), Android (3): raw syscall with OS-specific numbers
         uint64 real_nr = ir_x86_syscall_nr(imm)
         ir_emit_mov_r64_imm64(0, real_nr)
-        emit_x86_syscall_insn("syscall")
+        // Name the builtin that lowered to this IR_SYSCALL, not the IR op:
+        // imm alone cannot distinguish write() from file_write() from print().
+        // Falls back to a generic label if nothing was recorded -- never a
+        // guessed name (see ir_insn_origin, ir.kr).
+        uint64 sc_who = ir_insn_origin_at(ii)
+        if sc_who == 0 { sc_who = "an unnamed syscall lowering" }
+        emit_x86_syscall_insn(sc_who)
         if dst_r != 0xFFFFFFFF && dst_r != 0 {
             ir_emit_mov_r64_r64(dst_r, 0)
         }

@@ -571,10 +571,20 @@ fn bare_metal_trap_refused(uint64 insn, uint64 what) {
 // than asserted. Mirrors emit_a64_svc's role on arm64.
 //
 // `what` names the reaching builtin. An explicit inline `asm { "syscall" }`
-// passes what = 0 and is PERMITTED: the programmer typed the instruction, so
-// it is a deliberate escape hatch, not a silent injection by a builtin. That
-// matches arm64 and riscv32, where inline `asm { "svc #0" }` / `asm { "ecall" }`
-// are assembled by the asm string matcher and never reach these emitters at all.
+// passes what = 0 and is PERMITTED.
+//
+// INTENTIONAL, NOT AN OVERSIGHT: inline asm is the ONE path that emits a trap
+// instruction under --target=none on all four architectures. `asm { "syscall" }`
+// here, and `asm { "svc #N" }` / `asm { "ecall" }` on arm64 and riscv32, which
+// the asm string matcher assembles itself and which therefore never reach these
+// emitters at all. It is an escape hatch on purpose: the programmer typed the
+// instruction, and bare-metal code legitimately needs raw instructions the
+// compiler has no builtin for. What Task 2 exists to stop is a syscall the
+// compiler INJECTS silently through a builtin's Linux fall-through, not one
+// the source asked for. Refusing inline asm would leave no way to write it.
+//
+// Sub-project E makes inline asm considerably more capable; do not read this
+// carve-out as a gap that was missed when revisiting it then.
 fn emit_x86_syscall_insn(uint64 what) {
     if target_os == 4 && what != 0 {
         uint64 x86sc = "SYSCALL"

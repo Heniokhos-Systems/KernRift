@@ -8149,17 +8149,49 @@ for CP_FLAG in --legacy --emit=obj; do
     rm -f /tmp/krc_choke_bin_$$
 done
 
-# The diagnostic must name the REACHING BUILTIN, not just the instruction --
-# that is what turns the remaining per-OS audit into a worklist the compiler
-# hands you instead of ~60 sites found by inspection.
-TOTAL=$((TOTAL + 1))
-CP_ERR=$("$CP_KRC" --arch=x86_64 --target=none "$CP_SRC" -o /tmp/krc_choke_bin_$$ 2>&1)
-if echo "$CP_ERR" | grep -q "SYSCALL reached the emitter from 'syscall'"; then
-    PASS=$((PASS + 1)); echo "  choke_point_names_builtin: PASS"
-else
-    echo "FAIL: choke_point_names_builtin (got '$CP_ERR')"; FAIL=$((FAIL + 1))
-fi
-rm -f /tmp/krc_choke_bin_$$
+# The diagnostic must name the REACHING BUILTIN, not just the instruction or
+# the IR op -- that is what turns the remaining per-OS audit into a worklist
+# the compiler hands you instead of ~60 sites found by inspection.
+#
+# This is not free on the IR path: IR_SYSCALL carries the canonical Linux
+# syscall NUMBER, and that number is many-to-one with builtins (nr 1 is
+# write/print/println/print_str/println_str/file_write; nr 0 is read and
+# file_read; nr 8 is file_size twice). The lowering records the name in the
+# ir_insn_origin parallel table and the emitters read it back. Assert several
+# distinct builtins so a regression to the coarse "syscall" label -- or a
+# cross-wired name, which is worse -- fails here.
+CP_CASE_NAMES="exit write read print_str println_str file_open file_close file_write file_read file_size"
+for CP_B in $CP_CASE_NAMES; do
+    case $CP_B in
+        exit)        CP_BODY='exit(0)';;
+        write)       CP_BODY='write(1, "x", 1)';;
+        read)        CP_BODY='uint64 n = read(0, 4096, 1) exit(n)';;
+        print_str)   CP_BODY='print_str("x")';;
+        println_str) CP_BODY='println_str("x")';;
+        file_open)   CP_BODY='uint64 f = file_open("x", 0) file_close(f)';;
+        file_close)  CP_BODY='file_close(3)';;
+        file_write)  CP_BODY='file_write(3, "x", 1)';;
+        file_read)   CP_BODY='uint64 n = file_read(3, 4096, 1) exit(n)';;
+        file_size)   CP_BODY='uint64 s = file_size(3) write(1, "x", s)';;
+    esac
+    printf 'fn main() { %s }\n' "$CP_BODY" > "$CP_SRC"
+    for A in x86_64 arm64; do
+        TOTAL=$((TOTAL + 1))
+        CP_ERR=$("$CP_KRC" --arch=$A --target=none "$CP_SRC" -o /tmp/krc_choke_bin_$$ 2>&1)
+        if echo "$CP_ERR" | grep -q "reached the emitter from '$CP_B'"; then
+            PASS=$((PASS + 1)); echo "  choke_point_names_${CP_B}_$A: PASS"
+        else
+            echo "FAIL: choke_point_names_${CP_B}_$A (got '$CP_ERR')"; FAIL=$((FAIL + 1))
+        fi
+        rm -f /tmp/krc_choke_bin_$$
+    done
+done
+# print()/println() are NOT in that list on purpose, and the reason is worth
+# recording: their lowering allocates a formatting buffer first, so IR_ALLOC
+# reaches the emitter before their IR_SYSCALL does and the refusal correctly
+# names `alloc`. That is the first builtin-injected trap, not a misattribution
+# -- asserting `print` here would be asserting something untrue.
+printf 'fn main() { exit(0) }\n' > "$CP_SRC"
 
 # The diagnostic must not be TRUNCATED. Every write() in the refusal path
 # derives its length with str_len() rather than a hand-counted literal,

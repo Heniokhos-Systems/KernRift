@@ -1636,7 +1636,11 @@ fn ir_emit_arm64_insn(uint64 ii) {
         // Map abstract syscall number to ARM64 number
         uint64 real_nr = ir_a64_syscall_nr(imm)
         emit_a64_syscall_nr(real_nr)
-        emit_a64_svc("syscall")
+        // See ir.kr's IR_SYSCALL case: imm is the syscall number, not the
+        // builtin, so the reaching builtin is read from the parallel table.
+        uint64 sc_who_a = ir_insn_origin_at(ii)
+        if sc_who_a == 0 { sc_who_a = "an unnamed syscall lowering" }
+        emit_a64_svc(sc_who_a)
         // Result in x0
         if dst_r != 0xFFFFFFFF && dst_r != 0 {
             emit_a64_mov(dst_r, 0)
