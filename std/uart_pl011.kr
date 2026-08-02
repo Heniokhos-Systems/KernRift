@@ -1,0 +1,90 @@
+// KernRift bare-metal output provider — ARM PrimeCell PL011 UART, arm64.
+//
+//   import "std/uart_pl011.kr"
+//   krc --arch=arm64 --target=none prog.kr -o prog.img
+//
+// The arm64 counterpart of std/uart_16550.kr; see that file's header for how
+// `@builtin_override` displaces the refused `write` builtin and why
+// `print` / `println` / `print_str` / `println_str` reach this one function
+// too under `--target=none`.
+//
+// WHY THIS IS LIBRARY CODE. 0x0900_0000 is where QEMU's `virt` machine puts
+// UART0 and where a Raspberry Pi does not. A base address is a board fact.
+// Copy this file, change PL011_BASE, keep the annotation.
+//
+// The PL011 is memory-mapped, so unlike the 16550 this needs no inline asm —
+// plain stores and loads through the register addresses.
+
+// QEMU `-M virt` UART0.  Raspberry Pi 3/4 PL011: 0x3F20_1000 / 0xFE20_1000.
+static uint64 PL011_BASE = 0x09000000
+
+// Register offsets.
+//   +0x00  DR    data register (write = transmit, read = receive)
+//   +0x18  FR    flag register
+//   +0x24  IBRD  integer baud rate divisor
+//   +0x28  FBRD  fractional baud rate divisor
+//   +0x2C  LCRH  line control
+//   +0x30  CR    control
+//   +0x38  IMSC  interrupt mask
+static uint64 PL011_DR = 0x00
+static uint64 PL011_FR = 0x18
+static uint64 PL011_IBRD = 0x24
+static uint64 PL011_FBRD = 0x28
+static uint64 PL011_LCRH = 0x2C
+static uint64 PL011_CR = 0x30
+static uint64 PL011_IMSC = 0x38
+
+// FR bit 5: transmit FIFO full. Polled before every byte — writing DR while
+// it is set drops the character.
+static uint64 PL011_FR_TXFF = 0x20
+
+fn pl011_reg_write(uint64 off, uint64 val) {
+    uint64 addr = PL011_BASE + off
+    uint32 v32 = val & 0xFFFFFFFF
+    unsafe { *(addr as uint32) = v32 }
+}
+
+fn pl011_reg_read(uint64 off) -> uint64 {
+    uint64 addr = PL011_BASE + off
+    uint32 v32 = 0
+    unsafe { *(addr as uint32) -> v32 }
+    return v32
+}
+
+// Optional: 115200 baud 8N1 from the QEMU virt 24 MHz UARTCLK, FIFOs on,
+// interrupts masked. QEMU leaves UART0 usable, so `write` works without this;
+// call it from your entry point when you do not trust the prior state.
+fn pl011_init() {
+    pl011_reg_write(PL011_CR, 0x0000)      // disable while reprogramming
+    pl011_reg_write(PL011_IBRD, 13)        // 24e6 / (16 * 115200) = 13.02
+    pl011_reg_write(PL011_FBRD, 1)
+    pl011_reg_write(PL011_LCRH, 0x70)      // 8N1, FIFOs enabled
+    pl011_reg_write(PL011_IMSC, 0x0000)    // all interrupts masked
+    pl011_reg_write(PL011_CR, 0x0301)      // UARTEN | TXE | RXE
+}
+
+// One byte, after waiting for room in the transmit FIFO.
+fn pl011_putc(uint64 c) {
+    uint64 full = PL011_FR_TXFF
+    while full != 0 {
+        uint64 flags = pl011_reg_read(PL011_FR)
+        full = flags & PL011_FR_TXFF
+    }
+    pl011_reg_write(PL011_DR, c & 0xFF)
+}
+
+// The provider. `fd` is accepted and ignored: one UART is the board's only
+// output, so stdout (1) and stderr (2) are the same device. Returns the byte
+// count, matching the builtin's contract.
+@builtin_override
+fn write(uint64 _fd, uint64 buf, uint64 len) -> uint64 {
+    uint64 i = 0
+    while i < len {
+        uint64 p = buf + i
+        uint64 c = 0
+        unsafe { *(p as uint8) -> c }
+        pl011_putc(c)
+        i = i + 1
+    }
+    return len
+}

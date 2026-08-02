@@ -1,0 +1,115 @@
+// KernRift bare-metal allocator — bump pointer over an explicitly supplied
+// region.
+//
+//   import "std/heap_bump.kr"
+//   fn main() {
+//       heap_bump_init(0x0020_0000, 0x0010_0000)   // 1 MiB at 2 MiB
+//       uint64 p = alloc(64)
+//       ...
+//   }
+//
+// Under `--target=none` there is no kernel, so `alloc` is not mmap and
+// `dealloc` is not munmap; the compiler refuses both builtins (src/ir.kr).
+// This module supplies replacements through `@builtin_override`, which
+// registers the names so every builtin-dispatch chain — the IR lowering and
+// both legacy backends — skips its own lowering and emits a normal call here.
+//
+// THE REGION IS PASSED IN, NOT LINKED IN. A bump allocator conventionally
+// runs between `__heap_start` and `__heap_end`, symbols a linker script
+// defines. There is no linker on this path: `--target=none` emits the image
+// directly and nothing in the toolchain defines those symbols, so referencing
+// them would be a reference to nothing. `heap_bump_init(base, len)` is
+// therefore mandatory, and it is also the honest interface — where RAM lives
+// is a board fact, the same kind of fact as a UART base address, and it
+// belongs in the program that knows the board rather than in this file.
+//
+// dealloc is a NO-OP by design. A bump allocator cannot free: that is the
+// trade it makes for an allocation being three instructions and for having no
+// metadata, no free list and no fragmentation. It is the right allocator for
+// a program that allocates during setup and then runs, and the wrong one for
+// a program that allocates in a loop. If you need real reclamation, write a
+// different module — the annotation is all this file contributes.
+
+// Next free byte, and one past the last usable byte. Both zero until
+// heap_bump_init runs, which is what makes "used before initialised"
+// detectable rather than a wild pointer.
+static uint64 heap_bump_next = 0
+static uint64 heap_bump_limit = 0
+
+// Post-mortem state, readable from a debugger or a JTAG probe after a halt.
+static uint64 heap_bump_fail_reason = 0    // 1 = uninitialised, 2 = exhausted
+static uint64 heap_bump_fail_request = 0   // the size that could not be served
+static uint64 heap_bump_total = 0          // bytes handed out so far
+
+// Every allocation is 16-byte aligned. 16 is the widest alignment the ABIs in
+// this tree require (SysV/AAPCS stack alignment, and enough for any scalar or
+// SIMD spill a caller might place in the block).
+static uint64 HEAP_BUMP_ALIGN = 16
+
+// Halting is what "refuse loudly" means with no OS underneath.
+//
+// The alternatives are worse in the specific way this project cares about. A
+// null return is a silently wrong answer: the caller stores through it, and
+// the corruption surfaces somewhere else entirely, long after the allocation
+// that caused it. Wrapping the pointer past the end of the region is the same
+// failure with extra steps. There is no stderr to complain to and exit() is
+// refused on bare metal, so the loudest available refusal is to record why
+// and stop the machine where the fault happened, with the reason and the
+// offending size still in memory for whoever attaches a debugger.
+fn heap_bump_halt(uint64 reason, uint64 request) {
+    heap_bump_fail_reason = reason
+    heap_bump_fail_request = request
+    loop { }
+}
+
+// Hand this module a region. `base` is the first usable byte and `len` its
+// size in bytes; the last usable byte is base + len - 1. Call it once, from
+// the entry point, before any alloc().
+fn heap_bump_init(uint64 base, uint64 len) {
+    // A zero base is indistinguishable from "never initialised", and a zero
+    // length is a region that can serve nothing — both are configuration
+    // mistakes, and both are caught here rather than at the first alloc().
+    if base == 0 || len == 0 { heap_bump_halt(1, len) }
+    heap_bump_next = base
+    heap_bump_limit = base + len
+    heap_bump_total = 0
+}
+
+// Bytes still available.
+fn heap_bump_remaining() -> uint64 {
+    if heap_bump_next == 0 { return 0 }
+    if heap_bump_next >= heap_bump_limit { return 0 }
+    return heap_bump_limit - heap_bump_next
+}
+
+// Bytes handed out since heap_bump_init.
+fn heap_bump_used() -> uint64 {
+    return heap_bump_total
+}
+
+@builtin_override
+fn alloc(uint64 n) -> uint64 {
+    if heap_bump_next == 0 { heap_bump_halt(1, n) }
+    // Round the request up to the alignment. Done on `n` BEFORE adding it to
+    // the cursor so the sum below is the real end of the block: rounding the
+    // cursor afterwards instead would let the last block extend past the
+    // limit by up to ALIGN-1 bytes without the check noticing.
+    uint64 need = n + (HEAP_BUMP_ALIGN - 1)
+    need = need & (0xFFFFFFFFFFFFFFFF - (HEAP_BUMP_ALIGN - 1))
+    // Overflow first, THEN the limit. `heap_bump_next + need` wraps for a
+    // request near 2^64, and a wrapped sum is smaller than the cursor, so the
+    // limit test alone would accept it and return a pointer into the region
+    // for a block that does not fit in the address space.
+    uint64 end = heap_bump_next + need
+    if end < heap_bump_next { heap_bump_halt(2, n) }
+    if end > heap_bump_limit { heap_bump_halt(2, n) }
+    uint64 p = heap_bump_next
+    heap_bump_next = end
+    heap_bump_total = heap_bump_total + need
+    return p
+}
+
+// No-op, deliberately. See the header.
+@builtin_override
+fn dealloc(uint64 _p) {
+}

@@ -1,0 +1,109 @@
+// KernRift bare-metal output provider — 16550 / NS8250 UART, x86_64 COM1.
+//
+//   import "std/uart_16550.kr"
+//   krc --arch=x86_64 --target=none prog.kr -o prog.img
+//
+// Under `--target=none` there is no kernel, so `write` is not a syscall and
+// the compiler refuses the builtin (src/ir.kr). This module supplies the
+// replacement through `@builtin_override`: the annotation registers the name
+// so every builtin-dispatch chain (IR lowering and both legacy backends)
+// skips its own `write` and emits a normal call to the body below.
+//
+// `print`, `println`, `print_str` and `println_str` are lowered to calls of
+// THIS function too when `--target=none` is in effect (src/ir.kr) — they are
+// separate builtins that emitted their own syscall, so without that routing
+// an override named `write` would leave all four still refusing. One provider
+// therefore serves all five; a program needs no changes beyond the import.
+//
+// WHY THIS IS LIBRARY CODE. A UART base address is a *board* fact, not a
+// compiler fact. 0x3F8 is COM1 on a PC-compatible machine and on QEMU's
+// `-serial` device; it is wrong on anything else. Baking it into codegen
+// would make the compiler wrong on any other board and unoverridable without
+// patching it. Copy this file, change UART16550_BASE, keep the annotation.
+//
+// x86_64 ONLY: the 16550 lives behind port I/O (`in`/`out`), which exists on
+// no other architecture in this tree. arm64 gets std/uart_pl011.kr. Importing
+// both into one program is a duplicate definition of `write` and is rejected.
+
+// COM1. COM2 is 0x2F8, COM3 0x3E8, COM4 0x2E8.
+static uint64 UART16550_BASE = 0x3F8
+
+// Register offsets from the base port.
+//   +0  THR  transmit holding register (write)  / RBR receive (read)
+//   +0  DLL  divisor latch low   (when DLAB set)
+//   +1  IER  interrupt enable    / DLM divisor latch high (when DLAB set)
+//   +2  FCR  FIFO control (write)
+//   +3  LCR  line control  (bit 7 = DLAB)
+//   +4  MCR  modem control
+//   +5  LSR  line status   (bit 5 = THR empty, bit 6 = transmitter idle)
+static uint64 UART16550_IER = 1
+static uint64 UART16550_FCR = 2
+static uint64 UART16550_LCR = 3
+static uint64 UART16550_MCR = 4
+static uint64 UART16550_LSR = 5
+
+// LSR bit 5: transmit holding register empty. Polled before every byte —
+// pushing a byte while it is clear overwrites the one still being shifted
+// out, which is how a driver "works" on QEMU and drops characters on metal.
+static uint64 UART16550_LSR_THRE = 0x20
+
+// x86 port I/O has no builtin, so it goes through inline asm. `--target=none`
+// deliberately still permits inline asm: the escape hatch exists precisely so
+// bare-metal code can reach instructions the compiler has no builtin for (see
+// emit_x86_syscall_insn in src/codegen.kr).
+fn uart16550_outb(uint64 port, uint64 val) {
+    asm { "out dx, al" } in(port -> rdx, val -> rax)
+}
+
+// `in al, dx` writes only AL and leaves bits 8..63 of RAX untouched, so RAX
+// is zeroed through the input constraint first — otherwise the caller reads
+// stale high bits back as part of the status byte.
+fn uart16550_inb(uint64 port) -> uint64 {
+    uint64 v = 0
+    uint64 _zero = 0
+    asm { "in al, dx" } in(port -> rdx, _zero -> rax) out(rax -> v)
+    return v & 0xFF
+}
+
+// Optional: 115200 baud, 8N1, FIFOs on. Firmware usually leaves COM1 usable
+// and QEMU always does, so `write` works without this — call it from your
+// entry point when you do not trust what ran before you.
+fn uart16550_init() {
+    uart16550_outb(UART16550_BASE + UART16550_IER, 0x00)   // interrupts off
+    uart16550_outb(UART16550_BASE + UART16550_LCR, 0x80)   // DLAB on
+    uart16550_outb(UART16550_BASE + 0, 0x01)               // divisor lo = 1
+    uart16550_outb(UART16550_BASE + 1, 0x00)               // divisor hi = 0
+    uart16550_outb(UART16550_BASE + UART16550_LCR, 0x03)   // DLAB off, 8N1
+    uart16550_outb(UART16550_BASE + UART16550_FCR, 0xC7)   // FIFO on, clear
+    uart16550_outb(UART16550_BASE + UART16550_MCR, 0x0B)   // DTR/RTS/OUT2
+}
+
+// One byte, after waiting for the transmitter to be ready.
+fn uart16550_putc(uint64 c) {
+    uint64 ready = 0
+    while ready == 0 {
+        uint64 status = uart16550_inb(UART16550_BASE + UART16550_LSR)
+        ready = status & UART16550_LSR_THRE
+    }
+    uart16550_outb(UART16550_BASE, c & 0xFF)
+}
+
+// The provider. `fd` is accepted and ignored: a board with one UART has one
+// output, and both stdout (1) and stderr (2) are that UART. Returns the byte
+// count, matching the builtin's contract, so callers that check the return
+// value keep working.
+//
+// The return value is the count actually pushed, which is always `len` here
+// because uart16550_putc blocks until the transmitter accepts the byte.
+@builtin_override
+fn write(uint64 _fd, uint64 buf, uint64 len) -> uint64 {
+    uint64 i = 0
+    while i < len {
+        uint64 p = buf + i
+        uint64 c = 0
+        unsafe { *(p as uint8) -> c }
+        uart16550_putc(c)
+        i = i + 1
+    }
+    return len
+}
