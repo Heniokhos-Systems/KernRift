@@ -261,8 +261,10 @@ fn main() {
         write(1, kr_desc, str_len(kr_desc))
         write(1, "Auto-detects host architecture and extracts the matching native binary.\n\n", 73)
         write(1, "options:\n", 9)
-        write(1, "  --help       show this help\n", 29)
-        write(1, "  --version    show version\n", 27)
+        uint64 wmsg_264 = "  --help       show this help\n"
+        write(1, wmsg_264, str_len_r(wmsg_264))
+        uint64 wmsg_265 = "  --version    show version\n"
+        write(1, wmsg_265, str_len_r(wmsg_265))
         exit(0)
     }
 
@@ -293,7 +295,8 @@ fn main() {
                 write(1, "usage: kr <program.krbo> [args...]\n\n", 36)
                 uint64 kr_desc = "Runs .krbo fat binaries (BCJ+LZ-Rift-compressed, 8 platform slices).\n"
         write(1, kr_desc, str_len(kr_desc))
-                write(1, "Auto-detects host architecture and extracts the matching native binary.\n", 71)
+                uint64 wmsg_296 = "Auto-detects host architecture and extracts the matching native binary.\n"
+                write(1, wmsg_296, str_len_r(wmsg_296))
                 exit(0)
             }
         }
@@ -376,7 +379,8 @@ fn main() {
         file_close(tfd)
         set_executable(tmp)
         exec_process(tmp)
-        write(2, "kr: exec failed\n", 17)
+        uint64 wmsg_379 = "kr: exec failed\n"
+        write(2, wmsg_379, str_len_r(wmsg_379))
         exit(1)
     }
 
@@ -416,8 +420,10 @@ fn main() {
     }
 
     if found == 0 {
-        write(2, "kr: no native binary found for this architecture\n", 50)
-        write(2, "The .krbo file may not contain a slice for your platform.\n", 57)
+        uint64 wmsg_419 = "kr: no native binary found for this architecture\n"
+        write(2, wmsg_419, str_len_r(wmsg_419))
+        uint64 wmsg_420 = "The .krbo file may not contain a slice for your platform.\n"
+        write(2, wmsg_420, str_len_r(wmsg_420))
         write(2, "Recompile with: krc program.kr -o program.krbo\n", 47)
         exit(1)
     }

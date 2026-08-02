@@ -3087,7 +3087,8 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
         entry_off = find_main_offset()
         if entry_off == 0xFFFFFFFF {
             write(2, "error: no 'main' function found\n", 32)
-            write(2, "Every KernRift program needs: fn main() { ... }\n", 49)
+            uint64 wmsg_3090 = "Every KernRift program needs: fn main() { ... }\n"
+            write(2, wmsg_3090, str_len(wmsg_3090))
             exit(1)
         }
     }
@@ -3707,7 +3708,8 @@ fn compile_fat(uint64 input_path, uint64 output_path) {
     uint64 entry_off = find_main_offset()
     if entry_off == 0xFFFFFFFF {
         write(2, "error: no 'main' function found\n", 32)
-        write(2, "Every KernRift program needs: fn main() { ... }\n", 49)
+        uint64 wmsg_3710 = "Every KernRift program needs: fn main() { ... }\n"
+        write(2, wmsg_3710, str_len(wmsg_3710))
         exit(1)
     }
     uint64 entry_va = 0x400000 + entry_off
@@ -5197,7 +5199,8 @@ fn main() {
                 write(1, "  --coalesce                Briggs/George copy coalescing (default on)\n", 71)
                 write(1, "  --no-coalesce             disable copy coalescing\n", 52)
                 write(1, "  --check-types             type checker (default on)\n", 54)
-                write(1, "  --no-check-types          disable type checker\n", 50)
+                uint64 wmsg_5200 = "  --no-check-types          disable type checker\n"
+                write(1, wmsg_5200, str_len(wmsg_5200))
                 write(1, "  --O0                      disable IR optimizations (CF/DCE/CSE/LICM)\n", 71)
                 write(1, "  --freestanding            no startup code, no libc\n", 53)
                 write(1, "  --debug                   runtime safety checks (bounds, null)\n", 65)

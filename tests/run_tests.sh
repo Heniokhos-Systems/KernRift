@@ -8296,6 +8296,58 @@ for A in riscv32 xtensa; do
 done
 rm -f "$CP_SRC"
 
+# --- hand-counted write() lengths ------------------------------------------
+# Every write(fd, "<literal>", N) must have N equal to the literal's real byte
+# length. Getting this wrong is the single most repeated defect in this tree:
+# 30 sites were wrong at once, 22 over-reading (emitting stray NULs and, at
+# living.kr's worst case, five bytes of the NEXT string literal) and 8
+# truncating (dropping the trailing newline, or the closing quote from
+# "unrecognized asm instruction '"). All 30 now derive their length with
+# str_len(); this check keeps the count at zero.
+#
+# The length is derived two independent ways and both must agree, because a
+# scanner that is wrong in one direction is wrong in the other too:
+#   A) decode the literal to bytes and take len()
+#   B) count raw SOURCE bytes between the quotes, minus one per 2-char escape
+# They differ only if an escape is not a 2-char-to-1-byte mapping. (B) is what
+# makes multi-byte characters safe: " -> stable\n" with a 3-byte arrow is 12
+# bytes and must NOT be flagged -- an earlier scan using Python's
+# unicode_escape reported it as a 3-byte truncation and was wrong.
+TOTAL=$((TOTAL + 1))
+WL_BAD=$(SRCDIR="$DIR/../src" python3 - <<'WLPY'
+import re, os, glob
+LIT = re.compile(rb'write\(\s*(?:1|2)\s*,\s*"((?:[^"\\]|\\.)*)"\s*,\s*(\d+)\s*\)')
+ESC = {ord('n'): b'\n', ord('t'): b'\t', ord('r'): b'\r', ord('0'): b'\0',
+       ord('\\'): b'\\', ord('"'): b'"', ord("'"): b"'"}
+bad, disagree = [], []
+for path in sorted(glob.glob(os.path.join(os.environ["SRCDIR"], "*.kr"))):
+    for ln, line in enumerate(open(path, "rb").read().split(b"\n"), 1):
+        for m in LIT.finditer(line):
+            body, decl = m.group(1), int(m.group(2))
+            out, i, nesc = b"", 0, 0
+            while i < len(body):
+                if body[i] == 0x5C and i + 1 < len(body):
+                    out += ESC.get(body[i + 1], bytes([body[i + 1]])); i += 2; nesc += 1
+                else:
+                    out += bytes([body[i]]); i += 1
+            a, b = len(out), len(body) - nesc
+            where = "%s:%d" % (os.path.basename(path), ln)
+            if a != b:
+                disagree.append("%s (A=%d B=%d)" % (where, a, b))
+            elif a != decl:
+                bad.append("%s declared %d, real %d" % (where, decl, a))
+out = []
+if disagree: out.append("length methods disagree: " + "; ".join(disagree))
+if bad: out.append("%d wrong length(s): %s" % (len(bad), "; ".join(bad[:6])))
+print(" | ".join(out))
+WLPY
+)
+if [ -z "$WL_BAD" ]; then
+    PASS=$((PASS + 1)); echo "  write_literal_lengths: PASS (all hand-counted write() lengths match)"
+else
+    echo "FAIL: write_literal_lengths ($WL_BAD)"; FAIL=$((FAIL + 1))
+fi
+
 # --- esp32 .bss zero-loop bounds -------------------------------------------
 # The entry preamble zeroes [bss_lo, bss_hi) from two literal-pool words that
 # main.kr patches at finalize time. esp32_startup_stub greps the six WDT

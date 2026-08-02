@@ -5582,7 +5582,8 @@ fn gen_expr(uint64 node) {
                     uint32 pat_k_raw = ast_kind(pat)
                     uint64 pat_k = pat_k_raw
                     if pat_k == 52 {
-                        write(2, "error: range patterns require the IR backend (drop --legacy)\n", 62)
+                        uint64 wmsg_5585 = "error: range patterns require the IR backend (drop --legacy)\n"
+                        write(2, wmsg_5585, str_len(wmsg_5585))
                         exit(1)
                     }
                     gen_expr(pat)
@@ -8995,10 +8996,12 @@ fn asm_emit_x86(uint64 str_tok) {
     if asm_match(sptr, 0, "swapgs", 6) != 0 && slen == 6 { emit_byte(0x0F); emit_byte(0x01); emit_byte(0xF8); return }
     // Unrecognized mnemonic — hard error. Use raw hex ("0x48 0xD3 0xE0")
     // for instructions not in the built-in table.
-    write(2, "error: unrecognized asm instruction '", 36)
+    uint64 wmsg_8998 = "error: unrecognized asm instruction '"
+    write(2, wmsg_8998, str_len(wmsg_8998))
     write(2, sptr, slen)
     write(2, "'\n", 2)
-    write(2, "  hint: use raw hex bytes instead, e.g. asm(\"0x48 0xD3 0xE0\")\n", 63)
+    uint64 wmsg_9001 = "  hint: use raw hex bytes instead, e.g. asm(\"0x48 0xD3 0xE0\")\n"
+    write(2, wmsg_9001, str_len(wmsg_9001))
     exit(1)
 }
 
@@ -9164,10 +9167,12 @@ fn asm_emit_a64(uint64 str_tok) {
         return
     }
     // Unrecognized mnemonic — hard error.
-    write(2, "error: unrecognized asm instruction '", 36)
+    uint64 wmsg_9167 = "error: unrecognized asm instruction '"
+    write(2, wmsg_9167, str_len(wmsg_9167))
     write(2, sptr, slen)
     write(2, "'\n", 2)
-    write(2, "  hint: use raw hex word instead, e.g. asm(\"0xD503201F\")\n", 56)
+    uint64 wmsg_9170 = "  hint: use raw hex word instead, e.g. asm(\"0xD503201F\")\n"
+    write(2, wmsg_9170, str_len(wmsg_9170))
     exit(1)
 }
 
@@ -9991,7 +9996,8 @@ fn gen_stmt(uint64 node) {
                     uint32 pat_k_raw = ast_kind(pat)
                     uint64 pat_k = pat_k_raw
                     if pat_k == 52 {
-                        write(2, "error: range patterns require the IR backend (drop --legacy)\n", 62)
+                        uint64 wmsg_9994 = "error: range patterns require the IR backend (drop --legacy)\n"
+                        write(2, wmsg_9994, str_len(wmsg_9994))
                         exit(1)
                     }
                     gen_expr(pat)
@@ -10341,7 +10347,8 @@ fn gen_stmt(uint64 node) {
     // to the IR backend (which is the default) instead of silently
     // dropping the cleanup.
     if kind == 51 {
-        write(2, "error: `defer` requires the IR backend (drop --legacy)\n", 56)
+        uint64 wmsg_10344 = "error: `defer` requires the IR backend (drop --legacy)\n"
+        write(2, wmsg_10344, str_len(wmsg_10344))
         exit(1)
     }
 }
@@ -12865,11 +12872,13 @@ fn emit_elf_lkm(uint64 text_len, uint64 data_len, uint64 arch) {
 
     if misc_dev_mode != 0 {
         if ioctl_handler_tok == 0 {
-            write(2, "krc: @module_register_misc_device requires an @lkm_ioctl_handler\n", 66)
+            uint64 wmsg_12868 = "krc: @module_register_misc_device requires an @lkm_ioctl_handler\n"
+            write(2, wmsg_12868, str_len(wmsg_12868))
             exit(1)
         }
         if init_fn_tok != 0 {
-            write(2, "krc: @module_init conflicts with @module_register_misc_device (init is auto-generated)\n", 88)
+            uint64 wmsg_12872 = "krc: @module_init conflicts with @module_register_misc_device (init is auto-generated)\n"
+            write(2, wmsg_12872, str_len(wmsg_12872))
             exit(1)
         }
         // @module_exit is ALLOWED in misc-device mode: it becomes an
@@ -12878,11 +12887,13 @@ fn emit_elf_lkm(uint64 text_len, uint64 data_len, uint64 arch) {
     }
     if misc_dev_mode == 0 {
         if init_fn_tok == 0 {
-            write(2, "krc: --emit=lkm requires a @module_init function (or use @module_register_misc_device)\n", 88)
+            uint64 wmsg_12881 = "krc: --emit=lkm requires a @module_init function (or use @module_register_misc_device)\n"
+            write(2, wmsg_12881, str_len(wmsg_12881))
             exit(1)
         }
         if exit_fn_tok == 0 {
-            write(2, "krc: --emit=lkm requires a @module_exit function (or use @module_register_misc_device)\n", 88)
+            uint64 wmsg_12885 = "krc: --emit=lkm requires a @module_exit function (or use @module_register_misc_device)\n"
+            write(2, wmsg_12885, str_len(wmsg_12885))
             exit(1)
         }
     }
@@ -13003,11 +13014,13 @@ fn emit_elf_lkm(uint64 text_len, uint64 data_len, uint64 arch) {
             ei = ei + 1
         }
         if found_reg == 0 {
-            write(2, "krc: misc-device mode requires `extern fn misc_register(uint64 dev) -> int32`\n", 79)
+            uint64 wmsg_13006 = "krc: misc-device mode requires `extern fn misc_register(uint64 dev) -> int32`\n"
+            write(2, wmsg_13006, str_len(wmsg_13006))
             exit(1)
         }
         if found_dereg == 0 {
-            write(2, "krc: misc-device mode requires `extern fn misc_deregister(uint64 dev) -> int32`\n", 81)
+            uint64 wmsg_13010 = "krc: misc-device mode requires `extern fn misc_deregister(uint64 dev) -> int32`\n"
+            write(2, wmsg_13010, str_len(wmsg_13010))
             exit(1)
         }
     }
@@ -13037,7 +13050,8 @@ fn emit_elf_lkm(uint64 text_len, uint64 data_len, uint64 arch) {
             pei = pei + 1
         }
         if found_preg == 0 {
-            write(2, "krc: pci-driver mode requires `extern fn __pci_register_driver(uint64 drv, uint64 owner, uint64 name) -> int32`\n", 111)
+            uint64 wmsg_13040 = "krc: pci-driver mode requires `extern fn __pci_register_driver(uint64 drv, uint64 owner, uint64 name) -> int32`\n"
+            write(2, wmsg_13040, str_len(wmsg_13040))
             exit(1)
         }
         if found_punreg == 0 {

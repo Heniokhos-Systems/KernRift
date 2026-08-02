@@ -1887,7 +1887,8 @@ fn run_migration(uint64 input_path, uint64 dry_run) {
         uint8[32] nb
         uint64 nl = fmt_uint(nb, matches)
         write(1, nb, nl)
-        write(1, " migration site(s) rewritten\n", 34)
+        uint64 wmsg_1890 = " migration site(s) rewritten\n"
+        write(1, wmsg_1890, str_len(wmsg_1890))
         write(1, "--- dry-run output preview (first 512 bytes) ---\n", 49)
         uint64 preview = new_size
         if preview > 512 { preview = 512 }
@@ -1904,7 +1905,8 @@ fn run_migration(uint64 input_path, uint64 dry_run) {
     // Write rewritten source back to the same file
     uint64 ofd = file_open(input_path, 1)
     if ofd > 0xFFFFFFFFFFFFF000 {
-        write(2, "error: cannot open output file for writing\n", 44)
+        uint64 wmsg_1907 = "error: cannot open output file for writing\n"
+        write(2, wmsg_1907, str_len(wmsg_1907))
         exit(1)
     }
     file_write(ofd, out_buf_m, new_size)
