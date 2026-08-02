@@ -2559,6 +2559,17 @@ fn ir_emit_arm64_insn(uint64 ii) {
             uint64 chmod_nr_m = ir_a64_syscall_nr(15)
             emit_a64_syscall_nr(chmod_nr_m)
             emit_a64_svc("set_executable")
+        } else if target_os == 4 {
+            // Bare metal. Unreachable in practice -- ir.kr's set_executable
+            // lowering refuses under target_os == 4 before any IR_SET_EXEC is
+            // created -- but this arm is the reason the chain now HAS a final
+            // else. Before it, target_os == 4 matched none of 0/3/1 and this
+            // op emitted zero instructions, so `--arch=arm64 --target=none`
+            // accepted set_executable() silently while x86_64 refused it at
+            // the chmod syscall. No trap instruction is emitted on that path,
+            // so Task 2's emitter guards structurally could not see it.
+            uint64 bmse_a = "set_executable"
+            ir_bare_metal_builtin_refused(bmse_a, "a bare-metal image has no filesystem, so there is nothing for this builtin to act on")
         }
         return
     }
@@ -2659,6 +2670,17 @@ fn ir_emit_arm64_insn(uint64 ii) {
             emit_a64_mul(10, 10, 14)              // x10 = frac * 1e9
             emit_a64_udiv(10, 10, 12)             // x10 = frac*1e9 / freq
             emit_a64_add(0, 9, 10)                // x0  = secs*1e9 + frac*1e9/freq
+        } else if target_os == 4 {
+            // Bare metal. Unreachable in practice -- ir.kr's time_ns lowering
+            // refuses under target_os == 4 before any IR_TIME_NS is created --
+            // but this arm replaces a `else { mov x0, #0 }` that made
+            // `--arch=arm64 --target=none` compile time_ns() clean and return
+            // a CONSTANT ZERO on every call, while x86_64 refused the same
+            // program at the clock_gettime syscall. A silently wrong clock is
+            // worse than a missing one, and no trap instruction is emitted on
+            // this path for Task 2's emitter guards to catch.
+            uint64 bmt_a = "time_ns"
+            ir_bare_metal_builtin_refused(bmt_a, "there is no OS clock; read the platform's cycle counter with inline asm, or supply time_ns with @builtin_override")
         } else {
             emit_a64_mov_imm(0, 0)
         }

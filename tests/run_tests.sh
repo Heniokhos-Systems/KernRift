@@ -8149,48 +8149,48 @@ for CP_FLAG in --legacy --emit=obj; do
     rm -f /tmp/krc_choke_bin_$$
 done
 
-# The diagnostic must name the REACHING BUILTIN, not just the instruction or
-# the IR op -- that is what turns the remaining per-OS audit into a worklist
-# the compiler hands you instead of ~60 sites found by inspection.
+# The IR backend's builtins now refuse at their LOWERING (Task 3), so on that
+# path they never reach the trap emitter and the emitter's name-plumbing is no
+# longer what a user sees. It still has to WORK, though -- the legacy backend
+# reaches it for real, and the IR emitter guard remains the backstop for any
+# lowering that gets added without a --target=none arm. Assert it through
+# --legacy, which has its own builtin dispatch in src/codegen.kr and does not
+# go through ir_lower_expr at all.
 #
-# This is not free on the IR path: IR_SYSCALL carries the canonical Linux
-# syscall NUMBER, and that number is many-to-one with builtins (nr 1 is
+# This is not free: IR_SYSCALL carries the canonical Linux syscall NUMBER, and
+# that number is many-to-one with builtins (nr 1 is
 # write/print/println/print_str/println_str/file_write; nr 0 is read and
-# file_read; nr 8 is file_size twice). The lowering records the name in the
-# ir_insn_origin parallel table and the emitters read it back. Assert several
-# distinct builtins so a regression to the coarse "syscall" label -- or a
-# cross-wired name, which is worse -- fails here.
-CP_CASE_NAMES="exit write read print_str println_str file_open file_close file_write file_read file_size"
+# file_read; nr 8 is file_size twice), so a regression to the coarse "syscall"
+# label -- or a cross-wired name, which is worse -- must fail here.
+# println_str and time_ns are deliberately absent. The legacy backend shares
+# ONE lowering for print_str/println_str (src/codegen.kr:6405) and names it
+# "print_str" for both, and its time_ns() body reaches the emitter through the
+# surrounding exit() first -- so asserting either name here would be asserting
+# something untrue. Both builtins ARE covered, on both arches, by the
+# target_none_audit_* block below, which tests the IR lowering. Legacy backend
+# naming belongs to Task 6.
+CP_CASE_NAMES="exit write print_str file_open file_close file_write file_read file_size"
 for CP_B in $CP_CASE_NAMES; do
     case $CP_B in
         exit)        CP_BODY='exit(0)';;
         write)       CP_BODY='write(1, "x", 1)';;
-        read)        CP_BODY='uint64 n = read(0, 4096, 1) exit(n)';;
         print_str)   CP_BODY='print_str("x")';;
-        println_str) CP_BODY='println_str("x")';;
-        file_open)   CP_BODY='uint64 f = file_open("x", 0) file_close(f)';;
+        file_open)   CP_BODY='uint64 f = file_open("x", 0) exit(f)';;
         file_close)  CP_BODY='file_close(3)';;
         file_write)  CP_BODY='file_write(3, "x", 1)';;
         file_read)   CP_BODY='uint64 n = file_read(3, 4096, 1) exit(n)';;
-        file_size)   CP_BODY='uint64 s = file_size(3) write(1, "x", s)';;
+        file_size)   CP_BODY='uint64 s = file_size(3) exit(s)';;
     esac
     printf 'fn main() { %s }\n' "$CP_BODY" > "$CP_SRC"
-    for A in x86_64 arm64; do
-        TOTAL=$((TOTAL + 1))
-        CP_ERR=$("$CP_KRC" --arch=$A --target=none "$CP_SRC" -o /tmp/krc_choke_bin_$$ 2>&1)
-        if echo "$CP_ERR" | grep -q "reached the emitter from '$CP_B'"; then
-            PASS=$((PASS + 1)); echo "  choke_point_names_${CP_B}_$A: PASS"
-        else
-            echo "FAIL: choke_point_names_${CP_B}_$A (got '$CP_ERR')"; FAIL=$((FAIL + 1))
-        fi
-        rm -f /tmp/krc_choke_bin_$$
-    done
+    TOTAL=$((TOTAL + 1))
+    CP_ERR=$("$CP_KRC" --legacy --arch=x86_64 --target=none "$CP_SRC" -o /tmp/krc_choke_bin_$$ 2>&1)
+    if echo "$CP_ERR" | grep -q "reached the emitter from '$CP_B'"; then
+        PASS=$((PASS + 1)); echo "  choke_point_names_${CP_B}_legacy: PASS"
+    else
+        echo "FAIL: choke_point_names_${CP_B}_legacy (got '$CP_ERR')"; FAIL=$((FAIL + 1))
+    fi
+    rm -f /tmp/krc_choke_bin_$$
 done
-# print()/println() are NOT in that list on purpose, and the reason is worth
-# recording: their lowering allocates a formatting buffer first, so IR_ALLOC
-# reaches the emitter before their IR_SYSCALL does and the refusal correctly
-# names `alloc`. That is the first builtin-injected trap, not a misattribution
-# -- asserting `print` here would be asserting something untrue.
 printf 'fn main() { exit(0) }\n' > "$CP_SRC"
 
 # The diagnostic must not be TRUNCATED. Every write() in the refusal path
@@ -8198,9 +8198,10 @@ printf 'fn main() { exit(0) }\n' > "$CP_SRC"
 # because a wrong count truncates the one message that explains a silent
 # syscall -- and a tree-wide scan finds 30 pre-existing write(fd,"lit",N)
 # sites whose N does not match the literal. Assert on the wire: the last
-# characters of the message must survive to stderr.
+# characters of the message must survive to stderr. Via --legacy for the same
+# reason as the block above: the IR path refuses earlier now.
 TOTAL=$((TOTAL + 1))
-CP_ERR=$("$CP_KRC" --arch=arm64 --target=none "$CP_SRC" -o /tmp/krc_choke_bin_$$ 2>&1)
+CP_ERR=$("$CP_KRC" --legacy --arch=arm64 --target=none "$CP_SRC" -o /tmp/krc_choke_bin_$$ 2>&1)
 if echo "$CP_ERR" | grep -q "before it can be used in a freestanding image\.$"; then
     PASS=$((PASS + 1)); echo "  choke_point_diag_not_truncated: PASS"
 else
@@ -8295,6 +8296,160 @@ for A in riscv32 xtensa; do
     rm -f /tmp/krc_choke_bin_$$
 done
 rm -f "$CP_SRC"
+
+# --- --target=none refusals are builtin-specific (the fall-through audit) ---
+#
+# The per-OS dispatch across the IR backends is "special-case Windows/macOS,
+# else fall through to POSIX", so target_os == 4 silently INHERITED the Linux
+# path at ~60 branch sites. Task 2's emitter guards catch every one of those
+# that emits a trap instruction. This block is the audit's own gate, and it
+# asserts three things the emitter guards cannot:
+#
+#   1. NON-ZERO EXIT and NO ARTIFACT. Named first because the obvious way to
+#      write this test is vacuous: a PASS condition of "the generic
+#      choke-point message is absent" is also satisfied by a syntax error, a
+#      missing file, or an unrecognised flag.
+#   2. The diagnostic NAMES THE BUILTIN THE PROGRAMMER WROTE. print/println
+#      allocate a formatting buffer before writing, so the emitter guard named
+#      `alloc` for a program containing no alloc().
+#   3. The generic choke-point message is ABSENT -- reaching it means a
+#      lowering has no --target=none arm and only the backstop caught it.
+#
+# Every program is written so the result is CONSUMED (stored to a static).
+# Without that, dead-code elimination removes the builtin call outright and
+# the whole corpus passes while testing nothing: measured, `uint64 p =
+# alloc(64) loop { }` compiled clean under --target=none purely because `p`
+# was unused.
+echo ""
+echo "--- --target=none refusals are builtin-specific ---"
+AU_D=$(mktemp -d)
+au_gen() { printf 'static uint64 sink = 0\nfn main() {\n    %s\n    loop { }\n}\n' "$2" > "$AU_D/a_$1.kr"; }
+au_gen exit             'exit(0)'
+au_gen write            'sink = write(1, "x", 1)'
+au_gen read             'sink = read(0, sink, 1)'
+au_gen print            'print(1)'
+au_gen println          'println(1)'
+au_gen print_str        'print_str("x")'
+au_gen println_str      'println_str("x")'
+au_gen alloc            'sink = alloc(64)'
+au_gen dealloc          'dealloc(sink)'
+au_gen time_ns          'sink = time_ns()'
+au_gen file_open        'sink = file_open("x", 0)'
+au_gen file_close       'sink = file_close(3)'
+au_gen file_read        'sink = file_read(3, sink, 1)'
+au_gen file_write       'sink = file_write(3, "x", 1)'
+au_gen file_size        'sink = file_size(3)'
+au_gen set_executable   'sink = set_executable("x")'
+au_gen exec_process     'sink = exec_process("x")'
+au_gen syscall_raw      'sink = syscall_raw(60, 0, 0, 0, 0, 0, 0)'
+for A in x86_64 arm64; do
+    for AU_F in "$AU_D"/a_*.kr; do
+        AU_B=$(basename "$AU_F" .kr); AU_B=${AU_B#a_}
+        AU_OUT="/tmp/krc_au_$$"
+        TOTAL=$((TOTAL + 1))
+        rm -f "$AU_OUT"
+        AU_ERR=$("$CP_KRC" --arch=$A --target=none "$AU_F" -o "$AU_OUT" 2>&1); AU_ST=$?
+        if [ "$AU_ST" = "0" ]; then
+            echo "FAIL: audit_${AU_B}_$A (compiled CLEAN under --target=none -- a fall-through site was missed)"
+            FAIL=$((FAIL + 1))
+        elif echo "$AU_ERR" | grep -q "reached the emitter"; then
+            echo "FAIL: audit_${AU_B}_$A (generic choke-point message -- the lowering has no --target=none arm)"
+            FAIL=$((FAIL + 1))
+        elif ! echo "$AU_ERR" | grep -q "error: --target=none: '$AU_B' is not available on bare metal"; then
+            echo "FAIL: audit_${AU_B}_$A (refusal does not name '$AU_B': '$AU_ERR')"
+            FAIL=$((FAIL + 1))
+        elif [ -f "$AU_OUT" ]; then
+            echo "FAIL: audit_${AU_B}_$A (refused but still wrote an artifact)"
+            FAIL=$((FAIL + 1))
+        else
+            PASS=$((PASS + 1)); echo "  audit_${AU_B}_$A: PASS"
+        fi
+        rm -f "$AU_OUT"
+    done
+done
+
+# The refusal must be ACTIONABLE, not just specific: it names what to do
+# instead. exit() is the case with a concrete replacement, and the message is
+# checked to its final character so a hand-counted write() length (the defect
+# 563b0f3 fixed 30 of) cannot truncate the advice off the end.
+TOTAL=$((TOTAL + 1))
+AU_ERR=$("$CP_KRC" --arch=x86_64 --target=none "$AU_D/a_exit.kr" -o /tmp/krc_au_$$ 2>&1)
+if echo "$AU_ERR" | grep -q "end main with \`loop { }\` instead -- there is no parent process to return a status to$"; then
+    PASS=$((PASS + 1)); echo "  audit_refusal_is_actionable: PASS"
+else
+    echo "FAIL: audit_refusal_is_actionable (got '$AU_ERR')"; FAIL=$((FAIL + 1))
+fi
+rm -f /tmp/krc_au_$$
+
+# @builtin_override must WIN over the refusal. Every check above sits inside
+# an `if skip_builtin == 0 && tok_matches(...)` arm, i.e. after
+# builtin_override_lookup, so a program that supplies its own println never
+# reaches the refusal. This is the mechanism Task 5's bare-metal driver
+# modules are built on: if this test fails, --target=none has no escape and
+# the whole target is unusable rather than merely restricted.
+TOTAL=$((TOTAL + 1))
+cat > "$AU_D/ov.kr" <<'AUEOF'
+static uint64 uart = 0x10000000
+@builtin_override
+fn println(uint64 v) -> uint64 {
+    unsafe { *(uart as uint8) = 65 }
+    return 0
+}
+fn main() { println(7)  loop { } }
+AUEOF
+rm -f /tmp/krc_au_ov_$$
+AU_ERR=$("$CP_KRC" --arch=x86_64 --target=none "$AU_D/ov.kr" -o /tmp/krc_au_ov_$$ 2>&1); AU_ST=$?
+if [ "$AU_ST" = "0" ] && [ -f /tmp/krc_au_ov_$$ ]; then
+    PASS=$((PASS + 1)); echo "  audit_builtin_override_beats_refusal: PASS"
+else
+    echo "FAIL: audit_builtin_override_beats_refusal (exit $AU_ST: '$AU_ERR')"; FAIL=$((FAIL + 1))
+fi
+rm -f /tmp/krc_au_ov_$$
+
+# A program that touches no OS builtin must still COMPILE under --target=none,
+# and the artifact must contain no trap instruction. Without this the whole
+# block above is satisfiable by refusing everything.
+TOTAL=$((TOTAL + 1))
+cat > "$AU_D/pos.kr" <<'AUEOF'
+static uint64 counter = 0
+fn add(uint64 a, uint64 b) -> uint64 { return a + b }
+fn main() {
+    uint64 i = 0
+    while i < 10 { counter = add(counter, i)  i = i + 1 }
+    loop { }
+}
+AUEOF
+AU_POS_OK=1
+for A in x86_64 arm64; do
+    rm -f /tmp/krc_au_pos_$$
+    "$CP_KRC" --arch=$A --target=none "$AU_D/pos.kr" -o /tmp/krc_au_pos_$$ >/dev/null 2>&1 \
+        || AU_POS_OK=0
+    [ -f /tmp/krc_au_pos_$$ ] || AU_POS_OK=0
+done
+if [ "$AU_POS_OK" = "1" ]; then
+    PASS=$((PASS + 1)); echo "  audit_builtin_free_program_compiles: PASS"
+else
+    echo "FAIL: audit_builtin_free_program_compiles (a program using no OS builtin was rejected)"; FAIL=$((FAIL + 1))
+fi
+rm -f /tmp/krc_au_pos_$$
+
+# The refusals are keyed on target_os == 4 ONLY. Plain --freestanding on
+# riscv32/xtensa keeps its pre-existing "IR op N not yet implemented" refusal
+# unchanged -- that is a byte-identity constraint from the plan ("write/alloc
+# stay refused on riscv32/xtensa"), and it is the check that the new arms did
+# not leak into a target that was already working.
+for A in riscv32 xtensa; do
+    TOTAL=$((TOTAL + 1))
+    printf 'static uint32 sink = 0\nfn main() {\n    sink = write(1, "x", 1)\n    loop { }\n}\n' > "$AU_D/fs.kr"
+    AU_ERR=$("$CP_KRC" --arch=$A --freestanding "$AU_D/fs.kr" -o /tmp/krc_au_fs_$$ 2>&1)
+    if echo "$AU_ERR" | grep -q "$A: IR op 52 not yet implemented"; then
+        PASS=$((PASS + 1)); echo "  audit_${A}_freestanding_unchanged: PASS"
+    else
+        echo "FAIL: audit_${A}_freestanding_unchanged (got '$AU_ERR')"; FAIL=$((FAIL + 1))
+    fi
+    rm -f /tmp/krc_au_fs_$$
+done
+rm -rf "$AU_D"
 
 # --- hand-counted write() lengths ------------------------------------------
 # Every write(fd, "<literal>", N) must have N equal to the literal's real byte
