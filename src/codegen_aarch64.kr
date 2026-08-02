@@ -3235,6 +3235,12 @@ fn gen_expr_a64(uint64 node) {
                 emit_a64_mov(1, 0)
                 emit_a64_mov_imm(0, 0)
                 emit_a64_win_call_iat(12)
+            } else if target_os == 4 {
+                // --target=none: 0, deliberately -- see the long rationale on
+                // the same arm in src/ir.kr. 0 already means "no path is
+                // available" on every non-Windows target, and that is the
+                // literal truth for an image with no loader and no argv[0].
+                emit_a64_mov_imm(0, 0)
             } else {
                 emit_a64_mov_imm(0, 0)
             }
@@ -3924,7 +3930,10 @@ fn gen_expr_a64(uint64 node) {
             return
         }
 
-        // Built-in: get_target_os() → compile-time OS constant (0=Linux, 1=macOS, 2=Windows)
+        // Built-in: get_target_os() → compile-time OS constant
+        // 0=Linux, 1=macOS, 2=Windows, 3=Android, 4=none (bare metal).
+        // Emits target_os verbatim, so --target=none already reports 4 and
+        // needs no arm; pinned by tests/run_tests.sh so it stays that way.
         if is_extern_call == 0 && tok_matches(wct, "get_target_os", 13) != 0 {
             emit_a64_mov_imm(0, target_os)
             return
@@ -3974,8 +3983,15 @@ fn gen_expr_a64(uint64 node) {
         }
 
         // Built-in: get_arch_id() → compile-time arch ID
+        // arm64: linux=2, windows=4, macos=6, android=7, NONE=10.
+        // The target_os == 4 arm is NOT redundant with the one in src/ir.kr:
+        // --legacy and --emit=obj dispatch builtins here and never call
+        // ir_lower_expr, so an ir.kr-only fix leaves them reporting Linux.
+        // See ir.kr's get_arch_id for why 10 is a new id, not a reused one.
         if is_extern_call == 0 && tok_matches(wct, "get_arch_id", 11) != 0 {
-            if target_os == 3 {
+            if target_os == 4 {
+                emit_a64_mov_imm(0, 10)
+            } else if target_os == 3 {
                 emit_a64_mov_imm(0, 7)
             } else if target_os == 2 {
                 emit_a64_mov_imm(0, 4)

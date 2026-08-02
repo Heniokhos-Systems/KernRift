@@ -1310,13 +1310,13 @@ signed_le(a, b)    signed_ge(a, b)
 | Function | Description |
 |---|---|
 | `exit(code)` | Terminate the process with an exit code. |
-| `get_target_os()` | Host OS: `0`=Linux, `1`=macOS, `2`=Windows, `3`=Android. |
-| `get_arch_id()` | Compile-time arch ID: `1` Linux x86_64, `2` Linux arm64, `3` Win x86_64, `4` Win arm64, `5` macOS x86_64, `6` macOS arm64, `7` Android arm64, `8` Android x86_64. |
+| `get_target_os()` | Target OS: `0`=Linux, `1`=macOS, `2`=Windows, `3`=Android, `4`=none (bare metal, `--target=none`). |
+| `get_arch_id()` | Compile-time arch ID: `1` Linux x86_64, `2` Linux arm64, `3` Win x86_64, `4` Win arm64, `5` macOS x86_64, `6` macOS arm64, `7` Android arm64, `8` Android x86_64, `9` bare-metal x86_64, `10` bare-metal arm64, `11` bare-metal riscv32, `12` bare-metal xtensa. |
 | `exec_process(path)` | Spawn and wait for a process (argv = `{path, NULL}`). Returns exit code. |
 | `exec_process_argv(path, argv)` | Like `exec_process` but with an explicit NULL-terminated `argv` pointer array. |
 | `set_executable(path)` | `chmod +x` equivalent. |
 | `time_ns()` | Monotonic clock reading in nanoseconds (`CLOCK_MONOTONIC`). |
-| `get_module_path(buf, size)` | Write the current binary's path into `buf`. |
+| `get_module_path(buf, size)` | Write the current binary's path into `buf`. Returns the length, or `0` if no path is available — which is the answer on Linux, macOS, Android and `--target=none`; only Windows resolves a real path. |
 | `fmt_uint(buf, val)` | Format `val` as decimal into `buf`. Returns length. |
 | `syscall_raw(nr, a1, a2, a3, a4, a5, a6)` | Raw syscall with up to 6 args. |
 

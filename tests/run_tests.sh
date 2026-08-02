@@ -8487,6 +8487,209 @@ for A in riscv32 xtensa; do
 done
 rm -rf "$AU_D"
 
+# --- compile-time constants must not report Linux under --target=none ------
+#
+# THESE TESTS INSPECT THE ARTIFACT. THEY NEVER RUN IT. Under --target=none
+# there is no way to observe a value the usual way: exit() is refused on
+# x86_64/arm64, there is no output provider, and --emit=ir has no defined
+# outcome yet. Everything below compiles, then reads the bytes back.
+#
+# get_arch_id/get_target_os/get_module_path fold to a COMPILE-TIME CONSTANT
+# and emit no trap instruction, so Task 2's emitter guards and Task 3's
+# refusal audit both structurally miss them: the builtin does not fail, it
+# answers wrongly. At 563b0f3 get_arch_id initialised arch_id to the Linux
+# value and only overrode for Windows/macOS/Android, so --target=none
+# silently reported "Linux x86_64" / "Linux arm64".
+#
+# The oracle is exact and needs no disassembler, so it works on riscv32 and
+# xtensa too: compile `sink = <builtin>()` and `sink = <expected literal>`
+# from otherwise byte-identical sources and require the two ARTIFACTS to be
+# byte-identical. Both lower to IR_CONST, so equality holds iff the folded
+# constant is exactly the expected one. Asserting the SPECIFIC value is the
+# whole point -- the defect is a plausible WRONG value, so "non-zero", "not
+# the default" or "differs from hosted" would all pass while broken.
+# Verified to fail before the fix: at 563b0f3 `sink = get_arch_id()` was
+# byte-identical to `sink = 1` on x86_64 and to `sink = 2` on arm64.
+echo ""
+echo "--- --target=none compile-time constants ---"
+TN_D=$(mktemp -d)
+
+# Compile `sink = $2` and `sink = $3` under the flags in $4, require the two
+# artifacts to be byte-identical. $1 is the check name.
+tn_const_is() {
+    local name="$1" expr="$2" want="$3"; shift 3
+    TOTAL=$((TOTAL + 1))
+    printf 'static uint32 sink = 0\nstatic uint32 buf = 0\nfn main() {\n    sink = %s\n    loop { }\n}\n' "$expr" > "$TN_D/e.kr"
+    printf 'static uint32 sink = 0\nstatic uint32 buf = 0\nfn main() {\n    sink = %s\n    loop { }\n}\n' "$want" > "$TN_D/w.kr"
+    rm -f "$TN_D/e.out" "$TN_D/w.out"
+    local eerr werr
+    eerr=$("$CP_KRC" "$@" "$TN_D/e.kr" -o "$TN_D/e.out" 2>&1)
+    werr=$("$CP_KRC" "$@" "$TN_D/w.kr" -o "$TN_D/w.out" 2>&1)
+    if [ ! -f "$TN_D/e.out" ]; then
+        echo "FAIL: $name (expression build failed: '$eerr')"; FAIL=$((FAIL + 1))
+    elif [ ! -f "$TN_D/w.out" ]; then
+        echo "FAIL: $name (literal build failed: '$werr')"; FAIL=$((FAIL + 1))
+    elif cmp -s "$TN_D/e.out" "$TN_D/w.out"; then
+        PASS=$((PASS + 1)); echo "  $name: PASS"
+    else
+        echo "FAIL: $name (folded constant is NOT $want)"; FAIL=$((FAIL + 1))
+    fi
+}
+
+# get_target_os() == 4. It folds target_os verbatim so it is already right --
+# pinned here precisely BECAUSE it needs no code change, so a future edit to
+# that lowering cannot quietly regress it to a per-OS chain like its
+# neighbours have.
+tn_const_is tn_target_os_x86_64  'get_target_os()' 4 --arch=x86_64 --target=none
+tn_const_is tn_target_os_arm64   'get_target_os()' 4 --arch=arm64   --target=none
+tn_const_is tn_target_os_riscv32 'get_target_os()' 4 --arch=riscv32 --target=none
+tn_const_is tn_target_os_xtensa  'get_target_os()' 4 --arch=xtensa  --target=none
+tn_const_is tn_target_os_legacy_x86_64 'get_target_os()' 4 --legacy --arch=x86_64 --target=none
+tn_const_is tn_target_os_legacy_arm64  'get_target_os()' 4 --legacy --arch=arm64  --target=none
+tn_const_is tn_target_os_obj_x86_64 'get_target_os()' 4 --emit=obj --arch=x86_64 --target=none
+tn_const_is tn_target_os_obj_arm64  'get_target_os()' 4 --emit=obj --arch=arm64  --target=none
+
+# get_arch_id() must report a BARE-METAL id, never a Linux one.
+#   9 = bare-metal x86_64   10 = bare-metal arm64
+#  11 = bare-metal riscv32  12 = bare-metal xtensa
+# The hosted ids 1..8 stay exactly as they were: they are the KrboFat slice
+# selectors and a fat binary cannot contain a bare-metal slice.
+tn_const_is tn_arch_id_x86_64  'get_arch_id()'  9 --arch=x86_64 --target=none
+tn_const_is tn_arch_id_arm64   'get_arch_id()' 10 --arch=arm64   --target=none
+tn_const_is tn_arch_id_riscv32 'get_arch_id()' 11 --arch=riscv32 --target=none
+tn_const_is tn_arch_id_xtensa  'get_arch_id()' 12 --arch=xtensa  --target=none
+# --legacy and --emit=obj never call ir_lower_expr: they have their own
+# builtin dispatch in src/codegen.kr / src/codegen_aarch64.kr. A fix that
+# lives only in ir.kr leaves them reporting Linux, which is exactly how the
+# legacy time_ns constant zero shipped in an artifact at 563b0f3.
+tn_const_is tn_arch_id_legacy_x86_64 'get_arch_id()'  9 --legacy --arch=x86_64 --target=none
+tn_const_is tn_arch_id_legacy_arm64  'get_arch_id()' 10 --legacy --arch=arm64  --target=none
+tn_const_is tn_arch_id_obj_x86_64 'get_arch_id()'  9 --emit=obj --arch=x86_64 --target=none
+tn_const_is tn_arch_id_obj_arm64  'get_arch_id()' 10 --emit=obj --arch=arm64  --target=none
+
+# get_module_path() answers 0 on bare metal, and that is a DECISION, not a
+# fall-through. 0 is what this builtin already returns on Linux, macOS and
+# Android -- it means "no path is available", which is exactly true of an
+# image with no filesystem, no loader and no argv[0]. Unlike time_ns or
+# set_executable it is not a wrong answer standing in for an action that
+# silently did not happen, and every caller in this tree already gates on
+# `> 0` (src/main.kr's import_init_search_paths). So this is the one member
+# of the class whose correct behaviour was ALREADY correct: these checks pass
+# both before and after the fix by design, and they exist to pin the decision
+# so it cannot drift back into being an accident.
+#
+# tn_const_is cannot be used here: get_module_path takes two arguments, and
+# although the argument evaluation is folded away the argument vregs still
+# reserve stack slots, so `sink = get_module_path(buf, 64)` has a larger frame
+# than `sink = 0` and the artifacts differ for a reason that has nothing to do
+# with the constant. The chain asserted instead is exact in two links:
+#   1. hosted Linux really does answer 0 -- observed by RUNNING it, the one
+#      place in this block where running is possible;
+#   2. the --target=none artifact is byte-identical to the Linux one.
+# A Windows build of the same source is the third leg, and it is what stops
+# link 2 being vacuous -- Windows is the only target that lowers to a real
+# GetModuleFileNameA call, so it proves the target_os dispatch in this
+# lowering is live rather than the whole thing having been folded away. On
+# x86_64/arm64 that shows up as a DIFFERENT artifact. On riscv32/xtensa there
+# is no Windows backend at all, so it shows up as the build FAILING on
+# `IR op 146 not yet implemented` (146 = IR_MODULE_PATH) -- which is the same
+# proof, and is asserted rather than skipped, because a skipped leg is a
+# finding you decided not to have.
+if [ "$ARCH" = "x86_64" ]; then
+    TOTAL=$((TOTAL + 1))
+    printf 'static uint64 mbuf = 0\nfn main() {\n    mbuf = alloc(512)\n    println(get_module_path(mbuf, 512))\n    exit(0)\n}\n' > "$TN_D/mprun.kr"
+    rm -f "$TN_D/mprun"
+    "$CP_KRC" --arch=x86_64 --target=linux "$TN_D/mprun.kr" -o "$TN_D/mprun" >/dev/null 2>&1
+    chmod +x "$TN_D/mprun" 2>/dev/null
+    TN_MPOUT=$("$TN_D/mprun" 2>&1)
+    if [ "$TN_MPOUT" = "0" ]; then
+        PASS=$((PASS + 1)); echo "  tn_module_path_linux_is_zero: PASS"
+    else
+        echo "FAIL: tn_module_path_linux_is_zero (got '$TN_MPOUT')"; FAIL=$((FAIL + 1))
+    fi
+else
+    echo "  tn_module_path_linux_is_zero: SKIP (non-x86_64 host)"
+fi
+printf 'static uint32 sink = 0\nstatic uint32 buf = 0\nfn main() {\n    sink = get_module_path(buf, 64)\n    loop { }\n}\n' > "$TN_D/mp.kr"
+tn_mp_same_as_linux() { # name, win-mode(artifact|nyi), flags...
+    local name="$1" winmode="$2"; shift 2
+    TOTAL=$((TOTAL + 1))
+    rm -f "$TN_D/mp_n" "$TN_D/mp_l" "$TN_D/mp_w"
+    "$CP_KRC" "$@" --target=none "$TN_D/mp.kr" -o "$TN_D/mp_n" >/dev/null 2>&1
+    "$CP_KRC" "$@" --freestanding "$TN_D/mp.kr" -o "$TN_D/mp_l" >/dev/null 2>&1
+    local werr
+    werr=$("$CP_KRC" "$@" --freestanding --target=windows "$TN_D/mp.kr" -o "$TN_D/mp_w" 2>&1)
+    local winok=0
+    if [ "$winmode" = "artifact" ]; then
+        [ -f "$TN_D/mp_w" ] && ! cmp -s "$TN_D/mp_n" "$TN_D/mp_w" && winok=1
+    else
+        [ ! -f "$TN_D/mp_w" ] && echo "$werr" | grep -q "IR op 146 not yet implemented" && winok=1
+    fi
+    if [ ! -f "$TN_D/mp_n" ] || [ ! -f "$TN_D/mp_l" ]; then
+        echo "FAIL: $name (the bare-metal or Linux build produced no artifact)"; FAIL=$((FAIL + 1))
+    elif ! cmp -s "$TN_D/mp_n" "$TN_D/mp_l"; then
+        echo "FAIL: $name (bare metal does not fold to the Linux answer)"; FAIL=$((FAIL + 1))
+    elif [ "$winok" != "1" ]; then
+        echo "FAIL: $name (the Windows leg did not distinguish itself: '$werr')"; FAIL=$((FAIL + 1))
+    else
+        PASS=$((PASS + 1)); echo "  $name: PASS"
+    fi
+}
+tn_mp_same_as_linux tn_module_path_x86_64  artifact --arch=x86_64
+tn_mp_same_as_linux tn_module_path_arm64   artifact --arch=arm64
+tn_mp_same_as_linux tn_module_path_riscv32 nyi      --arch=riscv32
+tn_mp_same_as_linux tn_module_path_xtensa  nyi      --arch=xtensa
+tn_mp_same_as_linux tn_module_path_legacy_x86_64 artifact --legacy --arch=x86_64
+tn_mp_same_as_linux tn_module_path_legacy_arm64  artifact --legacy --arch=arm64
+
+# The hosted ids must not move. --target=none is an ADDITION to the arch_id
+# ABI, not a renumbering, and these are the values docs/LANGUAGE.md and the
+# KrboFat slice table are written against.
+tn_const_is tn_arch_id_hosted_linux_x86_64   'get_arch_id()' 1 --arch=x86_64 --target=linux
+tn_const_is tn_arch_id_hosted_linux_arm64    'get_arch_id()' 2 --arch=arm64  --target=linux
+tn_const_is tn_arch_id_hosted_windows_x86_64 'get_arch_id()' 3 --arch=x86_64 --target=windows
+tn_const_is tn_arch_id_hosted_windows_arm64  'get_arch_id()' 4 --arch=arm64  --target=windows
+tn_const_is tn_arch_id_hosted_macos_x86_64   'get_arch_id()' 5 --arch=x86_64 --target=macos
+tn_const_is tn_arch_id_hosted_macos_arm64    'get_arch_id()' 6 --arch=arm64  --target=macos
+tn_const_is tn_arch_id_hosted_android_arm64  'get_arch_id()' 7 --arch=arm64  --target=android
+tn_const_is tn_arch_id_hosted_android_x86_64 'get_arch_id()' 8 --arch=x86_64 --target=android
+
+# Second, independent reading of the SAME fact: find the immediate in the
+# emitted machine code. The equality oracle above proves the constant is 9 by
+# construction; this proves it by disassembling what actually shipped, so a
+# hypothetical bug that made the literal path wrong in the same direction
+# cannot hide. Both encodings materialise the value into whichever register
+# the allocator picked, so the register field is a wildcard and the immediate
+# is not:
+#   x86_64  MOV r32, imm32   B8+r imm32(LE)      -> b[89a-f] <imm32 LE>
+#   arm64   MOVZ Xd, #imm16  D2800000|imm16<<5|d, little-endian. Only the
+#           LOW byte carries the register (0..31) alongside the bottom bits
+#           of imm16<<5, so for imm 10 (0x140) it is 0x40..0x5F and the rest
+#           of the word is fixed at 0180d2; for the Linux imm 2 (0x40) the
+#           same low-byte range appears but the word is 0080d2.
+# Wrong-value guards are asserted too: the Linux immediates must be ABSENT.
+tn_imm() { # name, file, present-regex, absent-regex
+    TOTAL=$((TOTAL + 1))
+    local hex
+    hex=$(xxd -p "$2" | tr -d '\n')
+    if ! echo "$hex" | grep -qE "$3"; then
+        echo "FAIL: $1 (expected immediate not materialised in the artifact)"; FAIL=$((FAIL + 1))
+    elif echo "$hex" | grep -qE "$4"; then
+        echo "FAIL: $1 (the Linux immediate is still in the artifact)"; FAIL=$((FAIL + 1))
+    else
+        PASS=$((PASS + 1)); echo "  $1: PASS"
+    fi
+}
+printf 'static uint32 sink = 0\nfn main() {\n    sink = get_arch_id()\n    loop { }\n}\n' > "$TN_D/aid.kr"
+rm -f "$TN_D/aid_x86" "$TN_D/aid_a64"
+"$CP_KRC" --arch=x86_64 --target=none "$TN_D/aid.kr" -o "$TN_D/aid_x86" >/dev/null 2>&1
+"$CP_KRC" --arch=arm64  --target=none "$TN_D/aid.kr" -o "$TN_D/aid_a64" >/dev/null 2>&1
+# mov r32, 9  vs  mov r32, 1
+tn_imm tn_arch_id_immediate_x86_64 "$TN_D/aid_x86" 'b[89a-f]09000000' 'b[89a-f]01000000'
+# movz xd, #10 (imm<<5 = 0x140) vs movz xd, #2 (imm<<5 = 0x40)
+tn_imm tn_arch_id_immediate_arm64  "$TN_D/aid_a64" '[45][0-9a-f]0180d2' '[45][0-9a-f]0080d2'
+rm -rf "$TN_D"
+
 # --- hand-counted write() lengths ------------------------------------------
 # Every write(fd, "<literal>", N) must have N equal to the literal's real byte
 # length. Getting this wrong is the single most repeated defect in this tree:

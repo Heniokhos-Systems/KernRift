@@ -2970,7 +2970,11 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
     //   1 macOS  → Mach-O
     //   2 win    → COFF (PE object)
     //   3 android → ELF
-    //   4 freebsd → ELF
+    //   4 none (bare metal) → ELF. Said "freebsd" until --target=none took
+    //     the value; there is no freebsd target and never was. ELF is right
+    //     for bare metal too -- a freestanding .o is an ELF relocatable and
+    //     a64_compute_va's Linux fall-through hands out the same 0x400000
+    //     base the freestanding ELF emitter uses.
     if emit_mode == 3 {
         uint64 total_code = codegen_output_len()
         if arch == 2 {
@@ -5183,6 +5187,12 @@ fn main() {
                 write(1, "  --arch=x86_64|arm64|riscv32|xtensa   single-arch binary (no fat-binary wrap)\n", 79)
                 uint64 tgt_help = "  --target=linux|macos|windows|android|esp32|none   single-target binary\n"
                 write(1, tgt_help, str_len(tgt_help))
+                // 'none' adds values to the get_target_os()/get_arch_id() ABI
+                // rather than reusing an OS's, so --help states them: a user
+                // who writes `if get_arch_id() == 2` for arm64 gets 10 on a
+                // bare-metal arm64 build and must handle it.
+                uint64 tn_help = "                              'none' = bare metal, no OS: get_target_os()=4, get_arch_id()=9-12\n"
+                write(1, tn_help, str_len(tn_help))
                 write(1, "  --targets=<list>          custom fat binary subset\n", 53)
                 write(1, "                              e.g. linux-x64,macos-arm64,win-x64\n", 65)
                 write(1, "  --emit=elfexe|macho|pe|android        single-target executable\n", 65)

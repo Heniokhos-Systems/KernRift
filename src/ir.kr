@@ -2099,6 +2099,29 @@ fn ir_lower_expr(uint64 node) -> uint64 {
             uint64 dest = ir_new_vreg()
             if target_os == 2 {
                 ir_emit(IR_MODULE_PATH, dest, buf_v, size_v, 0, ir_current_bb)
+            } else if target_os == 4 {
+                // --target=none: 0, and this is a DECISION, not the Linux
+                // fall-through underneath it. Spelled out separately so it
+                // stays one.
+                //
+                // Every other member of the "answers instead of trapping"
+                // class found by this sub-project had to REFUSE, because the
+                // constant stood in for an action that silently did not
+                // happen (set_executable's chmod) or for state that does not
+                // exist (time_ns's clock). This one is different: 0 is not a
+                // stand-in, it is the true and complete answer. It already
+                // means "no path is available" on linux/macos/android -- the
+                // only target that ever returns anything else is Windows --
+                // and a bare-metal image genuinely has no loader, no
+                // filesystem and no argv[0] to name itself with. Refusing
+                // would turn a builtin that answers a question truthfully
+                // into a compile error for asking it.
+                //
+                // Callers already handle 0: src/main.kr's import_init_search
+                // _paths only runs `if exe_len > 0`. tests/run_tests.sh pins
+                // this against the Linux artifact, and against the Windows
+                // one to prove the comparison can tell them apart.
+                ir_emit(IR_CONST, dest, 0, 0, 0, ir_current_bb)
             } else {
                 ir_emit(IR_CONST, dest, 0, 0, 0, ir_current_bb)
             }
@@ -3000,6 +3023,15 @@ fn ir_lower_expr(uint64 node) -> uint64 {
         }
 
         // get_target_os() → compile-time OS constant
+        // 0 linux, 1 macos, 2 windows, 3 android, 4 NONE (bare metal).
+        // This folds target_os VERBATIM, so --target=none has always reported
+        // 4 correctly and needs no arm here. Recorded explicitly because the
+        // two builtins either side of it did NOT: a reader checking whether
+        // this file handles target_os == 4 should not have to re-derive that
+        // this one is safe, and a future edit that turns this into a per-OS
+        // chain like its neighbours would reintroduce the defect silently.
+        // tests/run_tests.sh pins the value at 4 on all four arches and on
+        // both backends for exactly that reason.
         if skip_builtin == 0 && tok_matches(wct, "get_target_os", 13) != 0 {
             uint64 dest = ir_new_vreg()
             ir_emit(IR_CONST, dest, 0, 0, target_os, ir_current_bb)
@@ -3008,12 +3040,43 @@ fn ir_lower_expr(uint64 node) -> uint64 {
 
         // get_arch_id() → compile-time arch ID.
         // Matches the legacy codegen IDs. Arch+OS crosstable:
-        //   x86_64:  linux=1, windows=3, macos=5, android=8
-        //   arm64:   linux=2, windows=4, macos=6, android=7
-        // target_arch is 0 for x86_64, 1 for arm64 (set from main.kr).
+        //   x86_64:  linux=1, windows=3, macos=5, android=8, NONE=9
+        //   arm64:   linux=2, windows=4, macos=6, android=7, NONE=10
+        //   riscv32: NONE=11        xtensa: NONE=12
+        // target_arch is 0 x86_64, 1 arm64, 2 riscv32, 3 xtensa (from main.kr).
+        //
+        // WHY target_os == 4 NEEDS ITS OWN ARM. arch_id was initialised to 1
+        // -- Linux x86_64 -- and only OVERRIDDEN for windows/macos/android, so
+        // bare metal inherited the Linux answer. No syscall is emitted, so
+        // Task 2's trap-instruction guards structurally could not see it, and
+        // the builtin did not fail: it answered "you are running on Linux" to
+        // a program with no kernel under it. Measured at 563b0f3: on x86_64
+        // `sink = get_arch_id()` compiled byte-identical to `sink = 1`, and on
+        // arm64 to `sink = 2`.
+        //
+        // The bare-metal ids are NEW VALUES (9..12), not a reuse of 1..8. Two
+        // reasons. First, 1..8 are the KrboFat slice selectors (main.kr's
+        // target_mask maps bit i to arch_id i+1) and reusing one would make a
+        // bare-metal image indistinguishable from a hosted slice; 9..12 are
+        // outside that space and a fat binary cannot contain a bare-metal
+        // slice anyway (--target=none is refused from every entrance into
+        // compile_fat). Second, the whole point is that bare metal is NOT an
+        // OS, so it must not borrow an OS's id.
+        //
+        // CONSUMER NOTE: code that dispatches on arch_id with `== 2` meaning
+        // "arm64" (src/living.kr:1213 does) sees 10 on a bare-metal arm64
+        // build and takes the x86_64 branch. That is correct-by-refusal here
+        // -- every such site in this tree is guarded by a syscall that
+        // --target=none refuses first -- but user code doing the same must
+        // add the none ids. docs/LANGUAGE.md documents them.
         if skip_builtin == 0 && tok_matches(wct, "get_arch_id", 11) != 0 {
             uint64 arch_id = 1
-            if target_arch == 1 {
+            if target_os == 4 {
+                arch_id = 9
+                if target_arch == 1 { arch_id = 10 }
+                if target_arch == 2 { arch_id = 11 }
+                if target_arch == 3 { arch_id = 12 }
+            } else if target_arch == 1 {
                 arch_id = 2
                 if target_os == 2 { arch_id = 4 }
                 if target_os == 1 { arch_id = 6 }
