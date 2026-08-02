@@ -248,6 +248,23 @@ fn rv_mv(uint64 rd, uint64 rs) {
     rv_i(0, rs, 0, rd, 0x13)
 }
 
+// The single riscv32 ECALL emitter (0x00000073). Every site that would emit
+// that word routes through here, so the --target=none refusal cannot be
+// bypassed by a site an audit missed; grep the tree for 0x00000073 and this
+// is the only emission. See bare_metal_trap_refused (codegen.kr) for why the
+// guard lives at the emitter rather than in a post-hoc scan of the artifact.
+//
+// `what` names the reaching builtin. An explicit inline `asm { "ecall" }`
+// passes what = 0 and is PERMITTED: the programmer typed the instruction, so
+// it is a deliberate escape hatch, not a silent injection by a builtin.
+fn rv_ecall(uint64 what) {
+    if target_os == 4 && what != 0 {
+        uint64 rvec = "ECALL"
+        bare_metal_trap_refused(rvec, what)
+    }
+    emit_u32_le(0x00000073)
+}
+
 // li rd, imm — materialize a 32-bit constant.
 // Small values ([-2048, 2047] as a signed 32-bit number) fit a single
 // `addi rd, x0, imm` (addi sign-extends imm12, so 0xFFFFF800..0xFFFFFFFF
@@ -1016,7 +1033,9 @@ fn asm_emit_rv(uint64 str_tok) {
 
     // ----- Nullary intrinsics (fixed 32-bit words) -----
     if asm_match(sptr, 0, "nop", 3) != 0 && slen == 3 { rv_i(0, 0, 0, 0, 0x13); return }   // addi x0,x0,0
-    if asm_match(sptr, 0, "ecall", 5) != 0 && slen == 5 { emit_u32_le(0x00000073); return }
+    // what = 0: an explicit inline `asm { "ecall" }`. Permitted under
+    // --target=none because the programmer typed the instruction (see rv_ecall).
+    if asm_match(sptr, 0, "ecall", 5) != 0 && slen == 5 { rv_ecall(0); return }
     if asm_match(sptr, 0, "ebreak", 6) != 0 && slen == 6 { emit_u32_le(0x00100073); return }
     if asm_match(sptr, 0, "wfi", 3) != 0 && slen == 3 { emit_u32_le(0x10500073); return }
     if asm_match(sptr, 0, "mret", 4) != 0 && slen == 4 { emit_u32_le(0x30200073); return }
@@ -2057,7 +2076,7 @@ fn ir_emit_riscv_insn(uint64 ii) {
         rv_li(14, 0xFFFFFFFF)                  // a4 = fd = -1
         rv_li(15, 0)                           // a5 = offset = 0 (pages; moot)
         rv_li(17, 222)                         // a7 = mmap2
-        emit_u32_le(0x00000073)                // ecall  (ptr in a0)
+        rv_ecall("alloc")                      // ecall  (ptr in a0)
         rv_s(0, RV_T6, RV_A0, 2, 0x23)         // sw t6, 0(a0)   store size header
         rv_i(8, RV_A0, 0, RV_A0, 0x13)         // a0 = a0 + 8    (past header)
         if dst_r != 0xFFFFFFFF && dst_r != RV_A0 { rv_mv(dst_r, RV_A0) }
@@ -2087,7 +2106,7 @@ fn ir_emit_riscv_insn(uint64 ii) {
         rv_i(0, RV_A0, 2, 11, 0x03)            // lw a1, 0(a0)          (stored size)
         rv_i(8, 11, 0, 11, 0x13)               // addi a1, a1, 8        (total length)
         rv_li(17, ir_rv32_syscall_nr(11))      // a7 = munmap syscall nr
-        emit_u32_le(0x00000073)                // ecall
+        rv_ecall("dealloc")
         return
     }
 
@@ -2253,7 +2272,7 @@ fn ir_emit_riscv_insn(uint64 ii) {
         }
         uint64 real_nr = ir_rv32_syscall_nr(imm)
         rv_li(17, real_nr)                 // a7 = syscall number
-        emit_u32_le(0x00000073)            // ecall
+        rv_ecall("syscall")
         if dst_r != 0xFFFFFFFF && dst_r != RV_A0 { rv_mv(dst_r, RV_A0) }
         if dst_r == 0xFFFFFFFF { rv_store_spill(RV_A0, dest_v) }
         return
@@ -2267,7 +2286,7 @@ fn ir_emit_riscv_insn(uint64 ii) {
         }
         uint64 nr_r = rv_resolve_src(s1_v, RV_T5)
         rv_mv(17, nr_r)                    // a7 = number
-        emit_u32_le(0x00000073)            // ecall
+        rv_ecall("syscall_raw")
         if dst_r != 0xFFFFFFFF && dst_r != RV_A0 { rv_mv(dst_r, RV_A0) }
         if dst_r == 0xFFFFFFFF { rv_store_spill(RV_A0, dest_v) }
         return
@@ -2627,7 +2646,7 @@ fn ir_riscv_gen(uint64 fn_node) {
     uint64 wnt_rv_ep = fn_name_tok_rv
     if tok_matches(wnt_rv_ep, "main", 4) != 0 && freestanding == 0 && is_naked == 0 {
         rv_li(17, 93)                 // a7 = 93 (asm-generic exit)
-        emit_u32_le(0x00000073)       // ecall
+        rv_ecall("main() epilogue auto-exit")
     }
     if is_naked == 0 {
         // Restore used s-registers (mirror of the prologue)

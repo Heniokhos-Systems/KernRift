@@ -268,7 +268,32 @@ fn xt_memw() { xt_rrr(0, 0xC, 0, 2, 0, 0) }
 //
 // Under qemu WITHOUT -semihosting this instruction is a silent NO-OP,
 // not a trap: an image that relies on it to exit will simply run forever.
-fn xt_simcall() { xt_rrr(0, 0, 1, 5, 0, 0) }
+//
+// This is also the single SIMCALL emitter and the --target=none choke point
+// for xtensa. SIMCALL is gated on the REACHING BUILTIN, not on the
+// instruction, and that distinction is load-bearing: unlike SYSCALL/SVC/ECALL
+// it has a legitimate bare-metal use. The op-52 lowering below (ir_xtensa.kr) terminates a qemu
+// lx60 image through semihosting, which is a *working* bare-metal exit() that
+// the --target=none spec preserves deliberately. A blanket SIMCALL refusal
+// would break it and fail the freestanding corpus gate by design. So `exit`
+// is permitted and every other builtin refuses -- a future lowering that adds
+// a SIMCALL for, say, write() is refused automatically, without editing this
+// function.
+//
+// `what` == 0 means an explicit inline `asm { "simcall" }`: the programmer
+// typed the instruction, so it is a deliberate escape hatch, matching x86,
+// arm64 and riscv32 (where inline asm never reaches the trap emitter at all).
+fn xt_simcall(uint64 what) {
+    if target_os == 4 && what != 0 {
+        uint64 xt_permitted = "exit"
+        if str_eq_full(what, xt_permitted) == 0 {
+            uint64 xtsc = "SIMCALL"
+            bare_metal_trap_refused(xtsc, what)
+        }
+    }
+    xt_rrr(0, 0, 1, 5, 0, 0)
+}
+
 // RSYNC: same RRR group as MEMW, t=1 (word 0x002010) — waits for a WSR to a
 // special register (PS here) to take effect before dependent instructions.
 fn xt_rsync() { xt_rrr(0, 1, 0, 2, 0, 0) }
@@ -1671,7 +1696,9 @@ fn asm_emit_xt(uint64 str_tok) {
     // Nullary intrinsics (fixed-width words; NOP.N = 16-bit, MEMW = 24-bit).
     if asm_match(sptr, 0, "nop", 3) != 0 && slen == 3 { xt_nop_n(); return }
     if asm_match(sptr, 0, "memw", 4) != 0 && slen == 4 { xt_memw(); return }
-    if asm_match(sptr, 0, "simcall", 7) != 0 && slen == 7 { xt_simcall(); return }
+    // what = 0: an explicit inline `asm { "simcall" }`. Permitted under
+    // --target=none because the programmer typed the instruction (see xt_simcall).
+    if asm_match(sptr, 0, "simcall", 7) != 0 && slen == 7 { xt_simcall(0); return }
 
     // Unrecognized mnemonic — hard error (loud, like the riscv path). Operand
     // and raw-hex forms are out of scope for this MVP (widths are ambiguous on
@@ -2760,7 +2787,7 @@ fn ir_emit_xtensa_insn(uint64 ii) {
         // booting an image that relies on this must pass -semihosting.
         xt_mv(3, XT_ARG0)          // a3 = status (from a2) — MUST be first
         xt_movi(XT_ARG0, 1)        // a2 = SYS_exit
-        xt_simcall()
+        xt_simcall("exit")
         // If semihosting was not enabled the SIMCALL did nothing; park rather
         // than fall through into whatever bytes follow.
         xt_j(codegen_output_len())

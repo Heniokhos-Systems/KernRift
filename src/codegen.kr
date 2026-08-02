@@ -522,6 +522,68 @@ fn emit_byte(uint8 b) {
     out_len = out_len + 1
 }
 
+// ---------------------------------------------------------------------------
+// Bare-metal (--target=none) trap-instruction choke point
+// ---------------------------------------------------------------------------
+//
+// Under --target=none (target_os == 4) there is no kernel, so no trap
+// instruction may ever reach the output. The per-OS dispatch throughout this
+// codebase is "special-case Windows/macOS, else fall through to POSIX", so
+// target_os == 4 silently INHERITS the Linux path at roughly sixty branch
+// sites (`target_os == 2` alone appears 116 times; `target_os == 0` only 4).
+// Auditing those by inspection is exactly how a Linux syscall ends up inside
+// a kernel image, so every architecture instead routes its trap instruction
+// through a single emitter that refuses here:
+//
+//   x86_64  SYSCALL  0F 05       -> emit_x86_syscall_insn   (this file)
+//   arm64   SVC                  -> emit_a64_svc_word       (codegen_aarch64.kr)
+//   riscv32 ECALL   0x00000073   -> rv_ecall                (ir_riscv.kr)
+//   xtensa  SIMCALL              -> xt_simcall              (ir_xtensa.kr)
+//
+// Guarding the emitter is strictly stronger than scanning the artifact: a
+// freestanding image has no ELF sections at all to scan, the guard covers
+// paths no test corpus reaches, and it cannot be fooled by data that happens
+// to encode a trap instruction.
+//
+// `insn` is the mnemonic and `what` names the builtin/lowering that reached
+// the emitter, so the error points at the source construct rather than at the
+// encoder -- which is what turns the remaining per-OS audit into a worklist
+// the compiler hands you. Every length here is DERIVED with str_len(), never
+// counted: a hand-counted length truncates the one diagnostic that explains a
+// silent syscall.
+fn bare_metal_trap_refused(uint64 insn, uint64 what) {
+    uint64 bmt1 = "error: --target=none: "
+    write(2, bmt1, str_len(bmt1))
+    write(2, insn, str_len(insn))
+    uint64 bmt2 = " reached the emitter from '"
+    write(2, bmt2, str_len(bmt2))
+    write(2, what, str_len(what))
+    uint64 bmt3 = "': there is no operating system to trap into on bare metal. This builtin must refuse, or be lowered for --target=none, before it can be used in a freestanding image.\n"
+    write(2, bmt3, str_len(bmt3))
+    exit(1)
+}
+
+// The single x86_64 SYSCALL (0F 05) emitter, shared by BOTH x86 backends --
+// the IR backend (src/ir.kr) and the legacy direct codegen (this file, reached
+// via --legacy, --emit=obj and --emit=lkm). Grep the tree for an emit_byte
+// of 0x0F immediately followed by an emit_byte of 0x05 and this is the only
+// hit; that grep is the enumeration of the sites, and it is verifiable rather
+// than asserted. Mirrors emit_a64_svc's role on arm64.
+//
+// `what` names the reaching builtin. An explicit inline `asm { "syscall" }`
+// passes what = 0 and is PERMITTED: the programmer typed the instruction, so
+// it is a deliberate escape hatch, not a silent injection by a builtin. That
+// matches arm64 and riscv32, where inline `asm { "svc #0" }` / `asm { "ecall" }`
+// are assembled by the asm string matcher and never reach these emitters at all.
+fn emit_x86_syscall_insn(uint64 what) {
+    if target_os == 4 && what != 0 {
+        uint64 x86sc = "SYSCALL"
+        bare_metal_trap_refused(x86sc, what)
+    }
+    emit_byte(0x0F)
+    emit_byte(0x05)
+}
+
 fn emit_u32_le(uint64 val) {
     uint8 b0 = val & 0xFF
     uint8 b1 = (val >> 8) & 0xFF
@@ -4169,8 +4231,8 @@ fn gen_expr(uint64 node) {
                 emit_mov_rax_imm(1)
                 emit_mov_rdi_rax()
                 if target_os == 2 { emit_mov_rcx_rax(); emit_win_alloc_stack(0x20); emit_win_call_iat(0) }
-                else if target_os == 1 { emit_mov_rax_imm(0x2000001); emit_byte(0x0F); emit_byte(0x05) }
-                else { emit_mov_rax_imm(231); emit_byte(0x0F); emit_byte(0x05) }
+                else if target_os == 1 { emit_mov_rax_imm(0x2000001); emit_x86_syscall_insn("array bounds check (--debug)") }
+                else { emit_mov_rax_imm(231); emit_x86_syscall_insn("array bounds check (--debug)") }
                 uint64 bc_skip = out_len - bc_jb - 1
                 uint8 bc_s = bc_skip
                 uint64 bc_pp = out_buf + bc_jb
@@ -4770,10 +4832,10 @@ fn gen_expr(uint64 node) {
                     emit_win_call_iat(0)
                 } else if target_os == 1 {
                     emit_mov_rax_imm(0x2000001)
-                    emit_byte(0x0F); emit_byte(0x05)
+                    emit_x86_syscall_insn("+ overflow check (--debug)")
                 } else {
                     emit_mov_rax_imm(231)
-                    emit_byte(0x0F); emit_byte(0x05)
+                    emit_x86_syscall_insn("+ overflow check (--debug)")
                 }
                 uint64 jo_add_skip = out_len - jo_add - 1
                 uint8 jo_add_s8 = jo_add_skip
@@ -4795,10 +4857,10 @@ fn gen_expr(uint64 node) {
                     emit_win_call_iat(0)
                 } else if target_os == 1 {
                     emit_mov_rax_imm(0x2000001)
-                    emit_byte(0x0F); emit_byte(0x05)
+                    emit_x86_syscall_insn("- overflow check (--debug)")
                 } else {
                     emit_mov_rax_imm(231)
-                    emit_byte(0x0F); emit_byte(0x05)
+                    emit_x86_syscall_insn("- overflow check (--debug)")
                 }
                 uint64 jo_sub_skip = out_len - jo_sub - 1
                 uint8 jo_sub_s8 = jo_sub_skip
@@ -4820,10 +4882,10 @@ fn gen_expr(uint64 node) {
                     emit_win_call_iat(0)
                 } else if target_os == 1 {
                     emit_mov_rax_imm(0x2000001)
-                    emit_byte(0x0F); emit_byte(0x05)
+                    emit_x86_syscall_insn("* overflow check (--debug)")
                 } else {
                     emit_mov_rax_imm(231)
-                    emit_byte(0x0F); emit_byte(0x05)
+                    emit_x86_syscall_insn("* overflow check (--debug)")
                 }
                 uint64 jo_mul_skip = out_len - jo_mul - 1
                 uint8 jo_mul_s8 = jo_mul_skip
@@ -4848,10 +4910,10 @@ fn gen_expr(uint64 node) {
                     emit_win_call_iat(0)
                 } else if target_os == 1 {
                     emit_mov_rax_imm(0x2000001)
-                    emit_byte(0x0F); emit_byte(0x05)
+                    emit_x86_syscall_insn("/ divide-by-zero check (--debug)")
                 } else {
                     emit_mov_rax_imm(231)
-                    emit_byte(0x0F); emit_byte(0x05)
+                    emit_x86_syscall_insn("/ divide-by-zero check (--debug)")
                 }
                 // Patch jnz to skip the trap
                 uint64 dz_skip = out_len - dz_jnz_patch - 1
@@ -4886,10 +4948,10 @@ fn gen_expr(uint64 node) {
                     emit_win_call_iat(0)
                 } else if target_os == 1 {
                     emit_mov_rax_imm(0x2000001)
-                    emit_byte(0x0F); emit_byte(0x05)
+                    emit_x86_syscall_insn("% divide-by-zero check (--debug)")
                 } else {
                     emit_mov_rax_imm(231)
-                    emit_byte(0x0F); emit_byte(0x05)
+                    emit_x86_syscall_insn("% divide-by-zero check (--debug)")
                 }
                 // Patch jnz to skip the trap
                 uint64 mz_skip = out_len - mz_jnz_patch - 1
@@ -4954,10 +5016,10 @@ fn gen_expr(uint64 node) {
                     emit_win_call_iat(0)
                 } else if target_os == 1 {
                     emit_mov_rax_imm(0x2000001)
-                    emit_byte(0x0F); emit_byte(0x05)
+                    emit_x86_syscall_insn("+= overflow check (--debug)")
                 } else {
                     emit_mov_rax_imm(231)
-                    emit_byte(0x0F); emit_byte(0x05)
+                    emit_x86_syscall_insn("+= overflow check (--debug)")
                 }
                 uint64 jo_ca_skip = out_len - jo_ca - 1
                 uint8 jo_ca_s8 = jo_ca_skip
@@ -4979,10 +5041,10 @@ fn gen_expr(uint64 node) {
                     emit_win_call_iat(0)
                 } else if target_os == 1 {
                     emit_mov_rax_imm(0x2000001)
-                    emit_byte(0x0F); emit_byte(0x05)
+                    emit_x86_syscall_insn("-= overflow check (--debug)")
                 } else {
                     emit_mov_rax_imm(231)
-                    emit_byte(0x0F); emit_byte(0x05)
+                    emit_x86_syscall_insn("-= overflow check (--debug)")
                 }
                 uint64 jo_cs_skip = out_len - jo_cs - 1
                 uint8 jo_cs_s8 = jo_cs_skip
@@ -5004,10 +5066,10 @@ fn gen_expr(uint64 node) {
                     emit_win_call_iat(0)
                 } else if target_os == 1 {
                     emit_mov_rax_imm(0x2000001)
-                    emit_byte(0x0F); emit_byte(0x05)
+                    emit_x86_syscall_insn("*= overflow check (--debug)")
                 } else {
                     emit_mov_rax_imm(231)
-                    emit_byte(0x0F); emit_byte(0x05)
+                    emit_x86_syscall_insn("*= overflow check (--debug)")
                 }
                 uint64 jo_cm_skip = out_len - jo_cm - 1
                 uint8 jo_cm_s8 = jo_cm_skip
@@ -5614,8 +5676,7 @@ fn gen_expr(uint64 node) {
             } else {
                 emit_mov_rdi_rax()
                 if target_os == 1 { emit_mov_rax_imm(0x2000001) } else { emit_mov_rax_imm(231) }
-                emit_byte(0x0F)
-                emit_byte(0x05)
+                emit_x86_syscall_insn("exit")
             }
             return
         }
@@ -5670,8 +5731,7 @@ fn gen_expr(uint64 node) {
                 emit_load_rax_from_stack(temp_slot_0)
                 emit_mov_rdi_rax()
                 if target_os == 1 { emit_mov_rax_imm(0x2000004) } else { emit_mov_rax_imm(1) }
-                emit_byte(0x0F)
-                emit_byte(0x05)
+                emit_x86_syscall_insn("write")
             }
             return
         }
@@ -5769,8 +5829,7 @@ fn gen_expr(uint64 node) {
                 emit_byte(0xC9)
                 // rax = syscall number
                 if target_os == 1 { emit_mov_rax_imm(0x20000C5) } else { emit_mov_rax_imm(9) }
-                emit_byte(0x0F)
-                emit_byte(0x05)
+                emit_x86_syscall_insn("alloc")
                 // rax = raw mmap pointer
                 // Store size header at [rax], return rax+8
                 emit_store_rax_to_stack(temp_slot_1)
@@ -5851,8 +5910,7 @@ fn gen_expr(uint64 node) {
                 emit_mov_rax_imm(0x1A4)
                 emit_mov_rdx_rax()
                 if target_os == 1 { emit_mov_rax_imm(0x2000005) } else { emit_mov_rax_imm(2) }
-                emit_byte(0x0F)
-                emit_byte(0x05)
+                emit_x86_syscall_insn("file_open")
             }
             return
         }
@@ -5909,8 +5967,7 @@ fn gen_expr(uint64 node) {
                 emit_load_rax_from_stack(temp_slot_0)
                 emit_mov_rdi_rax()
                 if target_os == 1 { emit_mov_rax_imm(0x2000003) } else { emit_mov_rax_imm(0) }
-                emit_byte(0x0F)
-                emit_byte(0x05)
+                emit_x86_syscall_insn("file_read")
             }
             return
         }
@@ -5957,8 +6014,7 @@ fn gen_expr(uint64 node) {
                 emit_load_rax_from_stack(temp_slot_0)
                 emit_mov_rdi_rax()
                 if target_os == 1 { emit_mov_rax_imm(0x2000004) } else { emit_mov_rax_imm(1) }
-                emit_byte(0x0F)
-                emit_byte(0x05)
+                emit_x86_syscall_insn("file_write")
             }
             return
         }
@@ -5977,8 +6033,7 @@ fn gen_expr(uint64 node) {
             } else {
                 emit_mov_rdi_rax()
                 if target_os == 1 { emit_mov_rax_imm(0x2000006) } else { emit_mov_rax_imm(3) }
-                emit_byte(0x0F)
-                emit_byte(0x05)
+                emit_x86_syscall_insn("file_close")
             }
             return
         }
@@ -6016,8 +6071,7 @@ fn gen_expr(uint64 node) {
                 emit_mov_rax_imm(2)
                 emit_mov_rdx_rax()
                 if target_os == 1 { emit_mov_rax_imm(0x20000C7) } else { emit_mov_rax_imm(8) }
-                emit_byte(0x0F)
-                emit_byte(0x05)
+                emit_x86_syscall_insn("file_size")
                 // Save size
                 emit_push_rax()
                 // lseek(fd, 0, SEEK_SET=0) to rewind
@@ -6028,8 +6082,7 @@ fn gen_expr(uint64 node) {
                 emit_byte(0x31)
                 emit_byte(0xD2)
                 if target_os == 1 { emit_mov_rax_imm(0x20000C7) } else { emit_mov_rax_imm(8) }
-                emit_byte(0x0F)
-                emit_byte(0x05)
+                emit_x86_syscall_insn("file_size")
                 // Restore size
                 emit_pop_rcx()
                 // mov rax, rcx
@@ -6100,7 +6153,7 @@ fn gen_expr(uint64 node) {
                         emit_mov_rax_imm(1)
                         emit_mov_rdx_rax()
                         if target_os == 1 { emit_mov_rax_imm(0x2000004) } else { emit_mov_rax_imm(1) }
-                        emit_byte(0x0F); emit_byte(0x05)
+                        emit_x86_syscall_insn("print")
                     }
                 }
                 pr_first = 0
@@ -6146,7 +6199,7 @@ fn gen_expr(uint64 node) {
                         emit_mov_rax_imm(1)
                         emit_mov_rdi_rax()
                         if target_os == 1 { emit_mov_rax_imm(0x2000004) } else { emit_mov_rax_imm(1) }
-                        emit_byte(0x0F); emit_byte(0x05)
+                        emit_x86_syscall_insn("print")
                     }
                 } else {
                     // Integer: format as decimal string and write
@@ -6195,7 +6248,7 @@ fn gen_expr(uint64 node) {
                         emit_mov_rax_imm(1)
                         emit_mov_rdx_rax()
                         if target_os == 1 { emit_mov_rax_imm(0x2000004) } else { emit_mov_rax_imm(1) }
-                        emit_byte(0x0F); emit_byte(0x05)
+                        emit_x86_syscall_insn("print")
                     }
                     emit_byte(0xE9)
                     uint64 pr_jend = out_len; emit_u32_le(0)
@@ -6277,7 +6330,7 @@ fn gen_expr(uint64 node) {
                         emit_mov_rax_imm(1)
                         emit_mov_rdi_rax()
                         if target_os == 1 { emit_mov_rax_imm(0x2000004) } else { emit_mov_rax_imm(1) }
-                        emit_byte(0x0F); emit_byte(0x05)
+                        emit_x86_syscall_insn("print")
                     }
                     uint64 pr_eend = out_len
                     patch_u32(pr_jend, pr_eend - pr_jend - 4)
@@ -6330,7 +6383,7 @@ fn gen_expr(uint64 node) {
                     emit_mov_rax_imm(1)
                     emit_mov_rdx_rax()
                     if target_os == 1 { emit_mov_rax_imm(0x2000004) } else { emit_mov_rax_imm(1) }
-                    emit_byte(0x0F); emit_byte(0x05)
+                    emit_x86_syscall_insn("println")
                 }
             }
             return
@@ -6385,7 +6438,7 @@ fn gen_expr(uint64 node) {
                 emit_mov_rax_imm(1)
                 emit_mov_rdi_rax()
                 if target_os == 1 { emit_mov_rax_imm(0x2000004) } else { emit_mov_rax_imm(1) }
-                emit_byte(0x0F); emit_byte(0x05)
+                emit_x86_syscall_insn("print_str")
             }
             // println_str also emits a newline
             if is_println != 0 {
@@ -6440,7 +6493,7 @@ fn gen_expr(uint64 node) {
                     emit_mov_rax_imm(1)
                     emit_mov_rdx_rax()
                     if target_os == 1 { emit_mov_rax_imm(0x2000004) } else { emit_mov_rax_imm(1) }
-                    emit_byte(0x0F); emit_byte(0x05)
+                    emit_x86_syscall_insn("print_str")
                 }
             }
             return
@@ -6595,7 +6648,7 @@ fn gen_expr(uint64 node) {
                     emit_mov_rax_imm(11)
                 }
                 // syscall
-                emit_byte(0x0F); emit_byte(0x05)
+                emit_x86_syscall_insn("dealloc")
             }
             rax_cache = 0
             return
@@ -7296,7 +7349,7 @@ fn gen_expr(uint64 node) {
                     emit_byte(0x48); emit_byte(0x31); emit_byte(0xD2)
                 }
                 if target_os == 1 { emit_mov_rax_imm(0x200003B) } else { emit_mov_rax_imm(59) }
-                emit_byte(0x0F); emit_byte(0x05)
+                emit_x86_syscall_insn("exec_process_argv")
                 // Save errno if defined
                 uint64 errno_off_xa = static_lookup_by_name("exec_errno", 10)
                 if errno_off_xa != 0xFFFFFFFF {
@@ -7385,7 +7438,7 @@ fn gen_expr(uint64 node) {
                     emit_byte(0x48); emit_byte(0x31); emit_byte(0xD2)  // xor rdx, rdx
                 }
                 if target_os == 1 { emit_mov_rax_imm(0x200003B) } else { emit_mov_rax_imm(59) }
-                emit_byte(0x0F); emit_byte(0x05)
+                emit_x86_syscall_insn("exec_process")
                 // Restore stack if execve failed (only reached on error)
                 emit_byte(0x48); emit_byte(0x83); emit_byte(0xC4); emit_byte(0x10) // add rsp, 16
                 // Save errno (rax) to exec_errno static if defined
@@ -7408,7 +7461,7 @@ fn gen_expr(uint64 node) {
                 emit_mov_rax_imm(0x1ED)
                 emit_mov_rsi_rax()
                 if target_os == 1 { emit_mov_rax_imm(0x200000F) } else { emit_mov_rax_imm(90) }
-                emit_byte(0x0F); emit_byte(0x05)
+                emit_x86_syscall_insn("set_executable")
             }
             return
         }
@@ -7426,8 +7479,8 @@ fn gen_expr(uint64 node) {
                 emit_mov_rax_imm(1)
                 emit_mov_rdi_rax()
                 if target_os == 2 { emit_mov_rcx_rax(); emit_win_alloc_stack(0x20); emit_win_call_iat(0) }
-                else if target_os == 1 { emit_mov_rax_imm(0x2000001); emit_byte(0x0F); emit_byte(0x05) }
-                else { emit_mov_rax_imm(231); emit_byte(0x0F); emit_byte(0x05) }
+                else if target_os == 1 { emit_mov_rax_imm(0x2000001); emit_x86_syscall_insn("load8 null check (--debug)") }
+                else { emit_mov_rax_imm(231); emit_x86_syscall_insn("load8 null check (--debug)") }
                 uint64 l8_skip = out_len - jnz_l8 - 1
                 uint8 l8_s8 = l8_skip
                 uint64 l8_pp = out_buf + jnz_l8
@@ -7449,8 +7502,8 @@ fn gen_expr(uint64 node) {
                 emit_mov_rax_imm(1)
                 emit_mov_rdi_rax()
                 if target_os == 2 { emit_mov_rcx_rax(); emit_win_alloc_stack(0x20); emit_win_call_iat(0) }
-                else if target_os == 1 { emit_mov_rax_imm(0x2000001); emit_byte(0x0F); emit_byte(0x05) }
-                else { emit_mov_rax_imm(231); emit_byte(0x0F); emit_byte(0x05) }
+                else if target_os == 1 { emit_mov_rax_imm(0x2000001); emit_x86_syscall_insn("load16 null check (--debug)") }
+                else { emit_mov_rax_imm(231); emit_x86_syscall_insn("load16 null check (--debug)") }
                 uint64 l16_skip = out_len - jnz_l16 - 1
                 uint8 l16_s8 = l16_skip
                 uint64 l16_pp = out_buf + jnz_l16
@@ -7472,8 +7525,8 @@ fn gen_expr(uint64 node) {
                 emit_mov_rax_imm(1)
                 emit_mov_rdi_rax()
                 if target_os == 2 { emit_mov_rcx_rax(); emit_win_alloc_stack(0x20); emit_win_call_iat(0) }
-                else if target_os == 1 { emit_mov_rax_imm(0x2000001); emit_byte(0x0F); emit_byte(0x05) }
-                else { emit_mov_rax_imm(231); emit_byte(0x0F); emit_byte(0x05) }
+                else if target_os == 1 { emit_mov_rax_imm(0x2000001); emit_x86_syscall_insn("load32 null check (--debug)") }
+                else { emit_mov_rax_imm(231); emit_x86_syscall_insn("load32 null check (--debug)") }
                 uint64 l32_skip = out_len - jnz_l32 - 1
                 uint8 l32_s8 = l32_skip
                 uint64 l32_pp = out_buf + jnz_l32
@@ -7495,8 +7548,8 @@ fn gen_expr(uint64 node) {
                 emit_mov_rax_imm(1)
                 emit_mov_rdi_rax()
                 if target_os == 2 { emit_mov_rcx_rax(); emit_win_alloc_stack(0x20); emit_win_call_iat(0) }
-                else if target_os == 1 { emit_mov_rax_imm(0x2000001); emit_byte(0x0F); emit_byte(0x05) }
-                else { emit_mov_rax_imm(231); emit_byte(0x0F); emit_byte(0x05) }
+                else if target_os == 1 { emit_mov_rax_imm(0x2000001); emit_x86_syscall_insn("load64 null check (--debug)") }
+                else { emit_mov_rax_imm(231); emit_x86_syscall_insn("load64 null check (--debug)") }
                 uint64 l64_skip = out_len - jnz_l64 - 1
                 uint8 l64_s8 = l64_skip
                 uint64 l64_pp = out_buf + jnz_l64
@@ -7527,8 +7580,8 @@ fn gen_expr(uint64 node) {
                 emit_mov_rax_imm(1)
                 emit_mov_rdi_rax()
                 if target_os == 2 { emit_mov_rcx_rax(); emit_win_alloc_stack(0x20); emit_win_call_iat(0) }
-                else if target_os == 1 { emit_mov_rax_imm(0x2000001); emit_byte(0x0F); emit_byte(0x05) }
-                else { emit_mov_rax_imm(231); emit_byte(0x0F); emit_byte(0x05) }
+                else if target_os == 1 { emit_mov_rax_imm(0x2000001); emit_x86_syscall_insn("store8 null check (--debug)") }
+                else { emit_mov_rax_imm(231); emit_x86_syscall_insn("store8 null check (--debug)") }
                 uint64 s8_skip = out_len - jnz_s8 - 1
                 uint8 s8_s = s8_skip
                 uint64 s8_pp = out_buf + jnz_s8
@@ -7558,8 +7611,8 @@ fn gen_expr(uint64 node) {
                 emit_mov_rax_imm(1)
                 emit_mov_rdi_rax()
                 if target_os == 2 { emit_mov_rcx_rax(); emit_win_alloc_stack(0x20); emit_win_call_iat(0) }
-                else if target_os == 1 { emit_mov_rax_imm(0x2000001); emit_byte(0x0F); emit_byte(0x05) }
-                else { emit_mov_rax_imm(231); emit_byte(0x0F); emit_byte(0x05) }
+                else if target_os == 1 { emit_mov_rax_imm(0x2000001); emit_x86_syscall_insn("store16 null check (--debug)") }
+                else { emit_mov_rax_imm(231); emit_x86_syscall_insn("store16 null check (--debug)") }
                 uint64 s16_skip = out_len - jnz_s16 - 1
                 uint8 s16_s = s16_skip
                 uint64 s16_pp = out_buf + jnz_s16
@@ -7588,8 +7641,8 @@ fn gen_expr(uint64 node) {
                 emit_mov_rax_imm(1)
                 emit_mov_rdi_rax()
                 if target_os == 2 { emit_mov_rcx_rax(); emit_win_alloc_stack(0x20); emit_win_call_iat(0) }
-                else if target_os == 1 { emit_mov_rax_imm(0x2000001); emit_byte(0x0F); emit_byte(0x05) }
-                else { emit_mov_rax_imm(231); emit_byte(0x0F); emit_byte(0x05) }
+                else if target_os == 1 { emit_mov_rax_imm(0x2000001); emit_x86_syscall_insn("store32 null check (--debug)") }
+                else { emit_mov_rax_imm(231); emit_x86_syscall_insn("store32 null check (--debug)") }
                 uint64 s32_skip = out_len - jnz_s32 - 1
                 uint8 s32_s = s32_skip
                 uint64 s32_pp = out_buf + jnz_s32
@@ -7618,8 +7671,8 @@ fn gen_expr(uint64 node) {
                 emit_mov_rax_imm(1)
                 emit_mov_rdi_rax()
                 if target_os == 2 { emit_mov_rcx_rax(); emit_win_alloc_stack(0x20); emit_win_call_iat(0) }
-                else if target_os == 1 { emit_mov_rax_imm(0x2000001); emit_byte(0x0F); emit_byte(0x05) }
-                else { emit_mov_rax_imm(231); emit_byte(0x0F); emit_byte(0x05) }
+                else if target_os == 1 { emit_mov_rax_imm(0x2000001); emit_x86_syscall_insn("store64 null check (--debug)") }
+                else { emit_mov_rax_imm(231); emit_x86_syscall_insn("store64 null check (--debug)") }
                 uint64 s64_skip = out_len - jnz_s64 - 1
                 uint8 s64_s = s64_skip
                 uint64 s64_pp = out_buf + jnz_s64
@@ -7960,7 +8013,7 @@ fn gen_expr(uint64 node) {
             // nr -> rax
             emit_load_rax_from_stack(sc_base)
             // syscall (0F 05)
-            emit_byte(0x0F); emit_byte(0x05)
+            emit_x86_syscall_insn("syscall_raw")
             // Result is in rax
             return
         }
@@ -7990,7 +8043,7 @@ fn gen_expr(uint64 node) {
                 emit_byte(0xBF); emit_byte(1); emit_byte(0); emit_byte(0); emit_byte(0) // mov edi, 1
                 emit_byte(0x48); emit_byte(0x89); emit_byte(0xE6) // mov rsi, rsp
                 emit_mov_rax_imm(228)                              // mov eax, 228
-                emit_byte(0x0F); emit_byte(0x05)                   // syscall
+                emit_x86_syscall_insn("time_ns")                   // syscall
                 emit_byte(0x48); emit_byte(0x8B); emit_byte(0x04); emit_byte(0x24) // mov rax, [rsp]
                 emit_byte(0x48); emit_byte(0x69); emit_byte(0xC0)  // imul rax, rax, 1e9
                 emit_u32_le(1000000000)
@@ -8004,7 +8057,7 @@ fn gen_expr(uint64 node) {
                 emit_byte(0x48); emit_byte(0x89); emit_byte(0xE7)  // mov rdi, rsp (&tv)
                 emit_byte(0x31); emit_byte(0xF6)                   // xor esi, esi (NULL tz)
                 emit_mov_rax_imm(0x2000074)                        // mov eax, gettimeofday
-                emit_byte(0x0F); emit_byte(0x05)                   // syscall
+                emit_x86_syscall_insn("time_ns")                   // syscall
                 emit_byte(0x48); emit_byte(0x8B); emit_byte(0x04); emit_byte(0x24) // mov rax, [rsp] (sec)
                 emit_byte(0x48); emit_byte(0x69); emit_byte(0xC0)  // imul rax, rax, 1e9
                 emit_u32_le(1000000000)
@@ -8895,7 +8948,11 @@ fn asm_emit_x86(uint64 str_tok) {
     if asm_match(sptr, 0, "rdmsr", 5) != 0 && slen == 5 { emit_byte(0x0F); emit_byte(0x32); return }
     if asm_match(sptr, 0, "wrmsr", 5) != 0 && slen == 5 { emit_byte(0x0F); emit_byte(0x30); return }
     if asm_match(sptr, 0, "iretq", 5) != 0 && slen == 5 { emit_byte(0x48); emit_byte(0xCF); return }
-    if asm_match(sptr, 0, "syscall", 7) != 0 && slen == 7 { emit_byte(0x0F); emit_byte(0x05); return }
+    // what = 0: an explicit inline `asm { "syscall" }`. Permitted under
+    // --target=none because the programmer typed the instruction (see
+    // emit_x86_syscall_insn); routed through the choke point anyway so the
+    // raw 0F 05 encoding appears in exactly one place in the tree.
+    if asm_match(sptr, 0, "syscall", 7) != 0 && slen == 7 { emit_x86_syscall_insn(0); return }
     if asm_match(sptr, 0, "pushfq", 6) != 0 && slen == 6 { emit_byte(0x9C); return }
     if asm_match(sptr, 0, "popfq", 5) != 0 && slen == 5 { emit_byte(0x9D); return }
     if asm_match(sptr, 0, "cld", 3) != 0 && slen == 3 { emit_byte(0xFC); return }
@@ -10031,8 +10088,8 @@ fn gen_stmt(uint64 node) {
                     emit_mov_rax_imm(1)
                     emit_mov_rdi_rax()
                     if target_os == 2 { emit_mov_rcx_rax(); emit_win_alloc_stack(0x20); emit_win_call_iat(0) }
-                    else if target_os == 1 { emit_mov_rax_imm(0x2000001); emit_byte(0x0F); emit_byte(0x05) }
-                    else { emit_mov_rax_imm(231); emit_byte(0x0F); emit_byte(0x05) }
+                    else if target_os == 1 { emit_mov_rax_imm(0x2000001); emit_x86_syscall_insn("array bounds check (--debug)") }
+                    else { emit_mov_rax_imm(231); emit_x86_syscall_insn("array bounds check (--debug)") }
                     uint64 bca_skip = out_len - bca_jb - 1
                     uint8 bca_s = bca_skip
                     uint64 bca_pp = out_buf + bca_jb
@@ -11169,7 +11226,7 @@ fn gen_function(uint64 fn_node) {
             // Linux/macOS: exit(rax) — copy rax→rdi, then set syscall nr
             emit_mov_rdi_rax()
             if target_os == 1 { emit_mov_rax_imm(0x2000001) } else { emit_mov_rax_imm(231) }
-            emit_byte(0x0F); emit_byte(0x05)
+            emit_x86_syscall_insn("main() epilogue auto-exit")
         }
     }
 

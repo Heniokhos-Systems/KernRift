@@ -993,7 +993,7 @@ fn ir_emit_arm64_insn(uint64 ii) {
             emit_a64(0xB5000000 | (b_reg & 0x1F))   // CBNZ xB, skip — patched below
             emit_a64_mov_imm(0, 1)
             emit_a64_mov_imm(8, 93)                  // exit syscall
-            emit_a64_svc()
+            emit_a64_svc("/ divide-by-zero check (--debug)")
             uint64 dz_delta = out_len - dz_cbnz
             patch_u32(dz_cbnz, 0xB5000000 | (a64_check_b19(dz_delta) << 5) | (b_reg & 0x1F))
         }
@@ -1015,7 +1015,7 @@ fn ir_emit_arm64_insn(uint64 ii) {
             emit_a64(0xB5000000 | (b_reg & 0x1F))
             emit_a64_mov_imm(0, 1)
             emit_a64_mov_imm(8, 93)
-            emit_a64_svc()
+            emit_a64_svc("% divide-by-zero check (--debug)")
             uint64 dz_delta = out_len - dz_cbnz
             patch_u32(dz_cbnz, 0xB5000000 | (a64_check_b19(dz_delta) << 5) | (b_reg & 0x1F))
         }
@@ -1040,7 +1040,7 @@ fn ir_emit_arm64_insn(uint64 ii) {
             emit_a64(0xB5000000 | (b_reg & 0x1F))
             emit_a64_mov_imm(0, 1)
             emit_a64_mov_imm(8, 93)
-            emit_a64_svc()
+            emit_a64_svc("/ divide-by-zero check (--debug)")
             uint64 dz_delta = out_len - dz_cbnz
             patch_u32(dz_cbnz, 0xB5000000 | (a64_check_b19(dz_delta) << 5) | (b_reg & 0x1F))
         }
@@ -1062,7 +1062,7 @@ fn ir_emit_arm64_insn(uint64 ii) {
             emit_a64(0xB5000000 | (b_reg & 0x1F))
             emit_a64_mov_imm(0, 1)
             emit_a64_mov_imm(8, 93)
-            emit_a64_svc()
+            emit_a64_svc("% divide-by-zero check (--debug)")
             uint64 dz_delta = out_len - dz_cbnz
             patch_u32(dz_cbnz, 0xB5000000 | (a64_check_b19(dz_delta) << 5) | (b_reg & 0x1F))
         }
@@ -1636,7 +1636,7 @@ fn ir_emit_arm64_insn(uint64 ii) {
         // Map abstract syscall number to ARM64 number
         uint64 real_nr = ir_a64_syscall_nr(imm)
         emit_a64_syscall_nr(real_nr)
-        emit_a64_svc()
+        emit_a64_svc("syscall")
         // Result in x0
         if dst_r != 0xFFFFFFFF && dst_r != 0 {
             emit_a64_mov(dst_r, 0)
@@ -1692,7 +1692,7 @@ fn ir_emit_arm64_insn(uint64 ii) {
             // syscall (mmap)
             uint64 mmap_nr = ir_a64_syscall_nr(9)
             emit_a64_syscall_nr(mmap_nr)
-            emit_a64_svc()
+            emit_a64_svc("alloc")
             // x0 = raw ptr. Store header: [x0] = original size (x11)
             emit_a64_str(11, 0, 0)
             // x0 = x0 + 8 (return ptr past header)
@@ -1727,7 +1727,7 @@ fn ir_emit_arm64_insn(uint64 ii) {
             // munmap syscall
             uint64 munmap_nr = ir_a64_syscall_nr(11)
             emit_a64_syscall_nr(munmap_nr)
-            emit_a64_svc()
+            emit_a64_svc("dealloc")
         }
         return
     }
@@ -2045,7 +2045,7 @@ fn ir_emit_arm64_insn(uint64 ii) {
         } else {
             emit_a64_mov(8, nr_r)
         }
-        emit_a64_svc()
+        emit_a64_svc("syscall_raw")
         if dst_r != 0xFFFFFFFF && dst_r != 0 {
             emit_a64_mov(dst_r, 0)
         }
@@ -2419,7 +2419,7 @@ fn ir_emit_arm64_insn(uint64 ii) {
         // syscall execve
         uint64 execve_nr = ir_a64_syscall_nr(59)
         emit_a64_syscall_nr(execve_nr)
-        emit_a64_svc()
+        emit_a64_svc("exec_process")
         // execve failed (only reached on error) — no SP restore needed (scratchpad)
         // Save errno to exec_errno if defined
         uint64 errno_off = static_lookup_by_name("exec_errno", 10)
@@ -2521,7 +2521,7 @@ fn ir_emit_arm64_insn(uint64 ii) {
         // syscall execve
         uint64 execve_nr_a = ir_a64_syscall_nr(59)
         emit_a64_syscall_nr(execve_nr_a)
-        emit_a64_svc()
+        emit_a64_svc("exec_process_argv")
         // Save errno
         uint64 errno_off_a = static_lookup_by_name("exec_errno", 10)
         if errno_off_a != 0xFFFFFFFF {
@@ -2547,14 +2547,14 @@ fn ir_emit_arm64_insn(uint64 ii) {
             emit_a64_mov_imm(3, 0)                    // flags = 0
             uint64 chmod_nr = ir_a64_syscall_nr(90)
             emit_a64_syscall_nr(chmod_nr)
-            emit_a64_svc()
+            emit_a64_svc("set_executable")
         } else if target_os == 1 {
             // macOS: chmod(path, 0755) — syscall 15
             emit_a64_mov(0, path_r)
             emit_a64_mov_imm(1, 0x1ED)
             uint64 chmod_nr_m = ir_a64_syscall_nr(15)
             emit_a64_syscall_nr(chmod_nr_m)
-            emit_a64_svc()
+            emit_a64_svc("set_executable")
         }
         return
     }
@@ -2594,7 +2594,7 @@ fn ir_emit_arm64_insn(uint64 ii) {
             emit_a64_mov_imm(0, 1)
             uint64 cgt_nr = ir_a64_syscall_nr(228)
             emit_a64_syscall_nr(cgt_nr)
-            emit_a64_svc()
+            emit_a64_svc("time_ns")
             emit_a64_mov_imm(11, ir_a64_scratch_off)
             ir_a64_add_sp_reg(11, 11)
             emit_a64_ldr(9, 11, 0)
@@ -2615,7 +2615,7 @@ fn ir_emit_arm64_insn(uint64 ii) {
             ir_a64_add_sp_reg(0, 0)
             emit_a64_mov_imm(1, 0)
             emit_a64_mov_imm(16, 116)
-            emit_a64_svc()
+            emit_a64_svc("time_ns")
             emit_a64_mov_imm(11, ir_a64_scratch_off)
             ir_a64_add_sp_reg(11, 11)
             emit_a64_ldr(9, 11, 0)
@@ -2732,7 +2732,7 @@ fn ir_emit_arm64_insn(uint64 ii) {
         } else {
             emit_a64_mov_imm(8, 93)                        // Linux/Android: exit = 93 via x8
         }
-        emit_a64(0xD4000001)                               // SVC #0
+        emit_a64_svc_word(0xD4000001, "array bounds check (--debug)")                               // SVC #0
         return
     }
 
@@ -3676,7 +3676,7 @@ fn ir_emit_arm64_function(uint64 fn_node) {
                 emit_a64_win_call_iat(0)
             } else {
                 if target_os == 1 { emit_a64_syscall_nr(1) } else { emit_a64_syscall_nr(93) }
-                emit_a64_svc()
+                emit_a64_svc("main() epilogue auto-exit")
             }
         }
         // Restore callee-saved registers. Exact mirror of the prologue:

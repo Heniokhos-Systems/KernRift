@@ -304,12 +304,37 @@ fn emit_a64_cset(uint64 rd, uint64 cond) {
     emit_a64(insn)
 }
 
-// SVC #0 (supervisor call, Linux syscall)
-fn emit_a64_svc() {
+// The single arm64 SVC emitter. EVERY site that would produce an SVC word --
+// both through emit_a64_svc below and the handful of lowerings that emit a
+// fixed SVC #0 directly (exec_process, set_executable, time_ns, the --debug
+// bounds trap) -- routes through here, so the --target=none refusal cannot be
+// bypassed by a site an audit missed. `what` names the reaching builtin; see
+// bare_metal_trap_refused (codegen.kr) for why the guard lives at the emitter.
+//
+// `word` rather than a bare SVC #0 because the encodings genuinely differ and
+// must be preserved byte-for-byte: emit_a64_svc picks SVC #0x80 on macOS,
+// while several direct sites emit SVC #0 unconditionally (harmless on Darwin
+// arm64, where XNU takes the syscall number from x16 and ignores the SVC
+// immediate). Normalising them is a macOS behaviour change and is NOT done here.
+//
+// Inline `asm { "svc #N" }` never reaches this function: the asm string
+// matcher (codegen.kr) assembles the word itself. That is deliberate and
+// matches x86/riscv32 -- an instruction the programmer typed is an explicit
+// escape hatch, not a silent injection by a builtin.
+fn emit_a64_svc_word(uint64 word, uint64 what) {
+    if target_os == 4 {
+        uint64 a64svc = "SVC"
+        bare_metal_trap_refused(a64svc, what)
+    }
+    emit_a64(word)
+}
+
+// SVC #0 (supervisor call, Linux syscall) / SVC #0x80 (macOS)
+fn emit_a64_svc(uint64 what) {
     if target_os == 1 {
-        emit_a64(0xD4001001)
+        emit_a64_svc_word(0xD4001001, what)
     } else {
-        emit_a64(0xD4000001)
+        emit_a64_svc_word(0xD4000001, what)
     }
 }
 
@@ -1592,7 +1617,7 @@ fn gen_expr_a64(uint64 node) {
                 emit_a64(0x54000007)  // b.vc +0 (placeholder, cond=7=VC)
                 emit_a64_mov_imm(0, 1)
                 if target_os == 2 { emit_a64_win_call_iat(0) }
-                else { if target_os == 1 { emit_a64_syscall_nr(1) } else { emit_a64_syscall_nr(93) }; emit_a64_svc() }
+                else { if target_os == 1 { emit_a64_syscall_nr(1) } else { emit_a64_syscall_nr(93) }; emit_a64_svc("+ overflow check (--debug)") }
                 uint64 bvc_add_off = out_len - bvc_add
                 patch_u32(bvc_add, 0x54000007 | (a64_check_b19(bvc_add_off) << 5))
             } else {
@@ -1608,7 +1633,7 @@ fn gen_expr_a64(uint64 node) {
                 emit_a64(0x54000007)  // b.vc +0 (placeholder, cond=7=VC)
                 emit_a64_mov_imm(0, 1)
                 if target_os == 2 { emit_a64_win_call_iat(0) }
-                else { if target_os == 1 { emit_a64_syscall_nr(1) } else { emit_a64_syscall_nr(93) }; emit_a64_svc() }
+                else { if target_os == 1 { emit_a64_syscall_nr(1) } else { emit_a64_syscall_nr(93) }; emit_a64_svc("- overflow check (--debug)") }
                 uint64 bvc_sub_off = out_len - bvc_sub
                 patch_u32(bvc_sub, 0x54000007 | (a64_check_b19(bvc_sub_off) << 5))
             } else {
@@ -1627,7 +1652,7 @@ fn gen_expr_a64(uint64 node) {
                 emit_a64(0xB4000000 | 10)  // cbz x10, +0 (placeholder)
                 emit_a64_mov_imm(0, 1)
                 if target_os == 2 { emit_a64_win_call_iat(0) }
-                else { if target_os == 1 { emit_a64_syscall_nr(1) } else { emit_a64_syscall_nr(93) }; emit_a64_svc() }
+                else { if target_os == 1 { emit_a64_syscall_nr(1) } else { emit_a64_syscall_nr(93) }; emit_a64_svc("* overflow check (--debug)") }
                 uint64 cbz_mul_off = out_len - cbz_mul
                 patch_u32(cbz_mul, 0xB4000000 | (a64_check_b19(cbz_mul_off) << 5) | 10)
             } else {
@@ -1641,7 +1666,7 @@ fn gen_expr_a64(uint64 node) {
                 emit_a64(0xB5000000 | 9)  // cbnz x9, +0 (placeholder)
                 emit_a64_mov_imm(0, 1)
                 if target_os == 2 { emit_a64_win_call_iat(0) }
-                else { if target_os == 1 { emit_a64_syscall_nr(1) } else { emit_a64_syscall_nr(93) }; emit_a64_svc() }
+                else { if target_os == 1 { emit_a64_syscall_nr(1) } else { emit_a64_syscall_nr(93) }; emit_a64_svc("/ divide-by-zero check (--debug)") }
                 uint64 cbnz_div_off = out_len - cbnz_div
                 patch_u32(cbnz_div, 0xB5000000 | (a64_check_b19(cbnz_div_off) << 5) | 9)
             }
@@ -1657,7 +1682,7 @@ fn gen_expr_a64(uint64 node) {
                 emit_a64(0xB5000000 | 9)  // cbnz x9, +0 (placeholder)
                 emit_a64_mov_imm(0, 1)
                 if target_os == 2 { emit_a64_win_call_iat(0) }
-                else { if target_os == 1 { emit_a64_syscall_nr(1) } else { emit_a64_syscall_nr(93) }; emit_a64_svc() }
+                else { if target_os == 1 { emit_a64_syscall_nr(1) } else { emit_a64_syscall_nr(93) }; emit_a64_svc("% divide-by-zero check (--debug)") }
                 uint64 cbnz_mod_off = out_len - cbnz_mod
                 patch_u32(cbnz_mod, 0xB5000000 | (a64_check_b19(cbnz_mod_off) << 5) | 9)
             }
@@ -2101,7 +2126,7 @@ fn gen_expr_a64(uint64 node) {
             } else {
                 // x0 already has exit code
                 if target_os == 1 { emit_a64_syscall_nr(1) } else { emit_a64_syscall_nr(93) }
-                emit_a64_svc()
+                emit_a64_svc("exit")
             }
             return
         }
@@ -2158,7 +2183,7 @@ fn gen_expr_a64(uint64 node) {
                 emit_a64_mov(1, 0)
                 emit_a64_load_x0(temp_slot_0)
                 if target_os == 1 { emit_a64_syscall_nr(4) } else { emit_a64_syscall_nr(64) }
-                emit_a64_svc()
+                emit_a64_svc("write")
             }
             return
         }
@@ -2203,7 +2228,7 @@ fn gen_expr_a64(uint64 node) {
                 emit_a64_mov_imm(4, 0xFFFFFFFFFFFFFFFF)
                 emit_a64_mov_imm(5, 0)
                 if target_os == 1 { emit_a64_syscall_nr(197) } else { emit_a64_syscall_nr(222) }
-                emit_a64_svc()
+                emit_a64_svc("alloc")
                 // x0 = raw mmap pointer
                 // Store size header at [x0], return x0+8
                 emit_a64_store_x0(temp_slot_1)
@@ -2264,7 +2289,7 @@ fn gen_expr_a64(uint64 node) {
                 // x2 = mode
                 emit_a64_mov_imm(2, 0x1A4)
                 emit_a64_syscall_nr(5)
-                emit_a64_svc()
+                emit_a64_svc("file_open")
             } else {
                 // Linux ARM64: openat(AT_FDCWD, path, flags, mode)
                 emit_a64_mov(2, 0)
@@ -2280,7 +2305,7 @@ fn gen_expr_a64(uint64 node) {
                 // x3 = mode
                 emit_a64_mov_imm(3, 0x1A4)
                 emit_a64_syscall_nr(56)
-                emit_a64_svc()
+                emit_a64_svc("file_open")
             }
             return
         }
@@ -2332,7 +2357,7 @@ fn gen_expr_a64(uint64 node) {
                 emit_a64_mov(1, 0)
                 emit_a64_load_x0(temp_slot_0)
                 if target_os == 1 { emit_a64_syscall_nr(3) } else { emit_a64_syscall_nr(63) }
-                emit_a64_svc()
+                emit_a64_svc("file_read")
             }
             return
         }
@@ -2372,7 +2397,7 @@ fn gen_expr_a64(uint64 node) {
                 emit_a64_mov(1, 0)
                 emit_a64_load_x0(temp_slot_0)
                 if target_os == 1 { emit_a64_syscall_nr(4) } else { emit_a64_syscall_nr(64) }
-                emit_a64_svc()
+                emit_a64_svc("file_write")
             }
             return
         }
@@ -2388,7 +2413,7 @@ fn gen_expr_a64(uint64 node) {
                 emit_a64_win_call_iat(5)
             } else {
                 if target_os == 1 { emit_a64_syscall_nr(6) } else { emit_a64_syscall_nr(57) }
-                emit_a64_svc()
+                emit_a64_svc("file_close")
             }
             return
         }
@@ -2417,13 +2442,13 @@ fn gen_expr_a64(uint64 node) {
                 emit_a64_mov_imm(1, 0)
                 emit_a64_mov_imm(2, 2)
                 if target_os == 1 { emit_a64_syscall_nr(199) } else { emit_a64_syscall_nr(62) }
-                emit_a64_svc()
+                emit_a64_svc("file_size")
                 emit_a64_mov(9, 0)
                 emit_a64_mov(0, 19)
                 emit_a64_mov_imm(1, 0)
                 emit_a64_mov_imm(2, 0)
                 if target_os == 1 { emit_a64_syscall_nr(199) } else { emit_a64_syscall_nr(62) }
-                emit_a64_svc()
+                emit_a64_svc("file_size")
                 emit_a64_mov(0, 9)
             }
             return
@@ -2465,7 +2490,7 @@ fn gen_expr_a64(uint64 node) {
                     } else {
                         emit_a64_mov_imm(0, 1)
                         if target_os == 1 { emit_a64_syscall_nr(4) } else { emit_a64_syscall_nr(64) }
-                        emit_a64_svc()
+                        emit_a64_svc("print")
                     }
                 }
                 apv_first = 0
@@ -2502,7 +2527,7 @@ fn gen_expr_a64(uint64 node) {
                     } else {
                         emit_a64_mov_imm(0, 1)
                         if target_os == 1 { emit_a64_syscall_nr(4) } else { emit_a64_syscall_nr(64) }
-                        emit_a64_svc()
+                        emit_a64_svc("print")
                     }
                 } else {
                     // Integer: format as decimal and write
@@ -2529,7 +2554,7 @@ fn gen_expr_a64(uint64 node) {
                     } else {
                         emit_a64_mov_imm(0, 1)
                         if target_os == 1 { emit_a64_syscall_nr(4) } else { emit_a64_syscall_nr(64) }
-                        emit_a64_svc()
+                        emit_a64_svc("print")
                     }
                     uint64 apv_bend = out_len
                     emit_a64_b(0)
@@ -2597,7 +2622,7 @@ fn gen_expr_a64(uint64 node) {
                     } else {
                         emit_a64_mov_imm(0, 1)
                         if target_os == 1 { emit_a64_syscall_nr(4) } else { emit_a64_syscall_nr(64) }
-                        emit_a64_svc()
+                        emit_a64_svc("print")
                     }
                     uint64 apv_end = out_len
                     uint64 apv_endd = apv_end - apv_bend
@@ -2626,7 +2651,7 @@ fn gen_expr_a64(uint64 node) {
                 } else {
                     emit_a64_mov_imm(0, 1)
                     if target_os == 1 { emit_a64_syscall_nr(4) } else { emit_a64_syscall_nr(64) }
-                    emit_a64_svc()
+                    emit_a64_svc("println")
                 }
             }
             return
@@ -2670,7 +2695,7 @@ fn gen_expr_a64(uint64 node) {
             } else {
                 emit_a64_mov_imm(0, 1)
                 if target_os == 1 { emit_a64_syscall_nr(4) } else { emit_a64_syscall_nr(64) }
-                emit_a64_svc()
+                emit_a64_svc("print_str")
             }
             // println_str: write "\n" after the string
             if a_is_pln != 0 {
@@ -2693,7 +2718,7 @@ fn gen_expr_a64(uint64 node) {
                 } else {
                     emit_a64_mov_imm(0, 1)
                     if target_os == 1 { emit_a64_syscall_nr(4) } else { emit_a64_syscall_nr(64) }
-                    emit_a64_svc()
+                    emit_a64_svc("print_str")
                 }
             }
             return
@@ -2807,7 +2832,7 @@ fn gen_expr_a64(uint64 node) {
                 emit_a64_add_imm(1, 1, 8)
                 // munmap syscall
                 if target_os == 1 { emit_a64_syscall_nr(73) } else { emit_a64_syscall_nr(215) }
-                emit_a64_svc()
+                emit_a64_svc("dealloc")
             }
             return
         }
@@ -3322,7 +3347,7 @@ fn gen_expr_a64(uint64 node) {
                     emit_a64(0xAA1F03E2)            // mov x2, xzr
                 }
                 if target_os == 1 { emit_a64_syscall_nr(59) } else { emit_a64_syscall_nr(221) }
-                emit_a64(0xD4000001)                // svc #0
+                emit_a64_svc_word(0xD4000001, "exec_process_argv")                // svc #0
                 // On failure, save errno
                 uint64 errno_off_ea = static_lookup_by_name("exec_errno", 10)
                 if errno_off_ea != 0xFFFFFFFF {
@@ -3414,7 +3439,7 @@ fn gen_expr_a64(uint64 node) {
                     emit_a64(0xAA1F03E2)  // mov x2, xzr (envp = NULL)
                 }
                 if target_os == 1 { emit_a64_syscall_nr(59) } else { emit_a64_syscall_nr(221) }
-                emit_a64(0xD4000001) // svc #0
+                emit_a64_svc_word(0xD4000001, "exec_process") // svc #0
                 // Restore stack if execve failed (only reached on error)
                 emit_a64(0x910043FF) // add sp, sp, #16
                 // Save errno (x0) to exec_errno static if defined
@@ -3435,7 +3460,7 @@ fn gen_expr_a64(uint64 node) {
                 // macOS: chmod(x0=path, x1=0755)
                 emit_a64_mov_imm(1, 0x1ED)
                 emit_a64_syscall_nr(15)
-                emit_a64(0xD4000001)
+                emit_a64_svc_word(0xD4000001, "set_executable")
             } else if target_os != 2 {
                 // Linux/Android: fchmodat(AT_FDCWD, path, 0755, 0)
                 emit_a64_mov(1, 0)
@@ -3443,7 +3468,7 @@ fn gen_expr_a64(uint64 node) {
                 emit_a64_mov_imm(2, 0x1ED)
                 emit_a64_mov_imm(3, 0)
                 emit_a64_syscall_nr(53)
-                emit_a64(0xD4000001)
+                emit_a64_svc_word(0xD4000001, "set_executable")
             }
             return
         }
@@ -3458,7 +3483,7 @@ fn gen_expr_a64(uint64 node) {
                 emit_a64(0xB5000000 | 0)  // cbnz x0, +0 (placeholder)
                 emit_a64_mov_imm(0, 1)
                 if target_os == 2 { emit_a64_win_call_iat(0) }
-                else { if target_os == 1 { emit_a64_syscall_nr(1) } else { emit_a64_syscall_nr(93) }; emit_a64_svc() }
+                else { if target_os == 1 { emit_a64_syscall_nr(1) } else { emit_a64_syscall_nr(93) }; emit_a64_svc("load8 null check (--debug)") }
                 uint64 cbnz_l8_off = out_len - cbnz_l8
                 patch_u32(cbnz_l8, 0xB5000000 | (a64_check_b19(cbnz_l8_off) << 5) | 0)
             }
@@ -3475,7 +3500,7 @@ fn gen_expr_a64(uint64 node) {
                 emit_a64(0xB5000000 | 0)  // cbnz x0, +0 (placeholder)
                 emit_a64_mov_imm(0, 1)
                 if target_os == 2 { emit_a64_win_call_iat(0) }
-                else { if target_os == 1 { emit_a64_syscall_nr(1) } else { emit_a64_syscall_nr(93) }; emit_a64_svc() }
+                else { if target_os == 1 { emit_a64_syscall_nr(1) } else { emit_a64_syscall_nr(93) }; emit_a64_svc("load16 null check (--debug)") }
                 uint64 cbnz_l16_off = out_len - cbnz_l16
                 patch_u32(cbnz_l16, 0xB5000000 | (a64_check_b19(cbnz_l16_off) << 5) | 0)
             }
@@ -3492,7 +3517,7 @@ fn gen_expr_a64(uint64 node) {
                 emit_a64(0xB5000000 | 0)  // cbnz x0, +0 (placeholder)
                 emit_a64_mov_imm(0, 1)
                 if target_os == 2 { emit_a64_win_call_iat(0) }
-                else { if target_os == 1 { emit_a64_syscall_nr(1) } else { emit_a64_syscall_nr(93) }; emit_a64_svc() }
+                else { if target_os == 1 { emit_a64_syscall_nr(1) } else { emit_a64_syscall_nr(93) }; emit_a64_svc("load32 null check (--debug)") }
                 uint64 cbnz_l32_off = out_len - cbnz_l32
                 patch_u32(cbnz_l32, 0xB5000000 | (a64_check_b19(cbnz_l32_off) << 5) | 0)
             }
@@ -3509,7 +3534,7 @@ fn gen_expr_a64(uint64 node) {
                 emit_a64(0xB5000000 | 0)  // cbnz x0, +0 (placeholder)
                 emit_a64_mov_imm(0, 1)
                 if target_os == 2 { emit_a64_win_call_iat(0) }
-                else { if target_os == 1 { emit_a64_syscall_nr(1) } else { emit_a64_syscall_nr(93) }; emit_a64_svc() }
+                else { if target_os == 1 { emit_a64_syscall_nr(1) } else { emit_a64_syscall_nr(93) }; emit_a64_svc("load64 null check (--debug)") }
                 uint64 cbnz_l64_off = out_len - cbnz_l64
                 patch_u32(cbnz_l64, 0xB5000000 | (a64_check_b19(cbnz_l64_off) << 5) | 0)
             }
@@ -3534,7 +3559,7 @@ fn gen_expr_a64(uint64 node) {
                 emit_a64(0xB5000000 | 0)  // cbnz x0, +0 (placeholder)
                 emit_a64_mov_imm(0, 1)
                 if target_os == 2 { emit_a64_win_call_iat(0) }
-                else { if target_os == 1 { emit_a64_syscall_nr(1) } else { emit_a64_syscall_nr(93) }; emit_a64_svc() }
+                else { if target_os == 1 { emit_a64_syscall_nr(1) } else { emit_a64_syscall_nr(93) }; emit_a64_svc("store8 null check (--debug)") }
                 uint64 cbnz_s8_off = out_len - cbnz_s8
                 patch_u32(cbnz_s8, 0xB5000000 | (a64_check_b19(cbnz_s8_off) << 5) | 0)
                 emit_a64_load_x0(temp_slot_0)
@@ -3558,7 +3583,7 @@ fn gen_expr_a64(uint64 node) {
                 emit_a64(0xB5000000 | 0)  // cbnz x0, +0 (placeholder)
                 emit_a64_mov_imm(0, 1)
                 if target_os == 2 { emit_a64_win_call_iat(0) }
-                else { if target_os == 1 { emit_a64_syscall_nr(1) } else { emit_a64_syscall_nr(93) }; emit_a64_svc() }
+                else { if target_os == 1 { emit_a64_syscall_nr(1) } else { emit_a64_syscall_nr(93) }; emit_a64_svc("store16 null check (--debug)") }
                 uint64 cbnz_s16_off = out_len - cbnz_s16
                 patch_u32(cbnz_s16, 0xB5000000 | (a64_check_b19(cbnz_s16_off) << 5) | 0)
                 emit_a64_load_x0(temp_slot_0)
@@ -3582,7 +3607,7 @@ fn gen_expr_a64(uint64 node) {
                 emit_a64(0xB5000000 | 0)  // cbnz x0, +0 (placeholder)
                 emit_a64_mov_imm(0, 1)
                 if target_os == 2 { emit_a64_win_call_iat(0) }
-                else { if target_os == 1 { emit_a64_syscall_nr(1) } else { emit_a64_syscall_nr(93) }; emit_a64_svc() }
+                else { if target_os == 1 { emit_a64_syscall_nr(1) } else { emit_a64_syscall_nr(93) }; emit_a64_svc("store32 null check (--debug)") }
                 uint64 cbnz_s32_off = out_len - cbnz_s32
                 patch_u32(cbnz_s32, 0xB5000000 | (a64_check_b19(cbnz_s32_off) << 5) | 0)
                 emit_a64_load_x0(temp_slot_0)
@@ -3606,7 +3631,7 @@ fn gen_expr_a64(uint64 node) {
                 emit_a64(0xB5000000 | 0)  // cbnz x0, +0 (placeholder)
                 emit_a64_mov_imm(0, 1)
                 if target_os == 2 { emit_a64_win_call_iat(0) }
-                else { if target_os == 1 { emit_a64_syscall_nr(1) } else { emit_a64_syscall_nr(93) }; emit_a64_svc() }
+                else { if target_os == 1 { emit_a64_syscall_nr(1) } else { emit_a64_syscall_nr(93) }; emit_a64_svc("store64 null check (--debug)") }
                 uint64 cbnz_s64_off = out_len - cbnz_s64
                 patch_u32(cbnz_s64, 0xB5000000 | (a64_check_b19(cbnz_s64_off) << 5) | 0)
                 emit_a64_load_x0(temp_slot_0)
@@ -3941,7 +3966,7 @@ fn gen_expr_a64(uint64 node) {
             // a0 -> x0
             emit_a64_load_x0(sc_base + 8)
             // svc #0
-            emit_a64_svc()
+            emit_a64_svc("syscall_raw")
             // Result is in x0
             return
         }
@@ -4013,7 +4038,7 @@ fn gen_expr_a64(uint64 node) {
                 emit_a64_mov_imm(0, 1)                // x0 = CLOCK_MONOTONIC
                 emit_a64(0x910003E1)                   // add x1, sp, #0 (&ts)
                 emit_a64_mov_imm(8, 113)               // x8 = SYS_clock_gettime
-                emit_a64(0xD4000001)                   // svc #0
+                emit_a64_svc_word(0xD4000001, "time_ns")                   // svc #0
                 emit_a64_ldr(9, 31, 0)                 // x9 = ts.tv_sec
                 emit_a64_ldr(10, 31, 8)                // x10 = ts.tv_nsec
                 emit_a64(0x910043FF)                   // add sp, sp, #16
@@ -4027,7 +4052,7 @@ fn gen_expr_a64(uint64 node) {
                 emit_a64(0x910003E0)                   // add x0, sp, #0 (&tv)
                 emit_a64_mov_imm(1, 0)                 // x1 = NULL (tz)
                 emit_a64_mov_imm(16, 116)              // x16 = gettimeofday
-                emit_a64(0xD4001001)                   // svc #0x80
+                emit_a64_svc_word(0xD4001001, "time_ns")                   // svc #0x80
                 emit_a64_ldr(9, 31, 0)                 // x9 = tv_sec
                 emit_a64_ldr(10, 31, 8)                // x10 = tv_usec
                 emit_a64(0x910043FF)                   // add sp, sp, #16
@@ -5902,7 +5927,7 @@ fn gen_function_a64(uint64 fn_node) {
             emit_a64_win_call_iat(0)
         } else {
             if target_os == 1 { emit_a64_syscall_nr(1) } else { emit_a64_syscall_nr(93) }
-            emit_a64_svc()
+            emit_a64_svc("main() epilogue auto-exit")
         }
     }
 

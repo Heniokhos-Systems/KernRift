@@ -8529,8 +8529,7 @@ fn ir_emit_x86_insn(uint64 ii) {
         uint64 mmap_nr = ir_x86_syscall_nr(9)
         ir_emit_mov_r64_imm64(0, mmap_nr)
         // syscall
-        emit_byte(0x0F)
-        emit_byte(0x05)
+        emit_x86_syscall_insn("alloc")
         // rax = raw ptr. Pop original size into rcx (caller-saved scratch)
         emit_byte(0x59)  // pop rcx
         // Store size at [rax]: mov [rax], rcx
@@ -8591,8 +8590,7 @@ fn ir_emit_x86_insn(uint64 ii) {
         uint64 munmap_nr = ir_x86_syscall_nr(11)
         ir_emit_mov_r64_imm64(0, munmap_nr)
         // syscall
-        emit_byte(0x0F)
-        emit_byte(0x05)
+        emit_x86_syscall_insn("dealloc")
         return
     }
 
@@ -9123,8 +9121,7 @@ fn ir_emit_x86_insn(uint64 ii) {
         // Linux (0), macOS (1), Android (3): raw syscall with OS-specific numbers
         uint64 real_nr = ir_x86_syscall_nr(imm)
         ir_emit_mov_r64_imm64(0, real_nr)
-        emit_byte(0x0F)
-        emit_byte(0x05)
+        emit_x86_syscall_insn("syscall")
         if dst_r != 0xFFFFFFFF && dst_r != 0 {
             ir_emit_mov_r64_r64(dst_r, 0)
         }
@@ -9300,7 +9297,7 @@ fn ir_emit_x86_insn(uint64 ii) {
         uint64 nr_r = ir_resolve_src(s1_v, 0)
         ir_emit_mov_r64_r64(0, nr_r)
         // syscall
-        emit_byte(0x0F); emit_byte(0x05)
+        emit_x86_syscall_insn("syscall_raw")
         // Result in rax
         if dst_r != 0xFFFFFFFF && dst_r != 0 {
             ir_emit_mov_r64_r64(dst_r, 0)
@@ -9901,7 +9898,7 @@ fn ir_emit_x86_insn(uint64 ii) {
         uint64 execve_nr = ir_x86_syscall_nr(59)
         ir_emit_mov_r64_imm64(0, execve_nr)
         // syscall: 0F 05
-        emit_byte(0x0F); emit_byte(0x05)
+        emit_x86_syscall_insn("exec_process_argv")
         // If execve fails, restore stack: add rsp, 16
         emit_byte(0x48); emit_byte(0x83); emit_byte(0xC4); emit_byte(0x10)
         // Save errno to exec_errno if defined
@@ -10006,7 +10003,7 @@ fn ir_emit_x86_insn(uint64 ii) {
         uint64 execve_nr_a = ir_x86_syscall_nr(59)
         ir_emit_mov_r64_imm64(0, execve_nr_a)
         // syscall: 0F 05
-        emit_byte(0x0F); emit_byte(0x05)
+        emit_x86_syscall_insn("exec_process")
         // Save errno to exec_errno if defined
         uint64 errno_off_a = static_lookup_by_name("exec_errno", 10)
         if errno_off_a != 0xFFFFFFFF {
@@ -10040,7 +10037,7 @@ fn ir_emit_x86_insn(uint64 ii) {
             uint64 chmod_nr = ir_x86_syscall_nr(90)
             ir_emit_mov_r64_imm64(0, chmod_nr)
             // syscall: 0F 05
-            emit_byte(0x0F); emit_byte(0x05)
+            emit_x86_syscall_insn("set_executable")
         }
         return
     }
@@ -10151,7 +10148,7 @@ fn ir_emit_x86_insn(uint64 ii) {
             emit_byte(0x48); emit_byte(0x89); emit_byte(0xE7)                      // mov rdi, rsp
             emit_byte(0x31); emit_byte(0xF6)                                       // xor esi, esi
             ir_emit_mov_r64_imm64(0, 0x2000074)                                    // mov rax, gettimeofday
-            emit_byte(0x0F); emit_byte(0x05)                                       // syscall
+            emit_x86_syscall_insn("time_ns")                                       // syscall
             emit_byte(0x48); emit_byte(0x8B); emit_byte(0x04); emit_byte(0x24)     // mov rax, [rsp]
             emit_byte(0x48); emit_byte(0x69); emit_byte(0xC0)                      // imul rax, rax, 1e9
             emit_u32_le(1000000000)
@@ -10168,7 +10165,7 @@ fn ir_emit_x86_insn(uint64 ii) {
             emit_byte(0x48); emit_byte(0x89); emit_byte(0xE6)
             uint64 cgt_nr = ir_x86_syscall_nr(228)
             ir_emit_mov_r64_imm64(0, cgt_nr)
-            emit_byte(0x0F); emit_byte(0x05)
+            emit_x86_syscall_insn("time_ns")
             emit_byte(0x48); emit_byte(0x8B); emit_byte(0x04); emit_byte(0x24)
             emit_byte(0x48); emit_byte(0x69); emit_byte(0xC0)
             emit_u32_le(1000000000)
@@ -10252,8 +10249,8 @@ fn ir_emit_x86_insn(uint64 ii) {
         emit_mov_rax_imm(1)
         emit_mov_rdi_rax()
         if target_os == 2 { emit_mov_rcx_rax(); emit_win_alloc_stack(0x20); emit_win_call_iat(0) }
-        else if target_os == 1 { emit_mov_rax_imm(0x2000001); emit_byte(0x0F); emit_byte(0x05) }
-        else { emit_mov_rax_imm(231); emit_byte(0x0F); emit_byte(0x05) }
+        else if target_os == 1 { emit_mov_rax_imm(0x2000001); emit_x86_syscall_insn("array bounds check (--debug)") }
+        else { emit_mov_rax_imm(231); emit_x86_syscall_insn("array bounds check (--debug)") }
         uint64 bchk_skip = out_len - bchk_jb - 1
         uint8 bchk_s = bchk_skip
         uint64 bchk_pp = out_buf + bchk_jb
@@ -13419,7 +13416,7 @@ fn ir_emit_x86_function(uint64 fn_node) {
                 emit_byte(0x48); emit_byte(0x89); emit_byte(0xC7)
                 if target_os == 1 { emit_byte(0xB8); emit_u32_le(0x2000001) }
                 else { emit_byte(0xB8); emit_u32_le(231) }
-                emit_byte(0x0F); emit_byte(0x05)
+                emit_x86_syscall_insn("main() epilogue auto-exit")
             }
         }
         if frame_size > 0 {

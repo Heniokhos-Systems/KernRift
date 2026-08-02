@@ -8090,6 +8090,180 @@ fi
 
 rm -f "$TN_SRC" /tmp/krc_tnone_bin_$$
 
+# --- syscall choke points under --target=none ------------------------------
+# The per-OS dispatch in this codebase is "special-case Windows/macOS, else
+# fall through to POSIX", so target_os == 4 (--target=none) silently inherits
+# the LINUX path at ~60 branch sites. Rather than audit those by inspection --
+# which is how a Linux syscall ends up inside a kernel image -- every arch
+# routes its trap instruction through a single emitter that refuses there:
+#   x86_64  SYSCALL 0F 05     -> emit_x86_syscall_insn  (src/codegen.kr)
+#   arm64   SVC               -> emit_a64_svc_word      (src/codegen_aarch64.kr)
+#   riscv32 ECALL 0x00000073  -> rv_ecall               (src/ir_riscv.kr)
+#   xtensa  SIMCALL           -> xt_simcall             (src/ir_xtensa.kr)
+# Guarding the emitter is strictly stronger than scanning the artifact: a
+# freestanding image has NO ELF SECTIONS at all to scan ("There are no
+# sections in this file"), the guard covers paths no corpus reaches, and it
+# cannot be fooled by data that happens to encode a trap instruction.
+echo ""
+echo "--- syscall choke points under --target=none ---"
+CP_SRC="/tmp/krc_choke_$$.kr"
+printf 'fn main() { exit(0) }\n' > "$CP_SRC"
+# Use the RAW compiler binary, not $KRC: under `make test` $KRC is a wrapper
+# (Makefile:96) that unconditionally injects --arch=x86_64 ahead of every
+# test's own arguments. --arch is last-wins today so the wrapper does not
+# actually mask these cases, but relying on that is exactly the accident
+# Task 1 hit; the raw binary keeps the invocation honest. Same build/krc2
+# then build/krc3 fallback as the governance test above.
+if [ -f "$DIR/../build/krc2" ]; then
+    CP_KRC=$(cd "$DIR/../build" && pwd)/krc2
+elif [ -f "$DIR/../build/krc3" ]; then
+    CP_KRC=$(cd "$DIR/../build" && pwd)/krc3
+else
+    CP_KRC=""
+fi
+for A in x86_64 arm64; do
+    TOTAL=$((TOTAL + 1))
+    CP_ERR=$("$CP_KRC" --arch=$A --target=none "$CP_SRC" -o /tmp/krc_choke_bin_$$ 2>&1); CP_ST=$?
+    if [ -n "$CP_KRC" ] && [ "$CP_ST" != "0" ] && echo "$CP_ERR" | grep -q "no operating system"; then
+        PASS=$((PASS + 1)); echo "  choke_point_$A: PASS"
+    else
+        echo "FAIL: choke_point_$A (exit $CP_ST: '$CP_ERR')"; FAIL=$((FAIL + 1))
+    fi
+    rm -f /tmp/krc_choke_bin_$$
+done
+
+# x86_64 has TWO backends and both emit 0F 05: the IR backend (src/ir.kr,
+# default) and the legacy direct codegen (src/codegen.kr), which --legacy,
+# --emit=obj and --emit=lkm all route through. Before the shared choke point
+# existed, `--legacy --target=none` and `--emit=obj --target=none` both
+# compiled cleanly and put `mov eax,231; syscall` in a bare-metal artifact.
+for CP_FLAG in --legacy --emit=obj; do
+    TOTAL=$((TOTAL + 1))
+    CP_ERR=$("$CP_KRC" $CP_FLAG --arch=x86_64 --target=none "$CP_SRC" -o /tmp/krc_choke_bin_$$ 2>&1); CP_ST=$?
+    CP_NAME=$(echo "$CP_FLAG" | tr -d '-' | tr '=' '_')
+    if [ -n "$CP_KRC" ] && [ "$CP_ST" != "0" ] && echo "$CP_ERR" | grep -q "no operating system"; then
+        PASS=$((PASS + 1)); echo "  choke_point_x86_$CP_NAME: PASS"
+    else
+        echo "FAIL: choke_point_x86_$CP_NAME (exit $CP_ST: '$CP_ERR')"; FAIL=$((FAIL + 1))
+    fi
+    rm -f /tmp/krc_choke_bin_$$
+done
+
+# The diagnostic must name the REACHING BUILTIN, not just the instruction --
+# that is what turns the remaining per-OS audit into a worklist the compiler
+# hands you instead of ~60 sites found by inspection.
+TOTAL=$((TOTAL + 1))
+CP_ERR=$("$CP_KRC" --arch=x86_64 --target=none "$CP_SRC" -o /tmp/krc_choke_bin_$$ 2>&1)
+if echo "$CP_ERR" | grep -q "SYSCALL reached the emitter from 'syscall'"; then
+    PASS=$((PASS + 1)); echo "  choke_point_names_builtin: PASS"
+else
+    echo "FAIL: choke_point_names_builtin (got '$CP_ERR')"; FAIL=$((FAIL + 1))
+fi
+rm -f /tmp/krc_choke_bin_$$
+
+# The diagnostic must not be TRUNCATED. Every write() in the refusal path
+# derives its length with str_len() rather than a hand-counted literal,
+# because a wrong count truncates the one message that explains a silent
+# syscall -- and a tree-wide scan finds 30 pre-existing write(fd,"lit",N)
+# sites whose N does not match the literal. Assert on the wire: the last
+# characters of the message must survive to stderr.
+TOTAL=$((TOTAL + 1))
+CP_ERR=$("$CP_KRC" --arch=arm64 --target=none "$CP_SRC" -o /tmp/krc_choke_bin_$$ 2>&1)
+if echo "$CP_ERR" | grep -q "before it can be used in a freestanding image\.$"; then
+    PASS=$((PASS + 1)); echo "  choke_point_diag_not_truncated: PASS"
+else
+    echo "FAIL: choke_point_diag_not_truncated (message ends early: '$CP_ERR')"; FAIL=$((FAIL + 1))
+fi
+rm -f /tmp/krc_choke_bin_$$
+
+# The enumeration itself, made permanent. Sites were enumerated by EMITTED
+# BYTES, not by source pattern: an earlier draft of this work said "the 5
+# 0F 05 emitters in ir.kr" when the real tree-wide count was 73 (61 in
+# codegen.kr, 12 in ir.kr) plus 7 raw arm64 SVC words that bypassed
+# emit_a64_svc entirely. A plan that names N sites is wrong the moment N is
+# wrong and the miss is a silent syscall, so assert instead that the raw
+# encodings appear ONLY in their choke-point helper. Any future patch that
+# open-codes a trap instruction fails here.
+TOTAL=$((TOTAL + 1))
+CP_BAD=$(SRCDIR="$DIR/../src" python3 - <<'CPPY'
+import re, os, glob
+src = os.environ["SRCDIR"]
+bad = []
+
+# x86_64 SYSCALL: build the stream of emit_byte(<literal>) calls per file in
+# source order and report every ADJACENT (0x0F, 0x05) pair. This is the
+# emitted-bytes enumeration, not a source-pattern grep: it sees the one-line
+# `emit_byte(0x0F); emit_byte(0x05)` form and the two-line form alike, and it
+# does not false-positive on 0x0F followed by an unrelated byte.
+BYTE = re.compile(r"emit_byte\(\s*(0x[0-9A-Fa-f]+|\d+)\s*\)")
+val = lambda s: int(s, 16) if s.lower().startswith("0x") else int(s)
+x86 = []
+for path in sorted(glob.glob(os.path.join(src, "*.kr"))):
+    stream = []
+    for ln, line in enumerate(open(path), 1):
+        for m in BYTE.finditer(line.split("//")[0]):
+            stream.append((ln, val(m.group(1))))
+    for i in range(len(stream) - 1):
+        if stream[i][1] == 0x0F and stream[i + 1][1] == 0x05:
+            x86.append("%s:%d" % (os.path.basename(path), stream[i][0]))
+# Exactly one: emit_x86_syscall_insn's own body in codegen.kr.
+if len(x86) != 1 or not x86[0].startswith("codegen.kr:"):
+    bad.append("x86 SYSCALL emitted at %s (want exactly 1, inside emit_x86_syscall_insn)" % x86)
+
+# arm64 SVC words. Every occurrence must be an argument to emit_a64_svc_word,
+# the inline-asm assembler (which builds the word from a parsed immediate), or
+# the disassembler's lookup table -- never a bare emit_a64(<svc word>).
+a64 = []
+for path in sorted(glob.glob(os.path.join(src, "*.kr"))):
+    for ln, line in enumerate(open(path), 1):
+        if re.search(r"0xD400[01]001", line) and re.search(r"emit_a64\(\s*0xD400[01]001", line):
+            a64.append("%s:%d" % (os.path.basename(path), ln))
+# codegen.kr's `asm { "svc #N" }` assembler is the one permitted bare emit_a64.
+a64 = [h for h in a64 if not h.startswith("codegen.kr:")]
+if a64:
+    bad.append("arm64 SVC emitted outside emit_a64_svc_word at %s" % a64)
+
+# riscv32 ECALL and xtensa SIMCALL: exactly one emission of each word.
+def count(pat):
+    n = 0
+    for path in sorted(glob.glob(os.path.join(src, "*.kr"))):
+        n += len(re.findall(pat, open(path).read()))
+    return n
+n = count(r"emit_u32_le\(0x00000073\)")
+if n != 1:
+    bad.append("riscv32 ECALL emitted %d times (want 1, inside rv_ecall)" % n)
+n = count(r"xt_rrr\(0, 0, 1, 5, 0, 0\)")
+if n != 1:
+    bad.append("xtensa SIMCALL emitted %d times (want 1, inside xt_simcall)" % n)
+
+print("; ".join(bad))
+CPPY
+)
+if [ -z "$CP_BAD" ]; then
+    PASS=$((PASS + 1)); echo "  choke_point_single_emitter: PASS"
+else
+    echo "FAIL: choke_point_single_emitter (raw trap encodings outside the helper:$CP_BAD)"
+    FAIL=$((FAIL + 1))
+fi
+
+# The xtensa guard must NOT fire for exit(). ir_xtensa.kr ships a working
+# bare-metal exit() through qemu lx60 semihosting (SIMCALL) and the spec
+# preserves it deliberately, so the gate is on the reaching builtin, not on
+# the instruction. A blanket SIMCALL refusal would break this by design.
+# riscv32 likewise lowers a freestanding exit() to the sifive_test MMIO
+# device, emitting no ECALL at all -- so neither arch may refuse here.
+for A in riscv32 xtensa; do
+    TOTAL=$((TOTAL + 1))
+    CP_ERR=$("$CP_KRC" --arch=$A --target=none "$CP_SRC" -o /tmp/krc_choke_bin_$$ 2>&1); CP_ST=$?
+    if [ "$CP_ST" = "0" ] && [ -f /tmp/krc_choke_bin_$$ ]; then
+        PASS=$((PASS + 1)); echo "  choke_point_${A}_exit_still_allowed: PASS"
+    else
+        echo "FAIL: choke_point_${A}_exit_still_allowed (exit $CP_ST: '$CP_ERR')"; FAIL=$((FAIL + 1))
+    fi
+    rm -f /tmp/krc_choke_bin_$$
+done
+rm -f "$CP_SRC"
+
 # --- esp32 .bss zero-loop bounds -------------------------------------------
 # The entry preamble zeroes [bss_lo, bss_hi) from two literal-pool words that
 # main.kr patches at finalize time. esp32_startup_stub greps the six WDT
