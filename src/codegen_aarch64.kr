@@ -2675,9 +2675,20 @@ fn gen_expr_a64(uint64 node) {
             uint64 a_is_pln = 0
             if is_extern_call == 0 && tok_matches(wct, "println_str", 11) != 0 { a_is_pln = 1 }
             // --target=none: see the print/println arm above.
+            // PRE-EXISTING DEFECT, RECORDED NOT FIXED: the `println_str`
+            // disjunct above is NOT gated on is_extern_call, unlike every
+            // other builtin arm in this dispatch. So an
+            // `@builtin_override fn println_str` is silently ignored on the
+            // legacy backends and this builtin lowering wins -- on hosted
+            // builds too, where it has presumably always been so. It also
+            // makes a_is_pln read 0 for an overridden println_str, which is
+            // why the refusal below computes its own name from the token
+            // instead of trusting that flag. Fixing the disjunct changes
+            // hosted legacy dispatch semantics and belongs in its own change,
+            // not smuggled in here.
             if target_os == 4 && builtin_override_tok_of("write", 5) != 0xFFFFFFFF {
                 uint64 bmlpsa = "print_str"
-                if a_is_pln != 0 { bmlpsa = "println_str" }
+                if tok_matches(wct, "println_str", 11) != 0 { bmlpsa = "println_str" }
                 bare_metal_builtin_refused(bmlpsa, bm_fix_write_legacy())
             }
             uint32 first_arg = ast_child(node)

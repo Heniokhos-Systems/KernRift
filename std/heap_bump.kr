@@ -70,6 +70,11 @@ fn heap_bump_init(uint64 base, uint64 len) {
     // length is a region that can serve nothing — both are configuration
     // mistakes, and both are caught here rather than at the first alloc().
     if base == 0 || len == 0 { heap_bump_halt(1, len) }
+    // A region that wraps the address space would leave limit BELOW base, and
+    // every "is there room" test downstream is a comparison against limit, so
+    // all of them would answer nonsense. Rejected here, once, so alloc() can
+    // rely on base <= next <= limit as an invariant rather than re-deriving it.
+    if base + len < base { heap_bump_halt(1, len) }
     heap_bump_next = base
     heap_bump_limit = base + len
     heap_bump_total = 0
@@ -90,19 +95,54 @@ fn heap_bump_used() -> uint64 {
 @builtin_override
 fn alloc(uint64 n) -> uint64 {
     if heap_bump_next == 0 { heap_bump_halt(1, n) }
-    // Round the request up to the alignment. Done on `n` BEFORE adding it to
-    // the cursor so the sum below is the real end of the block: rounding the
-    // cursor afterwards instead would let the last block extend past the
-    // limit by up to ALIGN-1 bytes without the check noticing.
-    uint64 need = n + (HEAP_BUMP_ALIGN - 1)
+
+    // THE RAW REQUEST IS CHECKED FIRST, BEFORE ANY ARITHMETIC TOUCHES IT.
+    //
+    // An earlier version rounded up first and checked afterwards, and the
+    // round-up was itself the thing that wrapped: for n near 2^64,
+    // `n + 15` wraps to a small value, `& ~15` then floors it to 0, and every
+    // subsequent check passes on a `need` of zero. Measured hosted with a
+    // 4096-byte region: `alloc(2^64 - 1)` returned p = 4096, reserved 0 bytes
+    // and refused nothing — the caller then owned a pointer to a region 2^64
+    // bytes short of the size it asked for. That is exactly the silently wrong
+    // answer this module's header argues against, produced by the check that
+    // was supposed to prevent it.
+    //
+    // `avail` cannot underflow: heap_bump_init rejects a wrapping region, so
+    // base <= next <= limit holds, and next is only ever assigned an `end`
+    // that was already proven <= limit below.
+    uint64 avail = heap_bump_limit - heap_bump_next
+    if n > avail { heap_bump_halt(2, n) }
+
+    // Round up to the alignment. Done on `n` rather than on the cursor
+    // afterwards, so the sum below is the real end of the block: rounding the
+    // cursor instead would let the last block extend past the limit by up to
+    // ALIGN-1 bytes without the check noticing.
+    //
+    // A zero request is rounded up to a full ALIGN rather than to nothing.
+    // alloc(0) returning the cursor unchanged makes two consecutive zero-size
+    // allocations the same pointer, and makes either of them alias the next
+    // real allocation — so a caller that stores a sentinel through a
+    // zero-length block corrupts a block it does not own. One 16-byte block
+    // is the cheapest way to keep "every allocation is distinct" true.
+    uint64 want = n
+    if want == 0 { want = 1 }
+    uint64 need = want + (HEAP_BUMP_ALIGN - 1)
+    // Belt and braces, and each link is independently justified rather than
+    // redundant. The check above bounds `n` by the region, which for any
+    // realistic region already rules this out; this one holds even for a
+    // region that spans nearly the whole address space, where `avail` is large
+    // enough that `n + 15` could still wrap.
+    if need < want { heap_bump_halt(2, n) }
     need = need & (0xFFFFFFFFFFFFFFFF - (HEAP_BUMP_ALIGN - 1))
+
     // Overflow first, THEN the limit. `heap_bump_next + need` wraps for a
-    // request near 2^64, and a wrapped sum is smaller than the cursor, so the
-    // limit test alone would accept it and return a pointer into the region
-    // for a block that does not fit in the address space.
+    // cursor near 2^64, and a wrapped sum is smaller than the cursor, so the
+    // limit test alone would accept it.
     uint64 end = heap_bump_next + need
     if end < heap_bump_next { heap_bump_halt(2, n) }
     if end > heap_bump_limit { heap_bump_halt(2, n) }
+
     uint64 p = heap_bump_next
     heap_bump_next = end
     heap_bump_total = heap_bump_total + need

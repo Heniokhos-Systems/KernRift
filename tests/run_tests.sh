@@ -8597,14 +8597,19 @@ done
 # disassembler that silently prints nothing cannot pass it.
 TOTAL=$((TOTAL + 1))
 if command -v objdump >/dev/null 2>&1; then
-    PV_HAS=$(objdump -D -b binary -m i386:x86-64 "$PV_D/y.out" 2>/dev/null | grep -c "out    %al,(%dx)")
     printf 'import "../std/uart_16550.kr"\nfn main() {\n    loop { }\n}\n' > "$PV_D/n86.kr"
     printf 'import "../std/uart_16550.kr"\nfn main() {\n    println("hi")\n    loop { }\n}\n' > "$PV_D/y86.kr"
     rm -f "$PV_D/n86.out" "$PV_D/y86.out"
     "$PV_KRC" --arch=x86_64 --target=none "$PV_D/n86.kr" -o "$PV_D/n86.out" >/dev/null 2>&1
     "$PV_KRC" --arch=x86_64 --target=none "$PV_D/y86.kr" -o "$PV_D/y86.out" >/dev/null 2>&1
-    PV_HAS=$(objdump -D -b binary -m i386:x86-64 "$PV_D/y86.out" 2>/dev/null | grep -c "out    %al,(%dx)")
-    PV_NOT=$(objdump -D -b binary -m i386:x86-64 "$PV_D/n86.out" 2>/dev/null | grep -c "out    %al,(%dx)")
+    # Whitespace-tolerant: objdump pads the mnemonic column and the width is
+    # not a stable interface. A literal "out    %al,(%dx)" with the exact run
+    # of spaces this binutils happens to emit would turn a formatting change in
+    # a future objdump into a silent 0 here, i.e. a check that reports the UART
+    # store is missing when it is present.
+    PV_PAT='out[[:space:]]+%al,\(%dx\)'
+    PV_HAS=$(objdump -D -b binary -m i386:x86-64 "$PV_D/y86.out" 2>/dev/null | grep -cE "$PV_PAT")
+    PV_NOT=$(objdump -D -b binary -m i386:x86-64 "$PV_D/n86.out" 2>/dev/null | grep -cE "$PV_PAT")
     if [ "$PV_HAS" -ge 1 ] && [ "$PV_NOT" = "0" ]; then
         PASS=$((PASS + 1)); echo "  provider_uart_store_in_bytes: PASS ($PV_HAS out instructions, 0 without the println)"
     else
@@ -8686,6 +8691,76 @@ for A in x86_64 arm64; do
     rm -f "$PV_D/both.out"
 done
 
+# A provider is resolved BY NAME; its SHAPE has to be checked separately.
+#
+# The lowerings synthesise calls -- write(fd, buf, len), alloc(n) -- and a
+# synthesised call is invisible to the AST-walking arity check in
+# src/analysis.kr, because it does not exist in the AST. Measured before the
+# check existed: a one-argument `@builtin_override fn write` compiled CLEAN on
+# both arches at exit 0 with an artifact, while the compiler passed it three
+# arguments. That is a silent ABI mismatch, and it is a check the override path
+# SKIPS rather than one the language lacks -- a hand-written three-argument
+# call against that same override is rejected today.
+for A in x86_64 arm64; do
+    TOTAL=$((TOTAL + 1))
+    printf 'static uint64 sink = 0\n@builtin_override\nfn write(uint64 only_one) -> uint64 { sink = only_one  return 0 }\nfn main() {\n    println("hi")\n    loop { }\n}\n' > "$PV_D/ar.kr"
+    rm -f "$PV_D/ar.out"
+    PV_ERR=$("$PV_KRC" --arch=$A --target=none "$PV_D/ar.kr" -o "$PV_D/ar.out" 2>&1); PV_ST=$?
+    if [ "$PV_ST" = "0" ] || [ -f "$PV_D/ar.out" ]; then
+        echo "FAIL: provider_arity_write_$A (a 1-argument write provider took 3 synthesised arguments and compiled clean)"; FAIL=$((FAIL + 1))
+    elif ! echo "$PV_ERR" | grep -q "provider declares 1 parameter(s), but print/println/print_str/println_str under --target=none lowers to 3-argument calls of it"; then
+        echo "FAIL: provider_arity_write_$A (diagnostic does not state both counts: '$PV_ERR')"; FAIL=$((FAIL + 1))
+    elif ! echo "$PV_ERR" | grep -q 'Declare it as `fn write(uint64 fd, uint64 buf, uint64 len) -> uint64`\.$'; then
+        echo "FAIL: provider_arity_write_$A (diagnostic does not name the expected signature: '$PV_ERR')"; FAIL=$((FAIL + 1))
+    else
+        PASS=$((PASS + 1)); echo "  provider_arity_write_$A: PASS"
+    fi
+    rm -f "$PV_D/ar.out"
+
+    # Same blind spot on the allocator, and one step worse: the f-string
+    # CONSUMES the result, so a VOID provider hands it whatever is in the
+    # return register. Both the arity and the return type are checked.
+    PV_M=$(pv_mod "$A")
+    TOTAL=$((TOTAL + 1))
+    printf 'import "%s"\n@builtin_override\nfn alloc(uint64 a, uint64 b) -> uint64 { return a + b }\nfn main() {\n    uint64 y = 5\n    println(f"x {y}")\n    loop { }\n}\n' "$PV_M" > "$PV_D/ar2.kr"
+    rm -f "$PV_D/ar2.out"
+    PV_ERR=$("$PV_KRC" --arch=$A --target=none "$PV_D/ar2.kr" -o "$PV_D/ar2.out" 2>&1); PV_ST=$?
+    if [ "$PV_ST" = "0" ] || [ -f "$PV_D/ar2.out" ]; then
+        echo "FAIL: provider_arity_alloc_$A (a 2-argument alloc provider took 1 synthesised argument and compiled clean)"; FAIL=$((FAIL + 1))
+    elif ! echo "$PV_ERR" | grep -q "provider declares 2 parameter(s), but an f-string under --target=none lowers to 1-argument calls of it"; then
+        echo "FAIL: provider_arity_alloc_$A (diagnostic does not state both counts: '$PV_ERR')"; FAIL=$((FAIL + 1))
+    else
+        PASS=$((PASS + 1)); echo "  provider_arity_alloc_$A: PASS"
+    fi
+    rm -f "$PV_D/ar2.out"
+
+    TOTAL=$((TOTAL + 1))
+    printf 'import "%s"\nstatic uint64 hp = 0x200000\n@builtin_override\nfn alloc(uint64 n) { hp = hp + n }\nfn main() {\n    uint64 y = 5\n    println(f"x {y}")\n    loop { }\n}\n' "$PV_M" > "$PV_D/ar3.kr"
+    rm -f "$PV_D/ar3.out"
+    PV_ERR=$("$PV_KRC" --arch=$A --target=none "$PV_D/ar3.kr" -o "$PV_D/ar3.out" 2>&1); PV_ST=$?
+    if [ "$PV_ST" = "0" ] || [ -f "$PV_D/ar3.out" ]; then
+        echo "FAIL: provider_void_alloc_$A (a void alloc provider supplied the f-string's buffer address and compiled clean)"; FAIL=$((FAIL + 1))
+    elif ! echo "$PV_ERR" | grep -q "provider returns nothing, but an f-string under --target=none uses its result"; then
+        echo "FAIL: provider_void_alloc_$A (diagnostic does not say the result is consumed: '$PV_ERR')"; FAIL=$((FAIL + 1))
+    else
+        PASS=$((PASS + 1)); echo "  provider_void_alloc_$A: PASS"
+    fi
+    rm -f "$PV_D/ar3.out"
+
+    # A CORRECTLY shaped provider must still compile, or the three checks above
+    # are satisfied by a compiler that refuses every override.
+    TOTAL=$((TOTAL + 1))
+    printf 'import "%s"\nimport "../std/heap_bump.kr"\nfn main() {\n    heap_bump_init(0x200000, 0x100000)\n    uint64 y = 5\n    println(f"x {y}")\n    loop { }\n}\n' "$PV_M" > "$PV_D/ar4.kr"
+    rm -f "$PV_D/ar4.out"
+    PV_ERR=$("$PV_KRC" --arch=$A --target=none "$PV_D/ar4.kr" -o "$PV_D/ar4.out" 2>&1); PV_ST=$?
+    if [ "$PV_ST" = "0" ] && [ -f "$PV_D/ar4.out" ]; then
+        PASS=$((PASS + 1)); echo "  provider_correct_shape_accepted_$A: PASS"
+    else
+        echo "FAIL: provider_correct_shape_accepted_$A (exit $PV_ST: '$PV_ERR')"; FAIL=$((FAIL + 1))
+    fi
+    rm -f "$PV_D/ar4.out"
+done
+
 # f-strings need the OTHER provider. An f-string's value is a pointer that may
 # outlive the frame, so its buffer cannot become a stack slot the way print's
 # formatting scratch does -- it stays a heap allocation and therefore needs
@@ -8753,6 +8828,111 @@ for A in x86_64 arm64; do
         rm -f "$PV_D/ord.out"
     done
 done
+
+# std/heap_bump.kr's refusals, EXECUTED.
+#
+# Everything else in this block is static: a bare-metal image cannot be run
+# here (no entry point, no stack setup, a hardcoded load address), so the
+# allocator's overrun paths would otherwise ship reviewed but never once
+# executed -- and a reviewed-not-executed bound is exactly what was wrong with
+# the first version of this allocator. It rounded the request up BEFORE
+# checking it, so `n + 15` wrapped for n near 2^64, `& ~15` floored it to 0,
+# and alloc(2^64-1) on a 4096-byte region returned a pointer, reserved nothing
+# and refused nothing.
+#
+# The module is transformed mechanically into something runnable: the
+# @builtin_override annotations are stripped and alloc/dealloc renamed (they
+# would otherwise shadow the builtins the harness itself needs), and
+# heap_bump_halt is made to report and exit instead of `loop { }`. THE
+# ARITHMETIC UNDER TEST IS NOT TOUCHED. The transformation is asserted to have
+# applied, so a sed that silently matches nothing fails here rather than
+# hanging forever on the module's real halt loop.
+HB_D=$(mktemp -d "$DIR/../krc_pv_XXXXXX")
+sed -e 's/^@builtin_override$//' \
+    -e 's/^fn alloc(/fn hb_alloc(/' \
+    -e 's/^fn dealloc(/fn hb_dealloc(/' \
+    -e 's|^fn heap_bump_halt(uint64 reason, uint64 request) {|fn heap_bump_halt(uint64 reason, uint64 request) {\n    println("HALT", reason, request)\n    exit(9)|' \
+    "$DIR/../std/heap_bump.kr" > "$HB_D/hb.kr"
+TOTAL=$((TOTAL + 1))
+if grep -q '^fn hb_alloc(' "$HB_D/hb.kr" \
+   && grep -q 'println("HALT", reason, request)' "$HB_D/hb.kr" \
+   && ! grep -q '^@builtin_override$' "$HB_D/hb.kr"; then
+    PASS=$((PASS + 1)); echo "  heap_bump_harness_applied: PASS"
+else
+    echo "FAIL: heap_bump_harness_applied (the transformation did not apply -- every heap_bump check below is vacuous)"
+    FAIL=$((FAIL + 1))
+fi
+
+hb_case() {
+    local name="$1" body="$2" want="$3"
+    TOTAL=$((TOTAL + 1))
+    printf 'import "hb.kr"\nfn main() {\n%s\n    exit(0)\n}\n' "$body" > "$HB_D/c.kr"
+    rm -f "$HB_D/c.out"
+    local err got
+    err=$("$PV_KRC" --arch=$ARCH "$HB_D/c.kr" -o "$HB_D/c.out" 2>&1)
+    if [ ! -f "$HB_D/c.out" ]; then
+        echo "FAIL: heap_bump_$name (build failed: '$err')"; FAIL=$((FAIL + 1)); return
+    fi
+    chmod +x "$HB_D/c.out"
+    got=$(timeout 10 "$HB_D/c.out" 2>&1)
+    if [ "$got" = "$want" ]; then
+        PASS=$((PASS + 1)); echo "  heap_bump_$name: PASS"
+    else
+        echo "FAIL: heap_bump_$name (wanted '$want', got '$got')"; FAIL=$((FAIL + 1))
+    fi
+}
+
+# The defect, pinned. A request that wraps the round-up must refuse, not
+# return a pointer to a block 2^64 bytes short of what was asked for.
+hb_case wrap_roundup \
+    '    heap_bump_init(0x1000, 0x1000)
+    uint64 huge = 0xFFFFFFFFFFFFFFFF
+    uint64 p = hb_alloc(huge)
+    println("NO REFUSAL", p)' \
+    'HALT 2 18446744073709551615'
+# One byte past the region, the ordinary exhaustion path.
+hb_case exhausted \
+    '    heap_bump_init(0x1000, 0x1000)
+    uint64 p = hb_alloc(4097)
+    println("NO REFUSAL", p)' \
+    'HALT 2 4097'
+# Using it before heap_bump_init.
+hb_case uninitialised \
+    '    uint64 p = hb_alloc(8)
+    println("NO REFUSAL", p)' \
+    'HALT 1 8'
+# A region that wraps the address space: every downstream "is there room" test
+# compares against limit, so a limit below base makes all of them nonsense.
+hb_case init_wraps \
+    '    heap_bump_init(0xFFFFFFFFFFFF0000, 0x20000)
+    println("NO REFUSAL")' \
+    'HALT 1 131072'
+# Exactly the region must fit -- the refusals above must not be off by one.
+hb_case exact_fit \
+    '    heap_bump_init(0x1000, 0x1000)
+    uint64 p = hb_alloc(4096)
+    println("ok", p, heap_bump_used(), heap_bump_remaining())' \
+    'ok 4096 4096 0'
+# alloc(0) must not alias. Returning the cursor unchanged makes two zero-size
+# allocations the same pointer AND makes either alias the next real block, so a
+# sentinel written through a zero-length block corrupts a block it does not own.
+hb_case zero_size_distinct \
+    '    heap_bump_init(0x1000, 0x1000)
+    uint64 a = hb_alloc(0)
+    uint64 b = hb_alloc(0)
+    uint64 c = hb_alloc(8)
+    println(b - a, c - b)' \
+    '16 16'
+# Alignment holds for an awkward size, and dealloc stays a no-op.
+hb_case align_and_dealloc \
+    '    heap_bump_init(0x1000, 0x1000)
+    uint64 a = hb_alloc(1)
+    uint64 b = hb_alloc(17)
+    hb_dealloc(b)
+    uint64 c = hb_alloc(1)
+    println(b - a, c - b, heap_bump_used())' \
+    '16 32 64'
+rm -rf "$HB_D"
 
 # HOSTED BUILDS MUST NOT MOVE. The routing is keyed on target_os == 4, so a
 # hosted program that defines `@builtin_override fn write` must keep println

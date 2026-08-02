@@ -1340,9 +1340,28 @@ fn ir_is_pow2(uint64 v) -> uint64 {
 // rather than falling into the generic emitter backstop.
 
 // The 64-byte per-function scratch used to format one argument at a time.
-// 64 is comfortably above the widest thing that can be formatted into it:
-// IR_FMT_UINT writes at most 20 digits, and IR_FMT_F64 gives up at |x| >= 1e18
-// so its widest output is sign + 18 digits + '.' + 6 fraction digits = 26.
+//
+// THE WORST CASE IS 40 BYTES, AND IT IS NaN ON x86_64. It was measured, not
+// derived, because the derivation was wrong: an earlier version of this
+// comment reasoned "IR_FMT_F64 gives up at |x| >= 1e18, so sign + 18 digits +
+// '.' + 6 fraction digits = 26" from the code, and the code does not do that.
+// `ucomisd` sets CF on unordered, and the guard at IR_FMT_F64's 1e18 test is
+// `jae`, which is `jnc` -- so a NaN does NOT take the "big" branch its own
+// comment claims it does. It falls through into the integer path, where
+// cvttsd2si yields the INDEFINITE value, and prints as
+//
+//     -9223372036854775808.9223372036854775808        (40 bytes)
+//
+// Measured by compiling `print(0.0 / 0.0)` for x86_64 and counting the bytes
+// on stdout. +/-Inf is "big" / "-big" on both arches; arm64 prints "big" for
+// the same NaN, so the two arches diverge on this input (recorded as a finding
+// in the task report, not fixed here).
+//
+// 40 < 64, so the scratch is not overflowable by anything the IR_FMT_* family
+// can produce today: FMT_UINT at most 20 digits, the signed path at most 21,
+// FMT_BOOL 5, char 1. The margin is 24 bytes, and it is stated here as a
+// measured number so the next person to widen a formatter has something to
+// check against rather than a derivation to re-derive incorrectly.
 //
 // Reserved lazily so a function that never prints pays nothing, and reserved
 // ONCE so a function with fifty printlns does not grow a 3 KB frame. The
@@ -1416,8 +1435,21 @@ fn ir_bm_emit_write_lit(uint64 wtok, uint64 s, uint64 n) {
 // The definition token of the `write` provider, or 0xFFFFFFFF if the program
 // supplied none. Callers refuse on 0xFFFFFFFF; they must NOT fall back to the
 // syscall lowering, which is the whole point of --target=none.
+//
+// Resolving by name is not enough: the lowerings below synthesise a
+// three-argument call, and a synthesised call is invisible to the AST-walking
+// arity check in src/analysis.kr. Validated here, at the single point every
+// bare-metal print resolves through, so a provider of the wrong shape is
+// refused rather than silently handed arguments it never declared. The result
+// is discarded by every caller, so the return type is not constrained.
 fn ir_bm_write_provider() -> uint64 {
-    return builtin_override_tok_of("write", 5)
+    uint64 wtok = builtin_override_tok_of("write", 5)
+    if wtok != 0xFFFFFFFF {
+        bm_provider_check(wtok, "write", 3, 0,
+                          "print/println/print_str/println_str under --target=none",
+                          bm_write_shape())
+    }
+    return wtok
 }
 
 // The bare-metal body of print()/println(). Mirrors the hosted lowering's
@@ -3911,7 +3943,12 @@ fn ir_lower_expr(uint64 node) -> uint64 {
         return buf_v
     }
 
-    // FString (50) — build interpolated string in a 4096-byte stack buffer
+    // FString (50) — build the interpolated string in a 4096-byte HEAP buffer.
+    // (It was never a stack buffer; the comment said so for a long time. The
+    // buffer is an IR_ALLOC on hosted targets and a call to the `alloc`
+    // provider under --target=none, and it has to be heap either way: the
+    // f-string's value is a pointer the caller may store somewhere that
+    // outlives this frame.)
     if kind == 50 {
         uint64 buf_v = ir_new_vreg()
         // --target=none: IR_ALLOC is mmap/VirtualAlloc, which the emitter
@@ -3932,6 +3969,15 @@ fn ir_lower_expr(uint64 node) -> uint64 {
         // refusal necessary at 563b0f3.
         if target_os == 4 {
             uint64 fs_atok = builtin_override_tok_of("alloc", 5)
+            // Same synthesised-call blind spot as the write provider, and one
+            // step worse: the f-string CONSUMES the result as its buffer
+            // address, so a void provider hands it whatever is in the return
+            // register. Both are checked.
+            if fs_atok != 0xFFFFFFFF {
+                bm_provider_check(fs_atok, "alloc", 1, 1,
+                                  "an f-string under --target=none",
+                                  bm_alloc_shape())
+            }
             if fs_atok == 0xFFFFFFFF {
                 uint64 bmfs = "f-string"
                 bare_metal_builtin_refused(bmfs, "an f-string builds its result in a heap buffer, and the result may outlive the frame, so a stack slot will not do -- supply `@builtin_override fn alloc(uint64 n) -> uint64` (import \"std/heap_bump.kr\" and call heap_bump_init), or format with print()/println() instead, which needs no allocator")
@@ -11268,7 +11314,19 @@ fn ir_emit_x86_insn(uint64 ii) {
         emit_byte(0x58)  // pop rax
         // ucomisd xmm0, xmm1: 66 0F 2E C1
         emit_byte(0x66); emit_byte(0x0F); emit_byte(0x2E); emit_byte(0xC1)
-        // jae .ff_big (unsigned above-or-equal = >= 1e18 or NaN) — rel32 to reach far target
+        // jae .ff_big (unsigned above-or-equal = >= 1e18) — rel32 to reach far
+        // target.
+        //
+        // "or NaN" USED TO BE ON THIS LINE AND IS FALSE. ucomisd sets
+        // ZF=PF=CF=1 on unordered, and jae is jnc, so CF=1 means the branch is
+        // NOT taken: a NaN falls through into the integer path below, where
+        // cvttsd2si yields the x86 INDEFINITE value and the result prints as
+        // -9223372036854775808.9223372036854775808 (40 bytes). arm64's
+        // IR_FMT_F64 prints "big" for the same input, so the two arches
+        // diverge here. Left as-is deliberately -- changing it is a
+        // cross-architecture formatting decision, not a comment fix -- but the
+        // 40-byte figure is load-bearing for the --target=none print scratch
+        // (see ir_bm_scratch_off), so do not "correct" this back.
         emit_byte(0x0F); emit_byte(0x83)  // jae rel32
         uint64 ff_jae_patch = out_len
         emit_byte(0); emit_byte(0); emit_byte(0); emit_byte(0)  // 4-byte placeholder

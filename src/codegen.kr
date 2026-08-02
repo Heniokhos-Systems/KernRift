@@ -689,6 +689,105 @@ fn bm_fix_write() -> uint64 {
 fn bm_fix_write_legacy() -> uint64 {
     return "the @builtin_override `write` provider is honoured by the IR backend only -- drop --legacy / --emit=obj and rebuild, or drop the call"
 }
+
+// ---------------------------------------------------------------------------
+// A provider resolved by NAME must also have the right SHAPE
+// ---------------------------------------------------------------------------
+//
+// The bare-metal lowerings SYNTHESISE calls: three-argument write(fd, buf, len)
+// from every print builtin, one-argument alloc(n) from every f-string. A
+// synthesised call is not arity-checked the way a written one is, and the
+// reason is structural rather than an oversight -- sema_check_expr
+// (src/analysis.kr) walks the AST looking for Call nodes, and these calls do
+// not exist in the AST at all. They are created during IR lowering, long after
+// that pass has run.
+//
+// So this is a check the override path SKIPS, not one the language lacks. A
+// hand-written `write(1, s, n)` against a one-parameter override IS rejected
+// ("wrong number of arguments"); only the synthesised call slipped through.
+//
+// Measured before this existed, on both arches at --target=none:
+//   @builtin_override fn write(uint64 only_one) -> uint64   + println("hi")
+//     -> compiled clean, exit 0, artifact written. The provider read rsi and
+//        rdx, which the caller set and the callee never declared: a silent ABI
+//        mismatch with no diagnostic anywhere in the toolchain.
+//   @builtin_override fn alloc(uint64 a, uint64 b) -> uint64 + an f-string
+//     -> same, in the other direction (callee reads an argument never passed).
+//   @builtin_override fn alloc(uint64 n)  (VOID)             + an f-string
+//     -> same again: the f-string used whatever happened to be in rax as its
+//        buffer address. Return type is checked too where the value is
+//        CONSUMED, which is alloc but not write.
+//
+// `reached_by` names the construct that does the lowering, so the message
+// explains why a program that never wrote a three-argument call is being told
+// about one. Every length is derived with str_len(); the counts go through
+// fmt_uint.
+fn bm_provider_shape_error(uint64 name, uint64 got, uint64 want, uint64 reached_by, uint64 shape) {
+    uint64 pa1 = "error: --target=none: the @builtin_override '"
+    write(2, pa1, str_len(pa1))
+    write(2, name, str_len(name))
+    uint64 pa2 = "' provider declares "
+    write(2, pa2, str_len(pa2))
+    uint8[24] pabuf
+    uint64 palen = fmt_uint(pabuf, got)
+    write(2, pabuf, palen)
+    uint64 pa3 = " parameter(s), but "
+    write(2, pa3, str_len(pa3))
+    write(2, reached_by, str_len(reached_by))
+    uint64 pa4 = " lowers to "
+    write(2, pa4, str_len(pa4))
+    uint8[24] pabuf2
+    uint64 palen2 = fmt_uint(pabuf2, want)
+    write(2, pabuf2, palen2)
+    uint64 pa5 = "-argument calls of it. Declare it as `"
+    write(2, pa5, str_len(pa5))
+    write(2, shape, str_len(shape))
+    uint64 pa6 = "`.\n"
+    write(2, pa6, str_len(pa6))
+    exit(1)
+}
+
+fn bm_provider_return_error(uint64 name, uint64 reached_by, uint64 shape) {
+    uint64 pr1 = "error: --target=none: the @builtin_override '"
+    write(2, pr1, str_len(pr1))
+    write(2, name, str_len(name))
+    uint64 pr2 = "' provider returns nothing, but "
+    write(2, pr2, str_len(pr2))
+    write(2, reached_by, str_len(reached_by))
+    uint64 pr3 = " uses its result. Declare it as `"
+    write(2, pr3, str_len(pr3))
+    write(2, shape, str_len(shape))
+    uint64 pr4 = "`.\n"
+    write(2, pr4, str_len(pr4))
+    exit(1)
+}
+
+// Validate one provider against the shape its lowering will synthesise.
+// `want_return` is 1 when the synthesised call CONSUMES the result.
+fn bm_provider_check(uint64 tok, uint64 name, uint64 want, uint64 want_return,
+                     uint64 reached_by, uint64 shape) {
+    uint64 got = fn_sig_lookup(tok)
+    // 0xFFFFFFFF means the name is not in the signature table at all, which
+    // cannot happen for an @builtin_override (the annotation is only reachable
+    // from a fn definition, and every definition registers a signature). Left
+    // permissive rather than fatal so a future registration path that skips
+    // the table degrades to today's behaviour instead of refusing every build.
+    if got == 0xFFFFFFFF { return }
+    if got != want {
+        bm_provider_shape_error(name, got, want, reached_by, shape)
+    }
+    if want_return != 0 && fn_sig_returns(tok) == 0 {
+        bm_provider_return_error(name, reached_by, shape)
+    }
+}
+
+// The two shapes the bare-metal lowerings synthesise, spelled once.
+fn bm_write_shape() -> uint64 {
+    return "fn write(uint64 fd, uint64 buf, uint64 len) -> uint64"
+}
+fn bm_alloc_shape() -> uint64 {
+    return "fn alloc(uint64 n) -> uint64"
+}
 fn bm_fix_nofs() -> uint64 {
     return "a bare-metal image has no filesystem, so there is nothing for this builtin to act on"
 }
@@ -6560,9 +6659,20 @@ fn gen_expr(uint64 node) {
             // same remedy, same "only when a provider exists" gate; the
             // backstop named 'print_str' for println_str, which is one of the
             // things this arm fixes when it does fire.
+            // PRE-EXISTING DEFECT, RECORDED NOT FIXED: the `println_str`
+            // disjunct above is NOT gated on is_extern_call, unlike every
+            // other builtin arm in this dispatch. So an
+            // `@builtin_override fn println_str` is silently ignored on the
+            // legacy backends and this builtin lowering wins -- on hosted
+            // builds too, where it has presumably always been so. It also
+            // makes a_is_pln read 0 for an overridden println_str, which is
+            // why the refusal below computes its own name from the token
+            // instead of trusting that flag. Fixing the disjunct changes
+            // hosted legacy dispatch semantics and belongs in its own change,
+            // not smuggled in here.
             if target_os == 4 && builtin_override_tok_of("write", 5) != 0xFFFFFFFF {
                 uint64 bmlps = "print_str"
-                if is_println != 0 { bmlps = "println_str" }
+                if tok_matches(wct, "println_str", 11) != 0 { bmlps = "println_str" }
                 bare_metal_builtin_refused(bmlps, bm_fix_write_legacy())
             }
             uint32 first_arg = ast_child(node)
