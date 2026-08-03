@@ -9150,6 +9150,464 @@ else
 fi
 rm -f /tmp/krc_stb_d_$$ /tmp/krc_stb_e_$$ "$STB_SRC" "$STB_SRC2"
 
+# --- x86_64 entry stub: multiboot header + long-mode trampoline (B2 T4) -----
+#
+# X86_64 CANNOT USE ARM64'S SHAPE. KernRift emits only 64-bit code, and no x86
+# entry path hands over a 64-bit CPU: `-device loader` leaves the CPU in 16-bit
+# real mode (CR0.PE=0), `-kernel` on our ELF is refused, and multiboot enters
+# 32-BIT protected mode. So the x86 stub is a multiboot header plus a 32-bit
+# trampoline that builds page tables, enables PAE + EFER.LME + paging, loads a
+# 64-bit GDT, far-jumps to long mode and calls the entry.
+#
+# THE STUB SITS AT FILE OFFSET 0, unlike arm64's, which is appended. A
+# multiboot header must lie within the first 8192 bytes of the file, so
+# appending it after the code would work only for images under 8 KiB and would
+# then fail SILENTLY (qemu simply does not find a header) on the first program
+# that grew past that. Consequence: on x86 the payload SHIFTS by the stub's
+# length, which is why row 4 derives that shift from the artifact instead of
+# comparing offsets directly the way the arm64 rows do.
+#
+# NOTHING BELOW HARDCODES A PATCH-SITE OFFSET. Adding `cld` to the trampoline
+# once moved every site above 32 by one byte WHILE THE TOTAL STAYED 226 (the
+# .align 16 padding absorbed it), so a size check cannot notice and a table of
+# offsets is wrong by the next edit -- with a triple fault, not a diagnostic,
+# as the symptom. The checker instead LOCATES each site by its opcode and
+# requires the occurrence to be unique.
+echo ""
+echo "--- x86_64 entry stub: multiboot + long-mode trampoline (B2 T4) ---"
+XSB_SRC="$DIR/../test_tmp_xsb_$$.kr"     # f + main          (entry == main)
+XSB_SRC2="$DIR/../test_tmp_xsb2_$$.kr"   # f + main + _start (entry == _start)
+# Deliberately NO statics and NO string literals, unlike the arm64 rows'
+# program: row 4 asserts the payload is byte-identical after the shift, and
+# the stub's length (226) is 2 mod 8, so a data area would sit behind a
+# different amount of 8-byte alignment padding in the two builds and every
+# RIP-relative displacement into it would legitimately differ. `f` is
+# recursive so the inliner cannot fold it away and the entry function stays
+# off file offset 0.
+XSB_PREFIX='fn f(uint64 x) -> uint64 { if x < 2 { return x + 7 }
+ return f(x - 1) + f(x - 2) }
+fn main() -> uint64 { return f(6) + 0x1111 }
+'
+XSB_START='fn _start() { loop { } }
+'
+printf '%s'   "$XSB_PREFIX"               > "$XSB_SRC"
+printf '%s%s' "$XSB_PREFIX" "$XSB_START"  > "$XSB_SRC2"
+XSB_LOAD=0x400000
+XSB_LOAD2=0x800000
+XSB_SP=0x90000        # the classic below-1-MiB kernel stack
+XSB_SP2=0x300ff0      # a DIFFERENT one, and not a round number: row 3 is the
+                      # only thing standing between --stack-top and the C4 bug
+                      # (validated, reported, then silently ignored)
+
+# Compile one x86_64 image; echo "<entry> <filesz>" on success, nothing on
+# failure. $1 src, $2 out, $3 load-addr, $4... extra flags.
+xsb_build() {
+    local src="$1" out="$2" ld="$3"; shift 3
+    local o st
+    rm -f "$out"
+    o=$($KRC $KRC_FLAGS "$src" -o "$out" --arch=x86_64 --target=none --emit=image --load-addr=$ld "$@" 2>&1)
+    st=$?
+    [ $st -eq 0 ] || return 1
+    echo "$o" | sed -n 's/^image: .* entry=\([0-9]*\) filesz=\([0-9]*\) .*/\1 \2/p'
+}
+
+# Structural check of the whole stub. $1 image, $2 load addr, $3 stack top.
+# On success prints EXACTLY ONE line "stub_size=<n> entry_off=<n>" and exits 0;
+# on failure prints every reason it found and exits 1.
+#
+# A HARNESS FAILURE MUST NOT READ AS A PASS (T3 review I1). Callers require the
+# stub_size= prefix rather than treating empty output as green, so a missing
+# artifact, a python traceback or no python3 at all fails closed.
+xsb_check() {
+    if [ ! -f "$1" ]; then
+        echo "no artifact at $1 -- the check's SUBJECT does not exist, so nothing was verified"
+        return 1
+    fi
+    local xo xc
+    xo=$(xsb_check_py "$1" "$2" "$3"); xc=$?
+    if [ $xc -ne 0 ] && [ -z "$xo" ]; then
+        echo "xsb_check harness failed (python3 exit=$xc) with no reason on stdout -- the check never ran"
+        return 1
+    fi
+    [ -n "$xo" ] && echo "$xo"
+    return $xc
+}
+xsb_check_py() {
+    python3 - "$1" "$2" "$3" <<'PY'
+import struct, sys
+img, load, sp = sys.argv[1], int(sys.argv[2], 0), int(sys.argv[3], 0)
+d = open(img, "rb").read()
+bad = []
+def u32(o): return struct.unpack_from("<I", d, o)[0]
+def u64(o): return struct.unpack_from("<Q", d, o)[0]
+
+# Locate each patch site BY OPCODE, and require the occurrence to be unique --
+# no offset in this file is hardcoded, because every one of them has moved.
+def find1(pat, what, lo=0, hi=None):
+    hi = len(d) if hi is None else hi
+    hits, i = [], lo
+    while True:
+        j = d.find(pat, i, hi)
+        if j < 0: break
+        hits.append(j); i = j + 1
+    if len(hits) != 1:
+        bad.append("%s: found %d occurrences of %s, want exactly 1"
+                   % (what, len(hits), pat.hex()))
+        return None
+    return hits[0]
+
+if len(d) < 226:
+    print("image is %d bytes -- too short to hold the 226-byte stub" % len(d))
+    sys.exit(1)
+
+# --- multiboot header, offset 0 -------------------------------------------
+MAGIC, FLAGS = 0x1BADB002, 0x00010000
+if u32(0) != MAGIC:
+    bad.append("offset 0 is %08x, not the multiboot magic %08x -- qemu -kernel "
+               "will not even load this file" % (u32(0), MAGIC))
+if u32(4) != FLAGS:
+    bad.append("flags %08x != %08x (bit 16 is the AOUT KLUDGE, which is what "
+               "lets a RAW non-ELF file boot at all)" % (u32(4), FLAGS))
+ck = (-(MAGIC + FLAGS)) & 0xFFFFFFFF
+if u32(8) != ck:
+    bad.append("checksum %08x != -(magic+flags) %08x" % (u32(8), ck))
+if u32(12) != load:
+    bad.append("header_addr %08x != --load-addr %08x" % (u32(12), load))
+if u32(16) != load:
+    bad.append("load_addr %08x != --load-addr %08x" % (u32(16), load))
+if u32(20) != 0:
+    bad.append("load_end_addr %08x != 0 (0 means 'the whole file')" % u32(20))
+if u32(24) != 0:
+    bad.append("bss_end_addr %08x != 0" % u32(24))
+if u32(28) != load + 32:
+    bad.append("entry_addr %08x != load+32 %08x" % (u32(28), load + 32))
+
+# --- 32-bit code ----------------------------------------------------------
+# cli;cld. THE cld IS LOAD-BEARING AND UNTESTABLE BY BOOTING: multiboot 0.6.96
+# 3.2 fixes only EFLAGS.VM and EFLAGS.IF and leaves DF UNDEFINED, while the
+# trampoline runs rep stosl/movsl. QEMU happens to enter with DF=0, so this
+# byte check is the ONLY thing that holds it.
+if d[32:34] != b"\xfa\xfc":
+    bad.append("bytes 32..34 are %s, not cli;cld (fafc) -- a missing cld leaves "
+               "DF UNDEFINED across the rep stosl that builds the page tables"
+               % d[32:34].hex())
+
+# EVERY SEARCH WINDOW IS ANCHORED TO AN ALREADY-LOCATED SITE, never to a
+# written-down offset, and every window is deliberately far wider than the
+# thing inside it so the bound is not a layout claim. The chain starts at the
+# header's own entry_addr and walks: lgdtl -> the ljmp that must follow it ->
+# the 64-bit block the ljmp targets -> the two immediates inside that block.
+# Searching the WHOLE FILE for `48 c7 c4` or `48 b8` would be wrong for a
+# different reason than fragility: a real payload can legitimately contain
+# either byte sequence, and the row would then fail on a correct compiler.
+start32 = u32(28) - load
+lgdt = find1(b"\x0f\x01\x15", "lgdtl", start32, start32 + 256)
+ljmp = None
+if lgdt is not None:
+    if d[lgdt + 7] != 0xEA:
+        bad.append("byte after lgdtl is %02x, not the ljmp (ea) that must "
+                   "immediately follow it" % d[lgdt + 7])
+    else:
+        ljmp = lgdt + 7
+movsp = None
+movabs = None
+if ljmp is not None:
+    lm = u32(ljmp + 1) - load
+    if 0 <= lm and lm + 64 <= len(d):
+        movsp = find1(b"\x48\xc7\xc4", "mov $imm32,%rsp", lm, lm + 64)
+        movabs = find1(b"\x48\xb8", "movabs $imm64,%rax", lm, lm + 64)
+
+if lgdt is not None:
+    gdtr_off = u32(lgdt + 3) - load
+    if gdtr_off < 0 or gdtr_off + 10 > len(d):
+        bad.append("lgdtl points at %08x, i.e. file offset %d, outside the image"
+                   % (u32(lgdt + 3), gdtr_off))
+    else:
+        lim = struct.unpack_from("<H", d, gdtr_off)[0]
+        gdt_off = u32(gdtr_off + 2) - load
+        if gdt_off < 0 or gdt_off + 24 > len(d):
+            bad.append("gdtr base %08x is outside the image" % u32(gdtr_off + 2))
+        else:
+            if lim != 23:
+                bad.append("gdtr limit %d != 23 (3 quads - 1)" % lim)
+            if gdt_off + 24 != gdtr_off:
+                bad.append("gdt at %d + 24 != gdtr at %d" % (gdt_off, gdtr_off))
+            want = [0, 0x00AF9A000000FFFF, 0x00CF92000000FFFF]
+            for i, w in enumerate(want):
+                got = u64(gdt_off + i * 8)
+                if got != w:
+                    bad.append("gdt[%d] = %016x != %016x" % (i, got, w))
+            if u32(gdtr_off + 6) != 0:
+                bad.append("gdtr tail .long is %08x, not 0" % u32(gdtr_off + 6))
+        stub_size = gdtr_off + 10
+else:
+    stub_size = None
+
+if ljmp is not None:
+    if u32(ljmp + 5) & 0xFFFF != 0x0008:
+        bad.append("ljmp selector %04x != 0x08 (the 64-bit code segment)"
+                   % (u32(ljmp + 5) & 0xFFFF))
+    lm_off = u32(ljmp + 1) - load
+    if lm_off < 0 or lm_off + 10 > len(d):
+        bad.append("ljmp targets %08x, outside the image" % u32(ljmp + 1))
+    elif d[lm_off:lm_off + 10] != bytes.fromhex("66b810008ed88ec08ed0"):
+        bad.append("ljmp lands on %s, not the 64-bit segment reloads "
+                   "(66b810008ed88ec08ed0)" % d[lm_off:lm_off + 10].hex())
+
+# --- 64-bit code ----------------------------------------------------------
+if movsp is not None and u32(movsp + 3) != sp:
+    bad.append("mov $imm32,%%rsp carries %08x, not --stack-top %08x -- the "
+               "flag was validated and reported and then IGNORED (review C4)"
+               % (u32(movsp + 3), sp))
+
+entry_off = None
+if movabs is not None:
+    ev = u64(movabs + 2)
+    if ev == 0:
+        bad.append("movabs carries 0 -- the UNPATCHED placeholder. `call *%rax` "
+                   "to 0 is a triple fault, not a diagnostic: the entry address "
+                   "is written after the emit loop and that write did not happen")
+    else:
+        entry_off = ev - load
+        if entry_off < 0 or entry_off >= len(d):
+            bad.append("movabs carries %016x, i.e. file offset %d, outside the "
+                       "%d-byte image" % (ev, entry_off, len(d)))
+        elif stub_size is not None and entry_off < stub_size:
+            bad.append("movabs targets offset %d, which is INSIDE the %d-byte "
+                       "stub -- it must point into the payload" % (entry_off, stub_size))
+    if d[movabs + 10:movabs + 15] != bytes.fromhex("ffd0f4ebfd"):
+        bad.append("bytes after the movabs are %s, not call *%%rax; hlt; jmp . "
+                   "(ffd0f4ebfd)" % d[movabs + 10:movabs + 15].hex())
+
+if bad:
+    print("; ".join(bad)); sys.exit(1)
+print("stub_size=%d entry_off=%d" % (stub_size, entry_off))
+PY
+}
+
+# Count multiboot magics on a 4-byte grid. The stub is the only thing that can
+# emit one, so this is the byte-level "the stub is present" / "absent" test.
+xsb_magic_count() {
+    python3 - "$1" <<'PY'
+import sys
+d = open(sys.argv[1], "rb").read()
+print(sum(1 for i in range(0, len(d) - 3, 4)
+          if d[i:i+4] == bytes.fromhex("02b0ad1b")))   # 0x1BADB002 little-endian
+PY
+}
+
+# 1. The multiboot header is at offset 0, its three address fields agree with
+#    --load-addr, and the whole trampoline decodes: cld present, GDT/GDTR
+#    self-consistent, far jump landing on the 64-bit segment reloads, the
+#    call/hlt tail intact. The reported entry is the trampoline (load+32), NOT
+#    the entry function.
+TOTAL=$((TOTAL + 1))
+xsb_ra=$(xsb_build "$XSB_SRC" /tmp/krc_xsb_a_$$ $XSB_LOAD); xsb_sta=$?
+xsb_rb=$(xsb_build "$XSB_SRC" /tmp/krc_xsb_b_$$ $XSB_LOAD --stack-top=$XSB_SP); xsb_stb=$?
+xsb_fn=${xsb_ra% *}
+xsb_e=${xsb_rb% *}; xsb_f=${xsb_rb#* }
+xsb_why=""; xsb_facts=""
+if [ $xsb_sta -ne 0 ] || [ $xsb_stb -ne 0 ] || [ -z "$xsb_ra" ] || [ -z "$xsb_rb" ]; then
+    xsb_why="build failed (no-flag exit=$xsb_sta report='$xsb_ra'; stub exit=$xsb_stb report='$xsb_rb')"
+elif [ "$xsb_f" != "$(stat -c%s /tmp/krc_xsb_b_$$ 2>/dev/null)" ]; then
+    xsb_why="report claims filesz=$xsb_f, on disk $(stat -c%s /tmp/krc_xsb_b_$$ 2>/dev/null)"
+elif [ "$xsb_e" != "32" ]; then
+    xsb_why="report says entry=$xsb_e; the multiboot entry_addr is load+32, so the reported entry must be 32 (it is $xsb_fn without the flag)"
+else
+    xsb_facts=$(xsb_check /tmp/krc_xsb_b_$$ "$XSB_LOAD" "$XSB_SP"); xsb_crc=$?
+    case "$xsb_facts" in
+        stub_size=*) [ $xsb_crc -eq 0 ] || xsb_why="xsb_check exited $xsb_crc: $xsb_facts" ;;
+        *)           xsb_why="${xsb_facts:-xsb_check produced no facts and exited $xsb_crc -- the check never ran}" ;;
+    esac
+fi
+if [ -z "$xsb_why" ]; then
+    PASS=$((PASS + 1)); echo "  stub_x86_multiboot_header: PASS ($xsb_facts, of $xsb_f B)"
+else
+    echo "FAIL: stub_x86_multiboot_header ($xsb_why)"; FAIL=$((FAIL + 1))
+fi
+
+# 2. No --stack-top => no stub. A byte fact on the artifact, not "the compiler
+#    exited 0": zero multiboot magics without the flag, exactly one with it.
+TOTAL=$((TOTAL + 1))
+xsb_na=$(xsb_magic_count /tmp/krc_xsb_a_$$ 2>/dev/null)
+xsb_nb=$(xsb_magic_count /tmp/krc_xsb_b_$$ 2>/dev/null)
+if [ "$xsb_na" = "0" ] && [ "$xsb_nb" = "1" ]; then
+    PASS=$((PASS + 1)); echo "  stub_x86_absent_without_flag: PASS (0 vs 1 multiboot magic)"
+else
+    echo "FAIL: stub_x86_absent_without_flag (no-flag image has ${xsb_na:-?} magics, flag'd image ${xsb_nb:-?}; want 0 and 1)"
+    FAIL=$((FAIL + 1))
+fi
+
+# 3. --stack-top REACHES THE GUEST. The reference .S hardcoded 0x90000 and the
+#    bug survived a full review round because the differential build only ever
+#    varied the load address (review C4). Two different values, each of which
+#    must appear in its own image's `mov $imm32,%rsp` -- and the two images
+#    must therefore differ.
+TOTAL=$((TOTAL + 1))
+xsb_rc=$(xsb_build "$XSB_SRC" /tmp/krc_xsb_c_$$ $XSB_LOAD --stack-top=$XSB_SP2); xsb_stc=$?
+xsb_fc=$(xsb_check /tmp/krc_xsb_c_$$ "$XSB_LOAD" "$XSB_SP2"); xsb_crc3=$?
+if [ $xsb_stc -ne 0 ]; then
+    xsb_why3="build at --stack-top=$XSB_SP2 exited $xsb_stc"
+elif [ $xsb_crc3 -ne 0 ] || [ "${xsb_fc#stub_size=}" = "$xsb_fc" ]; then
+    xsb_why3="${xsb_fc:-xsb_check produced no facts and exited $xsb_crc3 -- the check never ran}"
+elif cmp -s /tmp/krc_xsb_b_$$ /tmp/krc_xsb_c_$$; then
+    xsb_why3="the $XSB_SP and $XSB_SP2 images are BYTE-IDENTICAL -- --stack-top is being ignored"
+else
+    xsb_why3=""
+fi
+if [ -z "$xsb_why3" ]; then
+    PASS=$((PASS + 1)); echo "  stub_x86_stack_top_reaches_the_image: PASS ($XSB_SP != $XSB_SP2, each in its own rsp load)"
+else
+    echo "FAIL: stub_x86_stack_top_reaches_the_image ($xsb_why3)"; FAIL=$((FAIL + 1))
+fi
+rm -f /tmp/krc_xsb_c_$$
+
+# 4. The movabs targets the ENTRY FUNCTION, and the payload is otherwise
+#    untouched. Unlike arm64 the stub is PREPENDED, so the entry function moves
+#    -- by exactly the stub's length, which is DERIVED FROM THE ARTIFACT (the
+#    gdtr's own end) rather than written down here. Both halves matter: the
+#    offset arithmetic AND a byte-for-byte comparison of the shifted payload,
+#    so a movabs that happened to land on the right number for the wrong reason
+#    still reds.
+TOTAL=$((TOTAL + 1))
+xsb_ss=${xsb_facts#stub_size=}; xsb_ss=${xsb_ss%% *}
+xsb_eo=${xsb_facts##*entry_off=}
+if [ -z "$xsb_facts" ] || [ -z "$xsb_ss" ] || [ -z "$xsb_eo" ]; then
+    xsb_why4="row 1 produced no facts, so there is nothing to check here"
+elif [ "$xsb_eo" != "$((xsb_fn + xsb_ss))" ]; then
+    xsb_why4="movabs targets offset $xsb_eo; the entry function is at $xsb_fn without the flag and the stub is $xsb_ss B, so it must be $((xsb_fn + xsb_ss))"
+else
+    xsb_why4=$(python3 - /tmp/krc_xsb_a_$$ /tmp/krc_xsb_b_$$ "$xsb_ss" <<'PY'
+import sys
+a = open(sys.argv[1], "rb").read(); b = open(sys.argv[2], "rb").read()
+ss = int(sys.argv[3])
+# Trailing 8-byte alignment padding legitimately differs (the stub is 2 mod 8),
+# so compare everything up to the last 8 bytes of the shorter payload.
+n = min(len(a), len(b) - ss) - 8
+if n <= 0:
+    print("no payload to compare (a=%d b=%d stub=%d)" % (len(a), len(b), ss))
+elif a[:n] != b[ss:ss + n]:
+    i = next(k for k in range(n) if a[k] != b[ss + k])
+    print("payload differs at byte %d of %d (%02x vs %02x) -- prepending the "
+          "stub changed the code, it must only move it" % (i, n, a[i], b[ss + i]))
+PY
+)
+fi
+if [ -z "$xsb_why4" ]; then
+    PASS=$((PASS + 1)); echo "  stub_x86_entry_movabs_targets_entry: PASS (entry $xsb_fn + stub $xsb_ss = $xsb_eo, payload identical)"
+else
+    echo "FAIL: stub_x86_entry_movabs_targets_entry ($xsb_why4)"; FAIL=$((FAIL + 1))
+fi
+rm -f /tmp/krc_xsb_a_$$ /tmp/krc_xsb_b_$$
+
+# 5. The stub calls the ENTRY, which is T2's rule and not "main": with both
+#    `_start` and `main` live, the movabs must resolve to `_start`. Rows 1-4
+#    all use a program whose entry IS main, so this is the only row that would
+#    catch a stub wired to find_main_offset().
+TOTAL=$((TOTAL + 1))
+xsb_rd=$(xsb_build "$XSB_SRC2" /tmp/krc_xsb_d_$$ $XSB_LOAD); xsb_std=$?
+xsb_re=$(xsb_build "$XSB_SRC2" /tmp/krc_xsb_e_$$ $XSB_LOAD --stack-top=$XSB_SP); xsb_ste=$?
+xsb_sfn=${xsb_rd% *}
+xsb_fe=$(xsb_check /tmp/krc_xsb_e_$$ "$XSB_LOAD" "$XSB_SP"); xsb_crc5=$?
+if [ $xsb_std -ne 0 ] || [ $xsb_ste -ne 0 ] || [ -z "$xsb_rd" ] || [ -z "$xsb_re" ]; then
+    xsb_why5="build failed (no-flag exit=$xsb_std report='$xsb_rd'; stub exit=$xsb_ste report='$xsb_re')"
+elif [ $xsb_crc5 -ne 0 ] || [ "${xsb_fe#stub_size=}" = "$xsb_fe" ]; then
+    xsb_why5="${xsb_fe:-xsb_check produced no facts and exited $xsb_crc5 -- the check never ran}"
+else
+    xsb_ss5=${xsb_fe#stub_size=}; xsb_ss5=${xsb_ss5%% *}
+    xsb_eo5=${xsb_fe##*entry_off=}
+    if [ "$xsb_eo5" != "$((xsb_sfn + xsb_ss5))" ]; then
+        xsb_why5="movabs targets $xsb_eo5, but _start is at $xsb_sfn + stub $xsb_ss5 = $((xsb_sfn + xsb_ss5))"
+    else
+        xsb_why5=""
+    fi
+fi
+if [ -z "$xsb_why5" ]; then
+    PASS=$((PASS + 1)); echo "  stub_x86_movabs_targets_start: PASS (movabs -> _start at $xsb_sfn + $xsb_ss5)"
+else
+    echo "FAIL: stub_x86_movabs_targets_start ($xsb_why5)"; FAIL=$((FAIL + 1))
+fi
+rm -f /tmp/krc_xsb_d_$$ /tmp/krc_xsb_e_$$
+
+# 6. --load-addr REACHES THE GUEST, which is the opposite of the arm64 rule.
+#    An arm64 image is fully PC-relative and must be byte-identical at two
+#    addresses; the x86 trampoline necessarily materialises absolute addresses
+#    (the multiboot header's three, lgdtl's operand, the far jump's target, the
+#    gdtr base and the entry), so the two builds must DIFFER and each must
+#    validate against its own address.
+TOTAL=$((TOTAL + 1))
+xsb_rf=$(xsb_build "$XSB_SRC" /tmp/krc_xsb_f_$$ $XSB_LOAD  --stack-top=$XSB_SP); xsb_stf=$?
+xsb_rg=$(xsb_build "$XSB_SRC" /tmp/krc_xsb_g_$$ $XSB_LOAD2 --stack-top=$XSB_SP); xsb_stg=$?
+xsb_ff=$(xsb_check /tmp/krc_xsb_f_$$ "$XSB_LOAD"  "$XSB_SP"); xsb_crcf=$?
+xsb_fg=$(xsb_check /tmp/krc_xsb_g_$$ "$XSB_LOAD2" "$XSB_SP"); xsb_crcg=$?
+if [ $xsb_stf -ne 0 ] || [ $xsb_stg -ne 0 ]; then
+    xsb_why6="build failed ($XSB_LOAD exit=$xsb_stf, $XSB_LOAD2 exit=$xsb_stg)"
+elif [ $xsb_crcf -ne 0 ] || [ "${xsb_ff#stub_size=}" = "$xsb_ff" ]; then
+    xsb_why6="at $XSB_LOAD: ${xsb_ff:-no facts, exit=$xsb_crcf -- the check never ran}"
+elif [ $xsb_crcg -ne 0 ] || [ "${xsb_fg#stub_size=}" = "$xsb_fg" ]; then
+    xsb_why6="at $XSB_LOAD2: ${xsb_fg:-no facts, exit=$xsb_crcg -- the check never ran}"
+elif [ "$xsb_ff" != "$xsb_fg" ]; then
+    xsb_why6="the two builds disagree on layout ('$xsb_ff' vs '$xsb_fg'); only the ADDRESSES should change"
+elif cmp -s /tmp/krc_xsb_f_$$ /tmp/krc_xsb_g_$$; then
+    xsb_why6="the $XSB_LOAD and $XSB_LOAD2 images are BYTE-IDENTICAL -- --load-addr never reached the stub"
+else
+    xsb_why6=""
+fi
+if [ -z "$xsb_why6" ]; then
+    PASS=$((PASS + 1)); echo "  stub_x86_load_addr_reaches_the_image: PASS ($XSB_LOAD and $XSB_LOAD2 each validate against their own address)"
+else
+    echo "FAIL: stub_x86_load_addr_reaches_the_image ($xsb_why6)"; FAIL=$((FAIL + 1))
+fi
+rm -f /tmp/krc_xsb_f_$$ /tmp/krc_xsb_g_$$
+
+# 7-9. THE TRAMPOLINE'S PRECONDITIONS ARE HARD AND WERE UNCHECKED (review I3).
+#      Page tables occupy physical 0x1000-0x4000; the identity map is a single
+#      512-entry PD of 2 MiB pages, i.e. EXACTLY the first 1 GiB. Measured at
+#      HEAD: --load-addr=0x2000 (the page-table build overwrites the image) and
+#      --load-addr=0x50000000 (beyond the map) BOTH compiled clean and booted
+#      silent. Each refusal is asserted with the three-clause pattern -- nonzero
+#      exit, a diagnostic naming WHICH precondition failed, and NO artifact --
+#      because any one of the three alone can hold while the build is broken.
+xsb_refuse() {   # $1 label, $2 expected substring, $3... krc args
+    local label="$1" want="$2"; shift 2
+    TOTAL=$((TOTAL + 1))
+    local out st art=/tmp/krc_xsb_r_$$
+    rm -f "$art"
+    out=$($KRC $KRC_FLAGS "$XSB_SRC" -o "$art" --arch=x86_64 --target=none \
+             --emit=image "$@" 2>&1); st=$?
+    if [ $st -eq 0 ]; then
+        echo "FAIL: $label (exited 0 -- accepted, and a silent boot is the symptom)"; FAIL=$((FAIL + 1))
+    elif ! echo "$out" | grep -qF -- "$want"; then   # -F -- : the wanted text
+                                                     # STARTS WITH "--" and grep
+                                                     # would read it as an option
+        echo "FAIL: $label (refused, but the diagnostic does not name the precondition: '$(echo "$out" | head -c 160)')"; FAIL=$((FAIL + 1))
+    elif [ -f "$art" ]; then
+        echo "FAIL: $label (refused and diagnosed, but WROTE $art anyway)"; FAIL=$((FAIL + 1))
+    else
+        PASS=$((PASS + 1)); echo "  $label: PASS (exit=$st, named the precondition, no artifact)"
+    fi
+    rm -f "$art"
+}
+xsb_refuse stub_x86_load_addr_refused_page_tables "identity-map page tables" \
+    --load-addr=0x2000 --stack-top=$XSB_SP
+# The two "1 GiB" refusals need DISCRIMINATING substrings: both messages say
+# "1 GiB" (they are the same precondition seen from two flags), so grepping
+# that alone would let the load-addr rule fire for a bad --stack-top, or vice
+# versa, and both rows would still be green.
+xsb_refuse stub_x86_load_addr_refused_above_map "--load-addr= must be below 0x40000000" \
+    --load-addr=0x50000000 --stack-top=$XSB_SP
+xsb_refuse stub_x86_stack_top_refused_above_map "--stack-top= must be at most 0x40000000" \
+    --load-addr=$XSB_LOAD --stack-top=0x50000000
+
+# 10. The stack must not start INSIDE the image. That check needs the file
+#     size, so it runs at finalize -- and finalize is also where the `image:`
+#     report is printed, so it has to run BEFORE the report or a refused build
+#     still announces an artifact it never wrote.
+xsb_refuse stub_x86_stack_top_refused_inside_image "inside the image" \
+    --load-addr=$XSB_LOAD --stack-top=$((XSB_LOAD + 64))
+
+rm -f "$XSB_SRC" "$XSB_SRC2"
+
 # --- syscall choke points under --target=none ------------------------------
 # The per-OS dispatch in this codebase is "special-case Windows/macOS, else
 # fall through to POSIX", so target_os == 4 (--target=none) silently inherits

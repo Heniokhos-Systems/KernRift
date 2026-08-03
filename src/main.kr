@@ -2329,6 +2329,217 @@ fn find_entry_node(uint64 root) -> uint64 {
     return fen_main
 }
 
+// ---------------------------------------------------------------------------
+// The x86_64 entry stub (sub-project B2, D6): multiboot header + long-mode
+// trampoline.
+// ---------------------------------------------------------------------------
+//
+// WHY THIS IS NOT arm64's FIVE WORDS. On arm64 the reset vector hands over an
+// AArch64 core and the stub only has to set SP and branch. x86_64 has no such
+// path: KernRift emits ONLY 64-bit code, and nothing that can load a flat
+// image hands over a 64-bit CPU. `-device loader` leaves the CPU in 16-bit
+// REAL mode (CR0.PE = 0), `-kernel` on our ELF is refused, and multiboot --
+// the one interface that will load a raw file -- enters 32-BIT PROTECTED
+// mode. So the x86 stub IS the trampoline: it builds page tables, turns on
+// PAE + EFER.LME + paging, loads a 64-bit GDT, far-jumps to long mode and
+// calls the entry.
+//
+// Derived from docs/superpowers/specs/2026-08-03-x86-selfboot-trampoline.S,
+// which was booted end to end (header + trampoline + an unmodified
+// --emit=image payload, concatenated) before any of this was written.
+//
+// NOT A BLOB PLUS AN OFFSET TABLE, ON PURPOSE. Eight values here depend on
+// addresses: the header's three, lgdtl's disp32, the far jump's off32, the
+// movabs entry address, the gdtr's base and the 64-bit rsp. Three of those
+// were missed by inspection and only found by differential build. And the
+// offsets have already moved twice -- adding `cld` shifted every site above
+// 32 by one byte WHILE THE TOTAL STAYED 226 (the .align 16 padding absorbed
+// it), so no size check could notice. Every site below is therefore CAPTURED
+// as `out_len` at the moment it is emitted and patched from that capture; no
+// offset is written down anywhere, and editing the instruction stream cannot
+// silently invalidate one. The symptom it would produce -- `call *%rax` into
+// a stale address -- is a triple fault, not a diagnostic.
+//
+// PRECONDITIONS THE CALLER MUST HAVE ENFORCED (see the --load-addr/--stack-top
+// validation): the page tables built below occupy physical 0x1000-0x4000, the
+// identity map is one 512-entry PD of 2 MiB pages and therefore covers
+// EXACTLY the first 1 GiB, and the stack must not start inside the image.
+//
+// The entry address is the ONE value that cannot be written here: the entry
+// function has not been emitted yet (this runs before the emit loop, because
+// the multiboot header has to be at file offset 0). Its site is published in
+// x86stub_entry_site and patched after the loop.
+static uint64 x86stub_entry_site = 0    // file offset of the movabs imm64
+static uint64 x86stub_start32_off = 0   // file offset of the trampoline's cli
+
+fn emit_x86_image_stub(uint64 ld, uint64 sp) {
+    // `base` is the stub's own file offset. It is 0 today -- the multiboot
+    // header must lie in the first 8192 bytes of the file and there is no
+    // reason to put anything ahead of it -- but every address below is
+    // computed as `ld + <file offset>` rather than assuming it.
+    uint64 base = out_len
+
+    // --- multiboot header, 32 bytes --------------------------------------
+    // flags bit 16 is the AOUT KLUDGE: it tells the loader to take the load
+    // addresses from these fields instead of parsing an a.out/ELF header,
+    // which is the ONLY reason a raw headerless file can be booted at all.
+    uint64 mb_magic = 0x1BADB002
+    uint64 mb_flags = 0x00010000
+    uint64 mb_sum = mb_magic + mb_flags
+    // Two's complement without an underflow: -(magic+flags) mod 2^32.
+    uint64 mb_ck = 0xFFFFFFFF - mb_sum + 1
+    emit_u32_le(mb_magic)
+    emit_u32_le(mb_flags)
+    emit_u32_le(mb_ck)
+    emit_u32_le(ld + base)                  // header_addr
+    emit_u32_le(ld)                         // load_addr  (file offset 0)
+    emit_u32_le(0)                          // load_end_addr = 0 = whole file
+    emit_u32_le(0)                          // bss_end_addr
+    uint64 xs_hdr_entry = out_len
+    emit_u32_le(0)                          // entry_addr <- patched below
+
+    // --- 32-bit code ------------------------------------------------------
+    uint64 xs_start32 = out_len
+    x86stub_start32_off = xs_start32
+    emit_byte(0xFA)                         // cli
+    // cld is LOAD-BEARING AND UNPROVABLE BY BOOTING. Multiboot 0.6.96 3.2
+    // fixes only EFLAGS bit 17 (VM) and bit 9 (IF) and leaves DF UNDEFINED,
+    // and the rep stosl below depends on it. QEMU happens to enter with
+    // DF = 0, so neither a differential build nor an end-to-end boot can
+    // catch its absence -- it is an environment dependency, not a
+    // measurable one. Only the byte-level test holds it.
+    emit_byte(0xFC)                         // cld
+    emit_byte(0xBF)                         // mov $0x1000,%edi
+    emit_u32_le(0x1000)
+    emit_byte(0x0F)                         // mov %edi,%cr3
+    emit_byte(0x22)
+    emit_byte(0xDF)
+    emit_byte(0x31)                         // xor %eax,%eax
+    emit_byte(0xC0)
+    emit_byte(0xB9)                         // mov $0xC00,%ecx   (3 pages / 4)
+    emit_u32_le(0xC00)
+    emit_byte(0xF3)                         // rep stosl  -> zero 0x1000-0x4000
+    emit_byte(0xAB)
+    emit_byte(0xBF)                         // mov $0x1000,%edi
+    emit_u32_le(0x1000)
+    emit_byte(0xC7)                         // movl $0x2003,(%edi)   PML4[0]
+    emit_byte(0x07)
+    emit_u32_le(0x2003)
+    emit_byte(0xC7)                         // movl $0x3003,0x1000(%edi) PDPT[0]
+    emit_byte(0x87)
+    emit_u32_le(0x1000)
+    emit_u32_le(0x3003)
+    emit_byte(0xBF)                         // mov $0x3000,%edi      PD
+    emit_u32_le(0x3000)
+    emit_byte(0xB8)                         // mov $0x83,%eax  present|rw|2MiB
+    emit_u32_le(0x83)
+    emit_byte(0xB9)                         // mov $512,%ecx   512 * 2 MiB = 1 GiB
+    emit_u32_le(512)
+    uint64 xs_pd_loop = out_len             // 1:
+    emit_byte(0x89)                         // mov %eax,(%edi)
+    emit_byte(0x07)
+    emit_byte(0x05)                         // add $0x200000,%eax
+    emit_u32_le(0x200000)
+    emit_byte(0x83)                         // add $8,%edi
+    emit_byte(0xC7)
+    emit_byte(0x08)
+    emit_byte(0xE2)                         // loop 1b
+    // rel8 back to the loop head, DERIVED. Wraps through uint64 because the
+    // displacement is negative; the mask is what makes it a byte.
+    uint64 xs_ld8 = xs_pd_loop - out_len - 1
+    uint8 xs_lb = xs_ld8 & 0xFF
+    emit_byte(xs_lb)
+    emit_byte(0x0F)                         // mov %cr4,%eax
+    emit_byte(0x20)
+    emit_byte(0xE0)
+    emit_byte(0x83)                         // or $(1<<5),%eax   CR4.PAE
+    emit_byte(0xC8)
+    emit_byte(0x20)
+    emit_byte(0x0F)                         // mov %eax,%cr4
+    emit_byte(0x22)
+    emit_byte(0xE0)
+    emit_byte(0xB9)                         // mov $0xC0000080,%ecx   IA32_EFER
+    emit_u32_le(0xC0000080)
+    emit_byte(0x0F)                         // rdmsr
+    emit_byte(0x32)
+    emit_byte(0x0D)                         // or $(1<<8),%eax   EFER.LME
+    emit_u32_le(0x100)
+    emit_byte(0x0F)                         // wrmsr
+    emit_byte(0x30)
+    emit_byte(0x0F)                         // mov %cr0,%eax
+    emit_byte(0x20)
+    emit_byte(0xC0)
+    emit_byte(0x0D)                         // or $0x80000001,%eax  PG|PE
+    emit_u32_le(0x80000001)
+    emit_byte(0x0F)                         // mov %eax,%cr0
+    emit_byte(0x22)
+    emit_byte(0xC0)
+    emit_byte(0x0F)                         // lgdtl gdtr
+    emit_byte(0x01)
+    emit_byte(0x15)
+    uint64 xs_lgdt = out_len
+    emit_u32_le(0)                          // <- patched: ld + gdtr offset
+    emit_byte(0xEA)                         // ljmp $0x08, $lm
+    uint64 xs_ljmp = out_len
+    emit_u32_le(0)                          // <- patched: ld + lm offset
+    emit_u16_le(0x0008)                     // selector = GDT[1], the 64-bit CS
+
+    // --- 64-bit code ------------------------------------------------------
+    uint64 xs_lm = out_len
+    emit_byte(0x66)                         // mov $0x10,%ax   GDT[2], data
+    emit_byte(0xB8)
+    emit_u16_le(0x0010)
+    emit_byte(0x8E)                         // mov %ax,%ds
+    emit_byte(0xD8)
+    emit_byte(0x8E)                         // mov %ax,%es
+    emit_byte(0xC0)
+    emit_byte(0x8E)                         // mov %ax,%ss
+    emit_byte(0xD0)
+    // mov $imm32,%rsp -- the 7-byte sign-extended form. The flag validation
+    // refuses --stack-top >= 2^31 precisely so this encoding always applies;
+    // at or above that boundary the value would need the 10-byte movabs and
+    // every site after it would move while the file size stayed the same.
+    emit_byte(0x48)
+    emit_byte(0xC7)
+    emit_byte(0xC4)
+    emit_u32_le(sp)
+    emit_byte(0x48)                         // movabs $entry,%rax
+    emit_byte(0xB8)
+    x86stub_entry_site = out_len
+    emit_u64_le(0)                          // <- patched AFTER the emit loop
+    emit_byte(0xFF)                         // call *%rax
+    emit_byte(0xD0)
+    uint64 xs_halt = out_len
+    emit_byte(0xF4)                         // hlt
+    emit_byte(0xEB)                         // jmp . -- park on a known address
+    uint64 xs_jd = xs_halt - out_len - 1
+    uint8 xs_jb = xs_jd & 0xFF
+    emit_byte(xs_jb)
+
+    // --- descriptor tables ------------------------------------------------
+    // Pad to 16 in FILE offset, which is what the reference .S does. LGDT
+    // imposes no alignment, so this is cosmetic rather than architectural --
+    // and it could not be anything else, since --load-addr is a user value
+    // and the file offset is the only thing this code controls.
+    while (out_len & 15) != 0 { emit_byte(0) }
+    uint64 xs_gdt = out_len
+    emit_u64_le(0)                          // null descriptor
+    emit_u64_le(0x00AF9A000000FFFF)         // 64-bit code, ring 0
+    emit_u64_le(0x00CF92000000FFFF)         // data
+    uint64 xs_gdtr = out_len
+    uint64 xs_lim = xs_gdtr - xs_gdt - 1
+    emit_u16_le(xs_lim)                     // limit = size - 1
+    uint64 xs_gdtr_base = out_len
+    emit_u32_le(0)                          // <- patched: ld + gdt offset
+    emit_u32_le(0)                          // .long 0 (the .S's tail)
+
+    // --- the captured sites ----------------------------------------------
+    patch_u32(xs_hdr_entry, ld + xs_start32)
+    patch_u32(xs_lgdt, ld + xs_gdtr)
+    patch_u32(xs_ljmp, ld + xs_lm)
+    patch_u32(xs_gdtr_base, ld + xs_gdt)
+}
+
 // arch: 0=x86_64, 1=arm64
 // emit: 0=elfexe, 1=machoexe, 2=peexe, 3=obj (ELF relocatable), 5=asm listing, 6=ir dump
 fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode) {
@@ -2597,6 +2808,40 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
 
     uint64 text_start = codegen_output_len()
 
+    // ------------------------------------------------------------------
+    // The x86_64 entry stub, PART 1 OF 2: the bytes (sub-project B2, D6).
+    //
+    // WHY THIS ONE IS PREPENDED AND arm64's IS APPENDED. A multiboot header
+    // must lie entirely within the FIRST 8192 BYTES of the file, and it is
+    // the header -- not a reset vector -- that tells the loader where to
+    // enter. Appending the stub the way Task 3 does on arm64 would work for
+    // small images and then fail on the first program that grew past 8 KiB,
+    // by the loader simply not finding a header: a silent boot, not a
+    // diagnostic. So the stub goes at file offset 0 and the payload shifts
+    // by its length. Everything x86 emits into an image is RIP-relative or
+    // fixed up from out_len, so a uniform shift of the code region is
+    // invisible to it (asserted byte-for-byte by stub_x86_entry_movabs_*).
+    //
+    // ONE VALUE CANNOT BE WRITTEN HERE: the entry function's address. No
+    // function has been emitted yet, so fn_lookup has nothing to answer
+    // with. emit_x86_image_stub publishes the movabs's file offset in
+    // x86stub_entry_site and PART 2 -- after the emit loop, before fixup
+    // resolution, exactly where Task 3 puts arm64's `bl` patch -- writes it.
+    // Left unwritten it is a `call *%rax` to 0, i.e. a triple fault with no
+    // diagnostic anywhere, which is what stub_x86_multiboot_header's
+    // "movabs carries 0" clause exists to catch.
+    //
+    // GATED ON emit_mode/arch/flag, NEVER ON target_os -- same reasoning as
+    // the arm64 stub below: the per-OS dispatch in this codebase is
+    // "special-case Windows/macOS, ELSE fall through to POSIX", so a
+    // bare-metal condition phrased as an OS test is the shape that silently
+    // inherits Linux. No --stack-top => no stub => bytes unchanged.
+    uint64 x86_stub_on = 0
+    if img_raw != 0 && arch == 0 && stack_top_set != 0 {
+        x86_stub_on = 1
+        emit_x86_image_stub(load_addr, stack_top)
+    }
+
     // Raw flat binary: QEMU's -bios loader begins execution at
     // 0x8000_0000 = byte offset 0 of the image, so the entry function
     // must be the FIRST thing emitted, ahead of source order. Emission
@@ -2820,6 +3065,58 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
         // or a syscall: --target=none has no OS to exit to, and the trap
         // emitters refuse there anyway.
         emit_a64(0x14000000)
+    }
+
+    // ------------------------------------------------------------------
+    // The x86_64 entry stub, PART 2 OF 2: the entry address.
+    //
+    // HERE, AND NOT WHERE THE BYTES WERE EMITTED, IS THE WHOLE POINT. The
+    // trampoline's `movabs $entry,%rax; call *%rax` needs an absolute
+    // address that does not exist until every function has been laid out,
+    // so the byte emission at text_start left the immediate zero and
+    // published its offset. This is the same slot in the pipeline where the
+    // arm64 stub's `bl` is resolved (after the emit loop, before the
+    // "Resolve call fixups" block) and it fails the same way if skipped:
+    // `call *%rax` with rax = 0 is not a fault the compiler can report, it
+    // is a triple fault in the guest, and the image compiles, disassembles
+    // and reports perfectly on the way there.
+    //
+    // Not routed through the fixup table like arm64's `bl`: that table
+    // resolves PC-RELATIVE call displacements, and this is an absolute
+    // 64-bit address. patch_u64 against the captured site is the direct
+    // equivalent, and it is the only site in the stub that outlives the
+    // emitter.
+    if x86_stub_on != 0 {
+        uint64 xsb_node = find_entry_node(root)
+        if xsb_node == 0 {
+            // Worded identically to the arm64 arm above and the finalize
+            // block below, so one cause cannot grow three diagnostics.
+            uint64 xsb_msg = "error: --emit=image needs an entry function ('_start' or 'main')\n"
+            write(2, xsb_msg, str_len(xsb_msg))
+            xsb_msg = "A bare-metal image has no loader to call: name the first function to run either '_start' or 'main'\n"
+            write(2, xsb_msg, str_len(xsb_msg))
+            exit(1)
+        }
+        uint32 xsb_tok = ast_data1(xsb_node)
+        uint64 xsb_wtok = xsb_tok
+        uint64 xsb_off = fn_lookup(xsb_wtok)
+        if xsb_off == 0xFFFFFFFF {
+            // find_entry_node only returns functions dce_is_live accepted and
+            // the emit loop emits exactly those, so this is an internal
+            // inconsistency, not a user error. The finalize block runs the
+            // same check; reaching it here first means the CALL would have
+            // been wrong even if the report were right.
+            uint64 xsx_msg = "error: internal: entry function was selected but never registered in the code image\n"
+            write(2, xsx_msg, str_len(xsx_msg))
+            exit(1)
+        }
+        patch_u64(x86stub_entry_site, load_addr + xsb_off)
+        // The reported entry is the TRAMPOLINE's first instruction (D2) --
+        // the address a loader must jump to, and the same value the
+        // multiboot header carries in entry_addr. The entry FUNCTION reached
+        // any other way would run with a garbage stack, in 32-bit mode, on a
+        // CPU with paging off.
+        img_stub_off = x86stub_start32_off
     }
 
     // Xtensa raw mode (Task 3): the whole post-codegen pipeline below
@@ -3377,6 +3674,38 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
         // load_addr is echoed, never embedded. Two different aligned
         // addresses must produce one byte-identical artifact.
         uint64 img_size = codegen_output_len()
+        // The two trampoline preconditions that need the FILE SIZE, so they
+        // cannot live with the rest of the --load-addr/--stack-top validation
+        // (B2 Task 4, review I3). They run HERE, ahead of the report, for two
+        // reasons: the report announces an artifact, and codegen_write_output
+        // has not run yet -- so a refusal leaves nothing on disk and says
+        // nothing that was not true.
+        //
+        // Gated on the stub actually being emitted, like the address-only
+        // half: a B1-style blob loaded by somebody else's loader is subject
+        // to neither.
+        if arch == 0 && stack_top_set != 0 {
+            uint64 img_end = load_addr + img_size
+            if img_end > 1073741824 {
+                uint64 ie_1g = "error: the image does not fit under the x86_64 self-boot trampoline's identity map: the map is a single 512-entry page directory of 2 MiB pages and covers exactly the first 1 GiB, and this image ends past it. Lower --load-addr, or drop --stack-top and boot it with a loader of your own\n"
+                write(2, ie_1g, str_len(ie_1g))
+                exit(1)
+            }
+            // The stack grows DOWN from --stack-top, so the FIRST push writes
+            // the eight bytes [stack_top-8, stack_top) and that band is what
+            // this compares against the image. A stack top AT the load address
+            // is therefore fine (the push lands below the image) and one eight
+            // bytes past the image's end is not. How far down the stack will
+            // go afterwards is not knowable here -- a stack far above the
+            // image still collides eventually and is not refused -- so this
+            // catches exactly the configurations that are corrupt from the
+            // very first push.
+            if stack_top > load_addr && stack_top < img_end + 8 {
+                uint64 st_in = "error: --stack-top= starts inside the image: the stack grows down from it and the first push would overwrite the program's own bytes. Put the stack below --load-addr, or above the end of the image\n"
+                write(2, st_in, str_len(st_in))
+                exit(1)
+            }
+        }
         uint8[64] ib
         uint64 im = "image: arch="
         write(1, im, str_len(im))
@@ -6017,6 +6346,47 @@ fn main() {
                 if stack_top >= 2147483648 {
                     uint64 st_hi = "error: --stack-top= must be below 0x80000000 on x86_64: at or above 2^31 the assembler widens `mov $imm,%rsp` from a 7-byte sign-extended form to a 10-byte movabs, moving every later patch site while the file size stays fixed. This constraint is x86_64-only -- arm64 is bounded by the movz/movk pair instead\n"
                     write(2, st_hi, str_len(st_hi))
+                    exit(1)
+                }
+                // Bound 3 (B2 Task 4, review I3): the trampoline's identity
+                // map is ONE 512-entry page directory of 2 MiB pages, so it
+                // covers exactly the first 1 GiB and nothing above it is
+                // addressable once paging comes on. A stack top above that
+                // faults on the first push, with no handler and no IDT --
+                // i.e. a triple fault, not a diagnostic.
+                //
+                // ORDER MATTERS: this sits AFTER bound 2 deliberately. It is
+                // the stricter rule, so putting it first would make bound 2
+                // unreachable and change the message a 0x80000000 stack top
+                // gets. Both refuse; they refuse for different reasons and
+                // each says its own.
+                //
+                // The bound is inclusive: rsp = 0x40000000 is legal because
+                // the stack grows DOWN and the first push lands at
+                // 0x3FFFFFF8, inside the map.
+                if stack_top > 1073741824 {
+                    uint64 st_1g = "error: --stack-top= must be at most 0x40000000 on x86_64: the self-boot trampoline's identity map is a single 512-entry page directory of 2 MiB pages, so it covers exactly the first 1 GiB; a stack above that is unmapped the moment paging is enabled and the first push triple-faults\n"
+                    write(2, st_1g, str_len(st_1g))
+                    exit(1)
+                }
+                // --load-addr's own trampoline preconditions. These are
+                // gated on --stack-top being present, i.e. on the stub
+                // actually being emitted: without it the image is a blob for
+                // somebody else's loader (which is what sub-project B1
+                // shipped and what the boot gate's x86 legs still use), and
+                // refusing an address on the strength of a trampoline that
+                // was never emitted would be pure over-reach.
+                //
+                // Measured at B2 Task 4's BASE: both of the addresses below
+                // compiled clean and booted SILENT.
+                if load_addr < 16384 {
+                    uint64 la_pt = "error: --load-addr= must be at least 0x4000 when --stack-top= asks for the x86_64 self-boot trampoline: the trampoline builds its identity-map page tables at physical 0x1000-0x4000 and zeroes that whole range, so an image loaded there is overwritten by its own boot code before it runs\n"
+                    write(2, la_pt, str_len(la_pt))
+                    exit(1)
+                }
+                if load_addr >= 1073741824 {
+                    uint64 la_1g = "error: --load-addr= must be below 0x40000000 when --stack-top= asks for the x86_64 self-boot trampoline: the trampoline's identity map is a single 512-entry page directory of 2 MiB pages and covers exactly the first 1 GiB, so an image at or above that address is unmapped the instant paging is enabled\n"
+                    write(2, la_1g, str_len(la_1g))
                     exit(1)
                 }
             }
