@@ -189,6 +189,23 @@ gate1() {
         done
     done
 
+    # (A2) The CONTAINER emitters, which the rows above do not reach. --target=
+    #      selects the ABI (syscall numbers, calling convention), NOT the
+    #      output format: `--arch=x86_64 --target=windows` emits an ELF whose
+    #      magic is 7f454c46, and PE and Mach-O come out only under --emit=.
+    #      These rows exist because an injected byte in emit_pe_headers_x64 and
+    #      emit_pe_headers_a64 -- both of them -- flagged only the two fat rows
+    #      when the matrix had 121 rows, which is what a container emitter
+    #      covered by exactly one path looks like. --emit=lkm is absent because
+    #      it refuses on both arches for both programs, i.e. there is nothing
+    #      to compare.
+    for a in x86_64 arm64; do
+        for e in pe macho; do
+            g1row "krc_${a}_${e}"   "--arch=$a --emit=$e" "$G1_FROZEN"
+            g1row "probe_${a}_${e}" "--arch=$a --emit=$e" "$DIR/corpus/probe_io.kr"
+        done
+    done
+
     # (B) --debug on every hosted pair. bmarr.kr indexes a stack array with a
     #     runtime value ON PURPOSE: --debug on an array-free program emits no
     #     bounds check at all, so those rows would compare two artifacts that
@@ -323,21 +340,21 @@ NORMPY
     # NEGATIVE tests -- invocations it expects to be refused. Those three are
     # named, so a row that starts refusing is a failure and a row that stops
     # refusing is one too.
-    if [ "$G1_ROWS" = "121" ]; then
-        ok "gate1_row_count" "121 rows"
+    if [ "$G1_ROWS" = "129" ]; then
+        ok "gate1_row_count" "129 rows"
     else
-        bad "gate1_row_count" "built $G1_ROWS rows, expected 121"
+        bad "gate1_row_count" "built $G1_ROWS rows, expected 129"
     fi
     G1_NOBUILD_WANT="--arch=riscv32 --freestanding examples/riscv-hosted/hello.kr
 --arch=riscv32 --freestanding --target=esp32 examples/esp32/minimal.kr
 --arch=xtensa --target=esp32 examples/esp32/minimal.kr"
     G1_NOBUILD_GOT=$(printf '%s' "$G1_NOBUILD" | sed '/^$/d' | sort)
-    if [ "$G1_ARTIFACTS" != "118" ]; then
-        bad "gate1_build_outcomes" "$G1_ARTIFACTS of $G1_ROWS rows produced an artifact, expected 118"
+    if [ "$G1_ARTIFACTS" != "126" ]; then
+        bad "gate1_build_outcomes" "$G1_ARTIFACTS of $G1_ROWS rows produced an artifact, expected 126"
     elif [ "$G1_NOBUILD_GOT" != "$(printf '%s' "$G1_NOBUILD_WANT" | sort)" ]; then
         bad "gate1_build_outcomes" "the rows that produced no artifact are not the three expected refusals: $(echo "$G1_NOBUILD_GOT" | tr '\n' ';')"
     else
-        ok "gate1_build_outcomes" "118 rows built, 3 refused (the suite's own esp32-guard and riscv32 IR-op-52 negatives)"
+        ok "gate1_build_outcomes" "126 rows built, 3 refused (the suite's own esp32-guard and riscv32 IR-op-52 negatives)"
     fi
     if [ "$G1_DIFF" = "0" ]; then
         ok "gate1_byte_identity" "$G1_SAME/$G1_ROWS rows identical"
