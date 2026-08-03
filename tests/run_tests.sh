@@ -8474,11 +8474,14 @@ rm -f /tmp/krc_img_g_$$ "$IMG_SRC"
 # no statics and no fixups" (the magic initialiser was present and both arm64
 # ADRP pairs already resolved to it). So a pin spelled "the output is not an
 # ELF" passes at BASE and proves nothing.
-# Red at BASE: image_report_format_*, image_entry_matches_elf_*,
-# image_no_truncation -- i.e. exactly the rows that need the report line.
-# Green at BASE: every other row here. Those are regression pins, and each was
-# individually OBSERVED FAILING against a deliberately broken build before
-# being trusted (the injections are listed in this task's report).
+# Red at BASE (7): image_report_format_*, image_entry_matches_elf_*,
+# image_statics_present_* (on filesz -- their count/offset half was already
+# green) and image_no_truncation. Every one of them needs the report line.
+# Green at BASE (6): the rest. Those are regression pins, not evidence, so each
+# was individually OBSERVED FAILING against a deliberately broken compiler
+# before being trusted -- six injections, listed in this task's report:
+# fixups resolved in ELF coordinates, BSS truncation, static data not emitted,
+# load_addr embedded, entry reported as 0, sizes taken pre-truncation.
 echo ""
 echo "--- --emit=image emission + report ---"
 
@@ -8645,11 +8648,14 @@ rm -f /tmp/krc_i5_$$ /tmp/krc_i5strip_$$
 #    that emit_mode 8 changed LAYOUT, not CODE.
 TOTAL=$((TOTAL + 1))
 $KRC $KRC_FLAGS "$IMG5_SRC" -o /tmp/krc_i5i_$$ --arch=x86_64 --target=none --emit=image --load-addr=0x400000 >/dev/null 2>&1
-if [ -f /tmp/krc_i5e_x_$$ ] && [ -f /tmp/krc_i5i_$$ ] \
-   && cmp -s <(tail -c +$(( IMG5_EHDR + 1 )) /tmp/krc_i5e_x_$$) /tmp/krc_i5i_$$; then
+i5why=$(cmp <(tail -c +$(( IMG5_EHDR + 1 )) /tmp/krc_i5e_x_$$) /tmp/krc_i5i_$$ 2>&1)
+if [ -f /tmp/krc_i5e_x_$$ ] && [ -f /tmp/krc_i5i_$$ ] && [ -z "$i5why" ]; then
     PASS=$((PASS + 1)); echo "  image_x86_tail_identity: PASS"
 else
-    echo "FAIL: image_x86_tail_identity (image != elf[$IMG5_EHDR:])"; FAIL=$((FAIL + 1))
+    # Name the cause. "image != elf[120:]" on its own does not say whether the
+    # code changed or the file merely got longer, and those want opposite fixes.
+    echo "FAIL: image_x86_tail_identity (elf=$(stat -c%s /tmp/krc_i5e_x_$$ 2>/dev/null) img=$(stat -c%s /tmp/krc_i5i_$$ 2>/dev/null); ${i5why:-both files missing})"
+    FAIL=$((FAIL + 1))
 fi
 rm -f /tmp/krc_i5i_$$
 
@@ -8659,12 +8665,20 @@ rm -f /tmp/krc_i5i_$$
 #    silent-boot defect, from the other side of the decoder in row 4b.
 TOTAL=$((TOTAL + 1))
 $KRC $KRC_FLAGS "$IMG5_SRC" -o /tmp/krc_i5i_$$ --arch=arm64 --target=none --emit=image --load-addr=0x40400000 >/dev/null 2>&1
-if [ -f /tmp/krc_i5e_a_$$ ] && [ -f /tmp/krc_i5i_$$ ] \
-   && [ "$(( $(stat -c%s /tmp/krc_i5e_a_$$) - IMG5_EHDR ))" = "$(stat -c%s /tmp/krc_i5i_$$)" ] \
-   && ! cmp -s <(tail -c +$(( IMG5_EHDR + 1 )) /tmp/krc_i5e_a_$$) /tmp/krc_i5i_$$; then
+i6want=$(( $(stat -c%s /tmp/krc_i5e_a_$$ 2>/dev/null || echo 0) - IMG5_EHDR ))
+i6got=$(stat -c%s /tmp/krc_i5i_$$ 2>/dev/null || echo 0)
+i6same=no; cmp -s <(tail -c +$(( IMG5_EHDR + 1 )) /tmp/krc_i5e_a_$$) /tmp/krc_i5i_$$ && i6same=yes
+if [ -f /tmp/krc_i5e_a_$$ ] && [ -f /tmp/krc_i5i_$$ ] && [ "$i6want" = "$i6got" ] && [ "$i6same" = no ]; then
     PASS=$((PASS + 1)); echo "  image_a64_not_a_strip: PASS"
+elif [ "$i6want" != "$i6got" ]; then
+    # Separated from the byte-equality arm on purpose: a length change and a
+    # byte-for-byte match are opposite defects (something got appended vs the
+    # page arithmetic was never redone) and one message for both misdirects.
+    echo "FAIL: image_a64_not_a_strip (length: elf[$IMG5_EHDR:]=$i6want but image=$i6got — the image gained or lost bytes)"
+    FAIL=$((FAIL + 1))
 else
-    echo "FAIL: image_a64_not_a_strip (a header-strip image boots to silence)"; FAIL=$((FAIL + 1))
+    echo "FAIL: image_a64_not_a_strip (image is byte-equal to the header-stripped ELF — the ADRP page arithmetic was not redone at header_size=0, which boots to silence)"
+    FAIL=$((FAIL + 1))
 fi
 rm -f /tmp/krc_i5i_$$
 
