@@ -8961,7 +8961,8 @@ STB_START='fn _start() { g = f(7) + 0x2222
 '
 printf '%s'   "$STB_PREFIX"               > "$STB_SRC"
 printf '%s%s' "$STB_PREFIX" "$STB_START"  > "$STB_SRC2"
-STB_SP=0x40800000
+STB_SP=0x40800000     # low half zero  -- rows 1-3
+STB_SP2=0x40801230    # low half NONZERO -- row 4 (review M4); movk = f2824600
 
 # Compile one arm64 image; echo "<entry> <filesz>" on success, nothing on
 # failure. $1 src, $2 out, $3 load-addr, $4... extra flags.
@@ -8978,7 +8979,34 @@ stb_build() {
 # Decode the five words at <off> and check them against the spec-D2 encodings.
 # $1 image, $2 stub offset, $3 stack top, $4 expected BL target offset.
 # Prints every mismatch it finds (not just the first) and exits nonzero.
+#
+# A HARNESS FAILURE MUST NEVER READ AS A PASS (review I1). Callers consume this
+# through `reason=$(stb_check …)` and treat an EMPTY reason as green, so any
+# path that exits nonzero while printing nothing to stdout -- a missing
+# artifact, a python traceback, no python3 at all -- would paint the row green
+# with the check never having run. Observed: deleting only row 4's artifact
+# produced a fully green 4/4 section with that row's subject not existing.
+# Two guards, deliberately overlapping:
+#   * an explicit artifact precondition here, which is the likely cause and
+#     deserves its own message rather than "python exited 1";
+#   * a catch-all that converts "nonzero exit, empty stdout" into a loud
+#     reason, so a failure mode nobody predicted still reds the row.
+# Callers add a THIRD, independent layer by checking the exit status too.
 stb_check() {
+    if [ ! -f "$1" ]; then
+        echo "no artifact at $1 -- the check's SUBJECT does not exist, so nothing was verified"
+        return 1
+    fi
+    local sc_out sc_rc
+    sc_out=$(stb_check_py "$1" "$2" "$3" "$4"); sc_rc=$?
+    if [ $sc_rc -ne 0 ] && [ -z "$sc_out" ]; then
+        echo "stb_check harness failed (python3 exit=$sc_rc) with no reason on stdout -- the check never ran"
+        return 1
+    fi
+    [ -n "$sc_out" ] && echo "$sc_out"
+    return $sc_rc
+}
+stb_check_py() {
     python3 - "$1" "$2" "$3" "$4" <<'PY'
 import struct, sys
 img, off, sp, want = sys.argv[1], int(sys.argv[2]), int(sys.argv[3], 0), int(sys.argv[4])
@@ -9040,7 +9068,12 @@ elif [ "$stb_f" != "$(stat -c%s /tmp/krc_stb_b_$$ 2>/dev/null)" ]; then
 elif [ "$stb_e" = "$stb_fn" ]; then
     stb_why="entry=$stb_e is the entry FUNCTION's offset -- no stub was emitted"
 else
-    stb_why=$(stb_check /tmp/krc_stb_b_$$ "$stb_e" "$STB_SP" "$stb_fn") || true
+    # Status AND stdout. `$(…) || true` alone discards the status, which is
+    # exactly how a silent harness failure becomes a PASS (review I1).
+    stb_why=$(stb_check /tmp/krc_stb_b_$$ "$stb_e" "$STB_SP" "$stb_fn"); stb_crc=$?
+    if [ -z "$stb_why" ] && [ $stb_crc -ne 0 ]; then
+        stb_why="stb_check exited $stb_crc with no reason -- the check never ran"
+    fi
 fi
 if [ -z "$stb_why" ]; then
     PASS=$((PASS + 1)); echo "  stub_arm64_words: PASS (stub at $stb_e, bl -> main at $stb_fn, of $stb_f)"
@@ -9082,18 +9115,36 @@ rm -f /tmp/krc_stb_b_$$ /tmp/krc_stb_c_$$
 #    `_start` and `main` live, the BL must resolve to `_start`. This is the
 #    only row that would catch a stub wired to find_main_offset() -- rows 1-3
 #    all use a program whose entry IS main.
+#
+#    AND IT CARRIES THE NONZERO-LOW-HALF STACK TOP (review M4). Rows 1-3 use
+#    0x40800000, whose low 16 bits are zero -- so the expected `movk x0, #0`
+#    is byte-identical to what a compiler that DROPPED the low half entirely
+#    would emit, leaving that whole defect class unpinned. 0x40801230 is
+#    16-byte aligned, below 2^32, and encodes movk as f2824600, so a dropped
+#    or truncated low half shows up here as a mismatch.
+#
+#    Its preconditions mirror row 1's rather than jumping straight to the
+#    word check (review M1): reported-vs-on-disk size, and "entry is still
+#    the entry FUNCTION's offset", so a red run says WHICH thing broke.
 TOTAL=$((TOTAL + 1))
 stb_rd=$(stb_build "$STB_SRC2" /tmp/krc_stb_d_$$ 0x40400000); stb_std=$?
-stb_re=$(stb_build "$STB_SRC2" /tmp/krc_stb_e_$$ 0x40400000 --stack-top=$STB_SP); stb_ste=$?
+stb_re=$(stb_build "$STB_SRC2" /tmp/krc_stb_e_$$ 0x40400000 --stack-top=$STB_SP2); stb_ste=$?
 stb_sfn=${stb_rd% *}
-stb_se=${stb_re% *}
+stb_se=${stb_re% *}; stb_sf=${stb_re#* }
 if [ $stb_std -ne 0 ] || [ $stb_ste -ne 0 ] || [ -z "$stb_rd" ] || [ -z "$stb_re" ]; then
     stb_why2="build failed (no-flag exit=$stb_std report='$stb_rd'; stub exit=$stb_ste report='$stb_re')"
+elif [ "$stb_sf" != "$(stat -c%s /tmp/krc_stb_e_$$ 2>/dev/null)" ]; then
+    stb_why2="report claims filesz=$stb_sf, on disk $(stat -c%s /tmp/krc_stb_e_$$ 2>/dev/null)"
+elif [ "$stb_se" = "$stb_sfn" ]; then
+    stb_why2="entry=$stb_se is the entry FUNCTION's offset -- no stub was emitted"
 else
-    stb_why2=$(stb_check /tmp/krc_stb_e_$$ "$stb_se" "$STB_SP" "$stb_sfn") || true
+    stb_why2=$(stb_check /tmp/krc_stb_e_$$ "$stb_se" "$STB_SP2" "$stb_sfn"); stb_crc2=$?
+    if [ -z "$stb_why2" ] && [ $stb_crc2 -ne 0 ]; then
+        stb_why2="stb_check exited $stb_crc2 with no reason -- the check never ran"
+    fi
 fi
 if [ -z "$stb_why2" ]; then
-    PASS=$((PASS + 1)); echo "  stub_arm64_bl_targets_start: PASS (stub at $stb_se, bl -> _start at $stb_sfn)"
+    PASS=$((PASS + 1)); echo "  stub_arm64_bl_targets_start: PASS (stub at $stb_se, bl -> _start at $stb_sfn, sp=$STB_SP2)"
 else
     echo "FAIL: stub_arm64_bl_targets_start ($stb_why2)"; FAIL=$((FAIL + 1))
 fi
