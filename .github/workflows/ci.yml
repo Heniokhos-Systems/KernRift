@@ -365,6 +365,23 @@ jobs:
           name: krc-fatbinary
           path: /tmp/fatbin
 
+      # An x86-capable disassembler. Ubuntu builds binutils with one target set
+      # per host arch, so this runner's /usr/bin/objdump knows aarch64 and
+      # nothing else: `objdump -m i386:x86-64` errors and prints no
+      # instructions. The --target=none gate disassembles a cross-compiled
+      # x86_64 bare-metal image to prove println really lowers to the 16550
+      # UART `out %al,(%dx)`, and it asserts both directions, so a disassembler
+      # that prints nothing reads as "the UART store is missing" -- a real FAIL
+      # for a tooling reason. binutils-x86-64-linux-gnu supplies
+      # x86_64-linux-gnu-objdump, which the gate probes for and selects. NOT
+      # continue-on-error: if this stops installing, the gate must go red
+      # rather than quietly lose its artifact-proof leg.
+      - name: Install x86_64 cross binutils (for the --target=none byte proof)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq binutils-x86-64-linux-gnu
+          x86_64-linux-gnu-objdump --version | head -1
+
       - name: Self-compile + tests (everything to debug-kit)
         continue-on-error: true
         timeout-minutes: 12

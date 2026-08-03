@@ -529,27 +529,47 @@ gate2() {
         cp "$INREPO/h.out" "$INREPO/${A}_h.out" 2>/dev/null
     done
 
-    # The provider body in the BYTES, not merely "some call". objdump is
-    # x86_64-only on a stock binutils and that is enough: this is the leg that
-    # proves the artifact contains the actual UART store. Asserted in both
-    # directions so a disassembler printing nothing cannot pass it. Missing
+    # The provider body in the BYTES, not merely "some call". This is the leg
+    # that proves the artifact contains the actual UART store. Asserted in both
+    # directions so a disassembler printing nothing cannot pass it. No capable
     # objdump is a FAILURE, not a skip -- it is the artifact proof.
     # x86_64's OWN pair, named explicitly: the loop above finishes on arm64, so
     # disassembling whatever y.out/n.out happen to be finds a PL011 store with
     # an x86 disassembler and reports 0-and-0, which reads as "the UART store
     # is missing" when it is present. That is a false FAIL today and would be a
     # false PASS the moment the both-directions condition were relaxed.
-    if command -v objdump >/dev/null 2>&1; then
-        PAT='out[[:space:]]+%al,\(%dx\)'
-        HAS=$(objdump -D -b binary -m i386:x86-64 "$INREPO/x86_64_y.out" 2>/dev/null | grep -cE "$PAT")
-        NOT=$(objdump -D -b binary -m i386:x86-64 "$INREPO/x86_64_n.out" 2>/dev/null | grep -cE "$PAT")
+    #
+    # `command -v objdump` proves one is INSTALLED, not that it can decode x86.
+    # Ubuntu builds binutils with one target set per host arch: on an arm64 host
+    # /usr/bin/objdump knows aarch64 and nothing else, so `-m i386:x86-64` writes
+    # "can't use supplied machine i386:x86-64" to stderr (swallowed by
+    # 2>/dev/null), prints no instructions, and BOTH counts come back 0 -- read
+    # here, correctly, as "the UART store is missing". That was the Linux ARM64
+    # CI failure. So probe by DOING the disassembly on a lone 0xee byte and
+    # requiring the very pattern grepped for below; a tool that decodes x86 but
+    # spells the operand differently is rejected here rather than silently
+    # scoring 0 there. CI installs binutils-x86-64-linux-gnu on the arm64 runner
+    # so a capable one is always found.
+    PAT='out[[:space:]]+%al,\(%dx\)'
+    printf '\356' > "$INREPO/probe.bin"   # 0xee, the one-byte `out %al,(%dx)`
+    OD=""
+    for C in objdump x86_64-linux-gnu-objdump gobjdump x86_64-elf-objdump; do
+        command -v "$C" >/dev/null 2>&1 || continue
+        if [ "$("$C" -D -b binary -m i386:x86-64 "$INREPO/probe.bin" 2>/dev/null \
+                | grep -cE "$PAT")" -ge 1 ]; then
+            OD="$C"; break
+        fi
+    done
+    if [ -n "$OD" ]; then
+        HAS=$("$OD" -D -b binary -m i386:x86-64 "$INREPO/x86_64_y.out" 2>/dev/null | grep -cE "$PAT")
+        NOT=$("$OD" -D -b binary -m i386:x86-64 "$INREPO/x86_64_n.out" 2>/dev/null | grep -cE "$PAT")
         if [ "$HAS" -ge 1 ] && [ "$NOT" = "0" ]; then
-            ok "g2_uart_store_in_bytes" "$HAS out instructions with the println, 0 without"
+            ok "g2_uart_store_in_bytes" "$HAS out instructions with the println via $OD, 0 without"
         else
-            bad "g2_uart_store_in_bytes" "with println: $HAS, without: $NOT"
+            bad "g2_uart_store_in_bytes" "with println: $HAS, without: $NOT, via $OD"
         fi
     else
-        bad "g2_uart_store_in_bytes" "objdump not installed -- this is the artifact proof, not an optional extra"
+        bad "g2_uart_store_in_bytes" "no objdump on PATH can disassemble x86-64 -- install binutils-x86-64-linux-gnu; this is the artifact proof, not an optional extra"
     fi
 
     # riscv32/xtensa have NO provider path, and the reason is a language limit

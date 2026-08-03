@@ -8892,32 +8892,52 @@ for A in x86_64 arm64; do
     fi
 done
 
-# The bytes themselves. objdump is x86_64-only on a stock binutils, and that
-# is enough: it is the leg that proves the artifact contains the actual UART
-# store rather than merely "some call". Asserted in BOTH directions so a
+# The bytes themselves: the leg that proves the artifact contains the actual
+# UART store rather than merely "some call". Asserted in BOTH directions so a
 # disassembler that silently prints nothing cannot pass it.
+#
+# `command -v objdump` proves one is INSTALLED, not that it can decode x86.
+# Ubuntu's binutils is built one target set per host arch: on an arm64 host
+# /usr/bin/objdump knows aarch64 and nothing else, so `-m i386:x86-64` writes
+# "can't use supplied machine i386:x86-64" to stderr (swallowed by 2>/dev/null),
+# prints no instructions, and BOTH counts come back 0 -- which this assertion
+# correctly reads as "the UART store is missing". That is the exact shape of
+# the Linux ARM64 CI failure. So probe by DOING the disassembly on a lone 0xee
+# byte and requiring the very pattern grepped for below; a tool that decodes
+# x86 but spells the operand differently is rejected here rather than silently
+# scoring 0 there. CI installs binutils-x86-64-linux-gnu on the arm64 runner so
+# a capable one is always found; finding none is a FAILURE, never a skip.
 TOTAL=$((TOTAL + 1))
-if command -v objdump >/dev/null 2>&1; then
+# Whitespace-tolerant: objdump pads the mnemonic column and the width is not a
+# stable interface. A literal "out    %al,(%dx)" with the exact run of spaces
+# this binutils happens to emit would turn a formatting change in a future
+# objdump into a silent 0 here, i.e. a check that reports the UART store is
+# missing when it is present.
+PV_PAT='out[[:space:]]+%al,\(%dx\)'
+printf '\356' > "$PV_D/probe.bin"   # 0xee, the one-byte `out %al,(%dx)`
+PV_OD=""
+for PV_C in objdump x86_64-linux-gnu-objdump gobjdump x86_64-elf-objdump; do
+    command -v "$PV_C" >/dev/null 2>&1 || continue
+    if [ "$("$PV_C" -D -b binary -m i386:x86-64 "$PV_D/probe.bin" 2>/dev/null \
+            | grep -cE "$PV_PAT")" -ge 1 ]; then
+        PV_OD="$PV_C"; break
+    fi
+done
+if [ -n "$PV_OD" ]; then
     printf 'import "../std/uart_16550.kr"\nfn main() {\n    loop { }\n}\n' > "$PV_D/n86.kr"
     printf 'import "../std/uart_16550.kr"\nfn main() {\n    println("hi")\n    loop { }\n}\n' > "$PV_D/y86.kr"
     rm -f "$PV_D/n86.out" "$PV_D/y86.out"
     "$PV_KRC" --arch=x86_64 --target=none "$PV_D/n86.kr" -o "$PV_D/n86.out" >/dev/null 2>&1
     "$PV_KRC" --arch=x86_64 --target=none "$PV_D/y86.kr" -o "$PV_D/y86.out" >/dev/null 2>&1
-    # Whitespace-tolerant: objdump pads the mnemonic column and the width is
-    # not a stable interface. A literal "out    %al,(%dx)" with the exact run
-    # of spaces this binutils happens to emit would turn a formatting change in
-    # a future objdump into a silent 0 here, i.e. a check that reports the UART
-    # store is missing when it is present.
-    PV_PAT='out[[:space:]]+%al,\(%dx\)'
-    PV_HAS=$(objdump -D -b binary -m i386:x86-64 "$PV_D/y86.out" 2>/dev/null | grep -cE "$PV_PAT")
-    PV_NOT=$(objdump -D -b binary -m i386:x86-64 "$PV_D/n86.out" 2>/dev/null | grep -cE "$PV_PAT")
+    PV_HAS=$("$PV_OD" -D -b binary -m i386:x86-64 "$PV_D/y86.out" 2>/dev/null | grep -cE "$PV_PAT")
+    PV_NOT=$("$PV_OD" -D -b binary -m i386:x86-64 "$PV_D/n86.out" 2>/dev/null | grep -cE "$PV_PAT")
     if [ "$PV_HAS" -ge 1 ] && [ "$PV_NOT" = "0" ]; then
-        PASS=$((PASS + 1)); echo "  provider_uart_store_in_bytes: PASS ($PV_HAS out instructions, 0 without the println)"
+        PASS=$((PASS + 1)); echo "  provider_uart_store_in_bytes: PASS ($PV_HAS out instructions via $PV_OD, 0 without the println)"
     else
-        echo "FAIL: provider_uart_store_in_bytes (with println: $PV_HAS, without: $PV_NOT)"; FAIL=$((FAIL + 1))
+        echo "FAIL: provider_uart_store_in_bytes (with println: $PV_HAS, without: $PV_NOT, via $PV_OD)"; FAIL=$((FAIL + 1))
     fi
 else
-    echo "FAIL: provider_uart_store_in_bytes (objdump not installed -- this leg is the artifact proof, not an optional extra)"
+    echo "FAIL: provider_uart_store_in_bytes (no objdump on PATH can disassemble x86-64 -- install binutils-x86-64-linux-gnu; this leg is the artifact proof, not an optional extra)"
     FAIL=$((FAIL + 1))
 fi
 
