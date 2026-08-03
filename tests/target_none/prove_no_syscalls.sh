@@ -30,19 +30,12 @@
 #   could prove it. Two safety comments in this sub-project's own diff were
 #   wrong in review; a disassembly is not an execution.
 #
-# TODO(sub-project B): BLOCKING serial-output leg, to be added here once B
-# supplies entry/SP/load address. It is not optional and it is not covered by
-# anything above:
-#   * boot the x86_64 image under `qemu-system-x86_64 -nographic` and require
-#     the exact bytes the program prints to arrive on the 16550 (COM1);
-#   * boot the arm64 image under `qemu-system-aarch64 -M virt -nographic` and
-#     require the same on the PL011;
-#   * run one program that exhausts std/heap_bump.kr and require the observed
-#     HALT behaviour, so the allocator's refusal path is executed rather than
-#     read. heap_bump's overflow arithmetic is currently proven only by a
-#     source transformation run on the host.
-# Until those three observations exist, no claim about runtime behaviour on
-# bare metal may be made from this script or from the reports that cite it.
+# The BLOCKING serial-output legs live in tests/target_none/boot_gate.sh
+# (sub-project B1): both UARTs observed printing computed sentinels from
+# RAW --emit=image artifacts, one heap-exhaustion halt discriminated by
+# parked PC over QMP, and an arm64 misalignment pair -- every leg with an
+# observed negative control. Runtime claims about bare metal cite THAT
+# gate; this script's claims remain compile-time only.
 #
 # -----------------------------------------------------------------------------
 # Usage
@@ -82,7 +75,7 @@ KRC="${KRC:-$REPO/build/krc2}"
 # `git merge-base`, which silently changes meaning the moment the branch is
 # merged or rebased -- and a gate whose baseline moved is a gate comparing the
 # tree against itself.
-TN_BASE="${TN_BASE:-0f6cee703257f81db7ca8f5fb8ee37b4394da776}"
+TN_BASE="${TN_BASE:-271e1186e22994e7fc4c4b9f6abf71e7bad0164e}"
 
 MODE="both"
 case "${1:-}" in
