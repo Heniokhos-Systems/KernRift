@@ -2492,6 +2492,31 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
     } else if emit_mode == 5 {
         // ASM listing — no header, code at offset 0
         header_size = 0
+    } else if emit_mode == 8 {
+        // --emit=image: raw headerless flat binary. header_size = 0 FROM THE
+        // START — the rv_raw shape (:2423-2427) — never truncation of an
+        // emitted ELF. a64_compute_va maps file offset -> 0x400000 + offset
+        // (codegen_aarch64.kr:6228) and the ADRP page arithmetic is baked
+        // from that map, so chopping a 0x78-byte header off a finished ELF
+        // shifts every offset by a non-page amount and leaves every baked
+        // page_off 0x78 too large — the image boots to SILENCE at any
+        // page-aligned address. With header_size = 0 the map is
+        // self-consistent (file offset 0 IS the load address) and the runtime
+        // constraint collapses to load_addr % 4096 == 0, which the arm64 arm
+        // of the flag validation already enforces; x86_64 is RIP-relative
+        // throughout and needs no constraint at all.
+        //
+        // Being exact about what this line does TODAY: header_size is read
+        // only by the emit_mode 0/1/2 finalize arms (:3107, :3140, :3243,
+        // :3301, :3313), none of which emit_mode 8 reaches, so the assignment
+        // is currently inert. It is here because the value is a fact about
+        // this format, not a computation: the moment anything shared starts
+        // consuming header_size, an image that still claimed 120 would be
+        // wrong in the direction that produces a silent boot rather than a
+        // diagnostic. The correctness of the emission does not rest on it —
+        // it rests on no header bytes having been emitted, which is why the
+        // branch above this one is empty of emit_* calls.
+        header_size = 0
     }
 
     uint64 text_start = codegen_output_len()
@@ -3149,6 +3174,57 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
         }
         patch_u32(68, p_filesz_rv)     // Elf32_Phdr p_filesz
         patch_u32(72, total_size_rv)   // Elf32_Phdr p_memsz
+    } else if emit_mode == 8 {
+        // --emit=image finalize. NOTHING is patched — there is no header —
+        // and NOTHING is truncated: memsz == filesz by decision. Nothing on
+        // bare metal zeroes a BSS tail in B1 (the entry stub that will own
+        // zeroing is sub-project B2), and QEMU zero-fills RAM, so a truncated
+        // image would pass the boot gate while reading garbage statics on
+        // real silicon. The full file IS the zeroed BSS. codegen_truncate is
+        // reached only from the emit_mode == 0 arms above, so this needs no
+        // guard — measured: the 64 KiB-static program emits 65600 bytes here
+        // where the ELF path emits 180 and lets p_memsz carry the rest.
+        //
+        // The report line is a REQUIRED output, not a convenience: a flat
+        // image has no e_entry, so main's file offset is recorded in no other
+        // place, and the boot harness needs it to branch to load + entry.
+        // entry_off comes from find_main_offset() above (it ran: rv_raw == 0),
+        // and with no header emitted the code offset IS the file offset.
+        //
+        // Values are decimal throughout — fmt_uint exists, write_hex32 caps
+        // at 32 bits and load_addr is 64-bit; one radix beats two. Size is
+        // codegen_output_len() at THIS point rather than text_size: they are
+        // equal here, but text_size is the variable the hosted report line
+        // prints and on the ELF path that is the PRE-truncation size (a
+        // 1001-byte file reported as "66424 bytes"), so deriving the number
+        // from the buffer is what "inspect the artifact" means.
+        //
+        // load_addr is echoed, never embedded. Two different aligned
+        // addresses must produce one byte-identical artifact.
+        uint64 img_size = codegen_output_len()
+        uint8[64] ib
+        uint64 im = "image: arch="
+        write(1, im, str_len(im))
+        uint64 an = arch_flag_name(arch)
+        write(1, an, str_len(an))
+        im = " entry="
+        write(1, im, str_len(im))
+        uint64 il = fmt_uint(ib, entry_off)
+        write(1, ib, il)
+        im = " filesz="
+        write(1, im, str_len(im))
+        il = fmt_uint(ib, img_size)
+        write(1, ib, il)
+        im = " memsz="
+        write(1, im, str_len(im))
+        il = fmt_uint(ib, img_size)
+        write(1, ib, il)
+        im = " load="
+        write(1, im, str_len(im))
+        il = fmt_uint(ib, load_addr)
+        write(1, ib, il)
+        im = "\n"
+        write(1, im, str_len(im))
     } else if emit_mode == 1 {
         // Mach-O
         uint64 page_size = 4096
