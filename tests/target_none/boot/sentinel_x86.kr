@@ -1,0 +1,13 @@
+// Boot-gate sentinel, x86_64. See sentinel_a64.kr for the design argument.
+// Different constant from the arm64 twin so a cross-wired capture fails.
+import "../std/uart_16550.kr"
+static uint64 sen = 0
+fn stamp(uint64 v) -> uint64 { return v + 9 }
+fn main() -> uint64 {
+    uart16550_init()
+    sen = 2000000007
+    sen = stamp(sen)
+    print(sen)
+    println_str("")
+    return 0
+}

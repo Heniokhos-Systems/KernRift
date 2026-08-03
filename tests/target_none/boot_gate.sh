@@ -84,6 +84,50 @@ boot_run() {
     return 0
 }
 
+# Gate-wide fixed addresses (used by every leg; leg 4 shifts the arm64 one).
+A64_LOAD=0x40400000; A64_STUB=0x40300000; A64_SP=0x40800000
+X86_LOAD=0x400000
+
+# Compile a gate program and echo the ENTRY FILE OFFSET (decimal) on stdout.
+# Task-2 form: --target=none ELF; the whole file is loaded at $*_LOAD, and
+# because the ELF LOAD phdr maps file offset 0 to VA 0x400000, the entry's
+# file offset is e_entry - 0x400000. (Task 6 swaps this body for --emit=image
+# and the compiler's own report line; callers stay unchanged.)
+#
+# DERIVED, not assumed: both arches really do emit a single LOAD at offset 0 /
+# VA 0x400000 with FileSiz == MemSiz (observed: x86 0x470, arm64 0x490), so
+# there is no BSS tail that raw loading would leave unzeroed, and the file
+# offset arithmetic is exact rather than approximately right.
+build_image() {
+    local arch="$1" src="$2" out="$3"
+    local aflag="x86_64"
+    [ "$arch" = "a64" ] && aflag="arm64"
+    if ! "$KRC" --arch=$aflag --target=none "$src" -o "$out" >/dev/null 2>&1; then
+        return 1
+    fi
+    local eva
+    eva=$(readelf -h "$out" | awk '/Entry point/{print $4}')
+    echo $(( eva - 0x400000 ))
+}
+
+# One arm64 boot: image file at $1's load addr, stub branching to entry.
+# $1 load addr, $2 image, $3 entry off, $4 serial out.
+a64_boot() {
+    local load="$1" img="$2" entry="$3" ser="$4"
+    python3 "$BOOT/make_stub.py" $(( load + entry )) "$A64_STUB" "$A64_SP" "$WORK/stub.bin"
+    boot_run a64 "$ser" \
+        -device loader,file="$WORK/stub.bin",addr=$A64_STUB,cpu-num=0 \
+        -device loader,file="$img",addr=$(printf 0x%x "$load"),force-raw=on
+}
+
+# One x86 boot: loader built for the entry VA, image via -device loader.
+x86_boot() {
+    local load="$1" img="$2" entry="$3" ser="$4"
+    "$BOOT/build_loader.sh" $(printf 0x%x $(( load + entry ))) "$WORK/ldr.elf" >/dev/null 2>&1 || return 1
+    boot_run x86 "$ser" -kernel "$WORK/ldr.elf" \
+        -device loader,file="$img",addr=$(printf 0x%x "$load"),force-raw=on
+}
+
 # =============================================================================
 # L0 — the multiboot loader itself: builds, is loadable, and its liveness
 #      sentinel is on the wire. Controls: a magic-corrupted build must be
@@ -175,7 +219,123 @@ PY
     fi
 }
 
+# =============================================================================
+# L1 — x86_64 boots and prints the computed sentinel. Controls: (a) no image
+#      loaded => loader sentinel only; (b) entry replaced by OFFSET 0 — the
+#      pre-B1 default wrong answer (O1/O2) => no sentinel; (c) entry - 4 — the
+#      previous function's tail => no sentinel. NOT entry + 4: main's first
+#      instructions are stack bookkeeping and +4/+8/+12 all still print (V16,
+#      review round 1 C1).
+#
+#      WHAT OFFSET 0 ACTUALLY IS, stated as observed rather than as planned:
+#      in TODAY's --target=none form the image is an ELF file loaded raw, so
+#      file offset 0 is the ELF HEADER (`7f 45 4c 46 …`) executed as
+#      instructions — not the UART provider's first helper, which is where it
+#      will land once Task 6 makes the image headerless. Either way it is the
+#      wrong answer the gate must reject, and it was observed silent here
+#      (serial held the loader sentinel `KR-LDR|` and nothing else).
+#
+#      THE SENTINEL IS COMPUTED, not echoed: `2000000016` is `2000000007`
+#      (a static written in main) plus 9 (returned from a call), formatted at
+#      runtime. Verified on the artifacts: `strings -a` over sx.img, sa.img
+#      and the loader ELF finds ZERO occurrences of either digit string, so
+#      the wire cannot be carrying a copied literal.
+# =============================================================================
+leg1() {
+    echo "--- L1: x86_64 boot + computed sentinel ---"
+    cp "$BOOT/sentinel_x86.kr" "$WORK/sentinel_x86.kr"
+    local entry
+    if ! entry=$(build_image x86 "$WORK/sentinel_x86.kr" "$WORK/sx.img"); then
+        bad "L1_compile" "sentinel_x86.kr did not compile"; return
+    fi
+    x86_boot "$X86_LOAD" "$WORK/sx.img" "$entry" "$WORK/l1_ser.txt"
+    if grep -q "2000000016" "$WORK/l1_ser.txt" && grep -q "KR-LDR|" "$WORK/l1_ser.txt"; then
+        ok "L1_sentinel" "computed 2000000016 + loader liveness on COM1"
+    else
+        bad "L1_sentinel" "serial held: '$(cat "$WORK/l1_ser.txt")'"
+    fi
+    # Control (a): same loader, NO image. The loader must still prove itself
+    # alive and the program sentinel must be impossible.
+    "$BOOT/build_loader.sh" $(printf 0x%x $(( X86_LOAD + entry ))) "$WORK/ldr.elf" >/dev/null 2>&1
+    boot_run x86 "$WORK/l1_noimg.txt" -kernel "$WORK/ldr.elf"
+    if grep -q "KR-LDR|" "$WORK/l1_noimg.txt" && ! grep -q "2000000016" "$WORK/l1_noimg.txt"; then
+        ok "L1_control_no_image" "loader alive, program sentinel absent"
+    else
+        bad "L1_control_no_image" "serial held: '$(cat "$WORK/l1_noimg.txt")'"
+    fi
+    # Controls (b)/(c): offset 0 and entry-4 must not print — both observed
+    # silent on this machine against these exact artifacts (see the header
+    # note on what offset 0 really is today). They prove the entry value is
+    # load-bearing at function granularity; instruction-level +4 is NOT
+    # observable (V16), which is why it is not used as a control.
+    x86_boot "$X86_LOAD" "$WORK/sx.img" 0 "$WORK/l1_off0.txt"
+    if grep -q "2000000016" "$WORK/l1_off0.txt"; then
+        bad "L1_control_offset0" "sentinel printed from offset 0"
+    else
+        ok "L1_control_offset0" "offset 0 => no sentinel"
+    fi
+    x86_boot "$X86_LOAD" "$WORK/sx.img" $(( entry - 4 )) "$WORK/l1_offm.txt"
+    if grep -q "2000000016" "$WORK/l1_offm.txt"; then
+        bad "L1_control_entry_minus4" "sentinel printed from the previous function's tail"
+    else
+        ok "L1_control_entry_minus4" "entry-4 => no sentinel"
+    fi
+}
+
+# =============================================================================
+# L2 — arm64 boots and prints the computed sentinel. Same three controls
+#      (no-image; offset 0; entry - 4 — never entry + 4, see V16).
+#
+#      Position independence is what makes the 0x40400000 load address legal
+#      even though the ELF is linked at 0x400000: every static access in the
+#      arm64 output is `adrp x16, …` + a fixed displacement and every call is
+#      a PC-relative `bl` (checked in the disassembly: 18 adrp, zero absolute
+#      addresses). The x86 image is loaded at its link address, so the
+#      question does not arise there.
+# =============================================================================
+leg2() {
+    echo "--- L2: arm64 boot + computed sentinel ---"
+    cp "$BOOT/sentinel_a64.kr" "$WORK/sentinel_a64.kr"
+    local entry
+    if ! entry=$(build_image a64 "$WORK/sentinel_a64.kr" "$WORK/sa.img"); then
+        bad "L2_compile" "sentinel_a64.kr did not compile"; return
+    fi
+    a64_boot "$A64_LOAD" "$WORK/sa.img" "$entry" "$WORK/l2_ser.txt"
+    if grep -q "1000000016" "$WORK/l2_ser.txt"; then
+        ok "L2_sentinel" "computed 1000000016 on the PL011"
+    else
+        bad "L2_sentinel" "serial held: '$(cat "$WORK/l2_ser.txt")'"
+    fi
+    # Control (a): stub with NO image => silence (arm64 has no loader
+    # sentinel; the stub is 4 instructions). This control exists to pin the
+    # observation that silence CANNOT be a pass condition on this arch —
+    # legs assert presence, never absence alone (review 2, O5).
+    python3 "$BOOT/make_stub.py" $(( A64_LOAD + entry )) "$A64_STUB" "$A64_SP" "$WORK/stub.bin"
+    boot_run a64 "$WORK/l2_noimg.txt" -device loader,file="$WORK/stub.bin",addr=$A64_STUB,cpu-num=0
+    if grep -q "1000000016" "$WORK/l2_noimg.txt"; then
+        bad "L2_control_no_image" "sentinel printed with no image loaded"
+    else
+        ok "L2_control_no_image" "no image => no sentinel"
+    fi
+    # Controls (b)/(c): offset 0 and entry-4 — both observed silent on this
+    # machine against these exact artifacts (empty PL011 capture in each case).
+    a64_boot "$A64_LOAD" "$WORK/sa.img" 0 "$WORK/l2_off0.txt"
+    if grep -q "1000000016" "$WORK/l2_off0.txt"; then
+        bad "L2_control_offset0" "sentinel printed from offset 0"
+    else
+        ok "L2_control_offset0" "offset 0 => no sentinel"
+    fi
+    a64_boot "$A64_LOAD" "$WORK/sa.img" $(( entry - 4 )) "$WORK/l2_offm.txt"
+    if grep -q "1000000016" "$WORK/l2_offm.txt"; then
+        bad "L2_control_entry_minus4" "sentinel printed from the previous function's tail"
+    else
+        ok "L2_control_entry_minus4" "entry-4 => no sentinel"
+    fi
+}
+
 leg0
+leg1
+leg2
 
 echo ""
 echo "boot gate: $PASS pass, $FAIL FAIL"
