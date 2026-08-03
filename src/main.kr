@@ -900,7 +900,8 @@ fn xtensa_nyi(uint64 what) {
 fn emit_asm_listing(uint64 output_path, uint64 arch, uint64 text_start, uint64 source, uint64 tokens) {
     uint64 fd = open_output_or_die(output_path)
     uint64 code_end = codegen_output_len()
-    write(fd, "; KernRift assembly listing\n", 27)
+    uint64 wmsg_903 = "; KernRift assembly listing\n"
+    write(fd, wmsg_903, str_len(wmsg_903))
     if arch == 0 {
         write(fd, "; Architecture: x86_64\n", 23)
     } else if arch == 1 {
@@ -1458,7 +1459,8 @@ fn emit_asm_listing(uint64 output_path, uint64 arch, uint64 text_start, uint64 s
                             write_hex8(fd, b1)
                             write(fd, " ", 1)
                             write_hex8(fd, b2)
-                            write(fd, "           mfence", 18)
+                            uint64 wmsg_1461 = "           mfence"
+                            write(fd, wmsg_1461, str_len(wmsg_1461))
                             pos = pos + 3
                         } else {
                             write_hex8(fd, b0)
@@ -1532,7 +1534,8 @@ fn emit_asm_listing(uint64 output_path, uint64 arch, uint64 text_start, uint64 s
                     // LOCK prefix
                     write_hex8(fd, b0)
                     write(fd, " ", 1)
-                    write(fd, "...          lock ...", 20)
+                    uint64 wmsg_1535 = "...          lock ..."
+                    write(fd, wmsg_1535, str_len(wmsg_1535))
                     // Dump rest of instruction (up to 7 more bytes)
                     uint64 li = 1
                     while li < 8 && pos + li < fn_end {

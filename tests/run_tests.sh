@@ -9579,6 +9579,21 @@ rm -rf "$TN_D"
 # "unrecognized asm instruction '"). All 30 now derive their length with
 # str_len(); this check keeps the count at zero.
 #
+# THE FD IS A WILDCARD, and it has to be. This scanner shipped matching only
+# `write(1, ...)` and `write(2, ...)` -- a LITERAL fd -- while its own comment
+# claimed every site. Three live wrong lengths sat behind that blind spot the
+# whole time, all in the --emit=asm listing writer, which writes to an opened
+# file rather than to stdout/stderr:
+#   main.kr:903   "; KernRift assembly listing\n" declared 27, real 28 -- the
+#                 listing header lost its newline and ran straight into
+#                 "; Architecture: x86_64". Observed on the wire.
+#   main.kr:1461  "           mfence"            declared 18, real 17 -- a NUL
+#                 byte after every disassembled mfence.
+#   main.kr:1535  "...          lock ..."        declared 20, real 21 -- the
+#                 lock-prefix line lost its last ".".
+# A guard whose scope is narrower than its comment is worse than no guard: it
+# reads as coverage. Two lessons are wired in below rather than written down.
+#
 # The length is derived two independent ways and both must agree, because a
 # scanner that is wrong in one direction is wrong in the other too:
 #   A) decode the literal to bytes and take len()
@@ -9587,17 +9602,40 @@ rm -rf "$TN_D"
 # makes multi-byte characters safe: " -> stable\n" with a 3-byte arrow is 12
 # bytes and must NOT be flagged -- an earlier scan using Python's
 # unicode_escape reported it as a 3-byte truncation and was wrong.
+#
+# Two guards against the scanner itself going quiet, because that is exactly
+# how the fd blind spot survived:
+#   * COVERAGE. A loose pattern finds every `write(... "literal" ..., <digits>)`
+#     on a line; the strict pattern must match all of them. A site the strict
+#     pattern cannot parse is REPORTED, not skipped, so the next unanticipated
+#     fd shape fails here instead of hiding.
+#   * FLOOR. The scan must see at least 800 sites (825 in src/ + std/ at the
+#     time of writing). A regex that stops matching finds zero wrong lengths
+#     and would otherwise pass green.
 TOTAL=$((TOTAL + 1))
-WL_BAD=$(SRCDIR="$DIR/../src" python3 - <<'WLPY'
+WL_BAD=$(SRCDIR="$DIR/../src" STDDIR="$DIR/../std" python3 - <<'WLPY'
 import re, os, glob
-LIT = re.compile(rb'write\(\s*(?:1|2)\s*,\s*"((?:[^"\\]|\\.)*)"\s*,\s*(\d+)\s*\)')
+# fd is any expression that contains no comma and no quote -- `1`, `2`, `fd`,
+# `out_fd`, `h + 1`. A fd containing a comma (a nested call) would be missed by
+# this and CAUGHT BY THE COVERAGE LEG below rather than silently dropped.
+LIT = re.compile(rb'write\(\s*([^,"()]{1,64}?)\s*,\s*"((?:[^"\\]|\\.)*)"\s*,\s*(\d+)\s*\)')
+# Deliberately sloppy: any write( ... "literal" ... , digits ) on one line.
+LOOSE = re.compile(rb'write\([^;]{0,120}?"(?:[^"\\]|\\.)*"\s*,\s*\d+\s*\)')
 ESC = {ord('n'): b'\n', ord('t'): b'\t', ord('r'): b'\r', ord('0'): b'\0',
        ord('\\'): b'\\', ord('"'): b'"', ord("'"): b"'"}
-bad, disagree = [], []
-for path in sorted(glob.glob(os.path.join(os.environ["SRCDIR"], "*.kr"))):
+bad, disagree, unparsed = [], [], []
+seen = 0
+files = sorted(glob.glob(os.path.join(os.environ["SRCDIR"], "*.kr")))
+files += sorted(glob.glob(os.path.join(os.environ["STDDIR"], "*.kr")))
+for path in files:
     for ln, line in enumerate(open(path, "rb").read().split(b"\n"), 1):
-        for m in LIT.finditer(line):
-            body, decl = m.group(1), int(m.group(2))
+        where = "%s:%d" % (os.path.basename(path), ln)
+        strict = list(LIT.finditer(line))
+        if len(strict) < len(list(LOOSE.finditer(line))):
+            unparsed.append(where)
+        for m in strict:
+            seen += 1
+            body, decl = m.group(2), int(m.group(3))
             out, i, nesc = b"", 0, 0
             while i < len(body):
                 if body[i] == 0x5C and i + 1 < len(body):
@@ -9605,7 +9643,6 @@ for path in sorted(glob.glob(os.path.join(os.environ["SRCDIR"], "*.kr"))):
                 else:
                     out += bytes([body[i]]); i += 1
             a, b = len(out), len(body) - nesc
-            where = "%s:%d" % (os.path.basename(path), ln)
             if a != b:
                 disagree.append("%s (A=%d B=%d)" % (where, a, b))
             elif a != decl:
@@ -9613,6 +9650,9 @@ for path in sorted(glob.glob(os.path.join(os.environ["SRCDIR"], "*.kr"))):
 out = []
 if disagree: out.append("length methods disagree: " + "; ".join(disagree))
 if bad: out.append("%d wrong length(s): %s" % (len(bad), "; ".join(bad[:6])))
+if unparsed: out.append("%d site(s) the fd pattern could not parse: %s"
+                        % (len(unparsed), "; ".join(unparsed[:6])))
+if seen < 800: out.append("only %d sites scanned (expected >= 800) -- the scanner went quiet" % seen)
 print(" | ".join(out))
 WLPY
 )
