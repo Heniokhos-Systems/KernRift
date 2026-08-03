@@ -2275,6 +2275,60 @@ fn emit_asm_listing(uint64 output_path, uint64 arch, uint64 text_start, uint64 s
     file_close(fd)
 }
 
+// Bare-metal entry selection, shared by every raw-emission path.
+//
+// Returns the AST node of the entry function: a live `_start` if one exists,
+// else a live `main`, else 0. First match wins on each name; the caller owns
+// the diagnostic for 0 because the wording differs per path.
+//
+// A NODE, NOT AN OFFSET. Callers that need a code offset must convert -- the
+// fn_table entry only exists once that function has been emitted, and two of
+// the three callers need the node BEFORE codegen (riscv hoists the entry to
+// offset 0; xtensa threads it into ir_xtensa_gen for the SP preamble). The
+// third (--emit=image) converts via fn_lookup after codegen. Returning an
+// offset here would force the two pre-codegen callers to look up something
+// that does not exist yet.
+//
+// Factored out of two near-identical ~30-line walks (the riscv32 and xtensa
+// blocks below) when --emit=image needed the same rule on x86_64/arm64.
+// `main` is the fallback and not the preference: a bare-metal program is
+// free to name its entry `main`, but if it also spells `_start` it means it.
+//
+// dce_is_live is the liveness test rather than "exists": a `_start` the
+// caller pruned must not be selected, and dce_is_live answers 1 for
+// everything when DCE seeded nothing (a `_start`-only program), which is
+// what makes that case work without a special arm.
+fn find_entry_node(uint64 root) -> uint64 {
+    uint64 fen_start = 0
+    uint64 fen_main = 0
+    uint32 fen_child = ast_child(root)
+    uint64 fen_w = fen_child
+    while fen_w != 0 {
+        uint32 fen_k = ast_kind(fen_w)
+        if fen_k == 2 {
+            uint32 fen_name = ast_data1(fen_w)
+            uint64 fen_wn = fen_name
+            if dce_is_live(fen_wn) != 0 {
+                if tok_matches(fen_wn, "_start", 6) != 0 {
+                    if fen_start == 0 {
+                        fen_start = fen_w
+                    }
+                } else if tok_matches(fen_wn, "main", 4) != 0 {
+                    if fen_main == 0 {
+                        fen_main = fen_w
+                    }
+                }
+            }
+        }
+        uint32 fen_nx = ast_next(fen_w)
+        fen_w = fen_nx
+    }
+    if fen_start != 0 {
+        return fen_start
+    }
+    return fen_main
+}
+
 // arch: 0=x86_64, 1=arm64
 // emit: 0=elfexe, 1=machoexe, 2=peexe, 3=obj (ELF relocatable), 5=asm listing, 6=ir dump
 fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode) {
@@ -2350,17 +2404,39 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
     if arch == 3 && emit_mode == 0 && freestanding != 0 {
         xt_raw = 1
     }
+    // --emit=image (x86_64/arm64 bare metal). Gated on emit_mode ALONE, not on
+    // target_os: the flag validation has already refused --emit=image for every
+    // OS but `none` and for every arch but 0/1, so emit_mode == 8 is the exact
+    // set. Deliberately NOT written as `target_os == 4` — the per-OS dispatch
+    // in this codebase is "special-case Windows/macOS, ELSE fall through to
+    // POSIX", and a bare-metal condition phrased in terms of the OS is the
+    // shape that inherits Linux when a case is missed. emit_mode has no
+    // fall-through.
+    uint64 img_raw = 0
+    if emit_mode == 8 {
+        img_raw = 1
+    }
 
     // Dead code elimination: scan AST for reachable functions
     dce_init()
     if emit_mode == 3 || emit_mode == 5 || emit_mode == 6 || emit_mode == 7 {
         dce_set_keep_all(1)
     }
-    // Raw riscv: dce_scan only seeds `main` + @export, so a freestanding
-    // entry named `_start` would be pruned before it can be placed at
-    // offset 0. Seed it explicitly here (dce_scan's phase-2 closure then
-    // walks its callees like any other root).
-    if rv_raw != 0 || xt_raw != 0 {
+    // Raw riscv / xtensa / --emit=image: dce_scan only seeds `main` + @export,
+    // so a freestanding entry named `_start` would be pruned before it can be
+    // placed at offset 0. Seed it explicitly here (dce_scan's phase-2 closure
+    // then walks its callees like any other root).
+    //
+    // img_raw joined this gate with B2 Task 2 and the seeding is REQUIRED, not
+    // cosmetic: without it a `_start`-only image has dce_count == 0 and works
+    // by accident (dce_is_live answers 1 for everything when nothing was
+    // seeded), while an image with BOTH `_start` and `main` seeds only `main`
+    // — `_start` is then dead, is never emitted, and find_entry_node correctly
+    // declines to select a function that is not in the artifact. Measured at
+    // BASE: the two-function program compiled to the same 176 bytes as the
+    // main-only one. The gate stays OFF the hosted path, where `_start` is an
+    // ordinary function name and libc owns the real entry.
+    if rv_raw != 0 || xt_raw != 0 || img_raw != 0 {
         uint32 rvs_child = ast_child(root)
         uint64 rvs_w = rvs_child
         while rvs_w != 0 {
@@ -2532,32 +2608,7 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
     // new fixup kind, and no ±1 MiB jal range limit to worry about.
     uint64 rv_entry_node = 0
     if rv_raw != 0 {
-        uint64 rv_main_node = 0
-        uint32 rve_child = ast_child(root)
-        uint64 rve_w = rve_child
-        while rve_w != 0 {
-            uint32 rve_k = ast_kind(rve_w)
-            if rve_k == 2 {
-                uint32 rve_name = ast_data1(rve_w)
-                uint64 rve_wn = rve_name
-                if dce_is_live(rve_wn) != 0 {
-                    if tok_matches(rve_wn, "_start", 6) != 0 {
-                        if rv_entry_node == 0 {
-                            rv_entry_node = rve_w
-                        }
-                    } else if tok_matches(rve_wn, "main", 4) != 0 {
-                        if rv_main_node == 0 {
-                            rv_main_node = rve_w
-                        }
-                    }
-                }
-            }
-            uint32 rve_nx = ast_next(rve_w)
-            rve_w = rve_nx
-        }
-        if rv_entry_node == 0 {
-            rv_entry_node = rv_main_node
-        }
+        rv_entry_node = find_entry_node(root)
         if rv_entry_node == 0 {
             uint64 rve_msg = "error: freestanding riscv32 needs an entry function ('_start' or 'main')\n"
             write(2, rve_msg, str_len(rve_msg))
@@ -2590,32 +2641,7 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
     // on every other path.
     uint64 xt_entry_node = 0
     if xt_raw != 0 {
-        uint64 xt_main_node = 0
-        uint32 xte_child = ast_child(root)
-        uint64 xte_w = xte_child
-        while xte_w != 0 {
-            uint32 xte_k = ast_kind(xte_w)
-            if xte_k == 2 {
-                uint32 xte_name = ast_data1(xte_w)
-                uint64 xte_wn = xte_name
-                if dce_is_live(xte_wn) != 0 {
-                    if tok_matches(xte_wn, "_start", 6) != 0 {
-                        if xt_entry_node == 0 {
-                            xt_entry_node = xte_w
-                        }
-                    } else if tok_matches(xte_wn, "main", 4) != 0 {
-                        if xt_main_node == 0 {
-                            xt_main_node = xte_w
-                        }
-                    }
-                }
-            }
-            uint32 xte_nx = ast_next(xte_w)
-            xte_w = xte_nx
-        }
-        if xt_entry_node == 0 {
-            xt_entry_node = xt_main_node
-        }
+        xt_entry_node = find_entry_node(root)
         if xt_entry_node == 0 {
             uint64 xte_msg = "error: freestanding xtensa needs an entry function ('_start' or 'main')\n"
             write(2, xte_msg, str_len(xte_msg))
@@ -3114,8 +3140,47 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
     // is written verbatim below. Skip the entire patch block. Also skip
     // find_main_offset: a raw image whose entry is `_start` legitimately
     // has no `main`.
+    //
+    // --emit=image resolves its entry the bare-metal way instead: a live
+    // `_start`, else `main` — the same rule riscv32 and xtensa raw emission
+    // have used since sub-project A, now shared through find_entry_node.
+    // find_main_offset is left exactly as it is (@export, hosted path):
+    // widening a hosted exported function to satisfy a bare-metal requirement
+    // is how the else-POSIX inheritance defects in this codebase were made.
+    //
+    // THE CONVERSION IS THE POINT OF THIS ARM. find_entry_node hands back an
+    // AST NODE; the `image:` report line — the only place a flat image records
+    // its entry, since there is no e_entry — needs a CODE OFFSET. Widening the
+    // refusal below so `_start`-only programs stop being rejected, WITHOUT
+    // this fn_lookup, leaves entry_off at the 0xFFFFFFFF sentinel and every
+    // such image reports entry=4294967295 while exiting 0 and writing a
+    // perfectly good artifact. fn_lookup (not find_main_offset) is what turns
+    // the node's name token into the offset codegen registered for it, and it
+    // runs HERE, after the emit loop, because the fn_table entry does not
+    // exist before that.
     uint64 entry_off = 0
-    if rv_raw == 0 {
+    if img_raw != 0 {
+        uint64 img_entry_node = find_entry_node(root)
+        if img_entry_node == 0 {
+            uint64 ime_msg = "error: --emit=image needs an entry function ('_start' or 'main')\n"
+            write(2, ime_msg, str_len(ime_msg))
+            ime_msg = "A bare-metal image has no loader to call: name the first function to run either '_start' or 'main'\n"
+            write(2, ime_msg, str_len(ime_msg))
+            exit(1)
+        }
+        uint32 ime_tok = ast_data1(img_entry_node)
+        uint64 ime_wtok = ime_tok
+        entry_off = fn_lookup(ime_wtok)
+        if entry_off == 0xFFFFFFFF {
+            // find_entry_node only returns functions dce_is_live accepted, and
+            // the emit loop emits exactly those, so reaching this is an
+            // internal inconsistency between the two — not a user error. Say
+            // so rather than emitting an image whose entry points nowhere.
+            uint64 imx_msg = "error: internal: entry function was selected but never registered in the code image\n"
+            write(2, imx_msg, str_len(imx_msg))
+            exit(1)
+        }
+    } else if rv_raw == 0 {
         entry_off = find_main_offset()
         if entry_off == 0xFFFFFFFF {
             write(2, "error: no 'main' function found\n", 32)
@@ -3186,10 +3251,12 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
         // where the ELF path emits 180 and lets p_memsz carry the rest.
         //
         // The report line is a REQUIRED output, not a convenience: a flat
-        // image has no e_entry, so main's file offset is recorded in no other
-        // place, and the boot harness needs it to branch to load + entry.
-        // entry_off comes from find_main_offset() above (it ran: rv_raw == 0),
-        // and with no header emitted the code offset IS the file offset.
+        // image has no e_entry, so the entry's file offset is recorded in no
+        // other place, and the boot harness needs it to branch to load + entry.
+        // entry_off comes from the img_raw arm above — find_entry_node's node
+        // resolved through fn_lookup, NOT find_main_offset — so it is a live
+        // `_start` when the program has one and `main` otherwise; and with no
+        // header emitted the code offset IS the file offset.
         //
         // Values are decimal throughout — fmt_uint exists, write_hex32 caps
         // at 32 bits and load_addr is 64-bit; one radix beats two. Size is

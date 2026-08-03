@@ -8771,6 +8771,154 @@ else
 fi
 rm -f /tmp/krc_i6_$$ "$IMG6_SRC" "$IMG5_SRC" /tmp/krc_i5e_x_$$ /tmp/krc_i5e_a_$$
 
+# --- entry selection: `_start` preferred over `main` (sub-project B2, T2) ---
+#
+# WHAT THIS SECTION PINS. `--emit=image` used to resolve its entry through
+# find_main_offset() alone, so a bare-metal program whose entry is named
+# `_start` -- the name riscv32 and xtensa raw emission have accepted since
+# sub-project A -- was refused outright with "no 'main' function found". T2
+# gives x86_64/arm64 the same rule the other two arches already had: the entry
+# is a live `_start` if one exists, else `main`.
+#
+# THE TRAP THESE ROWS ARE SHAPED AROUND. Entry selection returns an AST NODE;
+# the report line needs a CODE OFFSET. Widening the refusal so `_start`-only
+# programs compile, without also converting node -> offset, leaves entry_off at
+# its 0xFFFFFFFF sentinel and the artifact reports entry=4294967295. A row that
+# asserted only "exit 0 and a file appeared" is GREEN on that defect, which is
+# why every row below reads `entry` out of the report line and bounds it:
+# 0 < entry < filesz. Observed: with the refusal widened and nothing else, the
+# entry_start_only rows fail on `entry=4294967295 >= filesz`.
+#
+# WHY THE PREFERENCE ROWS COMPARE TWO BUILDS INSTEAD OF LOOKING FOR A SENTINEL
+# IN THE BYTES. Nothing in `make test` can EXECUTE one of these images -- the
+# stack-init stub is Tasks 3/4, and the arm64 artifact is not native here
+# either -- so "the `_start` sentinel is printed and main's is not" has no
+# harness. A sentinel searched for in the FILE cannot stand in for it: both
+# functions are live (main is a DCE root, `_start` is seeded), so both bodies
+# are emitted and BOTH sentinels appear whichever one was chosen. And a 64-bit
+# immediate is contiguous bytes on x86_64 but four movz/movk words on arm64, so
+# a byte search is not even portable across the two rows.
+#
+# What IS falsifiable without execution is the offset. The two sources differ
+# by exactly one appended function, so `f` and `main` occupy identical offsets
+# in both; main_only's reported entry IS main's offset. If selection picked
+# main, `both` reports that same number. It must instead report a LARGER one --
+# `_start` is emitted after main -- and still inside the file. That
+# distinguishes all four outcomes: chose main (equal), chose `_start`
+# (greater), unresolved sentinel (>= filesz), hardcoded zero (0).
+echo ""
+echo "--- entry selection: _start preferred over main (B2 T2) ---"
+ENT_A="$DIR/../test_tmp_ent_a_$$.kr"   # f + main            (no _start)
+ENT_B="$DIR/../test_tmp_ent_b_$$.kr"   # f + main + _start   (identical prefix)
+ENT_S="$DIR/../test_tmp_ent_s_$$.kr"   # f + _start          (no main at all)
+ENT_N="$DIR/../test_tmp_ent_n_$$.kr"   # neither
+# `f` is recursive so the inliner cannot fold it away; that keeps main off file
+# offset 0, without which "entry > 0" would be unfalsifiable. The two bodies
+# compute different sentinels into the same static -- different code, no new
+# static or string literal, so appending `_start` cannot shift `f` or `main`.
+ENT_PREFIX='static uint64 g = 0x4B52535441525421
+fn f(uint64 x) -> uint64 { if x < 2 { return x + g }
+ return f(x - 1) + f(x - 2) }
+'
+ENT_MAIN='fn main() -> uint64 { g = f(6) + 0x1111
+ return 0 }
+'
+ENT_START='fn _start() { g = f(7) + 0x2222
+ loop { } }
+'
+printf '%s%s'   "$ENT_PREFIX" "$ENT_MAIN"                 > "$ENT_A"
+printf '%s%s%s' "$ENT_PREFIX" "$ENT_MAIN" "$ENT_START"    > "$ENT_B"
+printf '%s%s'   "$ENT_PREFIX" "$ENT_START"                > "$ENT_S"
+printf '%s'     "$ENT_PREFIX"                             > "$ENT_N"
+
+# Compile one image; echo "<entry> <filesz>" on success, nothing on failure.
+ent_build() {  # $1 src, $2 arch, $3 out
+    local ld=0x400000; [ "$2" = arm64 ] && ld=0x40400000
+    local o st
+    o=$($KRC $KRC_FLAGS "$1" -o "$3" --arch=$2 --target=none --emit=image --load-addr=$ld 2>&1)
+    st=$?
+    [ $st -eq 0 ] || return 1
+    echo "$o" | sed -n 's/^image: .* entry=\([0-9]*\) filesz=\([0-9]*\) .*/\1 \2/p'
+}
+
+# 1. A program whose only function is `_start` compiles, writes an image, and
+#    reports an entry that is a real offset inside it. At BASE both arches
+#    print "error: no 'main' function found" and write nothing.
+for IA in x86_64 arm64; do
+    TOTAL=$((TOTAL + 1))
+    rm -f /tmp/krc_ent_$$
+    ent_r=$(ent_build "$ENT_S" $IA /tmp/krc_ent_$$); ent_st=$?
+    ent_e=${ent_r% *}; ent_f=${ent_r#* }
+    if [ $ent_st -eq 0 ] && [ -f /tmp/krc_ent_$$ ] && [ -n "$ent_r" ] \
+       && [ "$ent_e" -gt 0 ] && [ "$ent_e" -lt "$ent_f" ] \
+       && [ "$ent_f" = "$(stat -c%s /tmp/krc_ent_$$)" ]; then
+        PASS=$((PASS + 1)); echo "  entry_start_only_$IA: PASS (entry=$ent_e of $ent_f)"
+    else
+        echo "FAIL: entry_start_only_$IA (exit=$ent_st report='$ent_r' size=$(stat -c%s /tmp/krc_ent_$$ 2>/dev/null))"
+        FAIL=$((FAIL + 1))
+    fi
+    rm -f /tmp/krc_ent_$$
+done
+
+# 2. With BOTH present, `_start` wins. See the section header for why this is
+#    an offset comparison and not a sentinel search.
+for IA in x86_64 arm64; do
+    TOTAL=$((TOTAL + 1))
+    rm -f /tmp/krc_enta_$$ /tmp/krc_entb_$$
+    ent_ra=$(ent_build "$ENT_A" $IA /tmp/krc_enta_$$); ent_sta=$?
+    ent_rb=$(ent_build "$ENT_B" $IA /tmp/krc_entb_$$); ent_stb=$?
+    ent_ea=${ent_ra% *}
+    ent_eb=${ent_rb% *}; ent_fb=${ent_rb#* }
+    if [ $ent_sta -eq 0 ] && [ $ent_stb -eq 0 ] && [ -n "$ent_ra" ] && [ -n "$ent_rb" ] \
+       && [ "$ent_ea" -gt 0 ] && [ "$ent_eb" -gt "$ent_ea" ] && [ "$ent_eb" -lt "$ent_fb" ]; then
+        PASS=$((PASS + 1)); echo "  entry_start_preferred_$IA: PASS (main at $ent_ea, _start at $ent_eb of $ent_fb)"
+    elif [ -n "$ent_ra" ] && [ "$ent_eb" = "$ent_ea" ] && [ "$ent_eb" -lt "$ent_fb" ]; then
+        # Named apart from the bounds failure: "still points at main" and
+        # "points nowhere" are different defects and want opposite fixes.
+        echo "FAIL: entry_start_preferred_$IA (entry=$ent_eb is main's own offset — _start was not preferred)"
+        FAIL=$((FAIL + 1))
+    else
+        echo "FAIL: entry_start_preferred_$IA (main_only='$ent_ra' exit=$ent_sta, both='$ent_rb' exit=$ent_stb)"
+        FAIL=$((FAIL + 1))
+    fi
+    rm -f /tmp/krc_enta_$$ /tmp/krc_entb_$$
+done
+
+# 3. Neither function present: refused, three clauses (nonzero exit, the
+#    diagnostic, no artifact). The message must name BOTH acceptable names --
+#    "no 'main' function found" is now a half-truth on this path.
+for IA in x86_64 arm64; do
+    TOTAL=$((TOTAL + 1))
+    ILOAD=0x400000; [ "$IA" = arm64 ] && ILOAD=0x40400000
+    rm -f /tmp/krc_entn_$$
+    entn_out=$($KRC $KRC_FLAGS "$ENT_N" -o /tmp/krc_entn_$$ --arch=$IA --target=none --emit=image --load-addr=$ILOAD 2>&1)
+    entn_st=$?
+    if [ $entn_st -ne 0 ] && [ ! -f /tmp/krc_entn_$$ ] \
+       && echo "$entn_out" | grep -q "needs an entry function ('_start' or 'main')"; then
+        PASS=$((PASS + 1)); echo "  entry_neither_refused_$IA: PASS"
+    else
+        echo "FAIL: entry_neither_refused_$IA (exit=$entn_st, artifact=$([ -f /tmp/krc_entn_$$ ] && echo yes || echo no), out=$(echo "$entn_out" | head -1))"
+        FAIL=$((FAIL + 1))
+    fi
+    rm -f /tmp/krc_entn_$$
+done
+
+# 4. The HOSTED refusal must not widen. A program with `_start` and no `main`
+#    compiled for Linux still needs a `main` -- `_start` there is an ordinary
+#    function name and libc/the kernel owns the real entry. This is the
+#    else-POSIX inheritance guard in reverse: a bare-metal rule that leaked
+#    into the hosted path would show up here.
+TOTAL=$((TOTAL + 1))
+rm -f /tmp/krc_enth_$$
+enth_out=$($KRC $KRC_FLAGS "$ENT_S" -o /tmp/krc_enth_$$ --arch=x86_64 2>&1); enth_st=$?
+if [ $enth_st -ne 0 ] && echo "$enth_out" | grep -q "no 'main' function found"; then
+    PASS=$((PASS + 1)); echo "  entry_start_not_entry_when_hosted: PASS"
+else
+    echo "FAIL: entry_start_not_entry_when_hosted (exit=$enth_st, out=$(echo "$enth_out" | head -1))"
+    FAIL=$((FAIL + 1))
+fi
+rm -f /tmp/krc_enth_$$ "$ENT_A" "$ENT_B" "$ENT_S" "$ENT_N"
+
 # --- syscall choke points under --target=none ------------------------------
 # The per-OS dispatch in this codebase is "special-case Windows/macOS, else
 # fall through to POSIX", so target_os == 4 (--target=none) silently inherits
