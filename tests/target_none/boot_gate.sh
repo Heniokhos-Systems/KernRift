@@ -131,16 +131,14 @@ BOOT_DEADLINE_TICKS=200   # 10 s — hard ceiling on waiting for evidence
 # where the machine is slowest — the failure mode this gate exists to prevent.
 BOOT_SILENCE_TICKS=40
 BOOT_WAITED_TICKS=0       # out-param: ticks actually waited by the last run
-boot_run() {
-    local arch="$1" ser="$2" expect="$3"; shift 3
-    local qemu="qemu-system-x86_64" machine="-no-reboot"
-    if [ "$arch" = "a64" ]; then qemu="qemu-system-aarch64"; machine="-M virt -cpu cortex-a57"; fi
-    rm -f "$ser"
+# The wait itself, factored out because boot_run_qmp (L3) needs the SAME
+# semantics while the guest is still alive. Two copies of this loop would
+# drift, and the mode that drifted would be the one nobody re-derived.
+#   boot_wait <qemu pid> <serial file> <expect>
+boot_wait() {
+    local pid="$1" ser="$2" expect="$3" n=0
     local limit="$BOOT_DEADLINE_TICKS"
     [ "$expect" = "RUNOUT" ] && limit="$BOOT_SILENCE_TICKS"
-    # shellcheck disable=SC2086
-    timeout 10 "$qemu" $machine -display none -serial "file:$ser" "$@" >/dev/null 2>&1 &
-    local pid=$! n=0
     while [ "$n" -lt "$limit" ]; do
         if [ "$expect" != "RUNOUT" ] && [ "$expect" != "SELFEXIT" ] &&
            [ -s "$ser" ] && grep -qE "$expect" "$ser" 2>/dev/null; then
@@ -153,6 +151,16 @@ boot_run() {
         n=$((n + 1))
     done
     BOOT_WAITED_TICKS="$n"
+}
+boot_run() {
+    local arch="$1" ser="$2" expect="$3"; shift 3
+    local qemu="qemu-system-x86_64" machine="-no-reboot"
+    if [ "$arch" = "a64" ]; then qemu="qemu-system-aarch64"; machine="-M virt -cpu cortex-a57"; fi
+    rm -f "$ser"
+    # shellcheck disable=SC2086
+    timeout 10 "$qemu" $machine -display none -serial "file:$ser" "$@" >/dev/null 2>&1 &
+    local pid=$!
+    boot_wait "$pid" "$ser" "$expect"
     kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null
     # No capture file => qemu never opened it => no boot occurred.
     [ -f "$ser" ] || return 1
