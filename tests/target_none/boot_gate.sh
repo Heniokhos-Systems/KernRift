@@ -13,14 +13,17 @@
 # so a skip there is indistinguishable from a pass; that pattern is exactly
 # what this gate must not copy.
 #
-# CI CANNOT RUN THIS GATE TODAY. .github/workflows/ci.yml installs only
-# qemu-USER-static (:82, :250) and binutils-x86-64-linux-gnu (:382) — there is
-# no qemu-system-x86_64 or qemu-system-aarch64 on any job, so every run of this
-# script under CI as it stands would stop at the dependency loop below.
-# Installing them and wiring this gate into a job is a later task's work; it is
-# deliberately not done here. The failure mode meanwhile is loud and correct (a
-# counted FAIL naming the missing tool, never a silent skip), so nothing is
-# unsafe — but do not go looking for a CI job that already runs this.
+# CI STATUS, stated precisely. Task 1 shipped with "CI cannot run this gate":
+# ci.yml carried qemu-USER-static only. Task 2 wires the gate into
+# tests/run_tests.sh as a COUNTED test and adds `qemu-system-x86 qemu-system-arm`
+# to both jobs that invoke the suite (the ubuntu-latest x86_64 job and the
+# ubuntu-24.04-arm job). So the gate is now *expected* to run in CI —
+# but NO CI RUN HAS EVER EXECUTED IT. Nothing in B1 is pushed, and two things
+# are declared-unverified from the dev machine: whether qemu-system-x86 installs
+# on ubuntu-24.04-arm, and what an emulated x86 boot costs in wall clock on
+# either runner. Until a green CI run exists, treat this gate's evidence as
+# produced on one developer machine. The failure mode is loud either way (a
+# counted FAIL naming the missing tool, never a silent skip).
 #
 # Usage:  tests/target_none/boot_gate.sh
 # Env:    KRC=<path>  compiler under test (default build/krc2)

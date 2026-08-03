@@ -11618,6 +11618,26 @@ else
 fi
 rm -f "$SR_SRC" "$SR_BIN"
 
+# --- Bare-metal boot gate (sub-project B1) ---
+# One counted test wrapping tests/target_none/boot_gate.sh. DELIBERATELY NOT
+# behind `command -v qemu-system-*`: the gate itself fails loudly when a
+# dependency is missing, and TOTAL is incremented unconditionally — a skip
+# indistinguishable from a pass is how three of four legs of this gate's
+# first design went vacuous (see the gate's header).
+echo ""
+echo "--- bare-metal boot gate ---"
+TOTAL=$((TOTAL + 1))
+if [ -f "$DIR/../build/krc2" ]; then
+    BOOT_KRC=$(cd "$DIR/../build" && pwd)/krc2
+else
+    BOOT_KRC=""
+fi
+if [ -n "$BOOT_KRC" ] && KRC="$BOOT_KRC" bash "$DIR/target_none/boot_gate.sh"; then
+    PASS=$((PASS + 1))
+else
+    echo "FAIL: boot_gate (see leg output above)"; FAIL=$((FAIL + 1))
+fi
+
 # --- Summary ---
 echo ""
 echo "=== Results: $PASS/$TOTAL passed, $FAIL failed ==="
