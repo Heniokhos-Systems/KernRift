@@ -1,0 +1,31 @@
+// Frozen byte-identity input, portable across all four architectures.
+//
+// Everything here is uint32 on purpose: riscv32 and xtensa reject uint64
+// outright ("64-bit integers not supported on riscv32; use uint32"), so a
+// uint64 program cannot be used as the SAME frozen input on all four arches --
+// it would fail in the type checker before any codegen ran and the row would
+// compare two identical parse errors instead of two artifacts.
+//
+// Exercises: statics, a static array, calls with 3 arguments, mul/xor/shift/
+// and/add, a while loop and the `loop { }` bare-metal park.
+static uint32 counter = 0
+static uint32 table[8]
+
+fn add3(uint32 a, uint32 b, uint32 c) -> uint32 { return a + b + c }
+
+fn mix(uint32 x) -> uint32 {
+    uint32 y = x * 31
+    y = y ^ (y >> 3)
+    y = y + (y << 5)
+    return y & 0xFFFF
+}
+
+fn main() {
+    uint32 i = 0
+    while i < 8 {
+        table[i] = mix(i)
+        counter = add3(counter, table[i], i)
+        i = i + 1
+    }
+    loop { }
+}

@@ -1,0 +1,45 @@
+// Frozen byte-identity input for the HOSTED rows only (it uses uint64 and the
+// OS builtins, so it is not portable to riscv32/xtensa).
+//
+// Why it exists separately from the compiler's own source: Task 5 rewrote the
+// print/println/print_str/println_str lowerings so that under target_os == 4
+// they resolve their output through the @builtin_override lookup and format
+// into a 64-byte stack scratch instead of a 4096-byte IR_ALLOC. That edit sits
+// directly in the hosted lowering path. This program pins the hosted bytes of
+// all four of those builtins across a spread of argument shapes -- integer,
+// signed integer, string, float, several arguments, none -- plus
+// write/alloc/dealloc, so a regression confined to (say) the f64 formatting
+// arm cannot hide behind the compiler's own source, which never prints a
+// float.
+//
+// NOTHING HERE ASSERTS WHAT THIS PROGRAM PRINTS. It is a codegen probe: the
+// gate compares the ARTIFACT BYTES emitted before and after the branch. That
+// distinction matters for one line in particular -- a bare negative literal is
+// typed uint64, so `println(-1)` prints 18446744073709551615 while the `int64
+// neg` below prints -1. That asymmetry is pre-existing hosted behaviour, out
+// of scope for --target=none, and it is pinned here ON PURPOSE: anyone who
+// changes it will see this row flagged rather than change it unnoticed.
+static uint64 sink = 0
+
+fn main() {
+    int64 neg = 0 - 7
+    int64 minus1 = 0 - 1
+
+    print_str("probe: ")
+    println_str("io")
+    print(1)
+    println(0)
+    println(9223372036854775807)
+    println(minus1)
+    println(-1)
+    println("s", 42)
+    println("f", 3.5)
+    println("neg", neg, "and", -2.25)
+    print("a", 1, "b", 2, "c", 3)
+    println_str("")
+
+    uint64 p = alloc(64)
+    unsafe { *(p as uint8) = 65 }
+    sink = write(1, "w\n", 2)
+    dealloc(p)
+}

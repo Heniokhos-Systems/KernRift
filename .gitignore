@@ -62,3 +62,6 @@ packaging/deb/ext/
 /docs/superpowers/
 /docs/reviews/
 /docs/PHASE_B_DESIGN.md
+
+# --target=none acceptance-gate scratch (tests/target_none/prove_no_syscalls.sh)
+/krc_tn_gate_*/

@@ -9570,6 +9570,50 @@ tn_imm tn_arch_id_immediate_x86_64 "$TN_D/aid_x86" 'b[89a-f]09000000' 'b[89a-f]0
 tn_imm tn_arch_id_immediate_arm64  "$TN_D/aid_a64" '[45][0-9a-f]0180d2' '[45][0-9a-f]0080d2'
 rm -rf "$TN_D"
 
+# --- the --target=none acceptance gate, gate 2 ------------------------------
+#
+# tests/target_none/prove_no_syscalls.sh is the two-gate acceptance gate for
+# --target=none. Only GATE 2 runs here, and the split is deliberate:
+#
+#   Gate 2 (the corpus) needs nothing but the compiler in build/ -- every
+#   builtin, all four architectures, refusals and providers -- and it is the
+#   leg that can see else-POSIX inheritance, which byte-identity structurally
+#   cannot. It costs about half a second, so it belongs in every `make test`.
+#
+#   Gate 1 (byte-identity) has to build the compiler AS OF THE BRANCH POINT,
+#   which needs a git checkout and about 80 seconds. It is a branch/release
+#   gate, run on demand:  tests/target_none/prove_no_syscalls.sh
+#   Run the script with no arguments to get both.
+#
+# The script is invoked WITHOUT KRC set, so it uses build/krc2 directly rather
+# than $KRC, which under `make test` is a wrapper that injects --arch=x86_64
+# ahead of every argument -- and the arch is the variable under test here.
+#
+# READ THE SCRIPT'S HEADER BEFORE CITING A GREEN RUN. Nothing in this
+# sub-project has ever produced output on bare metal; the gate asserts what the
+# compiler emits, never what a board did with it.
+TOTAL=$((TOTAL + 1))
+TN_GATE="$DIR/target_none/prove_no_syscalls.sh"
+if [ ! -x "$TN_GATE" ]; then
+    echo "FAIL: target_none_acceptance_gate (missing or not executable: $TN_GATE)"; FAIL=$((FAIL + 1))
+else
+    TN_GATE_OUT=$(env -u KRC bash "$TN_GATE" --gate2 2>&1); TN_GATE_ST=$?
+    TN_GATE_SUM=$(echo "$TN_GATE_OUT" | grep -E "^=== prove_no_syscalls:")
+    # A pass count is asserted, not just the exit status: a script that silently
+    # stopped generating rows exits 0 having proved nothing. 95 checks today.
+    TN_GATE_N=$(echo "$TN_GATE_OUT" | grep -cE "^  [a-z0-9_]+: PASS")
+    if [ "$TN_GATE_ST" != "0" ]; then
+        echo "FAIL: target_none_acceptance_gate ($TN_GATE_SUM)"
+        echo "$TN_GATE_OUT" | grep "^FAIL:" | sed 's/^/    /'
+        FAIL=$((FAIL + 1))
+    elif [ "$TN_GATE_N" -lt 95 ]; then
+        echo "FAIL: target_none_acceptance_gate (only $TN_GATE_N checks ran, expected at least 95 -- the gate went quiet)"
+        FAIL=$((FAIL + 1))
+    else
+        PASS=$((PASS + 1)); echo "  target_none_acceptance_gate: PASS ($TN_GATE_N gate-2 checks; gate 1 is on demand)"
+    fi
+fi
+
 # --- hand-counted write() lengths ------------------------------------------
 # Every write(fd, "<literal>", N) must have N equal to the literal's real byte
 # length. Getting this wrong is the single most repeated defect in this tree:

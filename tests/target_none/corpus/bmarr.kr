@@ -1,0 +1,31 @@
+// Frozen byte-identity input carrying a STACK ARRAY indexed by a runtime
+// value, so the `--debug` rows really do emit IR_ARR_CHECK.
+//
+// Without this the `--debug` rows in the matrix would compare two artifacts
+// that contain no bounds check at all, and a change to bounds-check codegen
+// would sail through a green "--debug byte-identical" result. Task 6 hit the
+// mirror image of this: an array-free program compiled clean under
+// `--debug --target=none` on all four arches because there was nothing for the
+// check to fire on.
+//
+// uint32 throughout -- see arith.kr for why.
+static uint32 sum = 0
+
+fn pick(uint32 n) -> uint32 {
+    uint32[16] buf
+    uint32 i = 0
+    while i < 16 {
+        buf[i] = i * i
+        i = i + 1
+    }
+    return buf[n & 15]
+}
+
+fn main() {
+    uint32 k = 0
+    while k < 16 {
+        sum = sum + pick(k)
+        k = k + 1
+    }
+    loop { }
+}
