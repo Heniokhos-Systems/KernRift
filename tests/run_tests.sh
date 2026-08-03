@@ -8439,20 +8439,6 @@ else
 fi
 rm -f /tmp/krc_imgna_$$
 
-# 17. POSITIVE control for the asymmetric alignment rule: x86_64 must ACCEPT
-#     the very address arm64 refuses. Full validation only -- emission lands
-#     in the next commit, so assert the flags CLEAR VALIDATION by checking
-#     the failure (if any) is not a flag refusal. After Task 5 this test is
-#     superseded by image_report_format, which asserts success outright.
-TOTAL=$((TOTAL + 1))
-x86ok_out=$($KRC $KRC_FLAGS "$IMG_SRC" -o /tmp/krc_img_$$ --arch=x86_64 --target=none --emit=image --load-addr=0x400100 2>&1)
-if echo "$x86ok_out" | grep -q "must be 4096-aligned"; then
-    echo "FAIL: image_x86_any_addr_accepted (alignment refusal fired on x86_64)"; FAIL=$((FAIL + 1))
-else
-    PASS=$((PASS + 1)); echo "  image_x86_any_addr_accepted: PASS"
-fi
-rm -f /tmp/krc_img_$$
-
 # 18. -g under --target=none WITHOUT image stays ACCEPTED -- pinned by
 #     sub-project A; the new refusal must not widen.
 TOTAL=$((TOTAL + 1))

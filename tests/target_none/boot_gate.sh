@@ -90,19 +90,23 @@ trap cleanup EXIT INT TERM
 # gate on a machine that never needed the tool. Removing them is therefore a
 # correctness fix, not tidying.
 #
-# `cmp` is a PRE-EXISTING dead entry (no user in this file or in
-# build_loader.sh — it predates Task 6). Left in place deliberately so this
-# task's diff contains only what this task orphaned; recorded here so the next
-# reader does not have to re-derive it.
+# `cmp` was a PRE-EXISTING dead entry (no user in this file or in
+# build_loader.sh — it predates Task 6) and has been removed from the list
+# below: a hard dependency on a tool nothing runs is the exact false-fail
+# this comment block is about, so keeping it here would contradict the rule
+# it states.
 #
 # Still live, and where: python3 (make_stub.py / qmp_pc.py / loop_offset_a64),
 # timeout + both qemu-system binaries (every boot), stat (L0's size report),
-# sed (L0's indented build log, build_image's report parse), od (build_loader.sh).
+# sed (L0's indented build log, build_image's report parse), od (build_loader.sh),
+# wc (L0's build-log line count, L0's sentinel count), tr (L3/L4 serial-capture
+# flattening for diagnostics), head (L0/L4 truncated log excerpts), grep (L0's
+# sentinel count, boot_run's expect match).
 #
 # as/ld are NOT probed here — build_loader.sh does its own FUNCTIONAL probe,
 # because on an aarch64 host `command -v as` answers "yes" and means "no"
 # (review round 1 C4).
-for t in qemu-system-x86_64 qemu-system-aarch64 python3 timeout od stat cmp sed; do
+for t in qemu-system-x86_64 qemu-system-aarch64 python3 timeout od stat sed wc tr head grep; do
     if ! command -v "$t" >/dev/null 2>&1; then
         bad "boot_dep_$t" "$t not found — the boot gate REQUIRES it; absence is a failure, not a skip"
     fi
@@ -600,15 +604,19 @@ leg1() {
         bad "L1_control_offset0" "the boot did not run — silence proves nothing"
     elif grep -q "2000000016" "$WORK/l1_off0.txt"; then
         bad "L1_control_offset0" "sentinel printed from offset 0"
+    elif ! grep -q "KR-LDR|" "$WORK/l1_off0.txt"; then
+        bad "L1_control_offset0" "loader liveness sentinel absent — capture present but nothing shows the boot executed: '$(cat "$WORK/l1_off0.txt")'"
     else
-        ok "L1_control_offset0" "offset 0 => no sentinel (boot ran, capture present)"
+        ok "L1_control_offset0" "offset 0 => no program sentinel, loader liveness present (boot ran, capture present)"
     fi
     if ! x86_boot "$X86_LOAD" "$WORK/sx.img" $(( entry - 4 )) "$WORK/l1_offm.txt" RUNOUT; then
         bad "L1_control_entry_minus4" "the boot did not run — silence proves nothing"
     elif grep -q "2000000016" "$WORK/l1_offm.txt"; then
         bad "L1_control_entry_minus4" "sentinel printed from the previous function's tail"
+    elif ! grep -q "KR-LDR|" "$WORK/l1_offm.txt"; then
+        bad "L1_control_entry_minus4" "loader liveness sentinel absent — capture present but nothing shows the boot executed: '$(cat "$WORK/l1_offm.txt")'"
     else
-        ok "L1_control_entry_minus4" "entry-4 => no sentinel (boot ran, capture present)"
+        ok "L1_control_entry_minus4" "entry-4 => no program sentinel, loader liveness present (boot ran, capture present)"
     fi
 }
 

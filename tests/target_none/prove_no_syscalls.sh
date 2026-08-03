@@ -30,12 +30,14 @@
 #   could prove it. Two safety comments in this sub-project's own diff were
 #   wrong in review; a disassembly is not an execution.
 #
-# The BLOCKING serial-output legs live in tests/target_none/boot_gate.sh
-# (sub-project B1): both UARTs observed printing computed sentinels from
-# RAW --emit=image artifacts, one heap-exhaustion halt discriminated by
-# parked PC over QMP, and an arm64 misalignment pair -- every leg with an
-# observed negative control. Runtime claims about bare metal cite THAT
-# gate; this script's claims remain compile-time only.
+# The serial-output legs live in tests/target_none/boot_gate.sh (sub-project
+# B1): both UARTs observed printing computed sentinels from RAW --emit=image
+# artifacts, one heap-exhaustion halt discriminated by parked PC over QMP,
+# and -- SUPPORTING arm64's BLOCKING compile-time alignment refusal -- a
+# misalignment pair showing the same image print at one offset and go
+# silent at another. Every leg carries an observed negative control. Runtime
+# claims about bare metal cite THAT gate; this script's claims remain
+# compile-time only.
 #
 # -----------------------------------------------------------------------------
 # Usage
@@ -741,7 +743,9 @@ esac
 echo ""
 echo "=== prove_no_syscalls: $PASS passed, $FAIL failed ==="
 echo "    A green run says the compiler emits the right calls and refuses the"
-echo "    right builtins. It does NOT say anything has run on bare metal --"
-echo "    see the TODO(sub-project B) serial-output leg at the top of this file."
+echo "    right builtins. It does NOT say anything has run on bare metal UNDER"
+echo "    THIS SCRIPT -- see the discharge note near the top of this file, and"
+echo "    tests/target_none/boot_gate.sh (sub-project B1), which is where bare-"
+echo "    metal execution is actually observed and proven."
 [ "$FAIL" = "0" ] || exit 1
 exit 0

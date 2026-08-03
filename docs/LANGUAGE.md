@@ -1501,7 +1501,7 @@ no container, and nothing is truncated (`memsz == filesz`). The build prints
 a report line the boot tooling parses:
 
 ```
-image: arch=arm64 entry=620 filesz=928 memsz=928 load=1077936128
+image: arch=arm64 entry=620 filesz=1048 memsz=1048 load=1077936128
 ```
 
 `entry` is the file offset of `main` (a flat image has no `e_entry`; a boot
