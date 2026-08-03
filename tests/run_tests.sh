@@ -11627,15 +11627,28 @@ rm -f "$SR_SRC" "$SR_BIN"
 echo ""
 echo "--- bare-metal boot gate ---"
 TOTAL=$((TOTAL + 1))
+# The RAW compiler binary, not the --arch=x86_64 wrapper: the gate passes
+# --arch= itself and must not depend on wrapper injection. krc2-then-krc3
+# mirrors the governance test at :3319 — the fallback is not decorative, the
+# arm64 CI job self-compiles to krc3 and a job that produced only krc3 would
+# otherwise report "no compiler" on a tree that has one.
 if [ -f "$DIR/../build/krc2" ]; then
     BOOT_KRC=$(cd "$DIR/../build" && pwd)/krc2
+elif [ -f "$DIR/../build/krc3" ]; then
+    BOOT_KRC=$(cd "$DIR/../build" && pwd)/krc3
 else
     BOOT_KRC=""
 fi
-if [ -n "$BOOT_KRC" ] && KRC="$BOOT_KRC" bash "$DIR/target_none/boot_gate.sh"; then
+if [ -z "$BOOT_KRC" ]; then
+    # Name the cause. The previous message said "see leg output above" in this
+    # branch too, pointing at output that cannot exist: the gate never started.
+    echo "FAIL: boot_gate (no compiler under test: neither build/krc2 nor build/krc3 exists, so the gate never ran)"
+    FAIL=$((FAIL + 1))
+elif KRC="$BOOT_KRC" bash "$DIR/target_none/boot_gate.sh"; then
     PASS=$((PASS + 1))
 else
-    echo "FAIL: boot_gate (see leg output above)"; FAIL=$((FAIL + 1))
+    echo "FAIL: boot_gate (gate ran with $BOOT_KRC and one or more legs failed — see the leg output above)"
+    FAIL=$((FAIL + 1))
 fi
 
 # --- Summary ---

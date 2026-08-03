@@ -69,21 +69,102 @@ for t in qemu-system-x86_64 qemu-system-aarch64 python3 readelf timeout od stat 
 done
 if [ "$FAIL" != 0 ]; then echo "boot gate: $PASS pass, $FAIL FAIL"; exit 1; fi
 
-# Serial capture helper: run qemu for a bounded time, harvest COM1/PL011.
-# $1 = arch (x86|a64), $2 = serial output file, rest = extra qemu args.
+# Serial capture helper: run qemu, harvest COM1/PL011, stop as soon as the
+# leg's evidence is in (or its window closes).
+#
+#   boot_run <arch: x86|a64> <serial file> <expect> [qemu args...]
+#
+# <expect> is one of three things, and it is mandatory and positional so that
+# omitting it cannot silently degrade into "wait a while and hope" — a caller
+# that forgets it hands qemu one fewer flag and the leg fails loudly:
+#
+#   <ERE>     the leg is WAITING FOR this; the run ends the instant it appears
+#             on the wire, and gives up after the full deadline.
+#   RUNOUT    no content trigger; short CALIBRATED window (absence controls).
+#   SELFEXIT  no content trigger; wait up to the full deadline for qemu to end
+#             by itself.
+#
+# WHY L0 NEEDS SELFEXIT AND NOT EITHER OF THE OTHER TWO. Its assertion is an
+# occurrence COUNT of exactly 1. Content-polling would stop that run at the
+# FIRST sentinel and thereby hide the very regression the count exists to
+# detect: with -no-reboot removed the loader reboot-loops and replays the
+# sentinel (34 observed), which an early-out would truncate back to 1 and PASS.
+# And the short RUNOUT window would be wrong in the other direction — it is
+# sized for legs that expect nothing, so a slow runner whose qemu takes longer
+# to start than the window would score count 0 and FALSE-FAIL a positive leg.
+# SELFEXIT costs nothing on the normal path (the loader triple-faults and
+# -no-reboot exits it in ~80 ms, 2 ticks) and leaves 10 s of headroom for a
+# machine nobody here has measured. Reaching that conclusion by nearly
+# introducing the first mistake is the reason it is written down.
+#
+# RETURNS NONZERO IF THE BOOT DID NOT HAPPEN. The capture file is deleted
+# before launch, so its existence afterwards is proof that qemu started and
+# opened it. Silence from a boot that never ran is not evidence of anything,
+# and six controls here assert silence — see their call sites.
+#
+# WHY NOT `sleep 4` (what task 1 shipped), AND WHY NOT PLAIN EXIT-POLLING
+# (what task 2's first report proposed). Both were wrong, and MEASURED rather
+# than argued this time. Only the three FAULT-terminating boots self-exit
+# quickly; L1_sentinel parks in the loader's hlt loop, and L1_no_image plus
+# ALL FOUR arm64 boots busy-spin until they are killed. Therefore:
+#   * exit-polling with the 10 s backstop is NOT semantically identical to the
+#     sleep — it is strictly worse, because every spinning boot would then wait
+#     the full 10 s (~60 s of gate against today's 36 s);
+#   * a fixed `sleep 4` does not merely waste time, it CREATES a race. A boot
+#     needing more than 4 s under TCG on a CI runner would false-fail a
+#     POSITIVE leg, and no CI job has ever run this gate, so that risk is live
+#     and unmeasured.
+# Polling the CONTENT removes both: a positive leg ends as soon as its evidence
+# is on the wire and only gives up after 10 s, so a slow runner costs latency
+# instead of a false failure.
+#
 # x86 always runs -no-reboot: a triple fault otherwise REBOOT-LOOPS and
 # replays the loader sentinel indefinitely (observed: 25 repetitions in
 # 3 s, V17). With -no-reboot QEMU exits by itself; the kill is then a
 # no-op and the wait still reaps.
+BOOT_TICK=0.05            # poll granularity, seconds
+BOOT_DEADLINE_TICKS=200   # 10 s — hard ceiling on waiting for evidence
+# Window for a RUNOUT leg. Seeded at 2 s and then RE-DERIVED by each leg from
+# its own positive boot (8x the time that boot needed to reach the wire, capped
+# at the deadline), so on a slow TCG runner the controls stretch in step with
+# the thing they are controlling for. A fixed window would go vacuous exactly
+# where the machine is slowest — the failure mode this gate exists to prevent.
+BOOT_SILENCE_TICKS=40
+BOOT_WAITED_TICKS=0       # out-param: ticks actually waited by the last run
 boot_run() {
-    local arch="$1" ser="$2"; shift 2
+    local arch="$1" ser="$2" expect="$3"; shift 3
     local qemu="qemu-system-x86_64" machine="-no-reboot"
     if [ "$arch" = "a64" ]; then qemu="qemu-system-aarch64"; machine="-M virt -cpu cortex-a57"; fi
+    rm -f "$ser"
+    local limit="$BOOT_DEADLINE_TICKS"
+    [ "$expect" = "RUNOUT" ] && limit="$BOOT_SILENCE_TICKS"
     # shellcheck disable=SC2086
     timeout 10 "$qemu" $machine -display none -serial "file:$ser" "$@" >/dev/null 2>&1 &
-    local pid=$!
-    sleep 4
+    local pid=$! n=0
+    while [ "$n" -lt "$limit" ]; do
+        if [ "$expect" != "RUNOUT" ] && [ "$expect" != "SELFEXIT" ] &&
+           [ -s "$ser" ] && grep -qE "$expect" "$ser" 2>/dev/null; then
+            break
+        fi
+        # Self-exit early-out: once qemu is gone no further byte can arrive,
+        # so both kinds of leg can stop waiting immediately.
+        kill -0 "$pid" 2>/dev/null || break
+        sleep "$BOOT_TICK"
+        n=$((n + 1))
+    done
+    BOOT_WAITED_TICKS="$n"
     kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null
+    # No capture file => qemu never opened it => no boot occurred.
+    [ -f "$ser" ] || return 1
+    return 0
+}
+
+# Re-derive the RUNOUT window from a positive boot that has just been observed
+# reaching the wire in $BOOT_WAITED_TICKS. 8x margin, floor 2 s, cap 10 s.
+calibrate_silence() {
+    BOOT_SILENCE_TICKS=$(( BOOT_WAITED_TICKS * 8 ))
+    [ "$BOOT_SILENCE_TICKS" -lt 40 ] && BOOT_SILENCE_TICKS=40
+    [ "$BOOT_SILENCE_TICKS" -gt "$BOOT_DEADLINE_TICKS" ] && BOOT_SILENCE_TICKS="$BOOT_DEADLINE_TICKS"
     return 0
 }
 
@@ -114,20 +195,24 @@ build_image() {
 }
 
 # One arm64 boot: image file at $1's load addr, stub branching to entry.
-# $1 load addr, $2 image, $3 entry off, $4 serial out.
+# $1 load addr, $2 image, $3 entry off, $4 serial out, $5 expect (see boot_run).
+# EVERY step propagates failure. A stub the generator refused to emit, or a
+# qemu that never opened the capture, must not look like "the program stayed
+# quiet" to a control that reads silence as a pass.
 a64_boot() {
-    local load="$1" img="$2" entry="$3" ser="$4"
-    python3 "$BOOT/make_stub.py" $(( load + entry )) "$A64_STUB" "$A64_SP" "$WORK/stub.bin"
-    boot_run a64 "$ser" \
+    local load="$1" img="$2" entry="$3" ser="$4" expect="$5"
+    python3 "$BOOT/make_stub.py" $(( load + entry )) "$A64_STUB" "$A64_SP" "$WORK/stub.bin" || return 1
+    boot_run a64 "$ser" "$expect" \
         -device loader,file="$WORK/stub.bin",addr=$A64_STUB,cpu-num=0 \
         -device loader,file="$img",addr=$(printf 0x%x "$load"),force-raw=on
 }
 
 # One x86 boot: loader built for the entry VA, image via -device loader.
+# $1 load addr, $2 image, $3 entry off, $4 serial out, $5 expect.
 x86_boot() {
-    local load="$1" img="$2" entry="$3" ser="$4"
+    local load="$1" img="$2" entry="$3" ser="$4" expect="$5"
     "$BOOT/build_loader.sh" $(printf 0x%x $(( load + entry ))) "$WORK/ldr.elf" >/dev/null 2>&1 || return 1
-    boot_run x86 "$ser" -kernel "$WORK/ldr.elf" \
+    boot_run x86 "$ser" "$expect" -kernel "$WORK/ldr.elf" \
         -device loader,file="$img",addr=$(printf 0x%x "$load"),force-raw=on
 }
 
@@ -154,7 +239,12 @@ leg0() {
     # The assertion is an occurrence COUNT: without -no-reboot the fault
     # reboot-loops and replays the sentinel (25 times in 3 s observed),
     # and exact string equality could never pass.
-    boot_run x86 "$WORK/l0_ser.txt" -kernel "$WORK/l0.elf"
+    # SELFEXIT, deliberately NOT a content trigger — see boot_run's header.
+    # This assertion is a COUNT, and stopping at the first sentinel would
+    # truncate the reboot-loop it exists to detect back to a passing 1.
+    if ! boot_run x86 "$WORK/l0_ser.txt" SELFEXIT -kernel "$WORK/l0.elf"; then
+        bad "L0_loader_liveness_sentinel" "the boot did not run (no capture file)"; return
+    fi
     L0N=$(grep -o "KR-LDR|" "$WORK/l0_ser.txt" | wc -l)
     if [ "$L0N" = "1" ]; then
         ok "L0_loader_liveness_sentinel" "exactly one KR-LDR| with no image loaded"
@@ -251,17 +341,25 @@ leg1() {
     if ! entry=$(build_image x86 "$WORK/sentinel_x86.kr" "$WORK/sx.img"); then
         bad "L1_compile" "sentinel_x86.kr did not compile"; return
     fi
-    x86_boot "$X86_LOAD" "$WORK/sx.img" "$entry" "$WORK/l1_ser.txt"
+    if ! x86_boot "$X86_LOAD" "$WORK/sx.img" "$entry" "$WORK/l1_ser.txt" "2000000016"; then
+        bad "L1_sentinel" "the boot did not run (loader build or qemu launch failed)"; return
+    fi
     if grep -q "2000000016" "$WORK/l1_ser.txt" && grep -q "KR-LDR|" "$WORK/l1_ser.txt"; then
-        ok "L1_sentinel" "computed 2000000016 + loader liveness on COM1"
+        ok "L1_sentinel" "computed 2000000016 + loader liveness on COM1 (${BOOT_WAITED_TICKS} ticks)"
     else
         bad "L1_sentinel" "serial held: '$(cat "$WORK/l1_ser.txt")'"
     fi
+    # Every control below asserts ABSENCE, so its window must be long enough
+    # that a working boot would certainly have printed by now. Derived from the
+    # positive boot just observed rather than guessed — see calibrate_silence.
+    calibrate_silence
     # Control (a): same loader, NO image. The loader must still prove itself
     # alive and the program sentinel must be impossible.
-    "$BOOT/build_loader.sh" $(printf 0x%x $(( X86_LOAD + entry ))) "$WORK/ldr.elf" >/dev/null 2>&1
-    boot_run x86 "$WORK/l1_noimg.txt" -kernel "$WORK/ldr.elf"
-    if grep -q "KR-LDR|" "$WORK/l1_noimg.txt" && ! grep -q "2000000016" "$WORK/l1_noimg.txt"; then
+    if ! "$BOOT/build_loader.sh" $(printf 0x%x $(( X86_LOAD + entry ))) "$WORK/ldr.elf" >/dev/null 2>&1; then
+        bad "L1_control_no_image" "loader build failed — control never ran"
+    elif ! boot_run x86 "$WORK/l1_noimg.txt" RUNOUT -kernel "$WORK/ldr.elf"; then
+        bad "L1_control_no_image" "the boot did not run (no capture file)"
+    elif grep -q "KR-LDR|" "$WORK/l1_noimg.txt" && ! grep -q "2000000016" "$WORK/l1_noimg.txt"; then
         ok "L1_control_no_image" "loader alive, program sentinel absent"
     else
         bad "L1_control_no_image" "serial held: '$(cat "$WORK/l1_noimg.txt")'"
@@ -271,17 +369,26 @@ leg1() {
     # note on what offset 0 really is today). They prove the entry value is
     # load-bearing at function granularity; instruction-level +4 is NOT
     # observable (V16), which is why it is not used as a control.
-    x86_boot "$X86_LOAD" "$WORK/sx.img" 0 "$WORK/l1_off0.txt"
-    if grep -q "2000000016" "$WORK/l1_off0.txt"; then
+    #
+    # THE BOOT'S EXIT STATUS IS CHECKED FIRST, AND THAT IS THE WHOLE POINT.
+    # These three legs read silence as evidence, so a boot that never happened
+    # would hand them a free PASS: with the return value ignored (as it was
+    # until review 3), deleting the capture file or breaking the loader build
+    # passed all six absence controls with no qemu ever started. Silence only
+    # means something once the run it came from is known to have occurred.
+    if ! x86_boot "$X86_LOAD" "$WORK/sx.img" 0 "$WORK/l1_off0.txt" RUNOUT; then
+        bad "L1_control_offset0" "the boot did not run — silence proves nothing"
+    elif grep -q "2000000016" "$WORK/l1_off0.txt"; then
         bad "L1_control_offset0" "sentinel printed from offset 0"
     else
-        ok "L1_control_offset0" "offset 0 => no sentinel"
+        ok "L1_control_offset0" "offset 0 => no sentinel (boot ran, capture present)"
     fi
-    x86_boot "$X86_LOAD" "$WORK/sx.img" $(( entry - 4 )) "$WORK/l1_offm.txt"
-    if grep -q "2000000016" "$WORK/l1_offm.txt"; then
+    if ! x86_boot "$X86_LOAD" "$WORK/sx.img" $(( entry - 4 )) "$WORK/l1_offm.txt" RUNOUT; then
+        bad "L1_control_entry_minus4" "the boot did not run — silence proves nothing"
+    elif grep -q "2000000016" "$WORK/l1_offm.txt"; then
         bad "L1_control_entry_minus4" "sentinel printed from the previous function's tail"
     else
-        ok "L1_control_entry_minus4" "entry-4 => no sentinel"
+        ok "L1_control_entry_minus4" "entry-4 => no sentinel (boot ran, capture present)"
     fi
 }
 
@@ -303,36 +410,47 @@ leg2() {
     if ! entry=$(build_image a64 "$WORK/sentinel_a64.kr" "$WORK/sa.img"); then
         bad "L2_compile" "sentinel_a64.kr did not compile"; return
     fi
-    a64_boot "$A64_LOAD" "$WORK/sa.img" "$entry" "$WORK/l2_ser.txt"
+    if ! a64_boot "$A64_LOAD" "$WORK/sa.img" "$entry" "$WORK/l2_ser.txt" "1000000016"; then
+        bad "L2_sentinel" "the boot did not run (stub generation or qemu launch failed)"; return
+    fi
     if grep -q "1000000016" "$WORK/l2_ser.txt"; then
-        ok "L2_sentinel" "computed 1000000016 on the PL011"
+        ok "L2_sentinel" "computed 1000000016 on the PL011 (${BOOT_WAITED_TICKS} ticks)"
     else
         bad "L2_sentinel" "serial held: '$(cat "$WORK/l2_ser.txt")'"
     fi
+    # Absence windows derived from the arm64 positive boot just observed —
+    # separately from L1's, because the two arches do not run at the same speed.
+    calibrate_silence
     # Control (a): stub with NO image => silence (arm64 has no loader
     # sentinel; the stub is 4 instructions). This control exists to pin the
     # observation that silence CANNOT be a pass condition on this arch —
-    # legs assert presence, never absence alone (review 2, O5).
-    python3 "$BOOT/make_stub.py" $(( A64_LOAD + entry )) "$A64_STUB" "$A64_SP" "$WORK/stub.bin"
-    boot_run a64 "$WORK/l2_noimg.txt" -device loader,file="$WORK/stub.bin",addr=$A64_STUB,cpu-num=0
-    if grep -q "1000000016" "$WORK/l2_noimg.txt"; then
+    # legs assert presence, never absence alone (review 2, O5). Which is
+    # precisely why the boot's own status is checked before its silence is
+    # read: see the note in leg1.
+    if ! python3 "$BOOT/make_stub.py" $(( A64_LOAD + entry )) "$A64_STUB" "$A64_SP" "$WORK/stub.bin"; then
+        bad "L2_control_no_image" "stub generation failed — control never ran"
+    elif ! boot_run a64 "$WORK/l2_noimg.txt" RUNOUT -device loader,file="$WORK/stub.bin",addr=$A64_STUB,cpu-num=0; then
+        bad "L2_control_no_image" "the boot did not run — silence proves nothing"
+    elif grep -q "1000000016" "$WORK/l2_noimg.txt"; then
         bad "L2_control_no_image" "sentinel printed with no image loaded"
     else
-        ok "L2_control_no_image" "no image => no sentinel"
+        ok "L2_control_no_image" "no image => no sentinel (boot ran, capture present)"
     fi
     # Controls (b)/(c): offset 0 and entry-4 — both observed silent on this
     # machine against these exact artifacts (empty PL011 capture in each case).
-    a64_boot "$A64_LOAD" "$WORK/sa.img" 0 "$WORK/l2_off0.txt"
-    if grep -q "1000000016" "$WORK/l2_off0.txt"; then
+    if ! a64_boot "$A64_LOAD" "$WORK/sa.img" 0 "$WORK/l2_off0.txt" RUNOUT; then
+        bad "L2_control_offset0" "the boot did not run — silence proves nothing"
+    elif grep -q "1000000016" "$WORK/l2_off0.txt"; then
         bad "L2_control_offset0" "sentinel printed from offset 0"
     else
-        ok "L2_control_offset0" "offset 0 => no sentinel"
+        ok "L2_control_offset0" "offset 0 => no sentinel (boot ran, capture present)"
     fi
-    a64_boot "$A64_LOAD" "$WORK/sa.img" $(( entry - 4 )) "$WORK/l2_offm.txt"
-    if grep -q "1000000016" "$WORK/l2_offm.txt"; then
+    if ! a64_boot "$A64_LOAD" "$WORK/sa.img" $(( entry - 4 )) "$WORK/l2_offm.txt" RUNOUT; then
+        bad "L2_control_entry_minus4" "the boot did not run — silence proves nothing"
+    elif grep -q "1000000016" "$WORK/l2_offm.txt"; then
         bad "L2_control_entry_minus4" "sentinel printed from the previous function's tail"
     else
-        ok "L2_control_entry_minus4" "entry-4 => no sentinel"
+        ok "L2_control_entry_minus4" "entry-4 => no sentinel (boot ran, capture present)"
     fi
 }
 
