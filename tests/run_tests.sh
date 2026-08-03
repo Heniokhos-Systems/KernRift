@@ -9600,14 +9600,14 @@ else
     TN_GATE_OUT=$(env -u KRC bash "$TN_GATE" --gate2 2>&1); TN_GATE_ST=$?
     TN_GATE_SUM=$(echo "$TN_GATE_OUT" | grep -E "^=== prove_no_syscalls:")
     # A pass count is asserted, not just the exit status: a script that silently
-    # stopped generating rows exits 0 having proved nothing. 95 checks today.
+    # stopped generating rows exits 0 having proved nothing. 104 checks today.
     TN_GATE_N=$(echo "$TN_GATE_OUT" | grep -cE "^  [a-z0-9_]+: PASS")
     if [ "$TN_GATE_ST" != "0" ]; then
         echo "FAIL: target_none_acceptance_gate ($TN_GATE_SUM)"
         echo "$TN_GATE_OUT" | grep "^FAIL:" | sed 's/^/    /'
         FAIL=$((FAIL + 1))
-    elif [ "$TN_GATE_N" -lt 95 ]; then
-        echo "FAIL: target_none_acceptance_gate (only $TN_GATE_N checks ran, expected at least 95 -- the gate went quiet)"
+    elif [ "$TN_GATE_N" -lt 104 ]; then
+        echo "FAIL: target_none_acceptance_gate (only $TN_GATE_N checks ran, expected at least 104 -- the gate went quiet)"
         FAIL=$((FAIL + 1))
     else
         PASS=$((PASS + 1)); echo "  target_none_acceptance_gate: PASS ($TN_GATE_N gate-2 checks; gate 1 is on demand)"

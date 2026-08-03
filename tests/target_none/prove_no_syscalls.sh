@@ -571,13 +571,131 @@ gate2() {
         rm -f "$INREPO/p32.out"
     done
 
+    # --- (b2) IR_ALLOC sites with NO --target=none arm ----------------------
+    #
+    # READ THE POLARITY BEFORE READING THE ASSERTIONS. Everywhere else in this
+    # gate, the generic emitter backstop firing is a FAILURE. Here it is what
+    # is asserted, because it is what happens today and pretending otherwise
+    # would leave the behaviour unrecorded.
+    #
+    # src/ir.kr emits IR_ALLOC from six sites that have no --target=none arm
+    # and no provider routing:
+    #   :3413  struct copy on assignment
+    #   :3461  struct returned by value
+    #   :3894  struct literal
+    #   :4164  local array over the stack-array threshold
+    #   :4192  struct declaration with an initialiser
+    #   :4209  local array OF structs
+    # Only the print/f-string IR_ALLOC was rerouted (Task 5). So on bare metal
+    # a struct literal, or a `uint32[2048]`, refuses with the GENERIC message
+    # naming 'alloc' -- a builtin the programmer never wrote -- and it does so
+    # EVEN WITH std/heap_bump.kr imported, which is the whole remedy the
+    # diagnostic would otherwise be pointing at.
+    #
+    # It FAILS CLOSED: exit 1, no artifact, no syscall in anything shipped. So
+    # this is not a safety hole, it is an incomplete feature with a misleading
+    # diagnostic -- structs are effectively unusable on bare metal. By this
+    # branch's own standard it is a missing arm.
+    #
+    # PINNED, NOT ENDORSED. Provider routing for these six sites is a FOLLOW-UP
+    # and is explicitly not done in this round. What this pin buys is that the
+    # day someone routes them, these checks fail and force the pin to be
+    # rewritten as the real assertion -- rather than the behaviour changing with
+    # nothing recording that it ever looked like this.
+    for A in x86_64 arm64; do
+        M=$(g2mod "$A")
+        printf 'import "%s"\nimport "../std/heap_bump.kr"\nstruct P { uint64 x  uint64 y }\nfn main() {\n    heap_bump_init(0x200000, 0x100000)\n    P p = P { x: 1, y: 2 }\n    println("v=", p.x)\n    loop { }\n}\n' "$M" > "$INREPO/st.kr"
+        printf 'import "%s"\nimport "../std/heap_bump.kr"\nfn main() {\n    heap_bump_init(0x200000, 0x100000)\n    uint32[2048] big\n    big[3] = 7\n    println("v=", big[3])\n    loop { }\n}\n' "$M" > "$INREPO/bigarr.kr"
+        for W in st bigarr; do
+            rm -f "$INREPO/$W.out"
+            ERR=$("$KRC" --arch=$A --target=none "$INREPO/$W.kr" -o "$INREPO/$W.out" 2>&1); ST=$?
+            if [ "$ST" = "0" ] || [ -f "$INREPO/$W.out" ]; then
+                bad "g2_ir_alloc_unrouted_${W}_$A" "this now COMPILES -- if the six IR_ALLOC sites were routed to the provider, rewrite this pin as a real provider assertion"
+            elif ! echo "$ERR" | grep -q "reached the emitter from 'alloc'"; then
+                bad "g2_ir_alloc_unrouted_${W}_$A" "expected the generic backstop naming 'alloc', got: '$ERR'"
+            else
+                ok "g2_ir_alloc_unrouted_${W}_$A" "refuses via the generic backstop naming 'alloc', heap_bump imported and unused"
+            fi
+            rm -f "$INREPO/$W.out"
+        done
+    done
+    # The CONTROL, without which the two checks above are vacuous: "refuses
+    # naming 'alloc'" is satisfied by a build where nothing at all works. A
+    # local array UNDER the stack-array threshold takes IR_STACK_ADDR instead
+    # of IR_ALLOC and must COMPILE with the same imports, so what the pin
+    # records is those specific constructs and not bare metal in general.
+    for A in x86_64 arm64; do
+        M=$(g2mod "$A")
+        printf 'import "%s"\nimport "../std/heap_bump.kr"\nfn main() {\n    heap_bump_init(0x200000, 0x100000)\n    uint32[16] small\n    small[3] = 7\n    println("v=", small[3])\n    loop { }\n}\n' "$M" > "$INREPO/smallarr.kr"
+        rm -f "$INREPO/smallarr.out"
+        ERR=$("$KRC" --arch=$A --target=none "$INREPO/smallarr.kr" -o "$INREPO/smallarr.out" 2>&1); ST=$?
+        if [ "$ST" = "0" ] && [ -f "$INREPO/smallarr.out" ]; then
+            ok "g2_ir_alloc_control_small_array_$A" "under the threshold: IR_STACK_ADDR, compiles"
+        else
+            bad "g2_ir_alloc_control_small_array_$A" "a stack-sized local array does not compile either, so the two pins above assert nothing specific: '$ERR'"
+        fi
+        rm -f "$INREPO/smallarr.out"
+    done
+
+    # riscv32/xtensa never reach the backstop: IR_ALLOC (op 70) is unimplemented
+    # in those backends at all, hosted included. Different message, same
+    # fail-closed outcome, pinned separately so the two are not conflated.
+    printf 'struct P { uint32 x  uint32 y }\nfn main() {\n    P p = P { x: 1, y: 2 }\n    loop { }\n}\n' > "$INREPO/st32.kr"
+    for A in riscv32 xtensa; do
+        rm -f "$INREPO/st32.out"
+        ERR=$("$KRC" --arch=$A --target=none "$INREPO/st32.kr" -o "$INREPO/st32.out" 2>&1); ST=$?
+        if [ "$ST" = "0" ] || [ -f "$INREPO/st32.out" ]; then
+            bad "g2_ir_alloc_unrouted_struct_$A" "this now compiles -- IR op 70 must have been implemented; rewrite this pin"
+        elif ! echo "$ERR" | grep -q "error: $A: IR op 70 not yet implemented"; then
+            bad "g2_ir_alloc_unrouted_struct_$A" "expected the IR op 70 NYI refusal, got: '$ERR'"
+        else
+            ok "g2_ir_alloc_unrouted_struct_$A" "IR op 70 NYI -- fails closed, by a different route"
+        fi
+        rm -f "$INREPO/st32.out"
+    done
+
+    # --- (b3) -g under --target=none: an ACCEPTED flag, recorded ------------
+    #
+    # Task 6 refused --debug and --legacy under --target=none and recorded why.
+    # -g was never ruled on. It is ACCEPTED, and the decision is recorded here
+    # as an assertion rather than a sentence: DWARF is inert data that no code
+    # reads at runtime and it emits no instructions, so unlike --debug (which
+    # emits bounds-check traps) there is nothing about it that needs an OS.
+    # Pinned in three directions -- it compiles, it is byte-identical to the
+    # --freestanding -g artifact (so --target=none adds nothing of its own to
+    # the debug path), and it is NOT a no-op (it differs from the same build
+    # without -g, so a future change that silently dropped DWARF fails here).
+    printf 'fn main() { loop { } }\n' > "$INREPO/g.kr"
+    rm -f "$INREPO/g_tn" "$INREPO/g_fs" "$INREPO/g_plain"
+    "$KRC" --arch=x86_64 --target=none    -g "$INREPO/g.kr" -o "$INREPO/g_tn"    >/dev/null 2>&1
+    "$KRC" --arch=x86_64 --freestanding   -g "$INREPO/g.kr" -o "$INREPO/g_fs"    >/dev/null 2>&1
+    "$KRC" --arch=x86_64 --target=none       "$INREPO/g.kr" -o "$INREPO/g_plain" >/dev/null 2>&1
+    if [ ! -f "$INREPO/g_tn" ]; then
+        bad "g2_dash_g_accepted" "-g under --target=none no longer compiles; if it is now refused, this pin records the old decision and must be rewritten"
+    elif ! cmp -s "$INREPO/g_tn" "$INREPO/g_fs"; then
+        bad "g2_dash_g_accepted" "--target=none -g and --freestanding -g no longer agree"
+    elif cmp -s "$INREPO/g_tn" "$INREPO/g_plain"; then
+        bad "g2_dash_g_accepted" "-g is a no-op under --target=none -- the DWARF is not being emitted"
+    else
+        ok "g2_dash_g_accepted" "$(wc -c < "$INREPO/g_tn") B with -g vs $(wc -c < "$INREPO/g_plain") B without, identical to --freestanding -g"
+    fi
+
     # --- (c) no trap instruction in any artifact ----------------------------
     #
     # Every artifact --target=none produced above is scanned for ALL FOUR trap
     # encodings, not just its own arch's: a cross-wired backend emitting the
     # wrong architecture's trap is exactly the kind of thing a per-arch scan
-    # would miss. The scan is on ALIGNED bytes -- `xxd -p | grep 0f05` matches
-    # across a byte boundary and reports traps that are not there.
+    # would miss.
+    #
+    # The scan searches raw BYTES at every offset. It is deliberately not
+    # instruction-aligned -- these are flat images with no section table to
+    # align against, and an unaligned hit is worth reporting anyway. What it
+    # avoids is the NIBBLE-boundary false positive: `xxd -p | grep 0f05`
+    # matches half-way through a byte pair, so bytes A0 F0 5B read as a
+    # SYSCALL that is not there. Scanning bytes rather than a hex string
+    # cannot make that mistake. The trade is the opposite direction --
+    # constant data that happens to spell a trap encoding would be reported,
+    # which is a false FAIL and would be investigated, not a false pass.
     #
     #   x86_64  SYSCALL  0F 05
     #   arm64   SVC #0   0xD4000001 little-endian -> 01 00 00 D4
@@ -593,7 +711,7 @@ gate2() {
     "$KRC" --arch=riscv32 --target=none "$INREPO/e.kr" -o "$INREPO/e_rv" >/dev/null 2>&1
     "$KRC" --arch=xtensa  --target=none "$INREPO/e.kr" -o "$INREPO/e_xt" >/dev/null 2>&1
 
-    G2_TRAP=$(TN_FILES="$INREPO/x86_64_y.out $INREPO/x86_64_n.out $INREPO/x86_64_h.out $INREPO/arm64_y.out $INREPO/arm64_n.out $INREPO/arm64_h.out $INREPO/e_rv $INREPO/e_xt" python3 - <<'TRAPPY'
+    G2_TRAP=$(TN_FILES="$INREPO/x86_64_y.out $INREPO/x86_64_n.out $INREPO/x86_64_h.out $INREPO/arm64_y.out $INREPO/arm64_n.out $INREPO/arm64_h.out $INREPO/e_rv $INREPO/e_xt $INREPO/g_tn" python3 - <<'TRAPPY'
 import os, sys
 TRAPS = {"x86_SYSCALL": b"\x0f\x05", "arm64_SVC": b"\x01\x00\x00\xd4",
          "riscv32_ECALL": b"\x73\x00\x00\x00", "xtensa_SIMCALL": b"\x00\x51\x00"}
@@ -618,7 +736,7 @@ print("; ".join(found))
 TRAPPY
 )
     if [ -z "$G2_TRAP" ]; then
-        ok "g2_no_trap_instructions" "8 bare-metal artifacts, 0 traps outside the xtensa exit carve-out"
+        ok "g2_no_trap_instructions" "9 bare-metal artifacts (incl. the -g build), 0 traps outside the xtensa exit carve-out"
     else
         bad "g2_no_trap_instructions" "$G2_TRAP"
     fi

@@ -2236,10 +2236,23 @@ fn ir_emit_riscv_insn(uint64 ii) {
             // with status 0 (measured), so exit(0) needs no special case and
             // the dedicated 0x5555 pass word is unnecessary.
             //
-            // ⚠️ Hard-codes a `virt`-only MMIO address. riscv32 freestanding
-            // has no machine/board flag today, so every artifact in the repo
-            // is a virt image. Adding a riscv32 `--target=` would invalidate
-            // this and must revisit it.
+            // ⚠️ Hard-codes a `virt`-only MMIO address, and the flag this
+            // warning was waiting for now EXISTS: `--arch=riscv32
+            // --target=none` routes exit() through this exact path, and
+            // --target=none is the flag most likely to mean real silicon
+            // rather than qemu `virt`. On a board without sifive_test at
+            // 0x00100000 this store goes to whatever is mapped there, or
+            // faults, and exit() does not exit.
+            //
+            // It is DELIBERATELY LEFT AS IS for now: the alternative is
+            // refusing exit() on bare-metal riscv32, which would break every
+            // existing freestanding riscv32 artifact in the repo (all of them
+            // are virt images) for no gain until a board selector exists.
+            // tests/target_none/prove_no_syscalls.sh pins the current
+            // behaviour in BOTH directions so this cannot change unnoticed.
+            // The release decision -- document the qemu-only semantics or gate
+            // them behind a board flag -- is still open and is recorded in the
+            // sub-project ledger, NOT closed by this comment.
             //
             // No spill store for dst_r == 0xFFFFFFFF: op 52 carries a dest
             // vreg and hosted callers read it (ir.kr:1751), but this path

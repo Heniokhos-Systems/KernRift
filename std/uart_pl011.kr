@@ -51,9 +51,17 @@ fn pl011_reg_read(uint64 off) -> uint64 {
     return v32
 }
 
-// Optional: 115200 baud 8N1 from the QEMU virt 24 MHz UARTCLK, FIFOs on,
-// interrupts masked. QEMU leaves UART0 usable, so `write` works without this;
-// call it from your entry point when you do not trust the prior state.
+// 115200 baud 8N1 from the QEMU virt 24 MHz UARTCLK, FIFOs on, interrupts
+// masked.
+//
+// CALL THIS. An earlier version of this comment said QEMU leaves UART0 usable
+// so `write` works without it. That was an UNOBSERVED RUNTIME CLAIM: nothing
+// in this sub-project has ever produced a character on a UART, on silicon or
+// under an emulator. What is known is what the compiler emits — the provider
+// lowers to the register writes below. Whether the prior state happens to be
+// usable is precisely what has not been checked. The divisor constants below
+// are also QEMU-virt-specific: a board with a different UARTCLK needs
+// different ones.
 fn pl011_init() {
     pl011_reg_write(PL011_CR, 0x0000)      // disable while reprogramming
     pl011_reg_write(PL011_IBRD, 13)        // 24e6 / (16 * 115200) = 13.02

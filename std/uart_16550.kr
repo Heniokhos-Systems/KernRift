@@ -65,9 +65,16 @@ fn uart16550_inb(uint64 port) -> uint64 {
     return v & 0xFF
 }
 
-// Optional: 115200 baud, 8N1, FIFOs on. Firmware usually leaves COM1 usable
-// and QEMU always does, so `write` works without this — call it from your
-// entry point when you do not trust what ran before you.
+// 115200 baud, 8N1, FIFOs on.
+//
+// CALL THIS. An earlier version of this comment said firmware "usually" leaves
+// COM1 usable and QEMU "always" does, so `write` works without it. That was an
+// UNOBSERVED RUNTIME CLAIM: nothing in this sub-project has ever produced a
+// character on a UART, on silicon or under an emulator, so "works without
+// this" is not something anyone here has seen. What is actually known is what
+// the compiler emits — the provider lowers to the port writes below — and
+// whether a particular firmware or emulator happens to leave the line
+// configured is exactly the thing that has not been checked.
 fn uart16550_init() {
     uart16550_outb(UART16550_BASE + UART16550_IER, 0x00)   // interrupts off
     uart16550_outb(UART16550_BASE + UART16550_LCR, 0x80)   // DLAB on
