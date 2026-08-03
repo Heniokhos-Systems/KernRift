@@ -8919,6 +8919,186 @@ else
 fi
 rm -f /tmp/krc_enth_$$ "$ENT_A" "$ENT_B" "$ENT_S" "$ENT_N"
 
+# --- the arm64 entry stub: set SP, `bl <entry>`, halt (sub-project B2, T3) ---
+#
+# WHAT THIS SECTION PINS. With `--stack-top=` present, an arm64 `--emit=image`
+# artifact carries a five-word stub the compiler emitted, and the REPORTED
+# `entry` points at that stub rather than at the entry function. Without the
+# flag nothing is emitted -- that half is asserted here as a byte-level fact
+# (zero `mov sp, x0` words in the artifact), not merely as "the flag was
+# accepted".
+#
+# WHY THE BL IS DECODED AND NOT JUST SHAPE-CHECKED. `BL #0` -- the placeholder
+# `emit_a64(0x94000000)` writes before the fixup runs -- IS a well-formed BL
+# instruction, and it is a BRANCH TO ITSELF. A stub emitted after
+# `resolve_fixups_a64()` therefore assembles, disassembles and reports
+# perfectly while hanging the machine on the first instruction of the entry
+# sequence, with no diagnostic anywhere. So the rows below reject imm26 == 0
+# explicitly AND resolve the displacement to a file offset, which must equal
+# the entry function's own offset.
+#
+# WHERE THAT EXPECTED OFFSET COMES FROM. The stub is emitted after every
+# function is laid out, so adding it cannot move a function: the entry
+# function's offset in the with-stub image is exactly the entry the SAME
+# program reports with the flag absent. (Its BYTES can differ -- the string
+# and static areas moved by the stub's length, so ADRP/ADD immediates inside
+# the functions are patched differently -- but no function's OFFSET does.)
+echo ""
+echo "--- arm64 entry stub: SP + bl + halt (B2 T3) ---"
+STB_SRC="$DIR/../test_tmp_stb_$$.kr"     # f + main            (entry == main)
+STB_SRC2="$DIR/../test_tmp_stb2_$$.kr"   # f + main + _start   (entry == _start)
+# Same shape as T2's programs: `f` is recursive so the inliner cannot fold it,
+# which keeps the entry function off file offset 0 and leaves "the stub's entry
+# differs from the function's entry" falsifiable.
+STB_PREFIX='static uint64 g = 0x4B52535441525421
+fn f(uint64 x) -> uint64 { if x < 2 { return x + g }
+ return f(x - 1) + f(x - 2) }
+fn main() -> uint64 { g = f(6) + 0x1111
+ return 0 }
+'
+STB_START='fn _start() { g = f(7) + 0x2222
+ loop { } }
+'
+printf '%s'   "$STB_PREFIX"               > "$STB_SRC"
+printf '%s%s' "$STB_PREFIX" "$STB_START"  > "$STB_SRC2"
+STB_SP=0x40800000
+
+# Compile one arm64 image; echo "<entry> <filesz>" on success, nothing on
+# failure. $1 src, $2 out, $3 load-addr, $4... extra flags.
+stb_build() {
+    local src="$1" out="$2" ld="$3"; shift 3
+    local o st
+    rm -f "$out"
+    o=$($KRC $KRC_FLAGS "$src" -o "$out" --arch=arm64 --target=none --emit=image --load-addr=$ld "$@" 2>&1)
+    st=$?
+    [ $st -eq 0 ] || return 1
+    echo "$o" | sed -n 's/^image: .* entry=\([0-9]*\) filesz=\([0-9]*\) .*/\1 \2/p'
+}
+
+# Decode the five words at <off> and check them against the spec-D2 encodings.
+# $1 image, $2 stub offset, $3 stack top, $4 expected BL target offset.
+# Prints every mismatch it finds (not just the first) and exits nonzero.
+stb_check() {
+    python3 - "$1" "$2" "$3" "$4" <<'PY'
+import struct, sys
+img, off, sp, want = sys.argv[1], int(sys.argv[2]), int(sys.argv[3], 0), int(sys.argv[4])
+d = open(img, "rb").read()
+if off + 20 > len(d):
+    print("stub at %d does not fit in a %d-byte image" % (off, len(d))); sys.exit(1)
+w = list(struct.unpack("<5I", d[off:off + 20]))
+e0 = 0xd2a00000 | (((sp >> 16) & 0xffff) << 5)      # movz x0, #sp[31:16], lsl 16
+e1 = 0xf2800000 | ((sp & 0xffff) << 5)              # movk x0, #sp[15:0]
+bad = []
+if w[0] != e0: bad.append("word0 %08x != movz %08x" % (w[0], e0))
+if w[1] != e1: bad.append("word1 %08x != movk %08x" % (w[1], e1))
+if w[2] != 0x9100001f: bad.append("word2 %08x != mov sp,x0 9100001f" % w[2])
+if (w[3] >> 26) != 0x25:
+    bad.append("word3 %08x is not a BL (opcode %02x != 25)" % (w[3], w[3] >> 26))
+else:
+    imm = w[3] & 0x3ffffff
+    if imm >= (1 << 25): imm -= (1 << 26)
+    if imm == 0:
+        bad.append("word3 %08x is BL #0 -- the UNRESOLVED placeholder, i.e. a "
+                   "branch to itself; the stub was emitted past "
+                   "resolve_fixups_a64()" % w[3])
+    else:
+        tgt = off + 12 + imm * 4
+        if tgt != want:
+            bad.append("BL targets offset %d, entry function is at %d" % (tgt, want))
+if w[4] != 0x14000000: bad.append("word4 %08x != halt (b .) 14000000" % w[4])
+if bad:
+    print("; ".join(bad)); sys.exit(1)
+PY
+}
+
+# Count 0x9100001f (`mov sp, x0`) words in an image. The stub is the only
+# thing that emits one -- ir_a64/codegen_a64 move the stack pointer with
+# SUB/ADD sp,sp,#imm, never through x0 -- so this is the byte-level test for
+# "the stub is present" / "the stub is absent".
+stb_movsp_count() {
+    python3 - "$1" <<'PY'
+import sys
+d = open(sys.argv[1], "rb").read()
+print(sum(1 for i in range(0, len(d) - 3, 4)
+          if d[i:i+4] == bytes.fromhex("1f000091")))   # 0x9100001f little-endian
+PY
+}
+
+# 1. The five words are at the reported entry, and the BL resolves to the
+#    entry function's own offset (taken from the SAME program built with the
+#    flag absent).
+TOTAL=$((TOTAL + 1))
+stb_ra=$(stb_build "$STB_SRC" /tmp/krc_stb_a_$$ 0x40400000); stb_sta=$?
+stb_rb=$(stb_build "$STB_SRC" /tmp/krc_stb_b_$$ 0x40400000 --stack-top=$STB_SP); stb_stb=$?
+stb_fn=${stb_ra% *}
+stb_e=${stb_rb% *}; stb_f=${stb_rb#* }
+stb_why=""
+if [ $stb_sta -ne 0 ] || [ $stb_stb -ne 0 ] || [ -z "$stb_ra" ] || [ -z "$stb_rb" ]; then
+    stb_why="build failed (no-flag exit=$stb_sta report='$stb_ra'; stub exit=$stb_stb report='$stb_rb')"
+elif [ "$stb_f" != "$(stat -c%s /tmp/krc_stb_b_$$ 2>/dev/null)" ]; then
+    stb_why="report claims filesz=$stb_f, on disk $(stat -c%s /tmp/krc_stb_b_$$ 2>/dev/null)"
+elif [ "$stb_e" = "$stb_fn" ]; then
+    stb_why="entry=$stb_e is the entry FUNCTION's offset -- no stub was emitted"
+else
+    stb_why=$(stb_check /tmp/krc_stb_b_$$ "$stb_e" "$STB_SP" "$stb_fn") || true
+fi
+if [ -z "$stb_why" ]; then
+    PASS=$((PASS + 1)); echo "  stub_arm64_words: PASS (stub at $stb_e, bl -> main at $stb_fn, of $stb_f)"
+else
+    echo "FAIL: stub_arm64_words ($stb_why)"; FAIL=$((FAIL + 1))
+fi
+
+# 2. No --stack-top => no stub. Asserted as a byte fact on the artifact, not
+#    as "the compiler exited 0": the no-flag image must contain ZERO
+#    `mov sp, x0` words and the flag'd one exactly ONE.
+TOTAL=$((TOTAL + 1))
+stb_na=$(stb_movsp_count /tmp/krc_stb_a_$$ 2>/dev/null)
+stb_nb=$(stb_movsp_count /tmp/krc_stb_b_$$ 2>/dev/null)
+if [ "$stb_na" = "0" ] && [ "$stb_nb" = "1" ]; then
+    PASS=$((PASS + 1)); echo "  stub_arm64_absent_without_flag: PASS (0 vs 1 mov sp,x0)"
+else
+    echo "FAIL: stub_arm64_absent_without_flag (no-flag image has ${stb_na:-?} mov sp,x0 words, flag'd image ${stb_nb:-?}; want 0 and 1)"
+    FAIL=$((FAIL + 1))
+fi
+rm -f /tmp/krc_stb_a_$$
+
+# 3. The stub is FULLY PC-RELATIVE: the same source, same --stack-top, two
+#    different --load-addr values must produce byte-identical images. A stub
+#    that materialised the load address anywhere would differ here (and would
+#    also red B1's image_load_addr_not_embedded_arm64, which covers only the
+#    no-stub form).
+TOTAL=$((TOTAL + 1))
+stb_rc=$(stb_build "$STB_SRC" /tmp/krc_stb_c_$$ 0x40500000 --stack-top=$STB_SP); stb_stc=$?
+if [ $stb_stc -eq 0 ] && [ -f /tmp/krc_stb_b_$$ ] && [ -f /tmp/krc_stb_c_$$ ] \
+   && cmp -s /tmp/krc_stb_b_$$ /tmp/krc_stb_c_$$; then
+    PASS=$((PASS + 1)); echo "  stub_arm64_load_addr_not_embedded: PASS (0x40400000 == 0x40500000, byte for byte)"
+else
+    echo "FAIL: stub_arm64_load_addr_not_embedded (exit=$stb_stc; the stub depends on --load-addr)"
+    FAIL=$((FAIL + 1))
+fi
+rm -f /tmp/krc_stb_b_$$ /tmp/krc_stb_c_$$
+
+# 4. The stub calls the ENTRY, which is T2's rule and not "main": with both
+#    `_start` and `main` live, the BL must resolve to `_start`. This is the
+#    only row that would catch a stub wired to find_main_offset() -- rows 1-3
+#    all use a program whose entry IS main.
+TOTAL=$((TOTAL + 1))
+stb_rd=$(stb_build "$STB_SRC2" /tmp/krc_stb_d_$$ 0x40400000); stb_std=$?
+stb_re=$(stb_build "$STB_SRC2" /tmp/krc_stb_e_$$ 0x40400000 --stack-top=$STB_SP); stb_ste=$?
+stb_sfn=${stb_rd% *}
+stb_se=${stb_re% *}
+if [ $stb_std -ne 0 ] || [ $stb_ste -ne 0 ] || [ -z "$stb_rd" ] || [ -z "$stb_re" ]; then
+    stb_why2="build failed (no-flag exit=$stb_std report='$stb_rd'; stub exit=$stb_ste report='$stb_re')"
+else
+    stb_why2=$(stb_check /tmp/krc_stb_e_$$ "$stb_se" "$STB_SP" "$stb_sfn") || true
+fi
+if [ -z "$stb_why2" ]; then
+    PASS=$((PASS + 1)); echo "  stub_arm64_bl_targets_start: PASS (stub at $stb_se, bl -> _start at $stb_sfn)"
+else
+    echo "FAIL: stub_arm64_bl_targets_start ($stb_why2)"; FAIL=$((FAIL + 1))
+fi
+rm -f /tmp/krc_stb_d_$$ /tmp/krc_stb_e_$$ "$STB_SRC" "$STB_SRC2"
+
 # --- syscall choke points under --target=none ------------------------------
 # The per-OS dispatch in this codebase is "special-case Windows/macOS, else
 # fall through to POSIX", so target_os == 4 (--target=none) silently inherits

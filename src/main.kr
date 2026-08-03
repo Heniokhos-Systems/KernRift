@@ -2726,6 +2726,102 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
         wchild = nxt
     }
 
+    // ------------------------------------------------------------------
+    // The arm64 entry stub (sub-project B2, D2). Opt-in via --stack-top=.
+    //
+    //     movz x0, #sp[31:16], lsl 16
+    //     movk x0, #sp[15:0]
+    //     mov  sp, x0
+    //     bl   <entry>
+    //     b    .                        <- the halt
+    //
+    // WHY: at reset SP is garbage, so the entry function's own prologue
+    // faults on its first stack store and the image boots to silence. Until
+    // now a hand-written external stub (tests/target_none/boot/make_stub.py)
+    // supplied the stack; with this block the image is self-sufficient.
+    //
+    // WHERE THIS SITS IS LOAD-BEARING, IN BOTH DIRECTIONS.
+    //
+    //   * AFTER the emit loop, so no function moves. The stub is appended to
+    //     the code region, which means the entry function keeps the exact
+    //     offset it has with the flag absent. (Emitting at offset 0 would
+    //     work too — the `bl` removes any adjacency requirement — but it
+    //     would shift every function and every derived-from-the-report gate
+    //     control with them.)
+    //   * BEFORE `resolve_fixups_a64()` (the "Resolve call fixups" block
+    //     below), because that is what patches the `bl`. Emitted after it,
+    //     the placeholder `BL #0` survives — and `BL #0` is not a crash or a
+    //     diagnostic, it is a well-formed BRANCH TO ITSELF. The image would
+    //     compile, disassemble and report perfectly and hang on the stub's
+    //     fourth word. Nothing downstream would notice.
+    //
+    // The stub is FULLY PC-RELATIVE and materialises no address: `bl` and
+    // `b` are both PC-relative, x30 is set by the hardware, and the only
+    // immediate is the stack top the user passed. --load-addr is echoed in
+    // the report and never embedded (image_load_addr_not_embedded_arm64).
+    //
+    // GATED ON emit_mode/arch/flag, NEVER ON target_os. The per-OS dispatch
+    // here is "special-case Windows/macOS, ELSE fall through to POSIX", so a
+    // bare-metal condition written as an OS test is the shape that silently
+    // inherits Linux. img_raw is emit_mode == 8 and has no fall-through;
+    // stack_top_set is the D4 opt-in (absent => no stub => bytes unchanged);
+    // arch == 1 is arm64. x86_64 keeps accepting --stack-top and emitting no
+    // stub — its stub is the long-mode trampoline, a separate task.
+    uint64 img_stub_off = 0xFFFFFFFF
+    if img_raw != 0 && arch == 1 && stack_top_set != 0 {
+        uint64 stb_node = find_entry_node(root)
+        if stb_node == 0 {
+            // Same condition the finalize block below refuses on, reached
+            // earlier because the stub needs the entry's name token now.
+            // Worded identically so the two arms cannot drift into two
+            // different diagnostics for one cause.
+            uint64 stb_msg = "error: --emit=image needs an entry function ('_start' or 'main')\n"
+            write(2, stb_msg, str_len(stb_msg))
+            stb_msg = "A bare-metal image has no loader to call: name the first function to run either '_start' or 'main'\n"
+            write(2, stb_msg, str_len(stb_msg))
+            exit(1)
+        }
+        // fn_register stores a function's OWN declaration token, and
+        // fn_lookup compares token TEXT, so a fixup recorded against
+        // ast_data1(entry_node) resolves exactly like a call the source
+        // wrote. (Sub-project A's "a synthesised call cannot resolve"
+        // finding is about names the source never spelled; the entry's name
+        // is in the source by definition.)
+        uint32 stb_tok = ast_data1(stb_node)
+        img_stub_off = out_len
+
+        // Every subexpression is parenthesised on purpose: in this dialect
+        // `&`, `|` and `^` bind TIGHTER than `+` and `<<`, so `a | b << 5`
+        // means `(a | b) << 5`.
+        uint64 stb_hi = (stack_top >> 16) & 0xFFFF
+        uint64 stb_lo = stack_top & 0xFFFF
+        uint64 stb_w0 = 0xD2A00000 | (stb_hi << 5)      // movz x0, #hi, lsl 16
+        uint64 stb_w1 = 0xF2800000 | (stb_lo << 5)      // movk x0, #lo
+        emit_a64(stb_w0)
+        emit_a64(stb_w1)
+        emit_a64(0x9100001F)                            // mov sp, x0
+
+        // bl <entry>. Placeholder + fixup, the idiom every backend
+        // open-codes (there is no record_fixup helper): fixup_table_ensure()
+        // then an inline [u32 patch_off][u32 name_tok] write. Mirrors
+        // ir_aarch64.kr's IR_CALL.
+        uint64 stb_patch = out_len
+        emit_a64(0x94000000)                            // BL #0 (placeholder)
+        fixup_table_ensure()
+        uint64 stb_fe = fixup_table + fixup_count * 8
+        uint32 stb_po = stb_patch
+        unsafe { *(stb_fe as uint32) = stb_po }
+        uint64 stb_fe4 = stb_fe + 4
+        unsafe { *(stb_fe4 as uint32) = stb_tok }
+        fixup_count = fixup_count + 1
+
+        // The halt: b . — the word after the call, so the PC parks on a
+        // known address when the entry returns (D5). Deliberately not `wfi`
+        // or a syscall: --target=none has no OS to exit to, and the trap
+        // emitters refuse there anyway.
+        emit_a64(0x14000000)
+    }
+
     // Xtensa raw mode (Task 3): the whole post-codegen pipeline below
     // (call/string/static fixups, ELF headers, BSS truncation) is still
     // xtensa_nyi. Leaf functions need none of it — write the raw code blob and
@@ -3179,6 +3275,18 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
             uint64 imx_msg = "error: internal: entry function was selected but never registered in the code image\n"
             write(2, imx_msg, str_len(imx_msg))
             exit(1)
+        }
+        // With a stub emitted, THE STUB is the entry: it is the address a
+        // loader (or a reset vector) must start at, and the entry function
+        // reached through it would fault on a garbage SP. The fn_lookup
+        // above still runs and still refuses on an inconsistency — the stub
+        // recorded a `bl` fixup against that same token, so a miss here
+        // means the image's own call would not have resolved either.
+        // img_stub_off is 0xFFFFFFFF on every path that emitted no stub
+        // (x86_64, and arm64 without --stack-top), where entry_off stays
+        // exactly what it was.
+        if img_stub_off != 0xFFFFFFFF {
+            entry_off = img_stub_off
         }
     } else if rv_raw == 0 {
         entry_off = find_main_offset()
