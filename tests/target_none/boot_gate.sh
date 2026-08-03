@@ -575,11 +575,20 @@ leg1() {
     # is parsed from the compiler's own `image:` line, and a flat image has no
     # e_entry to check it against. So the leg's subject (boot at the REPORTED
     # entry, must print) and these two (boot at values either side of it, must
-    # not) together make the report load-bearing: a report that drifts by a
-    # function boundary turns the subject silent or lights one of these.
-    # Instruction-level drift (entry+4/8/12) is NOT observable — main's first
-    # instructions are stack bookkeeping and still print (review round 1 C1);
-    # D1 states this limitation.
+    # not) are jointly what makes the report load-bearing.
+    #
+    # HOW SHARP THAT ACTUALLY IS — MEASURED AT TASK 6, and SHARPER than the
+    # plan assumed. The plan (D1) recorded "instruction-level drift entry+4/8/12
+    # is not observable", reasoning from V16: main's first instructions are
+    # stack bookkeeping, so BRANCHING to entry+4 still prints. V16 is right, and
+    # this leg's subject alone really is blind to a +4 report. THE entry-4
+    # CONTROL IS NOT. With the report N bytes too high the control boots at
+    # real_entry + (N - 4), which is inside main and prints — so it goes RED.
+    # Five report drifts were built into the compiler and run: -4 and 0 kill the
+    # SUBJECT (silence); +4, +8 and +16 light THIS CONTROL; +16 kills both.
+    # Every drift constructed reddened at least one check. That is five points,
+    # not a proof of coverage — a drift landing on some other silent address
+    # remains possible and is not claimed to be caught.
     #
     # THE BOOT'S EXIT STATUS IS CHECKED FIRST, AND THAT IS THE WHOLE POINT.
     # These three legs read silence as evidence, so a boot that never happened
@@ -662,10 +671,12 @@ leg2() {
     # — both re-observed silent in IMAGE form, empty PL011 capture in each case.
     # SINCE TASK 6 THESE ARE ALSO THE REPORT-ACCURACY CONTROLS: `entry` is
     # parsed from the compiler's `image:` line and a flat image has no e_entry,
-    # so a report that drifts from the artifact by a function boundary turns
-    # the subject silent or lights one of these up. Instruction-level drift
-    # (entry+4/8/12) is NOT observable — main's first instructions are stack
-    # bookkeeping and still print (review round 1 C1); D1 states this limitation.
+    # so a report that drifts from the artifact turns the subject silent or
+    # lights one of these up. See leg 1's note on the same controls for the
+    # measured sharpness — briefly: a -4 or 0 report kills the subject, and a
+    # +4/+8/+16 report reds the entry-4 control, which is finer than D1's
+    # "instruction-level drift is not observable" allowed for. Both arches were
+    # injected and both behaved identically.
     if ! a64_boot "$A64_LOAD" "$WORK/sa.img" 0 "$WORK/l2_off0.txt" RUNOUT; then
         bad "L2_control_offset0" "the boot did not run — silence proves nothing"
     elif grep -q "1000000016" "$WORK/l2_off0.txt"; then
