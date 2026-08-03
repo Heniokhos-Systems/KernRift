@@ -11,8 +11,16 @@
 # HARD DEPENDENCIES — absence of any is a FAILURE, never a skip. The suite's
 # existing qemu skips (tests/run_tests.sh:5240, :5720) do not increment TOTAL,
 # so a skip there is indistinguishable from a pass; that pattern is exactly
-# what this gate must not copy. CI installs qemu-system-x86 + qemu-system-arm
-# for the suite jobs (.github/workflows/ci.yml).
+# what this gate must not copy.
+#
+# CI CANNOT RUN THIS GATE TODAY. .github/workflows/ci.yml installs only
+# qemu-USER-static (:82, :250) and binutils-x86-64-linux-gnu (:382) — there is
+# no qemu-system-x86_64 or qemu-system-aarch64 on any job, so every run of this
+# script under CI as it stands would stop at the dependency loop below.
+# Installing them and wiring this gate into a job is a later task's work; it is
+# deliberately not done here. The failure mode meanwhile is loud and correct (a
+# counted FAIL naming the missing tool, never a silent skip), so nothing is
+# unsafe — but do not go looking for a CI job that already runs this.
 #
 # Usage:  tests/target_none/boot_gate.sh
 # Env:    KRC=<path>  compiler under test (default build/krc2)
@@ -30,8 +38,22 @@ bad()  { FAIL=$((FAIL + 1)); echo "FAIL: $1${2:+ ($2)}"; }
 # Trap covers INT/TERM too; a SIGKILL can still strand a krc_boot_gate_*
 # dir at repo root (same residue class as prove_no_syscalls' INREPO dir) —
 # it is untracked and the never-add-all rule keeps it out of commits.
+#
+# ON FAILURE THE WORK DIR IS KEPT, and its path is printed. Deleting it
+# unconditionally destroyed the only copy of every build log, serial capture
+# and qemu stderr the gate had just asserted against, so a red run left
+# nothing to diagnose from — the same destroy-the-evidence mistake as
+# truncating the output you are asserting against.
 WORK=$(mktemp -d "$REPO/krc_boot_gate_XXXXXX")
-trap 'rm -rf "$WORK" ${QMPD:+"$QMPD"}' EXIT INT TERM
+cleanup() {
+    rm -rf ${QMPD:+"$QMPD"}
+    if [ "$FAIL" != 0 ]; then
+        echo "  (work dir kept for diagnosis: $WORK)" >&2
+    else
+        rm -rf "$WORK"
+    fi
+}
+trap cleanup EXIT INT TERM
 
 # readelf leaves this list in Task 6 (its last user, build_image's ELF
 # form, is replaced by the compiler's image: report there). as/ld are NOT
@@ -70,7 +92,13 @@ boot_run() {
 leg0() {
     echo "--- L0: x86_64 multiboot loader self-test ---"
     if ! "$BOOT/build_loader.sh" 0xdead0000 "$WORK/l0.elf" >"$WORK/l0.log" 2>&1; then
-        bad "L0_loader_builds" "$(head -1 "$WORK/l0.log")"; return
+        # Print the WHOLE log, not head -1: for an assembler error line 1 is
+        # only "…/boot.S: Assembler messages:" and the actual diagnostic is on
+        # line 2, so head -1 named the file and nothing else. The work dir
+        # survives a red run (see cleanup), so l0.log is still on disk too.
+        echo "  build log ($WORK/l0.log, $(wc -l <"$WORK/l0.log") lines):"
+        sed 's/^/    | /' "$WORK/l0.log"
+        bad "L0_loader_builds" "build failed; full log printed above"; return
     fi
     ok "L0_loader_builds" "$(stat -c%s "$WORK/l0.elf") B"
     # Liveness: loader alone, entry 0xdead0000 (outside the identity map).
@@ -93,9 +121,20 @@ leg0() {
     # run here: the corrupt loader must draw the load-failure message and
     # the good loader, same command, must not. Both exit fast on their own
     # (-no-reboot; entry 0xdead0000 triple-faults the good one — V18).
-    # KNOWN RESIDUAL: a HANG on the good half still passes this check, because
-    # `timeout`'s own stderr does not match the pattern either. That is
-    # tolerable only because the liveness count above catches hangs directly.
+    # KNOWN RESIDUAL, stated exactly: a HANG on the good half still passes this
+    # check, because `timeout`'s own stderr does not match the pattern either
+    # (observed: it is "qemu-system-x86_64: terminating on signal 15 from pid N
+    # (timeout)", exit 124 after the full 10 s).
+    # The liveness count above only NARROWS that — it catches a hang BEFORE the
+    # sentinel (count 0), not one after it. A loader whose entry spins in a hlt
+    # loop prints exactly one sentinel, PASSES the liveness leg, and then passes
+    # this check too. Built and observed: entry = the loader's own hlt loop
+    # (0x1000b9) gives sentinel count 1 and a non-matching stderr, so the whole
+    # of L0 goes green on a loader that hangs after the sentinel.
+    # Nothing in L0 detects a post-sentinel hang; an earlier version of this
+    # comment wrongly claimed the count covered it. Tasks 2-3 close the gap for
+    # free: from there something after the call has to print for a leg to pass,
+    # which a hung image cannot do.
     cp "$WORK/l0.elf" "$WORK/l0_bad.elf"
     python3 - "$WORK/l0_bad.elf" <<'PY'
 import sys
@@ -116,9 +155,16 @@ PY
     # assembler candidate hidden, the build must FAIL naming what it
     # probed (never skip). The sandbox PATH carries only the tools
     # build_loader.sh itself needs.
+    # `type -P`, not `command -v`: the latter answers with the bare NAME for a
+    # shell builtin (pwd) or a shell function (some shells define one for
+    # grep), which silently created a dangling self-symlink and left the
+    # sandbox missing a tool the test never meant to remove.
+    # `command -v -p` does NOT fix this — verified: with a grep function
+    # defined, `command -v -p grep` still answers "grep", while `type -P grep`
+    # answers /usr/bin/grep. bash-only, and this gate is bash-only already.
     SB="$WORK/sandbox_path"; mkdir -p "$SB"
     for t in bash dirname pwd mktemp head od tr grep rm; do
-        p=$(command -v $t 2>/dev/null) && ln -sf "$p" "$SB/$t"
+        p=$(type -P "$t" 2>/dev/null) && [ -n "$p" ] && ln -sf "$p" "$SB/$t"
     done
     if PATH="$SB" bash "$BOOT/build_loader.sh" 0x400000 "$WORK/l0_noas.elf" >"$WORK/l0_noas.log" 2>&1; then
         bad "L0_missing_as_fails" "build succeeded with no assembler on PATH"

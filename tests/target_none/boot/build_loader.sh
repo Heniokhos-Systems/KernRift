@@ -1,6 +1,11 @@
 #!/bin/bash
 # Build the multiboot long-mode loader with the KernRift image's entry VA
-# baked in (--defsym; movabs resolves it via R_X86_64_64 at link).
+# baked in. `--defsym KR_ENTRY_VA=<va>` defines an ABSOLUTE symbol, so the
+# `movabs $KR_ENTRY_VA, %rax` immediate is final in the .o at ASSEMBLY time —
+# `objdump` on the object already shows `movabs $0x400000,%rax`, and no
+# relocation is emitted for it. (An earlier comment credited a link-time
+# R_X86_64_64; there is no such reloc here, and an elf32 object could not
+# carry that type at all — the object's only relocs are three R_386_32.)
 #
 # REQUIRED toolchain: an x86-capable GNU assembler + linker. FUNCTIONALLY
 # PROBED, not `command -v`-checked: on an aarch64 host (the Linux ARM64 CI
