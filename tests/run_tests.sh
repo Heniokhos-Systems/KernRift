@@ -8360,6 +8360,109 @@ fi
 
 rm -rf "$T6_D"
 
+# --- --emit=image / --load-addr flag surface (sub-project B1) ---
+# Every interaction enumerated, none left to discovery. Each refusal names
+# both flags; artifact absence is asserted alongside the message because a
+# diagnostic that still writes output is half a refusal.
+echo ""
+echo "--- --emit=image / --load-addr flag surface ---"
+IMG_SRC="$DIR/../test_tmp_img_$$.kr"
+printf 'fn main() -> uint64 { return 7 }\n' > "$IMG_SRC"
+img_refuses() {  # $1 name, $2 grep pattern, rest = flags
+    local name="$1" pat="$2"; shift 2
+    TOTAL=$((TOTAL + 1))
+    rm -f /tmp/krc_img_$$
+    local out; out=$($KRC $KRC_FLAGS "$IMG_SRC" -o /tmp/krc_img_$$ "$@" 2>&1); local st=$?
+    if [ $st -ne 0 ] && echo "$out" | grep -q "$pat" && [ ! -f /tmp/krc_img_$$ ]; then
+        PASS=$((PASS + 1)); echo "  $name: PASS"
+    else
+        echo "FAIL: $name (exit=$st, artifact=$([ -f /tmp/krc_img_$$ ] && echo yes || echo no), out=$(echo "$out" | head -1))"
+        FAIL=$((FAIL + 1))
+    fi
+    rm -f /tmp/krc_img_$$
+}
+# 1. image without --target=none (default OS = linux): refused, naming why.
+img_refuses image_needs_target_none "requires --target=none" --arch=x86_64 --emit=image --load-addr=0x400000
+# 2. image with a HOSTED --target: same refusal (the rule is about the
+#    resolved OS, not about the flag's absence).
+img_refuses image_hosted_target_refused "requires --target=none" --arch=arm64 --target=macos --emit=image --load-addr=0x40400000
+# 3-4. riscv32/xtensa: refused, naming the raw path each arch already owns.
+#    The xtensa pattern is a substring UNIQUE to the xtensa message --
+#    "x86_64/arm64 only" appears in both messages, so grepping it would let
+#    a defect that routes xtensa to the riscv32 refusal pass.
+img_refuses image_riscv32_refused "already emits a raw boot image" --arch=riscv32 --target=none --emit=image --load-addr=0x80000000
+img_refuses image_xtensa_refused "xtensa raw emission" --arch=xtensa --target=none --emit=image --load-addr=0xd0000000
+# 5. image without --load-addr: refused.
+img_refuses image_needs_load_addr "requires --load-addr" --arch=x86_64 --target=none --emit=image
+# 6. arm64 unaligned load addr: refused, and the message states the
+#    asymmetry (x86_64 accepts any address) -- a shared diagnostic would be
+#    wrong on one arch (spec R2).
+img_refuses image_a64_unaligned_refused "must be 4096-aligned on arm64" --arch=arm64 --target=none --emit=image --load-addr=0x40400100
+# 7. --load-addr without --emit=image: refused. Pinned because BEFORE this
+#    commit the flag was silently consumed as an input filename (V7).
+img_refuses load_addr_needs_image "only meaningful with --emit=image" --arch=x86_64 --load-addr=0x400000
+# 8-9. malformed values: refused at parse, not silently zero.
+img_refuses load_addr_bad_hex "decimal or 0x-prefixed hex" --arch=x86_64 --target=none --emit=image --load-addr=0xZZ
+img_refuses load_addr_empty "decimal or 0x-prefixed hex" --arch=x86_64 --target=none --emit=image --load-addr=
+# 10. -g with image: refused (the DWARF footer would land inside the blob).
+img_refuses image_dash_g_refused "conflicts with --emit=image" --arch=arm64 --target=none --emit=image --load-addr=0x40400000 -g
+# 11. --legacy with image: the existing target=none refusal fires (pinned so
+#     check ordering can never quietly reopen it).
+img_refuses image_legacy_refused "conflicts with --target=none" --arch=x86_64 --target=none --emit=image --load-addr=0x400000 --legacy
+# 12. --emit last-wins: elfexe then image behaves as image (the refusal
+#     proves image won the chain).
+img_refuses image_emit_last_wins "requires --target=none" --arch=x86_64 --emit=elfexe --emit=image --load-addr=0x400000
+# 13. --load-addr=0: refused. Zero parses fine and passes the arm64
+#     alignment check, but is indistinguishable from unset in every report
+#     and stub that consumes it.
+img_refuses image_load_addr_zero_refused "load-addr=0 is refused" --arch=arm64 --target=none --emit=image --load-addr=0
+# 14-15. --targets= interactions (V12: --targets FORCES the fat path even
+#     with --emit=). Safe only by check ordering -- these rows pin it
+#     so a reorder cannot reopen A's Task-1 fat-path Critical.
+img_refuses image_targets_no_none "requires --target=none" --arch=x86_64 --emit=image --load-addr=0x400000 --targets=linux-x64
+img_refuses image_targets_with_none "cannot build a fat binary" --arch=x86_64 --target=none --emit=image --load-addr=0x400000 --targets=linux-x64
+
+# 16. NO --arch AT ALL: must refuse. V11: with emit_set=1 the fat-guard
+#     "pass --arch" refusal never fires and arch silently defaults to
+#     x86_64 -- which would skip the arm64 alignment validation entirely.
+#     Uses the RAW build/krc2: the make-test wrapper injects --arch=x86_64,
+#     which is the exact condition under test.
+TOTAL=$((TOTAL + 1))
+if [ -f "$DIR/../build/krc2" ]; then IMG_RAW_KRC=$(cd "$DIR/../build" && pwd)/krc2; else IMG_RAW_KRC=""; fi
+rm -f /tmp/krc_imgna_$$
+imgna_out=$("$IMG_RAW_KRC" "$IMG_SRC" -o /tmp/krc_imgna_$$ --target=none --emit=image --load-addr=0x40400100 2>&1); imgna_st=$?
+if [ -n "$IMG_RAW_KRC" ] && [ $imgna_st -ne 0 ] \
+   && echo "$imgna_out" | grep -q "requires an explicit --arch" && [ ! -f /tmp/krc_imgna_$$ ]; then
+    PASS=$((PASS + 1)); echo "  image_needs_explicit_arch: PASS"
+else
+    echo "FAIL: image_needs_explicit_arch (exit=$imgna_st, out=$(echo "$imgna_out" | head -1))"; FAIL=$((FAIL + 1))
+fi
+rm -f /tmp/krc_imgna_$$
+
+# 17. POSITIVE control for the asymmetric alignment rule: x86_64 must ACCEPT
+#     the very address arm64 refuses. Full validation only -- emission lands
+#     in the next commit, so assert the flags CLEAR VALIDATION by checking
+#     the failure (if any) is not a flag refusal. After Task 5 this test is
+#     superseded by image_report_format, which asserts success outright.
+TOTAL=$((TOTAL + 1))
+x86ok_out=$($KRC $KRC_FLAGS "$IMG_SRC" -o /tmp/krc_img_$$ --arch=x86_64 --target=none --emit=image --load-addr=0x400100 2>&1)
+if echo "$x86ok_out" | grep -q "must be 4096-aligned"; then
+    echo "FAIL: image_x86_any_addr_accepted (alignment refusal fired on x86_64)"; FAIL=$((FAIL + 1))
+else
+    PASS=$((PASS + 1)); echo "  image_x86_any_addr_accepted: PASS"
+fi
+rm -f /tmp/krc_img_$$
+
+# 18. -g under --target=none WITHOUT image stays ACCEPTED -- pinned by
+#     sub-project A; the new refusal must not widen.
+TOTAL=$((TOTAL + 1))
+if $KRC $KRC_FLAGS "$IMG_SRC" -o /tmp/krc_img_g_$$ --arch=arm64 --target=none -g >/dev/null 2>&1 && [ -f /tmp/krc_img_g_$$ ]; then
+    PASS=$((PASS + 1)); echo "  target_none_dash_g_still_accepted: PASS"
+else
+    echo "FAIL: target_none_dash_g_still_accepted (A's pinned acceptance regressed)"; FAIL=$((FAIL + 1))
+fi
+rm -f /tmp/krc_img_g_$$ "$IMG_SRC"
+
 # --- syscall choke points under --target=none ------------------------------
 # The per-OS dispatch in this codebase is "special-case Windows/macOS, else
 # fall through to POSIX", so target_os == 4 (--target=none) silently inherits

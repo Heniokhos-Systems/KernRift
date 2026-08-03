@@ -1482,11 +1482,41 @@ krc <file.kr> --target=android -o out
 #   lkm                                                 → Linux kernel module (.ko) — see docs/LKM.md
 #   asm                                                 → annotated assembly listing (to -o path)
 #   ir                                                  → SSA IR dump per function (to stdout)
+#   image                                               → raw headerless flat binary (bare metal)
 krc <file.kr> --emit=pe -o out.exe
 krc <file.kr> --emit=macho -o out
 krc <file.kr> --emit=android -o out
 krc <file.kr> -c -o out.o            # shorthand for --emit=obj
 krc <file.kr> --emit=lkm -o mod.ko   # Linux loadable kernel module (x86_64 only)
+```
+
+### Bare-metal flat images (`--emit=image`)
+
+```
+krc prog.kr --arch=arm64 --target=none --emit=image --load-addr=0x40400000 -o prog.img
+```
+
+Emits a raw headerless flat binary: byte 0 is the first code byte, there is
+no container, and nothing is truncated (`memsz == filesz`). The build prints
+a report line the boot tooling parses:
+
+```
+image: arch=arm64 entry=620 filesz=928 memsz=928 load=1077936128
+```
+
+`entry` is the file offset of `main` (a flat image has no `e_entry`; a boot
+stub must branch to `load + entry`). All values are decimal.
+
+`--load-addr=` is **required, validated, and reported — never embedded**:
+x86_64 images are fully RIP-relative and run at any address; arm64 images
+are position-independent modulo 4 KiB, so a non-4096-aligned `--load-addr`
+is refused on arm64 only. Requires `--target=none` (a hosted OS would put
+its syscalls in the blob), an explicit `--arch=x86_64|arm64` (riscv32/xtensa
+already own their raw paths via `--freestanding`). `-g` is refused. The entry
+stub, stack setup and BSS-zeroing are sub-project B2; until then the loader
+owns SP and nothing zeroes memory beyond what the full image itself carries.
+
+```
 
 # Codegen backend & optimization
 krc <file.kr> --arch=arm64           # default: IR (SSA + optimizer + regalloc)

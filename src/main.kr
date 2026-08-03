@@ -4940,6 +4940,14 @@ static uint64 lc_deprecate_name = 0
 static uint64 lc_reject_name = 0
 static uint64 freestanding = 0
 
+// --emit=image state. load_addr is VALIDATION AND REPORTING ONLY — it is
+// never embedded in the artifact (x86_64 is fully RIP-relative; arm64 is
+// position-independent modulo 4 KiB, both verified by boots at shifted
+// addresses). Statics rather than locals so compile() can read them, the
+// same forward-reference shape freestanding uses at :2340.
+static uint64 load_addr = 0
+static uint64 load_addr_set = 0
+
 // Machine target (--target=esp32): 0 = none, 1 = ESP32 (Xtensa LX6 esp-image
 // at ESP32 load addresses). Orthogonal to target_os — --target= is overloaded:
 // OS names set target_os, machine names set this. Only meaningful with
@@ -5021,6 +5029,56 @@ fn arch_os_pair_supported(uint64 arch, uint64 os) -> uint64 {
         return 0
     }
     return 0
+}
+
+// One message, one place. Every --load-addr= parse failure exits through here
+// rather than repeating the literal at each rejection site: the suite greps
+// this text, and three copies is three chances for one of them to drift.
+fn load_addr_die() {
+    uint64 la_bad = "error: --load-addr= wants a decimal or 0x-prefixed hex address\n"
+    write(2, la_bad, str_len(la_bad))
+    exit(1)
+}
+
+// --load-addr= value: plain decimal or 0x/0X-prefixed hex. Anything else —
+// empty, stray characters, bare "0x", more than 16 digits — refuses loudly:
+// this value feeds the arm64 alignment check, and a malformed input that
+// silently parsed as 0 would PASS that check while meaning nothing.
+fn parse_load_addr(uint64 s) -> uint64 {
+    uint64 p = s
+    uint64 base = 10
+    uint64 c0 = 0
+    unsafe { *(p as uint8) -> c0 }
+    if c0 == 48 {
+        uint64 p1 = p + 1
+        uint64 c1 = 0
+        unsafe { *(p1 as uint8) -> c1 }
+        if c1 == 120 || c1 == 88 {
+            base = 16
+            p = p + 2
+        }
+    }
+    uint64 v = 0
+    uint64 ndigits = 0
+    loop {
+        uint64 c = 0
+        unsafe { *(p as uint8) -> c }
+        if c == 0 { break }
+        uint64 d = 99
+        if c >= 48 && c <= 57 { d = c - 48 }
+        if base == 16 && c >= 97 && c <= 102 { d = c - 87 }
+        if base == 16 && c >= 65 && c <= 70 { d = c - 55 }
+        if d == 99 { load_addr_die() }
+        v = v * base + d
+        ndigits = ndigits + 1
+        // Overflow guard: 16 hex digits is a full uint64, and anything longer
+        // has already wrapped silently by the time we could notice.
+        if ndigits > 16 { load_addr_die() }
+        p = p + 1
+    }
+    // Catches both "--load-addr=" (empty) and "--load-addr=0x" (prefix only).
+    if ndigits == 0 { load_addr_die() }
+    return v
 }
 
 // Spellings for the pair diagnostic. These are the --arch= / --target= values
@@ -5157,14 +5215,29 @@ fn main() {
                     // with .modinfo, struct module, init_module /
                     // cleanup_module symbols. Phase A.1.
                     emit_mode = 7
+                } else if str_eq_full(emit_str, "image") != 0 {
+                    // Raw headerless flat binary for bare metal. emit_mode 8
+                    // is a NEW value on purpose: the raw-path triggers for
+                    // riscv32/xtensa key on emit_mode == 0 + freestanding
+                    // (:2340), so a new value is untouched by every existing
+                    // invocation and byte-identity holds by construction.
+                    emit_mode = 8
                 } else {
                     write(2, "error: unknown emit format '", 28)
                     uint64 esl = str_len(emit_str)
                     write(2, emit_str, esl)
                     write(2, "'\n", 2)
-                    write(2, "valid: elfexe, elf, linux, macho, mac, darwin, pe, windows, win, obj, android, asm, ir, lkm\n", 92)
+                    uint64 evl = "valid: elfexe, elf, linux, macho, mac, darwin, pe, windows, win, obj, android, asm, ir, lkm, image\n"
+                    write(2, evl, str_len(evl))
                     exit(1)
                 }
+            } else if str_starts_with(arg, "--load-addr=", 12) != 0 {
+                // An explicit arm, and it must precede the final
+                // `else { input_path = arg }` fallthrough: before this,
+                // --load-addr=0x400000 was swallowed as an INPUT FILENAME and
+                // the build died with "cannot open '--load-addr=0x400000'".
+                load_addr = parse_load_addr(arg + 12)
+                load_addr_set = 1
             } else if str_eq_full(arg, "-c") != 0 {
                 emit_set = 1
                 emit_mode = 3
@@ -5282,6 +5355,10 @@ fn main() {
                 write(1, "  --emit=lkm                Linux loadable kernel module (.ko)\n", 63)
                 write(1, "  --emit=asm                annotated assembly listing\n", 55)
                 write(1, "  --emit=ir                 dump SSA IR per function\n", 53)
+                uint64 h_img = "  --emit=image             raw headerless flat binary (bare metal; needs --target=none, explicit --arch, --load-addr=)\n"
+                write(1, h_img, str_len(h_img))
+                uint64 h_la = "  --load-addr=<addr>       where the image will be loaded; validated (arm64: 4096-aligned) and reported, never embedded\n"
+                write(1, h_la, str_len(h_la))
                 write(1, "  -c                        shorthand for --emit=obj\n", 53)
                 write(1, "  -o <path>                 output path\n\n", 41)
 
@@ -5509,6 +5586,66 @@ fn main() {
         //            --emit=ir under --target=none is already the oracle the
         //            provider-routing tests read.
         //   elfexe — the default, and the format --target=none emits.
+    }
+
+    // --emit=image (emit_mode 8): sub-project B1's flat-image surface.
+    // Every refusal names both flags, matching the block above. These run
+    // AFTER the target=none block so --legacy/--debug/-container refusals
+    // keep their existing messages when both apply, and BEFORE the fat-binary
+    // guard so --targets= cannot route an image build into compile_fat.
+    if emit_mode == 8 {
+        if target_os != 4 {
+            uint64 im_tn = "error: --emit=image requires --target=none: without it the resolved target OS is a hosted one (the default is linux) and the flat blob would contain that OS's syscalls with no kernel behind them\n"
+            write(2, im_tn, str_len(im_tn))
+            exit(1)
+        }
+        // No --arch at all: refuse. --emit= sets emit_set, which skips the
+        // fat path AND its "pass --arch" refusal, so the arch would
+        // silently default to x86_64 — and the arm64 alignment validation
+        // below would silently not run (the exact "no --arch at all"
+        // entrance that was sub-project A's Task-1 Critical).
+        if arch_set == 0 {
+            uint64 im_ar = "error: --emit=image requires an explicit --arch=x86_64 or --arch=arm64: --load-addr validation is per-arch (arm64 demands 4096-alignment, x86_64 does not), so a silently defaulted arch would validate against the wrong rule\n"
+            write(2, im_ar, str_len(im_ar))
+            exit(1)
+        }
+        if arch == 2 {
+            uint64 im_rv = "error: --emit=image is x86_64/arm64 only: --arch=riscv32 --freestanding already emits a raw boot image (entry hoisted to offset 0, sp preamble) and --emit=image would be a second spelling of it with different entry semantics\n"
+            write(2, im_rv, str_len(im_rv))
+            exit(1)
+        }
+        if arch == 3 {
+            uint64 im_xt = "error: --emit=image is x86_64/arm64 only: xtensa raw emission is --arch=xtensa --freestanding (lx60 boot ELF) or --target=esp32 (esp-image), each with its own entry semantics\n"
+            write(2, im_xt, str_len(im_xt))
+            exit(1)
+        }
+        if load_addr_set == 0 {
+            uint64 im_la = "error: --emit=image requires --load-addr=<addr>: a flat image has no header, so nothing else records where it will run; the address is validated (arm64) and reported, never embedded in the bytes\n"
+            write(2, im_la, str_len(im_la))
+            exit(1)
+        }
+        if load_addr == 0 {
+            // Zero parses cleanly and is 4096-aligned, but every consumer
+            // of the report (and B2's stub) reads 0 as "unset".
+            uint64 im_z = "error: --load-addr=0 is refused: a zero load address is indistinguishable from an unset one in every report and boot stub that consumes it\n"
+            write(2, im_z, str_len(im_z))
+            exit(1)
+        }
+        if arch == 1 && (load_addr & 4095) != 0 {
+            uint64 im_al = "error: --load-addr= must be 4096-aligned on arm64: ADRP page arithmetic is baked at compile time and only survives a page-aligned shift. This constraint is arm64-only -- x86_64 images are RIP-relative and boot at any address\n"
+            write(2, im_al, str_len(im_al))
+            exit(1)
+        }
+        if debug_info_mode != 0 {
+            uint64 im_g = "error: -g conflicts with --emit=image: the DWARF footer and its section headers would land INSIDE the flat blob at addresses derived from the ELF layout the image does not have. Drop -g, or drop --emit=image to keep the ELF that -g understands\n"
+            write(2, im_g, str_len(im_g))
+            exit(1)
+        }
+    }
+    if load_addr_set != 0 && emit_mode != 8 {
+        uint64 la_im = "error: --load-addr= is only meaningful with --emit=image: hosted containers carry their load address in their own headers\n"
+        write(2, la_im, str_len(la_im))
+        exit(1)
     }
 
     // arch x OS validation. This runs AFTER the emit_mode -> target_os
