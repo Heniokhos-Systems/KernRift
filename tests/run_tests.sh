@@ -8449,6 +8449,73 @@ else
 fi
 rm -f /tmp/krc_img_g_$$ "$IMG_SRC"
 
+# --- --stack-top= flag surface (sub-project B2, Task 1) ---
+# D4: the flag's PRESENCE is the opt-in for stub emission (a later task).
+# This task only parses, validates and refuses it -- no stub is emitted, so
+# every accept row below just proves the compiler gets past validation and
+# still writes the ordinary --emit=image artifact. Every refusal row asserts
+# THREE clauses via img_refuses(): nonzero exit, the diagnostic text, and no
+# artifact written -- B1 Task 6 shipped a hole where a refusal that printed
+# the right message, wrote nothing and exited 0 passed a two-clause check.
+echo ""
+echo "--- --stack-top= flag surface (B2 Task 1) ---"
+STK_SRC="$DIR/../test_tmp_stk_$$.kr"
+printf 'fn main() -> uint64 { return 7 }\n' > "$STK_SRC"
+
+# 1. --stack-top outside --emit=image: refused. Gated on --emit=image, NOT
+#    --target=none (review I6) -- --target=none is the WIDER set (riscv32
+#    and xtensa raw emission both live under it without this flag meaning
+#    anything), so this row deliberately keeps --target=none on the line and
+#    drops only --emit=image, to prove the gate is the narrower flag.
+img_refuses stacktop_requires_image "only meaningful with --emit=image" --arch=arm64 --target=none --stack-top=0x40400000
+
+# 2. arm64: a stack top that is not 16-byte aligned is refused -- aarch64
+#    faults on the first SP-relative stack access otherwise, the same
+#    constraint make_stub.py already enforces.
+img_refuses stacktop_arm64_alignment "must be 16-byte aligned on arm64" --arch=arm64 --target=none --emit=image --load-addr=0x40400000 --stack-top=0x40500004
+
+# 3. arm64: a stack top >= 2^32 is refused -- the movz/movk pair the stub
+#    will patch into the entry code covers bits 31:0 only. 0x100000000 is
+#    itself 16-byte aligned, isolating the range check from row 2's.
+img_refuses stacktop_range "must be below 2^32 on arm64" --arch=arm64 --target=none --emit=image --load-addr=0x40400000 --stack-top=0x100000000
+
+# 4. --stack-top=0 is refused, arch-independently. Zero parses cleanly and
+#    passes every alignment/range check on both arches, but is
+#    indistinguishable from "unset" in every report and stub that will
+#    consume it (mirrors --load-addr=0's existing refusal).
+img_refuses stacktop_zero_refused "stack-top=0 is refused" --arch=x86_64 --target=none --emit=image --load-addr=0x400000 --stack-top=0
+
+# 5. x86_64 ACCEPTS a stack top that is not 16-byte aligned -- the asymmetry
+#    with arm64 is deliberate (D4) and must be pinned as an ACCEPT, not a
+#    refusal: a shared alignment rule would be wrong on one of the two
+#    arches. 0x90001 is neither 16-byte aligned nor 4-byte aligned.
+TOTAL=$((TOTAL + 1))
+rm -f /tmp/krc_stk_$$
+if $KRC $KRC_FLAGS "$STK_SRC" -o /tmp/krc_stk_$$ --arch=x86_64 --target=none --emit=image --load-addr=0x400000 --stack-top=0x90001 >/dev/null 2>&1 \
+   && [ -f /tmp/krc_stk_$$ ]; then
+    PASS=$((PASS + 1)); echo "  stacktop_x86_accepts_unaligned_16: PASS"
+else
+    echo "FAIL: stacktop_x86_accepts_unaligned_16"; FAIL=$((FAIL + 1))
+fi
+rm -f /tmp/krc_stk_$$
+
+# 6. x86_64 has its OWN range rule, independent of arm64's 2^32/alignment
+#    rules (review C4/N2): a stack top >= 0x80000000 is refused because the
+#    assembler widens `mov $imm,%rsp` from a 7-byte sign-extended form to a
+#    10-byte movabs at that boundary, moving every later patch site while
+#    the file stays 226 bytes (measured) -- a fixed-offset patch table would
+#    silently patch the wrong bytes above this line.
+img_refuses stacktop_x86_range "below 0x80000000 on x86_64" --arch=x86_64 --target=none --emit=image --load-addr=0x400000 --stack-top=0x80000000
+
+# 6b. x86_64's other bound: a stack top inside 0x1000-0x4000 collides with
+#     the boot stub's identity-map page tables and is refused. Same row
+#     family as #6 -- both bounds come from the flag value alone, no image
+#     size needed (the stack-vs-image overlap check is Task 4's, not this
+#     task's -- review N8).
+img_refuses stacktop_x86_range_collision "0x1000-0x4000 on x86_64" --arch=x86_64 --target=none --emit=image --load-addr=0x400000 --stack-top=0x2000
+
+rm -f "$STK_SRC"
+
 # --- --emit=image EMISSION + the `image:` report line (sub-project B1, T5) ---
 #
 # WHICH ROWS WERE RED BEFORE THE IMPLEMENTATION, AND WHY THAT MATTERS.

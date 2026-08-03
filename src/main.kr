@@ -5024,6 +5024,16 @@ static uint64 freestanding = 0
 static uint64 load_addr = 0
 static uint64 load_addr_set = 0
 
+// --stack-top= state (sub-project B2, D4): the flag's PRESENCE is the opt-in
+// for entry-stub emission in a later task. This task parses, validates and
+// reports it, and emits nothing -- same VALIDATION-ONLY shape as load_addr
+// above, and the same forward-reference reason (compile() can read it).
+// Deliberately NO default: an unset stack means "no stub", never "guess
+// one" -- a silently defaulted stack boots on the author's board and faults
+// silently on someone else's.
+static uint64 stack_top = 0
+static uint64 stack_top_set = 0
+
 // Machine target (--target=esp32): 0 = none, 1 = ESP32 (Xtensa LX6 esp-image
 // at ESP32 load addresses). Orthogonal to target_os — --target= is overloaded:
 // OS names set target_os, machine names set this. Only meaningful with
@@ -5154,6 +5164,57 @@ fn parse_load_addr(uint64 s) -> uint64 {
     }
     // Catches both "--load-addr=" (empty) and "--load-addr=0x" (prefix only).
     if ndigits == 0 { load_addr_die() }
+    return v
+}
+
+// One message, one place, mirroring load_addr_die() above. Every
+// --stack-top= parse failure exits through here rather than repeating the
+// literal at each site.
+fn stack_top_die() {
+    uint64 st_bad = "error: --stack-top= wants a decimal or 0x-prefixed hex address\n"
+    write(2, st_bad, str_len(st_bad))
+    exit(1)
+}
+
+// --stack-top= value: same grammar as --load-addr= (parse_load_addr above)
+// -- plain decimal or 0x/0X-prefixed hex. Duplicated rather than shared:
+// the two flags have independent die() paths naming independent flags, and
+// a shared parser would need a function-pointer callback to keep that, for
+// no real savings over these ~30 lines.
+fn parse_stack_top(uint64 s) -> uint64 {
+    uint64 p = s
+    uint64 base = 10
+    uint64 c0 = 0
+    unsafe { *(p as uint8) -> c0 }
+    if c0 == 48 {
+        uint64 p1 = p + 1
+        uint64 c1 = 0
+        unsafe { *(p1 as uint8) -> c1 }
+        if c1 == 120 || c1 == 88 {
+            base = 16
+            p = p + 2
+        }
+    }
+    uint64 v = 0
+    uint64 ndigits = 0
+    loop {
+        uint64 c = 0
+        unsafe { *(p as uint8) -> c }
+        if c == 0 { break }
+        uint64 d = 99
+        if c >= 48 && c <= 57 { d = c - 48 }
+        if base == 16 && c >= 97 && c <= 102 { d = c - 87 }
+        if base == 16 && c >= 65 && c <= 70 { d = c - 55 }
+        if d == 99 { stack_top_die() }
+        v = v * base + d
+        ndigits = ndigits + 1
+        // Overflow guard: 16 hex digits is a full uint64, and anything
+        // longer has already wrapped silently by the time we could notice.
+        if ndigits > 16 { stack_top_die() }
+        p = p + 1
+    }
+    // Catches both "--stack-top=" (empty) and "--stack-top=0x" (prefix only).
+    if ndigits == 0 { stack_top_die() }
     return v
 }
 
@@ -5314,6 +5375,14 @@ fn main() {
                 // the build died with "cannot open '--load-addr=0x400000'".
                 load_addr = parse_load_addr(arg + 12)
                 load_addr_set = 1
+            } else if str_starts_with(arg, "--stack-top=", 12) != 0 {
+                // Same V7 hazard load_addr's arm comments on: without an
+                // explicit arm here, --stack-top=... falls through to the
+                // final `else { input_path = arg }` and dies with
+                // "cannot open '--stack-top=...': file not found" instead
+                // of naming itself.
+                stack_top = parse_stack_top(arg + 12)
+                stack_top_set = 1
             } else if str_eq_full(arg, "-c") != 0 {
                 emit_set = 1
                 emit_mode = 3
@@ -5435,6 +5504,8 @@ fn main() {
                 write(1, h_img, str_len(h_img))
                 uint64 h_la = "  --load-addr=<addr>       where the image will be loaded; validated (arm64: 4096-aligned) and reported, never embedded\n"
                 write(1, h_la, str_len(h_la))
+                uint64 h_st = "  --stack-top=<addr>       opts into an entry stub (later); validated per-arch (arm64: 16-byte aligned, <2^32; x86_64: <0x80000000, outside 0x1000-0x4000), no default\n"
+                write(1, h_st, str_len(h_st))
                 write(1, "  -c                        shorthand for --emit=obj\n", 53)
                 write(1, "  -o <path>                 output path\n\n", 41)
 
@@ -5717,10 +5788,73 @@ fn main() {
             write(2, im_g, str_len(im_g))
             exit(1)
         }
+        // --stack-top= validation (sub-project B2, D4). Only runs when the
+        // flag is actually present -- unlike --load-addr=, --stack-top= has
+        // no "image requires it" refusal here: the flag's ABSENCE is a
+        // legal, meaningful choice (no stub, later task), so Task 1 must
+        // not turn "unset" into an error.
+        if stack_top_set != 0 {
+            if stack_top == 0 {
+                // Zero parses cleanly and passes every alignment/range
+                // check below on both arches, but is indistinguishable
+                // from "unset" in every report and stub that will consume
+                // it -- mirrors --load-addr=0's refusal just above.
+                uint64 st_z = "error: --stack-top=0 is refused: a zero stack pointer faults on the first push, and is indistinguishable from unset in every report and boot stub that consumes it\n"
+                write(2, st_z, str_len(st_z))
+                exit(1)
+            }
+            // Validation is ARCH-ASYMMETRIC (spec D4) and each half is
+            // stated separately in its own diagnostic -- a shared message
+            // would be wrong on whichever arch it doesn't apply to.
+            if arch == 1 {
+                // aarch64 faults on the very first SP-relative stack access
+                // if SP is not 16-byte aligned -- the same constraint
+                // make_stub.py already refuses on. x86_64 has no such rule.
+                if (stack_top & 15) != 0 {
+                    uint64 st_al = "error: --stack-top= must be 16-byte aligned on arm64: aarch64 faults on the first SP-relative stack access if SP is not 16-byte aligned. This constraint is arm64-only -- x86_64 accepts any alignment\n"
+                    write(2, st_al, str_len(st_al))
+                    exit(1)
+                }
+                // The movz/movk pair the stub will patch into the entry
+                // code covers bits 31:0 only, so anything >= 2^32 cannot be
+                // materialized into SP by that pair. x86_64 has its own,
+                // different range rule below instead.
+                if stack_top >= 4294967296 {
+                    uint64 st_rg = "error: --stack-top= must be below 2^32 on arm64: the movz/movk pair the stub patches into the entry code covers bits 31:0 only. This constraint is arm64-only -- x86_64 stacks are bounded by their own range rule instead\n"
+                    write(2, st_rg, str_len(st_rg))
+                    exit(1)
+                }
+            }
+            if arch == 0 {
+                // x86_64 needs its own range rule -- it has no --load-addr
+                // constraint beyond != 0 today, so this is new ground.
+                // Bound 1: must not collide with the boot stub's identity-
+                // map page tables, which live at physical 0x1000-0x4000.
+                if stack_top >= 4096 && stack_top < 16384 {
+                    uint64 st_pt = "error: --stack-top= must not fall inside 0x1000-0x4000 on x86_64: the boot stub's identity-map page tables live there, and a stack in that range would corrupt them on the first push. This constraint is x86_64-only -- arm64 has no page tables in the flat image\n"
+                    write(2, st_pt, str_len(st_pt))
+                    exit(1)
+                }
+                // Bound 2: must be < 2^31. At or above that boundary the
+                // assembler widens `mov $imm,%rsp` from the 7-byte sign-
+                // extended form to a 10-byte movabs -- moving every later
+                // patch site while the file stays 226 bytes (measured).
+                if stack_top >= 2147483648 {
+                    uint64 st_hi = "error: --stack-top= must be below 0x80000000 on x86_64: at or above 2^31 the assembler widens `mov $imm,%rsp` from a 7-byte sign-extended form to a 10-byte movabs, moving every later patch site while the file size stays fixed. This constraint is x86_64-only -- arm64 is bounded by the movz/movk pair instead\n"
+                    write(2, st_hi, str_len(st_hi))
+                    exit(1)
+                }
+            }
+        }
     }
     if load_addr_set != 0 && emit_mode != 8 {
         uint64 la_im = "error: --load-addr= is only meaningful with --emit=image: hosted containers carry their load address in their own headers\n"
         write(2, la_im, str_len(la_im))
+        exit(1)
+    }
+    if stack_top_set != 0 && emit_mode != 8 {
+        uint64 st_im = "error: --stack-top= is only meaningful with --emit=image: hosted containers manage the stack pointer through their own loader, not a flag\n"
+        write(2, st_im, str_len(st_im))
         exit(1)
     }
 
