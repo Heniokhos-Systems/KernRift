@@ -1,0 +1,19 @@
+// Leg-3 negative control (b): a data abort AFTER MID. With no vector table
+// installed, the abort parks the PC away from heap_bump_halt's loop (a
+// planning run observed 0x200). This program proves the parked-PC
+// assertion is load-bearing: without it, "PRE+MID then hang" passes for
+// any crash whatsoever.
+import "../std/uart_pl011.kr"
+import "../std/heap_bump.kr"
+fn main() -> uint64 {
+    pl011_init()
+    println_str("PRE")
+    heap_bump_init(0x40500000, 4096)
+    uint64 p = alloc(64)
+    println_str("MID")
+    uint64 addr = 0x4000000000
+    uint64 bad = 0
+    unsafe { *(addr as uint64) -> bad }
+    println_str("POST")
+    return p + bad
+}

@@ -1,0 +1,19 @@
+// Leg-3 subject: heap exhaustion, DISCRIMINATED. The three observables:
+//   PRE  — main reached, UART up.
+//   MID  — heap_bump_init ran AND a real alloc was served, so the later
+//          halt cannot be heap_bump_halt(1,...) (uninitialised).
+//   parked PC == load + offset(self-branch) — the machine is inside
+//          heap_bump_halt's loop{}, so the halt is not a stray abort.
+// Together: fail_reason == 2, observed from outside, no stdlib edits.
+import "../std/uart_pl011.kr"
+import "../std/heap_bump.kr"
+fn main() -> uint64 {
+    pl011_init()
+    println_str("PRE")
+    heap_bump_init(0x40500000, 4096)
+    uint64 p = alloc(64)
+    println_str("MID")
+    uint64 q = alloc(1048576)
+    println_str("POST")
+    return p + q
+}
