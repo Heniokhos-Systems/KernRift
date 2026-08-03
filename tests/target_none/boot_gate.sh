@@ -32,9 +32,33 @@ DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO="$(cd "$DIR/../.." && pwd)"
 KRC="${KRC:-$REPO/build/krc2}"
 BOOT="$DIR/boot"
-PASS=0; FAIL=0
-ok()   { PASS=$((PASS + 1)); echo "  $1: PASS${2:+ ($2)}"; }
-bad()  { FAIL=$((FAIL + 1)); echo "FAIL: $1${2:+ ($2)}"; }
+PASS=0; FAIL=0; SKIP=0
+SEEN=""
+ok()   { PASS=$((PASS + 1)); SEEN="$SEEN $1"; echo "  $1: PASS${2:+ ($2)}"; }
+bad()  { FAIL=$((FAIL + 1)); SEEN="$SEEN $1"; echo "FAIL: $1${2:+ ($2)}"; }
+
+# A leg whose early check fails `return`s, so its SIBLING checks never run --
+# and a red run then UNDER-REPORTS its own scope: breaking L1's compile step
+# printed "1 pass, 1 FAIL" for a leg that contains five checks, so four
+# assertions silently vanished from the tally rather than being named. That is
+# fail-closed (the run is still red) but it hides how much is unverified.
+#
+# run_leg declares the checks a COMPLETE run of a leg reports, and names every
+# one that did not run as SKIP. The roster deliberately omits failure-only
+# names (L1_compile and friends report on the failure path only), so a green
+# run has an empty skip set by construction.
+run_leg() {
+    local fn="$1"; shift
+    "$fn"
+    local c
+    for c in "$@"; do
+        case " $SEEN " in
+            *" $c "*) ;;
+            *) SKIP=$((SKIP + 1))
+               echo "  $c: SKIP (an earlier failure in $fn stopped the leg before this check ran)" ;;
+        esac
+    done
+}
 
 # Import resolution: programs must sit in-repo so "../std/…" hits the tree
 # under test, not the installed stdlib (same reasoning as prove_no_syscalls).
@@ -696,13 +720,21 @@ leg4() {
     fi
 }
 
-leg0
-leg1
-leg2
-leg3
-leg4
+run_leg leg0 L0_loader_builds L0_loader_liveness_sentinel L0_corrupt_magic_rejected L0_missing_as_fails
+run_leg leg1 L1_sentinel L1_control_no_image L1_control_offset0 L1_control_entry_minus4
+run_leg leg2 L2_sentinel L2_control_no_image L2_control_offset0 L2_control_entry_minus4
+run_leg leg3 L3_unique_halt_loop L3_exhaustion_halt L3_control_uninit L3_control_crash
+run_leg leg4 L4_aligned_prints_misaligned_silent
 
 echo ""
-echo "boot gate: $PASS pass, $FAIL FAIL"
+echo "boot gate: $PASS pass, $FAIL FAIL, $SKIP SKIP"
 [ "$FAIL" = 0 ] || exit 1
+# A SKIP with no FAIL cannot happen by the design above -- every skip is
+# downstream of an early return, and every early return calls bad(). If it
+# does happen, a roster name is misspelled or a check was renamed, and the
+# gate would otherwise report a smaller suite as green. Fail loudly.
+if [ "$SKIP" != 0 ]; then
+    echo "FAIL: boot_gate_roster ($SKIP checks skipped with no failure to explain them -- a run_leg roster name no longer matches any ok/bad call)"
+    exit 1
+fi
 exit 0

@@ -264,32 +264,20 @@ DERIVE
         g1row "suite_$nm" "$flags" "$REPO/$input"
     done < "$G1_DERIVED"
 
-    # --- the one intended artifact change on this branch --------------------
+    # --- NOTE: the --emit=asm normalisation carve-out is GONE ---------------
     #
-    # The --emit=asm listing writer had three wrong write() lengths, fixed by
-    # this branch's first commit, so every asm row's bytes MOVE -- legitimately.
-    # The rows are not dropped from the matrix, and they are not compared
-    # loosely: the BEFORE listing has exactly those three defects UNDONE and
-    # must then be byte-identical to the AFTER listing. Anything else that
-    # moved in an assembly listing still fails.
-    #
-    #   header: "...listing;"  ->  "...listing\n;"   (declared 27, real 28)
-    #   mfence: over-read by 1 emitted a trailing NUL
-    #   lock:   truncated by 1 lost the third "."
-    #
-    # An exclusion would have been the easy version of this and would have
-    # taken 18 of the 121 rows out of the gate permanently.
-    g1_norm_asm() {
-        python3 - "$1" "$2" <<'NORMPY'
-import sys
-b = open(sys.argv[1], "rb").read()
-if b"; KernRift assembly listing;" not in b:
-    sys.exit(3)   # the listing header is not what this normalisation expects
-n = b.replace(b"; KernRift assembly listing;", b"; KernRift assembly listing\n;", 1)
-n = n.replace(b"mfence\x00", b"mfence").replace(b"lock ..\n", b"lock ...\n")
-open(sys.argv[2], "wb").write(n)
-NORMPY
-    }
+    # It existed because the listing writer had three wrong write() lengths
+    # (header declared 27 for a 28-byte string, so "...listing" lost its \n;
+    # mfence over-read by 1 and emitted a trailing NUL; lock truncated by 1 and
+    # lost its third "."). Those were fixed BEFORE the current TN_BASE, so the
+    # BEFORE compiler now emits correct listings too and there is nothing left
+    # to normalise: the carve-out's own guard fired (`sys.exit(3)`) on all 18
+    # asm rows, reporting 18 failures for an artifact difference that no longer
+    # exists. Byte-identity passed 129/129 on the RAW, un-normalised bytes in
+    # that same run -- which is the proof that removing this is safe rather
+    # than a loosening. Asm rows are now compared exactly, like every other row.
+    # If a future branch legitimately moves listing bytes again, add the
+    # normalisation back WITH its guard, do not exclude the rows.
 
     # --- run the matrix -----------------------------------------------------
     G1_ROWS=0; G1_SAME=0; G1_DIFF=0; G1_ARTIFACTS=0; G1_DIFFLIST=""; G1_NOBUILD=""
@@ -305,17 +293,6 @@ NORMPY
         "$TMP/krc_before" $flags "$input" -o "$b" >/dev/null 2>&1; bst=$?
         # shellcheck disable=SC2086
         "$KRC"            $flags "$input" -o "$a" >/dev/null 2>&1; ast=$?
-        case "$flags" in
-            *--emit=asm*)
-                if [ -f "$b" ]; then
-                    if ! g1_norm_asm "$b" "$b.norm"; then
-                        bad "gate1_asm_normalise_$name" "the listing header is not the shape this branch's fix produced"
-                    else
-                        mv "$b.norm" "$b"
-                    fi
-                fi
-                ;;
-        esac
         bh="absent"; ah="absent"
         [ -f "$b" ] && bh=$(sha256sum < "$b" | cut -d' ' -f1)
         [ -f "$a" ] && ah=$(sha256sum < "$a" | cut -d' ' -f1)
