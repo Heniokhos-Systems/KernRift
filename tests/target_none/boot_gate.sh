@@ -82,11 +82,27 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-# readelf leaves this list in Task 6 (its last user, build_image's ELF
-# form, is replaced by the compiler's image: report there). as/ld are NOT
-# probed here — build_loader.sh does its own FUNCTIONAL probe, because on
-# an aarch64 host `command -v as` answers "yes" and means "no" (review round 1 C4).
-for t in qemu-system-x86_64 qemu-system-aarch64 python3 readelf timeout od stat cmp awk sed; do
+# TASK 6 REMOVED readelf AND awk. Their only user in this file was one line
+# inside build_image's ELF form (`readelf -h | awk '/Entry point/'`), and that
+# body is now the compiler's own `image:` report — grep the file, there is no
+# second call site. A hard dependency on a tool nothing runs is not harmless:
+# absence is a FAILURE here by policy, so a dead entry false-fails the whole
+# gate on a machine that never needed the tool. Removing them is therefore a
+# correctness fix, not tidying.
+#
+# `cmp` is a PRE-EXISTING dead entry (no user in this file or in
+# build_loader.sh — it predates Task 6). Left in place deliberately so this
+# task's diff contains only what this task orphaned; recorded here so the next
+# reader does not have to re-derive it.
+#
+# Still live, and where: python3 (make_stub.py / qmp_pc.py / loop_offset_a64),
+# timeout + both qemu-system binaries (every boot), stat (L0's size report),
+# sed (L0's indented build log, build_image's report parse), od (build_loader.sh).
+#
+# as/ld are NOT probed here — build_loader.sh does its own FUNCTIONAL probe,
+# because on an aarch64 host `command -v as` answers "yes" and means "no"
+# (review round 1 C4).
+for t in qemu-system-x86_64 qemu-system-aarch64 python3 timeout od stat cmp sed; do
     if ! command -v "$t" >/dev/null 2>&1; then
         bad "boot_dep_$t" "$t not found — the boot gate REQUIRES it; absence is a failure, not a skip"
     fi
@@ -204,26 +220,65 @@ calibrate_silence() {
 A64_LOAD=0x40400000; A64_STUB=0x40300000; A64_SP=0x40800000
 X86_LOAD=0x400000
 
-# Compile a gate program and echo the ENTRY FILE OFFSET (decimal) on stdout.
-# Task-2 form: --target=none ELF; the whole file is loaded at $*_LOAD, and
-# because the ELF LOAD phdr maps file offset 0 to VA 0x400000, the entry's
-# file offset is e_entry - 0x400000. (Task 6 swaps this body for --emit=image
-# and the compiler's own report line; callers stay unchanged.)
+# Compile a gate program to a RAW HEADERLESS IMAGE and echo the ENTRY FILE
+# OFFSET (decimal) on stdout. Callers are unchanged from the Task-2 ELF form
+# this replaced; everything else about the artifact changed.
 #
-# DERIVED, not assumed: both arches really do emit a single LOAD at offset 0 /
-# VA 0x400000 with FileSiz == MemSiz (observed: x86 0x470, arm64 0x490), so
-# there is no BSS tail that raw loading would leave unzeroed, and the file
-# offset arithmetic is exact rather than approximately right.
+# THIS IS THE FIRST TIME ANYTHING --emit=image PRODUCES HAS EXECUTED. Task 5
+# proved the images look right — statics located by initialiser value, every
+# arm64 ADRP pair resolving in image coordinates, entry cross-checked against
+# the ELF's e_entry — and said so plainly: all 13 of its rows are static, and
+# each can pass with the image broken. Every leg below is now a run.
+#
+# THE REPORT IS THE ONLY SOURCE OF THE ENTRY OFFSET, which is new. A flat
+# image has no e_entry, no phdrs and no section table, so the number the gate
+# branches to is a number the compiler printed and nothing can cross-check on
+# the artifact. The gate therefore PROVES it instead of trusting it: legs 1
+# and 2 each boot `load + entry` (must print a computed sentinel) alongside
+# `load + 0` and `load + entry - 4` (must stay silent) — see those legs'
+# headers for what each address actually is in image form.
+#
+# EXIT STATUS IS CHECKED, AND SO IS THE ARTIFACT'S SIZE. The `image:` line is
+# printed BEFORE the file is written (src/main.kr, report ~:3204 vs
+# codegen_write_output ~:3383), so a well-formed report can describe a file
+# that does not exist and a grep-only parse goes green on it. Exit status
+# alone does not close that either: codegen_write_output ignores file_write's
+# return (src/codegen.kr:16126-16130), so a SHORT write exits 0. All three are
+# required here — exit 0, a parsable line, and on-disk size == the reported
+# filesz. The full compiler output is kept beside the artifact ($WORK survives
+# a red run) instead of going to /dev/null as the ELF form did, so a failed
+# compile leaves its diagnostic behind.
+#
+# --load-addr is MANDATORY for --emit=image and is validated and reported,
+# never embedded (Task 5: image_load_addr_not_embedded_*). That is exactly
+# what lets leg 4 compile at $A64_LOAD and then boot THE SAME BYTES at
+# +0x100 — the artifact does not depend on the address it was compiled for,
+# so the misaligned half of that pair is a load-time fact about arm64 ADRP
+# arithmetic and not a different build.
 build_image() {
     local arch="$1" src="$2" out="$3"
-    local aflag="x86_64"
-    [ "$arch" = "a64" ] && aflag="arm64"
-    if ! "$KRC" --arch=$aflag --target=none "$src" -o "$out" >/dev/null 2>&1; then
+    local aflag="x86_64" iload="$X86_LOAD"
+    if [ "$arch" = "a64" ]; then aflag="arm64"; iload="$A64_LOAD"; fi
+    local log="$out.rep"
+    rm -f "$out"
+    if ! "$KRC" --arch=$aflag --target=none --emit=image \
+                --load-addr=$(printf 0x%x "$iload") "$src" -o "$out" >"$log" 2>&1; then
+        echo "  build_image: $KRC exited nonzero for $src (see $log)" >&2
         return 1
     fi
-    local eva
-    eva=$(readelf -h "$out" | awk '/Entry point/{print $4}')
-    echo $(( eva - 0x400000 ))
+    local entry filesz ondisk
+    entry=$(sed -n 's/^image: .* entry=\([0-9][0-9]*\) .*$/\1/p' "$log")
+    filesz=$(sed -n 's/^image: .* filesz=\([0-9][0-9]*\) .*$/\1/p' "$log")
+    if [ -z "$entry" ] || [ -z "$filesz" ]; then
+        echo "  build_image: no parsable 'image:' line for $src (see $log)" >&2
+        return 1
+    fi
+    ondisk=$(stat -c%s "$out" 2>/dev/null)
+    if [ "$ondisk" != "$filesz" ]; then
+        echo "  build_image: report claims filesz=$filesz but $out is ${ondisk:-ABSENT} B" >&2
+        return 1
+    fi
+    echo "$entry"
 }
 
 # One arm64 boot: image file at $1's load addr, stub branching to entry.
@@ -316,6 +371,17 @@ boot_run_qmp() {
 # File offset of the UNIQUE arm64 self-branch (loop{} == word 0x14000000).
 # Echoes the decimal offset; fails the calling leg if the count is not
 # exactly 1.
+#
+# SINCE TASK 6 THE SCAN RUNS ON THE RAW IMAGE, so the offset it returns is
+# already the image offset and L3's `A64_LOAD + offset` needs no header
+# correction — measured, both forms: 0x314 = 788 under the Task-2 ELF, 668
+# here, and 788 - 668 = 120, the Ehdr+Phdr that is no longer there. The scan
+# still covers the whole file including static data (Task 3 concern 3): a
+# coincidental 0x14000000 data word yields AMBIG:N and a FALSE FAILURE, never
+# a false pass. Task 3 hoped Task 6 would let this be narrowed to .text; it
+# does the opposite — an image has no section table at all, so whole-file is
+# now the only possible scan, and the fail-safe direction is what makes that
+# acceptable rather than a regression.
 #
 # THE UNIQUENESS IS ASSERTED, NOT ASSUMED, and that is the whole reason this
 # is a separate check with its own PASS line. L3 reads "PC == load + offset"
@@ -449,13 +515,18 @@ PY
 #      instructions are stack bookkeeping and +4/+8/+12 all still print (V16,
 #      review round 1 C1).
 #
-#      WHAT OFFSET 0 ACTUALLY IS, stated as observed rather than as planned:
-#      in TODAY's --target=none form the image is an ELF file loaded raw, so
-#      file offset 0 is the ELF HEADER (`7f 45 4c 46 …`) executed as
-#      instructions — not the UART provider's first helper, which is where it
-#      will land once Task 6 makes the image headerless. Either way it is the
-#      wrong answer the gate must reject, and it was observed silent here
-#      (serial held the loader sentinel `KR-LDR|` and nothing else).
+#      WHAT OFFSET 0 ACTUALLY IS — RE-OBSERVED AT TASK 6, NOT INHERITED. Under
+#      the Task-2 ELF form, offset 0 was the ELF HEADER (`7f 45 4c 46 …`)
+#      executed as instructions. `--emit=image` emits no header, so offset 0 is
+#      now REAL CODE and the control survives for a DIFFERENT REASON. Read off
+#      the artifact under test (capstone, x86 image, offset 0): it is
+#      `uart16550_outb` (std/uart_16550.kr:54), the UART provider's first
+#      helper — push/push/…,
+#      `mov rbx,rdi; mov r12,rsi`, `out dx,al` with whatever the loader left in
+#      rdi/rsi, then epilogue + `ret` back into the loader, which hlt-loops.
+#      One garbage byte may go to one garbage I/O port; the sentinel is ten
+#      formatted digits that only main computes, so it cannot appear. Observed
+#      silent in image form, not assumed to carry over.
 #
 #      THE SENTINEL IS COMPUTED, not echoed: `2000000016` is `2000000007`
 #      (a static written in main) plus 9 (returned from a call), formatted at
@@ -493,11 +564,22 @@ leg1() {
     else
         bad "L1_control_no_image" "serial held: '$(cat "$WORK/l1_noimg.txt")'"
     fi
-    # Controls (b)/(c): offset 0 and entry-4 must not print — both observed
-    # silent on this machine against these exact artifacts (see the header
-    # note on what offset 0 really is today). They prove the entry value is
+    # Controls (b)/(c): offset 0 and entry-4 must not print — both re-observed
+    # silent in IMAGE form (see the header note; offset 0 is now uart16550_outb,
+    # not the ELF header it was through Task 5). They prove the entry value is
     # load-bearing at function granularity; instruction-level +4 is NOT
     # observable (V16), which is why it is not used as a control.
+    #
+    # SINCE TASK 6 THESE ARE ALSO THE REPORT-ACCURACY CONTROLS. `entry` no
+    # longer comes from a header the loader could be trusted to agree with — it
+    # is parsed from the compiler's own `image:` line, and a flat image has no
+    # e_entry to check it against. So the leg's subject (boot at the REPORTED
+    # entry, must print) and these two (boot at values either side of it, must
+    # not) together make the report load-bearing: a report that drifts by a
+    # function boundary turns the subject silent or lights one of these.
+    # Instruction-level drift (entry+4/8/12) is NOT observable — main's first
+    # instructions are stack bookkeeping and still print (review round 1 C1);
+    # D1 states this limitation.
     #
     # THE BOOT'S EXIT STATUS IS CHECKED FIRST, AND THAT IS THE WHOLE POINT.
     # These three legs read silence as evidence, so a boot that never happened
@@ -525,12 +607,22 @@ leg1() {
 # L2 — arm64 boots and prints the computed sentinel. Same three controls
 #      (no-image; offset 0; entry - 4 — never entry + 4, see V16).
 #
-#      Position independence is what makes the 0x40400000 load address legal
-#      even though the ELF is linked at 0x400000: every static access in the
-#      arm64 output is `adrp x16, …` + a fixed displacement and every call is
-#      a PC-relative `bl` (checked in the disassembly: 18 adrp, zero absolute
-#      addresses). The x86 image is loaded at its link address, so the
+#      Position independence is what makes the 0x40400000 load address legal:
+#      every static access in the arm64 output is `adrp x16, …` + a fixed
+#      displacement and every call is a PC-relative `bl` (checked in the
+#      disassembly: 18 adrp, zero absolute addresses). Since Task 6 the image
+#      is also COMPILED with --load-addr=0x40400000, but that address is only
+#      validated and echoed — Task 5's image_load_addr_not_embedded_arm64
+#      proves two different aligned addresses yield one byte-identical
+#      artifact, so position independence is still what is doing the work.
+#      The x86 image is loaded at the address it was built for, so the
 #      question does not arise there.
+#
+#      OFFSET 0 IN IMAGE FORM, re-observed here too: `pl011_reg_write`
+#      (std/uart_pl011.kr's first helper) — `sub sp,…`, an `adrp` load of the
+#      PL011 base, `str w20,[x19]` through a garbage x0/x1 pair, then `ret` to
+#      x30, which the reset stub never set (it branches with `b`, not `bl`).
+#      No formatted digits can come out of it.
 # =============================================================================
 leg2() {
     echo "--- L2: arm64 boot + computed sentinel ---"
@@ -565,8 +657,15 @@ leg2() {
     else
         ok "L2_control_no_image" "no image => no sentinel (boot ran, capture present)"
     fi
-    # Controls (b)/(c): offset 0 and entry-4 — both observed silent on this
-    # machine against these exact artifacts (empty PL011 capture in each case).
+    # Controls (b)/(c): offset 0 (pl011_reg_write with garbage args, `ret`ing
+    # to an x30 the stub never set) and entry-4 (the previous function's `ret`)
+    # — both re-observed silent in IMAGE form, empty PL011 capture in each case.
+    # SINCE TASK 6 THESE ARE ALSO THE REPORT-ACCURACY CONTROLS: `entry` is
+    # parsed from the compiler's `image:` line and a flat image has no e_entry,
+    # so a report that drifts from the artifact by a function boundary turns
+    # the subject silent or lights one of these up. Instruction-level drift
+    # (entry+4/8/12) is NOT observable — main's first instructions are stack
+    # bookkeeping and still print (review round 1 C1); D1 states this limitation.
     if ! a64_boot "$A64_LOAD" "$WORK/sa.img" 0 "$WORK/l2_off0.txt" RUNOUT; then
         bad "L2_control_offset0" "the boot did not run — silence proves nothing"
     elif grep -q "1000000016" "$WORK/l2_off0.txt"; then
@@ -675,13 +774,24 @@ leg3() {
 }
 
 # =============================================================================
-# L4 — arm64 alignment, RUNTIME PAIR: one leg, one image, two runs. The
-#      aligned run must PRINT — that is what proves the harness is live, since
-#      a silence-only assertion once passed with no image loaded at all
-#      (review 2, O5) — and the +0x100 run must be silent. The BLOCKING
-#      compile-time refusal of an unaligned --load-addr belongs to the flag
-#      surface (Task 4) and is wired in here from Task 6 on; asserting it
-#      today would be asserting something that does not exist.
+# L4 — arm64 alignment. THE BLOCKING ASSERTION IS THE COMPILE-TIME REFUSAL of
+#      an unaligned --load-addr (per the spec's leg-4 correction): delete that
+#      check and the leg exits 0, which is what makes it the one that can be
+#      shown to fail. The RUNTIME PAIR — one image, two runs, aligned prints
+#      and +0x100 silent — is the SUPPORTING observation: it is why the
+#      refusal exists at all, since it shows what an unaligned load actually
+#      does to a real boot. The aligned half must PRINT, because a
+#      silence-only assertion once passed with no image loaded at all
+#      (review 2, O5).
+#
+#      THE TWO COMPILE-TIME CHECKS RUN FIRST, DELIBERATELY, and that is a
+#      departure from the brief's "append after the runtime pair". leg4's
+#      runtime half has two early `return`s, so appending would have made the
+#      BLOCKING assertion the first thing hidden by a failure of the
+#      supporting one. run_leg would name both as SKIP (Task 4's fix), so
+#      nothing would go silently missing either way — but a red run should
+#      still report the leg's primary assertion rather than skip it, and these
+#      two checks depend on nothing the runtime pair produces.
 #
 #      WHY 0x100 AND NOT SOME LARGER SHIFT. arm64 position independence here
 #      is real but PAGE-GRANULAR: every static reaches its data through
@@ -698,8 +808,42 @@ leg3() {
 #      asserting a falsehood.
 # =============================================================================
 leg4() {
-    echo "--- L4: arm64 misalignment runtime pair ---"
+    echo "--- L4: arm64 misalignment (compile refusal + runtime pair) ---"
     cp "$BOOT/sentinel_a64.kr" "$WORK/sentinel_a64.kr"
+    cp "$BOOT/sentinel_x86.kr" "$WORK/sentinel_x86_l4.kr"
+    # BLOCKING: the unaligned --load-addr must be refused AT COMPILE TIME.
+    # THREE things are asserted, and each covers a way the other two pass on
+    # something that is not the refusal:
+    #   * nonzero exit    — a refusal that exits 0 is not a refusal;
+    #   * the NAMED message — an exit-code-only check passes on a typo'd path,
+    #     a missing file, or any unrelated diagnostic (review round 1 I4);
+    #   * NO ARTIFACT     — "it complained and emitted anyway" is the failure
+    #     this leg exists to prevent, and neither of the other two sees it.
+    # The compiler writes this diagnostic to STDERR (verified: with 2>/dev/null
+    # the message vanishes and only the exit status is left), so the capture
+    # must merge it. The log is kept in $WORK, which survives a red run.
+    rm -f "$WORK/l4_ref.img"
+    "$KRC" --arch=arm64 --target=none --emit=image --load-addr=0x40400100 \
+           "$WORK/sentinel_a64.kr" -o "$WORK/l4_ref.img" >"$WORK/l4_ref.log" 2>&1
+    local rc4=$?
+    if [ "$rc4" != 0 ] && grep -q "must be 4096-aligned on arm64" "$WORK/l4_ref.log" \
+       && [ ! -f "$WORK/l4_ref.img" ]; then
+        ok "L4_unaligned_refused_at_compile" "exit $rc4, named diagnostic, no artifact written"
+    else
+        bad "L4_unaligned_refused_at_compile" "exit=$rc4 artifact=$([ -f "$WORK/l4_ref.img" ] && echo WRITTEN || echo absent) log='$(head -c 120 "$WORK/l4_ref.log")'"
+    fi
+    # The asymmetry is what makes the refusal a STATEMENT ABOUT arm64 rather
+    # than a blanket restriction: x86_64 takes the same low-12-bit offset and
+    # must EMIT. Artifact presence is asserted, not just exit 0 — Task 5's
+    # print-before-write hazard means a zero exit alone does not prove a file.
+    rm -f "$WORK/l4_x.img"
+    if "$KRC" --arch=x86_64 --target=none --emit=image --load-addr=0x400100 \
+              "$WORK/sentinel_x86_l4.kr" -o "$WORK/l4_x.img" >"$WORK/l4_x.log" 2>&1 \
+       && [ -f "$WORK/l4_x.img" ]; then
+        ok "L4_x86_same_offset_accepted" "asymmetry holds: x86_64 took +0x100 and wrote $(stat -c%s "$WORK/l4_x.img") B"
+    else
+        bad "L4_x86_same_offset_accepted" "x86_64 refused (or wrote nothing) at an address it can run at: '$(head -c 120 "$WORK/l4_x.log")'"
+    fi
     local entry
     if ! entry=$(build_image a64 "$WORK/sentinel_a64.kr" "$WORK/s4.img"); then
         bad "L4_aligned_prints_misaligned_silent" "sentinel_a64.kr did not compile"; return
@@ -724,7 +868,7 @@ run_leg leg0 L0_loader_builds L0_loader_liveness_sentinel L0_corrupt_magic_rejec
 run_leg leg1 L1_sentinel L1_control_no_image L1_control_offset0 L1_control_entry_minus4
 run_leg leg2 L2_sentinel L2_control_no_image L2_control_offset0 L2_control_entry_minus4
 run_leg leg3 L3_unique_halt_loop L3_exhaustion_halt L3_control_uninit L3_control_crash
-run_leg leg4 L4_aligned_prints_misaligned_silent
+run_leg leg4 L4_unaligned_refused_at_compile L4_x86_same_offset_accepted L4_aligned_prints_misaligned_silent
 
 echo ""
 echo "boot gate: $PASS pass, $FAIL FAIL, $SKIP SKIP"
