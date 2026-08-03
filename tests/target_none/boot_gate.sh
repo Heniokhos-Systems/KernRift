@@ -224,6 +224,103 @@ x86_boot() {
         -device loader,file="$img",addr=$(printf 0x%x "$load"),force-raw=on
 }
 
+# boot_run for arm64 WITH a QMP socket, so the guest's PC can be read while it
+# is still running. Same contract as boot_run — capture deleted before launch,
+# nonzero return if it is missing afterwards, same <expect> vocabulary via
+# boot_wait — plus the out-param PARKED_PC.
+#
+#   boot_run_qmp <serial file> <expect> [qemu args...]
+#
+# PARKED_PC is lower-case hex without 0x or leading zeros, or one of two
+# LOUD non-values:
+#   QMPFAIL       the query did not produce a PC (socket, protocol, or qemu).
+#   MOVING:<pc>   the PC never stopped changing, so nothing here is "parked";
+#                 <pc> is the last sample taken.
+# CONSUMERS MUST SHAPE-CHECK IT. L3's crash control asserts `!=` against the
+# loop address, and both non-values satisfy a `!=` vacuously — a broken QMP
+# path would paint that control green with the discriminator never having run
+# (review round 1, I5). The `=` comparisons fail closed and need no guard, but
+# get the same explicit check so a red run says which thing broke.
+#
+# WHY TWO SAMPLES AND NOT ONE. "Parked" is a claim that the machine has
+# STOPPED, and a single sample cannot distinguish a halt loop from a PC that
+# merely happened to be there as the guest ran through. Sampling until two
+# consecutive reads agree makes parked an observed property. It also removes
+# the race a fixed settle would have: the wait ends the instant MID reaches
+# the wire, microseconds of guest time before the halt is entered.
+# Re-sampling (rather than one fixed gap) is what keeps a slow TCG runner
+# from FALSE-FAILING here — the same reasoning as the derived silence window.
+#
+# THE SOCKET LIVES UNDER /tmp, NOT $WORK. AF_UNIX paths cap at 107 bytes, and
+# past that qemu exits 1 with its stderr discarded: every leg then reads
+# QMPFAIL against an empty serial capture with no attribution.
+BOOT_QMP_GAP=0.25         # seconds between consecutive PC samples
+BOOT_QMP_TRIES=20         # give up (=> MOVING) after this many samples
+boot_run_qmp() {
+    local ser="$1" expect="$2"; shift 2
+    QMPD="${QMPD:-$(mktemp -d /tmp/krcqmp.XXXXXX)}"
+    local sock="$QMPD/qmp.sock"
+    rm -f "$ser" "$sock"
+    PARKED_PC=QMPFAIL
+    timeout 15 qemu-system-aarch64 -M virt -cpu cortex-a57 -display none \
+        -serial "file:$ser" -qmp "unix:$sock,server,nowait" "$@" >/dev/null 2>&1 &
+    local pid=$!
+    boot_wait "$pid" "$ser" "$expect"
+    local prev="" cur="" i=0
+    while [ "$i" -lt "$BOOT_QMP_TRIES" ]; do
+        cur=$(python3 "$BOOT/qmp_pc.py" "$sock" 2>>"$WORK/qmp_err.txt") || cur=QMPFAIL
+        [ -z "$cur" ] && cur=QMPFAIL      # empty stdout is a failure, not a PC
+        [ "$cur" = QMPFAIL ] && break
+        [ "$cur" = "$prev" ] && break     # two consecutive reads agree => parked
+        prev="$cur"; cur=""
+        sleep "$BOOT_QMP_GAP"
+        i=$((i + 1))
+    done
+    kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null
+    if [ "$cur" = QMPFAIL ]; then
+        PARKED_PC=QMPFAIL
+    elif [ -z "$cur" ]; then
+        PARKED_PC="MOVING:$prev"
+    else
+        PARKED_PC="$cur"
+    fi
+    # No capture file => qemu never opened it => no boot occurred.
+    [ -f "$ser" ] || return 1
+    return 0
+}
+
+# File offset of the UNIQUE arm64 self-branch (loop{} == word 0x14000000).
+# Echoes the decimal offset; fails the calling leg if the count is not
+# exactly 1.
+#
+# THE UNIQUENESS IS ASSERTED, NOT ASSUMED, and that is the whole reason this
+# is a separate check with its own PASS line. L3 reads "PC == load + offset"
+# as "the machine is in heap_bump_halt's loop". A second self-branch anywhere
+# in the image — another loop{}, a different inlining decision, a data word
+# that happens to be 0x14000000 — makes that inference unsound, and it would
+# do so SILENTLY: the leg would go on passing while no longer discriminating.
+loop_offset_a64() {
+    python3 - "$1" <<'PY'
+import sys
+d = open(sys.argv[1], "rb").read()
+offs = [i for i in range(0, len(d) - 3, 4) if d[i:i+4] == bytes.fromhex("00000014")]
+if len(offs) != 1:
+    print("AMBIG:%d" % len(offs)); sys.exit(1)
+print(offs[0])
+PY
+}
+
+# a64_boot's QMP twin: identical addressing and identical failure propagation,
+# plus PARKED_PC. $1 load addr, $2 image, $3 entry off, $4 serial, $5 expect.
+a64_boot_qmp() {
+    local load="$1" img="$2" entry="$3" ser="$4" expect="$5"
+    PARKED_PC=QMPFAIL   # never let a leg read the PREVIOUS run's PC
+    python3 "$BOOT/make_stub.py" $(( load + entry )) "$A64_STUB" "$A64_SP" "$WORK/stub.bin" || return 1
+    boot_run_qmp "$ser" "$expect" \
+        -device loader,file="$WORK/stub.bin",addr=$A64_STUB,cpu-num=0 \
+        -device loader,file="$img",addr=$(printf 0x%x "$load"),force-raw=on
+}
+
 # =============================================================================
 # L0 — the multiboot loader itself: builds, is loadable, and its liveness
 #      sentinel is on the wire. Controls: a magic-corrupted build must be
@@ -462,9 +559,148 @@ leg2() {
     fi
 }
 
+# =============================================================================
+# L3 — heap exhaustion, DISCRIMINATED: PRE+MID on the wire, POST absent, and
+#      the machine parked INSIDE heap_bump_halt's loop (QMP PC == load +
+#      unique self-branch offset). Controls prove each assertion load-bearing:
+#      (a) uninitialised variant parks at the SAME loop but never prints MID;
+#      (b) crash variant prints MID but parks AWAY from the loop.
+#
+#      WHY THE PC IS NEEDED AT ALL. Exhaustion and heap_bump_halt(1, ...) end
+#      in the SAME `loop { }` (std/heap_bump.kr:59-67), so "it halted" carries
+#      no information about WHY. Reading the parked PC turns the halt site
+#      itself into the evidence, without touching the stdlib module under test.
+#
+#      ABSENCE OF POST, honestly stated. The run's wait ends the instant MID
+#      reaches the wire, so on its own "no POST yet" would be vacuous. It is
+#      not vacuous here for two reasons that are both observed rather than
+#      argued: the capture is read AFTER the parked-PC sampling and the kill,
+#      so the absence window covers the settle too; and a machine proven
+#      stationary in a one-instruction self-branch cannot subsequently print.
+# =============================================================================
+leg3() {
+    echo "--- L3: heap exhaustion, discriminated ---"
+    local entry loopoff want_pc
+    cp "$BOOT/heap_a64.kr" "$BOOT/heap_uninit_a64.kr" "$BOOT/heap_crash_a64.kr" "$WORK/"
+    if ! entry=$(build_image a64 "$WORK/heap_a64.kr" "$WORK/h.img"); then
+        bad "L3_compile" "heap_a64.kr did not compile"; return
+    fi
+    if ! loopoff=$(loop_offset_a64 "$WORK/h.img"); then
+        bad "L3_unique_halt_loop" "self-branch count: $loopoff"; return
+    fi
+    ok "L3_unique_halt_loop" "single loop{} at file offset $loopoff"
+    if ! a64_boot_qmp "$A64_LOAD" "$WORK/h.img" "$entry" "$WORK/l3_ser.txt" "MID"; then
+        bad "L3_exhaustion_halt" "the boot did not run (stub generation or qemu launch failed)"; return
+    fi
+    want_pc=$(printf %x $(( A64_LOAD + loopoff )))
+    if [ "$PARKED_PC" = "$want_pc" ] && grep -q "PRE" "$WORK/l3_ser.txt" \
+       && grep -q "MID" "$WORK/l3_ser.txt" && ! grep -q "POST" "$WORK/l3_ser.txt"; then
+        ok "L3_exhaustion_halt" "PRE+MID, no POST, parked at 0x$want_pc == heap_bump_halt's loop"
+    else
+        bad "L3_exhaustion_halt" "serial='$(tr '\n' ' ' <"$WORK/l3_ser.txt")' pc=$PARKED_PC want=$want_pc"
+    fi
+    # Control (a): uninitialised => SAME park, but MID must be ABSENT. This is
+    # what proves the MID assertion load-bearing: drop it from the subject and
+    # this program satisfies everything that is left.
+    local e2 l2 pc2
+    if ! e2=$(build_image a64 "$WORK/heap_uninit_a64.kr" "$WORK/hu.img"); then
+        bad "L3_control_uninit" "heap_uninit_a64.kr did not compile"; return
+    fi
+    if ! l2=$(loop_offset_a64 "$WORK/hu.img"); then
+        bad "L3_control_uninit" "self-branch count: $l2"; return
+    fi
+    if ! a64_boot_qmp "$A64_LOAD" "$WORK/hu.img" "$e2" "$WORK/l3a_ser.txt" "PRE"; then
+        bad "L3_control_uninit" "the boot did not run"; return
+    fi
+    pc2=$(printf %x $(( A64_LOAD + l2 )))
+    if [ "$PARKED_PC" = "$pc2" ] && grep -q "PRE" "$WORK/l3a_ser.txt" \
+       && ! grep -q "MID" "$WORK/l3a_ser.txt"; then
+        ok "L3_control_uninit" "reason-1 halt parks at the SAME loop (0x$pc2) with MID absent — MID is what discriminates"
+    else
+        bad "L3_control_uninit" "serial='$(tr '\n' ' ' <"$WORK/l3a_ser.txt")' pc=$PARKED_PC loop=$pc2"
+    fi
+    # Control (b): crash after MID => parked AWAY from the loop. This proves
+    # the PC assertion load-bearing: drop it and "PRE+MID then hang" passes
+    # for any crash whatsoever.
+    local e3 l3off pc3
+    if ! e3=$(build_image a64 "$WORK/heap_crash_a64.kr" "$WORK/hc.img"); then
+        bad "L3_control_crash" "heap_crash_a64.kr did not compile"; return
+    fi
+    if ! l3off=$(loop_offset_a64 "$WORK/hc.img"); then
+        bad "L3_control_crash" "self-branch count: $l3off"; return
+    fi
+    if ! a64_boot_qmp "$A64_LOAD" "$WORK/hc.img" "$e3" "$WORK/l3b_ser.txt" "MID"; then
+        bad "L3_control_crash" "the boot did not run"; return
+    fi
+    # SHAPE-CHECK BEFORE THE COMPARISON. This control's PC assertion is a
+    # `!=`, which both QMPFAIL and MOVING:* satisfy vacuously, so without this
+    # the control goes green precisely when the discriminator is broken —
+    # observed: with qmp_pc.py's socket argument corrupted, L3_control_crash
+    # passed while the other two failed (review round 1, I5).
+    case "$PARKED_PC" in
+        "" | *[!0-9a-f]*)
+            bad "L3_control_crash" "no parked PC (PARKED_PC='$PARKED_PC') — the discriminator never ran"; return ;;
+    esac
+    pc3=$(printf %x $(( A64_LOAD + l3off )))
+    if [ "$PARKED_PC" != "$pc3" ] && grep -q "MID" "$WORK/l3b_ser.txt" \
+       && ! grep -q "POST" "$WORK/l3b_ser.txt"; then
+        ok "L3_control_crash" "abort parks at 0x$PARKED_PC, not the halt loop at 0x$pc3 — the PC check is what discriminates"
+    else
+        bad "L3_control_crash" "serial='$(tr '\n' ' ' <"$WORK/l3b_ser.txt")' pc=$PARKED_PC loop=$pc3"
+    fi
+}
+
+# =============================================================================
+# L4 — arm64 alignment, RUNTIME PAIR: one leg, one image, two runs. The
+#      aligned run must PRINT — that is what proves the harness is live, since
+#      a silence-only assertion once passed with no image loaded at all
+#      (review 2, O5) — and the +0x100 run must be silent. The BLOCKING
+#      compile-time refusal of an unaligned --load-addr belongs to the flag
+#      surface (Task 4) and is wired in here from Task 6 on; asserting it
+#      today would be asserting something that does not exist.
+#
+#      WHY 0x100 AND NOT SOME LARGER SHIFT. arm64 position independence here
+#      is real but PAGE-GRANULAR: every static reaches its data through
+#      `adrp` + displacement, and adrp resolves a 4 KiB page, so a shift that
+#      preserves the low 12 bits preserves the map and a shift that does not
+#      destroys it. Measured on this exact image: +0x0 prints, +0x1000 prints,
+#      and +0x100 / +0x200 / +0x400 / +0x4100 are all silent. 0x100 is
+#      therefore the SMALLEST interesting failure, and it is chosen because it
+#      is the one an unaligned --load-addr would most plausibly produce.
+#
+#      Note what this leg does NOT assert: nothing about x86_64. That image is
+#      fully position-independent — the same bytes printed at 0x400000,
+#      0x800000 and 0x800123 — so an x86 misalignment control would be
+#      asserting a falsehood.
+# =============================================================================
+leg4() {
+    echo "--- L4: arm64 misalignment runtime pair ---"
+    cp "$BOOT/sentinel_a64.kr" "$WORK/sentinel_a64.kr"
+    local entry
+    if ! entry=$(build_image a64 "$WORK/sentinel_a64.kr" "$WORK/s4.img"); then
+        bad "L4_aligned_prints_misaligned_silent" "sentinel_a64.kr did not compile"; return
+    fi
+    if ! a64_boot "$A64_LOAD" "$WORK/s4.img" "$entry" "$WORK/l4_ok.txt" "1000000016"; then
+        bad "L4_aligned_prints_misaligned_silent" "the ALIGNED boot did not run"; return
+    fi
+    # The misaligned half asserts absence, so its window is derived from the
+    # aligned half just observed — same rule as every other silence here.
+    calibrate_silence
+    if ! a64_boot $(( A64_LOAD + 0x100 )) "$WORK/s4.img" "$entry" "$WORK/l4_mis.txt" RUNOUT; then
+        bad "L4_aligned_prints_misaligned_silent" "the MISALIGNED boot did not run — silence proves nothing"; return
+    fi
+    if grep -q "1000000016" "$WORK/l4_ok.txt" && ! grep -q "1000000016" "$WORK/l4_mis.txt"; then
+        ok "L4_aligned_prints_misaligned_silent" "same bytes, same invocation: 0x$(printf %x $A64_LOAD) prints, +0x100 is silent"
+    else
+        bad "L4_aligned_prints_misaligned_silent" "aligned='$(tr '\n' ' ' <"$WORK/l4_ok.txt")' mis='$(tr '\n' ' ' <"$WORK/l4_mis.txt")'"
+    fi
+}
+
 leg0
 leg1
 leg2
+leg3
+leg4
 
 echo ""
 echo "boot gate: $PASS pass, $FAIL FAIL"
