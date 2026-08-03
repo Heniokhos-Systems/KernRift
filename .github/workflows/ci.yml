@@ -56,6 +56,20 @@ jobs:
           mv build/krc2.stable build/krc2
           chmod +x build/krc2
 
+      # The bare-metal boot gate (tests/target_none/boot_gate.sh) is now a
+      # COUNTED test inside run_tests.sh, not a skip, so these emulators are a
+      # hard dependency of the suite rather than an optional extra: without
+      # them the suite goes red at the gate's dependency loop, naming the
+      # missing tool. That is deliberate — the whole point of B1 is that a
+      # check nobody can run must be visible, not silent.
+      # binutils is preinstalled on x86_64 runners and its bare `as`/`ld` pass
+      # build_loader.sh's FUNCTIONAL probe there, so no cross package is needed
+      # on this job (the arm64 job is different — see its own comment).
+      - name: Install boot-gate toolchain (qemu-system)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq qemu-system-x86 qemu-system-arm
+
       - name: Test suite
         run: |
           # The suite asserts the kr runner's reported version against the
@@ -381,6 +395,22 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y -qq binutils-x86-64-linux-gnu
           x86_64-linux-gnu-objdump --version | head -1
+
+      # Same hard dependency as the x86_64 job. NOT bare `binutils`: on this
+      # runner that package IS aarch64 binutils and fixes nothing — the
+      # x86-capable assembler/linker build_loader.sh probes for come from
+      # binutils-x86-64-linux-gnu, installed by the step above, which is why
+      # that step has to stay ahead of this one.
+      # DECLARED, NOT VERIFIED FROM THE DEV MACHINE: whether qemu-system-x86 is
+      # installable on ubuntu-24.04-arm, and what the emulated x86 boot costs in
+      # wall clock there. If the package is unavailable the job fails at this
+      # step — visible and attributable — and the fallback (an explicit counted
+      # host gate on the x86 leg) goes through review, never through a silent
+      # skip.
+      - name: Install boot-gate toolchain (qemu-system)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq qemu-system-x86 qemu-system-arm
 
       - name: Self-compile + tests (everything to debug-kit)
         continue-on-error: true

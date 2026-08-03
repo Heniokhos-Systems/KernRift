@@ -1,0 +1,14 @@
+// Leg-3 negative control (a): heap_bump_init never called, so the FIRST
+// alloc halts with reason 1 — parking at the SAME loop{} as exhaustion.
+// The leg's MID assertion is what tells them apart; this program proves
+// that assertion is load-bearing (a PRE/POST pair alone passes here, which
+// is review 2's C3-R2 exactly).
+import "../std/uart_pl011.kr"
+import "../std/heap_bump.kr"
+fn main() -> uint64 {
+    pl011_init()
+    println_str("PRE")
+    uint64 p = alloc(64)
+    println_str("MID")
+    return p
+}

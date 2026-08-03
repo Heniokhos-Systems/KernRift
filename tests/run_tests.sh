@@ -8360,6 +8360,350 @@ fi
 
 rm -rf "$T6_D"
 
+# --- --emit=image / --load-addr flag surface (sub-project B1) ---
+# Every interaction enumerated, none left to discovery. Each refusal names
+# both flags; artifact absence is asserted alongside the message because a
+# diagnostic that still writes output is half a refusal.
+echo ""
+echo "--- --emit=image / --load-addr flag surface ---"
+IMG_SRC="$DIR/../test_tmp_img_$$.kr"
+printf 'fn main() -> uint64 { return 7 }\n' > "$IMG_SRC"
+img_refuses() {  # $1 name, $2 grep pattern, rest = flags
+    local name="$1" pat="$2"; shift 2
+    TOTAL=$((TOTAL + 1))
+    rm -f /tmp/krc_img_$$
+    local out; out=$($KRC $KRC_FLAGS "$IMG_SRC" -o /tmp/krc_img_$$ "$@" 2>&1); local st=$?
+    if [ $st -ne 0 ] && echo "$out" | grep -q "$pat" && [ ! -f /tmp/krc_img_$$ ]; then
+        PASS=$((PASS + 1)); echo "  $name: PASS"
+    else
+        echo "FAIL: $name (exit=$st, artifact=$([ -f /tmp/krc_img_$$ ] && echo yes || echo no), out=$(echo "$out" | head -1))"
+        FAIL=$((FAIL + 1))
+    fi
+    rm -f /tmp/krc_img_$$
+}
+# 1. image without --target=none (default OS = linux): refused, naming why.
+img_refuses image_needs_target_none "requires --target=none" --arch=x86_64 --emit=image --load-addr=0x400000
+# 2. image with a HOSTED --target: same refusal (the rule is about the
+#    resolved OS, not about the flag's absence).
+img_refuses image_hosted_target_refused "requires --target=none" --arch=arm64 --target=macos --emit=image --load-addr=0x40400000
+# 3-4. riscv32/xtensa: refused, naming the raw path each arch already owns.
+#    The xtensa pattern is a substring UNIQUE to the xtensa message --
+#    "x86_64/arm64 only" appears in both messages, so grepping it would let
+#    a defect that routes xtensa to the riscv32 refusal pass.
+img_refuses image_riscv32_refused "already emits a raw boot image" --arch=riscv32 --target=none --emit=image --load-addr=0x80000000
+img_refuses image_xtensa_refused "xtensa raw emission" --arch=xtensa --target=none --emit=image --load-addr=0xd0000000
+# 5. image without --load-addr: refused.
+img_refuses image_needs_load_addr "requires --load-addr" --arch=x86_64 --target=none --emit=image
+# 6. arm64 unaligned load addr: refused, and the message states the
+#    asymmetry (x86_64 accepts any address) -- a shared diagnostic would be
+#    wrong on one arch (spec R2).
+img_refuses image_a64_unaligned_refused "must be 4096-aligned on arm64" --arch=arm64 --target=none --emit=image --load-addr=0x40400100
+# 7. --load-addr without --emit=image: refused. Pinned because BEFORE this
+#    commit the flag was silently consumed as an input filename (V7).
+img_refuses load_addr_needs_image "only meaningful with --emit=image" --arch=x86_64 --load-addr=0x400000
+# 8-9. malformed values: refused at parse, not silently zero.
+img_refuses load_addr_bad_hex "decimal or 0x-prefixed hex" --arch=x86_64 --target=none --emit=image --load-addr=0xZZ
+img_refuses load_addr_empty "decimal or 0x-prefixed hex" --arch=x86_64 --target=none --emit=image --load-addr=
+# 10. -g with image: refused (the DWARF footer would land inside the blob).
+img_refuses image_dash_g_refused "conflicts with --emit=image" --arch=arm64 --target=none --emit=image --load-addr=0x40400000 -g
+# 11. --legacy with image: the existing target=none refusal fires (pinned so
+#     check ordering can never quietly reopen it).
+img_refuses image_legacy_refused "conflicts with --target=none" --arch=x86_64 --target=none --emit=image --load-addr=0x400000 --legacy
+# 12. --emit last-wins: elfexe then image behaves as image (the refusal
+#     proves image won the chain).
+img_refuses image_emit_last_wins "requires --target=none" --arch=x86_64 --emit=elfexe --emit=image --load-addr=0x400000
+# 13. --load-addr=0: refused. Zero parses fine and passes the arm64
+#     alignment check, but is indistinguishable from unset in every report
+#     and stub that consumes it.
+img_refuses image_load_addr_zero_refused "load-addr=0 is refused" --arch=arm64 --target=none --emit=image --load-addr=0
+# 14-15. --targets= interactions (V12: --targets FORCES the fat path even
+#     with --emit=). Safe only by check ordering -- these rows pin it
+#     so a reorder cannot reopen A's Task-1 fat-path Critical.
+img_refuses image_targets_no_none "requires --target=none" --arch=x86_64 --emit=image --load-addr=0x400000 --targets=linux-x64
+img_refuses image_targets_with_none "cannot build a fat binary" --arch=x86_64 --target=none --emit=image --load-addr=0x400000 --targets=linux-x64
+
+# 16. NO --arch AT ALL: must refuse. V11: with emit_set=1 the fat-guard
+#     "pass --arch" refusal never fires and arch silently defaults to
+#     x86_64 -- which would skip the arm64 alignment validation entirely.
+#     Uses the RAW build/krc2: the make-test wrapper injects --arch=x86_64,
+#     which is the exact condition under test.
+TOTAL=$((TOTAL + 1))
+if [ -f "$DIR/../build/krc2" ]; then IMG_RAW_KRC=$(cd "$DIR/../build" && pwd)/krc2; else IMG_RAW_KRC=""; fi
+rm -f /tmp/krc_imgna_$$
+imgna_out=$("$IMG_RAW_KRC" "$IMG_SRC" -o /tmp/krc_imgna_$$ --target=none --emit=image --load-addr=0x40400100 2>&1); imgna_st=$?
+if [ -n "$IMG_RAW_KRC" ] && [ $imgna_st -ne 0 ] \
+   && echo "$imgna_out" | grep -q "requires an explicit --arch" && [ ! -f /tmp/krc_imgna_$$ ]; then
+    PASS=$((PASS + 1)); echo "  image_needs_explicit_arch: PASS"
+else
+    echo "FAIL: image_needs_explicit_arch (exit=$imgna_st, out=$(echo "$imgna_out" | head -1))"; FAIL=$((FAIL + 1))
+fi
+rm -f /tmp/krc_imgna_$$
+
+# 18. -g under --target=none WITHOUT image stays ACCEPTED -- pinned by
+#     sub-project A; the new refusal must not widen.
+TOTAL=$((TOTAL + 1))
+if $KRC $KRC_FLAGS "$IMG_SRC" -o /tmp/krc_img_g_$$ --arch=arm64 --target=none -g >/dev/null 2>&1 && [ -f /tmp/krc_img_g_$$ ]; then
+    PASS=$((PASS + 1)); echo "  target_none_dash_g_still_accepted: PASS"
+else
+    echo "FAIL: target_none_dash_g_still_accepted (A's pinned acceptance regressed)"; FAIL=$((FAIL + 1))
+fi
+rm -f /tmp/krc_img_g_$$ "$IMG_SRC"
+
+# --- --emit=image EMISSION + the `image:` report line (sub-project B1, T5) ---
+#
+# WHICH ROWS WERE RED BEFORE THE IMPLEMENTATION, AND WHY THAT MATTERS.
+# A fully-valid `--emit=image` invocation ALREADY exited 0 at BASE and already
+# wrote a headerless blob -- WITH its static data and WITH its fixups resolved
+# in image coordinates. Two circulated descriptions of that blob are false and
+# were checked against the BASE binary: it does NOT fall through to the ELF
+# path (no ELF magic, 176 B vs the ELF's 296 B), and it is NOT "bare code with
+# no statics and no fixups" (the magic initialiser was present and both arm64
+# ADRP pairs already resolved to it). So a pin spelled "the output is not an
+# ELF" passes at BASE and proves nothing.
+# Red at BASE (7): image_report_format_*, image_entry_matches_elf_*,
+# image_statics_present_* (on filesz -- their count/offset half was already
+# green) and image_no_truncation. Every one of them needs the report line.
+# Green at BASE (6): the rest. Those are regression pins, not evidence, so each
+# was individually OBSERVED FAILING against a deliberately broken compiler
+# before being trusted -- six injections, listed in this task's report:
+# fixups resolved in ELF coordinates, BSS truncation, static data not emitted,
+# load_addr embedded, entry reported as 0, sizes taken pre-truncation.
+echo ""
+echo "--- --emit=image emission + report ---"
+
+# Statics + recursion + a call: exercises the static-fixup class and keeps
+# `main` OFF file offset 0 (a straight-line callee gets inlined and main lands
+# at 0, which would make the entry pin unfalsifiable). The initialiser is a
+# magic so the data blob can be LOCATED in the artifact by value instead of
+# assumed present.
+IMG5_SRC="$DIR/../test_tmp_img5_$$.kr"
+IMG5_MAGIC=4b52494d41474521
+printf 'static uint64 g = 0x4B52494D41474521\nfn f(uint64 x) -> uint64 { if x < 2 { return x + g }\n return f(x - 1) + f(x - 2) }\nfn main() -> uint64 { g = 2\n return f(6) }\n' > "$IMG5_SRC"
+# Elf64_Ehdr(64) + one Elf64_Phdr(56). Not spelled as a magic number anywhere a
+# comparison depends on it alone: image_x86_tail_identity below compares whole
+# files, so a wrong value here fails on length, not silently.
+IMG5_EHDR=120
+
+# Byte offset of the first 8-byte-aligned qword equal to $2, or -1.
+img_qword_off() {
+    local idx
+    idx=$(od -An -tx8 -v "$1" 2>/dev/null | tr -s ' ' '\n' | grep -v '^$' | grep -n "^$2\$" | head -1 | cut -d: -f1)
+    if [ -n "$idx" ]; then echo $(( (idx - 1) * 8 )); else echo -1; fi
+}
+img_qword_count() {
+    od -An -tx8 -v "$1" 2>/dev/null | tr -s ' ' '\n' | grep -c "^$2\$"
+}
+# e_entry of an Elf64 file, as an offset from the --target=none load base.
+img_elf_entry_off() {
+    local lo hi
+    lo=$(od -An -tx4 -j24 -N4 -v "$1" | tr -d ' \n')
+    hi=$(od -An -tx4 -j28 -N4 -v "$1" | tr -d ' \n')
+    echo $(( (((16#$hi) << 32) | (16#$lo)) - 0x400000 ))
+}
+# Decode every "ADRP x16 + LDR/STR/ADD via x16" pair in an arm64 FLAT image and
+# print the file offset each pair resolves to, one per line. The arithmetic is
+# done in IMAGE coordinates (file offset 0 == the load address, which is
+# 4096-aligned by validation), which is precisely the coordinate system a
+# header-stripped ELF gets wrong: stripping 0x78 shifts every offset by a
+# non-page amount, so the baked page_off is 0x78 too large. That is the defect
+# that boots to silence, and image_a64_strip_is_rejected below is its live
+# negative control.
+img_a64_adrp_targets() {
+    local -a w=()
+    local x
+    while read -r x; do w+=( $((16#$x)) ); done < <(od -An -tx4 -v "$1" | tr -s ' ' '\n' | grep -v '^$')
+    local i n=${#w[@]} v v2 immlo immhi d po
+    for (( i = 0; i < n - 1; i++ )); do
+        v=${w[i]}
+        (( (v & 0x9F00001F) == 0x90000010 )) || continue   # ADRP x16
+        immlo=$(( (v >> 29) & 3 )); immhi=$(( (v >> 5) & 0x7FFFF ))
+        d=$(( (immhi << 2) | immlo ))
+        (( d >= 0x100000 )) && d=$(( d - 0x200000 ))       # sign-extend imm21
+        v2=${w[i+1]}
+        if (( ((v2 >> 24) & 0xFF) == 0x91 )); then
+            po=$(( (v2 >> 10) & 0xFFF ))                   # ADD: unscaled
+        else
+            po=$(( ((v2 >> 10) & 0xFFF) << 3 ))            # LDR/STR X: scaled by 8
+        fi
+        echo $(( (((i * 4) >> 12) + d) * 4096 + po ))
+    done
+}
+
+# Reference ELFs for the same program, built once and reused by several rows.
+$KRC $KRC_FLAGS "$IMG5_SRC" -o /tmp/krc_i5e_x_$$ --arch=x86_64 --target=none >/dev/null 2>&1
+$KRC $KRC_FLAGS "$IMG5_SRC" -o /tmp/krc_i5e_a_$$ --arch=arm64  --target=none >/dev/null 2>&1
+
+# 1. The artifact is raw (no ELF magic) and the report line is EXACTLY the
+#    contract Task 6's gate parses: `image: arch=<name> entry= filesz= memsz=
+#    load=`, all decimal. arch= is in the line because --target=none --emit=
+#    without --arch silently defaulted to x86_64 before Task 4 refused it, and
+#    a report that omitted the arch could not have shown that.
+for IA in x86_64 arm64; do
+    TOTAL=$((TOTAL + 1))
+    ILOAD=0x400000; [ "$IA" = arm64 ] && ILOAD=0x40400000
+    rm -f /tmp/krc_i5_$$
+    i1out=$($KRC $KRC_FLAGS "$IMG5_SRC" -o /tmp/krc_i5_$$ --arch=$IA --target=none --emit=image --load-addr=$ILOAD 2>&1); i1st=$?
+    i1magic=$(head -c4 /tmp/krc_i5_$$ 2>/dev/null | od -An -tx1 | tr -d ' \n')
+    if [ $i1st -eq 0 ] && [ -f /tmp/krc_i5_$$ ] && [ "$i1magic" != "7f454c46" ] \
+       && echo "$i1out" | grep -qE "^image: arch=$IA entry=[0-9]+ filesz=[0-9]+ memsz=[0-9]+ load=$(( ILOAD ))$"; then
+        PASS=$((PASS + 1)); echo "  image_report_format_$IA: PASS"
+    else
+        echo "FAIL: image_report_format_$IA (exit=$i1st, magic=$i1magic, line=$(echo "$i1out" | grep '^image:' || echo NONE))"
+        FAIL=$((FAIL + 1))
+    fi
+    rm -f /tmp/krc_i5_$$
+done
+
+# 2. The reported entry is the file offset of `main` IN THE IMAGE. Cross-checked
+#    against the same program's ELF e_entry, which is the only other place that
+#    offset is recorded -- a flat image has no e_entry, which is why the report
+#    is a required output rather than a convenience. Also asserts entry != 0:
+#    offset 0 is NOT main on x86_64/arm64 (only riscv32 hoists the entry), and
+#    a pin that tolerated 0 would accept `entry=0` hardcoded.
+for IA in x86_64 arm64; do
+    TOTAL=$((TOTAL + 1))
+    ILOAD=0x400000; IREF=/tmp/krc_i5e_x_$$; [ "$IA" = arm64 ] && { ILOAD=0x40400000; IREF=/tmp/krc_i5e_a_$$; }
+    i2out=$($KRC $KRC_FLAGS "$IMG5_SRC" -o /tmp/krc_i5_$$ --arch=$IA --target=none --emit=image --load-addr=$ILOAD 2>&1)
+    i2got=$(echo "$i2out" | sed -n 's/^image: .* entry=\([0-9]*\) .*/\1/p')
+    i2want=$(( $(img_elf_entry_off "$IREF") - IMG5_EHDR ))
+    if [ -n "$i2got" ] && [ "$i2got" = "$i2want" ] && [ "$i2want" -gt 0 ]; then
+        PASS=$((PASS + 1)); echo "  image_entry_matches_elf_$IA: PASS (entry=$i2got)"
+    else
+        echo "FAIL: image_entry_matches_elf_$IA (reported '$i2got', ELF says $i2want)"; FAIL=$((FAIL + 1))
+    fi
+    rm -f /tmp/krc_i5_$$
+done
+
+# 3. The static data blob is IN the image, exactly once, and inside the
+#    reported filesz. Locating it by its initialiser value is what makes the
+#    fixup row below able to name the offset the ADRP pairs must reach.
+for IA in x86_64 arm64; do
+    TOTAL=$((TOTAL + 1))
+    ILOAD=0x400000; [ "$IA" = arm64 ] && ILOAD=0x40400000
+    i3out=$($KRC $KRC_FLAGS "$IMG5_SRC" -o /tmp/krc_i5_$$ --arch=$IA --target=none --emit=image --load-addr=$ILOAD 2>&1)
+    i3fs=$(echo "$i3out" | sed -n 's/^image: .*filesz=\([0-9]*\).*/\1/p')
+    i3off=$(img_qword_off /tmp/krc_i5_$$ $IMG5_MAGIC)
+    i3cnt=$(img_qword_count /tmp/krc_i5_$$ $IMG5_MAGIC)
+    if [ "$i3cnt" = "1" ] && [ "$i3off" -ge 0 ] && [ -n "$i3fs" ] \
+       && [ "$i3fs" = "$(stat -c%s /tmp/krc_i5_$$)" ] && [ $(( i3off + 8 )) -le "$i3fs" ]; then
+        PASS=$((PASS + 1)); echo "  image_statics_present_$IA: PASS (initialiser at +$i3off of $i3fs)"
+    else
+        echo "FAIL: image_statics_present_$IA (count=$i3cnt off=$i3off filesz=$i3fs size=$(stat -c%s /tmp/krc_i5_$$ 2>/dev/null))"
+        FAIL=$((FAIL + 1))
+    fi
+    rm -f /tmp/krc_i5_$$
+done
+
+# 4. arm64 static fixups RESOLVE, in the image's own coordinates: every ADRP
+#    x16 pair must land on the initialiser's actual offset. This is the row
+#    that distinguishes a real image from a header-stripped ELF; x86_64 needs
+#    no equivalent because it is fully RIP-relative, which row 5 pins by whole-
+#    file identity with the ELF tail.
+TOTAL=$((TOTAL + 1))
+$KRC $KRC_FLAGS "$IMG5_SRC" -o /tmp/krc_i5_$$ --arch=arm64 --target=none --emit=image --load-addr=0x40400000 >/dev/null 2>&1
+i4want=$(img_qword_off /tmp/krc_i5_$$ $IMG5_MAGIC)
+i4t=$(img_a64_adrp_targets /tmp/krc_i5_$$)
+i4n=$(echo "$i4t" | grep -c '^[0-9]')
+i4bad=$(echo "$i4t" | grep -vc "^$i4want\$")
+if [ "$i4n" = "2" ] && [ "$i4bad" = "0" ] && [ "$i4want" -ge 0 ]; then
+    PASS=$((PASS + 1)); echo "  image_a64_fixups_resolve: PASS (2/2 ADRP pairs -> +$i4want)"
+else
+    echo "FAIL: image_a64_fixups_resolve ($i4n pairs, $i4bad missing +$i4want; got: $(echo $i4t))"; FAIL=$((FAIL + 1))
+fi
+# 4b. LIVE NEGATIVE CONTROL for row 4: run the identical decoder over the ELF
+#     with its 120-byte header chopped off -- the artifact a post-hoc
+#     truncation would produce. It must NOT resolve to the initialiser. Without
+#     this row, row 4 is a check that has only ever been seen passing.
+TOTAL=$((TOTAL + 1))
+tail -c +$(( IMG5_EHDR + 1 )) /tmp/krc_i5e_a_$$ > /tmp/krc_i5strip_$$
+i4swant=$(img_qword_off /tmp/krc_i5strip_$$ $IMG5_MAGIC)
+i4st=$(img_a64_adrp_targets /tmp/krc_i5strip_$$)
+i4sn=$(echo "$i4st" | grep -c '^[0-9]')
+i4sbad=$(echo "$i4st" | grep -vc "^$i4swant\$")
+if [ "$i4sn" = "2" ] && [ "$i4sbad" = "2" ]; then
+    PASS=$((PASS + 1)); echo "  image_a64_strip_is_rejected: PASS (2/2 stripped ADRP pairs miss +$i4swant: $(echo $i4st))"
+else
+    echo "FAIL: image_a64_strip_is_rejected (decoder cannot tell a strip from an image: $i4sn pairs, $i4sbad wrong)"
+    FAIL=$((FAIL + 1))
+fi
+rm -f /tmp/krc_i5_$$ /tmp/krc_i5strip_$$
+
+# 5. x86_64 tail identity: the image must equal the ELF build's bytes past the
+#    120-byte header. x86_64 codegen is RIP-relative throughout, so raw
+#    emission may not change one byte of code or data -- the cheapest oracle
+#    that emit_mode 8 changed LAYOUT, not CODE.
+TOTAL=$((TOTAL + 1))
+$KRC $KRC_FLAGS "$IMG5_SRC" -o /tmp/krc_i5i_$$ --arch=x86_64 --target=none --emit=image --load-addr=0x400000 >/dev/null 2>&1
+i5why=$(cmp <(tail -c +$(( IMG5_EHDR + 1 )) /tmp/krc_i5e_x_$$) /tmp/krc_i5i_$$ 2>&1)
+if [ -f /tmp/krc_i5e_x_$$ ] && [ -f /tmp/krc_i5i_$$ ] && [ -z "$i5why" ]; then
+    PASS=$((PASS + 1)); echo "  image_x86_tail_identity: PASS"
+else
+    # Name the cause. "image != elf[120:]" on its own does not say whether the
+    # code changed or the file merely got longer, and those want opposite fixes.
+    echo "FAIL: image_x86_tail_identity (elf=$(stat -c%s /tmp/krc_i5e_x_$$ 2>/dev/null) img=$(stat -c%s /tmp/krc_i5i_$$ 2>/dev/null); ${i5why:-both files missing})"
+    FAIL=$((FAIL + 1))
+fi
+rm -f /tmp/krc_i5i_$$
+
+# 6. arm64 must NOT equal the ELF tail, at the same length: same code, same
+#    size, different ADRP immediates because the page arithmetic was redone at
+#    header_size = 0. An arm64 image byte-equal to the stripped ELF IS the
+#    silent-boot defect, from the other side of the decoder in row 4b.
+TOTAL=$((TOTAL + 1))
+$KRC $KRC_FLAGS "$IMG5_SRC" -o /tmp/krc_i5i_$$ --arch=arm64 --target=none --emit=image --load-addr=0x40400000 >/dev/null 2>&1
+i6want=$(( $(stat -c%s /tmp/krc_i5e_a_$$ 2>/dev/null || echo 0) - IMG5_EHDR ))
+i6got=$(stat -c%s /tmp/krc_i5i_$$ 2>/dev/null || echo 0)
+i6same=no; cmp -s <(tail -c +$(( IMG5_EHDR + 1 )) /tmp/krc_i5e_a_$$) /tmp/krc_i5i_$$ && i6same=yes
+if [ -f /tmp/krc_i5e_a_$$ ] && [ -f /tmp/krc_i5i_$$ ] && [ "$i6want" = "$i6got" ] && [ "$i6same" = no ]; then
+    PASS=$((PASS + 1)); echo "  image_a64_not_a_strip: PASS"
+elif [ "$i6want" != "$i6got" ]; then
+    # Separated from the byte-equality arm on purpose: a length change and a
+    # byte-for-byte match are opposite defects (something got appended vs the
+    # page arithmetic was never redone) and one message for both misdirects.
+    echo "FAIL: image_a64_not_a_strip (length: elf[$IMG5_EHDR:]=$i6want but image=$i6got — the image gained or lost bytes)"
+    FAIL=$((FAIL + 1))
+else
+    echo "FAIL: image_a64_not_a_strip (image is byte-equal to the header-stripped ELF — the ADRP page arithmetic was not redone at header_size=0, which boots to silence)"
+    FAIL=$((FAIL + 1))
+fi
+rm -f /tmp/krc_i5i_$$
+
+# 7. --load-addr is validated and reported, never embedded: two different
+#    aligned addresses, one byte-identical artifact, per arch. Asserting the
+#    opposite ("different addr => different bytes") would be satisfiable only
+#    by a gratuitous absolute reference.
+for IA in x86_64 arm64; do
+    TOTAL=$((TOTAL + 1))
+    L1=0x400000; L2=0x800000; [ "$IA" = arm64 ] && { L1=0x40400000; L2=0x40800000; }
+    $KRC $KRC_FLAGS "$IMG5_SRC" -o /tmp/krc_i5a_$$ --arch=$IA --target=none --emit=image --load-addr=$L1 >/dev/null 2>&1
+    $KRC $KRC_FLAGS "$IMG5_SRC" -o /tmp/krc_i5b_$$ --arch=$IA --target=none --emit=image --load-addr=$L2 >/dev/null 2>&1
+    if [ -f /tmp/krc_i5a_$$ ] && cmp -s /tmp/krc_i5a_$$ /tmp/krc_i5b_$$; then
+        PASS=$((PASS + 1)); echo "  image_load_addr_not_embedded_$IA: PASS"
+    else
+        echo "FAIL: image_load_addr_not_embedded_$IA"; FAIL=$((FAIL + 1))
+    fi
+    rm -f /tmp/krc_i5a_$$ /tmp/krc_i5b_$$
+done
+
+# 8. No truncation: a 64 KiB static tail stays in the file, memsz == filesz,
+#    and both exceed 64 KiB. The ELF path truncates this same program to 180
+#    bytes (measured) and lets p_memsz carry the rest; nothing on bare metal
+#    zeroes a BSS tail in B1, and QEMU zero-fills RAM, so a truncated image
+#    would pass the boot gate VACUOUSLY and read garbage statics on silicon.
+TOTAL=$((TOTAL + 1))
+IMG6_SRC="$DIR/../test_tmp_img6_$$.kr"
+printf 'static uint8[65536] blob\nfn main() -> uint64 { unsafe { *((blob + 65535) as uint8) = 7 }\n return 0 }\n' > "$IMG6_SRC"
+i8out=$($KRC $KRC_FLAGS "$IMG6_SRC" -o /tmp/krc_i6_$$ --arch=arm64 --target=none --emit=image --load-addr=0x40400000 2>&1)
+i8fs=$(echo "$i8out" | sed -n 's/^image: .*filesz=\([0-9]*\).*/\1/p')
+i8ms=$(echo "$i8out" | sed -n 's/^image: .*memsz=\([0-9]*\).*/\1/p')
+if [ -f /tmp/krc_i6_$$ ] && [ -n "$i8fs" ] && [ "$(stat -c%s /tmp/krc_i6_$$)" = "$i8fs" ] \
+   && [ "$i8fs" = "$i8ms" ] && [ "$i8fs" -gt 65536 ]; then
+    PASS=$((PASS + 1)); echo "  image_no_truncation: PASS (filesz=memsz=$i8fs on disk)"
+else
+    echo "FAIL: image_no_truncation (filesz=$i8fs memsz=$i8ms size=$(stat -c%s /tmp/krc_i6_$$ 2>/dev/null))"; FAIL=$((FAIL + 1))
+fi
+rm -f /tmp/krc_i6_$$ "$IMG6_SRC" "$IMG5_SRC" /tmp/krc_i5e_x_$$ /tmp/krc_i5e_a_$$
+
 # --- syscall choke points under --target=none ------------------------------
 # The per-OS dispatch in this codebase is "special-case Windows/macOS, else
 # fall through to POSIX", so target_os == 4 (--target=none) silently inherits
@@ -11617,6 +11961,39 @@ else
     echo "FAIL: arm64_syscall_nr_linux_x8 (compile failed)"; FAIL=$((FAIL + 1))
 fi
 rm -f "$SR_SRC" "$SR_BIN"
+
+# --- Bare-metal boot gate (sub-project B1) ---
+# One counted test wrapping tests/target_none/boot_gate.sh. DELIBERATELY NOT
+# behind `command -v qemu-system-*`: the gate itself fails loudly when a
+# dependency is missing, and TOTAL is incremented unconditionally — a skip
+# indistinguishable from a pass is how three of four legs of this gate's
+# first design went vacuous (see the gate's header).
+echo ""
+echo "--- bare-metal boot gate ---"
+TOTAL=$((TOTAL + 1))
+# The RAW compiler binary, not the --arch=x86_64 wrapper: the gate passes
+# --arch= itself and must not depend on wrapper injection. krc2-then-krc3
+# mirrors the governance test at :3319 — the fallback is not decorative, the
+# arm64 CI job self-compiles to krc3 and a job that produced only krc3 would
+# otherwise report "no compiler" on a tree that has one.
+if [ -f "$DIR/../build/krc2" ]; then
+    BOOT_KRC=$(cd "$DIR/../build" && pwd)/krc2
+elif [ -f "$DIR/../build/krc3" ]; then
+    BOOT_KRC=$(cd "$DIR/../build" && pwd)/krc3
+else
+    BOOT_KRC=""
+fi
+if [ -z "$BOOT_KRC" ]; then
+    # Name the cause. The previous message said "see leg output above" in this
+    # branch too, pointing at output that cannot exist: the gate never started.
+    echo "FAIL: boot_gate (no compiler under test: neither build/krc2 nor build/krc3 exists, so the gate never ran)"
+    FAIL=$((FAIL + 1))
+elif KRC="$BOOT_KRC" bash "$DIR/target_none/boot_gate.sh"; then
+    PASS=$((PASS + 1))
+else
+    echo "FAIL: boot_gate (gate ran with $BOOT_KRC and one or more legs failed — see the leg output above)"
+    FAIL=$((FAIL + 1))
+fi
 
 # --- Summary ---
 echo ""

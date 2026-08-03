@@ -30,19 +30,14 @@
 #   could prove it. Two safety comments in this sub-project's own diff were
 #   wrong in review; a disassembly is not an execution.
 #
-# TODO(sub-project B): BLOCKING serial-output leg, to be added here once B
-# supplies entry/SP/load address. It is not optional and it is not covered by
-# anything above:
-#   * boot the x86_64 image under `qemu-system-x86_64 -nographic` and require
-#     the exact bytes the program prints to arrive on the 16550 (COM1);
-#   * boot the arm64 image under `qemu-system-aarch64 -M virt -nographic` and
-#     require the same on the PL011;
-#   * run one program that exhausts std/heap_bump.kr and require the observed
-#     HALT behaviour, so the allocator's refusal path is executed rather than
-#     read. heap_bump's overflow arithmetic is currently proven only by a
-#     source transformation run on the host.
-# Until those three observations exist, no claim about runtime behaviour on
-# bare metal may be made from this script or from the reports that cite it.
+# The serial-output legs live in tests/target_none/boot_gate.sh (sub-project
+# B1): both UARTs observed printing computed sentinels from RAW --emit=image
+# artifacts, one heap-exhaustion halt discriminated by parked PC over QMP,
+# and -- SUPPORTING arm64's BLOCKING compile-time alignment refusal -- a
+# misalignment pair showing the same image print at one offset and go
+# silent at another. Every leg carries an observed negative control. Runtime
+# claims about bare metal cite THAT gate; this script's claims remain
+# compile-time only.
 #
 # -----------------------------------------------------------------------------
 # Usage
@@ -82,7 +77,7 @@ KRC="${KRC:-$REPO/build/krc2}"
 # `git merge-base`, which silently changes meaning the moment the branch is
 # merged or rebased -- and a gate whose baseline moved is a gate comparing the
 # tree against itself.
-TN_BASE="${TN_BASE:-0f6cee703257f81db7ca8f5fb8ee37b4394da776}"
+TN_BASE="${TN_BASE:-271e1186e22994e7fc4c4b9f6abf71e7bad0164e}"
 
 MODE="both"
 case "${1:-}" in
@@ -264,32 +259,20 @@ DERIVE
         g1row "suite_$nm" "$flags" "$REPO/$input"
     done < "$G1_DERIVED"
 
-    # --- the one intended artifact change on this branch --------------------
+    # --- NOTE: the --emit=asm normalisation carve-out is GONE ---------------
     #
-    # The --emit=asm listing writer had three wrong write() lengths, fixed by
-    # this branch's first commit, so every asm row's bytes MOVE -- legitimately.
-    # The rows are not dropped from the matrix, and they are not compared
-    # loosely: the BEFORE listing has exactly those three defects UNDONE and
-    # must then be byte-identical to the AFTER listing. Anything else that
-    # moved in an assembly listing still fails.
-    #
-    #   header: "...listing;"  ->  "...listing\n;"   (declared 27, real 28)
-    #   mfence: over-read by 1 emitted a trailing NUL
-    #   lock:   truncated by 1 lost the third "."
-    #
-    # An exclusion would have been the easy version of this and would have
-    # taken 18 of the 121 rows out of the gate permanently.
-    g1_norm_asm() {
-        python3 - "$1" "$2" <<'NORMPY'
-import sys
-b = open(sys.argv[1], "rb").read()
-if b"; KernRift assembly listing;" not in b:
-    sys.exit(3)   # the listing header is not what this normalisation expects
-n = b.replace(b"; KernRift assembly listing;", b"; KernRift assembly listing\n;", 1)
-n = n.replace(b"mfence\x00", b"mfence").replace(b"lock ..\n", b"lock ...\n")
-open(sys.argv[2], "wb").write(n)
-NORMPY
-    }
+    # It existed because the listing writer had three wrong write() lengths
+    # (header declared 27 for a 28-byte string, so "...listing" lost its \n;
+    # mfence over-read by 1 and emitted a trailing NUL; lock truncated by 1 and
+    # lost its third "."). Those were fixed BEFORE the current TN_BASE, so the
+    # BEFORE compiler now emits correct listings too and there is nothing left
+    # to normalise: the carve-out's own guard fired (`sys.exit(3)`) on all 18
+    # asm rows, reporting 18 failures for an artifact difference that no longer
+    # exists. Byte-identity passed 129/129 on the RAW, un-normalised bytes in
+    # that same run -- which is the proof that removing this is safe rather
+    # than a loosening. Asm rows are now compared exactly, like every other row.
+    # If a future branch legitimately moves listing bytes again, add the
+    # normalisation back WITH its guard, do not exclude the rows.
 
     # --- run the matrix -----------------------------------------------------
     G1_ROWS=0; G1_SAME=0; G1_DIFF=0; G1_ARTIFACTS=0; G1_DIFFLIST=""; G1_NOBUILD=""
@@ -305,17 +288,6 @@ NORMPY
         "$TMP/krc_before" $flags "$input" -o "$b" >/dev/null 2>&1; bst=$?
         # shellcheck disable=SC2086
         "$KRC"            $flags "$input" -o "$a" >/dev/null 2>&1; ast=$?
-        case "$flags" in
-            *--emit=asm*)
-                if [ -f "$b" ]; then
-                    if ! g1_norm_asm "$b" "$b.norm"; then
-                        bad "gate1_asm_normalise_$name" "the listing header is not the shape this branch's fix produced"
-                    else
-                        mv "$b.norm" "$b"
-                    fi
-                fi
-                ;;
-        esac
         bh="absent"; ah="absent"
         [ -f "$b" ] && bh=$(sha256sum < "$b" | cut -d' ' -f1)
         [ -f "$a" ] && ah=$(sha256sum < "$a" | cut -d' ' -f1)
@@ -771,7 +743,9 @@ esac
 echo ""
 echo "=== prove_no_syscalls: $PASS passed, $FAIL failed ==="
 echo "    A green run says the compiler emits the right calls and refuses the"
-echo "    right builtins. It does NOT say anything has run on bare metal --"
-echo "    see the TODO(sub-project B) serial-output leg at the top of this file."
+echo "    right builtins. It does NOT say anything has run on bare metal UNDER"
+echo "    THIS SCRIPT -- see the discharge note near the top of this file, and"
+echo "    tests/target_none/boot_gate.sh (sub-project B1), which is where bare-"
+echo "    metal execution is actually observed and proven."
 [ "$FAIL" = "0" ] || exit 1
 exit 0

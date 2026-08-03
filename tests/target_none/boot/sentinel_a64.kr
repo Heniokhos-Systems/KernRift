@@ -1,0 +1,16 @@
+// Boot-gate sentinel, arm64. The observable is a COMPUTED value: a static
+// written in main, mutated through a call, printed with the bare-metal
+// print scratch. The digit string "1000000016" appears nowhere as a
+// literal, so a loader echo, an unexecuted rodata blob, or an unzeroed-BSS
+// artifact cannot fake it (review 2, C3-R2 legs 1-2).
+import "../std/uart_pl011.kr"
+static uint64 sen = 0
+fn stamp(uint64 v) -> uint64 { return v + 9 }
+fn main() -> uint64 {
+    pl011_init()
+    sen = 1000000007
+    sen = stamp(sen)
+    print(sen)
+    println_str("")
+    return 0
+}
