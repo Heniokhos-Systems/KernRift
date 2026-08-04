@@ -8631,7 +8631,7 @@ $KRC $KRC_FLAGS --help > "$HD_HELP" 2>&1
 # Flag tokens, from either text. The trailing filter drops markdown anchors
 # like `#embedded-targets-riscv32--xtensa--esp32`, which are not flags: a real
 # long option never contains a second `--`.
-hd_flags() { grep -o -- '--[a-z0-9][a-z0-9-]*' "$1" | grep -v -- '.--' | sort -u; }
+hd_flags() { grep -o -- '--[A-Za-z0-9][A-Za-z0-9-]*' "$1" | grep -v -- '.--' | sort -u; }
 
 # 1. Every flag --help lists is named in the manual.
 TOTAL=$((TOTAL + 1))
