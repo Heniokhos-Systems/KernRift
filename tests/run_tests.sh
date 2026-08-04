@@ -8596,11 +8596,14 @@ fi
 rm -f /tmp/krc_stk_a64_$$
 
 # --- --image-header flag surface (sub-project C, Task 1) ---
-# Task 1 parses and validates only -- no header is ever emitted here, so
-# every row below is a REFUSAL or an accept that must be BYTE-IDENTICAL to
-# the same command without --image-header (proven in the byte-neutrality
-# section further down). Three-clause refusals via img_refuses(), same as
-# the --stack-top= rows just above.
+# Task 1 parses and validates only -- no header is ever emitted here. Rows
+# 1-3 are three-clause refusals via img_refuses(), same as the --stack-top=
+# rows just above. Row 4 is the one ACCEPTED case (--emit=image, --arch=arm64,
+# --stack-top= all present) and it is where byte-neutrality is actually
+# proven -- not merely asserted in this comment (an earlier draft of this
+# comment claimed the proof lived in a "byte-neutrality section further
+# down" that was never written; row 4 below is that proof, in this section,
+# not a forward reference to one that doesn't exist).
 echo ""
 echo "--- --image-header flag surface (C, Task 1) ---"
 
@@ -8618,9 +8621,43 @@ img_refuses imghdr_requires_arm64 "requires --arch=arm64" --arch=x86_64 --target
 
 # 3. --image-header outside --emit=image: refused. Mirrors
 #    stacktop_requires_image above -- --target=none alone (no --emit=image)
-#    is otherwise a legal, accepted build (row 18, target_none_dash_g_still_
-#    accepted), so --image-header is the only thing that can fail this line.
+#    is otherwise a legal, accepted build (target_none_dash_g_still_accepted,
+#    named rather than by ordinal: ordinals rot the moment a row is inserted
+#    above them), so --image-header is the only thing that can fail this line.
 img_refuses imghdr_requires_emit_image "only meaningful with --emit=image" --arch=arm64 --target=none --image-header
+
+# 4. --image-header ACCEPTED on a valid arm64 config, and the artifact is
+#    BYTE-IDENTICAL to the same build without the flag -- Task 1 emits no
+#    header at all, so the flag must change zero bytes. This is checked here
+#    as a REAL row, not left as a claim in a comment: I1 found exactly that
+#    shape of defect (a comment pointing at a "proof" section that was never
+#    written), and no row before this one ever built an ACCEPTED
+#    --image-header artifact at all, let alone compared it to anything.
+#
+#    TASK 2 MUST UPDATE THIS ROW. Task 2 emits the real 64-byte Image header,
+#    at which point a flagged and an unflagged build STOP being
+#    byte-identical ON PURPOSE. This row is written to fail LOUDLY rather
+#    than silently when that happens: it asserts the two sizes are EQUAL
+#    (via cmp, which also fails on a pure length mismatch), not merely that
+#    some byte range matches, so Task 2 landing without touching this row
+#    turns it red with a message that names the size check -- an obvious,
+#    deliberate update to make, not a mystery regression. The replacement
+#    Task 2 owes this row is:
+#      1. size(flagged) == size(unflagged) + 64
+#      2. bytes[64:] of flagged == bytes[0:] of unflagged (the header is a
+#         pure prefix; nothing after it moves)
+ihdr_a=/tmp/krc_ihdr_a_$$
+ihdr_b=/tmp/krc_ihdr_b_$$
+rm -f "$ihdr_a" "$ihdr_b"
+TOTAL=$((TOTAL + 1))
+if $KRC $KRC_FLAGS "$STK_SRC" -o "$ihdr_a" --arch=arm64 --target=none --emit=image --load-addr=0x40400000 --stack-top=0x40800000 >/dev/null 2>&1 \
+   && $KRC $KRC_FLAGS "$STK_SRC" -o "$ihdr_b" --arch=arm64 --target=none --emit=image --load-addr=0x40400000 --stack-top=0x40800000 --image-header >/dev/null 2>&1 \
+   && [ -f "$ihdr_a" ] && [ -f "$ihdr_b" ] && cmp -s "$ihdr_a" "$ihdr_b"; then
+    PASS=$((PASS + 1)); echo "  imghdr_task1_byte_neutral: PASS ($(wc -c < "$ihdr_a") B, flagged == unflagged -- Task 1 emits no header bytes)"
+else
+    echo "FAIL: imghdr_task1_byte_neutral (--image-header changed a byte, or one build failed -- if Task 2 just landed the real header, replace this row's size-EQUAL check per the comment above, do not just widen the diagnostic)"; FAIL=$((FAIL + 1))
+fi
+rm -f "$ihdr_a" "$ihdr_b"
 
 rm -f "$STK_SRC" "$IMG_SRC"
 
