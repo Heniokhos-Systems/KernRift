@@ -701,6 +701,26 @@ a64_kernel_base() {
     echo "$base"
 }
 
+# IS `$base` A BASE, OR IS IT ONE OF a64_kernel_base's NON-VALUES? (Task 3
+# review, Minor 1.) The two `!=` controls in L6 compare their own mutant's base
+# against the SUBJECT's, and the subject's is captured in a chain that calls
+# bad() and keeps going -- so if the subject's boot breaks while the mutants'
+# do not, `$base` holds BADPC:QMPFAIL or OUTSIDE:-1234 and `[ "$basebad" =
+# "$base" ]` is trivially false. Both controls then PASS on a comparison
+# against a non-value, printing it through printf %x as "0x0". The gate still
+# reds -- L6_kernel_load_base_is_header_derived fails on the same condition, so
+# NO FALSE-GREEN RUN IS POSSIBLE -- but a control must not print PASS for a
+# discriminator that never ran, which is this file's rule everywhere else
+# (a64_kernel_base's own shape check exists for the same reason one level
+# down). Decimal digits only: that is exactly what a64_kernel_base echoes on
+# success, and every non-value it echoes carries a colon and a prefix.
+a64_base_is_value() {
+    case "$1" in
+        "" | *[!0-9]*) return 1 ;;
+    esac
+    return 0
+}
+
 # a64_boot's QMP twin: identical addressing and identical failure propagation,
 # plus PARKED_PC. $1 load addr, $2 image, $3 entry off, $4 serial, $5 expect.
 a64_boot_qmp() {
@@ -1280,9 +1300,13 @@ leg1() {
 #      paragraph becomes false again.)
 #
 #      REPORT ACCURACY IS STILL THESE CONTROLS' JOB ON THIS ARCH, unlike x86.
-#      An arm64 image has no header and no e_entry, so `entry` is a number the
-#      compiler printed with nothing on the artifact to check it against. The
-#      subject (enter at the reported entry, must print) plus offset 0 and
+#      An arm64 image without `--image-header` -- which is every image this
+#      leg builds -- has no header and no e_entry, so `entry` is a number the
+#      compiler printed with nothing on the artifact to check it against.
+#      (With the flag there IS something on the artifact -- the header's own
+#      branch, which is what L6 tests. That is a fact about L6's images, not
+#      about this leg's.)
+#      The subject (enter at the reported entry, must print) plus offset 0 and
 #      entry-4 either side of it (must not) are jointly what makes the report
 #      load-bearing. Both re-observed under the EMITTED stub, not inherited:
 #      with the stub the reported entry is 956 where the entry function is at
@@ -1378,8 +1402,9 @@ leg2() {
     fi
     # Controls: offset 0 and entry-4 must not print. Both re-observed under the
     # EMITTED stub (PC 0x200 in each case), not carried over from B1. They are
-    # what makes the reported `entry` load-bearing on an arch whose artifact
-    # has no header to check it against.
+    # what makes the reported `entry` load-bearing on an artifact that has no
+    # header to check it against -- which every image built here is, the flag
+    # being absent from all of leg2's builds.
     # BOTH READ THE PC, and that is review I3: they used to assert silence
     # alone while this leg's header claimed otherwise, so their 0x200 evidence
     # lived only in a report — the exact debt Task 5 exists to retire. The
@@ -1865,6 +1890,11 @@ l6_quiet_control() {
 #                     "16K pages". THE EMITTED VALUE IS NOT COVERED — 0xA and
 #                     0x2 give an IDENTICAL file(1) line AND an identical parked
 #                     PC, so bit 3 (physical placement) has NO oracle here.
+#                     Re-measured in Task 4 with a SECOND bit-3-only pair,
+#                     0x8 vs 0x0: also identical in both oracles. 0x8 vs 0xA
+#                     is NOT a bit-3 experiment — it drops bits 1-2 too and
+#                     file(1) loses the "4K pages" clause, which is what
+#                     makes 0xA/0x2 and 0x8/0x0 the pairs worth quoting.
 #        code1        NO ORACLE. 0xDEADBEEF boots identically, file(1) unchanged.
 #        res2..res4   NO ORACLE.
 #        res5         NO ORACLE. 0xDEADBEEF boots identically, file(1) unchanged.
@@ -1873,6 +1903,31 @@ l6_quiet_control() {
 #      `imghdr_reserved_are_zero` in tests/run_tests.sh, which checks what the
 #      compiler wrote and cannot check that anything cares. That is not a gap
 #      this leg can close: nothing observable depends on them.
+#
+#      WHAT A GREEN L6 DOES NOT CLAIM (sub-project C, Task 4). Every number
+#      above is `load_aarch64_image` in qemu's hw/arm/boot.c doing what it
+#      does. That makes this leg proof THAT QEMU READS OUR HEADER — the
+#      strongest evidence in this project, and still not evidence that the
+#      header is CONFORMANT to the Linux Image specification. No test here
+#      compares the bytes to the spec; no spec-conformance claim is available
+#      from anything in this tree.
+#
+#      AND NO REAL BOOT CHAIN HAS RUN ANY OF IT. No U-Boot `booti`, no EFI
+#      stub, no Android boot.img tooling, no hardware, and this gate has never
+#      run in CI: qemu 8.2.2 on one developer machine is the entire boot
+#      evidence for a sub-project whose stated purpose is real-loader
+#      compatibility. Read every PASS line below with that bound attached.
+#
+#      A LIVE GAP IN EXACTLY THAT DIRECTION: B2's entry stub materialises the
+#      stack top IN x0 (movz/movk) as its first instruction, and the arm64
+#      boot protocol requires a loader to pass the FDT's physical address in
+#      x0. Every boot in this leg therefore DISCARDS the device tree qemu
+#      handed it, and that qemu DOES hand one over was measured, not assumed:
+#      with code0 repointed at the stub's halt so the movz/movk never run, the
+#      guest parks with x0 = 0x44000000 and the word there is 0xd00dfeed.
+#      Nothing here reds on that — the sentinel wants no FDT — so
+#      it is recorded at the stub in src/main.kr and again in
+#      docs/LANGUAGE.md, and it is out of scope for C to fix.
 #
 #      file(1) IS DELIBERATELY NOT RUN HERE. `imghdr_file_recognises_image`
 #      already runs it, in the suite, in both directions. This gate's rule is
@@ -1955,8 +2010,13 @@ leg6() {
     # SILENCE IS NOT THE DISCRIMINATOR AND MUST NOT BE ASSERTED. Measured: this
     # mutant boots and prints, because the payload is position-independent. The
     # header is abandoned, which shows up as a DIFFERENT load base.
+    # $base COMES FROM THE SUBJECT, WHICH CAN HAVE FAILED WITHOUT RETURNING:
+    # see a64_base_is_value. A `!=` against BADPC:* or OUTSIDE:* is not a
+    # discriminator, so refuse to print PASS for one.
     local pcbad basebad
-    if ! img_patch "$img" "$WORK/s6_magic.img" "u32:$A64H_MAGIC_OFF:3735928559"; then
+    if ! a64_base_is_value "$base"; then
+        bad "L6_control_magic_makes_qemu_read_the_header" "the subject produced no load base ('$base'), so there is nothing to compare against — this control's discriminator cannot run"
+    elif ! img_patch "$img" "$WORK/s6_magic.img" "u32:$A64H_MAGIC_OFF:3735928559"; then
         bad "L6_control_magic_makes_qemu_read_the_header" "could not patch the magic — control never ran"
     elif ! a64_kernel_boot_qmp "$WORK/s6_magic.img" "$WORK/l6_magic.txt" "1000000016"; then
         bad "L6_control_magic_makes_qemu_read_the_header" "the boot did not run (qemu exit=$BOOT_QEMU_RC)"
@@ -1965,7 +2025,13 @@ leg6() {
         if ! basebad=$(a64_kernel_base "$pcbad" "$halt"); then
             bad "L6_control_magic_makes_qemu_read_the_header" "no load base from PARKED_PC='$pcbad': $basebad — the discriminator never ran"
         elif [ "$basebad" = "$base" ]; then
-            bad "L6_control_magic_makes_qemu_read_the_header" "magic 0xDEADBEEF and magic 0x644d5241 both loaded at $(printf 0x%x "$base") — the magic changes nothing, so L6_kernel_load_base_is_header_derived is not about our header"
+            # WORDED FOR THE DEFUSED-HARNESS CASE TOO (Task 3 review, Minor 3).
+            # img_patch reports success for a write that changed nothing (a
+            # no-op value, or the right value at the wrong offset), so an equal
+            # base has TWO causes and this message must not assert the one it
+            # cannot see. It names the file it booted, not the patch it hoped
+            # for.
+            bad "L6_control_magic_makes_qemu_read_the_header" "s6_magic.img (the copy this control writes 0xDEADBEEF into, intending the magic) and the unpatched image both loaded at $(printf 0x%x "$base") — either that write did not reach the magic or qemu does not read it; either way L6_kernel_load_base_is_header_derived is not about our header"
         else
             ok "L6_control_magic_makes_qemu_read_the_header" "magic := 0xDEADBEEF => qemu ABANDONS the header and falls back to $(printf 0x%x "$basebad") instead of $(printf 0x%x "$base") (it still boots and still prints — the load base, not silence, is what discriminates; file(1) is the second oracle, in imghdr_file_recognises_image)"
         fi
@@ -1975,7 +2041,9 @@ leg6() {
     # boot and print. The Image spec says a zero image_size means "size unknown,
     # use the default offset", and that is exactly what qemu does.
     local base0
-    if ! img_patch "$img" "$WORK/s6_sz0.img" \
+    if ! a64_base_is_value "$base"; then
+        bad "L6_control_image_size_zero_abandons_header" "the subject produced no load base ('$base'), so there is nothing to compare against — this control's discriminator cannot run"
+    elif ! img_patch "$img" "$WORK/s6_sz0.img" \
             "u32:$A64H_IMAGE_SIZE_OFF:0" "u32:$(( A64H_IMAGE_SIZE_OFF + 4 )):0"; then
         bad "L6_control_image_size_zero_abandons_header" "could not patch image_size — control never ran"
     elif ! a64_kernel_boot_qmp "$WORK/s6_sz0.img" "$WORK/l6_sz0.txt" "1000000016"; then

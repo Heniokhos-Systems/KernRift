@@ -1482,7 +1482,7 @@ krc <file.kr> --target=android -o out
 #   lkm                                                 → Linux kernel module (.ko) — see docs/LKM.md
 #   asm                                                 → annotated assembly listing (to -o path)
 #   ir                                                  → SSA IR dump per function (to stdout)
-#   image                                               → raw headerless flat binary (bare metal)
+#   image                                               → raw flat binary, no container (bare metal; --image-header prefixes an arm64 boot header)
 krc <file.kr> --emit=pe -o out.exe
 krc <file.kr> --emit=macho -o out
 krc <file.kr> --emit=android -o out
@@ -1496,9 +1496,11 @@ krc <file.kr> --emit=lkm -o mod.ko   # Linux loadable kernel module (x86_64 only
 krc prog.kr --arch=arm64 --target=none --emit=image --load-addr=0x40400000 -o prog.img
 ```
 
-Emits a raw headerless flat binary: byte 0 is the first code byte, there is
-no container, and nothing is truncated (`memsz == filesz`). The build prints
-a report line the boot tooling parses:
+Emits a raw flat binary: there is no container, and nothing is truncated
+(`memsz == filesz`). Byte 0 is the first code byte — unless `--image-header`
+(below) prefixes the 64-byte arm64 `Image` header, which is the only thing
+that ever precedes code in this format. The build prints a report line the
+boot tooling parses:
 
 ```
 image: arch=arm64 entry=620 filesz=1048 memsz=1048 load=1077936128
@@ -1509,7 +1511,9 @@ report line is the only place it is recorded. Which offset depends on the
 flags: the entry function is a live `_start` if the program has one and
 `main` otherwise, and with `--stack-top=` (below) `entry` is instead the
 offset of the **emitted entry stub**, which is what a loader or a reset
-vector must start at. All values are decimal.
+vector must start at — except under `--image-header`, where the header's
+first word branches to that stub and the address to start at is the load
+address itself, file offset 0. All values are decimal.
 
 `--load-addr=` is **required, validated, and reported — never embedded**:
 x86_64 images are fully RIP-relative and run at any address; arm64 images
@@ -1608,9 +1612,12 @@ krc prog.kr --arch=arm64 --target=none --emit=image \
 ```
 
 `--image-header` prefixes the artifact with the 64-byte arm64 Linux `Image`
-header (magic `0x644d5241`), so a real arm64 boot chain (U-Boot, UEFI stub,
-and similar) can recognize and load it, the same way `--stack-top=` above
-adds x86_64's multiboot header. `file(1)` reports the result as
+header (magic `0x644d5241`), so that a real arm64 boot chain (U-Boot, UEFI
+stub, and similar) can recognize and load it, the same way `--stack-top=`
+above adds x86_64's multiboot header. That last part is a **design claim
+about the format, not a tested one** — read *What this is verified against*
+at the end of this section before relying on it. `file(1)` reports the
+result as
 *"Linux kernel ARM64 boot executable Image, little-endian, 4K pages"*.
 
 The header's first word is a branch to the entry stub, so **the artifact
@@ -1637,6 +1644,62 @@ Without the flag no byte of the output changes.
   and is accepted by a loader, but the image has no entry stub to jump to
   and faults instantly. Requiring `--stack-top=` keeps that combination —
   a header making a false claim about the bytes behind it — unrepresentable.
+
+##### What this is verified against — and what it is not
+
+Two oracles exercise the header and no others: `file(1)`, and a real
+`qemu-system-aarch64 -M virt -cpu cortex-a57 -kernel <image>` boot in
+`tests/target_none/boot_gate.sh` (leg L6), where QEMU is the thing that
+parses the 64 bytes and decides both where to place the image and where to
+start it. Everything below is a limit of *that evidence*.
+
+* **No real boot chain has run any of this.** No U-Boot `booti`, no EFI stub,
+  no Android `boot.img` tooling was available. Nor has anything run on
+  hardware: QEMU 8.2.2 on one developer machine is the whole of the boot
+  evidence, and none of it has ever run in CI.
+* **The load-base result is QEMU's behaviour, not the specification's.** L6
+  shows the image landing at an address nothing on the command line named,
+  and moving when `text_offset` moves. That is QEMU's `load_aarch64_image`
+  reading our header — it proves the header *is read*. It does **not** prove
+  the header is conformant to the Linux `Image` specification, and nothing
+  in this tree does.
+* **QEMU does not reject a bad magic.** A corrupted magic still boots and
+  still prints, because this compiler's arm64 output is position-independent:
+  QEMU silently abandons the header and falls back to its own default offset.
+  So no boot *failure* ever witnesses the magic. Its oracles are `file(1)`
+  and that shift in load base.
+* **Several fields are checked by nothing.** `code1`, `res2`–`res5` are
+  written as zero and read by nothing observable. The emitted **`flags` value
+  is uncovered too.** `file(1)` reads only bit 0 (endianness) and bits 1–2
+  (page size); nothing reads **bit 3**, the physical-placement bit, and
+  measuring it in isolation confirms that twice over — `0xA` vs `0x2` and
+  `0x8` vs `0x0` each differ in bit 3 alone and each give an identical
+  `file(1)` line *and* an identical parked PC. The compiler-side rows in
+  `tests/run_tests.sh` assert what was *written*; they cannot assert that
+  anything reads it.
+* **Whether `text_offset` is legacy is not settled here.** We write
+  `text_offset = 0` and declare 2 MiB-relative placement through `flags`
+  bit 3, the form current kernel documentation describes. QEMU honours
+  `text_offset` *verbatim* (measured: `0x300000` → base `0x40300000`, with a
+  +2 MiB bump only below 4 KiB), so it does not treat the field as legacy —
+  but whether a modern loader prefers the flags bit, the field, or neither is
+  **unverified**, because exactly one loader has ever been tried.
+* **The entry stub discards `x0`.** The arm64 boot protocol requires the
+  loader to pass the device tree blob's physical address in `x0`. The stub
+  `--stack-top=` emits materialises the stack top *in `x0`* before moving it
+  to `sp`, so a real loader's FDT pointer is overwritten before any KernRift
+  code runs and cannot be recovered. Measured, not inferred: with the stub's
+  first three instructions skipped, a plain `qemu -M virt -kernel` boot parks
+  with `x0 = 0x44000000`, whose first guest word is `0xd00dfeed` — the FDT
+  magic; the same image unpatched parks with `x0 = 0`. Nothing in a KernRift
+  image can read a device tree today.
+* **`--load-addr=` does not survive a header-parsing loader.** Under
+  `-kernel` QEMU chose `0x40200000` regardless of what `--load-addr=` said.
+  The value is still required, still validated, and the stack-vs-image
+  refusal above is **still computed from it** — so with `--image-header` you
+  can be refused for an overlap the real load makes irrelevant, or accepted
+  into one it creates. Set it to where you actually expect the image to land
+  and treat that refusal as advisory.
 
 ```
 
