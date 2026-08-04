@@ -8882,6 +8882,15 @@ rm -f /tmp/krc_uefipr_$$ "$UEFI_PR"
 #     find_entry_node-vs-find_main_offset fork. Asserted through the REPORT
 #     line, not just exit 0: an image whose entry never resolved reports the
 #     0xFFFFFFFF sentinel (4294967295) while exiting 0.
+#
+#     DO NOT DROP THE REPORT-LINE GREP. This row is named for the img_raw site,
+#     but it is ALSO THE SOLE WITNESS FOR THE FINALIZE ARM -- measured: delete
+#     that arm and 20 of 21 uefi rows stay green, because the artifact comes out
+#     BYTE-IDENTICAL and only the report line disappears. A rewrite that keeps
+#     the entry VALUE but drops the grep silently retires the only coverage of
+#     the most dangerous silent site in this sub-project.
+#     Task 2 must change the expected entry (4096 pins today's geometry); it
+#     must NOT change how the entry is observed.
 TOTAL=$((TOTAL + 1))
 UEFI_ST="$DIR/../test_tmp_uefist_$$.kr"
 printf 'fn _start() -> uint64 { return 7 }\n' > "$UEFI_ST"
@@ -8891,7 +8900,7 @@ uefist_ent=$(echo "$uefist_out" | grep -o 'entry=[0-9]*' | head -1)
 if [ $uefist_st -eq 0 ] && [ -f /tmp/krc_uefist_$$ ] && [ "$uefist_ent" = "entry=4096" ]; then
     PASS=$((PASS + 1)); echo "  uefi_start_only_program: PASS ($uefist_ent, no 'main' in the source)"
 else
-    echo "FAIL: uefi_start_only_program (exit=$uefist_st, entry='$uefist_ent' want entry=4096, out=$(echo "$uefist_out" | head -1))"; FAIL=$((FAIL + 1))
+    echo "FAIL: uefi_start_only_program (exit=$uefist_st, entry='$uefist_ent' want entry=4096 -- if Task 2 moved the geometry, update the VALUE and keep the report-line grep, out=$(echo "$uefist_out" | head -1))"; FAIL=$((FAIL + 1))
 fi
 rm -f /tmp/krc_uefist_$$ "$UEFI_ST"
 
