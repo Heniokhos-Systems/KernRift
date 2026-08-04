@@ -2455,7 +2455,12 @@ uefi_boot() {
 # runner may be, and a false-failed positive on a slow machine is the failure
 # mode this whole file is written against (see the derived silence window and
 # boot_run's `== 1`). The marker is a statement about the EVIDENCE instead: a
-# slow machine still produces it, and a hung one never does at any speed.
+# slow machine still produces it WITHIN THE DEADLINE, and a hung one never does
+# at any speed. Past the deadline the capture has no marker either and the row
+# reds — the check is not immune to a slow machine, it is just strictly better
+# than a threshold: a threshold reds runs that genuinely finished, the marker
+# reds only runs that genuinely did not. And a machine that slow fails the
+# positives anyway (no sentinel, so not RAN), so no passing row becomes a flake.
 #
 # PRINTED_PARTIAL is the seventh name and it is a FAIL BUCKET, not a seventh
 # outcome: the literal reached the wire, the computed value did not, and nothing
