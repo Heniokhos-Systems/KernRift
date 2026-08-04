@@ -1610,9 +1610,22 @@ krc prog.kr --arch=arm64 --target=none --emit=image \
 `--image-header` prefixes the artifact with the 64-byte arm64 Linux `Image`
 header (magic `0x644d5241`), so a real arm64 boot chain (U-Boot, UEFI stub,
 and similar) can recognize and load it, the same way `--stack-top=` above
-adds x86_64's multiboot header. **This flag currently only parses and
-validates — no header is emitted, and no byte the compiler writes changes
-because of it.** A later revision fills the 64 bytes in.
+adds x86_64's multiboot header. `file(1)` reports the result as
+*"Linux kernel ARM64 boot executable Image, little-endian, 4K pages"*.
+
+The header's first word is a branch to the entry stub, so **the artifact
+boots from its first byte**: a loader jumps to the load address and needs to
+know nothing else about the layout. `image_size` carries the whole file size,
+header included; `text_offset` is 0 and `flags` is `0xA` (little-endian,
+4 KB pages, load anywhere).
+
+The header is emitted *before* code generation, so every page-relative
+reference is laid out around it. That is why the artifact grows by exactly 64
+bytes and not by 64 plus padding, and why a header cannot be bolted onto an
+already-emitted image after the fact — the `adrp` page arithmetic would be
+64 bytes stale and the image would boot to silence.
+
+Without the flag no byte of the output changes.
 
 `--image-header` requires all three of:
 

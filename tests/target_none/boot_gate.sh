@@ -425,8 +425,16 @@ X86_STACK_TOP=0x90000
 # multiboot header plus a 32-bit long-mode trampoline — and the reported
 # `entry` is the STUB, not the entry function. Without it the output is B1's
 # bare blob for somebody else's loader, which is what L3 still uses.
+#
+# THE OPTIONAL 5th ARGUMENT IS EXTRA FLAGS, added by sub-project C Task 2 for
+# `--image-header` (L5). It is a plain word-split string and NOT a general
+# escape hatch: everything that must hold for the returned `entry` to be
+# meaningful -- exit 0, a parsable `image:` line, on-disk size == reported
+# filesz -- is asserted for the extended form exactly as for the plain one, so
+# a flag that breaks any of those fails the caller rather than being waved
+# through. Callers passing nothing get byte-for-byte the previous command line.
 build_image() {
-    local arch="$1" src="$2" out="$3" stop="${4:-}"
+    local arch="$1" src="$2" out="$3" stop="${4:-}" extra="${5:-}"
     local aflag="x86_64" iload="$X86_LOAD"
     if [ "$arch" = "a64" ]; then aflag="arm64"; iload="$A64_LOAD"; fi
     local log="$out.rep"
@@ -434,7 +442,7 @@ build_image() {
     [ -n "$stop" ] && sflag="--stack-top=$stop"
     rm -f "$out"
     # shellcheck disable=SC2086
-    if ! "$KRC" --arch=$aflag --target=none --emit=image $sflag \
+    if ! "$KRC" --arch=$aflag --target=none --emit=image $sflag $extra \
                 --load-addr=$(printf 0x%x "$iload") "$src" -o "$out" >"$log" 2>&1; then
         echo "  build_image: $KRC exited nonzero for $src (see $log)" >&2
         return 1
@@ -1525,6 +1533,134 @@ leg4() {
     fi
 }
 
+# =============================================================================
+# L5 — the arm64 Linux `Image` header actually BRANCHES (sub-project C, Task 2)
+#
+#      THE SUBJECT IS FILE OFFSET 0, and that is the whole leg. With
+#      `--image-header` the compiler prefixes 64 bytes whose FIRST WORD is
+#      `b <stub>`; every other byte of the header is inert data that no
+#      instruction ever reads. So the one thing a boot can prove about this
+#      header — and the one thing no static check can — is that entering the
+#      artifact at its first byte reaches the stub and the program runs.
+#
+#      WHAT THE STATIC ROWS CANNOT SEE. tests/run_tests.sh decodes code0 and
+#      asserts its imm26 lands on the reported entry. That is arithmetic on a
+#      number the compiler printed, checked against a word the compiler wrote;
+#      both come from the same emitter and are wrong together if the emitter's
+#      idea of the stub offset is wrong. Only a machine executing the word
+#      settles it. This is the same division of labour as L2: the static rows
+#      say the image LOOKS right, the leg says it RUNS.
+#
+#      OFFSET 0 IS ASSERTED NOT TO BE THE REPORTED ENTRY, for the reason L2's
+#      header spells out and which is SHARPER here: with the header the
+#      reported entry is the stub at 64 + its old offset, so if it ever came
+#      back as 0 the subject would be entering the stub directly and the
+#      header's branch would go untested while the leg stayed green. Checked,
+#      not assumed.
+#
+#      THE HALT ASSERTION IS WHAT RULES OUT "PRINTED SOME OTHER WAY". A
+#      sentinel on the wire proves the program ran; it does not prove control
+#      arrived through `bl <entry>` from the stub. Parking on the stub's own
+#      `b .` after main returns does — the PC is read over QMP and cross-checked
+#      against `entry + 16`, so a stub whose halt moved cannot pass by accident.
+#      That `b .` is also still the UNIQUE 0x14000000 in the image, which is a
+#      standing obligation on code0: the placeholder branch is the same word,
+#      so a missed patch-back would both hang the machine here AND break the
+#      `loop_offset_a64` scan five other checks read a PC through.
+#
+#      THE CONTROL DELIBERATELY DUPLICATES L2_control_offset0's SHAPE. Same
+#      source, same --stack-top, same entry address (0), only `--image-header`
+#      removed — silence, and a parked PC that is NOT the halt. L2 already runs
+#      that exact boot, so this is a duplicate run and it is on purpose: this
+#      leg's inference ("offset 0 printed BECAUSE of the header") must not
+#      depend on another leg having executed. A control borrowed from a leg
+#      that returned early is not a control.
+# =============================================================================
+leg5() {
+    echo "--- L5: arm64 Image header — boot from file offset 0 ---"
+    cp "$BOOT/sentinel_a64.kr" "$WORK/sentinel_a64_l5.kr"
+    local entry img="$WORK/s5.img"
+    if ! entry=$(build_image a64 "$WORK/sentinel_a64_l5.kr" "$img" "$A64_STACK_TOP" "--image-header"); then
+        bad "L5_header_entry_is_not_offset0" "sentinel_a64.kr did not compile with --image-header"; return
+    fi
+    # ---- BLOCKING, BEFORE THE RUNTIME PAIRS (see L1's note on ordering) ----
+    if [ "$entry" != 0 ]; then
+        ok "L5_header_entry_is_not_offset0" "reported entry $entry != 0, so booting at offset 0 exercises the header's branch and not the stub itself"
+    else
+        bad "L5_header_entry_is_not_offset0" "the reported entry IS file offset 0 — the subject would enter the stub directly and code0 would go untested"
+    fi
+    local halt want_pc
+    if ! halt=$(loop_offset_a64 "$img"); then
+        # AMBIG:2 here would mean the header contributed a second self-branch.
+        # It cannot come from an UNPATCHED code0 -- that placeholder is 0, i.e.
+        # `udf #0`, chosen precisely so a missed patch is not this word -- so it
+        # would mean the patch computed a displacement of 0 and branched to
+        # itself, which is a different defect from the one L2 guards.
+        bad "L5_halt_parked" "self-branch count: $halt (AMBIG:2 means code0 was patched to branch to ITSELF)"; return
+    fi
+    if [ "$halt" != $(( entry + 16 )) ]; then
+        bad "L5_halt_parked" "the unique 'b .' is at $halt, but the stub's halt must be at entry + 16 = $(( entry + 16 ))"; return
+    fi
+    want_pc=$(printf %x $(( A64_LOAD + halt )))
+    # ---- the subject: enter at the HEADER, not at the stub -----------------
+    if ! a64_self_boot_qmp "$A64_LOAD" "$img" 0 "$WORK/l5_ser.txt" "1000000016"; then
+        bad "L5_header_boots_from_offset0" "the boot did not run (qemu exit=$BOOT_QEMU_RC): '$(head -c 120 "$WORK/l5_ser.txt.err")'"
+        bad "L5_halt_parked" "no boot to read a PC from"; return
+    fi
+    if grep -q "1000000016" "$WORK/l5_ser.txt"; then
+        ok "L5_header_boots_from_offset0" "entered at load + 0 (code0) and computed 1000000016 on the PL011 (${BOOT_WAITED_TICKS} ticks)"
+    else
+        bad "L5_header_boots_from_offset0" "serial held: '$(tr '\n' ' ' <"$WORK/l5_ser.txt")'"
+    fi
+    if [ "$PARKED_PC" = "$want_pc" ]; then
+        ok "L5_halt_parked" "PC parked at 0x$want_pc == load + entry + 16, the stub's own 'b .' — so code0 branched to the stub and main RETURNED into it"
+    else
+        bad "L5_halt_parked" "pc=$PARKED_PC want=$want_pc"
+    fi
+    # Absence window derived from the arm64 positive boot just observed.
+    calibrate_silence
+    # ---- the control: the same image WITHOUT the header, same entry (0) ----
+    #
+    # THE CONTROL COMPARES AGAINST ITS OWN IMAGE'S HALT, not the subject's.
+    # The two artifacts differ by a 64-byte prefix, so the unflagged image's
+    # `b .` sits 64 bytes BELOW $want_pc. Testing the control's parked PC
+    # against $want_pc — as the first version of this leg did — asks whether
+    # it stopped at an address that is not in its stub at all: it would go
+    # green on any outcome including the one it exists to catch (offset 0
+    # reaching the stub without a header, which would park at
+    # $want_pc - 64 and read as "not the halt"). It passed, for the wrong
+    # reason. $want_pc5 is derived from the control's own file.
+    #
+    # AND THE 64-BYTE RELATION IS ASSERTED, not assumed: if the two halts are
+    # not exactly 64 apart, the two images differ by more than the header and
+    # "one flag is the whole difference" is not a claim this leg may make.
+    local e5 halt5 want_pc5
+    if ! e5=$(build_image a64 "$WORK/sentinel_a64_l5.kr" "$WORK/s5_noh.img" "$A64_STACK_TOP"); then
+        bad "L5_control_no_header_offset0_silent" "the no-header build failed — control never ran"
+    elif ! halt5=$(loop_offset_a64 "$WORK/s5_noh.img"); then
+        bad "L5_control_no_header_offset0_silent" "self-branch count in the no-header image: $halt5 — no address to discriminate against"
+    elif [ "$halt5" != $(( halt - 64 )) ]; then
+        bad "L5_control_no_header_offset0_silent" "the no-header halt is at $halt5 but the headered one is at $halt — the two images differ by something other than the 64-byte prefix, so this is not a control"
+    elif ! a64_self_boot_qmp "$A64_LOAD" "$WORK/s5_noh.img" 0 "$WORK/l5_noh.txt" RUNOUT; then
+        bad "L5_control_no_header_offset0_silent" "the boot did not run (qemu exit=$BOOT_QEMU_RC) — silence proves nothing"
+    elif grep -q "1000000016" "$WORK/l5_noh.txt"; then
+        bad "L5_control_no_header_offset0_silent" "sentinel printed from offset 0 of an image with NO header — the subject's pass says nothing about code0"
+    else
+        want_pc5=$(printf %x $(( A64_LOAD + halt5 )))
+        # SHAPE-CHECK BEFORE THE `!=` (B1 review I5): QMPFAIL and MOVING:*
+        # satisfy it vacuously, so without this the control goes green
+        # precisely when the discriminator is broken.
+        case "$PARKED_PC" in
+            "" | *[!0-9a-f]*)
+                bad "L5_control_no_header_offset0_silent" "no parked PC (PARKED_PC='$PARKED_PC') — the discriminator never ran" ;;
+            "$want_pc5")
+                bad "L5_control_no_header_offset0_silent" "parked at its OWN halt 0x$want_pc5 having entered at offset 0 with no header — offset 0 reached the stub without code0" ;;
+            *)
+                ok "L5_control_no_header_offset0_silent" "no --image-header => offset 0 is the first FUNCTION (entry $e5): no sentinel, parked at 0x$PARKED_PC (not its own halt 0x$want_pc5, which is $want_pc minus the 64-byte prefix) — one flag is the whole difference" ;;
+        esac
+    fi
+}
+
 # THE ROSTERS ARE THE SKIP ACCOUNTING, so every check added by B2 Task 5 is
 # listed here. A check that is not on its leg's roster does not become a SKIP
 # when an earlier failure returns past it — it simply vanishes from the tally,
@@ -1542,6 +1678,8 @@ run_leg leg2 L2_entry_is_not_offset0 L2_self_boot_sentinel L2_halt_parked \
              L2_control_no_stub L2_control_offset0 L2_control_entry_minus4
 run_leg leg3 L3_unique_halt_loop L3_exhaustion_halt L3_control_uninit L3_control_crash
 run_leg leg4 L4_unaligned_refused_at_compile L4_x86_same_offset_accepted L4_aligned_prints_misaligned_silent
+run_leg leg5 L5_header_entry_is_not_offset0 L5_header_boots_from_offset0 L5_halt_parked \
+             L5_control_no_header_offset0_silent
 
 echo ""
 echo "boot gate: $PASS pass, $FAIL FAIL, $SKIP SKIP"
