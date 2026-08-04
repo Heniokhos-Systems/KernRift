@@ -8006,8 +8006,18 @@ else
     echo "FAIL: target_none_esp32_conflict (exit $TN_ST: '$TN_ERR')"; FAIL=$((FAIL + 1))
 fi
 
-# 4. Contradictory emit modes.
-for M in lkm android; do
+# 4. Contradictory emit modes -- ALL FOUR of them.
+#    This loop shipped naming two, `lkm` and `android`, while a reader would
+#    reasonably take a list headed "contradictory emit modes" for the list.
+#    macho and pe became refusals later (they are OS containers: a Mach-O
+#    needs dyld and LC_MAIN, a PE's entry calls through a kernel32 import
+#    slot) and were pinned only in the t6 surface, so this enumeration was
+#    two-thirds of the truth from the day it stopped being all of it.
+#    It is now the complete refused set. What KEEPS it complete is not this
+#    line but t6_emit_table_covers_every_mode further down, which derives the
+#    mode set from src/main.kr; this loop is the --target=none surface's own
+#    copy and reds here for a nearer, better-named reason.
+for M in lkm android macho pe; do
     TOTAL=$((TOTAL + 1))
     TN_ERR=$($KRC --arch=x86_64 --target=none --emit=$M "$TN_SRC" -o /tmp/krc_tnone_bin_$$ 2>&1); TN_ST=$?
     if [ "$TN_ST" != "0" ] && echo "$TN_ERR" | grep -q "target=none"; then
@@ -8112,10 +8122,15 @@ rm -f "$TN_SRC" /tmp/krc_tnone_bin_$$
 #     there on bare metal. --emit=obj reaches the SAME codegen and is kept, so
 #     none of the legacy bare-metal coverage below is lost -- see the note on
 #     the choke-point and provider blocks.
-#  3. --emit= never sets target_os, so macho/pe/obj/asm/ir each had no defined
-#     outcome under --target=none. macho and pe produced a real OS container
-#     (an 8192-byte Mach-O, a 2048-byte PE) full of bare-metal codegen, which
-#     nothing on either side can load.
+#  3. --emit= never sets target_os TO A BARE-METAL ONE, so macho/pe/obj/asm/ir
+#     each had no defined outcome under --target=none. macho and pe produced a
+#     real OS container (an 8192-byte Mach-O, a 2048-byte PE) full of
+#     bare-metal codegen, which nothing on either side can load. (The four
+#     words in caps were missing and made the sentence false: `--emit=macho`,
+#     `--emit=pe` and `--emit=android` DO auto-set target_os when no --target=
+#     was given -- src/main.kr's "Auto-set target_os from emit_mode" block --
+#     which is exactly why t6_pair_riscv32_emit_pe below has to run its check
+#     on the RESOLVED OS. This file asserted both readings, 180 lines apart.)
 #  4. There was NO arch x OS validation at all: `--arch=riscv32
 #     --target=windows` exited 0 and wrote a 296-byte RISC-V *ELF*. The check
 #     added is an ENUMERATION of the legal pairs, not a blacklist -- a
@@ -8282,6 +8297,62 @@ t6_refuses "t6_emit_lkm_tnone" "--emit=lkm" "--target=none" -- \
     --emit=lkm --arch=x86_64 --target=none "$T6_D/plain.kr"
 t6_refuses "t6_emit_android_tnone" "--emit=android" "--target=none" -- \
     --emit=android --arch=arm64 --target=none "$T6_D/plain.kr"
+#    image (8) and uefi (9) are the two bare-metal modes and BOTH WERE MISSING
+#    from this table while its comment claimed completeness -- the exact defect
+#    D Task 4 was written to sweep for. They belong here even though each has
+#    its own dedicated block further down: this table is the one place that
+#    answers "what does every emit mode do under --target=none", and a mode
+#    whose answer lives only in its own block is a mode this table cannot
+#    speak for. Both REQUIRE --target=none rather than merely tolerating it,
+#    which is a third outcome the table had no example of.
+t6_builds "t6_emit_image_tnone" -- --emit=image --arch=x86_64 --target=none --load-addr=0x400000 "$T6_D/plain.kr"
+t6_builds "t6_emit_uefi_tnone" -- --emit=uefi --arch=x86_64 --target=none "$T6_D/plain.kr"
+
+# 3b. COMPLETENESS, DERIVED RATHER THAN ASSERTED.
+#     The comment on block 3 says the emit-mode table is complete in one place.
+#     That sentence was FALSE for two whole modes and nothing noticed, because
+#     nothing checked it -- a hand-written table cannot know about a mode
+#     nobody added to it. So the roster below is compared against the set of
+#     emit_mode values the compiler actually assigns, read out of the source
+#     that assigns them. Add an `emit_mode = 10` arm without a row here and
+#     this reds; that is the whole point, and it is why the check is on the
+#     MODE NUMBERS and not on the spellings (16 of the 28 spellings are
+#     aliases for a mode some other spelling already covers).
+T6_MODE_ROWS="0:t6_emit_elfexe_tnone 1:t6_emit_macho_tnone 2:t6_emit_pe_tnone 3:t6_emit_obj_tnone_x86_64 4:t6_emit_android_tnone 5:t6_emit_asm_tnone 6:t6_emit_ir_tnone 7:t6_emit_lkm_tnone 8:t6_emit_image_tnone 9:t6_emit_uefi_tnone"
+TOTAL=$((TOTAL + 1))
+T6_MODES_SRC=$(grep -oE 'emit_mode = [0-9]+' "$DIR/../src/main.kr" | grep -oE '[0-9]+$' | sort -un | tr '\n' ' ')
+T6_MODES_TBL=$(for p in $T6_MODE_ROWS; do echo "${p%%:*}"; done | sort -un | tr '\n' ' ')
+# The NAME half, which the first version of this check parsed and then threw
+# away -- so it printed "each with a named row" while deleting the real
+# uefi row left it green. A roster entry now has to point at a row that
+# EXISTS, and "exists" means an INVOCATION, not a mention: the name must
+# appear either as `t6_builds "<name>"` / `t6_refuses "<name>"` or as the
+# `"  <name>: PASS` line of a hand-rolled row.
+#
+# THE FIRST ATTEMPT AT THIS WAS "the name occurs on some line other than the
+# T6_MODE_ROWS line", AND IT WAS DEFEATED BY THIS VERY COMMENT -- the red
+# experiment deleted the uefi row and the check stayed green, because the
+# comment above named it. A check that a prose mention can satisfy is the
+# same class of defect it exists to catch, which is why it is anchored to the
+# call syntax now and why the offending word is not repeated here.
+T6_NOROW=""
+for p in $T6_MODE_ROWS; do
+    t6_rn="${p#*:}"
+    grep -qE "^t6_(builds|refuses) \"$t6_rn\"|\"  $t6_rn: PASS" "$DIR/run_tests.sh" \
+        || T6_NOROW="$T6_NOROW $t6_rn"
+done
+if [ -z "$T6_MODES_SRC" ]; then
+    echo "FAIL: t6_emit_table_covers_every_mode (could not read any 'emit_mode = N' assignment out of src/main.kr -- the derivation broke, which would make this check vacuous)"
+    FAIL=$((FAIL + 1))
+elif [ -n "$T6_NOROW" ]; then
+    echo "FAIL: t6_emit_table_covers_every_mode (T6_MODE_ROWS names rows that do not exist in this file:$T6_NOROW -- the roster is a promise, not the coverage)"
+    FAIL=$((FAIL + 1))
+elif [ "$T6_MODES_SRC" = "$T6_MODES_TBL" ]; then
+    PASS=$((PASS + 1)); echo "  t6_emit_table_covers_every_mode: PASS ($(echo "$T6_MODES_TBL" | wc -w | tr -d ' ') modes, each naming a row that exists)"
+else
+    echo "FAIL: t6_emit_table_covers_every_mode (src/main.kr assigns emit_mode values [$T6_MODES_SRC]; this block's roster covers [$T6_MODES_TBL]. Add the missing mode's row to block 3 and its entry to T6_MODE_ROWS)"
+    FAIL=$((FAIL + 1))
+fi
 
 # 4. arch x OS pairs. `--arch=riscv32 --target=windows` exited 0 and wrote a
 #    RISC-V ELF; nothing anywhere validated the combination.
@@ -8699,6 +8770,566 @@ rm -f "$ihdr_a" "$ihdr_b"
 
 rm -f "$STK_SRC" "$IMG_SRC"
 
+# --- --emit=uefi flag surface, payload geometry, PE header (D, Tasks 1-2) ----
+#
+# WHAT MAKES THIS MODE DANGEROUS, AND WHY EVERY ROW BELOW IS SHAPED THE WAY IT
+# IS. A new --emit= value inherits four separate defaults, and all four fail
+# IDENTICALLY: exit 0, no diagnostic, an artifact on disk, and every static
+# assertion about the flag surface still green. They are, with the evidence
+# that each is real rather than theoretical (all measured at BASE = 2b63051,
+# with the mode's arms deliberately absent):
+#
+#   1. THE HEADER DISPATCH (src/main.kr, the `if emit_mode == 0 ... else if`
+#      chain) has no terminal `else`. A mode that reaches it unnamed emits no
+#      container bytes at all and header_size keeps its 120-byte default.
+#   2. THE FINALIZE DISPATCH has no terminal `else` either. A fall-through
+#      there gets no entry patch and no size patch, and still reaches
+#      codegen_write_output.
+#   3. img_raw was `emit_mode == 8` ALONE, and it gates BOTH the `_start` DCE
+#      seeding AND the entry-resolver fork. Falsified by construction at BASE:
+#      `fn _start() -> uint64 { return 7 }` compiles under --emit=image
+#      (`image: ... entry=0`, 32 bytes) and dies "no 'main' function found"
+#      under --emit=pe -- and the second branch is what a new mode inherits.
+#   4. target_os SILENTLY BECOMES LINUX. The auto-set block keys on emit_mode
+#      1/2/4 only, so a new mode leaves target_os at its 0 = linux default and
+#      every else-POSIX fall-through in the tree answers "Linux" for it. Row
+#      `uefi_target_none_is_bare_metal` is the positive control for that.
+#
+# THE PAYLOAD ROW IS THE ONE THAT SEES SITES 1-3. Exit 0 plus "a file exists"
+# would pass with all three arms missing. `uefi_payload_is_the_image_payload`
+# reads the artifact instead: the bytes after the reserved header region must
+# be the SAME BYTES --emit=image emits for the same source and arch. That
+# fails if the payload is truncated, if fixups went unresolved, if statics
+# were dropped -- and, on arm64, if the reserved region is not a whole number
+# of 4 KiB pages, because adrp bakes page(target) - page(pc) from the file
+# offset and only a page-congruent shift leaves those bytes alone.
+#
+# THE 4 KiB IS TASK 2's CONSTRAINT, HONOURED HERE. a64_compute_va maps file
+# offset -> 0x400000 + offset, so the payload's baked page arithmetic is
+# congruent to its FILE offset mod 4096. A PE loader maps it at
+# SectionRVA + (offset - PointerToRawData). Those agree only when
+# (SectionRVA - PointerToRawData) == 0 mod 4096. This tree reserves 0x1000
+# and places the section at RVA 0x1000, i.e. delta 0 -- the strongest
+# form, where file offset == RVA everywhere in the file. The 0xE00 delta a
+# 0x200 file alignment would produce is exactly the value that loads, runs
+# and faults with no diagnostic.
+#
+# TASK 2 FILLED THE REGION and added the header rows below the payload rows.
+# The delta-0 geometry Task 1 fixed did NOT move -- FileAlignment is 0x1000
+# (== SectionAlignment), so PointerToRawData 0x1000 is a legal aligned value
+# and no field has to lie to reach delta 0. Two consequences the rows below
+# pin, both of which a reader would otherwise have to guess at:
+#   * `entry=4096` in the report is UNCHANGED from Task 1, because the header
+#     region is the same 4096 bytes it always was. The row that pins it kept
+#     its value AND its report-line grep (see its comment).
+#   * SizeOfRawData must be a multiple of FileAlignment, so the artifact is
+#     now zero-padded to 4096 + roundup(payload, 4096). The payload rows
+#     below compare the payload PREFIX byte-for-byte and assert the pad is
+#     zero, which is strictly more than the old exact-length compare checked.
+echo ""
+echo "--- --emit=uefi flag surface + payload geometry (D, Tasks 1-2) ---"
+UEFI_SRC="$DIR/../test_tmp_uefi_$$.kr"
+printf 'static uint64 uefi_magic = 305419896\nfn helper(uint64 x) -> uint64 { return x + uefi_magic }\nfn main() -> uint64 { return helper(3) }\n' > "$UEFI_SRC"
+# Three clauses per refusal, exactly as img_refuses(): nonzero exit, the
+# diagnostic, and NO ARTIFACT. A diagnostic that still writes a file is half a
+# refusal, and for this mode the half that ships is the dangerous one.
+uefi_refuses() {  # $1 name, $2 grep pattern, rest = flags
+    local name="$1" pat="$2"; shift 2
+    TOTAL=$((TOTAL + 1))
+    rm -f /tmp/krc_uefi_$$
+    local out; out=$($KRC $KRC_FLAGS "$UEFI_SRC" -o /tmp/krc_uefi_$$ "$@" 2>&1); local st=$?
+    if [ $st -ne 0 ] && echo "$out" | grep -q -- "$pat" && [ ! -f /tmp/krc_uefi_$$ ]; then
+        PASS=$((PASS + 1)); echo "  $name: PASS"
+    else
+        echo "FAIL: $name (exit=$st, artifact=$([ -f /tmp/krc_uefi_$$ ] && echo yes || echo no), out=$(echo "$out" | head -1))"
+        FAIL=$((FAIL + 1))
+    fi
+    rm -f /tmp/krc_uefi_$$
+}
+
+# 1-2. --target=none is REQUIRED, both by absence and against a hosted value.
+#      Row 1 is the one that closes the else-POSIX door: with no --target= on
+#      the line at all the resolved OS is linux, and a UEFI application full
+#      of Linux syscalls is exactly the silent artifact this mode must never
+#      produce.
+uefi_refuses uefi_requires_target_none "requires --target=none" --arch=x86_64 --emit=uefi
+uefi_refuses uefi_hosted_target_refused "requires --target=none" --arch=arm64 --target=macos --emit=uefi
+
+# 3-4. riscv32 / xtensa: refused. There is no third Machine value to write
+#      into a PE header for either, and both already own a raw path. The
+#      patterns are substrings UNIQUE to each message -- "x86_64/arm64 only"
+#      appears in both, so grepping it would let a defect that routes xtensa
+#      to the riscv32 refusal pass (the same trap the --emit=image rows note).
+uefi_refuses uefi_refuses_riscv32 "no PE Machine value for riscv32" --arch=riscv32 --target=none --emit=uefi
+uefi_refuses uefi_refuses_xtensa "no PE Machine value for xtensa" --arch=xtensa --target=none --emit=uefi
+
+# 5. NO --arch AT ALL: refused. There is no arch_set == 0 refusal for a new
+#    emit mode -- --emit= sets emit_set, which skips the fat path AND its
+#    "pass --arch" refusal, so the arch would silently default to x86_64 and
+#    the PE Machine field would name a CPU nobody asked for. Uses the RAW
+#    build/krc2 because the make-test wrapper injects --arch=x86_64, which is
+#    the exact condition under test.
+TOTAL=$((TOTAL + 1))
+if [ -f "$DIR/../build/krc2" ]; then UEFI_RAW_KRC=$(cd "$DIR/../build" && pwd)/krc2; else UEFI_RAW_KRC=""; fi
+rm -f /tmp/krc_uefina_$$
+uefina_out=$("$UEFI_RAW_KRC" "$UEFI_SRC" -o /tmp/krc_uefina_$$ --target=none --emit=uefi 2>&1); uefina_st=$?
+if [ -n "$UEFI_RAW_KRC" ] && [ $uefina_st -ne 0 ] \
+   && echo "$uefina_out" | grep -q "requires an explicit --arch" && [ ! -f /tmp/krc_uefina_$$ ]; then
+    PASS=$((PASS + 1)); echo "  uefi_requires_explicit_arch: PASS"
+else
+    echo "FAIL: uefi_requires_explicit_arch (exit=$uefina_st, out=$(echo "$uefina_out" | head -1))"; FAIL=$((FAIL + 1))
+fi
+rm -f /tmp/krc_uefina_$$
+
+# 6-7. --target=android, BOTH ORDERS, because the two orders fail through
+#      different doors and only one of them is covered by row 1.
+#
+#      MEASURED: `--target=android` does not merely set target_os, it ASSIGNS
+#      emit_mode = 4 in the middle of the argument loop. So with --emit=uefi
+#      FIRST the mode is silently overwritten, the emit_mode-9 refusals never
+#      run, and the build emits an Android PIE ELF at exit 0 -- --emit=image
+#      survives the same line only by the accident of ALSO requiring
+#      --load-addr=, whose "only meaningful with --emit=image" check then
+#      fires. A new mode has no such backstop, so it gets an explicit one.
+#      In the other order --emit=uefi comes last, wins the chain, and is
+#      caught by row 1's target_os rule instead -- a different door, hence a
+#      different expected diagnostic, hence two rows and not one.
+uefi_refuses uefi_refuses_target_android "overridden by --target=android" --arch=x86_64 --emit=uefi --target=android
+uefi_refuses uefi_target_android_first "requires --target=none" --arch=x86_64 --target=android --emit=uefi
+
+# 8. -g: refused. At BASE the -g refusal lives INSIDE `if emit_mode == 8`, so
+#    a new mode inherits acceptance, not refusal -- and acceptance is silent:
+#    measured at BASE, `--emit=pe -g` is BYTE-IDENTICAL to `--emit=pe` (2048
+#    bytes both), so -g on a container that ignores it is not even visible in
+#    the artifact.
+uefi_refuses uefi_rejects_g "conflicts with --emit=uefi" --arch=arm64 --target=none --emit=uefi -g
+
+# 9-11. The three --emit=image-only flags stay --emit=image-only. A UEFI
+#       application is loaded and relocated by firmware: it has no load
+#       address to pin, its stack is set up before entry so there is no stub
+#       to emit, and the arm64 Linux Image header is a different container.
+uefi_refuses uefi_load_addr_refused "only meaningful with --emit=image" --arch=x86_64 --target=none --emit=uefi --load-addr=0x400000
+uefi_refuses uefi_stack_top_refused "only meaningful with --emit=image" --arch=x86_64 --target=none --emit=uefi --stack-top=0x90000
+uefi_refuses uefi_image_header_refused "only meaningful with --emit=image" --arch=arm64 --target=none --emit=uefi --image-header
+
+# 12-13. --targets= forces the fat path even with --emit= present, so both
+#        spellings are pinned exactly as the --emit=image rows pin them: check
+#        ORDER is the only thing keeping a fat build from swallowing this mode.
+uefi_refuses uefi_targets_no_none "requires --target=none" --arch=x86_64 --emit=uefi --targets=linux-x64
+uefi_refuses uefi_targets_with_none "cannot build a fat binary" --arch=x86_64 --target=none --emit=uefi --targets=linux-x64
+
+# 14. --emit= LAST-WINS still works in the uefi -> other direction. This is
+#     the row that keeps the android-override refusal narrow: it must fire on
+#     an emit_mode clobbered by --target=android and NOT on one a later
+#     --emit= legitimately replaced. `--emit=uefi --emit=elfexe --target=none`
+#     is a plain accepted bare-metal ELF build.
+TOTAL=$((TOTAL + 1))
+rm -f /tmp/krc_uefilw_$$
+if $KRC $KRC_FLAGS "$UEFI_SRC" -o /tmp/krc_uefilw_$$ --arch=x86_64 --target=none --emit=uefi --emit=elfexe >/dev/null 2>&1 \
+   && [ -f /tmp/krc_uefilw_$$ ] && head -c 4 /tmp/krc_uefilw_$$ | grep -q ELF; then
+    PASS=$((PASS + 1)); echo "  uefi_emit_last_wins_away: PASS (--emit=uefi --emit=elfexe builds an ELF)"
+else
+    echo "FAIL: uefi_emit_last_wins_away (the override refusal is too wide: a later --emit= is last-wins, not a clobber)"; FAIL=$((FAIL + 1))
+fi
+rm -f /tmp/krc_uefilw_$$
+# ...and the other direction refuses on the resolved mode, not the spelling.
+uefi_refuses uefi_emit_last_wins_to "requires --target=none" --arch=x86_64 --emit=elfexe --emit=uefi
+
+# 15. THE target_os POSITIVE CONTROL (Task 1, Step 4). Everything above is a
+#     refusal, and refusals cannot show what the ACCEPTED path resolved to.
+#     This one can: `print` is refused under --target=none with a message no
+#     hosted target ever produces, and compiles clean on every hosted one. So
+#     an --emit=uefi build that answers "not available on bare metal" is a
+#     build whose target_os is 4 and not 0.
+#
+#     CONSTRUCTED, NOT ASSUMED. With the --target=none refusal disabled in a
+#     scratch build of the compiler, `--arch=x86_64 --emit=uefi` on this exact
+#     program COMPILED CLEAN: exit 0, a 4312-byte artifact (216-byte payload),
+#     and `objdump -D -b binary -m i386:x86-64` counts FOUR x86_64 `syscall`
+#     instructions in it -- Linux syscalls inside a UEFI application. The
+#     default really is linux; this row is what witnesses it staying gone.
+TOTAL=$((TOTAL + 1))
+UEFI_PR="$DIR/../test_tmp_uefipr_$$.kr"
+printf 'fn main() -> uint64 { print(1) return 0 }\n' > "$UEFI_PR"
+rm -f /tmp/krc_uefipr_$$
+uefipr_out=$($KRC $KRC_FLAGS "$UEFI_PR" -o /tmp/krc_uefipr_$$ --arch=x86_64 --target=none --emit=uefi 2>&1); uefipr_st=$?
+if [ $uefipr_st -ne 0 ] && echo "$uefipr_out" | grep -q "not available on bare metal" && [ ! -f /tmp/krc_uefipr_$$ ]; then
+    PASS=$((PASS + 1)); echo "  uefi_target_none_is_bare_metal: PASS (accepted uefi path resolves target_os=none, not linux)"
+else
+    echo "FAIL: uefi_target_none_is_bare_metal (exit=$uefipr_st, out=$(echo "$uefipr_out" | head -1) -- an --emit=uefi build that accepts print() resolved target_os to a hosted OS)"; FAIL=$((FAIL + 1))
+fi
+rm -f /tmp/krc_uefipr_$$ "$UEFI_PR"
+
+# 16. A `_start`-only program builds -- site 3, img_raw. At BASE this program
+#     dies "no 'main' function found" on every mode but 8, because img_raw
+#     gates both the DCE seeding that keeps `_start` alive and the
+#     find_entry_node-vs-find_main_offset fork. Asserted through the REPORT
+#     line, not just exit 0: an image whose entry never resolved reports the
+#     0xFFFFFFFF sentinel (4294967295) while exiting 0.
+#
+#     DO NOT DROP THE REPORT-LINE GREP. This row is named for the img_raw site,
+#     but it is ALSO THE SOLE WITNESS FOR THE FINALIZE ARM -- measured: delete
+#     that arm and 20 of 21 uefi rows stay green, because the artifact comes out
+#     BYTE-IDENTICAL and only the report line disappears. A rewrite that keeps
+#     the entry VALUE but drops the grep silently retires the only coverage of
+#     the most dangerous silent site in this sub-project.
+#     Task 2 must change the expected entry (4096 pins today's geometry); it
+#     must NOT change how the entry is observed.
+#
+#     TASK 2 REPORT: the VALUE did not have to move and the grep is untouched.
+#     Task 2 filled the reserved region rather than resizing it -- the header
+#     is 0x170 bytes inside the same 4096-byte region, PointerToRawData is
+#     still 0x1000, and a `_start`-only payload still begins at file offset
+#     4096. So 4096 is re-derived here, not inherited: it is asserted against
+#     the same artifact whose AddressOfEntryPoint row 21 reads back and
+#     compares to this very report line.
+#
+#     THE FINALIZE ARM NOW HAS MORE THAN ONE WITNESS, which is the point of
+#     saying so. Re-measured at Task 2 with the arm deleted from a scratch
+#     compiler: this row reds as before, AND rows 21-22 red on entry_point,
+#     size_of_code, size_of_image, virtual_size and size_of_raw_data (all
+#     left at 0), and rows 17-18 red on the missing file-alignment padding.
+#     The grep stays anyway -- it is the only one of those that survives a
+#     future header rewrite.
+TOTAL=$((TOTAL + 1))
+UEFI_ST="$DIR/../test_tmp_uefist_$$.kr"
+printf 'fn _start() -> uint64 { return 7 }\n' > "$UEFI_ST"
+rm -f /tmp/krc_uefist_$$
+uefist_out=$($KRC $KRC_FLAGS "$UEFI_ST" -o /tmp/krc_uefist_$$ --arch=x86_64 --target=none --emit=uefi 2>&1); uefist_st=$?
+uefist_ent=$(echo "$uefist_out" | grep -o 'entry=[0-9]*' | head -1)
+if [ $uefist_st -eq 0 ] && [ -f /tmp/krc_uefist_$$ ] && [ "$uefist_ent" = "entry=4096" ]; then
+    PASS=$((PASS + 1)); echo "  uefi_start_only_program: PASS ($uefist_ent, no 'main' in the source)"
+else
+    echo "FAIL: uefi_start_only_program (exit=$uefist_st, entry='$uefist_ent' want entry=4096 -- if Task 2 moved the geometry, update the VALUE and keep the report-line grep, out=$(echo "$uefist_out" | head -1))"; FAIL=$((FAIL + 1))
+fi
+rm -f /tmp/krc_uefist_$$ "$UEFI_ST"
+
+# 17-18. THE PAYLOAD ROW (see this section's header). Per arch: the uefi
+#        artifact's bytes from 4096 on begin with the --emit=image artifact
+#        for the same source, BYTE FOR BYTE, and everything after that is
+#        zero file-alignment padding.
+#
+#        WHY THIS IS NO LONGER AN EXACT-LENGTH COMPARE (Task 2). At Task 1 the
+#        artifact was exactly 4096 + payload, because nothing constrained its
+#        tail. Task 2's header declares FileAlignment 0x1000, and a PE section's
+#        SizeOfRawData must be a multiple of FileAlignment -- so the choice is
+#        between padding the file and writing a SizeOfRawData that runs past
+#        EOF, which the derivation reference lists as a REJECTION. The file is
+#        padded. All three clauses below are asserted, so the row still fails
+#        on a truncated payload, on unresolved fixups, on dropped statics and
+#        -- on arm64 -- on a non-page-congruent header region; it additionally
+#        now fails if the padding is not zero or not the exact amount the
+#        declared alignment requires.
+#
+#        WHY BYTE-FOR-BYTE IS AVAILABLE AT ALL, and it is not a coincidence:
+#        --load-addr is echoed and never embedded, x86_64 image output is
+#        RIP-relative throughout, and arm64's adrp/add pairs survive a shift
+#        that is a whole number of pages.
+#
+#        THE ARM64 ARM IS THE CONGRUENCE CHECK; THE x86_64 ARM IS NOT, and
+#        the difference was measured rather than assumed. Rebuilding the
+#        compiler with the reserved region set to 0x200 instead of 0x1000 and
+#        re-running both arms:
+#          * arm64  -> payload DIFFERS. Two independent mechanisms, and the
+#            weaker source only needs the first: the `add` half of each
+#            adrp/add pair carries `target & 0xFFF`, which any non-4096
+#            multiple moves (measured on this 3-line source, 56-byte payload);
+#            and on a payload that spans pages the `adrp` page difference
+#            itself moves (measured separately on a 4544-byte payload).
+#          * x86_64 -> payload still IDENTICAL, at 0x200 and at 0x1000 alike.
+#            It is RIP-relative throughout and genuinely immune, so its arm
+#            here proves payload COMPLETENESS and nothing about geometry.
+#        So do not read the x86_64 row as covering C1. Only arm64 does.
+#
+#        The source carries a static AND a cross-function call on purpose:
+#        a leaf that returns a constant has no fixups to resolve, so it would
+#        pass this row with the static-fixup and call-fixup passes skipped
+#        entirely -- and with no static there is no adrp/add pair, which is
+#        the only thing the arm64 arm can see a bad geometry through.
+for UA in x86_64 arm64; do
+    ULOAD=0x400000
+    if [ "$UA" = "arm64" ]; then ULOAD=0x40400000; fi
+    TOTAL=$((TOTAL + 1))
+    rm -f /tmp/krc_ue_$$ /tmp/krc_ui_$$ /tmp/krc_ut_$$
+    $KRC $KRC_FLAGS "$UEFI_SRC" -o /tmp/krc_ue_$$ --arch=$UA --target=none --emit=uefi >/dev/null 2>&1
+    $KRC $KRC_FLAGS "$UEFI_SRC" -o /tmp/krc_ui_$$ --arch=$UA --target=none --emit=image --load-addr=$ULOAD >/dev/null 2>&1
+    if [ -f /tmp/krc_ue_$$ ] && [ -f /tmp/krc_ui_$$ ]; then
+        ue_n=$(wc -c < /tmp/krc_ue_$$); ui_n=$(wc -c < /tmp/krc_ui_$$)
+        ui_pad=$(( (ui_n + 4095) / 4096 * 4096 ))
+        tail -c +4097 /tmp/krc_ue_$$ | head -c "$ui_n" > /tmp/krc_ut_$$
+        ue_tailnz=$(tail -c +$((4097 + ui_n)) /tmp/krc_ue_$$ | tr -d '\000' | wc -c)
+        if [ "$ue_n" -eq "$((ui_pad + 4096))" ] && cmp -s /tmp/krc_ut_$$ /tmp/krc_ui_$$ && [ "$ue_tailnz" = "0" ]; then
+            PASS=$((PASS + 1)); echo "  uefi_payload_is_the_image_payload_$UA: PASS ($ue_n = 4096 + $ui_n payload + $((ui_pad - ui_n)) zero pad, payload byte-identical)"
+        else
+            echo "FAIL: uefi_payload_is_the_image_payload_$UA (uefi=$ue_n want $((ui_pad + 4096)); image=$ui_n; payload $(cmp -s /tmp/krc_ut_$$ /tmp/krc_ui_$$ && echo matches || echo DIFFERS); $ue_tailnz non-zero bytes in the pad)"; FAIL=$((FAIL + 1))
+        fi
+    else
+        echo "FAIL: uefi_payload_is_the_image_payload_$UA (one of the two builds produced no artifact)"; FAIL=$((FAIL + 1))
+    fi
+    rm -f /tmp/krc_ue_$$ /tmp/krc_ui_$$ /tmp/krc_ut_$$
+done
+
+# 19. The reserved header region is now FILLED (Task 2). At Task 1 this row
+#     asserted 4096 zero bytes and carried a note telling Task 2 to come here
+#     and say what it wrote; this is that. The region is still exactly 4096
+#     bytes -- the geometry did not move -- but it is no longer empty, and the
+#     tail of it (past the one section header, 0x170) is still zero, so a
+#     header that grew past its region would red this rather than silently
+#     overwrite the first instruction of the payload.
+TOTAL=$((TOTAL + 1))
+rm -f /tmp/krc_uez_$$
+$KRC $KRC_FLAGS "$UEFI_SRC" -o /tmp/krc_uez_$$ --arch=x86_64 --target=none --emit=uefi >/dev/null 2>&1
+uez_nz=$(head -c 4096 /tmp/krc_uez_$$ 2>/dev/null | tr -d '\000' | wc -c)
+uez_tail=$(head -c 4096 /tmp/krc_uez_$$ 2>/dev/null | tail -c +369 | tr -d '\000' | wc -c)
+if [ -f /tmp/krc_uez_$$ ] && [ "$uez_nz" -gt 0 ] && [ "$uez_tail" = "0" ]; then
+    PASS=$((PASS + 1)); echo "  uefi_header_region_filled: PASS ($uez_nz non-zero bytes in 0x0-0x170, 0 after)"
+else
+    echo "FAIL: uefi_header_region_filled (artifact=$([ -f /tmp/krc_uez_$$ ] && echo yes || echo no), $uez_nz non-zero bytes in the region want >0, $uez_tail non-zero past 0x170 want 0)"; FAIL=$((FAIL + 1))
+fi
+rm -f /tmp/krc_uez_$$
+
+# 21-22. EVERY LOAD-BEARING PE FIELD, READ FROM THE ARTIFACT AT ITS OFFSET.
+#        One row per arch, because Machine is the only field that differs and
+#        an arch-blind row would let one arch's header be emitted for the
+#        other. Offsets are absolute file offsets, which under the delta-0
+#        geometry are also RVAs: DOS 0x00, PE signature 0x40, COFF 0x44,
+#        optional header 0x58 (240 bytes, so it ends at 0x148), the single
+#        section header 0x148 (40 bytes, ending 0x170).
+#
+#        THE THREE FIELDS THAT ARE NOT SELF-EVIDENT, and why each is asserted
+#        against a DERIVED value rather than a literal:
+#          * AddressOfEntryPoint is compared to the `entry=` the compiler
+#            REPORTS, not to a constant -- and this clause used to claim a
+#            discrimination the comparison CANNOT make. It cannot see a wrong
+#            entry VALUE: main.kr hands `entry_off` to patch_uefi_headers and
+#            prints THAT SAME VARIABLE a few lines later with no reassignment
+#            in between, so one bad entry_off moves both sides together and
+#            this row stays green. A literal would be no better -- every
+#            source in this block puts its entry at payload offset 0, so the
+#            reported 4096 is also the value the "entry at section start"
+#            defect produces.
+#            What the comparison DOES prove is that the patch landed at the
+#            right OFFSET among patch_uefi_headers' five patch_u32 targets,
+#            and that the report line still describes the artifact on disk.
+#            THE ENTRY VALUE IS COVERED, JUST NOT HERE: boot-gate L7 boots an
+#            application whose entry is 4772, and
+#            L7_control_entry_at_section_start_silent boots 4096 and shows it
+#            loads, runs and says nothing.
+#          * VirtualSize is compared to the size of the --emit=image artifact
+#            for the same source -- i.e. the true payload length. The
+#            derivation reference re-classified "VirtualSize too small" from
+#            IGNORED to a LOADED_FAULTED #PF, so this is a boot-oracle.
+#          * SizeOfRawData is compared to (file size - 4096). "Raw data past
+#            EOF" is also a rejection, and a SizeOfRawData that merely looks
+#            plausible is exactly how that ships.
+#        SizeOfOptionalHeader is checked for the CONSISTENCY rule OVMF
+#        actually enforces -- SizeOfOptionalHeader - 112 == NumberOfRvaAndSizes
+#        * 8 -- and not merely for the value 240.
+ue_u16() { od -An -tu2 -j "$2" -N2 -v "$1" 2>/dev/null | tr -d ' '; }
+ue_u32() { od -An -tu4 -j "$2" -N4 -v "$1" 2>/dev/null | tr -d ' '; }
+ue_u64() { od -An -tu8 -j "$2" -N8 -v "$1" 2>/dev/null | tr -d ' '; }
+ue_hex() { od -An -tx1 -j "$2" -N"$3" -v "$1" 2>/dev/null | tr -d ' \n'; }
+uh_bad=""
+uh_chk() { [ "$2" = "$3" ] || uh_bad="$uh_bad $1(want=$2 got=$3)"; }
+for UA in x86_64 arm64; do
+    UMACH=34404                                     # 0x8664 IMAGE_FILE_MACHINE_AMD64
+    if [ "$UA" = "arm64" ]; then UMACH=43620; fi    # 0xAA64 IMAGE_FILE_MACHINE_ARM64
+    ULOAD=0x400000
+    if [ "$UA" = "arm64" ]; then ULOAD=0x40400000; fi
+    TOTAL=$((TOTAL + 1))
+    rm -f /tmp/krc_uh_$$ /tmp/krc_uhi_$$
+    uh_out=$($KRC $KRC_FLAGS "$UEFI_SRC" -o /tmp/krc_uh_$$ --arch=$UA --target=none --emit=uefi 2>&1)
+    $KRC $KRC_FLAGS "$UEFI_SRC" -o /tmp/krc_uhi_$$ --arch=$UA --target=none --emit=image --load-addr=$ULOAD >/dev/null 2>&1
+    uh_bad=""
+    if [ -f /tmp/krc_uh_$$ ] && [ -f /tmp/krc_uhi_$$ ]; then
+        uh_ent=$(echo "$uh_out" | grep -o 'entry=[0-9]*' | head -1 | cut -d= -f2)
+        uh_fsz=$(wc -c < /tmp/krc_uh_$$)
+        uh_pay=$(wc -c < /tmp/krc_uhi_$$)
+        uh_raw=$((uh_fsz - 4096))
+        # DOS + PE signature
+        uh_chk dos_mz            4d5a       "$(ue_hex /tmp/krc_uh_$$ 0 2)"
+        uh_chk e_lfanew          64         "$(ue_u32 /tmp/krc_uh_$$ 60)"
+        uh_chk pe_signature      50450000   "$(ue_hex /tmp/krc_uh_$$ 64 4)"
+        # COFF header
+        uh_chk machine           "$UMACH"   "$(ue_u16 /tmp/krc_uh_$$ 68)"
+        uh_chk number_of_sections 1         "$(ue_u16 /tmp/krc_uh_$$ 70)"
+        uh_soh=$(ue_u16 /tmp/krc_uh_$$ 84)
+        uh_nrs=$(ue_u32 /tmp/krc_uh_$$ 196)
+        uh_chk size_of_opt_header_consistency "$((uh_nrs * 8))" "$((uh_soh - 112))"
+        uh_char=$(ue_u16 /tmp/krc_uh_$$ 86)
+        uh_chk relocs_stripped_clear   0    "$((uh_char & 1))"
+        uh_chk executable_image_set    2    "$((uh_char & 2))"
+        # Optional header (PE32+)
+        uh_chk magic_pe32plus    523        "$(ue_u16 /tmp/krc_uh_$$ 88)"   # 0x20b
+        uh_chk size_of_code      "$uh_raw"  "$(ue_u32 /tmp/krc_uh_$$ 92)"
+        uh_chk entry_point       "$uh_ent"  "$(ue_u32 /tmp/krc_uh_$$ 104)"
+        uh_chk base_of_code      4096       "$(ue_u32 /tmp/krc_uh_$$ 108)"
+        uh_chk image_base        0          "$(ue_u64 /tmp/krc_uh_$$ 112)"
+        uh_chk section_alignment 4096       "$(ue_u32 /tmp/krc_uh_$$ 120)"
+        uh_chk file_alignment    4096       "$(ue_u32 /tmp/krc_uh_$$ 124)"
+        uh_chk size_of_image     "$((4096 + uh_raw))" "$(ue_u32 /tmp/krc_uh_$$ 144)"
+        uh_chk size_of_headers   4096       "$(ue_u32 /tmp/krc_uh_$$ 148)"
+        uh_chk subsystem         10         "$(ue_u16 /tmp/krc_uh_$$ 156)"
+        uh_chk number_of_rva_and_sizes 16   "$uh_nrs"
+        # All 16 data directories zero -- in particular index 1, the import
+        # table, which is what a header copied from format_pe.kr would carry.
+        uh_chk data_directories_all_zero 0 \
+            "$(ue_hex /tmp/krc_uh_$$ 200 128 | tr -d '0' | wc -c)"
+        uh_chk no_kernel32 0 "$(grep -c kernel32 /tmp/krc_uh_$$ 2>/dev/null)"
+        # The one section header
+        uh_chk section_name      2e74657874000000 "$(ue_hex /tmp/krc_uh_$$ 328 8)"
+        uh_chk virtual_size      "$uh_pay"  "$(ue_u32 /tmp/krc_uh_$$ 336)"
+        uh_chk virtual_address   4096       "$(ue_u32 /tmp/krc_uh_$$ 340)"
+        uh_chk size_of_raw_data  "$uh_raw"  "$(ue_u32 /tmp/krc_uh_$$ 344)"
+        uh_chk pointer_to_raw_data 4096     "$(ue_u32 /tmp/krc_uh_$$ 348)"
+        uh_chk pointer_to_relocations 0     "$(ue_u32 /tmp/krc_uh_$$ 352)"
+        uh_chk pointer_to_linenumbers 0     "$(ue_u32 /tmp/krc_uh_$$ 356)"
+        uh_chk number_of_relocations  0     "$(ue_u16 /tmp/krc_uh_$$ 360)"
+        uh_chk number_of_linenumbers  0     "$(ue_u16 /tmp/krc_uh_$$ 362)"
+        # 0xE0000020 = CODE|EXECUTE|READ|WRITE. The WRITE bit is arm64's, and
+        # it is not cosmetic -- but the way it fails is narrower than "arm64
+        # needs a writable .text", and the difference decides whether a test
+        # can see it at all. Measured under AAVMF 2024.02 with 0x60000020:
+        # a payload that only READS its statics RAN; a payload that WRITES one
+        # printed its first line and then took `Synchronous Exception`, i.e.
+        # the abort is on the STORE, not at load. x86_64 ran in every case.
+        # One layout for both arches, so both carry the bit.
+        uh_chk section_characteristics 3758096416 "$(ue_u32 /tmp/krc_uh_$$ 364)"
+    else
+        uh_bad=" no artifact (uefi=$([ -f /tmp/krc_uh_$$ ] && echo yes || echo no) image=$([ -f /tmp/krc_uhi_$$ ] && echo yes || echo no))"
+    fi
+    if [ -z "$uh_bad" ]; then
+        PASS=$((PASS + 1)); echo "  uefi_pe_header_fields_$UA: PASS (machine=$UMACH subsystem=10 entry=$uh_ent)"
+    else
+        echo "FAIL: uefi_pe_header_fields_$UA:$uh_bad"; FAIL=$((FAIL + 1))
+    fi
+    rm -f /tmp/krc_uh_$$ /tmp/krc_uhi_$$
+done
+
+# 23-24. C1, PAGE CONGRUENCE, ASSERTED FROM THE ARTIFACT'S OWN FIELDS. Row 21's
+#        two literals (VirtualAddress 4096, PointerToRawData 4096) already pin
+#        today's values; this row states the RULE those values satisfy, so that
+#        a future geometry change is forced to satisfy it rather than to edit
+#        two unrelated-looking constants. The failure it guards is the one with
+#        no local symptom at all: the arm64 payload's baked adrp page arithmetic
+#        is congruent to its FILE offset mod 4096, the loader maps it at
+#        SectionRVA + (offset - PointerToRawData), and a non-page delta makes
+#        every page computation wrong -- measured as LOADED_FAULTED, at exit 0,
+#        with file(1) still calling the artifact an EFI application.
+for UA in x86_64 arm64; do
+    TOTAL=$((TOTAL + 1))
+    rm -f /tmp/krc_uc_$$
+    $KRC $KRC_FLAGS "$UEFI_SRC" -o /tmp/krc_uc_$$ --arch=$UA --target=none --emit=uefi >/dev/null 2>&1
+    if [ -f /tmp/krc_uc_$$ ]; then
+        uc_rva=$(ue_u32 /tmp/krc_uc_$$ 340); uc_ptr=$(ue_u32 /tmp/krc_uc_$$ 348)
+        uc_delta=$((uc_rva - uc_ptr))
+        # `-gt 0` is not decoration: without it this row passes on an artifact
+        # with NO HEADER AT ALL, where both fields read 0 and 0 - 0 is trivially
+        # congruent. Measured -- it passed exactly that way against the Task 1
+        # binary before the header existed.
+        if [ "$uc_ptr" -gt 0 ] && [ "$uc_rva" -gt 0 ] && [ $((uc_delta % 4096)) -eq 0 ]; then
+            PASS=$((PASS + 1)); echo "  uefi_page_congruence_$UA: PASS (RVA $uc_rva - PointerToRawData $uc_ptr = $uc_delta, 0 mod 4096)"
+        else
+            echo "FAIL: uefi_page_congruence_$UA (RVA $uc_rva, PointerToRawData $uc_ptr, delta $uc_delta -- both must be non-zero and the delta 0 mod 4096, or every baked arm64 adrp page delta in the payload is wrong and the image loads and faults with no diagnostic)"; FAIL=$((FAIL + 1))
+        fi
+    else
+        echo "FAIL: uefi_page_congruence_$UA (no artifact)"; FAIL=$((FAIL + 1))
+    fi
+    rm -f /tmp/krc_uc_$$
+done
+
+# 25. file(1) MUST SAY "PE32+ executable (EFI application)". A second oracle,
+#     independent of this suite's own idea of the layout.
+#
+# 26-28. ...AND THE MUTATION CONTROLS, because "file says EFI application" is
+#     worth nothing without knowing what makes it stop saying it. All three
+#     were measured; two of them do NOT do what the obvious guess says:
+#       * Subsystem 10 -> 3 : "PE32+ executable (console)". THIS is the field
+#         the "EFI application" phrase keys on, and it is also the field OVMF
+#         rejects. It is therefore the only one of the three that is a
+#         discriminating oracle for this mode.
+#       * Magic 0x20b -> 0x10b : "PE32 executable (EFI application)" -- still
+#         an EFI application to file(1), just a 32-bit one. A revision of the
+#         spec claimed this gives `data`; it does not.
+#       * DOS 'MZ' -> 'XX' : "data". Only destroying the DOS magic does that,
+#         which is why `file` reporting `data` is a test of the FIRST TWO BYTES
+#         and of nothing else.
+ue_poke() {  # $1 file, $2 decimal offset, rest = decimal byte values
+    local f="$1" off="$2" b; shift 2
+    for b in "$@"; do
+        printf "$(printf '\\x%02x' "$b")" | dd of="$f" bs=1 seek="$off" conv=notrunc status=none
+        off=$((off + 1))
+    done
+}
+TOTAL=$((TOTAL + 1))
+rm -f /tmp/krc_uf_$$
+$KRC $KRC_FLAGS "$UEFI_SRC" -o /tmp/krc_uf_$$ --arch=x86_64 --target=none --emit=uefi >/dev/null 2>&1
+uf_says=$(file -b /tmp/krc_uf_$$ 2>/dev/null)
+if echo "$uf_says" | grep -q "PE32+ executable" && echo "$uf_says" | grep -q "EFI application"; then
+    PASS=$((PASS + 1)); echo "  uefi_file_says_efi_application: PASS ($uf_says)"
+else
+    echo "FAIL: uefi_file_says_efi_application (file(1) says '$uf_says')"; FAIL=$((FAIL + 1))
+fi
+# 26: Subsystem 10 -> 3 must LOSE the "EFI application" phrase while REMAINING
+#     a PE32+ executable. Both halves are needed. Measured against the Task 1
+#     binary, whose header region was all zeros: `file` said `data`, which
+#     satisfies "does not say EFI application" and made this row green on an
+#     artifact with no header at all. A control that cannot fail on a missing
+#     header is not a control.
+TOTAL=$((TOTAL + 1))
+cp /tmp/krc_uf_$$ /tmp/krc_ufs_$$; ue_poke /tmp/krc_ufs_$$ 156 3 0
+ufs_says=$(file -b /tmp/krc_ufs_$$ 2>/dev/null)
+if echo "$ufs_says" | grep -q "PE32+ executable" && ! echo "$ufs_says" | grep -q "EFI application"; then
+    PASS=$((PASS + 1)); echo "  uefi_file_control_subsystem: PASS (subsystem 3 -> '$ufs_says')"
+else
+    echo "FAIL: uefi_file_control_subsystem (subsystem patched to 3 and file(1) still says '$ufs_says' -- the phrase is not keyed on the subsystem, so row 25 is not the oracle it is documented as)"; FAIL=$((FAIL + 1))
+fi
+rm -f /tmp/krc_ufs_$$
+# 27: Magic 0x20b -> 0x10b drops the '+' and KEEPS the phrase. Stated so the
+#     control above cannot be mistaken for "any header damage loses it".
+TOTAL=$((TOTAL + 1))
+cp /tmp/krc_uf_$$ /tmp/krc_ufm_$$; ue_poke /tmp/krc_ufm_$$ 88 11 1
+ufm_says=$(file -b /tmp/krc_ufm_$$ 2>/dev/null)
+if echo "$ufm_says" | grep -q "PE32 executable" && echo "$ufm_says" | grep -q "EFI application"; then
+    PASS=$((PASS + 1)); echo "  uefi_file_control_magic: PASS (magic 0x10b -> '$ufm_says')"
+else
+    echo "FAIL: uefi_file_control_magic (magic patched to 0x10b and file(1) says '$ufm_says', expected a PE32 (not PE32+) EFI application)"; FAIL=$((FAIL + 1))
+fi
+rm -f /tmp/krc_ufm_$$
+# 28: only the DOS magic gives `data` -- asserted as a CHANGE from the pristine
+#     artifact's answer, for the reason row 26 records: "`file` says data" is
+#     also what a header-less artifact produces.
+TOTAL=$((TOTAL + 1))
+cp /tmp/krc_uf_$$ /tmp/krc_ufd_$$; ue_poke /tmp/krc_ufd_$$ 0 88 88
+ufd_says=$(file -b /tmp/krc_ufd_$$ 2>/dev/null)
+if [ "$ufd_says" = "data" ] && [ "$uf_says" != "data" ]; then
+    PASS=$((PASS + 1)); echo "  uefi_file_control_dos_magic: PASS (MZ -> XX gives 'data')"
+else
+    echo "FAIL: uefi_file_control_dos_magic (DOS magic destroyed and file(1) says '$ufd_says', expected 'data')"; FAIL=$((FAIL + 1))
+fi
+rm -f /tmp/krc_ufd_$$ /tmp/krc_uf_$$
+
+# 20. THE `--emit=pe` REFUSAL'S REASONING (Task 1, Step 6). The check stays --
+#     a Windows PE genuinely cannot run without the loader to bind its
+#     imports; measured, its entry is `call *0xf6e(%rip)` into an unresolved
+#     IAT slot. Only the STATED REASON was false: "a subsystem field" and
+#     "nothing on bare metal loads one" are both things UEFI firmware does
+#     every boot. The message must now point at --emit=uefi, and must not
+#     claim that a PE is unloadable on bare metal as such.
+TOTAL=$((TOTAL + 1))
+rm -f /tmp/krc_uepe_$$
+uepe_out=$($KRC $KRC_FLAGS "$UEFI_SRC" -o /tmp/krc_uepe_$$ --arch=x86_64 --target=none --emit=pe 2>&1); uepe_st=$?
+if [ $uepe_st -ne 0 ] && [ ! -f /tmp/krc_uepe_$$ ] \
+   && echo "$uepe_out" | grep -q -- "--emit=uefi" \
+   && ! echo "$uepe_out" | grep -q "nothing on bare metal loads one"; then
+    PASS=$((PASS + 1)); echo "  pe_tnone_refusal_points_at_uefi: PASS"
+else
+    echo "FAIL: pe_tnone_refusal_points_at_uefi (exit=$uepe_st, out=$(echo "$uepe_out" | head -1))"; FAIL=$((FAIL + 1))
+fi
+rm -f /tmp/krc_uepe_$$
+
+rm -f "$UEFI_SRC"
+
 # --- `--help` vs docs/LANGUAGE.md vs the compiler (sub-project B2, M5) -------
 #
 # WHY THIS SECTION EXISTS. Sub-project B2's final review found TWO separate
@@ -8874,7 +9505,87 @@ else
     FAIL=$((FAIL + 1))
 fi
 
-rm -f "$HD_HELP" "$HD_SEC" "$HD_LINE" "$HD_SRC" "$IHDR_SEC"
+# 5. --emit=uefi IS STRUCTURALLY INVISIBLE TO ROWS 1-2, so it gets its own
+#    pair (sub-project D, Task 1, Step 5).
+#
+#    hd_flags()'s regex is `--[A-Za-z0-9][A-Za-z0-9-]*` and `=` is in neither
+#    class, so from `--emit=uefi` it extracts `--emit` -- a token that has been
+#    in both texts since long before this mode existed. Rows 1 and 2 are
+#    therefore satisfied by an --emit= mode that neither text mentions, and by
+#    one the manual describes after the compiler dropped it. That is not a
+#    defect in rows 1-2 (they are about FLAGS) -- it is why an --emit= VALUE
+#    needs a check of its own, in both directions, the same way --image-header
+#    needed rows 4/4b for its prose.
+#
+#    VERIFIED BY DELETION, one text at a time, against the built compiler:
+#      * delete the `  --emit=uefi ...` line from src/main.kr's --help block
+#        and rebuild -> `uefi_help_has_own_line` reds, ALONE.
+#      * delete the `#### UEFI applications` section from docs/LANGUAGE.md ->
+#        `uefi_docs_section_intact` reds, ALONE.
+#    Rows 1-2 stayed green through both, reporting the same flag count.
+TOTAL=$((TOTAL + 1))
+uefi_help_n=$(grep -c '^  --emit=uefi ' "$HD_HELP")
+if [ "$uefi_help_n" = "1" ]; then
+    PASS=$((PASS + 1)); echo "  uefi_help_has_own_line: PASS (exactly 1 dedicated --help row)"
+else
+    echo "FAIL: uefi_help_has_own_line (found $uefi_help_n lines starting '  --emit=uefi ' in --help, want exactly 1; hd_flags cannot see an --emit= VALUE, so nothing else in this suite would notice its absence)"
+    FAIL=$((FAIL + 1))
+fi
+
+#    The docs half. Scoped to the section with the same awk row 3 uses, for
+#    the same reason: unscoped, every phrase below is satisfiable from
+#    somewhere else in a 2400-line file and the check is decorative.
+UEFI_SEC=/tmp/krc_uefi_sec_$$
+awk '/^#### UEFI applications/{s=1;print;next} s&&/^#/&&!/^##### /{exit} s{print}' "$HD_DOC" > "$UEFI_SEC"
+TOTAL=$((TOTAL + 1))
+uefi_doc_miss=""
+[ -s "$UEFI_SEC" ] || uefi_doc_miss=" the-section-itself"
+# PROSE ONLY for the three tokens below. As shipped they were each satisfied
+# FIRST by the section's own example command and sample report line -- which
+# are fenced code, not documentation of the requirement -- so deleting every
+# explanatory paragraph left them green. Stripping the fences makes each one
+# assert that the requirement is actually WRITTEN DOWN somewhere.
+UEFI_PROSE=/tmp/krc_uefi_prose_$$
+awk '/^```/{f=!f;next} !f' "$UEFI_SEC" > "$UEFI_PROSE"
+grep -qF -- '--target=none' "$UEFI_PROSE" || uefi_doc_miss="$uefi_doc_miss target-none-requirement"
+grep -qF -- '--arch=' "$UEFI_PROSE" || uefi_doc_miss="$uefi_doc_miss explicit-arch-requirement"
+grep -qF -- '4096' "$UEFI_PROSE" || uefi_doc_miss="$uefi_doc_miss page-congruence"
+# Task 2 added the header. Subsystem 10 is the one field with no runner-up --
+# 11 and 12 are valid EFI subsystems and BDS still refuses them -- so the
+# manual has to name it, and the WRITE bit is the one that separates an arm64
+# application that runs from one that aborts on its first store.
+grep -qF -- 'Subsystem' "$UEFI_SEC" || uefi_doc_miss="$uefi_doc_miss subsystem-10"
+grep -qF -- 'WRITE'     "$UEFI_SEC" || uefi_doc_miss="$uefi_doc_miss writable-text-section"
+# The Status heading survives Task 2 with its meaning inverted -- it said what
+# was NOT emitted yet, and now says what has booted. Either way this mode's
+# section must carry an explicit statement of how far the evidence goes,
+# because every other paragraph in it reads like a completed feature.
+grep -qF -- 'Status' "$UEFI_SEC" || uefi_doc_miss="$uefi_doc_miss status-statement"
+# ...AND THE QUALIFICATION ON IT, WHICH NOTHING GUARDED UNTIL NOW. The row
+# above asserts that a Status statement EXISTS; it said nothing about what the
+# statement claims. Measured by the whole-branch review: reverting "QEMU's
+# OVMF ... emulated, not real hardware" back to "run under real firmware" --
+# the EXACT drift Task 2's review already had to catch by hand once in this
+# sub-project -- left this row GREEN. The honesty bound is the sentence the
+# whole sub-project answers to, so it gets a check and not a convention.
+grep -qF -- 'emulated'    "$UEFI_PROSE" || uefi_doc_miss="$uefi_doc_miss emulation-qualifier"
+grep -qF -- 'QEMU'        "$UEFI_PROSE" || uefi_doc_miss="$uefi_doc_miss names-the-emulator"
+grep -qF -- 'Secure Boot' "$UEFI_PROSE" || uefi_doc_miss="$uefi_doc_miss secure-boot-limit"
+# The negative half. "real firmware" is allowed ONLY inside a negation, so
+# "does not claim real firmware" passes and "runs under real firmware" reds.
+# Written as "some matching line carries no negation" rather than a blanket
+# ban, because the honest sentence and the dishonest one share the phrase.
+if grep -- 'real firmware' "$UEFI_PROSE" | grep -qvE 'not |no |never '; then
+    uefi_doc_miss="$uefi_doc_miss unqualified-real-firmware-claim"
+fi
+if [ -z "$uefi_doc_miss" ]; then
+    PASS=$((PASS + 1)); echo "  uefi_docs_section_intact: PASS (section present, $(wc -l < "$UEFI_SEC" | tr -d ' ') lines)"
+else
+    echo "FAIL: uefi_docs_section_intact (docs/LANGUAGE.md's '#### UEFI applications' section is missing:$uefi_doc_miss)"
+    FAIL=$((FAIL + 1))
+fi
+
+rm -f "$HD_HELP" "$HD_SEC" "$HD_LINE" "$HD_SRC" "$IHDR_SEC" "$UEFI_SEC" "$UEFI_PROSE"
 
 # --- --emit=image EMISSION + the `image:` report line (sub-project B1, T5) ---
 #
@@ -13401,45 +14112,137 @@ done
 # (a compiler that collapsed every alias to one format would still pass an [ -s ]
 # only check). Assert the container magic bytes: ELF 7f454c46, Mach-O cffaedfe,
 # PE 4d5a0000, asm is text (no fixed magic, so just check for '; ' comment lead-in).
-emit_expected_magic() {
+#
+# THE SPELLING LIST IS NOW DERIVED FROM THE COMPILER'S OWN ARMS, and that is
+# the point of this rewrite rather than a tidy-up. It used to be 24 names typed
+# out by hand under the sentence "Every spelling that works today must still
+# work" — and by the time D Task 4 read it, `ir`, `lkm`, `image` and `uefi`
+# all worked and none of them was in it. A hand-list cannot notice a spelling
+# nobody added to it, so the sentence was false the moment a mode shipped, and
+# each new mode made it falser. src/main.kr's `str_eq_full(emit_str, "...")`
+# chain is the only thing that decides what --emit= accepts, so it is what this
+# reads. Three guard rows below make the derivation itself falsifiable: an
+# empty or short derivation reds rather than silently testing nothing, and a
+# spelling with no recipe reds instead of being skipped.
+EV_BM="/tmp/krc_ev_bm_$$.kr"
+printf 'fn main() { loop { } }\n' > "$EV_BM"
+EV_LKM="/tmp/krc_ev_lkm_$$.kr"
+printf '@module_init\nfn kr_init() -> uint64 { return 0 }\n@module_exit\nfn kr_exit() { }\n' > "$EV_LKM"
+
+# spelling -> "<expectation>|<extra krc flags>|<source>". Four expectation
+# kinds beyond a container magic: TEXT (asm listing), STDOUT (--emit=ir writes
+# no file at all), and RAW (--emit=image is a headerless blob, so its promise
+# is the ABSENCE of every container magic — "some non-empty file" would be a
+# vacuous check for exactly the one mode that has no magic to check).
+emit_recipe() {
     case "$1" in
         elf|elf-arm64|elf-x86_64|elfexe|linux|linux-x86_64|linux-arm64|linux-x86-64|obj|android)
-            echo "7f454c46" ;;
+            echo "7f454c46||$EV_SRC" ;;
         macho|mac|macos|mac-x64|mac-arm64|darwin)
-            echo "cffaedfe" ;;
+            echo "cffaedfe||$EV_SRC" ;;
         windows|windows-x64|windows-arm64|win|win-x64|win-arm64|pe)
-            echo "4d5a0000" ;;
-        asm)
-            echo "TEXT" ;;
+            echo "4d5a0000||$EV_SRC" ;;
+        # An .ko is a relocatable ELF, but it needs a @module_init to be
+        # emitted at all, so it cannot share the default source.
+        lkm)   echo "7f454c46||$EV_LKM" ;;
+        # Both bare-metal modes REQUIRE --target=none and refuse `exit`, hence
+        # the loop{} source. uefi promises the same MZ magic as pe and a very
+        # different container; the magic alone does not separate them, which is
+        # what uefi_pe_header_fields_* and the boot gate's L7/L8 are for.
+        uefi)  echo "4d5a0000|--target=none|$EV_BM" ;;
+        image) echo "RAW|--target=none --load-addr=0x400000|$EV_BM" ;;
+        asm)   echo "TEXT||$EV_SRC" ;;
+        ir)    echo "STDOUT||$EV_SRC" ;;
     esac
 }
-for GOOD in elf elf-arm64 elf-x86_64 elfexe linux linux-x86_64 linux-arm64 linux-x86-64 \
-            macho mac macos mac-x64 mac-arm64 darwin \
-            windows windows-x64 windows-arm64 win win-x64 win-arm64 pe \
-            obj android asm; do
+
+EV_ALL=$(grep -o 'str_eq_full(emit_str, "[^"]*")' "$DIR/../src/main.kr" \
+         | sed 's/.*"\(.*\)".*/\1/' | sort -u)
+EV_NALL=$(echo "$EV_ALL" | grep -c .)
+
+# Guard 1: the derivation produced something plausible. If src/main.kr is
+# reformatted so the pattern stops matching, this reds instead of turning the
+# whole block into a zero-iteration loop that reports nothing.
+TOTAL=$((TOTAL + 1))
+if [ "$EV_NALL" -ge 24 ]; then
+    PASS=$((PASS + 1)); echo "  emit_alias_set_derived: PASS ($EV_NALL spellings read out of src/main.kr)"
+else
+    echo "FAIL: emit_alias_set_derived (derived only $EV_NALL spellings from src/main.kr's str_eq_full(emit_str, ...) arms; 24 shipped in v2.8.4 and none has ever been removed, so a smaller number means the derivation broke, not that the compiler shrank)"
+    FAIL=$((FAIL + 1))
+fi
+
+# Guard 2: the compiler's own "valid: ..." diagnostic lists exactly those
+# spellings, BOTH WAYS. This is the enumeration D Task 4 was sent to find: it
+# shipped as a 16-name sample of a 27-name set, so a user who mistyped
+# `--emit=macos` was told `macos` was not valid. One-way would not do — a list
+# that merely contains every arm could still invent names that do not work.
+TOTAL=$((TOTAL + 1))
+EV_VALID=$($KRC --emit=__no_such_format__ "$EV_SRC" -o "$EV_BIN" 2>&1 \
+           | sed -n 's/^valid: //p' | tr ',' '\n' | tr -d ' \r' | grep -v '^$' | sort -u)
+EV_ONLY_ARM=$(comm -23 <(echo "$EV_ALL") <(echo "$EV_VALID") | tr '\n' ' ')
+EV_ONLY_MSG=$(comm -13 <(echo "$EV_ALL") <(echo "$EV_VALID") | tr '\n' ' ')
+if [ -z "$EV_VALID" ]; then
+    echo "FAIL: emit_valid_list_is_complete (the compiler printed no 'valid: ' line for an unknown --emit= value)"; FAIL=$((FAIL + 1))
+elif [ -n "$EV_ONLY_ARM" ] || [ -n "$EV_ONLY_MSG" ]; then
+    echo "FAIL: emit_valid_list_is_complete (accepted but not listed: [$EV_ONLY_ARM]; listed but not accepted: [$EV_ONLY_MSG])"; FAIL=$((FAIL + 1))
+else
+    PASS=$((PASS + 1)); echo "  emit_valid_list_is_complete: PASS ($EV_NALL spellings, arms and diagnostic agree both ways)"
+fi
+
+# Guard 3: every derived spelling has a recipe. Without this a new --emit=
+# value would simply not be exercised by the loop below — the silent-skip
+# failure mode, which is the one this whole task exists to close.
+TOTAL=$((TOTAL + 1))
+EV_NORECIPE=""
+for GOOD in $EV_ALL; do
+    [ -n "$(emit_recipe "$GOOD")" ] || EV_NORECIPE="$EV_NORECIPE $GOOD"
+done
+if [ -z "$EV_NORECIPE" ]; then
+    PASS=$((PASS + 1)); echo "  emit_recipe_covers_every_alias: PASS (all $EV_NALL spellings have an expectation)"
+else
+    echo "FAIL: emit_recipe_covers_every_alias (no expectation for:$EV_NORECIPE -- add an arm to emit_recipe() so the alias is checked instead of skipped)"
+    FAIL=$((FAIL + 1))
+fi
+
+for GOOD in $EV_ALL; do
     TOTAL=$((TOTAL + 1))
     rm -f "$EV_BIN"
-    EXP_MAGIC=$(emit_expected_magic "$GOOD")
-    if $KRC --emit=$GOOD "$EV_SRC" -o "$EV_BIN" >/dev/null 2>&1 && [ -s "$EV_BIN" ]; then
+    EV_R=$(emit_recipe "$GOOD")
+    EXP_MAGIC="${EV_R%%|*}"; EV_REST="${EV_R#*|}"
+    EV_FLAGS="${EV_REST%%|*}"; EV_IN="${EV_REST#*|}"
+    if [ -z "$EV_R" ]; then
+        echo "FAIL: emit_accept_$GOOD (no recipe; see emit_recipe_covers_every_alias)"; FAIL=$((FAIL + 1))
+    elif [ "$EXP_MAGIC" = "STDOUT" ]; then
+        if $KRC --emit=$GOOD $EV_FLAGS "$EV_IN" 2>/dev/null | grep -q '^function main:'; then
+            PASS=$((PASS + 1)); echo "  emit_accept_$GOOD: PASS (IR dump on stdout)"
+        else
+            echo "FAIL: emit_accept_$GOOD (expected an IR dump naming main on stdout)"; FAIL=$((FAIL + 1))
+        fi
+    elif $KRC --emit=$GOOD $EV_FLAGS "$EV_IN" -o "$EV_BIN" >/dev/null 2>&1 && [ -s "$EV_BIN" ]; then
+        GOT_MAGIC=$(xxd -p -l4 "$EV_BIN")
         if [ "$EXP_MAGIC" = "TEXT" ]; then
             if head -c2 "$EV_BIN" | grep -q '; '; then
                 PASS=$((PASS + 1)); echo "  emit_accept_$GOOD: PASS (text asm)"
             else
                 echo "FAIL: emit_accept_$GOOD (expected text asm output)"; FAIL=$((FAIL + 1))
             fi
+        elif [ "$EXP_MAGIC" = "RAW" ]; then
+            case "$GOT_MAGIC" in
+                7f454c46|cffaedfe|4d5a0000)
+                    echo "FAIL: emit_accept_$GOOD (a flat image must carry no container magic, got $GOT_MAGIC)"; FAIL=$((FAIL + 1)) ;;
+                *)
+                    PASS=$((PASS + 1)); echo "  emit_accept_$GOOD: PASS (headerless, first bytes $GOT_MAGIC)" ;;
+            esac
+        elif [ "$GOT_MAGIC" = "$EXP_MAGIC" ]; then
+            PASS=$((PASS + 1)); echo "  emit_accept_$GOOD: PASS (magic $GOT_MAGIC)"
         else
-            GOT_MAGIC=$(xxd -p -l4 "$EV_BIN")
-            if [ "$GOT_MAGIC" = "$EXP_MAGIC" ]; then
-                PASS=$((PASS + 1)); echo "  emit_accept_$GOOD: PASS (magic $GOT_MAGIC)"
-            else
-                echo "FAIL: emit_accept_$GOOD (expected magic $EXP_MAGIC, got $GOT_MAGIC)"; FAIL=$((FAIL + 1))
-            fi
+            echo "FAIL: emit_accept_$GOOD (expected magic $EXP_MAGIC, got $GOT_MAGIC)"; FAIL=$((FAIL + 1))
         fi
     else
         echo "FAIL: emit_accept_$GOOD (alias must keep working)"; FAIL=$((FAIL + 1))
     fi
 done
-rm -f "$EV_SRC" "$EV_BIN"
+rm -f "$EV_SRC" "$EV_BIN" "$EV_BM" "$EV_LKM"
 
 # --- syscall_raw number register per ARM64 ABI (artifact inspection) ---
 # aarch64 takes the syscall number in x8 on Linux/Android and in x16 on

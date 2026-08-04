@@ -118,15 +118,30 @@ nothing, i.e. that mode was already using the legacy backend.
 | `--legacy` | legacy | by definition |
 | **`--emit=obj` / `-c`** | **legacy** | byte-identical with and without `--legacy` (160 B both) |
 | **`--emit=lkm`** | **legacy** | byte-identical with and without `--legacy` |
+| `--emit=image`, `--emit=uefi` | **IR** | the gate excludes only modes 3 and 7; the usual "differs from `--legacy`" evidence is *unavailable* here — both require `--target=none`, and `--legacy` is refused under it (`t6_legacy_tnone_*`), so there is no legacy build to diff against |
 | `--arch=riscv32`, `--arch=xtensa` (any emit mode) | **IR** | no legacy backend exists for these arches; `--legacy` is a silent no-op |
-| `--emit=ir` | neither — lowering only | `src/main.kr:2380`, exits before codegen |
+| `--emit=ir` | neither — lowering only | the `if emit_mode == 6` block in `compile()`, `src/main.kr` — exits before codegen |
 
-The gate is one condition, in two places:
+This table is per **emit mode** and all ten are now listed. It named six of
+them for a while: `--emit=image` (8) and `--emit=uefi` (9) were both missing,
+and the second row's "differs from `--legacy`" evidence *cannot* be produced
+for either of them, so adding them by pattern-matching the rows above would
+have written a claim nobody could check.
+
+The gate is one condition, in two places — `grep -n 'emit_ir_mode != 0 && arch =='
+src/main.kr` finds both:
 
 ```
-src/main.kr:2614  if emit_ir_mode != 0 && arch == 0 && emit_mode != 3 && emit_mode != 7 {
-src/main.kr:2624  } else if emit_ir_mode != 0 && arch == 1 && emit_mode != 3 && emit_mode != 7 {
+if emit_ir_mode != 0 && arch == 0 && emit_mode != 3 && emit_mode != 7 {
+} else if emit_ir_mode != 0 && arch == 1 && emit_mode != 3 && emit_mode != 7 {
 ```
+
+**No line numbers here, deliberately.** The three that used to be in this
+section pointed at neither this tree nor its parent: they were off by exactly
++9 from the parent, i.e. measured against an intermediate working state and
+never re-checked — by the same commit that deleted line numbers from
+`src/main.kr` on the grounds that named variables do not rot. Re-deriving them
+would only reset the clock.
 
 `emit_mode == 3` is `--emit=obj`, `emit_mode == 7` is `--emit=lkm`. The
 in-source comment says why: *"skip for `--emit=obj` and `--emit=lkm`; both
@@ -148,7 +163,10 @@ rows alone will never exercise the PE or Mach-O header emitters.
 ### `--emit=ir` is pre-optimization
 
 `ir_dump()` is called directly after `ir_lower_function()` with **no
-`ir_optimize()` in between** (`src/main.kr:2387`–`2389`). So `--emit=ir`
+`ir_optimize()` in between** — the two calls are adjacent inside the
+`if emit_mode == 6` block in `compile()`, `src/main.kr`. (The claim is true;
+the `:2387`–`2389` that used to be cited here was not, for the same reason as
+the three above. Re-checked against the block itself.) So `--emit=ir`
 shows you what the lowering produced, never what the optimizer did. Ops the
 optimizer creates (`IR_ADD_IMM`, `IR_MUL_IMM`, `IR_LEA_BIS`, `IR_ROR`,
 `IR_SHL_IMM`, `IR_LOAD_BIS`, `IR_STORE_BIS`, the riscv `*_IMM` family)
@@ -1232,6 +1250,16 @@ or "std/uart_pl011.kr" (arm64 PL011), or drop the call
 Refused under `--target=none`: `--debug`, `--legacy`, `--emit=macho`,
 `--emit=pe`, `--emit=android`, `--emit=lkm`. Allowed and pinned:
 `--emit=obj`, `--emit=asm`, `--emit=ir`, `--emit=elfexe`, `-g`.
+**Require** `--target=none` rather than merely tolerating it:
+`--emit=image` and `--emit=uefi` — a third outcome this sentence had no
+category for, and the reason it read as complete while omitting two modes.
+`-g`'s entry is a per-mode fact, not a blanket one: it is accepted alongside
+the default ELF on bare metal and **refused** by both of those two, because
+the DWARF footer is laid out from an ELF geometry neither container has.
+The per-mode roster the suite actually derives is
+`t6_emit_table_covers_every_mode` in `tests/run_tests.sh`; prose here cannot
+notice a mode nobody added to it, which is exactly how this paragraph went
+stale.
 
 ### Known gap: six `IR_ALLOC` sites with no bare-metal arm
 
@@ -1293,7 +1321,8 @@ removed; do not re-add them without re-verifying.
    - `--legacy --emit=elfexe`: exit 193, **`call rel32 = 0`** — a call to the
      next instruction.
 
-   Neither path warns. `docs/LANGUAGE.md:1850` documents `--emit=obj` as the
+   Neither path warns. `docs/LANGUAGE.md` §24 "Extern functions" documents
+   `--emit=obj` as the
    intended use, so this is a missing diagnostic rather than a broken
    feature, but the failure is silent and differs by backend.
 9. **`--legacy --arch=arm64 --debug` emits no array bounds check.** Verified:

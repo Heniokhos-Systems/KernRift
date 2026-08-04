@@ -1,0 +1,26 @@
+// Boot-gate UEFI sentinel, x86_64 (sub-project D, L7). Booted as
+// EFI/BOOT/BOOTX64.EFI on an ESP handed to OVMF. See uefi_sentinel_a64.kr for
+// the design argument — two markers, the literal first, the static write last.
+//
+// A DIFFERENT CONSTANT AND A DIFFERENT LITERAL from the arm64 twin, so a
+// cross-wired capture (the x86 leg reading the arm64 leg's serial file, or
+// either of them reading L1's or L2's `2000000016` / `1000000016`) fails
+// instead of passing on somebody else's evidence.
+//
+// COM1 rather than the PL011: on q35 that is the port-I/O 16550 OVMF itself
+// prints through, so the sentinel and the firmware's own BdsDxe lines land in
+// the same capture and the verdict function can read both.
+import "../std/uart_16550.kr"
+static uint64 useed = 3000000007
+static uint64 usink = 0
+fn ustamp(uint64 v) -> uint64 { return v + 9 }
+fn main() -> uint64 {
+    uart16550_init()
+    println_str("KRUEFI-X86")
+    uint64 v = ustamp(useed)
+    print(v)
+    println_str("")
+    usink = v
+    if usink != v { return 1 }
+    return 0
+}
