@@ -341,12 +341,24 @@ fn emit_uefi_headers(uint64 machine) -> uint64 {
 
     // ---- COFF header (0x44..0x57) ----
     emit_u16_le(machine)    // 0x8664 x86_64 / 0xAA64 arm64. Caller derives it
-                            // from arch; note 0x14c (IA32) LOADS on X64
-                            // firmware and then yields nothing, so a wrong
-                            // value here is one more silent failure.
+                            // from arch. RE-MEASURED (D Task 4, OVMF
+                            // 2024.02-2ubuntu0.8, one build): 0x14c (IA32) in
+                            // an otherwise-pristine artifact gets `loading`,
+                            // then `starting`, then `failed to start ...:
+                            // Unsupported` — nothing of ours runs and NO CPU
+                            // fault. So "yields nothing" is right and the
+                            // "silent failure" this comment used to claim is
+                            // WRONG on that build: the boot manager names it.
+                            // A different firmware may well be silent; what is
+                            // measured is one build, and 0xAA64 on x86 is a
+                            // counted control (L7) while 0x14c is not.
     emit_u16_le(1)          // NumberOfSections: one, .text
     emit_u32_le(0)          // TimeDateStamp: zero, so the artifact is
-                            // reproducible. Firmware does not read it.
+                            // reproducible. Measured on the same one build: a
+                            // 0xDEADBEEF stamp still RAN, both sentinels on
+                            // the wire. That is "not rejected here", NOT
+                            // "unread" — nothing observes what firmware does
+                            // with a field it accepts.
     emit_u32_le(0)          // PointerToSymbolTable
     emit_u32_le(0)          // NumberOfSymbols
     emit_u16_le(240)        // SizeOfOptionalHeader. What OVMF checks is the
@@ -362,9 +374,16 @@ fn emit_uefi_headers(uint64 machine) -> uint64 {
                             // "fixes" it: DEBUG_STRIPPED makes file(1) append
                             // "(stripped to external PDB)". There is no PDB;
                             // that is file(1) reading the flag as Microsoft's
-                            // toolchain uses it. Firmware ignores the whole
-                            // field (even EXECUTABLE_IMAGE cleared still
-                            // loads), so nothing here is a boot oracle.
+                            // toolchain uses it. MEASURED, and stated as what
+                            // was measured: on OVMF 2024.02-2ubuntu0.8 an
+                            // artifact with EXECUTABLE_IMAGE *cleared*
+                            // (0x0222 -> 0x0220) still loaded, started and
+                            // printed both sentinels. One bit, one build. Read
+                            // that as "this field is not guaranteed to be
+                            // checked", never as "this field is safe to get
+                            // wrong": no evidence here says another firmware
+                            // ignores it, and none says the other 14 bits
+                            // behave like that one.
 
     // ---- Optional header, PE32+ (0x58..0x147) ----
     emit_u16_le(0x020B)     // Magic. 0x10b here still gives file(1) "PE32
@@ -417,11 +436,20 @@ fn emit_uefi_headers(uint64 machine) -> uint64 {
     emit_byte(0x2E); emit_byte(0x74); emit_byte(0x65); emit_byte(0x78)
     emit_byte(0x74); emit_byte(0); emit_byte(0); emit_byte(0)   // ".text"
     emit_u32_le(0)          // VirtualSize           -- patched. Too small is a
-                            // LOADED_FAULTED #PF, not the ignorable field the
-                            // derivation reference first filed it as.
+                            // LOADED_FAULTED, not the ignorable field the
+                            // derivation reference first filed it as. The
+                            // vector is #UD, not the #PF this comment used to
+                            // name: the loader maps a page it copied (almost)
+                            // nothing into and the guest executes zeros.
+                            // Re-measured D Task 4 --  VirtualSize := 1 gives
+                            // `starting Boot0001` and then
+                            // `Exception Type - 06(#UD - Invalid Opcode)`.
+                            // L7's control asserts the OUTCOME, not the
+                            // vector, so a firmware that reports it
+                            // differently still reds on the capture.
     emit_u32_le(0x1000)     // VirtualAddress
     emit_u32_le(0)          // SizeOfRawData         -- patched. 0 is also a
-                            // LOADED_FAULTED #PF.
+                            // LOADED_FAULTED, same #UD, same measurement.
     emit_u32_le(0x1000)     // PointerToRawData == VirtualAddress: delta 0.
     emit_u32_le(0)          // PointerToRelocations
     emit_u32_le(0)          // PointerToLinenumbers

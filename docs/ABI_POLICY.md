@@ -73,7 +73,7 @@ Currently frozen: all helpers documented in `docs/ERROR_HANDLING.md`
 
 | Flag                     | Stability |
 |--------------------------|-----------|
-| `--emit=exe/obj/asm/ir`  | Stable    |
+| `--emit=<format>`        | Stable — the accepted spellings are an additive set; none has ever been removed. `krc --emit=<garbage>` prints the whole list, and the suite pins that list against the compiler's own arms both ways (`emit_valid_list_is_complete`). This row used to read `--emit=exe/obj/asm/ir`, which named a spelling (`exe`) the compiler has never accepted and omitted the other 27 it does. |
 | `--target=<name>`        | Stable    |
 | `--legacy`               | Stable during the IR migration; may become a no-op later. |
 | `--coalesce` / `--no-coalesce` | Stable surface — the heuristic may change. |
@@ -90,8 +90,12 @@ are exactly:
 | `windows`, `win` | Windows |
 | `android` | Android |
 | `esp32` | ESP32 (Xtensa LX6) esp-image; requires `--arch=xtensa --freestanding` |
+| `none` | Bare metal — no OS at all. `get_target_os()` answers `4`, `get_arch_id()` answers 9-12, and the OS-provided builtins are refused rather than silently lowered. Required by `--emit=image` and `--emit=uefi`. |
 
-Anything else is a hard error. A triple such as `aarch64-linux-android` has
+Anything else is a hard error. (`none` was missing from a table that said
+"exactly" for the whole of its first release; the omission is recorded rather
+than quietly patched, because a list claiming exactness is the shape that
+hides an addition.) A triple such as `aarch64-linux-android` has
 never been accepted — before v2.8 it matched nothing, fell through the
 dispatch chain and was silently ignored, producing a default-target binary.
 It is now rejected outright. Note that `--target=` selects the **OS** (or, for

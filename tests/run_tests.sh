@@ -8006,8 +8006,18 @@ else
     echo "FAIL: target_none_esp32_conflict (exit $TN_ST: '$TN_ERR')"; FAIL=$((FAIL + 1))
 fi
 
-# 4. Contradictory emit modes.
-for M in lkm android; do
+# 4. Contradictory emit modes -- ALL FOUR of them.
+#    This loop shipped naming two, `lkm` and `android`, while a reader would
+#    reasonably take a list headed "contradictory emit modes" for the list.
+#    macho and pe became refusals later (they are OS containers: a Mach-O
+#    needs dyld and LC_MAIN, a PE's entry calls through a kernel32 import
+#    slot) and were pinned only in the t6 surface, so this enumeration was
+#    two-thirds of the truth from the day it stopped being all of it.
+#    It is now the complete refused set. What KEEPS it complete is not this
+#    line but t6_emit_table_covers_every_mode further down, which derives the
+#    mode set from src/main.kr; this loop is the --target=none surface's own
+#    copy and reds here for a nearer, better-named reason.
+for M in lkm android macho pe; do
     TOTAL=$((TOTAL + 1))
     TN_ERR=$($KRC --arch=x86_64 --target=none --emit=$M "$TN_SRC" -o /tmp/krc_tnone_bin_$$ 2>&1); TN_ST=$?
     if [ "$TN_ST" != "0" ] && echo "$TN_ERR" | grep -q "target=none"; then
@@ -8112,10 +8122,15 @@ rm -f "$TN_SRC" /tmp/krc_tnone_bin_$$
 #     there on bare metal. --emit=obj reaches the SAME codegen and is kept, so
 #     none of the legacy bare-metal coverage below is lost -- see the note on
 #     the choke-point and provider blocks.
-#  3. --emit= never sets target_os, so macho/pe/obj/asm/ir each had no defined
-#     outcome under --target=none. macho and pe produced a real OS container
-#     (an 8192-byte Mach-O, a 2048-byte PE) full of bare-metal codegen, which
-#     nothing on either side can load.
+#  3. --emit= never sets target_os TO A BARE-METAL ONE, so macho/pe/obj/asm/ir
+#     each had no defined outcome under --target=none. macho and pe produced a
+#     real OS container (an 8192-byte Mach-O, a 2048-byte PE) full of
+#     bare-metal codegen, which nothing on either side can load. (The four
+#     words in caps were missing and made the sentence false: `--emit=macho`,
+#     `--emit=pe` and `--emit=android` DO auto-set target_os when no --target=
+#     was given -- src/main.kr's "Auto-set target_os from emit_mode" block --
+#     which is exactly why t6_pair_riscv32_emit_pe below has to run its check
+#     on the RESOLVED OS. This file asserted both readings, 180 lines apart.)
 #  4. There was NO arch x OS validation at all: `--arch=riscv32
 #     --target=windows` exited 0 and wrote a 296-byte RISC-V *ELF*. The check
 #     added is an ENUMERATION of the legal pairs, not a blacklist -- a
@@ -8282,6 +8297,40 @@ t6_refuses "t6_emit_lkm_tnone" "--emit=lkm" "--target=none" -- \
     --emit=lkm --arch=x86_64 --target=none "$T6_D/plain.kr"
 t6_refuses "t6_emit_android_tnone" "--emit=android" "--target=none" -- \
     --emit=android --arch=arm64 --target=none "$T6_D/plain.kr"
+#    image (8) and uefi (9) are the two bare-metal modes and BOTH WERE MISSING
+#    from this table while its comment claimed completeness -- the exact defect
+#    D Task 4 was written to sweep for. They belong here even though each has
+#    its own dedicated block further down: this table is the one place that
+#    answers "what does every emit mode do under --target=none", and a mode
+#    whose answer lives only in its own block is a mode this table cannot
+#    speak for. Both REQUIRE --target=none rather than merely tolerating it,
+#    which is a third outcome the table had no example of.
+t6_builds "t6_emit_image_tnone" -- --emit=image --arch=x86_64 --target=none --load-addr=0x400000 "$T6_D/plain.kr"
+t6_builds "t6_emit_uefi_tnone" -- --emit=uefi --arch=x86_64 --target=none "$T6_D/plain.kr"
+
+# 3b. COMPLETENESS, DERIVED RATHER THAN ASSERTED.
+#     The comment on block 3 says the emit-mode table is complete in one place.
+#     That sentence was FALSE for two whole modes and nothing noticed, because
+#     nothing checked it -- a hand-written table cannot know about a mode
+#     nobody added to it. So the roster below is compared against the set of
+#     emit_mode values the compiler actually assigns, read out of the source
+#     that assigns them. Add an `emit_mode = 10` arm without a row here and
+#     this reds; that is the whole point, and it is why the check is on the
+#     MODE NUMBERS and not on the spellings (16 of the 28 spellings are
+#     aliases for a mode some other spelling already covers).
+T6_MODE_ROWS="0:t6_emit_elfexe_tnone 1:t6_emit_macho_tnone 2:t6_emit_pe_tnone 3:t6_emit_obj_tnone_x86_64 4:t6_emit_android_tnone 5:t6_emit_asm_tnone 6:t6_emit_ir_tnone 7:t6_emit_lkm_tnone 8:t6_emit_image_tnone 9:t6_emit_uefi_tnone"
+TOTAL=$((TOTAL + 1))
+T6_MODES_SRC=$(grep -oE 'emit_mode = [0-9]+' "$DIR/../src/main.kr" | grep -oE '[0-9]+$' | sort -un | tr '\n' ' ')
+T6_MODES_TBL=$(for p in $T6_MODE_ROWS; do echo "${p%%:*}"; done | sort -un | tr '\n' ' ')
+if [ -z "$T6_MODES_SRC" ]; then
+    echo "FAIL: t6_emit_table_covers_every_mode (could not read any 'emit_mode = N' assignment out of src/main.kr -- the derivation broke, which would make this check vacuous)"
+    FAIL=$((FAIL + 1))
+elif [ "$T6_MODES_SRC" = "$T6_MODES_TBL" ]; then
+    PASS=$((PASS + 1)); echo "  t6_emit_table_covers_every_mode: PASS ($(echo "$T6_MODES_TBL" | wc -w | tr -d ' ') modes, each with a named row)"
+else
+    echo "FAIL: t6_emit_table_covers_every_mode (src/main.kr assigns emit_mode values [$T6_MODES_SRC]; this block's roster covers [$T6_MODES_TBL]. Add the missing mode's row to block 3 and its entry to T6_MODE_ROWS)"
+    FAIL=$((FAIL + 1))
+fi
 
 # 4. arch x OS pairs. `--arch=riscv32 --target=windows` exited 0 and wrote a
 #    RISC-V ELF; nothing anywhere validated the combination.
@@ -14004,45 +14053,137 @@ done
 # (a compiler that collapsed every alias to one format would still pass an [ -s ]
 # only check). Assert the container magic bytes: ELF 7f454c46, Mach-O cffaedfe,
 # PE 4d5a0000, asm is text (no fixed magic, so just check for '; ' comment lead-in).
-emit_expected_magic() {
+#
+# THE SPELLING LIST IS NOW DERIVED FROM THE COMPILER'S OWN ARMS, and that is
+# the point of this rewrite rather than a tidy-up. It used to be 24 names typed
+# out by hand under the sentence "Every spelling that works today must still
+# work" — and by the time D Task 4 read it, `ir`, `lkm`, `image` and `uefi`
+# all worked and none of them was in it. A hand-list cannot notice a spelling
+# nobody added to it, so the sentence was false the moment a mode shipped, and
+# each new mode made it falser. src/main.kr's `str_eq_full(emit_str, "...")`
+# chain is the only thing that decides what --emit= accepts, so it is what this
+# reads. Three guard rows below make the derivation itself falsifiable: an
+# empty or short derivation reds rather than silently testing nothing, and a
+# spelling with no recipe reds instead of being skipped.
+EV_BM="/tmp/krc_ev_bm_$$.kr"
+printf 'fn main() { loop { } }\n' > "$EV_BM"
+EV_LKM="/tmp/krc_ev_lkm_$$.kr"
+printf '@module_init\nfn kr_init() -> uint64 { return 0 }\n@module_exit\nfn kr_exit() { }\n' > "$EV_LKM"
+
+# spelling -> "<expectation>|<extra krc flags>|<source>". Four expectation
+# kinds beyond a container magic: TEXT (asm listing), STDOUT (--emit=ir writes
+# no file at all), and RAW (--emit=image is a headerless blob, so its promise
+# is the ABSENCE of every container magic — "some non-empty file" would be a
+# vacuous check for exactly the one mode that has no magic to check).
+emit_recipe() {
     case "$1" in
         elf|elf-arm64|elf-x86_64|elfexe|linux|linux-x86_64|linux-arm64|linux-x86-64|obj|android)
-            echo "7f454c46" ;;
+            echo "7f454c46||$EV_SRC" ;;
         macho|mac|macos|mac-x64|mac-arm64|darwin)
-            echo "cffaedfe" ;;
+            echo "cffaedfe||$EV_SRC" ;;
         windows|windows-x64|windows-arm64|win|win-x64|win-arm64|pe)
-            echo "4d5a0000" ;;
-        asm)
-            echo "TEXT" ;;
+            echo "4d5a0000||$EV_SRC" ;;
+        # An .ko is a relocatable ELF, but it needs a @module_init to be
+        # emitted at all, so it cannot share the default source.
+        lkm)   echo "7f454c46||$EV_LKM" ;;
+        # Both bare-metal modes REQUIRE --target=none and refuse `exit`, hence
+        # the loop{} source. uefi promises the same MZ magic as pe and a very
+        # different container; the magic alone does not separate them, which is
+        # what uefi_pe_header_fields_* and the boot gate's L7/L8 are for.
+        uefi)  echo "4d5a0000|--target=none|$EV_BM" ;;
+        image) echo "RAW|--target=none --load-addr=0x400000|$EV_BM" ;;
+        asm)   echo "TEXT||$EV_SRC" ;;
+        ir)    echo "STDOUT||$EV_SRC" ;;
     esac
 }
-for GOOD in elf elf-arm64 elf-x86_64 elfexe linux linux-x86_64 linux-arm64 linux-x86-64 \
-            macho mac macos mac-x64 mac-arm64 darwin \
-            windows windows-x64 windows-arm64 win win-x64 win-arm64 pe \
-            obj android asm; do
+
+EV_ALL=$(grep -o 'str_eq_full(emit_str, "[^"]*")' "$DIR/../src/main.kr" \
+         | sed 's/.*"\(.*\)".*/\1/' | sort -u)
+EV_NALL=$(echo "$EV_ALL" | grep -c .)
+
+# Guard 1: the derivation produced something plausible. If src/main.kr is
+# reformatted so the pattern stops matching, this reds instead of turning the
+# whole block into a zero-iteration loop that reports nothing.
+TOTAL=$((TOTAL + 1))
+if [ "$EV_NALL" -ge 24 ]; then
+    PASS=$((PASS + 1)); echo "  emit_alias_set_derived: PASS ($EV_NALL spellings read out of src/main.kr)"
+else
+    echo "FAIL: emit_alias_set_derived (derived only $EV_NALL spellings from src/main.kr's str_eq_full(emit_str, ...) arms; 24 shipped in v2.8.4 and none has ever been removed, so a smaller number means the derivation broke, not that the compiler shrank)"
+    FAIL=$((FAIL + 1))
+fi
+
+# Guard 2: the compiler's own "valid: ..." diagnostic lists exactly those
+# spellings, BOTH WAYS. This is the enumeration D Task 4 was sent to find: it
+# shipped as a 16-name sample of a 27-name set, so a user who mistyped
+# `--emit=macos` was told `macos` was not valid. One-way would not do — a list
+# that merely contains every arm could still invent names that do not work.
+TOTAL=$((TOTAL + 1))
+EV_VALID=$($KRC --emit=__no_such_format__ "$EV_SRC" -o "$EV_BIN" 2>&1 \
+           | sed -n 's/^valid: //p' | tr ',' '\n' | tr -d ' \r' | grep -v '^$' | sort -u)
+EV_ONLY_ARM=$(comm -23 <(echo "$EV_ALL") <(echo "$EV_VALID") | tr '\n' ' ')
+EV_ONLY_MSG=$(comm -13 <(echo "$EV_ALL") <(echo "$EV_VALID") | tr '\n' ' ')
+if [ -z "$EV_VALID" ]; then
+    echo "FAIL: emit_valid_list_is_complete (the compiler printed no 'valid: ' line for an unknown --emit= value)"; FAIL=$((FAIL + 1))
+elif [ -n "$EV_ONLY_ARM" ] || [ -n "$EV_ONLY_MSG" ]; then
+    echo "FAIL: emit_valid_list_is_complete (accepted but not listed: [$EV_ONLY_ARM]; listed but not accepted: [$EV_ONLY_MSG])"; FAIL=$((FAIL + 1))
+else
+    PASS=$((PASS + 1)); echo "  emit_valid_list_is_complete: PASS ($EV_NALL spellings, arms and diagnostic agree both ways)"
+fi
+
+# Guard 3: every derived spelling has a recipe. Without this a new --emit=
+# value would simply not be exercised by the loop below — the silent-skip
+# failure mode, which is the one this whole task exists to close.
+TOTAL=$((TOTAL + 1))
+EV_NORECIPE=""
+for GOOD in $EV_ALL; do
+    [ -n "$(emit_recipe "$GOOD")" ] || EV_NORECIPE="$EV_NORECIPE $GOOD"
+done
+if [ -z "$EV_NORECIPE" ]; then
+    PASS=$((PASS + 1)); echo "  emit_recipe_covers_every_alias: PASS (all $EV_NALL spellings have an expectation)"
+else
+    echo "FAIL: emit_recipe_covers_every_alias (no expectation for:$EV_NORECIPE -- add an arm to emit_recipe() so the alias is checked instead of skipped)"
+    FAIL=$((FAIL + 1))
+fi
+
+for GOOD in $EV_ALL; do
     TOTAL=$((TOTAL + 1))
     rm -f "$EV_BIN"
-    EXP_MAGIC=$(emit_expected_magic "$GOOD")
-    if $KRC --emit=$GOOD "$EV_SRC" -o "$EV_BIN" >/dev/null 2>&1 && [ -s "$EV_BIN" ]; then
+    EV_R=$(emit_recipe "$GOOD")
+    EXP_MAGIC="${EV_R%%|*}"; EV_REST="${EV_R#*|}"
+    EV_FLAGS="${EV_REST%%|*}"; EV_IN="${EV_REST#*|}"
+    if [ -z "$EV_R" ]; then
+        echo "FAIL: emit_accept_$GOOD (no recipe; see emit_recipe_covers_every_alias)"; FAIL=$((FAIL + 1))
+    elif [ "$EXP_MAGIC" = "STDOUT" ]; then
+        if $KRC --emit=$GOOD $EV_FLAGS "$EV_IN" 2>/dev/null | grep -q '^function main:'; then
+            PASS=$((PASS + 1)); echo "  emit_accept_$GOOD: PASS (IR dump on stdout)"
+        else
+            echo "FAIL: emit_accept_$GOOD (expected an IR dump naming main on stdout)"; FAIL=$((FAIL + 1))
+        fi
+    elif $KRC --emit=$GOOD $EV_FLAGS "$EV_IN" -o "$EV_BIN" >/dev/null 2>&1 && [ -s "$EV_BIN" ]; then
+        GOT_MAGIC=$(xxd -p -l4 "$EV_BIN")
         if [ "$EXP_MAGIC" = "TEXT" ]; then
             if head -c2 "$EV_BIN" | grep -q '; '; then
                 PASS=$((PASS + 1)); echo "  emit_accept_$GOOD: PASS (text asm)"
             else
                 echo "FAIL: emit_accept_$GOOD (expected text asm output)"; FAIL=$((FAIL + 1))
             fi
+        elif [ "$EXP_MAGIC" = "RAW" ]; then
+            case "$GOT_MAGIC" in
+                7f454c46|cffaedfe|4d5a0000)
+                    echo "FAIL: emit_accept_$GOOD (a flat image must carry no container magic, got $GOT_MAGIC)"; FAIL=$((FAIL + 1)) ;;
+                *)
+                    PASS=$((PASS + 1)); echo "  emit_accept_$GOOD: PASS (headerless, first bytes $GOT_MAGIC)" ;;
+            esac
+        elif [ "$GOT_MAGIC" = "$EXP_MAGIC" ]; then
+            PASS=$((PASS + 1)); echo "  emit_accept_$GOOD: PASS (magic $GOT_MAGIC)"
         else
-            GOT_MAGIC=$(xxd -p -l4 "$EV_BIN")
-            if [ "$GOT_MAGIC" = "$EXP_MAGIC" ]; then
-                PASS=$((PASS + 1)); echo "  emit_accept_$GOOD: PASS (magic $GOT_MAGIC)"
-            else
-                echo "FAIL: emit_accept_$GOOD (expected magic $EXP_MAGIC, got $GOT_MAGIC)"; FAIL=$((FAIL + 1))
-            fi
+            echo "FAIL: emit_accept_$GOOD (expected magic $EXP_MAGIC, got $GOT_MAGIC)"; FAIL=$((FAIL + 1))
         fi
     else
         echo "FAIL: emit_accept_$GOOD (alias must keep working)"; FAIL=$((FAIL + 1))
     fi
 done
-rm -f "$EV_SRC" "$EV_BIN"
+rm -f "$EV_SRC" "$EV_BIN" "$EV_BM" "$EV_LKM"
 
 # --- syscall_raw number register per ARM64 ABI (artifact inspection) ---
 # aarch64 takes the syscall number in x8 on Linux/Android and in x16 on

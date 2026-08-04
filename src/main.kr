@@ -2575,8 +2575,17 @@ fn emit_x86_image_stub(uint64 ld, uint64 sp) {
     patch_u32(xs_gdtr_base, ld + xs_gdt)
 }
 
-// arch: 0=x86_64, 1=arm64
-// emit: 0=elfexe, 1=machoexe, 2=peexe, 3=obj (ELF relocatable), 5=asm listing, 6=ir dump
+// arch: 0=x86_64, 1=arm64, 2=riscv32, 3=xtensa
+// emit: 0=elfexe, 1=machoexe, 2=peexe, 3=obj (ELF relocatable), 4=android PIE,
+//       5=asm listing, 6=ir dump, 7=lkm (.ko), 8=image (raw flat, bare metal),
+//       9=uefi (PE32+ EFI application, bare metal)
+//
+// BOTH LISTS ARE ENUMERATIONS AND BOTH HAD ROTTED. This one named six of ten
+// emit modes and two of four arches; it was last correct before --emit=android
+// existed. The single source of truth is the --emit= / --arch= arm chain in
+// main(); emit_valid_list_is_complete in the suite pins the arm chain against
+// the "valid:" diagnostic, but nothing can pin a comment, so read it as a
+// convenience and the arms as the answer.
 fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode) {
     uint64 t_start = time_ns()
     set_target_arch(arch)
@@ -2657,6 +2666,16 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
     // — the per-OS dispatch in this codebase is "special-case Windows/macOS,
     // ELSE fall through to POSIX", and a bare-metal condition phrased in terms
     // of the OS is the shape that inherits Linux when a case is missed.
+    //
+    // WHAT THIS COMMENT USED TO END WITH — "emit_mode has no fall-through" —
+    // WAS FALSE, and it was one of a matched pair (the other sat at the arm64
+    // entry-stub block; see the note there). The emit_mode chains DO fall
+    // through, in three places: the header dispatch below, this file's
+    // finalize dispatch, and this very variable. Omitting a mode from any of
+    // the three writes a WRONG ARTIFACT AT EXIT 0 with no diagnostic —
+    // measured, not reasoned, by disabling each one in turn in sub-project D
+    // Task 1. Both halves of the pair were corrected there rather than left
+    // standing beside the change that falsified them; this is the record.
     //
     // MODE 9 JOINED THIS GATE IN SUB-PROJECT D TASK 1, AND HAD TO. This one
     // variable gates two separate things and BOTH of them fail silently when a
@@ -2849,10 +2868,17 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
         // of the flag validation already enforces; x86_64 is RIP-relative
         // throughout and needs no constraint at all.
         //
-        // Being exact about what this line does TODAY: header_size is read
-        // only by the emit_mode 0/1/2 finalize arms (:3107, :3140, :3243,
-        // :3301, :3313), none of which emit_mode 8 reaches, so the assignment
-        // is currently inert. It is here because the value is a fact about
+        // Being exact about what this line does TODAY: header_size is read by
+        // the elfexe/riscv, Mach-O and PE finalize arms — and, since
+        // sub-project D, by the --emit=uefi arm as well, which uses it as the
+        // boundary between header and payload. None of them is reached by
+        // emit_mode 8, so THIS assignment is inert; the sentence that used to
+        // sit here said "only by the emit_mode 0/1/2 finalize arms" and named
+        // five line numbers, and by D Task 4 both halves were wrong — mode 9
+        // had joined the readers and every one of the five numbers pointed
+        // somewhere else. Line numbers are not repeated here for that reason;
+        // `grep -n header_size src/main.kr` is the answer that cannot rot.
+        // It is here because the value is a fact about
         // this format, not a computation: the moment anything shared starts
         // consuming header_size, an image that still claimed 120 would be
         // wrong in the direction that produces a silent boot rather than a
@@ -6427,8 +6453,12 @@ fn main() {
                     // Image header --image-header opts into. emit_mode 8
                     // is a NEW value on purpose: the raw-path triggers for
                     // riscv32/xtensa key on emit_mode == 0 + freestanding
-                    // (:2340), so a new value is untouched by every existing
-                    // invocation and byte-identity holds by construction.
+                    // (the rv_raw / xt_raw gates in compile()), so a new value
+                    // is untouched by every existing invocation and
+                    // byte-identity holds by construction. The line number
+                    // that used to be here, `:2340`, was wrong when it was
+                    // written and wronger after D moved the gates; named
+                    // variables do not rot.
                     emit_mode = 8
                 } else if str_eq_full(emit_str, "uefi") != 0 {
                     // UEFI application: a PE32+ image that firmware loads and
@@ -6446,7 +6476,17 @@ fn main() {
                     uint64 esl = str_len(emit_str)
                     write(2, emit_str, esl)
                     write(2, "'\n", 2)
-                    uint64 evl = "valid: elfexe, elf, linux, macho, mac, darwin, pe, windows, win, obj, android, asm, ir, lkm, image, uefi\n"
+                    // EVERY spelling the arms above accept, in the order they
+                    // appear there. It used to be a SAMPLE presented as a
+                    // list: 16 of the then-27 names, silently omitting
+                    // elf-arm64, macos, win-x64 and nine more, so a user
+                    // whose spelling was rejected for a typo was told their
+                    // corrected spelling was invalid too. Pinned BOTH WAYS by
+                    // emit_valid_list_is_complete in the suite -- every arm
+                    // must appear here and every name here must be an arm --
+                    // because this is exactly the enumeration a new emit mode
+                    // falsifies, and --emit=uefi did falsify it.
+                    uint64 evl = "valid: elfexe, elf, elf-arm64, elf-x86_64, linux, linux-x86_64, linux-arm64, linux-x86-64, macho, mac, macos, mac-x64, mac-arm64, darwin, windows, windows-x64, windows-arm64, win, win-x64, win-arm64, pe, obj, android, asm, ir, lkm, image, uefi\n"
                     write(2, evl, str_len(evl))
                     exit(1)
                 }
@@ -6513,7 +6553,10 @@ fn main() {
                 } else if str_eq_full(tgt_str, "none") != 0 {
                     // Bare metal: no operating system. Forces freestanding
                     // (main's prologue/epilogue only emit OS startup/exit code
-                    // when freestanding == 0, ir.kr:13084 and :13405) so
+                    // when freestanding == 0 -- the three `freestanding == 0`
+                    // guards on `main` in ir.kr; the line numbers that used to
+                    // be quoted here, :13084 and :13405, pointed at a blank
+                    // line and an unrelated store) so
                     // --target=none alone is enough — the user does not also
                     // have to pass --freestanding. Lowering for target_os == 4
                     // beyond this flag surface is later work; this only
@@ -6601,7 +6644,7 @@ fn main() {
                 // An --emit= VALUE is structurally invisible to them, which is
                 // why this line and its docs section each carry their own row
                 // (uefi_help_has_own_line, uefi_docs_section_intact).
-                uint64 h_uefi = "  --emit=uefi              UEFI application: a PE32+ image firmware loads and enters directly (bare metal; needs --target=none and an explicit --arch=x86_64|arm64; takes no --load-addr/--stack-top -- firmware relocates the image and enters with a stack already set up)\n"
+                uint64 h_uefi = "  --emit=uefi              UEFI application: a PE32+ image firmware loads and enters directly (bare metal; needs --target=none and an explicit --arch=x86_64|arm64; takes no --load-addr/--stack-top -- firmware places the image where it likes and enters with a stack already set up; unsigned, so Secure Boot refuses it)\n"
                 write(1, h_uefi, str_len(h_uefi))
                 uint64 h_la = "  --load-addr=<addr>       where the image will be loaded; validated (arm64: 4096-aligned) and reported, never embedded\n"
                 write(1, h_la, str_len(h_la))

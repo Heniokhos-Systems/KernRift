@@ -205,6 +205,22 @@ gate1() {
     #      covered by exactly one path looks like. --emit=lkm is absent because
     #      it refuses on both arches for both programs, i.e. there is nothing
     #      to compare.
+    #
+    #      THIS LIST IS TWO CONTAINERS SHORT AND CANNOT BE OTHERWISE TODAY.
+    #      --emit=image (sub-project B1) and --emit=uefi (D) are both container
+    #      emitters this gate does not reach, and --emit=uefi shares
+    #      src/format_pe.kr with the pe rows above -- exactly the file whose
+    #      single-path coverage this block was written against. Neither can be
+    #      added: gate 1 compares a BASE-built artifact with a HEAD-built one,
+    #      and TN_BASE (271e118) has no `image` or `uefi` arm at all, so the
+    #      BASE compiler refuses the row and there is nothing to diff. Checked,
+    #      not assumed: `git show $TN_BASE:src/main.kr | grep 'emit_str, "uefi"'`
+    #      matches nothing, and the same for "image".
+    #      What covers them meanwhile: uefi_pe_header_fields_* in the suite
+    #      (static field assertions) and boot_gate.sh L7/L8 (thirteen firmware
+    #      boots). ADD BOTH HERE THE NEXT TIME TN_BASE MOVES PAST THEM -- that
+    #      is the only thing standing in the way, and this note exists so the
+    #      omission is a deferral rather than a gap nobody wrote down.
     for a in x86_64 arm64; do
         for e in pe macho; do
             g1row "krc_${a}_${e}"   "--arch=$a --emit=$e" "$G1_FROZEN"

@@ -1716,8 +1716,11 @@ start it. Everything below is a limit of *that evidence*.
 krc app.kr --arch=x86_64 --target=none --emit=uefi -o BOOTX64.EFI
 ```
 
-A UEFI application is a PE32+ image that the firmware loads, relocates and
-enters directly. Unlike `--emit=image` it needs no loader of yours and no
+A UEFI application is a PE32+ image that the firmware loads, places at an
+address of its own choosing, and enters directly. *Places*, not *relocates*:
+there is no `.reloc` section and no fixup is ever applied to the image — see
+`ImageBase` below.
+Unlike `--emit=image` it needs no loader of yours and no
 entry stub: firmware enters in long mode with paging on and a stack already
 set up, so there is nothing for a trampoline to do. Consequently
 `--load-addr=`, `--stack-top=` and `--image-header` are all **refused** with
@@ -1825,6 +1828,56 @@ legs. Absence is a **counted failure** naming every path tried — never a silen
 pass — though the checks downstream of it in the same leg are then reported as
 SKIP rather than run: a missing OVMF gives 1 FAIL and 9 SKIP on L7, a missing
 AAVMF 1 FAIL and 3 SKIP on L8.
+
+##### Limits, as measured
+
+Everything in this section was measured on **one machine**, with **edk2
+2024.02** (Ubuntu `ovmf` / `qemu-efi-aarch64` 2024.02-2ubuntu0.8) under **QEMU
+8.2.2**, Secure Boot off unless stated. No real hardware and no vendor firmware
+has run any of it. Where a field is described as not being checked, that is a
+statement about *this* build: **"not guaranteed to be caught" is what was
+observed, and it never means "safe to get wrong."**
+
+**Secure Boot rejects this output. That is a property of the artifact, not a
+gap in the tooling.** The applications are unsigned and nothing here signs
+them. Measured with the *identical* file — one variable changed, the firmware
+pair:
+
+| what booted | firmware | result |
+|---|---|---|
+| the x86_64 sentinel | `OVMF_CODE_4M.fd` + `OVMF_VARS_4M.fd` | **ran** — both sentinel markers on COM1 |
+| the same bytes | `OVMF_CODE_4M.ms.fd` + `OVMF_VARS_4M.ms.fd` (Microsoft keys) | `BdsDxe: failed to load Boot0001 …: **Access Denied**` — nothing of ours ran |
+| Microsoft-signed `shimx64.efi.dualsigned` | that same MS-key firmware | `loading` → **`starting`** — so the firmware does boot an image it trusts |
+| the arm64 sentinel | `AAVMF_CODE.no-secboot.fd` | **ran** — both markers on the PL011 |
+| the same bytes | `AAVMF_CODE.ms.fd` + `AAVMF_VARS.ms.fd` | `failed to load Boot0001 …: **Access Denied**` |
+
+The third row is the control that makes the second mean something: without it,
+`Access Denied` could have been the ESP rather than the signature. Note also
+that `Access Denied` is a *different* status from the `Not Found` an empty or
+misnamed ESP produces, so this rejection is a positive observation and not an
+absence. Signing is out of scope for this mode; a signed application would need
+a key, an `sbsign`-equivalent, and a `.reloc`-free image the signer accepts —
+none of which exist here.
+
+**Boot services are out of scope, and a codegen limit blocks them.** These
+applications never touch the `EFI_SYSTEM_TABLE`: they take the firmware's
+entry, drive a UART directly and return. `efi_main(ImageHandle, SystemTable)`
+is not implemented, and calling a boot service would go through `call_ptr`,
+which **silently drops every argument past the sixth** — `src/ir.kr:3151`
+declares `uint64[6] cp_arg_vregs` and `:3155` stops the lowering loop at
+`cp_count < 6`, with no diagnostic and exit 0. Measured on this tree: a
+seven-parameter callee reached through
+`call_ptr(p, 1, 2, 4, 8, 16, 32, 7)` returns **63** on x86_64 (the seventh
+argument was never passed) and **127** on arm64 (never passed either — the
+callee read an uninitialised `x6`, which held `64` from an earlier probe). The
+legacy backend does the same thing: 63. That cap has to be fixed before boot
+services are possible, it is **codegen work rather than container work**, and
+it is not claimed to be the only thing in the way.
+
+**Also deliberately absent:** `--emit=uefi` for riscv32 or xtensa (neither has
+a PE `Machine` value here, and both already own a raw boot path through
+`--freestanding`), and any new `--target=` value — a UEFI application is
+`--target=none` like every other bare-metal artifact.
 
 ```
 
@@ -2236,15 +2289,25 @@ fn main() {
 
 ## 25. Binary formats
 
+All ten `--emit=` modes, and the two formats that are reached by other flags:
+
 | Format | Produced by | Use |
 |---|---|---|
 | `.krbo` fat binary | default (no `--arch`) | Cross-platform distribution — `kr` picks the right slice |
-| ELF executable | `--arch=x86_64` / `--arch=arm64` on Linux | Native Linux binary |
-| ELF relocatable | `--emit=obj` | Link into an external object (`.o`) |
+| ELF executable | `--emit=elfexe` (the default), `--arch=x86_64` / `--arch=arm64` on Linux | Native Linux binary |
+| ELF relocatable | `--emit=obj` (or `-c`) | Link into an external object (`.o`) |
 | Mach-O | `--emit=macho` | macOS executable (x86_64 or arm64) |
 | PE | `--emit=pe` | Windows `.exe` |
 | Android PIE ELF | `--emit=android` | Android ARM64 (default) or x86_64 (`--arch=x86_64`) |
+| Loadable kernel module | `--emit=lkm` | Linux `.ko`, x86_64 only — see [LKM.md](LKM.md) |
 | Assembly listing | `--emit=asm` | Human-readable disassembly with labels |
+| IR dump | `--emit=ir` | Text on **stdout**; no file is written |
+| Raw flat image | `--emit=image` | Bare metal, no container — needs `--target=none` |
+| UEFI application | `--emit=uefi` | PE32+ image firmware loads and enters — needs `--target=none` |
+| ESP32 flash image | `--arch=xtensa --freestanding --target=esp32` | Not an `--emit=` mode: the machine target selects it |
+
+The last four have no place on a hosted OS, and the two bare-metal `--emit=`
+modes **require** `--target=none` rather than merely accepting it.
 
 A `.krbo` fat binary packs up to 8 platform slices (Linux x86_64, Linux
 ARM64, Windows x86_64, Windows ARM64, macOS x86_64, macOS ARM64, Android
