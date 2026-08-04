@@ -1,7 +1,18 @@
 #!/bin/bash
 # =============================================================================
-# The bare-metal BOOT gate (sub-project B1)
+# The bare-metal BOOT gate (sub-project B1; x86 legs re-pointed by B2 Task 5)
 # =============================================================================
+# SINCE B2 TASK 5 THE SUBJECT IS THE COMPILER'S OWN ENTRY STUB, NOT AN EXTERNAL
+# LOADER. `--emit=image --stack-top=` now emits a self-sufficient artifact on
+# both arches (B2 tasks 3 and 4), so:
+#   * x86_64 boots as `qemu-system-x86_64 -kernel <image>` and NOTHING ELSE —
+#     no loader ELF, no `-device loader`, no assembler on the machine;
+#   * arm64 boots with the image and a reset-PC `-device loader,addr=…` and no
+#     `file=` stub — make_stub.py is not invoked by L1, L2, L4 or L5.
+# Those two boots existed only as manual runs recorded in Task 3's and Task 4's
+# reports until this file was changed. A result that lives only in a report is
+# one refactor away from being unverified; every one of them is a leg now.
+#
 # Closes the TODO(sub-project B) recorded in prove_no_syscalls.sh: every leg
 # here is an OBSERVED RUN under qemu-system-*, and every leg ships with a
 # negative control that has itself been observed failing. A leg that has only
@@ -96,17 +107,23 @@ trap cleanup EXIT INT TERM
 # this comment block is about, so keeping it here would contradict the rule
 # it states.
 #
-# Still live, and where: python3 (make_stub.py / qmp_pc.py / loop_offset_a64),
-# timeout + both qemu-system binaries (every boot), stat (L0's size report),
-# sed (L0's indented build log, build_image's report parse), od (build_loader.sh),
-# wc (L0's build-log line count, L0's sentinel count), tr (L3/L4 serial-capture
-# flattening for diagnostics), head (L0/L4 truncated log excerpts), grep (L0's
-# sentinel count, boot_run's expect match).
+# B2 TASK 5 REMOVED `od` AND `wc` FOR THE SAME REASON. Their only users were
+# build_loader.sh (od) and L0's build-log / sentinel counts (wc), and Task 5
+# retires both — the x86 legs no longer build a loader at all. Same rule as
+# above: a probed-but-unused tool false-fails the whole gate on a machine that
+# never needed it.
 #
-# as/ld are NOT probed here — build_loader.sh does its own FUNCTIONAL probe,
-# because on an aarch64 host `command -v as` answers "yes" and means "no"
-# (review round 1 C4).
-for t in qemu-system-x86_64 qemu-system-aarch64 python3 timeout od stat sed wc tr head grep; do
+# Still live, and where: python3 (make_stub.py for L3, qmp_pc.py, the image
+# scanners `loop_offset_a64` / `halt_offset_x86` / `mb_u32`, and the three
+# artifact patchers in L1), timeout + both qemu-system binaries (every boot),
+# stat (build_image's on-disk size cross-check, L0's capture size, L4's report),
+# sed (build_image's report parse), tr (L3/L4 serial-capture flattening for
+# diagnostics), head (L1/L4 truncated log excerpts), grep (boot_run's expect
+# match, every sentinel assertion).
+#
+# `as`/`ld` ARE NO LONGER A DEPENDENCY OF ANY KIND — that was the external
+# loader's, and the compiler emits its own stub now.
+for t in qemu-system-x86_64 qemu-system-aarch64 python3 timeout stat sed tr head grep; do
     if ! command -v "$t" >/dev/null 2>&1; then
         bad "boot_dep_$t" "$t not found — the boot gate REQUIRES it; absence is a failure, not a skip"
     fi
@@ -141,10 +158,45 @@ if [ "$FAIL" != 0 ]; then echo "boot gate: $PASS pass, $FAIL FAIL"; exit 1; fi
 # machine nobody here has measured. Reaching that conclusion by nearly
 # introducing the first mistake is the reason it is written down.
 #
-# RETURNS NONZERO IF THE BOOT DID NOT HAPPEN. The capture file is deleted
-# before launch, so its existence afterwards is proof that qemu started and
-# opened it. Silence from a boot that never ran is not evidence of anything,
-# and six controls here assert silence — see their call sites.
+# RETURNS NONZERO IF THE BOOT DID NOT HAPPEN — AND CAPTURE-FILE EXISTENCE IS
+# NOT HOW THAT IS DECIDED. It was, until B2 Task 5, and it was WRONG:
+#
+#   QEMU OPENS THE `file:` CHARDEV BEFORE IT PROCESSES `-device` AND `-kernel`.
+#
+# So a boot QEMU refuses to start — an unloadable `-device loader,file=`, a
+# missing `-kernel`, an image with no valid multiboot header — still leaves an
+# EXISTING, EMPTY capture behind, and `[ -f "$ser" ]` calls that a boot. Every
+# control here that reads silence as evidence then passes on a QEMU that never
+# executed a single guest instruction. MEASURED, all four cases, capture
+# present and 0 bytes in each:
+#   qemu-system-x86_64  -kernel /nonexistent.img      -> exit 1, "could not open kernel file"
+#   qemu-system-x86_64  -kernel <no multiboot header> -> exit 1, "invalid kernel header"
+#   qemu-system-aarch64 -device loader,file=/nonexistent -> exit 1, "Cannot load specified image"
+#   (a boot that DID run, killed or self-exited)      -> exit 0
+#
+# THE DISCRIMINATOR IS QEMU'S EXIT STATUS, and specifically `== 1`, not `!= 0`.
+# A guest that ran exits 0 whether we killed it (SIGTERM reaches qemu through
+# `timeout`, which qemu handles as a clean shutdown) or it self-exited on a
+# triple fault under -no-reboot — both measured. `!= 0` would additionally
+# catch `timeout`'s own 124, which is REACHABLE: BOOT_DEADLINE_TICKS * BOOT_TICK
+# is exactly the `timeout 10`, so a leg that waits the full deadline races the
+# alarm. That race would false-FAIL a positive leg on a slow runner, which is
+# the failure mode this gate exists to prevent, so the check is `== 1`.
+#
+# UNTIL TASK 5 THE x86 HALF OF THIS WAS CLOSED A DIFFERENT WAY: every x86
+# silence control also required the external loader's `KR-LDR|` liveness
+# sentinel on the wire, which is real proof a guest ran. THAT SENTINEL BELONGED
+# TO THE LOADER TASK 4 REPLACED. Under `-kernel <image>` nothing prints before
+# the payload, so the shield died with the loader and x86 needed this same
+# exit-status check — it is NOT already handled by the arm64 fix.
+#
+# THE CHECK IS ITSELF GATED, permanently, by L0's dead-boot legs: they run a
+# boot QEMU refuses, assert boot_run reports failure, AND assert the capture
+# file is present — i.e. they assert that the pre-fix predicate WOULD have
+# passed. L0's liveboot leg is the other half: boot_run must NOT flag a boot
+# that really ran, so "always return 1" cannot pass the gate either.
+#
+# BOOT_QEMU_RC is the raw status, exported for diagnostics and for L0.
 #
 # WHY NOT `sleep 4` (what task 1 shipped), AND WHY NOT PLAIN EXIT-POLLING
 # (what task 2's first report proposed). Both were wrong, and MEASURED rather
@@ -175,6 +227,7 @@ BOOT_DEADLINE_TICKS=200   # 10 s — hard ceiling on waiting for evidence
 # where the machine is slowest — the failure mode this gate exists to prevent.
 BOOT_SILENCE_TICKS=40
 BOOT_WAITED_TICKS=0       # out-param: ticks actually waited by the last run
+BOOT_QEMU_RC=0            # out-param: qemu's exit status from the last run
 # The wait itself, factored out because boot_run_qmp (L3) needs the SAME
 # semantics while the guest is still alive. Two copies of this loop would
 # drift, and the mode that drifted would be the one nobody re-derived.
@@ -200,14 +253,22 @@ boot_run() {
     local arch="$1" ser="$2" expect="$3"; shift 3
     local qemu="qemu-system-x86_64" machine="-no-reboot"
     if [ "$arch" = "a64" ]; then qemu="qemu-system-aarch64"; machine="-M virt -cpu cortex-a57"; fi
-    rm -f "$ser"
+    rm -f "$ser" "$ser.err"
+    BOOT_QEMU_RC=0
+    # qemu's stderr is KEPT, not discarded: it is the only place the reason for
+    # a refused boot is written, and $WORK survives a red run.
     # shellcheck disable=SC2086
-    timeout 10 "$qemu" $machine -display none -serial "file:$ser" "$@" >/dev/null 2>&1 &
+    timeout 10 "$qemu" $machine -display none -serial "file:$ser" "$@" >/dev/null 2>"$ser.err" &
     local pid=$!
     boot_wait "$pid" "$ser" "$expect"
     kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null
+    BOOT_QEMU_RC=$?
     # No capture file => qemu never opened it => no boot occurred.
     [ -f "$ser" ] || return 1
+    # Capture present but qemu REFUSED the boot. See this function's header:
+    # the chardev is opened before -device/-kernel, so this is the case that
+    # hands a free pass to every control that reads silence as evidence.
+    [ "$BOOT_QEMU_RC" != 1 ] || return 1
     return 0
 }
 
@@ -221,8 +282,16 @@ calibrate_silence() {
 }
 
 # Gate-wide fixed addresses (used by every leg; leg 4 shifts the arm64 one).
+# A64_STUB is the load address of the EXTERNAL make_stub.py stub, which since
+# Task 5 has exactly one user left: L3 (see leg3's header for why).
 A64_LOAD=0x40400000; A64_STUB=0x40300000; A64_SP=0x40800000
 X86_LOAD=0x400000
+# --stack-top values handed to the compiler for the EMITTED stubs.
+# arm64: 4 MiB above the image, 16-byte aligned, below 2^32.
+# x86_64: BELOW the image (0x90000 < 0x400000) and below the 1 GiB identity
+# map — both preconditions Task 4 validates and refuses on.
+A64_STACK_TOP=0x40800000
+X86_STACK_TOP=0x90000
 
 # Compile a gate program to a RAW HEADERLESS IMAGE and echo the ENTRY FILE
 # OFFSET (decimal) on stdout. Callers are unchanged from the Task-2 ELF form
@@ -259,13 +328,23 @@ X86_LOAD=0x400000
 # +0x100 — the artifact does not depend on the address it was compiled for,
 # so the misaligned half of that pair is a load-time fact about arm64 ADRP
 # arithmetic and not a different build.
+#
+# THE OPTIONAL 4th ARGUMENT IS `--stack-top=<v>`, and it is what makes the
+# artifact SELF-SUFFICIENT (B2 tasks 3 and 4): with it the compiler emits its
+# own entry stub — arm64 `movz/movk/mov sp,x0; bl <entry>; b .`, x86_64 a
+# multiboot header plus a 32-bit long-mode trampoline — and the reported
+# `entry` is the STUB, not the entry function. Without it the output is B1's
+# bare blob for somebody else's loader, which is what L3 still uses.
 build_image() {
-    local arch="$1" src="$2" out="$3"
+    local arch="$1" src="$2" out="$3" stop="${4:-}"
     local aflag="x86_64" iload="$X86_LOAD"
     if [ "$arch" = "a64" ]; then aflag="arm64"; iload="$A64_LOAD"; fi
     local log="$out.rep"
+    local sflag=""
+    [ -n "$stop" ] && sflag="--stack-top=$stop"
     rm -f "$out"
-    if ! "$KRC" --arch=$aflag --target=none --emit=image \
+    # shellcheck disable=SC2086
+    if ! "$KRC" --arch=$aflag --target=none --emit=image $sflag \
                 --load-addr=$(printf 0x%x "$iload") "$src" -o "$out" >"$log" 2>&1; then
         echo "  build_image: $KRC exited nonzero for $src (see $log)" >&2
         return 1
@@ -298,21 +377,53 @@ a64_boot() {
         -device loader,file="$img",addr=$(printf 0x%x "$load"),force-raw=on
 }
 
-# One x86 boot: loader built for the entry VA, image via -device loader.
-# $1 load addr, $2 image, $3 entry off, $4 serial out, $5 expect.
-x86_boot() {
+# One arm64 SELF-boot: the compiler's own emitted stub, no stub FILE. The only
+# file on the command line is the artifact under test; the second -device
+# carries an ADDRESS ONLY and just parks the reset PC on the emitted stub.
+# `make_stub.py` is not invoked. $1 load, $2 image, $3 entry off (the stub's,
+# as reported), $4 serial, $5 expect.
+a64_self_boot() {
     local load="$1" img="$2" entry="$3" ser="$4" expect="$5"
-    "$BOOT/build_loader.sh" $(printf 0x%x $(( load + entry ))) "$WORK/ldr.elf" >/dev/null 2>&1 || return 1
-    boot_run x86 "$ser" "$expect" -kernel "$WORK/ldr.elf" \
-        -device loader,file="$img",addr=$(printf 0x%x "$load"),force-raw=on
+    boot_run a64 "$ser" "$expect" \
+        -device loader,file="$img",addr=$(printf 0x%x "$load"),force-raw=on \
+        -device loader,addr=$(printf 0x%x $(( load + entry ))),cpu-num=0
+}
+a64_self_boot_qmp() {
+    local load="$1" img="$2" entry="$3" ser="$4" expect="$5"
+    PARKED_PC=QMPFAIL   # never let a leg read the PREVIOUS run's PC
+    boot_run_qmp a64 "$ser" "$expect" \
+        -device loader,file="$img",addr=$(printf 0x%x "$load"),force-raw=on \
+        -device loader,addr=$(printf 0x%x $(( load + entry ))),cpu-num=0
 }
 
-# boot_run for arm64 WITH a QMP socket, so the guest's PC can be read while it
-# is still running. Same contract as boot_run — capture deleted before launch,
-# nonzero return if it is missing afterwards, same <expect> vocabulary via
-# boot_wait — plus the out-param PARKED_PC.
+# One x86_64 SELF-boot. THE WHOLE COMMAND LINE IS `-kernel <image>` — no loader
+# ELF, no `-device loader`, no load address (the emitted multiboot header
+# carries it), no entry offset (the header carries that too). This replaces
+# B1's x86_boot, which built tests/target_none/boot/boot.S with the system
+# assembler and loaded the image beside it.
+# $1 image, $2 serial, $3 expect.
+x86_boot() {
+    local img="$1" ser="$2" expect="$3"
+    boot_run x86 "$ser" "$expect" -kernel "$img"
+}
+x86_boot_qmp() {
+    local img="$1" ser="$2" expect="$3"
+    PARKED_PC=QMPFAIL
+    boot_run_qmp x86 "$ser" "$expect" -kernel "$img"
+}
+
+# boot_run WITH a QMP socket, so the guest's PC can be read while it is still
+# running. Same contract as boot_run — capture deleted before launch, and the
+# SAME dead-boot rule (missing capture, or a qemu that exited 1 having refused
+# to start the guest), same <expect> vocabulary via boot_wait — plus the
+# out-param PARKED_PC.
 #
-#   boot_run_qmp <serial file> <expect> [qemu args...]
+# TASK 5 GAVE IT AN <arch>. It was arm64-only through B1 because only L3 read a
+# PC; the x86 stub's halt is now read the same way (`RIP=` — qmp_pc.py already
+# covered both), and duplicating this function per arch is exactly the drift
+# its own header warns about for boot_wait.
+#
+#   boot_run_qmp <arch: x86|a64> <serial file> <expect> [qemu args...]
 #
 # PARKED_PC is lower-case hex without 0x or leading zeros, or one of two
 # LOUD non-values:
@@ -340,13 +451,17 @@ x86_boot() {
 BOOT_QMP_GAP=0.25         # seconds between consecutive PC samples
 BOOT_QMP_TRIES=20         # give up (=> MOVING) after this many samples
 boot_run_qmp() {
-    local ser="$1" expect="$2"; shift 2
+    local arch="$1" ser="$2" expect="$3"; shift 3
+    local qemu="qemu-system-x86_64" machine="-no-reboot"
+    if [ "$arch" = "a64" ]; then qemu="qemu-system-aarch64"; machine="-M virt -cpu cortex-a57"; fi
     QMPD="${QMPD:-$(mktemp -d /tmp/krcqmp.XXXXXX)}"
     local sock="$QMPD/qmp.sock"
-    rm -f "$ser" "$sock"
+    rm -f "$ser" "$ser.err" "$sock"
     PARKED_PC=QMPFAIL
-    timeout 15 qemu-system-aarch64 -M virt -cpu cortex-a57 -display none \
-        -serial "file:$ser" -qmp "unix:$sock,server,nowait" "$@" >/dev/null 2>&1 &
+    BOOT_QEMU_RC=0
+    # shellcheck disable=SC2086
+    timeout 15 "$qemu" $machine -display none \
+        -serial "file:$ser" -qmp "unix:$sock,server,nowait" "$@" >/dev/null 2>"$ser.err" &
     local pid=$!
     boot_wait "$pid" "$ser" "$expect"
     local prev="" cur="" i=0
@@ -360,6 +475,7 @@ boot_run_qmp() {
         i=$((i + 1))
     done
     kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null
+    BOOT_QEMU_RC=$?
     if [ "$cur" = QMPFAIL ]; then
         PARKED_PC=QMPFAIL
     elif [ -z "$cur" ]; then
@@ -369,6 +485,8 @@ boot_run_qmp() {
     fi
     # No capture file => qemu never opened it => no boot occurred.
     [ -f "$ser" ] || return 1
+    # Capture present but qemu refused the boot — see boot_run's header.
+    [ "$BOOT_QEMU_RC" != 1 ] || return 1
     return 0
 }
 
@@ -410,294 +528,489 @@ a64_boot_qmp() {
     local load="$1" img="$2" entry="$3" ser="$4" expect="$5"
     PARKED_PC=QMPFAIL   # never let a leg read the PREVIOUS run's PC
     python3 "$BOOT/make_stub.py" $(( load + entry )) "$A64_STUB" "$A64_SP" "$WORK/stub.bin" || return 1
-    boot_run_qmp "$ser" "$expect" \
+    boot_run_qmp a64 "$ser" "$expect" \
         -device loader,file="$WORK/stub.bin",addr=$A64_STUB,cpu-num=0 \
         -device loader,file="$img",addr=$(printf 0x%x "$load"),force-raw=on
 }
 
+# File offset of the UNIQUE x86 stub halt (`hlt; jmp .` == f4 eb fd). Echoes
+# the decimal offset; fails the calling leg if the count is not exactly 1, for
+# the same reason loop_offset_a64 does: L1 reads "RIP == load + off + 1" as
+# "the machine is parked on the stub's halt", and a second f4-eb-fd anywhere in
+# the image would make that inference unsound SILENTLY.
+#
+# IT ALSO ASSERTS THE TWO BYTES IN FRONT OF IT ARE `ff d0` (`call *%rax`).
+# That is not decoration — L1's no-return control OVERWRITES exactly those two
+# bytes, and locating them by "two before the halt" instead of by a hardcoded
+# offset is what keeps the control pointed at the call after the next edit to
+# the stub. A mislocated patch would silently degrade the control into "some
+# other two bytes changed and it stayed quiet".
+halt_offset_x86() {
+    python3 - "$1" <<'PY'
+import sys
+d = open(sys.argv[1], "rb").read()
+offs = [i for i in range(len(d) - 2) if d[i] == 0xF4 and d[i+1] == 0xEB and d[i+2] == 0xFD]
+if len(offs) != 1:
+    print("AMBIG:%d" % len(offs)); sys.exit(1)
+o = offs[0]
+if o < 2 or d[o-2] != 0xFF or d[o-1] != 0xD0:
+    print("NOCALL:%s" % d[max(0, o-2):o].hex()); sys.exit(1)
+print(o)
+PY
+}
+
+# Echo the little-endian u32 at file offset $2 of image $1, in decimal.
+# Used to read the emitted multiboot header's own fields off the artifact.
+mb_u32() {
+    python3 - "$1" "$2" <<'PY'
+import struct, sys
+d = open(sys.argv[1], "rb").read()
+o = int(sys.argv[2])
+if o + 4 > len(d):
+    print("SHORT"); sys.exit(1)
+print(struct.unpack_from("<I", d, o)[0])
+PY
+}
+
+# Copy $1 to $2 and overwrite $3 bytes of it. Mode $4 is one of:
+#   u32:<off>:<val>   little-endian u32 at <off>
+#   hex:<off>:<bytes> raw hex at <off>
+#   zero:<off>        zero everything from <off> to EOF
+# Exits nonzero (and writes nothing) if the offset does not fit, so a control
+# built on a mislocated patch site fails instead of quietly testing nothing.
+img_patch() {
+    python3 - "$1" "$2" "$3" <<'PY'
+import struct, sys
+src, dst, spec = sys.argv[1], sys.argv[2], sys.argv[3]
+d = bytearray(open(src, "rb").read())
+kind, rest = spec.split(":", 1)
+if kind == "zero":
+    o = int(rest)
+    if o >= len(d):
+        sys.exit("img_patch: zero offset %d is past EOF (%d)" % (o, len(d)))
+    for i in range(o, len(d)):
+        d[i] = 0
+elif kind == "u32":
+    o, v = rest.split(":")
+    o, v = int(o), int(v)
+    if o + 4 > len(d):
+        sys.exit("img_patch: u32 at %d does not fit in %d bytes" % (o, len(d)))
+    struct.pack_into("<I", d, o, v & 0xFFFFFFFF)
+elif kind == "hex":
+    o, h = rest.split(":")
+    o, b = int(o), bytes.fromhex(h)
+    if o + len(b) > len(d):
+        sys.exit("img_patch: %d hex bytes at %d do not fit in %d" % (len(b), o, len(d)))
+    d[o:o+len(b)] = b
+else:
+    sys.exit("img_patch: unknown spec %r" % spec)
+open(dst, "wb").write(d)
+PY
+}
+
+# Multiboot header field offsets, from the emitting code (src/main.kr,
+# emit_x86_image_stub) and re-read off the artifact by L1.
+MB_MAGIC_OFF=0; MB_HEADER_ADDR_OFF=12; MB_LOAD_ADDR_OFF=16; MB_ENTRY_ADDR_OFF=28
+MB_MAGIC=464367618          # 0x1BADB002
+
 # =============================================================================
-# L0 — the multiboot loader itself: builds, is loadable, and its liveness
-#      sentinel is on the wire. Controls: a magic-corrupted build must be
-#      REJECTED by qemu -kernel, and the missing-as path must FAIL loudly.
+# L0 — boot_run's DEAD-BOOT DETECTOR. This is not a subject leg; it is the gate
+#      testing its own instrument, and it exists because eleven checks below
+#      read SILENCE as evidence.
+#
+#      B1 SHIPPED L0 AS THE EXTERNAL LOADER'S SELF-TEST — it builds, its
+#      `KR-LDR|` liveness sentinel is on the wire, a magic-corrupted build is
+#      rejected, and the missing-assembler path fails loudly. B2 Task 4 made
+#      the compiler emit its own multiboot header and trampoline, so there is
+#      no loader to build: all four of those checks are RETIRED, named
+#      individually in this task's report. The corrupt-magic idea is not lost —
+#      it survives re-pointed at the EMITTED header, as L1's
+#      `L1_no_header_image_refused`, where a no-`--stack-top` image (no header
+#      at all) must be refused by `qemu -kernel`.
+#
+#      WHAT REPLACES THEM IS THE THING THE LOADER'S SENTINEL WAS ACTUALLY DOING
+#      FOR THE GATE: proving a guest ran. Every x86 silence control used to
+#      require `KR-LDR|` on the wire, which is real liveness evidence — and
+#      that sentinel belonged to the loader. Under `-kernel <image>` nothing
+#      prints before the payload, so the shield is gone and the exit-status
+#      rule in boot_run's header is what stands in its place, on BOTH arches.
+#
+#      THESE THREE CHECKS ARE THAT RULE'S OWN NEGATIVE AND POSITIVE CONTROLS,
+#      permanently, rather than a mutation someone ran once:
+#        * the two dead-boot checks assert boot_run reports FAILURE for a boot
+#          qemu refused — AND that the capture file is PRESENT, i.e. that the
+#          pre-Task-5 predicate would have said "the boot ran". If a future
+#          qemu ever stopped creating the capture, the checks would go green
+#          for the wrong reason, so that half is asserted too and named.
+#        * the liveboot check asserts boot_run does NOT flag a boot that really
+#          ran. Without it "return 1 always" satisfies both dead-boot checks.
 # =============================================================================
 leg0() {
-    echo "--- L0: x86_64 multiboot loader self-test ---"
-    if ! "$BOOT/build_loader.sh" 0xdead0000 "$WORK/l0.elf" >"$WORK/l0.log" 2>&1; then
-        # Print the WHOLE log, not head -1: for an assembler error line 1 is
-        # only "…/boot.S: Assembler messages:" and the actual diagnostic is on
-        # line 2, so head -1 named the file and nothing else. The work dir
-        # survives a red run (see cleanup), so l0.log is still on disk too.
-        echo "  build log ($WORK/l0.log, $(wc -l <"$WORK/l0.log") lines):"
-        sed 's/^/    | /' "$WORK/l0.log"
-        bad "L0_loader_builds" "build failed; full log printed above"; return
-    fi
-    ok "L0_loader_builds" "$(stat -c%s "$WORK/l0.elf") B"
-    # Liveness: loader alone, entry 0xdead0000 (outside the identity map).
-    # It prints the sentinel, triple-faults on the call, and -no-reboot
-    # makes QEMU exit — observed: ONE sentinel, exit in ~80 ms (V17).
-    # The assertion is an occurrence COUNT: without -no-reboot the fault
-    # reboot-loops and replays the sentinel (25 times in 3 s observed),
-    # and exact string equality could never pass.
-    # SELFEXIT, deliberately NOT a content trigger — see boot_run's header.
-    # This assertion is a COUNT, and stopping at the first sentinel would
-    # truncate the reboot-loop it exists to detect back to a passing 1.
-    if ! boot_run x86 "$WORK/l0_ser.txt" SELFEXIT -kernel "$WORK/l0.elf"; then
-        bad "L0_loader_liveness_sentinel" "the boot did not run (no capture file)"; return
-    fi
-    L0N=$(grep -o "KR-LDR|" "$WORK/l0_ser.txt" | wc -l)
-    if [ "$L0N" = "1" ]; then
-        ok "L0_loader_liveness_sentinel" "exactly one KR-LDR| with no image loaded"
+    echo "--- L0: boot_run's dead-boot detector (the I1 rule, gated) ---"
+    local gone="$WORK/this_image_does_not_exist.img"
+    rm -f "$gone"
+    # x86: qemu exits 1 with "could not open kernel file" before any guest
+    # instruction runs. SELFEXIT, not RUNOUT — qemu is gone in milliseconds.
+    if boot_run x86 "$WORK/l0_dead_x86.txt" SELFEXIT -kernel "$gone"; then
+        bad "L0_deadboot_x86" "boot_run called it a boot; qemu exit=$BOOT_QEMU_RC"
+    elif [ ! -f "$WORK/l0_dead_x86.txt" ]; then
+        bad "L0_deadboot_x86" "the capture file is ABSENT, so this control no longer exercises the defect it exists for (qemu used to create it before failing)"
     else
-        bad "L0_loader_liveness_sentinel" "sentinel count $L0N, serial: '$(head -c 64 "$WORK/l0_ser.txt")'"
+        ok "L0_deadboot_x86" "qemu exit $BOOT_QEMU_RC, capture PRESENT at $(stat -c%s "$WORK/l0_dead_x86.txt") B — a silence-only predicate would have passed"
     fi
-    # Negative control: corrupt the multiboot magic; qemu must refuse to
-    # load it. THE DISCRIMINATOR IS STDERR, NOT THE EXIT CODE — a good
-    # loader under a timeout kill also exits nonzero, so an exit-code
-    # assertion passes for every input (review round 1 C3). Both halves
-    # run here: the corrupt loader must draw the load-failure message and
-    # the good loader, same command, must not. Both exit fast on their own
-    # (-no-reboot; entry 0xdead0000 triple-faults the good one — V18).
-    # KNOWN RESIDUAL, stated exactly: a HANG on the good half still passes this
-    # check, because `timeout`'s own stderr does not match the pattern either
-    # (observed: it is "qemu-system-x86_64: terminating on signal 15 from pid N
-    # (timeout)", exit 124 after the full 10 s).
-    # The liveness count above only NARROWS that — it catches a hang BEFORE the
-    # sentinel (count 0), not one after it. A loader whose entry spins in a hlt
-    # loop prints exactly one sentinel, PASSES the liveness leg, and then passes
-    # this check too. Built and observed: entry = the loader's own hlt loop
-    # (0x1000b9) gives sentinel count 1 and a non-matching stderr, so the whole
-    # of L0 goes green on a loader that hangs after the sentinel.
-    # Nothing in L0 detects a post-sentinel hang; an earlier version of this
-    # comment wrongly claimed the count covered it. Tasks 2-3 close the gap for
-    # free: from there something after the call has to print for a leg to pass,
-    # which a hung image cannot do.
-    cp "$WORK/l0.elf" "$WORK/l0_bad.elf"
-    python3 - "$WORK/l0_bad.elf" <<'PY'
-import sys
-p = sys.argv[1]; d = bytearray(open(p, "rb").read())
-i = d.find(bytes.fromhex("02b0ad1b"))
-assert i >= 0, "magic not found — self-test and this control disagree"
-d[i] ^= 0xFF
-open(p, "wb").write(d)
-PY
-    timeout 10 qemu-system-x86_64 -display none -no-reboot -kernel "$WORK/l0_bad.elf" >/dev/null 2>"$WORK/l0_bad.err"
-    timeout 10 qemu-system-x86_64 -display none -no-reboot -kernel "$WORK/l0.elf"     >/dev/null 2>"$WORK/l0_good.err"
-    if grep -qE "PVH ELF Note|multiboot" "$WORK/l0_bad.err" && ! grep -qE "PVH ELF Note|multiboot" "$WORK/l0_good.err"; then
-        ok "L0_corrupt_magic_rejected" "load failure named on the corrupt loader only (observed: 'Error loading uncompressed kernel without PVH ELF Note')"
+    # arm64: same shape through -device loader,file=, which is how every arm64
+    # leg puts its image in memory.
+    if boot_run a64 "$WORK/l0_dead_a64.txt" SELFEXIT \
+           -device loader,file="$gone",addr=$A64_LOAD,force-raw=on; then
+        bad "L0_deadboot_a64" "boot_run called it a boot; qemu exit=$BOOT_QEMU_RC"
+    elif [ ! -f "$WORK/l0_dead_a64.txt" ]; then
+        bad "L0_deadboot_a64" "the capture file is ABSENT, so this control no longer exercises the defect it exists for"
     else
-        bad "L0_corrupt_magic_rejected" "bad_err='$(head -c 80 "$WORK/l0_bad.err")' good_err='$(head -c 80 "$WORK/l0_good.err")'"
+        ok "L0_deadboot_a64" "qemu exit $BOOT_QEMU_RC, capture PRESENT at $(stat -c%s "$WORK/l0_dead_a64.txt") B — a silence-only predicate would have passed"
     fi
-    # Negative control for the dependency policy: with every x86-capable
-    # assembler candidate hidden, the build must FAIL naming what it
-    # probed (never skip). The sandbox PATH carries only the tools
-    # build_loader.sh itself needs.
-    # `type -P`, not `command -v`: the latter answers with the bare NAME for a
-    # shell builtin (pwd) or a shell function (some shells define one for
-    # grep), which silently created a dangling self-symlink and left the
-    # sandbox missing a tool the test never meant to remove.
-    # `command -v -p` does NOT fix this — verified: with a grep function
-    # defined, `command -v -p grep` still answers "grep", while `type -P grep`
-    # answers /usr/bin/grep. bash-only, and this gate is bash-only already.
-    SB="$WORK/sandbox_path"; mkdir -p "$SB"
-    for t in bash dirname pwd mktemp head od tr grep rm; do
-        p=$(type -P "$t" 2>/dev/null) && [ -n "$p" ] && ln -sf "$p" "$SB/$t"
-    done
-    if PATH="$SB" bash "$BOOT/build_loader.sh" 0x400000 "$WORK/l0_noas.elf" >"$WORK/l0_noas.log" 2>&1; then
-        bad "L0_missing_as_fails" "build succeeded with no assembler on PATH"
-    elif grep -q "no x86-capable GNU assembler found" "$WORK/l0_noas.log"; then
-        ok "L0_missing_as_fails" "refused, naming every probed candidate"
+    # Non-vacuity. Bare machines, no image: the guest runs (whatever the reset
+    # vector holds) and qemu exits 0 when killed. boot_run must say "ran".
+    # Measured on both: exit 0, capture present, empty.
+    local lx=1 la=1
+    boot_run x86 "$WORK/l0_live_x86.txt" RUNOUT && lx=0
+    boot_run a64 "$WORK/l0_live_a64.txt" RUNOUT && la=0
+    if [ "$lx" = 0 ] && [ "$la" = 0 ]; then
+        ok "L0_liveboot_not_flagged" "both bare machines reported as boots — the detector is not 'always fail'"
     else
-        bad "L0_missing_as_fails" "failed, but not with the named-probe message: $(head -1 "$WORK/l0_noas.log")"
+        bad "L0_liveboot_not_flagged" "x86 ok=$lx a64 ok=$la (a boot that RAN was reported as dead; every positive leg below is now unreachable)"
     fi
 }
 
 # =============================================================================
-# L1 — x86_64 boots and prints the computed sentinel. Controls: (a) no image
-#      loaded => loader sentinel only; (b) entry replaced by OFFSET 0 — the
-#      pre-B1 default wrong answer (O1/O2) => no sentinel; (c) entry - 4 — the
-#      previous function's tail => no sentinel. NOT entry + 4: main's first
-#      instructions are stack bookkeeping and +4/+8/+12 all still print (V16,
-#      review round 1 C1).
+# L1 — x86_64 SELF-BOOT. `qemu-system-x86_64 -kernel <image>` and nothing else:
+#      no loader ELF, no `-device loader`, no assembler, no load address and no
+#      entry offset on the command line. The artifact carries all of it in the
+#      multiboot header the compiler emits (B2 Task 4). This leg IS the x86
+#      self-sufficiency leg — the plan's Step 4 asked for one, and MOVING L1
+#      onto the emitted form rather than adding a sixth leg beside it is the
+#      point: the old form's checks would otherwise have gone on passing until
+#      Task 6 deleted boot.S out from under them.
 #
-#      WHAT OFFSET 0 ACTUALLY IS — RE-OBSERVED AT TASK 6, NOT INHERITED. Under
-#      the Task-2 ELF form, offset 0 was the ELF HEADER (`7f 45 4c 46 …`)
-#      executed as instructions. `--emit=image` emits no header, so offset 0 is
-#      now REAL CODE and the control survives for a DIFFERENT REASON. Read off
-#      the artifact under test (capstone, x86 image, offset 0): it is
-#      `uart16550_outb` (std/uart_16550.kr:54), the UART provider's first
-#      helper — push/push/…,
-#      `mov rbx,rdi; mov r12,rsi`, `out dx,al` with whatever the loader left in
-#      rdi/rsi, then epilogue + `ret` back into the loader, which hlt-loops.
-#      One garbage byte may go to one garbage I/O port; the sentinel is ten
-#      formatted digits that only main computes, so it cannot appear. Observed
-#      silent in image form, not assumed to carry over.
+#      WHAT WAS RETIRED FROM B1's L1, AND WHY — each re-observed, none assumed:
+#
+#      * `L1_control_no_image` (loader alone, no image => loader sentinel only,
+#        program sentinel impossible). NOT CONSTRUCTIBLE: there is no loader to
+#        run alone. Its job — "the sentinel cannot come from whatever boots the
+#        program" — is done here by `L1_control_zeroed_payload`, which is
+#        strictly sharper: same stub, same command, payload zeroed, and Task 4
+#        observed the trampoline still reaching long mode (CS64, EFER=0x500)
+#        with no sentinel.
+#
+#      * `L1_control_offset0`. RETIRED BECAUSE IT INVERTS, and this was
+#        measured, not predicted. Under the emitted form file offset 0 is the
+#        MULTIBOOT HEADER. Its bytes decode as harmless 32-bit instructions
+#        (`02 b0 ad 1b …` = add dh,[eax+0x1bad] …) that neither fault nor
+#        branch, so control FALLS THROUGH into the trampoline at offset 32.
+#        Observed: entering at load+0 PRINTS `2000000016`. A silence control
+#        that prints is not a weak control, it is a red leg, and re-pointing it
+#        at some other offset would only be picking an address that happens to
+#        be quiet today.
+#
+#      * `L1_control_entry_minus4`. NOT CONSTRUCTIBLE, and it inverts for the
+#        same reason. `-kernel` enters at the header's `entry_addr`; there is
+#        no command-line entry to shift. Patching `entry_addr` to load+entry-4
+#        is the closest reconstruction and it lands at file offset 28 — inside
+#        the header — which likewise falls through into the trampoline and
+#        PRINTS (observed).
+#
+#      WHAT REPLACES entry-4 AS THE REPORT-ACCURACY CHECK. B1 needed those two
+#      controls because a flat image has no e_entry and the reported `entry`
+#      was therefore uncheckable against the artifact. THAT IS NO LONGER TRUE
+#      ON x86: the emitted multiboot header carries `entry_addr`, and QEMU
+#      jumps to it. So the report is cross-checked against the artifact
+#      directly (`L1_multiboot_header`), and two runtime legs make that
+#      cross-check load-bearing rather than a fact about two numbers:
+#        * `L1_control_entry_addr_honoured` moves `entry_addr` — ONE u32, no
+#          other byte changed — to the stub's own halt. The boot goes silent
+#          and parks THERE. If QEMU ignored the field this run would print, so
+#          silence here is what proves the field steers the boot. The parked
+#          register is EIP, not RIP: entering past the trampoline means long
+#          mode is never entered (observed EIP=004000b1, CS32, HLT=1), which
+#          is a second, independent witness that the jump really did skip it.
+#          qmp_pc.py was taught EIP for this leg; with RIP only it returned
+#          QMPFAIL, which is indistinguishable from a broken QMP path.
+#        * `L1_no_header_image_refused` builds the same source with no
+#          `--stack-top`, hence no header at all, and QEMU refuses it.
 #
 #      THE SENTINEL IS COMPUTED, not echoed: `2000000016` is `2000000007`
 #      (a static written in main) plus 9 (returned from a call), formatted at
 #      runtime. Verified on the artifacts: `strings -a` over sx.img, sa.img
 #      and the loader ELF finds ZERO occurrences of either digit string, so
 #      the wire cannot be carrying a copied literal.
+#
+#      D5, THE RETURN-TO-HALT: `L1_halt_parked`. After `main` returns, the
+#      trampoline's `call *%rax` falls into `hlt; jmp .`, so RIP must PARK on
+#      that address — read over QMP exactly as L3 reads the arm64 one.
+#      Continued silence cannot tell "halted correctly" from "faulted", which
+#      is why the address is asserted and not the quiet.
 # =============================================================================
 leg1() {
-    echo "--- L1: x86_64 boot + computed sentinel ---"
+    echo "--- L1: x86_64 self-boot (-kernel <image>, nothing else) ---"
     cp "$BOOT/sentinel_x86.kr" "$WORK/sentinel_x86.kr"
-    local entry
-    if ! entry=$(build_image x86 "$WORK/sentinel_x86.kr" "$WORK/sx.img"); then
-        bad "L1_compile" "sentinel_x86.kr did not compile"; return
+    local entry img="$WORK/sx.img"
+    if ! entry=$(build_image x86 "$WORK/sentinel_x86.kr" "$img" "$X86_STACK_TOP"); then
+        bad "L1_compile" "sentinel_x86.kr did not compile with --stack-top=$X86_STACK_TOP"; return
     fi
-    if ! x86_boot "$X86_LOAD" "$WORK/sx.img" "$entry" "$WORK/l1_ser.txt" "2000000016"; then
-        bad "L1_sentinel" "the boot did not run (loader build or qemu launch failed)"; return
-    fi
-    if grep -q "2000000016" "$WORK/l1_ser.txt" && grep -q "KR-LDR|" "$WORK/l1_ser.txt"; then
-        ok "L1_sentinel" "computed 2000000016 + loader liveness on COM1 (${BOOT_WAITED_TICKS} ticks)"
+    # ---- BLOCKING, AND BEFORE THE RUNTIME PAIRS ON PURPOSE -----------------
+    # B1 measured that appending a blocking assertion after a runtime pair
+    # turns it into a SKIP the moment the runtime half fails. These two depend
+    # on nothing a boot produces, so they run first and a red run still reports
+    # the leg's primary static claim.
+    # mb_u32 answers in DECIMAL and $X86_LOAD is written in hex, so every
+    # comparison below is against $(( X86_LOAD )) — a `=` between "4194304"
+    # and "0x400000" is false for two spellings of the same address, which is
+    # a false FAIL, and the mirror-image mistake would be a false pass.
+    local mb_magic mb_hdr mb_load mb_entry halt want_entry want_load
+    mb_magic=$(mb_u32 "$img" $MB_MAGIC_OFF)
+    mb_hdr=$(mb_u32 "$img" $MB_HEADER_ADDR_OFF)
+    mb_load=$(mb_u32 "$img" $MB_LOAD_ADDR_OFF)
+    mb_entry=$(mb_u32 "$img" $MB_ENTRY_ADDR_OFF)
+    want_load=$(( X86_LOAD ))
+    want_entry=$(( X86_LOAD + entry ))
+    if [ "$mb_magic" = "$MB_MAGIC" ] && [ "$mb_hdr" = "$want_load" ] \
+       && [ "$mb_load" = "$want_load" ] && [ "$mb_entry" = "$want_entry" ]; then
+        ok "L1_multiboot_header" "magic at offset 0, header_addr=load_addr=$want_load, entry_addr=$mb_entry == load + reported entry ($entry)"
     else
-        bad "L1_sentinel" "serial held: '$(cat "$WORK/l1_ser.txt")'"
+        bad "L1_multiboot_header" "magic=$mb_magic (want $MB_MAGIC) header_addr=$mb_hdr load_addr=$mb_load (want $want_load) entry_addr=$mb_entry (want $want_entry = $want_load + $entry)"
+    fi
+    # The halt is located, not written down, and its uniqueness is asserted —
+    # `L1_halt_parked` reads RIP == load + halt + 1 as "parked on the stub's
+    # halt", and a second f4-eb-fd would make that unsound without a symptom.
+    if ! halt=$(halt_offset_x86 "$img"); then
+        bad "L1_halt_parked" "cannot locate a unique 'hlt; jmp .' preceded by 'call *%rax': $halt"; return
+    fi
+    # Control for the header being what makes the image bootable AT ALL: the
+    # same source without --stack-top emits no stub and therefore no header,
+    # and qemu -kernel must refuse it. This is also a second, independent
+    # exercise of boot_run's dead-boot rule (L0) on a REAL artifact rather
+    # than a missing file.
+    if ! build_image x86 "$WORK/sentinel_x86.kr" "$WORK/sx_noflag.img" >/dev/null; then
+        bad "L1_no_header_image_refused" "the no-flag build failed — control never ran"
+    elif boot_run x86 "$WORK/l1_nohdr.txt" SELFEXIT -kernel "$WORK/sx_noflag.img"; then
+        bad "L1_no_header_image_refused" "qemu accepted a headerless image (exit=$BOOT_QEMU_RC): '$(head -c 120 "$WORK/l1_nohdr.txt.err")'"
+    else
+        ok "L1_no_header_image_refused" "no --stack-top => no multiboot header => qemu exit $BOOT_QEMU_RC: '$(head -c 60 "$WORK/l1_nohdr.txt.err")'"
+    fi
+    # ---- the subject, and D5 --------------------------------------------
+    local want_pc
+    want_pc=$(printf %x $(( X86_LOAD + halt + 1 )))
+    if ! x86_boot_qmp "$img" "$WORK/l1_ser.txt" "2000000016"; then
+        bad "L1_self_boot_sentinel" "the boot did not run (qemu exit=$BOOT_QEMU_RC): '$(head -c 120 "$WORK/l1_ser.txt.err")'"
+        bad "L1_halt_parked" "no boot to read a PC from"; return
+    fi
+    if grep -q "2000000016" "$WORK/l1_ser.txt"; then
+        ok "L1_self_boot_sentinel" "computed 2000000016 on COM1 from '-kernel $(basename "$img")' alone — no loader file (${BOOT_WAITED_TICKS} ticks)"
+    else
+        bad "L1_self_boot_sentinel" "serial held: '$(tr '\n' ' ' <"$WORK/l1_ser.txt")'"
+    fi
+    if [ "$PARKED_PC" = "$want_pc" ]; then
+        ok "L1_halt_parked" "RIP parked at 0x$want_pc == load + $halt + 1, the stub's own 'hlt; jmp .' — so main RETURNED into it (D5)"
+    else
+        bad "L1_halt_parked" "pc=$PARKED_PC want=$want_pc"
     fi
     # Every control below asserts ABSENCE, so its window must be long enough
     # that a working boot would certainly have printed by now. Derived from the
     # positive boot just observed rather than guessed — see calibrate_silence.
     calibrate_silence
-    # Control (a): same loader, NO image. The loader must still prove itself
-    # alive and the program sentinel must be impossible.
-    if ! "$BOOT/build_loader.sh" $(printf 0x%x $(( X86_LOAD + entry ))) "$WORK/ldr.elf" >/dev/null 2>&1; then
-        bad "L1_control_no_image" "loader build failed — control never ran"
-    elif ! boot_run x86 "$WORK/l1_noimg.txt" RUNOUT -kernel "$WORK/ldr.elf"; then
-        bad "L1_control_no_image" "the boot did not run (no capture file)"
-    elif grep -q "KR-LDR|" "$WORK/l1_noimg.txt" && ! grep -q "2000000016" "$WORK/l1_noimg.txt"; then
-        ok "L1_control_no_image" "loader alive, program sentinel absent"
+    # Control: entry_addr is what QEMU jumps to. ONE u32 changed, pointed at
+    # the halt this leg just proved the address of. Silence proves the field
+    # steered the boot (entering anywhere in the header or the trampoline
+    # PRINTS — measured), and the parked RIP is positive evidence of where it
+    # went rather than an inference from the quiet.
+    if ! img_patch "$img" "$WORK/sx_ea.img" "u32:$MB_ENTRY_ADDR_OFF:$(( X86_LOAD + halt ))"; then
+        bad "L1_control_entry_addr_honoured" "could not patch entry_addr — control never ran"
+    elif ! x86_boot_qmp "$WORK/sx_ea.img" "$WORK/l1_ea.txt" RUNOUT; then
+        bad "L1_control_entry_addr_honoured" "the boot did not run (qemu exit=$BOOT_QEMU_RC) — silence proves nothing"
+    elif grep -q "2000000016" "$WORK/l1_ea.txt"; then
+        bad "L1_control_entry_addr_honoured" "sentinel printed with entry_addr pointing at the halt — qemu is NOT using the field, so L1_multiboot_header is not load-bearing"
+    elif [ "$PARKED_PC" != "$want_pc" ]; then
+        bad "L1_control_entry_addr_honoured" "silent, but pc=$PARKED_PC is not the halt at 0x$want_pc — where it actually went is unaccounted for"
     else
-        bad "L1_control_no_image" "serial held: '$(cat "$WORK/l1_noimg.txt")'"
+        ok "L1_control_entry_addr_honoured" "entry_addr -> the halt: no sentinel, parked at 0x$PARKED_PC (32-bit mode — the trampoline was skipped, so the field steers the boot)"
     fi
-    # Controls (b)/(c): offset 0 and entry-4 must not print — both re-observed
-    # silent in IMAGE form (see the header note; offset 0 is now uart16550_outb,
-    # not the ELF header it was through Task 5). They prove the entry value is
-    # load-bearing at function granularity; instruction-level +4 is NOT
-    # observable (V16), which is why it is not used as a control.
-    #
-    # SINCE TASK 6 THESE ARE ALSO THE REPORT-ACCURACY CONTROLS. `entry` no
-    # longer comes from a header the loader could be trusted to agree with — it
-    # is parsed from the compiler's own `image:` line, and a flat image has no
-    # e_entry to check it against. So the leg's subject (boot at the REPORTED
-    # entry, must print) and these two (boot at values either side of it, must
-    # not) are jointly what makes the report load-bearing.
-    #
-    # HOW SHARP THAT ACTUALLY IS — MEASURED AT TASK 6, and SHARPER than the
-    # plan assumed. The plan (D1) recorded "instruction-level drift entry+4/8/12
-    # is not observable", reasoning from V16: main's first instructions are
-    # stack bookkeeping, so BRANCHING to entry+4 still prints. V16 is right, and
-    # this leg's subject alone really is blind to a +4 report. THE entry-4
-    # CONTROL IS NOT. With the report N bytes too high the control boots at
-    # real_entry + (N - 4), which is inside main and prints — so it goes RED.
-    # Five report drifts were built into the compiler and run: -4 and 0 kill the
-    # SUBJECT (silence); +4, +8 and +16 light THIS CONTROL; +16 kills both.
-    # Every drift constructed reddened at least one check. That is five points,
-    # not a proof of coverage — a drift landing on some other silent address
-    # remains possible and is not claimed to be caught.
-    #
-    # THE BOOT'S EXIT STATUS IS CHECKED FIRST, AND THAT IS THE WHOLE POINT.
-    # These three legs read silence as evidence, so a boot that never happened
-    # would hand them a free PASS: with the return value ignored (as it was
-    # until review 3), deleting the capture file or breaking the loader build
-    # passed all six absence controls with no qemu ever started. Silence only
-    # means something once the run it came from is known to have occurred.
-    if ! x86_boot "$X86_LOAD" "$WORK/sx.img" 0 "$WORK/l1_off0.txt" RUNOUT; then
-        bad "L1_control_offset0" "the boot did not run — silence proves nothing"
-    elif grep -q "2000000016" "$WORK/l1_off0.txt"; then
-        bad "L1_control_offset0" "sentinel printed from offset 0"
-    elif ! grep -q "KR-LDR|" "$WORK/l1_off0.txt"; then
-        bad "L1_control_offset0" "loader liveness sentinel absent — capture present but nothing shows the boot executed: '$(cat "$WORK/l1_off0.txt")'"
+    # Control: main must RETURN for the halt to be reached. Two bytes of the
+    # artifact — the `call *%rax` that `halt_offset_x86` located and asserted —
+    # become `jmp .`, so the machine parks THREE BYTES EARLIER, at a known,
+    # stationary address that is not the halt. This is what makes the PC in
+    # L1_halt_parked discriminating: drop that assertion and "boots, prints,
+    # then goes quiet" would pass for a machine parked anywhere.
+    local no_ret_pc
+    no_ret_pc=$(printf %x $(( X86_LOAD + halt - 2 )))
+    if ! img_patch "$img" "$WORK/sx_nr.img" "hex:$(( halt - 2 )):ebfe"; then
+        bad "L1_control_no_return" "could not patch the call site — control never ran"
+    elif ! x86_boot_qmp "$WORK/sx_nr.img" "$WORK/l1_nr.txt" RUNOUT; then
+        bad "L1_control_no_return" "the boot did not run (qemu exit=$BOOT_QEMU_RC) — silence proves nothing"
+    elif grep -q "2000000016" "$WORK/l1_nr.txt"; then
+        bad "L1_control_no_return" "sentinel printed with the call to main replaced by 'jmp .'"
+    elif [ "$PARKED_PC" != "$no_ret_pc" ]; then
+        bad "L1_control_no_return" "pc=$PARKED_PC, want 0x$no_ret_pc (the patched call site)"
     else
-        ok "L1_control_offset0" "offset 0 => no program sentinel, loader liveness present (boot ran, capture present)"
+        ok "L1_control_no_return" "call *%rax -> jmp .: no sentinel and RIP parks at 0x$no_ret_pc, 3 bytes short of the halt — the halt address discriminates"
     fi
-    if ! x86_boot "$X86_LOAD" "$WORK/sx.img" $(( entry - 4 )) "$WORK/l1_offm.txt" RUNOUT; then
-        bad "L1_control_entry_minus4" "the boot did not run — silence proves nothing"
-    elif grep -q "2000000016" "$WORK/l1_offm.txt"; then
-        bad "L1_control_entry_minus4" "sentinel printed from the previous function's tail"
-    elif ! grep -q "KR-LDR|" "$WORK/l1_offm.txt"; then
-        bad "L1_control_entry_minus4" "loader liveness sentinel absent — capture present but nothing shows the boot executed: '$(cat "$WORK/l1_offm.txt")'"
+    # Control: the sentinel comes from KernRift's compiled code, not the stub.
+    # Payload zeroed from the end of the stub, stub kept byte-for-byte. Task 4
+    # observed the trampoline still reaching long mode here (CS64, EFER=0x500)
+    # with nothing on the wire; this leg keeps the serial half, which is the
+    # part that is stationary enough to assert (the guest executes zeros and
+    # its PC keeps moving, so a parked-PC assertion would be flaky by design).
+    local stub_end=$(( halt + 3 ))
+    if ! img_patch "$img" "$WORK/sx_zero.img" "zero:$stub_end"; then
+        bad "L1_control_zeroed_payload" "could not zero the payload — control never ran"
+    elif ! boot_run x86 "$WORK/l1_zero.txt" RUNOUT -kernel "$WORK/sx_zero.img"; then
+        bad "L1_control_zeroed_payload" "the boot did not run (qemu exit=$BOOT_QEMU_RC) — silence proves nothing"
+    elif grep -q "2000000016" "$WORK/l1_zero.txt"; then
+        bad "L1_control_zeroed_payload" "sentinel printed from an image whose payload is all zeroes"
     else
-        ok "L1_control_entry_minus4" "entry-4 => no program sentinel, loader liveness present (boot ran, capture present)"
+        ok "L1_control_zeroed_payload" "stub kept, everything from offset $stub_end zeroed => no sentinel (boot ran, qemu exit $BOOT_QEMU_RC)"
     fi
 }
 
 # =============================================================================
-# L2 — arm64 boots and prints the computed sentinel. Same three controls
-#      (no-image; offset 0; entry - 4 — never entry + 4, see V16).
+# L2 — arm64 SELF-BOOT. The compiler's own emitted stub (B2 Task 3) sets SP,
+#      `bl`s the entry and halts, so the only FILE on the command line is the
+#      artifact under test. `make_stub.py` is NOT invoked by this leg — the
+#      second `-device loader` carries an ADDRESS ONLY and merely parks the
+#      reset PC on the emitted stub, which is the arm64 equivalent of QEMU
+#      reading `entry_addr` out of x86's multiboot header.
 #
+#      This is the arm64 self-sufficiency leg, and like L1 it REPLACES the
+#      external-stub form rather than sitting beside it. B1's L2 booted the
+#      same image with a 4-instruction stub loaded at $A64_STUB; that stub is
+#      exactly what Task 3 moved into the compiler.
+#
+#      RETIRED FROM B1's L2: `L2_control_no_image` (stub file, no image =>
+#      silence). Not constructible without an external stub, and its job is
+#      done strictly better by `L2_control_no_stub`: the SAME source built
+#      WITHOUT --stack-top, so no stub is emitted, entered at its own reported
+#      entry. That is one variable — is there a stub — instead of two, and it
+#      is Task 3's own control A.
+#
+#      SILENCE IS NEVER THE WHOLE OF A CONTROL HERE. arm64 has no pre-payload
+#      liveness sentinel of any kind, so both quiet controls read the PC over
+#      QMP as well: they park at 0x200, the exception vector, which is POSITIVE
+#      evidence that the guest executed and faulted on the garbage SP rather
+#      than never having started. Combined with boot_run's exit-status rule
+#      (L0), "quiet" now has two independent witnesses behind it.
+#
+#      REPORT ACCURACY IS STILL THESE CONTROLS' JOB ON THIS ARCH, unlike x86.
+#      An arm64 image has no header and no e_entry, so `entry` is a number the
+#      compiler printed with nothing on the artifact to check it against. The
+#      subject (enter at the reported entry, must print) plus offset 0 and
+#      entry-4 either side of it (must not) are jointly what makes the report
+#      load-bearing. Both re-observed under the EMITTED stub, not inherited:
+#      with the stub the reported entry is 956 where the entry function is at
+#      620, so entry-4 is now the last word of the PRECEDING function rather
+#      than the entry function's own tail — measured silent, PC 0x200.
+#
+#      OFFSET 0 IS ASSERTED NOT TO BE THE ENTRY, AND THAT ASSERTION IS THE
+#      POINT OF `L2_entry_is_not_offset0`. The control assumes offset 0 is not
+#      where the program starts, and that assumption holds for a reason that
+#      can change without warning: the entry is usually the FIRST live
+#      top-level function, so a source reorder — or a decision to PREPEND the
+#      stub the way x86 must — would silently invert the control into a
+#      duplicate of the subject. x86's twin already inverted for exactly this
+#      class of reason (see L1's header), so it is checked rather than trusted.
 #      Position independence is what makes the 0x40400000 load address legal:
 #      every static access in the arm64 output is `adrp x16, …` + a fixed
-#      displacement and every call is a PC-relative `bl` (checked in the
-#      disassembly: 18 adrp, zero absolute addresses). Since Task 6 the image
-#      is also COMPILED with --load-addr=0x40400000, but that address is only
-#      validated and echoed — Task 5's image_load_addr_not_embedded_arm64
-#      proves two different aligned addresses yield one byte-identical
-#      artifact, so position independence is still what is doing the work.
-#      The x86 image is loaded at the address it was built for, so the
-#      question does not arise there.
-#
-#      OFFSET 0 IN IMAGE FORM, re-observed here too: `pl011_reg_write`
+#      displacement and every call is PC-relative (18 adrp, zero absolute
+#      addresses in the disassembly). Offset 0 is `pl011_reg_write`
 #      (std/uart_pl011.kr's first helper) — `sub sp,…`, an `adrp` load of the
 #      PL011 base, `str w20,[x19]` through a garbage x0/x1 pair, then `ret` to
-#      x30, which the reset stub never set (it branches with `b`, not `bl`).
-#      No formatted digits can come out of it.
+#      an x30 the reset never set. No formatted digits can come out of it.
+#
+#      D5, THE RETURN-TO-HALT: `L2_halt_parked`. The stub's fifth word is
+#      `b .`, so after `main` returns the PC must PARK on it. The address is
+#      not written down — it is the UNIQUE 0x14000000 in the image, found by
+#      the same `loop_offset_a64` L3 uses, and cross-checked against
+#      `entry + 16` so that a stub whose halt moved cannot pass by accident.
 # =============================================================================
 leg2() {
-    echo "--- L2: arm64 boot + computed sentinel ---"
+    echo "--- L2: arm64 self-boot (no stub file) + computed sentinel ---"
     cp "$BOOT/sentinel_a64.kr" "$WORK/sentinel_a64.kr"
-    local entry
-    if ! entry=$(build_image a64 "$WORK/sentinel_a64.kr" "$WORK/sa.img"); then
-        bad "L2_compile" "sentinel_a64.kr did not compile"; return
+    local entry img="$WORK/sa.img"
+    if ! entry=$(build_image a64 "$WORK/sentinel_a64.kr" "$img" "$A64_STACK_TOP"); then
+        bad "L2_compile" "sentinel_a64.kr did not compile with --stack-top=$A64_STACK_TOP"; return
     fi
-    if ! a64_boot "$A64_LOAD" "$WORK/sa.img" "$entry" "$WORK/l2_ser.txt" "1000000016"; then
-        bad "L2_sentinel" "the boot did not run (stub generation or qemu launch failed)"; return
+    # ---- BLOCKING, BEFORE THE RUNTIME PAIRS (see L1's note on ordering) ----
+    if [ "$entry" != 0 ]; then
+        ok "L2_entry_is_not_offset0" "reported entry $entry != 0, so the offset-0 control is testing a DIFFERENT address from the subject"
+    else
+        bad "L2_entry_is_not_offset0" "the reported entry IS file offset 0 — L2_control_offset0 would silently become a duplicate of the subject and stop discriminating"
+    fi
+    local halt want_pc
+    if ! halt=$(loop_offset_a64 "$img"); then
+        bad "L2_halt_parked" "self-branch count: $halt"; return
+    fi
+    if [ "$halt" != $(( entry + 16 )) ]; then
+        bad "L2_halt_parked" "the unique 'b .' is at $halt, but the stub's halt must be at entry + 16 = $(( entry + 16 ))"; return
+    fi
+    want_pc=$(printf %x $(( A64_LOAD + halt )))
+    # ---- the subject, and D5 ----------------------------------------------
+    if ! a64_self_boot_qmp "$A64_LOAD" "$img" "$entry" "$WORK/l2_ser.txt" "1000000016"; then
+        bad "L2_self_boot_sentinel" "the boot did not run (qemu exit=$BOOT_QEMU_RC): '$(head -c 120 "$WORK/l2_ser.txt.err")'"
+        bad "L2_halt_parked" "no boot to read a PC from"; return
     fi
     if grep -q "1000000016" "$WORK/l2_ser.txt"; then
-        ok "L2_sentinel" "computed 1000000016 on the PL011 (${BOOT_WAITED_TICKS} ticks)"
+        ok "L2_self_boot_sentinel" "computed 1000000016 on the PL011 with NO stub file loaded (${BOOT_WAITED_TICKS} ticks)"
     else
-        bad "L2_sentinel" "serial held: '$(cat "$WORK/l2_ser.txt")'"
+        bad "L2_self_boot_sentinel" "serial held: '$(tr '\n' ' ' <"$WORK/l2_ser.txt")'"
+    fi
+    if [ "$PARKED_PC" = "$want_pc" ]; then
+        ok "L2_halt_parked" "PC parked at 0x$want_pc == load + entry + 16, the stub's own 'b .' — so main RETURNED into it (D5)"
+    else
+        bad "L2_halt_parked" "pc=$PARKED_PC want=$want_pc"
     fi
     # Absence windows derived from the arm64 positive boot just observed —
     # separately from L1's, because the two arches do not run at the same speed.
     calibrate_silence
-    # Control (a): stub with NO image => silence (arm64 has no loader
-    # sentinel; the stub is 4 instructions). This control exists to pin the
-    # observation that silence CANNOT be a pass condition on this arch —
-    # legs assert presence, never absence alone (review 2, O5). Which is
-    # precisely why the boot's own status is checked before its silence is
-    # read: see the note in leg1.
-    if ! python3 "$BOOT/make_stub.py" $(( A64_LOAD + entry )) "$A64_STUB" "$A64_SP" "$WORK/stub.bin"; then
-        bad "L2_control_no_image" "stub generation failed — control never ran"
-    elif ! boot_run a64 "$WORK/l2_noimg.txt" RUNOUT -device loader,file="$WORK/stub.bin",addr=$A64_STUB,cpu-num=0; then
-        bad "L2_control_no_image" "the boot did not run — silence proves nothing"
-    elif grep -q "1000000016" "$WORK/l2_noimg.txt"; then
-        bad "L2_control_no_image" "sentinel printed with no image loaded"
+    # Control: no stub. Same source, no --stack-top, entered at ITS OWN
+    # reported entry — one variable. Silence AND a parked PC that is not the
+    # halt: 0x200 is the exception vector, i.e. the guest ran and faulted on
+    # the SP the stub would have set. This is also what makes L2_halt_parked's
+    # address assertion discriminating; drop it and "quiet after the sentinel"
+    # passes for any fault.
+    local e0
+    if ! e0=$(build_image a64 "$WORK/sentinel_a64.kr" "$WORK/sa_noflag.img"); then
+        bad "L2_control_no_stub" "the no-flag build failed — control never ran"
+    elif ! a64_self_boot_qmp "$A64_LOAD" "$WORK/sa_noflag.img" "$e0" "$WORK/l2_nostub.txt" RUNOUT; then
+        bad "L2_control_no_stub" "the boot did not run (qemu exit=$BOOT_QEMU_RC) — silence proves nothing"
+    elif grep -q "1000000016" "$WORK/l2_nostub.txt"; then
+        bad "L2_control_no_stub" "sentinel printed from an image with no emitted stub"
     else
-        ok "L2_control_no_image" "no image => no sentinel (boot ran, capture present)"
+        # SHAPE-CHECK BEFORE THE `!=`. QMPFAIL and MOVING:* both satisfy it
+        # vacuously, so without this the control goes green precisely when the
+        # discriminator is broken (review round 1, I5).
+        case "$PARKED_PC" in
+            "" | *[!0-9a-f]*)
+                bad "L2_control_no_stub" "no parked PC (PARKED_PC='$PARKED_PC') — the discriminator never ran" ;;
+            "$want_pc")
+                bad "L2_control_no_stub" "parked at the halt 0x$want_pc with no stub emitted" ;;
+            *)
+                ok "L2_control_no_stub" "no --stack-top => entry $e0 is the FUNCTION: no sentinel, parked at 0x$PARKED_PC (not the halt 0x$want_pc)" ;;
+        esac
     fi
-    # Controls (b)/(c): offset 0 (pl011_reg_write with garbage args, `ret`ing
-    # to an x30 the stub never set) and entry-4 (the previous function's `ret`)
-    # — both re-observed silent in IMAGE form, empty PL011 capture in each case.
-    # SINCE TASK 6 THESE ARE ALSO THE REPORT-ACCURACY CONTROLS: `entry` is
-    # parsed from the compiler's `image:` line and a flat image has no e_entry,
-    # so a report that drifts from the artifact turns the subject silent or
-    # lights one of these up. See leg 1's note on the same controls for the
-    # measured sharpness — briefly: a -4 or 0 report kills the subject, and a
-    # +4/+8/+16 report reds the entry-4 control, which is finer than D1's
-    # "instruction-level drift is not observable" allowed for. Both arches were
-    # injected and both behaved identically.
-    if ! a64_boot "$A64_LOAD" "$WORK/sa.img" 0 "$WORK/l2_off0.txt" RUNOUT; then
-        bad "L2_control_offset0" "the boot did not run — silence proves nothing"
+    # Controls: offset 0 and entry-4 must not print. Both re-observed under the
+    # EMITTED stub (PC 0x200 in each case), not carried over from B1. They are
+    # what makes the reported `entry` load-bearing on an arch whose artifact
+    # has no header to check it against.
+    if ! a64_self_boot "$A64_LOAD" "$img" 0 "$WORK/l2_off0.txt" RUNOUT; then
+        bad "L2_control_offset0" "the boot did not run (qemu exit=$BOOT_QEMU_RC) — silence proves nothing"
     elif grep -q "1000000016" "$WORK/l2_off0.txt"; then
         bad "L2_control_offset0" "sentinel printed from offset 0"
     else
-        ok "L2_control_offset0" "offset 0 => no sentinel (boot ran, capture present)"
+        ok "L2_control_offset0" "offset 0 => no sentinel (boot ran, qemu exit $BOOT_QEMU_RC)"
     fi
-    if ! a64_boot "$A64_LOAD" "$WORK/sa.img" $(( entry - 4 )) "$WORK/l2_offm.txt" RUNOUT; then
-        bad "L2_control_entry_minus4" "the boot did not run — silence proves nothing"
+    if ! a64_self_boot "$A64_LOAD" "$img" $(( entry - 4 )) "$WORK/l2_offm.txt" RUNOUT; then
+        bad "L2_control_entry_minus4" "the boot did not run (qemu exit=$BOOT_QEMU_RC) — silence proves nothing"
     elif grep -q "1000000016" "$WORK/l2_offm.txt"; then
-        bad "L2_control_entry_minus4" "sentinel printed from the previous function's tail"
+        bad "L2_control_entry_minus4" "sentinel printed from the word before the stub"
     else
-        ok "L2_control_entry_minus4" "entry-4 => no sentinel (boot ran, capture present)"
+        ok "L2_control_entry_minus4" "entry-4 (the preceding function's tail, not the entry function's) => no sentinel (boot ran, qemu exit $BOOT_QEMU_RC)"
     fi
 }
 
@@ -719,6 +1032,22 @@ leg2() {
 #      argued: the capture is read AFTER the parked-PC sampling and the kill,
 #      so the absence window covers the settle too; and a machine proven
 #      stationary in a one-instruction self-branch cannot subsequently print.
+#
+#      THIS IS THE ONE LEG B2 TASK 5 LEFT ON THE EXTERNAL make_stub.py STUB,
+#      and the reason is `loop_offset_a64` itself. All three heap programs
+#      contain a `loop { }`, which IS the word this helper counts; the emitted
+#      arm64 stub ends in `b .`, the SAME word. Building these with
+#      --stack-top therefore gives two self-branches and the helper returns
+#      AMBIG:2 (confirmed live at Task 3: offsets [668, 1732] for heap_a64.kr).
+#      It fails safe — the leg goes RED, never falsely green — but a leg that
+#      cannot run is not a check, so L3 keeps the no-stack-top build and the
+#      external stub. Weakening the uniqueness assertion to "exactly one
+#      besides the stub's" would make the PC inference this leg is built on
+#      ("the machine is in heap_bump_halt's loop") depend on knowing which of
+#      two self-branches it parked in, which is precisely what uniqueness buys.
+#      make_stub.py is therefore NOT dead code after Task 6 removes boot.S; L3
+#      is its sole remaining user, and the arm64 self-boot is gated by L2, L4
+#      and their controls instead.
 # =============================================================================
 leg3() {
     echo "--- L3: heap exhaustion, discriminated ---"
@@ -863,18 +1192,23 @@ leg4() {
     else
         bad "L4_x86_same_offset_accepted" "x86_64 refused (or wrote nothing) at an address it can run at: '$(head -c 120 "$WORK/l4_x.log")'"
     fi
+    # The runtime pair runs on the EMITTED stub since B2 Task 5 — same image,
+    # same self-boot invocation as L2, only the load address differs. That is
+    # what keeps the pair's "one number different" claim honest: with an
+    # external stub the two runs also differed in a stub built for a different
+    # branch target. Re-observed on this form: 0x40400000 prints, +0x100 silent.
     local entry
-    if ! entry=$(build_image a64 "$WORK/sentinel_a64.kr" "$WORK/s4.img"); then
+    if ! entry=$(build_image a64 "$WORK/sentinel_a64.kr" "$WORK/s4.img" "$A64_STACK_TOP"); then
         bad "L4_aligned_prints_misaligned_silent" "sentinel_a64.kr did not compile"; return
     fi
-    if ! a64_boot "$A64_LOAD" "$WORK/s4.img" "$entry" "$WORK/l4_ok.txt" "1000000016"; then
-        bad "L4_aligned_prints_misaligned_silent" "the ALIGNED boot did not run"; return
+    if ! a64_self_boot "$A64_LOAD" "$WORK/s4.img" "$entry" "$WORK/l4_ok.txt" "1000000016"; then
+        bad "L4_aligned_prints_misaligned_silent" "the ALIGNED boot did not run (qemu exit=$BOOT_QEMU_RC)"; return
     fi
     # The misaligned half asserts absence, so its window is derived from the
     # aligned half just observed — same rule as every other silence here.
     calibrate_silence
-    if ! a64_boot $(( A64_LOAD + 0x100 )) "$WORK/s4.img" "$entry" "$WORK/l4_mis.txt" RUNOUT; then
-        bad "L4_aligned_prints_misaligned_silent" "the MISALIGNED boot did not run — silence proves nothing"; return
+    if ! a64_self_boot $(( A64_LOAD + 0x100 )) "$WORK/s4.img" "$entry" "$WORK/l4_mis.txt" RUNOUT; then
+        bad "L4_aligned_prints_misaligned_silent" "the MISALIGNED boot did not run (qemu exit=$BOOT_QEMU_RC) — silence proves nothing"; return
     fi
     if grep -q "1000000016" "$WORK/l4_ok.txt" && ! grep -q "1000000016" "$WORK/l4_mis.txt"; then
         ok "L4_aligned_prints_misaligned_silent" "same bytes, same invocation: 0x$(printf %x $A64_LOAD) prints, +0x100 is silent"
@@ -883,9 +1217,21 @@ leg4() {
     fi
 }
 
-run_leg leg0 L0_loader_builds L0_loader_liveness_sentinel L0_corrupt_magic_rejected L0_missing_as_fails
-run_leg leg1 L1_sentinel L1_control_no_image L1_control_offset0 L1_control_entry_minus4
-run_leg leg2 L2_sentinel L2_control_no_image L2_control_offset0 L2_control_entry_minus4
+# THE ROSTERS ARE THE SKIP ACCOUNTING, so every check added by B2 Task 5 is
+# listed here. A check that is not on its leg's roster does not become a SKIP
+# when an earlier failure returns past it — it simply vanishes from the tally,
+# which is the under-reporting this mechanism exists to prevent.
+#
+# THE COUNT CHANGED AT TASK 5 AND THAT IS EXPECTED. B1's 19/0/0 is not a
+# baseline any more: L0's four loader checks are retired, L1 lost three
+# loader-shaped controls and gained five, L2 lost one and gained three. What
+# must hold is 0 FAIL and 0 SKIP.
+run_leg leg0 L0_deadboot_x86 L0_deadboot_a64 L0_liveboot_not_flagged
+run_leg leg1 L1_multiboot_header L1_no_header_image_refused L1_self_boot_sentinel \
+             L1_halt_parked L1_control_entry_addr_honoured L1_control_no_return \
+             L1_control_zeroed_payload
+run_leg leg2 L2_entry_is_not_offset0 L2_self_boot_sentinel L2_halt_parked \
+             L2_control_no_stub L2_control_offset0 L2_control_entry_minus4
 run_leg leg3 L3_unique_halt_loop L3_exhaustion_halt L3_control_uninit L3_control_crash
 run_leg leg4 L4_unaligned_refused_at_compile L4_x86_same_offset_accepted L4_aligned_prints_misaligned_silent
 
