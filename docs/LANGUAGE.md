@@ -1497,10 +1497,13 @@ krc prog.kr --arch=arm64 --target=none --emit=image --load-addr=0x40400000 -o pr
 ```
 
 Emits a raw flat binary: there is no container, and nothing is truncated
-(`memsz == filesz`). Byte 0 is the first code byte — unless `--image-header`
-(below) prefixes the 64-byte arm64 `Image` header, which is the only thing
-that ever precedes code in this format. The build prints a report line the
-boot tooling parses:
+(`memsz == filesz`). Byte 0 is the first code byte unless a boot header is
+prefixed, and this format has exactly two, one per arch: on arm64
+`--image-header` (below) prefixes the 64-byte `Image` header, and on x86_64
+`--stack-top=` (below) prefixes a multiboot header. They occupy the same
+slot and are mutually exclusive by arch — `--image-header` is refused on
+x86_64 — so at most one thing ever precedes code. The build prints a report
+line the boot tooling parses:
 
 ```
 image: arch=arm64 entry=620 filesz=1048 memsz=1048 load=1077936128
@@ -1656,7 +1659,12 @@ start it. Everything below is a limit of *that evidence*.
 * **No real boot chain has run any of this.** No U-Boot `booti`, no EFI stub,
   no Android `boot.img` tooling was available. Nor has anything run on
   hardware: QEMU 8.2.2 on one developer machine is the whole of the boot
-  evidence, and none of it has ever run in CI.
+  evidence.
+* **The header's own boot legs have not run in CI yet.** The boot gate as a
+  whole *is* CI-wired — it is a counted test inside `tests/run_tests.sh`, and
+  it ran green in CI at this work's branch point on both Linux runners. The
+  two legs that exercise the header (L5 and L6) are newer than that run, so
+  they have only ever run locally; they join CI on the first push.
 * **The load-base result is QEMU's behaviour, not the specification's.** L6
   shows the image landing at an address nothing on the command line named,
   and moving when `text_offset` moves. That is QEMU's `load_aarch64_image`

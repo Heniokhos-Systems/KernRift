@@ -8596,14 +8596,29 @@ fi
 rm -f /tmp/krc_stk_a64_$$
 
 # --- --image-header flag surface (sub-project C, Task 1) ---
-# Task 1 parses and validates only -- no header is ever emitted here. Rows
-# 1-3 are three-clause refusals via img_refuses(), same as the --stack-top=
-# rows just above. Row 4 is the one ACCEPTED case (--emit=image, --arch=arm64,
-# --stack-top= all present) and it is where byte-neutrality is actually
-# proven -- not merely asserted in this comment (an earlier draft of this
-# comment claimed the proof lived in a "byte-neutrality section further
-# down" that was never written; row 4 below is that proof, in this section,
-# not a forward reference to one that doesn't exist).
+# Rows 1-3 are three-clause refusals via img_refuses(), same as the
+# --stack-top= rows just above; a refused build produces no artifact, so no
+# header is emitted on those three lines. Row 4 is the one ACCEPTED case
+# (--emit=image, --arch=arm64, --stack-top= all present), and since Task 2 it
+# DOES emit a real 64-byte header -- this section stopped being emission-free
+# then, whatever its heading still says about Task 1.
+#
+# WHAT ROW 4 PROVES IS PURE-PREFIX, NOT BYTE-NEUTRALITY. Two different claims:
+#   * pure-prefix  -- the FLAGGED artifact is the UNFLAGGED one with exactly 64
+#     bytes in front of it. That is row 4, in three clauses, below.
+#   * byte-neutrality -- the UNFLAGGED artifact is bit-identical to what this
+#     compiler produced BEFORE the flag existed. NO ROW IN THIS TREE PROVES
+#     THAT. It was measured once, off-tree, against a compiler built from the
+#     branch point across 8 configurations; a measurement in a report is not a
+#     check in a suite.
+# What row 4 does bound is the regression that matters most here: if the header
+# were ever emitted WITHOUT the flag, both builds would grow by 64 and clause 2
+# (flagged == unflagged + 64) would go red. That is a default-on guard, not a
+# byte-neutrality proof.
+#
+# (Two earlier drafts of this comment were wrong in opposite directions: the
+# first pointed at a "byte-neutrality section further down" that was never
+# written, and its correction claimed row 4 was that proof. Neither held.)
 echo ""
 echo "--- --image-header flag surface (C, Task 1) ---"
 
@@ -8790,7 +8805,76 @@ hd_bound help_docs_stacktop_above_ceiling 0x40000000 0x40000010 R "one step past
 hd_bound help_docs_stacktop_pt_low        0x1000     0x1000     A "0x1000 is the highest stack top whose first push clears the page tables (it lands at 0xFF8)"
 hd_bound help_docs_stacktop_pt_high       0x4008     0x4008     A "0x4008 is the lowest stack top whose first push clears the page tables (it lands at 0x4000)"
 hd_bound help_docs_stacktop_pt_inside     0x4008     0x4007     R "one below the stated low bound pushes into the page directory's last entry"
-rm -f "$HD_HELP" "$HD_SEC" "$HD_LINE" "$HD_SRC"
+
+# 4. THE --image-header HONESTY TEXT IS A DELIVERABLE, SO IT IS GUARDED
+#    (sub-project C, final review, I7).
+#
+#    PROVED NECESSARY BY CONSTRUCTION. Before these two rows existed, both of
+#    the following mutations left `make test` FULLY GREEN at 1109/1109:
+#      * MUTANT B — delete the entire `#### arm64 boot header` docs section,
+#        INCLUDING the whole "What this is verified against — and what it is
+#        not" block. Three incidental mentions of the flag survive elsewhere in
+#        the manual, which is all rows 1 and 2 need.
+#      * MUTANT A — delete the dedicated `--image-header` line from `--help`.
+#        The flag is ALSO named inside the `--emit=image` line's description,
+#        so its TOKEN survives and rows 1-2 are again satisfied.
+#    Row 3's numbers do not occur in this section either. So the single
+#    highest-value artifact this sub-project produced — a written, measured
+#    statement of what the header is NOT backed by — was protected by nothing.
+#
+#    BOTH MUTANTS WERE RE-RUN AGAINST THESE ROWS AND EACH REDS EXACTLY ONE:
+#    mutant B (docs section removed) reds `imghdr_docs_limits_block_intact`
+#    alone, and mutant A (src/main.kr's h_ih line removed, compiler rebuilt)
+#    reds `imghdr_help_has_own_line` alone. In both runs rows 1 and 2 still
+#    reported 26 flags and PASSED, which is the whole point: these two rows see
+#    what token coverage cannot.
+#
+#    THESE TWO ROWS ARE STRUCTURAL, not behavioural, and they do not pretend
+#    otherwise: they assert the section exists, that its limits subsection is
+#    still nested inside it, and that the three bounds a reader most needs are
+#    still stated. Scoped with the same awk as row 3 and for the same reason —
+#    unscoped, "No real boot chain" is satisfied from anywhere in a 2400-line
+#    file and the check is decorative. The scope differs from row 3's in one
+#    way: `##### ` subheadings do NOT terminate it, because the block being
+#    protected IS a `#####` subsection and row 3's awk would cut it off.
+#
+#    PHRASES, NOT FLAG TOKENS, because these limits are prose — which is
+#    precisely why no token grep can protect them. The cost is real and
+#    accepted: rewording one of these three sentences reds a row. That is the
+#    intended trade. This text has now twice been "corrected" into a new
+#    falsehood, so a deliberate reword SHOULD have to come here in the same
+#    commit and say so.
+IHDR_SEC=/tmp/krc_ihdr_sec_$$
+awk '/^#### arm64 boot header/{s=1;print;next} s&&/^#/&&!/^##### /{exit} s{print}' "$HD_DOC" > "$IHDR_SEC"
+TOTAL=$((TOTAL + 1))
+ihdr_doc_miss=""
+[ -s "$IHDR_SEC" ] || ihdr_doc_miss=" the-section-itself"
+grep -qF -- '##### What this is verified against' "$IHDR_SEC" || ihdr_doc_miss="$ihdr_doc_miss the-limits-subsection"
+grep -qF -- 'No real boot chain' "$IHDR_SEC" || ihdr_doc_miss="$ihdr_doc_miss no-real-boot-chain"
+grep -qF -- "not the specification's" "$IHDR_SEC" || ihdr_doc_miss="$ihdr_doc_miss qemu-not-the-spec"
+grep -qF -- 'does not reject a bad magic' "$IHDR_SEC" || ihdr_doc_miss="$ihdr_doc_miss bad-magic-not-refused"
+if [ -z "$ihdr_doc_miss" ]; then
+    PASS=$((PASS + 1)); echo "  imghdr_docs_limits_block_intact: PASS (section present, $(wc -l < "$IHDR_SEC" | tr -d ' ') lines, all 3 bounds stated)"
+else
+    echo "FAIL: imghdr_docs_limits_block_intact (docs/LANGUAGE.md's '#### arm64 boot header' section is missing:$ihdr_doc_miss -- this text is what the sub-project delivered; if it was reworded on purpose, update this row in the same commit, do not delete it)"
+    FAIL=$((FAIL + 1))
+fi
+
+# 4b. ...and --help still carries a line ABOUT the flag, not merely a mention
+#     of its name inside another flag's description. Anchored to the flag
+#     column: `^  --image-header ` matches only the dedicated row, so mutant A
+#     (delete that row, leave the `--emit=image` mention) reds here and nowhere
+#     else in the suite.
+TOTAL=$((TOTAL + 1))
+ihdr_help_n=$(grep -c '^  --image-header ' "$HD_HELP")
+if [ "$ihdr_help_n" = "1" ]; then
+    PASS=$((PASS + 1)); echo "  imghdr_help_has_own_line: PASS (exactly 1 dedicated --help row)"
+else
+    echo "FAIL: imghdr_help_has_own_line (found $ihdr_help_n lines starting '  --image-header ' in --help, want exactly 1; the flag being NAMED in --emit=image's description is not a description of the flag)"
+    FAIL=$((FAIL + 1))
+fi
+
+rm -f "$HD_HELP" "$HD_SEC" "$HD_LINE" "$HD_SRC" "$IHDR_SEC"
 
 # --- --emit=image EMISSION + the `image:` report line (sub-project B1, T5) ---
 #
@@ -9073,10 +9157,18 @@ rm -f /tmp/krc_i6_$$ "$IMG6_SRC" "$IMG5_SRC" /tmp/krc_i5e_x_$$ /tmp/krc_i5e_a_$$
 # TWO FIELDS ARE PATCHED BACK, not written at emit time, and both are patched
 # for the same reason: the value does not exist yet when the bytes are laid
 # down. `code0` needs the stub's offset (no function has been emitted), and
-# `image_size` needs the final file size. A missed patch-back is silent in each
-# case -- an unpatched `code0` is `b .+0`, a well-formed branch to ITSELF, and
-# an unpatched `image_size` is 0, which a real loader reads as "reserve
-# nothing". Rows 6 and 7 are what make those two loud.
+# `image_size` needs the final file size. BOTH PLACEHOLDERS ARE ZERO
+# (src/main.kr: emit_a64(0) and emit_u64_le(0)), and the two miss cases are not
+# alike:
+#   * a missed `code0` patch leaves 0x00000000, which is `udf #0` -- an
+#     undefined instruction on the image's FIRST word. That is loud at runtime,
+#     and it is loud on purpose: src/main.kr spends eight lines rejecting the
+#     tempting 0x14000000 (`b .`) placeholder precisely because THAT one would
+#     hang quietly. Do not "fix" the placeholder to a well-formed branch.
+#   * a missed `image_size` patch leaves 0, which really is silent -- a loader
+#     reads it as "reserve nothing" and carries on.
+# Rows 6 and 7 make both statically detectable, so neither has to reach a boot
+# to be caught.
 IHDR_SRC="$DIR/../test_tmp_ihdr_$$.kr"
 # A program WITH page-relative references (a static the code reads through an
 # ADRP pair), unlike $STK_SRC above. Row 9 needs them: they are the only
@@ -9117,15 +9209,23 @@ else
     echo "FAIL: imghdr_magic_and_flags (magic=$i9magic want $(( 0x644d5241 )); flags=$i9flags want 10)"; FAIL=$((FAIL + 1))
 fi
 
-# 6. code0 is a REAL branch to the stub, and specifically is NOT 0x14000000.
-#    0x14000000 is `b .`, which is BOTH the unpatched placeholder AND the
-#    stub's own halt word -- so a missed patch-back would be invisible to a
-#    "top byte is 0x14" check, would hang the machine on the first instruction,
-#    and would put a SECOND 0x14000000 in the image, breaking the boot gate's
-#    `loop_offset_a64` uniqueness scan (five checks read a PC through it). All
-#    three consequences follow from one wrong word, so the word is decoded:
-#    top 6 bits == 0b000101 (B), and the sign-extended imm26 * 4 must land
-#    exactly on the reported entry -- which, with a stub, IS the stub offset.
+# 6. code0 is a REAL branch to the stub. The word is decoded rather than
+#    pattern-matched, and the two guards catch different faults:
+#    * op == 5 (top 6 bits 0b000101, B) with the sign-extended imm26 * 4
+#      landing exactly on the reported entry -- which, with a stub, IS the stub
+#      offset. THE SHIPPED PLACEHOLDER IS 0x00000000, `udf #0`, whose op is 0,
+#      so a dropped patch-back reds here. (It is also loud at runtime: an
+#      undefined instruction on the image's first word, not a hang.)
+#    * code0 != 0x14000000. That word is `b .` and it is NOT the placeholder --
+#      src/main.kr deliberately REJECTED it as one, because it would hang
+#      silently instead of faulting AND would put a SECOND 0x14000000 in the
+#      image, breaking the boot gate's `loop_offset_a64` uniqueness scan (five
+#      checks read a PC through it). This clause is the standing guard against
+#      that decision being quietly revisited. Note it is REDUNDANT today and
+#      kept deliberately: `b .` satisfies op == 5, and is already caught by the
+#      offset clause, since its target is +0 and --image-header always places
+#      the stub past the 64-byte header, so the reported entry is never 0. The
+#      named clause is what makes the rejection legible at the point of test.
 TOTAL=$((TOTAL + 1))
 i9rep=$($KRC $KRC_FLAGS "$IHDR_SRC" -o "$IHDR_IMG" --arch=arm64 --target=none --emit=image \
         --load-addr=0x40400000 --stack-top=0x40800000 --image-header 2>&1)
@@ -9138,7 +9238,7 @@ i9tgt=$(( i9imm * 4 ))
 if [ "$i9op" = "5" ] && [ "$i9c0" != "$(( 0x14000000 ))" ] && [ -n "$i9entry" ] && [ "$i9tgt" = "$i9entry" ]; then
     PASS=$((PASS + 1)); echo "  imghdr_code0_branches_to_stub: PASS (code0=$(printf 0x%08x "$i9c0") = b +$i9tgt = reported entry $i9entry)"
 else
-    echo "FAIL: imghdr_code0_branches_to_stub (code0=$(printf 0x%08x "$i9c0" 2>/dev/null) op=$i9op target=+$i9tgt reported entry=${i9entry:-UNPARSED}; 0x14000000 means the patch-back never ran)"; FAIL=$((FAIL + 1))
+    echo "FAIL: imghdr_code0_branches_to_stub (code0=$(printf 0x%08x "$i9c0" 2>/dev/null) op=$i9op target=+$i9tgt reported entry=${i9entry:-UNPARSED}; 0x00000000 (udf) means the code0 patch-back never ran, 0x14000000 means the rejected 'b .' placeholder was reinstated)"; FAIL=$((FAIL + 1))
 fi
 
 # 6b. AND THE HALT IS STILL UNIQUE. Row 6 pins code0 != 0x14000000 by decoding

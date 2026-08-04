@@ -10,10 +10,18 @@
 #   * arm64 boots with the image and a reset-PC `-device loader,addr=…` and no
 #     `file=` stub — make_stub.py is not invoked by L1, L2, L4 or L5.
 # SUB-PROJECT C ADDED THE ARM64 `-kernel` FORM AS WELL, in L6: with the 64-byte
-# `Image` header the artifact is loadable by a real arm64 boot chain, so L6
-# hands it to QEMU's own loader — no -device, no address — and QEMU decides
-# where to put it by READING the header. That is the only invocation in this
-# file where a header is recognised rather than merely present; see L6.
+# `Image` header L6 hands the artifact to QEMU's own loader — no -device, no
+# address — and QEMU decides where to put it by READING the header. That is the
+# only invocation in this file where a header is recognised rather than merely
+# present; see L6.
+# WHAT THAT IS AND IS NOT, because the sentence that used to stand here
+# ("the artifact is loadable by a real arm64 boot chain") asserted the untested
+# headline as fact and this file contradicts it in L6's own block. What L6
+# shows is that QEMU's `load_aarch64_image` READS our 64 bytes. It does not
+# show they conform to the Linux `Image` specification — nothing in this tree
+# does — and NO REAL BOOT CHAIN HAS RUN ANY OF THIS: no U-Boot `booti`, no EFI
+# stub, no Android boot.img tooling, no hardware. Real-loader compatibility is
+# sub-project C's design goal; one QEMU is its entire evidence.
 # Those two boots existed only as manual runs recorded in Task 3's and Task 4's
 # reports until this file was changed. A result that lives only in a report is
 # one refactor away from being unverified; every one of them is a leg now.
@@ -31,15 +39,25 @@
 # what this gate must not copy.
 #
 # CI STATUS, stated precisely. Task 1 shipped with "CI cannot run this gate":
-# ci.yml carried qemu-USER-static only. Task 2 wires the gate into
-# tests/run_tests.sh as a COUNTED test and adds `qemu-system-x86 qemu-system-arm`
+# ci.yml carried qemu-USER-static only. B1 Task 2 wired the gate into
+# tests/run_tests.sh as a COUNTED test and added `qemu-system-x86 qemu-system-arm`
 # to both jobs that invoke the suite (the ubuntu-latest x86_64 job and the
-# ubuntu-24.04-arm job). So the gate is now *expected* to run in CI —
-# but NO CI RUN HAS EVER EXECUTED IT. Nothing in B1 is pushed, and two things
-# are declared-unverified from the dev machine: whether qemu-system-x86 installs
-# on ubuntu-24.04-arm, and what an emulated x86 boot costs in wall clock on
-# either runner. Until a green CI run exists, treat this gate's evidence as
-# produced on one developer machine. The failure mode is loud either way (a
+# ubuntu-24.04-arm job). THIS GATE NOW RUNS IN CI, and the clause that used to
+# stand here — "NO CI RUN HAS EVER EXECUTED IT. Nothing in B1 is pushed" — is
+# stale: B2's merge pushed both. origin/main is ee37196, and GitHub Actions run
+# 30894588445 on that sha concluded success with `--- bare-metal boot gate ---`
+# in the log of BOTH suite jobs (1032/1032 on ubuntu-latest x86_64, 1017/1017 on
+# ubuntu-24.04-arm, 0 failed each). That also settles the two things B1 declared
+# unverified from the dev machine: qemu-system-x86 does install on
+# ubuntu-24.04-arm, and the emulated boots are affordable — on the x86_64
+# runner ~24 s elapsed between this gate's banner and the suite summary, and
+# the gate is the last section before it.
+#
+# WHAT IS STILL CI-UNRUN is narrower: the legs sub-project C adds (L5 and L6),
+# because that branch is unpushed. They run on the first push after it merges —
+# nothing further is needed on the runners, which already carry qemu-system-arm
+# (⊃ qemu-system-aarch64) and file(1). Until then, treat L5's and L6's evidence
+# as produced on one developer machine. The failure mode is loud either way (a
 # counted FAIL naming the missing tool, never a silent skip).
 #
 # Usage:  tests/target_none/boot_gate.sh
@@ -1687,9 +1705,14 @@ leg4() {
 #      `b .` after main returns does — the PC is read over QMP and cross-checked
 #      against `entry + 16`, so a stub whose halt moved cannot pass by accident.
 #      That `b .` is also still the UNIQUE 0x14000000 in the image, which is a
-#      standing obligation on code0: the placeholder branch is the same word,
-#      so a missed patch-back would both hang the machine here AND break the
-#      `loop_offset_a64` scan five other checks read a PC through.
+#      standing obligation on code0 — but NOT because the placeholder is the
+#      same word. It is not: the placeholder is 0 (`udf #0`), and 0x14000000
+#      was deliberately rejected as one for exactly this reason (src/main.kr;
+#      restated in this leg's own AMBIG:2 note, below). The obligation is
+#      on the PATCHED value: if code0's computed displacement ever came out 0,
+#      the branch would encode as 0x14000000, hang here AND break the
+#      `loop_offset_a64` scan five other checks read a PC through. A MISSED
+#      patch is a different, louder failure — `udf` on the first word.
 #
 #      THE CONTROL DELIBERATELY DUPLICATES L2_control_offset0's SHAPE. Same
 #      source, same --stack-top, same entry address (0), only `--image-header`
@@ -1913,10 +1936,16 @@ l6_quiet_control() {
 #      from anything in this tree.
 #
 #      AND NO REAL BOOT CHAIN HAS RUN ANY OF IT. No U-Boot `booti`, no EFI
-#      stub, no Android boot.img tooling, no hardware, and this gate has never
-#      run in CI: qemu 8.2.2 on one developer machine is the entire boot
-#      evidence for a sub-project whose stated purpose is real-loader
-#      compatibility. Read every PASS line below with that bound attached.
+#      stub, no Android boot.img tooling, no hardware: qemu 8.2.2 on one
+#      developer machine is the entire boot evidence for a sub-project whose
+#      stated purpose is real-loader compatibility. Read every PASS line below
+#      with that bound attached.
+#
+#      CI, PRECISELY — and it is not "never" (see the CI STATUS block in this
+#      file's header). The gate is a COUNTED test in tests/run_tests.sh and ran
+#      green in CI at the branch point, on both suite runners. What has never
+#      run in CI is narrower: L5 and L6 specifically, because sub-project C's
+#      branch is unpushed. Both run on the first push after it merges.
 #
 #      A LIVE GAP IN EXACTLY THAT DIRECTION: B2's entry stub materialises the
 #      stack top IN x0 (movz/movk) as its first instruction, and the arm64

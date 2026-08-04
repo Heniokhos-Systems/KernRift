@@ -2917,8 +2917,12 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
     //   * THE LOAD-BASE EVIDENCE IS QEMU'S load_aarch64_image, NOT THE Image
     //     SPECIFICATION. It shows the header is READ. Nothing in this tree
     //     shows it is CONFORMANT, and NO REAL BOOT CHAIN HAS EVER RUN IT —
-    //     no U-Boot booti, no EFI stub, no Android boot.img, no hardware,
-    //     never in CI. One QEMU 8.2.2 on one machine is the whole of it.
+    //     no U-Boot booti, no EFI stub, no Android boot.img, no hardware.
+    //     One QEMU 8.2.2 on one machine is the whole of it. Not "never in
+    //     CI": the boot gate is a counted test in tests/run_tests.sh and ran
+    //     green in CI at this work's branch point. It is the two header legs
+    //     (L5, L6) that are newer than that run and so CI-unrun until the
+    //     first push. See the CI STATUS block in boot_gate.sh's header.
     //   * A BAD MAGIC IS NOT REFUSED. QEMU silently abandons the header and
     //     loads at its own default offset, and the payload is
     //     position-independent, so the image still boots and still prints.
@@ -3808,9 +3812,22 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
             write(2, imx_msg, str_len(imx_msg))
             exit(1)
         }
-        // With a stub emitted, THE STUB is the entry: it is the address a
-        // loader (or a reset vector) must start at, and the entry function
-        // reached through it would fault on a garbage SP. The fn_lookup
+        // With a stub emitted, THE STUB is what `entry` reports, and the entry
+        // function reached through it would fault on a garbage SP.
+        //
+        // WHETHER THAT IS ALSO THE ADDRESS TO START AT DEPENDS ON THE HEADER,
+        // and the unconditional claim that used to stand here is false under
+        // --image-header. Without a header, yes: a loader or reset vector must
+        // be parked on load_addr + entry, because nothing else in the file
+        // points at the stub. WITH --image-header, the start address is the
+        // LOAD ADDRESS, file offset 0 — the header's code0 branches to this
+        // stub, which is exactly what makes the artifact bootable from its
+        // first byte — measured, in boot_gate.sh leg L5, which enters the
+        // artifact at file offset 0 and reaches the stub. A header-aware loader
+        // (qemu -kernel, leg L6) will start at offset 0 whatever this line
+        // reports, so tooling built on the old wording talks past it. Same
+        // statement in docs/LANGUAGE.md under `--emit=image`, and again at the
+        // finalize block below. The fn_lookup
         // above still runs and still refuses on an inconsistency — the stub
         // recorded a `bl` fixup (arm64) or a patched movabs (x86_64) against
         // that same token, so a miss here means the image's own call would
