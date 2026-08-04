@@ -806,13 +806,32 @@ PY
 }
 
 # Copy $1 to $2, applying every spec from $3 onwards IN ORDER. A spec is one of:
-#   u32:<off>:<val>   little-endian u32 at <off>
-#   hex:<off>:<bytes> raw hex at <off>
-#   zero:<off>        zero everything from <off> to EOF
+#   u32:<off>:<val>              little-endian u32 at <off>
+#   hex:<off>:<bytes>            raw hex at <off>
+#   zero:<off>                   zero everything from <off> to EOF
+#   u32was:<off>:<old>:<new>     u32, but only if <off> currently holds <old>
+#   hexwas:<off>:<oldhex>:<new>  hex, but only if <off> currently holds <oldhex>
 # Order matters and is used: L1's payload control zeroes to EOF and then plants
 # a landing pad inside the zeroed region.
 # Exits nonzero (and writes nothing) if an offset does not fit, so a control
 # built on a mislocated patch site fails instead of quietly testing nothing.
+#
+# THE `was` FORMS EXIST BECAUSE "THE OFFSET FITS" IS NOT "THE OFFSET IS RIGHT"
+# (D Task 3 review, Important 1). Every offset this file patches sits comfortably
+# inside the file, so a mislocated constant writes real bytes into inert padding
+# and img_patch reports success. A control whose EXPECTED VERDICT DIFFERS FROM
+# THE PRISTINE ONE still reds when that happens -- the mutant behaves like the
+# original, which is not what the row wanted -- but a control that expects the
+# pristine verdict stays GREEN while printing a claim about a byte it never
+# changed. That is measured, not hypothetical: mislocating UEFI_OFF_SECTCHARS to
+# offset 6000 left L7_control_read_only_section_still_runs passing and asserting
+# "the same byte change that makes the arm64 twin abort".
+#
+# Naming the OLD value turns a mislocated offset into a refusal, which
+# uefi_control reports as "the control never ran". It is checked BEFORE any
+# write in the same spec, and specs are applied in order, so a later spec sees
+# the earlier one's result -- an expectation is about the file as it stands at
+# that point, not about the pristine input.
 img_patch() {
     python3 - "$@" <<'PY'
 import struct, sys
@@ -832,6 +851,28 @@ for spec in sys.argv[3:]:
         if o + 4 > len(d):
             sys.exit("img_patch: u32 at %d does not fit in %d bytes" % (o, len(d)))
         struct.pack_into("<I", d, o, v & 0xFFFFFFFF)
+    elif kind == "u32was":
+        o, w, v = rest.split(":")
+        o, w, v = int(o), int(w), int(v)
+        if o + 4 > len(d):
+            sys.exit("img_patch: u32was at %d does not fit in %d bytes" % (o, len(d)))
+        cur = struct.unpack_from("<I", d, o)[0]
+        if cur != (w & 0xFFFFFFFF):
+            sys.exit("img_patch: u32was at %d expected %d, found %d -- the offset is "
+                     "wrong, or the artifact changed; refusing to patch" % (o, w, cur))
+        struct.pack_into("<I", d, o, v & 0xFFFFFFFF)
+    elif kind == "hexwas":
+        o, wh, h = rest.split(":")
+        o, wb, b = int(o), bytes.fromhex(wh), bytes.fromhex(h)
+        if len(wb) != len(b):
+            sys.exit("img_patch: hexwas at %d: old is %d bytes, new is %d" % (o, len(wb), len(b)))
+        if o + len(b) > len(d):
+            sys.exit("img_patch: hexwas at %d does not fit in %d bytes" % (o, len(d)))
+        if bytes(d[o:o+len(wb)]) != wb:
+            sys.exit("img_patch: hexwas at %d expected %s, found %s -- the offset is "
+                     "wrong, or the artifact changed; refusing to patch"
+                     % (o, wh, bytes(d[o:o+len(wb)]).hex()))
+        d[o:o+len(b)] = b
     elif kind == "hex":
         o, h = rest.split(":")
         o, b = int(o), bytes.fromhex(h)
@@ -2152,8 +2193,11 @@ leg6() {
 # at the top of the file. The reason is scope: the loop's failure exits before
 # L0 runs, and a machine with qemu but without ovmf can still produce every one
 # of L0-L6's results. A missing firmware is still a counted FAILURE naming the
-# paths that were tried — never a skip — it just does not take the other seven
-# legs down with it.
+# paths that were tried — never a silent pass — it just does not take the other
+# seven legs down with it. Be precise about what that means, because the run is
+# NOT skip-free: the FAILURE is the dependency check, and every check downstream
+# of it in the same leg is then reported as SKIP by run_leg. MEASURED, with both
+# firmwares forced unresolved: 0 pass, 2 FAIL, 12 SKIP (9 from L7, 3 from L8).
 #
 # TRAPS, ALL MEASURED ON THIS MACHINE, none inherited:
 #
@@ -2163,7 +2207,9 @@ leg6() {
 #     into the VARS pflash. A shared copy makes each run depend on the one
 #     before it, and the "boot the pristine image, then a mutant" ordering these
 #     legs use is exactly the shape that goes wrong. `uefi_boot` copies one per
-#     tag; the OVMF vars are 4 MiB and the AAVMF vars 64 MiB, ~0.02 s each.
+#     tag; the OVMF vars are 528 KiB (540672 B -- the `4M` in OVMF_VARS_4M.fd
+#     names the CODE flash size, not this file) and the AAVMF vars 64 MiB,
+#     ~0.02 s each.
 #   * LANDING IN THE SETUP UI IS COMPATIBLE WITH SUCCESS. A UEFI application
 #     that RETURNS hands control back to BDS, which then runs the next boot
 #     option — UiApp (the setup browser) on a zero return, or the EFI shell on a
@@ -2409,7 +2455,13 @@ uefi_verdict() {
     # 5. the firmware said no, or never started the image.
     if grep -qa 'failed to load Boot0001' "$ser"; then echo NOT_LOADED; return 0; fi
     grep -qa 'starting Boot0001' "$ser" || { echo NOT_LOADED; return 0; }
-    # 6. loaded, started, and produced nothing.
+    # 6. loaded, started, and produced nothing. EXERCISED by
+    # L7_control_entry_at_section_start_silent -- it was not, until the Task 3
+    # review pointed out that this was the one arm of the crashed-vs-silent
+    # distinction (the distinction that produced this sub-project's Critical)
+    # that no row reached, so a regression collapsing it would have been
+    # invisible. PRINTED_PARTIAL is deliberately still unexercised: it is a fail
+    # bucket, not a claim, and no artifact is known to produce it.
     echo LOADED_SILENT; return 0
 }
 
@@ -2482,8 +2534,14 @@ uefi_status_is() { grep -qa "failed to load Boot0001.*: $2" "$1"; }
 #        Machine 0x8664 -> 0xaa64                : Unsupported
 #        NumberOfRvaAndSizes 16 -> 8             : Unsupported
 #        SizeOfImage 8192 -> 4096                : Unsupported
-#        VirtualSize 1112 -> 1                   : LOADED, then #UD
+#        VirtualSize (1136 here) -> 1            : LOADED, then #UD
 #        SizeOfRawData 4096 -> 0                 : LOADED, then #UD
+#        AddressOfEntryPoint 4772 -> 4096        : LOADED, STARTED, silent
+#
+#      THE `1136` IS THIS SENTINEL'S PAYLOAD LENGTH AND IS READ OFF THE
+#      ARTIFACT, not written down: an earlier draft of this comment said 1112
+#      and no check asserted on it, so it was simply wrong (Task 3 review,
+#      Minor 1). The two rows that name it interpolate `$vsz`.
 #
 #      THE FAULT IS `#UD`, NOT `#PF`. The plan said `#PF` for both fault
 #      controls; on this firmware both produce `!!!! X64 Exception Type -
@@ -2498,24 +2556,31 @@ uefi_status_is() { grep -qa "failed to load Boot0001.*: $2" "$1"; }
 #      optional header starts at 0x58 and the single section table entry at
 #      0x148. They are constants of THIS emitter, not of PE, and a second
 #      section would move the section-table offsets — which is why the leg
-#      re-reads NumberOfSections off the artifact before it patches anything.
+#      re-reads NumberOfSections, Magic AND SizeOfOptionalHeader off the
+#      artifact before it patches anything, and why every patch below names the
+#      value it expects to find (`u32was`/`hexwas`). "The offset fits" is not
+#      "the offset is right"; see img_patch's header for the row that was
+#      measured passing on a patch that landed in padding.
 # =============================================================================
 # PE32+ field offsets in an --emit=uefi artifact, one section, e_lfanew = 0x40.
 UEFI_OFF_NSECTIONS=70       # 0x46 u16
 UEFI_OFF_MACHINE=68         # 0x44 u16
+UEFI_OFF_SIZEOFOPTHDR=84    # 0x54 u16
 UEFI_OFF_MAGIC=88           # 0x58 u16
+UEFI_OFF_ENTRY=104          # 0x68 u32
 UEFI_OFF_SIZEOFIMAGE=144    # 0x90 u32
 UEFI_OFF_SUBSYSTEM=156      # 0x9C u16
 UEFI_OFF_NUMRVA=196         # 0xC4 u32
 UEFI_OFF_VIRTUALSIZE=336    # 0x150 u32
 UEFI_OFF_SECTCHARS=364      # 0x16C u32
 UEFI_OFF_SIZEOFRAWDATA=344  # 0x158 u32
+UEFI_SECTCHARS=3758096416   # 0xE0000020 -- read, write, execute, code
 leg7() {
     echo "--- L7: x86_64 UEFI application under OVMF (q35) ---"
     UEFI_BATCH_POS=""
     UEFI_LIT="KRUEFI-X86"; UEFI_COMP="3000000016"
     if [ -z "$UEFI_X86_CODE" ]; then
-        bad "L7_uefi_x86_boots" "no OVMF firmware found. Tried: $UEFI_X86_TRIED. This gate treats a missing dependency as a FAILURE, never a skip (install ovmf)"
+        bad "L7_uefi_x86_boots" "no OVMF firmware found. Tried: $UEFI_X86_TRIED. This gate treats a missing dependency as a counted FAILURE, never a silent pass (install ovmf). The other 9 L7 checks are then reported as SKIP -- measured: 1 FAIL + 9 SKIP here, 1 FAIL + 3 SKIP on L8"
         return
     fi
     cp "$BOOT/uefi_sentinel_x86.kr" "$WORK/uefi_sentinel_x86.kr"
@@ -2526,13 +2591,36 @@ leg7() {
     # The mutants are anchored on the ARTIFACT, not on the emitter's source: if
     # this is not a one-section PE32+ with the DOS stub the offsets above assume,
     # every patch below lands somewhere else and the controls test nothing.
-    local nsec magic
+    # SizeOfOptionalHeader IS PART OF THIS (Task 3 review, Minor 4): the three
+    # section-table offsets (336/344/364) are `0x58 + SizeOfOptionalHeader + k`,
+    # so a 240 that became something else moves all three while
+    # NumberOfSections and Magic still look right.
+    local nsec magic soh vsz
     nsec=$(mb_u32 "$img" "$UEFI_OFF_NSECTIONS") || nsec="READFAIL"
     magic=$(mb_u32 "$img" "$UEFI_OFF_MAGIC") || magic="READFAIL"
-    # mb_u32 reads 4 bytes; NumberOfSections and Magic are u16, so mask.
+    soh=$(mb_u32 "$img" "$UEFI_OFF_SIZEOFOPTHDR") || soh="READFAIL"
+    # mb_u32 reads 4 bytes; NumberOfSections, Magic and SizeOfOptionalHeader
+    # are u16, so mask.
     if [ "$nsec" = READFAIL ] || [ $(( nsec & 0xFFFF )) != 1 ] \
-       || [ "$magic" = READFAIL ] || [ $(( magic & 0xFFFF )) != 523 ]; then
-        bad "L7_uefi_x86_boots" "the artifact is not the one-section PE32+ these offsets assume (NumberOfSections=$nsec Magic=$magic) -- every control below would patch the wrong bytes"; return
+       || [ "$magic" = READFAIL ] || [ $(( magic & 0xFFFF )) != 523 ] \
+       || [ "$soh" = READFAIL ] || [ $(( soh & 0xFFFF )) != 240 ]; then
+        bad "L7_uefi_x86_boots" "the artifact is not the one-section PE32+ these offsets assume (NumberOfSections=$nsec Magic=$magic SizeOfOptionalHeader=$soh) -- every control below would patch the wrong bytes"; return
+    fi
+    # VirtualSize is READ rather than written down: the two rows that name it
+    # would otherwise carry a number that goes stale the next time the sentinel
+    # changes, which is how `1112` survived into two shipped comments while the
+    # artifact said 1136 (Task 3 review, Minor 1). Nothing asserts on the value,
+    # so nothing catches it -- deriving it means it cannot be wrong.
+    vsz=$(mb_u32 "$img" "$UEFI_OFF_VIRTUALSIZE") || vsz="READFAIL"
+    if [ "$vsz" = READFAIL ] || [ "$vsz" -lt 2 ]; then
+        bad "L7_uefi_x86_boots" "could not read a plausible VirtualSize ($vsz) -- the fault controls below would be patching it to a value it may already hold"; return
+    fi
+    # The entry point must NOT already be the section start, or the
+    # LOADED_SILENT control below plants a value the artifact already has and
+    # tests nothing. (An `--emit=uefi` build of a `_start`-only program really
+    # does report entry=4096; this sentinel has functions in front of it.)
+    if [ "$entry" = 4096 ]; then
+        bad "L7_uefi_x86_boots" "the reported entry is already 4096, the section start -- L7_control_entry_at_section_start_silent would be a no-op patch"; return
     fi
     # ---- the subject, and this leg's positive control -----------------------
     if ! uefi_boot x86 "$img" "x7_pos"; then
@@ -2550,11 +2638,11 @@ leg7() {
     # one indistinguishable from an empty ESP -- it is evidence only because
     # L7_uefi_x86_boots ran in this same batch, through this same staging.
     if uefi_control L7_control_subsystem_3_not_loaded x86 "$img" x7_sub3 NOT_LOADED \
-            "Subsystem 10 -> 3 (Windows console)" "hex:$UEFI_OFF_SUBSYSTEM:0300"; then
+            "Subsystem 10 -> 3 (Windows console)" "hexwas:$UEFI_OFF_SUBSYSTEM:0a00:0300"; then
         ok "L7_control_subsystem_3_not_loaded" "Subsystem := 3 => NOT_LOADED ('$(uefi_first_match "$UEFI_SER" 'failed to load Boot0001[^[:cntrl:]]*')') -- the status is 'Not Found', the SAME text an empty ESP and a misnamed file produce, so the batch positive above is what makes this a rejection and not a staging bug"
     fi
     if uefi_control L7_control_magic_pe32_not_loaded x86 "$img" x7_magic NOT_LOADED \
-            "optional header Magic 0x20b (PE32+) -> 0x10b (PE32)" "hex:$UEFI_OFF_MAGIC:0b01"; then
+            "optional header Magic 0x20b (PE32+) -> 0x10b (PE32)" "hexwas:$UEFI_OFF_MAGIC:0b02:0b01"; then
         if uefi_status_is "$UEFI_SER" "Unsupported"; then
             ok "L7_control_magic_pe32_not_loaded" "Magic := 0x10b => NOT_LOADED, status 'Unsupported' -- a word no missing file can produce, so this row discriminates on its own"
         else
@@ -2562,7 +2650,7 @@ leg7() {
         fi
     fi
     if uefi_control L7_control_machine_arm64_not_loaded x86 "$img" x7_mach NOT_LOADED \
-            "Machine 0x8664 (AMD64) -> 0xaa64 (ARM64) on X64 firmware" "hex:$UEFI_OFF_MACHINE:64aa"; then
+            "Machine 0x8664 (AMD64) -> 0xaa64 (ARM64) on X64 firmware" "hexwas:$UEFI_OFF_MACHINE:6486:64aa"; then
         if uefi_status_is "$UEFI_SER" "Unsupported"; then
             ok "L7_control_machine_arm64_not_loaded" "Machine := 0xaa64 => NOT_LOADED, status 'Unsupported' -- the field is read, and a defaulted Machine would not be"
         else
@@ -2575,7 +2663,7 @@ leg7() {
     # individually plausible -- which is what the suite's static row checks and
     # what this row shows the firmware also checks.
     if uefi_control L7_control_rva_count_inconsistent_not_loaded x86 "$img" x7_nrva NOT_LOADED \
-            "NumberOfRvaAndSizes 16 -> 8 with SizeOfOptionalHeader still 240" "u32:$UEFI_OFF_NUMRVA:8"; then
+            "NumberOfRvaAndSizes 16 -> 8 with SizeOfOptionalHeader still 240" "u32was:$UEFI_OFF_NUMRVA:16:8"; then
         if uefi_status_is "$UEFI_SER" "Unsupported"; then
             ok "L7_control_rva_count_inconsistent_not_loaded" "NumberOfRvaAndSizes := 8 (240-112 != 8*8) => NOT_LOADED, status 'Unsupported'"
         else
@@ -2583,7 +2671,7 @@ leg7() {
         fi
     fi
     if uefi_control L7_control_size_of_image_too_small_not_loaded x86 "$img" x7_szimg NOT_LOADED \
-            "SizeOfImage 8192 -> 4096, i.e. smaller than the section it must cover" "u32:$UEFI_OFF_SIZEOFIMAGE:4096"; then
+            "SizeOfImage 8192 -> 4096, i.e. smaller than the section it must cover" "u32was:$UEFI_OFF_SIZEOFIMAGE:8192:4096"; then
         if uefi_status_is "$UEFI_SER" "Unsupported"; then
             ok "L7_control_size_of_image_too_small_not_loaded" "SizeOfImage := 4096 (the section ends at 8192) => NOT_LOADED, status 'Unsupported'"
         else
@@ -2596,12 +2684,29 @@ leg7() {
     # entered the image -- with a section whose contents it was told were 1 byte
     # (or 0 bytes) long. Nothing of ours prints, and the machine faults.
     if uefi_control L7_control_virtual_size_too_small_faults x86 "$img" x7_vsize LOADED_FAULTED \
-            "VirtualSize -> 1 (the loader copies one byte of a 1112-byte payload)" "u32:$UEFI_OFF_VIRTUALSIZE:1"; then
+            "VirtualSize -> 1 (the loader copies one byte of a ${vsz}-byte payload)" "u32was:$UEFI_OFF_VIRTUALSIZE:$vsz:1"; then
         ok "L7_control_virtual_size_too_small_faults" "VirtualSize := 1 => the image LOADS ('starting Boot0001' present) and then faults with nothing of ours on the wire: '$(uefi_first_match "$UEFI_SER" 'X64 Exception Type[^!]*')'"
     fi
     if uefi_control L7_control_size_of_raw_data_zero_faults x86 "$img" x7_srd0 LOADED_FAULTED \
-            "SizeOfRawData -> 0 (nothing is copied from the file at all)" "u32:$UEFI_OFF_SIZEOFRAWDATA:0"; then
+            "SizeOfRawData -> 0 (nothing is copied from the file at all)" "u32was:$UEFI_OFF_SIZEOFRAWDATA:4096:0"; then
         ok "L7_control_size_of_raw_data_zero_faults" "SizeOfRawData := 0 => LOADS and faults: '$(uefi_first_match "$UEFI_SER" 'X64 Exception Type[^!]*')'"
+    fi
+    # ---- one that LOADS, RUNS AND SAYS NOTHING ------------------------------
+    # THE SIXTH OUTCOME. Every other row here lands on one of five verdicts;
+    # without this one `LOADED_SILENT` is a branch of uefi_verdict that nothing
+    # reaches, and a regression collapsing it into NOT_LOADED or RAN would not
+    # red the gate (Task 3 review, Important 2). It is also the arm of the
+    # crashed-vs-silent distinction that produced this sub-project's Critical,
+    # so leaving it unexercised is exactly the wrong gap to leave.
+    #
+    # AddressOfEntryPoint := the section start. That is the plan's Step 4 case:
+    # the firmware maps the image and calls RVA 0x1000, which is the first
+    # FUNCTION of the payload rather than the program's entry, so it returns
+    # without ever reaching main. MEASURED: loaded, `starting Boot0001`, zero
+    # fault hits, neither marker, control back to BDS.
+    if uefi_control L7_control_entry_at_section_start_silent x86 "$img" x7_ent0 LOADED_SILENT \
+            "AddressOfEntryPoint $entry -> 4096 (the section start, i.e. the first function and not the entry)" "u32was:$UEFI_OFF_ENTRY:$entry:4096"; then
+        ok "L7_control_entry_at_section_start_silent" "entry := 4096 => the image LOADS and STARTS ('starting Boot0001' on the wire), faults NOWHERE, prints NEITHER marker and returns to BDS -- the one outcome no other row here reaches"
     fi
     # ---- the asymmetry that makes L8's printed-then-faulted row a control ----
     # Same mutation, other arch. Clearing the write bit is fatal on arm64 and
@@ -2609,9 +2714,17 @@ leg7() {
     # reference ("arm64 needs a writable .text" is too broad -- the image loads
     # and executes; the abort is on the STORE). Without this row, L8's fault
     # could be "any change to the characteristics word breaks the load".
+    #
+    # THE ONLY ROW HERE WHOSE EXPECTED VERDICT IS THE PRISTINE ONE, which makes
+    # it the only one a mislocated patch leaves GREEN -- measured, by pointing
+    # UEFI_OFF_SECTCHARS at inert padding: it went on passing and went on
+    # printing the claim below, which at that point was false. `u32was` is what
+    # closes it: name the old value and a wrong offset becomes a refusal that
+    # uefi_control reports as "the control never ran". Do not weaken it back to
+    # `u32`; there is no verdict this row could compare against instead.
     if uefi_control L7_control_read_only_section_still_runs x86 "$img" x7_ro RAN \
-            "section characteristics 0xE0000020 -> 0x60000020 (write bit cleared)" "u32:$UEFI_OFF_SECTCHARS:1610612768"; then
-        ok "L7_control_read_only_section_still_runs" "write bit cleared => x86_64 STILL RUNS ('$UEFI_LIT' and $UEFI_COMP) -- the same byte change that makes the arm64 twin abort on its store"
+            "section characteristics 0xE0000020 -> 0x60000020 (write bit cleared)" "u32was:$UEFI_OFF_SECTCHARS:$UEFI_SECTCHARS:1610612768"; then
+        ok "L7_control_read_only_section_still_runs" "write bit cleared (the old value 0xE0000020 was asserted at the patch site, so this is that byte and not another) => x86_64 STILL RUNS ('$UEFI_LIT' and $UEFI_COMP) -- the same change that makes the arm64 twin abort on its store"
     fi
 }
 
@@ -2645,7 +2758,7 @@ leg8() {
     UEFI_BATCH_POS=""
     UEFI_LIT="KRUEFI-A64"; UEFI_COMP="4000000016"
     if [ -z "$UEFI_A64_CODE" ]; then
-        bad "L8_uefi_a64_boots" "no AAVMF firmware found. Tried: $UEFI_A64_TRIED. This gate treats a missing dependency as a FAILURE, never a skip (install qemu-efi-aarch64)"
+        bad "L8_uefi_a64_boots" "no AAVMF firmware found. Tried: $UEFI_A64_TRIED. This gate treats a missing dependency as a counted FAILURE, never a silent pass (install qemu-efi-aarch64). The other 3 L8 checks are then reported as SKIP"
         return
     fi
     cp "$BOOT/uefi_sentinel_a64.kr" "$WORK/uefi_sentinel_a64.kr"
@@ -2653,12 +2766,20 @@ leg8() {
     if ! entry=$(build_uefi a64 "$WORK/uefi_sentinel_a64.kr" "$img"); then
         bad "L8_uefi_a64_boots" "uefi_sentinel_a64.kr did not build as a UEFI application"; return
     fi
-    local nsec machine
+    # Same pre-flight as L7, SizeOfOptionalHeader included -- see that leg for
+    # why each of the three is here rather than assumed.
+    local nsec machine soh vsz
     nsec=$(mb_u32 "$img" "$UEFI_OFF_NSECTIONS") || nsec="READFAIL"
     machine=$(mb_u32 "$img" "$UEFI_OFF_MACHINE") || machine="READFAIL"
+    soh=$(mb_u32 "$img" "$UEFI_OFF_SIZEOFOPTHDR") || soh="READFAIL"
     if [ "$nsec" = READFAIL ] || [ $(( nsec & 0xFFFF )) != 1 ] \
-       || [ "$machine" = READFAIL ] || [ $(( machine & 0xFFFF )) != 43620 ]; then
-        bad "L8_uefi_a64_boots" "the artifact is not the one-section AArch64 PE32+ these offsets assume (NumberOfSections=$nsec Machine=$machine)"; return
+       || [ "$machine" = READFAIL ] || [ $(( machine & 0xFFFF )) != 43620 ] \
+       || [ "$soh" = READFAIL ] || [ $(( soh & 0xFFFF )) != 240 ]; then
+        bad "L8_uefi_a64_boots" "the artifact is not the one-section AArch64 PE32+ these offsets assume (NumberOfSections=$nsec Machine=$machine SizeOfOptionalHeader=$soh)"; return
+    fi
+    vsz=$(mb_u32 "$img" "$UEFI_OFF_VIRTUALSIZE") || vsz="READFAIL"
+    if [ "$vsz" = READFAIL ] || [ "$vsz" -lt 2 ]; then
+        bad "L8_uefi_a64_boots" "could not read a plausible VirtualSize ($vsz)"; return
     fi
     # ---- the subject, and this leg's positive control -----------------------
     if ! uefi_boot a64 "$img" "a8_pos"; then
@@ -2672,12 +2793,12 @@ leg8() {
     fi
     # ---- the rejection whose status is the ambiguous one --------------------
     if uefi_control L8_control_subsystem_3_not_loaded a64 "$img" a8_sub3 NOT_LOADED \
-            "Subsystem 10 -> 3 (Windows console)" "hex:$UEFI_OFF_SUBSYSTEM:0300"; then
+            "Subsystem 10 -> 3 (Windows console)" "hexwas:$UEFI_OFF_SUBSYSTEM:0a00:0300"; then
         ok "L8_control_subsystem_3_not_loaded" "Subsystem := 3 => NOT_LOADED ('$(uefi_first_match "$UEFI_SER" 'failed to load Boot0001[^[:cntrl:]]*')') -- measured byte-identical to an empty ESP and to a misnamed file on this firmware, so L8_uefi_a64_boots in this same batch is the entire reason it counts"
     fi
     # ---- faulted having printed NOTHING ------------------------------------
     if uefi_control L8_control_virtual_size_too_small_faults a64 "$img" a8_vsize LOADED_FAULTED \
-            "VirtualSize -> 1" "u32:$UEFI_OFF_VIRTUALSIZE:1"; then
+            "VirtualSize $vsz -> 1" "u32was:$UEFI_OFF_VIRTUALSIZE:$vsz:1"; then
         ok "L8_control_virtual_size_too_small_faults" "VirtualSize := 1 => LOADS and faults with NOTHING of ours on the wire: '$(uefi_first_match "$UEFI_SER" 'Synchronous Exception at [0-9A-Fa-fx]*')'"
     fi
     # ---- faulted having printed EVERYTHING: the six-outcome control ---------
@@ -2687,7 +2808,7 @@ leg8() {
     # for a fault and this is a green run of a machine that crashed; score
     # LOADED_FAULTED first and the two arm64 fault rows become the same row.
     if uefi_control L8_control_read_only_section_printed_then_faulted a64 "$img" a8_ro PRINTED_THEN_FAULTED \
-            "section characteristics 0xE0000020 -> 0x60000020 (write bit cleared)" "u32:$UEFI_OFF_SECTCHARS:1610612768"; then
+            "section characteristics 0xE0000020 -> 0x60000020 (write bit cleared)" "u32was:$UEFI_OFF_SECTCHARS:$UEFI_SECTCHARS:1610612768"; then
         ok "L8_control_read_only_section_printed_then_faulted" "write bit cleared => '$UEFI_LIT' AND $UEFI_COMP reach the wire and THEN '$(uefi_first_match "$UEFI_SER" 'Synchronous Exception at [0-9A-Fa-fx]*')' -- a RAN-first verdict scores this as success and a FAULTED-first one loses it into the row above; both red here"
     fi
 }
@@ -2705,7 +2826,8 @@ leg8() {
 # renamed by either. SUB-PROJECT D moved it once more, 36 -> 49, adding L7's
 # nine x86_64/OVMF checks and L8's four arm64/AAVMF ones; again nothing was
 # retired or renamed, so a run that reports fewer than 49 has lost a check
-# rather than tightened one.
+# rather than tightened one. D's Task 3 REVIEW then took it to 50 with L7's
+# LOADED_SILENT control -- the one outcome of uefi_verdict that no row reached.
 run_leg leg0 L0_deadboot_x86 L0_deadboot_a64 L0_liveboot_not_flagged L0_alarm_not_a_dead_boot
 run_leg leg1 L1_multiboot_header L1_no_header_image_refused L1_self_boot_sentinel \
              L1_halt_parked L1_control_entry_addr_honoured L1_control_no_return \
@@ -2728,6 +2850,7 @@ run_leg leg7 L7_uefi_x86_boots L7_control_subsystem_3_not_loaded \
              L7_control_size_of_image_too_small_not_loaded \
              L7_control_virtual_size_too_small_faults \
              L7_control_size_of_raw_data_zero_faults \
+             L7_control_entry_at_section_start_silent \
              L7_control_read_only_section_still_runs
 run_leg leg8 L8_uefi_a64_boots L8_control_subsystem_3_not_loaded \
              L8_control_virtual_size_too_small_faults \

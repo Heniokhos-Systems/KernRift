@@ -1804,16 +1804,27 @@ control back and the
 firmware then runs its setup UI; that is a normal return, not a failure.
 
 **`make test` re-runs those boots.** Task 3 put them in
-`tests/target_none/boot_gate.sh` as legs **L7** (x86_64/OVMF, nine checks) and
+`tests/target_none/boot_gate.sh` as legs **L7** (x86_64/OVMF, ten checks) and
 **L8** (arm64/AAVMF, four), so the evidence is a counted test rather than prose
-in a report. Each leg boots the pristine application off a FAT ESP as
-`EFI/BOOT/BOOTX64.EFI` / `BOOTAA64.EFI` and then boots deliberately corrupted
-copies of it: `Subsystem 3`, `Magic 0x10b`, a wrong `Machine`, an inconsistent
-`NumberOfRvaAndSizes` and an undersized `SizeOfImage` are all **refused**, while
-an undersized `VirtualSize` and a zero `SizeOfRawData` **load and then fault**.
+in a report. Both legs boot the pristine application off a FAT ESP as
+`EFI/BOOT/BOOTX64.EFI` / `BOOTAA64.EFI` and then boot deliberately corrupted
+copies of it.
+
+**L7** carries the header-rejection set: `Subsystem 3`, `Magic 0x10b`, a wrong
+`Machine`, an inconsistent `NumberOfRvaAndSizes` and an undersized `SizeOfImage`
+are all **refused**; an undersized `VirtualSize` and a zero `SizeOfRawData`
+**load and then fault**; and an `AddressOfEntryPoint` moved to the section start
+**loads, runs and says nothing**. **L8** carries three of those — `Subsystem 3`
+and `VirtualSize`, plus the case that exists only on arm64: a read-only code
+section, which prints both markers and *then* aborts on its first store (x86_64
+runs the same artifact unharmed, which is L7's tenth check).
+
 The firmware images (Debian/Ubuntu `ovmf` and `qemu-efi-aarch64`, or the
 equivalent paths on other distributions) are a hard dependency of those two
-legs: absence is a counted failure naming every path tried, never a skip.
+legs. Absence is a **counted failure** naming every path tried — never a silent
+pass — though the checks downstream of it in the same leg are then reported as
+SKIP rather than run: a missing OVMF gives 1 FAIL and 9 SKIP on L7, a missing
+AAVMF 1 FAIL and 3 SKIP on L8.
 
 ```
 
