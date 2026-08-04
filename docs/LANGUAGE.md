@@ -1600,6 +1600,31 @@ its statics are carried as real zero bytes and there is nothing left for a
 zeroing loop to do. Do not assume RAM outside the image is zero — QEMU
 zero-fills it, real silicon does not.
 
+#### arm64 boot header (`--image-header`)
+
+```
+krc prog.kr --arch=arm64 --target=none --emit=image \
+    --load-addr=0x40400000 --stack-top=0x40800000 --image-header -o prog.img
+```
+
+`--image-header` prefixes the artifact with the 64-byte arm64 Linux `Image`
+header (magic `0x644d5241`), so a real arm64 boot chain (U-Boot, UEFI stub,
+and similar) can recognize and load it, the same way `--stack-top=` above
+adds x86_64's multiboot header. **This flag currently only parses and
+validates — no header is emitted, and no byte the compiler writes changes
+because of it.** A later revision fills the 64 bytes in.
+
+`--image-header` requires all three of:
+
+* `--emit=image` — a flat image is the only thing to prefix.
+* `--arch=arm64` — the header is arm64's Linux `Image` format; x86_64
+  `--emit=image` already carries its own header, the multiboot one
+  `--stack-top=` adds, so `--image-header` there has nothing to attach to.
+* `--stack-top=` — a header on a stub-less image validates under `file(1)`
+  and is accepted by a loader, but the image has no entry stub to jump to
+  and faults instantly. Requiring `--stack-top=` keeps that combination —
+  a header making a false claim about the bytes behind it — unrepresentable.
+
 ```
 
 # Codegen backend & optimization

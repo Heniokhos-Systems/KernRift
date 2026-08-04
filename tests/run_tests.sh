@@ -8595,6 +8595,33 @@ else
 fi
 rm -f /tmp/krc_stk_a64_$$
 
+# --- --image-header flag surface (sub-project C, Task 1) ---
+# Task 1 parses and validates only -- no header is ever emitted here, so
+# every row below is a REFUSAL or an accept that must be BYTE-IDENTICAL to
+# the same command without --image-header (proven in the byte-neutrality
+# section further down). Three-clause refusals via img_refuses(), same as
+# the --stack-top= rows just above.
+echo ""
+echo "--- --image-header flag surface (C, Task 1) ---"
+
+# 1. --image-header without --stack-top=: refused. An otherwise-valid arm64
+#    --emit=image line (arch, target, load-addr all present and legal) is
+#    used so the ONLY thing missing is --stack-top=, isolating this refusal
+#    from the arm64-only and emit=image-only ones below.
+img_refuses imghdr_requires_stack_top "requires --stack-top=" --arch=arm64 --target=none --emit=image --load-addr=0x40400000 --image-header
+
+# 2. --image-header on x86_64: refused, even with a --stack-top= that is
+#    otherwise legal for x86_64's own multiboot path -- the header this flag
+#    prefixes is arm64's Linux Image format, not x86_64's. --stack-top= is
+#    included so this row cannot pass under row 1's rule instead of its own.
+img_refuses imghdr_requires_arm64 "requires --arch=arm64" --arch=x86_64 --target=none --emit=image --load-addr=0x400000 --stack-top=0x90000 --image-header
+
+# 3. --image-header outside --emit=image: refused. Mirrors
+#    stacktop_requires_image above -- --target=none alone (no --emit=image)
+#    is otherwise a legal, accepted build (row 18, target_none_dash_g_still_
+#    accepted), so --image-header is the only thing that can fail this line.
+img_refuses imghdr_requires_emit_image "only meaningful with --emit=image" --arch=arm64 --target=none --image-header
+
 rm -f "$STK_SRC" "$IMG_SRC"
 
 # --- `--help` vs docs/LANGUAGE.md vs the compiler (sub-project B2, M5) -------

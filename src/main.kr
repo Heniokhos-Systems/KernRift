@@ -5610,6 +5610,13 @@ static uint64 load_addr_set = 0
 static uint64 stack_top = 0
 static uint64 stack_top_set = 0
 
+// --image-header state (sub-project C, Task 1): parse and validate only --
+// this task emits no header at all, so image_header_set gates nothing but
+// the refusals below. It requires --emit=image, --arch=arm64 and
+// --stack-top= together (validated where --stack-top='s own checks live);
+// the flag's presence alone changes no byte the compiler writes.
+static uint64 image_header_set = 0
+
 // Machine target (--target=esp32): 0 = none, 1 = ESP32 (Xtensa LX6 esp-image
 // at ESP32 load addresses). Orthogonal to target_os — --target= is overloaded:
 // OS names set target_os, machine names set this. Only meaningful with
@@ -5959,6 +5966,15 @@ fn main() {
                 // of naming itself.
                 stack_top = parse_stack_top(arg + 12)
                 stack_top_set = 1
+            } else if str_eq_full(arg, "--image-header") != 0 {
+                // No value to parse -- an explicit arm is still needed for
+                // the same V7 reason --load-addr=/--stack-top= have one:
+                // without it, --image-header falls through to the final
+                // `else { input_path = arg }` and dies with "cannot open
+                // '--image-header': file not found" instead of naming
+                // itself. Validated below (sub-project C, Task 1): this
+                // task only parses and refuses -- no header is emitted.
+                image_header_set = 1
             } else if str_eq_full(arg, "-c") != 0 {
                 emit_set = 1
                 emit_mode = 3
@@ -6082,6 +6098,8 @@ fn main() {
                 write(1, h_la, str_len(h_la))
                 uint64 h_st = "  --stack-top=<addr>       emit a self-booting entry stub that sets SP here (x86_64 also gets a multiboot header + long-mode trampoline); validated per-arch (arm64: 16-byte aligned, <2^32; x86_64: <=0x40000000, its first push must clear the page tables at 0x1000-0x4000 so the stack top is <=0x1000 or >=0x4008, and --load-addr must then be in [0x4000,0x40000000)); on both arches the stack must not start inside the image; no default\n"
                 write(1, h_st, str_len(h_st))
+                uint64 h_ih = "  --image-header            prefix the 64-byte arm64 Linux Image header (magic 0x644d5241); requires --arch=arm64 and --stack-top=; parsed and validated only -- no header is emitted yet\n"
+                write(1, h_ih, str_len(h_ih))
                 write(1, "  -c                        shorthand for --emit=obj\n", 53)
                 write(1, "  -o <path>                 output path\n\n", 41)
 
@@ -6491,6 +6509,29 @@ fn main() {
                 }
             }
         }
+        // --image-header (sub-project C, Task 1): parse and validate only --
+        // no header is emitted by this task. Requires --arch=arm64 (the
+        // header being prefixed IS arm64's Linux Image format; x86_64
+        // --emit=image already gets its own header -- the multiboot one
+        // --stack-top= adds above -- so --image-header on x86_64 has
+        // nothing of its own to attach) and --stack-top= (a header on a
+        // stub-less image validates under file(1) and is accepted by a
+        // loader, but the image has no entry stub to jump to and faults
+        // instantly, which would make the header a false claim about the
+        // bytes it precedes). Checked after the arch==2/arch==3 refusals
+        // above, so arch here is only ever 0 (x86_64) or 1 (arm64).
+        if image_header_set != 0 {
+            if arch == 0 {
+                uint64 ih_a64 = "error: --image-header requires --arch=arm64: the header is arm64's Linux Image format (magic 0x644d5241); x86_64 --emit=image already carries its own header (the multiboot one --stack-top= adds), so --image-header on x86_64 has nothing to attach to\n"
+                write(2, ih_a64, str_len(ih_a64))
+                exit(1)
+            }
+            if stack_top_set == 0 {
+                uint64 ih_st = "error: --image-header requires --stack-top=: a header on a stub-less image validates under file(1) and is accepted by a loader, but the image has no entry stub to jump to and faults instantly. Pass --stack-top= so the header's claim matches the bytes\n"
+                write(2, ih_st, str_len(ih_st))
+                exit(1)
+            }
+        }
     }
     if load_addr_set != 0 && emit_mode != 8 {
         uint64 la_im = "error: --load-addr= is only meaningful with --emit=image: hosted containers carry their load address in their own headers\n"
@@ -6500,6 +6541,11 @@ fn main() {
     if stack_top_set != 0 && emit_mode != 8 {
         uint64 st_im = "error: --stack-top= is only meaningful with --emit=image: hosted containers manage the stack pointer through their own loader, not a flag\n"
         write(2, st_im, str_len(st_im))
+        exit(1)
+    }
+    if image_header_set != 0 && emit_mode != 8 {
+        uint64 ih_im = "error: --image-header is only meaningful with --emit=image: it prefixes a flat image with an arm64 boot header, and only --emit=image produces a flat image to prefix\n"
+        write(2, ih_im, str_len(ih_im))
         exit(1)
     }
 
