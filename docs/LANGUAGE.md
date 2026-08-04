@@ -1483,6 +1483,7 @@ krc <file.kr> --target=android -o out
 #   asm                                                 → annotated assembly listing (to -o path)
 #   ir                                                  → SSA IR dump per function (to stdout)
 #   image                                               → raw flat binary, no container (bare metal; --image-header prefixes an arm64 boot header)
+#   uefi                                                → UEFI application (PE32+) that firmware loads and enters directly
 krc <file.kr> --emit=pe -o out.exe
 krc <file.kr> --emit=macho -o out
 krc <file.kr> --emit=android -o out
@@ -1708,6 +1709,65 @@ start it. Everything below is a limit of *that evidence*.
   can be refused for an overlap the real load makes irrelevant, or accepted
   into one it creates. Set it to where you actually expect the image to land
   and treat that refusal as advisory.
+
+#### UEFI applications (`--emit=uefi`)
+
+```
+krc app.kr --arch=x86_64 --target=none --emit=uefi -o BOOTX64.EFI
+```
+
+A UEFI application is a PE32+ image that the firmware loads, relocates and
+enters directly. Unlike `--emit=image` it needs no loader of yours and no
+entry stub: firmware enters in long mode with paging on and a stack already
+set up, so there is nothing for a trampoline to do. Consequently
+`--load-addr=`, `--stack-top=` and `--image-header` are all **refused** with
+this mode — they describe a flat image somebody else has to place, and
+firmware places this one itself. The build prints a report line:
+
+```
+uefi: arch=x86_64 entry=4096 filesz=4232 memsz=4232 hdr=4096
+```
+
+`entry` and `hdr` are **file offsets**, decimal, like the `--emit=image`
+report's. `hdr` is the size of the reserved header region at the front of the
+file; `entry` is the entry function — a live `_start` if the program has one
+and `main` otherwise, the same bare-metal rule `--emit=image` uses.
+
+**Required flags, and why each is refused rather than defaulted:**
+
+* `--target=none` — a new emit mode does *not* get a bare-metal target for
+  free. Without this flag the resolved OS is the default, `linux`, and the
+  application would carry Linux syscalls that firmware does not provide.
+* `--arch=x86_64` or `--arch=arm64`, **explicitly** — a PE names the CPU in
+  its `Machine` field, so a silently defaulted arch produces an application
+  declaring a processor you did not ask for. riscv32 and xtensa are refused
+  outright: neither has a `Machine` value here, and both already own a raw
+  boot path through `--freestanding`.
+* `-g` is refused, as it is for `--emit=image`: the DWARF footer is laid out
+  from an ELF geometry this container does not have.
+
+`--target=android` is refused too, and for a reason worth knowing: that flag
+does not only choose an OS, it *also* forces `--emit=android`, so combining
+the two would otherwise have silently emitted an Android ELF.
+
+**The header region is 4096 bytes and that is a correctness constraint, not
+a formatting choice.** arm64 `adrp` page arithmetic is baked during code
+generation from the *file* offset of each datum, while a PE loader places the
+payload at `SectionRVA + (file offset − PointerToRawData)`. The two agree on
+page boundaries only when that difference is a multiple of 4096. This
+compiler takes the strongest form: `PointerToRawData == SectionRVA == 0x1000`,
+so file offset equals RVA for every byte in the artifact. A conventional
+0x200 file alignment with the section at RVA 0x1000 gives a difference of
+0xE00 instead — and the resulting image loads, is accepted by `file(1)`, and
+faults with no diagnostic. x86_64 output is RIP-relative and immune to this,
+and is held to the same geometry anyway.
+
+**Status: the PE header itself is not emitted yet.** As of sub-project D
+Task 1 the mode's flag surface, its refusals and its payload geometry are
+complete, and the reserved 4096 bytes are **zero** — so the artifact is not
+yet a PE and no firmware will load it. Task 2 fills the header in. Do not
+read the sections above as a claim that any of this has booted; nothing in
+this tree has run a KernRift artifact under UEFI firmware.
 
 ```
 

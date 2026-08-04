@@ -2650,16 +2650,37 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
     if arch == 3 && emit_mode == 0 && freestanding != 0 {
         xt_raw = 1
     }
-    // --emit=image (x86_64/arm64 bare metal). Gated on emit_mode ALONE, not on
-    // target_os: the flag validation has already refused --emit=image for every
-    // OS but `none` and for every arch but 0/1, so emit_mode == 8 is the exact
-    // set. Deliberately NOT written as `target_os == 4` — the per-OS dispatch
-    // in this codebase is "special-case Windows/macOS, ELSE fall through to
-    // POSIX", and a bare-metal condition phrased in terms of the OS is the
-    // shape that inherits Linux when a case is missed. emit_mode has no
-    // fall-through.
+    // The FLAT-PAYLOAD modes: --emit=image (8) and --emit=uefi (9). Gated on
+    // emit_mode ALONE, not on target_os: the flag validation has already
+    // refused both of them for every OS but `none` and for every arch but 0/1,
+    // so {8, 9} is the exact set. Deliberately NOT written as `target_os == 4`
+    // — the per-OS dispatch in this codebase is "special-case Windows/macOS,
+    // ELSE fall through to POSIX", and a bare-metal condition phrased in terms
+    // of the OS is the shape that inherits Linux when a case is missed.
+    //
+    // MODE 9 JOINED THIS GATE IN SUB-PROJECT D TASK 1, AND HAD TO. This one
+    // variable gates two separate things and BOTH of them fail silently when a
+    // mode is missing from it:
+    //
+    //   * the `_start` DCE seeding below — without it, a program with both
+    //     `_start` and `main` seeds only `main`, `_start` is pruned, and
+    //     find_entry_node declines to select a function that is not in the
+    //     artifact;
+    //   * the ENTRY-RESOLVER FORK at the finalize block — img_raw == 0 takes
+    //     the find_main_offset branch, which is the hosted `@export`-and-`main`
+    //     rule. Falsified by construction at BASE: `fn _start() -> uint64 {
+    //     return 7 }` compiles under --emit=image (entry=0, 32 bytes) and dies
+    //     "error: no 'main' function found" under --emit=pe. That second
+    //     branch is exactly what a new emit mode inherits.
+    //
+    // What mode 9 does NOT inherit from mode 8 is any of the three flag-gated
+    // blocks below (--image-header's 64 bytes, and both entry stubs): each also
+    // tests image_header_set / stack_top_set, and all three of those flags are
+    // refused outside emit_mode 8 by the validation at the bottom of this file.
+    // UEFI needs none of them — firmware enters in long mode with a stack
+    // already set up.
     uint64 img_raw = 0
-    if emit_mode == 8 {
+    if emit_mode == 8 || emit_mode == 9 {
         img_raw = 1
     }
 
@@ -2857,6 +2878,53 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
         // destroys. This branch is still empty of emit_* calls because
         // nothing unconditional belongs here, not because nothing may.
         header_size = 0
+    } else if emit_mode == 9 {
+        // --emit=uefi: a PE32+ EFI application (sub-project D).
+        //
+        // THIS ARM RESERVES THE HEADER REGION; TASK 2 FILLS IT. What is
+        // emitted here today is 4096 zero bytes, and the reason the SIZE
+        // lands in Task 1 rather than with the fields is that the size is
+        // not a formatting choice — it is a correctness constraint on the
+        // PAYLOAD, and the payload is emitted immediately after this line.
+        //
+        // C1, THE PAGE-CONGRUENCE CONSTRAINT. a64_compute_va maps a file
+        // offset to 0x400000 + offset (codegen_aarch64.kr) with no notion of
+        // a container, and every arm64 ADRP page computation is baked from
+        // that map DURING codegen. A PE loader does not map the file that
+        // way: the payload lands at ImageBase + SectionRVA + (file_offset −
+        // PointerToRawData). The two agree on page boundaries — which is all
+        // ADRP needs, since 0x400000 is itself page-aligned — exactly when
+        //
+        //     (SectionRVA − PointerToRawData) % 4096 == 0
+        //
+        // This tree takes the strongest form of that: PointerToRawData ==
+        // SectionRVA == 0x1000, delta 0, so file offset == RVA for every byte
+        // in the artifact including the headers. The tempting alternative —
+        // the customary 0x200 file alignment with the section at RVA 0x1000 —
+        // gives a delta of 0xE00 and is the value the derivation reference
+        // prescribes. MEASURED: pad 0x200 -> the image LOADS AND FAULTS; pad
+        // 0x1000 -> runs; pad 0 -> runs. It exits 0, file(1) still calls the
+        // result an EFI application, and every static field assertion still
+        // passes, so nothing but a real boot witnesses it.
+        //
+        // x86_64 is immune (RIP-relative throughout) and is held to the same
+        // geometry anyway: one layout, one set of patch offsets, and no arch
+        // where a wrong delta is survivable enough to go unnoticed.
+        //
+        // EMITTED BEFORE THE FUNCTION EMIT LOOP, like the arm64 Image header
+        // and the x86_64 multiboot stub, and for the same reason: that is
+        // what re-bakes the page arithmetic AROUND the prefix in one step.
+        // A 4096-byte region glued on afterwards would leave every baked
+        // page_off one page stale while the data it points at had moved.
+        //
+        // header_size carries the mode 0/1/2/4 meaning here — bytes emitted
+        // before text_start — and NOT the mode 8 meaning ("how far the load
+        // address is from file offset 0"), because unlike a flat image this
+        // format really does have a container in front of the code. Nothing
+        // reads it on this path today; Task 2's PointerToRawData is the value
+        // it exists to be.
+        while codegen_output_len() < 4096 { emit_byte(0) }
+        header_size = 4096
     }
 
     uint64 text_start = codegen_output_len()
@@ -3185,7 +3253,19 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
     // GATED ON emit_mode/arch/flag, NEVER ON target_os. The per-OS dispatch
     // here is "special-case Windows/macOS, ELSE fall through to POSIX", so a
     // bare-metal condition written as an OS test is the shape that silently
-    // inherits Linux. img_raw is emit_mode == 8 and has no fall-through;
+    // inherits Linux. img_raw is emit_mode 8 or 9 (--emit=image / --emit=uefi,
+    // see its declaration); this block additionally requires stack_top_set,
+    // which is refused outside --emit=image, so only mode 8 can reach it.
+    //
+    // THE CLAUSE THAT USED TO SIT HERE — "img_raw is emit_mode == 8 and has no
+    // fall-through" — WAS FALSE IN BOTH HALVES. The set was widened by
+    // sub-project D; and the emit_mode chains DO fall through, in three
+    // separate places (the header dispatch, this file's finalize dispatch, and
+    // img_raw itself), each of which produces an artifact at exit 0 with no
+    // diagnostic. That was the whole hazard D Task 1 was written against, so
+    // the sentence is corrected here rather than left standing next to the
+    // change that falsified it.
+    //
     // stack_top_set is the D4 opt-in (absent => no stub => bytes unchanged);
     // arch == 1 is arm64. x86_64 has its own, differently-shaped stub — the
     // multiboot header + long-mode trampoline emitted at PART 1 above, which
@@ -4073,6 +4153,60 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
         write(1, ib, il)
         im = "\n"
         write(1, im, str_len(im))
+    } else if emit_mode == 9 {
+        // --emit=uefi finalize (sub-project D).
+        //
+        // THIS ARM EXISTS BECAUSE THE CHAIN HAS NO TERMINAL `else`. A mode
+        // that reaches the end of it unnamed gets no entry patch and no size
+        // patch, and then falls straight into codegen_write_output twelve
+        // lines below — exit 0, no diagnostic, a file on disk. That is the
+        // single most likely way this sub-project ships a broken artifact, so
+        // the arm is written before it has anything to patch rather than
+        // added alongside the fields that need it.
+        //
+        // NOTHING IS PATCHED HERE YET, and that is a Task 1 statement with an
+        // expiry date, not a property of the format: Task 2 patches
+        // AddressOfEntryPoint (= uf_entry, since file offset == RVA under the
+        // delta-0 geometry the header arm reserves), SizeOfImage and
+        // SizeOfHeaders into the 4096-byte region that arm emitted.
+        //
+        // NOTHING IS TRUNCATED, for the same reason --emit=image truncates
+        // nothing: the statics are carried as real zero bytes and there is no
+        // startup code to re-zero them. A PE's SizeOfImage-vs-raw-size pair
+        // could express a BSS tail, and deliberately will not — firmware
+        // zero-fills nothing.
+        //
+        // entry comes from the img_raw arm above (find_entry_node resolved
+        // through fn_lookup), so it is a live `_start` when the program has
+        // one and `main` otherwise. img_stub_set is always 0 on this path —
+        // both stubs are gated on --stack-top=, which is refused outside
+        // --emit=image — so entry is the entry FUNCTION's offset, with no
+        // trampoline in between. UEFI enters in long mode with a stack the
+        // firmware set up; there is nothing for a stub to do.
+        uint64 uf_size = codegen_output_len()
+        uint8[64] uf_b
+        uint64 uf_m = "uefi: arch="
+        write(1, uf_m, str_len(uf_m))
+        uint64 uf_a = arch_flag_name(arch)
+        write(1, uf_a, str_len(uf_a))
+        uf_m = " entry="
+        write(1, uf_m, str_len(uf_m))
+        uint64 uf_l = fmt_uint(uf_b, entry_off)
+        write(1, uf_b, uf_l)
+        uf_m = " filesz="
+        write(1, uf_m, str_len(uf_m))
+        uf_l = fmt_uint(uf_b, uf_size)
+        write(1, uf_b, uf_l)
+        uf_m = " memsz="
+        write(1, uf_m, str_len(uf_m))
+        uf_l = fmt_uint(uf_b, uf_size)
+        write(1, uf_b, uf_l)
+        uf_m = " hdr="
+        write(1, uf_m, str_len(uf_m))
+        uf_l = fmt_uint(uf_b, header_size)
+        write(1, uf_b, uf_l)
+        uf_m = "\n"
+        write(1, uf_m, str_len(uf_m))
     } else if emit_mode == 1 {
         // Mach-O
         uint64 page_size = 4096
@@ -6109,6 +6243,21 @@ fn main() {
     uint64 emit_mode = 0
     uint64 arch_set = 0
     uint64 emit_set = 0
+    // "the LAST --emit= on the line spelled `uefi`", which is a different fact
+    // from `emit_mode == 9` and is why it needs its own variable. --target=
+    // android does not merely set target_os: it ASSIGNS emit_mode = 4 from
+    // inside the argument loop, so `--emit=uefi --target=android` leaves
+    // emit_mode 4 with nothing anywhere recording that a UEFI application was
+    // asked for. Measured before this existed: that line emitted an Android
+    // PIE ELF at exit 0. --emit=image survives the same clobber only by
+    // accident (it also requires --load-addr=, whose own "only meaningful
+    // with --emit=image" check then fires); a new mode has no such backstop.
+    //
+    // RESET, NOT JUST SET, by every later --emit= and by -c — otherwise the
+    // post-loop check below would also fire on `--emit=uefi --emit=elfexe`,
+    // which is ordinary last-wins and must keep working (pinned by
+    // uefi_emit_last_wins_away).
+    uint64 uefi_set = 0
     // Tracks what the last --target= flag resolved to, so a second, different
     // --target= is a conflict rather than last-wins (e.g. --target=esp32
     // already implies bare metal on Xtensa; composing it with an OS name or
@@ -6162,6 +6311,9 @@ fn main() {
                 }
             } else if str_starts_with(arg, "--emit=", 7) != 0 {
                 emit_set = 1
+                // Cleared here and re-set only by the `uefi` arm below, so it
+                // always describes the LAST --emit= and never a superseded one.
+                uefi_set = 0
                 uint64 emit_str = arg + 7
                 if str_eq_full(emit_str, "elfexe") != 0 {
                     emit_mode = 0
@@ -6220,12 +6372,23 @@ fn main() {
                     // (:2340), so a new value is untouched by every existing
                     // invocation and byte-identity holds by construction.
                     emit_mode = 8
+                } else if str_eq_full(emit_str, "uefi") != 0 {
+                    // UEFI application: a PE32+ image that firmware loads and
+                    // enters directly (sub-project D). A NEW emit_mode value
+                    // rather than a modifier on 2 (--emit=pe) or 8
+                    // (--emit=image), because it shares the CONTAINER with
+                    // neither: --emit=pe hardcodes a kernel32 import table and
+                    // a Windows subsystem, and --emit=image has no container
+                    // at all. What it does share with 8 is the PAYLOAD, which
+                    // is why both are in img_raw.
+                    emit_mode = 9
+                    uefi_set = 1
                 } else {
                     write(2, "error: unknown emit format '", 28)
                     uint64 esl = str_len(emit_str)
                     write(2, emit_str, esl)
                     write(2, "'\n", 2)
-                    uint64 evl = "valid: elfexe, elf, linux, macho, mac, darwin, pe, windows, win, obj, android, asm, ir, lkm, image\n"
+                    uint64 evl = "valid: elfexe, elf, linux, macho, mac, darwin, pe, windows, win, obj, android, asm, ir, lkm, image, uefi\n"
                     write(2, evl, str_len(evl))
                     exit(1)
                 }
@@ -6255,6 +6418,7 @@ fn main() {
                 image_header_set = 1
             } else if str_eq_full(arg, "-c") != 0 {
                 emit_set = 1
+                uefi_set = 0
                 emit_mode = 3
             } else if str_starts_with(arg, "--targets=", 10) != 0 {
                 parse_targets_arg(arg + 10)
@@ -6372,6 +6536,15 @@ fn main() {
                 write(1, "  --emit=ir                 dump SSA IR per function\n", 53)
                 uint64 h_img = "  --emit=image             raw flat binary, no container (bare metal; needs --target=none, explicit --arch, --load-addr=; --image-header prefixes an arm64 boot header)\n"
                 write(1, h_img, str_len(h_img))
+                // A dedicated line, not a clause inside another flag's
+                // description: `hd_flags`'s regex stops at `=`, so it reads
+                // `--emit` out of `--emit=uefi` and the docs-consistency rows
+                // are already satisfied by a token that predates this mode.
+                // An --emit= VALUE is structurally invisible to them, which is
+                // why this line and its docs section each carry their own row
+                // (uefi_help_has_own_line, uefi_docs_section_intact).
+                uint64 h_uefi = "  --emit=uefi              UEFI application: a PE32+ image firmware loads and enters directly (bare metal; needs --target=none and an explicit --arch=x86_64|arm64; takes no --load-addr/--stack-top -- firmware relocates the image and enters with a stack already set up)\n"
+                write(1, h_uefi, str_len(h_uefi))
                 uint64 h_la = "  --load-addr=<addr>       where the image will be loaded; validated (arm64: 4096-aligned) and reported, never embedded\n"
                 write(1, h_la, str_len(h_la))
                 uint64 h_st = "  --stack-top=<addr>       emit a self-booting entry stub that sets SP here (x86_64 also gets a multiboot header + long-mode trampoline); validated per-arch (arm64: 16-byte aligned, <2^32; x86_64: <=0x40000000, its first push must clear the page tables at 0x1000-0x4000 so the stack top is <=0x1000 or >=0x4008, and --load-addr must then be in [0x4000,0x40000000)); on both arches the stack must not start inside the image; no default\n"
@@ -6508,6 +6681,25 @@ fn main() {
     // emit_mode=4 (android): default to arm64 unless --arch was explicitly set
     if emit_mode == 4 && arch_set == 0 { arch = 1 }
 
+    // --emit=uefi survived the argument loop, or it did not. THE ONLY THING
+    // THAT CAN TAKE IT AWAY IS --target=android, which assigns emit_mode = 4
+    // in the middle of the loop; a later --emit= clears uefi_set on its way
+    // past, so ordinary last-wins never reaches here.
+    //
+    // FIRST, AHEAD OF EVERY OTHER REFUSAL IN THIS FILE, because by this point
+    // emit_mode says 4 and target_os says 3 — the request is invisible to
+    // every check keyed on either. Without this the line emits an Android PIE
+    // ELF at exit 0 with no diagnostic, which is the exact shape sub-project A
+    // spent a Critical on. The opposite order (`--target=android --emit=uefi`)
+    // is NOT this defect: there --emit=uefi legitimately wins the chain and is
+    // refused by the --target=none rule below, which is a different door and
+    // says so.
+    if uefi_set != 0 && emit_mode != 9 {
+        uint64 uf_ov = "error: --emit=uefi was overridden by --target=android: --target=android does not only select an OS, it also forces --emit=android, so the UEFI application you asked for would have been emitted as an Android PIE ELF. Drop --target=android (--emit=uefi requires --target=none), or drop --emit=uefi\n"
+        write(2, uf_ov, str_len(uf_ov))
+        exit(1)
+    }
+
     // --target=none is a bare-metal image: no kernel to load a loadable
     // kernel module into, no Android runtime to host an APK payload. Refuse
     // both explicitly rather than emitting a container that nothing on that
@@ -6530,21 +6722,34 @@ fn main() {
         }
         // Mach-O and PE are OS CONTAINERS, not just byte layouts: a Mach-O
         // image is loaded by dyld through LC_MAIN and its segments are mapped
-        // by the macOS kernel; a PE image is loaded by the Windows loader
-        // through an import table and a subsystem field. Nothing on bare
-        // metal reads either. Before this, `--emit=macho --target=none`
-        // exited 0 and wrote a real 8192-byte Mach-O (2048-byte PE) full of
-        // bare-metal codegen — a file no macOS and no bare-metal machine can
-        // load. Keyed on the resolved emit_mode, not on the spelling, so the
-        // aliases (darwin/mac/mac-arm64, win/win-x64/windows-arm64) are
-        // covered by the same two checks.
+        // by the macOS kernel; the PE this compiler emits is loaded by the
+        // Windows loader, which binds its imports. Before this, `--emit=macho
+        // --target=none` exited 0 and wrote a real 8192-byte Mach-O
+        // (2048-byte PE) full of bare-metal codegen — a file no macOS and no
+        // bare-metal machine can load. Keyed on the resolved emit_mode, not on
+        // the spelling, so the aliases (darwin/mac/mac-arm64,
+        // win/win-x64/windows-arm64) are covered by the same two checks.
+        //
+        // THE PE HALF KEPT ITS CHECK AND LOST ITS REASONING (sub-project D,
+        // Task 1). It used to say a PE "is an OS container (the Windows
+        // loader, an import table, a subsystem field) and nothing on bare
+        // metal loads one", and that last clause is simply false: UEFI
+        // firmware loads a PE32+ on bare metal on every boot, and the
+        // subsystem field is precisely how it tells an EFI application from a
+        // Windows one. The REFUSAL is still right, for a narrower and
+        // verifiable reason: what --emit=pe emits is a WINDOWS PE. It carries
+        // an unconditional kernel32 .idata (verified present in the emitted
+        // bytes), and its entry instruction is `call *0xf6e(%rip)` into an IAT
+        // slot that only the Windows loader ever fills, so on bare metal it
+        // jumps through a null pointer on its first instruction. --emit=uefi
+        // is the mode that does not do that, so the message names it.
         if emit_mode == 1 {
             uint64 mo_msg = "error: --emit=macho conflicts with --target=none: a Mach-O image is an OS container (dyld, LC_MAIN, segments mapped by the macOS kernel) and nothing on bare metal loads one; use the default ELF, or --emit=obj for a relocatable object to link yourself\n"
             write(2, mo_msg, str_len(mo_msg))
             exit(1)
         }
         if emit_mode == 2 {
-            uint64 pe_msg = "error: --emit=pe conflicts with --target=none: a PE image is an OS container (the Windows loader, an import table, a subsystem field) and nothing on bare metal loads one; use the default ELF, or --emit=obj for a relocatable object to link yourself\n"
+            uint64 pe_msg = "error: --emit=pe conflicts with --target=none: --emit=pe emits a WINDOWS PE -- it imports kernel32 and its entry instruction calls through an import-table slot that only the Windows loader fills, so on bare metal it jumps through a null pointer before your code runs. Firmware does load PE32+ images, so if that is what you want use --emit=uefi; otherwise use the default ELF, or --emit=obj for a relocatable object to link yourself\n"
             write(2, pe_msg, str_len(pe_msg))
             exit(1)
         }
@@ -6808,6 +7013,73 @@ fn main() {
                 write(2, ih_st, str_len(ih_st))
                 exit(1)
             }
+        }
+    }
+    // --emit=uefi (emit_mode 9): sub-project D's UEFI-application surface.
+    // Deliberately a SEPARATE block from mode 8's above rather than a widened
+    // `emit_mode == 8 || emit_mode == 9` on each row: the two modes agree on
+    // three rules and disagree on the rest (mode 9 takes no --load-addr, no
+    // --stack-top and no --image-header, and its arch refusals are about a PE
+    // Machine value rather than about a raw path each arch already owns), so
+    // a shared block would need a per-mode message on nearly every line.
+    //
+    // EVERY ROW HERE IS A DEFAULT A NEW EMIT MODE INHERITS, not a rule
+    // invented for this format. There is no arch_set == 0 refusal, no
+    // target_os refusal and no -g refusal anywhere that a mode gets for free;
+    // each of the three below was measured silently absent before it was
+    // written.
+    if emit_mode == 9 {
+        // THE else-POSIX DOOR, arriving through the --emit= entrance. The
+        // auto-set block above keys on emit_mode 1/2/4 only, so mode 9 leaves
+        // target_os at its 0 = linux default and every "special-case Windows/
+        // macOS, ELSE fall through to POSIX" dispatch in the tree answers
+        // "Linux" for it. CONSTRUCTED, NOT ASSUMED: with this one check
+        // disabled in a scratch build, `--arch=x86_64 --emit=uefi` (no
+        // --target= on the line) on a program calling print() compiled CLEAN
+        // -- exit 0, a 4312-byte artifact, and four x86_64 `syscall`
+        // instructions in its payload. Firmware provides no syscalls at all,
+        // so that artifact faults on its first write with nothing to report it.
+        if target_os != 4 {
+            uint64 uf_tn = "error: --emit=uefi requires --target=none: without it the resolved target OS is a hosted one (the default is linux) and the application would carry that OS's syscalls, which UEFI firmware does not provide\n"
+            write(2, uf_tn, str_len(uf_tn))
+            exit(1)
+        }
+        // No --arch at all: refuse. --emit= sets emit_set, which skips the fat
+        // path AND its "pass --arch" refusal, so the arch would silently
+        // default to x86_64 -- and a PE carries the CPU in its Machine field,
+        // so a defaulted arch is a header that names a processor nobody asked
+        // for, on an artifact whose whole purpose is to be handed to firmware.
+        if arch_set == 0 {
+            uint64 uf_ar = "error: --emit=uefi requires an explicit --arch=x86_64 or --arch=arm64: a PE header names the CPU in its Machine field, so a silently defaulted arch would produce an application declaring a processor you did not ask for\n"
+            write(2, uf_ar, str_len(uf_ar))
+            exit(1)
+        }
+        // riscv32 / xtensa. Each message carries a substring UNIQUE to it --
+        // "x86_64/arm64 only" would appear in both, and a defect that routed
+        // xtensa to the riscv32 arm would then pass a test grepping the shared
+        // half (the trap the --emit=image rows already document).
+        if arch == 2 {
+            uint64 uf_rv = "error: --emit=uefi is x86_64/arm64 only: there is no PE Machine value for riscv32 in this compiler, and no UEFI firmware target for it here either. Use --arch=riscv32 --freestanding for a raw boot image instead\n"
+            write(2, uf_rv, str_len(uf_rv))
+            exit(1)
+        }
+        if arch == 3 {
+            uint64 uf_xt = "error: --emit=uefi is x86_64/arm64 only: there is no PE Machine value for xtensa, and the chip has no UEFI firmware. Use --arch=xtensa --freestanding (lx60 boot ELF) or --target=esp32 (esp-image) instead\n"
+            write(2, uf_xt, str_len(uf_xt))
+            exit(1)
+        }
+        // -g. Its existing refusal is nested inside `if emit_mode == 8`, so a
+        // new mode inherits ACCEPTANCE -- and acceptance here is invisible:
+        // measured at BASE, `--emit=pe -g` produces a file BYTE-IDENTICAL to
+        // `--emit=pe` (2048 bytes both), i.e. the flag is silently discarded
+        // rather than doing something wrong. Refused rather than discarded,
+        // for the same reason mode 8 refuses it: the DWARF footer and its
+        // section headers are laid out from an ELF geometry this container
+        // does not have.
+        if debug_info_mode != 0 {
+            uint64 uf_g = "error: -g conflicts with --emit=uefi: the DWARF footer and its section headers are laid out from the ELF geometry a PE32+ EFI application does not have, and would land inside the image at addresses nothing maps. Drop -g, or drop --emit=uefi to keep the ELF that -g understands\n"
+            write(2, uf_g, str_len(uf_g))
+            exit(1)
         }
     }
     if load_addr_set != 0 && emit_mode != 8 {

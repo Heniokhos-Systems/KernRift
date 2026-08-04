@@ -8699,6 +8699,289 @@ rm -f "$ihdr_a" "$ihdr_b"
 
 rm -f "$STK_SRC" "$IMG_SRC"
 
+# --- --emit=uefi flag surface + payload geometry (sub-project D, Task 1) -----
+#
+# WHAT MAKES THIS MODE DANGEROUS, AND WHY EVERY ROW BELOW IS SHAPED THE WAY IT
+# IS. A new --emit= value inherits four separate defaults, and all four fail
+# IDENTICALLY: exit 0, no diagnostic, an artifact on disk, and every static
+# assertion about the flag surface still green. They are, with the evidence
+# that each is real rather than theoretical (all measured at BASE = 2b63051,
+# with the mode's arms deliberately absent):
+#
+#   1. THE HEADER DISPATCH (src/main.kr, the `if emit_mode == 0 ... else if`
+#      chain) has no terminal `else`. A mode that reaches it unnamed emits no
+#      container bytes at all and header_size keeps its 120-byte default.
+#   2. THE FINALIZE DISPATCH has no terminal `else` either. A fall-through
+#      there gets no entry patch and no size patch, and still reaches
+#      codegen_write_output.
+#   3. img_raw was `emit_mode == 8` ALONE, and it gates BOTH the `_start` DCE
+#      seeding AND the entry-resolver fork. Falsified by construction at BASE:
+#      `fn _start() -> uint64 { return 7 }` compiles under --emit=image
+#      (`image: ... entry=0`, 32 bytes) and dies "no 'main' function found"
+#      under --emit=pe -- and the second branch is what a new mode inherits.
+#   4. target_os SILENTLY BECOMES LINUX. The auto-set block keys on emit_mode
+#      1/2/4 only, so a new mode leaves target_os at its 0 = linux default and
+#      every else-POSIX fall-through in the tree answers "Linux" for it. Row
+#      `uefi_target_none_is_bare_metal` is the positive control for that.
+#
+# THE PAYLOAD ROW IS THE ONE THAT SEES SITES 1-3. Exit 0 plus "a file exists"
+# would pass with all three arms missing. `uefi_payload_is_the_image_payload`
+# reads the artifact instead: the bytes after the reserved header region must
+# be the SAME BYTES --emit=image emits for the same source and arch. That
+# fails if the payload is truncated, if fixups went unresolved, if statics
+# were dropped -- and, on arm64, if the reserved region is not a whole number
+# of 4 KiB pages, because adrp bakes page(target) - page(pc) from the file
+# offset and only a page-congruent shift leaves those bytes alone.
+#
+# THE 4 KiB IS TASK 2's CONSTRAINT, HONOURED HERE. a64_compute_va maps file
+# offset -> 0x400000 + offset, so the payload's baked page arithmetic is
+# congruent to its FILE offset mod 4096. A PE loader maps it at
+# SectionRVA + (offset - PointerToRawData). Those agree only when
+# (SectionRVA - PointerToRawData) == 0 mod 4096. This tree reserves 0x1000
+# and will place the section at RVA 0x1000, i.e. delta 0 -- the strongest
+# form, where file offset == RVA everywhere in the file. The 0xE00 delta a
+# 0x200 file alignment would produce is exactly the value that loads, runs
+# and faults with no diagnostic.
+echo ""
+echo "--- --emit=uefi flag surface + payload geometry (D, Task 1) ---"
+UEFI_SRC="$DIR/../test_tmp_uefi_$$.kr"
+printf 'static uint64 uefi_magic = 305419896\nfn helper(uint64 x) -> uint64 { return x + uefi_magic }\nfn main() -> uint64 { return helper(3) }\n' > "$UEFI_SRC"
+# Three clauses per refusal, exactly as img_refuses(): nonzero exit, the
+# diagnostic, and NO ARTIFACT. A diagnostic that still writes a file is half a
+# refusal, and for this mode the half that ships is the dangerous one.
+uefi_refuses() {  # $1 name, $2 grep pattern, rest = flags
+    local name="$1" pat="$2"; shift 2
+    TOTAL=$((TOTAL + 1))
+    rm -f /tmp/krc_uefi_$$
+    local out; out=$($KRC $KRC_FLAGS "$UEFI_SRC" -o /tmp/krc_uefi_$$ "$@" 2>&1); local st=$?
+    if [ $st -ne 0 ] && echo "$out" | grep -q -- "$pat" && [ ! -f /tmp/krc_uefi_$$ ]; then
+        PASS=$((PASS + 1)); echo "  $name: PASS"
+    else
+        echo "FAIL: $name (exit=$st, artifact=$([ -f /tmp/krc_uefi_$$ ] && echo yes || echo no), out=$(echo "$out" | head -1))"
+        FAIL=$((FAIL + 1))
+    fi
+    rm -f /tmp/krc_uefi_$$
+}
+
+# 1-2. --target=none is REQUIRED, both by absence and against a hosted value.
+#      Row 1 is the one that closes the else-POSIX door: with no --target= on
+#      the line at all the resolved OS is linux, and a UEFI application full
+#      of Linux syscalls is exactly the silent artifact this mode must never
+#      produce.
+uefi_refuses uefi_requires_target_none "requires --target=none" --arch=x86_64 --emit=uefi
+uefi_refuses uefi_hosted_target_refused "requires --target=none" --arch=arm64 --target=macos --emit=uefi
+
+# 3-4. riscv32 / xtensa: refused. There is no third Machine value to write
+#      into a PE header for either, and both already own a raw path. The
+#      patterns are substrings UNIQUE to each message -- "x86_64/arm64 only"
+#      appears in both, so grepping it would let a defect that routes xtensa
+#      to the riscv32 refusal pass (the same trap the --emit=image rows note).
+uefi_refuses uefi_refuses_riscv32 "no PE Machine value for riscv32" --arch=riscv32 --target=none --emit=uefi
+uefi_refuses uefi_refuses_xtensa "no PE Machine value for xtensa" --arch=xtensa --target=none --emit=uefi
+
+# 5. NO --arch AT ALL: refused. There is no arch_set == 0 refusal for a new
+#    emit mode -- --emit= sets emit_set, which skips the fat path AND its
+#    "pass --arch" refusal, so the arch would silently default to x86_64 and
+#    the PE Machine field would name a CPU nobody asked for. Uses the RAW
+#    build/krc2 because the make-test wrapper injects --arch=x86_64, which is
+#    the exact condition under test.
+TOTAL=$((TOTAL + 1))
+if [ -f "$DIR/../build/krc2" ]; then UEFI_RAW_KRC=$(cd "$DIR/../build" && pwd)/krc2; else UEFI_RAW_KRC=""; fi
+rm -f /tmp/krc_uefina_$$
+uefina_out=$("$UEFI_RAW_KRC" "$UEFI_SRC" -o /tmp/krc_uefina_$$ --target=none --emit=uefi 2>&1); uefina_st=$?
+if [ -n "$UEFI_RAW_KRC" ] && [ $uefina_st -ne 0 ] \
+   && echo "$uefina_out" | grep -q "requires an explicit --arch" && [ ! -f /tmp/krc_uefina_$$ ]; then
+    PASS=$((PASS + 1)); echo "  uefi_requires_explicit_arch: PASS"
+else
+    echo "FAIL: uefi_requires_explicit_arch (exit=$uefina_st, out=$(echo "$uefina_out" | head -1))"; FAIL=$((FAIL + 1))
+fi
+rm -f /tmp/krc_uefina_$$
+
+# 6-7. --target=android, BOTH ORDERS, because the two orders fail through
+#      different doors and only one of them is covered by row 1.
+#
+#      MEASURED: `--target=android` does not merely set target_os, it ASSIGNS
+#      emit_mode = 4 in the middle of the argument loop. So with --emit=uefi
+#      FIRST the mode is silently overwritten, the emit_mode-9 refusals never
+#      run, and the build emits an Android PIE ELF at exit 0 -- --emit=image
+#      survives the same line only by the accident of ALSO requiring
+#      --load-addr=, whose "only meaningful with --emit=image" check then
+#      fires. A new mode has no such backstop, so it gets an explicit one.
+#      In the other order --emit=uefi comes last, wins the chain, and is
+#      caught by row 1's target_os rule instead -- a different door, hence a
+#      different expected diagnostic, hence two rows and not one.
+uefi_refuses uefi_refuses_target_android "overridden by --target=android" --arch=x86_64 --emit=uefi --target=android
+uefi_refuses uefi_target_android_first "requires --target=none" --arch=x86_64 --target=android --emit=uefi
+
+# 8. -g: refused. At BASE the -g refusal lives INSIDE `if emit_mode == 8`, so
+#    a new mode inherits acceptance, not refusal -- and acceptance is silent:
+#    measured at BASE, `--emit=pe -g` is BYTE-IDENTICAL to `--emit=pe` (2048
+#    bytes both), so -g on a container that ignores it is not even visible in
+#    the artifact.
+uefi_refuses uefi_rejects_g "conflicts with --emit=uefi" --arch=arm64 --target=none --emit=uefi -g
+
+# 9-11. The three --emit=image-only flags stay --emit=image-only. A UEFI
+#       application is loaded and relocated by firmware: it has no load
+#       address to pin, its stack is set up before entry so there is no stub
+#       to emit, and the arm64 Linux Image header is a different container.
+uefi_refuses uefi_load_addr_refused "only meaningful with --emit=image" --arch=x86_64 --target=none --emit=uefi --load-addr=0x400000
+uefi_refuses uefi_stack_top_refused "only meaningful with --emit=image" --arch=x86_64 --target=none --emit=uefi --stack-top=0x90000
+uefi_refuses uefi_image_header_refused "only meaningful with --emit=image" --arch=arm64 --target=none --emit=uefi --image-header
+
+# 12-13. --targets= forces the fat path even with --emit= present, so both
+#        spellings are pinned exactly as the --emit=image rows pin them: check
+#        ORDER is the only thing keeping a fat build from swallowing this mode.
+uefi_refuses uefi_targets_no_none "requires --target=none" --arch=x86_64 --emit=uefi --targets=linux-x64
+uefi_refuses uefi_targets_with_none "cannot build a fat binary" --arch=x86_64 --target=none --emit=uefi --targets=linux-x64
+
+# 14. --emit= LAST-WINS still works in the uefi -> other direction. This is
+#     the row that keeps the android-override refusal narrow: it must fire on
+#     an emit_mode clobbered by --target=android and NOT on one a later
+#     --emit= legitimately replaced. `--emit=uefi --emit=elfexe --target=none`
+#     is a plain accepted bare-metal ELF build.
+TOTAL=$((TOTAL + 1))
+rm -f /tmp/krc_uefilw_$$
+if $KRC $KRC_FLAGS "$UEFI_SRC" -o /tmp/krc_uefilw_$$ --arch=x86_64 --target=none --emit=uefi --emit=elfexe >/dev/null 2>&1 \
+   && [ -f /tmp/krc_uefilw_$$ ] && head -c 4 /tmp/krc_uefilw_$$ | grep -q ELF; then
+    PASS=$((PASS + 1)); echo "  uefi_emit_last_wins_away: PASS (--emit=uefi --emit=elfexe builds an ELF)"
+else
+    echo "FAIL: uefi_emit_last_wins_away (the override refusal is too wide: a later --emit= is last-wins, not a clobber)"; FAIL=$((FAIL + 1))
+fi
+rm -f /tmp/krc_uefilw_$$
+# ...and the other direction refuses on the resolved mode, not the spelling.
+uefi_refuses uefi_emit_last_wins_to "requires --target=none" --arch=x86_64 --emit=elfexe --emit=uefi
+
+# 15. THE target_os POSITIVE CONTROL (Task 1, Step 4). Everything above is a
+#     refusal, and refusals cannot show what the ACCEPTED path resolved to.
+#     This one can: `print` is refused under --target=none with a message no
+#     hosted target ever produces, and compiles clean on every hosted one. So
+#     an --emit=uefi build that answers "not available on bare metal" is a
+#     build whose target_os is 4 and not 0.
+#
+#     CONSTRUCTED, NOT ASSUMED. With the --target=none refusal disabled in a
+#     scratch build of the compiler, `--arch=x86_64 --emit=uefi` on this exact
+#     program COMPILED CLEAN: exit 0, a 4312-byte artifact (216-byte payload),
+#     and `objdump -D -b binary -m i386:x86-64` counts FOUR x86_64 `syscall`
+#     instructions in it -- Linux syscalls inside a UEFI application. The
+#     default really is linux; this row is what witnesses it staying gone.
+TOTAL=$((TOTAL + 1))
+UEFI_PR="$DIR/../test_tmp_uefipr_$$.kr"
+printf 'fn main() -> uint64 { print(1) return 0 }\n' > "$UEFI_PR"
+rm -f /tmp/krc_uefipr_$$
+uefipr_out=$($KRC $KRC_FLAGS "$UEFI_PR" -o /tmp/krc_uefipr_$$ --arch=x86_64 --target=none --emit=uefi 2>&1); uefipr_st=$?
+if [ $uefipr_st -ne 0 ] && echo "$uefipr_out" | grep -q "not available on bare metal" && [ ! -f /tmp/krc_uefipr_$$ ]; then
+    PASS=$((PASS + 1)); echo "  uefi_target_none_is_bare_metal: PASS (accepted uefi path resolves target_os=none, not linux)"
+else
+    echo "FAIL: uefi_target_none_is_bare_metal (exit=$uefipr_st, out=$(echo "$uefipr_out" | head -1) -- an --emit=uefi build that accepts print() resolved target_os to a hosted OS)"; FAIL=$((FAIL + 1))
+fi
+rm -f /tmp/krc_uefipr_$$ "$UEFI_PR"
+
+# 16. A `_start`-only program builds -- site 3, img_raw. At BASE this program
+#     dies "no 'main' function found" on every mode but 8, because img_raw
+#     gates both the DCE seeding that keeps `_start` alive and the
+#     find_entry_node-vs-find_main_offset fork. Asserted through the REPORT
+#     line, not just exit 0: an image whose entry never resolved reports the
+#     0xFFFFFFFF sentinel (4294967295) while exiting 0.
+TOTAL=$((TOTAL + 1))
+UEFI_ST="$DIR/../test_tmp_uefist_$$.kr"
+printf 'fn _start() -> uint64 { return 7 }\n' > "$UEFI_ST"
+rm -f /tmp/krc_uefist_$$
+uefist_out=$($KRC $KRC_FLAGS "$UEFI_ST" -o /tmp/krc_uefist_$$ --arch=x86_64 --target=none --emit=uefi 2>&1); uefist_st=$?
+uefist_ent=$(echo "$uefist_out" | grep -o 'entry=[0-9]*' | head -1)
+if [ $uefist_st -eq 0 ] && [ -f /tmp/krc_uefist_$$ ] && [ "$uefist_ent" = "entry=4096" ]; then
+    PASS=$((PASS + 1)); echo "  uefi_start_only_program: PASS ($uefist_ent, no 'main' in the source)"
+else
+    echo "FAIL: uefi_start_only_program (exit=$uefist_st, entry='$uefist_ent' want entry=4096, out=$(echo "$uefist_out" | head -1))"; FAIL=$((FAIL + 1))
+fi
+rm -f /tmp/krc_uefist_$$ "$UEFI_ST"
+
+# 17-18. THE PAYLOAD ROW (see this section's header). Per arch: the uefi
+#        artifact is exactly 4096 bytes longer than the --emit=image artifact
+#        for the same source, and its bytes from 4096 on are that artifact
+#        BYTE FOR BYTE.
+#
+#        WHY BYTE-FOR-BYTE IS AVAILABLE AT ALL, and it is not a coincidence:
+#        --load-addr is echoed and never embedded, x86_64 image output is
+#        RIP-relative throughout, and arm64's adrp/add pairs survive a shift
+#        that is a whole number of pages.
+#
+#        THE ARM64 ARM IS THE CONGRUENCE CHECK; THE x86_64 ARM IS NOT, and
+#        the difference was measured rather than assumed. Rebuilding the
+#        compiler with the reserved region set to 0x200 instead of 0x1000 and
+#        re-running both arms:
+#          * arm64  -> payload DIFFERS. Two independent mechanisms, and the
+#            weaker source only needs the first: the `add` half of each
+#            adrp/add pair carries `target & 0xFFF`, which any non-4096
+#            multiple moves (measured on this 3-line source, 56-byte payload);
+#            and on a payload that spans pages the `adrp` page difference
+#            itself moves (measured separately on a 4544-byte payload).
+#          * x86_64 -> payload still IDENTICAL, at 0x200 and at 0x1000 alike.
+#            It is RIP-relative throughout and genuinely immune, so its arm
+#            here proves payload COMPLETENESS and nothing about geometry.
+#        So do not read the x86_64 row as covering C1. Only arm64 does.
+#
+#        The source carries a static AND a cross-function call on purpose:
+#        a leaf that returns a constant has no fixups to resolve, so it would
+#        pass this row with the static-fixup and call-fixup passes skipped
+#        entirely -- and with no static there is no adrp/add pair, which is
+#        the only thing the arm64 arm can see a bad geometry through.
+for UA in x86_64 arm64; do
+    ULOAD=0x400000
+    if [ "$UA" = "arm64" ]; then ULOAD=0x40400000; fi
+    TOTAL=$((TOTAL + 1))
+    rm -f /tmp/krc_ue_$$ /tmp/krc_ui_$$ /tmp/krc_ut_$$
+    $KRC $KRC_FLAGS "$UEFI_SRC" -o /tmp/krc_ue_$$ --arch=$UA --target=none --emit=uefi >/dev/null 2>&1
+    $KRC $KRC_FLAGS "$UEFI_SRC" -o /tmp/krc_ui_$$ --arch=$UA --target=none --emit=image --load-addr=$ULOAD >/dev/null 2>&1
+    if [ -f /tmp/krc_ue_$$ ] && [ -f /tmp/krc_ui_$$ ]; then
+        ue_n=$(wc -c < /tmp/krc_ue_$$); ui_n=$(wc -c < /tmp/krc_ui_$$)
+        tail -c +4097 /tmp/krc_ue_$$ > /tmp/krc_ut_$$
+        if [ "$ue_n" -eq "$((ui_n + 4096))" ] && cmp -s /tmp/krc_ut_$$ /tmp/krc_ui_$$; then
+            PASS=$((PASS + 1)); echo "  uefi_payload_is_the_image_payload_$UA: PASS ($ue_n = 4096 + $ui_n, payload byte-identical)"
+        else
+            echo "FAIL: uefi_payload_is_the_image_payload_$UA (uefi=$ue_n image=$ui_n; payload $(cmp -s /tmp/krc_ut_$$ /tmp/krc_ui_$$ && echo matches || echo DIFFERS))"; FAIL=$((FAIL + 1))
+        fi
+    else
+        echo "FAIL: uefi_payload_is_the_image_payload_$UA (one of the two builds produced no artifact)"; FAIL=$((FAIL + 1))
+    fi
+    rm -f /tmp/krc_ue_$$ /tmp/krc_ui_$$ /tmp/krc_ut_$$
+done
+
+# 19. The reserved header region is RESERVED, not merely absent: 4096 bytes
+#     before the payload, and at Task 1 they are all zero because no PE header
+#     is emitted yet (Task 2 fills them). Stated as an assertion rather than
+#     left implicit so that Task 2 has to come here and say what it wrote.
+TOTAL=$((TOTAL + 1))
+rm -f /tmp/krc_uez_$$
+$KRC $KRC_FLAGS "$UEFI_SRC" -o /tmp/krc_uez_$$ --arch=x86_64 --target=none --emit=uefi >/dev/null 2>&1
+uez_nz=$(head -c 4096 /tmp/krc_uez_$$ 2>/dev/null | tr -d '\000' | wc -c)
+if [ -f /tmp/krc_uez_$$ ] && [ "$uez_nz" = "0" ]; then
+    PASS=$((PASS + 1)); echo "  uefi_header_region_reserved: PASS (4096 reserved bytes, 0 non-zero at Task 1)"
+else
+    echo "FAIL: uefi_header_region_reserved (artifact=$([ -f /tmp/krc_uez_$$ ] && echo yes || echo no), $uez_nz non-zero bytes in the reserved region; if Task 2 filled it, update this row in the same commit)"; FAIL=$((FAIL + 1))
+fi
+rm -f /tmp/krc_uez_$$
+
+# 20. THE `--emit=pe` REFUSAL'S REASONING (Task 1, Step 6). The check stays --
+#     a Windows PE genuinely cannot run without the loader to bind its
+#     imports; measured, its entry is `call *0xf6e(%rip)` into an unresolved
+#     IAT slot. Only the STATED REASON was false: "a subsystem field" and
+#     "nothing on bare metal loads one" are both things UEFI firmware does
+#     every boot. The message must now point at --emit=uefi, and must not
+#     claim that a PE is unloadable on bare metal as such.
+TOTAL=$((TOTAL + 1))
+rm -f /tmp/krc_uepe_$$
+uepe_out=$($KRC $KRC_FLAGS "$UEFI_SRC" -o /tmp/krc_uepe_$$ --arch=x86_64 --target=none --emit=pe 2>&1); uepe_st=$?
+if [ $uepe_st -ne 0 ] && [ ! -f /tmp/krc_uepe_$$ ] \
+   && echo "$uepe_out" | grep -q -- "--emit=uefi" \
+   && ! echo "$uepe_out" | grep -q "nothing on bare metal loads one"; then
+    PASS=$((PASS + 1)); echo "  pe_tnone_refusal_points_at_uefi: PASS"
+else
+    echo "FAIL: pe_tnone_refusal_points_at_uefi (exit=$uepe_st, out=$(echo "$uepe_out" | head -1))"; FAIL=$((FAIL + 1))
+fi
+rm -f /tmp/krc_uepe_$$
+
+rm -f "$UEFI_SRC"
+
 # --- `--help` vs docs/LANGUAGE.md vs the compiler (sub-project B2, M5) -------
 #
 # WHY THIS SECTION EXISTS. Sub-project B2's final review found TWO separate
@@ -8874,7 +9157,53 @@ else
     FAIL=$((FAIL + 1))
 fi
 
-rm -f "$HD_HELP" "$HD_SEC" "$HD_LINE" "$HD_SRC" "$IHDR_SEC"
+# 5. --emit=uefi IS STRUCTURALLY INVISIBLE TO ROWS 1-2, so it gets its own
+#    pair (sub-project D, Task 1, Step 5).
+#
+#    hd_flags()'s regex is `--[A-Za-z0-9][A-Za-z0-9-]*` and `=` is in neither
+#    class, so from `--emit=uefi` it extracts `--emit` -- a token that has been
+#    in both texts since long before this mode existed. Rows 1 and 2 are
+#    therefore satisfied by an --emit= mode that neither text mentions, and by
+#    one the manual describes after the compiler dropped it. That is not a
+#    defect in rows 1-2 (they are about FLAGS) -- it is why an --emit= VALUE
+#    needs a check of its own, in both directions, the same way --image-header
+#    needed rows 4/4b for its prose.
+#
+#    VERIFIED BY DELETION, one text at a time, against the built compiler:
+#      * delete the `  --emit=uefi ...` line from src/main.kr's --help block
+#        and rebuild -> `uefi_help_has_own_line` reds, ALONE.
+#      * delete the `#### UEFI applications` section from docs/LANGUAGE.md ->
+#        `uefi_docs_section_intact` reds, ALONE.
+#    Rows 1-2 stayed green through both, reporting the same flag count.
+TOTAL=$((TOTAL + 1))
+uefi_help_n=$(grep -c '^  --emit=uefi ' "$HD_HELP")
+if [ "$uefi_help_n" = "1" ]; then
+    PASS=$((PASS + 1)); echo "  uefi_help_has_own_line: PASS (exactly 1 dedicated --help row)"
+else
+    echo "FAIL: uefi_help_has_own_line (found $uefi_help_n lines starting '  --emit=uefi ' in --help, want exactly 1; hd_flags cannot see an --emit= VALUE, so nothing else in this suite would notice its absence)"
+    FAIL=$((FAIL + 1))
+fi
+
+#    The docs half. Scoped to the section with the same awk row 3 uses, for
+#    the same reason: unscoped, every phrase below is satisfiable from
+#    somewhere else in a 2400-line file and the check is decorative.
+UEFI_SEC=/tmp/krc_uefi_sec_$$
+awk '/^#### UEFI applications/{s=1;print;next} s&&/^#/&&!/^##### /{exit} s{print}' "$HD_DOC" > "$UEFI_SEC"
+TOTAL=$((TOTAL + 1))
+uefi_doc_miss=""
+[ -s "$UEFI_SEC" ] || uefi_doc_miss=" the-section-itself"
+grep -qF -- '--target=none' "$UEFI_SEC" || uefi_doc_miss="$uefi_doc_miss target-none-requirement"
+grep -qF -- '--arch=' "$UEFI_SEC" || uefi_doc_miss="$uefi_doc_miss explicit-arch-requirement"
+grep -qF -- '4096' "$UEFI_SEC" || uefi_doc_miss="$uefi_doc_miss page-congruence"
+grep -qF -- 'Status' "$UEFI_SEC" || uefi_doc_miss="$uefi_doc_miss what-is-not-emitted-yet"
+if [ -z "$uefi_doc_miss" ]; then
+    PASS=$((PASS + 1)); echo "  uefi_docs_section_intact: PASS (section present, $(wc -l < "$UEFI_SEC" | tr -d ' ') lines)"
+else
+    echo "FAIL: uefi_docs_section_intact (docs/LANGUAGE.md's '#### UEFI applications' section is missing:$uefi_doc_miss)"
+    FAIL=$((FAIL + 1))
+fi
+
+rm -f "$HD_HELP" "$HD_SEC" "$HD_LINE" "$HD_SRC" "$IHDR_SEC" "$UEFI_SEC"
 
 # --- --emit=image EMISSION + the `image:` report line (sub-project B1, T5) ---
 #
