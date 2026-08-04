@@ -8595,6 +8595,108 @@ else
 fi
 rm -f /tmp/krc_stk_a64_$$
 
+# --- --image-header flag surface (sub-project C, Task 1) ---
+# Rows 1-3 are three-clause refusals via img_refuses(), same as the
+# --stack-top= rows just above; a refused build produces no artifact, so no
+# header is emitted on those three lines. Row 4 is the one ACCEPTED case
+# (--emit=image, --arch=arm64, --stack-top= all present), and since Task 2 it
+# DOES emit a real 64-byte header -- this section stopped being emission-free
+# then, whatever its heading still says about Task 1.
+#
+# WHAT ROW 4 PROVES IS PURE-PREFIX, NOT BYTE-NEUTRALITY. Two different claims:
+#   * pure-prefix  -- the FLAGGED artifact is the UNFLAGGED one with exactly 64
+#     bytes in front of it. That is row 4, in three clauses, below.
+#   * byte-neutrality -- the UNFLAGGED artifact is bit-identical to what this
+#     compiler produced BEFORE the flag existed. NO ROW IN THIS TREE PROVES
+#     THAT. It was measured once, off-tree, against a compiler built from the
+#     branch point across 8 configurations; a measurement in a report is not a
+#     check in a suite.
+# What row 4 does bound is the regression that matters most here: if the header
+# were ever emitted WITHOUT the flag, both builds would grow by 64 and clause 2
+# (flagged == unflagged + 64) would go red. That is a default-on guard, not a
+# byte-neutrality proof.
+#
+# (Two earlier drafts of this comment were wrong in opposite directions: the
+# first pointed at a "byte-neutrality section further down" that was never
+# written, and its correction claimed row 4 was that proof. Neither held.)
+echo ""
+echo "--- --image-header flag surface (C, Task 1) ---"
+
+# 1. --image-header without --stack-top=: refused. An otherwise-valid arm64
+#    --emit=image line (arch, target, load-addr all present and legal) is
+#    used so the ONLY thing missing is --stack-top=, isolating this refusal
+#    from the arm64-only and emit=image-only ones below.
+img_refuses imghdr_requires_stack_top "requires --stack-top=" --arch=arm64 --target=none --emit=image --load-addr=0x40400000 --image-header
+
+# 2. --image-header on x86_64: refused, even with a --stack-top= that is
+#    otherwise legal for x86_64's own multiboot path -- the header this flag
+#    prefixes is arm64's Linux Image format, not x86_64's. --stack-top= is
+#    included so this row cannot pass under row 1's rule instead of its own.
+img_refuses imghdr_requires_arm64 "requires --arch=arm64" --arch=x86_64 --target=none --emit=image --load-addr=0x400000 --stack-top=0x90000 --image-header
+
+# 3. --image-header outside --emit=image: refused. Mirrors
+#    stacktop_requires_image above -- --target=none alone (no --emit=image)
+#    is otherwise a legal, accepted build (target_none_dash_g_still_accepted,
+#    named rather than by ordinal: ordinals rot the moment a row is inserted
+#    above them), so --image-header is the only thing that can fail this line.
+img_refuses imghdr_requires_emit_image "only meaningful with --emit=image" --arch=arm64 --target=none --image-header
+
+# 4. --image-header ACCEPTED on a valid arm64 config, and the header is a PURE
+#    PREFIX: the flagged artifact is the unflagged one with exactly 64 bytes
+#    in front of it.
+#
+#    THIS ROW REPLACES Task 1's `imghdr_task1_byte_neutral`, which asserted the
+#    two builds were byte-IDENTICAL. That was true only while Task 1 emitted
+#    nothing; Task 2 emits the real header, so identity is now the WRONG claim
+#    and the old row was written to go red rather than quietly keep passing.
+#    It was rewritten, not widened.
+#
+#    THREE CLAUSES, AND THE FIRST IS NOT DECORATION. The old row's guard was
+#    `[ -f a ] && [ -f b ] && cmp -s a b`, and TWO EMPTY FILES satisfy all
+#    three (confirmed by construction: `: > a; : > b; cmp -s a b` exits 0). A
+#    +64 delta has the same hole -- 0 and 64 satisfy it as happily as 56 and
+#    120 -- so the unflagged size is asserted NONZERO on its own. The three
+#    clauses are:
+#      1. size(unflagged) > 0        -- there is an artifact to prefix at all
+#      2. size(flagged) == size(unflagged) + 64  -- exactly the header, no pad
+#      3. bytes[64:] of flagged == bytes[0:] of unflagged
+#
+#    CLAUSE 3 IS NOT A CLAIM THAT THE PAYLOAD IS UNTOUCHED. It is a claim about
+#    THIS program. `$STK_SRC` is `fn main() -> uint64 { return 7 }`, which has
+#    no page-relative references, so its payload genuinely does not move when
+#    the header shifts everything by 64. A program that DOES have them has its
+#    ADRP page arithmetic re-baked around the header and its payload bytes
+#    differ -- which is correct, and is what imghdr_page_refs_rebaked below
+#    asserts positively. Do not generalise clause 3 into "the flag never
+#    changes a payload byte"; that is false, and asserting it would forbid the
+#    re-baking the header depends on.
+ihdr_a=/tmp/krc_ihdr_a_$$
+ihdr_b=/tmp/krc_ihdr_b_$$
+rm -f "$ihdr_a" "$ihdr_b"
+TOTAL=$((TOTAL + 1))
+ihdr_sa=0; ihdr_sb=0
+if $KRC $KRC_FLAGS "$STK_SRC" -o "$ihdr_a" --arch=arm64 --target=none --emit=image --load-addr=0x40400000 --stack-top=0x40800000 >/dev/null 2>&1 \
+   && $KRC $KRC_FLAGS "$STK_SRC" -o "$ihdr_b" --arch=arm64 --target=none --emit=image --load-addr=0x40400000 --stack-top=0x40800000 --image-header >/dev/null 2>&1 \
+   && [ -f "$ihdr_a" ] && [ -f "$ihdr_b" ]; then
+    ihdr_sa=$(stat -c%s "$ihdr_a"); ihdr_sb=$(stat -c%s "$ihdr_b")
+fi
+if [ "$ihdr_sa" -gt 0 ] && [ "$ihdr_sb" = "$(( ihdr_sa + 64 ))" ] \
+   && cmp -s <(tail -c +65 "$ihdr_b") "$ihdr_a"; then
+    PASS=$((PASS + 1)); echo "  imghdr_pure_prefix: PASS ($ihdr_sa B + 64 = $ihdr_sb B, flagged[64:] == unflagged)"
+else
+    echo "FAIL: imghdr_pure_prefix (unflagged=$ihdr_sa B flagged=$ihdr_sb B, want flagged == unflagged + 64 with unflagged > 0 and flagged[64:] byte-equal)"; FAIL=$((FAIL + 1))
+fi
+rm -f "$ihdr_a" "$ihdr_b"
+
+# THE OTHER HALF OF THIS SECTION IS BELOW, not missing: the rows that read the
+# 64 emitted bytes field by field live in `--image-header: the 64 emitted bytes
+# (C, Task 2)`, after the `--emit=image` behaviour section, because one of them
+# needs that section's `img_a64_adrp_targets` decoder. That section's own
+# header says the same thing from the other end. (Stated in both places on
+# purpose: I1 in this sub-project was a comment pointing at a section that did
+# not exist, so a forward reference here is only safe if the target names
+# itself as the target.)
+
 rm -f "$STK_SRC" "$IMG_SRC"
 
 # --- `--help` vs docs/LANGUAGE.md vs the compiler (sub-project B2, M5) -------
@@ -8703,7 +8805,76 @@ hd_bound help_docs_stacktop_above_ceiling 0x40000000 0x40000010 R "one step past
 hd_bound help_docs_stacktop_pt_low        0x1000     0x1000     A "0x1000 is the highest stack top whose first push clears the page tables (it lands at 0xFF8)"
 hd_bound help_docs_stacktop_pt_high       0x4008     0x4008     A "0x4008 is the lowest stack top whose first push clears the page tables (it lands at 0x4000)"
 hd_bound help_docs_stacktop_pt_inside     0x4008     0x4007     R "one below the stated low bound pushes into the page directory's last entry"
-rm -f "$HD_HELP" "$HD_SEC" "$HD_LINE" "$HD_SRC"
+
+# 4. THE --image-header HONESTY TEXT IS A DELIVERABLE, SO IT IS GUARDED
+#    (sub-project C, final review, I7).
+#
+#    PROVED NECESSARY BY CONSTRUCTION. Before these two rows existed, both of
+#    the following mutations left `make test` FULLY GREEN at 1109/1109:
+#      * MUTANT B — delete the entire `#### arm64 boot header` docs section,
+#        INCLUDING the whole "What this is verified against — and what it is
+#        not" block. Three incidental mentions of the flag survive elsewhere in
+#        the manual, which is all rows 1 and 2 need.
+#      * MUTANT A — delete the dedicated `--image-header` line from `--help`.
+#        The flag is ALSO named inside the `--emit=image` line's description,
+#        so its TOKEN survives and rows 1-2 are again satisfied.
+#    Row 3's numbers do not occur in this section either. So the single
+#    highest-value artifact this sub-project produced — a written, measured
+#    statement of what the header is NOT backed by — was protected by nothing.
+#
+#    BOTH MUTANTS WERE RE-RUN AGAINST THESE ROWS AND EACH REDS EXACTLY ONE:
+#    mutant B (docs section removed) reds `imghdr_docs_limits_block_intact`
+#    alone, and mutant A (src/main.kr's h_ih line removed, compiler rebuilt)
+#    reds `imghdr_help_has_own_line` alone. In both runs rows 1 and 2 still
+#    reported 26 flags and PASSED, which is the whole point: these two rows see
+#    what token coverage cannot.
+#
+#    THESE TWO ROWS ARE STRUCTURAL, not behavioural, and they do not pretend
+#    otherwise: they assert the section exists, that its limits subsection is
+#    still nested inside it, and that the three bounds a reader most needs are
+#    still stated. Scoped with the same awk as row 3 and for the same reason —
+#    unscoped, "No real boot chain" is satisfied from anywhere in a 2400-line
+#    file and the check is decorative. The scope differs from row 3's in one
+#    way: `##### ` subheadings do NOT terminate it, because the block being
+#    protected IS a `#####` subsection and row 3's awk would cut it off.
+#
+#    PHRASES, NOT FLAG TOKENS, because these limits are prose — which is
+#    precisely why no token grep can protect them. The cost is real and
+#    accepted: rewording one of these three sentences reds a row. That is the
+#    intended trade. This text has now twice been "corrected" into a new
+#    falsehood, so a deliberate reword SHOULD have to come here in the same
+#    commit and say so.
+IHDR_SEC=/tmp/krc_ihdr_sec_$$
+awk '/^#### arm64 boot header/{s=1;print;next} s&&/^#/&&!/^##### /{exit} s{print}' "$HD_DOC" > "$IHDR_SEC"
+TOTAL=$((TOTAL + 1))
+ihdr_doc_miss=""
+[ -s "$IHDR_SEC" ] || ihdr_doc_miss=" the-section-itself"
+grep -qF -- '##### What this is verified against' "$IHDR_SEC" || ihdr_doc_miss="$ihdr_doc_miss the-limits-subsection"
+grep -qF -- 'No real boot chain' "$IHDR_SEC" || ihdr_doc_miss="$ihdr_doc_miss no-real-boot-chain"
+grep -qF -- "not the specification's" "$IHDR_SEC" || ihdr_doc_miss="$ihdr_doc_miss qemu-not-the-spec"
+grep -qF -- 'does not reject a bad magic' "$IHDR_SEC" || ihdr_doc_miss="$ihdr_doc_miss bad-magic-not-refused"
+if [ -z "$ihdr_doc_miss" ]; then
+    PASS=$((PASS + 1)); echo "  imghdr_docs_limits_block_intact: PASS (section present, $(wc -l < "$IHDR_SEC" | tr -d ' ') lines, all 3 bounds stated)"
+else
+    echo "FAIL: imghdr_docs_limits_block_intact (docs/LANGUAGE.md's '#### arm64 boot header' section is missing:$ihdr_doc_miss -- this text is what the sub-project delivered; if it was reworded on purpose, update this row in the same commit, do not delete it)"
+    FAIL=$((FAIL + 1))
+fi
+
+# 4b. ...and --help still carries a line ABOUT the flag, not merely a mention
+#     of its name inside another flag's description. Anchored to the flag
+#     column: `^  --image-header ` matches only the dedicated row, so mutant A
+#     (delete that row, leave the `--emit=image` mention) reds here and nowhere
+#     else in the suite.
+TOTAL=$((TOTAL + 1))
+ihdr_help_n=$(grep -c '^  --image-header ' "$HD_HELP")
+if [ "$ihdr_help_n" = "1" ]; then
+    PASS=$((PASS + 1)); echo "  imghdr_help_has_own_line: PASS (exactly 1 dedicated --help row)"
+else
+    echo "FAIL: imghdr_help_has_own_line (found $ihdr_help_n lines starting '  --image-header ' in --help, want exactly 1; the flag being NAMED in --emit=image's description is not a description of the flag)"
+    FAIL=$((FAIL + 1))
+fi
+
+rm -f "$HD_HELP" "$HD_SEC" "$HD_LINE" "$HD_SRC" "$IHDR_SEC"
 
 # --- --emit=image EMISSION + the `image:` report line (sub-project B1, T5) ---
 #
@@ -8959,6 +9130,233 @@ else
     echo "FAIL: image_no_truncation (filesz=$i8fs memsz=$i8ms size=$(stat -c%s /tmp/krc_i6_$$ 2>/dev/null))"; FAIL=$((FAIL + 1))
 fi
 rm -f /tmp/krc_i6_$$ "$IMG6_SRC" "$IMG5_SRC" /tmp/krc_i5e_x_$$ /tmp/krc_i5e_a_$$
+
+# --- --image-header: the 64 emitted bytes (C, Task 2) ------------------------
+#
+# WHY THIS IS HERE AND NOT WITH THE OTHER imghdr_* ROWS. The flag-surface
+# section above (`--image-header flag surface`) holds the refusals and
+# imghdr_pure_prefix; these rows are its other half and would read better next
+# to it. They are here because imghdr_page_refs_rebaked calls
+# `img_a64_adrp_targets`, defined a few dozen lines above this line, and bash
+# resolves a function at CALL time -- placed in the section above, that row
+# would not fail, it would print "command not found" to stderr, compare two
+# empty strings and PASS. The alternative was to hoist the decoder away from
+# the coordinate-system comment that explains it. Splitting the rows was the
+# cheaper of the two.
+#
+# EVERY FIELD IS READ BACK OFF THE ARTIFACT, at its spec offset, never from a
+# variable the emitter also wrote. The format is the arm64 Linux `Image`
+# header (spec D5 / Documentation/arch/arm64/booting.rst):
+#
+#   0  code0       b <stub>          16  image_size  u64, file size incl. hdr
+#   4  code1       0                 24  flags       u64, 0xA
+#   8  text_offset u64, 0            32  res2..res4  u64 x3, 0
+#                                    56  magic       u32, 0x644d5241 ("ARM\x64")
+#                                    60  res5        u32, 0
+#
+# TWO FIELDS ARE PATCHED BACK, not written at emit time, and both are patched
+# for the same reason: the value does not exist yet when the bytes are laid
+# down. `code0` needs the stub's offset (no function has been emitted), and
+# `image_size` needs the final file size. BOTH PLACEHOLDERS ARE ZERO
+# (src/main.kr: emit_a64(0) and emit_u64_le(0)), and the two miss cases are not
+# alike:
+#   * a missed `code0` patch leaves 0x00000000, which is `udf #0` -- an
+#     undefined instruction on the image's FIRST word. That is loud at runtime,
+#     and it is loud on purpose: src/main.kr spends eight lines rejecting the
+#     tempting 0x14000000 (`b .`) placeholder precisely because THAT one would
+#     hang quietly. Do not "fix" the placeholder to a well-formed branch.
+#   * a missed `image_size` patch leaves 0, which really is silent -- a loader
+#     reads it as "reserve nothing" and carries on.
+# Rows 6 and 7 make both statically detectable, so neither has to reach a boot
+# to be caught.
+IHDR_SRC="$DIR/../test_tmp_ihdr_$$.kr"
+# A program WITH page-relative references (a static the code reads through an
+# ADRP pair), unlike $STK_SRC above. Row 9 needs them: they are the only
+# observable that the VA map was recomputed around the header rather than the
+# header merely being glued on.
+printf 'static uint64 s = 0x1234\nfn main() -> uint64 { return s + 1 }\n' > "$IHDR_SRC"
+IHDR_IMG=/tmp/krc_ihdr_img_$$
+IHDR_NOF=/tmp/krc_ihdr_nof_$$
+rm -f "$IHDR_IMG" "$IHDR_NOF"
+$KRC $KRC_FLAGS "$IHDR_SRC" -o "$IHDR_IMG" --arch=arm64 --target=none --emit=image \
+     --load-addr=0x40400000 --stack-top=0x40800000 --image-header >/dev/null 2>&1
+$KRC $KRC_FLAGS "$IHDR_SRC" -o "$IHDR_NOF" --arch=arm64 --target=none --emit=image \
+     --load-addr=0x40400000 --stack-top=0x40800000 >/dev/null 2>&1
+
+# Little-endian u32/u64 at file offset $2 of $1, in decimal. `od -j` skips, and
+# the value is assembled in shell arithmetic rather than by trusting od's own
+# multi-byte types, which are host-endian.
+ihdr_u32() {
+    local b; b=$(od -An -tx1 -j"$2" -N4 -v "$1" 2>/dev/null | tr -d ' \n')
+    [ ${#b} = 8 ] || { echo SHORT; return 1; }
+    echo $(( 16#${b:6:2}${b:4:2}${b:2:2}${b:0:2} ))
+}
+ihdr_u64() {
+    local b; b=$(od -An -tx1 -j"$2" -N8 -v "$1" 2>/dev/null | tr -d ' \n')
+    [ ${#b} = 16 ] || { echo SHORT; return 1; }
+    echo $(( 16#${b:14:2}${b:12:2}${b:10:2}${b:8:2}${b:6:2}${b:4:2}${b:2:2}${b:0:2} ))
+}
+
+# 5. magic and flags -- the two fields a loader keys on. magic is what makes
+#    the artifact recognisable AT ALL (row 10's file(1) oracle reads exactly
+#    these four bytes); flags 0xA is bit 1 (4 KB pages) | bit 3 (load anywhere)
+#    with bit 0 clear (little-endian).
+TOTAL=$((TOTAL + 1))
+i9magic=$(ihdr_u32 "$IHDR_IMG" 56); i9flags=$(ihdr_u64 "$IHDR_IMG" 24)
+if [ "$i9magic" = "$(( 0x644d5241 ))" ] && [ "$i9flags" = "10" ]; then
+    PASS=$((PASS + 1)); echo "  imghdr_magic_and_flags: PASS (magic=0x644d5241 @56, flags=0xA @24)"
+else
+    echo "FAIL: imghdr_magic_and_flags (magic=$i9magic want $(( 0x644d5241 )); flags=$i9flags want 10)"; FAIL=$((FAIL + 1))
+fi
+
+# 6. code0 is a REAL branch to the stub. The word is decoded rather than
+#    pattern-matched, and the two guards catch different faults:
+#    * op == 5 (top 6 bits 0b000101, B) with the sign-extended imm26 * 4
+#      landing exactly on the reported entry -- which, with a stub, IS the stub
+#      offset. THE SHIPPED PLACEHOLDER IS 0x00000000, `udf #0`, whose op is 0,
+#      so a dropped patch-back reds here. (It is also loud at runtime: an
+#      undefined instruction on the image's first word, not a hang.)
+#    * code0 != 0x14000000. That word is `b .` and it is NOT the placeholder --
+#      src/main.kr deliberately REJECTED it as one, because it would hang
+#      silently instead of faulting AND would put a SECOND 0x14000000 in the
+#      image, breaking the boot gate's `loop_offset_a64` uniqueness scan (five
+#      checks read a PC through it). This clause is the standing guard against
+#      that decision being quietly revisited. Note it is REDUNDANT today and
+#      kept deliberately: `b .` satisfies op == 5, and is already caught by the
+#      offset clause, since its target is +0 and --image-header always places
+#      the stub past the 64-byte header, so the reported entry is never 0. The
+#      named clause is what makes the rejection legible at the point of test.
+TOTAL=$((TOTAL + 1))
+i9rep=$($KRC $KRC_FLAGS "$IHDR_SRC" -o "$IHDR_IMG" --arch=arm64 --target=none --emit=image \
+        --load-addr=0x40400000 --stack-top=0x40800000 --image-header 2>&1)
+i9entry=$(echo "$i9rep" | sed -n 's/^image: .* entry=\([0-9][0-9]*\) .*$/\1/p')
+i9c0=$(ihdr_u32 "$IHDR_IMG" 0)
+i9op=$(( (i9c0 >> 26) & 0x3F ))
+i9imm=$(( i9c0 & 0x3FFFFFF ))
+[ "$i9imm" -ge $(( 0x2000000 )) ] && i9imm=$(( i9imm - 0x4000000 ))
+i9tgt=$(( i9imm * 4 ))
+if [ "$i9op" = "5" ] && [ "$i9c0" != "$(( 0x14000000 ))" ] && [ -n "$i9entry" ] && [ "$i9tgt" = "$i9entry" ]; then
+    PASS=$((PASS + 1)); echo "  imghdr_code0_branches_to_stub: PASS (code0=$(printf 0x%08x "$i9c0") = b +$i9tgt = reported entry $i9entry)"
+else
+    echo "FAIL: imghdr_code0_branches_to_stub (code0=$(printf 0x%08x "$i9c0" 2>/dev/null) op=$i9op target=+$i9tgt reported entry=${i9entry:-UNPARSED}; 0x00000000 (udf) means the code0 patch-back never ran, 0x14000000 means the rejected 'b .' placeholder was reinstated)"; FAIL=$((FAIL + 1))
+fi
+
+# 6b. AND THE HALT IS STILL UNIQUE. Row 6 pins code0 != 0x14000000 by decoding
+#     one word; this pins the CONSEQUENCE the boot gate depends on, on the
+#     whole file. `loop_offset_a64` locates the stub's `b .` by being the only
+#     0x14000000 word in the image and five gate checks read a PC through it,
+#     so a duplicate would not fail here-and-now -- it would silently stop
+#     those five from discriminating. Asserted on the HEADERED artifact
+#     because that is the one that gained a candidate word.
+TOTAL=$((TOTAL + 1))
+i9halt=$(od -An -tx4 -v "$IHDR_IMG" | tr -s ' ' '\n' | grep -c '^14000000$')
+if [ "$i9halt" = "1" ]; then
+    PASS=$((PASS + 1)); echo "  imghdr_halt_still_unique: PASS (exactly one 0x14000000 in the headered image)"
+else
+    echo "FAIL: imghdr_halt_still_unique ($i9halt words equal 0x14000000; loop_offset_a64 needs exactly 1 or the boot gate's PC checks stop discriminating)"; FAIL=$((FAIL + 1))
+fi
+
+# 7. image_size == the size of the file ON DISK, and nonzero. The second
+#    clause is not implied by the first (a zero-byte artifact would satisfy
+#    equality), and it is the one that is a PROTOCOL obligation rather than an
+#    observable: image_size = 1 and image_size = 64 BOTH boot under QEMU, which
+#    substitutes its own 2 MiB text_offset and never reads this field for
+#    placement. A real loader reads it as "how much memory to reserve", so
+#    "the whole file, header included" rests on this static assertion and on
+#    nothing the boot gate can see.
+TOTAL=$((TOTAL + 1))
+i9sz=$(ihdr_u64 "$IHDR_IMG" 16); i9disk=$(stat -c%s "$IHDR_IMG" 2>/dev/null || echo 0)
+if [ "$i9sz" = "$i9disk" ] && [ "$i9sz" -gt 0 ]; then
+    PASS=$((PASS + 1)); echo "  imghdr_image_size_is_file_size: PASS (image_size=$i9sz == on-disk $i9disk, header included)"
+else
+    echo "FAIL: imghdr_image_size_is_file_size (image_size=$i9sz on-disk=$i9disk; 0 tells a loader to reserve nothing, and a stale value means the patch-back never ran)"; FAIL=$((FAIL + 1))
+fi
+
+# 8. Every reserved field is zero: code1 @4, text_offset @8, res2-res4 @32/40/48
+#    and res5 @60. text_offset is in this list rather than beside flags because
+#    0 IS its required value here ("load anywhere", flags bit 3), not a
+#    placeholder -- but the check is the same check, and splitting it would
+#    leave the three res words as the only unasserted bytes in the header.
+TOTAL=$((TOTAL + 1))
+i9z=""
+# Widths matter: code1 @4 and res5 @60 are u32, the rest are u64. Reading a
+# u64 field as a u32 would leave its high half unasserted, which is the half a
+# stray write is most likely to land in.
+for i9o in 4 60; do
+    i9v=$(ihdr_u32 "$IHDR_IMG" "$i9o")
+    [ "$i9v" = 0 ] || i9z="$i9z u32@$i9o=$i9v"
+done
+for i9o in 8 32 40 48; do
+    i9v=$(ihdr_u64 "$IHDR_IMG" "$i9o")
+    [ "$i9v" = 0 ] || i9z="$i9z u64@$i9o=$i9v"
+done
+if [ -z "$i9z" ]; then
+    PASS=$((PASS + 1)); echo "  imghdr_reserved_are_zero: PASS (code1, text_offset, res2-res5 all 0)"
+else
+    echo "FAIL: imghdr_reserved_are_zero (nonzero:$i9z)"; FAIL=$((FAIL + 1))
+fi
+
+# 9. THE MECHANISM, NOT THE OUTPUT. The header is emitted BEFORE the function
+#    emit loop, so `a64_compute_va` lays every function out 64 bytes further
+#    along and re-bakes each ADRP page computation around it. The observable is
+#    that every page-relative reference in the flagged image resolves to
+#    EXACTLY its unflagged target + 64 -- the payload moved and the arithmetic
+#    followed it. Glue the header on afterwards instead and these targets stay
+#    put while the data they point at moves, which boots to SILENCE.
+#
+#    A BYTE COUNT IS DELIBERATELY NOT ASSERTED, and an unchanged payload is
+#    deliberately NOT treated as failure. The number of re-baked BYTES is
+#    program-specific -- 24 for the boot gate's sentinel_a64.kr (18 ADRP
+#    pairs), 2 for the suite's IMG5_SRC, and legitimately 0 for a program with
+#    no page-relative references at all, whose image is perfectly correct
+#    ($STK_SRC in row 4 is exactly that program). What is asserted is the
+#    RELATION, which holds for every program including the zero-pair one --
+#    vacuously there, and that is why $IHDR_SRC has a static: a vacuous row is
+#    not a check, so this row's own precondition (at least one pair) is
+#    asserted first.
+TOTAL=$((TOTAL + 1))
+i9a=$(img_a64_adrp_targets "$IHDR_NOF" | tr '\n' ' ')
+i9b=$(img_a64_adrp_targets "$IHDR_IMG" | tr '\n' ' ')
+i9want=""
+for i9t in $i9a; do i9want="$i9want $(( i9t + 64 ))"; done
+i9want=$(echo $i9want); i9b=$(echo $i9b)
+i9n=$(echo "$i9a" | wc -w)
+if [ "$i9n" -ge 1 ] && [ "$i9want" = "$i9b" ]; then
+    PASS=$((PASS + 1)); echo "  imghdr_page_refs_rebaked: PASS ($i9n ADRP pair(s), every target +64: [$i9a] -> [$i9b])"
+elif [ "$i9n" -lt 1 ]; then
+    echo "FAIL: imghdr_page_refs_rebaked (the test program has NO ADRP pairs, so this row proves nothing -- \$IHDR_SRC lost its static)"; FAIL=$((FAIL + 1))
+else
+    echo "FAIL: imghdr_page_refs_rebaked (unflagged targets [$i9a] want [$i9want] got [$i9b] -- the VA map was not recomputed around the header)"; FAIL=$((FAIL + 1))
+fi
+
+# 10. THE INDEPENDENT ORACLE: file(1), which has its own Image magic rule and
+#     no knowledge of this compiler. Positive AND negative in one row -- the
+#     negative is the artifact with its four magic bytes overwritten, which
+#     must fall back to "data". Without the negative half the positive is a
+#     check that has only ever been seen passing, and file(1) reporting "data"
+#     for BOTH would be indistinguishable from success on a grep that only
+#     looked at the positive.
+TOTAL=$((TOTAL + 1))
+if ! command -v file >/dev/null 2>&1; then
+    # Not a skip: a skip here is indistinguishable from a pass (the suite's
+    # TOTAL is already incremented) and this is the only check in the section
+    # that does not trust the compiler's own view of its output.
+    echo "FAIL: imghdr_file_recognises_image (file(1) is not installed -- the independent oracle cannot run)"; FAIL=$((FAIL + 1))
+else
+    i9corrupt=/tmp/krc_ihdr_bad_$$
+    cp "$IHDR_IMG" "$i9corrupt"
+    printf '\xde\xad\xbe\xef' | dd of="$i9corrupt" bs=1 seek=56 conv=notrunc status=none
+    i9good=$(file -b "$IHDR_IMG" 2>/dev/null)
+    i9bad=$(file -b "$i9corrupt" 2>/dev/null)
+    if echo "$i9good" | grep -q "Linux kernel ARM64 boot executable Image" && [ "$i9bad" = "data" ]; then
+        PASS=$((PASS + 1)); echo "  imghdr_file_recognises_image: PASS (file(1): '$i9good'; magic corrupted -> '$i9bad')"
+    else
+        echo "FAIL: imghdr_file_recognises_image (good='$i9good' want 'Linux kernel ARM64 boot executable Image'; corrupted='$i9bad' want 'data')"; FAIL=$((FAIL + 1))
+    fi
+    rm -f "$i9corrupt"
+fi
+
+rm -f "$IHDR_IMG" "$IHDR_NOF" "$IHDR_SRC"
 
 # --- entry selection: `_start` preferred over `main` (sub-project B2, T2) ---
 #

@@ -2835,13 +2835,135 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
         // this format, not a computation: the moment anything shared starts
         // consuming header_size, an image that still claimed 120 would be
         // wrong in the direction that produces a silent boot rather than a
-        // diagnostic. The correctness of the emission does not rest on it —
-        // it rests on no header bytes having been emitted, which is why the
-        // branch above this one is empty of emit_* calls.
+        // diagnostic.
+        //
+        // IT STAYS 0 EVEN WHEN --image-header PREFIXES 64 BYTES (sub-project
+        // C, Task 2), and that is not an oversight. What header_size means on
+        // this path is "how far the load address is from file offset 0", and
+        // an arm64 Image header is LOADED — it lives at load_addr like every
+        // other byte of the file, exactly as x86_64's multiboot header does
+        // (which is also emitted at offset 0 and also leaves this 0). The
+        // value that would be wrong is 64: it would say the map starts 64
+        // bytes in, and the ADRP page arithmetic is baked straight off
+        // a64_compute_va(file_offset), which knows nothing about headers.
+        //
+        // An earlier revision of this comment ended "the correctness of the
+        // emission rests on no header bytes having been emitted, which is why
+        // the branch above this one is empty of emit_* calls". That is no
+        // longer true of emit_mode 8 as a whole — the --image-header block
+        // below emits 64 — and it was never what the correctness rested on.
+        // It rests on file offset 0 being the load address, which a prefix
+        // emitted BEFORE codegen preserves and a prefix glued on AFTERWARDS
+        // destroys. This branch is still empty of emit_* calls because
+        // nothing unconditional belongs here, not because nothing may.
         header_size = 0
     }
 
     uint64 text_start = codegen_output_len()
+
+    // ------------------------------------------------------------------
+    // The arm64 Linux `Image` header (sub-project C, Task 2, spec D5).
+    //
+    // 64 bytes at file offset 0, EMITTED BEFORE THE FUNCTION EMIT LOOP, and
+    // that ordering is the entire design. a64_compute_va maps a file offset
+    // to 0x400000 + offset with no notion of a header
+    // (codegen_aarch64.kr:6214), and every ADRP page computation is baked
+    // from that map DURING codegen. Emitting the prefix first therefore moves
+    // the payload and re-bakes the page arithmetic around it in one step, with
+    // no VA-map change and not one line in codegen_aarch64.kr. Glue the same
+    // 64 bytes on afterwards instead and every baked page_off is 64 too small
+    // while the data it points at has moved: the image boots to SILENCE, which
+    // is the identical failure mode the header_size = 0 note above describes
+    // for a post-hoc ELF strip. The only invariant this relies on is
+    // load_addr % 4096 == 0, enforced at the arm64 arm of the --load-addr
+    // validation, and a 64-byte prefix cannot disturb it.
+    //
+    // THIS IS THE SAME SLOT x86_64's MULTIBOOT HEADER USES, deliberately: two
+    // boot headers, two arches, one position in the pipeline, so neither can
+    // acquire an ordering the other lacks. They are mutually exclusive by
+    // arch, so nothing at offset 0 is ever written twice.
+    //
+    // TWO FIELDS CANNOT BE WRITTEN HERE, not one. `code0` needs the stub's
+    // file offset and no function has been emitted yet; `image_size` needs the
+    // final file size and nothing has been laid out yet. Both are patched
+    // back below at the point their value first exists — code0 right after the
+    // stub is emitted, image_size in the emit_mode 8 finalize block. BOTH
+    // PLACEHOLDERS ARE ZERO ON PURPOSE, matching the multiboot header's
+    // entry_addr: an unpatched code0 of 0x00000000 is `udf #0`, an undefined
+    // instruction that faults on the first word of the image. The tempting
+    // placeholder — 0x14000000, `b .` — would instead HANG, silently, and
+    // would put a second 0x14000000 in the file, which is the stub's halt
+    // word and the thing the boot gate's loop_offset_a64 uniqueness scan
+    // reads a PC through in five checks. Loud beats quiet; a placeholder that
+    // is also a valid instruction is the worst of both.
+    //
+    // WHAT THESE 64 BYTES ARE, AND ARE NOT, BACKED BY (sub-project C, Task 4).
+    // Anyone changing a field below should know which ones anything reads:
+    //
+    //   * TWO ORACLES EXIST AND NO OTHERS — file(1)
+    //     (imghdr_file_recognises_image, tests/run_tests.sh) and a real
+    //     `qemu -M virt -cpu cortex-a57 -kernel` boot (leg L6 of
+    //     tests/target_none/boot_gate.sh). QEMU reads magic, text_offset and
+    //     image_size; file(1) reads magic and flags bits 0 and 1-2. code1,
+    //     res2-res5 and the EMITTED flags VALUE are read by nothing. Bit 3 in
+    //     particular has no oracle at all, measured in isolation twice: 0xA
+    //     vs 0x2 and 0x8 vs 0x0 each differ in bit 3 ALONE and each give an
+    //     identical file(1) line AND an identical parked PC. (0x8 vs 0xA is
+    //     NOT that experiment — it also drops bits 1-2 and file(1) does
+    //     notice, losing the "4K pages" clause. Task 4 wrote the sloppy
+    //     version of this sentence first and its own re-measurement caught
+    //     it.) The static rows assert what this block WROTE and cannot
+    //     assert that anything cares.
+    //   * THE LOAD-BASE EVIDENCE IS QEMU'S load_aarch64_image, NOT THE Image
+    //     SPECIFICATION. It shows the header is READ. Nothing in this tree
+    //     shows it is CONFORMANT, and NO REAL BOOT CHAIN HAS EVER RUN IT —
+    //     no U-Boot booti, no EFI stub, no Android boot.img, no hardware.
+    //     One QEMU 8.2.2 on one machine is the whole of it. Not "never in
+    //     CI": the boot gate is a counted test in tests/run_tests.sh and ran
+    //     green in CI at this work's branch point. It is the two header legs
+    //     (L5, L6) that are newer than that run and so CI-unrun until the
+    //     first push. See the CI STATUS block in boot_gate.sh's header.
+    //   * A BAD MAGIC IS NOT REFUSED. QEMU silently abandons the header and
+    //     loads at its own default offset, and the payload is
+    //     position-independent, so the image still boots and still prints.
+    //     Only file(1) and a 0x40080000-vs-0x40200000 shift in load base ever
+    //     witness the magic.
+    //   * text_offset = 0 PLUS flags BIT 3 IS A CHOICE NOTHING HERE VALIDATES
+    //     (spec open question 3, disposed of rather than left open). Current
+    //     kernel documentation describes text_offset as legacy and the
+    //     2 MiB-relative placement as declared through flags bit 3, which is
+    //     what this writes. MEASURED: QEMU honours text_offset VERBATIM
+    //     (0x300000 -> base 0x40300000, +2 MiB bump only below 4 KiB), i.e.
+    //     it does not treat the field as legacy. Which of the two a modern
+    //     loader actually honours is UNVERIFIED and cannot be settled here —
+    //     exactly one loader has ever been tried. Writing 0 is the value that
+    //     is correct under either reading; that is why it is safe, not
+    //     because the question was answered.
+    //
+    // GATED ON emit_mode/arch/flag, NEVER ON target_os — same reasoning as
+    // both stubs below: per-OS dispatch in this codebase is "special-case
+    // Windows/macOS, ELSE fall through to POSIX", so a bare-metal condition
+    // phrased as an OS test is the shape that silently inherits Linux. The
+    // three conditions are redundant with the flag validation (which already
+    // refuses --image-header without --arch=arm64, --emit=image and
+    // --stack-top=) and are spelled out anyway, so that this block reads as
+    // its own statement of when a header exists rather than as a consequence
+    // of a check 3000 lines away. No --image-header => no bytes => every
+    // existing image pin holds unchanged.
+    uint64 a64hdr_on = 0
+    if img_raw != 0 && arch == 1 && image_header_set != 0 {
+        a64hdr_on = 1
+        emit_a64(0)                 // 0:  code0 — b <stub>, PATCHED below
+        emit_a64(0)                 // 4:  code1
+        emit_u64_le(0)              // 8:  text_offset — 0 = "load anywhere"
+        emit_u64_le(0)              // 16: image_size — PATCHED at finalize
+        emit_u64_le(10)             // 24: flags — 0xA: LE, 4 KB pages, anywhere
+        emit_u64_le(0)              // 32: res2
+        emit_u64_le(0)              // 40: res3
+        emit_u64_le(0)              // 48: res4
+        emit_u32_le(0x644d5241)     // 56: magic — "ARM\x64"
+        emit_u32_le(0)              // 60: res5
+    }
 
     // ------------------------------------------------------------------
     // The x86_64 entry stub, PART 1 OF 2: the bytes (sub-project B2, D6).
@@ -3040,6 +3162,26 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
     // immediate is the stack top the user passed. --load-addr is echoed in
     // the report and never embedded (image_load_addr_not_embedded_arm64).
     //
+    // THIS STUB DESTROYS x0, AND UNDER --image-header THAT LOSES THE DEVICE
+    // TREE (sub-project C, Task 4 — recorded, deliberately NOT fixed here).
+    // The arm64 Linux boot protocol requires a loader to enter the image with
+    // x0 = the physical address of the FDT. The movz/movk pair below writes
+    // the stack top into x0 as its FIRST instruction, before anything can
+    // save it, so a real loader's FDT pointer is gone before one line of
+    // KernRift runs and nothing in the language can recover it. This is a
+    // LIVE gap, not a hypothetical, and it was MEASURED rather than inferred:
+    // patch code0 to branch straight to the stub's halt (skipping these three
+    // instructions) and a plain `qemu -M virt -cpu cortex-a57 -kernel` boot
+    // parks with x0 = 0x44000000, whose first guest word is 0xd00dfeed — the
+    // FDT magic. The SAME image unpatched parks with x0 = 0 and sp = the
+    // stack top. So the pointer is handed over on every boot in the gate and
+    // thrown away by the first instruction. It is also why
+    // B2's already-documented "the first parameter is the stack top" quirk is
+    // worse than a curiosity here — x0 is not free to use, it is spoken for
+    // by the protocol the header opts into. Fixing it means picking another
+    // scratch register (x9-x15 are all free at entry) and defining how a
+    // program asks for the FDT; both are out of scope for C.
+    //
     // GATED ON emit_mode/arch/flag, NEVER ON target_os. The per-OS dispatch
     // here is "special-case Windows/macOS, ELSE fall through to POSIX", so a
     // bare-metal condition written as an OS test is the shape that silently
@@ -3108,6 +3250,67 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
         // or a syscall: --target=none has no OS to exit to, and the trap
         // emitters refuse there anyway.
         emit_a64(0x14000000)
+    }
+
+    // ------------------------------------------------------------------
+    // The Image header's `code0`, PART 2 OF 2 (sub-project C, Task 2).
+    //
+    // HERE, AND NOT WHERE THE 64 BYTES WERE EMITTED, for the reason the x86
+    // trampoline's PART 2 gives twelve lines further down: the value does not
+    // exist until the thing it points at has been laid out. img_stub_off is
+    // the stub's file offset and is set three lines above this comment, by
+    // the block that just emitted it — which is also why this sits here and
+    // not with the finalize block: a reader looking for "where does code0 get
+    // its target" finds it adjacent to the only assignment that produces one.
+    //
+    // A MISSED PATCH IS `udf #0` AT OFFSET 0 — a fault on the image's first
+    // instruction, not a hang (see the emission block's note on why the
+    // placeholder is 0 and not `b .`).
+    //
+    // TIED TO img_stub_set, NOT TO a64hdr_on ALONE, even though the flag
+    // validation makes --image-header imply --stack-top= and therefore imply
+    // a stub. If that implication ever loosens, the failure this ordering
+    // produces is a header branching to file offset 0 — itself, an infinite
+    // loop at the first word — so the dependency is stated rather than
+    // inherited.
+    if a64hdr_on != 0 && img_stub_set != 0 {
+        // `b` takes a SIGNED imm26 of WORDS, ±128 MiB from the branch. The
+        // branch is at offset 0 and the stub is at img_stub_off, so the
+        // displacement is img_stub_off / 4 and is always positive. It is
+        // bounds-checked rather than masked: `& 0x3FFFFFF` on an out-of-range
+        // offset does not fail, it BRANCHES SOMEWHERE ELSE IN THE IMAGE, and
+        // an image that large is exactly the one nobody would disassemble.
+        //
+        // WHAT THIS BOUNDS IS THE STUB'S OFFSET, NOT THE FILE. An earlier
+        // revision of this comment claimed "the stub is appended after all
+        // code and data, so this bounds the whole artifact". That is FALSE
+        // for the layout actually emitted: STATIC DATA FOLLOWS THE STUB.
+        // Measured twice —
+        //   * one-static program: header 0-63, entry fn 64-107, stub 108-127,
+        //     static 128-135;
+        //   * 64 KiB-static program: stub at 124 in a 65680-byte file, i.e.
+        //     65536 bytes of statics sitting entirely past it.
+        // So a file may legitimately extend far past img_stub_off, and an
+        // image LARGER than 128 MiB is not by itself a refusal. The branch
+        // only has to reach the stub, which is exactly what is tested here.
+        //
+        // UNTESTED, AND SAID PLAINLY. Because statics do not move the stub,
+        // firing this needs ~128 MiB of CODE — not a large array, which is
+        // the cheap way to grow an image and does nothing here. Nothing in
+        // the suite comes near that, so this refusal has only ever been
+        // observed NOT firing. It is kept because the alternative failure is
+        // a silent wrong branch and a named diagnostic that never fires costs
+        // nothing — but it is not evidence of anything, and no row should be
+        // read as covering it.
+        if img_stub_off > 134217724 {
+            uint64 ih_far = "error: --image-header cannot reach the entry stub: the header's first word is a `b` with a signed 26-bit word displacement (+/-128 MiB) and this image places the stub past that. The image is too large to be prefixed with an arm64 Image header\n"
+            write(2, ih_far, str_len(ih_far))
+            exit(1)
+        }
+        // Every subexpression parenthesised on purpose: in this dialect `&`,
+        // `|` and `^` bind TIGHTER than `+` and `<<`.
+        uint64 ih_imm = (img_stub_off >> 2) & 0x3FFFFFF
+        patch_u32(0, 0x14000000 | ih_imm)
     }
 
     // ------------------------------------------------------------------
@@ -3609,9 +3812,22 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
             write(2, imx_msg, str_len(imx_msg))
             exit(1)
         }
-        // With a stub emitted, THE STUB is the entry: it is the address a
-        // loader (or a reset vector) must start at, and the entry function
-        // reached through it would fault on a garbage SP. The fn_lookup
+        // With a stub emitted, THE STUB is what `entry` reports, and the entry
+        // function reached through it would fault on a garbage SP.
+        //
+        // WHETHER THAT IS ALSO THE ADDRESS TO START AT DEPENDS ON THE HEADER,
+        // and the unconditional claim that used to stand here is false under
+        // --image-header. Without a header, yes: a loader or reset vector must
+        // be parked on load_addr + entry, because nothing else in the file
+        // points at the stub. WITH --image-header, the start address is the
+        // LOAD ADDRESS, file offset 0 — the header's code0 branches to this
+        // stub, which is exactly what makes the artifact bootable from its
+        // first byte — measured, in boot_gate.sh leg L5, which enters the
+        // artifact at file offset 0 and reaches the stub. A header-aware loader
+        // (qemu -kernel, leg L6) will start at offset 0 whatever this line
+        // reports, so tooling built on the old wording talks past it. Same
+        // statement in docs/LANGUAGE.md under `--emit=image`, and again at the
+        // finalize block below. The fn_lookup
         // above still runs and still refuses on an inconsistency — the stub
         // recorded a `bl` fixup (arm64) or a patched movabs (x86_64) against
         // that same token, so a miss here means the image's own call would
@@ -3685,8 +3901,19 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
         patch_u32(68, p_filesz_rv)     // Elf32_Phdr p_filesz
         patch_u32(72, total_size_rv)   // Elf32_Phdr p_memsz
     } else if emit_mode == 8 {
-        // --emit=image finalize. NOTHING is patched — there is no header —
-        // and NOTHING is truncated: memsz == filesz by decision.
+        // --emit=image finalize. NOTHING is truncated: memsz == filesz by
+        // decision.
+        //
+        // ONE THING IS PATCHED HERE, AND ONLY UNDER --image-header: the Image
+        // header's image_size, at offset 16, by the PART 2 OF 2 block below.
+        // Without the flag this arm writes no byte at all and the artifact
+        // reaches codegen_write_output exactly as codegen left it. An earlier
+        // revision of this line read "NOTHING is patched — there is no header
+        // —", which sub-project C falsified IN THIS VERY BLOCK. Same
+        // stale-premise/surviving-conclusion shape as Task 1's I1 and as the
+        // "with no header emitted" premise under THE CODE OFFSET IS THE FILE
+        // OFFSET later in this same arm: third occurrence in one sub-project,
+        // which is why the correction is spelled out instead of just applied.
         //
         // NOTHING ZEROES A BSS TAIL ON BARE METAL, AND NOTHING IS PLANNED TO.
         // Sub-project B2 emitted the entry stub (arm64: set SP, `bl` the
@@ -3710,8 +3937,25 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
         // other place, and the boot harness needs it to branch to load + entry.
         // entry_off comes from the img_raw arm above — find_entry_node's node
         // resolved through fn_lookup, NOT find_main_offset — so it is a live
-        // `_start` when the program has one and `main` otherwise; and with no
-        // header emitted the code offset IS the file offset.
+        // `_start` when the program has one and `main` otherwise.
+        //
+        // THE CODE OFFSET IS THE FILE OFFSET, and that survives --image-header
+        // rather than depending on nothing being prefixed. An earlier revision
+        // of this line justified it as "with no header emitted", which stopped
+        // being true the moment Task 2 landed while the conclusion it
+        // supported stayed correct — the stale-premise/surviving-conclusion
+        // shape this sub-project has already been bitten by once (Task 1, I1).
+        // The durable reason is that fn_lookup returns an offset into the SAME
+        // out_buf the header was emitted into, and the header is emitted
+        // BEFORE codegen, so every registered offset already counts those 64
+        // bytes. A prefix therefore cannot desynchronise the report; a prefix
+        // added after codegen would, which is one more reason it is not.
+        //
+        // With --image-header a loader does not need this number at all — it
+        // enters at file offset 0 and code0 branches to the stub. The report
+        // stays REQUIRED regardless, because the boot gate enters at
+        // load + entry directly and B1-style headerless images have no other
+        // record of where to start.
         //
         // Values are decimal throughout — fmt_uint exists, write_hex32 caps
         // at 32 bits and load_addr is 64-bit; one radix beats two. Size is
@@ -3724,6 +3968,36 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
         // load_addr is echoed, never embedded. Two different aligned
         // addresses must produce one byte-identical artifact.
         uint64 img_size = codegen_output_len()
+        // ------------------------------------------------------------------
+        // The Image header's `image_size`, PART 2 OF 2 (sub-project C, Task 2).
+        //
+        // THE SECOND PATCH-BACK, and the one that is easy to miss because the
+        // field looks like a constant. It is not: it is the FINAL FILE SIZE,
+        // which does not exist until every function, every string and every
+        // static has been laid out — i.e. not until this line. img_size is
+        // read from the buffer here rather than accumulated, for the reason
+        // the report's own note above gives.
+        //
+        // THE HEADER'S OWN 64 BYTES ARE INCLUDED, because they are part of
+        // the file and a loader reserving image_size bytes must cover them.
+        // Nothing observable enforces that: QEMU never honours text_offset = 0
+        // (it substitutes 2 MiB) and never reads this field for placement, so
+        // image_size = 1 and image_size = 64 BOTH boot. It is a protocol
+        // obligation to real loaders resting entirely on the static assertion
+        // in imghdr_image_size_is_file_size, and taking it from
+        // codegen_output_len() — the same number the report prints and the
+        // boot gate cross-checks against the artifact's on-disk size — is what
+        // makes that assertion cheap to keep true.
+        //
+        // AHEAD OF THE REFUSALS AND THE REPORT BELOW: patching the buffer
+        // cannot change its length, so an image that is about to be refused
+        // is neither written nor perturbed by having been patched. Placed
+        // after them instead, a future early-exit added between here and the
+        // report would ship a zero image_size — "reserve nothing" — from a
+        // build that exited 0.
+        if a64hdr_on != 0 {
+            patch_u64(16, img_size)
+        }
         // The two checks that need the FILE SIZE, so they cannot live with
         // the rest of the --load-addr/--stack-top validation (B2 Task 4,
         // review I3). They run HERE, ahead of the report, for two reasons:
@@ -5610,6 +5884,15 @@ static uint64 load_addr_set = 0
 static uint64 stack_top = 0
 static uint64 stack_top_set = 0
 
+// --image-header state (sub-project C). Requires --emit=image, --arch=arm64
+// and --stack-top= together, validated where --stack-top='s own checks live.
+// Set, it makes the emit_mode 8 path prefix the artifact with the 64-byte
+// arm64 Linux `Image` header (Task 2 -- the emission block, and the two
+// patch-backs it needs, are the three `a64hdr_on` sites). Unset, no byte the
+// compiler writes changes: every --emit=image pin in the suite builds without
+// this flag and is unaffected by it.
+static uint64 image_header_set = 0
+
 // Machine target (--target=esp32): 0 = none, 1 = ESP32 (Xtensa LX6 esp-image
 // at ESP32 load addresses). Orthogonal to target_os — --target= is overloaded:
 // OS names set target_os, machine names set this. Only meaningful with
@@ -5929,7 +6212,9 @@ fn main() {
                     // cleanup_module symbols. Phase A.1.
                     emit_mode = 7
                 } else if str_eq_full(emit_str, "image") != 0 {
-                    // Raw headerless flat binary for bare metal. emit_mode 8
+                    // Raw flat binary for bare metal — no container, and
+                    // nothing precedes the code except the 64-byte arm64
+                    // Image header --image-header opts into. emit_mode 8
                     // is a NEW value on purpose: the raw-path triggers for
                     // riscv32/xtensa key on emit_mode == 0 + freestanding
                     // (:2340), so a new value is untouched by every existing
@@ -5959,6 +6244,15 @@ fn main() {
                 // of naming itself.
                 stack_top = parse_stack_top(arg + 12)
                 stack_top_set = 1
+            } else if str_eq_full(arg, "--image-header") != 0 {
+                // No value to parse -- an explicit arm is still needed for
+                // the same V7 reason --load-addr=/--stack-top= have one:
+                // without it, --image-header falls through to the final
+                // `else { input_path = arg }` and dies with "cannot open
+                // '--image-header': file not found" instead of naming
+                // itself. Validated below; the 64 bytes it turns on are
+                // emitted from the `a64hdr_on` block on the emit_mode 8 path.
+                image_header_set = 1
             } else if str_eq_full(arg, "-c") != 0 {
                 emit_set = 1
                 emit_mode = 3
@@ -6076,12 +6370,14 @@ fn main() {
                 write(1, "  --emit=lkm                Linux loadable kernel module (.ko)\n", 63)
                 write(1, "  --emit=asm                annotated assembly listing\n", 55)
                 write(1, "  --emit=ir                 dump SSA IR per function\n", 53)
-                uint64 h_img = "  --emit=image             raw headerless flat binary (bare metal; needs --target=none, explicit --arch, --load-addr=)\n"
+                uint64 h_img = "  --emit=image             raw flat binary, no container (bare metal; needs --target=none, explicit --arch, --load-addr=; --image-header prefixes an arm64 boot header)\n"
                 write(1, h_img, str_len(h_img))
                 uint64 h_la = "  --load-addr=<addr>       where the image will be loaded; validated (arm64: 4096-aligned) and reported, never embedded\n"
                 write(1, h_la, str_len(h_la))
                 uint64 h_st = "  --stack-top=<addr>       emit a self-booting entry stub that sets SP here (x86_64 also gets a multiboot header + long-mode trampoline); validated per-arch (arm64: 16-byte aligned, <2^32; x86_64: <=0x40000000, its first push must clear the page tables at 0x1000-0x4000 so the stack top is <=0x1000 or >=0x4008, and --load-addr must then be in [0x4000,0x40000000)); on both arches the stack must not start inside the image; no default\n"
                 write(1, h_st, str_len(h_st))
+                uint64 h_ih = "  --image-header            prefix the 64-byte arm64 Linux Image header (magic 0x644d5241) so a loader can boot the artifact from its first byte; requires --emit=image, --arch=arm64 and --stack-top=\n"
+                write(1, h_ih, str_len(h_ih))
                 write(1, "  -c                        shorthand for --emit=obj\n", 53)
                 write(1, "  -o <path>                 output path\n\n", 41)
 
@@ -6350,7 +6646,7 @@ fn main() {
             exit(1)
         }
         if load_addr_set == 0 {
-            uint64 im_la = "error: --emit=image requires --load-addr=<addr>: a flat image has no header, so nothing else records where it will run; the address is validated (arm64) and reported, never embedded in the bytes\n"
+            uint64 im_la = "error: --emit=image requires --load-addr=<addr>: nothing in a flat image records where it will run -- not even --image-header's Image header, whose text_offset is an offset from the loader's own base and never an absolute address; the value is validated (arm64) and reported, never embedded in the bytes\n"
             write(2, im_la, str_len(im_la))
             exit(1)
         }
@@ -6491,6 +6787,28 @@ fn main() {
                 }
             }
         }
+        // --image-header (sub-project C). Requires --arch=arm64 (the
+        // header being prefixed IS arm64's Linux Image format; x86_64
+        // --emit=image already gets its own header -- the multiboot one
+        // --stack-top= adds above -- so --image-header on x86_64 has
+        // nothing of its own to attach) and --stack-top= (a header on a
+        // stub-less image validates under file(1) and is accepted by a
+        // loader, but the image has no entry stub to jump to and faults
+        // instantly, which would make the header a false claim about the
+        // bytes it precedes). Checked after the arch==2/arch==3 refusals
+        // above, so arch here is only ever 0 (x86_64) or 1 (arm64).
+        if image_header_set != 0 {
+            if arch == 0 {
+                uint64 ih_a64 = "error: --image-header requires --arch=arm64: the header is arm64's Linux Image format (magic 0x644d5241); x86_64 --emit=image already carries its own header (the multiboot one --stack-top= adds), so --image-header on x86_64 has nothing to attach to\n"
+                write(2, ih_a64, str_len(ih_a64))
+                exit(1)
+            }
+            if stack_top_set == 0 {
+                uint64 ih_st = "error: --image-header requires --stack-top=: a header on a stub-less image validates under file(1) and is accepted by a loader, but the image has no entry stub to jump to and faults instantly. Pass --stack-top= so the header's claim matches the bytes\n"
+                write(2, ih_st, str_len(ih_st))
+                exit(1)
+            }
+        }
     }
     if load_addr_set != 0 && emit_mode != 8 {
         uint64 la_im = "error: --load-addr= is only meaningful with --emit=image: hosted containers carry their load address in their own headers\n"
@@ -6500,6 +6818,11 @@ fn main() {
     if stack_top_set != 0 && emit_mode != 8 {
         uint64 st_im = "error: --stack-top= is only meaningful with --emit=image: hosted containers manage the stack pointer through their own loader, not a flag\n"
         write(2, st_im, str_len(st_im))
+        exit(1)
+    }
+    if image_header_set != 0 && emit_mode != 8 {
+        uint64 ih_im = "error: --image-header is only meaningful with --emit=image: it prefixes a flat image with an arm64 boot header, and only --emit=image produces a flat image to prefix\n"
+        write(2, ih_im, str_len(ih_im))
         exit(1)
     }
 
