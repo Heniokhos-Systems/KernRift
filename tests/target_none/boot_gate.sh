@@ -13,7 +13,8 @@
 # reports until this file was changed. A result that lives only in a report is
 # one refactor away from being unverified; every one of them is a leg now.
 #
-# Closes the TODO(sub-project B) recorded in prove_no_syscalls.sh: every leg
+# Discharges the bare-metal-execution debt recorded in prove_no_syscalls.sh's
+# "WHAT A GREEN RUN DOES NOT CLAIM" note: every leg
 # here is an OBSERVED RUN under qemu-system-*, and every leg ships with a
 # negative control that has itself been observed failing. A leg that has only
 # ever been seen passing is not a check — three of four legs of this gate's
@@ -101,28 +102,47 @@ trap cleanup EXIT INT TERM
 # gate on a machine that never needed the tool. Removing them is therefore a
 # correctness fix, not tidying.
 #
-# `cmp` was a PRE-EXISTING dead entry (no user in this file or in
-# build_loader.sh — it predates Task 6) and has been removed from the list
+# `cmp` was a PRE-EXISTING dead entry (no user in this file, and none in the
+# external loader's build script either) and has been removed from the list
 # below: a hard dependency on a tool nothing runs is the exact false-fail
 # this comment block is about, so keeping it here would contradict the rule
 # it states.
 #
 # B2 TASK 5 REMOVED `od` AND `wc` FOR THE SAME REASON. Their only users were
 # build_loader.sh (od) and L0's build-log / sentinel counts (wc), and Task 5
-# retires both — the x86 legs no longer build a loader at all. Same rule as
+# retired both — the x86 legs no longer build a loader at all. Same rule as
 # above: a probed-but-unused tool false-fails the whole gate on a machine that
 # never needed it.
 #
-# Still live, and where: python3 (make_stub.py for L3, qmp_pc.py, the image
-# scanners `loop_offset_a64` / `halt_offset_x86` / `mb_u32`, and the three
-# artifact patchers in L1), timeout + both qemu-system binaries (every boot),
-# stat (build_image's on-disk size cross-check, L0's capture size, L4's report),
-# sed (build_image's report parse), tr (L3/L4 serial-capture flattening for
-# diagnostics), head (L1/L4 truncated log excerpts), grep (boot_run's expect
-# match, every sentinel assertion).
+# B2 TASK 6 RE-DERIVED THE WHOLE ROSTER after deleting boot.S, build_loader.sh
+# and boot.ld, because that is precisely the edit that orphans a probe — and
+# found NOTHING LEFT TO REMOVE: the loader's own tools (`as`, `ld`, `od`) had
+# already gone with Task 5's retirement of L0's build legs, and every name
+# below still has a live user in this file. The result is a non-change, which
+# is worth recording: "the deletion changed no dependency" is a checked claim
+# here, not an assumption.
 #
-# `as`/`ld` ARE NO LONGER A DEPENDENCY OF ANY KIND — that was the external
-# loader's, and the compiler emits its own stub now.
+# Still live, and where — verified by grep at Task 6, not inherited:
+#   python3   make_stub.py (L3 only), qmp_pc.py, the image readers
+#             loop_offset_a64 / halt_offset_x86 / mb_u32 / call_target_x86 /
+#             img_bytes, and img_patch (L1's three patched controls)
+#   timeout   every boot, both arches
+#   qemu-system-x86_64, qemu-system-aarch64   every boot
+#   stat      build_image's on-disk size cross-check, L0's capture sizes,
+#             L4's x86 artifact report
+#   sed       build_image's `image:` report parse — the ONLY source of the
+#             entry offset every leg branches to
+#   grep      boot_wait's expect match, every sentinel assertion
+#   head      L1's `-c` log excerpts (one of them on the PASS path, in
+#             L1_no_header_image_refused), L2's and L4's failure excerpts
+#   tr        serial-capture flattening in L1/L2/L3/L4 diagnostics. NOTE this
+#             one is reached only on failure paths, so a green run never
+#             executes it. It stays a hard dependency deliberately: this gate's
+#             red runs have to be readable, and a `tr: not found` inside a
+#             failure message is a diagnostic lost exactly when it is needed.
+#
+# `as`/`ld` ARE NO LONGER A DEPENDENCY OF ANY KIND — they were the external
+# loader's, that loader is deleted, and the compiler emits its own stub now.
 for t in qemu-system-x86_64 qemu-system-aarch64 python3 timeout stat sed tr head grep; do
     if ! command -v "$t" >/dev/null 2>&1; then
         bad "boot_dep_$t" "$t not found — the boot gate REQUIRES it; absence is a failure, not a skip"
@@ -145,18 +165,25 @@ if [ "$FAIL" != 0 ]; then echo "boot gate: $PASS pass, $FAIL FAIL"; exit 1; fi
 #   SELFEXIT  no content trigger; wait up to the full deadline for qemu to end
 #             by itself.
 #
-# WHY L0 NEEDS SELFEXIT AND NOT EITHER OF THE OTHER TWO. Its assertion is an
-# occurrence COUNT of exactly 1. Content-polling would stop that run at the
-# FIRST sentinel and thereby hide the very regression the count exists to
-# detect: with -no-reboot removed the loader reboot-loops and replays the
-# sentinel (34 observed), which an early-out would truncate back to 1 and PASS.
-# And the short RUNOUT window would be wrong in the other direction — it is
-# sized for legs that expect nothing, so a slow runner whose qemu takes longer
-# to start than the window would score count 0 and FALSE-FAIL a positive leg.
-# SELFEXIT costs nothing on the normal path (the loader triple-faults and
-# -no-reboot exits it in ~80 ms, 2 ticks) and leaves 10 s of headroom for a
-# machine nobody here has measured. Reaching that conclusion by nearly
-# introducing the first mistake is the reason it is written down.
+# WHY SELFEXIT EXISTS AND WHO USES IT NOW (rewritten at B2 Task 6 — the
+# justification below it was B1's and described a check Task 4 retired: L0 used
+# to count occurrences of the external loader's `KR-LDR|` sentinel, and there
+# is no loader and no sentinel any more).
+#
+# Its three users today are the boots QEMU REFUSES: L0_deadboot_x86,
+# L0_deadboot_a64, and L1_no_header_image_refused. None of them can wait for
+# content — no guest instruction ever runs — and what each one reads is
+# BOOT_QEMU_RC == 1, i.e. QEMU's OWN exit status. That is what rules out both
+# other modes:
+#   * an <ERE> would have nothing to match and would burn the full 10 s;
+#   * RUNOUT would cap the wait at the CALIBRATED silence window, and if a slow
+#     runner's qemu had not yet exited when that window closed, boot_run would
+#     kill it and BOOT_QEMU_RC would be the KILL's status rather than qemu's
+#     refusal — the discriminator these three controls are built on, silently
+#     replaced by the harness's own signal.
+# SELFEXIT costs nothing on the normal path (boot_wait's `kill -0` breaks the
+# instant qemu is gone, ~2 ticks here) and leaves the full 10 s of headroom for
+# a machine nobody has measured.
 #
 # RETURNS NONZERO IF THE BOOT DID NOT HAPPEN — AND CAPTURE-FILE EXISTENCE IS
 # NOT HOW THAT IS DECIDED. It was, until B2 Task 5, and it was WRONG:
@@ -200,9 +227,13 @@ if [ "$FAIL" != 0 ]; then echo "boot gate: $PASS pass, $FAIL FAIL"; exit 1; fi
 #
 # WHY NOT `sleep 4` (what task 1 shipped), AND WHY NOT PLAIN EXIT-POLLING
 # (what task 2's first report proposed). Both were wrong, and MEASURED rather
-# than argued this time. Only the three FAULT-terminating boots self-exit
-# quickly; L1_sentinel parks in the loader's hlt loop, and L1_no_image plus
-# ALL FOUR arm64 boots busy-spin until they are killed. Therefore:
+# than argued this time. Only the boots QEMU REFUSES self-exit quickly (the
+# three SELFEXIT users listed above); EVERY leg whose guest actually runs parks
+# or spins until it is killed — L1's four x86 boots park on a halt or a landing
+# pad, and all of L2's, L3's and L4's arm64 boots park in a `b .` or spin in
+# the exception vector. (B1 wrote this paragraph with leg names — L1_sentinel,
+# L1_no_image — that Tasks 4 and 5 retired; the shape of the argument survived
+# the re-pointing, the names did not.) Therefore:
 #   * exit-polling with the 10 s backstop is NOT semantically identical to the
 #     sleep — it is strictly worse, because every spinning boot would then wait
 #     the full 10 s (~60 s of gate against today's 36 s);
@@ -214,10 +245,14 @@ if [ "$FAIL" != 0 ]; then echo "boot gate: $PASS pass, $FAIL FAIL"; exit 1; fi
 # is on the wire and only gives up after 10 s, so a slow runner costs latency
 # instead of a false failure.
 #
-# x86 always runs -no-reboot: a triple fault otherwise REBOOT-LOOPS and
-# replays the loader sentinel indefinitely (observed: 25 repetitions in
-# 3 s, V17). With -no-reboot QEMU exits by itself; the kill is then a
-# no-op and the wait still reaps.
+# x86 always runs -no-reboot, so a triple-faulting guest EXITS instead of
+# reboot-looping. B1 needed this: its external loader replayed `KR-LDR|` on
+# every reboot (observed: 25 repetitions in 3 s, V17) and L0 counted those
+# occurrences. That loader and that count are both gone, so no leg depends on
+# the flag today — it is kept because the alternative is a faulting guest
+# spinning to the deadline with nothing on the wire, which costs 10 s per leg
+# and tells a reader nothing. With -no-reboot QEMU exits by itself; the kill is
+# then a no-op and the wait still reaps.
 BOOT_TICK=0.05            # poll granularity, seconds
 BOOT_DEADLINE_TICKS=200   # 10 s — hard ceiling on waiting for evidence
 # Window for a RUNOUT leg. Seeded at 2 s and then RE-DERIVED by each leg from
@@ -228,7 +263,27 @@ BOOT_DEADLINE_TICKS=200   # 10 s — hard ceiling on waiting for evidence
 BOOT_SILENCE_TICKS=40
 BOOT_WAITED_TICKS=0       # out-param: ticks actually waited by the last run
 BOOT_QEMU_RC=0            # out-param: qemu's exit status from the last run
-PARKED_PC=NOQMPRUN        # out-param: see boot_run_qmp; never a stale value
+# out-param of boot_run_qmp: the guest's parked PC, or one of the two LOUD
+# non-values that function documents (QMPFAIL / MOVING:<pc>).
+#
+# THE RULE THAT GOVERNS IT LIVES HERE, ON THE DECLARATION, AND NOT ON ANY ONE
+# HELPER (B2 Task 6, finding N2). It used to live on `x86_boot`, which Task 5
+# left with no call sites -- so a routine "delete the dead helpers" pass would
+# have taken the rule out with them. Attached to the variable, it cannot be
+# orphaned: every future helper has to set this.
+#
+#   A NON-QMP BOOT MUST DESTROY THE PREVIOUS RUN'S PC.
+#
+# Without that, a control MOVED OFF a _qmp helper keeps reading the LAST QMP
+# run's value and its parked-PC assertion silently becomes a no-op -- and on
+# this gate the arm64 controls all park at the same 0x200, so it would go on
+# passing with its discriminator switched off. NOQMPRUN fails every consumer's
+# shape-check by design (the `case` guards in L2 and L3 reject it, and the `=`
+# comparisons in L1/L2 fail closed against it).
+#
+# EVERY non-QMP helper below sets it: a64_self_boot (live, L4), x86_boot and
+# a64_boot (no call sites today -- see their headers).
+PARKED_PC=NOQMPRUN        # never a stale value
 # The wait itself, factored out because boot_run_qmp (L3) needs the SAME
 # semantics while the guest is still alive. Two copies of this loop would
 # drift, and the mode that drifted would be the one nobody re-derived.
@@ -365,13 +420,24 @@ build_image() {
     echo "$entry"
 }
 
-# One arm64 boot: image file at $1's load addr, stub branching to entry.
+# One arm64 boot on the EXTERNAL make_stub.py stub: image file at $1's load
+# addr, stub branching to entry.
 # $1 load addr, $2 image, $3 entry off, $4 serial out, $5 expect (see boot_run).
 # EVERY step propagates failure. A stub the generator refused to emit, or a
 # qemu that never opened the capture, must not look like "the program stayed
 # quiet" to a control that reads silence as a pass.
+#
+# NO CALL SITES TODAY, and that is why it kept its defect until B2 Task 6
+# (finding N1): it was the third non-QMP helper and the only one that never
+# got the PARKED_PC clobber. It is KEPT rather than deleted because L3 is
+# still on the external stub (see leg3's header) and the QMP/non-QMP pair is
+# where a demotion of an L3 control would land -- which is exactly the move
+# that would have reopened the stale-PC hazard. A dead bash function cannot
+# affect a result; a dead HARD DEPENDENCY can, and those are removed (see the
+# dependency block above). The two are not the same class of dead thing.
 a64_boot() {
     local load="$1" img="$2" entry="$3" ser="$4" expect="$5"
+    PARKED_PC=NOQMPRUN   # see the PARKED_PC declaration above
     python3 "$BOOT/make_stub.py" $(( load + entry )) "$A64_STUB" "$A64_SP" "$WORK/stub.bin" || return 1
     boot_run a64 "$ser" "$expect" \
         -device loader,file="$WORK/stub.bin",addr=$A64_STUB,cpu-num=0 \
@@ -385,7 +451,7 @@ a64_boot() {
 # as reported), $4 serial, $5 expect.
 a64_self_boot() {
     local load="$1" img="$2" entry="$3" ser="$4" expect="$5"
-    PARKED_PC=NOQMPRUN   # see x86_boot
+    PARKED_PC=NOQMPRUN   # see the PARKED_PC declaration above
     boot_run a64 "$ser" "$expect" \
         -device loader,file="$img",addr=$(printf 0x%x "$load"),force-raw=on \
         -device loader,addr=$(printf 0x%x $(( load + entry ))),cpu-num=0
@@ -400,18 +466,19 @@ a64_self_boot_qmp() {
 
 # One x86_64 SELF-boot. THE WHOLE COMMAND LINE IS `-kernel <image>` — no loader
 # ELF, no `-device loader`, no load address (the emitted multiboot header
-# carries it), no entry offset (the header carries that too). This replaces
-# B1's x86_boot, which built tests/target_none/boot/boot.S with the system
-# assembler and loaded the image beside it.
+# carries it), no entry offset (the header carries that too). This pair
+# replaced B1's x86_boot, which assembled an external multiboot long-mode
+# loader (tests/target_none/boot/boot.S, deleted by B2 Task 6 along with
+# build_loader.sh and boot.ld) and loaded the image beside it.
 # $1 image, $2 serial, $3 expect.
+#
+# THE NON-QMP FORM HAS NO CALL SITES TODAY — all four L1 legs read a PC, so
+# every one of them is on the _qmp twin. Kept for the same reason a64_boot is
+# (see that function's header), and the rule its body used to carry now lives
+# on the PARKED_PC declaration, where a delete-dead-code pass cannot take it.
 x86_boot() {
     local img="$1" ser="$2" expect="$3"
-    # A NON-QMP BOOT MUST DESTROY THE PREVIOUS RUN'S PC. Without this a control
-    # that is moved off the _qmp helper keeps reading the LAST QMP run's value
-    # and its parked-PC assertion silently becomes a no-op -- and on this gate
-    # the neighbouring arm64 controls all park at the same 0x200, so it would
-    # go on passing. NOQMPRUN fails every consumer's shape-check by design.
-    PARKED_PC=NOQMPRUN
+    PARKED_PC=NOQMPRUN   # see the PARKED_PC declaration above
     boot_run x86 "$ser" "$expect" -kernel "$img"
 }
 x86_boot_qmp() {
@@ -802,9 +869,11 @@ leg0() {
 #
 #      THE SENTINEL IS COMPUTED, not echoed: `2000000016` is `2000000007`
 #      (a static written in main) plus 9 (returned from a call), formatted at
-#      runtime. Verified on the artifacts: `strings -a` over sx.img, sa.img
-#      and the loader ELF finds ZERO occurrences of either digit string, so
-#      the wire cannot be carrying a copied literal.
+#      runtime. Verified on the artifacts: `strings -a` over sx.img and sa.img
+#      finds ZERO occurrences of either digit string, so the wire cannot be
+#      carrying a copied literal. (B1 checked the external loader ELF here
+#      too; there is no third artifact to check since Task 4 — the two images
+#      ARE the whole command line now.)
 #
 #      D5, THE RETURN-TO-HALT: `L1_halt_parked`. After `main` returns, the
 #      trampoline's `call *%rax` falls into `hlt; jmp .`, so RIP must PARK on
@@ -1195,7 +1264,8 @@ leg2() {
 #      besides the stub's" would make the PC inference this leg is built on
 #      ("the machine is in heap_bump_halt's loop") depend on knowing which of
 #      two self-branches it parked in, which is precisely what uniqueness buys.
-#      make_stub.py is therefore NOT dead code after Task 6 removes boot.S; L3
+#      make_stub.py is therefore NOT dead code now that Task 6 removed boot.S
+#      and build_loader.sh — it is a different file and a different stub; L3
 #      is its sole remaining user, and the arm64 self-boot is gated by L2, L4
 #      and their controls instead.
 # =============================================================================

@@ -10400,9 +10400,14 @@ done
 
 # std/heap_bump.kr's refusals, EXECUTED.
 #
-# Everything else in this block is static: a bare-metal image cannot be run
-# here (no entry point, no stack setup, a hardcoded load address), so the
-# allocator's overrun paths would otherwise ship reviewed but never once
+# Everything else in this block is static, and this block has no emulator: a
+# bare-metal image cannot REPORT here. (The reason used to be "no entry point,
+# no stack setup, a hardcoded load address"; sub-project B2 closed all three —
+# --emit=image takes --load-addr= and --stack-top= emits an entry stub — and
+# the boot gate further down this file DOES run heap_bump under QEMU. But L3
+# reads a HALT, discriminated by a parked PC over QMP; a halted guest cannot
+# print the request that was refused, which is what these cases assert.) So
+# the allocator's overrun paths would otherwise ship reviewed but never once
 # executed -- and a reviewed-not-executed bound is exactly what was wrong with
 # the first version of this allocator. It rounded the request up BEFORE
 # checking it, so `n + 15` wrapped for n near 2^64, `& ~15` floored it to 0,

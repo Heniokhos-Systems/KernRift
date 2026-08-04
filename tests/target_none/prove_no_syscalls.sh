@@ -17,27 +17,38 @@
 #
 # WHAT A GREEN RUN DOES NOT CLAIM, AND MUST NEVER BE READ AS CLAIMING:
 #
-#   NOTHING IN THIS SUB-PROJECT HAS EVER PRODUCED OUTPUT ON BARE METAL. Not on
-#   silicon, not under an emulator. --target=none hardcodes a 0x400000 load
-#   address (src/main.kr:3101, 3719, 3832) and emits no startup code, so the
-#   stack pointer is garbage by the time main's prologue runs. A QEMU boot of
-#   one of these images produced no output; that is the EXPECTED symptom of a
-#   missing entry point, not an unexplained failure. Sub-project B
-#   (--emit=image) supplies the entry point, the stack and the load address.
+#   NOTHING THIS SCRIPT CHECKS HAS EVER PRODUCED OUTPUT ON BARE METAL. Not on
+#   silicon, not under an emulator. Every artifact it inspects is a
+#   --target=none build with NO startup code: the ELF form takes the hosted
+#   0x400000 base and emits no entry stub, so the stack pointer is garbage by
+#   the time main's prologue runs. A QEMU boot of one of these produced no
+#   output; that is the EXPECTED symptom of a missing entry point, not an
+#   unexplained failure.
+#
+#   (The load address is no longer hardcoded for the bare-metal form at all.
+#   --emit=image REQUIRES --load-addr= and validates it per-arch, and
+#   --stack-top= makes the compiler emit the entry stub itself — sub-project
+#   B1 for the flag, B2 tasks 1-4 for the stub. This note used to cite three
+#   src/main.kr line numbers for the hardcoded address; all three had drifted
+#   onto unrelated code by B2 Task 6, which is why they are gone rather than
+#   renumbered.)
 #
 #   So: "the compiler emits a call to the UART provider" is proven here.
 #   "a character came out of the UART" is not, and this script has no leg that
 #   could prove it. Two safety comments in this sub-project's own diff were
 #   wrong in review; a disassembly is not an execution.
 #
-# The serial-output legs live in tests/target_none/boot_gate.sh (sub-project
-# B1): both UARTs observed printing computed sentinels from RAW --emit=image
-# artifacts, one heap-exhaustion halt discriminated by parked PC over QMP,
-# and -- SUPPORTING arm64's BLOCKING compile-time alignment refusal -- a
+# The serial-output legs live in tests/target_none/boot_gate.sh (sub-projects
+# B1 and B2): both UARTs observed printing computed sentinels from RAW
+# --emit=image artifacts that boot WITH NO EXTERNAL LOADER — x86_64 as
+# `qemu-system-x86_64 -kernel <image>` and nothing else, arm64 with the image
+# and a reset-PC parked on its own emitted stub — one heap-exhaustion halt
+# discriminated by parked PC over QMP, a return-to-halt assertion on each
+# arch, and -- SUPPORTING arm64's BLOCKING compile-time alignment refusal -- a
 # misalignment pair showing the same image print at one offset and go
 # silent at another. Every leg carries an observed negative control. Runtime
 # claims about bare metal cite THAT gate; this script's claims remain
-# compile-time only.
+# compile-time only. Nothing in either sub-project has run outside QEMU.
 #
 # -----------------------------------------------------------------------------
 # Usage
@@ -745,7 +756,7 @@ echo "=== prove_no_syscalls: $PASS passed, $FAIL failed ==="
 echo "    A green run says the compiler emits the right calls and refuses the"
 echo "    right builtins. It does NOT say anything has run on bare metal UNDER"
 echo "    THIS SCRIPT -- see the discharge note near the top of this file, and"
-echo "    tests/target_none/boot_gate.sh (sub-project B1), which is where bare-"
+echo "    tests/target_none/boot_gate.sh (sub-projects B1+B2), which is where bare-"
 echo "    metal execution is actually observed and proven."
 [ "$FAIL" = "0" ] || exit 1
 exit 0

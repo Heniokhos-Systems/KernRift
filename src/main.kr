@@ -3646,11 +3646,21 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
         patch_u32(72, total_size_rv)   // Elf32_Phdr p_memsz
     } else if emit_mode == 8 {
         // --emit=image finalize. NOTHING is patched — there is no header —
-        // and NOTHING is truncated: memsz == filesz by decision. Nothing on
-        // bare metal zeroes a BSS tail in B1 (the entry stub that will own
-        // zeroing is sub-project B2), and QEMU zero-fills RAM, so a truncated
-        // image would pass the boot gate while reading garbage statics on
-        // real silicon. The full file IS the zeroed BSS. codegen_truncate is
+        // and NOTHING is truncated: memsz == filesz by decision.
+        //
+        // NOTHING ZEROES A BSS TAIL ON BARE METAL, AND NOTHING IS PLANNED TO.
+        // Sub-project B2 emitted the entry stub (arm64: set SP, `bl` the
+        // entry, halt; x86_64: multiboot header + long-mode trampoline) and
+        // that stub deliberately does NOT zero anything — B2 spec D3 records
+        // the decision, and the reason is right here: the image already
+        // carries its statics as real zero BYTES, so a zeroing loop would
+        // re-zero bytes that are already zero on disk. This is what makes the
+        // no-truncation rule permanent rather than provisional. QEMU
+        // zero-fills RAM, so a truncated image would pass the boot gate while
+        // reading garbage statics on real silicon — and no B-series artifact
+        // has ever run on real silicon to catch it.
+        //
+        // The full file IS the zeroed BSS. codegen_truncate is
         // reached only from the emit_mode == 0 arms above, so this needs no
         // guard — measured: the 64 KiB-static program emits 65600 bytes here
         // where the ELF path emits 180 and lets p_memsz carry the rest.
@@ -6008,7 +6018,7 @@ fn main() {
                 write(1, h_img, str_len(h_img))
                 uint64 h_la = "  --load-addr=<addr>       where the image will be loaded; validated (arm64: 4096-aligned) and reported, never embedded\n"
                 write(1, h_la, str_len(h_la))
-                uint64 h_st = "  --stack-top=<addr>       opts into an entry stub (later); validated per-arch (arm64: 16-byte aligned, <2^32; x86_64: <0x80000000, outside 0x1000-0x4000), no default\n"
+                uint64 h_st = "  --stack-top=<addr>       emit a self-booting entry stub that sets SP here (x86_64 also gets a multiboot header + long-mode trampoline); validated per-arch (arm64: 16-byte aligned, <2^32; x86_64: <0x80000000, outside 0x1000-0x4000), no default\n"
                 write(1, h_st, str_len(h_st))
                 write(1, "  -c                        shorthand for --emit=obj\n", 53)
                 write(1, "  -o <path>                 output path\n\n", 41)
@@ -6196,8 +6206,15 @@ fn main() {
         // This is a refusal and not a lowering because there is nowhere for a
         // failed check to GO on bare metal: no kernel to exit to, no stderr,
         // no debugger. It becomes implementable when a bare-metal panic path
-        // exists (a user-supplied @builtin_override panic handler, or the
-        // halt loop that sub-project B's entry code will establish).
+        // exists — a user-supplied @builtin_override panic handler, or a halt
+        // the checks can branch to.
+        //
+        // SUB-PROJECT B2 DID NOT SUPPLY THAT PATH, though it is the obvious
+        // place to look now. The emitted entry stub ends in a halt (arm64
+        // `b .`, x86_64 `hlt; jmp .`), but it is the RETURN site of the entry
+        // function, nothing routes a failed check to it, and it exists only
+        // when --stack-top= is passed. A --debug build with no --stack-top
+        // would still have nowhere to go, so the refusal stays unconditional.
         if debug_mode != 0 {
             uint64 dbg_msg = "error: --debug conflicts with --target=none: the runtime safety checks inline a per-OS exit(1) trap into every function that indexes an array or dereferences a pointer, and bare metal has no kernel to trap into. Drop --debug until a bare-metal panic path exists.\n"
             write(2, dbg_msg, str_len(dbg_msg))

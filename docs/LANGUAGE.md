@@ -1504,17 +1504,57 @@ a report line the boot tooling parses:
 image: arch=arm64 entry=620 filesz=1048 memsz=1048 load=1077936128
 ```
 
-`entry` is the file offset of `main` (a flat image has no `e_entry`; a boot
-stub must branch to `load + entry`). All values are decimal.
+`entry` is a **file offset**, because a flat image has no `e_entry` and this
+report line is the only place it is recorded. Which offset depends on the
+flags: the entry function is a live `_start` if the program has one and
+`main` otherwise, and with `--stack-top=` (below) `entry` is instead the
+offset of the **emitted entry stub**, which is what a loader or a reset
+vector must start at. All values are decimal.
 
 `--load-addr=` is **required, validated, and reported — never embedded**:
 x86_64 images are fully RIP-relative and run at any address; arm64 images
 are position-independent modulo 4 KiB, so a non-4096-aligned `--load-addr`
 is refused on arm64 only. Requires `--target=none` (a hosted OS would put
 its syscalls in the blob), an explicit `--arch=x86_64|arm64` (riscv32/xtensa
-already own their raw paths via `--freestanding`). `-g` is refused. The entry
-stub, stack setup and BSS-zeroing are sub-project B2; until then the loader
-owns SP and nothing zeroes memory beyond what the full image itself carries.
+already own their raw paths via `--freestanding`). `-g` is refused.
+
+#### Self-booting images (`--stack-top=`)
+
+```
+krc prog.kr --arch=x86_64 --target=none --emit=image \
+    --load-addr=0x400000 --stack-top=0x90000 -o prog.img
+qemu-system-x86_64 -kernel prog.img          # and nothing else
+```
+
+Without `--stack-top=` the image has no startup code at all: SP is whatever
+reset left behind, so the entry function faults in its own prologue and
+something else has to set up the stack and branch to `load + entry`.
+
+`--stack-top=` opts into an emitted entry stub, and the image becomes
+self-sufficient:
+
+* **arm64** — `movz`/`movk` the stack top into `x0`, `mov sp, x0`, `bl` the
+  entry function, then `b .`. Boot it by parking the reset PC on
+  `load + entry`.
+* **x86_64** — a multiboot header followed by a 32-bit trampoline that builds
+  an identity map of the first 1 GiB, enables PAE + long mode, loads a 64-bit
+  GDT, sets RSP and calls the entry function, then `hlt; jmp .`. The header
+  carries the load and entry addresses, so `qemu-system-x86_64 -kernel` is
+  the whole command line.
+
+The stub's trailing halt is the entry function's **return** site: when the
+entry function returns, the machine parks there rather than running off the
+end of the image.
+
+The value is validated per arch (arm64: 16-byte aligned and below 2^32;
+x86_64: below 0x80000000, clear of the trampoline's page tables at
+0x1000–0x4000, and clear of the image's own bytes), and the x86_64 form also
+requires the image to fit under the 1 GiB identity map.
+
+**Nothing zeroes a BSS tail, by design.** The image is never truncated, so
+its statics are carried as real zero bytes and there is nothing left for a
+zeroing loop to do. Do not assume RAM outside the image is zero — QEMU
+zero-fills it, real silicon does not.
 
 ```
 

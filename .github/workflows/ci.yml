@@ -62,9 +62,12 @@ jobs:
       # them the suite goes red at the gate's dependency loop, naming the
       # missing tool. That is deliberate — the whole point of B1 is that a
       # check nobody can run must be visible, not silent.
-      # binutils is preinstalled on x86_64 runners and its bare `as`/`ld` pass
-      # build_loader.sh's FUNCTIONAL probe there, so no cross package is needed
-      # on this job (the arm64 job is different — see its own comment).
+      # THE GATE NEEDS NO ASSEMBLER OR LINKER AT ALL since B2 (tasks 3-4 made
+      # the compiler emit its own entry stub; task 6 deleted the external
+      # multiboot loader and its build script). This comment used to explain
+      # why the runner's preinstalled `as`/`ld` were enough for build_loader.sh's
+      # functional probe — there is no such probe now, on either job. qemu-system
+      # is the whole of the gate's non-coreutils toolchain.
       - name: Install boot-gate toolchain (qemu-system)
         run: |
           sudo apt-get update -qq
@@ -396,11 +399,13 @@ jobs:
           sudo apt-get install -y -qq binutils-x86-64-linux-gnu
           x86_64-linux-gnu-objdump --version | head -1
 
-      # Same hard dependency as the x86_64 job. NOT bare `binutils`: on this
-      # runner that package IS aarch64 binutils and fixes nothing — the
-      # x86-capable assembler/linker build_loader.sh probes for come from
-      # binutils-x86-64-linux-gnu, installed by the step above, which is why
-      # that step has to stay ahead of this one.
+      # Same hard dependency as the x86_64 job. The step ABOVE is the one that
+      # matters for binutils on this runner: bare `binutils` here IS aarch64
+      # binutils, and prove_no_syscalls.sh's gate-2 leg needs an objdump that
+      # can decode x86-64 — hence binutils-x86-64-linux-gnu. (Until B2 Task 6
+      # that package also supplied the x86-capable as/ld the external loader's
+      # build script probed for; the loader is deleted and the boot gate now
+      # requires no assembler or linker on either job.)
       # DECLARED, NOT VERIFIED FROM THE DEV MACHINE: whether qemu-system-x86 is
       # installable on ubuntu-24.04-arm, and what the emulated x86 boot costs in
       # wall clock there. If the package is unavailable the job fails at this
