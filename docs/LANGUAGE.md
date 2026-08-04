@@ -1551,7 +1551,7 @@ The value is refused if it is zero, and validated per arch:
 | | accepted `--stack-top=` | accepted `--load-addr=` |
 |---|---|---|
 | **arm64** | 16-byte aligned, below 2^32 | 4096-aligned (unchanged by this flag) |
-| **x86_64** | **at most `0x40000000`**, and outside `0x1000–0x4000` | **`0x4000` … below `0x40000000`** |
+| **x86_64** | **at most `0x40000000`**, and **at most `0x1000` or at least `0x4008`** | **`0x4000` … below `0x40000000`** |
 
 Both arches additionally refuse a stack top that starts **inside the image**:
 the stack grows down, so the first push writes the eight bytes below it, and
@@ -1568,9 +1568,14 @@ a single 512-entry page directory of 2 MiB pages, so it maps exactly the first
 on the image's *end* (a load address that fits but whose image runs past 1 GiB
 is refused too). The page tables themselves are built at physical
 `0x1000–0x4000` and that range is zeroed, so neither the stack nor the image
-may live there. Passing `--stack-top=` is what makes the two `--load-addr`
-bounds apply: without it no trampoline is emitted and the image is a blob for
-a loader of your own, which is subject to none of this.
+may live there. The stack bound is stated on the **first push**, not on the
+pointer: the trampoline's `call` writes the eight bytes below the stack top, so
+`0x1000` is accepted (its push lands at `0xFF8`, under the tables) and `0x4000`
+is refused (its push at `0x3FF8` would overwrite the last page-directory entry,
+which maps the top 2 MiB of the mapped GiB). `0x4008` is the lowest accepted
+value above the tables. Passing `--stack-top=` is what makes the two
+`--load-addr` bounds apply: without it no trampoline is emitted and the image is
+a blob for a loader of your own, which is subject to none of this.
 
 **Declare the entry function with no parameters.** Neither stub sets up
 arguments, and neither is refused for taking them: `fn main(uint64 argc,
@@ -1602,7 +1607,9 @@ krc <file.kr> --arch=arm64           # default: IR (SSA + optimizer + regalloc)
 krc --legacy --arch=arm64 <file.kr>  # legacy direct-walking codegen
 krc --ir <file.kr>                   # force IR even where a recipe falls back to legacy
 krc --no-coalesce <file.kr>          # disable Briggs/George copy coalescing (default on)
+krc --coalesce <file.kr>             # ...and its explicit positive form (the default)
 krc --no-check-types <file.kr>       # disable the type checker (default on)
+krc --check-types <file.kr>          # ...and its explicit positive form (the default)
 krc --O0 <file.kr>                   # disable the IR optimizer (CF/DCE/CSE/LICM)
 krc --debug <file.kr>                # runtime safety checks (bounds, null, some div-by-zero)
 krc -g <file.kr> -o out              # emit DWARF debug info (.debug_line/info/abbrev/str)

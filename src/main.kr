@@ -2282,12 +2282,27 @@ fn emit_asm_listing(uint64 output_path, uint64 arch, uint64 text_start, uint64 s
 // the diagnostic for 0 because the wording differs per path.
 //
 // A NODE, NOT AN OFFSET. Callers that need a code offset must convert -- the
-// fn_table entry only exists once that function has been emitted, and two of
-// the three callers need the node BEFORE codegen (riscv hoists the entry to
-// offset 0; xtensa threads it into ir_xtensa_gen for the SP preamble). The
-// third (--emit=image) converts via fn_lookup after codegen. Returning an
-// offset here would force the two pre-codegen callers to look up something
-// that does not exist yet.
+// fn_table entry only exists once that function has been emitted -- and the
+// five call sites do three different things with the node, which is why this
+// returns the node and not an offset:
+//
+//   * BEFORE codegen, node only (riscv32 raw, xtensa raw). riscv hoists the
+//     entry to offset 0; xtensa threads it into ir_xtensa_gen for the SP
+//     preamble. Neither could look up an offset here -- it does not exist yet.
+//   * AFTER codegen, node -> NAME TOKEN, no lookup (the arm64 --emit=image
+//     stub). It records the token in the fixup table and lets
+//     resolve_fixups_a64 patch the `bl`, exactly like a call the source wrote.
+//   * AFTER codegen, node -> fn_lookup -> offset (the x86_64 --emit=image
+//     stub's PART 2, which patches an absolute movabs; and the finalize block,
+//     which needs an offset for the `image:` report line).
+//
+// THE IMAGE PATH WALKS THE AST TWICE, not once: one of the two stub arms
+// (arm64 at `img_raw && arch == 1`, x86_64 at `x86_stub_on`) plus the finalize
+// block. Never three -- the two stub arms are mutually exclusive on arch -- and
+// only once without `--stack-top=`, where no stub is emitted. The walk is a
+// single pass over the top-level declaration list with no allocation, and the
+// alternative (thread the node down through ~700 lines of codegen) buys less
+// than it costs; noted so a future reader does not mistake it for an oversight.
 //
 // Factored out of two near-identical ~30-line walks (the riscv32 and xtensa
 // blocks below) when --emit=image needed the same rule on x86_64/arm64.
@@ -2327,6 +2342,26 @@ fn find_entry_node(uint64 root) -> uint64 {
         return fen_start
     }
     return fen_main
+}
+
+// The "--emit=image found neither entry name" diagnostic, in ONE place.
+//
+// find_entry_node returning 0 is refused at three points on the image path --
+// the arm64 stub arm, the x86_64 stub's PART 2, and the finalize block -- and
+// the wording must not drift between them, because they are one cause. It was
+// written out verbatim three times (Task 3 added the second, Task 4 the third
+// without noting it), which is exactly the shape that drifts. Mirrors
+// load_addr_die()/stack_top_die() below: one message, one place, no return.
+//
+// The riscv32/xtensa refusals are deliberately NOT routed here -- they name
+// their own arch and their own flag (`freestanding riscv32`), which is a
+// different message for a different path, not a copy of this one.
+fn entry_missing_die() {
+    uint64 em_msg = "error: --emit=image needs an entry function ('_start' or 'main')\n"
+    write(2, em_msg, str_len(em_msg))
+    em_msg = "A bare-metal image has no loader to call: name the first function to run either '_start' or 'main'\n"
+    write(2, em_msg, str_len(em_msg))
+    exit(1)
 }
 
 // ---------------------------------------------------------------------------
@@ -3013,19 +3048,25 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
     // arch == 1 is arm64. x86_64 has its own, differently-shaped stub — the
     // multiboot header + long-mode trampoline emitted at PART 1 above, which
     // is PREPENDED rather than appended, hence two blocks and not one.
-    uint64 img_stub_off = 0xFFFFFFFF
+    // "A stub was emitted, and it starts at img_stub_off." Two variables and
+    // not one sentinel value ON PURPOSE: the finalize block that consumes this
+    // also holds `entry_off`, whose OWN 0xFFFFFFFF means "fn_lookup found no
+    // such function", and `entry_off = img_stub_off` would then sit four lines
+    // from an `entry_off == 0xFFFFFFFF` test meaning something else entirely.
+    // img_stub_set is the same idiom as stack_top_set/load_addr_set: presence
+    // is a separate fact from value, and 0xFFFFFFFF is already spoken for by
+    // fn_lookup and find_main_offset. img_stub_off is meaningless while
+    // img_stub_set is 0.
+    uint64 img_stub_off = 0
+    uint64 img_stub_set = 0
     if img_raw != 0 && arch == 1 && stack_top_set != 0 {
         uint64 stb_node = find_entry_node(root)
         if stb_node == 0 {
             // Same condition the finalize block below refuses on, reached
             // earlier because the stub needs the entry's name token now.
-            // Worded identically so the two arms cannot drift into two
-            // different diagnostics for one cause.
-            uint64 stb_msg = "error: --emit=image needs an entry function ('_start' or 'main')\n"
-            write(2, stb_msg, str_len(stb_msg))
-            stb_msg = "A bare-metal image has no loader to call: name the first function to run either '_start' or 'main'\n"
-            write(2, stb_msg, str_len(stb_msg))
-            exit(1)
+            // Shared with that block through entry_missing_die() so the two
+            // arms cannot drift into two diagnostics for one cause.
+            entry_missing_die()
         }
         // fn_register stores a function's OWN declaration token, and
         // fn_lookup compares token TEXT, so a fixup recorded against
@@ -3035,6 +3076,7 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
         // is in the source by definition.)
         uint32 stb_tok = ast_data1(stb_node)
         img_stub_off = out_len
+        img_stub_set = 1
 
         // Every subexpression is parenthesised on purpose: in this dialect
         // `&`, `|` and `^` bind TIGHTER than `+` and `<<`, so `a | b << 5`
@@ -3090,13 +3132,9 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
     if x86_stub_on != 0 {
         uint64 xsb_node = find_entry_node(root)
         if xsb_node == 0 {
-            // Worded identically to the arm64 arm above and the finalize
-            // block below, so one cause cannot grow three diagnostics.
-            uint64 xsb_msg = "error: --emit=image needs an entry function ('_start' or 'main')\n"
-            write(2, xsb_msg, str_len(xsb_msg))
-            xsb_msg = "A bare-metal image has no loader to call: name the first function to run either '_start' or 'main'\n"
-            write(2, xsb_msg, str_len(xsb_msg))
-            exit(1)
+            // Shared with the arm64 arm above and the finalize block below,
+            // so one cause cannot grow three diagnostics.
+            entry_missing_die()
         }
         uint32 xsb_tok = ast_data1(xsb_node)
         uint64 xsb_wtok = xsb_tok
@@ -3118,6 +3156,7 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
         // any other way would run with a garbage stack, in 32-bit mode, on a
         // CPU with paging off.
         img_stub_off = x86stub_start32_off
+        img_stub_set = 1
     }
 
     // Xtensa raw mode (Task 3): the whole post-codegen pipeline below
@@ -3556,11 +3595,7 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
     if img_raw != 0 {
         uint64 img_entry_node = find_entry_node(root)
         if img_entry_node == 0 {
-            uint64 ime_msg = "error: --emit=image needs an entry function ('_start' or 'main')\n"
-            write(2, ime_msg, str_len(ime_msg))
-            ime_msg = "A bare-metal image has no loader to call: name the first function to run either '_start' or 'main'\n"
-            write(2, ime_msg, str_len(ime_msg))
-            exit(1)
+            entry_missing_die()
         }
         uint32 ime_tok = ast_data1(img_entry_node)
         uint64 ime_wtok = ime_tok
@@ -3581,12 +3616,13 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
         // recorded a `bl` fixup (arm64) or a patched movabs (x86_64) against
         // that same token, so a miss here means the image's own call would
         // not have resolved either.
-        // BOTH stub paths set img_stub_off: arm64's block above sets it to the
-        // appended stub's offset, and the x86_64 PART 2 block sets it to the
-        // trampoline's `cli`. It stays 0xFFFFFFFF only with --stack-top
-        // absent, i.e. no stub on either arch, where entry_off stays exactly
-        // what it was.
-        if img_stub_off != 0xFFFFFFFF {
+        // BOTH stub paths set img_stub_set: arm64's block above records the
+        // appended stub's offset, and the x86_64 PART 2 block records the
+        // trampoline's `cli`. It stays 0 only with --stack-top absent, i.e. no
+        // stub on either arch, where entry_off stays exactly what it was.
+        // Tested against its OWN flag and not against 0xFFFFFFFF -- the
+        // sentinel four lines up belongs to fn_lookup and means something else.
+        if img_stub_set != 0 {
             entry_off = img_stub_off
         }
     } else if rv_raw == 0 {
@@ -6044,7 +6080,7 @@ fn main() {
                 write(1, h_img, str_len(h_img))
                 uint64 h_la = "  --load-addr=<addr>       where the image will be loaded; validated (arm64: 4096-aligned) and reported, never embedded\n"
                 write(1, h_la, str_len(h_la))
-                uint64 h_st = "  --stack-top=<addr>       emit a self-booting entry stub that sets SP here (x86_64 also gets a multiboot header + long-mode trampoline); validated per-arch (arm64: 16-byte aligned, <2^32; x86_64: <=0x40000000, outside 0x1000-0x4000, and --load-addr must then be in [0x4000,0x40000000)); on both arches the stack must not start inside the image; no default\n"
+                uint64 h_st = "  --stack-top=<addr>       emit a self-booting entry stub that sets SP here (x86_64 also gets a multiboot header + long-mode trampoline); validated per-arch (arm64: 16-byte aligned, <2^32; x86_64: <=0x40000000, its first push must clear the page tables at 0x1000-0x4000 so the stack top is <=0x1000 or >=0x4008, and --load-addr must then be in [0x4000,0x40000000)); on both arches the stack must not start inside the image; no default\n"
                 write(1, h_st, str_len(h_st))
                 write(1, "  -c                        shorthand for --emit=obj\n", 53)
                 write(1, "  -o <path>                 output path\n\n", 41)
@@ -6376,10 +6412,30 @@ fn main() {
             if arch == 0 {
                 // x86_64 needs its own range rule -- it has no --load-addr
                 // constraint beyond != 0 today, so this is new ground.
-                // Bound 1: must not collide with the boot stub's identity-
-                // map page tables, which live at physical 0x1000-0x4000.
-                if stack_top >= 4096 && stack_top < 16384 {
-                    uint64 st_pt = "error: --stack-top= must not fall inside 0x1000-0x4000 on x86_64: the boot stub's identity-map page tables live there, and a stack in that range would corrupt them on the first push. This constraint is x86_64-only -- arm64 has no page tables in the flat image\n"
+                // Bound 1: the FIRST PUSH must not land in the boot stub's
+                // identity-map page tables, which live at physical
+                // 0x1000-0x4000 (PDE 511 of the page directory is the last
+                // eight bytes of that range, and it maps the GiB's top 2 MiB).
+                //
+                // THE BAND IS THE PUSH'S BAND, NOT THE POINTER'S. The stack
+                // grows down, so the trampoline's `call *%rax` writes the eight
+                // bytes [stack_top-8, stack_top) -- the same +8 convention the
+                // stack-vs-image check at finalize uses. Testing the pointer
+                // instead of the push, which is what shipped from Task 1 to
+                // here, is off by eight at BOTH edges:
+                //
+                //   * 0x1000 was REFUSED, though its push at [0xFF8, 0x1000)
+                //     lands entirely below the tables and harms nothing.
+                //   * 0x4000 was ACCEPTED, though its push at [0x3FF8, 0x4000)
+                //     overwrites a live PDE with a return address. Latent
+                //     corruption of the map the guest is about to run under.
+                //
+                // [stack_top-8, stack_top) overlaps [0x1000, 0x4000) exactly
+                // when stack_top > 0x1000 and stack_top < 0x4008, so those are
+                // the bounds. Both are strict: 0x1000 and 0x4008 are the
+                // nearest accepted values on either side.
+                if stack_top > 4096 && stack_top < 16392 {
+                    uint64 st_pt = "error: --stack-top='s first push would land inside 0x1000-0x4000 on x86_64: the boot stub's identity-map page tables live there, the stack grows down, and the first push writes the eight bytes below the stack top. The stack top must be at most 0x1000 or at least 0x4008. This constraint is x86_64-only -- arm64 has no page tables in the flat image\n"
                     write(2, st_pt, str_len(st_pt))
                     exit(1)
                 }

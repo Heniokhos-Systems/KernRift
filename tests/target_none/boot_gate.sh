@@ -43,6 +43,31 @@ set -u
 DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO="$(cd "$DIR/../.." && pwd)"
 KRC="${KRC:-$REPO/build/krc2}"
+
+# STALE-BINARY WARNING, DELIBERATELY NOT A GATE (T5-M7).
+#
+# Under `make test` the compiler is rebuilt before the suite runs, so this is
+# always silent there. The exposed path is the developer running this script
+# standalone against a build/krc2 that predates their edit -- a false pass this
+# project has already produced once (Task 1's `make` printing "Nothing to be
+# done" while the gate reported green on the previous binary).
+#
+# WHY A WARNING AND NOT A REFUSAL: $KRC is an arbitrary path. Testing a
+# release binary, a bisect build, or a copy from another worktree against this
+# tree's src/ is a legitimate thing to do, and every one of those is "older
+# than src/". A mtime comparison is a heuristic, not a proof of staleness, so
+# it may not be allowed to turn a legitimate run red. It goes to stderr and
+# names the file that is newer, so the message is actionable rather than a
+# vague "might be stale".
+if [ -e "$KRC" ]; then
+    KRC_NEWER=$(find "$REPO/src" -name '*.kr' -newer "$KRC" -print -quit 2>/dev/null || true)
+    if [ -n "$KRC_NEWER" ]; then
+        echo "  WARNING: $KRC is OLDER than $KRC_NEWER -- this gate may be" >&2
+        echo "  testing a stale compiler. Run 'make' first, or set KRC= deliberately." >&2
+    fi
+    unset KRC_NEWER
+fi
+
 BOOT="$DIR/boot"
 PASS=0; FAIL=0; SKIP=0
 SEEN=""
@@ -209,6 +234,9 @@ if [ "$FAIL" != 0 ]; then echo "boot gate: $PASS pass, $FAIL FAIL"; exit 1; fi
 # is exactly the `timeout 10`, so a leg that waits the full deadline races the
 # alarm. That race would false-FAIL a positive leg on a slow runner, which is
 # the failure mode this gate exists to prevent, so the check is `== 1`.
+# L0_alarm_not_a_dead_boot is what holds it at `== 1`: it drives a real boot to
+# rc 124 with a one-second alarm and asserts boot_run still calls it a boot.
+# Without it, `== 1` -> `!= 0` is a regression no check in this gate can see.
 #
 # UNTIL TASK 5 THE x86 HALF OF THIS WAS CLOSED A DIFFERENT WAY: every x86
 # silence control also required the external loader's `KR-LDR|` liveness
@@ -254,6 +282,12 @@ if [ "$FAIL" != 0 ]; then echo "boot gate: $PASS pass, $FAIL FAIL"; exit 1; fi
 # and tells a reader nothing. With -no-reboot QEMU exits by itself; the kill is
 # then a no-op and the wait still reaps.
 BOOT_TICK=0.05            # poll granularity, seconds
+# `timeout`'s alarm, in seconds. A VARIABLE ONLY SO L0 CAN EXERCISE rc 124 --
+# every real leg runs at the 10 s default and none of them touches it. L0's
+# alarm check turns it down to 1 s, which is the only way to reach the 124 path
+# without deliberately running a boot past the full deadline (10 s of gate time
+# for one control). It is saved and restored around that one check.
+BOOT_TIMEOUT=10
 BOOT_DEADLINE_TICKS=200   # 10 s — hard ceiling on waiting for evidence
 # Window for a RUNOUT leg. Seeded at 2 s and then RE-DERIVED by each leg from
 # its own positive boot (8x the time that boot needed to reach the wire, capped
@@ -314,7 +348,7 @@ boot_run() {
     # qemu's stderr is KEPT, not discarded: it is the only place the reason for
     # a refused boot is written, and $WORK survives a red run.
     # shellcheck disable=SC2086
-    timeout 10 "$qemu" $machine -display none -serial "file:$ser" "$@" >/dev/null 2>"$ser.err" &
+    timeout "$BOOT_TIMEOUT" "$qemu" $machine -display none -serial "file:$ser" "$@" >/dev/null 2>"$ser.err" &
     local pid=$!
     boot_wait "$pid" "$ser" "$expect"
     kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null
@@ -808,6 +842,53 @@ leg0() {
     else
         bad "L0_liveboot_not_flagged" "x86 ok=$lx a64 ok=$la (a boot that RAN was reported as dead; every positive leg below is now unreachable)"
     fi
+    # THE DISCRIMINATOR IS `== 1`, NOT `!= 0`, AND THIS IS THE ONLY THING THAT
+    # HOLDS IT THERE. The two checks above pin the two ends boot_run cares
+    # about — a refused boot (qemu's own exit 1) and a boot that ran (0) — and
+    # BOTH of them stay green under `!= 0`. The third status is `timeout`'s own
+    # 124, which means "the guest was still running when the alarm fired": a
+    # boot that RAN, and the case a `!= 0` regression would report as dead. The
+    # consequence is measured, not argued — Task 5 shipped `!= 0` and three
+    # positive legs false-failed on it.
+    #
+    # WHY THIS IS NOT A FLAKINESS SOURCE, which is the objection that kept it
+    # queued. The obvious construction — run a real leg past the full 10 s
+    # deadline — races the harness against the alarm and costs 10 s. This one
+    # inverts the race instead of running it: the alarm is turned down to 1 s
+    # while boot_wait's own window is opened to 10 s, so `timeout` ALWAYS wins,
+    # by a factor of ten, on any machine. The guest only has to still be alive
+    # after one second, and this is the same bare machine L0_liveboot_not_flagged
+    # just watched survive its own two-second window. Nothing here depends on
+    # how fast the runner is; a slower one makes the guest MORE likely to
+    # outlive the alarm, not less.
+    #
+    # BOTH HALVES ARE ASSERTED. `boot_run returned 0` is the claim; `rc == 124`
+    # is what keeps the claim from going vacuous — if the alarm ever stops
+    # firing (a `timeout` that behaves differently, a guest that self-exits
+    # inside a second) the status would be 0, boot_run would return 0 for a
+    # different reason, and this control would pass while testing nothing.
+    #
+    # WHAT IT DOES NOT COVER, stated rather than left to be discovered:
+    # boot_run_qmp carries the SAME `!= 1` literal against its own `timeout 15`
+    # and is not exercised here. Its alarm is not on a variable, and reaching
+    # it would mean standing up a QMP session purely to be killed. The two
+    # copies are one rule spelled twice, so a regression that edits one would
+    # almost certainly edit both and this check would see it — "almost
+    # certainly" being exactly as strong as that argument is.
+    local sv_timeout="$BOOT_TIMEOUT" sv_silence="$BOOT_SILENCE_TICKS"
+    BOOT_TIMEOUT=1
+    BOOT_SILENCE_TICKS=200        # 10 s — the harness must OUTLAST the alarm
+    local alarm_ok=1
+    boot_run x86 "$WORK/l0_alarm.txt" RUNOUT && alarm_ok=0
+    local alarm_rc="$BOOT_QEMU_RC"
+    BOOT_TIMEOUT="$sv_timeout"; BOOT_SILENCE_TICKS="$sv_silence"
+    if [ "$alarm_rc" != 124 ]; then
+        bad "L0_alarm_not_a_dead_boot" "the 1 s alarm did not fire (qemu exit=$alarm_rc, not 124) — this control did not exercise the 124 path at all, so it proves nothing about == 1 vs != 0"
+    elif [ "$alarm_ok" != 0 ]; then
+        bad "L0_alarm_not_a_dead_boot" "timeout's own 124 was read as a refused boot — the discriminator has regressed from '== 1' to '!= 0', and every leg whose guest outlives the deadline now false-fails"
+    else
+        ok "L0_alarm_not_a_dead_boot" "qemu exit 124 (the alarm), reported as a boot — '!= 0' would have called it dead"
+    fi
 }
 
 # =============================================================================
@@ -1030,13 +1111,20 @@ leg1() {
     # WHY A LANDING PAD RATHER THAN "IS THE GUEST STILL ALIVE". Because a guest
     # executing zeroes is not a stable observable and MUST NOT be one this gate
     # depends on. Zeroes decode as `add %al,(%rax)`, which is SELF-MODIFYING at
-    # the address it is executing, so the walk is chaotic; measured on one
-    # image, one command line, twelve runs: eleven died inside ~100 ms and one
-    # survived the full 2 s window in long mode at RIP 0x7453e8. Task 4's
-    # CS64/EFER observation is that one-in-twelve outcome, and a liveness
-    # assertion built on it would have been an intermittently-red gate — a
-    # correction that was itself wrong, which is the recurring failure of this
-    # sub-project. The landing pad makes the same claim DETERMINISTICALLY:
+    # the address it is executing, so the walk is chaotic. Observed on one
+    # image, one command line: across twelve runs a single survivor reached the
+    # full 2 s window in long mode at RIP 0x7453e8, while the other eleven died
+    # inside ~100 ms — and that survivor COULD NOT BE REPRODUCED in 40 further
+    # runs of the same image and command line, which got 0. So this is one
+    # observation, not a measured rate, and the number of runs it would take to
+    # see another is unknown. Task 4's CS64/EFER observation is that survivor.
+    # A liveness assertion built on it would have been a gate that is red
+    # almost always and green on nobody's schedule — and stating the rate as
+    # "one in twelve" would itself have been a correction that was wrong, which
+    # is the recurring failure of this sub-project. Note that 0/40 makes the
+    # conclusion STRONGER, not weaker: the less reproducible the survival, the
+    # less admissible it is as an observable. The landing pad makes the same
+    # claim DETERMINISTICALLY:
     # 5/5 runs park at load + <call target> + 1, and with the GDT destroyed
     # (the review-I1 form) 3/3 give QMPFAIL because qemu is already gone.
     #
@@ -1446,7 +1534,7 @@ leg4() {
 # baseline any more: L0's four loader checks are retired, L1 lost three
 # loader-shaped controls and gained five, L2 lost one and gained three. What
 # must hold is 0 FAIL and 0 SKIP.
-run_leg leg0 L0_deadboot_x86 L0_deadboot_a64 L0_liveboot_not_flagged
+run_leg leg0 L0_deadboot_x86 L0_deadboot_a64 L0_liveboot_not_flagged L0_alarm_not_a_dead_boot
 run_leg leg1 L1_multiboot_header L1_no_header_image_refused L1_self_boot_sentinel \
              L1_halt_parked L1_control_entry_addr_honoured L1_control_no_return \
              L1_control_zeroed_payload

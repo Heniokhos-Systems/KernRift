@@ -8518,13 +8518,56 @@ rm -f /tmp/krc_stk_$$
 #    silently patch the wrong bytes above this line.
 img_refuses stacktop_x86_range "below 0x80000000 on x86_64" --arch=x86_64 --target=none --emit=image --load-addr=0x400000 --stack-top=0x80000000
 
-# 6b. x86_64's other bound: a stack top inside 0x1000-0x4000 collides with
-#     the boot stub's identity-map page tables and is refused. Same row
-#     family as #6 -- both bounds come from the flag value alone, no image
-#     size needed. The rules that DO need the image size (the 1 GiB fit and
-#     the stack-vs-image overlap) fire in the --emit=image finalize and are
-#     covered by rows 7-8 below and by stub_x86_stack_top_refused_inside_image.
+# 6b. x86_64's other bound: a stack top whose first push lands in 0x1000-0x4000
+#     collides with the boot stub's identity-map page tables and is refused.
+#     Same row family as #6 -- both bounds come from the flag value alone, no
+#     image size needed. The rules that DO need the image size (the 1 GiB fit
+#     and the stack-vs-image overlap) fire in the --emit=image finalize and are
+#     covered by rows 7-8 below, by stub_x86_stack_top_refused_inside_image and
+#     by stub_x86_image_end_refused_above_map.
+#
+#     0x2000 IS THE INTERIOR OF THE BAND, not an edge. Both edges are pinned
+#     separately by 6c-6e below, and they have to be: this row is green under
+#     the wrong rule as well as the right one, which is how the off-by-eight
+#     survived from Task 1 to the final review.
 img_refuses stacktop_x86_range_collision "0x1000-0x4000 on x86_64" --arch=x86_64 --target=none --emit=image --load-addr=0x400000 --stack-top=0x2000
+
+# 6c-6e. BOTH EDGES OF THAT BAND, because both were off by eight from Task 1
+#     until the final review found it. The rule is about the trampoline's FIRST
+#     PUSH, which writes [stack_top-8, stack_top) -- the same +8 convention row
+#     7's stack-vs-image check uses -- and the shipped test was on the POINTER:
+#
+#       * 0x1000 was REFUSED. Its push lands at [0xFF8, 0x1000), entirely below
+#         the page tables. A legal configuration was rejected.
+#       * 0x4000 was ACCEPTED. Its push lands at [0x3FF8, 0x4000) -- the last
+#         eight bytes of the page directory, i.e. PDE 511, which maps the top
+#         2 MiB of the identity-mapped GiB. The guest overwrites an entry of
+#         the map it is about to run under, silently and on its first call.
+#
+#     Both edges are pinned as rows because a one-sided fix is exactly how the
+#     off-by-eight got here: the refusal above (6b, 0x2000) is green under BOTH
+#     the wrong rule and the right one, so it could never have caught this.
+#     0x4007 is the last refused value and 0x4008 the first accepted one.
+stk_accepts() {   # $1 label, $2... krc args -- the accept twin of img_refuses
+    local label="$1"; shift
+    TOTAL=$((TOTAL + 1))
+    local art=/tmp/krc_stk_acc_$$
+    rm -f "$art"
+    if $KRC $KRC_FLAGS "$STK_SRC" -o "$art" "$@" >/dev/null 2>&1 && [ -f "$art" ]; then
+        PASS=$((PASS + 1)); echo "  $label: PASS"
+    else
+        echo "FAIL: $label (refused, or exited 0 without writing $art)"; FAIL=$((FAIL + 1))
+    fi
+    rm -f "$art"
+}
+stk_accepts stacktop_x86_page_table_low_edge_accepted \
+    --arch=x86_64 --target=none --emit=image --load-addr=0x400000 --stack-top=0x1000
+img_refuses stacktop_x86_page_table_high_edge_refused "0x1000-0x4000 on x86_64" \
+    --arch=x86_64 --target=none --emit=image --load-addr=0x400000 --stack-top=0x4000
+img_refuses stacktop_x86_page_table_last_refused "0x1000-0x4000 on x86_64" \
+    --arch=x86_64 --target=none --emit=image --load-addr=0x400000 --stack-top=0x4007
+stk_accepts stacktop_x86_page_table_first_accepted \
+    --arch=x86_64 --target=none --emit=image --load-addr=0x400000 --stack-top=0x4008
 
 # 7. arm64 refuses a stack top INSIDE THE IMAGE, exactly as x86_64 does.
 #    This rule is architecture-independent -- the first push writes
@@ -8553,6 +8596,114 @@ fi
 rm -f /tmp/krc_stk_a64_$$
 
 rm -f "$STK_SRC" "$IMG_SRC"
+
+# --- `--help` vs docs/LANGUAGE.md vs the compiler (sub-project B2, M5) -------
+#
+# WHY THIS SECTION EXISTS. Sub-project B2's final review found TWO separate
+# documentation defects inside a single branch: `--help` and docs/LANGUAGE.md
+# both stated an x86_64 `--stack-top` range the compiler refuses (I1), and
+# three "a later task will do this / this emits nothing" comments survived the
+# task that was supposed to retire them (I2). Both were found by a human
+# reading the two texts against the code. Nothing in the suite could have
+# found either, because nothing in the suite reads those texts at all.
+#
+# A DOC IS A CLAIM ABOUT BEHAVIOUR, so it can be tested like one. Two
+# mechanisms, deliberately different in kind:
+#
+#   * COVERAGE (rows 1-2) is mechanical and total: every flag one text names,
+#     the other must name too. It catches the flag that gets added to the
+#     parser and to --help and never reaches the manual, and the flag the
+#     manual still describes after it was removed.
+#   * AGREEMENT (row 3) is behavioural: the numbers both texts print for the
+#     x86_64 --stack-top bounds are probed against the compiler itself. This
+#     is the half that would have caught I1 -- the texts were self-consistent
+#     and both wrong, so no amount of text-vs-text checking could see it.
+#
+# NEITHER HALF ALONE IS ENOUGH and that is the point: move a bound in the code
+# and row 3 reds; edit a bound in one text and rows 1-3 red; edit it in both
+# texts without touching the code and row 3 reds. There is no single-file edit
+# that leaves all three green and the tree inconsistent.
+echo ""
+echo "--- --help vs docs/LANGUAGE.md consistency (B2) ---"
+HD_DOC="$DIR/../docs/LANGUAGE.md"
+HD_HELP=/tmp/krc_hd_help_$$
+$KRC $KRC_FLAGS --help > "$HD_HELP" 2>&1
+# Flag tokens, from either text. The trailing filter drops markdown anchors
+# like `#embedded-targets-riscv32--xtensa--esp32`, which are not flags: a real
+# long option never contains a second `--`.
+hd_flags() { grep -o -- '--[a-z0-9][a-z0-9-]*' "$1" | grep -v -- '.--' | sort -u; }
+
+# 1. Every flag --help lists is named in the manual.
+TOTAL=$((TOTAL + 1))
+hd_missing=""
+for hd_f in $(hd_flags "$HD_HELP"); do
+    grep -qF -- "$hd_f" "$HD_DOC" || hd_missing="$hd_missing $hd_f"
+done
+if [ -z "$hd_missing" ]; then
+    PASS=$((PASS + 1)); echo "  help_flags_are_documented: PASS ($(hd_flags "$HD_HELP" | wc -l) flags)"
+else
+    echo "FAIL: help_flags_are_documented (--help lists these and docs/LANGUAGE.md never mentions them:$hd_missing)"
+    FAIL=$((FAIL + 1))
+fi
+
+# 2. ...and the reverse: no flag survives in the manual after --help drops it.
+#    A separate row because the two directions want opposite fixes -- one says
+#    "document this", the other says "the manual describes a flag that is gone".
+TOTAL=$((TOTAL + 1))
+hd_stale=""
+for hd_f in $(hd_flags "$HD_DOC"); do
+    grep -qF -- "$hd_f" "$HD_HELP" || hd_stale="$hd_stale $hd_f"
+done
+if [ -z "$hd_stale" ]; then
+    PASS=$((PASS + 1)); echo "  docs_flags_are_in_help: PASS ($(hd_flags "$HD_DOC" | wc -l) flags)"
+else
+    echo "FAIL: docs_flags_are_in_help (docs/LANGUAGE.md names these and --help does not:$hd_stale)"
+    FAIL=$((FAIL + 1))
+fi
+
+# 3. The x86_64 --stack-top bounds: stated in both texts, enforced by the
+#    compiler, one row per claim.
+#
+#    THE DOCS GREP IS SCOPED to the "Self-booting images" section, from its
+#    heading to the next heading. Unscoped, `0x1000` is satisfied by the
+#    integer-literal example in section 4 and the claim would be vacuous --
+#    which is the check-that-cannot-fail shape this branch has already shipped
+#    once. The help grep is scoped to the --stack-top line for the same reason.
+HD_SEC=/tmp/krc_hd_sec_$$
+awk '/^#### Self-booting images/{s=1;print;next} s&&/^#/{exit} s{print}' "$HD_DOC" > "$HD_SEC"
+HD_LINE=/tmp/krc_hd_line_$$
+grep -- '--stack-top=<addr>' "$HD_HELP" > "$HD_LINE"
+HD_SRC="$DIR/../test_tmp_hd_$$.kr"
+printf 'fn main() -> uint64 { return 0 }\n' > "$HD_SRC"
+# $1 label, $2 the number both texts must state, $3 stack top, $4 A|R, $5 why
+hd_bound() {
+    local label="$1" num="$2" st="$3" want="$4" why="$5"
+    TOTAL=$((TOTAL + 1))
+    local art=/tmp/krc_hd_art_$$ got
+    rm -f "$art"
+    if $KRC $KRC_FLAGS "$HD_SRC" -o "$art" --arch=x86_64 --target=none --emit=image \
+           --load-addr=0x400000 --stack-top=$st >/dev/null 2>&1 && [ -f "$art" ]; then
+        got=A
+    else
+        got=R
+    fi
+    rm -f "$art"
+    if ! grep -qF -- "$num" "$HD_LINE"; then
+        echo "FAIL: $label (--help's --stack-top line does not state $num -- $why)"; FAIL=$((FAIL + 1))
+    elif ! grep -qF -- "$num" "$HD_SEC"; then
+        echo "FAIL: $label (docs/LANGUAGE.md's self-booting section does not state $num -- $why)"; FAIL=$((FAIL + 1))
+    elif [ "$got" != "$want" ]; then
+        echo "FAIL: $label (both texts state $num, but the compiler ${got:+$([ "$got" = A ] && echo ACCEPTS || echo REFUSES)} --stack-top=$st -- $why)"; FAIL=$((FAIL + 1))
+    else
+        PASS=$((PASS + 1)); echo "  $label: PASS ($num stated in both texts; --stack-top=$st $([ "$want" = A ] && echo accepted || echo refused))"
+    fi
+}
+hd_bound help_docs_stacktop_ceiling      0x40000000 0x40000000 A "the identity map covers exactly the first 1 GiB, and the bound is inclusive: the first push from 0x40000000 lands at 0x3FFFFFF8, inside the map"
+hd_bound help_docs_stacktop_above_ceiling 0x40000000 0x40000010 R "one step past the stated ceiling must be refused, or the ceiling is decorative"
+hd_bound help_docs_stacktop_pt_low        0x1000     0x1000     A "0x1000 is the highest stack top whose first push clears the page tables (it lands at 0xFF8)"
+hd_bound help_docs_stacktop_pt_high       0x4008     0x4008     A "0x4008 is the lowest stack top whose first push clears the page tables (it lands at 0x4000)"
+hd_bound help_docs_stacktop_pt_inside     0x4008     0x4007     R "one below the stated low bound pushes into the page directory's last entry"
+rm -f "$HD_HELP" "$HD_SEC" "$HD_LINE" "$HD_SRC"
 
 # --- --emit=image EMISSION + the `image:` report line (sub-project B1, T5) ---
 #
@@ -8939,6 +9090,41 @@ for IA in x86_64 arm64; do
         FAIL=$((FAIL + 1))
     fi
     rm -f /tmp/krc_entn_$$
+done
+
+# 3b. THE SAME REFUSAL, WITH --stack-top=, WHICH IS A DIFFERENT ARM OF THE
+#     COMPILER. find_entry_node returning 0 is refused at THREE points on the
+#     image path, and which one fires depends on the flag:
+#
+#       --stack-top absent  -> the finalize block  (what row 3 above reaches)
+#       --stack-top + x86_64 -> the trampoline's PART 2, before finalize
+#       --stack-top + arm64  -> the stub arm, before finalize
+#
+#     Row 3 only ever reaches the first, so the two stub arms shipped with no
+#     coverage at all. Confirmed by instrumenting all three arms with distinct
+#     markers and rebuilding: with the flag the stub arms fire and the finalize
+#     arm is never reached; without it, only the finalize arm is.
+#
+#     They are worth their own rows even though the diagnostic is now shared
+#     through entry_missing_die(): the stub arms run BEFORE any stub bytes are
+#     emitted and before the entry token is read out of the node, so a missing
+#     guard there is not a wrong message, it is ast_data1(0) followed by a
+#     fixup recorded against a garbage token. Three clauses, as everywhere.
+for IA in x86_64 arm64; do
+    TOTAL=$((TOTAL + 1))
+    ILOAD=0x400000; ISTK=0x90000
+    [ "$IA" = arm64 ] && { ILOAD=0x40400000; ISTK=0x40800000; }
+    rm -f /tmp/krc_entns_$$
+    entns_out=$($KRC $KRC_FLAGS "$ENT_N" -o /tmp/krc_entns_$$ --arch=$IA --target=none --emit=image --load-addr=$ILOAD --stack-top=$ISTK 2>&1)
+    entns_st=$?
+    if [ $entns_st -ne 0 ] && [ ! -f /tmp/krc_entns_$$ ] \
+       && echo "$entns_out" | grep -q "needs an entry function ('_start' or 'main')"; then
+        PASS=$((PASS + 1)); echo "  entry_neither_refused_with_stub_$IA: PASS"
+    else
+        echo "FAIL: entry_neither_refused_with_stub_$IA (exit=$entns_st, artifact=$([ -f /tmp/krc_entns_$$ ] && echo yes || echo no), out=$(echo "$entns_out" | head -1))"
+        FAIL=$((FAIL + 1))
+    fi
+    rm -f /tmp/krc_entns_$$
 done
 
 # 4. The HOSTED refusal must not widen. A program with `_start` and no `main`
@@ -9654,6 +9840,23 @@ xsb_refuse stub_x86_stack_top_refused_above_map "--stack-top= must be at most 0x
 #     still announces an artifact it never wrote.
 xsb_refuse stub_x86_stack_top_refused_inside_image "inside the image" \
     --load-addr=$XSB_LOAD --stack-top=$((XSB_LOAD + 64))
+
+# 11. The image's END must fit under the identity map too. This was the only
+#     refusal in the branch with no row: --load-addr alone is bounded below
+#     0x40000000, but a load address that fits can still carry an image that
+#     runs past 1 GiB, and everything past it is unmapped the instant paging
+#     comes on. Like row 10 this needs the FILE SIZE, so it fires at finalize
+#     and ahead of the report.
+#
+#     0x3FFFFFF0 is sixteen bytes below the map's end and passes the argument-
+#     time --load-addr bound, so this row cannot be that bound firing early;
+#     any image at all overflows from there (the x86 trampoline alone is 226
+#     bytes), which is what keeps the row from depending on XSB_SRC's size.
+#     The stack top is below the load address, so row 10's rule is not what
+#     refuses it either. The substring is the message's own opening -- the two
+#     other "1 GiB" messages name a FLAG, this one names the IMAGE.
+xsb_refuse stub_x86_image_end_refused_above_map "the image does not fit under the x86_64 self-boot trampoline's identity map" \
+    --load-addr=0x3FFFFFF0 --stack-top=$XSB_SP
 
 rm -f "$XSB_SRC" "$XSB_SRC2"
 
