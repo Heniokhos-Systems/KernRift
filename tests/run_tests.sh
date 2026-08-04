@@ -8699,7 +8699,7 @@ rm -f "$ihdr_a" "$ihdr_b"
 
 rm -f "$STK_SRC" "$IMG_SRC"
 
-# --- --emit=uefi flag surface + payload geometry (sub-project D, Task 1) -----
+# --- --emit=uefi flag surface, payload geometry, PE header (D, Tasks 1-2) ----
 #
 # WHAT MAKES THIS MODE DANGEROUS, AND WHY EVERY ROW BELOW IS SHAPED THE WAY IT
 # IS. A new --emit= value inherits four separate defaults, and all four fail
@@ -8738,12 +8738,25 @@ rm -f "$STK_SRC" "$IMG_SRC"
 # congruent to its FILE offset mod 4096. A PE loader maps it at
 # SectionRVA + (offset - PointerToRawData). Those agree only when
 # (SectionRVA - PointerToRawData) == 0 mod 4096. This tree reserves 0x1000
-# and will place the section at RVA 0x1000, i.e. delta 0 -- the strongest
+# and places the section at RVA 0x1000, i.e. delta 0 -- the strongest
 # form, where file offset == RVA everywhere in the file. The 0xE00 delta a
 # 0x200 file alignment would produce is exactly the value that loads, runs
 # and faults with no diagnostic.
+#
+# TASK 2 FILLED THE REGION and added the header rows below the payload rows.
+# The delta-0 geometry Task 1 fixed did NOT move -- FileAlignment is 0x1000
+# (== SectionAlignment), so PointerToRawData 0x1000 is a legal aligned value
+# and no field has to lie to reach delta 0. Two consequences the rows below
+# pin, both of which a reader would otherwise have to guess at:
+#   * `entry=4096` in the report is UNCHANGED from Task 1, because the header
+#     region is the same 4096 bytes it always was. The row that pins it kept
+#     its value AND its report-line grep (see its comment).
+#   * SizeOfRawData must be a multiple of FileAlignment, so the artifact is
+#     now zero-padded to 4096 + roundup(payload, 4096). The payload rows
+#     below compare the payload PREFIX byte-for-byte and assert the pad is
+#     zero, which is strictly more than the old exact-length compare checked.
 echo ""
-echo "--- --emit=uefi flag surface + payload geometry (D, Task 1) ---"
+echo "--- --emit=uefi flag surface + payload geometry (D, Tasks 1-2) ---"
 UEFI_SRC="$DIR/../test_tmp_uefi_$$.kr"
 printf 'static uint64 uefi_magic = 305419896\nfn helper(uint64 x) -> uint64 { return x + uefi_magic }\nfn main() -> uint64 { return helper(3) }\n' > "$UEFI_SRC"
 # Three clauses per refusal, exactly as img_refuses(): nonzero exit, the
@@ -8891,6 +8904,22 @@ rm -f /tmp/krc_uefipr_$$ "$UEFI_PR"
 #     the most dangerous silent site in this sub-project.
 #     Task 2 must change the expected entry (4096 pins today's geometry); it
 #     must NOT change how the entry is observed.
+#
+#     TASK 2 REPORT: the VALUE did not have to move and the grep is untouched.
+#     Task 2 filled the reserved region rather than resizing it -- the header
+#     is 0x170 bytes inside the same 4096-byte region, PointerToRawData is
+#     still 0x1000, and a `_start`-only payload still begins at file offset
+#     4096. So 4096 is re-derived here, not inherited: it is asserted against
+#     the same artifact whose AddressOfEntryPoint row 21 reads back and
+#     compares to this very report line.
+#
+#     THE FINALIZE ARM NOW HAS MORE THAN ONE WITNESS, which is the point of
+#     saying so. Re-measured at Task 2 with the arm deleted from a scratch
+#     compiler: this row reds as before, AND rows 21-22 red on entry_point,
+#     size_of_code, size_of_image, virtual_size and size_of_raw_data (all
+#     left at 0), and rows 17-18 red on the missing file-alignment padding.
+#     The grep stays anyway -- it is the only one of those that survives a
+#     future header rewrite.
 TOTAL=$((TOTAL + 1))
 UEFI_ST="$DIR/../test_tmp_uefist_$$.kr"
 printf 'fn _start() -> uint64 { return 7 }\n' > "$UEFI_ST"
@@ -8905,9 +8934,21 @@ fi
 rm -f /tmp/krc_uefist_$$ "$UEFI_ST"
 
 # 17-18. THE PAYLOAD ROW (see this section's header). Per arch: the uefi
-#        artifact is exactly 4096 bytes longer than the --emit=image artifact
-#        for the same source, and its bytes from 4096 on are that artifact
-#        BYTE FOR BYTE.
+#        artifact's bytes from 4096 on begin with the --emit=image artifact
+#        for the same source, BYTE FOR BYTE, and everything after that is
+#        zero file-alignment padding.
+#
+#        WHY THIS IS NO LONGER AN EXACT-LENGTH COMPARE (Task 2). At Task 1 the
+#        artifact was exactly 4096 + payload, because nothing constrained its
+#        tail. Task 2's header declares FileAlignment 0x1000, and a PE section's
+#        SizeOfRawData must be a multiple of FileAlignment -- so the choice is
+#        between padding the file and writing a SizeOfRawData that runs past
+#        EOF, which the derivation reference lists as a REJECTION. The file is
+#        padded. All three clauses below are asserted, so the row still fails
+#        on a truncated payload, on unresolved fixups, on dropped statics and
+#        -- on arm64 -- on a non-page-congruent header region; it additionally
+#        now fails if the padding is not zero or not the exact amount the
+#        declared alignment requires.
 #
 #        WHY BYTE-FOR-BYTE IS AVAILABLE AT ALL, and it is not a coincidence:
 #        --load-addr is echoed and never embedded, x86_64 image output is
@@ -8943,11 +8984,13 @@ for UA in x86_64 arm64; do
     $KRC $KRC_FLAGS "$UEFI_SRC" -o /tmp/krc_ui_$$ --arch=$UA --target=none --emit=image --load-addr=$ULOAD >/dev/null 2>&1
     if [ -f /tmp/krc_ue_$$ ] && [ -f /tmp/krc_ui_$$ ]; then
         ue_n=$(wc -c < /tmp/krc_ue_$$); ui_n=$(wc -c < /tmp/krc_ui_$$)
-        tail -c +4097 /tmp/krc_ue_$$ > /tmp/krc_ut_$$
-        if [ "$ue_n" -eq "$((ui_n + 4096))" ] && cmp -s /tmp/krc_ut_$$ /tmp/krc_ui_$$; then
-            PASS=$((PASS + 1)); echo "  uefi_payload_is_the_image_payload_$UA: PASS ($ue_n = 4096 + $ui_n, payload byte-identical)"
+        ui_pad=$(( (ui_n + 4095) / 4096 * 4096 ))
+        tail -c +4097 /tmp/krc_ue_$$ | head -c "$ui_n" > /tmp/krc_ut_$$
+        ue_tailnz=$(tail -c +$((4097 + ui_n)) /tmp/krc_ue_$$ | tr -d '\000' | wc -c)
+        if [ "$ue_n" -eq "$((ui_pad + 4096))" ] && cmp -s /tmp/krc_ut_$$ /tmp/krc_ui_$$ && [ "$ue_tailnz" = "0" ]; then
+            PASS=$((PASS + 1)); echo "  uefi_payload_is_the_image_payload_$UA: PASS ($ue_n = 4096 + $ui_n payload + $((ui_pad - ui_n)) zero pad, payload byte-identical)"
         else
-            echo "FAIL: uefi_payload_is_the_image_payload_$UA (uefi=$ue_n image=$ui_n; payload $(cmp -s /tmp/krc_ut_$$ /tmp/krc_ui_$$ && echo matches || echo DIFFERS))"; FAIL=$((FAIL + 1))
+            echo "FAIL: uefi_payload_is_the_image_payload_$UA (uefi=$ue_n want $((ui_pad + 4096)); image=$ui_n; payload $(cmp -s /tmp/krc_ut_$$ /tmp/krc_ui_$$ && echo matches || echo DIFFERS); $ue_tailnz non-zero bytes in the pad)"; FAIL=$((FAIL + 1))
         fi
     else
         echo "FAIL: uefi_payload_is_the_image_payload_$UA (one of the two builds produced no artifact)"; FAIL=$((FAIL + 1))
@@ -8955,20 +8998,232 @@ for UA in x86_64 arm64; do
     rm -f /tmp/krc_ue_$$ /tmp/krc_ui_$$ /tmp/krc_ut_$$
 done
 
-# 19. The reserved header region is RESERVED, not merely absent: 4096 bytes
-#     before the payload, and at Task 1 they are all zero because no PE header
-#     is emitted yet (Task 2 fills them). Stated as an assertion rather than
-#     left implicit so that Task 2 has to come here and say what it wrote.
+# 19. The reserved header region is now FILLED (Task 2). At Task 1 this row
+#     asserted 4096 zero bytes and carried a note telling Task 2 to come here
+#     and say what it wrote; this is that. The region is still exactly 4096
+#     bytes -- the geometry did not move -- but it is no longer empty, and the
+#     tail of it (past the one section header, 0x170) is still zero, so a
+#     header that grew past its region would red this rather than silently
+#     overwrite the first instruction of the payload.
 TOTAL=$((TOTAL + 1))
 rm -f /tmp/krc_uez_$$
 $KRC $KRC_FLAGS "$UEFI_SRC" -o /tmp/krc_uez_$$ --arch=x86_64 --target=none --emit=uefi >/dev/null 2>&1
 uez_nz=$(head -c 4096 /tmp/krc_uez_$$ 2>/dev/null | tr -d '\000' | wc -c)
-if [ -f /tmp/krc_uez_$$ ] && [ "$uez_nz" = "0" ]; then
-    PASS=$((PASS + 1)); echo "  uefi_header_region_reserved: PASS (4096 reserved bytes, 0 non-zero at Task 1)"
+uez_tail=$(head -c 4096 /tmp/krc_uez_$$ 2>/dev/null | tail -c +369 | tr -d '\000' | wc -c)
+if [ -f /tmp/krc_uez_$$ ] && [ "$uez_nz" -gt 0 ] && [ "$uez_tail" = "0" ]; then
+    PASS=$((PASS + 1)); echo "  uefi_header_region_filled: PASS ($uez_nz non-zero bytes in 0x0-0x170, 0 after)"
 else
-    echo "FAIL: uefi_header_region_reserved (artifact=$([ -f /tmp/krc_uez_$$ ] && echo yes || echo no), $uez_nz non-zero bytes in the reserved region; if Task 2 filled it, update this row in the same commit)"; FAIL=$((FAIL + 1))
+    echo "FAIL: uefi_header_region_filled (artifact=$([ -f /tmp/krc_uez_$$ ] && echo yes || echo no), $uez_nz non-zero bytes in the region want >0, $uez_tail non-zero past 0x170 want 0)"; FAIL=$((FAIL + 1))
 fi
 rm -f /tmp/krc_uez_$$
+
+# 21-22. EVERY LOAD-BEARING PE FIELD, READ FROM THE ARTIFACT AT ITS OFFSET.
+#        One row per arch, because Machine is the only field that differs and
+#        an arch-blind row would let one arch's header be emitted for the
+#        other. Offsets are absolute file offsets, which under the delta-0
+#        geometry are also RVAs: DOS 0x00, PE signature 0x40, COFF 0x44,
+#        optional header 0x58 (240 bytes, so it ends at 0x148), the single
+#        section header 0x148 (40 bytes, ending 0x170).
+#
+#        THE THREE FIELDS THAT ARE NOT SELF-EVIDENT, and why each is asserted
+#        against a DERIVED value rather than a literal:
+#          * AddressOfEntryPoint is compared to the `entry=` the compiler
+#            REPORTS, not to a constant. A header patched from a stale
+#            variable, or an entry resolved before the header region was
+#            reserved, makes those two disagree; no literal can see that.
+#          * VirtualSize is compared to the size of the --emit=image artifact
+#            for the same source -- i.e. the true payload length. The
+#            derivation reference re-classified "VirtualSize too small" from
+#            IGNORED to a LOADED_FAULTED #PF, so this is a boot-oracle.
+#          * SizeOfRawData is compared to (file size - 4096). "Raw data past
+#            EOF" is also a rejection, and a SizeOfRawData that merely looks
+#            plausible is exactly how that ships.
+#        SizeOfOptionalHeader is checked for the CONSISTENCY rule OVMF
+#        actually enforces -- SizeOfOptionalHeader - 112 == NumberOfRvaAndSizes
+#        * 8 -- and not merely for the value 240.
+ue_u16() { od -An -tu2 -j "$2" -N2 -v "$1" 2>/dev/null | tr -d ' '; }
+ue_u32() { od -An -tu4 -j "$2" -N4 -v "$1" 2>/dev/null | tr -d ' '; }
+ue_u64() { od -An -tu8 -j "$2" -N8 -v "$1" 2>/dev/null | tr -d ' '; }
+ue_hex() { od -An -tx1 -j "$2" -N"$3" -v "$1" 2>/dev/null | tr -d ' \n'; }
+uh_bad=""
+uh_chk() { [ "$2" = "$3" ] || uh_bad="$uh_bad $1(want=$2 got=$3)"; }
+for UA in x86_64 arm64; do
+    UMACH=34404                                     # 0x8664 IMAGE_FILE_MACHINE_AMD64
+    if [ "$UA" = "arm64" ]; then UMACH=43620; fi    # 0xAA64 IMAGE_FILE_MACHINE_ARM64
+    ULOAD=0x400000
+    if [ "$UA" = "arm64" ]; then ULOAD=0x40400000; fi
+    TOTAL=$((TOTAL + 1))
+    rm -f /tmp/krc_uh_$$ /tmp/krc_uhi_$$
+    uh_out=$($KRC $KRC_FLAGS "$UEFI_SRC" -o /tmp/krc_uh_$$ --arch=$UA --target=none --emit=uefi 2>&1)
+    $KRC $KRC_FLAGS "$UEFI_SRC" -o /tmp/krc_uhi_$$ --arch=$UA --target=none --emit=image --load-addr=$ULOAD >/dev/null 2>&1
+    uh_bad=""
+    if [ -f /tmp/krc_uh_$$ ] && [ -f /tmp/krc_uhi_$$ ]; then
+        uh_ent=$(echo "$uh_out" | grep -o 'entry=[0-9]*' | head -1 | cut -d= -f2)
+        uh_fsz=$(wc -c < /tmp/krc_uh_$$)
+        uh_pay=$(wc -c < /tmp/krc_uhi_$$)
+        uh_raw=$((uh_fsz - 4096))
+        # DOS + PE signature
+        uh_chk dos_mz            4d5a       "$(ue_hex /tmp/krc_uh_$$ 0 2)"
+        uh_chk e_lfanew          64         "$(ue_u32 /tmp/krc_uh_$$ 60)"
+        uh_chk pe_signature      50450000   "$(ue_hex /tmp/krc_uh_$$ 64 4)"
+        # COFF header
+        uh_chk machine           "$UMACH"   "$(ue_u16 /tmp/krc_uh_$$ 68)"
+        uh_chk number_of_sections 1         "$(ue_u16 /tmp/krc_uh_$$ 70)"
+        uh_soh=$(ue_u16 /tmp/krc_uh_$$ 84)
+        uh_nrs=$(ue_u32 /tmp/krc_uh_$$ 196)
+        uh_chk size_of_opt_header_consistency "$((uh_nrs * 8))" "$((uh_soh - 112))"
+        uh_char=$(ue_u16 /tmp/krc_uh_$$ 86)
+        uh_chk relocs_stripped_clear   0    "$((uh_char & 1))"
+        uh_chk executable_image_set    2    "$((uh_char & 2))"
+        # Optional header (PE32+)
+        uh_chk magic_pe32plus    523        "$(ue_u16 /tmp/krc_uh_$$ 88)"   # 0x20b
+        uh_chk size_of_code      "$uh_raw"  "$(ue_u32 /tmp/krc_uh_$$ 92)"
+        uh_chk entry_point       "$uh_ent"  "$(ue_u32 /tmp/krc_uh_$$ 104)"
+        uh_chk base_of_code      4096       "$(ue_u32 /tmp/krc_uh_$$ 108)"
+        uh_chk image_base        0          "$(ue_u64 /tmp/krc_uh_$$ 112)"
+        uh_chk section_alignment 4096       "$(ue_u32 /tmp/krc_uh_$$ 120)"
+        uh_chk file_alignment    4096       "$(ue_u32 /tmp/krc_uh_$$ 124)"
+        uh_chk size_of_image     "$((4096 + uh_raw))" "$(ue_u32 /tmp/krc_uh_$$ 144)"
+        uh_chk size_of_headers   4096       "$(ue_u32 /tmp/krc_uh_$$ 148)"
+        uh_chk subsystem         10         "$(ue_u16 /tmp/krc_uh_$$ 156)"
+        uh_chk number_of_rva_and_sizes 16   "$uh_nrs"
+        # All 16 data directories zero -- in particular index 1, the import
+        # table, which is what a header copied from format_pe.kr would carry.
+        uh_chk data_directories_all_zero 0 \
+            "$(ue_hex /tmp/krc_uh_$$ 200 128 | tr -d '0' | wc -c)"
+        uh_chk no_kernel32 0 "$(grep -c kernel32 /tmp/krc_uh_$$ 2>/dev/null)"
+        # The one section header
+        uh_chk section_name      2e74657874000000 "$(ue_hex /tmp/krc_uh_$$ 328 8)"
+        uh_chk virtual_size      "$uh_pay"  "$(ue_u32 /tmp/krc_uh_$$ 336)"
+        uh_chk virtual_address   4096       "$(ue_u32 /tmp/krc_uh_$$ 340)"
+        uh_chk size_of_raw_data  "$uh_raw"  "$(ue_u32 /tmp/krc_uh_$$ 344)"
+        uh_chk pointer_to_raw_data 4096     "$(ue_u32 /tmp/krc_uh_$$ 348)"
+        uh_chk pointer_to_relocations 0     "$(ue_u32 /tmp/krc_uh_$$ 352)"
+        uh_chk pointer_to_linenumbers 0     "$(ue_u32 /tmp/krc_uh_$$ 356)"
+        uh_chk number_of_relocations  0     "$(ue_u16 /tmp/krc_uh_$$ 360)"
+        uh_chk number_of_linenumbers  0     "$(ue_u16 /tmp/krc_uh_$$ 362)"
+        # 0xE0000020 = CODE|EXECUTE|READ|WRITE. The WRITE bit is arm64's, and
+        # it is not cosmetic -- but the way it fails is narrower than "arm64
+        # needs a writable .text", and the difference decides whether a test
+        # can see it at all. Measured under AAVMF 2024.02 with 0x60000020:
+        # a payload that only READS its statics RAN; a payload that WRITES one
+        # printed its first line and then took `Synchronous Exception`, i.e.
+        # the abort is on the STORE, not at load. x86_64 ran in every case.
+        # One layout for both arches, so both carry the bit.
+        uh_chk section_characteristics 3758096416 "$(ue_u32 /tmp/krc_uh_$$ 364)"
+    else
+        uh_bad=" no artifact (uefi=$([ -f /tmp/krc_uh_$$ ] && echo yes || echo no) image=$([ -f /tmp/krc_uhi_$$ ] && echo yes || echo no))"
+    fi
+    if [ -z "$uh_bad" ]; then
+        PASS=$((PASS + 1)); echo "  uefi_pe_header_fields_$UA: PASS (machine=$UMACH subsystem=10 entry=$uh_ent)"
+    else
+        echo "FAIL: uefi_pe_header_fields_$UA:$uh_bad"; FAIL=$((FAIL + 1))
+    fi
+    rm -f /tmp/krc_uh_$$ /tmp/krc_uhi_$$
+done
+
+# 23-24. C1, PAGE CONGRUENCE, ASSERTED FROM THE ARTIFACT'S OWN FIELDS. Row 21's
+#        two literals (VirtualAddress 4096, PointerToRawData 4096) already pin
+#        today's values; this row states the RULE those values satisfy, so that
+#        a future geometry change is forced to satisfy it rather than to edit
+#        two unrelated-looking constants. The failure it guards is the one with
+#        no local symptom at all: the arm64 payload's baked adrp page arithmetic
+#        is congruent to its FILE offset mod 4096, the loader maps it at
+#        SectionRVA + (offset - PointerToRawData), and a non-page delta makes
+#        every page computation wrong -- measured as LOADED_FAULTED, at exit 0,
+#        with file(1) still calling the artifact an EFI application.
+for UA in x86_64 arm64; do
+    TOTAL=$((TOTAL + 1))
+    rm -f /tmp/krc_uc_$$
+    $KRC $KRC_FLAGS "$UEFI_SRC" -o /tmp/krc_uc_$$ --arch=$UA --target=none --emit=uefi >/dev/null 2>&1
+    if [ -f /tmp/krc_uc_$$ ]; then
+        uc_rva=$(ue_u32 /tmp/krc_uc_$$ 340); uc_ptr=$(ue_u32 /tmp/krc_uc_$$ 348)
+        uc_delta=$((uc_rva - uc_ptr))
+        # `-gt 0` is not decoration: without it this row passes on an artifact
+        # with NO HEADER AT ALL, where both fields read 0 and 0 - 0 is trivially
+        # congruent. Measured -- it passed exactly that way against the Task 1
+        # binary before the header existed.
+        if [ "$uc_ptr" -gt 0 ] && [ "$uc_rva" -gt 0 ] && [ $((uc_delta % 4096)) -eq 0 ]; then
+            PASS=$((PASS + 1)); echo "  uefi_page_congruence_$UA: PASS (RVA $uc_rva - PointerToRawData $uc_ptr = $uc_delta, 0 mod 4096)"
+        else
+            echo "FAIL: uefi_page_congruence_$UA (RVA $uc_rva, PointerToRawData $uc_ptr, delta $uc_delta -- both must be non-zero and the delta 0 mod 4096, or every baked arm64 adrp page delta in the payload is wrong and the image loads and faults with no diagnostic)"; FAIL=$((FAIL + 1))
+        fi
+    else
+        echo "FAIL: uefi_page_congruence_$UA (no artifact)"; FAIL=$((FAIL + 1))
+    fi
+    rm -f /tmp/krc_uc_$$
+done
+
+# 25. file(1) MUST SAY "PE32+ executable (EFI application)". A second oracle,
+#     independent of this suite's own idea of the layout.
+#
+# 26-28. ...AND THE MUTATION CONTROLS, because "file says EFI application" is
+#     worth nothing without knowing what makes it stop saying it. All three
+#     were measured; two of them do NOT do what the obvious guess says:
+#       * Subsystem 10 -> 3 : "PE32+ executable (console)". THIS is the field
+#         the "EFI application" phrase keys on, and it is also the field OVMF
+#         rejects. It is therefore the only one of the three that is a
+#         discriminating oracle for this mode.
+#       * Magic 0x20b -> 0x10b : "PE32 executable (EFI application)" -- still
+#         an EFI application to file(1), just a 32-bit one. A revision of the
+#         spec claimed this gives `data`; it does not.
+#       * DOS 'MZ' -> 'XX' : "data". Only destroying the DOS magic does that,
+#         which is why `file` reporting `data` is a test of the FIRST TWO BYTES
+#         and of nothing else.
+ue_poke() {  # $1 file, $2 decimal offset, rest = decimal byte values
+    local f="$1" off="$2" b; shift 2
+    for b in "$@"; do
+        printf "$(printf '\\x%02x' "$b")" | dd of="$f" bs=1 seek="$off" conv=notrunc status=none
+        off=$((off + 1))
+    done
+}
+TOTAL=$((TOTAL + 1))
+rm -f /tmp/krc_uf_$$
+$KRC $KRC_FLAGS "$UEFI_SRC" -o /tmp/krc_uf_$$ --arch=x86_64 --target=none --emit=uefi >/dev/null 2>&1
+uf_says=$(file -b /tmp/krc_uf_$$ 2>/dev/null)
+if echo "$uf_says" | grep -q "PE32+ executable" && echo "$uf_says" | grep -q "EFI application"; then
+    PASS=$((PASS + 1)); echo "  uefi_file_says_efi_application: PASS ($uf_says)"
+else
+    echo "FAIL: uefi_file_says_efi_application (file(1) says '$uf_says')"; FAIL=$((FAIL + 1))
+fi
+# 26: Subsystem 10 -> 3 must LOSE the "EFI application" phrase while REMAINING
+#     a PE32+ executable. Both halves are needed. Measured against the Task 1
+#     binary, whose header region was all zeros: `file` said `data`, which
+#     satisfies "does not say EFI application" and made this row green on an
+#     artifact with no header at all. A control that cannot fail on a missing
+#     header is not a control.
+TOTAL=$((TOTAL + 1))
+cp /tmp/krc_uf_$$ /tmp/krc_ufs_$$; ue_poke /tmp/krc_ufs_$$ 156 3 0
+ufs_says=$(file -b /tmp/krc_ufs_$$ 2>/dev/null)
+if echo "$ufs_says" | grep -q "PE32+ executable" && ! echo "$ufs_says" | grep -q "EFI application"; then
+    PASS=$((PASS + 1)); echo "  uefi_file_control_subsystem: PASS (subsystem 3 -> '$ufs_says')"
+else
+    echo "FAIL: uefi_file_control_subsystem (subsystem patched to 3 and file(1) still says '$ufs_says' -- the phrase is not keyed on the subsystem, so row 25 is not the oracle it is documented as)"; FAIL=$((FAIL + 1))
+fi
+rm -f /tmp/krc_ufs_$$
+# 27: Magic 0x20b -> 0x10b drops the '+' and KEEPS the phrase. Stated so the
+#     control above cannot be mistaken for "any header damage loses it".
+TOTAL=$((TOTAL + 1))
+cp /tmp/krc_uf_$$ /tmp/krc_ufm_$$; ue_poke /tmp/krc_ufm_$$ 88 11 1
+ufm_says=$(file -b /tmp/krc_ufm_$$ 2>/dev/null)
+if echo "$ufm_says" | grep -q "PE32 executable" && echo "$ufm_says" | grep -q "EFI application"; then
+    PASS=$((PASS + 1)); echo "  uefi_file_control_magic: PASS (magic 0x10b -> '$ufm_says')"
+else
+    echo "FAIL: uefi_file_control_magic (magic patched to 0x10b and file(1) says '$ufm_says', expected a PE32 (not PE32+) EFI application)"; FAIL=$((FAIL + 1))
+fi
+rm -f /tmp/krc_ufm_$$
+# 28: only the DOS magic gives `data` -- asserted as a CHANGE from the pristine
+#     artifact's answer, for the reason row 26 records: "`file` says data" is
+#     also what a header-less artifact produces.
+TOTAL=$((TOTAL + 1))
+cp /tmp/krc_uf_$$ /tmp/krc_ufd_$$; ue_poke /tmp/krc_ufd_$$ 0 88 88
+ufd_says=$(file -b /tmp/krc_ufd_$$ 2>/dev/null)
+if [ "$ufd_says" = "data" ] && [ "$uf_says" != "data" ]; then
+    PASS=$((PASS + 1)); echo "  uefi_file_control_dos_magic: PASS (MZ -> XX gives 'data')"
+else
+    echo "FAIL: uefi_file_control_dos_magic (DOS magic destroyed and file(1) says '$ufd_says', expected 'data')"; FAIL=$((FAIL + 1))
+fi
+rm -f /tmp/krc_ufd_$$ /tmp/krc_uf_$$
 
 # 20. THE `--emit=pe` REFUSAL'S REASONING (Task 1, Step 6). The check stays --
 #     a Windows PE genuinely cannot run without the loader to bind its
@@ -9204,7 +9459,17 @@ uefi_doc_miss=""
 grep -qF -- '--target=none' "$UEFI_SEC" || uefi_doc_miss="$uefi_doc_miss target-none-requirement"
 grep -qF -- '--arch=' "$UEFI_SEC" || uefi_doc_miss="$uefi_doc_miss explicit-arch-requirement"
 grep -qF -- '4096' "$UEFI_SEC" || uefi_doc_miss="$uefi_doc_miss page-congruence"
-grep -qF -- 'Status' "$UEFI_SEC" || uefi_doc_miss="$uefi_doc_miss what-is-not-emitted-yet"
+# Task 2 added the header. Subsystem 10 is the one field with no runner-up --
+# 11 and 12 are valid EFI subsystems and BDS still refuses them -- so the
+# manual has to name it, and the WRITE bit is the one that separates an arm64
+# application that runs from one that aborts on its first store.
+grep -qF -- 'Subsystem' "$UEFI_SEC" || uefi_doc_miss="$uefi_doc_miss subsystem-10"
+grep -qF -- 'WRITE'     "$UEFI_SEC" || uefi_doc_miss="$uefi_doc_miss writable-text-section"
+# The Status heading survives Task 2 with its meaning inverted -- it said what
+# was NOT emitted yet, and now says what has booted. Either way this mode's
+# section must carry an explicit statement of how far the evidence goes,
+# because every other paragraph in it reads like a completed feature.
+grep -qF -- 'Status' "$UEFI_SEC" || uefi_doc_miss="$uefi_doc_miss status-statement"
 if [ -z "$uefi_doc_miss" ]; then
     PASS=$((PASS + 1)); echo "  uefi_docs_section_intact: PASS (section present, $(wc -l < "$UEFI_SEC" | tr -d ' ') lines)"
 else

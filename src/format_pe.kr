@@ -243,6 +243,241 @@ fn emit_pe_idata(uint64 idata_rva) -> uint64 {
 }
 
 // ---------------------------------------------------------------------------
+// UEFI application headers — PE32+, ONE section, delta-0 (sub-project D, T2)
+// ---------------------------------------------------------------------------
+//
+// SEPARATE FROM emit_pe_headers_x64/_a64 ABOVE, AND IT HAD TO BE. Those two
+// emit a WINDOWS PE and every one of the following is wrong for firmware:
+// Subsystem 3 (console — OVMF refuses it outright, `failed to load ... Not
+// Found`), an unconditional kernel32 `.idata` whose IAT only the Windows
+// loader fills, ImageBase 0x140000000, 2 or 3 sections, and FileAlignment
+// 0x200 against a section at RVA 0x1000. That last one is not a style
+// difference; see C1 below. Their patch offsets also move with
+// NumberOfSections, so "just parameterise them" would put this format's
+// offsets at the mercy of an edit to Windows' section list.
+//
+// C1, THE PAGE-CONGRUENCE CONSTRAINT, IS WHAT DECIDES THE GEOMETRY.
+// a64_compute_va maps a file offset to 0x400000 + offset with no notion of a
+// container, and every arm64 ADRP page computation is baked from that map
+// DURING codegen. A PE loader maps the payload at
+//
+//     ImageBase + SectionRVA + (file_offset - PointerToRawData)
+//
+// so the two agree on page boundaries — all ADRP needs — exactly when
+// (SectionRVA - PointerToRawData) is 0 mod 4096. MEASURED: a 0x200 header
+// region gives a 0xE00 delta and the image LOADS AND FAULTS; 0x1000 runs; 0
+// runs. That failure is silent in every other channel — exit 0, file(1) still
+// says "EFI application", every static field assertion passes. It is also
+// EXACTLY THE CONFIGURATION THE DERIVATION REFERENCE'S TABLE PRESCRIBES, so
+// the customary layout is the broken one here and is not to be restored.
+//
+// This takes the strongest form: PointerToRawData == SectionRVA == 0x1000,
+// delta 0, so file offset == RVA for every byte in the artifact. x86_64 is
+// immune (RIP-relative throughout) and is held to the same geometry anyway —
+// one layout, one set of patch offsets, and no arch on which a wrong delta is
+// survivable enough to go unnoticed.
+//
+// FileAlignment == SectionAlignment == 0x1000 IS PART OF THAT, not a
+// decoration. Delta 0 needs PointerToRawData 0x1000, and PointerToRawData
+// must be a multiple of FileAlignment; declaring 0x200 would leave a legal
+// value but would also make SizeOfRawData's own alignment obligation a
+// 0x200 one, i.e. two alignments to keep straight for no gain. With one
+// value, every offset and size in the header is a multiple of it. The cost
+// is the file-alignment padding the caller adds after the payload, up to
+// 4095 bytes; the alternative — an unaligned SizeOfRawData — is a field that
+// says something false about the file, and "raw data past EOF" is a
+// documented OVMF rejection one arithmetic slip away from it.
+//
+// ONE SECTION, AND IT IS WRITABLE (0xE0000020). The statics share the section
+// with the code — that is what one section means — so a read-only code
+// section makes every write to a static a fault on arm64, which enforces the
+// characteristics; x86 does not.
+//
+// MEASURED HERE, and the shape is narrower than "arm64 needs a writable
+// .text". Under AAVMF 2024.02, with a payload that only READS its statics, a
+// 0x60000020 section RAN — the image loads and executes fine. With a payload
+// that WRITES one, 0x60000020 printed its first line and then took
+// `Synchronous Exception at 0x...5CB572BC`, i.e. the abort is on the STORE,
+// not at load time. 0xE0000020 ran in both. x86_64 ran in all four. So the
+// bit is load-bearing, but a test whose payload never stores to a static
+// cannot see it — which is precisely how a read-only code section would ship.
+//
+// The two remedies that suggest themselves instead of the WRITE bit are both
+// wrong: --emit=pe's three-section layout is the Windows path this format
+// exists to avoid, and --emit=lkm's code/data split is safe only because
+// main.kr suppresses static-fixup baking for mode 7 and emits relocations
+// instead — which a `.reloc`-less UEFI image cannot do. A second section
+// would also introduce a second RVA-to-offset delta and make C1 strictly
+// harder.
+//
+// NO `.reloc`, AND NEVER `RELOCS_STRIPPED`. The payload is position-
+// independent (0 `movabs`, 29 RIP-relative operands; a `lea rax,[rip+0]`
+// probe printed its correct self-address at two very different load
+// addresses), so no fixups are needed — but RELOCS_STRIPPED with ImageBase 0
+// is a hard load failure, and with a fixed base it boots only if that exact
+// address happens to be free. Characteristics 0x0222 has bit 0 clear.
+//
+// LAYOUT, all values also being RVAs under delta 0:
+//   0x000  DOS header, 64 B, e_lfanew = 0x40 at 0x3C
+//   0x040  PE\0\0
+//   0x044  COFF header, 20 B
+//   0x058  optional header, 240 B (112 fixed + 16 data directories)
+//   0x148  the one section header, 40 B
+//   0x170  zero to 0x1000
+// patch_uefi_headers below owns every offset that is filled in afterwards;
+// this function and that one are the only places that know these numbers.
+@export
+fn emit_uefi_headers(uint64 machine) -> uint64 {
+    // ---- DOS header (0x00..0x3F) ----
+    // Two bytes of magic, then zeros, then e_lfanew. No DOS stub program:
+    // firmware never executes one, and `file(1)` keys only on the magic.
+    emit_byte(0x4D); emit_byte(0x5A)
+    uint64 i = 0
+    while i < 58 { emit_byte(0); i = i + 1 }
+    emit_u32_le(0x40)
+
+    // ---- PE signature (0x40) ----
+    emit_byte(0x50); emit_byte(0x45); emit_byte(0); emit_byte(0)
+
+    // ---- COFF header (0x44..0x57) ----
+    emit_u16_le(machine)    // 0x8664 x86_64 / 0xAA64 arm64. Caller derives it
+                            // from arch; note 0x14c (IA32) LOADS on X64
+                            // firmware and then yields nothing, so a wrong
+                            // value here is one more silent failure.
+    emit_u16_le(1)          // NumberOfSections: one, .text
+    emit_u32_le(0)          // TimeDateStamp: zero, so the artifact is
+                            // reproducible. Firmware does not read it.
+    emit_u32_le(0)          // PointerToSymbolTable
+    emit_u32_le(0)          // NumberOfSymbols
+    emit_u16_le(240)        // SizeOfOptionalHeader. What OVMF checks is the
+                            // CONSISTENCY 240 - 112 == 16 * 8, not the count
+                            // 16 — a 160-byte header with 6 directories boots
+                            // too. Both halves live in this function, and the
+                            // test asserts the relation rather than the value.
+    emit_u16_le(0x0222)     // EXECUTABLE_IMAGE | LARGE_ADDRESS_AWARE |
+                            // DEBUG_STRIPPED. Bit 0, RELOCS_STRIPPED, stays
+                            // clear — see above. This exact value is the one
+                            // measured to boot, so it is kept as measured.
+                            // Side effect worth knowing before someone
+                            // "fixes" it: DEBUG_STRIPPED makes file(1) append
+                            // "(stripped to external PDB)". There is no PDB;
+                            // that is file(1) reading the flag as Microsoft's
+                            // toolchain uses it. Firmware ignores the whole
+                            // field (even EXECUTABLE_IMAGE cleared still
+                            // loads), so nothing here is a boot oracle.
+
+    // ---- Optional header, PE32+ (0x58..0x147) ----
+    emit_u16_le(0x020B)     // Magic. 0x10b here still gives file(1) "PE32
+                            // executable (EFI application)" — the phrase is
+                            // keyed on the Subsystem — but OVMF rejects it.
+    emit_byte(0); emit_byte(0)   // Major/MinorLinkerVersion
+    emit_u32_le(0)          // SizeOfCode            -- patched
+    emit_u32_le(0)          // SizeOfInitializedData: the statics live inside
+                            // the one section with the code, so there is no
+                            // second section to describe here.
+    emit_u32_le(0)          // SizeOfUninitializedData: no BSS. The payload
+                            // carries its zero statics as real bytes and
+                            // firmware zero-fills nothing.
+    emit_u32_le(0)          // AddressOfEntryPoint   -- patched
+    emit_u32_le(0x1000)     // BaseOfCode == the section RVA
+    emit_u64_le(0)          // ImageBase. Zero, with relocations NOT stripped:
+                            // firmware places the image where it likes and the
+                            // payload does not care.
+    emit_u32_le(0x1000)     // SectionAlignment
+    emit_u32_le(0x1000)     // FileAlignment -- equal, which is what makes
+                            // file offset == RVA legal rather than merely
+                            // convenient
+    emit_u16_le(0); emit_u16_le(0)   // Major/MinorOperatingSystemVersion
+    emit_u16_le(0); emit_u16_le(0)   // Major/MinorImageVersion
+    emit_u16_le(0); emit_u16_le(0)   // Major/MinorSubsystemVersion
+    emit_u32_le(0)          // Win32VersionValue
+    emit_u32_le(0)          // SizeOfImage           -- patched
+    emit_u32_le(0x1000)     // SizeOfHeaders. Equal to PointerToRawData and a
+                            // multiple of FileAlignment; too large OR too
+                            // small is an OVMF rejection.
+    emit_u32_le(0)          // CheckSum: not required for EFI applications.
+    emit_u16_le(10)         // Subsystem = EFI_APPLICATION. LOAD-BEARING: 0, 3,
+                            // 11, 12 and 13 are all refused by BDS, and 11/12
+                            // are *valid* EFI subsystems — BDS specifically
+                            // demands EFI_APPLICATION. It is also the field
+                            // file(1) keys "(EFI application)" on.
+    emit_u16_le(0)          // DllCharacteristics
+    emit_u64_le(0)          // SizeOfStackReserve ) firmware enters with a
+    emit_u64_le(0)          // SizeOfStackCommit  ) stack already set up, so
+    emit_u64_le(0)          // SizeOfHeapReserve  ) none of these are honoured
+    emit_u64_le(0)          // SizeOfHeapCommit   ) and none are needed
+    emit_u32_le(0)          // LoaderFlags
+    emit_u32_le(16)         // NumberOfRvaAndSizes
+    // 16 data directories, ALL ZERO. Index 1 in particular: an import
+    // directory is exactly what makes --emit=pe's output unloadable here.
+    i = 0
+    while i < 16 { emit_u32_le(0); emit_u32_le(0); i = i + 1 }
+
+    // ---- Section header (0x148..0x16F) ----
+    emit_byte(0x2E); emit_byte(0x74); emit_byte(0x65); emit_byte(0x78)
+    emit_byte(0x74); emit_byte(0); emit_byte(0); emit_byte(0)   // ".text"
+    emit_u32_le(0)          // VirtualSize           -- patched. Too small is a
+                            // LOADED_FAULTED #PF, not the ignorable field the
+                            // derivation reference first filed it as.
+    emit_u32_le(0x1000)     // VirtualAddress
+    emit_u32_le(0)          // SizeOfRawData         -- patched. 0 is also a
+                            // LOADED_FAULTED #PF.
+    emit_u32_le(0x1000)     // PointerToRawData == VirtualAddress: delta 0.
+    emit_u32_le(0)          // PointerToRelocations
+    emit_u32_le(0)          // PointerToLinenumbers
+    emit_u16_le(0)          // NumberOfRelocations
+    emit_u16_le(0)          // NumberOfLinenumbers
+    emit_u32_le(0xE0000020) // CODE | EXECUTE | READ | WRITE. The WRITE bit is
+                            // arm64's — measured, a 0x60000020 section takes a
+                            // Synchronous Exception on the first STORE to a
+                            // static there (it loads and starts fine), while
+                            // x86 tolerates it. See the note above this fn.
+
+    // ---- Zero to the start of the payload ----
+    while out_len < 0x1000 { emit_byte(0) }
+    // Return the region actually written, not the constant it is expected to
+    // equal. Today the two agree; if the header ever grew past 0x1000 this
+    // guard is what stops it under-reporting the region silently, which is
+    // the exact shape of failure this sub-project exists to prevent.
+    if out_len != 0x1000 {
+        uint64 uhz_e = "error: internal: emit_uefi_headers wrote a region that does not match the reserved size\n"
+        write(2, uhz_e, str_len(uhz_e))
+        exit(1)
+    }
+    return out_len
+}
+
+// Fill in the five fields that are not knowable until the payload has been
+// laid out, and return SizeOfImage so the caller can report it without
+// recomputing the rounding.
+//
+// THE CALLER MUST HAVE PADDED THE FILE to 0x1000 + the returned raw size
+// BEFORE the artifact is written: SizeOfRawData is rounded up to
+// FileAlignment here. That rounding is a choice, not a firmware demand — the
+// exact unaligned SizeOfRawData, with the file ending there, is out-of-spec
+// but was measured to RUN under both OVMF and AAVMF. Padding is kept for
+// PE-spec conformance and so FileAlignment and SectionAlignment can share
+// one value. VirtualSize stays the EXACT payload length, which is what the
+// loader reads (it copies min(VirtualSize, SizeOfRawData) bytes and zeroes
+// the rest of the section).
+//
+// entry_rva is the entry's FILE OFFSET, unconverted, because under delta 0
+// the file offset IS the RVA. That identity is asserted from the artifact by
+// uefi_page_congruence_*, so if the geometry is ever changed this line stops
+// being a no-op conversion and the test says so.
+@export
+fn patch_uefi_headers(uint64 entry_rva, uint64 payload_size) -> uint64 {
+    uint64 raw = (payload_size + 0xFFF) & ~0xFFF
+    uint64 image_size = 0x1000 + raw
+    patch_u32(0x5C, raw)            // opt+4   SizeOfCode
+    patch_u32(0x68, entry_rva)      // opt+16  AddressOfEntryPoint
+    patch_u32(0x90, image_size)     // opt+56  SizeOfImage
+    patch_u32(0x150, payload_size)  // sec+8   VirtualSize
+    patch_u32(0x158, raw)           // sec+16  SizeOfRawData
+    return image_size
+}
+
+// ---------------------------------------------------------------------------
 // PE header emission with .text + .idata
 // ---------------------------------------------------------------------------
 

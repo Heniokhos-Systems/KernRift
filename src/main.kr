@@ -2881,11 +2881,14 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
     } else if emit_mode == 9 {
         // --emit=uefi: a PE32+ EFI application (sub-project D).
         //
-        // THIS ARM RESERVES THE HEADER REGION; TASK 2 FILLS IT. What is
-        // emitted here today is 4096 zero bytes, and the reason the SIZE
-        // lands in Task 1 rather than with the fields is that the size is
-        // not a formatting choice — it is a correctness constraint on the
-        // PAYLOAD, and the payload is emitted immediately after this line.
+        // THIS ARM EMITS THE HEADER REGION. Task 1 reserved 4096 zero bytes
+        // here; Task 2 filled them with a real PE32+ EFI application header
+        // WITHOUT changing the size, which is why nothing downstream of the
+        // region moved (`entry=4096` for a `_start`-only payload is the same
+        // number it reported at Task 1). The reason the SIZE landed in Task 1
+        // rather than with the fields is that the size is not a formatting
+        // choice — it is a correctness constraint on the PAYLOAD, and the
+        // payload is emitted immediately after this line.
         //
         // C1, THE PAGE-CONGRUENCE CONSTRAINT. a64_compute_va maps a file
         // offset to 0x400000 + offset (codegen_aarch64.kr) with no notion of
@@ -2920,11 +2923,29 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
         // header_size carries the mode 0/1/2/4 meaning here — bytes emitted
         // before text_start — and NOT the mode 8 meaning ("how far the load
         // address is from file offset 0"), because unlike a flat image this
-        // format really does have a container in front of the code. Nothing
-        // reads it on this path today; Task 2's PointerToRawData is the value
-        // it exists to be.
-        while codegen_output_len() < 4096 { emit_byte(0) }
-        header_size = 4096
+        // format really does have a container in front of the code. It IS
+        // PointerToRawData, and under the delta-0 geometry it is the section
+        // RVA too; emit_uefi_headers returns the same number so the two
+        // cannot drift apart silently.
+        //
+        // THE MACHINE FIELD IS DERIVED HERE, from arch, and the else is a
+        // hard error rather than a default. --emit=uefi already refuses
+        // riscv32/xtensa and requires an explicit --arch, so nothing should
+        // reach that branch — but the failure mode if something ever does is
+        // a PE naming a CPU nobody asked for, and 0x14c (IA32) is measured to
+        // LOAD on X64 firmware and then produce nothing at all. A wrong
+        // Machine is not a diagnostic; it is a silent boot.
+        uint64 uf_machine = 0
+        if arch == 0 {
+            uf_machine = 0x8664
+        } else if arch == 1 {
+            uf_machine = 0xAA64
+        } else {
+            uint64 ufm_e = "error: internal: --emit=uefi reached header emission with an arch that has no PE Machine value\n"
+            write(2, ufm_e, str_len(ufm_e))
+            exit(1)
+        }
+        header_size = emit_uefi_headers(uf_machine)
     }
 
     uint64 text_start = codegen_output_len()
@@ -4164,17 +4185,39 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
         // the arm is written before it has anything to patch rather than
         // added alongside the fields that need it.
         //
-        // NOTHING IS PATCHED HERE YET, and that is a Task 1 statement with an
-        // expiry date, not a property of the format: Task 2 patches
-        // AddressOfEntryPoint (= uf_entry, since file offset == RVA under the
-        // delta-0 geometry the header arm reserves), SizeOfImage and
-        // SizeOfHeaders into the 4096-byte region that arm emitted.
+        // FIVE FIELDS ARE PATCHED HERE (Task 2), all through
+        // patch_uefi_headers so that this file never learns a header offset:
+        // SizeOfCode, AddressOfEntryPoint, SizeOfImage, the section's
+        // VirtualSize and its SizeOfRawData. Three of the five are boot
+        // oracles rather than bookkeeping — a VirtualSize that is too small
+        // and a SizeOfRawData of 0 each raise a loud #PF naming EntryPoint=,
+        // and an AddressOfEntryPoint that is anything but the real entry
+        // either #PFs or, in the one realistic case (entry == section start),
+        // runs the wrong code silently.
+        //
+        // AddressOfEntryPoint IS entry_off UNCONVERTED, because the delta-0
+        // geometry makes file offset == RVA. That is stated as an identity
+        // and asserted from the artifact (uefi_page_congruence_*), not
+        // assumed: if the geometry ever moves, this stops being a no-op and
+        // the assertion is what says so.
+        //
+        // THE FILE IS PADDED TO FileAlignment, AND THAT IS THE ONE PLACE THIS
+        // FORMAT ADDS BYTES. SizeOfRawData must be a multiple of
+        // FileAlignment (0x1000 here, equal to SectionAlignment); the only
+        // alternative to padding is a SizeOfRawData that runs past EOF, which
+        // is a documented OVMF rejection. The padding is emitted BEFORE the
+        // patch call so codegen_output_len() is final when the sizes are
+        // computed from it — the ordering the ELF and Mach-O arms use, and
+        // the ordering that keeps "inspect the artifact" available: every
+        // number in the header is derived from the buffer that was written,
+        // not from a running total.
         //
         // NOTHING IS TRUNCATED, for the same reason --emit=image truncates
         // nothing: the statics are carried as real zero bytes and there is no
         // startup code to re-zero them. A PE's SizeOfImage-vs-raw-size pair
         // could express a BSS tail, and deliberately will not — firmware
-        // zero-fills nothing.
+        // zero-fills nothing. VirtualSize is therefore the exact payload
+        // length and the section's tail is padding, not BSS.
         //
         // entry comes from the img_raw arm above (find_entry_node resolved
         // through fn_lookup), so it is a live `_start` when the program has
@@ -4183,7 +4226,22 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
         // --emit=image — so entry is the entry FUNCTION's offset, with no
         // trampoline in between. UEFI enters in long mode with a stack the
         // firmware set up; there is nothing for a stub to do.
+        uint64 uf_payload = codegen_output_len() - header_size
+        uint64 uf_raw = (uf_payload + 0xFFF) & ~0xFFF
+        while codegen_output_len() < header_size + uf_raw { emit_byte(0) }
+        uint64 uf_image = patch_uefi_headers(entry_off, uf_payload)
         uint64 uf_size = codegen_output_len()
+        if uf_size != uf_image {
+            // The two numbers are computed from the same payload length by
+            // two different expressions -- the pad loop above, and the
+            // rounding inside patch_uefi_headers. If they ever disagree, the
+            // header is describing a file that was not written: SizeOfImage
+            // would name bytes past EOF, which the loader faults on. Said out
+            // loud rather than left to a boot to discover.
+            uint64 ufz_e = "error: internal: --emit=uefi SizeOfImage does not match the bytes emitted\n"
+            write(2, ufz_e, str_len(ufz_e))
+            exit(1)
+        }
         uint8[64] uf_b
         uint64 uf_m = "uefi: arch="
         write(1, uf_m, str_len(uf_m))

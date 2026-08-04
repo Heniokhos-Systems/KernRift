@@ -1725,13 +1725,26 @@ this mode — they describe a flat image somebody else has to place, and
 firmware places this one itself. The build prints a report line:
 
 ```
-uefi: arch=x86_64 entry=4096 filesz=4232 memsz=4232 hdr=4096
+uefi: arch=x86_64 entry=4096 filesz=8192 memsz=8192 hdr=4096
 ```
 
 `entry` and `hdr` are **file offsets**, decimal, like the `--emit=image`
-report's. `hdr` is the size of the reserved header region at the front of the
-file; `entry` is the entry function — a live `_start` if the program has one
-and `main` otherwise, the same bare-metal rule `--emit=image` uses.
+report's. `hdr` is the size of the header region at the front of the file;
+`entry` is the entry function — a live `_start` if the program has one and
+`main` otherwise, the same bare-metal rule `--emit=image` uses. Because the
+geometry below makes file offset equal RVA, `entry` is also the header's
+`AddressOfEntryPoint`, and `filesz` is its `SizeOfImage`.
+
+`filesz` includes **file-alignment padding**: `FileAlignment` is 0x1000, and
+a PE section's `SizeOfRawData` is spec-required to be a multiple of it.
+Padding to that boundary is a choice, not something firmware forces: an
+unaligned `SizeOfRawData`, with the file ending exactly there and nothing
+past EOF, is out-of-spec but was **measured to run under both OVMF and
+AAVMF**. Padding is kept anyway, for PE-spec conformance and because it lets
+`FileAlignment` and `SectionAlignment` share one value instead of two. So a
+56-byte program still produces an 8192-byte application. The padding is zero
+and is not BSS: the payload carries its zero statics as real bytes, because
+firmware zero-fills nothing.
 
 **Required flags, and why each is refused rather than defaulted:**
 
@@ -1762,12 +1775,35 @@ so file offset equals RVA for every byte in the artifact. A conventional
 faults with no diagnostic. x86_64 output is RIP-relative and immune to this,
 and is held to the same geometry anyway.
 
-**Status: the PE header itself is not emitted yet.** As of sub-project D
-Task 1 the mode's flag surface, its refusals and its payload geometry are
-complete, and the reserved 4096 bytes are **zero** — so the artifact is not
-yet a PE and no firmware will load it. Task 2 fills the header in. Do not
-read the sections above as a claim that any of this has booted; nothing in
-this tree has run a KernRift artifact under UEFI firmware.
+**The header, and the fields that are load-bearing.** One section, `.text`,
+carrying code and statics together, with characteristics `0xE0000020` —
+`CODE|EXECUTE|READ|`**`WRITE`**. The write bit is arm64's: measured under
+AAVMF, a read-only code section loads and starts, then takes a *Synchronous
+Exception* on the first store to a static. x86_64 does not enforce it.
+
+* `Subsystem` is **10**, `EFI_APPLICATION`. Subsystems 0, 3, 11, 12 and 13 are
+  all refused by the boot manager — including 11 and 12, which are perfectly
+  valid EFI subsystems. It is also the field `file(1)` keys its
+  *"(EFI application)"* phrase on.
+* `ImageBase` is 0 and `IMAGE_FILE_RELOCS_STRIPPED` is **never** set, so
+  firmware places the image where it likes. There is no `.reloc` section and
+  none is needed: the payload is position-independent.
+* There is **no import directory**. That is the whole difference between this
+  and `--emit=pe`, whose entry instruction calls through a `kernel32` import
+  slot only the Windows loader fills.
+* `SizeOfOptionalHeader` is 240 with 16 data directories. What firmware
+  actually validates is the *consistency* `SizeOfOptionalHeader − 112 ==
+  NumberOfRvaAndSizes × 8`, not the count.
+
+**Status: this has booted.** Sub-project D Task 2 emits the header, and the
+resulting applications were run under **QEMU's OVMF 2024.02 firmware on q35
+and AAVMF 2024.02 on `virt`** — emulated, not real hardware or vendor
+firmware, and with no Secure Boot — where each printed its sentinel and
+returned control to the boot manager. An application that returns hands
+control back and the
+firmware then runs its setup UI; that is a normal return, not a failure. The
+gate leg that keeps this true lands in Task 3; until then the boot evidence is
+recorded in the sub-project's report and not re-run by `make test`.
 
 ```
 
