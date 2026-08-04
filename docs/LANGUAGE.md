@@ -1504,17 +1504,101 @@ a report line the boot tooling parses:
 image: arch=arm64 entry=620 filesz=1048 memsz=1048 load=1077936128
 ```
 
-`entry` is the file offset of `main` (a flat image has no `e_entry`; a boot
-stub must branch to `load + entry`). All values are decimal.
+`entry` is a **file offset**, because a flat image has no `e_entry` and this
+report line is the only place it is recorded. Which offset depends on the
+flags: the entry function is a live `_start` if the program has one and
+`main` otherwise, and with `--stack-top=` (below) `entry` is instead the
+offset of the **emitted entry stub**, which is what a loader or a reset
+vector must start at. All values are decimal.
 
 `--load-addr=` is **required, validated, and reported — never embedded**:
 x86_64 images are fully RIP-relative and run at any address; arm64 images
 are position-independent modulo 4 KiB, so a non-4096-aligned `--load-addr`
 is refused on arm64 only. Requires `--target=none` (a hosted OS would put
 its syscalls in the blob), an explicit `--arch=x86_64|arm64` (riscv32/xtensa
-already own their raw paths via `--freestanding`). `-g` is refused. The entry
-stub, stack setup and BSS-zeroing are sub-project B2; until then the loader
-owns SP and nothing zeroes memory beyond what the full image itself carries.
+already own their raw paths via `--freestanding`). `-g` is refused.
+
+#### Self-booting images (`--stack-top=`)
+
+```
+krc prog.kr --arch=x86_64 --target=none --emit=image \
+    --load-addr=0x400000 --stack-top=0x90000 -o prog.img
+qemu-system-x86_64 -kernel prog.img          # and nothing else
+```
+
+Without `--stack-top=` the image has no startup code at all: SP is whatever
+reset left behind, so the entry function faults in its own prologue and
+something else has to set up the stack and branch to `load + entry`.
+
+`--stack-top=` opts into an emitted entry stub, and the image becomes
+self-sufficient:
+
+* **arm64** — `movz`/`movk` the stack top into `x0`, `mov sp, x0`, `bl` the
+  entry function, then `b .`. Boot it by parking the reset PC on
+  `load + entry`.
+* **x86_64** — a multiboot header followed by a 32-bit trampoline that builds
+  an identity map of the first 1 GiB, enables PAE + long mode, loads a 64-bit
+  GDT, sets RSP and calls the entry function, then `hlt; jmp .`. The header
+  carries the load and entry addresses, so `qemu-system-x86_64 -kernel` is
+  the whole command line.
+
+The stub's trailing halt is the entry function's **return** site: when the
+entry function returns, the machine parks there rather than running off the
+end of the image.
+
+The value is refused if it is zero, and validated per arch:
+
+| | accepted `--stack-top=` | accepted `--load-addr=` |
+|---|---|---|
+| **arm64** | 16-byte aligned, below 2^32 | 4096-aligned (unchanged by this flag) |
+| **x86_64** | **at most `0x40000000`**, and **at most `0x1000` or at least `0x4008`** | **`0x4000` … below `0x40000000`** |
+
+Both arches additionally refuse a stack top that starts **inside the image**:
+the stack grows down, so the first push writes the eight bytes below it, and
+those must not be the program's own. The refused band is everything strictly
+above `--load-addr` and below `load + filesz + 8` — so a stack top *at* or
+below the load address is fine (its first push lands under the image), and
+`load + filesz + 8` is the lowest accepted value above it. How far the stack
+grows afterwards is not knowable at compile time and is not checked: a stack
+placed just above the image will still collide eventually.
+
+The x86_64 numbers all come from the trampoline it emits. Its identity map is
+a single 512-entry page directory of 2 MiB pages, so it maps exactly the first
+1 GiB — hence the `0x40000000` ceiling on the stack, on the load address, and
+on the image's *end* (a load address that fits but whose image runs past 1 GiB
+is refused too). The page tables themselves are built at physical
+`0x1000–0x4000` and that range is zeroed, so neither the stack nor the image
+may live there. The stack bound is stated on the **first push**, not on the
+pointer: the trampoline's `call` writes the eight bytes below the stack top, so
+`0x1000` is accepted (its push lands at `0xFF8`, under the tables) and `0x4000`
+is refused (its push at `0x3FF8` would overwrite the last page-directory entry,
+which maps the top 2 MiB of the mapped GiB). `0x4008` is the lowest accepted
+value above the tables. Passing `--stack-top=` is what makes the two
+`--load-addr` bounds apply: without it no trampoline is emitted and the image is
+a blob for a loader of your own, which is subject to none of this.
+
+**Declare the entry function with no parameters.** Neither stub sets up
+arguments, and neither is refused for taking them: `fn main(uint64 argc,
+uint64 argv) -> uint64` compiles clean into an image and reads whatever the
+stub happened to leave in the argument registers. What it reads is *stable and
+plausible-looking*, which is worse than garbage — measured under QEMU by
+booting an entry that spins iff its first parameter equals a candidate:
+
+* **arm64** — the first parameter is the **stack top**. The stub materialises
+  it in `x0` (`movz`/`movk`), copies it to `sp`, and never clobbers `x0`
+  before the `bl`, so `argc` is exactly the `--stack-top=` value.
+* **x86_64** — the first parameter is **`0x4000`**, the address one past the
+  identity-map page tables: the trampoline leaves `%edi` there after filling
+  the page directory and does not touch it again before `call *%rax`.
+
+Second and later parameters are true garbage. `@builtin_override fn _start` is
+likewise a no-op here: the stub calls the entry function directly, not through
+any trampoline an override could replace.
+
+**Nothing zeroes a BSS tail, by design.** The image is never truncated, so
+its statics are carried as real zero bytes and there is nothing left for a
+zeroing loop to do. Do not assume RAM outside the image is zero — QEMU
+zero-fills it, real silicon does not.
 
 ```
 
@@ -1523,7 +1607,9 @@ krc <file.kr> --arch=arm64           # default: IR (SSA + optimizer + regalloc)
 krc --legacy --arch=arm64 <file.kr>  # legacy direct-walking codegen
 krc --ir <file.kr>                   # force IR even where a recipe falls back to legacy
 krc --no-coalesce <file.kr>          # disable Briggs/George copy coalescing (default on)
+krc --coalesce <file.kr>             # ...and its explicit positive form (the default)
 krc --no-check-types <file.kr>       # disable the type checker (default on)
+krc --check-types <file.kr>          # ...and its explicit positive form (the default)
 krc --O0 <file.kr>                   # disable the IR optimizer (CF/DCE/CSE/LICM)
 krc --debug <file.kr>                # runtime safety checks (bounds, null, some div-by-zero)
 krc -g <file.kr> -o out              # emit DWARF debug info (.debug_line/info/abbrev/str)
