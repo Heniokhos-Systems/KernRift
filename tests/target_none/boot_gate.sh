@@ -228,6 +228,7 @@ BOOT_DEADLINE_TICKS=200   # 10 s — hard ceiling on waiting for evidence
 BOOT_SILENCE_TICKS=40
 BOOT_WAITED_TICKS=0       # out-param: ticks actually waited by the last run
 BOOT_QEMU_RC=0            # out-param: qemu's exit status from the last run
+PARKED_PC=NOQMPRUN        # out-param: see boot_run_qmp; never a stale value
 # The wait itself, factored out because boot_run_qmp (L3) needs the SAME
 # semantics while the guest is still alive. Two copies of this loop would
 # drift, and the mode that drifted would be the one nobody re-derived.
@@ -384,6 +385,7 @@ a64_boot() {
 # as reported), $4 serial, $5 expect.
 a64_self_boot() {
     local load="$1" img="$2" entry="$3" ser="$4" expect="$5"
+    PARKED_PC=NOQMPRUN   # see x86_boot
     boot_run a64 "$ser" "$expect" \
         -device loader,file="$img",addr=$(printf 0x%x "$load"),force-raw=on \
         -device loader,addr=$(printf 0x%x $(( load + entry ))),cpu-num=0
@@ -404,6 +406,12 @@ a64_self_boot_qmp() {
 # $1 image, $2 serial, $3 expect.
 x86_boot() {
     local img="$1" ser="$2" expect="$3"
+    # A NON-QMP BOOT MUST DESTROY THE PREVIOUS RUN'S PC. Without this a control
+    # that is moved off the _qmp helper keeps reading the LAST QMP run's value
+    # and its parked-PC assertion silently becomes a no-op -- and on this gate
+    # the neighbouring arm64 controls all park at the same 0x200, so it would
+    # go on passing. NOQMPRUN fails every consumer's shape-check by design.
+    PARKED_PC=NOQMPRUN
     boot_run x86 "$ser" "$expect" -kernel "$img"
 }
 x86_boot_qmp() {
@@ -572,46 +580,100 @@ print(struct.unpack_from("<I", d, o)[0])
 PY
 }
 
-# Copy $1 to $2 and overwrite $3 bytes of it. Mode $4 is one of:
+# Copy $1 to $2, applying every spec from $3 onwards IN ORDER. A spec is one of:
 #   u32:<off>:<val>   little-endian u32 at <off>
 #   hex:<off>:<bytes> raw hex at <off>
 #   zero:<off>        zero everything from <off> to EOF
-# Exits nonzero (and writes nothing) if the offset does not fit, so a control
+# Order matters and is used: L1's payload control zeroes to EOF and then plants
+# a landing pad inside the zeroed region.
+# Exits nonzero (and writes nothing) if an offset does not fit, so a control
 # built on a mislocated patch site fails instead of quietly testing nothing.
 img_patch() {
-    python3 - "$1" "$2" "$3" <<'PY'
+    python3 - "$@" <<'PY'
 import struct, sys
-src, dst, spec = sys.argv[1], sys.argv[2], sys.argv[3]
+src, dst = sys.argv[1], sys.argv[2]
 d = bytearray(open(src, "rb").read())
-kind, rest = spec.split(":", 1)
-if kind == "zero":
-    o = int(rest)
-    if o >= len(d):
-        sys.exit("img_patch: zero offset %d is past EOF (%d)" % (o, len(d)))
-    for i in range(o, len(d)):
-        d[i] = 0
-elif kind == "u32":
-    o, v = rest.split(":")
-    o, v = int(o), int(v)
-    if o + 4 > len(d):
-        sys.exit("img_patch: u32 at %d does not fit in %d bytes" % (o, len(d)))
-    struct.pack_into("<I", d, o, v & 0xFFFFFFFF)
-elif kind == "hex":
-    o, h = rest.split(":")
-    o, b = int(o), bytes.fromhex(h)
-    if o + len(b) > len(d):
-        sys.exit("img_patch: %d hex bytes at %d do not fit in %d" % (len(b), o, len(d)))
-    d[o:o+len(b)] = b
-else:
-    sys.exit("img_patch: unknown spec %r" % spec)
+for spec in sys.argv[3:]:
+    kind, rest = spec.split(":", 1)
+    if kind == "zero":
+        o = int(rest)
+        if o >= len(d):
+            sys.exit("img_patch: zero offset %d is past EOF (%d)" % (o, len(d)))
+        for i in range(o, len(d)):
+            d[i] = 0
+    elif kind == "u32":
+        o, v = rest.split(":")
+        o, v = int(o), int(v)
+        if o + 4 > len(d):
+            sys.exit("img_patch: u32 at %d does not fit in %d bytes" % (o, len(d)))
+        struct.pack_into("<I", d, o, v & 0xFFFFFFFF)
+    elif kind == "hex":
+        o, h = rest.split(":")
+        o, b = int(o), bytes.fromhex(h)
+        if o + len(b) > len(d):
+            sys.exit("img_patch: %d hex bytes at %d do not fit in %d" % (len(b), o, len(d)))
+        d[o:o+len(b)] = b
+    else:
+        sys.exit("img_patch: unknown spec %r" % spec)
 open(dst, "wb").write(d)
 PY
 }
 
+# File offset the x86 stub's `call *%rax` transfers to, i.e. the ENTRY FUNCTION
+# — read out of the `movabs $entry,%rax` immediate and converted to a file
+# offset with the image's load address ($2).
+#
+# LOCATED BY ANCHOR, NOT BY CONSTANT, and the anchor is the halt this file
+# already locates: the trampoline's tail is `48 b8 <imm64> ff d0 f4 eb fd`, so
+# the immediate sits at halt-10 and `48 b8` must be at halt-12. Both are
+# asserted. A whole-file search for `48 b8` would false-hit any payload byte
+# pair, and a hardcoded offset would be wrong by the next edit to the stub.
+call_target_x86() {
+    python3 - "$1" "$2" <<'PY'
+import struct, sys
+d = open(sys.argv[1], "rb").read()
+load = int(sys.argv[2])
+offs = [i for i in range(len(d) - 2) if d[i] == 0xF4 and d[i+1] == 0xEB and d[i+2] == 0xFD]
+if len(offs) != 1:
+    print("AMBIG:%d" % len(offs)); sys.exit(1)
+h = offs[0]
+if h < 12 or d[h-12] != 0x48 or d[h-11] != 0xB8:
+    print("NOMOVABS:%s" % d[max(0, h-12):h-10].hex()); sys.exit(1)
+va = struct.unpack_from("<Q", d, h - 10)[0]
+off = va - load
+if off < 0 or off >= len(d):
+    print("OUTSIDE:%d" % off); sys.exit(1)
+print(off)
+PY
+}
+
+# Echo $3 bytes of image $1 starting at file offset $2, as lower-case hex.
+# Echoes SHORT (and exits nonzero) rather than a truncated string if the range
+# runs past EOF, so a mislocated read cannot compare equal to nothing.
+img_bytes() {
+    python3 - "$1" "$2" "$3" <<'PY'
+import sys
+d = open(sys.argv[1], "rb").read()
+o, n = int(sys.argv[2]), int(sys.argv[3])
+if o < 0 or o + n > len(d):
+    print("SHORT"); sys.exit(1)
+print(d[o:o+n].hex())
+PY
+}
+
 # Multiboot header field offsets, from the emitting code (src/main.kr,
-# emit_x86_image_stub) and re-read off the artifact by L1.
+# emit_x86_image_stub) and re-read off the artifact by L1. MB_HEADER_SIZE is a
+# fact about the FORMAT, not about this compiler: the AOUT-kludge header is
+# eight u32s, so `entry_addr` must point one header past `header_addr`.
 MB_MAGIC_OFF=0; MB_HEADER_ADDR_OFF=12; MB_LOAD_ADDR_OFF=16; MB_ENTRY_ADDR_OFF=28
+MB_HEADER_SIZE=32
 MB_MAGIC=464367618          # 0x1BADB002
+# The trampoline's first two instructions, at the published entry: cli; cld.
+X86_TRAMPOLINE_FIRST=fafc
+# The stub's tail, past the code: a 3-quad GDT and the 10-byte GDTR the
+# trampoline LGDTs. Both are INSIDE the stub and both are load-bearing at run
+# time — see L1_control_zeroed_payload for what happens when they are not.
+X86_GDT_BYTES=24; X86_GDTR_BYTES=10
 
 # =============================================================================
 # L0 — boot_run's DEAD-BOOT DETECTOR. This is not a subject leg; it is the gate
@@ -697,9 +759,10 @@ leg0() {
 #        program sentinel impossible). NOT CONSTRUCTIBLE: there is no loader to
 #        run alone. Its job — "the sentinel cannot come from whatever boots the
 #        program" — is done here by `L1_control_zeroed_payload`, which is
-#        strictly sharper: same stub, same command, payload zeroed, and Task 4
-#        observed the trampoline still reaching long mode (CS64, EFER=0x500)
-#        with no sentinel.
+#        strictly sharper: same stub, same command, payload zeroed and a halt
+#        planted at the address the stub calls, so the guest PARKS THERE — which
+#        is positive proof the trampoline built its page tables, loaded its GDT
+#        and entered long mode before finding nothing to run.
 #
 #      * `L1_control_offset0`. RETIRED BECAUSE IT INVERTS, and this was
 #        measured, not predicted. Under the emitted form file offset 0 is the
@@ -761,22 +824,51 @@ leg1() {
     # turns it into a SKIP the moment the runtime half fails. These two depend
     # on nothing a boot produces, so they run first and a red run still reports
     # the leg's primary static claim.
+    # WHAT THIS CHECK DOES AND DOES NOT COVER, stated exactly, because an
+    # earlier version of this comment claimed independence the code did not
+    # have (review I2).
+    #
+    # THE REPORT-vs-entry_addr CLAUSE IS A TAUTOLOGY WITH RESPECT TO THE
+    # COMPILER. Both numbers are the SAME variable: `xs_start32` in
+    # emit_x86_image_stub feeds `patch_u32(xs_hdr_entry, ld + xs_start32)`
+    # (src/main.kr:2537) AND `x86stub_start32_off` -> `img_stub_off` ->
+    # `entry_off` (:2403, :3119, :3586), which is what the `image:` line
+    # prints. They cannot disagree, so on its own this clause catches a
+    # spelling or parsing mistake in THIS SCRIPT and nothing about the
+    # compiler. Demonstrated: publishing the entry two bytes late — skipping
+    # `cli; cld` — leaves it green.
+    #
+    # WHAT ACTUALLY BITES IS THE FORMAT ANCHOR, and it is derived from the
+    # ARTIFACT rather than from that variable:
+    #   * a multiboot header is 32 bytes and `header_addr` says where it is,
+    #     so the trampoline must start at exactly `header_addr + 32` — no
+    #     hardcoded 32-as-an-entry-offset, and no compiler value on the
+    #     right-hand side;
+    #   * the two bytes AT the published entry must be `fa fc` (`cli; cld`),
+    #     the trampoline's first instructions, read out of the image.
+    # A published entry that drifts by any amount reds both: the arithmetic
+    # first, and the opcode check second with the bytes it actually found.
+    #
     # mb_u32 answers in DECIMAL and $X86_LOAD is written in hex, so every
     # comparison below is against $(( X86_LOAD )) — a `=` between "4194304"
     # and "0x400000" is false for two spellings of the same address, which is
     # a false FAIL, and the mirror-image mistake would be a false pass.
     local mb_magic mb_hdr mb_load mb_entry halt want_entry want_load
+    local want_start entry_bytes
     mb_magic=$(mb_u32 "$img" $MB_MAGIC_OFF)
     mb_hdr=$(mb_u32 "$img" $MB_HEADER_ADDR_OFF)
     mb_load=$(mb_u32 "$img" $MB_LOAD_ADDR_OFF)
     mb_entry=$(mb_u32 "$img" $MB_ENTRY_ADDR_OFF)
     want_load=$(( X86_LOAD ))
     want_entry=$(( X86_LOAD + entry ))
+    want_start=$(( mb_hdr + MB_HEADER_SIZE ))
+    entry_bytes=$(img_bytes "$img" $(( mb_entry - want_load )) 2)
     if [ "$mb_magic" = "$MB_MAGIC" ] && [ "$mb_hdr" = "$want_load" ] \
-       && [ "$mb_load" = "$want_load" ] && [ "$mb_entry" = "$want_entry" ]; then
-        ok "L1_multiboot_header" "magic at offset 0, header_addr=load_addr=$want_load, entry_addr=$mb_entry == load + reported entry ($entry)"
+       && [ "$mb_load" = "$want_load" ] && [ "$mb_entry" = "$want_entry" ] \
+       && [ "$mb_entry" = "$want_start" ] && [ "$entry_bytes" = "$X86_TRAMPOLINE_FIRST" ]; then
+        ok "L1_multiboot_header" "magic at offset 0, header_addr=load_addr=$want_load, entry_addr=$mb_entry == header_addr + $MB_HEADER_SIZE and holds $entry_bytes (cli; cld); the report's entry ($entry) agrees, though that clause shares xs_start32 and is not independent"
     else
-        bad "L1_multiboot_header" "magic=$mb_magic (want $MB_MAGIC) header_addr=$mb_hdr load_addr=$mb_load (want $want_load) entry_addr=$mb_entry (want $want_entry = $want_load + $entry)"
+        bad "L1_multiboot_header" "magic=$mb_magic (want $MB_MAGIC) header_addr=$mb_hdr load_addr=$mb_load (want $want_load) entry_addr=$mb_entry (want $want_entry = $want_load + reported $entry; and want $want_start = header_addr + $MB_HEADER_SIZE) bytes-at-entry=$entry_bytes (want $X86_TRAMPOLINE_FIRST = cli; cld)"
     fi
     # The halt is located, not written down, and its uniqueness is asserted —
     # `L1_halt_parked` reads RIP == load + halt + 1 as "parked on the stub's
@@ -853,20 +945,52 @@ leg1() {
         ok "L1_control_no_return" "call *%rax -> jmp .: no sentinel and RIP parks at 0x$no_ret_pc, 3 bytes short of the halt — the halt address discriminates"
     fi
     # Control: the sentinel comes from KernRift's compiled code, not the stub.
-    # Payload zeroed from the end of the stub, stub kept byte-for-byte. Task 4
-    # observed the trampoline still reaching long mode here (CS64, EFER=0x500)
-    # with nothing on the wire; this leg keeps the serial half, which is the
-    # part that is stationary enough to assert (the guest executes zeros and
-    # its PC keeps moving, so a parked-PC assertion would be flaky by design).
-    local stub_end=$(( halt + 3 ))
-    if ! img_patch "$img" "$WORK/sx_zero.img" "zero:$stub_end"; then
-        bad "L1_control_zeroed_payload" "could not zero the payload — control never ran"
-    elif ! boot_run x86 "$WORK/l1_zero.txt" RUNOUT -kernel "$WORK/sx_zero.img"; then
+    # The whole payload is zeroed and a `hlt; jmp .` landing pad is planted at
+    # the address the stub's `call *%rax` transfers to. The guest must then
+    # PARK ON THAT PAD with nothing on the wire.
+    #
+    # THE STUB DOES NOT END AT THE HALT — that was this control's defect
+    # (review I1). `halt + 3` is the end of the CODE; the stub continues with
+    # `.align 16` padding, a 3-quad GDT and a 10-byte GDTR, and the trampoline
+    # LGDTs that table on its way to long mode. Zeroing from 179 destroys the
+    # descriptor tables and the guest TRIPLE-FAULTS INSIDE THE STUB, never
+    # reaching the payload at all — and the old form passed on exactly that.
+    # The end is DERIVED, not written down: align the code end to 16 (what the
+    # emitter's `while (out_len & 15)` loop does), then the GDT and the GDTR.
+    #
+    # WHY A LANDING PAD RATHER THAN "IS THE GUEST STILL ALIVE". Because a guest
+    # executing zeroes is not a stable observable and MUST NOT be one this gate
+    # depends on. Zeroes decode as `add %al,(%rax)`, which is SELF-MODIFYING at
+    # the address it is executing, so the walk is chaotic; measured on one
+    # image, one command line, twelve runs: eleven died inside ~100 ms and one
+    # survived the full 2 s window in long mode at RIP 0x7453e8. Task 4's
+    # CS64/EFER observation is that one-in-twelve outcome, and a liveness
+    # assertion built on it would have been an intermittently-red gate — a
+    # correction that was itself wrong, which is the recurring failure of this
+    # sub-project. The landing pad makes the same claim DETERMINISTICALLY:
+    # 5/5 runs park at load + <call target> + 1, and with the GDT destroyed
+    # (the review-I1 form) 3/3 give QMPFAIL because qemu is already gone.
+    #
+    # WHAT PARKING THERE PROVES, and it is more than silence did: the
+    # trampoline built its page tables, LGDT'd the GDT this control kept,
+    # ljmp'd into long mode, set RSP and transferred to the address its
+    # `movabs` carries. Every one of those is required to reach the pad.
+    local stub_end=$(( ((halt + 3 + 15) / 16) * 16 + X86_GDT_BYTES + X86_GDTR_BYTES ))
+    local calltgt pad_pc
+    if ! calltgt=$(call_target_x86 "$img" $(( X86_LOAD ))); then
+        bad "L1_control_zeroed_payload" "cannot read the call target out of the movabs: $calltgt"; return
+    fi
+    pad_pc=$(printf %x $(( X86_LOAD + calltgt + 1 )))
+    if ! img_patch "$img" "$WORK/sx_zero.img" "zero:$stub_end" "hex:$calltgt:f4ebfd"; then
+        bad "L1_control_zeroed_payload" "could not build the zeroed image — control never ran"
+    elif ! x86_boot_qmp "$WORK/sx_zero.img" "$WORK/l1_zero.txt" RUNOUT; then
         bad "L1_control_zeroed_payload" "the boot did not run (qemu exit=$BOOT_QEMU_RC) — silence proves nothing"
     elif grep -q "2000000016" "$WORK/l1_zero.txt"; then
         bad "L1_control_zeroed_payload" "sentinel printed from an image whose payload is all zeroes"
+    elif [ "$PARKED_PC" != "$pad_pc" ]; then
+        bad "L1_control_zeroed_payload" "pc=$PARKED_PC, want 0x$pad_pc (the pad at the call target, file offset $calltgt) — the guest never reached the payload, so its silence says nothing about where the sentinel comes from. Stub kept through offset $stub_end."
     else
-        ok "L1_control_zeroed_payload" "stub kept, everything from offset $stub_end zeroed => no sentinel (boot ran, qemu exit $BOOT_QEMU_RC)"
+        ok "L1_control_zeroed_payload" "stub kept through the GDTR (offset $stub_end), payload zeroed, pad at the call target (offset $calltgt): parked at 0x$pad_pc with no sentinel"
     fi
 }
 
@@ -891,11 +1015,17 @@ leg1() {
 #      is Task 3's own control A.
 #
 #      SILENCE IS NEVER THE WHOLE OF A CONTROL HERE. arm64 has no pre-payload
-#      liveness sentinel of any kind, so both quiet controls read the PC over
-#      QMP as well: they park at 0x200, the exception vector, which is POSITIVE
-#      evidence that the guest executed and faulted on the garbage SP rather
-#      than never having started. Combined with boot_run's exit-status rule
-#      (L0), "quiet" now has two independent witnesses behind it.
+#      liveness sentinel of any kind, so ALL THREE quiet controls read the PC
+#      over QMP as well — `L2_control_no_stub`, `L2_control_offset0` and
+#      `L2_control_entry_minus4`, every one of them through
+#      `a64_self_boot_qmp`. They park at 0x200, the exception vector, which is
+#      POSITIVE evidence that the guest executed and faulted on the garbage SP
+#      rather than never having started. Combined with boot_run's exit-status
+#      rule (L0), "quiet" has two independent witnesses behind it. (Two of the
+#      three asserted silence ALONE when this header was first written, so the
+#      0x200 fact was still living in a report rather than in the gate — review
+#      I3. If a control here is ever moved back to `a64_self_boot`, this
+#      paragraph becomes false again.)
 #
 #      REPORT ACCURACY IS STILL THESE CONTROLS' JOB ON THIS ARCH, unlike x86.
 #      An arm64 image has no header and no e_entry, so `entry` is a number the
@@ -998,19 +1128,39 @@ leg2() {
     # EMITTED stub (PC 0x200 in each case), not carried over from B1. They are
     # what makes the reported `entry` load-bearing on an arch whose artifact
     # has no header to check it against.
-    if ! a64_self_boot "$A64_LOAD" "$img" 0 "$WORK/l2_off0.txt" RUNOUT; then
+    # BOTH READ THE PC, and that is review I3: they used to assert silence
+    # alone while this leg's header claimed otherwise, so their 0x200 evidence
+    # lived only in a report — the exact debt Task 5 exists to retire. The
+    # shape-check comes first for the reason B1's I5 records: QMPFAIL and
+    # MOVING:* satisfy a `!=` vacuously, so without it the control goes green
+    # precisely when the discriminator is broken.
+    if ! a64_self_boot_qmp "$A64_LOAD" "$img" 0 "$WORK/l2_off0.txt" RUNOUT; then
         bad "L2_control_offset0" "the boot did not run (qemu exit=$BOOT_QEMU_RC) — silence proves nothing"
     elif grep -q "1000000016" "$WORK/l2_off0.txt"; then
         bad "L2_control_offset0" "sentinel printed from offset 0"
     else
-        ok "L2_control_offset0" "offset 0 => no sentinel (boot ran, qemu exit $BOOT_QEMU_RC)"
+        case "$PARKED_PC" in
+            "" | *[!0-9a-f]*)
+                bad "L2_control_offset0" "no parked PC (PARKED_PC='$PARKED_PC') — the discriminator never ran" ;;
+            "$want_pc")
+                bad "L2_control_offset0" "parked at the halt 0x$want_pc having entered at offset 0" ;;
+            *)
+                ok "L2_control_offset0" "offset 0 => no sentinel, parked at 0x$PARKED_PC (not the halt 0x$want_pc) — the guest RAN and faulted" ;;
+        esac
     fi
-    if ! a64_self_boot "$A64_LOAD" "$img" $(( entry - 4 )) "$WORK/l2_offm.txt" RUNOUT; then
+    if ! a64_self_boot_qmp "$A64_LOAD" "$img" $(( entry - 4 )) "$WORK/l2_offm.txt" RUNOUT; then
         bad "L2_control_entry_minus4" "the boot did not run (qemu exit=$BOOT_QEMU_RC) — silence proves nothing"
     elif grep -q "1000000016" "$WORK/l2_offm.txt"; then
         bad "L2_control_entry_minus4" "sentinel printed from the word before the stub"
     else
-        ok "L2_control_entry_minus4" "entry-4 (the preceding function's tail, not the entry function's) => no sentinel (boot ran, qemu exit $BOOT_QEMU_RC)"
+        case "$PARKED_PC" in
+            "" | *[!0-9a-f]*)
+                bad "L2_control_entry_minus4" "no parked PC (PARKED_PC='$PARKED_PC') — the discriminator never ran" ;;
+            "$want_pc")
+                bad "L2_control_entry_minus4" "parked at the halt 0x$want_pc having entered at entry-4" ;;
+            *)
+                ok "L2_control_entry_minus4" "entry-4 (the preceding function's tail, not the entry function's) => no sentinel, parked at 0x$PARKED_PC (not the halt 0x$want_pc)" ;;
+        esac
     fi
 }
 
