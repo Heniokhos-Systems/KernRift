@@ -2427,6 +2427,35 @@ uefi_boot() {
 #                               Boot0001 under both firmwares measured here; if
 #                               a future firmware orders the options differently
 #                               this must be loud, not a silent NOT_LOADED.
+#   no DONE marker            — the run hit the DEADLINE instead of ending. See
+#                               below; this one is not obvious and it is the one
+#                               that could produce a FALSE GREEN.
+#
+# THE DEADLINE CHECK, AND WHY IT IS THE MARKER AND NOT THE CLOCK (Task 3
+# re-review). `boot_wait` returns when its tick budget runs out without saying
+# so, and `boot_run` only rejects qemu's exit 1 — `timeout`'s own 124 is a
+# BOOT, deliberately (L0_alarm_not_a_dead_boot pins that). So an image that
+# STARTS, never prints, never faults and never returns runs out the 60 s and
+# lands on exactly the evidence `LOADED_SILENT` is defined by: started, no
+# markers, no fault. A hang would score as the silent case, and
+# L7_control_entry_at_section_start_silent — the row that exists to protect the
+# crashed-vs-silent distinction — would go green on it.
+#
+# Requiring the DONE marker closes it for every row at once, because every one
+# of the five outcomes below leaves one behind: `Exception` for both faulted
+# shapes, `failed to load Boot` for NOT_LOADED, `loading Boot000[^1]` for RAN
+# and for the genuine silent case (BDS moving to the next option is what "the
+# application returned" looks like). A run with none of them did not end, and
+# nothing about it is a verdict.
+#
+# THE ALTERNATIVE — assert BOOT_WAITED_TICKS is well under UEFI_BOOT_TICKS —
+# WAS REJECTED, and the reason matters. It needs a threshold, and a threshold
+# is a claim about how fast the machine is: the genuine case is 28 ticks here
+# against a 1200-tick ceiling, but nothing in this gate knows how slow a TCG
+# runner may be, and a false-failed positive on a slow machine is the failure
+# mode this whole file is written against (see the derived silence window and
+# boot_run's `== 1`). The marker is a statement about the EVIDENCE instead: a
+# slow machine still produces it, and a hung one never does at any speed.
 #
 # PRINTED_PARTIAL is the seventh name and it is a FAIL BUCKET, not a seventh
 # outcome: the literal reached the wire, the computed value did not, and nothing
@@ -2438,6 +2467,7 @@ uefi_verdict() {
     [ -s "$ser" ] || { echo "HARNESS_ERROR:empty-capture"; return 0; }
     grep -qa 'BdsDxe:' "$ser" || { echo "HARNESS_ERROR:no-bds"; return 0; }
     grep -qa 'Boot0001' "$ser" || { echo "HARNESS_ERROR:no-boot0001"; return 0; }
+    grep -qaE "$UEFI_DONE_RE" "$ser" || { echo "HARNESS_ERROR:no-terminator"; return 0; }
     local sawlit=1 sawcomp=1 sawfault=1
     grep -qa "$lit"  "$ser" && sawlit=0
     grep -qa "$comp" "$ser" && sawcomp=0
