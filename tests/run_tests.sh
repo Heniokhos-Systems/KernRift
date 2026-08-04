@@ -8447,18 +8447,29 @@ if $KRC $KRC_FLAGS "$IMG_SRC" -o /tmp/krc_img_g_$$ --arch=arm64 --target=none -g
 else
     echo "FAIL: target_none_dash_g_still_accepted (A's pinned acceptance regressed)"; FAIL=$((FAIL + 1))
 fi
-rm -f /tmp/krc_img_g_$$ "$IMG_SRC"
+rm -f /tmp/krc_img_g_$$
+# $IMG_SRC IS DELETED AT THE END OF THE --stack-top= SECTION BELOW, NOT HERE.
+# img_refuses() compiles $IMG_SRC, and every row it serves in that section used
+# to run with the file already gone. Those rows still passed, because every
+# diagnostic they assert is emitted during ARGUMENT VALIDATION, before the
+# source is opened -- but that made them insensitive to their own input, and a
+# refusal that fires any LATER (the finalize block's 1 GiB and stack-vs-image
+# rules do) could not be written with img_refuses at all: it got
+# "cannot open '...': file not found" instead. Keeping the source alive is
+# what lets stacktop_arm64_refused_inside_image use the same helper.
 
-# --- --stack-top= flag surface (sub-project B2, Task 1) ---
-# D4: the flag's PRESENCE is the opt-in for stub emission (a later task).
-# This task only parses, validates and refuses it -- no stub is emitted, so
-# every accept row below just proves the compiler gets past validation and
-# still writes the ordinary --emit=image artifact. Every refusal row asserts
+# --- --stack-top= flag surface (sub-project B2) ---
+# D4: the flag's PRESENCE is the opt-in for stub emission. THIS SECTION IS
+# ABOUT THE FLAG SURFACE ONLY -- what the compiler accepts and what it
+# refuses. The emitted bytes are pinned two sections down (the arm64 stub and
+# the x86_64 multiboot header + trampoline), so an accept row here proves only
+# that the compiler got past validation and wrote an artifact; row 5's accept,
+# for one, now carries the full 226-byte x86 trampoline. Every refusal asserts
 # THREE clauses via img_refuses(): nonzero exit, the diagnostic text, and no
 # artifact written -- B1 Task 6 shipped a hole where a refusal that printed
 # the right message, wrote nothing and exited 0 passed a two-clause check.
 echo ""
-echo "--- --stack-top= flag surface (B2 Task 1) ---"
+echo "--- --stack-top= flag surface (B2) ---"
 STK_SRC="$DIR/../test_tmp_stk_$$.kr"
 printf 'fn main() -> uint64 { return 7 }\n' > "$STK_SRC"
 
@@ -8475,7 +8486,7 @@ img_refuses stacktop_requires_image "only meaningful with --emit=image" --arch=a
 img_refuses stacktop_arm64_alignment "must be 16-byte aligned on arm64" --arch=arm64 --target=none --emit=image --load-addr=0x40400000 --stack-top=0x40500004
 
 # 3. arm64: a stack top >= 2^32 is refused -- the movz/movk pair the stub
-#    will patch into the entry code covers bits 31:0 only. 0x100000000 is
+#    patches into the entry code covers bits 31:0 only. 0x100000000 is
 #    itself 16-byte aligned, isolating the range check from row 2's.
 img_refuses stacktop_range "must be below 2^32 on arm64" --arch=arm64 --target=none --emit=image --load-addr=0x40400000 --stack-top=0x100000000
 
@@ -8510,11 +8521,38 @@ img_refuses stacktop_x86_range "below 0x80000000 on x86_64" --arch=x86_64 --targ
 # 6b. x86_64's other bound: a stack top inside 0x1000-0x4000 collides with
 #     the boot stub's identity-map page tables and is refused. Same row
 #     family as #6 -- both bounds come from the flag value alone, no image
-#     size needed (the stack-vs-image overlap check is Task 4's, not this
-#     task's -- review N8).
+#     size needed. The rules that DO need the image size (the 1 GiB fit and
+#     the stack-vs-image overlap) fire in the --emit=image finalize and are
+#     covered by rows 7-8 below and by stub_x86_stack_top_refused_inside_image.
 img_refuses stacktop_x86_range_collision "0x1000-0x4000 on x86_64" --arch=x86_64 --target=none --emit=image --load-addr=0x400000 --stack-top=0x2000
 
-rm -f "$STK_SRC"
+# 7. arm64 refuses a stack top INSIDE THE IMAGE, exactly as x86_64 does.
+#    This rule is architecture-independent -- the first push writes
+#    [stack_top-8, stack_top) and overwriting the program's own bytes needs
+#    no page tables -- but it shipped gated on `arch == 0`. Before the fix
+#    this command exited 0 and wrote a 56-byte image whose first push landed
+#    at 0x40400008, inside its own code, while the x86_64 twin
+#    (stub_x86_stack_top_refused_inside_image) refused the identical shape.
+#    0x40400010 is 16-byte aligned and below 2^32, so rows 2 and 3's bounds
+#    cannot be what refuses it.
+img_refuses stacktop_arm64_refused_inside_image "starts inside the image" --arch=arm64 --target=none --emit=image --load-addr=0x40400000 --stack-top=0x40400010
+
+# 8. ...and the boot gate's own arm64 pair still ACCEPTS. Row 7's rule fires
+#    on a band eight bytes wide past the image end, so this row is the proof
+#    that widening it did not make the gate's configuration illegal: the same
+#    --load-addr with the gate's 0x40800000 stack top, 4 MiB clear of a ~1 KiB
+#    image, must still compile and write an artifact.
+TOTAL=$((TOTAL + 1))
+rm -f /tmp/krc_stk_a64_$$
+if $KRC $KRC_FLAGS "$STK_SRC" -o /tmp/krc_stk_a64_$$ --arch=arm64 --target=none --emit=image --load-addr=0x40400000 --stack-top=0x40800000 >/dev/null 2>&1 \
+   && [ -f /tmp/krc_stk_a64_$$ ]; then
+    PASS=$((PASS + 1)); echo "  stacktop_arm64_above_image_accepted: PASS"
+else
+    echo "FAIL: stacktop_arm64_above_image_accepted (the gate's own arm64 stack top is now refused)"; FAIL=$((FAIL + 1))
+fi
+rm -f /tmp/krc_stk_a64_$$
+
+rm -f "$STK_SRC" "$IMG_SRC"
 
 # --- --emit=image EMISSION + the `image:` report line (sub-project B1, T5) ---
 #
@@ -8908,16 +8946,27 @@ done
 #    function name and libc/the kernel owns the real entry. This is the
 #    else-POSIX inheritance guard in reverse: a bare-metal rule that leaked
 #    into the hosted path would show up here.
-TOTAL=$((TOTAL + 1))
-rm -f /tmp/krc_enth_$$
-enth_out=$($KRC $KRC_FLAGS "$ENT_S" -o /tmp/krc_enth_$$ --arch=x86_64 2>&1); enth_st=$?
-if [ $enth_st -ne 0 ] && echo "$enth_out" | grep -q "no 'main' function found"; then
-    PASS=$((PASS + 1)); echo "  entry_start_not_entry_when_hosted: PASS"
-else
-    echo "FAIL: entry_start_not_entry_when_hosted (exit=$enth_st, out=$(echo "$enth_out" | head -1))"
-    FAIL=$((FAIL + 1))
-fi
-rm -f /tmp/krc_enth_$$ "$ENT_A" "$ENT_B" "$ENT_S" "$ENT_N"
+#
+#    THREE clauses and BOTH arches, like every other refusal in this branch.
+#    It shipped as a two-clause x86_64-only row, which is the exact shape B1
+#    Task 6's hole wore: a refusal that prints the right message, writes
+#    nothing and exits 0 passes a two-clause check. The bare-metal widening
+#    landed in shared code (find_entry_node), so an arch-specific leak into
+#    the hosted path is possible and only the arm64 twin would see it.
+for IA in x86_64 arm64; do
+    TOTAL=$((TOTAL + 1))
+    rm -f /tmp/krc_enth_$$
+    enth_out=$($KRC $KRC_FLAGS "$ENT_S" -o /tmp/krc_enth_$$ --arch=$IA 2>&1); enth_st=$?
+    if [ $enth_st -ne 0 ] && [ ! -f /tmp/krc_enth_$$ ] \
+       && echo "$enth_out" | grep -q "no 'main' function found"; then
+        PASS=$((PASS + 1)); echo "  entry_start_not_entry_when_hosted_$IA: PASS"
+    else
+        echo "FAIL: entry_start_not_entry_when_hosted_$IA (exit=$enth_st, artifact=$([ -f /tmp/krc_enth_$$ ] && echo yes || echo no), out=$(echo "$enth_out" | head -1))"
+        FAIL=$((FAIL + 1))
+    fi
+    rm -f /tmp/krc_enth_$$
+done
+rm -f "$ENT_A" "$ENT_B" "$ENT_S" "$ENT_N"
 
 # --- the arm64 entry stub: set SP, `bl <entry>`, halt (sub-project B2, T3) ---
 #

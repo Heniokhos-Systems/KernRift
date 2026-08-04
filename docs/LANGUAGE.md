@@ -1546,10 +1546,49 @@ The stub's trailing halt is the entry function's **return** site: when the
 entry function returns, the machine parks there rather than running off the
 end of the image.
 
-The value is validated per arch (arm64: 16-byte aligned and below 2^32;
-x86_64: below 0x80000000, clear of the trampoline's page tables at
-0x1000–0x4000, and clear of the image's own bytes), and the x86_64 form also
-requires the image to fit under the 1 GiB identity map.
+The value is refused if it is zero, and validated per arch:
+
+| | accepted `--stack-top=` | accepted `--load-addr=` |
+|---|---|---|
+| **arm64** | 16-byte aligned, below 2^32 | 4096-aligned (unchanged by this flag) |
+| **x86_64** | **at most `0x40000000`**, and outside `0x1000–0x4000` | **`0x4000` … below `0x40000000`** |
+
+Both arches additionally refuse a stack top that starts **inside the image**:
+the stack grows down, so the first push writes the eight bytes below it, and
+those must not be the program's own. The refused band is everything strictly
+above `--load-addr` and below `load + filesz + 8` — so a stack top *at* or
+below the load address is fine (its first push lands under the image), and
+`load + filesz + 8` is the lowest accepted value above it. How far the stack
+grows afterwards is not knowable at compile time and is not checked: a stack
+placed just above the image will still collide eventually.
+
+The x86_64 numbers all come from the trampoline it emits. Its identity map is
+a single 512-entry page directory of 2 MiB pages, so it maps exactly the first
+1 GiB — hence the `0x40000000` ceiling on the stack, on the load address, and
+on the image's *end* (a load address that fits but whose image runs past 1 GiB
+is refused too). The page tables themselves are built at physical
+`0x1000–0x4000` and that range is zeroed, so neither the stack nor the image
+may live there. Passing `--stack-top=` is what makes the two `--load-addr`
+bounds apply: without it no trampoline is emitted and the image is a blob for
+a loader of your own, which is subject to none of this.
+
+**Declare the entry function with no parameters.** Neither stub sets up
+arguments, and neither is refused for taking them: `fn main(uint64 argc,
+uint64 argv) -> uint64` compiles clean into an image and reads whatever the
+stub happened to leave in the argument registers. What it reads is *stable and
+plausible-looking*, which is worse than garbage — measured under QEMU by
+booting an entry that spins iff its first parameter equals a candidate:
+
+* **arm64** — the first parameter is the **stack top**. The stub materialises
+  it in `x0` (`movz`/`movk`), copies it to `sp`, and never clobbers `x0`
+  before the `bl`, so `argc` is exactly the `--stack-top=` value.
+* **x86_64** — the first parameter is **`0x4000`**, the address one past the
+  identity-map page tables: the trampoline leaves `%edi` there after filling
+  the page directory and does not touch it again before `call *%rax`.
+
+Second and later parameters are true garbage. `@builtin_override fn _start` is
+likewise a no-op here: the stub calls the entry function directly, not through
+any trampoline an override could replace.
 
 **Nothing zeroes a BSS tail, by design.** The image is never truncated, so
 its statics are carried as real zero bytes and there is nothing left for a

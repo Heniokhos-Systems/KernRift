@@ -3010,8 +3010,9 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
     // bare-metal condition written as an OS test is the shape that silently
     // inherits Linux. img_raw is emit_mode == 8 and has no fall-through;
     // stack_top_set is the D4 opt-in (absent => no stub => bytes unchanged);
-    // arch == 1 is arm64. x86_64 keeps accepting --stack-top and emitting no
-    // stub — its stub is the long-mode trampoline, a separate task.
+    // arch == 1 is arm64. x86_64 has its own, differently-shaped stub — the
+    // multiboot header + long-mode trampoline emitted at PART 1 above, which
+    // is PREPENDED rather than appended, hence two blocks and not one.
     uint64 img_stub_off = 0xFFFFFFFF
     if img_raw != 0 && arch == 1 && stack_top_set != 0 {
         uint64 stb_node = find_entry_node(root)
@@ -3577,11 +3578,14 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
         // loader (or a reset vector) must start at, and the entry function
         // reached through it would fault on a garbage SP. The fn_lookup
         // above still runs and still refuses on an inconsistency — the stub
-        // recorded a `bl` fixup against that same token, so a miss here
-        // means the image's own call would not have resolved either.
-        // img_stub_off is 0xFFFFFFFF on every path that emitted no stub
-        // (x86_64, and arm64 without --stack-top), where entry_off stays
-        // exactly what it was.
+        // recorded a `bl` fixup (arm64) or a patched movabs (x86_64) against
+        // that same token, so a miss here means the image's own call would
+        // not have resolved either.
+        // BOTH stub paths set img_stub_off: arm64's block above sets it to the
+        // appended stub's offset, and the x86_64 PART 2 block sets it to the
+        // trampoline's `cli`. It stays 0xFFFFFFFF only with --stack-top
+        // absent, i.e. no stub on either arch, where entry_off stays exactly
+        // what it was.
         if img_stub_off != 0xFFFFFFFF {
             entry_off = img_stub_off
         }
@@ -3684,19 +3688,35 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
         // load_addr is echoed, never embedded. Two different aligned
         // addresses must produce one byte-identical artifact.
         uint64 img_size = codegen_output_len()
-        // The two trampoline preconditions that need the FILE SIZE, so they
-        // cannot live with the rest of the --load-addr/--stack-top validation
-        // (B2 Task 4, review I3). They run HERE, ahead of the report, for two
-        // reasons: the report announces an artifact, and codegen_write_output
-        // has not run yet -- so a refusal leaves nothing on disk and says
-        // nothing that was not true.
+        // The two checks that need the FILE SIZE, so they cannot live with
+        // the rest of the --load-addr/--stack-top validation (B2 Task 4,
+        // review I3). They run HERE, ahead of the report, for two reasons:
+        // the report announces an artifact, and codegen_write_output has not
+        // run yet -- so a refusal leaves nothing on disk and says nothing
+        // that was not true.
         //
-        // Gated on the stub actually being emitted, like the address-only
-        // half: a B1-style blob loaded by somebody else's loader is subject
-        // to neither.
-        if arch == 0 && stack_top_set != 0 {
+        // THEY ARE NOT THE SAME KIND OF RULE. This comment used to call both
+        // of them "trampoline preconditions", which is true of one and false
+        // of the other, and the false half was gated `arch == 0` to match the
+        // name:
+        //
+        //   * THE 1 GiB FIT is a property of the x86_64 trampoline's identity
+        //     map (one 512-entry page directory of 2 MiB pages). arm64's stub
+        //     enables no paging and maps nothing, so this stays arch == 0.
+        //   * STACK-VS-IMAGE IS ARCHITECTURE-INDEPENDENT. A stack top inside
+        //     the image means the first push overwrites the program's own
+        //     bytes, on any machine, with or without paging. Shipped gated on
+        //     arch == 0 anyway: `--arch=arm64 --load-addr=0x40400000
+        //     --stack-top=0x40400010` exited 0 and wrote a 56-byte image
+        //     whose first push lands at 0x40400008, inside its own code,
+        //     while x86_64 refused the identical shape. Ungated here.
+        //
+        // Both stay gated on the stub actually being emitted, like the
+        // address-only half: a B1-style blob loaded by somebody else's loader
+        // gets its SP from that loader and is subject to neither.
+        if stack_top_set != 0 {
             uint64 img_end = load_addr + img_size
-            if img_end > 1073741824 {
+            if arch == 0 && img_end > 1073741824 {
                 uint64 ie_1g = "error: the image does not fit under the x86_64 self-boot trampoline's identity map: the map is a single 512-entry page directory of 2 MiB pages and covers exactly the first 1 GiB, and this image ends past it. Lower --load-addr, or drop --stack-top and boot it with a loader of your own\n"
                 write(2, ie_1g, str_len(ie_1g))
                 exit(1)
@@ -3710,6 +3730,10 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
             // image still collides eventually and is not refused -- so this
             // catches exactly the configurations that are corrupt from the
             // very first push.
+            //
+            // Fires on BOTH arches (see above). No boot-gate leg can reach it:
+            // the gate's arm64 images load at 0x40400000 and run ~1 KiB, and
+            // its stack top is 0x40800000 -- 4 MiB clear of img_end.
             if stack_top > load_addr && stack_top < img_end + 8 {
                 uint64 st_in = "error: --stack-top= starts inside the image: the stack grows down from it and the first push would overwrite the program's own bytes. Put the stack below --load-addr, or above the end of the image\n"
                 write(2, st_in, str_len(st_in))
@@ -5539,9 +5563,11 @@ static uint64 load_addr = 0
 static uint64 load_addr_set = 0
 
 // --stack-top= state (sub-project B2, D4): the flag's PRESENCE is the opt-in
-// for entry-stub emission in a later task. This task parses, validates and
-// reports it, and emits nothing -- same VALIDATION-ONLY shape as load_addr
-// above, and the same forward-reference reason (compile() can read it).
+// for entry-stub emission -- the arm64 stub block and emit_x86_image_stub's
+// multiboot header + long-mode trampoline both read stack_top_set as their
+// gate, and so does the stack-vs-image refusal in the --emit=image finalize.
+// Statics rather than locals for the same forward-reference reason as
+// load_addr above (compile() can read them).
 // Deliberately NO default: an unset stack means "no stub", never "guess
 // one" -- a silently defaulted stack boots on the author's board and faults
 // silently on someone else's.
@@ -6018,7 +6044,7 @@ fn main() {
                 write(1, h_img, str_len(h_img))
                 uint64 h_la = "  --load-addr=<addr>       where the image will be loaded; validated (arm64: 4096-aligned) and reported, never embedded\n"
                 write(1, h_la, str_len(h_la))
-                uint64 h_st = "  --stack-top=<addr>       emit a self-booting entry stub that sets SP here (x86_64 also gets a multiboot header + long-mode trampoline); validated per-arch (arm64: 16-byte aligned, <2^32; x86_64: <0x80000000, outside 0x1000-0x4000), no default\n"
+                uint64 h_st = "  --stack-top=<addr>       emit a self-booting entry stub that sets SP here (x86_64 also gets a multiboot header + long-mode trampoline); validated per-arch (arm64: 16-byte aligned, <2^32; x86_64: <=0x40000000, outside 0x1000-0x4000, and --load-addr must then be in [0x4000,0x40000000)); on both arches the stack must not start inside the image; no default\n"
                 write(1, h_st, str_len(h_st))
                 write(1, "  -c                        shorthand for --emit=obj\n", 53)
                 write(1, "  -o <path>                 output path\n\n", 41)
@@ -6312,14 +6338,15 @@ fn main() {
         // --stack-top= validation (sub-project B2, D4). Only runs when the
         // flag is actually present -- unlike --load-addr=, --stack-top= has
         // no "image requires it" refusal here: the flag's ABSENCE is a
-        // legal, meaningful choice (no stub, later task), so Task 1 must
-        // not turn "unset" into an error.
+        // legal, meaningful choice (no stub is emitted and the image is a
+        // blob for somebody else's loader, which is what sub-project B1
+        // shipped), so "unset" must not become an error.
         if stack_top_set != 0 {
             if stack_top == 0 {
                 // Zero parses cleanly and passes every alignment/range
                 // check below on both arches, but is indistinguishable
-                // from "unset" in every report and stub that will consume
-                // it -- mirrors --load-addr=0's refusal just above.
+                // from "unset" in every report and in both stubs that
+                // consume it -- mirrors --load-addr=0's refusal just above.
                 uint64 st_z = "error: --stack-top=0 is refused: a zero stack pointer faults on the first push, and is indistinguishable from unset in every report and boot stub that consumes it\n"
                 write(2, st_z, str_len(st_z))
                 exit(1)
@@ -6336,7 +6363,7 @@ fn main() {
                     write(2, st_al, str_len(st_al))
                     exit(1)
                 }
-                // The movz/movk pair the stub will patch into the entry
+                // The movz/movk pair the stub patches into the entry
                 // code covers bits 31:0 only, so anything >= 2^32 cannot be
                 // materialized into SP by that pair. x86_64 has its own,
                 // different range rule below instead.
