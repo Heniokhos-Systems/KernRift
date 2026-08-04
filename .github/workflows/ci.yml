@@ -66,12 +66,18 @@ jobs:
       # the compiler emit its own entry stub; task 6 deleted the external
       # multiboot loader and its build script). This comment used to explain
       # why the runner's preinstalled `as`/`ld` were enough for build_loader.sh's
-      # functional probe — there is no such probe now, on either job. qemu-system
-      # is the whole of the gate's non-coreutils toolchain.
-      - name: Install boot-gate toolchain (qemu-system)
+      # functional probe — there is no such probe now, on either job.
+      # SUB-PROJECT D ADDED THE FIRMWARE IMAGES: L7 and L8 boot a PE32+ EFI
+      # application under edk2, so `ovmf` (OVMF_CODE_4M.fd + VARS, x86_64) and
+      # `qemu-efi-aarch64` (AAVMF_CODE.fd + VARS, arm64) are hard dependencies
+      # of the gate on the same terms as the emulators — the legs report a
+      # counted FAILURE naming every path they tried, never a skip. qemu-system
+      # plus those two firmware packages is the whole of the gate's non-coreutils
+      # toolchain.
+      - name: Install boot-gate toolchain (qemu-system + UEFI firmware)
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq qemu-system-x86 qemu-system-arm
+          sudo apt-get install -y -qq qemu-system-x86 qemu-system-arm ovmf qemu-efi-aarch64
 
       - name: Test suite
         run: |
@@ -412,10 +418,10 @@ jobs:
       # step — visible and attributable — and the fallback (an explicit counted
       # host gate on the x86 leg) goes through review, never through a silent
       # skip.
-      - name: Install boot-gate toolchain (qemu-system)
+      - name: Install boot-gate toolchain (qemu-system + UEFI firmware)
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq qemu-system-x86 qemu-system-arm
+          sudo apt-get install -y -qq qemu-system-x86 qemu-system-arm ovmf qemu-efi-aarch64
 
       - name: Self-compile + tests (everything to debug-kit)
         continue-on-error: true

@@ -22,9 +22,19 @@
 # does — and NO REAL BOOT CHAIN HAS RUN ANY OF THIS: no U-Boot `booti`, no EFI
 # stub, no Android boot.img tooling, no hardware. Real-loader compatibility is
 # sub-project C's design goal; one QEMU is its entire evidence.
+# SUB-PROJECT D ADDED L7 AND L8, and they change what "loader" means again: no
+# `-kernel` and no `-device loader` at all. The artifact is a PE32+ EFI
+# application staged as `EFI/BOOT/BOOTX64.EFI` (or `BOOTAA64.EFI`) on a FAT
+# volume, and the loader is edk2 — OVMF on q35, AAVMF on `virt` — which finds
+# it by the removable-media path and parses the header the compiler emitted.
+# The firmware images are a HARD DEPENDENCY of those two legs, resolved and
+# asserted in their own block below rather than in the tool loop; see the
+# comment there for why absence is still a counted FAILURE and still not a skip.
 # Those two boots existed only as manual runs recorded in Task 3's and Task 4's
-# reports until this file was changed. A result that lives only in a report is
-# one refactor away from being unverified; every one of them is a leg now.
+# reports until this file was changed — and sub-project D's OVMF/AAVMF boots
+# existed only as prose in its Task 2 report until L7/L8. A result that lives
+# only in a report is one refactor away from being unverified; every one of them
+# is a leg now.
 #
 # Discharges the bare-metal-execution debt recorded in prove_no_syscalls.sh's
 # "WHAT A GREEN RUN DOES NOT CLAIM" note: every leg
@@ -179,7 +189,9 @@ trap cleanup EXIT INT TERM
 #   stat      build_image's on-disk size cross-check, L0's capture sizes,
 #             L4's x86 artifact report
 #   sed       build_image's `image:` report parse — the ONLY source of the
-#             entry offset every leg branches to
+#             entry offset every leg branches to — and build_uefi's `uefi:`
+#             one, which is a DIFFERENT line and needs its own expression
+#             (see build_uefi's header)
 #   grep      boot_wait's expect match, every sentinel assertion
 #   head      L1's `-c` log excerpts (one of them on the PASS path, in
 #             L1_no_header_image_refused), L2's and L4's failure excerpts
@@ -2118,6 +2130,568 @@ leg6() {
     fi
 }
 
+# =============================================================================
+# THE UEFI HALF (sub-project D). Everything from here to the rosters is L7/L8.
+# =============================================================================
+# WHAT IS DIFFERENT ABOUT THESE TWO LEGS, in one sentence: L0-L6 hand QEMU an
+# artifact and QEMU is the loader, whereas L7 and L8 hand a FIRMWARE an ESP and
+# edk2 is the loader. Nothing on the command line names an address, an entry
+# offset or even a file — the firmware finds `EFI/BOOT/BOOTX64.EFI` by the
+# removable-media path, parses the PE32+ header the compiler emitted, maps the
+# image and calls it. That is the whole claim of sub-project D, and until this
+# block existed the only record of it was prose in Task 2's report.
+#
+# WHAT A GREEN L7/L8 CLAIMS, and nothing more: a UEFI application built by this
+# compiler loads and prints under QEMU's OVMF (q35) and AAVMF (`virt`) on the
+# machine that ran the gate. NOT real hardware, NOT vendor firmware, NOT Secure
+# Boot — Secure Boot is off in the non-secboot builds selected below, and these
+# artifacts are unsigned.
+#
+# THE FIRMWARE IS A HARD DEPENDENCY, LIKE EVERY OTHER TOOL HERE, but it is
+# resolved here and asserted INSIDE leg7/leg8 rather than in the dependency loop
+# at the top of the file. The reason is scope: the loop's failure exits before
+# L0 runs, and a machine with qemu but without ovmf can still produce every one
+# of L0-L6's results. A missing firmware is still a counted FAILURE naming the
+# paths that were tried — never a skip — it just does not take the other seven
+# legs down with it.
+#
+# TRAPS, ALL MEASURED ON THIS MACHINE, none inherited:
+#
+#   * `-net none` IS REQUIRED. Without it OVMF spends its timeout on PXE before
+#     touching the disk, and every leg here pays for it.
+#   * A FRESH VARS COPY PER RUN. The firmware writes BootOrder and BootNNNN
+#     into the VARS pflash. A shared copy makes each run depend on the one
+#     before it, and the "boot the pristine image, then a mutant" ordering these
+#     legs use is exactly the shape that goes wrong. `uefi_boot` copies one per
+#     tag; the OVMF vars are 4 MiB and the AAVMF vars 64 MiB, ~0.02 s each.
+#   * LANDING IN THE SETUP UI IS COMPATIBLE WITH SUCCESS. A UEFI application
+#     that RETURNS hands control back to BDS, which then runs the next boot
+#     option — UiApp (the setup browser) on a zero return, or the EFI shell on a
+#     non-zero one. The verdict is the SENTINEL, never where the firmware ends
+#     up; the only thing the trailing option is used for is the DONE marker.
+#   * `mmx64.efi` IS A USELESS POSITIVE CONTROL. MokManager exits immediately,
+#     which is indistinguishable from failing to load. The positive control here
+#     is our own sentinel, which prints.
+#
+# THE THING THAT MAKES THE NEGATIVE CONTROLS MEAN ANYTHING — read this before
+# adding a leg. Measured under BOTH firmwares, in this session:
+#
+#     empty ESP                  -> BdsDxe: failed to load Boot0001 …: Not Found
+#     correct app, wrong filename-> BdsDxe: failed to load Boot0001 …: Not Found
+#     genuine `Subsystem 3`      -> BdsDxe: failed to load Boot0001 …: Not Found
+#
+# BYTE-IDENTICAL. "Not loaded" therefore does not distinguish a real rejection
+# from a staging bug, and under any staging defect EVERY negative control here
+# would pass. That is why `uefi_batch_positive` exists and why every control
+# checks it: a rejection is evidence only in a batch where something else got
+# through, and it is an assertion in the harness rather than a note in a
+# comment. The x86 controls that produce `Unsupported` rather than `Not Found`
+# get a second, independent oracle (the status word itself cannot be produced by
+# a missing file) and assert that too — but `Subsystem 3` is not one of them.
+
+# Where the firmware images live. TRIED IN ORDER, AND CODE/VARS ARE PAIRED:
+# mixing an OVMF_CODE from one packaging with an OVMF_VARS from another is a
+# silent way to boot a firmware whose variable store it does not understand.
+# Debian/Ubuntu first because that is what this gate has been measured on.
+UEFI_X86_CODE=""; UEFI_X86_VARS=""
+UEFI_A64_CODE=""; UEFI_A64_VARS=""
+UEFI_X86_TRIED=""; UEFI_A64_TRIED=""
+uefi_pick_firmware() {
+    local pair c v
+    for pair in "$@"; do
+        c="${pair%%|*}"; v="${pair#*|}"
+        if [ -f "$c" ] && [ -f "$v" ]; then echo "$c|$v"; return 0; fi
+    done
+    return 1
+}
+UEFI_X86_TRIED="/usr/share/OVMF/OVMF_CODE_4M.fd+VARS_4M, /usr/share/OVMF/OVMF_CODE.fd+VARS, /usr/share/edk2/ovmf/OVMF_CODE.fd+VARS, /usr/share/qemu/edk2-x86_64-code.fd+edk2-i386-vars.fd"
+if UEFI_X86_PAIR=$(uefi_pick_firmware \
+        "/usr/share/OVMF/OVMF_CODE_4M.fd|/usr/share/OVMF/OVMF_VARS_4M.fd" \
+        "/usr/share/OVMF/OVMF_CODE.fd|/usr/share/OVMF/OVMF_VARS.fd" \
+        "/usr/share/edk2/ovmf/OVMF_CODE.fd|/usr/share/edk2/ovmf/OVMF_VARS.fd" \
+        "/usr/share/qemu/edk2-x86_64-code.fd|/usr/share/qemu/edk2-i386-vars.fd"); then
+    UEFI_X86_CODE="${UEFI_X86_PAIR%%|*}"; UEFI_X86_VARS="${UEFI_X86_PAIR#*|}"
+fi
+UEFI_A64_TRIED="/usr/share/AAVMF/AAVMF_CODE.fd+VARS, /usr/share/AAVMF/AAVMF_CODE.no-secboot.fd+VARS, /usr/share/qemu-efi-aarch64/QEMU_EFI.fd+QEMU_VARS.fd, /usr/share/edk2/aarch64/QEMU_EFI-pflash.raw+vars-template-pflash.raw"
+if UEFI_A64_PAIR=$(uefi_pick_firmware \
+        "/usr/share/AAVMF/AAVMF_CODE.fd|/usr/share/AAVMF/AAVMF_VARS.fd" \
+        "/usr/share/AAVMF/AAVMF_CODE.no-secboot.fd|/usr/share/AAVMF/AAVMF_VARS.fd" \
+        "/usr/share/qemu-efi-aarch64/QEMU_EFI.fd|/usr/share/qemu-efi-aarch64/QEMU_VARS.fd" \
+        "/usr/share/edk2/aarch64/QEMU_EFI-pflash.raw|/usr/share/edk2/aarch64/vars-template-pflash.raw"); then
+    UEFI_A64_CODE="${UEFI_A64_PAIR%%|*}"; UEFI_A64_VARS="${UEFI_A64_PAIR#*|}"
+fi
+
+# THE RUN IS OVER WHEN BDS HAS MOVED PAST OUR BOOT OPTION, OR THE MACHINE HAS
+# FAULTED. This is `<expect>` for every boot below, and getting it wrong is
+# expensive in both directions:
+#   * stopping at the SENTINEL would make `printed, then faulted` unobservable —
+#     the fault text arrives after the sentinel, so a harness that stops on the
+#     sentinel can only ever report RAN. The six outcomes would then be five
+#     with an unreachable case, which is the exact defect the ordering below is
+#     written against.
+#   * stopping only at UiApp burns the full deadline on every rejected boot,
+#     because a rejection falls through to the EFI shell (Boot0002) instead —
+#     measured: 767 ticks against 29 once `failed to load` was added here.
+# `Boot000[^1]` is "any boot option that is not ours"; our app is Boot0001 under
+# both firmwares, and a capture in which Boot0001 never appears at all is a
+# HARNESS_ERROR below rather than a verdict.
+UEFI_DONE_RE='Exception|BdsDxe: failed to load Boot|BdsDxe: loading Boot000[^1]'
+# What a fault looks like. x86_64/OVMF: `!!!! X64 Exception Type - 06(#UD …)`.
+# arm64/AAVMF: `Synchronous Exception at 0x…`. Both measured this session, and
+# `ASSERT` is included because an edk2 assertion is also "the firmware stopped
+# because of us". Checked against clean captures: 0 occurrences of either word
+# in a run that RAN, on both arches.
+UEFI_FAULT_RE='Exception|ASSERT'
+# out-param of uefi_boot: the serial capture of the run it just did.
+UEFI_SER=""
+# The two markers the CURRENT leg's sentinel prints, set by each leg before its
+# first boot. Globals rather than parameters because uefi_control passes them to
+# uefi_verdict on the caller's behalf; declared here so `set -u` catches a leg
+# that forgets to set them instead of a control silently grepping for "".
+UEFI_LIT=""; UEFI_COMP=""
+# The firmware legs get their OWN deadline, saved and restored around each boot
+# by uefi_boot. MEASURED on this machine, from qemu launch to the DONE marker:
+# 1.4 s under OVMF and 5.3 s under AAVMF. The gate-wide 10 s would leave the
+# arm64 leg less than 2x of headroom, and a false-failed POSITIVE leg on a slow
+# runner is the failure mode this gate exists to prevent -- so the firmware
+# boots get 60 s, better than 10x the slower of the two. It costs nothing on the
+# normal path (boot_wait breaks the tick the marker appears).
+UEFI_BOOT_TIMEOUT=60
+UEFI_BOOT_TICKS=1200
+# The batch's positive control. Set by each leg from its FIRST boot — the
+# pristine artifact — and read by every control in that leg. "" until set, so a
+# control that runs before any positive fails closed.
+UEFI_BATCH_POS=""
+
+# Compile a gate program to a UEFI APPLICATION and echo the reported entry RVA
+# (decimal) on stdout.
+#
+# THE `image:` SED AT :474-475 DOES NOT MATCH THIS BUILD, and that is the reason
+# this is a separate function rather than a fifth argument to build_image. The
+# --emit=uefi report line is
+#     uefi: arch=x86_64 entry=4772 filesz=8192 memsz=8192 hdr=4096
+# so `sed -n 's/^image: …/'` yields the empty string, and build_image's own
+# emptiness check would then call it "no parsable line" — fail-closed, but for a
+# reason that has nothing to do with the artifact. Everything build_image
+# asserts is asserted here for the same reasons (see its header): exit 0, a
+# parsable line, and on-disk size == the reported filesz, because the report is
+# printed BEFORE the file is written and codegen ignores file_write's status.
+#
+# `hdr` IS PARSED AND CHECKED TOO. The header region and the payload are the two
+# halves of the geometry Task 2 fixed, and `entry < hdr` would mean the entry
+# point lands inside the PE header — an artifact that cannot run and whose
+# report still looks well-formed.
+build_uefi() {
+    local arch="$1" src="$2" out="$3"
+    local aflag="x86_64"
+    [ "$arch" = "a64" ] && aflag="arm64"
+    local log="$out.rep"
+    rm -f "$out"
+    if ! "$KRC" --arch=$aflag --target=none --emit=uefi "$src" -o "$out" >"$log" 2>&1; then
+        echo "  build_uefi: $KRC exited nonzero for $src (see $log)" >&2
+        return 1
+    fi
+    local entry filesz hdr ondisk
+    entry=$(sed -n 's/^uefi: .* entry=\([0-9][0-9]*\) .*$/\1/p' "$log")
+    filesz=$(sed -n 's/^uefi: .* filesz=\([0-9][0-9]*\) .*$/\1/p' "$log")
+    hdr=$(sed -n 's/^uefi: .* hdr=\([0-9][0-9]*\).*$/\1/p' "$log")
+    if [ -z "$entry" ] || [ -z "$filesz" ] || [ -z "$hdr" ]; then
+        echo "  build_uefi: no parsable 'uefi:' line for $src (see $log)" >&2
+        return 1
+    fi
+    ondisk=$(stat -c%s "$out" 2>/dev/null)
+    if [ "$ondisk" != "$filesz" ]; then
+        echo "  build_uefi: report claims filesz=$filesz but $out is ${ondisk:-ABSENT} B" >&2
+        return 1
+    fi
+    if [ "$entry" -lt "$hdr" ]; then
+        echo "  build_uefi: entry=$entry is inside the ${hdr}-byte header region" >&2
+        return 1
+    fi
+    echo "$entry"
+}
+
+# Stage one artifact on a fresh ESP and boot it under the firmware.
+#   uefi_boot <arch: x86|a64> <artifact> <tag>
+# Returns nonzero if the boot did not happen (boot_run's rule, unchanged), and
+# sets UEFI_SER to the capture either way.
+#
+# ONE STAGING PATH FOR EVERY ARTIFACT IN THIS FILE, and that is load-bearing
+# rather than tidy. The batch's positive control reaches the firmware through
+# exactly these four lines — same directory construction, same filename, same
+# `fat:rw:` drive — so "the positive RAN" is evidence that the staging works for
+# the mutants too. Give a control its own staging and that inference is gone.
+uefi_boot() {
+    local arch="$1" art="$2" tag="$3"
+    PARKED_PC=NOQMPRUN   # see the PARKED_PC declaration above
+    local esp="$WORK/uefi_esp_$tag" ser="$WORK/uefi_$tag.txt"
+    local name="BOOTX64.EFI"
+    [ "$arch" = "a64" ] && name="BOOTAA64.EFI"
+    UEFI_SER="$ser"
+    rm -rf "$esp"
+    mkdir -p "$esp/EFI/BOOT" || return 1
+    cp "$art" "$esp/EFI/BOOT/$name" || return 1
+    local vars="$WORK/uefi_vars_$tag.fd"
+    local sv_t="$BOOT_TIMEOUT" sv_d="$BOOT_DEADLINE_TICKS" rc=0
+    BOOT_TIMEOUT="$UEFI_BOOT_TIMEOUT"; BOOT_DEADLINE_TICKS="$UEFI_BOOT_TICKS"
+    if [ "$arch" = "a64" ]; then
+        if cp "$UEFI_A64_VARS" "$vars"; then
+            boot_run a64 "$ser" "$UEFI_DONE_RE" -m 256 -net none \
+                -drive if=pflash,format=raw,unit=0,readonly=on,file="$UEFI_A64_CODE" \
+                -drive if=pflash,format=raw,unit=1,file="$vars" \
+                -drive format=raw,file=fat:rw:"$esp" || rc=1
+        else
+            rc=1
+        fi
+    else
+        if cp "$UEFI_X86_VARS" "$vars"; then
+            boot_run x86 "$ser" "$UEFI_DONE_RE" -M q35 -m 256 -net none \
+                -drive if=pflash,format=raw,unit=0,readonly=on,file="$UEFI_X86_CODE" \
+                -drive if=pflash,format=raw,unit=1,file="$vars" \
+                -drive format=raw,file=fat:rw:"$esp" || rc=1
+        else
+            rc=1
+        fi
+    fi
+    BOOT_TIMEOUT="$sv_t"; BOOT_DEADLINE_TICKS="$sv_d"
+    return $rc
+}
+
+# THE VERDICT FUNCTION. SIX OUTCOMES, AND THE ORDER IS THE WHOLE DESIGN.
+#   uefi_verdict <serial file> <literal marker> <computed marker>
+#
+# WHY NOT FIVE. The plan asked for five, ordering LOADED_FAULTED before
+# LOADED_SILENT. That ordering is necessary and NOT sufficient: it does not
+# order RAN, and a payload that PRINTS ITS SENTINEL AND THEN FAULTS is exactly
+# the shape a RAN-first verdict scores as success. That shape is not
+# hypothetical — it is how the read-only-section experiment presents on arm64
+# (first line and computed value on the wire, then a Synchronous Exception on
+# the store), and it is L8_control_read_only_section_printed_then_faulted below.
+# PRINTED_THEN_FAULTED is therefore its OWN outcome and is tested FIRST of the
+# three, so it can be absorbed into neither RAN nor LOADED_FAULTED. If you
+# "simplify" this back to five by folding it into either, that control reds —
+# which is the point, and is why it is a control and not a comment.
+#
+# THE HARNESS ERRORS COME BEFORE EVERYTHING because none of the six is
+# interpretable without them:
+#   no capture / empty        — qemu never wrote a byte; nothing ran.
+#   no `BdsDxe:`              — the firmware never reached the boot manager, so
+#                               "our app did not print" says nothing about it.
+#   no `Boot0001`             — BDS never considered the disk. Our app is
+#                               Boot0001 under both firmwares measured here; if
+#                               a future firmware orders the options differently
+#                               this must be loud, not a silent NOT_LOADED.
+#
+# PRINTED_PARTIAL is the seventh name and it is a FAIL BUCKET, not a seventh
+# outcome: the literal reached the wire, the computed value did not, and nothing
+# faulted. No leg expects it, so any occurrence reds. It exists so that shape
+# cannot be filed as LOADED_SILENT (it printed) or as RAN (it did not compute).
+uefi_verdict() {
+    local ser="$1" lit="$2" comp="$3"
+    [ -f "$ser" ] || { echo "HARNESS_ERROR:no-capture"; return 0; }
+    [ -s "$ser" ] || { echo "HARNESS_ERROR:empty-capture"; return 0; }
+    grep -qa 'BdsDxe:' "$ser" || { echo "HARNESS_ERROR:no-bds"; return 0; }
+    grep -qa 'Boot0001' "$ser" || { echo "HARNESS_ERROR:no-boot0001"; return 0; }
+    local sawlit=1 sawcomp=1 sawfault=1
+    grep -qa "$lit"  "$ser" && sawlit=0
+    grep -qa "$comp" "$ser" && sawcomp=0
+    grep -qaE "$UEFI_FAULT_RE" "$ser" && sawfault=0
+    # 1. printed AND faulted — before both of the outcomes that would swallow it.
+    if [ "$sawfault" = 0 ] && { [ "$sawlit" = 0 ] || [ "$sawcomp" = 0 ]; }; then
+        echo PRINTED_THEN_FAULTED; return 0
+    fi
+    # 2. faulted having printed nothing.
+    if [ "$sawfault" = 0 ]; then echo LOADED_FAULTED; return 0; fi
+    # 3. the full sentinel, no fault.
+    if [ "$sawcomp" = 0 ] && [ "$sawlit" = 0 ]; then echo RAN; return 0; fi
+    # 4. some of it, no fault. Nobody expects this; see the header.
+    if [ "$sawlit" = 0 ] || [ "$sawcomp" = 0 ]; then echo PRINTED_PARTIAL; return 0; fi
+    # 5. the firmware said no, or never started the image.
+    if grep -qa 'failed to load Boot0001' "$ser"; then echo NOT_LOADED; return 0; fi
+    grep -qa 'starting Boot0001' "$ser" || { echo NOT_LOADED; return 0; }
+    # 6. loaded, started, and produced nothing.
+    echo LOADED_SILENT; return 0
+}
+
+# FIRST MATCH OF <ere> IN <file>, CR stripped, or the empty string.
+#   uefi_first_match <file> <ere>
+# NO PIPELINE, DELIBERATELY. This script does not set `pipefail` (deliberately:
+# several existing legs pipe into `head`, which closes the pipe and would make a
+# SIGPIPE-killed producer fail the leg), so in a pipeline a failing grep is
+# invisible and the reader gets an empty string with no attribution. Here the
+# grep's status is the only thing that decides, and the CR strip is a parameter
+# expansion rather than a `tr`.
+uefi_first_match() {
+    local m
+    m=$(grep -m1 -aoE "$2" "$1" 2>/dev/null) || { printf '%s' "(no match for $2)"; return 0; }
+    m="${m%%$'\n'*}"
+    printf '%s' "${m//$'\r'/}"
+}
+
+# THE ASSERTION THE WHOLE NEGATIVE HALF RESTS ON. Fails (nonzero) unless this
+# leg's positive control RAN, so a control can refuse to credit a rejection in a
+# batch where nothing got through. See the block comment above for the three
+# byte-identical `Not Found` cases this closes.
+uefi_batch_positive() { [ "$UEFI_BATCH_POS" = RAN ]; }
+
+# One negative control, end to end: patch a copy of the subject, boot it, and
+# require BOTH the batch positive AND the expected verdict.
+#   uefi_control <name> <arch> <src artifact> <tag> <expected verdict> <what> [img_patch specs...]
+# The status-word oracle is separate (uefi_status_is) because only some of these
+# have one.
+uefi_control() {
+    local name="$1" arch="$2" src="$3" tag="$4" want="$5" what="$6"; shift 6
+    local mut="$WORK/uefi_$tag.efi"
+    if ! uefi_batch_positive; then
+        bad "$name" "the batch positive control did NOT run (verdict '$UEFI_BATCH_POS'), so the outcome of '$what' is not evidence -- an empty ESP, a misnamed file and a genuine header rejection are byte-identical on this firmware"
+        return 1
+    fi
+    if ! img_patch "$src" "$mut" "$@"; then
+        bad "$name" "could not patch the artifact ($what) -- the control never ran"
+        return 1
+    fi
+    if ! uefi_boot "$arch" "$mut" "$tag"; then
+        bad "$name" "the boot did not happen (qemu exit=$BOOT_QEMU_RC): '$(head -c 200 "$UEFI_SER.err")'"
+        return 1
+    fi
+    local got
+    got=$(uefi_verdict "$UEFI_SER" "$UEFI_LIT" "$UEFI_COMP")
+    if [ "$got" != "$want" ]; then
+        bad "$name" "$what => verdict $got, wanted $want (capture: $UEFI_SER)"
+        return 1
+    fi
+    return 0
+}
+# The SECOND oracle for the five x86 rejections that produce `Unsupported`. A
+# missing or misnamed file cannot produce that word — it produces `Not Found` —
+# so for those five the status text discriminates a real header rejection from a
+# staging bug on its own, without leaning on the batch positive. `Subsystem 3`
+# is deliberately NOT one of them: it produces `Not Found`, and it is the row
+# that shows why the batch positive has to exist.
+uefi_status_is() { grep -qa "failed to load Boot0001.*: $2" "$1"; }
+
+# =============================================================================
+# L7 — x86_64 UEFI APPLICATION under OVMF (q35). Nine boots: the subject, five
+#      header rejections, two loads that fault, and the read-only-section case
+#      that x86 TOLERATES — which is what makes L8's arm64 twin a controlled
+#      experiment rather than "some mutation broke it".
+#
+#      MEASURED STATUS WORDS, this session, and they are not all the same:
+#        Subsystem 10 -> 3                       : Not Found
+#        Magic 0x20b -> 0x10b                    : Unsupported
+#        Machine 0x8664 -> 0xaa64                : Unsupported
+#        NumberOfRvaAndSizes 16 -> 8             : Unsupported
+#        SizeOfImage 8192 -> 4096                : Unsupported
+#        VirtualSize 1112 -> 1                   : LOADED, then #UD
+#        SizeOfRawData 4096 -> 0                 : LOADED, then #UD
+#
+#      THE FAULT IS `#UD`, NOT `#PF`. The plan said `#PF` for both fault
+#      controls; on this firmware both produce `!!!! X64 Exception Type -
+#      06(#UD - Invalid Opcode)`, because the loader maps a page it copied
+#      nothing into and the guest executes zeros. The rows assert the OUTCOME
+#      (LOADED_FAULTED, i.e. `starting Boot0001` and then a fault) and not the
+#      vector, so a firmware that reports it differently reds on the text of the
+#      capture rather than on a number nothing here derives.
+#
+#      THE HEADER OFFSETS ARE FIXED BY TASK 2's ONE-SECTION LAYOUT (verified
+#      against the artifact this session with an independent PE reader): the
+#      optional header starts at 0x58 and the single section table entry at
+#      0x148. They are constants of THIS emitter, not of PE, and a second
+#      section would move the section-table offsets — which is why the leg
+#      re-reads NumberOfSections off the artifact before it patches anything.
+# =============================================================================
+# PE32+ field offsets in an --emit=uefi artifact, one section, e_lfanew = 0x40.
+UEFI_OFF_NSECTIONS=70       # 0x46 u16
+UEFI_OFF_MACHINE=68         # 0x44 u16
+UEFI_OFF_MAGIC=88           # 0x58 u16
+UEFI_OFF_SIZEOFIMAGE=144    # 0x90 u32
+UEFI_OFF_SUBSYSTEM=156      # 0x9C u16
+UEFI_OFF_NUMRVA=196         # 0xC4 u32
+UEFI_OFF_VIRTUALSIZE=336    # 0x150 u32
+UEFI_OFF_SECTCHARS=364      # 0x16C u32
+UEFI_OFF_SIZEOFRAWDATA=344  # 0x158 u32
+leg7() {
+    echo "--- L7: x86_64 UEFI application under OVMF (q35) ---"
+    UEFI_BATCH_POS=""
+    UEFI_LIT="KRUEFI-X86"; UEFI_COMP="3000000016"
+    if [ -z "$UEFI_X86_CODE" ]; then
+        bad "L7_uefi_x86_boots" "no OVMF firmware found. Tried: $UEFI_X86_TRIED. This gate treats a missing dependency as a FAILURE, never a skip (install ovmf)"
+        return
+    fi
+    cp "$BOOT/uefi_sentinel_x86.kr" "$WORK/uefi_sentinel_x86.kr"
+    local img="$WORK/u7.efi" entry
+    if ! entry=$(build_uefi x86 "$WORK/uefi_sentinel_x86.kr" "$img"); then
+        bad "L7_uefi_x86_boots" "uefi_sentinel_x86.kr did not build as a UEFI application"; return
+    fi
+    # The mutants are anchored on the ARTIFACT, not on the emitter's source: if
+    # this is not a one-section PE32+ with the DOS stub the offsets above assume,
+    # every patch below lands somewhere else and the controls test nothing.
+    local nsec magic
+    nsec=$(mb_u32 "$img" "$UEFI_OFF_NSECTIONS") || nsec="READFAIL"
+    magic=$(mb_u32 "$img" "$UEFI_OFF_MAGIC") || magic="READFAIL"
+    # mb_u32 reads 4 bytes; NumberOfSections and Magic are u16, so mask.
+    if [ "$nsec" = READFAIL ] || [ $(( nsec & 0xFFFF )) != 1 ] \
+       || [ "$magic" = READFAIL ] || [ $(( magic & 0xFFFF )) != 523 ]; then
+        bad "L7_uefi_x86_boots" "the artifact is not the one-section PE32+ these offsets assume (NumberOfSections=$nsec Magic=$magic) -- every control below would patch the wrong bytes"; return
+    fi
+    # ---- the subject, and this leg's positive control -----------------------
+    if ! uefi_boot x86 "$img" "x7_pos"; then
+        bad "L7_uefi_x86_boots" "the boot did not happen (qemu exit=$BOOT_QEMU_RC): '$(head -c 200 "$UEFI_SER.err")'"; return
+    fi
+    UEFI_BATCH_POS=$(uefi_verdict "$UEFI_SER" "$UEFI_LIT" "$UEFI_COMP")
+    if [ "$UEFI_BATCH_POS" = RAN ]; then
+        ok "L7_uefi_x86_boots" "OVMF loaded EFI/BOOT/BOOTX64.EFI off a fat:rw: ESP by the removable-media path and ran it: '$UEFI_LIT' and the computed $UEFI_COMP on COM1, entry RVA $entry (${BOOT_WAITED_TICKS} ticks)"
+    else
+        bad "L7_uefi_x86_boots" "verdict $UEFI_BATCH_POS, wanted RAN (capture: $UEFI_SER)"
+    fi
+    # ---- five header rejections --------------------------------------------
+    # Subsystem: the field that says "this is an EFI application". 3 is the
+    # Windows console subsystem. THE ONE WHOSE STATUS IS `Not Found`, i.e. the
+    # one indistinguishable from an empty ESP -- it is evidence only because
+    # L7_uefi_x86_boots ran in this same batch, through this same staging.
+    if uefi_control L7_control_subsystem_3_not_loaded x86 "$img" x7_sub3 NOT_LOADED \
+            "Subsystem 10 -> 3 (Windows console)" "hex:$UEFI_OFF_SUBSYSTEM:0300"; then
+        ok "L7_control_subsystem_3_not_loaded" "Subsystem := 3 => NOT_LOADED ('$(uefi_first_match "$UEFI_SER" 'failed to load Boot0001[^[:cntrl:]]*')') -- the status is 'Not Found', the SAME text an empty ESP and a misnamed file produce, so the batch positive above is what makes this a rejection and not a staging bug"
+    fi
+    if uefi_control L7_control_magic_pe32_not_loaded x86 "$img" x7_magic NOT_LOADED \
+            "optional header Magic 0x20b (PE32+) -> 0x10b (PE32)" "hex:$UEFI_OFF_MAGIC:0b01"; then
+        if uefi_status_is "$UEFI_SER" "Unsupported"; then
+            ok "L7_control_magic_pe32_not_loaded" "Magic := 0x10b => NOT_LOADED, status 'Unsupported' -- a word no missing file can produce, so this row discriminates on its own"
+        else
+            bad "L7_control_magic_pe32_not_loaded" "NOT_LOADED but not with 'Unsupported': '$(uefi_first_match "$UEFI_SER" 'failed to load Boot0001[^[:cntrl:]]*')'"
+        fi
+    fi
+    if uefi_control L7_control_machine_arm64_not_loaded x86 "$img" x7_mach NOT_LOADED \
+            "Machine 0x8664 (AMD64) -> 0xaa64 (ARM64) on X64 firmware" "hex:$UEFI_OFF_MACHINE:64aa"; then
+        if uefi_status_is "$UEFI_SER" "Unsupported"; then
+            ok "L7_control_machine_arm64_not_loaded" "Machine := 0xaa64 => NOT_LOADED, status 'Unsupported' -- the field is read, and a defaulted Machine would not be"
+        else
+            bad "L7_control_machine_arm64_not_loaded" "NOT_LOADED but not with 'Unsupported': '$(uefi_first_match "$UEFI_SER" 'failed to load Boot0001[^[:cntrl:]]*')'"
+        fi
+    fi
+    # SizeOfOptionalHeader and NumberOfRvaAndSizes must satisfy
+    # `SizeOfOptionalHeader - 112 == NumberOfRvaAndSizes * 8`. Patching the
+    # count alone (16 -> 8) breaks the relation while leaving both fields
+    # individually plausible -- which is what the suite's static row checks and
+    # what this row shows the firmware also checks.
+    if uefi_control L7_control_rva_count_inconsistent_not_loaded x86 "$img" x7_nrva NOT_LOADED \
+            "NumberOfRvaAndSizes 16 -> 8 with SizeOfOptionalHeader still 240" "u32:$UEFI_OFF_NUMRVA:8"; then
+        if uefi_status_is "$UEFI_SER" "Unsupported"; then
+            ok "L7_control_rva_count_inconsistent_not_loaded" "NumberOfRvaAndSizes := 8 (240-112 != 8*8) => NOT_LOADED, status 'Unsupported'"
+        else
+            bad "L7_control_rva_count_inconsistent_not_loaded" "NOT_LOADED but not with 'Unsupported': '$(uefi_first_match "$UEFI_SER" 'failed to load Boot0001[^[:cntrl:]]*')'"
+        fi
+    fi
+    if uefi_control L7_control_size_of_image_too_small_not_loaded x86 "$img" x7_szimg NOT_LOADED \
+            "SizeOfImage 8192 -> 4096, i.e. smaller than the section it must cover" "u32:$UEFI_OFF_SIZEOFIMAGE:4096"; then
+        if uefi_status_is "$UEFI_SER" "Unsupported"; then
+            ok "L7_control_size_of_image_too_small_not_loaded" "SizeOfImage := 4096 (the section ends at 8192) => NOT_LOADED, status 'Unsupported'"
+        else
+            bad "L7_control_size_of_image_too_small_not_loaded" "NOT_LOADED but not with 'Unsupported': '$(uefi_first_match "$UEFI_SER" 'failed to load Boot0001[^[:cntrl:]]*')'"
+        fi
+    fi
+    # ---- two that LOAD and then fault --------------------------------------
+    # These are the pair the plan had misfiled as ignored. They are not
+    # rejections: `starting Boot0001` is on the wire, so the firmware mapped and
+    # entered the image -- with a section whose contents it was told were 1 byte
+    # (or 0 bytes) long. Nothing of ours prints, and the machine faults.
+    if uefi_control L7_control_virtual_size_too_small_faults x86 "$img" x7_vsize LOADED_FAULTED \
+            "VirtualSize -> 1 (the loader copies one byte of a 1112-byte payload)" "u32:$UEFI_OFF_VIRTUALSIZE:1"; then
+        ok "L7_control_virtual_size_too_small_faults" "VirtualSize := 1 => the image LOADS ('starting Boot0001' present) and then faults with nothing of ours on the wire: '$(uefi_first_match "$UEFI_SER" 'X64 Exception Type[^!]*')'"
+    fi
+    if uefi_control L7_control_size_of_raw_data_zero_faults x86 "$img" x7_srd0 LOADED_FAULTED \
+            "SizeOfRawData -> 0 (nothing is copied from the file at all)" "u32:$UEFI_OFF_SIZEOFRAWDATA:0"; then
+        ok "L7_control_size_of_raw_data_zero_faults" "SizeOfRawData := 0 => LOADS and faults: '$(uefi_first_match "$UEFI_SER" 'X64 Exception Type[^!]*')'"
+    fi
+    # ---- the asymmetry that makes L8's printed-then-faulted row a control ----
+    # Same mutation, other arch. Clearing the write bit is fatal on arm64 and
+    # not on x86_64, which is the correction Task 2 made to the derivation
+    # reference ("arm64 needs a writable .text" is too broad -- the image loads
+    # and executes; the abort is on the STORE). Without this row, L8's fault
+    # could be "any change to the characteristics word breaks the load".
+    if uefi_control L7_control_read_only_section_still_runs x86 "$img" x7_ro RAN \
+            "section characteristics 0xE0000020 -> 0x60000020 (write bit cleared)" "u32:$UEFI_OFF_SECTCHARS:1610612768"; then
+        ok "L7_control_read_only_section_still_runs" "write bit cleared => x86_64 STILL RUNS ('$UEFI_LIT' and $UEFI_COMP) -- the same byte change that makes the arm64 twin abort on its store"
+    fi
+}
+
+# =============================================================================
+# L8 — arm64 UEFI APPLICATION under AAVMF (`virt`). Four boots, and the fourth
+#      is the reason the verdict function has six outcomes rather than five.
+#
+#      MEASURED, this session:
+#        pristine                                : RAN  (KRUEFI-A64, 4000000016)
+#        Subsystem 10 -> 3                       : NOT_LOADED, `Not Found`
+#        VirtualSize -> 1                        : LOADED_FAULTED, Synchronous
+#                                                  Exception, nothing printed
+#        characteristics -> 0x60000020           : PRINTED_THEN_FAULTED --
+#          KRUEFI-A64 and 4000000016 on the PL011, THEN
+#          `Synchronous Exception at 0x000000004CB573E0`
+#
+#      THE LAST TWO ARE A PAIR AND MUST BOTH STAY. One faults having printed
+#      nothing and one faults having printed everything; a verdict function that
+#      cannot tell them apart passes exactly one of the two, whichever way it is
+#      wrong. Together they pin the ordering in uefi_verdict from both sides.
+#
+#      WHY THE arm64 LEG IS THE SHORT ONE. Its firmware costs ~5.3 s to reach
+#      the sentinel against OVMF's ~1.4 s (measured, both), so the five
+#      header-rejection controls live on L7 where they are four times cheaper.
+#      What CANNOT move is anything about the write bit: on x86_64 the read-only
+#      section runs (L7's last row), so the printed-then-faulted shape does not
+#      exist there.
+# =============================================================================
+leg8() {
+    echo "--- L8: arm64 UEFI application under AAVMF (virt) ---"
+    UEFI_BATCH_POS=""
+    UEFI_LIT="KRUEFI-A64"; UEFI_COMP="4000000016"
+    if [ -z "$UEFI_A64_CODE" ]; then
+        bad "L8_uefi_a64_boots" "no AAVMF firmware found. Tried: $UEFI_A64_TRIED. This gate treats a missing dependency as a FAILURE, never a skip (install qemu-efi-aarch64)"
+        return
+    fi
+    cp "$BOOT/uefi_sentinel_a64.kr" "$WORK/uefi_sentinel_a64.kr"
+    local img="$WORK/u8.efi" entry
+    if ! entry=$(build_uefi a64 "$WORK/uefi_sentinel_a64.kr" "$img"); then
+        bad "L8_uefi_a64_boots" "uefi_sentinel_a64.kr did not build as a UEFI application"; return
+    fi
+    local nsec machine
+    nsec=$(mb_u32 "$img" "$UEFI_OFF_NSECTIONS") || nsec="READFAIL"
+    machine=$(mb_u32 "$img" "$UEFI_OFF_MACHINE") || machine="READFAIL"
+    if [ "$nsec" = READFAIL ] || [ $(( nsec & 0xFFFF )) != 1 ] \
+       || [ "$machine" = READFAIL ] || [ $(( machine & 0xFFFF )) != 43620 ]; then
+        bad "L8_uefi_a64_boots" "the artifact is not the one-section AArch64 PE32+ these offsets assume (NumberOfSections=$nsec Machine=$machine)"; return
+    fi
+    # ---- the subject, and this leg's positive control -----------------------
+    if ! uefi_boot a64 "$img" "a8_pos"; then
+        bad "L8_uefi_a64_boots" "the boot did not happen (qemu exit=$BOOT_QEMU_RC): '$(head -c 200 "$UEFI_SER.err")'"; return
+    fi
+    UEFI_BATCH_POS=$(uefi_verdict "$UEFI_SER" "$UEFI_LIT" "$UEFI_COMP")
+    if [ "$UEFI_BATCH_POS" = RAN ]; then
+        ok "L8_uefi_a64_boots" "AAVMF loaded EFI/BOOT/BOOTAA64.EFI off a fat:rw: ESP and ran it: '$UEFI_LIT' and the computed $UEFI_COMP on the PL011, entry RVA $entry (${BOOT_WAITED_TICKS} ticks)"
+    else
+        bad "L8_uefi_a64_boots" "verdict $UEFI_BATCH_POS, wanted RAN (capture: $UEFI_SER)"
+    fi
+    # ---- the rejection whose status is the ambiguous one --------------------
+    if uefi_control L8_control_subsystem_3_not_loaded a64 "$img" a8_sub3 NOT_LOADED \
+            "Subsystem 10 -> 3 (Windows console)" "hex:$UEFI_OFF_SUBSYSTEM:0300"; then
+        ok "L8_control_subsystem_3_not_loaded" "Subsystem := 3 => NOT_LOADED ('$(uefi_first_match "$UEFI_SER" 'failed to load Boot0001[^[:cntrl:]]*')') -- measured byte-identical to an empty ESP and to a misnamed file on this firmware, so L8_uefi_a64_boots in this same batch is the entire reason it counts"
+    fi
+    # ---- faulted having printed NOTHING ------------------------------------
+    if uefi_control L8_control_virtual_size_too_small_faults a64 "$img" a8_vsize LOADED_FAULTED \
+            "VirtualSize -> 1" "u32:$UEFI_OFF_VIRTUALSIZE:1"; then
+        ok "L8_control_virtual_size_too_small_faults" "VirtualSize := 1 => LOADS and faults with NOTHING of ours on the wire: '$(uefi_first_match "$UEFI_SER" 'Synchronous Exception at [0-9A-Fa-fx]*')'"
+    fi
+    # ---- faulted having printed EVERYTHING: the six-outcome control ---------
+    # THIS ROW IS WHY uefi_verdict IS NOT FIVE OUTCOMES. Clearing the section's
+    # write bit leaves an image that loads, runs, prints its literal AND its
+    # computed value, and then aborts on `usink = v`. Score RAN before checking
+    # for a fault and this is a green run of a machine that crashed; score
+    # LOADED_FAULTED first and the two arm64 fault rows become the same row.
+    if uefi_control L8_control_read_only_section_printed_then_faulted a64 "$img" a8_ro PRINTED_THEN_FAULTED \
+            "section characteristics 0xE0000020 -> 0x60000020 (write bit cleared)" "u32:$UEFI_OFF_SECTCHARS:1610612768"; then
+        ok "L8_control_read_only_section_printed_then_faulted" "write bit cleared => '$UEFI_LIT' AND $UEFI_COMP reach the wire and THEN '$(uefi_first_match "$UEFI_SER" 'Synchronous Exception at [0-9A-Fa-fx]*')' -- a RAN-first verdict scores this as success and a FAULTED-first one loses it into the row above; both red here"
+    fi
+}
+
 # THE ROSTERS ARE THE SKIP ACCOUNTING, so every check added by B2 Task 5 is
 # listed here. A check that is not on its leg's roster does not become a SKIP
 # when an earlier failure returns past it — it simply vanishes from the tally,
@@ -2128,7 +2702,10 @@ leg6() {
 # loader-shaped controls and gained five, L2 lost one and gained three. What
 # must hold is 0 FAIL and 0 SKIP. Sub-project C moved it twice more — 24 -> 28
 # with L5 (Task 2), 28 -> 36 with L6 (Task 3) — and no check was retired or
-# renamed by either.
+# renamed by either. SUB-PROJECT D moved it once more, 36 -> 49, adding L7's
+# nine x86_64/OVMF checks and L8's four arm64/AAVMF ones; again nothing was
+# retired or renamed, so a run that reports fewer than 49 has lost a check
+# rather than tightened one.
 run_leg leg0 L0_deadboot_x86 L0_deadboot_a64 L0_liveboot_not_flagged L0_alarm_not_a_dead_boot
 run_leg leg1 L1_multiboot_header L1_no_header_image_refused L1_self_boot_sentinel \
              L1_halt_parked L1_control_entry_addr_honoured L1_control_no_return \
@@ -2145,6 +2722,16 @@ run_leg leg6 L6_kernel_boots L6_kernel_load_base_is_header_derived \
              L6_control_image_size_zero_abandons_header \
              L6_control_code0_nop_silent L6_control_code0_off_by_one_word_silent \
              L6_control_no_header_kernel_silent
+run_leg leg7 L7_uefi_x86_boots L7_control_subsystem_3_not_loaded \
+             L7_control_magic_pe32_not_loaded L7_control_machine_arm64_not_loaded \
+             L7_control_rva_count_inconsistent_not_loaded \
+             L7_control_size_of_image_too_small_not_loaded \
+             L7_control_virtual_size_too_small_faults \
+             L7_control_size_of_raw_data_zero_faults \
+             L7_control_read_only_section_still_runs
+run_leg leg8 L8_uefi_a64_boots L8_control_subsystem_3_not_loaded \
+             L8_control_virtual_size_too_small_faults \
+             L8_control_read_only_section_printed_then_faulted
 
 echo ""
 echo "boot gate: $PASS pass, $FAIL FAIL, $SKIP SKIP"

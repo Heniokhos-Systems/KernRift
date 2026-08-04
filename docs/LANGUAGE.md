@@ -1801,9 +1801,19 @@ and AAVMF 2024.02 on `virt`** — emulated, not real hardware or vendor
 firmware, and with no Secure Boot — where each printed its sentinel and
 returned control to the boot manager. An application that returns hands
 control back and the
-firmware then runs its setup UI; that is a normal return, not a failure. The
-gate leg that keeps this true lands in Task 3; until then the boot evidence is
-recorded in the sub-project's report and not re-run by `make test`.
+firmware then runs its setup UI; that is a normal return, not a failure.
+
+**`make test` re-runs those boots.** Task 3 put them in
+`tests/target_none/boot_gate.sh` as legs **L7** (x86_64/OVMF, nine checks) and
+**L8** (arm64/AAVMF, four), so the evidence is a counted test rather than prose
+in a report. Each leg boots the pristine application off a FAT ESP as
+`EFI/BOOT/BOOTX64.EFI` / `BOOTAA64.EFI` and then boots deliberately corrupted
+copies of it: `Subsystem 3`, `Magic 0x10b`, a wrong `Machine`, an inconsistent
+`NumberOfRvaAndSizes` and an undersized `SizeOfImage` are all **refused**, while
+an undersized `VirtualSize` and a zero `SizeOfRawData` **load and then fault**.
+The firmware images (Debian/Ubuntu `ovmf` and `qemu-efi-aarch64`, or the
+equivalent paths on other distributions) are a hard dependency of those two
+legs: absence is a counted failure naming every path tried, never a skip.
 
 ```
 

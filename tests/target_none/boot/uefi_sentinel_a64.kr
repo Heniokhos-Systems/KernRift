@@ -1,0 +1,44 @@
+// Boot-gate UEFI sentinel, arm64 (sub-project D, L8). Booted as
+// EFI/BOOT/BOOTAA64.EFI on an ESP handed to AAVMF, so the observable arrives
+// on the SAME PL011 the firmware is already printing to.
+//
+// TWO MARKERS, AND THE ORDER BETWEEN THEM IS THE POINT — this is not a copy of
+// sentinel_a64.kr with a different constant. The verdict function has to be
+// able to tell "printed, then faulted" from "ran" and from "faulted", and a
+// sentinel with ONE observable cannot produce the middle shape:
+//
+//   KRUEFI-A64   a LITERAL, printed first. It says the image loaded, the
+//                firmware transferred control, and our code reached its first
+//                statement. It proves nothing about arithmetic.
+//   4000000016   a COMPUTED value: a static's initialiser mutated through a
+//                call. The digit string appears NOWHERE in the artifact (the
+//                static holds 4000000007), so a loader echo or an unexecuted
+//                rodata blob cannot fake it.
+//
+// THE STATIC WRITE IS LAST, DELIBERATELY, and it is the fault site L8's
+// printed-then-faulted control uses. With the section's write bit cleared
+// (0x60000020) both markers reach the wire and the store then aborts — which
+// is exactly the shape a verdict function that tests RAN first misfiles as
+// success. Move `usink = v` above the prints and that control degrades into an
+// ordinary "faulted without printing", and the six-outcome ordering in
+// boot_gate.sh's uefi_verdict stops being exercised by anything.
+//
+// It is read back before returning so the store cannot be optimised away, and
+// main returns 0: a non-zero return makes BDS treat the boot option as failed
+// and fall through to the next one, which changes the firmware's own trailing
+// output (measured: `return usink` => Boot0002 "EFI Internal Shell" instead of
+// Boot0000 "UiApp"). The verdict never reads that, but the DONE marker does.
+import "../std/uart_pl011.kr"
+static uint64 useed = 4000000007
+static uint64 usink = 0
+fn ustamp(uint64 v) -> uint64 { return v + 9 }
+fn main() -> uint64 {
+    pl011_init()
+    println_str("KRUEFI-A64")
+    uint64 v = ustamp(useed)
+    print(v)
+    println_str("")
+    usink = v
+    if usink != v { return 1 }
+    return 0
+}
