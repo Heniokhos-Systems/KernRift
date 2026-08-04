@@ -217,8 +217,9 @@ gate1() {
     #      not assumed: `git show $TN_BASE:src/main.kr | grep 'emit_str, "uefi"'`
     #      matches nothing, and the same for "image".
     #      What covers them meanwhile: uefi_pe_header_fields_* in the suite
-    #      (static field assertions) and boot_gate.sh L7/L8 (thirteen firmware
-    #      boots). ADD BOTH HERE THE NEXT TIME TN_BASE MOVES PAST THEM -- that
+    #      (static field assertions) and boot_gate.sh L7/L8 (FOURTEEN firmware
+    #      boots: 10 on L7, 4 on L8 -- thirteen was right at c4687c6 and
+    #      stopped being right at a0eed73, which added L7's tenth row). ADD BOTH HERE THE NEXT TIME TN_BASE MOVES PAST THEM -- that
     #      is the only thing standing in the way, and this note exists so the
     #      omission is a deferral rather than a gap nobody wrote down.
     for a in x86_64 arm64; do

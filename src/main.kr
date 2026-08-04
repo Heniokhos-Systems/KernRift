@@ -4216,10 +4216,28 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
         // SizeOfCode, AddressOfEntryPoint, SizeOfImage, the section's
         // VirtualSize and its SizeOfRawData. Three of the five are boot
         // oracles rather than bookkeeping — a VirtualSize that is too small
-        // and a SizeOfRawData of 0 each raise a loud #PF naming EntryPoint=,
-        // and an AddressOfEntryPoint that is anything but the real entry
-        // either #PFs or, in the one realistic case (entry == section start),
-        // runs the wrong code silently.
+        // and a SizeOfRawData of 0 each raise a loud fault whose dump names
+        // EntryPoint= and ImageBase=, and the two out-of-payload
+        // AddressOfEntryPoint values measured below also fault. NOT A
+        // UNIVERSAL: an entry landing on some other valid instruction
+        // boundary INSIDE the payload is neither measured nor excepted, and
+        // would run the wrong code rather than fault. The one case measured
+        // to be silent is entry == section start.
+        //
+        // THE VECTOR IS #UD, AND THIS COMMENT SAID #PF TWICE. Measured on
+        // OVMF 2024.02, four separate defects, all
+        // `Exception Type - 06(#UD - Invalid Opcode)` after
+        // `starting Boot0001`: VirtualSize := 1; SizeOfRawData := 0;
+        // AddressOfEntryPoint moved into the zero padding (0x7000); and
+        // AddressOfEntryPoint moved past SizeOfImage (0x100000). Not #PF in
+        // any of them — the loader maps a page it copied (almost) nothing
+        // into and the guest executes zeros, so the CPU meets an invalid
+        // opcode before it meets an unmapped page. The silent case is
+        // measured too, as boot-gate L7_control_entry_at_section_start_silent.
+        // The wrong vector came from the derivation reference, reached three
+        // files, was corrected in boot_gate.sh and then in format_pe.kr — and
+        // survived HERE, inside the same commit whose message claimed the
+        // sweep was done. Both instances are named in that history on purpose.
         //
         // AddressOfEntryPoint IS entry_off UNCONVERTED, because the delta-0
         // geometry makes file offset == RVA. That is stated as an identity

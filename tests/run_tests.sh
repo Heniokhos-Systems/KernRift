@@ -8322,11 +8322,33 @@ T6_MODE_ROWS="0:t6_emit_elfexe_tnone 1:t6_emit_macho_tnone 2:t6_emit_pe_tnone 3:
 TOTAL=$((TOTAL + 1))
 T6_MODES_SRC=$(grep -oE 'emit_mode = [0-9]+' "$DIR/../src/main.kr" | grep -oE '[0-9]+$' | sort -un | tr '\n' ' ')
 T6_MODES_TBL=$(for p in $T6_MODE_ROWS; do echo "${p%%:*}"; done | sort -un | tr '\n' ' ')
+# The NAME half, which the first version of this check parsed and then threw
+# away -- so it printed "each with a named row" while deleting the real
+# uefi row left it green. A roster entry now has to point at a row that
+# EXISTS, and "exists" means an INVOCATION, not a mention: the name must
+# appear either as `t6_builds "<name>"` / `t6_refuses "<name>"` or as the
+# `"  <name>: PASS` line of a hand-rolled row.
+#
+# THE FIRST ATTEMPT AT THIS WAS "the name occurs on some line other than the
+# T6_MODE_ROWS line", AND IT WAS DEFEATED BY THIS VERY COMMENT -- the red
+# experiment deleted the uefi row and the check stayed green, because the
+# comment above named it. A check that a prose mention can satisfy is the
+# same class of defect it exists to catch, which is why it is anchored to the
+# call syntax now and why the offending word is not repeated here.
+T6_NOROW=""
+for p in $T6_MODE_ROWS; do
+    t6_rn="${p#*:}"
+    grep -qE "^t6_(builds|refuses) \"$t6_rn\"|\"  $t6_rn: PASS" "$DIR/run_tests.sh" \
+        || T6_NOROW="$T6_NOROW $t6_rn"
+done
 if [ -z "$T6_MODES_SRC" ]; then
     echo "FAIL: t6_emit_table_covers_every_mode (could not read any 'emit_mode = N' assignment out of src/main.kr -- the derivation broke, which would make this check vacuous)"
     FAIL=$((FAIL + 1))
+elif [ -n "$T6_NOROW" ]; then
+    echo "FAIL: t6_emit_table_covers_every_mode (T6_MODE_ROWS names rows that do not exist in this file:$T6_NOROW -- the roster is a promise, not the coverage)"
+    FAIL=$((FAIL + 1))
 elif [ "$T6_MODES_SRC" = "$T6_MODES_TBL" ]; then
-    PASS=$((PASS + 1)); echo "  t6_emit_table_covers_every_mode: PASS ($(echo "$T6_MODES_TBL" | wc -w | tr -d ' ') modes, each with a named row)"
+    PASS=$((PASS + 1)); echo "  t6_emit_table_covers_every_mode: PASS ($(echo "$T6_MODES_TBL" | wc -w | tr -d ' ') modes, each naming a row that exists)"
 else
     echo "FAIL: t6_emit_table_covers_every_mode (src/main.kr assigns emit_mode values [$T6_MODES_SRC]; this block's roster covers [$T6_MODES_TBL]. Add the missing mode's row to block 3 and its entry to T6_MODE_ROWS)"
     FAIL=$((FAIL + 1))
@@ -9077,9 +9099,22 @@ rm -f /tmp/krc_uez_$$
 #        THE THREE FIELDS THAT ARE NOT SELF-EVIDENT, and why each is asserted
 #        against a DERIVED value rather than a literal:
 #          * AddressOfEntryPoint is compared to the `entry=` the compiler
-#            REPORTS, not to a constant. A header patched from a stale
-#            variable, or an entry resolved before the header region was
-#            reserved, makes those two disagree; no literal can see that.
+#            REPORTS, not to a constant -- and this clause used to claim a
+#            discrimination the comparison CANNOT make. It cannot see a wrong
+#            entry VALUE: main.kr hands `entry_off` to patch_uefi_headers and
+#            prints THAT SAME VARIABLE a few lines later with no reassignment
+#            in between, so one bad entry_off moves both sides together and
+#            this row stays green. A literal would be no better -- every
+#            source in this block puts its entry at payload offset 0, so the
+#            reported 4096 is also the value the "entry at section start"
+#            defect produces.
+#            What the comparison DOES prove is that the patch landed at the
+#            right OFFSET among patch_uefi_headers' five patch_u32 targets,
+#            and that the report line still describes the artifact on disk.
+#            THE ENTRY VALUE IS COVERED, JUST NOT HERE: boot-gate L7 boots an
+#            application whose entry is 4772, and
+#            L7_control_entry_at_section_start_silent boots 4096 and shows it
+#            loads, runs and says nothing.
 #          * VirtualSize is compared to the size of the --emit=image artifact
 #            for the same source -- i.e. the true payload length. The
 #            derivation reference re-classified "VirtualSize too small" from
@@ -9505,9 +9540,16 @@ awk '/^#### UEFI applications/{s=1;print;next} s&&/^#/&&!/^##### /{exit} s{print
 TOTAL=$((TOTAL + 1))
 uefi_doc_miss=""
 [ -s "$UEFI_SEC" ] || uefi_doc_miss=" the-section-itself"
-grep -qF -- '--target=none' "$UEFI_SEC" || uefi_doc_miss="$uefi_doc_miss target-none-requirement"
-grep -qF -- '--arch=' "$UEFI_SEC" || uefi_doc_miss="$uefi_doc_miss explicit-arch-requirement"
-grep -qF -- '4096' "$UEFI_SEC" || uefi_doc_miss="$uefi_doc_miss page-congruence"
+# PROSE ONLY for the three tokens below. As shipped they were each satisfied
+# FIRST by the section's own example command and sample report line -- which
+# are fenced code, not documentation of the requirement -- so deleting every
+# explanatory paragraph left them green. Stripping the fences makes each one
+# assert that the requirement is actually WRITTEN DOWN somewhere.
+UEFI_PROSE=/tmp/krc_uefi_prose_$$
+awk '/^```/{f=!f;next} !f' "$UEFI_SEC" > "$UEFI_PROSE"
+grep -qF -- '--target=none' "$UEFI_PROSE" || uefi_doc_miss="$uefi_doc_miss target-none-requirement"
+grep -qF -- '--arch=' "$UEFI_PROSE" || uefi_doc_miss="$uefi_doc_miss explicit-arch-requirement"
+grep -qF -- '4096' "$UEFI_PROSE" || uefi_doc_miss="$uefi_doc_miss page-congruence"
 # Task 2 added the header. Subsystem 10 is the one field with no runner-up --
 # 11 and 12 are valid EFI subsystems and BDS still refuses them -- so the
 # manual has to name it, and the WRITE bit is the one that separates an arm64
@@ -9519,6 +9561,23 @@ grep -qF -- 'WRITE'     "$UEFI_SEC" || uefi_doc_miss="$uefi_doc_miss writable-te
 # section must carry an explicit statement of how far the evidence goes,
 # because every other paragraph in it reads like a completed feature.
 grep -qF -- 'Status' "$UEFI_SEC" || uefi_doc_miss="$uefi_doc_miss status-statement"
+# ...AND THE QUALIFICATION ON IT, WHICH NOTHING GUARDED UNTIL NOW. The row
+# above asserts that a Status statement EXISTS; it said nothing about what the
+# statement claims. Measured by the whole-branch review: reverting "QEMU's
+# OVMF ... emulated, not real hardware" back to "run under real firmware" --
+# the EXACT drift Task 2's review already had to catch by hand once in this
+# sub-project -- left this row GREEN. The honesty bound is the sentence the
+# whole sub-project answers to, so it gets a check and not a convention.
+grep -qF -- 'emulated'    "$UEFI_PROSE" || uefi_doc_miss="$uefi_doc_miss emulation-qualifier"
+grep -qF -- 'QEMU'        "$UEFI_PROSE" || uefi_doc_miss="$uefi_doc_miss names-the-emulator"
+grep -qF -- 'Secure Boot' "$UEFI_PROSE" || uefi_doc_miss="$uefi_doc_miss secure-boot-limit"
+# The negative half. "real firmware" is allowed ONLY inside a negation, so
+# "does not claim real firmware" passes and "runs under real firmware" reds.
+# Written as "some matching line carries no negation" rather than a blanket
+# ban, because the honest sentence and the dishonest one share the phrase.
+if grep -- 'real firmware' "$UEFI_PROSE" | grep -qvE 'not |no |never '; then
+    uefi_doc_miss="$uefi_doc_miss unqualified-real-firmware-claim"
+fi
 if [ -z "$uefi_doc_miss" ]; then
     PASS=$((PASS + 1)); echo "  uefi_docs_section_intact: PASS (section present, $(wc -l < "$UEFI_SEC" | tr -d ' ') lines)"
 else
@@ -9526,7 +9585,7 @@ else
     FAIL=$((FAIL + 1))
 fi
 
-rm -f "$HD_HELP" "$HD_SEC" "$HD_LINE" "$HD_SRC" "$IHDR_SEC" "$UEFI_SEC"
+rm -f "$HD_HELP" "$HD_SEC" "$HD_LINE" "$HD_SRC" "$IHDR_SEC" "$UEFI_SEC" "$UEFI_PROSE"
 
 # --- --emit=image EMISSION + the `image:` report line (sub-project B1, T5) ---
 #

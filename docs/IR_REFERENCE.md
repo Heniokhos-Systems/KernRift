@@ -120,7 +120,7 @@ nothing, i.e. that mode was already using the legacy backend.
 | **`--emit=lkm`** | **legacy** | byte-identical with and without `--legacy` |
 | `--emit=image`, `--emit=uefi` | **IR** | the gate excludes only modes 3 and 7; the usual "differs from `--legacy`" evidence is *unavailable* here — both require `--target=none`, and `--legacy` is refused under it (`t6_legacy_tnone_*`), so there is no legacy build to diff against |
 | `--arch=riscv32`, `--arch=xtensa` (any emit mode) | **IR** | no legacy backend exists for these arches; `--legacy` is a silent no-op |
-| `--emit=ir` | neither — lowering only | `src/main.kr:2734`, exits before codegen |
+| `--emit=ir` | neither — lowering only | the `if emit_mode == 6` block in `compile()`, `src/main.kr` — exits before codegen |
 
 This table is per **emit mode** and all ten are now listed. It named six of
 them for a while: `--emit=image` (8) and `--emit=uefi` (9) were both missing,
@@ -128,12 +128,20 @@ and the second row's "differs from `--legacy`" evidence *cannot* be produced
 for either of them, so adding them by pattern-matching the rows above would
 have written a claim nobody could check.
 
-The gate is one condition, in two places:
+The gate is one condition, in two places — `grep -n 'emit_ir_mode != 0 && arch =='
+src/main.kr` finds both:
 
 ```
-src/main.kr:3165  if emit_ir_mode != 0 && arch == 0 && emit_mode != 3 && emit_mode != 7 {
-src/main.kr:3175  } else if emit_ir_mode != 0 && arch == 1 && emit_mode != 3 && emit_mode != 7 {
+if emit_ir_mode != 0 && arch == 0 && emit_mode != 3 && emit_mode != 7 {
+} else if emit_ir_mode != 0 && arch == 1 && emit_mode != 3 && emit_mode != 7 {
 ```
+
+**No line numbers here, deliberately.** The three that used to be in this
+section pointed at neither this tree nor its parent: they were off by exactly
++9 from the parent, i.e. measured against an intermediate working state and
+never re-checked — by the same commit that deleted line numbers from
+`src/main.kr` on the grounds that named variables do not rot. Re-deriving them
+would only reset the clock.
 
 `emit_mode == 3` is `--emit=obj`, `emit_mode == 7` is `--emit=lkm`. The
 in-source comment says why: *"skip for `--emit=obj` and `--emit=lkm`; both
@@ -155,7 +163,10 @@ rows alone will never exercise the PE or Mach-O header emitters.
 ### `--emit=ir` is pre-optimization
 
 `ir_dump()` is called directly after `ir_lower_function()` with **no
-`ir_optimize()` in between** (`src/main.kr:2387`–`2389`). So `--emit=ir`
+`ir_optimize()` in between** — the two calls are adjacent inside the
+`if emit_mode == 6` block in `compile()`, `src/main.kr`. (The claim is true;
+the `:2387`–`2389` that used to be cited here was not, for the same reason as
+the three above. Re-checked against the block itself.) So `--emit=ir`
 shows you what the lowering produced, never what the optimizer did. Ops the
 optimizer creates (`IR_ADD_IMM`, `IR_MUL_IMM`, `IR_LEA_BIS`, `IR_ROR`,
 `IR_SHL_IMM`, `IR_LOAD_BIS`, `IR_STORE_BIS`, the riscv `*_IMM` family)

@@ -2306,8 +2306,11 @@ All ten `--emit=` modes, and the two formats that are reached by other flags:
 | UEFI application | `--emit=uefi` | PE32+ image firmware loads and enters — needs `--target=none` |
 | ESP32 flash image | `--arch=xtensa --freestanding --target=esp32` | Not an `--emit=` mode: the machine target selects it |
 
-The last four have no place on a hosted OS, and the two bare-metal `--emit=`
-modes **require** `--target=none` rather than merely accepting it.
+The last **three** have no place on a hosted OS, and the two bare-metal
+`--emit=` modes **require** `--target=none` rather than merely accepting it.
+`--emit=ir` is not one of them: it is a text dump and runs perfectly well
+hosted (`krc --arch=x86_64 --target=linux --emit=ir prog.kr` exits 0 and
+prints the IR).
 
 A `.krbo` fat binary packs up to 8 platform slices (Linux x86_64, Linux
 ARM64, Windows x86_64, Windows ARM64, macOS x86_64, macOS ARM64, Android
