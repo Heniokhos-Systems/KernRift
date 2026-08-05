@@ -1482,7 +1482,7 @@ krc <file.kr> --target=android -o out
 #   lkm                                                 → Linux kernel module (.ko) — see docs/LKM.md
 #   asm                                                 → annotated assembly listing (to -o path)
 #   ir                                                  → SSA IR dump per function (to stdout)
-#   image                                               → raw flat binary, no container (bare metal; --image-header prefixes an arm64 boot header)
+#   image                                               → raw flat binary, no container (bare metal; --image-header prefixes an arm64 boot header; --reset-vector selects the x86_64 QEMU -bios form — flag surface only today, see below)
 #   uefi                                                → UEFI application (PE32+) that firmware loads and enters directly
 krc <file.kr> --emit=pe -o out.exe
 krc <file.kr> --emit=macho -o out
@@ -1709,6 +1709,86 @@ start it. Everything below is a limit of *that evidence*.
   can be refused for an overlap the real load makes irrelevant, or accepted
   into one it creates. Set it to where you actually expect the image to land
   and treat that refusal as advisory.
+
+#### The reset-vector form (`--reset-vector`)
+
+```
+krc prog.kr --target=none --arch=x86_64 --emit=image --reset-vector \
+    --stack-top=0x90000 -o bios.bin
+qemu-system-x86_64 -bios bios.bin          # and nothing else
+```
+
+**Status: flag surface only.** This section documents what `--reset-vector`
+accepts and refuses today. It does **not** yet produce a bootable artifact —
+the reset-vector stage itself (the code that actually reaches long mode and
+runs the payload) is a separate, later piece of work. Right now the flag
+exists, is validated, and a build that passes validation succeeds and writes
+an artifact — but that artifact is today's ordinary flat payload with no
+reset-vector stage in front of it, not the fixed-size, `-bios`-bootable image
+this form is for. Treat everything below as the contract the flag surface
+holds to, not as evidence the boot form works.
+
+`--reset-vector` is x86_64-only and is **unrelated to `--stack-top=`'s
+entry stub above**: it does not reuse, extend, or modify the multiboot
+header + long-mode trampoline `--stack-top=` alone opts into, and building
+with both present never emits that trampoline. What the two flags share is
+only the underlying value — `--reset-vector` still reads the `--stack-top=`
+number, for the stack pointer its own (future) startup code will set — not
+the stub that number otherwise gates.
+
+This form is for `qemu-system-x86_64 -bios`: QEMU maps the file so its last
+byte sits at the top of the 32-bit address space and the CPU resets into it
+directly, with no loader, no multiboot header, and no `-kernel` convenience
+in between. Because of that, the geometry differs from every other
+`--emit=image` form in three ways this flag surface already enforces:
+
+* **`--load-addr=` is refused, not merely unnecessary.** A `-bios` reset
+  vector has no loader to hand an address to, and measurement backs this up:
+  a plain `--emit=image` x86_64 payload is byte-identical whether
+  `--load-addr=` says `0x100000` or `0x20000000`. There is nothing for the
+  flag to choose here, so it is refused rather than silently ignored.
+* **`--stack-top=` is required, with no default — same rule as
+  `--stack-top=` itself states, extended to a form that cannot fall back to
+  "no stub, whatever SP reset left behind."** This form's startup code will
+  always set the stack from this value; an unset stack means "no value,"
+  never "guess one."
+* **`--stack-top=` has its own x86_64 range rule, wider than `--stack-top='s
+  existing one.** The existing self-boot trampoline (above) keeps its
+  identity-map page tables at physical `0x1000`–`0x4000`. The reset-vector
+  form's own future page tables need more room — `0x1000`–`0x7000` — so a
+  stack top whose first push (the stack grows down, so the first push writes
+  the eight bytes *below* the stack top — same convention as the existing
+  rule) would land in that wider band is refused: at most `0x1000`, or at
+  least `0x7008`. This bound is checked today, from the flag value alone.
+
+**Refused today, each with its own message:**
+
+| condition | why |
+|---|---|
+| `--arch` other than `x86_64` | arm64 resets directly into AArch64 state; riscv32/xtensa already have raw paths via `--freestanding` |
+| `--target` other than `none` | same rule every `--emit=image` build follows — no hosted OS in a flat image |
+| `--emit` other than `image` | the flag selects a form of the flat image and needs one to select |
+| `--stack-top=` absent | no default stack, ever |
+| `--load-addr=` given | measured meaningless for this form (above) |
+| `--stack-top=`'s first push lands in `0x1000`–`0x7000` | this form's own, wider page-table band |
+
+**Not yet checked, and known not to be:** a payload that will not fit in the
+fixed 64 KiB this form's file size is pinned to. That check needs the
+payload's compiled length, which does not exist at the point these flags are
+validated — it exists only after code generation has run, alongside the
+reset-vector stage this section already says is not built yet. Until both
+land together, a large program compiles under `--reset-vector` without
+complaint rather than being refused; it simply is not yet the artifact this
+form is for.
+
+**What a future green result will claim, and what it will not.** Once the
+reset-vector stage exists and its own boot leg passes: *a reset-vector image
+built by `krc` alone reaches 16-bit real mode, 32-bit protected mode and
+64-bit long mode, and runs its payload, under QEMU on one machine.* It will
+**not** claim real hardware, real firmware, or any BIOS other than QEMU's
+`-bios` mapping behaviour — which the whole geometry above depends on. That
+bound holds now, while there is nothing to boot, and it will still hold once
+there is.
 
 #### UEFI applications (`--emit=uefi`)
 

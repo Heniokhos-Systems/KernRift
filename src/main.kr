@@ -3108,8 +3108,26 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
     // "special-case Windows/macOS, ELSE fall through to POSIX", so a
     // bare-metal condition phrased as an OS test is the shape that silently
     // inherits Linux. No --stack-top => no stub => bytes unchanged.
+    //
+    // && reset_vector_set == 0 (sub-project E, Task 1): stack_top_set is
+    // OVERLOADED. Under B1/B2 its presence gates emission of THIS stub, B2's
+    // multiboot header + 32->64 trampoline. Under --reset-vector the value is
+    // still wanted (Task 2's own, unrelated 16->32->64 stage reads stack_top
+    // directly for its rsp), but this stub must NOT fire -- E's spec keeps
+    // "no change to the multiboot path B2 shipped" true precisely by never
+    // calling emit_x86_image_stub from the reset-vector path (design spec
+    // S3(c)). Without this exclusion, --reset-vector --stack-top=0x90000
+    // would silently grow B2's multiboot header onto the front of a file that
+    // is also supposed to start with the reset-vector stage at offset 0 --
+    // two file-offset-0 constructs fighting for the same bytes. This is the
+    // ONE condition Task 1 Step 5 is about; the arm64 twin four lines below
+    // needs no such guard because reset_vector_set != 0 already forces
+    // arch == 0 (refused otherwise, in the --emit=image validation above) --
+    // confirmed, not assumed: img_raw_reset_vector_and_arm64_refused in
+    // tests/run_tests.sh pins that the arch==1 combination is refused before
+    // reaching this function at all.
     uint64 x86_stub_on = 0
-    if img_raw != 0 && arch == 0 && stack_top_set != 0 {
+    if img_raw != 0 && arch == 0 && stack_top_set != 0 && reset_vector_set == 0 {
         x86_stub_on = 1
         emit_x86_image_stub(load_addr, stack_top)
     }
@@ -3326,6 +3344,16 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
     // is a separate fact from value, and 0xFFFFFFFF is already spoken for by
     // fn_lookup and find_main_offset. img_stub_off is meaningless while
     // img_stub_set is 0.
+    // NO `&& reset_vector_set == 0` HERE, UNLIKE THE x86_64 GATE ABOVE --
+    // deliberately, because it is unreachable rather than merely unwanted.
+    // --reset-vector is refused for any arch other than x86_64 in the
+    // --emit=image validation above, so reset_vector_set != 0 can never
+    // co-occur with arch == 1 at this point in the function; adding the
+    // guard here would be a no-op that invites a reader to believe arm64
+    // reset-vector is a real, merely-excluded case (sub-project E, Task 1
+    // Step 5 — "confirm that rather than assuming it": confirmed by
+    // img_refuses reset_vector_requires_x86_64 in tests/run_tests.sh, which
+    // pins the arch==1 combination as refused before compile() runs at all).
     uint64 img_stub_off = 0
     uint64 img_stub_set = 0
     if img_raw != 0 && arch == 1 && stack_top_set != 0 {
@@ -4151,7 +4179,29 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
         // Both stay gated on the stub actually being emitted, like the
         // address-only half: a B1-style blob loaded by somebody else's loader
         // gets its SP from that loader and is subject to neither.
-        if stack_top_set != 0 {
+        //
+        // && reset_vector_set == 0 (sub-project E, Task 1): BOTH checks below
+        // assume `img_end = load_addr + img_size` -- the B1/B2 geometry where
+        // the whole file is the program, loaded wherever --load-addr says.
+        // --reset-vector is not that geometry: --load-addr is refused
+        // outright (measured meaningless, design spec S8 Q2), the file is a
+        // fixed 65536 bytes regardless of img_size, and the payload this
+        // computation would call "the image" is copied to a fixed physical
+        // address (0x100000) that has nothing to do with load_addr (which is
+        // 0 here, since the flag is refused). Left ungated, a large payload
+        // under --reset-vector could trip the 1 GiB check or the
+        // stack-vs-image check against a meaningless img_end, and the fit
+        // message ends "...or drop --stack-top and boot it with a loader of
+        // your own" -- wrong advice under a flag that REQUIRES --stack-top.
+        // The real equivalents for this geometry are E's own two refusals:
+        // the 0x1000-0x7000 page-table overlap (checked below, at parse
+        // time, since it needs only the flag value) and the
+        // 0x100000..+PAYLEN payload overlap plus the 64 KiB fit (both
+        // deferred to Task 2's finalize step, because PAYLEN -- the copied
+        // payload's length -- is not known until codegen has run; see
+        // reset_vector_payload_too_large in tests/run_tests.sh, left
+        // deliberately red).
+        if stack_top_set != 0 && reset_vector_set == 0 {
             uint64 img_end = load_addr + img_size
             if arch == 0 && img_end > 1073741824 {
                 uint64 ie_1g = "error: the image does not fit under the x86_64 self-boot trampoline's identity map: the map is a single 512-entry page directory of 2 MiB pages and covers exactly the first 1 GiB, and this image ends past it. Lower --load-addr, or drop --stack-top and boot it with a loader of your own\n"
@@ -6129,6 +6179,25 @@ static uint64 stack_top_set = 0
 // this flag and is unaffected by it.
 static uint64 image_header_set = 0
 
+// --reset-vector state (sub-project E). A bare boolean, like --image-header --
+// no value to parse. Requires --emit=image, --arch=x86_64, --target=none and
+// --stack-top= (all validated where the flag is parsed below); refuses
+// --load-addr= (measured meaningless for this form -- spec E S8 Q2: the
+// x86_64 --emit=image payload is byte-identical at --load-addr=0x100000 and
+// 0x20000000, because the reset-vector form's payload always lands at the
+// fixed physical address 0x100000, never at a user-chosen one).
+//
+// stack_top_set is READ but its GATE MEANING IS NOT REUSED: under B1/B2,
+// stack_top_set != 0 means "emit B2's multiboot stub". Under --reset-vector
+// it means something different -- "rsp for the reset-vector stage's own
+// trampoline, which Task 2 emits" -- so every site that gates stub emission
+// on stack_top_set alone must also exclude reset_vector_set (Task 1 Step 5).
+// Task 1 emits no stage bytes; it only makes the flag exist, refuses the six
+// wrong invocations, and stops B2's stub from firing when this is set. The
+// stack VALUE Task 2 needs is exactly stack_top, already parsed above --
+// nothing new to store for it.
+static uint64 reset_vector_set = 0
+
 // Machine target (--target=esp32): 0 = none, 1 = ESP32 (Xtensa LX6 esp-image
 // at ESP32 load addresses). Orthogonal to target_os — --target= is overloaded:
 // OS names set target_os, machine names set this. Only meaningful with
@@ -6532,6 +6601,15 @@ fn main() {
                 // itself. Validated below; the 64 bytes it turns on are
                 // emitted from the `a64hdr_on` block on the emit_mode 8 path.
                 image_header_set = 1
+            } else if str_eq_full(arg, "--reset-vector") != 0 {
+                // No value to parse -- same V7 reason --image-header's arm
+                // comments above give: without an explicit arm here,
+                // --reset-vector falls through to the final
+                // `else { input_path = arg }` and dies with "cannot open
+                // '--reset-vector': file not found" instead of naming
+                // itself. Validated below, alongside --emit=image's other
+                // flags; the stage bytes it opts into are Task 2's.
+                reset_vector_set = 1
             } else if str_eq_full(arg, "-c") != 0 {
                 emit_set = 1
                 uefi_set = 0
@@ -6670,6 +6748,8 @@ fn main() {
                 write(1, h_st, str_len(h_st))
                 uint64 h_ih = "  --image-header            prefix the 64-byte arm64 Linux Image header (magic 0x644d5241) so a loader can boot the artifact from its first byte; requires --emit=image, --arch=arm64 and --stack-top=\n"
                 write(1, h_ih, str_len(h_ih))
+                uint64 h_rv = "  --reset-vector            x86_64 QEMU -bios reset-vector form: fixed 64 KiB, entered directly with no loader; requires --arch=x86_64, --target=none and --stack-top=, refuses --load-addr=; flag surface only today, no stage bytes emitted yet\n"
+                write(1, h_rv, str_len(h_rv))
                 write(1, "  -c                        shorthand for --emit=obj\n", 53)
                 write(1, "  -o <path>                 output path\n\n", 41)
 
@@ -6969,12 +7049,57 @@ fn main() {
             write(2, im_xt, str_len(im_xt))
             exit(1)
         }
-        if load_addr_set == 0 {
+        // --reset-vector (sub-project E, Task 1): three refusals of its own,
+        // checked here -- ahead of --load-addr='s "requires" refusal just
+        // below -- because a legal --reset-vector build never passes
+        // --load-addr=, and that refusal would otherwise misfire on it
+        // (guarded out explicitly two blocks down, not relied on to not
+        // reach this far).
+        if reset_vector_set != 0 {
+            // arm64 resets directly into AArch64 state, not through this
+            // form's real/protected/long-mode stage; riscv32 and xtensa
+            // already have their own raw boot paths via --freestanding.
+            // arch_set == 0 was refused above, so arch here is a real,
+            // user-chosen value.
+            if arch != 0 {
+                uint64 rv_ar = "error: --reset-vector requires --arch=x86_64: the reset-vector form resets into 16-bit real mode and builds its own transition through 32-bit protected and 64-bit long mode; arm64 resets directly into AArch64 state, and riscv32/xtensa already have their own raw boot paths via --freestanding\n"
+                write(2, rv_ar, str_len(rv_ar))
+                exit(1)
+            }
+            // Measured meaningless (design spec S8 Q2): a plain --emit=image
+            // x86_64 payload is byte-identical at --load-addr=0x100000 and
+            // --load-addr=0x20000000. --reset-vector's payload always lands
+            // at the fixed physical address 0x100000 -- the stage copies it
+            // there itself -- so there is no address for this flag to choose.
+            if load_addr_set != 0 {
+                uint64 rv_la = "error: --reset-vector conflicts with --load-addr=: the reset-vector stage always copies the payload to the fixed physical address 0x100000, never to a chosen one -- measured byte-identical at --load-addr=0x100000 and --load-addr=0x20000000 for a plain --emit=image build. Drop --load-addr=\n"
+                write(2, rv_la, str_len(rv_la))
+                exit(1)
+            }
+            // No default, ever: src/main.kr's own stack_top declaration
+            // states the project's rule verbatim -- "an unset stack means
+            // 'no stub', never 'guess one' -- a silently defaulted stack
+            // boots on the author's board and faults silently on someone
+            // else's." The reset-vector stage sets rsp from this value
+            // (Task 2); with the flag absent there is nothing to set it
+            // from and no safe default to invent.
+            if stack_top_set == 0 {
+                uint64 rv_st = "error: --reset-vector requires --stack-top=: the reset-vector stage sets rsp from this value before calling the entry function, and there is no default -- an unset stack means 'no value', never 'guess one'\n"
+                write(2, rv_st, str_len(rv_st))
+                exit(1)
+            }
+        }
+        // reset_vector_set == 0: a legal --reset-vector build never sets
+        // --load-addr= (refused above), so without this guard the "requires
+        // --load-addr=" and "--load-addr=0" refusals below would misfire on
+        // every such build. See the reset-vector block just above for the
+        // flag's own load-addr refusal.
+        if load_addr_set == 0 && reset_vector_set == 0 {
             uint64 im_la = "error: --emit=image requires --load-addr=<addr>: nothing in a flat image records where it will run -- not even --image-header's Image header, whose text_offset is an offset from the loader's own base and never an absolute address; the value is validated (arm64) and reported, never embedded in the bytes\n"
             write(2, im_la, str_len(im_la))
             exit(1)
         }
-        if load_addr == 0 {
+        if load_addr == 0 && reset_vector_set == 0 {
             // Zero parses cleanly and is 4096-aligned, but every consumer
             // of the report (and B2's stub) reads 0 as "unset".
             uint64 im_z = "error: --load-addr=0 is refused: a zero load address is indistinguishable from an unset one in every report and boot stub that consumes it\n"
@@ -7029,7 +7154,20 @@ fn main() {
                     exit(1)
                 }
             }
-            if arch == 0 {
+            // && reset_vector_set == 0 (sub-project E, Task 1): every bound
+            // in this arm is a property of B2's self-boot trampoline --
+            // its page tables, its single-GiB identity map, its --load-addr
+            // preconditions -- none of which --reset-vector emits (Task 1
+            // Step 5 excludes emit_x86_image_stub itself under this flag;
+            // design spec S3(c)). Under --reset-vector --load-addr is always
+            // 0 (the flag is refused, not merely unset), so left ungated the
+            // "must be at least 0x4000" / "must be below 0x40000000" rows
+            // below would misfire on every valid --reset-vector build by
+            // reading load_addr == 0 as "inside the zeroed page tables" --
+            // page tables that, under this flag, this function never builds.
+            // The reset-vector-specific replacement is the sibling block
+            // below.
+            if arch == 0 && reset_vector_set == 0 {
                 // x86_64 needs its own range rule -- it has no --load-addr
                 // constraint beyond != 0 today, so this is new ground.
                 // Bound 1: the FIRST PUSH must not land in the boot stub's
@@ -7107,6 +7245,39 @@ fn main() {
                 if load_addr >= 1073741824 {
                     uint64 la_1g = "error: --load-addr= must be below 0x40000000 when --stack-top= asks for the x86_64 self-boot trampoline: the trampoline's identity map is a single 512-entry page directory of 2 MiB pages and covers exactly the first 1 GiB, so an image at or above that address is unmapped the instant paging is enabled\n"
                     write(2, la_1g, str_len(la_1g))
+                    exit(1)
+                }
+            }
+            // --reset-vector's OWN x86_64 range rule (sub-project E, Task 1),
+            // re-derived rather than inheriting the B2 bounds just above --
+            // this geometry is different (design spec S4/S5), not a
+            // relaxation of B2's: the reset-vector stage builds its OWN
+            // identity page tables at physical 0x1000-0x7000 (PDPT[0..3] and
+            // four page directories, mapping the full 4 GiB -- more table
+            // space than B2's single PD, which is why the band is wider than
+            // B2's 0x1000-0x4000), and the payload lands at a SECOND fixed
+            // region, 0x100000..+PAYLEN, that B2's geometry has no equivalent
+            // of at all.
+            //
+            // Same +8 convention as B2's page-table check and the
+            // stack-vs-image check above: the stage's first push writes
+            // [stack_top-8, stack_top), so that band -- not the bare pointer
+            // -- is what must clear 0x1000-0x7000. It overlaps exactly when
+            // stack_top > 0x1000 and stack_top < 0x7008.
+            //
+            // THE PAYLOAD HALF OF THIS RULE (0x100000..+PAYLEN) IS NOT HERE.
+            // It cannot be: PAYLEN is the copied payload's length, and that
+            // is only known after codegen has produced it, at finalize --
+            // this function runs at flag-parse time, before a single byte of
+            // the program has been compiled. That half of the check, and the
+            // 64 KiB total-size fit it is bundled with in the design spec,
+            // are Task 2's (its finalize step, where PAYLEN first exists).
+            // Task 1 owns only the test row for it and leaves that row red;
+            // see reset_vector_payload_too_large in tests/run_tests.sh.
+            if arch == 0 && reset_vector_set != 0 {
+                if stack_top > 4096 && stack_top < 28680 {
+                    uint64 rv_pt = "error: --stack-top='s first push would land inside 0x1000-0x7000 under --reset-vector: the reset-vector stage builds its own identity page tables there (PDPT[0..3] and four page directories, mapping the full 4 GiB -- more table space than the self-boot trampoline's 0x1000-0x4000), and the stack grows down so the first push writes the eight bytes below the stack top. The stack top must be at most 0x1000 or at least 0x7008. This constraint is --reset-vector-only\n"
+                    write(2, rv_pt, str_len(rv_pt))
                     exit(1)
                 }
             }
@@ -7200,6 +7371,16 @@ fn main() {
             write(2, uf_g, str_len(uf_g))
             exit(1)
         }
+    }
+    // Checked BEFORE --stack-top='s own "only meaningful" row just below:
+    // every --reset-vector test row also carries --stack-top=, so ordering
+    // this one first is what makes reset_vector_requires_emit_image (not
+    // stacktop_requires_image's shared substring) the row that actually
+    // proves this flag's own gate fired.
+    if reset_vector_set != 0 && emit_mode != 8 {
+        uint64 rv_im = "error: --reset-vector is only meaningful with --emit=image: it selects the reset-vector form of the flat image, and only --emit=image produces a flat image for it to select\n"
+        write(2, rv_im, str_len(rv_im))
+        exit(1)
     }
     if load_addr_set != 0 && emit_mode != 8 {
         uint64 la_im = "error: --load-addr= is only meaningful with --emit=image: hosted containers carry their load address in their own headers\n"

@@ -8768,6 +8768,107 @@ rm -f "$ihdr_a" "$ihdr_b"
 # not exist, so a forward reference here is only safe if the target names
 # itself as the target.)
 
+# --- --reset-vector flag surface (sub-project E, Task 1) ---
+# `krc` alone, given --reset-vector on --emit=image, will (Task 2) produce a
+# 65536-byte x86_64 artifact bootable by `qemu-system-x86_64 -bios` and
+# nothing else -- no GNU as, no ld, no --defsym, no concatenation script.
+# TASK 1 IS THE FLAG AND ITS REFUSALS ONLY: it emits no stage bytes. Six of
+# the seven rows below are wrong command lines, each refused with its own
+# distinguishable message (img_refuses' three clauses: nonzero exit, the
+# diagnostic text, no artifact left on disk). The seventh -- payload too
+# large -- is different in kind and is explained at its own row below.
+echo ""
+echo "--- --reset-vector flag surface (E, Task 1) ---"
+
+# 1. arm64: refused. arm64 resets directly into AArch64 state, not through
+#    the real/protected/long-mode transition this form builds; riscv32 and
+#    xtensa already have their own raw paths via --freestanding.
+img_refuses reset_vector_requires_x86_64 "requires --arch=x86_64" \
+    --target=none --arch=arm64 --emit=image --reset-vector --stack-top=0x90000
+
+# 2. --target=linux: refused by the EXISTING --emit=image rule, unchanged --
+#    --reset-vector adds no target requirement of its own beyond what
+#    --emit=image already enforces, so this row pins that the shared refusal
+#    still fires with the new flag present (not merely tested in its
+#    absence).
+img_refuses reset_vector_requires_target_none "requires --target=none" \
+    --target=linux --arch=x86_64 --emit=image --reset-vector --stack-top=0x90000
+
+# 3. --emit=elf: refused. Mirrors --load-addr=/--stack-top=/--image-header's
+#    own "only meaningful with --emit=image" rows just below them in
+#    src/main.kr -- this flag selects a FORM of the flat image, so it needs
+#    one to select. Pattern is the flag's OWN wording, not the shared
+#    substring those three rows' messages also carry, so this row proves
+#    --reset-vector's gate fired and not one of theirs (this line also sets
+#    --stack-top=, which on its own would trip stacktop_requires_image's
+#    identical-looking rule if --reset-vector's check were not ordered and
+#    worded to win first).
+img_refuses reset_vector_requires_emit_image "reset-vector is only meaningful" \
+    --target=none --arch=x86_64 --emit=elf --reset-vector --stack-top=0x90000
+
+# 4. --stack-top= absent: refused. No default stack, ever -- D4's rule,
+#    restated verbatim in src/main.kr's own stack_top declaration -- and this
+#    form sets rsp from the flag's value with nothing to fall back to.
+img_refuses reset_vector_requires_stack_top "requires --stack-top=" \
+    --target=none --arch=x86_64 --emit=image --reset-vector
+
+# 5. --load-addr= given: refused. Measured meaningless (design spec S8 Q2):
+#    a plain --emit=image x86_64 payload is byte-identical at
+#    --load-addr=0x100000 and --load-addr=0x20000000, because this form's
+#    payload always lands at the fixed physical address 0x100000 -- there is
+#    no address left for the flag to choose.
+img_refuses reset_vector_conflicts_load_addr "conflicts with --load-addr=" \
+    --target=none --arch=x86_64 --emit=image --reset-vector --stack-top=0x90000 --load-addr=0x100000
+
+# 6. --stack-top= landing inside the page tables: refused. The reset-vector
+#    stage builds its OWN identity page tables at 0x1000-0x7000 (PDPT[0..3],
+#    four page directories, the full 4 GiB -- wider than the self-boot
+#    trampoline's single-PD 0x1000-0x4000 B2 already refuses on), and the
+#    stack grows down, so the first push must clear that band. 0x2000 is the
+#    band's INTERIOR, deliberately, not an edge -- mirroring
+#    stacktop_x86_range_collision's own caution a few sections up: an edge
+#    alone would read green under an off-by-eight rule too, which is exactly
+#    the defect class B2's edge rows (6c-6e there) exist to catch. The edges
+#    of E's own band are not separately pinned here (Task 1 owns the row, not
+#    a full edge audit); 0x1000-0x7000 in the message is what the "why" grep
+#    below actually asserts.
+img_refuses reset_vector_stack_top_in_page_tables "0x1000-0x7000" \
+    --target=none --arch=x86_64 --emit=image --reset-vector --stack-top=0x2000
+
+# 7. Payload too large for the fixed 65536-byte image: THE REFUSAL THAT
+#    MATTERS MOST, and the one Task 1 does NOT implement. Its absence is not
+#    "a wrong command line accepted" the way rows 1-6 are -- it is a
+#    SILENTLY TRUNCATED BOOTABLE IMAGE, the only failure mode in this list
+#    that produces a working-looking artifact that is WRONG rather than an
+#    artifact that is simply absent. The check belongs at finalize, because
+#    PAYLEN -- the copied payload's length -- does not exist until codegen
+#    has produced it; every refusal above runs entirely at flag-parse time,
+#    before compilation, and has no PAYLEN to check against.
+#
+# THIS ROW IS DELIBERATELY LEFT RED. Task 1 owns writing it, running it for
+# real, and reporting what it actually does -- not skipping it, not loosening
+# its assertion until it passes, not marking it a false PASS/SKIP. It is a
+# genuine FAIL in this suite's count until sub-project E's Task 2 implements
+# the finalize-time fit check; that task is what turns this row green.
+#
+# big.kr is GENERATED here, not committed: a 100000-byte static array is
+# enough to exceed any plausible "65536 - PAYOFF - 16" bound (PAYOFF is the
+# ~294-byte reset-vector stage's own size, not yet implemented and therefore
+# not knowable to this row) by a wide margin, regardless of what PAYOFF turns
+# out to be once Task 2 lands.
+RV_BIG_SRC="$DIR/../test_tmp_rvbig_$$.kr"
+printf 'static uint8[100000] rv_big_pad\nfn main() -> uint64 { unsafe { *((rv_big_pad + 99999) as uint8) = 7 }\n return 0 }\n' > "$RV_BIG_SRC"
+TOTAL=$((TOTAL + 1))
+rm -f /tmp/krc_rvbig_$$
+rvbig_out=$($KRC $KRC_FLAGS "$RV_BIG_SRC" -o /tmp/krc_rvbig_$$ --target=none --arch=x86_64 --emit=image --reset-vector --stack-top=0x90000 2>&1); rvbig_st=$?
+if [ $rvbig_st -ne 0 ] && echo "$rvbig_out" | grep -qi 'too large\|does not fit\|65536' && [ ! -f /tmp/krc_rvbig_$$ ]; then
+    PASS=$((PASS + 1)); echo "  reset_vector_payload_too_large: PASS (Task 2's finalize check already landed)"
+else
+    echo "FAIL: reset_vector_payload_too_large (EXPECTED RED at Task 1 -- PAYLEN is only known at finalize, so the fit check is Task 2's, not Task 1's; exit=$rvbig_st, artifact=$([ -f /tmp/krc_rvbig_$$ ] && echo yes || echo no). Task 2 must turn this row green.)"
+    FAIL=$((FAIL + 1))
+fi
+rm -f /tmp/krc_rvbig_$$ "$RV_BIG_SRC"
+
 rm -f "$STK_SRC" "$IMG_SRC"
 
 # --- --emit=uefi flag surface, payload geometry, PE header (D, Tasks 1-2) ----
