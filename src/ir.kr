@@ -12400,6 +12400,7 @@ fn ir_opt_is_side_effect(uint64 op) -> uint64 {
     if op == 83 { return 1 }   // RET3
     if op == 85 { return 1 }   // SYSCALL_RAW
     if op == 87 { return 1 }   // CALL_IND
+    if op == 146 { return 1 }  // MODULE_PATH (writes the path through buf, same as STORE_BIS)
     if op >= 90 && op <= 96 { return 1 }    // atomics, vstore/vload, asm
     if op >= 109 && op <= 115 { return 1 }  // atomic RMW, exec, set_exec
     if op == 119 { return 1 }  // TIME_NS (reads clock, not pure)

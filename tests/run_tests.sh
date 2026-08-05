@@ -12925,6 +12925,37 @@ tn_mp_same_as_linux tn_module_path_arm64   artifact --arch=arm64
 tn_mp_same_as_linux tn_module_path_riscv32 pair     --arch=riscv32
 tn_mp_same_as_linux tn_module_path_xtensa  pair     --arch=xtensa
 
+# ir_opt_is_side_effect did not list opcode 146 (IR_MODULE_PATH), so a
+# get_module_path call whose length result goes unused was deleted by DCE --
+# but the call WRITES the path through its buffer argument, so deleting it
+# silently drops that write. Windows is the only target that emits
+# IR_MODULE_PATH (target_os==2 gated), so build the same buffer-alloc
+# skeleton with and without the call and compare PE sizes: with the bug, an
+# unused-result call adds zero bytes over no call at all (fully erased).
+# Size, not cmp -s: the PE COFF header carries a build timestamp, so two
+# builds of even identical code differ in a couple of header bytes -- the
+# artifact SIZE is the part DCE actually changes.
+TOTAL=$((TOTAL + 1))
+printf 'fn main() {\n    uint64 buf = alloc(300)\n    exit(0)\n}\n' > "$TN_D/mp_nocall.kr"
+printf 'fn main() {\n    uint64 buf = alloc(300)\n    get_module_path(buf, 300)\n    exit(0)\n}\n' > "$TN_D/mp_unused.kr"
+rm -f "$TN_D/mp_nocall_w" "$TN_D/mp_unused_w"
+"$CP_KRC" --arch=x86_64 --target=windows "$TN_D/mp_nocall.kr" -o "$TN_D/mp_nocall_w" >/dev/null 2>&1
+"$CP_KRC" --arch=x86_64 --target=windows "$TN_D/mp_unused.kr" -o "$TN_D/mp_unused_w" >/dev/null 2>&1
+if [ -f "$TN_D/mp_nocall_w" ] && [ -f "$TN_D/mp_unused_w" ]; then
+    MP_NC_SZ=$(wc -c < "$TN_D/mp_nocall_w")
+    MP_UN_SZ=$(wc -c < "$TN_D/mp_unused_w")
+    if [ "$MP_NC_SZ" != "$MP_UN_SZ" ]; then
+        PASS=$((PASS + 1))
+        echo "  tn_module_path_unused_result_not_dce: PASS ($MP_NC_SZ vs $MP_UN_SZ bytes)"
+    else
+        echo "FAIL: tn_module_path_unused_result_not_dce (no-call and unused-result artifacts are the same size ($MP_NC_SZ) -- get_module_path was DCE'd)"
+        FAIL=$((FAIL + 1))
+    fi
+else
+    echo "FAIL: tn_module_path_unused_result_not_dce (one of the artifacts failed to build)"
+    FAIL=$((FAIL + 1))
+fi
+
 # The claim the two `pair` legs above lean on, made an assertion: the Windows
 # branch of get_module_path exists exactly ONCE, in the shared IR lowering,
 # so it is arch-independent by construction. If a backend ever grows its own
