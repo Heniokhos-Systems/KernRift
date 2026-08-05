@@ -316,7 +316,8 @@ static uint64 fn_ret_signed_count = 0
 static uint64 fn_ret_struct_table = 0
 static uint64 fn_ret_struct_count = 0
 
-// IR backend mode: when 1, use SSA IR + register allocator + x86_64 emitter
+// IR backend mode: when 1, use the IR (NOT SSA -- see ir.kr's header) +
+// register allocator + x86_64 emitter
 static uint64 emit_ir_mode = 1
 
 // Debug info: DWARF line table infrastructure
@@ -7147,6 +7148,19 @@ fn gen_expr(uint64 node) {
                 uint32 nt2 = ast_next(wtmp)
                 wtmp = nt2
             }
+            // The register-loading loops below only assign int args 0-5 and
+            // float args 0-5 to a GPR/xmm register (SysV: rdi,rsi,rdx,rcx,r8,r9
+            // / xmm0-5; Windows: rcx/rdx/r8/r9 positional). A 7th argument is
+            // still evaluated above -- its side effects happen -- but it is
+            // never loaded into anything the callee reads, so the call
+            // silently ran with a missing argument. Same cap and message as
+            // the shared IR lowering's call_ptr guard (src/ir.kr), so both
+            // backends refuse identically instead of the legacy path being
+            // the quiet way around it.
+            if arg_count > 6 {
+                write(2, "error: too many call_ptr arguments (max 6)\n", 43)
+                exit(1)
+            }
 
             // Allocate temp slots: 1 for fn_ptr + arg_count for args
             uint64 ptr_slot = var_count * 8
@@ -12231,6 +12245,69 @@ fn dce_is_live(uint64 name_tok) -> uint64 {
     if dce_enabled == 0 { return 1 }
     if dce_count == 0 { return 1 }
     return dce_has(name_tok)
+}
+
+// Returns 1 if `mode` (an --emit= value) produces bytes meant to be RUN
+// directly -- a KernRift-built executable with no later linking or
+// module-loader step to bind a symbol at. Returns 0 for the
+// translation-unit outputs: obj (3) and lkm (7) are relocatable, resolved
+// by a system linker or (for lkm) the kernel module loader at insmod time;
+// asm (5) and ir (6) are text dumps, not runnable code at all.
+//
+// This is the SAME grouping dce_set_keep_all already uses (main.kr's
+// `compile`, the `emit_mode == 3 || emit_mode == 5 || emit_mode == 6 ||
+// emit_mode == 7` gate) for exactly the same reason: those four modes are
+// a translation unit, not a finished artifact.
+@export
+fn emit_mode_is_executable(uint64 mode) -> uint64 {
+    if mode == 3 { return 0 }   // obj
+    if mode == 5 { return 0 }   // asm
+    if mode == 6 { return 0 }   // ir
+    if mode == 7 { return 0 }   // lkm
+    return 1                    // elfexe/macho/pe/android/image/uefi
+}
+
+// Hard-refuses to keep compiling when an `extern fn` is CALLED from
+// reachable code (dce_is_live) while this build's own emit mode produces a
+// directly-executable artifact. There is no linker or loader step left to
+// bind the symbol, so at run time the call target is whatever codegen
+// happens to synthesize for an undefined callee -- measured: the IR
+// backend binds a synthesised stub (silently returns 0) and the legacy
+// backend falls through with the argument still sitting in the return
+// register (silently returns the argument). Both are a WORKING BINARY,
+// WRONG ANSWER, WITH NO DIAGNOSTIC, differently per backend. Refuse
+// instead.
+//
+// Must run AFTER dce_scan (so dce_is_live reflects real reachability, not
+// dead declarations that are merely unused) and BEFORE any output byte is
+// written, so an unresolved extern never reaches disk.
+//
+// `check` is emit_mode_is_executable's result, threaded in rather than
+// re-derived here: callers that always build an executable (compile_fat's
+// eight ELF/Mach-O/PE/Android slices -- there is no --emit= in fat mode)
+// pass 1 directly instead of a meaningless mode number.
+fn refuse_unresolved_externs(uint64 check) {
+    if check == 0 { return }
+    uint64 i = 0
+    while i < extern_fn_count {
+        uint64 entry = extern_fn_table + i * 8
+        uint32 name_tok = 0
+        unsafe { *(entry as uint32) -> name_tok }
+        uint64 wnt = name_tok
+        if dce_is_live(wnt) != 0 {
+            diag_loc_head(wnt, 0)
+            uint64 em1 = "extern fn '"
+            write(2, em1, str_len(em1))
+            uint64 ts = tok_text_start(wnt)
+            uint64 tl = tok_text_len(wnt)
+            write(2, cg_source + ts, tl)
+            uint64 em2 = "' is never defined and this emit mode produces\n  an executable; nothing will resolve it at run time. Provide a definition, or\n  use --emit=obj.\n"
+            write(2, em2, str_len(em2))
+            diag_span_of(wnt)
+            exit(1)
+        }
+        i = i + 1
+    }
 }
 
 // ---------------------------------------------------------------------------

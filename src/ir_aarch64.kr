@@ -1,6 +1,7 @@
 // KernRift self-hosted compiler -- AArch64 IR backend
 //
-// Emits ARM64 machine code from the shared SSA IR infrastructure (ir.kr).
+// Emits ARM64 machine code from the shared IR infrastructure (ir.kr). That
+// IR is not SSA -- see the header of ir.kr.
 // Uses the graph-colouring register allocator with 10 callee-saved registers
 // (x19-x28) and the emit_a64_* instruction helpers from codegen_aarch64.kr.
 //

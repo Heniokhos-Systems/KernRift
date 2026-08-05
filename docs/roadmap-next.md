@@ -7,8 +7,8 @@ what's currently blocking each one.
 
 ## R0: Embedded backends — ✅ SHIPPED (v2.8.27 / v2.8.28)
 
-Three backends landed and are merged. All three are driven by the same SSA IR
-as x86_64/arm64 — no second front end.
+Three backends landed and are merged. All three are driven by the same IR
+(not SSA) as x86_64/arm64 — no second front end.
 
 - **RISC-V RV32IMC** (v2.8.27) — encoders, s0–s11 colour map, ALU/loads/stores/
   compares/branches/calls, RV32M mul-div, the C compressed extension as a

@@ -254,7 +254,7 @@ program — that's the preferred form for a parity bug report.
 
 ## 3. Inspecting compiler output
 
-### `--emit=ir` — dump the SSA IR
+### `--emit=ir` — dump the IR (not SSA)
 
 Prints the IR for every function to **stdout** (any `-o` is ignored):
 
@@ -278,7 +278,9 @@ function main:
     ...
 ```
 
-How to read it: `vN` are SSA virtual registers (`v0` means "no value");
+How to read it: `vN` are virtual registers (`v0` means "no value"; the IR
+is not SSA — named variables reuse one vreg across assignments, so no phi
+is ever needed and none is built);
 `bbN` are basic blocks; `arg vX [i]` loads vX into argument slot *i* for the
 next `call`/`syscall`. Every opcode — all 93 of them — is documented in
 [`docs/IR_REFERENCE.md`](IR_REFERENCE.md), including which ops the
@@ -389,7 +391,7 @@ directly.
 | `--O0` | Disable IR optimizations (CF/DCE/CSE/LICM) |
 | `--coalesce` / `--no-coalesce` | Enable (default) / disable copy coalescing |
 | `--ir` / `--legacy` | IR backend (default) / legacy backend — the correctness oracle |
-| `--emit=ir` | Dump SSA IR per function to stdout |
+| `--emit=ir` | Dump IR per function to stdout (not SSA) |
 | `--emit=asm` | Annotated assembly listing to `-o` |
 | `--check-types` / `--no-check-types` | Type checker on (default) / off |
 | `krc check FILE.kr [--ci] [--fix]` | Static safety analysis |

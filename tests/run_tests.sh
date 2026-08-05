@@ -1585,6 +1585,37 @@ else
     echo "  emit_obj_c_flag: FAIL (compilation with -c failed)"
 fi
 
+# -c takes no value: -c=1 must be REJECTED, not silently swallowed. -c is
+# matched with str_eq_full, which matches the bare spelling only, so
+# `-c=1` used to fall through to the final `else { input_path = arg }` and
+# be silently ignored -- measured: exit 0 and a 176-byte EXECUTABLE (the
+# default emit mode) instead of a .o.
+TOTAL=$((TOTAL + 1))
+rm -f /tmp/krc_c_eq_$$.o
+c_eq_out=$($KRC $KRC_FLAGS -c=1 /tmp/krc_obj_$$.kr -o /tmp/krc_c_eq_$$.o 2>&1); c_eq_st=$?
+if [ $c_eq_st -ne 0 ] && echo "$c_eq_out" | grep -q "takes no value" && [ ! -f /tmp/krc_c_eq_$$.o ]; then
+    PASS=$((PASS + 1)); echo "  dash_c_rejects_value: PASS"
+else
+    FAIL=$((FAIL + 1)); echo "FAIL: dash_c_rejects_value (exit=$c_eq_st, artifact=$([ -f /tmp/krc_c_eq_$$.o ] && echo yes || echo no), out=$(echo "$c_eq_out" | head -1))"
+fi
+rm -f /tmp/krc_c_eq_$$.o
+
+# -h takes no value: -h=1 must be REJECTED, not silently swallowed. -h is
+# matched with str_eq_full (bare spelling only), so `-h=1` used to fall
+# through to the final `else { input_path = arg }` and be silently treated
+# as an input filename instead of printing help -- measured: exit 0, no
+# usage text. Note this is NOT the same shape as `--help=1`, which is
+# matched with str_starts_with like every other `=`-less flag and is
+# therefore out of scope here (see the --image-header/--reset-vector/-c
+# rows above) -- deliberately left accepting a value it ignores.
+TOTAL=$((TOTAL + 1))
+h_eq_out=$($KRC -h=1 2>&1); h_eq_st=$?
+if [ $h_eq_st -ne 0 ] && echo "$h_eq_out" | grep -q "takes no value"; then
+    PASS=$((PASS + 1)); echo "  dash_h_rejects_value: PASS"
+else
+    FAIL=$((FAIL + 1)); echo "FAIL: dash_h_rejects_value (exit=$h_eq_st, out=$(echo "$h_eq_out" | head -1))"
+fi
+
 # Test readelf can parse sections and symbols.
 # Cross-compile KRC_FLAGS (e.g. --arch=arm64 on an arm64 runner re-targeting
 # the host) can produce a valid .o that this regex-based test doesn't cover.
@@ -3312,6 +3343,144 @@ else
 fi
 rm -f /tmp/krc_lc_$$.kr /tmp/krc_lc_out_$$.txt
 
+# krc lc report: exact write() byte lengths (print_living_report and
+# print_living_report_filtered in src/living.kr each hardcode the length of
+# every literal they write instead of deriving it, and 14 of those
+# constants across the two functions were wrong: 3 over-read past the
+# string's own NUL (writing the NUL byte itself, which showed up as a
+# stray NUL before "#lang stable" — the "    stable semantic core...\n"
+# and "#lang ...\n\n" preambles) and 11 truncated their string, most of
+# them report labels ("  Calls:       " etc. one byte short, and
+# "\n\nFitness: " missing the trailing space so it read "Fitness:100/100").
+# This row pins both failure modes at once on deterministic telemetry from
+# a trivial one-function program: no stray NUL anywhere in the output, and
+# every truncation-prone label present with its full, correctly-spaced text.
+TOTAL=$((TOTAL + 1))
+cat > /tmp/krc_lc_report_$$.kr <<'KREOF'
+fn main() -> uint64 {
+    return 0
+}
+KREOF
+$KRC lc /tmp/krc_lc_report_$$.kr > /tmp/krc_lc_report_out_$$.txt 2>&1
+lc_report_err=$(python3 -c "
+data = open('/tmp/krc_lc_report_out_$$.txt', 'rb').read()
+checks = [
+    (b'\\x00' not in data, 'stray NUL byte in report output'),
+    (b'    stable semantic core + adaptive surface layer\n' in data, 'core/surface preamble line wrong'),
+    (b'(default \xe2\x80\x94 production-safe features only)\n\nTelemetry\n' in data, '#lang stable line wrong (over-read into Telemetry, or missing blank line)'),
+    (b'  Functions:   1\n' in data, 'Functions label wrong'),
+    (b'  Calls:       0\n' in data, 'Calls label truncated/misaligned'),
+    (b'  Unsafe ops:  0\n' in data, 'Unsafe ops label truncated/misaligned'),
+    (b'  Total ops:   1\n' in data, 'Total ops label truncated/misaligned'),
+    (b'  Patterns:    0\n' in data, 'Patterns label truncated/misaligned'),
+    (b'\n\nFitness: 100/100\n' in data, 'Fitness line truncated (missing space before value)'),
+]
+bad = [msg for ok, msg in checks if not ok]
+if bad:
+    print('; '.join(bad)); raise SystemExit(1)
+" 2>&1)
+if [ -z "$lc_report_err" ]; then
+    PASS=$((PASS + 1)); echo "  lc_report_bytes_exact: PASS"
+else
+    FAIL=$((FAIL + 1)); echo "FAIL: lc_report_bytes_exact ($lc_report_err)"
+fi
+rm -f /tmp/krc_lc_report_$$.kr /tmp/krc_lc_report_out_$$.txt
+
+# analysis.kr: same class of wrong write() byte length as the lc report
+# fix above, in the kernel-safety-check diagnostics (`krc check`).
+# check_critical_regions is the one of the four that is actually reachable
+# right now: it pattern-matches acquire()/release()/alloc() call names
+# directly in the AST, no annotation parsing required. `krc check` on a
+# bare alloc() between acquire()/release() (a bare expression statement --
+# check_critical_stmt only inspects ExprStmt kind, not a `let`
+# initializer) fires it. The pre-fix length (48) read one byte past the
+# string's own trailing \n into whatever followed it in .rodata, which
+# showed up as a stray NUL byte between the diagnostic and krc's next line
+# of output.
+TOTAL=$((TOTAL + 1))
+cat > /tmp/krc_critregion_$$.kr <<'KREOF'
+fn acquire(uint64 l) { }
+fn release(uint64 l) { }
+fn main() {
+    acquire(1)
+    alloc(8)
+    release(1)
+    exit(0)
+}
+KREOF
+$KRC check /tmp/krc_critregion_$$.kr > /tmp/krc_critregion_out_$$.txt 2>&1
+critregion_err=$(python3 -c "
+data = open('/tmp/krc_critregion_out_$$.txt', 'rb').read()
+checks = [
+    (b'\\x00' not in data, 'stray NUL byte in check output'),
+    (b'critical-region: alloc inside critical section\n' in data, 'critical-region message missing or malformed'),
+]
+bad = [msg for ok, msg in checks if not ok]
+if bad:
+    print('; '.join(bad)); raise SystemExit(1)
+" 2>&1)
+if [ -z "$critregion_err" ]; then
+    PASS=$((PASS + 1)); echo "  analysis_critical_region_bytes_exact: PASS"
+else
+    FAIL=$((FAIL + 1)); echo "FAIL: analysis_critical_region_bytes_exact ($critregion_err)"
+fi
+rm -f /tmp/krc_critregion_$$.kr /tmp/krc_critregion_out_$$.txt
+
+# The other three analysis.kr write() length fixes (ctx-check :165,
+# eff-check :205, lock-cycle :327) cannot be exercised the same way: their
+# callers require populated annotation/lock-graph tables, and
+# src/main.kr's own comment at the `run_analysis` call site says why those
+# tables are permanently empty -- "annotations are not parsed yet, so
+# ann_register and lock_add_edge have no callers" (grep confirms zero call
+# sites for either, anywhere in src/*.kr). So there is no `.kr` program
+# that can reach those three write() calls today; asserting "red before,
+# green after, executed" for them would be fabricated. Pin the byte
+# lengths statically instead -- read the three literals straight out of
+# analysis.kr and assert each write() call's length argument equals the
+# string's real encoded length, so a future length regression is still
+# caught the moment it's introduced, before the day these become reachable.
+TOTAL=$((TOTAL + 1))
+analysis_static_err=$(python3 -c "
+import re
+src = open('$DIR/../src/analysis.kr', 'rb').read().decode('utf-8')
+# (search text, expected write() length constant). The source shape is
+# always \`uint64 msg = \"<lit>\"\` followed, a line or two later, by
+# \`write(2, msg, N)\` -- not an inline write(2, \"...\", N), so the literal
+# and its length live on different lines.
+pairs = [
+    ('ctx-check: context violation in ', 32),
+    ('eff-check: undeclared effect in ', 32),
+    ('lock-cycle: potential deadlock between locks\n', 45),
+]
+bad = []
+for lit, want_len in pairs:
+    real_len = len(lit.encode('utf-8'))
+    if real_len != want_len:
+        bad.append(f'{lit!r}: encodes to {real_len} bytes, test expected {want_len}')
+        continue
+    escaped = lit.replace(chr(10), '\\\\n')
+    pat = 'uint64 msg = ' + re.escape('\"' + escaped + '\"')
+    m = re.search(pat, src)
+    if not m:
+        bad.append(f'{lit!r}: literal not found in analysis.kr')
+        continue
+    tail = src[m.end():m.end() + 200]
+    wm = re.search(r'write\(2,\s*msg,\s*(\d+)\)', tail)
+    if not wm:
+        bad.append(f'{lit!r}: no write(2, msg, N) within 200 chars after the literal')
+        continue
+    got = int(wm.group(1))
+    if got != want_len:
+        bad.append(f'{lit!r}: write() uses {got}, should be {want_len}')
+if bad:
+    print('; '.join(bad)); raise SystemExit(1)
+" 2>&1)
+if [ -z "$analysis_static_err" ]; then
+    PASS=$((PASS + 1)); echo "  analysis_unreachable_write_lengths_pinned: PASS"
+else
+    FAIL=$((FAIL + 1)); echo "FAIL: analysis_unreachable_write_lengths_pinned ($analysis_static_err)"
+fi
+
 # Governance: promote + list round-trip
 TOTAL=$((TOTAL + 1))
 GOV_DIR=/tmp/krc_gov_$$
@@ -3892,6 +4061,153 @@ else
     echo "  extern_libc_write: SKIP (gcc not available)"
     echo "  extern_libc_strlen_write: SKIP (gcc not available)"
 fi
+
+echo ""
+echo "--- extern fn: unresolved refused for executable emit modes (issue: silent wrong answer) ---"
+# An `extern fn` that is never defined and never linked used to produce a
+# WORKING BINARY THAT RETURNS A WRONG ANSWER, differently per backend, with
+# no diagnostic: the IR backend synthesized a stub (silently returns 0), the
+# legacy backend fell through with the argument still in the return register
+# (silently returns the argument). Both are exit 0. Fixed: unresolved +
+# CALLED extern fn is now a hard compile-time error for every emit mode that
+# produces a directly-executable artifact, and --emit=obj (the mode the
+# feature is actually for -- resolved by a real system linker) keeps
+# accepting it.
+TOTAL=$((TOTAL + 1))
+cat > /tmp/krc_extir_$$.kr <<'KREOF'
+extern fn missing_thing(uint64 x) -> uint64
+fn main() {
+    uint64 r = missing_thing(7)
+    exit(r)
+}
+KREOF
+if $KRC $KRC_FLAGS /tmp/krc_extir_$$.kr -o /tmp/krc_extir_bin_$$ > /dev/null 2>/tmp/krc_extir_err_$$; then
+    echo "FAIL: extern_unresolved_refused_ir (should not compile)"
+    FAIL=$((FAIL + 1))
+elif [ -e /tmp/krc_extir_bin_$$ ]; then
+    echo "FAIL: extern_unresolved_refused_ir (refused but left an artifact on disk)"
+    FAIL=$((FAIL + 1))
+elif grep -q "is never defined and this emit mode produces" /tmp/krc_extir_err_$$; then
+    PASS=$((PASS + 1))
+    echo "  extern_unresolved_refused_ir: PASS"
+else
+    echo "FAIL: extern_unresolved_refused_ir (wrong/missing diagnostic)"
+    FAIL=$((FAIL + 1))
+fi
+rm -f /tmp/krc_extir_$$.kr /tmp/krc_extir_bin_$$ /tmp/krc_extir_err_$$
+
+TOTAL=$((TOTAL + 1))
+cat > /tmp/krc_extref_$$.kr <<'KREOF'
+extern fn missing_thing(uint64 x) -> uint64
+fn main() {
+    uint64 r = missing_thing(7)
+    exit(r)
+}
+KREOF
+# --legacy has its own emission path (falls through with the arg still in
+# the return register instead of the IR backend's synthesised-stub-returns-0)
+# -- verified separately rather than assumed covered by the same check.
+if $KRC $KRC_FLAGS --legacy /tmp/krc_extref_$$.kr -o /tmp/krc_extref_bin_$$ > /dev/null 2>/tmp/krc_extref_err_$$; then
+    echo "FAIL: extern_unresolved_refused_legacy (should not compile)"
+    FAIL=$((FAIL + 1))
+elif [ -e /tmp/krc_extref_bin_$$ ]; then
+    echo "FAIL: extern_unresolved_refused_legacy (refused but left an artifact on disk)"
+    FAIL=$((FAIL + 1))
+elif grep -q "is never defined and this emit mode produces" /tmp/krc_extref_err_$$; then
+    PASS=$((PASS + 1))
+    echo "  extern_unresolved_refused_legacy: PASS"
+else
+    echo "FAIL: extern_unresolved_refused_legacy (wrong/missing diagnostic)"
+    FAIL=$((FAIL + 1))
+fi
+rm -f /tmp/krc_extref_$$.kr /tmp/krc_extref_bin_$$ /tmp/krc_extref_err_$$
+
+TOTAL=$((TOTAL + 1))
+# Same unresolved extern, but --emit=obj is the mode the feature exists for
+# (resolved by a later system linker, not by krc2) -- must keep succeeding.
+cat > /tmp/krc_extobj_$$.kr <<'KREOF'
+extern fn missing_thing(uint64 x) -> uint64
+fn main() {
+    uint64 r = missing_thing(7)
+    exit(r)
+}
+KREOF
+if $KRC $KRC_FLAGS --emit=obj /tmp/krc_extobj_$$.kr -o /tmp/krc_extobj_$$.o > /dev/null 2>&1 \
+   && [ -e /tmp/krc_extobj_$$.o ]; then
+    PASS=$((PASS + 1))
+    echo "  extern_unresolved_obj_still_succeeds: PASS"
+else
+    echo "FAIL: extern_unresolved_obj_still_succeeds (--emit=obj must keep accepting unresolved extern fn)"
+    FAIL=$((FAIL + 1))
+fi
+rm -f /tmp/krc_extobj_$$.kr /tmp/krc_extobj_$$.o
+
+# A RESOLVED extern (the language's actual extern-fn workflow: declare,
+# --emit=obj, link with the platform linker) must keep working end to end,
+# and must keep working when the object was produced by EITHER backend.
+if [ "$HOST_M" = "x86_64" ] || [ "$HOST_M" = "amd64" ]; then
+    if command -v gcc > /dev/null 2>&1; then
+        for BACKEND_FLAG in "" "--legacy"; do
+            TOTAL=$((TOTAL + 1))
+            LABEL="extern_resolved_via_obj_link${BACKEND_FLAG:+_legacy}"
+            cat > /tmp/krc_extres_$$.kr <<'KREOF'
+extern fn strlen(u64 s) -> u64
+extern fn write(u64 fd, u64 buf, u64 len) -> u64
+fn main() {
+    u64 msg = "extern_resolved_ok\n"
+    write(1, msg, strlen(msg))
+    exit(0)
+}
+KREOF
+            if $KRC $KRC_FLAGS $BACKEND_FLAG --emit=obj /tmp/krc_extres_$$.kr -o /tmp/krc_extres_$$.o > /dev/null 2>&1 \
+               && gcc /tmp/krc_extres_$$.o -o /tmp/krc_extres_bin_$$ -no-pie > /dev/null 2>&1; then
+                got=$(/tmp/krc_extres_bin_$$ 2>/dev/null)
+                if [ "$got" = "extern_resolved_ok" ]; then
+                    PASS=$((PASS + 1))
+                    echo "  $LABEL: PASS"
+                else
+                    FAIL=$((FAIL + 1))
+                    echo "  $LABEL: FAIL (got: $got)"
+                fi
+            else
+                FAIL=$((FAIL + 1))
+                echo "  $LABEL: FAIL (compile/link failed)"
+            fi
+            rm -f /tmp/krc_extres_$$.kr /tmp/krc_extres_$$.o /tmp/krc_extres_bin_$$
+        done
+    else
+        echo "  extern_resolved_via_obj_link: SKIP (gcc not available)"
+        echo "  extern_resolved_via_obj_link_legacy: SKIP (gcc not available)"
+    fi
+else
+    echo "  extern_resolved_via_obj_link: SKIP (non-x86_64 host toolchain)"
+    echo "  extern_resolved_via_obj_link_legacy: SKIP (non-x86_64 host toolchain)"
+fi
+
+# Regression: a normal program with no extern fn at all must be completely
+# unaffected by the new check, on both backends.
+run_test "extern_refusal_no_false_positive_ir" 'fn add(uint64 a, uint64 b) -> uint64 { return a + b }
+fn main() { exit(add(3, 4)) }' 7
+TOTAL=$((TOTAL + 1))
+cat > /tmp/krc_extnofp_$$.kr <<'KREOF'
+fn add(uint64 a, uint64 b) -> uint64 { return a + b }
+fn main() { exit(add(3, 4)) }
+KREOF
+if $KRC $KRC_FLAGS --legacy /tmp/krc_extnofp_$$.kr -o /tmp/krc_extnofp_bin_$$ > /dev/null 2>&1; then
+    /tmp/krc_extnofp_bin_$$
+    rc=$?
+    if [ "$rc" = "7" ]; then
+        PASS=$((PASS + 1))
+        echo "  extern_refusal_no_false_positive_legacy: PASS"
+    else
+        echo "FAIL: extern_refusal_no_false_positive_legacy (got exit $rc, want 7)"
+        FAIL=$((FAIL + 1))
+    fi
+else
+    echo "FAIL: extern_refusal_no_false_positive_legacy (should compile)"
+    FAIL=$((FAIL + 1))
+fi
+rm -f /tmp/krc_extnofp_$$.kr /tmp/krc_extnofp_bin_$$
 
 # --- sizeof ---
 run_test "sizeof_u8" 'fn main() { exit(sizeof(uint8)) }' 1
@@ -8452,6 +8768,37 @@ img_refuses() {  # $1 name, $2 grep pattern, rest = flags
     fi
     rm -f /tmp/krc_img_$$
 }
+# img_refuses() puts its flags AFTER the input path and -o. That is fine for
+# every row whose flag is one the parser already recognizes (the refusal is
+# semantic -- e.g. "requires --target=none" -- and fires the same regardless
+# of where the flag sits). It is NOT fine for a row whose entire point is an
+# UNRECOGNIZED spelling (`--image-header=1`, `--reset-vector=1`): the parser's
+# fallback for anything it doesn't match is `else { input_path = arg }`, so
+# putting the unrecognized flag after "$IMG_SRC" -o ... makes it silently
+# reassign input_path instead, and the run then fails for the WRONG reason
+# ("cannot open '--image-header=1'") rather than the one the row's comment
+# describes. Verified against a build of main.kr at 9e5fc70 (one commit
+# before the fix that made these two spellings recognized): with flags
+# after the path, imghdr_rejects_value's args produced "cannot open
+# '--image-header=1'" and reset_vector_rejects_value's produced the
+# unrelated pre-existing "--emit=image requires --load-addr" (that row was
+# also missing --load-addr=, needed once flags move earlier); with flags
+# BEFORE the path on that same pre-fix build, both instead produced the
+# actual silently-swallowed-flag defect the comments describe: exit 0 and
+# an unflagged/wrong-mode artifact.
+img_refuses_flags_first() {  # $1 name, $2 grep pattern, rest = flags (before the input path)
+    local name="$1" pat="$2"; shift 2
+    TOTAL=$((TOTAL + 1))
+    rm -f /tmp/krc_img_$$
+    local out; out=$($KRC $KRC_FLAGS "$@" "$IMG_SRC" -o /tmp/krc_img_$$ 2>&1); local st=$?
+    if [ $st -ne 0 ] && echo "$out" | grep -q "$pat" && [ ! -f /tmp/krc_img_$$ ]; then
+        PASS=$((PASS + 1)); echo "  $name: PASS"
+    else
+        echo "FAIL: $name (exit=$st, artifact=$([ -f /tmp/krc_img_$$ ] && echo yes || echo no), out=$(echo "$out" | head -1))"
+        FAIL=$((FAIL + 1))
+    fi
+    rm -f /tmp/krc_img_$$
+}
 # 1. image without --target=none (default OS = linux): refused, naming why.
 img_refuses image_needs_target_none "requires --target=none" --arch=x86_64 --emit=image --load-addr=0x400000
 # 2. image with a HOSTED --target: same refusal (the rule is about the
@@ -8712,6 +9059,19 @@ img_refuses imghdr_requires_arm64 "requires --arch=arm64" --arch=x86_64 --target
 #    above them), so --image-header is the only thing that can fail this line.
 img_refuses imghdr_requires_emit_image "only meaningful with --emit=image" --arch=arm64 --target=none --image-header
 
+# 3b. --image-header=<anything>: refused with a diagnostic, not silently
+#     swallowed. --image-header is matched with str_eq_full, which matches
+#     the bare spelling only, so `--image-header=1` used to fall through to
+#     the final `else { input_path = arg }` and be silently ignored -- an
+#     otherwise-valid build (same flags as imghdr_pure_prefix below) produced
+#     the UNFLAGGED 56-byte artifact at exit 0 instead of the 120-byte
+#     header-prefixed one, with no indication the flag had been dropped.
+#     img_refuses_flags_first, not img_refuses: the unrecognized spelling
+#     has to land BEFORE the input path or the parser's unrecognized-flag
+#     fallback reassigns input_path to it instead, and the row fails for
+#     "cannot open '--image-header=1'" rather than this claim.
+img_refuses_flags_first imghdr_rejects_value "image-header takes no value" --arch=arm64 --target=none --emit=image --load-addr=0x40400000 --stack-top=0x40800000 --image-header=1
+
 # 4. --image-header ACCEPTED on a valid arm64 config, and the header is a PURE
 #    PREFIX: the flagged artifact is the unflagged one with exactly 64 bytes
 #    in front of it.
@@ -8775,7 +9135,7 @@ rm -f "$ihdr_a" "$ihdr_b"
 # FLAG SURFACE ONLY: the stage bytes it guards are asserted two sections
 # below, in `--reset-vector: the emitted stage`, and booted by leg L9.
 #
-# 13 ROWS. Nine are `img_refuses` (three clauses each: nonzero exit, the
+# 14 ROWS. Ten are `img_refuses` (three clauses each: nonzero exit, the
 # diagnostic text, no artifact left on disk), three are `stk_accepts` twins
 # pinning the accepting side of a band edge, and one -- payload too large --
 # is hand-written and different in kind, explained at its own row below.
@@ -8787,7 +9147,9 @@ rm -f "$ihdr_a" "$ihdr_b"
 # three commits after Task 2 landed and booted. A count and a tense are
 # exactly the two things a comment cannot be pinned on, so they are the two
 # things to re-derive when touching this file: `grep -cE '^(img_refuses|
-# stk_accepts) '` over the section is where the 12 comes from.
+# stk_accepts) '` over the section is where the 13 comes from (row 1b below,
+# --reset-vector=<value>, added the fourteenth without touching the other
+# thirteen's numbering).
 echo ""
 echo "--- --reset-vector flag surface (E, Task 1) ---"
 
@@ -8796,6 +9158,22 @@ echo "--- --reset-vector flag surface (E, Task 1) ---"
 #    xtensa already have their own raw paths via --freestanding.
 img_refuses reset_vector_requires_x86_64 "requires --arch=x86_64" \
     --target=none --arch=arm64 --emit=image --reset-vector --stack-top=0x90000
+
+# 1b. --reset-vector=<anything>: refused with a diagnostic, not silently
+#     swallowed. --reset-vector is matched with str_eq_full, which matches
+#     the bare spelling only, so `--reset-vector=1` used to fall through to
+#     the final `else { input_path = arg }` and be silently ignored --
+#     measured: exit 0 and a 256-byte MULTIBOOT artifact (the plain
+#     --emit=image + --stack-top= form), not the 65536-byte reset-vector
+#     image the flag asked for. That measurement needs --load-addr= present
+#     (a "plain --emit=image" build requires it -- see image_needs_load_addr
+#     above), so it is added here; the row's flags also have to land BEFORE
+#     the input path (img_refuses_flags_first, not img_refuses) or the
+#     unrecognized spelling reassigns input_path instead and the row fails
+#     for the unrelated, pre-existing "--emit=image requires --load-addr"
+#     rather than this claim.
+img_refuses_flags_first reset_vector_rejects_value "reset-vector takes no value" \
+    --target=none --arch=x86_64 --emit=image --reset-vector=1 --stack-top=0x90000 --load-addr=0x100000
 
 # 2. --target=linux: refused by the EXISTING --emit=image rule, unchanged --
 #    --reset-vector adds no target requirement of its own beyond what
@@ -12925,6 +13303,37 @@ tn_mp_same_as_linux tn_module_path_arm64   artifact --arch=arm64
 tn_mp_same_as_linux tn_module_path_riscv32 pair     --arch=riscv32
 tn_mp_same_as_linux tn_module_path_xtensa  pair     --arch=xtensa
 
+# ir_opt_is_side_effect did not list opcode 146 (IR_MODULE_PATH), so a
+# get_module_path call whose length result goes unused was deleted by DCE --
+# but the call WRITES the path through its buffer argument, so deleting it
+# silently drops that write. Windows is the only target that emits
+# IR_MODULE_PATH (target_os==2 gated), so build the same buffer-alloc
+# skeleton with and without the call and compare PE sizes: with the bug, an
+# unused-result call adds zero bytes over no call at all (fully erased).
+# Size, not cmp -s: the PE COFF header carries a build timestamp, so two
+# builds of even identical code differ in a couple of header bytes -- the
+# artifact SIZE is the part DCE actually changes.
+TOTAL=$((TOTAL + 1))
+printf 'fn main() {\n    uint64 buf = alloc(300)\n    exit(0)\n}\n' > "$TN_D/mp_nocall.kr"
+printf 'fn main() {\n    uint64 buf = alloc(300)\n    get_module_path(buf, 300)\n    exit(0)\n}\n' > "$TN_D/mp_unused.kr"
+rm -f "$TN_D/mp_nocall_w" "$TN_D/mp_unused_w"
+"$CP_KRC" --arch=x86_64 --target=windows "$TN_D/mp_nocall.kr" -o "$TN_D/mp_nocall_w" >/dev/null 2>&1
+"$CP_KRC" --arch=x86_64 --target=windows "$TN_D/mp_unused.kr" -o "$TN_D/mp_unused_w" >/dev/null 2>&1
+if [ -f "$TN_D/mp_nocall_w" ] && [ -f "$TN_D/mp_unused_w" ]; then
+    MP_NC_SZ=$(wc -c < "$TN_D/mp_nocall_w")
+    MP_UN_SZ=$(wc -c < "$TN_D/mp_unused_w")
+    if [ "$MP_NC_SZ" != "$MP_UN_SZ" ]; then
+        PASS=$((PASS + 1))
+        echo "  tn_module_path_unused_result_not_dce: PASS ($MP_NC_SZ vs $MP_UN_SZ bytes)"
+    else
+        echo "FAIL: tn_module_path_unused_result_not_dce (no-call and unused-result artifacts are the same size ($MP_NC_SZ) -- get_module_path was DCE'd)"
+        FAIL=$((FAIL + 1))
+    fi
+else
+    echo "FAIL: tn_module_path_unused_result_not_dce (one of the artifacts failed to build)"
+    FAIL=$((FAIL + 1))
+fi
+
 # The claim the two `pair` legs above lean on, made an assertion: the Windows
 # branch of get_module_path exists exactly ONCE, in the shared IR lowering,
 # so it is arch-independent by construction. If a backend ever grows its own
@@ -14646,6 +15055,109 @@ else
     echo "FAIL: call_args_25_arm64 (exit $CA_A64_ST: '$CA_A64_ERR')"; FAIL=$((FAIL + 1))
 fi
 rm -f "$CA_SRC" "$CA_BIN"
+
+# call_ptr has its own, separate 6-arg cap (cp_arg_vregs holds 6 slots).
+# Unlike the direct-call loop above, the call_ptr collection loop
+# (`while wca != 0 && cp_count < 6`) had NO post-loop guard: a 7th argument's
+# ir_lower_expr was simply never collected, so the argument was not merely
+# unpassed -- its side effects vanished. `bump` proves the side effect
+# happened or didn't via a static global, since call_ptr's own return value
+# is not enough to distinguish "argument dropped" from "argument garbage".
+#
+# The guard above lives in the shared IR lowering only, which is the
+# DEFAULT backend but not the only one: `--legacy` has its own call_ptr
+# codegen (src/codegen.kr) with the identical shape of bug -- it evaluates
+# every argument (so the 7th's side effects DO happen there, unlike the IR
+# backend) but its register-loading loops only assign int/float args 0-5 to
+# a GPR/xmm register, so a 7th argument is silently never loaded into
+# anything the callee reads. Measured before the legacy-path fix: a 7-arg
+# call_ptr compiled at exit 0 and returned 21 instead of 28. The row below
+# exercises `--legacy` explicitly so a fix to only one backend cannot pass
+# this suite.
+CP_SRC="/tmp/krc_callptrargs_$$.kr"
+CP_BIN="/tmp/krc_callptrargs_$$.bin"
+cat > "$CP_SRC" <<'KREOF'
+static uint64 side = 0
+fn bump(uint64 x) -> uint64 { side = x; return x }
+fn f7(uint64 a, uint64 b, uint64 c, uint64 d, uint64 e, uint64 g, uint64 h) -> uint64 {
+    return a + b + c + d + e + g + h
+}
+fn main() {
+    uint64 p = fn_addr("f7")
+    uint64 r = call_ptr(p, 1, 2, 3, 4, 5, 6, bump(77))
+    exit(r)
+}
+KREOF
+TOTAL=$((TOTAL + 1))
+CP_ERR=$($KRC --arch=$RUN_ARCH "$CP_SRC" -o "$CP_BIN" 2>&1); CP_ST=$?
+if [ "$CP_ST" != "0" ] && echo "$CP_ERR" | grep -q "too many call_ptr arguments (max 6)"; then
+    PASS=$((PASS + 1)); echo "  call_ptr_args_7_rejected: PASS (exit $CP_ST, clean diagnostic)"
+else
+    echo "FAIL: call_ptr_args_7_rejected (expected non-zero + 'too many call_ptr arguments', got exit $CP_ST: '$CP_ERR')"
+    FAIL=$((FAIL + 1))
+fi
+# Positive control: exactly 6 args must still compile and run correctly.
+CP6_SRC="/tmp/krc_callptrargs6_$$.kr"
+cat > "$CP6_SRC" <<'KREOF'
+fn f6(uint64 a, uint64 b, uint64 c, uint64 d, uint64 e, uint64 g) -> uint64 {
+    return a + b + c + d + e + g
+}
+fn main() {
+    uint64 p = fn_addr("f6")
+    uint64 r = call_ptr(p, 1, 2, 3, 4, 5, 6)
+    exit(r)
+}
+KREOF
+TOTAL=$((TOTAL + 1))
+rm -f "$CP_BIN"
+if $KRC --arch=$RUN_ARCH "$CP6_SRC" -o "$CP_BIN" >/dev/null 2>&1 && [ -s "$CP_BIN" ]; then
+    chmod +x "$CP_BIN"; "$CP_BIN"; CP6_RUN=$?
+    if [ "$CP6_RUN" = "21" ]; then
+        PASS=$((PASS + 1)); echo "  call_ptr_args_6_accepted: PASS (compiles and returns 21)"
+    else
+        echo "FAIL: call_ptr_args_6_accepted (ran but returned $CP6_RUN, want 21)"; FAIL=$((FAIL + 1))
+    fi
+else
+    echo "FAIL: call_ptr_args_6_accepted (should compile to a non-empty artifact)"; FAIL=$((FAIL + 1))
+fi
+# `--legacy` twin of call_ptr_args_7_rejected: same 7-arg source, the other
+# backend. Positive control (6 args) is call_ptr_args_6_accepted above,
+# rerun implicitly since a `--legacy` cap that rejected everything would
+# still need catching -- so also assert the 6-arg legacy build runs.
+#
+# PINNED TO x86_64, AND NOT BECAUSE OF THE HOST. The 6-argument cap is a
+# property of the x86 lowering ONLY. codegen_aarch64.kr's own call_ptr
+# lowering loads x0-x7 and spills the rest to the stack, so arm64 legacy has
+# NO 6-arg defect -- measured under qemu-aarch64-static: 7 args -> 28, 8 -> 36,
+# both correct. Running this row at $RUN_ARCH would therefore FAIL on an
+# aarch64 host (RUN_ARCH becomes arm64, the build succeeds at rc 0, the row
+# expects a refusal) -- and this project has a native ARM64 CI job, so that is
+# a red CI, not a hypothetical. DO NOT "fix" it by adding a cap to
+# codegen_aarch64.kr: that would DELETE working 7- and 8-argument support.
+TOTAL=$((TOTAL + 1))
+CP_LG_ERR=$($KRC --arch=x86_64 --legacy "$CP_SRC" -o "$CP_BIN" 2>&1); CP_LG_ST=$?
+if [ "$CP_LG_ST" != "0" ] && echo "$CP_LG_ERR" | grep -q "too many call_ptr arguments (max 6)"; then
+    PASS=$((PASS + 1)); echo "  call_ptr_args_7_rejected_legacy: PASS (exit $CP_LG_ST, clean diagnostic)"
+else
+    echo "FAIL: call_ptr_args_7_rejected_legacy (expected non-zero + 'too many call_ptr arguments', got exit $CP_LG_ST: '$CP_LG_ERR')"
+    FAIL=$((FAIL + 1))
+fi
+TOTAL=$((TOTAL + 1))
+rm -f "$CP_BIN"
+# x86_64 for the same reason as its 7-arg twin above -- and running it here
+# keeps the pair symmetric, so the positive control is the same backend and
+# arch as the refusal it credits.
+if $KRC --arch=x86_64 --legacy "$CP6_SRC" -o "$CP_BIN" >/dev/null 2>&1 && [ -s "$CP_BIN" ]; then
+    chmod +x "$CP_BIN"; "$CP_BIN"; CP6_LG_RUN=$?
+    if [ "$CP6_LG_RUN" = "21" ]; then
+        PASS=$((PASS + 1)); echo "  call_ptr_args_6_accepted_legacy: PASS (compiles and returns 21)"
+    else
+        echo "FAIL: call_ptr_args_6_accepted_legacy (ran but returned $CP6_LG_RUN, want 21)"; FAIL=$((FAIL + 1))
+    fi
+else
+    echo "FAIL: call_ptr_args_6_accepted_legacy (should compile to a non-empty artifact)"; FAIL=$((FAIL + 1))
+fi
+rm -f "$CP_SRC" "$CP6_SRC" "$CP_BIN"
 
 echo ""
 echo "--- float literal return kinds ---"

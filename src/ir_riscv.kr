@@ -1,6 +1,7 @@
 // KernRift self-hosted compiler -- RISC-V RV32IMC IR backend
 //
-// Reads the shared SSA IR (ir.kr) and will emit little-endian RV32IMC
+// Reads the shared IR (ir.kr -- not SSA, see its header) and will emit
+// little-endian RV32IMC
 // machine code, mirroring src/ir_aarch64.kr's structure. target_arch==2.
 //
 // This file currently provides the bit-exact base-ISA instruction encoders
@@ -1125,7 +1126,11 @@ fn ir_emit_riscv_insn(uint64 ii) {
     // IR_VSTORE (94) carry a store WIDTH in dest_v, and IR_LOAD (30) may
     // carry one in src2 (struct-field loads) — those fields are not vregs,
     // so skip the fkind probe there. IR_CALL (50) carries the ARG COUNT
-    // in src1 (ir.kr:2788) — also not a vreg (a low count could alias a
+    // in src1 (set by ir_lower_expr's general call-expression lowering,
+    // `ir_emit(IR_CALL, dest, arg_count, 0, callee_tok, ...)` — not any of
+    // ir_lower_expr's builtin special-cases, which is where a stale line
+    // number pointing at this comment's old target, the file_close
+    // builtin, came from) — also not a vreg (a low count could alias a
     // real vreg id), so skip its s1 probe too.
     if rv_op_is_float(op) != 0 { rv_float_trap() }
     if op != 31 && op != 94 {

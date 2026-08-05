@@ -1481,7 +1481,7 @@ krc <file.kr> --target=android -o out
 #   obj   (or -c)                                       → ELF relocatable (.o / .obj)
 #   lkm                                                 → Linux kernel module (.ko) — see docs/LKM.md
 #   asm                                                 → annotated assembly listing (to -o path)
-#   ir                                                  → SSA IR dump per function (to stdout)
+#   ir                                                  → IR dump per function (to stdout; not SSA -- linear three-address code, see src/ir.kr)
 #   image                                               → raw flat binary, no container (bare metal; --image-header prefixes an arm64 boot header; --reset-vector selects the x86_64 QEMU -bios form — emits the stage and boots, see below)
 #   uefi                                                → UEFI application (PE32+) that firmware loads and enters directly
 krc <file.kr> --emit=pe -o out.exe
@@ -2148,7 +2148,7 @@ a PE `Machine` value here, and both already own a raw boot path through
 ```
 
 # Codegen backend & optimization
-krc <file.kr> --arch=arm64           # default: IR (SSA + optimizer + regalloc)
+krc <file.kr> --arch=arm64           # default: IR (not SSA -- optimizer + regalloc)
 krc --legacy --arch=arm64 <file.kr>  # legacy direct-walking codegen
 krc --ir <file.kr>                   # force IR even where a recipe falls back to legacy
 krc --no-coalesce <file.kr>          # disable Briggs/George copy coalescing (default on)
@@ -2172,7 +2172,7 @@ krc lc --list-proposals              # print the proposal registry
 krc lc --promote <name>              # promote a proposal to stable
 krc lc --deprecate <name>            # mark a proposal as deprecated
 krc lc --reject <name>               # revert a proposal to experimental
-krc --emit=ir <file.kr>              # dump the SSA IR for a single function
+krc --emit=ir <file.kr>              # dump the IR per function, not SSA
 krc --version                        # print the compiler version
 krc --help                           # usage info
 ```
