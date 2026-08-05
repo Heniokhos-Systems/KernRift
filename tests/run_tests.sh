@@ -3386,6 +3386,101 @@ else
 fi
 rm -f /tmp/krc_lc_report_$$.kr /tmp/krc_lc_report_out_$$.txt
 
+# analysis.kr: same class of wrong write() byte length as the lc report
+# fix above, in the kernel-safety-check diagnostics (`krc check`).
+# check_critical_regions is the one of the four that is actually reachable
+# right now: it pattern-matches acquire()/release()/alloc() call names
+# directly in the AST, no annotation parsing required. `krc check` on a
+# bare alloc() between acquire()/release() (a bare expression statement --
+# check_critical_stmt only inspects ExprStmt kind, not a `let`
+# initializer) fires it. The pre-fix length (48) read one byte past the
+# string's own trailing \n into whatever followed it in .rodata, which
+# showed up as a stray NUL byte between the diagnostic and krc's next line
+# of output.
+TOTAL=$((TOTAL + 1))
+cat > /tmp/krc_critregion_$$.kr <<'KREOF'
+fn acquire(uint64 l) { }
+fn release(uint64 l) { }
+fn main() {
+    acquire(1)
+    alloc(8)
+    release(1)
+    exit(0)
+}
+KREOF
+$KRC check /tmp/krc_critregion_$$.kr > /tmp/krc_critregion_out_$$.txt 2>&1
+critregion_err=$(python3 -c "
+data = open('/tmp/krc_critregion_out_$$.txt', 'rb').read()
+checks = [
+    (b'\\x00' not in data, 'stray NUL byte in check output'),
+    (b'critical-region: alloc inside critical section\n' in data, 'critical-region message missing or malformed'),
+]
+bad = [msg for ok, msg in checks if not ok]
+if bad:
+    print('; '.join(bad)); raise SystemExit(1)
+" 2>&1)
+if [ -z "$critregion_err" ]; then
+    PASS=$((PASS + 1)); echo "  analysis_critical_region_bytes_exact: PASS"
+else
+    FAIL=$((FAIL + 1)); echo "FAIL: analysis_critical_region_bytes_exact ($critregion_err)"
+fi
+rm -f /tmp/krc_critregion_$$.kr /tmp/krc_critregion_out_$$.txt
+
+# The other three analysis.kr write() length fixes (ctx-check :165,
+# eff-check :205, lock-cycle :327) cannot be exercised the same way: their
+# callers require populated annotation/lock-graph tables, and
+# src/main.kr's own comment at the `run_analysis` call site says why those
+# tables are permanently empty -- "annotations are not parsed yet, so
+# ann_register and lock_add_edge have no callers" (grep confirms zero call
+# sites for either, anywhere in src/*.kr). So there is no `.kr` program
+# that can reach those three write() calls today; asserting "red before,
+# green after, executed" for them would be fabricated. Pin the byte
+# lengths statically instead -- read the three literals straight out of
+# analysis.kr and assert each write() call's length argument equals the
+# string's real encoded length, so a future length regression is still
+# caught the moment it's introduced, before the day these become reachable.
+TOTAL=$((TOTAL + 1))
+analysis_static_err=$(python3 -c "
+import re
+src = open('$DIR/../src/analysis.kr', 'rb').read().decode('utf-8')
+# (search text, expected write() length constant). The source shape is
+# always \`uint64 msg = \"<lit>\"\` followed, a line or two later, by
+# \`write(2, msg, N)\` -- not an inline write(2, \"...\", N), so the literal
+# and its length live on different lines.
+pairs = [
+    ('ctx-check: context violation in ', 32),
+    ('eff-check: undeclared effect in ', 32),
+    ('lock-cycle: potential deadlock between locks\n', 45),
+]
+bad = []
+for lit, want_len in pairs:
+    real_len = len(lit.encode('utf-8'))
+    if real_len != want_len:
+        bad.append(f'{lit!r}: encodes to {real_len} bytes, test expected {want_len}')
+        continue
+    escaped = lit.replace(chr(10), '\\\\n')
+    pat = 'uint64 msg = ' + re.escape('\"' + escaped + '\"')
+    m = re.search(pat, src)
+    if not m:
+        bad.append(f'{lit!r}: literal not found in analysis.kr')
+        continue
+    tail = src[m.end():m.end() + 200]
+    wm = re.search(r'write\(2,\s*msg,\s*(\d+)\)', tail)
+    if not wm:
+        bad.append(f'{lit!r}: no write(2, msg, N) within 200 chars after the literal')
+        continue
+    got = int(wm.group(1))
+    if got != want_len:
+        bad.append(f'{lit!r}: write() uses {got}, should be {want_len}')
+if bad:
+    print('; '.join(bad)); raise SystemExit(1)
+" 2>&1)
+if [ -z "$analysis_static_err" ]; then
+    PASS=$((PASS + 1)); echo "  analysis_unreachable_write_lengths_pinned: PASS"
+else
+    FAIL=$((FAIL + 1)); echo "FAIL: analysis_unreachable_write_lengths_pinned ($analysis_static_err)"
+fi
+
 # Governance: promote + list round-trip
 TOTAL=$((TOTAL + 1))
 GOV_DIR=/tmp/krc_gov_$$

@@ -162,7 +162,7 @@ fn check_ctx_expr(uint64 node, uint64 caller_tok, uint64 caller_ctx) {
         if caller_ctx > callee_ctx && callee_ctx != 0 {
             // Context violation!
             uint64 msg = "ctx-check: context violation in "
-            write(2, msg, 33)
+            write(2, msg, 32)
             uint64 ts = tok_text_start(caller_tok)
             uint64 tl = tok_text_len(caller_tok)
             write(2, cg_source + ts, tl)
@@ -202,7 +202,7 @@ fn check_effects(uint64 root) {
             // Check: actual must be subset of declared
             if (actual_eff & ~declared_eff) != 0 {
                 uint64 msg = "eff-check: undeclared effect in "
-                write(2, msg, 33)
+                write(2, msg, 32)
                 uint64 ts = tok_text_start(fn_tok)
                 uint64 tl = tok_text_len(fn_tok)
                 write(2, cg_source + ts, tl)
@@ -324,7 +324,7 @@ fn check_lock_cycles() -> uint64 {
                 uint64 wtj = to_j
                 if tok_text_eq(wfi, wtj) != 0 && tok_text_eq(wti, wfj) != 0 {
                     uint64 msg = "lock-cycle: potential deadlock between locks\n"
-                    write(2, msg, 42)
+                    write(2, msg, 45)
                     return 1
                 }
             }
@@ -419,7 +419,7 @@ fn check_critical_stmt(uint64 node, uint64 depth) -> uint64 {
             if depth > 0 {
                 if tok_matches(callee_tok, "alloc", 5) != 0 {
                     uint64 msg = "critical-region: alloc inside critical section\n"
-                    write(2, msg, 48)
+                    write(2, msg, 47)
                 }
             }
         }
