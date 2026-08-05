@@ -1,6 +1,7 @@
 // KernRift self-hosted compiler -- RISC-V RV32IMC IR backend
 //
-// Reads the shared SSA IR (ir.kr) and will emit little-endian RV32IMC
+// Reads the shared IR (ir.kr -- not SSA, see its header) and will emit
+// little-endian RV32IMC
 // machine code, mirroring src/ir_aarch64.kr's structure. target_arch==2.
 //
 // This file currently provides the bit-exact base-ISA instruction encoders

@@ -7412,7 +7412,14 @@ fn main() {
                 write(1, "  --emit=obj                relocatable .o (.obj on Windows)\n", 61)
                 write(1, "  --emit=lkm                Linux loadable kernel module (.ko)\n", 63)
                 write(1, "  --emit=asm                annotated assembly listing\n", 55)
-                write(1, "  --emit=ir                 dump SSA IR per function\n", 53)
+                // NOT SSA. IR_PHI has a declaration and a printer but zero
+                // ir_emit(IR_PHI...) construction sites -- the IR is linear
+                // three-address code over unbounded vregs (named variables
+                // reuse one vreg across assignments, so no phi is ever
+                // needed). This line used to say "dump SSA IR per function",
+                // which was simply false; --emit=ir dumps this linear IR,
+                // pre-DCE.
+                write(1, "  --emit=ir                 dump IR per function\n", 49)
                 // THE `--load-addr=` CLAUSE IS QUALIFIED BECAUSE --reset-vector
                 // FALSIFIED IT (sub-project E, Task 4). This line read "needs
                 // --target=none, explicit --arch, --load-addr=" while
