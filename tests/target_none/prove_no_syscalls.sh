@@ -26,7 +26,9 @@
 #   unexplained failure.
 #
 #   (The load address is no longer hardcoded for the bare-metal form at all.
-#   --emit=image REQUIRES --load-addr= and validates it per-arch, and
+#   --emit=image REQUIRES --load-addr= and validates it per-arch -- EXCEPT
+#   under --reset-vector (sub-project E), which REFUSES it, because a `-bios`
+#   reset vector has no loader to hand an address to -- and
 #   --stack-top= makes the compiler emit the entry stub itself — sub-project
 #   B1 for the flag, B2 tasks 1-4 for the stub. This note used to cite three
 #   src/main.kr line numbers for the hardcoded address; all three had drifted
@@ -39,16 +41,24 @@
 #   wrong in review; a disassembly is not an execution.
 #
 # The serial-output legs live in tests/target_none/boot_gate.sh (sub-projects
-# B1 and B2): both UARTs observed printing computed sentinels from RAW
-# --emit=image artifacts that boot WITH NO EXTERNAL LOADER — x86_64 as
-# `qemu-system-x86_64 -kernel <image>` and nothing else, arm64 with the image
-# and a reset-PC parked on its own emitted stub — one heap-exhaustion halt
+# B1, B2, C, D and E — this list said "B1 and B2" until E Task 4 swept it, by
+# which time three more sub-projects had added legs to that file): both UARTs
+# observed printing computed sentinels from RAW
+# --emit=image artifacts that boot WITH NO EXTERNAL LOADER — and there are now
+# THREE such invocations, not two:
+#   * x86_64 as `qemu-system-x86_64 -kernel <image>` and nothing else (B2);
+#   * arm64 with the image and a reset-PC parked on its own emitted stub (B2),
+#     or handed to QEMU's own loader by the Image header alone (C, L6);
+#   * x86_64 as `qemu-system-x86_64 -bios <image>` and NOTHING ELSE (E, L9) --
+#     no loader at all, the artifact IS the firmware, and the first instruction
+#     executed on the machine is one this compiler emitted, in 16-bit real mode.
+# — plus one heap-exhaustion halt
 # discriminated by parked PC over QMP, a return-to-halt assertion on each
 # arch, and -- SUPPORTING arm64's BLOCKING compile-time alignment refusal -- a
 # misalignment pair showing the same image print at one offset and go
 # silent at another. Every leg carries an observed negative control. Runtime
 # claims about bare metal cite THAT gate; this script's claims remain
-# compile-time only. Nothing in either sub-project has run outside QEMU.
+# compile-time only. NOTHING IN ANY OF THOSE SUB-PROJECTS HAS RUN OUTSIDE QEMU.
 #
 # -----------------------------------------------------------------------------
 # Usage
@@ -216,10 +226,18 @@ gate1() {
     #      BASE compiler refuses the row and there is nothing to diff. Checked,
     #      not assumed: `git show $TN_BASE:src/main.kr | grep 'emit_str, "uefi"'`
     #      matches nothing, and the same for "image".
-    #      What covers them meanwhile: uefi_pe_header_fields_* in the suite
-    #      (static field assertions) and boot_gate.sh L7/L8 (FOURTEEN firmware
-    #      boots: 10 on L7, 4 on L8 -- thirteen was right at c4687c6 and
-    #      stopped being right at a0eed73, which added L7's tenth row). ADD BOTH HERE THE NEXT TIME TN_BASE MOVES PAST THEM -- that
+    #      What covers --emit=uefi meanwhile: uefi_pe_header_fields_* in the
+    #      suite (static field assertions) and boot_gate.sh L7/L8 (FOURTEEN
+    #      firmware boots: 10 on L7, 4 on L8 -- thirteen was right at c4687c6
+    #      and stopped being right at a0eed73, which added L7's tenth row.
+    #      RE-COUNTED AT E TASK 4, because L9 added eight legs to the same file
+    #      and this sentence has been wrong by one before: still 14. L9 boots
+    #      no firmware -- there is none -- so it changes nothing here).
+    #      WHAT COVERS --emit=image MEANWHILE WAS NEVER WRITTEN DOWN, and this
+    #      sentence named only the uefi half. It is boot_gate.sh L1-L6 and L9:
+    #      L9 alone is nine checks and eight `-bios` boots of a --reset-vector
+    #      image (sub-project E), i.e. the --emit=image form with no loader of
+    #      any kind. ADD BOTH HERE THE NEXT TIME TN_BASE MOVES PAST THEM -- that
     #      is the only thing standing in the way, and this note exists so the
     #      omission is a deferral rather than a gap nobody wrote down.
     for a in x86_64 arm64; do
@@ -773,7 +791,7 @@ echo "=== prove_no_syscalls: $PASS passed, $FAIL failed ==="
 echo "    A green run says the compiler emits the right calls and refuses the"
 echo "    right builtins. It does NOT say anything has run on bare metal UNDER"
 echo "    THIS SCRIPT -- see the discharge note near the top of this file, and"
-echo "    tests/target_none/boot_gate.sh (sub-projects B1+B2), which is where bare-"
+echo "    tests/target_none/boot_gate.sh (sub-projects B1+B2+C+D+E), which is where bare-"
 echo "    metal execution is actually observed and proven."
 [ "$FAIL" = "0" ] || exit 1
 exit 0

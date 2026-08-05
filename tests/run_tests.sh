@@ -8768,7 +8768,689 @@ rm -f "$ihdr_a" "$ihdr_b"
 # not exist, so a forward reference here is only safe if the target names
 # itself as the target.)
 
+# --- --reset-vector flag surface (sub-project E, Task 1) ---
+# `krc` alone, given --reset-vector on --emit=image, produces a 65536-byte
+# x86_64 artifact bootable by `qemu-system-x86_64 -bios` and nothing else --
+# no GNU as, no ld, no --defsym, no concatenation script. THIS SECTION IS THE
+# FLAG SURFACE ONLY: the stage bytes it guards are asserted two sections
+# below, in `--reset-vector: the emitted stage`, and booted by leg L9.
+#
+# 13 ROWS. Nine are `img_refuses` (three clauses each: nonzero exit, the
+# diagnostic text, no artifact left on disk), three are `stk_accepts` twins
+# pinning the accepting side of a band edge, and one -- payload too large --
+# is hand-written and different in kind, explained at its own row below.
+#
+# THE COUNT AND THE TENSE WERE BOTH WRONG UNTIL THE FINAL REVIEW. This block
+# said "six of the seven rows" (correct when written, falsified by review r1
+# adding four band-edge rows and two 4 GiB rows) and "will (Task 2) produce"
+# and "it emits no stage bytes" -- stale forward references still standing
+# three commits after Task 2 landed and booted. A count and a tense are
+# exactly the two things a comment cannot be pinned on, so they are the two
+# things to re-derive when touching this file: `grep -cE '^(img_refuses|
+# stk_accepts) '` over the section is where the 12 comes from.
+echo ""
+echo "--- --reset-vector flag surface (E, Task 1) ---"
+
+# 1. arm64: refused. arm64 resets directly into AArch64 state, not through
+#    the real/protected/long-mode transition this form builds; riscv32 and
+#    xtensa already have their own raw paths via --freestanding.
+img_refuses reset_vector_requires_x86_64 "requires --arch=x86_64" \
+    --target=none --arch=arm64 --emit=image --reset-vector --stack-top=0x90000
+
+# 2. --target=linux: refused by the EXISTING --emit=image rule, unchanged --
+#    --reset-vector adds no target requirement of its own beyond what
+#    --emit=image already enforces, so this row pins that the shared refusal
+#    still fires with the new flag present (not merely tested in its
+#    absence).
+img_refuses reset_vector_requires_target_none "requires --target=none" \
+    --target=linux --arch=x86_64 --emit=image --reset-vector --stack-top=0x90000
+
+# 3. --emit=elf: refused. Mirrors --load-addr=/--stack-top=/--image-header's
+#    own "only meaningful with --emit=image" rows just below them in
+#    src/main.kr -- this flag selects a FORM of the flat image, so it needs
+#    one to select. Pattern is the flag's OWN wording, not the shared
+#    substring those three rows' messages also carry, so this row proves
+#    --reset-vector's gate fired and not one of theirs (this line also sets
+#    --stack-top=, which on its own would trip stacktop_requires_image's
+#    identical-looking rule if --reset-vector's check were not ordered and
+#    worded to win first).
+img_refuses reset_vector_requires_emit_image "reset-vector is only meaningful" \
+    --target=none --arch=x86_64 --emit=elf --reset-vector --stack-top=0x90000
+
+# 4. --stack-top= absent: refused. No default stack, ever -- D4's rule,
+#    restated verbatim in src/main.kr's own stack_top declaration -- and this
+#    form sets rsp from the flag's value with nothing to fall back to.
+img_refuses reset_vector_requires_stack_top "requires --stack-top=" \
+    --target=none --arch=x86_64 --emit=image --reset-vector
+
+# 5. --load-addr= given: refused. Measured meaningless (design spec S8 Q2):
+#    a plain --emit=image x86_64 payload is byte-identical at
+#    --load-addr=0x100000 and --load-addr=0x20000000, because this form's
+#    payload always lands at the fixed physical address 0x100000 -- there is
+#    no address left for the flag to choose.
+img_refuses reset_vector_conflicts_load_addr "conflicts with --load-addr=" \
+    --target=none --arch=x86_64 --emit=image --reset-vector --stack-top=0x90000 --load-addr=0x100000
+
+# 6. --stack-top= landing inside the page tables: refused. The reset-vector
+#    stage builds its OWN identity page tables at 0x1000-0x7000 (PDPT[0..3],
+#    four page directories, the full 4 GiB -- wider than the self-boot
+#    trampoline's single-PD 0x1000-0x4000 B2 already refuses on), and the
+#    stack grows down, so the first push must clear that band. 0x2000 is the
+#    band's INTERIOR, deliberately, not an edge -- mirroring
+#    stacktop_x86_range_collision's own caution a few sections up: an edge
+#    alone would read green under an off-by-eight rule too, which is exactly
+#    the defect class B2's edge rows (6c-6e there) exist to catch.
+img_refuses reset_vector_stack_top_in_page_tables "0x1000-0x7000" \
+    --target=none --arch=x86_64 --emit=image --reset-vector --stack-top=0x2000
+
+# 6b-6e. BOTH EDGES OF THAT BAND (review r1 Minor 3). Row 6 alone is the
+#    interior-only probe B2's own review found insufficient (6c-6e there
+#    exist for exactly this reason: an off-by-eight reads green against an
+#    interior value and only an edge row catches it). [stack_top-8,
+#    stack_top) overlaps [0x1000, 0x7000) exactly when stack_top > 0x1000 and
+#    stack_top < 0x7008, so 0x1000 and 0x7008 are the nearest ACCEPTED values
+#    on either side and 0x1001 / 0x7007 the nearest REFUSED ones.
+stk_accepts reset_vector_page_table_low_edge_accepted \
+    --target=none --arch=x86_64 --emit=image --reset-vector --stack-top=0x1000
+img_refuses reset_vector_page_table_low_edge_refused "0x1000-0x7000" \
+    --target=none --arch=x86_64 --emit=image --reset-vector --stack-top=0x1001
+img_refuses reset_vector_page_table_high_edge_refused "0x1000-0x7000" \
+    --target=none --arch=x86_64 --emit=image --reset-vector --stack-top=0x7007
+stk_accepts reset_vector_page_table_high_edge_accepted \
+    --target=none --arch=x86_64 --emit=image --reset-vector --stack-top=0x7008
+
+# 8. --stack-top= at or above the reset-vector stage's own 4 GiB identity
+#    map ceiling: refused (review r1 Important 1). Excluding B2's whole x86
+#    range arm under --reset-vector (Task 1 Step 5's guard on it, a few
+#    sections up: `arch == 0 && reset_vector_set == 0`) also excluded that
+#    arm's "stack must fit inside the identity map" bound -- and unlike the
+#    page-table band and the --load-addr pair, that bound is NOT
+#    B2-specific: it re-derives here to a DIFFERENT map size (the
+#    reset-vector stage's PDPT[0..3] covers the full 4 GiB, not B2's single
+#    GiB), not to nothing. Left unchecked, --stack-top= had NO ceiling at
+#    all under --reset-vector -- 0x100000000 and even
+#    0xFFFFFFFFFFFFFFF0 both exited 0 before this fix. `>=`, not B2's `>`:
+#    the reset-vector stage this bound is about has not been built yet
+#    (Task 1 emits no stage bytes), so the refusal is conservative at the
+#    exact boundary rather than asserting an inclusive edge nobody has
+#    measured for it.
+img_refuses reset_vector_above_4gib_map_refused "below 0x100000000" \
+    --target=none --arch=x86_64 --emit=image --reset-vector --stack-top=0x100000000
+stk_accepts reset_vector_at_4gib_map_edge_accepted \
+    --target=none --arch=x86_64 --emit=image --reset-vector --stack-top=0xFFFFFFFF
+
+# 9. Payload too large for the fixed 65536-byte image: THE REFUSAL THAT
+#    MATTERS MOST, and the one Task 1 does NOT implement. Its absence is not
+#    "a wrong command line accepted" the way rows 1-8 are -- it is a
+#    SILENTLY TRUNCATED BOOTABLE IMAGE, the only failure mode in this list
+#    that produces a working-looking artifact that is WRONG rather than an
+#    artifact that is simply absent. The check belongs at finalize, because
+#    PAYLEN -- the copied payload's length -- does not exist until codegen
+#    has produced it; every refusal above runs entirely at flag-parse time,
+#    before compilation, and has no PAYLEN to check against.
+#
+# THIS ROW IS DELIBERATELY LEFT RED. Task 1 owns writing it, running it for
+# real, and reporting what it actually does -- not skipping it, not loosening
+# its assertion until it passes, not marking it a false PASS/SKIP. It is a
+# genuine FAIL in this suite's count until sub-project E's Task 2 implements
+# the finalize-time fit check; that task is what turns this row green.
+#
+# TASK 2 LANDED AND THIS ROW IS NOW GREEN, with its assertion UNCHANGED --
+# that was the point of writing it before the check existed. The refusal it
+# now catches names both sizes, and the bound it fires against
+# (65536 - payoff - 16) is pinned from BOTH SIDES by
+# resetvec_fit_edge_accepted / resetvec_fit_edge_refused in the section
+# below; this row's 100000-byte array proves the check exists, those two
+# prove where it is.
+#
+# big.kr is GENERATED here, not committed: a 100000-byte static array is
+# enough to exceed any plausible "65536 - PAYOFF - 16" bound (PAYOFF is the
+# ~294-byte reset-vector stage's own size, not yet implemented and therefore
+# not knowable to this row) by a wide margin, regardless of what PAYOFF turns
+# out to be once Task 2 lands.
+RV_BIG_SRC="$DIR/../test_tmp_rvbig_$$.kr"
+printf 'static uint8[100000] rv_big_pad\nfn main() -> uint64 { unsafe { *((rv_big_pad + 99999) as uint8) = 7 }\n return 0 }\n' > "$RV_BIG_SRC"
+TOTAL=$((TOTAL + 1))
+rm -f /tmp/krc_rvbig_$$
+rvbig_out=$($KRC $KRC_FLAGS "$RV_BIG_SRC" -o /tmp/krc_rvbig_$$ --target=none --arch=x86_64 --emit=image --reset-vector --stack-top=0x90000 2>&1); rvbig_st=$?
+if [ $rvbig_st -ne 0 ] && echo "$rvbig_out" | grep -qi 'too large\|does not fit\|65536' && [ ! -f /tmp/krc_rvbig_$$ ]; then
+    PASS=$((PASS + 1)); echo "  reset_vector_payload_too_large: PASS (Task 2's finalize check already landed)"
+else
+    # E TASK 4: this text used to say "EXPECTED RED at Task 1 ... Task 2 must
+    # turn this row green". Task 2 turned it green, so the same words would now
+    # tell a reader that a live regression is expected. A red here is a red.
+    echo "FAIL: reset_vector_payload_too_large (a 100000-byte payload was NOT refused by the finalize-time fit check Task 2 landed; exit=$rvbig_st, artifact=$([ -f /tmp/krc_rvbig_$$ ] && echo yes || echo no). This is a regression, not a known gap.)"
+    FAIL=$((FAIL + 1))
+fi
+rm -f /tmp/krc_rvbig_$$ "$RV_BIG_SRC"
+
 rm -f "$STK_SRC" "$IMG_SRC"
+
+# --- --reset-vector: the emitted stage (sub-project E, Task 2) --------------
+#
+# WHAT CHANGED UNDER THIS SECTION'S FEET. Everything above is flag-parse
+# behaviour and holds with no stage bytes at all; Task 2 emits the stage, so
+# `--reset-vector` now produces a 65536-byte artifact that boots under
+# `qemu-system-x86_64 -bios` and nothing else. The row directly above
+# (reset_vector_payload_too_large) went green as a side effect and is
+# unchanged -- its assertion was written for this moment.
+#
+# EVERY ROW HERE IS STATIC, AND STATIC IS NOT ENOUGH ON ITS OWN. A stage can
+# satisfy all of them and still triple-fault: the boot itself is boot-gate leg
+# L9's (Task 3). What these rows are FOR is the class of defect a boot cannot
+# localise -- a far jump to a stale offset, a GDT whose 0x08 is the wrong
+# width, a `rep movsl` count that is short by three bytes -- each of which
+# shows up on the wire as an indistinguishable silent reboot.
+#
+# NOTHING HERE IS ASSERTED AGAINST A WRITTEN-DOWN OFFSET. The checker below
+# starts at byte 0 and WALKS: `cli;cld`, then the `lgdtl` disp to the GDTR, the
+# GDTR's base to the GDT, the 16-bit far jump to start32, the 32-bit far jump
+# to lm64, the `movabs` to the stack top, the `mov $imm32,%rax` to the entry.
+# Every hop is read out of the artifact, so a patch site that was captured and
+# then never written reads back as its own placeholder and fails at the hop
+# that consumes it, naming that hop. A table of expected offsets would instead
+# go stale silently the first time an instruction changed length -- which has
+# already happened once in this file's history, to B2's stub, WITHOUT changing
+# the total size (the .align-16 pad absorbed it).
+echo ""
+echo "--- --reset-vector: the emitted stage (E, Task 2) ---"
+
+# A program with a static, a called helper and a non-trivial main, so the
+# payload is more than a `ret` and `kentoff` is not trivially 0. Deliberately
+# NOT the boot gate's sentinel_x86.kr: that one imports ../std/uart_16550.kr,
+# whose resolution depends on where the source is placed, and these rows are
+# about bytes rather than about output.
+RVS_SRC="$DIR/../test_tmp_rvs_$$.kr"
+printf 'static uint64 rvs_acc = 0\nfn rvs_fib(uint64 n) -> uint64 { if n < 2 { return n }\n return rvs_fib(n - 1) + rvs_fib(n - 2) }\nfn main() -> uint64 { rvs_acc = rvs_fib(7)\n return rvs_acc }\n' > "$RVS_SRC"
+RVS_A=/tmp/krc_rvs_a_$$        # --reset-vector, --stack-top=0x90000
+RVS_B=/tmp/krc_rvs_b_$$        # --reset-vector, --stack-top=0x80000
+RVS_P=/tmp/krc_rvs_p_$$        # the SAME program with NO --reset-vector
+
+rvs_build() {   # $1 src, $2 out, $3 stack-top -- stdout = the two report lines
+    rm -f "$2"
+    $KRC $KRC_FLAGS "$1" -o "$2" --target=none --arch=x86_64 --emit=image \
+        --reset-vector --stack-top="$3" 2>&1
+}
+rvs_field() {   # $1 report text, $2 field name -> its value
+    echo "$1" | grep -oE "$2=[0-9]+" | head -1 | cut -d= -f2
+}
+
+rvs_a=$(rvs_build "$RVS_SRC" "$RVS_A" 0x90000); rvs_a_st=$?
+rvs_b=$(rvs_build "$RVS_SRC" "$RVS_B" 0x80000); rvs_b_st=$?
+rm -f "$RVS_P"
+rvs_p=$($KRC $KRC_FLAGS "$RVS_SRC" -o "$RVS_P" --target=none --arch=x86_64 \
+        --emit=image --load-addr=0x100000 2>&1); rvs_p_st=$?
+
+rvs_payoff=$(rvs_field "$rvs_a" payoff)
+rvs_paylen=$(rvs_field "$rvs_a" paylen)
+rvs_kentoff=$(rvs_field "$rvs_a" kentoff)
+
+# The walker. Prints one facts line on success; on failure prints every
+# complaint it found (not just the first -- a wrong GDT and a wrong far jump
+# are two separate defects and finding them one boot at a time is what this
+# sub-project is trying to stop doing).
+rvs_check() {   # $1 image, $2 stack-top, $3 payoff, $4 paylen, $5 kentoff
+    python3 - "$1" "$2" "$3" "$4" "$5" <<'PY'
+import sys, struct
+d       = open(sys.argv[1], "rb").read()
+sp      = int(sys.argv[2], 0)
+payoff  = int(sys.argv[3]); paylen = int(sys.argv[4]); kentoff = int(sys.argv[5])
+BIOS    = 0xFFFF0000
+bad     = []
+def u16(o): return struct.unpack_from("<H", d, o)[0]
+def u32(o): return struct.unpack_from("<I", d, o)[0]
+def u64(o): return struct.unpack_from("<Q", d, o)[0]
+def find1(pat, what, lo, hi):
+    hits, i = [], lo
+    while True:
+        j = d.find(pat, i, hi)
+        if j < 0: break
+        hits.append(j); i = j + 1
+    if len(hits) != 1:
+        bad.append("%s: %d matches for %s in [%d,%d), want exactly 1"
+                   % (what, len(hits), pat.hex(), lo, hi))
+        return None
+    return hits[0]
+
+# --- the fixed geometry ---------------------------------------------------
+if len(d) != 65536:
+    bad.append("file is %d bytes, not 65536 -- `-bios` was MEASURED to refuse "
+               "32768 and 66000" % len(d))
+    print("; ".join(bad)); sys.exit(1)
+if d[0:2] != bytes.fromhex("fafc"):
+    bad.append("the stage does not begin cli;cld (fa fc) but %s -- file offset "
+               "0 is where the reset jmp lands" % d[0:2].hex())
+if d[0xFFF0:0xFFF3] != bytes.fromhex("e90d00"):
+    bad.append("bytes at 0xFFF0 are %s, not the 3-byte near `jmp` e9 0d 00. "
+               "The CPU resets to CS=f000:IP=fff0, so this is the first "
+               "instruction executed" % d[0xFFF0:0xFFF3].hex())
+if d[0xFFF3:0x10000] != b"\x00" * 13:
+    bad.append("the 13 bytes after the reset jmp are not zero")
+if any(u32(i) == 0x1BADB002 for i in range(0, payoff - 3, 4)):
+    bad.append("a multiboot magic appears inside the stage -- B2's "
+               "--stack-top stub fired on the reset-vector path, and two "
+               "file-offset-0 constructs cannot share a file")
+
+# --- 16-bit real: cli/cld -> lgdt -> CR0.PE -> ljmp $0x08 -----------------
+lgdt = find1(bytes.fromhex("2e660f0116"), "lgdtl %cs:disp16", 0, payoff)
+gdt_off = None
+if lgdt is not None:
+    gdtr_off = u16(lgdt + 5)
+    # A BARE FILE OFFSET, not a linear address: the disp is read through CS,
+    # whose base is already 0xFFFF0000.
+    if gdtr_off + 6 > payoff:
+        bad.append("the lgdtl disp16 is %d, which is not inside the stage "
+                   "[0,%d)" % (gdtr_off, payoff))
+    else:
+        lim = u16(gdtr_off)
+        gdt_off = u32(gdtr_off + 2) - BIOS
+        if lim != 31:
+            bad.append("gdtr limit %d != 31 (4 quads - 1)" % lim)
+        if gdt_off < 0 or gdt_off + 32 != gdtr_off:
+            bad.append("gdtr base %08x -> file offset %d; +32 != gdtr at %d"
+                       % (u32(gdtr_off + 2), gdt_off, gdtr_off))
+        else:
+            want = [0, 0x00CF9A000000FFFF, 0x00CF92000000FFFF, 0x00AF9A000000FFFF]
+            for i, w in enumerate(want):
+                if u64(gdt_off + i * 8) != w:
+                    bad.append("gdt[%d] = %016x != %016x"
+                               % (i, u64(gdt_off + i * 8), w))
+            # The width bits, decoded rather than pattern-matched: byte 6 of a
+            # descriptor carries L (0x20) and D/B (0x40). THIS is the check
+            # that separates this stage from emit_x86_image_stub's, whose 0x08
+            # is 64-bit code -- a 16-bit stage ljmp'ing $0x08 into THAT lands
+            # in long mode with paging off.
+            f08, f18 = d[gdt_off + 8 + 6], d[gdt_off + 24 + 6]
+            if (f08 & 0x20) != 0 or (f08 & 0x40) == 0:
+                bad.append("GDT 0x08 flags %02x: L=%d D/B=%d -- it must be "
+                           "32-BIT code (L=0, D/B=1)"
+                           % (f08, (f08 >> 5) & 1, (f08 >> 6) & 1))
+            if (f18 & 0x20) == 0 or (f18 & 0x40) != 0:
+                bad.append("GDT 0x18 flags %02x: L=%d D/B=%d -- it must be "
+                           "64-BIT code (L=1, D/B=0)"
+                           % (f18, (f18 >> 5) & 1, (f18 >> 6) & 1))
+
+start32 = None
+lj16 = find1(bytes.fromhex("66ea"), "16-bit ljmpl", 0, payoff)
+if lj16 is not None:
+    if u16(lj16 + 6) != 0x0008:
+        bad.append("16-bit ljmpl selector %04x != 0x08 (the 32-bit code CS)"
+                   % u16(lj16 + 6))
+    start32 = u32(lj16 + 2) - BIOS
+    if start32 < 0 or start32 + 9 > payoff:
+        bad.append("16-bit ljmpl targets %08x, outside the stage"
+                   % u32(lj16 + 2))
+        start32 = None
+    elif d[start32:start32 + 4] != bytes.fromhex("66b81000"):
+        bad.append("16-bit ljmpl lands on %s, not `mov $0x10,%%ax` (66b81000)"
+                   % d[start32:start32 + 4].hex())
+
+# --- 32-bit protected: the copy, the 4 GiB map, ljmp $0x18 ---------------
+lm64 = None
+if start32 is not None:
+    m = find1(bytes.fromhex("f3a5"), "rep movsl", start32, payoff)
+    if m is not None:
+        if d[m - 15] != 0xBE or d[m - 10] != 0xBF or d[m - 5] != 0xB9:
+            bad.append("the 15 bytes before `rep movsl` are not "
+                       "mov $imm32,%%esi / %%edi / %%ecx: %s"
+                       % d[m - 15:m].hex())
+        else:
+            if u32(m - 14) != BIOS + payoff:
+                bad.append("the copy source is %08x, i.e. file offset %d, not "
+                           "the reported payoff %d"
+                           % (u32(m - 14), u32(m - 14) - BIOS, payoff))
+            if u32(m - 9) != 0x100000:
+                bad.append("the copy destination is %08x, not 0x100000"
+                           % u32(m - 9))
+            want_dw = (paylen + 3) // 4
+            if u32(m - 4) != want_dw:
+                bad.append("`rep movsl` count is %d dwords, not ceil(%d/4)=%d "
+                           "-- a truncating divide leaves the payload's last "
+                           "1-3 bytes uncopied"
+                           % (u32(m - 4), paylen, want_dw))
+    z = find1(bytes.fromhex("f3ab"), "rep stosl", start32, payoff)
+    if z is not None:
+        if d[z - 5] != 0xB9 or u32(z - 4) != 0x1800:
+            bad.append("the page-table zeroing count is not 0x1800 dwords "
+                       "(0x1000..0x7000, six pages)")
+    for addr, val in ((0x1000, 0x2003), (0x2000, 0x3003), (0x2008, 0x4003),
+                      (0x2010, 0x5003), (0x2018, 0x6003)):
+        find1(b"\xc7\x05" + struct.pack("<II", addr, val),
+              "movl $%04x,%04x" % (val, addr), start32, payoff)
+    pd = find1(bytes.fromhex("b883000000") + b"\xb9", "mov $0x83,%eax; mov "
+               "$imm32,%ecx", start32, payoff)
+    if pd is not None:
+        n = u32(pd + 6)
+        if n != 2048:
+            # THE SYMPTOM IS REPETITION, NOT CESSATION, and Task 3's control
+            # derives its expectation from this line. Measured by cutting an
+            # emitted artifact's loop count to 512 and booting it:
+            # `RPRPRPRP...` forever, because the triple fault resets the CPU
+            # back into the stage. A control that greps for a serial capture
+            # ENDING in `RP` would pass on the correct compiler too; the
+            # discriminator is that `L` never appears.
+            bad.append("the page directory loop runs %d times = %d MiB "
+                       "identity-mapped, not 2048 = 4 GiB. This stage RUNS at "
+                       "0xFFFF0000; a short map triple-faults on the far jump, "
+                       "resets, and re-runs -- measured `RPRPRP...` repeating "
+                       "with `L` never printed" % (n, n * 2))
+    lj32 = find1(bytes.fromhex("0f22c0ea"), "mov %eax,%cr0; ljmp",
+                 start32, payoff)
+    if lj32 is not None:
+        if u16(lj32 + 8) != 0x0018:
+            bad.append("32-bit ljmp selector %04x != 0x18 (the 64-bit code CS)"
+                       % u16(lj32 + 8))
+        lm64 = u32(lj32 + 4) - BIOS
+        if lm64 < 0 or lm64 + 32 > payoff:
+            bad.append("32-bit ljmp targets %08x, outside the stage"
+                       % u32(lj32 + 4))
+            lm64 = None
+
+# --- 64-bit long mode: rsp, the entry, the landing pad -------------------
+if lm64 is not None:
+    if d[lm64:lm64 + 10] != bytes.fromhex("66b810008ed88ec08ed0"):
+        bad.append("lm64 does not begin with the data-segment reloads: %s"
+                   % d[lm64:lm64 + 10].hex())
+    mv = lm64 + 10
+    if d[mv:mv + 2] != bytes.fromhex("48bc"):
+        bad.append("no `movabs $imm64,%%rsp` (48 bc) at lm64+10, found %s. The "
+                   "7-byte `mov $imm32,%%rsp` SIGN-EXTENDS and --reset-vector "
+                   "accepts --stack-top up to 0xFFFFFFFF"
+                   % d[mv:mv + 2].hex())
+    elif u64(mv + 2) != sp:
+        bad.append("movabs carries %016x, not --stack-top %08x -- the flag was "
+                   "validated and reported and then IGNORED" % (u64(mv + 2), sp))
+    ent = mv + 10 + 7
+    if d[mv + 10:ent] != bytes.fromhex("66baf803b04cee"):
+        bad.append("the 'L' sentinel (mov $0x3F8,%%dx; mov $'L',%%al; out) is "
+                   "missing after the rsp load: %s. Without R/P/L a triple "
+                   "fault is an indistinguishable silent reboot"
+                   % d[mv + 10:ent].hex())
+    if d[ent:ent + 3] != bytes.fromhex("48c7c0"):
+        bad.append("no `mov $imm32,%%rax` at the entry site, found %s"
+                   % d[ent:ent + 3].hex())
+    else:
+        want = 0x100000 + kentoff
+        if u32(ent + 3) == 0:
+            bad.append("the entry immediate is 0 -- the UNPATCHED placeholder. "
+                       "`call *%rax` to 0 is a triple fault, not a diagnostic")
+        elif u32(ent + 3) != want:
+            bad.append("the entry immediate is %08x, not 0x100000 + kentoff "
+                       "%d = %08x" % (u32(ent + 3), kentoff, want))
+    if d[ent + 7:ent + 12] != bytes.fromhex("ffd0f4ebfd"):
+        bad.append("bytes after the entry load are %s, not `call *%%rax; hlt; "
+                   "jmp .` (ffd0f4ebfd) -- a returning payload would run into "
+                   "the GDT" % d[ent + 7:ent + 12].hex())
+
+# --- the payload's own bounds --------------------------------------------
+if payoff + paylen > 0xFFF0:
+    bad.append("payoff %d + paylen %d = %d runs into the reset vector at "
+               "0xFFF0" % (payoff, paylen, payoff + paylen))
+elif d[payoff + paylen:0xFFF0] != b"\x00" * (0xFFF0 - payoff - paylen):
+    bad.append("the fill between the payload and the reset vector is not zero")
+if gdt_off is not None and not (gdt_off + 38 <= payoff < gdt_off + 38 + 16):
+    bad.append("payoff %d is not the 16-byte-aligned end of the stage "
+               "(gdtr ends at %d)" % (payoff, gdt_off + 38))
+
+if bad:
+    print("; ".join(bad)); sys.exit(1)
+print("stage=%d payload=%d..%d entry=0x%x fill=%d"
+      % (payoff, payoff, payoff + paylen, 0x100000 + kentoff,
+         0xFFF0 - payoff - paylen))
+PY
+}
+
+# 1. The report line, and the artifact agreeing with it. `entry=0` is the
+#    DECISION Task 2 makes (design spec S7 left it open): under --reset-vector
+#    the reported entry is the stage's own first byte, because the reset jmp
+#    transfers to CS:0 and nothing else in the artifact is entered from
+#    outside. The `image:` line's SHAPE is unchanged -- the three numbers a
+#    consumer needs get their own `reset-vector:` line rather than being
+#    squeezed into a field that means a file offset everywhere else.
+TOTAL=$((TOTAL + 1))
+rvs_why=""
+rvs_disk=$(stat -c%s "$RVS_A" 2>/dev/null)
+if [ $rvs_a_st -ne 0 ]; then
+    rvs_why="the build failed (exit=$rvs_a_st): $(echo "$rvs_a" | head -1)"
+elif ! echo "$rvs_a" | grep -q 'image: arch=x86_64 entry=0 filesz=65536 memsz=65536 load=0'; then
+    rvs_why="image line is '$(echo "$rvs_a" | grep '^image:')', want 'image: arch=x86_64 entry=0 filesz=65536 memsz=65536 load=0'"
+elif ! echo "$rvs_a" | grep -qE '^reset-vector: payoff=[0-9]+ paylen=[0-9]+ kentoff=[0-9]+ stack=589824$'; then
+    rvs_why="no well-formed 'reset-vector:' line: '$(echo "$rvs_a" | grep '^reset-vector:')'"
+elif [ "$rvs_disk" != "65536" ]; then
+    rvs_why="the report claims filesz=65536 and the file on disk is ${rvs_disk:-absent} bytes"
+fi
+if [ -z "$rvs_why" ]; then
+    PASS=$((PASS + 1)); echo "  resetvec_report_line: PASS (entry=0, 65536 B on disk, payoff=$rvs_payoff paylen=$rvs_paylen kentoff=$rvs_kentoff)"
+else
+    echo "FAIL: resetvec_report_line ($rvs_why)"; FAIL=$((FAIL + 1))
+fi
+
+# 2. The stage decodes, hop by hop, from byte 0. See the section header for
+#    why nothing here is compared against a written-down offset.
+TOTAL=$((TOTAL + 1))
+if [ $rvs_a_st -ne 0 ] || [ -z "$rvs_payoff" ]; then
+    echo "FAIL: resetvec_stage_decodes (no artifact to decode: exit=$rvs_a_st)"
+    FAIL=$((FAIL + 1))
+else
+    rvs_facts=$(rvs_check "$RVS_A" 0x90000 "$rvs_payoff" "$rvs_paylen" "$rvs_kentoff"); rvs_rc=$?
+    if [ $rvs_rc -eq 0 ]; then
+        PASS=$((PASS + 1)); echo "  resetvec_stage_decodes: PASS ($rvs_facts)"
+    else
+        echo "FAIL: resetvec_stage_decodes (${rvs_facts:-the checker produced no output and exited $rvs_rc})"
+        FAIL=$((FAIL + 1))
+    fi
+fi
+
+# 3. THE PAYLOAD IS THE ORDINARY --emit=image ARTIFACT, UNSHIFTED AND
+#    UNMODIFIED, and payoff/paylen/kentoff say exactly where it is. This is
+#    the row that gives the three fields an INDEPENDENT source: the same
+#    program built without --reset-vector is the payload, byte for byte, its
+#    size is paylen and its reported entry is kentoff. Nothing in this row
+#    reads a number out of the reset-vector build to check the reset-vector
+#    build against itself.
+TOTAL=$((TOTAL + 1))
+rvs_pe=$(rvs_field "$rvs_p" entry)
+rvs_pz=$(stat -c%s "$RVS_P" 2>/dev/null)
+rvs_why=""
+if [ $rvs_p_st -ne 0 ]; then
+    rvs_why="the plain --emit=image build failed (exit=$rvs_p_st)"
+elif [ "$rvs_paylen" != "$rvs_pz" ]; then
+    rvs_why="paylen=$rvs_paylen but the same program without --reset-vector is $rvs_pz bytes"
+elif [ "$rvs_kentoff" != "$rvs_pe" ]; then
+    rvs_why="kentoff=$rvs_kentoff but the same program without --reset-vector reports entry=$rvs_pe"
+elif ! python3 -c "
+import sys
+a=open(sys.argv[1],'rb').read(); b=open(sys.argv[2],'rb').read(); o=int(sys.argv[3])
+sys.exit(0 if a[o:o+len(b)]==b else 1)" "$RVS_A" "$RVS_P" "$rvs_payoff"; then
+    rvs_why="the $rvs_pz bytes at offset $rvs_payoff are not the plain --emit=image artifact"
+fi
+if [ -z "$rvs_why" ]; then
+    PASS=$((PASS + 1)); echo "  resetvec_payload_is_the_plain_image: PASS ($rvs_pz B at offset $rvs_payoff, entry $rvs_pe == kentoff)"
+else
+    echo "FAIL: resetvec_payload_is_the_plain_image ($rvs_why)"; FAIL=$((FAIL + 1))
+fi
+
+# 4. --stack-top REACHES THE GUEST, and reaches it at BOTH sites. B2's own
+#    review (C4) found a stub that validated and reported the flag and then
+#    emitted the reference .S's hardcoded 0x90000, and a single-value row
+#    cannot see that -- 0x90000 IS the reference's constant. So: two values,
+#    each image decoded against its OWN value by the walker above (which
+#    reads the `movabs` and compares), plus a differential that pins the
+#    SECOND site, the 32-bit `mov $imm32,%esp` the walker does not check.
+#
+#    THE EXPECTED DIFF COUNT IS DERIVED, NOT WRITTEN DOWN. Two stack tops
+#    that differ in one byte produce a two-byte diff, not a twelve-byte one
+#    -- 0x00090000 and 0x00080000 differ only in their third byte. So the
+#    expectation is 2 x (bytes that differ in the low four), which is what
+#    "the value reaches exactly two immediates" means for ANY pair. Writing
+#    12 here would have been an assertion about the encoding's width rather
+#    than about the value, and it read RED against a correct compiler.
+TOTAL=$((TOTAL + 1))
+rvs_why=""
+if [ $rvs_b_st -ne 0 ]; then
+    rvs_why="the 0x80000 build failed (exit=$rvs_b_st)"
+else
+    rvs_facts=$(rvs_check "$RVS_B" 0x80000 "$(rvs_field "$rvs_b" payoff)" \
+                "$(rvs_field "$rvs_b" paylen)" "$(rvs_field "$rvs_b" kentoff)"); rvs_rc=$?
+    if [ $rvs_rc -ne 0 ]; then
+        rvs_why="the 0x80000 image does not decode: $rvs_facts"
+    else
+        rvs_diff=$(python3 -c "
+import sys
+a = open(sys.argv[1], 'rb').read(); b = open(sys.argv[2], 'rb').read()
+payoff = int(sys.argv[3])
+sa, sb = int(sys.argv[4], 0), int(sys.argv[5], 0)
+if len(a) != len(b):
+    print('sizes differ: %d vs %d' % (len(a), len(b))); raise SystemExit
+off = [i for i in range(len(a)) if a[i] != b[i]]
+want = 2 * sum(1 for k in range(4) if ((sa >> (8 * k)) & 0xFF) != ((sb >> (8 * k)) & 0xFF))
+if len(off) != want:
+    print('%d bytes differ, want %d = 2 x the differing bytes of the two '
+          'stack tops -- one site is a constant, or something else tracks '
+          'the flag' % (len(off), want))
+elif off and max(off) >= payoff:
+    print('a differing byte at offset %d lies in the PAYLOAD (payoff=%d): '
+          '--stack-top must change the stage only' % (max(off), payoff))
+else:
+    print('ok %d' % len(off))" "$RVS_A" "$RVS_B" "$rvs_payoff" 0x90000 0x80000)
+        case "$rvs_diff" in
+            "ok "*) ;;
+            *) rvs_why="$rvs_diff" ;;
+        esac
+    fi
+fi
+if [ -z "$rvs_why" ]; then
+    PASS=$((PASS + 1)); echo "  resetvec_stack_top_reaches_the_guest: PASS (0x90000 vs 0x80000: $rvs_diff differing bytes, all inside the stage)"
+else
+    echo "FAIL: resetvec_stack_top_reaches_the_guest ($rvs_why)"; FAIL=$((FAIL + 1))
+fi
+
+# 5. THE FIT REFUSAL'S EDGE, both sides. The row above
+#    (reset_vector_payload_too_large) uses a 100000-byte array -- an order of
+#    magnitude past the bound, which proves the check exists and says nothing
+#    about where it is. The bound is 65536 - payoff - 16, and it is the LAST
+#    accepted payload that a truncating image would silently produce, so both
+#    sides of it are pinned. The array sizes are DERIVED from the reported
+#    payoff, not written down: payoff is an emission detail and hardcoding it
+#    here would turn a stage-length change into a mysterious red.
+rvs_avail=$(( 65536 - rvs_payoff - 16 ))
+RVS_FIT="$DIR/../test_tmp_rvfit_$$.kr"
+rvs_fit_try() {   # $1 array size -> exit status; leaves the artifact or not
+    printf 'static uint8[%d] rvf_p\nfn main() -> uint64 { unsafe { *((rvf_p + %d) as uint8) = 7 }\n return 0 }\n' "$1" $(( $1 - 1 )) > "$RVS_FIT"
+    rm -f /tmp/krc_rvfit_$$
+    $KRC $KRC_FLAGS "$RVS_FIT" -o /tmp/krc_rvfit_$$ --target=none --arch=x86_64 \
+        --emit=image --reset-vector --stack-top=0x90000 2>&1
+}
+# THE EDGE IS FOUND, NOT ASSUMED. The array size that produces the largest
+# fitting payload is not `rvs_avail`: the program carries code of its own and
+# a static is aligned, so the array-size-to-payload-size map has a step. Walk
+# DOWN from the bound to the first accepted size -- that is the accept/refuse
+# boundary by construction, whatever the step turns out to be -- and pin both
+# sides of it. Asserting "paylen == rvs_avail exactly" would have been an
+# assumption about that alignment, which is precisely the class of claim this
+# sub-project keeps getting wrong.
+rvs_max=""
+rvs_n=$rvs_avail
+while [ $rvs_n -ge $(( rvs_avail - 128 )) ]; do
+    if rvs_fit_try $rvs_n >/dev/null 2>&1; then rvs_max=$rvs_n; break; fi
+    rvs_n=$(( rvs_n - 1 ))
+done
+TOTAL=$((TOTAL + 1))
+rvs_maxlen=""
+if [ -z "$rvs_max" ]; then
+    echo "FAIL: resetvec_fit_edge_accepted (no array size within 128 bytes of the $rvs_avail-byte bound was accepted)"
+    FAIL=$((FAIL + 1))
+else
+    rvs_out=$(rvs_fit_try $rvs_max)
+    rvs_maxlen=$(rvs_field "$rvs_out" paylen)
+    if [ -n "$rvs_maxlen" ] && [ "$rvs_maxlen" -le "$rvs_avail" ] \
+       && [ "$rvs_maxlen" -gt $(( rvs_avail - 16 )) ] \
+       && [ "$(stat -c%s /tmp/krc_rvfit_$$ 2>/dev/null)" = "65536" ]; then
+        PASS=$((PASS + 1)); echo "  resetvec_fit_edge_accepted: PASS (paylen=$rvs_maxlen fits under 65536 - $rvs_payoff - 16 = $rvs_avail, still a 65536-byte image)"
+    else
+        echo "FAIL: resetvec_fit_edge_accepted (largest accepted array $rvs_max gives paylen=${rvs_maxlen:-?}, want <= $rvs_avail and within 16 of it)"
+        FAIL=$((FAIL + 1))
+    fi
+fi
+TOTAL=$((TOTAL + 1))
+rvs_out=$(rvs_fit_try $(( ${rvs_max:-$rvs_avail} + 1 ))); rvs_st=$?
+if [ $rvs_st -ne 0 ] && [ ! -f /tmp/krc_rvfit_$$ ] \
+   && echo "$rvs_out" | grep -q "does not fit" \
+   && echo "$rvs_out" | grep -q "only $rvs_avail are available"; then
+    PASS=$((PASS + 1)); echo "  resetvec_fit_edge_refused: PASS (one array byte past the last fitting build is refused, naming both sizes)"
+else
+    echo "FAIL: resetvec_fit_edge_refused (exit=$rvs_st, artifact=$([ -f /tmp/krc_rvfit_$$ ] && echo yes || echo no), out=$(echo "$rvs_out" | head -1))"
+    FAIL=$((FAIL + 1))
+fi
+rm -f /tmp/krc_rvfit_$$ "$RVS_FIT"
+
+# 7-10. THE PAYLOAD-OVERLAP BAND, interior plus both edges (whole-branch
+#    review, Important 1). The design spec's stack rule has two disjuncts --
+#    "--stack-top overlaps 0x1000-0x7000 OR 0x100000..+PAYLEN" -- and only
+#    the first shipped, while two comments in src/main.kr asserted the second
+#    had merely been deferred to finalize. It had been deferred there and
+#    then not written.
+#
+#    WHY NO OTHER ROW OR DOCUMENTED LIMIT COVERS IT. 0x100008 is inside the
+#    4 GiB map, inside installed RAM, and clear of 0x1000-0x7000, so the
+#    ceiling row, the documented (unrefusable) RAM bound and the page-table
+#    band rows all pass it. Forced red against the shipped compiler by
+#    BOOTING it: `--stack-top=0x100008` exited 0, wrote a 65536-byte
+#    artifact, put `RPL` on the wire and then wedged with no further output
+#    -- `call *%rax` pushes its return address over the first eight bytes of
+#    the payload it is about to enter. The same source at 0x90000 prints
+#    `RPL2000000016`.
+#
+#    THE EDGES ARE DERIVED FROM THE REPORTED paylen, not written down: the
+#    band is [stack_top-8, stack_top) against [0x100000, 0x100000+paylen),
+#    which overlaps exactly when stack_top > 0x100000 and
+#    stack_top < 0x100000 + paylen + 8. Same +8 convention as the page-table
+#    band and as B2's stack-vs-image check, and the same documented limit:
+#    it catches what is corrupt from the FIRST push. Measured and not
+#    refused: 0x100400 (eight bytes past a 1016-byte payload) still boots to
+#    `RPL` and dies once the payload's own frames walk down into it, exactly
+#    as B2's equivalent comment already says of its own bound.
+rvs_ovl_try() {   # $1 stack-top -> compiler output; exit status in $?
+    rm -f /tmp/krc_rvovl_$$
+    $KRC $KRC_FLAGS "$RVS_SRC" -o /tmp/krc_rvovl_$$ --target=none --arch=x86_64 \
+        --emit=image --reset-vector --stack-top="$1" 2>&1
+}
+rvs_ovl_row() {   # $1 name, $2 stack-top, $3 "R" refused / "A" accepted
+    TOTAL=$((TOTAL + 1))
+    local out st; out=$(rvs_ovl_try "$2"); st=$?
+    local art=no; [ -f /tmp/krc_rvovl_$$ ] && art=yes
+    local why=""
+    if [ "$3" = "R" ]; then
+        [ $st -ne 0 ] || why="exit=0"
+        [ "$art" = "no" ] || why="$why artifact-left-on-disk"
+        echo "$out" | grep -q "would land inside the reset-vector payload" \
+            || why="$why wrong-or-missing-message"
+    else
+        [ $st -eq 0 ] || why="exit=$st"
+        [ "$art" = "yes" ] || why="$why no-artifact"
+    fi
+    rm -f /tmp/krc_rvovl_$$
+    if [ -z "$why" ]; then
+        PASS=$((PASS + 1)); echo "  $1: PASS"
+    else
+        echo "FAIL: $1 (--stack-top=$2 want $3:$why; out=$(echo "$out" | head -1 | cut -c1-100))"
+        FAIL=$((FAIL + 1))
+    fi
+}
+rvs_pl=$rvs_paylen
+if [ -z "$rvs_pl" ]; then
+    TOTAL=$((TOTAL + 1)); FAIL=$((FAIL + 1))
+    echo "FAIL: resetvec_stack_top_in_payload (no paylen was reported, so the band's edges cannot be derived)"
+else
+    # 0x100000 = 1048576. Low edge ACCEPTED: the push lands below the payload.
+    rvs_ovl_row resetvec_stack_top_payload_low_edge_accepted 1048576 A
+    # Interior: the whole first push lands inside the payload's first bytes.
+    rvs_ovl_row resetvec_stack_top_in_payload_refused 1048584 R
+    # High edge: one byte of the push still inside, then fully clear.
+    rvs_ovl_row resetvec_stack_top_payload_high_edge_refused $(( 1048576 + rvs_pl + 7 )) R
+    rvs_ovl_row resetvec_stack_top_payload_high_edge_accepted $(( 1048576 + rvs_pl + 8 )) A
+fi
+rm -f "$RVS_SRC" "$RVS_A" "$RVS_B" "$RVS_P"
 
 # --- --emit=uefi flag surface, payload geometry, PE header (D, Tasks 1-2) ----
 #
@@ -9575,7 +10257,15 @@ grep -qF -- 'Secure Boot' "$UEFI_PROSE" || uefi_doc_miss="$uefi_doc_miss secure-
 # "does not claim real firmware" passes and "runs under real firmware" reds.
 # Written as "some matching line carries no negation" rather than a blanket
 # ban, because the honest sentence and the dishonest one share the phrase.
-if grep -- 'real firmware' "$UEFI_PROSE" | grep -qvE 'not |no |never '; then
+# `grep -qv` ON THE TAIL OF A PIPE IS NOT SAFE ON THIS HOST -- see the long
+# note on rvec_unqualified below: ugrep 7.5.0 measured a FALSE negative for
+# exactly this shape. It is not live here today (the UEFI prose has zero
+# `real firmware` matches, and `-qv` is correct on a single line), but it
+# would break SILENTLY the moment an honest sentence is added -- and this is
+# the guard for the claim sub-project D had to correct by hand twice. Use the
+# same capture-and-test form, which is POSIX `-E`/`-v` only.
+uefi_unqualified=$(grep -- 'real firmware' "$UEFI_PROSE" | grep -vE 'not |no |never ')
+if [ -n "$uefi_unqualified" ]; then
     uefi_doc_miss="$uefi_doc_miss unqualified-real-firmware-claim"
 fi
 if [ -z "$uefi_doc_miss" ]; then
@@ -9584,6 +10274,107 @@ else
     echo "FAIL: uefi_docs_section_intact (docs/LANGUAGE.md's '#### UEFI applications' section is missing:$uefi_doc_miss)"
     FAIL=$((FAIL + 1))
 fi
+
+# 6. --reset-vector's own honesty section (review r1, Important 2). Rows 1-2
+#    above are STRUCTURALLY BLIND to this: `--reset-vector` survives in the
+#    `--emit=` one-liner (LANGUAGE.md's format list) regardless of whether
+#    the dedicated section below it exists, so hd_flags() alone cannot tell
+#    the two apart -- proven by MUTANT B, run against this exact tree: delete
+#    the entire `#### The reset-vector form` section (80+ lines, including
+#    the Step 7 "never real firmware" paragraph) and BOTH
+#    help_flags_are_documented and docs_flags_are_in_help stayed green,
+#    because the one-liner alone satisfies them. (MUTANT A -- drop the
+#    dedicated --help line -- IS already caught, by docs_flags_are_in_help;
+#    only the docs half needed a row of its own, same asymmetry D found for
+#    --emit=uefi.)
+#
+#    Grep for the HONESTY WORDING ITSELF, not for tokens a sample invocation
+#    already satisfies (D's own review found its first version of this row
+#    weak for exactly that reason: `--target=none` etc. are satisfied by the
+#    section's fenced example command before a word of prose runs). Scoped
+#    to prose only, code fences stripped, same as the UEFI row above.
+RVEC_SEC=/tmp/krc_rvec_sec_$$
+# `##### ` DOES NOT TERMINATE THIS SCOPE, same exemption row 4 already needed
+# and for the same reason: E Task 4 nests a `##### What this is verified
+# against` limits block inside this section, and row 3's plain `/^#/{exit}`
+# would cut the section off AT that heading, putting the whole block out of
+# scope. MEASURED rather than reasoned, both ways, against this exact tree:
+# with the plain awk the row FAILS with "the-limits-subsection ram-not-map-bound
+# size-rule-labelled-inference ci-status-stated", and with this awk it passes at
+# 191 lines. Note what that measurement does NOT say: the older greps
+# ('one machine', 'real hardware', 'real firmware') keep passing either way,
+# because they are satisfied by the "What a green result claims" paragraph that
+# sits ABOVE the new heading. So this is a scope fix the new greps require, not
+# a rescue of the old ones -- and the plain awk fails CLOSED, it does not go
+# quietly green.
+awk '/^#### The reset-vector form/{s=1;print;next} s&&/^#/&&!/^##### /{exit} s{print}' "$HD_DOC" > "$RVEC_SEC"
+TOTAL=$((TOTAL + 1))
+rvec_doc_miss=""
+[ -s "$RVEC_SEC" ] || rvec_doc_miss=" the-section-itself"
+RVEC_PROSE=/tmp/krc_rvec_prose_$$
+awk '/^```/{f=!f;next} !f' "$RVEC_SEC" > "$RVEC_PROSE"
+grep -qF -- 'Status'         "$RVEC_SEC"   || rvec_doc_miss="$rvec_doc_miss status-statement"
+# WAS `grep -qF 'flag surface'`, AND THAT MARKER INVERTED UNDER THIS ROW
+# (whole-branch review, Minor 3). It was written when the section said "the
+# flag surface only"; Task 2's r1 rewrote that sentence to "no longer the
+# flag surface only", so the row went on passing while guarding a phrase that
+# now asserts the opposite of what the row is named for. Not vacuous -- it
+# still failed if the words vanished -- but it guarded nothing it claimed to.
+# Replaced with the disclosure that is actually load-bearing NOW: the section
+# has to keep saying that the unrefusable stack hazards are a silent reboot
+# loop with no diagnostic. That sentence is the one a tidy-up would delete
+# and the one whose absence would make the section dishonest.
+grep -qF -- 'silent reboot loop' "$RVEC_PROSE" || rvec_doc_miss="$rvec_doc_miss unchecked-hazard-disclosure"
+grep -qF -- 'QEMU'           "$RVEC_PROSE" || rvec_doc_miss="$rvec_doc_miss names-the-emulator"
+grep -qF -- '-bios'          "$RVEC_PROSE" || rvec_doc_miss="$rvec_doc_miss names-the-bios-flag"
+grep -qF -- 'one machine'    "$RVEC_PROSE" || rvec_doc_miss="$rvec_doc_miss one-machine-scope"
+grep -qF -- 'real hardware'  "$RVEC_PROSE" || rvec_doc_miss="$rvec_doc_miss real-hardware-mentioned"
+grep -qF -- 'real firmware'  "$RVEC_PROSE" || rvec_doc_miss="$rvec_doc_miss real-firmware-mentioned"
+# E TASK 4's LIMITS BLOCK, guarded the way sub-project C's is (row 4). Same
+# argument, same cost: these are PHRASES, not flag tokens, so rewording one
+# reds a row and a deliberate reword has to come here in the same commit.
+# Four claims, each of which was wrong or absent somewhere in this sub-project
+# before it was measured: that the stack's real bound is RAM and not the map,
+# that busting it is silent, that the 64 KiB rule is an INFERENCE from measured
+# points rather than a quoted requirement, and that L9 is not in CI. The last
+# is the one most likely to rot: it becomes false on the first push, and it
+# must be edited then rather than left standing.
+grep -qF -- '##### What this is verified against' "$RVEC_SEC" || rvec_doc_miss="$rvec_doc_miss the-limits-subsection"
+grep -qF -- 'installed guest RAM' "$RVEC_SEC" || rvec_doc_miss="$rvec_doc_miss ram-not-map-bound"
+# NOT `no diagnostic` -- that phrase ALSO occurs in the RAM-table paragraph
+# ABOVE this block's heading, so deleting the whole limits subsection left this
+# name GREEN while the other four reddened. Measured. Grep a phrase that exists
+# only inside the block.
+grep -qF -- 'no message, no exit code' "$RVEC_SEC" || rvec_doc_miss="$rvec_doc_miss silent-failure-stated"
+grep -qF -- 'inference'           "$RVEC_SEC" || rvec_doc_miss="$rvec_doc_miss size-rule-labelled-inference"
+grep -qF -- 'never run in CI'     "$RVEC_SEC" || rvec_doc_miss="$rvec_doc_miss ci-status-stated"
+# THE NEGATIVE HALF, both ways. "real hardware"/"real firmware" is allowed
+# ONLY inside a negation on the SAME line -- "will not claim real hardware,
+# real firmware" passes, a bare "runs under real firmware" (added anywhere in
+# the section, even alongside the honest sentence -- MUTANT B's second form)
+# reds. "some matching line carries no negation nearby", not a blanket ban,
+# because the honest sentence and an unqualified one share the same words.
+#
+# Captured to a variable and tested with `-n`, NOT `grep -q` on the tail of
+# the pipe: this host's `grep` is ugrep 7.5.0, and `grep -E ... | grep -qvE
+# 'not |no |never '` on this exact two-line input (one negated, one not)
+# measured a FALSE "no unqualified line" here -- `grep -qv` exited 1 even
+# though the un-quieted `grep -v` on the identical input correctly printed
+# the offending line and exited 0. Whatever the cause, `-q`'s early-exit
+# path and `-v`'s must-see-every-line-to-decide semantics don't agree on
+# this grep. Capturing full output and checking non-emptiness sidesteps it
+# and was verified to catch MUTANT B where the `-qv` form silently didn't.
+rvec_unqualified=$(grep -E 'real hardware|real firmware' "$RVEC_PROSE" | grep -vE 'not |no |never ')
+if [ -n "$rvec_unqualified" ]; then
+    rvec_doc_miss="$rvec_doc_miss unqualified-real-hardware-or-firmware-claim"
+fi
+if [ -z "$rvec_doc_miss" ]; then
+    PASS=$((PASS + 1)); echo "  resetvec_docs_honesty_block_intact: PASS (section present, $(wc -l < "$RVEC_SEC" | tr -d ' ') lines)"
+else
+    echo "FAIL: resetvec_docs_honesty_block_intact (docs/LANGUAGE.md's '#### The reset-vector form' section is missing:$rvec_doc_miss)"
+    FAIL=$((FAIL + 1))
+fi
+rm -f "$RVEC_SEC" "$RVEC_PROSE"
 
 rm -f "$HD_HELP" "$HD_SEC" "$HD_LINE" "$HD_SRC" "$IHDR_SEC" "$UEFI_SEC" "$UEFI_PROSE"
 
@@ -14367,5 +15158,14 @@ fi
 
 # --- Summary ---
 echo ""
+# THERE IS NO KNOWN DELIBERATE RED IN THIS SUITE, so nothing is annotated here.
+# Review r1 Minor 4 added a NOTE naming reset_vector_payload_too_large as a
+# DELIBERATE red, because sub-project E Task 1 wrote that row before the check
+# it asserts existed. TASK 2 LANDED THE CHECK AND THE ROW HAS BEEN GREEN SINCE,
+# which made the NOTE's own guard (`rvbig_st -eq 0`) permanently false -- dead
+# code whose text, if it ever did print again, would tell a reader that a live
+# regression was "expected, not a regression". Removed at E Task 4 rather than
+# left standing. If a future task deliberately lands a red row again, add the
+# annotation back here, for that row, with that task's name on it.
 echo "=== Results: $PASS/$TOTAL passed, $FAIL failed ==="
 exit $FAIL
