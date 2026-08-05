@@ -7154,19 +7154,29 @@ fn main() {
                     exit(1)
                 }
             }
-            // && reset_vector_set == 0 (sub-project E, Task 1): every bound
-            // in this arm is a property of B2's self-boot trampoline --
-            // its page tables, its single-GiB identity map, its --load-addr
-            // preconditions -- none of which --reset-vector emits (Task 1
-            // Step 5 excludes emit_x86_image_stub itself under this flag;
-            // design spec S3(c)). Under --reset-vector --load-addr is always
-            // 0 (the flag is refused, not merely unset), so left ungated the
-            // "must be at least 0x4000" / "must be below 0x40000000" rows
-            // below would misfire on every valid --reset-vector build by
-            // reading load_addr == 0 as "inside the zeroed page tables" --
-            // page tables that, under this flag, this function never builds.
-            // The reset-vector-specific replacement is the sibling block
-            // below.
+            // && reset_vector_set == 0 (sub-project E, Task 1): this arm's
+            // bounds are B2's self-boot trampoline's, and they part into TWO
+            // KINDS under --reset-vector, not one. Review r1 caught a first
+            // draft of this comment claiming all of them were B2-specific and
+            // therefore simply inapplicable -- true of the page-table band
+            // and the two --load-addr preconditions (--reset-vector emits
+            // neither the trampoline nor a page-table region at those
+            // addresses; Task 1 Step 5 excludes emit_x86_image_stub itself
+            // under this flag, design spec S3(c); and --load-addr is always 0
+            // here, the flag being refused rather than merely unset, so left
+            // ungated the "must be at least 0x4000" row would misfire on
+            // every valid --reset-vector build by reading load_addr == 0 as
+            // "inside the zeroed page tables" this function never builds
+            // here). FALSE of the "stack must fit inside the identity map"
+            // bound: --reset-vector maps memory too (PDPT[0..3], the full
+            // 4 GiB, not B2's single GiB), so that bound RE-DERIVES to a
+            // DIFFERENT NUMBER rather than to nothing, and dropping it here
+            // without replacing it left --stack-top with no ceiling at all
+            // -- measured: 0x100000000 and even 0xFFFFFFFFFFFFFFF0 both
+            // exited 0. The re-derived 4 GiB bound is the sibling block's
+            // OWN check below, not merely a documented gap; the page-table
+            // and --load-addr bounds have no such replacement because they
+            // are the ones that are genuinely inapplicable.
             if arch == 0 && reset_vector_set == 0 {
                 // x86_64 needs its own range rule -- it has no --load-addr
                 // constraint beyond != 0 today, so this is new ground.
@@ -7278,6 +7288,32 @@ fn main() {
                 if stack_top > 4096 && stack_top < 28680 {
                     uint64 rv_pt = "error: --stack-top='s first push would land inside 0x1000-0x7000 under --reset-vector: the reset-vector stage builds its own identity page tables there (PDPT[0..3] and four page directories, mapping the full 4 GiB -- more table space than the self-boot trampoline's 0x1000-0x4000), and the stack grows down so the first push writes the eight bytes below the stack top. The stack top must be at most 0x1000 or at least 0x7008. This constraint is --reset-vector-only\n"
                     write(2, rv_pt, str_len(rv_pt))
+                    exit(1)
+                }
+                // Review r1, Important 1: excluding B2's whole range arm above
+                // (the `&& reset_vector_set == 0` guard on it) also excluded
+                // its Bound 3, "the stack must fit inside the identity map" --
+                // and that bound is NOT B2-specific the way bounds 1 and the
+                // --load-addr pair are. It re-derives here to a DIFFERENT
+                // NUMBER, not to nothing: the reset-vector stage's map is
+                // PDPT[0..3], the full 4 GiB, where B2's is a single GiB.
+                // Left unchecked, --stack-top=0x100000000 (4 GiB) and even
+                // --stack-top=0xFFFFFFFFFFFFFFF0 both exited 0 -- no ceiling
+                // at all, not merely the wrong one.
+                //
+                // `>=`, NOT B2's `>`: B2 accepts rsp == its map size exactly,
+                // because Task-2-verified math places the first push entirely
+                // inside the map at that value. The reset-vector stage that
+                // math is ABOUT has not been built yet -- Task 1 emits no
+                // stage bytes -- so asserting the identical inclusive edge
+                // here would be a claim about geometry nobody has measured.
+                // Refusing AT the boundary too is the conservative bound this
+                // task can actually stand behind; Task 2, once the stage
+                // exists to measure against, can loosen it to `>` if the
+                // math the same way B2's does.
+                if stack_top >= 4294967296 {
+                    uint64 rv_4g = "error: --stack-top= must be below 0x100000000 (4 GiB) under --reset-vector: the reset-vector stage's identity map is PDPT[0..3], four page directories covering the full 4 GiB, so a stack top at or above that is unmapped the moment paging is enabled and the first push triple-faults. This constraint is --reset-vector-only -- the self-boot trampoline's own ceiling is a different number, 0x40000000, for its narrower single-GiB map\n"
+                    write(2, rv_4g, str_len(rv_4g))
                     exit(1)
                 }
             }

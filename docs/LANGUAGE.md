@@ -1760,6 +1760,12 @@ in between. Because of that, the geometry differs from every other
   the eight bytes *below* the stack top — same convention as the existing
   rule) would land in that wider band is refused: at most `0x1000`, or at
   least `0x7008`. This bound is checked today, from the flag value alone.
+* **`--stack-top=` also has its own, wider ceiling: `0x100000000` (4 GiB),
+  not the existing trampoline's `0x40000000` (1 GiB).** The existing
+  self-boot trampoline's identity map is a single GiB; the reset-vector
+  stage's own (future) map is `PDPT[0..3]`, the full 4 GiB, so a stack top at
+  or above that ceiling is refused too — checked today, from the flag value
+  alone, ahead of the stage that ceiling is actually about.
 
 **Refused today, each with its own message:**
 
@@ -1771,6 +1777,7 @@ in between. Because of that, the geometry differs from every other
 | `--stack-top=` absent | no default stack, ever |
 | `--load-addr=` given | measured meaningless for this form (above) |
 | `--stack-top=`'s first push lands in `0x1000`–`0x7000` | this form's own, wider page-table band |
+| `--stack-top=` at or above `0x100000000` | this form's own, wider (4 GiB) identity-map ceiling |
 
 **Not yet checked, and known not to be:** a payload that will not fit in the
 fixed 64 KiB this form's file size is pinned to. That check needs the
@@ -1785,7 +1792,7 @@ form is for.
 reset-vector stage exists and its own boot leg passes: *a reset-vector image
 built by `krc` alone reaches 16-bit real mode, 32-bit protected mode and
 64-bit long mode, and runs its payload, under QEMU on one machine.* It will
-**not** claim real hardware, real firmware, or any BIOS other than QEMU's
+**not claim** real hardware, real firmware, or any BIOS other than QEMU's
 `-bios` mapping behaviour — which the whole geometry above depends on. That
 bound holds now, while there is nothing to boot, and it will still hold once
 there is.

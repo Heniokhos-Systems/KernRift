@@ -8828,16 +8828,49 @@ img_refuses reset_vector_conflicts_load_addr "conflicts with --load-addr=" \
 #    band's INTERIOR, deliberately, not an edge -- mirroring
 #    stacktop_x86_range_collision's own caution a few sections up: an edge
 #    alone would read green under an off-by-eight rule too, which is exactly
-#    the defect class B2's edge rows (6c-6e there) exist to catch. The edges
-#    of E's own band are not separately pinned here (Task 1 owns the row, not
-#    a full edge audit); 0x1000-0x7000 in the message is what the "why" grep
-#    below actually asserts.
+#    the defect class B2's edge rows (6c-6e there) exist to catch.
 img_refuses reset_vector_stack_top_in_page_tables "0x1000-0x7000" \
     --target=none --arch=x86_64 --emit=image --reset-vector --stack-top=0x2000
 
-# 7. Payload too large for the fixed 65536-byte image: THE REFUSAL THAT
+# 6b-6e. BOTH EDGES OF THAT BAND (review r1 Minor 3). Row 6 alone is the
+#    interior-only probe B2's own review found insufficient (6c-6e there
+#    exist for exactly this reason: an off-by-eight reads green against an
+#    interior value and only an edge row catches it). [stack_top-8,
+#    stack_top) overlaps [0x1000, 0x7000) exactly when stack_top > 0x1000 and
+#    stack_top < 0x7008, so 0x1000 and 0x7008 are the nearest ACCEPTED values
+#    on either side and 0x1001 / 0x7007 the nearest REFUSED ones.
+stk_accepts reset_vector_page_table_low_edge_accepted \
+    --target=none --arch=x86_64 --emit=image --reset-vector --stack-top=0x1000
+img_refuses reset_vector_page_table_low_edge_refused "0x1000-0x7000" \
+    --target=none --arch=x86_64 --emit=image --reset-vector --stack-top=0x1001
+img_refuses reset_vector_page_table_high_edge_refused "0x1000-0x7000" \
+    --target=none --arch=x86_64 --emit=image --reset-vector --stack-top=0x7007
+stk_accepts reset_vector_page_table_high_edge_accepted \
+    --target=none --arch=x86_64 --emit=image --reset-vector --stack-top=0x7008
+
+# 8. --stack-top= at or above the reset-vector stage's own 4 GiB identity
+#    map ceiling: refused (review r1 Important 1). Excluding B2's whole x86
+#    range arm under --reset-vector (Task 1 Step 5's guard on it, a few
+#    sections up: `arch == 0 && reset_vector_set == 0`) also excluded that
+#    arm's "stack must fit inside the identity map" bound -- and unlike the
+#    page-table band and the --load-addr pair, that bound is NOT
+#    B2-specific: it re-derives here to a DIFFERENT map size (the
+#    reset-vector stage's PDPT[0..3] covers the full 4 GiB, not B2's single
+#    GiB), not to nothing. Left unchecked, --stack-top= had NO ceiling at
+#    all under --reset-vector -- 0x100000000 and even
+#    0xFFFFFFFFFFFFFFF0 both exited 0 before this fix. `>=`, not B2's `>`:
+#    the reset-vector stage this bound is about has not been built yet
+#    (Task 1 emits no stage bytes), so the refusal is conservative at the
+#    exact boundary rather than asserting an inclusive edge nobody has
+#    measured for it.
+img_refuses reset_vector_above_4gib_map_refused "below 0x100000000" \
+    --target=none --arch=x86_64 --emit=image --reset-vector --stack-top=0x100000000
+stk_accepts reset_vector_at_4gib_map_edge_accepted \
+    --target=none --arch=x86_64 --emit=image --reset-vector --stack-top=0xFFFFFFFF
+
+# 9. Payload too large for the fixed 65536-byte image: THE REFUSAL THAT
 #    MATTERS MOST, and the one Task 1 does NOT implement. Its absence is not
-#    "a wrong command line accepted" the way rows 1-6 are -- it is a
+#    "a wrong command line accepted" the way rows 1-8 are -- it is a
 #    SILENTLY TRUNCATED BOOTABLE IMAGE, the only failure mode in this list
 #    that produces a working-looking artifact that is WRONG rather than an
 #    artifact that is simply absent. The check belongs at finalize, because
@@ -9685,6 +9718,66 @@ else
     echo "FAIL: uefi_docs_section_intact (docs/LANGUAGE.md's '#### UEFI applications' section is missing:$uefi_doc_miss)"
     FAIL=$((FAIL + 1))
 fi
+
+# 6. --reset-vector's own honesty section (review r1, Important 2). Rows 1-2
+#    above are STRUCTURALLY BLIND to this: `--reset-vector` survives in the
+#    `--emit=` one-liner (LANGUAGE.md's format list) regardless of whether
+#    the dedicated section below it exists, so hd_flags() alone cannot tell
+#    the two apart -- proven by MUTANT B, run against this exact tree: delete
+#    the entire `#### The reset-vector form` section (80+ lines, including
+#    the Step 7 "never real firmware" paragraph) and BOTH
+#    help_flags_are_documented and docs_flags_are_in_help stayed green,
+#    because the one-liner alone satisfies them. (MUTANT A -- drop the
+#    dedicated --help line -- IS already caught, by docs_flags_are_in_help;
+#    only the docs half needed a row of its own, same asymmetry D found for
+#    --emit=uefi.)
+#
+#    Grep for the HONESTY WORDING ITSELF, not for tokens a sample invocation
+#    already satisfies (D's own review found its first version of this row
+#    weak for exactly that reason: `--target=none` etc. are satisfied by the
+#    section's fenced example command before a word of prose runs). Scoped
+#    to prose only, code fences stripped, same as the UEFI row above.
+RVEC_SEC=/tmp/krc_rvec_sec_$$
+awk '/^#### The reset-vector form/{s=1;print;next} s&&/^#/{exit} s{print}' "$HD_DOC" > "$RVEC_SEC"
+TOTAL=$((TOTAL + 1))
+rvec_doc_miss=""
+[ -s "$RVEC_SEC" ] || rvec_doc_miss=" the-section-itself"
+RVEC_PROSE=/tmp/krc_rvec_prose_$$
+awk '/^```/{f=!f;next} !f' "$RVEC_SEC" > "$RVEC_PROSE"
+grep -qF -- 'Status'         "$RVEC_SEC"   || rvec_doc_miss="$rvec_doc_miss status-statement"
+grep -qF -- 'flag surface'   "$RVEC_PROSE" || rvec_doc_miss="$rvec_doc_miss flag-surface-only-qualifier"
+grep -qF -- 'QEMU'           "$RVEC_PROSE" || rvec_doc_miss="$rvec_doc_miss names-the-emulator"
+grep -qF -- '-bios'          "$RVEC_PROSE" || rvec_doc_miss="$rvec_doc_miss names-the-bios-flag"
+grep -qF -- 'one machine'    "$RVEC_PROSE" || rvec_doc_miss="$rvec_doc_miss one-machine-scope"
+grep -qF -- 'real hardware'  "$RVEC_PROSE" || rvec_doc_miss="$rvec_doc_miss real-hardware-mentioned"
+grep -qF -- 'real firmware'  "$RVEC_PROSE" || rvec_doc_miss="$rvec_doc_miss real-firmware-mentioned"
+# THE NEGATIVE HALF, both ways. "real hardware"/"real firmware" is allowed
+# ONLY inside a negation on the SAME line -- "will not claim real hardware,
+# real firmware" passes, a bare "runs under real firmware" (added anywhere in
+# the section, even alongside the honest sentence -- MUTANT B's second form)
+# reds. "some matching line carries no negation nearby", not a blanket ban,
+# because the honest sentence and an unqualified one share the same words.
+#
+# Captured to a variable and tested with `-n`, NOT `grep -q` on the tail of
+# the pipe: this host's `grep` is ugrep 7.5.0, and `grep -E ... | grep -qvE
+# 'not |no |never '` on this exact two-line input (one negated, one not)
+# measured a FALSE "no unqualified line" here -- `grep -qv` exited 1 even
+# though the un-quieted `grep -v` on the identical input correctly printed
+# the offending line and exited 0. Whatever the cause, `-q`'s early-exit
+# path and `-v`'s must-see-every-line-to-decide semantics don't agree on
+# this grep. Capturing full output and checking non-emptiness sidesteps it
+# and was verified to catch MUTANT B where the `-qv` form silently didn't.
+rvec_unqualified=$(grep -E 'real hardware|real firmware' "$RVEC_PROSE" | grep -vE 'not |no |never ')
+if [ -n "$rvec_unqualified" ]; then
+    rvec_doc_miss="$rvec_doc_miss unqualified-real-hardware-or-firmware-claim"
+fi
+if [ -z "$rvec_doc_miss" ]; then
+    PASS=$((PASS + 1)); echo "  resetvec_docs_honesty_block_intact: PASS (section present, $(wc -l < "$RVEC_SEC" | tr -d ' ') lines)"
+else
+    echo "FAIL: resetvec_docs_honesty_block_intact (docs/LANGUAGE.md's '#### The reset-vector form' section is missing:$rvec_doc_miss)"
+    FAIL=$((FAIL + 1))
+fi
+rm -f "$RVEC_SEC" "$RVEC_PROSE"
 
 rm -f "$HD_HELP" "$HD_SEC" "$HD_LINE" "$HD_SRC" "$IHDR_SEC" "$UEFI_SEC" "$UEFI_PROSE"
 
@@ -14468,5 +14561,25 @@ fi
 
 # --- Summary ---
 echo ""
+# Review r1 Minor 4: a bare "$FAIL failed" line here, or make check's abort,
+# gives no reason to whoever reads only the tail. reset_vector_payload_too_large
+# (sub-project E, Task 1) is DELIBERATELY red -- Task 1 does not implement the
+# 64 KiB payload fit check, because PAYLEN only exists at finalize; Task 2's
+# job is to turn it green -- so name it here rather than leaving every red
+# summary equally unexplained. rvbig_st is set once, earlier in this same
+# top-level script (not inside a function), so it is still in scope here;
+# ${rvbig_st:-} degrades safely if that section is ever skipped.
+#
+# rvbig_st == 0 means the oversized build compiled CLEAN -- exactly the
+# EXPECTED-RED state this task leaves behind (Task 1 does not refuse it).
+# rvbig_st != 0 means something now refuses that build -- either Task 2's
+# real fit check landed (the row asserts a message, so it would read that
+# refusal as a genuine PASS above) or an unrelated refusal started firing
+# first, in which case the row's own FAIL text above already says so. Either
+# way, once rvbig_st != 0 there is no longer a known, deliberate red to
+# explain here.
+if [ -n "${rvbig_st:-}" ] && [ "$rvbig_st" -eq 0 ]; then
+    echo "NOTE: reset_vector_payload_too_large is a DELIBERATE red (sub-project E Task 1 does not implement the 64 KiB payload fit check; Task 2 turns it green) -- if it is the only FAIL below, that is expected, not a regression."
+fi
 echo "=== Results: $PASS/$TOTAL passed, $FAIL failed ==="
 exit $FAIL
