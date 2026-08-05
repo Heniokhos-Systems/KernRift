@@ -14927,6 +14927,17 @@ rm -f "$CA_SRC" "$CA_BIN"
 # unpassed -- its side effects vanished. `bump` proves the side effect
 # happened or didn't via a static global, since call_ptr's own return value
 # is not enough to distinguish "argument dropped" from "argument garbage".
+#
+# The guard above lives in the shared IR lowering only, which is the
+# DEFAULT backend but not the only one: `--legacy` has its own call_ptr
+# codegen (src/codegen.kr) with the identical shape of bug -- it evaluates
+# every argument (so the 7th's side effects DO happen there, unlike the IR
+# backend) but its register-loading loops only assign int/float args 0-5 to
+# a GPR/xmm register, so a 7th argument is silently never loaded into
+# anything the callee reads. Measured before the legacy-path fix: a 7-arg
+# call_ptr compiled at exit 0 and returned 21 instead of 28. The row below
+# exercises `--legacy` explicitly so a fix to only one backend cannot pass
+# this suite.
 CP_SRC="/tmp/krc_callptrargs_$$.kr"
 CP_BIN="/tmp/krc_callptrargs_$$.bin"
 cat > "$CP_SRC" <<'KREOF'
@@ -14972,6 +14983,30 @@ if $KRC --arch=$RUN_ARCH "$CP6_SRC" -o "$CP_BIN" >/dev/null 2>&1 && [ -s "$CP_BI
     fi
 else
     echo "FAIL: call_ptr_args_6_accepted (should compile to a non-empty artifact)"; FAIL=$((FAIL + 1))
+fi
+# `--legacy` twin of call_ptr_args_7_rejected: same 7-arg source, the other
+# backend. Positive control (6 args) is call_ptr_args_6_accepted above,
+# rerun implicitly since a `--legacy` cap that rejected everything would
+# still need catching -- so also assert the 6-arg legacy build runs.
+TOTAL=$((TOTAL + 1))
+CP_LG_ERR=$($KRC --arch=$RUN_ARCH --legacy "$CP_SRC" -o "$CP_BIN" 2>&1); CP_LG_ST=$?
+if [ "$CP_LG_ST" != "0" ] && echo "$CP_LG_ERR" | grep -q "too many call_ptr arguments (max 6)"; then
+    PASS=$((PASS + 1)); echo "  call_ptr_args_7_rejected_legacy: PASS (exit $CP_LG_ST, clean diagnostic)"
+else
+    echo "FAIL: call_ptr_args_7_rejected_legacy (expected non-zero + 'too many call_ptr arguments', got exit $CP_LG_ST: '$CP_LG_ERR')"
+    FAIL=$((FAIL + 1))
+fi
+TOTAL=$((TOTAL + 1))
+rm -f "$CP_BIN"
+if $KRC --arch=$RUN_ARCH --legacy "$CP6_SRC" -o "$CP_BIN" >/dev/null 2>&1 && [ -s "$CP_BIN" ]; then
+    chmod +x "$CP_BIN"; "$CP_BIN"; CP6_LG_RUN=$?
+    if [ "$CP6_LG_RUN" = "21" ]; then
+        PASS=$((PASS + 1)); echo "  call_ptr_args_6_accepted_legacy: PASS (compiles and returns 21)"
+    else
+        echo "FAIL: call_ptr_args_6_accepted_legacy (ran but returned $CP6_LG_RUN, want 21)"; FAIL=$((FAIL + 1))
+    fi
+else
+    echo "FAIL: call_ptr_args_6_accepted_legacy (should compile to a non-empty artifact)"; FAIL=$((FAIL + 1))
 fi
 rm -f "$CP_SRC" "$CP6_SRC" "$CP_BIN"
 

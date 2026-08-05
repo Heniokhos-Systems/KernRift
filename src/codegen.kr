@@ -7148,6 +7148,19 @@ fn gen_expr(uint64 node) {
                 uint32 nt2 = ast_next(wtmp)
                 wtmp = nt2
             }
+            // The register-loading loops below only assign int args 0-5 and
+            // float args 0-5 to a GPR/xmm register (SysV: rdi,rsi,rdx,rcx,r8,r9
+            // / xmm0-5; Windows: rcx/rdx/r8/r9 positional). A 7th argument is
+            // still evaluated above -- its side effects happen -- but it is
+            // never loaded into anything the callee reads, so the call
+            // silently ran with a missing argument. Same cap and message as
+            // the shared IR lowering's call_ptr guard (src/ir.kr), so both
+            // backends refuse identically instead of the legacy path being
+            // the quiet way around it.
+            if arg_count > 6 {
+                write(2, "error: too many call_ptr arguments (max 6)\n", 43)
+                exit(1)
+            }
 
             // Allocate temp slots: 1 for fn_ptr + arg_count for args
             uint64 ptr_slot = var_count * 8
