@@ -647,15 +647,15 @@ fn print_living_report(uint64 tel, uint64 patterns, uint64 fitness) {
     uint64 msg = "=== KernRift Living Compiler Report ===\n"
     write(1, msg, 40)
     msg = "    stable semantic core + adaptive surface layer\n"
-    write(1, msg, 51)
+    write(1, msg, 50)
     // Show the active language profile from #lang (if any)
     uint64 prof = get_lang_profile()
     if prof == 0 {
         msg = "    #lang stable        (default — production-safe features only)\n\n"
-        write(1, msg, 68)
+        write(1, msg, 69)
     } else {
         msg = "    #lang experimental (also allows features under active development)\n\n"
-        write(1, msg, 73)
+        write(1, msg, 72)
     }
 
     msg = "Telemetry\n"
@@ -664,19 +664,19 @@ fn print_living_report(uint64 tel, uint64 patterns, uint64 fitness) {
     write(1, msg, 15)
     lc_write_num(tel_get(tel, 0))
     msg = "\n  Calls:       "
-    write(1, msg, 15)
+    write(1, msg, 16)
     lc_write_num(tel_get(tel, 2))
     msg = "\n  Unsafe ops:  "
-    write(1, msg, 15)
+    write(1, msg, 16)
     lc_write_num(tel_get(tel, 3))
     msg = "\n  Total ops:   "
-    write(1, msg, 15)
+    write(1, msg, 16)
     lc_write_num(tel_get(tel, 6))
     msg = "\n  Patterns:    "
-    write(1, msg, 15)
+    write(1, msg, 16)
     lc_write_num(patterns)
     msg = "\n\nFitness: "
-    write(1, msg, 10)
+    write(1, msg, 11)
     lc_write_num(fitness)
     msg = "/100\n\n"
     write(1, msg, 6)
@@ -765,7 +765,7 @@ fn print_living_report_filtered(uint64 tel, uint64 patterns, uint64 fitness, uin
     uint64 msg = "=== KernRift Living Compiler Report ===\n"
     write(1, msg, 40)
     msg = "    stable semantic core + adaptive surface layer\n\n"
-    write(1, msg, 52)
+    write(1, msg, 51)
 
     msg = "Telemetry\n"
     write(1, msg, 10)
@@ -773,16 +773,16 @@ fn print_living_report_filtered(uint64 tel, uint64 patterns, uint64 fitness, uin
     write(1, msg, 15)
     lc_write_num(tel_get(tel, 0))
     msg = "\n  Calls:       "
-    write(1, msg, 15)
+    write(1, msg, 16)
     lc_write_num(tel_get(tel, 2))
     msg = "\n  Unsafe ops:  "
-    write(1, msg, 15)
+    write(1, msg, 16)
     lc_write_num(tel_get(tel, 3))
     msg = "\n  Total ops:   "
-    write(1, msg, 15)
+    write(1, msg, 16)
     lc_write_num(tel_get(tel, 6))
     msg = "\n\nFitness: "
-    write(1, msg, 10)
+    write(1, msg, 11)
     lc_write_num(fitness)
     msg = "/100\n\n"
     write(1, msg, 6)
@@ -818,7 +818,7 @@ fn print_living_report_filtered(uint64 tel, uint64 patterns, uint64 fitness, uin
     write(1, msg, 17)
     lc_write_num(shown)
     msg = " suggestion(s) at fitness >= "
-    write(1, msg, 28)
+    write(1, msg, 29)
     lc_write_num(min_fitness)
     msg = "\n\n"
     write(1, msg, 2)

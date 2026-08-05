@@ -3343,6 +3343,49 @@ else
 fi
 rm -f /tmp/krc_lc_$$.kr /tmp/krc_lc_out_$$.txt
 
+# krc lc report: exact write() byte lengths (print_living_report and
+# print_living_report_filtered in src/living.kr each hardcode the length of
+# every literal they write instead of deriving it, and 14 of those
+# constants across the two functions were wrong: 3 over-read past the
+# string's own NUL (writing the NUL byte itself, which showed up as a
+# stray NUL before "#lang stable" — the "    stable semantic core...\n"
+# and "#lang ...\n\n" preambles) and 11 truncated their string, most of
+# them report labels ("  Calls:       " etc. one byte short, and
+# "\n\nFitness: " missing the trailing space so it read "Fitness:100/100").
+# This row pins both failure modes at once on deterministic telemetry from
+# a trivial one-function program: no stray NUL anywhere in the output, and
+# every truncation-prone label present with its full, correctly-spaced text.
+TOTAL=$((TOTAL + 1))
+cat > /tmp/krc_lc_report_$$.kr <<'KREOF'
+fn main() -> uint64 {
+    return 0
+}
+KREOF
+$KRC lc /tmp/krc_lc_report_$$.kr > /tmp/krc_lc_report_out_$$.txt 2>&1
+lc_report_err=$(python3 -c "
+data = open('/tmp/krc_lc_report_out_$$.txt', 'rb').read()
+checks = [
+    (b'\\x00' not in data, 'stray NUL byte in report output'),
+    (b'    stable semantic core + adaptive surface layer\n' in data, 'core/surface preamble line wrong'),
+    (b'(default \xe2\x80\x94 production-safe features only)\n\nTelemetry\n' in data, '#lang stable line wrong (over-read into Telemetry, or missing blank line)'),
+    (b'  Functions:   1\n' in data, 'Functions label wrong'),
+    (b'  Calls:       0\n' in data, 'Calls label truncated/misaligned'),
+    (b'  Unsafe ops:  0\n' in data, 'Unsafe ops label truncated/misaligned'),
+    (b'  Total ops:   1\n' in data, 'Total ops label truncated/misaligned'),
+    (b'  Patterns:    0\n' in data, 'Patterns label truncated/misaligned'),
+    (b'\n\nFitness: 100/100\n' in data, 'Fitness line truncated (missing space before value)'),
+]
+bad = [msg for ok, msg in checks if not ok]
+if bad:
+    print('; '.join(bad)); raise SystemExit(1)
+" 2>&1)
+if [ -z "$lc_report_err" ]; then
+    PASS=$((PASS + 1)); echo "  lc_report_bytes_exact: PASS"
+else
+    FAIL=$((FAIL + 1)); echo "FAIL: lc_report_bytes_exact ($lc_report_err)"
+fi
+rm -f /tmp/krc_lc_report_$$.kr /tmp/krc_lc_report_out_$$.txt
+
 # Governance: promote + list round-trip
 TOTAL=$((TOTAL + 1))
 GOV_DIR=/tmp/krc_gov_$$
