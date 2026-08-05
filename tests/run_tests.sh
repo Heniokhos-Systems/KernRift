@@ -8769,14 +8769,25 @@ rm -f "$ihdr_a" "$ihdr_b"
 # itself as the target.)
 
 # --- --reset-vector flag surface (sub-project E, Task 1) ---
-# `krc` alone, given --reset-vector on --emit=image, will (Task 2) produce a
-# 65536-byte x86_64 artifact bootable by `qemu-system-x86_64 -bios` and
-# nothing else -- no GNU as, no ld, no --defsym, no concatenation script.
-# TASK 1 IS THE FLAG AND ITS REFUSALS ONLY: it emits no stage bytes. Six of
-# the seven rows below are wrong command lines, each refused with its own
-# distinguishable message (img_refuses' three clauses: nonzero exit, the
-# diagnostic text, no artifact left on disk). The seventh -- payload too
-# large -- is different in kind and is explained at its own row below.
+# `krc` alone, given --reset-vector on --emit=image, produces a 65536-byte
+# x86_64 artifact bootable by `qemu-system-x86_64 -bios` and nothing else --
+# no GNU as, no ld, no --defsym, no concatenation script. THIS SECTION IS THE
+# FLAG SURFACE ONLY: the stage bytes it guards are asserted two sections
+# below, in `--reset-vector: the emitted stage`, and booted by leg L9.
+#
+# 13 ROWS. Nine are `img_refuses` (three clauses each: nonzero exit, the
+# diagnostic text, no artifact left on disk), three are `stk_accepts` twins
+# pinning the accepting side of a band edge, and one -- payload too large --
+# is hand-written and different in kind, explained at its own row below.
+#
+# THE COUNT AND THE TENSE WERE BOTH WRONG UNTIL THE FINAL REVIEW. This block
+# said "six of the seven rows" (correct when written, falsified by review r1
+# adding four band-edge rows and two 4 GiB rows) and "will (Task 2) produce"
+# and "it emits no stage bytes" -- stale forward references still standing
+# three commits after Task 2 landed and booted. A count and a tense are
+# exactly the two things a comment cannot be pinned on, so they are the two
+# things to re-derive when touching this file: `grep -cE '^(img_refuses|
+# stk_accepts) '` over the section is where the 12 comes from.
 echo ""
 echo "--- --reset-vector flag surface (E, Task 1) ---"
 
@@ -9371,7 +9382,75 @@ else
     echo "FAIL: resetvec_fit_edge_refused (exit=$rvs_st, artifact=$([ -f /tmp/krc_rvfit_$$ ] && echo yes || echo no), out=$(echo "$rvs_out" | head -1))"
     FAIL=$((FAIL + 1))
 fi
-rm -f /tmp/krc_rvfit_$$ "$RVS_FIT" "$RVS_SRC" "$RVS_A" "$RVS_B" "$RVS_P"
+rm -f /tmp/krc_rvfit_$$ "$RVS_FIT"
+
+# 7-10. THE PAYLOAD-OVERLAP BAND, interior plus both edges (whole-branch
+#    review, Important 1). The design spec's stack rule has two disjuncts --
+#    "--stack-top overlaps 0x1000-0x7000 OR 0x100000..+PAYLEN" -- and only
+#    the first shipped, while two comments in src/main.kr asserted the second
+#    had merely been deferred to finalize. It had been deferred there and
+#    then not written.
+#
+#    WHY NO OTHER ROW OR DOCUMENTED LIMIT COVERS IT. 0x100008 is inside the
+#    4 GiB map, inside installed RAM, and clear of 0x1000-0x7000, so the
+#    ceiling row, the documented (unrefusable) RAM bound and the page-table
+#    band rows all pass it. Forced red against the shipped compiler by
+#    BOOTING it: `--stack-top=0x100008` exited 0, wrote a 65536-byte
+#    artifact, put `RPL` on the wire and then wedged with no further output
+#    -- `call *%rax` pushes its return address over the first eight bytes of
+#    the payload it is about to enter. The same source at 0x90000 prints
+#    `RPL2000000016`.
+#
+#    THE EDGES ARE DERIVED FROM THE REPORTED paylen, not written down: the
+#    band is [stack_top-8, stack_top) against [0x100000, 0x100000+paylen),
+#    which overlaps exactly when stack_top > 0x100000 and
+#    stack_top < 0x100000 + paylen + 8. Same +8 convention as the page-table
+#    band and as B2's stack-vs-image check, and the same documented limit:
+#    it catches what is corrupt from the FIRST push. Measured and not
+#    refused: 0x100400 (eight bytes past a 1016-byte payload) still boots to
+#    `RPL` and dies once the payload's own frames walk down into it, exactly
+#    as B2's equivalent comment already says of its own bound.
+rvs_ovl_try() {   # $1 stack-top -> compiler output; exit status in $?
+    rm -f /tmp/krc_rvovl_$$
+    $KRC $KRC_FLAGS "$RVS_SRC" -o /tmp/krc_rvovl_$$ --target=none --arch=x86_64 \
+        --emit=image --reset-vector --stack-top="$1" 2>&1
+}
+rvs_ovl_row() {   # $1 name, $2 stack-top, $3 "R" refused / "A" accepted
+    TOTAL=$((TOTAL + 1))
+    local out st; out=$(rvs_ovl_try "$2"); st=$?
+    local art=no; [ -f /tmp/krc_rvovl_$$ ] && art=yes
+    local why=""
+    if [ "$3" = "R" ]; then
+        [ $st -ne 0 ] || why="exit=0"
+        [ "$art" = "no" ] || why="$why artifact-left-on-disk"
+        echo "$out" | grep -q "would land inside the reset-vector payload" \
+            || why="$why wrong-or-missing-message"
+    else
+        [ $st -eq 0 ] || why="exit=$st"
+        [ "$art" = "yes" ] || why="$why no-artifact"
+    fi
+    rm -f /tmp/krc_rvovl_$$
+    if [ -z "$why" ]; then
+        PASS=$((PASS + 1)); echo "  $1: PASS"
+    else
+        echo "FAIL: $1 (--stack-top=$2 want $3:$why; out=$(echo "$out" | head -1 | cut -c1-100))"
+        FAIL=$((FAIL + 1))
+    fi
+}
+rvs_pl=$rvs_paylen
+if [ -z "$rvs_pl" ]; then
+    TOTAL=$((TOTAL + 1)); FAIL=$((FAIL + 1))
+    echo "FAIL: resetvec_stack_top_in_payload (no paylen was reported, so the band's edges cannot be derived)"
+else
+    # 0x100000 = 1048576. Low edge ACCEPTED: the push lands below the payload.
+    rvs_ovl_row resetvec_stack_top_payload_low_edge_accepted 1048576 A
+    # Interior: the whole first push lands inside the payload's first bytes.
+    rvs_ovl_row resetvec_stack_top_in_payload_refused 1048584 R
+    # High edge: one byte of the push still inside, then fully clear.
+    rvs_ovl_row resetvec_stack_top_payload_high_edge_refused $(( 1048576 + rvs_pl + 7 )) R
+    rvs_ovl_row resetvec_stack_top_payload_high_edge_accepted $(( 1048576 + rvs_pl + 8 )) A
+fi
+rm -f "$RVS_SRC" "$RVS_A" "$RVS_B" "$RVS_P"
 
 # --- --emit=uefi flag surface, payload geometry, PE header (D, Tasks 1-2) ----
 #
@@ -10235,7 +10314,17 @@ rvec_doc_miss=""
 RVEC_PROSE=/tmp/krc_rvec_prose_$$
 awk '/^```/{f=!f;next} !f' "$RVEC_SEC" > "$RVEC_PROSE"
 grep -qF -- 'Status'         "$RVEC_SEC"   || rvec_doc_miss="$rvec_doc_miss status-statement"
-grep -qF -- 'flag surface'   "$RVEC_PROSE" || rvec_doc_miss="$rvec_doc_miss flag-surface-only-qualifier"
+# WAS `grep -qF 'flag surface'`, AND THAT MARKER INVERTED UNDER THIS ROW
+# (whole-branch review, Minor 3). It was written when the section said "the
+# flag surface only"; Task 2's r1 rewrote that sentence to "no longer the
+# flag surface only", so the row went on passing while guarding a phrase that
+# now asserts the opposite of what the row is named for. Not vacuous -- it
+# still failed if the words vanished -- but it guarded nothing it claimed to.
+# Replaced with the disclosure that is actually load-bearing NOW: the section
+# has to keep saying that the unrefusable stack hazards are a silent reboot
+# loop with no diagnostic. That sentence is the one a tidy-up would delete
+# and the one whose absence would make the section dishonest.
+grep -qF -- 'silent reboot loop' "$RVEC_PROSE" || rvec_doc_miss="$rvec_doc_miss unchecked-hazard-disclosure"
 grep -qF -- 'QEMU'           "$RVEC_PROSE" || rvec_doc_miss="$rvec_doc_miss names-the-emulator"
 grep -qF -- '-bios'          "$RVEC_PROSE" || rvec_doc_miss="$rvec_doc_miss names-the-bios-flag"
 grep -qF -- 'one machine'    "$RVEC_PROSE" || rvec_doc_miss="$rvec_doc_miss one-machine-scope"

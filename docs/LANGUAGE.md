@@ -1833,6 +1833,8 @@ sentinel payload, varying only `--stack-top` and `-m`:
 | `0x10000000` (256 MiB) | **`RPLRPLRPL…`** | `RPL2000000016` |
 | `0x80000000` (2 GiB) | **`RPLRPLRPL…`** | `RPL2000000016` |
 | `0xF0000000` | **`RPLRPLRPL…`** | **`RPLRPLRPL…`** (PCI hole) |
+| `0x100000` | `RPL`, then dies | `RPL`, then dies (legacy hole) |
+| `0xFFFFFFF8` | `RPL`, then hangs | `RPL`, then hangs (inside the image) |
 
 Two things to read off it. First, **the command this section prints —
 `qemu-system-x86_64 -bios bios.bin`, and nothing else — is the 128 MiB
@@ -1842,10 +1844,22 @@ symptom is **`RPL` repeating**, not `RP` repeating: `L` *does* print, because
 long mode is reached and the map is fine; the fault is the payload's first
 push landing on an address with nothing behind it, which triple-faults and
 resets the CPU back into the stage. `RPRPRP…` (no `L`) means something else
-entirely — a bad map or a bad GDT. Keep `--stack-top` inside installed RAM,
-below the top-of-32-bit PCI hole, and clear of `0x1000`–`0x7000` and of the
-payload at `0x100000`; `0x90000` satisfies all four, which is why it is the
-example.
+entirely — a bad map or a bad GDT.
+
+**"Mapped" is not "backed by RAM", and the holes are not all at the top.**
+The last three rows are the same hazard in three places: `0xF0000000` is the
+PCI hole below 4 GiB, `0xFFFFFFF8` is inside the region `-bios` maps the image
+itself into, and `0x100000` is the *low* one — the stack grows down out of
+`0x100000` straight into `0xA0000`–`0xFFFFF`, the legacy VGA/option-ROM
+window, which is not writable RAM on a PC. `0x100000` is worth calling out
+because the payload-overlap refusal below **accepts** it: the first push lands
+below the payload, which is all that rule claims, and the address is still
+unusable for an unrelated reason. None of the three is refused, for the same
+reason the RAM bound is not: which physical addresses are backed by writable
+memory is a property of the machine, not of the program. Keep `--stack-top`
+inside installed RAM, below `0xA0000`, clear of `0x1000`–`0x7000`, and clear
+of the payload at `0x100000`; `0x90000` satisfies all four, which is why it is
+the example.
 
 **Refused at flag-parse time, each with its own message:**
 
@@ -1859,15 +1873,32 @@ example.
 | `--stack-top=`'s first push lands in `0x1000`–`0x7000` | this form's own, wider page-table band |
 | `--stack-top=` at or above `0x100000000` | this form's own, wider (4 GiB) identity-map ceiling |
 
-**Refused at the end of the build, not at flag-parse time:** a payload that
-will not fit. The file is exactly 65536 bytes, of which the stage takes
-`payoff` and the reset vector's own window takes the last 16, so the payload
-has `65536 - payoff - 16` bytes. That check needs the payload's compiled
-length, which does not exist until code generation has run — so unlike every
-refusal in the table above it fires at the end of the build, and the message
-names **both** the payload's actual size and the space available. It never
-truncates: a truncated image boots, prints `RPL`, and then runs half a
-program.
+**Refused at the end of the build, not at flag-parse time —** two rules, both
+needing `paylen`, which does not exist until code generation has run:
+
+* **A payload that will not fit.** The file is exactly 65536 bytes, of which
+  the stage takes `payoff` and the reset vector's own window takes the last
+  16, so the payload has `65536 - payoff - 16` bytes. The message names
+  **both** the payload's actual size and the space available. It never
+  truncates: a truncated image boots, prints `RPL`, and then runs half a
+  program.
+* **`--stack-top=`'s first push landing inside the payload.** The payload is
+  copied to physical `0x100000`, so it occupies
+  `0x100000 .. 0x100000 + paylen`, and a stack top inside that band means the
+  stage's own `call` writes its return address over the program it is about to
+  enter. Measured before this was checked: `--stack-top=0x100008` exited 0,
+  wrote a valid-looking 65536-byte image, printed `RPL`, and then **wedged
+  silently** — no message and no exit code, because `0x100008` is inside the
+  4 GiB map, inside installed RAM and clear of the page tables, so no other
+  rule saw it.
+
+Both of these, and the `0x1000`–`0x7000` rule in the table above, use the same
+convention as `--stack-top=`'s own existing check: they compare the band the
+**first push** writes, `[stack_top-8, stack_top)`. How far down the stack
+travels afterwards is not knowable at compile time and is not refused — a
+stack top eight bytes past the payload's end is accepted and will still
+collide once the program's own frames walk down into it (measured:
+`--stack-top=0x100400` against a 1016-byte payload boots to `RPL` and dies).
 
 **What a green result claims, and what it does not.** *A reset-vector image
 built by `krc` alone reaches 16-bit real mode, 32-bit protected mode and
@@ -1916,7 +1947,19 @@ number names the command that produced it.
   anything** — no message, no exit code, just `RPL` repeating. The two
   failure modes are told apart by one letter: a bad map or a bad GDT never
   prints `L`; RAM exhaustion prints `L` and then dies on the payload's first
-  push.
+  push. The same is true of every other *mapped but not backed by writable
+  RAM* address — the PCI hole, the legacy `0xA0000`–`0xFFFFF` window, and the
+  region `-bios` maps the image into. All are measured in the table earlier in
+  this section and none is refused, because the physical memory map belongs to
+  the machine and not to the program.
+* **The payload-overlap and page-table refusals bound the FIRST push only.**
+  Both compare `[stack_top-8, stack_top)`. A stack top clear of both bands
+  still collides with the payload once the program's own frames walk down far
+  enough, and nothing refuses or diagnoses that — measured,
+  `--stack-top=0x100400` against a 1016-byte payload. What the refusals rule
+  out is the configuration that is corrupt before a single instruction of the
+  program runs, which is the same bound `--stack-top=`'s own
+  stack-inside-the-image check has always carried.
 * **L9 has never run in CI.** The gate as a whole is CI-wired — it is a
   counted test inside `tests/run_tests.sh`, legs L0–L8 are on `origin/main`
   (`07e0422`), and run **30989294535** on that sha concluded *success* — but

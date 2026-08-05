@@ -2921,8 +2921,14 @@ leg8() {
 #   L  long mode reached: PAE + EFER.LME + CR0.PG and the 64-bit far jump taken
 #   <computed>  the PAYLOAD ran: sentinel_x86.kr's 2000000007 + 9, printed by
 #      KernRift code that was COPIED from the BIOS region down to 0x100000
-# `rv_verdict` below decodes a capture into one of six names; the positive row
-# asserts the full `RPL<computed>` and no row asserts a prefix by grep.
+# `rv_verdict` below decodes a capture into one of EIGHT names -- six verdicts,
+# plus `UNEXPECTED:<capture>` and `HARNESS_ERROR:no-capture`; the positive row
+# asserts the full `RPL<computed>` and no row asserts a prefix by grep. The
+# count is stated once, here and at rv_verdict, and both sites used to
+# disagree (six here, "SEVEN" there) while the function could print eight.
+# Documentation only -- every row matches an exact string, so nothing failed
+# open -- but a self-contradicting file is what made the miscount survive two
+# reviews. Re-derive it from the `print(` calls in rv_verdict, never by hand.
 #
 # TRAPS, ALL MEASURED ON THIS MACHINE IN THIS SESSION, none inherited. Two of
 # them are controls that were PROPOSED for this leg and are worthless:
@@ -3176,7 +3182,9 @@ PY
 # DECODE ONE CAPTURE INTO EXACTLY ONE VERDICT.  rv_verdict <serial file>
 #
 # The capture is flattened (CR and LF removed) and matched WHOLE, never grepped
-# for a prefix. SEVEN names -- six verdicts and one harness state:
+# for a prefix. EIGHT names -- six verdicts, one catch-all and one harness
+# state. (This line said SEVEN, and the header said six; the function has
+# always been able to print all eight. Counted from its own `print(` calls.)
 #   SILENT         nothing reached the wire at all
 #   R              one or more `R`s and NO `P` and NO `L`, with any non-sentinel
 #                  bytes between them: real mode ran, protected mode did not.

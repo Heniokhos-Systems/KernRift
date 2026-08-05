@@ -4611,6 +4611,53 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
                 write(2, rvf_em, str_len(rvf_em))
                 exit(1)
             }
+            // THE PAYLOAD-OVERLAP REFUSAL -- the design spec's second
+            // disjunct, shipped three commits late (whole-branch review,
+            // Important 1). The spec's rule is "--stack-top overlaps
+            // 0x1000-0x7000 OR 0x100000..+PAYLEN"; only the first disjunct
+            // existed, while two comments -- one of them a few hundred lines
+            // below this and one at parse time -- asserted this half had been
+            // deferred here "where PAYLEN first exists". It had been deferred
+            // here and then not written, which is this branch's own dominant
+            // defect: confident prose describing a check that does not exist.
+            //
+            // WHY IT IS NOT COVERED BY ANYTHING ELSE. 0x100008 is inside the
+            // 4 GiB map (so the ceiling refusal misses it), it is inside
+            // installed RAM (so the documented, unrefusable RAM bound misses
+            // it), and it is clear of 0x1000-0x7000 (so the page-table band
+            // misses it). Measured before this check existed:
+            // --stack-top=0x100008 exits 0, writes a 65536-byte artifact,
+            // prints `RPL`, and then WEDGES SILENTLY -- `call *%rax` pushes
+            // its return address over the first eight bytes of the payload it
+            // is about to enter. No message, no exit code, nothing to read.
+            //
+            // SAME +8 CONVENTION AS THE OTHER THREE, and the same documented
+            // limit. The stack grows DOWN, so the first push writes
+            // [stack_top-8, stack_top), and that band is what is compared
+            // against [0x100000, 0x100000+PAYLEN). A stack top AT 0x100000 is
+            // therefore accepted (the push lands below the payload) and one
+            // eight bytes past the payload's end is too. HOW FAR DOWN THE
+            // STACK GOES AFTERWARDS IS NOT KNOWABLE HERE -- measured:
+            // --stack-top=0x100400, eight bytes clear of a 1016-byte
+            // payload's end, still boots to `RPL` and dies once the payload's
+            // own frames walk down into it -- so this catches exactly the
+            // configurations that are corrupt from the very first push, which
+            // is the identical bound and the identical wording B2's
+            // stack-vs-image check ships with.
+            if stack_top > 1048576 && stack_top < 1048576 + rvf_paylen + 8 {
+                uint8[64] rvo_b
+                uint64 rvo_m = "error: --stack-top='s first push would land inside the reset-vector payload: the stage copies the payload to physical 0x100000 and it is "
+                write(2, rvo_m, str_len(rvo_m))
+                uint64 rvo_l = fmt_uint(rvo_b, rvf_paylen)
+                write(2, rvo_b, rvo_l)
+                rvo_m = " bytes long, so it occupies 1048576.."
+                write(2, rvo_m, str_len(rvo_m))
+                rvo_l = fmt_uint(rvo_b, 1048576 + rvf_paylen)
+                write(2, rvo_b, rvo_l)
+                rvo_m = " decimal, and the stack grows down so the first push writes the eight bytes below the stack top -- it would overwrite the program's own bytes before the stage calls into it. Put the stack at or below 0x100000 (0x90000 clears both this region and the page tables), or at least eight bytes above the payload's end\n"
+                write(2, rvo_m, str_len(rvo_m))
+                exit(1)
+            }
             // PAYLEN, the seventh and last patch site. The stage copies with
             // `rep movsl`, so the immediate is a DWORD COUNT and the `+ 3`
             // rounds it UP. The over-read of up to 3 bytes past the payload
@@ -4717,14 +4764,17 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
         // stack-vs-image check against a meaningless img_end, and the fit
         // message ends "...or drop --stack-top and boot it with a loader of
         // your own" -- wrong advice under a flag that REQUIRES --stack-top.
-        // The real equivalents for this geometry are E's own two refusals:
+        // The real equivalents for this geometry are E's own three refusals:
         // the 0x1000-0x7000 page-table overlap (checked below, at parse
-        // time, since it needs only the flag value) and the
-        // 0x100000..+PAYLEN payload overlap plus the 64 KiB fit (both
-        // deferred to Task 2's finalize step, because PAYLEN -- the copied
-        // payload's length -- is not known until codegen has run; see
-        // reset_vector_payload_too_large in tests/run_tests.sh, left
-        // deliberately red).
+        // time, since it needs only the flag value), and the
+        // 0x100000..+PAYLEN payload overlap plus the 64 KiB fit -- both of
+        // which need PAYLEN, the copied payload's length, and therefore run
+        // at finalize. ALL THREE NOW EXIST; an earlier revision of this
+        // sentence said the last two were "deferred to Task 2's finalize
+        // step", which stayed true of the fit and became false of the
+        // overlap, since Task 2 shipped only the fit. See the payload-overlap
+        // block in the --reset-vector finalize arm above for what the gap
+        // measured as (exit 0, `RPL`, then a silent wedge).
         if stack_top_set != 0 && reset_vector_set == 0 {
             uint64 img_end = load_addr + img_size
             if arch == 0 && img_end > 1073741824 {
@@ -7170,7 +7220,27 @@ fn main() {
                 // `else { input_path = arg }` and dies with "cannot open
                 // '--reset-vector': file not found" instead of naming
                 // itself. Validated below, alongside --emit=image's other
-                // flags; the stage bytes it opts into are Task 2's.
+                // flags; the stage bytes it opts into are emitted by
+                // emit_x86_reset_vector_stage on the emit_mode 8 path.
+                //
+                // THIS ARM DOES NOT COVER `--reset-vector=<anything>`, AND
+                // THE PARAGRAPH ABOVE OVERSTATED WHAT IT PREVENTS.
+                // str_eq_full matches the bare spelling only, so
+                // `--reset-vector=1` still falls through to
+                // `else { input_path = arg }` -- measured: exit 0 and a
+                // 256-byte MULTIBOOT artifact, because the flag was never
+                // set and --stack-top alone selects B2's stub. The user
+                // asked for a reset-vector image and silently got a
+                // different one. NOT INTRODUCED HERE and not fixed here:
+                // --image-header=1 and --stack-top (bare) behave identically,
+                // so this is a property of the whole `=`-less flag class and
+                // of the final `else` that swallows unknown arguments as
+                // input paths. Fixing it means changing unknown-flag handling
+                // for every flag at once, which is its own change with its
+                // own rows -- doing it inside a merge gate for one flag would
+                // leave the class half-fixed and the next reader unable to
+                // tell which half. Recorded so the claim above stops being
+                // read as "and therefore no spelling can be swallowed".
                 reset_vector_set = 1
             } else if str_eq_full(arg, "-c") != 0 {
                 emit_set = 1
@@ -7853,15 +7923,24 @@ fn main() {
             // -- is what must clear 0x1000-0x7000. It overlaps exactly when
             // stack_top > 0x1000 and stack_top < 0x7008.
             //
-            // THE PAYLOAD HALF OF THIS RULE (0x100000..+PAYLEN) IS NOT HERE.
-            // It cannot be: PAYLEN is the copied payload's length, and that
-            // is only known after codegen has produced it, at finalize --
-            // this function runs at flag-parse time, before a single byte of
-            // the program has been compiled. That half of the check, and the
-            // 64 KiB total-size fit it is bundled with in the design spec,
-            // are Task 2's (its finalize step, where PAYLEN first exists).
-            // Task 1 owns only the test row for it and leaves that row red;
-            // see reset_vector_payload_too_large in tests/run_tests.sh.
+            // THE PAYLOAD HALF OF THIS RULE (0x100000..+PAYLEN) IS NOT HERE,
+            // AND IS NOT MISSING EITHER -- it lives in the --reset-vector
+            // finalize arm, in the block immediately after the 64 KiB fit
+            // check. It cannot be here: PAYLEN is the copied payload's
+            // length, and that is only known after codegen has produced it,
+            // at finalize -- this function runs at flag-parse time, before a
+            // single byte of the program has been compiled.
+            //
+            // THE WORDING THAT USED TO STAND HERE SAID IT WAS "Task 2's",
+            // AND STAYED THERE AFTER TASK 2 SHIPPED WITHOUT IT. Task 2
+            // implemented the fit half only; the overlap half existed
+            // nowhere for three commits while this comment and one in the
+            // finalize arm both asserted it had merely been deferred. A
+            // whole-branch review caught it by BOOTING --stack-top=0x100008:
+            // exit 0, a valid-looking 65536-byte image, `RPL` on the wire,
+            // then a silent wedge. Both comments are corrected rather than
+            // deleted, because "deferred to X" ageing into a false claim the
+            // moment X ships is the shape worth leaving a marker for.
             if arch == 0 && reset_vector_set != 0 {
                 if stack_top > 4096 && stack_top < 28680 {
                     uint64 rv_pt = "error: --stack-top='s first push would land inside 0x1000-0x7000 under --reset-vector: the reset-vector stage builds its own identity page tables there (PDPT[0..3] and four page directories, mapping the full 4 GiB -- more table space than the self-boot trampoline's 0x1000-0x4000), and the stack grows down so the first push writes the eight bytes below the stack top. The stack top must be at most 0x1000 or at least 0x7008. This constraint is --reset-vector-only\n"
@@ -7887,8 +7966,8 @@ fn main() {
                 // here would be a claim about geometry nobody has measured.
                 // Refusing AT the boundary too is the conservative bound this
                 // task can actually stand behind; Task 2, once the stage
-                // exists to measure against, can loosen it to `>` if the
-                // math the same way B2's does.
+                // existed to measure against, could have loosened it to `>`
+                // if the math worked out the same way B2's does.
                 //
                 // TASK 2 LANDED AND THE BOUND WAS NOT LOOSENED, DELIBERATELY.
                 // The emitted stage does map exactly PDPT[0..3] x 4 GiB, so
