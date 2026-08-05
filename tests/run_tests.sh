@@ -14144,7 +14144,15 @@ emit_recipe() {
             echo "4d5a0000||$EV_SRC" ;;
         # An .ko is a relocatable ELF, but it needs a @module_init to be
         # emitted at all, so it cannot share the default source.
-        lkm)   echo "7f454c46||$EV_LKM" ;;
+        #
+        # --arch=x86_64 IS REQUIRED, NOT DECORATION: lkm is the one spelling in
+        # this list that refuses a host arch. `--emit=lkm` without it takes the
+        # NATIVE arch, so this row passed on x86_64 and failed on the Linux
+        # ARM64 runner with "krc: --emit=lkm currently supports x86_64 only"
+        # (exit 1) -- measured, run 30959429718. The pre-existing LKM section
+        # below pins the same flag for the same reason; this arm was written
+        # without it and only CI could see the difference.
+        lkm)   echo "7f454c46|--arch=x86_64|$EV_LKM" ;;
         # Both bare-metal modes REQUIRE --target=none and refuse `exit`, hence
         # the loop{} source. uefi promises the same MZ magic as pe and a very
         # different container; the magic alone does not separate them, which is
