@@ -3893,6 +3893,153 @@ else
     echo "  extern_libc_strlen_write: SKIP (gcc not available)"
 fi
 
+echo ""
+echo "--- extern fn: unresolved refused for executable emit modes (issue: silent wrong answer) ---"
+# An `extern fn` that is never defined and never linked used to produce a
+# WORKING BINARY THAT RETURNS A WRONG ANSWER, differently per backend, with
+# no diagnostic: the IR backend synthesized a stub (silently returns 0), the
+# legacy backend fell through with the argument still in the return register
+# (silently returns the argument). Both are exit 0. Fixed: unresolved +
+# CALLED extern fn is now a hard compile-time error for every emit mode that
+# produces a directly-executable artifact, and --emit=obj (the mode the
+# feature is actually for -- resolved by a real system linker) keeps
+# accepting it.
+TOTAL=$((TOTAL + 1))
+cat > /tmp/krc_extir_$$.kr <<'KREOF'
+extern fn missing_thing(uint64 x) -> uint64
+fn main() {
+    uint64 r = missing_thing(7)
+    exit(r)
+}
+KREOF
+if $KRC $KRC_FLAGS /tmp/krc_extir_$$.kr -o /tmp/krc_extir_bin_$$ > /dev/null 2>/tmp/krc_extir_err_$$; then
+    echo "FAIL: extern_unresolved_refused_ir (should not compile)"
+    FAIL=$((FAIL + 1))
+elif [ -e /tmp/krc_extir_bin_$$ ]; then
+    echo "FAIL: extern_unresolved_refused_ir (refused but left an artifact on disk)"
+    FAIL=$((FAIL + 1))
+elif grep -q "is never defined and this emit mode produces" /tmp/krc_extir_err_$$; then
+    PASS=$((PASS + 1))
+    echo "  extern_unresolved_refused_ir: PASS"
+else
+    echo "FAIL: extern_unresolved_refused_ir (wrong/missing diagnostic)"
+    FAIL=$((FAIL + 1))
+fi
+rm -f /tmp/krc_extir_$$.kr /tmp/krc_extir_bin_$$ /tmp/krc_extir_err_$$
+
+TOTAL=$((TOTAL + 1))
+cat > /tmp/krc_extref_$$.kr <<'KREOF'
+extern fn missing_thing(uint64 x) -> uint64
+fn main() {
+    uint64 r = missing_thing(7)
+    exit(r)
+}
+KREOF
+# --legacy has its own emission path (falls through with the arg still in
+# the return register instead of the IR backend's synthesised-stub-returns-0)
+# -- verified separately rather than assumed covered by the same check.
+if $KRC $KRC_FLAGS --legacy /tmp/krc_extref_$$.kr -o /tmp/krc_extref_bin_$$ > /dev/null 2>/tmp/krc_extref_err_$$; then
+    echo "FAIL: extern_unresolved_refused_legacy (should not compile)"
+    FAIL=$((FAIL + 1))
+elif [ -e /tmp/krc_extref_bin_$$ ]; then
+    echo "FAIL: extern_unresolved_refused_legacy (refused but left an artifact on disk)"
+    FAIL=$((FAIL + 1))
+elif grep -q "is never defined and this emit mode produces" /tmp/krc_extref_err_$$; then
+    PASS=$((PASS + 1))
+    echo "  extern_unresolved_refused_legacy: PASS"
+else
+    echo "FAIL: extern_unresolved_refused_legacy (wrong/missing diagnostic)"
+    FAIL=$((FAIL + 1))
+fi
+rm -f /tmp/krc_extref_$$.kr /tmp/krc_extref_bin_$$ /tmp/krc_extref_err_$$
+
+TOTAL=$((TOTAL + 1))
+# Same unresolved extern, but --emit=obj is the mode the feature exists for
+# (resolved by a later system linker, not by krc2) -- must keep succeeding.
+cat > /tmp/krc_extobj_$$.kr <<'KREOF'
+extern fn missing_thing(uint64 x) -> uint64
+fn main() {
+    uint64 r = missing_thing(7)
+    exit(r)
+}
+KREOF
+if $KRC $KRC_FLAGS --emit=obj /tmp/krc_extobj_$$.kr -o /tmp/krc_extobj_$$.o > /dev/null 2>&1 \
+   && [ -e /tmp/krc_extobj_$$.o ]; then
+    PASS=$((PASS + 1))
+    echo "  extern_unresolved_obj_still_succeeds: PASS"
+else
+    echo "FAIL: extern_unresolved_obj_still_succeeds (--emit=obj must keep accepting unresolved extern fn)"
+    FAIL=$((FAIL + 1))
+fi
+rm -f /tmp/krc_extobj_$$.kr /tmp/krc_extobj_$$.o
+
+# A RESOLVED extern (the language's actual extern-fn workflow: declare,
+# --emit=obj, link with the platform linker) must keep working end to end,
+# and must keep working when the object was produced by EITHER backend.
+if [ "$HOST_M" = "x86_64" ] || [ "$HOST_M" = "amd64" ]; then
+    if command -v gcc > /dev/null 2>&1; then
+        for BACKEND_FLAG in "" "--legacy"; do
+            TOTAL=$((TOTAL + 1))
+            LABEL="extern_resolved_via_obj_link${BACKEND_FLAG:+_legacy}"
+            cat > /tmp/krc_extres_$$.kr <<'KREOF'
+extern fn strlen(u64 s) -> u64
+extern fn write(u64 fd, u64 buf, u64 len) -> u64
+fn main() {
+    u64 msg = "extern_resolved_ok\n"
+    write(1, msg, strlen(msg))
+    exit(0)
+}
+KREOF
+            if $KRC $KRC_FLAGS $BACKEND_FLAG --emit=obj /tmp/krc_extres_$$.kr -o /tmp/krc_extres_$$.o > /dev/null 2>&1 \
+               && gcc /tmp/krc_extres_$$.o -o /tmp/krc_extres_bin_$$ -no-pie > /dev/null 2>&1; then
+                got=$(/tmp/krc_extres_bin_$$ 2>/dev/null)
+                if [ "$got" = "extern_resolved_ok" ]; then
+                    PASS=$((PASS + 1))
+                    echo "  $LABEL: PASS"
+                else
+                    FAIL=$((FAIL + 1))
+                    echo "  $LABEL: FAIL (got: $got)"
+                fi
+            else
+                FAIL=$((FAIL + 1))
+                echo "  $LABEL: FAIL (compile/link failed)"
+            fi
+            rm -f /tmp/krc_extres_$$.kr /tmp/krc_extres_$$.o /tmp/krc_extres_bin_$$
+        done
+    else
+        echo "  extern_resolved_via_obj_link: SKIP (gcc not available)"
+        echo "  extern_resolved_via_obj_link_legacy: SKIP (gcc not available)"
+    fi
+else
+    echo "  extern_resolved_via_obj_link: SKIP (non-x86_64 host toolchain)"
+    echo "  extern_resolved_via_obj_link_legacy: SKIP (non-x86_64 host toolchain)"
+fi
+
+# Regression: a normal program with no extern fn at all must be completely
+# unaffected by the new check, on both backends.
+run_test "extern_refusal_no_false_positive_ir" 'fn add(uint64 a, uint64 b) -> uint64 { return a + b }
+fn main() { exit(add(3, 4)) }' 7
+TOTAL=$((TOTAL + 1))
+cat > /tmp/krc_extnofp_$$.kr <<'KREOF'
+fn add(uint64 a, uint64 b) -> uint64 { return a + b }
+fn main() { exit(add(3, 4)) }
+KREOF
+if $KRC $KRC_FLAGS --legacy /tmp/krc_extnofp_$$.kr -o /tmp/krc_extnofp_bin_$$ > /dev/null 2>&1; then
+    /tmp/krc_extnofp_bin_$$
+    rc=$?
+    if [ "$rc" = "7" ]; then
+        PASS=$((PASS + 1))
+        echo "  extern_refusal_no_false_positive_legacy: PASS"
+    else
+        echo "FAIL: extern_refusal_no_false_positive_legacy (got exit $rc, want 7)"
+        FAIL=$((FAIL + 1))
+    fi
+else
+    echo "FAIL: extern_refusal_no_false_positive_legacy (should compile)"
+    FAIL=$((FAIL + 1))
+fi
+rm -f /tmp/krc_extnofp_$$.kr /tmp/krc_extnofp_bin_$$
+
 # --- sizeof ---
 run_test "sizeof_u8" 'fn main() { exit(sizeof(uint8)) }' 1
 run_test "sizeof_u64" 'fn main() { exit(sizeof(uint64)) }' 8

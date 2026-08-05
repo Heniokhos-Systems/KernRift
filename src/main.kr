@@ -3085,6 +3085,16 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
     }
     dce_scan(root)
 
+    // Refuse an unresolved `extern fn` that reachable code actually calls
+    // when this build's emit mode produces a directly-executable artifact
+    // -- see refuse_unresolved_externs (codegen.kr) for why. Runs here:
+    // after dce_scan (liveness is accurate) and before any output byte is
+    // written (header emission starts below). Covers BOTH backends: the
+    // --legacy/IR choice is a branch further down inside this same
+    // function, not a separate entry point, so this check runs before
+    // either is reached.
+    refuse_unresolved_externs(emit_mode_is_executable(emit_mode))
+
     // IR dump: lower each function to IR and print, then exit early
     if emit_mode == 6 {
         ir_init()
@@ -5488,6 +5498,15 @@ fn compile_fat(uint64 input_path, uint64 output_path) {
     dce_init()
     dce_scan(root)
 
+    // Every compile_fat slice is a directly-executable artifact (ELF/
+    // Mach-O/PE/Android; fat mode has no --emit=obj/asm/ir/lkm variant), so
+    // pass 1 rather than deriving it from a mode number -- see
+    // refuse_unresolved_externs (codegen.kr) for what this refuses and why.
+    // Repeated after each of this function's 8 dce_scan calls, one per
+    // (OS, arch) slice, since each re-parses into its own fresh AST and
+    // extern_fn_table.
+    refuse_unresolved_externs(1)
+
     // Generate x86_64 ELF into temp buffer.
     // The per-slice buffer is allocated AFTER codegen (same pattern as the
     // arm64 / pe / macho / android slices below) because the 1 MB upfront
@@ -5615,6 +5634,7 @@ fn compile_fat(uint64 input_path, uint64 output_path) {
     inline_pass(root2)
     dce_init()
     dce_scan(root2)
+    refuse_unresolved_externs(1)  // see the compile_fat comment above
 
     emit_elf_header_a64()
     emit_program_header_a64(0)
@@ -5725,6 +5745,7 @@ fn compile_fat(uint64 input_path, uint64 output_path) {
     inline_pass(root3)
     dce_init()
     dce_scan(root3)
+    refuse_unresolved_externs(1)  // see the compile_fat comment above
 
     uint64 header3 = emit_pe_headers_x64(0)
     uint64 text_start3 = codegen_output_len()
@@ -5840,6 +5861,7 @@ fn compile_fat(uint64 input_path, uint64 output_path) {
     inline_pass(root4)
     dce_init()
     dce_scan(root4)
+    refuse_unresolved_externs(1)  // see the compile_fat comment above
 
     uint64 header4 = emit_pe_headers_a64(0)
     uint64 text_start4 = codegen_output_len()
@@ -5978,6 +6000,7 @@ fn compile_fat(uint64 input_path, uint64 output_path) {
     inline_pass(root5)
     dce_init()
     dce_scan(root5)
+    refuse_unresolved_externs(1)  // see the compile_fat comment above
 
     uint64 header5 = emit_macho_headers_x64(0)
     uint64 text_start5 = codegen_output_len()
@@ -6084,6 +6107,7 @@ fn compile_fat(uint64 input_path, uint64 output_path) {
     inline_pass(root6)
     dce_init()
     dce_scan(root6)
+    refuse_unresolved_externs(1)  // see the compile_fat comment above
 
     uint64 header6 = emit_macho_headers_a64(0)
     uint64 text_start6 = codegen_output_len()
@@ -6226,6 +6250,7 @@ fn compile_fat(uint64 input_path, uint64 output_path) {
     inline_pass(root8)
     dce_init()
     dce_scan(root8)
+    refuse_unresolved_externs(1)  // see the compile_fat comment above
 
     emit_elf_header_android_x86_64()
     uint64 text_start8 = codegen_output_len()
@@ -6351,6 +6376,7 @@ fn compile_fat(uint64 input_path, uint64 output_path) {
     inline_pass(root7)
     dce_init()
     dce_scan(root7)
+    refuse_unresolved_externs(1)  // see the compile_fat comment above
 
     emit_elf_header_android_a64()
     uint64 text_start7 = codegen_output_len()
