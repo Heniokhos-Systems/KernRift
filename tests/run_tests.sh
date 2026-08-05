@@ -15144,18 +15144,35 @@ else
 fi
 TOTAL=$((TOTAL + 1))
 rm -f "$CP_BIN"
-# x86_64 for the same reason as its 7-arg twin above -- and running it here
-# keeps the pair symmetric, so the positive control is the same backend and
-# arch as the refusal it credits.
+# TWO ASSERTIONS, TWO ARCHES, AND THE SPLIT IS THE WHOLE POINT.
+#
+# The x86_64 half is COMPILE-ONLY and credits the refusal row above: it proves
+# the new cap does not over-fire at six on the same arch that refuses at seven.
+# It must NOT be run -- pinning the RUN to x86_64 is what reddened CI on the
+# native ARM64 job (run 31047947720): the build succeeded, the artifact was
+# x86_64, and executing it on aarch64 gave exit 126, "cannot execute".
+#
+# The native half RUNS, at $RUN_ARCH, because a positive control that never
+# executes cannot show the six-argument path still produces the right ANSWER.
+# On aarch64 that exercises codegen_aarch64.kr's own call_ptr lowering, which
+# has no cap at all (measured 7->28, 8->36) -- six returning 21 there is still
+# the correct expectation.
+TOTAL=$((TOTAL + 1))
 if $KRC --arch=x86_64 --legacy "$CP6_SRC" -o "$CP_BIN" >/dev/null 2>&1 && [ -s "$CP_BIN" ]; then
+    PASS=$((PASS + 1)); echo "  call_ptr_args_6_accepted_legacy_x86: PASS (compiles; not run -- may be a foreign arch here)"
+else
+    echo "FAIL: call_ptr_args_6_accepted_legacy_x86 (six args must still compile on the arch that refuses seven)"; FAIL=$((FAIL + 1))
+fi
+rm -f "$CP_BIN"
+if $KRC --arch=$RUN_ARCH --legacy "$CP6_SRC" -o "$CP_BIN" >/dev/null 2>&1 && [ -s "$CP_BIN" ]; then
     chmod +x "$CP_BIN"; "$CP_BIN"; CP6_LG_RUN=$?
     if [ "$CP6_LG_RUN" = "21" ]; then
-        PASS=$((PASS + 1)); echo "  call_ptr_args_6_accepted_legacy: PASS (compiles and returns 21)"
+        PASS=$((PASS + 1)); echo "  call_ptr_args_6_accepted_legacy: PASS (native $RUN_ARCH, runs and returns 21)"
     else
-        echo "FAIL: call_ptr_args_6_accepted_legacy (ran but returned $CP6_LG_RUN, want 21)"; FAIL=$((FAIL + 1))
+        echo "FAIL: call_ptr_args_6_accepted_legacy (native $RUN_ARCH ran but returned $CP6_LG_RUN, want 21)"; FAIL=$((FAIL + 1))
     fi
 else
-    echo "FAIL: call_ptr_args_6_accepted_legacy (should compile to a non-empty artifact)"; FAIL=$((FAIL + 1))
+    echo "FAIL: call_ptr_args_6_accepted_legacy (should compile to a non-empty artifact on $RUN_ARCH)"; FAIL=$((FAIL + 1))
 fi
 rm -f "$CP_SRC" "$CP6_SRC" "$CP_BIN"
 
