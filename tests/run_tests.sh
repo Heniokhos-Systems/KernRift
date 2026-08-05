@@ -15124,8 +15124,18 @@ fi
 # backend. Positive control (6 args) is call_ptr_args_6_accepted above,
 # rerun implicitly since a `--legacy` cap that rejected everything would
 # still need catching -- so also assert the 6-arg legacy build runs.
+#
+# PINNED TO x86_64, AND NOT BECAUSE OF THE HOST. The 6-argument cap is a
+# property of the x86 lowering ONLY. codegen_aarch64.kr's own call_ptr
+# lowering loads x0-x7 and spills the rest to the stack, so arm64 legacy has
+# NO 6-arg defect -- measured under qemu-aarch64-static: 7 args -> 28, 8 -> 36,
+# both correct. Running this row at $RUN_ARCH would therefore FAIL on an
+# aarch64 host (RUN_ARCH becomes arm64, the build succeeds at rc 0, the row
+# expects a refusal) -- and this project has a native ARM64 CI job, so that is
+# a red CI, not a hypothetical. DO NOT "fix" it by adding a cap to
+# codegen_aarch64.kr: that would DELETE working 7- and 8-argument support.
 TOTAL=$((TOTAL + 1))
-CP_LG_ERR=$($KRC --arch=$RUN_ARCH --legacy "$CP_SRC" -o "$CP_BIN" 2>&1); CP_LG_ST=$?
+CP_LG_ERR=$($KRC --arch=x86_64 --legacy "$CP_SRC" -o "$CP_BIN" 2>&1); CP_LG_ST=$?
 if [ "$CP_LG_ST" != "0" ] && echo "$CP_LG_ERR" | grep -q "too many call_ptr arguments (max 6)"; then
     PASS=$((PASS + 1)); echo "  call_ptr_args_7_rejected_legacy: PASS (exit $CP_LG_ST, clean diagnostic)"
 else
@@ -15134,7 +15144,10 @@ else
 fi
 TOTAL=$((TOTAL + 1))
 rm -f "$CP_BIN"
-if $KRC --arch=$RUN_ARCH --legacy "$CP6_SRC" -o "$CP_BIN" >/dev/null 2>&1 && [ -s "$CP_BIN" ]; then
+# x86_64 for the same reason as its 7-arg twin above -- and running it here
+# keeps the pair symmetric, so the positive control is the same backend and
+# arch as the refusal it credits.
+if $KRC --arch=x86_64 --legacy "$CP6_SRC" -o "$CP_BIN" >/dev/null 2>&1 && [ -s "$CP_BIN" ]; then
     chmod +x "$CP_BIN"; "$CP_BIN"; CP6_LG_RUN=$?
     if [ "$CP6_LG_RUN" = "21" ]; then
         PASS=$((PASS + 1)); echo "  call_ptr_args_6_accepted_legacy: PASS (compiles and returns 21)"
