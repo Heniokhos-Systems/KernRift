@@ -2181,6 +2181,13 @@ For debugging — `-g` DWARF in gdb, the `--debug` trap table, and the
 `--O0` → `--no-coalesce` → `--legacy` miscompile bisection ladder — see
 [docs/DEBUGGING.md](DEBUGGING.md).
 
+`--legacy --arch=arm64 --debug` is refused: the legacy arm64 backend has no
+array-bounds-check codegen, so that exact combination would otherwise build
+clean and silently ship `--debug` unmet. `--legacy --arch=arm64` without
+`--debug`, and `--debug` on every other arch/backend pairing (including the
+default IR backend on arm64), are unaffected — see the per-backend table in
+[docs/DEBUGGING.md](DEBUGGING.md).
+
 ### Static checks: the type checker
 
 A static type checker runs by default on every compile (and under

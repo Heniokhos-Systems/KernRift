@@ -43,9 +43,13 @@ fn main() {
 
 Release build: runs to completion, prints `0`, exits 0 — the out-of-bounds
 store silently lands somewhere on the stack. With `--debug`: the process
-exits with code **1** before the store, on both backends and both
-architectures. The trap is silent (no message); a non-zero exit at an
-unexpected point is the signal.
+exits with code **1** before the store, on the IR backend on both x86_64
+and arm64, and on the legacy backend on x86_64. The trap is silent (no
+message); a non-zero exit at an unexpected point is the signal.
+
+The legacy arm64 backend has no bounds-check codegen at all — see the table
+below — so `--legacy --arch=arm64 --debug` is refused outright rather than
+silently accepting a build with no checks.
 
 ### What `--debug` checks, per backend
 
@@ -53,16 +57,26 @@ The two backends instrument different things. This table is derived from
 `docs/UNDEFINED_BEHAVIOR.md` and verified by running trap programs on each
 backend:
 
-| Check | IR backend (default) | `--legacy` backend |
-|---|---|---|
-| Array bounds (compile-time-sized stack/static arrays) | **Traps**, `exit(1)` — x86_64 and arm64 | **Traps**, `exit(1)` |
-| Integer divide / modulo by zero | arm64: **traps**, `exit(1)`. x86_64: **no check** — hardware SIGFPE (shell reports exit 136) | **Traps**, `exit(1)` — both arches |
-| Signed `i64`/`i32`… add/sub overflow | No check — wraps | **Traps**, `exit(1)` |
-| Null pointer in `loadN`/`storeN` builtins | No check — SIGSEGV (exit 139) | **Traps**, `exit(1)` |
-| Unsigned overflow | No check (defined behavior — wraps) | No check (wraps; the guard tests the *signed* overflow flag only) |
+| Check | IR backend (default) | `--legacy` backend, x86_64 | `--legacy` backend, arm64 |
+|---|---|---|---|
+| Array bounds (compile-time-sized stack/static arrays) | **Traps**, `exit(1)` — x86_64 and arm64 | **Traps**, `exit(1)` | refused at compile time (see below) |
+| Integer divide / modulo by zero | arm64: **traps**, `exit(1)`. x86_64: **no check** — hardware SIGFPE (shell reports exit 136) | **Traps**, `exit(1)` | refused at compile time (see below) |
+| Signed `i64`/`i32`… add/sub overflow | No check — wraps | **Traps**, `exit(1)` | refused at compile time (see below) |
+| Null pointer in `loadN`/`storeN` builtins | No check — SIGSEGV (exit 139) | **Traps**, `exit(1)` | refused at compile time (see below) |
+| Unsigned overflow | No check (defined behavior — wraps) | No check (wraps; the guard tests the *signed* overflow flag only) | refused at compile time (see below) |
+
+**`--legacy --arch=arm64 --debug` is refused outright, unconditionally.**
+`codegen_aarch64.kr` (the legacy arm64 backend) has no array-bounds-check
+codegen at all — it never did — even though it correctly traps the other
+four rows above. Rather than ship `--debug` unmet for bounds checks on this
+one backend/arch combination with no diagnostic, the compiler refuses the
+whole three-flag combination up front. The practical effect: on arm64,
+`--legacy --debug` is not available at all, for any of the five checks —
+use the IR backend (the default) there instead.
 
 Practical consequence: if `--debug` on the default backend doesn't catch
-anything, try `--legacy --debug` — it guards more operations:
+anything, try `--legacy --debug` — it guards more operations — but only on
+x86_64:
 
 ```sh
 krc --arch=x86_64 --legacy --debug program.kr -o program
@@ -147,10 +161,11 @@ Program received signal SIGSEGV, Segmentation fault.
 The usual suspects, in order of likelihood:
 
 1. **Null or garbage pointer** in a `loadN`/`storeN` — rebuild with
-   `--legacy --debug` to turn null dereferences into a clean `exit(1)` at
-   the exact call.
+   `--legacy --debug` (x86_64 only — see §1's `--debug` table) to turn null
+   dereferences into a clean `exit(1)` at the exact call.
 2. **Out-of-bounds array index** that walked off the stack — `--debug`
-   bounds checks catch this on either backend.
+   bounds checks catch this on the IR backend on either arch, and on the
+   legacy backend on x86_64 (`--legacy --arch=arm64 --debug` is refused).
 3. **Use-after-`dealloc`** or stack overflow from deep recursion — see
    `docs/UNDEFINED_BEHAVIOR.md` for what is and isn't defined.
 

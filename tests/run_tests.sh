@@ -8561,6 +8561,68 @@ for A in x86_64 arm64; do
     t6_builds "t6_legacy_freestanding_$A" -- --legacy --arch=$A --freestanding "$T6_D/plain.kr"
 done
 
+# 5. --legacy --arch=arm64 --debug: codegen_aarch64.kr has no array-bounds-
+#    check machinery at all (arr_count_lookup has 4 call sites -- codegen.kr
+#    :4457/:10403 legacy x86_64, ir.kr:3844/:4868 IR x86_64 -- and none in
+#    codegen_aarch64.kr; arm64 IR checks via a different mechanism,
+#    IR_ARR_CHECK op 131). Measured: `uint64[4] a; a[99]` under --debug
+#    aborts (rc=1) on x86_64 legacy, x86_64 IR and arm64 IR, but under
+#    --legacy --arch=arm64 --debug it silently prints "v=0" and exits 0.
+#    --debug is a safety promise; refuse rather than ship it unmet with no
+#    diagnostic.
+t6_refuses "t6_legacy_arm64_debug_refused" "--debug" "--legacy" -- \
+    --legacy --arch=arm64 --debug "$T6_D/arr.kr"
+# --legacy + arm64 WITHOUT --debug must keep working (also covered by
+# t6_legacy_hosted_arm64 above; repeated here with the exact repro flags,
+# no --target=, for direct correspondence with the refusal case).
+t6_builds "t6_legacy_arm64_no_debug_builds" -- --legacy --arch=arm64 "$T6_D/arr.kr"
+# The fat-binary path (no --arch at all -- bare `krc` emits a FAT binary)
+# reaches the same defective slice: compile_fat's arm64 slices honor
+# --legacy exactly like the single-target path, and the default fat build
+# (no --targets=) always includes all 4 arm64 (OS, arch) slices. Refuse
+# there too, deliberately, rather than let it through by accident.
+t6_refuses "t6_legacy_debug_fat_refused" "--debug" "--legacy" -- \
+    --legacy --debug "$T6_D/arr.kr"
+
+# An actual out-of-bounds index, to prove the STILL-WORKING configs really
+# do trap rather than merely "not refuse" -- the refusal above must not
+# have accidentally widened into something that also swallows these.
+printf 'fn main() {\n    uint64[4] a\n    uint64 v = a[99]\n    println(v)\n    exit(0)\n}\n' > "$T6_D/oob.kr"
+
+if [ -n "$QEMU_A64" ]; then
+    TOTAL=$((TOTAL + 1))
+    if $T6_KRC --arch=arm64 --debug "$T6_D/oob.kr" -o "$T6_D/oob_ir_a64" >/dev/null 2>&1; then
+        chmod +x "$T6_D/oob_ir_a64"
+        $QEMU_A64 "$T6_D/oob_ir_a64" >/dev/null 2>&1
+        oob_ir_a64_st=$?
+        if [ "$oob_ir_a64_st" != "0" ]; then
+            PASS=$((PASS + 1)); echo "  t6_debug_arm64_ir_still_traps: PASS (exit $oob_ir_a64_st)"
+        else
+            echo "FAIL: t6_debug_arm64_ir_still_traps (exit 0 -- bounds check missing)"; FAIL=$((FAIL + 1))
+        fi
+    else
+        echo "FAIL: t6_debug_arm64_ir_still_traps (build failed)"; FAIL=$((FAIL + 1))
+    fi
+    rm -f "$T6_D/oob_ir_a64"
+else
+    echo "  t6_debug_arm64_ir_still_traps: SKIP (no qemu-aarch64-static)"
+fi
+
+TOTAL=$((TOTAL + 1))
+if $T6_KRC --legacy --arch=x86_64 --debug "$T6_D/oob.kr" -o "$T6_D/oob_leg_x64" >/dev/null 2>&1; then
+    chmod +x "$T6_D/oob_leg_x64"
+    "$T6_D/oob_leg_x64" >/dev/null 2>&1
+    oob_leg_x64_st=$?
+    if [ "$oob_leg_x64_st" != "0" ]; then
+        PASS=$((PASS + 1)); echo "  t6_debug_legacy_x86_64_still_traps: PASS (exit $oob_leg_x64_st)"
+    else
+        echo "FAIL: t6_debug_legacy_x86_64_still_traps (exit 0 -- bounds check missing)"; FAIL=$((FAIL + 1))
+    fi
+else
+    echo "FAIL: t6_debug_legacy_x86_64_still_traps (build failed)"; FAIL=$((FAIL + 1))
+fi
+rm -f "$T6_D/oob.kr" "$T6_D/oob_leg_x64"
+
 # 3. Every remaining --emit= mode gets a DEFINED outcome under --target=none.
 #    macho and pe are OS containers -- a Mach-O needs dyld and LC_MAIN, a PE
 #    needs the Windows loader and an import table -- and before this both

@@ -7604,6 +7604,73 @@ fn main() {
         exit(1)
     }
 
+    // --legacy --arch=arm64 --debug: codegen_aarch64.kr has no array-
+    // bounds-check machinery at all. `arr_count_lookup` has 4 call sites --
+    // codegen.kr:4457 and :10403 (legacy x86_64), ir.kr:3844 and :4868 (IR
+    // x86_64) -- and none in codegen_aarch64.kr. arm64 IR checks via a
+    // different mechanism (IR_ARR_CHECK, op 131), so it IS covered; only
+    // the legacy arm64 path is silent. Measured on this tree: `uint64[4] a;
+    // a[99]` under --debug aborts (rc=1) on x86_64 legacy, x86_64 IR and
+    // arm64 IR, but under --legacy --arch=arm64 --debug it prints "v=0" and
+    // exits 0. --debug is a safety promise this backend does not keep, so
+    // refuse rather than ship it unmet with no diagnostic.
+    //
+    // Adding the checks is separately queued work (this is a front-end
+    // refusal, not codegen). This deliberately breaks a command line that
+    // worked before -- accepted: bounds checking itself was never actually
+    // protected here. Collateral, and worth being honest about: this
+    // codegen_aarch64.kr file DOES correctly trap overflow, null pointers
+    // and divide-by-zero under --debug (see its own debug_mode sites), and
+    // refusing the whole three-flag combination makes those unreachable on
+    // legacy arm64 too, not just the missing bounds check. A --debug build
+    // that used none of the five checks was never protected by any of
+    // them; one that used only the four that did work loses working
+    // protection to this refusal. The alternative -- refusing only when an
+    // array is actually indexed -- was rejected: it reproduces the exact
+    // "silent restriction surfaces on whichever function you write next"
+    // failure mode the --target=none --debug refusal above was written to
+    // avoid, for the same reason.
+    //
+    // Gated on emit_ir_mode == 0, which is exactly "--legacy was passed"
+    // (its only writer besides the codegen.kr default). --emit=obj and
+    // --emit=lkm also fall back to legacy codegen on arm64 even without
+    // --legacy (their own extern-relocation requirement, unconditional on
+    // this flag) -- that is a different, narrower gap and out of scope
+    // here; this refusal only fires when --legacy was actually requested.
+    //
+    // Reaches through the fat-binary path too: bare `krc` with no --arch
+    // emits a FAT binary, and compile_fat's four arm64 (OS, arch) slices
+    // (linux/win/macos/android-arm64 -- KrboFat bits 1/3/5/6) honor
+    // --legacy exactly like the single-target path above (see the matching
+    // `if emit_ir_mode != 0 { ... } else { gen_function_a64(...) }` at each
+    // arm64 slice in compile_fat). The default fat build (no --targets=)
+    // carries all 8 slices, so `--legacy --debug` with no --arch reaches
+    // the same silent gap by default; a `--targets=` selection that
+    // excludes every arm64 bit does not, and is left alone.
+    if emit_ir_mode == 0 && debug_mode != 0 {
+        uint64 fat_dispatch = 0
+        if target_mask != 0 || (arch_set == 0 && emit_set == 0 && cli_argc > 0) {
+            fat_dispatch = 1
+        }
+        uint64 arm64_legacy_reachable = 0
+        if fat_dispatch != 0 {
+            // 0x6A = bits 1,3,5,6 = linux-arm64, win-arm64, macos-arm64,
+            // android-arm64 (see the KrboFat bit-layout comment above
+            // target_mask's declaration). target_mask == 0 means the
+            // default: all 8 slices, which includes all four of those.
+            if target_mask == 0 || (target_mask & 0x6A) != 0 {
+                arm64_legacy_reachable = 1
+            }
+        } else if arch == 1 {
+            arm64_legacy_reachable = 1
+        }
+        if arm64_legacy_reachable != 0 {
+            uint64 dbg_lg_msg = "error: --debug does not emit array bounds checks on the legacy arm64 backend. They are emitted on x86_64 (legacy and IR) and on arm64 IR. Drop --legacy, or drop --debug and accept no bounds checking.\n"
+            write(2, dbg_lg_msg, str_len(dbg_lg_msg))
+            exit(1)
+        }
+    }
+
     // --target=none is a bare-metal image: no kernel to load a loadable
     // kernel module into, no Android runtime to host an APK payload. Refuse
     // both explicitly rather than emitting a container that nothing on that
