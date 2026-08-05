@@ -7310,7 +7310,7 @@ fn main() {
                 write(1, h_st, str_len(h_st))
                 uint64 h_ih = "  --image-header            prefix the 64-byte arm64 Linux Image header (magic 0x644d5241) so a loader can boot the artifact from its first byte; requires --emit=image, --arch=arm64 and --stack-top=\n"
                 write(1, h_ih, str_len(h_ih))
-                uint64 h_rv = "  --reset-vector            x86_64 QEMU -bios reset-vector form: fixed 64 KiB, entered directly with no loader; requires --arch=x86_64, --target=none and --stack-top=, refuses --load-addr=; flag surface only today, no stage bytes emitted yet\n"
+                uint64 h_rv = "  --reset-vector            x86_64 QEMU -bios reset-vector form: fixed 64 KiB, entered directly with no loader; requires --arch=x86_64, --target=none and --stack-top=, refuses --load-addr=; the stack must also lie within the guest's INSTALLED RAM, which cannot be checked here -- see LANGUAGE.md\n"
                 write(1, h_rv, str_len(h_rv))
                 write(1, "  -c                        shorthand for --emit=obj\n", 53)
                 write(1, "  -o <path>                 output path\n\n", 41)

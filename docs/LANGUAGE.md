@@ -1482,7 +1482,7 @@ krc <file.kr> --target=android -o out
 #   lkm                                                 → Linux kernel module (.ko) — see docs/LKM.md
 #   asm                                                 → annotated assembly listing (to -o path)
 #   ir                                                  → SSA IR dump per function (to stdout)
-#   image                                               → raw flat binary, no container (bare metal; --image-header prefixes an arm64 boot header; --reset-vector selects the x86_64 QEMU -bios form — flag surface only today, see below)
+#   image                                               → raw flat binary, no container (bare metal; --image-header prefixes an arm64 boot header; --reset-vector selects the x86_64 QEMU -bios form — emits the stage and boots, see below)
 #   uefi                                                → UEFI application (PE32+) that firmware loads and enters directly
 krc <file.kr> --emit=pe -o out.exe
 krc <file.kr> --emit=macho -o out
