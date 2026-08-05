@@ -35,6 +35,13 @@
 # existed only as prose in its Task 2 report until L7/L8. A result that lives
 # only in a report is one refactor away from being unverified; every one of them
 # is a leg now.
+# SUB-PROJECT E ADDED L9, and it removes the loader entirely: `-bios <image>`,
+# where the artifact IS the firmware. QEMU maps its 65536 bytes at 0xFFFF0000
+# and the CPU comes out of reset fetching the last 16 of them, so the first
+# instruction executed on the machine is one this compiler emitted, in 16-bit
+# real mode. Same debt, same discharge: `--reset-vector`'s boot existed only as
+# prose in E's Task 2 report until L9. See L9's own block for the four sentinel
+# letters and for two proposed controls that were measured worthless.
 #
 # Discharges the bare-metal-execution debt recorded in prove_no_syscalls.sh's
 # "WHAT A GREEN RUN DOES NOT CLAIM" note: every leg
@@ -183,15 +190,18 @@ trap cleanup EXIT INT TERM
 # Still live, and where — verified by grep at Task 6, not inherited:
 #   python3   make_stub.py (L3 only), qmp_pc.py, the image readers
 #             loop_offset_a64 / halt_offset_x86 / mb_u32 / call_target_x86 /
-#             img_bytes, and img_patch (L1's three patched controls)
+#             img_bytes / rv_sites, the capture decoder rv_verdict, and
+#             img_patch (L1's three patched controls, and every control in
+#             L7, L8 and L9)
 #   timeout   every boot, both arches
 #   qemu-system-x86_64, qemu-system-aarch64   every boot
 #   stat      build_image's on-disk size cross-check, L0's capture sizes,
 #             L4's x86 artifact report
 #   sed       build_image's `image:` report parse — the ONLY source of the
-#             entry offset every leg branches to — and build_uefi's `uefi:`
-#             one, which is a DIFFERENT line and needs its own expression
-#             (see build_uefi's header)
+#             entry offset every leg branches to — build_uefi's `uefi:` one,
+#             and build_reset_vector's `reset-vector:` one; all three are
+#             DIFFERENT lines and each needs its own expression (see those two
+#             functions' headers for why they are not arguments to build_image)
 #   grep      boot_wait's expect match, every sentinel assertion
 #   head      L1's `-c` log excerpts (one of them on the PASS path, in
 #             L1_no_header_image_refused), L2's and L4's failure excerpts
@@ -809,10 +819,27 @@ PY
 #   u32:<off>:<val>              little-endian u32 at <off>
 #   hex:<off>:<bytes>            raw hex at <off>
 #   zero:<off>                   zero everything from <off> to EOF
+#   zeron:<off>:<len>            zero exactly <len> bytes at <off>
 #   u32was:<off>:<old>:<new>     u32, but only if <off> currently holds <old>
 #   hexwas:<off>:<oldhex>:<new>  hex, but only if <off> currently holds <oldhex>
 # Order matters and is used: L1's payload control zeroes to EOF and then plants
 # a landing pad inside the zeroed region.
+#
+# `zeron` IS L9's, AND `zero` THERE IS A MISTAKE NOTHING WOULD CATCH. L1's
+# artifact ends with its payload, so "zero to EOF" is exactly "zero the
+# payload". L9's does not: a `--reset-vector` image is a FIXED 65536 bytes whose
+# last 16 carry the RESET VECTOR, so `zero:<payoff>` erases the `jmp` the CPU
+# fetches first, and all the fill between the payload and it, along with the
+# payload.
+# MEASURED, NOT REASONED, and the obvious prediction was wrong: substituting
+# `zero:$payoff` for `zeron` leaves L9_control_zeroed_payload GREEN, because a
+# zeroed reset jmp BOOTS NORMALLY (real-mode IP wraps within CS and re-enters
+# the stage -- L9's header records the same trap for its own control). So the
+# damage is not a false verdict, it is a FALSE CLAIM: the row would go on
+# printing "payload [payoff,payoff+paylen) zeroed" while having zeroed the whole
+# tail of the file, which is the class of mistake img_patch's `was` forms exist
+# for one level down. The length is the compiler's published `paylen`, which is
+# the reason that number is on the report line at all.
 # Exits nonzero (and writes nothing) if an offset does not fit, so a control
 # built on a mislocated patch site fails instead of quietly testing nothing.
 #
@@ -844,6 +871,13 @@ for spec in sys.argv[3:]:
         if o >= len(d):
             sys.exit("img_patch: zero offset %d is past EOF (%d)" % (o, len(d)))
         for i in range(o, len(d)):
+            d[i] = 0
+    elif kind == "zeron":
+        o, n = rest.split(":")
+        o, n = int(o), int(n)
+        if o < 0 or n < 0 or o + n > len(d):
+            sys.exit("img_patch: zeron [%d,%d) does not fit in %d bytes" % (o, o + n, len(d)))
+        for i in range(o, o + n):
             d[i] = 0
     elif kind == "u32":
         o, v = rest.split(":")
@@ -2848,6 +2882,566 @@ leg8() {
     fi
 }
 
+# =============================================================================
+# THE RESET-VECTOR HALF (sub-project E). Everything from here to the rosters is
+# L9.
+# =============================================================================
+# WHAT IS DIFFERENT ABOUT THIS LEG, in one sentence: L0-L6 hand QEMU an artifact
+# and QEMU is the loader, L7/L8 hand a FIRMWARE an ESP and edk2 is the loader --
+# and L9 has NO LOADER AT ALL. The artifact IS the firmware: `-bios <image>` maps
+# its 65536 bytes at 0xFFFF0000 and the CPU comes out of reset fetching from
+# 0xFFFFFFF0, i.e. from the last 16 bytes of the file. Everything that runs
+# afterwards is bytes this compiler emitted, starting in 16-bit real mode.
+#
+# UNTIL THIS BLOCK EXISTED THE ONLY RECORD OF THAT BOOT WAS PROSE IN SUB-PROJECT
+# E's TASK 2 REPORT -- the same debt L7/L8 discharged for the UEFI boots, and the
+# reason the header at the top of this file says a result that lives only in a
+# report is one refactor away from being unverified.
+#
+# WHAT A GREEN L9 CLAIMS, and nothing more: a `--reset-vector` image built by
+# this compiler takes an emulated x86_64 from the reset vector through protected
+# mode into long mode and runs a KernRift program there, under QEMU on the
+# machine that ran the gate. NOT real hardware and NOT a real chipset -- and the
+# distinction is sharper here than anywhere else in this file, because the region
+# this image is mapped into is exactly the one a real board write-protects and
+# shadow-copies.
+#
+# THE FOUR SENTINELS ARE THE WHOLE INSTRUMENT, and each letter is a distinct
+# claim about a mode transition rather than decoration:
+#   R  the reset vector ran: real mode, COM1 programmed 8N1
+#   P  protected mode reached: CR0.PE set and the 32-bit far jump taken
+#   L  long mode reached: PAE + EFER.LME + CR0.PG and the 64-bit far jump taken
+#   <computed>  the PAYLOAD ran: sentinel_x86.kr's 2000000007 + 9, printed by
+#      KernRift code that was COPIED from the BIOS region down to 0x100000
+# `rv_verdict` below decodes a capture into one of six names; the positive row
+# asserts the full `RPL<computed>` and no row asserts a prefix by grep.
+#
+# TRAPS, ALL MEASURED ON THIS MACHINE IN THIS SESSION, none inherited. Two of
+# them are controls that were PROPOSED for this leg and are worthless:
+#
+#   * A ZEROED RESET JMP BOOTS NORMALLY. `00 00 00` at 0xFFF0 is not "the CPU
+#     goes nowhere": real-mode IP wraps within CS, so the guest walks the 13
+#     zero bytes of padding off the end of the segment, wraps to offset 0 and
+#     RE-ENTERS THE STAGE. Measured: `RPL2000000016`, byte-identical to
+#     pristine. The control here plants `EB FE` (`jmp .`) instead, which is
+#     measured SILENT with RIP parked at 0xfff0.
+#   * `KENTOFF + 4` IS BYTE-IDENTICAL TO PRISTINE on the wire and was measured
+#     so. The control here re-points the call at a NAMED target -- a landing pad
+#     this script plants at a derived offset inside the payload -- and asserts
+#     the guest parks ON it.
+#   * `-no-reboot` CHANGES WHAT THE 1 GiB CONTROL LOOKS LIKE, and boot_run
+#     passes it on every x86 boot. Task 2 measured `RPRPRPRP...` for that mutant
+#     on a bare command line, because the triple fault RESETS the CPU back into
+#     the stage. Under this gate's `-no-reboot` the same image gives exactly
+#     `RP` and QEMU EXITS BY ITSELF -- both measured here, same image, the flag
+#     the only difference. `rv_verdict` accepts either shape under one name,
+#     because what discriminates the map fault is that **`L` NEVER PRINTS**, not
+#     the tail of the capture. A control that grepped for a capture ENDING in
+#     `RP` would pass on a correct compiler too (tests/run_tests.sh:9116 carries
+#     the same warning).
+#   * THE RAM CEILING IS NOT THE MAP CEILING. `--stack-top` is validated against
+#     the 4 GiB identity map, and the compiler cannot know how much RAM the
+#     machine has, so a stack top inside the map but outside INSTALLED RAM is
+#     accepted and faults on the payload's first push. Measured, same image:
+#     `--stack-top=0x80000000` gives the full sequence at `-m 4096` and `RPL`
+#     with no sentinel at `-m 128`. That is the two-sided evidence
+#     L9_stack_top_above_2_31_boots asserts. (Task 2's report calls this shape
+#     `RPLRPLRPL...`; that was measured without `-no-reboot`. Same fault, and
+#     `rv_verdict` names both -- see its header.)
+#
+# THE PAYLOAD-REGION LANDING PAD IS A TEST-TIME PATCH AND HAS TO BE. A compiler
+# cannot plant `hlt; jmp .` inside its own payload without corrupting the
+# payload, so Task 2 deliberately did not -- it published `payoff`/`paylen`/
+# `kentoff` so that THIS file can. Same shape as L1's zeroed-payload control:
+# zero the payload, plant the pad at the address the stage's call transfers to,
+# and require the guest to PARK ON IT. Without the pad, zeroes decode as
+# `add %al,(%rax)`, which is self-modifying at the address it is executing; L1's
+# header records the measurement that killed that idea (one survivor in twelve
+# runs, then 0 in 40).
+#
+# WHY THERE IS NO `PAYLEN := 0` ROW (the spec's §7 forces an explicit choice).
+# DROPPED, as subsumed by L9_control_zeroed_payload. With the copy suppressed
+# nothing is written to 0x100000 at all, so the landing pad -- which lives in the
+# UNCOPIED payload region -- never reaches the guest, and the call lands in
+# uninitialised RAM. The only assertion left would be "no sentinel", i.e. an
+# absence, and the row that already exists makes the same claim (the sentinel
+# comes from the copied payload) with a POSITIVE observable: a parked RIP on a
+# known pad. Asserting `0x100000` over QMP was the alternative the spec offers;
+# it would be asserting the CONTENTS of guest RAM, which this gate has no reader
+# for and which says nothing the parked PC does not.
+#
+# THE SOURCE IS L1's SENTINEL, unchanged and uncopied: the same
+# `tests/target_none/boot/sentinel_x86.kr`, so `2000000016` here and in L1 are
+# the same program reached two completely different ways -- multiboot `-kernel`
+# there, the reset vector here.
+
+# The program under test is L1's, so the computed value is L1's.
+RV_SENTINEL=2000000016
+# --stack-top for the ordinary rows. NOT $X86_STACK_TOP's value by accident:
+# 0x90000 is below the payload's 0x100000 base and inside the low 640 KiB, which
+# is what Task 2's own smoke boots used.
+RV_STACK_TOP=0x90000
+# The ≥ 2^31 row. This is the value the 10-byte `movabs` exists for: the 7-byte
+# `mov $imm32,%rsp` the reference stage uses SIGN-EXTENDS, so this value would
+# become 0xFFFFFFFF80000000 -- outside the identity map, i.e. a fault on the
+# payload's first push. Task 2 asserted that statically and could not boot it;
+# this row boots it.
+RV_STACK_TOP_HI=0x80000000
+# The `-m` that row needs, and the `-m` that proves it needs it. See the RAM
+# trap above.
+RV_HI_RAM=4096
+RV_LOW_RAM=128
+# The batch's positive control, set by leg9 from its FIRST boot -- the pristine
+# artifact -- and read by every control. "" until set, so a control that runs
+# before any positive fails closed. Same rule as UEFI_BATCH_POS: a mutant's
+# rejection is evidence only in a batch where something else got through.
+RV_BATCH_POS=""
+rv_batch_positive() { [ "$RV_BATCH_POS" = RPL_SENTINEL ]; }
+
+# Build a `--reset-vector` image and echo `<payoff> <paylen> <kentoff> <stack>`.
+#   build_reset_vector <src> <out> <stack-top>
+#
+# ITS OWN PARSER, NOT build_image's. Two lines are printed, not one:
+#     image: arch=x86_64 entry=0 filesz=65536 memsz=65536 load=0
+#     reset-vector: payoff=304 paylen=1016 kentoff=676 stack=589824
+# and build_image's `sed -n 's/^image: …'` cannot see the second one at all --
+# it would silently return the entry from the first while every number this leg
+# actually patches with went unread. build_uefi is a separate function for
+# exactly the same reason; see its header.
+#
+# EVERYTHING build_image ASSERTS IS ASSERTED HERE, for its reasons: exit 0, a
+# parsable line, and on-disk size == the reported filesz, because the report is
+# printed BEFORE the file is written and codegen ignores file_write's status.
+# `--load-addr` is NOT passed and must not be: it is REFUSED under
+# `--reset-vector` (the payload's base is a fixed 0x100000), which is why this
+# cannot be a fifth argument to build_image either.
+build_reset_vector() {
+    local src="$1" out="$2" stop="$3"
+    local log="$out.rep"
+    rm -f "$out"
+    if ! "$KRC" --arch=x86_64 --target=none --emit=image --reset-vector \
+                --stack-top="$stop" "$src" -o "$out" >"$log" 2>&1; then
+        echo "  build_reset_vector: $KRC exited nonzero for $src --stack-top=$stop (see $log)" >&2
+        return 1
+    fi
+    local filesz payoff paylen kentoff stack ondisk
+    filesz=$(sed -n 's/^image: .* filesz=\([0-9][0-9]*\) .*$/\1/p' "$log")
+    payoff=$(sed -n 's/^reset-vector: payoff=\([0-9][0-9]*\) .*$/\1/p' "$log")
+    paylen=$(sed -n 's/^reset-vector: .* paylen=\([0-9][0-9]*\) .*$/\1/p' "$log")
+    kentoff=$(sed -n 's/^reset-vector: .* kentoff=\([0-9][0-9]*\) .*$/\1/p' "$log")
+    stack=$(sed -n 's/^reset-vector: .* stack=\([0-9][0-9]*\).*$/\1/p' "$log")
+    if [ -z "$filesz" ] || [ -z "$payoff" ] || [ -z "$paylen" ] || [ -z "$kentoff" ] || [ -z "$stack" ]; then
+        echo "  build_reset_vector: no parsable 'image:'+'reset-vector:' pair for $src (see $log)" >&2
+        return 1
+    fi
+    ondisk=$(stat -c%s "$out" 2>/dev/null)
+    if [ "$ondisk" != "$filesz" ]; then
+        echo "  build_reset_vector: report claims filesz=$filesz but $out is ${ondisk:-ABSENT} B" >&2
+        return 1
+    fi
+    # The stage echoes back the --stack-top it was given; if it does not, every
+    # row below is testing a different machine from the one it names.
+    if [ "$stack" != "$(( stop ))" ]; then
+        echo "  build_reset_vector: asked for --stack-top=$stop ($(( stop ))) but the report says stack=$stack" >&2
+        return 1
+    fi
+    echo "$payoff $paylen $kentoff $stack"
+}
+
+# EVERY PATCH SITE L9 USES, LOCATED BY ANCHOR AND CROSS-CHECKED AGAINST THE
+# REPORT. Echoes `<halt> <payoff-imm> <movsl-count> <pd-count> <pdpt1> <pdpt2>
+# <pdpt3>` as decimal FILE OFFSETS (except <movsl-count>, which is a value), or
+# `ERR:<why>` on stdout with a nonzero status.
+#   rv_sites <img> <payoff> <paylen> <kentoff>
+#
+# NOT ONE HARDCODED OFFSET, and that is not tidiness. The gate cannot edit the
+# emitter's source, so the 1 GiB mutant has to be built by byte-patching the
+# emitted image -- and a written-down offset there rots on the first instruction
+# added to the stage, with a TRIPLE FAULT as the symptom rather than a
+# diagnostic. Every site below is found by searching for the byte pattern of the
+# instruction that owns it, the way `halt_offset_x86` already does, and a search
+# that matches zero times or more than once is a loud failure that stops the leg.
+#
+# THE ANCHORS ARE INSTRUCTION ENCODINGS, so a change to the value an instruction
+# carries changes the pattern and the search finds nothing -- which is the
+# fail-closed direction. Specifically:
+#   halt        the unique `f4 eb fd`, required to be preceded by
+#               `48 c7 c0 <imm32>` + `ff d0` -- i.e. the stage's
+#               `mov $(0x100000+KENTOFF),%rax; call *%rax; hlt; jmp .`. The
+#               immediate is the KENTOFF site, at halt-6.
+#   payoff-imm  anchored on `bf 00 00 10 00` + `b9` (`mov $0x100000,%edi` then
+#               `mov $count,%ecx`), with `be` required 5 bytes in front: the
+#               copy block's `mov $(0xFFFF0000+PAYOFF),%esi`.
+#   pd-count    anchored on `bf 00 30 00 00 b8 83 00 00 00 b9` -- PD0's address,
+#               the 2 MiB page attribute, and the loop count's opcode.
+#   pdpt1..3    the three `movl $0x<n>003,0x<2008|2010|2018>` stores, each its
+#               own unique 10-byte encoding.
+#
+# AND THE REPORT IS CHECKED AGAINST THE ARTIFACT HERE, in both directions:
+# `0x100000+kentoff` must be the immediate the call actually uses,
+# `0xFFFF0000+payoff` must be the address the copy actually reads from, and
+# `ceil(paylen/4)` must be the dword count it actually copies. Those three
+# numbers are what every patch below is computed from; taking them on trust from
+# a printed line would make a mislocated landing pad look like a silent guest.
+rv_sites() {
+    python3 - "$1" "$2" "$3" "$4" <<'PY'
+import struct, sys
+d = open(sys.argv[1], "rb").read()
+payoff, paylen, kentoff = int(sys.argv[2]), int(sys.argv[3]), int(sys.argv[4])
+
+
+def die(msg):
+    print("ERR:" + msg)
+    sys.exit(1)
+
+
+def uniq(pat, what):
+    o = [i for i in range(len(d) - len(pat) + 1) if d[i:i + len(pat)] == pat]
+    if len(o) != 1:
+        die("%s: the byte pattern %s matches %d times in the image, not exactly 1"
+            % (what, pat.hex(), len(o)))
+    return o[0]
+
+
+halt = uniq(bytes.fromhex("f4ebfd"), "the stage's landing pad 'hlt; jmp .'")
+if halt < 9 or d[halt - 9:halt - 6] != bytes.fromhex("48c7c0") \
+        or d[halt - 2:halt] != bytes.fromhex("ffd0"):
+    die("the halt at %d is not preceded by 'mov $imm32,%%rax; call *%%rax' (found %s)"
+        % (halt, d[max(0, halt - 9):halt].hex()))
+kimm = halt - 6
+got = struct.unpack_from("<I", d, kimm)[0]
+if got != 0x100000 + kentoff:
+    die("the call transfers to 0x%x, but the report says kentoff=%d, i.e. 0x%x"
+        % (got, kentoff, 0x100000 + kentoff))
+m = uniq(bytes.fromhex("bf00001000") + b"\xb9",
+         "the payload copy 'mov $0x100000,%edi; mov $count,%ecx'")
+if m < 5 or d[m - 5] != 0xBE:
+    die("the copy block at %d is not preceded by 'mov $imm32,%%esi'" % m)
+pimm = m - 4
+got = struct.unpack_from("<I", d, pimm)[0]
+if got != 0xFFFF0000 + payoff:
+    die("the copy reads from 0x%x, but the report says payoff=%d, i.e. 0x%x"
+        % (got, payoff, 0xFFFF0000 + payoff))
+cnt = struct.unpack_from("<I", d, m + 6)[0]
+if cnt != (paylen + 3) // 4:
+    die("'rep movsl' copies %d dwords, but the report says paylen=%d, i.e. %d dwords"
+        % (cnt, paylen, (paylen + 3) // 4))
+pd = uniq(bytes.fromhex("bf00300000b883000000b9"),
+          "the PD fill loop 'mov $0x3000,%edi; mov $0x83,%eax; mov $count,%ecx'")
+pdcnt = pd + 11
+n = struct.unpack_from("<I", d, pdcnt)[0]
+if n != 2048:
+    die("the PD loop count is %d, not the 2048 entries x 2 MiB = 4 GiB this leg's "
+        "1 GiB control mutates" % n)
+pdpt = []
+for slot, (a, v) in enumerate(((0x2008, 0x4003), (0x2010, 0x5003), (0x2018, 0x6003)), 1):
+    o = uniq(b"\xc7\x05" + struct.pack("<II", a, v), "the PDPT[%d] store" % slot)
+    pdpt.append(o + 6)
+if halt >= payoff:
+    die("the halt at %d is not inside the stage (payoff=%d) -- it was found in the "
+        "payload, so it is not the stage's landing pad" % (halt, payoff))
+if payoff + paylen > len(d) - 16:
+    die("the payload [%d,%d) overruns the reset vector at %d" % (payoff, payoff + paylen, len(d) - 16))
+print("%d %d %d %d %d %d %d" % (halt, pimm, cnt, pdcnt, pdpt[0], pdpt[1], pdpt[2]))
+PY
+}
+
+# DECODE ONE CAPTURE INTO EXACTLY ONE VERDICT.  rv_verdict <serial file>
+#
+# The capture is flattened (CR and LF removed) and matched WHOLE, never grepped
+# for a prefix. Six names:
+#   SILENT         nothing reached the wire at all
+#   R              `R` one or more times: real mode ran, protected mode did not
+#   RP             `RP` one or more times: **`L` NEVER PRINTED**. The map fault,
+#                  under either reboot policy -- see this block's header.
+#   RPL            exactly one `RPL`: all three modes, and the payload printed
+#                  nothing
+#   RPL_LOOP       `RPL` two or more times: the payload FAULTED and the machine
+#                  reset. The RAM-ceiling shape.
+#   RPL_SENTINEL   exactly `RPL` + the computed sentinel: the full sequence
+#   UNEXPECTED:<flattened capture, truncated>
+#
+# `R` IS A FAIL BUCKET: no row expects it, and it exists so that shape cannot be
+# filed as something a row DOES expect. It is Task 2's measured symptom for a
+# 64-bit `0x08` descriptor, and without a name of its own it would read as a
+# prefix of a passing capture.
+#
+# `RPL_LOOP` IS UNREACHABLE UNDER THIS GATE AND IS KEPT ANYWAY, which is a
+# deliberate choice and not an oversight. boot_run passes `-no-reboot` on every
+# x86 boot, so a triple-faulting guest EXITS instead of re-running the stage:
+# measured, the stack-outside-RAM case gives `RPL` here where Task 2's bare
+# command line gave `RPLRPLRPL...`. The name stays so that a future leg (or a
+# reader reproducing a capture by hand, without the flag) cannot have the reboot
+# shape scored as the single-pass `RPL` that L9_control_zeroed_payload expects.
+# The same reasoning gives the map fault ONE name covering both shapes -- see
+# `RP` above: there the discriminator is the absent `L`, not the repetition.
+#
+# WHOLE-STRING MATCHING IS THE POINT. Every letter is a separate claim about a
+# mode transition, so "the capture contains RPL" is not the same statement as
+# "the capture IS RPL followed by the sentinel" -- and it is the second one the
+# positive row is entitled to make.
+rv_verdict() {
+    python3 - "$1" "$RV_SENTINEL" <<'PY'
+import re, sys
+try:
+    s = open(sys.argv[1], "rb").read()
+except OSError:
+    print("HARNESS_ERROR:no-capture")
+    sys.exit(0)
+s = s.replace(b"\r", b"").replace(b"\n", b"").decode("latin-1")
+sent = sys.argv[2]
+if s == "":
+    print("SILENT")
+elif s == "RPL" + sent:
+    print("RPL_SENTINEL")
+elif s == "RPL":
+    print("RPL")
+elif re.fullmatch(r"(RP)+", s):
+    print("RP")
+elif re.fullmatch(r"(RPL)+", s):
+    print("RPL_LOOP")
+elif re.fullmatch(r"R+", s):
+    print("R")
+else:
+    print("UNEXPECTED:" + s[:120])
+PY
+}
+
+# One `-bios` boot. THE WHOLE COMMAND LINE IS `-bios <image> -net none` plus
+# whatever `-m` the caller needs: no `-kernel`, no `-device loader`, no load
+# address, no entry offset, and no firmware of anyone else's. `-net none` is
+# carried over from L7/L8's measurement (without it QEMU can spend its window on
+# PXE); there is no option ROM here to do that, and it costs nothing.
+# $1 image, $2 serial, $3 expect (see boot_run), $4.. extra qemu args.
+rv_boot_qmp() {
+    local img="$1" ser="$2" expect="$3"; shift 3
+    PARKED_PC=QMPFAIL
+    boot_run_qmp x86 "$ser" "$expect" -bios "$img" -net none "$@"
+}
+rv_boot() {
+    local img="$1" ser="$2" expect="$3"; shift 3
+    PARKED_PC=NOQMPRUN   # see the PARKED_PC declaration above
+    boot_run x86 "$ser" "$expect" -bios "$img" -net none "$@"
+}
+
+# =============================================================================
+# L9 — x86_64 RESET-VECTOR BOOT (`-bios <image>`, nothing else). Seven boots:
+#      the subject, four controls, and the ≥ 2^31 stack top from both sides.
+#      See the block comment above for what each sentinel letter claims and for
+#      the two proposed controls that were measured worthless.
+# =============================================================================
+leg9() {
+    echo "--- L9: x86_64 reset-vector boot (-bios <image>, no loader at all) ---"
+    RV_BATCH_POS=""
+    cp "$BOOT/sentinel_x86.kr" "$WORK/rv_sentinel_x86.kr"
+    local img="$WORK/rv.img" rep payoff paylen kentoff stack
+    if ! rep=$(build_reset_vector "$WORK/rv_sentinel_x86.kr" "$img" "$RV_STACK_TOP"); then
+        bad "L9_reset_vector_report_and_anchors" "sentinel_x86.kr did not build with --reset-vector --stack-top=$RV_STACK_TOP"; return
+    fi
+    set -- $rep
+    payoff="$1"; paylen="$2"; kentoff="$3"; stack="$4"
+    # ---- BLOCKING, AND BEFORE THE BOOTS (see L1's note on ordering) ---------
+    # Every patch below is computed from payoff/paylen/kentoff, so if any of
+    # them is wrong the controls patch inert bytes and their mutants behave like
+    # the original. rv_sites is where that is caught, against the artifact.
+    local sites halt pimm movsl pdcnt pdpt1 pdpt2 pdpt3
+    if ! sites=$(rv_sites "$img" "$payoff" "$paylen" "$kentoff"); then
+        bad "L9_reset_vector_report_and_anchors" "$sites"; return
+    fi
+    set -- $sites
+    halt="$1"; pimm="$2"; movsl="$3"; pdcnt="$4"; pdpt1="$5"; pdpt2="$6"; pdpt3="$7"
+    ok "L9_reset_vector_report_and_anchors" "payoff=$payoff paylen=$paylen kentoff=$kentoff stack=$stack, all three cross-checked against the artifact's own immediates (copy source at file offset $pimm, $movsl dwords, call target at $(( halt - 6 ))); the halt is the unique f4ebfd at $halt, the PD loop count at $pdcnt and the three PDPT stores at $pdpt1/$pdpt2/$pdpt3 -- every one located by byte pattern, none written down"
+    # ---- the subject, and this leg's positive control ------------------------
+    # THE FULL SEQUENCE, matched whole. `RPL` + the computed value is four
+    # separate claims -- reset vector, protected mode, long mode, and KernRift
+    # code running at 0x100000 -- and rv_verdict refuses to let any prefix of it
+    # be scored as this.
+    local want_pc verdict
+    want_pc=$(printf %x $(( 0xFFFF0000 + halt + 1 )))
+    if ! rv_boot_qmp "$img" "$WORK/l9_ser.txt" "RPL$RV_SENTINEL"; then
+        bad "L9_reset_vector_boots" "the boot did not run (qemu exit=$BOOT_QEMU_RC): '$(head -c 200 "$WORK/l9_ser.txt.err")'"
+        bad "L9_halt_parked" "no boot to read a PC from"; return
+    fi
+    RV_BATCH_POS=$(rv_verdict "$WORK/l9_ser.txt")
+    if [ "$RV_BATCH_POS" = RPL_SENTINEL ]; then
+        ok "L9_reset_vector_boots" "'-bios $(basename "$img")' and nothing else: RPL$RV_SENTINEL on COM1 -- R at the reset vector in real mode, P in 32-bit protected mode, L in long mode, then the payload copied to 0x100000 computing $RV_SENTINEL (${BOOT_WAITED_TICKS} ticks)"
+    else
+        bad "L9_reset_vector_boots" "verdict $RV_BATCH_POS, wanted RPL_SENTINEL (capture: $WORK/l9_ser.txt)"
+    fi
+    # D5, THE RETURN-TO-HALT, and the address the other rows are measured
+    # against: `main` returns into the stage's own `hlt; jmp .`, one byte past
+    # the `hlt`, at 0xFFFF0000 + the halt this leg located.
+    if [ "$PARKED_PC" = "$want_pc" ]; then
+        ok "L9_halt_parked" "RIP parked at 0x$want_pc == 0xFFFF0000 + $halt + 1, the stage's own 'hlt; jmp .' -- so main RETURNED into it, and the guest is in long mode at the top of the address space"
+    else
+        bad "L9_halt_parked" "pc=$PARKED_PC want=$want_pc"
+    fi
+    # Every control below asserts something about an ABSENT sentinel, so its
+    # window must be long enough that a working boot would certainly have
+    # printed. Derived from the positive boot just observed, not guessed.
+    calibrate_silence
+    # ---- control: the 4 GiB identity map ------------------------------------
+    # THE HISTORICAL BUG, NOW A PERMANENT PIN. B2's stub maps 1 GiB because its
+    # code runs low; this stage runs at 0xFFFF0000, so a 1 GiB map has no
+    # translation for the instruction after `mov %eax,%cr0` and the machine
+    # triple-faults BEFORE `L`. Built here as a real 1 GiB map, not just a short
+    # loop: the count 2048 -> 512 (512 x 2 MiB = 1 GiB) AND the three PDPT
+    # entries for the 2nd, 3rd and 4th GiB made not-present.
+    # `u32was` names the old value at every one of the four sites, so a
+    # mislocated patch is a REFUSAL ("the control never ran") instead of four
+    # writes into padding and a mutant that behaves like the original.
+    if ! rv_batch_positive; then
+        bad "L9_control_map_1gib_no_long_mode" "the batch positive control did NOT run (verdict '$RV_BATCH_POS'), so a mutant's silence is not evidence"
+    elif ! img_patch "$img" "$WORK/rv_1gib.img" "u32was:$pdcnt:2048:512" \
+            "u32was:$pdpt1:16387:0" "u32was:$pdpt2:20483:0" "u32was:$pdpt3:24579:0"; then
+        bad "L9_control_map_1gib_no_long_mode" "could not build the 1 GiB mutant -- the control never ran"
+    elif ! rv_boot "$WORK/rv_1gib.img" "$WORK/l9_1gib.txt" SELFEXIT; then
+        bad "L9_control_map_1gib_no_long_mode" "the boot did not run (qemu exit=$BOOT_QEMU_RC) -- an absent 'L' proves nothing"
+    else
+        verdict=$(rv_verdict "$WORK/l9_1gib.txt")
+        if [ "$verdict" != RP ]; then
+            bad "L9_control_map_1gib_no_long_mode" "verdict $verdict, wanted RP (i.e. 'L' never printed) -- capture: $WORK/l9_1gib.txt"
+        elif [ "$BOOT_WAITED_TICKS" -ge "$BOOT_DEADLINE_TICKS" ]; then
+            bad "L9_control_map_1gib_no_long_mode" "verdict RP, but qemu never exited (waited the full $BOOT_DEADLINE_TICKS ticks) -- the guest is quiet rather than faulted, which is a different claim"
+        else
+            ok "L9_control_map_1gib_no_long_mode" "map 4 GiB -> 1 GiB (PD count 512, PDPT[1..3] not present): verdict RP, so R and P reached the wire and **L NEVER DID**; qemu self-exited after ${BOOT_WAITED_TICKS} ticks on the triple fault (-no-reboot). The missing L is the discriminator, not the tail of the capture"
+        fi
+    fi
+    # ---- control: the reset vector itself -----------------------------------
+    # THE THREE BYTES AT 0xFFFFFFF0 ARE WHAT THE CPU FETCHES FIRST. Their file
+    # offset is `filesz - 16`, which is an ARCHITECTURAL fact about `-bios`
+    # geometry rather than an emitter constant -- and `hexwas` names the near
+    # jump that must be there, so a wrong location is a refusal.
+    # `EB FE`, NOT ZEROES: see this block's header for the measurement.
+    local rvoff nop_pc
+    rvoff=$(( $(stat -c%s "$img") - 16 ))
+    nop_pc=fff0
+    if ! rv_batch_positive; then
+        bad "L9_control_reset_jmp_spins_silent" "the batch positive control did NOT run (verdict '$RV_BATCH_POS'), so silence is not evidence"
+    elif ! img_patch "$img" "$WORK/rv_ebfe.img" "hexwas:$rvoff:e90d00:ebfe90"; then
+        bad "L9_control_reset_jmp_spins_silent" "could not patch the reset vector at $rvoff -- the control never ran"
+    elif ! rv_boot_qmp "$WORK/rv_ebfe.img" "$WORK/l9_ebfe.txt" RUNOUT; then
+        bad "L9_control_reset_jmp_spins_silent" "the boot did not run (qemu exit=$BOOT_QEMU_RC) -- silence proves nothing"
+    else
+        verdict=$(rv_verdict "$WORK/l9_ebfe.txt")
+        if [ "$verdict" != SILENT ]; then
+            bad "L9_control_reset_jmp_spins_silent" "verdict $verdict, wanted SILENT -- capture: $WORK/l9_ebfe.txt"
+        elif [ "$PARKED_PC" != "$nop_pc" ]; then
+            bad "L9_control_reset_jmp_spins_silent" "silent, but pc=$PARKED_PC is not 0x$nop_pc (the reset vector) -- where the machine actually is is unaccounted for"
+        else
+            ok "L9_control_reset_jmp_spins_silent" "reset jmp at file offset $rvoff -> 'jmp .': NOTHING on the wire and the CPU parked at 0x$nop_pc, still in real mode at the reset vector (a ZEROED jmp instead boots normally -- IP wraps within CS and re-enters the stage)"
+        fi
+    fi
+    # ---- control: the sentinel comes from the COPIED PAYLOAD -----------------
+    # L1's shape, and it needs the landing pad for L1's reason. The payload
+    # region [payoff, payoff+paylen) is zeroed -- EXACTLY that range, because
+    # zeroing to EOF would take the reset vector with it -- and `hlt; jmp .` is
+    # planted at the offset the stage's call transfers to. The stage is
+    # untouched, so R, P and L must still print, and the guest must PARK ON THE
+    # PAD at 0x100000 + kentoff + 1.
+    # WHAT PARKING THERE PROVES, and it is more than silence: the stage
+    # programmed COM1, entered protected mode, ran `rep movsl` over the region
+    # this control zeroed, built the 4 GiB map, entered long mode, loaded rsp
+    # and transferred to the address its own immediate carries.
+    local pad_pc
+    pad_pc=$(printf %x $(( 0x100000 + kentoff + 1 )))
+    if ! rv_batch_positive; then
+        bad "L9_control_zeroed_payload" "the batch positive control did NOT run (verdict '$RV_BATCH_POS'), so this mutant's behaviour is not evidence"
+    elif ! img_patch "$img" "$WORK/rv_zero.img" "zeron:$payoff:$paylen" "hex:$(( payoff + kentoff )):f4ebfd"; then
+        bad "L9_control_zeroed_payload" "could not build the zeroed image -- the control never ran"
+    elif ! rv_boot_qmp "$WORK/rv_zero.img" "$WORK/l9_zero.txt" RUNOUT; then
+        bad "L9_control_zeroed_payload" "the boot did not run (qemu exit=$BOOT_QEMU_RC) -- silence proves nothing"
+    else
+        verdict=$(rv_verdict "$WORK/l9_zero.txt")
+        if [ "$verdict" != RPL ]; then
+            bad "L9_control_zeroed_payload" "verdict $verdict, wanted RPL (the stage runs, the payload prints nothing) -- capture: $WORK/l9_zero.txt"
+        elif [ "$PARKED_PC" != "$pad_pc" ]; then
+            bad "L9_control_zeroed_payload" "pc=$PARKED_PC, want 0x$pad_pc (the pad at payload offset $kentoff) -- the guest never reached the copied payload, so the absent sentinel says nothing about where it comes from"
+        else
+            ok "L9_control_zeroed_payload" "payload [$payoff,$(( payoff + paylen ))) zeroed with a pad at the call target: RPL and no sentinel, parked at 0x$pad_pc -- the stage is intact and the $RV_SENTINEL comes from the payload it copied"
+        fi
+    fi
+    # ---- control: KENTOFF is what the call transfers to ----------------------
+    # A NAMED TARGET, NOT A WRONG ONE. `KENTOFF + 4` was measured BYTE-IDENTICAL
+    # TO PRISTINE on the wire -- a vacuous control. Here the immediate is
+    # re-pointed at a landing pad this script plants at a DERIVED offset inside
+    # the payload, and the row asserts the guest parks on that pad: positive
+    # evidence about an address, not an inference from quiet.
+    # The offset is `paylen - 16`: inside the region `rep movsl` copies, and far
+    # enough from the end that the 3-byte pad fits. It must not BE kentoff, or
+    # the patch is a no-op -- asserted, not assumed, the same way L7 refuses to
+    # plant an entry the artifact already has.
+    local alt alt_pc
+    alt=$(( paylen - 16 ))
+    if ! rv_batch_positive; then
+        bad "L9_control_kentoff_steers_the_call" "the batch positive control did NOT run (verdict '$RV_BATCH_POS'), so this mutant's behaviour is not evidence"
+    elif [ "$alt" = "$kentoff" ] || [ "$alt" -lt 0 ]; then
+        bad "L9_control_kentoff_steers_the_call" "the alternate target paylen-16 = $alt is not a usable second address (kentoff=$kentoff, paylen=$paylen) -- the patch would be a no-op"
+    else
+        alt_pc=$(printf %x $(( 0x100000 + alt + 1 )))
+        if ! img_patch "$img" "$WORK/rv_kent.img" "hex:$(( payoff + alt )):f4ebfd" \
+                "u32was:$(( halt - 6 )):$(( 0x100000 + kentoff )):$(( 0x100000 + alt ))"; then
+            bad "L9_control_kentoff_steers_the_call" "could not re-point the call immediate at $(( halt - 6 )) -- the control never ran"
+        elif ! rv_boot_qmp "$WORK/rv_kent.img" "$WORK/l9_kent.txt" RUNOUT; then
+            bad "L9_control_kentoff_steers_the_call" "the boot did not run (qemu exit=$BOOT_QEMU_RC) -- silence proves nothing"
+        else
+            verdict=$(rv_verdict "$WORK/l9_kent.txt")
+            if [ "$verdict" != RPL ]; then
+                bad "L9_control_kentoff_steers_the_call" "verdict $verdict, wanted RPL -- capture: $WORK/l9_kent.txt"
+            elif [ "$PARKED_PC" != "$alt_pc" ]; then
+                bad "L9_control_kentoff_steers_the_call" "pc=$PARKED_PC, want 0x$alt_pc (the pad at payload offset $alt) -- the call did not go where the immediate says"
+            else
+                ok "L9_control_kentoff_steers_the_call" "call immediate 0x$(printf %x $(( 0x100000 + kentoff ))) -> 0x$(printf %x $(( 0x100000 + alt ))), a pad planted at payload offset $alt: RPL, no sentinel, parked at 0x$alt_pc -- the immediate steers the call, which KENTOFF+4 could not show (byte-identical to pristine)"
+            fi
+        fi
+    fi
+    # ---- the >= 2^31 stack top, booted from both sides -----------------------
+    # TASK 2 COULD ONLY ASSERT THIS STATICALLY. `--stack-top` >= 2^31 is what
+    # forced the 10-byte `movabs $imm64,%rsp`: the reference stage's 7-byte
+    # `mov $imm32,%rsp` SIGN-EXTENDS, so this value would land at
+    # 0xFFFFFFFF80000000, outside the identity map, and the payload's first push
+    # would fault. Only 0x90000 and 0x80000 had ever been booted.
+    # TWO BOOTS, BECAUSE ONE IS NOT DISCRIMINATING ENOUGH. At `-m $RV_HI_RAM` the
+    # full sequence must appear; at `-m $RV_LOW_RAM` the SAME IMAGE must reach
+    # `L` and then die, because 0x80000000 is inside the 4 GiB map but outside
+    # 128 MiB of installed RAM. The second boot is what shows rsp really is up
+    # there and is really being pushed to -- an rsp the payload never touched
+    # would boot at both. It is also the RAM ceiling itself, which the compiler
+    # does not and cannot refuse (see docs/LANGUAGE.md).
+    local himg="$WORK/rv_hi.img" hrep hpayoff hpaylen hkentoff hstack hsites hhalt hpc
+    if ! hrep=$(build_reset_vector "$WORK/rv_sentinel_x86.kr" "$himg" "$RV_STACK_TOP_HI"); then
+        bad "L9_stack_top_above_2_31_boots" "the --stack-top=$RV_STACK_TOP_HI build failed -- the row never ran"; return
+    fi
+    set -- $hrep
+    hpayoff="$1"; hpaylen="$2"; hkentoff="$3"; hstack="$4"
+    if ! hsites=$(rv_sites "$himg" "$hpayoff" "$hpaylen" "$hkentoff"); then
+        bad "L9_stack_top_above_2_31_boots" "$hsites"; return
+    fi
+    set -- $hsites
+    hhalt="$1"
+    hpc=$(printf %x $(( 0xFFFF0000 + hhalt + 1 )))
+    if ! rv_boot_qmp "$himg" "$WORK/l9_hi.txt" "RPL$RV_SENTINEL" -m "$RV_HI_RAM"; then
+        bad "L9_stack_top_above_2_31_boots" "the -m $RV_HI_RAM boot did not run (qemu exit=$BOOT_QEMU_RC): '$(head -c 200 "$WORK/l9_hi.txt.err")'"
+    else
+        verdict=$(rv_verdict "$WORK/l9_hi.txt")
+        local hi_pc="$PARKED_PC" lo_verdict
+        if [ "$verdict" != RPL_SENTINEL ]; then
+            bad "L9_stack_top_above_2_31_boots" "--stack-top=$RV_STACK_TOP_HI at -m $RV_HI_RAM: verdict $verdict, wanted RPL_SENTINEL (capture: $WORK/l9_hi.txt)"
+        elif [ "$hi_pc" != "$hpc" ]; then
+            bad "L9_stack_top_above_2_31_boots" "printed the full sequence but parked at $hi_pc, not 0x$hpc (that image's own halt at $hhalt)"
+        elif ! rv_boot "$himg" "$WORK/l9_lo.txt" SELFEXIT -m "$RV_LOW_RAM"; then
+            bad "L9_stack_top_above_2_31_boots" "the -m $RV_LOW_RAM half did not run (qemu exit=$BOOT_QEMU_RC) -- without it the row cannot show rsp is really at $RV_STACK_TOP_HI"
+        else
+            lo_verdict=$(rv_verdict "$WORK/l9_lo.txt")
+            if [ "$lo_verdict" != RPL ] && [ "$lo_verdict" != RPL_LOOP ]; then
+                bad "L9_stack_top_above_2_31_boots" "the same image at -m $RV_LOW_RAM gave verdict $lo_verdict; wanted RPL or RPL_LOOP (long mode reached, then the first push faults outside installed RAM). Capture: $WORK/l9_lo.txt"
+            else
+                ok "L9_stack_top_above_2_31_boots" "--stack-top=$RV_STACK_TOP_HI (stack=$hstack, >= 2^31, the value the 10-byte movabs exists for): RPL$RV_SENTINEL at -m $RV_HI_RAM parked at 0x$hpc, and the SAME image at -m $RV_LOW_RAM gives $lo_verdict -- so rsp really is at 0x$(printf %x "$hstack") and is really pushed to; a sign-extending 7-byte mov would have failed both"
+            fi
+        fi
+    fi
+}
+
 # THE ROSTERS ARE THE SKIP ACCOUNTING, so every check added by B2 Task 5 is
 # listed here. A check that is not on its leg's roster does not become a SKIP
 # when an earlier failure returns past it — it simply vanishes from the tally,
@@ -2863,6 +3457,8 @@ leg8() {
 # retired or renamed, so a run that reports fewer than 49 has lost a check
 # rather than tightened one. D's Task 3 REVIEW then took it to 50 with L7's
 # LOADED_SILENT control -- the one outcome of uefi_verdict that no row reached.
+# SUB-PROJECT E moved it once more, 50 -> 58, adding L9's eight reset-vector
+# checks; again nothing was retired or renamed.
 run_leg leg0 L0_deadboot_x86 L0_deadboot_a64 L0_liveboot_not_flagged L0_alarm_not_a_dead_boot
 run_leg leg1 L1_multiboot_header L1_no_header_image_refused L1_self_boot_sentinel \
              L1_halt_parked L1_control_entry_addr_honoured L1_control_no_return \
@@ -2890,6 +3486,10 @@ run_leg leg7 L7_uefi_x86_boots L7_control_subsystem_3_not_loaded \
 run_leg leg8 L8_uefi_a64_boots L8_control_subsystem_3_not_loaded \
              L8_control_virtual_size_too_small_faults \
              L8_control_read_only_section_printed_then_faulted
+run_leg leg9 L9_reset_vector_report_and_anchors L9_reset_vector_boots L9_halt_parked \
+             L9_control_map_1gib_no_long_mode L9_control_reset_jmp_spins_silent \
+             L9_control_zeroed_payload L9_control_kentoff_steers_the_call \
+             L9_stack_top_above_2_31_boots
 
 echo ""
 echo "boot gate: $PASS pass, $FAIL FAIL, $SKIP SKIP"
