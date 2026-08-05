@@ -6411,11 +6411,21 @@ fn ir_get_phys_reg(uint64 vreg) -> uint64 {
     return phys
 }
 
-// Used-callee-save mask. After regalloc, returns a 5-bit set with bit i
-// set iff some vreg got color i (= one of rbx/r12/r13/r14/r15). Lets the
-// prologue/epilogue push only what's actually used — fib(40) burns
-// ~330M calls, each with 5 push+pop pairs even when only 3 colours are
-// live. Trimming the prologue saves ~2 stack writes + 2 reads per call.
+// Used-callee-save mask. After regalloc, returns a bit set with bit i set
+// iff some vreg got colour i. Lets the prologue/epilogue push only what's
+// actually used — fib(40) burns ~330M calls, and trimming the prologue to
+// only the colours actually live saves stack writes + reads per call.
+//
+// SHARED ACROSS ARCHES, so the colours a set bit names are NOT fixed x86_64
+// register names: this function only knows colour NUMBERS, and each caller
+// maps them through its own colour file. x86_64's narrow (callee-saved-only)
+// file is 6 colours wide (0..5 = rbx/r12/r13/r14/r15/rbp; commit 66463d8
+// added rbp as colour 5, so fib(40) now pushes 6 pairs where the file is
+// full, not the 5 this comment used to say). This function is also called
+// from src/ir_aarch64.kr (10 narrow / 23 wide colours), src/ir_riscv.kr (12
+// colours) and src/ir_xtensa.kr (4 colours) — arm64's 23-wide file is the
+// widest caller, so across all of them the mask reaches bit 22, not the
+// 5-bit set this comment used to claim.
 fn ir_used_color_mask() -> uint64 {
     uint64 mask = 0
     uint64 v = 1
