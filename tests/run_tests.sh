@@ -14647,6 +14647,61 @@ else
 fi
 rm -f "$CA_SRC" "$CA_BIN"
 
+# call_ptr has its own, separate 6-arg cap (cp_arg_vregs holds 6 slots).
+# Unlike the direct-call loop above, the call_ptr collection loop
+# (`while wca != 0 && cp_count < 6`) had NO post-loop guard: a 7th argument's
+# ir_lower_expr was simply never collected, so the argument was not merely
+# unpassed -- its side effects vanished. `bump` proves the side effect
+# happened or didn't via a static global, since call_ptr's own return value
+# is not enough to distinguish "argument dropped" from "argument garbage".
+CP_SRC="/tmp/krc_callptrargs_$$.kr"
+CP_BIN="/tmp/krc_callptrargs_$$.bin"
+cat > "$CP_SRC" <<'KREOF'
+static uint64 side = 0
+fn bump(uint64 x) -> uint64 { side = x; return x }
+fn f7(uint64 a, uint64 b, uint64 c, uint64 d, uint64 e, uint64 g, uint64 h) -> uint64 {
+    return a + b + c + d + e + g + h
+}
+fn main() {
+    uint64 p = fn_addr("f7")
+    uint64 r = call_ptr(p, 1, 2, 3, 4, 5, 6, bump(77))
+    exit(r)
+}
+KREOF
+TOTAL=$((TOTAL + 1))
+CP_ERR=$($KRC --arch=$RUN_ARCH "$CP_SRC" -o "$CP_BIN" 2>&1); CP_ST=$?
+if [ "$CP_ST" != "0" ] && echo "$CP_ERR" | grep -q "too many call_ptr arguments (max 6)"; then
+    PASS=$((PASS + 1)); echo "  call_ptr_args_7_rejected: PASS (exit $CP_ST, clean diagnostic)"
+else
+    echo "FAIL: call_ptr_args_7_rejected (expected non-zero + 'too many call_ptr arguments', got exit $CP_ST: '$CP_ERR')"
+    FAIL=$((FAIL + 1))
+fi
+# Positive control: exactly 6 args must still compile and run correctly.
+CP6_SRC="/tmp/krc_callptrargs6_$$.kr"
+cat > "$CP6_SRC" <<'KREOF'
+fn f6(uint64 a, uint64 b, uint64 c, uint64 d, uint64 e, uint64 g) -> uint64 {
+    return a + b + c + d + e + g
+}
+fn main() {
+    uint64 p = fn_addr("f6")
+    uint64 r = call_ptr(p, 1, 2, 3, 4, 5, 6)
+    exit(r)
+}
+KREOF
+TOTAL=$((TOTAL + 1))
+rm -f "$CP_BIN"
+if $KRC --arch=$RUN_ARCH "$CP6_SRC" -o "$CP_BIN" >/dev/null 2>&1 && [ -s "$CP_BIN" ]; then
+    chmod +x "$CP_BIN"; "$CP_BIN"; CP6_RUN=$?
+    if [ "$CP6_RUN" = "21" ]; then
+        PASS=$((PASS + 1)); echo "  call_ptr_args_6_accepted: PASS (compiles and returns 21)"
+    else
+        echo "FAIL: call_ptr_args_6_accepted (ran but returned $CP6_RUN, want 21)"; FAIL=$((FAIL + 1))
+    fi
+else
+    echo "FAIL: call_ptr_args_6_accepted (should compile to a non-empty artifact)"; FAIL=$((FAIL + 1))
+fi
+rm -f "$CP_SRC" "$CP6_SRC" "$CP_BIN"
+
 echo ""
 echo "--- float literal return kinds ---"
 # tc_expr_kind reported EVERY FloatLit as f64, ignoring the `f` suffix, so the

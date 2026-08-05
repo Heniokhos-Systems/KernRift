@@ -3160,6 +3160,16 @@ fn ir_lower_expr(uint64 node) -> uint64 {
                 uint32 anxt = ast_next(wca)
                 wca = anxt
             }
+            // Without this guard, a 7th call_ptr argument is silently
+            // dropped -- and not merely unpassed: cp_arg_vregs only holds 6
+            // slots, so the 7th argument's ir_lower_expr result is simply
+            // never collected and its side effects vanish. The direct-call
+            // path (below, ~line 3426) has the equivalent guard; this
+            // message is worded differently so the two are distinguishable.
+            if wca != 0 {
+                write(2, "error: too many call_ptr arguments (max 6)\n", 43)
+                exit(1)
+            }
             // Emit ARGs for call arguments
             uint64 cpi = 0
             while cpi < cp_count {
