@@ -1960,14 +1960,17 @@ number names the command that produced it.
   out is the configuration that is corrupt before a single instruction of the
   program runs, which is the same bound `--stack-top=`'s own
   stack-inside-the-image check has always carried.
-* **L9 has never run in CI.** The gate as a whole is CI-wired — it is a
-  counted test inside `tests/run_tests.sh`, legs L0–L8 are on `origin/main`
-  (`07e0422`), and run **30989294535** on that sha concluded *success* — but
-  this sub-project's branch is unpushed, so **every L9 result quoted anywhere
-  in this tree was produced on the one developer machine above**. They join CI
-  on the first push, and this bullet has to be rewritten then. Checked, not
-  assumed: `git show origin/main:tests/target_none/boot_gate.sh` at `07e0422`
-  contains `L7_uefi_x86_boots` and does not contain `L9_reset_vector_boots`.
+* **L9 has run in CI — on x86_64 only.** Until `4390d48` this bullet read "L9
+  has never run in CI", which was true while the branch was unpushed. Run
+  **31024409854** on `4390d48` concluded *success* with `boot gate: 59 pass,
+  0 FAIL, 0 SKIP` on the **Linux x86_64** job, whose test step is **not**
+  `continue-on-error` — so all nine L9 legs, including the eight TCG boots,
+  are now re-run on every push by a machine that is not the developer's.
+  `L9_reset_vector_boots` logged `RPL2000000016` there.
+  **What that still does not cover:** every L9 result is QEMU/TCG on a
+  GitHub-hosted x86_64 runner. There is no second emulator, no arm64 host for
+  this leg (it is x86_64-only by construction), and **no hardware** — see the
+  first bullet of this block, which the CI result does not weaken.
 * **What is deliberately absent.** No `include_bytes`, no assembly symbol
   references, no settable BIOS size, no arm64 form (arm64 resets straight into
   AArch64 state and needs none of this), no riscv32/xtensa form, and no change

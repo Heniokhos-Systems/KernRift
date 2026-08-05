@@ -10347,7 +10347,11 @@ grep -qF -- 'installed guest RAM' "$RVEC_SEC" || rvec_doc_miss="$rvec_doc_miss r
 # only inside the block.
 grep -qF -- 'no message, no exit code' "$RVEC_SEC" || rvec_doc_miss="$rvec_doc_miss silent-failure-stated"
 grep -qF -- 'inference'           "$RVEC_SEC" || rvec_doc_miss="$rvec_doc_miss size-rule-labelled-inference"
-grep -qF -- 'never run in CI'     "$RVEC_SEC" || rvec_doc_miss="$rvec_doc_miss ci-status-stated"
+# WAS `never run in CI`, which stopped being true at 4390d48 -- run 31024409854
+# ran all nine L9 legs on the Linux x86_64 job. The row's job is to keep the CI
+# STATUS stated, not to pin one particular status, so it now greps the phrase
+# that survives either way. Rewriting the bullet without this phrase reds it.
+grep -qF -- 'run in CI'           "$RVEC_SEC" || rvec_doc_miss="$rvec_doc_miss ci-status-stated"
 # THE NEGATIVE HALF, both ways. "real hardware"/"real firmware" is allowed
 # ONLY inside a negation on the SAME line -- "will not claim real hardware,
 # real firmware" passes, a bare "runs under real firmware" (added anywhere in
