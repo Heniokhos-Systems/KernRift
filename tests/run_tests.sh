@@ -9709,7 +9709,15 @@ grep -qF -- 'Secure Boot' "$UEFI_PROSE" || uefi_doc_miss="$uefi_doc_miss secure-
 # "does not claim real firmware" passes and "runs under real firmware" reds.
 # Written as "some matching line carries no negation" rather than a blanket
 # ban, because the honest sentence and the dishonest one share the phrase.
-if grep -- 'real firmware' "$UEFI_PROSE" | grep -qvE 'not |no |never '; then
+# `grep -qv` ON THE TAIL OF A PIPE IS NOT SAFE ON THIS HOST -- see the long
+# note on rvec_unqualified below: ugrep 7.5.0 measured a FALSE negative for
+# exactly this shape. It is not live here today (the UEFI prose has zero
+# `real firmware` matches, and `-qv` is correct on a single line), but it
+# would break SILENTLY the moment an honest sentence is added -- and this is
+# the guard for the claim sub-project D had to correct by hand twice. Use the
+# same capture-and-test form, which is POSIX `-E`/`-v` only.
+uefi_unqualified=$(grep -- 'real firmware' "$UEFI_PROSE" | grep -vE 'not |no |never ')
+if [ -n "$uefi_unqualified" ]; then
     uefi_doc_miss="$uefi_doc_miss unqualified-real-firmware-claim"
 fi
 if [ -z "$uefi_doc_miss" ]; then

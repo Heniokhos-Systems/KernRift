@@ -7312,7 +7312,7 @@ fn main() {
                 // exists to measure against, can loosen it to `>` if the
                 // math the same way B2's does.
                 if stack_top >= 4294967296 {
-                    uint64 rv_4g = "error: --stack-top= must be below 0x100000000 (4 GiB) under --reset-vector: the reset-vector stage's identity map is PDPT[0..3], four page directories covering the full 4 GiB, so a stack top at or above that is unmapped the moment paging is enabled and the first push triple-faults. This constraint is --reset-vector-only -- the self-boot trampoline's own ceiling is a different number, 0x40000000, for its narrower single-GiB map\n"
+                    uint64 rv_4g = "error: --stack-top= must be below 0x100000000 (4 GiB) under --reset-vector: the reset-vector stage's identity map is PDPT[0..3], four page directories covering the full 4 GiB, so a stack top above that is unmapped the moment paging is enabled and the first push triple-faults. A stack top of exactly 0x100000000 is refused CONSERVATIVELY rather than because it faults -- its first push lands at 0xFFFFFFF8, inside the map -- pending Task 2 pinning the real geometry. This constraint is --reset-vector-only -- the self-boot trampoline's own ceiling is a different number, 0x40000000, for its narrower single-GiB map\n"
                     write(2, rv_4g, str_len(rv_4g))
                     exit(1)
                 }
