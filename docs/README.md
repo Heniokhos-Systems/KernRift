@@ -50,7 +50,7 @@ contributors and the curious; **Project** tracks direction and process.
 
 - [Architecture](ARCHITECTURE.md) — the compiler pipeline and source
   layout.
-- [IR Reference](IR_REFERENCE.md) — the SSA IR: opcodes, the optimizer
+- [IR Reference](IR_REFERENCE.md) — the IR (not SSA): opcodes, the optimizer
   passes, the register allocator.
 - [ABI Policy](ABI_POLICY.md) — calling conventions and platform ABI
   decisions.

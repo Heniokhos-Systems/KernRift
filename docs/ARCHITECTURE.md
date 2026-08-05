@@ -13,8 +13,8 @@ src/
 │                      counts) + diagnostics (spans/carets); effect passes
 ├── type_check.kr      Type checker (default-on, fatal) + `let` inference
 ├── inliner.kr         AST-level inliner: pure single-expression callees → call sites
-├── ir.kr              SSA IR + x86_64 emitter, liveness, graph-colour RA with
-│                      Briggs/George coalescer, LICM, CF/DCE/CSE
+├── ir.kr              IR (not SSA) + x86_64 emitter, liveness, graph-colour RA
+│                      with Briggs/George coalescer, LICM, CF/DCE/CSE
 ├── ir_aarch64.kr      AArch64 emitter from the same IR
 ├── ir_riscv.kr        RV32IMC emitter from the same IR (+ C-compression peephole)
 ├── ir_xtensa.kr       Xtensa LX6 emitter from the same IR (literal pools, CALL0
@@ -42,7 +42,7 @@ src/
 2. **Parse** — tokens → arena AST (32 bytes per node, child/sibling links)
 3. **Check** — semantic validation (missing return, arg counts, unused/uninitialized) + the type checker (`type_check.kr`); `let` type inference resolves each inferred local. Errors here are fatal. The effect/capability/lock passes also run (advisory).
 4. **Inline** — AST-level pass folds pure single-expression callees into call sites; DCE drops the unused originals (translation-unit `--emit=obj/asm/ir` keep them)
-5. **Lower to IR** — AST → SSA IR instructions with virtual registers
+5. **Lower to IR** — AST → linear IR instructions (not SSA — see `ir.kr`'s header) with virtual registers
 6. **Optimize IR** — constant folding → DCE → CSE → LICM → DCE
 7. **Liveness** — per-opcode live-in/live-out sets for all virtual registers
 8. **Register allocation** — Chaitin-style graph coloring with Briggs/George copy coalescing onto physical registers
@@ -59,7 +59,7 @@ one optimizer, one register allocator. Step 9 is where the single IR fans out
 to **five** machine-code emitters, and step 11 to the container writers.
 
 ```
-                        AST → SSA IR → opt → liveness → regalloc
+                        AST → IR (not SSA) → opt → liveness → regalloc
                                           │
         ┌─────────────┬───────────────────┼───────────────┬─────────────┐
         ▼             ▼                   ▼               ▼             ▼
@@ -107,7 +107,7 @@ This bypasses the SELinux file-label transition Termux uses to block execve of u
 
 - **Flat AST**: 32-byte nodes (8 fixed 4-byte slots: kind, data1–data4, tok, child, next) in a contiguous arena, 1-indexed. No pointers, just indices. Tokens are 16-byte records in a parallel arena.
 - **Arenas, some fixed and some growable**: the token buffer is sized for 524288 tokens and the AST arena similarly; the self-compile sits near 48%, and `make check` fails if it crosses 80% (raise `max_tok` in `main.kr` before that). Several tables that used to have hard caps now grow on demand through the shared `grow_buf` helper (`codegen.kr`) — a fresh mmap, a copy, then release of the old mapping. That covers the IR instruction arena and its parallel source-token table, the IR basic-block lists, the struct table and each struct's field list, and the import machinery (seen-set, search paths, path buffer). Because `grow_buf` moves the base pointer, any code holding a raw offset into one of these tables must re-derive it after a growth. Tables that still have fixed caps fail loud on overflow rather than truncating.
-- **SSA IR**: target-independent opcodes (114 as of v2.8.28; see [IR_REFERENCE.md](IR_REFERENCE.md)), virtual registers, liveness, graph-coloring register allocator with Briggs/George copy coalescing, an AST-level inliner, LICM, constant folding, DCE, and CSE. Added in v2.8.2, replacing the "no IR" stance of earlier versions.
+- **IR (not SSA)**: target-independent opcodes (114 as of v2.8.28; see [IR_REFERENCE.md](IR_REFERENCE.md)), virtual registers, liveness, graph-coloring register allocator with Briggs/George copy coalescing, an AST-level inliner, LICM, constant folding, DCE, and CSE. Linear three-address code over unbounded vregs — named variables reuse one vreg across assignments, so no phi is ever needed and `IR_PHI` has zero construction sites. Added in v2.8.2, replacing the "no IR" stance of earlier versions.
 - **Per-target emitters, shared IR**: Linux/macOS/Windows/Android syscall conventions, Mach-O argc/argv in x0/x1, Windows IAT calls — all handled at emission time from the same abstract opcodes.
 - **No external tools**: the compiler writes binaries directly; there is no assembler, linker, or libc in the build graph.
 - **Variable dedup**: same-named variables in different if-branches share a slot.
