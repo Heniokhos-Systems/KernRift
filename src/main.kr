@@ -7293,7 +7293,14 @@ fn main() {
                 write(1, "  --emit=lkm                Linux loadable kernel module (.ko)\n", 63)
                 write(1, "  --emit=asm                annotated assembly listing\n", 55)
                 write(1, "  --emit=ir                 dump SSA IR per function\n", 53)
-                uint64 h_img = "  --emit=image             raw flat binary, no container (bare metal; needs --target=none, explicit --arch, --load-addr=; --image-header prefixes an arm64 boot header)\n"
+                // THE `--load-addr=` CLAUSE IS QUALIFIED BECAUSE --reset-vector
+                // FALSIFIED IT (sub-project E, Task 4). This line read "needs
+                // --target=none, explicit --arch, --load-addr=" while
+                // --reset-vector REFUSES --load-addr=, and it named only one of
+                // the two sub-forms. Neither the help<->docs gate nor anything
+                // else could see that: those rows compare flag TOKENS, and both
+                // tokens are in both texts.
+                uint64 h_img = "  --emit=image             raw flat binary, no container (bare metal; needs --target=none and an explicit --arch; --load-addr= too, EXCEPT under --reset-vector, which refuses it). Sub-forms: --image-header prefixes an arm64 boot header, --reset-vector selects the x86_64 QEMU -bios form\n"
                 write(1, h_img, str_len(h_img))
                 // A dedicated line, not a clause inside another flag's
                 // description: `hd_flags`'s regex stops at `=`, so it reads
@@ -7306,7 +7313,16 @@ fn main() {
                 write(1, h_uefi, str_len(h_uefi))
                 uint64 h_la = "  --load-addr=<addr>       where the image will be loaded; validated (arm64: 4096-aligned) and reported, never embedded\n"
                 write(1, h_la, str_len(h_la))
-                uint64 h_st = "  --stack-top=<addr>       emit a self-booting entry stub that sets SP here (x86_64 also gets a multiboot header + long-mode trampoline); validated per-arch (arm64: 16-byte aligned, <2^32; x86_64: <=0x40000000, its first push must clear the page tables at 0x1000-0x4000 so the stack top is <=0x1000 or >=0x4008, and --load-addr must then be in [0x4000,0x40000000)); on both arches the stack must not start inside the image; no default\n"
+                // EVERY x86_64 NUMBER ON THIS LINE IS THE MULTIBOOT STUB's, AND
+                // --reset-vector REPLACES ALL OF THEM (sub-project E, Task 4):
+                // its page-table band is 0x1000-0x7000, its ceiling is the 4 GiB
+                // map, and it refuses --load-addr= outright, so the
+                // stack-inside-the-image rule has no load address to be computed
+                // from and is not applied. Stated as a pointer rather than a
+                // second set of numbers: help_docs_stacktop_* probes THESE
+                // numbers against the compiler, and a line carrying two rule
+                // sets could satisfy those greps with the wrong one.
+                uint64 h_st = "  --stack-top=<addr>       emit a self-booting entry stub that sets SP here (x86_64 also gets a multiboot header + long-mode trampoline); validated per-arch (arm64: 16-byte aligned, <2^32; x86_64: <=0x40000000, its first push must clear the page tables at 0x1000-0x4000 so the stack top is <=0x1000 or >=0x4008, and --load-addr must then be in [0x4000,0x40000000)); on both arches the stack must not start inside the image; no default. Under --reset-vector NONE of the x86_64 rules here apply -- that form has its own, wider ones; see LANGUAGE.md\n"
                 write(1, h_st, str_len(h_st))
                 uint64 h_ih = "  --image-header            prefix the 64-byte arm64 Linux Image header (magic 0x644d5241) so a loader can boot the artifact from its first byte; requires --emit=image, --arch=arm64 and --stack-top=\n"
                 write(1, h_ih, str_len(h_ih))
@@ -7873,8 +7889,18 @@ fn main() {
                 // task can actually stand behind; Task 2, once the stage
                 // exists to measure against, can loosen it to `>` if the
                 // math the same way B2's does.
+                //
+                // TASK 2 LANDED AND THE BOUND WAS NOT LOOSENED, DELIBERATELY.
+                // The emitted stage does map exactly PDPT[0..3] x 4 GiB, so
+                // 0x100000000's first push at 0xFFFFFFF8 is provably inside
+                // it and `>` would be sound. It stays `>=` because a stack
+                // top of exactly 4 GiB has no use that 0xFFFFFFF8 does not
+                // serve, and because the boot gate has never booted one.
+                // The message no longer says "pending Task 2" -- Task 2 is
+                // done, and a user-facing string may not carry a forward
+                // reference to work that has already shipped (E, Task 4).
                 if stack_top >= 4294967296 {
-                    uint64 rv_4g = "error: --stack-top= must be below 0x100000000 (4 GiB) under --reset-vector: the reset-vector stage's identity map is PDPT[0..3], four page directories covering the full 4 GiB, so a stack top above that is unmapped the moment paging is enabled and the first push triple-faults. A stack top of exactly 0x100000000 is refused CONSERVATIVELY rather than because it faults -- its first push lands at 0xFFFFFFF8, inside the map -- pending Task 2 pinning the real geometry. This constraint is --reset-vector-only -- the self-boot trampoline's own ceiling is a different number, 0x40000000, for its narrower single-GiB map\n"
+                    uint64 rv_4g = "error: --stack-top= must be below 0x100000000 (4 GiB) under --reset-vector: the reset-vector stage's identity map is PDPT[0..3], four page directories covering the full 4 GiB, so a stack top above that is unmapped the moment paging is enabled and the first push triple-faults. A stack top of exactly 0x100000000 is refused CONSERVATIVELY rather than because it faults -- its first push lands at 0xFFFFFFF8, inside the map. This constraint is --reset-vector-only -- the self-boot trampoline's own ceiling is a different number, 0x40000000, for its narrower single-GiB map\n"
                     write(2, rv_4g, str_len(rv_4g))
                     exit(1)
                 }
@@ -7892,7 +7918,7 @@ fn main() {
         // above, so arch here is only ever 0 (x86_64) or 1 (arm64).
         if image_header_set != 0 {
             if arch == 0 {
-                uint64 ih_a64 = "error: --image-header requires --arch=arm64: the header is arm64's Linux Image format (magic 0x644d5241); x86_64 --emit=image already carries its own header (the multiboot one --stack-top= adds), so --image-header on x86_64 has nothing to attach to\n"
+                uint64 ih_a64 = "error: --image-header requires --arch=arm64: the header is arm64's Linux Image format (magic 0x644d5241); x86_64 --emit=image already has its own front-of-file forms (the multiboot header --stack-top= adds, and the stage --reset-vector adds), so --image-header on x86_64 has nothing to attach to\n"
                 write(2, ih_a64, str_len(ih_a64))
                 exit(1)
             }

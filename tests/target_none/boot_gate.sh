@@ -70,12 +70,20 @@
 # runner ~24 s elapsed between this gate's banner and the suite summary, and
 # the gate is the last section before it.
 #
-# WHAT IS STILL CI-UNRUN is narrower: the legs sub-project C adds (L5 and L6),
-# because that branch is unpushed. They run on the first push after it merges —
-# nothing further is needed on the runners, which already carry qemu-system-arm
-# (⊃ qemu-system-aarch64) and file(1). Until then, treat L5's and L6's evidence
-# as produced on one developer machine. The failure mode is loud either way (a
-# counted FAIL naming the missing tool, never a silent skip).
+# WHAT IS STILL CI-UNRUN, RE-MEASURED AT E TASK 4 rather than inherited: this
+# paragraph named L5 and L6, and that stopped being true when C and D merged.
+# Checked, not assumed — `git show origin/main:tests/target_none/boot_gate.sh`
+# at 07e0422 contains L6_kernel_boots and L7_uefi_x86_boots and does NOT contain
+# L9_reset_vector_boots, and GitHub Actions run 30989294535 on that sha
+# concluded success with both suite jobs (Linux x86_64 and Linux ARM64) green.
+# So L0–L8 are on origin/main and CI executes them; the
+# CI-unrun set is now exactly **L9's checks**, because sub-project E's branch is
+# unpushed. NOTHING IN THIS FILE MAY SAY L9 HAS RUN IN CI UNTIL IT HAS. They run
+# on the first push after E merges — nothing further is needed on the runners,
+# which already carry qemu-system-x86 (⊃ qemu-system-x86_64) and python3. Until
+# then, treat L9's evidence as produced on one developer machine. The failure
+# mode is loud either way (a counted FAIL naming the missing tool, never a
+# silent skip).
 #
 # Usage:  tests/target_none/boot_gate.sh
 # Env:    KRC=<path>  compiler under test (default build/krc2)
@@ -3050,8 +3058,8 @@ build_reset_vector() {
 
 # EVERY PATCH SITE L9 USES, LOCATED BY ANCHOR AND CROSS-CHECKED AGAINST THE
 # REPORT. Echoes `<halt> <payoff-imm> <movsl-count> <pd-count> <pdpt1> <pdpt2>
-# <pdpt3>` as decimal FILE OFFSETS (except <movsl-count>, which is a value), or
-# `ERR:<why>` on stdout with a nonzero status.
+# <pdpt3> <gdt-flags>` as decimal FILE OFFSETS (except <movsl-count>, which is a
+# value), or `ERR:<why>` on stdout with a nonzero status.
 #   rv_sites <img> <payoff> <paylen> <kentoff>
 #
 # NOT ONE HARDCODED OFFSET, and that is not tidiness. The gate cannot edit the
@@ -3076,6 +3084,11 @@ build_reset_vector() {
 #               the 2 MiB page attribute, and the loop count's opcode.
 #   pdpt1..3    the three `movl $0x<n>003,0x<2008|2010|2018>` stores, each its
 #               own unique 10-byte encoding.
+#   gdt-flags   the whole 32-byte GDT -- null, 32-bit code, data, 64-bit code --
+#               matched as one literal, so the site returned is the FLAGS byte
+#               of GDT[1] in a table whose other three entries are already known
+#               to be what the stage emitted. The returned offset is gdt+12,
+#               the u32 whose high half carries that flags nibble.
 #
 # AND THE REPORT IS CHECKED AGAINST THE ARTIFACT HERE, in both directions:
 # `0x100000+kentoff` must be the immediate the call actually uses,
@@ -3137,21 +3150,49 @@ pdpt = []
 for slot, (a, v) in enumerate(((0x2008, 0x4003), (0x2010, 0x5003), (0x2018, 0x6003)), 1):
     o = uniq(b"\xc7\x05" + struct.pack("<II", a, v), "the PDPT[%d] store" % slot)
     pdpt.append(o + 6)
+# The GDT, matched WHOLE. Anchoring on GDT[1] alone would match a 16-byte
+# window that says nothing about which table it is in; the 32-byte literal
+# below is null + 32-bit code + data + 64-bit code, i.e. the stage's own table
+# and no other, so gdt+12 is GDT[1]'s flags/limit-high dword by construction.
+gdt = uniq(bytes.fromhex("0000000000000000"      # 0x00 null
+                         "ffff0000009acf00"      # 0x08 32-bit code, ring 0
+                         "ffff00000092cf00"      # 0x10 data
+                         "ffff0000009aaf00"),    # 0x18 64-bit code, ring 0
+           "the stage's four-entry GDT")
+gdtfl = gdt + 12
+if struct.unpack_from("<I", d, gdtfl)[0] != 0x00CF9A00:
+    die("GDT[1]'s high dword at %d is 0x%08x, not 0x00CF9A00" % (gdtfl, struct.unpack_from("<I", d, gdtfl)[0]))
+if gdt >= payoff:
+    die("the GDT at %d is not inside the stage (payoff=%d)" % (gdt, payoff))
 if halt >= payoff:
     die("the halt at %d is not inside the stage (payoff=%d) -- it was found in the "
         "payload, so it is not the stage's landing pad" % (halt, payoff))
 if payoff + paylen > len(d) - 16:
     die("the payload [%d,%d) overruns the reset vector at %d" % (payoff, payoff + paylen, len(d) - 16))
-print("%d %d %d %d %d %d %d" % (halt, pimm, cnt, pdcnt, pdpt[0], pdpt[1], pdpt[2]))
+print("%d %d %d %d %d %d %d %d" % (halt, pimm, cnt, pdcnt, pdpt[0], pdpt[1], pdpt[2], gdtfl))
 PY
 }
 
 # DECODE ONE CAPTURE INTO EXACTLY ONE VERDICT.  rv_verdict <serial file>
 #
 # The capture is flattened (CR and LF removed) and matched WHOLE, never grepped
-# for a prefix. Six names:
+# for a prefix. SEVEN names -- six verdicts and one harness state:
 #   SILENT         nothing reached the wire at all
-#   R              `R` one or more times: real mode ran, protected mode did not
+#   R              one or more `R`s and NO `P` and NO `L`, with any non-sentinel
+#                  bytes between them: real mode ran, protected mode did not.
+#                  The GDT-width fault, under either reboot policy.
+#                  THE "ANY NON-SENTINEL BYTES" PART IS NOT SLACK, IT IS THE
+#                  MEASUREMENT. Task 2's report and this leg's brief both call
+#                  this shape a bare `R` / `RRRR...`; the capture on this machine
+#                  is `R\x10` and `(R\x10)+` -- 52794 exact pairs in 6 s without
+#                  `-no-reboot`, and nothing else in the file. A stage executing
+#                  its 32-bit half as 16-bit code still reaches an `out` to COM1
+#                  with 0x10 in %al. So a whole-string `R+` scores the real
+#                  artifact `UNEXPECTED` -- measured, it did, on the first green
+#                  run of the control below. What the row is entitled to claim is
+#                  that **`P` NEVER PRINTED**, and that is what this matches;
+#                  pinning the garbage byte itself would make a QEMU upgrade red
+#                  a row about the compiler.
 #   RP             `RP` one or more times: **`L` NEVER PRINTED**. The map fault,
 #                  under either reboot policy -- see this block's header.
 #   RPL            exactly one `RPL`: all three modes, and the payload printed
@@ -3160,11 +3201,18 @@ PY
 #                  reset. The RAM-ceiling shape.
 #   RPL_SENTINEL   exactly `RPL` + the computed sentinel: the full sequence
 #   UNEXPECTED:<flattened capture, truncated>
+# ...and the seventh, which is not a verdict about a guest at all:
+#   HARNESS_ERROR:no-capture   the capture file could not be opened, i.e. qemu
+#                  never created it. Emitted INSTEAD OF `SILENT`, because "no
+#                  boot happened" and "the boot printed nothing" are different
+#                  claims and every control here is entitled to the second one.
+#                  It fails closed -- no row accepts it -- so this header saying
+#                  "six" was a documentation defect and not a live hole.
 #
-# `R` IS A FAIL BUCKET: no row expects it, and it exists so that shape cannot be
-# filed as something a row DOES expect. It is Task 2's measured symptom for a
-# 64-bit `0x08` descriptor, and without a name of its own it would read as a
-# prefix of a passing capture.
+# `R` IS EXPECTED BY EXACTLY ONE ROW, L9_control_gdt_08_64bit_no_protected_mode,
+# and by nothing else -- so it is still the bucket that keeps Task 2's measured
+# symptom for a 64-bit `0x08` descriptor from reading as a prefix of a passing
+# capture. It was a pure fail bucket until that control existed.
 #
 # `RPL_LOOP` IS UNREACHABLE UNDER THIS GATE AND IS KEPT ANYWAY, which is a
 # deliberate choice and not an oversight. boot_run passes `-no-reboot` on every
@@ -3200,7 +3248,7 @@ elif re.fullmatch(r"(RP)+", s):
     print("RP")
 elif re.fullmatch(r"(RPL)+", s):
     print("RPL_LOOP")
-elif re.fullmatch(r"R+", s):
+elif re.fullmatch(r"(R[^RPL]*)+", s):
     print("R")
 else:
     print("UNEXPECTED:" + s[:120])
@@ -3225,8 +3273,8 @@ rv_boot() {
 }
 
 # =============================================================================
-# L9 — x86_64 RESET-VECTOR BOOT (`-bios <image>`, nothing else). Seven boots:
-#      the subject, four controls, and the ≥ 2^31 stack top from both sides.
+# L9 — x86_64 RESET-VECTOR BOOT (`-bios <image>`, nothing else). Eight boots:
+#      the subject, five controls, and the ≥ 2^31 stack top from both sides.
 #      See the block comment above for what each sentinel letter claims and for
 #      the two proposed controls that were measured worthless.
 # =============================================================================
@@ -3244,13 +3292,13 @@ leg9() {
     # Every patch below is computed from payoff/paylen/kentoff, so if any of
     # them is wrong the controls patch inert bytes and their mutants behave like
     # the original. rv_sites is where that is caught, against the artifact.
-    local sites halt pimm movsl pdcnt pdpt1 pdpt2 pdpt3
+    local sites halt pimm movsl pdcnt pdpt1 pdpt2 pdpt3 gdtfl
     if ! sites=$(rv_sites "$img" "$payoff" "$paylen" "$kentoff"); then
         bad "L9_reset_vector_report_and_anchors" "$sites"; return
     fi
     set -- $sites
-    halt="$1"; pimm="$2"; movsl="$3"; pdcnt="$4"; pdpt1="$5"; pdpt2="$6"; pdpt3="$7"
-    ok "L9_reset_vector_report_and_anchors" "payoff=$payoff paylen=$paylen kentoff=$kentoff stack=$stack, all three cross-checked against the artifact's own immediates (copy source at file offset $pimm, $movsl dwords, call target at $(( halt - 6 ))); the halt is the unique f4ebfd at $halt, the PD loop count at $pdcnt and the three PDPT stores at $pdpt1/$pdpt2/$pdpt3 -- every one located by byte pattern, none written down"
+    halt="$1"; pimm="$2"; movsl="$3"; pdcnt="$4"; pdpt1="$5"; pdpt2="$6"; pdpt3="$7"; gdtfl="$8"
+    ok "L9_reset_vector_report_and_anchors" "payoff=$payoff paylen=$paylen kentoff=$kentoff stack=$stack, all three cross-checked against the artifact's own immediates (copy source at file offset $pimm, $movsl dwords, call target at $(( halt - 6 ))); the halt is the unique f4ebfd at $halt, the PD loop count at $pdcnt, the three PDPT stores at $pdpt1/$pdpt2/$pdpt3 and GDT[1]'s flags dword at $gdtfl -- every one located by byte pattern, none written down"
     # ---- the subject, and this leg's positive control ------------------------
     # THE FULL SEQUENCE, matched whole. `RPL` + the computed value is four
     # separate claims -- reset vector, protected mode, long mode, and KernRift
@@ -3305,6 +3353,52 @@ leg9() {
             bad "L9_control_map_1gib_no_long_mode" "verdict RP, but qemu never exited (waited the full $BOOT_DEADLINE_TICKS ticks) -- the guest is quiet rather than faulted, which is a different claim"
         else
             ok "L9_control_map_1gib_no_long_mode" "map 4 GiB -> 1 GiB (PD count 512, PDPT[1..3] not present): verdict RP, so R and P reached the wire and **L NEVER DID**; qemu self-exited after ${BOOT_WAITED_TICKS} ticks on the triple fault (-no-reboot). The missing L is the discriminator, not the tail of the capture"
+        fi
+    fi
+    # ---- control: the GDT's own width ---------------------------------------
+    # THE SECOND TRIPLE-FAULT CLASS TASK 2 MEASURED, AND UNTIL NOW THE ONLY ONE
+    # WITH NO BOOT BEHIND IT. Task 2 found two ways to build a stage that resets
+    # and then dies: a map too small for the address the stage runs at (the row
+    # above), and a GDT whose 0x08 descriptor is 64-bit rather than 32-bit. The
+    # first got a permanent boot control; the second was covered STATICALLY only,
+    # by resetvec_stage_decodes in tests/run_tests.sh, which asserts the emitted
+    # descriptor's bytes and can say nothing about what the CPU does with them.
+    #
+    # WHY 0x08 HAS TO BE 32-BIT HERE AND IS 64-BIT IN B2's STUB: this stage is
+    # entered in 16-bit real mode, so it needs a 32-bit code segment to enter
+    # PROTECTED mode with before it can build the long-mode one. B2's stub is
+    # entered by a multiboot loader already in protected mode and needs only the
+    # second. Copying B2's table into this stage is therefore a plausible edit
+    # with no compile-time symptom, which is what a control is for.
+    #
+    # ONE u32, THE FLAGS/LIMIT-HIGH DWORD OF GDT[1]: 0x00CF9A00 -> 0x00AF9A00,
+    # i.e. the flags nibble C (G=1, D/B=1, L=0) -> A (G=1, D/B=0, L=1) that
+    # separates this table's 0x08 from its own 0x18. With EFER.LMA still 0 the
+    # L bit is ignored and D/B=0 makes it a 16-BIT code segment, so the 32-bit
+    # half of the stage executes as 16-bit garbage and faults BEFORE `P`.
+    #
+    # MEASURED ON THIS MACHINE, same image, the flag the only difference:
+    # `-no-reboot` gives the two bytes `52 10` and qemu EXITS BY ITSELF; without
+    # it, `(52 10)` repeated 52794 times (105588 B in 6 s) and nothing else.
+    # NOT the bare `R` / `RRRR...` this control's brief and Task 2's report both
+    # state -- see rv_verdict's header for why that difference cost the first
+    # green run of this row and what the matcher does about it. rv_verdict names
+    # both shapes `R`, for the same reason it gives the map fault one name: the
+    # discriminator is that `P` NEVER PRINTS, not the tail of the capture.
+    if ! rv_batch_positive; then
+        bad "L9_control_gdt_08_64bit_no_protected_mode" "the batch positive control did NOT run (verdict '$RV_BATCH_POS'), so a mutant's silence is not evidence"
+    elif ! img_patch "$img" "$WORK/rv_gdt64.img" "u32was:$gdtfl:13605376:11508224"; then
+        bad "L9_control_gdt_08_64bit_no_protected_mode" "could not widen GDT[1] to 64-bit -- the control never ran"
+    elif ! rv_boot "$WORK/rv_gdt64.img" "$WORK/l9_gdt64.txt" SELFEXIT; then
+        bad "L9_control_gdt_08_64bit_no_protected_mode" "the boot did not run (qemu exit=$BOOT_QEMU_RC) -- an absent 'P' proves nothing"
+    else
+        verdict=$(rv_verdict "$WORK/l9_gdt64.txt")
+        if [ "$verdict" != R ]; then
+            bad "L9_control_gdt_08_64bit_no_protected_mode" "verdict $verdict, wanted R (i.e. 'P' never printed) -- capture: $WORK/l9_gdt64.txt"
+        elif [ "$BOOT_WAITED_TICKS" -ge "$BOOT_DEADLINE_TICKS" ]; then
+            bad "L9_control_gdt_08_64bit_no_protected_mode" "verdict R, but qemu never exited (waited the full $BOOT_DEADLINE_TICKS ticks) -- the guest is quiet rather than faulted, which is a different claim"
+        else
+            ok "L9_control_gdt_08_64bit_no_protected_mode" "GDT[1] flags 0xCF -> 0xAF at file offset $gdtfl (32-bit code -> 64-bit code, the width B2's stub uses at the same selector): verdict R, so R reached the wire and **P NEVER DID**; qemu self-exited after ${BOOT_WAITED_TICKS} ticks on the triple fault (-no-reboot)"
         fi
     fi
     # ---- control: the reset vector itself -----------------------------------
@@ -3458,7 +3552,10 @@ leg9() {
 # rather than tightened one. D's Task 3 REVIEW then took it to 50 with L7's
 # LOADED_SILENT control -- the one outcome of uefi_verdict that no row reached.
 # SUB-PROJECT E moved it once more, 50 -> 58, adding L9's eight reset-vector
-# checks; again nothing was retired or renamed.
+# checks; again nothing was retired or renamed. E's Task 4 then took it to 59
+# with L9_control_gdt_08_64bit_no_protected_mode -- the second of the two
+# triple-fault classes Task 2 measured, which until then had static coverage
+# only.
 run_leg leg0 L0_deadboot_x86 L0_deadboot_a64 L0_liveboot_not_flagged L0_alarm_not_a_dead_boot
 run_leg leg1 L1_multiboot_header L1_no_header_image_refused L1_self_boot_sentinel \
              L1_halt_parked L1_control_entry_addr_honoured L1_control_no_return \
@@ -3487,7 +3584,8 @@ run_leg leg8 L8_uefi_a64_boots L8_control_subsystem_3_not_loaded \
              L8_control_virtual_size_too_small_faults \
              L8_control_read_only_section_printed_then_faulted
 run_leg leg9 L9_reset_vector_report_and_anchors L9_reset_vector_boots L9_halt_parked \
-             L9_control_map_1gib_no_long_mode L9_control_reset_jmp_spins_silent \
+             L9_control_map_1gib_no_long_mode L9_control_gdt_08_64bit_no_protected_mode \
+             L9_control_reset_jmp_spins_silent \
              L9_control_zeroed_payload L9_control_kentoff_steers_the_call \
              L9_stack_top_above_2_31_boots
 

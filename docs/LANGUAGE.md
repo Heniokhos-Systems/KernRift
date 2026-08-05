@@ -1498,13 +1498,20 @@ krc prog.kr --arch=arm64 --target=none --emit=image --load-addr=0x40400000 -o pr
 ```
 
 Emits a raw flat binary: there is no container, and nothing is truncated
-(`memsz == filesz`). Byte 0 is the first code byte unless a boot header is
-prefixed, and this format has exactly two, one per arch: on arm64
-`--image-header` (below) prefixes the 64-byte `Image` header, and on x86_64
-`--stack-top=` (below) prefixes a multiboot header. They occupy the same
-slot and are mutually exclusive by arch — `--image-header` is refused on
-x86_64 — so at most one thing ever precedes code. The build prints a report
-line the boot tooling parses:
+(`memsz == filesz`). Byte 0 is the first code byte unless something is
+prefixed, and this format has **three** such front-of-file forms, never more
+than one at a time:
+
+* **arm64, `--image-header`** (below) — the 64-byte Linux `Image` header.
+* **x86_64, `--stack-top=`** (below) — a multiboot header.
+* **x86_64, `--reset-vector`** (below) — not a header at all but a whole
+  16→32→64-bit stage, several hundred bytes of it, with the compiler's
+  payload placed *after* it.
+
+They occupy the same slot and cannot combine: `--image-header` is refused on
+x86_64, and `--reset-vector` is refused on arm64 and never emits
+`--stack-top=`'s multiboot stub. So at most one thing ever precedes code.
+The build prints a report line the boot tooling parses:
 
 ```
 image: arch=arm64 entry=620 filesz=1048 memsz=1048 load=1077936128
@@ -1515,9 +1522,10 @@ report line is the only place it is recorded. Which offset depends on the
 flags: the entry function is a live `_start` if the program has one and
 `main` otherwise, and with `--stack-top=` (below) `entry` is instead the
 offset of the **emitted entry stub**, which is what a loader or a reset
-vector must start at — except under `--image-header`, where the header's
-first word branches to that stub and the address to start at is the load
-address itself, file offset 0. All values are decimal.
+vector must start at. Two forms override that, both to `0`: under
+`--image-header` the header's first word branches to the stub, and under
+`--reset-vector` the stage *is* the first byte of the file, so in both cases
+the address to start at is file offset 0. All values are decimal.
 
 `--load-addr=` is **required, validated, and reported — never embedded**:
 x86_64 images are fully RIP-relative and run at any address; arm64 images
@@ -1525,6 +1533,8 @@ are position-independent modulo 4 KiB, so a non-4096-aligned `--load-addr`
 is refused on arm64 only. Requires `--target=none` (a hosted OS would put
 its syscalls in the blob), an explicit `--arch=x86_64|arm64` (riscv32/xtensa
 already own their raw paths via `--freestanding`). `-g` is refused.
+**`--reset-vector` is the one exception to "required":** it *refuses*
+`--load-addr=` outright and reports `load=0` — see its own section below.
 
 #### Self-booting images (`--stack-top=`)
 
@@ -1554,14 +1564,20 @@ The stub's trailing halt is the entry function's **return** site: when the
 entry function returns, the machine parks there rather than running off the
 end of the image.
 
-The value is refused if it is zero, and validated per arch:
+The value is refused if it is zero, and validated per arch. **The x86_64 row
+is this section's stub only** — `--reset-vector` reads the same flag and
+applies a different, wider set of rules to it, listed in its own section
+below:
 
 | | accepted `--stack-top=` | accepted `--load-addr=` |
 |---|---|---|
 | **arm64** | 16-byte aligned, below 2^32 | 4096-aligned (unchanged by this flag) |
 | **x86_64** | **at most `0x40000000`**, and **at most `0x1000` or at least `0x4008`** | **`0x4000` … below `0x40000000`** |
 
-Both arches additionally refuse a stack top that starts **inside the image**:
+Both arches additionally refuse a stack top that starts **inside the image**
+(again, this section's stubs only — `--reset-vector` refuses `--load-addr=`,
+so there is no load address for this rule to be computed from and it is not
+applied there):
 the stack grows down, so the first push writes the eight bytes below it, and
 those must not be the program's own. The refused band is everything strictly
 above `--load-addr` and below `load + filesz + 8` — so a stack top *at* or
@@ -1585,12 +1601,13 @@ value above the tables. Passing `--stack-top=` is what makes the two
 `--load-addr` bounds apply: without it no trampoline is emitted and the image is
 a blob for a loader of your own, which is subject to none of this.
 
-**Declare the entry function with no parameters.** Neither stub sets up
-arguments, and neither is refused for taking them: `fn main(uint64 argc,
-uint64 argv) -> uint64` compiles clean into an image and reads whatever the
-stub happened to leave in the argument registers. What it reads is *stable and
-plausible-looking*, which is worse than garbage — measured under QEMU by
-booting an entry that spins iff its first parameter equals a candidate:
+**Declare the entry function with no parameters.** No stub on any of the three
+paths sets up arguments, and none is refused for taking them: `fn main(uint64
+argc, uint64 argv) -> uint64` compiles clean into an image and reads whatever
+the stub happened to leave in the argument registers. What it reads is *stable
+and plausible-looking*, which is worse than garbage — measured under QEMU by
+booting an entry that spins iff its first parameter equals a candidate, and for
+the reset-vector row by booting one that **prints** its parameters:
 
 * **arm64** — the first parameter is the **stack top**. The stub materialises
   it in `x0` (`movz`/`movk`), copies it to `sp`, and never clobbers `x0`
@@ -1598,8 +1615,14 @@ booting an entry that spins iff its first parameter equals a candidate:
 * **x86_64** — the first parameter is **`0x4000`**, the address one past the
   identity-map page tables: the trampoline leaves `%edi` there after filling
   the page directory and does not touch it again before `call *%rax`.
+* **x86_64 under `--reset-vector`** — the first parameter is **`0x7000`**, one
+  past *that* stage's six pages of tables, for the same reason and with a
+  different number. Measured under `qemu-system-x86_64 -bios`, two payloads of
+  different sizes, both printing `28672`.
 
-Second and later parameters are true garbage. `@builtin_override fn _start` is
+Second and later parameters are true garbage — under `--reset-vector` `%rsi`
+came back as the end of the stage's copy source (`0xFFFF05A8` and `0xFFFF06B0`
+for those same two payloads), i.e. a value that moves with the program. `@builtin_override fn _start` is
 likewise a no-op here: the stub calls the entry function directly, not through
 any trampoline an override could replace.
 
@@ -1642,8 +1665,9 @@ Without the flag no byte of the output changes.
 
 * `--emit=image` — a flat image is the only thing to prefix.
 * `--arch=arm64` — the header is arm64's Linux `Image` format; x86_64
-  `--emit=image` already carries its own header, the multiboot one
-  `--stack-top=` adds, so `--image-header` there has nothing to attach to.
+  `--emit=image` already has its own front-of-file forms — the multiboot
+  header `--stack-top=` adds, and the stage `--reset-vector` adds — so
+  `--image-header` there has nothing to attach to.
 * `--stack-top=` — a header on a stub-less image validates under `file(1)`
   and is accepted by a loader, but the image has no entry stub to jump to
   and faults instantly. Requiring `--stack-top=` keeps that combination —
@@ -1661,11 +1685,15 @@ start it. Everything below is a limit of *that evidence*.
   no Android `boot.img` tooling was available. Nor has anything run on
   hardware: QEMU 8.2.2 on one developer machine is the whole of the boot
   evidence.
-* **The header's own boot legs have not run in CI yet.** The boot gate as a
-  whole *is* CI-wired — it is a counted test inside `tests/run_tests.sh`, and
-  it ran green in CI at this work's branch point on both Linux runners. The
-  two legs that exercise the header (L5 and L6) are newer than that run, so
-  they have only ever run locally; they join CI on the first push.
+* **The header's own boot legs now DO run in CI** — this bullet said they did
+  not, and that stopped being true when sub-project C merged. Re-checked at
+  E Task 4: `origin/main` is `07e0422`, that tree's `boot_gate.sh` contains
+  `L6_kernel_boots`, and GitHub Actions run **30989294535** on that sha
+  concluded *success* with both suite jobs (Linux x86_64 and Linux ARM64)
+  green. The gate is a counted test inside `tests/run_tests.sh` and the suite
+  exits non-zero on any FAIL, so a green suite job on that sha is L5 and L6
+  passing on the runners. (The run's log body was no longer retrievable, so
+  the per-leg lines are not quoted here — the job conclusions are.)
 * **The load-base result is QEMU's behaviour, not the specification's.** L6
   shows the image landing at an address nothing on the command line named,
   and moving when `text_offset` moves. That is QEMU's `load_aarch64_image`
@@ -1848,6 +1876,59 @@ built by `krc` alone reaches 16-bit real mode, 32-bit protected mode and
 `-bios` mapping behaviour — which the whole geometry above depends on. That
 bound was written while there was nothing to boot, and it still holds now
 that there is.
+
+##### What this is verified against — and what it is not
+
+One oracle exercises this form and no others: a real
+`qemu-system-x86_64 -bios <image>` boot in `tests/target_none/boot_gate.sh`
+(leg L9) — nine checks, eight boots, every one of them with an observed
+negative control. Everything below is a limit of *that evidence*, and each
+number names the command that produced it.
+
+* **One emulator, one version, one machine.** QEMU 8.2.2
+  (`1:8.2.2+ds-0ubuntu1.17`) on one developer machine is the whole of the
+  boot evidence for this flag. Nothing here has run on silicon, and nothing
+  here has been loaded by firmware that anyone else wrote.
+* **This is the leg where "QEMU only" matters most, not least.** `-bios`
+  maps the file so its last byte lands at the top of the 32-bit address
+  space — exactly the window a real chipset write-protects, shadow-copies
+  into RAM, and hands to a descriptor-driven SPI controller. Getting these
+  bytes onto a board is not "the same thing with a different loader": it is
+  flashing SPI, which is a separate problem this sub-project does not touch.
+  So no real hardware has run this, and no plan for it is implied.
+* **The geometry itself is QEMU's behaviour, not a specification.** That the
+  file is mapped ending at `0xFFFFFFFF`, that the reset vector therefore sits
+  at `filesz - 16`, and that `CS=f000:IP=fff0` reaches it — those are things
+  this QEMU does. The stage is *designed around them*. They are not read out
+  of a chipset datasheet anywhere in this tree.
+* **The 64 KiB size is fixed, and the rule behind it is an inference.**
+  Measured on this QEMU, same image padded at the front so the reset vector
+  stays last: 32768 B, 65535 B, 66000 B and 98304 B are all **refused**
+  (`qemu: could not load PC BIOS`), while 65536 B, 131072 B, 196608 B and
+  262144 B all **boot**. Those eight points are the measurement. *"`-bios`
+  requires a multiple of 64 KiB"* is the **inference** that fits them — it is
+  not quoted from QEMU's source or documentation, and it is not what the
+  compiler enforces. The compiler emits exactly 65536, always.
+* **`--stack-top`'s real bound is installed guest RAM, and it is unchecked
+  and undiagnosable.** The 4 GiB refusal above is the *map* bound. The RAM
+  bound is measured in the table earlier in this section, the compiler cannot
+  know it, and exceeding it is a **silent reboot loop with no diagnostic from
+  anything** — no message, no exit code, just `RPL` repeating. The two
+  failure modes are told apart by one letter: a bad map or a bad GDT never
+  prints `L`; RAM exhaustion prints `L` and then dies on the payload's first
+  push.
+* **L9 has never run in CI.** The gate as a whole is CI-wired — it is a
+  counted test inside `tests/run_tests.sh`, legs L0–L8 are on `origin/main`
+  (`07e0422`), and run **30989294535** on that sha concluded *success* — but
+  this sub-project's branch is unpushed, so **every L9 result quoted anywhere
+  in this tree was produced on the one developer machine above**. They join CI
+  on the first push, and this bullet has to be rewritten then. Checked, not
+  assumed: `git show origin/main:tests/target_none/boot_gate.sh` at `07e0422`
+  contains `L7_uefi_x86_boots` and does not contain `L9_reset_vector_boots`.
+* **What is deliberately absent.** No `include_bytes`, no assembly symbol
+  references, no settable BIOS size, no arm64 form (arm64 resets straight into
+  AArch64 state and needs none of this), no riscv32/xtensa form, and no change
+  of any kind to the multiboot path `--stack-top=` alone emits.
 
 #### UEFI applications (`--emit=uefi`)
 

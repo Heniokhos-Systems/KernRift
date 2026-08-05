@@ -8905,7 +8905,10 @@ rvbig_out=$($KRC $KRC_FLAGS "$RV_BIG_SRC" -o /tmp/krc_rvbig_$$ --target=none --a
 if [ $rvbig_st -ne 0 ] && echo "$rvbig_out" | grep -qi 'too large\|does not fit\|65536' && [ ! -f /tmp/krc_rvbig_$$ ]; then
     PASS=$((PASS + 1)); echo "  reset_vector_payload_too_large: PASS (Task 2's finalize check already landed)"
 else
-    echo "FAIL: reset_vector_payload_too_large (EXPECTED RED at Task 1 -- PAYLEN is only known at finalize, so the fit check is Task 2's, not Task 1's; exit=$rvbig_st, artifact=$([ -f /tmp/krc_rvbig_$$ ] && echo yes || echo no). Task 2 must turn this row green.)"
+    # E TASK 4: this text used to say "EXPECTED RED at Task 1 ... Task 2 must
+    # turn this row green". Task 2 turned it green, so the same words would now
+    # tell a reader that a live regression is expected. A red here is a red.
+    echo "FAIL: reset_vector_payload_too_large (a 100000-byte payload was NOT refused by the finalize-time fit check Task 2 landed; exit=$rvbig_st, artifact=$([ -f /tmp/krc_rvbig_$$ ] && echo yes || echo no). This is a regression, not a known gap.)"
     FAIL=$((FAIL + 1))
 fi
 rm -f /tmp/krc_rvbig_$$ "$RV_BIG_SRC"
@@ -10212,7 +10215,20 @@ fi
 #    section's fenced example command before a word of prose runs). Scoped
 #    to prose only, code fences stripped, same as the UEFI row above.
 RVEC_SEC=/tmp/krc_rvec_sec_$$
-awk '/^#### The reset-vector form/{s=1;print;next} s&&/^#/{exit} s{print}' "$HD_DOC" > "$RVEC_SEC"
+# `##### ` DOES NOT TERMINATE THIS SCOPE, same exemption row 4 already needed
+# and for the same reason: E Task 4 nests a `##### What this is verified
+# against` limits block inside this section, and row 3's plain `/^#/{exit}`
+# would cut the section off AT that heading, putting the whole block out of
+# scope. MEASURED rather than reasoned, both ways, against this exact tree:
+# with the plain awk the row FAILS with "the-limits-subsection ram-not-map-bound
+# size-rule-labelled-inference ci-status-stated", and with this awk it passes at
+# 191 lines. Note what that measurement does NOT say: the older greps
+# ('one machine', 'real hardware', 'real firmware') keep passing either way,
+# because they are satisfied by the "What a green result claims" paragraph that
+# sits ABOVE the new heading. So this is a scope fix the new greps require, not
+# a rescue of the old ones -- and the plain awk fails CLOSED, it does not go
+# quietly green.
+awk '/^#### The reset-vector form/{s=1;print;next} s&&/^#/&&!/^##### /{exit} s{print}' "$HD_DOC" > "$RVEC_SEC"
 TOTAL=$((TOTAL + 1))
 rvec_doc_miss=""
 [ -s "$RVEC_SEC" ] || rvec_doc_miss=" the-section-itself"
@@ -10225,6 +10241,20 @@ grep -qF -- '-bios'          "$RVEC_PROSE" || rvec_doc_miss="$rvec_doc_miss name
 grep -qF -- 'one machine'    "$RVEC_PROSE" || rvec_doc_miss="$rvec_doc_miss one-machine-scope"
 grep -qF -- 'real hardware'  "$RVEC_PROSE" || rvec_doc_miss="$rvec_doc_miss real-hardware-mentioned"
 grep -qF -- 'real firmware'  "$RVEC_PROSE" || rvec_doc_miss="$rvec_doc_miss real-firmware-mentioned"
+# E TASK 4's LIMITS BLOCK, guarded the way sub-project C's is (row 4). Same
+# argument, same cost: these are PHRASES, not flag tokens, so rewording one
+# reds a row and a deliberate reword has to come here in the same commit.
+# Four claims, each of which was wrong or absent somewhere in this sub-project
+# before it was measured: that the stack's real bound is RAM and not the map,
+# that busting it is silent, that the 64 KiB rule is an INFERENCE from measured
+# points rather than a quoted requirement, and that L9 is not in CI. The last
+# is the one most likely to rot: it becomes false on the first push, and it
+# must be edited then rather than left standing.
+grep -qF -- '##### What this is verified against' "$RVEC_SEC" || rvec_doc_miss="$rvec_doc_miss the-limits-subsection"
+grep -qF -- 'installed guest RAM' "$RVEC_SEC" || rvec_doc_miss="$rvec_doc_miss ram-not-map-bound"
+grep -qF -- 'no diagnostic'       "$RVEC_SEC" || rvec_doc_miss="$rvec_doc_miss silent-failure-stated"
+grep -qF -- 'inference'           "$RVEC_SEC" || rvec_doc_miss="$rvec_doc_miss size-rule-labelled-inference"
+grep -qF -- 'never run in CI'     "$RVEC_SEC" || rvec_doc_miss="$rvec_doc_miss ci-status-stated"
 # THE NEGATIVE HALF, both ways. "real hardware"/"real firmware" is allowed
 # ONLY inside a negation on the SAME line -- "will not claim real hardware,
 # real firmware" passes, a bare "runs under real firmware" (added anywhere in
@@ -15035,25 +15065,14 @@ fi
 
 # --- Summary ---
 echo ""
-# Review r1 Minor 4: a bare "$FAIL failed" line here, or make check's abort,
-# gives no reason to whoever reads only the tail. reset_vector_payload_too_large
-# (sub-project E, Task 1) is DELIBERATELY red -- Task 1 does not implement the
-# 64 KiB payload fit check, because PAYLEN only exists at finalize; Task 2's
-# job is to turn it green -- so name it here rather than leaving every red
-# summary equally unexplained. rvbig_st is set once, earlier in this same
-# top-level script (not inside a function), so it is still in scope here;
-# ${rvbig_st:-} degrades safely if that section is ever skipped.
-#
-# rvbig_st == 0 means the oversized build compiled CLEAN -- exactly the
-# EXPECTED-RED state this task leaves behind (Task 1 does not refuse it).
-# rvbig_st != 0 means something now refuses that build -- either Task 2's
-# real fit check landed (the row asserts a message, so it would read that
-# refusal as a genuine PASS above) or an unrelated refusal started firing
-# first, in which case the row's own FAIL text above already says so. Either
-# way, once rvbig_st != 0 there is no longer a known, deliberate red to
-# explain here.
-if [ -n "${rvbig_st:-}" ] && [ "$rvbig_st" -eq 0 ]; then
-    echo "NOTE: reset_vector_payload_too_large is a DELIBERATE red (sub-project E Task 1 does not implement the 64 KiB payload fit check; Task 2 turns it green) -- if it is the only FAIL below, that is expected, not a regression."
-fi
+# THERE IS NO KNOWN DELIBERATE RED IN THIS SUITE, so nothing is annotated here.
+# Review r1 Minor 4 added a NOTE naming reset_vector_payload_too_large as a
+# DELIBERATE red, because sub-project E Task 1 wrote that row before the check
+# it asserts existed. TASK 2 LANDED THE CHECK AND THE ROW HAS BEEN GREEN SINCE,
+# which made the NOTE's own guard (`rvbig_st -eq 0`) permanently false -- dead
+# code whose text, if it ever did print again, would tell a reader that a live
+# regression was "expected, not a regression". Removed at E Task 4 rather than
+# left standing. If a future task deliberately lands a red row again, add the
+# annotation back here, for that row, with that task's name on it.
 echo "=== Results: $PASS/$TOTAL passed, $FAIL failed ==="
 exit $FAIL
