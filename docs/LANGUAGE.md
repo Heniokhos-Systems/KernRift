@@ -1718,23 +1718,47 @@ krc prog.kr --target=none --arch=x86_64 --emit=image --reset-vector \
 qemu-system-x86_64 -bios bios.bin          # and nothing else
 ```
 
-**Status: flag surface only.** This section documents what `--reset-vector`
-accepts and refuses today. It does **not** yet produce a bootable artifact —
-the reset-vector stage itself (the code that actually reaches long mode and
-runs the payload) is a separate, later piece of work. Right now the flag
-exists, is validated, and a build that passes validation succeeds and writes
-an artifact — but that artifact is today's ordinary flat payload with no
-reset-vector stage in front of it, not the fixed-size, `-bios`-bootable image
-this form is for. Treat everything below as the contract the flag surface
-holds to, not as evidence the boot form works.
+**Status: the stage is emitted and the artifact boots.** This is no longer
+the flag surface only: `--reset-vector` now emits a self-contained
+16-bit → 32-bit → 64-bit stage at file offset 0, places the compiler's own
+payload after it, zero-fills to exactly 65536 bytes and plants the 3-byte
+reset `jmp` at `0xFFF0`. The artifact has been booted with
+`qemu-system-x86_64 -bios` on one machine and printed `RPL` followed by its
+payload's own computed output. It does
+**not claim** real hardware, real firmware, or any BIOS other than QEMU's
+`-bios` mapping behaviour.
+
+The build prints a second report line:
+
+```
+image: arch=x86_64 entry=0 filesz=65536 memsz=65536 load=0
+reset-vector: payoff=304 paylen=1016 kentoff=676 stack=589824
+```
+
+`entry=0` is the stage's own first byte — the CPU resets to `CS=f000:IP=fff0`
+and the `jmp` there transfers to `CS:0`, so file offset 0 is where execution
+begins. `load=0` because `--load-addr=` is refused for this form (below).
+The `reset-vector:` line is the layout contract: `payoff` is the payload's
+file offset (and therefore the stage's length), `paylen` the number of bytes
+copied to physical `0x100000`, `kentoff` the entry function's offset *within*
+the payload — so the guest is entered at `0x100000 + kentoff` — and `stack`
+the value loaded into `rsp`.
 
 `--reset-vector` is x86_64-only and is **unrelated to `--stack-top=`'s
 entry stub above**: it does not reuse, extend, or modify the multiboot
 header + long-mode trampoline `--stack-top=` alone opts into, and building
-with both present never emits that trampoline. What the two flags share is
-only the underlying value — `--reset-vector` still reads the `--stack-top=`
-number, for the stack pointer its own (future) startup code will set — not
-the stub that number otherwise gates.
+with both present never emits that trampoline. The two stages share no code
+and are deliberately different: this one's GDT selector `0x08` is *32-bit*
+code (a 16-bit stage has to enter protected mode before it can enter long
+mode), and it identity-maps the full 4 GiB rather than 1 GiB, because the
+stage itself runs at `0xFFFF0000`. What the two flags share is only the
+underlying value — `--reset-vector` reads the `--stack-top=` number for its
+own `rsp` — not the stub that number otherwise gates.
+
+Three characters are written to COM1 as the stage advances: `R` once 16-bit
+real mode is running at the reset vector, `P` once 32-bit protected mode is
+entered, `L` once long mode is. They are not debug leftovers — without them a
+fault anywhere in the sequence is an indistinguishable silent reboot.
 
 This form is for `qemu-system-x86_64 -bios`: QEMU maps the file so its last
 byte sits at the top of the 32-bit address space and the CPU resets into it
@@ -1749,13 +1773,13 @@ in between. Because of that, the geometry differs from every other
   flag to choose here, so it is refused rather than silently ignored.
 * **`--stack-top=` is required, with no default — same rule as
   `--stack-top=` itself states, extended to a form that cannot fall back to
-  "no stub, whatever SP reset left behind."** This form's startup code will
-  always set the stack from this value; an unset stack means "no value,"
+  "no stub, whatever SP reset left behind."** The stage sets `esp` and `rsp` from this value; an unset stack means "no value,"
   never "guess one."
 * **`--stack-top=` has its own x86_64 range rule, wider than `--stack-top='s
   existing one.** The existing self-boot trampoline (above) keeps its
   identity-map page tables at physical `0x1000`–`0x4000`. The reset-vector
-  form's own future page tables need more room — `0x1000`–`0x7000` — so a
+  form's own page tables need more room — `0x1000`–`0x7000`, six pages:
+  PML4, PDPT and four page directories — so a
   stack top whose first push (the stack grows down, so the first push writes
   the eight bytes *below* the stack top — same convention as the existing
   rule) would land in that wider band is refused: at most `0x1000`, or at
@@ -1763,11 +1787,11 @@ in between. Because of that, the geometry differs from every other
 * **`--stack-top=` also has its own, wider ceiling: `0x100000000` (4 GiB),
   not the existing trampoline's `0x40000000` (1 GiB).** The existing
   self-boot trampoline's identity map is a single GiB; the reset-vector
-  stage's own (future) map is `PDPT[0..3]`, the full 4 GiB, so a stack top at
-  or above that ceiling is refused too — checked today, from the flag value
-  alone, ahead of the stage that ceiling is actually about.
+  stage's own map is `PDPT[0..3]`, 2048 x 2 MiB, the full 4 GiB, so a stack
+  top at or above that ceiling is refused too — checked from the flag value
+  alone, before the stage that ceiling is about is even emitted.
 
-**Refused today, each with its own message:**
+**Refused at flag-parse time, each with its own message:**
 
 | condition | why |
 |---|---|
@@ -1779,23 +1803,23 @@ in between. Because of that, the geometry differs from every other
 | `--stack-top=`'s first push lands in `0x1000`–`0x7000` | this form's own, wider page-table band |
 | `--stack-top=` at or above `0x100000000` | this form's own, wider (4 GiB) identity-map ceiling |
 
-**Not yet checked, and known not to be:** a payload that will not fit in the
-fixed 64 KiB this form's file size is pinned to. That check needs the
-payload's compiled length, which does not exist at the point these flags are
-validated — it exists only after code generation has run, alongside the
-reset-vector stage this section already says is not built yet. Until both
-land together, a large program compiles under `--reset-vector` without
-complaint rather than being refused; it simply is not yet the artifact this
-form is for.
+**Refused at the end of the build, not at flag-parse time:** a payload that
+will not fit. The file is exactly 65536 bytes, of which the stage takes
+`payoff` and the reset vector's own window takes the last 16, so the payload
+has `65536 - payoff - 16` bytes. That check needs the payload's compiled
+length, which does not exist until code generation has run — so unlike every
+refusal in the table above it fires at the end of the build, and the message
+names **both** the payload's actual size and the space available. It never
+truncates: a truncated image boots, prints `RPL`, and then runs half a
+program.
 
-**What a future green result will claim, and what it will not.** Once the
-reset-vector stage exists and its own boot leg passes: *a reset-vector image
+**What a green result claims, and what it does not.** *A reset-vector image
 built by `krc` alone reaches 16-bit real mode, 32-bit protected mode and
-64-bit long mode, and runs its payload, under QEMU on one machine.* It will
+64-bit long mode, and runs its payload, under QEMU on one machine.* It does
 **not claim** real hardware, real firmware, or any BIOS other than QEMU's
 `-bios` mapping behaviour — which the whole geometry above depends on. That
-bound holds now, while there is nothing to boot, and it will still hold once
-there is.
+bound was written while there was nothing to boot, and it still holds now
+that there is.
 
 #### UEFI applications (`--emit=uefi`)
 

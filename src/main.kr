@@ -2575,6 +2575,318 @@ fn emit_x86_image_stub(uint64 ld, uint64 sp) {
     patch_u32(xs_gdtr_base, ld + xs_gdt)
 }
 
+// ---------------------------------------------------------------------------
+// The x86_64 RESET-VECTOR stage (sub-project E, Task 2): 16-bit real ->
+// 32-bit protected -> long mode, emitted at file offset 0 of a fixed
+// 65536-byte artifact that `qemu-system-x86_64 -bios` boots and NOTHING else
+// boots.
+// ---------------------------------------------------------------------------
+//
+// GEOMETRY. `-bios` maps the file so its LAST byte lands at 0xFFFFFFFF. The
+// CPU resets to CS=f000 (hidden base 0xFFFF0000), IP=0xFFF0 -- sixteen bytes
+// before EOF -- so with the file exactly 65536 bytes and the stage at file
+// offset 0, linear = 0xFFFF0000 + file_offset and EVERY LABEL DOUBLES AS ITS
+// CS-RELATIVE OFFSET. That identity is what lets the 16-bit `lgdtl %cs:disp16`
+// below carry a bare file offset. The 3-byte `jmp` planted at 0xFFF0 by the
+// --emit=image finalize block is what transfers control here.
+//
+// THIS SHARES NOTHING WITH emit_x86_image_stub ABOVE, DELIBERATELY, AND THE
+// DUPLICATION IS THE POINT. Both build a GDT and both build identity page
+// tables, with DIFFERENT CONTENTS, and unifying them reintroduces a triple
+// fault that has no diagnostic. Read this table before "simplifying" either:
+//
+//                          | emit_x86_image_stub | HERE (reset vector)
+//   ----------------------- --------------------- ----------------------------
+//   file offset 0 carries  | multiboot header    | this stage's `cli`
+//   GDT selector 0x08      | 64-BIT code         | 32-BIT code (0x18 is 64-bit)
+//   identity map           | PDPT[0], one PD,    | PDPT[0..3], four PDs,
+//                          | EXACTLY 1 GiB       | 2048 x 2 MiB = 4 GiB
+//   payload base           | global load_addr    | fixed 0x100000, copied
+//   entry mode on arrival  | 32-bit protected    | 16-bit REAL
+//
+// A 16-bit stage CANNOT `ljmp $0x08` into protected mode against B2's table --
+// 0x08 there is the 64-bit CS. And 1 GiB is not enough here: this stage RUNS
+// at 0xFFFF0000, the top of 4 GiB, so with only the first GiB mapped the far
+// jump into long mode lands on an unmapped page and triple-faults. That is not
+// a hypothetical -- it was reproduced, and the symptom is the serial line
+// stopping at `RP` with `L` never printed.
+//
+// THE R / P / L SENTINELS ARE LOAD-BEARING, NOT DEBUG LEFTOVERS. Three `out`
+// instructions to COM1. Without them a triple fault anywhere in this sequence
+// is an indistinguishable silent reboot; with them the failure names its own
+// stage. `R` = 16-bit real reached, `P` = 32-bit protected reached, `L` = long
+// mode reached, and the payload's own output follows.
+//
+// SEVEN PATCH SITES, EVERY ONE CAPTURED AS `out_len` AT EMISSION, exactly as
+// emit_x86_image_stub does and for exactly the same reason: a stale offset
+// here is a triple fault in the guest, not a compiler diagnostic. Four are
+// self-references resolved before this function returns (the lgdt disp, both
+// far-jump targets, the GDTR's base); PAYOFF is resolved at the bottom of this
+// function, once the payload's aligned start is known; PAYLEN and KENTOFF are
+// published as statics because neither exists until codegen has run.
+//
+// Derived from docs/superpowers/specs/2026-08-03-x86-reset-vector-stage.S
+// (local-only), which assembles to 294 bytes and has booted end to end. Two
+// bytes-level departures from it, both deliberate:
+//   * `%esp` / `%rsp` come from --stack-top, not the reference's hardcoded
+//     0x90000. A hardcoded stack is exactly what src/main.kr's own stack_top
+//     declaration forbids.
+//   * `%rsp` is loaded with the 10-byte `movabs $imm64` and not the
+//     reference's 7-byte `mov $imm32,%rsp`. The 7-byte form SIGN-EXTENDS, and
+//     --reset-vector accepts --stack-top up to 0xFFFFFFFF (its ceiling is the
+//     4 GiB map, not B2's 2^31 encoding limit), so any value at or above 2^31
+//     would silently become 0xFFFFFFFF8xxxxxxx -- a stack pointer outside the
+//     identity map, i.e. a fault on the payload's first push.
+static uint64 rvstage_payoff = 0        // file offset where the payload begins
+static uint64 rvstage_paylen_site = 0   // file offset of the rep-movsl dword count
+static uint64 rvstage_kentoff_site = 0  // file offset of the `mov $imm32,%rax`
+static uint64 rvstage_kentoff = 0       // the entry's offset WITHIN the payload
+
+// `movl $val, disp32` (C7 05 disp32 imm32) -- the absolute-address store the
+// reference .S writes as `movl $0x2003, 0x1000`. Five of them build PML4[0]
+// and PDPT[0..3]; a helper rather than five open-coded pairs because the
+// operand order (disp BEFORE imm) is the part that gets transposed.
+fn rvs_movl_abs(uint64 addr, uint64 val) {
+    emit_byte(0xC7)
+    emit_byte(0x05)
+    emit_u32_le(addr)
+    emit_u32_le(val)
+}
+
+fn emit_x86_reset_vector_stage(uint64 sp) {
+    uint64 rv_bios = 4294901760          // 0xFFFF0000 -- where -bios maps byte 0
+    uint64 rv_low = 1048576              // 0x100000 -- where the payload is copied
+
+    // --- 16-bit real mode -------------------------------------------------
+    emit_byte(0xFA)                      // cli
+    // cld, for the `rep movsl` and `rep stosl` further down. At RESET the CPU
+    // clears DF, so unlike B2's cld (which guards against a multiboot loader
+    // leaving DF set) this one is provably redundant on paper -- and it is
+    // emitted anyway, because "the reset state" is exactly the class of
+    // assumption this sub-project keeps finding wrong, and one byte is not a
+    // trade.
+    emit_byte(0xFC)                      // cld
+    emit_byte(0xBA)                      // mov $0x3FB,%dx   COM1 line control
+    emit_u16_le(0x03FB)
+    emit_byte(0xB0)                      // mov $0x03,%al    8N1
+    emit_byte(0x03)
+    emit_byte(0xEE)                      // out %al,(%dx)
+    emit_byte(0xBA)                      // mov $0x3F8,%dx   COM1 transmit
+    emit_u16_le(0x03F8)
+    emit_byte(0xB0)                      // mov $'R',%al
+    emit_byte(0x52)
+    emit_byte(0xEE)                      // out -> 'R': the reset vector ran
+    emit_byte(0x2E)                      // lgdtl %cs:gdtr
+    emit_byte(0x66)
+    emit_byte(0x0F)
+    emit_byte(0x01)
+    emit_byte(0x16)
+    uint64 rv_lgdt_site = out_len
+    // A BARE FILE OFFSET, NOT A LINEAR ADDRESS -- the one patch site here that
+    // is not `rv_bios + something`. This is a 16-bit disp16 read through CS,
+    // whose base is already 0xFFFF0000, so adding it again would address
+    // 0x1FFFE0000 and the LGDT would load garbage. It also means the GDTR must
+    // sit inside the first 64 KiB, which the fixed file size guarantees.
+    emit_u16_le(0)                       // <- patched: gdtr's FILE offset
+    emit_byte(0x0F)                      // mov %cr0,%eax
+    emit_byte(0x20)
+    emit_byte(0xC0)
+    emit_byte(0x66)                      // or $1,%eax   CR0.PE
+    emit_byte(0x83)
+    emit_byte(0xC8)
+    emit_byte(0x01)
+    emit_byte(0x0F)                      // mov %eax,%cr0
+    emit_byte(0x22)
+    emit_byte(0xC0)
+    emit_byte(0x66)                      // ljmpl $0x08,$start32
+    emit_byte(0xEA)
+    uint64 rv_ljmp32_site = out_len
+    emit_u32_le(0)                       // <- patched: rv_bios + start32
+    emit_u16_le(0x0008)                  // selector 0x08 = the 32-BIT code CS
+
+    // --- 32-bit protected mode -------------------------------------------
+    uint64 rv_start32 = out_len
+    emit_byte(0x66)                      // mov $0x10,%ax   GDT[2], data
+    emit_byte(0xB8)
+    emit_u16_le(0x0010)
+    emit_byte(0x8E)                      // mov %ax,%ds
+    emit_byte(0xD8)
+    emit_byte(0x8E)                      // mov %ax,%es
+    emit_byte(0xC0)
+    emit_byte(0x8E)                      // mov %ax,%ss
+    emit_byte(0xD0)
+    emit_byte(0xBC)                      // mov $stack_top,%esp
+    emit_u32_le(sp)
+    emit_byte(0x66)                      // mov $0x3F8,%dx
+    emit_byte(0xBA)
+    emit_u16_le(0x03F8)
+    emit_byte(0xB0)                      // mov $'P',%al
+    emit_byte(0x50)
+    emit_byte(0xEE)                      // out -> 'P': protected mode reached
+    // Copy the payload out of the BIOS region down to 0x100000. The image
+    // cannot simply be executed where it lies: it sits at the top of the
+    // address space in a region a real chipset write-protects, and the
+    // payload's statics are writable data.
+    emit_byte(0xBE)                      // mov $(rv_bios + PAYOFF),%esi
+    uint64 rv_payoff_site = out_len
+    emit_u32_le(0)                       // <- patched at the bottom of this fn
+    emit_byte(0xBF)                      // mov $0x100000,%edi
+    emit_u32_le(rv_low)
+    emit_byte(0xB9)                      // mov $((PAYLEN+3)/4),%ecx
+    rvstage_paylen_site = out_len
+    emit_u32_le(0)                       // <- patched at finalize
+    emit_byte(0xF3)                      // rep movsl
+    emit_byte(0xA5)
+    // Identity-map the FULL 4 GiB. See the header comment: B2 maps one GiB
+    // because its code runs low; this stage runs at 0xFFFF0000 and a 1 GiB map
+    // triple-faults on the far jump below, printing `RP` and stopping.
+    emit_byte(0xBF)                      // mov $0x1000,%edi
+    emit_u32_le(0x1000)
+    emit_byte(0x0F)                      // mov %edi,%cr3
+    emit_byte(0x22)
+    emit_byte(0xDF)
+    emit_byte(0x31)                      // xor %eax,%eax
+    emit_byte(0xC0)
+    emit_byte(0xB9)                      // mov $0x1800,%ecx  (6 pages / 4)
+    emit_u32_le(0x1800)
+    emit_byte(0xF3)                      // rep stosl -> zero 0x1000..0x7000
+    emit_byte(0xAB)
+    // 0x1000..0x7000 is SIX pages: PML4, PDPT, and four page directories. This
+    // is the band --stack-top is refused inside, and it is wider than B2's
+    // 0x1000..0x4000 by exactly the three extra page directories.
+    rvs_movl_abs(0x1000, 0x2003)         // PML4[0]  -> PDPT @0x2000
+    rvs_movl_abs(0x2000, 0x3003)         // PDPT[0]  -> PD0  @0x3000
+    rvs_movl_abs(0x2008, 0x4003)         // PDPT[1]  -> PD1  @0x4000
+    rvs_movl_abs(0x2010, 0x5003)         // PDPT[2]  -> PD2  @0x5000
+    rvs_movl_abs(0x2018, 0x6003)         // PDPT[3]  -> PD3  @0x6000
+    emit_byte(0xBF)                      // mov $0x3000,%edi   PD0
+    emit_u32_le(0x3000)
+    emit_byte(0xB8)                      // mov $0x83,%eax  present|rw|2MiB
+    emit_u32_le(0x83)
+    emit_byte(0xB9)                      // mov $2048,%ecx  2048 * 2 MiB = 4 GiB
+    emit_u32_le(2048)
+    uint64 rv_pd_loop = out_len          // 1:
+    emit_byte(0x89)                      // mov %eax,(%edi)
+    emit_byte(0x07)
+    emit_byte(0x05)                      // add $0x200000,%eax
+    emit_u32_le(0x200000)
+    emit_byte(0x83)                      // add $8,%edi
+    emit_byte(0xC7)
+    emit_byte(0x08)
+    emit_byte(0xE2)                      // loop 1b
+    // rel8 back to the loop head, DERIVED. Wraps through uint64 because the
+    // displacement is negative; the mask is what makes it a byte.
+    uint64 rv_ld8 = rv_pd_loop - out_len - 1
+    uint8 rv_lb = rv_ld8 & 0xFF
+    emit_byte(rv_lb)
+    emit_byte(0x0F)                      // mov %cr4,%eax
+    emit_byte(0x20)
+    emit_byte(0xE0)
+    emit_byte(0x83)                      // or $(1<<5),%eax   CR4.PAE
+    emit_byte(0xC8)
+    emit_byte(0x20)
+    emit_byte(0x0F)                      // mov %eax,%cr4
+    emit_byte(0x22)
+    emit_byte(0xE0)
+    emit_byte(0xB9)                      // mov $0xC0000080,%ecx   IA32_EFER
+    emit_u32_le(0xC0000080)
+    emit_byte(0x0F)                      // rdmsr
+    emit_byte(0x32)
+    emit_byte(0x0D)                      // or $(1<<8),%eax   EFER.LME
+    emit_u32_le(0x100)
+    emit_byte(0x0F)                      // wrmsr
+    emit_byte(0x30)
+    emit_byte(0x0F)                      // mov %cr0,%eax
+    emit_byte(0x20)
+    emit_byte(0xC0)
+    emit_byte(0x0D)                      // or $0x80000001,%eax  PG|PE
+    emit_u32_le(0x80000001)
+    emit_byte(0x0F)                      // mov %eax,%cr0
+    emit_byte(0x22)
+    emit_byte(0xC0)
+    emit_byte(0xEA)                      // ljmp $0x18,$lm64
+    uint64 rv_ljmp64_site = out_len
+    emit_u32_le(0)                       // <- patched: rv_bios + lm64
+    emit_u16_le(0x0018)                  // selector 0x18 = the 64-bit code CS
+
+    // --- 64-bit long mode -------------------------------------------------
+    uint64 rv_lm64 = out_len
+    emit_byte(0x66)                      // mov $0x10,%ax   GDT[2], data
+    emit_byte(0xB8)
+    emit_u16_le(0x0010)
+    emit_byte(0x8E)                      // mov %ax,%ds
+    emit_byte(0xD8)
+    emit_byte(0x8E)                      // mov %ax,%es
+    emit_byte(0xC0)
+    emit_byte(0x8E)                      // mov %ax,%ss
+    emit_byte(0xD0)
+    emit_byte(0x48)                      // movabs $stack_top,%rsp -- 10 bytes,
+    emit_byte(0xBC)                      // NOT B2's 7-byte sign-extending form;
+    emit_u64_le(sp)                      // see the header comment.
+    emit_byte(0x66)                      // mov $0x3F8,%dx
+    emit_byte(0xBA)
+    emit_u16_le(0x03F8)
+    emit_byte(0xB0)                      // mov $'L',%al
+    emit_byte(0x4C)
+    emit_byte(0xEE)                      // out -> 'L': long mode reached
+    emit_byte(0x48)                      // mov $(0x100000 + KENTOFF),%rax
+    emit_byte(0xC7)
+    emit_byte(0xC0)
+    rvstage_kentoff_site = out_len
+    // The 7-byte sign-extending form IS safe here, unlike the rsp load above:
+    // the value is 0x100000 + an offset inside a payload that cannot exceed
+    // 64 KiB, so it can never reach 2^31.
+    emit_u32_le(0)                       // <- patched at PART 2, after codegen
+    emit_byte(0xFF)                      // call *%rax
+    emit_byte(0xD0)
+    // The landing pad: `hlt; jmp .` immediately after the call, so a payload
+    // that RETURNS parks on a known address instead of running off into the
+    // GDT. Zeros would decode as `add %al,(%rax)`, which is self-modifying at
+    // the address it is executing and therefore unusable as an observable --
+    // measured under B2's L1 control, where a zero-walk survived one boot in
+    // twelve and then 0 in 40.
+    uint64 rv_halt = out_len
+    emit_byte(0xF4)                      // hlt
+    emit_byte(0xEB)                      // jmp . -- park on a known address
+    uint64 rv_jd = rv_halt - out_len - 1
+    uint8 rv_jb = rv_jd & 0xFF
+    emit_byte(rv_jb)
+
+    // --- descriptor tables ------------------------------------------------
+    // THREE LOADED SELECTORS AND FOUR ENTRIES, where B2 has two and three: a
+    // 16-bit stage needs a 32-bit code segment to enter protected mode with
+    // AND a 64-bit one to enter long mode with, and B2 -- entered already in
+    // protected mode -- needs only the second. Hence 0x08 = 32-bit code here
+    // and 0x08 = 64-bit code there.
+    while (out_len & 15) != 0 { emit_byte(0) }
+    uint64 rv_gdt = out_len
+    emit_u64_le(0)                       // 0x00: null descriptor
+    emit_u64_le(0x00CF9A000000FFFF)      // 0x08: 32-bit code, ring 0
+    emit_u64_le(0x00CF92000000FFFF)      // 0x10: data
+    emit_u64_le(0x00AF9A000000FFFF)      // 0x18: 64-bit code, ring 0
+    uint64 rv_gdtr = out_len
+    uint64 rv_lim = rv_gdtr - rv_gdt - 1
+    emit_u16_le(rv_lim)                  // limit = size - 1 = 31
+    uint64 rv_gdtr_base_site = out_len
+    emit_u32_le(0)                       // <- patched: rv_bios + gdt
+
+    // --- the captured sites, four of seven --------------------------------
+    patch_u16(rv_lgdt_site, rv_gdtr)
+    patch_u32(rv_ljmp32_site, rv_bios + rv_start32)
+    patch_u32(rv_ljmp64_site, rv_bios + rv_lm64)
+    patch_u32(rv_gdtr_base_site, rv_bios + rv_gdt)
+
+    // --- PAYOFF, the fifth ------------------------------------------------
+    // The payload is whatever codegen emits next, so its file offset is
+    // out_len RIGHT HERE -- after a 16-byte alignment pad, which keeps the
+    // `rep movsl` source dword-aligned and the payload's code 16-aligned.
+    // Captured, not computed from the stage's length: the stage's length has
+    // already changed once during development while the file size did not.
+    while (out_len & 15) != 0 { emit_byte(0) }
+    rvstage_payoff = out_len
+    patch_u32(rv_payoff_site, rv_bios + rvstage_payoff)
+}
+
 // arch: 0=x86_64, 1=arm64, 2=riscv32, 3=xtensa
 // emit: 0=elfexe, 1=machoexe, 2=peexe, 3=obj (ELF relocatable), 4=android PIE,
 //       5=asm listing, 6=ir dump, 7=lkm (.ko), 8=image (raw flat, bare metal),
@@ -3132,6 +3444,40 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
         emit_x86_image_stub(load_addr, stack_top)
     }
 
+    // ------------------------------------------------------------------
+    // The x86_64 reset-vector stage, PART 1 OF 2 (sub-project E, Task 2).
+    //
+    // SAME SLOT AS B2's PART 1 AND FOR A STRONGER REASON. B2's multiboot
+    // header merely has to lie within the first 8192 bytes; this stage has to
+    // be at file offset 0 EXACTLY, because `-bios` maps the file's last byte
+    // at 0xFFFFFFFF and the reset CS base is 0xFFFF0000 -- so file offset 0 is
+    // the only offset whose CS-relative address is 0, and every self-reference
+    // the stage emits assumes that identity.
+    //
+    // MUTUALLY EXCLUSIVE WITH THE BLOCK ABOVE, ENFORCED FROM BOTH ENDS: that
+    // one carries `reset_vector_set == 0`, this one `reset_vector_set != 0`.
+    // Two file-offset-0 constructs cannot share a file, and the failure mode
+    // if they ever did is a multiboot header where a `cli` should be -- i.e. a
+    // guest executing 0x1BADB002 as code.
+    //
+    // GATED ON emit_mode/arch/flag, NEVER ON target_os -- same reasoning as
+    // both stub blocks: the per-OS dispatch in this codebase is "special-case
+    // Windows/macOS, ELSE fall through to POSIX", so a bare-metal condition
+    // phrased as an OS test silently inherits Linux. arch == 0 and img_raw are
+    // redundant with the flag validation (--reset-vector is refused for any
+    // other arch and outside --emit=image) and are spelled out anyway, so this
+    // block states its own conditions rather than inheriting them from a check
+    // 3500 lines away.
+    //
+    // stack_top is passed as a VALUE, not read as a gate: --reset-vector
+    // requires --stack-top=, so stack_top_set is implied and testing it here
+    // would suggest an opt-out that does not exist.
+    uint64 rvstage_on = 0
+    if img_raw != 0 && arch == 0 && reset_vector_set != 0 {
+        rvstage_on = 1
+        emit_x86_reset_vector_stage(stack_top)
+    }
+
     // Raw flat binary: QEMU's -bios loader begins execution at
     // 0x8000_0000 = byte offset 0 of the image, so the entry function
     // must be the FIRST thing emitted, ahead of source order. Emission
@@ -3514,6 +3860,68 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
         // any other way would run with a garbage stack, in 32-bit mode, on a
         // CPU with paging off.
         img_stub_off = x86stub_start32_off
+        img_stub_set = 1
+    }
+
+    // ------------------------------------------------------------------
+    // The x86_64 reset-vector stage, PART 2 OF 2: KENTOFF and the report.
+    //
+    // KENTOFF is the entry function's offset WITHIN THE PAYLOAD, not within
+    // the file: the stage copies [PAYOFF, PAYOFF+PAYLEN) to physical 0x100000
+    // and then calls 0x100000 + KENTOFF, so the stage's own bytes must be
+    // subtracted out. Both operands exist here and not one line earlier --
+    // fn_lookup needs the emit loop finished, and rvstage_payoff was captured
+    // by the emitter -- and neither is written down as a constant anywhere.
+    // Getting this wrong is a `call` into the middle of an instruction: a
+    // triple fault with no diagnostic, which is why the value is derived from
+    // two captures rather than from the stage's known size.
+    //
+    // PAYLEN is NOT patched here. It is the only one of the seven sites that
+    // still cannot be known: static data is emitted after the last function,
+    // so the payload's length is not final until the finalize block.
+    //
+    // WHAT `image: entry=` REPORTS UNDER --reset-vector, DECIDED HERE (design
+    // spec S7 left it open): **0**, the stage's own first byte, via
+    // img_stub_off = 0 / img_stub_set = 1. Three reasons, in order of weight:
+    //   * It is literally where execution begins. The reset `jmp` at 0xFFF0
+    //     transfers to CS:0, i.e. file offset 0; no other address in this
+    //     artifact is entered from outside.
+    //   * It is the same rule B2 already publishes -- "the reported entry is
+    //     the TRAMPOLINE's first instruction, not the entry function" -- so
+    //     the report keeps ONE meaning across both x86 image forms rather than
+    //     growing a second.
+    //   * The entry FUNCTION's address is not expressible in this field
+    //     anyway: it is a PHYSICAL address (0x100000 + KENTOFF) that exists
+    //     only after the copy, whereas `entry=` is a file offset everywhere
+    //     else it appears.
+    // The three numbers a consumer actually needs -- PAYOFF, PAYLEN, KENTOFF
+    // -- get their own `reset-vector:` line at finalize instead of being
+    // squeezed into a field that means something else. The `image:` line's
+    // shape is therefore UNCHANGED, which is what keeps L1/L5's existing
+    // assertions on it valid.
+    //
+    // img_stub_set = 1 with img_stub_off = 0 is not a sentinel collision:
+    // presence and value are separate facts here exactly as they are for
+    // stack_top_set/load_addr_set, and 0 is a real, correct offset.
+    if rvstage_on != 0 {
+        uint64 rvp_node = find_entry_node(root)
+        if rvp_node == 0 {
+            entry_missing_die()
+        }
+        uint32 rvp_tok = ast_data1(rvp_node)
+        uint64 rvp_wtok = rvp_tok
+        uint64 rvp_off = fn_lookup(rvp_wtok)
+        if rvp_off == 0xFFFFFFFF {
+            // Same internal inconsistency the two blocks above refuse on:
+            // find_entry_node only returns functions dce_is_live accepted and
+            // the emit loop emits exactly those.
+            uint64 rvp_msg = "error: internal: entry function was selected but never registered in the code image\n"
+            write(2, rvp_msg, str_len(rvp_msg))
+            exit(1)
+        }
+        rvstage_kentoff = rvp_off - rvstage_payoff
+        patch_u32(rvstage_kentoff_site, 1048576 + rvstage_kentoff)
+        img_stub_off = 0
         img_stub_set = 1
     }
 
@@ -4122,6 +4530,78 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
         //
         // load_addr is echoed, never embedded. Two different aligned
         // addresses must produce one byte-identical artifact.
+        // ------------------------------------------------------------------
+        // --reset-vector: the fit refusal, PAYLEN, the zero fill and the reset
+        // `jmp` (sub-project E, Task 2).
+        //
+        // FIRST IN THIS ARM, AHEAD OF `img_size`, ON PURPOSE: everything below
+        // reads codegen_output_len() as the final file size, and this block is
+        // what makes that 65536. Placed after it, the report would announce a
+        // filesz that is neither what was emitted nor what -bios needs.
+        //
+        // THE FIT REFUSAL COMES BEFORE ANY BYTE IS ADDED. A payload that does
+        // not fit must leave nothing on disk and must not be padded first --
+        // padding it would produce exactly the artifact the refusal exists to
+        // prevent, a 65536-byte file whose payload was silently truncated by
+        // the fill. Truncation is never an option here: the image would boot,
+        // print R/P/L, and then run half a program.
+        uint64 rvf_paylen = 0
+        if rvstage_on != 0 {
+            rvf_paylen = codegen_output_len() - rvstage_payoff
+            // 65536 - PAYOFF - 16. The 16 is the reset vector's own region:
+            // the CPU resets to IP=0xFFF0, sixteen bytes before EOF, and the
+            // 3-byte `jmp` planted there needs the whole reserved window --
+            // reserving only 3 would let a payload end at 0xFFF3 and leave the
+            // reset `jmp` overwriting the last three payload bytes.
+            uint64 rvf_avail = 65536 - rvstage_payoff - 16
+            if rvf_paylen > rvf_avail {
+                // NAMES BOTH SIZES, because "does not fit" alone tells the
+                // author nothing about how much to remove, and this artifact's
+                // budget is not a number anyone can look up: it is 65536 minus
+                // a stage whose length is an emission detail.
+                uint8[64] rvf_eb
+                uint64 rvf_em = "error: --reset-vector payload does not fit the fixed 65536-byte image: the payload is "
+                write(2, rvf_em, str_len(rvf_em))
+                uint64 rvf_el = fmt_uint(rvf_eb, rvf_paylen)
+                write(2, rvf_eb, rvf_el)
+                rvf_em = " bytes and only "
+                write(2, rvf_em, str_len(rvf_em))
+                rvf_el = fmt_uint(rvf_eb, rvf_avail)
+                write(2, rvf_eb, rvf_el)
+                rvf_em = " are available (65536 - "
+                write(2, rvf_em, str_len(rvf_em))
+                rvf_el = fmt_uint(rvf_eb, rvstage_payoff)
+                write(2, rvf_eb, rvf_el)
+                rvf_em = " bytes of reset-vector stage - 16 bytes of reset vector)\n"
+                write(2, rvf_em, str_len(rvf_em))
+                rvf_em = "The file size is fixed by the -bios geometry and is not settable: shrink the program's code and static data\n"
+                write(2, rvf_em, str_len(rvf_em))
+                exit(1)
+            }
+            // PAYLEN, the seventh and last patch site. The stage copies with
+            // `rep movsl`, so the immediate is a DWORD COUNT, rounded UP -- a
+            // truncating divide would leave the payload's last one to three
+            // bytes uncopied, which for a trailing static is silent corruption
+            // and for trailing code is a fault in the middle of an
+            // instruction. The over-read of up to 3 bytes past the payload
+            // reads zero fill and writes it above the payload at 0x100000.
+            patch_u32(rvstage_paylen_site, (rvf_paylen + 3) / 4)
+            // Zero fill to the reset vector, then the reset vector itself.
+            // 65520 = 0xFFF0.
+            while out_len < 65520 { emit_byte(0) }
+            // `jmp rel16` to CS:0 -- 3 bytes, and it works by WRAPPING IP:
+            // the instruction ends at IP 0xFFF3 and 0xFFF3 + 0x000D = 0x10000,
+            // truncated to 16 bits = 0x0000, with CS's base left untouched at
+            // 0xFFFF0000. That is the whole reason the stage can live at file
+            // offset 0 rather than being squeezed into the last 16 bytes.
+            emit_byte(0xE9)
+            emit_u16_le(13)
+            // The remaining 13 bytes of the reset window. Zero rather than a
+            // pattern: nothing executes them (the jmp is unconditional and
+            // backwards) and a recognisable pattern here would invite a reader
+            // to think something does.
+            while out_len < 65536 { emit_byte(0) }
+        }
         uint64 img_size = codegen_output_len()
         // ------------------------------------------------------------------
         // The Image header's `image_size`, PART 2 OF 2 (sub-project C, Task 2).
@@ -4250,6 +4730,44 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
         write(1, ib, il)
         im = "\n"
         write(1, im, str_len(im))
+        // A SECOND LINE, NOT THREE MORE FIELDS ON THE FIRST. The `image:`
+        // line's shape is consumed by the boot gate's L1/L5 legs and by five
+        // suite rows; widening it under one flag would make every one of them
+        // flag-dependent. These four numbers are the reset form's entire
+        // layout contract and nothing else can derive them from the artifact
+        // without decoding the stage's immediates:
+        //   payoff  -- file offset of the payload, and the length of the stage
+        //   paylen  -- bytes copied to 0x100000 (the `rep movsl` count * 4,
+        //              rounded down again to the true length)
+        //   kentoff -- the entry function's offset within the payload, so the
+        //              guest's entry is physical 0x100000 + kentoff
+        //   stack   -- the value the stage loads into rsp, echoed so a boot
+        //              harness need not re-read --stack-top from its own
+        //              command line
+        // `load=` on the line above is 0 and stays 0: --load-addr is REFUSED
+        // under this flag, so there is no load address to report. The payload's
+        // physical base is 0x100000, fixed, and is implied by kentoff's
+        // definition above rather than being a settable number.
+        if rvstage_on != 0 {
+            im = "reset-vector: payoff="
+            write(1, im, str_len(im))
+            il = fmt_uint(ib, rvstage_payoff)
+            write(1, ib, il)
+            im = " paylen="
+            write(1, im, str_len(im))
+            il = fmt_uint(ib, rvf_paylen)
+            write(1, ib, il)
+            im = " kentoff="
+            write(1, im, str_len(im))
+            il = fmt_uint(ib, rvstage_kentoff)
+            write(1, ib, il)
+            im = " stack="
+            write(1, im, str_len(im))
+            il = fmt_uint(ib, stack_top)
+            write(1, ib, il)
+            im = "\n"
+            write(1, im, str_len(im))
+        }
     } else if emit_mode == 9 {
         // --emit=uefi finalize (sub-project D).
         //
