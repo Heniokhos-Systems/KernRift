@@ -9108,10 +9108,18 @@ if start32 is not None:
     if pd is not None:
         n = u32(pd + 6)
         if n != 2048:
+            # THE SYMPTOM IS REPETITION, NOT CESSATION, and Task 3's control
+            # derives its expectation from this line. Measured by cutting an
+            # emitted artifact's loop count to 512 and booting it:
+            # `RPRPRPRP...` forever, because the triple fault resets the CPU
+            # back into the stage. A control that greps for a serial capture
+            # ENDING in `RP` would pass on the correct compiler too; the
+            # discriminator is that `L` never appears.
             bad.append("the page directory loop runs %d times = %d MiB "
                        "identity-mapped, not 2048 = 4 GiB. This stage RUNS at "
-                       "0xFFFF0000; a short map triple-faults on the far jump "
-                       "and the serial output stops at `RP`" % (n, n * 2))
+                       "0xFFFF0000; a short map triple-faults on the far jump, "
+                       "resets, and re-runs -- measured `RPRPRP...` repeating "
+                       "with `L` never printed" % (n, n * 2))
     lj32 = find1(bytes.fromhex("0f22c0ea"), "mov %eax,%cr0; ljmp",
                  start32, payoff)
     if lj32 is not None:

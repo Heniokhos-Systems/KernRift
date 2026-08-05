@@ -2383,6 +2383,31 @@ fn entry_missing_die() {
 // which was booted end to end (header + trampoline + an unmodified
 // --emit=image payload, concatenated) before any of this was written.
 //
+// THERE IS A SECOND TRAMPOLINE IN THIS FILE, AND MERGING THEM IS A SILENT
+// TRIPLE FAULT. emit_x86_reset_vector_stage (sub-project E, just below this
+// function) also builds a GDT, also builds identity page tables, and also far-
+// jumps into long mode -- with DELIBERATELY DIFFERENT CONTENTS. If you have
+// arrived here intending to factor the two into one emitter, this is the
+// paragraph that is addressed to you:
+//
+//                          | HERE (multiboot)    | reset-vector stage
+//   ----------------------- --------------------- ----------------------------
+//   entered in             | 32-bit PROTECTED    | 16-bit REAL
+//   file offset 0 carries  | the multiboot header| that stage's `cli`
+//   GDT selector 0x08      | 64-BIT code         | 32-BIT code (0x18 is 64-bit)
+//   identity map           | PDPT[0], one PD,    | PDPT[0..3], four PDs,
+//                          | EXACTLY 1 GiB       | 2048 x 2 MiB = 4 GiB
+//   payload base           | the global load_addr| fixed 0x100000, copied
+//
+// The selector row alone makes them incompatible: a 16-bit stage must
+// `ljmp $0x08` into PROTECTED mode, and 0x08 in THIS table is the 64-bit CS.
+// The map row is the one with the measured failure attached -- that stage runs
+// at 0xFFFF0000, so giving it this function's 1 GiB map triple-faults on the
+// far jump, resets, and re-runs: `RPRPRP...` forever with `L` never printed.
+// Neither failure is a diagnostic anywhere; both are a guest that reboots.
+// The duplication is by VALUE, argued through two spec reviews, not by
+// accident. The same table appears from the other side on that function.
+//
 // NOT A BLOB PLUS AN OFFSET TABLE, ON PURPOSE. Eight values here depend on
 // addresses: the header's three, lgdtl's disp32, the far jump's off32, the
 // movabs entry address, the gdtr's base and the 64-bit rsp. Three of those
@@ -2608,8 +2633,14 @@ fn emit_x86_image_stub(uint64 ld, uint64 sp) {
 // 0x08 there is the 64-bit CS. And 1 GiB is not enough here: this stage RUNS
 // at 0xFFFF0000, the top of 4 GiB, so with only the first GiB mapped the far
 // jump into long mode lands on an unmapped page and triple-faults. That is not
-// a hypothetical -- it was reproduced, and the symptom is the serial line
-// stopping at `RP` with `L` never printed.
+// a hypothetical -- it was reproduced, by cutting the page-directory loop
+// below from 2048 to 512 in an emitted artifact and booting it. THE SYMPTOM IS
+// `RPRPRPRP...` REPEATING FOREVER, not a serial line that stops: a triple
+// fault RESETS the CPU, which re-enters this stage at 0xFFF0 and prints `R`
+// and `P` again. What is diagnostic is that `L` NEVER APPEARS -- an earlier
+// revision of this comment (and of the spec it came from) said "stops at
+// `RP`", which is what one sees only if the capture window is short enough to
+// miss the second iteration.
 //
 // THE R / P / L SENTINELS ARE LOAD-BEARING, NOT DEBUG LEFTOVERS. Three `out`
 // instructions to COM1. Without them a triple fault anywhere in this sequence
@@ -2739,7 +2770,9 @@ fn emit_x86_reset_vector_stage(uint64 sp) {
     emit_byte(0xA5)
     // Identity-map the FULL 4 GiB. See the header comment: B2 maps one GiB
     // because its code runs low; this stage runs at 0xFFFF0000 and a 1 GiB map
-    // triple-faults on the far jump below, printing `RP` and stopping.
+    // triple-faults on the far jump below, which RESETS the CPU back into this
+    // stage -- measured symptom `RPRPRPRP...` repeating, with `L` never
+    // printed. It is the missing `L`, not a stall, that names the fault.
     emit_byte(0xBF)                      // mov $0x1000,%edi
     emit_u32_le(0x1000)
     emit_byte(0x0F)                      // mov %edi,%cr3
@@ -4579,12 +4612,23 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
                 exit(1)
             }
             // PAYLEN, the seventh and last patch site. The stage copies with
-            // `rep movsl`, so the immediate is a DWORD COUNT, rounded UP -- a
-            // truncating divide would leave the payload's last one to three
-            // bytes uncopied, which for a trailing static is silent corruption
-            // and for trailing code is a fault in the middle of an
-            // instruction. The over-read of up to 3 bytes past the payload
+            // `rep movsl`, so the immediate is a DWORD COUNT and the `+ 3`
+            // rounds it UP. The over-read of up to 3 bytes past the payload
             // reads zero fill and writes it above the payload at 0x100000.
+            //
+            // DEFENSIVE AND CURRENTLY UNREACHABLE, SAID PLAINLY (review r1,
+            // Minor 1). The rounding is kept because it is the correct
+            // arithmetic, NOT because it has ever mattered: replacing it with
+            // a plain `/ 4` leaves every row in the suite green, because
+            // codegen's own alignment makes PAYLEN a multiple of 8 for all 13
+            // programs the reviewer could construct. So no row covers this and
+            // none is claimed to; a regression here would be invisible until
+            // some future emission produced a payload whose length is not a
+            // multiple of 4, at which point the symptom would be a trailing
+            // static silently short by one to three bytes. That failure is
+            // real but it is a POSSIBILITY, not something observed -- the
+            // earlier revision of this comment described it as if it were the
+            // live hazard the `+ 3` was written against.
             patch_u32(rvstage_paylen_site, (rvf_paylen + 3) / 4)
             // Zero fill to the reset vector, then the reset vector itself.
             // 65520 = 0xFFF0.

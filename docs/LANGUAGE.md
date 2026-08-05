@@ -1791,6 +1791,34 @@ in between. Because of that, the geometry differs from every other
   top at or above that ceiling is refused too — checked from the flag value
   alone, before the stage that ceiling is about is even emitted.
 
+**That 4 GiB ceiling is the *map* bound, and it is not the only bound. The
+other one cannot be checked, and exceeding it is a silent reboot loop.**
+The page tables say an address is *mapped*; they do not say there is RAM
+behind it. The stack has to land in **memory the machine actually has**, and
+the compiler has no way to know how much that is — so this is documented
+rather than refused. Measured on `qemu-system-x86_64`, same image, same
+sentinel payload, varying only `--stack-top` and `-m`:
+
+| `--stack-top` | default RAM (128 MiB) | `-m 4096` |
+|---|---|---|
+| `0x90000` | `RPL2000000016` | `RPL2000000016` |
+| `0x10000000` (256 MiB) | **`RPLRPLRPL…`** | `RPL2000000016` |
+| `0x80000000` (2 GiB) | **`RPLRPLRPL…`** | `RPL2000000016` |
+| `0xF0000000` | **`RPLRPLRPL…`** | **`RPLRPLRPL…`** (PCI hole) |
+
+Two things to read off it. First, **the command this section prints —
+`qemu-system-x86_64 -bios bios.bin`, and nothing else — is the 128 MiB
+column**, so a stack top above about 128 MiB reboots under exactly the
+invocation documented here, with no diagnostic from anything. Second, the
+symptom is **`RPL` repeating**, not `RP` repeating: `L` *does* print, because
+long mode is reached and the map is fine; the fault is the payload's first
+push landing on an address with nothing behind it, which triple-faults and
+resets the CPU back into the stage. `RPRPRP…` (no `L`) means something else
+entirely — a bad map or a bad GDT. Keep `--stack-top` inside installed RAM,
+below the top-of-32-bit PCI hole, and clear of `0x1000`–`0x7000` and of the
+payload at `0x100000`; `0x90000` satisfies all four, which is why it is the
+example.
+
 **Refused at flag-parse time, each with its own message:**
 
 | condition | why |
