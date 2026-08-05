@@ -316,7 +316,8 @@ static uint64 fn_ret_signed_count = 0
 static uint64 fn_ret_struct_table = 0
 static uint64 fn_ret_struct_count = 0
 
-// IR backend mode: when 1, use SSA IR + register allocator + x86_64 emitter
+// IR backend mode: when 1, use the IR (NOT SSA -- see ir.kr's header) +
+// register allocator + x86_64 emitter
 static uint64 emit_ir_mode = 1
 
 // Debug info: DWARF line table infrastructure

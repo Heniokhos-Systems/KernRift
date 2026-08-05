@@ -12451,7 +12451,10 @@ fn ir_opt_dce() {
     memset(ir_dce_live, 0, dce_clear)
 
     // Mark phase: iterate BACKWARD over instructions, marking live vregs.
-    // SSA defs precede their uses in linear order, so a backward sweep
+    // TEMPORARIES are single-assignment by construction (ir_new_vreg mints a
+    // fresh number per temporary and never reuses it) even though the IR as a
+    // whole is NOT SSA -- named variables are mutable slots. So a temporary's
+    // def precedes its uses in linear order, and a backward sweep
     // propagates dest-live → src-live through whole chains in one pass;
     // loop-carried uses may still need a second round, so iterate to a
     // fixed point (typically 2 rounds instead of the forward walk's
@@ -13506,7 +13509,10 @@ fn ir_def_skip_copy(uint64 vreg) -> uint64 {
 }
 
 // ROR pattern matcher. Called once per ir_optimize invocation, after
-// LICM + DCE so the IR is in canonical SSA form. For each OR
+// LICM + DCE so the copy chains this traces are already cleaned up. (It does
+// NOT run on "canonical SSA form" -- the IR is not SSA; see ir.kr's header.
+// What it relies on is that temporaries are single-assignment, which they are
+// by construction.) For each OR
 // instruction whose operands trace through copies to AND-with-0xFFFFFFFF
 // of SHR/SHL of the same source vreg with complementary shift amounts
 // (n and 32-n), rewrite the OR to an IR_ROR and let DCE drop the dead
