@@ -7239,6 +7239,17 @@ fn main() {
                 // itself. Validated below; the 64 bytes it turns on are
                 // emitted from the `a64hdr_on` block on the emit_mode 8 path.
                 image_header_set = 1
+            } else if str_starts_with(arg, "--image-header=", 15) != 0 {
+                // str_eq_full above only matches the bare spelling, so
+                // without this arm `--image-header=1` fell through to the
+                // final `else { input_path = arg }` and was silently
+                // ignored (exit 0, 56-byte artifact with no header instead
+                // of the 120-byte header-prefixed one). This flag takes no
+                // value, unlike --load-addr=/--stack-top=, so unlike those
+                // the fix is to reject the `=` form outright rather than
+                // parse it.
+                write(2, "error: --image-header takes no value\n", 37)
+                exit(1)
             } else if str_eq_full(arg, "--reset-vector") != 0 {
                 // No value to parse -- same V7 reason --image-header's arm
                 // comments above give: without an explicit arm here,
@@ -7248,30 +7259,30 @@ fn main() {
                 // itself. Validated below, alongside --emit=image's other
                 // flags; the stage bytes it opts into are emitted by
                 // emit_x86_reset_vector_stage on the emit_mode 8 path.
-                //
-                // THIS ARM DOES NOT COVER `--reset-vector=<anything>`, AND
-                // THE PARAGRAPH ABOVE OVERSTATED WHAT IT PREVENTS.
-                // str_eq_full matches the bare spelling only, so
-                // `--reset-vector=1` still falls through to
-                // `else { input_path = arg }` -- measured: exit 0 and a
-                // 256-byte MULTIBOOT artifact, because the flag was never
-                // set and --stack-top alone selects B2's stub. The user
-                // asked for a reset-vector image and silently got a
-                // different one. NOT INTRODUCED HERE and not fixed here:
-                // --image-header=1 and --stack-top (bare) behave identically,
-                // so this is a property of the whole `=`-less flag class and
-                // of the final `else` that swallows unknown arguments as
-                // input paths. Fixing it means changing unknown-flag handling
-                // for every flag at once, which is its own change with its
-                // own rows -- doing it inside a merge gate for one flag would
-                // leave the class half-fixed and the next reader unable to
-                // tell which half. Recorded so the claim above stops being
-                // read as "and therefore no spelling can be swallowed".
                 reset_vector_set = 1
+            } else if str_starts_with(arg, "--reset-vector=", 15) != 0 {
+                // str_eq_full above matches the bare spelling only, so
+                // without this arm `--reset-vector=1` fell through to the
+                // final `else { input_path = arg }` -- measured: exit 0 and
+                // a 256-byte MULTIBOOT artifact, because the flag was never
+                // set and --stack-top alone selects B2's stub, instead of
+                // the 65536-byte reset-vector image the user asked for.
+                // This flag takes no value, so the fix is to reject the
+                // `=` form outright rather than parse it.
+                write(2, "error: --reset-vector takes no value\n", 37)
+                exit(1)
             } else if str_eq_full(arg, "-c") != 0 {
                 emit_set = 1
                 uefi_set = 0
                 emit_mode = 3
+            } else if str_starts_with(arg, "-c=", 3) != 0 {
+                // str_eq_full above matches bare "-c" only, so without this
+                // arm `-c=1` fell through to the final
+                // `else { input_path = arg }` -- measured: exit 0 and a
+                // 176-byte executable instead of a .o. This flag takes no
+                // value, so reject the `=` form outright.
+                write(2, "error: -c takes no value\n", 25)
+                exit(1)
             } else if str_starts_with(arg, "--targets=", 10) != 0 {
                 parse_targets_arg(arg + 10)
             } else if str_starts_with(arg, "--target=", 9) != 0 {
@@ -7365,6 +7376,19 @@ fn main() {
                     target_os = 4
                     freestanding = 1
                 }
+            } else if str_starts_with(arg, "-h=", 3) != 0 {
+                // -h is matched with str_eq_full below (bare spelling
+                // only), so without this arm `-h=1` fell through to the
+                // final `else { input_path = arg }` and was silently
+                // treated as an input filename instead of printing help.
+                // --help itself keeps its str_starts_with arm below and so
+                // still accepts (and ignores) `--help=anything` -- that is
+                // the same shape every other `str_starts_with`-matched flag
+                // has, and is explicitly out of scope here (see the
+                // --image-header/--reset-vector/-c arms above). -h takes no
+                // value, so reject the `=` form outright.
+                write(2, "error: -h takes no value\n", 25)
+                exit(1)
             } else if str_starts_with(arg, "--help", 6) != 0 || str_eq_full(arg, "-h") != 0 {
                 write(1, "usage: krc [options] <file.kr> [-o output]\n", 43)
                 write(1, "       krc <command> <file.kr> [options]\n\n", 42)

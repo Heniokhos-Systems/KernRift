@@ -1585,6 +1585,37 @@ else
     echo "  emit_obj_c_flag: FAIL (compilation with -c failed)"
 fi
 
+# -c takes no value: -c=1 must be REJECTED, not silently swallowed. -c is
+# matched with str_eq_full, which matches the bare spelling only, so
+# `-c=1` used to fall through to the final `else { input_path = arg }` and
+# be silently ignored -- measured: exit 0 and a 176-byte EXECUTABLE (the
+# default emit mode) instead of a .o.
+TOTAL=$((TOTAL + 1))
+rm -f /tmp/krc_c_eq_$$.o
+c_eq_out=$($KRC $KRC_FLAGS -c=1 /tmp/krc_obj_$$.kr -o /tmp/krc_c_eq_$$.o 2>&1); c_eq_st=$?
+if [ $c_eq_st -ne 0 ] && echo "$c_eq_out" | grep -q "takes no value" && [ ! -f /tmp/krc_c_eq_$$.o ]; then
+    PASS=$((PASS + 1)); echo "  dash_c_rejects_value: PASS"
+else
+    FAIL=$((FAIL + 1)); echo "FAIL: dash_c_rejects_value (exit=$c_eq_st, artifact=$([ -f /tmp/krc_c_eq_$$.o ] && echo yes || echo no), out=$(echo "$c_eq_out" | head -1))"
+fi
+rm -f /tmp/krc_c_eq_$$.o
+
+# -h takes no value: -h=1 must be REJECTED, not silently swallowed. -h is
+# matched with str_eq_full (bare spelling only), so `-h=1` used to fall
+# through to the final `else { input_path = arg }` and be silently treated
+# as an input filename instead of printing help -- measured: exit 0, no
+# usage text. Note this is NOT the same shape as `--help=1`, which is
+# matched with str_starts_with like every other `=`-less flag and is
+# therefore out of scope here (see the --image-header/--reset-vector/-c
+# rows above) -- deliberately left accepting a value it ignores.
+TOTAL=$((TOTAL + 1))
+h_eq_out=$($KRC -h=1 2>&1); h_eq_st=$?
+if [ $h_eq_st -ne 0 ] && echo "$h_eq_out" | grep -q "takes no value"; then
+    PASS=$((PASS + 1)); echo "  dash_h_rejects_value: PASS"
+else
+    FAIL=$((FAIL + 1)); echo "FAIL: dash_h_rejects_value (exit=$h_eq_st, out=$(echo "$h_eq_out" | head -1))"
+fi
+
 # Test readelf can parse sections and symbols.
 # Cross-compile KRC_FLAGS (e.g. --arch=arm64 on an arm64 runner re-targeting
 # the host) can produce a valid .o that this regex-based test doesn't cover.
@@ -8859,6 +8890,15 @@ img_refuses imghdr_requires_arm64 "requires --arch=arm64" --arch=x86_64 --target
 #    above them), so --image-header is the only thing that can fail this line.
 img_refuses imghdr_requires_emit_image "only meaningful with --emit=image" --arch=arm64 --target=none --image-header
 
+# 3b. --image-header=<anything>: refused with a diagnostic, not silently
+#     swallowed. --image-header is matched with str_eq_full, which matches
+#     the bare spelling only, so `--image-header=1` used to fall through to
+#     the final `else { input_path = arg }` and be silently ignored -- an
+#     otherwise-valid build (same flags as imghdr_pure_prefix below) produced
+#     the UNFLAGGED 56-byte artifact at exit 0 instead of the 120-byte
+#     header-prefixed one, with no indication the flag had been dropped.
+img_refuses imghdr_rejects_value "image-header takes no value" --arch=arm64 --target=none --emit=image --load-addr=0x40400000 --stack-top=0x40800000 --image-header=1
+
 # 4. --image-header ACCEPTED on a valid arm64 config, and the header is a PURE
 #    PREFIX: the flagged artifact is the unflagged one with exactly 64 bytes
 #    in front of it.
@@ -8922,7 +8962,7 @@ rm -f "$ihdr_a" "$ihdr_b"
 # FLAG SURFACE ONLY: the stage bytes it guards are asserted two sections
 # below, in `--reset-vector: the emitted stage`, and booted by leg L9.
 #
-# 13 ROWS. Nine are `img_refuses` (three clauses each: nonzero exit, the
+# 14 ROWS. Ten are `img_refuses` (three clauses each: nonzero exit, the
 # diagnostic text, no artifact left on disk), three are `stk_accepts` twins
 # pinning the accepting side of a band edge, and one -- payload too large --
 # is hand-written and different in kind, explained at its own row below.
@@ -8934,7 +8974,9 @@ rm -f "$ihdr_a" "$ihdr_b"
 # three commits after Task 2 landed and booted. A count and a tense are
 # exactly the two things a comment cannot be pinned on, so they are the two
 # things to re-derive when touching this file: `grep -cE '^(img_refuses|
-# stk_accepts) '` over the section is where the 12 comes from.
+# stk_accepts) '` over the section is where the 13 comes from (row 1b below,
+# --reset-vector=<value>, added the fourteenth without touching the other
+# thirteen's numbering).
 echo ""
 echo "--- --reset-vector flag surface (E, Task 1) ---"
 
@@ -8943,6 +8985,16 @@ echo "--- --reset-vector flag surface (E, Task 1) ---"
 #    xtensa already have their own raw paths via --freestanding.
 img_refuses reset_vector_requires_x86_64 "requires --arch=x86_64" \
     --target=none --arch=arm64 --emit=image --reset-vector --stack-top=0x90000
+
+# 1b. --reset-vector=<anything>: refused with a diagnostic, not silently
+#     swallowed. --reset-vector is matched with str_eq_full, which matches
+#     the bare spelling only, so `--reset-vector=1` used to fall through to
+#     the final `else { input_path = arg }` and be silently ignored --
+#     measured: exit 0 and a 256-byte MULTIBOOT artifact (the plain
+#     --emit=image + --stack-top= form), not the 65536-byte reset-vector
+#     image the flag asked for.
+img_refuses reset_vector_rejects_value "reset-vector takes no value" \
+    --target=none --arch=x86_64 --emit=image --reset-vector=1 --stack-top=0x90000
 
 # 2. --target=linux: refused by the EXISTING --emit=image rule, unchanged --
 #    --reset-vector adds no target requirement of its own beyond what
