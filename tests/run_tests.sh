@@ -10252,7 +10252,11 @@ grep -qF -- 'real firmware'  "$RVEC_PROSE" || rvec_doc_miss="$rvec_doc_miss real
 # must be edited then rather than left standing.
 grep -qF -- '##### What this is verified against' "$RVEC_SEC" || rvec_doc_miss="$rvec_doc_miss the-limits-subsection"
 grep -qF -- 'installed guest RAM' "$RVEC_SEC" || rvec_doc_miss="$rvec_doc_miss ram-not-map-bound"
-grep -qF -- 'no diagnostic'       "$RVEC_SEC" || rvec_doc_miss="$rvec_doc_miss silent-failure-stated"
+# NOT `no diagnostic` -- that phrase ALSO occurs in the RAM-table paragraph
+# ABOVE this block's heading, so deleting the whole limits subsection left this
+# name GREEN while the other four reddened. Measured. Grep a phrase that exists
+# only inside the block.
+grep -qF -- 'no message, no exit code' "$RVEC_SEC" || rvec_doc_miss="$rvec_doc_miss silent-failure-stated"
 grep -qF -- 'inference'           "$RVEC_SEC" || rvec_doc_miss="$rvec_doc_miss size-rule-labelled-inference"
 grep -qF -- 'never run in CI'     "$RVEC_SEC" || rvec_doc_miss="$rvec_doc_miss ci-status-stated"
 # THE NEGATIVE HALF, both ways. "real hardware"/"real firmware" is allowed
