@@ -8768,6 +8768,37 @@ img_refuses() {  # $1 name, $2 grep pattern, rest = flags
     fi
     rm -f /tmp/krc_img_$$
 }
+# img_refuses() puts its flags AFTER the input path and -o. That is fine for
+# every row whose flag is one the parser already recognizes (the refusal is
+# semantic -- e.g. "requires --target=none" -- and fires the same regardless
+# of where the flag sits). It is NOT fine for a row whose entire point is an
+# UNRECOGNIZED spelling (`--image-header=1`, `--reset-vector=1`): the parser's
+# fallback for anything it doesn't match is `else { input_path = arg }`, so
+# putting the unrecognized flag after "$IMG_SRC" -o ... makes it silently
+# reassign input_path instead, and the run then fails for the WRONG reason
+# ("cannot open '--image-header=1'") rather than the one the row's comment
+# describes. Verified against a build of main.kr at 9e5fc70 (one commit
+# before the fix that made these two spellings recognized): with flags
+# after the path, imghdr_rejects_value's args produced "cannot open
+# '--image-header=1'" and reset_vector_rejects_value's produced the
+# unrelated pre-existing "--emit=image requires --load-addr" (that row was
+# also missing --load-addr=, needed once flags move earlier); with flags
+# BEFORE the path on that same pre-fix build, both instead produced the
+# actual silently-swallowed-flag defect the comments describe: exit 0 and
+# an unflagged/wrong-mode artifact.
+img_refuses_flags_first() {  # $1 name, $2 grep pattern, rest = flags (before the input path)
+    local name="$1" pat="$2"; shift 2
+    TOTAL=$((TOTAL + 1))
+    rm -f /tmp/krc_img_$$
+    local out; out=$($KRC $KRC_FLAGS "$@" "$IMG_SRC" -o /tmp/krc_img_$$ 2>&1); local st=$?
+    if [ $st -ne 0 ] && echo "$out" | grep -q "$pat" && [ ! -f /tmp/krc_img_$$ ]; then
+        PASS=$((PASS + 1)); echo "  $name: PASS"
+    else
+        echo "FAIL: $name (exit=$st, artifact=$([ -f /tmp/krc_img_$$ ] && echo yes || echo no), out=$(echo "$out" | head -1))"
+        FAIL=$((FAIL + 1))
+    fi
+    rm -f /tmp/krc_img_$$
+}
 # 1. image without --target=none (default OS = linux): refused, naming why.
 img_refuses image_needs_target_none "requires --target=none" --arch=x86_64 --emit=image --load-addr=0x400000
 # 2. image with a HOSTED --target: same refusal (the rule is about the
@@ -9035,7 +9066,11 @@ img_refuses imghdr_requires_emit_image "only meaningful with --emit=image" --arc
 #     otherwise-valid build (same flags as imghdr_pure_prefix below) produced
 #     the UNFLAGGED 56-byte artifact at exit 0 instead of the 120-byte
 #     header-prefixed one, with no indication the flag had been dropped.
-img_refuses imghdr_rejects_value "image-header takes no value" --arch=arm64 --target=none --emit=image --load-addr=0x40400000 --stack-top=0x40800000 --image-header=1
+#     img_refuses_flags_first, not img_refuses: the unrecognized spelling
+#     has to land BEFORE the input path or the parser's unrecognized-flag
+#     fallback reassigns input_path to it instead, and the row fails for
+#     "cannot open '--image-header=1'" rather than this claim.
+img_refuses_flags_first imghdr_rejects_value "image-header takes no value" --arch=arm64 --target=none --emit=image --load-addr=0x40400000 --stack-top=0x40800000 --image-header=1
 
 # 4. --image-header ACCEPTED on a valid arm64 config, and the header is a PURE
 #    PREFIX: the flagged artifact is the unflagged one with exactly 64 bytes
@@ -9130,9 +9165,15 @@ img_refuses reset_vector_requires_x86_64 "requires --arch=x86_64" \
 #     the final `else { input_path = arg }` and be silently ignored --
 #     measured: exit 0 and a 256-byte MULTIBOOT artifact (the plain
 #     --emit=image + --stack-top= form), not the 65536-byte reset-vector
-#     image the flag asked for.
-img_refuses reset_vector_rejects_value "reset-vector takes no value" \
-    --target=none --arch=x86_64 --emit=image --reset-vector=1 --stack-top=0x90000
+#     image the flag asked for. That measurement needs --load-addr= present
+#     (a "plain --emit=image" build requires it -- see image_needs_load_addr
+#     above), so it is added here; the row's flags also have to land BEFORE
+#     the input path (img_refuses_flags_first, not img_refuses) or the
+#     unrecognized spelling reassigns input_path instead and the row fails
+#     for the unrelated, pre-existing "--emit=image requires --load-addr"
+#     rather than this claim.
+img_refuses_flags_first reset_vector_rejects_value "reset-vector takes no value" \
+    --target=none --arch=x86_64 --emit=image --reset-vector=1 --stack-top=0x90000 --load-addr=0x100000
 
 # 2. --target=linux: refused by the EXISTING --emit=image rule, unchanged --
 #    --reset-vector adds no target requirement of its own beyond what
