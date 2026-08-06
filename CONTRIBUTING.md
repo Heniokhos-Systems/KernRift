@@ -50,7 +50,7 @@ All compiler source is in `src/` (one compilation unit; see the Makefile
 | `parser.kr` | Parser (recursive descent + Pratt expressions) |
 | `analysis.kr` | Semantic checks + diagnostics (`diag_*`) |
 | `type_check.kr` | Type checker (default-on, fatal) + `let` inference |
-| `ir.kr` | SSA IR: lowering, optimizer passes, register allocation, x86_64 emit |
+| `ir.kr` | IR (not SSA): lowering, optimizer passes, register allocation, x86_64 emit |
 | `ir_aarch64.kr` | IR AArch64 emit |
 | `codegen.kr` | Legacy direct x86_64 codegen (`--legacy`) |
 | `codegen_aarch64.kr` | Legacy direct AArch64 codegen |

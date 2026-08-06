@@ -63,8 +63,8 @@ libc. One `.krbo` fat binary contains all **8 platform slices**
 extracts the matching slice at startup and executes it. Self-host bootstrap
 fixed point is verified by CI on every push.
 
-The compiler is written entirely in KernRift and includes an SSA IR backend,
-graph-coloring register allocator, constant folding / DCE / CSE, and per-target
+The compiler is written entirely in KernRift and includes an optimising IR
+backend (not SSA), graph-coloring register allocator, constant folding / DCE / CSE, and per-target
 ELF / Mach-O / PE emitters — no LLVM, no external assembler, no external linker.
 
 - [GitHub](https://github.com/Heniokhos-Systems/KernRift)

@@ -42,9 +42,9 @@ Architecture: $arch
 Maintainer: Pantelis Christou <contact@heniokhos.com>
 Homepage: https://kernrift.org
 Description: Self-hosted systems language compiler for kernel and bare-metal development
- KernRift is a self-hosting systems language compiler with an SSA IR backend
- that emits native machine code directly -- no LLVM, no C, no external
- assembler. It produces native executables for x86_64 and AArch64 and
+ KernRift is a self-hosting systems language compiler with an optimising IR
+ backend (not SSA) that emits native machine code directly -- no LLVM, no C,
+ no external assembler. It produces native executables for x86_64 and AArch64 and
  cross-compiles bare-metal for RISC-V 32 and Xtensa LX6, including direct-boot
  ESP32 images and Linux kernel modules. It self-compiles in about half a second
  on modern hardware, reaching a bit-identical bootstrap fixed point. Kernel-first

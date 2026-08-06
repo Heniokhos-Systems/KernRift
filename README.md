@@ -2,7 +2,7 @@
 
 **KernRift is a bare-metal systems programming language and compiler created by Pantelis Christou.**
 
-A self-hosted systems language compiler for kernel-first development. KernRift compiles itself — no Rust, no C, no LLVM, no external toolchain. It produces native executables for x86_64 and AArch64 on Linux, Windows, macOS, and Android, with BCJ+LZ-Rift-compressed fat binaries as the default output (8 platform slices per `.krbo`). The `kr` runner executes `.krbo` fat binaries on any supported platform. The compiler self-hosts on all 8 targets and is verified via CI on every push. The compiler ships with an **SSA-based IR backend** with liveness analysis, graph-coloring register allocation, an AST-level function inliner, Briggs/George copy coalescing, LICM, constant folding, DCE, and CSE — producing native machine code for all targets directly from the IR, no assembler in the loop.
+A self-hosted systems language compiler for kernel-first development. KernRift compiles itself — no Rust, no C, no LLVM, no external toolchain. It produces native executables for x86_64 and AArch64 on Linux, Windows, macOS, and Android, with BCJ+LZ-Rift-compressed fat binaries as the default output (8 platform slices per `.krbo`). The `kr` runner executes `.krbo` fat binaries on any supported platform. The compiler self-hosts on all 8 targets and is verified via CI on every push. The compiler ships with an **optimising IR backend** — not SSA; linear three-address code over unbounded vregs, with named variables reusing one vreg across assignments — with liveness analysis, graph-coloring register allocation, an AST-level function inliner, Briggs/George copy coalescing, LICM, constant folding, DCE, and CSE — producing native machine code for all targets directly from the IR, no assembler in the loop.
 
 Beyond the eight hosted platform targets, the same IR feeds three **embedded
 backends** — 32-bit RISC-V (`--arch=riscv32`), Xtensa LX6 (`--arch=xtensa`),
@@ -12,21 +12,23 @@ subset of the language, not a second full implementation: see
 [Embedded targets](#embedded-targets-riscv32--xtensa--esp32) for exactly what
 is and is not supported.
 
-**v2.8.26 highlights** (full details in [CHANGELOG.md](CHANGELOG.md)):
+**v2.9.0 highlights** (full details in [CHANGELOG.md](CHANGELOG.md)):
 
-- **Language ergonomics.** Ternary `cond ? then : else`, `let` type inference (`let n = a + b`), `match` as an expression with bare-statement arms, `continue` inside `for`, `loop { }`, inclusive ranges `0..=n`, and `defer { }`.
-- **Diagnostics.** Parser error recovery (many syntax errors per run, not just the first), `file:line:col` headers with a source line and `^~~~` caret, and "did you mean?" suggestions on undeclared names. The type checker is now default-on and fatal.
-- **Codegen.** Power-of-two `/`/`%` strength-reduce to `shr`/`and`; every AArch64 branch displacement is range-checked instead of silently masked.
-- **A large correctness batch** across the IR and legacy backends, plus stdlib fixes (`map` growth, `read_file`, `exp` of negatives) — see the changelog.
-- **Briggs/George copy coalescing, on by default.** The graph-colouring register allocator collapses `vN = copy vM` pairs whose live ranges don't interfere, so the redundant `mov rN, rN` is dropped at emit time. Briggs is the conservative gate (refuses if ≥ K neighbours of the merged class would have degree ≥ K); George is a less-conservative fallback gated to K ≥ 8. krc.kr self-compile vs `--no-coalesce`: x86_64 −72 B, arm64 −1592 B. `--no-coalesce` disables.
-- **AST-level function inliner.** Pure single-expression callees (`fn add(a, b) -> u64 { return a + b }`) are folded into their call sites; DCE then drops the unused originals. `--emit=obj` / `--emit=asm` / `--emit=ir` keep every top-level fn live so symbols still appear in the linker table / asm listing / IR dump.
-- **`--help` rewritten** to cover every flag the parser handles, grouped by output / code-gen / living-compiler / info. Previously `--legacy`, `--coalesce`, `--O0`, and the entire `lc` proposal surface were undocumented.
-- **IR ARM64 `compile_fat` fixed** (R1). The v2.8.7-era miscompile that forced a `--legacy --arch=arm64` shipping recipe is gone; ARM64 slices in fat binaries now go through IR by default. `--legacy` remains as an explicit opt-out, not a silent fallback.
+A bare-metal release: six sub-projects take the compiler from "provably safe under static analysis" to programs that actually boot — under QEMU. **Everything bare-metal here is emulated, on one machine.** No real hardware, no vendor firmware. Secure Boot is measured **incompatible** (an MS-key OVMF refuses the identical artifact that runs unsigned). The boot gate has 59 legs and runs in CI on every push, including on a native ARM64 runner.
+
+- **`--target=none`** — freestanding, no libc, no host OS. Refuses every OS-bound construct and routes `print`/`println`/f-strings/`alloc` through pluggable write/alloc providers instead.
+- **`--emit=image`** — raw flat binary, no container, plus a QEMU boot gate in the test suite that requires a computed sentinel value on the wire, not just "QEMU didn't crash".
+- **Compiler-emitted entry stubs** (`--stack-top`) — a `--target=none` binary no longer needs a hand-written loader to set up a stack before jumping into `main`; images are self-sufficient on both arches.
+- **`--image-header`** — prefixes the arm64 Linux `Image` header (64 bytes, magic `0x644d5241`) so an arm64 build can be handed directly to a Linux boot loader.
+- **`--emit=uefi`** — PE32+ EFI applications that load and print under QEMU's OVMF (x86_64) and AAVMF (arm64). Booting verified under emulated firmware only; unsigned, so Secure Boot refuses it.
+- **`--reset-vector`** — a 64 KiB x86_64 image that boots straight from the CPU reset vector under `qemu -bios`, reaching 16-bit real → 32-bit protected → long mode and running its payload, with no GNU `as`, `ld`, `objcopy`, or `--defsym` anywhere in the build.
+- **Defect fixes that change behaviour.** `call_ptr` silently dropped arguments 7+ *and their side effects*; now refused on both x86 backends. An unresolved `extern fn` produced a running binary with a wrong answer, differently per backend; now a hard error in executable emit modes. `--image-header=`, `--reset-vector=`, `-c=`, `-h=` were silently ignored — `--reset-vector=1` produced a *multiboot* artifact, `-c=1` an executable instead of a `.o`; now refused. `--debug` silently emitted no array bounds checks wherever arm64 legacy codegen was selected; now refused on every such path — and that refusal also disables the overflow/null/divide-by-zero checks that DO work there, because the checks are all-or-nothing per backend. 18 wrong `write()` byte lengths, 7 of which over-read past a NUL.
+- **Honesty correction.** The IR is not, and never has been, SSA — it is linear three-address code over unbounded vregs; named variables reuse one vreg across assignments, so no phi is ever needed and none is built. 17 sites said otherwise and are now corrected.
 
 ## Features
 
 - **Self-hosting** — the compiler compiles itself to a fixed point. No Rust, no C, no LLVM in the build.
-- **SSA IR backend** — target-independent intermediate representation with liveness analysis, graph-coloring register allocation with Briggs/George copy coalescing, an AST-level function inliner, LICM, constant folding, DCE, and CSE. Emits x86_64 and AArch64 machine code directly — no assembler, no linker in the loop. `--legacy` falls back to the original direct codegen.
+- **Optimising IR backend** — target-independent intermediate representation (not SSA — linear three-address code over unbounded vregs; named variables reuse one vreg across assignments, so no phi is needed) with liveness analysis, graph-coloring register allocation with Briggs/George copy coalescing, an AST-level function inliner, LICM, constant folding, DCE, and CSE. Emits x86_64 and AArch64 machine code directly — no assembler, no linker in the loop. `--legacy` falls back to the original direct codegen.
 - **Cross-platform** — Linux, Windows, macOS, Android on x86_64 and ARM64 from a single source tree.
 - **Embedded backends** — 32-bit RISC-V (RV32IMC) and Xtensa LX6 from the same IR, plus an ESP32 direct-boot image writer. Reduced feature set (no floats, no 64-bit integers); see [Embedded targets](#embedded-targets-riscv32--xtensa--esp32).
 - **Linux kernel modules** — `--emit=lkm` produces a loadable `.ko` relocatable object. See [docs/LKM.md](docs/LKM.md).
@@ -312,7 +314,7 @@ See the [`examples/`](examples/) directory for runnable programs covering every 
 |------|---------|
 | `lexer.kr` | Tokenizer (90+ kinds) |
 | `parser.kr` | Recursive descent + Pratt precedence |
-| `ir.kr` | SSA IR + x86_64 emitter (Linux / macOS / Windows / Android), liveness, graph-colour RA, Briggs/George coalescer, LICM, CF/DCE/CSE |
+| `ir.kr` | IR (not SSA) + x86_64 emitter (Linux / macOS / Windows / Android), liveness, graph-colour RA, Briggs/George coalescer, LICM, CF/DCE/CSE |
 | `ir_aarch64.kr` | AArch64 emitter fed from the same IR |
 | `ir_riscv.kr` / `codegen_riscv.kr` | RV32IMC emitter + C-compression peephole and RV32IMC disassembler |
 | `ir_xtensa.kr` / `codegen_xtensa.kr` | Xtensa LX6 emitter (literal pools, CALL0 frames) + ESP32 layout guards |
@@ -353,7 +355,7 @@ A released `krc` binary compiles the current source into the next `krc`. No Rust
 
 ## Embedded targets: riscv32 / xtensa / ESP32
 
-The same SSA IR that feeds the eight hosted platforms also drives three
+The same IR that feeds the eight hosted platforms also drives three
 embedded backends. **These are a subset of the language, not a second full
 implementation.** The table below is the honest support matrix — every cell was
 established by compiling a program that exercises the feature.
