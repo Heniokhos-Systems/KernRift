@@ -94,6 +94,7 @@ lone compile rather than a fat build):
 | `--legacy --arch=arm64 --debug` | Explicit: `--legacy` asks for it directly. |
 | `--arch=arm64 --emit=obj --debug` | Implicit: a relocatable object always uses legacy codegen, on every arch, so extern-symbol relocations resolve correctly — `--legacy` is redundant here and was never required for this to happen. |
 | `--arch=arm64 --emit=lkm --debug` | Same as `--emit=obj`, for the same reason (LKM is also a relocatable-object format). `--emit=lkm` on arm64 is ALSO refused for an unrelated reason (loadable kernel modules are x86_64-only today), but that check runs later, inside object emission — this refusal runs first and wins, so the message you actually see is the `--debug` one below, not the x86_64-only one. |
+| `--emit=android --legacy --debug` | **No `--arch`, no `--target`, and the word arm64 appears nowhere on this command line.** `--emit=android` sets an explicit emit mode, so this is a lone compile rather than a fat build; and `--emit=android` with no explicit `--arch` resolves the arch to arm64, because that is what Android means here. Listed because a command line with no `arm64` in it landing on a message about "the legacy arm64 backend" is otherwise baffling. |
 
 **Fat build with an arm64 slice** (no `--arch` resolves a fat `.krbo`
 covering all 8 hosted (OS, arch) slices by default, four of which are

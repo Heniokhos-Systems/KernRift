@@ -2184,7 +2184,7 @@ For debugging — `-g` DWARF in gdb, the `--debug` trap table, and the
 `--debug` is refused whenever the command line would reach legacy arm64
 codegen: that backend has no array-bounds-check codegen, so any such build
 would otherwise compile clean and silently ship `--debug` unmet. That
-includes a single arm64 target (`--legacy --arch=arm64 --debug`, and also
+includes a single arm64 target (`--legacy --arch=arm64 --debug`, `--emit=android --legacy --debug` which names no arch at all, and also
 `--arch=arm64 --emit=obj --debug` / `--arch=arm64 --emit=lkm --debug` —
 obj/lkm select legacy codegen on arm64 even with no `--legacy` on the line,
 for extern relocations) AND a fat (`.krbo`) build carrying an arm64 slice —
