@@ -306,19 +306,31 @@ jobs:
     runs-on: ubuntu-latest
     continue-on-error: true
     steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Wait for release assets (avoids the tag-push race with release.yml's own build job)
+        # This job runs in the same workflow run as build-release, but as a
+        # separate job it can still observe the release before build-release
+        # has finished uploading krc-windows-*.zip. Poll instead of assuming
+        # they're already there -- same disease fixed for aur-test/scoop-test
+        # in 465d06a, just within a single workflow instead of across two.
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          bash scripts/wait-for-release-assets.sh \
+            "${{ github.repository }}" "${{ github.ref_name }}" \
+            krc-windows-x86_64.zip krc-windows-arm64.zip
+
       - name: Fetch release zip SHAs
         id: shas
         run: |
           set -euo pipefail
           V="${{ github.ref_name }}"
-          # Release-upload can be eventually consistent; retry briefly.
           for url in \
             "https://github.com/Heniokhos-Systems/KernRift/releases/download/$V/krc-windows-x86_64.zip" \
             "https://github.com/Heniokhos-Systems/KernRift/releases/download/$V/krc-windows-arm64.zip"; do
-            for i in 1 2 3 4 5; do
-              if curl -fsSL -o "/tmp/$(basename "$url")" "$url"; then break; fi
-              sleep 10
-            done
+            curl -fsSL -o "/tmp/$(basename "$url")" "$url"
           done
           echo "x64=$(sha256sum /tmp/krc-windows-x86_64.zip | awk '{print toupper($1)}')"   >> "$GITHUB_OUTPUT"
           echo "arm64=$(sha256sum /tmp/krc-windows-arm64.zip | awk '{print toupper($1)}')" >> "$GITHUB_OUTPUT"
