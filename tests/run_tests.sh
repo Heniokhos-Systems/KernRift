@@ -3385,10 +3385,21 @@ if [ -z "$VENC_LISTING" ] || [ ! -f "$VENC_LISTING" ]; then
     VENC_OK=0
     echo "  could not locate asm listing (got '$VENC_LISTING')"
 else
-    # STLRB/H/W/X then LDARB/H/W/X.
-    for w in 089ff 489ff 889ff c89ff 08dff 48dff 88dff c8dff; do
-        grep -qi ": $w" "$VENC_LISTING" || { VENC_OK=0; echo "  missing volatile width word $w"; }
-    done
+    # Assert the SEQUENCE, not just presence. Presence alone would still pass
+    # if two widths were permuted (u8 -> STLRH, u16 -> STLRB): all eight words
+    # would still appear, and every runtime row above would stay green, because
+    # a 2-byte store at 0x04 still never reaches the witness at 0x08. The
+    # fixture writes B,H,W,X then reads B,H,W,X, and volatile ops are
+    # side-effecting and non-hoistable, so this order is stable.
+    VENC_SEQ=$(grep -oiE ': (089ff|489ff|889ff|c89ff|08dff|48dff|88dff|c8dff)' "$VENC_LISTING" \
+        | sed 's/^: //' | tr 'A-F' 'a-f' | tr '\n' ' ')
+    VENC_WANT="089ff 489ff 889ff c89ff 08dff 48dff 88dff c8dff "
+    if [ "$VENC_SEQ" != "$VENC_WANT" ]; then
+        VENC_OK=0
+        echo "  volatile width sequence mismatch"
+        echo "    want: $VENC_WANT"
+        echo "    got:  $VENC_SEQ"
+    fi
 fi
 if [ "$VENC_OK" = "1" ]; then
     echo "  arm64_narrow_volatile_encodings: PASS (STLR+LDAR B/H/W/X all emitted)"

@@ -2236,17 +2236,17 @@ fn ir_emit_arm64_insn(uint64 ii) {
         uint64 addr_reg = ir_a64_resolve_src(s1_v, 9)
         uint64 val_reg = ir_a64_resolve_src(s2_v, 10)
         // Width is in the DEST slot (ir.kr:5131 for device fields, plus the
-        // vstore8/16/32/64 builtins at ir.kr:2192/2203/2497/2508).
+        // vstore8/16/32/64 builtins at ir.kr:2497/2508/2192/2203).
         // NOT dst_r: that is computed near the top of this function from
         // dest_v, which for op 94 is the width, not a vreg id.
         uint64 vw = dest_v
         // Size is bits 31:30 — STLRB / STLRH / STLR Wt / STLR Xt.
         // An unrecognised width takes the narrowest form, matching x86
         // (ir.kr:10233): losing data locally beats corrupting neighbours.
+        // Unreachable today — parser.kr:2710-2718 is the only producer and it
+        // yields 1/2/4/8 only — but defensive, and cheap.
         uint64 vs_base = 0x089FFC00
-        if vw == 2 { vs_base = 0x489FFC00 }
-        else if vw == 4 { vs_base = 0x889FFC00 }
-        else if vw == 8 { vs_base = 0xC89FFC00 }
+        if vw == 2 { vs_base = 0x489FFC00 } else if vw == 4 { vs_base = 0x889FFC00 } else if vw == 8 { vs_base = 0xC89FFC00 }
         uint64 vs = vs_base | (addr_reg << 5) | val_reg
         emit_a64(vs)
         return
@@ -2258,15 +2258,13 @@ fn ir_emit_arm64_insn(uint64 ii) {
         uint64 d = dst_r
         if d == 0xFFFFFFFF { d = 9 }
         // Width is in the IMM slot (ir.kr:3791 for device fields, plus the
-        // vload8/16/32/64 builtins at ir.kr:2213/2221/2480/2488).
+        // vload8/16/32/64 builtins at ir.kr:2480/2488/2213/2221).
         uint64 lw = imm
         // LDARB / LDARH / LDAR Wt / LDAR Xt. The narrow forms zero-extend into
         // Wt, and a Wt write zeroes Xt[63:32], so the 64-bit spill below stays
         // correct and no UXTB/UXTH is needed — same as x86's movzx.
         uint64 vl_base = 0x08DFFC00
-        if lw == 2 { vl_base = 0x48DFFC00 }
-        else if lw == 4 { vl_base = 0x88DFFC00 }
-        else if lw == 8 { vl_base = 0xC8DFFC00 }
+        if lw == 2 { vl_base = 0x48DFFC00 } else if lw == 4 { vl_base = 0x88DFFC00 } else if lw == 8 { vl_base = 0xC8DFFC00 }
         uint64 vl = vl_base | (addr_reg << 5) | d
         emit_a64(vl)
         if dst_r == 0xFFFFFFFF {
