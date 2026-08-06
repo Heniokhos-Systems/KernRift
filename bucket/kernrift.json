@@ -1,15 +1,15 @@
 {
-    "version": "2.8.34",
+    "version": "2.9.0",
     "description": "Self-hosted systems language compiler for kernel and bare-metal development",
     "homepage": "https://kernrift.org",
     "license": "Apache-2.0",
     "architecture": {
         "64bit": {
-            "url": "https://github.com/Heniokhos-Systems/KernRift/releases/download/v2.8.34/krc-windows-x86_64.zip",
+            "url": "https://github.com/Heniokhos-Systems/KernRift/releases/download/v2.9.0/krc-windows-x86_64.zip",
             "hash": "544f7ff1d90b21b7515cdb8f035cae2f8d86fac17b77f925035c0d59a2b57102"
         },
         "arm64": {
-            "url": "https://github.com/Heniokhos-Systems/KernRift/releases/download/v2.8.34/krc-windows-arm64.zip",
+            "url": "https://github.com/Heniokhos-Systems/KernRift/releases/download/v2.9.0/krc-windows-arm64.zip",
             "hash": "0f903930abe81fd22b3c0c4ad7cb7c3e24b8c1a5a838ac6d59dbfd58b57cac97"
         }
     },

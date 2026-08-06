@@ -1,5 +1,11 @@
 # Changelog
 
+## 2.9.0
+
+- Version bump to track the 2.9.0 compiler release; no extension code
+  changes.
+- Dependency: `brace-expansion` (transitive, via `minimatch`) 5.0.8 -> 5.0.9.
+
 ## 2.8.34
 
 - **Security**: `vscode-languageclient` 9 pulled a DoS-vulnerable

@@ -7,7 +7,7 @@
 class Kernrift < Formula
   desc "Self-hosted systems language compiler for kernel and bare-metal development"
   homepage "https://kernrift.org"
-  version "2.8.34"
+  version "2.9.0"
   license "Apache-2.0"
 
   REL = "https://github.com/Heniokhos-Systems/KernRift/releases/download/v#{version}".freeze
@@ -83,6 +83,6 @@ class Kernrift < Formula
     KR
     system bin/"krc", "t.kr", "-o", "t.krbo"
     assert_predicate testpath/"t.krbo", :exist?
-    assert_match "2.8.34", shell_output("#{bin}/krc --version")
+    assert_match "2.9.0", shell_output("#{bin}/krc --version")
   end
 end

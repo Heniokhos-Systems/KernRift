@@ -2,10 +2,95 @@
 
 All notable changes to `kernriftc` are documented in this file.
 
-## Unreleased
+## v2.9.0 — 2026-08-06
+
+A bare-metal release. Six sub-projects take the compiler from "provably safe
+under static analysis" (`--target=none`'s original static refusals) to
+programs that actually boot: a raw-image emitter with a QEMU boot gate,
+compiler-emitted entry stubs, an arm64 Linux `Image` header, a UEFI PE
+application, and a from-scratch x86_64 reset-vector image.
+**Everything bare-metal here is QEMU on one machine, emulated** — none of it
+has run on real hardware or real firmware, and Secure Boot is measured
+**incompatible**, not merely untested.
+
+Alongside that: eight defect fixes that change what compiles, and a
+correction to 17 sites that claimed the IR is SSA. It never has been.
+
+### Bare metal
+
+- **`--target=none`**, refusing every OS-bound construct (raw syscalls,
+  `--legacy`, OS-bound `--emit=` modes) and routing `print`/`println`/
+  f-strings/`alloc` through pluggable write/alloc providers (16550 UART,
+  PL011, a bump heap) instead of a host OS.
+- **`--emit=image`**, raw headerless flat-binary emission, plus a QEMU boot
+  gate (`tests/target_none/boot_gate.sh`) that boots the compiler's own
+  artifacts on x86_64 (multiboot long-mode loader + COM1 16550) and arm64
+  (virt + PL011) and requires a computed sentinel value on the wire, not
+  just "QEMU didn't crash".
+- **Compiler-emitted entry stubs** (`--stack-top`), so a `--target=none`
+  binary no longer needs a hand-written loader to set up a stack before
+  jumping into `main`.
+- **The arm64 Linux `Image` header** (`--image-header`), so an arm64
+  `--target=none` build can be handed directly to a Linux boot loader's
+  `Image` convention.
+- **`--emit=uefi`**, producing PE32+ EFI applications that boot under QEMU's
+  OVMF (x86_64) and AAVMF (arm64) — booting verified under emulated firmware
+  only. Secure Boot is measured incompatible.
+- **`--reset-vector`**, a 64 KiB x86_64 image that boots straight from the
+  CPU reset vector under `qemu -bios`, with no external toolchain at all: no
+  GNU `as`, `ld`, `objcopy`, no `--defsym`. The compiler emits the 16-bit
+  real-mode entry, the 32-bit and 64-bit stage transitions, and the fixups
+  itself.
 
 ### Fixed
 
+- **`call_ptr` silently dropped arguments 7+, and their side effects with
+  them.** `call_ptr(p, 1, 2, 3, 4, 5, 6, bump(77))`'s 7th argument was never
+  collected on the IR backend (`bump`'s write never happened), and evaluated
+  but never loaded into any register on `--legacy` (its side effect ran, the
+  value just went nowhere). Both x86 backends now refuse a 7th `call_ptr`
+  argument with a named diagnostic instead of silently dropping it. `>6`
+  support is not implemented — that is separate, queued work. **arm64 is
+  unaffected on either backend**: `codegen_aarch64.kr`'s `call_ptr` lowering
+  already spills correctly past 6 arguments and was never capped.
+- **An unresolved `extern fn` produced a running binary with a wrong answer,
+  differently per backend, with no diagnostic.** The IR backend synthesized
+  a stub that returns 0 for every call; `--legacy` fell through with the
+  call's own argument still sitting in the return register, so the call
+  silently returned its argument back to itself. Now a hard error wherever
+  the extern is DCE-live and the output is directly executable
+  (`elfexe`/`macho`/`pe`/`android`/`image`/`uefi`); `obj`/`asm`/`ir`/`lkm`
+  stay exempt because those outputs are resolved by a later linker or
+  loader.
+- **`--image-header=`, `--reset-vector=`, `-c=`, `-h=` were silently
+  ignored.** The `=value` form parsed as nothing and fell through to
+  whatever the bare flag meant, so `--reset-vector=1` quietly produced a
+  *multiboot* artifact instead of a reset-vector image, and `-c=1` an
+  executable instead of a `.o`. All four now refuse instead of guessing.
+- **`--debug` silently emitted no array bounds checks wherever arm64 legacy
+  codegen was selected** — not just under `--legacy --arch=arm64`, but on
+  every route that reaches that codegen (`--emit=obj`, `--emit=lkm`, and the
+  fat-binary path's arm64 slices). `codegen_aarch64.kr` has no bounds-check
+  machinery at all; `uint64[4] a; a[99]` printed a garbage value and exited
+  0 with no diagnostic. The combination is now refused, derived from the
+  actual codegen dispatch condition rather than enumerated by hand.
+  **The cost is real and is stated, not hidden**: `codegen_aarch64.kr`'s
+  overflow/null-pointer/divide-by-zero `--debug` guards DO work correctly on
+  that backend, and refusing the combination makes those unreachable too —
+  the checks are all-or-nothing per backend build, not selectable per
+  check. Implementing arm64 legacy bounds checks stays queued; when it
+  lands, this refusal comes out.
+- **`IR_MODULE_PATH` (op 146) was dead-code-eliminated despite writing
+  through its buffer argument.** `ir_opt_is_side_effect` didn't list it, so
+  a `get_module_path()` call whose length result went unused was deleted —
+  even though the call writes the resolved path the Windows stdlib search
+  depends on. A `--target=windows` build with the result unused came out
+  byte-identical to one with no call at all.
+- **18 wrong `write()` byte lengths** (14 in `living.kr`'s `lc` report, 4 in
+  `analysis.kr`'s kernel-safety diagnostics) — 7 of them over-read past the
+  string's own NUL, writing a stray NUL byte into the output; the rest
+  truncated by a byte, most often eating a leading newline or a trailing
+  space in a report label.
 - **`fn f() -> f32 { return 1.5f }` no longer fails type checking.** Sema
   reported every float literal as `f64` regardless of the `f` suffix, so the
   return-kind check saw f32-declared against f64-actual and rejected it —
@@ -17,6 +102,20 @@ All notable changes to `kernriftc` are documented in this file.
     `fn f() -> f64 { return 1.5f }`, which previously compiled and was a
     silent miscompile: the callee left f32 bits in `xmm0` and a non-inlined
     caller read them as `f64` (returned `0.0` for `1.5f`).
+
+### Honesty corrections
+
+- **The IR is not SSA, and never has been.** `IR_PHI` has a declaration and
+  a printer (arm64's case is a no-op, "handled by regalloc") and *zero*
+  `ir_emit(IR_PHI...)` construction sites anywhere in the compiler: the IR
+  is linear three-address code over unbounded vregs, and named variables
+  reuse one vreg across assignments, so no phi is ever needed and none is
+  built. 17 sites said otherwise and are now corrected — `--help`'s
+  `--emit=ir` line, file-header comments, and the `docs/` tree, including
+  two optimizer-pass comments that used "SSA" as an algorithm's
+  *justification* rather than a restatement (the DCE mark phase and the ROR
+  matcher actually depend on temporaries being single-assignment, not on
+  canonical SSA form — both now state the narrower, true premise).
 
 ### Breaking
 
