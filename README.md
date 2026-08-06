@@ -114,6 +114,14 @@ echo "deb [signed-by=/usr/share/keyrings/kernrift-archive-keyring.gpg] https://a
 sudo apt update && sudo apt install kernrift
 ```
 
+(If you previously used the install script above, its copies in
+`~/.local/bin` will **shadow** the packaged ones — `apt install` succeeds and
+`krc --version` still reports the older version. Run `which krc` and
+`which kr` to check: both should print `/usr/bin/…`. If they point at
+`~/.local/bin`, remove `~/.local/bin/krc`, `~/.local/bin/kr` and
+`~/.local/share/kernrift/` so the package's binaries and its
+`/usr/share/kernrift/std` are the ones in use.)
+
 **Arch Linux** — AUR (amd64 + arm64):
 ```bash
 yay -S kernrift
