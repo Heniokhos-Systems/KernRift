@@ -8561,6 +8561,211 @@ for A in x86_64 arm64; do
     t6_builds "t6_legacy_freestanding_$A" -- --legacy --arch=$A --freestanding "$T6_D/plain.kr"
 done
 
+# 5. --debug on ANY path that reaches legacy arm64 codegen. codegen_aarch64
+#    .kr has no array-bounds-check machinery at all (arr_count_lookup has 4
+#    call sites -- codegen.kr:4457/:10403 legacy x86_64, ir.kr:3844/:4868 IR
+#    x86_64 -- and none in codegen_aarch64.kr; arm64 IR checks via a
+#    different mechanism, IR_ARR_CHECK op 131). Measured: `uint64[4] a;
+#    a[99]` under --debug aborts (rc=1) on x86_64 legacy, x86_64 IR and
+#    arm64 IR, but on legacy arm64 it silently prints a garbage value and
+#    exits 0 (silent-and-exit-0 reproduces every time; the specific value
+#    read does not). --debug is a safety promise; refuse rather than ship
+#    it unmet with no diagnostic.
+#
+#    The rule is DERIVED from the codegen dispatch (arch == 1 &&
+#    (emit_ir_mode == 0 || emit_mode == 3 || emit_mode == 7)), not
+#    enumerated: --legacy is the obvious way in, but --emit=obj (3) and
+#    --emit=lkm (7) select legacy on arm64 unconditionally, even with no
+#    --legacy on the line at all (both need it for extern relocations).
+#    Verified below by exhaustively trying --arch=arm64 --debug against
+#    every --emit= spelling this compiler accepts today (a hardcoded
+#    28-item list, checked against itself for count and NOT independently
+#    cross-checked against src/main.kr here -- emit_valid_list_is_complete
+#    elsewhere in this file is what derives the spelling set mechanically
+#    from src/main.kr's str_eq_full(emit_str, ...) arms and would catch a
+#    spelling this list drifted out of sync with; --help is not that check,
+#    it lists only 8 of the 28 accepted spellings).
+t6_refuses "t6_legacy_arm64_debug_refused" "--debug" "--legacy" -- \
+    --legacy --arch=arm64 --debug "$T6_D/arr.kr"
+# --emit=obj reaches legacy arm64 codegen with NO --legacy anywhere on the
+# line -- this is the case that was missed until the rule was derived from
+# the dispatch instead of enumerated from the two cases known at the time.
+t6_refuses "t6_emit_obj_arm64_debug_refused" "--debug" "--emit=obj" -- \
+    --arch=arm64 --emit=obj --debug "$T6_D/arr.kr"
+# --emit=lkm reaches it too (same dispatch condition). It is ALSO refused
+# for an unrelated reason (x86_64-only), but that check runs later --
+# measured, THIS refusal wins, so the message really is the --debug one
+# (t6_refuses pins both "--debug" and "arm64", so this does assert which
+# message wins, not just that some refusal fired).
+t6_refuses "t6_emit_lkm_arm64_debug_refused" "--debug" "arm64" -- \
+    --arch=arm64 --emit=lkm --debug "$T6_D/arr.kr"
+# --legacy + arm64 WITHOUT --debug must keep working (also covered by
+# t6_legacy_hosted_arm64 above; repeated here with the exact repro flags,
+# no --target=, for direct correspondence with the refusal case).
+t6_builds "t6_legacy_arm64_no_debug_builds" -- --legacy --arch=arm64 "$T6_D/arr.kr"
+# --emit=obj on arm64 WITHOUT --debug must also keep working -- it is the
+# legacy backend's own normal path (obj always uses legacy, on any arch),
+# untouched by this refusal because debug_mode == 0.
+t6_builds "t6_emit_obj_arm64_no_debug_builds" -- --arch=arm64 --emit=obj "$T6_D/arr.kr"
+# The fat-binary path (no --arch at all -- bare `krc` emits a FAT binary)
+# reaches the same defective slice: compile_fat's arm64 slices honor
+# --legacy exactly like the single-target path, and the default fat build
+# (no --targets=) always includes all 4 arm64 (OS, arch) slices. Refuse
+# there too, deliberately, rather than let it through by accident.
+t6_refuses "t6_legacy_debug_fat_refused" "--debug" "--legacy" -- \
+    --legacy --debug "$T6_D/arr.kr"
+
+# Exhaustive check: every --emit= spelling this compiler accepts today,
+# against --arch=arm64 --debug, with NO --legacy. Per the derived rule,
+# exactly two (obj, lkm) should reach legacy arm64 codegen and be refused;
+# every other spelling must still build (image/uefi refuse too, but for the
+# unrelated "requires --target=none" reason -- not exercised here since no
+# --target= is passed, so they hit that refusal first regardless of
+# --debug). The 28-item list below is a hardcoded snapshot, not derived
+# from source -- the count check just below only catches this list being
+# edited down, not the compiler's accepted-spelling set drifting away from
+# it. emit_valid_list_is_complete (elsewhere in this file) is the test that
+# derives the spelling set mechanically from src/main.kr's
+# str_eq_full(emit_str, ...) arms and would actually catch that drift.
+EMIT_SPELLINGS="elfexe elf elf-arm64 elf-x86_64 linux linux-x86_64 linux-arm64 linux-x86-64 macho mac macos mac-x64 mac-arm64 darwin windows windows-x64 windows-arm64 win win-x64 win-arm64 pe obj android asm ir lkm image uefi"
+EMIT_SPELLING_COUNT=$(echo $EMIT_SPELLINGS | wc -w)
+TOTAL=$((TOTAL + 1))
+if [ "$EMIT_SPELLING_COUNT" != "28" ]; then
+    echo "FAIL: t6_emit_spelling_count (EMIT_SPELLINGS above was edited to $EMIT_SPELLING_COUNT entries, expected 28 -- this only catches an edit to the literal list, not the compiler's spelling set changing; see emit_valid_list_is_complete for that)"
+    FAIL=$((FAIL + 1))
+else
+    PASS=$((PASS + 1)); echo "  t6_emit_spelling_count: PASS (28)"
+fi
+ES_BAD=""
+for ES in $EMIT_SPELLINGS; do
+    TOTAL=$((TOTAL + 1))
+    rm -f "$T6_D/es_out"
+    ES_ERR=$("$T6_KRC" --arch=arm64 --debug --emit=$ES "$T6_D/arr.kr" -o "$T6_D/es_out" 2>&1); ES_ST=$?
+    ES_WANT_REFUSED=0
+    if [ "$ES" = "obj" ] || [ "$ES" = "lkm" ]; then ES_WANT_REFUSED=1; fi
+    if [ "$ES_WANT_REFUSED" = "1" ]; then
+        if [ "$ES_ST" != "0" ] && [ ! -f "$T6_D/es_out" ]; then
+            PASS=$((PASS + 1))
+        else
+            echo "FAIL: t6_emit_spelling_$ES (expected refused, got exit $ES_ST, artifact $([ -f "$T6_D/es_out" ] && echo present || echo absent))"
+            FAIL=$((FAIL + 1)); ES_BAD="$ES_BAD $ES"
+        fi
+    else
+        # image/uefi need --target=none (a different, already-tested
+        # refusal) so they fail here too, for the OTHER reason -- assert
+        # only that the message names --target=none, not --debug, so a
+        # future change that makes them ALSO reach legacy arm64 codegen
+        # (and starts refusing for THIS reason without --target=none) would
+        # still be caught.
+        if [ "$ES" = "image" ] || [ "$ES" = "uefi" ]; then
+            if [ "$ES_ST" != "0" ] && echo "$ES_ERR" | grep -q -- "--target=none"; then
+                PASS=$((PASS + 1))
+            else
+                echo "FAIL: t6_emit_spelling_$ES (expected the --target=none refusal, got exit $ES_ST: '$ES_ERR')"
+                FAIL=$((FAIL + 1)); ES_BAD="$ES_BAD $ES"
+            fi
+        elif [ "$ES" = "ir" ]; then
+            # --emit=ir dumps to STDOUT and ignores -o (see the
+            # emit_accept_ir row elsewhere in this file) -- success is a
+            # clean exit with a non-empty dump, not an -o artifact.
+            if [ "$ES_ST" = "0" ] && [ -n "$ES_ERR" ]; then
+                PASS=$((PASS + 1))
+            else
+                echo "FAIL: t6_emit_spelling_$ES (expected an IR dump on stdout, got exit $ES_ST: '$ES_ERR')"
+                FAIL=$((FAIL + 1)); ES_BAD="$ES_BAD $ES"
+            fi
+        elif [ "$ES_ST" = "0" ] && [ -f "$T6_D/es_out" ]; then
+            PASS=$((PASS + 1))
+        else
+            echo "FAIL: t6_emit_spelling_$ES (expected to build, got exit $ES_ST: '$ES_ERR')"
+            FAIL=$((FAIL + 1)); ES_BAD="$ES_BAD $ES"
+        fi
+    fi
+    rm -f "$T6_D/es_out"
+done
+if [ -z "$ES_BAD" ]; then
+    echo "  t6_emit_spelling_enumeration: PASS (28/28 -- reaches-legacy-arm64 is exactly {obj, lkm})"
+else
+    echo "  t6_emit_spelling_enumeration: see failures above for:$ES_BAD"
+fi
+
+# An actual out-of-bounds index, to prove the STILL-WORKING configs really
+# do trap rather than merely "not refuse" -- the refusal above must not
+# have accidentally widened into something that also swallows these.
+printf 'fn main() {\n    uint64[4] a\n    uint64 v = a[99]\n    println(v)\n    exit(0)\n}\n' > "$T6_D/oob.kr"
+
+# arm64 IR: this row EXECUTES its artifact, so it is built for arm64
+# deliberately and run under qemu-aarch64-static rather than natively --
+# never native-executed on a mismatched host.
+if [ -n "$QEMU_A64" ]; then
+    TOTAL=$((TOTAL + 1))
+    if $T6_KRC --arch=arm64 --debug "$T6_D/oob.kr" -o "$T6_D/oob_ir_a64" >/dev/null 2>&1; then
+        chmod +x "$T6_D/oob_ir_a64"
+        $QEMU_A64 "$T6_D/oob_ir_a64" >/dev/null 2>&1
+        oob_ir_a64_st=$?
+        if [ "$oob_ir_a64_st" != "0" ]; then
+            PASS=$((PASS + 1)); echo "  t6_debug_arm64_ir_still_traps: PASS (exit $oob_ir_a64_st)"
+        else
+            echo "FAIL: t6_debug_arm64_ir_still_traps (exit 0 -- bounds check missing)"; FAIL=$((FAIL + 1))
+        fi
+    else
+        echo "FAIL: t6_debug_arm64_ir_still_traps (build failed)"; FAIL=$((FAIL + 1))
+    fi
+    rm -f "$T6_D/oob_ir_a64"
+else
+    echo "  t6_debug_arm64_ir_still_traps: SKIP (no qemu-aarch64-static)"
+fi
+
+# x86_64 legacy and x86_64 obj: these rows EXECUTE their artifact natively
+# (no emulator), so they are gated on $RUN_ARCH == x86_64 rather than
+# pinning --arch=x86_64 unconditionally -- pinning it and running natively
+# on a mismatched host (e.g. an arm64 CI runner) would give exit 126
+# (cannot execute), which reads as a wrong answer rather than a wrong arch.
+if [ "$RUN_ARCH" = "x86_64" ]; then
+    TOTAL=$((TOTAL + 1))
+    if $T6_KRC --legacy --arch=x86_64 --debug "$T6_D/oob.kr" -o "$T6_D/oob_leg_x64" >/dev/null 2>&1; then
+        chmod +x "$T6_D/oob_leg_x64"
+        "$T6_D/oob_leg_x64" >/dev/null 2>&1
+        oob_leg_x64_st=$?
+        if [ "$oob_leg_x64_st" != "0" ]; then
+            PASS=$((PASS + 1)); echo "  t6_debug_legacy_x86_64_still_traps: PASS (exit $oob_leg_x64_st)"
+        else
+            echo "FAIL: t6_debug_legacy_x86_64_still_traps (exit 0 -- bounds check missing)"; FAIL=$((FAIL + 1))
+        fi
+    else
+        echo "FAIL: t6_debug_legacy_x86_64_still_traps (build failed)"; FAIL=$((FAIL + 1))
+    fi
+    rm -f "$T6_D/oob_leg_x64"
+
+    # --emit=obj is the other newly-widened case: on x86_64 (arch == 0) it
+    # never matched the widened rule (which is arm64-only), so it must
+    # still build under --debug AND the emitted relocatable object must
+    # still bounds-check once linked. Mirrors the extern_resolved_via_obj
+    # _link gate above (gcc, -no-pie, x86_64 host toolchain).
+    if command -v gcc > /dev/null 2>&1; then
+        TOTAL=$((TOTAL + 1))
+        if $T6_KRC --arch=x86_64 --emit=obj --debug "$T6_D/oob.kr" -o "$T6_D/oob_obj_x64.o" >/dev/null 2>&1 \
+           && gcc "$T6_D/oob_obj_x64.o" -o "$T6_D/oob_obj_x64" -no-pie >/dev/null 2>&1; then
+            "$T6_D/oob_obj_x64" >/dev/null 2>&1
+            oob_obj_x64_st=$?
+            if [ "$oob_obj_x64_st" != "0" ]; then
+                PASS=$((PASS + 1)); echo "  t6_debug_obj_x86_64_still_traps: PASS (exit $oob_obj_x64_st)"
+            else
+                echo "FAIL: t6_debug_obj_x86_64_still_traps (exit 0 -- bounds check missing)"; FAIL=$((FAIL + 1))
+            fi
+        else
+            echo "FAIL: t6_debug_obj_x86_64_still_traps (build or link failed)"; FAIL=$((FAIL + 1))
+        fi
+        rm -f "$T6_D/oob_obj_x64.o" "$T6_D/oob_obj_x64"
+    else
+        echo "  t6_debug_obj_x86_64_still_traps: SKIP (no gcc)"
+    fi
+else
+    echo "  t6_debug_legacy_x86_64_still_traps: SKIP (RUN_ARCH=$RUN_ARCH, not x86_64)"
+    echo "  t6_debug_obj_x86_64_still_traps: SKIP (RUN_ARCH=$RUN_ARCH, not x86_64)"
+fi
+rm -f "$T6_D/oob.kr"
+
 # 3. Every remaining --emit= mode gets a DEFINED outcome under --target=none.
 #    macho and pe are OS containers -- a Mach-O needs dyld and LC_MAIN, a PE
 #    needs the Windows loader and an import table -- and before this both

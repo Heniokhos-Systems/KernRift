@@ -43,9 +43,20 @@ fn main() {
 
 Release build: runs to completion, prints `0`, exits 0 — the out-of-bounds
 store silently lands somewhere on the stack. With `--debug`: the process
-exits with code **1** before the store, on both backends and both
-architectures. The trap is silent (no message); a non-zero exit at an
-unexpected point is the signal.
+exits with code **1** before the store, on the IR backend on both x86_64
+and arm64, and on the legacy backend on x86_64. The trap is silent (no
+message); a non-zero exit at an unexpected point is the signal.
+
+The legacy arm64 backend has no bounds-check codegen at all — see the table
+below — so `--debug` is refused outright on any command line that would
+reach it, rather than silently accepting a build with no checks. That is
+not only `--legacy --arch=arm64 --debug`: `--arch=arm64 --emit=obj --debug`
+and `--arch=arm64 --emit=lkm --debug` select the legacy backend too, even
+with no `--legacy` on the line at all (obj/lkm always need legacy codegen,
+on every arch, for extern relocations) — and so does a **fat build that
+carries an arm64 slice**, including the plain `krc prog.kr --legacy
+--debug` with no `--arch` at all. See "Why refused on more than `--legacy`"
+below for the full list.
 
 ### What `--debug` checks, per backend
 
@@ -53,16 +64,75 @@ The two backends instrument different things. This table is derived from
 `docs/UNDEFINED_BEHAVIOR.md` and verified by running trap programs on each
 backend:
 
-| Check | IR backend (default) | `--legacy` backend |
-|---|---|---|
-| Array bounds (compile-time-sized stack/static arrays) | **Traps**, `exit(1)` — x86_64 and arm64 | **Traps**, `exit(1)` |
-| Integer divide / modulo by zero | arm64: **traps**, `exit(1)`. x86_64: **no check** — hardware SIGFPE (shell reports exit 136) | **Traps**, `exit(1)` — both arches |
-| Signed `i64`/`i32`… add/sub overflow | No check — wraps | **Traps**, `exit(1)` |
-| Null pointer in `loadN`/`storeN` builtins | No check — SIGSEGV (exit 139) | **Traps**, `exit(1)` |
-| Unsigned overflow | No check (defined behavior — wraps) | No check (wraps; the guard tests the *signed* overflow flag only) |
+| Check | IR backend (default) | `--legacy` backend, x86_64 | `--legacy` backend, arm64 |
+|---|---|---|---|
+| Array bounds (compile-time-sized stack/static arrays) | **Traps**, `exit(1)` — x86_64 and arm64 | **Traps**, `exit(1)` | refused at compile time (see below) |
+| Integer divide / modulo by zero | arm64: **traps**, `exit(1)`. x86_64: **no check** — hardware SIGFPE (shell reports exit 136) | **Traps**, `exit(1)` | refused at compile time (see below) |
+| Signed `i64`/`i32`… add/sub overflow | No check — wraps | **Traps**, `exit(1)` | refused at compile time (see below) |
+| Null pointer in `loadN`/`storeN` builtins | No check — SIGSEGV (exit 139) | **Traps**, `exit(1)` | refused at compile time (see below) |
+| Unsigned overflow | No check (defined behavior — wraps) | No check (wraps; the guard tests the *signed* overflow flag only) | refused at compile time (see below) |
+
+**`--debug` is refused outright on arm64 whenever it would reach the legacy
+backend.** `codegen_aarch64.kr` has no array-bounds-check codegen at all —
+it never did — even though it correctly traps the other four rows above.
+Rather than ship `--debug` unmet for bounds checks on this one
+backend/arch combination with no diagnostic, the compiler refuses the
+command line up front.
+
+#### Why refused on more than `--legacy`
+
+The refusal is derived from what actually selects the legacy backend on
+arm64, not from "the user typed `--legacy`". Two families of command line
+reach it — a single arm64 target, and a fat (`.krbo`) build that carries an
+arm64 slice:
+
+**Single arm64 target** (`--arch=arm64`, or an equivalent, resolved to a
+lone compile rather than a fat build):
+
+| Command line | Why it reaches legacy arm64 codegen |
+|---|---|
+| `--legacy --arch=arm64 --debug` | Explicit: `--legacy` asks for it directly. |
+| `--arch=arm64 --emit=obj --debug` | Implicit: a relocatable object always uses legacy codegen, on every arch, so extern-symbol relocations resolve correctly — `--legacy` is redundant here and was never required for this to happen. |
+| `--arch=arm64 --emit=lkm --debug` | Same as `--emit=obj`, for the same reason (LKM is also a relocatable-object format). `--emit=lkm` on arm64 is ALSO refused for an unrelated reason (loadable kernel modules are x86_64-only today), but that check runs later, inside object emission — this refusal runs first and wins, so the message you actually see is the `--debug` one below, not the x86_64-only one. |
+| `--emit=android --legacy --debug` | **No `--arch`, no `--target`, and the word arm64 appears nowhere on this command line.** `--emit=android` sets an explicit emit mode, so this is a lone compile rather than a fat build; and `--emit=android` with no explicit `--arch` resolves the arch to arm64, because that is what Android means here. Listed because a command line with no `arm64` in it landing on a message about "the legacy arm64 backend" is otherwise baffling. |
+
+**Fat build with an arm64 slice** (no `--arch` resolves a fat `.krbo`
+covering all 8 hosted (OS, arch) slices by default, four of which are
+arm64):
+
+| Command line | Why it reaches legacy arm64 codegen |
+|---|---|
+| `--legacy --debug prog.kr` | No `--arch` at all — the default output for a bare `krc` invocation. This is the single most likely way a real user hits this refusal: they never typed `--arch=arm64`, or arm64, anywhere. |
+| `--target=android --legacy --debug` | `--target=android` forces `emit_mode` to Android internally but does not set the "an explicit target was requested" flag that `--emit=android` would — so the fat-build decision still sees "no arch, no emit" and routes here anyway, arm64 slice included. |
+| `--targets=<list>,...arm64... --legacy --debug` | An explicit `--targets=` selection that names any arm64 slice (`linux-arm64`, `win-arm64`, `mac-arm64`, `android-arm64`) forces a fat build containing it. A `--targets=` selection that excludes every arm64 slice is NOT refused — e.g. `--targets=linux-x64,win-x64` still builds. |
+
+Before this was understood, only the first single-target row was refused:
+`--arch=arm64 --emit=obj --debug` compiled cleanly at exit 0, with no
+diagnostic, reaching the exact same unchecked codegen path as the
+`--legacy` case — and the fat-build rows were not documented anywhere,
+even though the refusal already covered them.
+
+**The accepted cost.** `codegen_aarch64.kr` DOES correctly trap the other
+four checks in the table above — overflow, divide-by-zero, and null
+pointers all work on legacy arm64. The refusal is on the whole command
+line, not on the missing check alone, because the checks are all-or-nothing
+per backend build, not selectable per check. That means a `--debug` build
+that would have used only the three checks that DO work on legacy arm64
+loses that working protection to this refusal too, on every command line in
+the table above. This is a deliberate, accepted trade: the alternative —
+refusing only when an array is actually indexed — reproduces the "silent
+restriction surfaces on whichever function you write next" failure mode
+that this same refusal exists to avoid for the missing bounds check.
+Implementing arm64-legacy bounds-check codegen (which would remove the
+refusal entirely) is queued, not started.
+
+The practical effect: on arm64, the legacy backend is not usable under
+`--debug` at all, for any of the five checks — use the IR backend (the
+default) there instead.
 
 Practical consequence: if `--debug` on the default backend doesn't catch
-anything, try `--legacy --debug` — it guards more operations:
+anything, try `--legacy --debug` — it guards more operations — but only on
+x86_64:
 
 ```sh
 krc --arch=x86_64 --legacy --debug program.kr -o program
@@ -147,10 +217,11 @@ Program received signal SIGSEGV, Segmentation fault.
 The usual suspects, in order of likelihood:
 
 1. **Null or garbage pointer** in a `loadN`/`storeN` — rebuild with
-   `--legacy --debug` to turn null dereferences into a clean `exit(1)` at
-   the exact call.
+   `--legacy --debug` (x86_64 only — see §1's `--debug` table) to turn null
+   dereferences into a clean `exit(1)` at the exact call.
 2. **Out-of-bounds array index** that walked off the stack — `--debug`
-   bounds checks catch this on either backend.
+   bounds checks catch this on the IR backend on either arch, and on the
+   legacy backend on x86_64 (`--legacy --arch=arm64 --debug` is refused).
 3. **Use-after-`dealloc`** or stack overflow from deep recursion — see
    `docs/UNDEFINED_BEHAVIOR.md` for what is and isn't defined.
 
