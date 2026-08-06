@@ -1,0 +1,42 @@
+// Narrow volatile access width, both directions.
+//
+// The arm64 IR backend once emitted a 64-bit STLR/LDAR for every volatile
+// access regardless of declared width, so a u8 write clobbered 7 neighbouring
+// bytes and a u8 read pulled them in. x86_64 and the legacy backends were
+// always correct, which makes this a pure cross-arch divergence -- exactly
+// what this harness exists to catch. It went undetected for the whole life of
+// the bug because the corpus contained no device-block or vload/vstore
+// program at all.
+//
+// Self-checking: exit 0 means agree-and-correct. The harness compares exit
+// code and stdout between the two builds.
+device Fake at 0x66666000 {
+    Data   at 0x00 : u32
+    Status at 0x04 : u8
+    Other  at 0x08 : u32
+}
+
+fn main() {
+    u64 nr = 9
+    u64 aid = get_arch_id()
+    if aid == 2 { nr = 222 }
+    if aid == 4 { nr = 222 }
+    if aid == 6 { nr = 222 }
+    if aid == 7 { nr = 222 }
+    syscall_raw(nr, 0x66666000, 4096, 3, 0x32, 0xFFFFFFFFFFFFFFFF, 0)
+
+    // Store side: the u8 write at 0x04 must not reach Other at 0x08.
+    Fake.Other = 99
+    Fake.Status = 7
+    u64 kept = Fake.Other
+
+    // Load side: dirty the neighbour first, then a narrow read must not bleed.
+    // Without this the page is zero-filled and an over-wide load still yields
+    // the right low byte.
+    store32(0x66666008, 0x11111111)
+    u64 s = Fake.Status
+
+    if kept != 99 { exit(2) }
+    if s != 7 { exit(1) }
+    exit(0)
+}

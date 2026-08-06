@@ -3346,6 +3346,59 @@ run_test "vstore_narrow_no_clobber" 'fn main() {
     exit(vload32(0x66666008))
 }' 99
 
+# The runtime rows above catch the value corruption but not WHICH instruction
+# produced it: swapping the acquire/release forms for a plain load/store plus a
+# barrier would keep them green while dropping the ordering guarantee MMIO
+# depends on. Pin the emitted words for all eight forms.
+#
+# Asserts the hex column, NOT a mnemonic -- main.kr has no STLR/LDAR decoder at
+# any width, so these listing lines have a blank mnemonic column and a grep for
+# "stlrb" would silently never fire.
+#
+# Five hex digits only: word = base | (Rn << 5) | Rt, so bits 11:8 are
+# 0xC | ((Rn >> 3) & 3) and the 6th digit varies with the address register.
+# Bits 31:12 are pure base bits and allocation-independent.
+TOTAL=$((TOTAL + 1))
+cat > /tmp/krc_venc_$$.kr <<'KREOF'
+device D at 0x40000000 {
+    B at 0x00 : u8
+    H at 0x08 : u16
+    W at 0x10 : u32
+    X at 0x18 : u64
+}
+fn main() {
+    D.B = 1
+    D.H = 2
+    D.W = 3
+    D.X = 4
+    u64 a = D.B
+    u64 b = D.H
+    u64 c = D.W
+    u64 e = D.X
+    exit(a + b + c + e)
+}
+KREOF
+$KRC --arch=arm64 --emit=asm /tmp/krc_venc_$$.kr > /tmp/krc_venc_out_$$ 2>&1
+VENC_LISTING=$(sed -n 's/.* -> \(.*\) (asm listing)$/\1/p' /tmp/krc_venc_out_$$)
+VENC_OK=1
+if [ -z "$VENC_LISTING" ] || [ ! -f "$VENC_LISTING" ]; then
+    VENC_OK=0
+    echo "  could not locate asm listing (got '$VENC_LISTING')"
+else
+    # STLRB/H/W/X then LDARB/H/W/X.
+    for w in 089ff 489ff 889ff c89ff 08dff 48dff 88dff c8dff; do
+        grep -qi ": $w" "$VENC_LISTING" || { VENC_OK=0; echo "  missing volatile width word $w"; }
+    done
+fi
+if [ "$VENC_OK" = "1" ]; then
+    echo "  arm64_narrow_volatile_encodings: PASS (STLR+LDAR B/H/W/X all emitted)"
+    PASS=$((PASS + 1))
+else
+    echo "FAIL: arm64_narrow_volatile_encodings"
+    FAIL=$((FAIL + 1))
+fi
+rm -f /tmp/krc_venc_$$.kr /tmp/krc_venc_out_$$ "$VENC_LISTING"
+
 echo ""
 echo "--- v2.6 method calls ---"
 run_test "method_call" 'struct P { u64 x; u64 y }
