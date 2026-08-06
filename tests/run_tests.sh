@@ -2188,8 +2188,6 @@ run_test "let_signed"    'fn main(){ i64 a = 0 - 5; let r = a; if r < 0 { exit(9
 # H2: inferring from a call to an i64-returning fn must be SIGNED (was silently u64).
 run_test "let_call_signed" 'fn neg() -> i64 { return 0 - 5 }
 fn main(){ let r = neg(); if r < 0 { exit(9) } exit(0) }' 9
-run_test_legacy "let_call_signed_legacy" 'fn neg() -> i64 { return 0 - 5 }
-fn main(){ let r = neg(); if r < 0 { exit(9) } exit(0) }' 9
 # H2: inferring from a signed static/global must be SIGNED.
 run_test "let_static_signed" 'static i64 g = -7
 fn main(){ let r = g
@@ -2311,6 +2309,12 @@ run_test_legacy() {
     fi
     rm -f "$REPO_ROOT/test_tmp_$$.kr" /tmp/krc_leg_$$
 }
+# H2 legacy-backend companion of let_call_signed above -- moved down here
+# (this is where run_test_legacy is defined; a call before this point is a
+# bash "command not found", not a deferred call, since this file has no
+# function-hoisting: it silently ran zero times).
+run_test_legacy "let_call_signed_legacy" 'fn neg() -> i64 { return 0 - 5 }
+fn main(){ let r = neg(); if r < 0 { exit(9) } exit(0) }' 9
 run_test_legacy "ternary_legacy_true"   'fn main() { u64 x=5; exit(x>3 ? 1 : 0) }' 1
 run_test_legacy "ternary_legacy_false"  'fn main() { u64 x=2; exit(x>3 ? 1 : 0) }' 0
 run_test_legacy "ternary_legacy_nested" 'fn main() { u64 x=5; exit(x>9 ? 3 : x>4 ? 2 : 1) }' 2
