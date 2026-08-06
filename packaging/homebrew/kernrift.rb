@@ -16,18 +16,18 @@ class Kernrift < Formula
   on_macos do
     on_arm do
       url "#{REL}/krc-macos-arm64"
-      sha256 "9ac17d2e0d3f79f35690d6a1d74ec1f91b1f985d6f9554435f1564aa98173844"
+      sha256 "fcb1f5212b523ec02319ddb84c4ab10ebd8d600b65ba034f7c1b9838e155dc33"
       resource "kr" do
         url "#{REL}/kr-macos-arm64"
-        sha256 "b19924c2286d6e700ca0a9072e2720eb33b7af1c5e17b84a28f112cd5aaef681"
+        sha256 "739cc3faed07e2b99f302f62c4384c501c232b3c19ec2289aabc6ecc9cf113a3"
       end
     end
     on_intel do
       url "#{REL}/krc-macos-x86_64"
-      sha256 "9048bbdfc2628ca102b4218d28681229bad66c9f73e72de509407f1ed9683071"
+      sha256 "f63c4de71dac229656e0334cad6d17a1f1de84cdc55df81a2ac91683c4dd55d6"
       resource "kr" do
         url "#{REL}/kr-macos-x86_64"
-        sha256 "3c37fb68eb7cb6909ffa23b835de8fb63d98a4e868d96d804dabe43798ef727b"
+        sha256 "038f4ba591f25e53f3e416b04ce6a5ed4475baad242389fd01468fcfc337684f"
       end
     end
   end
@@ -35,18 +35,18 @@ class Kernrift < Formula
   on_linux do
     on_arm do
       url "#{REL}/krc-linux-arm64"
-      sha256 "d3947044027ea775aa96e584bb0e4faf58c5e1957b283752ae11c1cf0f7d188e"
+      sha256 "15578e49f04a2e1f1e3ec8ca4d6b6ff6eee66c4293dfa037ffacae1517418f8c"
       resource "kr" do
         url "#{REL}/kr-linux-arm64"
-        sha256 "75b9817d064d44459b39b547a7d3311a51df0097b3dd60bba4be20e2d683dfbf"
+        sha256 "3767aeb4ac34664ee03554d638e0d263b9302cd9981a8fd298bb70e8cb1e3be4"
       end
     end
     on_intel do
       url "#{REL}/krc-linux-x86_64"
-      sha256 "e6b1699f1d2cb2d0dd0f80dac234bb41abcd5097fa9177c4b41fd302523dcdc0"
+      sha256 "d278c07613948c484146e66b36efd66b79739cf54e6fcf2f68d47e82befb1b6e"
       resource "kr" do
         url "#{REL}/kr-linux-x86_64"
-        sha256 "4c3bf4eb2fdbc166d18fa89205395d83a13f8724834998798b9f8b52f728d3f3"
+        sha256 "c1066890d90524ed558c9478ae83acc55631df395ab25e31e122e8c3842da3a5"
       end
     end
   end

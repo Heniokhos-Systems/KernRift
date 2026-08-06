@@ -6,11 +6,11 @@
     "architecture": {
         "64bit": {
             "url": "https://github.com/Heniokhos-Systems/KernRift/releases/download/v2.9.0/krc-windows-x86_64.zip",
-            "hash": "544f7ff1d90b21b7515cdb8f035cae2f8d86fac17b77f925035c0d59a2b57102"
+            "hash": "23ae1e860ba4fb077e5d44c47f4959c23ae7ca6f773094f4da0c4235673e919b"
         },
         "arm64": {
             "url": "https://github.com/Heniokhos-Systems/KernRift/releases/download/v2.9.0/krc-windows-arm64.zip",
-            "hash": "0f903930abe81fd22b3c0c4ad7cb7c3e24b8c1a5a838ac6d59dbfd58b57cac97"
+            "hash": "2a4665c5598f25faad6e724409d9c69d3c5a2e0032b2b92690b8aa91f4d82611"
         }
     },
     "bin": [
