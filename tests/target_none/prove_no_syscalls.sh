@@ -94,6 +94,57 @@ set -u
 DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO="$(cd "$DIR/../.." && pwd)"
 KRC="${KRC:-$REPO/build/krc2}"
+
+# REFUSE A $KRC THAT INJECTS AN --arch=, because gate 1 cannot measure anything
+# through one. MEASURED 2026-08-06, after two runs on the same tree disagreed
+# (129/129 vs 2/129) and the discrepancy was briefly read as a real codegen
+# divergence:
+#
+#   gate 1 applies $KRC to the AFTER build but invokes $TMP/krc_before
+#   DIRECTLY. `make test`'s wrapper is `exec ./build/krc2 --arch=x86_64 "$@"`
+#   (Makefile), so BEFORE builds a fat KRBOFAT container and AFTER builds one
+#   native ELF slice. cmp differs at BYTE 1 -- 13300 B vs 4016 B for
+#   fat_probe. It is not a field, it is a different container, so the run
+#   compares nothing.
+#
+#   It hits EXACTLY the two rows with empty flags (fat_krc, fat_probe). All
+#   127 others carry their own --arch= and last-one-wins, so the injection is
+#   inert there -- which is why the symptom is a puzzling "2 of 129" rather
+#   than a total failure.
+#
+# tests/run_tests.sh guards its own call with `env -u KRC`; this makes the
+# hand-run case impossible rather than merely documented somewhere else.
+# DETECTED BY BEHAVIOUR, NOT BY STRING. A first attempt at this guard grepped
+# "$KRC" for `--arch=` and would have MISSED the very case that motivated it:
+# make test's wrapper is a SCRIPT whose path contains no such text -- the flag
+# lives inside the file. So probe what $KRC actually emits: with no arch flag,
+# a bare compiler produces a fat KRBOFAT container. Anything else means $KRC
+# is injecting an arch somewhere, and gate 1 cannot measure through it.
+if [ -n "${KRC:-}" ]; then
+    _pk_src="$(mktemp /tmp/krc_archprobe_XXXXXX.kr)"
+    _pk_out="$(mktemp -u /tmp/krc_archprobe_XXXXXX.bin)"
+    printf 'fn main() -> uint64 {\n    return 0\n}\n' > "$_pk_src"
+    if $KRC "$_pk_src" -o "$_pk_out" >/dev/null 2>&1 && [ -s "$_pk_out" ]; then
+        _pk_magic="$(head -c 8 "$_pk_out" | od -An -tx1 | tr -d ' \n')"
+        # 4b52424f46415400 == "KRBOFAT\0"
+        if [ "$_pk_magic" != "4b52424f46415400" ]; then
+            echo "error: \$KRC does not emit a fat binary with no arch flag (magic $_pk_magic)" >&2
+            echo "  \$KRC = $KRC" >&2
+            echo "  It is injecting an --arch=, and gate 1 CANNOT MEASURE THROUGH THAT." >&2
+            echo "  Gate 1 compares a BASE-built artifact against a HEAD-built one, and" >&2
+            echo "  only the HEAD side goes through \$KRC -- so an injected arch makes the" >&2
+            echo "  two sides different CONTAINER KINDS (fat KRBOFAT vs one ELF slice)." >&2
+            echo "  They differ at byte 1 and the run compares nothing. It hits exactly" >&2
+            echo "  the two rows with empty flags (fat_krc, fat_probe); the other 127" >&2
+            echo "  carry their own --arch= and last-one-wins, which is why the symptom" >&2
+            echo "  is a puzzling '2 of 129' rather than an obvious failure." >&2
+            echo "  Re-run with:  env -u KRC $0 $*" >&2
+            rm -f "$_pk_src" "$_pk_out"
+            exit 2
+        fi
+    fi
+    rm -f "$_pk_src" "$_pk_out"
+fi
 # The BASE this branch forks from. Pinned rather than derived from
 # `git merge-base`, which silently changes meaning the moment the branch is
 # merged or rebased -- and a gate whose baseline moved is a gate comparing the
