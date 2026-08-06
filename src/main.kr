@@ -7611,9 +7611,11 @@ fn main() {
     // checks via a different mechanism (IR_ARR_CHECK, op 131), so it IS
     // covered; only the legacy arm64 path is silent. Measured on this tree:
     // `uint64[4] a; a[99]` under --debug aborts (rc=1) on x86_64 legacy,
-    // x86_64 IR and arm64 IR, but on legacy arm64 it prints "v=0" and exits
-    // 0. --debug is a safety promise this backend does not keep, so refuse
-    // rather than ship it unmet with no diagnostic.
+    // x86_64 IR and arm64 IR, but on legacy arm64 it silently prints
+    // whatever garbage value was sitting past the array and exits 0 --
+    // silent-and-exit-0 reproduces every time; the specific value read does
+    // not. --debug is a safety promise this backend does not keep, so
+    // refuse rather than ship it unmet with no diagnostic.
     //
     // DERIVED FROM THE ACTUAL DISPATCH, NOT ENUMERATED: the per-function
     // codegen loop below (and its four twins in compile_fat) picks legacy
@@ -7628,12 +7630,14 @@ fn main() {
     // legacy codegen for extern relocations (see that same comment).
     // Measured: `--arch=arm64 --emit=obj --debug`, no --legacy anywhere,
     // compiled clean at exit 0 before this widened refusal existed.
-    // --emit=lkm on arm64 is already refused unconditionally for an
-    // unrelated reason (x86_64-only, codegen.kr:13273) so it never reaches
-    // this far in practice, but the condition above is left to include it
-    // rather than special-cased out: a rule derived from the dispatch is
-    // supposed to describe the dispatch, not a snapshot of which other
-    // refusals currently happen to shadow it.
+    // --emit=lkm on arm64 is ALSO refused for an unrelated reason
+    // (x86_64-only, codegen.kr:13273) -- but that check runs later, inside
+    // emit_elf_lkm, well after this one. Measured: this refusal fires
+    // first and wins, so `--arch=arm64 --emit=lkm --debug` prints the
+    // --debug message below, not "--emit=lkm currently supports x86_64
+    // only". Included anyway, not special-cased out: a rule derived from
+    // the dispatch is supposed to describe the dispatch, not a snapshot of
+    // which refusal happens to run first today.
     //
     // Adding the checks is separately queued work (this is a front-end
     // refusal, not codegen). This deliberately breaks command lines that

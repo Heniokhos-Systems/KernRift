@@ -53,8 +53,10 @@ reach it, rather than silently accepting a build with no checks. That is
 not only `--legacy --arch=arm64 --debug`: `--arch=arm64 --emit=obj --debug`
 and `--arch=arm64 --emit=lkm --debug` select the legacy backend too, even
 with no `--legacy` on the line at all (obj/lkm always need legacy codegen,
-on every arch, for extern relocations) — see "Why refused on more than
-`--legacy`" below.
+on every arch, for extern relocations) — and so does a **fat build that
+carries an arm64 slice**, including the plain `krc prog.kr --legacy
+--debug` with no `--arch` at all. See "Why refused on more than `--legacy`"
+below for the full list.
 
 ### What `--debug` checks, per backend
 
@@ -80,17 +82,34 @@ command line up front.
 #### Why refused on more than `--legacy`
 
 The refusal is derived from what actually selects the legacy backend on
-arm64, not from "the user typed `--legacy`". Three command lines reach it:
+arm64, not from "the user typed `--legacy`". Two families of command line
+reach it — a single arm64 target, and a fat (`.krbo`) build that carries an
+arm64 slice:
+
+**Single arm64 target** (`--arch=arm64`, or an equivalent, resolved to a
+lone compile rather than a fat build):
 
 | Command line | Why it reaches legacy arm64 codegen |
 |---|---|
 | `--legacy --arch=arm64 --debug` | Explicit: `--legacy` asks for it directly. |
 | `--arch=arm64 --emit=obj --debug` | Implicit: a relocatable object always uses legacy codegen, on every arch, so extern-symbol relocations resolve correctly — `--legacy` is redundant here and was never required for this to happen. |
-| `--arch=arm64 --emit=lkm --debug` | Same as `--emit=obj`, for the same reason (LKM is also a relocatable-object format). In practice `--emit=lkm` on arm64 is refused first for an unrelated reason (loadable kernel modules are x86_64-only today), so this row is currently unreachable in isolation — but the rule does not special-case it out, because a rule derived from the dispatch should describe the dispatch. |
+| `--arch=arm64 --emit=lkm --debug` | Same as `--emit=obj`, for the same reason (LKM is also a relocatable-object format). `--emit=lkm` on arm64 is ALSO refused for an unrelated reason (loadable kernel modules are x86_64-only today), but that check runs later, inside object emission — this refusal runs first and wins, so the message you actually see is the `--debug` one below, not the x86_64-only one. |
 
-Before this was understood, only the first row was refused: `--arch=arm64
---emit=obj --debug` compiled cleanly at exit 0, with no diagnostic, reaching
-the exact same unchecked codegen path as the `--legacy` case.
+**Fat build with an arm64 slice** (no `--arch` resolves a fat `.krbo`
+covering all 8 hosted (OS, arch) slices by default, four of which are
+arm64):
+
+| Command line | Why it reaches legacy arm64 codegen |
+|---|---|
+| `--legacy --debug prog.kr` | No `--arch` at all — the default output for a bare `krc` invocation. This is the single most likely way a real user hits this refusal: they never typed `--arch=arm64`, or arm64, anywhere. |
+| `--target=android --legacy --debug` | `--target=android` forces `emit_mode` to Android internally but does not set the "an explicit target was requested" flag that `--emit=android` would — so the fat-build decision still sees "no arch, no emit" and routes here anyway, arm64 slice included. |
+| `--targets=<list>,...arm64... --legacy --debug` | An explicit `--targets=` selection that names any arm64 slice (`linux-arm64`, `win-arm64`, `mac-arm64`, `android-arm64`) forces a fat build containing it. A `--targets=` selection that excludes every arm64 slice is NOT refused — e.g. `--targets=linux-x64,win-x64` still builds. |
+
+Before this was understood, only the first single-target row was refused:
+`--arch=arm64 --emit=obj --debug` compiled cleanly at exit 0, with no
+diagnostic, reaching the exact same unchecked codegen path as the
+`--legacy` case — and the fat-build rows were not documented anywhere,
+even though the refusal already covered them.
 
 **The accepted cost.** `codegen_aarch64.kr` DOES correctly trap the other
 four checks in the table above — overflow, divide-by-zero, and null

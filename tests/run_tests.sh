@@ -8567,9 +8567,10 @@ done
 #    x86_64 -- and none in codegen_aarch64.kr; arm64 IR checks via a
 #    different mechanism, IR_ARR_CHECK op 131). Measured: `uint64[4] a;
 #    a[99]` under --debug aborts (rc=1) on x86_64 legacy, x86_64 IR and
-#    arm64 IR, but on legacy arm64 it silently prints "v=0" and exits 0.
-#    --debug is a safety promise; refuse rather than ship it unmet with no
-#    diagnostic.
+#    arm64 IR, but on legacy arm64 it silently prints a garbage value and
+#    exits 0 (silent-and-exit-0 reproduces every time; the specific value
+#    read does not). --debug is a safety promise; refuse rather than ship
+#    it unmet with no diagnostic.
 #
 #    The rule is DERIVED from the codegen dispatch (arch == 1 &&
 #    (emit_ir_mode == 0 || emit_mode == 3 || emit_mode == 7)), not
@@ -8577,8 +8578,13 @@ done
 #    --emit=lkm (7) select legacy on arm64 unconditionally, even with no
 #    --legacy on the line at all (both need it for extern relocations).
 #    Verified below by exhaustively trying --arch=arm64 --debug against
-#    every --emit= spelling this compiler accepts (checked against --help's
-#    own list, so a spelling added there without being added here reds).
+#    every --emit= spelling this compiler accepts today (a hardcoded
+#    28-item list, checked against itself for count and NOT independently
+#    cross-checked against src/main.kr here -- emit_valid_list_is_complete
+#    elsewhere in this file is what derives the spelling set mechanically
+#    from src/main.kr's str_eq_full(emit_str, ...) arms and would catch a
+#    spelling this list drifted out of sync with; --help is not that check,
+#    it lists only 8 of the 28 accepted spellings).
 t6_refuses "t6_legacy_arm64_debug_refused" "--debug" "--legacy" -- \
     --legacy --arch=arm64 --debug "$T6_D/arr.kr"
 # --emit=obj reaches legacy arm64 codegen with NO --legacy anywhere on the
@@ -8586,9 +8592,11 @@ t6_refuses "t6_legacy_arm64_debug_refused" "--debug" "--legacy" -- \
 # the dispatch instead of enumerated from the two cases known at the time.
 t6_refuses "t6_emit_obj_arm64_debug_refused" "--debug" "--emit=obj" -- \
     --arch=arm64 --emit=obj --debug "$T6_D/arr.kr"
-# --emit=lkm reaches it too (same dispatch condition), though in practice
-# it is already refused first for an unrelated reason (x86_64-only). Still
-# refused either way -- this only asserts refusal, not which message wins.
+# --emit=lkm reaches it too (same dispatch condition). It is ALSO refused
+# for an unrelated reason (x86_64-only), but that check runs later --
+# measured, THIS refusal wins, so the message really is the --debug one
+# (t6_refuses pins both "--debug" and "arm64", so this does assert which
+# message wins, not just that some refusal fired).
 t6_refuses "t6_emit_lkm_arm64_debug_refused" "--debug" "arm64" -- \
     --arch=arm64 --emit=lkm --debug "$T6_D/arr.kr"
 # --legacy + arm64 WITHOUT --debug must keep working (also covered by
@@ -8607,17 +8615,23 @@ t6_builds "t6_emit_obj_arm64_no_debug_builds" -- --arch=arm64 --emit=obj "$T6_D/
 t6_refuses "t6_legacy_debug_fat_refused" "--debug" "--legacy" -- \
     --legacy --debug "$T6_D/arr.kr"
 
-# Exhaustive check: every --emit= spelling --help lists, against
-# --arch=arm64 --debug, with NO --legacy. Per the derived rule, exactly two
-# (obj, lkm) should reach legacy arm64 codegen and be refused; every other
-# spelling must still build (image/uefi refuse too, but for the unrelated
-# "requires --target=none" reason -- not exercised here since no --target=
-# is passed, so they hit that refusal first regardless of --debug).
+# Exhaustive check: every --emit= spelling this compiler accepts today,
+# against --arch=arm64 --debug, with NO --legacy. Per the derived rule,
+# exactly two (obj, lkm) should reach legacy arm64 codegen and be refused;
+# every other spelling must still build (image/uefi refuse too, but for the
+# unrelated "requires --target=none" reason -- not exercised here since no
+# --target= is passed, so they hit that refusal first regardless of
+# --debug). The 28-item list below is a hardcoded snapshot, not derived
+# from source -- the count check just below only catches this list being
+# edited down, not the compiler's accepted-spelling set drifting away from
+# it. emit_valid_list_is_complete (elsewhere in this file) is the test that
+# derives the spelling set mechanically from src/main.kr's
+# str_eq_full(emit_str, ...) arms and would actually catch that drift.
 EMIT_SPELLINGS="elfexe elf elf-arm64 elf-x86_64 linux linux-x86_64 linux-arm64 linux-x86-64 macho mac macos mac-x64 mac-arm64 darwin windows windows-x64 windows-arm64 win win-x64 win-arm64 pe obj android asm ir lkm image uefi"
 EMIT_SPELLING_COUNT=$(echo $EMIT_SPELLINGS | wc -w)
 TOTAL=$((TOTAL + 1))
 if [ "$EMIT_SPELLING_COUNT" != "28" ]; then
-    echo "FAIL: t6_emit_spelling_count (expected 28 spellings in the enumeration, have $EMIT_SPELLING_COUNT -- --help's list moved; update EMIT_SPELLINGS above)"
+    echo "FAIL: t6_emit_spelling_count (EMIT_SPELLINGS above was edited to $EMIT_SPELLING_COUNT entries, expected 28 -- this only catches an edit to the literal list, not the compiler's spelling set changing; see emit_valid_list_is_complete for that)"
     FAIL=$((FAIL + 1))
 else
     PASS=$((PASS + 1)); echo "  t6_emit_spelling_count: PASS (28)"
