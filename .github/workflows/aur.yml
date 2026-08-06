@@ -38,6 +38,23 @@ jobs:
           cd /home/builder/b
           namcap PKGBUILD
 
+      - name: Wait for release assets (avoids the tag-push race with release.yml)
+        # A tag push triggers this workflow and release.yml in the same
+        # second. makepkg below downloads krc-linux-x86_64/kr-linux-x86_64
+        # from that tag's release, which release.yml can still be building --
+        # this workflow cannot win that race by assuming the assets exist.
+        # Poll instead. The version comes from PKGBUILD's own pkgver, not a
+        # literal, so this never drifts from what's actually being tested.
+        run: |
+          # The archlinux:latest container has curl but not `gh`, so this
+          # polls via the unauthenticated public REST API (scripts/wait-for-
+          # release-assets.sh falls back to it automatically). Well within
+          # the unauthenticated rate limit at one request per 30s.
+          PKGVER=$(grep -oE '^pkgver=.*' packaging/aur/PKGBUILD | cut -d= -f2)
+          bash scripts/wait-for-release-assets.sh \
+            "${{ github.repository }}" "v$PKGVER" \
+            krc-linux-x86_64 kr-linux-x86_64
+
       - name: Build (verifies all source checksums)
         run: |
           cd /home/builder/b

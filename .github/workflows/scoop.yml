@@ -20,6 +20,22 @@ jobs:
           iex "& {$(irm get.scoop.sh)} -RunAsAdmin"
           "$env:USERPROFILE\scoop\shims" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
 
+      - name: Wait for release assets (avoids the tag-push race with release.yml)
+        # A tag push triggers this workflow and release.yml in the same
+        # second. `scoop install` below fetches krc-windows-*.zip from that
+        # tag's release, which release.yml can still be building -- this
+        # workflow cannot win that race by assuming the assets exist. Poll
+        # instead. The version comes from bucket/kernrift.json itself, not a
+        # literal, so this never drifts from what's actually being tested.
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION=$(grep -oE '"version": *"[^"]*"' bucket/kernrift.json | head -1 | sed -E 's/.*"([^"]*)"$/\1/')
+          bash scripts/wait-for-release-assets.sh \
+            "${{ github.repository }}" "v$VERSION" \
+            krc-windows-x86_64.zip krc-windows-arm64.zip
+
       - name: Install kernrift from the local manifest
         shell: pwsh
         run: scoop install .\bucket\kernrift.json
