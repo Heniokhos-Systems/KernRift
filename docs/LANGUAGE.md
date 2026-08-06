@@ -2181,12 +2181,19 @@ For debugging — `-g` DWARF in gdb, the `--debug` trap table, and the
 `--O0` → `--no-coalesce` → `--legacy` miscompile bisection ladder — see
 [docs/DEBUGGING.md](DEBUGGING.md).
 
-`--legacy --arch=arm64 --debug` is refused: the legacy arm64 backend has no
-array-bounds-check codegen, so that exact combination would otherwise build
-clean and silently ship `--debug` unmet. `--legacy --arch=arm64` without
-`--debug`, and `--debug` on every other arch/backend pairing (including the
-default IR backend on arm64), are unaffected — see the per-backend table in
-[docs/DEBUGGING.md](DEBUGGING.md).
+`--debug` is refused on arm64 whenever the command line would reach the
+legacy backend: the legacy arm64 backend has no array-bounds-check codegen,
+so any such build would otherwise compile clean and silently ship `--debug`
+unmet. That is `--legacy --arch=arm64 --debug`, and also `--arch=arm64
+--emit=obj --debug` / `--arch=arm64 --emit=lkm --debug` — obj/lkm select
+legacy codegen on arm64 even with no `--legacy` on the line, for extern
+relocations. The refusal also disables legacy arm64's overflow/null-pointer
+/divide-by-zero `--debug` checks, which DO work there, on every one of
+those command lines — an accepted cost of refusing the whole command line
+rather than only the missing check; see
+[docs/DEBUGGING.md](DEBUGGING.md) for the full reasoning and table. None of
+this affects any of those flags without `--debug`, or `--debug` on any
+other arch/backend pairing (including the default IR backend on arm64).
 
 ### Static checks: the type checker
 

@@ -7604,50 +7604,67 @@ fn main() {
         exit(1)
     }
 
-    // --legacy --arch=arm64 --debug: codegen_aarch64.kr has no array-
-    // bounds-check machinery at all. `arr_count_lookup` has 4 call sites --
-    // codegen.kr:4457 and :10403 (legacy x86_64), ir.kr:3844 and :4868 (IR
-    // x86_64) -- and none in codegen_aarch64.kr. arm64 IR checks via a
-    // different mechanism (IR_ARR_CHECK, op 131), so it IS covered; only
-    // the legacy arm64 path is silent. Measured on this tree: `uint64[4] a;
-    // a[99]` under --debug aborts (rc=1) on x86_64 legacy, x86_64 IR and
-    // arm64 IR, but under --legacy --arch=arm64 --debug it prints "v=0" and
-    // exits 0. --debug is a safety promise this backend does not keep, so
-    // refuse rather than ship it unmet with no diagnostic.
+    // --debug on any path that reaches legacy arm64 codegen: codegen_aarch64
+    // .kr has no array-bounds-check machinery at all. `arr_count_lookup` has
+    // 4 call sites -- codegen.kr:4457 and :10403 (legacy x86_64), ir.kr:3844
+    // and :4868 (IR x86_64) -- and none in codegen_aarch64.kr. arm64 IR
+    // checks via a different mechanism (IR_ARR_CHECK, op 131), so it IS
+    // covered; only the legacy arm64 path is silent. Measured on this tree:
+    // `uint64[4] a; a[99]` under --debug aborts (rc=1) on x86_64 legacy,
+    // x86_64 IR and arm64 IR, but on legacy arm64 it prints "v=0" and exits
+    // 0. --debug is a safety promise this backend does not keep, so refuse
+    // rather than ship it unmet with no diagnostic.
+    //
+    // DERIVED FROM THE ACTUAL DISPATCH, NOT ENUMERATED: the per-function
+    // codegen loop below (and its four twins in compile_fat) picks legacy
+    // arm64 (gen_function_a64) over IR arm64 (ir_emit_arm64_function)
+    // exactly when
+    //     arch == 1 && (emit_ir_mode == 0 || emit_mode == 3 || emit_mode == 7)
+    // -- see the `if emit_ir_mode != 0 && arch == 1 && emit_mode != 3 &&
+    // emit_mode != 7 { IR } ... else { legacy }` chain a few hundred lines
+    // down. `--legacy` (emit_ir_mode == 0) is the obvious way in, but
+    // --emit=obj (3) and --emit=lkm (7) select legacy on arm64 UNCONDITIONALLY
+    // -- even with no --legacy on the line at all -- because both need
+    // legacy codegen for extern relocations (see that same comment).
+    // Measured: `--arch=arm64 --emit=obj --debug`, no --legacy anywhere,
+    // compiled clean at exit 0 before this widened refusal existed.
+    // --emit=lkm on arm64 is already refused unconditionally for an
+    // unrelated reason (x86_64-only, codegen.kr:13273) so it never reaches
+    // this far in practice, but the condition above is left to include it
+    // rather than special-cased out: a rule derived from the dispatch is
+    // supposed to describe the dispatch, not a snapshot of which other
+    // refusals currently happen to shadow it.
     //
     // Adding the checks is separately queued work (this is a front-end
-    // refusal, not codegen). This deliberately breaks a command line that
+    // refusal, not codegen). This deliberately breaks command lines that
     // worked before -- accepted: bounds checking itself was never actually
-    // protected here. Collateral, and worth being honest about: this
-    // codegen_aarch64.kr file DOES correctly trap overflow, null pointers
-    // and divide-by-zero under --debug (see its own debug_mode sites), and
-    // refusing the whole three-flag combination makes those unreachable on
-    // legacy arm64 too, not just the missing bounds check. A --debug build
-    // that used none of the five checks was never protected by any of
-    // them; one that used only the four that did work loses working
-    // protection to this refusal. The alternative -- refusing only when an
-    // array is actually indexed -- was rejected: it reproduces the exact
-    // "silent restriction surfaces on whichever function you write next"
-    // failure mode the --target=none --debug refusal above was written to
+    // protected on any of them. Collateral, and stated plainly in the
+    // message below because the owner decided the rule must be coherent
+    // even at this cost: codegen_aarch64.kr DOES correctly trap overflow,
+    // null pointers and divide-by-zero under --debug (see its own
+    // debug_mode sites), and refusing the whole combination makes those
+    // unreachable on legacy arm64 too, not just the missing bounds check. A
+    // --debug build that used none of the four other checks was never
+    // protected by any of them; one that used only the working ones loses
+    // working protection to this refusal, until the bounds-check codegen is
+    // implemented (queued, not started). The alternative -- refusing only
+    // when an array is actually indexed -- was rejected: it reproduces the
+    // exact "silent restriction surfaces on whichever function you write
+    // next" failure mode the --target=none --debug refusal above exists to
     // avoid, for the same reason.
-    //
-    // Gated on emit_ir_mode == 0, which is exactly "--legacy was passed"
-    // (its only writer besides the codegen.kr default). --emit=obj and
-    // --emit=lkm also fall back to legacy codegen on arm64 even without
-    // --legacy (their own extern-relocation requirement, unconditional on
-    // this flag) -- that is a different, narrower gap and out of scope
-    // here; this refusal only fires when --legacy was actually requested.
     //
     // Reaches through the fat-binary path too: bare `krc` with no --arch
     // emits a FAT binary, and compile_fat's four arm64 (OS, arch) slices
-    // (linux/win/macos/android-arm64 -- KrboFat bits 1/3/5/6) honor
-    // --legacy exactly like the single-target path above (see the matching
-    // `if emit_ir_mode != 0 { ... } else { gen_function_a64(...) }` at each
-    // arm64 slice in compile_fat). The default fat build (no --targets=)
-    // carries all 8 slices, so `--legacy --debug` with no --arch reaches
-    // the same silent gap by default; a `--targets=` selection that
-    // excludes every arm64 bit does not, and is left alone.
-    if emit_ir_mode == 0 && debug_mode != 0 {
+    // (linux/win/macos/android-arm64 -- KrboFat bits 1/3/5/6) pick legacy
+    // vs IR purely on emit_ir_mode (fat mode has no --emit=obj/asm/ir/lkm
+    // variant, so the emit_mode half of the single-target rule above does
+    // not apply there -- see the matching `if emit_ir_mode != 0 { ... }
+    // else { gen_function_a64(...) }` at each arm64 slice in compile_fat).
+    // The default fat build (no --targets=) carries all 8 slices, so
+    // `--legacy --debug` with no --arch reaches the same silent gap by
+    // default; a `--targets=` selection that excludes every arm64 bit does
+    // not, and is left alone.
+    if debug_mode != 0 {
         uint64 fat_dispatch = 0
         if target_mask != 0 || (arch_set == 0 && emit_set == 0 && cli_argc > 0) {
             fat_dispatch = 1
@@ -7658,15 +7675,24 @@ fn main() {
             // android-arm64 (see the KrboFat bit-layout comment above
             // target_mask's declaration). target_mask == 0 means the
             // default: all 8 slices, which includes all four of those.
-            if target_mask == 0 || (target_mask & 0x6A) != 0 {
-                arm64_legacy_reachable = 1
+            if emit_ir_mode == 0 {
+                if target_mask == 0 || (target_mask & 0x6A) != 0 {
+                    arm64_legacy_reachable = 1
+                }
             }
         } else if arch == 1 {
-            arm64_legacy_reachable = 1
+            if emit_ir_mode == 0 || emit_mode == 3 || emit_mode == 7 {
+                arm64_legacy_reachable = 1
+            }
         }
         if arm64_legacy_reachable != 0 {
-            uint64 dbg_lg_msg = "error: --debug does not emit array bounds checks on the legacy arm64 backend. They are emitted on x86_64 (legacy and IR) and on arm64 IR. Drop --legacy, or drop --debug and accept no bounds checking.\n"
-            write(2, dbg_lg_msg, str_len(dbg_lg_msg))
+            if emit_ir_mode == 0 {
+                uint64 dbg_lg_msg = "error: --debug does not emit array bounds checks on the legacy arm64 backend, and refusing this also drops the overflow/null-pointer/divide-by-zero checks that DO work there (they are all-or-nothing per backend, not per-check). Bounds checks are emitted on x86_64 (legacy and IR) and on arm64 IR; arm64-legacy bounds checking is queued, not implemented. Drop --legacy, or drop --debug and accept no runtime checks on this backend.\n"
+                write(2, dbg_lg_msg, str_len(dbg_lg_msg))
+            } else {
+                uint64 dbg_obj_msg = "error: --debug does not emit array bounds checks on the legacy arm64 backend, which --emit=obj/--emit=lkm select on arm64 even without --legacy (extern relocations need it); refusing this also drops the overflow/null-pointer/divide-by-zero checks that DO work there (they are all-or-nothing per backend, not per-check). Bounds checks are emitted on x86_64 (legacy and IR) and on arm64 IR; arm64-legacy bounds checking is queued, not implemented. Drop --debug and accept no runtime checks, or build without --emit=obj/--emit=lkm.\n"
+                write(2, dbg_obj_msg, str_len(dbg_obj_msg))
+            }
             exit(1)
         }
     }

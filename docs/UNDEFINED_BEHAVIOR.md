@@ -46,7 +46,7 @@ reasoning for anything non-obvious.
 | Unaligned load / store (non-atomic)     | Defined  | Both x86 and ARMv8 permit; a few microbenchmarks pay a penalty. |
 | Unaligned atomic load / store           | **Undefined** | ARMv8 traps. x86 works but is not portable. |
 | Load / store of an invalid pointer      | **Undefined** | No bounds tracking. Typically SIGSEGV. |
-| Array indexing out-of-bounds            | **Undefined** in release; trap under `--debug` | Compile with `--debug` to turn every indexed access of a compile-time-sized array (stack or static) into a bounds check that `exit(1)`s on violation. Release builds elide the check. Applies to the IR backend on x86_64 and arm64, and to the `--legacy` backend on x86_64; the legacy arm64 backend (`codegen_aarch64.kr`) has no such codegen, so `--legacy --arch=arm64 --debug` is refused at compile time rather than silently building a checkless binary. |
+| Array indexing out-of-bounds            | **Undefined** in release; trap under `--debug` | Compile with `--debug` to turn every indexed access of a compile-time-sized array (stack or static) into a bounds check that `exit(1)`s on violation. Release builds elide the check. Applies to the IR backend on x86_64 and arm64, and to the legacy backend on x86_64; the legacy arm64 backend (`codegen_aarch64.kr`) has no such codegen, so `--debug` is refused at compile time on every command line that would reach it: `--legacy --arch=arm64 --debug`, and also `--arch=arm64 --emit=obj --debug` / `--arch=arm64 --emit=lkm --debug` (obj/lkm select legacy codegen on arm64 even without `--legacy`, for extern relocations). Refusing the whole command line, not just the missing check, also disables the overflow/divide-by-zero/null-pointer checks below on those same command lines, even though they DO work on legacy arm64 — see `docs/DEBUGGING.md` for why that trade was accepted. |
 | Use-after-free (`dealloc` then access)  | **Undefined** | The backing allocator is `mmap` / `HeapAlloc`; behavior varies. |
 | Double `dealloc`                        | **Undefined** | Allocator-dependent. |
 | Read of an uninitialized stack slot     | Unspecified | Whatever value happens to be on the stack. Not cleared by prologue. |
@@ -158,8 +158,8 @@ Items tracked against the UB surface:
   trapping exists only on the legacy backend under `--debug`, and its
   add/sub guard (`jno`/`b.vc`) catches signed overflow only — unsigned
   carry wraps silently. The default IR backend emits no overflow checks.
-  In practice this means x86_64 only: `--legacy --arch=arm64 --debug` is
-  refused (see the array-indexing row above), which also makes the legacy
-  arm64 overflow/null/divide-by-zero guards unreachable even though their
-  codegen is correct — the refusal is on the whole flag combination, not
-  just the missing bounds check.
+  In practice this means x86_64 only: every command line that reaches
+  legacy arm64 codegen under `--debug` is refused (see the array-indexing
+  row above), which also makes the legacy arm64 overflow/null/divide-by-zero
+  guards unreachable even though their codegen is correct — the refusal is
+  on the whole command line, not just the missing bounds check.

@@ -48,8 +48,13 @@ and arm64, and on the legacy backend on x86_64. The trap is silent (no
 message); a non-zero exit at an unexpected point is the signal.
 
 The legacy arm64 backend has no bounds-check codegen at all — see the table
-below — so `--legacy --arch=arm64 --debug` is refused outright rather than
-silently accepting a build with no checks.
+below — so `--debug` is refused outright on any command line that would
+reach it, rather than silently accepting a build with no checks. That is
+not only `--legacy --arch=arm64 --debug`: `--arch=arm64 --emit=obj --debug`
+and `--arch=arm64 --emit=lkm --debug` select the legacy backend too, even
+with no `--legacy` on the line at all (obj/lkm always need legacy codegen,
+on every arch, for extern relocations) — see "Why refused on more than
+`--legacy`" below.
 
 ### What `--debug` checks, per backend
 
@@ -65,14 +70,45 @@ backend:
 | Null pointer in `loadN`/`storeN` builtins | No check — SIGSEGV (exit 139) | **Traps**, `exit(1)` | refused at compile time (see below) |
 | Unsigned overflow | No check (defined behavior — wraps) | No check (wraps; the guard tests the *signed* overflow flag only) | refused at compile time (see below) |
 
-**`--legacy --arch=arm64 --debug` is refused outright, unconditionally.**
-`codegen_aarch64.kr` (the legacy arm64 backend) has no array-bounds-check
-codegen at all — it never did — even though it correctly traps the other
-four rows above. Rather than ship `--debug` unmet for bounds checks on this
-one backend/arch combination with no diagnostic, the compiler refuses the
-whole three-flag combination up front. The practical effect: on arm64,
-`--legacy --debug` is not available at all, for any of the five checks —
-use the IR backend (the default) there instead.
+**`--debug` is refused outright on arm64 whenever it would reach the legacy
+backend.** `codegen_aarch64.kr` has no array-bounds-check codegen at all —
+it never did — even though it correctly traps the other four rows above.
+Rather than ship `--debug` unmet for bounds checks on this one
+backend/arch combination with no diagnostic, the compiler refuses the
+command line up front.
+
+#### Why refused on more than `--legacy`
+
+The refusal is derived from what actually selects the legacy backend on
+arm64, not from "the user typed `--legacy`". Three command lines reach it:
+
+| Command line | Why it reaches legacy arm64 codegen |
+|---|---|
+| `--legacy --arch=arm64 --debug` | Explicit: `--legacy` asks for it directly. |
+| `--arch=arm64 --emit=obj --debug` | Implicit: a relocatable object always uses legacy codegen, on every arch, so extern-symbol relocations resolve correctly — `--legacy` is redundant here and was never required for this to happen. |
+| `--arch=arm64 --emit=lkm --debug` | Same as `--emit=obj`, for the same reason (LKM is also a relocatable-object format). In practice `--emit=lkm` on arm64 is refused first for an unrelated reason (loadable kernel modules are x86_64-only today), so this row is currently unreachable in isolation — but the rule does not special-case it out, because a rule derived from the dispatch should describe the dispatch. |
+
+Before this was understood, only the first row was refused: `--arch=arm64
+--emit=obj --debug` compiled cleanly at exit 0, with no diagnostic, reaching
+the exact same unchecked codegen path as the `--legacy` case.
+
+**The accepted cost.** `codegen_aarch64.kr` DOES correctly trap the other
+four checks in the table above — overflow, divide-by-zero, and null
+pointers all work on legacy arm64. The refusal is on the whole command
+line, not on the missing check alone, because the checks are all-or-nothing
+per backend build, not selectable per check. That means a `--debug` build
+that would have used only the three checks that DO work on legacy arm64
+loses that working protection to this refusal too, on every command line in
+the table above. This is a deliberate, accepted trade: the alternative —
+refusing only when an array is actually indexed — reproduces the "silent
+restriction surfaces on whichever function you write next" failure mode
+that this same refusal exists to avoid for the missing bounds check.
+Implementing arm64-legacy bounds-check codegen (which would remove the
+refusal entirely) is queued, not started.
+
+The practical effect: on arm64, the legacy backend is not usable under
+`--debug` at all, for any of the five checks — use the IR backend (the
+default) there instead.
 
 Practical consequence: if `--debug` on the default backend doesn't catch
 anything, try `--legacy --debug` — it guards more operations — but only on
