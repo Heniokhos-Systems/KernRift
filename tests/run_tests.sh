@@ -3094,6 +3094,64 @@ fn main() {
     if s != 0x3A9A6225 { exit(2) }
     exit(42)
 }' 42
+
+    # --- narrow volatile access width ---
+    # The arm64 IR backend emitted a 64-bit STLR/LDAR for EVERY volatile access
+    # regardless of the declared width, so a u8 write clobbered 7 neighbouring
+    # bytes and a u8 read pulled them in. These rows must live inside this
+    # QEMU/x86_64 block: run_test_a64 is defined at :2953 and this block ends
+    # at the `fi` below, so calling it later would emit "command not found",
+    # never increment TOTAL, and silently pass.
+    run_test_a64 "a64_device_narrow_store_no_clobber" 'device Fake at 0x66666000 {
+    Data   at 0x00 : u32
+    Status at 0x04 : u8
+    Other  at 0x08 : u32
+}
+fn main() {
+    u64 nr = 9
+    u64 aid = get_arch_id()
+    if aid == 2 { nr = 222 }
+    if aid == 4 { nr = 222 }
+    if aid == 6 { nr = 222 }
+    if aid == 7 { nr = 222 }
+    syscall_raw(nr, 0x66666000, 4096, 3, 0x32, 0xFFFFFFFFFFFFFFFF, 0)
+    Fake.Other = 99
+    Fake.Status = 7
+    exit(Fake.Other)
+}' 99
+
+    run_test_a64 "a64_device_narrow_load_no_bleed" 'device Fake at 0x66666000 {
+    Data   at 0x00 : u32
+    Status at 0x04 : u8
+    Other  at 0x08 : u32
+}
+fn main() {
+    u64 nr = 9
+    u64 aid = get_arch_id()
+    if aid == 2 { nr = 222 }
+    if aid == 4 { nr = 222 }
+    if aid == 6 { nr = 222 }
+    if aid == 7 { nr = 222 }
+    syscall_raw(nr, 0x66666000, 4096, 3, 0x32, 0xFFFFFFFFFFFFFFFF, 0)
+    store8(0x66666004, 7)
+    store32(0x66666008, 0x11111111)
+    u64 s = Fake.Status
+    if s == 7 { exit(0) }
+    exit(1)
+}' 0
+
+    run_test_a64 "a64_vstore_narrow_no_clobber" 'fn main() {
+    u64 nr = 9
+    u64 aid = get_arch_id()
+    if aid == 2 { nr = 222 }
+    if aid == 4 { nr = 222 }
+    if aid == 6 { nr = 222 }
+    if aid == 7 { nr = 222 }
+    syscall_raw(nr, 0x66666000, 4096, 3, 0x32, 0xFFFFFFFFFFFFFFFF, 0)
+    vstore32(0x66666008, 99)
+    vstore8(0x66666004, 7)
+    exit(vload32(0x66666008))
+}' 99
 fi
 
 # --- v2.6 feature tests ---
@@ -3226,6 +3284,67 @@ fn main() {
     u8  s = Fake.Status
     exit(v + s)
 }' 49
+
+# Narrow volatile access width. NOTE: device_block_read_write above passes even
+# with the width bug present -- its overlapping 64-bit stores still truncate to
+# the expected reads -- so it is NOT width coverage. These rows are.
+# They compile at the host arch, so they are the arm64 coverage on the native
+# ubuntu-24.04-arm CI job; the a64_* twins above cover the x86_64 job via QEMU.
+run_test "device_narrow_store_no_clobber" 'device Fake at 0x66666000 {
+    Data   at 0x00 : u32
+    Status at 0x04 : u8
+    Other  at 0x08 : u32
+}
+fn main() {
+    u64 nr = 9
+    u64 aid = get_arch_id()
+    if aid == 2 { nr = 222 }
+    if aid == 4 { nr = 222 }
+    if aid == 6 { nr = 222 }
+    if aid == 7 { nr = 222 }
+    syscall_raw(nr, 0x66666000, 4096, 3, 0x32, 0xFFFFFFFFFFFFFFFF, 0)
+    Fake.Other = 99
+    Fake.Status = 7
+    exit(Fake.Other)
+}' 99
+
+# The store row cannot catch a load-side regression: a fresh mmap page is
+# zero-filled, so an over-wide load still yields the right low byte. The
+# neighbour must be dirtied first.
+run_test "device_narrow_load_no_bleed" 'device Fake at 0x66666000 {
+    Data   at 0x00 : u32
+    Status at 0x04 : u8
+    Other  at 0x08 : u32
+}
+fn main() {
+    u64 nr = 9
+    u64 aid = get_arch_id()
+    if aid == 2 { nr = 222 }
+    if aid == 4 { nr = 222 }
+    if aid == 6 { nr = 222 }
+    if aid == 7 { nr = 222 }
+    syscall_raw(nr, 0x66666000, 4096, 3, 0x32, 0xFFFFFFFFFFFFFFFF, 0)
+    store8(0x66666004, 7)
+    store32(0x66666008, 0x11111111)
+    u64 s = Fake.Status
+    if s == 7 { exit(0) }
+    exit(1)
+}' 0
+
+# Same defect reached through the vstore*/vload* builtins instead of a device
+# block -- they emit the same two IR opcodes.
+run_test "vstore_narrow_no_clobber" 'fn main() {
+    u64 nr = 9
+    u64 aid = get_arch_id()
+    if aid == 2 { nr = 222 }
+    if aid == 4 { nr = 222 }
+    if aid == 6 { nr = 222 }
+    if aid == 7 { nr = 222 }
+    syscall_raw(nr, 0x66666000, 4096, 3, 0x32, 0xFFFFFFFFFFFFFFFF, 0)
+    vstore32(0x66666008, 99)
+    vstore8(0x66666004, 7)
+    exit(vload32(0x66666008))
+}' 99
 
 echo ""
 echo "--- v2.6 method calls ---"
