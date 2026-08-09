@@ -1296,36 +1296,48 @@ rm -f "$DIR/../vbar_v_$$.kr" "$DIR/../vbar_u_$$.kr"
 # identifier" -- for `unsafe` as well as `volatile`. Compile-and-run all four.
 TOTAL=$((TOTAL + 1))
 VBIND_OK=1
-# Resolve qemu LOCALLY. $QEMU_A64 is not set until ~line 2950, far below this
-# point, so referencing it here would be empty and both arm64 configs would be
-# skipped in silence -- the same shape as the run_test_a64 placement trap.
-VBIND_QEMU="$(command -v qemu-aarch64-static || command -v qemu-aarch64 || true)"
+# These rows EXECUTE, so they must follow $RUN_ARCH rather than naming an arch.
+# Hardcoding x86_64 here made the native ARM64 CI job produce a binary it could
+# not run (exit 126, reported as a wrong answer) -- the exact trap documented at
+# the top of this file.
+#
+# Host arch runs natively; the other arch runs under qemu when available.
+# Resolve qemu LOCALLY: $QEMU_A64 is not set until ~line 2950, far below here,
+# so referencing it would be empty and skip configs in silence.
+VBIND_OTHER="arm64"
+if [ "$RUN_ARCH" = "arm64" ]; then VBIND_OTHER="x86_64"; fi
+VBIND_QEMU=""
+if [ "$VBIND_OTHER" = "arm64" ]; then
+    VBIND_QEMU="$(command -v qemu-aarch64-static || command -v qemu-aarch64 || true)"
+fi
 printf 'fn main() { u64 p = alloc(64)  store32(p, 4)  volatile { *(p as u32) -> v }  exit(v / 2) }\n' > "$DIR/../vbind_v_$$.kr"
 printf 'fn main() { u64 p = alloc(64)  store32(p, 4)  unsafe { *(p as u32) -> v }  exit(v / 2) }\n' > "$DIR/../vbind_u_$$.kr"
 VBIND_RAN=0
+vbind_run() { # <arch> <flags> <src> <runner-or-empty>
+    local _bin="/tmp/krc_vbind_$$"
+    if ! $KRC --arch="$1" $2 "$3" -o "$_bin" >/dev/null 2>&1; then
+        VBIND_OK=0; echo "  $(basename $3) $1 ${2:-IR}: COMPILE FAILED"
+        return
+    fi
+    if [ -n "$4" ]; then $4 "$_bin" >/dev/null 2>&1; else "$_bin" >/dev/null 2>&1; fi
+    local _rc=$?
+    VBIND_RAN=$((VBIND_RAN + 1))
+    [ "$_rc" = "2" ] || { VBIND_OK=0; echo "  $(basename $3) $1 ${2:-IR}: got $_rc, want 2"; }
+    rm -f "$_bin"
+}
 for _src in "$DIR/../vbind_v_$$.kr" "$DIR/../vbind_u_$$.kr"; do
-    for _cfg in "x86_64:" "x86_64:--legacy" "arm64:" "arm64:--legacy"; do
-        _a="${_cfg%%:*}"; _f="${_cfg##*:}"
-        if [ "$_a" = "arm64" ] && [ -z "$VBIND_QEMU" ]; then continue; fi
-        _bin="/tmp/krc_vbind_$$"
-        if ! $KRC --arch="$_a" $_f "$_src" -o "$_bin" >/dev/null 2>&1; then
-            VBIND_OK=0; echo "  $(basename $_src) $_a ${_f:-IR}: COMPILE FAILED"
-        else
-            if [ "$_a" = "arm64" ]; then $VBIND_QEMU "$_bin" >/dev/null 2>&1; else "$_bin" >/dev/null 2>&1; fi
-            _rc=$?
-            VBIND_RAN=$((VBIND_RAN + 1))
-            [ "$_rc" = "2" ] || { VBIND_OK=0; echo "  $(basename $_src) $_a ${_f:-IR}: got $_rc, want 2"; }
-        fi
-        rm -f "$_bin"
-    done
+    vbind_run "$RUN_ARCH" ""          "$_src" ""
+    vbind_run "$RUN_ARCH" "--legacy"  "$_src" ""
+    if [ -n "$VBIND_QEMU" ]; then
+        vbind_run "$VBIND_OTHER" ""         "$_src" "$VBIND_QEMU"
+        vbind_run "$VBIND_OTHER" "--legacy" "$_src" "$VBIND_QEMU"
+    fi
 done
-# Guard against the whole loop silently doing nothing: 2 sources x 4 configs,
-# or x 2 if qemu is unavailable. Zero would mean the assertion is vacuous.
-if [ -n "$VBIND_QEMU" ]; then
-    [ "$VBIND_RAN" = "8" ] || { VBIND_OK=0; echo "  only $VBIND_RAN/8 config-runs executed"; }
-else
-    [ "$VBIND_RAN" = "4" ] || { VBIND_OK=0; echo "  only $VBIND_RAN/4 config-runs executed (no qemu)"; }
-fi
+# Guard against the loop silently doing nothing. 2 sources x 2 host configs
+# always; x2 more per source when the other arch is runnable.
+VBIND_WANT=4
+if [ -n "$VBIND_QEMU" ]; then VBIND_WANT=8; fi
+[ "$VBIND_RAN" = "$VBIND_WANT" ] || { VBIND_OK=0; echo "  only $VBIND_RAN/$VBIND_WANT config-runs executed"; }
 if [ "$VBIND_OK" = "1" ]; then
     echo "  ptrload_dest_binding_all_backends: PASS (volatile+unsafe bind dest, $VBIND_RAN config-runs)"
     PASS=$((PASS + 1))
