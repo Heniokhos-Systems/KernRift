@@ -5249,6 +5249,45 @@ else
 fi
 rm -f "$UEX_IMG"
 
+# `krc lc --ci` applies a DEFAULT fitness gate of 50, so it does not fail on
+# every pattern. docs/LIVING_COMPILER.md said it did, which is the dangerous
+# direction: anyone wiring the bare form into CI gets a gate that silently
+# ignores everything below 50. Pin the default in the source AND that the doc
+# states it, so the two cannot drift apart.
+TOTAL=$((TOTAL + 1))
+lc_src_default=$(grep -c 'if gate_threshold == 0 { gate_threshold = 50 }' "$DIR/../src/main.kr")
+# Match a phrase that cannot be split by prose wrapping -- the first attempt
+# here grepped for a sentence that the doc wraps mid-phrase, and reported the
+# doc silent when it was not.
+lc_doc_states=$(grep -c 'alone gates at fitness \*\*50\*\*' "$DIR/../docs/LIVING_COMPILER.md")
+if [ "$lc_src_default" = "1" ] && [ "$lc_doc_states" = "1" ]; then
+    PASS=$((PASS + 1)); echo "  lc_ci_default_gate_pinned: PASS (source gates at 50, doc says so)"
+else
+    FAIL=$((FAIL + 1))
+    echo "FAIL: lc_ci_default_gate_pinned (src default-50 sites=$lc_src_default, doc mentions=$lc_doc_states)"
+    echo "  if you changed the --ci default gate, update docs/LIVING_COMPILER.md in the same commit"
+fi
+
+# And the behaviour itself: a file whose only pattern is below the default must
+# pass bare --ci and fail --min-fitness=1. std/alloc.kr currently reports one
+# unchecked_call at 44; if the stdlib changes such that it no longer does, this
+# row skips rather than failing on an unrelated edit.
+TOTAL=$((TOTAL + 1))
+lc_fits=$($KRC lc "$DIR/../std/alloc.kr" 2>/dev/null | grep -oE 'fitness: [0-9]+' | grep -oE '[0-9]+')
+lc_max=0
+for f in $lc_fits; do [ "$f" -gt "$lc_max" ] && lc_max=$f; done
+if [ -z "$lc_fits" ] || [ "$lc_max" -ge 50 ]; then
+    PASS=$((PASS + 1)); echo "  lc_ci_gate_behaviour: SKIP (std/alloc.kr has no sub-50-only pattern; max=$lc_max)"
+else
+    $KRC lc --ci "$DIR/../std/alloc.kr" >/dev/null 2>&1; lc_bare=$?
+    $KRC lc --ci --min-fitness=1 "$DIR/../std/alloc.kr" >/dev/null 2>&1; lc_all=$?
+    if [ "$lc_bare" = "0" ] && [ "$lc_all" = "1" ]; then
+        PASS=$((PASS + 1)); echo "  lc_ci_gate_behaviour: PASS (bare --ci passes a fitness-$lc_max pattern, --min-fitness=1 catches it)"
+    else
+        FAIL=$((FAIL + 1)); echo "FAIL: lc_ci_gate_behaviour (bare=$lc_bare want 0, min1=$lc_all want 1)"
+    fi
+fi
+
 # False-positive guard. Widening the anchor lookup must not make REACHABLE
 # expression statements warn -- a call before the terminator, a call inside a
 # conditional, and calls in a loop body are all live code.

@@ -145,10 +145,31 @@ migration engine — the rewrite is identity-preserving at the IR level.
 
 ```sh
 krc lc file.kr                     # full report
-krc lc --min-fitness=30 file.kr    # filter to patterns with fitness >= 30
-krc lc --ci file.kr                # fail exit code if any pattern fires
-krc lc --ci --min-fitness=50 file.kr  # fail only on patterns >= 50
+krc lc --min-fitness=30 file.kr    # filter the REPORT to patterns >= 30
+krc lc --ci --min-fitness=1 file.kr   # fail if ANY pattern fires
+krc lc --ci file.kr                # fail only on patterns >= 50  (see below)
 ```
+
+**`--ci` on its own does NOT fail on every pattern — it applies a default
+threshold of 50.** `--min-fitness` sets that threshold when `--ci` is present,
+and `krc lc --ci --min-fitness=50` is therefore *identical* to bare
+`krc lc --ci`, not a stricter form of it. Wiring the bare form into CI in the
+belief that it catches everything gives you a gate that silently ignores every
+pattern below 50. Demonstrated against this repository's own stdlib:
+
+```
+$ krc lc std/alloc.kr | grep fitness:
+  [1] unchecked_call  fitness: 44
+$ krc lc --ci std/alloc.kr ; echo $?
+0                       # a pattern fired, and the gate passed
+$ krc lc --ci --min-fitness=1 std/alloc.kr ; echo $?
+1                       # what "fail if any pattern fires" actually requires
+```
+
+The gate is `fitness >= threshold` over the pattern list, so `--min-fitness=1`
+catches everything a pattern detector can report (fitness 0 is not emitted).
+Note `--min-fitness` does double duty: with `--ci` it is the gate, without it
+it filters the report, and it is also the promotion floor for `--promote`.
 
 ### Fitness scoring
 
@@ -173,7 +194,7 @@ What's built and what's next, aligned with the blueprint:
 | Pattern detection | Implemented (5 patterns, 2-layer classification) |
 | Fitness scoring | Implemented (layer-weighted) |
 | Two-layer report | Implemented |
-| CI gating (`--ci`, `--min-fitness`) | Implemented |
+| CI gating (`--ci`, `--min-fitness`) | Implemented — `--ci` alone gates at fitness **50**, not 0 |
 | Auto-fix flag on patterns | Implemented |
 | **Migration engine** (actual source rewriting) | Implemented — `krc lc --fix` rewrites `unsafe{}` pointer ops to `load*/store*` builtins in place. `--dry-run` previews without writing. |
 | **Proposal engine** (generate candidate syntax forms) | Implemented — `krc lc` prints proposals that fire against telemetry, with before/after snippets and rationale. 7 proposals in the initial registry. |
