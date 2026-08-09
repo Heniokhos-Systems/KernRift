@@ -44,20 +44,33 @@ Normal KernRift programs start at the runtime's `_start`, which sets up
 argv/envp, calls `main`, then invokes `exit`. Freestanding programs have
 none of that:
 
-- No stdin/stdout/stderr. Syscalls are meaningless — there's no kernel.
-- No `exit()`. Falling off `main` returns to whatever called you (usually
-  a reset vector or hang loop).
-- No `alloc()`. No dynamic memory unless you bring your own allocator.
-- No stack. You set one up in a tiny assembly trampoline.
+**Two different flags do two different things here, and it matters:**
+
+- **`--freestanding` on x86_64/arm64 means "no libc", NOT "no kernel".** You
+  are still on Linux. `println`, `alloc` and `exit` all work, syscalls are
+  still issued, and the output is a statically linked **ELF**, not a flat
+  binary. It drops the CRT, not the operating system. (On `riscv32`/`xtensa`
+  the same flag *is* genuinely bare-metal — those backends have no hosted
+  mode to fall back to.)
+- **`--target=none` is the bare-metal mode** this tutorial actually wants. It
+  refuses every OS-bound construct with a diagnostic that names a replacement,
+  e.g. calling `println_str` reports that there is no operating system to
+  provide it and points you at `std/uart_16550.kr` (x86_64 COM1) or
+  `std/uart_pl011.kr` (arm64 PL011), or at supplying your own
+  `@builtin_override fn write`. `alloc` is refused the same way, and you set
+  up the stack yourself — or let `--stack-top` emit the entry stub for you.
 
 The compiler flag:
 
 ```
-krc --freestanding --arch=arm64 main.kr -o kernel.elf
+krc --target=none --arch=arm64 --emit=image --image-header \
+    --load-addr=0x40080000 --stack-top=0x40200000 main.kr -o kernel.img
 ```
 
-produces a flat binary with only the code you wrote plus stdlib functions
-you actually called. No `_start`, no CRT, no syscall numbers.
+`--emit=image` is what produces a raw flat binary; `--freestanding` alone
+still emits an ELF container. `--stack-top` makes the compiler emit its own
+entry stub, so the image is self-sufficient and needs no hand-written
+assembly trampoline.
 
 You're responsible for:
 
@@ -81,8 +94,9 @@ Offset  Name    Width   Access   Description
 0x02C   LCR_H   32      rw       Line control (word length, FIFOs)
 0x030   CR      32      rw       Control (UART enable, TX enable, RX enable)
 0x038   IMSC    32      rw       Interrupt mask
-0x044   MIS     32      ro       Masked interrupt status
-0x044   ICR     32      wo       Interrupt clear (write 1 to clear; same offset, different semantics)
+0x03C   RIS     32      ro       Raw interrupt status
+0x040   MIS     32      ro       Masked interrupt status (RIS & IMSC)
+0x044   ICR     32      wo       Interrupt clear (write 1 to clear)
 ```
 
 In KernRift, a `device` block captures this:
@@ -96,7 +110,7 @@ device PL011 at 0x09000000 {
     LCR_H at 0x02C : u32
     CR    at 0x030 : u32
     IMSC  at 0x038 : u32
-    MIS   at 0x044 : u32 ro
+    MIS   at 0x040 : u32 ro
     ICR   at 0x044 : u32 wo
 }
 ```
@@ -395,7 +409,7 @@ bytes if you hold a key down, the interrupt-driven one won't.
   "examples/gic-setup" placeholder.
 - **Two UART FIFO levels.** If you're echoing at >1 MBaud, the 32-byte
   FIFO can overflow between ISRs. Set `LCR_H.FEN = 1` (we do) and enable
-  the level-triggered FIFO watermark interrupt (IMSC bit 6) instead of
+  the receive timeout interrupt (IMSC bit 6, `UART011_RTIM`) instead of
   the single-byte RX interrupt.
 - **Baud rate assumes UARTCLK = 24 MHz.** On Raspberry Pi 4 the UARTCLK
   is 48 MHz (configurable via `core_freq` in `config.txt`).

@@ -1864,6 +1864,27 @@ fn stmt_returns(uint64 stmt) -> uint64 {
         if wek == 13 { return stmt_returns(welse) }   // else-if: recurse as statement
         return block_has_return(welse)                // plain else: block
     }
+    // A provably infinite loop with no break never falls through either, so a
+    // function ending in one cannot reach the end. `loop { }` desugars to
+    // `while 1 == 1`, and `--target=none` explicitly tells users to "end main
+    // with `loop { }`" — which this check then rejected as "may not return a
+    // value on all paths" whenever main had a return type. The compiler was
+    // refusing the idiom it recommends.
+    //
+    // Same two helpers as the unreachable-code check, and the same bias:
+    // sema_block_may_break reports "may break" for anything it cannot model,
+    // so an unmodelled construct costs a spurious error at worst, never a
+    // missed one.
+    if wk == 14 {
+        uint32 lcond = ast_child(stmt)
+        uint64 wlcond = lcond
+        if sema_cond_always_true(wlcond) != 0 {
+            uint32 lbody = ast_data1(stmt)
+            uint64 wlbody = lbody
+            if sema_block_may_break(wlbody) == 0 { return 1 }
+        }
+        return 0
+    }
     // exit(...) never returns to the caller, so a function whose last
     // statement is an exit() call cannot fall off the end (M12).
     if wk == 16 {

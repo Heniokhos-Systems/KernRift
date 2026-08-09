@@ -5187,6 +5187,36 @@ run_warning_check "diag_unreachable_after_loop_body" 'fn main() { u64 i = 0  loo
 # A break belonging to an INNER loop does not let the outer one exit.
 run_warning_check "diag_unreachable_after_loop_inner_break" 'fn main() { loop { while 1 == 1 { break } }  u64 d = 1 }' "unreachable code"
 
+# A function ending in an infinite loop cannot fall off the end, so the
+# missing-return check must not fire. --target=none tells users to "end main
+# with `loop { }`", and this check rejected exactly that whenever main had a
+# return type -- the compiler refusing the idiom it recommends.
+TOTAL=$((TOTAL + 1))
+MRET_OK=1
+mret() { # <name> <src> <want-error-count>
+    printf '%s\n' "$2" > "$DIR/../mret_$$.kr"
+    local n
+    n=$($KRC $KRC_FLAGS "$DIR/../mret_$$.kr" -o /tmp/krc_mret_$$ 2>&1 | grep -c 'may not return')
+    [ "$n" = "$3" ] || { MRET_OK=0; echo "  $1: got $n missing-return errors, want $3"; }
+    rm -f "$DIR/../mret_$$.kr" /tmp/krc_mret_$$
+}
+mret "main->u32 ending in loop{}" 'fn main() -> uint32 { u64 x = 1  loop { } }' 0
+mret "helper->u64 ending in loop{}" 'fn h() -> u64 { loop { } }
+fn main() { exit(0) }' 0
+# The check must NOT be weakened: each of these still has a real path that
+# falls off the end.
+mret "no return at all still errors" 'fn h() -> u64 { u64 x = 1 }
+fn main() { exit(0) }' 1
+mret "loop WITH break still errors" 'fn h() -> u64 { loop { break } }
+fn main() { exit(0) }' 1
+mret "if without else still errors" 'fn h(u64 a) -> u64 { if a > 0 { return 1 } }
+fn main() { exit(0) }' 1
+if [ "$MRET_OK" = "1" ]; then
+    PASS=$((PASS + 1)); echo "  missing_return_infinite_loop: PASS (loop{} satisfies it; check not weakened)"
+else
+    FAIL=$((FAIL + 1)); echo "FAIL: missing_return_infinite_loop"
+fi
+
 # False-positive guard. Widening the anchor lookup must not make REACHABLE
 # expression statements warn -- a call before the terminator, a call inside a
 # conditional, and calls in a loop body are all live code.
