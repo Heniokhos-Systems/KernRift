@@ -1184,7 +1184,10 @@ fi
 run_test "noreturn_fn" '@noreturn fn die() { exit(99) }
 fn main() { die() }' 99
 
-# volatile block (same as unsafe)
+# volatile block. NOTE: this row passes even with the data3 f64 miscompile
+# present, because exit(val) never does arithmetic on the loaded value -- the
+# vreg was mistyped f64 but a plain register move looks identical. The rows
+# below are the ones that actually exercise it.
 run_test "volatile_block" 'fn main() {
     uint64 buf = alloc(64)
     uint64 val = 0
@@ -1192,6 +1195,80 @@ run_test "volatile_block" 'fn main() {
     volatile { *(buf as uint64) -> val }
     exit(val)
 }' 42
+
+# The miscompile: parser.kr wrote a bare 1 into data3 as a "volatile flag"
+# while the unsafe path wrote the FLOAT KIND into the same slot, and IR
+# lowering read it as the float kind. Every volatile load was therefore typed
+# f64, so integer arithmetic on it produced 0.
+run_test "volatile_load_not_mistyped_f64" 'fn main() {
+    u64 p = alloc(64)
+    store32(p, 4)
+    volatile { *(p as u32) -> v }
+    u64 w = v / 2
+    exit(w)
+}' 2
+
+# The same program with `unsafe` was always correct -- it is the control that
+# proves the defect was volatile-specific, not a bug in the load itself.
+run_test "unsafe_load_control_still_correct" 'fn main() {
+    u64 p = alloc(64)
+    store32(p, 4)
+    unsafe { *(p as u32) -> v }
+    u64 w = v / 2
+    exit(w)
+}' 2
+
+# A genuine f64 through a volatile load must still be typed f64 -- the fix
+# must not simply clear the float kind.
+run_test "volatile_load_f64_still_float" 'fn main() {
+    u64 p = alloc(64)
+    unsafe { *(p as f64) = 6.5 }
+    volatile { *(p as f64) -> d }
+    f64 e = d * 2.0
+    if e > 12.9 { if e < 13.1 { exit(9) } }
+    exit(1)
+}' 9
+
+# Volatile now lowers to IR_VLOAD/IR_VSTORE, so it inherits their width
+# correctness: a u8 volatile store must not clobber its neighbours. Before
+# that it went through the plain IR_STORE path.
+run_test "volatile_narrow_store_no_clobber" 'fn main() {
+    u64 p = alloc(64)
+    store32(p + 8, 77)
+    volatile { *(p + 4 as u8) = 3 }
+    exit(load32(p + 8))
+}' 77
+
+# The barrier itself, asserted on emitted bytes with a control. The IR backend
+# emitted NO barrier for a volatile block while the legacy backend emitted one
+# (measured: x86 legacy 1 mfence, x86 IR 0) -- the same legacy-is-right/IR-is-
+# the-outlier shape as the arm64 device-width defect. Behaviour alone cannot
+# catch a missing fence, so pin the instruction.
+# Compile-only, so the arch may be pinned.
+TOTAL=$((TOTAL + 1))
+VBAR_OK=1
+printf 'fn main() { u64 p = alloc(64)  volatile { *(p as u32) -> v }  exit(0) }\n' > "$DIR/../vbar_v_$$.kr"
+printf 'fn main() { u64 p = alloc(64)  unsafe { *(p as u32) -> v }  exit(0) }\n' > "$DIR/../vbar_u_$$.kr"
+VBAR_VOUT=$($KRC --arch=x86_64 --emit=asm "$DIR/../vbar_v_$$.kr" 2>&1)
+VBAR_UOUT=$($KRC --arch=x86_64 --emit=asm "$DIR/../vbar_u_$$.kr" 2>&1)
+VBAR_VL=$(printf '%s' "$VBAR_VOUT" | sed -n 's/.* -> \(.*\) (asm listing)$/\1/p')
+VBAR_UL=$(printf '%s' "$VBAR_UOUT" | sed -n 's/.* -> \(.*\) (asm listing)$/\1/p')
+if [ -f "$VBAR_VL" ] && [ -f "$VBAR_UL" ]; then
+    VBAR_V=$(grep -ci '0f ae f0' "$VBAR_VL")
+    VBAR_U=$(grep -ci '0f ae f0' "$VBAR_UL")
+    [ "$VBAR_V" -ge 1 ] || { VBAR_OK=0; echo "  volatile block emitted no mfence"; }
+    [ "$VBAR_U" = "0" ] || { VBAR_OK=0; echo "  unsafe block wrongly emitted $VBAR_U mfence"; }
+else
+    VBAR_OK=0; echo "  could not locate asm listings"
+fi
+if [ "$VBAR_OK" = "1" ]; then
+    echo "  volatile_block_emits_barrier: PASS (volatile fences, unsafe does not)"
+    PASS=$((PASS + 1))
+else
+    echo "FAIL: volatile_block_emits_barrier"
+    FAIL=$((FAIL + 1))
+fi
+rm -f "$DIR/../vbar_v_$$.kr" "$DIR/../vbar_u_$$.kr" "$VBAR_VL" "$VBAR_UL"
 
 # @packed struct annotation (should parse without error)
 run_test "packed_struct" '@packed struct Reg { uint8 a; uint32 b }

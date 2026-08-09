@@ -1502,7 +1502,21 @@ fn parse_stmt() -> uint64 {
         return asm_node
     }
 
-    // Volatile block: volatile { ... } — treated same as unsafe for now
+    // Volatile block: volatile { *(addr as TYPE) -> dest }
+    //                 volatile { *(addr as TYPE) = value }
+    // NOT a general scope — it parses exactly the same single access form as
+    // `unsafe`, and produces the same AST kinds (41 PtrLoad / 42 PtrStore).
+    // The difference is data3 bit 4, which marks the access volatile so IR
+    // lowering emits IR_VLOAD/IR_VSTORE rather than a plain load/store.
+    //
+    // data3 layout, shared with the unsafe path below:
+    //   bits 0..3 = float kind (0 = int, 1 = f64, 2 = f32, 3 = f16)
+    //   bit  4    = volatile
+    // These used to collide: this path wrote a bare 1 as a "volatile flag"
+    // while the unsafe path wrote the float kind into the same slot, and IR
+    // lowering read it as the float kind. So EVERY `volatile { *(p as TYPE)
+    // -> v }` silently typed v as f64 — `v / 2` on a u32 read of 4 returned
+    // 0 instead of 2.
     if kind == 91 {
         advance_tok()
         expect(12)
@@ -1541,7 +1555,14 @@ fn parse_stmt() -> uint64 {
             ast_set_child(node, ae)
             uint32 dt = dest_tok
             ast_set_data2(node, dt)
-            uint32 vf = 1
+            // Real float kind in bits 0..3, volatile in bit 4. Computing the
+            // fkind here is what fixes the miscompile: this path used to write
+            // a bare 1, which IR lowering read as "f64".
+            uint32 vfk = 0
+            if type_kind == 96 { vfk = 1 }
+            else if type_kind == 95 { vfk = 2 }
+            else if type_kind == 94 { vfk = 3 }
+            uint32 vf = vfk | 16
             ast_set_data3(node, vf)
             return node
         }
@@ -1556,7 +1577,9 @@ fn parse_stmt() -> uint64 {
             ast_set_child(node, ae)
             uint32 ve = val_expr
             ast_set_data2(node, ve)
-            uint32 vf = 1
+            // Volatile marker only (bit 4). Stores carry no float kind — the
+            // unsafe store path leaves data3 at 0 — so bits 0..3 stay clear.
+            uint32 vf = 16
             ast_set_data3(node, vf)
             return node
         }
