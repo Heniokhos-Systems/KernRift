@@ -1,0 +1,60 @@
+// Allocation failure must be VISIBLE, not fatal: alloc returns 0 (never 8,
+// never a non-null pointer to nothing) and the program keeps running, and
+// dealloc of that 0 is a no-op.
+//
+// This entry exists mostly for DIFF_MODE=backend (legacy vs IR on the host
+// arch). The alloc/dealloc guards are lowered inline and separately in FOUR
+// places -- ir.kr, codegen.kr, ir_aarch64.kr, codegen_aarch64.kr -- and
+// --emit=obj/--emit=lkm select the legacy codegen with no --legacy on the
+// command line, so a fix applied to only some of them would leave `krc`
+// returning 0 while `krc --emit=obj` segfaulted. Backend mode catches exactly
+// that; crossarch mode additionally covers x86_64 vs arm64.
+//
+// The size is 0xFFFFFFFFFFFF0000 on purpose. A merely huge-but-plausible
+// length (16 TiB) fits a 128 TiB user VA and only fails under the default
+// vm.overcommit_memory=0 heuristic, so it would flip green on any host with
+// overcommit_memory=1 -- routine on container and CI hosts. A length beyond
+// TASK_SIZE is rejected by get_unmapped_area regardless of overcommit policy,
+// and it still survives the emitted `size + 8` without wrapping to 0.
+fn main() {
+    uint64 p = alloc(0xFFFFFFFFFFFF0000)
+    // Reaching this line at all is the point: alloc used to store the size
+    // header through -ENOMEM and die here.
+    println(1)
+    if p == 0 {
+        println(2)
+    } else if p == 8 {
+        // The specific wrong answer the old unconditional `+8` would give on
+        // a NULL return: a non-null pointer to nothing, which defeats the
+        // documented null check entirely.
+        println(8)
+    } else {
+        println(9)
+    }
+
+    // dealloc of a failed allocation must not fault. The POSIX lowering reads
+    // the size header at [ptr-8] before the munmap, so this used to load from
+    // address -8.
+    dealloc(p)
+    dealloc(0)
+    println(3)
+
+    // The success path must be untouched by the guard: the value round-trips
+    // and the size header still holds the ORIGINAL requested size.
+    uint64 q = alloc(1000)
+    if q == 0 {
+        println(90)
+        exit(1)
+    }
+    unsafe { *(q as uint64) = 3735928559 }
+    uint64 v = 0
+    unsafe { *(q as uint64) -> v }
+    println(v)
+    uint64 h = q - 8
+    uint64 sz = 0
+    unsafe { *(h as uint64) -> sz }
+    println(sz)
+    dealloc(q)
+    println(4)
+    exit(0)
+}

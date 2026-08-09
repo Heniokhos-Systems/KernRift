@@ -2410,6 +2410,88 @@ run_test_legacy "break_outside_loop_legacy" 'fn main(){ break
 run_test_legacy "fstring_in_returning_fn_legacy" 'fn show(u64 n){ print_str(f"value is {n} plus padding text to overflow saved regs") }
 fn main(){ show(42); exit(7) }' 7
 
+# --- alloc() must return 0 on exhaustion, and dealloc(0) must be a no-op ---
+# docs/UNDEFINED_BEHAVIOR.md promises "alloc returns 0. Callers must check."
+# It did not: alloc stored its 8-byte size header through the raw mmap result,
+# so a failed allocation SEGFAULTED INSIDE alloc (exit 139) and the documented
+# null check was unreachable code. dealloc(0) faulted too -- it reads the size
+# header at [ptr-8] before the munmap.
+#
+# These rows run on the HOST arch through the IR backend and again through
+# run_test_legacy, because alloc/dealloc are lowered inline and SEPARATELY in
+# each backend. --emit=obj and --emit=lkm select the legacy codegen with no
+# --legacy on the command line, so an IR-only fix would leave `krc --emit=obj`
+# faulting while plain `krc` returned 0. The arm64 twins live in the QEMU
+# block further down (inside its `if`, or they would silently never run).
+#
+# The size is 0xFFFFFFFFFFFF0000, not a merely huge one: 16 TiB fits a 128 TiB
+# user VA and fails only under the default vm.overcommit_memory=0 heuristic,
+# so it would flip green on any host with overcommit_memory=1. A length past
+# TASK_SIZE is refused by get_unmapped_area whatever the overcommit policy,
+# and still survives the emitted `size + 8` without wrapping to 0.
+run_test "alloc_oom_returns_zero" 'fn main() {
+    u64 p = alloc(0xFFFFFFFFFFFF0000)
+    if p == 0 { exit(42) }
+    exit(7)
+}' 42
+run_test "alloc_oom_not_eight" 'fn main() {
+    u64 p = alloc(0xFFFFFFFFFFFF0000)
+    if p == 8 { exit(8) }
+    if p != 0 { exit(9) }
+    exit(42)
+}' 42
+run_test "alloc_success_header_intact" 'fn main() {
+    u64 p = alloc(1000)
+    if p == 0 { exit(1) }
+    unsafe { *(p as uint64) = 3735928559 }
+    u64 v = 0
+    unsafe { *(p as uint64) -> v }
+    if v != 3735928559 { exit(2) }
+    u64 h = p - 8
+    u64 sz = 0
+    unsafe { *(h as uint64) -> sz }
+    if sz != 1000 { exit(3) }
+    dealloc(p)
+    exit(42)
+}' 42
+run_test "dealloc_zero_no_fault" 'fn main() {
+    dealloc(0)
+    u64 p = alloc(0xFFFFFFFFFFFF0000)
+    dealloc(p)
+    exit(42)
+}' 42
+run_test_legacy "alloc_oom_returns_zero_legacy" 'fn main() {
+    u64 p = alloc(0xFFFFFFFFFFFF0000)
+    if p == 0 { exit(42) }
+    exit(7)
+}' 42
+run_test_legacy "alloc_oom_not_eight_legacy" 'fn main() {
+    u64 p = alloc(0xFFFFFFFFFFFF0000)
+    if p == 8 { exit(8) }
+    if p != 0 { exit(9) }
+    exit(42)
+}' 42
+run_test_legacy "alloc_success_header_intact_legacy" 'fn main() {
+    u64 p = alloc(1000)
+    if p == 0 { exit(1) }
+    unsafe { *(p as uint64) = 3735928559 }
+    u64 v = 0
+    unsafe { *(p as uint64) -> v }
+    if v != 3735928559 { exit(2) }
+    u64 h = p - 8
+    u64 sz = 0
+    unsafe { *(h as uint64) -> sz }
+    if sz != 1000 { exit(3) }
+    dealloc(p)
+    exit(42)
+}' 42
+run_test_legacy "dealloc_zero_no_fault_legacy" 'fn main() {
+    dealloc(0)
+    u64 p = alloc(0xFFFFFFFFFFFF0000)
+    dealloc(p)
+    exit(42)
+}' 42
+
 # Short-circuit &&/|| parity: legacy must match IR (evaluate RHS only when
 # needed) AND match IR's value semantics: && = lhs?rhs:0, || = lhs?1:rhs.
 # IR tests lock the contract; legacy tests were RED (non-short-circuit + normalized).
@@ -3191,6 +3273,44 @@ fn main() {
     vstore8(0x66666004, 7)
     exit(vload32(0x66666008))
 }' 99
+
+    # alloc/dealloc failure guards on arm64. These MUST live inside this `if`:
+    # run_test_a64 is defined within it, so a row placed after the closing `fi`
+    # is a bash "command not found" that never increments TOTAL and silently
+    # passes. x86_64-only rows would not have caught the arm64 half -- both
+    # arm64 lowerings (ir_aarch64.kr and codegen_aarch64.kr) had the same
+    # unconditional header store, measured at exit 139 before the fix.
+    run_test_a64 "a64_alloc_oom_returns_zero" 'fn main() {
+    u64 p = alloc(0xFFFFFFFFFFFF0000)
+    if p == 0 { exit(42) }
+    exit(7)
+}' 42
+    run_test_a64 "a64_alloc_oom_not_eight" 'fn main() {
+    u64 p = alloc(0xFFFFFFFFFFFF0000)
+    if p == 8 { exit(8) }
+    if p != 0 { exit(9) }
+    exit(42)
+}' 42
+    run_test_a64 "a64_alloc_success_header_intact" 'fn main() {
+    u64 p = alloc(1000)
+    if p == 0 { exit(1) }
+    unsafe { *(p as uint64) = 3735928559 }
+    u64 v = 0
+    unsafe { *(p as uint64) -> v }
+    if v != 3735928559 { exit(2) }
+    u64 h = p - 8
+    u64 sz = 0
+    unsafe { *(h as uint64) -> sz }
+    if sz != 1000 { exit(3) }
+    dealloc(p)
+    exit(42)
+}' 42
+    run_test_a64 "a64_dealloc_zero_no_fault" 'fn main() {
+    dealloc(0)
+    u64 p = alloc(0xFFFFFFFFFFFF0000)
+    dealloc(p)
+    exit(42)
+}' 42
 fi
 
 # --- v2.6 feature tests ---
@@ -4409,6 +4529,55 @@ else
     echo "  extern_resolved_via_obj_link: SKIP (non-x86_64 host toolchain)"
     echo "  extern_resolved_via_obj_link_legacy: SKIP (non-x86_64 host toolchain)"
 fi
+
+# --emit=obj is where a partial alloc fix would hide: main.kr selects the
+# LEGACY codegen for --emit=obj and --emit=lkm with no --legacy on the command
+# line, so `krc` could return 0 from a failed alloc while `krc --emit=obj`
+# still segfaulted. Link and RUN, not compile-only -- the defect is in the
+# emitted bytes, not in whether the object builds. MEASURED before the fix:
+# this program exited 139.
+if [ "$HOST_M" = "x86_64" ] || [ "$HOST_M" = "amd64" ]; then
+    if command -v gcc > /dev/null 2>&1; then
+        TOTAL=$((TOTAL + 1))
+        cat > /tmp/krc_aobj_$$.kr <<'KREOF'
+fn main() {
+    u64 p = alloc(0xFFFFFFFFFFFF0000)
+    if p != 0 { exit(9) }
+    dealloc(p)
+    dealloc(0)
+    u64 q = alloc(1000)
+    if q == 0 { exit(1) }
+    unsafe { *(q as uint64) = 3735928559 }
+    u64 v = 0
+    unsafe { *(q as uint64) -> v }
+    if v != 3735928559 { exit(2) }
+    dealloc(q)
+    exit(42)
+}
+KREOF
+        if $KRC $KRC_FLAGS --emit=obj /tmp/krc_aobj_$$.kr -o /tmp/krc_aobj_$$.o > /dev/null 2>&1 \
+           && gcc -nostdlib -static /tmp/krc_aobj_$$.o -o /tmp/krc_aobj_bin_$$ > /dev/null 2>&1; then
+            /tmp/krc_aobj_bin_$$ > /dev/null 2>&1
+            aobj_got=$?
+            if [ "$aobj_got" = "42" ]; then
+                PASS=$((PASS + 1))
+                echo "  alloc_oom_emit_obj: PASS"
+            else
+                FAIL=$((FAIL + 1))
+                echo "  alloc_oom_emit_obj: FAIL (expected 42, got $aobj_got)"
+            fi
+        else
+            FAIL=$((FAIL + 1))
+            echo "  alloc_oom_emit_obj: FAIL (compile/link failed)"
+        fi
+        rm -f /tmp/krc_aobj_$$.kr /tmp/krc_aobj_$$.o /tmp/krc_aobj_bin_$$
+    else
+        echo "  alloc_oom_emit_obj: SKIP (gcc not available)"
+    fi
+else
+    echo "  alloc_oom_emit_obj: SKIP (non-x86_64 host toolchain)"
+fi
+
 
 # Regression: a normal program with no extern fn at all must be completely
 # unaffected by the new check, on both backends.
