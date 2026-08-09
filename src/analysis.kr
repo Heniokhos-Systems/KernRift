@@ -1971,10 +1971,29 @@ fn sema_ur_block(uint64 block_node) {
     uint64 wchild = child
     while wchild != 0 {
         if terminated != 0 {
-            // This statement is unreachable
+            // This statement is unreachable. The diagnostic needs a token to
+            // anchor its span, and it is dropped silently when none is found —
+            // so a statement kind that carries no token of its own gets NO
+            // warning at all rather than a span-less one.
+            //
+            // That was the case for ExprStmt (16): the token lives on its
+            // child expression (a Call's callee token, for instance), not on
+            // the statement node. `g()` or `println(x)` after a return was
+            // therefore never reported, while a declaration, assignment, if,
+            // while or return in the same position was. Descend one level
+            // before giving up.
             uint32 ur_tok = ast_tok(wchild)
             if ur_tok == 0 { ur_tok = ast_data1(wchild) }
             if ur_tok == 0 { ur_tok = ast_data2(wchild) }
+            if ur_tok == 0 {
+                uint32 ur_kid = ast_child(wchild)
+                uint64 wurk = ur_kid
+                if wurk != 0 {
+                    ur_tok = ast_tok(ur_kid)
+                    if ur_tok == 0 { ur_tok = ast_data1(ur_kid) }
+                    if ur_tok == 0 { ur_tok = ast_data2(ur_kid) }
+                }
+            }
             uint64 wur = ur_tok
             if wur != 0 {
                 diag_emit(wur, 1, 5)

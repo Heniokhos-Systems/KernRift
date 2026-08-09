@@ -5133,6 +5133,45 @@ echo "--- Compiler diagnostics ---"
 run_error_check "diag_undef_var" 'fn main() { exit(xyz_undefined_name) }' "undeclared identifier"
 run_warning_check "diag_unreachable_return" 'fn foo() -> uint64 { return 1; uint64 x = 2; return x } fn main() { exit(0) }' "unreachable code"
 run_warning_check "diag_unreachable_break" 'fn main() { while 1 == 1 { break; uint64 x = 1 } exit(0) }' "unreachable code"
+# ExprStmt after a terminator. These two were SILENTLY MISSED: the diagnostic
+# is dropped when no anchor token is found, and an ExprStmt carries none of
+# its own -- the token lives on the child expression (a Call's callee). So a
+# bare call or println after a return produced no warning at all, while a
+# declaration, assignment, if, while or return in the same position did.
+run_warning_check "diag_unreachable_bare_call" 'fn g() { }
+fn foo() -> uint64 { return 1  g()  return 2 }
+fn main() { exit(0) }' "unreachable code"
+run_warning_check "diag_unreachable_println" 'fn foo() -> uint64 { return 1  println(9)  return 2 }
+fn main() { exit(0) }' "unreachable code"
+run_warning_check "diag_unreachable_call_after_exit" 'fn g() { }
+fn main() { exit(0)  g() }' "unreachable code"
+
+# False-positive guard. Widening the anchor lookup must not make REACHABLE
+# expression statements warn -- a call before the terminator, a call inside a
+# conditional, and calls in a loop body are all live code.
+TOTAL=$((TOTAL + 1))
+UR_FP_OK=1
+ur_fp() {
+    printf '%s\n' "$2" > "$DIR/../ur_fp_$$.kr"
+    local n
+    n=$($KRC $KRC_FLAGS "$DIR/../ur_fp_$$.kr" -o /tmp/krc_urfp_$$ 2>&1 | grep -c 'unreachable')
+    [ "$n" = "0" ] || { UR_FP_OK=0; echo "  false positive in '$1' ($n warnings)"; }
+    rm -f "$DIR/../ur_fp_$$.kr" /tmp/krc_urfp_$$
+}
+ur_fp "call then return" 'fn g() { }
+fn f() -> u64 { g()  return 1 }
+fn main() { exit(f()) }'
+ur_fp "call inside if" 'fn g() { }
+fn f() -> u64 { if 1 == 1 { g() }  return 1 }
+fn main() { exit(f()) }'
+ur_fp "calls in loop body" 'fn g() { }
+fn main() { u64 i = 0  while i < 3 { g()  i = i + 1 }  exit(0) }'
+ur_fp "println then exit" 'fn main() { println(1)  exit(0) }'
+if [ "$UR_FP_OK" = "1" ]; then
+    PASS=$((PASS + 1)); echo "  diag_unreachable_no_false_positives: PASS (4 reachable shapes stay quiet)"
+else
+    FAIL=$((FAIL + 1)); echo "FAIL: diag_unreachable_no_false_positives"
+fi
 run_warning_check "diag_unreachable_exit" 'fn main() { exit(0); uint64 x = 1 }' "unreachable code"
 
 # --- Runtime debug checks ---
