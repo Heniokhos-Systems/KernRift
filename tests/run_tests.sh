@@ -1239,36 +1239,101 @@ run_test "volatile_narrow_store_no_clobber" 'fn main() {
     exit(load32(p + 8))
 }' 77
 
-# The barrier itself, asserted on emitted bytes with a control. The IR backend
-# emitted NO barrier for a volatile block while the legacy backend emitted one
-# (measured: x86 legacy 1 mfence, x86 IR 0) -- the same legacy-is-right/IR-is-
-# the-outlier shape as the arm64 device-width defect. Behaviour alone cannot
-# catch a missing fence, so pin the instruction.
-# Compile-only, so the arch may be pinned.
+# The barrier itself, asserted on emitted bytes with a control, on ALL FOUR
+# backend/arch combinations.
+#
+# Covering only the default (x86_64 IR) is what let a real regression through
+# once already: re-encoding the AST volatile marker from 1 to bit 4 silently
+# stopped the LEGACY backends firing, because they tested `data3 == 1` rather
+# than the bit. The IR-only assertion stayed green through it. Behaviour cannot
+# catch a missing fence either -- a dropped barrier changes no exit code -- so
+# this pins the instruction on every path that emits one.
+#
+# Expected barrier per config: x86 mfence (0f ae f0) on both backends;
+# arm64 IR LDAR (size field in bits 31:30, so 08/48/88/c8 dff...) since
+# volatile lowers to IR_VLOAD; arm64 legacy DSB SY (d5033f9f).
+# Compile-only, so arches may be pinned.
 TOTAL=$((TOTAL + 1))
 VBAR_OK=1
-printf 'fn main() { u64 p = alloc(64)  volatile { *(p as u32) -> v }  exit(0) }\n' > "$DIR/../vbar_v_$$.kr"
-printf 'fn main() { u64 p = alloc(64)  unsafe { *(p as u32) -> v }  exit(0) }\n' > "$DIR/../vbar_u_$$.kr"
-VBAR_VOUT=$($KRC --arch=x86_64 --emit=asm "$DIR/../vbar_v_$$.kr" 2>&1)
-VBAR_UOUT=$($KRC --arch=x86_64 --emit=asm "$DIR/../vbar_u_$$.kr" 2>&1)
-VBAR_VL=$(printf '%s' "$VBAR_VOUT" | sed -n 's/.* -> \(.*\) (asm listing)$/\1/p')
-VBAR_UL=$(printf '%s' "$VBAR_UOUT" | sed -n 's/.* -> \(.*\) (asm listing)$/\1/p')
-if [ -f "$VBAR_VL" ] && [ -f "$VBAR_UL" ]; then
-    VBAR_V=$(grep -ci '0f ae f0' "$VBAR_VL")
-    VBAR_U=$(grep -ci '0f ae f0' "$VBAR_UL")
-    [ "$VBAR_V" -ge 1 ] || { VBAR_OK=0; echo "  volatile block emitted no mfence"; }
-    [ "$VBAR_U" = "0" ] || { VBAR_OK=0; echo "  unsafe block wrongly emitted $VBAR_U mfence"; }
-else
-    VBAR_OK=0; echo "  could not locate asm listings"
-fi
+printf 'fn main() { u64 p = alloc(64)  volatile { *(p as u32) -> v }  u64 w = v + 1  exit(0) }\n' > "$DIR/../vbar_v_$$.kr"
+printf 'fn main() { u64 p = alloc(64)  unsafe { *(p as u32) -> v }  u64 w = v + 1  exit(0) }\n' > "$DIR/../vbar_u_$$.kr"
+vbar_count() { # <arch> <flags> <srcfile> -> barrier count on stdout
+    local _o
+    _o=$($KRC --arch="$1" $2 --emit=asm "$3" 2>&1)
+    local _l
+    _l=$(printf '%s' "$_o" | sed -n 's/.* -> \(.*\) (asm listing)$/\1/p')
+    if [ ! -f "$_l" ]; then echo "NOLISTING"; return; fi
+    if [ "$1" = "x86_64" ]; then
+        grep -ci '0f ae f0' "$_l"
+    else
+        grep -ciE 'd5033f9f|: (08|48|88|c8)dff' "$_l"
+    fi
+    rm -f "$_l"
+}
+for _cfg in "x86_64:" "x86_64:--legacy" "arm64:" "arm64:--legacy"; do
+    _a="${_cfg%%:*}"; _f="${_cfg##*:}"
+    _nv=$(vbar_count "$_a" "$_f" "$DIR/../vbar_v_$$.kr")
+    _nu=$(vbar_count "$_a" "$_f" "$DIR/../vbar_u_$$.kr")
+    if [ "$_nv" = "NOLISTING" ] || [ "$_nu" = "NOLISTING" ]; then
+        VBAR_OK=0; echo "  $_a ${_f:-IR}: could not locate asm listing"
+    else
+        [ "$_nv" -ge 1 ] || { VBAR_OK=0; echo "  $_a ${_f:-IR}: volatile emitted NO barrier"; }
+        [ "$_nu" = "0" ] || { VBAR_OK=0; echo "  $_a ${_f:-IR}: unsafe wrongly emitted $_nu barrier(s)"; }
+    fi
+done
 if [ "$VBAR_OK" = "1" ]; then
-    echo "  volatile_block_emits_barrier: PASS (volatile fences, unsafe does not)"
+    echo "  volatile_block_emits_barrier: PASS (all 4 configs fence; unsafe fences on none)"
     PASS=$((PASS + 1))
 else
     echo "FAIL: volatile_block_emits_barrier"
     FAIL=$((FAIL + 1))
 fi
-rm -f "$DIR/../vbar_v_$$.kr" "$DIR/../vbar_u_$$.kr" "$VBAR_VL" "$VBAR_UL"
+rm -f "$DIR/../vbar_v_$$.kr" "$DIR/../vbar_u_$$.kr"
+
+# The `-> dest` binding must work WITHOUT pre-declaring dest, on every backend.
+# The IR backend auto-declared via ir_var_set; the legacy backends silently
+# dropped the value and then failed at the first USE with "use of undeclared
+# identifier" -- for `unsafe` as well as `volatile`. Compile-and-run all four.
+TOTAL=$((TOTAL + 1))
+VBIND_OK=1
+# Resolve qemu LOCALLY. $QEMU_A64 is not set until ~line 2950, far below this
+# point, so referencing it here would be empty and both arm64 configs would be
+# skipped in silence -- the same shape as the run_test_a64 placement trap.
+VBIND_QEMU="$(command -v qemu-aarch64-static || command -v qemu-aarch64 || true)"
+printf 'fn main() { u64 p = alloc(64)  store32(p, 4)  volatile { *(p as u32) -> v }  exit(v / 2) }\n' > "$DIR/../vbind_v_$$.kr"
+printf 'fn main() { u64 p = alloc(64)  store32(p, 4)  unsafe { *(p as u32) -> v }  exit(v / 2) }\n' > "$DIR/../vbind_u_$$.kr"
+VBIND_RAN=0
+for _src in "$DIR/../vbind_v_$$.kr" "$DIR/../vbind_u_$$.kr"; do
+    for _cfg in "x86_64:" "x86_64:--legacy" "arm64:" "arm64:--legacy"; do
+        _a="${_cfg%%:*}"; _f="${_cfg##*:}"
+        if [ "$_a" = "arm64" ] && [ -z "$VBIND_QEMU" ]; then continue; fi
+        _bin="/tmp/krc_vbind_$$"
+        if ! $KRC --arch="$_a" $_f "$_src" -o "$_bin" >/dev/null 2>&1; then
+            VBIND_OK=0; echo "  $(basename $_src) $_a ${_f:-IR}: COMPILE FAILED"
+        else
+            if [ "$_a" = "arm64" ]; then $VBIND_QEMU "$_bin" >/dev/null 2>&1; else "$_bin" >/dev/null 2>&1; fi
+            _rc=$?
+            VBIND_RAN=$((VBIND_RAN + 1))
+            [ "$_rc" = "2" ] || { VBIND_OK=0; echo "  $(basename $_src) $_a ${_f:-IR}: got $_rc, want 2"; }
+        fi
+        rm -f "$_bin"
+    done
+done
+# Guard against the whole loop silently doing nothing: 2 sources x 4 configs,
+# or x 2 if qemu is unavailable. Zero would mean the assertion is vacuous.
+if [ -n "$VBIND_QEMU" ]; then
+    [ "$VBIND_RAN" = "8" ] || { VBIND_OK=0; echo "  only $VBIND_RAN/8 config-runs executed"; }
+else
+    [ "$VBIND_RAN" = "4" ] || { VBIND_OK=0; echo "  only $VBIND_RAN/4 config-runs executed (no qemu)"; }
+fi
+if [ "$VBIND_OK" = "1" ]; then
+    echo "  ptrload_dest_binding_all_backends: PASS (volatile+unsafe bind dest, $VBIND_RAN config-runs)"
+    PASS=$((PASS + 1))
+else
+    echo "FAIL: ptrload_dest_binding_all_backends"
+    FAIL=$((FAIL + 1))
+fi
+rm -f "$DIR/../vbind_v_$$.kr" "$DIR/../vbind_u_$$.kr"
 
 # @packed struct annotation (should parse without error)
 run_test "packed_struct" '@packed struct Reg { uint8 a; uint32 b }

@@ -10659,13 +10659,21 @@ fn gen_stmt(uint64 node) {
             emit_byte(0x00)
         }
         // Volatile barrier after load (prevent reordering)
+        // data3 packs the float kind in bits 0..3 and volatile in bit 4 (see
+        // parser.kr). This used to test `== 1`, which broke the moment the
+        // volatile marker moved off value 1 — test the BIT, not the word.
         uint32 vol_flag = ast_data3(node)
         uint64 wvf = vol_flag
-        if wvf == 1 {
+        if (wvf & 16) != 0 {
             // mfence
             emit_byte(0x0F); emit_byte(0xAE); emit_byte(0xF0)
         }
-        // Store to destination variable
+        // Store to destination variable. The `-> dest` form BINDS dest: the
+        // IR backend auto-declares it via ir_var_set, so legacy must too.
+        // Previously an undeclared dest silently dropped the loaded value
+        // here and the program then failed at the first USE of it with
+        // "use of undeclared identifier" — for `unsafe` just as much as for
+        // `volatile`, since both build this node kind.
         uint32 dest_tok = ast_data2(node)
         uint64 doff = var_lookup(dest_tok)
         if doff != 0xFFFFFFFF {
@@ -10674,6 +10682,9 @@ fn gen_stmt(uint64 node) {
             uint64 soff = static_lookup(dest_tok)
             if soff != 0xFFFFFFFF {
                 emit_static_store(soff)
+            } else {
+                uint64 ndoff = var_declare(dest_tok)
+                emit_store_rax_to_stack(ndoff)
             }
         }
         return
@@ -10712,9 +10723,10 @@ fn gen_stmt(uint64 node) {
             emit_u32_le(temp_slot_0)
         }
         // Volatile barrier before store (prevent reordering)
+        // volatile is data3 bit 4 — see the load path above.
         uint32 vol_flag2 = ast_data3(node)
         uint64 wvf2 = vol_flag2
-        if wvf2 == 1 {
+        if (wvf2 & 16) != 0 {
             // mfence
             emit_byte(0x0F); emit_byte(0xAE); emit_byte(0xF0)
         }

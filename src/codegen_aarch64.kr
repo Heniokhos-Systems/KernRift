@@ -5288,16 +5288,28 @@ fn gen_stmt_a64(uint64 node) {
         else if wts == 4 { emit_a64_ldr32(0, 0, 0) }
         else { emit_a64_ldr(0, 0, 0) }
         // Volatile barrier after load (DSB SY — ensures device read completes)
+        // data3 packs the float kind in bits 0..3 and volatile in bit 4 (see
+        // parser.kr). Test the BIT, not the word — `== 1` silently stopped
+        // firing when the volatile marker moved off value 1.
         uint32 vol_flag = ast_data3(node)
         uint64 wvf = vol_flag
-        if wvf == 1 { emit_a64(0xD5033F9F) }
+        if (wvf & 16) != 0 { emit_a64(0xD5033F9F) }
+        // The `-> dest` form BINDS dest; the IR backend auto-declares it via
+        // ir_var_set, so legacy must too. An undeclared dest used to drop the
+        // loaded value silently here, and the program then failed at the
+        // first USE with "use of undeclared identifier".
         uint32 dest_tok = ast_data2(node)
         uint64 doff = var_lookup(dest_tok)
         if doff != 0xFFFFFFFF {
             emit_a64_store_x0(doff)
         } else {
             uint64 soff = static_lookup(dest_tok)
-            if soff != 0xFFFFFFFF { emit_a64_static_store(soff) }
+            if soff != 0xFFFFFFFF {
+                emit_a64_static_store(soff)
+            } else {
+                uint64 ndoff = var_declare(dest_tok)
+                emit_a64_store_x0(ndoff)
+            }
         }
         return
     }
@@ -5316,9 +5328,10 @@ fn gen_stmt_a64(uint64 node) {
         emit_a64_mov(10, 0)
         emit_a64_load_x0(temp_slot_0)
         // Volatile barrier before store (DSB SY — ensures device write commits)
+        // volatile is data3 bit 4 — see the load path above.
         uint32 vol_flag2 = ast_data3(node)
         uint64 wvf2 = vol_flag2
-        if wvf2 == 1 { emit_a64(0xD5033BBF) }
+        if (wvf2 & 16) != 0 { emit_a64(0xD5033BBF) }
         if wts == 1 { emit_a64_strb(0, 10, 0) }
         else if wts == 2 { emit_a64_strh(0, 10, 0) }
         else if wts == 4 { emit_a64_str32(0, 10, 0) }
