@@ -5621,6 +5621,11 @@ fn gen_function_a64(uint64 fn_node) {
 
     fn_register(name_tok, out_len)
 
+    // @export (bit 2): opt this function's symbol into STB_GLOBAL so other
+    // translation units (e.g. C via --emit=obj) can link against it.
+    uint64 is_export_a = ann_flags & 4
+    if is_export_a != 0 { export_fn_register(name_tok) }
+
     // Register float return type if applicable
     uint32 ret_type_tok_a = ast_data2(fn_node)
     uint64 wrt_a = ret_type_tok_a
