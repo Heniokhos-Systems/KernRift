@@ -2134,11 +2134,21 @@ fn ir_emit_riscv_insn(uint64 ii) {
             return
         }
         uint64 ptr_reg = rv_resolve_src(s1_v, RV_T5)
+        // dealloc(0) is a no-op. The `lw` below reads the size header at
+        // [ptr-8], so freeing 0 loads from address -8 and faults — and now
+        // that alloc can return 0, an unconditional cleanup path would hit it.
+        // Branch past the whole block BEFORE the header load. The block is
+        // rv_mark_noc'd for the same reason IR_ALLOC's guard is: the
+        // displacement is patched pre-compression and nothing would remap it.
+        uint64 rv_dz_site = out_len
+        rv_b(0, RV_ZERO, ptr_reg, 0, 0x63)     // beq ptr_reg, x0, .done
         rv_i(0 - 8, ptr_reg, 0, RV_A0, 0x13)   // addi a0, ptr_reg, -8  (real base)
         rv_i(0, RV_A0, 2, 11, 0x03)            // lw a1, 0(a0)          (stored size)
         rv_i(8, 11, 0, 11, 0x13)               // addi a1, a1, 8        (total length)
         rv_li(17, ir_rv32_syscall_nr(11))      // a7 = munmap syscall nr
         rv_ecall("dealloc")
+        patch_u32(rv_dz_site, rv_b_checked(out_len - rv_dz_site, RV_ZERO, ptr_reg, 0, 0x63))
+        rv_mark_noc(rv_dz_site, out_len)
         return
     }
 

@@ -2930,6 +2930,9 @@ fn gen_expr_a64(uint64 node) {
             gen_expr_a64(wfa)
             // x0 = user pointer (ptr+8 from alloc)
             // Real base = x0 - 8, size = [x0], total = size + 8
+            // dealloc(0) is a no-op — the POSIX arm LDRs the header at [x0-8],
+            // so freeing 0 reads address -8 and faults.
+            uint64 cga_dealloc_null = emit_a64_dealloc_null_cbz(0)
             if target_os == 2 {
                 // Windows ARM64: VirtualFree(base, 0, MEM_RELEASE)
                 // x0 = user ptr (ptr+8), base = x0 - 8
@@ -2950,6 +2953,7 @@ fn gen_expr_a64(uint64 node) {
                 if target_os == 1 { emit_a64_syscall_nr(73) } else { emit_a64_syscall_nr(215) }
                 emit_a64_svc("dealloc")
             }
+            emit_a64_dealloc_null_end(cga_dealloc_null, 0)
             return
         }
 

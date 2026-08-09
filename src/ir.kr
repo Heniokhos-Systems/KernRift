@@ -9143,6 +9143,13 @@ fn ir_emit_x86_insn(uint64 ii) {
         // IR_DEALLOC: free memory allocated by IR_ALLOC
         // src1 = user ptr vreg
         uint64 ptr_reg = ir_resolve_src(s1_v, 0)
+        // dealloc(0) is a no-op. The POSIX arm below does not merely
+        // munmap(ptr-8) — it first LOADS the size header at [ptr-8], so
+        // freeing 0 reads address -8 and faults. Now that alloc can hand back
+        // 0, the natural alloc/check/dealloc shape would otherwise crash on
+        // the free instead of on the alloc, which would move the segfault
+        // rather than remove it. Guard before the header load.
+        uint64 dealloc_null = emit_x86_dealloc_null_jz(ptr_reg)
         if target_os == 2 {
             // Windows: VirtualFree(ptr-8, 0, MEM_RELEASE)
             ir_emit_mov_r64_r64(1, ptr_reg)  // rcx = ptr
@@ -9154,6 +9161,7 @@ fn ir_emit_x86_insn(uint64 ii) {
             emit_win_alloc_stack(0x20)
             emit_win_call_iat(13)              // VirtualFree (IAT slot 13)
             emit_win_free_stack(0x20)
+            emit_x86_dealloc_null_end(dealloc_null)
             return
         }
         // Linux/macOS/Android: munmap(ptr-8, *(ptr-8)+8)
@@ -9179,6 +9187,7 @@ fn ir_emit_x86_insn(uint64 ii) {
         ir_emit_mov_r64_imm64(0, munmap_nr)
         // syscall
         emit_x86_syscall_insn("dealloc")
+        emit_x86_dealloc_null_end(dealloc_null)
         return
     }
 

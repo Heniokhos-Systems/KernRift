@@ -7040,6 +7040,12 @@ fn gen_expr(uint64 node) {
                 return
             }
 
+            // dealloc(0) is a no-op. The POSIX arm LOADS the size header at
+            // [rax-8] before the munmap, so freeing 0 reads address -8 and
+            // faults. Emitted AFTER the LKM early-return above: kfree(NULL)
+            // is already safe and that arm has no header load, so guarding it
+            // would only add dead bytes to every kernel module.
+            uint64 cg_dealloc_null = emit_x86_dealloc_null_jz(0)
             if target_os == 2 {
                 // Windows dealloc: VirtualFree(base, 0, MEM_RELEASE)
                 // rax = user ptr (ptr+8 from alloc), base = rax - 8
@@ -7077,6 +7083,7 @@ fn gen_expr(uint64 node) {
                 // syscall
                 emit_x86_syscall_insn("dealloc")
             }
+            emit_x86_dealloc_null_end(cg_dealloc_null)
             rax_cache = 0
             return
         }
