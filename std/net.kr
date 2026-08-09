@@ -125,6 +125,19 @@ fn net_htons(u64 port) -> u64 {
     return (lo << 8) | hi
 }
 
+// Host to network byte order, 32-bit. Needed for sin_addr: a packed IP
+// literal like 0x7F000001 (127.0.0.1) reads left-to-right in host order and
+// must be byte-reversed before it goes on the wire.
+// Note the parenthesisation: in KernRift `|` binds TIGHTER than `<<`, so
+// `b0 << 24 | b1 << 16` would parse as `b0 << (24 | b1) << 16`.
+fn net_htonl(u64 ip) -> u64 {
+    u64 b0 = ip & 255
+    u64 b1 = (ip >> 8) & 255
+    u64 b2 = (ip >> 16) & 255
+    u64 b3 = (ip >> 24) & 255
+    return (b0 << 24) | (b1 << 16) | (b2 << 8) | b3
+}
+
 // Build sockaddr_in for IPv4.
 // ip: 4 bytes packed in host order (e.g., 0x7F000001 = 127.0.0.1)
 // port: port number in host byte order
@@ -141,8 +154,13 @@ fn net_addr_ipv4(u64 ip, u64 port) -> u64 {
     u16 p16 = nport
     u64 port_ptr = addr + 2
     store16(port_ptr, p16)
-    // sin_addr at offset 4 as u32 (already in network byte order for packed IP)
-    u32 ip32 = ip
+    // sin_addr at offset 4 as u32, converted from the host-order argument this
+    // function documents. It previously stored `ip` raw, which contradicted
+    // both the header comment above and STDLIB.md, and made the documented
+    // 0x7F000001 resolve to 1.0.0.127 -- while the port two bytes earlier WAS
+    // converted, so one struct carried one field in each byte order.
+    u64 nip = net_htonl(ip)
+    u32 ip32 = nip
     u64 ip_ptr = addr + 4
     store32(ip_ptr, ip32)
     return addr

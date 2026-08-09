@@ -8009,6 +8009,47 @@ else
 fi
 rm -f "$XT_WR_SRC"
 
+# --- std/net.kr sockaddr byte order ---
+# net_addr_ipv4 documents its `ip` argument as host order (std/net.kr header
+# comment, STDLIB.md:444) but stored it raw, so the documented 0x7F000001
+# resolved to 1.0.0.127 -- while sin_port two bytes earlier WAS converted via
+# net_htons, leaving one struct carrying one field in each byte order.
+#
+# Asserts the on-the-wire bytes, not a round-trip through the same helper: a
+# round-trip would pass with any self-consistent convention, including the
+# broken one. Byte 0 of sin_addr must be 127 for 127.0.0.1.
+#
+# NOTE: this must run via run_test/run_test_output, which write the source to
+# $REPO_ROOT. A .kr file outside the repo resolves `import "std/net.kr"` to the
+# INSTALLED stdlib (/usr/share/kernrift/std/net.kr) and would silently test
+# the wrong file.
+run_test_output "net_addr_ipv4_byte_order" 'import "std/net.kr"
+fn main() {
+    u64 a = net_addr_ipv4(0x7F000001, 8080)
+    u64 ip = a + 4
+    print(load8(ip)); print_str(".")
+    print(load8(ip + 1)); print_str(".")
+    print(load8(ip + 2)); print_str(".")
+    print(load8(ip + 3)); print_str(" ")
+    u64 p = a + 2
+    print(load8(p)); print_str(",")
+    println(load8(p + 1))
+    net_addr_free(a)
+    exit(0)
+}' "127.0.0.1 31,144"
+
+# net_htonl on its own: 0x01020304 -> 0x04030201. Guards the parenthesisation
+# too -- in KernRift `|` binds tighter than `<<`, so an unparenthesised
+# `b0 << 24 | b1 << 16` silently computes something else entirely.
+run_test "net_htonl_swaps_all_four_bytes" 'import "std/net.kr"
+fn main() {
+    if net_htonl(0x01020304) != 0x04030201 { exit(1) }
+    if net_htonl(0x7F000001) != 0x0100007F { exit(2) }
+    if net_htonl(0) != 0 { exit(3) }
+    if net_htonl(0xFFFFFFFF) != 0xFFFFFFFF { exit(4) }
+    exit(0)
+}' 0
+
 # --- SHA-256 (std/sha256.kr) — FIPS 180-4 test vectors ---
 # Vector 3 is exactly 56 bytes: padding must spill into a second 64-byte
 # block (0x80 + 55 zero-fill bytes would leave no room for the 8-byte
