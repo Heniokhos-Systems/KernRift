@@ -2083,8 +2083,34 @@ fn ir_emit_riscv_insn(uint64 ii) {
         rv_li(15, 0)                           // a5 = offset = 0 (pages; moot)
         rv_li(17, 222)                         // a7 = mmap2
         rv_ecall("alloc")                      // ecall  (ptr in a0)
+        // mmap failure puts -errno in a0. a0 is THIRTY-TWO bits here, so the
+        // threshold is 0xFFFFF000, NOT the 64-bit 0xFFFFFFFFFFFFF000 the x86
+        // and arm64 backends use — the 64-bit constant would never compare
+        // true on rv32 and the guard would be dead code. Without this the
+        // `sw` below stores the size header through -ENOMEM and the process
+        // segfaults inside alloc (docs/UNDEFINED_BEHAVIOR.md promises 0).
+        // t5 is dead: the size lives in t6 and a0 holds the result.
+        // rv_li emits 0xFFFFF000 as a deterministic lui+addi pair, so the
+        // forward displacements below are fixed by construction: bgeu skips
+        // sw + addi + jal (12 bytes) to land on the `li a0, 0`, and that jal
+        // skips the li (4 bytes) to land past it.
+        //
+        // Those baked displacements only hold if the words keep their emitted
+        // WIDTH. They do not by default: rv_compress_function relayouts the
+        // function afterwards and c.sw/c.addi/c.li would shrink three of these
+        // five words, leaving both branches pointing 2 and 4 bytes past their
+        // targets (measured: the guard landed mid-block and `alloc` faulted
+        // even on success). Only recorded fixups and block offsets get
+        // remapped, and a hand-baked displacement is neither — so wrap the
+        // block in rv_mark_noc, exactly as the STR_EQ/MEMCMP inline loops do.
+        uint64 rv_alloc_guard = out_len
+        rv_li(RV_T5, 0xFFFFF000)               // lui+addi: t5 = -4096
+        rv_b(16, RV_T5, RV_A0, 7, 0x63)        // bgeu a0, t5, .fail
         rv_s(0, RV_T6, RV_A0, 2, 0x23)         // sw t6, 0(a0)   store size header
         rv_i(8, RV_A0, 0, RV_A0, 0x13)         // a0 = a0 + 8    (past header)
+        rv_j(8, 0, 0x6F)                       // jal x0, .done
+        rv_li(RV_A0, 0)                        // .fail: a0 = 0 (NO +8)
+        rv_mark_noc(rv_alloc_guard, out_len)
         if dst_r != 0xFFFFFFFF && dst_r != RV_A0 { rv_mv(dst_r, RV_A0) }
         if dst_r == 0xFFFFFFFF { rv_store_spill(RV_A0, dest_v) }
         return
