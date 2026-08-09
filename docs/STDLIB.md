@@ -1,6 +1,6 @@
 # KernRift Standard Library Reference
 
-The standard library lives in `std/*.kr` — **19 modules, 307 functions**
+The standard library lives in `std/*.kr` — **22 modules, 329 functions**
 (292 public + 15 underscore-prefixed internal helpers, listed for
 completeness). Import a module with its `std/` path:
 

@@ -334,7 +334,7 @@ fn main() {
 }
 ```
 
-Running `kernriftc demo_eff.kr` should emit:
+Running `krc check demo_eff.kr` should emit:
 
 - An `eff-check` warning for `timer_irq` (declared `none`, uses
   `io` / `alloc`).

@@ -924,12 +924,10 @@ left as lowered** (comment 11953) — liveness over-approximates, and
 to fixpoint, then a forward **NOP-out** sweep that sets `opcode = 0`
 (12482). It never deletes an instruction and never touches the block linked
 lists; terminators survive via `ir_opt_is_side_effect`. It crosses blocks.
-*Breaking invariant:* the operand-shape exclusion list at 12464 (which
+*Breaking invariant:* the operand-shape exclusion list in `ir_opt_dce` (which
 opcodes really read `src2`, and the imm-as-vreg set `{72, 76, 83, 93, 98,
-148}`) is **duplicated verbatim in four other places** — `ir_graph_color`
-(6562, 6573), `ir_seed_wide_ceilings_generic` (6170, 6177),
-`ir_compute_use_count` (5795, 5806), `ir_lea_mem_reads` (13252). Any
-divergence between the five copies miscompiles.
+148}`) is **duplicated verbatim in six other places — seven copies in total**.
+See §14 for the full list; any divergence between them miscompiles.
 
 **`ir_opt_cse` (12594)** — strictly **intra-block**. Hashes
 `{op, canon(src1), canon(src2), canon(imm)}` into a 4096-entry
@@ -1354,12 +1352,33 @@ removed; do not re-add them without re-verifying.
     the moment CSE moves or is re-run. §10.
 14. **Duplicated operand-shape tables.** The "which opcodes really read
     `src2`" exclusion list and the imm-is-a-vreg set `{72, 76, 83, 93, 98,
-    148}` are written out **five separate times**: `ir_opt_dce`
-    (`src/ir.kr:12464`, `12469`), `ir_graph_color` (`6562`, `6573`),
-    `ir_seed_wide_ceilings_generic` (`6170`, `6177`), `ir_compute_use_count`
-    (`5795`, `5806`), `ir_lea_mem_reads` (`13252`). Any divergence between
-    the five miscompiles. Adding an opcode with an unusual operand shape
-    means editing all five.
+    148}` are written out **SEVEN separate times**, all in `src/ir.kr`. Adding
+    an opcode with an unusual operand shape means editing **all seven**; any
+    divergence miscompiles.
+
+    | enclosing function |
+    |---|
+    | `ir_compute_liveness` |
+    | `ir_compute_use_count` |
+    | `ir_seed_wide_ceilings_generic` |
+    | `ir_graph_color` |
+    | `ir_x86_xmm_mark_unsafe` |
+    | `ir_opt_dce` |
+    | `ir_lea_mem_reads` |
+
+    Find them all with:
+
+    ```
+    grep -n 'op == 72 || op == 76 || op == 83 || op == 93 || op == 98 || op == 148' src/ir.kr
+    ```
+
+    **This entry said "five" until 2026-08-09, and the two it omitted were
+    `ir_compute_liveness` and `ir_x86_xmm_mark_unsafe` — both in the
+    liveness/interference path, i.e. exactly the class §5.4 warns produces a
+    use-after-free of a register.** An implementer following the old text
+    would have edited five sites and shipped a miscompile. Two further
+    near-copies in `ir_opt_cse` and `ir_opt_licm_one_pass` drop `148`
+    deliberately; do not "fix" those to match without reading §10 first.
 
 **Stale comments that have already misled this document**
 

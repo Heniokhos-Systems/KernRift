@@ -15,7 +15,7 @@ stability story.
 ### 1. Calling convention (between KernRift functions)
 
 This is the contract between a caller and a callee compiled by the same
-`kernriftc` build. It includes register assignments, argument passing,
+`krc` build. It includes register assignments, argument passing,
 return values, stack layout, and struct packing.
 
 | Target                | Convention                                   | Stable? |
@@ -145,7 +145,7 @@ for target B are fully ABI-compatible *only* when:
 1. `A == B`, OR
 2. Both targets share the same platform ABI (e.g., Linux x86_64 and
    Alpine x86_64), AND
-3. Both were built by the same `kernriftc` version, OR versions that share
+3. Both were built by the same `krc` version, OR versions that share
    the same MINOR (2.8.x ↔ 2.8.y).
 
 Fat binaries (KrboFat v2) work across targets by shipping one slice per
@@ -169,7 +169,7 @@ If a KernRift program calls into C (or vice versa) and the ABI appears
 violated, that is a bug. Reproduce with:
 
 ```
-$ kernriftc --emit=asm file.kr -o file.s
+$ krc --emit=asm file.kr -o file.s
 $ # compare the generated prologue / epilogue against the ABI spec
 ```
 

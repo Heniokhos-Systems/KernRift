@@ -53,7 +53,7 @@ none of that:
 The compiler flag:
 
 ```
-kernriftc --freestanding --arch=arm64 uart.kr main.kr -o kernel.elf
+krc --freestanding --arch=arm64 main.kr -o kernel.elf
 ```
 
 produces a flat binary with only the code you wrote plus stdlib functions

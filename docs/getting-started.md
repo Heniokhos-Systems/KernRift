@@ -235,8 +235,18 @@ u8  b  = load8(buf + 14)
 ```
 
 For MMIO, use the volatile variants: `vload8/16/32/64` and
-`vstore8/16/32/64`. These emit the same load/store instructions but add a
-memory barrier (`mfence` on x86_64, `DSB SY` on ARM64).
+`vstore8/16/32/64`.
+
+On x86_64 these emit an `mfence` alongside a width-correct load/store. On
+ARM64 they emit **different instructions** from the plain forms — the
+acquire/release pair `LDARB/H/W/X` and `STLRB/H/W/X`, not `ldr`/`str` with a
+barrier bolted on. That gives ordering, **not** completion: if you need the
+access to have finished rather than merely to be ordered against its
+neighbours, add an explicit `dsb()`.
+
+Both the width and the acquire/release form are chosen from the access size,
+so a `vstore8` writes exactly one byte and cannot disturb the bytes next to
+it. The same lowering backs a `volatile { }` block.
 
 ### Arrays
 

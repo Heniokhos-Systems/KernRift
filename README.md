@@ -41,7 +41,11 @@ A bare-metal release: six sub-projects take the compiler from "provably safe und
 - **Clean pointer syntax** — `store32(addr, val)` and `load64(addr)` instead of the verbose `unsafe { *(addr as uint32) = val }` form.
 - **Slice parameters** — `fn foo([u8] data)` with `data.len` for buffer-processing functions.
 - **Fixed arrays** — `u8[256] buf` locally, `static u8[4096] page` at module level, and `Point[10] pts` with `pts[i].field` syntax for struct arrays.
-- **Volatile blocks** — `mfence` on x86_64, `DSB SY` on ARM64 — completion barrier, not just ordering.
+- **Volatile blocks and the `vload*`/`vstore*` builtins** — `mfence` plus a
+  width-correct load/store on x86_64; `LDARB/H/W/X` and `STLRB/H/W/X` on ARM64.
+  ARM64 gets **acquire/release ordering, not a completion barrier** — add an
+  explicit `dsb()` if you need the access to have completed rather than merely
+  to be ordered. (The `--legacy` ARM64 backend emits `DSB SY` instead.)
 - **ARM64 system registers** — MSR/MRS access in inline asm (20+ registers including SCTLR_EL1, VBAR_EL1, MPIDR_EL1).
 - **Semantic analysis** — argument count checking, missing return detection, undeclared identifier detection.
 - **`--emit=asm`** — disassembled listing with function labels.
@@ -86,7 +90,7 @@ krc lc program.kr
 
 ### Self-compilation (~304K tokens, ~190K AST nodes, ~2.6 MB source)
 
-All 8 targets self-compile. CI verifies bootstrap fixed point (krc3 == krc4) and runs **703 tests** on every push. Numbers below are on an AMD Ryzen 9 7900X — see [`benchmarks/BENCHMARKS.md`](benchmarks/BENCHMARKS.md) for the complete run including gcc / rustc comparisons.
+All 8 targets self-compile. CI verifies bootstrap fixed point (krc3 == krc4) and runs the full suite on every push (**1275 tests** as of v2.9.0). Numbers below are on an AMD Ryzen 9 7900X — see [`benchmarks/BENCHMARKS.md`](benchmarks/BENCHMARKS.md) for the complete run including gcc / rustc comparisons.
 
 | Target | Legacy codegen | IR codegen (default) | IR vs legacy |
 |--------|---------------:|---------------------:|-------------:|
@@ -154,7 +158,7 @@ cargo install --git https://github.com/Heniokhos-Systems/KernRift-bootstrap kern
 make build && make install
 ```
 
-This installs `krc` and `kr` to `~/.local/bin/` and the standard library to `~/.local/share/kernrift/`. On Windows, the installer puts `krc.exe` and `kr.exe` into `%LOCALAPPDATA%\KernRift\`.
+This installs `krc` and `kr` to `~/.local/bin/` and the standard library to `~/.local/share/kernrift/`. On Windows, the installer puts `krc.exe` and `kr.exe` into `%LOCALAPPDATA%\KernRift\bin\`.
 
 ## Language
 
@@ -277,7 +281,7 @@ Compiler intrinsics — no imports needed.
 
 ## Standard Library
 
-19 modules (~4 700 lines) in `std/`:
+22 modules (~5 400 lines) in `std/`:
 
 | Module | Functions |
 |--------|-----------|
@@ -305,7 +309,7 @@ Import with `import "std/string.kr"` etc. The compiler searches `~/.local/share/
 
 ## Editor Support
 
-A VS Code extension (v0.2.3) is available on the VS Code Marketplace:
+A VS Code extension (v2.9.0, versioned in step with the compiler) is available on the VS Code Marketplace:
 
 - Syntax highlighting (TextMate grammar)
 - LSP server with diagnostics (`krc check`), completions, hover docs, and go-to-definition
@@ -316,7 +320,7 @@ See the [`examples/`](examples/) directory for runnable programs covering every 
 
 ## Architecture
 
-~63 500 lines of KernRift across 25 source files + 19 stdlib modules. Self-compiles to a 1.12 MB x86_64 native binary in ~0.41 s (IR, default), a 0.93 MB ARM64 binary, or an 8-slice fat binary (BCJ + LZ-Rift compression) in ~2.95 s on an AMD Ryzen 9 7900X. **703 tests** pass, bootstrap fixed point verified on all 8 targets — Linux, macOS, Windows, and Android on both x86_64 and ARM64. See [`benchmarks/BENCHMARKS.md`](benchmarks/BENCHMARKS.md) for micro-benchmarks vs gcc / rustc and peak-memory numbers.
+~69 900 lines of KernRift across 25 source files + 22 stdlib modules. Self-compiles to a 1.12 MB x86_64 native binary in ~0.41 s (IR, default), a 0.93 MB ARM64 binary, or an 8-slice fat binary (BCJ + LZ-Rift compression) in ~2.95 s on an AMD Ryzen 9 7900X. **1275 tests** pass as of v2.9.0, bootstrap fixed point verified on all 8 targets — Linux, macOS, Windows, and Android on both x86_64 and ARM64. See [`benchmarks/BENCHMARKS.md`](benchmarks/BENCHMARKS.md) for micro-benchmarks vs gcc / rustc and peak-memory numbers.
 
 | File | Purpose |
 |------|---------|
@@ -336,7 +340,7 @@ See the [`examples/`](examples/) directory for runnable programs covering every 
 | `bcj.kr` | BCJ filters (x86_64 + AArch64) for compression |
 | `format_*.kr` | ELF, Mach-O, PE, AR, KRBO, KrboFat |
 | `runner.kr` | `kr` — fat-binary slice extractor / launcher |
-| `std/*.kr` | Standard library (19 modules, ~4 700 lines) |
+| `std/*.kr` | Standard library (22 modules, ~5 400 lines) |
 
 ## Bootstrap
 

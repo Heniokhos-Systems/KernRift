@@ -3981,6 +3981,28 @@ else
     FAIL=$((FAIL + 1)); echo "FAIL: analysis_unreachable_write_lengths_pinned ($analysis_static_err)"
 fi
 
+# The operand-shape exclusion list is duplicated verbatim across several
+# functions in ir.kr, and any divergence between the copies miscompiles.
+# docs/IR_REFERENCE.md §14 tells implementers to edit every one of them, so the
+# doc's count and the source must agree -- it said "five" while the source had
+# SEVEN, and the two it omitted (ir_compute_liveness, ir_x86_xmm_mark_unsafe)
+# are in the liveness/interference path. Following it would have shipped a
+# use-after-free of a register.
+#
+# Pin the count in BOTH places. If you add or remove a copy, this row tells you
+# to update the doc in the same commit.
+TOTAL=$((TOTAL + 1))
+opshape_pat='op == 72 || op == 76 || op == 83 || op == 93 || op == 98 || op == 148'
+opshape_src=$(grep -c "$opshape_pat" "$DIR/../src/ir.kr")
+opshape_doc=$(grep -c 'SEVEN separate times' "$DIR/../docs/IR_REFERENCE.md")
+if [ "$opshape_src" = "7" ] && [ "$opshape_doc" = "1" ]; then
+    PASS=$((PASS + 1)); echo "  ir_operand_shape_copies_pinned: PASS (7 copies, doc agrees)"
+else
+    FAIL=$((FAIL + 1))
+    echo "FAIL: ir_operand_shape_copies_pinned (src has $opshape_src copies; docs/IR_REFERENCE.md §14 says SEVEN: $opshape_doc match)"
+    echo "  if you changed the number of copies, update docs/IR_REFERENCE.md §14 in the same commit"
+fi
+
 # Governance: promote + list round-trip
 TOTAL=$((TOTAL + 1))
 GOV_DIR=/tmp/krc_gov_$$
