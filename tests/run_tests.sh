@@ -4578,7 +4578,6 @@ else
     echo "  alloc_oom_emit_obj: SKIP (non-x86_64 host toolchain)"
 fi
 
-
 # Regression: a normal program with no extern fn at all must be completely
 # unaffected by the new check, on both backends.
 run_test "extern_refusal_no_false_positive_ir" 'fn add(uint64 a, uint64 b) -> uint64 { return a + b }
@@ -7758,6 +7757,53 @@ if command -v qemu-riscv32-static >/dev/null 2>&1; then
     rm -f "$RV_BIN"
 else
     echo "  riscv_hosted_exit_code: SKIP (qemu-riscv32-static not installed)"
+fi
+
+# riscv32 allocation-failure contract. The only asserting coverage the rv32
+# alloc/dealloc guards have: run_test/run_test_a64 never target riscv32, and
+# tests/diff_ir_legacy.sh has no rv32 arm (there is no legacy rv32 backend).
+# The threshold here is 32-bit (0xFFFFF001), not the 64-bit constant the other
+# backends use, and the guard words must stay uncompressed -- rv_compress_function
+# relayouts after emission, which once left the branch pointing mid-block and
+# faulted alloc even on SUCCESS. That is why exit 44 (the success leg) is
+# asserted alongside the OOM leg.
+echo ""
+echo "--- riscv32 alloc failure contract ---"
+if command -v qemu-riscv32-static >/dev/null 2>&1; then
+    TOTAL=$((TOTAL + 1))
+    RV_A_SRC="/tmp/krc_rv_alloc_$$.kr"
+    RV_A_BIN="/tmp/krc_rv_alloc_$$.bin"
+    cat > "$RV_A_SRC" <<'RVEOF'
+fn main() {
+    u32 bad = alloc(0xFFFF0000)
+    if bad != 0 { exit(1) }
+    dealloc(bad)
+    u32 ok = alloc(64)
+    if ok == 0 { exit(2) }
+    store32(ok, 4242)
+    u32 v = load32(ok)
+    dealloc(ok)
+    if v != 4242 { exit(3) }
+    exit(44)
+}
+RVEOF
+    if ! $KRC --arch=riscv32 "$RV_A_SRC" -o "$RV_A_BIN" >/dev/null 2>&1; then
+        echo "FAIL: riscv_alloc_oom_returns_zero (compilation failed)"
+        FAIL=$((FAIL + 1))
+    else
+        qemu-riscv32-static "$RV_A_BIN" >/dev/null 2>&1
+        rc=$?
+        if [ "$rc" = "44" ]; then
+            PASS=$((PASS + 1))
+            echo "  riscv_alloc_oom_returns_zero: PASS (OOM->0, dealloc(0) safe, success path intact)"
+        else
+            echo "FAIL: riscv_alloc_oom_returns_zero (got exit $rc, want 44)"
+            FAIL=$((FAIL + 1))
+        fi
+    fi
+    rm -f "$RV_A_SRC" "$RV_A_BIN"
+else
+    echo "  riscv_alloc_oom_returns_zero: SKIP (qemu-riscv32-static not installed)"
 fi
 
 # Compiles examples/riscv-hosted/hello.kr, which is the Task 2 hosted-syscall

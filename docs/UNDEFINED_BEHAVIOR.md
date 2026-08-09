@@ -137,10 +137,13 @@ Applying the Linux errno-range test on macOS would read a failure as success
 — `mmap` failure leaves `12` (`ENOMEM`) in `rax`/`x0` there, and `12` is not
 in the errno range — and the header store would then write to address 12.
 
-**What was executed, and what was only read.** The Linux x86_64, Linux arm64
-(under `qemu-aarch64-static`) and Linux riscv32 (under `qemu-riscv32-static`)
-paths were **run**, through both the IR and `--legacy` backends and through
-`--emit=obj`, which selects the legacy codegen with no `--legacy` flag. No
+**What was executed, and what was only read.** Linux x86_64 and Linux arm64
+(under `qemu-aarch64-static`) were **run through both the IR and `--legacy`
+backends**, and x86_64 additionally through `--emit=obj`, which selects the
+legacy codegen with no `--legacy` flag. Linux riscv32 was run under
+`qemu-riscv32-static` through the **IR backend only — there is no legacy
+riscv32 allocation lowering**, and `--legacy --arch=riscv32` emits a
+byte-identical binary to the IR build. No
 macOS or Windows host was available: those four paths (two arches × two
 backends, plus their `dealloc` guards) were verified by **disassembling the
 emitted instructions** with `llvm-mc` and confirming both the encoding and

@@ -144,6 +144,17 @@ fn main(){bump(); bump(); exit(g)}'
 # ---- sizeof ----
 diff_case "sizeof"    'fn main(){exit(sizeof(u64))}'
 
+# Allocation-failure parity. This harness runs x86_64 IR, x86_64 legacy, arm64
+# IR *and* arm64 legacy, which is the only automated coverage the arm64 legacy
+# alloc/dealloc guards have -- run_test_a64 is IR-only and tests/diff/run.sh's
+# backend mode is host-arch. Note it compares the four against each other and
+# does not assert an absolute, so it locks in agreement going forward rather
+# than detecting the original defect (pre-fix all four segfaulted, and so
+# agreed); the asserting rows live in run_tests.sh.
+diff_case "alloc_oom"    'fn main(){ u64 p = alloc(0xFFFFFFFFFFFF0000)  if p != 0 { exit(1) }  exit(42) }'
+diff_case "dealloc_null" 'fn main(){ dealloc(0)  exit(43) }'
+diff_case "alloc_ok"     'fn main(){ u64 p = alloc(64)  if p == 0 { exit(1) }  store64(p, 999)  u64 v = load64(p)  dealloc(p)  if v != 999 { exit(2) }  exit(44) }'
+
 echo "----"
 echo "Differential: $((TOTAL-DIV))/$TOTAL agree across backends, $DIV diverged."
 if [ "$DIV" = "0" ]; then echo "PARITY OK"; else echo "PARITY GAPS FOUND"; exit 1; fi
