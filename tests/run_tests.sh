@@ -1644,6 +1644,45 @@ else
 fi
 rm -f /tmp/krc_obj_$$.kr /tmp/krc_obj_$$.o /tmp/krc_obj_c_$$.o
 
+# --- @export controls STB_GLOBAL vs STB_LOCAL in --emit=obj symtab ---
+# @export is parsed and stored in ast_data4 bit 2 but used to have ZERO
+# effect on ELF symbol binding: every function except main was emitted
+# STB_LOCAL regardless, so a C driver could never link against a KernRift
+# .o (nm showed lowercase `t name`, not `T name`). Fixed by threading
+# ann_flags & 4 through gen_function/gen_function_a64 into export_fn_table,
+# which emit_elf_relocatable consults when deciding LOCAL vs GLOBAL.
+# --arch=x86_64 is pinned deliberately: this row only compiles and inspects
+# the .o with readelf, it never executes the artifact, so it is safe to run
+# on any host arch (see feedback_arch_pinned_rows).
+echo ""
+echo "--- @export symbol binding (--emit=obj) ---"
+TOTAL=$((TOTAL + 1))
+printf '@export\nfn addsix(u64 a, u64 b) -> u64 { return a + b + 6 }\n\nfn helper(u64 x) -> u64 { return x * 2 }\n\nfn main() -> uint32 { uint64 r = helper(1); exit(0) }\n' > /tmp/krc_export_$$.kr
+if $KRC --arch=x86_64 --emit=obj /tmp/krc_export_$$.kr -o /tmp/krc_export_$$.o > /dev/null 2>&1 \
+    && command -v readelf > /dev/null 2>&1; then
+    symbols=$(readelf -sW /tmp/krc_export_$$.o 2>/dev/null)
+    addsix_global=$(echo "$symbols" | grep -c 'FUNC.*GLOBAL.*addsix')
+    helper_local=$(echo "$symbols" | grep -c 'FUNC.*LOCAL.*helper')
+    main_global=$(echo "$symbols" | grep -c 'FUNC.*GLOBAL.*main')
+    if [ "$addsix_global" -ge 1 ] && [ "$helper_local" -ge 1 ] && [ "$main_global" -ge 1 ]; then
+        PASS=$((PASS + 1))
+        echo "  export_symbol_global: PASS (@export addsix=GLOBAL, un-annotated helper=LOCAL, main=GLOBAL)"
+    else
+        FAIL=$((FAIL + 1))
+        echo "FAIL: export_symbol_global (addsix_global=$addsix_global helper_local=$helper_local main_global=$main_global)"
+        echo "$symbols"
+    fi
+else
+    if command -v readelf > /dev/null 2>&1; then
+        FAIL=$((FAIL + 1))
+        echo "FAIL: export_symbol_global (compilation with --emit=obj failed)"
+    else
+        PASS=$((PASS + 1))
+        echo "  export_symbol_global: SKIP (readelf not found)"
+    fi
+fi
+rm -f /tmp/krc_export_$$.kr /tmp/krc_export_$$.o
+
 # --- ELF relocatable: large symbol table structural test (regression) ---
 # Every --emit=obj test above compiles a two-function toy program, whose
 # .strtab is a few hundred bytes. That never approached the .strtab buffer's

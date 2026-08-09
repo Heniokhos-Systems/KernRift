@@ -47,6 +47,16 @@ static uint64 fn_table = 0
 static uint64 fn_count = 0
 static uint64 fn_table_cap = 0
 
+// @export fn table — name_tok of every @export-annotated function that
+// gen_function/gen_function_a64 actually emitted (extern decls and
+// bodyless declarations never reach fn_register, so they never reach this
+// either). Consulted by emit_elf_relocatable to decide which fn_table
+// entries get STB_GLOBAL instead of the default STB_LOCAL, so C code (or
+// any other translation unit) can link against them. Each entry is 8
+// bytes: [name_tok(4), pad(4)]. Max 4096 exported functions.
+static uint64 export_fn_table = 0
+static uint64 export_fn_count = 0
+
 // Extern function table — functions declared with `extern fn name(params)`
 // that are resolved at link time by the system linker. Each entry is
 // 8 bytes: [name_tok(4), pad(4)]. Max 256 externs.
@@ -431,6 +441,8 @@ fn codegen_init(uint64 capacity, uint64 source, uint64 tokens) {
     fn_table_cap = 1024
     fn_table = alloc(fn_table_cap * 8)
     fn_count = 0
+    export_fn_table = alloc(4096 * 8)
+    export_fn_count = 0
     fixup_table = alloc(32768 * 8)
     fixup_count = 0
     fixup_cap = 32768
@@ -2554,6 +2566,41 @@ fn fn_register(uint64 name_tok, uint64 code_offset) {
     uint32 co = code_offset
     unsafe { *(e4 as uint32) = co }
     fn_count = fn_count + 1
+}
+
+// Record an @export-annotated function's name token, once it is known to
+// actually be emitted (called right after fn_register, from gen_function
+// and gen_function_a64). Consulted by emit_elf_relocatable.
+@export
+fn export_fn_register(uint64 name_tok) {
+    if export_fn_count >= 4096 {
+        write(2, "error: export_fn_table overflow (max 4096)\n", 43)
+        exit(1)
+    }
+    uint64 entry = export_fn_table + export_fn_count * 8
+    uint32 nt = name_tok
+    unsafe { *(entry as uint32) = nt }
+    export_fn_count = export_fn_count + 1
+}
+
+// Returns 1 if name_tok was registered via export_fn_register, else 0.
+// name_tok is compared by exact token index: both the writer (gen_function /
+// gen_function_a64) and this reader (emit_elf_relocatable) derive it from
+// the same ast_data1(fn_node) / fn_table entry, so index equality is exact
+// — no need for the text-comparison fallback tok_text_eq/builtin_override
+// use for tokens minted independently at different times.
+@export
+fn export_fn_is_exported(uint64 name_tok) -> uint64 {
+    uint64 i = 0
+    while i < export_fn_count {
+        uint64 entry = export_fn_table + i * 8
+        uint32 stored_tok = 0
+        unsafe { *(entry as uint32) -> stored_tok }
+        uint64 ws = stored_tok
+        if ws == name_tok { return 1 }
+        i = i + 1
+    }
+    return 0
 }
 
 // Per-function `@section("name")` annotation storage. Each entry is 16
@@ -10769,6 +10816,11 @@ fn gen_function(uint64 fn_node) {
     // Register function at current offset
     fn_register(name_tok, out_len)
 
+    // @export (bit 2): opt this function's symbol into STB_GLOBAL so other
+    // translation units (e.g. C via --emit=obj) can link against it.
+    uint64 is_export = ann_flags & 4
+    if is_export != 0 { export_fn_register(name_tok) }
+
     // Register float return type if applicable
     uint32 ret_type_tok = ast_data2(fn_node)
     uint64 wrt = ret_type_tok
@@ -15275,15 +15327,21 @@ fn emit_elf_relocatable(uint64 text_len, uint64 data_len, uint64 arch) {
 
     // Entries for each function
     fi = 0
-    // Count local symbols: everything except main (which is GLOBAL)
+    // Count local symbols: everything except main (which is GLOBAL) and
+    // everything @export-annotated (also GLOBAL, see export_fn_table).
     // STB_LOCAL symbols must come before STB_GLOBAL in symtab
     // info field = (binding << 4) | type
     // We emit locals first, then globals.
-    // First pass: emit LOCAL functions (not main)
+    // First pass: emit LOCAL functions (not main, not @export)
     uint64 local_count = 1  // include null symbol
     fi = 0
     while fi < fn_count {
-        if fi != main_fn_idx {
+        uint64 fentry_l = fn_table + fi * 8
+        uint32 stored_tok_l = 0
+        unsafe { *(fentry_l as uint32) -> stored_tok_l }
+        uint64 ws_l = stored_tok_l
+        uint64 is_export_sym = export_fn_is_exported(ws_l)
+        if fi != main_fn_idx && is_export_sym == 0 {
             uint64 no_ptr = name_offsets + fi * 8
             uint64 name_off = 0
             unsafe { *(no_ptr as uint64) -> name_off }
@@ -15331,10 +15389,47 @@ fn emit_elf_relocatable(uint64 text_len, uint64 data_len, uint64 arch) {
         emit_u64_le(0)
     }
 
+    // Second-b pass: emit GLOBAL for every @export-annotated function
+    // (excluding main, already emitted above — a function can be both
+    // "main" and @export, and it must appear exactly once in the symtab).
+    uint64 export_global_count = 0
+    fi = 0
+    while fi < fn_count {
+        if fi != main_fn_idx {
+            uint64 fentry_g = fn_table + fi * 8
+            uint32 stored_tok_g = 0
+            unsafe { *(fentry_g as uint32) -> stored_tok_g }
+            uint64 ws_g = stored_tok_g
+            if export_fn_is_exported(ws_g) != 0 {
+                uint64 no_ptr_g = name_offsets + fi * 8
+                uint64 name_off_g = 0
+                unsafe { *(no_ptr_g as uint64) -> name_off_g }
+                // st_name
+                emit_u32_le(name_off_g)
+                // st_info = STB_GLOBAL(1) << 4 | STT_FUNC(2) = 0x12
+                emit_byte(0x12)
+                // st_other = 0
+                emit_byte(0)
+                // st_shndx = 1 (.text section)
+                emit_u16_le(1)
+                // st_value = offset within .text
+                uint64 fe4_g = fentry_g + 4
+                uint32 code_off_g = 0
+                unsafe { *(fe4_g as uint32) -> code_off_g }
+                emit_u64_le(code_off_g)
+                // st_size = 0
+                emit_u64_le(0)
+                export_global_count = export_global_count + 1
+            }
+        }
+        fi = fi + 1
+    }
+
     // Third pass: emit extern function symbols (GLOBAL, STT_NOTYPE, SHN_UNDEF).
     // The linker resolves these when producing the final executable.
     uint64 extern_sym_base = local_count
     if main_fn_idx != 0xFFFFFFFF { extern_sym_base = extern_sym_base + 1 }
+    extern_sym_base = extern_sym_base + export_global_count
     uint64 ei2 = 0
     while ei2 < extern_fn_count {
         uint64 xno_ptr2 = extern_name_offsets + ei2 * 8
