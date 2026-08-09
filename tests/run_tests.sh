@@ -5249,6 +5249,31 @@ else
 fi
 rm -f "$UEX_IMG"
 
+# examples/tutorial-btree ships the page manager from docs/tutorial-btree.md
+# §2 -- the mmap-backed persistence the whole tutorial rests on. The stdlib has
+# no open/mmap/msync, so it goes through syscall_raw with per-arch numbers;
+# that is exactly the kind of code that rots silently.
+#
+# This row EXECUTES (it writes and re-reads a real file), so it builds at the
+# host arch via $RUN_ARCH rather than naming one.
+TOTAL=$((TOTAL + 1))
+BEX_DIR="$DIR/../examples/tutorial-btree"
+BEX_BIN="/tmp/krc_btree_example_$$"
+if [ ! -f "$BEX_DIR/main.kr" ] || [ ! -f "$BEX_DIR/pager.kr" ]; then
+    FAIL=$((FAIL + 1)); echo "FAIL: tutorial_btree_example_runs (source files missing)"
+elif ! $KRC --arch="$RUN_ARCH" "$BEX_DIR/main.kr" -o "$BEX_BIN" >/dev/null 2>&1; then
+    FAIL=$((FAIL + 1)); echo "FAIL: tutorial_btree_example_runs (compile failed)"
+else
+    "$BEX_BIN" >/dev/null 2>&1
+    bex_rc=$?
+    if [ "$bex_rc" = "0" ]; then
+        PASS=$((PASS + 1)); echo "  tutorial_btree_example_runs: PASS (magic + value survive msync and reopen)"
+    else
+        FAIL=$((FAIL + 1)); echo "FAIL: tutorial_btree_example_runs (exit $bex_rc; 1=open 2=msync 3=reopen 4=magic 5=value)"
+    fi
+fi
+rm -f "$BEX_BIN" /tmp/kr_tutorial_btree.db
+
 # `krc lc --ci` applies a DEFAULT fitness gate of 50, so it does not fail on
 # every pattern. docs/LIVING_COMPILER.md said it did, which is the dangerous
 # direction: anyone wiring the bare form into CI gets a gate that silently

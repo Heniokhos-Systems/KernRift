@@ -12,8 +12,11 @@ By the end you'll have:
 3. A one-phase durability strategy: write ahead a new root, fsync, swap.
 4. A CLI that `put` / `get` / `list` / `delete`s `u64 → u64` mappings.
 
-The running code is in `examples/tutorial-btree/`; this document
-explains *why* the code looks the way it does.
+`examples/tutorial-btree/` ships the **page manager** from §2 — the
+mmap-backed persistence layer everything else stands on — with a smoke test
+(`make check`) that writes, `msync`s, re-opens and verifies. The B-tree
+itself is what this document walks you through building on top of it; it is
+deliberately not shipped pre-written.
 
 ---
 
@@ -36,7 +39,11 @@ the header; pages 1..N are tree nodes.
 
 ```kernrift
 const u64 PAGE_SIZE = 8192
-const u64 MAGIC = 0x4B52425445455231   // "KRBTEER1" little-endian
+const u64 MAGIC = 0x4B52425445455231   // "KRBTEER1" read big-endian
+// Stored with store64 this lands in memory as the bytes "1REETBRK" -- the
+// ASCII reads left-to-right only in the big-endian view. That is fine for a
+// magic number, which is just a bit pattern, but do not expect `xxd` to show
+// you "KRBTEER1".
 
 struct Header {
     u64 magic        // sanity check
@@ -48,23 +55,51 @@ struct Header {
 
 Opening the file:
 
+**There is no `open`, `ftruncate`, `mmap` or `msync` in the standard
+library** — `std/io.kr` gives you whole-file `read_file`/`write_file` and
+nothing memory-mapped. For a page manager you go through `syscall_raw`
+directly, and you supply the syscall numbers yourself because they differ per
+architecture:
+
 ```kernrift
-fn db_open(u64 path) -> u64 {
-    u64 fd = open(path, 0x42, 0x180)         // O_RDWR | O_CREAT, mode 0600
-    if is_errno(fd) != 0 {
-        // ... bail
-    }
-    // mmap 1 GB of virtual address space. The file grows lazily via ftruncate.
-    u64 size = 1024 * 1024 * 1024
-    ftruncate(fd, size)
-    u64 base = mmap(0, size, 3, 1, fd, 0)    // PROT_R|W, MAP_SHARED
+// get_arch_id(): 1 = linux-x86_64, 2 = linux-arm64.
+// arm64 has no plain `open`; it only has `openat`.
+fn nr_openat()    -> u64 { u64 a = get_arch_id()  if a == 2 { return 56 }   return 257 }
+fn nr_ftruncate() -> u64 { u64 a = get_arch_id()  if a == 2 { return 46 }   return 77 }
+fn nr_mmap()      -> u64 { u64 a = get_arch_id()  if a == 2 { return 222 }  return 9 }
+fn nr_msync()     -> u64 { u64 a = get_arch_id()  if a == 2 { return 227 }  return 26 }
+fn nr_close()     -> u64 { u64 a = get_arch_id()  if a == 2 { return 57 }   return 3 }
+
+fn db_open(u64 path, u64 size) -> u64 {
+    // openat(AT_FDCWD, path, O_RDWR|O_CREAT, 0644). AT_FDCWD is -100.
+    u64 fd = syscall_raw(nr_openat(), 0xFFFFFFFFFFFFFF9C, path, 0x42, 420, 0, 0)
+    if fd > 0xFFFFFFFFFFFFF000 { return 0 }          // -errno
+    if syscall_raw(nr_ftruncate(), fd, size, 0, 0, 0, 0) > 0xFFFFFFFFFFFFF000 { return 0 }
+    // mmap(NULL, size, PROT_READ|PROT_WRITE, MAP_SHARED, fd, 0)
+    u64 base = syscall_raw(nr_mmap(), 0, size, 3, 1, fd, 0)
+    if base > 0xFFFFFFFFFFFFF000 { return 0 }
     return base
+}
+
+fn db_sync(u64 base, u64 size) -> u64 {
+    // msync(base, size, MS_SYNC)
+    return syscall_raw(nr_msync(), base, size, 4, 0, 0, 0)
 }
 ```
 
-The mmap gives us byte pointers directly; no buffer-pool machinery. This
-only works up to the mmap region size — on 64-bit Linux, 1 GB is fine,
-and extending it in place is a re-mmap away.
+A raw syscall returns `-errno` in the range `[-4095, -1]`, which as an
+unsigned value is `> 0xFFFFFFFFFFFFF000` — that is the error test above, and
+it is the same threshold `std/io.kr`'s `is_errno` uses. `is_errno` itself is
+fine to use here instead.
+
+The mmap gives us byte pointers directly; no buffer-pool machinery. It only
+works up to the mapped region size, and extending it in place is a re-mmap
+away.
+
+**This code is verified**: opening a file, truncating to 8 KiB, mapping it,
+writing the magic, `msync`ing and reading it back returns the written value on
+both x86_64 and arm64. Everything after this section assumes `db_open` hands
+you a base pointer.
 
 ---
 
@@ -82,9 +117,19 @@ offset  size    field
 8+2N*8  (k+1)*8 children[]         u64 pageno (only valid if internal)
 ```
 
-With `PAGE_SIZE = 8192` and all fields `u64`, the max fan-out works out
-to roughly 340 children per internal node (leaves slightly less because
-they also carry values). We'll cap at `N_MAX = 255` to leave slack.
+The offsets above are fixed, so **every** node reserves `keys[]`,
+`values[]` and `children[]` whether or not it uses them. With
+`PAGE_SIZE = 8192` that gives `8 + 8N + 8N + 8(N+1) = 8192`, i.e. **N = 340
+for internal nodes and leaves alike** — a leaf does not get fewer entries for
+"also carrying values", because the space for children it never uses is
+reserved regardless.
+
+If you instead gave leaves their own layout with no `children[]`, they would
+fit `8 + 8N + 8N = 8192` → **511** keys, i.e. *more* than an internal node,
+not fewer. Doing that costs you a single uniform node accessor, which is why
+this tutorial keeps one layout.
+
+We'll cap at `N_MAX = 255` to leave slack.
 
 ```kernrift
 const u64 N_MAX  = 255
@@ -136,7 +181,7 @@ fn node_find(u64 page, u64 key) -> u64 {
 
 fn db_get(u64 base, u64 key) -> u64 {
     u64 hdr = base
-    u64 root_no = *(hdr + 8) as u64
+    u64 root_no = load64(hdr + 8)
     u64 page = base + root_no * PAGE_SIZE
     while node_is_leaf(page) == 0 {
         u64 i = node_find(page, key)
@@ -224,17 +269,17 @@ This is the design lmdb uses. Implementation:
 ```kernrift
 fn db_put(u64 base, u64 key, u64 val) {
     u64 hdr = base
-    u64 old_root = *(hdr + 8) as u64
+    u64 old_root = load64(hdr + 8)
     u64 new_root = cow_insert(base, old_root, key, val)
 
     // Two fsyncs:
-    asm("dsb sy")                     // make all node writes visible
-    msync_full(base)                  // fsync the tree pages
+    dsb()                             // make all node writes visible
+    db_sync(base, size)               // msync the tree pages
 
     // Now commit the root switch.
     u64 rp = hdr + 8
     unsafe { *(rp as uint64) = new_root }
-    msync_full(base)                  // fsync the header
+    db_sync(base, size)               // msync the header
 }
 ```
 
@@ -251,9 +296,10 @@ traversal:
 
 ```kernrift
 fn db_range(u64 base, u64 lo, u64 hi, u64 cb) {
-    // cb is a function pointer — not yet supported in KernRift.
+    // cb is a function pointer: fn_addr("name") takes the address and
+    // call_ptr(p, args...) invokes it. Both work today.
     // Instead, inline the callback or use a polling "iterator":
-    u64 stack[16]
+    u64[16] stack
     u64 depth = 0
     // push root
     // while stack not empty:
@@ -285,7 +331,8 @@ fn main() {
 `fn_addr` requires the function name as a string literal — it resolves
 at link time, not at run time. For a true iterator that returns values,
 use a state-machine with `iter_next()` / `iter_end()` that returns a
-sentinel when done; `examples/tutorial-btree/iter.kr` sketches both.
+sentinel when done. (Neither is shipped — the example directory carries the
+§2 page manager only.)
 
 ---
 
@@ -306,14 +353,17 @@ functions above.
 
 ## 9. Benchmark
 
-On a 2020 Raspberry Pi 4 (2 GB, eMMC), the example loads a 10 M-entry
-sorted dataset in ~18 seconds (~555 K ops/s) and does 1.2 M random
-gets/s. That's with one fsync per batch of 1024 inserts; per-insert
-fsyncs drop the number to 1.2 K ops/s (eMMC's sync latency is ~800 µs).
+**No numbers are quoted here, deliberately.** Earlier revisions of this
+document gave throughput figures for a Raspberry Pi 4 and a comparison
+against sqlite. Those numbers could not be reproduced: the artifact they were
+measured on is not in this repository, and the primitives the tutorial
+described at the time (`open`, `mmap`, `msync_full`) do not exist, so nothing
+that could have produced them can be reconstructed.
 
-Compared to sqlite with default `PRAGMA synchronous=NORMAL`, this
-implementation is ~40 % faster on inserts and ~10 % slower on lookups
-(sqlite has a better page cache).
+If you build the tree and measure it, the figures worth reporting are inserts
+per second at a stated fsync batch size, random gets per second, and the
+storage device — sync latency dominates, so an insert rate without the fsync
+policy beside it means nothing.
 
 ---
 
@@ -358,4 +408,5 @@ Ideas, in roughly increasing difficulty:
   https://sqlite.org/fileformat2.html#b_tree_pages
 - `docs/ERROR_HANDLING.md` — for the `opt_*` / `is_errno` patterns used
   in the example's API surface.
-- `examples/tutorial-btree/README.md` — build and run instructions.
+- `examples/tutorial-btree/Makefile` — builds the §2 page manager and runs
+  its smoke test (`make check`).

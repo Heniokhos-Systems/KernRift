@@ -1,0 +1,36 @@
+// Smoke test for the page manager in docs/tutorial-btree.md §2.
+//
+// Opens a file, maps it, writes a magic + a value into page 0, msyncs,
+// re-opens it in a second mapping, and checks the bytes survived. That is
+// the whole persistence claim the tutorial's B-tree rests on.
+import "pager.kr"
+
+// "KRBTEER1" in the big-endian reading; stored little-endian these bytes
+// land as "1REETBRK" on disk. A magic number is a bit pattern, not a string.
+const u64 MAGIC = 0x4B52425445455231
+const u64 DBSIZE = 65536
+
+fn main() -> uint32 {
+    u64 path = "/tmp/kr_tutorial_btree.db"
+    u64[1] fdslot
+
+    u64 base = db_open(path, DBSIZE, fdslot)
+    if base == 0 { exit(1) }
+    u64 p0 = db_page(base, 0)
+    store64(p0, MAGIC)
+    store64(p0 + 8, 424242)
+    if db_sync(base, DBSIZE) != 0 { exit(2) }
+    db_close(load64(fdslot))
+
+    // Re-open: a fresh mapping of the same file must see the same bytes.
+    u64[1] fdslot2
+    u64 base2 = db_open(path, DBSIZE, fdslot2)
+    if base2 == 0 { exit(3) }
+    u64 q0 = db_page(base2, 0)
+    if load64(q0) != MAGIC { exit(4) }
+    if load64(q0 + 8) != 424242 { exit(5) }
+    db_close(load64(fdslot2))
+
+    println_str("pager: magic and value survived msync + reopen")
+    exit(0)
+}

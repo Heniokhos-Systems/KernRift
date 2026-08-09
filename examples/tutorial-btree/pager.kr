@@ -1,0 +1,49 @@
+// mmap-backed page manager for docs/tutorial-btree.md §2.
+//
+// The standard library has no open/ftruncate/mmap/msync -- std/io.kr offers
+// whole-file read_file/write_file and nothing memory-mapped -- so this goes
+// through syscall_raw. Numbers differ per architecture, hence the helpers.
+//
+// get_arch_id(): 1 = linux-x86_64, 2 = linux-arm64.
+// arm64 has no plain `open`; it only has `openat`.
+fn nr_openat()    -> u64 { u64 a = get_arch_id()  if a == 2 { return 56 }   return 257 }
+fn nr_ftruncate() -> u64 { u64 a = get_arch_id()  if a == 2 { return 46 }   return 77 }
+fn nr_mmap()      -> u64 { u64 a = get_arch_id()  if a == 2 { return 222 }  return 9 }
+fn nr_msync()     -> u64 { u64 a = get_arch_id()  if a == 2 { return 227 }  return 26 }
+fn nr_close()     -> u64 { u64 a = get_arch_id()  if a == 2 { return 57 }   return 3 }
+
+// A raw syscall reports failure as -errno, which unsigned is > 0xFFFFFFFFFFFFF000.
+// Same threshold std/io.kr's is_errno uses.
+fn pager_failed(u64 r) -> u64 {
+    if r > 0xFFFFFFFFFFFFF000 { return 1 }
+    return 0
+}
+
+// Returns the mapped base address, or 0 on failure. `fd_out` receives the fd
+// so the caller can close it; pass 0 to ignore.
+fn db_open(u64 path, u64 size, u64 fd_out) -> u64 {
+    // openat(AT_FDCWD = -100, path, O_RDWR|O_CREAT = 0x42, 0644)
+    u64 fd = syscall_raw(nr_openat(), 0xFFFFFFFFFFFFFF9C, path, 0x42, 420, 0, 0)
+    if pager_failed(fd) != 0 { return 0 }
+    if fd_out != 0 { store64(fd_out, fd) }
+    if pager_failed(syscall_raw(nr_ftruncate(), fd, size, 0, 0, 0, 0)) != 0 { return 0 }
+    // mmap(NULL, size, PROT_READ|PROT_WRITE = 3, MAP_SHARED = 1, fd, 0)
+    u64 base = syscall_raw(nr_mmap(), 0, size, 3, 1, fd, 0)
+    if pager_failed(base) != 0 { return 0 }
+    return base
+}
+
+// msync(base, size, MS_SYNC). Returns 0 on success.
+fn db_sync(u64 base, u64 size) -> u64 {
+    u64 r = syscall_raw(nr_msync(), base, size, 4, 0, 0, 0)
+    return pager_failed(r)
+}
+
+fn db_close(u64 fd) {
+    syscall_raw(nr_close(), fd, 0, 0, 0, 0, 0)
+}
+
+// Page n of the mapping. PAGE_SIZE is the tutorial's 8 KiB.
+fn db_page(u64 base, u64 pageno) -> u64 {
+    return base + pageno * 8192
+}
