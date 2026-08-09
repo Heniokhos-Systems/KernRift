@@ -4835,14 +4835,28 @@ fn ir_lower_stmt(uint64 node) {
         uint32 addr_expr = ast_child(node)
         uint64 addr_v = ir_lower_expr(addr_expr)
         uint64 dest_v = ir_new_vreg()
-        ir_emit(IR_LOAD, dest_v, addr_v, type_size, 0, ir_current_bb)
-        // Propagate f64/f32 type-flow from the `as TYPE` clause. The
-        // parser stashed the fkind in data3 (1=f64, 2=f32, 3=f16,
-        // 0=int). Without this, `unsafe { *(p as f64) -> v }` leaves
-        // v untyped at the IR level and downstream `v + x` emits
-        // integer arithmetic instead of IR_FADD.
-        uint32 fk32 = ast_data3(node)
-        uint64 fk = fk32
+        // data3 packs two things (see parser.kr's volatile block):
+        //   bits 0..3 = float kind (1=f64, 2=f32, 3=f16, 0=int)
+        //   bit  4    = volatile
+        // Reading the whole word as the float kind is what made every
+        // `volatile { *(p as TYPE) -> v }` come out f64.
+        uint32 d3_32 = ast_data3(node)
+        uint64 d3 = d3_32
+        uint64 fk = d3 & 15
+        uint64 is_vol = (d3 >> 4) & 1
+        if is_vol != 0 {
+            // Volatile: same lowering as the vload8/16/32/64 builtins, so it
+            // inherits their width-correct acquire semantics (mfence + sized
+            // load on x86, LDARB/H/W/X on arm64). Width goes in the IMM slot
+            // for IR_VLOAD, not src2 as IR_LOAD takes it.
+            ir_emit(IR_VLOAD, dest_v, addr_v, 0, type_size, ir_current_bb)
+        } else {
+            ir_emit(IR_LOAD, dest_v, addr_v, type_size, 0, ir_current_bb)
+        }
+        // Propagate f64/f32 type-flow from the `as TYPE` clause. Without
+        // this, `unsafe { *(p as f64) -> v }` leaves v untyped at the IR
+        // level and downstream `v + x` emits integer arithmetic instead of
+        // IR_FADD.
         if fk != 0 { ir_vreg_fkind_set(dest_v, fk) }
         // Bind dest variable
         uint32 dest_tok = ast_data2(node)
@@ -4850,7 +4864,7 @@ fn ir_lower_stmt(uint64 node) {
         return
     }
 
-    // PtrStore (42): unsafe { *(addr as TYPE) = val }
+    // PtrStore (42): unsafe/volatile { *(addr as TYPE) = val }
     if kind == 42 {
         uint32 ts = ast_data1(node)
         uint64 type_size = ts
@@ -4858,7 +4872,19 @@ fn ir_lower_stmt(uint64 node) {
         uint64 addr_v = ir_lower_expr(addr_expr)
         uint32 val_node = ast_data2(node)
         uint64 val_v = ir_lower_expr(val_node)
-        ir_emit(IR_STORE, type_size, addr_v, val_v, 0, ir_current_bb)
+        // data3 bit 4 = volatile (see parser.kr). Stores carry no float kind,
+        // so the low bits are always clear here.
+        uint32 sd3_32 = ast_data3(node)
+        uint64 sd3 = sd3_32
+        uint64 s_vol = (sd3 >> 4) & 1
+        if s_vol != 0 {
+            // Same lowering as the vstore8/16/32/64 builtins: mfence + sized
+            // store on x86, STLRB/H/W/X on arm64. Width goes in the DEST slot
+            // for IR_VSTORE.
+            ir_emit(IR_VSTORE, type_size, addr_v, val_v, 0, ir_current_bb)
+        } else {
+            ir_emit(IR_STORE, type_size, addr_v, val_v, 0, ir_current_bb)
+        }
         return
     }
 

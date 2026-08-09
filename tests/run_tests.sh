@@ -1184,7 +1184,10 @@ fi
 run_test "noreturn_fn" '@noreturn fn die() { exit(99) }
 fn main() { die() }' 99
 
-# volatile block (same as unsafe)
+# volatile block. NOTE: this row passes even with the data3 f64 miscompile
+# present, because exit(val) never does arithmetic on the loaded value -- the
+# vreg was mistyped f64 but a plain register move looks identical. The rows
+# below are the ones that actually exercise it.
 run_test "volatile_block" 'fn main() {
     uint64 buf = alloc(64)
     uint64 val = 0
@@ -1192,6 +1195,145 @@ run_test "volatile_block" 'fn main() {
     volatile { *(buf as uint64) -> val }
     exit(val)
 }' 42
+
+# The miscompile: parser.kr wrote a bare 1 into data3 as a "volatile flag"
+# while the unsafe path wrote the FLOAT KIND into the same slot, and IR
+# lowering read it as the float kind. Every volatile load was therefore typed
+# f64, so integer arithmetic on it produced 0.
+run_test "volatile_load_not_mistyped_f64" 'fn main() {
+    u64 p = alloc(64)
+    store32(p, 4)
+    volatile { *(p as u32) -> v }
+    u64 w = v / 2
+    exit(w)
+}' 2
+
+# The same program with `unsafe` was always correct -- it is the control that
+# proves the defect was volatile-specific, not a bug in the load itself.
+run_test "unsafe_load_control_still_correct" 'fn main() {
+    u64 p = alloc(64)
+    store32(p, 4)
+    unsafe { *(p as u32) -> v }
+    u64 w = v / 2
+    exit(w)
+}' 2
+
+# A genuine f64 through a volatile load must still be typed f64 -- the fix
+# must not simply clear the float kind.
+run_test "volatile_load_f64_still_float" 'fn main() {
+    u64 p = alloc(64)
+    unsafe { *(p as f64) = 6.5 }
+    volatile { *(p as f64) -> d }
+    f64 e = d * 2.0
+    if e > 12.9 { if e < 13.1 { exit(9) } }
+    exit(1)
+}' 9
+
+# Volatile now lowers to IR_VLOAD/IR_VSTORE, so it inherits their width
+# correctness: a u8 volatile store must not clobber its neighbours. Before
+# that it went through the plain IR_STORE path.
+run_test "volatile_narrow_store_no_clobber" 'fn main() {
+    u64 p = alloc(64)
+    store32(p + 8, 77)
+    volatile { *(p + 4 as u8) = 3 }
+    exit(load32(p + 8))
+}' 77
+
+# The barrier itself, asserted on emitted bytes with a control, on ALL FOUR
+# backend/arch combinations.
+#
+# Covering only the default (x86_64 IR) is what let a real regression through
+# once already: re-encoding the AST volatile marker from 1 to bit 4 silently
+# stopped the LEGACY backends firing, because they tested `data3 == 1` rather
+# than the bit. The IR-only assertion stayed green through it. Behaviour cannot
+# catch a missing fence either -- a dropped barrier changes no exit code -- so
+# this pins the instruction on every path that emits one.
+#
+# Expected barrier per config: x86 mfence (0f ae f0) on both backends;
+# arm64 IR LDAR (size field in bits 31:30, so 08/48/88/c8 dff...) since
+# volatile lowers to IR_VLOAD; arm64 legacy DSB SY (d5033f9f).
+# Compile-only, so arches may be pinned.
+TOTAL=$((TOTAL + 1))
+VBAR_OK=1
+printf 'fn main() { u64 p = alloc(64)  volatile { *(p as u32) -> v }  u64 w = v + 1  exit(0) }\n' > "$DIR/../vbar_v_$$.kr"
+printf 'fn main() { u64 p = alloc(64)  unsafe { *(p as u32) -> v }  u64 w = v + 1  exit(0) }\n' > "$DIR/../vbar_u_$$.kr"
+vbar_count() { # <arch> <flags> <srcfile> -> barrier count on stdout
+    local _o
+    _o=$($KRC --arch="$1" $2 --emit=asm "$3" 2>&1)
+    local _l
+    _l=$(printf '%s' "$_o" | sed -n 's/.* -> \(.*\) (asm listing)$/\1/p')
+    if [ ! -f "$_l" ]; then echo "NOLISTING"; return; fi
+    if [ "$1" = "x86_64" ]; then
+        grep -ci '0f ae f0' "$_l"
+    else
+        grep -ciE 'd5033f9f|: (08|48|88|c8)dff' "$_l"
+    fi
+    rm -f "$_l"
+}
+for _cfg in "x86_64:" "x86_64:--legacy" "arm64:" "arm64:--legacy"; do
+    _a="${_cfg%%:*}"; _f="${_cfg##*:}"
+    _nv=$(vbar_count "$_a" "$_f" "$DIR/../vbar_v_$$.kr")
+    _nu=$(vbar_count "$_a" "$_f" "$DIR/../vbar_u_$$.kr")
+    if [ "$_nv" = "NOLISTING" ] || [ "$_nu" = "NOLISTING" ]; then
+        VBAR_OK=0; echo "  $_a ${_f:-IR}: could not locate asm listing"
+    else
+        [ "$_nv" -ge 1 ] || { VBAR_OK=0; echo "  $_a ${_f:-IR}: volatile emitted NO barrier"; }
+        [ "$_nu" = "0" ] || { VBAR_OK=0; echo "  $_a ${_f:-IR}: unsafe wrongly emitted $_nu barrier(s)"; }
+    fi
+done
+if [ "$VBAR_OK" = "1" ]; then
+    echo "  volatile_block_emits_barrier: PASS (all 4 configs fence; unsafe fences on none)"
+    PASS=$((PASS + 1))
+else
+    echo "FAIL: volatile_block_emits_barrier"
+    FAIL=$((FAIL + 1))
+fi
+rm -f "$DIR/../vbar_v_$$.kr" "$DIR/../vbar_u_$$.kr"
+
+# The `-> dest` binding must work WITHOUT pre-declaring dest, on every backend.
+# The IR backend auto-declared via ir_var_set; the legacy backends silently
+# dropped the value and then failed at the first USE with "use of undeclared
+# identifier" -- for `unsafe` as well as `volatile`. Compile-and-run all four.
+TOTAL=$((TOTAL + 1))
+VBIND_OK=1
+# Resolve qemu LOCALLY. $QEMU_A64 is not set until ~line 2950, far below this
+# point, so referencing it here would be empty and both arm64 configs would be
+# skipped in silence -- the same shape as the run_test_a64 placement trap.
+VBIND_QEMU="$(command -v qemu-aarch64-static || command -v qemu-aarch64 || true)"
+printf 'fn main() { u64 p = alloc(64)  store32(p, 4)  volatile { *(p as u32) -> v }  exit(v / 2) }\n' > "$DIR/../vbind_v_$$.kr"
+printf 'fn main() { u64 p = alloc(64)  store32(p, 4)  unsafe { *(p as u32) -> v }  exit(v / 2) }\n' > "$DIR/../vbind_u_$$.kr"
+VBIND_RAN=0
+for _src in "$DIR/../vbind_v_$$.kr" "$DIR/../vbind_u_$$.kr"; do
+    for _cfg in "x86_64:" "x86_64:--legacy" "arm64:" "arm64:--legacy"; do
+        _a="${_cfg%%:*}"; _f="${_cfg##*:}"
+        if [ "$_a" = "arm64" ] && [ -z "$VBIND_QEMU" ]; then continue; fi
+        _bin="/tmp/krc_vbind_$$"
+        if ! $KRC --arch="$_a" $_f "$_src" -o "$_bin" >/dev/null 2>&1; then
+            VBIND_OK=0; echo "  $(basename $_src) $_a ${_f:-IR}: COMPILE FAILED"
+        else
+            if [ "$_a" = "arm64" ]; then $VBIND_QEMU "$_bin" >/dev/null 2>&1; else "$_bin" >/dev/null 2>&1; fi
+            _rc=$?
+            VBIND_RAN=$((VBIND_RAN + 1))
+            [ "$_rc" = "2" ] || { VBIND_OK=0; echo "  $(basename $_src) $_a ${_f:-IR}: got $_rc, want 2"; }
+        fi
+        rm -f "$_bin"
+    done
+done
+# Guard against the whole loop silently doing nothing: 2 sources x 4 configs,
+# or x 2 if qemu is unavailable. Zero would mean the assertion is vacuous.
+if [ -n "$VBIND_QEMU" ]; then
+    [ "$VBIND_RAN" = "8" ] || { VBIND_OK=0; echo "  only $VBIND_RAN/8 config-runs executed"; }
+else
+    [ "$VBIND_RAN" = "4" ] || { VBIND_OK=0; echo "  only $VBIND_RAN/4 config-runs executed (no qemu)"; }
+fi
+if [ "$VBIND_OK" = "1" ]; then
+    echo "  ptrload_dest_binding_all_backends: PASS (volatile+unsafe bind dest, $VBIND_RAN config-runs)"
+    PASS=$((PASS + 1))
+else
+    echo "FAIL: ptrload_dest_binding_all_backends"
+    FAIL=$((FAIL + 1))
+fi
+rm -f "$DIR/../vbind_v_$$.kr" "$DIR/../vbind_u_$$.kr"
 
 # @packed struct annotation (should parse without error)
 run_test "packed_struct" '@packed struct Reg { uint8 a; uint32 b }
