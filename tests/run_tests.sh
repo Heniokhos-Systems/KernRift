@@ -5249,6 +5249,49 @@ else
 fi
 rm -f "$UEX_IMG"
 
+# docs/IR_REFERENCE.md cites src/*.kr by line number, and those rot silently:
+# at the last audit 146 of 153 pointed at unrelated code while still being IN
+# RANGE, so they read as valid. This checks each citation still points at the
+# same source line it was recorded against, and names the ones that moved.
+#
+# Regenerate after editing src/ or the doc's citations:
+#   python3 scripts/gen-ir-reference-citations.py
+TOTAL=$((TOTAL + 1))
+CITE_MANIFEST="$DIR/ir_reference_citations.txt"
+if [ ! -f "$CITE_MANIFEST" ]; then
+    FAIL=$((FAIL + 1)); echo "FAIL: ir_reference_citations (manifest missing)"
+else
+    cite_bad=$(python3 - "$CITE_MANIFEST" "$DIR/.." <<'PYEOF'
+import hashlib, sys, os
+manifest, root = sys.argv[1], sys.argv[2]
+cache, bad = {}, []
+for raw in open(manifest):
+    raw = raw.strip()
+    if not raw or raw.startswith("#"):
+        continue
+    cite, want = raw.split()
+    path, num = cite.rsplit(":", 1)
+    if path not in cache:
+        p = os.path.join(root, path)
+        cache[path] = open(p).read().split("\n") if os.path.exists(p) else []
+    lines, i = cache[path], int(num)
+    got = hashlib.sha1(lines[i-1].strip().encode()).hexdigest()[:12] if i-1 < len(lines) else "MISSING"
+    if got != want:
+        bad.append(cite)
+print(" ".join(bad[:6]) + (f" (+{len(bad)-6} more)" if len(bad) > 6 else ""))
+PYEOF
+)
+    if [ -z "$cite_bad" ]; then
+        cite_n=$(grep -vc '^#' "$CITE_MANIFEST")
+        PASS=$((PASS + 1)); echo "  ir_reference_citations: PASS ($cite_n citations still resolve)"
+    else
+        FAIL=$((FAIL + 1))
+        echo "FAIL: ir_reference_citations (moved: $cite_bad)"
+        echo "  fix the citations in docs/IR_REFERENCE.md, then:"
+        echo "    python3 scripts/gen-ir-reference-citations.py"
+    fi
+fi
+
 # examples/tutorial-btree ships the page manager from docs/tutorial-btree.md
 # §2 -- the mmap-backed persistence the whole tutorial rests on. The stdlib has
 # no open/mmap/msync, so it goes through syscall_raw with per-arch numbers;
