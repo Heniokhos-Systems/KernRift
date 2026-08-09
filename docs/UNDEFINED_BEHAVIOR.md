@@ -101,8 +101,62 @@ reasoning for anything non-obvious.
 |-----------------------------------------|----------|-------|
 | Recursion                               | Defined  | Limited only by stack size. No tail-call elimination. |
 | Stack overflow                          | Unspecified | Platform-dependent — usually SIGSEGV on the guard page. |
-| Allocator exhaustion                    | Defined  | `alloc` returns 0. Callers must check. |
+| Allocator exhaustion                    | Defined  | `alloc` returns 0. Callers must check. See [Allocation failure](#allocation-failure) for what each target tests. |
+| `dealloc(0)`                            | Defined  | No-op. The guard precedes the size-header load, so freeing a failed allocation is safe. |
 | `static` array initializer              | Defined  | Zero-initialized. Non-literal initializers are silently ignored (tracked as issue #53). |
+
+### Allocation failure
+
+`alloc` returns **0** when the underlying allocation fails, on every backend
+and in every emit mode. It does not abort, and it never returns a non-null
+pointer to nothing — in particular not `8`, which the old unconditional
+"skip past the size header" arithmetic would have produced on a NULL return.
+
+The failure is **silent by design**: a caller that ignores the return gets a
+null dereference at first *use*, not a crash inside `alloc`. The null check
+this table instructs you to write is what turns that into a recoverable
+error. Through v2.9.0 it was unreachable code: `alloc` stored its 8-byte size
+header through the raw failure value and segfaulted before returning.
+
+`dealloc(0)` is a **no-op**. This matters more than it looks: `dealloc` reads
+the size header at `[ptr-8]` before unmapping, so without the guard the
+natural `alloc` / check / `dealloc` shape — or any unconditional cleanup path
+— would fault on the *free* instead of on the *alloc*.
+
+The failure signal is not the same on every target, and the four tests are
+deliberately not unified:
+
+| Target | How failure is signalled | Test emitted |
+|---|---|---|
+| Linux, Android (x86_64, arm64) | `mmap` returns `-errno` | unsigned `> 0xFFFFFFFFFFFFF000` |
+| macOS (x86_64, arm64) | BSD ABI: **carry flag set, POSITIVE errno** | `jc` / `b.cs` |
+| Windows (x86_64, arm64) | `VirtualAlloc` returns NULL | `test`/`jz`, `cbz` |
+| Linux riscv32 | `mmap2` returns `-errno` in a **32-bit** register | unsigned `> 0xFFFFF000` |
+
+Applying the Linux errno-range test on macOS would read a failure as success
+— `mmap` failure leaves `12` (`ENOMEM`) in `rax`/`x0` there, and `12` is not
+in the errno range — and the header store would then write to address 12.
+
+**What was executed, and what was only read.** The Linux x86_64, Linux arm64
+(under `qemu-aarch64-static`) and Linux riscv32 (under `qemu-riscv32-static`)
+paths were **run**, through both the IR and `--legacy` backends and through
+`--emit=obj`, which selects the legacy codegen with no `--legacy` flag. No
+macOS or Windows host was available: those four paths (two arches × two
+backends, plus their `dealloc` guards) were verified by **disassembling the
+emitted instructions** with `llvm-mc` and confirming both the encoding and
+that every branch displacement lands exactly past its block. They have not
+been executed on real hardware.
+
+**Kernel modules are excluded.** Under `--emit=lkm`, `alloc` is
+`__kmalloc_noprof` and returns the slab pointer verbatim with no `+8` and no
+size header; it already returned NULL on failure, and `kfree(NULL)` is
+already safe. No guard is emitted there.
+
+Bare-metal `--target=none` does not provide `alloc` at all, and freestanding
+riscv32 refuses it.
+
+The `std/alloc.kr` arena, pool and heap allocators sit *above* this and have
+their own documented failure modes.
 
 ## Optimizer guarantees
 
