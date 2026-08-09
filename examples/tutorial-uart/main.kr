@@ -1,0 +1,58 @@
+// Bare-metal PL011 echo for QEMU `virt`.
+//
+// Build and run:  make run       (see the Makefile in this directory)
+//
+// No boot.s, no link.ld, no vectors.s: `--stack-top` makes the compiler emit
+// its own entry stub, so the image is self-sufficient. `--target=none` means
+// there is no OS underneath -- print/println/alloc are refused, and all I/O
+// goes through the device block in uart.kr.
+import "uart.kr"
+
+// SPSC ring buffer. A static array's NAME is its address; there is no
+// address-of operator, which is why the two counters live in an array too.
+static u8[256] rx_buf
+static u64[2]  rx_idx        // [0] = head (next to read), [1] = tail (next write)
+
+fn ring_push(u64 b) -> u64 {
+    u64 idx = rx_idx
+    u64 tail = atomic_load(idx + 8)
+    u64 head = atomic_load(idx)
+    u64 next = (tail + 1) & 0xFF
+    if next == (head & 0xFF) {
+        return 0                  // full -- drop the byte
+    }
+    u64 p = rx_buf + (tail & 0xFF)
+    store8(p, b)
+    atomic_store(idx + 8, tail + 1)
+    return 1
+}
+
+fn ring_pop() -> u64 {
+    u64 idx = rx_idx
+    u64 head = atomic_load(idx)
+    u64 tail = atomic_load(idx + 8)
+    if head == tail {
+        return 0xFFFFFFFFFFFFFFFF  // empty
+    }
+    u64 p = rx_buf + (head & 0xFF)
+    u64 b = load8(p)
+    atomic_store(idx, head + 1)
+    return b
+}
+
+fn main() -> uint32 {
+    uart_init()
+    uart_puts("kr-uart echo ready\n")
+
+    // Polled echo. The tutorial's interrupt-driven variant needs GIC
+    // programming, which QEMU virt does not hand you for free.
+    loop {
+        u64 c = uart_getc()
+        ring_push(c)
+        u64 b = ring_pop()
+        if b != 0xFFFFFFFFFFFFFFFF {
+            uart_putc(b)
+            if b == 13 { uart_putc(10) }   // CR -> CRLF
+        }
+    }
+}

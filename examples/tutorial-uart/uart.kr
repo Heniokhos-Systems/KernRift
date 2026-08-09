@@ -1,0 +1,56 @@
+// PL011 UART driver for the QEMU `virt` machine.
+//
+// Register offsets are the ARM PrimeCell PL011 set, cross-checked against
+// the Linux kernel's include/linux/amba/serial.h. Note MIS (0x040) and ICR
+// (0x044) are DIFFERENT registers -- reading ICR returns nothing useful.
+device PL011 at 0x09000000 {
+    DR    at 0x000 : u32
+    FR    at 0x018 : u32
+    IBRD  at 0x024 : u32
+    FBRD  at 0x028 : u32
+    LCR_H at 0x02C : u32
+    CR    at 0x030 : u32
+    IMSC  at 0x038 : u32
+    RIS   at 0x03C : u32 ro
+    MIS   at 0x040 : u32 ro
+    ICR   at 0x044 : u32 wo
+}
+
+// FR bits: TXFF = bit 5 (transmit FIFO full), RXFE = bit 4 (receive empty).
+fn uart_init() {
+    PL011.CR = 0            // disable while reconfiguring
+    PL011.ICR = 0x7FF       // clear every pending interrupt
+    PL011.IBRD = 13         // 24 MHz / (16 * 115200) = 13.02
+    PL011.FBRD = 1
+    PL011.LCR_H = 0x70      // 8N1, FIFOs enabled (WLEN=3, FEN=1)
+    PL011.CR = 0x301        // UARTEN | TXE | RXE
+}
+
+fn uart_putc(u32 c) {
+    u32 full = 1
+    while full != 0 {
+        u32 fr = PL011.FR
+        full = fr & 0x20
+    }
+    PL011.DR = c
+}
+
+fn uart_getc() -> u64 {
+    u32 empty = 1
+    while empty != 0 {
+        u32 fr = PL011.FR
+        empty = fr & 0x10
+    }
+    u32 c = PL011.DR
+    return c
+}
+
+fn uart_puts(u64 s) {
+    u64 i = 0
+    u64 ch = load8(s)
+    while ch != 0 {
+        uart_putc(ch)
+        i = i + 1
+        ch = load8(s + i)
+    }
+}

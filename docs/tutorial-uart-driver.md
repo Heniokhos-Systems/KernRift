@@ -19,18 +19,23 @@ The source files in this tutorial live under `examples/tutorial-uart/`:
 ```
 examples/tutorial-uart/
 ├── Makefile
-├── boot.s           # 32-byte trampoline that sets up SP and calls kmain
-├── link.ld
-├── vectors.s        # 2 KiB exception vector (ARMv8 VBAR_EL1)
 ├── uart.kr          # the driver — the interesting file
-└── main.kr          # kmain — installs the ISR, then echoes forever
+└── main.kr          # main — sets up the ring buffer, then echoes forever
 ```
 
-If you're on aarch64 Linux with `qemu-system-aarch64` installed:
+**There is no `boot.s`, no `link.ld` and no `vectors.s`, and there is no
+assembler or linker in this build.** `--stack-top` makes the compiler emit its
+own entry stub, so the image sets up SP and jumps to `main` by itself. (`krc`
+cannot consume `.s` files at all, so any tutorial telling you to assemble a
+trampoline alongside it is describing a toolchain this one does not have.)
+
+With `qemu-system-aarch64` installed — no aarch64 host needed, this
+cross-compiles:
 
 ```
 cd examples/tutorial-uart
-make run
+make run     # interactive: type, and characters echo back. Ctrl-A X quits.
+make check   # non-interactive smoke test, exits non-zero on failure
 ```
 
 This tutorial tells you why each piece exists. If you just want working
@@ -201,8 +206,10 @@ VBAR + 0x280   IRQ   from current EL with SP_ELx   ← the one we care about
 ...
 ```
 
-`vectors.s` fills only the IRQ slot at `VBAR + 0x280`; everything else
-is a trap loop for easier debugging.
+Such a vector table would fill only the IRQ slot at `VBAR + 0x280`, with
+everything else a trap loop for easier debugging. **It is not part of the
+shipped example**: writing it needs an assembler, and `krc` does not consume
+`.s` files — see the note below.
 
 ```asm
 .align 11                     // 2 KiB alignment required by the spec
@@ -256,36 +263,48 @@ The ISR runs asynchronously and produces bytes; `main` consumes them.
 We need a lock-free ring buffer indexed by atomic 64-bit counters.
 
 ```kernrift
-static u8[256]  rx_buf
-static u64      rx_head_off   // index of next byte to read
-static u64      rx_tail_off   // index where next byte will be written
+static u8[256] rx_buf
+static u64[2]  rx_idx        // [0] = head (next to read), [1] = tail (next write)
 
 fn ring_push(u8 b) -> u64 {
-    u64 tail = atomic_load(&rx_tail_off)
-    u64 head = atomic_load(&rx_head_off)
+    u64 idx = rx_idx
+    u64 tail = atomic_load(idx + 8)
+    u64 head = atomic_load(idx)
     u64 next = (tail + 1) & 0xFF
     if next == (head & 0xFF) {
         return 0                  // full — drop the byte
     }
-    u64 p = &rx_buf[0] + (tail & 0xFF)
-    unsafe { *(p as uint8) = b }
-    atomic_store(&rx_tail_off, tail + 1)
+    u64 p = rx_buf + (tail & 0xFF)
+    store8(p, b)
+    atomic_store(idx + 8, tail + 1)
     return 1
 }
 
 fn ring_pop() -> u64 {
-    u64 head = atomic_load(&rx_head_off)
-    u64 tail = atomic_load(&rx_tail_off)
+    u64 idx = rx_idx
+    u64 head = atomic_load(idx)
+    u64 tail = atomic_load(idx + 8)
     if head == tail {
         return 0xFFFFFFFFFFFFFFFF  // empty — Pattern-1 "none"
     }
-    u64 p = &rx_buf[0] + (head & 0xFF)
-    u8 b = 0
-    unsafe { *(p as uint8) -> b }
-    atomic_store(&rx_head_off, head + 1)
+    u64 p = rx_buf + (head & 0xFF)
+    u64 b = load8(p)
+    atomic_store(idx, head + 1)
     return b
 }
 ```
+
+**There is no address-of operator in KernRift.** A `static` array's *name*
+already evaluates to its address, so `rx_buf` is the buffer's address and
+`rx_buf + n` indexes into it — writing `&rx_buf[0]` is a parse error. That is
+also why the two counters live in a `static u64[2]` rather than as two scalar
+statics: a scalar `static` has no spelling that yields its address, so the
+atomics could not reach it. `idx` is the pair's base, `idx + 8` the second
+element.
+
+The `&` in `(tail + 1) & 0xFF` is the bitwise operator, which does exist —
+and note it binds **tighter** than `+` in KernRift, unlike C, so the
+parentheses above are load-bearing.
 
 The SPSC (single-producer, single-consumer) invariant is what makes this
 correct: only the ISR writes to `rx_tail_off` and only `main` writes to
@@ -351,8 +370,13 @@ fn uart_init() {
 }
 
 fn main() {
-    // Extern 'vectors_el1' is defined in vectors.s
-    u64 vbar = 0                    // filled by the linker / asm symbol
+    // ILLUSTRATIVE ONLY -- this does not assemble today. `asm()` takes a
+    // small mnemonic table plus raw hex words and hard-errors on anything
+    // else, including `adrp`, and it cannot reference a symbol at all:
+    //   error: unrecognized asm instruction 'adrp x0, vectors_el1; ...'
+    // Symbol references from asm are tracked as future work; until then a
+    // vector table has to be placed at a known absolute address instead.
+    u64 vbar = 0
     asm("adrp x0, vectors_el1; add x0, x0, :lo12:vectors_el1") out(x0 -> vbar)
     install_vectors(vbar)
 
@@ -404,9 +428,10 @@ bytes if you hold a key down, the interrupt-driven one won't.
   as SPI 1. A complete driver would program the GICD / GICR to route it
   to CPU 0. QEMU's `virt` machine is lenient enough that masking it in
   the UART's IMSC and unmasking DAIF.I is enough to receive the IRQ
-  *if* you're running at EL1 with no GIC in between. On real hardware
-  you need GIC programming — see `docs/roadmap-next.md` for an
-  "examples/gic-setup" placeholder.
+  *if* you're running at EL1 with no GIC in between. On real hardware you
+  need GIC programming, which this repository does not yet have an example
+  for — which is also why `examples/tutorial-uart/` echoes by polling rather
+  than from the ISR.
 - **Two UART FIFO levels.** If you're echoing at >1 MBaud, the 32-byte
   FIFO can overflow between ISRs. Set `LCR_H.FEN = 1` (we do) and enable
   the receive timeout interrupt (IMSC bit 6, `UART011_RTIM`) instead of

@@ -5217,6 +5217,38 @@ else
     FAIL=$((FAIL + 1)); echo "FAIL: missing_return_infinite_loop"
 fi
 
+# examples/tutorial-uart must keep building. docs/tutorial-uart-driver.md walks
+# through these two files and tells the reader to `make run` in that directory;
+# the previous version of that claim pointed at a directory which did not exist
+# at all. Nothing else in the suite compiles anything under examples/, so
+# without this row the example can rot silently and the tutorial goes stale
+# with it.
+#
+# Compile-only and arch-pinned: the artifact is inspected, not executed.
+TOTAL=$((TOTAL + 1))
+UEX_DIR="$DIR/../examples/tutorial-uart"
+UEX_IMG="/tmp/krc_uart_example_$$.img"
+if [ ! -f "$UEX_DIR/main.kr" ] || [ ! -f "$UEX_DIR/uart.kr" ]; then
+    FAIL=$((FAIL + 1)); echo "FAIL: tutorial_uart_example_builds (source files missing)"
+# NOTE: do not `cd` into the example directory. `make test` builds its wrapper
+# as `exec ./build/krc2 ...` with a RELATIVE path, so any cd breaks $KRC.
+# Imports resolve relative to the importing FILE, so an absolute main.kr still
+# finds uart.kr beside it.
+elif ! $KRC --target=none --arch=arm64 --emit=image --image-header \
+            --load-addr=0x40080000 --stack-top=0x40200000 \
+            "$UEX_DIR/main.kr" -o "$UEX_IMG" >/dev/null 2>&1; then
+    FAIL=$((FAIL + 1)); echo "FAIL: tutorial_uart_example_builds (compile failed)"
+else
+    # arm64 Linux Image magic 0x644d5241 lives at offset 56.
+    uex_magic=$(od -An -tx4 -j56 -N4 "$UEX_IMG" 2>/dev/null | tr -d ' \n')
+    if [ "$uex_magic" = "644d5241" ]; then
+        PASS=$((PASS + 1)); echo "  tutorial_uart_example_builds: PASS (arm64 Image, magic ok)"
+    else
+        FAIL=$((FAIL + 1)); echo "FAIL: tutorial_uart_example_builds (magic '$uex_magic', want 644d5241)"
+    fi
+fi
+rm -f "$UEX_IMG"
+
 # False-positive guard. Widening the anchor lookup must not make REACHABLE
 # expression statements warn -- a call before the terminator, a call inside a
 # conditional, and calls in a loop body are all live code.
