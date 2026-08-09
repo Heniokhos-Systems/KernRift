@@ -5145,16 +5145,25 @@ run_warning_check "diag_unreachable_println" 'fn foo() -> uint64 { return 1  pri
 fn main() { exit(0) }' "unreachable code"
 run_warning_check "diag_unreachable_call_after_exit" 'fn g() { }
 fn main() { exit(0)  g() }' "unreachable code"
+# Code after an infinite loop. `loop { }` desugars to `while 1 == 1`, so
+# nothing after it can run unless the body breaks. return/exit inside the body
+# do not rescue the tail -- they leave the function entirely.
+run_warning_check "diag_unreachable_after_loop" 'fn main() { loop { }  u64 d = 1 }' "unreachable code"
+run_warning_check "diag_unreachable_after_loop_body" 'fn main() { u64 i = 0  loop { i = i + 1 }  u64 d = 1 }' "unreachable code"
+# A break belonging to an INNER loop does not let the outer one exit.
+run_warning_check "diag_unreachable_after_loop_inner_break" 'fn main() { loop { while 1 == 1 { break } }  u64 d = 1 }' "unreachable code"
 
 # False-positive guard. Widening the anchor lookup must not make REACHABLE
 # expression statements warn -- a call before the terminator, a call inside a
 # conditional, and calls in a loop body are all live code.
 TOTAL=$((TOTAL + 1))
 UR_FP_OK=1
+UR_FP_N=0
 ur_fp() {
     printf '%s\n' "$2" > "$DIR/../ur_fp_$$.kr"
     local n
     n=$($KRC $KRC_FLAGS "$DIR/../ur_fp_$$.kr" -o /tmp/krc_urfp_$$ 2>&1 | grep -c 'unreachable')
+    UR_FP_N=$((UR_FP_N + 1))
     [ "$n" = "0" ] || { UR_FP_OK=0; echo "  false positive in '$1' ($n warnings)"; }
     rm -f "$DIR/../ur_fp_$$.kr" /tmp/krc_urfp_$$
 }
@@ -5167,8 +5176,22 @@ fn main() { exit(f()) }'
 ur_fp "calls in loop body" 'fn g() { }
 fn main() { u64 i = 0  while i < 3 { g()  i = i + 1 }  exit(0) }'
 ur_fp "println then exit" 'fn main() { println(1)  exit(0) }'
+# An infinite loop WITH a break does not terminate the enclosing block.
+ur_fp "loop with break" 'fn main() { loop { break }  u64 d = 1  exit(0) }'
+ur_fp "loop, break inside if" 'fn main() { u64 i = 0  loop { if i > 0 { break }  i = i + 1 }  exit(0) }'
+ur_fp "loop, break in else arm" 'fn main() { u64 i = 0  loop { if i > 0 { i = i + 1 } else { break } }  exit(0) }'
+# The break hides in a statement kind the walker does not model (match). It
+# must bail out rather than assume the loop is infinite -- this is the case
+# that would turn a wrong answer into a warning on live code.
+ur_fp "loop, break inside match" 'fn main() { u64 i = 0  loop { match i { 0 => { break } _ => { i = i + 1 } } }  exit(0) }'
+ur_fp "ordinary while, real condition" 'fn main() { u64 i = 0  while i < 3 { i = i + 1 }  u64 d = 1  exit(0) }'
+# Derive the count rather than asserting it, so adding a shape above cannot
+# leave this line claiming a number it no longer checks.
+if [ "$UR_FP_N" -lt 9 ]; then
+    UR_FP_OK=0; echo "  only $UR_FP_N false-positive shapes ran (expected at least 9)"
+fi
 if [ "$UR_FP_OK" = "1" ]; then
-    PASS=$((PASS + 1)); echo "  diag_unreachable_no_false_positives: PASS (4 reachable shapes stay quiet)"
+    PASS=$((PASS + 1)); echo "  diag_unreachable_no_false_positives: PASS ($UR_FP_N reachable shapes stay quiet)"
 else
     FAIL=$((FAIL + 1)); echo "FAIL: diag_unreachable_no_false_positives"
 fi
