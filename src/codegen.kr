@@ -608,6 +608,96 @@ fn emit_x86_syscall_insn(uint64 what) {
 }
 
 // ---------------------------------------------------------------------------
+// alloc()/dealloc() failure guards — shared by BOTH x86_64 backends
+// ---------------------------------------------------------------------------
+//
+// docs/UNDEFINED_BEHAVIOR.md promises `alloc` returns 0 when the underlying
+// allocation fails. It did not: both x86_64 lowerings (the IR one in ir.kr and
+// the legacy AST one below) stored the 8-byte size header through the RAW
+// mmap/VirtualAlloc result and then added 8, unconditionally. On failure that
+// dereferences -ENOMEM, so the process segfaulted INSIDE alloc and the null
+// check the docs instruct users to write was unreachable code.
+//
+// The legacy backend is not an exotic path here: main.kr selects it for
+// --emit=obj and --emit=lkm with no --legacy on the command line, so fixing
+// only the IR side would leave `krc --emit=obj` faulting while plain `krc`
+// returned 0.
+//
+// Usage: with the raw result still in rax, call emit_x86_alloc_fail_jcc(),
+// emit the existing success block unchanged, then emit_x86_alloc_fail_tail()
+// with the returned offset. The tail appends `jmp .done` / `.fail: xor eax,eax`
+// and patches both rel32s, so the success block may be any length.
+//
+// THREE failure conventions, deliberately NOT unified:
+//
+//   Linux/Android  rax in [-4095, -1]        cmp rax,-4096 ; ja
+//   macOS          CF set, POSITIVE errno    jc
+//   Windows        VirtualAlloc returns NULL test rax,rax ; jz
+//
+// Darwin is the one that cannot share the Linux test: its BSD syscall ABI
+// reports failure with the carry flag and a POSITIVE errno, so `mmap` failure
+// leaves rax = 12 and the errno-range compare reads that as SUCCESS — the
+// header store would then write to address 12. Nothing that writes EFLAGS may
+// be emitted between the SYSCALL and this call; POP does not touch EFLAGS, so
+// the IR path's stack rebalance may legally precede it.
+fn emit_x86_alloc_fail_jcc() -> uint64 {
+    if target_os == 2 {
+        emit_byte(0x48); emit_byte(0x85); emit_byte(0xC0)   // test rax, rax
+        emit_byte(0x0F); emit_byte(0x84)                    // jz rel32
+    } else if target_os == 1 {
+        emit_byte(0x0F); emit_byte(0x82)                    // jc rel32
+    } else {
+        // cmp rax, imm32 — the imm32 sign-extends, so 0xFFFFF000 is -4096.
+        emit_byte(0x48); emit_byte(0x3D)
+        emit_u32_le(0xFFFFF000)
+        emit_byte(0x0F); emit_byte(0x87)                    // ja rel32
+    }
+    uint64 jcc_off = out_len
+    emit_u32_le(0)
+    return jcc_off
+}
+
+// Closes the block opened by emit_x86_alloc_fail_jcc. NO `+8` on the failure
+// path: a non-null pointer to nothing is the worst possible outcome — it
+// defeats the very null check this change exists to make work.
+fn emit_x86_alloc_fail_tail(uint64 jcc_off) {
+    emit_byte(0xE9)                                          // jmp .done
+    uint64 done_off = out_len
+    emit_u32_le(0)
+    // .fail:
+    patch_u32(jcc_off, out_len - (jcc_off + 4))
+    emit_byte(0x48); emit_byte(0x31); emit_byte(0xC0)        // xor rax, rax
+    // .done:
+    patch_u32(done_off, out_len - (done_off + 4))
+}
+
+// dealloc(0) must be a no-op. The POSIX lowering does not merely munmap(ptr-8):
+// it first LOADS the size header at [ptr-8], so freeing 0 reads address -8 and
+// faults. Guard before the header load, not merely before the syscall. Windows
+// does not fault today (sub 8 + VirtualFree, no header load, returns FALSE
+// harmlessly) but is guarded too — one uniform rule beats a per-target
+// exception nobody remembers.
+fn emit_x86_dealloc_null_jz(uint64 ptr_reg) -> uint64 {
+    // test ptr_reg, ptr_reg — REX.W, plus REX.R|REX.B for r8..r15.
+    uint64 dn_rex = 0x48
+    if ptr_reg >= 8 { dn_rex = 0x4D }
+    uint8 dn_rexb = dn_rex
+    emit_byte(dn_rexb)
+    emit_byte(0x85)
+    uint64 dn_mrm = 0xC0 | ((ptr_reg & 7) << 3) | (ptr_reg & 7)
+    uint8 dn_mrmb = dn_mrm
+    emit_byte(dn_mrmb)
+    emit_byte(0x0F); emit_byte(0x84)                         // jz rel32
+    uint64 jz_off = out_len
+    emit_u32_le(0)
+    return jz_off
+}
+
+fn emit_x86_dealloc_null_end(uint64 jz_off) {
+    patch_u32(jz_off, out_len - (jz_off + 4))
+}
+
+// ---------------------------------------------------------------------------
 // Bare-metal (--target=none) builtin refusal, at the LOWERING
 // ---------------------------------------------------------------------------
 //
@@ -6072,7 +6162,8 @@ fn gen_expr(uint64 node) {
                 emit_win_alloc_stack(0x20)
                 emit_win_call_iat(6)
                 emit_win_free_stack(0x20)
-                // rax = raw pointer from VirtualAlloc
+                // rax = raw pointer from VirtualAlloc — NULL on failure.
+                uint64 cg_win_alloc_fail = emit_x86_alloc_fail_jcc()
                 // Store size header at [rax], return rax+8
                 emit_store_rax_to_stack(temp_slot_1)
                 emit_load_rax_from_stack(temp_slot_0)
@@ -6083,6 +6174,7 @@ fn gen_expr(uint64 node) {
                 emit_byte(0x48); emit_byte(0x89); emit_byte(0x08)
                 // add rax, 8 (return ptr+8 to caller)
                 emit_byte(0x48); emit_byte(0x83); emit_byte(0xC0); emit_byte(8)
+                emit_x86_alloc_fail_tail(cg_win_alloc_fail)
             } else {
                 // rax = size+8 -> rsi (length)
                 emit_mov_rsi_rax()
@@ -6115,7 +6207,12 @@ fn gen_expr(uint64 node) {
                 // rax = syscall number
                 if target_os == 1 { emit_mov_rax_imm(0x20000C5) } else { emit_mov_rax_imm(9) }
                 emit_x86_syscall_insn("alloc")
-                // rax = raw mmap pointer
+                // rax = raw mmap pointer. Test it BEFORE anything else is
+                // emitted: on macOS the failure signal is the carry flag, and
+                // no flag-writing instruction may intervene. On failure this
+                // branches past the header store to `xor eax,eax`, so alloc
+                // returns 0 instead of dereferencing -ENOMEM.
+                uint64 cg_alloc_fail = emit_x86_alloc_fail_jcc()
                 // Store size header at [rax], return rax+8
                 emit_store_rax_to_stack(temp_slot_1)
                 emit_load_rax_from_stack(temp_slot_0)
@@ -6126,6 +6223,7 @@ fn gen_expr(uint64 node) {
                 emit_byte(0x48); emit_byte(0x89); emit_byte(0x08)
                 // add rax, 8 (return ptr+8 to caller)
                 emit_byte(0x48); emit_byte(0x83); emit_byte(0xC0); emit_byte(8)
+                emit_x86_alloc_fail_tail(cg_alloc_fail)
             }
             rax_cache = 0
             return
@@ -6942,6 +7040,12 @@ fn gen_expr(uint64 node) {
                 return
             }
 
+            // dealloc(0) is a no-op. The POSIX arm LOADS the size header at
+            // [rax-8] before the munmap, so freeing 0 reads address -8 and
+            // faults. Emitted AFTER the LKM early-return above: kfree(NULL)
+            // is already safe and that arm has no header load, so guarding it
+            // would only add dead bytes to every kernel module.
+            uint64 cg_dealloc_null = emit_x86_dealloc_null_jz(0)
             if target_os == 2 {
                 // Windows dealloc: VirtualFree(base, 0, MEM_RELEASE)
                 // rax = user ptr (ptr+8 from alloc), base = rax - 8
@@ -6979,6 +7083,7 @@ fn gen_expr(uint64 node) {
                 // syscall
                 emit_x86_syscall_insn("dealloc")
             }
+            emit_x86_dealloc_null_end(cg_dealloc_null)
             rax_cache = 0
             return
         }

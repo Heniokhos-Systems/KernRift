@@ -584,9 +584,15 @@ fn rv_try_compress(uint64 w) -> uint64 {
 static uint64 rv_noc_ranges = 0
 static uint64 rv_noc_count = 0
 
+// Per-function budget of no-compress regions. Raised from 256 to 4096 when the
+// alloc/dealloc OOM guards landed: IR_ALLOC and IR_DEALLOC are emitted
+// internally for every f-string and print buffer, so each one now burns two
+// slots. At 256 a single function was capped at ~28 f-string prints, down from
+// ~42 before the guards — programs that used to compile started hard-erroring.
+// The count resets per function, so 4096 is generous rather than expensive.
 fn rv_mark_noc(uint64 start, uint64 end) {
-    if rv_noc_ranges == 0 { rv_noc_ranges = alloc(256 * 8) }
-    if rv_noc_count >= 256 {
+    if rv_noc_ranges == 0 { rv_noc_ranges = alloc(4096 * 8) }
+    if rv_noc_count >= 4096 {
         rv_err("error: riscv32: too many non-compressible regions\n")
     }
     uint64 e = rv_noc_ranges + rv_noc_count * 8
@@ -2083,8 +2089,44 @@ fn ir_emit_riscv_insn(uint64 ii) {
         rv_li(15, 0)                           // a5 = offset = 0 (pages; moot)
         rv_li(17, 222)                         // a7 = mmap2
         rv_ecall("alloc")                      // ecall  (ptr in a0)
+        // mmap failure puts -errno in a0. a0 is THIRTY-TWO bits here, so the
+        // threshold is 0xFFFFF000, NOT the 64-bit 0xFFFFFFFFFFFFF000 the x86
+        // and arm64 backends use — the 64-bit constant would never compare
+        // true on rv32 and the guard would be dead code. Without this the
+        // `sw` below stores the size header through -ENOMEM and the process
+        // segfaults inside alloc (docs/UNDEFINED_BEHAVIOR.md promises 0).
+        // t5 is dead: the size lives in t6 and a0 holds the result.
+        // rv_li emits 0xFFFFF000 as a deterministic lui+addi pair, so the
+        // forward displacements below are fixed by construction: bgeu skips
+        // sw + addi + jal (12 bytes) to land on the `li a0, 0`, and that jal
+        // skips the li (4 bytes) to land past it.
+        //
+        // Those baked displacements only hold if the words keep their emitted
+        // WIDTH. They do not by default: rv_compress_function relayouts the
+        // function afterwards and c.addi/c.li would shrink three of these
+        // SEVEN words (addi t5,t5,imm / addi a0,a0,8 / li a0,0 — the `sw t6`
+        // cannot compress at all, since c.sw only reaches x8-x15 and t6 is
+        // x31), leaving both branches pointing 2 and 4 bytes past their
+        // targets (measured: the guard landed mid-block and `alloc` faulted
+        // even on success). Only recorded fixups and block offsets get
+        // remapped, and a hand-baked displacement is neither — so wrap the
+        // block in rv_mark_noc, exactly as the STR_EQ/MEMCMP inline loops do.
+        //
+        // Threshold is 0xFFFFF001, not 0xFFFFF000, because the branch below is
+        // BGEU (>=). mmap's error range is [-4095, -1]; testing `a0 >= -4095`
+        // matches it exactly and keeps rv32 identical to x86's `ja` and arm64's
+        // `b.hi`, both of which treat -4096 as SUCCESS. Using -4096 here would
+        // have classified one extra value as failure — unreachable, since
+        // errno 4096 does not exist, but a needless divergence on a change
+        // whose whole thesis is that each backend's convention is exactly right.
+        uint64 rv_alloc_guard = out_len
+        rv_li(RV_T5, 0xFFFFF001)               // lui+addi: t5 = -4095
+        rv_b(16, RV_T5, RV_A0, 7, 0x63)        // bgeu a0, t5, .fail
         rv_s(0, RV_T6, RV_A0, 2, 0x23)         // sw t6, 0(a0)   store size header
         rv_i(8, RV_A0, 0, RV_A0, 0x13)         // a0 = a0 + 8    (past header)
+        rv_j(8, 0, 0x6F)                       // jal x0, .done
+        rv_li(RV_A0, 0)                        // .fail: a0 = 0 (NO +8)
+        rv_mark_noc(rv_alloc_guard, out_len)
         if dst_r != 0xFFFFFFFF && dst_r != RV_A0 { rv_mv(dst_r, RV_A0) }
         if dst_r == 0xFFFFFFFF { rv_store_spill(RV_A0, dest_v) }
         return
@@ -2108,11 +2150,21 @@ fn ir_emit_riscv_insn(uint64 ii) {
             return
         }
         uint64 ptr_reg = rv_resolve_src(s1_v, RV_T5)
+        // dealloc(0) is a no-op. The `lw` below reads the size header at
+        // [ptr-8], so freeing 0 loads from address -8 and faults — and now
+        // that alloc can return 0, an unconditional cleanup path would hit it.
+        // Branch past the whole block BEFORE the header load. The block is
+        // rv_mark_noc'd for the same reason IR_ALLOC's guard is: the
+        // displacement is patched pre-compression and nothing would remap it.
+        uint64 rv_dz_site = out_len
+        rv_b(0, RV_ZERO, ptr_reg, 0, 0x63)     // beq ptr_reg, x0, .done
         rv_i(0 - 8, ptr_reg, 0, RV_A0, 0x13)   // addi a0, ptr_reg, -8  (real base)
         rv_i(0, RV_A0, 2, 11, 0x03)            // lw a1, 0(a0)          (stored size)
         rv_i(8, 11, 0, 11, 0x13)               // addi a1, a1, 8        (total length)
         rv_li(17, ir_rv32_syscall_nr(11))      // a7 = munmap syscall nr
         rv_ecall("dealloc")
+        patch_u32(rv_dz_site, rv_b_checked(out_len - rv_dz_site, RV_ZERO, ptr_reg, 0, 0x63))
+        rv_mark_noc(rv_dz_site, out_len)
         return
     }
 

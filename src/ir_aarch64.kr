@@ -1671,10 +1671,14 @@ fn ir_emit_arm64_insn(uint64 ii) {
             emit_a64_mov_imm(2, 0x3000)
             emit_a64_mov_imm(3, 4)
             emit_a64_win_call_iat(6)
-            // x0 = raw ptr. Store header: [x0] = original size (x11)
+            // x0 = raw ptr, NULL on failure — skip the header store and
+            // return 0 rather than storing through it.
+            uint64 a64_win_alloc_fail = emit_a64_alloc_fail_bcond(10)
+            // Store header: [x0] = original size (x11)
             emit_a64_str(11, 0, 0)
             // x0 = x0 + 8 (return ptr past header)
             emit_a64_add_imm(0, 0, 8)
+            emit_a64_alloc_fail_tail(a64_win_alloc_fail)
         } else {
             // AAPCS64 mmap: x0=addr, x1=len, x2=prot, x3=flags, x4=fd, x5=offset
             // x0 = 0 (addr)
@@ -1698,10 +1702,15 @@ fn ir_emit_arm64_insn(uint64 ii) {
             uint64 mmap_nr = ir_a64_syscall_nr(9)
             emit_a64_syscall_nr(mmap_nr)
             emit_a64_svc("alloc")
-            // x0 = raw ptr. Store header: [x0] = original size (x11)
+            // x0 = raw ptr. Test it FIRST — on macOS the failure signal is
+            // the carry flag, so nothing flag-writing may intervene. x10 is
+            // the scratch (outside the wide colour file); x11 holds the size.
+            uint64 a64_alloc_fail = emit_a64_alloc_fail_bcond(10)
+            // Store header: [x0] = original size (x11)
             emit_a64_str(11, 0, 0)
             // x0 = x0 + 8 (return ptr past header)
             emit_a64_add_imm(0, 0, 8)
+            emit_a64_alloc_fail_tail(a64_alloc_fail)
         }
         if dst_r != 0xFFFFFFFF && dst_r != 0 {
             emit_a64_mov(dst_r, 0)
@@ -1715,6 +1724,11 @@ fn ir_emit_arm64_insn(uint64 ii) {
     // ----- IR_DEALLOC (71): inline munmap / VirtualFree -----
     if op == 71 {
         uint64 ptr_reg = ir_a64_resolve_src(s1_v, 9)
+        // dealloc(0) is a no-op: the POSIX arm LDRs the size header at [x0]
+        // after subtracting 8, so freeing 0 reads address -8 and faults. Now
+        // that alloc can return 0, an unconditional cleanup path would crash
+        // on the free instead of the alloc. Guard before the header load.
+        uint64 a64_dealloc_null = emit_a64_dealloc_null_cbz(ptr_reg)
         if target_os == 2 {
             // Windows ARM64: VirtualFree(ptr-8, 0, MEM_RELEASE=0x8000)
             emit_a64_mov_imm(10, 8)
@@ -1734,6 +1748,7 @@ fn ir_emit_arm64_insn(uint64 ii) {
             emit_a64_syscall_nr(munmap_nr)
             emit_a64_svc("dealloc")
         }
+        emit_a64_dealloc_null_end(a64_dealloc_null, ptr_reg)
         return
     }
 

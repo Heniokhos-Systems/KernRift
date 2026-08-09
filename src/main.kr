@@ -1773,7 +1773,42 @@ fn emit_asm_listing(uint64 output_path, uint64 arch, uint64 text_start, uint64 s
                     uint64 bp1 = bp + 1
                     uint64 b1 = 0
                     unsafe { *(bp1 as uint8) -> b1 }
-                    if b1 == 0xC7 && pos + 7 <= fn_end {
+                    if b1 == 0x3D && pos + 6 <= fn_end {
+                        // REX.W cmp rax, imm32 (sign-extended): 48 3D imm32.
+                        // Needs its own case: without it the byte-walker hits
+                        // the 0xF0 inside an immediate like 0xFFFFF000 and
+                        // misreads it as a LOCK prefix, printing a bogus
+                        // "lock ..." line. The alloc OOM guard emits exactly
+                        // this form (cmp rax, -4096), so every alloc site in
+                        // every listing was affected.
+                        uint64 cb0 = 0
+                        uint64 cb1 = 0
+                        uint64 cb2 = 0
+                        uint64 cb3 = 0
+                        uint64 cp0 = bp + 2
+                        uint64 cp1 = bp + 3
+                        uint64 cp2 = bp + 4
+                        uint64 cp3 = bp + 5
+                        unsafe { *(cp0 as uint8) -> cb0 }
+                        unsafe { *(cp1 as uint8) -> cb1 }
+                        unsafe { *(cp2 as uint8) -> cb2 }
+                        unsafe { *(cp3 as uint8) -> cb3 }
+                        write_hex8(fd, b0)
+                        write(fd, " ", 1)
+                        write_hex8(fd, b1)
+                        write(fd, " ", 1)
+                        write_hex8(fd, cb0)
+                        write(fd, " ", 1)
+                        write_hex8(fd, cb1)
+                        write(fd, " ", 1)
+                        write_hex8(fd, cb2)
+                        write(fd, " ", 1)
+                        write_hex8(fd, cb3)
+                        write(fd, " cmp rax, 0x", 12)
+                        uint64 cmp_imm = cb0 | (cb1 << 8) | (cb2 << 16) | (cb3 << 24)
+                        write_hex32(fd, cmp_imm)
+                        pos = pos + 6
+                    } else if b1 == 0xC7 && pos + 7 <= fn_end {
                         // REX.W mov r64, imm32: 48 C7 C0+reg imm32
                         uint64 bp2 = bp + 2
                         uint64 modrm = 0
