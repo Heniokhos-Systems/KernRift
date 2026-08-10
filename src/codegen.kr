@@ -3406,8 +3406,24 @@ fn vardecl_resolved_kind(uint64 node) -> uint64 {
 }
 
 // Parse an x86_64 register name token into a 4-bit register code.
-// Returns 0..15 for recognised names, 0xFFFF for unknown.
-// Recognised: rax..rdi (0..7), r8..r15 (8..15).
+// Returns 0..15 for recognised names. Recognised: rax..rdi (0..7),
+// r8..r15 (8..15).
+//
+// Fail-loud discipline (same rule as rv_reg_code below): an UNKNOWN register
+// name is a HARD ERROR. It used to return a 0xFFFF sentinel and every caller
+// then skipped the binding, so `out(eax -> v)` — the 32-bit spelling, or any
+// typo — compiled clean on BOTH backends and left the variable at its stale
+// value. Measured before this change: the program below exited 7, not 42.
+//
+//     uint64 v = 7
+//     asm { "0xb8 0x2a 0x00 0x00 0x00" } out(eax -> v)
+//
+// This routine is shared: arch 0 (x86), arch 1 (arm64 IR) and arch 3 (xtensa)
+// all resolve constraint registers through it (only arch 2 routes to
+// rv_reg_code). Failing loud here is therefore deliberately cross-arch. No
+// non-x86 constraint register names exist in live source, and xtensa's
+// documented `in(v -> r15)` fallthrough (src/ir_xtensa.kr:2929) resolves to
+// 15 exactly as before.
 fn x86_reg_code(uint64 name_tok) -> uint64 {
     if tok_matches(name_tok, "rax", 3) != 0 { return 0 }
     if tok_matches(name_tok, "rcx", 3) != 0 { return 1 }
@@ -3425,7 +3441,34 @@ fn x86_reg_code(uint64 name_tok) -> uint64 {
     if tok_matches(name_tok, "r13", 3) != 0 { return 13 }
     if tok_matches(name_tok, "r14", 3) != 0 { return 14 }
     if tok_matches(name_tok, "r15", 3) != 0 { return 15 }
+    // Unknown name — fail the build loudly.
+    uint64 xtlen = tok_text_len(name_tok)
+    uint64 xtstart = tok_text_start(name_tok)
+    write(2, "error: unknown inline-asm constraint register '", 47)
+    write(2, cg_source + xtstart, xtlen)
+    write(2, "' (want rax rcx rdx rbx rsp rbp rsi rdi r8-r15)\n", 48)
+    exit(1)
     return 0xFFFF
+}
+
+// The other half of the asm-constraint silent-skip family: the OPERAND. Both
+// backends resolved `in(v -> reg)` / `out(reg -> v)` variables through a
+// lookup that returns a sentinel when the name is not a live local, then
+// skipped the binding. `in(nosuchvar -> rax)` compiled clean; so did naming a
+// static/global, which asm constraints have never supported (measured: the
+// register was left holding garbage, not the global's value).
+//
+// `resolved` is the lookup result (legacy: var_lookup's 0xFFFFFFFF byte
+// offset; IR: ir_var_get's 0xFFFFFFFF vreg). Homed here beside x86_reg_code
+// because ir.kr calls it exactly like it calls x86_reg_code.
+fn asm_require_local(uint64 name_tok, uint64 resolved) {
+    if resolved != 0xFFFFFFFF { return }
+    uint64 atlen = tok_text_len(name_tok)
+    uint64 atstart = tok_text_start(name_tok)
+    write(2, "error: inline-asm constraint variable not found: '", 50)
+    write(2, cg_source + atstart, atlen)
+    write(2, "' (asm in()/out() operands must be local variables)\n", 52)
+    exit(1)
 }
 
 // RISC-V inline-asm constraint register-name -> 0..31 hardware number.
@@ -10776,7 +10819,13 @@ fn gen_stmt(uint64 node) {
                 uint64 wvtok = vtok
                 uint64 rcode = x86_reg_code(wrtok)
                 uint64 voff  = var_lookup(wvtok)
-                if rcode != 0xFFFF && voff != 0xFFFFFFFF {
+                // Both halves used to be a silent skip. x86_reg_code now exits
+                // on an unknown register, and an operand naming something that
+                // is not a local (a typo, or a static/global — which asm
+                // constraints have never actually supported) is an error too:
+                // it used to compile clean and bind nothing.
+                asm_require_local(wvtok, voff)
+                if rcode != 0xFFFF {
                     emit_mov_reg_from_stack(rcode, voff)
                 }
             }
@@ -10811,7 +10860,8 @@ fn gen_stmt(uint64 node) {
                 uint64 wvtok2 = vtok2
                 uint64 rcode2 = x86_reg_code(wrtok2)
                 uint64 voff2  = var_lookup(wvtok2)
-                if rcode2 != 0xFFFF && voff2 != 0xFFFFFFFF {
+                asm_require_local(wvtok2, voff2)
+                if rcode2 != 0xFFFF {
                     emit_mov_reg_to_stack(rcode2, voff2)
                 }
             }

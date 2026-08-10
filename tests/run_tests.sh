@@ -4381,6 +4381,127 @@ else
 fi
 rm -f "$DIR/../vattr_tmp_$$.kr" "$DIR/../vattr2_tmp_$$.kr" /tmp/vattr_$$ /tmp/vattr2_$$ /tmp/vattr3_$$
 
+# --- inline-asm constraints must fail loud, on BOTH backends -----------------
+#
+# x86_reg_code used to return a 0xFFFF sentinel for an unrecognised register
+# and every binding site then SKIPPED the binding, so `out(eax -> v)` -- the
+# 32-bit spelling, or any typo -- compiled clean and did nothing. Measured
+# before the fix: the program in the executing row below exited 7, not 42, on
+# the IR backend AND on --legacy. The operand half had the same hole: an
+# unresolvable variable name (a typo, or a static/global, which asm constraints
+# have never supported) was silently dropped too.
+#
+# These two rows only COMPILE, so they pin --arch=x86_64 deliberately: the
+# register names being checked are x86 names.
+TOTAL=$((TOTAL + 1))
+cat > "$DIR/../asmreg_tmp_$$.kr" <<'ASMREGEOF'
+fn main() {
+    uint64 v = 7
+    asm { "0xb8 0x2a 0x00 0x00 0x00" } out(eax -> v)
+    exit(v)
+}
+ASMREGEOF
+cat > "$DIR/../asmvar_tmp_$$.kr" <<'ASMVAREOF'
+fn main() {
+    uint64 v = 7
+    asm { "0x48 0x89 0xC0" } in(nosuchvar -> rax) out(rax -> v)
+    exit(v)
+}
+ASMVAREOF
+asmloud_ok=1
+asmloud_note=""
+for asmloud_be in "" "--legacy"; do
+    asmloud_out=$($KRC --arch=x86_64 $asmloud_be "$DIR/../asmreg_tmp_$$.kr" -o /tmp/asmreg_$$ 2>&1)
+    if [ -f /tmp/asmreg_$$ ]; then
+        asmloud_ok=0; asmloud_note="unknown register accepted (${asmloud_be:-ir})"
+    elif ! printf '%s' "$asmloud_out" | grep -q "unknown inline-asm constraint register 'eax'"; then
+        asmloud_ok=0; asmloud_note="wrong/absent message for eax (${asmloud_be:-ir})"
+    fi
+    rm -f /tmp/asmreg_$$
+    asmloud_out=$($KRC --arch=x86_64 $asmloud_be "$DIR/../asmvar_tmp_$$.kr" -o /tmp/asmvar_$$ 2>&1)
+    if [ -f /tmp/asmvar_$$ ]; then
+        asmloud_ok=0; asmloud_note="unknown operand accepted (${asmloud_be:-ir})"
+    elif ! printf '%s' "$asmloud_out" | grep -q "inline-asm constraint variable not found: 'nosuchvar'"; then
+        asmloud_ok=0; asmloud_note="wrong/absent message for nosuchvar (${asmloud_be:-ir})"
+    fi
+    rm -f /tmp/asmvar_$$
+done
+if [ "$asmloud_ok" = "1" ]; then
+    PASS=$((PASS + 1)); echo "  asm_constraint_unknown_name_refused: PASS (register + operand, both backends)"
+else
+    FAIL=$((FAIL + 1)); echo "FAIL: asm_constraint_unknown_name_refused ($asmloud_note)"
+fi
+rm -f "$DIR/../asmreg_tmp_$$.kr" "$DIR/../asmvar_tmp_$$.kr"
+
+# Positive control for the row above: the fix must not pass by refusing
+# everything. Every accepted name (rax..rdi, rsp, rbp, r8..r15) still compiles
+# on both backends. rsp appears only as an OUTPUT -- feeding a value into rsp
+# would destroy the stack.
+TOTAL=$((TOTAL + 1))
+cat > "$DIR/../asmok_tmp_$$.kr" <<'ASMOKEOF'
+fn main() {
+    uint64 v = 1
+    uint64 o = 0
+    asm { "nop" } in(v -> rax, v -> rcx, v -> rdx, v -> rbx, v -> rsi, v -> rdi, v -> rbp)
+    asm { "nop" } in(v -> r8, v -> r9, v -> r10, v -> r11, v -> r12, v -> r13, v -> r14, v -> r15)
+    asm { "nop" } out(rsp -> o)
+    exit(0)
+}
+ASMOKEOF
+asmok_ok=1
+asmok_note=""
+for asmok_be in "" "--legacy"; do
+    asmok_out=$($KRC --arch=x86_64 $asmok_be "$DIR/../asmok_tmp_$$.kr" -o /tmp/asmok_$$ 2>&1)
+    if [ ! -f /tmp/asmok_$$ ]; then
+        asmok_ok=0
+        asmok_note="accepted name refused (${asmok_be:-ir}): $(printf '%s' "$asmok_out" | grep '^error' | head -1)"
+    fi
+    rm -f /tmp/asmok_$$
+done
+if [ "$asmok_ok" = "1" ]; then
+    PASS=$((PASS + 1)); echo "  asm_constraint_accepted_names_still_bind: PASS (16 names, both backends)"
+else
+    FAIL=$((FAIL + 1)); echo "FAIL: asm_constraint_accepted_names_still_bind ($asmok_note)"
+fi
+rm -f "$DIR/../asmok_tmp_$$.kr"
+
+# The one that EXECUTES: a correctly spelled binding must still move the value.
+# This is the row that was red before the fix in its `eax` form, so it is also
+# the row that proves the binding path itself was not broken by fixing it.
+# x86 machine code, so it can only run on an x86_64 host -- guarded on
+# $RUN_ARCH rather than pinned, and it builds for $RUN_ARCH.
+TOTAL=$((TOTAL + 1))
+if [ "$RUN_ARCH" = "x86_64" ]; then
+    cat > "$DIR/../asmbind_tmp_$$.kr" <<'ASMBINDEOF'
+fn main() {
+    uint64 v = 7
+    asm { "0xb8 0x2a 0x00 0x00 0x00" } out(rax -> v)
+    exit(v)
+}
+ASMBINDEOF
+    asmbind_ok=1
+    asmbind_note=""
+    for asmbind_be in "" "--legacy"; do
+        if $KRC --arch=$RUN_ARCH $asmbind_be "$DIR/../asmbind_tmp_$$.kr" -o /tmp/asmbind_$$ >/dev/null 2>&1; then
+            chmod +x /tmp/asmbind_$$
+            /tmp/asmbind_$$ >/dev/null 2>&1
+            asmbind_rc=$?
+            [ "$asmbind_rc" = "42" ] || { asmbind_ok=0; asmbind_note="${asmbind_be:-ir} exited $asmbind_rc, want 42"; }
+        else
+            asmbind_ok=0; asmbind_note="${asmbind_be:-ir} build failed"
+        fi
+        rm -f /tmp/asmbind_$$
+    done
+    if [ "$asmbind_ok" = "1" ]; then
+        PASS=$((PASS + 1)); echo "  asm_constraint_out_rax_binds: PASS (42 through rax, both backends)"
+    else
+        FAIL=$((FAIL + 1)); echo "FAIL: asm_constraint_out_rax_binds ($asmbind_note)"
+    fi
+    rm -f "$DIR/../asmbind_tmp_$$.kr"
+else
+    PASS=$((PASS + 1)); echo "  asm_constraint_out_rax_binds: SKIP (RUN_ARCH=$RUN_ARCH, x86 machine code)"
+fi
+
 # The operand-shape exclusion list is duplicated verbatim across several
 # functions in ir.kr, and any divergence between the copies miscompiles.
 # docs/IR_REFERENCE.md §14 tells implementers to edit every one of them, so the
