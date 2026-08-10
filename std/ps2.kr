@@ -1,0 +1,207 @@
+// KernRift Standard Library — PS/2 keyboard
+//
+// Keyboard input with no OS, no interrupt handler and no driver stack: poll
+// the 8042 controller and translate scancode set 1 into ASCII.
+//
+// FREESTANDING-SAFE: port I/O and static tables, no allocation.
+//
+// x86_64 only.
+//
+// Polling, not interrupts, deliberately: it needs no IDT, so it works in a
+// program that has not set up interrupts at all. The 8042 buffers a keystroke,
+// so a loop that polls faster than a person types loses nothing.
+
+import "x86.kr"
+
+// 8042 controller ports.
+const u64 PS2_DATA   = 0x60
+const u64 PS2_STATUS = 0x64
+const u64 PS2_CMD    = 0x64
+
+// Status register bits.
+const u64 PS2_STATUS_OUTPUT_FULL = 0x01     // a byte is waiting in PS2_DATA
+const u64 PS2_STATUS_INPUT_FULL  = 0x02
+const u64 PS2_STATUS_AUX         = 0x20     // the byte came from the mouse
+
+// Set-1 scancodes worth naming. Break codes are the make code | 0x80.
+const u64 PS2_SC_LSHIFT   = 0x2A
+const u64 PS2_SC_RSHIFT   = 0x36
+const u64 PS2_SC_CTRL     = 0x1D
+const u64 PS2_SC_CAPSLOCK = 0x3A
+const u64 PS2_SC_EXTENDED = 0xE0
+
+// Non-ASCII keys, returned above the ASCII range so a caller can switch on
+// them without colliding with a real character.
+const u64 PS2_KEY_UP    = 0x100
+const u64 PS2_KEY_DOWN  = 0x101
+const u64 PS2_KEY_LEFT  = 0x102
+const u64 PS2_KEY_RIGHT = 0x103
+const u64 PS2_KEY_HOME  = 0x104
+const u64 PS2_KEY_END   = 0x105
+const u64 PS2_KEY_DEL   = 0x106
+
+// --- tables -----------------------------------------------------------------
+//
+// scancode -> ASCII, unshifted and shifted. Static storage rather than the
+// fixed physical addresses this came from, so the module composes with
+// anything else.
+static u8[256] ps2_map
+static u8[256] ps2_map_shift
+
+static u64 ps2_shift_down = 0
+static u64 ps2_ctrl_down  = 0
+static u64 ps2_caps_on    = 0
+static u64 ps2_extended   = 0
+static u64 ps2_ready      = 0
+
+fn ps2_set(u64 sc, u64 lo, u64 up) {
+    if sc >= 256 { return }
+    store8(ps2_map + sc, lo)
+    store8(ps2_map_shift + sc, up)
+}
+
+// Map a contiguous run of scancodes from two parallel layout strings -- the
+// compact way to express a keyboard row.
+fn ps2_map_range(u64 sc0, u64 lo, u64 up) {
+    u64 i = 0
+    while load8(lo + i) != 0 {
+        ps2_set(sc0 + i, load8(lo + i), load8(up + i))
+        i = i + 1
+    }
+}
+
+// Build the US layout. Call once before polling.
+fn ps2_init() {
+    u64 i = 0
+    while i < 256 {
+        store8(ps2_map + i, 0)
+        store8(ps2_map_shift + i, 0)
+        i = i + 1
+    }
+    ps2_map_range(0x02, "1234567890", "!@#$%^&*()")
+    ps2_map_range(0x10, "qwertyuiop", "QWERTYUIOP")
+    ps2_map_range(0x1E, "asdfghjkl",  "ASDFGHJKL")
+    ps2_map_range(0x2C, "zxcvbnm",    "ZXCVBNM")
+    ps2_set(0x0E, 8, 8)          // backspace
+    ps2_set(0x0F, 9, 9)          // tab
+    ps2_set(0x1C, 10, 10)        // enter -> newline
+    ps2_set(0x39, 32, 32)        // space
+    ps2_set(0x0C, 45, 95)        // - _
+    ps2_set(0x0D, 61, 43)        // = +
+    ps2_set(0x1A, 91, 123)       // [ {
+    ps2_set(0x1B, 93, 125)       // ] }
+    ps2_set(0x27, 59, 58)        // ; :
+    ps2_set(0x28, 39, 34)        // ' "
+    ps2_set(0x29, 96, 126)       // ` ~
+    ps2_set(0x2B, 92, 124)       // \ |
+    ps2_set(0x33, 44, 60)        // , <
+    ps2_set(0x34, 46, 62)        // . >
+    ps2_set(0x35, 47, 63)        // / ?
+    ps2_set(0x01, 27, 27)        // escape
+    ps2_shift_down = 0
+    ps2_ctrl_down  = 0
+    ps2_caps_on    = 0
+    ps2_extended   = 0
+    ps2_ready      = 1
+}
+
+// --- modifier state ---------------------------------------------------------
+
+fn ps2_shift_held() -> u64 { return ps2_shift_down }
+fn ps2_ctrl_held() -> u64  { return ps2_ctrl_down }
+fn ps2_caps_lock() -> u64  { return ps2_caps_on }
+
+// --- polling ----------------------------------------------------------------
+
+// Translate an extended (0xE0-prefixed) make code to a PS2_KEY_* value.
+fn ps2_extended_key(u64 sc) -> u64 {
+    if sc == 0x48 { return PS2_KEY_UP }
+    if sc == 0x50 { return PS2_KEY_DOWN }
+    if sc == 0x4B { return PS2_KEY_LEFT }
+    if sc == 0x4D { return PS2_KEY_RIGHT }
+    if sc == 0x47 { return PS2_KEY_HOME }
+    if sc == 0x4F { return PS2_KEY_END }
+    if sc == 0x53 { return PS2_KEY_DEL }
+    return 0
+}
+
+// Non-blocking. Returns an ASCII byte, a PS2_KEY_* value, or 0 when nothing is
+// pending. Modifier presses update state and report 0, so a caller can treat
+// any non-zero result as a keystroke.
+fn ps2_poll() -> u64 {
+    if ps2_ready == 0 { ps2_init() }
+    u64 st = inb(PS2_STATUS)
+    if (st & PS2_STATUS_OUTPUT_FULL) == 0 { return 0 }
+    // A mouse byte shares this port. Discard it rather than decoding it as a
+    // scancode, which is what produces phantom keystrokes when a mouse moves.
+    if (st & PS2_STATUS_AUX) != 0 {
+        u64 _aux = inb(PS2_DATA)
+        return 0
+    }
+    u64 sc = inb(PS2_DATA)
+
+    if sc == PS2_SC_EXTENDED { ps2_extended = 1  return 0 }
+    if ps2_extended != 0 {
+        ps2_extended = 0
+        if sc >= 0x80 { return 0 }               // extended release
+        return ps2_extended_key(sc)
+    }
+
+    if sc == PS2_SC_LSHIFT { ps2_shift_down = 1  return 0 }
+    if sc == PS2_SC_RSHIFT { ps2_shift_down = 1  return 0 }
+    if sc == 0xAA { ps2_shift_down = 0  return 0 }      // LSHIFT release
+    if sc == 0xB6 { ps2_shift_down = 0  return 0 }      // RSHIFT release
+    if sc == PS2_SC_CTRL { ps2_ctrl_down = 1  return 0 }
+    if sc == 0x9D { ps2_ctrl_down = 0  return 0 }       // CTRL release
+    if sc == PS2_SC_CAPSLOCK {
+        if ps2_caps_on != 0 { ps2_caps_on = 0 } else { ps2_caps_on = 1 }
+        return 0
+    }
+    if sc >= 0x80 { return 0 }                          // any other release
+
+    u64 ch = load8(ps2_map + sc)
+    if ps2_shift_down != 0 { ch = load8(ps2_map_shift + sc) }
+    if ch == 0 { return 0 }
+
+    // Caps Lock affects letters only -- it must not turn `1` into `!`.
+    if ps2_caps_on != 0 {
+        if ps2_shift_down == 0 {
+            if ch >= 97 {
+                if ch <= 122 { ch = ch - 32 }
+            }
+        } else {
+            if ch >= 65 {
+                if ch <= 90 { ch = ch + 32 }
+            }
+        }
+    }
+
+    // Ctrl+A..Ctrl+Z produce 1..26, so Ctrl-C and Ctrl-D reach a caller in the
+    // form a terminal would deliver them.
+    if ps2_ctrl_down != 0 {
+        if ch >= 97 {
+            if ch <= 122 { return ch - 96 }
+        }
+        if ch >= 65 {
+            if ch <= 90 { return ch - 64 }
+        }
+    }
+    return ch
+}
+
+// Block until a key is pressed. Uses PAUSE so the spin is cheap.
+fn ps2_getc() -> u64 {
+    loop {
+        u64 c = ps2_poll()
+        if c != 0 { return c }
+        cpu_relax()
+    }
+}
+
+// --- controller commands ----------------------------------------------------
+
+// Pulse the 8042 reset line. The classic way to reboot a PC without ACPI: the
+// controller drives the CPU's RESET pin.
+fn ps2_reboot() {
+    outb(PS2_CMD, 0xFE)
+}

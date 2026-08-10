@@ -4215,6 +4215,172 @@ run_test "asm_out_operand_initialises" 'fn g() -> uint64 {
 }
 fn main() { exit(g() + 9) }' 9
 
+# --- examples/bare-console: VGA text + PS/2 keyboard + serial ---
+#
+# Compile-only row first, arch-pinned: the artifact is inspected, not executed.
+TOTAL=$((TOTAL + 1))
+BCON_DIR="$DIR/../examples/bare-console"
+BCON_IMG="/tmp/krc_bcon_$$.img"
+if [ ! -f "$BCON_DIR/main.kr" ]; then
+    FAIL=$((FAIL + 1)); echo "FAIL: bare_console_example_builds (source missing)"
+elif ! $KRC --target=none --arch=x86_64 --emit=image \
+            --load-addr=0x100000 --stack-top=0x90000 \
+            "$BCON_DIR/main.kr" -o "$BCON_IMG" >/dev/null 2>&1; then
+    FAIL=$((FAIL + 1)); echo "FAIL: bare_console_example_builds (compile failed)"
+else
+    PASS=$((PASS + 1)); echo "  bare_console_example_builds: PASS (x86_64 multiboot image)"
+fi
+
+# The claim is that keystrokes reach the program and output reaches BOTH sinks.
+# check.py types on an emulated PS/2 keyboard over QMP -- not over serial,
+# which would leave the scancode translation untested -- then asserts against
+# the serial log AND the VGA text buffer read out of guest memory at 0xB8000.
+# Both halves were confirmed load-bearing by breaking each on purpose.
+TOTAL=$((TOTAL + 1))
+if ! command -v qemu-system-x86_64 >/dev/null 2>&1 || ! command -v python3 >/dev/null 2>&1; then
+    PASS=$((PASS + 1)); echo "  bare_console_example_runs: PASS (SKIPPED -- no qemu-system-x86_64/python3)"
+elif [ ! -f "$BCON_IMG" ]; then
+    FAIL=$((FAIL + 1)); echo "FAIL: bare_console_example_runs (no image from the row above)"
+else
+    bcon_out=$(timeout 120 python3 "$BCON_DIR/check.py" "$BCON_IMG" 2>&1)
+    if printf '%s' "$bcon_out" | grep -q '^PASS: PS/2 input echoed'; then
+        PASS=$((PASS + 1)); echo "  bare_console_example_runs: PASS (PS/2 typed, echoed on vga+serial)"
+    else
+        FAIL=$((FAIL + 1)); echo "FAIL: bare_console_example_runs"
+        printf '%s\n' "$bcon_out" | grep -E '^BAD|^FAIL' | sed 's/^/    /' | head -6
+    fi
+fi
+rm -f "$BCON_IMG"
+
+# std/vga_text.kr, std/serial.kr and std/ps2.kr must each compile freestanding
+# across their whole surface, including what the example does not call.
+TOTAL=$((TOTAL + 1))
+cat > "$DIR/../vsp_tmp_$$.kr" <<'VSPEOF'
+import "std/console.kr"
+static u8[64] vbuf
+fn main() -> uint32 {
+    console_init_quiet()
+    console_set_vga(1)
+    console_set_serial(1)
+    vga_clear()
+    vga_set_attr(vga_attr(VGA_YELLOW, VGA_BLUE))
+    u64 _a = vga_get_attr()
+    u64 _r = vga_get_row()
+    u64 _c = vga_get_col()
+    vga_put_cell(0, 0, 65, 7)
+    u64 _cell = vga_get_cell(0, 0)
+    vga_fill_row(1, 32, 7)
+    vga_scroll()
+    vga_newline()
+    vga_puts("x")
+    vga_putsn("y")
+    vga_write_at(2, 2, "z", 7)
+    vga_move_cursor(3, 3)
+    vga_hide_cursor()
+    vga_sync_cursor()
+    serial_init_port(COM2, UART_DIVISOR_9600)
+    serial_set_port(COM1)
+    u64 _p = serial_get_port()
+    serial_putc_raw(65)
+    serial_puts("s")
+    serial_putsn("t")
+    serial_write("uv", 2)
+    u64 _sp = serial_poll()
+    if serial_has_data(COM1) != 0 { u64 _g = serial_getc() }
+    if ps2_shift_held() != 0 { }
+    if ps2_ctrl_held() != 0 { }
+    if ps2_caps_lock() != 0 { }
+    u64 _k = ps2_poll()
+    if _k == PS2_KEY_UP { ps2_reboot() }
+    u64 b = vbuf
+    console_readline(b, 64)
+    console_put_u64(1)
+    console_put_i64(0 - 1)
+    console_put_hex(255, 4)
+    console_putsn("done")
+    halt_forever()
+    return 0
+}
+VSPEOF
+if $KRC --target=none --arch=x86_64 --emit=image --load-addr=0x100000 \
+        --stack-top=0x90000 "$DIR/../vsp_tmp_$$.kr" -o /tmp/vsp_$$.img >/dev/null 2>&1; then
+    PASS=$((PASS + 1)); echo "  console_stack_full_surface_freestanding: PASS"
+else
+    FAIL=$((FAIL + 1)); echo "FAIL: console_stack_full_surface_freestanding"
+    $KRC --target=none --arch=x86_64 --emit=image --load-addr=0x100000 \
+         --stack-top=0x90000 "$DIR/../vsp_tmp_$$.kr" -o /tmp/vsp_$$.img 2>&1 | grep error | head -3 | sed 's/^/    /'
+fi
+rm -f "$DIR/../vsp_tmp_$$.kr" /tmp/vsp_$$.img
+
+# vga_attr packs (bg << 4) | fg. Worth pinning because the encoding is easy to
+# get backwards, and because `|` binds TIGHTER than `<<` in KernRift, so the
+# expression inside vga_attr has to be parenthesised to mean what it reads as.
+#
+# This row EXECUTES, so it cannot simply pin an arch. std/vga_text.kr is
+# x86_64-only (it imports std/x86.kr for the cursor ports), yet vga_attr itself
+# is pure arithmetic and dead-code elimination drops the port-I/O functions
+# before their x86 asm is ever emitted -- so it builds and runs on arm64 too.
+# That is a real property of the module and not something to leave incidental:
+# it runs on BOTH arches here, native plus emulator, so a change that makes the
+# pure helpers drag in x86 asm fails on the x86_64 runner rather than only on
+# the arm64 one.
+#
+# Third clause pins the other half of std/x86.kr's stated contract: a function
+# that DOES touch port I/O must fail loudly on a non-x86 target, not silently
+# compile to a no-op.
+TOTAL=$((TOTAL + 1))
+cat > "$DIR/../vattr_tmp_$$.kr" <<'VAEOF'
+import "std/vga_text.kr"
+fn main() {
+    if vga_attr(VGA_LIGHT_GREY, VGA_BLACK) != 0x07 { exit(1) }
+    if vga_attr(VGA_YELLOW, VGA_BLUE) != 0x1E { exit(2) }
+    if vga_attr(VGA_BLACK, VGA_LIGHT_GREY) != 0x70 { exit(3) }
+    if vga_attr(VGA_WHITE, VGA_WHITE) != 0xFF { exit(4) }
+    exit(9)
+}
+VAEOF
+cat > "$DIR/../vattr2_tmp_$$.kr" <<'VA2EOF'
+import "std/vga_text.kr"
+fn main() { vga_move_cursor(1, 1)  exit(9) }
+VA2EOF
+va_ok=1
+va_note=""
+# host arch, natively
+if $KRC --arch=$RUN_ARCH "$DIR/../vattr_tmp_$$.kr" -o /tmp/vattr_$$ >/dev/null 2>&1; then
+    chmod +x /tmp/vattr_$$
+    /tmp/vattr_$$ >/dev/null 2>&1
+    [ "$?" = "9" ] || { va_ok=0; va_note="native $RUN_ARCH run"; }
+else
+    va_ok=0; va_note="native $RUN_ARCH build"
+fi
+# the other arch, under an emulator when one is present
+if [ "$RUN_ARCH" = "x86_64" ]; then va_other=arm64; else va_other=x86_64; fi
+va_emu=""
+[ "$va_other" = "arm64" ] && va_emu="$(command -v qemu-aarch64-static || true)"
+[ "$va_other" = "x86_64" ] && va_emu="$(command -v qemu-x86_64-static || true)"
+if [ -n "$va_emu" ]; then
+    if $KRC --arch=$va_other "$DIR/../vattr_tmp_$$.kr" -o /tmp/vattr2_$$ >/dev/null 2>&1; then
+        chmod +x /tmp/vattr2_$$
+        $va_emu /tmp/vattr2_$$ >/dev/null 2>&1
+        [ "$?" = "9" ] || { va_ok=0; va_note="$va_other run"; }
+    else
+        va_ok=0; va_note="$va_other build (pure helpers should not drag in x86 asm)"
+    fi
+else
+    va_note="$va_other SKIPPED, no emulator"
+fi
+# port I/O on arm64 must be refused, loudly
+va_err=$($KRC --arch=arm64 "$DIR/../vattr2_tmp_$$.kr" -o /tmp/vattr3_$$ 2>&1)
+if [ -f /tmp/vattr3_$$ ] || ! printf '%s' "$va_err" | grep -q "unrecognized asm instruction"; then
+    va_ok=0; va_note="port I/O silently accepted on arm64"
+fi
+if [ "$va_ok" = "1" ]; then
+    PASS=$((PASS + 1)); echo "  vga_attr_packs_bg_high_fg_low: PASS (both arches; port I/O still refused on arm64${va_note:+; $va_note})"
+else
+    FAIL=$((FAIL + 1)); echo "FAIL: vga_attr_packs_bg_high_fg_low ($va_note)"
+fi
+rm -f "$DIR/../vattr_tmp_$$.kr" "$DIR/../vattr2_tmp_$$.kr" /tmp/vattr_$$ /tmp/vattr2_$$ /tmp/vattr3_$$
+
 # The operand-shape exclusion list is duplicated verbatim across several
 # functions in ir.kr, and any divergence between the copies miscompiles.
 # docs/IR_REFERENCE.md §14 tells implementers to edit every one of them, so the
