@@ -8,8 +8,8 @@ src/codegen.kr:759 200c44e86c3f
 src/codegen.kr:1142 61445d2e2178
 src/codegen.kr:2863 971cbe948330
 src/codegen.kr:2941 40790e96ab4b
-src/codegen.kr:12198 2b091052bfe1
-src/codegen.kr:12363 aa848ad63344
+src/codegen.kr:12201 2b091052bfe1
+src/codegen.kr:12366 aa848ad63344
 src/codegen_aarch64.kr:407 60c115e38124
 src/ir.kr:28 c30794eca0b2
 src/ir.kr:30 f675ac83e84b
@@ -144,7 +144,7 @@ src/ir_xtensa.kr:522 1066a0cf8f83
 src/ir_xtensa.kr:1713 1e6f86d4d4bd
 src/ir_xtensa.kr:1954 743fd331a82f
 src/ir_xtensa.kr:2816 68aff4cb352d
-src/main.kr:2360 844fbed9235f
-src/main.kr:6913 1f6a3a8734b0
-src/main.kr:7400 1a76db0f6e20
-src/main.kr:7537 70dc2d2f69ae
+src/main.kr:2377 844fbed9235f
+src/main.kr:6930 1f6a3a8734b0
+src/main.kr:7417 1a76db0f6e20
+src/main.kr:7554 70dc2d2f69ae

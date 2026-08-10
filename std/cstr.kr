@@ -1,0 +1,274 @@
+// KernRift Standard Library — caller-owned strings and number formatting
+//
+// FREESTANDING-SAFE. Every function here writes into a buffer the CALLER owns
+// and allocates nothing, so the whole module works under `--target=none` and
+// `--freestanding`.
+//
+// This is the difference from std/string.kr, and it is not about syscalls:
+// `str_copy` and `int_to_str` there return a freshly `alloc`'d buffer, and
+// `alloc` is refused on bare metal ("there is no operating system to provide
+// it"). Formatting a number should not need a heap, so these take a
+// destination and a capacity instead.
+//
+// Conventions throughout:
+//   * strings are NUL-terminated byte sequences ("C strings")
+//   * `cap` is the FULL size of the destination including the NUL
+//   * writers return the number of bytes written, NOT counting the NUL
+//   * every writer NUL-terminates, even when it truncates
+//   * a `cap` of 0 writes nothing at all and returns 0
+
+// Returned by the search functions when there is no match. Distinct from 0,
+// which is a valid index.
+const u64 CSTR_NOTFOUND = 0xFFFFFFFFFFFFFFFF
+
+// --- inspection -------------------------------------------------------------
+
+// Length in bytes, excluding the NUL.
+fn cstr_len(u64 s) -> u64 {
+    u64 i = 0
+    while load8(s + i) != 0 { i = i + 1 }
+    return i
+}
+
+// Index of the first `ch`, or CSTR_NOTFOUND. `ch` is a byte value.
+fn cstr_find(u64 s, u64 ch) -> u64 {
+    u64 i = 0
+    u64 c = load8(s)
+    while c != 0 {
+        if c == ch { return i }
+        i = i + 1
+        c = load8(s + i)
+    }
+    return CSTR_NOTFOUND
+}
+
+// 1 if the two strings are byte-identical, else 0.
+fn cstr_eq(u64 a, u64 b) -> u64 {
+    u64 i = 0
+    loop {
+        u64 ca = load8(a + i)
+        u64 cb = load8(b + i)
+        if ca != cb { return 0 }
+        if ca == 0 { return 1 }
+        i = i + 1
+    }
+}
+
+// 1 if `s` starts with `prefix`.
+fn cstr_starts_with(u64 s, u64 prefix) -> u64 {
+    u64 i = 0
+    loop {
+        u64 cp = load8(prefix + i)
+        if cp == 0 { return 1 }
+        if load8(s + i) != cp { return 0 }
+        i = i + 1
+    }
+}
+
+// Advance past ASCII spaces and tabs. Returns the new pointer.
+fn cstr_skip_spaces(u64 p) -> u64 {
+    loop {
+        u64 c = load8(p)
+        if c != 32 {
+            if c != 9 { return p }
+        }
+        p = p + 1
+    }
+}
+
+// --- copying ----------------------------------------------------------------
+
+// Bounded copy. Writes at most cap-1 bytes plus a NUL. Returns bytes written.
+fn cstr_copy(u64 dst, u64 src, u64 cap) -> u64 {
+    if cap == 0 { return 0 }
+    u64 i = 0
+    u64 limit = cap - 1
+    while i < limit {
+        u64 c = load8(src + i)
+        if c == 0 { break }
+        store8(dst + i, c)
+        i = i + 1
+    }
+    store8(dst + i, 0)
+    return i
+}
+
+// Append `src` to the NUL-terminated `dst`, respecting `cap` for the WHOLE
+// buffer. Returns the new total length.
+fn cstr_append(u64 dst, u64 src, u64 cap) -> u64 {
+    if cap == 0 { return 0 }
+    u64 n = cstr_len(dst)
+    if n + 1 >= cap { return n }
+    u64 room = cap - n
+    return n + cstr_copy(dst + n, src, room)
+}
+
+// --- splitting --------------------------------------------------------------
+
+// Split `line` at the first run of spaces, in place: writes a NUL over the
+// separator so `line` becomes the first token, and returns a pointer to the
+// remainder with leading spaces skipped. If there is no separator, the
+// returned pointer is the NUL at the end -- i.e. an empty argument string,
+// never a null pointer.
+//
+// Mutates `line`. Copy first if you need the original.
+fn cstr_split_word(u64 line) -> u64 {
+    u64 i = 0
+    loop {
+        u64 c = load8(line + i)
+        if c == 0 { return line + i }
+        if c == 32 { break }
+        i = i + 1
+    }
+    store8(line + i, 0)
+    i = i + 1
+    return cstr_skip_spaces(line + i)
+}
+
+// --- number formatting ------------------------------------------------------
+//
+// The gap these fill: std/string.kr's int_to_str allocates its result, so a
+// bare-metal program cannot print a number without a heap provider. These
+// write into the caller's buffer.
+
+// Unsigned decimal. Returns bytes written, excluding the NUL.
+fn cstr_u64_dec(u64 dst, u64 cap, u64 val) -> u64 {
+    if cap == 0 { return 0 }
+    if cap == 1 { store8(dst, 0)  return 0 }
+    // Render backwards into a scratch buffer: 20 digits covers 2^64-1.
+    u8[24] tmp
+    u64 n = 0
+    if val == 0 {
+        store8(tmp, 48)
+        n = 1
+    } else {
+        u64 v = val
+        while v != 0 {
+            u64 d = v % 10
+            store8(tmp + n, 48 + d)
+            n = n + 1
+            v = v / 10
+        }
+    }
+    u64 limit = cap - 1
+    u64 out = n
+    if out > limit { out = limit }
+    u64 i = 0
+    while i < out {
+        store8(dst + i, load8(tmp + (n - 1 - i)))
+        i = i + 1
+    }
+    store8(dst + out, 0)
+    return out
+}
+
+// Signed decimal, two's complement.
+fn cstr_i64_dec(u64 dst, u64 cap, u64 val) -> u64 {
+    if cap == 0 { return 0 }
+    // Bit 63 set means negative.
+    if (val >> 63) == 0 { return cstr_u64_dec(dst, cap, val) }
+    if cap < 3 { store8(dst, 0)  return 0 }
+    store8(dst, 45)
+    u64 mag = 0 - val
+    return 1 + cstr_u64_dec(dst + 1, cap - 1, mag)
+}
+
+// Lowercase hex, no "0x" prefix. `width` zero-pads to that many digits; pass 0
+// for the natural width. Useful for register and address dumps, which is what
+// bare-metal code needs constantly.
+fn cstr_u64_hex(u64 dst, u64 cap, u64 val, u64 width) -> u64 {
+    if cap == 0 { return 0 }
+    if cap == 1 { store8(dst, 0)  return 0 }
+    u8[24] tmp
+    u64 n = 0
+    if val == 0 {
+        store8(tmp, 48)
+        n = 1
+    } else {
+        u64 v = val
+        while v != 0 {
+            u64 d = v & 15
+            u64 ch = 48 + d
+            if d > 9 { ch = 87 + d }
+            store8(tmp + n, ch)
+            n = n + 1
+            v = v >> 4
+        }
+    }
+    // Zero-pad up to `width` (the digits are still reversed at this point).
+    while n < width {
+        store8(tmp + n, 48)
+        n = n + 1
+    }
+    u64 limit = cap - 1
+    u64 out = n
+    if out > limit { out = limit }
+    u64 i = 0
+    while i < out {
+        store8(dst + i, load8(tmp + (n - 1 - i)))
+        i = i + 1
+    }
+    store8(dst + out, 0)
+    return out
+}
+
+// "0x" followed by hex. The form you almost always want when dumping an
+// address -- writing it by hand was the workaround this module removes.
+fn cstr_u64_hex0x(u64 dst, u64 cap, u64 val, u64 width) -> u64 {
+    if cap < 3 {
+        if cap != 0 { store8(dst, 0) }
+        return 0
+    }
+    store8(dst, 48)
+    u64 d1 = dst + 1
+    store8(d1, 120)
+    return 2 + cstr_u64_hex(dst + 2, cap - 2, val, width)
+}
+
+// --- parsing ----------------------------------------------------------------
+
+// Parse leading decimal digits. Returns the value; `end_out`, if non-zero,
+// receives a pointer to the first byte that was not consumed, so a caller can
+// tell "0" from "not a number".
+fn cstr_parse_u64(u64 s, u64 end_out) -> u64 {
+    u64 v = 0
+    u64 i = 0
+    loop {
+        u64 c = load8(s + i)
+        if c < 48 { break }
+        if c > 57 { break }
+        v = v * 10 + (c - 48)
+        i = i + 1
+    }
+    if end_out != 0 { store64(end_out, s + i) }
+    return v
+}
+
+// Parse hex, with an optional "0x" prefix. Accepts both cases.
+fn cstr_parse_hex(u64 s, u64 end_out) -> u64 {
+    u64 i = 0
+    if load8(s) == 48 {
+        u64 c1 = load8(s + 1)
+        if c1 == 120 { i = 2 }
+        if c1 == 88 { i = 2 }
+    }
+    u64 v = 0
+    loop {
+        u64 c = load8(s + i)
+        u64 d = 16
+        if c >= 48 {
+            if c <= 57 { d = c - 48 }
+        }
+        if c >= 97 {
+            if c <= 102 { d = c - 87 }
+        }
+        if c >= 65 {
+            if c <= 70 { d = c - 55 }
+        }
+        if d == 16 { break }
+        v = (v << 4) | d
+        i = i + 1
+    }
+    if end_out != 0 { store64(end_out, s + i) }
+    return v
+}

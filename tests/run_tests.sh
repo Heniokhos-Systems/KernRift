@@ -3981,6 +3981,118 @@ else
     FAIL=$((FAIL + 1)); echo "FAIL: analysis_unreachable_write_lengths_pinned ($analysis_static_err)"
 fi
 
+# --- std/x86.kr + std/cstr.kr: bare-metal support modules ---
+# Both must work under --target=none. cstr.kr exists because std/string.kr's
+# int_to_str/str_copy ALLOCATE their result, and alloc is refused on bare metal
+# -- so formatting a number needed a heap. These write into a caller buffer.
+run_test "cstr_format_and_string_ops" 'import "std/cstr.kr"
+fn chk(u64 a, u64 b, u64 code) { if a != b { exit(code) } }
+fn main() {
+    u8[64] b
+    chk(cstr_u64_dec(b, 64, 0), 1, 1)
+    chk(cstr_eq(b, "0"), 1, 2)
+    chk(cstr_u64_dec(b, 64, 18446744073709551615), 20, 3)
+    chk(cstr_eq(b, "18446744073709551615"), 1, 4)
+    cstr_u64_hex(b, 64, 0xDEADBEEF, 0)
+    chk(cstr_eq(b, "deadbeef"), 1, 5)
+    cstr_u64_hex(b, 64, 0x1F, 8)
+    chk(cstr_eq(b, "0000001f"), 1, 6)
+    cstr_u64_hex0x(b, 64, 0x1000, 0)
+    chk(cstr_eq(b, "0x1000"), 1, 7)
+    cstr_i64_dec(b, 64, 0 - 42)
+    chk(cstr_eq(b, "-42"), 1, 8)
+    chk(cstr_u64_dec(b, 3, 4095), 2, 9)
+    chk(cstr_eq(b, "40"), 1, 10)
+    chk(cstr_copy(b, "hello", 64), 5, 11)
+    chk(cstr_append(b, "!!", 64), 7, 12)
+    chk(cstr_eq(b, "hello!!"), 1, 13)
+    chk(cstr_find("a,b", 44), 1, 14)
+    chk(cstr_find("abc", 122), CSTR_NOTFOUND, 15)
+    u8[32] line
+    cstr_copy(line, "echo  hi there", 32)
+    u64 args = cstr_split_word(line)
+    chk(cstr_eq(line, "echo"), 1, 16)
+    chk(cstr_eq(args, "hi there"), 1, 17)
+    chk(cstr_parse_u64("1234x", 0), 1234, 18)
+    chk(cstr_parse_hex("0xff", 0), 255, 19)
+    exit(9)
+}' 9
+
+# std/x86.kr: only the NON-PRIVILEGED surface can run hosted -- port I/O,
+# control registers, MSRs, cli/sti and lgdt/lidt are ring 0 and fault in
+# userspace. The privileged half is covered by the freestanding compile below.
+run_test "x86_nonprivileged_surface" 'import "std/x86.kr"
+fn main() {
+    if bswap16(0x1234) != 0x3412 { exit(1) }
+    if bswap32(0x11223344) != 0x44332211 { exit(2) }
+    if bswap64(0x1122334455667788) != 0x8877665544332211 { exit(3) }
+    if bswap32(bswap32(0xDEADBEEF)) != 0xDEADBEEF { exit(4) }
+    u64 t1 = rdtsc()
+    cpu_relax()
+    if rdtsc() < t1 { exit(5) }
+    if cpuid_eax(0) == 0 { exit(6) }
+    exit(9)
+}' 9
+
+# The whole point of both modules: they compile with no OS underneath.
+# Compile-only, so the arch may be pinned.
+TOTAL=$((TOTAL + 1))
+bm_ok=1
+cat > "$DIR/../bm_tmp_$$.kr" <<'BMEOF'
+import "std/cstr.kr"
+import "std/x86.kr"
+static u8[64] scratch
+fn main() -> uint32 {
+    u64 b = scratch
+    cstr_u64_hex0x(b, 64, 0x1000000, 8)
+    cstr_i64_dec(b, 64, 0 - 1)
+    cstr_append(b, "-metal", 64)
+    outb(0x3F8, 65)
+    u64 v = inb(0x3F8)
+    write_cr3(read_cr3())
+    invlpg(0x1000)
+    lgdt(0x2000)
+    wrmsr(0xC0000080, rdmsr(0xC0000080))
+    cli()
+    sti()
+    cpu_relax()
+    if v == 0xFFFF { hlt() }
+    loop { }
+}
+BMEOF
+$KRC --target=none --arch=x86_64 --emit=image --load-addr=0x100000 --stack-top=0x90000      "$DIR/../bm_tmp_$$.kr" -o /tmp/bm_$$.img >/dev/null 2>&1 || { bm_ok=0; echo "  x86_64 freestanding build failed"; }
+# cstr must be arch-neutral too
+cat > "$DIR/../bm2_tmp_$$.kr" <<'BM2EOF'
+import "std/cstr.kr"
+static u8[64] scratch
+fn main() -> uint32 {
+    u64 b = scratch
+    cstr_u64_hex0x(b, 64, 0x40080000, 8)
+    cstr_u64_dec(b, 64, 12345)
+    loop { }
+}
+BM2EOF
+$KRC --target=none --arch=arm64 --emit=image --load-addr=0x40080000 --stack-top=0x40200000      "$DIR/../bm2_tmp_$$.kr" -o /tmp/bm2_$$.img >/dev/null 2>&1 || { bm_ok=0; echo "  arm64 freestanding build failed"; }
+if [ "$bm_ok" = "1" ]; then
+    PASS=$((PASS + 1)); echo "  bare_metal_std_modules: PASS (cstr+x86 on x86_64, cstr on arm64, --target=none)"
+else
+    FAIL=$((FAIL + 1)); echo "FAIL: bare_metal_std_modules"
+fi
+rm -f "$DIR/../bm_tmp_$$.kr" "$DIR/../bm2_tmp_$$.kr" /tmp/bm_$$.img /tmp/bm2_$$.img
+
+# `pause` (F3 90) as a first-class mnemonic: a spin loop should not need
+# asm("0xF3 0x90"). Compile-only + byte assertion, so the arch may be pinned.
+TOTAL=$((TOTAL + 1))
+printf 'fn main(){ asm { "pause" }  exit(0) }\n' > "$DIR/../pz_tmp_$$.kr"
+pz_out=$($KRC --arch=x86_64 --emit=asm "$DIR/../pz_tmp_$$.kr" 2>&1)
+pz_l=$(printf '%s' "$pz_out" | sed -n 's/.* -> \(.*\) (asm listing)$/\1/p')
+if [ -f "$pz_l" ] && grep -qi 'f3 90' "$pz_l"; then
+    PASS=$((PASS + 1)); echo "  asm_pause_mnemonic: PASS (F3 90 emitted and decoded)"
+else
+    FAIL=$((FAIL + 1)); echo "FAIL: asm_pause_mnemonic (no f3 90 in listing)"
+fi
+rm -f "$DIR/../pz_tmp_$$.kr" "$pz_l"
+
 # The operand-shape exclusion list is duplicated verbatim across several
 # functions in ir.kr, and any divergence between the copies miscompiles.
 # docs/IR_REFERENCE.md §14 tells implementers to edit every one of them, so the

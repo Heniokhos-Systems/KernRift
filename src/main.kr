@@ -1578,6 +1578,23 @@ fn emit_asm_listing(uint64 output_path, uint64 arch, uint64 text_start, uint64 s
                     else if pop_r == 6 { write(fd, "rsi", 3) }
                     else { write(fd, "rdi", 3) }
                     pos = pos + 1
+                } else if b0 == 0xF3 && pos + 2 <= fn_end {
+                    // PAUSE is F3 90. Without this case the F3 dumps as a bare
+                    // byte and the 90 decodes as "nop", which reads as a plain
+                    // no-op when it is a spin hint.
+                    uint64 pz1 = bp + 1
+                    uint64 pzb = 0
+                    unsafe { *(pz1 as uint8) -> pzb }
+                    if pzb == 0x90 {
+                        write_hex8(fd, b0)
+                        write(fd, " ", 1)
+                        write_hex8(fd, pzb)
+                        write(fd, "              pause", 19)
+                        pos = pos + 2
+                    } else {
+                        write_hex8(fd, b0)
+                        pos = pos + 1
+                    }
                 } else if b0 == 0x90 {
                     // nop
                     write_hex8(fd, b0)
