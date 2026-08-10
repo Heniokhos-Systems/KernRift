@@ -1,0 +1,150 @@
+// KernRift Standard Library — QEMU ramfb
+//
+// ramfb gives a bare-metal program a real linear framebuffer with no PCI
+// enumeration, no VBE call and no driver: you hand QEMU a pointer to ordinary
+// RAM through fw_cfg and it scans out of it. For a freestanding KernRift image
+// this is the shortest path from "no display" to "pixels".
+//
+// FREESTANDING-SAFE: no allocation. The caller owns the framebuffer memory and
+// says where it is.
+//
+// x86_64 only, inherited from std/fw_cfg.kr's use of port I/O.
+//
+// Usage:
+//     if ramfb_init(0x1000000, 1024, 768) == 0 { /* no ramfb */ }
+//     ramfb_clear(0x00202020)
+//     ramfb_put_pixel(10, 10, 0x00FF0000)
+//
+// The framebuffer address must be RAM that nothing else is using and that the
+// device can reach -- i.e. a real physical address, identity-mapped. Size it
+// as height * stride bytes.
+
+import "fw_cfg.kr"
+
+// DRM fourcc "XR24" = XRGB8888: 32 bits per pixel, 0x00RRGGBB, top byte
+// ignored. The one format every QEMU build supports.
+const u64 RAMFB_FORMAT_XRGB8888 = 0x34325258
+
+// ramfb's fw_cfg file name.
+const u64 RAMFB_BYTES_PER_PIXEL = 4
+
+// --- state ------------------------------------------------------------------
+//
+// The 28-byte RAMFBCfg the device DMA-reads: u64 addr, u32 fourcc, u32 flags,
+// u32 width, u32 height, u32 stride -- ALL big-endian, which is why this
+// module leans on bswap so heavily.
+static u8[32] ramfb_cfg
+
+static u64 ramfb_addr   = 0
+static u64 ramfb_width  = 0
+static u64 ramfb_height = 0
+static u64 ramfb_stride = 0
+
+// --- setup ------------------------------------------------------------------
+
+// Full form: explicit stride, in bytes per scanline. Returns 1 on success, 0
+// if there is no fw_cfg, no DMA, or no `etc/ramfb` file (a QEMU built without
+// the device, or a machine type that lacks it).
+fn ramfb_init_stride(u64 addr, u64 w, u64 h, u64 stride) -> u64 {
+    if fw_cfg_present() == 0 { return 0 }
+    // Writes go only through DMA, so without it ramfb cannot be configured at
+    // all -- fail here rather than silently doing nothing.
+    if fw_cfg_has_dma() == 0 { return 0 }
+    u64 sel = fw_cfg_find_file("etc/ramfb")
+    if sel == FW_CFG_NOTFOUND { return 0 }
+
+    u64 c = ramfb_cfg
+    store64(c,      bswap64(addr))
+    store32(c + 8,  bswap32(RAMFB_FORMAT_XRGB8888))
+    store32(c + 12, bswap32(0))                     // flags, must be 0
+    store32(c + 16, bswap32(w))
+    store32(c + 20, bswap32(h))
+    store32(c + 24, bswap32(stride))
+
+    if fw_cfg_dma_write(sel, c, 28) == 0 { return 0 }
+
+    ramfb_addr   = addr
+    ramfb_width  = w
+    ramfb_height = h
+    ramfb_stride = stride
+    return 1
+}
+
+// The common case: packed 32-bit pixels, stride = width * 4.
+fn ramfb_init(u64 addr, u64 w, u64 h) -> u64 {
+    return ramfb_init_stride(addr, w, h, w * RAMFB_BYTES_PER_PIXEL)
+}
+
+// 1 once a framebuffer has been configured.
+fn ramfb_ready() -> u64 {
+    if ramfb_addr == 0 { return 0 }
+    return 1
+}
+
+fn ramfb_get_width() -> u64 { return ramfb_width }
+fn ramfb_get_height() -> u64 { return ramfb_height }
+fn ramfb_get_stride() -> u64 { return ramfb_stride }
+fn ramfb_get_addr() -> u64 { return ramfb_addr }
+
+// --- colour -----------------------------------------------------------------
+
+// Pack 8-bit components into XRGB8888. Parenthesised because in KernRift `|`
+// binds TIGHTER than `<<`.
+fn ramfb_rgb(u64 r, u64 g, u64 b) -> u64 {
+    return ((r & 0xFF) << 16) | ((g & 0xFF) << 8) | (b & 0xFF)
+}
+
+// --- drawing ----------------------------------------------------------------
+//
+// Deliberately minimal: a framebuffer you cannot write is not useful, but text
+// rendering, fonts and windowing belong in a layer above this one.
+
+// Byte offset of a pixel. Callers doing tight loops should hoist this.
+fn ramfb_offset(u64 x, u64 y) -> u64 {
+    return ramfb_addr + y * ramfb_stride + x * RAMFB_BYTES_PER_PIXEL
+}
+
+// Bounds-checked single pixel. Out-of-range coordinates are ignored rather
+// than corrupting whatever follows the framebuffer.
+fn ramfb_put_pixel(u64 x, u64 y, u64 colour) {
+    if ramfb_addr == 0 { return }
+    if x >= ramfb_width { return }
+    if y >= ramfb_height { return }
+    store32(ramfb_offset(x, y), colour)
+}
+
+fn ramfb_get_pixel(u64 x, u64 y) -> u64 {
+    if ramfb_addr == 0 { return 0 }
+    if x >= ramfb_width { return 0 }
+    if y >= ramfb_height { return 0 }
+    return load32(ramfb_offset(x, y))
+}
+
+// Fill a rectangle, clipped to the framebuffer.
+fn ramfb_fill_rect(u64 x, u64 y, u64 w, u64 h, u64 colour) {
+    if ramfb_addr == 0 { return }
+    if x >= ramfb_width { return }
+    if y >= ramfb_height { return }
+    u64 x1 = x + w
+    u64 y1 = y + h
+    // Clipping x is not cosmetic: without it the inner loop runs past the end
+    // of the scanline and the writes land at the START of the following row
+    // (and past the framebuffer entirely on the last row).
+    if x1 > ramfb_width { x1 = ramfb_width }
+    if y1 > ramfb_height { y1 = ramfb_height }
+    u64 yy = y
+    while yy < y1 {
+        u64 row = ramfb_addr + yy * ramfb_stride
+        u64 xx = x
+        while xx < x1 {
+            store32(row + xx * RAMFB_BYTES_PER_PIXEL, colour)
+            xx = xx + 1
+        }
+        yy = yy + 1
+    }
+}
+
+// Fill the whole framebuffer.
+fn ramfb_clear(u64 colour) {
+    ramfb_fill_rect(0, 0, ramfb_width, ramfb_height, colour)
+}

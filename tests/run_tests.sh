@@ -4093,6 +4093,128 @@ else
 fi
 rm -f "$DIR/../pz_tmp_$$.kr" "$pz_l"
 
+# --- std/fw_cfg.kr + std/ramfb.kr, and examples/ramfb-demo ---
+#
+# examples/ramfb-demo must keep building. Compile-only and arch-pinned: the
+# artifact is inspected, not executed. Same `do not cd` rule as the tutorial
+# rows above -- $KRC is a relative path.
+TOTAL=$((TOTAL + 1))
+RFB_DIR="$DIR/../examples/ramfb-demo"
+RFB_IMG="/tmp/krc_ramfb_example_$$.img"
+if [ ! -f "$RFB_DIR/main.kr" ]; then
+    FAIL=$((FAIL + 1)); echo "FAIL: ramfb_example_builds (source missing)"
+elif ! $KRC --target=none --arch=x86_64 --emit=image \
+            --load-addr=0x100000 --stack-top=0x90000 \
+            "$RFB_DIR/main.kr" -o "$RFB_IMG" >/dev/null 2>&1; then
+    FAIL=$((FAIL + 1)); echo "FAIL: ramfb_example_builds (compile failed)"
+else
+    # Multiboot header magic 0x1BADB002 must be within the first 8 KiB.
+    if od -An -tx4 -N8192 "$RFB_IMG" 2>/dev/null | tr -d ' \n' | grep -q '1badb002'; then
+        PASS=$((PASS + 1)); echo "  ramfb_example_builds: PASS (x86_64 multiboot image)"
+    else
+        FAIL=$((FAIL + 1)); echo "FAIL: ramfb_example_builds (no multiboot magic)"
+    fi
+fi
+
+# The claim that matters for ramfb is not "it compiled" but "QEMU scanned those
+# pixels out". check.py boots the image headless and compares QEMU's own
+# screendump against 13 expected pixel values. Needs qemu-system-x86_64 and
+# python3; noted rather than failed when absent, like the ESP rows above.
+TOTAL=$((TOTAL + 1))
+if ! command -v qemu-system-x86_64 >/dev/null 2>&1 || ! command -v python3 >/dev/null 2>&1; then
+    PASS=$((PASS + 1)); echo "  ramfb_example_draws: PASS (pixel check SKIPPED -- no qemu-system-x86_64/python3)"
+elif [ ! -f "$RFB_IMG" ]; then
+    FAIL=$((FAIL + 1)); echo "FAIL: ramfb_example_draws (no image from the row above)"
+else
+    rfb_out=$(timeout 60 python3 "$RFB_DIR/check.py" "$RFB_IMG" 2>&1)
+    if printf '%s' "$rfb_out" | grep -q '^PASS: 13/13 pixel checks$'; then
+        PASS=$((PASS + 1)); echo "  ramfb_example_draws: PASS (13/13 pixels verified via QMP screendump)"
+    else
+        FAIL=$((FAIL + 1)); echo "FAIL: ramfb_example_draws"
+        printf '%s\n' "$rfb_out" | sed 's/^/    /' | head -8
+    fi
+fi
+rm -f "$RFB_IMG"
+
+# std/fw_cfg.kr's whole surface must compile freestanding, including the paths
+# the demo does not exercise (DMA read, whole-file read, the LE item readers).
+TOTAL=$((TOTAL + 1))
+cat > "$DIR/../fwc_tmp_$$.kr" <<'FWCEOF'
+import "std/fw_cfg.kr"
+static u8[256] fwbuf
+fn main() -> uint32 {
+    if fw_cfg_present() == 0 { loop { } }
+    u64 b = fwbuf
+    u64 _ram = fw_cfg_ram_size()
+    u64 _cpus = fw_cfg_nb_cpus()
+    u64 _feat = fw_cfg_features()
+    if fw_cfg_has_dma() == 0 { loop { } }
+    u64 sel = fw_cfg_find_file("etc/e820")
+    if sel != FW_CFG_NOTFOUND {
+        fw_cfg_dma_read(sel, b, 64)
+        fw_cfg_dma_write(sel, b, 64)
+    }
+    fw_cfg_read_file("etc/smbios", b, 256)
+    fw_cfg_select(FW_CFG_SIGNATURE)
+    u64 _a = fw_cfg_read8()
+    u64 _c = fw_cfg_read_be16()
+    u64 _d = fw_cfg_read_be32()
+    u64 _e = fw_cfg_read_le32()
+    u64 _f = fw_cfg_read_le64()
+    fw_cfg_read_bytes(b, 4)
+    loop { }
+}
+FWCEOF
+if $KRC --target=none --arch=x86_64 --emit=image --load-addr=0x100000 \
+        --stack-top=0x90000 "$DIR/../fwc_tmp_$$.kr" -o /tmp/fwc_$$.img >/dev/null 2>&1; then
+    PASS=$((PASS + 1)); echo "  fw_cfg_full_surface_freestanding: PASS"
+else
+    FAIL=$((FAIL + 1)); echo "FAIL: fw_cfg_full_surface_freestanding"
+fi
+rm -f "$DIR/../fwc_tmp_$$.kr" /tmp/fwc_$$.img
+
+# A variable used ONLY as an asm operand is still used. sema_check_stmt did not
+# descend into asm constraint lists at all, so std/x86.kr's wrmsr was warned
+# about for `lo` and `hi` while passing both to the instruction. Three clauses,
+# because the fix must not simply silence the warning:
+#   in(var -> reg)  is a USE          -> no warning
+#   out(reg -> var) is an INIT only   -> still warns when the value is dead
+#   an untouched variable             -> still warns
+TOTAL=$((TOTAL + 1))
+cat > "$DIR/../asmop_tmp_$$.kr" <<'ASMEOF'
+fn f() -> uint64 {
+    uint64 used_as_input = 7
+    uint64 dead_out = 0
+    uint64 real_out = 0
+    uint64 never_touched = 0
+    asm { "rdtsc" } in(used_as_input -> rcx) out(rax -> dead_out, rdx -> real_out)
+    return real_out
+}
+fn main() { exit(f() & 1) }
+ASMEOF
+asm_w=$($KRC --arch=x86_64 "$DIR/../asmop_tmp_$$.kr" -o /tmp/asmop_$$ 2>&1)
+asm_ok=1
+printf '%s' "$asm_w" | grep -q "unused variable.*'used_as_input'" && asm_ok=0
+printf '%s' "$asm_w" | grep -q "unused variable.*'real_out'" && asm_ok=0
+printf '%s' "$asm_w" | grep -q "unused variable.*'dead_out'" || asm_ok=0
+printf '%s' "$asm_w" | grep -q "unused variable.*'never_touched'" || asm_ok=0
+if [ "$asm_ok" = "1" ]; then
+    PASS=$((PASS + 1)); echo "  asm_operand_counts_as_use: PASS (in= use, out= init-only, untouched still warns)"
+else
+    FAIL=$((FAIL + 1)); echo "FAIL: asm_operand_counts_as_use"
+    printf '%s\n' "$asm_w" | sed 's/^/    /' | head -6
+fi
+rm -f "$DIR/../asmop_tmp_$$.kr" /tmp/asmop_$$
+
+# An asm out() operand initialises its variable, so reading it afterwards is
+# not a use-before-init. Without the same fix this reported a false diagnostic.
+run_test "asm_out_operand_initialises" 'fn g() -> uint64 {
+    uint64 v
+    asm { "rdtsc" } out(rax -> v)
+    return v & 0
+}
+fn main() { exit(g() + 9) }' 9
+
 # The operand-shape exclusion list is duplicated verbatim across several
 # functions in ir.kr, and any divergence between the copies miscompiles.
 # docs/IR_REFERENCE.md §14 tells implementers to edit every one of them, so the

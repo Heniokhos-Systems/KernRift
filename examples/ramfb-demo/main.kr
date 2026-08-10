@@ -1,0 +1,72 @@
+// ramfb demo — pixels on a bare-metal x86_64 machine, no OS.
+//
+// Boots as a QEMU multiboot kernel, asks fw_cfg for a framebuffer, and draws.
+// There is no BIOS call, no VBE, no PCI enumeration and no driver: fw_cfg is
+// told where in RAM the framebuffer lives and QEMU scans out of it.
+//
+//     make run          # opens a window
+//     make check        # boots headless and verifies the pixels
+//
+// The framebuffer lives at 16 MiB. The image itself loads at 1 MiB and is a
+// few KiB, so they cannot collide; with -m 256 there is plenty of RAM behind
+// both. Nothing is mapped or allocated -- on a flat identity-mapped image a
+// physical address is just a number you store to.
+
+// Reached by relative path: an import resolves against the importing file's
+// own directory, and there is no -I/import-path flag. Installed builds can say
+// "std/ramfb.kr"; from inside the repo this has to walk up.
+import "../../std/ramfb.kr"
+
+const u64 FB_ADDR = 0x1000000
+const u64 FB_W    = 640
+const u64 FB_H    = 480
+
+const u64 COM1 = 0x3F8
+
+fn serial_puts(u64 s) {
+    u64 i = 0
+    while load8(s + i) != 0 {
+        outb(COM1, load8(s + i))
+        i = i + 1
+    }
+    outb(COM1, 10)
+}
+
+// Draw a 1px outline, which is a good shape to verify: it exercises all four
+// clipping edges and the corners.
+fn draw_frame(u64 colour) {
+    ramfb_fill_rect(0, 0, FB_W, 1, colour)
+    ramfb_fill_rect(0, FB_H - 1, FB_W, 1, colour)
+    ramfb_fill_rect(0, 0, 1, FB_H, colour)
+    ramfb_fill_rect(FB_W - 1, 0, 1, FB_H, colour)
+}
+
+fn main() -> uint32 {
+    if fw_cfg_present() == 0 {
+        serial_puts("FAIL: no fw_cfg device (QEMU only)")
+        loop { }
+    }
+    if ramfb_init(FB_ADDR, FB_W, FB_H) == 0 {
+        // Almost always means QEMU was started without `-device ramfb`.
+        serial_puts("FAIL: ramfb unavailable -- start QEMU with -device ramfb")
+        loop { }
+    }
+
+    ramfb_clear(ramfb_rgb(0x20, 0x20, 0x20))
+    ramfb_fill_rect(64, 64, 200, 120, ramfb_rgb(0xFF, 0x00, 0x00))
+    ramfb_fill_rect(300, 64, 200, 120, ramfb_rgb(0x00, 0xFF, 0x00))
+    ramfb_fill_rect(64, 260, 200, 120, ramfb_rgb(0x00, 0x60, 0xFF))
+    // Deliberately runs off the right and bottom edges: fill_rect must clip
+    // rather than write past the framebuffer.
+    ramfb_fill_rect(560, 400, 200, 200, ramfb_rgb(0xFF, 0xFF, 0x00))
+    draw_frame(ramfb_rgb(0xFF, 0xFF, 0xFF))
+
+    // Prove the pixels are really in memory, not just issued.
+    if ramfb_get_pixel(100, 100) != ramfb_rgb(0xFF, 0, 0) {
+        serial_puts("FAIL: readback mismatch")
+        loop { }
+    }
+    serial_puts("OK: ramfb 640x480 drawn")
+    halt_forever()
+    return 0
+}
