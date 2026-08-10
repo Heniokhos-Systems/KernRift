@@ -15,6 +15,34 @@
 // an override named `write` would leave all four still refusing. One provider
 // therefore serves all five; a program needs no changes beyond the import.
 //
+// A PROVIDER, NOT A DRIVER. The 16550 itself lives in `std/serial.kr`; this
+// file is the shim that publishes it as the compiler's `write`. It used to
+// carry its own port I/O and its own copy of the register map, so the stdlib
+// held two independent 16550 implementations that could drift apart. The
+// duplicates are gone: `uart16550_outb` and `uart16550_inb` were deleted in
+// favour of `outb`/`inb` from `std/x86.kr` (reached through `serial.kr`), and
+// the `UART16550_IER`/`_FCR`/`_LCR`/`_MCR`/`_LSR`/`_LSR_THRE` offsets in
+// favour of `serial.kr`'s `UART_*` set, which this import brings into scope.
+// `UART16550_BASE` stays, because which port to use is a real knob.
+//
+// MUTUALLY EXCLUSIVE WITH std/console.kr, BY DESIGN. Both are print
+// providers, so both define `write` with `@builtin_override` and importing
+// the two together is
+//
+//     error: redefinition of function 'write'
+//
+// naming a line in a stdlib file you did not write, which is a confusing way
+// to find out. Choose one:
+//
+//   * `std/uart_16550.kr` — serial only. The right choice when the machine
+//     has no display, when only the serial log is captured, or when the VGA
+//     text buffer is not wanted (`-vga none`).
+//   * `std/console.kr` — serial AND the VGA text screen, plus PS/2 keyboard
+//     input.
+//
+// Importing `std/serial.kr` alongside either is fine, and normal: `serial.kr`
+// defines no `write` of its own.
+//
 // WHY THIS IS LIBRARY CODE. A UART base address is a *board* fact, not a
 // compiler fact. 0x3F8 is COM1 on a PC-compatible machine and on QEMU's
 // `-serial` device; it is wrong on anything else. Baking it into codegen
@@ -25,74 +53,31 @@
 // no other architecture in this tree. arm64 gets std/uart_pl011.kr. Importing
 // both into one program is a duplicate definition of `write` and is rejected.
 
-// COM1. COM2 is 0x2F8, COM3 0x3E8, COM4 0x2E8.
+import "serial.kr"
+
+// COM1. COM2 is 0x2F8, COM3 0x3E8, COM4 0x2E8. Set this before calling
+// uart16550_init() to drive a different port.
 static uint64 UART16550_BASE = 0x3F8
-
-// Register offsets from the base port.
-//   +0  THR  transmit holding register (write)  / RBR receive (read)
-//   +0  DLL  divisor latch low   (when DLAB set)
-//   +1  IER  interrupt enable    / DLM divisor latch high (when DLAB set)
-//   +2  FCR  FIFO control (write)
-//   +3  LCR  line control  (bit 7 = DLAB)
-//   +4  MCR  modem control
-//   +5  LSR  line status   (bit 5 = THR empty, bit 6 = transmitter idle)
-static uint64 UART16550_IER = 1
-static uint64 UART16550_FCR = 2
-static uint64 UART16550_LCR = 3
-static uint64 UART16550_MCR = 4
-static uint64 UART16550_LSR = 5
-
-// LSR bit 5: transmit holding register empty. Polled before every byte —
-// pushing a byte while it is clear overwrites the one still being shifted
-// out, which is how a driver "works" on QEMU and drops characters on metal.
-static uint64 UART16550_LSR_THRE = 0x20
-
-// x86 port I/O has no builtin, so it goes through inline asm. `--target=none`
-// deliberately still permits inline asm: the escape hatch exists precisely so
-// bare-metal code can reach instructions the compiler has no builtin for (see
-// emit_x86_syscall_insn in src/codegen.kr).
-fn uart16550_outb(uint64 port, uint64 val) {
-    asm { "out dx, al" } in(port -> rdx, val -> rax)
-}
-
-// `in al, dx` writes only AL and leaves bits 8..63 of RAX untouched, so RAX
-// is zeroed through the input constraint first — otherwise the caller reads
-// stale high bits back as part of the status byte.
-fn uart16550_inb(uint64 port) -> uint64 {
-    uint64 v = 0
-    uint64 _zero = 0
-    asm { "in al, dx" } in(port -> rdx, _zero -> rax) out(rax -> v)
-    return v & 0xFF
-}
 
 // 115200 baud, 8N1, FIFOs on.
 //
 // CALL THIS. An earlier version of this comment said firmware "usually" leaves
 // COM1 usable and QEMU "always" does, so `write` works without it. That was an
-// UNOBSERVED RUNTIME CLAIM: nothing in this sub-project has ever produced a
+// UNOBSERVED RUNTIME CLAIM: nothing in this sub-project had ever produced a
 // character on a UART, on silicon or under an emulator, so "works without
-// this" is not something anyone here has seen. What is actually known is what
-// the compiler emits — the provider lowers to the port writes below — and
-// whether a particular firmware or emulator happens to leave the line
-// configured is exactly the thing that has not been checked.
+// this" was not something anyone here had seen. (It has since been seen under
+// QEMU — the boot gate's sentinels print through this provider — but that is
+// QEMU, and what real firmware leaves configured is still exactly the thing
+// that has not been checked.)
 fn uart16550_init() {
-    uart16550_outb(UART16550_BASE + UART16550_IER, 0x00)   // interrupts off
-    uart16550_outb(UART16550_BASE + UART16550_LCR, 0x80)   // DLAB on
-    uart16550_outb(UART16550_BASE + 0, 0x01)               // divisor lo = 1
-    uart16550_outb(UART16550_BASE + 1, 0x00)               // divisor hi = 0
-    uart16550_outb(UART16550_BASE + UART16550_LCR, 0x03)   // DLAB off, 8N1
-    uart16550_outb(UART16550_BASE + UART16550_FCR, 0xC7)   // FIFO on, clear
-    uart16550_outb(UART16550_BASE + UART16550_MCR, 0x0B)   // DTR/RTS/OUT2
+    serial_init_port(UART16550_BASE, UART_DIVISOR_115200)
 }
 
-// One byte, after waiting for the transmitter to be ready.
+// One byte, after waiting for the transmitter to be ready. No LF-to-CRLF
+// translation — this is the raw byte, deliberately, so `write` stays a byte
+// pipe. `serial_putc` is the translating one if you want it.
 fn uart16550_putc(uint64 c) {
-    uint64 ready = 0
-    while ready == 0 {
-        uint64 status = uart16550_inb(UART16550_BASE + UART16550_LSR)
-        ready = status & UART16550_LSR_THRE
-    }
-    uart16550_outb(UART16550_BASE, c & 0xFF)
+    serial_putc_port(UART16550_BASE, c & 0xFF)
 }
 
 // The provider. `fd` is accepted and ignored: a board with one UART has one
@@ -106,10 +91,7 @@ fn uart16550_putc(uint64 c) {
 fn write(uint64 _fd, uint64 buf, uint64 len) -> uint64 {
     uint64 i = 0
     while i < len {
-        uint64 p = buf + i
-        uint64 c = 0
-        unsafe { *(p as uint8) -> c }
-        uart16550_putc(c)
+        uart16550_putc(load8(buf + i))
         i = i + 1
     }
     return len

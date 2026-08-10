@@ -4502,6 +4502,128 @@ else
     PASS=$((PASS + 1)); echo "  asm_constraint_out_rax_binds: SKIP (RUN_ARCH=$RUN_ARCH, x86 machine code)"
 fi
 
+# --- std/uart_16550.kr is a provider layered on std/serial.kr ----------------
+#
+# uart_16550.kr used to carry its own port I/O and its own 16550 register map,
+# so the stdlib held two independent implementations of the same UART. It is
+# now a thin shim: serial.kr drives the chip, uart_16550.kr publishes it as the
+# compiler's `write`.
+#
+# All three rows below CROSS-COMPILE for x86_64 and run the artifact under
+# qemu-system-x86_64, so pinning the arch is correct -- these are bare-metal
+# x86 images, not host binaries, and the host arch does not enter into it.
+
+# Both print providers define `write` with @builtin_override, so importing them
+# together is a collision BY DESIGN and both headers say so. Pin the message,
+# because the thing that makes it confusing is that it names a line in a file
+# the user did not write. (Which file it names follows import order: the second
+# provider imported is the redefinition.)
+TOTAL=$((TOTAL + 1))
+cat > "$DIR/../ucol_tmp_$$.kr" <<'UCOLEOF'
+import "std/console.kr"
+import "std/uart_16550.kr"
+fn main() -> uint64 {
+    uart16550_init()
+    println_str("x")
+    return 0
+}
+UCOLEOF
+ucol_out=$($KRC --target=none --arch=x86_64 --emit=image --load-addr=0x100000 \
+                --stack-top=0x90000 "$DIR/../ucol_tmp_$$.kr" -o /tmp/ucol_$$.img 2>&1)
+if [ -f /tmp/ucol_$$.img ]; then
+    FAIL=$((FAIL + 1)); echo "FAIL: uart16550_console_collide_by_design (the two providers linked together)"
+elif ! printf '%s' "$ucol_out" | grep -q "std/uart_16550.kr:.*error: redefinition of function"; then
+    FAIL=$((FAIL + 1)); echo "FAIL: uart16550_console_collide_by_design (wrong message: $(printf '%s' "$ucol_out" | grep -m1 error))"
+else
+    PASS=$((PASS + 1)); echo "  uart16550_console_collide_by_design: PASS (redefinition of write, named in uart_16550.kr)"
+fi
+rm -f "$DIR/../ucol_tmp_$$.kr" /tmp/ucol_$$.img
+
+# The provider alone must still make `print`/`println_str` work with no OS
+# beneath it -- BOOTED, not merely compiled. serial_putsn is in the same
+# program on purpose: it is reachable only because uart_16550.kr imports
+# serial.kr, so its line in the log is what proves the layering rather than a
+# copy. The number is computed at run time so a stale capture cannot pass.
+TOTAL=$((TOTAL + 1))
+cat > "$DIR/../uprov_tmp_$$.kr" <<'UPROVEOF'
+import "std/uart_16550.kr"
+static uint64 useed = 5000000007
+fn ustamp(uint64 v) -> uint64 { return v + 9 }
+fn main() -> uint64 {
+    uart16550_init()
+    println_str("KRUART-PROVIDER")
+    print(ustamp(useed))
+    println_str("")
+    serial_putsn("VIA-SERIAL-KR")
+    return 0
+}
+UPROVEOF
+if ! command -v qemu-system-x86_64 >/dev/null 2>&1; then
+    PASS=$((PASS + 1)); echo "  uart16550_provider_prints_on_serial: PASS (SKIPPED -- no qemu-system-x86_64)"
+elif ! $KRC --target=none --arch=x86_64 --emit=image --load-addr=0x100000 \
+            --stack-top=0x90000 "$DIR/../uprov_tmp_$$.kr" -o /tmp/uprov_$$.img >/dev/null 2>&1; then
+    FAIL=$((FAIL + 1)); echo "FAIL: uart16550_provider_prints_on_serial (compile failed)"
+    $KRC --target=none --arch=x86_64 --emit=image --load-addr=0x100000 \
+         --stack-top=0x90000 "$DIR/../uprov_tmp_$$.kr" -o /tmp/uprov_$$.img 2>&1 | grep error | head -3 | sed 's/^/    /'
+else
+    rm -f /tmp/uprov_$$.log
+    timeout 15 qemu-system-x86_64 -kernel /tmp/uprov_$$.img -m 256 \
+        -serial file:/tmp/uprov_$$.log -display none -no-reboot >/dev/null 2>&1
+    uprov_log=$(cat /tmp/uprov_$$.log 2>/dev/null)
+    uprov_bad=""
+    printf '%s' "$uprov_log" | grep -q "KRUART-PROVIDER" || uprov_bad="no banner"
+    printf '%s' "$uprov_log" | grep -q "5000000016" || uprov_bad="$uprov_bad; no computed value"
+    printf '%s' "$uprov_log" | grep -q "VIA-SERIAL-KR" || uprov_bad="$uprov_bad; serial.kr surface unreachable"
+    if [ -z "$uprov_bad" ]; then
+        PASS=$((PASS + 1)); echo "  uart16550_provider_prints_on_serial: PASS (banner, computed 5000000016 and serial_putsn on COM1)"
+    else
+        FAIL=$((FAIL + 1)); echo "FAIL: uart16550_provider_prints_on_serial ($uprov_bad)"
+        printf '    log: %s\n' "$(printf '%s' "$uprov_log" | tr '\n' '|' | head -c 200)"
+    fi
+    rm -f /tmp/uprov_$$.img /tmp/uprov_$$.log
+fi
+rm -f "$DIR/../uprov_tmp_$$.kr"
+
+# Importing std/serial.kr NEXT TO the provider must stay clean. It is not
+# obvious that it would: the program spells the import "std/serial.kr" and
+# uart_16550.kr spells the same file "serial.kr" (the sibling-import rule), so
+# a resolver that deduplicated on the literal string rather than the resolved
+# path would pull serial.kr in twice and redefine every function in it.
+TOTAL=$((TOTAL + 1))
+cat > "$DIR/../usu_tmp_$$.kr" <<'USUEOF'
+import "std/serial.kr"
+import "std/uart_16550.kr"
+fn main() -> uint64 {
+    uart16550_init()
+    serial_set_port(COM1)
+    if serial_get_port() != COM1 { return 1 }
+    println_str("SERIAL-PLUS-UART-OK")
+    uart16550_putc(65)
+    uart16550_putc(10)
+    return 0
+}
+USUEOF
+if ! command -v qemu-system-x86_64 >/dev/null 2>&1; then
+    PASS=$((PASS + 1)); echo "  uart16550_beside_serial_import: PASS (SKIPPED -- no qemu-system-x86_64)"
+elif ! $KRC --target=none --arch=x86_64 --emit=image --load-addr=0x100000 \
+            --stack-top=0x90000 "$DIR/../usu_tmp_$$.kr" -o /tmp/usu_$$.img >/dev/null 2>&1; then
+    FAIL=$((FAIL + 1)); echo "FAIL: uart16550_beside_serial_import (compile failed)"
+    $KRC --target=none --arch=x86_64 --emit=image --load-addr=0x100000 \
+         --stack-top=0x90000 "$DIR/../usu_tmp_$$.kr" -o /tmp/usu_$$.img 2>&1 | grep error | head -3 | sed 's/^/    /'
+else
+    rm -f /tmp/usu_$$.log
+    timeout 15 qemu-system-x86_64 -kernel /tmp/usu_$$.img -m 256 \
+        -serial file:/tmp/usu_$$.log -display none -no-reboot >/dev/null 2>&1
+    usu_log=$(cat /tmp/usu_$$.log 2>/dev/null)
+    if printf '%s' "$usu_log" | grep -q "SERIAL-PLUS-UART-OK" && printf '%s' "$usu_log" | grep -q "^A$"; then
+        PASS=$((PASS + 1)); echo "  uart16550_beside_serial_import: PASS (one serial.kr, both entry points working)"
+    else
+        FAIL=$((FAIL + 1)); echo "FAIL: uart16550_beside_serial_import (log: $(printf '%s' "$usu_log" | tr '\n' '|' | head -c 120))"
+    fi
+    rm -f /tmp/usu_$$.img /tmp/usu_$$.log
+fi
+rm -f "$DIR/../usu_tmp_$$.kr"
+
 # The operand-shape exclusion list is duplicated verbatim across several
 # functions in ir.kr, and any divergence between the copies miscompiles.
 # docs/IR_REFERENCE.md §14 tells implementers to edit every one of them, so the

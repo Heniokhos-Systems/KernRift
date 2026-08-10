@@ -21,6 +21,23 @@
 // Dual output is not redundancy for its own sake. The screen is what a user
 // sees; the serial log is what a test harness can capture and what survives a
 // machine that dies before you can read the screen.
+//
+// MUTUALLY EXCLUSIVE WITH std/uart_16550.kr, BY DESIGN. Both are print
+// providers, so both define `write` with `@builtin_override` and importing the
+// two together is
+//
+//     error: redefinition of function 'write'
+//
+// naming a line in a stdlib file you did not write, which is a confusing way
+// to find out. Choose one:
+//
+//   * `std/console.kr` — serial AND the VGA text screen, plus PS/2 keyboard
+//     input. The one to reach for on a machine with a display.
+//   * `std/uart_16550.kr` — serial only. The right choice when there is no
+//     display, when only the serial log is captured, or under `-vga none`.
+//
+// Importing `std/serial.kr` alongside either is fine, and normal: `serial.kr`
+// defines no `write` of its own, and this module imports it below.
 
 import "vga_text.kr"
 import "serial.kr"
