@@ -1,0 +1,39 @@
+// gzip_stored — a stdin -> stdout gzip filter built on std/gzip.kr.
+//
+//   krc examples/gzip_stored.kr -o kr_gzip
+//   ./kr_gzip < input > output.gz
+//
+// Emits a valid RFC 1952 gzip stream (stored DEFLATE blocks), so any gunzip —
+// or a gzip-only bootloader — can decompress it. No external tools involved.
+
+import "../std/gzip.kr"
+
+fn main() {
+    // Slurp all of stdin into a growable buffer.
+    uint64 cap = 1048576                       // 1 MiB, doubles on demand
+    uint64 buf = alloc(cap)
+    uint64 len = 0
+    while 1 {
+        if len == cap {
+            uint64 ncap = cap * 2
+            uint64 nb = alloc(ncap)
+            uint64 c = 0
+            while c < len {
+                store8(nb + c, load8(buf + c))
+                c = c + 1
+            }
+            buf = nb
+            cap = ncap
+        }
+        uint64 n = file_read(0, buf + len, cap - len)
+        if n == 0 { break }                    // EOF
+        if n > 0xFFFFFFFFFFFFF000 { break }     // -errno as unsigned
+        len = len + n
+    }
+
+    uint64 olp = alloc(8)
+    uint64 out = gzip_stored(buf, len, olp)
+    uint64 outlen = load64(olp)
+    file_write(1, out, outlen)
+    exit(0)
+}

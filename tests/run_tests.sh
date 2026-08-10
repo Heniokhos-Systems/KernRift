@@ -4211,6 +4211,51 @@ else
 fi
 rm -f "$DIR/../idtflt_in_$$.kr" "$DIR/../idtflt_tmp_$$.kr" "/tmp/idtflt_$$.log"
 
+# --- std/gzip.kr: output must satisfy a REAL gunzip, not our own reader ---
+#
+# A self-written decoder would agree with a self-written encoder about a shared
+# misreading of RFC 1951, so this shells out to the system gunzip and to
+# `gzip -t`, which verifies the CRC-32 and ISIZE trailer rather than merely
+# decoding the stream.
+#
+# The sizes are chosen at the stored-block boundary, which is where the
+# framing actually gets exercised: 65535 is exactly one block, 65536 is two
+# (the first non-final), and 0 is the empty-input path that still has to emit
+# one final empty block. A test on a short string alone would never run the
+# multi-block loop at all.
+TOTAL=$((TOTAL + 1))
+if ! command -v gunzip >/dev/null 2>&1 || ! command -v gzip >/dev/null 2>&1; then
+    PASS=$((PASS + 1)); echo "  gzip_stored_roundtrips: PASS (SKIPPED -- no gzip/gunzip)"
+elif ! $KRC --arch=$RUN_ARCH "$DIR/../examples/gzip_stored.kr" -o /tmp/krgz_$$ >/dev/null 2>&1; then
+    FAIL=$((FAIL + 1)); echo "FAIL: gzip_stored_roundtrips (compile failed)"
+else
+    chmod +x /tmp/krgz_$$
+    gz_ok=1
+    gz_note=""
+    for gz_n in 0 1 65535 65536 131070; do
+        head -c $gz_n /dev/urandom > /tmp/krgz_in_$$ 2>/dev/null
+        if ! /tmp/krgz_$$ < /tmp/krgz_in_$$ > /tmp/krgz_out_$$.gz 2>/dev/null; then
+            gz_ok=0; gz_note="encoder failed at $gz_n"; break
+        fi
+        if ! gunzip -c /tmp/krgz_out_$$.gz > /tmp/krgz_back_$$ 2>/dev/null; then
+            gz_ok=0; gz_note="gunzip rejected $gz_n"; break
+        fi
+        if ! cmp -s /tmp/krgz_in_$$ /tmp/krgz_back_$$; then
+            gz_ok=0; gz_note="round-trip differs at $gz_n"; break
+        fi
+        # gzip -t re-checks CRC-32 and ISIZE, which a plain decode does not.
+        if ! gzip -t /tmp/krgz_out_$$.gz >/dev/null 2>&1; then
+            gz_ok=0; gz_note="gzip -t rejected $gz_n (CRC or ISIZE wrong)"; break
+        fi
+    done
+    if [ "$gz_ok" = "1" ]; then
+        PASS=$((PASS + 1)); echo "  gzip_stored_roundtrips: PASS (0/1/65535/65536/131070 B via system gunzip + gzip -t)"
+    else
+        FAIL=$((FAIL + 1)); echo "FAIL: gzip_stored_roundtrips ($gz_note)"
+    fi
+    rm -f /tmp/krgz_$$ /tmp/krgz_in_$$ /tmp/krgz_out_$$.gz /tmp/krgz_back_$$
+fi
+
 # --- std/x86.kr + std/cstr.kr: bare-metal support modules ---
 # Both must work under --target=none. cstr.kr exists because std/string.kr's
 # int_to_str/str_copy ALLOCATE their result, and alloc is refused on bare metal

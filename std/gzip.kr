@@ -1,0 +1,148 @@
+// KernRift Standard Library — gzip encoder (stored blocks)
+//
+// Produces a valid RFC 1952 gzip stream using only RFC 1951 "stored"
+// (uncompressed) DEFLATE blocks. There is no Huffman coding and no LZ77 match
+// search, so the output is the same size as the input plus ~0.03% framing
+// overhead. It exists so a gzip-only loader — e.g. an arm64 `lk` bootloader
+// that gunzips its kernel — can consume a KernRift-produced image with no
+// external gzip tool anywhere in the build.
+//
+// A real compressing DEFLATE encoder can replace the stored-block body later;
+// the framing (10-byte header, CRC-32 and ISIZE trailer) is format-correct and
+// stays identical. Any conforming gunzip decompresses the output exactly.
+//
+// PRECEDENCE: KernRift binds `& | ^` TIGHTER than `+ - << >>` (docs/LANGUAGE.md
+// §4, the opposite of C). Every shift/mask expression below is fully
+// parenthesized on purpose — do not "simplify" the parens away. All 32-bit
+// values are masked with `& 0xFFFFFFFF` because the host word is 64-bit.
+
+// ---------------------------------------------------------------------------
+// CRC-32 (IEEE 802.3, reflected polynomial 0xEDB88320), table-driven.
+// ---------------------------------------------------------------------------
+
+// Fill a caller-provided 256-entry table (256 * 4 = 1024 bytes) written with
+// store32 and read back with load32, so the in-word byte order is immaterial.
+fn crc32_build_table(uint64 tbl) {
+    uint64 n = 0
+    while n < 256 {
+        uint64 c = n
+        uint64 k = 0
+        while k < 8 {
+            if (c & 1) != 0 {
+                c = 0xEDB88320 ^ (c >> 1)
+            } else {
+                c = c >> 1
+            }
+            k = k + 1
+        }
+        store32(tbl + n * 4, c)
+        n = n + 1
+    }
+}
+
+// CRC-32 over `len` bytes at `data`, using a table built by crc32_build_table.
+fn crc32_compute(uint64 data, uint64 len, uint64 tbl) -> uint64 {
+    uint64 crc = 0xFFFFFFFF
+    uint64 i = 0
+    while i < len {
+        uint64 b = load8(data + i)
+        uint64 idx = (crc ^ b) & 0xFF
+        uint64 e = load32(tbl + idx * 4)
+        crc = ((crc >> 8) ^ e) & 0xFFFFFFFF
+        i = i + 1
+    }
+    return (crc ^ 0xFFFFFFFF) & 0xFFFFFFFF
+}
+
+// ---------------------------------------------------------------------------
+// gzip stream builder.
+// ---------------------------------------------------------------------------
+
+// Compress `len` bytes at `src` into a freshly allocated gzip stream. The
+// output byte-length is written to *out_len_ptr (a u64 cell the caller owns).
+// Returns the output buffer pointer.
+fn gzip_stored(uint64 src, uint64 len, uint64 out_len_ptr) -> uint64 {
+    // Output capacity: 10 header + 5 per 65535-byte stored block + data + 8
+    // trailer. An empty input still emits one (final, empty) block.
+    uint64 nblocks = (len + 65534) / 65535
+    if nblocks == 0 { nblocks = 1 }
+    uint64 cap = (((10 + (nblocks * 5)) + len) + 8)
+    uint64 out = alloc(cap)
+    uint64 o = 0
+
+    // gzip header: magic 1f 8b, CM=8 (deflate), FLG=0, MTIME=0, XFL=0, OS=3 (unix)
+    store8(out + 0, 0x1F)
+    store8(out + 1, 0x8B)
+    store8(out + 2, 0x08)
+    store8(out + 3, 0x00)
+    store8(out + 4, 0x00)
+    store8(out + 5, 0x00)
+    store8(out + 6, 0x00)
+    store8(out + 7, 0x00)
+    store8(out + 8, 0x00)
+    store8(out + 9, 0x03)
+    o = 10
+
+    // DEFLATE stored blocks (BTYPE=00). Each: 1 header byte (BFINAL in bit 0),
+    // LEN (2 LE), NLEN = ~LEN (2 LE), then LEN literal bytes.
+    uint64 pos = 0
+    uint64 remaining = len
+    uint64 done = 0
+    while done == 0 {
+        uint64 chunk = remaining
+        if chunk > 65535 { chunk = 65535 }
+        uint64 is_final = 0
+        if remaining <= 65535 { is_final = 1 }
+
+        uint64 hb = 0
+        if is_final != 0 { hb = 1 }
+        store8(out + o, hb)
+        o = o + 1
+
+        store8(out + o, chunk & 0xFF)
+        o = o + 1
+        store8(out + o, (chunk >> 8) & 0xFF)
+        o = o + 1
+        uint64 nlen = chunk ^ 0xFFFF          // one's complement over 16 bits
+        store8(out + o, nlen & 0xFF)
+        o = o + 1
+        store8(out + o, (nlen >> 8) & 0xFF)
+        o = o + 1
+
+        uint64 j = 0
+        while j < chunk {
+            store8(out + o + j, load8(src + pos + j))
+            j = j + 1
+        }
+        o = o + chunk
+        pos = pos + chunk
+        remaining = remaining - chunk
+        if is_final != 0 { done = 1 }
+    }
+
+    // Trailer: CRC-32 of the uncompressed data (LE), then ISIZE = len mod 2^32 (LE).
+    uint64 tbl = alloc(256 * 4)
+    crc32_build_table(tbl)
+    uint64 crc = crc32_compute(src, len, tbl)
+    store8(out + o, crc & 0xFF)
+    o = o + 1
+    store8(out + o, (crc >> 8) & 0xFF)
+    o = o + 1
+    store8(out + o, (crc >> 16) & 0xFF)
+    o = o + 1
+    store8(out + o, (crc >> 24) & 0xFF)
+    o = o + 1
+
+    uint64 isize = len & 0xFFFFFFFF
+    store8(out + o, isize & 0xFF)
+    o = o + 1
+    store8(out + o, (isize >> 8) & 0xFF)
+    o = o + 1
+    store8(out + o, (isize >> 16) & 0xFF)
+    o = o + 1
+    store8(out + o, (isize >> 24) & 0xFF)
+    o = o + 1
+
+    store64(out_len_ptr, o)
+    return out
+}
