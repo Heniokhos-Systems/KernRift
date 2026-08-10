@@ -3981,6 +3981,236 @@ else
     FAIL=$((FAIL + 1)); echo "FAIL: analysis_unreachable_write_lengths_pinned ($analysis_static_err)"
 fi
 
+# --- std/idt.kr: interrupt descriptor table and fault reporting ---
+#
+# The failure this module exists to end is also the one its tests have to
+# survive: a wrong gate field triple-faults, and under QEMU a triple fault is
+# indistinguishable from a clean reboot. So every assertion below is on the
+# INNER message the handler printed -- never an exit code, never "the guest
+# stopped". Each was observed red by breaking one field at a time: an IDTR
+# limit of 47, a gate with the present bit clear, a gate missing offset bits
+# 31:16, and a rel32 measured 8 bytes short all killed the guest silently;
+# vector 14 built as a no-error-code stub still printed `EXCEPTION 14 (#PF)`
+# but with `err=0x0 rip=0x2`, which is why the RIP is range-checked and not
+# merely required to be non-zero.
+#
+# Boot-and-wait instead of a fixed timeout: the report appears in well under a
+# second, and a guest that runs off into garbage can wedge QEMU hard enough to
+# ignore SIGTERM (measured -- a `timeout 5` left one spinning for five
+# minutes). SIGKILL on a PID this shell owns cannot be ignored.
+idt_boot_wait() {   # <-kernel|-bios> <image> <log> <marker>
+    rm -f "$3"
+    qemu-system-x86_64 "$1" "$2" -m 256 -serial "file:$3" \
+        -display none -no-reboot >/dev/null 2>&1 &
+    local qpid=$!
+    local i=0
+    while [ $i -lt 60 ]; do
+        if grep -q "$4" "$3" 2>/dev/null; then break; fi
+        sleep 0.25
+        i=$((i + 1))
+    done
+    kill -9 $qpid >/dev/null 2>&1
+    wait $qpid 2>/dev/null
+}
+
+# Whole surface must compile freestanding, including what the fault rows below
+# never call. Compile-only, so the arch is pinned: std/idt.kr is x86_64 by
+# construction. The `serial_putsn("BAD...")` branches are not assertions -- this
+# image is never booted -- they exist so dead-code elimination cannot drop the
+# calls before their asm is emitted, which is the only way a compile row can
+# cover a function at all.
+TOTAL=$((TOTAL + 1))
+cat > "$DIR/../idtsurf_tmp_$$.kr" <<'IDTSEOF'
+import "std/idt.kr"
+@naked
+fn my_isr() { asm { "iretq" } }
+fn main() -> uint32 {
+    serial_init()
+    idt_init()
+    idt_install_default_handlers()
+    idt_set_handler(32, fn_addr("my_isr"))
+    idt_set_gate(33, fn_addr("my_isr"), idt_get_cs(), 0, IDT_TYPE_TRAP)
+    idt_clear_handler(33)
+    idt_load()
+    if idt_limit() != 4095 { serial_putsn("BADLIMIT") }
+    if idt_base() != idt_table_addr() { serial_putsn("BADBASE") }
+    if idt_stub_addr(1) - idt_stub_addr(0) != IDT_GATE_SIZE { serial_putsn("BADSTUB") }
+    if idt_vector_has_error_code(14) == 0 { serial_putsn("BADERRVEC") }
+    if idt_vector_has_error_code(15) != 0 { serial_putsn("BADERRVEC") }
+    if idt_mnemonic(0) == 0 { serial_putsn("BADMNEM") }
+    if idt_read_cs() == 0 { serial_putsn("BADCS") }
+    halt_forever()
+    return 0
+}
+IDTSEOF
+if $KRC --target=none --arch=x86_64 --emit=image --load-addr=0x100000 \
+        --stack-top=0x90000 "$DIR/../idtsurf_tmp_$$.kr" -o /tmp/idtsurf_$$.img >/dev/null 2>&1; then
+    PASS=$((PASS + 1)); echo "  idt_full_surface_freestanding: PASS"
+else
+    FAIL=$((FAIL + 1)); echo "FAIL: idt_full_surface_freestanding"
+    $KRC --target=none --arch=x86_64 --emit=image --load-addr=0x100000 \
+         --stack-top=0x90000 "$DIR/../idtsurf_tmp_$$.kr" -o /tmp/idtsurf_$$.img 2>&1 \
+         | grep error | head -3 | sed 's/^/    /'
+fi
+rm -f "$DIR/../idtsurf_tmp_$$.kr" /tmp/idtsurf_$$.img
+
+# The two fields most likely to be silently wrong, read back out of the LIVE
+# IDTR with SIDT -- not out of the pseudo-descriptor the module just wrote,
+# which would only prove it can echo its own bytes. The base must be this
+# module's table, which is what says `lidt` took effect at all.
+#
+#   * The IDTR limit is size MINUS ONE. 4096 is not caught by anything -- the
+#     CPU only checks that the accessed gate fits -- so it is pinned here
+#     rather than left to a fault row that cannot see it.
+#   * The code selector differs BETWEEN IMAGE FORMS: 0x8 under multiboot,
+#     0x18 from the reset vector. Hardcoding 0x8 gives a module that works
+#     under -kernel and silently triple-faults under -bios (measured), which
+#     is exactly why both forms are booted here and below.
+TOTAL=$((TOTAL + 1))
+IDTCS_K="/tmp/idtcs_k_$$.img"; IDTCS_B="/tmp/idtcs_b_$$.img"
+cat > "$DIR/../idtcs_tmp_$$.kr" <<'IDTCEOF'
+import "std/idt.kr"
+static u8[32] idtcs_buf
+fn main() -> uint32 {
+    serial_init()
+    idt_init()
+    idt_load()
+    u64 b = idtcs_buf
+    serial_puts("IDTCS=")
+    cstr_u64_hex0x(b, 32, idt_get_cs(), 0)
+    serial_puts(b)
+    serial_puts(" IDTLIMIT=")
+    cstr_u64_dec(b, 32, idt_limit())
+    serial_puts(b)
+    serial_puts(" IDTBASE=")
+    if idt_base() == idt_table_addr() { serial_puts("ours") }
+    if idt_base() != idt_table_addr() { serial_puts("WRONG") }
+    serial_putc(10)
+    halt_forever()
+    return 0
+}
+IDTCEOF
+if ! command -v qemu-system-x86_64 >/dev/null 2>&1; then
+    PASS=$((PASS + 1)); echo "  idt_selector_and_limit: PASS (SKIPPED -- no qemu-system-x86_64)"
+elif ! $KRC --target=none --arch=x86_64 --emit=image --load-addr=0x100000 \
+            --stack-top=0x90000 "$DIR/../idtcs_tmp_$$.kr" -o "$IDTCS_K" >/dev/null 2>&1 \
+  || ! $KRC --target=none --arch=x86_64 --emit=image --reset-vector \
+            --stack-top=0x90000 "$DIR/../idtcs_tmp_$$.kr" -o "$IDTCS_B" >/dev/null 2>&1; then
+    FAIL=$((FAIL + 1)); echo "FAIL: idt_selector_and_limit (compile failed)"
+else
+    idt_boot_wait -kernel "$IDTCS_K" "/tmp/idtcs_k_$$.log" "IDTLIMIT="
+    idt_boot_wait -bios   "$IDTCS_B" "/tmp/idtcs_b_$$.log" "IDTLIMIT="
+    idtcs_ok=1
+    grep -q "IDTCS=0x8 IDTLIMIT=4095 IDTBASE=ours" "/tmp/idtcs_k_$$.log" 2>/dev/null || idtcs_ok=0
+    grep -q "IDTCS=0x18 IDTLIMIT=4095 IDTBASE=ours" "/tmp/idtcs_b_$$.log" 2>/dev/null || idtcs_ok=0
+    if [ "$idtcs_ok" = "1" ]; then
+        PASS=$((PASS + 1)); echo "  idt_selector_and_limit: PASS (live IDTR: CS 0x8/-kernel 0x18/-bios, limit 4095, base ours)"
+    else
+        FAIL=$((FAIL + 1)); echo "FAIL: idt_selector_and_limit"
+        echo "    -kernel: $(cat /tmp/idtcs_k_$$.log 2>/dev/null | tr -d '\r' | tail -1)"
+        echo "    -bios:   $(cat /tmp/idtcs_b_$$.log 2>/dev/null | tr -d '\r' | tail -1)"
+    fi
+fi
+rm -f "$DIR/../idtcs_tmp_$$.kr" "$IDTCS_K" "$IDTCS_B" "/tmp/idtcs_k_$$.log" "/tmp/idtcs_b_$$.log"
+
+# Four real faults, in both image forms, each asserted on vector, mnemonic,
+# error code AND a RIP inside the loaded payload.
+#
+# The error codes are not decoration: #PF here is a WRITE to an unmapped page,
+# so the CPU pushes 0x2 and a build that misread the frame cannot produce it by
+# accident. #DE and #BP push nothing, and the stub's `push 0` is what makes
+# their frames the same shape -- get that list wrong and the RIP check fires.
+#
+# #BP is a trap, so its reported RIP is the instruction AFTER the int3;
+# #DE/#GP/#PF are faults and report the faulting instruction itself. Both were
+# confirmed against objdump of the image (int3 at 0x10134c -> rip 0x10134d).
+TOTAL=$((TOTAL + 1))
+cat > "$DIR/../idtflt_in_$$.kr" <<'IDTFEOF'
+import "std/idt.kr"
+static u64 idtflt_sink = 0
+fn main() -> uint32 {
+    serial_init()
+    idt_init()
+    idt_install_default_handlers()
+    idt_load()
+    u64 sel = __SEL__
+    if sel == 0 {
+        u64 z = idtflt_sink
+        idtflt_sink = 7 / z
+    }
+    if sel == 3 {
+        asm { "0xCC" }
+    }
+    if sel == 13 {
+        u64 bad = 0x0000800000000000
+        idtflt_sink = load64(bad)
+    }
+    if sel == 14 {
+        u64 bad = 0x0000700000000000
+        store64(bad, 1)
+    }
+    serial_putsn("NOFAULT")
+    halt_forever()
+    return 0
+}
+IDTFEOF
+if ! command -v qemu-system-x86_64 >/dev/null 2>&1; then
+    PASS=$((PASS + 1)); echo "  idt_reports_four_faults: PASS (SKIPPED -- no qemu-system-x86_64)"
+else
+    idtf_ok=1
+    idtf_notes=""
+    for idtf_case in "0 #DE 0x0" "3 #BP 0x0" "13 #GP 0x0" "14 #PF 0x2"; do
+        idtf_vec="${idtf_case%% *}"
+        idtf_rest="${idtf_case#* }"
+        idtf_mn="${idtf_rest%% *}"
+        idtf_err="${idtf_rest#* }"
+        sed "s/__SEL__/$idtf_vec/" "$DIR/../idtflt_in_$$.kr" > "$DIR/../idtflt_tmp_$$.kr"
+        idtf_k="/tmp/idtflt_k_$$.img"; idtf_b="/tmp/idtflt_b_$$.img"
+        if ! $KRC --target=none --arch=x86_64 --emit=image --load-addr=0x100000 \
+                  --stack-top=0x90000 "$DIR/../idtflt_tmp_$$.kr" -o "$idtf_k" >/dev/null 2>&1 \
+        || ! $KRC --target=none --arch=x86_64 --emit=image --reset-vector \
+                  --stack-top=0x90000 "$DIR/../idtflt_tmp_$$.kr" -o "$idtf_b" >/dev/null 2>&1; then
+            idtf_ok=0; idtf_notes="$idtf_notes vec$idtf_vec:compile"
+            continue
+        fi
+        # RIP must land inside the payload: [0x100000, 0x100000 + image size).
+        # Derived from the artifact rather than hardcoded, so the bound stays
+        # tight as the test program changes. It rejects every wrong-field RIP
+        # measured while breaking this on purpose -- 0x0, 0x2 and 0x8.
+        idtf_hi=$((1048576 + $(wc -c < "$idtf_k")))
+        for idtf_form in kernel bios; do
+            if [ "$idtf_form" = "kernel" ]; then
+                idt_boot_wait -kernel "$idtf_k" "/tmp/idtflt_$$.log" "EXCEPTION"
+            else
+                idt_boot_wait -bios "$idtf_b" "/tmp/idtflt_$$.log" "EXCEPTION"
+            fi
+            # Not anchored at start-of-line: the reset-vector boot path prints
+            # its own "RPL" progress marker with no trailing newline, so under
+            # -bios the guest's first line reads "RPLEXCEPTION 3 (#BP) ...".
+            # An anchored match reported all four -bios cases as silent triple
+            # faults while the guest was in fact reporting them correctly.
+            idtf_line=$(tr -d '\r' < "/tmp/idtflt_$$.log" 2>/dev/null | grep -o 'EXCEPTION .*' | head -1)
+            idtf_want="EXCEPTION $idtf_vec ($idtf_mn) err=$idtf_err rip=0x"
+            case "$idtf_line" in
+                "$idtf_want"*) ;;
+                *) idtf_ok=0; idtf_notes="$idtf_notes [$idtf_form v$idtf_vec: '${idtf_line:-<silent: triple fault?>}']"; continue ;;
+            esac
+            idtf_rip=$(printf '%s' "$idtf_line" | sed -n 's/.* rip=\(0x[0-9a-f]*\).*/\1/p')
+            idtf_ripd=$((idtf_rip))
+            if [ "$idtf_ripd" -lt 1048576 ] || [ "$idtf_ripd" -ge "$idtf_hi" ]; then
+                idtf_ok=0; idtf_notes="$idtf_notes [$idtf_form v$idtf_vec: rip $idtf_rip outside payload]"
+            fi
+        done
+        rm -f "$idtf_k" "$idtf_b"
+    done
+    if [ "$idtf_ok" = "1" ]; then
+        PASS=$((PASS + 1)); echo "  idt_reports_four_faults: PASS (#DE #BP #GP #PF, vector+err+rip, -kernel and -bios)"
+    else
+        FAIL=$((FAIL + 1)); echo "FAIL: idt_reports_four_faults:$idtf_notes"
+    fi
+fi
+rm -f "$DIR/../idtflt_in_$$.kr" "$DIR/../idtflt_tmp_$$.kr" "/tmp/idtflt_$$.log"
+
 # --- std/x86.kr + std/cstr.kr: bare-metal support modules ---
 # Both must work under --target=none. cstr.kr exists because std/string.kr's
 # int_to_str/str_copy ALLOCATE their result, and alloc is refused on bare metal
