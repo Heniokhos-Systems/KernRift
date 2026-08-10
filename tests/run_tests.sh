@@ -4624,6 +4624,257 @@ else
 fi
 rm -f "$DIR/../usu_tmp_$$.kr"
 
+# --- std/pci.kr enumerates the real machine ----------------------------------
+#
+# One probe program, three machines. The point of the three is that a baked
+# list of devices would pass the first and fail the other two: `-vga none` and
+# `-net none` take devices away, `-device virtio-rng-pci` adds one, and the
+# guest's own output has to follow.
+#
+# These rows CROSS-COMPILE for x86_64 and run the artifact under
+# qemu-system-x86_64, so pinning the arch is right: they are bare-metal x86
+# images and the host arch does not enter into it.
+PCI_SRC="$DIR/../pciprobe_tmp_$$.kr"
+PCI_IMG=/tmp/pciprobe_$$.img
+cat > "$PCI_SRC" <<'PCIEOF'
+import "std/uart_16550.kr"
+import "std/cstr.kr"
+import "std/pci.kr"
+
+static u8[64] pbuf
+
+fn p_str(u64 s) {
+    u64 i = 0
+    while load8(s + i) != 0 {
+        uart16550_putc(load8(s + i))
+        i = i + 1
+    }
+}
+
+fn p_hex(u64 v, u64 width) {
+    u64 b = pbuf
+    cstr_u64_hex(b, 64, v, width)
+    p_str(b)
+}
+
+fn p_nl() { uart16550_putc(10) }
+
+fn p_bdf(u64 bus, u64 dev, u64 func) {
+    p_hex(bus, 2)
+    uart16550_putc(58)
+    p_hex(dev, 2)
+    uart16550_putc(46)
+    p_hex(func, 1)
+}
+
+// The callback pci_scan drives through call_ptr. Six arguments is the ceiling
+// (args 7+ are silently dropped), so class and subclass arrive packed.
+fn on_dev(u64 bus, u64 dev, u64 func, u64 vid, u64 did, u64 cls) {
+    p_str("DEV ")
+    p_bdf(bus, dev, func)
+    p_str(" ")
+    p_hex(vid, 4)
+    uart16550_putc(58)
+    p_hex(did, 4)
+    p_str(" cls=")
+    p_hex(cls, 4)
+    p_str(" hdr=")
+    p_hex(pci_header_type(bus, dev, func), 2)
+    p_nl()
+    u64 slot = 0
+    while slot < 6 {
+        u64 raw = pci_bar_raw(bus, dev, func, slot)
+        if raw != 0 {
+            p_str("BAR ")
+            p_bdf(bus, dev, func)
+            p_str(" ")
+            p_hex(slot, 1)
+            p_str(" raw=")
+            p_hex(raw, 8)
+            if pci_bar_is_io(bus, dev, func, slot) != 0 { p_str(" io") }
+            if pci_bar_is_64(bus, dev, func, slot) != 0 { p_str(" mem64") }
+            p_str(" addr=")
+            p_hex(pci_bar(bus, dev, func, slot), 8)
+            p_str(" next=")
+            p_hex(pci_bar_next(bus, dev, func, slot), 1)
+            p_nl()
+        }
+        slot = slot + 1
+    }
+}
+
+fn main() -> uint64 {
+    uart16550_init()
+    p_str("PCI-BEGIN")
+    p_nl()
+    pci_scan(fn_addr("on_dev"))
+    p_str("FIND 8086:100e -> ")
+    p_hex(pci_find_device(0x8086, 0x100E), 6)
+    p_nl()
+    p_str("FIND 1234:9999 -> ")
+    p_hex(pci_find_device(0x1234, 0x9999), 8)
+    p_nl()
+    p_str("ADDR ")
+    p_hex(pci_config_addr(0, 3, 0, 0), 8)
+    p_str(" ")
+    p_hex(pci_config_addr(0, 1, 3, 0x2C), 8)
+    p_nl()
+    // The mask widths, on inputs the machine itself never produces: every I/O
+    // BAR QEMU hands out is 16-byte aligned, so a live one masks the same
+    // under 2 bits and under 4.
+    p_str("DECODE ")
+    p_hex(pci_bar_decode(0x0000C04D, 0), 8)
+    p_str(" ")
+    p_hex(pci_bar_decode(0xFD000008, 0), 8)
+    p_str(" ")
+    p_hex(pci_bar_decode(0xFE00000C, 0x00000001), 9)
+    p_nl()
+    p_str("PCI-END")
+    p_nl()
+    return 0
+}
+PCIEOF
+
+# The guest halts rather than exiting, so `timeout N` would always cost the
+# full N. Wait for the end marker instead and kill as soon as it lands.
+pci_boot() {   # pci_boot <log> <extra qemu args...>
+    local log="$1"; shift
+    rm -f "$log"
+    timeout 40 qemu-system-x86_64 -kernel "$PCI_IMG" -m 256 \
+        -display none -no-reboot -serial "file:$log" "$@" >/dev/null 2>&1 &
+    local pid=$! n=0
+    while [ "$n" -lt 400 ]; do
+        if [ -s "$log" ] && grep -q "PCI-END" "$log" 2>/dev/null; then break; fi
+        kill -0 "$pid" 2>/dev/null || break
+        sleep 0.1
+        n=$((n + 1))
+    done
+    kill "$pid" 2>/dev/null
+    wait "$pid" 2>/dev/null
+}
+
+# want_lines <log> <label> — each remaining argument is a line that must be
+# present verbatim. Sets pci_bad.
+pci_want() {
+    local log="$1"; shift
+    local want
+    for want in "$@"; do
+        grep -qxF "$want" "$log" 2>/dev/null || pci_bad="$pci_bad; missing '$want'"
+    done
+}
+
+PCI_HAVE_QEMU=0
+command -v qemu-system-x86_64 >/dev/null 2>&1 && PCI_HAVE_QEMU=1
+PCI_BUILT=0
+if [ "$PCI_HAVE_QEMU" = "1" ]; then
+    if $KRC --target=none --arch=x86_64 --emit=image --load-addr=0x100000 \
+            --stack-top=0x90000 "$PCI_SRC" -o "$PCI_IMG" >/dev/null 2>&1; then
+        PCI_BUILT=1
+    fi
+fi
+
+# The default i440fx machine, read through 0xCF8/0xCFC by the guest itself.
+# Note what each assertion is load-bearing for:
+#   * device_id differing from vendor_id proves pci_config_read16 uses the
+#     sub-dword port (0xCFC + (off & 3)); reading the aligned dword instead
+#     would report the vendor for every even offset.
+#   * cls=0600 proves the same for pci_config_read8 at offsets 0x0B/0x0A.
+#   * hdr=80 on 00:01.0 is what licenses probing functions 1-7 -- and the
+#     PIIX3 answers on 0, 1 and 3 with NO function 2, so a walk that stops at
+#     the first absent function finds two thirds of the machine.
+#   * the 00:02.0 BAR line pins the MEMORY mask width: 4 bits, fd000008 ->
+#     fd000000, where a 2-bit mask would leave the 8. The I/O width is NOT
+#     observable from a live BAR here -- every I/O BAR this machine hands out
+#     is 16-byte aligned, so 0000c041 masks to 0000c040 under both widths --
+#     which is why DECODE feeds pci_bar_decode 0000c04d, where the two widths
+#     differ. (The plan cited 0xc041 -> 0xc040 as the confirmation of the
+#     2-bit mask; it is not one.)
+#   * DECODE's third field also runs the 64-bit join on a synthetic high half,
+#     so the 33rd bit upward is exercised even without the virtio row.
+#   * ADDR pins the config address word, whose unparenthesised C spelling
+#     evaluates to 0x0 in this dialect.
+TOTAL=$((TOTAL + 1))
+if [ "$PCI_HAVE_QEMU" = "0" ]; then
+    PASS=$((PASS + 1)); echo "  pci_enumerates_default_machine: PASS (SKIPPED -- no qemu-system-x86_64)"
+elif [ "$PCI_BUILT" = "0" ]; then
+    FAIL=$((FAIL + 1)); echo "FAIL: pci_enumerates_default_machine (compile failed)"
+    $KRC --target=none --arch=x86_64 --emit=image --load-addr=0x100000 \
+         --stack-top=0x90000 "$PCI_SRC" -o "$PCI_IMG" 2>&1 | grep error | head -3 | sed 's/^/    /'
+else
+    pci_boot /tmp/pcidef_$$.log
+    pci_bad=""
+    pci_want /tmp/pcidef_$$.log \
+        "DEV 00:00.0 8086:1237 cls=0600 hdr=00" \
+        "DEV 00:01.0 8086:7000 cls=0601 hdr=80" \
+        "DEV 00:01.1 8086:7010 cls=0101 hdr=00" \
+        "DEV 00:01.3 8086:7113 cls=0680 hdr=00" \
+        "DEV 00:02.0 1234:1111 cls=0300 hdr=00" \
+        "DEV 00:03.0 8086:100e cls=0200 hdr=00" \
+        "BAR 00:01.1 4 raw=0000c041 io addr=0000c040 next=5" \
+        "BAR 00:02.0 0 raw=fd000008 addr=fd000000 next=1" \
+        "FIND 8086:100e -> 000300" \
+        "FIND 1234:9999 -> ffffffff" \
+        "ADDR 80001800 80000b2c" \
+        "DECODE 0000c04c fd000000 1fe000000"
+    pci_n=$(grep -c '^DEV ' /tmp/pcidef_$$.log 2>/dev/null || echo 0)
+    [ "$pci_n" = "6" ] || pci_bad="$pci_bad; $pci_n DEV lines, want 6"
+    grep -q '^DEV 00:01.2' /tmp/pcidef_$$.log 2>/dev/null && pci_bad="$pci_bad; invented a function 2"
+    if [ -z "$pci_bad" ]; then
+        PASS=$((PASS + 1)); echo "  pci_enumerates_default_machine: PASS (6 devices, the 00:01.x function gap, address word, both BAR mask widths)"
+    else
+        FAIL=$((FAIL + 1)); echo "FAIL: pci_enumerates_default_machine (${pci_bad#; })"
+    fi
+    rm -f /tmp/pcidef_$$.log
+fi
+
+# Take two devices away. A baked list passes the row above and fails here.
+TOTAL=$((TOTAL + 1))
+if [ "$PCI_HAVE_QEMU" = "0" ] || [ "$PCI_BUILT" = "0" ]; then
+    PASS=$((PASS + 1)); echo "  pci_tracks_the_machine: PASS (SKIPPED -- no qemu image)"
+else
+    pci_boot /tmp/pcicut_$$.log -vga none -net none
+    pci_bad=""
+    pci_want /tmp/pcicut_$$.log \
+        "DEV 00:00.0 8086:1237 cls=0600 hdr=00" \
+        "DEV 00:01.0 8086:7000 cls=0601 hdr=80" \
+        "DEV 00:01.1 8086:7010 cls=0101 hdr=00" \
+        "DEV 00:01.3 8086:7113 cls=0680 hdr=00" \
+        "FIND 8086:100e -> ffffffff"
+    grep -q '^DEV 00:02.0' /tmp/pcicut_$$.log 2>/dev/null && pci_bad="$pci_bad; VGA still reported under -vga none"
+    grep -q '^DEV 00:03.0' /tmp/pcicut_$$.log 2>/dev/null && pci_bad="$pci_bad; e1000 still reported under -net none"
+    pci_n=$(grep -c '^DEV ' /tmp/pcicut_$$.log 2>/dev/null || echo 0)
+    [ "$pci_n" = "4" ] || pci_bad="$pci_bad; $pci_n DEV lines, want 4"
+    if [ -z "$pci_bad" ]; then
+        PASS=$((PASS + 1)); echo "  pci_tracks_the_machine: PASS (-vga none -net none: 4 devices, find returns PCI_NOT_FOUND)"
+    else
+        FAIL=$((FAIL + 1)); echo "FAIL: pci_tracks_the_machine (${pci_bad#; })"
+    fi
+    rm -f /tmp/pcicut_$$.log
+fi
+
+# The 64-bit BAR path would otherwise SHIP UNTESTED: every BAR on the default
+# machine is 32-bit, so the two-slot walk never executes above. virtio-rng-pci
+# appears at 00:04.0 with BAR4 = 0xfe00000c -- type bits 2:1 = 10b, so slot 5
+# is its high half and pci_bar_next must skip to 6, not 5.
+TOTAL=$((TOTAL + 1))
+if [ "$PCI_HAVE_QEMU" = "0" ] || [ "$PCI_BUILT" = "0" ]; then
+    PASS=$((PASS + 1)); echo "  pci_64bit_bar_consumes_two_slots: PASS (SKIPPED -- no qemu image)"
+else
+    pci_boot /tmp/pcirng_$$.log -device virtio-rng-pci
+    pci_bad=""
+    pci_want /tmp/pcirng_$$.log \
+        "DEV 00:04.0 1af4:1005 cls=00ff hdr=00" \
+        "BAR 00:04.0 4 raw=fe00000c mem64 addr=fe000000 next=6"
+    grep -q '^BAR 00:04.0 5 ' /tmp/pcirng_$$.log 2>/dev/null && pci_bad="$pci_bad; reported the 64-bit BAR's high half as a BAR of its own"
+    if [ -z "$pci_bad" ]; then
+        PASS=$((PASS + 1)); echo "  pci_64bit_bar_consumes_two_slots: PASS (virtio-rng 00:04.0 BAR4 mem64, next=6)"
+    else
+        FAIL=$((FAIL + 1)); echo "FAIL: pci_64bit_bar_consumes_two_slots (${pci_bad#; })"
+    fi
+    rm -f /tmp/pcirng_$$.log
+fi
+rm -f "$PCI_SRC" "$PCI_IMG"
+
 # The operand-shape exclusion list is duplicated verbatim across several
 # functions in ir.kr, and any divergence between the copies miscompiles.
 # docs/IR_REFERENCE.md §14 tells implementers to edit every one of them, so the
