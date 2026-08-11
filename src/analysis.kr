@@ -2216,6 +2216,140 @@ fn sema_check_unreachable(uint64 root) {
 
 // Entry point for semantic validation
 @export
+// --- C-divergence warning ----------------------------------------------------
+//
+// KernRift's precedence is NOT C's: `&`, `|` and `^` bind TIGHTER than `+` and
+// `<<`, and all three share ONE level where C gives them three. So `a + b & c`
+// means `a + (b & c)` here and `(a + b) & c` in C -- silently, with no error
+// and different results. This warns when an unparenthesised expression would
+// group differently for a reader arriving from C.
+//
+// C's binary precedence, higher binds tighter. Used ONLY to compare against
+// binop_precedence (src/parser.kr); it is not KernRift's own table.
+fn c_precedence(uint32 kind) -> uint32 {
+    if kind == 42 { return 1 }   // ||
+    if kind == 41 { return 2 }   // &&
+    if kind == 24 { return 3 }   // |
+    if kind == 25 { return 4 }   // ^
+    if kind == 23 { return 5 }   // &
+    if kind == 35 { return 6 }   // ==
+    if kind == 36 { return 6 }   // !=
+    if kind == 37 { return 7 }   // <
+    if kind == 38 { return 7 }   // <=
+    if kind == 39 { return 7 }   // >
+    if kind == 40 { return 7 }   // >=
+    if kind == 43 { return 8 }   // <<
+    if kind == 44 { return 8 }   // >>
+    if kind == 30 { return 9 }   // +
+    if kind == 31 { return 9 }   // -
+    if kind == 22 { return 10 }  // *
+    if kind == 32 { return 10 }  // /
+    if kind == 33 { return 10 }  // %
+    return 0
+}
+
+// 1 if this node is an operator node the warning models.
+fn sema_is_binop_node(uint64 n) -> uint64 {
+    if n == 0 { return 0 }
+    uint32 k = ast_kind(n)
+    if k == 33 { return 1 }
+    if k == 38 { return 1 }
+    return 0
+}
+
+// The operator TOKEN KIND of a BinOp/Compare node.
+fn sema_node_op(uint64 n) -> uint64 {
+    uint32 t = ast_data1(n)
+    uint64 wt = t
+    return sema_tok_kind(wt)
+}
+
+// `a X b Y c` groups right in KernRift iff kr(Y) > kr(X), and in C iff
+// c(Y) > c(X). They diverge iff those two booleans differ.
+//
+// THE ORDER IS TEXTUAL, NOT SYMMETRIC. For a right child the pair is
+// (op, child_op); for a LEFT child the child's operator comes textually first,
+// so the pair is (child_op, op). Applying it symmetrically was brute-forced
+// over all 18 operators: ordered gives 0 missed and 0 false positives,
+// symmetric misses 3 and false-fires on 3 -- including `a & b | c`, which is
+// not divergent at all.
+fn sema_pair_diverges(uint64 x_op, uint64 y_op) -> uint64 {
+    uint32 x32 = x_op
+    uint32 y32 = y_op
+    uint64 krx = binop_precedence(x32)
+    uint64 kry = binop_precedence(y32)
+    uint64 cx = c_precedence(x32)
+    uint64 cy = c_precedence(y32)
+    // Rank 0 means "not modelled", not "lowest". Bail rather than compare --
+    // sub-project B adds `as` as a value operator, and an operator missing
+    // from c_precedence would otherwise get rank 0 and warn spuriously.
+    if krx == 0 { return 0 }
+    if kry == 0 { return 0 }
+    if cx == 0 { return 0 }
+    if cy == 0 { return 0 }
+    uint64 kr_right = 0
+    if kry > krx { kr_right = 1 }
+    uint64 c_right = 0
+    if cy > cx { c_right = 1 }
+    if kr_right != c_right { return 1 }
+    return 0
+}
+
+// && and || are excluded entirely: verified 0 missed / 0 false positives with
+// them out, and their operands are conventionally parenthesised anyway.
+fn sema_op_excluded(uint64 op) -> uint64 {
+    if op == 41 { return 1 }
+    if op == 42 { return 1 }
+    return 0
+}
+
+// A child participates only if it is an operator node AND was not written in
+// parentheses. data3 == 1 means either the author parenthesised it or the
+// PARSER synthesised the node (compound assignment desugars `x &= a + b` into
+// exactly the shape this warns about) -- both must stay silent.
+fn sema_child_op(uint64 child) -> uint64 {
+    if sema_is_binop_node(child) == 0 { return 0 }
+    uint32 d3 = ast_data3(child)
+    if d3 == 1 { return 0 }
+    uint64 cop = sema_node_op(child)
+    if sema_op_excluded(cop) != 0 { return 0 }
+    return cop
+}
+
+// Scans every node rather than walking the tree: a generic walk would have to
+// know which fields are node indices per kind, and getting that wrong on
+// FieldAccess is a compiler segfault (see the paren flag in src/parser.kr).
+// child/data2 ARE node indices on BinOp/Compare, which is all this touches.
+fn sema_check_c_divergence(uint64 root) {
+    uint64 msg = "expression groups differently in C: KernRift binds & | ^ tighter than + and << -- add parentheses to say which you mean"
+    uint64 n = 1
+    while n <= ast_count {
+        if sema_is_binop_node(n) != 0 {
+            uint32 own3 = ast_data3(n)
+            uint64 op = sema_node_op(n)
+            if sema_op_excluded(op) == 0 && own3 != 1 {
+                uint32 optok = ast_data1(n)
+                uint64 woptok = optok
+
+                uint32 rc = ast_data2(n)
+                uint64 wrc = rc
+                uint64 rop = sema_child_op(wrc)
+                if rop != 0 {
+                    if sema_pair_diverges(op, rop) != 0 { diag_emit_str(woptok, 1, msg) }
+                }
+
+                uint32 lc = ast_child(n)
+                uint64 wlc = lc
+                uint64 lop = sema_child_op(wlc)
+                if lop != 0 {
+                    if sema_pair_diverges(lop, op) != 0 { diag_emit_str(woptok, 1, msg) }
+                }
+            }
+        }
+        n = n + 1
+    }
+}
+
 fn run_semantic_checks(uint64 root, uint64 source, uint64 tok_buf) -> uint64 {
     sema_init(source, tok_buf)
     diag_init()
@@ -2223,5 +2357,6 @@ fn run_semantic_checks(uint64 root, uint64 source, uint64 tok_buf) -> uint64 {
     sema_check_functions(root)
     sema_check_returns(root)
     sema_check_unreachable(root)
+    sema_check_c_divergence(root)
     return sema_errors + diag_error_count
 }

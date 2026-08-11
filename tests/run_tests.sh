@@ -4366,6 +4366,110 @@ else
 fi
 rm -f "$DIR/../a2r_tmp_$$.kr"
 
+# --- A3: warn when an expression groups differently than it would in C ---
+#
+# KernRift binds & | ^ TIGHTER than + and <<, and puts all three on ONE level
+# where C gives them three. So `a + b & c` is `a + (b & c)` here and
+# `(a + b) & c` in C -- silently, with different results.
+#
+# Compile-only rows, so the arch may be pinned.
+#
+# TEN fire cases, one per divergent class-pair -- not a sample. The pairs were
+# derived from binop_precedence vs C's ranking; a warning that caught only the
+# two obvious ones would look correct while missing the all-bitwise cases
+# (rows 8-10), which exist solely because KernRift collapses & ^ | to one level.
+a3_fire() {
+    printf 'fn main(){ u64 a=1 u64 b=2 u64 c=4 u64 d=3 u64 r = %s  exit(r) }\n' "$2" > "$DIR/../a3_tmp_$$.kr"
+    a3_n=$($KRC "$DIR/../a3_tmp_$$.kr" -o /dev/null 2>&1 | grep -c 'groups differently')
+    if [ "$a3_n" -ge 1 ]; then a3_pass=$((a3_pass + 1)); else
+        a3_bad="$a3_bad $1"; fi
+}
+a3_silent() {
+    printf 'fn main(){ u64 a=1 u64 b=2 u64 c=4 u64 d=3 u64 r = %s  exit(r) }\n' "$2" > "$DIR/../a3_tmp_$$.kr"
+    a3_n=$($KRC "$DIR/../a3_tmp_$$.kr" -o /dev/null 2>&1 | grep -c 'groups differently')
+    if [ "$a3_n" = "0" ]; then a3_pass=$((a3_pass + 1)); else
+        a3_bad="$a3_bad $1"; fi
+}
+TOTAL=$((TOTAL + 1))
+a3_pass=0
+a3_bad=""
+a3_fire  bitand_plus      'a + b & c'
+a3_fire  bitor_shift      'a << b | c'
+a3_fire  shift_plus       'a + b << c'
+a3_fire  shift_mul        'c / b << a'
+a3_fire  bitand_mul       'd * b & c'
+a3_fire  bitand_rel       'b < a | c'
+a3_fire  bitand_eq        'a == b & c'
+a3_fire  xor_and          'a ^ b & c'
+a3_fire  or_and           'a | b & c'
+a3_fire  or_xor           'c | b ^ c'
+if [ "$a3_pass" = "10" ]; then
+    PASS=$((PASS + 1)); echo "  c_divergence_warns_all_ten_pairs: PASS"
+else
+    FAIL=$((FAIL + 1)); echo "FAIL: c_divergence_warns_all_ten_pairs ($a3_pass/10; missed:$a3_bad)"
+fi
+
+# Silence matters more than firing: a warning that fires on correct code gets
+# switched off, and then the real ones are invisible too. Compound assignment
+# and for-increments are included because the parser DESUGARS them into exactly
+# the shape this warns about, with no mixed expression written by anyone.
+TOTAL=$((TOTAL + 1))
+a3_pass=0
+a3_bad=""
+a3_silent paren_right     'a + (b & c)'
+a3_silent paren_left      '(a + b) & c'
+a3_silent same_op_plus    'a + b + c'
+a3_silent same_op_and     'a & b & c'
+a3_silent mul_plus        'a * b + c'
+a3_silent plus_mul        'a + b * c'
+a3_silent logical         'a < b && c > a'
+a3_silent paren_or_xor    '(a | b) ^ c'
+a3_silent minus_plus      'a - b + c'
+a3_silent shift_shift     'a >> b >> c'
+a3_n=0
+printf 'fn main(){ u64 x=7 u64 a=1 u64 b=2\n x &= a + b\n exit(x) }\n' > "$DIR/../a3_tmp_$$.kr"
+a3_n=$($KRC "$DIR/../a3_tmp_$$.kr" -o /dev/null 2>&1 | grep -c 'groups differently')
+[ "$a3_n" = "0" ] && a3_pass=$((a3_pass + 1)) || a3_bad="$a3_bad compound_assign"
+printf 'fn main(){ u64 s=0\n for i in 0..4 { s = s + i }\n exit(s) }\n' > "$DIR/../a3_tmp_$$.kr"
+a3_n=$($KRC "$DIR/../a3_tmp_$$.kr" -o /dev/null 2>&1 | grep -c 'groups differently')
+[ "$a3_n" = "0" ] && a3_pass=$((a3_pass + 1)) || a3_bad="$a3_bad for_increment"
+if [ "$a3_pass" = "12" ]; then
+    PASS=$((PASS + 1)); echo "  c_divergence_silent_on_correct_code: PASS (12 shapes incl. desugared)"
+else
+    FAIL=$((FAIL + 1)); echo "FAIL: c_divergence_silent_on_correct_code ($a3_pass/12; fired on:$a3_bad)"
+fi
+
+# A POSITIVE CONTROL for the silence row. Without this, deleting the whole
+# warning would leave the silence row passing 12/12 -- the fire row above is
+# what catches that, and this makes the pairing explicit rather than implied.
+TOTAL=$((TOTAL + 1))
+printf 'fn main(){ u64 a=1 u64 b=2 u64 c=4 u64 r = a + b & c  exit(r) }\n' > "$DIR/../a3_tmp_$$.kr"
+a3_ctl=$($KRC "$DIR/../a3_tmp_$$.kr" -o /dev/null 2>&1 | grep -c 'groups differently')
+printf 'fn main(){ u64 a=1 u64 b=2 u64 c=4 u64 r = a + (b & c)  exit(r) }\n' > "$DIR/../a3_tmp2_$$.kr"
+a3_ctl2=$($KRC "$DIR/../a3_tmp2_$$.kr" -o /dev/null 2>&1 | grep -c 'groups differently')
+if [ "$a3_ctl" -ge 1 ] && [ "$a3_ctl2" = "0" ]; then
+    PASS=$((PASS + 1)); echo "  c_divergence_paren_is_the_difference: PASS (same expression, parens flip it)"
+else
+    FAIL=$((FAIL + 1)); echo "FAIL: c_divergence_paren_is_the_difference (bare=$a3_ctl parenthesised=$a3_ctl2)"
+fi
+rm -f "$DIR/../a3_tmp_$$.kr" "$DIR/../a3_tmp2_$$.kr"
+
+# Scale: the acceptance bar. The tree is uniformly parenthesised, so ANY output
+# here is a false positive rather than a discovery. Covers the ~201k-node
+# self-build plus every std module and example -- this bar was originally set
+# when the tree was much smaller, and it still holds.
+TOTAL=$((TOTAL + 1))
+a3_scale=$($KRC "$DIR/../build/krc.kr" -o /dev/null 2>&1 | grep -c 'groups differently')
+a3_std=0
+for a3_f in "$DIR"/../std/*.kr; do
+    a3_std=$((a3_std + $($KRC "$a3_f" -o /dev/null 2>&1 | grep -c 'groups differently')))
+done
+if [ "$a3_scale" = "0" ] && [ "$a3_std" = "0" ]; then
+    PASS=$((PASS + 1)); echo "  c_divergence_tree_stays_clean: PASS (self-build 0, std/ 0)"
+else
+    FAIL=$((FAIL + 1)); echo "FAIL: c_divergence_tree_stays_clean (self-build $a3_scale, std/ $a3_std)"
+fi
+
 # --- push/pop/mov/sidt mnemonics ---
 #
 # These exist so std/idt.kr need not be written in raw hex. Two rows, because

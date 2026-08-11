@@ -718,6 +718,22 @@ fn parse_primary() -> uint64 {
         advance_tok()
         uint64 inner = parse_expr()
         expect(11)
+        // Remember the parenthesis, so the C-divergence warning stays silent
+        // on an expression whose grouping the author already made explicit.
+        // Parens are otherwise ERASED here: `a + b & c` and `a + (b & c)`
+        // produce identical AST and identical IR, so without this flag the
+        // warning could not tell them apart.
+        //
+        // ONLY BinOp/Compare. data3 is free on those two, but this branch
+        // returns whatever parse_expr() produced -- and on FieldAccess (36)
+        // codegen reads data3 as a NODE INDEX gated on kind alone, so setting
+        // it to 1 makes the scan recurse into the Module node: `(p.x)` would
+        // segfault the compiler.
+        uint32 ik = ast_kind(inner)
+        if ik == 33 || ik == 38 {
+            uint32 pflag = 1
+            ast_set_data3(inner, pflag)
+        }
         return inner
     }
 
