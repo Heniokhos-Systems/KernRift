@@ -825,9 +825,22 @@ fn inline_walk(uint64 node, uint64 root) {
         if r4 != 0 { inline_walk(r4, root) }
     }
     if wk == 37 {
-        // Index: data1 = index expr.
-        uint32 ix = ast_data1(node)
-        if ix != 0 { inline_walk(ix, root) }
+        // Index (see ast.kr): data1 is the ARRAY NAME **TOKEN**, not a node —
+        // walking it fed a token index into a function that indexes the AST
+        // arena, so the walk left this tree entirely and traversed whatever
+        // node happened to share that number. Both arenas hold 524288 entries
+        // and a source file has more tokens than nodes, so the index is
+        // in-bounds either way and nothing faults: it silently walks an
+        // unrelated subtree (106 of 132 Index nodes across this repo's .kr
+        // corpus landed on a live node) or reads zeroed slack past ast_count.
+        //
+        // The index expression is `child` and the children loop above already
+        // walked it. The node-valued field here is data2: the stored VALUE of
+        // an indexed assignment (`a[i] = f(x)`), which data3 marks and which
+        // nothing else reaches — so calls on the right-hand side of every
+        // indexed assignment were never offered to the inliner.
+        uint32 stored = ast_data2(node)
+        if stored != 0 { inline_walk(stored, root) }
     }
     if wk == 2 {
         // FnDecl: data3 = body block.

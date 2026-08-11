@@ -8501,6 +8501,59 @@ else
 fi
 rm -f "$REPO_ROOT/test_tmp_$$.kr"
 
+# --- the inliner must traverse an Index node's AST children, not its token ---
+# Regression: inline_walk's Index (kind 37) case walked `data1`, which for that
+# kind is the array NAME TOKEN, and handed it to a function that indexes the
+# AST arena -- a token index used as a node index. It never faulted (both
+# arenas are 524288 entries, so the number is always in bounds) and it never
+# produced a wrong answer (a body containing a call is not inlinable, so the
+# only context-dependent guard -- the recursion check -- can never be reached
+# through that edge). It simply walked an unrelated subtree while the field
+# that DOES hold a node, data2 -- the stored value of `a[i] = <expr>` -- went
+# unvisited, so no call on the right-hand side of an indexed assignment was
+# ever offered to the inliner.
+#
+# `a[3] = addone(6)` is therefore the discriminating input: with the bug the IR
+# for main still contains a `call`, with the fix the body is spliced in. The
+# row also asserts the program's VALUE, since an inliner change that produced
+# the right IR shape and the wrong arithmetic would otherwise pass.
+echo ""
+echo "--- inliner walks Index children ---"
+TOTAL=$((TOTAL + 1))
+INLIDX_OK=1
+cat > "$REPO_ROOT/test_tmp_inlidx_$$.kr" <<'INLIDX'
+static u64[8] a
+fn addone(uint64 x) -> uint64 { return x + 1 }
+fn main() {
+    a[3] = addone(6)
+    exit(a[3])
+}
+INLIDX
+INLIDX_IR=$($KRC --emit=ir --arch="$RUN_ARCH" "$REPO_ROOT/test_tmp_inlidx_$$.kr" 2>/dev/null)
+# Sanity first: a dump that lost its `store` is not evidence of anything.
+echo "$INLIDX_IR" | grep -q "store" || { INLIDX_OK=0; echo "  no store in IR dump -- dump is not what we think"; }
+if echo "$INLIDX_IR" | grep -q "call @"; then
+    INLIDX_OK=0
+    echo "  addone( ) still called: the indexed-assign RHS was not walked"
+fi
+for _fl in "" "--legacy"; do
+    if $KRC --arch="$RUN_ARCH" $_fl "$REPO_ROOT/test_tmp_inlidx_$$.kr" -o "/tmp/krc_inlidx_$$" >/dev/null 2>&1; then
+        "/tmp/krc_inlidx_$$"; _rc=$?
+        [ "$_rc" = "7" ] || { INLIDX_OK=0; echo "  ${_fl:-IR}: got $_rc, want 7"; }
+    else
+        INLIDX_OK=0; echo "  ${_fl:-IR}: COMPILE FAILED"
+    fi
+    rm -f "/tmp/krc_inlidx_$$"
+done
+if [ "$INLIDX_OK" = "1" ]; then
+    PASS=$((PASS + 1))
+    echo "  inliner_walks_index_children: PASS"
+else
+    echo "FAIL: inliner_walks_index_children"
+    FAIL=$((FAIL + 1))
+fi
+rm -f "$REPO_ROOT/test_tmp_inlidx_$$.kr"
+
 # --- declared-type signedness must not be inherited from the initialiser ---
 # Regression: `u32 ux = <i32>` inherited the RHS signed flag, so ux (and
 # everything derived from it) used SIGNED ops -- `ux >> 1` became an
