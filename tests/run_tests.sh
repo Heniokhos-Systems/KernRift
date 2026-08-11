@@ -1347,6 +1347,113 @@ else
 fi
 rm -f "$DIR/../vbind_v_$$.kr" "$DIR/../vbind_u_$$.kr"
 
+# Compound assignment must evaluate its index/address subexpression EXACTLY
+# ONCE, on every backend.
+#
+# `arr[i()] += v()` used to desugar to a read-side Index node that pointed at
+# the SAME index-expression node as the store side, so each backend evaluated
+# it independently: the observed order was index, value, index (seq 121) on all
+# four backends instead of index, value (seq 12). `*(p as T) += v` did not
+# parse at all.
+#
+# `seq` records execution order as decimal digits, so this row FAILS on a
+# double evaluation rather than merely on a wrong stored value -- a row that
+# only checked the stored value, or only that the program compiles, passes
+# against both of those defects and catches neither.
+#
+# These rows EXECUTE, so they follow $RUN_ARCH rather than naming an arch;
+# the other arch runs under qemu when it is available.
+TOTAL=$((TOTAL + 1))
+CEVAL_OK=1
+CEVAL_OTHER="arm64"
+if [ "$RUN_ARCH" = "arm64" ]; then CEVAL_OTHER="x86_64"; fi
+CEVAL_QEMU=""
+if [ "$CEVAL_OTHER" = "arm64" ]; then
+    CEVAL_QEMU="$(command -v qemu-aarch64-static || command -v qemu-aarch64 || true)"
+fi
+
+# 1. arr[i()] OP= v() -- index once, then value => seq 12, and arr[3] == 5+7.
+cat > "$DIR/../ceval_idx_$$.kr" <<'CEVAL_IDX'
+static u64 seq = 0
+static u8[16] arr
+fn ai() -> u64 { seq = seq * 10 + 1  return 3 }
+fn fv() -> u64 { seq = seq * 10 + 2  return 7 }
+fn main() {
+    arr[3] = 5
+    arr[ai()] += fv()
+    if seq != 12 { exit(1) }
+    if arr[3] != 12 { exit(2) }
+    exit(7)
+}
+CEVAL_IDX
+
+# 2. unsafe { *(ap() as uint32) OP= fv() } -- address once, then value.
+cat > "$DIR/../ceval_ptr_$$.kr" <<'CEVAL_PTR'
+static u64 seq = 0
+static u8[16] buf
+fn ap() -> u64 { seq = seq * 10 + 1  return buf }
+fn fv() -> u64 { seq = seq * 10 + 2  return 3 }
+fn main() {
+    store32(buf, 5)
+    unsafe { *(ap() as uint32) += fv() }
+    if seq != 12 { exit(1) }
+    if load32(buf) != 8 { exit(2) }
+    exit(7)
+}
+CEVAL_PTR
+
+# 3. Plain `arr[i()] = v()` must keep its CURRENT value-then-index order (21).
+#    Pinned so the double-evaluation fix cannot quietly become an
+#    evaluation-order change; left-to-right is a separate, owner-approved task.
+cat > "$DIR/../ceval_plain_$$.kr" <<'CEVAL_PLAIN'
+static u64 seq = 0
+static u8[16] arr
+fn ai() -> u64 { seq = seq * 10 + 1  return 3 }
+fn fv() -> u64 { seq = seq * 10 + 2  return 7 }
+fn main() {
+    arr[ai()] = fv()
+    if seq != 21 { exit(1) }
+    exit(7)
+}
+CEVAL_PLAIN
+
+CEVAL_RAN=0
+ceval_run() { # <arch> <flags> <src> <runner-or-empty>
+    local _bin="/tmp/krc_ceval_$$"
+    if ! $KRC --arch="$1" $2 "$3" -o "$_bin" >/dev/null 2>&1; then
+        CEVAL_OK=0; echo "  $(basename $3) $1 ${2:-IR}: COMPILE FAILED"
+        return
+    fi
+    if [ -n "$4" ]; then $4 "$_bin" >/dev/null 2>&1; else "$_bin" >/dev/null 2>&1; fi
+    local _rc=$?
+    CEVAL_RAN=$((CEVAL_RAN + 1))
+    # 7 = reached the end with every assertion satisfied. 1 = wrong evaluation
+    # order (the double-eval defect), 2 = wrong stored value.
+    [ "$_rc" = "7" ] || { CEVAL_OK=0; echo "  $(basename $3) $1 ${2:-IR}: got $_rc, want 7"; }
+    rm -f "$_bin"
+}
+for _src in "$DIR/../ceval_idx_$$.kr" "$DIR/../ceval_ptr_$$.kr" "$DIR/../ceval_plain_$$.kr"; do
+    ceval_run "$RUN_ARCH" ""          "$_src" ""
+    ceval_run "$RUN_ARCH" "--legacy"  "$_src" ""
+    if [ -n "$CEVAL_QEMU" ]; then
+        ceval_run "$CEVAL_OTHER" ""         "$_src" "$CEVAL_QEMU"
+        ceval_run "$CEVAL_OTHER" "--legacy" "$_src" "$CEVAL_QEMU"
+    fi
+done
+# Guard against the loop silently doing nothing. 3 sources x 2 host configs
+# always; x2 more per source when the other arch is runnable.
+CEVAL_WANT=6
+if [ -n "$CEVAL_QEMU" ]; then CEVAL_WANT=12; fi
+[ "$CEVAL_RAN" = "$CEVAL_WANT" ] || { CEVAL_OK=0; echo "  only $CEVAL_RAN/$CEVAL_WANT config-runs executed"; }
+if [ "$CEVAL_OK" = "1" ]; then
+    echo "  compound_assign_evaluates_index_once: PASS ($CEVAL_RAN config-runs)"
+    PASS=$((PASS + 1))
+else
+    echo "FAIL: compound_assign_evaluates_index_once"
+    FAIL=$((FAIL + 1))
+fi
+rm -f "$DIR/../ceval_idx_$$.kr" "$DIR/../ceval_ptr_$$.kr" "$DIR/../ceval_plain_$$.kr"
+
 # @packed struct annotation (should parse without error)
 run_test "packed_struct" '@packed struct Reg { uint8 a; uint32 b }
 fn main() {

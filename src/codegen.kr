@@ -29,6 +29,15 @@ static uint64 var_frame_size = 0
 static uint64 temp_slot_0 = 0
 static uint64 temp_slot_1 = 0
 
+// Compound-assignment index/address temp. A compound store (`arr[i] OP= v`,
+// `*(p as T) OP= v`) evaluates its index/address expression ONCE into this
+// slot, then evaluates the value; the AstKind.CompoundTemp leaf the parser put
+// on the read side loads straight back out of it. It needs its own slot rather
+// than temp_slot_0/1 because the value expression clobbers both of those.
+// gen_expr never calls gen_stmt, so compound stores cannot nest and one slot
+// suffices.
+static uint64 compound_temp_slot = 0
+
 // Float tracking: 0 = result in rax (integer), 1 = result in xmm0 (f64), 2 = result in xmm0 (f32)
 static uint64 expr_is_float = 0
 // Struct literal tracking: 0xFFFFFFFF = not a struct, otherwise struct index
@@ -4029,6 +4038,44 @@ fn gen_expr(uint64 node) {
     if wdbg != 0 { line_table_record(wdbg) }
 
     uint32 kind = ast_kind(node)
+
+    // CompoundTemp (55): the index/address the enclosing compound store has
+    // already evaluated into compound_temp_slot. Reusing it is what keeps
+    // `arr[i()] += v()` from calling i() a second time.
+    if kind == 55 {
+        emit_load_rax_from_stack(compound_temp_slot)
+        expr_is_float = 0
+        return
+    }
+
+    // PtrLoadExpr (56): `*(addr as TYPE)` in expression position — the read
+    // half of `*(addr as TYPE) OP= val`. Same load as the kind-41 statement,
+    // minus the destination binding.
+    if kind == 56 {
+        uint32 ple_ts = ast_data1(node)
+        uint64 wple_ts = ple_ts
+        uint32 ple_addr = ast_child(node)
+        uint64 wple_a = ple_addr
+        gen_expr(wple_a)
+        // rax = address. Indirect load sized by the cast type.
+        if wple_ts == 1 {
+            emit_byte(0x0F); emit_byte(0xB6); emit_byte(0x00)   // movzbl (%rax), %eax
+        } else if wple_ts == 2 {
+            emit_byte(0x0F); emit_byte(0xB7); emit_byte(0x00)   // movzwl (%rax), %eax
+        } else if wple_ts == 4 {
+            emit_byte(0x8B); emit_byte(0x00)                    // movl (%rax), %eax
+        } else {
+            emit_byte(0x48); emit_byte(0x8B); emit_byte(0x00)   // movq (%rax), %rax
+        }
+        // data3 bit 4 = volatile — barrier after the load, as in kind 41.
+        uint32 ple_d3 = ast_data3(node)
+        uint64 wple_d3 = ple_d3
+        if (wple_d3 & 16) != 0 {
+            emit_byte(0x0F); emit_byte(0xAE); emit_byte(0xF0)   // mfence
+        }
+        expr_is_float = 0
+        return
+    }
 
     // Unary operator: !, -, ~
     if kind == 34 {
@@ -10813,15 +10860,30 @@ fn gen_stmt(uint64 node) {
         uint64 wd3 = idx_d3
         if wd3 == 1 {
             uint32 arr_tok = ast_data1(node)
-            // Evaluate value first → save to temp
             uint32 rhs_child = ast_data2(node)
             uint64 wrhs = rhs_child
-            gen_expr(wrhs)
-            emit_store_rax_to_stack(temp_slot_0)
-            // Evaluate index
             uint32 idx_child = ast_child(node)
             uint64 wi = idx_child
-            gen_expr(wi)
+            // data4 = 1 marks the compound form `arr[i] OP= v`, whose value
+            // expression contains a CompoundTemp standing for this index.
+            // Evaluate the index FIRST, exactly once, park it, and reload it
+            // so the code below still finds the index in rax. Plain
+            // `arr[i] = v` (data4 = 0) keeps its value-then-index order.
+            uint32 idx_compound = ast_data4(node)
+            uint64 wicmp = idx_compound
+            if wicmp == 1 {
+                gen_expr(wi)
+                emit_store_rax_to_stack(compound_temp_slot)
+                gen_expr(wrhs)
+                emit_store_rax_to_stack(temp_slot_0)
+                emit_load_rax_from_stack(compound_temp_slot)
+            } else {
+                // Evaluate value first → save to temp
+                gen_expr(wrhs)
+                emit_store_rax_to_stack(temp_slot_0)
+                // Evaluate index
+                gen_expr(wi)
+            }
             // Bounds check under --debug (same shape as the read path).
             if debug_mode != 0 {
                 uint64 bca_count = arr_count_lookup(arr_tok)
@@ -10953,16 +11015,31 @@ fn gen_stmt(uint64 node) {
     if kind == 42 {
         uint32 type_size = ast_data1(node)
         uint64 wts = type_size
-        // Evaluate value first → save to temp
         uint32 val_child = ast_data2(node)
         uint64 wv = val_child
-        gen_expr(wv)
-        // Save value to temp_slot_0
-        emit_store_rax_to_stack(temp_slot_0)
-        // Evaluate address
         uint32 addr_child = ast_child(node)
         uint64 wa = addr_child
-        gen_expr(wa)
+        // data4 = 1 marks `*(addr as TYPE) OP= val`, whose value expression
+        // reads back through a CompoundTemp. Evaluate the address FIRST,
+        // exactly once, park it, then reload it so the code below still finds
+        // the address in rax. Plain `*(addr as TYPE) = val` (data4 = 0) keeps
+        // its value-then-address order.
+        uint32 ps_compound = ast_data4(node)
+        uint64 wpsc = ps_compound
+        if wpsc == 1 {
+            gen_expr(wa)
+            emit_store_rax_to_stack(compound_temp_slot)
+            gen_expr(wv)
+            emit_store_rax_to_stack(temp_slot_0)
+            emit_load_rax_from_stack(compound_temp_slot)
+        } else {
+            // Evaluate value first → save to temp
+            gen_expr(wv)
+            // Save value to temp_slot_0
+            emit_store_rax_to_stack(temp_slot_0)
+            // Evaluate address
+            gen_expr(wa)
+        }
         // rax = address, load value from temp → rcx
         // mov rcx, [rsp + temp_slot_0]
         emit_byte(0x48)
@@ -11187,6 +11264,8 @@ fn gen_function(uint64 fn_node) {
     temp_slot_0 = var_count * 8
     var_count = var_count + 1
     temp_slot_1 = var_count * 8
+    var_count = var_count + 1
+    compound_temp_slot = var_count * 8
     var_count = var_count + 1
     r12_save_slot = var_count * 8
     var_count = var_count + 1

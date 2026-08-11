@@ -1188,6 +1188,14 @@ fn ir_emit_copy_to_snapshot(uint64 snap_buf, uint64 snap_count, uint64 bb) {
 
 static uint64 ir_current_bb = 0
 
+// Compound-assignment index/address temp. A compound store (`arr[i] OP= v`,
+// `*(p as T) OP= v`) evaluates its index/address expression ONCE into this
+// vreg, then lowers the value expression; the AstKind.CompoundTemp leaf that
+// the parser put on the read side lowers to exactly this vreg. Expression
+// lowering never reaches statement lowering (ir_lower_expr contains no
+// ir_lower_stmt call), so compound stores cannot nest and one slot suffices.
+static uint64 ir_compound_temp = 0xFFFFFFFF
+
 // Loop context stack for break/continue
 static uint64 ir_loop_exit_stack = 0       // bb indices for break targets
 
@@ -1542,6 +1550,35 @@ fn ir_lower_print_bare_metal(uint64 node, uint64 is_println, uint64 wtok) {
 fn ir_lower_expr(uint64 node) -> uint64 {
     if node == 0 { return 0xFFFFFFFF }
     uint32 kind = ast_kind(node)
+
+    // CompoundTemp (55): the index/address the enclosing compound store has
+    // already evaluated. Reusing it is what keeps `arr[i()] += v()` from
+    // calling i() a second time.
+    if kind == 55 {
+        return ir_compound_temp
+    }
+
+    // PtrLoadExpr (56): `*(addr as TYPE)` in expression position — the read
+    // half of `*(addr as TYPE) OP= val`. Same lowering as the kind-41
+    // statement, minus the destination binding.
+    if kind == 56 {
+        uint32 pl_ts = ast_data1(node)
+        uint64 pl_type_size = pl_ts
+        uint32 pl_addr = ast_child(node)
+        uint64 pl_addr_v = ir_lower_expr(pl_addr)
+        uint64 pl_dest = ir_new_vreg()
+        uint32 pl_d3_32 = ast_data3(node)
+        uint64 pl_d3 = pl_d3_32
+        uint64 pl_fk = pl_d3 & 15
+        uint64 pl_vol = (pl_d3 >> 4) & 1
+        if pl_vol != 0 {
+            ir_emit(IR_VLOAD, pl_dest, pl_addr_v, 0, pl_type_size, ir_current_bb)
+        } else {
+            ir_emit(IR_LOAD, pl_dest, pl_addr_v, pl_type_size, 0, ir_current_bb)
+        }
+        if pl_fk != 0 { ir_vreg_fkind_set(pl_dest, pl_fk) }
+        return pl_dest
+    }
 
     // IntLit (30)
     if kind == 30 {
@@ -4871,7 +4908,20 @@ fn ir_lower_stmt(uint64 node) {
         uint32 addr_expr = ast_child(node)
         uint64 addr_v = ir_lower_expr(addr_expr)
         uint32 val_node = ast_data2(node)
-        uint64 val_v = ir_lower_expr(val_node)
+        // data4 = 1 marks `*(addr as TYPE) OP= val`, whose value expression
+        // reads back through a CompoundTemp. The address is already in addr_v
+        // — park it so the read reuses it instead of evaluating addr twice.
+        uint32 ps_compound = ast_data4(node)
+        uint64 wpsc = ps_compound
+        uint64 val_v = 0xFFFFFFFF
+        if wpsc == 1 {
+            uint64 ps_saved = ir_compound_temp
+            ir_compound_temp = addr_v
+            val_v = ir_lower_expr(val_node)
+            ir_compound_temp = ps_saved
+        } else {
+            val_v = ir_lower_expr(val_node)
+        }
         // data3 bit 4 = volatile (see parser.kr). Stores carry no float kind,
         // so the low bits are always clear here.
         uint32 sd3_32 = ast_data3(node)
@@ -4893,13 +4943,29 @@ fn ir_lower_stmt(uint64 node) {
         uint32 idx_d3 = ast_data3(node)
         uint64 wd3 = idx_d3
         if wd3 == 1 {
-            // Evaluate value expression
+            uint32 idx_child = ast_child(node)
             uint32 rhs_child = ast_data2(node)
             uint64 wrhs = rhs_child
-            uint64 val_v = ir_lower_expr(wrhs)
-            // Evaluate index expression
-            uint32 idx_child = ast_child(node)
-            uint64 idx_v = ir_lower_expr(idx_child)
+            uint64 val_v = 0xFFFFFFFF
+            uint64 idx_v = 0xFFFFFFFF
+            // data4 = 1 marks the compound form `arr[i] OP= v`, whose value
+            // expression contains a CompoundTemp standing for this index.
+            // Evaluate the index FIRST, exactly once, and park it. Plain
+            // `arr[i] = v` (data4 = 0) keeps its value-then-index order.
+            uint32 is_compound = ast_data4(node)
+            uint64 wcmp = is_compound
+            if wcmp == 1 {
+                idx_v = ir_lower_expr(idx_child)
+                uint64 saved_temp = ir_compound_temp
+                ir_compound_temp = idx_v
+                val_v = ir_lower_expr(wrhs)
+                ir_compound_temp = saved_temp
+            } else {
+                // Evaluate value expression
+                val_v = ir_lower_expr(wrhs)
+                // Evaluate index expression
+                idx_v = ir_lower_expr(idx_child)
+            }
             // Load array base
             uint32 arr_tok = ast_data1(node)
             uint64 warrt = arr_tok

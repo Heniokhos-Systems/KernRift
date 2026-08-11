@@ -85,6 +85,28 @@ enum AstKind {
     MatchExpr = 54       // match in value position — child=scrutinee_expr,
                          // data1=first_arm_idx. Arms reuse MatchArm (20) but
                          // data2 holds a value-EXPR (not a body block).
+
+    // --- Compound assignment (`OP=`) support -------------------------------
+    // `arr[i] OP= v` and `*(p as T) OP= v` desugar to a STORE node whose value
+    // is `BinOp(OP, <read of the same location>, v)`. The index/address
+    // subexpression must be evaluated exactly ONCE, but it is needed by both
+    // the read and the store.
+    //
+    // The read side therefore does NOT carry a second reference to that
+    // subexpression — it carries this leaf instead. The enclosing store node
+    // evaluates the real subexpression first, parks the result, and every
+    // backend lowers CompoundTemp to "the value the enclosing store already
+    // computed". Sharing one subtree between two parents (what this replaces)
+    // made each backend evaluate it independently, so `arr[i()] += v()` called
+    // i() twice; a leaf makes that double evaluation unrepresentable.
+    CompoundTemp = 55    // no children, no data — see backends' compound paths
+
+    // Pointer dereference in EXPRESSION position — the read half of
+    // `*(addr as TYPE) OP= v`. Kind 41 (PtrLoad) is a STATEMENT that binds a
+    // destination variable, so it cannot be used here.
+    //   data1 = type_size, child = addr_expr (a CompoundTemp in the desugar),
+    //   data3 = float kind in bits 0..3, volatile in bit 4 (same layout as 41)
+    PtrLoadExpr = 56
 }
 
 // ---------------------------------------------------------------------------

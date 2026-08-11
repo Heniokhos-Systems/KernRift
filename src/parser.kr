@@ -910,6 +910,60 @@ fn parse_match_pattern() -> uint64 {
     return rp
 }
 
+// Build the AST for the compound-assignment form of a pointer store:
+//     unsafe   { *(addr as TYPE) OP= val }
+//     volatile { *(addr as TYPE) OP= val }
+// Called with the cursor on the `OP=` token, just past the closing `)`.
+//
+// Desugars to  PtrStore(addr, BinOp(OP, PtrLoadExpr(CompoundTemp), val))  —
+// i.e. `*(addr) = *(addr) OP val` with ONE evaluation of `addr`. The read side
+// holds a CompoundTemp leaf rather than a second reference to `addr_expr`: the
+// store node owns that subtree and data4=1 tells the backends to evaluate it
+// exactly once, before the value. See ast.kr for why a leaf and not sharing.
+//
+// `fk_bits` is the caller's data3 word: float kind in bits 0..3 (so a float
+// RMW does float arithmetic), volatile in bit 4.
+fn parse_ptr_compound_store(uint64 addr_expr, uint64 type_size, uint64 fk_bits) -> uint64 {
+    uint64 op_tok = advance_tok()
+    uint64 val_expr = parse_expr()
+    expect(13)
+
+    uint64 addr_temp = ast_alloc(AstKind.CompoundTemp)
+    uint64 load_node = ast_alloc(AstKind.PtrLoadExpr)
+    uint32 ts = type_size
+    ast_set_data1(load_node, ts)
+    uint32 at32 = addr_temp
+    ast_set_child(load_node, at32)
+    uint32 fkb = fk_bits
+    ast_set_data3(load_node, fkb)
+    ast_set_tok(load_node, op_tok)
+
+    uint64 binop = ast_alloc(AstKind.BinOp)
+    uint32 ot32 = op_tok
+    ast_set_data1(binop, ot32)
+    uint32 ln32 = load_node
+    ast_set_child(binop, ln32)
+    uint32 ve32 = val_expr
+    ast_set_data2(binop, ve32)
+
+    uint64 node = ast_alloc(42)
+    ast_set_data1(node, ts)
+    uint32 ae = addr_expr
+    ast_set_child(node, ae)
+    uint32 bp = binop
+    ast_set_data2(node, bp)
+    // Stores carry no float kind — keep only the volatile bit, matching the
+    // plain `*(addr as TYPE) = val` paths.
+    uint64 vol_only = fk_bits & 16
+    uint32 sd3 = vol_only
+    ast_set_data3(node, sd3)
+    // data4 = 1: compound. Evaluate the address ONCE, before the value.
+    uint32 one = 1
+    ast_set_data4(node, one)
+    ast_set_tok(node, op_tok)
+    return node
+}
+
 fn parse_stmt() -> uint64 {
     uint32 kind = cur_kind()
 
@@ -1599,6 +1653,19 @@ fn parse_stmt() -> uint64 {
             ast_set_data3(node, vf)
             return node
         }
+        // Compound store: *(addr as TYPE) OP= val  (+= -= *= /= %= &= |= ^=).
+        // The range covers LtLtEq/GtGtEq too, but the lexer never emits those
+        // two — `<<=` / `>>=` do not tokenize anywhere in the language today.
+        uint32 vc_op = cur_kind()
+        uint64 wvc_op = vc_op
+        if wvc_op >= 45 && wvc_op <= 54 {
+            uint32 vcfk = 0
+            if type_kind == 96 { vcfk = 1 }
+            else if type_kind == 95 { vcfk = 2 }
+            else if type_kind == 94 { vcfk = 3 }
+            uint64 vcbits = vcfk | 16
+            return parse_ptr_compound_store(addr_expr, type_size, vcbits)
+        }
         expect(13)
     }
 
@@ -1675,6 +1742,19 @@ fn parse_stmt() -> uint64 {
             uint32 ve = val_expr
             ast_set_data2(node, ve)
             return node
+        }
+        // Compound store: *(addr as TYPE) OP= val  (+= -= *= /= %= &= |= ^=).
+        // The range covers LtLtEq/GtGtEq too, but the lexer never emits those
+        // two — `<<=` / `>>=` do not tokenize anywhere in the language today.
+        uint32 uc_op = cur_kind()
+        uint64 wuc_op = uc_op
+        if wuc_op >= 45 && wuc_op <= 54 {
+            uint32 ucfk = 0
+            if type_kind == 96 { ucfk = 1 }
+            else if type_kind == 95 { ucfk = 2 }
+            else if type_kind == 94 { ucfk = 3 }
+            uint64 ucbits = ucfk
+            return parse_ptr_compound_store(addr_expr, type_size, ucbits)
         }
         expect(13)
     }
@@ -1820,11 +1900,19 @@ fn parse_stmt() -> uint64 {
         if wek_c == 37 {
             // Build a fresh copy of the Index node for the read side so
             // the store side can reuse the existing node as its AST home.
+            //
+            // The read side's index is a CompoundTemp LEAF, not a second
+            // reference to the real index expression: the store node owns that
+            // subtree and evaluates it once, and data4=1 below tells the
+            // backends to do so before evaluating the value. Pointing both
+            // nodes at the one subtree is what made `arr[i()] += v()` call
+            // i() twice (order 1,2,1 instead of 1,2) on every backend.
             uint64 idx_copy = ast_alloc(AstKind.Index)
             uint32 arr_tok = ast_data1(expr)
             ast_set_data1(idx_copy, arr_tok)
-            uint32 idx_child = ast_child(expr)
-            ast_set_child(idx_copy, idx_child)
+            uint64 idx_temp = ast_alloc(AstKind.CompoundTemp)
+            uint32 it32 = idx_temp
+            ast_set_child(idx_copy, it32)
             ast_set_tok(idx_copy, arr_tok)
             uint64 binop2 = ast_alloc(AstKind.BinOp)
             uint32 ot32b = op_tok
@@ -1833,11 +1921,16 @@ fn parse_stmt() -> uint64 {
             ast_set_child(binop2, ic32)
             uint32 r32b = rhs
             ast_set_data2(binop2, r32b)
-            // Store form: data2 = BinOp, data3 = 1 (indexed-assign marker).
+            // Store form: data2 = BinOp, data3 = 1 (indexed-assign marker),
+            // data4 = 1 (compound marker: evaluate the index expression ONCE,
+            // before the value, and park it for the CompoundTemp read above).
+            // Plain `arr[i] = v` leaves data4 at 0 and keeps its existing
+            // value-then-index order.
             uint32 bp32b = binop2
             ast_set_data2(expr, bp32b)
             uint32 one_b = 1
             ast_set_data3(expr, one_b)
+            ast_set_data4(expr, one_b)
             return expr
         }
 

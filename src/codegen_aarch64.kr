@@ -866,6 +866,36 @@ fn gen_expr_a64(uint64 node) {
 
     uint32 kind = ast_kind(node)
 
+    // CompoundTemp (55): the index/address the enclosing compound store has
+    // already evaluated into compound_temp_slot. Reusing it is what keeps
+    // `arr[i()] += v()` from calling i() a second time.
+    if kind == 55 {
+        emit_a64_load_x0(compound_temp_slot)
+        expr_is_float_a64 = 0
+        return
+    }
+
+    // PtrLoadExpr (56): `*(addr as TYPE)` in expression position — the read
+    // half of `*(addr as TYPE) OP= val`. Same load as the kind-41 statement,
+    // minus the destination binding.
+    if kind == 56 {
+        uint32 ple_ts_a = ast_data1(node)
+        uint64 wple_ts_a = ple_ts_a
+        uint32 ple_addr_a = ast_child(node)
+        uint64 wple_a_a = ple_addr_a
+        gen_expr_a64(wple_a_a)
+        if wple_ts_a == 1 { emit_a64_ldrb(0, 0, 0) }
+        else if wple_ts_a == 2 { emit_a64_ldrh(0, 0, 0) }
+        else if wple_ts_a == 4 { emit_a64_ldr32(0, 0, 0) }
+        else { emit_a64_ldr(0, 0, 0) }
+        // data3 bit 4 = volatile — DSB SY after the load, as in kind 41.
+        uint32 ple_d3_a = ast_data3(node)
+        uint64 wple_d3_a = ple_d3_a
+        if (wple_d3_a & 16) != 0 { emit_a64(0xD5033F9F) }
+        expr_is_float_a64 = 0
+        return
+    }
+
     // Unary operator
     if kind == 34 {
         uint32 operand_idx = ast_child(node)
@@ -5320,11 +5350,26 @@ fn gen_stmt_a64(uint64 node) {
         uint64 wts = type_size
         uint32 val_child = ast_data2(node)
         uint64 wv = val_child
-        gen_expr_a64(wv)
-        emit_a64_store_x0(temp_slot_0)
         uint32 addr_child = ast_child(node)
         uint64 wa = addr_child
-        gen_expr_a64(wa)
+        // data4 = 1 marks `*(addr as TYPE) OP= val`, whose value expression
+        // reads back through a CompoundTemp. Evaluate the address FIRST,
+        // exactly once, park it, then reload it so the code below still finds
+        // the address in x0. Plain `*(addr as TYPE) = val` (data4 = 0) keeps
+        // its value-then-address order.
+        uint32 ps_compound_a = ast_data4(node)
+        uint64 wpsc_a = ps_compound_a
+        if wpsc_a == 1 {
+            gen_expr_a64(wa)
+            emit_a64_store_x0(compound_temp_slot)
+            gen_expr_a64(wv)
+            emit_a64_store_x0(temp_slot_0)
+            emit_a64_load_x0(compound_temp_slot)
+        } else {
+            gen_expr_a64(wv)
+            emit_a64_store_x0(temp_slot_0)
+            gen_expr_a64(wa)
+        }
         emit_a64_mov(10, 0)
         emit_a64_load_x0(temp_slot_0)
         // Volatile barrier before store (DSB SY — ensures device write commits)
@@ -5346,12 +5391,27 @@ fn gen_stmt_a64(uint64 node) {
         if wd3 == 1 {
             uint32 rhs_child = ast_data2(node)
             uint64 wrhs = rhs_child
-            gen_expr_a64(wrhs)
-            emit_a64_store_x0(temp_slot_0)
             uint32 idx_child = ast_child(node)
             uint64 wi = idx_child
-            gen_expr_a64(wi)
-            emit_a64_store_x0(temp_slot_1)
+            // data4 = 1 marks the compound form `arr[i] OP= v`, whose value
+            // expression contains a CompoundTemp standing for this index.
+            // Evaluate the index FIRST, exactly once, and park it. Plain
+            // `arr[i] = v` (data4 = 0) keeps its value-then-index order.
+            uint32 idx_compound_a = ast_data4(node)
+            uint64 wicmp_a = idx_compound_a
+            if wicmp_a == 1 {
+                gen_expr_a64(wi)
+                emit_a64_store_x0(compound_temp_slot)
+                gen_expr_a64(wrhs)
+                emit_a64_store_x0(temp_slot_0)
+                emit_a64_load_x0(compound_temp_slot)
+                emit_a64_store_x0(temp_slot_1)
+            } else {
+                gen_expr_a64(wrhs)
+                emit_a64_store_x0(temp_slot_0)
+                gen_expr_a64(wi)
+                emit_a64_store_x0(temp_slot_1)
+            }
             uint32 arr_tok = ast_data1(node)
             uint64 warrtb = arr_tok
             uint64 arr_offset = var_lookup(arr_tok)
@@ -5718,6 +5778,8 @@ fn gen_function_a64(uint64 fn_node) {
     temp_slot_0 = var_count * 8
     var_count = var_count + 1
     temp_slot_1 = var_count * 8
+    var_count = var_count + 1
+    compound_temp_slot = var_count * 8
     var_count = var_count + 1
     var_frame_size = var_count * 8
     uint64 rem0 = var_frame_size & 15
