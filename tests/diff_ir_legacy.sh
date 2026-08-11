@@ -21,7 +21,7 @@ else
 fi
 QEMU="$(command -v qemu-aarch64-static || true)"
 TMP=/tmp/difftest_$$
-DIV=0; TOTAL=0
+DIV=0; TOTAL=0; KNOWN=0
 run_one() { # arch flags -> echoes exit code or "CERR"
     local out="$TMP.$2"
     if $KRC --arch="$1" $3 "$TMP.kr" -o "$out" >/dev/null 2>&1; then
@@ -50,6 +50,37 @@ diff_case() {
     if [ "$bad" = "1" ] || [ "$base" = "CERR" ]; then
         DIV=$((DIV+1))
         printf "DIVERGE  %-26s IRx86=%s legx86=%s IRa64=%s lega64=%s\n" "$name" "$ir_x" "$lg_x" "$ir_a" "$lg_a"
+    fi
+    rm -f "$TMP".*
+}
+
+# Known evaluation-order divergence between the backends (see the eval-order
+# investigation): the case is EXPECTED to disagree, with a specific value per
+# backend. It does not fail the run — which order is right is an open language
+# decision — but the expected values are PINNED: if either backend's order
+# changes (including a fix), this goes red so the change is made consciously
+# and this entry is updated or promoted to a plain diff_case.
+known_div_case() { # name src expected_ir expected_legacy
+    local name="$1"; local src="$2"; local exp_ir="$3"; local exp_lg="$4"
+    TOTAL=$((TOTAL+1))
+    printf '%s\n' "$src" > "$TMP.kr"
+    local ir_x=$(run_one x86_64 irx "")
+    local lg_x=$(run_one x86_64 lgx "--legacy")
+    local ir_a=$(run_one arm64 ira "")
+    local lg_a=$(run_one arm64 lga "--legacy")
+    local bad=0
+    [ "$ir_x" != "$exp_ir" ] && bad=1
+    [ "$lg_x" != "$exp_lg" ] && bad=1
+    [ "$ir_a" != "SKIP" ] && [ "$ir_a" != "$exp_ir" ] && bad=1
+    [ "$lg_a" != "SKIP" ] && [ "$lg_a" != "$exp_lg" ] && bad=1
+    if [ "$bad" = "1" ]; then
+        DIV=$((DIV+1))
+        printf "DIVERGE  %-26s IRx86=%s legx86=%s IRa64=%s lega64=%s (pinned known-divergent case CHANGED; expected IR=%s legacy=%s)\n" \
+            "$name" "$ir_x" "$lg_x" "$ir_a" "$lg_a" "$exp_ir" "$exp_lg"
+    else
+        KNOWN=$((KNOWN+1))
+        printf "KNOWN-DIVERGE  %-20s IR=%s legacy=%s (evaluation-order split, pinned)\n" \
+            "$name" "$exp_ir" "$exp_lg"
     fi
     rm -f "$TMP".*
 }
@@ -171,6 +202,44 @@ diff_case "alloc_oom"    'fn main(){ u64 p = alloc(0xFFFFFFFFFFFF0000)  if p != 
 diff_case "dealloc_null" 'fn main(){ dealloc(0)  exit(43) }'
 diff_case "alloc_ok"     'fn main(){ u64 p = alloc(64)  if p == 0 { exit(1) }  store64(p, 999)  u64 v = load64(p)  dealloc(p)  if v != 999 { exit(2) }  exit(44) }'
 
+# ---- evaluation order with interfering side effects ----
+# seq encodes execution order in decimal digits: f_i appends digit i.
+# These lock in the orders both backends currently share; no earlier case had
+# two side-effecting operands in one expression, which is why the deref-store
+# divergence below survived 73 green parity runs.
+diff_case "order_args" 'static u64 seq=0
+fn a()->u64{seq=seq*10+1; return 5}
+fn b()->u64{seq=seq*10+2; return 6}
+fn g(u64 x,u64 y)->u64{return x+y}
+fn main(){g(a(),b()); exit(seq)}'
+diff_case "order_binop" 'static u64 seq=0
+fn a()->u64{seq=seq*10+1; return 5}
+fn b()->u64{seq=seq*10+2; return 6}
+fn main(){u64 x=a()+b(); if x==999 {exit(255)} exit(seq)}'
+diff_case "order_store32" 'static u64 seq=0
+static u64 gbuf=0
+fn fa()->u64{seq=seq*10+1; return gbuf}
+fn fv()->u64{seq=seq*10+2; return 7}
+fn main(){gbuf=alloc(8); store32(fa(),fv()); exit(seq)}'
+diff_case "order_idx_store" 'static u64 seq=0
+static u8[16] arr
+fn ai()->u64{seq=seq*10+1; return 3}
+fn fv()->u64{seq=seq*10+2; return 7}
+fn main(){arr[ai()]=fv(); exit(seq)}'
+# Divergent: IR evaluates the address/index first (12), legacy evaluates the
+# value first (21). Same split on both arches. DO NOT silently re-pin these —
+# a red here means an evaluation-order change that needs an owner decision.
+known_div_case "order_deref_store" 'static u64 seq=0
+static u64 gbuf=0
+fn fa()->u64{seq=seq*10+1; return gbuf}
+fn fv()->u64{seq=seq*10+2; return 7}
+fn main(){gbuf=alloc(8); unsafe{*(fa() as uint32)=fv()}; exit(seq)}' 12 21
+known_div_case "order_sfield_store" 'static u64 seq=0
+struct P{u64 x;u64 y}
+fn ai()->u64{seq=seq*10+1; return 3}
+fn fv()->u64{seq=seq*10+2; return 7}
+fn main(){P[10] pts; pts[ai()].x=fv(); exit(seq)}' 12 21
+
 echo "----"
-echo "Differential: $((TOTAL-DIV))/$TOTAL agree across backends, $DIV diverged."
+echo "Differential: $((TOTAL-DIV-KNOWN))/$TOTAL agree across backends, $KNOWN known-divergent (pinned), $DIV diverged."
 if [ "$DIV" = "0" ]; then echo "PARITY OK"; else echo "PARITY GAPS FOUND"; exit 1; fi
