@@ -4653,6 +4653,170 @@ else
 fi
 rm -f "$DIR/../fwc_tmp_$$.kr" /tmp/fwc_$$.img
 
+# --- std/fw_cfg_mmio.kr: the arm64 `-M virt` transport ----------------------
+#
+# Same protocol as std/fw_cfg.kr, reached through MMIO at 0x09020000 instead
+# of ports. Compile-only and arch-PINNED to arm64: the module is arm64-only
+# (its x86 sibling is port-I/O), and this row only inspects that the whole
+# surface compiles freestanding -- nothing executes on the host.
+TOTAL=$((TOTAL + 1))
+cat > "$DIR/../fwm_tmp_$$.kr" <<'FWMEOF'
+import "std/fw_cfg_mmio.kr"
+static u8[256] fwmbuf
+fn main() -> uint32 {
+    fw_cfg_mmio_init(0x09020000)
+    if fw_cfg_present() == 0 { loop { } }
+    u64 b = fwmbuf
+    u64 _ram = fw_cfg_ram_size()
+    u64 _cpus = fw_cfg_nb_cpus()
+    u64 _feat = fw_cfg_features()
+    if fw_cfg_has_dma() == 0 { loop { } }
+    u64 sel = fw_cfg_find_file("etc/table-loader")
+    if sel != FW_CFG_NOTFOUND {
+        fw_cfg_dma_read(sel, b, 64)
+        fw_cfg_dma_write(sel, b, 64)
+    }
+    fw_cfg_read_file("etc/smbios", b, 256)
+    fw_cfg_select(FW_CFG_SIGNATURE)
+    u64 _a = fw_cfg_read8()
+    u64 _c = fw_cfg_read_be16()
+    u64 _d = fw_cfg_read_be32()
+    u64 _e = fw_cfg_read_le32()
+    u64 _f = fw_cfg_read_le64()
+    fw_cfg_read_bytes(b, 4)
+    loop { }
+}
+FWMEOF
+if $KRC --target=none --arch=arm64 --emit=image --image-header \
+        --load-addr=0x40080000 --stack-top=0x40200000 \
+        "$DIR/../fwm_tmp_$$.kr" -o /tmp/fwm_$$.img >/dev/null 2>&1; then
+    PASS=$((PASS + 1)); echo "  fw_cfg_mmio_full_surface_freestanding: PASS"
+else
+    FAIL=$((FAIL + 1)); echo "FAIL: fw_cfg_mmio_full_surface_freestanding"
+fi
+rm -f "$DIR/../fwm_tmp_$$.kr" /tmp/fwm_$$.img
+
+# The claim that matters is not "it compiled" but "the device answered": boot
+# the module on qemu-system-aarch64 `-M virt` and read the serial log. The
+# arch pin is legitimate here even though the row executes, because the
+# EMULATOR executes the artifact, not the host CPU -- same reasoning as the
+# ramfb/mouse-gui rows above, which run qemu-system-x86_64 on any host. When
+# qemu-system-aarch64 is absent this row SKIPS and says so; it does not claim
+# the coverage it did not get.
+#
+# Every asserted field discriminates a real bug (each was broken on purpose
+# and watched fail before this row landed):
+#   bfw=4      BIG-ENDIAN 16-bit selector + BE directory. The classic port
+#              of this module writes the selector little-endian; measured on
+#              QEMU 8.2.2, that makes the device see item 0x1900, the
+#              directory read all-zero, and find_file miss -- while the
+#              endian-neutral "QEMU" signature check still PASSES. This
+#              field, not `present`, is the one that catches that bug.
+#   cpus=2     item payloads stay little-endian over MMIO (-smp 2).
+#   sig=QEMU   DMA: BE request block, address halves HIGH at +16 then LOW
+#              at +20 (the low write triggers). The buffer is scrubbed
+#              first, so a stale signature cannot fake this.
+#   wr=1       DMA write path, against -device ramfb.
+TOTAL=$((TOTAL + 1))
+if ! command -v qemu-system-aarch64 >/dev/null 2>&1; then
+    PASS=$((PASS + 1)); echo "  fw_cfg_mmio_answers_on_virt: PASS (SKIPPED -- no qemu-system-aarch64; compile row above is the only coverage)"
+else
+cat > "$DIR/../fwmx_tmp_$$.kr" <<'FWMXEOF'
+import "std/uart_pl011.kr"
+import "std/fw_cfg_mmio.kr"
+static u8[128] fbuf
+static u64[4] rcfg
+fn puts2(u64 s) {
+    u64 i = 0
+    loop {
+        u64 c = load8(s + i)
+        if c == 0 { return }
+        pl011_putc(c)
+        i = i + 1
+    }
+}
+fn putd(u64 v) {
+    if v < 10 { pl011_putc(48 + v) } else { pl011_putc(88) }
+}
+fn fail(u64 msg) {
+    puts2("FWCFG-MMIO-FAIL ")
+    puts2(msg)
+    pl011_putc(10)
+    puts2("FWCFG-MMIO-DONE\n")
+    loop { }
+}
+fn main() -> uint32 {
+    pl011_init()
+    if fw_cfg_present() == 0 { fail("present") }
+    if fw_cfg_has_dma() == 0 { fail("dma-feature") }
+    u64 cpus = fw_cfg_nb_cpus()
+    u64 sel = fw_cfg_find_file("etc/boot-fail-wait")
+    if sel == FW_CFG_NOTFOUND { fail("find-file") }
+    u64 bfw = fw_cfg_last_size
+    u64 n = fw_cfg_read_file("etc/boot-fail-wait", fbuf, 128)
+    if n != bfw { fail("read-file-len") }
+    store8(fbuf, 0)
+    store8(fbuf + 1, 0)
+    store8(fbuf + 2, 0)
+    store8(fbuf + 3, 0)
+    if fw_cfg_dma_read(FW_CFG_SIGNATURE, fbuf, 4) == 0 { fail("dma-read-rc") }
+    u64 rsel = fw_cfg_find_file("etc/ramfb")
+    if rsel == FW_CFG_NOTFOUND { fail("no-ramfb") }
+    u64 c = rcfg
+    store32(c, 0)
+    store32(c + 4,  fw_cfg_bswap32(0x41000000))
+    store32(c + 8,  fw_cfg_bswap32(0x34325258))
+    store32(c + 12, 0)
+    store32(c + 16, fw_cfg_bswap32(64))
+    store32(c + 20, fw_cfg_bswap32(64))
+    store32(c + 24, fw_cfg_bswap32(256))
+    u64 wr = fw_cfg_dma_write(rsel, c, 28)
+    puts2("FWCFG-MMIO cpus=")
+    putd(cpus)
+    puts2(" bfw=")
+    putd(bfw)
+    puts2(" sig=")
+    pl011_putc(load8(fbuf))
+    pl011_putc(load8(fbuf + 1))
+    pl011_putc(load8(fbuf + 2))
+    pl011_putc(load8(fbuf + 3))
+    puts2(" wr=")
+    putd(wr)
+    pl011_putc(10)
+    puts2("FWCFG-MMIO-DONE\n")
+    loop { }
+}
+FWMXEOF
+fwm_img=/tmp/fwmx_$$.img
+fwm_log=/tmp/fwmx_$$.log
+if ! $KRC --target=none --arch=arm64 --emit=image --image-header \
+        --load-addr=0x40080000 --stack-top=0x40200000 \
+        "$DIR/../fwmx_tmp_$$.kr" -o "$fwm_img" >/dev/null 2>&1; then
+    FAIL=$((FAIL + 1)); echo "FAIL: fw_cfg_mmio_answers_on_virt (compile failed)"
+else
+    rm -f "$fwm_log"
+    qemu-system-aarch64 -M virt -cpu cortex-a72 -smp 2 -device ramfb \
+        -display none -serial "file:$fwm_log" -kernel "$fwm_img" -no-reboot \
+        >/dev/null 2>&1 &
+    fwm_qpid=$!
+    fwm_t=0
+    while [ $fwm_t -lt 120 ]; do
+        grep -q 'FWCFG-MMIO-DONE' "$fwm_log" 2>/dev/null && break
+        sleep 0.25
+        fwm_t=$((fwm_t + 1))
+    done
+    kill $fwm_qpid 2>/dev/null
+    wait $fwm_qpid 2>/dev/null
+    if grep -q '^FWCFG-MMIO cpus=2 bfw=4 sig=QEMU wr=1$' "$fwm_log" 2>/dev/null; then
+        PASS=$((PASS + 1)); echo "  fw_cfg_mmio_answers_on_virt: PASS (BE selector, LE payloads, DMA r/w observed on qemu virt)"
+    else
+        FAIL=$((FAIL + 1)); echo "FAIL: fw_cfg_mmio_answers_on_virt"
+        sed 's/^/    /' "$fwm_log" 2>/dev/null | head -6
+    fi
+fi
+rm -f "$DIR/../fwmx_tmp_$$.kr" "$fwm_img" "$fwm_log"
+fi
+
 # A variable used ONLY as an asm operand is still used. sema_check_stmt did not
 # descend into asm constraint lists at all, so std/x86.kr's wrmsr was warned
 # about for `lo` and `hi` while passing both to the instruction. Three clauses,
