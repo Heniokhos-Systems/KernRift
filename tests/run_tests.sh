@@ -1454,6 +1454,90 @@ else
 fi
 rm -f "$DIR/../ceval_idx_$$.kr" "$DIR/../ceval_ptr_$$.kr" "$DIR/../ceval_plain_$$.kr"
 
+# File-scope struct statics: `static Point[N] pts` and `static Point sp`.
+#
+# These SILENTLY LOST DATA on all four backends. struct_var_table is reset per
+# function, so a file-scope static could never be in it; every field access
+# fell through to the enum/zero path and the store emitted nothing while the
+# load returned 0. On top of that the parser sized `static Point[10]` at one
+# WORD per element (80 bytes, not 160), and `pts[i]` as a value loaded 8 bytes
+# where the element ADDRESS was meant, so dereferencing it segfaulted.
+#
+# Every row below ASSERTS A VALUE. A row that only checked "it compiles" passed
+# against the whole defect, which is why the plain-`static Point` read was the
+# only symptom anyone ever saw (it errored) while the write went missing in
+# silence. r10 is the LOCAL positive control that always worked: if the fix
+# ever regresses locals, that row goes red rather than the bug hiding.
+TOTAL=$((TOTAL + 1))
+SSTR_OK=1
+# These rows EXECUTE, so they follow $RUN_ARCH rather than naming an arch.
+SSTR_OTHER="arm64"
+if [ "$RUN_ARCH" = "arm64" ]; then SSTR_OTHER="x86_64"; fi
+SSTR_QEMU=""
+if [ "$SSTR_OTHER" = "arm64" ]; then
+    SSTR_QEMU="$(command -v qemu-aarch64-static || command -v qemu-aarch64 || true)"
+fi
+SSTR_HDR='struct Point { u64 x  u64 y }
+static Point[10] pts
+static Point sp
+static uint64 sguard
+'
+sstr_src() { printf '%s%s\n' "$SSTR_HDR" "$1" > "$DIR/../sstr_$2_$$.kr"; }
+# const index, both fields, write-then-read
+sstr_src 'fn main() { pts[3].x = 50  pts[3].y = 60  exit(pts[3].x + pts[3].y - 60) }' cidx
+# computed index, and element 3 must not alias element 7
+sstr_src 'fn main() { u64 i = 7  pts[3].x = 9  pts[i].x = 50  if pts[3].x != 9 { exit(1) }  exit(pts[i].x) }' vidx
+# field write -> RAW read at base+48 (element 3, field x, stride must be 16)
+sstr_src 'fn main() { pts[3].x = 50  u64 b = pts  u64 p = b + 48  u64 v = 0  unsafe { *(p as u64) -> v }  exit(v) }' fwrr
+# RAW write at base+48 -> FIELD read
+sstr_src 'fn main() { u64 b = pts  u64 p = b + 48  unsafe { *(p as u64) = 50 }  exit(pts[3].x) }' rwfr
+# pts[i] AS A VALUE is the element ADDRESS: stride 16, and dereferencing it
+# must return the stored field rather than segfaulting (was rc 139).
+sstr_src 'fn main() { pts[3].x = 50  u64 e0 = pts[0]  u64 e1 = pts[1]  if e1 - e0 != 16 { exit(1) }  u64 e3 = pts[3]  u64 v = 0  unsafe { *(e3 as u64) -> v }  exit(v) }' eval
+# plain `static Point sp`: write-then-read on both fields, bare `sp` decays to
+# its address, and element 9 of pts must not reach sp or sguard (160B reserved)
+sstr_src 'fn main() { sguard = 7  sp.x = 20  sp.y = 30  pts[9].y = 99  if sp.x != 20 { exit(1) }  if sp.y != 30 { exit(2) }  if sguard != 7 { exit(3) }  u64 b = sp  u64 v = 0  unsafe { *(b as u64) -> v }  if v != 20 { exit(4) }  exit(sp.x + sp.y) }' plain
+# LOCAL struct array + local plain struct: the positive control
+sstr_src 'fn main() { Point[4] loc  Point lp  loc[2].x = 20  loc[2].y = 30  lp.x = 0  u64 a = loc[0]  u64 c = loc[1]  if c - a != 16 { exit(1) }  exit(loc[2].x + loc[2].y + lp.x) }' local
+SSTR_RAN=0
+sstr_run() { # <arch> <flags> <src> <runner-or-empty> <expected>
+    local _bin="/tmp/krc_sstr_$$"
+    if ! $KRC --arch="$1" $2 "$3" -o "$_bin" >/dev/null 2>&1; then
+        SSTR_OK=0; echo "  $(basename $3) $1 ${2:-IR}: COMPILE FAILED"
+        return
+    fi
+    if [ -n "$4" ]; then $4 "$_bin" >/dev/null 2>&1; else "$_bin" >/dev/null 2>&1; fi
+    local _rc=$?
+    SSTR_RAN=$((SSTR_RAN + 1))
+    [ "$_rc" = "$5" ] || { SSTR_OK=0; echo "  $(basename $3) $1 ${2:-IR}: got $_rc, want $5"; }
+    rm -f "$_bin"
+}
+for _pair in "cidx:50" "vidx:50" "fwrr:50" "rwfr:50" "eval:50" "plain:50" "local:50"; do
+    _s="$DIR/../sstr_${_pair%%:*}_$$.kr"
+    _w="${_pair##*:}"
+    sstr_run "$RUN_ARCH" ""          "$_s" ""            "$_w"
+    sstr_run "$RUN_ARCH" "--legacy"  "$_s" ""            "$_w"
+    if [ -n "$SSTR_QEMU" ]; then
+        sstr_run "$SSTR_OTHER" ""         "$_s" "$SSTR_QEMU" "$_w"
+        sstr_run "$SSTR_OTHER" "--legacy" "$_s" "$SSTR_QEMU" "$_w"
+    fi
+done
+# Guard against the loop silently doing nothing. 7 sources x 2 host configs
+# always; x2 more per source when the other arch is runnable.
+SSTR_WANT=14
+if [ -n "$SSTR_QEMU" ]; then SSTR_WANT=28; fi
+[ "$SSTR_RAN" = "$SSTR_WANT" ] || { SSTR_OK=0; echo "  only $SSTR_RAN/$SSTR_WANT config-runs executed"; }
+if [ "$SSTR_OK" = "1" ]; then
+    echo "  file_scope_struct_statics_all_backends: PASS ($SSTR_RAN config-runs)"
+    PASS=$((PASS + 1))
+else
+    echo "FAIL: file_scope_struct_statics_all_backends"
+    FAIL=$((FAIL + 1))
+fi
+rm -f "$DIR/../sstr_cidx_$$.kr" "$DIR/../sstr_vidx_$$.kr" "$DIR/../sstr_fwrr_$$.kr" \
+      "$DIR/../sstr_rwfr_$$.kr" "$DIR/../sstr_eval_$$.kr" "$DIR/../sstr_plain_$$.kr" \
+      "$DIR/../sstr_local_$$.kr"
+
 # @packed struct annotation (should parse without error)
 run_test "packed_struct" '@packed struct Reg { uint8 a; uint32 b }
 fn main() {
@@ -9211,8 +9295,9 @@ fi
 # as a raw char. Part 3: struct `==` -> MEMCMP, reached via struct-typed
 # function PARAMETERS over two `static u32[2]` arrays (a local struct would
 # need IR_ALLOC, unimplemented on freestanding xtensa; a `static Point`
-# scalar never registers as a struct var — see mem_stack.kr's header comment
-# for the x86-host probe that found this). Full-output equality; loop{}
+# scalar USED TO never register as a struct var — since fixed, but this
+# example stays on the parameter form it was written for; see mem_stack.kr's
+# header comment for the x86-host probe that found it). Full-output equality; loop{}
 # keeps the core busy till timeout.
 echo ""
 echo "--- xtensa LX6 stack-array + memory-intrinsics boot test ---"

@@ -835,6 +835,25 @@ fn emit_a64_static_lea(uint64 data_offset) {
     emit_a64(0x91000200)           // ADD X0, X16, #0 (patched, Rd=X0, Rn=X16)
 }
 
+// emit: x0 = base address of the struct-typed name `name_tok`.
+//
+// A local struct variable keeps a POINTER to its storage in its stack slot,
+// so a plain load is the address. A file-scope static IS the storage, so its
+// address needs an ADRP+ADD. See emit_struct_base_rax in codegen.kr.
+fn emit_a64_struct_base_x0(uint64 name_tok) {
+    uint64 voff = var_lookup(name_tok)
+    if voff != 0xFFFFFFFF {
+        emit_a64_load_x0(voff)
+        return
+    }
+    uint64 soff = static_lookup(name_tok)
+    if soff != 0xFFFFFFFF {
+        emit_a64_static_lea(soff)
+        return
+    }
+    emit_a64_load_x0(0)
+}
+
 fn emit_a64_static_store(uint64 data_offset) {
     // Save x0 to temp register first
     emit_a64_mov(9, 0)
@@ -1337,11 +1356,8 @@ fn gen_expr_a64(uint64 node) {
                     uint64 mulinsn = 0x9B007C00 | (10 << 16) | (0 << 5) | 0
                     emit_a64(mulinsn)
                     emit_a64_mov(11, 0)
-                    // Load base address
-                    uint64 aoff = var_lookup(wait2)
-                    if aoff != 0xFFFFFFFF {
-                        emit_a64_load_x0(aoff)
-                    }
+                    // Load base address (local slot or static ADRP+ADD)
+                    emit_a64_struct_base_x0(wait2)
                     // x0 = base + x11
                     emit_a64_add(0, 0, 11)
                     if foff_i != 0 {
@@ -1455,11 +1471,9 @@ fn gen_expr_a64(uint64 node) {
         }
         uint64 si = struct_var_lookup(obj_tok)
         if si != 0xFFFFFFFF {
-            uint64 var_off = var_lookup(obj_tok)
-            if var_off == 0xFFFFFFFF { var_off = 0 }
             uint64 foff = struct_field_offset(si, field_tok)
             uint64 fsz = struct_field_size(si, field_tok)
-            emit_a64_load_x0(var_off)
+            emit_a64_struct_base_x0(obj_tok)
             if foff != 0 {
                 emit_a64_add_imm(0, 0, foff)
             }
@@ -1530,6 +1544,12 @@ fn gen_expr_a64(uint64 node) {
                     emit_a64_static_lea(soff)
                 } else {
                     emit_a64_static_load(soff)
+                }
+                // A file-scope static struct is a struct VALUE at its own
+                // address, exactly like a local struct variable.
+                uint64 ssvi_a = static_struct_lookup(wait_tok)
+                if ssvi_a != 0xFFFFFFFF {
+                    expr_is_struct_a64 = ssvi_a
                 }
             } else {
                 uint64 id_len = tok_text_len(tok)
@@ -5484,11 +5504,8 @@ fn gen_stmt_a64(uint64 node) {
                         uint64 mulinsn2 = 0x9B007C00 | (10 << 16) | (0 << 5) | 0
                         emit_a64(mulinsn2)
                         emit_a64_mov(11, 0)
-                        // Load base address
-                        uint64 aoff_aw = var_lookup(wait_aw)
-                        if aoff_aw != 0xFFFFFFFF {
-                            emit_a64_load_x0(aoff_aw)
-                        }
+                        // Load base address (local slot or static ADRP+ADD)
+                        emit_a64_struct_base_x0(wait_aw)
                         // Addr = base + x11 + foff
                         emit_a64_add(0, 0, 11)
                         if foff_aw != 0 { emit_a64_add_imm(0, 0, foff_aw) }
@@ -5578,10 +5595,8 @@ fn gen_stmt_a64(uint64 node) {
                 if fftk_w == 96 {
                     // f64 field: value is in d0, save to temp, compute addr, store
                     emit_a64_store_d0(temp_slot_0)
-                    uint64 var_off = var_lookup(obj_tok)
-                    if var_off == 0xFFFFFFFF { var_off = 0 }
                     uint64 foff = struct_field_offset(si, field_tok)
-                    emit_a64_load_x0(var_off)
+                    emit_a64_struct_base_x0(obj_tok)
                     if foff != 0 { emit_a64_add_imm(0, 0, foff) }
                     emit_a64_mov(10, 0)
                     emit_a64_load_d0(temp_slot_0)
@@ -5592,10 +5607,8 @@ fn gen_stmt_a64(uint64 node) {
                 if fftk_w == 95 {
                     // f32 field: value is in s0, save to temp, compute addr, store
                     emit_a64_store_s0(temp_slot_0)
-                    uint64 var_off = var_lookup(obj_tok)
-                    if var_off == 0xFFFFFFFF { var_off = 0 }
                     uint64 foff = struct_field_offset(si, field_tok)
-                    emit_a64_load_x0(var_off)
+                    emit_a64_struct_base_x0(obj_tok)
                     if foff != 0 { emit_a64_add_imm(0, 0, foff) }
                     emit_a64_mov(10, 0)
                     emit_a64_load_s0(temp_slot_0)
@@ -5604,11 +5617,9 @@ fn gen_stmt_a64(uint64 node) {
                     return
                 }
                 emit_a64_store_x0(temp_slot_0)
-                uint64 var_off = var_lookup(obj_tok)
-                if var_off == 0xFFFFFFFF { var_off = 0 }
                 uint64 foff = struct_field_offset(si, field_tok)
                 uint64 fsz = struct_field_size(si, field_tok)
-                emit_a64_load_x0(var_off)
+                emit_a64_struct_base_x0(obj_tok)
                 if foff != 0 { emit_a64_add_imm(0, 0, foff) }
                 emit_a64_mov(10, 0)
                 emit_a64_load_x0(temp_slot_0)

@@ -1832,6 +1832,64 @@ fn struct_var_lookup(uint64 var_tok) -> uint64 {
         }
         i = i + 1
     }
+    // struct_var_table is per-FUNCTION (reset on every function entry), so a
+    // file-scope `static Point p` / `static Point[N] pts` could never be in
+    // it — every field access then fell through to the enum/zero path and
+    // silently dropped the load or the store. The static struct table below
+    // is filled once at parse time and never reset, so it answers for
+    // module-level struct storage. Locals win: a local of the same name
+    // shadows the static, matching every other name lookup here.
+    return static_struct_lookup(var_tok)
+}
+
+// ---------------------------------------------------------------------------
+// File-scope static struct table: name_tok -> struct_idx.
+//
+// Populated by the parser when it sees `static StructName name` or
+// `static StructName[N] name`. Unlike struct_var_table this is never reset,
+// because file-scope statics outlive every function.
+// ---------------------------------------------------------------------------
+
+static uint64 static_struct_table = 0
+static uint64 static_struct_cap = 0
+static uint64 static_struct_count = 0
+
+@export
+fn static_struct_register(uint64 name_tok, uint64 struct_idx) {
+    if static_struct_table == 0 {
+        static_struct_cap = 256
+        static_struct_table = alloc(static_struct_cap * 8)
+    }
+    if static_struct_count >= static_struct_cap {
+        uint64 old_bytes = static_struct_cap * 8
+        static_struct_table = grow_buf(static_struct_table, old_bytes, old_bytes * 2)
+        static_struct_cap = static_struct_cap * 2
+    }
+    uint64 entry = static_struct_table + static_struct_count * 8
+    uint32 nt = name_tok
+    unsafe { *(entry as uint32) = nt }
+    uint64 e4 = entry + 4
+    uint32 si = struct_idx
+    unsafe { *(e4 as uint32) = si }
+    static_struct_count = static_struct_count + 1
+}
+
+// Returns the struct index for a file-scope static struct, or 0xFFFFFFFF.
+fn static_struct_lookup(uint64 name_tok) -> uint64 {
+    uint64 i = 0
+    while i < static_struct_count {
+        uint64 entry = static_struct_table + i * 8
+        uint32 stored = 0
+        unsafe { *(entry as uint32) -> stored }
+        uint64 ws = stored
+        if tok_text_eq(ws, name_tok) != 0 {
+            uint64 e4 = entry + 4
+            uint32 si = 0
+            unsafe { *(e4 as uint32) -> si }
+            return si
+        }
+        i = i + 1
+    }
     return 0xFFFFFFFF
 }
 
@@ -3650,6 +3708,27 @@ fn emit_load_rax_from_stack(uint64 offset) {
     rax_cache = offset + 1
 }
 
+// emit: rax = base address of the struct-typed name `name_tok`.
+//
+// A local struct variable keeps a POINTER to its storage in its stack slot,
+// so a plain load is the address. A file-scope static IS the storage, so its
+// address needs an LEA. Every struct field-access site has to make this
+// distinction; before this helper existed they all did the load
+// unconditionally and read a stack slot that never belonged to the static.
+fn emit_struct_base_rax(uint64 name_tok) {
+    uint64 voff = var_lookup(name_tok)
+    if voff != 0xFFFFFFFF {
+        emit_load_rax_from_stack(voff)
+        return
+    }
+    uint64 soff = static_lookup(name_tok)
+    if soff != 0xFFFFFFFF {
+        emit_static_lea(soff)
+        return
+    }
+    emit_load_rax_from_stack(0)
+}
+
 // emit: push rax
 fn emit_push_rax() {
     rax_invalidate()
@@ -4771,11 +4850,8 @@ fn gen_expr(uint64 node) {
                     emit_byte(0x48); emit_byte(0x0F); emit_byte(0xAF); emit_byte(0xC1)
                     // Save offset-into-array to rcx
                     emit_mov_rcx_rax()
-                    // Load base address of the array
-                    uint64 aoff = var_lookup(wait)
-                    if aoff != 0xFFFFFFFF {
-                        emit_load_rax_from_stack(aoff)
-                    }
+                    // Load base address of the array (local slot or static LEA)
+                    emit_struct_base_rax(wait)
                     // rax = base, rcx = i*stride. addr = base + rcx + foff_i
                     emit_byte(0x48); emit_byte(0x01); emit_byte(0xC8) // add rax, rcx
                     if foff_i != 0 {
@@ -4898,12 +4974,10 @@ fn gen_expr(uint64 node) {
         uint64 si = struct_var_lookup(obj_tok)
         if si != 0xFFFFFFFF {
             // Struct field read: load base + field_offset
-            uint64 var_off = var_lookup(obj_tok)
-            if var_off == 0xFFFFFFFF { var_off = 0 }
             uint64 foff = struct_field_offset(si, field_tok)
             uint64 fsz = struct_field_size(si, field_tok)
             // Load struct base address
-            emit_load_rax_from_stack(var_off)
+            emit_struct_base_rax(obj_tok)
             // Add field offset
             if foff != 0 {
                 emit_byte(0x48); emit_byte(0x05)
@@ -4980,6 +5054,13 @@ fn gen_expr(uint64 node) {
                     emit_static_lea(soff)
                 } else {
                     emit_static_load(soff)
+                }
+                // A file-scope static struct is a struct VALUE at its own
+                // address, exactly like a local struct variable — say so, or
+                // callers copy 8 bytes of it and method receivers get junk.
+                uint64 ssvi = static_struct_lookup(wident_tok)
+                if ssvi != 0xFFFFFFFF {
+                    expr_is_struct = ssvi
                 }
             } else {
                 uint64 id_len = tok_text_len(tok)
@@ -10183,11 +10264,8 @@ fn gen_stmt(uint64 node) {
                         emit_mov_rax_imm(stride_w)
                         emit_byte(0x48); emit_byte(0x0F); emit_byte(0xAF); emit_byte(0xC1)
                         emit_mov_rcx_rax()
-                        // Load base address
-                        uint64 aoff_w = var_lookup(wait_w)
-                        if aoff_w != 0xFFFFFFFF {
-                            emit_load_rax_from_stack(aoff_w)
-                        }
+                        // Load base address (local slot or static LEA)
+                        emit_struct_base_rax(wait_w)
                         // addr = base + rcx + foff_w
                         emit_byte(0x48); emit_byte(0x01); emit_byte(0xC8)
                         if foff_w != 0 {
@@ -10309,11 +10387,9 @@ fn gen_stmt(uint64 node) {
             // Compute address: base + field_offset
             uint64 si = struct_var_lookup(obj_tok)
             if si != 0xFFFFFFFF {
-                uint64 var_off = var_lookup(obj_tok)
-                if var_off == 0xFFFFFFFF { var_off = 0 }
                 uint64 foff = struct_field_offset(si, field_tok)
                 uint64 fsz = struct_field_size(si, field_tok)
-                emit_load_rax_from_stack(var_off)
+                emit_struct_base_rax(obj_tok)
                 if foff != 0 {
                     emit_byte(0x48); emit_byte(0x05)
                     emit_u32_le(foff)

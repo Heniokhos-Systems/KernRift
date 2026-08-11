@@ -20,12 +20,15 @@
 //
 // Part 3 (MEMCMP via struct ==): local struct instances would need IR_ALLOC
 // (unimplemented on freestanding xtensa — no OS to service the mmap-style
-// allocation), and a `static Point` scalar slot never registers as a
-// struct var (the parser's `static TYPE name` path only calls
-// static_declare(), never struct_var_register() — confirmed by probing on
-// the x86 host backend: a static-struct `==` silently degrades to a
-// scalar-load compare of just the first field, never reaching IR_MEMCMP at
-// all). The form that DOES reach MEMCMP without touching IR_ALLOC: struct
+// allocation). A `static Point` scalar slot USED TO never register as a
+// struct var either — the parser's `static TYPE name` path only called
+// static_declare(), never anything that recorded the struct type, so a
+// static-struct `==` silently degraded to a scalar-load compare of just the
+// first field and never reached IR_MEMCMP. That is fixed (statics now
+// register in static_struct_table), but this example is deliberately left on
+// the parameter form below, which is what it was written to exercise and
+// what the boot test's golden output pins. The form that reaches MEMCMP
+// without touching IR_ALLOC: struct
 // pointers arrive through ordinary FUNCTION PARAMETERS (ir.kr:4696-4698
 // registers a struct-typed param for field access regardless of what
 // pointer value the caller passed), so two `static u32[2]` arrays (already

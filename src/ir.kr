@@ -1091,6 +1091,28 @@ fn ir_var_get(uint64 name_tok) -> uint64 {
     return vr
 }
 
+// Base address of the struct-typed name `name_tok`, as a vreg.
+//
+// A local struct variable's vreg already holds a POINTER to its storage. A
+// file-scope static has no vreg at all — it IS the storage, so its address
+// comes from IR_STATIC_ADDR. Every struct field-access site needs this
+// distinction; before this helper they all used a bare ir_var_get, whose
+// 0xFFFFFFFF miss was then used as a vreg number and silently produced
+// nothing (stores vanished, loads read zero).
+fn ir_struct_base_addr(uint64 name_tok) -> uint64 {
+    uint64 v = ir_var_get(name_tok)
+    if v != 0xFFFFFFFF { return v }
+    uint64 soff = static_lookup(name_tok)
+    if soff != 0xFFFFFFFF {
+        uint64 dest = ir_new_vreg()
+        ir_emit(IR_STATIC_ADDR, dest, 0, 0, soff, ir_current_bb)
+        return dest
+    }
+    uint64 z = ir_new_vreg()
+    ir_emit(IR_CONST, z, 0, 0, 0, ir_current_bb)
+    return z
+}
+
 // Emit COPY instructions from current var map vregs to snapshot vregs,
 // using a two-phase approach to avoid read-after-write hazards.
 // Phase 1: snapshot all changed values into fresh vregs (reads before writes).
@@ -1263,7 +1285,7 @@ fn ir_lower_field_chain(uint64 node) -> uint64 {
         uint64 wobj = obj_tok
         uint64 si = struct_var_lookup(wobj)
         if si != 0xFFFFFFFF {
-            uint64 base_v = ir_var_get(obj_tok)
+            uint64 base_v = ir_struct_base_addr(obj_tok)
             uint64 foff = struct_field_offset(si, field_tok)
             uint64 addr_v = base_v
             if foff != 0 {
@@ -3772,7 +3794,7 @@ fn ir_lower_expr(uint64 node) -> uint64 {
                     uint32 idx_ch = ast_child(wchild_fa)
                     uint64 idx_v = ir_lower_expr(idx_ch)
                     // addr = base + idx * stride + foff
-                    uint64 base_v = ir_var_get(ai_tok)
+                    uint64 base_v = ir_struct_base_addr(ai_tok)
                     uint64 stride_v = ir_new_vreg()
                     ir_emit(IR_CONST, stride_v, 0, 0, stride, ir_current_bb)
                     uint64 scaled_v = ir_new_vreg()
@@ -3835,7 +3857,7 @@ fn ir_lower_expr(uint64 node) -> uint64 {
         uint64 si = struct_var_lookup(wobj)
         if si != 0xFFFFFFFF {
             // Struct field read: base + offset, load
-            uint64 base_v = ir_var_get(obj_tok)
+            uint64 base_v = ir_struct_base_addr(obj_tok)
             uint64 foff = struct_field_offset(si, field_tok)
             uint64 fsz = struct_field_size(si, field_tok)
             uint64 addr_v = base_v
@@ -5182,7 +5204,7 @@ fn ir_lower_stmt(uint64 node) {
                         uint32 idx_ch = ast_child(wchild_fa)
                         uint64 idx_v = ir_lower_expr(idx_ch)
                         // addr = base + idx * stride + foff
-                        uint64 base_v = ir_var_get(ai_tok)
+                        uint64 base_v = ir_struct_base_addr(ai_tok)
                         uint64 stride_v = ir_new_vreg()
                         ir_emit(IR_CONST, stride_v, 0, 0, stride, ir_current_bb)
                         uint64 scaled_v = ir_new_vreg()
@@ -5231,7 +5253,7 @@ fn ir_lower_stmt(uint64 node) {
             uint64 wobj = obj_tok
             uint64 si = struct_var_lookup(wobj)
             if si != 0xFFFFFFFF {
-                uint64 base_v = ir_var_get(obj_tok)
+                uint64 base_v = ir_struct_base_addr(obj_tok)
                 uint64 foff = struct_field_offset(si, field_tok)
                 uint64 fsz = struct_field_size(si, field_tok)
                 uint64 addr_v = base_v

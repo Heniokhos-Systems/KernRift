@@ -343,6 +343,13 @@ fn tc_expr_kind(uint64 node) -> uint64 {
         uint32 nt = ast_data1(node)
         uint64 lk = tc_local_lookup(nt)
         if lk != 0 { return lk }
+        // A file-scope `static Point p` is struct-typed. static_kind_of only
+        // records the type TOKEN's lexer kind, which for a struct name is
+        // just Ident(1) — reporting that made every `p.field` READ a
+        // "field access on non-struct value" error while the WRITE compiled
+        // clean and silently went nowhere.
+        uint64 ssi = static_struct_lookup(nt)
+        if ssi != 0xFFFFFFFF { return 200 + ssi }
         return static_kind_of(nt)        // module-level static/const
     }
     // Compare (38), LogicalAnd/Or (39, 40)

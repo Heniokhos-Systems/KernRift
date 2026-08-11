@@ -2436,6 +2436,15 @@ fn parse_module() -> uint64 {
             advance_tok()
             // Type keyword
             uint64 stype_tok = advance_tok()
+            // `static StructName name` / `static StructName[N] name`: the type
+            // is an identifier naming a struct, not a type keyword. Without
+            // this the element size fell through to target_word_size() — a
+            // `static Point[10]` of a 16-byte struct reserved 80 bytes, and
+            // nothing recorded that the name was struct-typed at all.
+            uint64 sstruct_si = 0xFFFFFFFF
+            uint32 sstk_raw = tok_kind_at(stype_tok)
+            uint64 wsstk_raw = sstk_raw
+            if wsstk_raw == 1 { sstruct_si = struct_lookup(stype_tok) }
             // Check for array syntax: static TYPE[N] name
             if cur_kind() == 14 {
                 advance_tok()
@@ -2491,9 +2500,12 @@ fn parse_module() -> uint64 {
                 if wstk == 81 || wstk == 85 { elem_sz = 2 }
                 if wstk == 82 || wstk == 86 { elem_sz = 4 }
                 if wstk == 83 || wstk == 87 { elem_sz = 8 }
+                // Struct element type: the stride is the struct's size.
+                if sstruct_si != 0xFFFFFFFF { elem_sz = struct_total_size(sstruct_si) }
                 static_declare_array(name_tok, stsz_val * elem_sz)
                 static_set_elem_size_last(elem_sz)
                 static_set_kind_last(wstk)
+                if sstruct_si != 0xFFFFFFFF { static_struct_register(name_tok, sstruct_si) }
                 // Record fkind so index reads propagate f64/f32 type-flow.
                 // KwFloat16=94, KwFloat32=95, KwFloat64=96.
                 if wstk == 96 { static_set_fkind_last(1) }
@@ -2508,8 +2520,21 @@ fn parse_module() -> uint64 {
             } else {
                 // Name token
                 uint64 name_tok = expect(1)
-                // Register the static variable
-                static_declare(name_tok)
+                // `static StructName name`: reserve the struct's real size,
+                // not one word. Declaring it through static_declare_array is
+                // deliberate — a struct static is a 1-element struct array,
+                // and marking it as an array is what makes a bare `sp` decay
+                // to its ADDRESS instead of loading 8 bytes of its first
+                // field, which is what a struct value has to be.
+                if sstruct_si != 0xFFFFFFFF {
+                    uint64 sstruct_bytes = struct_total_size(sstruct_si)
+                    static_declare_array(name_tok, sstruct_bytes)
+                    static_set_elem_size_last(sstruct_bytes)
+                    static_struct_register(name_tok, sstruct_si)
+                } else {
+                    // Register the static variable
+                    static_declare(name_tok)
+                }
                 // Record fkind so reads propagate f64/f32 type-flow.
                 // KwFloat16=94, KwFloat32=95, KwFloat64=96.
                 uint32 stk_s = tok_kind_at(stype_tok)
