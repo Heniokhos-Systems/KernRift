@@ -4387,6 +4387,13 @@ fn main() {
 # std/x86.kr: only the NON-PRIVILEGED surface can run hosted -- port I/O,
 # control registers, MSRs, cli/sti and lgdt/lidt are ring 0 and fault in
 # userspace. The privileged half is covered by the freestanding compile below.
+#
+# rdtsc is asserted to ADVANCE between two reads, not to be ordered:
+# `rdtsc() < t1` was the old form, and a rdtsc broken to return a constant
+# (the shape a dropped out() binding produces) passed it -- 0 < 0 is false
+# (measured). Two reads of a cycle counter are never equal, and equality
+# stays true across a core migration where ordering does not, so this form
+# discriminates without the flake.
 run_test "x86_nonprivileged_surface" 'import "std/x86.kr"
 fn main() {
     if bswap16(0x1234) != 0x3412 { exit(1) }
@@ -4395,7 +4402,7 @@ fn main() {
     if bswap32(bswap32(0xDEADBEEF)) != 0xDEADBEEF { exit(4) }
     u64 t1 = rdtsc()
     cpu_relax()
-    if rdtsc() < t1 { exit(5) }
+    if rdtsc() == t1 { exit(5) }
     if cpuid_eax(0) == 0 { exit(6) }
     exit(9)
 }' 9
@@ -4574,12 +4581,38 @@ rm -f "$DIR/../asmop_tmp_$$.kr" /tmp/asmop_$$
 
 # An asm out() operand initialises its variable, so reading it afterwards is
 # not a use-before-init. Without the same fix this reported a false diagnostic.
-run_test "asm_out_operand_initialises" 'fn g() -> uint64 {
+#
+# The diagnostic is a WARNING, so run_test (exit code only) cannot see it:
+# with the init-marking deleted from sema, the run_test form still exited 9
+# and passed (measured). Assert on the compiler's stderr as well as the run.
+TOTAL=$((TOTAL + 1))
+cat > "$DIR/../asmoi_tmp_$$.kr" <<'ASMOIEOF'
+fn g() -> uint64 {
     uint64 v
     asm { "rdtsc" } out(rax -> v)
     return v & 0
 }
-fn main() { exit(g() + 9) }' 9
+fn main() { exit(g() + 9) }
+ASMOIEOF
+asmoi_ok=1
+asmoi_note=""
+asmoi_out=$($KRC $KRC_FLAGS "$DIR/../asmoi_tmp_$$.kr" -o /tmp/asmoi_$$ 2>&1)
+if [ ! -f /tmp/asmoi_$$ ]; then
+    asmoi_ok=0; asmoi_note="compile failed"
+else
+    printf '%s' "$asmoi_out" | grep -q "used before initialization.*'v'" \
+        && { asmoi_ok=0; asmoi_note="false use-before-init diagnostic on v"; }
+    chmod +x /tmp/asmoi_$$
+    /tmp/asmoi_$$ >/dev/null 2>&1
+    asmoi_rc=$?
+    [ "$asmoi_rc" = "9" ] || { asmoi_ok=0; asmoi_note="$asmoi_note; exited $asmoi_rc, want 9"; }
+fi
+if [ "$asmoi_ok" = "1" ]; then
+    PASS=$((PASS + 1)); echo "  asm_out_operand_initialises: PASS (no false diagnostic, ran to exit 9)"
+else
+    FAIL=$((FAIL + 1)); echo "FAIL: asm_out_operand_initialises (${asmoi_note#; })"
+fi
+rm -f "$DIR/../asmoi_tmp_$$.kr" /tmp/asmoi_$$
 
 # --- examples/bare-console: VGA text + PS/2 keyboard + serial ---
 #
@@ -5251,15 +5284,23 @@ rm -f "$PCI_SRC" "$PCI_IMG"
 #
 # Pin the count in BOTH places. If you add or remove a copy, this row tells you
 # to update the doc in the same commit.
+#
+# The pattern is anchored to the WHOLE line (^ws if <chain> {$), not a
+# substring. A substring count stays at 7 when one copy is extended in place
+# ("|| op == 150" appended, or a new op prepended before 72) -- proven by
+# injecting exactly that: the old grep -c still said 7 while the copies
+# disagreed, which is the miscompile this row exists to pin. Anchoring means
+# ANY textual divergence in a copy drops the count and fails the row.
 TOTAL=$((TOTAL + 1))
-opshape_pat='op == 72 || op == 76 || op == 83 || op == 93 || op == 98 || op == 148'
-opshape_src=$(grep -c "$opshape_pat" "$DIR/../src/ir.kr")
+opshape_pat='^[[:space:]]*if op == 72 \|\| op == 76 \|\| op == 83 \|\| op == 93 \|\| op == 98 \|\| op == 148 \{[[:space:]]*$'
+opshape_src=$(grep -cE "$opshape_pat" "$DIR/../src/ir.kr")
 opshape_doc=$(grep -c 'SEVEN separate times' "$DIR/../docs/IR_REFERENCE.md")
 if [ "$opshape_src" = "7" ] && [ "$opshape_doc" = "1" ]; then
-    PASS=$((PASS + 1)); echo "  ir_operand_shape_copies_pinned: PASS (7 copies, doc agrees)"
+    PASS=$((PASS + 1)); echo "  ir_operand_shape_copies_pinned: PASS (7 verbatim copies, doc agrees)"
 else
     FAIL=$((FAIL + 1))
-    echo "FAIL: ir_operand_shape_copies_pinned (src has $opshape_src copies; docs/IR_REFERENCE.md §14 says SEVEN: $opshape_doc match)"
+    echo "FAIL: ir_operand_shape_copies_pinned (src has $opshape_src verbatim copies, want 7; docs/IR_REFERENCE.md §14 says SEVEN: $opshape_doc match)"
+    echo "  if a copy no longer matches verbatim, the copies have diverged (that miscompiles);"
     echo "  if you changed the number of copies, update docs/IR_REFERENCE.md §14 in the same commit"
 fi
 
