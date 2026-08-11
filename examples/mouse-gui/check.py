@@ -30,11 +30,17 @@ import time
 # spans x 70..230, y 110..154, so (150,132) is comfortably inside it.
 START_X, START_Y = 320, 240
 TARGET_X, TARGET_Y = 150, 132
-# A point inside "Click me", and one inside the second button which is never
-# touched and therefore acts as a control.
-BTN1_PROBE = (90, 145)
-BTN2_PROBE = (300, 145)
-BTN2_UNPRESSED = (0x60, 0x40, 0x80)
+# The clicked button, and the second button which is never touched and so acts
+# as a control. Insets avoid the border.
+BTN1_RECT = (74, 114, 226, 150)
+BTN2_RECT = (264, 114, 416, 150)
+
+# The click assertion compares the SAME button before and after the press, not
+# one button against the other. The two buttons are deliberately different
+# colours, so "clicked differs from control" is true whether or not the press
+# ever registered -- measured: with button_set_pressed reduced to a no-op, that
+# form of the check still passed. A before/after diff on one widget is the
+# assertion that actually discriminates.
 
 
 class Qemu:
@@ -108,6 +114,7 @@ def main():
     if "--keep-ppm" in sys.argv:
         keep = sys.argv[sys.argv.index("--keep-ppm") + 1]
     ppm = keep or "/tmp/mgui_%d.ppm" % os.getpid()
+    ppm_before = (keep + ".before") if keep else "/tmp/mgui_%d_b.ppm" % os.getpid()
     serial = "/tmp/mgui_%d.txt" % os.getpid()
 
     q = Qemu(image, serial)
@@ -118,6 +125,10 @@ def main():
         # QMP mouse_move deltas are SCREEN-space: +y is down.
         q.hmp("mouse_move %d %d" % (TARGET_X - START_X, TARGET_Y - START_Y))
         time.sleep(0.6)
+        # Capture BEFORE the press, with the cursor already parked on the
+        # button, so the only difference between the two frames is the press.
+        q.hmp("screendump " + ppm_before)
+        time.sleep(0.4)
         q.hmp("mouse_button 1")
         time.sleep(0.7)
         q.hmp("screendump " + ppm)
@@ -152,29 +163,39 @@ def main():
         if k not in log:
             fail.append("keyboard dead while mouse streaming (missing %r)" % k)
 
-    if not os.path.exists(ppm):
-        fail.append("no screendump produced")
+    if not os.path.exists(ppm) or not os.path.exists(ppm_before):
+        fail.append("screendump missing (need both before and after)")
     else:
+        wb, hb, pb = read_ppm(ppm_before)
         w, h, px = read_ppm(ppm)
         print("resolution: %dx%d" % (w, h))
-        if (w, h) != (640, 480):
-            fail.append("expected 640x480, got %dx%d" % (w, h))
+        if (w, h) != (640, 480) or (wb, hb) != (640, 480):
+            fail.append("expected 640x480, got %dx%d / %dx%d" % (w, h, wb, hb))
         else:
-            def at(x, y):
-                o = (y * w + x) * 3
-                return (px[o], px[o + 1], px[o + 2])
-            b1, b2 = at(*BTN1_PROBE), at(*BTN2_PROBE)
-            print("clicked button %s   control button %s" % (b1, b2))
-            # The pressed widget must look different from the untouched one.
-            # Asserting "differs from the control" rather than a literal colour
-            # keeps this from breaking if the theme changes.
-            if b2 != BTN2_UNPRESSED:
-                fail.append("control button changed: %s (nothing should have touched it)" % (b2,))
-            if b1 == b2:
-                fail.append("pressed button looks identical to the control -- no visual feedback")
+            def diff_count(rect):
+                x0, y0, x1, y1 = rect
+                n = 0
+                for y in range(y0, y1):
+                    for x in range(x0, x1):
+                        o = (y * w + x) * 3
+                        if px[o:o + 3] != pb[o:o + 3]:
+                            n += 1
+                return n
+            d1, d2 = diff_count(BTN1_RECT), diff_count(BTN2_RECT)
+            total1 = (BTN1_RECT[2] - BTN1_RECT[0]) * (BTN1_RECT[3] - BTN1_RECT[1])
+            print("clicked button: %d/%d pixels changed by the press" % (d1, total1))
+            print("control button: %d pixels changed (must be 0)" % d2)
+            # A press must visibly change the widget it landed on...
+            if d1 == 0:
+                fail.append("press changed NO pixels on the clicked button -- no visual feedback")
+            # ...and must not touch anything else.
+            if d2 != 0:
+                fail.append("control button changed by %d pixels (nothing touched it)" % d2)
 
-    if not keep and os.path.exists(ppm):
-        os.remove(ppm)
+    if not keep:
+        for f in (ppm, ppm_before):
+            if os.path.exists(f):
+                os.remove(f)
 
     if fail:
         for f in fail:
