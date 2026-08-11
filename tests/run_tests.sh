@@ -4256,6 +4256,113 @@ else
     rm -f /tmp/krgz_$$ /tmp/krgz_in_$$ /tmp/krgz_out_$$.gz /tmp/krgz_back_$$
 fi
 
+# --- push/pop/mov/sidt mnemonics ---
+#
+# These exist so std/idt.kr need not be written in raw hex. Two rows, because
+# "it assembles to the right bytes" and "it does the right thing" are different
+# claims and the second is the one that matters.
+#
+# Byte assertion. Compile-only, so the arch may be pinned. The encodings are
+# asserted verbatim rather than by re-deriving them here, because a test that
+# recomputes the encoding the same way the compiler does would agree with the
+# compiler about a shared mistake.
+TOTAL=$((TOTAL + 1))
+cat > "$DIR/../mnem_tmp_$$.kr" <<'MNEOF'
+fn probe() {
+    asm { "push rax" }
+    asm { "push r15" }
+    asm { "pop r15" }
+    asm { "pop rax" }
+    asm { "mov r12, rax" }
+    asm { "mov rax, r12" }
+    asm { "mov rax, cs" }
+    asm { "mov rax, [rsp+0x100]" }
+    asm { "sidt [rax]" }
+}
+fn main() { probe()  exit(0) }
+MNEOF
+mnem_ok=1
+mnem_note=""
+if $KRC --arch=x86_64 --emit=obj "$DIR/../mnem_tmp_$$.kr" -o /tmp/mnem_$$.o >/dev/null 2>&1; then
+    mnem_hex=$(od -An -tx1 -v /tmp/mnem_$$.o | tr -d ' \n')
+    # push rax / push r15 / pop r15 / pop rax, contiguous.
+    printf '%s' "$mnem_hex" | grep -q '504157415f58' || { mnem_ok=0; mnem_note="push/pop sequence"; }
+    # mov r12,rax then mov rax,r12 -- REX.B vs REX.R. If these two were the
+    # same bytes, the prefix bits would be inverted and the wrong register
+    # would move whenever an operand is r8-r15.
+    printf '%s' "$mnem_hex" | grep -q '4989c44c89e0' || { mnem_ok=0; mnem_note="mov REX.R/REX.B"; }
+    # mov rax,cs ; mov rax,[rsp+0x100] ; sidt [rax]
+    printf '%s' "$mnem_hex" | grep -q '8cc8488b8424000100000f0108' || { mnem_ok=0; mnem_note="cs/disp32/sidt"; }
+else
+    mnem_ok=0; mnem_note="compile failed"
+fi
+if [ "$mnem_ok" = "1" ]; then
+    PASS=$((PASS + 1)); echo "  asm_push_pop_mov_encodings: PASS (push/pop, REX.R vs REX.B, cs, [rsp+disp32], sidt)"
+else
+    FAIL=$((FAIL + 1)); echo "FAIL: asm_push_pop_mov_encodings ($mnem_note)"
+fi
+rm -f "$DIR/../mnem_tmp_$$.kr" /tmp/mnem_$$.o
+
+# Runtime behaviour. This row EXECUTES, so it cannot pin an arch -- but the
+# mnemonics are x86-only by construction, so it runs only where the host is
+# x86_64 and says so otherwise rather than pretending to have covered it.
+TOTAL=$((TOTAL + 1))
+if [ "$RUN_ARCH" != "x86_64" ]; then
+    PASS=$((PASS + 1)); echo "  asm_push_pop_mov_runtime: PASS (SKIPPED -- x86-only mnemonics, host is $RUN_ARCH)"
+else
+    cat > "$DIR/../mnemr_tmp_$$.kr" <<'MNREOF'
+fn mov_through(u64 a) -> u64 {
+    u64 out = 0
+    asm { "mov rbx, rax" } in(a -> rax) out(rbx -> out)
+    return out
+}
+fn push_pop(u64 a) -> u64 {
+    u64 out = 0
+    asm { "push rax"  "pop rbx" } in(a -> rax) out(rbx -> out)
+    return out
+}
+// Discriminates REX.R from REX.B. `a` goes into r12, rax is then overwritten
+// with `b`, and r12 is brought back into rax -- so the result must be `a`.
+// With the REX bits inverted, `mov rax, r12` assembles to something that
+// leaves rax alone, and the result is `b`.
+//
+// The obvious form (push rax; pop r13; mov rbx, r13) does NOT discriminate:
+// measured, it still passed with REX.R/REX.B swapped, because rbx happened to
+// already hold the expected value.
+fn rex_roundtrip(u64 a, u64 b) -> u64 {
+    u64 out = 0
+    asm { "push rax"  "pop r12"  "mov rax, rcx"  "mov rax, r12" } in(a -> rax, b -> rcx) out(rax -> out)
+    return out
+}
+fn main() {
+    if mov_through(1234) != 1234 { exit(1) }
+    if push_pop(4321) != 4321 { exit(2) }
+    if rex_roundtrip(999, 555) != 999 { exit(3) }
+    // If push and pop were unbalanced the stack would be off by 8 and
+    // returning from these would fault rather than fail an assertion.
+    if mov_through(7) + push_pop(2) != 9 { exit(4) }
+    exit(9)
+}
+MNREOF
+    mnr_ok=1
+    for mnr_mode in "" "--legacy"; do
+        if $KRC --arch=$RUN_ARCH $mnr_mode "$DIR/../mnemr_tmp_$$.kr" -o /tmp/mnemr_$$ >/dev/null 2>&1; then
+            chmod +x /tmp/mnemr_$$
+            /tmp/mnemr_$$ >/dev/null 2>&1
+            mnr_rc=$?
+            [ "$mnr_rc" = "9" ] || { mnr_ok=0; echo "    ${mnr_mode:-ir} exited $mnr_rc, want 9"; }
+        else
+            mnr_ok=0; echo "    ${mnr_mode:-ir} build failed"
+        fi
+    done
+    if [ "$mnr_ok" = "1" ]; then
+        PASS=$((PASS + 1)); echo "  asm_push_pop_mov_runtime: PASS (values moved, REX.R/REX.B distinguished, stack balanced, both backends)"
+    else
+        FAIL=$((FAIL + 1)); echo "FAIL: asm_push_pop_mov_runtime"
+    fi
+    rm -f "$DIR/../mnemr_tmp_$$.kr" /tmp/mnemr_$$
+fi
+
 # --- std/mouse.kr and examples/mouse-gui ---
 #
 # Compile-only row first, arch-pinned: the artifact is inspected, not executed.
