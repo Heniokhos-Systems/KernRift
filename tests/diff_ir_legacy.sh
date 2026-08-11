@@ -3,6 +3,22 @@
 # For each program, compile+run through all four backends and compare exit codes.
 # Any disagreement is a parity bug. arm64 runs under qemu-aarch64-static if present.
 KRC="${KRC:-./build/krc3}"
+# A stale $KRC silently invalidates every row here. It bit us once as a false
+# RED (a Jun-10 krc3 still refused `continue` in a `for` loop, which the
+# compiler has supported for months) -- but the dangerous direction is a false
+# GREEN: an old binary agreeing with itself across all four backends while the
+# real compiler diverges. Refuse to run rather than report on the wrong binary.
+if [ -f "$KRC" ]; then
+    newest_src=$(ls -t src/*.kr 2>/dev/null | head -1)
+    if [ -n "$newest_src" ] && [ "$newest_src" -nt "$KRC" ]; then
+        echo "ERROR: $KRC is older than $newest_src -- it does not contain the current compiler." >&2
+        echo "       Rebuild (make build) or point KRC at a current binary, e.g. KRC=./build/krc2 $0" >&2
+        exit 2
+    fi
+else
+    echo "ERROR: $KRC does not exist. Set KRC= or run 'make build'." >&2
+    exit 2
+fi
 QEMU="$(command -v qemu-aarch64-static || true)"
 TMP=/tmp/difftest_$$
 DIV=0; TOTAL=0

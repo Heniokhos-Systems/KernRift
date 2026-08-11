@@ -65,3 +65,7 @@ packaging/deb/ext/
 
 # --target=none acceptance-gate scratch (tests/target_none/prove_no_syscalls.sh)
 /krc_tn_gate_*/
+
+# Example build artifacts
+examples/*/kernel.img
+examples/*/*.ppm

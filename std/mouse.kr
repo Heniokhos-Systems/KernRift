@@ -1,0 +1,204 @@
+// KernRift Standard Library — PS/2 mouse
+//
+// A pointer with no OS, no interrupt handler and no driver stack: enable the
+// auxiliary device on the 8042 and read its 3-byte movement packets.
+//
+// FREESTANDING-SAFE: no allocation.
+//
+// x86_64 only.
+//
+//     mouse_init()
+//     mouse_set_bounds(640, 480)
+//     loop {
+//         if mouse_poll() != 0 { redraw(mouse_x(), mouse_y(), mouse_buttons()) }
+//     }
+//
+// Polled, like std/ps2.kr, so it needs no IDT and no PIC setup.
+//
+// THIS MODULE NEVER TOUCHES PORT 0x60. std/ps2.kr owns it and hands mouse
+// bytes over through its aux ring -- see the "port ownership" note there for
+// why two pollers on one port cannot both work. Everything below is protocol.
+
+import "ps2.kr"
+
+// Button bits, matching the packet's own layout so mouse_buttons() needs no
+// translation.
+const u64 MOUSE_BTN_LEFT   = 0x01
+const u64 MOUSE_BTN_RIGHT  = 0x02
+const u64 MOUSE_BTN_MIDDLE = 0x04
+
+// Packet flag bits.
+const u64 MOUSE_FLAG_ALWAYS_1 = 0x08
+const u64 MOUSE_FLAG_X_SIGN   = 0x10
+const u64 MOUSE_FLAG_Y_SIGN   = 0x20
+const u64 MOUSE_FLAG_X_OVF    = 0x40
+const u64 MOUSE_FLAG_Y_OVF    = 0x80
+
+// Device commands (sent through ps2_aux_write).
+const u64 MOUSE_CMD_ENABLE_REPORTING  = 0xF4
+const u64 MOUSE_CMD_DISABLE_REPORTING = 0xF5
+const u64 MOUSE_CMD_SET_DEFAULTS      = 0xF6
+const u64 MOUSE_CMD_RESET             = 0xFF
+const u64 MOUSE_ACK                   = 0xFA
+
+// --- state ------------------------------------------------------------------
+
+static u64 mouse_ready    = 0
+static u64 mouse_pos_x    = 0
+static u64 mouse_pos_y    = 0
+static u64 mouse_max_x    = 639
+static u64 mouse_max_y    = 479
+static u64 mouse_btn      = 0
+// Packet assembly: 0, 1 or 2 bytes collected so far.
+static u64 mouse_phase    = 0
+static u64 mouse_b0       = 0
+static u64 mouse_b1       = 0
+// Diagnostics, worth having when a mouse "does nothing".
+static u64 mouse_packets  = 0
+static u64 mouse_resyncs  = 0
+
+fn mouse_x() -> u64 { return mouse_pos_x }
+fn mouse_y() -> u64 { return mouse_pos_y }
+fn mouse_buttons() -> u64 { return mouse_btn }
+fn mouse_is_ready() -> u64 { return mouse_ready }
+fn mouse_packet_count() -> u64 { return mouse_packets }
+fn mouse_resync_count() -> u64 { return mouse_resyncs }
+
+// Cursor is clamped to [0, max]. Call before polling; defaults suit 640x480.
+fn mouse_set_bounds(u64 w, u64 h) {
+    if w == 0 { mouse_max_x = 0 } else { mouse_max_x = w - 1 }
+    if h == 0 { mouse_max_y = 0 } else { mouse_max_y = h - 1 }
+    if mouse_pos_x > mouse_max_x { mouse_pos_x = mouse_max_x }
+    if mouse_pos_y > mouse_max_y { mouse_pos_y = mouse_max_y }
+}
+
+fn mouse_set_pos(u64 x, u64 y) {
+    mouse_pos_x = x
+    mouse_pos_y = y
+    if mouse_pos_x > mouse_max_x { mouse_pos_x = mouse_max_x }
+    if mouse_pos_y > mouse_max_y { mouse_pos_y = mouse_max_y }
+}
+
+// --- bring-up ---------------------------------------------------------------
+
+// Enable the auxiliary device and start streaming. Returns 1 on success, 0 if
+// no mouse answered.
+//
+// Every wait inside is bounded (std/ps2.kr's PS2_WAIT_SPINS), so a machine
+// with no mouse returns 0 instead of hanging -- there is no watchdog on bare
+// metal and a spin here would be unrecoverable.
+fn mouse_init() -> u64 {
+    ps2_init()                              // keyboard tables + the rings
+
+    // 0xA8 enables the aux port. Without it the device is present but mute,
+    // which is the most common reason a mouse "does not work".
+    if ps2_ctl_write(0xA8) == 0 { return 0 }
+
+    // Known-good state, then streaming on. QEMU needs no config-byte write.
+    ps2_aux_write(MOUSE_CMD_SET_DEFAULTS)
+    ps2_wait_read()                         // its ACK
+
+    if ps2_aux_write(MOUSE_CMD_ENABLE_REPORTING) == 0 { return 0 }
+    u64 ack = ps2_wait_read()
+    if ack != MOUSE_ACK { return 0 }
+
+    mouse_phase = 0
+    mouse_btn = 0
+    mouse_packets = 0
+    ps2_aux_flush()
+    ps2_clear_overflow()
+    mouse_ready = 1
+    return 1
+}
+
+// Recover from a desynchronised packet stream.
+//
+// THIS IS THE ONLY SOUND RECOVERY, and the reason is worth stating: the flags
+// byte has bit 3 always set, so it is tempting to resynchronise by scanning
+// for a byte with bit 3 set. That does not work. Bit 3 is also set in the
+// MOVEMENT bytes whenever |dx| or |dy| falls in 8..15, 24..31, and so on --
+// measured, three of four real packets contained such a false candidate. A
+// scan would lock onto a data byte and stay wrong.
+//
+// So bit 3 is used as a DETECTOR only. Recovery tells the DEVICE to restart
+// its own packet index: disable reporting, discard everything buffered, enable
+// again.
+fn mouse_resync() -> u64 {
+    mouse_resyncs = mouse_resyncs + 1
+    mouse_phase = 0
+    ps2_aux_write(MOUSE_CMD_DISABLE_REPORTING)
+    ps2_wait_read()
+    ps2_drain()
+    ps2_aux_flush()
+    ps2_clear_overflow()
+    if ps2_aux_write(MOUSE_CMD_ENABLE_REPORTING) == 0 { return 0 }
+    ps2_wait_read()
+    return 1
+}
+
+// --- polling ----------------------------------------------------------------
+
+// Apply one decoded packet to the cursor.
+fn mouse_apply(u64 flags, u64 xb, u64 yb) {
+    mouse_btn = flags & 0x07
+
+    // Overflow means the movement value is meaningless; keep the buttons and
+    // drop the motion rather than jumping the cursor across the screen.
+    if (flags & MOUSE_FLAG_X_OVF) != 0 { return }
+    if (flags & MOUSE_FLAG_Y_OVF) != 0 { return }
+
+    // 9-bit two's complement: the sign lives in the flags byte.
+    if (flags & MOUSE_FLAG_X_SIGN) != 0 {
+        u64 mag = 256 - xb
+        if xb == 0 { mag = 0 }
+        if mag > mouse_pos_x { mouse_pos_x = 0 } else { mouse_pos_x = mouse_pos_x - mag }
+    } else {
+        mouse_pos_x = mouse_pos_x + xb
+        if mouse_pos_x > mouse_max_x { mouse_pos_x = mouse_max_x }
+    }
+
+    // Y is inverted: the mouse reports +Y as UP, screens count +Y DOWN.
+    if (flags & MOUSE_FLAG_Y_SIGN) != 0 {
+        u64 mag = 256 - yb
+        if yb == 0 { mag = 0 }
+        mouse_pos_y = mouse_pos_y + mag
+        if mouse_pos_y > mouse_max_y { mouse_pos_y = mouse_max_y }
+    } else {
+        if yb > mouse_pos_y { mouse_pos_y = 0 } else { mouse_pos_y = mouse_pos_y - yb }
+    }
+}
+
+// Non-blocking. Consumes whatever is pending and returns 1 if the cursor or
+// button state changed, else 0.
+fn mouse_poll() -> u64 {
+    if mouse_ready == 0 { return 0 }
+    ps2_drain()
+
+    // A dropped byte means the 3-byte framing is no longer trustworthy.
+    if ps2_overflowed() != 0 { mouse_resync()  return 0 }
+
+    u64 changed = 0
+    loop {
+        u64 b = ps2_aux_pop()
+        if b == PS2_EMPTY { break }
+
+        if mouse_phase == 0 {
+            // Detector, not a resync point -- see mouse_resync.
+            if (b & MOUSE_FLAG_ALWAYS_1) == 0 {
+                mouse_resync()
+                break
+            }
+            mouse_b0 = b
+            mouse_phase = 1
+        } else if mouse_phase == 1 {
+            mouse_b1 = b
+            mouse_phase = 2
+        } else {
+            mouse_apply(mouse_b0, mouse_b1, b)
+            mouse_phase = 0
+            mouse_packets = mouse_packets + 1
+            changed = 1
+        }
+    }
+    return changed
+}

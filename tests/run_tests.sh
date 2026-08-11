@@ -3981,6 +3981,1570 @@ else
     FAIL=$((FAIL + 1)); echo "FAIL: analysis_unreachable_write_lengths_pinned ($analysis_static_err)"
 fi
 
+# --- std/idt.kr: interrupt descriptor table and fault reporting ---
+#
+# The failure this module exists to end is also the one its tests have to
+# survive: a wrong gate field triple-faults, and under QEMU a triple fault is
+# indistinguishable from a clean reboot. So every assertion below is on the
+# INNER message the handler printed -- never an exit code, never "the guest
+# stopped". Each was observed red by breaking one field at a time: an IDTR
+# limit of 47, a gate with the present bit clear, a gate missing offset bits
+# 31:16, and a rel32 measured 8 bytes short all killed the guest silently;
+# vector 14 built as a no-error-code stub still printed `EXCEPTION 14 (#PF)`
+# but with `err=0x0 rip=0x2`, which is why the RIP is range-checked and not
+# merely required to be non-zero.
+#
+# Boot-and-wait instead of a fixed timeout: the report appears in well under a
+# second, and a guest that runs off into garbage can wedge QEMU hard enough to
+# ignore SIGTERM (measured -- a `timeout 5` left one spinning for five
+# minutes). SIGKILL on a PID this shell owns cannot be ignored.
+idt_boot_wait() {   # <-kernel|-bios> <image> <log> <marker>
+    rm -f "$3"
+    qemu-system-x86_64 "$1" "$2" -m 256 -serial "file:$3" \
+        -display none -no-reboot >/dev/null 2>&1 &
+    local qpid=$!
+    local i=0
+    while [ $i -lt 60 ]; do
+        if grep -q "$4" "$3" 2>/dev/null; then break; fi
+        sleep 0.25
+        i=$((i + 1))
+    done
+    kill -9 $qpid >/dev/null 2>&1
+    wait $qpid 2>/dev/null
+}
+
+# Whole surface must compile freestanding, including what the fault rows below
+# never call. Compile-only, so the arch is pinned: std/idt.kr is x86_64 by
+# construction. The `serial_putsn("BAD...")` branches are not assertions -- this
+# image is never booted -- they exist so dead-code elimination cannot drop the
+# calls before their asm is emitted, which is the only way a compile row can
+# cover a function at all.
+TOTAL=$((TOTAL + 1))
+cat > "$DIR/../idtsurf_tmp_$$.kr" <<'IDTSEOF'
+import "std/idt.kr"
+@naked
+fn my_isr() { asm { "iretq" } }
+fn main() -> uint32 {
+    serial_init()
+    idt_init()
+    idt_install_default_handlers()
+    idt_set_handler(32, fn_addr("my_isr"))
+    idt_set_gate(33, fn_addr("my_isr"), idt_get_cs(), 0, IDT_TYPE_TRAP)
+    idt_clear_handler(33)
+    idt_load()
+    if idt_limit() != 4095 { serial_putsn("BADLIMIT") }
+    if idt_base() != idt_table_addr() { serial_putsn("BADBASE") }
+    if idt_stub_addr(1) - idt_stub_addr(0) != IDT_GATE_SIZE { serial_putsn("BADSTUB") }
+    if idt_vector_has_error_code(14) == 0 { serial_putsn("BADERRVEC") }
+    if idt_vector_has_error_code(15) != 0 { serial_putsn("BADERRVEC") }
+    if idt_mnemonic(0) == 0 { serial_putsn("BADMNEM") }
+    if idt_read_cs() == 0 { serial_putsn("BADCS") }
+    halt_forever()
+    return 0
+}
+IDTSEOF
+if $KRC --target=none --arch=x86_64 --emit=image --load-addr=0x100000 \
+        --stack-top=0x90000 "$DIR/../idtsurf_tmp_$$.kr" -o /tmp/idtsurf_$$.img >/dev/null 2>&1; then
+    PASS=$((PASS + 1)); echo "  idt_full_surface_freestanding: PASS"
+else
+    FAIL=$((FAIL + 1)); echo "FAIL: idt_full_surface_freestanding"
+    $KRC --target=none --arch=x86_64 --emit=image --load-addr=0x100000 \
+         --stack-top=0x90000 "$DIR/../idtsurf_tmp_$$.kr" -o /tmp/idtsurf_$$.img 2>&1 \
+         | grep error | head -3 | sed 's/^/    /'
+fi
+rm -f "$DIR/../idtsurf_tmp_$$.kr" /tmp/idtsurf_$$.img
+
+# The two fields most likely to be silently wrong, read back out of the LIVE
+# IDTR with SIDT -- not out of the pseudo-descriptor the module just wrote,
+# which would only prove it can echo its own bytes. The base must be this
+# module's table, which is what says `lidt` took effect at all.
+#
+#   * The IDTR limit is size MINUS ONE. 4096 is not caught by anything -- the
+#     CPU only checks that the accessed gate fits -- so it is pinned here
+#     rather than left to a fault row that cannot see it.
+#   * The code selector differs BETWEEN IMAGE FORMS: 0x8 under multiboot,
+#     0x18 from the reset vector. Hardcoding 0x8 gives a module that works
+#     under -kernel and silently triple-faults under -bios (measured), which
+#     is exactly why both forms are booted here and below.
+TOTAL=$((TOTAL + 1))
+IDTCS_K="/tmp/idtcs_k_$$.img"; IDTCS_B="/tmp/idtcs_b_$$.img"
+cat > "$DIR/../idtcs_tmp_$$.kr" <<'IDTCEOF'
+import "std/idt.kr"
+static u8[32] idtcs_buf
+fn main() -> uint32 {
+    serial_init()
+    idt_init()
+    idt_load()
+    u64 b = idtcs_buf
+    serial_puts("IDTCS=")
+    cstr_u64_hex0x(b, 32, idt_get_cs(), 0)
+    serial_puts(b)
+    serial_puts(" IDTLIMIT=")
+    cstr_u64_dec(b, 32, idt_limit())
+    serial_puts(b)
+    serial_puts(" IDTBASE=")
+    if idt_base() == idt_table_addr() { serial_puts("ours") }
+    if idt_base() != idt_table_addr() { serial_puts("WRONG") }
+    serial_putc(10)
+    halt_forever()
+    return 0
+}
+IDTCEOF
+if ! command -v qemu-system-x86_64 >/dev/null 2>&1; then
+    PASS=$((PASS + 1)); echo "  idt_selector_and_limit: PASS (SKIPPED -- no qemu-system-x86_64)"
+elif ! $KRC --target=none --arch=x86_64 --emit=image --load-addr=0x100000 \
+            --stack-top=0x90000 "$DIR/../idtcs_tmp_$$.kr" -o "$IDTCS_K" >/dev/null 2>&1 \
+  || ! $KRC --target=none --arch=x86_64 --emit=image --reset-vector \
+            --stack-top=0x90000 "$DIR/../idtcs_tmp_$$.kr" -o "$IDTCS_B" >/dev/null 2>&1; then
+    FAIL=$((FAIL + 1)); echo "FAIL: idt_selector_and_limit (compile failed)"
+else
+    idt_boot_wait -kernel "$IDTCS_K" "/tmp/idtcs_k_$$.log" "IDTLIMIT="
+    idt_boot_wait -bios   "$IDTCS_B" "/tmp/idtcs_b_$$.log" "IDTLIMIT="
+    idtcs_ok=1
+    grep -q "IDTCS=0x8 IDTLIMIT=4095 IDTBASE=ours" "/tmp/idtcs_k_$$.log" 2>/dev/null || idtcs_ok=0
+    grep -q "IDTCS=0x18 IDTLIMIT=4095 IDTBASE=ours" "/tmp/idtcs_b_$$.log" 2>/dev/null || idtcs_ok=0
+    if [ "$idtcs_ok" = "1" ]; then
+        PASS=$((PASS + 1)); echo "  idt_selector_and_limit: PASS (live IDTR: CS 0x8/-kernel 0x18/-bios, limit 4095, base ours)"
+    else
+        FAIL=$((FAIL + 1)); echo "FAIL: idt_selector_and_limit"
+        echo "    -kernel: $(cat /tmp/idtcs_k_$$.log 2>/dev/null | tr -d '\r' | tail -1)"
+        echo "    -bios:   $(cat /tmp/idtcs_b_$$.log 2>/dev/null | tr -d '\r' | tail -1)"
+    fi
+fi
+rm -f "$DIR/../idtcs_tmp_$$.kr" "$IDTCS_K" "$IDTCS_B" "/tmp/idtcs_k_$$.log" "/tmp/idtcs_b_$$.log"
+
+# Four real faults, in both image forms, each asserted on vector, mnemonic,
+# error code AND a RIP inside the loaded payload.
+#
+# The error codes are not decoration: #PF here is a WRITE to an unmapped page,
+# so the CPU pushes 0x2 and a build that misread the frame cannot produce it by
+# accident. #DE and #BP push nothing, and the stub's `push 0` is what makes
+# their frames the same shape -- get that list wrong and the RIP check fires.
+#
+# #BP is a trap, so its reported RIP is the instruction AFTER the int3;
+# #DE/#GP/#PF are faults and report the faulting instruction itself. Both were
+# confirmed against objdump of the image (int3 at 0x10134c -> rip 0x10134d).
+TOTAL=$((TOTAL + 1))
+cat > "$DIR/../idtflt_in_$$.kr" <<'IDTFEOF'
+import "std/idt.kr"
+static u64 idtflt_sink = 0
+fn main() -> uint32 {
+    serial_init()
+    idt_init()
+    idt_install_default_handlers()
+    idt_load()
+    u64 sel = __SEL__
+    if sel == 0 {
+        u64 z = idtflt_sink
+        idtflt_sink = 7 / z
+    }
+    if sel == 3 {
+        asm { "0xCC" }
+    }
+    if sel == 13 {
+        u64 bad = 0x0000800000000000
+        idtflt_sink = load64(bad)
+    }
+    if sel == 14 {
+        u64 bad = 0x0000700000000000
+        store64(bad, 1)
+    }
+    serial_putsn("NOFAULT")
+    halt_forever()
+    return 0
+}
+IDTFEOF
+if ! command -v qemu-system-x86_64 >/dev/null 2>&1; then
+    PASS=$((PASS + 1)); echo "  idt_reports_four_faults: PASS (SKIPPED -- no qemu-system-x86_64)"
+else
+    idtf_ok=1
+    idtf_notes=""
+    for idtf_case in "0 #DE 0x0" "3 #BP 0x0" "13 #GP 0x0" "14 #PF 0x2"; do
+        idtf_vec="${idtf_case%% *}"
+        idtf_rest="${idtf_case#* }"
+        idtf_mn="${idtf_rest%% *}"
+        idtf_err="${idtf_rest#* }"
+        sed "s/__SEL__/$idtf_vec/" "$DIR/../idtflt_in_$$.kr" > "$DIR/../idtflt_tmp_$$.kr"
+        idtf_k="/tmp/idtflt_k_$$.img"; idtf_b="/tmp/idtflt_b_$$.img"
+        if ! $KRC --target=none --arch=x86_64 --emit=image --load-addr=0x100000 \
+                  --stack-top=0x90000 "$DIR/../idtflt_tmp_$$.kr" -o "$idtf_k" >/dev/null 2>&1 \
+        || ! $KRC --target=none --arch=x86_64 --emit=image --reset-vector \
+                  --stack-top=0x90000 "$DIR/../idtflt_tmp_$$.kr" -o "$idtf_b" >/dev/null 2>&1; then
+            idtf_ok=0; idtf_notes="$idtf_notes vec$idtf_vec:compile"
+            continue
+        fi
+        # RIP must land inside the payload: [0x100000, 0x100000 + image size).
+        # Derived from the artifact rather than hardcoded, so the bound stays
+        # tight as the test program changes. It rejects every wrong-field RIP
+        # measured while breaking this on purpose -- 0x0, 0x2 and 0x8.
+        idtf_hi=$((1048576 + $(wc -c < "$idtf_k")))
+        for idtf_form in kernel bios; do
+            if [ "$idtf_form" = "kernel" ]; then
+                idt_boot_wait -kernel "$idtf_k" "/tmp/idtflt_$$.log" "EXCEPTION"
+            else
+                idt_boot_wait -bios "$idtf_b" "/tmp/idtflt_$$.log" "EXCEPTION"
+            fi
+            # Not anchored at start-of-line: the reset-vector boot path prints
+            # its own "RPL" progress marker with no trailing newline, so under
+            # -bios the guest's first line reads "RPLEXCEPTION 3 (#BP) ...".
+            # An anchored match reported all four -bios cases as silent triple
+            # faults while the guest was in fact reporting them correctly.
+            idtf_line=$(tr -d '\r' < "/tmp/idtflt_$$.log" 2>/dev/null | grep -o 'EXCEPTION .*' | head -1)
+            idtf_want="EXCEPTION $idtf_vec ($idtf_mn) err=$idtf_err rip=0x"
+            case "$idtf_line" in
+                "$idtf_want"*) ;;
+                *) idtf_ok=0; idtf_notes="$idtf_notes [$idtf_form v$idtf_vec: '${idtf_line:-<silent: triple fault?>}']"; continue ;;
+            esac
+            idtf_rip=$(printf '%s' "$idtf_line" | sed -n 's/.* rip=\(0x[0-9a-f]*\).*/\1/p')
+            idtf_ripd=$((idtf_rip))
+            if [ "$idtf_ripd" -lt 1048576 ] || [ "$idtf_ripd" -ge "$idtf_hi" ]; then
+                idtf_ok=0; idtf_notes="$idtf_notes [$idtf_form v$idtf_vec: rip $idtf_rip outside payload]"
+            fi
+        done
+        rm -f "$idtf_k" "$idtf_b"
+    done
+    if [ "$idtf_ok" = "1" ]; then
+        PASS=$((PASS + 1)); echo "  idt_reports_four_faults: PASS (#DE #BP #GP #PF, vector+err+rip, -kernel and -bios)"
+    else
+        FAIL=$((FAIL + 1)); echo "FAIL: idt_reports_four_faults:$idtf_notes"
+    fi
+fi
+rm -f "$DIR/../idtflt_in_$$.kr" "$DIR/../idtflt_tmp_$$.kr" "/tmp/idtflt_$$.log"
+
+# --- std/gzip.kr: output must satisfy a REAL gunzip, not our own reader ---
+#
+# A self-written decoder would agree with a self-written encoder about a shared
+# misreading of RFC 1951, so this shells out to the system gunzip and to
+# `gzip -t`, which verifies the CRC-32 and ISIZE trailer rather than merely
+# decoding the stream.
+#
+# The sizes are chosen at the stored-block boundary, which is where the
+# framing actually gets exercised: 65535 is exactly one block, 65536 is two
+# (the first non-final), and 0 is the empty-input path that still has to emit
+# one final empty block. A test on a short string alone would never run the
+# multi-block loop at all.
+TOTAL=$((TOTAL + 1))
+if ! command -v gunzip >/dev/null 2>&1 || ! command -v gzip >/dev/null 2>&1; then
+    PASS=$((PASS + 1)); echo "  gzip_stored_roundtrips: PASS (SKIPPED -- no gzip/gunzip)"
+elif ! $KRC --arch=$RUN_ARCH "$DIR/../examples/gzip_stored.kr" -o /tmp/krgz_$$ >/dev/null 2>&1; then
+    FAIL=$((FAIL + 1)); echo "FAIL: gzip_stored_roundtrips (compile failed)"
+else
+    chmod +x /tmp/krgz_$$
+    gz_ok=1
+    gz_note=""
+    for gz_n in 0 1 65535 65536 131070; do
+        head -c $gz_n /dev/urandom > /tmp/krgz_in_$$ 2>/dev/null
+        if ! /tmp/krgz_$$ < /tmp/krgz_in_$$ > /tmp/krgz_out_$$.gz 2>/dev/null; then
+            gz_ok=0; gz_note="encoder failed at $gz_n"; break
+        fi
+        if ! gunzip -c /tmp/krgz_out_$$.gz > /tmp/krgz_back_$$ 2>/dev/null; then
+            gz_ok=0; gz_note="gunzip rejected $gz_n"; break
+        fi
+        if ! cmp -s /tmp/krgz_in_$$ /tmp/krgz_back_$$; then
+            gz_ok=0; gz_note="round-trip differs at $gz_n"; break
+        fi
+        # gzip -t re-checks CRC-32 and ISIZE, which a plain decode does not.
+        if ! gzip -t /tmp/krgz_out_$$.gz >/dev/null 2>&1; then
+            gz_ok=0; gz_note="gzip -t rejected $gz_n (CRC or ISIZE wrong)"; break
+        fi
+    done
+    if [ "$gz_ok" = "1" ]; then
+        PASS=$((PASS + 1)); echo "  gzip_stored_roundtrips: PASS (0/1/65535/65536/131070 B via system gunzip + gzip -t)"
+    else
+        FAIL=$((FAIL + 1)); echo "FAIL: gzip_stored_roundtrips ($gz_note)"
+    fi
+    rm -f /tmp/krgz_$$ /tmp/krgz_in_$$ /tmp/krgz_out_$$.gz /tmp/krgz_back_$$
+fi
+
+# --- push/pop/mov/sidt mnemonics ---
+#
+# These exist so std/idt.kr need not be written in raw hex. Two rows, because
+# "it assembles to the right bytes" and "it does the right thing" are different
+# claims and the second is the one that matters.
+#
+# Byte assertion. Compile-only, so the arch may be pinned. The encodings are
+# asserted verbatim rather than by re-deriving them here, because a test that
+# recomputes the encoding the same way the compiler does would agree with the
+# compiler about a shared mistake.
+TOTAL=$((TOTAL + 1))
+cat > "$DIR/../mnem_tmp_$$.kr" <<'MNEOF'
+fn probe() {
+    asm { "push rax" }
+    asm { "push r15" }
+    asm { "pop r15" }
+    asm { "pop rax" }
+    asm { "mov r12, rax" }
+    asm { "mov rax, r12" }
+    asm { "mov rax, cs" }
+    asm { "mov rax, [rsp+0x100]" }
+    asm { "sidt [rax]" }
+}
+fn main() { probe()  exit(0) }
+MNEOF
+mnem_ok=1
+mnem_note=""
+if $KRC --arch=x86_64 --emit=obj "$DIR/../mnem_tmp_$$.kr" -o /tmp/mnem_$$.o >/dev/null 2>&1; then
+    mnem_hex=$(od -An -tx1 -v /tmp/mnem_$$.o | tr -d ' \n')
+    # push rax / push r15 / pop r15 / pop rax, contiguous.
+    printf '%s' "$mnem_hex" | grep -q '504157415f58' || { mnem_ok=0; mnem_note="push/pop sequence"; }
+    # mov r12,rax then mov rax,r12 -- REX.B vs REX.R. If these two were the
+    # same bytes, the prefix bits would be inverted and the wrong register
+    # would move whenever an operand is r8-r15.
+    printf '%s' "$mnem_hex" | grep -q '4989c44c89e0' || { mnem_ok=0; mnem_note="mov REX.R/REX.B"; }
+    # mov rax,cs ; mov rax,[rsp+0x100] ; sidt [rax]
+    printf '%s' "$mnem_hex" | grep -q '8cc8488b8424000100000f0108' || { mnem_ok=0; mnem_note="cs/disp32/sidt"; }
+else
+    mnem_ok=0; mnem_note="compile failed"
+fi
+if [ "$mnem_ok" = "1" ]; then
+    PASS=$((PASS + 1)); echo "  asm_push_pop_mov_encodings: PASS (push/pop, REX.R vs REX.B, cs, [rsp+disp32], sidt)"
+else
+    FAIL=$((FAIL + 1)); echo "FAIL: asm_push_pop_mov_encodings ($mnem_note)"
+fi
+rm -f "$DIR/../mnem_tmp_$$.kr" /tmp/mnem_$$.o
+
+# Runtime behaviour. This row EXECUTES, so it cannot pin an arch -- but the
+# mnemonics are x86-only by construction, so it runs only where the host is
+# x86_64 and says so otherwise rather than pretending to have covered it.
+TOTAL=$((TOTAL + 1))
+if [ "$RUN_ARCH" != "x86_64" ]; then
+    PASS=$((PASS + 1)); echo "  asm_push_pop_mov_runtime: PASS (SKIPPED -- x86-only mnemonics, host is $RUN_ARCH)"
+else
+    cat > "$DIR/../mnemr_tmp_$$.kr" <<'MNREOF'
+fn mov_through(u64 a) -> u64 {
+    u64 out = 0
+    asm { "mov rbx, rax" } in(a -> rax) out(rbx -> out)
+    return out
+}
+fn push_pop(u64 a) -> u64 {
+    u64 out = 0
+    asm { "push rax"  "pop rbx" } in(a -> rax) out(rbx -> out)
+    return out
+}
+// Discriminates REX.R from REX.B. `a` goes into r12, rax is then overwritten
+// with `b`, and r12 is brought back into rax -- so the result must be `a`.
+// With the REX bits inverted, `mov rax, r12` assembles to something that
+// leaves rax alone, and the result is `b`.
+//
+// The obvious form (push rax; pop r13; mov rbx, r13) does NOT discriminate:
+// measured, it still passed with REX.R/REX.B swapped, because rbx happened to
+// already hold the expected value.
+fn rex_roundtrip(u64 a, u64 b) -> u64 {
+    u64 out = 0
+    asm { "push rax"  "pop r12"  "mov rax, rcx"  "mov rax, r12" } in(a -> rax, b -> rcx) out(rax -> out)
+    return out
+}
+fn main() {
+    if mov_through(1234) != 1234 { exit(1) }
+    if push_pop(4321) != 4321 { exit(2) }
+    if rex_roundtrip(999, 555) != 999 { exit(3) }
+    // If push and pop were unbalanced the stack would be off by 8 and
+    // returning from these would fault rather than fail an assertion.
+    if mov_through(7) + push_pop(2) != 9 { exit(4) }
+    exit(9)
+}
+MNREOF
+    mnr_ok=1
+    for mnr_mode in "" "--legacy"; do
+        if $KRC --arch=$RUN_ARCH $mnr_mode "$DIR/../mnemr_tmp_$$.kr" -o /tmp/mnemr_$$ >/dev/null 2>&1; then
+            chmod +x /tmp/mnemr_$$
+            /tmp/mnemr_$$ >/dev/null 2>&1
+            mnr_rc=$?
+            [ "$mnr_rc" = "9" ] || { mnr_ok=0; echo "    ${mnr_mode:-ir} exited $mnr_rc, want 9"; }
+        else
+            mnr_ok=0; echo "    ${mnr_mode:-ir} build failed"
+        fi
+    done
+    if [ "$mnr_ok" = "1" ]; then
+        PASS=$((PASS + 1)); echo "  asm_push_pop_mov_runtime: PASS (values moved, REX.R/REX.B distinguished, stack balanced, both backends)"
+    else
+        FAIL=$((FAIL + 1)); echo "FAIL: asm_push_pop_mov_runtime"
+    fi
+    rm -f "$DIR/../mnemr_tmp_$$.kr" /tmp/mnemr_$$
+fi
+
+# --- std/mouse.kr and examples/mouse-gui ---
+#
+# Compile-only row first, arch-pinned: the artifact is inspected, not executed.
+TOTAL=$((TOTAL + 1))
+MG_DIR="$DIR/../examples/mouse-gui"
+MG_IMG="/tmp/krc_mgui_$$.img"
+if [ ! -f "$MG_DIR/main.kr" ]; then
+    FAIL=$((FAIL + 1)); echo "FAIL: mouse_gui_example_builds (source missing)"
+elif ! $KRC --target=none --arch=x86_64 --emit=image \
+            --load-addr=0x100000 --stack-top=0x90000 \
+            "$MG_DIR/main.kr" -o "$MG_IMG" >/dev/null 2>&1; then
+    FAIL=$((FAIL + 1)); echo "FAIL: mouse_gui_example_builds (compile failed)"
+else
+    PASS=$((PASS + 1)); echo "  mouse_gui_example_builds: PASS (widgets+mouse+ramfb, --target=none)"
+fi
+
+# The behavioural row. Drives the mouse AND the keyboard over QMP and asserts
+# three independent things: the cursor reached a commanded position, a click
+# was attributed to the right widget AND changed pixels, and the keyboard still
+# worked while the mouse was streaming.
+#
+# That last one is the load-bearing one. Keyboard and mouse share a single 8042
+# output buffer, so two pollers each reading 0x60 steal each other's bytes.
+# Measured with a second reader reintroduced: the cursor never moved at all,
+# the click was never seen, and a keystroke went missing -- 3 of 3 checks red.
+TOTAL=$((TOTAL + 1))
+if ! command -v qemu-system-x86_64 >/dev/null 2>&1 || ! command -v python3 >/dev/null 2>&1; then
+    PASS=$((PASS + 1)); echo "  mouse_gui_example_runs: PASS (SKIPPED -- no qemu-system-x86_64/python3)"
+elif [ ! -f "$MG_IMG" ]; then
+    FAIL=$((FAIL + 1)); echo "FAIL: mouse_gui_example_runs (no image from the row above)"
+else
+    mg_out=$(timeout 200 python3 "$MG_DIR/check.py" "$MG_IMG" 2>&1)
+    if printf '%s' "$mg_out" | grep -q '^PASS: cursor moved'; then
+        PASS=$((PASS + 1)); echo "  mouse_gui_example_runs: PASS (cursor, click-changes-pixels, keyboard alive)"
+    else
+        FAIL=$((FAIL + 1)); echo "FAIL: mouse_gui_example_runs"
+        printf '%s\n' "$mg_out" | grep -E '^BAD|^FAIL' | sed 's/^/    /' | head -6
+    fi
+fi
+rm -f "$MG_IMG"
+
+# std/mouse.kr must never read the shared port itself. This is a SOURCE
+# invariant rather than a behavioural one because the failure it prevents is
+# intermittent: a second reader on 0x60 only loses the bytes it happens to
+# win, so a behavioural test can pass by timing luck. std/ps2.kr owns the port;
+# mouse.kr is protocol only.
+TOTAL=$((TOTAL + 1))
+if grep -nE '\b(inb|outb)\s*\(\s*(PS2_DATA|PS2_STATUS|PS2_CMD|0x60|0x64)' "$DIR/../std/mouse.kr" >/dev/null 2>&1; then
+    FAIL=$((FAIL + 1)); echo "FAIL: mouse_never_touches_shared_port (std/mouse.kr reads 0x60/0x64 directly)"
+    grep -nE '\b(inb|outb)\s*\(' "$DIR/../std/mouse.kr" | sed 's/^/    /' | head -4
+else
+    PASS=$((PASS + 1)); echo "  mouse_never_touches_shared_port: PASS (ps2.kr is the only owner of 0x60)"
+fi
+
+# Whole surface must compile freestanding, including what the demo never calls.
+TOTAL=$((TOTAL + 1))
+cat > "$DIR/../mou_tmp_$$.kr" <<'MOUEOF'
+import "std/mouse.kr"
+fn main() -> uint32 {
+    if mouse_init() == 0 { loop { } }
+    mouse_set_bounds(1024, 768)
+    mouse_set_pos(10, 10)
+    if mouse_poll() != 0 {
+        u64 _x = mouse_x()
+        u64 _y = mouse_y()
+        if (mouse_buttons() & MOUSE_BTN_LEFT) != 0 { }
+        if (mouse_buttons() & MOUSE_BTN_RIGHT) != 0 { }
+        if (mouse_buttons() & MOUSE_BTN_MIDDLE) != 0 { }
+    }
+    if mouse_is_ready() == 0 { mouse_resync() }
+    u64 _p = mouse_packet_count()
+    u64 _r = mouse_resync_count()
+    if ps2_overflowed() != 0 { ps2_clear_overflow() }
+    ps2_drain()
+    if ps2_kbd_pop() == PS2_EMPTY { }
+    if ps2_aux_pop() == PS2_EMPTY { }
+    ps2_aux_flush()
+    halt_forever()
+    return 0
+}
+MOUEOF
+if $KRC --target=none --arch=x86_64 --emit=image --load-addr=0x100000 \
+        --stack-top=0x90000 "$DIR/../mou_tmp_$$.kr" -o /tmp/mou_$$.img >/dev/null 2>&1; then
+    PASS=$((PASS + 1)); echo "  mouse_full_surface_freestanding: PASS"
+else
+    FAIL=$((FAIL + 1)); echo "FAIL: mouse_full_surface_freestanding"
+    $KRC --target=none --arch=x86_64 --emit=image --load-addr=0x100000 \
+         --stack-top=0x90000 "$DIR/../mou_tmp_$$.kr" -o /tmp/mou_$$.img 2>&1 | grep error | head -3 | sed 's/^/    /'
+fi
+rm -f "$DIR/../mou_tmp_$$.kr" /tmp/mou_$$.img
+
+# --- std/x86.kr + std/cstr.kr: bare-metal support modules ---
+# Both must work under --target=none. cstr.kr exists because std/string.kr's
+# int_to_str/str_copy ALLOCATE their result, and alloc is refused on bare metal
+# -- so formatting a number needed a heap. These write into a caller buffer.
+run_test "cstr_format_and_string_ops" 'import "std/cstr.kr"
+fn chk(u64 a, u64 b, u64 code) { if a != b { exit(code) } }
+fn main() {
+    u8[64] b
+    chk(cstr_u64_dec(b, 64, 0), 1, 1)
+    chk(cstr_eq(b, "0"), 1, 2)
+    chk(cstr_u64_dec(b, 64, 18446744073709551615), 20, 3)
+    chk(cstr_eq(b, "18446744073709551615"), 1, 4)
+    cstr_u64_hex(b, 64, 0xDEADBEEF, 0)
+    chk(cstr_eq(b, "deadbeef"), 1, 5)
+    cstr_u64_hex(b, 64, 0x1F, 8)
+    chk(cstr_eq(b, "0000001f"), 1, 6)
+    cstr_u64_hex0x(b, 64, 0x1000, 0)
+    chk(cstr_eq(b, "0x1000"), 1, 7)
+    cstr_i64_dec(b, 64, 0 - 42)
+    chk(cstr_eq(b, "-42"), 1, 8)
+    chk(cstr_u64_dec(b, 3, 4095), 2, 9)
+    chk(cstr_eq(b, "40"), 1, 10)
+    chk(cstr_copy(b, "hello", 64), 5, 11)
+    chk(cstr_append(b, "!!", 64), 7, 12)
+    chk(cstr_eq(b, "hello!!"), 1, 13)
+    chk(cstr_find("a,b", 44), 1, 14)
+    chk(cstr_find("abc", 122), CSTR_NOTFOUND, 15)
+    u8[32] line
+    cstr_copy(line, "echo  hi there", 32)
+    u64 args = cstr_split_word(line)
+    chk(cstr_eq(line, "echo"), 1, 16)
+    chk(cstr_eq(args, "hi there"), 1, 17)
+    chk(cstr_parse_u64("1234x", 0), 1234, 18)
+    chk(cstr_parse_hex("0xff", 0), 255, 19)
+    exit(9)
+}' 9
+
+# std/x86.kr: only the NON-PRIVILEGED surface can run hosted -- port I/O,
+# control registers, MSRs, cli/sti and lgdt/lidt are ring 0 and fault in
+# userspace. The privileged half is covered by the freestanding compile below.
+#
+# rdtsc is asserted to ADVANCE between two reads, not to be ordered:
+# `rdtsc() < t1` was the old form, and a rdtsc broken to return a constant
+# (the shape a dropped out() binding produces) passed it -- 0 < 0 is false
+# (measured). Two reads of a cycle counter are never equal, and equality
+# stays true across a core migration where ordering does not, so this form
+# discriminates without the flake.
+run_test "x86_nonprivileged_surface" 'import "std/x86.kr"
+fn main() {
+    if bswap16(0x1234) != 0x3412 { exit(1) }
+    if bswap32(0x11223344) != 0x44332211 { exit(2) }
+    if bswap64(0x1122334455667788) != 0x8877665544332211 { exit(3) }
+    if bswap32(bswap32(0xDEADBEEF)) != 0xDEADBEEF { exit(4) }
+    u64 t1 = rdtsc()
+    cpu_relax()
+    if rdtsc() == t1 { exit(5) }
+    if cpuid_eax(0) == 0 { exit(6) }
+    exit(9)
+}' 9
+
+# The whole point of both modules: they compile with no OS underneath.
+# Compile-only, so the arch may be pinned.
+TOTAL=$((TOTAL + 1))
+bm_ok=1
+cat > "$DIR/../bm_tmp_$$.kr" <<'BMEOF'
+import "std/cstr.kr"
+import "std/x86.kr"
+static u8[64] scratch
+fn main() -> uint32 {
+    u64 b = scratch
+    cstr_u64_hex0x(b, 64, 0x1000000, 8)
+    cstr_i64_dec(b, 64, 0 - 1)
+    cstr_append(b, "-metal", 64)
+    outb(0x3F8, 65)
+    u64 v = inb(0x3F8)
+    write_cr3(read_cr3())
+    invlpg(0x1000)
+    lgdt(0x2000)
+    wrmsr(0xC0000080, rdmsr(0xC0000080))
+    cli()
+    sti()
+    cpu_relax()
+    if v == 0xFFFF { hlt() }
+    loop { }
+}
+BMEOF
+$KRC --target=none --arch=x86_64 --emit=image --load-addr=0x100000 --stack-top=0x90000      "$DIR/../bm_tmp_$$.kr" -o /tmp/bm_$$.img >/dev/null 2>&1 || { bm_ok=0; echo "  x86_64 freestanding build failed"; }
+# cstr must be arch-neutral too
+cat > "$DIR/../bm2_tmp_$$.kr" <<'BM2EOF'
+import "std/cstr.kr"
+static u8[64] scratch
+fn main() -> uint32 {
+    u64 b = scratch
+    cstr_u64_hex0x(b, 64, 0x40080000, 8)
+    cstr_u64_dec(b, 64, 12345)
+    loop { }
+}
+BM2EOF
+$KRC --target=none --arch=arm64 --emit=image --load-addr=0x40080000 --stack-top=0x40200000      "$DIR/../bm2_tmp_$$.kr" -o /tmp/bm2_$$.img >/dev/null 2>&1 || { bm_ok=0; echo "  arm64 freestanding build failed"; }
+if [ "$bm_ok" = "1" ]; then
+    PASS=$((PASS + 1)); echo "  bare_metal_std_modules: PASS (cstr+x86 on x86_64, cstr on arm64, --target=none)"
+else
+    FAIL=$((FAIL + 1)); echo "FAIL: bare_metal_std_modules"
+fi
+rm -f "$DIR/../bm_tmp_$$.kr" "$DIR/../bm2_tmp_$$.kr" /tmp/bm_$$.img /tmp/bm2_$$.img
+
+# `pause` (F3 90) as a first-class mnemonic: a spin loop should not need
+# asm("0xF3 0x90"). Compile-only + byte assertion, so the arch may be pinned.
+TOTAL=$((TOTAL + 1))
+printf 'fn main(){ asm { "pause" }  exit(0) }\n' > "$DIR/../pz_tmp_$$.kr"
+pz_out=$($KRC --arch=x86_64 --emit=asm "$DIR/../pz_tmp_$$.kr" 2>&1)
+pz_l=$(printf '%s' "$pz_out" | sed -n 's/.* -> \(.*\) (asm listing)$/\1/p')
+if [ -f "$pz_l" ] && grep -qi 'f3 90' "$pz_l"; then
+    PASS=$((PASS + 1)); echo "  asm_pause_mnemonic: PASS (F3 90 emitted and decoded)"
+else
+    FAIL=$((FAIL + 1)); echo "FAIL: asm_pause_mnemonic (no f3 90 in listing)"
+fi
+rm -f "$DIR/../pz_tmp_$$.kr" "$pz_l"
+
+# --- std/fw_cfg.kr + std/ramfb.kr, and examples/ramfb-demo ---
+#
+# examples/ramfb-demo must keep building. Compile-only and arch-pinned: the
+# artifact is inspected, not executed. Same `do not cd` rule as the tutorial
+# rows above -- $KRC is a relative path.
+TOTAL=$((TOTAL + 1))
+RFB_DIR="$DIR/../examples/ramfb-demo"
+RFB_IMG="/tmp/krc_ramfb_example_$$.img"
+if [ ! -f "$RFB_DIR/main.kr" ]; then
+    FAIL=$((FAIL + 1)); echo "FAIL: ramfb_example_builds (source missing)"
+elif ! $KRC --target=none --arch=x86_64 --emit=image \
+            --load-addr=0x100000 --stack-top=0x90000 \
+            "$RFB_DIR/main.kr" -o "$RFB_IMG" >/dev/null 2>&1; then
+    FAIL=$((FAIL + 1)); echo "FAIL: ramfb_example_builds (compile failed)"
+else
+    # Multiboot header magic 0x1BADB002 must be within the first 8 KiB.
+    if od -An -tx4 -N8192 "$RFB_IMG" 2>/dev/null | tr -d ' \n' | grep -q '1badb002'; then
+        PASS=$((PASS + 1)); echo "  ramfb_example_builds: PASS (x86_64 multiboot image)"
+    else
+        FAIL=$((FAIL + 1)); echo "FAIL: ramfb_example_builds (no multiboot magic)"
+    fi
+fi
+
+# The claim that matters for ramfb is not "it compiled" but "QEMU scanned those
+# pixels out". check.py boots the image headless and compares QEMU's own
+# screendump against 13 expected pixel values. Needs qemu-system-x86_64 and
+# python3; noted rather than failed when absent, like the ESP rows above.
+TOTAL=$((TOTAL + 1))
+if ! command -v qemu-system-x86_64 >/dev/null 2>&1 || ! command -v python3 >/dev/null 2>&1; then
+    PASS=$((PASS + 1)); echo "  ramfb_example_draws: PASS (pixel check SKIPPED -- no qemu-system-x86_64/python3)"
+elif [ ! -f "$RFB_IMG" ]; then
+    FAIL=$((FAIL + 1)); echo "FAIL: ramfb_example_draws (no image from the row above)"
+else
+    rfb_out=$(timeout 60 python3 "$RFB_DIR/check.py" "$RFB_IMG" 2>&1)
+    if printf '%s' "$rfb_out" | grep -q '^PASS: 13/13 pixel checks$'; then
+        PASS=$((PASS + 1)); echo "  ramfb_example_draws: PASS (13/13 pixels verified via QMP screendump)"
+    else
+        FAIL=$((FAIL + 1)); echo "FAIL: ramfb_example_draws"
+        printf '%s\n' "$rfb_out" | sed 's/^/    /' | head -8
+    fi
+fi
+rm -f "$RFB_IMG"
+
+# std/fw_cfg.kr's whole surface must compile freestanding, including the paths
+# the demo does not exercise (DMA read, whole-file read, the LE item readers).
+TOTAL=$((TOTAL + 1))
+cat > "$DIR/../fwc_tmp_$$.kr" <<'FWCEOF'
+import "std/fw_cfg.kr"
+static u8[256] fwbuf
+fn main() -> uint32 {
+    if fw_cfg_present() == 0 { loop { } }
+    u64 b = fwbuf
+    u64 _ram = fw_cfg_ram_size()
+    u64 _cpus = fw_cfg_nb_cpus()
+    u64 _feat = fw_cfg_features()
+    if fw_cfg_has_dma() == 0 { loop { } }
+    u64 sel = fw_cfg_find_file("etc/e820")
+    if sel != FW_CFG_NOTFOUND {
+        fw_cfg_dma_read(sel, b, 64)
+        fw_cfg_dma_write(sel, b, 64)
+    }
+    fw_cfg_read_file("etc/smbios", b, 256)
+    fw_cfg_select(FW_CFG_SIGNATURE)
+    u64 _a = fw_cfg_read8()
+    u64 _c = fw_cfg_read_be16()
+    u64 _d = fw_cfg_read_be32()
+    u64 _e = fw_cfg_read_le32()
+    u64 _f = fw_cfg_read_le64()
+    fw_cfg_read_bytes(b, 4)
+    loop { }
+}
+FWCEOF
+if $KRC --target=none --arch=x86_64 --emit=image --load-addr=0x100000 \
+        --stack-top=0x90000 "$DIR/../fwc_tmp_$$.kr" -o /tmp/fwc_$$.img >/dev/null 2>&1; then
+    PASS=$((PASS + 1)); echo "  fw_cfg_full_surface_freestanding: PASS"
+else
+    FAIL=$((FAIL + 1)); echo "FAIL: fw_cfg_full_surface_freestanding"
+fi
+rm -f "$DIR/../fwc_tmp_$$.kr" /tmp/fwc_$$.img
+
+# --- std/fw_cfg_mmio.kr: the arm64 `-M virt` transport ----------------------
+#
+# Same protocol as std/fw_cfg.kr, reached through MMIO at 0x09020000 instead
+# of ports. Compile-only and arch-PINNED to arm64: the module is arm64-only
+# (its x86 sibling is port-I/O), and this row only inspects that the whole
+# surface compiles freestanding -- nothing executes on the host.
+TOTAL=$((TOTAL + 1))
+cat > "$DIR/../fwm_tmp_$$.kr" <<'FWMEOF'
+import "std/fw_cfg_mmio.kr"
+static u8[256] fwmbuf
+fn main() -> uint32 {
+    fw_cfg_mmio_init(0x09020000)
+    if fw_cfg_present() == 0 { loop { } }
+    u64 b = fwmbuf
+    u64 _ram = fw_cfg_ram_size()
+    u64 _cpus = fw_cfg_nb_cpus()
+    u64 _feat = fw_cfg_features()
+    if fw_cfg_has_dma() == 0 { loop { } }
+    u64 sel = fw_cfg_find_file("etc/table-loader")
+    if sel != FW_CFG_NOTFOUND {
+        fw_cfg_dma_read(sel, b, 64)
+        fw_cfg_dma_write(sel, b, 64)
+    }
+    fw_cfg_read_file("etc/smbios", b, 256)
+    fw_cfg_select(FW_CFG_SIGNATURE)
+    u64 _a = fw_cfg_read8()
+    u64 _c = fw_cfg_read_be16()
+    u64 _d = fw_cfg_read_be32()
+    u64 _e = fw_cfg_read_le32()
+    u64 _f = fw_cfg_read_le64()
+    fw_cfg_read_bytes(b, 4)
+    loop { }
+}
+FWMEOF
+if $KRC --target=none --arch=arm64 --emit=image --image-header \
+        --load-addr=0x40080000 --stack-top=0x40200000 \
+        "$DIR/../fwm_tmp_$$.kr" -o /tmp/fwm_$$.img >/dev/null 2>&1; then
+    PASS=$((PASS + 1)); echo "  fw_cfg_mmio_full_surface_freestanding: PASS"
+else
+    FAIL=$((FAIL + 1)); echo "FAIL: fw_cfg_mmio_full_surface_freestanding"
+fi
+rm -f "$DIR/../fwm_tmp_$$.kr" /tmp/fwm_$$.img
+
+# The claim that matters is not "it compiled" but "the device answered": boot
+# the module on qemu-system-aarch64 `-M virt` and read the serial log. The
+# arch pin is legitimate here even though the row executes, because the
+# EMULATOR executes the artifact, not the host CPU -- same reasoning as the
+# ramfb/mouse-gui rows above, which run qemu-system-x86_64 on any host. When
+# qemu-system-aarch64 is absent this row SKIPS and says so; it does not claim
+# the coverage it did not get.
+#
+# Every asserted field discriminates a real bug (each was broken on purpose
+# and watched fail before this row landed):
+#   bfw=4      BIG-ENDIAN 16-bit selector + BE directory. The classic port
+#              of this module writes the selector little-endian; measured on
+#              QEMU 8.2.2, that makes the device see item 0x1900, the
+#              directory read all-zero, and find_file miss -- while the
+#              endian-neutral "QEMU" signature check still PASSES. This
+#              field, not `present`, is the one that catches that bug.
+#   cpus=2     item payloads stay little-endian over MMIO (-smp 2).
+#   sig=QEMU   DMA: BE request block, address halves HIGH at +16 then LOW
+#              at +20 (the low write triggers). The buffer is scrubbed
+#              first, so a stale signature cannot fake this.
+#   wr=1       DMA write path, against -device ramfb.
+TOTAL=$((TOTAL + 1))
+if ! command -v qemu-system-aarch64 >/dev/null 2>&1; then
+    PASS=$((PASS + 1)); echo "  fw_cfg_mmio_answers_on_virt: PASS (SKIPPED -- no qemu-system-aarch64; compile row above is the only coverage)"
+else
+cat > "$DIR/../fwmx_tmp_$$.kr" <<'FWMXEOF'
+import "std/uart_pl011.kr"
+import "std/fw_cfg_mmio.kr"
+static u8[128] fbuf
+static u64[4] rcfg
+fn puts2(u64 s) {
+    u64 i = 0
+    loop {
+        u64 c = load8(s + i)
+        if c == 0 { return }
+        pl011_putc(c)
+        i = i + 1
+    }
+}
+fn putd(u64 v) {
+    if v < 10 { pl011_putc(48 + v) } else { pl011_putc(88) }
+}
+fn fail(u64 msg) {
+    puts2("FWCFG-MMIO-FAIL ")
+    puts2(msg)
+    pl011_putc(10)
+    puts2("FWCFG-MMIO-DONE\n")
+    loop { }
+}
+fn main() -> uint32 {
+    pl011_init()
+    if fw_cfg_present() == 0 { fail("present") }
+    if fw_cfg_has_dma() == 0 { fail("dma-feature") }
+    u64 cpus = fw_cfg_nb_cpus()
+    u64 sel = fw_cfg_find_file("etc/boot-fail-wait")
+    if sel == FW_CFG_NOTFOUND { fail("find-file") }
+    u64 bfw = fw_cfg_last_size
+    u64 n = fw_cfg_read_file("etc/boot-fail-wait", fbuf, 128)
+    if n != bfw { fail("read-file-len") }
+    store8(fbuf, 0)
+    store8(fbuf + 1, 0)
+    store8(fbuf + 2, 0)
+    store8(fbuf + 3, 0)
+    if fw_cfg_dma_read(FW_CFG_SIGNATURE, fbuf, 4) == 0 { fail("dma-read-rc") }
+    u64 rsel = fw_cfg_find_file("etc/ramfb")
+    if rsel == FW_CFG_NOTFOUND { fail("no-ramfb") }
+    u64 c = rcfg
+    store32(c, 0)
+    store32(c + 4,  fw_cfg_bswap32(0x41000000))
+    store32(c + 8,  fw_cfg_bswap32(0x34325258))
+    store32(c + 12, 0)
+    store32(c + 16, fw_cfg_bswap32(64))
+    store32(c + 20, fw_cfg_bswap32(64))
+    store32(c + 24, fw_cfg_bswap32(256))
+    u64 wr = fw_cfg_dma_write(rsel, c, 28)
+    puts2("FWCFG-MMIO cpus=")
+    putd(cpus)
+    puts2(" bfw=")
+    putd(bfw)
+    puts2(" sig=")
+    pl011_putc(load8(fbuf))
+    pl011_putc(load8(fbuf + 1))
+    pl011_putc(load8(fbuf + 2))
+    pl011_putc(load8(fbuf + 3))
+    puts2(" wr=")
+    putd(wr)
+    pl011_putc(10)
+    puts2("FWCFG-MMIO-DONE\n")
+    loop { }
+}
+FWMXEOF
+fwm_img=/tmp/fwmx_$$.img
+fwm_log=/tmp/fwmx_$$.log
+if ! $KRC --target=none --arch=arm64 --emit=image --image-header \
+        --load-addr=0x40080000 --stack-top=0x40200000 \
+        "$DIR/../fwmx_tmp_$$.kr" -o "$fwm_img" >/dev/null 2>&1; then
+    FAIL=$((FAIL + 1)); echo "FAIL: fw_cfg_mmio_answers_on_virt (compile failed)"
+else
+    rm -f "$fwm_log"
+    qemu-system-aarch64 -M virt -cpu cortex-a72 -smp 2 -device ramfb \
+        -display none -serial "file:$fwm_log" -kernel "$fwm_img" -no-reboot \
+        >/dev/null 2>&1 &
+    fwm_qpid=$!
+    fwm_t=0
+    while [ $fwm_t -lt 120 ]; do
+        grep -q 'FWCFG-MMIO-DONE' "$fwm_log" 2>/dev/null && break
+        sleep 0.25
+        fwm_t=$((fwm_t + 1))
+    done
+    kill $fwm_qpid 2>/dev/null
+    wait $fwm_qpid 2>/dev/null
+    if grep -q '^FWCFG-MMIO cpus=2 bfw=4 sig=QEMU wr=1$' "$fwm_log" 2>/dev/null; then
+        PASS=$((PASS + 1)); echo "  fw_cfg_mmio_answers_on_virt: PASS (BE selector, LE payloads, DMA r/w observed on qemu virt)"
+    else
+        FAIL=$((FAIL + 1)); echo "FAIL: fw_cfg_mmio_answers_on_virt"
+        sed 's/^/    /' "$fwm_log" 2>/dev/null | head -6
+    fi
+fi
+rm -f "$DIR/../fwmx_tmp_$$.kr" "$fwm_img" "$fwm_log"
+fi
+
+# A variable used ONLY as an asm operand is still used. sema_check_stmt did not
+# descend into asm constraint lists at all, so std/x86.kr's wrmsr was warned
+# about for `lo` and `hi` while passing both to the instruction. Three clauses,
+# because the fix must not simply silence the warning:
+#   in(var -> reg)  is a USE          -> no warning
+#   out(reg -> var) is an INIT only   -> still warns when the value is dead
+#   an untouched variable             -> still warns
+TOTAL=$((TOTAL + 1))
+cat > "$DIR/../asmop_tmp_$$.kr" <<'ASMEOF'
+fn f() -> uint64 {
+    uint64 used_as_input = 7
+    uint64 dead_out = 0
+    uint64 real_out = 0
+    uint64 never_touched = 0
+    asm { "rdtsc" } in(used_as_input -> rcx) out(rax -> dead_out, rdx -> real_out)
+    return real_out
+}
+fn main() { exit(f() & 1) }
+ASMEOF
+asm_w=$($KRC --arch=x86_64 "$DIR/../asmop_tmp_$$.kr" -o /tmp/asmop_$$ 2>&1)
+asm_ok=1
+printf '%s' "$asm_w" | grep -q "unused variable.*'used_as_input'" && asm_ok=0
+printf '%s' "$asm_w" | grep -q "unused variable.*'real_out'" && asm_ok=0
+printf '%s' "$asm_w" | grep -q "unused variable.*'dead_out'" || asm_ok=0
+printf '%s' "$asm_w" | grep -q "unused variable.*'never_touched'" || asm_ok=0
+if [ "$asm_ok" = "1" ]; then
+    PASS=$((PASS + 1)); echo "  asm_operand_counts_as_use: PASS (in= use, out= init-only, untouched still warns)"
+else
+    FAIL=$((FAIL + 1)); echo "FAIL: asm_operand_counts_as_use"
+    printf '%s\n' "$asm_w" | sed 's/^/    /' | head -6
+fi
+rm -f "$DIR/../asmop_tmp_$$.kr" /tmp/asmop_$$
+
+# An asm out() operand initialises its variable, so reading it afterwards is
+# not a use-before-init. Without the same fix this reported a false diagnostic.
+#
+# The diagnostic is a WARNING, so run_test (exit code only) cannot see it:
+# with the init-marking deleted from sema, the run_test form still exited 9
+# and passed (measured). Assert on the compiler's stderr as well as the run.
+TOTAL=$((TOTAL + 1))
+cat > "$DIR/../asmoi_tmp_$$.kr" <<'ASMOIEOF'
+fn g() -> uint64 {
+    uint64 v
+    asm { "rdtsc" } out(rax -> v)
+    return v & 0
+}
+fn main() { exit(g() + 9) }
+ASMOIEOF
+asmoi_ok=1
+asmoi_note=""
+asmoi_out=$($KRC $KRC_FLAGS "$DIR/../asmoi_tmp_$$.kr" -o /tmp/asmoi_$$ 2>&1)
+if [ ! -f /tmp/asmoi_$$ ]; then
+    asmoi_ok=0; asmoi_note="compile failed"
+else
+    printf '%s' "$asmoi_out" | grep -q "used before initialization.*'v'" \
+        && { asmoi_ok=0; asmoi_note="false use-before-init diagnostic on v"; }
+    chmod +x /tmp/asmoi_$$
+    /tmp/asmoi_$$ >/dev/null 2>&1
+    asmoi_rc=$?
+    [ "$asmoi_rc" = "9" ] || { asmoi_ok=0; asmoi_note="$asmoi_note; exited $asmoi_rc, want 9"; }
+fi
+if [ "$asmoi_ok" = "1" ]; then
+    PASS=$((PASS + 1)); echo "  asm_out_operand_initialises: PASS (no false diagnostic, ran to exit 9)"
+else
+    FAIL=$((FAIL + 1)); echo "FAIL: asm_out_operand_initialises (${asmoi_note#; })"
+fi
+rm -f "$DIR/../asmoi_tmp_$$.kr" /tmp/asmoi_$$
+
+# --- examples/bare-console: VGA text + PS/2 keyboard + serial ---
+#
+# Compile-only row first, arch-pinned: the artifact is inspected, not executed.
+TOTAL=$((TOTAL + 1))
+BCON_DIR="$DIR/../examples/bare-console"
+BCON_IMG="/tmp/krc_bcon_$$.img"
+if [ ! -f "$BCON_DIR/main.kr" ]; then
+    FAIL=$((FAIL + 1)); echo "FAIL: bare_console_example_builds (source missing)"
+elif ! $KRC --target=none --arch=x86_64 --emit=image \
+            --load-addr=0x100000 --stack-top=0x90000 \
+            "$BCON_DIR/main.kr" -o "$BCON_IMG" >/dev/null 2>&1; then
+    FAIL=$((FAIL + 1)); echo "FAIL: bare_console_example_builds (compile failed)"
+else
+    PASS=$((PASS + 1)); echo "  bare_console_example_builds: PASS (x86_64 multiboot image)"
+fi
+
+# The claim is that keystrokes reach the program and output reaches BOTH sinks.
+# check.py types on an emulated PS/2 keyboard over QMP -- not over serial,
+# which would leave the scancode translation untested -- then asserts against
+# the serial log AND the VGA text buffer read out of guest memory at 0xB8000.
+# Both halves were confirmed load-bearing by breaking each on purpose.
+TOTAL=$((TOTAL + 1))
+if ! command -v qemu-system-x86_64 >/dev/null 2>&1 || ! command -v python3 >/dev/null 2>&1; then
+    PASS=$((PASS + 1)); echo "  bare_console_example_runs: PASS (SKIPPED -- no qemu-system-x86_64/python3)"
+elif [ ! -f "$BCON_IMG" ]; then
+    FAIL=$((FAIL + 1)); echo "FAIL: bare_console_example_runs (no image from the row above)"
+else
+    bcon_out=$(timeout 120 python3 "$BCON_DIR/check.py" "$BCON_IMG" 2>&1)
+    if printf '%s' "$bcon_out" | grep -q '^PASS: PS/2 input echoed'; then
+        PASS=$((PASS + 1)); echo "  bare_console_example_runs: PASS (PS/2 typed, echoed on vga+serial)"
+    else
+        FAIL=$((FAIL + 1)); echo "FAIL: bare_console_example_runs"
+        printf '%s\n' "$bcon_out" | grep -E '^BAD|^FAIL' | sed 's/^/    /' | head -6
+    fi
+fi
+rm -f "$BCON_IMG"
+
+# std/vga_text.kr, std/serial.kr and std/ps2.kr must each compile freestanding
+# across their whole surface, including what the example does not call.
+TOTAL=$((TOTAL + 1))
+cat > "$DIR/../vsp_tmp_$$.kr" <<'VSPEOF'
+import "std/console.kr"
+static u8[64] vbuf
+fn main() -> uint32 {
+    console_init_quiet()
+    console_set_vga(1)
+    console_set_serial(1)
+    vga_clear()
+    vga_set_attr(vga_attr(VGA_YELLOW, VGA_BLUE))
+    u64 _a = vga_get_attr()
+    u64 _r = vga_get_row()
+    u64 _c = vga_get_col()
+    vga_put_cell(0, 0, 65, 7)
+    u64 _cell = vga_get_cell(0, 0)
+    vga_fill_row(1, 32, 7)
+    vga_scroll()
+    vga_newline()
+    vga_puts("x")
+    vga_putsn("y")
+    vga_write_at(2, 2, "z", 7)
+    vga_move_cursor(3, 3)
+    vga_hide_cursor()
+    vga_sync_cursor()
+    serial_init_port(COM2, UART_DIVISOR_9600)
+    serial_set_port(COM1)
+    u64 _p = serial_get_port()
+    serial_putc_raw(65)
+    serial_puts("s")
+    serial_putsn("t")
+    serial_write("uv", 2)
+    u64 _sp = serial_poll()
+    if serial_has_data(COM1) != 0 { u64 _g = serial_getc() }
+    if ps2_shift_held() != 0 { }
+    if ps2_ctrl_held() != 0 { }
+    if ps2_caps_lock() != 0 { }
+    u64 _k = ps2_poll()
+    if _k == PS2_KEY_UP { ps2_reboot() }
+    u64 b = vbuf
+    console_readline(b, 64)
+    console_put_u64(1)
+    console_put_i64(0 - 1)
+    console_put_hex(255, 4)
+    console_putsn("done")
+    halt_forever()
+    return 0
+}
+VSPEOF
+if $KRC --target=none --arch=x86_64 --emit=image --load-addr=0x100000 \
+        --stack-top=0x90000 "$DIR/../vsp_tmp_$$.kr" -o /tmp/vsp_$$.img >/dev/null 2>&1; then
+    PASS=$((PASS + 1)); echo "  console_stack_full_surface_freestanding: PASS"
+else
+    FAIL=$((FAIL + 1)); echo "FAIL: console_stack_full_surface_freestanding"
+    $KRC --target=none --arch=x86_64 --emit=image --load-addr=0x100000 \
+         --stack-top=0x90000 "$DIR/../vsp_tmp_$$.kr" -o /tmp/vsp_$$.img 2>&1 | grep error | head -3 | sed 's/^/    /'
+fi
+rm -f "$DIR/../vsp_tmp_$$.kr" /tmp/vsp_$$.img
+
+# vga_attr packs (bg << 4) | fg. Worth pinning because the encoding is easy to
+# get backwards, and because `|` binds TIGHTER than `<<` in KernRift, so the
+# expression inside vga_attr has to be parenthesised to mean what it reads as.
+#
+# This row EXECUTES, so it cannot simply pin an arch. std/vga_text.kr is
+# x86_64-only (it imports std/x86.kr for the cursor ports), yet vga_attr itself
+# is pure arithmetic and dead-code elimination drops the port-I/O functions
+# before their x86 asm is ever emitted -- so it builds and runs on arm64 too.
+# That is a real property of the module and not something to leave incidental:
+# it runs on BOTH arches here, native plus emulator, so a change that makes the
+# pure helpers drag in x86 asm fails on the x86_64 runner rather than only on
+# the arm64 one.
+#
+# Third clause pins the other half of std/x86.kr's stated contract: a function
+# that DOES touch port I/O must fail loudly on a non-x86 target, not silently
+# compile to a no-op.
+TOTAL=$((TOTAL + 1))
+cat > "$DIR/../vattr_tmp_$$.kr" <<'VAEOF'
+import "std/vga_text.kr"
+fn main() {
+    if vga_attr(VGA_LIGHT_GREY, VGA_BLACK) != 0x07 { exit(1) }
+    if vga_attr(VGA_YELLOW, VGA_BLUE) != 0x1E { exit(2) }
+    if vga_attr(VGA_BLACK, VGA_LIGHT_GREY) != 0x70 { exit(3) }
+    if vga_attr(VGA_WHITE, VGA_WHITE) != 0xFF { exit(4) }
+    exit(9)
+}
+VAEOF
+cat > "$DIR/../vattr2_tmp_$$.kr" <<'VA2EOF'
+import "std/vga_text.kr"
+fn main() { vga_move_cursor(1, 1)  exit(9) }
+VA2EOF
+va_ok=1
+va_note=""
+# host arch, natively
+if $KRC --arch=$RUN_ARCH "$DIR/../vattr_tmp_$$.kr" -o /tmp/vattr_$$ >/dev/null 2>&1; then
+    chmod +x /tmp/vattr_$$
+    /tmp/vattr_$$ >/dev/null 2>&1
+    [ "$?" = "9" ] || { va_ok=0; va_note="native $RUN_ARCH run"; }
+else
+    va_ok=0; va_note="native $RUN_ARCH build"
+fi
+# the other arch, under an emulator when one is present
+if [ "$RUN_ARCH" = "x86_64" ]; then va_other=arm64; else va_other=x86_64; fi
+va_emu=""
+[ "$va_other" = "arm64" ] && va_emu="$(command -v qemu-aarch64-static || true)"
+[ "$va_other" = "x86_64" ] && va_emu="$(command -v qemu-x86_64-static || true)"
+if [ -n "$va_emu" ]; then
+    if $KRC --arch=$va_other "$DIR/../vattr_tmp_$$.kr" -o /tmp/vattr2_$$ >/dev/null 2>&1; then
+        chmod +x /tmp/vattr2_$$
+        $va_emu /tmp/vattr2_$$ >/dev/null 2>&1
+        [ "$?" = "9" ] || { va_ok=0; va_note="$va_other run"; }
+    else
+        va_ok=0; va_note="$va_other build (pure helpers should not drag in x86 asm)"
+    fi
+else
+    va_note="$va_other SKIPPED, no emulator"
+fi
+# port I/O on arm64 must be refused, loudly
+va_err=$($KRC --arch=arm64 "$DIR/../vattr2_tmp_$$.kr" -o /tmp/vattr3_$$ 2>&1)
+if [ -f /tmp/vattr3_$$ ] || ! printf '%s' "$va_err" | grep -q "unrecognized asm instruction"; then
+    va_ok=0; va_note="port I/O silently accepted on arm64"
+fi
+if [ "$va_ok" = "1" ]; then
+    PASS=$((PASS + 1)); echo "  vga_attr_packs_bg_high_fg_low: PASS (both arches; port I/O still refused on arm64${va_note:+; $va_note})"
+else
+    FAIL=$((FAIL + 1)); echo "FAIL: vga_attr_packs_bg_high_fg_low ($va_note)"
+fi
+rm -f "$DIR/../vattr_tmp_$$.kr" "$DIR/../vattr2_tmp_$$.kr" /tmp/vattr_$$ /tmp/vattr2_$$ /tmp/vattr3_$$
+
+# --- inline-asm constraints must fail loud, on BOTH backends -----------------
+#
+# x86_reg_code used to return a 0xFFFF sentinel for an unrecognised register
+# and every binding site then SKIPPED the binding, so `out(eax -> v)` -- the
+# 32-bit spelling, or any typo -- compiled clean and did nothing. Measured
+# before the fix: the program in the executing row below exited 7, not 42, on
+# the IR backend AND on --legacy. The operand half had the same hole: an
+# unresolvable variable name (a typo, or a static/global, which asm constraints
+# have never supported) was silently dropped too.
+#
+# These two rows only COMPILE, so they pin --arch=x86_64 deliberately: the
+# register names being checked are x86 names.
+TOTAL=$((TOTAL + 1))
+cat > "$DIR/../asmreg_tmp_$$.kr" <<'ASMREGEOF'
+fn main() {
+    uint64 v = 7
+    asm { "0xb8 0x2a 0x00 0x00 0x00" } out(eax -> v)
+    exit(v)
+}
+ASMREGEOF
+cat > "$DIR/../asmvar_tmp_$$.kr" <<'ASMVAREOF'
+fn main() {
+    uint64 v = 7
+    asm { "0x48 0x89 0xC0" } in(nosuchvar -> rax) out(rax -> v)
+    exit(v)
+}
+ASMVAREOF
+asmloud_ok=1
+asmloud_note=""
+for asmloud_be in "" "--legacy"; do
+    asmloud_out=$($KRC --arch=x86_64 $asmloud_be "$DIR/../asmreg_tmp_$$.kr" -o /tmp/asmreg_$$ 2>&1)
+    if [ -f /tmp/asmreg_$$ ]; then
+        asmloud_ok=0; asmloud_note="unknown register accepted (${asmloud_be:-ir})"
+    elif ! printf '%s' "$asmloud_out" | grep -q "unknown inline-asm constraint register 'eax'"; then
+        asmloud_ok=0; asmloud_note="wrong/absent message for eax (${asmloud_be:-ir})"
+    fi
+    rm -f /tmp/asmreg_$$
+    asmloud_out=$($KRC --arch=x86_64 $asmloud_be "$DIR/../asmvar_tmp_$$.kr" -o /tmp/asmvar_$$ 2>&1)
+    if [ -f /tmp/asmvar_$$ ]; then
+        asmloud_ok=0; asmloud_note="unknown operand accepted (${asmloud_be:-ir})"
+    elif ! printf '%s' "$asmloud_out" | grep -q "inline-asm constraint variable not found: 'nosuchvar'"; then
+        asmloud_ok=0; asmloud_note="wrong/absent message for nosuchvar (${asmloud_be:-ir})"
+    fi
+    rm -f /tmp/asmvar_$$
+done
+if [ "$asmloud_ok" = "1" ]; then
+    PASS=$((PASS + 1)); echo "  asm_constraint_unknown_name_refused: PASS (register + operand, both backends)"
+else
+    FAIL=$((FAIL + 1)); echo "FAIL: asm_constraint_unknown_name_refused ($asmloud_note)"
+fi
+rm -f "$DIR/../asmreg_tmp_$$.kr" "$DIR/../asmvar_tmp_$$.kr"
+
+# Positive control for the row above: the fix must not pass by refusing
+# everything. Every accepted name (rax..rdi, rsp, rbp, r8..r15) still compiles
+# on both backends. rsp appears only as an OUTPUT -- feeding a value into rsp
+# would destroy the stack.
+TOTAL=$((TOTAL + 1))
+cat > "$DIR/../asmok_tmp_$$.kr" <<'ASMOKEOF'
+fn main() {
+    uint64 v = 1
+    uint64 o = 0
+    asm { "nop" } in(v -> rax, v -> rcx, v -> rdx, v -> rbx, v -> rsi, v -> rdi, v -> rbp)
+    asm { "nop" } in(v -> r8, v -> r9, v -> r10, v -> r11, v -> r12, v -> r13, v -> r14, v -> r15)
+    asm { "nop" } out(rsp -> o)
+    exit(0)
+}
+ASMOKEOF
+asmok_ok=1
+asmok_note=""
+for asmok_be in "" "--legacy"; do
+    asmok_out=$($KRC --arch=x86_64 $asmok_be "$DIR/../asmok_tmp_$$.kr" -o /tmp/asmok_$$ 2>&1)
+    if [ ! -f /tmp/asmok_$$ ]; then
+        asmok_ok=0
+        asmok_note="accepted name refused (${asmok_be:-ir}): $(printf '%s' "$asmok_out" | grep '^error' | head -1)"
+    fi
+    rm -f /tmp/asmok_$$
+done
+if [ "$asmok_ok" = "1" ]; then
+    PASS=$((PASS + 1)); echo "  asm_constraint_accepted_names_still_bind: PASS (16 names, both backends)"
+else
+    FAIL=$((FAIL + 1)); echo "FAIL: asm_constraint_accepted_names_still_bind ($asmok_note)"
+fi
+rm -f "$DIR/../asmok_tmp_$$.kr"
+
+# The one that EXECUTES: a correctly spelled binding must still move the value.
+# This is the row that was red before the fix in its `eax` form, so it is also
+# the row that proves the binding path itself was not broken by fixing it.
+# x86 machine code, so it can only run on an x86_64 host -- guarded on
+# $RUN_ARCH rather than pinned, and it builds for $RUN_ARCH.
+TOTAL=$((TOTAL + 1))
+if [ "$RUN_ARCH" = "x86_64" ]; then
+    cat > "$DIR/../asmbind_tmp_$$.kr" <<'ASMBINDEOF'
+fn main() {
+    uint64 v = 7
+    asm { "0xb8 0x2a 0x00 0x00 0x00" } out(rax -> v)
+    exit(v)
+}
+ASMBINDEOF
+    asmbind_ok=1
+    asmbind_note=""
+    for asmbind_be in "" "--legacy"; do
+        if $KRC --arch=$RUN_ARCH $asmbind_be "$DIR/../asmbind_tmp_$$.kr" -o /tmp/asmbind_$$ >/dev/null 2>&1; then
+            chmod +x /tmp/asmbind_$$
+            /tmp/asmbind_$$ >/dev/null 2>&1
+            asmbind_rc=$?
+            [ "$asmbind_rc" = "42" ] || { asmbind_ok=0; asmbind_note="${asmbind_be:-ir} exited $asmbind_rc, want 42"; }
+        else
+            asmbind_ok=0; asmbind_note="${asmbind_be:-ir} build failed"
+        fi
+        rm -f /tmp/asmbind_$$
+    done
+    if [ "$asmbind_ok" = "1" ]; then
+        PASS=$((PASS + 1)); echo "  asm_constraint_out_rax_binds: PASS (42 through rax, both backends)"
+    else
+        FAIL=$((FAIL + 1)); echo "FAIL: asm_constraint_out_rax_binds ($asmbind_note)"
+    fi
+    rm -f "$DIR/../asmbind_tmp_$$.kr"
+else
+    PASS=$((PASS + 1)); echo "  asm_constraint_out_rax_binds: SKIP (RUN_ARCH=$RUN_ARCH, x86 machine code)"
+fi
+
+# --- std/uart_16550.kr is a provider layered on std/serial.kr ----------------
+#
+# uart_16550.kr used to carry its own port I/O and its own 16550 register map,
+# so the stdlib held two independent implementations of the same UART. It is
+# now a thin shim: serial.kr drives the chip, uart_16550.kr publishes it as the
+# compiler's `write`.
+#
+# All three rows below CROSS-COMPILE for x86_64 and run the artifact under
+# qemu-system-x86_64, so pinning the arch is correct -- these are bare-metal
+# x86 images, not host binaries, and the host arch does not enter into it.
+
+# Both print providers define `write` with @builtin_override, so importing them
+# together is a collision BY DESIGN and both headers say so. Pin the message,
+# because the thing that makes it confusing is that it names a line in a file
+# the user did not write. (Which file it names follows import order: the second
+# provider imported is the redefinition.)
+TOTAL=$((TOTAL + 1))
+cat > "$DIR/../ucol_tmp_$$.kr" <<'UCOLEOF'
+import "std/console.kr"
+import "std/uart_16550.kr"
+fn main() -> uint64 {
+    uart16550_init()
+    println_str("x")
+    return 0
+}
+UCOLEOF
+ucol_out=$($KRC --target=none --arch=x86_64 --emit=image --load-addr=0x100000 \
+                --stack-top=0x90000 "$DIR/../ucol_tmp_$$.kr" -o /tmp/ucol_$$.img 2>&1)
+if [ -f /tmp/ucol_$$.img ]; then
+    FAIL=$((FAIL + 1)); echo "FAIL: uart16550_console_collide_by_design (the two providers linked together)"
+elif ! printf '%s' "$ucol_out" | grep -q "std/uart_16550.kr:.*error: redefinition of function"; then
+    FAIL=$((FAIL + 1)); echo "FAIL: uart16550_console_collide_by_design (wrong message: $(printf '%s' "$ucol_out" | grep -m1 error))"
+else
+    PASS=$((PASS + 1)); echo "  uart16550_console_collide_by_design: PASS (redefinition of write, named in uart_16550.kr)"
+fi
+rm -f "$DIR/../ucol_tmp_$$.kr" /tmp/ucol_$$.img
+
+# The provider alone must still make `print`/`println_str` work with no OS
+# beneath it -- BOOTED, not merely compiled. serial_putsn is in the same
+# program on purpose: it is reachable only because uart_16550.kr imports
+# serial.kr, so its line in the log is what proves the layering rather than a
+# copy. The number is computed at run time so a stale capture cannot pass.
+TOTAL=$((TOTAL + 1))
+cat > "$DIR/../uprov_tmp_$$.kr" <<'UPROVEOF'
+import "std/uart_16550.kr"
+static uint64 useed = 5000000007
+fn ustamp(uint64 v) -> uint64 { return v + 9 }
+fn main() -> uint64 {
+    uart16550_init()
+    println_str("KRUART-PROVIDER")
+    print(ustamp(useed))
+    println_str("")
+    serial_putsn("VIA-SERIAL-KR")
+    return 0
+}
+UPROVEOF
+if ! command -v qemu-system-x86_64 >/dev/null 2>&1; then
+    PASS=$((PASS + 1)); echo "  uart16550_provider_prints_on_serial: PASS (SKIPPED -- no qemu-system-x86_64)"
+elif ! $KRC --target=none --arch=x86_64 --emit=image --load-addr=0x100000 \
+            --stack-top=0x90000 "$DIR/../uprov_tmp_$$.kr" -o /tmp/uprov_$$.img >/dev/null 2>&1; then
+    FAIL=$((FAIL + 1)); echo "FAIL: uart16550_provider_prints_on_serial (compile failed)"
+    $KRC --target=none --arch=x86_64 --emit=image --load-addr=0x100000 \
+         --stack-top=0x90000 "$DIR/../uprov_tmp_$$.kr" -o /tmp/uprov_$$.img 2>&1 | grep error | head -3 | sed 's/^/    /'
+else
+    rm -f /tmp/uprov_$$.log
+    timeout 15 qemu-system-x86_64 -kernel /tmp/uprov_$$.img -m 256 \
+        -serial file:/tmp/uprov_$$.log -display none -no-reboot >/dev/null 2>&1
+    uprov_log=$(cat /tmp/uprov_$$.log 2>/dev/null)
+    uprov_bad=""
+    printf '%s' "$uprov_log" | grep -q "KRUART-PROVIDER" || uprov_bad="no banner"
+    printf '%s' "$uprov_log" | grep -q "5000000016" || uprov_bad="$uprov_bad; no computed value"
+    printf '%s' "$uprov_log" | grep -q "VIA-SERIAL-KR" || uprov_bad="$uprov_bad; serial.kr surface unreachable"
+    if [ -z "$uprov_bad" ]; then
+        PASS=$((PASS + 1)); echo "  uart16550_provider_prints_on_serial: PASS (banner, computed 5000000016 and serial_putsn on COM1)"
+    else
+        FAIL=$((FAIL + 1)); echo "FAIL: uart16550_provider_prints_on_serial ($uprov_bad)"
+        printf '    log: %s\n' "$(printf '%s' "$uprov_log" | tr '\n' '|' | head -c 200)"
+    fi
+    rm -f /tmp/uprov_$$.img /tmp/uprov_$$.log
+fi
+rm -f "$DIR/../uprov_tmp_$$.kr"
+
+# Importing std/serial.kr NEXT TO the provider must stay clean. It is not
+# obvious that it would: the program spells the import "std/serial.kr" and
+# uart_16550.kr spells the same file "serial.kr" (the sibling-import rule), so
+# a resolver that deduplicated on the literal string rather than the resolved
+# path would pull serial.kr in twice and redefine every function in it.
+TOTAL=$((TOTAL + 1))
+cat > "$DIR/../usu_tmp_$$.kr" <<'USUEOF'
+import "std/serial.kr"
+import "std/uart_16550.kr"
+fn main() -> uint64 {
+    uart16550_init()
+    serial_set_port(COM1)
+    if serial_get_port() != COM1 { return 1 }
+    println_str("SERIAL-PLUS-UART-OK")
+    uart16550_putc(65)
+    uart16550_putc(10)
+    return 0
+}
+USUEOF
+if ! command -v qemu-system-x86_64 >/dev/null 2>&1; then
+    PASS=$((PASS + 1)); echo "  uart16550_beside_serial_import: PASS (SKIPPED -- no qemu-system-x86_64)"
+elif ! $KRC --target=none --arch=x86_64 --emit=image --load-addr=0x100000 \
+            --stack-top=0x90000 "$DIR/../usu_tmp_$$.kr" -o /tmp/usu_$$.img >/dev/null 2>&1; then
+    FAIL=$((FAIL + 1)); echo "FAIL: uart16550_beside_serial_import (compile failed)"
+    $KRC --target=none --arch=x86_64 --emit=image --load-addr=0x100000 \
+         --stack-top=0x90000 "$DIR/../usu_tmp_$$.kr" -o /tmp/usu_$$.img 2>&1 | grep error | head -3 | sed 's/^/    /'
+else
+    rm -f /tmp/usu_$$.log
+    timeout 15 qemu-system-x86_64 -kernel /tmp/usu_$$.img -m 256 \
+        -serial file:/tmp/usu_$$.log -display none -no-reboot >/dev/null 2>&1
+    usu_log=$(cat /tmp/usu_$$.log 2>/dev/null)
+    if printf '%s' "$usu_log" | grep -q "SERIAL-PLUS-UART-OK" && printf '%s' "$usu_log" | grep -q "^A$"; then
+        PASS=$((PASS + 1)); echo "  uart16550_beside_serial_import: PASS (one serial.kr, both entry points working)"
+    else
+        FAIL=$((FAIL + 1)); echo "FAIL: uart16550_beside_serial_import (log: $(printf '%s' "$usu_log" | tr '\n' '|' | head -c 120))"
+    fi
+    rm -f /tmp/usu_$$.img /tmp/usu_$$.log
+fi
+rm -f "$DIR/../usu_tmp_$$.kr"
+
+# --- std/pci.kr enumerates the real machine ----------------------------------
+#
+# One probe program, three machines. The point of the three is that a baked
+# list of devices would pass the first and fail the other two: `-vga none` and
+# `-net none` take devices away, `-device virtio-rng-pci` adds one, and the
+# guest's own output has to follow.
+#
+# These rows CROSS-COMPILE for x86_64 and run the artifact under
+# qemu-system-x86_64, so pinning the arch is right: they are bare-metal x86
+# images and the host arch does not enter into it.
+PCI_SRC="$DIR/../pciprobe_tmp_$$.kr"
+PCI_IMG=/tmp/pciprobe_$$.img
+cat > "$PCI_SRC" <<'PCIEOF'
+import "std/uart_16550.kr"
+import "std/cstr.kr"
+import "std/pci.kr"
+
+static u8[64] pbuf
+
+fn p_str(u64 s) {
+    u64 i = 0
+    while load8(s + i) != 0 {
+        uart16550_putc(load8(s + i))
+        i = i + 1
+    }
+}
+
+fn p_hex(u64 v, u64 width) {
+    u64 b = pbuf
+    cstr_u64_hex(b, 64, v, width)
+    p_str(b)
+}
+
+fn p_nl() { uart16550_putc(10) }
+
+fn p_bdf(u64 bus, u64 dev, u64 func) {
+    p_hex(bus, 2)
+    uart16550_putc(58)
+    p_hex(dev, 2)
+    uart16550_putc(46)
+    p_hex(func, 1)
+}
+
+// The callback pci_scan drives through call_ptr. Six arguments is the ceiling
+// (args 7+ are silently dropped), so class and subclass arrive packed.
+fn on_dev(u64 bus, u64 dev, u64 func, u64 vid, u64 did, u64 cls) {
+    p_str("DEV ")
+    p_bdf(bus, dev, func)
+    p_str(" ")
+    p_hex(vid, 4)
+    uart16550_putc(58)
+    p_hex(did, 4)
+    p_str(" cls=")
+    p_hex(cls, 4)
+    p_str(" hdr=")
+    p_hex(pci_header_type(bus, dev, func), 2)
+    p_nl()
+    u64 slot = 0
+    while slot < 6 {
+        u64 raw = pci_bar_raw(bus, dev, func, slot)
+        if raw != 0 {
+            p_str("BAR ")
+            p_bdf(bus, dev, func)
+            p_str(" ")
+            p_hex(slot, 1)
+            p_str(" raw=")
+            p_hex(raw, 8)
+            if pci_bar_is_io(bus, dev, func, slot) != 0 { p_str(" io") }
+            if pci_bar_is_64(bus, dev, func, slot) != 0 { p_str(" mem64") }
+            p_str(" addr=")
+            p_hex(pci_bar(bus, dev, func, slot), 8)
+            p_str(" next=")
+            p_hex(pci_bar_next(bus, dev, func, slot), 1)
+            p_nl()
+        }
+        slot = slot + 1
+    }
+}
+
+fn main() -> uint64 {
+    uart16550_init()
+    p_str("PCI-BEGIN")
+    p_nl()
+    pci_scan(fn_addr("on_dev"))
+    p_str("FIND 8086:100e -> ")
+    p_hex(pci_find_device(0x8086, 0x100E), 6)
+    p_nl()
+    p_str("FIND 1234:9999 -> ")
+    p_hex(pci_find_device(0x1234, 0x9999), 8)
+    p_nl()
+    p_str("ADDR ")
+    p_hex(pci_config_addr(0, 3, 0, 0), 8)
+    p_str(" ")
+    p_hex(pci_config_addr(0, 1, 3, 0x2C), 8)
+    p_nl()
+    // The mask widths, on inputs the machine itself never produces: every I/O
+    // BAR QEMU hands out is 16-byte aligned, so a live one masks the same
+    // under 2 bits and under 4.
+    p_str("DECODE ")
+    p_hex(pci_bar_decode(0x0000C04D, 0), 8)
+    p_str(" ")
+    p_hex(pci_bar_decode(0xFD000008, 0), 8)
+    p_str(" ")
+    p_hex(pci_bar_decode(0xFE00000C, 0x00000001), 9)
+    p_nl()
+    p_str("PCI-END")
+    p_nl()
+    return 0
+}
+PCIEOF
+
+# The guest halts rather than exiting, so `timeout N` would always cost the
+# full N. Wait for the end marker instead and kill as soon as it lands.
+pci_boot() {   # pci_boot <log> <extra qemu args...>
+    local log="$1"; shift
+    rm -f "$log"
+    timeout 40 qemu-system-x86_64 -kernel "$PCI_IMG" -m 256 \
+        -display none -no-reboot -serial "file:$log" "$@" >/dev/null 2>&1 &
+    local pid=$! n=0
+    while [ "$n" -lt 400 ]; do
+        if [ -s "$log" ] && grep -q "PCI-END" "$log" 2>/dev/null; then break; fi
+        kill -0 "$pid" 2>/dev/null || break
+        sleep 0.1
+        n=$((n + 1))
+    done
+    kill "$pid" 2>/dev/null
+    wait "$pid" 2>/dev/null
+}
+
+# want_lines <log> <label> — each remaining argument is a line that must be
+# present verbatim. Sets pci_bad.
+pci_want() {
+    local log="$1"; shift
+    local want
+    for want in "$@"; do
+        grep -qxF "$want" "$log" 2>/dev/null || pci_bad="$pci_bad; missing '$want'"
+    done
+}
+
+PCI_HAVE_QEMU=0
+command -v qemu-system-x86_64 >/dev/null 2>&1 && PCI_HAVE_QEMU=1
+PCI_BUILT=0
+if [ "$PCI_HAVE_QEMU" = "1" ]; then
+    if $KRC --target=none --arch=x86_64 --emit=image --load-addr=0x100000 \
+            --stack-top=0x90000 "$PCI_SRC" -o "$PCI_IMG" >/dev/null 2>&1; then
+        PCI_BUILT=1
+    fi
+fi
+
+# The default i440fx machine, read through 0xCF8/0xCFC by the guest itself.
+# Note what each assertion is load-bearing for:
+#   * device_id differing from vendor_id proves pci_config_read16 uses the
+#     sub-dword port (0xCFC + (off & 3)); reading the aligned dword instead
+#     would report the vendor for every even offset.
+#   * cls=0600 proves the same for pci_config_read8 at offsets 0x0B/0x0A.
+#   * hdr=80 on 00:01.0 is what licenses probing functions 1-7 -- and the
+#     PIIX3 answers on 0, 1 and 3 with NO function 2, so a walk that stops at
+#     the first absent function finds two thirds of the machine.
+#   * the 00:02.0 BAR line pins the MEMORY mask width: 4 bits, fd000008 ->
+#     fd000000, where a 2-bit mask would leave the 8. The I/O width is NOT
+#     observable from a live BAR here -- every I/O BAR this machine hands out
+#     is 16-byte aligned, so 0000c041 masks to 0000c040 under both widths --
+#     which is why DECODE feeds pci_bar_decode 0000c04d, where the two widths
+#     differ. (The plan cited 0xc041 -> 0xc040 as the confirmation of the
+#     2-bit mask; it is not one.)
+#   * DECODE's third field also runs the 64-bit join on a synthetic high half,
+#     so the 33rd bit upward is exercised even without the virtio row.
+#   * ADDR pins the config address word, whose unparenthesised C spelling
+#     evaluates to 0x0 in this dialect.
+TOTAL=$((TOTAL + 1))
+if [ "$PCI_HAVE_QEMU" = "0" ]; then
+    PASS=$((PASS + 1)); echo "  pci_enumerates_default_machine: PASS (SKIPPED -- no qemu-system-x86_64)"
+elif [ "$PCI_BUILT" = "0" ]; then
+    FAIL=$((FAIL + 1)); echo "FAIL: pci_enumerates_default_machine (compile failed)"
+    $KRC --target=none --arch=x86_64 --emit=image --load-addr=0x100000 \
+         --stack-top=0x90000 "$PCI_SRC" -o "$PCI_IMG" 2>&1 | grep error | head -3 | sed 's/^/    /'
+else
+    pci_boot /tmp/pcidef_$$.log
+    pci_bad=""
+    pci_want /tmp/pcidef_$$.log \
+        "DEV 00:00.0 8086:1237 cls=0600 hdr=00" \
+        "DEV 00:01.0 8086:7000 cls=0601 hdr=80" \
+        "DEV 00:01.1 8086:7010 cls=0101 hdr=00" \
+        "DEV 00:01.3 8086:7113 cls=0680 hdr=00" \
+        "DEV 00:02.0 1234:1111 cls=0300 hdr=00" \
+        "DEV 00:03.0 8086:100e cls=0200 hdr=00" \
+        "BAR 00:01.1 4 raw=0000c041 io addr=0000c040 next=5" \
+        "BAR 00:02.0 0 raw=fd000008 addr=fd000000 next=1" \
+        "FIND 8086:100e -> 000300" \
+        "FIND 1234:9999 -> ffffffff" \
+        "ADDR 80001800 80000b2c" \
+        "DECODE 0000c04c fd000000 1fe000000"
+    pci_n=$(grep -c '^DEV ' /tmp/pcidef_$$.log 2>/dev/null || echo 0)
+    [ "$pci_n" = "6" ] || pci_bad="$pci_bad; $pci_n DEV lines, want 6"
+    grep -q '^DEV 00:01.2' /tmp/pcidef_$$.log 2>/dev/null && pci_bad="$pci_bad; invented a function 2"
+    if [ -z "$pci_bad" ]; then
+        PASS=$((PASS + 1)); echo "  pci_enumerates_default_machine: PASS (6 devices, the 00:01.x function gap, address word, both BAR mask widths)"
+    else
+        FAIL=$((FAIL + 1)); echo "FAIL: pci_enumerates_default_machine (${pci_bad#; })"
+    fi
+    rm -f /tmp/pcidef_$$.log
+fi
+
+# Take two devices away. A baked list passes the row above and fails here.
+TOTAL=$((TOTAL + 1))
+if [ "$PCI_HAVE_QEMU" = "0" ] || [ "$PCI_BUILT" = "0" ]; then
+    PASS=$((PASS + 1)); echo "  pci_tracks_the_machine: PASS (SKIPPED -- no qemu image)"
+else
+    pci_boot /tmp/pcicut_$$.log -vga none -net none
+    pci_bad=""
+    pci_want /tmp/pcicut_$$.log \
+        "DEV 00:00.0 8086:1237 cls=0600 hdr=00" \
+        "DEV 00:01.0 8086:7000 cls=0601 hdr=80" \
+        "DEV 00:01.1 8086:7010 cls=0101 hdr=00" \
+        "DEV 00:01.3 8086:7113 cls=0680 hdr=00" \
+        "FIND 8086:100e -> ffffffff"
+    grep -q '^DEV 00:02.0' /tmp/pcicut_$$.log 2>/dev/null && pci_bad="$pci_bad; VGA still reported under -vga none"
+    grep -q '^DEV 00:03.0' /tmp/pcicut_$$.log 2>/dev/null && pci_bad="$pci_bad; e1000 still reported under -net none"
+    pci_n=$(grep -c '^DEV ' /tmp/pcicut_$$.log 2>/dev/null || echo 0)
+    [ "$pci_n" = "4" ] || pci_bad="$pci_bad; $pci_n DEV lines, want 4"
+    if [ -z "$pci_bad" ]; then
+        PASS=$((PASS + 1)); echo "  pci_tracks_the_machine: PASS (-vga none -net none: 4 devices, find returns PCI_NOT_FOUND)"
+    else
+        FAIL=$((FAIL + 1)); echo "FAIL: pci_tracks_the_machine (${pci_bad#; })"
+    fi
+    rm -f /tmp/pcicut_$$.log
+fi
+
+# The 64-bit BAR path would otherwise SHIP UNTESTED: every BAR on the default
+# machine is 32-bit, so the two-slot walk never executes above. virtio-rng-pci
+# appears at 00:04.0 with BAR4 = 0xfe00000c -- type bits 2:1 = 10b, so slot 5
+# is its high half and pci_bar_next must skip to 6, not 5.
+TOTAL=$((TOTAL + 1))
+if [ "$PCI_HAVE_QEMU" = "0" ] || [ "$PCI_BUILT" = "0" ]; then
+    PASS=$((PASS + 1)); echo "  pci_64bit_bar_consumes_two_slots: PASS (SKIPPED -- no qemu image)"
+else
+    pci_boot /tmp/pcirng_$$.log -device virtio-rng-pci
+    pci_bad=""
+    pci_want /tmp/pcirng_$$.log \
+        "DEV 00:04.0 1af4:1005 cls=00ff hdr=00" \
+        "BAR 00:04.0 4 raw=fe00000c mem64 addr=fe000000 next=6"
+    grep -q '^BAR 00:04.0 5 ' /tmp/pcirng_$$.log 2>/dev/null && pci_bad="$pci_bad; reported the 64-bit BAR's high half as a BAR of its own"
+    if [ -z "$pci_bad" ]; then
+        PASS=$((PASS + 1)); echo "  pci_64bit_bar_consumes_two_slots: PASS (virtio-rng 00:04.0 BAR4 mem64, next=6)"
+    else
+        FAIL=$((FAIL + 1)); echo "FAIL: pci_64bit_bar_consumes_two_slots (${pci_bad#; })"
+    fi
+    rm -f /tmp/pcirng_$$.log
+fi
+rm -f "$PCI_SRC" "$PCI_IMG"
+
 # The operand-shape exclusion list is duplicated verbatim across several
 # functions in ir.kr, and any divergence between the copies miscompiles.
 # docs/IR_REFERENCE.md §14 tells implementers to edit every one of them, so the
@@ -3991,15 +5555,23 @@ fi
 #
 # Pin the count in BOTH places. If you add or remove a copy, this row tells you
 # to update the doc in the same commit.
+#
+# The pattern is anchored to the WHOLE line (^ws if <chain> {$), not a
+# substring. A substring count stays at 7 when one copy is extended in place
+# ("|| op == 150" appended, or a new op prepended before 72) -- proven by
+# injecting exactly that: the old grep -c still said 7 while the copies
+# disagreed, which is the miscompile this row exists to pin. Anchoring means
+# ANY textual divergence in a copy drops the count and fails the row.
 TOTAL=$((TOTAL + 1))
-opshape_pat='op == 72 || op == 76 || op == 83 || op == 93 || op == 98 || op == 148'
-opshape_src=$(grep -c "$opshape_pat" "$DIR/../src/ir.kr")
+opshape_pat='^[[:space:]]*if op == 72 \|\| op == 76 \|\| op == 83 \|\| op == 93 \|\| op == 98 \|\| op == 148 \{[[:space:]]*$'
+opshape_src=$(grep -cE "$opshape_pat" "$DIR/../src/ir.kr")
 opshape_doc=$(grep -c 'SEVEN separate times' "$DIR/../docs/IR_REFERENCE.md")
 if [ "$opshape_src" = "7" ] && [ "$opshape_doc" = "1" ]; then
-    PASS=$((PASS + 1)); echo "  ir_operand_shape_copies_pinned: PASS (7 copies, doc agrees)"
+    PASS=$((PASS + 1)); echo "  ir_operand_shape_copies_pinned: PASS (7 verbatim copies, doc agrees)"
 else
     FAIL=$((FAIL + 1))
-    echo "FAIL: ir_operand_shape_copies_pinned (src has $opshape_src copies; docs/IR_REFERENCE.md §14 says SEVEN: $opshape_doc match)"
+    echo "FAIL: ir_operand_shape_copies_pinned (src has $opshape_src verbatim copies, want 7; docs/IR_REFERENCE.md §14 says SEVEN: $opshape_doc match)"
+    echo "  if a copy no longer matches verbatim, the copies have diverged (that miscompiles);"
     echo "  if you changed the number of copies, update docs/IR_REFERENCE.md §14 in the same commit"
 fi
 

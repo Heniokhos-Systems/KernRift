@@ -1,0 +1,215 @@
+// KernRift Standard Library — x86_64 machine primitives
+//
+// Port I/O, control registers, MSRs, descriptor tables and the instructions a
+// bare-metal x86_64 program needs before it has an OS.
+//
+// FREESTANDING-SAFE: every function here is `asm` only. Nothing in this module
+// issues a syscall or calls into libc, so it is usable under `--target=none`
+// and `--freestanding`. It is x86_64-only by construction -- importing it on
+// another architecture will fail at the first asm block, which is the intended
+// behaviour rather than a silent no-op.
+//
+// The values passed to `in`/`out` are full u64s; the instruction width is
+// chosen by which function you call, not by the type of the argument.
+
+// --- port I/O: output -------------------------------------------------------
+
+// Write a byte to an I/O port.
+fn outb(uint64 port, uint64 val) {
+    asm { "out dx, al" } in(port -> rdx, val -> rax)
+}
+
+// Write a 16-bit word to an I/O port.
+fn outw(uint64 port, uint64 val) {
+    asm { "out dx, ax" } in(port -> rdx, val -> rax)
+}
+
+// Write a 32-bit dword to an I/O port.
+fn outl(uint64 port, uint64 val) {
+    asm { "out dx, eax" } in(port -> rdx, val -> rax)
+}
+
+// --- port I/O: input --------------------------------------------------------
+//
+// `_zero` is fed to rax so the register is a declared input rather than
+// whatever the allocator left there; the `in` instruction overwrites it.
+
+// Read a byte from an I/O port.
+fn inb(uint64 port) -> uint64 {
+    uint64 v = 0
+    uint64 _zero = 0
+    asm { "in al, dx" } in(port -> rdx, _zero -> rax) out(rax -> v)
+    return v & 0xFF
+}
+
+// Read a 16-bit word from an I/O port.
+fn inw(uint64 port) -> uint64 {
+    uint64 v = 0
+    uint64 _zero = 0
+    asm { "in ax, dx" } in(port -> rdx, _zero -> rax) out(rax -> v)
+    return v & 0xFFFF
+}
+
+// Read a 32-bit dword from an I/O port.
+fn inl(uint64 port) -> uint64 {
+    uint64 v = 0
+    uint64 _zero = 0
+    asm { "in eax, dx" } in(port -> rdx, _zero -> rax) out(rax -> v)
+    return v & 0xFFFFFFFF
+}
+
+// --- execution control ------------------------------------------------------
+
+// PAUSE. A spin-wait hint: cuts the power and memory-order penalty of a busy
+// loop, and decodes as NOP on cores without SSE2, so it is safe everywhere.
+// Put this in the body of any poll loop.
+fn cpu_relax() {
+    asm { "pause" }
+}
+
+// Halt until the next interrupt. With interrupts masked this halts forever.
+fn hlt() {
+    asm { "hlt" }
+}
+
+// Mask maskable interrupts.
+fn cli() {
+    asm { "cli" }
+}
+
+// Unmask maskable interrupts.
+fn sti() {
+    asm { "sti" }
+}
+
+// Stop permanently: mask interrupts, then halt in a loop so a spurious NMI
+// cannot resume execution past this point.
+fn halt_forever() {
+    asm { "cli" }
+    loop {
+        asm { "hlt" }
+    }
+}
+
+// --- identification and timing ---------------------------------------------
+
+// CPUID leaf `leaf` -> EAX. Clobbers rbx/rcx/rdx as the instruction requires.
+fn cpuid_eax(uint64 leaf) -> uint64 {
+    uint64 v = 0
+    asm { "cpuid" } in(leaf -> rax) out(rax -> v)
+    return v & 0xFFFFFFFF
+}
+
+// CPUID leaf `leaf` -> EDX. The common feature-bit word.
+fn cpuid_edx(uint64 leaf) -> uint64 {
+    uint64 v = 0
+    asm { "cpuid" } in(leaf -> rax) out(rdx -> v)
+    return v & 0xFFFFFFFF
+}
+
+// CPUID leaf `leaf` -> ECX.
+fn cpuid_ecx(uint64 leaf) -> uint64 {
+    uint64 v = 0
+    asm { "cpuid" } in(leaf -> rax) out(rcx -> v)
+    return v & 0xFFFFFFFF
+}
+
+// Timestamp counter, full 64 bits recombined from EDX:EAX.
+fn rdtsc() -> uint64 {
+    uint64 lo = 0
+    uint64 hi = 0
+    asm { "rdtsc" } out(rax -> lo, rdx -> hi)
+    return ((hi & 0xFFFFFFFF) << 32) | (lo & 0xFFFFFFFF)
+}
+
+// --- model-specific registers ----------------------------------------------
+
+// Read MSR `msr`, recombining EDX:EAX. Faults if the MSR does not exist.
+fn rdmsr(uint64 msr) -> uint64 {
+    uint64 lo = 0
+    uint64 hi = 0
+    asm { "rdmsr" } in(msr -> rcx) out(rax -> lo, rdx -> hi)
+    return ((hi & 0xFFFFFFFF) << 32) | (lo & 0xFFFFFFFF)
+}
+
+// Write `val` to MSR `msr`, split across EDX:EAX as the instruction expects.
+fn wrmsr(uint64 msr, uint64 val) {
+    uint64 lo = val & 0xFFFFFFFF
+    uint64 hi = (val >> 32) & 0xFFFFFFFF
+    asm { "wrmsr" } in(msr -> rcx, lo -> rax, hi -> rdx)
+}
+
+// --- control registers ------------------------------------------------------
+
+fn read_cr0() -> uint64 {
+    uint64 v = 0
+    asm { "mov rax, cr0" } out(rax -> v)
+    return v
+}
+
+// The page-table base. Reading it is how you find the active PML4.
+fn read_cr3() -> uint64 {
+    uint64 v = 0
+    asm { "mov rax, cr3" } out(rax -> v)
+    return v
+}
+
+fn read_cr4() -> uint64 {
+    uint64 v = 0
+    asm { "mov rax, cr4" } out(rax -> v)
+    return v
+}
+
+fn write_cr0(uint64 v) {
+    asm { "mov cr0, rax" } in(v -> rax)
+}
+
+// Reloading CR3 also flushes the non-global TLB.
+fn write_cr3(uint64 v) {
+    asm { "mov cr3, rax" } in(v -> rax)
+}
+
+fn write_cr4(uint64 v) {
+    asm { "mov cr4, rax" } in(v -> rax)
+}
+
+// Invalidate one page's TLB entry -- cheaper than reloading CR3 when a single
+// mapping changed.
+fn invlpg(uint64 addr) {
+    asm { "invlpg [rax]" } in(addr -> rax)
+}
+
+// --- descriptor tables ------------------------------------------------------
+//
+// Both take the address of a 10-byte pseudo-descriptor: u16 limit followed by
+// u64 base. Build it with store16/store64 and pass its address.
+
+fn lgdt(uint64 desc_addr) {
+    asm { "lgdt [rax]" } in(desc_addr -> rax)
+}
+
+fn lidt(uint64 desc_addr) {
+    asm { "lidt [rax]" } in(desc_addr -> rax)
+}
+
+// --- byte order -------------------------------------------------------------
+//
+// Here rather than in a string/format module because the callers are hardware:
+// fw_cfg, PCI config space and most device descriptors are big-endian while
+// x86 is little-endian.
+//
+// NOTE the parenthesisation. In KernRift `&` binds TIGHTER than `<<` and `+`
+// (the reverse of C), so `v & 0xFF << 24` would parse as `v & (0xFF << 24)`.
+// Every mask-then-shift below is explicit for that reason.
+
+fn bswap16(uint64 v) -> uint64 {
+    return ((v & 0xFF) << 8) | ((v >> 8) & 0xFF)
+}
+
+fn bswap32(uint64 v) -> uint64 {
+    return ((v & 0xFF) << 24) | ((v & 0xFF00) << 8) | ((v >> 8) & 0xFF00) | ((v >> 24) & 0xFF)
+}
+
+fn bswap64(uint64 v) -> uint64 {
+    return (bswap32(v & 0xFFFFFFFF) << 32) | bswap32((v >> 32) & 0xFFFFFFFF)
+}

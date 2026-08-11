@@ -1,0 +1,182 @@
+// KernRift Standard Library — bare-metal console
+//
+// Ties the output and input devices together so a freestanding program gets
+// the thing it actually wants: working `print`. Text goes to the VGA text
+// screen AND the serial port; keystrokes come from the PS/2 keyboard OR the
+// serial port, whichever produces one first.
+//
+// FREESTANDING-SAFE: no allocation.
+//
+// x86_64 only.
+//
+//     console_init()
+//     println("hello from ring 0")
+//     u64 c = console_getc()
+//
+// The reason this module exists rather than just calling vga_puts/serial_puts:
+// it defines `write` with @builtin_override, and under --target=none the
+// compiler lowers `print`, `println` and f-strings to `write`. Importing this
+// is what makes the language's ordinary output work with no OS beneath it.
+//
+// Dual output is not redundancy for its own sake. The screen is what a user
+// sees; the serial log is what a test harness can capture and what survives a
+// machine that dies before you can read the screen.
+//
+// MUTUALLY EXCLUSIVE WITH std/uart_16550.kr, BY DESIGN. Both are print
+// providers, so both define `write` with `@builtin_override` and importing the
+// two together is
+//
+//     error: redefinition of function 'write'
+//
+// naming a line in a stdlib file you did not write, which is a confusing way
+// to find out. Choose one:
+//
+//   * `std/console.kr` — serial AND the VGA text screen, plus PS/2 keyboard
+//     input. The one to reach for on a machine with a display.
+//   * `std/uart_16550.kr` — serial only. The right choice when there is no
+//     display, when only the serial log is captured, or under `-vga none`.
+//
+// Importing `std/serial.kr` alongside either is fine, and normal: `serial.kr`
+// defines no `write` of its own, and this module imports it below.
+
+import "vga_text.kr"
+import "serial.kr"
+import "ps2.kr"
+import "cstr.kr"
+
+// Which sinks are live. Both default on; console_init turns off whatever is
+// not wanted.
+static u64 console_to_vga    = 1
+static u64 console_to_serial = 1
+static u64 console_started   = 0
+
+// --- setup ------------------------------------------------------------------
+
+// Bring up serial, keyboard and screen. Safe to call more than once.
+fn console_init() {
+    serial_init()
+    ps2_init()
+    vga_clear()
+    console_started = 1
+}
+
+// Same, without clearing the screen -- for taking over a display that already
+// has something on it (a bootloader banner, say).
+fn console_init_quiet() {
+    serial_init()
+    ps2_init()
+    console_started = 1
+}
+
+fn console_set_vga(u64 on)    { console_to_vga = on }
+fn console_set_serial(u64 on) { console_to_serial = on }
+
+// --- output -----------------------------------------------------------------
+
+fn console_putc(u64 c) {
+    if console_to_serial != 0 { serial_putc(c) }
+    if console_to_vga != 0 { vga_putc(c) }
+}
+
+fn console_puts(u64 s) {
+    u64 i = 0
+    while load8(s + i) != 0 {
+        console_putc(load8(s + i))
+        i = i + 1
+    }
+}
+
+fn console_putsn(u64 s) {
+    console_puts(s)
+    console_putc(10)
+}
+
+// Scratch for the number formatters. Not re-entrant, which matches a console.
+static u8[32] console_numbuf
+
+// Print an unsigned decimal. std/string.kr's int_to_str cannot be used here:
+// it allocates, and --target=none refuses alloc.
+fn console_put_u64(u64 v) {
+    u64 b = console_numbuf
+    cstr_u64_dec(b, 32, v)
+    console_puts(b)
+}
+
+fn console_put_i64(u64 v) {
+    u64 b = console_numbuf
+    cstr_i64_dec(b, 32, v)
+    console_puts(b)
+}
+
+// Print "0x" followed by hex. `width` zero-pads; 0 means natural width.
+fn console_put_hex(u64 v, u64 width) {
+    u64 b = console_numbuf
+    cstr_u64_hex0x(b, 32, v, width)
+    console_puts(b)
+}
+
+// The compiler lowers print/println/f-strings to `write` under --target=none.
+// Defining it here is what makes those work with no OS; @builtin_override says
+// the shadowing is deliberate, which the compiler otherwise rejects.
+@builtin_override
+fn write(uint64 _fd, uint64 buf, uint64 len) -> uint64 {
+    uint64 i = 0
+    while i < len {
+        console_putc(load8(buf + i))
+        i = i + 1
+    }
+    return len
+}
+
+// --- input ------------------------------------------------------------------
+
+// Non-blocking: a keystroke from either input, or 0 if neither has one.
+// Keyboard first, so a person typing at the machine beats a stale serial byte.
+fn console_poll() -> u64 {
+    u64 c = ps2_poll()
+    if c != 0 { return c }
+    return serial_poll()
+}
+
+fn console_getc() -> u64 {
+    loop {
+        u64 c = console_poll()
+        if c != 0 { return c }
+        cpu_relax()
+    }
+}
+
+// Read a line into `dst`, echoing as it goes, until Enter. Returns the length,
+// excluding the NUL. Handles backspace; ignores everything non-printable.
+//
+// Caller-owned buffer and an explicit cap, like std/cstr.kr -- there is no
+// heap to grow into.
+fn console_readline(u64 dst, u64 cap) -> u64 {
+    if cap == 0 { return 0 }
+    u64 n = 0
+    loop {
+        u64 c = console_getc()
+        if c == 10 { console_putc(10)  break }
+        if c == 13 { console_putc(10)  break }
+        if c == 8 {
+            if n > 0 {
+                n = n - 1
+                // Erase visually: back up, blank, back up again.
+                console_putc(8)
+                console_putc(32)
+                console_putc(8)
+            }
+        } else if c >= 32 {
+            // Above 255 are the PS2_KEY_* values, which have no text form.
+            if c < 127 {
+                if n + 1 < cap {
+                    store8(dst + n, c)
+                    n = n + 1
+                    console_putc(c)
+                }
+            }
+        }
+    }
+    store8(dst + n, 0)
+    return n
+}

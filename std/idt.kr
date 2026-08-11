@@ -1,0 +1,373 @@
+// KernRift Standard Library — x86_64 interrupt descriptor table
+//
+// What this buys you: without an IDT a bare-metal fault triple-faults and the
+// machine resets. There is no message, no register dump and no RIP, so every
+// bug in a freestanding program looks exactly like every other bug -- and
+// exactly like a deliberate reboot. After `idt_init()` /
+// `idt_install_default_handlers()` / `idt_load()` a fault prints
+//
+//     EXCEPTION 14 (#PF) err=0x2 rip=0x101389
+//
+// and halts, which turns "it rebooted" into a line number.
+//
+// FREESTANDING-SAFE: no allocation, no syscalls. x86_64 only.
+//
+//     import "std/idt.kr"
+//     import "std/serial.kr"
+//
+//     fn main() -> uint32 {
+//         serial_init()
+//         idt_init()
+//         idt_install_default_handlers()
+//         idt_load()
+//         ...
+//     }
+//
+// --- where the report goes --------------------------------------------------
+//
+// Straight out of the 16550 UART via std/serial.kr, NOT through the `write`
+// provider that `print` uses. Three reasons: the reporter must work before any
+// console is initialised, it must work when the thing that faulted IS the
+// console, and std/serial.kr defines no `write` -- so importing this module
+// can never collide with std/console.kr or std/uart_16550.kr, which do.
+// Call `serial_init()` (or `console_init()`, which inits the same UART) before
+// you arm the IDT; the reporter deliberately does not touch the UART's
+// configuration, so it inherits whatever port `serial_set_port` last chose.
+//
+// --- warning: the legacy PIC is left alone ----------------------------------
+//
+// This module programs no interrupt controller. Under a multiboot boot
+// (`--emit=image --load-addr=`, QEMU `-kernel`) the 8259 is left where the
+// firmware put it, so IRQ0 arrives on vector **8**: call `sti()` and the very
+// next timer tick reports a double fault that never happened. It reports it
+// exactly once, because the default handler halts -- so what you see is a
+// machine that stopped for no reason you can find in your own code.
+// Worse, the fields lie: a hardware IRQ pushes no error code, but
+// stub 8 is built as an error-code stub, so the reported `err` is really the
+// interrupted RIP and the reported `rip` is really CS -- measured here as
+// `EXCEPTION 8 (#DF) err=0x100172 rip=0x8`, where 0x8 is the code selector and
+// not an address. Do not go hunting for a double fault. Keep interrupts
+// masked, or remap the PIC yourself, until you need IRQs.
+//
+// Under `--emit=image --reset-vector` (QEMU `-bios`) nothing arrives at all --
+// measured: the same program prints its banner and then stays quiet, because
+// the KernRift image *is* the firmware and nobody ever programmed the 8259.
+
+import "x86.kr"
+import "cstr.kr"
+import "serial.kr"
+
+// 256 gates x 16 bytes. The address of a static is what `lidt` wants on an
+// identity-mapped image.
+const u64 IDT_ENTRIES   = 256
+const u64 IDT_GATE_SIZE = 16
+
+// Present, DPL 0, 64-bit interrupt gate. "Interrupt" rather than "trap" (0x8F)
+// clears IF on entry, so a fault cannot be interrupted halfway through
+// reporting itself.
+const u64 IDT_TYPE_INTERRUPT = 0x8E
+const u64 IDT_TYPE_TRAP      = 0x8F
+
+// The CPU's own vectors. Everything from 32 up is free for IRQs and software
+// interrupts.
+const u64 IDT_CPU_VECTORS = 32
+
+static u8[4096] idt_table
+
+// The pseudo-descriptor `lidt` reads: u16 limit then u64 base = 10 bytes.
+// Sixteen so the tail is padding rather than whatever follows in memory.
+static u8[16] idt_ptr
+
+// The stub table (see below). 32 stubs x 16 bytes = 512 bytes are used; the
+// array is DELIBERATELY twice that, so a future 33rd stub has somewhere to go.
+// Do not "fix" the size to 512 -- it is slack on purpose.
+static u8[1024] idt_stubs
+
+// Code selector, read from CS at run time by idt_init. Never hardcode it:
+// a multiboot image runs with CS=0x0008 and a reset-vector image with
+// CS=0x0018, so a baked 0x08 produces a module that works under `-kernel` and
+// silently triple-faults under `-bios`.
+static u64 idt_cs = 0
+
+// Scratch for number formatting in the reporter. A static, because the
+// reporter runs on a faulted machine and must not allocate.
+static u8[32] idt_numbuf
+
+// --- reading CS -------------------------------------------------------------
+
+// `mov ax, cs` as raw bytes: the assembler has no mnemonic for a segment-register
+// move. rax is fed a declared zero first so the binding is an input the
+// allocator knows about; 0x8C 0xC8 overwrites the low half.
+fn idt_read_cs() -> u64 {
+    u64 zero = 0
+    u64 v = 0
+    asm { "mov rax, cs" } in(zero -> rax) out(rax -> v)
+    return v & 0xFFFF
+}
+
+// The selector idt_init latched. 0 before idt_init has run.
+fn idt_get_cs() -> u64 { return idt_cs }
+
+// --- gates ------------------------------------------------------------------
+
+// A 64-bit gate descriptor is not laid out in one piece: the handler address is
+// split into three fields with the selector and attribute bytes wedged between
+// them.
+//
+//   +0  offset 15:0      +2  selector      +4  IST      +5  type/attr
+//   +6  offset 31:16     +8  offset 63:32  +12 reserved
+fn idt_set_gate(u64 vec, u64 handler, u64 selector, u64 ist, u64 type_attr) {
+    if vec >= IDT_ENTRIES { return }
+    u64 g = idt_table + (vec * IDT_GATE_SIZE)
+    store16(g + 0, handler & 0xFFFF)
+    store16(g + 2, selector & 0xFFFF)
+    store8(g + 4, ist & 0x07)
+    store8(g + 5, type_attr & 0xFF)
+    store16(g + 6, (handler >> 16) & 0xFFFF)
+    store32(g + 8, (handler >> 32) & 0xFFFFFFFF)
+    store32(g + 12, 0)
+}
+
+// Install `addr` as the handler for `vec`, as a present 64-bit interrupt gate
+// on the selector idt_init read from CS. `addr` comes from `fn_addr("name")`
+// -- which takes a string literal -- or from `idt_stub_addr(v)`.
+fn idt_set_handler(u64 vec, u64 addr) {
+    idt_set_gate(vec, addr, idt_cs, 0, IDT_TYPE_INTERRUPT)
+}
+
+// Mark a gate not-present, so the vector goes back to triple-faulting.
+fn idt_clear_handler(u64 vec) {
+    idt_set_gate(vec, 0, 0, 0, 0)
+}
+
+// --- the stub table ---------------------------------------------------------
+//
+// One shared handler needs to know which vector it was entered on, and the CPU
+// does not tell it. The usual answer is 32 near-identical handler functions;
+// this module instead builds 32 sixteen-byte stubs at run time, in static
+// storage, which the entry stub's identity map leaves both writable and
+// executable. Each is:
+//
+//     push 0   | nop nop      normalise the error-code / no-error-code split
+//     push imm8 <vector>
+//     sub rsp, 0x100          clear of isr_common's own locals
+//     jmp rel32 -> isr_common
+//
+//     6A 00 (or 90 90) = 2      6A vv = 2
+//     48 81 EC 00 01 00 00 = 7  E9 rel32 = 5       total exactly 16
+//
+// The sixteen bytes are full: there is no slack for another instruction.
+// `fn_addr` is called ONCE, for isr_common; the other 31 gate targets are
+// computed addresses, so its string-literal restriction never bites.
+//
+// LOAD-BEARING PRECONDITION: static storage is executable. If a future change
+// makes the identity map W^X, this is the line that says why the module broke.
+
+// Vectors whose exception pushes a CPU error code onto the stack. Getting this
+// list wrong shifts every frame offset by 8 and reports the error code as the
+// RIP. 9, 15, 18-20 and 22-28 push nothing; neither does any hardware IRQ.
+fn idt_vector_has_error_code(u64 v) -> u64 {
+    if v == 8  { return 1 }   // #DF
+    if v == 10 { return 1 }   // #TS
+    if v == 11 { return 1 }   // #NP
+    if v == 12 { return 1 }   // #SS
+    if v == 13 { return 1 }   // #GP
+    if v == 14 { return 1 }   // #PF
+    if v == 17 { return 1 }   // #AC
+    if v == 21 { return 1 }   // #CP
+    if v == 29 { return 1 }   // #VC
+    if v == 30 { return 1 }   // #SX
+    return 0
+}
+
+// Address of the runtime-built stub for `vec`. This is what goes in the gate.
+fn idt_stub_addr(u64 vec) -> u64 {
+    return idt_stubs + (vec * IDT_GATE_SIZE)
+}
+
+// Assemble all 32 stubs. Called by idt_init.
+fn idt_build_stubs() {
+    u64 common = fn_addr("isr_common")
+    u64 v = 0
+    while v < IDT_CPU_VECTORS {
+        u64 p = idt_stubs + (v * IDT_GATE_SIZE)
+        if idt_vector_has_error_code(v) != 0 {
+            store8(p + 0, 0x90)          // nop: the CPU already pushed one
+            store8(p + 1, 0x90)          // nop
+        } else {
+            store8(p + 0, 0x6A)          // push imm8 0: a dummy error code, so
+            store8(p + 1, 0x00)          //   every frame has the same shape
+        }
+        store8(p + 2, 0x6A)              // push imm8 <vector>
+        store8(p + 3, v & 0xFF)
+        store8(p + 4, 0x48)              // sub rsp, 0x100
+        store8(p + 5, 0x81)
+        store8(p + 6, 0xEC)
+        store8(p + 7, 0x00)
+        store8(p + 8, 0x01)
+        store8(p + 9, 0x00)
+        store8(p + 10, 0x00)
+        store8(p + 11, 0xE9)             // jmp rel32
+        // rel32 is relative to the END of the jmp, which is the end of the
+        // stub. Wrapping u64 arithmetic gives the right two's complement in
+        // the low 32 bits whichever way the branch goes.
+        u64 rel = common - (p + IDT_GATE_SIZE)
+        store8(p + 12, rel & 0xFF)
+        store8(p + 13, (rel >> 8) & 0xFF)
+        store8(p + 14, (rel >> 16) & 0xFF)
+        store8(p + 15, (rel >> 24) & 0xFF)
+        v = v + 1
+    }
+}
+
+// --- the common handler -----------------------------------------------------
+//
+// `@naked` emits no prologue, so RSP at entry IS the frame pointer -- which is
+// the whole reason the frame is reachable without a `push`/`mov reg,reg` the
+// assembler does not have. After the stub's two pushes and its `sub rsp,0x100`
+// the stack reads:
+//
+//     [rsp+0x100] vector      [rsp+0x108] error code   [rsp+0x110] RIP
+//     [rsp+0x118] CS          [rsp+0x120] RFLAGS       [rsp+0x128] old RSP
+//     [rsp+0x130] SS
+//
+// The three `mov rax,[rsp+disp32]` below are those offsets, in raw hex,
+// because the assembler has no `[rsp+N]` operand syntax. They are disp32 forms
+// (48 8B 84 24 ...) -- the shorter disp8 encoding cannot reach 0x100.
+//
+// Entry RSP is 8 mod 16 (5 CPU pushes + 2 stub pushes = 7 qwords, plus a
+// multiple of 16), the same phase as a normal SysV function entry, which is
+// what makes the plain call to idt_report below safe. Changing the stub's
+// `sub rsp` constant would break both the offsets and that phase.
+@naked
+fn isr_common() {
+    u64 vec = 0
+    u64 err = 0
+    u64 rip = 0
+    asm { "mov rax, [rsp+0x100]" } out(rax -> vec)   // [rsp+0x100]
+    asm { "mov rax, [rsp+0x108]" } out(rax -> err)   // [rsp+0x108]
+    asm { "mov rax, [rsp+0x110]" } out(rax -> rip)   // [rsp+0x110]
+    idt_report(vec, err, rip)
+}
+
+// Intel's mnemonics for vectors 0-31. Returned as a plain pointer to a string
+// literal; there is nothing to free.
+fn idt_mnemonic(u64 v) -> u64 {
+    if v == 0  { return "#DE" }   // divide error
+    if v == 1  { return "#DB" }   // debug
+    if v == 2  { return "NMI" }
+    if v == 3  { return "#BP" }   // breakpoint (int3)
+    if v == 4  { return "#OF" }   // overflow
+    if v == 5  { return "#BR" }   // bound range exceeded
+    if v == 6  { return "#UD" }   // invalid opcode
+    if v == 7  { return "#NM" }   // device not available
+    if v == 8  { return "#DF" }   // double fault
+    if v == 9  { return "CSO" }   // coprocessor segment overrun (386 only)
+    if v == 10 { return "#TS" }   // invalid TSS
+    if v == 11 { return "#NP" }   // segment not present
+    if v == 12 { return "#SS" }   // stack-segment fault
+    if v == 13 { return "#GP" }   // general protection
+    if v == 14 { return "#PF" }   // page fault
+    if v == 16 { return "#MF" }   // x87 floating point
+    if v == 17 { return "#AC" }   // alignment check
+    if v == 18 { return "#MC" }   // machine check
+    if v == 19 { return "#XM" }   // SIMD floating point
+    if v == 20 { return "#VE" }   // virtualisation
+    if v == 21 { return "#CP" }   // control protection
+    if v == 28 { return "#HV" }   // hypervisor injection
+    if v == 29 { return "#VC" }   // VMM communication
+    if v == 30 { return "#SX" }   // security
+    if v < IDT_CPU_VECTORS { return "RSV" }
+    return "IRQ"
+}
+
+// Print the fault and stop. Reached by a plain call from isr_common, so the
+// compiler's ordinary frame math applies -- nothing here is naked.
+@noreturn
+fn idt_report(u64 vec, u64 err, u64 rip) {
+    u64 b = idt_numbuf
+    serial_puts("EXCEPTION ")
+    cstr_u64_dec(b, 32, vec)
+    serial_puts(b)
+    serial_puts(" (")
+    serial_puts(idt_mnemonic(vec))
+    serial_puts(") err=")
+    cstr_u64_hex0x(b, 32, err, 0)
+    serial_puts(b)
+    serial_puts(" rip=")
+    cstr_u64_hex0x(b, 32, rip, 0)
+    serial_puts(b)
+    serial_putc(10)
+    halt_forever()
+}
+
+// --- setup ------------------------------------------------------------------
+
+// Zero the table, latch CS, and assemble the stub table. Call this first; it
+// does NOT load the IDTR, so you can install your own handlers in between.
+fn idt_init() {
+    idt_cs = idt_read_cs()
+    u64 t = idt_table
+    u64 i = 0
+    u64 n = IDT_ENTRIES * IDT_GATE_SIZE
+    while i < n {
+        store8(t + i, 0)
+        i = i + 1
+    }
+    idt_build_stubs()
+}
+
+// Point vectors 0-31 at the reporting stubs. Anything you installed by hand
+// before this is overwritten; call it first and override afterwards.
+fn idt_install_default_handlers() {
+    u64 v = 0
+    while v < IDT_CPU_VECTORS {
+        idt_set_handler(v, idt_stub_addr(v))
+        v = v + 1
+    }
+}
+
+// Build the pseudo-descriptor and `lidt` it.
+//
+// The limit is size MINUS ONE -- the offset of the last valid byte, 4095.
+//
+// Measured, because the direction matters and is easy to get backwards: a
+// limit one too LARGE (4096) is inert. The CPU only checks that the gate it is
+// about to read fits, and no vector can reach past 4095, so nothing observes
+// the extra byte -- do not expect a test to catch that mistake. A limit too
+// SMALL is the fatal one: with 47, vector 3 is out of range, the resulting #GP
+// is out of range too, and the machine triple-faults with no output at all,
+// which is precisely the failure this module exists to end.
+fn idt_load() {
+    u64 p = idt_ptr
+    store16(p + 0, (IDT_ENTRIES * IDT_GATE_SIZE) - 1)
+    store64(p + 2, idt_table)
+    lidt(p)
+}
+
+// --- reading the live IDTR --------------------------------------------------
+//
+// SIDT stores the register `lidt` loaded: u16 limit then u64 base. Raw bytes
+// (0F 01 /1 with a [rax] ModRM) because the assembler has `lidt` but not its
+// counterpart. These deliberately read the CPU rather than echoing idt_ptr, so
+// a caller checking them is checking that the load actually took effect.
+static u8[16] idt_idtr_buf
+
+fn idt_store_idtr(u64 dst) {
+    asm { "sidt [rax]" } in(dst -> rax)
+}
+
+// Limit currently in the CPU's IDTR. 4095 after idt_load().
+fn idt_limit() -> u64 {
+    idt_store_idtr(idt_idtr_buf)
+    return load16(idt_idtr_buf)
+}
+
+// Base currently in the CPU's IDTR. Equals idt_table_addr() after idt_load().
+fn idt_base() -> u64 {
+    idt_store_idtr(idt_idtr_buf)
+    return load64(idt_idtr_buf + 2)
+}
+
+// Where this module's table lives, whether or not it has been loaded.
+fn idt_table_addr() -> u64 { return idt_table }

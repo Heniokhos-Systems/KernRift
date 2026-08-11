@@ -1,0 +1,305 @@
+// KernRift Standard Library — QEMU fw_cfg over MMIO (arm64 `-M virt`)
+//
+// The MMIO transport for the device std/fw_cfg.kr reaches through x86 I/O
+// ports. Same protocol, same API names -- a caller switches transports by
+// switching the import -- but every primitive differs, which is why this is a
+// separate module and not a refactor (the same split as std/uart_16550.kr vs
+// std/uart_pl011.kr).
+//
+// FREESTANDING-SAFE: volatile MMIO and static storage only, no allocation.
+//
+// arm64 ONLY in practice: nothing here is arch-specific KernRift, but the
+// base address is a `-M virt` fact and the x86 flavour of the device answers
+// on ports, not memory.
+//
+// MEASURED FACTS (QEMU 8.2.2, `-M virt`; dumpdtb + a bare-metal probe):
+//
+//   * The device tree names the device `fw-cfg@9020000`, compatible
+//     "qemu,fw-cfg-mmio", reg = <0x09020000 0x18>. The base below is that
+//     measurement, not folklore -- on another board read the DTB.
+//
+//   * Register layout within those 0x18 bytes:
+//         +0   data      (byte-wide sequential reads, like the x86 data port)
+//         +8   selector  (16-bit, WRITE-ONLY, BIG-ENDIAN)
+//         +16  DMA addr  (64-bit big-endian, or two 32-bit BE halves)
+//
+//   * THE SELECTOR IS BIG-ENDIAN, unlike the x86 port. Established by
+//     experiment, not datasheet: writing selector 0x0019 (the file directory)
+//     as a raw little-endian halfword made the device see item 0x1900 and
+//     every read returned 0; byte-swapped it returned the real directory
+//     (count 9). Note that the SIGNATURE selector (0x0000) cannot catch this
+//     bug -- 0x0000 byte-swapped is 0x0000 -- so a fw_cfg_present() that
+//     passes proves nothing about selector byte order. The directory does.
+//
+//   * Endianness within the data stream is the same as on x86 and does NOT
+//     depend on the transport: structural fields (the file directory) are
+//     big-endian, item payloads are little-endian (nb_cpus read LE returned
+//     the -smp value; the directory walk yielded correct names and sizes).
+//
+//   * FW_CFG_RAM_SIZE (0x0003) is an x86 legacy item: on `-M virt` it reads
+//     as 0 (measured, `-m 256M`). RAM size on arm comes from the device tree.
+//     fw_cfg_ram_size is kept for API parity; treat 0 as "not this transport".
+//
+//   * DMA works: address register written as two 32-bit big-endian halves,
+//     HIGH at +16 then LOW at +20 -- the low-half write triggers, so the
+//     order is not optional. Measured: DMA read of the signature returned
+//     "QEMU" with control 0; DMA write to a read-only item set the ERROR
+//     bit; DMA write of a RAMFBCfg to `etc/ramfb` succeeded.
+//
+// Storage alignment differs from the x86 module ON PURPOSE: the request
+// block is u64[2], not u8[16], because these images run with the MMU off
+// and every data access is Device-nGnRnE -- an unaligned store64 faults.
+
+// Sibling std modules are imported by bare filename -- a nested import
+// resolves relative to the importing file's own directory.
+import "cstr.kr"
+
+// --- the device --------------------------------------------------------------
+
+// QEMU `-M virt` puts fw-cfg here (measured, see header). A base address is
+// a board fact: on anything else, read the DTB and call fw_cfg_mmio_init.
+static u64 fw_cfg_mmio_base = 0x09020000
+
+const u64 FW_CFG_MMIO_DATA = 0      // byte-wide sequential data
+const u64 FW_CFG_MMIO_SEL  = 8      // u16 selector, BIG-ENDIAN
+const u64 FW_CFG_MMIO_DMA  = 16     // u64 BE address, high half first
+
+// Point this module at a different base (from the DTB of a non-virt board).
+fn fw_cfg_mmio_init(u64 base) {
+    fw_cfg_mmio_base = base
+}
+
+// --- well-known selectors (identical to std/fw_cfg.kr) -----------------------
+
+const u64 FW_CFG_SIGNATURE = 0x0000     // 4 bytes, "QEMU"
+const u64 FW_CFG_ID        = 0x0001     // u32 LE feature bitmap
+const u64 FW_CFG_RAM_SIZE  = 0x0003     // u64 LE -- 0 on `-M virt`, see header
+const u64 FW_CFG_NB_CPUS   = 0x0005     // u32 LE
+const u64 FW_CFG_FILE_DIR  = 0x0019     // the named-file directory
+
+const u64 FW_CFG_FEATURE_DMA = 0x02
+
+// --- DMA control bits --------------------------------------------------------
+
+const u64 FW_CFG_DMA_ERROR  = 0x01      // set BY THE DEVICE on failure
+const u64 FW_CFG_DMA_READ   = 0x02
+const u64 FW_CFG_DMA_SKIP   = 0x04
+const u64 FW_CFG_DMA_SELECT = 0x08
+const u64 FW_CFG_DMA_WRITE  = 0x10
+
+const u64 FW_CFG_NOTFOUND = 0xFFFFFFFFFFFFFFFF
+
+// --- storage -----------------------------------------------------------------
+
+// FWCfgDmaAccess: u32 control, u32 length, u64 address. All big-endian.
+// u64[2] for 8-byte alignment -- MMU-off arm64 faults on unaligned store64.
+static u64[2] fw_dma_req
+// Scratch for one directory entry's 56-byte name field, plus a NUL.
+static u8[64] fw_name
+
+// The most recent file's size in bytes, set by fw_cfg_find_file.
+static u64 fw_cfg_last_size = 0
+
+// --- byte order --------------------------------------------------------------
+//
+// Local copies rather than std/x86.kr's: that module's asm blocks cannot
+// compile on arm64, and these three lines are the only thing needed from it.
+// NOTE the parenthesisation -- in KernRift `&` binds TIGHTER than `<<`.
+
+fn fw_cfg_bswap16(u64 v) -> u64 {
+    return ((v & 0xFF) << 8) | ((v >> 8) & 0xFF)
+}
+
+fn fw_cfg_bswap32(u64 v) -> u64 {
+    return ((v & 0xFF) << 24) | ((v & 0xFF00) << 8) | ((v >> 8) & 0xFF00) | ((v >> 24) & 0xFF)
+}
+
+fn fw_cfg_bswap64(u64 v) -> u64 {
+    return (fw_cfg_bswap32(v & 0xFFFFFFFF) << 32) | fw_cfg_bswap32((v >> 32) & 0xFFFFFFFF)
+}
+
+// --- primitive access --------------------------------------------------------
+//
+// vstore16/vload8/vstore32 are volatile with barriers: the accesses are never
+// hoisted, fused or reordered, and the emitted width is the named width
+// (STLRH / LDARB / STLR -- verified in the listing; a width-wrong volatile
+// store was a real arm64 miscompile, fixed and pinned before this module).
+
+// Point the data register at `sel`. BIG-ENDIAN, 16-bit -- see header.
+fn fw_cfg_select(u64 sel) {
+    vstore16(fw_cfg_mmio_base + FW_CFG_MMIO_SEL, fw_cfg_bswap16(sel & 0xFFFF))
+}
+
+// Next byte from the current selection.
+fn fw_cfg_read8() -> u64 {
+    return vload8(fw_cfg_mmio_base + FW_CFG_MMIO_DATA)
+}
+
+// fw_cfg's *structural* fields (the directory) are big-endian, while its
+// *item payloads* are little-endian -- true over MMIO exactly as over ports
+// (measured, see header). Using the wrong reader is the classic fw_cfg bug.
+fn fw_cfg_read_be16() -> u64 {
+    u64 b0 = fw_cfg_read8()
+    u64 b1 = fw_cfg_read8()
+    return (b0 << 8) | b1
+}
+
+fn fw_cfg_read_be32() -> u64 {
+    u64 b0 = fw_cfg_read8()
+    u64 b1 = fw_cfg_read8()
+    u64 b2 = fw_cfg_read8()
+    u64 b3 = fw_cfg_read8()
+    return (b0 << 24) | (b1 << 16) | (b2 << 8) | b3
+}
+
+fn fw_cfg_read_le32() -> u64 {
+    u64 b0 = fw_cfg_read8()
+    u64 b1 = fw_cfg_read8()
+    u64 b2 = fw_cfg_read8()
+    u64 b3 = fw_cfg_read8()
+    return (b3 << 24) | (b2 << 16) | (b1 << 8) | b0
+}
+
+fn fw_cfg_read_le64() -> u64 {
+    u64 lo = fw_cfg_read_le32()
+    u64 hi = fw_cfg_read_le32()
+    return (hi << 32) | lo
+}
+
+// Read `n` bytes of the current selection into `dst`.
+fn fw_cfg_read_bytes(u64 dst, u64 n) {
+    u64 i = 0
+    while i < n {
+        store8(dst + i, fw_cfg_read8())
+        i = i + 1
+    }
+}
+
+// --- probing -----------------------------------------------------------------
+
+// 1 if a QEMU fw_cfg device answered. Check this BEFORE anything else. And
+// remember: selector 0x0000 is endian-neutral, so this passing does NOT
+// vouch for the selector byte order -- fw_cfg_find_file exercises that.
+fn fw_cfg_present() -> u64 {
+    fw_cfg_select(FW_CFG_SIGNATURE)
+    if fw_cfg_read8() != 81 { return 0 }        // 'Q'
+    if fw_cfg_read8() != 69 { return 0 }        // 'E'
+    if fw_cfg_read8() != 77 { return 0 }        // 'M'
+    if fw_cfg_read8() != 85 { return 0 }        // 'U'
+    return 1
+}
+
+// The FW_CFG_ID feature bitmap. Measured 0x3 on `-M virt`.
+fn fw_cfg_features() -> u64 {
+    fw_cfg_select(FW_CFG_ID)
+    return fw_cfg_read_le32()
+}
+
+// 1 if the DMA interface is usable. Required for any write.
+fn fw_cfg_has_dma() -> u64 {
+    if (fw_cfg_features() & FW_CFG_FEATURE_DMA) != 0 { return 1 }
+    return 0
+}
+
+// Guest RAM size in bytes. MEASURED 0 on `-M virt` -- the item is x86
+// legacy; arm boards publish RAM in the device tree instead. Kept so a
+// transport switch does not break the build; treat 0 as "ask the DTB".
+fn fw_cfg_ram_size() -> u64 {
+    fw_cfg_select(FW_CFG_RAM_SIZE)
+    return fw_cfg_read_le64()
+}
+
+// Number of CPUs QEMU was started with (works on virt: measured -smp 2 -> 2).
+fn fw_cfg_nb_cpus() -> u64 {
+    fw_cfg_select(FW_CFG_NB_CPUS)
+    return fw_cfg_read_le32()
+}
+
+// --- the file directory ------------------------------------------------------
+
+// Look up a named file (e.g. "etc/ramfb") in FW_CFG_FILE_DIR. Returns its
+// selector, or FW_CFG_NOTFOUND. On success `fw_cfg_last_size` holds its size.
+//
+// The directory is: u32 count, then `count` 64-byte entries of
+// { u32 size, u16 select, u16 reserved, char name[56] } -- all big-endian.
+// It must be read straight through: the data register is a cursor, so
+// skipping an entry means consuming all 64 of its bytes.
+fn fw_cfg_find_file(u64 name) -> u64 {
+    fw_cfg_select(FW_CFG_FILE_DIR)
+    u64 count = fw_cfg_read_be32()
+    // A wildly large count means nothing answered at the base address.
+    if count > 4096 { return FW_CFG_NOTFOUND }
+    u64 i = 0
+    while i < count {
+        u64 size = fw_cfg_read_be32()
+        u64 sel  = fw_cfg_read_be16()
+        u64 _res = fw_cfg_read_be16()
+        u64 nb = fw_name
+        fw_cfg_read_bytes(nb, 56)
+        store8(nb + 56, 0)                      // names need not be terminated
+        if cstr_eq(nb, name) != 0 {
+            fw_cfg_last_size = size
+            return sel
+        }
+        i = i + 1
+    }
+    return FW_CFG_NOTFOUND
+}
+
+// Read a whole named file into `dst`, capped at `cap`. Returns bytes read, or
+// FW_CFG_NOTFOUND if there is no such file.
+fn fw_cfg_read_file(u64 name, u64 dst, u64 cap) -> u64 {
+    u64 sel = fw_cfg_find_file(name)
+    if sel == FW_CFG_NOTFOUND { return FW_CFG_NOTFOUND }
+    u64 n = fw_cfg_last_size
+    if n > cap { n = cap }
+    fw_cfg_select(sel)
+    fw_cfg_read_bytes(dst, n)
+    return n
+}
+
+// --- DMA ---------------------------------------------------------------------
+
+// Issue one DMA request against selector `sel`. `extra` carries the direction
+// bit (FW_CFG_DMA_READ or FW_CFG_DMA_WRITE). Returns 1 on success, 0 if the
+// device reported an error.
+//
+// The address register is 64-bit big-endian split across two 32-bit writes:
+// the HIGH half at +16 first, then the LOW half at +20 -- the low-half write
+// is what triggers the transfer, so the order is not optional. (Measured:
+// this sequence read the signature and programmed ramfb; see header.)
+//
+// The request block address handed to the device is `fw_dma_req`'s address
+// as the CPU sees it -- these images are identity-mapped, so a static's
+// address IS the physical address the device needs.
+fn fw_cfg_dma(u64 sel, u64 buf, u64 len, u64 extra) -> u64 {
+    u64 req = fw_dma_req
+    // NOTE the parentheses: in KernRift `|` binds TIGHTER than `<<`, so an
+    // unparenthesised `sel << 16 | FW_CFG_DMA_SELECT` would shift by 24.
+    u64 control = (sel << 16) | FW_CFG_DMA_SELECT | extra
+    store32(req,     fw_cfg_bswap32(control))
+    store32(req + 4, fw_cfg_bswap32(len))
+    store64(req + 8, fw_cfg_bswap64(buf))
+
+    vstore32(fw_cfg_mmio_base + FW_CFG_MMIO_DMA,
+             fw_cfg_bswap32((req >> 32) & 0xFFFFFFFF))
+    vstore32(fw_cfg_mmio_base + FW_CFG_MMIO_DMA + 4,
+             fw_cfg_bswap32(req & 0xFFFFFFFF))
+
+    // The device clears `control` to 0 when done, or sets the ERROR bit. It
+    // writes the field back, so re-read it rather than trusting our copy.
+    u64 done = fw_cfg_bswap32(load32(req))
+    if (done & FW_CFG_DMA_ERROR) != 0 { return 0 }
+    return 1
+}
+
+// Read `len` bytes of `sel` into `buf` by DMA.
+fn fw_cfg_dma_read(u64 sel, u64 buf, u64 len) -> u64 {
+    return fw_cfg_dma(sel, buf, len, FW_CFG_DMA_READ)
+}
+
+// Write `len` bytes from `buf` into `sel` by DMA. This is the only way to
+// write fw_cfg at all -- the data register cannot do it.
+fn fw_cfg_dma_write(u64 sel, u64 buf, u64 len) -> u64 {
+    return fw_cfg_dma(sel, buf, len, FW_CFG_DMA_WRITE)
+}

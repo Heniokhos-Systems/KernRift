@@ -1,0 +1,237 @@
+// A mouse-driven GUI on bare-metal x86_64.
+//
+// No OS, no bootloader, no driver stack, no interrupt handlers. A framebuffer
+// from QEMU's ramfb, widgets from std/widget.kr, and a pointer from a polled
+// PS/2 mouse.
+//
+//     make run      # a window you can actually click in
+//     make check    # drives the mouse headless and asserts what happened
+//
+// Nothing here is new UI code: panel, button, label and the 8x16 font already
+// existed in std/. What was missing was the mouse, and the reason it could
+// never have worked before is in std/ps2.kr's "port ownership" note --
+// keyboard and mouse share one 8042 output buffer, and the keyboard poller
+// used to read mouse bytes and throw them away.
+//
+// The allocator is std/heap_bump.kr: the widget toolkit allocates its
+// descriptors, and `--target=none` refuses `alloc` unless a program supplies
+// one. A bump allocator is the right shape here -- everything is allocated
+// during setup and nothing is ever freed.
+
+import "../../std/ramfb.kr"
+import "../../std/heap_bump.kr"
+import "../../std/fb.kr"
+import "../../std/font.kr"
+import "../../std/color.kr"
+import "../../std/widget.kr"
+import "../../std/mouse.kr"
+import "../../std/serial.kr"
+import "../../std/cstr.kr"
+
+const u64 FB_ADDR = 0x1000000
+const u64 FB_W    = 640
+const u64 FB_H    = 480
+
+// 1 MiB of heap at 2 MiB. Clear of the image (1 MiB, a few tens of KiB long)
+// and clear of the framebuffer (16 MiB).
+const u64 HEAP_BASE = 0x200000
+const u64 HEAP_LEN  = 0x100000
+
+const u64 CURSOR_W = 8
+const u64 CURSOR_H = 8
+
+static u64 fbp = 0
+static u64 btn_go = 0
+static u64 btn_quit = 0
+static u64 coord_label = 0
+
+// Pixels hidden by the cursor, so it can be lifted without redrawing the
+// scene. 8*8 pixels * 4 bytes.
+static u8[256] cursor_backing
+static u64 cursor_shown = 0
+static u64 cursor_at_x  = 0
+static u64 cursor_at_y  = 0
+
+static u8[64] textbuf
+
+// A classic arrow, one bit per pixel, MSB leftmost.
+static u8[8] cursor_rows
+
+fn cursor_init_shape() {
+    store8(cursor_rows + 0, 0x80)
+    store8(cursor_rows + 1, 0xC0)
+    store8(cursor_rows + 2, 0xE0)
+    store8(cursor_rows + 3, 0xF0)
+    store8(cursor_rows + 4, 0xF8)
+    store8(cursor_rows + 5, 0xFC)
+    store8(cursor_rows + 6, 0xE0)
+    store8(cursor_rows + 7, 0x90)
+}
+
+fn px_addr(u64 x, u64 y) -> u64 {
+    return FB_ADDR + y * (FB_W * 4) + x * 4
+}
+
+// --- cursor -----------------------------------------------------------------
+
+fn cursor_lift() {
+    if cursor_shown == 0 { return }
+    u64 dy = 0
+    while dy < CURSOR_H {
+        u64 dx = 0
+        while dx < CURSOR_W {
+            u64 x = cursor_at_x + dx
+            u64 y = cursor_at_y + dy
+            if x < FB_W {
+                if y < FB_H {
+                    store32(px_addr(x, y), load32(cursor_backing + (dy * CURSOR_W + dx) * 4))
+                }
+            }
+            dx = dx + 1
+        }
+        dy = dy + 1
+    }
+    cursor_shown = 0
+}
+
+fn cursor_drop(u64 cx, u64 cy) {
+    u64 dy = 0
+    while dy < CURSOR_H {
+        u64 bits = load8(cursor_rows + dy)
+        u64 dx = 0
+        while dx < CURSOR_W {
+            u64 x = cx + dx
+            u64 y = cy + dy
+            if x < FB_W {
+                if y < FB_H {
+                    store32(cursor_backing + (dy * CURSOR_W + dx) * 4, load32(px_addr(x, y)))
+                    // MSB is the leftmost pixel.
+                    if (bits & (128 >> dx)) != 0 {
+                        store32(px_addr(x, y), rgb(0xFF, 0xFF, 0xFF))
+                    }
+                }
+            }
+            dx = dx + 1
+        }
+        dy = dy + 1
+    }
+    cursor_at_x = cx
+    cursor_at_y = cy
+    cursor_shown = 1
+}
+
+// --- scene ------------------------------------------------------------------
+
+fn draw_scene() {
+    fb_fill(fbp, rgb(0x18, 0x18, 0x24))
+    u64 p = panel_new(fbp, 40, 40, 560, 160, rgb(0x28, 0x28, 0x3C), rgb(0x80, 0x80, 0xA0))
+    panel_draw(p)
+    u64 title = label_new(fbp, 60, 60, "KernRift bare-metal GUI -- move and click",
+                          rgb(0xFF, 0xFF, 0xFF), rgb(0x28, 0x28, 0x3C))
+    label_draw(title)
+    button_draw(btn_go)
+    button_draw(btn_quit)
+    label_draw(coord_label)
+}
+
+fn update_coords() {
+    u64 b = textbuf
+    cstr_copy(b, "x=", 64)
+    u64 n = cstr_len(b)
+    n = n + cstr_u64_dec(b + n, 64 - n, mouse_x())
+    cstr_append(b, " y=", 64)
+    n = cstr_len(b)
+    n = n + cstr_u64_dec(b + n, 64 - n, mouse_y())
+    cstr_append(b, " btn=", 64)
+    n = cstr_len(b)
+    cstr_u64_dec(b + n, 64 - n, mouse_buttons())
+    label_set_text(coord_label, b)
+    label_draw(coord_label)
+}
+
+fn main() -> uint32 {
+    serial_init()
+    heap_bump_init(HEAP_BASE, HEAP_LEN)
+
+    if ramfb_init(FB_ADDR, FB_W, FB_H) == 0 {
+        serial_putsn("FAIL: no ramfb -- start QEMU with -device ramfb")
+        halt_forever()
+    }
+    font_init()
+    cursor_init_shape()
+    fbp = fb_init(FB_ADDR, FB_W, FB_H, FB_W * 4, 32)
+
+    btn_go = button_new(fbp, 70, 110, 160, 44, "Click me",
+                        rgb(0xFF, 0xFF, 0xFF), rgb(0x40, 0x60, 0xC0))
+    btn_quit = button_new(fbp, 260, 110, 160, 44, "Second",
+                          rgb(0xFF, 0xFF, 0xFF), rgb(0x60, 0x40, 0x80))
+    coord_label = label_new(fbp, 60, 230, "x=0 y=0 btn=0",
+                            rgb(0x90, 0xFF, 0x90), rgb(0x18, 0x18, 0x24))
+
+    if mouse_init() == 0 {
+        serial_putsn("FAIL: no PS/2 mouse")
+        halt_forever()
+    }
+    mouse_set_bounds(FB_W, FB_H)
+    mouse_set_pos(FB_W / 2, FB_H / 2)
+
+    draw_scene()
+    update_coords()
+    cursor_drop(mouse_x(), mouse_y())
+    serial_putsn("GUI-READY")
+
+    u64 was_down = 0
+    loop {
+        if mouse_poll() != 0 {
+            u64 down = 0
+            if (mouse_buttons() & MOUSE_BTN_LEFT) != 0 { down = 1 }
+
+            cursor_lift()
+
+            if down != was_down {
+                // Press and release both redraw, so the button's visual state
+                // always matches the physical one.
+                u64 hit_go = button_contains(btn_go, mouse_x(), mouse_y())
+                u64 hit_2  = button_contains(btn_quit, mouse_x(), mouse_y())
+                if down != 0 {
+                    if hit_go != 0 {
+                        button_set_pressed(btn_go, 1)
+                        serial_putsn("HIT go")
+                    }
+                    if hit_2 != 0 {
+                        button_set_pressed(btn_quit, 1)
+                        serial_putsn("HIT second")
+                    }
+                    if hit_go == 0 {
+                        if hit_2 == 0 { serial_putsn("HIT none") }
+                    }
+                } else {
+                    button_set_pressed(btn_go, 0)
+                    button_set_pressed(btn_quit, 0)
+                }
+                button_draw(btn_go)
+                button_draw(btn_quit)
+                was_down = down
+            }
+
+            update_coords()
+            cursor_drop(mouse_x(), mouse_y())
+
+            serial_puts("POS ")
+            serial_write(textbuf, cstr_len(textbuf))
+            serial_putc(10)
+        }
+
+        // The keyboard must keep working WHILE the mouse streams. Both go
+        // through std/ps2.kr's single drain; before that existed, whichever
+        // one polled first ate the other's bytes off port 0x60.
+        u64 k = ps2_poll()
+        if k != 0 {
+            if k < 128 {
+                serial_puts("KEY ")
+                serial_putc(k)
+                serial_putc(10)
+            }
+        }
+    }
+}

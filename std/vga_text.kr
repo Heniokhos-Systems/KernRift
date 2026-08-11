@@ -1,0 +1,207 @@
+// KernRift Standard Library — VGA text mode (80x25)
+//
+// The display that is already there when an x86 PC finishes booting: a grid of
+// character cells at 0xB8000, no mode set, no driver, no framebuffer. Less
+// capable than std/ramfb.kr but it needs nothing from QEMU and works on real
+// hardware and every emulator.
+//
+// FREESTANDING-SAFE: direct memory writes and port I/O only, no allocation.
+//
+// x86_64 only.
+//
+// Each cell is 2 bytes: the character, then an attribute byte of
+// (background << 4) | foreground. Backgrounds only reach 0-7 unless blink is
+// disabled, so VGA_LIGHT_* are foreground colours in practice.
+
+import "x86.kr"
+
+const u64 VGA_MEM  = 0xB8000
+const u64 VGA_COLS = 80
+const u64 VGA_ROWS = 25
+
+// --- colours ----------------------------------------------------------------
+
+const u64 VGA_BLACK         = 0
+const u64 VGA_BLUE          = 1
+const u64 VGA_GREEN         = 2
+const u64 VGA_CYAN          = 3
+const u64 VGA_RED           = 4
+const u64 VGA_MAGENTA       = 5
+const u64 VGA_BROWN         = 6
+const u64 VGA_LIGHT_GREY    = 7
+const u64 VGA_DARK_GREY     = 8
+const u64 VGA_LIGHT_BLUE    = 9
+const u64 VGA_LIGHT_GREEN   = 10
+const u64 VGA_LIGHT_CYAN    = 11
+const u64 VGA_LIGHT_RED     = 12
+const u64 VGA_LIGHT_MAGENTA = 13
+const u64 VGA_YELLOW        = 14
+const u64 VGA_WHITE         = 15
+
+// Pack a foreground and background into an attribute byte.
+fn vga_attr(u64 fg, u64 bg) -> u64 {
+    return ((bg & 0x0F) << 4) | (fg & 0x0F)
+}
+
+// --- cursor state -----------------------------------------------------------
+
+static u64 vga_row = 0
+static u64 vga_col = 0
+static u64 vga_cur_attr = 7          // light grey on black
+
+fn vga_set_attr(u64 attr) { vga_cur_attr = attr }
+fn vga_get_attr() -> u64 { return vga_cur_attr }
+fn vga_get_row() -> u64 { return vga_row }
+fn vga_get_col() -> u64 { return vga_col }
+
+// --- raw cell access --------------------------------------------------------
+
+// Write one cell. Out-of-range coordinates are ignored.
+//
+// NOTE the parentheses on the attribute shift: in KernRift `|` binds TIGHTER
+// than `<<`, so `ch | attr << 8` would parse as `(ch | attr) << 8`.
+fn vga_put_cell(u64 row, u64 col, u64 ch, u64 attr) {
+    if row >= VGA_ROWS { return }
+    if col >= VGA_COLS { return }
+    u64 a = VGA_MEM + (row * VGA_COLS + col) * 2
+    store16(a, (ch & 0xFF) | ((attr & 0xFF) << 8))
+}
+
+fn vga_get_cell(u64 row, u64 col) -> u64 {
+    if row >= VGA_ROWS { return 0 }
+    if col >= VGA_COLS { return 0 }
+    return load16(VGA_MEM + (row * VGA_COLS + col) * 2)
+}
+
+// Fill one row with `ch`.
+fn vga_fill_row(u64 row, u64 ch, u64 attr) {
+    u64 c = 0
+    while c < VGA_COLS {
+        vga_put_cell(row, c, ch, attr)
+        c = c + 1
+    }
+}
+
+// --- hardware cursor --------------------------------------------------------
+//
+// The blinking underline, moved through the CRTC index/data port pair. Purely
+// cosmetic: text appears whether or not this is called.
+
+const u64 VGA_CRTC_INDEX = 0x3D4
+const u64 VGA_CRTC_DATA  = 0x3D5
+
+fn vga_move_cursor(u64 row, u64 col) {
+    u64 pos = row * VGA_COLS + col
+    outb(VGA_CRTC_INDEX, 15)                    // cursor location low
+    outb(VGA_CRTC_DATA, pos & 0xFF)
+    outb(VGA_CRTC_INDEX, 14)                    // cursor location high
+    outb(VGA_CRTC_DATA, (pos >> 8) & 0xFF)
+}
+
+// Park the cursor off-screen. The usual way to "hide" it without touching the
+// cursor-shape registers.
+fn vga_hide_cursor() {
+    vga_move_cursor(VGA_ROWS, 0)
+}
+
+fn vga_sync_cursor() {
+    vga_move_cursor(vga_row, vga_col)
+}
+
+// --- scrolling and clearing -------------------------------------------------
+
+fn vga_clear() {
+    u64 r = 0
+    while r < VGA_ROWS {
+        vga_fill_row(r, 32, vga_cur_attr)
+        r = r + 1
+    }
+    vga_row = 0
+    vga_col = 0
+    vga_sync_cursor()
+}
+
+// Move every row up one and blank the last. Copies cells directly rather than
+// going through vga_put_cell so the bounds checks are not paid 1,920 times.
+fn vga_scroll() {
+    u64 r = 0
+    while r < VGA_ROWS - 1 {
+        u64 dst = VGA_MEM + r * VGA_COLS * 2
+        u64 src = dst + VGA_COLS * 2
+        u64 i = 0
+        while i < VGA_COLS * 2 {
+            store8(dst + i, load8(src + i))
+            i = i + 1
+        }
+        r = r + 1
+    }
+    vga_fill_row(VGA_ROWS - 1, 32, vga_cur_attr)
+}
+
+fn vga_newline() {
+    vga_col = 0
+    vga_row = vga_row + 1
+    if vga_row >= VGA_ROWS {
+        vga_scroll()
+        vga_row = VGA_ROWS - 1
+    }
+}
+
+// --- writing ----------------------------------------------------------------
+
+// Write one character, honouring newline, carriage return, backspace and tab.
+// Wraps at the right margin and scrolls at the bottom.
+fn vga_putc(u64 ch) {
+    if ch == 10 { vga_newline()  vga_sync_cursor()  return }
+    if ch == 13 { vga_col = 0    vga_sync_cursor()  return }
+    if ch == 8 {
+        // Backspace erases, which is what a caller echoing input wants; it
+        // does not cross back over a line boundary.
+        if vga_col > 0 {
+            vga_col = vga_col - 1
+            vga_put_cell(vga_row, vga_col, 32, vga_cur_attr)
+        }
+        vga_sync_cursor()
+        return
+    }
+    if ch == 9 {
+        // Advance to the next 8-column stop, one space at a time so that
+        // wrapping and scrolling are handled in exactly one place.
+        u64 n = 8 - (vga_col % 8)
+        u64 i = 0
+        while i < n {
+            vga_putc(32)
+            i = i + 1
+        }
+        return
+    }
+    vga_put_cell(vga_row, vga_col, ch, vga_cur_attr)
+    vga_col = vga_col + 1
+    if vga_col >= VGA_COLS { vga_newline() }
+    vga_sync_cursor()
+}
+
+// Write a NUL-terminated string.
+fn vga_puts(u64 s) {
+    u64 i = 0
+    while load8(s + i) != 0 {
+        vga_putc(load8(s + i))
+        i = i + 1
+    }
+}
+
+// Write a string followed by a newline.
+fn vga_putsn(u64 s) {
+    vga_puts(s)
+    vga_putc(10)
+}
+
+// Write `s` at a fixed position in a fixed attribute, without disturbing the
+// cursor. For status lines and chrome.
+fn vga_write_at(u64 row, u64 col, u64 s, u64 attr) {
+    u64 i = 0
+    while load8(s + i) != 0 {
+        vga_put_cell(row, col + i, load8(s + i), attr)
+        i = i + 1
+    }
+}

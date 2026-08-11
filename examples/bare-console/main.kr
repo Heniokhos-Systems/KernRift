@@ -1,0 +1,89 @@
+// A tiny interactive shell on bare-metal x86_64.
+//
+// No OS, no libc, no bootloader, no interrupt handlers. Type at the VGA screen
+// with a PS/2 keyboard, or over the serial port -- both work, and output goes
+// to both.
+//
+//     make run      # a window plus the serial log in your terminal
+//     make check    # drives it headless and asserts what came back
+//
+// Note that this uses plain `print`/`println`. Importing std/console.kr
+// defines `write` with @builtin_override, and the compiler lowers those to
+// `write` under --target=none, so the language's ordinary output works with
+// nothing underneath it.
+
+import "../../std/console.kr"
+// console.kr does not pull in fw_cfg; the `ram`/`cpus` commands need it.
+import "../../std/fw_cfg.kr"
+
+const u64 LINE_CAP = 128
+
+static u8[128] line
+
+fn banner() {
+    vga_set_attr(vga_attr(VGA_BLACK, VGA_LIGHT_GREY))
+    vga_write_at(0, 0, "  KernRift bare-metal console -- type `help`                                     ", vga_attr(VGA_BLACK, VGA_LIGHT_GREY))
+    vga_set_attr(vga_attr(VGA_LIGHT_GREY, VGA_BLACK))
+    // Start below the status bar so the banner is not immediately scrolled off.
+    println("")
+    println("KernRift console ready.")
+}
+
+fn cmd_help() {
+    println("commands:")
+    println("  help          this text")
+    println("  echo <text>   print <text> back")
+    println("  ram           guest RAM size, from fw_cfg")
+    println("  cpus          CPU count, from fw_cfg")
+    println("  reboot        pulse the keyboard-controller reset line")
+}
+
+fn cmd_ram() {
+    if fw_cfg_present() == 0 {
+        println("no fw_cfg device")
+        return
+    }
+    u64 mb = fw_cfg_ram_size() / 1048576
+    print("ram: ")
+    console_put_u64(mb)
+    println(" MiB")
+}
+
+fn cmd_cpus() {
+    if fw_cfg_present() == 0 {
+        println("no fw_cfg device")
+        return
+    }
+    print("cpus: ")
+    console_put_u64(fw_cfg_nb_cpus())
+    console_putc(10)
+}
+
+fn run_line(u64 buf) {
+    u64 p = cstr_skip_spaces(buf)
+    if load8(p) == 0 { return }
+    u64 args = cstr_split_word(p)
+    if cstr_eq(p, "help") != 0 { cmd_help()  return }
+    if cstr_eq(p, "echo") != 0 { console_puts(args)  console_putc(10)  return }
+    if cstr_eq(p, "ram") != 0 { cmd_ram()  return }
+    if cstr_eq(p, "cpus") != 0 { cmd_cpus()  return }
+    if cstr_eq(p, "reboot") != 0 {
+        println("rebooting")
+        ps2_reboot()
+        return
+    }
+    print("unknown command: ")
+    console_puts(p)
+    console_putc(10)
+}
+
+fn main() -> uint32 {
+    console_init()
+    banner()
+    u64 buf = line
+    loop {
+        print("> ")
+        console_readline(buf, LINE_CAP)
+        run_line(buf)
+    }
+}

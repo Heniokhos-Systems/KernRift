@@ -1487,6 +1487,44 @@ fn sema_check_stmt(uint64 node) {
     if node == 0 { return }
     uint32 kind = ast_kind(node)
 
+    // Asm (43): the instruction strings are opaque, but the I/O constraint
+    // list is not, and it references real variables. Without this the walker
+    // never descends here at all, so a variable passed ONLY as an asm operand
+    // looks dead -- std/x86.kr's wrmsr was warned about for `lo`/`hi` while
+    // using both. A warning that fires on correct code is one users turn off.
+    //
+    // Constraints hang off data3 as an AsmConstraint (45) list; each carries
+    // the clause kind in data1 and the variable token in data3:
+    //   0 = in(var -> reg)      -- the variable is READ
+    //   1 = out(reg -> var)     -- the variable is WRITTEN
+    //   2 = clobbers(reg)       -- no variable at all (data3 is 0)
+    if kind == 43 {
+        uint32 asm_cons = ast_data3(node)
+        uint64 wcons = asm_cons
+        while wcons != 0 {
+            uint32 acl = ast_data1(wcons)
+            uint64 wacl = acl
+            uint32 avt = ast_data3(wcons)
+            uint64 wavt = avt
+            if wavt != 0 {
+                uint64 avi = sema_var_lookup_v(wavt)
+                if avi != 0xFFFFFFFF {
+                    if wacl == 0 {
+                        sema_var_mark_used(avi)
+                    } else if wacl == 1 {
+                        // An out operand initialises the variable; it is not
+                        // itself a use, so `asm out(rax -> v)` with v never
+                        // read still reports v unused, which is correct.
+                        sema_var_mark_init(avi)
+                    }
+                }
+            }
+            uint32 anx = ast_next(wcons)
+            wcons = anx
+        }
+        return
+    }
+
     // ExprStmt: child=expr
     if kind == 16 {
         uint32 expr = ast_child(node)

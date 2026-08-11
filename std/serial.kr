@@ -1,0 +1,138 @@
+// KernRift Standard Library — 16550 UART (PC serial ports)
+//
+// The output device to reach for first on bare metal: it needs no display, no
+// mode set and no font, and under QEMU `-serial stdio` puts the bytes straight
+// in your terminal. When something faults before the screen is up, this is
+// what tells you where.
+//
+// FREESTANDING-SAFE: port I/O only, no allocation.
+//
+// x86_64 only. (The arm64 `virt` machine's PL011 is a different device --
+// see examples/tutorial-uart.)
+
+import "x86.kr"
+
+// Standard PC port assignments.
+const u64 COM1 = 0x3F8
+const u64 COM2 = 0x2F8
+const u64 COM3 = 0x3E8
+const u64 COM4 = 0x2E8
+
+// Register offsets from the port base. Several are dual-purpose: with the
+// divisor-latch bit set, offsets 0 and 1 become the low and high halves of the
+// baud divisor instead of data and interrupt-enable.
+const u64 UART_DATA        = 0     // read: RX, write: TX
+const u64 UART_INT_ENABLE  = 1
+const u64 UART_DIVISOR_LO  = 0     // when DLAB is set
+const u64 UART_DIVISOR_HI  = 1     // when DLAB is set
+const u64 UART_FIFO_CTRL   = 2
+const u64 UART_LINE_CTRL   = 3
+const u64 UART_MODEM_CTRL  = 4
+const u64 UART_LINE_STATUS = 5
+
+const u64 UART_LSR_DATA_READY   = 0x01
+const u64 UART_LSR_THR_EMPTY    = 0x20
+
+const u64 UART_LCR_8N1 = 0x03      // 8 data bits, no parity, 1 stop bit
+const u64 UART_LCR_DLAB = 0x80     // divisor latch access
+
+// 115200 / divisor = baud, so 1 is 115200 and 12 is 9600.
+const u64 UART_DIVISOR_115200 = 1
+const u64 UART_DIVISOR_9600   = 12
+
+// Which port the convenience wrappers below use.
+static u64 serial_port = 0x3F8
+
+fn serial_set_port(u64 base) { serial_port = base }
+fn serial_get_port() -> u64 { return serial_port }
+
+// --- setup ------------------------------------------------------------------
+
+// Configure `base` for 8N1 at 115200/divisor, FIFOs on.
+//
+// Under QEMU output works even without this, because the emulated UART accepts
+// bytes regardless of configuration. On real hardware it does not -- which is
+// exactly the kind of difference that turns up only once the code leaves the
+// emulator.
+fn serial_init_port(u64 base, u64 divisor) {
+    outb(base + UART_INT_ENABLE, 0x00)                  // no interrupts: polled
+    outb(base + UART_LINE_CTRL, UART_LCR_DLAB)          // expose the divisor
+    outb(base + UART_DIVISOR_LO, divisor & 0xFF)
+    outb(base + UART_DIVISOR_HI, (divisor >> 8) & 0xFF)
+    outb(base + UART_LINE_CTRL, UART_LCR_8N1)           // and hide it again
+    outb(base + UART_FIFO_CTRL, 0xC7)                   // enable+clear, 14-byte
+    outb(base + UART_MODEM_CTRL, 0x0B)                  // DTR, RTS, OUT2
+    serial_port = base
+}
+
+// COM1 at 115200 8N1.
+fn serial_init() {
+    serial_init_port(COM1, UART_DIVISOR_115200)
+}
+
+// --- output -----------------------------------------------------------------
+
+fn serial_can_send(u64 base) -> u64 {
+    if (inb(base + UART_LINE_STATUS) & UART_LSR_THR_EMPTY) != 0 { return 1 }
+    return 0
+}
+
+// Send one byte, waiting for the holding register to drain.
+fn serial_putc_port(u64 base, u64 c) {
+    while serial_can_send(base) == 0 { cpu_relax() }
+    outb(base + UART_DATA, c & 0xFF)
+}
+
+// Send one byte on the selected port, expanding LF to CRLF -- terminals
+// generally need the CR, and forgetting it produces the staircase effect.
+fn serial_putc(u64 c) {
+    if c == 10 { serial_putc_port(serial_port, 13) }
+    serial_putc_port(serial_port, c)
+}
+
+// Send a byte exactly as given, with no LF translation. For binary output.
+fn serial_putc_raw(u64 c) {
+    serial_putc_port(serial_port, c)
+}
+
+fn serial_puts(u64 s) {
+    u64 i = 0
+    while load8(s + i) != 0 {
+        serial_putc(load8(s + i))
+        i = i + 1
+    }
+}
+
+fn serial_putsn(u64 s) {
+    serial_puts(s)
+    serial_putc(10)
+}
+
+fn serial_write(u64 buf, u64 len) {
+    u64 i = 0
+    while i < len {
+        serial_putc(load8(buf + i))
+        i = i + 1
+    }
+}
+
+// --- input ------------------------------------------------------------------
+
+fn serial_has_data(u64 base) -> u64 {
+    if (inb(base + UART_LINE_STATUS) & UART_LSR_DATA_READY) != 0 { return 1 }
+    return 0
+}
+
+// Non-blocking: a byte, or 0 if nothing is waiting.
+fn serial_poll() -> u64 {
+    if serial_has_data(serial_port) == 0 { return 0 }
+    return inb(serial_port + UART_DATA) & 0xFF
+}
+
+fn serial_getc() -> u64 {
+    loop {
+        u64 c = serial_poll()
+        if c != 0 { return c }
+        cpu_relax()
+    }
+}

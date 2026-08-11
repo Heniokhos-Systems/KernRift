@@ -5005,10 +5005,10 @@ fn ir_lower_stmt(uint64 node) {
                 // in constraint: load the variable value
                 uint32 vtok = ast_data3(wci)
                 uint64 var_v = ir_var_get(vtok)
-                if var_v == 0xFFFFFFFF {
-                    var_v = ir_new_vreg()
-                    ir_emit(IR_CONST, var_v, 0, 0, 0, ir_current_bb)
-                }
+                // Was: silently synthesise a zero constant, so
+                // `in(nosuchvar -> rax)` compiled clean and fed the block a 0.
+                // Same silent-skip family as the register-name sentinel.
+                asm_require_local(vtok, var_v)
                 // Store the vreg as src in the instruction imm (via IR_ARG).
                 // Register-name resolution is arch-specific: riscv32 (arch 2)
                 // uses rv_reg_code (a0-a7/s0-s11/x0-x31, fails loud on an
@@ -5046,6 +5046,9 @@ fn ir_lower_stmt(uint64 node) {
                 // out constraint: capture register value into variable
                 uint32 rtok2 = ast_data2(wco)
                 uint32 vtok2 = ast_data3(wco)
+                // ir_var_set below would happily CREATE a map entry for a name
+                // that is not a declared local, so the write went nowhere.
+                asm_require_local(vtok2, ir_var_get(vtok2))
                 // Same arch-gated dispatch as the IN site above: riscv32 uses
                 // rv_reg_code (fail-loud); arch 0/1 unchanged.
                 uint64 rcode2 = 0

@@ -1,0 +1,239 @@
+// KernRift Standard Library — QEMU fw_cfg
+//
+// fw_cfg is the channel QEMU uses to hand a guest configuration before there is
+// any OS: RAM size, SMBIOS tables, kernel command line, and -- via `etc/ramfb`
+// -- a linear framebuffer. It is the cheapest way for a bare-metal KernRift
+// program to learn anything about the machine it woke up on.
+//
+// FREESTANDING-SAFE: port I/O and static storage only, no allocation.
+//
+// x86_64 ONLY. fw_cfg is reached through I/O ports here; on arm/virt the same
+// device is memory-mapped at a DTB-supplied base, which is a different module.
+//
+// Layering note: this imports std/x86.kr for in*/out*/bswap*, and std/cstr.kr
+// for the filename compare, precisely so those primitives live in one place.
+
+// Sibling std modules are imported by bare filename -- a nested import
+// resolves relative to the importing file's own directory, so "std/x86.kr"
+// here would look for std/std/x86.kr.
+import "x86.kr"
+import "cstr.kr"
+
+// --- ports ------------------------------------------------------------------
+
+const u64 FW_CFG_PORT_SEL  = 0x510      // u16, selector
+const u64 FW_CFG_PORT_DATA = 0x511      // u8, sequential data
+const u64 FW_CFG_PORT_DMA  = 0x514      // u64 BE address, written high half first
+
+// --- well-known selectors ---------------------------------------------------
+
+const u64 FW_CFG_SIGNATURE = 0x0000     // 4 bytes, "QEMU"
+const u64 FW_CFG_ID        = 0x0001     // u32 LE feature bitmap
+const u64 FW_CFG_RAM_SIZE  = 0x0003     // u64 LE
+const u64 FW_CFG_NB_CPUS   = 0x0005     // u32 LE
+const u64 FW_CFG_FILE_DIR  = 0x0019     // the named-file directory
+
+// FW_CFG_ID bit 1: the DMA interface is available. Writes REQUIRE DMA -- the
+// data port is read-only on any QEMU new enough to matter -- so ramfb setup
+// depends on this bit.
+const u64 FW_CFG_FEATURE_DMA = 0x02
+
+// --- DMA control bits -------------------------------------------------------
+
+const u64 FW_CFG_DMA_ERROR  = 0x01      // set BY THE DEVICE on failure
+const u64 FW_CFG_DMA_READ   = 0x02
+const u64 FW_CFG_DMA_SKIP   = 0x04
+const u64 FW_CFG_DMA_SELECT = 0x08
+const u64 FW_CFG_DMA_WRITE  = 0x10
+
+// Returned by fw_cfg_find_file when there is no such file.
+const u64 FW_CFG_NOTFOUND = 0xFFFFFFFFFFFFFFFF
+
+// --- storage ----------------------------------------------------------------
+//
+// ApexRift, where this code came from, pinned these to literal addresses
+// (0x300000/0x300100/0x300200). Static storage is the portable form: the
+// linker places it, and on an identity-mapped bare-metal image a static's
+// address IS the physical address the device needs. Nothing here is
+// re-entrant -- fw_cfg is a single global device and these mirror it.
+
+// FWCfgDmaAccess: u32 control, u32 length, u64 address. All big-endian.
+static u8[16] fw_dma_req
+// Scratch for one directory entry's 56-byte name field, plus a NUL.
+static u8[64] fw_name
+
+// The most recent file's size in bytes, set by fw_cfg_find_file. Read it
+// straight after a successful lookup.
+static u64 fw_cfg_last_size = 0
+
+// --- primitive access -------------------------------------------------------
+
+// Point the data port at `sel`. Every read below is sequential from here.
+fn fw_cfg_select(u64 sel) {
+    outw(FW_CFG_PORT_SEL, sel & 0xFFFF)
+}
+
+// Next byte from the current selection.
+fn fw_cfg_read8() -> u64 {
+    return inb(FW_CFG_PORT_DATA)
+}
+
+// fw_cfg's *structural* fields (the directory) are big-endian, while its
+// *item payloads* are little-endian. Both readers are provided; using the
+// wrong one is the classic fw_cfg bug.
+fn fw_cfg_read_be16() -> u64 {
+    u64 b0 = inb(FW_CFG_PORT_DATA)
+    u64 b1 = inb(FW_CFG_PORT_DATA)
+    return (b0 << 8) | b1
+}
+
+fn fw_cfg_read_be32() -> u64 {
+    u64 b0 = inb(FW_CFG_PORT_DATA)
+    u64 b1 = inb(FW_CFG_PORT_DATA)
+    u64 b2 = inb(FW_CFG_PORT_DATA)
+    u64 b3 = inb(FW_CFG_PORT_DATA)
+    return (b0 << 24) | (b1 << 16) | (b2 << 8) | b3
+}
+
+fn fw_cfg_read_le32() -> u64 {
+    u64 b0 = inb(FW_CFG_PORT_DATA)
+    u64 b1 = inb(FW_CFG_PORT_DATA)
+    u64 b2 = inb(FW_CFG_PORT_DATA)
+    u64 b3 = inb(FW_CFG_PORT_DATA)
+    return (b3 << 24) | (b2 << 16) | (b1 << 8) | b0
+}
+
+fn fw_cfg_read_le64() -> u64 {
+    u64 lo = fw_cfg_read_le32()
+    u64 hi = fw_cfg_read_le32()
+    return (hi << 32) | lo
+}
+
+// Read `n` bytes of the current selection into `dst`.
+fn fw_cfg_read_bytes(u64 dst, u64 n) {
+    u64 i = 0
+    while i < n {
+        store8(dst + i, inb(FW_CFG_PORT_DATA))
+        i = i + 1
+    }
+}
+
+// --- probing ----------------------------------------------------------------
+
+// 1 if a QEMU fw_cfg device answered. Check this BEFORE anything else: on
+// hardware without the device the port floats to 0xFF and every read returns
+// garbage that otherwise looks like a very short file directory.
+fn fw_cfg_present() -> u64 {
+    fw_cfg_select(FW_CFG_SIGNATURE)
+    if fw_cfg_read8() != 81 { return 0 }        // 'Q'
+    if fw_cfg_read8() != 69 { return 0 }        // 'E'
+    if fw_cfg_read8() != 77 { return 0 }        // 'M'
+    if fw_cfg_read8() != 85 { return 0 }        // 'U'
+    return 1
+}
+
+// The FW_CFG_ID feature bitmap.
+fn fw_cfg_features() -> u64 {
+    fw_cfg_select(FW_CFG_ID)
+    return fw_cfg_read_le32()
+}
+
+// 1 if the DMA interface is usable. Required for any write.
+fn fw_cfg_has_dma() -> u64 {
+    if (fw_cfg_features() & FW_CFG_FEATURE_DMA) != 0 { return 1 }
+    return 0
+}
+
+// Guest RAM size in bytes, or 0 if unavailable.
+fn fw_cfg_ram_size() -> u64 {
+    fw_cfg_select(FW_CFG_RAM_SIZE)
+    return fw_cfg_read_le64()
+}
+
+// Number of CPUs QEMU was started with.
+fn fw_cfg_nb_cpus() -> u64 {
+    fw_cfg_select(FW_CFG_NB_CPUS)
+    return fw_cfg_read_le32()
+}
+
+// --- the file directory -----------------------------------------------------
+
+// Look up a named file (e.g. "etc/ramfb") in FW_CFG_FILE_DIR. Returns its
+// selector, or FW_CFG_NOTFOUND. On success `fw_cfg_last_size` holds its size.
+//
+// The directory is: u32 count, then `count` 64-byte entries of
+// { u32 size, u16 select, u16 reserved, char name[56] } -- all big-endian.
+// It must be read straight through: the data port is a cursor, so skipping an
+// entry means consuming all 64 of its bytes.
+fn fw_cfg_find_file(u64 name) -> u64 {
+    fw_cfg_select(FW_CFG_FILE_DIR)
+    u64 count = fw_cfg_read_be32()
+    // A wildly large count means we are reading a floating bus, not a device.
+    if count > 4096 { return FW_CFG_NOTFOUND }
+    u64 i = 0
+    while i < count {
+        u64 size = fw_cfg_read_be32()
+        u64 sel  = fw_cfg_read_be16()
+        u64 _res = fw_cfg_read_be16()
+        u64 nb = fw_name
+        fw_cfg_read_bytes(nb, 56)
+        store8(nb + 56, 0)                      // names need not be terminated
+        if cstr_eq(nb, name) != 0 {
+            fw_cfg_last_size = size
+            return sel
+        }
+        i = i + 1
+    }
+    return FW_CFG_NOTFOUND
+}
+
+// Read a whole named file into `dst`, capped at `cap`. Returns bytes read, or
+// FW_CFG_NOTFOUND if there is no such file.
+fn fw_cfg_read_file(u64 name, u64 dst, u64 cap) -> u64 {
+    u64 sel = fw_cfg_find_file(name)
+    if sel == FW_CFG_NOTFOUND { return FW_CFG_NOTFOUND }
+    u64 n = fw_cfg_last_size
+    if n > cap { n = cap }
+    fw_cfg_select(sel)
+    fw_cfg_read_bytes(dst, n)
+    return n
+}
+
+// --- DMA --------------------------------------------------------------------
+
+// Issue one DMA request against selector `sel`. `extra` carries the direction
+// bit (FW_CFG_DMA_READ or FW_CFG_DMA_WRITE). Returns 1 on success, 0 if the
+// device reported an error.
+//
+// The address register is 64-bit big-endian and split across two 32-bit port
+// writes: the HIGH half first, then the LOW half -- writing the low half is
+// what triggers the transfer, so the order is not optional.
+fn fw_cfg_dma(u64 sel, u64 buf, u64 len, u64 extra) -> u64 {
+    u64 req = fw_dma_req
+    // NOTE the parentheses: in KernRift `|` binds TIGHTER than `<<`, so an
+    // unparenthesised `sel << 16 | FW_CFG_DMA_SELECT` would shift by 24.
+    u64 control = (sel << 16) | FW_CFG_DMA_SELECT | extra
+    store32(req,     bswap32(control))
+    store32(req + 4, bswap32(len))
+    store64(req + 8, bswap64(buf))
+
+    outl(FW_CFG_PORT_DMA,     bswap32((req >> 32) & 0xFFFFFFFF))
+    outl(FW_CFG_PORT_DMA + 4, bswap32(req & 0xFFFFFFFF))
+
+    // The device clears `control` to 0 when done, or sets the ERROR bit. It
+    // writes the field back, so re-read it rather than trusting our copy.
+    u64 done = bswap32(load32(req))
+    if (done & FW_CFG_DMA_ERROR) != 0 { return 0 }
+    return 1
+}
+
+// Read `len` bytes of `sel` into `buf` by DMA.
+fn fw_cfg_dma_read(u64 sel, u64 buf, u64 len) -> u64 {
+    return fw_cfg_dma(sel, buf, len, FW_CFG_DMA_READ)
+}
+
+// Write `len` bytes from `buf` into `sel` by DMA. This is the only way to
+// write fw_cfg at all -- the data port cannot do it.
+fn fw_cfg_dma_write(u64 sel, u64 buf, u64 len) -> u64 {
+    return fw_cfg_dma(sel, buf, len, FW_CFG_DMA_WRITE)
+}
