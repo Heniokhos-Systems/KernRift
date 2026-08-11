@@ -497,10 +497,26 @@ fn diag_init() {
     diag_warn_count = 0
 }
 
+// How many diagnostics were dropped because the 1024-entry table was full.
+// Without this the compiler reports 1024 and silently discards the rest, which
+// defeats a warning whose whole value is coverage. Note the cap check sits
+// BEFORE diag_error_count is incremented, so a file with >1024 diagnostics
+// also UNDERCOUNTS its errors -- a pre-existing bug, recorded here rather than
+// fixed, because changing the error count changes exit status.
+static uint64 diag_dropped = 0
+
+// Set by `-w`. Warnings are dropped at EMIT rather than at report, so they
+// also stop consuming the 1024 cap -- otherwise suppressed warnings could
+// crowd out real errors.
+static uint64 diag_no_warnings = 0
+
+fn diag_set_no_warnings(uint64 on) { diag_no_warnings = on }
+
 // Legacy emit: looks up the message via diag_msg_text(msg_id).
 // severity: 0 = error, 1 = warning
 fn diag_emit(uint64 tok_idx, uint64 severity, uint64 msg_id) {
-    if diag_count >= 1024 { return }
+    if diag_no_warnings != 0 && severity == 1 { return }
+    if diag_count >= 1024 { diag_dropped = diag_dropped + 1  return }
     uint64 entry = diag_table + diag_count * 16
     uint32 ti = tok_idx
     unsafe { *(entry as uint32) = ti }
@@ -521,7 +537,8 @@ fn diag_emit(uint64 tok_idx, uint64 severity, uint64 msg_id) {
 // Caller controls the message text. Use this for type-checker rules.
 @export
 fn diag_emit_str(uint64 tok_idx, uint64 severity, uint64 msg_ptr) {
-    if diag_count >= 1024 { return }
+    if diag_no_warnings != 0 && severity == 1 { return }
+    if diag_count >= 1024 { diag_dropped = diag_dropped + 1  return }
     uint64 entry = diag_table + diag_count * 16
     uint32 ti = tok_idx
     unsafe { *(entry as uint32) = ti }
@@ -706,6 +723,14 @@ fn diag_report_all() {
         // Source line + caret pointer
         diag_print_source_line(tstart, tlen, tok_line)
         i = i + 1
+    }
+    // Say what was dropped rather than truncating in silence.
+    if diag_dropped > 0 {
+        uint8[24] dbuf
+        write(2, "  ... ", 6)
+        uint64 dlen = fmt_uint(dbuf, diag_dropped)
+        write(2, dbuf, dlen)
+        write(2, " further diagnostic(s) suppressed (cap 1024)\n", 45)
     }
     // Summary line
     if diag_count > 0 {

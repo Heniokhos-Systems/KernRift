@@ -4470,6 +4470,77 @@ else
     FAIL=$((FAIL + 1)); echo "FAIL: c_divergence_tree_stays_clean (self-build $a3_scale, std/ $a3_std)"
 fi
 
+# --- A4: the two diagnostic mechanism gaps ---
+#
+# -w exists because A3 added a warning over every expression, and a new warning
+# with no off-switch is the ergonomics complaint this sub-project is meant to
+# remove. Errors must be unaffected -- a -w that silenced errors would "pass" a
+# broken build.
+TOTAL=$((TOTAL + 1))
+printf 'fn main(){ u64 a=1 u64 b=2 u64 c=4 u64 r = a + b & c  exit(r) }\n' > "$DIR/../w_tmp_$$.kr"
+w_off=$($KRC "$DIR/../w_tmp_$$.kr" -o /dev/null 2>&1 | grep -c 'groups differently')
+w_on=$($KRC -w "$DIR/../w_tmp_$$.kr" -o /dev/null 2>&1 | grep -c 'groups differently')
+# The error probe MUST travel the path -w intercepts. Two earlier probes did
+# not, and both passed while -w wrongly suppressed diag_emit ENTIRELY: an
+# undefined call and a duplicate FUNCTION both go through report_error_at.
+# A duplicate VARIABLE in one scope is diag_emit(sev 0), which is the branch
+# that matters -- measured to vanish under that break.
+printf 'fn main(){\n    u64 dupvar = 1\n    u64 dupvar = 2\n    exit(dupvar)\n}\n' > "$DIR/../w2_tmp_$$.kr"
+w_err_out=$($KRC -w "$DIR/../w2_tmp_$$.kr" -o /dev/null 2>&1)
+$KRC -w "$DIR/../w2_tmp_$$.kr" -o /dev/null >/dev/null 2>&1
+w_err_rc=$?
+w_ok=1
+w_why=""
+[ "$w_off" -ge 1 ] || { w_ok=0; w_why="no warning without -w (positive control)"; }
+[ "$w_on" = "0" ] || { w_ok=0; w_why="-w did not suppress the warning"; }
+[ "$w_err_rc" != "0" ] || { w_ok=0; w_why="-w suppressed a real ERROR (exit status)"; }
+printf '%s' "$w_err_out" | grep -q 'redefinition of variable' || { w_ok=0; w_why="-w suppressed a diag_emit severity-0 error MESSAGE"; }
+if [ "$w_ok" = "1" ]; then
+    PASS=$((PASS + 1)); echo "  minus_w_suppresses_warnings_only: PASS (warn $w_off->0, error still exits $w_err_rc)"
+else
+    FAIL=$((FAIL + 1)); echo "FAIL: minus_w_suppresses_warnings_only ($w_why)"
+fi
+rm -f "$DIR/../w_tmp_$$.kr" "$DIR/../w2_tmp_$$.kr"
+
+# The diagnostic table holds 1024 and used to discard the rest in SILENCE,
+# which defeats a warning whose value is coverage. The tail must account for
+# every dropped entry: printed + suppressed == the number of real sites.
+TOTAL=$((TOTAL + 1))
+{
+  echo 'fn main() {'
+  echo '    u64 a=1 u64 b=2 u64 c=4'
+  echo '    u64 r = 0'
+  i=0
+  while [ $i -lt 1200 ]; do echo '    r = a + b & c'; i=$((i + 1)); done
+  echo '    exit(r & 1)'
+  echo '}'
+} > "$DIR/../cap_tmp_$$.kr"
+cap_out=$($KRC "$DIR/../cap_tmp_$$.kr" -o /dev/null 2>&1)
+cap_shown=$(printf '%s' "$cap_out" | grep -c 'groups differently')
+cap_drop=$(printf '%s' "$cap_out" | sed -n 's/.*\.\.\. \([0-9]*\) further diagnostic.*/\1/p')
+cap_ok=1
+cap_why=""
+[ "$cap_shown" = "1024" ] || { cap_ok=0; cap_why="printed $cap_shown, expected the 1024 cap"; }
+[ -n "$cap_drop" ] || { cap_ok=0; cap_why="no suppression tail"; }
+# The arithmetic is the point: a tail that just said "some were dropped" would
+# pass a counter that counts wrong.
+[ "$cap_ok" = "1" ] && [ "$((cap_shown + cap_drop))" = "1200" ] || { cap_ok=0; cap_why="${cap_why:-$cap_shown + $cap_drop != 1200}"; }
+if [ "$cap_ok" = "1" ]; then
+    PASS=$((PASS + 1)); echo "  diag_cap_reports_what_it_dropped: PASS (1024 shown + $cap_drop suppressed = 1200)"
+else
+    FAIL=$((FAIL + 1)); echo "FAIL: diag_cap_reports_what_it_dropped ($cap_why)"
+fi
+# -w drops warnings at EMIT, so they must not consume the cap at all.
+TOTAL=$((TOTAL + 1))
+capw_out=$($KRC -w "$DIR/../cap_tmp_$$.kr" -o /dev/null 2>&1)
+if [ "$(printf '%s' "$capw_out" | grep -c 'further diagnostic')" = "0" ] \
+   && [ "$(printf '%s' "$capw_out" | grep -c 'groups differently')" = "0" ]; then
+    PASS=$((PASS + 1)); echo "  minus_w_consumes_no_diag_cap: PASS"
+else
+    FAIL=$((FAIL + 1)); echo "FAIL: minus_w_consumes_no_diag_cap (suppressed warnings still filled the table)"
+fi
+rm -f "$DIR/../cap_tmp_$$.kr"
+
 # --- push/pop/mov/sidt mnemonics ---
 #
 # These exist so std/idt.kr need not be written in raw hex. Two rows, because

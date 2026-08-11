@@ -7604,6 +7604,8 @@ fn main() {
                 write(1, "  --coalesce                Briggs/George copy coalescing (default on)\n", 71)
                 write(1, "  --no-coalesce             disable copy coalescing\n", 52)
                 write(1, "  --check-types             type checker (default on)\n", 54)
+                uint64 wmsg_w = "  -w                        suppress warnings (errors unaffected)\n"
+                write(1, wmsg_w, 66)
                 uint64 wmsg_5200 = "  --no-check-types          disable type checker\n"
                 write(1, wmsg_5200, str_len(wmsg_5200))
                 write(1, "  --O0                      disable IR optimizations (CF/DCE/CSE/LICM)\n", 71)
@@ -7644,6 +7646,11 @@ fn main() {
                 ir_set_coalesce(0)
             } else if str_starts_with(arg, "--coalesce", 10) != 0 {
                 ir_set_coalesce(1)
+            } else if str_eq_full(arg, "-w") != 0 {
+                // Suppress warnings. Matched EXACTLY: "-w" is short enough
+                // that a prefix match would also swallow "-wsomething" and
+                // silently accept a typo.
+                diag_set_no_warnings(1)
             } else if str_starts_with(arg, "--no-check-types", 16) != 0 {
                 check_types_enabled = 0
             } else if str_starts_with(arg, "--check-types", 13) != 0 {

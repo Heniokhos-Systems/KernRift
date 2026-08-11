@@ -855,7 +855,7 @@ The driver is `ir_optimize()` (`src/ir.kr:13078`). **There is no
 document. It runs once per function, after lowering and before liveness.
 
 `--O0` sets `ir_opt_level = 0` (`src/ir.kr:11841`, written only at
-`src/main.kr:7642`) and each backend skips the whole call
+`src/main.kr:7644`) and each backend skips the whole call
 (`src/ir.kr:13681`, `src/ir_aarch64.kr:3283`, `src/ir_riscv.kr:2414`,
 `src/ir_xtensa.kr:2816`). Note the spelling: **`--O0`**, two dashes. There is
 no `-O0`, `-O1`, `--O2` — no other write to `ir_opt_level` exists.
