@@ -894,6 +894,24 @@ fn gen_expr_a64(uint64 node) {
         return
     }
 
+    // ForEndHoist (57): the `for` loop's end bound, already evaluated once
+    // into for_end_slot by the enclosing While lowering. Reading the slot back
+    // is what keeps `for i in a()..b()` from calling b() on every condition
+    // test. With nothing parked (this node reached from outside a for-range
+    // While) fall back to evaluating the real bound rather than reading a slot
+    // no one wrote.
+    if kind == 57 {
+        if for_end_slot != 0xFFFFFFFF {
+            emit_a64_load_x0(for_end_slot)
+            expr_is_float_a64 = 0
+            return
+        }
+        uint32 feh_c_a = ast_child(node)
+        uint64 wfeh_c_a = feh_c_a
+        gen_expr_a64(wfeh_c_a)
+        return
+    }
+
     // PtrLoadExpr (56): `*(addr as TYPE)` in expression position — the read
     // half of `*(addr as TYPE) OP= val`. Same load as the kind-41 statement,
     // minus the destination binding.
@@ -5135,6 +5153,28 @@ fn gen_stmt_a64(uint64 node) {
 
     // While
     if kind == 14 {
+        // A for-range desugar puts a ForEndHoist in the condition. Evaluate
+        // the real end bound HERE — before loop_start, so it is outside the
+        // loop — park it, and let the condition read the parked value. A
+        // user-written `while` has no ForEndHoist and is untouched.
+        uint64 saved_for_end_slot_a = for_end_slot
+        for_end_slot = 0xFFFFFFFF
+        uint64 fe_node_a = for_end_hoist_of(node)
+        if fe_node_a != 0 {
+            uint32 fe_child_a = ast_child(fe_node_a)
+            uint64 wfe_child_a = fe_child_a
+            gen_expr_a64(wfe_child_a)
+            // Its own frame slot: the value must survive the whole body, and
+            // a nested for loop parks in a different one.
+            uint64 fe_slot_a = var_count * 8
+            var_count = var_count + 1
+            var_frame_size = var_count * 8
+            uint64 ferem_a = var_frame_size & 15
+            if ferem_a != 0 { var_frame_size = var_frame_size + 16 - ferem_a }
+            emit_a64_store_x0(fe_slot_a)
+            for_end_slot = fe_slot_a
+        }
+
         uint64 loop_start = out_len
         if loop_depth >= 16 {
             write(2, "error: loop_stack overflow (max 16)\n", 36)
@@ -5177,6 +5217,7 @@ fn gen_stmt_a64(uint64 node) {
             bi = bi + 1
         }
         break_fixup_count = saved_break_start
+        for_end_slot = saved_for_end_slot_a
         return
     }
 

@@ -1575,6 +1575,189 @@ else
     FAIL=$((FAIL + 1))
 fi
 rm -f "$DIR/../shassign_idx_$$.kr" "$DIR/../shassign_ptr_$$.kr" "$DIR/../shassign_val_$$.kr"
+# `for i in START..END` must evaluate BOTH bounds exactly once, before the
+# first iteration, on every backend.
+#
+# The desugar builds `{ i = START; while i < END { body; i++ } }`, and a While
+# re-tests its condition every trip, so END used to run once per CONDITION
+# TEST: `for i in a()..b()` called b() three times for two iterations (seq 122
+# instead of 12), and `for i in 0..len(x)` re-called len() on every iteration.
+#
+# `seq` records execution order as decimal digits and the counters count calls,
+# so these rows FAIL on a repeated evaluation. A row asserting only that the
+# loop runs the right number of TIMES passes against the defect unchanged --
+# the trip count was always correct, only the side effects were wrong -- so the
+# order assertions and the count assertions are made separately below.
+#
+# These rows EXECUTE, so they follow $RUN_ARCH rather than naming an arch;
+# the other arch runs under qemu when it is available.
+TOTAL=$((TOTAL + 1))
+FEVAL_OK=1
+FEVAL_OTHER="arm64"
+if [ "$RUN_ARCH" = "arm64" ]; then FEVAL_OTHER="x86_64"; fi
+FEVAL_QEMU=""
+if [ "$FEVAL_OTHER" = "arm64" ]; then
+    FEVAL_QEMU="$(command -v qemu-aarch64-static || command -v qemu-aarch64 || true)"
+fi
+
+# 1. Both bounds evaluated once, in source order, and the loop still runs the
+#    right number of times. a() -> 1, b() -> 2, so exactly one trip.
+cat > "$DIR/../feval_order_$$.kr" <<'FEVAL_ORDER'
+static u64 seq = 0
+static u64 trips = 0
+fn a() -> u64 { seq = seq * 10 + 1  return 1 }
+fn b() -> u64 { seq = seq * 10 + 2  return 2 }
+fn main() {
+    for i in a()..b() { trips = trips + 1 }
+    if seq != 12 { exit(1) }
+    if trips != 1 { exit(2) }
+    exit(7)
+}
+FEVAL_ORDER
+
+# 2. Iteration counts, asserted on their own: empty, single, many, inclusive.
+#    This is the check that CANNOT see the double-evaluation defect, which is
+#    exactly why it is separate from the order rows rather than standing in
+#    for them.
+cat > "$DIR/../feval_count_$$.kr" <<'FEVAL_COUNT'
+fn main() {
+    uint64 n = 0
+    for i in 5..5 { n = n + 1 }
+    if n != 0 { exit(1) }
+    uint64 m = 0
+    for j in 0..1 { m = m + 1 }
+    if m != 1 { exit(2) }
+    uint64 k = 0
+    uint64 sum = 0
+    for p in 3..10 { k = k + 1  sum = sum + p }
+    if k != 7 { exit(3) }
+    if sum != 42 { exit(4) }
+    uint64 q = 0
+    for r in 0..=3 { q = q + 1 }
+    if q != 4 { exit(5) }
+    exit(7)
+}
+FEVAL_COUNT
+
+# 3. Nested loops: each level's bound runs once per ENTRY of that level, not
+#    once per condition test. A single shared park slot would also redden here.
+cat > "$DIR/../feval_nest_$$.kr" <<'FEVAL_NEST'
+static u64 no = 0
+static u64 ni = 0
+static u64 body = 0
+fn oe() -> u64 { no = no + 1  return 2 }
+fn ie() -> u64 { ni = ni + 1  return 3 }
+fn main() {
+    for i in 0..oe() {
+        for j in 0..ie() { body = body + 1 }
+    }
+    if no != 1 { exit(1) }
+    if ni != 2 { exit(2) }
+    if body != 6 { exit(3) }
+    exit(7)
+}
+FEVAL_NEST
+
+# 4. break and continue change neither the bound evaluation count nor the
+#    trip count.
+cat > "$DIR/../feval_flow_$$.kr" <<'FEVAL_FLOW'
+static u64 nb = 0
+static u64 nc = 0
+static u64 hit_b = 0
+static u64 hit_c = 0
+fn eb() -> u64 { nb = nb + 1  return 10 }
+fn ec() -> u64 { nc = nc + 1  return 10 }
+fn main() {
+    for i in 0..eb() {
+        hit_b = hit_b + 1
+        if i == 3 { break }
+    }
+    for j in 0..ec() {
+        if j == 5 { continue }
+        hit_c = hit_c + 1
+    }
+    if nb != 1 { exit(1) }
+    if nc != 1 { exit(2) }
+    if hit_b != 4 { exit(3) }
+    if hit_c != 9 { exit(4) }
+    exit(7)
+}
+FEVAL_FLOW
+
+# 5. A user-written `while` MUST still re-evaluate its condition every trip.
+#    Deliberately written in the SAME shape as the for-range condition -- the
+#    side-effecting call on the right of a `<` -- so an over-broad hoist that
+#    parked every While's compare rhs reddens here instead of passing quietly.
+cat > "$DIR/../feval_while_$$.kr" <<'FEVAL_WHILE'
+static u64 calls = 0
+static u64 i = 0
+fn lim() -> u64 { calls = calls + 1  return 4 }
+fn main() {
+    uint64 trips = 0
+    while i < lim() { i = i + 1  trips = trips + 1 }
+    if calls != 5 { exit(1) }
+    if trips != 4 { exit(2) }
+    exit(7)
+}
+FEVAL_WHILE
+
+# 6. The bound is a VALUE, not an alias: assigning to the variable the end
+#    bound was computed from must not lengthen the loop. This is the row that
+#    caught the IR backend parking the variable's own vreg -- lowering a bare
+#    `n` hands back the vreg the VARIABLE lives in, and the loop's back-edge
+#    parallel-move then wrote the body's new value straight into the "parked"
+#    bound, so IR ran 100 trips where both legacy backends ran 3.
+cat > "$DIR/../feval_snap_$$.kr" <<'FEVAL_SNAP'
+fn main() {
+    uint64 n = 3
+    uint64 c = 0
+    for i in 0..n { n = 100  c = c + 1 }
+    if c != 3 { exit(1) }
+    if n != 100 { exit(2) }
+    exit(7)
+}
+FEVAL_SNAP
+
+FEVAL_RAN=0
+feval_run() { # <arch> <flags> <src> <runner-or-empty>
+    local _bin="/tmp/krc_feval_$$"
+    if ! $KRC --arch="$1" $2 "$3" -o "$_bin" >/dev/null 2>&1; then
+        FEVAL_OK=0; echo "  $(basename $3) $1 ${2:-IR}: COMPILE FAILED"
+        return
+    fi
+    if [ -n "$4" ]; then $4 "$_bin" >/dev/null 2>&1; else "$_bin" >/dev/null 2>&1; fi
+    local _rc=$?
+    FEVAL_RAN=$((FEVAL_RAN + 1))
+    # 7 = reached the end with every assertion satisfied. Anything else names
+    # the assertion that failed (see the exit codes in each source above).
+    [ "$_rc" = "7" ] || { FEVAL_OK=0; echo "  $(basename $3) $1 ${2:-IR}: got $_rc, want 7"; }
+    rm -f "$_bin"
+}
+for _src in "$DIR/../feval_order_$$.kr" "$DIR/../feval_count_$$.kr" \
+            "$DIR/../feval_nest_$$.kr" "$DIR/../feval_flow_$$.kr" \
+            "$DIR/../feval_while_$$.kr" "$DIR/../feval_snap_$$.kr"; do
+    feval_run "$RUN_ARCH" ""          "$_src" ""
+    feval_run "$RUN_ARCH" "--legacy"  "$_src" ""
+    if [ -n "$FEVAL_QEMU" ]; then
+        feval_run "$FEVAL_OTHER" ""         "$_src" "$FEVAL_QEMU"
+        feval_run "$FEVAL_OTHER" "--legacy" "$_src" "$FEVAL_QEMU"
+    fi
+done
+# Guard against the loop silently doing nothing. 6 sources x 2 host configs
+# always; x2 more per source when the other arch is runnable.
+FEVAL_WANT=12
+if [ -n "$FEVAL_QEMU" ]; then FEVAL_WANT=24; fi
+[ "$FEVAL_RAN" = "$FEVAL_WANT" ] || { FEVAL_OK=0; echo "  only $FEVAL_RAN/$FEVAL_WANT config-runs executed"; }
+if [ "$FEVAL_OK" = "1" ]; then
+    echo "  for_range_evaluates_bounds_once: PASS ($FEVAL_RAN config-runs)"
+    PASS=$((PASS + 1))
+else
+    echo "FAIL: for_range_evaluates_bounds_once"
+    FAIL=$((FAIL + 1))
+fi
+rm -f "$DIR/../feval_order_$$.kr" "$DIR/../feval_count_$$.kr" \
+      "$DIR/../feval_nest_$$.kr" "$DIR/../feval_flow_$$.kr" \
+      "$DIR/../feval_while_$$.kr" "$DIR/../feval_snap_$$.kr"
 rm -f "$DIR/../ceval_idx_$$.kr" "$DIR/../ceval_ptr_$$.kr" "$DIR/../ceval_plain_$$.kr"
 
 # File-scope struct statics: `static Point[N] pts` and `static Point sp`.

@@ -226,6 +226,18 @@ static u8[16] arr
 fn ai()->u64{seq=seq*10+1; return 3}
 fn fv()->u64{seq=seq*10+2; return 7}
 fn main(){arr[ai()]=fv(); exit(seq)}'
+# `for i in START..END` evaluates both bounds exactly once, before the loop.
+# The bound is a VALUE: IR parked the vreg the variable itself lives in, so
+# the loop's back-edge wrote the body's new n straight into the "parked" bound
+# and IR ran 100 trips where legacy ran 3. These two rows are the pair that
+# split.
+diff_case "order_for_bounds" 'static u64 seq=0
+fn a()->u64{seq=seq*10+1; return 1}
+fn b()->u64{seq=seq*10+2; return 2}
+fn main(){for i in a()..b() {} exit(seq)}'
+diff_case "for_bound_is_a_value" 'fn main(){u64 n=3; u64 c=0
+for i in 0..n { n=100; c=c+1 }
+exit(c)}'
 # Divergent: IR evaluates the address/index first (12), legacy evaluates the
 # value first (21). Same split on both arches. DO NOT silently re-pin these —
 # a red here means an evaluation-order change that needs an owner decision.

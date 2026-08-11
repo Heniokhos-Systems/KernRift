@@ -1218,6 +1218,16 @@ static uint64 ir_current_bb = 0
 // ir_lower_stmt call), so compound stores cannot nest and one slot suffices.
 static uint64 ir_compound_temp = 0xFFFFFFFF
 
+// `for i in START..END` end bound, parked for the whole loop. The While
+// lowering evaluates ForEndHoist's child ONCE into this vreg, in the
+// preheader BB (before the IR_BR into the header, so liveness sees a
+// definition that dominates every condition test); the AstKind.ForEndHoist
+// leaf the parser left in the condition lowers to exactly this vreg.
+// Saved/restored around each loop, so a nested for loop gets its own vreg and
+// the outer bound is still valid when the outer condition is re-tested.
+// 0xFFFFFFFF = nothing parked (lower the bound in place instead).
+static uint64 ir_for_end = 0xFFFFFFFF
+
 // Loop context stack for break/continue
 static uint64 ir_loop_exit_stack = 0       // bb indices for break targets
 
@@ -1578,6 +1588,18 @@ fn ir_lower_expr(uint64 node) -> uint64 {
     // calling i() a second time.
     if kind == 55 {
         return ir_compound_temp
+    }
+
+    // ForEndHoist (57): the `for` loop's end bound, already evaluated once
+    // into ir_for_end by the enclosing While lowering. Reusing that vreg is
+    // what keeps `for i in a()..b()` from calling b() on every condition test.
+    // With nothing parked (this node reached from outside a for-range While)
+    // fall back to lowering the real bound rather than returning a dead vreg.
+    if kind == 57 {
+        if ir_for_end != 0xFFFFFFFF { return ir_for_end }
+        uint32 feh_c_ir = ast_child(node)
+        uint64 wfeh_c_ir = feh_c_ir
+        return ir_lower_expr(wfeh_c_ir)
     }
 
     // PtrLoadExpr (56): `*(addr as TYPE)` in expression position — the read
@@ -4598,6 +4620,34 @@ fn ir_lower_stmt(uint64 node) {
 
     // While (14)
     if kind == 14 {
+        // A for-range desugar puts a ForEndHoist in the condition. Lower the
+        // real end bound HERE, while ir_current_bb is still the preheader and
+        // before any BB is created, so it is evaluated once on the way into
+        // the loop instead of once per condition test. A user-written `while`
+        // has no ForEndHoist and is untouched: its condition is re-tested in
+        // full, as it must be.
+        //
+        // Clear first so a plain `while` nested in a for body cannot inherit
+        // the enclosing loop's vreg, and save/restore so the enclosing loop
+        // still has its own bound after the body.
+        uint64 saved_ir_for_end = ir_for_end
+        ir_for_end = 0xFFFFFFFF
+        uint64 fe_node_ir = for_end_hoist_of(node)
+        if fe_node_ir != 0 {
+            uint32 fe_child_ir = ast_child(fe_node_ir)
+            uint64 wfe_child_ir = fe_child_ir
+            uint64 fe_val_ir = ir_lower_expr(wfe_child_ir)
+            // COPY into a vreg of our own. Lowering a bare `n` returns the
+            // vreg the VARIABLE lives in, not a snapshot of its value, and the
+            // back-edge parallel-move writes the body's new value straight
+            // into that vreg — so `for i in 0..n { n = 100 }` would run 100
+            // times on this backend while both legacy backends, which park in
+            // a private stack slot, run 3. The bound is a value, not an alias.
+            uint64 fe_copy_ir = ir_new_vreg()
+            ir_emit(IR_COPY, fe_copy_ir, fe_val_ir, 0, 0, ir_current_bb)
+            ir_for_end = fe_copy_ir
+        }
+
         // Snapshot the preheader BB before any new BBs are created so
         // LICM can hoist invariants right before the loop entry IR_BR.
         uint64 licm_preheader = ir_current_bb
@@ -4696,6 +4746,7 @@ fn ir_lower_stmt(uint64 node) {
         ir_current_bb = bb_exit
         dealloc(snap_buf)
         dealloc(hdr_buf)
+        ir_for_end = saved_ir_for_end
         return
     }
 

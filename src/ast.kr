@@ -107,6 +107,22 @@ enum AstKind {
     //   data1 = type_size, child = addr_expr (a CompoundTemp in the desugar),
     //   data3 = float kind in bits 0..3, volatile in bit 4 (same layout as 41)
     PtrLoadExpr = 56
+
+    // --- `for i in START..END` end-bound hoist -----------------------------
+    // The for-range desugar builds `{ i = START; while i < END { body; i++ } }`.
+    // A While re-evaluates its condition on every trip, so leaving END inside
+    // the condition ran END once per iteration: `for i in a()..b()` called b()
+    // three times for two iterations, and `for i in 0..len(x)` re-called len()
+    // forever. The language evaluates BOTH bounds exactly once, before the
+    // first iteration.
+    //
+    // The parser therefore wraps END in this node and leaves it exactly where
+    // END used to sit (Compare.data2) so every generic AST walker still
+    // reaches the real expression through `child`. The While lowering in each
+    // backend evaluates `child` ONCE in the preheader, parks the result, and
+    // lowers this node to the parked value on every condition test.
+    //   child = the real END expression
+    ForEndHoist = 57
 }
 
 // ---------------------------------------------------------------------------
@@ -303,4 +319,33 @@ fn ast_append_child(uint64 parent_idx, uint64 child_idx) {
         n = ast_next(cur)
     }
     ast_set_next(cur, c32)
+}
+
+// ---------------------------------------------------------------------------
+// for-range end-bound helper
+// ---------------------------------------------------------------------------
+
+// Given a While node, return the ForEndHoist (57) node in its condition, or 0
+// if this While is not a for-range desugar. Only the parser's for-range path
+// builds `Compare(< | <=, Ident, ForEndHoist)`, so a user-written `while` —
+// whose condition MUST be re-tested in full every trip — never matches.
+//
+// Structural detection rather than a flag word on the While: the ForEndHoist
+// node then has exactly one home in the tree, so there is no second pointer
+// that could drift out of step with it.
+@export
+fn for_end_hoist_of(uint64 while_node) -> uint64 {
+    uint32 c32 = ast_child(while_node)
+    uint64 c = c32
+    if c == 0 { return 0 }
+    uint32 ck = ast_kind(c)
+    uint64 wck = ck
+    if wck != 38 { return 0 }          // condition is not a Compare
+    uint32 r32 = ast_data2(c)
+    uint64 r = r32
+    if r == 0 { return 0 }
+    uint32 rk = ast_kind(r)
+    uint64 wrk = rk
+    if wrk != 57 { return 0 }
+    return r
 }

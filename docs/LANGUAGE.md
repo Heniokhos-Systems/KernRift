@@ -277,6 +277,19 @@ for i in 0..n {
 inclusive form `0..=n` visits `n` as well. The `in` keyword is optional:
 `for i 0..10` also parses.
 
+**Both bounds are evaluated exactly once, before the first iteration**, start
+then end. `for i in 0..len(x)` calls `len` once, not once per iteration, and a
+bound with a side effect runs that side effect once. The loop iterates over the
+range that snapshot describes, so assigning to a variable the end bound was
+computed from does not lengthen or shorten the loop:
+
+```kr
+uint64 n = 3
+for i in 0..n { n = 100 }   // 3 iterations, not 100
+```
+
+Use `while` when the condition genuinely has to be re-tested every trip.
+
 ### break and continue
 
 ```kr

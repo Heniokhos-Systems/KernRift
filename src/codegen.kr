@@ -38,6 +38,15 @@ static uint64 temp_slot_1 = 0
 // suffices.
 static uint64 compound_temp_slot = 0
 
+// `for i in START..END` end bound, parked for the whole loop. The While
+// lowering evaluates ForEndHoist's child ONCE before the loop head and stores
+// it here; the AstKind.ForEndHoist leaf left in the condition loads it back on
+// every trip. Unlike compound_temp_slot this cannot be one shared slot: the
+// value has to survive the entire loop body, which may contain another for
+// loop, so each for-desugared While allocates its own slot out of the frame.
+// 0xFFFFFFFF = nothing parked (lower the bound in place instead).
+static uint64 for_end_slot = 0xFFFFFFFF
+
 // Float tracking: 0 = result in rax (integer), 1 = result in xmm0 (f64), 2 = result in xmm0 (f32)
 static uint64 expr_is_float = 0
 // Struct literal tracking: 0xFFFFFFFF = not a struct, otherwise struct index
@@ -4124,6 +4133,24 @@ fn gen_expr(uint64 node) {
     if kind == 55 {
         emit_load_rax_from_stack(compound_temp_slot)
         expr_is_float = 0
+        return
+    }
+
+    // ForEndHoist (57): the `for` loop's end bound, already evaluated once
+    // into for_end_slot by the enclosing While lowering. Reading the slot back
+    // is what keeps `for i in a()..b()` from calling b() on every condition
+    // test. With nothing parked (this node reached from outside a for-range
+    // While) fall back to evaluating the real bound rather than reading a slot
+    // no one wrote.
+    if kind == 57 {
+        if for_end_slot != 0xFFFFFFFF {
+            emit_load_rax_from_stack(for_end_slot)
+            expr_is_float = 0
+            return
+        }
+        uint32 feh_c = ast_child(node)
+        uint64 wfeh_c = feh_c
+        gen_expr(wfeh_c)
         return
     }
 
@@ -10710,6 +10737,33 @@ fn gen_stmt(uint64 node) {
 
     // While: while (cond) { body }
     if kind == 14 {
+        // A for-range desugar puts a ForEndHoist in the condition. Evaluate
+        // the real end bound HERE — before loop_start, so it is outside the
+        // loop — park it, and let the condition read the parked value. A
+        // user-written `while` has no ForEndHoist and is untouched: its
+        // condition is re-tested in full, as it must be.
+        //
+        // Clear the parked slot first so a plain `while` nested in a for body
+        // cannot inherit the enclosing loop's slot, and save/restore it so the
+        // enclosing loop gets its own slot back after the body.
+        uint64 saved_for_end_slot = for_end_slot
+        for_end_slot = 0xFFFFFFFF
+        uint64 fe_node = for_end_hoist_of(node)
+        if fe_node != 0 {
+            uint32 fe_child = ast_child(fe_node)
+            uint64 wfe_child = fe_child
+            gen_expr(wfe_child)
+            // Its own frame slot: the value must survive the whole body, and
+            // a nested for loop parks in a different one.
+            uint64 fe_slot = var_count * 8
+            var_count = var_count + 1
+            var_frame_size = var_count * 8
+            uint64 ferem = var_frame_size & 15
+            if ferem != 0 { var_frame_size = var_frame_size + 16 - ferem }
+            emit_store_rax_to_stack(fe_slot)
+            for_end_slot = fe_slot
+        }
+
         uint64 loop_start = out_len
 
         // Push loop context
@@ -10770,6 +10824,7 @@ fn gen_stmt(uint64 node) {
             bi = bi + 1
         }
         break_fixup_count = saved_break_start
+        for_end_slot = saved_for_end_slot
         return
     }
 

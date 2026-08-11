@@ -1408,14 +1408,29 @@ fn parse_stmt() -> uint64 {
         ast_set_child(var_node, se)
         ast_append_child(outer_block, var_node)
 
-        // Compare: IDENT < END
+        // Compare: IDENT < ForEndHoist(END)
+        //
+        // END is wrapped, not inlined. A While re-evaluates its condition on
+        // every trip, so an END sitting bare here ran once per condition TEST:
+        // `for i in a()..b()` called b() three times for two iterations, and
+        // `for i in 0..len(x)` re-called len() on every iteration. Both bounds
+        // are evaluated exactly once, before the first iteration; the backends'
+        // While lowering evaluates ForEndHoist's child in the preheader, parks
+        // it, and lowers the node itself to the parked value.
+        //
+        // The wrapper takes END's place rather than moving it onto the While,
+        // so the expression stays where every generic AST walker (the inliner's
+        // Compare-rhs link, type check, analysis) already looks for it.
         uint64 iter_ident = ast_alloc(AstKind.Ident)
         ast_set_data1(iter_ident, tt)
+        uint64 end_hoist = ast_alloc(AstKind.ForEndHoist)
+        uint32 ee = end_expr
+        ast_set_child(end_hoist, ee)
         uint64 cmp_node = ast_alloc(AstKind.Compare)
         uint32 ii = iter_ident
         ast_set_child(cmp_node, ii)
-        uint32 ee = end_expr
-        ast_set_data2(cmp_node, ee)
+        uint32 eh = end_hoist
+        ast_set_data2(cmp_node, eh)
         uint32 dt = dot_tok
         ast_set_data1(cmp_node, dt)
 
