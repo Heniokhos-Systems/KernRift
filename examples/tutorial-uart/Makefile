@@ -20,6 +20,10 @@ run: kernel.img
 	    -kernel kernel.img
 
 # Non-interactive smoke test: expect the banner AND the echoed input back.
+# Both greps are load-bearing: a single grep for the echoed 'Hello' kept
+# reporting "banner printed" with the banner deleted (measured), because the
+# two strings share no text. The banner proves uart_puts/init ran; the echo
+# proves the RX->ring->TX path did.
 #
 # Two details this depends on. `-serial stdio -monitor none` rather than
 # `-nographic`: -nographic muxes the QEMU monitor onto stdio and eats piped
@@ -27,10 +31,12 @@ run: kernel.img
 # holding CR at 0 are discarded by the hardware, so sending immediately loses
 # the first character.
 check: kernel.img
-	@{ sleep 1.5; printf 'Hello'; sleep 1.5; } | \
+	@out=$$({ sleep 1.5; printf 'Hello'; sleep 1.5; } | \
 	    timeout 8 qemu-system-aarch64 -M virt -cpu cortex-a72 \
 	    -display none -serial stdio -monitor none -kernel kernel.img \
-	    2>/dev/null | head -c 200 | grep -q 'Hello' \
+	    2>/dev/null | head -c 200); \
+	  printf '%s' "$$out" | grep -q 'kr-uart echo ready' \
+	  && printf '%s' "$$out" | grep -q 'Hello' \
 	  && echo "check: OK (banner printed, input echoed)" \
 	  || { echo "check: FAILED"; exit 1; }
 
