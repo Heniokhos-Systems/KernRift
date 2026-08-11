@@ -101,7 +101,7 @@ static u8[32] idt_numbuf
 fn idt_read_cs() -> u64 {
     u64 zero = 0
     u64 v = 0
-    asm { "0x8c 0xc8" } in(zero -> rax) out(rax -> v)
+    asm { "mov rax, cs" } in(zero -> rax) out(rax -> v)
     return v & 0xFFFF
 }
 
@@ -244,9 +244,9 @@ fn isr_common() {
     u64 vec = 0
     u64 err = 0
     u64 rip = 0
-    asm { "0x48 0x8B 0x84 0x24 0x00 0x01 0x00 0x00" } out(rax -> vec)   // [rsp+0x100]
-    asm { "0x48 0x8B 0x84 0x24 0x08 0x01 0x00 0x00" } out(rax -> err)   // [rsp+0x108]
-    asm { "0x48 0x8B 0x84 0x24 0x10 0x01 0x00 0x00" } out(rax -> rip)   // [rsp+0x110]
+    asm { "mov rax, [rsp+0x100]" } out(rax -> vec)   // [rsp+0x100]
+    asm { "mov rax, [rsp+0x108]" } out(rax -> err)   // [rsp+0x108]
+    asm { "mov rax, [rsp+0x110]" } out(rax -> rip)   // [rsp+0x110]
     idt_report(vec, err, rip)
 }
 
@@ -354,7 +354,7 @@ fn idt_load() {
 static u8[16] idt_idtr_buf
 
 fn idt_store_idtr(u64 dst) {
-    asm { "0x0F 0x01 0x08" } in(dst -> rax)
+    asm { "sidt [rax]" } in(dst -> rax)
 }
 
 // Limit currently in the CPU's IDTR. 4095 after idt_load().
