@@ -69,3 +69,6 @@ packaging/deb/ext/
 # Example build artifacts
 examples/*/kernel.img
 examples/*/*.ppm
+
+# living-compiler backups written by `krc lc --fix`
+*.lcbak

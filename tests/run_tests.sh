@@ -4256,6 +4256,78 @@ else
     rm -f /tmp/krgz_$$ /tmp/krgz_in_$$ /tmp/krgz_out_$$.gz /tmp/krgz_back_$$
 fi
 
+# --- lc --fix writes a backup; lc undo restores it ---
+#
+# `--fix` rewrites IN PLACE and nothing verifies the rewrite preserved meaning.
+# Two failure modes are reachable TODAY: the byte scanner rewrites inside
+# comments and string literals (measured on a copy of this compiler's own
+# lexer: 141 sites, and the keyword table became `match_keyword(start, len,
+# "u8", 5)` -- string shortened, length constant left at 5), and the store
+# rewrite changes argument evaluation order on the legacy backend.
+#
+# Backup+undo covers the FIRST (corruption is loud). It does not cover the
+# second, which compiles fine -- that is what the verification harness is for.
+TOTAL=$((TOTAL + 1))
+lcb_dir="$DIR/../lcbak_tmp_$$"
+mkdir -p "$lcb_dir"
+cat > "$lcb_dir/t.kr" <<'LCBEOF'
+fn main() {
+    uint64 buf = alloc(16)
+    uint64 v = 0
+    store32(buf, 42)
+    unsafe { *(buf as uint32) -> v }
+    exit(v)
+}
+LCBEOF
+cp "$lcb_dir/t.kr" "$lcb_dir/orig.kr"
+lcb_ok=1
+lcb_why=""
+"$DIR/../build/krc2" lc --fix "$lcb_dir/t.kr" >/dev/null 2>&1
+# A rewrite must actually have happened, or every clause below is vacuous.
+grep -q 'v = load32(buf)' "$lcb_dir/t.kr" || { lcb_ok=0; lcb_why="no rewrite happened (positive control)"; }
+[ -f "$lcb_dir/t.kr.lcbak" ] || { lcb_ok=0; lcb_why="no backup written"; }
+cmp -s "$lcb_dir/t.kr.lcbak" "$lcb_dir/orig.kr" || { lcb_ok=0; lcb_why="backup is not the original bytes"; }
+"$DIR/../build/krc2" lc undo "$lcb_dir/t.kr" >/dev/null 2>&1
+cmp -s "$lcb_dir/t.kr" "$lcb_dir/orig.kr" || { lcb_ok=0; lcb_why="undo did not restore the original"; }
+# --dry-run must neither write a backup nor touch the file.
+cp "$lcb_dir/orig.kr" "$lcb_dir/dry.kr"
+"$DIR/../build/krc2" lc --fix --dry-run "$lcb_dir/dry.kr" >/dev/null 2>&1
+[ -f "$lcb_dir/dry.kr.lcbak" ] && { lcb_ok=0; lcb_why="--dry-run wrote a backup"; }
+cmp -s "$lcb_dir/dry.kr" "$lcb_dir/orig.kr" || { lcb_ok=0; lcb_why="--dry-run modified the file"; }
+# undo with no backup must FAIL loudly rather than silently doing nothing.
+"$DIR/../build/krc2" lc undo "$lcb_dir/dry.kr" >/dev/null 2>&1
+[ "$?" != "0" ] || { lcb_ok=0; lcb_why="undo with no backup exited 0"; }
+if [ "$lcb_ok" = "1" ]; then
+    PASS=$((PASS + 1)); echo "  lc_fix_backup_and_undo: PASS (backup==original, undo restores, dry-run inert, missing backup errors)"
+else
+    FAIL=$((FAIL + 1)); echo "FAIL: lc_fix_backup_and_undo ($lcb_why)"
+fi
+rm -rf "$lcb_dir"
+
+# The scenario the seatbelt exists for: --fix on a REAL source file corrupts it
+# (comments, string literals, and a keyword table whose length constant no
+# longer matches its shortened string), and undo gets it back byte-identically.
+# A toy input would not exercise the alias-rewrite arm at all -- the two
+# pre-existing --fix rows are written entirely in short forms, which is why
+# this corruption went unnoticed.
+TOTAL=$((TOTAL + 1))
+lcx_dir="$DIR/../lcbak2_tmp_$$"
+mkdir -p "$lcx_dir"
+cp "$DIR/../src/lexer.kr" "$lcx_dir/lex.kr"
+lcx_ok=1
+lcx_why=""
+lcx_sites=$("$DIR/../build/krc2" lc --fix "$lcx_dir/lex.kr" 2>&1 | sed -n 's/^migration: \([0-9]*\) migration site.*/\1/p')
+[ -n "$lcx_sites" ] && [ "$lcx_sites" -gt 50 ] || { lcx_ok=0; lcx_why="expected a large rewrite on a real file, got '${lcx_sites:-none}'"; }
+cmp -s "$lcx_dir/lex.kr" "$DIR/../src/lexer.kr" && { lcx_ok=0; lcx_why="the file was NOT modified, so undo proves nothing"; }
+"$DIR/../build/krc2" lc undo "$lcx_dir/lex.kr" >/dev/null 2>&1
+cmp -s "$lcx_dir/lex.kr" "$DIR/../src/lexer.kr" || { lcx_ok=0; lcx_why="undo did not recover the corrupted file"; }
+if [ "$lcx_ok" = "1" ]; then
+    PASS=$((PASS + 1)); echo "  lc_undo_recovers_a_corrupted_source: PASS ($lcx_sites sites rewritten, fully recovered)"
+else
+    FAIL=$((FAIL + 1)); echo "FAIL: lc_undo_recovers_a_corrupted_source ($lcx_why)"
+fi
+rm -rf "$lcx_dir"
+
 # --- A1: the fat-binary line names the runner ---
 #
 # Bare `krc` emits a fat binary BY DEFAULT and the shell cannot execute one, so

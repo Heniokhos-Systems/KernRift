@@ -1856,6 +1856,86 @@ fn mig_scan_and_rewrite(uint64 source, uint64 src_size, uint64 out_buf_a, uint64
 // Run the migration engine on `input_path`. If dry_run, print the rewritten
 // source and match count to stdout. If not, write back to the file.
 @export
+// --- backup and undo ---------------------------------------------------------
+//
+// `lc --fix` rewrites a file IN PLACE, and until the verification harness
+// exists nothing checks that the rewrite preserved meaning. Two failure modes
+// are known and reachable today:
+//
+//   * the byte-level scanner rewrites inside COMMENTS and STRING LITERALS.
+//     Measured on a copy of this compiler's own lexer: 141 sites, and the
+//     keyword table became `match_keyword(start, len, "u8", 5)` -- the string
+//     shortened to 2 characters while the length constant stayed 5, so that
+//     entry can never match again.
+//   * the store rewrite CHANGES ARGUMENT EVALUATION ORDER on the legacy
+//     backend: `unsafe { *(f() as uint32) = g() }` evaluates g before f, while
+//     `store32(f(), g())` evaluates f before g. Measured 21 vs 12.
+//
+// Backup covers the first: corruption is loud, the file stops compiling, and
+// `lc undo` puts it back. It does NOT cover the second, which compiles fine
+// and passes tests -- nothing would prompt you to undo it. That gap is what
+// the verification harness is for; this is a seatbelt, not a fix.
+//
+// The backup is NOT removed by undo: there is no unlink builtin, and leaving
+// it makes undo idempotent. It is overwritten by the next --fix.
+const u64 LC_BAK_SUFFIX_LEN = 6
+
+fn lc_backup_path(uint64 input_path) -> uint64 {
+    uint64 plen = str_len(input_path)
+    uint64 out = alloc(plen + LC_BAK_SUFFIX_LEN + 1)
+    memcpy(out, input_path, plen)
+    uint64 suffix = ".lcbak"
+    memcpy(out + plen, suffix, LC_BAK_SUFFIX_LEN)
+    uint64 tp = out + plen + LC_BAK_SUFFIX_LEN
+    uint8 z = 0
+    unsafe { *(tp as uint8) = z }
+    return out
+}
+
+// Save the ORIGINAL bytes before any rewrite is written. Returns 1 on success.
+// A failure here must stop the migration: rewriting without a recoverable copy
+// is exactly the situation this exists to prevent.
+fn lc_write_backup(uint64 input_path, uint64 src_buf, uint64 fsize) -> uint64 {
+    uint64 bpath = lc_backup_path(input_path)
+    uint64 bfd = file_open(bpath, 1)
+    if bfd > 0xFFFFFFFFFFFFF000 { return 0 }
+    file_write(bfd, src_buf, fsize)
+    file_close(bfd)
+    return 1
+}
+
+// `krc lc undo <file>` -- restore the file from its .lcbak.
+fn run_lc_undo(uint64 input_path) {
+    uint64 bpath = lc_backup_path(input_path)
+    uint64 bfd = file_open(bpath, 0)
+    if bfd > 0xFFFFFFFFFFFFF000 {
+        write(2, "error: no backup to undo: ", 26)
+        write(2, bpath, str_len(bpath))
+        write(2, "\n  a backup is written only by `krc lc --fix` (not --dry-run)\n", 62)
+        exit(1)
+    }
+    uint64 bsize = file_size(bfd)
+    uint64 bbuf = alloc(bsize + 1)
+    file_read(bfd, bbuf, bsize)
+    file_close(bfd)
+
+    uint64 ofd = file_open(input_path, 1)
+    if ofd > 0xFFFFFFFFFFFFF000 {
+        write(2, "error: cannot open file for writing: ", 37)
+        write(2, input_path, str_len(input_path))
+        write(2, "\n", 1)
+        exit(1)
+    }
+    file_write(ofd, bbuf, bsize)
+    file_close(ofd)
+
+    write(1, "undo: restored ", 15)
+    write(1, input_path, str_len(input_path))
+    write(1, " from ", 6)
+    write(1, bpath, str_len(bpath))
+    write(1, "\n", 1)
+}
+
 fn run_migration(uint64 input_path, uint64 dry_run) {
     uint64 fd = file_open(input_path, 0)
     if fd > 0xFFFFFFFFFFFFF000 {
@@ -1902,6 +1982,15 @@ fn run_migration(uint64 input_path, uint64 dry_run) {
         return
     }
 
+    // Back up the ORIGINAL before touching the file. If this fails, do not
+    // rewrite: an unrecoverable in-place rewrite is the thing being guarded.
+    if lc_write_backup(input_path, src_buf, fsize) == 0 {
+        write(2, "error: could not write backup; refusing to rewrite ", 51)
+        write(2, input_path, str_len(input_path))
+        write(2, "\n", 1)
+        exit(1)
+    }
+
     // Write rewritten source back to the same file
     uint64 ofd = file_open(input_path, 1)
     if ofd > 0xFFFFFFFFFFFFF000 {
@@ -1928,4 +2017,10 @@ fn run_migration(uint64 input_path, uint64 dry_run) {
     }
     write(1, input_path, pl)
     write(1, "\n", 1)
+    write(1, "  backup: ", 10)
+    uint64 bp_shown = lc_backup_path(input_path)
+    write(1, bp_shown, str_len(bp_shown))
+    write(1, "   (restore with: krc lc undo ", 30)
+    write(1, input_path, pl)
+    write(1, ")\n", 2)
 }

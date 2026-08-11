@@ -6921,6 +6921,7 @@ static uint64 check_types_enabled = 1
 static uint64 lc_ci_mode = 0
 static uint64 lc_min_fitness = 0
 static uint64 lc_fix_mode = 0
+static uint64 lc_undo_mode = 0
 static uint64 lc_dry_run = 0
 static uint64 lc_list_proposals = 0
 static uint64 lc_promote_name = 0
@@ -7624,6 +7625,8 @@ fn main() {
                 write(1, "  --min-fitness <N>         min fitness for --promote\n", 54)
                 write(1, "  --ci                      machine-readable check output\n", 58)
                 write(1, "  --fix                     apply auto-fixes from check\n", 56)
+                uint64 wmsg_undo = "  lc undo <file>           restore <file> from the backup --fix wrote\n"
+                write(1, wmsg_undo, 70)
                 write(1, "  --dry-run                 show changes without writing\n\n", 58)
 
                 write(1, "info:\n", 6)
@@ -7709,6 +7712,8 @@ fn main() {
                 lc_min_fitness = parse_uint_arg(next_arg)
             } else if str_starts_with(arg, "check", 5) != 0 && str_len(arg) == 5 {
                 mode = 1
+            } else if str_eq_full(arg, "undo") != 0 {
+                lc_undo_mode = 1
             } else if str_starts_with(arg, "lc", 2) != 0 && str_len(arg) == 2 {
                 mode = 2
             } else if str_starts_with(arg, "fmt", 3) != 0 && str_len(arg) == 3 {
@@ -8600,6 +8605,11 @@ fn main() {
             init_proposals()
             load_proposal_overrides()
             list_proposals()
+            exit(0)
+        }
+        // `krc lc undo <file>` -- put back what the last --fix overwrote.
+        if lc_undo_mode != 0 {
+            run_lc_undo(input_path)
             exit(0)
         }
         // --fix mode: run the migration engine on the input file
