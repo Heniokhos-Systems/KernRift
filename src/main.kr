@@ -6639,6 +6639,18 @@ fn compile_fat(uint64 input_path, uint64 output_path) {
         write(1, output_path, olen3)
         msg3 = "\n"
         write(1, msg3, 1)
+
+        // The runner hint, but CONDITIONAL here. A custom subset may exclude
+        // the host, and then `kr` fails with "no native binary found for this
+        // architecture" -- so an unconditional hint would send the user to a
+        // command that cannot work. target_mask bit i is arch id i+1.
+        if ((target_mask >> (get_arch_id() - 1)) & 1) != 0 {
+            msg3 = "  run it with: kr "
+            write(1, msg3, 18)
+            write(1, output_path, olen3)
+            msg3 = "\n"
+            write(1, msg3, 1)
+        }
         return
     }
 
@@ -6818,6 +6830,19 @@ fn compile_fat(uint64 input_path, uint64 output_path) {
         msg = "\n"
         write(1, msg, 1)
     }
+
+    // Bare `krc` emits a fat binary BY DEFAULT, and a shell will not execute
+    // one. So the default first experience is a file that does not run, with
+    // nothing on screen saying what does. `kr` is that thing, it exists
+    // (src/runner.kr), and it was previously undiscoverable from this output.
+    //
+    // Appended rather than folded into the line above so the slice enumeration
+    // and byte counts stay byte-identical for anything reading them.
+    uint64 hint = "  run it with: kr "
+    write(1, hint, 18)
+    write(1, output_path, olen)
+    msg = "\n"
+    write(1, msg, 1)
 }
 
 // Statics set by _start trampoline

@@ -134,11 +134,20 @@ bootstrap: build/krc2
 	@rm -f /tmp/krc_bs_src.kr /tmp/krc3_bs /tmp/krc4_bs
 
 # Install to INSTALL_DIR
-install: build/krc2
+# Installs `kr` alongside `krc` because the compiler's own default output now
+# says "run it with: kr <file>" -- a bare `krc` emits a fat binary, which the
+# shell cannot execute, and `kr` is what runs it. Installing only krc left a
+# source-built user being told to run a command they did not have.
+install: build/krc2 build/kr build/kr-bin
 	@mkdir -p $(INSTALL_DIR)
 	cp build/krc2 $(INSTALL_DIR)/krc
 	chmod +x $(INSTALL_DIR)/krc
+	cp build/kr-bin $(INSTALL_DIR)/kr-bin
+	chmod +x $(INSTALL_DIR)/kr-bin
+	cp build/kr $(INSTALL_DIR)/kr
+	chmod +x $(INSTALL_DIR)/kr
 	@echo "Installed: $(INSTALL_DIR)/krc"
+	@echo "Installed: $(INSTALL_DIR)/kr (fat-binary runner)"
 	@echo "Ensure $(INSTALL_DIR) is in your PATH"
 
 # Create distribution binaries

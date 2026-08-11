@@ -4256,6 +4256,58 @@ else
     rm -f /tmp/krgz_$$ /tmp/krgz_in_$$ /tmp/krgz_out_$$.gz /tmp/krgz_back_$$
 fi
 
+# --- A1: the fat-binary line names the runner ---
+#
+# Bare `krc` emits a fat binary BY DEFAULT and the shell cannot execute one, so
+# without this the default first experience is a file that does not run with
+# nothing saying what does.
+#
+# MUST use build/krc2 bare: `make test` sets KRC='./build/krc2 --arch=x86_64',
+# which emits a single ELF and no fat line at all, so $KRC could never pass.
+TOTAL=$((TOTAL + 1))
+printf 'fn main(){ exit(0) }\n' > "$DIR/../a1_tmp_$$.kr"
+a1_out=$("$DIR/../build/krc2" "$DIR/../a1_tmp_$$.kr" -o /tmp/a1_$$.krbo 2>&1)
+a1_ok=1
+a1_why=""
+printf '%s' "$a1_out" | grep -q 'run it with: kr' || { a1_ok=0; a1_why="no runner hint"; }
+# The hint is APPENDED, so the pre-existing fields must survive verbatim --
+# a reformat that dropped the slice enumeration would still name the runner.
+printf '%s' "$a1_out" | grep -q 'x86_64(' || { a1_ok=0; a1_why="slice enumeration lost"; }
+printf '%s' "$a1_out" | grep -q 'android-x64(' || { a1_ok=0; a1_why="slice list truncated"; }
+# The hint must name the actual output path, not a fixed string.
+printf '%s' "$a1_out" | grep -q "run it with: kr /tmp/a1_$$.krbo" || { a1_ok=0; a1_why="hint does not name the output path"; }
+if [ "$a1_ok" = "1" ]; then
+    PASS=$((PASS + 1)); echo "  fat_binary_runner_hint: PASS (names kr and the path; slice fields intact)"
+else
+    FAIL=$((FAIL + 1)); echo "FAIL: fat_binary_runner_hint ($a1_why)"
+fi
+rm -f "$DIR/../a1_tmp_$$.kr" /tmp/a1_$$.krbo
+
+# The custom --targets subset may EXCLUDE the host, and then `kr` fails with
+# "no native binary found for this architecture" -- so the hint must appear
+# only when the host slice is present. Both directions are asserted: a hint
+# that was simply deleted would satisfy the negative clause on its own.
+TOTAL=$((TOTAL + 1))
+printf 'fn main(){ exit(0) }\n' > "$DIR/../a1c_tmp_$$.kr"
+# Name the host slice by $RUN_ARCH so this does not silently invert on arm64.
+if [ "$RUN_ARCH" = "arm64" ]; then a1_host=linux-arm64; a1_away=linux-x64
+else a1_host=linux-x64; a1_away=linux-arm64; fi
+a1c_with=$("$DIR/../build/krc2" --targets=$a1_host,win-x64 "$DIR/../a1c_tmp_$$.kr" -o /tmp/a1cw_$$.krbo 2>&1)
+a1c_without=$("$DIR/../build/krc2" --targets=$a1_away,win-x64 "$DIR/../a1c_tmp_$$.kr" -o /tmp/a1cn_$$.krbo 2>&1)
+a1c_ok=1
+a1c_why=""
+printf '%s' "$a1c_with" | grep -q 'run it with: kr' || { a1c_ok=0; a1c_why="no hint when the host slice IS present"; }
+printf '%s' "$a1c_without" | grep -q 'run it with: kr' && { a1c_ok=0; a1c_why="hint present when the host slice is ABSENT (kr would fail)"; }
+# Neither spelling may warn about an unrecognised target name -- a typo here
+# would make the negative clause pass for the wrong reason.
+printf '%s' "$a1c_with$a1c_without" | grep -q 'unknown --targets name' && { a1c_ok=0; a1c_why="a --targets name was not recognised"; }
+if [ "$a1c_ok" = "1" ]; then
+    PASS=$((PASS + 1)); echo "  fat_binary_hint_conditional: PASS (hint iff the host slice is in the subset)"
+else
+    FAIL=$((FAIL + 1)); echo "FAIL: fat_binary_hint_conditional ($a1c_why)"
+fi
+rm -f "$DIR/../a1c_tmp_$$.kr" /tmp/a1cw_$$.krbo /tmp/a1cn_$$.krbo
+
 # --- push/pop/mov/sidt mnemonics ---
 #
 # These exist so std/idt.kr need not be written in raw hex. Two rows, because
