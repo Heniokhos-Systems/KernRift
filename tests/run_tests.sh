@@ -1452,6 +1452,129 @@ else
     echo "FAIL: compound_assign_evaluates_index_once"
     FAIL=$((FAIL + 1))
 fi
+# --- `<<=` and `>>=` --------------------------------------------------------
+# TokenKind.LtLtEq (53) / GtGtEq (54) were declared in the enum, referenced by
+# parser.kr's 45..54 compound-assign range and by ir.kr's operator mapping, but
+# the lexer never emitted them: `<<` matched first and the trailing `=` became
+# "unexpected '=' in expression". The legacy (non-IR) backends were a second,
+# quieter defect -- their operator chains stopped at 52, so once the token DID
+# lex, `a <<= n` fell off the end of the if/else chain and emitted nothing at
+# all, leaving the destination unchanged with no diagnostic.
+#
+# Hence three things are asserted, not one:
+#   * that it PARSES              (source 1/2/3 compile at all)
+#   * that it computes the VALUE  (source 3 -- a row that only checks the
+#     program compiles passes against the legacy no-op defect and catches it
+#     on neither backend)
+#   * that it evaluates the index/address exactly ONCE and before the value
+#     (sources 1 and 2 -- `seq` records execution order as decimal digits, so
+#     the new operators are pinned to the same CompoundTemp machinery the
+#     other nine OP= forms use, rather than growing a second, double-evaluating
+#     path of their own)
+#
+# These rows EXECUTE, so they follow $RUN_ARCH rather than naming an arch.
+TOTAL=$((TOTAL + 1))
+SHA_OK=1
+SHA_OTHER="arm64"
+if [ "$RUN_ARCH" = "arm64" ]; then SHA_OTHER="x86_64"; fi
+SHA_QEMU=""
+if [ "$SHA_OTHER" = "arm64" ]; then
+    SHA_QEMU="$(command -v qemu-aarch64-static || command -v qemu-aarch64 || true)"
+fi
+
+# 1. arr[i()] <<= v() -- index once, then value => seq 12, and arr[3] == 5<<3.
+cat > "$DIR/../shassign_idx_$$.kr" <<'SHASSIGN_IDX'
+static u64 seq = 0
+static u8[16] arr
+fn ai() -> u64 { seq = seq * 10 + 1  return 3 }
+fn fv() -> u64 { seq = seq * 10 + 2  return 3 }
+fn main() {
+    arr[3] = 5
+    arr[ai()] <<= fv()
+    if seq != 12 { exit(1) }
+    if arr[3] != 40 { exit(2) }
+    exit(7)
+}
+SHASSIGN_IDX
+
+# 2. unsafe { *(ap() as uint32) <<= fv() } -- address once, then value.
+cat > "$DIR/../shassign_ptr_$$.kr" <<'SHASSIGN_PTR'
+static u64 seq = 0
+static u8[16] buf
+fn ap() -> u64 { seq = seq * 10 + 1  return buf }
+fn fv() -> u64 { seq = seq * 10 + 2  return 3 }
+fn main() {
+    store32(buf, 5)
+    unsafe { *(ap() as uint32) <<= fv() }
+    if seq != 12 { exit(1) }
+    if load32(buf) != 40 { exit(2) }
+    exit(7)
+}
+SHASSIGN_PTR
+
+# 3. VALUES on every target form: plain variable, array element, deref, and a
+#    SIGNED >>= (which must be arithmetic, not logical).
+cat > "$DIR/../shassign_val_$$.kr" <<'SHASSIGN_VAL'
+static u64[8] a
+static u8[16] buf
+fn main() {
+    uint64 v = 3
+    v <<= 4
+    if v != 48 { exit(1) }
+    v >>= 1
+    if v != 24 { exit(2) }
+    a[3] = 5
+    a[3] <<= 3
+    if a[3] != 40 { exit(3) }
+    a[3] >>= 2
+    if a[3] != 10 { exit(4) }
+    store32(buf, 7)
+    unsafe { *(buf as uint32) <<= 2 }
+    if load32(buf) != 28 { exit(5) }
+    unsafe { *(buf as uint32) >>= 1 }
+    if load32(buf) != 14 { exit(6) }
+    int64 s = 0 - 64
+    s >>= 3
+    if s != 0 - 8 { exit(8) }
+    exit(7)
+}
+SHASSIGN_VAL
+
+SHA_RAN=0
+sha_run() { # <arch> <flags> <src> <runner-or-empty>
+    local _bin="/tmp/krc_shassign_$$"
+    if ! $KRC --arch="$1" $2 "$3" -o "$_bin" >/dev/null 2>&1; then
+        SHA_OK=0; echo "  $(basename $3) $1 ${2:-IR}: COMPILE FAILED"
+        return
+    fi
+    if [ -n "$4" ]; then $4 "$_bin" >/dev/null 2>&1; else "$_bin" >/dev/null 2>&1; fi
+    local _rc=$?
+    SHA_RAN=$((SHA_RAN + 1))
+    # 7 = every assertion satisfied. Anything else names the assertion that
+    # failed; 1 on sources 1/2 is specifically a wrong evaluation order.
+    [ "$_rc" = "7" ] || { SHA_OK=0; echo "  $(basename $3) $1 ${2:-IR}: got $_rc, want 7"; }
+    rm -f "$_bin"
+}
+for _src in "$DIR/../shassign_idx_$$.kr" "$DIR/../shassign_ptr_$$.kr" "$DIR/../shassign_val_$$.kr"; do
+    sha_run "$RUN_ARCH" ""          "$_src" ""
+    sha_run "$RUN_ARCH" "--legacy"  "$_src" ""
+    if [ -n "$SHA_QEMU" ]; then
+        sha_run "$SHA_OTHER" ""         "$_src" "$SHA_QEMU"
+        sha_run "$SHA_OTHER" "--legacy" "$_src" "$SHA_QEMU"
+    fi
+done
+# Guard against the loop silently doing nothing.
+SHA_WANT=6
+if [ -n "$SHA_QEMU" ]; then SHA_WANT=12; fi
+[ "$SHA_RAN" = "$SHA_WANT" ] || { SHA_OK=0; echo "  only $SHA_RAN/$SHA_WANT config-runs executed"; }
+if [ "$SHA_OK" = "1" ]; then
+    echo "  shift_assign_ops: PASS ($SHA_RAN config-runs)"
+    PASS=$((PASS + 1))
+else
+    echo "FAIL: shift_assign_ops"
+    FAIL=$((FAIL + 1))
+fi
+rm -f "$DIR/../shassign_idx_$$.kr" "$DIR/../shassign_ptr_$$.kr" "$DIR/../shassign_val_$$.kr"
 rm -f "$DIR/../ceval_idx_$$.kr" "$DIR/../ceval_ptr_$$.kr" "$DIR/../ceval_plain_$$.kr"
 
 # File-scope struct statics: `static Point[N] pts` and `static Point sp`.

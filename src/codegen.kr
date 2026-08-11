@@ -5533,14 +5533,14 @@ fn gen_expr(uint64 node) {
             emit_byte(0x31)
             emit_byte(0xC8)
         }
-        else if op_kind == 43 {
-            // << shift left: shl cl, rax (cl = low byte of rcx)
+        else if op_kind == 43 || op_kind == 53 {
+            // << <<= shift left: shl cl, rax (cl = low byte of rcx)
             emit_byte(0x48)
             emit_byte(0xD3)
             emit_byte(0xE0)
         }
-        else if op_kind == 44 {
-            // >> shift right: SAR (sign-extending) for signed inputs,
+        else if op_kind == 44 || op_kind == 54 {
+            // >> >>= shift right: SAR (sign-extending) for signed inputs,
             // SHR (zero-fill) otherwise. ModRM /7 = 0xF8, /5 = 0xE8.
             emit_byte(0x48)
             emit_byte(0xD3)

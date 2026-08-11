@@ -1827,8 +1827,8 @@ fn gen_expr_a64(uint64 node) {
         else if op_kind == 23 || op_kind == 50 { emit_a64_and(0, 0, 9) }
         else if op_kind == 24 || op_kind == 51 { emit_a64_orr(0, 0, 9) }
         else if op_kind == 25 || op_kind == 52 { emit_a64_eor(0, 0, 9) }
-        else if op_kind == 43 { emit_a64_lsl(0, 0, 9) }
-        else if op_kind == 44 {
+        else if op_kind == 43 || op_kind == 53 { emit_a64_lsl(0, 0, 9) }
+        else if op_kind == 44 || op_kind == 54 {
             // Signed operand → arithmetic shift right (asr); unsigned → lsr.
             if legacy_node_is_signed(node) != 0 { emit_a64_asr(0, 0, 9) }
             else { emit_a64_lsr(0, 0, 9) }

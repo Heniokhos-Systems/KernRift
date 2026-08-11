@@ -647,6 +647,12 @@ fn lex_one_token() {
     if ch == 62 && next == 61 { advance(); emit_token(TokenKind.GtEq, start, 2, tok_line); return }
     if ch == 38 && next == 38 { advance(); emit_token(TokenKind.AmpAmp, start, 2, tok_line); return }
     if ch == 124 && next == 124 { advance(); emit_token(TokenKind.PipePipe, start, 2, tok_line); return }
+    // Three-char shift-assign, checked BEFORE the two-char `<<` / `>>` below:
+    // matching `<<` first would leave a bare `=` and the parser would report
+    // "unexpected '=' in expression". peek() is `next` (pos already advanced
+    // past ch), so peek_at(1) is the third character.
+    if ch == 60 && next == 60 && peek_at(1) == 61 { advance(); advance(); emit_token(TokenKind.LtLtEq, start, 3, tok_line); return }
+    if ch == 62 && next == 62 && peek_at(1) == 61 { advance(); advance(); emit_token(TokenKind.GtGtEq, start, 3, tok_line); return }
     if ch == 60 && next == 60 { advance(); emit_token(TokenKind.LtLt, start, 2, tok_line); return }
     if ch == 62 && next == 62 { advance(); emit_token(TokenKind.GtGt, start, 2, tok_line); return }
     if ch == 45 && next == 62 { advance(); emit_token(TokenKind.Arrow, start, 2, tok_line); return }
