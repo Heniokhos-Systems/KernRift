@@ -4308,6 +4308,64 @@ else
 fi
 rm -f "$DIR/../a1c_tmp_$$.kr" /tmp/a1cw_$$.krbo /tmp/a1cn_$$.krbo
 
+# --- A2: a failed import reports what was actually tried ---
+#
+# It named ONE path having tried eleven. Measured with strace: 11 distinct
+# candidates, 12 opens, of which a whole degenerate second batch looks like
+# `/usr/share/kernrift//tmp/std/x.kr` because import_process re-resolves an
+# already-absolute path. Only the real batch is reported, deliberately.
+#
+# The exact set is NOT asserted: Linux has 5 search paths, macOS 4 (its $HOME
+# entry is silently absent because import_read_home reads /proc/self/environ)
+# and Windows 2.
+TOTAL=$((TOTAL + 1))
+printf 'import "std/definitely_no_such_module.kr"\nfn main(){ exit(0) }\n' > "$DIR/../a2_tmp_$$.kr"
+a2_out=$($KRC "$DIR/../a2_tmp_$$.kr" -o /dev/null 2>&1)
+a2_cands=$(printf '%s' "$a2_out" | grep -c 'definitely_no_such_module')
+a2_ok=1
+a2_why=""
+printf '%s' "$a2_out" | grep -q '  tried:' || { a2_ok=0; a2_why="no candidate list"; }
+# More than one candidate: the whole point. The old message named exactly one.
+[ "$a2_cands" -ge 3 ] || { a2_ok=0; a2_why="only $a2_cands lines mention the module; want the error plus >=2 candidates"; }
+# At least one real system path, so the list is not just the relative attempt.
+printf '%s' "$a2_out" | grep -q 'share/kernrift/std/definitely_no_such_module' || { a2_ok=0; a2_why="no system search path listed"; }
+# The relative-to-importer route must be present AND labelled -- it is the one
+# the old message printed, and it is not in the search table at all.
+printf '%s' "$a2_out" | grep -q 'relative to the importing file' || { a2_ok=0; a2_why="relative-to-importer attempt not labelled"; }
+# The degenerate second batch must NOT appear. Those paths splice an absolute
+# path onto a prefix, so they contain the module name twice over a doubled
+# separator or an embedded absolute segment.
+printf '%s' "$a2_out" | grep -qE 'kernrift//|kernrift/[a-z/]*/(tmp|home)/' && { a2_ok=0; a2_why="degenerate second batch leaked into the report"; }
+if [ "$a2_ok" = "1" ]; then
+    PASS=$((PASS + 1)); echo "  import_failure_lists_candidates: PASS ($a2_cands lines, system paths listed, no degenerate batch)"
+else
+    FAIL=$((FAIL + 1)); echo "FAIL: import_failure_lists_candidates ($a2_why)"
+    printf '%s\n' "$a2_out" | sed 's/^/    /' | head -10
+fi
+rm -f "$DIR/../a2_tmp_$$.kr"
+
+# The candidate list must RESET between imports rather than accumulating. Two
+# failing imports in one file: each report must name only its own module.
+#
+# This replaced a row asserting that a missing TOP-LEVEL input grows no
+# candidate list. That row could never fail: every import_process(input_path)
+# call site is preceded by import_check_file(input_path), which exits(1) first,
+# so the guarded code is unreachable from there. The guard stays as defence for
+# a future call site, but it is NOT claimed to be tested.
+TOTAL=$((TOTAL + 1))
+printf 'import "std/alphamissing.kr"\nimport "std/betamissing.kr"\nfn main(){ exit(0) }\n' > "$DIR/../a2r_tmp_$$.kr"
+a2r_out=$($KRC "$DIR/../a2r_tmp_$$.kr" -o /dev/null 2>&1)
+a2r_alpha=$(printf '%s' "$a2r_out" | grep -c 'alphamissing')
+a2r_beta=$(printf '%s' "$a2r_out" | grep -c 'betamissing')
+# One error line + N candidates each. Without the reset the SECOND report also
+# replays the first module's candidates, roughly doubling alpha's count.
+if [ "$a2r_alpha" -ge 2 ] && [ "$a2r_beta" -ge 2 ] && [ "$a2r_alpha" = "$a2r_beta" ]; then
+    PASS=$((PASS + 1)); echo "  import_candidates_reset_between_imports: PASS (alpha=$a2r_alpha beta=$a2r_beta, no carry-over)"
+else
+    FAIL=$((FAIL + 1)); echo "FAIL: import_candidates_reset_between_imports (alpha=$a2r_alpha beta=$a2r_beta; equal and >=2 expected)"
+fi
+rm -f "$DIR/../a2r_tmp_$$.kr"
+
 # --- push/pop/mov/sidt mnemonics ---
 #
 # These exist so std/idt.kr need not be written in raw hex. Two rows, because

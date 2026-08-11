@@ -532,6 +532,59 @@ fn import_add_search_path(uint64 path) {
     import_search_count = import_search_count + 1
 }
 
+// --- failed-import candidate list -------------------------------------------
+//
+// A failed import used to name ONE path having tried eleven. Measured with
+// strace on `import "std/nosuchmodule.kr"`: 11 distinct candidates, 12 opens.
+//
+// Only the FIRST batch is recorded. The second is degenerate: import_process
+// receives an already-resolved ABSOLUTE path and feeds it back through
+// import_resolve_stdlib, producing nonsense like
+// `/usr/share/kernrift//tmp/std/nosuchmodule.kr`. Printing all eleven would
+// show five entries that read as a compiler bug. Fixing that double-resolve
+// means threading the original spec through five call sites, four of which
+// depend on the current behaviour for the `krc std/io.kr` fallback -- out of
+// scope here, deliberately, and this comment is the record of that decision.
+const u64 IMPORT_CAND_CAP = 16
+static uint64 import_cand_buf = 0
+static uint64 import_cand_count = 0
+// Only batch 1 records. import_process's own stdlib call runs with this off.
+static uint64 import_cand_recording = 0
+
+fn import_cand_reset() {
+    if import_cand_buf == 0 { import_cand_buf = alloc(IMPORT_CAND_CAP * 8) }
+    import_cand_count = 0
+}
+
+fn import_cand_add(uint64 path) {
+    if import_cand_buf == 0 { import_cand_buf = alloc(IMPORT_CAND_CAP * 8) }
+    if import_cand_count >= IMPORT_CAND_CAP { return }
+    uint64 slot = import_cand_buf + import_cand_count * 8
+    unsafe { *(slot as uint64) = path }
+    import_cand_count = import_cand_count + 1
+}
+
+// Print the recorded candidates under an error. Silent when nothing was
+// recorded -- import_process is also called directly on the top-level input,
+// where there was no search to report.
+fn import_cand_report() {
+    if import_cand_count == 0 { return }
+    write(2, "  tried:\n", 9)
+    uint64 i = 0
+    while i < import_cand_count {
+        uint64 slot = import_cand_buf + i * 8
+        uint64 p = 0
+        unsafe { *(slot as uint64) -> p }
+        write(2, "    ", 4)
+        write(2, p, str_len(p))
+        if i == 0 {
+            write(2, "   (relative to the importing file)", 35)
+        }
+        write(2, "\n", 1)
+        i = i + 1
+    }
+}
+
 fn import_resolve_stdlib(uint64 import_path) -> uint64 {
     import_init_search_paths()
     uint64 plen = str_len(import_path)
@@ -547,6 +600,7 @@ fn import_resolve_stdlib(uint64 import_path) -> uint64 {
         uint64 tp = full + blen + plen
         uint8 z = 0
         unsafe { *(tp as uint8) = z }
+        if import_cand_recording != 0 { import_cand_add(full) }
         uint64 fd = file_open(full, 0)
         if fd < 0xFFFFFFFF {
             file_close(fd)
@@ -585,6 +639,7 @@ fn import_process(uint64 file_path) {
         write(2, msg, 27)
         write(2, file_path, str_len(file_path))
         write(2, "\n", 1)
+        import_cand_report()
         // Don't exit here — let compilation continue so the parser can report
         // the downstream errors this missing module causes. But record the
         // failure: open_output_or_die refuses to emit a binary if this is
@@ -669,7 +724,15 @@ fn import_process(uint64 file_path) {
                 uint64 ntp = name_copy + name_len
                 uint8 nz = 0
                 unsafe { *(ntp as uint8) = nz }
+                // Record what gets tried, so a failure can say so. The
+                // relative-to-importer attempt is first because that is what
+                // was tried first -- and it is NOT in the search table, which
+                // is why the old one-line message could only ever name it.
+                import_cand_reset()
+                import_cand_add(full_path)
+                import_cand_recording = 1
                 uint64 stdlib_path = import_resolve_stdlib(name_copy)
+                import_cand_recording = 0
                 if stdlib_path != 0 { full_path = stdlib_path }
             }
             // Recurse
