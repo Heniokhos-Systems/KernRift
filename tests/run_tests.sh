@@ -4256,6 +4256,97 @@ else
     rm -f /tmp/krgz_$$ /tmp/krgz_in_$$ /tmp/krgz_out_$$.gz /tmp/krgz_back_$$
 fi
 
+# --- std/mouse.kr and examples/mouse-gui ---
+#
+# Compile-only row first, arch-pinned: the artifact is inspected, not executed.
+TOTAL=$((TOTAL + 1))
+MG_DIR="$DIR/../examples/mouse-gui"
+MG_IMG="/tmp/krc_mgui_$$.img"
+if [ ! -f "$MG_DIR/main.kr" ]; then
+    FAIL=$((FAIL + 1)); echo "FAIL: mouse_gui_example_builds (source missing)"
+elif ! $KRC --target=none --arch=x86_64 --emit=image \
+            --load-addr=0x100000 --stack-top=0x90000 \
+            "$MG_DIR/main.kr" -o "$MG_IMG" >/dev/null 2>&1; then
+    FAIL=$((FAIL + 1)); echo "FAIL: mouse_gui_example_builds (compile failed)"
+else
+    PASS=$((PASS + 1)); echo "  mouse_gui_example_builds: PASS (widgets+mouse+ramfb, --target=none)"
+fi
+
+# The behavioural row. Drives the mouse AND the keyboard over QMP and asserts
+# three independent things: the cursor reached a commanded position, a click
+# was attributed to the right widget AND changed pixels, and the keyboard still
+# worked while the mouse was streaming.
+#
+# That last one is the load-bearing one. Keyboard and mouse share a single 8042
+# output buffer, so two pollers each reading 0x60 steal each other's bytes.
+# Measured with a second reader reintroduced: the cursor never moved at all,
+# the click was never seen, and a keystroke went missing -- 3 of 3 checks red.
+TOTAL=$((TOTAL + 1))
+if ! command -v qemu-system-x86_64 >/dev/null 2>&1 || ! command -v python3 >/dev/null 2>&1; then
+    PASS=$((PASS + 1)); echo "  mouse_gui_example_runs: PASS (SKIPPED -- no qemu-system-x86_64/python3)"
+elif [ ! -f "$MG_IMG" ]; then
+    FAIL=$((FAIL + 1)); echo "FAIL: mouse_gui_example_runs (no image from the row above)"
+else
+    mg_out=$(timeout 200 python3 "$MG_DIR/check.py" "$MG_IMG" 2>&1)
+    if printf '%s' "$mg_out" | grep -q '^PASS: cursor moved'; then
+        PASS=$((PASS + 1)); echo "  mouse_gui_example_runs: PASS (cursor, click-changes-pixels, keyboard alive)"
+    else
+        FAIL=$((FAIL + 1)); echo "FAIL: mouse_gui_example_runs"
+        printf '%s\n' "$mg_out" | grep -E '^BAD|^FAIL' | sed 's/^/    /' | head -6
+    fi
+fi
+rm -f "$MG_IMG"
+
+# std/mouse.kr must never read the shared port itself. This is a SOURCE
+# invariant rather than a behavioural one because the failure it prevents is
+# intermittent: a second reader on 0x60 only loses the bytes it happens to
+# win, so a behavioural test can pass by timing luck. std/ps2.kr owns the port;
+# mouse.kr is protocol only.
+TOTAL=$((TOTAL + 1))
+if grep -nE '\b(inb|outb)\s*\(\s*(PS2_DATA|PS2_STATUS|PS2_CMD|0x60|0x64)' "$DIR/../std/mouse.kr" >/dev/null 2>&1; then
+    FAIL=$((FAIL + 1)); echo "FAIL: mouse_never_touches_shared_port (std/mouse.kr reads 0x60/0x64 directly)"
+    grep -nE '\b(inb|outb)\s*\(' "$DIR/../std/mouse.kr" | sed 's/^/    /' | head -4
+else
+    PASS=$((PASS + 1)); echo "  mouse_never_touches_shared_port: PASS (ps2.kr is the only owner of 0x60)"
+fi
+
+# Whole surface must compile freestanding, including what the demo never calls.
+TOTAL=$((TOTAL + 1))
+cat > "$DIR/../mou_tmp_$$.kr" <<'MOUEOF'
+import "std/mouse.kr"
+fn main() -> uint32 {
+    if mouse_init() == 0 { loop { } }
+    mouse_set_bounds(1024, 768)
+    mouse_set_pos(10, 10)
+    if mouse_poll() != 0 {
+        u64 _x = mouse_x()
+        u64 _y = mouse_y()
+        if (mouse_buttons() & MOUSE_BTN_LEFT) != 0 { }
+        if (mouse_buttons() & MOUSE_BTN_RIGHT) != 0 { }
+        if (mouse_buttons() & MOUSE_BTN_MIDDLE) != 0 { }
+    }
+    if mouse_is_ready() == 0 { mouse_resync() }
+    u64 _p = mouse_packet_count()
+    u64 _r = mouse_resync_count()
+    if ps2_overflowed() != 0 { ps2_clear_overflow() }
+    ps2_drain()
+    if ps2_kbd_pop() == PS2_EMPTY { }
+    if ps2_aux_pop() == PS2_EMPTY { }
+    ps2_aux_flush()
+    halt_forever()
+    return 0
+}
+MOUEOF
+if $KRC --target=none --arch=x86_64 --emit=image --load-addr=0x100000 \
+        --stack-top=0x90000 "$DIR/../mou_tmp_$$.kr" -o /tmp/mou_$$.img >/dev/null 2>&1; then
+    PASS=$((PASS + 1)); echo "  mouse_full_surface_freestanding: PASS"
+else
+    FAIL=$((FAIL + 1)); echo "FAIL: mouse_full_surface_freestanding"
+    $KRC --target=none --arch=x86_64 --emit=image --load-addr=0x100000 \
+         --stack-top=0x90000 "$DIR/../mou_tmp_$$.kr" -o /tmp/mou_$$.img 2>&1 | grep error | head -3 | sed 's/^/    /'
+fi
+rm -f "$DIR/../mou_tmp_$$.kr" /tmp/mou_$$.img
+
 # --- std/x86.kr + std/cstr.kr: bare-metal support modules ---
 # Both must work under --target=none. cstr.kr exists because std/string.kr's
 # int_to_str/str_copy ALLOCATE their result, and alloc is refused on bare metal

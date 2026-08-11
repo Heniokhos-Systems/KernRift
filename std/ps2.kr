@@ -54,6 +54,139 @@ static u64 ps2_caps_on    = 0
 static u64 ps2_extended   = 0
 static u64 ps2_ready      = 0
 
+// --- port ownership ---------------------------------------------------------
+//
+// THIS MODULE IS THE ONLY PLACE THAT TOUCHES PORT 0x60. That is not tidiness:
+// the keyboard and the mouse share one 8042 output buffer, and a byte can only
+// be read once. Two pollers each calling inb(0x60) steal each other's bytes --
+// measured, with a second reader present the cursor never moves at all, clicks
+// are never seen, and keystrokes go missing. Before this, `ps2_poll` read the
+// port and DISCARDED anything with the aux bit set, so a mouse could not work
+// while the keyboard was polled -- and `console_poll` calls `ps2_poll` first,
+// so that applied to anything using console input.
+//
+// The rule: `ps2_drain` reads every pending byte, classifies it by the status
+// aux bit, and appends it to the keyboard ring or the mouse ring. `ps2_poll`
+// and `std/mouse.kr`'s `mouse_poll` both call the drain and then read only
+// their OWN ring. Neither reads the port.
+//
+// Returned by the ring pops when nothing is waiting. Distinct from 0, which is
+// a legitimate mouse data byte.
+const u64 PS2_EMPTY = 0xFFFFFFFFFFFFFFFF
+
+// How long the bounded waits spin before giving up. Absent hardware must not
+// hang the machine: on bare metal there is no watchdog and no way out.
+const u64 PS2_WAIT_SPINS = 100000
+
+// 256 bytes is ~85 mouse packets. A poll loop that runs faster than the mouse
+// reports (100 Hz by default) never gets close.
+static u8[256] ps2_kbd_ring
+static u64 ps2_kbd_head = 0
+static u64 ps2_kbd_tail = 0
+static u8[256] ps2_aux_ring
+static u64 ps2_aux_head = 0
+static u64 ps2_aux_tail = 0
+// Set when a ring was full and a byte was dropped. std/mouse.kr watches this:
+// a lost byte desynchronises the 3-byte packet stream, and the only sound
+// recovery is a device-level reset, not a guess about where a packet starts.
+static u64 ps2_overflow = 0
+
+fn ps2_overflowed() -> u64 { return ps2_overflow }
+fn ps2_clear_overflow() { ps2_overflow = 0 }
+
+// Read every byte the controller currently has, routing each to its ring.
+// Cheap when idle: one status read.
+fn ps2_drain() {
+    u64 guard = 0
+    while guard < 512 {
+        u64 st = inb(PS2_STATUS)
+        if (st & PS2_STATUS_OUTPUT_FULL) == 0 { return }
+        u64 b = inb(PS2_DATA)
+        if (st & PS2_STATUS_AUX) != 0 {
+            u64 nh = (ps2_aux_head + 1) % 256
+            if nh == ps2_aux_tail { ps2_overflow = 1 } else {
+                store8(ps2_aux_ring + ps2_aux_head, b)
+                ps2_aux_head = nh
+            }
+        } else {
+            u64 nk = (ps2_kbd_head + 1) % 256
+            if nk == ps2_kbd_tail { ps2_overflow = 1 } else {
+                store8(ps2_kbd_ring + ps2_kbd_head, b)
+                ps2_kbd_head = nk
+            }
+        }
+        guard = guard + 1
+    }
+}
+
+fn ps2_kbd_pop() -> u64 {
+    if ps2_kbd_tail == ps2_kbd_head { return PS2_EMPTY }
+    u64 b = load8(ps2_kbd_ring + ps2_kbd_tail)
+    ps2_kbd_tail = (ps2_kbd_tail + 1) % 256
+    return b
+}
+
+fn ps2_aux_pop() -> u64 {
+    if ps2_aux_tail == ps2_aux_head { return PS2_EMPTY }
+    u64 b = load8(ps2_aux_ring + ps2_aux_tail)
+    ps2_aux_tail = (ps2_aux_tail + 1) % 256
+    return b
+}
+
+fn ps2_aux_flush() {
+    ps2_aux_tail = ps2_aux_head
+}
+
+// --- controller command helpers ---------------------------------------------
+//
+// Also here rather than in std/mouse.kr, so that every access to 0x60/0x64
+// lives in one file. mouse.kr is protocol only.
+
+// Wait for the input buffer to drain so a write will not be lost. 0 on timeout.
+fn ps2_wait_write() -> u64 {
+    u64 i = 0
+    while i < PS2_WAIT_SPINS {
+        if (inb(PS2_STATUS) & PS2_STATUS_INPUT_FULL) == 0 { return 1 }
+        cpu_relax()
+        i = i + 1
+    }
+    return 0
+}
+
+// Bounded blocking read straight from the port, for the synchronous
+// command/response handshakes in mouse_init. Only safe BEFORE streaming has
+// started -- once data is flowing, use the drain and the rings.
+fn ps2_wait_read() -> u64 {
+    u64 i = 0
+    while i < PS2_WAIT_SPINS {
+        if (inb(PS2_STATUS) & PS2_STATUS_OUTPUT_FULL) != 0 { return inb(PS2_DATA) }
+        cpu_relax()
+        i = i + 1
+    }
+    return PS2_EMPTY
+}
+
+// Command byte to the controller (port 0x64).
+fn ps2_ctl_write(u64 cmd) -> u64 {
+    if ps2_wait_write() == 0 { return 0 }
+    outb(PS2_CMD, cmd)
+    return 1
+}
+
+// Data byte to the controller (port 0x60).
+fn ps2_data_write(u64 b) -> u64 {
+    if ps2_wait_write() == 0 { return 0 }
+    outb(PS2_DATA, b)
+    return 1
+}
+
+// Send a byte to the AUXILIARY device: 0xD4 tells the controller the next data
+// byte is for the mouse rather than the keyboard.
+fn ps2_aux_write(u64 b) -> u64 {
+    if ps2_ctl_write(0xD4) == 0 { return 0 }
+    return ps2_data_write(b)
+}
+
 fn ps2_set(u64 sc, u64 lo, u64 up) {
     if sc >= 256 { return }
     store8(ps2_map + sc, lo)
@@ -130,15 +263,9 @@ fn ps2_extended_key(u64 sc) -> u64 {
 // any non-zero result as a keystroke.
 fn ps2_poll() -> u64 {
     if ps2_ready == 0 { ps2_init() }
-    u64 st = inb(PS2_STATUS)
-    if (st & PS2_STATUS_OUTPUT_FULL) == 0 { return 0 }
-    // A mouse byte shares this port. Discard it rather than decoding it as a
-    // scancode, which is what produces phantom keystrokes when a mouse moves.
-    if (st & PS2_STATUS_AUX) != 0 {
-        u64 _aux = inb(PS2_DATA)
-        return 0
-    }
-    u64 sc = inb(PS2_DATA)
+    ps2_drain()
+    u64 sc = ps2_kbd_pop()
+    if sc == PS2_EMPTY { return 0 }
 
     if sc == PS2_SC_EXTENDED { ps2_extended = 1  return 0 }
     if ps2_extended != 0 {
