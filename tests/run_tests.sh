@@ -19921,6 +19921,17 @@ rm -f "$ARX_SRC" "$ARX_BIN"
 # FF /4 is jmp, FF /6 is push), so anything short of the bytes would pass while
 # emitting the wrong one. r10/r15 cover the REX.B path.
 # ---------------------------------------------------------------------------
+# GUARDED ON $RUN_ARCH, and not because the emitted bytes differ: the row
+# COMPILES x86_64 inline asm, and KRC_FLAGS defaults to --arch=$ARCH, so on the
+# native ARM64 job it asked an arm64 build to assemble `call rax` and produced
+# no artifact. Measured there, not predicted. Forcing --arch=x86_64 would also
+# build, but the point of the row is the byte encoding, which is meaningless to
+# assert from a host that cannot run it -- and a silent skip would read as
+# coverage, so it says so.
+if [ "$RUN_ARCH" != "x86_64" ]; then
+    PASS=$((PASS + 1)); TOTAL=$((TOTAL + 1))
+    echo "  asm_call_jmp_reg: SKIP (x86_64 encodings; host is $RUN_ARCH)"
+else
 TOTAL=$((TOTAL + 1))
 CR_SRC=$(mktemp /tmp/krc_callreg_XXXX.kr)
 CR_BIN=/tmp/krc_callreg_$$
@@ -19952,6 +19963,7 @@ else
     fi
 fi
 rm -f "$CR_SRC" "$CR_BIN"
+fi
 
 emit_recipe() {
     case "$1" in
