@@ -302,6 +302,48 @@ value_case "order_idx_store_value_clobbers" 'static u64[16] vc
 fn ai()->u64{return 3}
 fn main(){u64 m=0; vc[ai()]=write(1,m,0)+77; exit(vc[3])}' 77
 
+# --- builtin ARGUMENT parking ---------------------------------------------
+# The argument half of the temp_slot_0/temp_slot_1 family. A multi-argument
+# builtin parked already-evaluated arguments in the two shared scratch slots
+# while it evaluated the rest, and the rest is free to write those same slots.
+# Each of these disagreed IR-vs-legacy on BOTH arches before the fix; the
+# measured legacy value is in the comment so a regression is recognisable.
+#
+# No `import` here on purpose: this harness writes its source to /tmp, where
+# `std/` would resolve against the INSTALLED tree rather than this checkout.
+
+# Nested builtin in another builtin's argument list. signed_lt parks its first
+# operand, bit_range parks two — write's fd (2) replaced them. legacy: 1+0=1.
+value_case "arg_builtin_nested" 'fn main(){u64 s=0
+u64 a=signed_lt(5,3+write(2,s,0))
+u64 b=bit_range(255,0,4+write(2,s,0))
+exit(a+b)}' 15
+
+# store64 parks an ADDRESS, so the clobber was a wild store: legacy SEGFAULTED
+# (139) rather than returning a wrong number.
+value_case "arg_store64_addr" 'fn main(){u64 s=0
+u64 buf=alloc(64)
+store64(buf,77+write(2,s,0))
+exit(load64(buf))}' 77
+
+# An f-string keeps its running OUTPUT OFFSET in temp_slot_1 across the whole
+# segment loop, so a builtin in an interpolation walks the destination pointer
+# off the buffer. 'A'+'0'+'B' = 179; legacy read back 114.
+value_case "arg_fstring_interp" 'fn main(){u64 s=0
+u64 p=f"A{write(2,s,0)}B"
+exit(load8(p)+load8(p+1)+load8(p+2))}' 179
+
+# Tuple returns park each element across the evaluation of the later ones.
+value_case "arg_tuple_return" 'fn two()->u64{return (11+write(2,"F",0),22+write(2,"G",0))}
+fn main(){(u64 a,u64 b)=two(); exit(a+b)}' 33
+
+# No nested call at all: a fractional float LITERAL lowers as int+frac/divisor
+# using BOTH scratch slots, so fma_f64s own operands destroyed its parked
+# arguments. 2.5*4.5+1.25 = 12.5; legacy produced 0.
+value_case "arg_float_literal_scratch" 'fn main(){f64 r=fma_f64(2.5,4.5,1.25)
+u64 g=f64_to_int(r*100.0)
+exit(g-1000)}' 250
+
 echo "----"
 echo "Differential: $((TOTAL-DIV-KNOWN))/$TOTAL agree across backends, $KNOWN known-divergent (pinned), $DIV diverged."
 if [ "$DIV" = "0" ]; then echo "PARITY OK"; else echo "PARITY GAPS FOUND"; exit 1; fi

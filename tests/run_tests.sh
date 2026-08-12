@@ -2258,6 +2258,189 @@ rm -f "$DIR/../naked_repro_$$.kr" "$DIR/../naked_idt_$$.kr" \
       "$DIR/../naked_warn_$$.kr" "$DIR/../naked_a64_$$.kr"
 rm -f "$NK_ASM1" "$NK_ASM2" "$NK_ASM3" "$NK4_ASM"
 
+# --- builtin ARGUMENT parking gets a private scratch slot ------------------
+# The argument half of the temp_slot_0/temp_slot_1 family whose STORE half is
+# covered by store_sites_get_a_private_scratch_slot above.
+#
+# A builtin with more than one argument parked the arguments it had already
+# evaluated in temp_slot_0 / temp_slot_1 while it evaluated the rest -- and the
+# rest is an arbitrary expression which is free to write those same two slots.
+# Three node kinds do: a Call (every multi-arg builtin), a fractional float
+# LITERAL (it lowers as int + frac/divisor using both slots as scratch), and an
+# f-string (it keeps its running output offset in temp_slot_1). So
+#
+#     write(1, outer, write(2, inner, 3) + 1)
+#
+# ran the OUTER write with the INNER write's fd and buffer: nothing on stdout
+# and "IN" twice on stderr, on both legacy backends, while both IR backends
+# printed OUT/IN correctly.
+#
+# THESE ROWS ASSERT BOTH STREAMS SEPARATELY. The corruption is in *which fd*
+# and *which buffer* the builtin receives, so a row that only checks the exit
+# code -- or only checks that the program compiles -- passes against the defect
+# on all four configs. Each row also refuses an empty capture, so an empty
+# stdout compared against an empty expectation cannot report green.
+#
+# These rows EXECUTE, so they follow $RUN_ARCH rather than naming an arch.
+TOTAL=$((TOTAL + 1))
+ASLOT_OK=1
+ASLOT_OTHER="arm64"
+if [ "$RUN_ARCH" = "arm64" ]; then ASLOT_OTHER="x86_64"; fi
+ASLOT_QEMU=""
+if [ "$ASLOT_OTHER" = "arm64" ]; then
+    ASLOT_QEMU="$(command -v qemu-aarch64-static || command -v qemu-aarch64 || true)"
+fi
+
+# 1. The repro: a builtin call nested in another builtin's argument list.
+cat > "$DIR/../aslot_write_$$.kr" <<'ASLOT_WRITE'
+fn main() {
+    u64 outer = "OUT\n"
+    u64 inner = "IN\n"
+    write(1, outer, write(2, inner, 3) + 1)
+    exit(0)
+}
+ASLOT_WRITE
+
+# 2. Value corruption in three more builtins: the parked argument comes back
+#    as the nested write's fd. store64 parks an ADDRESS, so it segfaults.
+cat > "$DIR/../aslot_val_$$.kr" <<'ASLOT_VAL'
+fn main() {
+    u64 s = "X\n"
+    u64 a = signed_lt(5, 3 + write(2, s, 0))
+    u64 b = bit_range(255, 0, 4 + write(2, s, 0))
+    u64 buf = alloc(64)
+    store64(buf, 77 + write(2, s, 0))
+    u64 c = load64(buf)
+    if a == 0  { write(1, "A\n", 2) }
+    if b == 15 { write(1, "B\n", 2) }
+    if c == 77 { write(1, "C\n", 2) }
+    write(2, "done\n", 5)
+    exit(0)
+}
+ASLOT_VAL
+
+# 3. f-string: the running output offset lives in temp_slot_1 for the whole
+#    segment loop, so a builtin in an interpolation walks the destination
+#    pointer off the buffer (this one SEGFAULTED, it did not merely misprint).
+cat > "$DIR/../aslot_fstr_$$.kr" <<'ASLOT_FSTR'
+import "std/io.kr"
+fn main() {
+    u64 s = "X\n"
+    println(f"A{write(2, s, 0)}B{write(2, s, 0)}C")
+    write(2, "fs\n", 3)
+    exit(0)
+}
+ASLOT_FSTR
+
+# 4. Tuple returns park each element across the evaluation of the later ones.
+cat > "$DIR/../aslot_tuple_$$.kr" <<'ASLOT_TUPLE'
+fn two() -> u64 {
+    return (11 + write(2, "F\n", 0), 22 + write(2, "G\n", 0))
+}
+fn three() -> u64 {
+    return (31 + write(2, "H\n", 0), 32 + write(2, "I\n", 0), 33 + write(2, "J\n", 0))
+}
+fn main() {
+    (u64 a, u64 b) = two()
+    (u64 x, u64 y, u64 z) = three()
+    if a == 11 { write(1, "a\n", 2) }
+    if b == 22 { write(1, "b\n", 2) }
+    if x == 31 { write(1, "x\n", 2) }
+    if y == 32 { write(1, "y\n", 2) }
+    if z == 33 { write(1, "z\n", 2) }
+    write(2, "tup\n", 4)
+    exit(0)
+}
+ASLOT_TUPLE
+
+# 5. No nested call at all: a fractional float LITERAL uses both slots as
+#    scratch, so fma_f64's parked arguments are destroyed by its own operands.
+cat > "$DIR/../aslot_flit_$$.kr" <<'ASLOT_FLIT'
+fn main() {
+    f64 r = fma_f64(2.5, 4.5, 1.25)
+    u64 g = f64_to_int(r * 100.0)
+    if g == 1250 { write(1, "flit\n", 5) } else { write(1, "BAD\n", 4) }
+    write(2, "fl\n", 3)
+    exit(0)
+}
+ASLOT_FLIT
+
+aslot_want_out() {
+    case "$1" in
+        *aslot_write_*) printf 'OUT\n' ;;
+        *aslot_val_*)   printf 'A\nB\nC\n' ;;
+        *aslot_fstr_*)  printf 'A0B0C\n' ;;
+        *aslot_tuple_*) printf 'a\nb\nx\ny\nz\n' ;;
+        *aslot_flit_*)  printf 'flit\n' ;;
+    esac
+}
+aslot_want_err() {
+    case "$1" in
+        *aslot_write_*) printf 'IN\n' ;;
+        *aslot_val_*)   printf 'done\n' ;;
+        *aslot_fstr_*)  printf 'fs\n' ;;
+        *aslot_tuple_*) printf 'tup\n' ;;
+        *aslot_flit_*)  printf 'fl\n' ;;
+    esac
+}
+
+ASLOT_RAN=0
+aslot_run() { # <arch> <flags> <src> <runner-or-empty>
+    local _bin="/tmp/krc_aslot_$$"
+    local _eo="/tmp/krc_aslot_eo_$$"
+    local _tag="$(basename $3) $1 ${2:-IR}"
+    if ! $KRC --arch="$1" $2 "$3" -o "$_bin" >/dev/null 2>&1; then
+        ASLOT_OK=0; echo "  $_tag: COMPILE FAILED"
+        return
+    fi
+    local _out
+    if [ -n "$4" ]; then _out=$($4 "$_bin" 2>"$_eo"); else _out=$("$_bin" 2>"$_eo"); fi
+    local _err="$(cat "$_eo")"
+    local _wo="$(aslot_want_out "$3")"
+    local _we="$(aslot_want_err "$3")"
+    ASLOT_RAN=$((ASLOT_RAN + 1))
+    # A missing expectation would make every comparison vacuous.
+    if [ -z "$_wo" ] || [ -z "$_we" ]; then
+        ASLOT_OK=0; echo "  $_tag: no expectation recorded for this source"
+    # An empty capture compared against a non-empty expectation must fail
+    # loudly rather than looking like a mismatch of trailing whitespace.
+    elif [ -z "$_out" ]; then
+        ASLOT_OK=0; echo "  $_tag: EMPTY stdout, want $(printf '%s' "$_wo" | tr '\n' '/')"
+    elif [ "$_out" != "$_wo" ]; then
+        ASLOT_OK=0
+        echo "  $_tag: stdout $(printf '%s' "$_out" | tr '\n' '/') want $(printf '%s' "$_wo" | tr '\n' '/')"
+    elif [ "$_err" != "$_we" ]; then
+        ASLOT_OK=0
+        echo "  $_tag: stderr $(printf '%s' "$_err" | tr '\n' '/') want $(printf '%s' "$_we" | tr '\n' '/')"
+    fi
+    rm -f "$_bin" "$_eo"
+}
+for _src in "$DIR/../aslot_write_$$.kr" "$DIR/../aslot_val_$$.kr" \
+            "$DIR/../aslot_fstr_$$.kr" "$DIR/../aslot_tuple_$$.kr" \
+            "$DIR/../aslot_flit_$$.kr"; do
+    aslot_run "$RUN_ARCH" ""          "$_src" ""
+    aslot_run "$RUN_ARCH" "--legacy"  "$_src" ""
+    if [ -n "$ASLOT_QEMU" ]; then
+        aslot_run "$ASLOT_OTHER" ""         "$_src" "$ASLOT_QEMU"
+        aslot_run "$ASLOT_OTHER" "--legacy" "$_src" "$ASLOT_QEMU"
+    fi
+done
+# Guard against the loop silently doing nothing. 5 sources x 2 host configs
+# always; x2 more per source when the other arch is runnable.
+ASLOT_WANT=10
+if [ -n "$ASLOT_QEMU" ]; then ASLOT_WANT=20; fi
+[ "$ASLOT_RAN" = "$ASLOT_WANT" ] || { ASLOT_OK=0; echo "  only $ASLOT_RAN/$ASLOT_WANT config-runs executed"; }
+if [ "$ASLOT_OK" = "1" ]; then
+    echo "  builtin_args_get_a_private_scratch_slot: PASS ($ASLOT_RAN config-runs)"
+    PASS=$((PASS + 1))
+else
+    echo "FAIL: builtin_args_get_a_private_scratch_slot"
+    FAIL=$((FAIL + 1))
+fi
+rm -f "$DIR/../aslot_write_$$.kr" "$DIR/../aslot_val_$$.kr" \
+      "$DIR/../aslot_fstr_$$.kr" "$DIR/../aslot_tuple_$$.kr" \
+      "$DIR/../aslot_flit_$$.kr"
+
 rm -f "$DIR/../ceval_idx_$$.kr" "$DIR/../ceval_ptr_$$.kr" "$DIR/../ceval_plain_$$.kr"
 
 # File-scope struct statics: `static Point[N] pts` and `static Point sp`.

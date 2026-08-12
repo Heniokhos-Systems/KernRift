@@ -1500,6 +1500,103 @@ fn alloc_scratch_slot() -> uint64 {
     return offset
 }
 
+// ---------------------------------------------------------------------------
+// Argument parking: which expressions can reach temp_slot_0 / temp_slot_1?
+// ---------------------------------------------------------------------------
+//
+// A builtin with more than one argument parks the arguments it has already
+// evaluated in temp_slot_0 / temp_slot_1 while it evaluates the rest. The rest
+// is an arbitrary expression, and these node kinds can reach those very slots:
+//
+//   35 Call         — the builtins that park without spanning a gen_expr
+//                     (alloc, println, file_size) still use the shared pair
+//   46 FloatLitNode — a fractional literal lowers as int + frac/divisor and
+//                     uses BOTH slots as scratch, so `fma_f64(2.5, 4.5, 1.25)`
+//                     was miscompiled with no nested call in sight
+//   50 FString      — its own offset is private now, but its interpolated
+//                     segments are lowered through gen_expr and may call
+//
+// Every other expression kind lowers without touching them; that was checked
+// against both legacy backends by walking gen_expr's / gen_expr_a64's kind
+// dispatch and looking for a temp-slot store in each arm. The two agreed.
+//
+// So a park only needs a private frame slot when the expressions still to be
+// evaluated can reach the shared ones. `store64(p, v)` — the overwhelmingly
+// common shape — keeps using temp_slot_0 and costs no frame at all, which
+// matters because arm64 addresses these slots with a 12-bit scaled immediate
+// (~4095 slots) that overflows into the opcode field silently.
+//
+// The walk is a WHITELIST: only kinds whose sub-expression links are listed
+// here are recursed into, and anything unrecognised answers "yes, unsafe".
+// Getting a link wrong therefore costs 8 bytes of frame, never correctness.
+fn expr_may_clobber_temps(uint64 node) -> uint64 {
+    if node == 0 {
+        return 0
+    }
+    uint32 k32 = ast_kind(node)
+    uint64 k = k32
+    // Leaves: a literal, an identifier or a compile-time constant lowers to a
+    // single load/immediate and cannot park anything.
+    if k == 30 { return 0 }   // IntLit
+    if k == 31 { return 0 }   // StrLit
+    if k == 32 { return 0 }   // Ident
+    if k == 49 { return 0 }   // SizeofLit
+    if k == 55 { return 0 }   // CompoundTemp
+    // Transparent operators: safe exactly when their operands are. BinOp,
+    // Compare, LogicalAnd and LogicalOr keep the LHS in `child` and the RHS in
+    // data2 (see ast.kr), so both links have to be followed.
+    if k == 33 || k == 38 || k == 39 || k == 40 {
+        uint32 lhs32 = ast_child(node)
+        uint64 lhs = lhs32
+        if expr_may_clobber_temps(lhs) != 0 {
+            return 1
+        }
+        uint32 rhs32 = ast_data2(node)
+        uint64 rhs = rhs32
+        return expr_may_clobber_temps(rhs)
+    }
+    // Single-operand transparent kinds: UnaryOp, FieldAccess, Index,
+    // PtrLoadExpr, ForEndHoist all carry their only sub-expression in `child`.
+    if k == 34 || k == 36 || k == 37 || k == 56 || k == 57 {
+        uint32 c32 = ast_child(node)
+        uint64 c = c32
+        return expr_may_clobber_temps(c)
+    }
+    // 35 Call, 46 FloatLitNode, 50 FString and everything else: assume unsafe.
+    return 1
+}
+
+// Same question for a whole `next`-linked argument chain.
+fn chain_may_clobber_temps(uint64 node) -> uint64 {
+    uint64 cur = node
+    while cur != 0 {
+        if expr_may_clobber_temps(cur) != 0 {
+            return 1
+        }
+        uint32 nx = ast_next(cur)
+        cur = nx
+    }
+    return 0
+}
+
+// The slot a builtin should park an argument in.
+//
+// `call_node` is the Call node being lowered; the whole argument list is
+// checked, not just the arguments still pending, because a few builtins
+// (fma_f64) evaluate their arguments out of source order. Over-approximating
+// costs one frame slot and never correctness.
+//
+// Returns `dflt` (temp_slot_0 / temp_slot_1) when no argument can reach the
+// shared slots, and a private slot otherwise. Shared by both legacy backends.
+fn arg_park_slot(uint64 call_node, uint64 dflt) -> uint64 {
+    uint32 a32 = ast_child(call_node)
+    uint64 a = a32
+    if chain_may_clobber_temps(a) == 0 {
+        return dflt
+    }
+    return alloc_scratch_slot()
+}
+
 fn var_declare(uint64 name_tok) -> uint64 {
     // Check if variable already declared in this function (handles shadowing)
     uint64 existing = var_lookup(name_tok)
@@ -4501,6 +4598,8 @@ fn gen_expr(uint64 node) {
     // formats expression values into a stack buffer at var_frame_size.
     // Returns rax = pointer to null-terminated result buffer.
     if kind == 50 {
+        uint64 fs_slot_v = alloc_scratch_slot()  // was temp_slot_0
+        uint64 fs_slot_o = alloc_scratch_slot()  // was temp_slot_1 (running offset)
         // Reserve a 4096-byte result buffer INSIDE the frame (prologue sub rsp
         // is patched to the final var_frame_size at function end). Using
         // var_frame_size as the base overran saved rbx / the return addr (H7).
@@ -4510,9 +4609,9 @@ fn gen_expr(uint64 node) {
         var_frame_size = var_count * 8
         uint64 fs_brem = var_frame_size & 15
         if fs_brem != 0 { var_frame_size = var_frame_size + 16 - fs_brem }
-        // zero the running offset: temp_slot_1 = 0
+        // zero the running offset: fs_slot_o = 0
         emit_byte(0x48); emit_byte(0x31); emit_byte(0xC0)  // xor rax, rax
-        emit_store_rax_to_stack(temp_slot_1)
+        emit_store_rax_to_stack(fs_slot_o)
 
         uint32 fs_child = ast_child(node)
         uint64 wfs_child = fs_child
@@ -4566,20 +4665,20 @@ fn gen_expr(uint64 node) {
                             emit_byte(0x48); emit_byte(0x8D); emit_byte(0xBC); emit_byte(0x24)
                             emit_u32_le(fs_buf_off)
                         }
-                        // rax = offset from temp_slot_1 ; rdi += rax
+                        // rax = offset from fs_slot_o ; rdi += rax
                         emit_byte(0x48); emit_byte(0x8B)
-                        if temp_slot_1 < 128 {
-                            emit_byte(0x44); emit_byte(0x24); uint8 ts1a = temp_slot_1; emit_byte(ts1a)
+                        if fs_slot_o < 128 {
+                            emit_byte(0x44); emit_byte(0x24); uint8 ts1a = fs_slot_o; emit_byte(ts1a)
                         } else {
-                            emit_byte(0x84); emit_byte(0x24); emit_u32_le(temp_slot_1)
+                            emit_byte(0x84); emit_byte(0x24); emit_u32_le(fs_slot_o)
                         }
                         emit_byte(0x48); emit_byte(0x01); emit_byte(0xC7)  // add rdi, rax
                         // rep movsb (rcx=len, rsi=src, rdi=dest)
                         emit_byte(0xF3); emit_byte(0xA4)
-                        // update offset: temp_slot_1 += fs_tlen
-                        emit_load_rax_from_stack(temp_slot_1)
+                        // update offset: fs_slot_o += fs_tlen
+                        emit_load_rax_from_stack(fs_slot_o)
                         emit_byte(0x48); emit_byte(0x05); emit_u32_le(fs_tlen)  // add rax, imm32
-                        emit_store_rax_to_stack(temp_slot_1)
+                        emit_store_rax_to_stack(fs_slot_o)
                     }
                 } else {
                     // Regular StrLit: gen_expr -> rax=str ptr
@@ -4604,27 +4703,27 @@ fn gen_expr(uint64 node) {
                         emit_u32_le(fs_buf_off)
                     }
                     emit_byte(0x48); emit_byte(0x8B)
-                    if temp_slot_1 < 128 {
-                        emit_byte(0x44); emit_byte(0x24); uint8 ts1c = temp_slot_1; emit_byte(ts1c)
+                    if fs_slot_o < 128 {
+                        emit_byte(0x44); emit_byte(0x24); uint8 ts1c = fs_slot_o; emit_byte(ts1c)
                     } else {
-                        emit_byte(0x84); emit_byte(0x24); emit_u32_le(temp_slot_1)
+                        emit_byte(0x84); emit_byte(0x24); emit_u32_le(fs_slot_o)
                     }
                     emit_byte(0x48); emit_byte(0x01); emit_byte(0xC7)  // add rdi, rax
                     emit_byte(0xF3); emit_byte(0xA4)                   // rep movsb
                     emit_byte(0x49); emit_byte(0x89); emit_byte(0xCA)  // mov r10, rcx
                     emit_byte(0x48); emit_byte(0x8B)
-                    if temp_slot_1 < 128 {
-                        emit_byte(0x44); emit_byte(0x24); uint8 ts1d = temp_slot_1; emit_byte(ts1d)
+                    if fs_slot_o < 128 {
+                        emit_byte(0x44); emit_byte(0x24); uint8 ts1d = fs_slot_o; emit_byte(ts1d)
                     } else {
-                        emit_byte(0x84); emit_byte(0x24); emit_u32_le(temp_slot_1)
+                        emit_byte(0x84); emit_byte(0x24); emit_u32_le(fs_slot_o)
                     }
                     emit_byte(0x4C); emit_byte(0x01); emit_byte(0xD0)  // add rax, r10
-                    emit_store_rax_to_stack(temp_slot_1)
+                    emit_store_rax_to_stack(fs_slot_o)
                 }
             } else {
                 // Expression: evaluate and format as decimal integer
                 gen_expr(wfs_child)
-                emit_store_rax_to_stack(temp_slot_0)
+                emit_store_rax_to_stack(fs_slot_v)
                 // dest rdi = [rsp+fs_buf_off] + offset
                 if fs_buf_off < 128 {
                     emit_byte(0x48); emit_byte(0x8D); emit_byte(0x7C); emit_byte(0x24)
@@ -4634,14 +4733,14 @@ fn gen_expr(uint64 node) {
                     emit_u32_le(fs_buf_off)
                 }
                 emit_byte(0x48); emit_byte(0x8B)
-                if temp_slot_1 < 128 {
-                    emit_byte(0x4C); emit_byte(0x24); uint8 ts1e = temp_slot_1; emit_byte(ts1e)
+                if fs_slot_o < 128 {
+                    emit_byte(0x4C); emit_byte(0x24); uint8 ts1e = fs_slot_o; emit_byte(ts1e)
                 } else {
-                    emit_byte(0x8C); emit_byte(0x24); emit_u32_le(temp_slot_1)
+                    emit_byte(0x8C); emit_byte(0x24); emit_u32_le(fs_slot_o)
                 }
                 emit_byte(0x48); emit_byte(0x01); emit_byte(0xCF)  // add rdi, rcx
                 // rdi = dest. Load value.
-                emit_load_rax_from_stack(temp_slot_0)
+                emit_load_rax_from_stack(fs_slot_v)
                 // Signed values: same branchless sign handling as the IR
                 // backend (f341a32/0041ba2) — sign = val>>63 (arithmetic,
                 // 0 or -1), adv = sign&1 (0 or 1), abs = (val^sign)-sign.
@@ -4727,13 +4826,13 @@ fn gen_expr(uint64 node) {
                 unsafe { *((out_buf + fs_jfin) as uint32) = fs_jfin_t32 }
                 // update offset
                 emit_byte(0x48); emit_byte(0x8B)
-                if temp_slot_1 < 128 {
-                    emit_byte(0x44); emit_byte(0x24); uint8 ts1f = temp_slot_1; emit_byte(ts1f)
+                if fs_slot_o < 128 {
+                    emit_byte(0x44); emit_byte(0x24); uint8 ts1f = fs_slot_o; emit_byte(ts1f)
                 } else {
-                    emit_byte(0x84); emit_byte(0x24); emit_u32_le(temp_slot_1)
+                    emit_byte(0x84); emit_byte(0x24); emit_u32_le(fs_slot_o)
                 }
                 emit_byte(0x4C); emit_byte(0x01); emit_byte(0xD0)  // add rax, r10
-                emit_store_rax_to_stack(temp_slot_1)
+                emit_store_rax_to_stack(fs_slot_o)
             }
             uint32 fs_nxt = ast_next(wfs_child)
             wfs_child = fs_nxt
@@ -4748,10 +4847,10 @@ fn gen_expr(uint64 node) {
             emit_u32_le(fs_buf_off)
         }
         emit_byte(0x48); emit_byte(0x8B)
-        if temp_slot_1 < 128 {
-            emit_byte(0x4C); emit_byte(0x24); uint8 ts1z = temp_slot_1; emit_byte(ts1z)
+        if fs_slot_o < 128 {
+            emit_byte(0x4C); emit_byte(0x24); uint8 ts1z = fs_slot_o; emit_byte(ts1z)
         } else {
-            emit_byte(0x8C); emit_byte(0x24); emit_u32_le(temp_slot_1)
+            emit_byte(0x8C); emit_byte(0x24); emit_u32_le(fs_slot_o)
         }
         emit_byte(0x48); emit_byte(0x01); emit_byte(0xC8)   // add rax, rcx
         emit_byte(0xC6); emit_byte(0x00); emit_byte(0x00)   // mov byte[rax], 0
@@ -6280,14 +6379,16 @@ fn gen_expr(uint64 node) {
 
         // Check for built-in: write(fd, buf, len)
         if is_extern_call == 0 && tok_matches(wct, "write", 5) != 0 {
+            uint64 pk0_write = arg_park_slot(node, temp_slot_0)
+            uint64 pk1_write = arg_park_slot(node, temp_slot_1)
             uint32 arg1 = ast_child(node)
             uint64 wa1 = arg1
             gen_expr(wa1)
-            emit_store_rax_to_stack(temp_slot_0)
+            emit_store_rax_to_stack(pk0_write)
             uint32 arg2 = ast_next(wa1)
             uint64 wa2 = arg2
             gen_expr(wa2)
-            emit_store_rax_to_stack(temp_slot_1)
+            emit_store_rax_to_stack(pk1_write)
             uint32 arg3 = ast_next(wa2)
             uint64 wa3 = arg3
             gen_expr(wa3)
@@ -6301,7 +6402,7 @@ fn gen_expr(uint64 node) {
                 if wr_etr != 0 { var_frame_size = var_frame_size + 16 - wr_etr }
                 emit_store_rax_to_stack(extra_tmp)
                 // GetStdHandle: rcx = -(10 + fd)
-                emit_load_rax_from_stack(temp_slot_0)
+                emit_load_rax_from_stack(pk0_write)
                 emit_neg_rax()
                 emit_sub_rax_imm8(10)
                 emit_mov_rcx_rax()
@@ -6310,7 +6411,7 @@ fn gen_expr(uint64 node) {
                 emit_win_free_stack(0x20)
                 // rax = handle
                 emit_mov_rcx_rax()
-                emit_load_rax_from_stack(temp_slot_1)
+                emit_load_rax_from_stack(pk1_write)
                 // mov rdx, rax (buf)
                 emit_mov_rdx_rax()
                 emit_load_rax_from_stack(extra_tmp)
@@ -6323,9 +6424,9 @@ fn gen_expr(uint64 node) {
             } else {
                 // rax = len -> rdx
                 emit_mov_rdx_rax()
-                emit_load_rax_from_stack(temp_slot_1)
+                emit_load_rax_from_stack(pk1_write)
                 emit_mov_rsi_rax()
-                emit_load_rax_from_stack(temp_slot_0)
+                emit_load_rax_from_stack(pk0_write)
                 emit_mov_rdi_rax()
                 if target_os == 1 { emit_mov_rax_imm(0x2000004) } else { emit_mov_rax_imm(1) }
                 emit_x86_syscall_insn("write")
@@ -6453,19 +6554,21 @@ fn gen_expr(uint64 node) {
 
         // Check for built-in: file_open(path, flags) → open / CreateFileA
         if is_extern_call == 0 && tok_matches(wct, "file_open", 9) != 0 {
+            uint64 pk0_fileopen = arg_park_slot(node, temp_slot_0)
+            uint64 pk1_fileopen = arg_park_slot(node, temp_slot_1)
             uint32 arg1 = ast_child(node)
             uint64 wa1 = arg1
             gen_expr(wa1)
-            emit_store_rax_to_stack(temp_slot_0)
+            emit_store_rax_to_stack(pk0_fileopen)
             uint32 arg2 = ast_next(wa1)
             uint64 wa2 = arg2
             gen_expr(wa2)
-            emit_store_rax_to_stack(temp_slot_1)
+            emit_store_rax_to_stack(pk1_fileopen)
             if target_os == 2 {
                 // Windows: CreateFileA(path, access, share, NULL, disp, attrs, NULL)
                 // Use GENERIC_READ|GENERIC_WRITE (0xC0000000) + OPEN_ALWAYS(4)
                 // rcx = path
-                emit_load_rax_from_stack(temp_slot_0)
+                emit_load_rax_from_stack(pk0_fileopen)
                 emit_mov_rcx_rax()
                 // rdx = 0xC0000000 (GENERIC_READ|GENERIC_WRITE)
                 emit_mov_rax_imm(0xC0000000)
@@ -6477,7 +6580,7 @@ fn gen_expr(uint64 node) {
                 emit_mov_r9_imm(0)
                 emit_win_alloc_stack(0x40)
                 // [rsp+32] = disposition: 3-flags (read=3=OPEN_EXISTING, write=2=CREATE_ALWAYS)
-                emit_load_rax_from_stack(temp_slot_1 + 0x40)  // flags (adjusted for stack shift)
+                emit_load_rax_from_stack(pk1_fileopen + 0x40)  // flags (adjusted for stack shift)
                 emit_neg_rax()
                 // add eax, 3
                 emit_byte(0x83); emit_byte(0xC0); emit_byte(3)
@@ -6492,9 +6595,9 @@ fn gen_expr(uint64 node) {
                 emit_win_call_iat(3)
                 emit_win_free_stack(0x40)
             } else {
-                emit_load_rax_from_stack(temp_slot_0)
+                emit_load_rax_from_stack(pk0_fileopen)
                 emit_mov_rdi_rax()
-                emit_load_rax_from_stack(temp_slot_1)
+                emit_load_rax_from_stack(pk1_fileopen)
                 // mov rcx, rax (save flags)
                 emit_byte(0x48)
                 emit_byte(0x89)
@@ -6522,14 +6625,16 @@ fn gen_expr(uint64 node) {
 
         // Check for built-in: file_read(fd, buf, len) → read / ReadFile
         if is_extern_call == 0 && tok_matches(wct, "file_read", 9) != 0 {
+            uint64 pk0_fileread = arg_park_slot(node, temp_slot_0)
+            uint64 pk1_fileread = arg_park_slot(node, temp_slot_1)
             uint32 arg1 = ast_child(node)
             uint64 wa1 = arg1
             gen_expr(wa1)
-            emit_store_rax_to_stack(temp_slot_0)
+            emit_store_rax_to_stack(pk0_fileread)
             uint32 arg2 = ast_next(wa1)
             uint64 wa2 = arg2
             gen_expr(wa2)
-            emit_store_rax_to_stack(temp_slot_1)
+            emit_store_rax_to_stack(pk1_fileread)
             uint32 arg3 = ast_next(wa2)
             uint64 wa3 = arg3
             gen_expr(wa3)
@@ -6547,9 +6652,9 @@ fn gen_expr(uint64 node) {
                 emit_mov_rax_imm(0)
                 emit_store_rax_to_stack(br_slot)
                 // Set up ReadFile parameters
-                emit_load_rax_from_stack(temp_slot_0)
+                emit_load_rax_from_stack(pk0_fileread)
                 emit_mov_rcx_rax()                      // rcx = handle
-                emit_load_rax_from_stack(temp_slot_1)
+                emit_load_rax_from_stack(pk1_fileread)
                 emit_mov_rdx_rax()                      // rdx = buf
                 emit_load_rax_from_stack(extra_tmp)
                 // r8d = nNumberOfBytesToRead (truncate to 32-bit)
@@ -6567,9 +6672,9 @@ fn gen_expr(uint64 node) {
                 emit_load_rax_from_stack(br_slot)
             } else {
                 emit_mov_rdx_rax()
-                emit_load_rax_from_stack(temp_slot_1)
+                emit_load_rax_from_stack(pk1_fileread)
                 emit_mov_rsi_rax()
-                emit_load_rax_from_stack(temp_slot_0)
+                emit_load_rax_from_stack(pk0_fileread)
                 emit_mov_rdi_rax()
                 if target_os == 1 { emit_mov_rax_imm(0x2000003) } else { emit_mov_rax_imm(0) }
                 emit_x86_syscall_insn("file_read")
@@ -6579,14 +6684,16 @@ fn gen_expr(uint64 node) {
 
         // Check for built-in: file_write(fd, buf, len) → write / WriteFile
         if is_extern_call == 0 && tok_matches(wct, "file_write", 10) != 0 {
+            uint64 pk0_filewrite = arg_park_slot(node, temp_slot_0)
+            uint64 pk1_filewrite = arg_park_slot(node, temp_slot_1)
             uint32 arg1 = ast_child(node)
             uint64 wa1 = arg1
             gen_expr(wa1)
-            emit_store_rax_to_stack(temp_slot_0)
+            emit_store_rax_to_stack(pk0_filewrite)
             uint32 arg2 = ast_next(wa1)
             uint64 wa2 = arg2
             gen_expr(wa2)
-            emit_store_rax_to_stack(temp_slot_1)
+            emit_store_rax_to_stack(pk1_filewrite)
             uint32 arg3 = ast_next(wa2)
             uint64 wa3 = arg3
             gen_expr(wa3)
@@ -6598,9 +6705,9 @@ fn gen_expr(uint64 node) {
                 uint64 fw_etr = var_frame_size & 15
                 if fw_etr != 0 { var_frame_size = var_frame_size + 16 - fw_etr }
                 emit_store_rax_to_stack(extra_tmp)
-                emit_load_rax_from_stack(temp_slot_0)
+                emit_load_rax_from_stack(pk0_filewrite)
                 emit_mov_rcx_rax()
-                emit_load_rax_from_stack(temp_slot_1)
+                emit_load_rax_from_stack(pk1_filewrite)
                 emit_mov_rdx_rax()
                 emit_load_rax_from_stack(extra_tmp)
                 emit_mov_r8_rax()
@@ -6614,9 +6721,9 @@ fn gen_expr(uint64 node) {
                 emit_win_free_stack(0x30)
             } else {
                 emit_mov_rdx_rax()
-                emit_load_rax_from_stack(temp_slot_1)
+                emit_load_rax_from_stack(pk1_filewrite)
                 emit_mov_rsi_rax()
-                emit_load_rax_from_stack(temp_slot_0)
+                emit_load_rax_from_stack(pk0_filewrite)
                 emit_mov_rdi_rax()
                 if target_os == 1 { emit_mov_rax_imm(0x2000004) } else { emit_mov_rax_imm(1) }
                 emit_x86_syscall_insn("file_write")
@@ -7176,18 +7283,20 @@ fn gen_expr(uint64 node) {
 
         // Built-in: str_eq(a, b) → 1 if equal, 0 if not
         if is_extern_call == 0 && tok_matches(wct, "str_eq", 6) != 0 {
+            uint64 pk0_streq = arg_park_slot(node, temp_slot_0)
+            uint64 pk1_streq = arg_park_slot(node, temp_slot_1)
             uint32 arg1 = ast_child(node)
             uint64 wa1 = arg1
             gen_expr(wa1)
-            emit_store_rax_to_stack(temp_slot_0)
+            emit_store_rax_to_stack(pk0_streq)
             uint32 arg2 = ast_next(wa1)
             uint64 wa2 = arg2
             gen_expr(wa2)
-            emit_store_rax_to_stack(temp_slot_1)
+            emit_store_rax_to_stack(pk1_streq)
             // Load a into rcx, b into rdx
-            emit_load_rax_from_stack(temp_slot_0)
+            emit_load_rax_from_stack(pk0_streq)
             emit_byte(0x48); emit_byte(0x89); emit_byte(0xC1)
-            emit_load_rax_from_stack(temp_slot_1)
+            emit_load_rax_from_stack(pk1_streq)
             emit_byte(0x48); emit_byte(0x89); emit_byte(0xC2)
             // loop:
             uint64 se_loop = out_len
@@ -7312,14 +7421,16 @@ fn gen_expr(uint64 node) {
 
         // Built-in: memcpy(dst, src, len) → returns dst
         if is_extern_call == 0 && tok_matches(wct, "memcpy", 6) != 0 {
+            uint64 pk0_memcpy = arg_park_slot(node, temp_slot_0)
+            uint64 pk1_memcpy = arg_park_slot(node, temp_slot_1)
             uint32 arg1 = ast_child(node)
             uint64 wa1 = arg1
             gen_expr(wa1)
-            emit_store_rax_to_stack(temp_slot_0)
+            emit_store_rax_to_stack(pk0_memcpy)
             uint32 arg2 = ast_next(wa1)
             uint64 wa2 = arg2
             gen_expr(wa2)
-            emit_store_rax_to_stack(temp_slot_1)
+            emit_store_rax_to_stack(pk1_memcpy)
             uint32 arg3 = ast_next(wa2)
             uint64 wa3 = arg3
             gen_expr(wa3)
@@ -7328,11 +7439,11 @@ fn gen_expr(uint64 node) {
             if target_os == 2 {
                 // Windows: use r10 (dst) and r11 (src) — rdi/rsi are callee-saved
                 // Load dst → r10
-                emit_load_rax_from_stack(temp_slot_0)
+                emit_load_rax_from_stack(pk0_memcpy)
                 // mov r10, rax  (49 89 C2)
                 emit_byte(0x49); emit_byte(0x89); emit_byte(0xC2)
                 // Load src → r11
-                emit_load_rax_from_stack(temp_slot_1)
+                emit_load_rax_from_stack(pk1_memcpy)
                 // mov r11, rax  (49 89 C3)
                 emit_byte(0x49); emit_byte(0x89); emit_byte(0xC3)
                 // loop: test rcx, rcx
@@ -7363,10 +7474,10 @@ fn gen_expr(uint64 node) {
             } else {
                 // Linux/macOS: use rdi (dst) and rsi (src)
                 // Load dst → rdi
-                emit_load_rax_from_stack(temp_slot_0)
+                emit_load_rax_from_stack(pk0_memcpy)
                 emit_mov_rdi_rax()
                 // Load src → rsi
-                emit_load_rax_from_stack(temp_slot_1)
+                emit_load_rax_from_stack(pk1_memcpy)
                 emit_mov_rsi_rax()
                 // loop: test rcx, rcx
                 uint64 mc_loop = out_len
@@ -7395,20 +7506,22 @@ fn gen_expr(uint64 node) {
                 patch_u32(mc_jz, mc_done_disp)
             }
             // Return dst
-            emit_load_rax_from_stack(temp_slot_0)
+            emit_load_rax_from_stack(pk0_memcpy)
             return
         }
 
         // Built-in: memset(dst, val, len) → returns dst
         if is_extern_call == 0 && tok_matches(wct, "memset", 6) != 0 {
+            uint64 pk0_memset = arg_park_slot(node, temp_slot_0)
+            uint64 pk1_memset = arg_park_slot(node, temp_slot_1)
             uint32 arg1 = ast_child(node)
             uint64 wa1 = arg1
             gen_expr(wa1)
-            emit_store_rax_to_stack(temp_slot_0)
+            emit_store_rax_to_stack(pk0_memset)
             uint32 arg2 = ast_next(wa1)
             uint64 wa2 = arg2
             gen_expr(wa2)
-            emit_store_rax_to_stack(temp_slot_1)
+            emit_store_rax_to_stack(pk1_memset)
             uint32 arg3 = ast_next(wa2)
             uint64 wa3 = arg3
             gen_expr(wa3)
@@ -7417,11 +7530,11 @@ fn gen_expr(uint64 node) {
             if target_os == 2 {
                 // Windows: use r10 (dst) — rdi is callee-saved
                 // Load dst → r10
-                emit_load_rax_from_stack(temp_slot_0)
+                emit_load_rax_from_stack(pk0_memset)
                 // mov r10, rax  (49 89 C2)
                 emit_byte(0x49); emit_byte(0x89); emit_byte(0xC2)
                 // Load val → rdx (just need dl)
-                emit_load_rax_from_stack(temp_slot_1)
+                emit_load_rax_from_stack(pk1_memset)
                 emit_mov_rdx_rax()
                 // loop: test rcx, rcx
                 uint64 ms_loop = out_len
@@ -7447,10 +7560,10 @@ fn gen_expr(uint64 node) {
             } else {
                 // Linux/macOS: use rdi (dst)
                 // Load dst → rdi
-                emit_load_rax_from_stack(temp_slot_0)
+                emit_load_rax_from_stack(pk0_memset)
                 emit_mov_rdi_rax()
                 // Load val → rdx (just need dl)
-                emit_load_rax_from_stack(temp_slot_1)
+                emit_load_rax_from_stack(pk1_memset)
                 emit_mov_rdx_rax()
                 // loop: test rcx, rcx
                 uint64 ms_loop = out_len
@@ -7475,7 +7588,7 @@ fn gen_expr(uint64 node) {
                 patch_u32(ms_jz, ms_done_disp)
             }
             // Return dst
-            emit_load_rax_from_stack(temp_slot_0)
+            emit_load_rax_from_stack(pk0_memset)
             return
         }
 
@@ -7678,16 +7791,17 @@ fn gen_expr(uint64 node) {
 
         // Signed comparison builtins: signed_lt, signed_gt, signed_le, signed_ge
         if is_extern_call == 0 && tok_matches(wct, "signed_lt", 9) != 0 {
+            uint64 pk0_signedlt = arg_park_slot(node, temp_slot_0)
             uint32 arg1 = ast_child(node)
             uint64 wa1 = arg1
             gen_expr(wa1)
-            emit_store_rax_to_stack(temp_slot_0)
+            emit_store_rax_to_stack(pk0_signedlt)
             uint32 arg2 = ast_next(wa1)
             uint64 wa2 = arg2
             gen_expr(wa2)
             // rax = b, compare a < b (signed)
             emit_byte(0x48); emit_byte(0x89); emit_byte(0xC1) // mov rcx, rax
-            emit_load_rax_from_stack(temp_slot_0)
+            emit_load_rax_from_stack(pk0_signedlt)
             // cmp rax, rcx
             emit_byte(0x48); emit_byte(0x39); emit_byte(0xC8)
             // setl al (signed less)
@@ -7697,15 +7811,16 @@ fn gen_expr(uint64 node) {
             return
         }
         if is_extern_call == 0 && tok_matches(wct, "signed_gt", 9) != 0 {
+            uint64 pk0_signedgt = arg_park_slot(node, temp_slot_0)
             uint32 arg1 = ast_child(node)
             uint64 wa1 = arg1
             gen_expr(wa1)
-            emit_store_rax_to_stack(temp_slot_0)
+            emit_store_rax_to_stack(pk0_signedgt)
             uint32 arg2 = ast_next(wa1)
             uint64 wa2 = arg2
             gen_expr(wa2)
             emit_byte(0x48); emit_byte(0x89); emit_byte(0xC1)
-            emit_load_rax_from_stack(temp_slot_0)
+            emit_load_rax_from_stack(pk0_signedgt)
             emit_byte(0x48); emit_byte(0x39); emit_byte(0xC8)
             // setg al (signed greater)
             emit_byte(0x0F); emit_byte(0x9F); emit_byte(0xC0)
@@ -7713,15 +7828,16 @@ fn gen_expr(uint64 node) {
             return
         }
         if is_extern_call == 0 && tok_matches(wct, "signed_le", 9) != 0 {
+            uint64 pk0_signedle = arg_park_slot(node, temp_slot_0)
             uint32 arg1 = ast_child(node)
             uint64 wa1 = arg1
             gen_expr(wa1)
-            emit_store_rax_to_stack(temp_slot_0)
+            emit_store_rax_to_stack(pk0_signedle)
             uint32 arg2 = ast_next(wa1)
             uint64 wa2 = arg2
             gen_expr(wa2)
             emit_byte(0x48); emit_byte(0x89); emit_byte(0xC1)
-            emit_load_rax_from_stack(temp_slot_0)
+            emit_load_rax_from_stack(pk0_signedle)
             emit_byte(0x48); emit_byte(0x39); emit_byte(0xC8)
             // setle al (signed less or equal)
             emit_byte(0x0F); emit_byte(0x9E); emit_byte(0xC0)
@@ -7729,15 +7845,16 @@ fn gen_expr(uint64 node) {
             return
         }
         if is_extern_call == 0 && tok_matches(wct, "signed_ge", 9) != 0 {
+            uint64 pk0_signedge = arg_park_slot(node, temp_slot_0)
             uint32 arg1 = ast_child(node)
             uint64 wa1 = arg1
             gen_expr(wa1)
-            emit_store_rax_to_stack(temp_slot_0)
+            emit_store_rax_to_stack(pk0_signedge)
             uint32 arg2 = ast_next(wa1)
             uint64 wa2 = arg2
             gen_expr(wa2)
             emit_byte(0x48); emit_byte(0x89); emit_byte(0xC1)
-            emit_load_rax_from_stack(temp_slot_0)
+            emit_load_rax_from_stack(pk0_signedge)
             emit_byte(0x48); emit_byte(0x39); emit_byte(0xC8)
             // setge al (signed greater or equal)
             emit_byte(0x0F); emit_byte(0x9D); emit_byte(0xC0)
@@ -7748,16 +7865,17 @@ fn gen_expr(uint64 node) {
         // Bitfield operation builtins
         // bit_get(val, bit) — (val >> bit) & 1
         if is_extern_call == 0 && tok_matches(wct, "bit_get", 7) != 0 {
+            uint64 pk0_bitget = arg_park_slot(node, temp_slot_0)
             uint32 arg1 = ast_child(node)
             uint64 wa1 = arg1
             gen_expr(wa1)
-            emit_store_rax_to_stack(temp_slot_0)
+            emit_store_rax_to_stack(pk0_bitget)
             uint32 arg2 = ast_next(wa1)
             uint64 wa2 = arg2
             gen_expr(wa2)
             // rax = bit position, move to rcx for shift
             emit_byte(0x48); emit_byte(0x89); emit_byte(0xC1) // mov rcx, rax
-            emit_load_rax_from_stack(temp_slot_0)
+            emit_load_rax_from_stack(pk0_bitget)
             // shr rax, cl
             emit_byte(0x48); emit_byte(0xD3); emit_byte(0xE8)
             // and rax, 1
@@ -7766,10 +7884,12 @@ fn gen_expr(uint64 node) {
         }
         // bit_set(val, bit) — val | (1 << bit)
         if is_extern_call == 0 && tok_matches(wct, "bit_set", 7) != 0 {
+            uint64 pk0_bitset = arg_park_slot(node, temp_slot_0)
+            uint64 pk1_bitset = arg_park_slot(node, temp_slot_1)
             uint32 arg1 = ast_child(node)
             uint64 wa1 = arg1
             gen_expr(wa1)
-            emit_store_rax_to_stack(temp_slot_0)
+            emit_store_rax_to_stack(pk0_bitset)
             uint32 arg2 = ast_next(wa1)
             uint64 wa2 = arg2
             gen_expr(wa2)
@@ -7779,21 +7899,22 @@ fn gen_expr(uint64 node) {
             emit_mov_rax_imm(1)
             // shl rax, cl
             emit_byte(0x48); emit_byte(0xD3); emit_byte(0xE0)
-            // or rax, [temp_slot_0]
-            emit_store_rax_to_stack(temp_slot_1)
-            emit_load_rax_from_stack(temp_slot_0)
+            // or rax, [pk0_bitset]
+            emit_store_rax_to_stack(pk1_bitset)
+            emit_load_rax_from_stack(pk0_bitset)
             emit_byte(0x48); emit_byte(0x89); emit_byte(0xC1) // mov rcx, rax
-            emit_load_rax_from_stack(temp_slot_1)
+            emit_load_rax_from_stack(pk1_bitset)
             // or rax, rcx
             emit_byte(0x48); emit_byte(0x09); emit_byte(0xC8)
             return
         }
         // bit_clear(val, bit) — val & ~(1 << bit)
         if is_extern_call == 0 && tok_matches(wct, "bit_clear", 9) != 0 {
+            uint64 pk0_bitclear = arg_park_slot(node, temp_slot_0)
             uint32 arg1 = ast_child(node)
             uint64 wa1 = arg1
             gen_expr(wa1)
-            emit_store_rax_to_stack(temp_slot_0)
+            emit_store_rax_to_stack(pk0_bitclear)
             uint32 arg2 = ast_next(wa1)
             uint64 wa2 = arg2
             gen_expr(wa2)
@@ -7803,23 +7924,25 @@ fn gen_expr(uint64 node) {
             emit_byte(0x48); emit_byte(0xD3); emit_byte(0xE0)
             // not rax
             emit_byte(0x48); emit_byte(0xF7); emit_byte(0xD0)
-            // and rax, [temp_slot_0]
+            // and rax, [pk0_bitclear]
             emit_byte(0x48); emit_byte(0x89); emit_byte(0xC1) // mov rcx, rax
-            emit_load_rax_from_stack(temp_slot_0)
+            emit_load_rax_from_stack(pk0_bitclear)
             // and rax, rcx
             emit_byte(0x48); emit_byte(0x21); emit_byte(0xC8)
             return
         }
         // bit_range(val, start, width) — (val >> start) & ((1 << width) - 1)
         if is_extern_call == 0 && tok_matches(wct, "bit_range", 9) != 0 {
+            uint64 pk0_bitrange = arg_park_slot(node, temp_slot_0)
+            uint64 pk1_bitrange = arg_park_slot(node, temp_slot_1)
             uint32 arg1 = ast_child(node)
             uint64 wa1 = arg1
             gen_expr(wa1)
-            emit_store_rax_to_stack(temp_slot_0) // val
+            emit_store_rax_to_stack(pk0_bitrange) // val
             uint32 arg2 = ast_next(wa1)
             uint64 wa2 = arg2
             gen_expr(wa2)
-            emit_store_rax_to_stack(temp_slot_1) // start
+            emit_store_rax_to_stack(pk1_bitrange) // start
             uint32 arg3 = ast_next(wa2)
             uint64 wa3 = arg3
             gen_expr(wa3)
@@ -7828,15 +7951,15 @@ fn gen_expr(uint64 node) {
             emit_mov_rax_imm(1)
             emit_byte(0x48); emit_byte(0xD3); emit_byte(0xE0) // shl rax, cl
             emit_byte(0x48); emit_byte(0xFF); emit_byte(0xC8) // dec rax
-            emit_store_rax_to_stack(temp_slot_1 + 8) // save mask (borrow extra slot)
+            emit_store_rax_to_stack(pk1_bitrange + 8) // save mask (borrow extra slot)
             // Load val, shift right by start
-            emit_load_rax_from_stack(temp_slot_1) // start
+            emit_load_rax_from_stack(pk1_bitrange) // start
             emit_byte(0x48); emit_byte(0x89); emit_byte(0xC1) // mov rcx, rax
-            emit_load_rax_from_stack(temp_slot_0) // val
+            emit_load_rax_from_stack(pk0_bitrange) // val
             emit_byte(0x48); emit_byte(0xD3); emit_byte(0xE8) // shr rax, cl
             // and with mask
             emit_byte(0x48); emit_byte(0x89); emit_byte(0xC1) // mov rcx, rax
-            emit_load_rax_from_stack(temp_slot_1 + 8) // mask
+            emit_load_rax_from_stack(pk1_bitrange + 8) // mask
             emit_byte(0x48); emit_byte(0x21); emit_byte(0xC8) // and rax, rcx
             return
         }
@@ -7898,17 +8021,18 @@ fn gen_expr(uint64 node) {
 
         // Built-in: get_module_path(buf, size) → exe path length (Windows only, returns 0 on Linux)
         if is_extern_call == 0 && tok_matches(wct, "get_module_path", 15) != 0 {
+            uint64 pk0_getmodulepat = arg_park_slot(node, temp_slot_0)
             uint32 arg1 = ast_child(node)
             uint64 wa1 = arg1
             gen_expr(wa1)
-            emit_store_rax_to_stack(temp_slot_0)
+            emit_store_rax_to_stack(pk0_getmodulepat)
             uint32 arg2 = ast_next(wa1)
             uint64 wa2 = arg2
             gen_expr(wa2)
             if target_os == 2 {
                 // Windows: GetModuleFileNameA(NULL, buf, size)
                 emit_mov_r8_rax()
-                emit_load_rax_from_stack(temp_slot_0)
+                emit_load_rax_from_stack(pk0_getmodulepat)
                 emit_mov_rdx_rax()
                 emit_byte(0x48); emit_byte(0x31); emit_byte(0xC9)
                 emit_win_alloc_stack(0x20)
@@ -7933,14 +8057,16 @@ fn gen_expr(uint64 node) {
         // On Linux/macOS: svc execve(path, argv, envp). On Windows: fall back
         // to exec_process (no args forwarded).
         if is_extern_call == 0 && tok_matches(wct, "exec_process_argv", 17) != 0 {
+            uint64 pk0_execprocessa = arg_park_slot(node, temp_slot_0)
+            uint64 pk1_execprocessa = arg_park_slot(node, temp_slot_1)
             uint32 first_arg_a = ast_child(node)
             uint64 wfa_a = first_arg_a
             gen_expr(wfa_a)
-            emit_store_rax_to_stack(temp_slot_0)
+            emit_store_rax_to_stack(pk0_execprocessa)
             uint32 second_arg_a = ast_next(wfa_a)
             uint64 wsa_a = second_arg_a
             gen_expr(wsa_a)
-            emit_store_rax_to_stack(temp_slot_1)
+            emit_store_rax_to_stack(pk1_execprocessa)
             if target_os == 2 {
                 // Windows: build a space-separated cmdline from argv[] and
                 // pass it as lpCommandLine. No quoting — our child parser
@@ -7953,8 +8079,8 @@ fn gen_expr(uint64 node) {
                 //   0x050-0x0B7: STARTUPINFOA (104)
                 //   0x0B8-0x0CF: PROCESS_INFORMATION (24)
                 //   0x0D0-0x4CF: cmdline buffer (1024)
-                emit_load_rax_from_stack(temp_slot_0)
-                emit_store_rax_to_stack(temp_slot_0)
+                emit_load_rax_from_stack(pk0_execprocessa)
+                emit_store_rax_to_stack(pk0_execprocessa)
                 emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC); emit_u32_le(0x4D0)
                 emit_byte(0x48); emit_byte(0x8D); emit_byte(0x7C); emit_byte(0x24); emit_byte(0x50)
                 emit_byte(0x31); emit_byte(0xC0)
@@ -7963,7 +8089,7 @@ fn gen_expr(uint64 node) {
                 emit_byte(0xC7); emit_byte(0x44); emit_byte(0x24); emit_byte(0x50); emit_u32_le(104)
                 // ---- Build cmdline at [rsp+0xD0] ----
                 emit_byte(0x48); emit_byte(0x8D); emit_byte(0xBC); emit_byte(0x24); emit_u32_le(0xD0)
-                emit_byte(0x4C); emit_byte(0x8B); emit_byte(0x8C); emit_byte(0x24); emit_u32_le(temp_slot_1 + 0x4D0)
+                emit_byte(0x4C); emit_byte(0x8B); emit_byte(0x8C); emit_byte(0x24); emit_u32_le(pk1_execprocessa + 0x4D0)
                 // L_outer: mov rsi,[r9]; test rsi,rsi; jz L_done (+28)
                 emit_byte(0x49); emit_byte(0x8B); emit_byte(0x31)
                 emit_byte(0x48); emit_byte(0x85); emit_byte(0xF6)
@@ -7986,7 +8112,7 @@ fn gen_expr(uint64 node) {
                 emit_byte(0xC6); emit_byte(0x07); emit_byte(0x00)
                 // ---- CreateProcessA setup ----
                 // rcx = path (lpApplicationName)
-                emit_byte(0x48); emit_byte(0x8B); emit_byte(0x8C); emit_byte(0x24); emit_u32_le(temp_slot_0 + 0x4D0)
+                emit_byte(0x48); emit_byte(0x8B); emit_byte(0x8C); emit_byte(0x24); emit_u32_le(pk0_execprocessa + 0x4D0)
                 // lea rdx, [rsp+0xD0] (lpCommandLine = our cmdline)
                 emit_byte(0x48); emit_byte(0x8D); emit_byte(0x94); emit_byte(0x24); emit_u32_le(0xD0)
                 // r8 = NULL (lpProcessAttributes); r9 = NULL (lpThreadAttributes)
@@ -8013,9 +8139,9 @@ fn gen_expr(uint64 node) {
                 emit_win_call_iat(0)
             } else {
                 // execve(path, argv, envp)
-                emit_load_rax_from_stack(temp_slot_0)
+                emit_load_rax_from_stack(pk0_execprocessa)
                 emit_mov_rdi_rax()
-                emit_load_rax_from_stack(temp_slot_1)
+                emit_load_rax_from_stack(pk1_execprocessa)
                 emit_mov_rsi_rax()
                 // envp: use cli_envp if defined, else NULL
                 uint64 envp_off_xa = static_lookup_by_name("cli_envp", 8)
@@ -8239,16 +8365,17 @@ fn gen_expr(uint64 node) {
 
         // Built-in: store8/16/32/64(addr, val) — write to memory
         if is_extern_call == 0 && tok_matches(wct, "store8", 6) != 0 {
+            uint64 pk0_store8 = arg_park_slot(node, temp_slot_0)
             uint32 arg1 = ast_child(node)
             uint64 wa1 = arg1
             gen_expr(wa1)
-            emit_store_rax_to_stack(temp_slot_0)
+            emit_store_rax_to_stack(pk0_store8)
             uint32 arg2 = ast_next(wa1)
             uint64 wa2 = arg2
             gen_expr(wa2)
             // mov rcx, rax
             emit_byte(0x48); emit_byte(0x89); emit_byte(0xC1)
-            emit_load_rax_from_stack(temp_slot_0)
+            emit_load_rax_from_stack(pk0_store8)
             if debug_mode != 0 {
                 emit_byte(0x48); emit_byte(0x85); emit_byte(0xC0)
                 emit_byte(0x75)
@@ -8264,22 +8391,23 @@ fn gen_expr(uint64 node) {
                 uint64 s8_pp = out_buf + jnz_s8
                 unsafe { *(s8_pp as uint8) = s8_s }
                 // Reload rax (clobbered by null check exit path setup)
-                emit_load_rax_from_stack(temp_slot_0)
+                emit_load_rax_from_stack(pk0_store8)
             }
             // mov [rax], cl
             emit_byte(0x88); emit_byte(0x08)
             return
         }
         if is_extern_call == 0 && tok_matches(wct, "store16", 7) != 0 {
+            uint64 pk0_store16 = arg_park_slot(node, temp_slot_0)
             uint32 arg1 = ast_child(node)
             uint64 wa1 = arg1
             gen_expr(wa1)
-            emit_store_rax_to_stack(temp_slot_0)
+            emit_store_rax_to_stack(pk0_store16)
             uint32 arg2 = ast_next(wa1)
             uint64 wa2 = arg2
             gen_expr(wa2)
             emit_byte(0x48); emit_byte(0x89); emit_byte(0xC1)
-            emit_load_rax_from_stack(temp_slot_0)
+            emit_load_rax_from_stack(pk0_store16)
             if debug_mode != 0 {
                 emit_byte(0x48); emit_byte(0x85); emit_byte(0xC0)
                 emit_byte(0x75)
@@ -8294,22 +8422,23 @@ fn gen_expr(uint64 node) {
                 uint8 s16_s = s16_skip
                 uint64 s16_pp = out_buf + jnz_s16
                 unsafe { *(s16_pp as uint8) = s16_s }
-                emit_load_rax_from_stack(temp_slot_0)
+                emit_load_rax_from_stack(pk0_store16)
             }
             // mov [rax], cx  (0x66 prefix = 16-bit operand)
             emit_byte(0x66); emit_byte(0x89); emit_byte(0x08)
             return
         }
         if is_extern_call == 0 && tok_matches(wct, "store32", 7) != 0 {
+            uint64 pk0_store32 = arg_park_slot(node, temp_slot_0)
             uint32 arg1 = ast_child(node)
             uint64 wa1 = arg1
             gen_expr(wa1)
-            emit_store_rax_to_stack(temp_slot_0)
+            emit_store_rax_to_stack(pk0_store32)
             uint32 arg2 = ast_next(wa1)
             uint64 wa2 = arg2
             gen_expr(wa2)
             emit_byte(0x48); emit_byte(0x89); emit_byte(0xC1)
-            emit_load_rax_from_stack(temp_slot_0)
+            emit_load_rax_from_stack(pk0_store32)
             if debug_mode != 0 {
                 emit_byte(0x48); emit_byte(0x85); emit_byte(0xC0)
                 emit_byte(0x75)
@@ -8324,22 +8453,23 @@ fn gen_expr(uint64 node) {
                 uint8 s32_s = s32_skip
                 uint64 s32_pp = out_buf + jnz_s32
                 unsafe { *(s32_pp as uint8) = s32_s }
-                emit_load_rax_from_stack(temp_slot_0)
+                emit_load_rax_from_stack(pk0_store32)
             }
             // mov [rax], ecx
             emit_byte(0x89); emit_byte(0x08)
             return
         }
         if is_extern_call == 0 && tok_matches(wct, "store64", 7) != 0 {
+            uint64 pk0_store64 = arg_park_slot(node, temp_slot_0)
             uint32 arg1 = ast_child(node)
             uint64 wa1 = arg1
             gen_expr(wa1)
-            emit_store_rax_to_stack(temp_slot_0)
+            emit_store_rax_to_stack(pk0_store64)
             uint32 arg2 = ast_next(wa1)
             uint64 wa2 = arg2
             gen_expr(wa2)
             emit_byte(0x48); emit_byte(0x89); emit_byte(0xC1)
-            emit_load_rax_from_stack(temp_slot_0)
+            emit_load_rax_from_stack(pk0_store64)
             if debug_mode != 0 {
                 emit_byte(0x48); emit_byte(0x85); emit_byte(0xC0)
                 emit_byte(0x75)
@@ -8354,7 +8484,7 @@ fn gen_expr(uint64 node) {
                 uint8 s64_s = s64_skip
                 uint64 s64_pp = out_buf + jnz_s64
                 unsafe { *(s64_pp as uint8) = s64_s }
-                emit_load_rax_from_stack(temp_slot_0)
+                emit_load_rax_from_stack(pk0_store64)
             }
             // mov [rax], rcx
             emit_byte(0x48); emit_byte(0x89); emit_byte(0x08)
@@ -8398,58 +8528,62 @@ fn gen_expr(uint64 node) {
 
         // Built-in: vstore8/16/32/64(addr, val) — volatile store with mfence
         if is_extern_call == 0 && tok_matches(wct, "vstore8", 7) != 0 {
+            uint64 pk0_vstore8 = arg_park_slot(node, temp_slot_0)
             uint32 arg1 = ast_child(node)
             uint64 wa1 = arg1
             gen_expr(wa1)
-            emit_store_rax_to_stack(temp_slot_0)
+            emit_store_rax_to_stack(pk0_vstore8)
             uint32 arg2 = ast_next(wa1)
             uint64 wa2 = arg2
             gen_expr(wa2)
             emit_byte(0x48); emit_byte(0x89); emit_byte(0xC1)
-            emit_load_rax_from_stack(temp_slot_0)
+            emit_load_rax_from_stack(pk0_vstore8)
             // mfence (before store)
             emit_byte(0x0F); emit_byte(0xAE); emit_byte(0xF0)
             emit_byte(0x88); emit_byte(0x08)
             return
         }
         if is_extern_call == 0 && tok_matches(wct, "vstore16", 8) != 0 {
+            uint64 pk0_vstore16 = arg_park_slot(node, temp_slot_0)
             uint32 arg1 = ast_child(node)
             uint64 wa1 = arg1
             gen_expr(wa1)
-            emit_store_rax_to_stack(temp_slot_0)
+            emit_store_rax_to_stack(pk0_vstore16)
             uint32 arg2 = ast_next(wa1)
             uint64 wa2 = arg2
             gen_expr(wa2)
             emit_byte(0x48); emit_byte(0x89); emit_byte(0xC1)
-            emit_load_rax_from_stack(temp_slot_0)
+            emit_load_rax_from_stack(pk0_vstore16)
             emit_byte(0x0F); emit_byte(0xAE); emit_byte(0xF0)
             emit_byte(0x66); emit_byte(0x89); emit_byte(0x08)
             return
         }
         if is_extern_call == 0 && tok_matches(wct, "vstore32", 8) != 0 {
+            uint64 pk0_vstore32 = arg_park_slot(node, temp_slot_0)
             uint32 arg1 = ast_child(node)
             uint64 wa1 = arg1
             gen_expr(wa1)
-            emit_store_rax_to_stack(temp_slot_0)
+            emit_store_rax_to_stack(pk0_vstore32)
             uint32 arg2 = ast_next(wa1)
             uint64 wa2 = arg2
             gen_expr(wa2)
             emit_byte(0x48); emit_byte(0x89); emit_byte(0xC1)
-            emit_load_rax_from_stack(temp_slot_0)
+            emit_load_rax_from_stack(pk0_vstore32)
             emit_byte(0x0F); emit_byte(0xAE); emit_byte(0xF0)
             emit_byte(0x89); emit_byte(0x08)
             return
         }
         if is_extern_call == 0 && tok_matches(wct, "vstore64", 8) != 0 {
+            uint64 pk0_vstore64 = arg_park_slot(node, temp_slot_0)
             uint32 arg1 = ast_child(node)
             uint64 wa1 = arg1
             gen_expr(wa1)
-            emit_store_rax_to_stack(temp_slot_0)
+            emit_store_rax_to_stack(pk0_vstore64)
             uint32 arg2 = ast_next(wa1)
             uint64 wa2 = arg2
             gen_expr(wa2)
             emit_byte(0x48); emit_byte(0x89); emit_byte(0xC1)
-            emit_load_rax_from_stack(temp_slot_0)
+            emit_load_rax_from_stack(pk0_vstore64)
             emit_byte(0x0F); emit_byte(0xAE); emit_byte(0xF0)
             emit_byte(0x48); emit_byte(0x89); emit_byte(0x08)
             return
@@ -8469,16 +8603,17 @@ fn gen_expr(uint64 node) {
 
         // Built-in: atomic_store(ptr, val)
         if is_extern_call == 0 && tok_matches(wct, "atomic_store", 12) != 0 {
+            uint64 pk0_atomicstore = arg_park_slot(node, temp_slot_0)
             uint32 arg1 = ast_child(node)
             uint64 wa1 = arg1
             gen_expr(wa1)
-            emit_store_rax_to_stack(temp_slot_0)
+            emit_store_rax_to_stack(pk0_atomicstore)
             uint32 arg2 = ast_next(wa1)
             uint64 wa2 = arg2
             gen_expr(wa2)
             // mov rcx, rax (val)
             emit_byte(0x48); emit_byte(0x89); emit_byte(0xC1)
-            emit_load_rax_from_stack(temp_slot_0)
+            emit_load_rax_from_stack(pk0_atomicstore)
             // lock xchg [rax], rcx
             emit_byte(0xF0); emit_byte(0x48); emit_byte(0x87); emit_byte(0x08)
             return
@@ -8486,27 +8621,29 @@ fn gen_expr(uint64 node) {
 
         // Built-in: atomic_cas(ptr, expected, desired) → 1 if swapped, 0 if not
         if is_extern_call == 0 && tok_matches(wct, "atomic_cas", 10) != 0 {
+            uint64 pk0_atomiccas = arg_park_slot(node, temp_slot_0)
+            uint64 pk1_atomiccas = arg_park_slot(node, temp_slot_1)
             uint32 arg1 = ast_child(node)
             uint64 wa1 = arg1
             gen_expr(wa1)
-            emit_store_rax_to_stack(temp_slot_0)
+            emit_store_rax_to_stack(pk0_atomiccas)
             uint32 arg2 = ast_next(wa1)
             uint64 wa2 = arg2
             gen_expr(wa2)
-            emit_store_rax_to_stack(temp_slot_1)
+            emit_store_rax_to_stack(pk1_atomiccas)
             uint32 arg3 = ast_next(wa2)
             uint64 wa3 = arg3
             gen_expr(wa3)
             // rcx = desired (from rax)
             emit_byte(0x48); emit_byte(0x89); emit_byte(0xC1)
             // rax = expected (cmpxchg compares [rdx] with rax)
-            emit_load_rax_from_stack(temp_slot_1)
+            emit_load_rax_from_stack(pk1_atomiccas)
             // rdx = ptr
             emit_byte(0x48); emit_byte(0x8B); emit_byte(0x54); emit_byte(0x24)
-            if temp_slot_0 < 128 {
-                emit_byte(temp_slot_0)
+            if pk0_atomiccas < 128 {
+                emit_byte(pk0_atomiccas)
             } else {
-                emit_byte(0x94); emit_byte(0x24); emit_u32_le(temp_slot_0)
+                emit_byte(0x94); emit_byte(0x24); emit_u32_le(pk0_atomiccas)
             }
             // lock cmpxchg [rdx], rcx
             emit_byte(0xF0); emit_byte(0x48); emit_byte(0x0F); emit_byte(0xB1); emit_byte(0x0A)
@@ -8518,17 +8655,18 @@ fn gen_expr(uint64 node) {
 
         // Built-in: atomic_add(ptr, val) → old value
         if is_extern_call == 0 && tok_matches(wct, "atomic_add", 10) != 0 {
+            uint64 pk0_atomicadd = arg_park_slot(node, temp_slot_0)
             uint32 arg1 = ast_child(node)
             uint64 wa1 = arg1
             gen_expr(wa1)
-            emit_store_rax_to_stack(temp_slot_0)
+            emit_store_rax_to_stack(pk0_atomicadd)
             uint32 arg2 = ast_next(wa1)
             uint64 wa2 = arg2
             gen_expr(wa2)
             // rcx = val
             emit_byte(0x48); emit_byte(0x89); emit_byte(0xC1)
             // rax = ptr
-            emit_load_rax_from_stack(temp_slot_0)
+            emit_load_rax_from_stack(pk0_atomicadd)
             // lock xadd [rax], rcx
             emit_byte(0xF0); emit_byte(0x48); emit_byte(0x0F); emit_byte(0xC1); emit_byte(0x08)
             // rax = old value (rcx has old value after xadd)
@@ -8538,10 +8676,11 @@ fn gen_expr(uint64 node) {
 
         // Built-in: atomic_sub(ptr, val) → old value
         if is_extern_call == 0 && tok_matches(wct, "atomic_sub", 10) != 0 {
+            uint64 pk0_atomicsub = arg_park_slot(node, temp_slot_0)
             uint32 arg1 = ast_child(node)
             uint64 wa1 = arg1
             gen_expr(wa1)
-            emit_store_rax_to_stack(temp_slot_0)
+            emit_store_rax_to_stack(pk0_atomicsub)
             uint32 arg2 = ast_next(wa1)
             uint64 wa2 = arg2
             gen_expr(wa2)
@@ -8550,7 +8689,7 @@ fn gen_expr(uint64 node) {
             // neg rcx (negate val since there's no XSUB)
             emit_byte(0x48); emit_byte(0xF7); emit_byte(0xD9)
             // rax = ptr
-            emit_load_rax_from_stack(temp_slot_0)
+            emit_load_rax_from_stack(pk0_atomicsub)
             // lock xadd [rax], rcx
             emit_byte(0xF0); emit_byte(0x48); emit_byte(0x0F); emit_byte(0xC1); emit_byte(0x08)
             // rax = old value (rcx has old value after xadd)
@@ -8560,17 +8699,18 @@ fn gen_expr(uint64 node) {
 
         // Built-in: atomic_and(ptr, val) → old value
         if is_extern_call == 0 && tok_matches(wct, "atomic_and", 10) != 0 {
+            uint64 pk0_atomicand = arg_park_slot(node, temp_slot_0)
             uint32 arg1 = ast_child(node)
             uint64 wa1 = arg1
             gen_expr(wa1)
-            emit_store_rax_to_stack(temp_slot_0)
+            emit_store_rax_to_stack(pk0_atomicand)
             uint32 arg2 = ast_next(wa1)
             uint64 wa2 = arg2
             gen_expr(wa2)
             // rcx = val
             emit_byte(0x48); emit_byte(0x89); emit_byte(0xC1)
             // rdi = ptr
-            emit_load_rax_from_stack(temp_slot_0)
+            emit_load_rax_from_stack(pk0_atomicand)
             emit_byte(0x48); emit_byte(0x89); emit_byte(0xC7)
             // retry: mov rax, [rdi]
             emit_byte(0x48); emit_byte(0x8B); emit_byte(0x07)
@@ -8588,17 +8728,18 @@ fn gen_expr(uint64 node) {
 
         // Built-in: atomic_or(ptr, val) → old value
         if is_extern_call == 0 && tok_matches(wct, "atomic_or", 9) != 0 {
+            uint64 pk0_atomicor = arg_park_slot(node, temp_slot_0)
             uint32 arg1 = ast_child(node)
             uint64 wa1 = arg1
             gen_expr(wa1)
-            emit_store_rax_to_stack(temp_slot_0)
+            emit_store_rax_to_stack(pk0_atomicor)
             uint32 arg2 = ast_next(wa1)
             uint64 wa2 = arg2
             gen_expr(wa2)
             // rcx = val
             emit_byte(0x48); emit_byte(0x89); emit_byte(0xC1)
             // rdi = ptr
-            emit_load_rax_from_stack(temp_slot_0)
+            emit_load_rax_from_stack(pk0_atomicor)
             emit_byte(0x48); emit_byte(0x89); emit_byte(0xC7)
             // retry: mov rax, [rdi]
             emit_byte(0x48); emit_byte(0x8B); emit_byte(0x07)
@@ -8616,17 +8757,18 @@ fn gen_expr(uint64 node) {
 
         // Built-in: atomic_xor(ptr, val) → old value
         if is_extern_call == 0 && tok_matches(wct, "atomic_xor", 10) != 0 {
+            uint64 pk0_atomicxor = arg_park_slot(node, temp_slot_0)
             uint32 arg1 = ast_child(node)
             uint64 wa1 = arg1
             gen_expr(wa1)
-            emit_store_rax_to_stack(temp_slot_0)
+            emit_store_rax_to_stack(pk0_atomicxor)
             uint32 arg2 = ast_next(wa1)
             uint64 wa2 = arg2
             gen_expr(wa2)
             // rcx = val
             emit_byte(0x48); emit_byte(0x89); emit_byte(0xC1)
             // rdi = ptr
-            emit_load_rax_from_stack(temp_slot_0)
+            emit_load_rax_from_stack(pk0_atomicxor)
             emit_byte(0x48); emit_byte(0x89); emit_byte(0xC7)
             // retry: mov rax, [rdi]
             emit_byte(0x48); emit_byte(0x8B); emit_byte(0x07)
@@ -8939,7 +9081,9 @@ fn gen_expr(uint64 node) {
 
         // Built-in: fma_f64(a, b, c) → a*b + c (fallback: mulsd + addsd)
         if is_extern_call == 0 && tok_matches(wct, "fma_f64", 7) != 0 {
-            // Evaluate c → xmm0, save to temp_slot_1
+            uint64 pk0_fmaf64 = arg_park_slot(node, temp_slot_0)
+            uint64 pk1_fmaf64 = arg_park_slot(node, temp_slot_1)
+            // Evaluate c → xmm0, save to pk1_fmaf64
             uint32 arg_a = ast_child(node)
             uint64 wa_a = arg_a
             uint32 arg_b = ast_next(wa_a)
@@ -8948,17 +9092,17 @@ fn gen_expr(uint64 node) {
             uint64 wa_c = arg_c
 
             gen_expr(wa_c)
-            emit_store_xmm0_f64(temp_slot_1)
-            // Evaluate b → xmm0, save to temp_slot_0
+            emit_store_xmm0_f64(pk1_fmaf64)
+            // Evaluate b → xmm0, save to pk0_fmaf64
             gen_expr(wa_b)
-            emit_store_xmm0_f64(temp_slot_0)
+            emit_store_xmm0_f64(pk0_fmaf64)
             // Evaluate a → xmm0
             gen_expr(wa_a)
             // mulsd xmm0, xmm1: F2 0F 59 C1
-            emit_load_xmm1_f64(temp_slot_0)
+            emit_load_xmm1_f64(pk0_fmaf64)
             emit_byte(0xF2); emit_byte(0x0F); emit_byte(0x59); emit_byte(0xC1)
             // addsd xmm0, xmm1: F2 0F 58 C1
-            emit_load_xmm1_f64(temp_slot_1)
+            emit_load_xmm1_f64(pk1_fmaf64)
             emit_byte(0xF2); emit_byte(0x0F); emit_byte(0x58); emit_byte(0xC1)
             expr_is_float = 1
             return
@@ -10554,33 +10698,41 @@ fn gen_stmt(uint64 node) {
         uint64 wsi = second_idx
         uint32 third_idx = ast_data4(node)
         uint64 wti = third_idx
+        // A tuple element is parked across the evaluation of the LATER
+        // elements, and a later element is an arbitrary expression — a builtin
+        // call or a fractional float literal in it writes temp_slot_0/1 and
+        // silently replaces the earlier element. Private slots; a tuple return
+        // statement is rare, so this is not worth predicating.
         if wti != 0 && wsi != 0 {
             // 3-tuple return: first → rax, second → rdx, third → r8
+            uint64 rt3a = alloc_scratch_slot()
+            uint64 rt3b = alloc_scratch_slot()
             gen_expr(wec)
-            emit_store_rax_to_stack(temp_slot_0)
+            emit_store_rax_to_stack(rt3a)
             gen_expr(wsi)
-            emit_store_rax_to_stack(temp_slot_1)
+            emit_store_rax_to_stack(rt3b)
             gen_expr(wti)
             // mov r8, rax: 49 89 C0
             emit_byte(0x49); emit_byte(0x89); emit_byte(0xC0)
             // Reload second → rdx
-            emit_load_rax_from_stack(temp_slot_1)
+            emit_load_rax_from_stack(rt3b)
             emit_byte(0x48); emit_byte(0x89); emit_byte(0xC2)  // mov rdx, rax
             // Reload first → rax
             rax_cache = 0
-            emit_load_rax_from_stack(temp_slot_0)
+            emit_load_rax_from_stack(rt3a)
         } else if wsi != 0 {
-            // 2-tuple return: evaluate first into rax, stash in temp_slot_0
+            // 2-tuple return: evaluate first into rax, stash in a private slot
             // (using push/pop would shift rsp and break every cached
             // [rsp+N] offset), evaluate second into rax, move to rdx,
             // then reload first into rax. rdx is caller-saved on SysV so
             // it flows to the caller unchanged through the epilogue.
+            uint64 rt2a = alloc_scratch_slot()
             gen_expr(wec)
-            emit_store_rax_to_stack(temp_slot_0)
+            emit_store_rax_to_stack(rt2a)
             gen_expr(wsi)
             emit_byte(0x48); emit_byte(0x89); emit_byte(0xC2)  // mov rdx, rax
             rax_cache = 0
-            emit_load_rax_from_stack(temp_slot_0)
+            emit_load_rax_from_stack(rt2a)
         } else if wec != 0 {
             gen_expr(wec)
         }
