@@ -1476,6 +1476,30 @@ fn legacy_node_is_signed(uint64 ast_node) -> uint64 {
     return 0
 }
 
+// Reserve a nameless frame slot for one code-generation site.
+//
+// The legacy backends have exactly ONE pair of scratch slots per function,
+// temp_slot_0 / temp_slot_1. That is fine for a value parked across code that
+// provably cannot recurse into gen_expr, and WRONG for a value parked across
+// the evaluation of an arbitrary sub-expression: the sub-expression is free to
+// park its own operand in the very same slot. `arr[write(1, m, 0) + 3] = 77`
+// stored 1 instead of 77 for exactly that reason — `write` parks its fd in
+// temp_slot_0, on top of the pending store value.
+//
+// Store sites therefore ask for a private slot instead. Slots are never
+// recycled: a store statement costs 8 bytes of frame, once, at compile time.
+// Shared by both legacy backends (they share var_count / var_frame_size).
+fn alloc_scratch_slot() -> uint64 {
+    uint64 offset = var_count * 8
+    var_count = var_count + 1
+    var_frame_size = var_count * 8
+    uint64 rem = var_frame_size & 15
+    if rem != 0 {
+        var_frame_size = var_frame_size + 16 - rem
+    }
+    return offset
+}
+
 fn var_declare(uint64 name_tok) -> uint64 {
     // Check if variable already declared in this function (handles shadowing)
     uint64 existing = var_lookup(name_tok)
@@ -10279,9 +10303,12 @@ fn gen_stmt(uint64 node) {
                         uint64 stride_w = struct_total_size(sia_w)
                         uint64 foff_w = struct_field_offset(sia_w, field_tok)
                         uint64 fsz_w = struct_field_size(sia_w, field_tok)
-                        // Evaluate value → save to temp_slot_0
+                        // Evaluate value → park in a slot private to this
+                        // store; the index expression below may itself park
+                        // something in temp_slot_0.
+                        uint64 saf_slot = alloc_scratch_slot()
                         gen_expr(wval)
-                        emit_store_rax_to_stack(temp_slot_0)
+                        emit_store_rax_to_stack(saf_slot)
                         // Evaluate index → rax
                         uint32 idx_ch_w = ast_child(wfachild)
                         uint64 widx_w = idx_ch_w
@@ -10301,7 +10328,7 @@ fn gen_stmt(uint64 node) {
                         }
                         // mov rcx, rax (addr), load value, store
                         emit_byte(0x48); emit_byte(0x89); emit_byte(0xC1)
-                        emit_load_rax_from_stack(temp_slot_0)
+                        emit_load_rax_from_stack(saf_slot)
                         if fsz_w == 1 {
                             emit_byte(0x88); emit_byte(0x01)
                         } else if fsz_w == 2 {
@@ -10321,7 +10348,11 @@ fn gen_stmt(uint64 node) {
                 uint32 cfk_nw = ast_kind(wfachild)
                 uint64 wcfk_nw = cfk_nw
                 if wcfk_nw == 36 {
-                    // Evaluate value, save to temp_slot_0
+                    // Evaluate value, park it in a private slot: the field
+                    // chain below is an arbitrary expression (it may index an
+                    // array with a call in the subscript) and can reach
+                    // temp_slot_0.
+                    uint64 nfw_slot = alloc_scratch_slot()
                     gen_expr(wval)
                     if expr_is_float == 1 {
                         emit_byte(0x66); emit_byte(0x48); emit_byte(0x0F)
@@ -10331,7 +10362,7 @@ fn gen_stmt(uint64 node) {
                         emit_byte(0x66); emit_byte(0x0F)
                         emit_byte(0x7E); emit_byte(0xC0)
                     }
-                    emit_store_rax_to_stack(temp_slot_0)
+                    emit_store_rax_to_stack(nfw_slot)
                     // Evaluate nested field chain → pointer in rax, expr_is_struct set
                     gen_expr(wfachild)
                     uint64 nsi_w = expr_is_struct
@@ -10343,7 +10374,7 @@ fn gen_stmt(uint64 node) {
                             emit_u32_le(nfoff_w)
                         }
                         emit_byte(0x48); emit_byte(0x89); emit_byte(0xC1) // mov rcx, rax
-                        emit_load_rax_from_stack(temp_slot_0)
+                        emit_load_rax_from_stack(nfw_slot)
                         if nfsz_w == 1 {
                             emit_byte(0x88); emit_byte(0x01)
                         } else if nfsz_w == 2 {
@@ -11002,16 +11033,21 @@ fn gen_stmt(uint64 node) {
             // `arr[i] = v` (data4 = 0) keeps its value-then-index order.
             uint32 idx_compound = ast_data4(node)
             uint64 wicmp = idx_compound
+            // Private slots: the value and the index are each parked across
+            // the evaluation of the other, and either one may reach
+            // temp_slot_0/temp_slot_1 (any builtin call does).
+            uint64 ia_val_slot = alloc_scratch_slot()
+            uint64 ia_idx_slot = alloc_scratch_slot()
             if wicmp == 1 {
                 gen_expr(wi)
                 emit_store_rax_to_stack(compound_temp_slot)
                 gen_expr(wrhs)
-                emit_store_rax_to_stack(temp_slot_0)
+                emit_store_rax_to_stack(ia_val_slot)
                 emit_load_rax_from_stack(compound_temp_slot)
             } else {
                 // Evaluate value first → save to temp
                 gen_expr(wrhs)
-                emit_store_rax_to_stack(temp_slot_0)
+                emit_store_rax_to_stack(ia_val_slot)
                 // Evaluate index
                 gen_expr(wi)
             }
@@ -11035,7 +11071,7 @@ fn gen_stmt(uint64 node) {
                     unsafe { *(bca_pp as uint8) = bca_s }
                 }
             }
-            emit_store_rax_to_stack(temp_slot_1)
+            emit_store_rax_to_stack(ia_idx_slot)
             // Load array base
             uint64 warrt2 = arr_tok
             uint64 arr_offset = var_lookup(arr_tok)
@@ -11054,7 +11090,7 @@ fn gen_stmt(uint64 node) {
             }
             // rax = base. Save to rcx, then load index, scale it, add to base.
             emit_byte(0x48); emit_byte(0x89); emit_byte(0xC1) // mov rcx, rax (base)
-            emit_load_rax_from_stack(temp_slot_1)              // rax = index
+            emit_load_rax_from_stack(ia_idx_slot)              // rax = index
             // Scale rax by elem_sz_w: shl rax, log2(elem_sz_w)
             if elem_sz_w == 2 {
                 emit_byte(0x48); emit_byte(0xD1); emit_byte(0xE0) // shl rax, 1
@@ -11064,8 +11100,8 @@ fn gen_stmt(uint64 node) {
                 emit_byte(0x48); emit_byte(0xC1); emit_byte(0xE0); emit_byte(3) // shl rax, 3
             }
             emit_byte(0x48); emit_byte(0x01); emit_byte(0xC1)    // add rcx, rax → rcx = base+idx*elem
-            // Load value from temp_slot_0 → rax
-            emit_load_rax_from_stack(temp_slot_0)
+            // Load the parked value → rax
+            emit_load_rax_from_stack(ia_val_slot)
             // Store elem_sz_w bytes at [rcx]
             if elem_sz_w == 1 {
                 emit_byte(0x88); emit_byte(0x01)                  // mov byte [rcx], al
@@ -11157,36 +11193,40 @@ fn gen_stmt(uint64 node) {
         // its value-then-address order.
         uint32 ps_compound = ast_data4(node)
         uint64 wpsc = ps_compound
+        // Private slot: the value is parked across the evaluation of the
+        // address expression (and vice versa in the compound form), and either
+        // side may reach temp_slot_0 — any builtin call does.
+        uint64 ps_val_slot = alloc_scratch_slot()
         if wpsc == 1 {
             gen_expr(wa)
             emit_store_rax_to_stack(compound_temp_slot)
             gen_expr(wv)
-            emit_store_rax_to_stack(temp_slot_0)
+            emit_store_rax_to_stack(ps_val_slot)
             emit_load_rax_from_stack(compound_temp_slot)
         } else {
             // Evaluate value first → save to temp
             gen_expr(wv)
-            // Save value to temp_slot_0
-            emit_store_rax_to_stack(temp_slot_0)
+            // Park the value
+            emit_store_rax_to_stack(ps_val_slot)
             // Evaluate address
             gen_expr(wa)
         }
         // rax = address, load value from temp → rcx
-        // mov rcx, [rsp + temp_slot_0]
+        // mov rcx, [rsp + ps_val_slot]
         emit_byte(0x48)
         emit_byte(0x8B)
-        if temp_slot_0 == 0 {
+        if ps_val_slot == 0 {
             emit_byte(0x0C)
             emit_byte(0x24)
-        } else if temp_slot_0 < 128 {
+        } else if ps_val_slot < 128 {
             emit_byte(0x4C)
             emit_byte(0x24)
-            uint8 ts8 = temp_slot_0
+            uint8 ts8 = ps_val_slot
             emit_byte(ts8)
         } else {
             emit_byte(0x8C)
             emit_byte(0x24)
-            emit_u32_le(temp_slot_0)
+            emit_u32_le(ps_val_slot)
         }
         // Volatile barrier before store (prevent reordering)
         // volatile is data3 bit 4 — see the load path above.

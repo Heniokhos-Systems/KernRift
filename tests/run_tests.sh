@@ -1758,6 +1758,116 @@ fi
 rm -f "$DIR/../feval_order_$$.kr" "$DIR/../feval_count_$$.kr" \
       "$DIR/../feval_nest_$$.kr" "$DIR/../feval_flow_$$.kr" \
       "$DIR/../feval_while_$$.kr" "$DIR/../feval_snap_$$.kr"
+# --- store sites get a PRIVATE scratch slot --------------------------------
+# The legacy backends have exactly one pair of scratch slots per function,
+# temp_slot_0 / temp_slot_1. Every store used to park one operand there while
+# it evaluated the other -- and the other operand is an arbitrary expression
+# that is free to park something in the SAME slot. `write` does exactly that
+# with its fd, so
+#
+#     arr64[ write(1, msg, 0) + 3 ] = 77
+#
+# stored the fd (1) instead of 77 on both legacy backends while both IR
+# backends stored 77. Store sites now call alloc_scratch_slot() for a nameless
+# frame slot of their own.
+#
+# Every row ASSERTS THE STORED VALUE, not that it compiles: the defect
+# compiled perfectly and produced the wrong number, so a compile-only row
+# passes against it on all four configs. The exit code IS the loaded-back
+# value, so a row cannot go green by not storing at all.
+#
+# These rows EXECUTE, so they follow $RUN_ARCH rather than naming an arch.
+TOTAL=$((TOTAL + 1))
+TSLOT_OK=1
+TSLOT_OTHER="arm64"
+if [ "$RUN_ARCH" = "arm64" ]; then TSLOT_OTHER="x86_64"; fi
+TSLOT_QEMU=""
+if [ "$TSLOT_OTHER" = "arm64" ]; then
+    TSLOT_QEMU="$(command -v qemu-aarch64-static || command -v qemu-aarch64 || true)"
+fi
+
+# 1. Indexed store into a static array; the SUBSCRIPT clobbers the slot.
+cat > "$DIR/../tslot_idx_$$.kr" <<'TSLOT_IDX'
+static u64[16] arr64
+fn main() {
+    u64 msg = 0
+    arr64[ write(1, msg, 0) + 3 ] = 77
+    exit(arr64[3])
+}
+TSLOT_IDX
+
+# 2. PtrStore; the ADDRESS expression clobbers the slot.
+cat > "$DIR/../tslot_ptr_$$.kr" <<'TSLOT_PTR'
+fn main() {
+    u64 m = 0
+    u64[16] pa
+    u64 base = pa
+    unsafe { *((base + 8 * (write(1, m, 0) + 3)) as uint64) = 77 }
+    exit(pa[3])
+}
+TSLOT_PTR
+
+# 3. Struct-array element field write; the SUBSCRIPT clobbers the slot.
+cat > "$DIR/../tslot_sfield_$$.kr" <<'TSLOT_SFIELD'
+struct TsPt { u64 x  u64 y }
+fn main() {
+    u64 m = 0
+    TsPt[4] pts
+    pts[ write(1, m, 0) + 2 ].x = 77
+    exit(pts[2].x)
+}
+TSLOT_SFIELD
+
+# 4. Two clobbering stores in one function must not collide with each other
+#    either -- a per-site slot has to be per SITE, not one extra shared slot.
+cat > "$DIR/../tslot_two_$$.kr" <<'TSLOT_TWO'
+static u64[16] a2
+fn main() {
+    u64 m = 0
+    a2[ write(1, m, 0) + 3 ] = 40
+    a2[ write(1, m, 0) + 4 ] = 37
+    exit(a2[3] + a2[4])
+}
+TSLOT_TWO
+
+TSLOT_RAN=0
+tslot_run() { # <arch> <flags> <src> <runner-or-empty>
+    local _bin="/tmp/krc_tslot_$$"
+    if ! $KRC --arch="$1" $2 "$3" -o "$_bin" >/dev/null 2>&1; then
+        TSLOT_OK=0; echo "  $(basename $3) $1 ${2:-IR}: COMPILE FAILED"
+        return
+    fi
+    if [ -n "$4" ]; then $4 "$_bin" >/dev/null 2>&1; else "$_bin" >/dev/null 2>&1; fi
+    local _rc=$?
+    TSLOT_RAN=$((TSLOT_RAN + 1))
+    # 77 = the value actually reached memory. 1 = the parked value was replaced
+    # by write's fd (the defect). Anything else = it never got stored.
+    [ "$_rc" = "77" ] || { TSLOT_OK=0; echo "  $(basename $3) $1 ${2:-IR}: got $_rc, want 77"; }
+    rm -f "$_bin"
+}
+for _src in "$DIR/../tslot_idx_$$.kr" "$DIR/../tslot_ptr_$$.kr" \
+            "$DIR/../tslot_sfield_$$.kr" "$DIR/../tslot_two_$$.kr"; do
+    tslot_run "$RUN_ARCH" ""          "$_src" ""
+    tslot_run "$RUN_ARCH" "--legacy"  "$_src" ""
+    if [ -n "$TSLOT_QEMU" ]; then
+        tslot_run "$TSLOT_OTHER" ""         "$_src" "$TSLOT_QEMU"
+        tslot_run "$TSLOT_OTHER" "--legacy" "$_src" "$TSLOT_QEMU"
+    fi
+done
+# Guard against the loop silently doing nothing. 4 sources x 2 host configs
+# always; x2 more per source when the other arch is runnable.
+TSLOT_WANT=8
+if [ -n "$TSLOT_QEMU" ]; then TSLOT_WANT=16; fi
+[ "$TSLOT_RAN" = "$TSLOT_WANT" ] || { TSLOT_OK=0; echo "  only $TSLOT_RAN/$TSLOT_WANT config-runs executed"; }
+if [ "$TSLOT_OK" = "1" ]; then
+    echo "  store_sites_get_a_private_scratch_slot: PASS ($TSLOT_RAN config-runs)"
+    PASS=$((PASS + 1))
+else
+    echo "FAIL: store_sites_get_a_private_scratch_slot"
+    FAIL=$((FAIL + 1))
+fi
+rm -f "$DIR/../tslot_idx_$$.kr" "$DIR/../tslot_ptr_$$.kr" \
+      "$DIR/../tslot_sfield_$$.kr" "$DIR/../tslot_two_$$.kr"
 rm -f "$DIR/../ceval_idx_$$.kr" "$DIR/../ceval_ptr_$$.kr" "$DIR/../ceval_plain_$$.kr"
 
 # File-scope struct statics: `static Point[N] pts` and `static Point sp`.

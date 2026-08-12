@@ -5420,19 +5420,22 @@ fn gen_stmt_a64(uint64 node) {
         // its value-then-address order.
         uint32 ps_compound_a = ast_data4(node)
         uint64 wpsc_a = ps_compound_a
+        // Private slot — see alloc_scratch_slot(): the operand parked here
+        // crosses an arbitrary sub-expression that may itself use temp_slot_0.
+        uint64 ps_val_slot_a = alloc_scratch_slot()
         if wpsc_a == 1 {
             gen_expr_a64(wa)
             emit_a64_store_x0(compound_temp_slot)
             gen_expr_a64(wv)
-            emit_a64_store_x0(temp_slot_0)
+            emit_a64_store_x0(ps_val_slot_a)
             emit_a64_load_x0(compound_temp_slot)
         } else {
             gen_expr_a64(wv)
-            emit_a64_store_x0(temp_slot_0)
+            emit_a64_store_x0(ps_val_slot_a)
             gen_expr_a64(wa)
         }
         emit_a64_mov(10, 0)
-        emit_a64_load_x0(temp_slot_0)
+        emit_a64_load_x0(ps_val_slot_a)
         // Volatile barrier before store (DSB SY — ensures device write commits)
         // volatile is data3 bit 4 — see the load path above.
         uint32 vol_flag2 = ast_data3(node)
@@ -5460,18 +5463,22 @@ fn gen_stmt_a64(uint64 node) {
             // `arr[i] = v` (data4 = 0) keeps its value-then-index order.
             uint32 idx_compound_a = ast_data4(node)
             uint64 wicmp_a = idx_compound_a
+            // Private slots — see alloc_scratch_slot(). The value and the
+            // index are each parked across the evaluation of the other.
+            uint64 ia_val_slot_a = alloc_scratch_slot()
+            uint64 ia_idx_slot_a = alloc_scratch_slot()
             if wicmp_a == 1 {
                 gen_expr_a64(wi)
                 emit_a64_store_x0(compound_temp_slot)
                 gen_expr_a64(wrhs)
-                emit_a64_store_x0(temp_slot_0)
+                emit_a64_store_x0(ia_val_slot_a)
                 emit_a64_load_x0(compound_temp_slot)
-                emit_a64_store_x0(temp_slot_1)
+                emit_a64_store_x0(ia_idx_slot_a)
             } else {
                 gen_expr_a64(wrhs)
-                emit_a64_store_x0(temp_slot_0)
+                emit_a64_store_x0(ia_val_slot_a)
                 gen_expr_a64(wi)
-                emit_a64_store_x0(temp_slot_1)
+                emit_a64_store_x0(ia_idx_slot_a)
             }
             uint32 arr_tok = ast_data1(node)
             uint64 warrtb = arr_tok
@@ -5490,13 +5497,13 @@ fn gen_stmt_a64(uint64 node) {
                 }
             }
             emit_a64_mov(10, 0)              // x10 = base
-            emit_a64_load_x0(temp_slot_1)    // x0 = index
+            emit_a64_load_x0(ia_idx_slot_a)  // x0 = index
             uint64 shift_w = 0
             if elem_sz_w == 2 { shift_w = 1 }
             if elem_sz_w == 4 { shift_w = 2 }
             if elem_sz_w == 8 { shift_w = 3 }
             emit_a64_add_lsl(10, 10, 0, shift_w)  // x10 = base + (idx << shift)
-            emit_a64_load_x0(temp_slot_0)    // x0 = value
+            emit_a64_load_x0(ia_val_slot_a)  // x0 = value
             if elem_sz_w == 1 {
                 emit_a64_strb(0, 10, 0)
             } else if elem_sz_w == 2 {
@@ -5533,9 +5540,11 @@ fn gen_stmt_a64(uint64 node) {
                         uint64 stride_aw = struct_total_size(sia_aw)
                         uint64 foff_aw = struct_field_offset(sia_aw, field_tok)
                         uint64 fsz_aw = struct_field_size(sia_aw, field_tok)
-                        // Evaluate value → save to temp_slot_0
+                        // Evaluate value → park in a slot private to this
+                        // store (the index expression may use temp_slot_0).
+                        uint64 saf_slot_a = alloc_scratch_slot()
                         gen_expr_a64(wval)
-                        emit_a64_store_x0(temp_slot_0)
+                        emit_a64_store_x0(saf_slot_a)
                         // Evaluate index → x0
                         uint32 idx_ch_aw = ast_child(wfachild)
                         uint64 widx_aw = idx_ch_aw
@@ -5551,7 +5560,7 @@ fn gen_stmt_a64(uint64 node) {
                         emit_a64_add(0, 0, 11)
                         if foff_aw != 0 { emit_a64_add_imm(0, 0, foff_aw) }
                         emit_a64_mov(10, 0)
-                        emit_a64_load_x0(temp_slot_0)
+                        emit_a64_load_x0(saf_slot_a)
                         if fsz_aw == 1 { emit_a64_strb(0, 10, 0) }
                         else if fsz_aw == 2 { emit_a64_strh(0, 10, 0) }
                         else if fsz_aw == 4 { emit_a64_str32(0, 10, 0) }
@@ -5566,6 +5575,9 @@ fn gen_stmt_a64(uint64 node) {
                 uint32 cfk_nwa = ast_kind(wfachild)
                 uint64 wcfk_nwa = cfk_nwa
                 if wcfk_nwa == 36 {
+                    // Private slot: the field chain below is an arbitrary
+                    // expression and can reach temp_slot_0.
+                    uint64 nfw_slot_a = alloc_scratch_slot()
                     gen_expr_a64(wval)
                     if expr_is_float_a64 == 1 {
                         // fmov x0, d0
@@ -5575,7 +5587,7 @@ fn gen_stmt_a64(uint64 node) {
                         // fmov w0, s0
                         emit_a64(0x1E260000)
                     }
-                    emit_a64_store_x0(temp_slot_0)
+                    emit_a64_store_x0(nfw_slot_a)
                     gen_expr_a64(wfachild)
                     uint64 nsi_wa = expr_is_struct_a64
                     if nsi_wa != 0xFFFFFFFF {
@@ -5585,7 +5597,7 @@ fn gen_stmt_a64(uint64 node) {
                             emit_a64_add_imm(0, 0, nfoff_wa)
                         }
                         emit_a64_mov(10, 0)
-                        emit_a64_load_x0(temp_slot_0)
+                        emit_a64_load_x0(nfw_slot_a)
                         if nfsz_wa == 1 { emit_a64_strb(0, 10, 0) }
                         else if nfsz_wa == 2 { emit_a64_strh(0, 10, 0) }
                         else if nfsz_wa == 4 { emit_a64_str32(0, 10, 0) }
