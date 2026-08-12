@@ -212,6 +212,30 @@ unsigned. The `signed_lt` / `signed_gt` / `signed_le` / `signed_ge`
 built-ins force a signed comparison regardless of operand types (useful
 on raw `u64` bit patterns).
 
+### Evaluation order
+
+**Evaluation is left to right, and in an assignment the destination
+address is evaluated before the value.** Both operands of a binary
+operator, every call argument, and both sides of a store run in source
+order, on every backend and every target:
+
+```kr
+arr[ai()] = fv()          // ai() then fv()
+arr[a()]  = fv() + b()    // a(), then fv(), then b()
+unsafe { *(fa() as uint32) = fv() }   // fa() then fv()
+pts[ai()].x = fv()        // ai() then fv()
+f(p(), q(), r())          // p(), q(), r()
+```
+
+"Destination address" includes the subscript of an indexed store and the
+address expression of an `unsafe` deref store — the *whole* address, before
+*any* of the value. `arr[i] OP= v` follows the same rule and evaluates `i`
+exactly once. `&&` and `||` still short-circuit, so the right operand of
+those may not run at all (§5).
+
+This is a language guarantee, not an artifact: `tests/diff_ir_legacy.sh`
+pins the order on all four backend configurations.
+
 ---
 
 ## 5. Control flow

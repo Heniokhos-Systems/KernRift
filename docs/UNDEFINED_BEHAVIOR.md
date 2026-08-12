@@ -80,6 +80,7 @@ reasoning for anything non-obvious.
 
 | Operation                               | Status   | Notes |
 |-----------------------------------------|----------|-------|
+| Evaluation order within an expression   | Defined  | **Left to right, address before value.** Both operands of a binary operator, all call arguments, and both sides of an assignment run in source order; for a store the whole destination address — including an indexed store's subscript — is evaluated before any of the value. `&&` / `\|\|` still short-circuit. See `docs/LANGUAGE.md` §4. This rule is newer than v2.9.0: before it, no order was specified and the backends disagreed — `arr[i()] = v()` ran the value first on all four configurations, while `*(a()) = v()` and `pts[i()].f = v()` ran the value first on the legacy backends only. |
 | Calling a function pointer of wrong signature | **Undefined** | ABI mismatch — stack / regs trashed. |
 | Missing `return` from a non-void function | Unspecified | The caller reads whatever register the ABI uses for the return value (usually garbage). |
 | Calling a `@noreturn` function that returns | **Undefined** | Caller's frame is not restored. |

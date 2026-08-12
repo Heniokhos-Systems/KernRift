@@ -54,12 +54,41 @@ diff_case() {
     rm -f "$TMP".*
 }
 
+# Agreement AND a specific value. diff_case only asks whether the four
+# configs match each other, so for anything where the agreed value is itself
+# the point — evaluation order, say — it cannot fail as long as every backend
+# moves together. value_case pins the number.
+value_case() { # name src expected
+    local name="$1"; local src="$2"; local exp="$3"
+    TOTAL=$((TOTAL+1))
+    printf '%s\n' "$src" > "$TMP.kr"
+    local ir_x=$(run_one x86_64 irx "")
+    local lg_x=$(run_one x86_64 lgx "--legacy")
+    local ir_a=$(run_one arm64 ira "")
+    local lg_a=$(run_one arm64 lga "--legacy")
+    local bad=0
+    for v in "$ir_x" "$lg_x" "$ir_a" "$lg_a"; do
+        [ "$v" = "SKIP" ] && continue
+        [ "$v" != "$exp" ] && bad=1
+    done
+    if [ "$bad" = "1" ]; then
+        DIV=$((DIV+1))
+        printf "DIVERGE  %-26s IRx86=%s legx86=%s IRa64=%s lega64=%s (expected %s on every config)\n" \
+            "$name" "$ir_x" "$lg_x" "$ir_a" "$lg_a" "$exp"
+    fi
+    rm -f "$TMP".*
+}
+
 # Known evaluation-order divergence between the backends (see the eval-order
 # investigation): the case is EXPECTED to disagree, with a specific value per
 # backend. It does not fail the run — which order is right is an open language
 # decision — but the expected values are PINNED: if either backend's order
 # changes (including a fix), this goes red so the change is made consciously
 # and this entry is updated or promoted to a plain diff_case.
+#
+# No case needs it right now: the evaluation-order split it was written for
+# was closed by making the order left-to-right, address-before-value, and the
+# three rows moved to value_case. Kept for the next real split.
 known_div_case() { # name src expected_ir expected_legacy
     local name="$1"; local src="$2"; local exp_ir="$3"; local exp_lg="$4"
     TOTAL=$((TOTAL+1))
@@ -221,11 +250,16 @@ static u64 gbuf=0
 fn fa()->u64{seq=seq*10+1; return gbuf}
 fn fv()->u64{seq=seq*10+2; return 7}
 fn main(){gbuf=alloc(8); store32(fa(),fv()); exit(seq)}'
-diff_case "order_idx_store" 'static u64 seq=0
+# Stores evaluate the destination ADDRESS (including the subscript) before the
+# value, left to right — docs/LANGUAGE.md §4. These are value_case, not
+# diff_case: all four configs used to agree on 21 here, so a row that only
+# compared the backends against each other would have stayed green through
+# both the old order and the new one.
+value_case "order_idx_store" 'static u64 seq=0
 static u8[16] arr
 fn ai()->u64{seq=seq*10+1; return 3}
 fn fv()->u64{seq=seq*10+2; return 7}
-fn main(){arr[ai()]=fv(); exit(seq)}'
+fn main(){arr[ai()]=fv(); if arr[3]!=7 {exit(255)} exit(seq)}' 12
 # `for i in START..END` evaluates both bounds exactly once, before the loop.
 # The bound is a VALUE: IR parked the vreg the variable itself lives in, so
 # the loop's back-edge wrote the body's new n straight into the "parked" bound
@@ -238,19 +272,35 @@ fn main(){for i in a()..b() {} exit(seq)}'
 diff_case "for_bound_is_a_value" 'fn main(){u64 n=3; u64 c=0
 for i in 0..n { n=100; c=c+1 }
 exit(c)}'
-# Divergent: IR evaluates the address/index first (12), legacy evaluates the
-# value first (21). Same split on both arches. DO NOT silently re-pin these —
-# a red here means an evaluation-order change that needs an owner decision.
-known_div_case "order_deref_store" 'static u64 seq=0
+# These two used to be known_div_case, pinned at IR=12 / legacy=21. The legacy
+# backends now evaluate the address first too, so both legs read 12 and the
+# rows are plain value-pinned cases. DO NOT silently re-pin them — a red here
+# means an evaluation-order change that needs an owner decision.
+value_case "order_deref_store" 'static u64 seq=0
 static u64 gbuf=0
 fn fa()->u64{seq=seq*10+1; return gbuf}
 fn fv()->u64{seq=seq*10+2; return 7}
-fn main(){gbuf=alloc(8); unsafe{*(fa() as uint32)=fv()}; exit(seq)}' 12 21
-known_div_case "order_sfield_store" 'static u64 seq=0
+fn main(){gbuf=alloc(8); unsafe{*(fa() as uint32)=fv()}; if load32(gbuf)!=7 {exit(255)} exit(seq)}' 12
+value_case "order_sfield_store" 'static u64 seq=0
 struct P{u64 x;u64 y}
 fn ai()->u64{seq=seq*10+1; return 3}
 fn fv()->u64{seq=seq*10+2; return 7}
-fn main(){P[10] pts; pts[ai()].x=fv(); exit(seq)}' 12 21
+fn main(){P[10] pts; pts[ai()].x=fv(); if pts[3].x!=7 {exit(255)} exit(seq)}' 12
+# The subscript runs before the WHOLE value expression, and the value itself
+# runs left to right: 123. Every config used to say 231 — the entire value
+# expression ahead of the index — so this is not a two-way swap.
+value_case "order_idx_store_whole" 'static u64 seq=0
+static u64[16] arr64
+fn a()->u64{seq=seq*10+1; return 3}
+fn fv()->u64{seq=seq*10+2; return 5}
+fn b()->u64{seq=seq*10+3; return 4}
+fn main(){arr64[a()]=fv()+b(); if arr64[3]!=9 {exit(255)} exit(seq)}' 123
+# The store parks the SUBSCRIPT across the value expression now, so a builtin
+# in the value must not destroy it. Measured at 0 on both legacy backends when
+# the ordering change was applied without the per-site scratch slots.
+value_case "order_idx_store_value_clobbers" 'static u64[16] vc
+fn ai()->u64{return 3}
+fn main(){u64 m=0; vc[ai()]=write(1,m,0)+77; exit(vc[3])}' 77
 
 echo "----"
 echo "Differential: $((TOTAL-DIV-KNOWN))/$TOTAL agree across backends, $KNOWN known-divergent (pinned), $DIV diverged."

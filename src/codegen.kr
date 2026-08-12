@@ -10303,16 +10303,23 @@ fn gen_stmt(uint64 node) {
                         uint64 stride_w = struct_total_size(sia_w)
                         uint64 foff_w = struct_field_offset(sia_w, field_tok)
                         uint64 fsz_w = struct_field_size(sia_w, field_tok)
-                        // Evaluate value → park in a slot private to this
-                        // store; the index expression below may itself park
-                        // something in temp_slot_0.
+                        // ADDRESS BEFORE VALUE (docs/LANGUAGE.md §4): the
+                        // subscript is part of the destination, so it runs
+                        // first. Both operands get a slot private to this
+                        // store — either expression may park something in
+                        // temp_slot_0.
                         uint64 saf_slot = alloc_scratch_slot()
-                        gen_expr(wval)
-                        emit_store_rax_to_stack(saf_slot)
-                        // Evaluate index → rax
+                        uint64 saf_idx_slot = alloc_scratch_slot()
+                        // Evaluate index → park it
                         uint32 idx_ch_w = ast_child(wfachild)
                         uint64 widx_w = idx_ch_w
                         gen_expr(widx_w)
+                        emit_store_rax_to_stack(saf_idx_slot)
+                        // Evaluate value → park it
+                        gen_expr(wval)
+                        emit_store_rax_to_stack(saf_slot)
+                        // Reload the index for the scaling below
+                        emit_load_rax_from_stack(saf_idx_slot)
                         // rax = i. multiply by stride
                         emit_mov_rcx_rax()
                         emit_mov_rax_imm(stride_w)
@@ -11026,11 +11033,12 @@ fn gen_stmt(uint64 node) {
             uint64 wrhs = rhs_child
             uint32 idx_child = ast_child(node)
             uint64 wi = idx_child
-            // data4 = 1 marks the compound form `arr[i] OP= v`, whose value
-            // expression contains a CompoundTemp standing for this index.
-            // Evaluate the index FIRST, exactly once, park it, and reload it
-            // so the code below still finds the index in rax. Plain
-            // `arr[i] = v` (data4 = 0) keeps its value-then-index order.
+            // ADDRESS BEFORE VALUE (docs/LANGUAGE.md §4): the SUBSCRIPT is
+            // part of the destination address, so it runs first, exactly once,
+            // and is parked; then the value. data4 = 1 marks the compound form
+            // `arr[i] OP= v`, whose value expression contains a CompoundTemp
+            // standing for this index — same order, the index just goes to the
+            // slot the CompoundTemp node reads.
             uint32 idx_compound = ast_data4(node)
             uint64 wicmp = idx_compound
             // Private slots: the value and the index are each parked across
@@ -11045,11 +11053,14 @@ fn gen_stmt(uint64 node) {
                 emit_store_rax_to_stack(ia_val_slot)
                 emit_load_rax_from_stack(compound_temp_slot)
             } else {
-                // Evaluate value first → save to temp
+                // Evaluate index first → park it
+                gen_expr(wi)
+                emit_store_rax_to_stack(ia_idx_slot)
+                // Evaluate value → park it
                 gen_expr(wrhs)
                 emit_store_rax_to_stack(ia_val_slot)
-                // Evaluate index
-                gen_expr(wi)
+                // Reload the index: the bounds check below reads it in rax
+                emit_load_rax_from_stack(ia_idx_slot)
             }
             // Bounds check under --debug (same shape as the read path).
             if debug_mode != 0 {
@@ -11186,17 +11197,17 @@ fn gen_stmt(uint64 node) {
         uint64 wv = val_child
         uint32 addr_child = ast_child(node)
         uint64 wa = addr_child
-        // data4 = 1 marks `*(addr as TYPE) OP= val`, whose value expression
-        // reads back through a CompoundTemp. Evaluate the address FIRST,
-        // exactly once, park it, then reload it so the code below still finds
-        // the address in rax. Plain `*(addr as TYPE) = val` (data4 = 0) keeps
-        // its value-then-address order.
+        // ADDRESS BEFORE VALUE (docs/LANGUAGE.md §4): the address expression
+        // runs first, exactly once, and is parked; then the value. data4 = 1
+        // marks `*(addr as TYPE) OP= val`, whose value expression reads the
+        // address back through a CompoundTemp — same order, it just parks the
+        // address where the CompoundTemp node knows to find it.
         uint32 ps_compound = ast_data4(node)
         uint64 wpsc = ps_compound
-        // Private slot: the value is parked across the evaluation of the
-        // address expression (and vice versa in the compound form), and either
-        // side may reach temp_slot_0 — any builtin call does.
+        // Private slots: each operand is parked across the evaluation of the
+        // other, and either side may reach temp_slot_0 — any builtin call does.
         uint64 ps_val_slot = alloc_scratch_slot()
+        uint64 ps_addr_slot = alloc_scratch_slot()
         if wpsc == 1 {
             gen_expr(wa)
             emit_store_rax_to_stack(compound_temp_slot)
@@ -11204,12 +11215,14 @@ fn gen_stmt(uint64 node) {
             emit_store_rax_to_stack(ps_val_slot)
             emit_load_rax_from_stack(compound_temp_slot)
         } else {
-            // Evaluate value first → save to temp
-            gen_expr(wv)
-            // Park the value
-            emit_store_rax_to_stack(ps_val_slot)
-            // Evaluate address
+            // Evaluate address first → park it
             gen_expr(wa)
+            emit_store_rax_to_stack(ps_addr_slot)
+            // Evaluate value → park it
+            gen_expr(wv)
+            emit_store_rax_to_stack(ps_val_slot)
+            // Reload the address so the tail below still finds it in rax
+            emit_load_rax_from_stack(ps_addr_slot)
         }
         // rax = address, load value from temp → rcx
         // mov rcx, [rsp + ps_val_slot]

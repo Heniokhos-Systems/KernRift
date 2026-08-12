@@ -5413,16 +5413,15 @@ fn gen_stmt_a64(uint64 node) {
         uint64 wv = val_child
         uint32 addr_child = ast_child(node)
         uint64 wa = addr_child
-        // data4 = 1 marks `*(addr as TYPE) OP= val`, whose value expression
-        // reads back through a CompoundTemp. Evaluate the address FIRST,
-        // exactly once, park it, then reload it so the code below still finds
-        // the address in x0. Plain `*(addr as TYPE) = val` (data4 = 0) keeps
-        // its value-then-address order.
+        // ADDRESS BEFORE VALUE (docs/LANGUAGE.md §4) — see the x86_64
+        // gen_stmt for the full note. data4 = 1 marks the `OP=` form, whose
+        // value expression reads the address back through a CompoundTemp.
         uint32 ps_compound_a = ast_data4(node)
         uint64 wpsc_a = ps_compound_a
-        // Private slot — see alloc_scratch_slot(): the operand parked here
+        // Private slots — see alloc_scratch_slot(): each operand parked here
         // crosses an arbitrary sub-expression that may itself use temp_slot_0.
         uint64 ps_val_slot_a = alloc_scratch_slot()
+        uint64 ps_addr_slot_a = alloc_scratch_slot()
         if wpsc_a == 1 {
             gen_expr_a64(wa)
             emit_a64_store_x0(compound_temp_slot)
@@ -5430,9 +5429,11 @@ fn gen_stmt_a64(uint64 node) {
             emit_a64_store_x0(ps_val_slot_a)
             emit_a64_load_x0(compound_temp_slot)
         } else {
+            gen_expr_a64(wa)
+            emit_a64_store_x0(ps_addr_slot_a)
             gen_expr_a64(wv)
             emit_a64_store_x0(ps_val_slot_a)
-            gen_expr_a64(wa)
+            emit_a64_load_x0(ps_addr_slot_a)
         }
         emit_a64_mov(10, 0)
         emit_a64_load_x0(ps_val_slot_a)
@@ -5457,10 +5458,10 @@ fn gen_stmt_a64(uint64 node) {
             uint64 wrhs = rhs_child
             uint32 idx_child = ast_child(node)
             uint64 wi = idx_child
-            // data4 = 1 marks the compound form `arr[i] OP= v`, whose value
+            // ADDRESS BEFORE VALUE (docs/LANGUAGE.md §4) — the subscript is
+            // part of the destination, so it runs first, exactly once. data4
+            // = 1 marks the compound form `arr[i] OP= v`, whose value
             // expression contains a CompoundTemp standing for this index.
-            // Evaluate the index FIRST, exactly once, and park it. Plain
-            // `arr[i] = v` (data4 = 0) keeps its value-then-index order.
             uint32 idx_compound_a = ast_data4(node)
             uint64 wicmp_a = idx_compound_a
             // Private slots — see alloc_scratch_slot(). The value and the
@@ -5475,10 +5476,10 @@ fn gen_stmt_a64(uint64 node) {
                 emit_a64_load_x0(compound_temp_slot)
                 emit_a64_store_x0(ia_idx_slot_a)
             } else {
-                gen_expr_a64(wrhs)
-                emit_a64_store_x0(ia_val_slot_a)
                 gen_expr_a64(wi)
                 emit_a64_store_x0(ia_idx_slot_a)
+                gen_expr_a64(wrhs)
+                emit_a64_store_x0(ia_val_slot_a)
             }
             uint32 arr_tok = ast_data1(node)
             uint64 warrtb = arr_tok
@@ -5540,15 +5541,22 @@ fn gen_stmt_a64(uint64 node) {
                         uint64 stride_aw = struct_total_size(sia_aw)
                         uint64 foff_aw = struct_field_offset(sia_aw, field_tok)
                         uint64 fsz_aw = struct_field_size(sia_aw, field_tok)
-                        // Evaluate value → park in a slot private to this
-                        // store (the index expression may use temp_slot_0).
+                        // ADDRESS BEFORE VALUE (docs/LANGUAGE.md §4): the
+                        // subscript runs first. Both operands get a slot
+                        // private to this store (either expression may use
+                        // temp_slot_0).
                         uint64 saf_slot_a = alloc_scratch_slot()
-                        gen_expr_a64(wval)
-                        emit_a64_store_x0(saf_slot_a)
-                        // Evaluate index → x0
+                        uint64 saf_idx_slot_a = alloc_scratch_slot()
+                        // Evaluate index → park it
                         uint32 idx_ch_aw = ast_child(wfachild)
                         uint64 widx_aw = idx_ch_aw
                         gen_expr_a64(widx_aw)
+                        emit_a64_store_x0(saf_idx_slot_a)
+                        // Evaluate value → park it
+                        gen_expr_a64(wval)
+                        emit_a64_store_x0(saf_slot_a)
+                        // Reload the index for the scaling below
+                        emit_a64_load_x0(saf_idx_slot_a)
                         // Multiply by stride
                         emit_a64_mov_imm(10, stride_aw)
                         uint64 mulinsn2 = 0x9B007C00 | (10 << 16) | (0 << 5) | 0

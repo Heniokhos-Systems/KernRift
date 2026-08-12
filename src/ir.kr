@@ -5021,10 +5021,13 @@ fn ir_lower_stmt(uint64 node) {
             uint64 wrhs = rhs_child
             uint64 val_v = 0xFFFFFFFF
             uint64 idx_v = 0xFFFFFFFF
-            // data4 = 1 marks the compound form `arr[i] OP= v`, whose value
-            // expression contains a CompoundTemp standing for this index.
-            // Evaluate the index FIRST, exactly once, and park it. Plain
-            // `arr[i] = v` (data4 = 0) keeps its value-then-index order.
+            // ADDRESS BEFORE VALUE (docs/LANGUAGE.md §4): the SUBSCRIPT is
+            // part of the destination address, so it is lowered first — its
+            // side effects happen before any of the value expression's. data4
+            // = 1 marks the compound form `arr[i] OP= v`, whose value
+            // expression contains a CompoundTemp standing for this index;
+            // that form already had the order, it just also has to publish
+            // the index through ir_compound_temp.
             uint32 is_compound = ast_data4(node)
             uint64 wcmp = is_compound
             if wcmp == 1 {
@@ -5034,10 +5037,10 @@ fn ir_lower_stmt(uint64 node) {
                 val_v = ir_lower_expr(wrhs)
                 ir_compound_temp = saved_temp
             } else {
-                // Evaluate value expression
-                val_v = ir_lower_expr(wrhs)
                 // Evaluate index expression
                 idx_v = ir_lower_expr(idx_child)
+                // Evaluate value expression
+                val_v = ir_lower_expr(wrhs)
             }
             // Load array base
             uint32 arr_tok = ast_data1(node)

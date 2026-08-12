@@ -1402,9 +1402,11 @@ fn main() {
 }
 CEVAL_PTR
 
-# 3. Plain `arr[i()] = v()` must keep its CURRENT value-then-index order (21).
-#    Pinned so the double-evaluation fix cannot quietly become an
-#    evaluation-order change; left-to-right is a separate, owner-approved task.
+# 3. Plain `arr[i()] = v()` evaluates the SUBSCRIPT first (12), the same as
+#    the `OP=` form above -- the destination address is evaluated before the
+#    value on every backend (docs/LANGUAGE.md §4). This used to be pinned at
+#    21 while the language had no stated rule; it is pinned at 12 now so the
+#    plain and compound forms cannot drift apart again.
 cat > "$DIR/../ceval_plain_$$.kr" <<'CEVAL_PLAIN'
 static u64 seq = 0
 static u8[16] arr
@@ -1412,7 +1414,8 @@ fn ai() -> u64 { seq = seq * 10 + 1  return 3 }
 fn fv() -> u64 { seq = seq * 10 + 2  return 7 }
 fn main() {
     arr[ai()] = fv()
-    if seq != 21 { exit(1) }
+    if seq != 12 { exit(1) }
+    if arr[3] != 7 { exit(2) }
     exit(7)
 }
 CEVAL_PLAIN
@@ -1830,6 +1833,22 @@ fn main() {
 }
 TSLOT_TWO
 
+# 5. The mirror image, and the reason the private slots had to land BEFORE
+#    the left-to-right ordering change: now that the destination address is
+#    evaluated first, the parked operand is the INDEX and the clobbering
+#    builtin sits in the VALUE. Measured: this shape returns 77 with both
+#    changes, 77 with neither -- and 0 on both legacy backends with the
+#    ordering change alone. It is the one row that only the pair makes green.
+cat > "$DIR/../tslot_val_$$.kr" <<'TSLOT_VAL'
+static u64[16] vc
+fn ai() -> u64 { return 3 }
+fn main() {
+    u64 m = 0
+    vc[ ai() ] = write(1, m, 0) + 77
+    exit(vc[3])
+}
+TSLOT_VAL
+
 TSLOT_RAN=0
 tslot_run() { # <arch> <flags> <src> <runner-or-empty>
     local _bin="/tmp/krc_tslot_$$"
@@ -1846,7 +1865,8 @@ tslot_run() { # <arch> <flags> <src> <runner-or-empty>
     rm -f "$_bin"
 }
 for _src in "$DIR/../tslot_idx_$$.kr" "$DIR/../tslot_ptr_$$.kr" \
-            "$DIR/../tslot_sfield_$$.kr" "$DIR/../tslot_two_$$.kr"; do
+            "$DIR/../tslot_sfield_$$.kr" "$DIR/../tslot_two_$$.kr" \
+            "$DIR/../tslot_val_$$.kr"; do
     tslot_run "$RUN_ARCH" ""          "$_src" ""
     tslot_run "$RUN_ARCH" "--legacy"  "$_src" ""
     if [ -n "$TSLOT_QEMU" ]; then
@@ -1854,10 +1874,10 @@ for _src in "$DIR/../tslot_idx_$$.kr" "$DIR/../tslot_ptr_$$.kr" \
         tslot_run "$TSLOT_OTHER" "--legacy" "$_src" "$TSLOT_QEMU"
     fi
 done
-# Guard against the loop silently doing nothing. 4 sources x 2 host configs
+# Guard against the loop silently doing nothing. 5 sources x 2 host configs
 # always; x2 more per source when the other arch is runnable.
-TSLOT_WANT=8
-if [ -n "$TSLOT_QEMU" ]; then TSLOT_WANT=16; fi
+TSLOT_WANT=10
+if [ -n "$TSLOT_QEMU" ]; then TSLOT_WANT=20; fi
 [ "$TSLOT_RAN" = "$TSLOT_WANT" ] || { TSLOT_OK=0; echo "  only $TSLOT_RAN/$TSLOT_WANT config-runs executed"; }
 if [ "$TSLOT_OK" = "1" ]; then
     echo "  store_sites_get_a_private_scratch_slot: PASS ($TSLOT_RAN config-runs)"
@@ -1867,7 +1887,133 @@ else
     FAIL=$((FAIL + 1))
 fi
 rm -f "$DIR/../tslot_idx_$$.kr" "$DIR/../tslot_ptr_$$.kr" \
-      "$DIR/../tslot_sfield_$$.kr" "$DIR/../tslot_two_$$.kr"
+      "$DIR/../tslot_sfield_$$.kr" "$DIR/../tslot_two_$$.kr" \
+      "$DIR/../tslot_val_$$.kr"
+
+# --- evaluation order is LEFT TO RIGHT, ADDRESS BEFORE VALUE ---------------
+# docs/LANGUAGE.md §4 / docs/UNDEFINED_BEHAVIOR.md. Nothing specified an
+# order before this; the four constructs below were measured and DISAGREED:
+#
+#   construct                              IRx86 LGx86 IRa64 LGa64   now
+#   unsafe{*(fa() as uint32)=fv()}           12    21    12    21  ->  12
+#   pts[ai()].x=fv()  (local struct array)   12    21    12    21  ->  12
+#   arr[ai()]=fv()                           21    21    21    21  ->  12
+#   arr64[a()]=fv()+b()                     221   221   221   221  -> 122
+#
+# The third row is why this is not "make legacy match IR": both backends
+# moved. The fourth is not a two-way swap -- the ENTIRE value expression
+# used to run before the subscript.
+#
+# Each row asserts the ORDER (seq is a decimal digit per call, in execution
+# order) AND the stored VALUE. Order alone would pass if the store were
+# dropped; value alone would pass on any order.
+#
+# These rows EXECUTE, so they follow $RUN_ARCH rather than naming an arch.
+TOTAL=$((TOTAL + 1))
+EORD_OK=1
+EORD_OTHER="arm64"
+if [ "$RUN_ARCH" = "arm64" ]; then EORD_OTHER="x86_64"; fi
+EORD_QEMU=""
+if [ "$EORD_OTHER" = "arm64" ]; then
+    EORD_QEMU="$(command -v qemu-aarch64-static || command -v qemu-aarch64 || true)"
+fi
+
+# 1. Deref store: address expression, then value.
+cat > "$DIR/../eord_deref_$$.kr" <<'EORD_DEREF'
+static u64 seq = 0
+static u8[16] ebuf
+fn fa() -> u64 { seq = seq * 10 + 1  return ebuf }
+fn fv() -> u64 { seq = seq * 10 + 2  return 9 }
+fn main() {
+    unsafe { *(fa() as uint32) = fv() }
+    if seq != 12 { exit(1) }
+    if load32(ebuf) != 9 { exit(2) }
+    exit(7)
+}
+EORD_DEREF
+
+# 2. Struct-array element field write: subscript, then value.
+cat > "$DIR/../eord_sfield_$$.kr" <<'EORD_SFIELD'
+struct EPt { u64 x  u64 y }
+static u64 seq = 0
+fn ai() -> u64 { seq = seq * 10 + 1  return 1 }
+fn fv() -> u64 { seq = seq * 10 + 2  return 9 }
+fn main() {
+    EPt[4] pts
+    pts[ai()].x = fv()
+    if seq != 12 { exit(1) }
+    if pts[1].x != 9 { exit(2) }
+    exit(7)
+}
+EORD_SFIELD
+
+# 3. Plain indexed store: subscript, then value. BOTH backends changed here.
+cat > "$DIR/../eord_idx_$$.kr" <<'EORD_IDX'
+static u64 seq = 0
+static u8[16] earr
+fn ai() -> u64 { seq = seq * 10 + 1  return 3 }
+fn fv() -> u64 { seq = seq * 10 + 2  return 9 }
+fn main() {
+    earr[ai()] = fv()
+    if seq != 12 { exit(1) }
+    if earr[3] != 9 { exit(2) }
+    exit(7)
+}
+EORD_IDX
+
+# 4. Subscript before the WHOLE value expression, and the value itself
+#    left-to-right: 122, not 221 and not 212.
+cat > "$DIR/../eord_whole_$$.kr" <<'EORD_WHOLE'
+static u64 seq = 0
+static u64[16] earr64
+fn a()  -> u64 { seq = seq * 10 + 1  return 3 }
+fn fv() -> u64 { seq = seq * 10 + 2  return 5 }
+fn b()  -> u64 { seq = seq * 10 + 3  return 4 }
+fn main() {
+    earr64[a()] = fv() + b()
+    if seq != 123 { exit(1) }
+    if earr64[3] != 9 { exit(2) }
+    exit(7)
+}
+EORD_WHOLE
+
+EORD_RAN=0
+eord_run() { # <arch> <flags> <src> <runner-or-empty>
+    local _bin="/tmp/krc_eord_$$"
+    if ! $KRC --arch="$1" $2 "$3" -o "$_bin" >/dev/null 2>&1; then
+        EORD_OK=0; echo "  $(basename $3) $1 ${2:-IR}: COMPILE FAILED"
+        return
+    fi
+    if [ -n "$4" ]; then $4 "$_bin" >/dev/null 2>&1; else "$_bin" >/dev/null 2>&1; fi
+    local _rc=$?
+    EORD_RAN=$((EORD_RAN + 1))
+    # 7 = order and value both correct. 1 = wrong order, 2 = wrong value.
+    [ "$_rc" = "7" ] || { EORD_OK=0; echo "  $(basename $3) $1 ${2:-IR}: got $_rc, want 7"; }
+    rm -f "$_bin"
+}
+for _src in "$DIR/../eord_deref_$$.kr" "$DIR/../eord_sfield_$$.kr" \
+            "$DIR/../eord_idx_$$.kr" "$DIR/../eord_whole_$$.kr"; do
+    eord_run "$RUN_ARCH" ""          "$_src" ""
+    eord_run "$RUN_ARCH" "--legacy"  "$_src" ""
+    if [ -n "$EORD_QEMU" ]; then
+        eord_run "$EORD_OTHER" ""         "$_src" "$EORD_QEMU"
+        eord_run "$EORD_OTHER" "--legacy" "$_src" "$EORD_QEMU"
+    fi
+done
+# Guard against the loop silently doing nothing. 4 sources x 2 host configs
+# always; x2 more per source when the other arch is runnable.
+EORD_WANT=8
+if [ -n "$EORD_QEMU" ]; then EORD_WANT=16; fi
+[ "$EORD_RAN" = "$EORD_WANT" ] || { EORD_OK=0; echo "  only $EORD_RAN/$EORD_WANT config-runs executed"; }
+if [ "$EORD_OK" = "1" ]; then
+    echo "  store_evaluates_address_before_value: PASS ($EORD_RAN config-runs)"
+    PASS=$((PASS + 1))
+else
+    echo "FAIL: store_evaluates_address_before_value"
+    FAIL=$((FAIL + 1))
+fi
+rm -f "$DIR/../eord_deref_$$.kr" "$DIR/../eord_sfield_$$.kr" \
+      "$DIR/../eord_idx_$$.kr" "$DIR/../eord_whole_$$.kr"
 rm -f "$DIR/../ceval_idx_$$.kr" "$DIR/../ceval_ptr_$$.kr" "$DIR/../ceval_plain_$$.kr"
 
 # File-scope struct statics: `static Point[N] pts` and `static Point sp`.
