@@ -19908,6 +19908,51 @@ ax_refuse arx_refuses_stack_top     "only meaningful with --emit=image" --arch=x
 ax_refuse arx_refuses_load_addr     "only meaningful with --emit=image" --arch=x86_64 --target=none --emit=arx --load-addr=0x400000
 rm -f "$ARX_SRC" "$ARX_BIN"
 
+# ---------------------------------------------------------------------------
+# Inline asm: `call <reg>` and `jmp <reg>` (FF /2 and FF /4).
+#
+# Added because a stack-switching trampoline is unwritable without them: it has
+# to change rsp and then enter a function, and call_ptr cannot help -- the
+# compiler frames that call normally and a managed frame does not survive rsp
+# moving underneath it. ApexRift's program launcher hit exactly that wall.
+#
+# The encodings are asserted as BYTES, not merely "it compiled": a wrong ModRM
+# extension silently assembles to a different instruction (FF /2 is call,
+# FF /4 is jmp, FF /6 is push), so anything short of the bytes would pass while
+# emitting the wrong one. r10/r15 cover the REX.B path.
+# ---------------------------------------------------------------------------
+TOTAL=$((TOTAL + 1))
+CR_SRC=$(mktemp /tmp/krc_callreg_XXXX.kr)
+CR_BIN=/tmp/krc_callreg_$$
+cat > "$CR_SRC" <<'CREOF'
+@naked
+fn t() {
+    asm { "call rax" }
+    asm { "call r10" }
+    asm { "jmp rdx" }
+    asm { "jmp r15" }
+    asm { "ret" }
+}
+fn main() -> uint64 { t(); return 0 }
+CREOF
+rm -f "$CR_BIN"
+$KRC $KRC_FLAGS "$CR_SRC" -o "$CR_BIN" --target=none --emit=image \
+     --stack-top=0x90000 --load-addr=0x400000 >/dev/null 2>&1
+if [ ! -f "$CR_BIN" ]; then
+    echo "FAIL: asm_call_jmp_reg (no artifact)"; FAIL=$((FAIL + 1))
+else
+    # ffd0 = call rax, 41ffd2 = call r10, ffe2 = jmp rdx, 41ffe7 = jmp r15
+    cr_hex=$(od -An -tx1 -v "$CR_BIN" | tr -d ' \n')
+    cr_bad=""
+    case "$cr_hex" in *ffd041ffd2ffe241ffe7*) ;; *) cr_bad="sequence not found" ;; esac
+    if [ -z "$cr_bad" ]; then
+        PASS=$((PASS + 1)); echo "  asm_call_jmp_reg: PASS (ff d0 / 41 ff d2 / ff e2 / 41 ff e7)"
+    else
+        echo "FAIL: asm_call_jmp_reg ($cr_bad)"; FAIL=$((FAIL + 1))
+    fi
+fi
+rm -f "$CR_SRC" "$CR_BIN"
+
 emit_recipe() {
     case "$1" in
         elf|elf-arm64|elf-x86_64|elfexe|linux|linux-x86_64|linux-arm64|linux-x86-64|obj|android)

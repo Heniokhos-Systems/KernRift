@@ -957,7 +957,17 @@ asm("0xD503201F")        // nop (ARM64)
 **x86_64**: `nop`, `ret`, `hlt`, `int3`, `iretq`, `cli`, `sti`, `cpuid`,
 `rdmsr`, `wrmsr`, `lgdt [rax]`, `lidt [rax]`, `invlpg [rax]`, `ltr ax`,
 `swapgs`, control-register moves (`mov cr0, rax`, etc.), port I/O
-(`in al, dx`, `out dx, al`, wide variants).
+(`in al, dx`, `out dx, al`, wide variants), register-to-register `mov`,
+`push`/`pop` of a register, and **`call <reg>` / `jmp <reg>`** (indirect,
+`FF /2` and `FF /4`).
+
+`call <reg>` exists for the one thing `call_ptr` cannot do: enter a function
+after changing `rsp` yourself. `call_ptr` is framed normally by the compiler,
+and a compiler-managed frame does not survive `rsp` moving underneath it, so a
+stack-switching trampoline has to make the call from inline asm. Note what is
+still absent — there is **no memory operand** (`mov [rcx], rsp`) and no
+immediate arithmetic (`and rsp, -16`), so a trampoline must keep its saved
+state in registers and let the caller do any alignment.
 
 **ARM64**: `nop`, `ret`, `eret`, `wfi`, `wfe`, `sev`, barriers (`isb`,
 `dsb sy/ish`, `dmb sy/ish`), `svc #N`, and `mrs` / `msr` for 20+ system

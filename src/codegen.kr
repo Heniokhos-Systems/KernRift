@@ -9871,6 +9871,38 @@ fn asm_emit_x86(uint64 str_tok) {
             return
         }
     }
+    // `call <reg>` -- FF /2, CALL r/m64. Indirect calls through a register are
+    // what a stack-switching trampoline needs: it must change rsp and then
+    // enter a function, and the compiler's own call_ptr cannot help there
+    // because it frames the call normally and a managed frame cannot survive
+    // rsp moving underneath it. Without this form that trampoline is simply
+    // unwritable, which is what ApexRift's launcher ran into.
+    //
+    // No REX.W: CALL r/m64 already defaults to a 64-bit operand size in long
+    // mode, so the only REX needed is B, to reach r8-r15. ModRM is mod=11
+    // (register direct), reg=2 (the /2 opcode extension), rm=the register.
+    if asm_match(sptr, 0, "call ", 5) != 0 && slen > 5 {
+        uint64 cr = asm_x86_reg(sptr, 5, slen - 5)
+        if cr != 0xFFFF {
+            if cr >= 8 { emit_byte(0x41) }
+            emit_byte(0xFF)
+            emit_byte(0xD0 | (cr & 7))
+            return
+        }
+    }
+    // `jmp <reg>` -- FF /4, the same encoding one extension along. Paired with
+    // call because a longjmp-style restore wants it, and splitting the pair
+    // would leave the next person adding one instruction to a file that
+    // already has its twin.
+    if asm_match(sptr, 0, "jmp ", 4) != 0 && slen > 4 {
+        uint64 jr = asm_x86_reg(sptr, 4, slen - 4)
+        if jr != 0xFFFF {
+            if jr >= 8 { emit_byte(0x41) }
+            emit_byte(0xFF)
+            emit_byte(0xE0 | (jr & 7))
+            return
+        }
+    }
     if asm_match(sptr, 0, "pop ", 4) != 0 && slen > 4 {
         uint64 qr = asm_x86_reg(sptr, 4, slen - 4)
         if qr != 0xFFFF {
