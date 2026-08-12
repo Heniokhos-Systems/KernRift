@@ -6071,6 +6071,17 @@ static uint64 ir_used_callee_mask = 0
 // bytes plus the return address to reach the caller's stack args.
 static uint64 ir_callee_save_bytes = 0
 
+// Is the x86_64 function currently being emitted @naked? Set once per
+// function in ir_emit_x86_function, BEFORE register allocation, and read
+// by the colour-file choice, the IR_ARG shuffle path and the return
+// sequence. @naked is not a decoration the emitters may ignore: a naked
+// body runs on someone else's register state (an ISR entered between two
+// instructions of an unrelated function), so anything it writes that the
+// SysV ABI says a CALL preserves is silent corruption of the interrupted
+// code. Every emitter that can pick a register for itself has to consult
+// this. Mirrors ir_xtensa.kr's xt_cur_is_naked.
+static uint64 ir_x86_naked_fn = 0
+
 // Colour->physical-register table, shared by every backend. Sized once for
 // the LARGEST colour file any of them uses (arm64 wide: 23), so an arch
 // that allocated first can never undersize the buffer for a later one
@@ -6150,6 +6161,48 @@ fn ir_regalloc_init_x86_wide() {
     unsafe { *(p10 as uint64) = 10 }      // colour 10 -> r10
     uint64 p11 = ir_phys_regs + 88
     unsafe { *(p11 as uint64) = 11 }      // colour 11 -> r11
+}
+
+// --- @naked x86_64 colour file --------------------------------------------
+// A @naked body has no prologue, so it never saves anything; whatever it
+// writes, it destroys for good. The default six-colour file is
+// callee-saved ONLY (rbx, r12-r15, rbp), which is exactly the set an
+// interrupt stub must not touch: the interrupted function is holding live
+// values there and a CALL is not allowed to change them. (Reported from a
+// real kernel: an ISR stub's temporaries landed in rbx and corrupted a
+// name pointer the interrupted fs_lookup was holding.)
+//
+// The naked file is therefore the caller-saved set, minus the three
+// registers the emitters use as their own scratch: rax and rcx are
+// ir_resolve_src's spill-reload pair (and CL is the variable-shift count),
+// rdx is div/mod's implicit high half. That leaves rsi, rdi, r8-r11 —
+// six colours, the same width as the default file, so nothing spills that
+// did not spill before.
+//
+// Order matters. r10/r11 come first because they are the only two that are
+// not also SysV argument registers, so the greedy colourer reaches for
+// them first and the outgoing-argument shuffle (ir_emit_call_arg_group)
+// has less work to do.
+//
+// What this file does NOT buy: surviving a CALL. Every register in it is
+// caller-saved, so a value live across a call inside a naked body is
+// destroyed — and there is no frame to spill it into either. That case is
+// diagnosed, not silently miscompiled (ir_x86_naked_diagnose).
+fn ir_regalloc_init_x86_naked() {
+    IR_NUM_REGS = 6
+    ir_phys_regs_ensure()
+    uint64 n0 = ir_phys_regs
+    unsafe { *(n0 as uint64) = 10 }       // colour 0 -> r10
+    uint64 n1 = ir_phys_regs + 8
+    unsafe { *(n1 as uint64) = 11 }       // colour 1 -> r11
+    uint64 n2 = ir_phys_regs + 16
+    unsafe { *(n2 as uint64) = 6 }        // colour 2 -> rsi
+    uint64 n3 = ir_phys_regs + 24
+    unsafe { *(n3 as uint64) = 7 }        // colour 3 -> rdi
+    uint64 n4 = ir_phys_regs + 32
+    unsafe { *(n4 as uint64) = 8 }        // colour 4 -> r8
+    uint64 n5 = ir_phys_regs + 40
+    unsafe { *(n5 as uint64) = 9 }        // colour 5 -> r9
 }
 
 // Is this opcode's x86 handler audited safe for the wide colour file?
@@ -8309,6 +8362,138 @@ fn ir_emit_asm_in_group(uint64 start_ii) {
     }
 }
 
+// SysV register for outgoing argument index 0..5.
+fn ir_x86_arg_reg(uint64 idx) -> uint64 {
+    if idx == 0 { return 7 }    // rdi
+    if idx == 1 { return 6 }    // rsi
+    if idx == 2 { return 2 }    // rdx
+    if idx == 3 { return 1 }    // rcx
+    if idx == 4 { return 8 }    // r8
+    return 9                    // r9
+}
+
+// Emit a contiguous group of register-passed IR_ARG instructions (imm < 6)
+// starting at `start_ii`, shuffle-safely, via push/pop.
+//
+// Only @naked functions take this path. Everywhere else the outgoing
+// argument registers can never be a vreg's home — the default file is
+// callee-saved only, and the wide file caps every operand of a dirty op
+// (IR_ARG is dirty) back to the callee-saved prefix — so the sequential
+// `mov target, src` in the IR_ARG handler is already safe. The naked file
+// is caller-saved by necessity (ir_regalloc_init_x86_naked) and four of
+// its six colours ARE argument registers, so `f(a, b)` with `b` homed in
+// rdi would have arg0's move destroy arg1's source. Same hazard, same
+// remedy, as ir_emit_asm_in_group's `in(var -> reg)` groups.
+//
+// Push/pop is chosen over an ordering search because it is correct for
+// every permutation including cycles, and because a naked body is a
+// handful of instructions where the extra pushes cost nothing. The pushes
+// and pops balance, so RSP at the CALL is exactly what it would have been.
+//
+// Instructions after the first in the group are nop-marked (opcode 0) so
+// the caller's loop does not re-emit them. Overflow args (imm >= 6) and
+// asm-input args (imm >= 100) end the group and are handled as before.
+fn ir_emit_call_arg_group(uint64 start_ii) {
+    uint64 start_bb = ir_insn_bb(start_ii)
+    uint64[8] cg_dst
+    uint64[8] cg_src_v
+    uint64 cg_count = 0
+
+    uint64 ci = start_ii
+    while ci < ir_insn_count {
+        uint64 cop = ir_insn_opcode(ci)
+        if cop != 51 { break }
+        uint64 cimm = ir_insn_imm(ci)
+        if cimm >= 6 { break }
+        if ir_insn_bb(ci) != start_bb { break }
+        if cg_count >= 6 { break }
+        uint64 dpv = ir_x86_arg_reg(cimm)
+        uint64 spv = ir_insn_src1(ci)
+        uint64 dp = cg_dst + cg_count * 8
+        uint64 sp = cg_src_v + cg_count * 8
+        unsafe { *(dp as uint64) = dpv }
+        unsafe { *(sp as uint64) = spv }
+        cg_count = cg_count + 1
+        // start_ii's own opcode stays intact: its handler returns right
+        // after this helper, and nop-marking it would confuse a later
+        // re-read of the instruction stream.
+        if ci != start_ii { ir_insn_set_opcode(ci, 0) }
+        ci = ci + 1
+    }
+
+    // Refuse the one shape this cannot compile correctly: a call from a
+    // @naked body with a 7th argument. IR_CALL resolves the overflow args
+    // AFTER this group has already loaded rdi/rsi/rdx/rcx/r8/r9, and it
+    // reads them from ir_get_phys_reg — which, with the caller-saved naked
+    // file, can name a register the pops above just overwrote. Deferring
+    // the group past the overflow block would have to happen at every
+    // IR_ARG consumer (call, call_ind, syscall, syscall_raw, the Windows
+    // IAT paths); a missed one is silently unloaded arguments. Refusing is
+    // the honest answer, and it takes nothing away: before this change the
+    // same call corrupted callee-saved registers instead.
+    if ci < ir_insn_count {
+        if ir_insn_opcode(ci) == 51 {
+            uint64 nimm = ir_insn_imm(ci)
+            if nimm >= 6 && nimm < 100 && ir_insn_bb(ci) == start_bb {
+                write(2, "error: x86_64: a call from a @naked function may pass at most 6 arguments (the 7th and later go through the stack, which a naked body has no frame for). Move the call into a normal function.\n", 191)
+                exit(1)
+            }
+        }
+    }
+
+    // Phase A: push every source, left to right.
+    uint64 k = 0
+    while k < cg_count {
+        uint64 sp_k = cg_src_v + k * 8
+        uint64 s_v = 0
+        unsafe { *(sp_k as uint64) -> s_v }
+        uint64 s_reg = ir_get_phys_reg(s_v)
+        if s_reg == 0xFFFFFFFF {
+            // Spilled: load from [rsp + orig_off + k*8] (rsp has already
+            // dropped by k*8 from the preceding pushes) and push that.
+            uint64 orig_off = ir_spill_offset(s_v)
+            uint64 adj_off = orig_off + k * 8
+            emit_byte(0x48); emit_byte(0x8B)
+            if adj_off < 128 {
+                emit_byte(0x44); emit_byte(0x24)
+                uint8 o8 = adj_off
+                emit_byte(o8)
+            } else {
+                emit_byte(0x84); emit_byte(0x24)
+                emit_u32_le(adj_off)
+            }
+            emit_byte(0x50)
+        } else {
+            if s_reg >= 8 {
+                emit_byte(0x41)
+                uint8 po = 0x50 | (s_reg & 7)
+                emit_byte(po)
+            } else {
+                uint8 po = 0x50 | s_reg
+                emit_byte(po)
+            }
+        }
+        k = k + 1
+    }
+
+    // Phase B: pop into the argument registers in reverse push order.
+    uint64 k2 = cg_count
+    while k2 > 0 {
+        k2 = k2 - 1
+        uint64 dp_k = cg_dst + k2 * 8
+        uint64 d_reg = 0
+        unsafe { *(dp_k as uint64) -> d_reg }
+        if d_reg >= 8 {
+            emit_byte(0x41)
+            uint8 po = 0x58 | (d_reg & 7)
+            emit_byte(po)
+        } else {
+            uint8 po = 0x58 | d_reg
+            emit_byte(po)
+        }
+    }
+}
+
 // Loud failure for an opcode the x86_64 dispatch does not handle. A build
 // error is always better than silently emitting nothing.
 fn x86_nyi_op(uint64 op) {
@@ -9736,7 +9921,13 @@ fn ir_emit_x86_insn(uint64 ii) {
     }
 
     if op == 42 {
-        // IR_RET: mov rax, src1 then jmp to epilogue
+        // IR_RET: mov rax, src1 then jmp to epilogue.
+        // @naked has no epilogue (step 10 skips it), so the jmp would land
+        // on whatever byte follows the function — the first instruction of
+        // the next one. The repro's stub ended `iretq; xor rax,rax; jmp ...`
+        // for exactly this reason: the implicit RET_VOID the lowering appends
+        // to every body. A naked body owns its own control flow; emit nothing.
+        if ir_x86_naked_fn != 0 { return }
         uint64 ret_r = ir_resolve_src(s1_v, 0)
         if ret_r != 0 { ir_emit_mov_r64_r64(0, ret_r) }
         // Emit jmp to epilogue (patched later)
@@ -9753,6 +9944,8 @@ fn ir_emit_x86_insn(uint64 ii) {
         // IR_RET_VOID: zero rax (default exit code for void main) then
         // jmp to epilogue. Function-local void returns are unaffected:
         // the caller doesn't read rax.
+        // @naked: no epilogue to jump to — see IR_RET above.
+        if ir_x86_naked_fn != 0 { return }
         emit_byte(0x48); emit_byte(0x31); emit_byte(0xC0)   // xor rax, rax
         emit_byte(0xE9)
         uint64 rfp = ir_ret_fixups + ir_ret_fixup_count * 4
@@ -9848,13 +10041,16 @@ fn ir_emit_x86_insn(uint64 ii) {
     if op == 51 {
         // IR_ARG: move src to the correct argument register
         // SysV ABI: rdi(7), rsi(6), rdx(2), rcx(1), r8(8), r9(9)
-        uint64 target = 7
-        if imm == 1 { target = 6 }
-        if imm == 2 { target = 2 }
-        if imm == 3 { target = 1 }
-        if imm == 4 { target = 8 }
-        if imm == 5 { target = 9 }
+        uint64 target = ir_x86_arg_reg(imm)
         if imm < 6 {
+            if ir_x86_naked_fn != 0 {
+                // @naked: the colour file is caller-saved, so an argument
+                // register can be a live vreg's home and the sequential
+                // moves below would shuffle-clobber. Emit the whole group
+                // through the stack instead.
+                ir_emit_call_arg_group(ii)
+                return
+            }
             uint64 src_reg = ir_resolve_src(s1_v, 0)
             ir_emit_mov_r64_r64(target, src_reg)
         }
@@ -10052,12 +10248,21 @@ fn ir_emit_x86_insn(uint64 ii) {
         }
         // Reset overflow arg count
         ir_overflow_arg_count = 0
-        // Result in rax
-        if dst_r != 0xFFFFFFFF && dst_r != 0 {
-            ir_emit_mov_r64_r64(dst_r, 0)
-        }
-        if dst_r == 0xFFFFFFFF {
-            ir_emit_store_spill(0, dest_v)
+        // Result in rax. A statement-level call (`f()` as an ExprStmt) still
+        // gets a dest vreg from the lowering, and capturing rax into it wrote
+        // a register nobody reads — dead everywhere, and in a @naked body it
+        // was the reported `mov %rax,%rbx` that corrupted the interrupted
+        // function. The legacy backend never emitted it. Skip it when the
+        // vreg has no readers; ir_use_count_get is conservative (returns 255
+        // for anything past the counted range), so a wrong answer can only
+        // keep the old instruction, never drop a live one.
+        if ir_use_count_get(dest_v) != 0 {
+            if dst_r != 0xFFFFFFFF && dst_r != 0 {
+                ir_emit_mov_r64_r64(dst_r, 0)
+            }
+            if dst_r == 0xFFFFFFFF {
+                ir_emit_store_spill(0, dest_v)
+            }
         }
         return
     }
@@ -10119,6 +10324,9 @@ fn ir_emit_x86_insn(uint64 ii) {
         ir_emit_mov_r64_r64(0, ptr_r)
         // call rax: FF D0
         emit_byte(0xFF); emit_byte(0xD0)
+        // Unread result: emit no capture at all (see IR_CALL above). Checked
+        // before the f64 movq, which would otherwise write dst_r for nothing.
+        if ir_use_count_get(dest_v) == 0 { return }
         uint64 result_reg = 0   // rax for int return
         if imm == 1 {
             // movq dst_r (or rax if spilled), xmm0
@@ -13797,11 +14005,249 @@ fn ir_opt_recognize_rotate() {
     }
 }
 
+// Names for the registers a @naked arm64 body can end up holding a value
+// in: the naked colour file (x12-x15) and, if this ever regresses, the
+// callee-saved bank (x19-x28) the default file hands out.
+fn ir_a64_reg_name(uint64 r) -> uint64 {
+    if r == 12 { return "x12" }
+    if r == 13 { return "x13" }
+    if r == 14 { return "x14" }
+    if r == 15 { return "x15" }
+    if r == 19 { return "x19" }
+    if r == 20 { return "x20" }
+    if r == 21 { return "x21" }
+    if r == 22 { return "x22" }
+    if r == 23 { return "x23" }
+    if r == 24 { return "x24" }
+    if r == 25 { return "x25" }
+    if r == 26 { return "x26" }
+    if r == 27 { return "x27" }
+    if r == 28 { return "x28" }
+    return "a general-purpose register"
+}
+
+fn ir_x86_reg_name(uint64 r) -> uint64 {
+    if r == 0 { return "rax" }
+    if r == 1 { return "rcx" }
+    if r == 2 { return "rdx" }
+    if r == 3 { return "rbx" }
+    if r == 4 { return "rsp" }
+    if r == 5 { return "rbp" }
+    if r == 6 { return "rsi" }
+    if r == 7 { return "rdi" }
+    if r == 8 { return "r8" }
+    if r == 9 { return "r9" }
+    if r == 10 { return "r10" }
+    if r == 11 { return "r11" }
+    if r == 12 { return "r12" }
+    if r == 13 { return "r13" }
+    if r == 14 { return "r14" }
+    return "r15"
+}
+
+// Diagnose a @naked body that needs scratch it cannot safely be given.
+//
+// After ir_regalloc_init_x86_naked every colour is a caller-saved register,
+// which is the best a naked body can do — but "best" is not "safe" in two
+// shapes, and both are silent wrong code rather than a build failure, so
+// they get named here:
+//
+//   1. A value live ACROSS a call (or any other op whose handler is not on
+//      the wide-file whitelist, i.e. one that can clobber registers beyond
+//      its operands). The call destroys every caller-saved register by
+//      definition, and there is no frame to spill the value into.
+//   2. A value the allocator spilled. @naked forces frame_size to 0, so
+//      spill slots start at [rsp+0] — which in an interrupt stub is the
+//      interrupted frame itself.
+//
+// Deliberately a WARNING, not an error: std/idt.kr's own isr_common calls a
+// reporter, and every real stub that calls a handler would fail to build.
+// Escalating is a later decision; naming the registers is what turns a
+// multi-hour "filesystem bug" hunt into a one-line read.
+//
+// IR_ARG (51) is excluded: outgoing-argument registers in a naked body are
+// loaded shuffle-safely by ir_emit_call_arg_group, and the call those args
+// belong to is itself checked. IR_ASM_BLOCK (96) is excluded too — that is
+// the user's own instruction text, where taking responsibility for the
+// register file is the entire point of @naked.
+// arch_a64 selects the per-arch handler whitelist and register names, the
+// same switch ir_seed_wide_ceilings_generic takes.
+fn ir_naked_diagnose_generic(uint64 fn_node, uint64 arch_a64) {
+    uint64 vcount = ir_vreg_next
+    if vcount == 0 { return }
+    uint64 set_bytes = ir_live_words * 8
+    if ir_seed_live_buf == 0 {
+        ir_seed_live_cap = 1024 * 8
+        ir_seed_live_buf = alloc(ir_seed_live_cap)
+    }
+    if set_bytes > ir_seed_live_cap { return }
+    uint64 tmp = ir_seed_live_buf
+
+    uint64 clobber_mask = 0
+    uint64 spill_count = 0
+
+    // Spilled-and-actually-read vregs (1). A vreg with no readers that the
+    // allocator left uncoloured costs nothing and must not warn.
+    uint64 v = 1
+    while v < vcount {
+        if ir_use_count_get(v) != 0 {
+            if ir_get_phys_reg(v) == 0xFFFFFFFF { spill_count = spill_count + 1 }
+        }
+        v = v + 1
+    }
+
+    // Live-across-a-clobbering-op vregs (2). Same backward per-instruction
+    // walk as ir_seed_wide_ceilings_generic, and the same live-set update
+    // rules — diverging from them under-approximates liveness.
+    uint64 b = 0
+    while b < ir_bb_count {
+        uint64 wi = 0
+        while wi < ir_live_words {
+            uint64 sp0 = ir_live_out + b * set_bytes + wi * 8
+            uint64 dp0 = tmp + wi * 8
+            uint64 lv = 0
+            unsafe { *(sp0 as uint64) -> lv }
+            unsafe { *(dp0 as uint64) = lv }
+            wi = wi + 1
+        }
+        uint64 off_p = ir_bb_list_off + b * 4
+        uint32 off32 = 0
+        unsafe { *(off_p as uint32) -> off32 }
+        uint64 end_p = ir_bb_list_off + (b + 1) * 4
+        uint32 end32 = 0
+        unsafe { *(end_p as uint32) -> end32 }
+        uint64 loff = off32
+        uint64 n = end32 - off32
+        while n > 0 {
+            n = n - 1
+            uint64 ent = ir_bb_list_buf + (loff + n) * 4
+            uint32 ii32 = 0
+            unsafe { *(ent as uint32) -> ii32 }
+            uint64 ii = ii32
+            uint64 op = ir_insn_opcode(ii)
+            if op == 0 { continue }
+            uint64 op_safe = 0
+            if arch_a64 != 0 { op_safe = ir_a64_op_widesafe(op) }
+            else { op_safe = ir_x86_op_widesafe(op) }
+            uint64 risky = 0
+            if op_safe == 0 && op != 51 && op != 96 { risky = 1 }
+            if risky != 0 {
+                // Everything live AFTER this op, minus the op's own result.
+                uint64 dd_skip = ir_insn_dest(ii)
+                uint64 w2 = 0
+                while w2 < ir_live_words {
+                    uint64 lp = tmp + w2 * 8
+                    uint64 bits = 0
+                    unsafe { *(lp as uint64) -> bits }
+                    while bits != 0 {
+                        uint64 iso = bits & (0 - bits)
+                        uint64 bp = ir_popcount64(iso - 1)
+                        uint64 lv2 = w2 * 64 + bp
+                        if lv2 > 0 && lv2 < vcount && lv2 != dd_skip {
+                            uint64 pr = ir_get_phys_reg(lv2)
+                            if pr != 0xFFFFFFFF { clobber_mask = clobber_mask | (1 << pr) }
+                        }
+                        bits = bits & ~(1 << bp)
+                    }
+                    w2 = w2 + 1
+                }
+            }
+            // Live-set update — mirror of ir_graph_color's builder.
+            if ir_insn_has_def(ii) != 0 {
+                uint64 dv = ir_insn_dest(ii)
+                if dv > 0 && dv < vcount {
+                    uint64 dp2 = tmp + (dv / 64) * 8
+                    uint64 dval = 0
+                    unsafe { *(dp2 as uint64) -> dval }
+                    dval = dval & ~(1 << (dv & 63))
+                    unsafe { *(dp2 as uint64) = dval }
+                }
+            }
+            uint64 u1 = ir_insn_src1(ii)
+            if u1 > 0 && u1 < vcount && op != 1 && op != 79 {
+                uint64 up = tmp + (u1 / 64) * 8
+                uint64 uv = 0
+                unsafe { *(up as uint64) -> uv }
+                uv = uv | (1 << (u1 & 63))
+                unsafe { *(up as uint64) = uv }
+            }
+            uint64 u2 = ir_insn_src2(ii)
+            if u2 > 0 && u2 < vcount && op != 1 && op != 12 && op != 13 && op != 30 && op != 42 && op != 61 && op != 135 && op != 136 && op != 138 && (op < 140 || op > 145) {
+                uint64 up = tmp + (u2 / 64) * 8
+                uint64 uv = 0
+                unsafe { *(up as uint64) -> uv }
+                uv = uv | (1 << (u2 & 63))
+                unsafe { *(up as uint64) = uv }
+            }
+            if op == 72 || op == 76 || op == 83 || op == 93 || op == 98 || op == 148 {
+                uint64 uimm = ir_insn_imm(ii)
+                if uimm > 0 && uimm < vcount {
+                    uint64 up = tmp + (uimm / 64) * 8
+                    uint64 uv = 0
+                    unsafe { *(up as uint64) -> uv }
+                    uv = uv | (1 << (uimm & 63))
+                    unsafe { *(up as uint64) = uv }
+                }
+            }
+        }
+        b = b + 1
+    }
+
+    if clobber_mask == 0 && spill_count == 0 { return }
+    uint32 nk_tok = ast_data1(fn_node)
+    if clobber_mask != 0 {
+        write(2, "warning: @naked function '", 26)
+        uint64 ns = tok_text_start(nk_tok)
+        uint64 nl = tok_text_len(nk_tok)
+        write(2, cg_source + ns, nl)
+        write(2, "' holds a value across a call in ", 33)
+        uint64 rr = 0
+        uint64 first = 1
+        while rr < 32 {
+            if (clobber_mask & (1 << rr)) != 0 {
+                if first == 0 { write(2, ", ", 2) }
+                uint64 rn = 0
+                if arch_a64 != 0 { rn = ir_a64_reg_name(rr) }
+                else { rn = ir_x86_reg_name(rr) }
+                write(2, rn, str_len(rn))
+                first = 0
+            }
+            rr = rr + 1
+        }
+        write(2, " -- the call destroys it (caller-saved by the ABI) and a naked body has no frame to spill into. Save it in your own asm, or move the work into a normal function.\n", 162)
+    }
+    if spill_count != 0 {
+        write(2, "warning: @naked function '", 26)
+        uint64 ns2 = tok_text_start(nk_tok)
+        uint64 nl2 = tok_text_len(nk_tok)
+        write(2, cg_source + ns2, nl2)
+        write(2, "' ran out of safe registers and spilled ", 40)
+        uint8[24] sbuf
+        uint64 slen = fmt_uint(sbuf, spill_count)
+        write(2, sbuf, slen)
+        write(2, " value(s); a naked body has no frame, so the spill slots land on the caller's stack.\n", 85)
+    }
+}
+
+fn ir_x86_naked_diagnose(uint64 fn_node) {
+    ir_naked_diagnose_generic(fn_node, 0)
+}
+
+fn ir_a64_naked_diagnose(uint64 fn_node) {
+    ir_naked_diagnose_generic(fn_node, 1)
+}
+
 @export
 fn ir_emit_x86_function(uint64 fn_node) {
     // Check for @naked attribute: bit 1 of annotation flags
     uint32 ann_flags = ast_data4(fn_node)
     uint64 is_naked = ann_flags & 2
+    // Published to the instruction selectors BEFORE anything is lowered or
+    // emitted (the discipline ir_xtensa.kr already follows): the colour
+    // file, the outgoing-argument shuffle and the return sequence all
+    // branch on it, and a stale value from the previous function would be
+    // a miscompile in either direction.
+    ir_x86_naked_fn = is_naked
 
     // Record the function's float return kind so later callers can
     // tag their IR_CALL result vreg with the right fkind. Without
@@ -13848,10 +14294,16 @@ fn ir_emit_x86_function(uint64 fn_node) {
         ir_regalloc_init_x86_wide()
         ir_x86_seed_param_ceilings()
         ir_x86_seed_wide_ceilings()
+    } else if is_naked != 0 {
+        // @naked never gets the default file: colours 0-5 there are the
+        // callee-saved six, and a naked body writing those destroys the
+        // register state of whatever it interrupted.
+        ir_regalloc_init_x86_naked()
     } else {
         ir_regalloc_init()
     }
     ir_graph_color()
+    if is_naked != 0 { ir_x86_naked_diagnose(fn_node) }
 
     // 3b. XMM register class: f64 homes in xmm2..xmm15, a second
     // colouring over the same interference graph (see ir_x86_xmm_alloc).

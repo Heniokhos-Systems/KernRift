@@ -142,6 +142,54 @@ fn ir_a64_emit_callee_frame(uint64 mask, uint64 dmask, uint64 cs_base, uint64 sa
 // Register allocator setup for ARM64
 // ---------------------------------------------------------------------------
 
+// Is the arm64 function currently being emitted @naked? Set once per
+// function in ir_emit_arm64_function, BEFORE lowering, and read by the
+// colour-file choice, the f64 home allocator and the return sequence.
+// See ir.kr's ir_x86_naked_fn for why every register-picking emitter has
+// to consult it; arm64 had the identical defect (an @naked body's
+// temporaries landed in x19-x22, all AAPCS callee-saved).
+static uint64 ir_a64_naked_fn = 0
+
+// --- @naked ARM64 colour file ---------------------------------------------
+// The default file is x19-x28: callee-saved, i.e. exactly the registers an
+// interrupt stub must leave alone. The naked file is caller-saved instead,
+// and specifically the four caller-saved registers that are neither
+// argument registers nor emitter scratch:
+//
+//   x0-x7   are the outgoing argument registers; IR_ARG moves into them
+//           sequentially, so a vreg homed there would be shuffle-clobbered
+//           by an earlier argument's move.
+//   x8      is the indirect-result register and the macOS/Linux syscall
+//           number on some paths.
+//   x9/x10  ir_a64_resolve_src's spill-reload pair.
+//   x11     IR_MOD/IR_SMOD's quotient temp and the large-frame address
+//           scratch in ir_a64_ldr_sp/str_sp.
+//   x16/x17 linker veneer scratch; x18 platform-reserved; x30 is LR.
+//
+// which leaves x12-x15. Four colours instead of ten, so a naked body with
+// more than four simultaneously live values spills — and a naked body has
+// no frame, so that is diagnosed (ir_a64_naked_diagnose) rather than
+// silently emitted. Four is enough for the shape this exists for: an ISR
+// stub pulling a handful of words out of the interrupt frame and handing
+// them to a real function.
+//
+// x86_64 cannot take this route — it has only two caller-saved registers
+// that are not argument registers or scratch (r10, r11) — so it keeps the
+// argument registers in its file and makes IR_ARG shuffle-safe instead
+// (ir_emit_call_arg_group). Same goal, different arithmetic.
+fn ir_regalloc_init_arm64_naked() {
+    IR_NUM_REGS = 4
+    ir_phys_regs_ensure()
+    uint64 k0 = ir_phys_regs
+    unsafe { *(k0 as uint64) = 12 }       // colour 0 -> x12
+    uint64 k1 = ir_phys_regs + 8
+    unsafe { *(k1 as uint64) = 13 }       // colour 1 -> x13
+    uint64 k2 = ir_phys_regs + 16
+    unsafe { *(k2 as uint64) = 14 }       // colour 2 -> x14
+    uint64 k3 = ir_phys_regs + 24
+    unsafe { *(k3 as uint64) = 15 }       // colour 3 -> x15
+}
+
 fn ir_regalloc_init_arm64() {
     // Allocate or reuse the phys_regs table (sized centrally by
     // ir_phys_regs_ensure for the largest colour file any arch uses).
@@ -391,6 +439,12 @@ fn ir_a64_fpr_alloc() {
     }
     if vcount > ir_a64_fpr_map_cap { return }
     memset(ir_a64_fpr_map, 0, vcount)
+    // d8-d15 are AAPCS callee-saved and the prologue that would save them
+    // is skipped for @naked, so homing an f64 there is the same silent
+    // corruption the GPR file used to commit. The memset above still ran,
+    // so no stale home from the previous function survives. (x86_64 gets
+    // this for free: ir_x86_xmm_alloc is called with enable=0 for naked.)
+    if ir_a64_naked_fn != 0 { return }
     if vcount < 2 { return }
     // Interference-graph geometry — must mirror ir_graph_color exactly.
     uint64 row_words = (vcount + 63) / 64
@@ -1517,6 +1571,12 @@ fn ir_emit_arm64_insn(uint64 ii) {
 
     // ----- IR_RET (42): move result to x0 then branch to epilogue -----
     if op == 42 {
+        // @naked has no epilogue (step 11 skips it), so the B below would
+        // land on the first instruction of the NEXT function. The lowering
+        // appends an implicit RET_VOID to every body, which is how a naked
+        // stub ending in its own `eret`/`iretq` picked up a dead tail. A
+        // naked body owns its control flow; emit nothing.
+        if ir_a64_naked_fn != 0 { return }
         uint64 ret_dh = ir_a64_fpr_home(s1_v)
         if ret_dh != 0xFFFFFFFF {
             emit_a64_fmov_xd(0, ret_dh)
@@ -1539,6 +1599,8 @@ fn ir_emit_arm64_insn(uint64 ii) {
         // main) exits with status 0 instead of whatever was last in x0
         // when the auto-inserted exit syscall fires. Function-local void
         // returns are unaffected: caller doesn't read x0.
+        // @naked: no epilogue to branch to — see IR_RET above.
+        if ir_a64_naked_fn != 0 { return }
         emit_a64_mov_imm(0, 0)
         uint64 rfp = ir_ret_fixups + ir_ret_fixup_count * 4
         uint32 rpo = out_len
@@ -1609,12 +1671,17 @@ fn ir_emit_arm64_insn(uint64 ii) {
         unsafe { *(fe4 as uint32) = ct }
         fixup_count = fixup_count + 1
         ir_overflow_arg_count = 0
-        // Result in x0
-        if dst_r != 0xFFFFFFFF && dst_r != 0 {
-            emit_a64_mov(dst_r, 0)
-        }
-        if dst_r == 0xFFFFFFFF {
-            ir_a64_emit_store_spill(0, dest_v)
+        // Result in x0. A statement-level call still gets a dest vreg from
+        // the lowering; capturing x0 into it wrote a register nobody reads.
+        // See ir.kr's IR_CALL for the full note — in a @naked body this was
+        // the `mov x19, x0` that corrupted the interrupted function.
+        if ir_use_count_get(dest_v) != 0 {
+            if dst_r != 0xFFFFFFFF && dst_r != 0 {
+                emit_a64_mov(dst_r, 0)
+            }
+            if dst_r == 0xFFFFFFFF {
+                ir_a64_emit_store_spill(0, dest_v)
+            }
         }
         return
     }
@@ -2102,11 +2169,14 @@ fn ir_emit_arm64_insn(uint64 ii) {
     if op == 87 {
         uint64 ptr_r = ir_a64_resolve_src(s1_v, 9)
         emit_a64_blr(ptr_r)
-        if dst_r != 0xFFFFFFFF && dst_r != 0 {
-            emit_a64_mov(dst_r, 0)
-        }
-        if dst_r == 0xFFFFFFFF {
-            ir_a64_emit_store_spill(0, dest_v)
+        // Unread result: emit no capture (see IR_CALL above).
+        if ir_use_count_get(dest_v) != 0 {
+            if dst_r != 0xFFFFFFFF && dst_r != 0 {
+                emit_a64_mov(dst_r, 0)
+            }
+            if dst_r == 0xFFFFFFFF {
+                ir_a64_emit_store_spill(0, dest_v)
+            }
         }
         return
     }
@@ -3275,6 +3345,9 @@ fn ir_emit_arm64_function(uint64 fn_node) {
     // Check for @naked attribute
     uint32 ann_flags = ast_data4(fn_node)
     uint64 is_naked = ann_flags & 2
+    // Published before anything is lowered or emitted — the colour file,
+    // the f64 home allocator and the return sequence all branch on it.
+    ir_a64_naked_fn = is_naked
 
     // 1. Lower AST to IR
     ir_lower_function(fn_node)
@@ -3304,10 +3377,16 @@ fn ir_emit_arm64_function(uint64 fn_node) {
         ir_regalloc_init_arm64_wide()
         ir_a64_seed_param_ceilings()
         ir_a64_seed_wide_ceilings()
+    } else if is_naked != 0 {
+        // @naked never gets the default file: it is x19-x28, and a naked
+        // body writing those destroys the register state of whatever it
+        // interrupted.
+        ir_regalloc_init_arm64_naked()
     } else {
         ir_regalloc_init_arm64()
     }
     ir_graph_color()
+    if is_naked != 0 { ir_a64_naked_diagnose(fn_node) }
 
     // 3a. Dedicated f64 colouring over d8-d15 (sets ir_a64_uses_fpr,
     // which gates the FP callee-saved bank in the prologue/epilogue).

@@ -2014,6 +2014,250 @@ else
 fi
 rm -f "$DIR/../eord_deref_$$.kr" "$DIR/../eord_sfield_$$.kr" \
       "$DIR/../eord_idx_$$.kr" "$DIR/../eord_whole_$$.kr"
+# --- @naked bodies must not write callee-saved registers (IR backend) -------
+#
+# @naked means "no prologue": the body saves nothing, so every register it
+# writes is destroyed for whatever it interrupted. The IR backend used to
+# hand naked bodies the default six-colour file, which is callee-saved ONLY
+# (rbx, r12-r15, rbp) -- reported from a real OS project as an interrupt stub
+# clobbering rbx while the interrupted fs_lookup held a name pointer there.
+#
+# The check has to read the EMITTED CODE. A row that merely RUNS the stub
+# passes against this bug, because the corruption only shows up in the caller
+# after the interrupt returns. So: --emit=asm (the IR path, and it emits every
+# function regardless of reachability), carve the naked function's byte column
+# out of the listing, disassemble it, and fail on any instruction whose
+# DESTINATION is callee-saved. --emit=obj is the LEGACY backend, which has
+# always been clean here; measuring with it would hide the defect completely.
+echo ""
+echo "--- @naked callee-saved register discipline (IR backend) ---"
+
+# Byte column of one function in an --emit=asm listing, as a hex string.
+# Listing shape: "  <hex offset>: <hex bytes>  <mnemonic text>", with the
+# mnemonic separated by two spaces and often absent entirely, so the bytes
+# are the only column that is always there.
+nk_bytes() { # <listing> <label>
+    awk -v fn="$2:" '
+      $0 == fn { inf = 1; next }
+      inf && /^[A-Za-z_.]/ { inf = 0 }
+      inf {
+        line = $0 " "
+        sub(/^[ ]*[0-9a-f]+: /, "", line)
+        while (match(line, /^[0-9a-f][0-9a-f] /)) {
+          printf "%s", substr(line, 1, 2)
+          line = substr(line, 4)
+        }
+      }
+    ' "$1"
+}
+
+# Disassemble a hex byte string as x86-64 and print every instruction that
+# WRITES a callee-saved register: destination-last operand in AT&T syntax,
+# plus the pop forms.
+nk_x86_bad() { # <hex>
+    local _b="/tmp/krc_naked_$$.bin"
+    printf '%s' "$1" | xxd -r -p > "$_b"
+    objdump -D -b binary -m i386:x86-64 "$_b" 2>/dev/null \
+        | grep -E ',%(rbx|ebx|bx|bl|bh|rbp|ebp|bp|bpl|r1[2-5][dwb]?)$|pop +%(rbx|rbp|r1[2-5])$'
+    rm -f "$_b"
+}
+
+# 32-bit words of one function in an arm64 --emit=asm listing.
+nk_a64_words() { # <listing> <label>
+    awk -v fn="$2:" '
+      $0 == fn { inf = 1; next }
+      inf && /^[A-Za-z_.]/ { inf = 0 }
+      inf {
+        line = $0
+        sub(/^[ ]*[0-9a-f]+: /, "", line)
+        if (line ~ /^[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]/) {
+          print substr(line, 1, 8)
+        }
+      }
+    ' "$1"
+}
+
+# 1. The reported repro: a naked ISR stub that calls a normal function.
+#    Before the fix the IR backend put the (unread) call result in rbx and
+#    then emitted a dead `xor rax,rax; jmp` AFTER the user's iretq.
+cat > "$DIR/../naked_repro_$$.kr" <<'NAKED_REPRO'
+static u64 counter = 0
+fn handler() { counter = counter + 1 }
+@naked
+fn stub_a() {
+    asm { "push rax" }
+    handler()
+    asm { "pop rax" }
+    asm { "iretq" }
+}
+fn main() -> uint32 { u64 keep = fn_addr("stub_a")  counter = counter + keep  loop { } }
+NAKED_REPRO
+
+# 2. std/idt.kr's own isr_common. Before the fix it wrote rbx, r12, r13 AND
+#    r14 -- it survived only because its reporter halts, so the post-call
+#    capture never executed. A returning handler was corrupted for real.
+cat > "$DIR/../naked_idt_$$.kr" <<'NAKED_IDT'
+import "std/idt.kr"
+fn main() -> uint32 { idt_init()  return 0 }
+NAKED_IDT
+
+# 3. A naked body that keeps a value live ACROSS the call. No register file
+#    can make that correct (every register a naked body may safely use is
+#    caller-saved, and there is no frame to spill into), so the compiler has
+#    to SAY so. Warning, not error: std/idt.kr and every stub that calls a
+#    handler must still build.
+cat > "$DIR/../naked_warn_$$.kr" <<'NAKED_WARN'
+static u64 counter = 0
+fn handler() -> u64 { counter = counter + 1  return counter }
+@naked
+fn stub_w() {
+    u64 keep = counter + 7
+    u64 got = handler()
+    counter = keep + got
+}
+fn main() -> uint32 { u64 k = fn_addr("stub_w")  counter = counter + k  return 0 }
+NAKED_WARN
+
+# 4. Same shape as (1) but portable, for the arm64 IR backend, which shared
+#    the defect (temporaries landed in x19-x22, all AAPCS callee-saved).
+cat > "$DIR/../naked_a64_$$.kr" <<'NAKED_A64'
+static u64 counter = 0
+fn handler(u64 a, u64 b, u64 c) { counter = counter + a + b + c }
+@naked
+fn stub_a() {
+    u64 x = counter
+    u64 y = counter + 1
+    u64 z = counter + 2
+    handler(x, y, z)
+}
+fn main() -> uint32 { u64 keep = fn_addr("stub_a")  counter = counter + keep  return 0 }
+NAKED_A64
+
+NK_ASM1="/tmp/krc_naked_a1_$$.s"
+NK_ASM2="/tmp/krc_naked_a2_$$.s"
+NK_ASM3="/tmp/krc_naked_a3_$$.s"
+
+# Both x86_64 rows COMPILE only (they disassemble the listing, they never
+# execute it), so pinning --arch=x86_64 is correct here.
+if ! command -v objdump >/dev/null 2>&1 || ! command -v xxd >/dev/null 2>&1; then
+    echo "  naked_stub_no_callee_saved_x86: SKIP (objdump/xxd not installed)"
+    echo "  naked_isr_common_no_callee_saved: SKIP (objdump/xxd not installed)"
+else
+    TOTAL=$((TOTAL + 1))
+    NK1_OK=1
+    NK1_NOTES=""
+    if ! $KRC --arch=x86_64 --target=none --emit=asm "$DIR/../naked_repro_$$.kr" -o "$NK_ASM1" >/dev/null 2>&1; then
+        NK1_OK=0; NK1_NOTES=" (--emit=asm failed)"
+    else
+        NK1_HEX=$(nk_bytes "$NK_ASM1" stub_a)
+        # Guard against a silently-empty extraction: a check that cannot
+        # fail is not a check. The stub is push/call/pop/iretq = 10 bytes.
+        if [ ${#NK1_HEX} -lt 16 ]; then
+            NK1_OK=0; NK1_NOTES="$NK1_NOTES (extracted only ${#NK1_HEX} hex chars for stub_a)"
+        else
+            NK1_BAD=$(nk_x86_bad "$NK1_HEX")
+            if [ -n "$NK1_BAD" ]; then
+                NK1_OK=0
+                NK1_NOTES="$NK1_NOTES (writes callee-saved: $(echo "$NK1_BAD" | tr '\n' ';'))"
+            fi
+            # Dead tail: a naked body gets no synthesised return sequence, so
+            # the last thing emitted must be the user's own iretq (48 cf).
+            case "$NK1_HEX" in
+                *48cf) : ;;
+                *) NK1_OK=0; NK1_NOTES="$NK1_NOTES (code emitted after the user's iretq: ...${NK1_HEX#${NK1_HEX%????????}})" ;;
+            esac
+        fi
+    fi
+    if [ "$NK1_OK" = 1 ]; then
+        PASS=$((PASS + 1)); echo "  naked_stub_no_callee_saved_x86: PASS (no rbx/rbp/r12-r15 write, no tail past iretq)"
+    else
+        FAIL=$((FAIL + 1)); echo "FAIL: naked_stub_no_callee_saved_x86:$NK1_NOTES"
+    fi
+
+    TOTAL=$((TOTAL + 1))
+    NK2_OK=1
+    NK2_NOTES=""
+    if ! $KRC --arch=x86_64 --target=none --emit=asm "$DIR/../naked_idt_$$.kr" -o "$NK_ASM2" >/dev/null 2>&1; then
+        NK2_OK=0; NK2_NOTES=" (--emit=asm failed)"
+    else
+        NK2_HEX=$(nk_bytes "$NK_ASM2" isr_common)
+        if [ ${#NK2_HEX} -lt 40 ]; then
+            NK2_OK=0; NK2_NOTES="$NK2_NOTES (extracted only ${#NK2_HEX} hex chars for isr_common)"
+        else
+            NK2_BAD=$(nk_x86_bad "$NK2_HEX")
+            if [ -n "$NK2_BAD" ]; then
+                NK2_OK=0
+                NK2_NOTES="$NK2_NOTES (writes callee-saved: $(echo "$NK2_BAD" | tr '\n' ';'))"
+            fi
+        fi
+    fi
+    if [ "$NK2_OK" = 1 ]; then
+        PASS=$((PASS + 1)); echo "  naked_isr_common_no_callee_saved: PASS (std/idt.kr isr_common, no rbx/rbp/r12-r15 write)"
+    else
+        FAIL=$((FAIL + 1)); echo "FAIL: naked_isr_common_no_callee_saved:$NK2_NOTES"
+    fi
+fi
+
+# The unsafe-scratch diagnostic. Must be a WARNING (build still succeeds) and
+# must name the register, which is what turns a multi-hour "filesystem bug"
+# hunt into a one-line read.
+TOTAL=$((TOTAL + 1))
+NK3_OUT=$($KRC --arch=x86_64 --emit=asm "$DIR/../naked_warn_$$.kr" -o "$NK_ASM3" 2>&1)
+NK3_RC=$?
+NK3_OK=1
+NK3_NOTES=""
+[ "$NK3_RC" = 0 ] || { NK3_OK=0; NK3_NOTES=" (exit $NK3_RC -- must be a warning, not an error)"; }
+case "$NK3_OUT" in
+    *"warning: @naked function 'stub_w'"*) : ;;
+    *) NK3_OK=0; NK3_NOTES="$NK3_NOTES (no @naked warning naming stub_w)" ;;
+esac
+case "$NK3_OUT" in
+    *r10*|*r11*|*rsi*|*rdi*|*r8*|*r9*) : ;;
+    *) NK3_OK=0; NK3_NOTES="$NK3_NOTES (warning does not name the register at risk)" ;;
+esac
+if [ "$NK3_OK" = 1 ]; then
+    PASS=$((PASS + 1)); echo "  naked_live_across_call_warns: PASS (warns and names the register, build still succeeds)"
+else
+    FAIL=$((FAIL + 1)); echo "FAIL: naked_live_across_call_warns:$NK3_NOTES"
+fi
+
+# arm64 IR shared the defect. No aarch64 disassembler is assumed here, so the
+# check reads the destination-register field (bits 4:0) of each emitted word
+# and fails on x19-x28. B/BL words are skipped -- their low bits are part of
+# the branch offset, not a register number. The probe's naked body contains
+# no other branch form, which is what makes that exclusion sufficient.
+TOTAL=$((TOTAL + 1))
+NK4_ASM="/tmp/krc_naked_a4_$$.s"
+NK4_OK=1
+NK4_NOTES=""
+if ! $KRC --arch=arm64 --emit=asm "$DIR/../naked_a64_$$.kr" -o "$NK4_ASM" >/dev/null 2>&1; then
+    NK4_OK=0; NK4_NOTES=" (--emit=asm failed)"
+else
+    NK4_N=0
+    for _w in $(nk_a64_words "$NK4_ASM" stub_a); do
+        NK4_N=$((NK4_N + 1))
+        _wv=$((0x$_w))
+        _top=$((_wv & 0xFC000000))
+        if [ "$_top" = "$((0x14000000))" ] || [ "$_top" = "$((0x94000000))" ]; then continue; fi
+        _rd=$((_wv & 31))
+        if [ "$_rd" -ge 19 ] && [ "$_rd" -le 28 ]; then
+            NK4_OK=0; NK4_NOTES="$NK4_NOTES (word $_w writes x$_rd)"
+        fi
+    done
+    if [ "$NK4_N" -lt 5 ]; then
+        NK4_OK=0; NK4_NOTES="$NK4_NOTES (extracted only $NK4_N words for stub_a)"
+    fi
+fi
+if [ "$NK4_OK" = 1 ]; then
+    PASS=$((PASS + 1)); echo "  naked_stub_no_callee_saved_arm64: PASS (no x19-x28 destination)"
+else
+    FAIL=$((FAIL + 1)); echo "FAIL: naked_stub_no_callee_saved_arm64:$NK4_NOTES"
+fi
+
+rm -f "$DIR/../naked_repro_$$.kr" "$DIR/../naked_idt_$$.kr" \
+      "$DIR/../naked_warn_$$.kr" "$DIR/../naked_a64_$$.kr"
+rm -f "$NK_ASM1" "$NK_ASM2" "$NK_ASM3" "$NK4_ASM"
+
 rm -f "$DIR/../ceval_idx_$$.kr" "$DIR/../ceval_ptr_$$.kr" "$DIR/../ceval_plain_$$.kr"
 
 # File-scope struct statics: `static Point[N] pts` and `static Point sp`.
@@ -6675,12 +6919,12 @@ rm -f "$PCI_SRC" "$PCI_IMG"
 TOTAL=$((TOTAL + 1))
 opshape_pat='^[[:space:]]*if op == 72 \|\| op == 76 \|\| op == 83 \|\| op == 93 \|\| op == 98 \|\| op == 148 \{[[:space:]]*$'
 opshape_src=$(grep -cE "$opshape_pat" "$DIR/../src/ir.kr")
-opshape_doc=$(grep -c 'SEVEN separate times' "$DIR/../docs/IR_REFERENCE.md")
-if [ "$opshape_src" = "7" ] && [ "$opshape_doc" = "1" ]; then
-    PASS=$((PASS + 1)); echo "  ir_operand_shape_copies_pinned: PASS (7 verbatim copies, doc agrees)"
+opshape_doc=$(grep -c 'EIGHT separate times' "$DIR/../docs/IR_REFERENCE.md")
+if [ "$opshape_src" = "8" ] && [ "$opshape_doc" = "1" ]; then
+    PASS=$((PASS + 1)); echo "  ir_operand_shape_copies_pinned: PASS (8 verbatim copies, doc agrees)"
 else
     FAIL=$((FAIL + 1))
-    echo "FAIL: ir_operand_shape_copies_pinned (src has $opshape_src verbatim copies, want 7; docs/IR_REFERENCE.md §14 says SEVEN: $opshape_doc match)"
+    echo "FAIL: ir_operand_shape_copies_pinned (src has $opshape_src verbatim copies, want 8; docs/IR_REFERENCE.md §14 says EIGHT: $opshape_doc match)"
     echo "  if a copy no longer matches verbatim, the copies have diverged (that miscompiles);"
     echo "  if you changed the number of copies, update docs/IR_REFERENCE.md §14 in the same commit"
 fi
