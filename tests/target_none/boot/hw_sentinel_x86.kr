@@ -1,0 +1,132 @@
+// KernRift REAL-HARDWARE sentinel, x86_64 multiboot.
+//
+// Every bare-metal result in this project so far is QEMU-only. This program
+// exists to be booted on physical silicon, so it differs from sentinel_x86.kr
+// in one decisive way: it prints to VGA text memory at 0xB8000 rather than to
+// a 16550. Neither of the owner's machines has a serial port -- the desktop
+// probes 0x3F8 as PORT_UNKNOWN and the laptop has no COM at all -- so the
+// serial sentinel would boot correctly and print into a void.
+//
+// The output is designed to be READ OFF A SCREEN and reported back, so every
+// line has to be discriminating on its own:
+//
+//   L0  a literal marker            -- proves we reached VGA output at all
+//   L1  a COMPUTED value            -- a literal would print even if the
+//                                      arithmetic and the call were broken
+//   L2  a static array round-trip   -- proves .data/.bss landed where the
+//                                      image says, against a real memory map
+//   L3  a static STRUCT field       -- this shape silently lost every write
+//                                      until 3e15e4a; it has never run outside
+//                                      an emulator
+//   L4  the CPU's own brand string  -- via CPUID leaves 0x80000002-4. This is
+//                                      the line that makes the whole artifact
+//                                      self-authenticating: QEMU reports its
+//                                      own model string, so a photograph
+//                                      showing real silicon CANNOT have been
+//                                      produced under emulation.
+//
+// Boot: GRUB `multiboot` (legacy/CSM). Halts with `hlt` so the screen stays
+// readable rather than scrolling away or triple-faulting into a reboot loop.
+
+import "../../../std/vga_text.kr"
+import "../../../std/cstr.kr"
+
+struct Pt { u64 x  u64 y }
+
+static u64 seed = 1234567890
+static u64[16] arr
+static Pt[4] pts
+static u8[80] line
+static u8[64] brand
+
+fn stamp(u64 v) -> u64 { return v + 9 }
+
+// Little-endian 4 bytes of a CPUID register into a byte buffer.
+// NOTE the parentheses: in KernRift `&` binds TIGHTER than `>>`, so
+// `v >> 8 & 0xFF` would parse as `v >> (8 & 0xFF)`.
+fn put4(u64 dst, u64 v) {
+    store8(dst + 0, v & 0xFF)
+    store8(dst + 1, (v >> 8) & 0xFF)
+    store8(dst + 2, (v >> 16) & 0xFF)
+    store8(dst + 3, (v >> 24) & 0xFF)
+}
+
+// One CPUID leaf into 16 bytes at `dst`. ecx is fed 0 explicitly rather than
+// inherited from whatever the allocator left there.
+//
+// WHY RAW BYTES RATHER THAN `asm { "cpuid" } ... out(rbx -> b)`:
+// CPUID unavoidably writes EBX, and on x86_64 rbx is CALLEE-SAVED -- which in
+// this compiler means it is colour 0 of the allocator's register file, so a
+// live vreg is very likely sitting in it. The standing rule is that inline asm
+// may only touch caller-saved registers (rax, rcx, rdx, rsi, rdi, r8-r11) or
+// must preserve what it touches itself. The naive form breaks that rule and
+// the compiler does not diagnose it: it page-faulted here with CR2 holding
+// ASCII from the brand string, because `dst` was living in rbx and CPUID
+// overwrote it with 'riV '.
+//
+// So the push/pop must be INSIDE one block -- one asm block is one
+// instruction, and splitting the pair across blocks would leave rsp shifted
+// under any compiler-emitted frame access in between.
+//
+//   53           push rbx
+//   0F A2        cpuid
+//   48 89 DE     mov rsi, rbx     (rsi is caller-saved, safe to hand out)
+//   5B           pop rbx
+fn cpuid16(u64 leaf, u64 dst) {
+    u64 a = 0
+    u64 b = 0
+    u64 c = 0
+    u64 d = 0
+    u64 zero = 0
+    asm { "0x53 0x0F 0xA2 0x48 0x89 0xDE 0x5B" } in(leaf -> rax, zero -> rcx) out(rax -> a, rsi -> b, rcx -> c, rdx -> d)
+    put4(dst + 0, a)
+    put4(dst + 4, b)
+    put4(dst + 8, c)
+    put4(dst + 12, d)
+}
+
+// `halt_forever()` comes from std/x86.kr (reached via vga_text.kr). Parking in
+// a called function rather than inline also keeps `main`'s return reachable --
+// the missing-return check does not treat `loop { asm { "hlt" } }` as
+// provably infinite the way it treats a bare `loop { }`.
+fn main() -> uint32 {
+    u64 white = vga_attr(15, 0)
+    u64 green = vga_attr(10, 0)
+    u64 cyan  = vga_attr(11, 0)
+
+    vga_clear()
+    vga_hide_cursor()
+    vga_write_at(0, 0, "KERNRIFT BARE METAL x86_64 -- REAL HARDWARE", white)
+
+    // L1: computed, not literal. 1234567890 + 9 = 1234567899.
+    u64 v = stamp(seed)
+    cstr_u64_dec(line, 80, v)
+    vga_write_at(2, 0, "computed  ", cyan)
+    vga_write_at(2, 10, line, green)
+
+    // L2: static array round-trip through a real memory map.
+    arr[7] = 424242
+    cstr_u64_dec(line, 80, arr[7])
+    vga_write_at(3, 0, "array     ", cyan)
+    vga_write_at(3, 10, line, green)
+
+    // L3: static struct field -- silently dropped every write until 3e15e4a.
+    pts[2].x = 31337
+    pts[2].y = pts[2].x + 1
+    cstr_u64_dec(line, 80, pts[2].y)
+    vga_write_at(4, 0, "struct    ", cyan)
+    vga_write_at(4, 10, line, green)
+
+    // L4: the CPU identifies itself. Unfakeable provenance.
+    cpuid16(0x80000002, brand + 0)
+    cpuid16(0x80000003, brand + 16)
+    cpuid16(0x80000004, brand + 32)
+    store8(brand + 48, 0)
+    vga_write_at(6, 0, "cpu       ", cyan)
+    vga_write_at(6, 10, brand, white)
+
+    vga_write_at(8, 0, "halted -- all four lines above must be non-zero", white)
+
+    halt_forever()
+    return 0
+}
