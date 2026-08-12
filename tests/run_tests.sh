@@ -6038,7 +6038,17 @@ fn main() {
 # (measured). Two reads of a cycle counter are never equal, and equality
 # stays true across a core migration where ordering does not, so this form
 # discriminates without the flake.
-run_test "x86_nonprivileged_surface" 'import "std/x86.kr"
+#
+# THIS ROW EXECUTES, and std/x86.kr is x86_64-only BY CONSTRUCTION -- its own
+# header says importing it on another architecture "will fail at the first asm
+# block, which is the intended behaviour rather than a silent no-op". So this
+# is not a row that can follow $RUN_ARCH: there is no arm64 equivalent of
+# rdtsc/cpuid/pause to run. It ran natively on the ARM64 CI job and failed to
+# compile ('unrecognized asm instruction rdtsc') the first time this file
+# reached that job. Run it where it means something and say so where it does
+# not -- a silent omission would read as coverage.
+if [ "$RUN_ARCH" = "x86_64" ]; then
+    run_test "x86_nonprivileged_surface" 'import "std/x86.kr"
 fn main() {
     if bswap16(0x1234) != 0x3412 { exit(1) }
     if bswap32(0x11223344) != 0x44332211 { exit(2) }
@@ -6050,6 +6060,9 @@ fn main() {
     if cpuid_eax(0) == 0 { exit(6) }
     exit(9)
 }' 9
+else
+    echo "  x86_nonprivileged_surface: SKIP (std/x86.kr is x86_64-only by construction; host is $RUN_ARCH)"
+fi
 
 # The whole point of both modules: they compile with no OS underneath.
 # Compile-only, so the arch may be pinned.
@@ -6394,10 +6407,23 @@ rm -f "$DIR/../asmop_tmp_$$.kr" /tmp/asmop_$$
 # with the init-marking deleted from sema, the run_test form still exited 9
 # and passed (measured). Assert on the compiler's stderr as well as the run.
 TOTAL=$((TOTAL + 1))
-cat > "$DIR/../asmoi_tmp_$$.kr" <<'ASMOIEOF'
+#
+# THIS ROW EXECUTES, so the INSTRUCTION has to follow $RUN_ARCH -- `rdtsc` is
+# x86-only and the native ARM64 CI job rejected it ('unrecognized asm
+# instruction'). The property under test is not x86-specific at all (an asm
+# out() operand initialises its variable), so the row keeps its coverage on
+# both arches rather than skipping: arm64 uses a raw-hex NOP, which the
+# compiler's own hint recommends. The constraint register keeps its x86
+# spelling on BOTH backends -- arm64 rejects `x0` and wants `rax`.
+#
+# Whatever the instruction leaves in the register is irrelevant: `v & 0`
+# masks it, so only the diagnostic and the exit code are being asserted.
+ASMOI_INSN='"rdtsc"'
+if [ "$RUN_ARCH" != "x86_64" ]; then ASMOI_INSN='"0xD503201F"'; fi
+cat > "$DIR/../asmoi_tmp_$$.kr" <<ASMOIEOF
 fn g() -> uint64 {
     uint64 v
-    asm { "rdtsc" } out(rax -> v)
+    asm { $ASMOI_INSN } out(rax -> v)
     return v & 0
 }
 fn main() { exit(g() + 9) }
