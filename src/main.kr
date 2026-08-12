@@ -11,6 +11,7 @@ import "ir_xtensa.kr"
 import "codegen_xtensa.kr"
 import "format_macho.kr"
 import "format_pe.kr"
+import "format_arx.kr"
 import "format_archive.kr"
 import "format_android.kr"
 import "bcj.kr"
@@ -3159,7 +3160,7 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
     // UEFI needs none of them — firmware enters in long mode with a stack
     // already set up.
     uint64 img_raw = 0
-    if emit_mode == 8 || emit_mode == 9 {
+    if emit_mode == 8 || emit_mode == 9 || emit_mode == 10 {
         img_raw = 1
     }
 
@@ -3442,6 +3443,31 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
             exit(1)
         }
         header_size = emit_uefi_headers(uf_machine)
+    } else if emit_mode == 10 {
+        // --emit=arx: reserve and emit the 4096-byte ARX header region BEFORE
+        // codegen, for the reason the Image-header note below states in full --
+        // a prefix emitted first moves the payload and re-bakes the page
+        // arithmetic around it in one step, while the same bytes glued on
+        // afterwards leave every baked page_off short by the prefix.
+        //
+        // header_size = 4096 here means what it means for mode 9: bytes emitted
+        // before text_start. It is NOT the 64 in the ARX header's own
+        // header_size field, which describes the header STRUCT so a later
+        // version can grow it detectably. Two different quantities, and
+        // conflating them puts the payload 4032 bytes from where the segment
+        // entry says it is.
+        //
+        // The shared readers of this variable -- the mode-0, mode-2 and mode-9
+        // finalize arms -- are all unreachable from mode 10, so its only
+        // consumer is mode 10's own finalize arm below. That is why a wrong
+        // value here fails LOUD at the loader (its segment/entry bounds checks
+        // reject it) rather than producing the silent boot the mode-8 note
+        // warns about, which is a hazard of the shared readers this mode does
+        // not touch.
+        //
+        // entry_rel and payload are not known yet -- the payload has not been
+        // emitted -- so both are written as 0 and patched in the finalize arm.
+        header_size = emit_arx_headers(1, 0, 0)
     }
 
     uint64 text_start = codegen_output_len()
@@ -5096,6 +5122,68 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
         write(1, uf_b, uf_l)
         uf_m = "\n"
         write(1, uf_m, str_len(uf_m))
+    } else if emit_mode == 10 {
+        // --emit=arx finalize.
+        //
+        // THIS ARM EXISTS FOR THE REASON THE MODE 9 ARM STATES: the chain has
+        // no terminal `else`, so a mode that reaches the end unnamed gets no
+        // entry patch and no size patch and still writes a file -- exit 0, no
+        // diagnostic, a broken artifact on disk. For ARX that artifact would be
+        // a container whose entry field is 0 and whose image_size is 0, which
+        // the loader refuses; loud, but only after shipping.
+        //
+        // entry_off comes from the img_raw arm (find_entry_node through
+        // fn_lookup), so it is a live `_start` when the program has one and
+        // `main` otherwise, and it is a FILE offset. img_stub_set is always 0
+        // here -- both stubs gate on --stack-top=, refused outside --emit=image
+        // -- so it is the entry FUNCTION's offset with no trampoline in
+        // between. ApexRift enters it with a stack the loader set up, which is
+        // exactly the arrangement the refusal message for --stack-top=
+        // describes ("hosted containers manage the stack pointer through their
+        // own loader").
+        //
+        // NOTHING IS PADDED. The mode 9 arm pads to FileAlignment because a PE
+        // requires SizeOfRawData to be a multiple of it; ARX has no such rule,
+        // and padding here would be actively wrong -- the loader derives the
+        // image from image_size, and trailing bytes would either desynchronise
+        // it or be silently ignored, neither of which is worth the ambiguity.
+        uint64 ax_payload = codegen_output_len() - header_size
+        if entry_off < header_size {
+            // Cannot happen through the img_raw path -- the entry is a payload
+            // offset and the payload starts at header_size -- but the
+            // subtraction below would wrap into a colossal entry field that the
+            // loader reports as a bounds failure with no hint of the cause.
+            uint64 axe_e = "error: internal: --emit=arx entry offset lies inside the header region\n"
+            write(2, axe_e, str_len(axe_e))
+            exit(1)
+        }
+        patch_arx_headers(entry_off - header_size, ax_payload)
+        // LAST, and it must be: the checksum covers every byte, so any patch
+        // after it invalidates it silently.
+        arx_patch_checksum(codegen_output_len())
+        uint8[64] ax_b
+        uint64 ax_m = "arx: arch="
+        write(1, ax_m, str_len(ax_m))
+        uint64 ax_a = arch_flag_name(arch)
+        write(1, ax_a, str_len(ax_a))
+        ax_m = " entry="
+        write(1, ax_m, str_len(ax_m))
+        uint64 ax_l = fmt_uint(ax_b, entry_off - header_size)
+        write(1, ax_b, ax_l)
+        ax_m = " filesz="
+        write(1, ax_m, str_len(ax_m))
+        ax_l = fmt_uint(ax_b, ax_payload)
+        write(1, ax_b, ax_l)
+        ax_m = " memsz="
+        write(1, ax_m, str_len(ax_m))
+        ax_l = fmt_uint(ax_b, ax_payload)
+        write(1, ax_b, ax_l)
+        ax_m = " hdr="
+        write(1, ax_m, str_len(ax_m))
+        ax_l = fmt_uint(ax_b, header_size)
+        write(1, ax_b, ax_l)
+        ax_m = "\n"
+        write(1, ax_m, str_len(ax_m))
     } else if emit_mode == 1 {
         // Mach-O
         uint64 page_size = 4096
@@ -7337,6 +7425,23 @@ fn main() {
                     // is why both are in img_raw.
                     emit_mode = 9
                     uefi_set = 1
+                } else if str_eq_full(emit_str, "arx") != 0 {
+                    // ARX: ApexRift's own executable container, which its
+                    // kernel parses directly (docs/ARX_FORMAT.md in that tree).
+                    // A NEW emit_mode for the same reason 9 is one: it shares
+                    // the PAYLOAD with 8 and 9 -- flat, position-independent,
+                    // img_raw -- and its CONTAINER with nothing. A new value is
+                    // also untouched by every existing invocation, so
+                    // byte-identity for the other modes holds by construction
+                    // rather than by testing.
+                    //
+                    // Unlike 8 this is a HOSTED artifact: no entry stub, no
+                    // multiboot header, no --stack-top=. That falls out of the
+                    // existing rules rather than needing new ones -- the stubs
+                    // gate on stack_top_set, and --stack-top= is already
+                    // refused outside --emit=image with a message that says
+                    // hosted containers manage the stack through their loader.
+                    emit_mode = 10
                 } else {
                     write(2, "error: unknown emit format '", 28)
                     uint64 esl = str_len(emit_str)
@@ -7352,7 +7457,7 @@ fn main() {
                     // must appear here and every name here must be an arm --
                     // because this is exactly the enumeration a new emit mode
                     // falsifies, and --emit=uefi did falsify it.
-                    uint64 evl = "valid: elfexe, elf, elf-arm64, elf-x86_64, linux, linux-x86_64, linux-arm64, linux-x86-64, macho, mac, macos, mac-x64, mac-arm64, darwin, windows, windows-x64, windows-arm64, win, win-x64, win-arm64, pe, obj, android, asm, ir, lkm, image, uefi\n"
+                    uint64 evl = "valid: elfexe, elf, elf-arm64, elf-x86_64, linux, linux-x86_64, linux-arm64, linux-x86-64, macho, mac, macos, mac-x64, mac-arm64, darwin, windows, windows-x64, windows-arm64, win, win-x64, win-arm64, pe, obj, android, asm, ir, lkm, image, uefi, arx\n"
                     write(2, evl, str_len(evl))
                     exit(1)
                 }
@@ -7579,6 +7684,8 @@ fn main() {
                 // (uefi_help_has_own_line, uefi_docs_section_intact).
                 uint64 h_uefi = "  --emit=uefi              UEFI application: a PE32+ image firmware loads and enters directly (bare metal; needs --target=none and an explicit --arch=x86_64|arm64; takes no --load-addr/--stack-top -- firmware places the image where it likes and enters with a stack already set up; unsigned, so Secure Boot refuses it)\n"
                 write(1, h_uefi, str_len(h_uefi))
+                uint64 h_arx = "  --emit=arx               ARX container: a program ApexRift loads from its own filesystem and enters (bare metal, HOSTED; needs --target=none and --arch=x86_64; takes no --load-addr/--stack-top -- the loader chooses the address at run time and supplies the stack; arm64 is reserved in the format but has no loader yet)\n"
+                write(1, h_arx, str_len(h_arx))
                 uint64 h_la = "  --load-addr=<addr>       where the image will be loaded; validated (arm64: 4096-aligned) and reported, never embedded\n"
                 write(1, h_la, str_len(h_la))
                 // EVERY x86_64 NUMBER ON THIS LINE IS THE MULTIBOOT STUB's, AND
@@ -8378,6 +8485,68 @@ fn main() {
         if debug_info_mode != 0 {
             uint64 uf_g = "error: -g conflicts with --emit=uefi: the DWARF footer and its section headers are laid out from the ELF geometry a PE32+ EFI application does not have, and would land inside the image at addresses nothing maps. Drop -g, or drop --emit=uefi to keep the ELF that -g understands\n"
             write(2, uf_g, str_len(uf_g))
+            exit(1)
+        }
+    }
+    // --emit=arx. Its own block for the same reason mode 9 has one: EVERY ROW
+    // HERE IS A DEFAULT A NEW MODE INHERITS, never a rule invented for this
+    // format. What it does NOT need is a --stack-top=/--load-addr=/
+    // --image-header/--reset-vector refusal -- the generic rows below already
+    // refuse all four for every emit_mode != 8, and duplicating them here would
+    // change which message fires rather than adding protection.
+    if emit_mode == 10 {
+        // Same else-POSIX door mode 9 documents: the auto-set block keys on
+        // emit_mode 1/2/4, so mode 10 would leave target_os at its linux
+        // default and the payload would carry Linux syscalls. ApexRift provides
+        // none -- it is the OS -- so such an artifact faults on its first call
+        // with nothing to report it.
+        if target_os != 4 {
+            uint64 ax_tn = "error: --emit=arx requires --target=none: without it the resolved target OS is a hosted one (the default is linux) and the program would carry that OS's syscalls, which ApexRift does not provide -- it is the OS the container is loaded by\n"
+            write(2, ax_tn, str_len(ax_tn))
+            exit(1)
+        }
+        // No --arch: refuse rather than default. The ARX header names the CPU
+        // in its own arch field, and the loader refuses a mismatch, so a
+        // silently defaulted arch produces a container that is rejected at load
+        // time for a choice the user never made.
+        if arch_set == 0 {
+            uint64 ax_ar = "error: --emit=arx requires an explicit --arch=x86_64: the ARX header records the CPU and the loader refuses a container built for another one, so a silently defaulted arch yields a program rejected at load time for a choice you did not make\n"
+            write(2, ax_ar, str_len(ax_ar))
+            exit(1)
+        }
+        // arm64 is IN SCOPE and DELIBERATELY NOT ENABLED YET. The container
+        // reserves arch = 2 and the 4096-byte header region exists precisely so
+        // the arm64 ADRP page arithmetic will hold when it lands -- that design
+        // work is done, not deferred. What is missing is the other half: no
+        // arm64 ApexRift exists, its loader accepts x86_64 only, and so the
+        // page-congruence invariant this layout is built around would ship with
+        // static byte assertions and NO RUNTIME WITNESS. Emitting it would mean
+        // producing bytes nothing can load while implying they work. Enabling
+        // it later is deleting this row plus that witness, not a redesign.
+        if arch == 1 {
+            uint64 ax_a64 = "error: --emit=arx is x86_64 only today: the container reserves an arm64 arch value and its 4096-byte header region already keeps ADRP page arithmetic valid, but no arm64 loader exists to run the result, so the bytes would be unloadable and the page-congruence invariant untested. Use --arch=x86_64, or --emit=image for a raw arm64 boot artifact\n"
+            write(2, ax_a64, str_len(ax_a64))
+            exit(1)
+        }
+        // riscv32 / xtensa. Unique substrings per message, as the rows above
+        // document: a shared "x86_64 only" half would let a defect that routed
+        // one arch to the other's arm still pass a grep.
+        if arch == 2 {
+            uint64 ax_rv = "error: --emit=arx has no riscv32 form: ApexRift runs on x86_64 and there is no riscv32 loader for this container. Use --arch=riscv32 --freestanding for a raw boot image instead\n"
+            write(2, ax_rv, str_len(ax_rv))
+            exit(1)
+        }
+        if arch == 3 {
+            uint64 ax_xt = "error: --emit=arx has no xtensa form: ApexRift runs on x86_64 and the chip has no loader for this container. Use --arch=xtensa --freestanding or --target=esp32 instead\n"
+            write(2, ax_xt, str_len(ax_xt))
+            exit(1)
+        }
+        // -g, refused rather than silently discarded, for the reason mode 8 and
+        // mode 9 both refuse it: the DWARF footer is laid out from an ELF
+        // geometry this container does not have.
+        if debug_info_mode != 0 {
+            uint64 ax_g = "error: -g conflicts with --emit=arx: the DWARF footer and its section headers are laid out from an ELF geometry this container does not have, and would land inside the loaded image at offsets nothing maps. Drop -g, or drop --emit=arx to keep the ELF that -g understands\n"
+            write(2, ax_g, str_len(ax_g))
             exit(1)
         }
     }

@@ -2613,6 +2613,7 @@ All ten `--emit=` modes, and the two formats that are reached by other flags:
 
 | Format | Produced by | Use |
 |---|---|---|
+| ARX container | `--emit=arx` | A program ApexRift loads from its own filesystem (hosted; the OS supplies the stack) |
 | `.krbo` fat binary | default (no `--arch`) | Cross-platform distribution — `kr` picks the right slice |
 | ELF executable | `--emit=elfexe` (the default), `--arch=x86_64` / `--arch=arm64` on Linux | Native Linux binary |
 | ELF relocatable | `--emit=obj` (or `-c`) | Link into an external object (`.o`) |

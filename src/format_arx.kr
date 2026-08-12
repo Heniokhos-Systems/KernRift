@@ -1,0 +1,144 @@
+// format_arx.kr — ARX container (--emit=arx, emit_mode 10).
+//
+// ApexRift's own executable container: its kernel parses this directly to load
+// a program off its filesystem and enter it. The format is specified OUTSIDE
+// this tree, in ApexRift's docs/ARX_FORMAT.md, and a working loader (arx.kr)
+// already consumes it — so this file implements a contract, it does not define
+// one. Fields whose meaning looks arbitrary here are pinned there.
+//
+// WHAT IT SHARES AND WHAT IT DOES NOT, the same distinction that made --emit=uefi
+// a new mode rather than a flag on --emit=image: the PAYLOAD is the flat
+// position-independent blob (img_raw, exactly as modes 8 and 9), the CONTAINER
+// is shared with nothing.
+//
+// THE HEADER REGION IS 4096 BYTES AND ONLY 128 ARE USED. That is not slack for
+// its own sake — it is the arm64 correctness constraint, and it is the same
+// reason --emit=uefi reserves 4096 for a PE header that needs far less. Every
+// arm64 ADRP page computation is baked during codegen from
+// a64_compute_va(file_offset) = 0x400000 + file_offset, which knows nothing
+// about containers. The loader places payload byte `f` at `base + (f -
+// file_off)`, so the baked arithmetic survives exactly when
+//
+//     (file_off - mem_off) % 4096 == 0   AND   base % 4096 == 0
+//
+// The first half is this region's size; the second comes solely from the
+// `align` field written below, which the loader honours by over-allocating and
+// rounding up. BOTH halves are load-bearing: `align` is not decoration, and a
+// later "simplification" that lowers it (the loader would accept 16) leaves
+// x86_64 working and breaks arm64 at run time with no diagnostic.
+//
+// UNLIKE A PE, THIS HEADER REGION IS NOT LOADED. The segment entry starts at
+// file offset 4096 and maps to image offset 0, and `image_size` covers the
+// payload alone. A PE's headers are mapped; these are not.
+
+static uint64 ARX_HDR_REGION = 4096   // see the congruence note above
+static uint64 ARX_MAGIC_LE   = 0x5852417F   // bytes 7F 'A' 'R' 'X'
+
+// Emit the header region and return its size, so the finalize arm cannot drift
+// from it — the same contract emit_uefi_headers has, and for the same reason.
+//
+// `arch_id`   1 = x86_64, 2 = arm64 (ARX's own numbering, not this tree's).
+// `entry_rel` entry offset RELATIVE TO THE IMAGE BASE, i.e. already has the
+//             header region subtracted. Passing a file offset here would place
+//             the entry 4096 bytes past the real one, which the loader catches
+//             (its entry must land inside an executable segment's file-backed
+//             bytes) but only after the artifact has shipped.
+// `payload`   payload length in bytes; filesz == memsz == image_size today,
+//             because a KernRift flat image has no bss.
+//
+// The checksum is written as ZERO here and patched afterwards by
+// arx_patch_checksum: it covers the whole file, so it cannot be computed until
+// the payload exists.
+fn emit_arx_headers(uint64 arch_id, uint64 entry_rel, uint64 payload) -> uint64 {
+    // ---- header, 64 bytes ----
+    emit_u32_le(ARX_MAGIC_LE)
+    emit_u16_le(1)                  // version
+    emit_u16_le(64)                 // header_size: the HEADER, not the region.
+                                    // The loader validates it as a range so a
+                                    // later version can grow the header
+                                    // detectably; it is not the region size.
+    emit_u16_le(arch_id)
+    emit_u16_le(1)                  // flags: bit 0 PIC. Always set — this tree
+                                    // emits nothing else, and the loader
+                                    // refuses a clear bit rather than guessing.
+    emit_u32_le(1)                  // table_count
+    emit_u64_le(64)                 // table_off: directory sits right after the
+                                    // header, inside the reserved region
+    emit_u64_le(entry_rel)
+    emit_u64_le(payload)            // image_size — payload only; the region is
+                                    // not loaded
+    emit_u64_le(4096)               // align. Load-bearing for arm64; see above
+    emit_u64_le(0)                  // checksum, patched later
+    emit_u64_le(0)                  // reserved, must be 0 (the loader refuses
+                                    // nonzero so the field stays usable)
+
+    // ---- table directory, one 24-byte entry ----
+    emit_u32_le(1)                  // kind = SEGMENT
+    emit_u32_le(1)                  // flags = MANDATORY. The format makes this
+                                    // a PRODUCER OBLIGATION, not a hint: later
+                                    // stages add table kinds WITHOUT bumping
+                                    // `version`, so this flag is the only thing
+                                    // that stops an older loader silently
+                                    // mis-loading a newer file.
+    emit_u64_le(88)                 // off: 64 header + 24 directory
+    emit_u64_le(40)                 // size: one segment entry
+
+    // ---- segment entry, 40 bytes ----
+    emit_u64_le(ARX_HDR_REGION)     // file_off — the congruence constraint
+    emit_u64_le(0)                  // mem_off
+    emit_u64_le(payload)            // filesz
+    emit_u64_le(payload)            // memsz (no bss today)
+    emit_u32_le(5)                  // flags R|X. The X bit is not cosmetic:
+                                    // the loader requires the entry to land in
+                                    // an executable segment and refuses
+                                    // otherwise.
+    emit_u32_le(0)                  // align: RESERVED, must be 0
+
+    // ---- pad the rest of the region ----
+    uint64 i = 128
+    while i < ARX_HDR_REGION { emit_byte(0); i = i + 1 }
+    return ARX_HDR_REGION
+}
+
+// Patch the three fields that are not known until the payload exists, then the
+// checksum. Mirrors patch_uefi_headers: this file owns every header offset, so
+// main.kr never learns one.
+//
+// `entry_rel` is the entry offset MINUS the header region -- relative to the
+// image base, because mem_off is 0. Handing it a file offset would put the
+// entry 4096 bytes past the real function; the loader would catch it (the entry
+// must land inside an executable segment's file-backed bytes) but only after
+// the artifact shipped.
+fn patch_arx_headers(uint64 entry_rel, uint64 payload) {
+    patch_u64(24, entry_rel)        // header entry
+    patch_u64(32, payload)          // header image_size
+    patch_u64(88 + 16, payload)     // segment filesz
+    patch_u64(88 + 24, payload)     // segment memsz
+}
+
+// FNV-1a over the finished file with the 8 checksum bytes treated as zero, then
+// stored into them. Integrity against corruption only -- trivially forged, and
+// ApexRift's format doc is explicit that it is NOT a security boundary.
+//
+// Must run LAST: it covers every byte, so any later patch silently invalidates
+// it. The loader would then refuse the file, which is the safe direction, but
+// the ordering is a real constraint rather than a preference.
+fn arx_patch_checksum(uint64 len) {
+    uint64 h = 0xcbf29ce484222325
+    uint64 i = 0
+    while i < len {
+        uint64 p = out_buf + i
+        uint8 c = 0
+        unsafe { *(p as uint8) -> c }
+        uint64 b = c
+        // Bytes [48, 56) are the checksum field: hashed as zero so the value
+        // can live inside the region it covers.
+        if i >= 48 {
+            if i < 56 { b = 0 }
+        }
+        h = h ^ b
+        h = h * 0x100000001b3
+        i = i + 1
+    }
+    patch_u64(48, h)
+}

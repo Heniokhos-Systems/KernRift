@@ -12906,6 +12906,7 @@ t6_refuses "t6_emit_android_tnone" "--emit=android" "--target=none" -- \
 #    which is a third outcome the table had no example of.
 t6_builds "t6_emit_image_tnone" -- --emit=image --arch=x86_64 --target=none --load-addr=0x400000 "$T6_D/plain.kr"
 t6_builds "t6_emit_uefi_tnone" -- --emit=uefi --arch=x86_64 --target=none "$T6_D/plain.kr"
+t6_builds "t6_emit_arx_tnone" -- --emit=arx --arch=x86_64 --target=none "$T6_D/plain.kr"
 
 # 3b. COMPLETENESS, DERIVED RATHER THAN ASSERTED.
 #     The comment on block 3 says the emit-mode table is complete in one place.
@@ -12917,7 +12918,7 @@ t6_builds "t6_emit_uefi_tnone" -- --emit=uefi --arch=x86_64 --target=none "$T6_D
 #     this reds; that is the whole point, and it is why the check is on the
 #     MODE NUMBERS and not on the spellings (16 of the 28 spellings are
 #     aliases for a mode some other spelling already covers).
-T6_MODE_ROWS="0:t6_emit_elfexe_tnone 1:t6_emit_macho_tnone 2:t6_emit_pe_tnone 3:t6_emit_obj_tnone_x86_64 4:t6_emit_android_tnone 5:t6_emit_asm_tnone 6:t6_emit_ir_tnone 7:t6_emit_lkm_tnone 8:t6_emit_image_tnone 9:t6_emit_uefi_tnone"
+T6_MODE_ROWS="0:t6_emit_elfexe_tnone 1:t6_emit_macho_tnone 2:t6_emit_pe_tnone 3:t6_emit_obj_tnone_x86_64 4:t6_emit_android_tnone 5:t6_emit_asm_tnone 6:t6_emit_ir_tnone 7:t6_emit_lkm_tnone 8:t6_emit_image_tnone 9:t6_emit_uefi_tnone 10:t6_emit_arx_tnone"
 TOTAL=$((TOTAL + 1))
 T6_MODES_SRC=$(grep -oE 'emit_mode = [0-9]+' "$DIR/../src/main.kr" | grep -oE '[0-9]+$' | sort -un | tr '\n' ' ')
 T6_MODES_TBL=$(for p in $T6_MODE_ROWS; do echo "${p%%:*}"; done | sort -un | tr '\n' ' ')
@@ -19741,6 +19742,172 @@ printf '@module_init\nfn kr_init() -> uint64 { return 0 }\n@module_exit\nfn kr_e
 # no file at all), and RAW (--emit=image is a headerless blob, so its promise
 # is the ABSENCE of every container magic — "some non-empty file" would be a
 # vacuous check for exactly the one mode that has no magic to check).
+# ---------------------------------------------------------------------------
+# --emit=arx: the ARX container (ApexRift's own executable format).
+#
+# The format is specified in ANOTHER repository (ApexRift docs/ARX_FORMAT.md)
+# and consumed by a loader there, so these rows are the only thing on this side
+# that can catch a drift. They assert the fields the LOADER keys its
+# run-or-refuse decisions on, not merely the ones that are easy to read: a
+# golden test that checks magic and sizes while missing the segment's X bit
+# produces a green suite and an artifact the loader rejects.
+# ---------------------------------------------------------------------------
+ax_bad=""
+ax_chk() { [ "$2" = "$3" ] || ax_bad="$ax_bad $1(want=$2 got=$3)"; }
+ARX_SRC=$(mktemp /tmp/krc_arxsrc_XXXX.kr)
+printf 'fn main() -> uint64 {\n    return 0\n}\n' > "$ARX_SRC"
+ARX_BIN=/tmp/krc_arx_$$
+rm -f "$ARX_BIN"
+$KRC $KRC_FLAGS "$ARX_SRC" -o "$ARX_BIN" --arch=x86_64 --target=none --emit=arx >/dev/null 2>&1
+
+TOTAL=$((TOTAL + 1))
+if [ ! -f "$ARX_BIN" ]; then
+    echo "FAIL: arx_header_fields (no artifact produced)"; FAIL=$((FAIL + 1))
+else
+    ax_sz=$(wc -c < "$ARX_BIN")
+    ax_chk magic        "7f415258" "$(ue_hex "$ARX_BIN" 0 4)"
+    ax_chk version      1     "$(ue_u16 "$ARX_BIN" 4)"
+    ax_chk header_size  64    "$(ue_u16 "$ARX_BIN" 6)"
+    ax_chk arch         1     "$(ue_u16 "$ARX_BIN" 8)"
+    ax_chk pic_flag     1     "$(ue_u16 "$ARX_BIN" 10)"
+    ax_chk table_count  1     "$(ue_u32 "$ARX_BIN" 12)"
+    ax_chk table_off    64    "$(ue_u64 "$ARX_BIN" 16)"
+    # reserved must be 0: the loader refuses nonzero so the field stays usable
+    # by a later version instead of being silently occupied.
+    ax_chk reserved     0     "$(ue_u64 "$ARX_BIN" 56)"
+    # align is NOT cosmetic. arm64 correctness needs base % 4096 == 0 as well as
+    # a page-congruent file offset, and this field is the ONLY thing that
+    # delivers the first half -- the loader would accept 16. Lower it and x86_64
+    # keeps working while arm64 breaks at run time with no diagnostic.
+    ax_chk align        4096  "$(ue_u64 "$ARX_BIN" 40)"
+    ax_chk table_kind   1     "$(ue_u32 "$ARX_BIN" 64)"
+    # MANDATORY is a PRODUCER OBLIGATION in the format: later stages add table
+    # kinds without bumping `version`, so this flag is the only thing stopping
+    # an older loader from silently mis-loading a newer file. Nothing else
+    # checks it.
+    ax_chk table_flags  1     "$(ue_u32 "$ARX_BIN" 68)"
+    ax_chk seg_off      88    "$(ue_u64 "$ARX_BIN" 72)"
+    ax_chk seg_size     40    "$(ue_u64 "$ARX_BIN" 80)"
+    ax_chk seg_file_off 4096  "$(ue_u64 "$ARX_BIN" 88)"
+    ax_chk seg_mem_off  0     "$(ue_u64 "$ARX_BIN" 96)"
+    # R|X. The X bit is load-bearing: the loader requires the entry to land in
+    # an executable segment's file-backed bytes and refuses otherwise, so
+    # clearing it yields an artifact that builds clean and never runs.
+    ax_chk seg_flags    5     "$(ue_u32 "$ARX_BIN" 120)"
+    # Per-segment align is RESERVED and must be 0 -- a nonzero value is refused,
+    # because honouring it is not implemented and accepting it would imply an
+    # effect that does not exist.
+    ax_chk seg_align    0     "$(ue_u32 "$ARX_BIN" 124)"
+    ax_fsz=$(ue_u64 "$ARX_BIN" 104); ax_msz=$(ue_u64 "$ARX_BIN" 112)
+    ax_img=$(ue_u64 "$ARX_BIN" 32);  ax_ent=$(ue_u64 "$ARX_BIN" 24)
+    ax_chk filesz_eq_memsz  "$ax_fsz" "$ax_msz"
+    ax_chk image_size_eq_filesz "$ax_fsz" "$ax_img"
+    # No padding: the file is exactly the header region plus the payload. Stray
+    # trailing bytes would desynchronise image_size from what was written.
+    ax_chk file_len "$((4096 + ax_fsz))" "$ax_sz"
+    # The entry must be inside the segment's FILE-BACKED bytes, which is what
+    # the loader enforces; "inside the image" is not enough, since zeroed bss is
+    # inside the image and is garbage to execute.
+    [ "$ax_ent" -lt "$ax_fsz" ] || ax_bad="$ax_bad entry_in_filebacked(entry=$ax_ent filesz=$ax_fsz)"
+    if [ -z "$ax_bad" ]; then
+        PASS=$((PASS + 1)); echo "  arx_header_fields: PASS (entry=$ax_ent filesz=$ax_fsz hdr=4096 total=$ax_sz)"
+    else
+        echo "FAIL: arx_header_fields:$ax_bad"; FAIL=$((FAIL + 1))
+    fi
+fi
+
+# Page congruence, stated as the RULE rather than as two literals, so a future
+# geometry change has to satisfy it instead of editing constants that look
+# unrelated. Same guard the uefi row uses: both fields must be real, or an
+# artifact with no header at all passes on 0 - 0.
+TOTAL=$((TOTAL + 1))
+if [ -f "$ARX_BIN" ]; then
+    ax_fo=$(ue_u64 "$ARX_BIN" 88); ax_mo=$(ue_u64 "$ARX_BIN" 96)
+    ax_delta=$((ax_fo - ax_mo))
+    if [ "$ax_fo" -gt 0 ] && [ $((ax_delta % 4096)) -eq 0 ]; then
+        PASS=$((PASS + 1)); echo "  arx_page_congruence: PASS (file_off $ax_fo - mem_off $ax_mo = $ax_delta, 0 mod 4096)"
+    else
+        echo "FAIL: arx_page_congruence (file_off=$ax_fo mem_off=$ax_mo delta=$ax_delta not 0 mod 4096)"; FAIL=$((FAIL + 1))
+    fi
+else
+    echo "FAIL: arx_page_congruence (no artifact)"; FAIL=$((FAIL + 1))
+fi
+
+# The checksum, recomputed by an INDEPENDENT implementation.
+#
+# Deliberately NOT by calling the compiler: recomputing with the emitter's own
+# routine is tautological -- a typo'd FNV basis or prime would agree with itself
+# and pass here, then surface as a load-time refusal in another repository after
+# a version bump. The constants below come from ARX_FORMAT.md, not from src/.
+TOTAL=$((TOTAL + 1))
+if [ -f "$ARX_BIN" ] && command -v python3 >/dev/null 2>&1; then
+    ax_ck=$(python3 - "$ARX_BIN" <<'AXPY'
+import sys, struct
+d = open(sys.argv[1], 'rb').read()
+h = 0xcbf29ce484222325
+for i, b in enumerate(d):
+    if 48 <= i < 56:      # the checksum field hashes as zero
+        b = 0
+    h = ((h ^ b) * 0x100000001b3) & 0xFFFFFFFFFFFFFFFF
+print("ok" if h == struct.unpack_from('<Q', d, 48)[0] else "mismatch")
+AXPY
+)
+    if [ "$ax_ck" = "ok" ]; then
+        PASS=$((PASS + 1)); echo "  arx_checksum_independent: PASS (FNV-1a recomputed from the spec constants)"
+    else
+        echo "FAIL: arx_checksum_independent ($ax_ck)"; FAIL=$((FAIL + 1))
+    fi
+else
+    PASS=$((PASS + 1)); echo "  arx_checksum_independent: SKIP (no python3)"
+fi
+
+# Refusals. Each message carries a substring unique to it, so a defect that
+# routed one refusal to another's arm cannot pass by matching a shared half.
+ax_refuse() {   # <name> <unique-substring> <flags...>
+    TOTAL=$((TOTAL + 1))
+    local nm="$1"; local want="$2"; shift 2
+    local out; out=$($KRC $KRC_FLAGS "$ARX_SRC" -o /tmp/krc_axr_$$ "$@" 2>&1 >/dev/null)
+    rm -f /tmp/krc_axr_$$
+    case "$out" in
+        *"$want"*) PASS=$((PASS + 1)); echo "  $nm: PASS" ;;
+        *) echo "FAIL: $nm (wanted substring '$want', got: $(printf '%s' "$out" | head -1))"; FAIL=$((FAIL + 1)) ;;
+    esac
+}
+ax_refuse arx_refuses_hosted_target "requires --target=none" --arch=x86_64 --emit=arx
+# NOT via ax_refuse, and NOT via $KRC. Two layers inject an arch: KRC_FLAGS
+# defaults to --arch=$ARCH, and the make-test wrapper is literally
+# `exec ./build/krc2 --arch=x86_64 "$@"`. Either one makes the condition under
+# test unreachable, so this uses the RAW build/krc2 -- the same dodge, for the
+# same reason, as uefi_requires_explicit_arch above.
+TOTAL=$((TOTAL + 1))
+if [ -f "$DIR/../build/krc2" ]; then ARX_RAW_KRC=$(cd "$DIR/../build" && pwd)/krc2; else ARX_RAW_KRC=""; fi
+rm -f /tmp/krc_axna_$$
+ax_na=$("$ARX_RAW_KRC" "$ARX_SRC" -o /tmp/krc_axna_$$ --target=none --emit=arx 2>&1); ax_na_st=$?
+rm -f /tmp/krc_axna_$$
+if [ -z "$ARX_RAW_KRC" ] || [ $ax_na_st -eq 0 ]; then
+    echo "FAIL: arx_refuses_default_arch (exit=$ax_na_st, out=$(printf '%s' "$ax_na" | head -1))"; FAIL=$((FAIL + 1))
+else
+case "$ax_na" in
+    *"requires an explicit --arch=x86_64"*)
+        PASS=$((PASS + 1)); echo "  arx_refuses_default_arch: PASS" ;;
+    *)
+        echo "FAIL: arx_refuses_default_arch (wanted the explicit-arch refusal, got: $(printf '%s' "$ax_na" | head -1))"; FAIL=$((FAIL + 1)) ;;
+esac
+fi
+# arm64 is in scope and deliberately not enabled: the container reserves the
+# arch value and the layout already keeps ADRP arithmetic valid, but no arm64
+# loader exists, so emitting it would ship an untested invariant as if it worked.
+ax_refuse arx_refuses_arm64_queued  "x86_64 only today" --arch=arm64 --target=none --emit=arx
+ax_refuse arx_refuses_riscv32       "no riscv32 form" --arch=riscv32 --target=none --emit=arx
+ax_refuse arx_refuses_xtensa        "no xtensa form" --arch=xtensa --target=none --emit=arx
+ax_refuse arx_refuses_debug_info    "-g conflicts with --emit=arx" --arch=x86_64 --target=none --emit=arx -g
+# These two are refused by the GENERIC rows, not by mode 10's block. Pinned here
+# because mode 10 depends on them: re-implementing either inside the block would
+# change which message fires without adding protection.
+ax_refuse arx_refuses_stack_top     "only meaningful with --emit=image" --arch=x86_64 --target=none --emit=arx --stack-top=0x90000
+ax_refuse arx_refuses_load_addr     "only meaningful with --emit=image" --arch=x86_64 --target=none --emit=arx --load-addr=0x400000
+rm -f "$ARX_SRC" "$ARX_BIN"
+
 emit_recipe() {
     case "$1" in
         elf|elf-arm64|elf-x86_64|elfexe|linux|linux-x86_64|linux-arm64|linux-x86-64|obj|android)
@@ -19766,6 +19933,10 @@ emit_recipe() {
         # what uefi_pe_header_fields_* and the boot gate's L7/L8 are for.
         uefi)  echo "4d5a0000|--target=none|$EV_BM" ;;
         image) echo "RAW|--target=none --load-addr=0x400000|$EV_BM" ;;
+        # ARX is bare-metal too, but it is HOSTED: ApexRift loads it, so it
+        # takes neither --load-addr= nor --stack-top= (both refused outside
+        # --emit=image) and needs an explicit --arch. Its magic is its own.
+        arx)   echo "7f415258|--target=none --arch=x86_64|$EV_BM" ;;
         asm)   echo "TEXT||$EV_SRC" ;;
         ir)    echo "STDOUT||$EV_SRC" ;;
     esac

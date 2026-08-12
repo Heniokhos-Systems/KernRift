@@ -19,6 +19,7 @@ cat \
     "$DIR/src/ir_aarch64.kr" \
     "$DIR/src/format_macho.kr" \
     "$DIR/src/format_pe.kr" \
+    "$DIR/src/format_arx.kr" \
     "$DIR/src/format_archive.kr" \
     "$DIR/src/format_android.kr" \
     "$DIR/src/bcj.kr" \
