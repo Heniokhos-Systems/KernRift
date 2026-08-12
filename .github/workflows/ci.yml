@@ -27,9 +27,9 @@ jobs:
           # repo URL (Heniokhos-Systems/KernRift) is used directly to skip the rename
           # redirect that fronts the older Pantelis23/ + Rift-Intelligence/ aliases.
           curl --fail --location --silent --show-error \
-               --retry 5 --retry-delay 3 --retry-all-errors --connect-timeout 15 \
+               --retry 8 --retry-delay 5 --retry-all-errors --connect-timeout 15 \
                -o build/krc-bootstrap \
-               https://github.com/Heniokhos-Systems/KernRift/releases/download/v2.8.33/krc-linux-x86_64
+               https://github.com/Heniokhos-Systems/KernRift/releases/download/v2.9.0/krc-linux-x86_64
           # Sanity: must be an ELF ≥ 1 MiB. If not, dump the first bytes so future
           # failures don't reduce to "Not: command not found" 40 lines later.
           SIZE=$(wc -c < build/krc-bootstrap)
