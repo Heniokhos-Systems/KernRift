@@ -852,10 +852,28 @@ vstore32(mmio_addr, 0x01)      // volatile store, barrier before
 All widths are available:
 `vload8`, `vload16`, `vload32`, `vload64`, `vstore8`..`vstore64`.
 
-The barrier emitted is:
-- **x86_64**: `mfence` (full memory fence)
-- **ARM64**: `DSB SY` (data synchronization barrier — waits for completion,
-  not just ordering)
+What is emitted depends on the architecture **and the backend**:
+
+- **x86_64**, both backends: `mfence` (full memory fence) alongside a
+  width-correct `mov`.
+- **ARM64, IR backend (the default)**: no barrier instruction at all. The
+  access itself becomes an acquire/release form — `LDARB`/`LDARH`/`LDAR` and
+  `STLRB`/`STLRH`/`STLR`. That gives **ordering, not completion**.
+- **ARM64, `--legacy`**: a plain `LDR`/`STR` bracketed by `DSB SY`, which does
+  wait for completion.
+
+Measured by compiling `vload32` + `vstore32` and counting in `--emit=asm`:
+x86_64 IR 2 × `mfence`, x86_64 legacy 2 × `mfence`, **arm64 IR 0 × `DSB`**
+(`LDAR W20,[X19]` / `STLR W21,[X19]`), arm64 legacy 2 × `DSB SY`.
+
+If you are on ARM64 with the default backend and you need the access to have
+*completed* — the usual requirement when poking a device register and then
+waiting on its effect — add an explicit `dsb()`. Do not assume the volatile
+form does it for you.
+
+Note when checking this yourself: the `--emit=asm` disassembler prints the
+`LDAR`/`STLR` encodings with a blank mnemonic, so grepping the listing for
+`stlr` reports nothing. Decode the raw words (`88dffe74`, `889ffe75`).
 
 `volatile { *(addr as u32) = val }` is the equivalent block form and does
 the same thing.
@@ -885,7 +903,11 @@ failure.
 
 For driver code, a `device` block describes a hardware register set at a
 fixed base address. Field reads and writes compile directly to volatile
-loads and stores of the right width — with the proper memory barriers.
+loads and stores of the right width — that is, to exactly what `vload*` /
+`vstore*` emit, with the same per-backend caveat: `mfence` on x86_64, but
+`LDAR`/`STLR` acquire/release **ordering** on ARM64's default IR backend,
+verified by compiling a `device` block and finding 0 `DSB` in the listing.
+See §12 above.
 
 ```kr
 device UART0 at 0x3F201000 {
@@ -1319,8 +1341,8 @@ manually-built buffer — reach for `print_str` / `println_str`.
 |---|---|
 | `load8/16/32/64(addr)` | Read a value of the given width, zero-extended to `u64`. |
 | `store8/16/32/64(addr, val)` | Write a value of the given width. |
-| `vload8/16/32/64(addr)` | Volatile load with barrier — for MMIO. |
-| `vstore8/16/32/64(addr, val)` | Volatile store with barrier — for MMIO. |
+| `vload8/16/32/64(addr)` | Volatile load for MMIO — `mfence` on x86_64, `LDAR*` acquire on arm64 IR (§12). |
+| `vstore8/16/32/64(addr, val)` | Volatile store for MMIO — `mfence` on x86_64, `STLR*` release on arm64 IR (§12). |
 
 ### Atomic
 

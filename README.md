@@ -221,7 +221,8 @@ KernRift is designed for kernel and driver development. The two most
 important primitives:
 
 ```kr
-// Typed MMIO register blocks — compile to volatile load/store with barriers
+// Typed MMIO register blocks — compile to the same volatile load/store the
+// vload*/vstore* builtins emit (see the barrier table below this block)
 device UART0 at 0x3F201000 {
     Data at 0x00 : u32
     Flag at 0x18 : u32
@@ -234,8 +235,11 @@ fn putc(u8 c) {
 }
 
 // Clean pointer builtins (no unsafe blocks required)
-u32 status = vload32(0xFEE000B0)        // volatile load, with mfence / DSB SY
-vstore32(0xFEE000B0, 0x1)                // volatile store, with barrier
+// x86_64: mfence + a width-correct mov, on both backends.
+// arm64 (default IR backend): LDAR / STLR — acquire/release ORDERING, no DSB.
+// arm64 --legacy: a plain LDR/STR with DSB SY. See the note after this block.
+u32 status = vload32(0xFEE000B0)        // volatile load
+vstore32(0xFEE000B0, 0x1)                // volatile store
 store8(buf + offset, byte_value)         // plain store
 u64 value = load64(addr)                 // plain load
 
@@ -256,6 +260,23 @@ cr0 = bit_insert(cr0, 0, 16, new_flags)
 // krc --freestanding kernel.kr -o kernel.elf
 ```
 
+**On the `vload*` / `vstore*` barrier, precisely.** Compiling the two lines
+above and counting instructions in `krc --emit=asm` output:
+
+| Backend | `vload32` + `vstore32` emit |
+|---|---|
+| x86_64, IR (default) | 2 × `mfence` |
+| x86_64, `--legacy` | 2 × `mfence` |
+| **arm64, IR (default — this is what ships)** | **0 × `DSB`.** `LDAR W20,[X19]` and `STLR W21,[X19]` |
+| arm64, `--legacy` | 2 × `DSB SY`, around a plain `LDR`/`STR` |
+
+So on ARM64 you get **acquire/release ordering, not a completion barrier** —
+add an explicit `dsb()` if you need the access to have *completed* rather than
+merely to be *ordered*. (Caveat for anyone re-checking this: the `--emit=asm`
+disassembler prints `LDAR`/`STLR` with a blank mnemonic, so grepping the
+listing for `stlr` finds nothing. The two encodings above were decoded by hand
+from the `88dffe74` / `889ffe75` words the listing does print.)
+
 Annotations: `@export`, `@noreturn`, `@naked` (no prologue/epilogue), `@packed` (structs are already packed), `@section(".text.init")`. Stack frames >4KB emit a compile-time warning.
 
 ## Built-in Functions
@@ -270,7 +291,7 @@ Compiler intrinsics — no imports needed.
 | Memory | `memcpy(dst, src, len)`, `memset(dst, val, len)`, `str_len(s)`, `str_eq(a, b)` |
 | Pointer load | `load8(addr)`, `load16(addr)`, `load32(addr)`, `load64(addr)` — zero-extended to `u64` |
 | Pointer store | `store8(addr, v)`, `store16(addr, v)`, `store32(addr, v)`, `store64(addr, v)` |
-| Volatile (MMIO) | `vload8/16/32/64(addr)`, `vstore8/16/32/64(addr, v)` — with memory barrier |
+| Volatile (MMIO) | `vload8/16/32/64(addr)`, `vstore8/16/32/64(addr, v)` — x86_64: `mfence`. arm64: `LDAR`/`STLR` (ordering, **not** a completion barrier); `--legacy` uses `DSB SY` instead |
 | Atomic | `atomic_load(ptr)`, `atomic_store(ptr, v)`, `atomic_cas(ptr, exp, des)`, `atomic_add/sub/and/or/xor(ptr, v)` |
 | Bitfield | `bit_get(v, n)`, `bit_set(v, n)`, `bit_clear(v, n)`, `bit_range(v, start, width)`, `bit_insert(v, start, width, bits)` |
 | Signed cmp | `signed_lt(a, b)`, `signed_gt(a, b)`, `signed_le(a, b)`, `signed_ge(a, b)` |

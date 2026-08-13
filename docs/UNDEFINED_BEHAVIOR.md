@@ -69,9 +69,9 @@ reasoning for anything non-obvious.
 
 | Operation                               | Status   | Notes |
 |-----------------------------------------|----------|-------|
-| `atomic_load` / `atomic_store` (aligned, same size) | Defined | Sequential consistency on both x86 and ARM64 (DMB ISH on ARM, `lock` / `mfence` on x86). |
+| `atomic_load` / `atomic_store` (aligned, same size) | Defined | Sequential consistency on both x86 and ARM64. ARM64 uses the acquire/release forms `LDAR` / `STLR` — **not** a `DMB ISH`, which earlier revisions of this table claimed; x86 uses `lock` / `mfence`. |
 | `atomic_cas` success path               | Defined  | Returns 1 on success, 0 on failure. Out-param always written with the current value. |
-| `atomic_add` / `sub` / `and` / `or` / `xor` | Defined | Return the previous value. Sequentially consistent. |
+| `atomic_add` / `sub` / `and` / `or` / `xor` | Defined | Return the previous value. Sequentially consistent — an `LDAXR`/`STLXR` retry loop on ARM64, a `lock`-prefixed instruction on x86. (The `--emit=asm` disassembler labels those two encodings `ldxr`/`stxr`; the encodings themselves have the acquire/release bit set.) |
 | Data race (non-atomic concurrent access) | **Undefined** | Torn reads / writes observable. |
 | `dmb()` / `dsb()` / `isb()`              | Defined  | Emit the corresponding ARMv8 barrier; no-op on x86. |
 | `volatile` load / store                 | Defined  | Not hoisted, not fused, not reordered across other volatiles. No implicit fence — pair with `dmb/dsb/isb` for cross-CPU visibility. |
