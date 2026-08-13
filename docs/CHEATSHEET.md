@@ -177,7 +177,18 @@ fn total([u8] xs) -> u64 {  // slice parameter; .len is the caller-passed length
     }
     return s
 }
+
+fn main() {
+    buf[0] = 5
+    buf[1] = 6
+    println(total(buf, 4))  // CALLER PASSES TWO ARGS: pointer AND length.
+    exit(0)                 // `total(buf)` is "wrong number of arguments".
+}
 ```
+
+A slice parameter is sugar for a `(ptr, len)` pair passed as **two separate
+arguments**. `xs.len` inside the callee is just the second one — nothing
+carries a length for you, so the caller always supplies it.
 
 Slices are byte-addressed: `xs[i]` reads the byte at `xs + i`. For wider
 elements use the load builtins — e.g. `load64(xs + i * 8)` for `[u64]` data.
@@ -236,11 +247,13 @@ fn main() {
 ## Annotations
 
 ```kr
-@export            fn api() { }          // keep symbol in output
+@export            fn api() { }           // keep symbol in output
 @noreturn          fn panic() { exit(1) }
-@naked @section("name")  // also available
+@naked             fn isr() { }           // no prologue/epilogue
+@section(".text.init") fn boot() { }      // place in a named section
 
-@builtin_override  fn str_len(u64 s) -> u64 { ... }  // deliberately shadow a built-in
+// Deliberately shadow a built-in:
+@builtin_override  fn str_len(u64 s) -> u64 { return 7 }
 ```
 
 Defining a function whose name matches a built-in (`str_len`, `memcpy`,

@@ -93,7 +93,7 @@ A bare-metal release: six sub-projects take the compiler from "provably safe und
 - **Zero dependencies at runtime** — static executables, no libc, no dynamic linker.
 - **Kernel-first primitives** — `device` blocks for typed MMIO, `load/store/vload/vstore` builtins for clean pointer access, inline assembly with a large instruction table, signed comparisons, bitfield ops, atomic operations, `--freestanding` mode.
 - **Clean pointer syntax** — `store32(addr, val)` and `load64(addr)` instead of the verbose `unsafe { *(addr as uint32) = val }` form.
-- **Slice parameters** — `fn foo([u8] data)` with `data.len` for buffer-processing functions.
+- **Slice parameters** — `fn foo([u8] data)` with `data.len` for buffer-processing functions. It is sugar for a `(ptr, len)` pair, so the **caller passes two arguments**: `foo(buf, 4)`.
 - **Fixed arrays** — `u8[256] buf` locally, `static u8[4096] page` at module level, and `Point[10] pts` with `pts[i].field` syntax for struct arrays.
 - **Volatile blocks and the `vload*`/`vstore*` builtins** — `mfence` plus a
   width-correct load/store on x86_64; `LDARB/H/W/X` and `STLRB/H/W/X` on ARM64.
@@ -265,7 +265,7 @@ fn divmod(u64 a, u64 b) -> u64 {
 }
 ```
 
-Types: `u8/u16/u32/u64`, `i8/i16/i32/i64`, `f16/f32/f64` (long forms `uint8`..`int64` also work), structs, enums, fixed-size arrays, device blocks. Control: `if/else`, `while`, `for..in`, `break/continue`, `match`, recursion. Functions with method syntax (`fn Struct.method`), slice parameters (`fn foo([u8] data) { u64 n = data.len; ... }`), imports with recursive resolution.
+Types: `u8/u16/u32/u64`, `i8/i16/i32/i64`, `f16/f32/f64` (long forms `uint8`..`int64` also work), structs, enums, fixed-size arrays, device blocks. Control: `if/else`, `while`, `for..in`, `break/continue`, `match`, recursion. Functions with method syntax (`fn Struct.method`), slice parameters (`fn foo([u8] data) { u64 n = data.len; ... }`, called as `foo(buf, n)` — two arguments), imports with recursive resolution.
 
 **New to KernRift?** Start with [Getting Started](docs/getting-started.md) (install → first program → running tests), then the [one-page cheatsheet](docs/CHEATSHEET.md). Deeper references: [docs/LANGUAGE.md](docs/LANGUAGE.md), [docs/GRAMMAR.md](docs/GRAMMAR.md), the [standard library](docs/STDLIB.md), and the tutorials ([B-tree](docs/tutorial-btree.md), [UART driver](docs/tutorial-uart-driver.md)). The full documentation index is [docs/README.md](docs/README.md).
 
