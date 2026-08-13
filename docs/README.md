@@ -8,8 +8,8 @@ contributors and the curious; **Project** tracks direction and process.
 
 - [Getting Started](getting-started.md) — install, write and run your
   first program, run the tests.
-- [Cheatsheet](CHEATSHEET.md) — every construct on one page, each with a
-  runnable example.
+- [Cheatsheet](CHEATSHEET.md) — every construct on one page, with examples
+  (a few blocks are type/API listings rather than whole programs).
 - [Tutorial: B-tree](tutorial-btree.md) — building a real data structure.
 - [Tutorial: UART driver](tutorial-uart-driver.md) — `device` blocks and
   memory-mapped I/O.
@@ -18,8 +18,9 @@ contributors and the curious; **Project** tracks direction and process.
 
 - [Embedded targets](../README.md#embedded-targets-riscv32--xtensa--esp32) —
   the riscv32 / xtensa / ESP32 backends: the verified support matrix (no
-  floats, no 64-bit integers, no structs when freestanding), the freestanding
-  `fn main() -> uint32` programming model, and the ESP32 IRAM/DRAM budget.
+  floats, no 64-bit integers, no structs when freestanding, and **none of the
+  35 `std/` modules**), the freestanding `fn main() -> uint32` programming
+  model, and the ESP32 IRAM/DRAM budget.
 - [Freestanding mode](LANGUAGE.md#23-freestanding-mode) — the same ground from
   the language side: what `--freestanding` changes, the embedded-target subset,
   and which constructs survive it.
@@ -34,8 +35,8 @@ contributors and the curious; **Project** tracks direction and process.
 - [Language Reference](LANGUAGE.md) — the complete language: types,
   operators, control flow, structs, functions, builtins, annotations.
 - [Grammar](GRAMMAR.md) — the EBNF grammar and lexical rules.
-- [Standard Library](STDLIB.md) — every `std/*.kr` module, function by
-  function.
+- [Standard Library](STDLIB.md) — 19 of the 35 `std/*.kr` modules, function
+  by function. The 16 bare-metal driver modules are not written up yet.
 - [Undefined Behavior](UNDEFINED_BEHAVIOR.md) — what is defined, what
   traps under `--debug`, and what is genuinely UB. **Read before writing
   `unsafe` code.**
@@ -55,7 +56,8 @@ contributors and the curious; **Project** tracks direction and process.
 - [ABI Policy](ABI_POLICY.md) — calling conventions and platform ABI
   decisions.
 - [Effect System](EFFECT_SYSTEM.md) — the `@ctx` / `@eff` / `@caps`
-  analysis annotations.
+  analysis annotations. **Design only** — those three and the lock-cycle
+  check cannot fire today; only the critical-region pass is implemented.
 
 ## Project
 

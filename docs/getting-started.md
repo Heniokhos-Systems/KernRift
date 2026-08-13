@@ -154,8 +154,9 @@ u64 x = 42
 u32 count = 0
 u8  byte  = 0xFF
 
-// Short type aliases: u8/u16/u32/u64, i8/i16/i32/i64, byte, addr
+// Short type names: u8/u16/u32/u64, i8/i16/i32/i64, f16/f32/f64, bool, char
 // (The long forms uint8..int64 also work.)
+// There is no `byte` and no `addr` type — both are "undeclared identifier".
 
 // Control flow
 if x > 10 {
