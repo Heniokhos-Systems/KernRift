@@ -2,7 +2,7 @@
 
 **KernRift is a bare-metal systems programming language and compiler created by Pantelis Christou.**
 
-A self-hosted systems language compiler for kernel-first development. KernRift compiles itself — no Rust, no C, no LLVM, no external toolchain. It produces native executables for x86_64 and AArch64 on Linux, Windows, macOS, and Android, with BCJ+LZ-Rift-compressed fat binaries as the default output (8 platform slices per `.krbo`). The `kr` runner executes `.krbo` fat binaries on any supported platform. The compiler self-hosts on all 8 targets and is verified via CI on every push. The compiler ships with an **optimising IR backend** — not SSA; linear three-address code over unbounded vregs, with named variables reusing one vreg across assignments — with liveness analysis, graph-coloring register allocation, an AST-level function inliner, Briggs/George copy coalescing, LICM, constant folding, DCE, and CSE — producing native machine code for all targets directly from the IR, no assembler in the loop.
+A self-hosted systems language compiler for kernel-first development. KernRift compiles itself — no Rust, no C, no LLVM, no external toolchain. It produces native executables for x86_64 and AArch64 on Linux, Windows, macOS, and Android, with BCJ+LZ-Rift-compressed fat binaries as the default output (8 platform slices per `.krbo`). The `kr` runner executes `.krbo` fat binaries on any supported platform. The compiler self-hosts on all 8 targets, with the per-target caveats in [What is actually proven](#what-is-actually-proven) — read that before relying on any of them. The compiler ships with an **optimising IR backend** — not SSA; linear three-address code over unbounded vregs, with named variables reusing one vreg across assignments — with liveness analysis, graph-coloring register allocation, an AST-level function inliner, Briggs/George copy coalescing, LICM, constant folding, DCE, and CSE — producing native machine code for all targets directly from the IR, no assembler in the loop.
 
 Beyond the eight hosted platform targets, the same IR feeds three **embedded
 backends** — 32-bit RISC-V (`--arch=riscv32`), Xtensa LX6 (`--arch=xtensa`),
@@ -12,9 +12,63 @@ subset of the language, not a second full implementation: see
 [Embedded targets](#embedded-targets-riscv32--xtensa--esp32) for exactly what
 is and is not supported.
 
+## What is actually proven
+
+Read this table before anything else in this README. It is the honest version
+of every capability claim below it, and where the two disagree, this table
+wins.
+
+| Status | Meaning |
+|---|---|
+| 🟢 **Real hardware** | Ran on physical silicon, with evidence that could not have been produced under emulation. |
+| 🔵 **CI-verified** | Runs on every push, on a real runner of that OS/arch. |
+| 🟡 **QEMU / emulated only** | Works, but nothing outside an emulator has ever executed it. |
+| 🟠 **Experimental** | Usable, but a deliberate subset with limits that will stop you quickly. |
+| 🔴 **Not implemented** | Refused at compile time. |
+
+### Hosted targets — this is where the real coverage is
+
+| Target | Status | What was actually run |
+|---|---|---|
+| Linux x86_64 | 🔵 CI-verified | Self-compiles to a bootstrap fixed point; the full **1355-test** suite passes. This is the primary development target. |
+| Linux ARM64 | 🔵 CI-verified | Self-compiles to a fixed point; suite runs on a native ARM64 runner. |
+| Windows x86_64 | 🔵 CI-verified | Self-compile chain on a `windows-latest` runner. |
+| Windows ARM64 | 🔵 CI-verified | Self-compile chain through a fixed point on a `windows-11-arm` runner. |
+| macOS x86_64 | 🔵 CI-verified | Test binaries run, plus a self-compile, on a `macos-14` runner **under Rosetta**. |
+| macOS ARM64 | 🟡 Partly verified | CI runs cross-compiled test binaries on `macos-14`, but there is **no self-compile step for macOS ARM64 in CI**. Treat "self-hosts on ARM Macs" as untested by CI. |
+| Android ARM64 | 🟡 QEMU only in CI | CI runs Android binaries under `qemu-aarch64-static` with the *glibc* ARM64 loader symlinked in as `/system/bin/linker64`. **No bionic, no device.** A self-compile on a physical phone is reported by the author but is not reproduced by CI. |
+| Android x86_64 | 🟡 Emulated in CI | The Android artifact is executed by invoking `/lib64/ld-linux-x86-64.so.2` directly on the x86_64 Linux CI box. **No bionic, no device.** |
+
+### Bare metal
+
+| Capability | Status | What was actually run |
+|---|---|---|
+| **x86_64, GRUB multiboot** | 🟢 **Real hardware (2026-08-13)** | Booted from USB on an **AMD Ryzen 9 7900X** desktop and printed to VGA text memory. The artifact prints the CPU's own brand string from `CPUID` leaves `0x80000002–4`, so the screen is self-authenticating: under emulation that line reads `QEMU Virtual CPU version 2.5+`, and on the desktop it read the AMD part. Source: [`tests/target_none/boot/hw_sentinel_x86.kr`](tests/target_none/boot/hw_sentinel_x86.kr). This is the project's strongest single claim. |
+| arm64 bare metal (`--emit=image`) | 🟡 QEMU only | Boots and reports a computed sentinel under `qemu-system-aarch64`. **Nothing has ever run on arm64 silicon.** |
+| UEFI (`--emit=uefi`) | 🟡 QEMU only | Loads and prints under OVMF (x86_64) and AAVMF (arm64) — emulated firmware, not a vendor's. |
+| UEFI + Secure Boot | 🔴 Incompatible (measured) | An MS-key OVMF **refuses** the identical artifact that runs with Secure Boot off. Images are unsigned; this is a property of the output, not a bug to be fixed by trying again. |
+| `--reset-vector` | 🟡 QEMU only, by design | A 64 KiB image boots from the CPU reset vector under `qemu -bios`, reaching real → protected → long mode. It *replaces* firmware, so running it on a real board means flashing a BIOS; that is deliberately out of scope. |
+| Linux kernel modules (`--emit=lkm`) | 🟡 Unproven here | Produces a `.ko` relocatable. Loading it into a running kernel is not exercised by the test suite. |
+
+The bare-metal boot gate has **59 legs, all passing**, and runs on every push
+— but with the single exception of the multiboot row above, every leg of it is
+QEMU.
+
+### Embedded targets — do not read these as first-class
+
+| Target | Status | Detail |
+|---|---|---|
+| ESP32 (`--target=esp32`) | 🟢 Real hardware | `examples/esp32/hello.kr` boots from flash on an ESP32-D0WD-V3 and prints over UART0. |
+| Xtensa LX6 | 🟠 Experimental | Freestanding only — `--arch=xtensa` without `--freestanding` is refused (`xtensa ELF image emission not yet implemented`), and `-c` is refused (`xtensa fixup resolution not yet implemented`). |
+| riscv32 (RV32IMC) | 🟠 Experimental | Hosted ELF32 and `--freestanding` blobs both build; `.o` emission works. Verified under `qemu-riscv32-static` only. |
+| **The standard library on riscv32 / xtensa** | 🔴 **Unavailable** | **0 of the 35 `std/` modules compile** for these targets. Every one is rejected at its first `u64`, because `u64` is the language's default integer type and the word size here is 4 bytes: `error: 64-bit integers not supported on riscv32; use uint32`. Embedded programs must be written against the builtins and fixed-size types alone. |
+
+So the real, general-purpose coverage of this compiler is **x86_64 and ARM64**.
+riscv32 and Xtensa are a working code generator with no library on top of it.
+
 **v2.9.0 highlights** (full details in [CHANGELOG.md](CHANGELOG.md)):
 
-A bare-metal release: six sub-projects take the compiler from "provably safe under static analysis" to programs that actually boot — under QEMU. **Everything bare-metal here is emulated, on one machine.** No real hardware, no vendor firmware. Secure Boot is measured **incompatible** (an MS-key OVMF refuses the identical artifact that runs unsigned). The boot gate has 59 legs and runs in CI on every push, including on a native ARM64 runner.
+A bare-metal release: six sub-projects take the compiler from "provably safe under static analysis" to programs that actually boot. Everything bare-metal **in this release** was emulated, on one machine — no real hardware, no vendor firmware. (The x86_64 multiboot path has since booted on a physical Ryzen 9 7900X; see [What is actually proven](#what-is-actually-proven). Every other bare-metal claim here is still QEMU-only.) Secure Boot is measured **incompatible** (an MS-key OVMF refuses the identical artifact that runs unsigned). The boot gate has 59 legs and runs in CI on every push, including on a native ARM64 runner.
 
 - **`--target=none`** — freestanding, no libc, no host OS. Refuses every OS-bound construct and routes `print`/`println`/f-strings/`alloc` through pluggable write/alloc providers instead.
 - **`--emit=image`** — raw flat binary, no container, plus a QEMU boot gate in the test suite that requires a computed sentinel value on the wire, not just "QEMU didn't crash".
@@ -380,16 +434,22 @@ A released `krc` binary compiles the current source into the next `krc`. No Rust
 
 ## Platforms
 
-| Platform | Compile | Run | Self-host | File I/O | Bootstrap |
-|----------|---------|-----|-----------|----------|-----------|
-| Linux x86_64 | ✅ | ✅ | ✅ | ✅ | ✅ fixed point |
-| Linux ARM64 | ✅ | ✅ | ✅ | ✅ | ✅ fixed point |
-| macOS ARM64 | ✅ | ✅ | ✅ | ✅ | ✅ fixed point |
-| macOS x86_64 | ✅ | ✅ | ✅ | ✅ | ✅ (Rosetta) |
-| Windows x86_64 | ✅ | ✅ | ✅ | ✅ | ✅ fixed point |
-| Windows ARM64 | ✅ | ✅ | ✅ | ✅ | ✅ fixed point |
-| Android ARM64 | ✅ | ✅ | ✅ | ✅ | ✅ self-compiled on phone |
-| Android x86_64 | ✅ | ✅ | ✅ | ✅ | ✅ verified |
+The "How it is checked" column is the point of this table — the ✅ columns say
+a thing works, that column says who watched it work.
+
+| Platform | Compile | Run | Self-host | File I/O | How it is checked |
+|----------|---------|-----|-----------|----------|-------------------|
+| Linux x86_64 | ✅ | ✅ | ✅ | ✅ | CI, native runner; bootstrap fixed point + full 1355-test suite |
+| Linux ARM64 | ✅ | ✅ | ✅ | ✅ | CI, native ARM64 runner; bootstrap fixed point |
+| Windows x86_64 | ✅ | ✅ | ✅ | ✅ | CI, `windows-latest`; self-compile chain |
+| Windows ARM64 | ✅ | ✅ | ✅ | ✅ | CI, `windows-11-arm`; self-compile chain to fixed point |
+| macOS x86_64 | ✅ | ✅ | ✅ | ✅ | CI, `macos-14` **under Rosetta**; self-compile |
+| macOS ARM64 | ✅ | ✅ | ⚠️ | ✅ | CI, `macos-14`: runs cross-compiled binaries, **no self-compile step** |
+| Android ARM64 | ✅ | ⚠️ | ⚠️ | ✅ | CI under `qemu-aarch64-static` with the glibc loader standing in for `linker64` — **no bionic, no device**. Phone self-compile is author-reported, not reproduced by CI |
+| Android x86_64 | ✅ | ⚠️ | ⚠️ | ✅ | CI runs the artifact via `/lib64/ld-linux-x86-64.so.2` on the Linux box — **no bionic, no device** |
+
+⚠️ = the capability is claimed but nothing on that actual platform has been
+observed doing it. Everything Android is emulated or loader-substituted.
 
 ## Embedded targets: riscv32 / xtensa / ESP32
 
@@ -407,17 +467,24 @@ established by compiling a program that exercises the feature.
 | `f16` / `f32` / `f64` | Yes | **No** | **No** | **No** |
 | 64-bit integers (`u64` / `i64`) | Yes | **No** | **No** | **No** |
 | `exit()`, syscalls | Yes | Yes | **No** | **No** |
+| **Anything from `std/`** | Yes (35 modules) | **No — 0 of 35** | **No — 0 of 35** | **No — 0 of 35** |
+| `.o` relocatable (`-c`) | Yes | Yes | Yes | **No** (`xtensa fixup resolution not yet implemented`) |
 
 The limitations are hard compile errors, not silent miscompiles:
 
 - **No floating point.** `f16`/`f32`/`f64` are rejected outright — neither
-  target has a hardware FPU and there is no soft-float library.
-  There is no workaround short of fixed-point arithmetic
-  (see [`std/fixedpoint.kr`](docs/STDLIB.md)).
+  target has a hardware FPU and there is no soft-float library. The workaround
+  is fixed-point arithmetic you write yourself: **`std/fixedpoint.kr` cannot
+  be used**, because it is declared in `u64` and is rejected at its first
+  function (`std/fixedpoint.kr:5:16: error: 64-bit integers not supported on
+  riscv32; use uint32`).
 - **No 64-bit integers.** The word size is 4 bytes; `u64`/`i64` are rejected at
   the declaration site. Use `u32`. This is the limitation that bites first when
   porting existing KernRift code, because `u64` is the language's integer
-  default.
+  default — and it is why **none of the 35 `std/` modules compile** for these
+  targets. Every one of them declares `u64` somewhere near the top. There is
+  no standard library on riscv32 or xtensa; you write against the builtins and
+  fixed-size types.
 - **No structs or `alloc()` when freestanding.** Both lower to `IR_ALLOC`,
   which is implemented only for the hosted RISC-V path (via `mmap2`). Under
   `--freestanding` the compiler stops with
