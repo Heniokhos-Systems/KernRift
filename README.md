@@ -88,15 +88,15 @@ krc check module.kr
 krc lc program.kr
 ```
 
-### Self-compilation (~304K tokens, ~190K AST nodes, ~2.6 MB source)
+### Self-compilation (328 104 tokens, 205 843 AST nodes, 3 106 397 bytes of source)
 
-All 8 targets self-compile. CI verifies bootstrap fixed point (krc3 == krc4) and runs the full suite on every push (**1275 tests** as of v2.9.0). Numbers below are on an AMD Ryzen 9 7900X — see [`benchmarks/BENCHMARKS.md`](benchmarks/BENCHMARKS.md) for the complete run including gcc / rustc comparisons.
+All 8 targets self-compile. CI verifies bootstrap fixed point (krc3 == krc4) and runs the full suite on every push (**1355 tests**, all passing on this tree). Numbers below were re-measured on an AMD Ryzen 9 7900X with the compiler built from this commit — see [`benchmarks/BENCHMARKS.md`](benchmarks/BENCHMARKS.md) for the complete run including gcc / rustc comparisons.
 
 | Target | Legacy codegen | IR codegen (default) | IR vs legacy |
 |--------|---------------:|---------------------:|-------------:|
-| linux   x86_64 ELF    |  ~204 ms / 1.68 MB | ~411 ms / 1.12 MB | **−33 %** size |
-| linux   arm64  ELF    |  ~196 ms / 1.47 MB | ~422 ms / 0.93 MB | **−36 %** size |
-| **Fat binary (all 8)**| — | **~2.95 s / 3.99 MB** | (IR all 8 slices) |
+| linux   x86_64 ELF    |  ~221 ms / 1.79 MB | ~450 ms / 1.12 MB | **−37 %** size |
+| linux   arm64  ELF    |  ~205 ms / 1.56 MB | ~488 ms / 0.93 MB | **−40 %** size |
+| **Fat binary (all 8)**| — | **~3.12 s / 4.10 MB** | (IR all 8 slices) |
 
 The IR path now produces smaller binaries than legacy on both architectures. Two things landed since v2.8.8 to flip the size story: a partial used-callee-save prologue + cross-register spill-reload peephole (v2.8.21 RA work), and v2.8.24's Briggs/George copy coalescer. The function inliner (v2.8.24) also folds pure single-expression callees so DCE can drop the originals.
 
@@ -302,7 +302,12 @@ Compiler intrinsics — no imports needed.
 
 ## Standard Library
 
-22 modules (~5 400 lines) in `std/`:
+35 modules, 553 functions, ~8 600 lines in `std/`. The table below covers the
+19 general-purpose ones; the other 16 are the bare-metal drivers added for the
+boot work (`vga_text`, `serial`, `uart_16550`, `uart_pl011`, `ps2`, `mouse`,
+`pci`, `idt`, `x86`, `ramfb`, `fw_cfg`, `fw_cfg_mmio`, `console`, `cstr`,
+`heap_bump`, `gzip`) and are **not yet written up** in
+[docs/STDLIB.md](docs/STDLIB.md) — read the source for those.
 
 | Module | Functions |
 |--------|-----------|
@@ -341,11 +346,11 @@ See the [`examples/`](examples/) directory for runnable programs covering every 
 
 ## Architecture
 
-~69 900 lines of KernRift across 25 source files + 22 stdlib modules. Self-compiles to a 1.12 MB x86_64 native binary in ~0.41 s (IR, default), a 0.93 MB ARM64 binary, or an 8-slice fat binary (BCJ + LZ-Rift compression) in ~2.95 s on an AMD Ryzen 9 7900X. **1275 tests** pass as of v2.9.0, bootstrap fixed point verified on all 8 targets — Linux, macOS, Windows, and Android on both x86_64 and ARM64. See [`benchmarks/BENCHMARKS.md`](benchmarks/BENCHMARKS.md) for micro-benchmarks vs gcc / rustc and peak-memory numbers.
+71 970 lines of KernRift across the 25 source files the compiler is built from, plus 35 stdlib modules (8 584 lines). Self-compiles to a 1.12 MB x86_64 native binary in ~0.45 s (IR, default), a 0.93 MB ARM64 binary, or an 8-slice fat binary (BCJ + LZ-Rift compression) in ~3.12 s on an AMD Ryzen 9 7900X. **1355 tests** pass on this tree, bootstrap fixed point verified on all 8 targets — Linux, macOS, Windows, and Android on both x86_64 and ARM64. See [`benchmarks/BENCHMARKS.md`](benchmarks/BENCHMARKS.md) for micro-benchmarks vs gcc / rustc and peak-memory numbers.
 
 | File | Purpose |
 |------|---------|
-| `lexer.kr` | Tokenizer (90+ kinds) |
+| `lexer.kr` | Tokenizer (95 `TokenKind` members) |
 | `parser.kr` | Recursive descent + Pratt precedence |
 | `ir.kr` | IR (not SSA) + x86_64 emitter (Linux / macOS / Windows / Android), liveness, graph-colour RA, Briggs/George coalescer, LICM, CF/DCE/CSE |
 | `ir_aarch64.kr` | AArch64 emitter fed from the same IR |
@@ -361,7 +366,7 @@ See the [`examples/`](examples/) directory for runnable programs covering every 
 | `bcj.kr` | BCJ filters (x86_64 + AArch64) for compression |
 | `format_*.kr` | ELF, Mach-O, PE, AR, KRBO, KrboFat |
 | `runner.kr` | `kr` — fat-binary slice extractor / launcher |
-| `std/*.kr` | Standard library (22 modules, ~5 400 lines) |
+| `std/*.kr` | Standard library (35 modules, 553 functions, 8 584 lines) |
 
 ## Bootstrap
 

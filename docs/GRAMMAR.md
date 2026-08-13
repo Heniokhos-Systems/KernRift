@@ -39,7 +39,7 @@ else, so `/*` lexes as a `/` followed by a `*` and the parser reports
 `error: unexpected token in expression`. Use `//` on each line.
 
 Whitespace (spaces, tabs, CR, LF) is a token separator; no significant
-indentation. The lexer emits ~112 token kinds; only the subset relevant to
+indentation. `TokenKind` in `src/lexer.kr` has 95 members; only the subset relevant to
 grammar is referenced below.
 
 Binary (`0b...`) and octal (`0o...`) literals, `_` digit separators, and

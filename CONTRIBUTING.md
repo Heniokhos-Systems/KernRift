@@ -25,7 +25,9 @@ and runs, aborting on the first failure:
 
 1. **Bootstrap fixed point** — `krc3 == krc4` byte-for-byte (the compiler
    compiles itself to a stable fixed point).
-2. **Test suite** — `tests/run_tests.sh` (1275 tests as of v2.9.0).
+2. **Test suite** — run it as `make test`, never as bare `bash
+   tests/run_tests.sh` (which defaults `KRC` to `build/krc3` with no `--arch`
+   and reports mass failures on a healthy tree). 1355 tests on this tree.
 3. **IR-vs-legacy differential** — `tests/diff_ir_legacy.sh` and
    `diff_ir_legacy_stdout.sh` compile+run each probe on all four backends
    (IR/legacy × x86_64/arm64, arm64 under `qemu-aarch64-static`) and
@@ -68,8 +70,9 @@ The default backend is the **IR** path (`ir.kr` + `ir_aarch64.kr`); the
 second implementation and a differential oracle — see the IR vs legacy
 harnesses. New language features should land on the IR path.
 
-The standard library is in `std/` (22 modules) — see
-[docs/STDLIB.md](docs/STDLIB.md) for the per-function reference.
+The standard library is in `std/` (35 modules, 553 functions) — see
+[docs/STDLIB.md](docs/STDLIB.md) for the per-function reference, which
+currently covers 19 of them.
 
 ## Adding a test
 

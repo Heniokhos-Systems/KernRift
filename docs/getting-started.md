@@ -430,7 +430,8 @@ fn main() {
 }
 ```
 
-Available modules:
+The most commonly used modules (15 of the 35 in `std/` — see
+[STDLIB.md](STDLIB.md) for the rest):
 
 | Module | Highlights |
 |--------|-----------|
