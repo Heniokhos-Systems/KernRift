@@ -19965,6 +19965,49 @@ fi
 rm -f "$CR_SRC" "$CR_BIN"
 fi
 
+# --- int 0xNN encodes CD ib, and the vector is PARSED not assumed -------------
+#
+# Two different vectors, deliberately. A form that emitted a hardcoded 0xCD 0x80
+# would pass a single-vector check, so 0x2f is the one that proves the operand
+# reaches the encoder. Same RUN_ARCH guard and reasoning as asm_call_jmp_reg
+# above: the assertion is a byte encoding, meaningless from a host that cannot
+# assemble it, and a silent skip would read as coverage.
+if [ "$RUN_ARCH" != "x86_64" ]; then
+    PASS=$((PASS + 1)); TOTAL=$((TOTAL + 1))
+    echo "  asm_int_imm8: SKIP (x86_64 encodings; host is $RUN_ARCH)"
+else
+TOTAL=$((TOTAL + 1))
+II_SRC=$(mktemp /tmp/krc_intimm_XXXX.kr)
+II_BIN=/tmp/krc_intimm_$$
+cat > "$II_SRC" <<'IIEOF'
+@naked
+fn t() {
+    asm { "int 0x80" }
+    asm { "int 0x2f" }
+    asm { "int3" }
+    asm { "ret" }
+}
+fn main() -> uint64 { t(); return 0 }
+IIEOF
+rm -f "$II_BIN"
+$KRC $KRC_FLAGS "$II_SRC" -o "$II_BIN" --target=none --emit=image \
+     --stack-top=0x90000 --load-addr=0x400000 >/dev/null 2>&1
+if [ ! -f "$II_BIN" ]; then
+    echo "FAIL: asm_int_imm8 (no artifact)"; FAIL=$((FAIL + 1))
+else
+    # cd80 = int 0x80, cd2f = int 0x2f, cc = int3 (still its own one-byte form)
+    ii_hex=$(od -An -tx1 -v "$II_BIN" | tr -d ' \n')
+    ii_bad=""
+    case "$ii_hex" in *cd80cd2fcc*) ;; *) ii_bad="sequence not found" ;; esac
+    if [ -z "$ii_bad" ]; then
+        PASS=$((PASS + 1)); echo "  asm_int_imm8: PASS (cd 80 / cd 2f / cc)"
+    else
+        echo "FAIL: asm_int_imm8 ($ii_bad)"; FAIL=$((FAIL + 1))
+    fi
+fi
+rm -f "$II_SRC" "$II_BIN"
+fi
+
 emit_recipe() {
     case "$1" in
         elf|elf-arm64|elf-x86_64|elfexe|linux|linux-x86_64|linux-arm64|linux-x86-64|obj|android)

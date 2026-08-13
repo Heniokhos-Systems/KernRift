@@ -9854,6 +9854,18 @@ fn asm_emit_x86(uint64 str_tok) {
     if asm_match(sptr, 0, "cli", 3) != 0 && slen == 3 { emit_byte(0xFA); return }
     if asm_match(sptr, 0, "sti", 3) != 0 && slen == 3 { emit_byte(0xFB); return }
     if asm_match(sptr, 0, "int3", 4) != 0 && slen == 4 { emit_byte(0xCC); return }
+    // `int 0xNN` -- CD ib. int3 above is the dedicated one-byte form and cannot
+    // express any other vector. A bare-metal syscall gate is the motivating
+    // case: without this the program side has to hand-emit asm("0xCD 0x80"),
+    // which spells the design's single most load-bearing instruction as two
+    // opaque bytes. Hex only, because that is how vectors are written and
+    // because asm_parse_hex_byte already exists; a decimal form would be a
+    // second parser for no gain.
+    if asm_match(sptr, 0, "int 0x", 6) != 0 && slen == 8 {
+        emit_byte(0xCD)
+        emit_byte(asm_parse_hex_byte(sptr, 6))
+        return
+    }
     // PAUSE (F3 90). Decodes as a NOP on cores without SSE2, so it is safe
     // everywhere. Without it a spin loop has to emit asm("0xF3 0x90") by hand.
     if asm_match(sptr, 0, "pause", 5) != 0 && slen == 5 { emit_byte(0xF3); emit_byte(0x90); return }
