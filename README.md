@@ -59,7 +59,7 @@ wins.
 | UEFI (`--emit=uefi`) | 🟡 QEMU only | Loads and prints under OVMF (x86_64) and AAVMF (arm64) — emulated firmware, not a vendor's. |
 | UEFI + Secure Boot | ⚪ Incompatible (measured) | An MS-key OVMF **refuses** the identical artifact that runs with Secure Boot off. The images are unsigned, so a firmware that checks signatures rejects them — that is the system working, not a compile-time refusal or a defect. Signing would need a key, an `sbsign` equivalent, and a `.reloc`-free image the signer accepts; none of that exists here and none is planned. |
 | `--reset-vector` | 🟡 QEMU only, by design | A 64 KiB image boots from the CPU reset vector under `qemu -bios`, reaching real → protected → long mode. It *replaces* firmware, so running it on a real board means flashing a BIOS; that is deliberately out of scope. |
-| Linux kernel modules (`--emit=lkm`) | 🟡 Unproven here | Produces a `.ko` relocatable. Loading it into a running kernel is not exercised by the test suite. |
+| Linux kernel modules (`--emit=lkm`) | 🟢 Real hardware | `examples/hello_lkm.kr` **loads into a running Linux kernel** and executes in kernel space. Verified 2026-08-14 on 7.0.0-28-generic: `insmod` succeeds, `lsmod` shows `hello_kr` resident, `modinfo` reads the license/author/name, and the kernel log carries both the init and exit prints — `Hello from KernRift` at load, `Bye from KernRift` at `rmmod`, which then unloads cleanly. Requires Secure Boot off, since the module is unsigned (it taints `OE`). The `.ko` build is in CI; the load/unload cycle is not, so that part is manual. |
 
 The bare-metal boot gate has **59 legs, all passing**, and runs on every push
 — but with the single exception of the multiboot row above, every leg of it is
