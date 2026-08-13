@@ -238,12 +238,34 @@ fn main() {
                 arg_offset = 16
             } else {
                 // Termux pattern: argv[0] == argv[1] (both = path-to-self).
+                //
+                // argv[0] must LOOK LIKE A PATH. Termux duplicates the
+                // executable path, so both slots always contain a '/'.
+                // Requiring one is a tightening, not the loosening the note
+                // above warns against: that warns against "starts with /" as
+                // the trigger BY ITSELF, which matches every Bash run. Here it
+                // only ever removes matches, and the equality test already
+                // excludes normal invocations (argv[1] is the .krbo, not the
+                // program).
+                //
+                // Without it, any run whose single argument happens to equal
+                // argv[0] silently loses an argument. On ApexRift argv[0] is a
+                // bare basename, so `kr kr` -- a plausible typo, and a real
+                // file name -- printed usage instead of running it.
+                uint64 a0_has_slash = 0
+                uint64 a0_i = 0
+                while load8(argv0_p + a0_i) != 0 {
+                    if load8(argv0_p + a0_i) == 47 { a0_has_slash = 1 }
+                    a0_i = a0_i + 1
+                }
                 uint64 argv1_slot = cli_argv + 8
                 uint64 argv1_p = 0
                 unsafe { *(argv1_slot as uint64) -> argv1_p }
                 if argv1_p != 0 {
-                    if str_eq_r(argv0_p, argv1_p) != 0 {
-                        arg_offset = 16
+                    if a0_has_slash != 0 {
+                        if str_eq_r(argv0_p, argv1_p) != 0 {
+                            arg_offset = 16
+                        }
                     }
                 }
             }
