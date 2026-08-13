@@ -60,12 +60,14 @@ QEMU.
 |---|---|---|
 | ESP32 (`--target=esp32`) | 🟢 Real hardware | `examples/esp32/hello.kr` boots from flash on an ESP32-D0WD-V3 and prints over UART0. |
 | Xtensa LX6 | 🟠 Experimental | Freestanding only — `--arch=xtensa` without `--freestanding` is refused (`xtensa ELF image emission not yet implemented`), and `-c` is refused (`xtensa fixup resolution not yet implemented`). |
-| riscv32 (RV32IMC) | 🟠 Experimental | Hosted ELF32 and `--freestanding` blobs both build; `.o` emission works. Verified under `qemu-riscv32-static` only. |
+| riscv32 (RV32IMC) | 🟠 **Unfinished — scaffolding** | Built as a stepping stone to the Xtensa backend, not as a target in its own right: a simpler 32-bit ISA to get the shared 32-bit code paths right before tackling Xtensa and the ESP32. It works as far as it goes — hosted ELF32 and `--freestanding` blobs build, `.o` emission works, verified under `qemu-riscv32-static` — but it is **not finished and nobody should build on it**. Its job was to make the target below possible. |
 | **The standard library on riscv32 / xtensa** | ⚪ **Out of scope by design** | `std/` targets 64-bit hosts: it is written in `u64` throughout, and on a 4-byte-word target the compiler refuses that outright — `error: 64-bit integers not supported on riscv32; use uint32`. So none of the 35 modules import on these targets, and that is the type system doing its job rather than a missing port. Embedded programs are written against the builtins and fixed-size types, which is what the ESP32 example does. |
 
 So the general-purpose, library-backed coverage of this compiler is **x86_64 and
-ARM64**. riscv32 and Xtensa are a code generator for freestanding 32-bit code —
-deliberately without `std/` on top, not waiting for it.
+ARM64**. The 32-bit backends exist for one reason: to put KernRift on an ESP32.
+riscv32 was the stepping stone, Xtensa was the goal, and the ESP32 image writer
+is the payoff — the only thing in this section proven on real silicon. Their
+lack of `std/` is by design; riscv32's own incompleteness is not.
 
 **v2.9.0 highlights** (full details in [CHANGELOG.md](CHANGELOG.md)):
 
