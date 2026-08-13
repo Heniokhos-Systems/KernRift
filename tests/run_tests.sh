@@ -2582,6 +2582,278 @@ fi
 rm -f "$DIR/../dmassign_idx_$$.kr" "$DIR/../dmassign_ptr_$$.kr" \
       "$DIR/../dmassign_val_$$.kr"
 
+# --- Documentation pins (2026-08-14) ----------------------------------------
+#
+# The 2026-08-06 docs audit found ~163 false claims across 20 docs. They all
+# rotted for the same reason: NOTHING CHECKED THEM. Correcting the prose alone
+# just restarts the clock, so each of the six rows below asserts the measured
+# reality behind a claim I have just re-verified. If the behaviour changes, the
+# row goes red and names the doc that has to change with it.
+#
+# Every row here guards against passing VACUOUSLY: an empty grep capture, a
+# renamed symbol, or a probe that produced no output FAILS the row rather than
+# sailing through a comparison of "" against "".
+
+# 1. Block comments are NOT implemented. `/* ... */` is not lexed; the `/` is
+#    lexed as a divide operator and the parser then chokes.
+#
+#    SUBTLETY, and the exact reason the "block comments are supported" claim
+#    survived: a SINGLE-LINE `/* x */` at TOP LEVEL compiles clean. That is an
+#    accident, not support -- before a declaration the parser skips tokens it
+#    does not recognise, so the whole comment is swallowed and never reaches an
+#    expression context. Anyone who probes block comments by putting one at the
+#    top of a file therefore "confirms" a feature that does not exist. THE
+#    TOP-LEVEL FORM IS NOT A VALID PROBE. Pin the statement position instead,
+#    which genuinely errors, and pin the top-level accident too so that a
+#    partial implementation cannot land unnoticed.
+#
+#    Parse-only: a parse error is reached before any codegen, so the arch is
+#    irrelevant -- $RUN_ARCH is used purely because it is always a valid value.
+TOTAL=$((TOTAL + 1))
+BC_OK=1
+cat > "$DIR/../docpin_bc_body_$$.kr" <<'BC_BODY'
+fn main() {
+    /* inside a function body */
+    exit(0)
+}
+BC_BODY
+cat > "$DIR/../docpin_bc_top_$$.kr" <<'BC_TOP'
+/* top level single line */
+fn main() {
+    exit(0)
+}
+BC_TOP
+# Capture the COMPILER's status, not a later grep's. Reading `grep`'s exit code
+# and calling it the compiler's is a mistake I made twice on 2026-08-13.
+bc_out=$($KRC --arch=$RUN_ARCH "$DIR/../docpin_bc_body_$$.kr" -o /tmp/krc_bc_$$ 2>&1)
+bc_rc=$?
+rm -f /tmp/krc_bc_$$
+if [ "$bc_rc" = "0" ]; then
+    BC_OK=0
+    echo "  block comment in a STATEMENT position compiled -- block comments appear to be implemented now"
+fi
+# Assert the diagnostic, not merely a non-zero exit: any unrelated breakage
+# also exits non-zero, and would otherwise keep this row green for the wrong
+# reason.
+if ! printf '%s' "$bc_out" | grep -q 'error: unexpected token in expression'; then
+    BC_OK=0
+    echo "  expected 'error: unexpected token in expression', got: $(printf '%s' "$bc_out" | head -2)"
+fi
+# ...and that it points at the `/*` line (line 2 of the probe), so a parse
+# error somewhere else in the file cannot satisfy this row.
+if ! printf '%s' "$bc_out" | grep -q 'docpin_bc_body_.*\.kr:2:5: error:'; then
+    BC_OK=0
+    echo "  diagnostic did not point at the '/*' at line 2 col 5"
+fi
+# The top-level accident, pinned so a top-level-only implementation is visible.
+$KRC --arch=$RUN_ARCH "$DIR/../docpin_bc_top_$$.kr" -o /tmp/krc_bct_$$ >/dev/null 2>&1
+bct_rc=$?
+rm -f /tmp/krc_bct_$$
+if [ "$bct_rc" != "0" ]; then
+    BC_OK=0
+    echo "  the top-level single-line form no longer compiles (it did, by accident, on 2026-08-14)"
+fi
+if [ "$BC_OK" = "1" ]; then
+    PASS=$((PASS + 1)); echo "  block_comments_unimplemented: PASS (statement position errors; top-level form still slips through)"
+else
+    FAIL=$((FAIL + 1))
+    echo "FAIL: block_comments_unimplemented"
+    echo "  if block comments were implemented on purpose, update docs/LANGUAGE.md and delete this row;"
+    echo "  do NOT 'confirm' the feature with a top-level /* */ -- that form passes without any lexer support"
+fi
+rm -f "$DIR/../docpin_bc_body_$$.kr" "$DIR/../docpin_bc_top_$$.kr"
+
+# 2. The @ctx / @effects / caps / lock-order analyses CANNOT FIRE. `ann_register`
+#    and `lock_add_edge` are defined in src/analysis.kr and called from nowhere:
+#    annotations are never parsed, so the tables stay empty and all four passes
+#    are inert. docs/EFFECT_SYSTEM.md is therefore marked DESIGN ONLY.
+#
+#    Counting call sites needs care. A bare `grep -c 'ann_register(' src/*.kr`
+#    is NOT zero -- it matches the `fn ann_register(` DEFINITION, and
+#    `lock_add_edge` additionally matches a comment in src/main.kr that explains
+#    this very situation. So: strip `//` comments first, then drop `fn` lines.
+#
+#    ANTI-VACUITY GUARD: also require both functions to still be DEFINED. Without
+#    that, deleting or renaming them drives the call-site count to zero and this
+#    row would go green on a tree where the symbols no longer exist at all.
+TOTAL=$((TOTAL + 1))
+# Count DEFINITIONS, not defining files: both live in src/analysis.kr, so a
+# per-file count would say 1 and this row would have been born red.
+ann_defs=$(cat "$DIR"/../src/*.kr | grep -cE '^[[:space:]]*fn[[:space:]]+(ann_register|lock_add_edge)[[:space:]]*\(')
+ann_calls=$(cat "$DIR"/../src/*.kr \
+    | sed 's://.*::' \
+    | grep -E '(ann_register|lock_add_edge)[[:space:]]*\(' \
+    | grep -vcE '^[[:space:]]*fn[[:space:]]')
+ann_doc=$(grep -c 'Status: DESIGN ONLY' "$DIR/../docs/EFFECT_SYSTEM.md")
+if [ "$ann_defs" = "2" ] && [ "$ann_calls" = "0" ] && [ "$ann_doc" = "1" ]; then
+    PASS=$((PASS + 1)); echo "  effect_analyses_are_inert: PASS (both defined, 0 call sites, doc says DESIGN ONLY)"
+else
+    FAIL=$((FAIL + 1))
+    echo "FAIL: effect_analyses_are_inert (definitions=$ann_defs want 2, call sites=$ann_calls want 0, doc DESIGN-ONLY marker=$ann_doc want 1)"
+    echo "  if you WIRED THE ANALYSES UP, that is good news -- now drop the 'DESIGN ONLY' banner"
+    echo "  and the four 'NOT IMPLEMENTED' headings from docs/EFFECT_SYSTEM.md in the same commit;"
+    echo "  if you deleted or renamed the functions, update that doc and this row together"
+fi
+
+# 3. arm64 volatile emits NO completion barrier. On the default IR backend
+#    vload32/vstore32 become LDAR/STLR -- acquire/release ORDERING, not a DSB.
+#    docs/LANGUAGE.md and README.md both carry the measured table this pins:
+#      x86_64 IR 2 x mfence | arm64 IR 0 x DSB (LDAR/STLR) | arm64 legacy 2 x DSB SY
+#
+#    MATCH ON THE ENCODING, NEVER THE MNEMONIC. The `--emit=asm` decoder prints
+#    the LDAR/STLR encodings with a BLANK mnemonic field, so `grep -i stlr` finds
+#    nothing on a tree that emits STLR perfectly. That is precisely how the false
+#    "arm64 volatile emits DSB SY" claim survived: someone grepped for `stlr`,
+#    saw zero, and concluded the barrier form must be in use.
+#      88dffe.. = LDAR Wt,[Xn]    889ffe.. = STLR Wt,[Xn]
+#
+#    Compile-only (the listing is inspected, never executed), so pinning arches
+#    here is correct and cannot break the native ARM64 CI job.
+TOTAL=$((TOTAL + 1))
+VOL_OK=1
+cat > "$DIR/../docpin_vol_$$.kr" <<'VOL_SRC'
+static u8[64] buf
+fn main() {
+    u32 status = vload32(buf)
+    vstore32(buf, status)
+    exit(0)
+}
+VOL_SRC
+vol_check() { # <label> <arch> <extra-flags> <pattern> <want-count>
+    local _asm="/tmp/krc_vol_$$.s"
+    rm -f "$_asm"
+    if ! $KRC --arch="$2" $3 --emit=asm "$DIR/../docpin_vol_$$.kr" -o "$_asm" >/dev/null 2>&1; then
+        VOL_OK=0; echo "  $1: --emit=asm FAILED to compile"; return
+    fi
+    # An empty or missing listing must FAIL, not silently satisfy a want of 0.
+    if [ ! -s "$_asm" ]; then
+        VOL_OK=0; echo "  $1: listing is empty -- a want-0 check would have passed vacuously"; return
+    fi
+    local _got
+    _got=$(grep -ci "$4" "$_asm")
+    [ "$_got" = "$5" ] || { VOL_OK=0; echo "  $1: '$4' appears $_got time(s), want $5"; }
+    rm -f "$_asm"
+}
+vol_check "arm64 IR LDAR"     arm64  ""          '88dffe' 1
+vol_check "arm64 IR STLR"     arm64  ""          '889ffe' 1
+vol_check "arm64 IR no DSB"   arm64  ""          'dsb'    0
+vol_check "x86_64 IR mfence"  x86_64 ""          'mfence' 2
+vol_check "arm64 legacy DSB"  arm64  "--legacy"  'dsb'    2
+if [ "$VOL_OK" = "1" ]; then
+    PASS=$((PASS + 1)); echo "  arm64_volatile_no_dsb: PASS (LDAR+STLR, 0 DSB; x86 2 mfence; legacy 2 DSB)"
+else
+    FAIL=$((FAIL + 1))
+    echo "FAIL: arm64_volatile_no_dsb"
+    echo "  the volatile lowering changed -- update the barrier tables in docs/LANGUAGE.md"
+    echo "  and README.md in the same commit; grep the ENCODING, not the mnemonic"
+fi
+rm -f "$DIR/../docpin_vol_$$.kr" "/tmp/krc_vol_$$.s"
+
+# 4. `krc fmt` PRINTS TO STDOUT and does not rewrite the file. getting-started.md
+#    used to say it formatted in place, which would have had readers piping over
+#    their own source.
+#
+#    THE PROBE MUST BE DELIBERATELY MIS-FORMATTED. My first version of this row
+#    used an already-canonical `fn main() { exit(0) }`, and it PASSED against a
+#    compiler I had patched to write the formatted text straight back over the
+#    input -- because reformatting canonical source reproduces it byte for byte,
+#    so the in-place write left the hash alone. A hash check is only evidence if
+#    formatting actually changes the bytes. Hence the ragged indentation below,
+#    plus an explicit assertion that stdout DIFFERS from the input: if the
+#    formatter ever becomes a no-op on this probe, the row fails and says so
+#    rather than going quietly vacuous again.
+TOTAL=$((TOTAL + 1))
+FMT_OK=1
+cat > "$DIR/../docpin_fmt_$$.kr" <<'FMT_SRC'
+fn main()    {
+exit(0)
+}
+FMT_SRC
+fmt_orig=$(cat "$DIR/../docpin_fmt_$$.kr")
+fmt_before=$(md5sum < "$DIR/../docpin_fmt_$$.kr")
+fmt_out=$($KRC fmt "$DIR/../docpin_fmt_$$.kr" 2>/dev/null)
+fmt_after=$(md5sum < "$DIR/../docpin_fmt_$$.kr")
+if [ "$fmt_before" != "$fmt_after" ]; then
+    FMT_OK=0; echo "  krc fmt REWROTE the input file"
+fi
+if [ -z "$fmt_out" ]; then
+    FMT_OK=0; echo "  krc fmt produced no stdout -- the unchanged hash proves nothing here"
+fi
+if [ "$fmt_out" = "$fmt_orig" ]; then
+    FMT_OK=0
+    echo "  krc fmt did not reformat the probe, so the unchanged hash is vacuous"
+    echo "  -- make the probe messier, or this row stops proving anything"
+fi
+if ! printf '%s' "$fmt_out" | grep -q 'fn main()'; then
+    FMT_OK=0; echo "  krc fmt stdout did not contain the formatted source"
+fi
+fmt_doc=$(grep -c 'does \*not\* rewrite the file' "$DIR/../docs/getting-started.md")
+if [ "$fmt_doc" != "1" ]; then
+    FMT_OK=0; echo "  docs/getting-started.md no longer states that fmt does not rewrite (matches=$fmt_doc)"
+fi
+if [ "$FMT_OK" = "1" ]; then
+    PASS=$((PASS + 1)); echo "  fmt_does_not_write_in_place: PASS (hash unchanged, formatted text on stdout)"
+else
+    FAIL=$((FAIL + 1))
+    echo "FAIL: fmt_does_not_write_in_place"
+    echo "  if you made fmt write in place, update the krc fmt row in docs/getting-started.md"
+fi
+rm -f "$DIR/../docpin_fmt_$$.kr"
+
+# 5. README's advertised test count must equal what this suite actually reports.
+#    README.md states it TWICE and both must agree with the total, so updating
+#    one and missing the other is a red.
+#
+#    This row is SELF-REFERENTIAL: it is itself counted in the total. The
+#    comparison therefore cannot happen here -- at this point in the file $TOTAL
+#    is only a few hundred, with ~17 800 lines of rows still to run. Part A
+#    below parses and validates README; PART B, DOWN IN THE SUMMARY BLOCK, does
+#    the comparison once $TOTAL is final. TOTAL is incremented HERE so that the
+#    number README must state includes this row.
+TOTAL=$((TOTAL + 1))
+README_COUNTS=$(grep -oE '\*\*[0-9]+ tests\*\*' "$DIR/../README.md" | grep -oE '[0-9]+')
+# An empty capture must FAIL, never compare "" against "" and pass.
+README_N=$(printf '%s\n' "$README_COUNTS" | grep -c '^[0-9][0-9]*$')
+README_UNIQ=$(printf '%s\n' "$README_COUNTS" | sort -u | tr '\n' ' ' | sed 's/ *$//')
+
+# 6. std/ DOES NOT COMPILE FOR riscv32, and that is a DELIBERATE SCOPE BOUNDARY,
+#    NOT A GAP. The stdlib is written for 64-bit hosts; riscv32 exists as
+#    scaffolding for the Xtensa/ESP32 backend. Every std module is rejected at
+#    its first u64. DO NOT "FIX" THIS by widening riscv32 or by rewriting std/ in
+#    uint32 -- if the scope decision is ever actually reversed, change the docs
+#    and this row together, deliberately.
+#
+#    Assert the ERROR TEXT, not just a non-zero exit: a missing file, a bad flag
+#    or any unrelated failure also exits non-zero and would keep this row green
+#    while proving nothing. Compile-only, so --arch=riscv32 is pinned safely.
+TOTAL=$((TOTAL + 1))
+RV_OK=1
+RV_SEEN=0
+RV_BAD=0
+for _std in "$DIR"/../std/*.kr; do
+    RV_SEEN=$((RV_SEEN + 1))
+    rv_out=$($KRC --arch=riscv32 "$_std" -o /tmp/krc_rv_$$ 2>&1)
+    rm -f /tmp/krc_rv_$$
+    if ! printf '%s' "$rv_out" | grep -q 'error: 64-bit integers not supported on riscv32; use uint32'; then
+        RV_OK=0
+        RV_BAD=$((RV_BAD + 1))
+        [ "$RV_BAD" -le 3 ] && echo "  $(basename "$_std"): not rejected at a u64 -- got: $(printf '%s' "$rv_out" | head -1)"
+    fi
+done
+# Guard the loop against doing nothing: an empty glob would leave RV_OK=1.
+if [ "$RV_SEEN" != "35" ]; then
+    RV_OK=0
+    echo "  swept $RV_SEEN std modules, expected 35 -- the glob found the wrong set"
+fi
+if [ "$RV_OK" = "1" ]; then
+    PASS=$((PASS + 1)); echo "  std_rejected_on_riscv32: PASS (all $RV_SEEN modules rejected at their first u64)"
+else
+    FAIL=$((FAIL + 1))
+    echo "FAIL: std_rejected_on_riscv32 ($RV_BAD of $RV_SEEN modules not rejected as expected)"
+    echo "  std/ on riscv32 is a deliberate 64-bit-host scope decision, not a missing feature."
+    echo "  If it was reversed on purpose, update README.md and docs/ and change this row too."
+fi
+
 rm -f "$DIR/../ceval_idx_$$.kr" "$DIR/../ceval_ptr_$$.kr" "$DIR/../ceval_plain_$$.kr"
 
 # File-scope struct statics: `static Point[N] pts` and `static Point sp`.
@@ -20395,5 +20667,28 @@ echo ""
 # regression was "expected, not a regression". Removed at E Task 4 rather than
 # left standing. If a future task deliberately lands a red row again, add the
 # annotation back here, for that row, with that task's name on it.
+# --- Documentation pin 5, PART B (see Part A above) --------------------------
+# README.md advertises this suite's test count. Compare it against the total
+# only now, when $TOTAL is final and already includes this row (Part A did the
+# TOTAL++). Placing this comparison next to Part A would have compared README
+# against a partial count and been permanently, uselessly red.
+if [ "$README_N" = "0" ] || [ -z "$README_COUNTS" ]; then
+    FAIL=$((FAIL + 1))
+    echo "FAIL: readme_test_count_matches_suite (found NO '**N tests**' in README.md)"
+    echo "  the count must be stated -- an unparseable README is a failure, not a pass"
+elif [ "$README_N" != "2" ]; then
+    FAIL=$((FAIL + 1))
+    echo "FAIL: readme_test_count_matches_suite (README states the count $README_N times, want 2)"
+    echo "  README.md carries the number in the CI paragraph and in the stats paragraph"
+elif [ "$README_UNIQ" != "$TOTAL" ]; then
+    FAIL=$((FAIL + 1))
+    echo "FAIL: readme_test_count_matches_suite (README says '$README_UNIQ', suite ran $TOTAL)"
+    echo "  if the two README numbers differ from each other they are both shown above;"
+    echo "  update BOTH '**N tests**' occurrences in README.md to $TOTAL"
+else
+    PASS=$((PASS + 1))
+    echo "  readme_test_count_matches_suite: PASS (README and suite both say $TOTAL)"
+fi
+
 echo "=== Results: $PASS/$TOTAL passed, $FAIL failed ==="
 exit $FAIL
