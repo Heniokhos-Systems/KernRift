@@ -56,7 +56,7 @@ krc hello.kr --arch=x86_64 -o hello
 A successful compile reports what it produced and how long it took:
 
 ```
-15 tokens, 9 nodes, 264 bytes -> hello  (0.61 ms)
+15 tokens, 9 nodes, 296 bytes -> hello  (0.59 ms)
 ```
 
 Or build a cross-platform fat binary and run it through `kr`:
@@ -115,13 +115,17 @@ directly in comparisons: `if c == 'a' { ... }`).
 println("hello")           // string literal
 println(42)                // integer (decimal)
 println(x)                 // variable (decimal)
-println(3.14)              // f64 (6-digit fraction)
+println(3.14)              // f64 → "3.140000" (6-digit fraction, TRUNCATED
+                           // not rounded: println(3.14159) → "3.141589")
 println(true)              // bool → "true" / "false"
 println('A')               // char → one byte
 print("no newline")        // same family, no trailing \n
 
 // Variadic println (v2.8.3) — space-separated args, typed correctly:
 println("x =", x, "y =", y)       // prints "x = 42 y = 100"
+// The separator is inserted between EVERY pair of args, including around
+// literals, so this prints "loading  50 %" — two spaces, and a space before
+// the %. Build the string yourself if you need exact spacing.
 print("loading ", percent, "%\n")
 
 // f-strings (v2.8.3) — `{expr}` interpolates, `{{` / `}}` escape braces:
@@ -350,7 +354,7 @@ won't sneak in behind your back, even as the language evolves. See the
 | `krc --emit=lkm <file.kr>` | Loadable Linux kernel module (`.ko`). |
 | `krc --emit=asm <file.kr>` | Emit a disassembled listing with function labels. |
 | `krc check <file.kr>` | Run semantic analysis only. |
-| `krc fmt <file.kr>` | Auto-format the file in place. |
+| `krc fmt <file.kr>` | Print the formatted source **to stdout**. It does *not* rewrite the file — redirect if you want that: `krc fmt f.kr > f.new && mv f.new f.kr`. |
 | `krc lc <file.kr>` | Living compiler report: fitness score, pattern detection, proposal triggers. |
 | `krc lc --fix <file.kr>` | Apply auto-fixes in place (e.g. `unsafe{}` pointer ops → `load/store` builtins). |
 | `krc lc --fix --dry-run <file.kr>` | Preview auto-fixes without writing. |
@@ -438,7 +442,7 @@ The most commonly used modules (15 of the 35 in `std/` — see
 | `std/string.kr` | `str_cat(a,b)`, `str_copy(s)`, `str_sub(s,start,len)`, `int_to_str(v)`, `str_trim(s)` — these return newly allocated strings. Parsers return numbers: `str_to_int(s) -> u64`, `str_to_float(s) -> f64` (accepts `[±]INT[.FRAC][e±EXP]`; `0` / `0.0` when there are no digits; no hex, `inf` or `nan` forms) |
 | `std/io.kr` | `read_file`, `write_file`, `read_line`, `scan_int`, `scan_str`, `print_kv`, `print_indent` |
 | `std/math.kr` | `min`, `max`, `abs`, `clamp`, `pow`, `sqrt_int`, `gcd`, `is_prime` |
-| `std/fmt.kr` | `fmt_hex`, `fmt_bin`, `pad_left`, `pad_right` |
+| `std/fmt.kr` | `fmt_dec`, `fmt_hex`, `fmt_bin`, `pad_left`, `pad_right` — the two `pad_*` need `std/string.kr` imported too (they call `str_copy`) |
 | `std/mem.kr` | `realloc`, `memcmp`, `memzero`, `arena_init`, `arena_alloc`, `arena_reset` |
 | `std/vec.kr` | `vec_new`, `vec_push`, `vec_get`, `vec_set`, `vec_pop`, `vec_len` |
 | `std/map.kr` | `map_new`, `map_set`, `map_get`, `map_has`, `map_len` |

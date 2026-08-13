@@ -207,6 +207,12 @@ Integer→string conversions. **Every function returns a freshly
 `alloc`'d null-terminated string the caller owns.** Print results with
 the `print_str`/`println_str` built-ins.
 
+> **`pad_left` and `pad_right` need `std/string.kr` imported as well.** They
+> call `str_copy`, which lives there, and `std/fmt.kr` does not import it for
+> you. Importing only `std/fmt.kr` and calling `pad_left` fails with
+> `std/fmt.kr:122:31: error: undefined function 'str_copy'`. `fmt_dec`,
+> `fmt_hex` and `fmt_bin` are self-contained and need no second import.
+
 | Signature | Description |
 |---|---|
 | `fn fmt_dec(u64 val) -> u64` | Decimal: `fmt_dec(42)` → `"42"`. Unsigned only. Allocates. |
@@ -373,7 +379,7 @@ Internal helpers: `f64_double_n(f64 x, u64 n) -> f64`,
 
 | Signature | Description |
 |---|---|
-| `fn fmt_f64(f64 val, u64 decimals) -> u64` | Format as `[-]INT.FRAC` with `decimals` fractional digits (capped at 15). NaN/±Inf return `"NaN"`, `"inf"`, `"-inf"`. Returns fresh null-terminated string. Allocates. |
+| `fn fmt_f64(f64 val, u64 decimals) -> u64` | Format as `[-]INT.FRAC` with `decimals` fractional digits (capped at 15). **Truncates, does not round** — `fmt_f64(3.14159, 6)` is `"3.141589"`, because the nearest f64 to 3.14159 is 3.14158999…, and `0.9999999` at 6 digits is `"0.999999"`. NaN/±Inf return `"NaN"`, `"inf"`, `"-inf"`. Returns fresh null-terminated string. Allocates. |
 | `fn fmt_f32(f32 val, u64 decimals) -> u64` | f32 variant (decimals capped at 7); delegates to `fmt_f64`. Allocates. |
 | `fn fmt_classify_f64(f64 v) -> u64` / `fn fmt_classify_f32(f32 v) -> u64` | IEEE-754 class via bit inspection: 0=finite, 1=NaN, 2=+Inf, 3=−Inf. (Needed because float `!=` doesn't flag NaN in V1.) |
 | `fn fmt_float_literal(u64 b0, u64 b1, u64 b2, u64 b3) -> u64` | Internal: alloc a ≤4-byte literal ("NaN"/"inf"). Allocates. |
