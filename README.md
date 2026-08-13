@@ -14,6 +14,16 @@ is and is not supported.
 
 ## What is actually proven
 
+![KernRift running bare metal on an AMD Ryzen 9 7900X, booted from USB, printing to VGA text memory](docs/images/baremetal-ryzen-2026-08-13.jpg)
+
+*2026-08-13. A KernRift program, compiled by KernRift, booted from a USB stick
+on a physical AMD Ryzen 9 7900X with no operating system underneath it. The
+values are computed at runtime, not printed literals. The `cpu` line is read
+out of `CPUID` leaves `0x80000002`–`0x80000004` by the program itself — under
+emulation that line reads `QEMU Virtual CPU version 2.5+`, so the photograph
+authenticates itself. Source:
+[`tests/target_none/boot/hw_sentinel_x86.kr`](tests/target_none/boot/hw_sentinel_x86.kr).*
+
 Read this table before anything else in this README. It is the honest version
 of every capability claim below it, and where the two disagree, this table
 wins.
