@@ -418,13 +418,25 @@ krc check program.kr
 krc check: program.kr - OK
 ```
 
-`check` runs the living-compiler safety analysis: caller/callee **context**
-compatibility, declared-**effect** verification, module **capability**
-declarations, lock-cycle detection, and unsafe-pointer tracking. Add `--ci`
-for machine-readable output (exit code reflects findings) and `--fix` to
-apply auto-fixes. It is a complement to the type checker, not a superset —
-a clean `check` does not mean "no null derefs"; it means the
-context/effect/capability contracts hold.
+**A clean `krc check` is a much weaker statement than it looks.** The
+context (`@ctx`), effect (`@eff`), capability (`@caps`) and lock-cycle passes
+all run, but the annotations that drive them are parsed and then discarded —
+nothing populates the annotation table or the lock graph — so **none of those
+four can report anything, on any input**. The only analysis in `check` that
+can produce a finding is the critical-region pass (`alloc` between a bare
+`acquire()` and `release()`), and that one misses `u64 b = alloc(8)` and
+anything nested inside an `if` or a loop. See
+[EFFECT_SYSTEM.md](EFFECT_SYSTEM.md) for the measured details.
+
+So: a clean `check` does **not** mean "the context/effect/capability contracts
+hold" — it mostly means the file parsed. It is a complement to the type
+checker, not a superset, and certainly not a safety guarantee.
+
+`--ci` (gate on a fitness threshold, exit 1 below it) and `--fix` (run the
+migration engine) are **`krc lc` flags, not `krc check` flags**. Both are
+accepted on a `krc check` command line and then ignored — `krc check --ci`
+and `krc check --fix` behave exactly like a bare `krc check`, and both exit 0.
+Use `krc lc --ci program.kr` if you want the gating behaviour.
 
 A sensible pre-flight before a long debug session:
 
