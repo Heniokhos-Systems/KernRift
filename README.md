@@ -47,7 +47,7 @@ wins.
 | Windows ARM64 | 🔵 CI-verified | Self-compile chain through a fixed point on a `windows-11-arm` runner. |
 | macOS x86_64 | 🟡 Translated | GitHub has no x86_64 macOS runner here: the `macos-14` runner is ARM64, and the x86_64 slice is executed through `arch -x86_64`, i.e. **Rosetta translation**. It runs and it self-compiles, but not on an x86_64 Mac. |
 | macOS ARM64 | 🟡 Partly verified | CI runs cross-compiled test binaries on `macos-14`, but there is **no self-compile step for macOS ARM64 in CI**. Treat "self-hosts on ARM Macs" as untested by CI. |
-| Android ARM64 | 🟡 QEMU only in CI | CI runs Android binaries under `qemu-aarch64-static` with the *glibc* ARM64 loader symlinked in as `/system/bin/linker64`. **No bionic, no device.** A self-compile on a physical phone is reported by the author but is not reproduced by CI. |
+| Android ARM64 | 🟢 Real hardware | **Self-compiles to a bootstrap fixed point on a physical phone.** Verified 2026-08-14 on a Redmi Note 8 Pro (Android 11, arm64-v8a): the compiler was pushed over `adb`, rebuilt its own 3.1 MB source on the device in 4.9 s, and the stage-2 and stage-3 binaries are **byte-identical** (`sha256 8a39f8f6…`) to each other and to the cross-compiled one. The phone-built compiler then compiled and ran a program correctly. This runs under **bionic** — `/system/bin/linker64` is the Android runtime linker and the device has no glibc loader at all. CI cannot reproduce this: its Android jobs run PIE ELFs under the *glibc* loader on Linux. |
 | Android x86_64 | 🟡 Emulated in CI | The Android artifact is executed by invoking `/lib64/ld-linux-x86-64.so.2` directly on the x86_64 Linux CI box. **No bionic, no device.** |
 
 ### Bare metal
@@ -55,7 +55,7 @@ wins.
 | Capability | Status | What was actually run |
 |---|---|---|
 | **x86_64, GRUB multiboot** | 🟢 **Real hardware (2026-08-13)** | Booted from USB on an **AMD Ryzen 9 7900X** desktop and printed to VGA text memory. The artifact prints the CPU's own brand string from `CPUID` leaves `0x80000002–4`, so the screen is self-authenticating: under emulation that line reads `QEMU Virtual CPU version 2.5+`, and on the desktop it read the AMD part. Source: [`tests/target_none/boot/hw_sentinel_x86.kr`](tests/target_none/boot/hw_sentinel_x86.kr). This is the project's strongest single claim. |
-| arm64 bare metal (`--emit=image`) | 🟡 QEMU only | Boots and reports a computed sentinel under `qemu-system-aarch64`. **Nothing has ever run on arm64 silicon.** |
+| arm64 bare metal (`--emit=image`) | 🟢 Real hardware | The boot gate's sentinel runs under `qemu-system-aarch64`, but the interesting result is downstream: a **KernRift Phone OS** boots on a Redmi Note 8 Pro (MediaTek MT6785) and drives real peripherals — MMU on with caches, the full 1080×2340 framebuffer, MT6360 PMIC over I2C5, MTK SPI5, and a Novatek NT36672A touchscreen whose ~110 KB firmware the KernRift code downloads into the chip's SRAM each boot. A zero-Rust variant emits the boot image from `krc --emit=image --image-header --stack-top --load-addr` alone — no rustc, no linker script — with the required gzip done by `std/gzip.kr`. I verified that artifact carries a valid arm64 `Image` header (`ARMd` magic, `image_size 0x5780`, flags `0xa`) byte-shaped exactly as today's `krc` emits; the boot itself is the author's, on his handset, and is not reproducible from this repo. |
 | UEFI (`--emit=uefi`) | 🟡 QEMU only | Loads and prints under OVMF (x86_64) and AAVMF (arm64) — emulated firmware, not a vendor's. |
 | UEFI + Secure Boot | ⚪ Incompatible (measured) | An MS-key OVMF **refuses** the identical artifact that runs with Secure Boot off. The images are unsigned, so a firmware that checks signatures rejects them — that is the system working, not a compile-time refusal or a defect. Signing would need a key, an `sbsign` equivalent, and a `.reloc`-free image the signer accepts; none of that exists here and none is planned. |
 | `--reset-vector` | 🟡 QEMU only, by design | A 64 KiB image boots from the CPU reset vector under `qemu -bios`, reaching real → protected → long mode. It *replaces* firmware, so running it on a real board means flashing a BIOS; that is deliberately out of scope. |
@@ -415,7 +415,7 @@ See the [`examples/`](examples/) directory for runnable programs covering every 
 
 ## Architecture
 
-71 970 lines of KernRift across the 25 source files the compiler is built from, plus 35 stdlib modules (8 584 lines). Self-compiles to a 1.12 MB x86_64 native binary in ~0.45 s (IR, default), a 0.93 MB ARM64 binary, or an 8-slice fat binary (BCJ + LZ-Rift compression) in ~3.12 s on an AMD Ryzen 9 7900X. **1356 tests** pass on this tree. Bootstrap fixed point is verified **natively on Linux x86_64 and Linux ARM64**; Windows and macOS run their own chains on real runners, while the two Android targets are only ever executed under a glibc loader on Linux. See [`benchmarks/BENCHMARKS.md`](benchmarks/BENCHMARKS.md) for micro-benchmarks vs gcc / rustc and peak-memory numbers (a v2.8.33 run, not re-measured for v2.9.0).
+71 970 lines of KernRift across the 25 source files the compiler is built from, plus 35 stdlib modules (8 584 lines). Self-compiles to a 1.12 MB x86_64 native binary in ~0.45 s (IR, default), a 0.93 MB ARM64 binary, or an 8-slice fat binary (BCJ + LZ-Rift compression) in ~3.12 s on an AMD Ryzen 9 7900X. **1356 tests** pass on this tree. Bootstrap fixed point is verified **natively on Linux x86_64, Linux ARM64, and a physical Android ARM64 handset**; Windows and macOS run their own chains on real runners. Android x86_64 is the one target executed only under a glibc loader on Linux. See [`benchmarks/BENCHMARKS.md`](benchmarks/BENCHMARKS.md) for micro-benchmarks vs gcc / rustc and peak-memory numbers (a v2.8.33 run, not re-measured for v2.9.0).
 
 | File | Purpose |
 |------|---------|
@@ -460,7 +460,7 @@ a thing works, that column says who watched it work.
 | Windows ARM64 | ✅ | ✅ | ✅ | ✅ | CI, `windows-11-arm`; self-compile chain to fixed point |
 | macOS x86_64 | ✅ | ✅ | ✅ | ✅ | CI, `macos-14` **under Rosetta**; self-compile |
 | macOS ARM64 | ✅ | ✅ | ⚠️ | ✅ | CI, `macos-14`: runs cross-compiled binaries, **no self-compile step** |
-| Android ARM64 | ✅ | ⚠️ | ⚠️ | ✅ | CI under `qemu-aarch64-static` with the glibc loader standing in for `linker64` — **no bionic, no device**. Phone self-compile is author-reported, not reproduced by CI |
+| Android ARM64 | ✅ | ✅ | ✅ | ✅ | **Self-compiles to a fixed point on a physical Redmi Note 8 Pro under bionic** (verified 2026-08-14). CI is weaker: it runs the artifact under `qemu-aarch64-static` with the glibc loader standing in for `linker64` |
 | Android x86_64 | ✅ | ⚠️ | ⚠️ | ✅ | CI runs the artifact via `/lib64/ld-linux-x86-64.so.2` on the Linux box — **no bionic, no device** |
 
 ⚠️ = the capability is claimed but nothing on that actual platform has been
