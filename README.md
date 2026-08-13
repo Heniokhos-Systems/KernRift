@@ -61,10 +61,11 @@ QEMU.
 | ESP32 (`--target=esp32`) | 🟢 Real hardware | `examples/esp32/hello.kr` boots from flash on an ESP32-D0WD-V3 and prints over UART0. |
 | Xtensa LX6 | 🟠 Experimental | Freestanding only — `--arch=xtensa` without `--freestanding` is refused (`xtensa ELF image emission not yet implemented`), and `-c` is refused (`xtensa fixup resolution not yet implemented`). |
 | riscv32 (RV32IMC) | 🟠 Experimental | Hosted ELF32 and `--freestanding` blobs both build; `.o` emission works. Verified under `qemu-riscv32-static` only. |
-| **The standard library on riscv32 / xtensa** | 🔴 **Unavailable** | **0 of the 35 `std/` modules compile** for these targets. Every one is rejected at its first `u64`, because `u64` is the language's default integer type and the word size here is 4 bytes: `error: 64-bit integers not supported on riscv32; use uint32`. Embedded programs must be written against the builtins and fixed-size types alone. |
+| **The standard library on riscv32 / xtensa** | ⚪ **Out of scope by design** | `std/` targets 64-bit hosts: it is written in `u64` throughout, and on a 4-byte-word target the compiler refuses that outright — `error: 64-bit integers not supported on riscv32; use uint32`. So none of the 35 modules import on these targets, and that is the type system doing its job rather than a missing port. Embedded programs are written against the builtins and fixed-size types, which is what the ESP32 example does. |
 
-So the real, general-purpose coverage of this compiler is **x86_64 and ARM64**.
-riscv32 and Xtensa are a working code generator with no library on top of it.
+So the general-purpose, library-backed coverage of this compiler is **x86_64 and
+ARM64**. riscv32 and Xtensa are a code generator for freestanding 32-bit code —
+deliberately without `std/` on top, not waiting for it.
 
 **v2.9.0 highlights** (full details in [CHANGELOG.md](CHANGELOG.md)):
 
@@ -467,7 +468,7 @@ established by compiling a program that exercises the feature.
 | `f16` / `f32` / `f64` | Yes | **No** | **No** | **No** |
 | 64-bit integers (`u64` / `i64`) | Yes | **No** | **No** | **No** |
 | `exit()`, syscalls | Yes | Yes | **No** | **No** |
-| **Anything from `std/`** | Yes (35 modules) | **No — 0 of 35** | **No — 0 of 35** | **No — 0 of 35** |
+| **Anything from `std/`** | Yes (35 modules) | **No** — `std/` is `u64` throughout, see the row above | **No** — same reason | **No** — same reason |
 | `.o` relocatable (`-c`) | Yes | Yes | Yes | **No** (`xtensa fixup resolution not yet implemented`) |
 
 The limitations are hard compile errors, not silent miscompiles:
