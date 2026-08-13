@@ -22,9 +22,10 @@ wins.
 |---|---|
 | 🟢 **Real hardware** | Ran on physical silicon, with evidence that could not have been produced under emulation. |
 | 🔵 **CI-verified** | Runs on every push, on a real runner of that OS/arch. |
-| 🟡 **QEMU / emulated only** | Works, but nothing outside an emulator has ever executed it. |
+| 🟡 **Emulated, translated, or partial** | Nothing outside an emulator has run it, or it runs natively but is only partly exercised. The row says which. |
 | 🟠 **Experimental** | Usable, but a deliberate subset with limits that will stop you quickly. |
 | 🔴 **Not implemented** | Refused at compile time. |
+| ⚪ **Out of scope** | A deliberate boundary or an inherent property of the output — not a TODO, and not something to be fixed by trying again. |
 
 ### Hosted targets — this is where the real coverage is
 
@@ -34,7 +35,7 @@ wins.
 | Linux ARM64 | 🔵 CI-verified | Self-compiles to a fixed point; suite runs on a native ARM64 runner. |
 | Windows x86_64 | 🔵 CI-verified | Self-compile chain on a `windows-latest` runner. |
 | Windows ARM64 | 🔵 CI-verified | Self-compile chain through a fixed point on a `windows-11-arm` runner. |
-| macOS x86_64 | 🔵 CI-verified | Test binaries run, plus a self-compile, on a `macos-14` runner **under Rosetta**. |
+| macOS x86_64 | 🟡 Translated | GitHub has no x86_64 macOS runner here: the `macos-14` runner is ARM64, and the x86_64 slice is executed through `arch -x86_64`, i.e. **Rosetta translation**. It runs and it self-compiles, but not on an x86_64 Mac. |
 | macOS ARM64 | 🟡 Partly verified | CI runs cross-compiled test binaries on `macos-14`, but there is **no self-compile step for macOS ARM64 in CI**. Treat "self-hosts on ARM Macs" as untested by CI. |
 | Android ARM64 | 🟡 QEMU only in CI | CI runs Android binaries under `qemu-aarch64-static` with the *glibc* ARM64 loader symlinked in as `/system/bin/linker64`. **No bionic, no device.** A self-compile on a physical phone is reported by the author but is not reproduced by CI. |
 | Android x86_64 | 🟡 Emulated in CI | The Android artifact is executed by invoking `/lib64/ld-linux-x86-64.so.2` directly on the x86_64 Linux CI box. **No bionic, no device.** |
@@ -46,7 +47,7 @@ wins.
 | **x86_64, GRUB multiboot** | 🟢 **Real hardware (2026-08-13)** | Booted from USB on an **AMD Ryzen 9 7900X** desktop and printed to VGA text memory. The artifact prints the CPU's own brand string from `CPUID` leaves `0x80000002–4`, so the screen is self-authenticating: under emulation that line reads `QEMU Virtual CPU version 2.5+`, and on the desktop it read the AMD part. Source: [`tests/target_none/boot/hw_sentinel_x86.kr`](tests/target_none/boot/hw_sentinel_x86.kr). This is the project's strongest single claim. |
 | arm64 bare metal (`--emit=image`) | 🟡 QEMU only | Boots and reports a computed sentinel under `qemu-system-aarch64`. **Nothing has ever run on arm64 silicon.** |
 | UEFI (`--emit=uefi`) | 🟡 QEMU only | Loads and prints under OVMF (x86_64) and AAVMF (arm64) — emulated firmware, not a vendor's. |
-| UEFI + Secure Boot | 🔴 Incompatible (measured) | An MS-key OVMF **refuses** the identical artifact that runs with Secure Boot off. Images are unsigned; this is a property of the output, not a bug to be fixed by trying again. |
+| UEFI + Secure Boot | ⚪ Incompatible (measured) | An MS-key OVMF **refuses** the identical artifact that runs with Secure Boot off. The images are unsigned, so a firmware that checks signatures rejects them — that is the system working, not a compile-time refusal or a defect. Signing would need a key, an `sbsign` equivalent, and a `.reloc`-free image the signer accepts; none of that exists here and none is planned. |
 | `--reset-vector` | 🟡 QEMU only, by design | A 64 KiB image boots from the CPU reset vector under `qemu -bios`, reaching real → protected → long mode. It *replaces* firmware, so running it on a real board means flashing a BIOS; that is deliberately out of scope. |
 | Linux kernel modules (`--emit=lkm`) | 🟡 Unproven here | Produces a `.ko` relocatable. Loading it into a running kernel is not exercised by the test suite. |
 
