@@ -6563,6 +6563,9 @@ fn ir_color_ceil_get(uint64 vreg) -> uint64 {
 }
 static uint64 ir_ig_buf = 0
 static uint64 ir_ig_cap = 0
+// Ceiling on the interference bitmatrix: 65536 vregs x 1024 words x 8 B.
+// Spelled as a literal because a static initializer does NOT const-fold.
+static uint64 IR_IG_MAX = 536870912
 static uint64 ir_color_tmp_buf = 0
 static uint64 ir_color_tmp_cap = 0
 // Greedy-colouring priority order (rep vregs, hottest first) — sized to
@@ -6690,13 +6693,30 @@ fn ir_graph_color() {
     uint64 row_words = (vcount + 63) / 64
     uint64 row_bytes = row_words * 8
     uint64 ig_needed = vcount * row_bytes
-    if ir_ig_buf == 0 {
-        ir_ig_cap = 65536 * 1024 * 8
-        ir_ig_buf = alloc(ir_ig_cap)
-    }
-    if ig_needed > ir_ig_cap {
+    if ig_needed > IR_IG_MAX {
         write(2, "error: interference graph overflow\n", 35)
         exit(1)
+    }
+    // Grow on demand rather than reserving the 512 MB worst case up front.
+    // The old code allocated the ceiling on the first colored function and
+    // memset only the used prefix -- free on Linux, where alloc is a lazy
+    // mmap that never fails, and fatal anywhere the heap is real: ApexRift
+    // refused the 512 MB, alloc returned 0, and the memset below ran from
+    // address ZERO across the page tables. Real peak here is a few MB.
+    //
+    // Doubling keeps the number of regrows logarithmic when functions arrive
+    // in increasing size order, instead of one realloc per function.
+    if ig_needed > ir_ig_cap {
+        if ir_ig_buf != 0 { dealloc(ir_ig_buf) }
+        uint64 want = ir_ig_cap * 2
+        if want < ig_needed { want = ig_needed }
+        if want > IR_IG_MAX { want = IR_IG_MAX }
+        ir_ig_cap = want
+        ir_ig_buf = alloc(ir_ig_cap)
+        if ir_ig_buf == 0 {
+            write(2, "error: out of memory for interference graph\n", 44)
+            exit(1)
+        }
     }
     uint64 ig = ir_ig_buf
     memset(ig, 0, ig_needed)
