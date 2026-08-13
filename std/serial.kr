@@ -78,9 +78,49 @@ fn serial_can_send(u64 base) -> u64 {
 }
 
 // Send one byte, waiting for the holding register to drain.
+// BOUNDED. This used to spin forever on `serial_can_send`, which is correct
+// only where a UART exists. On a machine with no COM port the LSR can read
+// back 0x00, THRE never sets, and the machine hangs with nothing on screen --
+// indistinguishable from a boot failure, and the first byte anyone tries to
+// print is usually a banner, so it hangs before saying anything at all.
+//
+// A floating ISA bus reads 0xFF, which happens to have THRE set, so the hazard
+// only bites on hardware that decodes the port and returns zeros. That it
+// depends on the chipset is exactly why a bound is better than reasoning.
+//
+// Dropping a byte on a dead port is the right failure: output to a port nobody
+// can read is worthless, and a hang costs the whole machine. The bound is
+// generous enough that a real UART at 300 baud still drains inside it.
+static u64 SERIAL_SPIN_LIMIT = 200000
 fn serial_putc_port(u64 base, u64 c) {
-    while serial_can_send(base) == 0 { cpu_relax() }
+    u64 spins = 0
+    while serial_can_send(base) == 0 {
+        spins = spins + 1
+        if spins >= SERIAL_SPIN_LIMIT { return }
+        cpu_relax()
+    }
     outb(base + UART_DATA, c & 0xFF)
+}
+
+// Is there actually a UART here?
+//
+// The scratch register (base+7) is the standard probe: it is plain storage on a
+// real 16550 and reads back whatever was written, while an absent port returns
+// 0xFF from a floating bus or 0x00 from a chipset that decodes but does not
+// implement. Two different values are written because a bus stuck high would
+// pass a single 0xFF test.
+//
+// Restores the original byte, since a caller may probe a port that is in use.
+fn serial_present(u64 base) -> u64 {
+    u64 saved = inb(base + 7)
+    outb(base + 7, 0xAE)
+    u64 a = inb(base + 7)
+    outb(base + 7, 0x51)
+    u64 b = inb(base + 7)
+    outb(base + 7, saved)
+    if a != 0xAE { return 0 }
+    if b != 0x51 { return 0 }
+    return 1
 }
 
 // Send one byte on the selected port, expanding LF to CRLF -- terminals
