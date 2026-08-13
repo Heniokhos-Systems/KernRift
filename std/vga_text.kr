@@ -74,11 +74,23 @@ fn vga_get_cell(u64 row, u64 col) -> u64 {
 }
 
 // Fill one row with `ch`.
+// Fill one row, four cells per store for the same reason vga_scroll widens:
+// each access to 0xB8000 is a VM exit under KVM, and this runs on every scroll.
+// Bounds-checks the row itself now that it no longer goes through vga_put_cell.
 fn vga_fill_row(u64 row, u64 ch, u64 attr) {
-    u64 c = 0
-    while c < VGA_COLS {
-        vga_put_cell(row, c, ch, attr)
-        c = c + 1
+    if row >= VGA_ROWS { return }
+    u64 cell = (ch & 0xFF) | ((attr & 0xFF) << 8)
+    u64 quad = cell | (cell << 16) | (cell << 32) | (cell << 48)
+    u64 base = VGA_MEM + row * VGA_COLS * 2
+    u64 n = VGA_COLS * 2
+    u64 i = 0
+    while i + 8 <= n {
+        store64(base + i, quad)
+        i = i + 8
+    }
+    while i < n {
+        store16(base + i, cell)
+        i = i + 2
     }
 }
 
@@ -121,19 +133,35 @@ fn vga_clear() {
     vga_sync_cursor()
 }
 
-// Move every row up one and blank the last. Copies cells directly rather than
-// going through vga_put_cell so the bounds checks are not paid 1,920 times.
+// Move every row up one and blank the last.
+//
+// EIGHT BYTES AT A TIME, and this is the hottest loop in the console by a wide
+// margin. 0xB8000 is device memory: under KVM every access is a VM exit at
+// roughly 3.8 us, and the old byte-at-a-time version did 3,840 load8 plus
+// 3,840 store8 per scroll. Measured on a guest self-compile of the KernRift
+// compiler -- 157 scrolls, 1.21 M accesses -- that loop alone was 4.6 s of a
+// 5.46 s run, about 29 ms per scrolled line. Widening to u64 cuts the access
+// count 8x for identical output.
+//
+// Rows 1..N-1 move to rows 0..N-2, which is ONE contiguous block, so the
+// per-row loop was never needed either. dst < src and the copy runs forward,
+// which is the safe direction for an overlapping move.
+//
+// The tail loop is not dead code being tidy: it is what keeps this correct if
+// VGA_COLS ever stops making the span a multiple of 8. Today 24 * 160 = 3,840
+// divides exactly and the tail never runs.
 fn vga_scroll() {
-    u64 r = 0
-    while r < VGA_ROWS - 1 {
-        u64 dst = VGA_MEM + r * VGA_COLS * 2
-        u64 src = dst + VGA_COLS * 2
-        u64 i = 0
-        while i < VGA_COLS * 2 {
-            store8(dst + i, load8(src + i))
-            i = i + 1
-        }
-        r = r + 1
+    u64 n = (VGA_ROWS - 1) * VGA_COLS * 2
+    u64 dst = VGA_MEM
+    u64 src = VGA_MEM + VGA_COLS * 2
+    u64 i = 0
+    while i + 8 <= n {
+        store64(dst + i, load64(src + i))
+        i = i + 8
+    }
+    while i < n {
+        store8(dst + i, load8(src + i))
+        i = i + 1
     }
     vga_fill_row(VGA_ROWS - 1, 32, vga_cur_attr)
 }
