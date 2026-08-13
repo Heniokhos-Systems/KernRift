@@ -4294,6 +4294,27 @@ fn gen_expr(uint64 node) {
     // Invalidate rax cache — gen_expr will put a new value in rax
     rax_invalidate()
     expr_is_struct = 0xFFFFFFFF
+    // expr_is_float is an OUT parameter of gen_expr, and it needs the same
+    // defined default expr_is_struct has. Most arms assign it, but several do
+    // not — a string literal is the worst of them — and an arm that does not
+    // assign it used to return whatever the PREVIOUS expression left behind.
+    //
+    //     f64 y = x + 1.0
+    //     pp("FIRST_", "SECOND")
+    //
+    // lowered "FIRST_" with expr_is_float still 1 from the line above, so the
+    // caller filed argument 0 as an f64: it went to xmm0/d0 and the integer
+    // pass shifted "SECOND" down into the first integer register. Argument 0
+    // came back holding argument 1's value. It needed no nested call and no
+    // float parameter anywhere — only a float expression earlier in the same
+    // function — and it took out examples/fmt_nan_smoke.kr with a SIGSEGV on
+    // both legacy backends.
+    //
+    // Zeroing on entry is safe for the arms that PROPAGATE the flag from a
+    // sub-expression (unary minus, a parenthesised group): the nested gen_expr
+    // runs after this line and sets the flag itself. Arms that stash the flag
+    // across a sibling's evaluation already save it in a local first.
+    expr_is_float = 0
 
     // Record line for debug info
     uint32 dbg_tok = ast_tok(node)
@@ -4930,6 +4951,11 @@ fn gen_expr(uint64 node) {
             emit_u32_le(fs_buf_off)
         }
         rax_invalidate()
+        // An f-string is a char*, never a float — but its interpolated segments
+        // ran through gen_expr on the way here, and `f"v{x}"` with an f64 x left
+        // the flag set on the way out. The entry-point reset above cannot cover
+        // this: the segment's gen_expr runs AFTER it.
+        expr_is_float = 0
         return
     }
 

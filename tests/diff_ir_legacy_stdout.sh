@@ -71,6 +71,21 @@ fn main(){ let a = 6 * 7; let b = f(); let c = a + b; u64 t=0; for i in 0..4 { l
 dc "many_println" 'fn main(){ u64 i=0; u64 s=1; while i<10{ s=s*2; i=i+1 } println(s); exit(0) }'
 dc "deep_recursion" 'fn sum(u64 n)->u64{ if n==0{return 0} return n+sum(n-1) }
 fn main(){ println(sum(100)); exit(0) }'
+# A float expression earlier in the function used to leave the legacy backends'
+# expr_is_float set, so the NEXT string-literal argument was filed as an f64,
+# routed to xmm0/d0, and every integer argument shifted one register down. The
+# ordering is the whole assertion: "FIRST_|SECOND", not just "no crash".
+dc "strarg_after_float" 'fn pp(u64 a,u64 b){ print_str(a); print_str("|"); print_str(b); print_str("\n") }
+fn main(){ f64 x=1.5; f64 y=x+1.0; pp("FIRST_","SECOND"); exit(0) }'
+dc "strarg_nested_float_call" 'fn mkf(f64 v,u64 p)->u64{ return "SECOND" }
+fn pp(u64 a,u64 b){ print_str(a); print_str("|"); print_str(b); print_str("\n") }
+fn main(){ f64 x=1.5; pp("FIRST_", mkf(x,7)); exit(0) }'
+# An f-string interpolating a float needed its own clear at the END of the
+# f-string arm. Only argument 1 is printed: the legacy f-string renders a float
+# as "?" while the IR renders the value, which is a SEPARATE, pre-existing
+# divergence this row must not accidentally pin.
+dc "fstring_float_then_arg" 'fn pp(u64 a,u64 b){ println(b) }
+fn main(){ f64 x=1.5; pp(f"v={x}", 8738); exit(0) }'
 
 echo "----"
 echo "Stdout differential: $((TOTAL-DIV))/$TOTAL agree, $DIV diverged."

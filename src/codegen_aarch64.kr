@@ -896,6 +896,12 @@ fn emit_a64_static_store(uint64 data_offset) {
 
 fn gen_expr_a64(uint64 node) {
     expr_is_struct_a64 = 0xFFFFFFFF
+    // Same defined default the x86_64 legacy backend gives expr_is_float, and
+    // for the same defect: the arms that never assign this flag (a string
+    // literal above all) used to hand the caller the PREVIOUS expression's
+    // float-ness, so the next string-literal argument was filed as an f64 and
+    // routed to d0 while the integer arguments all shifted down one register.
+    expr_is_float_a64 = 0
 
     // Record line for debug info
     uint32 dbg_tok_a = ast_tok(node)
@@ -1376,6 +1382,10 @@ fn gen_expr_a64(uint64 node) {
         emit_a64(0x3900009F)                           // strb wzr, [x4]
         // return x0 = buffer address
         emit_a64_add_imm(0, 31, fs_buf_abs)
+        // An f-string is a char*, never a float. Its interpolated segments run
+        // through gen_expr_a64 above, AFTER the entry-point reset, so `f"v{x}"`
+        // with an f64 x otherwise reports itself to the caller as an f64.
+        expr_is_float_a64 = 0
         return
     }
 

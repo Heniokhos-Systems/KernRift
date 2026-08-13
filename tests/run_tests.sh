@@ -20813,6 +20813,223 @@ rm -f "$DIR/../pdrf_store_$$.kr" "$DIR/../pdrf_load_$$.kr" \
       "$DIR/../pdrf_f32_$$.kr" "$DIR/../pdrf_rmw_$$.kr" \
       "$DIR/../pdrf_vol_$$.kr"
 
+# --- ANCHOR sffa: stale expr_is_float misfiles the next argument -------------
+# Both LEGACY backends carried expr_is_float / expr_is_float_a64 as a sticky
+# global with no defined default. The arms that never assign it -- a string
+# literal above all -- returned whatever the PREVIOUS expression left behind,
+# so
+#
+#     f64 y = x + 1.0
+#     two("AAA", "BBB")
+#
+# filed "AAA" as an f64. It went to xmm0/d0, the integer pass shifted "BBB"
+# down into the first integer register, and argument 0 came back holding
+# argument 1's value. NO nested call and NO float parameter are needed -- only
+# a float expression earlier in the same function -- which is why the shape
+# that first surfaced it (a nested call taking an f64) is only one of these
+# rows. examples/fmt_nan_smoke.kr SIGSEGV'd on --legacy on both arches from it.
+#
+# A row that only asserted "does not segfault" would pass against half of this,
+# so every row names BOTH arguments and gives each its own exit code, and the
+# buffer row POISONS its destination first: 0xAA surviving means nothing was
+# written, which is a different failure from writing the wrong pointer.
+#
+# These rows EXECUTE, so they follow $RUN_ARCH rather than naming an arch.
+TOTAL=$((TOTAL + 1))
+SFFA_OK=1
+SFFA_OTHER="arm64"
+if [ "$RUN_ARCH" = "arm64" ]; then SFFA_OTHER="x86_64"; fi
+SFFA_QEMU=""
+if [ "$SFFA_OTHER" = "arm64" ]; then
+    SFFA_QEMU="$(command -v qemu-aarch64-static || command -v qemu-aarch64 || true)"
+fi
+
+# 1. The minimal shape: a string-literal argument 0 after a float statement.
+#    No nested call, no float parameter. Was exit 1 (arg 0 held "BBB") on
+#    legacy arm64 and a SIGSEGV on legacy x86_64.
+cat > "$DIR/../sffa_strlit_$$.kr" <<'SFFA_STRLIT'
+fn two(u64 a, u64 b) -> u64 {
+    if str_eq(a, "AAA") == 0 { return 1 }
+    if str_eq(b, "BBB") == 0 { return 2 }
+    return 0
+}
+fn main() {
+    f64 x = 1.5
+    f64 y = x + 1.0
+    u64 r = two("AAA", "BBB")
+    if r != 0 { exit(r) }
+    exit(7)
+}
+SFFA_STRLIT
+
+# 2. The shape the bug was first reported in: a nested call whose callee takes
+#    an f64. Was exit 1 on both legacy backends.
+cat > "$DIR/../sffa_nested_$$.kr" <<'SFFA_NESTED'
+fn mkf(f64 v, u64 p) -> u64 { return "SECOND" }
+fn two(u64 a, u64 b) -> u64 {
+    if str_eq(a, "FIRST_") == 0 { return 1 }
+    if str_eq(b, "SECOND") == 0 { return 2 }
+    return 0
+}
+fn main() {
+    f64 x = 1.5
+    u64 r = two("FIRST_", mkf(x, 7))
+    if r != 0 { exit(r) }
+    exit(7)
+}
+SFFA_NESTED
+
+# 3. An f-string is a char* too, and its interpolated segments run through
+#    gen_expr AFTER the entry-point reset -- so `f"v={x}"` with an f64 x needs
+#    its own clear at the END of the f-string arm, which the entry reset cannot
+#    give it. Exit 1 is the signature: argument 1's literal 0x2222 turned up in
+#    argument 0's register.
+cat > "$DIR/../sffa_fstr_$$.kr" <<'SFFA_FSTR'
+fn two(u64 a, u64 b) -> u64 {
+    if a == 0x2222 { return 1 }
+    if a == 0 { return 3 }
+    if b != 0x2222 { return 2 }
+    return 0
+}
+fn main() {
+    f64 x = 1.5
+    u64 r = two(f"v={x}", 0x2222)
+    if r != 0 { exit(r) }
+    exit(7)
+}
+SFFA_FSTR
+
+# 4. Three arguments, the destination buffer LAST, poisoned before the call.
+#    When argument 0 is misfiled every later argument shifts one register down
+#    and `buf` is whatever was in the third: exit 1/2 means the poison survived
+#    (nothing was written at all), exit 3 means both slots got the same
+#    pointer, 4/5 name which one holds the wrong string.
+cat > "$DIR/../sffa_poison_$$.kr" <<'SFFA_POISON'
+fn take2(u64 a, u64 b, u64 buf) {
+    store64(buf, a)
+    store64(buf + 8, b)
+}
+fn main() {
+    u64 p = alloc(64)
+    store64(p, 0xAAAAAAAAAAAAAAAA)
+    store64(p + 8, 0xAAAAAAAAAAAAAAAA)
+    f64 x = 1.5
+    f64 y = x + 1.0
+    take2("AAA", "BBB", p)
+    u64 v0 = load64(p)
+    u64 v1 = load64(p + 8)
+    if v0 == 0xAAAAAAAAAAAAAAAA { exit(1) }
+    if v1 == 0xAAAAAAAAAAAAAAAA { exit(2) }
+    if v0 == v1 { exit(3) }
+    if str_eq(v0, "AAA") == 0 { exit(4) }
+    if str_eq(v1, "BBB") == 0 { exit(5) }
+    exit(7)
+}
+SFFA_POISON
+
+SFFA_RAN=0
+sffa_run() { # <arch> <flags> <src> <runner-or-empty>
+    local _bin="/tmp/krc_sffa_$$"
+    if ! $KRC --arch="$1" $2 "$3" -o "$_bin" >/dev/null 2>&1; then
+        SFFA_OK=0; echo "  $(basename $3) $1 ${2:-IR}: COMPILE FAILED"
+        return
+    fi
+    if [ -n "$4" ]; then $4 "$_bin" >/dev/null 2>&1; else "$_bin" >/dev/null 2>&1; fi
+    local _rc=$?
+    SFFA_RAN=$((SFFA_RAN + 1))
+    # 7 = both arguments arrived in their own registers. 1..5 name which check
+    # failed; 139 is the defect's other face (the shifted pointer was stored
+    # through).
+    [ "$_rc" = "7" ] || { SFFA_OK=0; echo "  $(basename $3) $1 ${2:-IR}: got $_rc, want 7"; }
+    rm -f "$_bin"
+}
+for _src in "$DIR/../sffa_strlit_$$.kr" "$DIR/../sffa_nested_$$.kr" \
+            "$DIR/../sffa_fstr_$$.kr" "$DIR/../sffa_poison_$$.kr"; do
+    sffa_run "$RUN_ARCH" ""          "$_src" ""
+    sffa_run "$RUN_ARCH" "--legacy"  "$_src" ""
+    if [ -n "$SFFA_QEMU" ]; then
+        sffa_run "$SFFA_OTHER" ""         "$_src" "$SFFA_QEMU"
+        sffa_run "$SFFA_OTHER" "--legacy" "$_src" "$SFFA_QEMU"
+    fi
+done
+# Guard against the loop silently doing nothing. 4 sources x 2 host configs
+# always; x2 more per source when the other arch is runnable.
+SFFA_WANT=8
+if [ -n "$SFFA_QEMU" ]; then SFFA_WANT=16; fi
+[ "$SFFA_RAN" = "$SFFA_WANT" ] || { SFFA_OK=0; echo "  only $SFFA_RAN/$SFFA_WANT config-runs executed"; }
+if [ "$SFFA_OK" = "1" ]; then
+    echo "  stale_float_flag_misfiles_next_argument: PASS ($SFFA_RAN config-runs)"
+    PASS=$((PASS + 1))
+else
+    echo "FAIL: stale_float_flag_misfiles_next_argument"
+    FAIL=$((FAIL + 1))
+fi
+rm -f "$DIR/../sffa_strlit_$$.kr" "$DIR/../sffa_nested_$$.kr" \
+      "$DIR/../sffa_fstr_$$.kr" "$DIR/../sffa_poison_$$.kr"
+
+# --- ANCHOR sffa2: examples/fmt_nan_smoke.kr prints its documented output ----
+# The example's own header comment states the nine lines it must print. It
+# SIGSEGV'd on --legacy on both arches from the stale-flag bug above, getting
+# as far as "NaN=" -- put_pair received the STRING in its label slot, printed
+# it, then dereferenced a clobbered `s`. "It stops crashing" is NOT the
+# assertion here: the FULL expected text is, byte for byte, so a run that
+# survives but prints the wrong pair still fails.
+#
+# EXECUTES, so it follows $RUN_ARCH.
+TOTAL=$((TOTAL + 1))
+FNSO_OK=1
+FNSO_RAN=0
+FNSO_OTHER="arm64"
+if [ "$RUN_ARCH" = "arm64" ]; then FNSO_OTHER="x86_64"; fi
+FNSO_QEMU=""
+if [ "$FNSO_OTHER" = "arm64" ]; then
+    FNSO_QEMU="$(command -v qemu-aarch64-static || command -v qemu-aarch64 || true)"
+fi
+FNSO_WANT=$(cat <<'FNSO_EXPECT'
+nan_f32=NaN
+nan_f64=NaN
+pinf_f32=inf
+pinf_f64=inf
+ninf_f32=-inf
+ninf_f64=-inf
+finite_f32=1.5000000
+finite_f64=1.500000000000000
+ok
+FNSO_EXPECT
+)
+fnso_run() { # <arch> <flags> <runner-or-empty>
+    local _bin="/tmp/krc_fnso_$$"
+    if ! $KRC --arch="$1" $2 "$DIR/../examples/fmt_nan_smoke.kr" -o "$_bin" >/dev/null 2>&1; then
+        FNSO_OK=0; echo "  fmt_nan_smoke $1 ${2:-IR}: COMPILE FAILED"
+        return
+    fi
+    local _got
+    if [ -n "$3" ]; then _got=$($3 "$_bin" 2>/dev/null); else _got=$("$_bin" 2>/dev/null); fi
+    FNSO_RAN=$((FNSO_RAN + 1))
+    if [ "$_got" != "$FNSO_WANT" ]; then
+        FNSO_OK=0
+        echo "  fmt_nan_smoke $1 ${2:-IR}: output does not match the example's header comment"
+        echo "    got: $(echo "$_got" | tr '\n' '|')"
+    fi
+    rm -f "$_bin"
+}
+fnso_run "$RUN_ARCH" ""         ""
+fnso_run "$RUN_ARCH" "--legacy" ""
+if [ -n "$FNSO_QEMU" ]; then
+    fnso_run "$FNSO_OTHER" ""         "$FNSO_QEMU"
+    fnso_run "$FNSO_OTHER" "--legacy" "$FNSO_QEMU"
+fi
+FNSO_EXP_RUNS=2
+if [ -n "$FNSO_QEMU" ]; then FNSO_EXP_RUNS=4; fi
+[ "$FNSO_RAN" = "$FNSO_EXP_RUNS" ] || { FNSO_OK=0; echo "  only $FNSO_RAN/$FNSO_EXP_RUNS config-runs executed"; }
+if [ "$FNSO_OK" = "1" ]; then
+    echo "  fmt_nan_smoke_example_full_output: PASS ($FNSO_RAN config-runs)"
+    PASS=$((PASS + 1))
+else
+    echo "FAIL: fmt_nan_smoke_example_full_output"
+    FAIL=$((FAIL + 1))
+fi
+
 # --- Bare-metal boot gate (sub-project B1) ---
 # One counted test wrapping tests/target_none/boot_gate.sh. DELIBERATELY NOT
 # behind `command -v qemu-system-*`: the gate itself fails loudly when a
