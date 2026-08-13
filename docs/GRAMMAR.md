@@ -30,8 +30,13 @@ FSTR        = f"..." with embedded { expr } holes  (see Expressions)
 char_escape = "\\" ( "n" | "t" | "r" | "\\" | "'" | '"' | "0"
                    | "a" | "b" | "f" | "v" | "e"
                    | "x" HEX HEX )
-COMMENT     = "//" [^\n]*  |  "/*" ... "*/"   (discarded)
+COMMENT     = "//" [^\n]*                     (discarded)
 ```
+
+**There are no block comments.** `/* ... */` is not a comment — the lexer
+(`skip_whitespace_and_comments` in `src/lexer.kr`) recognises `//` and nothing
+else, so `/*` lexes as a `/` followed by a `*` and the parser reports
+`error: unexpected token in expression`. Use `//` on each line.
 
 Whitespace (spaces, tabs, CR, LF) is a token separator; no significant
 indentation. The lexer emits ~112 token kinds; only the subset relevant to

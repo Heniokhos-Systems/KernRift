@@ -143,7 +143,7 @@ program with `exit(code)`; every example in this guide ends with `exit(0)`.
 ## Language basics
 
 ```kr
-// Comments — line and /* block */
+// Comments — `//` only. There is no block-comment form.
 
 // Variables: type precedes the name
 u64 x = 42

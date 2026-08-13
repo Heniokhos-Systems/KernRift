@@ -258,6 +258,6 @@ println_str("with newline")
 ## Comments
 
 ```kr
-// line comment
-/* block comment */
+// line comment — this is the only comment form.
+// There are no block comments; `/* ... */` is a parse error.
 ```

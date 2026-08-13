@@ -48,8 +48,8 @@ program starts execution at `fn main()` (unless you pass `--freestanding`).
 ```kr
 // Line comment
 
-/* Block comment.
-   Can span multiple lines. */
+// There are no block comments. `/* ... */` is a parse error; use `//` on
+// each line.
 
 fn main() {
     println("Hello, KernRift!")
@@ -1427,7 +1427,7 @@ linker script.
 
 ```kr
 @section(".text.init")
-fn _start() { /* placed in a separate section */ }
+fn _start() { }   // placed in a separate section
 ```
 
 Under `--emit=obj` the name is captured but the ELF relocatable still
