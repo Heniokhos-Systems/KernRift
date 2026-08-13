@@ -717,6 +717,26 @@ fn emit_a64_load_s0(uint64 var_offset) {
     emit_a64(insn)
 }
 
+// Move a just-evaluated FLOAT result out of d0/s0 into x0 as RAW BITS.
+// `fk` is an expr_is_float_a64 value: 1 = f64, 2 = f32, anything else = no-op.
+//
+// This backend returns float values in d0/s0 and integer values in x0, so any
+// path that moves a value THROUGH x0 has to bring a float across first or it
+// moves whatever junk x0 happened to hold — which is what made
+// `unsafe { *(p as f64) = 2.5 }` store zero. Raw bits, no conversion: the IR
+// backends' IR_STORE writes the payload of the value vreg whatever its class,
+// so this keeps the two in step.
+fn emit_a64_float_bits_to_x0(uint64 fk) {
+    if fk == 1 { emit_a64(0x9E660000) }   // fmov x0, d0
+    if fk == 2 { emit_a64(0x1E260000) }   // fmov w0, s0
+}
+
+// The other direction: raw bits sitting in x0 become a float in d0/s0.
+fn emit_a64_x0_bits_to_float(uint64 fk) {
+    if fk == 1 { emit_a64(0x9E670000) }   // fmov d0, x0
+    if fk == 2 { emit_a64(0x1E270000) }   // fmov s0, w0
+}
+
 // LDR dN, [sp, #(a64_var_base + offset)] — load 64-bit float into dN
 fn emit_a64_load_dN(uint64 reg, uint64 var_offset) {
     uint64 abs_off = a64_var_base + var_offset
@@ -929,6 +949,18 @@ fn gen_expr_a64(uint64 node) {
         uint32 ple_d3_a = ast_data3(node)
         uint64 wple_d3_a = ple_d3_a
         if (wple_d3_a & 16) != 0 { emit_a64(0xD5033F9F) }
+        // data3 bits 0..3 = float kind (1=f64, 2=f32, 3=f16). The bits are in
+        // x0 and they are the right bits — but the enclosing `OP=` is float
+        // arithmetic, which this backend does in d0/s0. Saying nothing here is
+        // what made `*(p as f64) += 1.5` come out as the bare RHS: the BinOp
+        // saw an integer LHS and never took its float path. f16 (3) stays
+        // integer on purpose — see the kind-41 note.
+        uint64 wple_fk_a = wple_d3_a & 15
+        if wple_fk_a == 1 || wple_fk_a == 2 {
+            emit_a64_x0_bits_to_float(wple_fk_a)
+            expr_is_float_a64 = wple_fk_a
+            return
+        }
         expr_is_float_a64 = 0
         return
     }
@@ -1729,16 +1761,18 @@ fn gen_expr_a64(uint64 node) {
             uint64 pfb = cg_tokens + wop_fb * 16
             uint32 op_kind_fb = 0
             unsafe { *(pfb as uint32) -> op_kind_fb }
+            uint64 wopk_fb_a = op_kind_fb
+            wopk_fb_a = float_binop_op_kind(wopk_fb_a)
             if lhs_is_float_b == 2 {
-                if op_kind_fb == 30 { emit_a64(0x1E212800) } // fadd s0, s0, s1
-                if op_kind_fb == 31 { emit_a64(0x1E213800) } // fsub s0, s0, s1
-                if op_kind_fb == 22 { emit_a64(0x1E210800) } // fmul s0, s0, s1
-                if op_kind_fb == 32 { emit_a64(0x1E211800) } // fdiv s0, s0, s1
+                if wopk_fb_a == 30 { emit_a64(0x1E212800) } // fadd s0, s0, s1
+                if wopk_fb_a == 31 { emit_a64(0x1E213800) } // fsub s0, s0, s1
+                if wopk_fb_a == 22 { emit_a64(0x1E210800) } // fmul s0, s0, s1
+                if wopk_fb_a == 32 { emit_a64(0x1E211800) } // fdiv s0, s0, s1
             } else {
-                if op_kind_fb == 30 { emit_a64(0x1E612800) } // fadd d0, d0, d1
-                if op_kind_fb == 31 { emit_a64(0x1E613800) } // fsub d0, d0, d1
-                if op_kind_fb == 22 { emit_a64(0x1E610800) } // fmul d0, d0, d1
-                if op_kind_fb == 32 { emit_a64(0x1E611800) } // fdiv d0, d0, d1
+                if wopk_fb_a == 30 { emit_a64(0x1E612800) } // fadd d0, d0, d1
+                if wopk_fb_a == 31 { emit_a64(0x1E613800) } // fsub d0, d0, d1
+                if wopk_fb_a == 22 { emit_a64(0x1E610800) } // fmul d0, d0, d1
+                if wopk_fb_a == 32 { emit_a64(0x1E611800) } // fdiv d0, d0, d1
             }
             expr_is_float_a64 = lhs_is_float_b
             return
@@ -5450,18 +5484,31 @@ fn gen_stmt_a64(uint64 node) {
         // loaded value silently here, and the program then failed at the
         // first USE with "use of undeclared identifier".
         uint32 dest_tok = ast_data2(node)
+        // The `as TYPE` clause is the ONLY place the loaded value's register
+        // class is written down — data3 bits 0..3 carry it (1=f64, 2=f32,
+        // 3=f16). The load above already put the right BITS in x0; what was
+        // missing is telling the rest of the function that dest holds a float,
+        // so every later read of it comes out of d0/s0. Without it,
+        // `fmt_f64(z)` passed z in a GP register while the callee read d0 —
+        // 0.000000000000000 out of memory that held 2.5 exactly.
+        // f16 (3) deliberately stays on the integer path: this language has no
+        // f16 register class, an f16 IS a u64 bit pattern from f32_to_f16(),
+        // and typing it float would break the code that works today.
+        uint32 pl_d3_a = ast_data3(node)
+        uint64 wpl_fk_a = pl_d3_a
+        wpl_fk_a = wpl_fk_a & 15
         uint64 doff = var_lookup(dest_tok)
-        if doff != 0xFFFFFFFF {
-            emit_a64_store_x0(doff)
-        } else {
+        if doff == 0xFFFFFFFF {
             uint64 soff = static_lookup(dest_tok)
             if soff != 0xFFFFFFFF {
                 emit_a64_static_store(soff)
-            } else {
-                uint64 ndoff = var_declare(dest_tok)
-                emit_a64_store_x0(ndoff)
+                return
             }
+            doff = var_declare(dest_tok)
         }
+        if wpl_fk_a == 1 { var_type_register(dest_tok, 96) }
+        if wpl_fk_a == 2 { var_type_register(dest_tok, 95) }
+        emit_a64_store_x0(doff)
         return
     }
 
@@ -5482,16 +5529,28 @@ fn gen_stmt_a64(uint64 node) {
         // crosses an arbitrary sub-expression that may itself use temp_slot_0.
         uint64 ps_val_slot_a = alloc_scratch_slot()
         uint64 ps_addr_slot_a = alloc_scratch_slot()
+        // A float value expression leaves its result in d0/s0, not x0, and
+        // everything below this point moves the value through x0. Bringing the
+        // bits across is the whole fix for `unsafe { *(p as f64) = 2.5 }`,
+        // which used to park whatever junk x0 held and store THAT.
+        //
+        // The signal is the VALUE, not the cast type: the parser strips the
+        // float kind off a store node, and reading it off the value is also
+        // what matches the IR backends, whose IR_STORE writes the raw payload
+        // of the value vreg whatever the cast says. So `*(p as u64) = f64expr`
+        // and `*(p as f64) = intexpr` both keep IR/legacy parity here.
         if wpsc_a == 1 {
             gen_expr_a64(wa)
             emit_a64_store_x0(compound_temp_slot)
             gen_expr_a64(wv)
+            emit_a64_float_bits_to_x0(expr_is_float_a64)
             emit_a64_store_x0(ps_val_slot_a)
             emit_a64_load_x0(compound_temp_slot)
         } else {
             gen_expr_a64(wa)
             emit_a64_store_x0(ps_addr_slot_a)
             gen_expr_a64(wv)
+            emit_a64_float_bits_to_x0(expr_is_float_a64)
             emit_a64_store_x0(ps_val_slot_a)
             emit_a64_load_x0(ps_addr_slot_a)
         }

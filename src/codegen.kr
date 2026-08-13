@@ -3307,6 +3307,43 @@ fn emit_store_xmm0_f32(uint64 offset) {
     }
 }
 
+// Move a just-evaluated FLOAT result out of xmm0 into rax as RAW BITS.
+// `fk` is an expr_is_float value: 1 = f64, 2 = f32, anything else = no-op.
+//
+// This backend returns float values in xmm0 and integer values in rax, so any
+// path that moves a value THROUGH rax has to bring a float across first or it
+// moves whatever junk rax happened to hold. That is exactly what made
+// `unsafe { *(p as f64) = 2.5 }` store zero. Storing the raw bits (rather than
+// converting) is what the IR backends do too: IR_STORE writes the payload of
+// the value vreg whatever its class, so this keeps the two in step.
+fn emit_float_bits_to_rax(uint64 fk) {
+    if fk == 1 {
+        // movq rax, xmm0: 66 48 0F 7E C0
+        emit_byte(0x66); emit_byte(0x48); emit_byte(0x0F)
+        emit_byte(0x7E); emit_byte(0xC0)
+    }
+    if fk == 2 {
+        // movd eax, xmm0: 66 0F 7E C0
+        emit_byte(0x66); emit_byte(0x0F)
+        emit_byte(0x7E); emit_byte(0xC0)
+    }
+}
+
+// The other direction: raw bits sitting in rax become a float in xmm0.
+// `fk`: 1 = f64 (all 64 bits), 2 = f32 (low 32), anything else = no-op.
+fn emit_rax_bits_to_xmm0(uint64 fk) {
+    if fk == 1 {
+        // movq xmm0, rax: 66 48 0F 6E C0
+        emit_byte(0x66); emit_byte(0x48); emit_byte(0x0F)
+        emit_byte(0x6E); emit_byte(0xC0)
+    }
+    if fk == 2 {
+        // movd xmm0, eax: 66 0F 6E C0
+        emit_byte(0x66); emit_byte(0x0F)
+        emit_byte(0x6E); emit_byte(0xC0)
+    }
+}
+
 // movsd xmm1, [rsp+offset] — load f64 into temp register
 fn emit_load_xmm1_f64(uint64 offset) {
     emit_byte(0xF2); emit_byte(0x0F); emit_byte(0x10)
@@ -3561,6 +3598,24 @@ fn fn_ret_struct_lookup(uint64 name_tok) -> uint64 {
         i = i + 1
     }
     return 0xFFFFFFFF
+}
+
+// Map a compound-assignment operator token kind onto the plain binary op it
+// desugars to:  += (45) → + (30), -= (46) → - (31), *= (47) → * (22),
+// /= (48) → / (32).  Everything else passes through untouched.
+//
+// The INTEGER arithmetic paths spell every compound kind out next to its plain
+// twin ("op_kind == 32 || op_kind == 48"), but the FLOAT paths only ever
+// tested the plain four. So `*(p as f64) += 1.5` reached the float path,
+// loaded both operands into xmm0/xmm1 (d0/d1 on arm64) — and then emitted no
+// arithmetic instruction at all, writing the unchanged left operand back.
+// Shared by both legacy backends.
+fn float_binop_op_kind(uint64 k) -> uint64 {
+    if k == 45 { return 30 }
+    if k == 46 { return 31 }
+    if k == 47 { return 22 }
+    if k == 48 { return 32 }
+    return k
 }
 
 // Helper: is this type token a float type?
@@ -4299,6 +4354,18 @@ fn gen_expr(uint64 node) {
         uint64 wple_d3 = ple_d3
         if (wple_d3 & 16) != 0 {
             emit_byte(0x0F); emit_byte(0xAE); emit_byte(0xF0)   // mfence
+        }
+        // data3 bits 0..3 = float kind (1=f64, 2=f32, 3=f16). The bits are in
+        // rax and they are the right bits — but the enclosing `OP=` is float
+        // arithmetic, and this backend does float arithmetic in xmm0. Saying
+        // nothing here is what made `*(p as f64) += 1.5` come out as the bare
+        // RHS: the BinOp saw an integer LHS and never took its float path.
+        // f16 (3) stays integer on purpose — see the kind-41 note.
+        uint64 wple_fk = wple_d3 & 15
+        if wple_fk == 1 || wple_fk == 2 {
+            emit_rax_bits_to_xmm0(wple_fk)
+            expr_is_float = wple_fk
+            return
         }
         expr_is_float = 0
         return
@@ -5367,16 +5434,18 @@ fn gen_expr(uint64 node) {
                     uint64 pfb = cg_tokens + wop_fb * 16
                     uint32 op_kind_fb = 0
                     unsafe { *(pfb as uint32) -> op_kind_fb }
+                    uint64 wopk_fb = op_kind_fb
+                    wopk_fb = float_binop_op_kind(wopk_fb)
                     if lhs_is_float == 2 {
-                        if op_kind_fb == 30 { emit_byte(0xF3); emit_byte(0x0F); emit_byte(0x58); emit_byte(0xC1) } // addss
-                        if op_kind_fb == 31 { emit_byte(0xF3); emit_byte(0x0F); emit_byte(0x5C); emit_byte(0xC1) } // subss
-                        if op_kind_fb == 22 { emit_byte(0xF3); emit_byte(0x0F); emit_byte(0x59); emit_byte(0xC1) } // mulss
-                        if op_kind_fb == 32 { emit_byte(0xF3); emit_byte(0x0F); emit_byte(0x5E); emit_byte(0xC1) } // divss
+                        if wopk_fb == 30 { emit_byte(0xF3); emit_byte(0x0F); emit_byte(0x58); emit_byte(0xC1) } // addss
+                        if wopk_fb == 31 { emit_byte(0xF3); emit_byte(0x0F); emit_byte(0x5C); emit_byte(0xC1) } // subss
+                        if wopk_fb == 22 { emit_byte(0xF3); emit_byte(0x0F); emit_byte(0x59); emit_byte(0xC1) } // mulss
+                        if wopk_fb == 32 { emit_byte(0xF3); emit_byte(0x0F); emit_byte(0x5E); emit_byte(0xC1) } // divss
                     } else {
-                        if op_kind_fb == 30 { emit_byte(0xF2); emit_byte(0x0F); emit_byte(0x58); emit_byte(0xC1) } // addsd
-                        if op_kind_fb == 31 { emit_byte(0xF2); emit_byte(0x0F); emit_byte(0x5C); emit_byte(0xC1) } // subsd
-                        if op_kind_fb == 22 { emit_byte(0xF2); emit_byte(0x0F); emit_byte(0x59); emit_byte(0xC1) } // mulsd
-                        if op_kind_fb == 32 { emit_byte(0xF2); emit_byte(0x0F); emit_byte(0x5E); emit_byte(0xC1) } // divsd
+                        if wopk_fb == 30 { emit_byte(0xF2); emit_byte(0x0F); emit_byte(0x58); emit_byte(0xC1) } // addsd
+                        if wopk_fb == 31 { emit_byte(0xF2); emit_byte(0x0F); emit_byte(0x5C); emit_byte(0xC1) } // subsd
+                        if wopk_fb == 22 { emit_byte(0xF2); emit_byte(0x0F); emit_byte(0x59); emit_byte(0xC1) } // mulsd
+                        if wopk_fb == 32 { emit_byte(0xF2); emit_byte(0x0F); emit_byte(0x5E); emit_byte(0xC1) } // divsd
                     }
                     expr_is_float = lhs_is_float
                     return
@@ -5419,16 +5488,18 @@ fn gen_expr(uint64 node) {
                     uint64 pfc = cg_tokens + wop_fc * 16
                     uint32 op_kind_fc = 0
                     unsafe { *(pfc as uint32) -> op_kind_fc }
+                    uint64 wopk_fc = op_kind_fc
+                    wopk_fc = float_binop_op_kind(wopk_fc)
                     if lhs_is_float == 2 {
-                        if op_kind_fc == 30 { emit_byte(0xF3); emit_byte(0x0F); emit_byte(0x58); emit_byte(0xC1) }
-                        if op_kind_fc == 31 { emit_byte(0xF3); emit_byte(0x0F); emit_byte(0x5C); emit_byte(0xC1) }
-                        if op_kind_fc == 22 { emit_byte(0xF3); emit_byte(0x0F); emit_byte(0x59); emit_byte(0xC1) }
-                        if op_kind_fc == 32 { emit_byte(0xF3); emit_byte(0x0F); emit_byte(0x5E); emit_byte(0xC1) }
+                        if wopk_fc == 30 { emit_byte(0xF3); emit_byte(0x0F); emit_byte(0x58); emit_byte(0xC1) }
+                        if wopk_fc == 31 { emit_byte(0xF3); emit_byte(0x0F); emit_byte(0x5C); emit_byte(0xC1) }
+                        if wopk_fc == 22 { emit_byte(0xF3); emit_byte(0x0F); emit_byte(0x59); emit_byte(0xC1) }
+                        if wopk_fc == 32 { emit_byte(0xF3); emit_byte(0x0F); emit_byte(0x5E); emit_byte(0xC1) }
                     } else {
-                        if op_kind_fc == 30 { emit_byte(0xF2); emit_byte(0x0F); emit_byte(0x58); emit_byte(0xC1) }
-                        if op_kind_fc == 31 { emit_byte(0xF2); emit_byte(0x0F); emit_byte(0x5C); emit_byte(0xC1) }
-                        if op_kind_fc == 22 { emit_byte(0xF2); emit_byte(0x0F); emit_byte(0x59); emit_byte(0xC1) }
-                        if op_kind_fc == 32 { emit_byte(0xF2); emit_byte(0x0F); emit_byte(0x5E); emit_byte(0xC1) }
+                        if wopk_fc == 30 { emit_byte(0xF2); emit_byte(0x0F); emit_byte(0x58); emit_byte(0xC1) }
+                        if wopk_fc == 31 { emit_byte(0xF2); emit_byte(0x0F); emit_byte(0x5C); emit_byte(0xC1) }
+                        if wopk_fc == 22 { emit_byte(0xF2); emit_byte(0x0F); emit_byte(0x59); emit_byte(0xC1) }
+                        if wopk_fc == 32 { emit_byte(0xF2); emit_byte(0x0F); emit_byte(0x5E); emit_byte(0xC1) }
                     }
                     expr_is_float = lhs_is_float
                     return
@@ -5473,16 +5544,18 @@ fn gen_expr(uint64 node) {
                     uint64 pfd = cg_tokens + wop_fd * 16
                     uint32 op_kind_fd = 0
                     unsafe { *(pfd as uint32) -> op_kind_fd }
+                    uint64 wopk_fd = op_kind_fd
+                    wopk_fd = float_binop_op_kind(wopk_fd)
                     if lhs_is_float == 2 {
-                        if op_kind_fd == 30 { emit_byte(0xF3); emit_byte(0x0F); emit_byte(0x58); emit_byte(0xC1) }
-                        if op_kind_fd == 31 { emit_byte(0xF3); emit_byte(0x0F); emit_byte(0x5C); emit_byte(0xC1) }
-                        if op_kind_fd == 22 { emit_byte(0xF3); emit_byte(0x0F); emit_byte(0x59); emit_byte(0xC1) }
-                        if op_kind_fd == 32 { emit_byte(0xF3); emit_byte(0x0F); emit_byte(0x5E); emit_byte(0xC1) }
+                        if wopk_fd == 30 { emit_byte(0xF3); emit_byte(0x0F); emit_byte(0x58); emit_byte(0xC1) }
+                        if wopk_fd == 31 { emit_byte(0xF3); emit_byte(0x0F); emit_byte(0x5C); emit_byte(0xC1) }
+                        if wopk_fd == 22 { emit_byte(0xF3); emit_byte(0x0F); emit_byte(0x59); emit_byte(0xC1) }
+                        if wopk_fd == 32 { emit_byte(0xF3); emit_byte(0x0F); emit_byte(0x5E); emit_byte(0xC1) }
                     } else {
-                        if op_kind_fd == 30 { emit_byte(0xF2); emit_byte(0x0F); emit_byte(0x58); emit_byte(0xC1) }
-                        if op_kind_fd == 31 { emit_byte(0xF2); emit_byte(0x0F); emit_byte(0x5C); emit_byte(0xC1) }
-                        if op_kind_fd == 22 { emit_byte(0xF2); emit_byte(0x0F); emit_byte(0x59); emit_byte(0xC1) }
-                        if op_kind_fd == 32 { emit_byte(0xF2); emit_byte(0x0F); emit_byte(0x5E); emit_byte(0xC1) }
+                        if wopk_fd == 30 { emit_byte(0xF2); emit_byte(0x0F); emit_byte(0x58); emit_byte(0xC1) }
+                        if wopk_fd == 31 { emit_byte(0xF2); emit_byte(0x0F); emit_byte(0x5C); emit_byte(0xC1) }
+                        if wopk_fd == 22 { emit_byte(0xF2); emit_byte(0x0F); emit_byte(0x59); emit_byte(0xC1) }
+                        if wopk_fd == 32 { emit_byte(0xF2); emit_byte(0x0F); emit_byte(0x5E); emit_byte(0xC1) }
                     }
                     expr_is_float = lhs_is_float
                     return
@@ -11377,18 +11450,31 @@ fn gen_stmt(uint64 node) {
         // "use of undeclared identifier" — for `unsafe` just as much as for
         // `volatile`, since both build this node kind.
         uint32 dest_tok = ast_data2(node)
+        // The `as TYPE` clause is the ONLY place the loaded value's register
+        // class is written down — data3 bits 0..3 carry it (1=f64, 2=f32,
+        // 3=f16). The load above already put the right BITS in rax; what was
+        // missing is telling the rest of the function that dest holds a float,
+        // so every later read of it comes out of xmm0. Without it,
+        // `fmt_f64(z)` passed z in a GP register while the callee read xmm0 —
+        // 0.000000000000000 out of memory that held 2.5 exactly.
+        // f16 (3) deliberately stays on the integer path: this language has no
+        // f16 register class, an f16 IS a u64 bit pattern from f32_to_f16(),
+        // and typing it float would break the code that works today.
+        uint32 pl_d3 = ast_data3(node)
+        uint64 wpl_fk = pl_d3
+        wpl_fk = wpl_fk & 15
         uint64 doff = var_lookup(dest_tok)
-        if doff != 0xFFFFFFFF {
-            emit_store_rax_to_stack(doff)
-        } else {
+        if doff == 0xFFFFFFFF {
             uint64 soff = static_lookup(dest_tok)
             if soff != 0xFFFFFFFF {
                 emit_static_store(soff)
-            } else {
-                uint64 ndoff = var_declare(dest_tok)
-                emit_store_rax_to_stack(ndoff)
+                return
             }
+            doff = var_declare(dest_tok)
         }
+        if wpl_fk == 1 { var_type_register(dest_tok, 96) }
+        if wpl_fk == 2 { var_type_register(dest_tok, 95) }
+        emit_store_rax_to_stack(doff)
         return
     }
 
@@ -11412,10 +11498,21 @@ fn gen_stmt(uint64 node) {
         // other, and either side may reach temp_slot_0 — any builtin call does.
         uint64 ps_val_slot = alloc_scratch_slot()
         uint64 ps_addr_slot = alloc_scratch_slot()
+        // A float value expression leaves its result in xmm0, not rax, and
+        // everything below this point moves the value through rax. Bringing
+        // the bits across is the whole fix for `unsafe { *(p as f64) = 2.5 }`,
+        // which used to park whatever junk rax held and store THAT.
+        //
+        // The signal is the VALUE, not the cast type: the parser strips the
+        // float kind off a store node, and reading it off the value is also
+        // what matches the IR backends, whose IR_STORE writes the raw payload
+        // of the value vreg whatever the cast says. So `*(p as u64) = f64expr`
+        // and `*(p as f64) = intexpr` both keep IR/legacy parity here.
         if wpsc == 1 {
             gen_expr(wa)
             emit_store_rax_to_stack(compound_temp_slot)
             gen_expr(wv)
+            emit_float_bits_to_rax(expr_is_float)
             emit_store_rax_to_stack(ps_val_slot)
             emit_load_rax_from_stack(compound_temp_slot)
         } else {
@@ -11424,6 +11521,7 @@ fn gen_stmt(uint64 node) {
             emit_store_rax_to_stack(ps_addr_slot)
             // Evaluate value → park it
             gen_expr(wv)
+            emit_float_bits_to_rax(expr_is_float)
             emit_store_rax_to_stack(ps_val_slot)
             // Reload the address so the tail below still finds it in rax
             emit_load_rax_from_stack(ps_addr_slot)

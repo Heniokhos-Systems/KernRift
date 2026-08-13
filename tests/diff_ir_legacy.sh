@@ -374,6 +374,65 @@ int64 t=0-24
 t%=5
 exit((0-s)*10+(0-t))}' 44
 
+# Float pointer dereference. `unsafe { *(p as f64) = 2.5 }` stored ZERO on
+# both legacy backends and `*(p as f64) -> z` handed z to later readers in the
+# integer register class, while both IR backends were correct — a real
+# IR-vs-legacy split in both directions. Legacy dispatched the access purely on
+# the cast WIDTH and moved the value through rax/x0, where a float expression's
+# result is not. Every row poisons the target first: without that, "stored
+# zero" and "never stored" read the same.
+value_case "ptr_f64_store" 'fn main(){u64 b=alloc(64)
+store64(b,0xAAAAAAAAAAAAAAAA)
+unsafe { *(b as f64) = 2.5 }
+if load64(b)!=0x4004000000000000 { exit(1) }
+exit(7)}' 7
+value_case "ptr_f64_load" 'fn main(){u64 b=alloc(64)
+store64(b,0x4004000000000000)
+unsafe { *(b as f64) -> z }
+exit(f64_to_int(z*100.0))}' 250
+value_case "ptr_f64_roundtrip" 'fn main(){u64 b=alloc(64)
+store64(b,0xAAAAAAAAAAAAAAAA)
+unsafe { *(b as f64) = 1.25 }
+if load64(b)!=0x3FF4000000000000 { exit(1) }
+unsafe { *(b as f64) -> z }
+exit(f64_to_int(z*4.0))}' 5
+# The defect returned the LITERAL right operand instead of the product.
+value_case "ptr_f64_arith" 'fn main(){u64 b=alloc(64)
+store64(b,0x4004000000000000)
+unsafe { *(b as f64) -> z }
+f64 w=z*2.0
+exit(f64_to_int(w*10.0))}' 50
+# f32 shares the dispatch and broke identically; the surviving poison halves
+# also pin the store width at 4 bytes.
+value_case "ptr_f32_store_load" 'fn main(){u64 b=alloc(64)
+store64(b,0xAAAAAAAAAAAAAAAA)
+unsafe { *(b as f32) = 2.5f }
+if load64(b)!=0xAAAAAAAA40200000 { exit(1) }
+unsafe { *(b as f32) -> y }
+exit(f32_to_int(y*4.0f))}' 10
+# Float RMW: the float arithmetic paths only tested the plain operator kinds,
+# so `+=` matched no arm, emitted nothing, and wrote the left operand back —
+# the float twin of the divassign rows above.
+value_case "ptr_f64_compound" 'fn main(){u64 b=alloc(64)
+store64(b,0x4004000000000000)
+unsafe { *(b as f64) += 1.5 }
+if load64(b)!=0x4010000000000000 { exit(1) }
+unsafe { *(b as f64) /= 2.0 }
+if load64(b)!=0x4000000000000000 { exit(2) }
+exit(7)}' 7
+# `volatile` builds the same nodes with data3 bit 4 set: floats must move, and
+# a non-float volatile load must stay integer.
+value_case "ptr_f64_volatile" 'fn main(){u64 b=alloc(64)
+store64(b,0xAAAAAAAAAAAAAAAA)
+volatile { *(b as f64) = 2.5 }
+if load64(b)!=0x4004000000000000 { exit(1) }
+volatile { *(b as f64) -> z }
+if f64_to_int(z*2.0)!=5 { exit(2) }
+u64 hi=b+4
+volatile { *(hi as uint32) -> w }
+if w/2!=0x20020000 { exit(3) }
+exit(7)}' 7
+
 echo "----"
 echo "Differential: $((TOTAL-DIV-KNOWN))/$TOTAL agree across backends, $KNOWN known-divergent (pinned), $DIV diverged."
 if [ "$DIV" = "0" ]; then echo "PARITY OK"; else echo "PARITY GAPS FOUND"; exit 1; fi

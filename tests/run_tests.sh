@@ -20623,6 +20623,196 @@ else
 fi
 rm -f "$SR_SRC" "$SR_BIN"
 
+# --- float pointer dereference moves the VALUE, not junk -------------------
+# `unsafe { *(p as f64) = 2.5 }` stored ZERO on BOTH legacy backends and
+# `unsafe { *(p as f64) -> z }` handed z to every later reader in the wrong
+# register class, so a bit-exact 2.5 sitting in memory printed as 0.000000.
+# Both IR backends were correct, so this was a genuine IR-vs-legacy split.
+#
+# Two causes, both in the legacy backends:
+#   - PtrStore dispatched on the cast WIDTH alone and moved the value through
+#     rax/x0. A float expression leaves its result in xmm0/d0, so the store
+#     wrote whatever junk the integer register happened to hold.
+#   - PtrLoad put the right BITS in the destination slot but never recorded
+#     that the destination is a float, so every later read of it came out of
+#     the integer class -- fmt_f64(z) passed z in a GP register to a callee
+#     reading xmm0.
+# A third, adjacent one: the float arithmetic paths only ever tested the plain
+# operator kinds, so `*(p as f64) += 1.5` emitted NO arithmetic instruction and
+# wrote the unchanged left operand back (the float twin of the `/=` discard
+# already pinned in diff_ir_legacy.sh).
+#
+# EVERY row POISONS the target first and then asserts the FULL 64-bit pattern.
+# That is the whole point: without the poison "stored zero" and "never stored"
+# are the same reading, and a row that only checks the value "looks like 2.5"
+# passes against this bug, because the value it saw never came from memory.
+#
+# These rows EXECUTE, so they follow $RUN_ARCH rather than naming an arch.
+TOTAL=$((TOTAL + 1))
+PDRF_OK=1
+PDRF_OTHER="arm64"
+if [ "$RUN_ARCH" = "arm64" ]; then PDRF_OTHER="x86_64"; fi
+PDRF_QEMU=""
+if [ "$PDRF_OTHER" = "arm64" ]; then
+    PDRF_QEMU="$(command -v qemu-aarch64-static || command -v qemu-aarch64 || true)"
+fi
+
+# 1. Store: the poison must be replaced by the EXACT bits of 2.5, all 64 of
+#    them. Byte-level: 0xAA anywhere means the store missed; all-zero means it
+#    stored the empty integer register, which is what it used to do.
+cat > "$DIR/../pdrf_store_$$.kr" <<'PDRF_STORE'
+fn main() {
+    u64 b = alloc(64)
+    store64(b, 0xAAAAAAAAAAAAAAAA)
+    unsafe { *(b as f64) = 2.5 }
+    if load64(b) != 0x4004000000000000 { exit(1) }
+    exit(7)
+}
+PDRF_STORE
+
+# 2. Load: correct bits are written by an INTEGER store, so the only thing
+#    under test is whether the f64 read hands them to a float consumer.
+#    f64_to_int(z * 100.0) is 250 only if z really is 2.5 in the float class.
+cat > "$DIR/../pdrf_load_$$.kr" <<'PDRF_LOAD'
+fn main() {
+    u64 b = alloc(64)
+    store64(b, 0x4004000000000000)
+    unsafe { *(b as f64) -> z }
+    if f64_to_int(z) != 2 { exit(1) }
+    if f64_to_int(z * 100.0) != 250 { exit(2) }
+    exit(7)
+}
+PDRF_LOAD
+
+# 3. Full round trip, and the raw-bit check is what keeps it honest: a value
+#    that never left a register would satisfy the float check alone.
+cat > "$DIR/../pdrf_round_$$.kr" <<'PDRF_ROUND'
+fn main() {
+    u64 b = alloc(64)
+    store64(b, 0xAAAAAAAAAAAAAAAA)
+    unsafe { *(b as f64) = 1.25 }
+    if load64(b) != 0x3FF4000000000000 { exit(1) }
+    unsafe { *(b as f64) -> z }
+    if f64_to_int(z * 4.0) != 5 { exit(2) }
+    exit(7)
+}
+PDRF_ROUND
+
+# 4. Arithmetic on a dereferenced f64. The defect returned the LITERAL operand
+#    instead of the product -- f64_to_int(2.0) is 2, not 5 -- so this row fails
+#    with a number that names the symptom.
+cat > "$DIR/../pdrf_arith_$$.kr" <<'PDRF_ARITH'
+fn main() {
+    u64 b = alloc(64)
+    store64(b, 0x4004000000000000)
+    unsafe { *(b as f64) -> z }
+    f64 w = z * 2.0
+    if f64_to_int(w) != 5 { exit(1) }
+    f64 s = z + 0.5
+    if f64_to_int(s) != 3 { exit(2) }
+    f64 d = z - 0.5
+    if f64_to_int(d) != 2 { exit(3) }
+    exit(7)
+}
+PDRF_ARITH
+
+# 5. f32 is the same dispatch and was broken identically. The surviving 0xAAAA
+#    halves also pin the store WIDTH: 4 bytes, not 8.
+cat > "$DIR/../pdrf_f32_$$.kr" <<'PDRF_F32'
+fn main() {
+    u64 b = alloc(64)
+    store64(b, 0xAAAAAAAAAAAAAAAA)
+    unsafe { *(b as f32) = 2.5f }
+    if load64(b) != 0xAAAAAAAA40200000 { exit(1) }
+    unsafe { *(b as f32) -> y }
+    if f32_to_int(y * 4.0f) != 10 { exit(2) }
+    exit(7)
+}
+PDRF_F32
+
+# 6. Read-modify-write. 2.5+1.5=4, 4*2=8, 8-4=4, 4/4=1 -- each asserted as raw
+#    bits, so an op that silently emitted nothing (leaving the accumulator on
+#    the left operand) is caught at the first step.
+cat > "$DIR/../pdrf_rmw_$$.kr" <<'PDRF_RMW'
+fn main() {
+    u64 b = alloc(64)
+    store64(b, 0x4004000000000000)
+    unsafe { *(b as f64) += 1.5 }
+    if load64(b) != 0x4010000000000000 { exit(1) }
+    unsafe { *(b as f64) *= 2.0 }
+    if load64(b) != 0x4020000000000000 { exit(2) }
+    unsafe { *(b as f64) -= 4.0 }
+    if load64(b) != 0x4010000000000000 { exit(3) }
+    unsafe { *(b as f64) /= 4.0 }
+    if load64(b) != 0x3FF0000000000000 { exit(4) }
+    exit(7)
+}
+PDRF_RMW
+
+# 7. `volatile` builds the SAME AST nodes with data3 bit 4 set, so it has to
+#    move floats too -- and the non-float volatile load must stay integer. That
+#    last check is not decoration: reading the whole data3 word as the float
+#    kind is precisely how every `volatile { *(p as TYPE) -> v }` once came out
+#    f64.
+cat > "$DIR/../pdrf_vol_$$.kr" <<'PDRF_VOL'
+fn main() {
+    u64 b = alloc(64)
+    store64(b, 0xAAAAAAAAAAAAAAAA)
+    volatile { *(b as f64) = 2.5 }
+    if load64(b) != 0x4004000000000000 { exit(1) }
+    volatile { *(b as f64) -> z }
+    if f64_to_int(z * 2.0) != 5 { exit(2) }
+    u64 hi = b + 4
+    volatile { *(hi as uint32) -> w }
+    if w != 0x40040000 { exit(3) }
+    if w / 2 != 0x20020000 { exit(4) }
+    exit(7)
+}
+PDRF_VOL
+
+PDRF_RAN=0
+pdrf_run() { # <arch> <flags> <src> <runner-or-empty>
+    local _bin="/tmp/krc_pdrf_$$"
+    if ! $KRC --arch="$1" $2 "$3" -o "$_bin" >/dev/null 2>&1; then
+        PDRF_OK=0; echo "  $(basename $3) $1 ${2:-IR}: COMPILE FAILED"
+        return
+    fi
+    if [ -n "$4" ]; then $4 "$_bin" >/dev/null 2>&1; else "$_bin" >/dev/null 2>&1; fi
+    local _rc=$?
+    PDRF_RAN=$((PDRF_RAN + 1))
+    # 7 = every check inside the program passed. 1..4 name which one failed;
+    # 0 is the defect's signature (it stored/loaded zero and fell off a check).
+    [ "$_rc" = "7" ] || { PDRF_OK=0; echo "  $(basename $3) $1 ${2:-IR}: got $_rc, want 7"; }
+    rm -f "$_bin"
+}
+for _src in "$DIR/../pdrf_store_$$.kr" "$DIR/../pdrf_load_$$.kr" \
+            "$DIR/../pdrf_round_$$.kr" "$DIR/../pdrf_arith_$$.kr" \
+            "$DIR/../pdrf_f32_$$.kr" "$DIR/../pdrf_rmw_$$.kr" \
+            "$DIR/../pdrf_vol_$$.kr"; do
+    pdrf_run "$RUN_ARCH" ""          "$_src" ""
+    pdrf_run "$RUN_ARCH" "--legacy"  "$_src" ""
+    if [ -n "$PDRF_QEMU" ]; then
+        pdrf_run "$PDRF_OTHER" ""         "$_src" "$PDRF_QEMU"
+        pdrf_run "$PDRF_OTHER" "--legacy" "$_src" "$PDRF_QEMU"
+    fi
+done
+# Guard against the loop silently doing nothing. 7 sources x 2 host configs
+# always; x2 more per source when the other arch is runnable.
+PDRF_WANT=14
+if [ -n "$PDRF_QEMU" ]; then PDRF_WANT=28; fi
+[ "$PDRF_RAN" = "$PDRF_WANT" ] || { PDRF_OK=0; echo "  only $PDRF_RAN/$PDRF_WANT config-runs executed"; }
+if [ "$PDRF_OK" = "1" ]; then
+    echo "  float_pointer_deref_moves_the_value: PASS ($PDRF_RAN config-runs)"
+    PASS=$((PASS + 1))
+else
+    echo "FAIL: float_pointer_deref_moves_the_value"
+    FAIL=$((FAIL + 1))
+fi
+rm -f "$DIR/../pdrf_store_$$.kr" "$DIR/../pdrf_load_$$.kr" \
+      "$DIR/../pdrf_round_$$.kr" "$DIR/../pdrf_arith_$$.kr" \
+      "$DIR/../pdrf_f32_$$.kr" "$DIR/../pdrf_rmw_$$.kr" \
+      "$DIR/../pdrf_vol_$$.kr"
+
 # --- Bare-metal boot gate (sub-project B1) ---
 # One counted test wrapping tests/target_none/boot_gate.sh. DELIBERATELY NOT
 # behind `command -v qemu-system-*`: the gate itself fails loudly when a
