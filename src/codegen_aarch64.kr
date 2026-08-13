@@ -1811,7 +1811,13 @@ fn gen_expr_a64(uint64 node) {
                 emit_a64_mul(0, 0, 9)
             }
         }
-        else if op_kind == 32 {
+        // `/` and `/=` share this arm. SlashEq = 48 must be listed the way
+        // StarEq/AmpEq/LtLtEq are on the arms around it: this chain is the only
+        // place the legacy arm64 backend turns a BinOp into arithmetic, and an
+        // op_kind matching no arm leaves x0 holding the LHS, which the store
+        // then writes back unchanged. `x /= v` and `arr[i] /= v` compiled clean
+        // and silently discarded the result.
+        else if op_kind == 32 || op_kind == 48 {
             if debug_mode != 0 {
                 // Division by zero check: cbnz x9, skip; exit(1)
                 uint64 cbnz_div = out_len
@@ -1826,7 +1832,8 @@ fn gen_expr_a64(uint64 node) {
             if legacy_node_is_signed(node) != 0 { emit_a64_sdiv(0, 0, 9) }
             else { emit_a64_udiv(0, 0, 9) }
         }
-        else if op_kind == 33 {
+        // `%` and `%=` (PercentEq = 49) — same reasoning as the `/` arm above.
+        else if op_kind == 33 || op_kind == 49 {
             // modulo: x0 = x0 - (x0/x9)*x9
             if debug_mode != 0 {
                 // Division by zero check: cbnz x9, skip; exit(1)

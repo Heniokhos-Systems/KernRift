@@ -2441,6 +2441,147 @@ rm -f "$DIR/../aslot_write_$$.kr" "$DIR/../aslot_val_$$.kr" \
       "$DIR/../aslot_fstr_$$.kr" "$DIR/../aslot_tuple_$$.kr" \
       "$DIR/../aslot_flit_$$.kr"
 
+# --- `/=` and `%=` ----------------------------------------------------------
+# Both legacy backends' BinOp operator chains listed the compound tokens for
+# every operator EXCEPT SlashEq (48) and PercentEq (49): x86 had arms for
+# 45/46/47/50/51/52 and paired 43||53, 44||54, but `/` (32) and `%` (33) stood
+# alone; arm64 paired 30||45, 31||46, 22||47, 23||50, 24||51, 25||52, 43||53,
+# 44||54 and likewise left 32 and 33 unpaired. An op_kind that matches no arm
+# falls out of the whole if/else chain having emitted nothing, so the
+# accumulator still held the LHS and the enclosing store wrote that unchanged
+# value back. `x /= v`, `arr[i] /= v` and the deref form all compiled clean,
+# raised no diagnostic, and silently discarded the result on BOTH legacy
+# backends while the IR backends were correct -- a genuine IR/legacy
+# divergence, mirrored in tests/diff_ir_legacy.sh.
+#
+# Note this was never specific to the indexed form: the plain-variable
+# `x /= v` was equally broken, because the defect is in the shared BinOp
+# lowering that the parser's desugar feeds, not in any store path. Source 3
+# therefore pins the plain forms as controls alongside the indexed ones -- a
+# fix that only taught the indexed store about `/=` would look complete
+# without them.
+#
+# Three things are asserted, not one:
+#   * that it computes the VALUE (source 3 -- a row asserting only that the
+#     program compiles, or only a non-zero exit, passes against this bug)
+#   * that `/` and `%` stay SIGNED for signed operands (source 3's tail --
+#     -24/5 must be -4 and -24%5 must be -4, not the unsigned garbage a
+#     udiv/div would produce)
+#   * that the index/address is evaluated exactly ONCE and before the value
+#     (sources 1 and 2 -- `seq` records execution order as decimal digits, so
+#     these two operators are pinned to the same CompoundTemp machinery the
+#     other eight OP= forms use rather than growing a double-evaluating path)
+#
+# These rows EXECUTE, so they follow $RUN_ARCH rather than naming an arch.
+TOTAL=$((TOTAL + 1))
+DMA_OK=1
+DMA_OTHER="arm64"
+if [ "$RUN_ARCH" = "arm64" ]; then DMA_OTHER="x86_64"; fi
+DMA_QEMU=""
+if [ "$DMA_OTHER" = "arm64" ]; then
+    DMA_QEMU="$(command -v qemu-aarch64-static || command -v qemu-aarch64 || true)"
+fi
+
+# 1. arr[i()] /= v() -- index once, then value => seq 12, and arr[3] == 30/4.
+cat > "$DIR/../dmassign_idx_$$.kr" <<'DMASSIGN_IDX'
+static u64 seq = 0
+static u8[16] arr
+fn ai() -> u64 { seq = seq * 10 + 1  return 3 }
+fn fv() -> u64 { seq = seq * 10 + 2  return 4 }
+fn main() {
+    arr[3] = 30
+    arr[ai()] /= fv()
+    if seq != 12 { exit(1) }
+    if arr[3] != 7 { exit(2) }
+    exit(7)
+}
+DMASSIGN_IDX
+
+# 2. unsafe { *(ap() as uint32) %= fv() } -- address once, then value.
+cat > "$DIR/../dmassign_ptr_$$.kr" <<'DMASSIGN_PTR'
+static u64 seq = 0
+static u8[16] buf
+fn ap() -> u64 { seq = seq * 10 + 1  return buf }
+fn fv() -> u64 { seq = seq * 10 + 2  return 4 }
+fn main() {
+    store32(buf, 30)
+    unsafe { *(ap() as uint32) %= fv() }
+    if seq != 12 { exit(1) }
+    if load32(buf) != 2 { exit(2) }
+    exit(7)
+}
+DMASSIGN_PTR
+
+# 3. VALUES on every target form: plain variable (the control), array element,
+#    deref, and signed `/=` / `%=` which must truncate toward zero.
+cat > "$DIR/../dmassign_val_$$.kr" <<'DMASSIGN_VAL'
+static u64[8] a
+static u8[16] buf
+fn main() {
+    uint64 v = 23
+    v /= 2
+    if v != 11 { exit(1) }
+    v %= 4
+    if v != 3 { exit(2) }
+    a[3] = 23
+    a[3] /= 2
+    if a[3] != 11 { exit(3) }
+    a[3] %= 5
+    if a[3] != 1 { exit(4) }
+    store32(buf, 30)
+    unsafe { *(buf as uint32) /= 4 }
+    if load32(buf) != 7 { exit(5) }
+    unsafe { *(buf as uint32) %= 4 }
+    if load32(buf) != 3 { exit(6) }
+    int64 s = 0 - 24
+    s /= 5
+    if s != 0 - 4 { exit(8) }
+    int64 t = 0 - 24
+    t %= 5
+    if t != 0 - 4 { exit(9) }
+    exit(7)
+}
+DMASSIGN_VAL
+
+DMA_RAN=0
+dma_run() { # <arch> <flags> <src> <runner-or-empty>
+    local _bin="/tmp/krc_dmassign_$$"
+    if ! $KRC --arch="$1" $2 "$3" -o "$_bin" >/dev/null 2>&1; then
+        DMA_OK=0; echo "  $(basename $3) $1 ${2:-IR}: COMPILE FAILED"
+        return
+    fi
+    if [ -n "$4" ]; then $4 "$_bin" >/dev/null 2>&1; else "$_bin" >/dev/null 2>&1; fi
+    local _rc=$?
+    DMA_RAN=$((DMA_RAN + 1))
+    # 7 = every assertion satisfied. Anything else names the assertion that
+    # failed; 1 on sources 1/2 is specifically a wrong evaluation order, and
+    # the discard defect reports 2 there and 1/3/5/8 on source 3.
+    [ "$_rc" = "7" ] || { DMA_OK=0; echo "  $(basename $3) $1 ${2:-IR}: got $_rc, want 7"; }
+    rm -f "$_bin"
+}
+for _src in "$DIR/../dmassign_idx_$$.kr" "$DIR/../dmassign_ptr_$$.kr" "$DIR/../dmassign_val_$$.kr"; do
+    dma_run "$RUN_ARCH" ""          "$_src" ""
+    dma_run "$RUN_ARCH" "--legacy"  "$_src" ""
+    if [ -n "$DMA_QEMU" ]; then
+        dma_run "$DMA_OTHER" ""         "$_src" "$DMA_QEMU"
+        dma_run "$DMA_OTHER" "--legacy" "$_src" "$DMA_QEMU"
+    fi
+done
+# Guard against the loop silently doing nothing. 3 sources x 2 host configs
+# always; x2 more per source when the other arch is runnable.
+DMA_WANT=6
+if [ -n "$DMA_QEMU" ]; then DMA_WANT=12; fi
+[ "$DMA_RAN" = "$DMA_WANT" ] || { DMA_OK=0; echo "  only $DMA_RAN/$DMA_WANT config-runs executed"; }
+if [ "$DMA_OK" = "1" ]; then
+    echo "  divmod_assign_ops: PASS ($DMA_RAN config-runs)"
+    PASS=$((PASS + 1))
+else
+    echo "FAIL: divmod_assign_ops"
+    FAIL=$((FAIL + 1))
+fi
+rm -f "$DIR/../dmassign_idx_$$.kr" "$DIR/../dmassign_ptr_$$.kr" \
+      "$DIR/../dmassign_val_$$.kr"
+
 rm -f "$DIR/../ceval_idx_$$.kr" "$DIR/../ceval_ptr_$$.kr" "$DIR/../ceval_plain_$$.kr"
 
 # File-scope struct statics: `static Point[N] pts` and `static Point sp`.

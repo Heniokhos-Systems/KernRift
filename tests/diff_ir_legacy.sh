@@ -344,6 +344,36 @@ value_case "arg_float_literal_scratch" 'fn main(){f64 r=fma_f64(2.5,4.5,1.25)
 u64 g=f64_to_int(r*100.0)
 exit(g-1000)}' 250
 
+# --- `/=` and `%=` on the legacy backends ----------------------------------
+# Both legacy BinOp operator chains paired every compound token with its base
+# operator EXCEPT SlashEq (48) with `/` (32) and PercentEq (49) with `%` (33).
+# An op_kind matching no arm emitted nothing at all, leaving the accumulator
+# holding the LHS, which the enclosing store then wrote back unchanged. Both
+# IR backends were correct (ir.kr already spelled `op_kind == 32 || 48`), so
+# this was a real IR-vs-legacy divergence: 113 on IR, 253 on legacy — the
+# unmodified 23 and 23 rather than the 11 and 3 the division produced.
+# The plain-variable form was equally broken, so it is pinned here too.
+value_case "divassign_idx" 'fn main(){u64[8] a
+a[3]=23
+a[3]/=2
+u64[8] b
+b[3]=23
+b[3]%=5
+exit(a[3]*10+b[3])}' 113
+value_case "divassign_plain" 'fn main(){uint64 x=23
+x/=2
+uint64 y=23
+y%=5
+exit(x*10+y)}' 113
+# Signed operands must keep using idiv/sdiv, not div/udiv: -24/5 = -4 and
+# -24%5 = -4, so (0-s)*10+(0-t) = 44. The discard defect left both at -24,
+# which reads back as 264 & 255 = 8.
+value_case "divassign_signed" 'fn main(){int64 s=0-24
+s/=5
+int64 t=0-24
+t%=5
+exit((0-s)*10+(0-t))}' 44
+
 echo "----"
 echo "Differential: $((TOTAL-DIV-KNOWN))/$TOTAL agree across backends, $KNOWN known-divergent (pinned), $DIV diverged."
 if [ "$DIV" = "0" ]; then echo "PARITY OK"; else echo "PARITY GAPS FOUND"; exit 1; fi
