@@ -4143,26 +4143,18 @@ fn ir_lower_expr(uint64 node) -> uint64 {
                     // Empty part: emit zero length
                     ir_emit(IR_CONST, len_v, 0, 0, 0, ir_current_bb)
                 } else if wfraw != 0 {
-                    // Raw StrPart: copy bytes from source directly (no quote strip)
-                    str_buf_ensure(str_len + ftlen + 1)
+                    // Raw StrPart: bake the segment (escapes + brace doubling
+                    // processed) via the shared helper in codegen.kr, so this
+                    // path agrees byte-for-byte with both legacy backends.
                     uint64 fstr_offset = str_len
-                    uint64 fsi = 0
-                    while fsi < ftlen {
-                        uint64 fch = tok_source_byte(wftok, fsi)
-                        uint64 fsp = str_buf + str_len
-                        uint8 fcb = fch
-                        unsafe { *(fsp as uint8) = fcb }
-                        str_len = str_len + 1
-                        fsi = fsi + 1
-                    }
-                    // Null-terminate
-                    uint64 fnsp = str_buf + str_len
-                    uint8 fnz = 0
-                    unsafe { *(fnsp as uint8) = fnz }
-                    str_len = str_len + 1
+                    uint64 fbaked = fstr_part_bake(wftok)
                     uint64 fstr_v = ir_new_vreg()
                     ir_emit(IR_STR_CONST, fstr_v, 0, 0, fstr_offset, ir_current_bb)
-                    ir_emit(IR_STRLEN, len_v, fstr_v, 0, 0, ir_current_bb)
+                    // Compile-time length, NOT a runtime IR_STRLEN: now that
+                    // `\0` is a legal escape in a segment, strlen would stop
+                    // at the embedded NUL while the legacy backends (which
+                    // use the baked count) would copy the whole segment.
+                    ir_emit(IR_CONST, len_v, 0, 0, fbaked, ir_current_bb)
                     uint64 fmc = ir_new_vreg()
                     ir_emit(IR_MEMCPY, fmc, slot_v, fstr_v, len_v, ir_current_bb)
                 } else {

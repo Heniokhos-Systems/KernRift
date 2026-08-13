@@ -1310,9 +1310,12 @@ needed.
 | `file_size(fd)` | Return the size of an open file. |
 
 **f-strings** (v2.8.3): `f"x = {x}, pi ≈ {3.14}"` interpolates each
-`{expr}` with the same type-directed formatter `print` uses. `{{` and
-`}}` escape braces. The surrounding string segments are emitted
-verbatim, so f-strings compose with variadic `println`:
+`{expr}` with the same type-directed formatter `print` uses. The literal
+segments between the interpolations take **exactly the escape sequences a
+plain `"..."` literal takes** — `\n \t \r \0 \\ \" \' \b \f \v \a \e` and
+`\xHH` — so `f"a\nb={n}\n"` is two lines, not a backslash and an `n`. A
+literal brace is written `{{` or `}}` (`\{` and `\}` also work). f-strings
+compose with variadic `println`:
 
 ```kr
 println(f"result = {answer} ({percent}%)")

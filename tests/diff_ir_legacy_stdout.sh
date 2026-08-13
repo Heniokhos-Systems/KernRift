@@ -98,6 +98,19 @@ dc "f16_deref_typing" 'fn main(){ u64 p=alloc(64); store64(p,0xAAAAAAAAAAAAAAAA)
 # returned 0.0f for everything -- with no deref anywhere.
 dc "f16_to_f32_value" 'import "std/math_float.kr"
 fn main(){ f32 v=65.0f; u64 h=f32_to_f16(v); println(h); println_str(fmt_f32(f16_to_f32(h),4)); exit(0) }'
+# Escapes in f-string literal segments were processed by NOBODY, so all four
+# configs printed a literal backslash and agreed with each other -- these rows
+# could not have caught the original bug and do not claim to. What they DO
+# guard is the fix's own divergence surface: three separate lowerings now call
+# one bake helper, and each still computes the segment's copy length its own
+# way (rep movsb count on legacy x86, fs_len on legacy arm64, an IR_CONST on
+# the IR builder). The value itself is pinned byte-exactly in run_tests.sh
+# under ANCHOR fsesc; this file pins that the four configs still agree.
+dc "fstring_escapes" 'fn main(){ u64 n=7; print_str(f"a\nb={n}\t\r\\\"\x41|"); exit(0) }'
+dc "fstring_brace_doubling" 'fn main(){ u64 n=7; print_str(f"L{{{n}}}R\n"); exit(0) }'
+# Embedded NUL: the lengths above are what diverge here. A runtime strlen
+# would stop at the NUL, a compile-time count copies past it.
+dc "fstring_embedded_nul" 'fn main(){ u64 n=5; u64 p=f"a\0b{n}c"; u64 i=0; while i<5 { u64 q=p+i; u64 b=0; unsafe { *(q as uint8) -> b } print(b); print_str(",") ; i=i+1 } print_str("\n"); exit(0) }'
 
 echo "----"
 echo "Stdout differential: $((TOTAL-DIV))/$TOTAL agree, $DIV diverged."

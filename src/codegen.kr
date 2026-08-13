@@ -1096,6 +1096,70 @@ fn escape_char_to_byte(uint64 esc) -> uint64 {
     return 0xFFFFFFFFFFFFFFFF
 }
 
+// Bake ONE f-string literal segment into str_buf at the current str_len and
+// return the number of bytes written (excluding the NUL this appends).
+//
+// A StrPart token is the raw source text between interpolations, with NO
+// surrounding quotes — the lexer hands the bytes over verbatim, so this is
+// the ONLY unescaping pass that text ever gets. All three f-string lowerings
+// (legacy x86 gen_expr, legacy arm64 gen_expr_a64, and the IR builder) call
+// this exact function; each of them used to inline its own raw byte-copy
+// loop, which is why `f"a\nb"` printed a backslash and an 'n' on every
+// backend while "a\nb" printed a newline. Do NOT add a second pass anywhere
+// downstream: `\\n` would collapse to a newline instead of to `\` + `n`.
+//
+// Escape set is exactly escape_char_to_byte plus \xHH — the same table the
+// plain-string lowering and the char-literal parser use. `\"` reaches us
+// because the lexer's f-string scanner skips the byte after a backslash,
+// just as the plain-string scanner does.
+//
+// The two brace escapes are handled here as well, because they are literal-
+// segment escapes like any other. The lexer leaves `{{`/`}}` in the segment
+// as two bytes so they don't open an interpolation; collapsing them to one
+// brace is this function's job (it was nobody's job before, so `f"{{"`
+// printed two braces). `\{` and `\}` fall out of the escape path for free:
+// escape_char_to_byte doesn't know them, so the byte passes through verbatim.
+// The backslash form is checked FIRST, so `\\{n}` is a literal backslash
+// followed by a real interpolation.
+@export
+fn fstr_part_bake(uint64 tok_idx) -> uint64 {
+    uint64 tlen = tok_text_len(tok_idx)
+    str_buf_ensure(str_len + tlen + 1)
+    uint64 written = 0
+    uint64 si = 0
+    while si < tlen {
+        uint64 ch = tok_source_byte(tok_idx, si)
+        if ch == 92 && si + 1 < tlen {
+            si = si + 1
+            uint64 esc = tok_source_byte(tok_idx, si)
+            if esc == 120 && si + 2 < tlen {
+                ch = hex_digit_pair_to_byte(tok_source_byte(tok_idx, si + 1),
+                                            tok_source_byte(tok_idx, si + 2))
+                si = si + 2
+            } else {
+                uint64 mapped = escape_char_to_byte(esc)
+                if mapped != 0xFFFFFFFFFFFFFFFF { ch = mapped }
+                else { ch = esc }
+            }
+        } else if ch == 123 && si + 1 < tlen {
+            if tok_source_byte(tok_idx, si + 1) == 123 { si = si + 1 }
+        } else if ch == 125 && si + 1 < tlen {
+            if tok_source_byte(tok_idx, si + 1) == 125 { si = si + 1 }
+        }
+        uint64 sp = str_buf + str_len
+        uint8 cb = ch
+        unsafe { *(sp as uint8) = cb }
+        str_len = str_len + 1
+        written = written + 1
+        si = si + 1
+    }
+    uint64 nsp = str_buf + str_len
+    uint8 nz = 0
+    unsafe { *(nsp as uint8) = nz }
+    str_len = str_len + 1
+    return written
+}
+
 // Parse a two-digit hex byte for `\xHH` escapes. Returns 0 when either
 // digit is out of range — callers shouldn't land here unless the source
 // already matched `\x`.
@@ -4714,21 +4778,12 @@ fn gen_expr(uint64 node) {
                     uint64 wfs_tok = fs_tok
                     uint64 fs_tlen = tok_text_len(wfs_tok)
                     if fs_tlen != 0 {
-                        str_buf_ensure(str_len + fs_tlen + 1)
                         uint64 fs_soff = str_len
-                        uint64 fs_si = 0
-                        while fs_si < fs_tlen {
-                            uint64 fs_ch = tok_source_byte(wfs_tok, fs_si)
-                            uint64 fs_sp = str_buf + str_len
-                            uint8 fs_cb = fs_ch
-                            unsafe { *(fs_sp as uint8) = fs_cb }
-                            str_len = str_len + 1
-                            fs_si = fs_si + 1
-                        }
-                        uint64 fs_nsp = str_buf + str_len
-                        uint8 fs_nz = 0
-                        unsafe { *(fs_nsp as uint8) = fs_nz }
-                        str_len = str_len + 1
+                        // Shared bake: escapes and `{{`/`}}` are processed
+                        // here, so the emitted length fs_blen is <= the token
+                        // text length. Every length below must use fs_blen —
+                        // using fs_tlen would rep-movsb past the segment.
+                        uint64 fs_blen = fstr_part_bake(wfs_tok)
                         str_fixups_ensure()
                         // lea rsi, [rip + fs_soff]  (source)
                         emit_byte(0x48); emit_byte(0x8D); emit_byte(0x35)
@@ -4740,11 +4795,12 @@ fn gen_expr(uint64 node) {
                         unsafe { *(fs_fe4 as uint32) = fs_so }
                         str_fixup_count = str_fixup_count + 1
                         emit_u32_le(0)
-                        // String part length is known at compile time (fs_tlen):
-                        // no runtime strlen needed. rsi already points at the
-                        // source (lea above). rcx = fs_tlen ; rep movsb.
+                        // String part length is known at compile time (fs_blen,
+                        // the count fstr_part_bake actually wrote): no runtime
+                        // strlen needed. rsi already points at the source (lea
+                        // above). rcx = fs_blen ; rep movsb.
                         emit_byte(0x48); emit_byte(0xC7); emit_byte(0xC1)   // mov rcx, imm32
-                        emit_u32_le(fs_tlen)
+                        emit_u32_le(fs_blen)
                         // lea rdi, [rsp + fs_buf_off]
                         if fs_buf_off < 128 {
                             emit_byte(0x48); emit_byte(0x8D); emit_byte(0x7C); emit_byte(0x24)
@@ -4763,9 +4819,9 @@ fn gen_expr(uint64 node) {
                         emit_byte(0x48); emit_byte(0x01); emit_byte(0xC7)  // add rdi, rax
                         // rep movsb (rcx=len, rsi=src, rdi=dest)
                         emit_byte(0xF3); emit_byte(0xA4)
-                        // update offset: fs_slot_o += fs_tlen
+                        // update offset: fs_slot_o += fs_blen
                         emit_load_rax_from_stack(fs_slot_o)
-                        emit_byte(0x48); emit_byte(0x05); emit_u32_le(fs_tlen)  // add rax, imm32
+                        emit_byte(0x48); emit_byte(0x05); emit_u32_le(fs_blen)  // add rax, imm32
                         emit_store_rax_to_stack(fs_slot_o)
                     }
                 } else {

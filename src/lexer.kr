@@ -474,7 +474,16 @@ fn lex_one_token() {
             uint64 fstr_running = 1
             while pos < src_len && fstr_running != 0 {
                 uint64 fch = peek()
-                if fch == 34 {
+                if fch == 92 {
+                    // Backslash escapes the NEXT byte, exactly as in the
+                    // plain string-literal scanner below. Only the delimiter
+                    // question is settled here — the escape is decoded later,
+                    // when the segment is baked by fstr_part_bake. Without
+                    // this, f"say \"hi\"" ended at the first escaped quote
+                    // and the rest of the line was parsed as code.
+                    advance()
+                    if pos < src_len { advance() }
+                } else if fch == 34 {
                     fstr_running = 0
                 } else if fch == 123 {
                     // '{' — check for literal '{{'

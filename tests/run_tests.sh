@@ -21258,6 +21258,201 @@ else
     FAIL=$((FAIL + 1))
 fi
 
+# --- ANCHOR fsesc: f-string literal segments get a plain string's escapes ---
+# `print_str(f"a\nb={n}\n")` printed a literal backslash and an 'n'. The
+# interpolation was never the broken part -- {n} rendered 7 the whole time --
+# so ANY row that greps for "b=7" passes against the bug. The failure lives
+# entirely in the whitespace, so every row here compares the process's stdout
+# to an exact byte string with cmp and dumps od -c on a mismatch.
+#
+# The three f-string lowerings (legacy x86, legacy arm64, IR builder) each
+# inlined their own raw byte-copy of the segment text, so all four configs
+# were wrong together and agreed with each other. Agreement is therefore not
+# the assertion: the VALUE is. Runs on $RUN_ARCH plus the other arch under
+# qemu when it is installed, IR and --legacy on each.
+echo ""
+echo "--- f-string escape sequences (ANCHOR fsesc) ---"
+FSE_OTHER="arm64"
+if [ "$RUN_ARCH" = "arm64" ]; then FSE_OTHER="x86_64"; fi
+FSE_QEMU=""
+if [ "$FSE_OTHER" = "arm64" ]; then
+    FSE_QEMU="$(command -v qemu-aarch64-static || command -v qemu-aarch64 || true)"
+fi
+FSE_EXP_RUNS=2
+if [ -n "$FSE_QEMU" ]; then FSE_EXP_RUNS=4; fi
+FSE_SRCF="$DIR/../test_tmp_fse_$$.kr"
+FSE_EXPF="/tmp/krc_fse_exp_$$"
+FSE_GOTF="/tmp/krc_fse_got_$$"
+FSE_NAME=""
+FSE_OK=1
+FSE_RAN=0
+fse_run() { # <arch> <flags> <runner-or-empty>
+    local _bin="/tmp/krc_fse_bin_$$"
+    if ! $KRC --arch="$1" $2 "$FSE_SRCF" -o "$_bin" >/dev/null 2>&1; then
+        FSE_OK=0
+        echo "  $FSE_NAME $1 ${2:-IR}: COMPILE FAILED"
+        $KRC --arch="$1" $2 "$FSE_SRCF" -o "$_bin" 2>&1 | head -3
+        return
+    fi
+    chmod +x "$_bin"
+    if [ -n "$3" ]; then $3 "$_bin" > "$FSE_GOTF" 2>/dev/null
+    else "$_bin" > "$FSE_GOTF" 2>/dev/null; fi
+    FSE_RAN=$((FSE_RAN + 1))
+    if ! cmp -s "$FSE_GOTF" "$FSE_EXPF"; then
+        FSE_OK=0
+        echo "  $FSE_NAME $1 ${2:-IR}: stdout bytes differ"
+        echo "    want:$(od -An -c < "$FSE_EXPF" | tr '\n' ' ' | tr -s ' ')"
+        echo "    got :$(od -An -c < "$FSE_GOTF" | tr '\n' ' ' | tr -s ' ')"
+    fi
+    rm -f "$_bin"
+}
+fse_case() { # <name> <source> <expected-stdout-bytes>
+    FSE_NAME="$1"
+    TOTAL=$((TOTAL + 1))
+    FSE_OK=1
+    FSE_RAN=0
+    printf '%s\n' "$2" > "$FSE_SRCF"
+    printf '%s' "$3" > "$FSE_EXPF"
+    fse_run "$RUN_ARCH" ""         ""
+    fse_run "$RUN_ARCH" "--legacy" ""
+    if [ -n "$FSE_QEMU" ]; then
+        fse_run "$FSE_OTHER" ""         "$FSE_QEMU"
+        fse_run "$FSE_OTHER" "--legacy" "$FSE_QEMU"
+    fi
+    if [ "$FSE_RAN" != "$FSE_EXP_RUNS" ]; then
+        FSE_OK=0
+        echo "  $FSE_NAME: only $FSE_RAN/$FSE_EXP_RUNS config-runs executed"
+    fi
+    if [ "$FSE_OK" = "1" ]; then
+        PASS=$((PASS + 1))
+        echo "  $FSE_NAME: PASS ($FSE_RAN config-runs)"
+    else
+        FAIL=$((FAIL + 1))
+        echo "FAIL: $FSE_NAME"
+    fi
+    rm -f "$FSE_SRCF" "$FSE_EXPF" "$FSE_GOTF"
+}
+
+# The reduction exactly as reported. The plain-string line is the control:
+# it was always right, so a fix that broke normal strings shows up here.
+fse_case "fsesc_newline_in_fstring" "$(cat <<'FSE_EOF'
+fn main() {
+    u64 n = 7
+    print_str(f"a\nb={n}\n")
+    print_str("plain\nliteral\n")
+    exit(0)
+}
+FSE_EOF
+)" 'a
+b=7
+plain
+literal
+'
+
+# Every escape escape_char_to_byte knows, plus \xHH, rendered once from an
+# f-string and once from the equivalent plain string. \0 is deliberately
+# absent here -- print_str stops at a NUL, so it is pinned by its own row
+# below where the length is explicit instead.
+fse_case "fsesc_full_table_matches_plain_string" "$(cat <<'FSE_EOF'
+fn main() {
+    u64 n = 1
+    print_str(f"[{n}]\n\t\r\\\"\'\b\f\v\a\e\x41\x7a|")
+    print_str("\n")
+    print_str("[1]\n\t\r\\\"\'\b\f\v\a\e\x41\x7a|")
+    print_str("\n")
+    exit(0)
+}
+FSE_EOF
+)" $'[1]\n\t\r\\"\'\b\f\v\a\eAz|\n[1]\n\t\r\\"\'\b\f\v\a\eAz|\n'
+
+# THE anti-double-processing row. `\\n` is an escaped backslash followed by
+# a plain 'n': one pass turns it into `\` + `n`, a second pass would turn
+# that into a line feed. If this row ever prints a newline, some path
+# unescapes the segment twice.
+fse_case "fsesc_escaped_backslash_not_unescaped_twice" "$(cat <<'FSE_EOF'
+fn main() {
+    u64 n = 2
+    print_str(f"B\\nE{n}")
+    print_str("|")
+    print_str("B\\nE2")
+    print_str("\n")
+    exit(0)
+}
+FSE_EOF
+)" 'B\nE2|B\nE2
+'
+
+# The brace escape must survive the new unescaping pass. `{{` and `}}` are
+# how the language writes a literal brace inside an f-string; the lexer
+# leaves them as two bytes so they do not open an interpolation, and the
+# bake collapses them. A real {n} between them proves interpolation still
+# works with braces on both sides of it.
+fse_case "fsesc_brace_doubling_still_collapses" "$(cat <<'FSE_EOF'
+fn main() {
+    u64 n = 7
+    print_str(f"L{{{n}}}R")
+    print_str("\n")
+    exit(0)
+}
+FSE_EOF
+)" 'L{7}R
+'
+
+# \" inside an f-string: the f-string scanner has to skip the byte after a
+# backslash exactly as the plain-string scanner does, or the escaped quote
+# closes the string and the rest of the line is parsed as code (this was a
+# PARSE ERROR, not wrong output). \{ and \} reach the bake as unknown
+# escapes and pass their brace through, so they are a second literal-brace
+# spelling.
+fse_case "fsesc_escaped_quote_and_backslash_brace" "$(cat <<'FSE_EOF'
+fn main() {
+    u64 n = 9
+    print_str(f"say \"hi\" \{{n}\}")
+    print_str("\n")
+    exit(0)
+}
+FSE_EOF
+)" 'say "hi" {9}
+'
+
+# \xHH, on both sides of an interpolation.
+fse_case "fsesc_hex_escape" "$(cat <<'FSE_EOF'
+fn main() {
+    u64 n = 3
+    print_str(f"\x41{n}\x7a")
+    print_str("\n")
+    exit(0)
+}
+FSE_EOF
+)" 'A3z
+'
+
+# \0 in a segment, with the length supplied explicitly rather than by a
+# strlen, so the bytes AFTER the NUL are observable. The IR builder used to
+# size the segment copy with a runtime IR_STRLEN; that would stop at the NUL
+# while both legacy backends (which use the compile-time baked count) copied
+# the whole segment -- a NEW IR-vs-legacy divergence created by making \0
+# reachable. Printing the byte codes keeps the assertion in plain ASCII.
+fse_case "fsesc_embedded_nul_copies_trailing_bytes" "$(cat <<'FSE_EOF'
+fn main() {
+    u64 n = 5
+    u64 p = f"a\0b{n}c"
+    u64 i = 0
+    while i < 5 {
+        u64 q = p + i
+        u64 b = 0
+        unsafe { *(q as uint8) -> b }
+        print(b)
+        print_str(",")
+        i = i + 1
+    }
+    print_str("\n")
+    exit(0)
+}
+FSE_EOF
+)" '97,0,98,53,99,
+'
+
 # --- Summary ---
 echo ""
 # THERE IS NO KNOWN DELIBERATE RED IN THIS SUITE, so nothing is annotated here.
