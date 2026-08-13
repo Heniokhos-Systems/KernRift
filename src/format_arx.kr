@@ -109,7 +109,20 @@ fn emit_arx_headers(uint64 arch_id, uint64 entry_rel, uint64 payload) -> uint64 
 // entry 4096 bytes past the real function; the loader would catch it (the entry
 // must land inside an executable segment's file-backed bytes) but only after
 // the artifact shipped.
-fn patch_arx_headers(uint64 entry_rel, uint64 payload) {
+// `wants_services` is bit 1: the entry takes the kernel's services table as
+// its one argument. It is patched HERE rather than emitted, because the header
+// goes out before any function is emitted and the entry's arity is not known
+// until it has been resolved.
+//
+// Producing this correctly is what lets an ARX program be built and run without
+// a post-hoc patch step. ApexRift's tools patched the bit in afterwards and
+// recomputed the checksum, which meant a container the compiler emitted could
+// not run as emitted -- and a compiler that cannot emit a runnable copy of a
+// services program cannot bootstrap one.
+fn patch_arx_headers(uint64 entry_rel, uint64 payload, uint64 wants_services) {
+    uint64 fl = 1                   // bit 0 PIC, always
+    if wants_services != 0 { fl = fl | 2 }
+    patch_u16(10, fl)               // header flags
     patch_u64(24, entry_rel)        // header entry
     patch_u64(32, payload)          // header image_size
     patch_u64(88 + 16, payload)     // segment filesz

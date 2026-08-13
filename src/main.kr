@@ -2429,6 +2429,19 @@ fn emit_asm_listing(uint64 output_path, uint64 arch, uint64 text_start, uint64 s
 // caller pruned must not be selected, and dce_is_live answers 1 for
 // everything when DCE seeded nothing (a `_start`-only program), which is
 // what makes that case work without a special arm.
+// Set by the img_raw arm when it resolves the entry, read by the --emit=arx
+// finalize arm. A static because the two are far apart and the value is a
+// property of the program, not of either arm.
+static uint64 arx_entry_takes_services = 0
+
+// Parameters of a function declaration node. Delegates to the inliner's walk,
+// which counts a function node's direct children -- verified against both
+// shapes that matter here: a `_start(services)` entry reports 1 and a bare
+// `main()` reports 0.
+fn entry_param_count(uint64 fn_node) -> uint64 {
+    return inline_param_count(fn_node)
+}
+
 fn find_entry_node(uint64 root) -> uint64 {
     uint64 fen_start = 0
     uint64 fen_main = 0
@@ -4547,6 +4560,12 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
         if img_entry_node == 0 {
             entry_missing_die()
         }
+        // An entry that takes an argument is asking for the services table --
+        // that is the whole ARX services convention, and the loader passes it
+        // only when the flag says to. Reading the arity here rather than
+        // requiring a --arx-services switch means a services program cannot be
+        // built without the flag by forgetting to pass one.
+        if entry_param_count(img_entry_node) != 0 { arx_entry_takes_services = 1 }
         uint32 ime_tok = ast_data1(img_entry_node)
         uint64 ime_wtok = ime_tok
         entry_off = fn_lookup(ime_wtok)
@@ -5157,7 +5176,7 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
             write(2, axe_e, str_len(axe_e))
             exit(1)
         }
-        patch_arx_headers(entry_off - header_size, ax_payload)
+        patch_arx_headers(entry_off - header_size, ax_payload, arx_entry_takes_services)
         // LAST, and it must be: the checksum covers every byte, so any patch
         // after it invalidates it silently.
         arx_patch_checksum(codegen_output_len())
