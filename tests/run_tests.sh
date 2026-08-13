@@ -21030,6 +21030,201 @@ else
     FAIL=$((FAIL + 1))
 fi
 
+# --- ANCHOR fkn: the vreg float-kind namespace is not a float predicate -----
+# ir.kr's vreg float-kind slot holds 1=f64, 2=f32, 3=bool, 4=char, and only
+# the first two name a FLOAT register class -- 3 and 4 are integers carrying a
+# formatting hint. Testing `fk != 0` for "is this a float" sent bool and char
+# down IR_FADD/IR_FMUL/IR_FCMP on BOTH IR backends:
+#
+#     bool b = true   b * 2   -> 0                    (want 2)
+#     char c = 'A'    c / 5   -> 4623507967449235456  (want 13, and that
+#                                number is the f64 bit pattern of 13.0)
+#
+# `+` and `-` hid it: two small integers read as f64 DENORMALS add and
+# subtract BIT-EXACTLY, so only *, / and unary minus ever showed damage. That
+# is why these rows multiply and divide instead of adding.
+#
+# The second half is a SEPARATE namespace: `as TYPE` clauses and the static
+# table spell 3 = f16, which was fed straight into the vreg slot where 3 is
+# bool -- so `*(p as f16) -> g` and `static f16 s` came back as bools and
+# `print` rendered 21520 as "true". f16 has no register class in this
+# language; it is a u64 bit pattern from f32_to_f16() and belongs on the
+# integer path, which is what both LEGACY backends always did.
+#
+# These rows EXECUTE, so they follow $RUN_ARCH.
+TOTAL=$((TOTAL + 1))
+FKN_OK=1
+FKN_RAN=0
+FKN_OTHER="arm64"
+if [ "$RUN_ARCH" = "arm64" ]; then FKN_OTHER="x86_64"; fi
+FKN_QEMU=""
+if [ "$FKN_OTHER" = "arm64" ]; then
+    FKN_QEMU="$(command -v qemu-aarch64-static || command -v qemu-aarch64 || true)"
+fi
+
+# 1. bool and char through every arithmetic op. Was exit 1 on both IR
+#    backends (b * 2 came back 0) and exit 7 on both legacy backends.
+cat > "$DIR/../fkn_boolchar_$$.kr" <<'FKN_BOOLCHAR'
+fn main() {
+    bool b = true
+    if b * 2 != 2 { exit(1) }
+    if b / 1 != 1 { exit(2) }
+    if b - 1 != 0 { exit(3) }
+    char c = 'A'
+    if c != 65 { exit(4) }
+    if c * 2 != 130 { exit(5) }
+    if c / 5 != 13 { exit(6) }
+    if c + 1 != 66 { exit(8) }
+    exit(7)
+}
+FKN_BOOLCHAR
+
+# 2. Every f16 surface that reaches the vreg slot: a pointer deref, a scalar
+#    static and a static array element. The buffer is POISONED first, and the
+#    load16 check runs before the deref, so "the store never happened" is a
+#    different exit code from "the deref came back mistyped". Was exit 3 on
+#    both IR backends (g * 2 came back 0).
+cat > "$DIR/../fkn_f16_$$.kr" <<'FKN_F16'
+static f16 sf
+static f16[4] tab
+
+fn main() {
+    u64 p = alloc(64)
+    store64(p, 0xAAAAAAAAAAAAAAAA)
+    store16(p, 21520)
+    if load16(p) != 21520 { exit(1) }
+    unsafe { *(p as f16) -> g }
+    if g != 21520 { exit(2) }
+    if g * 2 != 43040 { exit(3) }
+    if g / 4 != 5380 { exit(4) }
+
+    sf = 100
+    if sf * 2 != 200 { exit(5) }
+
+    store64(tab, 0xAAAAAAAAAAAAAAAA)
+    store64(tab, 21520)
+    if tab[0] * 2 != 43040 { exit(6) }
+    exit(7)
+}
+FKN_F16
+
+fkn_run() { # <arch> <flags> <src> <runner-or-empty>
+    local _bin="/tmp/krc_fkn_$$"
+    if ! $KRC --arch="$1" $2 "$3" -o "$_bin" >/dev/null 2>&1; then
+        FKN_OK=0; echo "  $(basename $3) $1 ${2:-IR}: COMPILE FAILED"
+        return
+    fi
+    if [ -n "$4" ]; then $4 "$_bin" >/dev/null 2>&1; else "$_bin" >/dev/null 2>&1; fi
+    local _rc=$?
+    FKN_RAN=$((FKN_RAN + 1))
+    [ "$_rc" = "7" ] || { FKN_OK=0; echo "  $(basename $3) $1 ${2:-IR}: got $_rc, want 7"; }
+    rm -f "$_bin"
+}
+for _src in "$DIR/../fkn_boolchar_$$.kr" "$DIR/../fkn_f16_$$.kr"; do
+    fkn_run "$RUN_ARCH" ""          "$_src" ""
+    fkn_run "$RUN_ARCH" "--legacy"  "$_src" ""
+    if [ -n "$FKN_QEMU" ]; then
+        fkn_run "$FKN_OTHER" ""         "$_src" "$FKN_QEMU"
+        fkn_run "$FKN_OTHER" "--legacy" "$_src" "$FKN_QEMU"
+    fi
+done
+FKN_WANT=4
+if [ -n "$FKN_QEMU" ]; then FKN_WANT=8; fi
+[ "$FKN_RAN" = "$FKN_WANT" ] || { FKN_OK=0; echo "  only $FKN_RAN/$FKN_WANT config-runs executed"; }
+if [ "$FKN_OK" = "1" ]; then
+    echo "  fkind_namespace_bool_char_f16: PASS ($FKN_RAN config-runs)"
+    PASS=$((PASS + 1))
+else
+    echo "FAIL: fkind_namespace_bool_char_f16"
+    FAIL=$((FAIL + 1))
+fi
+rm -f "$DIR/../fkn_boolchar_$$.kr" "$DIR/../fkn_f16_$$.kr"
+
+# --- ANCHOR f16rt: legacy arm64 f16_to_f32 emitted the wrong FCVT -----------
+# 0x1E22C000 decodes as FCVT Dd, Sn -- single source, double destination: the
+# wrong direction AND the wrong register pair. It widened the f16 bit pattern
+# (read as a single-precision denormal) into d0, and the caller then read s0,
+# the low 32 bits of that f64, which are zero. EVERY f16_to_f32 on legacy
+# arm64 returned 0.0f, with no deref involved anywhere.
+#
+# Measured through fmt_f32 and asserted as TEXT. Not through exit(): that
+# truncates to 8 bits AND performs a float-to-int conversion, so it measures
+# three things at once and cannot tell 0.0 from a conversion fault.
+#
+# EXECUTES, so it follows $RUN_ARCH.
+TOTAL=$((TOTAL + 1))
+F16RT_OK=1
+F16RT_RAN=0
+F16RT_OTHER="arm64"
+if [ "$RUN_ARCH" = "arm64" ]; then F16RT_OTHER="x86_64"; fi
+F16RT_QEMU=""
+if [ "$F16RT_OTHER" = "arm64" ]; then
+    F16RT_QEMU="$(command -v qemu-aarch64-static || command -v qemu-aarch64 || true)"
+fi
+cat > "$DIR/../f16rt_$$.kr" <<'F16RT_SRC'
+import "std/io.kr"
+import "std/math_float.kr"
+
+fn main() {
+    f32 v = 65.0f
+    u64 h = f32_to_f16(v)
+    print_str("bits=")
+    print_int(h)
+    f32 back = f16_to_f32(h)
+    print_str("val=")
+    print_str(fmt_f32(back, 4))
+    print_str("\n")
+
+    u64 p = alloc(64)
+    store64(p, 0xAAAAAAAAAAAAAAAA)
+    store16(p, h)
+    unsafe { *(p as f16) -> g }
+    f32 back2 = f16_to_f32(g)
+    print_str("deref_val=")
+    print_str(fmt_f32(back2, 4))
+    print_str("\n")
+    exit(0)
+}
+F16RT_SRC
+F16RT_WANT=$(cat <<'F16RT_EXPECT'
+bits=21520
+val=65.0000
+deref_val=65.0000
+F16RT_EXPECT
+)
+f16rt_run() { # <arch> <flags> <runner-or-empty>
+    local _bin="/tmp/krc_f16rt_$$"
+    if ! $KRC --arch="$1" $2 "$DIR/../f16rt_$$.kr" -o "$_bin" >/dev/null 2>&1; then
+        F16RT_OK=0; echo "  f16rt $1 ${2:-IR}: COMPILE FAILED"
+        return
+    fi
+    local _got
+    if [ -n "$3" ]; then _got=$($3 "$_bin" 2>/dev/null); else _got=$("$_bin" 2>/dev/null); fi
+    F16RT_RAN=$((F16RT_RAN + 1))
+    if [ "$_got" != "$F16RT_WANT" ]; then
+        F16RT_OK=0
+        echo "  f16rt $1 ${2:-IR}: got [$(echo "$_got" | tr '\n' '|')], want [bits=21520|val=65.0000|deref_val=65.0000|]"
+    fi
+    rm -f "$_bin"
+}
+f16rt_run "$RUN_ARCH" ""         ""
+f16rt_run "$RUN_ARCH" "--legacy" ""
+if [ -n "$F16RT_QEMU" ]; then
+    f16rt_run "$F16RT_OTHER" ""         "$F16RT_QEMU"
+    f16rt_run "$F16RT_OTHER" "--legacy" "$F16RT_QEMU"
+fi
+F16RT_EXP=2
+if [ -n "$F16RT_QEMU" ]; then F16RT_EXP=4; fi
+[ "$F16RT_RAN" = "$F16RT_EXP" ] || { F16RT_OK=0; echo "  only $F16RT_RAN/$F16RT_EXP config-runs executed"; }
+if [ "$F16RT_OK" = "1" ]; then
+    echo "  f16_to_f32_round_trip: PASS ($F16RT_RAN config-runs)"
+    PASS=$((PASS + 1))
+else
+    echo "FAIL: f16_to_f32_round_trip"
+    FAIL=$((FAIL + 1))
+fi
+rm -f "$DIR/../f16rt_$$.kr"
+
 # --- Bare-metal boot gate (sub-project B1) ---
 # One counted test wrapping tests/target_none/boot_gate.sh. DELIBERATELY NOT
 # behind `command -v qemu-system-*`: the gate itself fails loudly when a

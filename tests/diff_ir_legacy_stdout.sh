@@ -86,6 +86,18 @@ fn main(){ f64 x=1.5; pp("FIRST_", mkf(x,7)); exit(0) }'
 # divergence this row must not accidentally pin.
 dc "fstring_float_then_arg" 'fn pp(u64 a,u64 b){ println(b) }
 fn main(){ f64 x=1.5; pp(f"v={x}", 8738); exit(0) }'
+# The IR vreg float-kind slot spells 3=bool and 4=char, and testing it as
+# `!= 0` for "is a float" put both on the FMUL/FDIV path -- the IR was the
+# WRONG side here, the opposite of every other row in this file. `+`/`-`
+# survived (denormal add is bit-exact), so these rows multiply and divide.
+dc "bool_char_arith" "fn main(){ bool b=true; char c='A'; println(b*2); println(c*2); println(c/5); exit(0) }"
+# `as f16` and `static f16` spell 3 = f16 in a DIFFERENT namespace, and that 3
+# arrived in the vreg slot meaning bool, so the IR printed 21520 as "true".
+dc "f16_deref_typing" 'fn main(){ u64 p=alloc(64); store64(p,0xAAAAAAAAAAAAAAAA); store16(p,21520); unsafe { *(p as f16) -> g } println(g); println(g*2); exit(0) }'
+# f16_to_f32 on legacy arm64 emitted FCVT Dd,Sn instead of FCVT Sd,Hn and
+# returned 0.0f for everything -- with no deref anywhere.
+dc "f16_to_f32_value" 'import "std/math_float.kr"
+fn main(){ f32 v=65.0f; u64 h=f32_to_f16(v); println(h); println_str(fmt_f32(f16_to_f32(h),4)); exit(0) }'
 
 echo "----"
 echo "Stdout differential: $((TOTAL-DIV))/$TOTAL agree, $DIV diverged."

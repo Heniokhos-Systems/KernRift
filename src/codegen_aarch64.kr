@@ -4540,7 +4540,15 @@ fn gen_expr_a64(uint64 node) {
             uint64 wfa = first_arg
             gen_expr_a64(wfa)
             emit_a64(0x1E270000)  // fmov s0, w0
-            emit_a64(0x1E22C000)  // fcvt s0, h0
+            // FCVT Sd, Hn. The word here used to be 0x1E22C000, which decodes
+            // as FCVT Dd, Sn: type=00 (single source) opc=01 (double dest) —
+            // the wrong direction AND the wrong pair. It widened the f16 bit
+            // pattern, read as a single-precision DENORMAL, into d0, and then
+            // the `expr_is_float_a64 = 2` below had the caller read s0, i.e.
+            // the low 32 bits of that f64, which are zero. Every f16_to_f32 on
+            // legacy arm64 returned 0.0f. Correct word: type=11 (half source)
+            // opc=00 (single dest) = 0x1EE24000.
+            emit_a64(0x1EE24000)  // fcvt s0, h0
             expr_is_float_a64 = 2
             return
         }

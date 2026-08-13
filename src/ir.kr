@@ -412,6 +412,40 @@ fn ir_vreg_fkind_get(uint64 vreg) -> uint64 {
     return 0
 }
 
+// Only FKIND_F64 and FKIND_F32 name a FLOAT register class. FKIND_BOOL and
+// FKIND_CHAR are ordinary integers carrying a formatting hint for print and
+// f-strings, and testing `fk != 0` for "is this a float" sent both of them
+// down the FADD / FMUL / FCMP path:
+//
+//     bool b = true   b * 2   -> 0                    (want 2)
+//     char c = 'A'    c / 5   -> 4623507967449235456  (want 13)
+//
+// that last number being the f64 bit pattern of 13.0. Addition and
+// subtraction hid this for years: two small integers read as f64 DENORMALS
+// add and subtract BIT-EXACTLY, so `c + 1` was right and only *, / and unary
+// minus showed damage. Both legacy backends were always correct here.
+fn ir_fkind_is_float(uint64 fk) -> uint64 {
+    if fk == FKIND_F64 { return 1 }
+    if fk == FKIND_F32 { return 1 }
+    return 0
+}
+
+// `as TYPE` clauses (parser.kr's data3 packing) and the static table both
+// spell float kinds 1 = f64, 2 = f32, 3 = f16. That is a DIFFERENT namespace
+// from the vreg one above, where 3 is bool — and feeding a declared kind
+// straight in made `*(p as f16) -> g` and `static f16 s` come back as
+// FKIND_BOOL, so both IR backends printed "true" where the value was 21520.
+//
+// f16 maps to FKIND_INT on purpose, not by omission: this language has no f16
+// register class. An f16 IS a u64 bit pattern produced by f32_to_f16(), and
+// keeping it on the integer path is exactly what both legacy backends already
+// do (see the kind-41 note in codegen.kr).
+fn ir_fkind_from_decl(uint64 declared) -> uint64 {
+    if declared == 1 { return FKIND_F64 }
+    if declared == 2 { return FKIND_F32 }
+    return FKIND_INT
+}
+
 fn ir_vreg_signed_set(uint64 vreg, uint64 s) {
     if vreg < ir_vreg_signed_cap {
         uint64 p = ir_vreg_signed_buf + vreg
@@ -1620,7 +1654,8 @@ fn ir_lower_expr(uint64 node) -> uint64 {
         } else {
             ir_emit(IR_LOAD, pl_dest, pl_addr_v, pl_type_size, 0, ir_current_bb)
         }
-        if pl_fk != 0 { ir_vreg_fkind_set(pl_dest, pl_fk) }
+        uint64 pl_vfk = ir_fkind_from_decl(pl_fk)
+        if pl_vfk != 0 { ir_vreg_fkind_set(pl_dest, pl_vfk) }
         return pl_dest
     }
 
@@ -1828,7 +1863,7 @@ fn ir_lower_expr(uint64 node) -> uint64 {
             // Propagate f64/f32 type-flow from the static's declared
             // type so downstream `+`, `*` etc. lower to IR_FADD/FMUL
             // rather than integer ops.
-            uint64 sfk = static_fkind_of(wt)
+            uint64 sfk = ir_fkind_from_decl(static_fkind_of(wt))
             if sfk != 0 { ir_vreg_fkind_set(dest, sfk) }
             return dest
         }
@@ -1861,7 +1896,7 @@ fn ir_lower_expr(uint64 node) -> uint64 {
         uint64 op_kind = tok_kind_at_raw(op_tok)
         // Check if LHS is float-typed
         uint64 lhs_fk = ir_vreg_fkind_get(lhs)
-        if lhs_fk != 0 {
+        if ir_fkind_is_float(lhs_fk) != 0 {
             // Float arithmetic: operands must share an fkind. ADDSS/SUBSS/
             // MULSS/DIVSS read only the low 32 bits of XMM, so an f64
             // literal like 1.0 (whose low 32 bits are 0x00000000) silently
@@ -2022,7 +2057,7 @@ fn ir_lower_expr(uint64 node) -> uint64 {
         uint64 dest = ir_new_vreg()
         // Check if LHS is float-typed
         uint64 cmp_fk = ir_vreg_fkind_get(lhs)
-        if cmp_fk != 0 {
+        if ir_fkind_is_float(cmp_fk) != 0 {
             // Float compare: operands must share an fkind or ucomiss/ucomisd
             // reads the wrong bit width. `f32 a == 1.0` previously compared
             // a 32-bit f32 (0x3F800000) against the low 32 bits of an f64
@@ -2090,7 +2125,7 @@ fn ir_lower_expr(uint64 node) -> uint64 {
             // - (negate). For floats, lower as FSUB(0.0, src) — IR_NEG does
             // integer two's-complement which corrupts IEEE 754 bits.
             uint64 src_fk = ir_vreg_fkind_get(src)
-            if src_fk != 0 {
+            if ir_fkind_is_float(src_fk) != 0 {
                 uint64 fzero = ir_new_vreg()
                 ir_emit(IR_CONST, fzero, 0, 0, 0, ir_current_bb)
                 ir_vreg_fkind_set(fzero, src_fk)
@@ -3973,7 +4008,7 @@ fn ir_lower_expr(uint64 node) -> uint64 {
         ir_emit(IR_LOAD, dest, addr_v, 0, elem_sz, ir_current_bb)
         // Propagate f64/f32 type-flow from the declared array element
         // type so `arr[i] + x` lowers as float arithmetic.
-        uint64 afk = static_fkind_of(warrt)
+        uint64 afk = ir_fkind_from_decl(static_fkind_of(warrt))
         if afk != 0 { ir_vreg_fkind_set(dest, afk) }
         return dest
     }
@@ -4967,7 +5002,8 @@ fn ir_lower_stmt(uint64 node) {
         // this, `unsafe { *(p as f64) -> v }` leaves v untyped at the IR
         // level and downstream `v + x` emits integer arithmetic instead of
         // IR_FADD.
-        if fk != 0 { ir_vreg_fkind_set(dest_v, fk) }
+        uint64 vfk = ir_fkind_from_decl(fk)
+        if vfk != 0 { ir_vreg_fkind_set(dest_v, vfk) }
         // Bind dest variable
         uint32 dest_tok = ast_data2(node)
         ir_var_set(dest_tok, dest_v)
