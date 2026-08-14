@@ -11,9 +11,11 @@
 #      IF AND ONLY IF something reaches it.
 #   3. Every builtin that has no bare-metal meaning refuses, the refusal names
 #      THAT BUILTIN, and it writes no artifact -- on all four architectures.
-#   4. Every existing target -- all 8 hosted (arch x OS), hosted riscv32, the
-#      fat binary, and every riscv32/xtensa freestanding invocation the suite
-#      makes -- emits BYTE-IDENTICAL artifacts before and after this branch.
+#   4. Every existing target -- all 8 hosted (arch x OS), the PE/Mach-O and
+#      bare-metal (image / image+stub / reset-vector / uefi / arx) containers,
+#      hosted riscv32, the fat binary, and every riscv32/xtensa freestanding
+#      invocation the suite makes -- emits BYTE-IDENTICAL artifacts to the
+#      pinned TN_BASE baseline.
 #
 # WHAT A GREEN RUN DOES NOT CLAIM, AND MUST NEVER BE READ AS CLAIMING:
 #
@@ -68,7 +70,7 @@
 #
 # Env:
 #   KRC=<path>      compiler under test          (default build/krc2)
-#   TN_BASE=<sha>   the commit this branch forks from, for gate 1
+#   TN_BASE=<sha>   the byte-identity baseline for gate 1 (see the pin below)
 #
 # TWO GATES, BECAUSE NEITHER SEES WHAT THE OTHER CATCHES.
 #
@@ -107,10 +109,12 @@ KRC="${KRC:-$REPO/build/krc2}"
 #   fat_probe. It is not a field, it is a different container, so the run
 #   compares nothing.
 #
-#   It hits EXACTLY the two rows with empty flags (fat_krc, fat_probe). All
-#   127 others carry their own --arch= and last-one-wins, so the injection is
-#   inert there -- which is why the symptom is a puzzling "2 of 129" rather
-#   than a total failure.
+#   It hits EXACTLY the two rows with empty flags (fat_krc, fat_probe). Every
+#   other row carries its own --arch= and last-one-wins, so the injection is
+#   inert there -- which is why the symptom is a puzzling "2 of N" rather than
+#   a total failure. (The counts above are from that 2026-08-06 run, when the
+#   matrix was 129 rows; it is 147 now and the two affected rows are the same
+#   two.)
 #
 # tests/run_tests.sh guards its own call with `env -u KRC`; this makes the
 # hand-run case impossible rather than merely documented somewhere else.
@@ -137,7 +141,7 @@ if [ -n "${KRC:-}" ]; then
             echo "  They differ at byte 1 and the run compares nothing. It hits exactly" >&2
             echo "  the two rows with empty flags (fat_krc, fat_probe); the other 127" >&2
             echo "  carry their own --arch= and last-one-wins, which is why the symptom" >&2
-            echo "  is a puzzling '2 of 129' rather than an obvious failure." >&2
+            echo "  is a puzzling 'exactly 2 rows differ' rather than an obvious failure." >&2
             echo "  Re-run with:  env -u KRC $0 $*" >&2
             rm -f "$_pk_src" "$_pk_out"
             exit 2
@@ -145,11 +149,27 @@ if [ -n "${KRC:-}" ]; then
     fi
     rm -f "$_pk_src" "$_pk_out"
 fi
-# The BASE this branch forks from. Pinned rather than derived from
-# `git merge-base`, which silently changes meaning the moment the branch is
-# merged or rebased -- and a gate whose baseline moved is a gate comparing the
-# tree against itself.
-TN_BASE="${TN_BASE:-271e1186e22994e7fc4c4b9f6abf71e7bad0164e}"
+# THE BASELINE. Pinned rather than derived from `git merge-base`, which
+# silently changes meaning the moment a branch is merged or rebased -- and a
+# gate whose baseline moved is a gate comparing the tree against itself.
+#
+# RE-BASED 2026-08-14, and the meaning changed with it. This used to be "the
+# commit --target=none forks from", a BRANCH-scoped invariant that expired when
+# the branch merged: on main it drifted to 200 commits back and reported 75 of
+# 129 rows differing, all of them legitimately -- fifteen deliberate miscompile
+# fixes plus the @naked dead-capture removal, which alone shrank the compiler by
+# 82 KB. A gate that is expected to be red is not a gate.
+#
+# It now means: NO UNINTENDED CODEGEN CHANGE SINCE THIS COMMIT. Re-base it
+# deliberately, as part of a change that is MEANT to move emitted bytes, and say
+# in the commit message which rows moved and why. Do not re-base it to silence a
+# surprise.
+#
+# One consequence of pinning it to a MERGED commit rather than a fork point:
+# BEFORE is now HEAD's own sources compiled by the compiler under test, so a
+# freshly re-based gate 1 is a self-build comparison and passes only at the
+# bootstrap fixed point. Run `make bootstrap` first if it reports a wide diff.
+TN_BASE="${TN_BASE:-6e37819a60b0783436d0f219ee08e23617db09ad}"
 
 MODE="both"
 case "${1:-}" in
@@ -267,35 +287,72 @@ gate1() {
     #      it refuses on both arches for both programs, i.e. there is nothing
     #      to compare.
     #
-    #      THIS LIST IS TWO CONTAINERS SHORT AND CANNOT BE OTHERWISE TODAY.
-    #      --emit=image (sub-project B1) and --emit=uefi (D) are both container
-    #      emitters this gate does not reach, and --emit=uefi shares
-    #      src/format_pe.kr with the pe rows above -- exactly the file whose
-    #      single-path coverage this block was written against. Neither can be
-    #      added: gate 1 compares a BASE-built artifact with a HEAD-built one,
-    #      and TN_BASE (271e118) has no `image` or `uefi` arm at all, so the
-    #      BASE compiler refuses the row and there is nothing to diff. Checked,
-    #      not assumed: `git show $TN_BASE:src/main.kr | grep 'emit_str, "uefi"'`
-    #      matches nothing, and the same for "image".
-    #      What covers --emit=uefi meanwhile: uefi_pe_header_fields_* in the
-    #      suite (static field assertions) and boot_gate.sh L7/L8 (FOURTEEN
-    #      firmware boots: 10 on L7, 4 on L8 -- thirteen was right at c4687c6
-    #      and stopped being right at a0eed73, which added L7's tenth row.
-    #      RE-COUNTED AT E TASK 4, because L9 added eight legs to the same file
-    #      and this sentence has been wrong by one before: still 14. L9 boots
-    #      no firmware -- there is none -- so it changes nothing here).
-    #      WHAT COVERS --emit=image MEANWHILE WAS NEVER WRITTEN DOWN, and this
-    #      sentence named only the uefi half. It is boot_gate.sh L1-L6 and L9:
-    #      L9 alone is nine checks and eight `-bios` boots of a --reset-vector
-    #      image (sub-project E), i.e. the --emit=image form with no loader of
-    #      any kind. ADD BOTH HERE THE NEXT TIME TN_BASE MOVES PAST THEM -- that
-    #      is the only thing standing in the way, and this note exists so the
-    #      omission is a deferral rather than a gap nobody wrote down.
+    #      THIS LIST USED TO BE TWO CONTAINERS SHORT. It no longer is -- see
+    #      (A3). The old note said --emit=image (B1) and --emit=uefi (D) could
+    #      not be added because the then-current TN_BASE (271e118) had no
+    #      `image` or `uefi` arm at all, so the BASE compiler refused the row
+    #      and there was nothing to diff, and it said to ADD BOTH THE NEXT TIME
+    #      TN_BASE MOVES PAST THEM. TN_BASE moved on 2026-08-14 and they are
+    #      added below, along with two the note never named: --emit=arx, and
+    #      --emit=image --reset-vector (E). --emit=lkm remains absent because it
+    #      refuses on both arches for both programs -- there is nothing to
+    #      compare -- and it is the one emitter for which that is still true.
     for a in x86_64 arm64; do
         for e in pe macho; do
             g1row "krc_${a}_${e}"   "--arch=$a --emit=$e" "$G1_FROZEN"
             g1row "probe_${a}_${e}" "--arch=$a --emit=$e" "$DIR/corpus/probe_io.kr"
         done
+    done
+
+    # (A3) The BARE-METAL container emitters, unreachable until TN_BASE moved
+    #      past the sub-projects that introduced them. Every one of these is a
+    #      distinct writer, and (A2) exists precisely because a container
+    #      covered by exactly one path hid an injected byte:
+    #        image             -- the raw form, no entry stub          (B1)
+    #        image --stack-top -- the compiler emits the stub itself   (B2)
+    #        image --reset-vector -- x86_64 only, the artifact IS the
+    #                             firmware; REFUSES --load-addr, since a
+    #                             `-bios` reset vector has no loader to hand
+    #                             an address to                        (E)
+    #        uefi              -- shares src/format_pe.kr with the pe rows
+    #                             above, the single-path file this whole block
+    #                             was written against                  (D)
+    #        arx               -- KernRift's own container, --target=none only
+    #
+    #      THE INPUT IS THE PORTABLE CORPUS, NOT probe_io.kr AND NOT $G1_FROZEN.
+    #      Both of those refuse here and would leave twelve rows comparing two
+    #      identical refusals: probe_io.kr calls print_str, which has no
+    #      bare-metal meaning and is refused BY NAME (that refusal is gate 2's
+    #      subject, not gate 1's), and the compiler's own source is a hosted
+    #      program. arith.kr and bmarr.kr are the only inputs in the corpus that
+    #      build on bare metal, and bmarr.kr's runtime-indexed stack array is
+    #      what keeps the --debug rows in (B) non-vacuous, so it carries real
+    #      codegen here too.
+    #
+    #      The load addresses are the conventional ones per arch and are
+    #      VALIDATED per-arch by the compiler, so they are not interchangeable
+    #      decoration: --emit=image refuses a --load-addr it considers wrong for
+    #      the target.
+    for p in arith bmarr; do
+        for a in x86_64 arm64; do
+            la="0x100000"; [ "$a" = "arm64" ] && la="0x40080000"
+            g1row "bm_image_${a}_${p}" \
+                  "--arch=$a --target=none --emit=image --load-addr=$la" \
+                  "$DIR/corpus/$p.kr"
+            g1row "bm_image_stub_${a}_${p}" \
+                  "--arch=$a --target=none --emit=image --load-addr=$la --stack-top=0x80000" \
+                  "$DIR/corpus/$p.kr"
+            g1row "bm_uefi_${a}_${p}" \
+                  "--arch=$a --target=none --emit=uefi" "$DIR/corpus/$p.kr"
+            g1row "bm_arx_${a}_${p}" \
+                  "--arch=$a --target=none --emit=arx"  "$DIR/corpus/$p.kr"
+        done
+        # x86_64 only, and BY REFUSAL rather than by omission: the reset-vector
+        # form resets into 16-bit real mode, and the arm64 invocation is one of
+        # gate 2's named refusals rather than a row with nothing in it.
+        g1row "bm_resetvec_x86_64_${p}" \
+              "--arch=x86_64 --target=none --emit=image --reset-vector --stack-top=0x80000" \
+              "$DIR/corpus/$p.kr"
     done
 
     # (B) --debug on every hosted pair. bmarr.kr indexes a stack array with a
@@ -409,21 +466,21 @@ DERIVE
     # NEGATIVE tests -- invocations it expects to be refused. Those three are
     # named, so a row that starts refusing is a failure and a row that stops
     # refusing is one too.
-    if [ "$G1_ROWS" = "129" ]; then
-        ok "gate1_row_count" "129 rows"
+    if [ "$G1_ROWS" = "147" ]; then
+        ok "gate1_row_count" "147 rows"
     else
-        bad "gate1_row_count" "built $G1_ROWS rows, expected 129"
+        bad "gate1_row_count" "built $G1_ROWS rows, expected 147"
     fi
     G1_NOBUILD_WANT="--arch=riscv32 --freestanding examples/riscv-hosted/hello.kr
 --arch=riscv32 --freestanding --target=esp32 examples/esp32/minimal.kr
 --arch=xtensa --target=esp32 examples/esp32/minimal.kr"
     G1_NOBUILD_GOT=$(printf '%s' "$G1_NOBUILD" | sed '/^$/d' | sort)
-    if [ "$G1_ARTIFACTS" != "126" ]; then
-        bad "gate1_build_outcomes" "$G1_ARTIFACTS of $G1_ROWS rows produced an artifact, expected 126"
+    if [ "$G1_ARTIFACTS" != "144" ]; then
+        bad "gate1_build_outcomes" "$G1_ARTIFACTS of $G1_ROWS rows produced an artifact, expected 144"
     elif [ "$G1_NOBUILD_GOT" != "$(printf '%s' "$G1_NOBUILD_WANT" | sort)" ]; then
         bad "gate1_build_outcomes" "the rows that produced no artifact are not the three expected refusals: $(echo "$G1_NOBUILD_GOT" | tr '\n' ';')"
     else
-        ok "gate1_build_outcomes" "126 rows built, 3 refused (the suite's own esp32-guard and riscv32 IR-op-52 negatives)"
+        ok "gate1_build_outcomes" "144 rows built, 3 refused (the suite's own esp32-guard and riscv32 IR-op-52 negatives)"
     fi
     if [ "$G1_DIFF" = "0" ]; then
         ok "gate1_byte_identity" "$G1_SAME/$G1_ROWS rows identical"

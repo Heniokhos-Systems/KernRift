@@ -18147,9 +18147,15 @@ rm -rf "$TN_D"
 #   leg that can see else-POSIX inheritance, which byte-identity structurally
 #   cannot. It costs about half a second, so it belongs in every `make test`.
 #
-#   Gate 1 (byte-identity) has to build the compiler AS OF THE BRANCH POINT,
-#   which needs a git checkout and about 80 seconds. It is a branch/release
-#   gate, run on demand:  tests/target_none/prove_no_syscalls.sh
+#   Gate 1 (byte-identity) has to build the compiler AS OF THE PINNED TN_BASE
+#   BASELINE, which needs a git checkout and about 80 seconds. It is a
+#   branch/release gate, run on demand:
+#   tests/target_none/prove_no_syscalls.sh
+#   (That baseline used to be this sub-project's branch point. It was re-based
+#   to main on 2026-08-14, when the branch-scoped reading had drifted 200
+#   commits and reported 75 of 129 rows differing, every one of them a
+#   deliberate codegen change. It now means "no unintended codegen change since
+#   that commit" -- see the pin's own comment in the script.)
 #   Run the script with no arguments to get both.
 #
 # The script is invoked WITHOUT KRC set, so it uses build/krc2 directly rather
