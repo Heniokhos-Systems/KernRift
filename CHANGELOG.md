@@ -2,6 +2,89 @@
 
 All notable changes to `kernriftc` are documented in this file.
 
+## v2.10.0 — 2026-08-14
+
+**The release where bare metal stopped meaning QEMU.** A KernRift program,
+compiled by KernRift, boots from a USB stick on a physical AMD Ryzen 9 7900X
+with no operating system underneath it and prints to VGA text memory. It prints
+the CPU's own brand string out of `CPUID`, so the result cannot have been
+produced under emulation — under QEMU that line reads `QEMU Virtual CPU
+version 2.5+`. See `tests/target_none/boot/hw_sentinel_x86.kr` and the "What is
+actually proven" table in the README.
+
+Three more results moved off "CI says so" and onto real devices: the compiler
+**self-compiles to a bootstrap fixed point on a physical Android handset**
+(Redmi Note 8 Pro, under bionic — CI can only run those binaries under the
+glibc loader), the same on a physical Windows laptop, and a KernRift-emitted
+**kernel module loads into a running Linux kernel** and executes in kernel
+space. None of that is reproducible from CI, and the README says so per row.
+
+### Silent miscompiles fixed
+
+Every one of these produced a wrong answer with no diagnostic. Several had
+been latent for a long time.
+
+* **`bool` and `char` were treated as float classes on both IR backends** —
+  the shipping default. `bool b = true; b * 2` gave **0**; `char c = 'A';
+  c / 5` gave a 19-digit number. Hidden for years because `+` and `-` are
+  bit-exact on two small integers reinterpreted as f64 denormals; only `*`
+  and `/` expose it.
+* **`@naked` bodies clobbered callee-saved registers** (IR). An interrupt
+  stub silently destroyed `rbx`, `r12`, `r13` and `r14`. Reported from a
+  downstream OS where it corrupted a filesystem lookup roughly 15% of the
+  time and read as a filesystem bug.
+* **Float pointer dereference moved nothing on legacy.** `*(p as f64) = 2.5`
+  wrote **zero**; the loaded value never reached the float register class.
+  Three separate causes, including compound `+=` emitting no arithmetic at all.
+* **A stale internal float flag misfiled the next argument** (legacy). After
+  any float statement, a following string-literal argument was passed in an
+  XMM register, so arguments arrived shifted. Caused a SIGSEGV in a shipped
+  example.
+* **File-scope struct statics silently lost data**, and `static Point[10]`
+  reserved 80 bytes instead of 160 — elements 5+ aliased other statics.
+* **`/=`, `%=`, `<<=`, `>>=`** discarded their result or emitted nothing on
+  the legacy backends.
+* **Builtin and store scratch slots collided.** Nested calls overwrote each
+  other's parked arguments; f-strings segfaulted.
+* **`for i in a()..b()`** re-evaluated the end bound every iteration, and
+  compound assignment evaluated its index twice — both observable through
+  side effects.
+
+### Language and semantics
+
+* **Evaluation order is now defined**: left-to-right, address before value.
+  Previously unspecified and divergent between backends. Documented in
+  `LANGUAGE.md` and `UNDEFINED_BEHAVIOR.md`.
+* **f-string literal segments now take a plain string's escape sequences.**
+  `f"a\nb"` printed a literal backslash-n before. `{{` and `}}` never escaped
+  a brace despite the docs saying so, and `\"` was a parse error.
+* **`main`'s exit status is no longer whatever the last statement left
+  behind** on the legacy backends — falling off the end, or a bare `return`,
+  now exits 0. An explicit returned value is unchanged.
+
+### Bare metal and the standard library
+
+* Bare-metal `std/` modules: VGA text, PS/2, serial, PCI, IDT with fault
+  reporting, mouse, framebuffer, fw_cfg, gzip, and an allocation-free `cstr`
+  for `--target=none` where `alloc` is refused.
+* The standard library is now **35 modules (~8,600 lines)**, up from 19.
+
+### Honesty
+
+* The README opens with a **"What is actually proven"** table: five statuses,
+  per target, distinguishing real hardware from CI from emulation from
+  deliberate scope boundaries. Where it and any other claim disagree, that
+  table wins.
+* A documentation audit removed a large number of false claims — block
+  comments that were documented but never implemented, an effect system whose
+  analyses have zero call sites, barrier guarantees the ARM64 backend does not
+  emit, and stale counts throughout.
+* **Six of those claims are now pinned by tests** and go red when they rot,
+  which is the only reason the rest will stay true.
+
+**1382 tests**, bootstrap fixed point, boot gate 59/0/0, and full IR-vs-legacy
+differential parity.
+
 ## v2.9.0 — 2026-08-06
 
 A bare-metal release. Six sub-projects take the compiler from "provably safe
