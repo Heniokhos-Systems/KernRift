@@ -2140,8 +2140,38 @@ fn parse_fn_decl() -> uint64 {
 fn parse_module() -> uint64 {
     uint64 mod_node = ast_alloc(AstKind.Module)
 
+    // Mid-file `import` detection. main.kr's import_process() reads only a
+    // LEADING run of import lines: it stops at the first line that is not an
+    // import and appends the rest of the file verbatim, so every later
+    // `import` is never opened. The token still arrives here, where it used
+    // to drop into the catch-all `advance_tok()` below and vanish without a
+    // word -- a bogus path compiled clean, and a real one failed later at the
+    // USE ("undefined function") while the reader stared at an import line
+    // that looked fine.
+    //
+    // The token stream is the CONCATENATION of every imported file, so "is
+    // this import at the top" is a per-FILE question, not a per-buffer one:
+    // srcmap_file() maps a byte offset back to its source file, and the
+    // leading run restarts at each file boundary. Without that, file B's
+    // perfectly legal header imports would be flagged because file A's
+    // declarations came first in the buffer.
+    //
+    // Comments and blank lines before the first import do NOT end the leading
+    // run -- import_process() skips them explicitly, and they produce no
+    // tokens here either, so the two agree.
+    uint64 imp_file = 0
+    uint64 imp_leading = 1
+
     while cur_kind() != 0 {
         uint32 kind = cur_kind()
+
+        // Track the leading-import run for the file this token came from.
+        uint64 tf = srcmap_file(tok_text_start(p_tok_pos))
+        if tf != imp_file {
+            imp_file = tf
+            imp_leading = 1
+        }
+        if kind != 75 { imp_leading = 0 }
 
         // Parse annotations (@export, @noreturn, @naked, @packed, @section,
         // @module_*, etc). Annotations preceding a `fn` apply to that
@@ -2910,6 +2940,42 @@ fn parse_module() -> uint64 {
                 eat(16)
             }
             expect(13)
+        } else if kind == 75 {
+            // `import` -- see the imp_leading note at the top of parse_module.
+            // Two ways to be wrong, and both used to compile clean:
+            //
+            //   1. No path at all (`import` on its own). import_check_import_line()
+            //      returns 0 without an opening quote, which ENDS the leading run,
+            //      so every real import after it is dropped too. Wrong at ANY
+            //      position, so this one is not gated on imp_leading.
+            //   2. A path, but after a declaration has already been parsed in this
+            //      file -- the scanner stopped before reaching it.
+            uint64 imp_tok = p_tok_pos
+            uint64 imp_leading_here = imp_leading
+            advance_tok()                              // `import`
+            uint64 has_path = 0
+            // Consume the path string, which also keeps a RUN of imports leading.
+            if cur_kind() == 3 {
+                has_path = 1
+                advance_tok()
+            }
+            uint64 imp_msg = 0
+            if has_path == 0 {
+                imp_msg = "`import` needs a quoted path, as in import \"std/io.kr\"; this one was ignored, and it also stopped every import below it from being read"
+            }
+            if has_path != 0 && imp_leading_here == 0 {
+                imp_msg = "`import` must precede every declaration in its file; this one was ignored, so nothing it names is in scope"
+            }
+            if imp_msg != 0 {
+                // Counted so the parse-error gate at the bottom of this function
+                // exits before sema -- otherwise the old "undefined function"
+                // cascade would still be the loudest thing on the terminal.
+                p_err_count = p_err_count + 1
+                if p_err_reported < 20 {
+                    p_err_reported = p_err_reported + 1
+                    report_error_at(imp_tok, imp_msg)
+                }
+            }
         } else {
             advance_tok()
         }

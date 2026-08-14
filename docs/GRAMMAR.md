@@ -60,7 +60,8 @@ u8 u16 u32 u64 i8 i16 i32 i64 f32 f64 bool char float double
 ## Module
 
 ```
-module      = top_item*
+module      = import_decl* top_item*
+import_decl = "import" STR_LIT
 top_item    = annotation* fn_decl
             | extern_decl
             | const_decl
@@ -70,6 +71,16 @@ top_item    = annotation* fn_decl
             | type_alias
             | device_decl
 ```
+
+The `import_decl*` prefix is a real restriction, not a stylistic one: **imports
+must precede every `top_item`.** The scanner in `import_process`
+(`src/main.kr`) reads a leading run of import lines and stops at the first line
+that is not one, so an import after a declaration is never opened. `parse_module`
+rejects one with an error rather than discarding it — the silence used to
+surface as `undefined function` at the *use* site, pointing away from the
+import. Comments and blank lines before the first import are skipped and do not
+end the run. `import` with no `STR_LIT` is an error at any position, because a
+pathless `import` also terminates the leading run.
 
 ## Annotations
 

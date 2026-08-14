@@ -21908,6 +21908,193 @@ fi
 rm -rf "$BCB_D"
 fi
 
+# --- Misplaced `import` is rejected, not swallowed (MIDIMP) -----------------
+# main.kr's import_process() reads only a LEADING run of import lines: it stops
+# at the first line that is not an import and appends the rest of the file
+# verbatim. Every later `import` was therefore never opened, and the token fell
+# into parse_module()'s catch-all `advance_tok()` and vanished. Measured
+# symptoms before the fix, all reproduced by the rows below:
+#   * a real mid-file import -> "undefined function" at the USE, pointing away
+#     from the import line the reader is staring at;
+#   * a mid-file import of a path that does not exist -> compiled CLEAN, exit 0,
+#     because the file was never even opened (at the top it says "cannot open");
+#   * a bare `import` with no path -> compiled CLEAN anywhere, and at the TOP of
+#     a file it silently ended the leading run, so every real import BELOW it
+#     was dropped too.
+#
+# EXIT CODE ALONE CANNOT TEST THIS. The first shape already exits non-zero
+# today via the downstream "undefined function", so these rows assert the
+# ERROR TEXT and that the caret line names `import`. The positive controls
+# below are what stop a fix that simply rejects all imports from passing.
+#
+# The negative rows only COMPILE and are pinned to --arch=x86_64 deliberately:
+# a diagnostic is emitted before any backend runs, so the arch cannot change
+# the outcome and nothing here is executed. The positive controls DO execute
+# their artifact and therefore use $RUN_ARCH.
+echo ""
+echo "--- misplaced import is rejected, not swallowed (ANCHOR MIDIMP) ---"
+MIDIMP_D="$DIR/../test_tmp_midimp_$$"
+mkdir -p "$MIDIMP_D"
+
+# Every negative row: compile, expect failure, and expect $2 in the message.
+midimp_neg() {
+    local name="$1"; local want="$2"; local src="$3"
+    TOTAL=$((TOTAL + 1))
+    local f="$MIDIMP_D/$name.kr"
+    printf '%s\n' "$src" > "$f"
+    local out
+    out=$($KRC --arch=x86_64 "$f" -o "$MIDIMP_D/$name.out" 2>&1)
+    local st=$?
+    if [ "$st" = "0" ]; then
+        echo "FAIL: $name (compiled clean, exit 0 -- the import was swallowed)"
+        FAIL=$((FAIL + 1))
+    elif ! printf '%s' "$out" | grep -q "$want"; then
+        echo "FAIL: $name (exit $st but no '$want' in the message)"
+        echo "  got: $(printf '%s' "$out" | head -2)"
+        FAIL=$((FAIL + 1))
+    elif ! printf '%s' "$out" | grep -q "^[^ ].*$name\.kr:[0-9]*:[0-9]*: error:"; then
+        echo "FAIL: $name (message is not located at a file:line:col)"
+        echo "  got: $(printf '%s' "$out" | head -2)"
+        FAIL=$((FAIL + 1))
+    else
+        PASS=$((PASS + 1))
+        echo "  $name: PASS (rejected, and the message says why)"
+    fi
+    rm -f "$MIDIMP_D/$name.out"
+}
+
+# 1. The reported shape: a real, resolvable import placed after a declaration.
+#    Before the fix this said "undefined function 'fmt_f64'" and pointed at
+#    line 3; it must now name the rule and point at line 2.
+midimp_neg midimp_after_decl 'must precede every declaration' \
+'fn helper() -> u64 { return 1 }
+import "../std/math_float.kr"
+fn main() -> uint32 { println_str(fmt_f64(1.5, 2))  return 0 }'
+
+# 2. The import must be reported at ITS OWN line, not at the use site. Line 2
+#    is the import; assert the diagnostic carries that line number.
+TOTAL=$((TOTAL + 1))
+printf '%s\n' 'fn helper() -> u64 { return 1 }
+import "../std/math_float.kr"
+fn main() -> uint32 { println_str(fmt_f64(1.5, 2))  return 0 }' > "$MIDIMP_D/line.kr"
+MIDIMP_LOUT=$($KRC --arch=x86_64 "$MIDIMP_D/line.kr" -o "$MIDIMP_D/line.out" 2>&1)
+if printf '%s' "$MIDIMP_LOUT" | grep -q "line\.kr:2:1: error: .import. must precede"; then
+    PASS=$((PASS + 1))
+    echo "  midimp_reported_at_import_line: PASS (line 2, the import, not line 3, the use)"
+else
+    echo "FAIL: midimp_reported_at_import_line (want line.kr:2:1 naming import)"
+    echo "  got: $(printf '%s' "$MIDIMP_LOUT" | head -2)"
+    FAIL=$((FAIL + 1))
+fi
+rm -f "$MIDIMP_D/line.out"
+
+# 3. A path that does not exist, mid-file, used to compile CLEAN and exit 0 --
+#    proof the file was never opened. At the top it errors with "cannot open
+#    import", so the silence was purely positional.
+midimp_neg midimp_bogus_path 'must precede every declaration' \
+'fn helper() -> u64 { return 1 }
+import "std/NO_SUCH_MODULE_ANYWHERE.kr"
+fn main() -> uint32 { return 0 }'
+
+# 4. A bare `import` with no path at all, mid-file. Also compiled clean before,
+#    so it was not mis-parsed -- it was swallowed.
+midimp_neg midimp_bare_midfile 'needs a quoted path' \
+'fn helper() -> u64 { return 1 }
+import
+fn main() -> uint32 { return 0 }'
+
+# 5. A bare `import` at the TOP of a file. Found while fixing the reported bug:
+#    import_check_import_line() returns 0 without an opening quote, which ENDS
+#    the leading run, so the perfectly good import on the NEXT line was dropped
+#    and the program failed at the use site with "undefined function". Wrong at
+#    any position, so this row is not about placement.
+midimp_neg midimp_bare_at_top 'needs a quoted path' \
+'import
+import "../std/math_float.kr"
+fn main() -> uint32 { println_str(fmt_f64(1.5, 2))  return 0 }'
+
+# 6. The error fires ONCE for one misplaced import, not once per declaration
+#    that follows it. Five declarations follow here.
+TOTAL=$((TOTAL + 1))
+printf '%s\n' 'fn a() -> u64 { return 1 }
+import "../std/math_float.kr"
+fn b() -> u64 { return 2 }
+fn c() -> u64 { return 3 }
+static uint64 d = 4
+struct MidImpS { uint64 x }
+fn main() -> uint32 { return 0 }' > "$MIDIMP_D/once.kr"
+MIDIMP_ONCE=$($KRC --arch=x86_64 "$MIDIMP_D/once.kr" -o "$MIDIMP_D/once.out" 2>&1 | grep -c 'must precede every declaration')
+if [ "$MIDIMP_ONCE" = "1" ]; then
+    PASS=$((PASS + 1))
+    echo "  midimp_reported_once: PASS (1 error, not 1 per following declaration)"
+else
+    echo "FAIL: midimp_reported_once (got $MIDIMP_ONCE copies of the error, want 1)"
+    FAIL=$((FAIL + 1))
+fi
+rm -f "$MIDIMP_D/once.out"
+
+# 7. POSITIVE CONTROL. A normal top-of-file import must still compile AND RUN.
+#    Without this row, a "fix" that rejected every import would pass rows 1-6.
+#    This row EXECUTES, so it uses $RUN_ARCH.
+TOTAL=$((TOTAL + 1))
+printf '%s\n' 'import "../std/math_float.kr"
+fn main() -> uint32 { println_str(fmt_f64(1.5, 2))  return 0 }' > "$MIDIMP_D/ok.kr"
+if $KRC --arch=$RUN_ARCH "$MIDIMP_D/ok.kr" -o "$MIDIMP_D/ok.out" > /dev/null 2>&1 &&
+   chmod +x "$MIDIMP_D/ok.out" &&
+   [ "$("$MIDIMP_D/ok.out" 2>&1)" = "1.50" ]; then
+    PASS=$((PASS + 1))
+    echo "  midimp_top_of_file_still_works: PASS (compiles and runs on $RUN_ARCH)"
+else
+    echo "FAIL: midimp_top_of_file_still_works (a legal import stopped compiling or running)"
+    FAIL=$((FAIL + 1))
+fi
+rm -f "$MIDIMP_D/ok.out"
+
+# 8. POSITIVE CONTROL. Comments and blank lines before the first import do NOT
+#    end the leading run -- import_process() skips them explicitly. Verified
+#    against the pre-fix tree too, so this is a pin on existing behaviour, not
+#    a claim the fix introduced it. EXECUTES -> $RUN_ARCH.
+TOTAL=$((TOTAL + 1))
+printf '%s\n' '// a header comment
+
+// and another, after a blank line
+import "../std/math_float.kr"
+fn main() -> uint32 { println_str(fmt_f64(1.5, 2))  return 0 }' > "$MIDIMP_D/cmt.kr"
+if $KRC --arch=$RUN_ARCH "$MIDIMP_D/cmt.kr" -o "$MIDIMP_D/cmt.out" > /dev/null 2>&1 &&
+   chmod +x "$MIDIMP_D/cmt.out" &&
+   [ "$("$MIDIMP_D/cmt.out" 2>&1)" = "1.50" ]; then
+    PASS=$((PASS + 1))
+    echo "  midimp_comment_preamble_ok: PASS (comments do not end the leading run)"
+else
+    echo "FAIL: midimp_comment_preamble_ok (a comment before the first import ended the scan)"
+    FAIL=$((FAIL + 1))
+fi
+rm -f "$MIDIMP_D/cmt.out"
+
+# 9. POSITIVE CONTROL, and the one that constrains the IMPLEMENTATION. The
+#    token stream is the CONCATENATION of every imported file, so "is this
+#    import at the top" has to be asked per SOURCE FILE. Here helper.kr's own
+#    leading imports sit in the buffer after math_float.kr's declarations; a
+#    check that tracked one global "have I seen a declaration yet" flag would
+#    reject them. EXECUTES -> $RUN_ARCH.
+TOTAL=$((TOTAL + 1))
+printf '%s\n' 'import "../std/math_float.kr"
+import "../std/string.kr"
+fn midimp_helper_val() -> f64 { return 2.25 }' > "$MIDIMP_D/helper.kr"
+printf '%s\n' 'import "helper.kr"
+fn main() -> uint32 { println_str(fmt_f64(midimp_helper_val(), 2))  return 0 }' > "$MIDIMP_D/multi.kr"
+if $KRC --arch=$RUN_ARCH "$MIDIMP_D/multi.kr" -o "$MIDIMP_D/multi.out" > /dev/null 2>&1 &&
+   chmod +x "$MIDIMP_D/multi.out" &&
+   [ "$("$MIDIMP_D/multi.out" 2>&1)" = "2.25" ]; then
+    PASS=$((PASS + 1))
+    echo "  midimp_per_file_leading_run: PASS (leading run restarts at each file)"
+else
+    echo "FAIL: midimp_per_file_leading_run (an imported file's own header imports were rejected)"
+    FAIL=$((FAIL + 1))
+fi
+
+rm -rf "$MIDIMP_D"
+
 # --- Summary ---
 echo ""
 # THERE IS NO KNOWN DELIBERATE RED IN THIS SUITE, so nothing is annotated here.

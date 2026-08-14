@@ -1278,11 +1278,21 @@ import "std/string.kr"
 import "utils.kr"
 ```
 
+**Every `import` must come before every declaration in its file.** Comments and
+blank lines may precede them; a `fn`, `static`, `const`, `struct`, `enum`,
+`type` or `device` may not. The import scanner reads only the leading run and
+stops at the first declaration, so an import placed after one is never opened —
+a misplaced `import` is a hard error naming the rule, not a silently dropped
+line.
+
 Import paths are resolved:
 
 1. Relative to the importing file's directory
 2. Then in the standard library location: `~/.local/share/kernrift/`
    (or `%LOCALAPPDATA%\KernRift\share\` on Windows)
+
+Paths are always joined to one of those roots, so an absolute path in an
+`import` does not work.
 
 Circular imports are detected and rejected. Each file is compiled at most
 once regardless of how many files import it.

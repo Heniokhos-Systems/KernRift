@@ -323,6 +323,10 @@ import "std/string.kr"
 import "utils.kr"
 ```
 
+Imports must come before every declaration in the file — comments and blank
+lines may precede them, a `fn` or `static` may not. An import placed after one
+is a hard error, because the scanner never reaches it.
+
 Paths are resolved relative to the importing file, then under
 `~/.local/share/kernrift/`. Circular imports are detected.
 

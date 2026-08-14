@@ -59,9 +59,21 @@ build/kr: packaging/kr.sh
 	chmod +x build/kr
 	@echo "Built build/kr (shell wrapper for kr-bin)"
 
+# $(SRCS) is main.kr's import list, hand-inlined in dependency order, so
+# main.kr's own 25 `import` lines are dead text once concatenated -- and they
+# land MID-FILE, past the leading run that import_process() reads. They were
+# tolerated only because the parser used to discard a stray top-level `import`
+# without a word; it now rejects one, because that silence is what made a
+# misplaced import present itself as "undefined function" at the use site.
+#
+# Dropping them costs nothing: `krc src/main.kr` (imports, no concat) and the
+# stripped concat compile to byte-identical output. The anchored pattern
+# matches only column-0 `import "`, which in $(SRCS) is exactly those 25 lines
+# -- an indented or otherwise-shaped import would survive the filter and then
+# fail the build loudly, which is the outcome we want.
 build/krc.kr: $(SRCS)
 	@mkdir -p build
-	cat $(SRCS) > build/krc.kr
+	cat $(SRCS) | grep -v '^import "' > build/krc.kr
 
 # Use the pre-built self-hosted compiler to self-compile
 build/krc2: build/krc.kr
