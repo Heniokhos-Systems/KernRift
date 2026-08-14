@@ -65,11 +65,33 @@ EOF
     curl -sSLf -o "$PKG/usr/bin/kr" "$BASE/$kr_name"
     chmod 755 "$PKG/usr/bin/kr"
 
-    # Download stdlib
-    for mod in alloc string io math math_float fmt mem memfast vec map color fb fixedpoint font widget time log net sha256; do
-        echo "  Downloading std/$mod.kr..."
-        curl -sSLf -o "$PKG/usr/share/kernrift/std/$mod.kr" "$RAW/std/$mod.kr"
+    # Download stdlib.
+    #
+    # The list is READ FROM THE REPO, not hardcoded. It used to be a literal
+    # list of 19 modules and it silently went stale: v2.10.0 ships 35, so a
+    # .deb built from the old list was missing all 16 bare-metal ones --
+    # vga_text, ps2, serial, idt, pci, x86, cstr and the rest -- which are the
+    # headline of that release. An apt user would have installed a compiler
+    # whose advertised stdlib did not exist.
+    echo "  Listing std/ from the repo..."
+    STD_MODS=$(curl -sSLf "https://api.github.com/repos/$REPO/contents/std?ref=v$VERSION" \
+               | grep -oE '"name": *"[a-zA-Z0-9_]+\.kr"' | sed -E 's/.*"([^"]+\.kr)"/\1/' | sort -u)
+    if [ -z "$STD_MODS" ]; then
+        echo "ERROR: could not list std/ from the repo -- refusing to build a .deb" >&2
+        echo "  a silently short stdlib is worse than no package" >&2
+        exit 1
+    fi
+    STD_N=0
+    for modf in $STD_MODS; do
+        echo "  Downloading std/$modf..."
+        curl -sSLf -o "$PKG/usr/share/kernrift/std/$modf" "$RAW/std/$modf"
+        STD_N=$((STD_N + 1))
     done
+    echo "  stdlib: $STD_N modules"
+    if [ "$STD_N" -lt 30 ]; then
+        echo "ERROR: only $STD_N stdlib modules -- expected 35+; refusing to ship" >&2
+        exit 1
+    fi
 
     # Copyright files
     echo "  Downloading LICENSE and NOTICE..."
