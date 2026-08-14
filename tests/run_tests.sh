@@ -2811,7 +2811,12 @@ rm -f "$DIR/../docpin_fmt_$$.kr"
 #    the comparison once $TOTAL is final. TOTAL is incremented HERE so that the
 #    number README must state includes this row.
 TOTAL=$((TOTAL + 1))
-README_COUNTS=$(grep -oE '\*\*[0-9]+ tests\*\*' "$DIR/../README.md" | grep -oE '[0-9]+')
+# Catch BOTH spellings. The row originally matched only '**N tests**', and two
+# '**N-test**' strings (the status table and the support matrix) sat stale at
+# 1356 for three releases underneath a green pin -- a check that could not see
+# the thing it was pinning. Both forms must now agree with the suite.
+README_COUNTS=$( { grep -oE '\*\*[0-9]+ tests\*\*' "$DIR/../README.md"
+                   grep -oE '[0-9]+-test' "$DIR/../README.md" ; } | grep -oE '[0-9]+')
 # An empty capture must FAIL, never compare "" against "" and pass.
 README_N=$(printf '%s\n' "$README_COUNTS" | grep -c '^[0-9][0-9]*$')
 README_UNIQ=$(printf '%s\n' "$README_COUNTS" | sort -u | tr '\n' ' ' | sed 's/ *$//')
@@ -21893,10 +21898,11 @@ if [ "$README_N" = "0" ] || [ -z "$README_COUNTS" ]; then
     FAIL=$((FAIL + 1))
     echo "FAIL: readme_test_count_matches_suite (found NO '**N tests**' in README.md)"
     echo "  the count must be stated -- an unparseable README is a failure, not a pass"
-elif [ "$README_N" != "2" ]; then
+elif [ "$README_N" -lt "2" ]; then
     FAIL=$((FAIL + 1))
-    echo "FAIL: readme_test_count_matches_suite (README states the count $README_N times, want 2)"
-    echo "  README.md carries the number in the CI paragraph and in the stats paragraph"
+    echo "FAIL: readme_test_count_matches_suite (README states the count $README_N times, want 2+)"
+    echo "  README.md carries it in the CI paragraph, the stats paragraph, the status"
+    echo "  table and the support matrix -- all spellings must agree"
 elif [ "$TOTAL" -gt "$README_UNIQ" ]; then
     # $TOTAL IS ENVIRONMENT-DEPENDENT and the first version of this row did not
     # account for it: ~84 rows are gated on optional tooling and neither run nor

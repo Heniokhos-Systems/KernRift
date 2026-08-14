@@ -41,7 +41,7 @@ wins.
 
 | Target | Status | What was actually run |
 |---|---|---|
-| Linux x86_64 | 🔵 CI-verified | Self-compiles to a bootstrap fixed point; the full **1356-test** suite passes. This is the primary development target. |
+| Linux x86_64 | 🔵 CI-verified | Self-compiles to a bootstrap fixed point; the full **1404-test** suite passes. This is the primary development target. |
 | Linux ARM64 | 🔵 CI-verified | Self-compiles to a fixed point; suite runs on a native ARM64 runner. |
 | Windows x86_64 | 🔵 CI-verified + hardware | Self-compile chain on a `windows-latest` runner every push. Also verified 2026-08-14 on a physical **Intel Core Ultra 9 275HX / Windows 11 Pro** laptop: the compiler rebuilt its own source twice on the machine and stages 1-3 are byte-identical (`sha256 5b21ae16…`), with the laptop-built compiler then compiling and running a program correctly. |
 | Windows ARM64 | 🔵 CI-verified | Self-compile chain through a fixed point on a `windows-11-arm` runner. |
@@ -456,7 +456,7 @@ a thing works, that column says who watched it work.
 
 | Platform | Compile | Run | Self-host | File I/O | How it is checked |
 |----------|---------|-----|-----------|----------|-------------------|
-| Linux x86_64 | ✅ | ✅ | ✅ | ✅ | CI, native runner; bootstrap fixed point + full 1356-test suite |
+| Linux x86_64 | ✅ | ✅ | ✅ | ✅ | CI, native runner; bootstrap fixed point + full 1404-test suite |
 | Linux ARM64 | ✅ | ✅ | ✅ | ✅ | CI, native ARM64 runner; bootstrap fixed point |
 | Windows x86_64 | ✅ | ✅ | ✅ | ✅ | CI, `windows-latest`; self-compile chain |
 | Windows ARM64 | ✅ | ✅ | ✅ | ✅ | CI, `windows-11-arm`; self-compile chain to fixed point |
