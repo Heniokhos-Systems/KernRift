@@ -68,6 +68,18 @@ been latent for a long time.
   reporting, mouse, framebuffer, fw_cfg, gzip, and an allocation-free `cstr`
   for `--target=none` where `alloc` is refused.
 * The standard library is now **35 modules (~8,600 lines)**, up from 19.
+* **`--emit=fatimage`: ONE boot image with several boot paths.** The same file
+  boots as an x86_64 multiboot kernel, as a UEFI application, and as an arm64
+  raw `Image` — verified by booting all three under QEMU from one artefact, not
+  by inspecting it. The compiler drives its own codegen once per architecture
+  and composes the result; `--slice=<arch>:<file>` adopts a prebuilt image for
+  an architecture whose program is a different source, which is the case the
+  real consumer has. The offset-0 collision between PE's `MZ` and arm64's
+  executable first word is resolved with `0x91005A4D` — `MZ` to firmware,
+  `add x13, x18, #0x16` to a CPU. See `examples/images/` and the
+  `--emit=fatimage` section of `docs/LANGUAGE.md`, which also records what
+  booting *cannot* prove (QEMU reads the whole file regardless of the header's
+  `image_size` or the multiboot `load_addr`, so no boot here witnesses either).
 
 ### Honesty
 

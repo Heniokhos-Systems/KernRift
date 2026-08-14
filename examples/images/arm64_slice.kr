@@ -1,0 +1,48 @@
+// A SEPARATE arm64 program, built on its own and handed to --emit=fatimage
+// with --slice=arm64:<file> instead of being compiled from the fat image's
+// source.
+//
+// This is the case pure multi-pass cannot express, and it is the real one: the
+// consumer this feature was written for (ApexRift) has an x86-only kernel and a
+// completely different arm64 program, so "compile the same source twice" was
+// never going to be the whole story. The banner differs from hello_fat.kr's on
+// purpose -- that difference is what proves the slice was ADOPTED rather than
+// the source having been compiled for arm64 anyway.
+//
+// It must be built with --image-header, because the fat image reads the entry
+// point back out of the Image header's code0 branch. A headerless raw arm64
+// image records its entry nowhere: the `image:` report line is the only place
+// that number ever existed, and it is long gone by the time a prebuilt file is
+// named on a command line.
+
+const u64 PL011_DR = 0x09000000
+const u64 PL011_FR = 0x09000018
+
+fn pl011_putc(u64 c) {
+    u64 full = 32
+    while full != 0 {
+        u64 fr = 0
+        unsafe { *(PL011_FR as uint32) -> fr }
+        full = fr & 0x20
+    }
+    uint32 w = c
+    unsafe { *(PL011_DR as uint32) = w }
+}
+
+fn pl011_puts(u64 s) {
+    u64 i = 0
+    u64 c = 0
+    unsafe { *(s as uint8) -> c }
+    while c != 0 {
+        if c == 10 { pl011_putc(13) }
+        pl011_putc(c)
+        i = i + 1
+        u64 p = s + i
+        unsafe { *(p as uint8) -> c }
+    }
+}
+
+fn _start() {
+    pl011_puts("KRFAT arm64 PREBUILT SLICE OK\n")
+    loop { }
+}

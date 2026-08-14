@@ -1,0 +1,126 @@
+// ONE source, TWO architectures, one boot image.
+//
+// `krc --emit=fatimage --arch=x86_64,arm64` compiles this file once per
+// architecture and composes the results into a single artefact with three boot
+// paths. The same bytes boot under `qemu-system-x86_64 -kernel` (multiboot),
+// under `qemu-system-aarch64 -kernel` (arm64 `Image`) and under OVMF (UEFI).
+//
+// WHY THIS FILE BRANCHES ON get_arch_id() INSTEAD OF JUST PRINTING. There is
+// no conditional compilation in KernRift and no arch-tagged `asm`, so a source
+// that is compiled for both architectures may only contain code BOTH backends
+// can lower. That rules out `outb` -- std/x86.kr implements it with an x86
+// `asm` block, and the arm64 backend refuses the instruction at emission time
+// even when the call is behind an `if` it will never take, because dead-code
+// elimination runs over the call graph and not over constant-folded branches.
+// Measured, not assumed: `--arch=arm64` on a file with a live `out dx, al`
+// fails with "unrecognized asm instruction".
+//
+// What both backends CAN lower is a plain memory store, so every output path
+// below is one:
+//
+//   * arm64 -- the QEMU `virt` machine's PL011 UART is memory-mapped at
+//     0x09000000, so writing a character is a `str` and nothing else. This is
+//     a real serial console: `-serial file:...` captures it.
+//   * x86_64 -- a PC's serial port is behind `out`, which is unavailable here,
+//     so the visible output goes to the VGA text buffer at 0xB8000 (also a
+//     plain store) and a plain-ASCII copy of the same banner is left at
+//     0x600000 for the test harness to read back with QEMU's `pmemsave`. The
+//     witness copy exists because VGA text interleaves a colour attribute
+//     after every character, which no grep is going to enjoy.
+//
+// The asymmetry is real and is the point: a fat image does not make two
+// machines the same, it puts two machines' code in one file.
+
+// Bare-metal arch ids under --target=none: 9 = x86_64, 10 = arm64.
+const u64 ARCH_X86_64 = 9
+
+const u64 VGA_TEXT     = 0xB8000
+const u64 X86_WITNESS  = 0x600000
+const u64 PL011_DR     = 0x09000000
+const u64 PL011_FR     = 0x09000018
+
+fn load_byte(u64 p) -> u64 {
+    u64 v = 0
+    unsafe { *(p as uint8) -> v }
+    return v
+}
+
+fn store_byte(u64 p, u64 v) {
+    uint8 b = v
+    unsafe { *(p as uint8) = b }
+}
+
+// --- x86_64 -----------------------------------------------------------------
+
+// Character cells are (byte, attribute) pairs; 0x0F is white on black.
+fn vga_puts(u64 s) {
+    u64 i = 0
+    u64 c = load_byte(s)
+    while c != 0 {
+        store_byte(VGA_TEXT + i * 2, c)
+        store_byte(VGA_TEXT + i * 2 + 1, 0x0F)
+        i = i + 1
+        c = load_byte(s + i)
+    }
+}
+
+// The same text as flat ASCII somewhere the monitor can dump it. Terminated
+// so a reader knows where it ends; the harness dumps a fixed 64 bytes.
+fn witness(u64 s) {
+    u64 i = 0
+    u64 c = load_byte(s)
+    while c != 0 {
+        store_byte(X86_WITNESS + i, c)
+        i = i + 1
+        c = load_byte(s + i)
+    }
+    store_byte(X86_WITNESS + i, 10)
+}
+
+// --- arm64 ------------------------------------------------------------------
+
+// FR bit 5 is TXFF (transmit FIFO full). No init: QEMU's PL011 accepts bytes
+// in its reset state, and both loaders that enter this slice hand over a UART
+// the firmware or the machine model has already brought up. On real silicon
+// this would need the IBRD/FBRD/LCR_H/CR sequence in std/uart_pl011.kr.
+fn pl011_putc(u64 c) {
+    u64 full = 32
+    while full != 0 {
+        u64 fr = 0
+        unsafe { *(PL011_FR as uint32) -> fr }
+        full = fr & 0x20
+    }
+    uint32 w = c
+    unsafe { *(PL011_DR as uint32) = w }
+}
+
+fn pl011_puts(u64 s) {
+    u64 i = 0
+    u64 c = load_byte(s)
+    while c != 0 {
+        if c == 10 { pl011_putc(13) }
+        pl011_putc(c)
+        i = i + 1
+        c = load_byte(s + i)
+    }
+}
+
+// --- entry ------------------------------------------------------------------
+//
+// Named `_start` rather than `main` deliberately: on a bare-metal image the
+// compiler prefers a live `_start`, and each slice's entry stub (opted into by
+// --stack-top=, which --emit=fatimage passes for every slice) sets SP and
+// branches here.
+//
+// It never returns. Each stub ends in a halt after the call, but the two
+// banners are the whole output and a return would race the harness's read.
+
+fn _start() {
+    if get_arch_id() == ARCH_X86_64 {
+        vga_puts("KRFAT x86_64 boot path OK")
+        witness("KRFAT x86_64 boot path OK")
+    } else {
+        pl011_puts("KRFAT arm64 boot path OK\n")
+    }
+    loop { }
+}

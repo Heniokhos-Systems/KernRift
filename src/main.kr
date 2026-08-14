@@ -5443,6 +5443,41 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
         patch_u32(332, (a_dal >> 32) & 0xFFFFFFFF)
     }
 
+    // --------------------------------------------------------------------
+    // THE FAT-IMAGE SLICE HOOK (--emit=fatimage). When fat_capture is set,
+    // this call is one PASS of a multi-pass build and its bytes belong in a
+    // composite, not on disk under `output_path` -- which is the FAT IMAGE's
+    // path, shared by every pass. Writing here would leave each pass
+    // clobbering the previous one's file. The composer overwrites all of it
+    // at the end, so on a SUCCESSFUL build the only cost is the wasted
+    // writes -- but on a build that refuses at any of the composer's
+    // invariants, the artifact left behind at the fat image's path is one
+    // slice of it: a plausible flat image sitting under the name a fat image
+    // was asked for. Every refusal in this mode leaves nothing on disk, which
+    // is the rule the --emit=image finalize block states for itself.
+    //
+    // THE BUFFER IS COPIED, NOT BORROWED. out_buf is re-initialised by the
+    // next pass's codegen_init, so a pointer into it survives exactly until
+    // the composer needs a second slice. Measured shape of that bug in
+    // compile_fat's own history (the source/token snapshot dance at the top
+    // of it): state that looks stable across one pass and is not.
+    //
+    // entry_off IS CAPTURED HERE AND NOWHERE ELSE. It is a local of this
+    // function, the `image:` report line is the only other place it appears,
+    // and the composer needs it to build the arm64 branch and to cross-check
+    // the multiboot entry_addr it reads back out of the slice's own header.
+    //
+    // The timing line is suppressed with the write, because it ends
+    // "-> <output_path>" and would name a file this pass did not write. The
+    // `image:` / `uefi:` report lines above are NOT suppressed: they are the
+    // per-slice record, they name their own arch, and the composer's summary
+    // is a fourth line rather than a replacement for them.
+    if fat_capture != 0 {
+        fat_cap_len = codegen_output_len()
+        fat_cap_buf = alloc(fat_cap_len)
+        memcpy(fat_cap_buf, out_buf, fat_cap_len)
+        fat_cap_entry = entry_off
+    } else {
     codegen_write_output(output_path)
     // Mark the output executable so `./out` works immediately.
     // No-op on Windows; safe on Linux/macOS/Android.
@@ -5490,6 +5525,7 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
     } else {
         msg = "\n"
         write(1, msg, 1)
+    }
     }
 }
 
@@ -7094,6 +7130,97 @@ static uint64 image_header_set = 0
 // nothing new to store for it.
 static uint64 reset_vector_set = 0
 
+// ---------------------------------------------------------------------------
+// --emit=fatimage state.
+// ---------------------------------------------------------------------------
+//
+// A fat image is ONE FILE WITH SEVERAL BOOT PATHS, so every piece of state
+// below is PER SLICE. That is the whole reason these cannot reuse load_addr /
+// stack_top above: those are one value each, and the x86_64 slice and the
+// arm64 slice have different ones by construction -- they are loaded by
+// different firmware, at different addresses, on different machines.
+//
+// TWO ARCHITECTURES, ENUMERATED, NOT AN ARRAY INDEXED BY arch. The container
+// has exactly two boot paths this compiler has ever booted (x86_64 multiboot
+// and arm64 raw `Image`), the --arch= validation refuses anything else, and an
+// array would invite a third arch to be added here without adding its boot
+// path -- which is a fat image that silently carries a slice nothing enters.
+// Adding riscv32 later means adding its rows here AND its entry indirection in
+// the composer, and the shape of this state is what makes that obvious.
+//
+// THE DEFAULTS ARE REAL VALUES, NOT ZERO SENTINELS, and this is the one place
+// in the bare-metal flag surface where a default address is allowed. The rule
+// stack_top states above -- "an unset stack means 'no stub', never 'guess
+// one'" -- is about a value the compiler cannot know: --emit=image builds a
+// blob for SOMEBODY ELSE'S loader, on a board the compiler has never seen. A
+// fat image is the opposite case: it names its own loaders (multiboot, the
+// arm64 boot protocol, UEFI), each of which fixes where the file lands, so the
+// addresses ARE knowable and a defaulted one is a derivation rather than a
+// guess. Both are still overridable, and the report prints what was used.
+//
+//   x86_64 load base 0x00400000 (4194304). The classic multiboot kernel
+//     address: above the 1 MiB hole, and the self-boot trampoline's own rules
+//     bracket it hard -- it must be >= 0x4000 (below that the trampoline
+//     zeroes its page-table region over the image) and the image must end
+//     below 0x40000000 (the trampoline's identity map is one page directory of
+//     2 MiB pages, exactly 1 GiB). 4 MiB leaves the whole 0x4000..0x400000
+//     band free for the stack and clears the hole.
+//   x86_64 stack top 0x003F0000 (4128768). 64 KiB BELOW the load base, so the
+//     stack grows down AWAY from the image and can never reach it -- the
+//     stack-vs-image refusal in the --emit=image finalize is what would
+//     otherwise fire. It also clears the trampoline's page tables at
+//     0x1000-0x4000 by ~4 MiB, and is under both the 2^31 encoding bound and
+//     the 1 GiB map ceiling.
+//   arm64 load base 0x40000000 (1073741824). RAM base on QEMU `virt`, and the
+//     conventional DRAM base for the arm64 boot protocol. 4096-aligned, which
+//     arm64 requires (ADRP page arithmetic is baked at compile time).
+//   arm64 stack top 0x40800000 (1082130432). 8 MiB into RAM: far above any
+//     slice this container has ever carried, 16-byte aligned (aarch64 faults
+//     on the first unaligned SP access) and below 2^32 (the stub materialises
+//     SP with a movz/movk pair covering bits 31:0 only).
+//
+// The load bases are BASES OF THE WHOLE FILE, not of a slice. Each slice's own
+// --load-addr is base + its file offset, computed by the composer -- which is
+// the only place those offsets exist, since they depend on how long the
+// preceding slices turned out to be.
+static uint64 fat_arch_mask = 0
+static uint64 fat_arch_list_set = 0
+static uint64 fat_slice_x86 = 0
+static uint64 fat_slice_a64 = 0
+static uint64 fat_slice_seen = 0
+static uint64 fat_load_x86 = 4194304
+static uint64 fat_load_x86_set = 0
+static uint64 fat_load_a64 = 1073741824
+static uint64 fat_load_a64_set = 0
+static uint64 fat_stack_x86 = 4128768
+static uint64 fat_stack_x86_set = 0
+static uint64 fat_stack_a64 = 1082130432
+static uint64 fat_stack_a64_set = 0
+
+// Which architecture gets the UEFI/PE boot path. 0 = x86_64, 1 = arm64,
+// 254 = none (no PE in the file). 255 = the user did not say, so the composer
+// derives it and PRINTS what it derived.
+//
+// EXACTLY ONE, AND THAT IS A PROPERTY OF PE RATHER THAN A SHORTCUT: the COFF
+// header carries a single Machine value and firmware checks it, so one PE
+// cannot serve two processors. The flag therefore takes ONE arch, and asking
+// it for two is refused with that sentence rather than silently honouring the
+// last one.
+static uint64 fat_uefi_arch = 255
+static uint64 fat_uefi_set = 0
+
+// Slice-capture channel between compile() and the composer. compile() is
+// re-entrant (it calls set_target_arch/import_init/lexer_init/ast_init/
+// codegen_init/parser_init itself), so the composer just calls it once per
+// slice -- but compile() WRITES A FILE, and under --emit=fatimage the file it
+// would write is the fat image's own path, once per pass. fat_capture turns
+// that write into a copy into these three globals instead. See the hook at the
+// bottom of compile() for why the buffer is copied rather than borrowed.
+static uint64 fat_capture = 0
+static uint64 fat_cap_buf = 0
+static uint64 fat_cap_len = 0
+static uint64 fat_cap_entry = 0
+
 // Machine target (--target=esp32): 0 = none, 1 = ESP32 (Xtensa LX6 esp-image
 // at ESP32 load addresses). Orthogonal to target_os — --target= is overloaded:
 // OS names set target_os, machine names set this. Only meaningful with
@@ -7296,6 +7423,960 @@ fn target_os_flag_name(uint64 os) -> uint64 {
     return "linux"
 }
 
+// ===========================================================================
+// --emit=fatimage: ONE boot image with several boot paths.
+// ===========================================================================
+//
+// NOT POLYGLOT MACHINE CODE. That would be a stunt and it is not what the
+// problem needs. The observation that makes this tractable is:
+//
+//     OF THE FORMATS INVOLVED, ONLY arm64's `Image` EXECUTES FROM OFFSET 0,
+//     AND EVEN THERE BYTE 0 IS A BRANCH.
+//
+//   * arm64 `Image`  -- the loader places the file and jumps to its first
+//                       byte. `code0` is a branch, so it can reach anywhere
+//                       in the file.
+//   * x86 multiboot  -- the loader never looks at byte 0. It SCANS the first
+//                       8 KiB for a magic and then honours `entry_addr`.
+//   * PE / UEFI      -- firmware reads "MZ" at byte 0 and follows `e_lfanew`
+//                       at byte 60 to the real header.
+//
+// So this is several ENTRY INDIRECTIONS into several complete, independently
+// compiled slices. Each architecture carries the other's bytes as dead
+// weight, which is precisely what a fat binary is.
+//
+//     offset 0x0000   DOS stub / arm64 Image header -- THE SAME 64 BYTES
+//                       code0 = 0x91005A4D: its low half is "MZ" for PE, and
+//                               it decodes as `add x13, x18, #0x16` on arm64
+//                       code1 = b <arm64 slice entry>
+//                       image_size at 16, flags at 24, "ARM\x64" at 56
+//                       e_lfanew at 60 -> the PE header, where krc put it
+//     offset 0x0040   PE headers, byte-for-byte from --emit=uefi
+//     offset 0x0400   a standalone multiboot header, inside the 8 KiB scan
+//     offset 0x1000   UEFI .text, untouched (PointerToRawData is 0x1000)
+//     offset ...      the x86_64 multiboot slice   (4096-aligned)
+//     offset ...      the arm64 raw slice          (4096-aligned)
+//
+// THE OFFSET-0 COLLISION, AND THE CONSTANT THAT DISSOLVES IT. PE demands "MZ"
+// at byte 0; arm64 EXECUTES byte 0. Linux resolved this years ago and the
+// resolution is 0x91005A4D: one 32-bit word whose first two bytes spell MZ and
+// whose AArch64 meaning is an add into a scratch register. Decoded rather than
+// copied: sf=1, family 0b100010 (ADD immediate), shift=00, imm12=0x016, Rn=18,
+// Rd=13, i.e. `add x13, x18, #0x16` -- and x13 is scratch here because the
+// arm64 boot protocol hands over only x0 (the DTB pointer). arm64 executes it
+// and falls through to the branch at byte 4; a PE loader reads two characters
+// and jumps to e_lfanew.
+//
+// WHY THE UEFI SLICE IS THE BASE FILE. krc emits e_lfanew = 0x40 and one
+// section at PointerToRawData = 0x1000, so building the composite ON TOP of
+// that output leaves every PE file offset already correct and needs no
+// section-table rewriting. Only the DOS stub is overwritten, and a PE loader
+// reads nothing there but e_lfanew -- which is restored byte-for-byte.
+//
+// WHY THE HEADERS DO NOT COLLIDE. The arm64 header owns bytes 0-63 and the
+// composer ASSERTS that no 4-byte-aligned word anywhere before 0x400 equals
+// the multiboot magic (the "first magic found is ours" check below), so the
+// x86 scan cannot false-positive on it. The arm64 loader reads only those 64
+// bytes plus whatever code0 branches to, so nothing the x86 slice contains can
+// disturb it. Blind to each other by construction, not by luck.
+//
+// UEFI IS ONE ARCHITECTURE, AND THAT IS PE's PROPERTY, NOT A SHORTCUT. The
+// COFF header carries exactly one Machine value and firmware checks it, so one
+// PE cannot serve both processors. The default composition is therefore THREE
+// boot paths, not four: x86_64 multiboot, x86_64 UEFI, arm64 raw Image. An
+// arm64 UEFI boot would need a second PE and there is nowhere for its Machine
+// value to live.
+//
+// WHAT THE BOOT GATE CANNOT PROVE, said plainly rather than implied away.
+// QEMU reads the whole file regardless of `image_size` and regardless of the
+// multiboot `load_addr` patch, so booting cannot witness either field; they
+// are written because they are what the formats specify and what U-Boot and
+// the arm64 boot protocol do honour. The fields booting DOES witness are
+// code0/code1 (replace the branch with a NOP and the arm64 path dies while
+// x86_64 is untouched) and the multiboot `entry_addr`.
+
+// Index of the first `b` in a NUL-terminated string, or 0xFFFFFFFF. The three
+// flag values this feature parses are all "<name><separator><rest>" and the
+// separator is what tells the per-arch form apart from the plain one -- a
+// comma in --arch=, a colon in --slice= / --load-addr= / --stack-top=.
+//
+// FIRST occurrence, deliberately, and it matters for exactly one case:
+// `--slice=arm64:C:\build\slice.img` on Windows. Splitting on the last colon
+// would take the drive letter for the architecture name.
+fn fatimg_find_byte(uint64 s, uint64 b) -> uint64 {
+    uint64 i = 0
+    uint64 c = 1
+    while c != 0 {
+        uint64 p = s + i
+        unsafe { *(p as uint8) -> c }
+        if c == b { return i }
+        i = i + 1
+    }
+    return 0xFFFFFFFF
+}
+
+// Architecture id from a name slice of known length (no NUL to stop at, since
+// these names are embedded in a longer argument).
+//
+// THE SAME SPELLINGS THE SINGLE-ARCH --arch= ACCEPTS, and that is not
+// cosmetic: a user who has typed `--arch=amd64` for years and then writes
+// `--arch=amd64,arm64` must not be told amd64 is unknown. riscv32 and xtensa
+// are RECOGNISED here rather than falling into the unknown-name arm, so their
+// refusals can say why a fat image has no path for them instead of implying a
+// typo.
+fn fatimg_arch_from_name(uint64 s, uint64 len) -> uint64 {
+    if targets_name_eq(s, len, "x86_64") != 0 { return 0 }
+    if targets_name_eq(s, len, "x86-64") != 0 { return 0 }
+    if targets_name_eq(s, len, "amd64") != 0 { return 0 }
+    if targets_name_eq(s, len, "x64") != 0 { return 0 }
+    if targets_name_eq(s, len, "arm64") != 0 { return 1 }
+    if targets_name_eq(s, len, "aarch64") != 0 { return 1 }
+    if targets_name_eq(s, len, "riscv32") != 0 { return 2 }
+    if targets_name_eq(s, len, "xtensa") != 0 { return 3 }
+    return 0xFF
+}
+
+// The two "this architecture has no fat-image boot path" refusals, in ONE
+// place: --arch=, --slice= and --fat-uefi= all reach them and the wording must
+// not drift between the three. Each message carries a substring UNIQUE to its
+// arch, for the reason the --emit=uefi rows document -- a shared
+// "x86_64/arm64 only" half would let a defect that routed one arch to the
+// other's arm still pass a grep.
+fn fatimg_refuse_arch(uint64 a, uint64 flag) {
+    if a == 2 {
+        write(2, "error: ", 7)
+        write(2, flag, str_len(flag))
+        uint64 mr = " does not accept riscv32: a fat image is a composition of BOOT PATHS, and this container has two -- the x86_64 multiboot header and the arm64 Image header. There is no riscv32 boot path in it, and a slice nothing enters is dead weight with no way to reach it. Use --arch=riscv32 --freestanding for a standalone raw boot image\n"
+        write(2, mr, str_len(mr))
+        exit(1)
+    }
+    if a == 3 {
+        write(2, "error: ", 7)
+        write(2, flag, str_len(flag))
+        uint64 mx = " does not accept xtensa: a fat image is a composition of BOOT PATHS, and this container has two -- the x86_64 multiboot header and the arm64 Image header. The chip's loader reads neither. Use --arch=xtensa --freestanding (lx60 boot ELF) or --target=esp32 (esp-image) for a standalone image\n"
+        write(2, mx, str_len(mx))
+        exit(1)
+    }
+}
+
+// --arch=<a>,<b> -- the LIST form, reached only when a comma is present, so
+// every single-arch invocation this compiler has ever accepted takes the
+// existing chain untouched and is byte-identical by construction.
+fn parse_fat_arch_list(uint64 list) {
+    uint64 mask = 0
+    uint64 i = 0
+    uint64 c = 0
+    uint64 p0 = list
+    unsafe { *(p0 as uint8) -> c }
+    while c != 0 {
+        uint64 start = i
+        while c != 0 && c != 44 {
+            i = i + 1
+            uint64 pn = list + i
+            unsafe { *(pn as uint8) -> c }
+        }
+        uint64 tok = list + start
+        uint64 tlen = i - start
+        if tlen == 0 {
+            uint64 me = "error: --arch= has an empty element in its list: write the architectures separated by single commas, as --arch=x86_64,arm64\n"
+            write(2, me, str_len(me))
+            exit(1)
+        }
+        uint64 a = fatimg_arch_from_name(tok, tlen)
+        if a == 0xFF {
+            uint64 mu = "error: --arch= list contains an unknown architecture '"
+            write(2, mu, str_len(mu))
+            write(2, tok, tlen)
+            mu = "' (use x86_64|arm64)\n"
+            write(2, mu, str_len(mu))
+            exit(1)
+        }
+        fatimg_refuse_arch(a, "the --arch= list")
+        uint64 bit = 1 << a
+        if (mask & bit) != 0 {
+            uint64 md = "error: --arch= names '"
+            write(2, md, str_len(md))
+            write(2, tok, tlen)
+            md = "' twice: a fat image carries one slice per architecture, so a repeated name is either a typo for the other architecture or a request the container cannot express\n"
+            write(2, md, str_len(md))
+            exit(1)
+        }
+        mask = mask | bit
+        if c == 44 {
+            i = i + 1
+            uint64 pc = list + i
+            unsafe { *(pc as uint8) -> c }
+        }
+    }
+    fat_arch_mask = mask
+    fat_arch_list_set = 1
+}
+
+// --slice=<arch>:<file>
+//
+// WHY THIS EXISTS AT ALL, given that --emit=fatimage can compile the same
+// source once per architecture. The real consumer of this feature has a
+// DIFFERENT PROGRAM per architecture -- ApexRift's kernel is x86-only and its
+// arm64 slice is a separate source entirely -- so pure multi-pass cannot
+// express its actual case. Mixing the two is the normal shape: compile the
+// architecture the source is written for, adopt a prebuilt image for the
+// other.
+fn parse_fat_slice_arg(uint64 v) {
+    uint64 ci = fatimg_find_byte(v, 58)
+    if ci == 0xFFFFFFFF || ci == 0 {
+        uint64 mf = "error: --slice= wants <arch>:<file>, for example --slice=arm64:build/arm64.img: the architecture has to be named because the fat image places each slice at its own file offset and enters it through that architecture's own boot header\n"
+        write(2, mf, str_len(mf))
+        exit(1)
+    }
+    uint64 a = fatimg_arch_from_name(v, ci)
+    if a == 0xFF {
+        uint64 mu = "error: --slice= names an unknown architecture '"
+        write(2, mu, str_len(mu))
+        write(2, v, ci)
+        mu = "' (use x86_64|arm64)\n"
+        write(2, mu, str_len(mu))
+        exit(1)
+    }
+    fatimg_refuse_arch(a, "--slice=")
+    uint64 path = v + ci + 1
+    uint64 c0 = 0
+    unsafe { *(path as uint8) -> c0 }
+    if c0 == 0 {
+        uint64 mp = "error: --slice= has an empty file path after the architecture name\n"
+        write(2, mp, str_len(mp))
+        exit(1)
+    }
+    if a == 0 {
+        if fat_slice_x86 != 0 {
+            uint64 md = "error: --slice=x86_64: was given twice: a fat image has one x86_64 slice, so the second path would silently replace the first\n"
+            write(2, md, str_len(md))
+            exit(1)
+        }
+        fat_slice_x86 = path
+    } else {
+        if fat_slice_a64 != 0 {
+            uint64 md2 = "error: --slice=arm64: was given twice: a fat image has one arm64 slice, so the second path would silently replace the first\n"
+            write(2, md2, str_len(md2))
+            exit(1)
+        }
+        fat_slice_a64 = path
+    }
+    fat_slice_seen = 1
+}
+
+// --load-addr=<arch>:<addr> (kind 0) and --stack-top=<arch>:<addr> (kind 1).
+// Reached only when the value carries a colon, so the plain single-image forms
+// of both flags are untouched.
+fn parse_fat_addr_arg(uint64 v, uint64 ci, uint64 kind) {
+    uint64 a = fatimg_arch_from_name(v, ci)
+    if a == 0xFF {
+        uint64 mu = "error: the per-architecture form of --load-addr=/--stack-top= names an unknown architecture '"
+        write(2, mu, str_len(mu))
+        write(2, v, ci)
+        mu = "' (use x86_64|arm64)\n"
+        write(2, mu, str_len(mu))
+        exit(1)
+    }
+    fatimg_refuse_arch(a, "the per-architecture form of --load-addr=/--stack-top=")
+    if kind == 0 {
+        uint64 lv = parse_load_addr(v + ci + 1)
+        if a == 0 {
+            fat_load_x86 = lv
+            fat_load_x86_set = 1
+        } else {
+            fat_load_a64 = lv
+            fat_load_a64_set = 1
+        }
+    } else {
+        uint64 sv = parse_stack_top(v + ci + 1)
+        if a == 0 {
+            fat_stack_x86 = sv
+            fat_stack_x86_set = 1
+        } else {
+            fat_stack_a64 = sv
+            fat_stack_a64_set = 1
+        }
+    }
+}
+
+// --fat-uefi=<arch>|none
+fn parse_fat_uefi_arg(uint64 v) {
+    uint64 comma = fatimg_find_byte(v, 44)
+    if comma != 0xFFFFFFFF {
+        uint64 mc = "error: --fat-uefi= takes ONE architecture, never a list: a PE's COFF header carries exactly one Machine value and firmware checks it, so a single file cannot be a UEFI application for two processors. A fat image is therefore PE for at most one architecture -- pick the one whose firmware you intend to boot under, and reach the other through its own boot path (the x86_64 multiboot header or the arm64 Image header), or pass --fat-uefi=none to leave the PE out altogether\n"
+        write(2, mc, str_len(mc))
+        exit(1)
+    }
+    uint64 len = str_len(v)
+    if targets_name_eq(v, len, "none") != 0 {
+        fat_uefi_arch = 254
+        fat_uefi_set = 1
+    } else {
+        uint64 a = fatimg_arch_from_name(v, len)
+        if a == 0xFF {
+            uint64 mu = "error: --fat-uefi= wants x86_64, arm64 or none, not '"
+            write(2, mu, str_len(mu))
+            write(2, v, len)
+            mu = "'\n"
+            write(2, mu, str_len(mu))
+            exit(1)
+        }
+        fatimg_refuse_arch(a, "--fat-uefi=")
+        fat_uefi_arch = a
+        fat_uefi_set = 1
+    }
+}
+
+// Little-endian stores/loads, byte at a time. Deliberately not a `*(p as
+// uint32)` store: the composer writes into a freshly allocated composite at
+// offsets it computed itself, and a byte loop is endian-explicit and has no
+// alignment question to get wrong on a host this compiler also targets.
+fn fatimg_put_u32(uint64 buf, uint64 off, uint64 v) {
+    uint64 i = 0
+    while i < 4 {
+        uint64 p = buf + off + i
+        uint64 bv = (v >> (i * 8)) & 0xFF
+        uint8 bb = bv
+        unsafe { *(p as uint8) = bb }
+        i = i + 1
+    }
+}
+
+fn fatimg_put_u64(uint64 buf, uint64 off, uint64 v) {
+    uint64 i = 0
+    while i < 8 {
+        uint64 p = buf + off + i
+        uint64 bv = (v >> (i * 8)) & 0xFF
+        uint8 bb = bv
+        unsafe { *(p as uint8) = bb }
+        i = i + 1
+    }
+}
+
+fn fatimg_get_u8(uint64 buf, uint64 off) -> uint64 {
+    uint64 p = buf + off
+    uint64 v = 0
+    unsafe { *(p as uint8) -> v }
+    return v
+}
+
+fn fatimg_get_u32(uint64 buf, uint64 off) -> uint64 {
+    uint64 v = 0
+    uint64 i = 0
+    while i < 4 {
+        uint64 b = fatimg_get_u8(buf, off + i)
+        v = v | (b << (i * 8))
+        i = i + 1
+    }
+    return v
+}
+
+fn fatimg_align_up(uint64 v, uint64 a) -> uint64 {
+    uint64 r = v & (a - 1)
+    if r == 0 { return v }
+    return v + a - r
+}
+
+// Print "<label> <decimal>" -- the report below is decimal throughout, for the
+// reason the `image:` report line states: fmt_uint exists, write_hex32 caps at
+// 32 bits, load addresses are 64-bit, and one radix beats two.
+fn fatimg_print_num(uint64 label, uint64 v) {
+    uint8[64] nb
+    write(1, label, str_len(label))
+    uint64 n = fmt_uint(nb, v)
+    write(1, nb, n)
+}
+
+// Same, to stderr, for the refusals that need to name a number.
+fn fatimg_err_num(uint64 label, uint64 v) {
+    uint8[64] nb
+    write(2, label, str_len(label))
+    uint64 n = fmt_uint(nb, v)
+    write(2, nb, n)
+}
+
+fn fatimg_die(uint64 msg) {
+    write(2, msg, str_len(msg))
+    exit(1)
+}
+
+// The multiboot scan, done exactly the way a multiboot LOADER does it: every
+// 4-byte-aligned offset in the first 8192 bytes, first hit wins. Returning the
+// first hit rather than "the one we expect" is what makes the composer's
+// "the first magic in the file is OURS" assertion meaningful -- a check that
+// looked only at 0x400 could not see a magic that shadowed it.
+fn fatimg_find_multiboot(uint64 buf, uint64 len) -> uint64 {
+    uint64 lim = len
+    if lim > 8192 { lim = 8192 }
+    uint64 off = 0
+    while off + 4 <= lim {
+        if fatimg_get_u32(buf, off) == 0x1BADB002 {
+            return off
+        }
+        off = off + 4
+    }
+    return 0xFFFFFFFF
+}
+
+// Encode `b #delta`, delta in BYTES relative to the branch word itself.
+//
+// Only forward branches occur here (the branch lives in the first 8 bytes and
+// every slice is after it), so no sign handling is needed and none is written:
+// a negative delta would arrive as a huge unsigned value and be refused by the
+// range check, which is the correct outcome rather than a silently wrapped
+// encoding. B's range is +-128 MiB; the positive half is 2^27 bytes.
+fn fatimg_a64_b(uint64 delta) -> uint64 {
+    if (delta & 3) != 0 {
+        uint64 m4 = "error: internal: the arm64 slice's entry is not 4-byte aligned, so the Image header's branch cannot reach it: every AArch64 instruction is a 4-byte word and B encodes its target as a word count, so a target at an odd byte offset is not expressible. This is a composer bug rather than anything the command line can cause -- both the slice offset and the entry offset inside it are 4096-aligned and word-aligned respectively\n"
+        fatimg_die(m4)
+    }
+    if delta >= 134217728 {
+        uint64 mr = "error: the arm64 slice sits more than 128 MiB into the fat image, which is past the range of the Image header's branch: AArch64's B encodes a signed 26-bit word displacement, so code0/code1 can only reach +-128 MiB. Shrink the x86_64 slice that precedes it, or build the arm64 half separately and boot it on its own\n"
+        fatimg_die(mr)
+    }
+    return 0x14000000 | ((delta >> 2) & 0x03FFFFFF)
+}
+
+// Length of the last file fatimg_read_slice() read. A global rather than an
+// out-parameter because there is no address-of operator for a local here, and
+// threading a scratch slot through the call would be more machinery than the
+// two call sites are worth.
+static uint64 fatimg_read_len = 0
+
+fn fatimg_read_slice(uint64 path) -> uint64 {
+    uint64 fd = file_open(path, 0)
+    if fd >= 0xFFFFFFFF {
+        uint64 mo = "error: --slice=: cannot open '"
+        write(2, mo, str_len(mo))
+        write(2, path, str_len(path))
+        mo = "': a --slice= file must already exist -- it is a prebuilt raw image the fat image adopts instead of compiling that architecture from the source on the command line\n"
+        write(2, mo, str_len(mo))
+        exit(1)
+    }
+    uint64 sz = file_size(fd)
+    if sz == 0 {
+        file_close(fd)
+        uint64 mz = "error: --slice=: '"
+        write(2, mz, str_len(mz))
+        write(2, path, str_len(path))
+        mz = "' is empty: a zero-byte slice would be composed into the image as a boot path that enters nothing\n"
+        write(2, mz, str_len(mz))
+        exit(1)
+    }
+    uint64 buf = alloc(sz)
+    file_read(fd, buf, sz)
+    file_close(fd)
+    fatimg_read_len = sz
+    return buf
+}
+
+// Where the entry stub sits INSIDE an x86_64 slice, derived from the slice's
+// own multiboot header rather than from the build that produced it.
+//
+// WHY DERIVED AND NOT REMEMBERED. A slice can arrive two ways -- compiled here
+// (in which case compile() reported its entry) or handed over with --slice=
+// (in which case nothing here saw the build at all). One derivation that works
+// for both is better than two paths that agree today: the compiled case then
+// CROSS-CHECKS the derivation against the reported number, which is a test of
+// the derivation the --slice= case cannot perform on itself.
+//
+// The arithmetic: krc writes header_addr = load + <header's own file offset>
+// and entry_addr = load + <stub's file offset>, so
+//     stub_offset = entry_addr - header_addr + header_offset_in_slice
+// with the load address cancelling out entirely. That is the whole reason this
+// works on a slice built for a completely different load address.
+// The load address the x86_64 slice was BUILT for, read out of its own
+// multiboot header by the function below. Kept because the x86_64 slice is the
+// one thing in this container that is NOT position-independent -- see the
+// refusal in the composer.
+static uint64 fatimg_x86_slice_load = 0
+
+fn fatimg_x86_entry_offset(uint64 buf, uint64 len, uint64 what) -> uint64 {
+    uint64 inner = fatimg_find_multiboot(buf, len)
+    if inner == 0xFFFFFFFF {
+        uint64 mn = "error: the x86_64 slice ("
+        write(2, mn, str_len(mn))
+        write(2, what, str_len(what))
+        mn = ") carries no multiboot header in its first 8 KiB, so there is nothing to read its entry point out of. A slice for the multiboot boot path must be built with --emit=image --stack-top=, which is the flag that emits the multiboot header and the long-mode trampoline behind it\n"
+        write(2, mn, str_len(mn))
+        exit(1)
+    }
+    uint64 hdr_addr = fatimg_get_u32(buf, inner + 12)
+    uint64 ent_addr = fatimg_get_u32(buf, inner + 28)
+    // krc's stub writes load_addr = the --load-addr the slice was built for,
+    // i.e. the address of the slice's own first byte. Published for the
+    // composer's placement check.
+    fatimg_x86_slice_load = fatimg_get_u32(buf, inner + 16)
+    if ent_addr < hdr_addr {
+        uint64 mb = "error: the x86_64 slice ("
+        write(2, mb, str_len(mb))
+        write(2, what, str_len(what))
+        mb = ") has a multiboot entry_addr below its own header_addr, so its entry does not lie inside it. Either the header was never patched (entry_addr 0 is what an unpatched krc image carries) or the file is not the image it claims to be\n"
+        write(2, mb, str_len(mb))
+        exit(1)
+    }
+    uint64 off = ent_addr - hdr_addr + inner
+    if off >= len {
+        uint64 mp = "error: the x86_64 slice ("
+        write(2, mp, str_len(mp))
+        write(2, what, str_len(what))
+        mp = ") puts its multiboot entry past its own last byte, so composing it would produce a boot path that jumps outside the file\n"
+        write(2, mp, str_len(mp))
+        exit(1)
+    }
+    return off
+}
+
+// The same question for arm64, answered out of the 64-byte Linux `Image`
+// header the slice must carry.
+//
+// WHY --image-header IS REQUIRED OF AN arm64 SLICE. A headerless arm64 image
+// records its entry NOWHERE -- the `image:` report line is the only place it
+// ever existed, and that line is gone by the time a --slice= file is handed
+// over. The Image header's code0 branch IS that record, written into the file,
+// so requiring the header is requiring the slice to be self-describing. The
+// x86_64 side gets this for free: its multiboot header is already a record of
+// the same fact, which is why the two rules look different and are the same
+// rule.
+fn fatimg_a64_entry_offset(uint64 buf, uint64 len, uint64 what) -> uint64 {
+    if len < 64 {
+        uint64 ms = "error: the arm64 slice ("
+        write(2, ms, str_len(ms))
+        write(2, what, str_len(what))
+        ms = ") is shorter than the 64-byte arm64 Image header it must begin with\n"
+        write(2, ms, str_len(ms))
+        exit(1)
+    }
+    if fatimg_get_u32(buf, 56) != 0x644D5241 {
+        uint64 mm = "error: the arm64 slice ("
+        write(2, mm, str_len(mm))
+        write(2, what, str_len(what))
+        mm = ") does not begin with an arm64 Image header (magic 0x644d5241 at offset 56). A fat image reads the slice's entry point out of that header's code0 branch, because nothing else in a raw arm64 image records where to start -- build the slice with --emit=image --image-header --stack-top=\n"
+        write(2, mm, str_len(mm))
+        exit(1)
+    }
+    uint64 code0 = fatimg_get_u32(buf, 0)
+    if (code0 >> 26) != 5 {
+        uint64 mb = "error: the arm64 slice ("
+        write(2, mb, str_len(mb))
+        write(2, what, str_len(what))
+        mb = ") has an Image header whose code0 is not an unconditional branch, so its entry point cannot be read out of it. krc writes `b <entry stub>` there only when --stack-top= asked for a stub; a header on a stub-less image points at nothing\n"
+        write(2, mb, str_len(mb))
+        exit(1)
+    }
+    uint64 off = (code0 & 0x03FFFFFF) * 4
+    if off >= len {
+        uint64 mp = "error: the arm64 slice ("
+        write(2, mp, str_len(mp))
+        write(2, what, str_len(what))
+        mp = ") has an Image header branching past its own last byte, so composing it would produce a boot path that jumps outside the file\n"
+        write(2, mp, str_len(mp))
+        exit(1)
+    }
+    return off
+}
+
+// Set the four --emit=image / --emit=uefi globals compile() reads, from ONE
+// place, before every pass. Every pass sets all four, even the three it wants
+// off, so that no pass can inherit the previous pass's flags.
+//
+// THE RESETS ARE INERT TODAY AND ARE KEPT ANYWAY, and the difference matters
+// enough to say which: MEASURED by removing them (this feature's mutation M14)
+// -- the composed image is BYTE-IDENTICAL. It has to be, given the current
+// order: all four globals are refused at flag-validation time under
+// --emit=fatimage, so they are 0 when the composer starts, and the passes run
+// UEFI -> x86_64 -> arm64, which happens to be increasing in what it turns on.
+// Nothing inherits anything wrong because nothing precedes it that set
+// anything wrong.
+//
+// WHAT THEY GUARD IS THE ORDER, NOT THIS BUILD. stack_top_set turns on the
+// x86_64 multiboot stub and image_header_set turns on the arm64 Image header,
+// and both gates are `img_raw && arch && flag` where emit_mode 9 (UEFI) is
+// img_raw -- so a UEFI pass that ran AFTER the arm64 pass, with arch arm64
+// (which --fat-uefi=arm64 selects), would emit 64 bytes of boot header into a
+// PE section. That is a reordering away, not a defect here, and an explicit
+// reset is cheaper than the comment explaining why the order is load-bearing.
+fn fatimg_set_pass_flags(uint64 ld, uint64 ld_set, uint64 sp, uint64 sp_set, uint64 hdr) {
+    load_addr = ld
+    load_addr_set = ld_set
+    stack_top = sp
+    stack_top_set = sp_set
+    image_header_set = hdr
+    reset_vector_set = 0
+}
+
+fn compile_fatimage(uint64 input_path, uint64 output_path) {
+    // ---- pass 1: the UEFI slice, which is also the base file -------------
+    //
+    // FIRST, because its length fixes where every other slice lands and
+    // therefore what --load-addr each of them is compiled for. The dependency
+    // runs one way only: the PE knows nothing about the slices appended after
+    // it (its SizeOfImage and section table cover only its own bytes), while
+    // each raw slice must be told an address that depends on the PE's length.
+    uint64 base_buf = 0
+    uint64 base_len = 0
+    uint64 e_lfanew = 0
+    uint64 uefi_len = 0
+    if fat_uefi_arch < 2 {
+        fat_capture = 1
+        fatimg_set_pass_flags(0, 0, 0, 0, 0)
+        compile(input_path, output_path, fat_uefi_arch, 9)
+        base_buf = fat_cap_buf
+        base_len = fat_cap_len
+        uefi_len = fat_cap_len
+        if fatimg_get_u8(base_buf, 0) != 77 || fatimg_get_u8(base_buf, 1) != 90 {
+            uint64 mz = "error: internal: the --emit=uefi slice does not begin with 'MZ', so the fat image's shared first 64 bytes cannot be both a DOS stub and an arm64 Image header\n"
+            fatimg_die(mz)
+        }
+        e_lfanew = fatimg_get_u32(base_buf, 60)
+        if e_lfanew + 4 > base_len {
+            fatimg_err_num("error: internal: the --emit=uefi slice's e_lfanew points at file offset ", e_lfanew)
+            uint64 me = ", which is past its own last byte\n"
+            fatimg_die(me)
+        }
+        if fatimg_get_u8(base_buf, e_lfanew) != 80 || fatimg_get_u8(base_buf, e_lfanew + 1) != 69 {
+            uint64 mp = "error: internal: the --emit=uefi slice has no PE signature where its own e_lfanew points, so the composite would carry a DOS stub leading nowhere\n"
+            fatimg_die(mp)
+        }
+        // THE OVERLAP CHECK, and the reason e_lfanew is read before the arm64
+        // header is written rather than after. The arm64 header owns bytes
+        // 0-63 and e_lfanew itself lives in its reserved word at 60, so the PE
+        // signature must begin at 64 or later or the two headers are fighting
+        // for the same bytes. krc emits 0x40 exactly; this asserts it rather
+        // than assuming it, because the number is the PE writer's choice and
+        // nothing else in this file would notice it moving.
+        if e_lfanew < 64 {
+            fatimg_err_num("error: the --emit=uefi slice puts its PE header at file offset ", e_lfanew)
+            uint64 ml = ", which overlaps the 64-byte arm64 Image header the fat image writes over the DOS stub. The PE signature must begin at 64 or later. Pass --fat-uefi=none to drop the UEFI boot path, or drop arm64 from --arch= so the first 64 bytes are the DOS stub alone\n"
+            fatimg_die(ml)
+        }
+        if base_len < 4096 {
+            fatimg_err_num("error: the --emit=uefi slice is only ", base_len)
+            uint64 ms = " bytes, so it has no section data at file offset 4096 and the fat image's layout assumption -- PE headers below 4096, everything else above -- does not hold for it\n"
+            fatimg_die(ms)
+        }
+    } else {
+        // NO PE. The prologue is synthesised instead of adopted: 4096 zero
+        // bytes holding the arm64 Image header at 0 and the multiboot header
+        // at 0x400, i.e. exactly the shape the PE base already has. Padded to
+        // 4096 for the same reason every slice is -- arm64's ADRP page
+        // arithmetic is baked at compile time and only survives a
+        // page-congruent placement.
+        base_len = 4096
+        base_buf = alloc(base_len)
+        uint64 zi = 0
+        while zi < base_len {
+            uint64 zp = base_buf + zi
+            uint8 zb = 0
+            unsafe { *(zp as uint8) = zb }
+            zi = zi + 1
+        }
+    }
+
+    // ---- pass 2: the x86_64 multiboot slice ------------------------------
+    uint64 mb_off = fatimg_align_up(base_len, 4096)
+    uint64 x86_load = fat_load_x86 + mb_off
+    uint64 x86_buf = 0
+    uint64 x86_len = 0
+    uint64 x86_entry = 0
+    uint64 x86_what = "compiled from the source on the command line"
+    if fat_slice_x86 != 0 {
+        x86_buf = fatimg_read_slice(fat_slice_x86)
+        x86_len = fatimg_read_len
+        x86_what = fat_slice_x86
+        x86_entry = fatimg_x86_entry_offset(x86_buf, x86_len, x86_what)
+    } else {
+        // The trampoline's own two bounds, re-checked on the COMPUTED address.
+        // The user set a base; the composer added an offset to it; the sum is
+        // what the flag validation would have checked had it been able to see
+        // it, and it runs before the compile rather than after so a refusal
+        // costs nothing.
+        if x86_load < 16384 {
+            fatimg_err_num("error: the x86_64 slice would be loaded at ", x86_load)
+            uint64 m1 = " (--load-addr=x86_64:<base> plus the slice's offset in the file), and the x86_64 self-boot trampoline builds its identity-map page tables at physical 0x1000-0x4000 and zeroes that whole range -- an image loaded there is overwritten by its own boot code before it runs. Raise --load-addr=x86_64: to at least 0x4000\n"
+            fatimg_die(m1)
+        }
+        if x86_load >= 1073741824 {
+            fatimg_err_num("error: the x86_64 slice would be loaded at ", x86_load)
+            uint64 m2 = " (--load-addr=x86_64:<base> plus the slice's offset in the file), and the x86_64 self-boot trampoline's identity map is a single 512-entry page directory of 2 MiB pages covering exactly the first 1 GiB -- an image at or above that address is unmapped the instant paging is enabled. Lower --load-addr=x86_64:\n"
+            fatimg_die(m2)
+        }
+        fat_capture = 1
+        fatimg_set_pass_flags(x86_load, 1, fat_stack_x86, 1, 0)
+        compile(input_path, output_path, 0, 8)
+        x86_buf = fat_cap_buf
+        x86_len = fat_cap_len
+        x86_entry = fatimg_x86_entry_offset(x86_buf, x86_len, x86_what)
+        // THE CROSS-CHECK the --slice= case cannot make on itself. Two
+        // independent answers to "where does this slice start executing" --
+        // one from compile()'s fn_lookup, one decoded out of the bytes it
+        // emitted -- and if they ever disagree the derivation is reading the
+        // wrong field of the wrong header and every --slice= build is silently
+        // wrong too.
+        if x86_entry != fat_cap_entry {
+            fatimg_err_num("error: internal: the x86_64 slice's multiboot header says its entry is at offset ", x86_entry)
+            fatimg_err_num(" but the compiler reported ", fat_cap_entry)
+            uint64 mx = ". These are two readings of the same fact and they must agree; the derivation from the multiboot header is what a --slice= file is composed with, so a disagreement here means every --slice= x86_64 build is placing the entry wrongly as well\n"
+            fatimg_die(mx)
+        }
+    }
+
+    // THE x86_64 SLICE IS NOT POSITION-INDEPENDENT, and this is the one place
+    // that fact bites. Everything else in this container relocates: x86_64 code
+    // is RIP-relative, arm64 code is PIC modulo 4 KiB and every slice lands on
+    // a page boundary, and --load-addr is documented as validated-and-reported,
+    // never embedded. ONE IMMEDIATE BREAKS THAT: the x86_64 self-boot
+    // trampoline ends in `movabs $entry,%rax; call *%rax`, and that imm64 is
+    // patched with load_addr + <the entry's file offset> -- an absolute
+    // address, baked at build time, because a 32-bit trampoline cannot form a
+    // RIP-relative reference to a 64-bit target.
+    //
+    // MEASURED, not reasoned: an x86_64 slice built with --load-addr=0x20000000
+    // and composed at 0x402000 produced a fat image whose arm64 path booted
+    // normally and whose x86_64 path went silent -- exit 0, a valid-looking
+    // artifact, and a `call` into unmapped memory. That is precisely the shape
+    // this whole flag surface refuses everywhere else.
+    //
+    // A COMPILED SLICE ALWAYS PASSES: the composer chose the address and passed
+    // it to compile(). The check is still run for it, because it costs nothing
+    // and because it is the assertion that the derivation above reads the field
+    // it thinks it does.
+    //
+    // The remedy is a rebuild, and the message carries the exact number, so the
+    // chicken-and-egg (the offset depends on how long the UEFI slice turned out
+    // to be) is resolved by running the command once and reading it off.
+    if fatimg_x86_slice_load != x86_load {
+        fatimg_err_num("error: the x86_64 slice was built for load address ", fatimg_x86_slice_load)
+        fatimg_err_num(" but the fat image places it at ", x86_load)
+        uint64 mpl = ". Unlike everything else in this container the x86_64 slice is not position-independent: its self-boot trampoline ends in `movabs $entry,%rax; call *%rax` and that address is baked in at build time, so a slice composed anywhere else calls into memory nothing mapped -- silently, at exit 0. Rebuild the slice with --load-addr= set to the second number above (it is the file's x86_64 load base plus the slice's offset in the file, both of which this line has just told you)\n"
+        fatimg_die(mpl)
+    }
+
+    // ---- pass 3: the arm64 raw slice -------------------------------------
+    uint64 arm_off = fatimg_align_up(mb_off + x86_len, 4096)
+    uint64 a64_load = fat_load_a64 + arm_off
+    uint64 a64_buf = 0
+    uint64 a64_len = 0
+    uint64 a64_entry = 0
+    uint64 a64_what = "compiled from the source on the command line"
+    if fat_slice_a64 != 0 {
+        a64_buf = fatimg_read_slice(fat_slice_a64)
+        a64_len = fatimg_read_len
+        a64_what = fat_slice_a64
+        a64_entry = fatimg_a64_entry_offset(a64_buf, a64_len, a64_what)
+    } else {
+        if (a64_load & 4095) != 0 {
+            fatimg_err_num("error: the arm64 slice would be loaded at ", a64_load)
+            uint64 ma = ", which is not 4096-aligned: ADRP page arithmetic is baked at compile time and only survives a page-aligned shift. Every slice offset inside a fat image is 4096-aligned, so this can only come from a --load-addr=arm64:<base> that is not\n"
+            fatimg_die(ma)
+        }
+        fat_capture = 1
+        // --image-header IS ON for this pass, and it is not decoration. The
+        // composer reads the slice's entry point back out of the header's
+        // code0 branch, using the SAME code path a --slice= file goes through,
+        // so the two cases cannot drift apart -- and the cross-check below
+        // then proves that path against compile()'s own answer. The 64 bytes
+        // also make the slice independently bootable, which is what makes
+        // `--slice=arm64:<that file>` a thing a user can actually do next.
+        //
+        // The header's image_size covers the SLICE, not the fat image. Both
+        // numbers are right about their own file: a loader handed the slice
+        // alone reserves the slice, and a loader handed the fat image reads
+        // the header at offset 0, whose image_size the composer sets to the
+        // whole composite below.
+        fatimg_set_pass_flags(a64_load, 1, fat_stack_a64, 1, 1)
+        compile(input_path, output_path, 1, 8)
+        a64_buf = fat_cap_buf
+        a64_len = fat_cap_len
+        a64_entry = fatimg_a64_entry_offset(a64_buf, a64_len, a64_what)
+        if a64_entry != fat_cap_entry {
+            fatimg_err_num("error: internal: the arm64 slice's Image header branches to offset ", a64_entry)
+            fatimg_err_num(" but the compiler reported its entry at ", fat_cap_entry)
+            uint64 mx2 = ". These are two readings of the same fact and they must agree; the decode from code0 is what a --slice= file is composed with, so a disagreement here means every --slice= arm64 build is placing the entry wrongly as well\n"
+            fatimg_die(mx2)
+        }
+    }
+    fat_capture = 0
+
+    // ---- compose ----------------------------------------------------------
+    uint64 total = arm_off + a64_len
+    uint64 img = alloc(total)
+    uint64 zi2 = 0
+    while zi2 < total {
+        uint64 zp2 = img + zi2
+        uint8 zb2 = 0
+        unsafe { *(zp2 as uint8) = zb2 }
+        zi2 = zi2 + 1
+    }
+    memcpy(img, base_buf, base_len)
+    memcpy(img + mb_off, x86_buf, x86_len)
+    memcpy(img + arm_off, a64_buf, a64_len)
+
+    // WHERE THE STANDALONE MULTIBOOT HEADER GOES, ONCE. Every use below reads
+    // this variable, and that is not tidiness: the first draft wrote 1024 into
+    // the bounds check, into the diagnostic that reports the offending offset,
+    // and into each of the eight field stores separately. A mutation that moved
+    // the header (run during this feature's own mutation testing) then refused
+    // correctly and NAMED THE WRONG OFFSET, because the check and the message
+    // were two literals that no longer agreed.
+    //
+    // 4-byte aligned and inside the 8 KiB multiboot scan window; past the PE
+    // headers krc emits (which end well before 0x200) and below the UEFI
+    // section data at 4096.
+    uint64 mb_hdr_off = 1024
+    // The 32 bytes the header is about to occupy must be padding, not something
+    // the PE cares about. Checked as "already zero" rather than reasoned about
+    // from the PE layout: the section table's end is a function of the PE
+    // writer's choices, and a future one that grew past mb_hdr_off would
+    // otherwise be silently overwritten here.
+    uint64 pi = 0
+    while pi < 32 {
+        if fatimg_get_u8(img, mb_hdr_off + pi) != 0 {
+            fatimg_err_num("error: the fat image's multiboot header would overwrite a non-zero byte at file offset ", mb_hdr_off + pi)
+            uint64 mo2 = ", which is inside the PE headers rather than the padding after them. The multiboot header must lie at a 4-byte-aligned offset inside the first 8 KiB and below the UEFI section data at 4096; there is no room for it in this PE\n"
+            fatimg_die(mo2)
+        }
+        pi = pi + 1
+    }
+    // Asserted rather than left to the reader: the header is 32 bytes and the
+    // UEFI section data starts at 4096, so a future relocation of either would
+    // collide silently -- the multiboot loader would read a header that
+    // overlaps live code and honour whatever the overlap happened to spell.
+    if mb_hdr_off + 32 > 4096 {
+        uint64 mc = "error: internal: the fat image's multiboot header collides with the UEFI section data at file offset 4096\n"
+        fatimg_die(mc)
+    }
+    if (mb_hdr_off & 3) != 0 {
+        uint64 ma4 = "error: internal: the fat image's multiboot header is not 4-byte aligned, and a multiboot loader only scans 4-byte-aligned offsets -- it would never find it\n"
+        fatimg_die(ma4)
+    }
+
+    // The standalone multiboot header. The one INSIDE the x86_64 slice sits
+    // far past the 8 KiB scan window in any realistic image, so the scan would
+    // never reach it; this is the copy the loader actually finds.
+    //
+    // THE ONE FIELD THAT IS NOT THE SLICE's. header_addr and entry_addr are
+    // the slice's own values shifted to where the slice actually landed, but
+    // load_addr is the BASE OF THE WHOLE FILE, so the loader pulls in every
+    // byte including the arm64 half. Multiboot computes the file offset of
+    // load_addr as (header's offset in file) - (header_addr - load_addr),
+    // which with these three values comes to exactly zero.
+    uint64 mb_flags = 0x00010000
+    uint64 mb_ck = 0xFFFFFFFF - (0x1BADB002 + mb_flags) + 1
+    fatimg_put_u32(img, mb_hdr_off, 0x1BADB002)
+    fatimg_put_u32(img, mb_hdr_off + 4, mb_flags)
+    fatimg_put_u32(img, mb_hdr_off + 8, mb_ck & 0xFFFFFFFF)
+    fatimg_put_u32(img, mb_hdr_off + 12, fat_load_x86 + mb_hdr_off)
+    fatimg_put_u32(img, mb_hdr_off + 16, fat_load_x86)
+    fatimg_put_u32(img, mb_hdr_off + 20, 0)
+    fatimg_put_u32(img, mb_hdr_off + 24, 0)
+    fatimg_put_u32(img, mb_hdr_off + 28, fat_load_x86 + mb_off + x86_entry)
+
+    // The shared 64 bytes. Only the DOS stub is touched, and e_lfanew is put
+    // back byte-for-byte -- a PE loader reads nothing else here.
+    //
+    // TWO SHAPES, because without a PE there is no "MZ" to preserve and
+    // pretending otherwise would put a two-character lie at byte 0 of a file
+    // no firmware will ever read. With a PE the branch has to move to code1,
+    // since code0 is spoken for; without one it sits at code0 and code1 is
+    // zero (`udf #0`, which faults loudly rather than hanging if anything ever
+    // reaches it -- the same choice the --image-header block makes for its own
+    // unpatched placeholders).
+    if fat_uefi_arch < 2 {
+        fatimg_put_u32(img, 0, 0x91005A4D)
+        fatimg_put_u32(img, 4, fatimg_a64_b(arm_off + a64_entry - 4))
+    } else {
+        fatimg_put_u32(img, 0, fatimg_a64_b(arm_off + a64_entry))
+        fatimg_put_u32(img, 4, 0)
+    }
+    fatimg_put_u64(img, 8, 0)              // text_offset: load anywhere
+    fatimg_put_u64(img, 16, total)         // image_size: the WHOLE composite
+    fatimg_put_u64(img, 24, 10)            // flags: LE, 4 KiB pages, anywhere
+    fatimg_put_u64(img, 32, 0)
+    fatimg_put_u64(img, 40, 0)
+    fatimg_put_u64(img, 48, 0)
+    fatimg_put_u32(img, 56, 0x644D5241)    // magic "ARM\x64"
+    fatimg_put_u32(img, 60, e_lfanew)      // restored, or 0 with no PE
+
+    // THE LAST INVARIANT, AND THE ONE THAT COULD NOT BE CHECKED EARLIER: a
+    // multiboot loader takes the FIRST magic it finds, so the header written
+    // above is only the one that gets used if nothing before it in the file
+    // happens to spell 0x1BADB002 on a 4-byte boundary. The arm64 header, the
+    // DOS stub and the PE headers all sit in front of it. Run on the FINISHED
+    // bytes, after everything is in place, because that is the only state a
+    // loader ever sees.
+    uint64 first = fatimg_find_multiboot(img, total)
+    if first != mb_hdr_off {
+        fatimg_err_num("error: the first multiboot magic in the composed image is at file offset ", first)
+        fatimg_err_num(" but the fat image's own header is at ", mb_hdr_off)
+        uint64 mf = ". A multiboot loader takes the first magic it finds on a 4-byte boundary within the first 8 KiB, so it would enter through a header this compiler did not write -- something ahead of offset 1024 (the arm64 Image header, the DOS stub or the PE headers) spells 0x1badb002\n"
+        fatimg_die(mf)
+    }
+
+    // ---- write ------------------------------------------------------------
+    uint64 fd = open_output_or_die(output_path)
+    file_write(fd, img, total)
+    file_close(fd)
+
+    // ---- report -----------------------------------------------------------
+    //
+    // A REQUIRED OUTPUT, not a convenience, for the reason the `image:` line
+    // gives: a fat image has no single entry point, and the file offsets of
+    // its slices are recorded in no other place. The per-slice `image:` and
+    // `uefi:` lines printed above are each pass's own record; these are the
+    // composite's.
+    uint64 rm = "fatimage: "
+    write(1, rm, str_len(rm))
+    write(1, output_path, str_len(output_path))
+    fatimg_print_num(" bytes=", total)
+    write(1, "\n", 1)
+
+    rm = "  x86_64 uefi     : "
+    write(1, rm, str_len(rm))
+    if fat_uefi_arch == 0 {
+        fatimg_print_num("pe_at=", e_lfanew)
+        fatimg_print_num(" text_at=", 4096)
+        fatimg_print_num(" bytes=", uefi_len)
+    } else {
+        rm = "none"
+        write(1, rm, str_len(rm))
+    }
+    write(1, "\n", 1)
+    if fat_uefi_arch == 1 {
+        rm = "  arm64 uefi      : "
+        write(1, rm, str_len(rm))
+        fatimg_print_num("pe_at=", e_lfanew)
+        fatimg_print_num(" text_at=", 4096)
+        fatimg_print_num(" bytes=", uefi_len)
+        write(1, "\n", 1)
+    }
+
+    rm = "  x86_64 multiboot: "
+    write(1, rm, str_len(rm))
+    fatimg_print_num("file=", mb_off)
+    fatimg_print_num(" bytes=", x86_len)
+    fatimg_print_num(" hdr=", mb_hdr_off)
+    fatimg_print_num(" entry=", fat_load_x86 + mb_off + x86_entry)
+    fatimg_print_num(" load=", fat_load_x86)
+    rm = "  ("
+    write(1, rm, str_len(rm))
+    write(1, x86_what, str_len(x86_what))
+    rm = ")\n"
+    write(1, rm, str_len(rm))
+
+    rm = "  arm64 image     : "
+    write(1, rm, str_len(rm))
+    fatimg_print_num("file=", arm_off)
+    fatimg_print_num(" bytes=", a64_len)
+    fatimg_print_num(" entry=", arm_off + a64_entry)
+    fatimg_print_num(" load=", fat_load_a64)
+    rm = "  ("
+    write(1, rm, str_len(rm))
+    write(1, a64_what, str_len(a64_what))
+    rm = ")\n"
+    write(1, rm, str_len(rm))
+}
+
 @export
 fn main() {
     // Windows: parse raw GetCommandLineA result into argc/argv
@@ -7353,7 +8434,23 @@ fn main() {
             } else if str_starts_with(arg, "--arch=", 7) != 0 {
                 arch_set = 1
                 uint64 arch_str = arg + 7
-                if str_eq_full(arch_str, "arm64") != 0 {
+                // THE LIST FORM, and it is entered ONLY on a comma. Every
+                // single-arch spelling this compiler has ever accepted goes
+                // down the untouched chain below, so no existing invocation
+                // changes a byte -- byte-identity by construction rather than
+                // by testing, the same argument --emit=image's new mode number
+                // makes for itself.
+                //
+                // `arch` is left at 0 rather than at "the first element": a
+                // fat image has no single architecture, the composer reads
+                // fat_arch_mask and never `arch`, and the only other consumer
+                // that runs on this path is arch_os_pair_supported, for which
+                // 0 is as true as 1. Setting it to the first element would
+                // invite a reader to think it means something.
+                if fatimg_find_byte(arch_str, 44) != 0xFFFFFFFF {
+                    parse_fat_arch_list(arch_str)
+                    arch = 0
+                } else if str_eq_full(arch_str, "arm64") != 0 {
                     arch = 1
                 } else if str_eq_full(arch_str, "aarch64") != 0 {
                     arch = 1
@@ -7454,6 +8551,23 @@ fn main() {
                     // is why both are in img_raw.
                     emit_mode = 9
                     uefi_set = 1
+                } else if str_eq_full(emit_str, "fatimage") != 0 {
+                    // ONE boot image with several boot paths (see
+                    // compile_fatimage above for the layout and the reasoning).
+                    // A NEW emit_mode for the reason 9 and 10 are new ones: it
+                    // shares its PAYLOADS with 8 and 9 -- it literally calls
+                    // compile() with those two modes, once per slice -- and its
+                    // CONTAINER with nothing, because the container is the
+                    // composition itself. A new value is also untouched by
+                    // every existing invocation.
+                    //
+                    // NOT A MODIFIER ON --emit=image. Mode 8 emits ONE artifact
+                    // for ONE architecture from ONE codegen pass; this drives
+                    // several passes and writes a file none of them produced.
+                    // The finalize chain in compile() has no arm for 11 and
+                    // must not grow one: this mode never reaches compile() as
+                    // itself, only as the 8s and 9s it dispatches.
+                    emit_mode = 11
                 } else if str_eq_full(emit_str, "arx") != 0 {
                     // ARX: ApexRift's own executable container, which its
                     // kernel parses directly (docs/ARX_FORMAT.md in that tree).
@@ -7486,7 +8600,7 @@ fn main() {
                     // must appear here and every name here must be an arm --
                     // because this is exactly the enumeration a new emit mode
                     // falsifies, and --emit=uefi did falsify it.
-                    uint64 evl = "valid: elfexe, elf, elf-arm64, elf-x86_64, linux, linux-x86_64, linux-arm64, linux-x86-64, macho, mac, macos, mac-x64, mac-arm64, darwin, windows, windows-x64, windows-arm64, win, win-x64, win-arm64, pe, obj, android, asm, ir, lkm, image, uefi, arx\n"
+                    uint64 evl = "valid: elfexe, elf, elf-arm64, elf-x86_64, linux, linux-x86_64, linux-arm64, linux-x86-64, macho, mac, macos, mac-x64, mac-arm64, darwin, windows, windows-x64, windows-arm64, win, win-x64, win-arm64, pe, obj, android, asm, ir, lkm, image, uefi, fatimage, arx\n"
                     write(2, evl, str_len(evl))
                     exit(1)
                 }
@@ -7495,16 +8609,57 @@ fn main() {
                 // `else { input_path = arg }` fallthrough: before this,
                 // --load-addr=0x400000 was swallowed as an INPUT FILENAME and
                 // the build died with "cannot open '--load-addr=0x400000'".
-                load_addr = parse_load_addr(arg + 12)
-                load_addr_set = 1
+                // A COLON SELECTS THE PER-ARCHITECTURE FORM. A fat image has
+                // one load address per slice, so a bare --load-addr= under
+                // --emit=fatimage would have to pick one and silently apply it
+                // to both; the colon form makes the user say which. The
+                // discriminator is the colon rather than the emit mode because
+                // flags are order-independent here -- --emit= may not have been
+                // seen yet when this arm runs.
+                uint64 la_v = arg + 12
+                uint64 la_ci = fatimg_find_byte(la_v, 58)
+                if la_ci != 0xFFFFFFFF {
+                    parse_fat_addr_arg(la_v, la_ci, 0)
+                } else {
+                    load_addr = parse_load_addr(la_v)
+                    load_addr_set = 1
+                }
             } else if str_starts_with(arg, "--stack-top=", 12) != 0 {
                 // Same V7 hazard load_addr's arm comments on: without an
                 // explicit arm here, --stack-top=... falls through to the
                 // final `else { input_path = arg }` and dies with
                 // "cannot open '--stack-top=...': file not found" instead
                 // of naming itself.
-                stack_top = parse_stack_top(arg + 12)
-                stack_top_set = 1
+                // Same colon discriminator as --load-addr= above, and for the
+                // same reason: each slice's stub sets its own SP.
+                uint64 st_v = arg + 12
+                uint64 st_ci = fatimg_find_byte(st_v, 58)
+                if st_ci != 0xFFFFFFFF {
+                    parse_fat_addr_arg(st_v, st_ci, 1)
+                } else {
+                    stack_top = parse_stack_top(st_v)
+                    stack_top_set = 1
+                }
+            } else if str_starts_with(arg, "--slice=", 8) != 0 {
+                // An explicit arm, for the V7 reason --load-addr='s arm gives:
+                // without one, --slice=arm64:x.img falls through to the final
+                // `else { input_path = arg }` and the build dies with "cannot
+                // open '--slice=arm64:x.img'" instead of the flag naming
+                // itself. Validated against --emit=fatimage after the loop.
+                parse_fat_slice_arg(arg + 8)
+            } else if str_starts_with(arg, "--fat-uefi=", 11) != 0 {
+                parse_fat_uefi_arg(arg + 11)
+            } else if str_eq_full(arg, "--fat-uefi") != 0 {
+                // str_starts_with above matches the `=` form only, so without
+                // this arm a bare --fat-uefi falls through to the input-path
+                // else and is read as a filename. This flag REQUIRES a value
+                // (unlike --image-header, which takes none), so the bare form
+                // is rejected rather than defaulted -- defaulting it would make
+                // "--fat-uefi" and "no --fat-uefi at all" mean the same thing
+                // while looking like a request.
+                uint64 fu_bare = "error: --fat-uefi requires a value: write --fat-uefi=x86_64, --fat-uefi=arm64 or --fat-uefi=none. A PE carries one COFF Machine value, so the fat image has to be told which architecture's firmware it is for\n"
+                write(2, fu_bare, str_len(fu_bare))
+                exit(1)
             } else if str_eq_full(arg, "--image-header") != 0 {
                 // No value to parse -- an explicit arm is still needed for
                 // the same V7 reason --load-addr=/--stack-top= have one:
@@ -7713,6 +8868,20 @@ fn main() {
                 // (uefi_help_has_own_line, uefi_docs_section_intact).
                 uint64 h_uefi = "  --emit=uefi              UEFI application: a PE32+ image firmware loads and enters directly (bare metal; needs --target=none and an explicit --arch=x86_64|arm64; takes no --load-addr/--stack-top -- firmware places the image where it likes and enters with a stack already set up; unsigned, so Secure Boot refuses it)\n"
                 write(1, h_uefi, str_len(h_uefi))
+                // A dedicated line, for the reason --emit=uefi's own note
+                // gives: hd_flags's regex stops at `=`, so it reads `--emit`
+                // out of `--emit=fatimage` and the docs-consistency rows are
+                // already satisfied by a token that predates this mode. An
+                // --emit= VALUE is structurally invisible to them, so this line
+                // and its docs section each carry their own suite row.
+                uint64 h_fat = "  --emit=fatimage          ONE boot image with several boot paths: x86_64 multiboot, x86_64 (or arm64) UEFI, and arm64 raw Image, all in one file (bare metal; needs --target=none and --arch=x86_64,arm64). The same source is compiled once per architecture unless --slice= supplies one. Byte 0 is shared between the PE 'MZ' and the arm64 Image header's code0 -- the constant 0x91005A4D is 'MZ' to firmware and `add x13, x18, #0x16` to a CPU\n"
+                write(1, h_fat, str_len(h_fat))
+                uint64 h_sl = "  --slice=<arch>:<file>    use a prebuilt raw image for one architecture of a fat image instead of compiling it (needs --emit=fatimage; the file must record its own entry point, i.e. be built with --emit=image --stack-top= on x86_64 and additionally --image-header on arm64). An x86_64 slice must ALSO have been built for the address it lands at -- its trampoline's `movabs $entry,%rax` is absolute -- and the build refuses one that was not, naming the address to rebuild at; arm64 slices relocate freely\n"
+                write(1, h_sl, str_len(h_sl))
+                uint64 h_fu = "  --fat-uefi=<arch>|none   which architecture of a fat image gets the PE/UEFI boot path; exactly one can, because a PE's COFF header carries one Machine value (default: x86_64, or arm64 if x86_64 came from --slice=, or none if both did; the build prints which)\n"
+                write(1, h_fu, str_len(h_fu))
+                uint64 h_pa = "  --load-addr=<arch>:<addr>, --stack-top=<arch>:<addr>\n                            per-slice forms of the two flags above, for --emit=fatimage only -- the load address is where the WHOLE FILE lands for that architecture, and each slice's own address is that base plus its offset in the file. Defaults: x86_64 load 0x400000 / stack 0x3f0000 (the classic multiboot address, with the stack below the image and clear of the trampoline's page tables at 0x1000-0x4000); arm64 load 0x40000000 / stack 0x40800000 (QEMU virt RAM base, stack 8 MiB in)\n"
+                write(1, h_pa, str_len(h_pa))
                 uint64 h_arx = "  --emit=arx               ARX container: a program ApexRift loads from its own filesystem and enters (bare metal, HOSTED; needs --target=none and --arch=x86_64|arm64; takes no --load-addr/--stack-top -- the loader chooses the address at run time and supplies the stack; arm64 containers declare align 4096 because the loader must place them page-congruently for ADRP)\n"
                 write(1, h_arx, str_len(h_arx))
                 uint64 h_la = "  --load-addr=<addr>       where the image will be loaded; validated (arm64: 4096-aligned) and reported, never embedded\n"
@@ -8051,6 +9220,48 @@ fn main() {
         //   elfexe — the default, and the format --target=none emits.
     }
 
+    // AHEAD OF EVERY MODE-SPECIFIC BLOCK BELOW, and that placement is the whole
+    // reason these rows work. Measured: with them after the `emit_mode == 8`
+    // block, `--emit=image --load-addr=x86_64:0x400000` was refused with
+    // "--emit=image requires --load-addr=<addr>" -- true, unhelpful, and about
+    // the wrong flag: the user DID pass --load-addr=, in a form that mode does
+    // not have, and the message named neither that form nor the mode it belongs
+    // to. A flag that names a mode it was not given must be answered by the flag
+    // it is, before any other mode gets to complain about what is missing.
+    // The three flags that exist only for --emit=fatimage. Same shape and same
+    // placement as the --load-addr=/--stack-top=/--image-header rows just
+    // below: a flag that names a mode it was not given is a refusal, never a
+    // silent no-op. Measured shape this closes: before these rows,
+    // `--arch=x86_64,arm64 --emit=image prog.kr` parsed the list, set
+    // fat_arch_mask, and then built a SINGLE x86_64 image at exit 0 -- the
+    // arm64 half of the request vanished with no diagnostic.
+    if fat_arch_list_set != 0 && emit_mode != 11 {
+        uint64 fl_im = "error: a comma-separated --arch= list is only meaningful with --emit=fatimage: every other emit mode produces one artifact for one architecture, so the second name in the list would be silently discarded. Pass --emit=fatimage, or name a single architecture\n"
+        write(2, fl_im, str_len(fl_im))
+        exit(1)
+    }
+    if fat_slice_seen != 0 && emit_mode != 11 {
+        uint64 fs_im = "error: --slice= is only meaningful with --emit=fatimage: it substitutes a prebuilt image for one architecture of a multi-architecture composition, and no other emit mode composes anything for it to substitute into\n"
+        write(2, fs_im, str_len(fs_im))
+        exit(1)
+    }
+    if fat_uefi_set != 0 && emit_mode != 11 {
+        uint64 fu_im = "error: --fat-uefi= is only meaningful with --emit=fatimage: it chooses which architecture of a fat image gets the PE/UEFI boot path. A single-architecture UEFI application is --emit=uefi, which needs no such choice\n"
+        write(2, fu_im, str_len(fu_im))
+        exit(1)
+    }
+    if emit_mode != 11 {
+        if fat_load_x86_set != 0 || fat_load_a64_set != 0 {
+            uint64 fla_im = "error: the per-architecture form --load-addr=<arch>:<addr> is only meaningful with --emit=fatimage: a single image has one load address, so write --load-addr=<addr> with no architecture prefix\n"
+            write(2, fla_im, str_len(fla_im))
+            exit(1)
+        }
+        if fat_stack_x86_set != 0 || fat_stack_a64_set != 0 {
+            uint64 fsa_im = "error: the per-architecture form --stack-top=<arch>:<addr> is only meaningful with --emit=fatimage: a single image has one entry stub, so write --stack-top=<addr> with no architecture prefix\n"
+            write(2, fsa_im, str_len(fsa_im))
+            exit(1)
+        }
+    }
     // --emit=image (emit_mode 8): sub-project B1's flat-image surface.
     // Every refusal names both flags, matching the block above. These run
     // AFTER the target=none block so --legacy/--debug/-container refusals
@@ -8528,6 +9739,177 @@ fn main() {
             exit(1)
         }
     }
+    // --emit=fatimage (emit_mode 11). Its own block, for the reason modes 9
+    // and 10 have one: EVERY ROW HERE IS A DEFAULT A NEW EMIT MODE INHERITS,
+    // never a rule invented for this format. The target_os, arch and -g rows
+    // are the three every previous mode had to write for itself after
+    // measuring their absence, and this mode would inherit ACCEPTANCE of all
+    // three.
+    //
+    // FIRST ROW FIRST: the target_os check must precede everything, because the
+    // t6 --emit= enumeration in the suite runs every spelling with
+    // `--arch=arm64 --debug` and asserts the refusal does not name --debug. The
+    // --target=none block above refuses --debug, so if this mode's own
+    // --target=none row did not fire first, a --debug refusal would be the
+    // message a user got for a missing --target=.
+    if emit_mode == 11 {
+        // The else-POSIX door, arriving through --emit=. The auto-set block
+        // above keys on emit_mode 1/2/4, so mode 11 leaves target_os at its
+        // linux default and every "special-case Windows/macOS, ELSE fall
+        // through to POSIX" dispatch in the tree answers "Linux" for it -- and
+        // every slice in the image would then carry Linux syscalls with no
+        // kernel behind them. Same door --emit=uefi measured 4312 bytes and
+        // four `syscall` instructions coming through.
+        if target_os != 4 {
+            uint64 fi_tn = "error: --emit=fatimage requires --target=none: without it the resolved target OS is a hosted one (the default is linux) and every slice in the image would carry that OS's syscalls -- there is no kernel behind any of the boot paths a fat image has, because a fat image IS what boots\n"
+            write(2, fi_tn, str_len(fi_tn))
+            exit(1)
+        }
+        // A fat image with one architecture is not a fat image. Refused rather
+        // than quietly built, because the artifact would be a perfectly valid
+        // single-arch image wearing a name that promises more -- and the whole
+        // point of the mode is that the same file boots on more than one
+        // machine.
+        if fat_arch_list_set == 0 {
+            uint64 fi_al = "error: --emit=fatimage requires a comma-separated --arch= list: write --arch=x86_64,arm64. A fat image is ONE FILE WITH SEVERAL BOOT PATHS, so it has no single architecture to default to, and a single --arch= would produce an ordinary image under a name that promises more than one machine can boot it\n"
+            write(2, fi_al, str_len(fi_al))
+            exit(1)
+        }
+        // EXACTLY x86_64 AND arm64, and this is an allow-list with no
+        // fall-through for the reason arch_os_pair_supported is one. The
+        // container has precisely two entry indirections -- the multiboot scan
+        // and the Image header's branch -- and both have been booted. A rule
+        // phrased as "at least two of the four architectures" would admit a
+        // pair this compiler has never composed and cannot enter.
+        if fat_arch_mask != 3 {
+            uint64 fi_ab = "error: --emit=fatimage composes exactly x86_64 and arm64: --arch=x86_64,arm64 (in either order). This container has two entry indirections and no more -- the x86_64 multiboot header, which a loader finds by scanning the first 8 KiB, and the arm64 Image header at offset 0, whose first word is a branch. A one-architecture list is an ordinary --emit=image build; there is no third boot path to add an architecture to\n"
+            write(2, fi_ab, str_len(fi_ab))
+            exit(1)
+        }
+        // -g, refused rather than silently discarded, for the reason modes 8,
+        // 9 and 10 all refuse it: the DWARF footer and its section headers are
+        // laid out from an ELF geometry none of the slices have. Worse here
+        // than in any single-image mode -- the footer would land inside a
+        // composite, at offsets belonging to whichever slice happened to
+        // follow.
+        if debug_info_mode != 0 {
+            uint64 fi_g = "error: -g conflicts with --emit=fatimage: the DWARF footer and its section headers are laid out from the ELF geometry none of a fat image's slices have, and would land inside the composite at offsets belonging to whichever slice follows. Drop -g, or drop --emit=fatimage to keep the ELF that -g understands\n"
+            write(2, fi_g, str_len(fi_g))
+            exit(1)
+        }
+        // The four single-image front-of-file flags, each refused with a
+        // message about THIS mode. Ahead of the generic "only meaningful with
+        // --emit=image" rows below, which would otherwise fire and tell a
+        // fatimage user to use a mode they deliberately did not ask for.
+        if load_addr_set != 0 {
+            uint64 fi_la = "error: --load-addr= is ambiguous under --emit=fatimage: the image has one load address per slice, and they are different addresses on different machines. Use the per-architecture form -- --load-addr=x86_64:0x400000 or --load-addr=arm64:0x40000000 -- which sets where the WHOLE FILE lands for that architecture; each slice's own address is that base plus its offset in the file, which only the composer knows\n"
+            write(2, fi_la, str_len(fi_la))
+            exit(1)
+        }
+        if stack_top_set != 0 {
+            uint64 fi_st = "error: --stack-top= is ambiguous under --emit=fatimage: each slice emits its own entry stub and sets its own SP, in a different machine's memory map. Use the per-architecture form -- --stack-top=x86_64:0x3f0000 or --stack-top=arm64:0x40800000\n"
+            write(2, fi_st, str_len(fi_st))
+            exit(1)
+        }
+        if image_header_set != 0 {
+            uint64 fi_ih = "error: --image-header is redundant under --emit=fatimage and is refused rather than ignored: the fat image ALWAYS writes an arm64 Image header, at file offset 0, sharing those 64 bytes with the PE DOS stub -- that shared header is the arm64 boot path. Accepting the flag would suggest there is a form of this mode without one\n"
+            write(2, fi_ih, str_len(fi_ih))
+            exit(1)
+        }
+        if reset_vector_set != 0 {
+            uint64 fi_rv = "error: --reset-vector conflicts with --emit=fatimage: the reset-vector form owns file offset 0 exactly -- `-bios` maps the file's last byte at 0xFFFFFFFF and every self-reference in its stage assumes that -- and offset 0 of a fat image is already the arm64 Image header shared with the PE DOS stub. Two file-offset-0 constructs cannot share a file. Build the reset-vector image on its own with --emit=image\n"
+            write(2, fi_rv, str_len(fi_rv))
+            exit(1)
+        }
+        // A PE HAS TO BE COMPILED, so it cannot come from a --slice=. A raw
+        // image handed over on the command line has no COFF header, no section
+        // table and no Machine value, and there is no honest way to wrap one
+        // after the fact -- the PE's own offsets are what the fat layout is
+        // built on top of.
+        if fat_uefi_set != 0 && fat_uefi_arch == 0 && fat_slice_x86 != 0 {
+            uint64 fu_sx = "error: --fat-uefi=x86_64 conflicts with --slice=x86_64:: the UEFI boot path is a PE32+ application the compiler builds from the source on the command line, and a --slice= file is a finished raw image with no COFF header to give it. Drop --slice=x86_64: so x86_64 is compiled here, or pass --fat-uefi=arm64 or --fat-uefi=none\n"
+            write(2, fu_sx, str_len(fu_sx))
+            exit(1)
+        }
+        if fat_uefi_set != 0 && fat_uefi_arch == 1 && fat_slice_a64 != 0 {
+            uint64 fu_sa = "error: --fat-uefi=arm64 conflicts with --slice=arm64:: the UEFI boot path is a PE32+ application the compiler builds from the source on the command line, and a --slice= file is a finished raw image with no COFF header to give it. Drop --slice=arm64: so arm64 is compiled here, or pass --fat-uefi=x86_64 or --fat-uefi=none\n"
+            write(2, fu_sa, str_len(fu_sa))
+            exit(1)
+        }
+        // THE DEFAULT, DERIVED AND THEN PRINTED. x86_64 first because that is
+        // where UEFI firmware is actually met in practice and because the
+        // reference composition this mode reproduces is PE-for-x86_64. If that
+        // architecture came from --slice= there is nothing to compile into a
+        // PE, so arm64 is tried, and if both were supplied the image simply has
+        // no UEFI path. That last case is a real configuration (both halves
+        // prebuilt) rather than an error, so it resolves to `none` -- and the
+        // report line says `uefi: none` out loud, because a boot path silently
+        // not being there is exactly the kind of absence a user discovers from
+        // firmware instead of from the build.
+        if fat_uefi_set == 0 {
+            if fat_slice_x86 == 0 {
+                fat_uefi_arch = 0
+            } else if fat_slice_a64 == 0 {
+                fat_uefi_arch = 1
+            } else {
+                fat_uefi_arch = 254
+            }
+        }
+        // Per-slice address validation. These are the --emit=image rules,
+        // re-applied here because they live in THIS function for mode 8 and the
+        // composer's internal compile() calls enter below it -- they would
+        // simply not run. The two that DO run for the internal passes are the
+        // ones inside compile()'s finalize (the 1 GiB image fit and
+        // stack-vs-image), because those need the emitted size.
+        //
+        // The load bases get their range checked in the composer instead, on
+        // base + offset: the offset is what the flag validation cannot see.
+        if fat_load_x86 == 0 {
+            uint64 fl_z = "error: --load-addr=x86_64:0 is refused: a zero load address is indistinguishable from an unset one in every report and boot stub that consumes it\n"
+            write(2, fl_z, str_len(fl_z))
+            exit(1)
+        }
+        if fat_load_a64 == 0 {
+            uint64 fa_z = "error: --load-addr=arm64:0 is refused: a zero load address is indistinguishable from an unset one in every report and boot stub that consumes it\n"
+            write(2, fa_z, str_len(fa_z))
+            exit(1)
+        }
+        if (fat_load_a64 & 4095) != 0 {
+            uint64 fa_al = "error: --load-addr=arm64: must be 4096-aligned: ADRP page arithmetic is baked at compile time and only survives a page-aligned shift. Every slice offset inside a fat image is already 4096-aligned, so the base has to be too. This constraint is arm64-only -- the x86_64 slice is RIP-relative and boots at any address\n"
+            write(2, fa_al, str_len(fa_al))
+            exit(1)
+        }
+        if fat_stack_x86 == 0 || fat_stack_a64 == 0 {
+            uint64 fs_z = "error: a fat image's --stack-top=<arch>:0 is refused: a zero stack pointer faults on the first push, and is indistinguishable from unset in every report and boot stub that consumes it\n"
+            write(2, fs_z, str_len(fs_z))
+            exit(1)
+        }
+        if (fat_stack_a64 & 15) != 0 {
+            uint64 fs_al = "error: --stack-top=arm64: must be 16-byte aligned: aarch64 faults on the first SP-relative stack access if SP is not 16-byte aligned. This constraint is arm64-only -- the x86_64 slice accepts any alignment\n"
+            write(2, fs_al, str_len(fs_al))
+            exit(1)
+        }
+        if fat_stack_a64 >= 4294967296 {
+            uint64 fs_rg = "error: --stack-top=arm64: must be below 2^32: the movz/movk pair the arm64 entry stub patches into the entry code covers bits 31:0 only. This constraint is arm64-only -- the x86_64 slice is bounded by its trampoline's identity map instead\n"
+            write(2, fs_rg, str_len(fs_rg))
+            exit(1)
+        }
+        if fat_stack_x86 > 4096 && fat_stack_x86 < 16392 {
+            uint64 fs_pt = "error: --stack-top=x86_64:'s first push would land inside 0x1000-0x4000: the multiboot slice's trampoline builds its identity-map page tables there, the stack grows down, and the first push writes the eight bytes below the stack top. The stack top must be at most 0x1000 or at least 0x4008. This constraint is x86_64-only -- the arm64 slice's stub has no page tables\n"
+            write(2, fs_pt, str_len(fs_pt))
+            exit(1)
+        }
+        if fat_stack_x86 >= 2147483648 {
+            uint64 fs_hi = "error: --stack-top=x86_64: must be below 0x80000000: at or above 2^31 the assembler widens `mov $imm,%rsp` from a 7-byte sign-extended form to a 10-byte movabs, moving every later patch site while the file size stays fixed. This constraint is x86_64-only -- the arm64 slice is bounded by its movz/movk pair instead\n"
+            write(2, fs_hi, str_len(fs_hi))
+            exit(1)
+        }
+        if fat_stack_x86 > 1073741824 {
+            uint64 fs_1g = "error: --stack-top=x86_64: must be at most 0x40000000: the multiboot slice's trampoline maps a single 512-entry page directory of 2 MiB pages, exactly the first 1 GiB, and a stack above that is unmapped the moment paging is enabled -- the first push triple-faults\n"
+            write(2, fs_1g, str_len(fs_1g))
+            exit(1)
+        }
+    }
     // Checked BEFORE --stack-top='s own "only meaningful" row just below:
     // every --reset-vector test row also carries --stack-top=, so ordering
     // this one first is what makes reset_vector_requires_emit_image (not
@@ -8844,6 +10226,17 @@ fn main() {
             exit(1)
         }
         compile_fat(input_path, output_path)
+    } else if emit_mode == 11 {
+        // --emit=fatimage never reaches compile() as itself. It drives
+        // compile() once per slice, with emit_mode 8 and 9, and composes what
+        // those passes produced -- so the finalize chain inside compile() has
+        // no arm for 11 and must never grow one. This is the fork that keeps
+        // that true; without it mode 11 would fall into compile() unnamed,
+        // reach the end of a chain that has no terminal `else`, get no entry
+        // patch and no size patch, and write a file at exit 0. That is the
+        // failure the --emit=uefi finalize arm was written before it had
+        // anything to patch in order to prevent.
+        compile_fatimage(input_path, output_path)
     } else {
         compile(input_path, output_path, arch, emit_mode)
     }

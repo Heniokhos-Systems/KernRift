@@ -1566,6 +1566,7 @@ krc <file.kr> --target=android -o out
 #   ir                                                  → IR dump per function (to stdout; not SSA -- linear three-address code, see src/ir.kr)
 #   image                                               → raw flat binary, no container (bare metal; --image-header prefixes an arm64 boot header; --reset-vector selects the x86_64 QEMU -bios form — emits the stage and boots, see below)
 #   uefi                                                → UEFI application (PE32+) that firmware loads and enters directly
+#   fatimage                                            → ONE boot image with several boot paths: x86_64 multiboot + UEFI and arm64 Image in one file (needs --arch=x86_64,arm64 — see below)
 krc <file.kr> --emit=pe -o out.exe
 krc <file.kr> --emit=macho -o out
 krc <file.kr> --emit=android -o out
@@ -2227,6 +2228,236 @@ a PE `Machine` value here, and both already own a raw boot path through
 `--freestanding`), and any new `--target=` value — a UEFI application is
 `--target=none` like every other bare-metal artifact.
 
+#### Fat boot images (`--emit=fatimage`)
+
+```
+krc prog.kr --target=none --arch=x86_64,arm64 --emit=fatimage -o fat.img
+```
+
+**ONE file with several boot paths**, so the same artefact boots on more than
+one machine. The default composition has **three**: x86_64 multiboot, x86_64
+UEFI, and arm64 raw `Image`. The same source is compiled once per
+architecture, internally, in one `krc` process — this is the only emit mode
+that runs codegen more than once and writes a file none of those runs
+produced.
+
+**This is not polyglot machine code**, and it does not need to be. Of the
+formats involved only arm64's `Image` executes from offset 0, and even there
+byte 0 is a branch:
+
+* **arm64 `Image`** — the loader places the file and jumps to its first byte.
+  `code0` is a branch, so it can reach anywhere in the file.
+* **x86 multiboot** — the loader never looks at byte 0. It *scans* the first
+  8 KiB for a magic and honours the `entry_addr` beside it.
+* **PE / UEFI** — firmware reads `MZ` at byte 0 and follows `e_lfanew` at
+  byte 60.
+
+So a fat image is several *entry indirections* into several complete,
+independently compiled slices, each architecture carrying the other's bytes as
+dead weight — which is precisely what a fat binary is.
+
+```
+offset 0x0000   DOS stub / arm64 Image header -- THE SAME 64 BYTES
+                  code0 = 0x91005A4D, code1 = b <arm64 entry>
+                  image_size at 16, flags at 24, "ARM\x64" at 56,
+                  e_lfanew at 60
+offset 0x0040   PE headers, byte-for-byte from --emit=uefi
+offset 0x0400   a standalone multiboot header, inside the 8 KiB scan window
+offset 0x1000   UEFI .text, untouched (PointerToRawData is 0x1000)
+offset ...      the x86_64 multiboot slice   (4096-aligned)
+offset ...      the arm64 raw slice          (4096-aligned)
+```
+
+**The offset-0 collision, and the constant that dissolves it.** PE demands
+`MZ` at byte 0; arm64 *executes* byte 0. The resolution is the 32-bit word
+`0x91005A4D`: its low two bytes are `4D 5A` = `MZ`, and as AArch64 it decodes
+to `add x13, x18, #0x16` — `sf=1`, family `0b100010` (ADD immediate),
+`imm12=0x016`, `Rn=18`, `Rd=13`, and `x13` is scratch because the arm64 boot
+protocol hands over only `x0` (the DTB pointer). arm64 executes it and falls
+through to the branch at byte 4; a PE loader reads two characters and jumps to
+`e_lfanew`. With `--fat-uefi=none` there is no `MZ` to preserve, so the branch
+moves to `code0` and byte 0 is a branch and nothing else — the compiler does
+not write two characters of PE that no firmware will read.
+
+**Why the UEFI slice is the base file.** `--emit=uefi` already emits
+`e_lfanew = 0x40` and one section at `PointerToRawData = 0x1000`, so building
+the composite *on top of* that output leaves every PE file offset correct with
+no section-table rewriting. Only the DOS stub is overwritten, and `e_lfanew`
+is put back byte-for-byte.
+
+**UEFI is one architecture, and that is PE's property rather than a
+shortcut.** The COFF header carries exactly one `Machine` value and firmware
+checks it, so a single file cannot be a UEFI application for two processors.
+`--fat-uefi=` therefore takes **one** architecture, and a list is refused with
+that sentence rather than the last name silently winning. The default is
+`x86_64`; if x86_64 came from `--slice=` there is nothing to compile into a
+PE, so `arm64` is tried, and if both slices were supplied the image simply has
+no UEFI path. The report line prints which was chosen, because a boot path
+silently not being there is the kind of absence you otherwise discover from
+firmware.
+
+The build prints one summary line per boot path, after each internal pass's
+own `uefi:` / `image:` line. All values are decimal, like every other
+bare-metal report here:
+
+```
+fatimage: fat.img bytes=13264
+  x86_64 uefi     : pe_at=64 text_at=4096 bytes=8192
+  x86_64 multiboot: file=8192 bytes=1064 hdr=1024 entry=4202528 load=4194304  (compiled from the source on the command line)
+  arm64 image     : file=12288 bytes=976 entry=13124 load=1073741824  (compiled from the source on the command line)
+```
+
+##### `--slice=<arch>:<file>` — adopt a prebuilt image
+
+```
+krc kernel.kr --target=none --arch=x86_64,arm64 --emit=fatimage \
+    --slice=arm64:build/arm64.img -o fat.img
+```
+
+Substitutes an already-built raw image for one architecture instead of
+compiling it. This exists because the real consumer has a **different program
+per architecture** — ApexRift's kernel is x86-only while its arm64 slice is a
+separate source entirely — so pure multi-pass cannot express its actual case.
+Compiling one architecture and adopting the other is the normal shape; both
+may be adopted, in which case nothing is compiled from the input file at all
+and the UEFI path resolves to `none`.
+
+**A `--slice=` file must record its own entry point**, because nothing here
+saw the build that produced it:
+
+* **x86_64** — a multiboot header in the first 8 KiB, i.e. built with
+  `--emit=image --stack-top=`. The entry *offset* is derived as
+  `entry_addr − header_addr + <the header's offset in the slice>`, in which
+  the slice's own load address cancels out.
+* **arm64** — a 64-byte `Image` header whose `code0` is a branch, i.e. built
+  with `--emit=image --image-header --stack-top=`. A headerless arm64 image
+  records its entry *nowhere*: the `image:` report line is the only place that
+  number ever existed and it is gone by the time a file is named on a command
+  line.
+
+The same derivation is used for slices this compiler just built, and the
+result is then **cross-checked against what `compile()` reported**. A
+disagreement is a hard error: it would mean every `--slice=` build was placing
+its entry wrongly too, and only the compiled case can notice.
+
+**An x86_64 `--slice=` must have been built for the address it will land at,
+and this is the one thing in the container that does not relocate.** Everything
+else does: x86_64 code is RIP-relative, arm64 code is position-independent
+modulo 4 KiB and every slice lands on a page boundary, and `--load-addr=` is
+elsewhere documented as validated-and-reported, never embedded. One immediate
+breaks it — the x86_64 self-boot trampoline ends in
+`movabs $entry,%rax; call *%rax`, and a 32-bit trampoline cannot form a
+RIP-relative reference to a 64-bit target, so that address is baked in from
+`--load-addr` at build time. **Measured:** a slice built at `0x20000000` and
+composed at `0x402000` produced a fat image whose arm64 path booted normally
+and whose x86_64 path went silent — exit 0, a valid-looking artifact, a `call`
+into unmapped memory. The composer therefore compares the slice's declared
+load address against where it is about to land and **refuses**, naming the
+exact address to rebuild at. The offset depends on how long the UEFI slice
+turned out to be, so the workflow is: run the command, read the number out of
+the refusal, rebuild the slice with that `--load-addr=`, run it again. An arm64
+`--slice=` has no such constraint.
+
+##### Per-slice addresses and their defaults
+
+A fat image has one load address and one stack top **per slice**, so the bare
+`--load-addr=` and `--stack-top=` are refused here and the per-architecture
+forms are used instead:
+
+```
+krc prog.kr --target=none --arch=x86_64,arm64 --emit=fatimage \
+    --load-addr=x86_64:0x400000 --stack-top=x86_64:0x3f0000 \
+    --load-addr=arm64:0x40000000 --stack-top=arm64:0x40800000 -o fat.img
+```
+
+The load address is where the **whole file** lands for that architecture; each
+slice's own address is that base plus its offset in the file, which only the
+composer knows. All four have defaults, and this is the one place in the
+bare-metal flag surface where a defaulted address is allowed: `--emit=image`
+builds a blob for *somebody else's* loader on a board the compiler has never
+seen, so a defaulted stack there would be a guess. A fat image names its own
+loaders, each of which fixes where the file lands, so the addresses are
+derivable.
+
+| flag | default | why |
+|---|---|---|
+| `--load-addr=x86_64:` | `0x400000` | the classic multiboot kernel address: above the 1 MiB hole, at least `0x4000` (below that the trampoline zeroes its page tables over the image), and far enough under `0x40000000` that the image ends inside the trampoline's 1 GiB identity map |
+| `--stack-top=x86_64:` | `0x3f0000` | 64 KiB *below* the load base, so the stack grows down away from the image; clear of the page tables at `0x1000`–`0x4000`; under both the 2^31 encoding bound and the 1 GiB map |
+| `--load-addr=arm64:` | `0x40000000` | RAM base on QEMU `virt` and the conventional DRAM base for the arm64 boot protocol; 4096-aligned, which arm64 requires |
+| `--stack-top=arm64:` | `0x40800000` | 8 MiB into RAM, above any slice this container has carried; 16-byte aligned; below 2^32, which the stub's `movz`/`movk` pair bounds |
+
+Every per-architecture rule `--emit=image` enforces is enforced here too, on
+each slice separately and with the architecture named in the message. Two of
+them — the 1 GiB image fit and "the stack must not start inside the image" —
+run inside the per-slice compile, because they need the emitted size.
+
+##### What the composition asserts about itself
+
+None of these are assumed:
+
+* the first multiboot magic **in the finished file** is the one this compiler
+  wrote, at offset 1024. A loader takes the first 4-byte-aligned magic in the
+  first 8 KiB, and the arm64 header, the DOS stub and the PE headers all sit
+  in front of it;
+* the 32 bytes that header occupies were **zero before it was written**, which
+  is how the composer knows it is writing into PE padding and not over a live
+  structure — checked as bytes rather than reasoned from the PE layout, since
+  the section table's end is the PE writer's choice;
+* `e_lfanew ≥ 64`, or the PE header overlaps the arm64 `Image` header, which
+  owns bytes 0–63 and keeps `e_lfanew` itself in its reserved word at 60;
+* the arm64 branch target is 4-byte aligned and inside B's ±128 MiB range;
+* each slice's entry, derived from its own header, lies inside that slice —
+  and, for a slice compiled here, equals what the compiler reported.
+
+##### Required flags, and what is refused
+
+* `--target=none` — a new emit mode does *not* get a bare-metal target for
+  free. Without it the resolved OS is the default, `linux`, and every slice
+  would carry Linux syscalls with no kernel behind any of the boot paths.
+* `--arch=x86_64,arm64`, as a comma list, **exactly those two**. A
+  one-architecture fat image is an ordinary `--emit=image` build wearing a
+  name that promises more, and riscv32/xtensa are refused because this
+  container has two entry indirections and neither is theirs. The list form is
+  itself refused outside this mode, where the second name would be silently
+  discarded.
+* `-g` is refused, as it is for `--emit=image` and `--emit=uefi`: the DWARF
+  footer is laid out from an ELF geometry none of the slices have, and here it
+  would land inside the composite at offsets belonging to whichever slice
+  follows.
+* `--image-header` is refused as **redundant rather than ignored**: a fat
+  image always writes an arm64 `Image` header at offset 0 — that shared header
+  *is* the arm64 boot path — so accepting the flag would suggest there is a
+  form of this mode without one.
+* `--reset-vector` is refused: it owns file offset 0 exactly, and offset 0 is
+  already the shared header. Two file-offset-0 constructs cannot share a file.
+
+##### Status: this has booted
+
+`examples/images/` is the worked example, and its `make check` boots the
+artefacts rather than merely building them: **`fat.img` under
+`qemu-system-x86_64 -kernel` (multiboot), under `qemu-system-aarch64 -M virt
+-kernel` (arm64 `Image`), and under OVMF as `EFI/BOOT/BOOTX64.EFI`** — one
+file, three boot paths, each asserted on its own banner. A second image built
+with `--slice=arm64:` is booted on both architectures too, and the arm64 leg
+greps for the *prebuilt slice's own* banner, which is what proves the
+substitution happened rather than the source having been compiled for arm64
+anyway.
+
+**What booting cannot prove**, stated rather than implied away: QEMU reads the
+whole file regardless of the `Image` header's `image_size` and regardless of
+the multiboot `load_addr` patch, so no boot here witnesses either field. They
+are written because they are what the formats specify and what U-Boot and the
+arm64 boot protocol do honour — a file that only works on a lenient loader is
+a file that breaks on real hardware. The fields booting *does* witness are
+`code0`/`code1` and the multiboot `entry_addr`. Nothing in this section has
+run on real silicon or on vendor firmware.
+
+**Also not checked:** whether a `--slice=` file was built at a 4096-aligned
+load address. arm64 code is position-independent modulo a page and every slice
+lands on a page boundary, so a slice built for an unaligned address would have
+baked `adrp` arithmetic that does not survive placement — and a finished raw
+image records nothing this compiler could test that against.
+
 ```
 
 # Codegen backend & optimization
@@ -2655,7 +2886,7 @@ fn main() {
 
 ## 25. Binary formats
 
-All ten `--emit=` modes, and the two formats that are reached by other flags:
+All eleven `--emit=` modes, and the two formats that are reached by other flags:
 
 | Format | Produced by | Use |
 |---|---|---|
@@ -2671,6 +2902,7 @@ All ten `--emit=` modes, and the two formats that are reached by other flags:
 | IR dump | `--emit=ir` | Text on **stdout**; no file is written |
 | Raw flat image | `--emit=image` | Bare metal, no container — needs `--target=none` |
 | UEFI application | `--emit=uefi` | PE32+ image firmware loads and enters — needs `--target=none` |
+| Fat boot image | `--emit=fatimage` | ONE file, several boot paths (x86_64 multiboot + UEFI, arm64 `Image`) — needs `--target=none` and `--arch=x86_64,arm64` |
 | ESP32 flash image | `--arch=xtensa --freestanding --target=esp32` | Not an `--emit=` mode: the machine target selects it |
 
 The last **three** have no place on a hosted OS, and the two bare-metal

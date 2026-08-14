@@ -13080,13 +13080,13 @@ done
 #    routes -- and any added later -- carries it by construction. The
 #    exhaustive --emit= enumeration below is kept for exactly that reason:
 #    it is now a NO-ROUTE-REFUSED sweep over every --emit= spelling this
-#    compiler accepts today (a hardcoded 28-item list, checked against
+#    compiler accepts today (a hardcoded 29-item list, checked against
 #    itself for count and NOT independently cross-checked against
 #    src/main.kr here -- emit_valid_list_is_complete elsewhere in this file
 #    is what derives the spelling set mechanically from src/main.kr's
 #    str_eq_full(emit_str, ...) arms and would catch a spelling this list
 #    drifted out of sync with; --help is not that check, it lists only 8 of
-#    the 28 accepted spellings).
+#    the 29 accepted spellings).
 t6_builds "t6_legacy_arm64_debug_builds" -- --legacy --arch=arm64 --debug "$T6_D/arr.kr"
 # --emit=obj reaches legacy arm64 codegen with NO --legacy anywhere on the
 # line -- the case that was missed until the old refusal was derived from
@@ -13131,25 +13131,25 @@ t6_builds "t6_legacy_debug_fat_builds" -- --legacy --debug "$T6_D/arr.kr"
 # for a --debug reason any more -- obj and lkm are the two that reach
 # legacy arm64 codegen, and both now carry the bounds check instead of
 # being turned away. Three spellings still fail here, each for a reason
-# that has nothing to do with --debug and predates it: image and uefi
-# require --target=none (not passed here), and lkm is x86_64-only. Those
-# three are asserted on their OWN wording, and every row additionally
+# that has nothing to do with --debug and predates it: image, uefi and
+# fatimage require --target=none (not passed here), and lkm is x86_64-only.
+# Those four are asserted on their OWN wording, and every row additionally
 # asserts that the word "--debug" does not appear in the failure -- which
 # is what makes this a no-route-refused sweep rather than a snapshot of
-# which refusal happens to win. The 28-item list below is a hardcoded snapshot, not derived
+# which refusal happens to win. The 29-item list below is a hardcoded snapshot, not derived
 # from source -- the count check just below only catches this list being
 # edited down, not the compiler's accepted-spelling set drifting away from
 # it. emit_valid_list_is_complete (elsewhere in this file) is the test that
 # derives the spelling set mechanically from src/main.kr's
 # str_eq_full(emit_str, ...) arms and would actually catch that drift.
-EMIT_SPELLINGS="elfexe elf elf-arm64 elf-x86_64 linux linux-x86_64 linux-arm64 linux-x86-64 macho mac macos mac-x64 mac-arm64 darwin windows windows-x64 windows-arm64 win win-x64 win-arm64 pe obj android asm ir lkm image uefi"
+EMIT_SPELLINGS="elfexe elf elf-arm64 elf-x86_64 linux linux-x86_64 linux-arm64 linux-x86-64 macho mac macos mac-x64 mac-arm64 darwin windows windows-x64 windows-arm64 win win-x64 win-arm64 pe obj android asm ir lkm image uefi fatimage"
 EMIT_SPELLING_COUNT=$(echo $EMIT_SPELLINGS | wc -w)
 TOTAL=$((TOTAL + 1))
-if [ "$EMIT_SPELLING_COUNT" != "28" ]; then
-    echo "FAIL: t6_emit_spelling_count (EMIT_SPELLINGS above was edited to $EMIT_SPELLING_COUNT entries, expected 28 -- this only catches an edit to the literal list, not the compiler's spelling set changing; see emit_valid_list_is_complete for that)"
+if [ "$EMIT_SPELLING_COUNT" != "29" ]; then
+    echo "FAIL: t6_emit_spelling_count (EMIT_SPELLINGS above was edited to $EMIT_SPELLING_COUNT entries, expected 29 -- this only catches an edit to the literal list, not the compiler's spelling set changing; see emit_valid_list_is_complete for that)"
     FAIL=$((FAIL + 1))
 else
-    PASS=$((PASS + 1)); echo "  t6_emit_spelling_count: PASS (28)"
+    PASS=$((PASS + 1)); echo "  t6_emit_spelling_count: PASS (29)"
 fi
 ES_BAD=""
 for ES in $EMIT_SPELLINGS; do
@@ -13168,7 +13168,7 @@ for ES in $EMIT_SPELLINGS; do
         # pre-existing refusals with nothing to do with --debug. Assert
         # each on its own wording so a future change that made one of them
         # start refusing for a --debug reason would still be caught above.
-        if [ "$ES" = "image" ] || [ "$ES" = "uefi" ]; then
+        if [ "$ES" = "image" ] || [ "$ES" = "uefi" ] || [ "$ES" = "fatimage" ]; then
             if [ "$ES_ST" != "0" ] && echo "$ES_ERR" | grep -q -- "--target=none"; then
                 PASS=$((PASS + 1))
             else
@@ -13204,7 +13204,7 @@ for ES in $EMIT_SPELLINGS; do
     rm -f "$T6_D/es_out"
 done
 if [ -z "$ES_BAD" ]; then
-    echo "  t6_emit_spelling_enumeration: PASS (28/28 -- no --debug refusal on any route; image/uefi/lkm fail for their own pre-existing reasons)"
+    echo "  t6_emit_spelling_enumeration: PASS (29/29 -- no --debug refusal on any route; image/uefi/fatimage/lkm fail for their own pre-existing reasons)"
 else
     echo "  t6_emit_spelling_enumeration: see failures above for:$ES_BAD"
 fi
@@ -13352,6 +13352,12 @@ t6_refuses "t6_emit_android_tnone" "--emit=android" "--target=none" -- \
 t6_builds "t6_emit_image_tnone" -- --emit=image --arch=x86_64 --target=none --load-addr=0x400000 "$T6_D/plain.kr"
 t6_builds "t6_emit_uefi_tnone" -- --emit=uefi --arch=x86_64 --target=none "$T6_D/plain.kr"
 t6_builds "t6_emit_arx_tnone" -- --emit=arx --arch=x86_64 --target=none "$T6_D/plain.kr"
+#    fatimage (11) is the composition mode: it drives compile() once per
+#    architecture and writes a file none of those passes produced. It belongs
+#    in this table for the same reason image and uefi do -- and unlike them it
+#    is the only mode whose --arch= is a LIST, so a row here also pins that the
+#    list form survives the whole flag surface and not just its own parser.
+t6_builds "t6_emit_fatimage_tnone" -- --emit=fatimage --arch=x86_64,arm64 --target=none "$T6_D/plain.kr"
 
 # 3b. COMPLETENESS, DERIVED RATHER THAN ASSERTED.
 #     The comment on block 3 says the emit-mode table is complete in one place.
@@ -13361,9 +13367,9 @@ t6_builds "t6_emit_arx_tnone" -- --emit=arx --arch=x86_64 --target=none "$T6_D/p
 #     emit_mode values the compiler actually assigns, read out of the source
 #     that assigns them. Add an `emit_mode = 10` arm without a row here and
 #     this reds; that is the whole point, and it is why the check is on the
-#     MODE NUMBERS and not on the spellings (16 of the 28 spellings are
+#     MODE NUMBERS and not on the spellings (16 of the 29 spellings are
 #     aliases for a mode some other spelling already covers).
-T6_MODE_ROWS="0:t6_emit_elfexe_tnone 1:t6_emit_macho_tnone 2:t6_emit_pe_tnone 3:t6_emit_obj_tnone_x86_64 4:t6_emit_android_tnone 5:t6_emit_asm_tnone 6:t6_emit_ir_tnone 7:t6_emit_lkm_tnone 8:t6_emit_image_tnone 9:t6_emit_uefi_tnone 10:t6_emit_arx_tnone"
+T6_MODE_ROWS="0:t6_emit_elfexe_tnone 1:t6_emit_macho_tnone 2:t6_emit_pe_tnone 3:t6_emit_obj_tnone_x86_64 4:t6_emit_android_tnone 5:t6_emit_asm_tnone 6:t6_emit_ir_tnone 7:t6_emit_lkm_tnone 8:t6_emit_image_tnone 9:t6_emit_uefi_tnone 10:t6_emit_arx_tnone 11:t6_emit_fatimage_tnone"
 TOTAL=$((TOTAL + 1))
 T6_MODES_SRC=$(grep -oE 'emit_mode = [0-9]+' "$DIR/../src/main.kr" | grep -oE '[0-9]+$' | sort -un | tr '\n' ' ')
 T6_MODES_TBL=$(for p in $T6_MODE_ROWS; do echo "${p%%:*}"; done | sort -un | tr '\n' ' ')
@@ -20518,6 +20524,12 @@ emit_recipe() {
         # takes neither --load-addr= nor --stack-top= (both refused outside
         # --emit=image) and needs an explicit --arch. Its magic is its own.
         arx)   echo "7f415258|--target=none --arch=x86_64|$EV_BM" ;;
+        # fatimage's first four bytes are 4d 5a 00 91 -- the one 32-bit word
+        # that is both "MZ" to a PE loader and `add x13, x18, #0x16` to an
+        # AArch64 core. Pinned as the MAGIC rather than as RAW precisely
+        # because those two bytes are load-bearing: an image that lost them
+        # would still be a plausible flat blob and RAW would accept it.
+        fatimage) echo "4d5a0091|--target=none --arch=x86_64,arm64|$EV_BM" ;;
         asm)   echo "TEXT||$EV_SRC" ;;
         ir)    echo "STDOUT||$EV_SRC" ;;
     esac
@@ -20610,6 +20622,333 @@ for GOOD in $EV_ALL; do
     fi
 done
 rm -f "$EV_SRC" "$EV_BIN" "$EV_BM" "$EV_LKM"
+
+# ---------------------------------------------------------------------------
+# --emit=fatimage: ONE file, several boot paths (ANCHOR FATIMG)
+# ---------------------------------------------------------------------------
+#
+# The refusals first, then the BYTES. Neither half alone would do: a refusal
+# sweep passes on a compiler that refuses everything, and a byte sweep passes
+# on one that composes a plausible image out of a nonsense command line.
+#
+# THE BYTE ROWS ARE THE POINT. `--emit=fatimage` writes a file none of its
+# codegen passes produced, so nothing downstream of codegen -- not the `image:`
+# report, not the artifact size -- can tell you the composition is right. Every
+# structural row below was falsified by a deliberate mutation before it was
+# kept; the ones that could NOT be falsified are noted where they sit.
+#
+# The boots themselves live in examples/images/'s `make check`, not here: they
+# need qemu-system-x86_64, qemu-system-aarch64 and OVMF, and they take ~100
+# seconds. This block is the part that runs everywhere.
+echo ""
+echo "--- --emit=fatimage (ANCHOR FATIMG) ---"
+FI_D=$(mktemp -d /tmp/krc_fatimg_XXXX)
+FI_SRC="$FI_D/prog.kr"
+FI_IMG="$FI_D/fat.img"
+printf 'fn _start() {\n    loop { }\n}\n' > "$FI_SRC"
+
+# $1 = row name, $2.. = flags. Asserts a NON-ZERO exit and that the message
+# contains $2 (a substring unique to the refusal being probed) -- never merely
+# "it failed", which any unrelated error satisfies.
+fi_refuses() {
+    fi_name="$1"; fi_want="$2"; shift 2
+    TOTAL=$((TOTAL + 1))
+    rm -f "$FI_IMG"
+    fi_err=$($KRC "$@" -o "$FI_IMG" 2>&1); fi_st=$?
+    if [ "$fi_st" != "0" ] && printf '%s' "$fi_err" | grep -qF -- "$fi_want" && [ ! -s "$FI_IMG" ]; then
+        PASS=$((PASS + 1)); echo "  $fi_name: PASS"
+    else
+        echo "FAIL: $fi_name (exit $fi_st, wanted a message containing '$fi_want' and no artifact: '$fi_err')"
+        FAIL=$((FAIL + 1))
+    fi
+    rm -f "$FI_IMG"
+}
+
+# Every row an emit mode INHERITS ACCEPTANCE of unless it writes it. Each of
+# the three was measured silently absent for --emit=uefi before that mode
+# wrote its own.
+fi_refuses "fatimg_requires_target_none" "--emit=fatimage requires --target=none" \
+    --emit=fatimage --arch=x86_64,arm64 "$FI_SRC"
+fi_refuses "fatimg_requires_arch_list" "requires a comma-separated --arch= list" \
+    --emit=fatimage --arch=x86_64 --target=none "$FI_SRC"
+fi_refuses "fatimg_refuses_g" "-g conflicts with --emit=fatimage" \
+    --emit=fatimage --arch=x86_64,arm64 --target=none -g "$FI_SRC"
+
+# The allow-list, one row per rejected architecture and each on a substring
+# UNIQUE to it: a shared "x86_64/arm64 only" half would let a defect that
+# routed riscv32 into xtensa's arm still pass a grep.
+fi_refuses "fatimg_refuses_riscv32_in_list" "does not accept riscv32" \
+    --emit=fatimage --arch=x86_64,riscv32 --target=none "$FI_SRC"
+fi_refuses "fatimg_refuses_xtensa_in_list" "does not accept xtensa" \
+    --emit=fatimage --arch=arm64,xtensa --target=none "$FI_SRC"
+fi_refuses "fatimg_refuses_one_arch_twice" "twice" \
+    --emit=fatimage --arch=arm64,arm64 --target=none "$FI_SRC"
+
+# The single-image front-of-file flags. Each has a generic "only meaningful
+# with --emit=image" row elsewhere that would ALSO fire here -- these assert
+# the fatimage-specific message wins, because the generic one tells a fatimage
+# user to switch to a mode they deliberately did not ask for.
+fi_refuses "fatimg_refuses_bare_load_addr" "ambiguous under --emit=fatimage" \
+    --emit=fatimage --arch=x86_64,arm64 --target=none --load-addr=0x400000 "$FI_SRC"
+fi_refuses "fatimg_refuses_bare_stack_top" "ambiguous under --emit=fatimage" \
+    --emit=fatimage --arch=x86_64,arm64 --target=none --stack-top=0x3f0000 "$FI_SRC"
+fi_refuses "fatimg_refuses_image_header" "redundant under --emit=fatimage" \
+    --emit=fatimage --arch=x86_64,arm64 --target=none --image-header "$FI_SRC"
+fi_refuses "fatimg_refuses_reset_vector" "--reset-vector conflicts with --emit=fatimage" \
+    --emit=fatimage --arch=x86_64,arm64 --target=none --reset-vector "$FI_SRC"
+
+# THE CONSTRAINT THIS WHOLE MODE IS BOUNDED BY: a PE carries one COFF Machine
+# value, so a fat image is PE for at most one architecture. The refusal has to
+# be reachable or the constraint is only prose, which is why --fat-uefi= parses
+# a list at all -- purely so that asking for two can be turned away by name.
+fi_refuses "fatimg_uefi_takes_one_arch" "COFF header carries exactly one Machine value" \
+    --emit=fatimage --arch=x86_64,arm64 --target=none --fat-uefi=x86_64,arm64 "$FI_SRC"
+fi_refuses "fatimg_uefi_bare_flag_refused" "--fat-uefi requires a value" \
+    --emit=fatimage --arch=x86_64,arm64 --target=none --fat-uefi "$FI_SRC"
+
+# The four flags that exist only for this mode. Before these rows,
+# `--arch=x86_64,arm64 --emit=image` parsed the list and then built a SINGLE
+# x86_64 image at exit 0 -- half the request gone with no diagnostic.
+fi_refuses "fatimg_arch_list_outside_mode" "only meaningful with --emit=fatimage" \
+    --emit=image --arch=x86_64,arm64 --target=none --load-addr=0x400000 "$FI_SRC"
+fi_refuses "fatimg_slice_outside_mode" "--slice= is only meaningful" \
+    --emit=image --arch=x86_64 --target=none --load-addr=0x400000 --slice=arm64:/dev/null "$FI_SRC"
+fi_refuses "fatimg_uefi_flag_outside_mode" "--fat-uefi= is only meaningful" \
+    --emit=uefi --arch=x86_64 --target=none --fat-uefi=x86_64 "$FI_SRC"
+fi_refuses "fatimg_per_arch_addr_outside_mode" "per-architecture form --load-addr=" \
+    --emit=image --arch=x86_64 --target=none --load-addr=x86_64:0x400000 "$FI_SRC"
+
+# A --slice= file has to be SELF-DESCRIBING, because nothing here saw the build
+# that produced it. Both halves are probed: a missing file, and a real arm64
+# image built WITHOUT --image-header, which is a perfectly good boot image and
+# still cannot be composed -- its entry point exists nowhere in its bytes.
+fi_refuses "fatimg_slice_missing_file" "cannot open" \
+    --emit=fatimage --arch=x86_64,arm64 --target=none --slice=arm64:"$FI_D/nope.img" "$FI_SRC"
+# The source is deliberately BIGGER than 64 bytes of code. A trivial `loop {}`
+# compiles to a 32-byte arm64 image, which trips the "shorter than the 64-byte
+# header" row below instead -- also correct, but a different refusal, and a
+# fixture that reaches the wrong one would leave the magic check unexercised.
+printf 'static uint64[16] pad\nfn _start() {\n    uint64 i = 0\n    while i < 16 { pad[i] = i * 3\n i = i + 1 }\n    loop { }\n}\n' > "$FI_D/big.kr"
+TOTAL=$((TOTAL + 1))
+if $KRC --emit=image --arch=arm64 --target=none --load-addr=0x40010000 \
+        --stack-top=0x40800000 "$FI_D/big.kr" -o "$FI_D/hdrless.img" >/dev/null 2>&1 \
+   && [ "$(wc -c < "$FI_D/hdrless.img" | tr -d ' ')" -ge 64 ]; then
+    rm -f "$FI_IMG"
+    fi_err=$($KRC --emit=fatimage --arch=x86_64,arm64 --target=none \
+                  --slice=arm64:"$FI_D/hdrless.img" "$FI_SRC" -o "$FI_IMG" 2>&1); fi_st=$?
+    if [ "$fi_st" != "0" ] && printf '%s' "$fi_err" | grep -qF -- "does not begin with an arm64 Image header"; then
+        PASS=$((PASS + 1)); echo "  fatimg_slice_needs_image_header: PASS"
+    else
+        echo "FAIL: fatimg_slice_needs_image_header (exit $fi_st: '$fi_err')"; FAIL=$((FAIL + 1))
+    fi
+else
+    echo "FAIL: fatimg_slice_needs_image_header (could not build a >=64-byte headerless arm64 slice)"; FAIL=$((FAIL + 1))
+fi
+rm -f "$FI_IMG"
+# ...and the short-slice half, which is the other way the same requirement is
+# missed: a real arm64 image so small it cannot even contain the header.
+TOTAL=$((TOTAL + 1))
+if $KRC --emit=image --arch=arm64 --target=none --load-addr=0x40010000 \
+        --stack-top=0x40800000 "$FI_SRC" -o "$FI_D/tiny.img" >/dev/null 2>&1 \
+   && [ "$(wc -c < "$FI_D/tiny.img" | tr -d ' ')" -lt 64 ]; then
+    fi_err=$($KRC --emit=fatimage --arch=x86_64,arm64 --target=none \
+                  --slice=arm64:"$FI_D/tiny.img" "$FI_SRC" -o "$FI_IMG" 2>&1); fi_st=$?
+    if [ "$fi_st" != "0" ] && printf '%s' "$fi_err" | grep -qF -- "shorter than the 64-byte arm64 Image header"; then
+        PASS=$((PASS + 1)); echo "  fatimg_slice_shorter_than_header: PASS"
+    else
+        echo "FAIL: fatimg_slice_shorter_than_header (exit $fi_st: '$fi_err')"; FAIL=$((FAIL + 1))
+    fi
+else
+    echo "  fatimg_slice_shorter_than_header: SKIP (the trivial arm64 image is no longer under 64 bytes, so this refusal has no fixture)"
+    PASS=$((PASS + 1))
+fi
+rm -f "$FI_IMG"
+
+# THE x86_64 SLICE IS THE ONE THING IN THIS CONTAINER THAT CANNOT BE MOVED.
+# Its self-boot trampoline ends in `movabs $entry,%rax; call *%rax` with an
+# absolute address baked from --load-addr, so a slice composed anywhere else
+# calls into unmapped memory. FOUND BY BOOTING, not by review: a slice built at
+# 0x20000000 and composed at 0x402000 gave a fat image whose arm64 path booted
+# and whose x86_64 path went silent at exit 0. The refusal names the address to
+# rebuild at, and this row asserts that it does -- a message that only said
+# "wrong address" would leave the user with no way to compute the right one,
+# since the offset depends on how long the UEFI slice turned out to be.
+TOTAL=$((TOTAL + 1))
+if $KRC --emit=image --arch=x86_64 --target=none --load-addr=0x20000000 \
+        --stack-top=0x90000 "$FI_SRC" -o "$FI_D/farx86.img" >/dev/null 2>&1; then
+    rm -f "$FI_IMG"
+    fi_err=$($KRC --emit=fatimage --arch=x86_64,arm64 --target=none \
+                  --slice=x86_64:"$FI_D/farx86.img" "$FI_SRC" -o "$FI_IMG" 2>&1); fi_st=$?
+    fi_named=$(printf '%s' "$fi_err" | sed -n 's/.*places it at \([0-9]*\)\..*/\1/p')
+    if [ "$fi_st" != "0" ] && [ ! -s "$FI_IMG" ] \
+       && printf '%s' "$fi_err" | grep -qF -- "not position-independent" \
+       && [ -n "$fi_named" ] && [ "$fi_named" != "536870912" ]; then
+        PASS=$((PASS + 1)); echo "  fatimg_x86_slice_must_match_placement: PASS (names $fi_named as the rebuild address)"
+    else
+        echo "FAIL: fatimg_x86_slice_must_match_placement (exit $fi_st, named '$fi_named': '$fi_err')"; FAIL=$((FAIL + 1))
+    fi
+else
+    echo "FAIL: fatimg_x86_slice_must_match_placement (could not build the far-address x86_64 slice)"; FAIL=$((FAIL + 1))
+fi
+rm -f "$FI_IMG"
+
+# --- and now the bytes ------------------------------------------------------
+FI_REPORT=$($KRC --emit=fatimage --arch=x86_64,arm64 --target=none "$FI_SRC" -o "$FI_IMG" 2>&1)
+TOTAL=$((TOTAL + 1))
+if [ -s "$FI_IMG" ]; then
+    PASS=$((PASS + 1)); echo "  fatimg_default_invocation_builds: PASS ($(wc -c < "$FI_IMG" | tr -d ' ') bytes)"
+else
+    echo "FAIL: fatimg_default_invocation_builds ('$FI_REPORT')"; FAIL=$((FAIL + 1))
+fi
+
+# The one word that is two things at once. Asserted as all four bytes, not as
+# "starts with MZ": the low half is what a PE loader reads and the high half is
+# what an AArch64 core executes, and a mutation to either is invisible to a
+# check that looks at the other.
+TOTAL=$((TOTAL + 1))
+fi_w0=$(od -An -tx1 -N4 -v "$FI_IMG" 2>/dev/null | tr -d ' \n')
+if [ "$fi_w0" = "4d5a0091" ]; then
+    PASS=$((PASS + 1)); echo "  fatimg_code0_is_mz_and_add_x13: PASS (4d 5a 00 91)"
+else
+    echo "FAIL: fatimg_code0_is_mz_and_add_x13 (first four bytes are '$fi_w0', want 4d5a0091 -- 'MZ' to firmware, \`add x13, x18, #0x16\` to a CPU)"
+    FAIL=$((FAIL + 1))
+fi
+
+TOTAL=$((TOTAL + 1))
+fi_magic=$(od -An -tx4 -j56 -N4 -v "$FI_IMG" 2>/dev/null | tr -d ' \n')
+if [ "$fi_magic" = "644d5241" ]; then
+    PASS=$((PASS + 1)); echo "  fatimg_arm64_image_magic: PASS"
+else
+    echo "FAIL: fatimg_arm64_image_magic (offset 56 is '$fi_magic', want 644d5241)"; FAIL=$((FAIL + 1))
+fi
+
+# The rest of the composition, decoded. Grouped into one python run because
+# every field below is read out of the same file at the same offsets, but each
+# produces its own named row so a failure says which invariant broke.
+FI_PY=$(python3 - "$FI_IMG" <<'FIPYEOF'
+import struct, sys
+b = open(sys.argv[1], "rb").read()
+u32 = lambda o: struct.unpack_from("<I", b, o)[0]
+u64 = lambda o: struct.unpack_from("<Q", b, o)[0]
+out = []
+
+# code1 must be an unconditional B whose target is inside the file. The target
+# is also cross-checked against the report by the shell, below.
+c1 = u32(4)
+out.append("code1_is_b %d" % (1 if (c1 >> 26) == 5 else 0))
+tgt = 4 + (c1 & 0x03FFFFFF) * 4
+out.append("code1_target %d" % tgt)
+out.append("in_file %d" % (1 if tgt < len(b) else 0))
+out.append("image_size %d" % u64(16))
+out.append("file_size %d" % len(b))
+out.append("e_lfanew %d" % u32(60))
+out.append("pe_sig %d" % (1 if b[u32(60):u32(60)+4] == b"PE\0\0" else 0))
+
+# The multiboot header: the FIRST 4-byte-aligned magic in the first 8 KiB,
+# which is what a loader takes, and its checksum, which is what a loader
+# validates before honouring anything else in it.
+first = -1
+for o in range(0, min(8192, len(b)) - 4, 4):
+    if u32(o) == 0x1BADB002:
+        first = o
+        break
+out.append("mb_first %d" % first)
+if first >= 0:
+    magic, flags, cksum = u32(first), u32(first+4), u32(first+8)
+    out.append("mb_cksum_ok %d" % (1 if (magic + flags + cksum) & 0xFFFFFFFF == 0 else 0))
+    out.append("mb_header_addr %d" % u32(first+12))
+    out.append("mb_load_addr %d" % u32(first+16))
+    out.append("mb_entry %d" % u32(first+28))
+print(" ".join(out))
+FIPYEOF
+)
+# The python run above prints "<name> <value>" pairs on one line; awk-matching
+# the NAME exactly is what keeps `mb_load_addr` from being answered by
+# `mb_header_addr` -- a substring match would, and did in the first draft.
+fi_field() { printf '%s' "$FI_PY" | awk -v k="$1" '{for(i=1;i<NF;i++) if($i==k){print $(i+1); exit}}'; }
+
+fi_row() {  # name, got, want, note
+    TOTAL=$((TOTAL + 1))
+    if [ "$2" = "$3" ]; then
+        PASS=$((PASS + 1)); echo "  $1: PASS"
+    else
+        echo "FAIL: $1 (got '$2', want '$3' -- $4)"; FAIL=$((FAIL + 1))
+    fi
+}
+
+fi_row "fatimg_code1_is_a_branch" "$(fi_field code1_is_b)" "1" \
+    "code1 must be an unconditional B; anything else and the arm64 loader executes whatever it happens to be"
+fi_row "fatimg_branch_target_inside_file" "$(fi_field in_file)" "1" \
+    "the branch must land inside the image, not past its last byte"
+fi_row "fatimg_image_size_is_file_size" "$(fi_field image_size)" "$(fi_field file_size)" \
+    "the Image header's image_size must cover the WHOLE composite, its own 64 bytes included. NOTE: no boot here witnesses this -- QEMU reads the file regardless -- so this static row is the only thing holding it"
+fi_row "fatimg_pe_signature_preserved" "$(fi_field pe_sig)" "1" \
+    "e_lfanew is restored byte-for-byte after the arm64 header overwrites the DOS stub; without that the UEFI path is dead"
+fi_row "fatimg_e_lfanew_clears_arm64_header" "$(test "$(fi_field e_lfanew)" -ge 64 && echo yes || echo no)" "yes" \
+    "the PE header must begin at 64 or later or it overlaps the arm64 Image header, which owns bytes 0-63"
+fi_row "fatimg_multiboot_header_is_first" "$(fi_field mb_first)" "1024" \
+    "a loader takes the FIRST 4-byte-aligned magic in the first 8 KiB; if anything ahead of 1024 spells 0x1badb002 the guest enters through a header this compiler did not write"
+fi_row "fatimg_multiboot_checksum" "$(fi_field mb_cksum_ok)" "1" \
+    "magic + flags + checksum must be zero mod 2^32 or the loader refuses the header outright"
+fi_row "fatimg_multiboot_load_addr_is_file_base" "$(fi_field mb_load_addr)" "4194304" \
+    "load_addr is the base of the WHOLE FILE, not of the slice -- that is what makes the loader pull in the arm64 half as well"
+fi_row "fatimg_multiboot_header_addr" "$(fi_field mb_header_addr)" "4195328" \
+    "header_addr must be load base + 1024, the header's own offset in the file"
+
+# The two entry points, cross-checked against the report the build printed.
+# The report is what a boot harness parses, so a report that disagrees with the
+# bytes is as broken as bytes that disagree with themselves.
+fi_rep_arm=$(printf '%s' "$FI_REPORT" | sed -n 's/.*arm64 image *: .*entry=\([0-9]*\).*/\1/p')
+fi_row "fatimg_report_matches_code1_target" "$(fi_field code1_target)" "$fi_rep_arm" \
+    "the arm64 entry the report prints must be exactly where code1 branches"
+fi_rep_x86=$(printf '%s' "$FI_REPORT" | sed -n 's/.*x86_64 multiboot: .*entry=\([0-9]*\).*/\1/p')
+fi_row "fatimg_report_matches_multiboot_entry" "$(fi_field mb_entry)" "$fi_rep_x86" \
+    "the x86_64 entry the report prints must be exactly the multiboot header's entry_addr"
+
+# --slice= SUBSTITUTION, proved by bytes rather than by exit 0. A composer that
+# ignored --slice= entirely and compiled the source for arm64 anyway would
+# produce a perfectly valid fat image and pass every row above.
+TOTAL=$((TOTAL + 1))
+printf 'fn _start() {\n    uint64 x = 0\n    while x < 3 { x = x + 1 }\n    loop { }\n}\n' > "$FI_D/other.kr"
+if $KRC --emit=image --arch=arm64 --target=none --image-header --load-addr=0x40010000 \
+        --stack-top=0x40800000 "$FI_D/other.kr" -o "$FI_D/slice.img" >/dev/null 2>&1 \
+   && $KRC --emit=fatimage --arch=x86_64,arm64 --target=none \
+           --slice=arm64:"$FI_D/slice.img" "$FI_SRC" -o "$FI_D/mixed.img" >/dev/null 2>&1; then
+    fi_soff=$($KRC --emit=fatimage --arch=x86_64,arm64 --target=none \
+                   --slice=arm64:"$FI_D/slice.img" "$FI_SRC" -o "$FI_D/mixed.img" 2>&1 \
+              | sed -n 's/.*arm64 image *: file=\([0-9]*\).*/\1/p')
+    fi_slen=$(wc -c < "$FI_D/slice.img" | tr -d ' ')
+    fi_a=$(od -An -tx1 -v -j "$fi_soff" -N "$fi_slen" "$FI_D/mixed.img" | tr -d ' \n')
+    fi_b=$(od -An -tx1 -v "$FI_D/slice.img" | tr -d ' \n')
+    if [ -n "$fi_a" ] && [ "$fi_a" = "$fi_b" ]; then
+        PASS=$((PASS + 1)); echo "  fatimg_slice_bytes_are_adopted_verbatim: PASS ($fi_slen bytes at offset $fi_soff)"
+    else
+        echo "FAIL: fatimg_slice_bytes_are_adopted_verbatim (the bytes at the reported arm64 offset are not the --slice= file's)"
+        FAIL=$((FAIL + 1))
+    fi
+else
+    echo "FAIL: fatimg_slice_bytes_are_adopted_verbatim (build failed)"; FAIL=$((FAIL + 1))
+fi
+
+# --fat-uefi=none: no PE, so no "MZ" to preserve, so the branch moves to code0
+# and byte 0 is a branch and nothing else. The compiler does not write two
+# characters of PE that no firmware will ever read.
+TOTAL=$((TOTAL + 1))
+if $KRC --emit=fatimage --arch=x86_64,arm64 --target=none --fat-uefi=none \
+        "$FI_SRC" -o "$FI_D/nopath.img" >/dev/null 2>&1; then
+    fi_n0=$(od -An -tx1 -N4 -v "$FI_D/nopath.img" | tr -d ' \n')
+    fi_n_isb=$(python3 -c "import sys;w=int(sys.argv[1][6:8]+sys.argv[1][4:6]+sys.argv[1][2:4]+sys.argv[1][0:2],16);print(1 if (w>>26)==5 else 0)" "$fi_n0")
+    if [ "$fi_n_isb" = "1" ] && [ "$fi_n0" != "4d5a0091" ]; then
+        PASS=$((PASS + 1)); echo "  fatimg_uefi_none_branches_at_code0: PASS (word0 $fi_n0)"
+    else
+        echo "FAIL: fatimg_uefi_none_branches_at_code0 (word0 '$fi_n0' -- with no PE the branch belongs at code0 and there is no MZ to keep)"
+        FAIL=$((FAIL + 1))
+    fi
+else
+    echo "FAIL: fatimg_uefi_none_branches_at_code0 (build failed)"; FAIL=$((FAIL + 1))
+fi
+
+rm -rf "$FI_D"
 
 # --- syscall_raw number register per ARM64 ABI (artifact inspection) ---
 # aarch64 takes the syscall number in x8 on Linux/Android and in x16 on
