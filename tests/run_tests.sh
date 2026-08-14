@@ -20339,10 +20339,40 @@ case "$ax_na" in
         echo "FAIL: arx_refuses_default_arch (wanted the explicit-arch refusal, got: $(printf '%s' "$ax_na" | head -1))"; FAIL=$((FAIL + 1)) ;;
 esac
 fi
-# arm64 is in scope and deliberately not enabled: the container reserves the
-# arch value and the layout already keeps ADRP arithmetic valid, but no arm64
-# loader exists, so emitting it would ship an untested invariant as if it worked.
-ax_refuse arx_refuses_arm64_queued  "x86_64 only today" --arch=arm64 --target=none --emit=arx
+# arm64 WAS refused here, with the reason "no arm64 loader exists, so emitting
+# it would ship an untested invariant as if it worked". ce95d1a built the
+# loader, so the precondition that row guarded is gone and the refusal it
+# asserted became false. Replaced with the positive claim rather than deleted:
+# the arch byte in the header is what a loader dispatches on, so assert THAT
+# and not merely that a file appeared.
+#
+# Compile-only (no arm64 container is executed here), so pinning --arch=arm64
+# is correct -- indeed the whole point of the row.
+TOTAL=$((TOTAL + 1))
+ARX_A64=/tmp/krc_arx_a64_$$
+rm -f "$ARX_A64"
+ax_a64_out=$($KRC "$ARX_SRC" -o "$ARX_A64" --arch=arm64 --target=none --emit=arx 2>&1); ax_a64_st=$?
+if [ $ax_a64_st -ne 0 ] || [ ! -f "$ARX_A64" ]; then
+    echo "FAIL: arx_emits_arm64 (exit=$ax_a64_st, out=$(printf '%s' "$ax_a64_out" | head -1))"
+    FAIL=$((FAIL + 1))
+else
+    # 7f 41 52 58 = \x7fARX. Byte 8 is the arch: 1 = x86_64, 2 = arm64.
+    ax_a64_magic=$(xxd -p -l 4 "$ARX_A64" 2>/dev/null)
+    ax_a64_arch=$(xxd -p -s 8 -l 1 "$ARX_A64" 2>/dev/null)
+    ax_x86_arch=$(xxd -p -s 8 -l 1 "$ARX_BIN" 2>/dev/null)
+    if [ "$ax_a64_magic" != "7f415258" ]; then
+        echo "FAIL: arx_emits_arm64 (magic $ax_a64_magic, want 7f415258)"; FAIL=$((FAIL + 1))
+    elif [ -z "$ax_a64_arch" ] || [ "$ax_a64_arch" = "$ax_x86_arch" ]; then
+        # Empty, or identical to the x86_64 container -- either means the arch
+        # byte is not actually carrying the target and the row proves nothing.
+        echo "FAIL: arx_emits_arm64 (arch byte '$ax_a64_arch' vs x86_64's '$ax_x86_arch' -- not discriminating)"
+        FAIL=$((FAIL + 1))
+    else
+        PASS=$((PASS + 1))
+        echo "  arx_emits_arm64: PASS (\x7fARX, arch byte $ax_a64_arch vs x86_64 $ax_x86_arch)"
+    fi
+fi
+rm -f "$ARX_A64"
 ax_refuse arx_refuses_riscv32       "no riscv32 form" --arch=riscv32 --target=none --emit=arx
 ax_refuse arx_refuses_xtensa        "no xtensa form" --arch=xtensa --target=none --emit=arx
 ax_refuse arx_refuses_debug_info    "-g conflicts with --emit=arx" --arch=x86_64 --target=none --emit=arx -g
