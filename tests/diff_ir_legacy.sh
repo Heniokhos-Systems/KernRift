@@ -433,6 +433,25 @@ volatile { *(hi as uint32) -> w }
 if w/2!=0x20020000 { exit(3) }
 exit(7)}' 7
 
+# main's exit status. Both legacy backends leaked the last statement's value
+# out as the status: `fn main() { write(1,"ok\n",3) }` exited 3, the byte
+# count, while both IR backends exited 0. These use value_case and not
+# diff_case on purpose -- the number IS the assertion, and a diff_case would
+# have gone green the moment all four agreed on any value at all.
+value_case "main_void_falls_off_end"  'fn main() { write(1, "ok\n", 3) }' 0
+value_case "main_void_bare_return"    'fn main() { write(1, "ok\n", 3) return }' 0
+value_case "main_void_early_return"   'fn main() { u64 n=write(1,"ok\n",3)
+if n==3 { write(1,"e\n",2) return }
+write(1,"l\n",2) }' 0
+# The positive control for the two rows above: a main that RETURNS a value
+# must still deliver it, so a fix that simply hard-codes 0 goes red here.
+value_case "main_typed_returns_value" 'fn main() -> uint32 { write(1, "ok\n", 3) return 7 }' 7
+value_case "main_typed_conditional_return" 'fn main() -> uint32 { u64 n=write(1,"ok\n",3)
+if n==3 { return 5 } else { return 9 } }' 5
+# The status still comes from exit() when main calls it, and exit() beats the
+# fall-through zero because it never returns to the epilogue.
+value_case "main_void_explicit_exit"  'fn main() { write(1, "ok\n", 3) exit(4) }' 4
+
 echo "----"
 echo "Differential: $((TOTAL-DIV-KNOWN))/$TOTAL agree across backends, $KNOWN known-divergent (pinned), $DIV diverged."
 if [ "$DIV" = "0" ]; then echo "PARITY OK"; else echo "PARITY GAPS FOUND"; exit 1; fi

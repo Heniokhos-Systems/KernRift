@@ -21453,6 +21453,179 @@ FSE_EOF
 )" '97,0,98,53,99,
 '
 
+# --- ANCHOR mainrc: main's exit status is not the last statement's value ----
+# `fn main() { write(1, "ok\n", 3) }` exited 3 on BOTH legacy backends and 0
+# on both IR backends -- a genuine IR-vs-legacy divergence, with the write()
+# byte count sitting in the return register and being used as the status.
+# examples/fmt_nan_smoke.kr printed all nine of its documented lines and still
+# exited 3 because of it.
+#
+# The semantics pinned here:
+#   * `fn main()` with no declared return type, falling off the end -> 0
+#   * `fn main()` with a valueless `return`                          -> 0
+#   * `fn main() -> uint32` that returns a value -> THAT value, unchanged;
+#     this is the positive control, so a fix that hard-codes 0 goes red
+#   * `fn main() -> uint32` that falls off the end is not a case: the
+#     missing-return checker already rejects it ("function may not return a
+#     value on all paths"), and mainrc_typed_fallthrough_is_rejected pins
+#     that it keeps doing so rather than silently exiting 0.
+#
+# EXECUTES, so it follows $RUN_ARCH, with the other arch under qemu.
+echo ""
+echo "--- main() exit status (ANCHOR mainrc) ---"
+MRC_OTHER="arm64"
+if [ "$RUN_ARCH" = "arm64" ]; then MRC_OTHER="x86_64"; fi
+MRC_QEMU=""
+if [ "$MRC_OTHER" = "arm64" ]; then
+    MRC_QEMU="$(command -v qemu-aarch64-static || command -v qemu-aarch64 || true)"
+fi
+MRC_EXP_RUNS=2
+if [ -n "$MRC_QEMU" ]; then MRC_EXP_RUNS=4; fi
+MRC_SRCF="$DIR/../test_tmp_mrc_$$.kr"
+MRC_NAME=""
+MRC_WANT=0
+MRC_OK=1
+MRC_RAN=0
+mrc_run() { # <arch> <flags> <runner-or-empty>
+    local _bin="/tmp/krc_mrc_bin_$$"
+    if ! $KRC --arch="$1" $2 "$MRC_SRCF" -o "$_bin" >/dev/null 2>&1; then
+        MRC_OK=0
+        echo "  $MRC_NAME $1 ${2:-IR}: COMPILE FAILED"
+        return
+    fi
+    chmod +x "$_bin"
+    local _rc=0
+    if [ -n "$3" ]; then $3 "$_bin" >/dev/null 2>&1 || _rc=$?
+    else "$_bin" >/dev/null 2>&1 || _rc=$?; fi
+    MRC_RAN=$((MRC_RAN + 1))
+    if [ "$_rc" != "$MRC_WANT" ]; then
+        MRC_OK=0
+        echo "  $MRC_NAME $1 ${2:-IR}: exit status $_rc, want $MRC_WANT"
+    fi
+    rm -f "$_bin"
+}
+mrc_case() { # <name> <source> <expected-exit-status>
+    MRC_NAME="$1"
+    MRC_WANT="$3"
+    TOTAL=$((TOTAL + 1))
+    MRC_OK=1
+    MRC_RAN=0
+    printf '%s\n' "$2" > "$MRC_SRCF"
+    mrc_run "$RUN_ARCH" ""         ""
+    mrc_run "$RUN_ARCH" "--legacy" ""
+    if [ -n "$MRC_QEMU" ]; then
+        mrc_run "$MRC_OTHER" ""         "$MRC_QEMU"
+        mrc_run "$MRC_OTHER" "--legacy" "$MRC_QEMU"
+    fi
+    if [ "$MRC_RAN" != "$MRC_EXP_RUNS" ]; then
+        MRC_OK=0
+        echo "  $MRC_NAME: only $MRC_RAN/$MRC_EXP_RUNS config-runs executed"
+    fi
+    if [ "$MRC_OK" = "1" ]; then
+        PASS=$((PASS + 1))
+        echo "  $MRC_NAME: PASS (exit $MRC_WANT on $MRC_RAN config-runs)"
+    else
+        FAIL=$((FAIL + 1))
+        echo "FAIL: $MRC_NAME"
+    fi
+    rm -f "$MRC_SRCF"
+}
+
+# The reduction exactly as reported. write() returns 3, and 3 was the status.
+mrc_case "mainrc_void_fallthrough_exits_0" \
+    'fn main() { write(1, "ok\n", 3) }' 0
+# The same leak reached through an explicit valueless `return`, which takes a
+# different path out of the body (a jump to the epilogue, not a fall-through).
+mrc_case "mainrc_void_bare_return_exits_0" \
+    'fn main() { write(1, "ok\n", 3) return }' 0
+mrc_case "mainrc_void_early_return_exits_0" "$(cat <<'MRC_EOF'
+fn main() {
+    u64 n = write(1, "ok\n", 3)
+    if n == 3 { write(1, "early\n", 6) return }
+    write(1, "late\n", 5)
+}
+MRC_EOF
+)" 0
+# POSITIVE CONTROL. A main that returns a value must still deliver it: this
+# row goes red against any fix that zeroes the register unconditionally.
+mrc_case "mainrc_typed_return_value_survives" \
+    'fn main() -> uint32 { write(1, "ok\n", 3) return 7 }' 7
+# Second positive control: the value arrives through a branch, so the
+# fall-through zero sits in the instruction stream between the body and the
+# epilogue and must be unreachable rather than merely unexecuted-by-luck.
+mrc_case "mainrc_typed_conditional_return_survives" "$(cat <<'MRC_EOF'
+fn main() -> uint32 {
+    u64 n = write(1, "ok\n", 3)
+    if n == 3 { return 5 } else { return 9 }
+}
+MRC_EOF
+)" 5
+# exit() still wins: it never returns to the epilogue, so no zeroing applies.
+mrc_case "mainrc_explicit_exit_still_wins" \
+    'fn main() { write(1, "ok\n", 3) exit(4) }' 4
+
+# `fn main() -> uint32` falling off the end is REJECTED, so there is no
+# runtime status to decide. Pinned because if that check ever relaxed, such a
+# main would now quietly exit 0 instead of returning a computed value, and
+# the three rows above would not notice.
+TOTAL=$((TOTAL + 1))
+MRC_REJ_SRC="$DIR/../test_tmp_mrcrej_$$.kr"
+printf '%s\n' 'fn main() -> uint32 { write(1, "ok\n", 3) }' > "$MRC_REJ_SRC"
+MRC_REJ_OUT=$($KRC --arch="$RUN_ARCH" "$MRC_REJ_SRC" -o /tmp/krc_mrcrej_$$ 2>&1)
+MRC_REJ_LEG=$($KRC --arch="$RUN_ARCH" --legacy "$MRC_REJ_SRC" -o /tmp/krc_mrcrej_$$ 2>&1)
+if printf '%s' "$MRC_REJ_OUT" | grep -q "may not return a value on all paths" \
+   && printf '%s' "$MRC_REJ_LEG" | grep -q "may not return a value on all paths"; then
+    PASS=$((PASS + 1))
+    echo "  mainrc_typed_fallthrough_is_rejected: PASS (both backends name the missing return)"
+else
+    FAIL=$((FAIL + 1))
+    echo "FAIL: mainrc_typed_fallthrough_is_rejected"
+    echo "  IR    : $(printf '%s' "$MRC_REJ_OUT" | head -2 | tr '\n' '|')"
+    echo "  legacy: $(printf '%s' "$MRC_REJ_LEG" | head -2 | tr '\n' '|')"
+fi
+rm -f "$MRC_REJ_SRC" /tmp/krc_mrcrej_$$
+
+# examples/fmt_nan_smoke.kr is the example the leak was found through: it
+# printed all nine documented lines and exited 3. ANCHOR sffa2 above already
+# pins its stdout on all four configs but deliberately does not look at the
+# status, so this row is the one that would have caught it.
+TOTAL=$((TOTAL + 1))
+MRC_FNS_OK=1
+MRC_FNS_RAN=0
+mrc_fns_run() { # <arch> <flags> <runner-or-empty>
+    local _bin="/tmp/krc_mrcfns_$$"
+    if ! $KRC --arch="$1" $2 "$DIR/../examples/fmt_nan_smoke.kr" -o "$_bin" >/dev/null 2>&1; then
+        MRC_FNS_OK=0; echo "  fmt_nan_smoke $1 ${2:-IR}: COMPILE FAILED"; return
+    fi
+    chmod +x "$_bin"
+    local _rc=0
+    if [ -n "$3" ]; then $3 "$_bin" >/dev/null 2>&1 || _rc=$?
+    else "$_bin" >/dev/null 2>&1 || _rc=$?; fi
+    MRC_FNS_RAN=$((MRC_FNS_RAN + 1))
+    if [ "$_rc" != "0" ]; then
+        MRC_FNS_OK=0
+        echo "  fmt_nan_smoke $1 ${2:-IR}: exit status $_rc, want 0"
+    fi
+    rm -f "$_bin"
+}
+mrc_fns_run "$RUN_ARCH" ""         ""
+mrc_fns_run "$RUN_ARCH" "--legacy" ""
+if [ -n "$MRC_QEMU" ]; then
+    mrc_fns_run "$MRC_OTHER" ""         "$MRC_QEMU"
+    mrc_fns_run "$MRC_OTHER" "--legacy" "$MRC_QEMU"
+fi
+if [ "$MRC_FNS_RAN" != "$MRC_EXP_RUNS" ]; then
+    MRC_FNS_OK=0
+    echo "  only $MRC_FNS_RAN/$MRC_EXP_RUNS config-runs executed"
+fi
+if [ "$MRC_FNS_OK" = "1" ]; then
+    PASS=$((PASS + 1))
+    echo "  fmt_nan_smoke_example_exits_0: PASS ($MRC_FNS_RAN config-runs)"
+else
+    FAIL=$((FAIL + 1))
+    echo "FAIL: fmt_nan_smoke_example_exits_0"
+fi
+
 # --- Summary ---
 echo ""
 # THERE IS NO KNOWN DELIBERATE RED IN THIS SUITE, so nothing is annotated here.

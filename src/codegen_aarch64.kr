@@ -5161,6 +5161,12 @@ fn gen_stmt_a64(uint64 node) {
                 }
                 expr_is_struct_a64 = 0xFFFFFFFF
             }
+        } else if legacy_main_zero_ret_a64 != 0 {
+            // Valueless `return` in main. type_check rejects `return` without
+            // a value in a non-void function, so reaching here means main has
+            // no declared return type and the status must be 0 -- otherwise
+            // whatever the previous statement left in x0 became it.
+            emit_a64_mov_imm(0, 0)
         }
         // Jump to epilogue
         emit_a64_b(0)
@@ -6096,10 +6102,19 @@ fn gen_function_a64(uint64 fn_node) {
         }
     }
 
-    // Default x0 to 0 at start of main's body so void main / implicit
-    // fall-through exits with status 0. Explicit `return N` overwrites.
+    // Default x0 to 0 at the START of main's body. Not sufficient alone --
+    // anything main computes afterwards overwrites x0 -- but it covers the
+    // empty body. The zeroing that decides the exit status happens on the two
+    // paths that LEAVE the body; see legacy_main_zero_ret_a64 and the
+    // epilogue, and the matching comment in codegen.kr's gen_function.
     if tok_matches(wnt_a64, "main", 4) != 0 && freestanding == 0 {
         emit_a64_mov_imm(0, 0)
+    }
+
+    // Set while generating main's body: a valueless `return` inside it must
+    // leave 0 in x0, because main's x0 becomes the process exit status.
+    if tok_matches(wnt_a64, "main", 4) != 0 && freestanding == 0 && is_naked == 0 {
+        legacy_main_zero_ret_a64 = 1
     }
 
     // Clear per-function slice table
@@ -6325,6 +6340,16 @@ fn gen_function_a64(uint64 fn_node) {
     if wbody != 0 {
         gen_block_a64(wbody)
     }
+
+    // Falling off the end of main's body is a return of nothing, so the exit
+    // status is 0. Emitting the zero HERE and not at epilogue_start is what
+    // keeps `fn main() -> uint32 { ... return N }` working: a `return N`
+    // branches to epilogue_start with N in x0 and lands PAST this
+    // instruction. See the matching comment in codegen.kr's gen_function.
+    if legacy_main_zero_ret_a64 != 0 {
+        emit_a64_mov_imm(0, 0)
+    }
+    legacy_main_zero_ret_a64 = 0
 
     // Epilogue — patch return jumps here
     uint64 epilogue_start = out_len

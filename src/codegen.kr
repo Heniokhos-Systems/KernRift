@@ -133,6 +133,14 @@ static uint64 LKM_GFP_KERNEL = 0xcc0
 static uint64 ret_fixups = 0
 static uint64 ret_fixup_count = 0
 
+// Non-zero only while gen_function is emitting main's body on a target where
+// main's return register becomes the process exit status. Both legacy
+// backends carry their own copy of this flag; the IR backend needs none,
+// because its builder appends an explicit IR_RET_VOID that already zeros the
+// register. See gen_function / gen_function_a64.
+static uint64 legacy_main_zero_ret = 0
+static uint64 legacy_main_zero_ret_a64 = 0
+
 // Loop context for break/continue
 // [loop_start_offset(8), break_fixup_start(8)] × 16 deep
 static uint64 loop_stack = 0
@@ -10942,6 +10950,13 @@ fn gen_stmt(uint64 node) {
             emit_load_rax_from_stack(rt2a)
         } else if wec != 0 {
             gen_expr(wec)
+        } else if legacy_main_zero_ret != 0 {
+            // Valueless `return` in main. type_check rejects `return` without
+            // a value in a non-void function, so reaching here means main has
+            // no declared return type and the status must be 0 -- otherwise
+            // whatever the previous statement left in rax became it.
+            emit_byte(0x31); emit_byte(0xC0)   // xor eax, eax
+            rax_cache = 0
         }
         // If returning a struct, load eightbytes into rax/rdx or xmm0/xmm1,
         // or copy to sret buffer for MEMORY class (>16 bytes).
@@ -11933,11 +11948,23 @@ fn gen_function(uint64 fn_node) {
         }
     }
 
-    // Default rax to 0 at start of main's body so void main / implicit
-    // fall-through exits with status 0. Explicit `return N` overwrites.
+    // Default rax to 0 at the START of main's body. This is not sufficient on
+    // its own -- anything main computes afterwards overwrites rax -- but it
+    // still covers the empty body, and it costs two bytes. The zeroing that
+    // actually decides the exit status happens on the two paths that LEAVE
+    // main's body: see legacy_main_zero_ret below and the epilogue.
     if tok_matches(wnt, "main", 4) != 0 && freestanding == 0 {
         // xor eax, eax
         emit_byte(0x31); emit_byte(0xC0)
+    }
+
+    // Set while generating main's body: a valueless `return` inside it must
+    // leave 0 in rax, because main's rax becomes the process exit status.
+    // Functions do not nest in KernRift, so clearing this after the body is
+    // enough -- there is no outer value to restore. @naked and --freestanding
+    // mains own their own exit path and are excluded.
+    if tok_matches(wnt, "main", 4) != 0 && freestanding == 0 && is_naked == 0 {
+        legacy_main_zero_ret = 1
     }
 
     // Clear per-function slice table
@@ -12593,6 +12620,17 @@ fn gen_function(uint64 fn_node) {
     if wbody != 0 {
         gen_block(wbody)
     }
+
+    // Falling off the end of main's body is a return of nothing, so the exit
+    // status is 0. Emitting the zero HERE and not at epilogue_start is what
+    // keeps `fn main() -> uint32 { ... return N }` working: a `return N`
+    // jumps to epilogue_start with N in rax and lands PAST this instruction.
+    // Without it the last statement's value leaked out as the status --
+    // `fn main() { write(1, "ok\n", 3) }` exited 3, the byte count.
+    if legacy_main_zero_ret != 0 {
+        emit_byte(0x31); emit_byte(0xC0)   // xor eax, eax
+    }
+    legacy_main_zero_ret = 0
 
     // Epilogue label — patch all return jumps to here
     uint64 epilogue_start = out_len
