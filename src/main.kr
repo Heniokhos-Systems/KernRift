@@ -3480,7 +3480,17 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
         //
         // entry_rel and payload are not known yet -- the payload has not been
         // emitted -- so both are written as 0 and patched in the finalize arm.
-        header_size = emit_arx_headers(1, 0, 0)
+        //
+        // TWO NUMBERINGS, and they do not agree. This tree counts 0 = x86_64,
+        // 1 = arm64; ARX counts 1 = x86_64, 2 = arm64 (format_arx.kr says so on
+        // the parameter). Written out rather than as `arch + 1` so adding an
+        // arch here cannot silently produce a plausible wrong value: the arch
+        // field is what makes ApexRift refuse a container built for another
+        // machine, so a wrong one is a program rejected at load time for a
+        // choice the user never made -- or worse, accepted by the wrong loader.
+        uint64 ax_arch_id = 1
+        if arch == 1 { ax_arch_id = 2 }
+        header_size = emit_arx_headers(ax_arch_id, 0, 0)
     }
 
     uint64 text_start = codegen_output_len()
@@ -7703,7 +7713,7 @@ fn main() {
                 // (uefi_help_has_own_line, uefi_docs_section_intact).
                 uint64 h_uefi = "  --emit=uefi              UEFI application: a PE32+ image firmware loads and enters directly (bare metal; needs --target=none and an explicit --arch=x86_64|arm64; takes no --load-addr/--stack-top -- firmware places the image where it likes and enters with a stack already set up; unsigned, so Secure Boot refuses it)\n"
                 write(1, h_uefi, str_len(h_uefi))
-                uint64 h_arx = "  --emit=arx               ARX container: a program ApexRift loads from its own filesystem and enters (bare metal, HOSTED; needs --target=none and --arch=x86_64; takes no --load-addr/--stack-top -- the loader chooses the address at run time and supplies the stack; arm64 is reserved in the format but has no loader yet)\n"
+                uint64 h_arx = "  --emit=arx               ARX container: a program ApexRift loads from its own filesystem and enters (bare metal, HOSTED; needs --target=none and --arch=x86_64|arm64; takes no --load-addr/--stack-top -- the loader chooses the address at run time and supplies the stack; arm64 containers declare align 4096 because the loader must place them page-congruently for ADRP)\n"
                 write(1, h_arx, str_len(h_arx))
                 uint64 h_la = "  --load-addr=<addr>       where the image will be loaded; validated (arm64: 4096-aligned) and reported, never embedded\n"
                 write(1, h_la, str_len(h_la))
@@ -8472,24 +8482,30 @@ fn main() {
         // silently defaulted arch produces a container that is rejected at load
         // time for a choice the user never made.
         if arch_set == 0 {
-            uint64 ax_ar = "error: --emit=arx requires an explicit --arch=x86_64: the ARX header records the CPU and the loader refuses a container built for another one, so a silently defaulted arch yields a program rejected at load time for a choice you did not make\n"
+            uint64 ax_ar = "error: --emit=arx requires an explicit --arch=x86_64 or --arch=arm64: the ARX header records the CPU and the loader refuses a container built for another one, so a silently defaulted arch yields a program rejected at load time for a choice you did not make\n"
             write(2, ax_ar, str_len(ax_ar))
             exit(1)
         }
-        // arm64 is IN SCOPE and DELIBERATELY NOT ENABLED YET. The container
-        // reserves arch = 2 and the 4096-byte header region exists precisely so
-        // the arm64 ADRP page arithmetic will hold when it lands -- that design
-        // work is done, not deferred. What is missing is the other half: no
-        // arm64 ApexRift exists, its loader accepts x86_64 only, and so the
-        // page-congruence invariant this layout is built around would ship with
-        // static byte assertions and NO RUNTIME WITNESS. Emitting it would mean
-        // producing bytes nothing can load while implying they work. Enabling
-        // it later is deleting this row plus that witness, not a redesign.
-        if arch == 1 {
-            uint64 ax_a64 = "error: --emit=arx is x86_64 only today: the container reserves an arm64 arch value and its 4096-byte header region already keeps ADRP page arithmetic valid, but no arm64 loader exists to run the result, so the bytes would be unloadable and the page-congruence invariant untested. Use --arch=x86_64, or --emit=image for a raw arm64 boot artifact\n"
-            write(2, ax_a64, str_len(ax_a64))
-            exit(1)
-        }
+        // arm64 IS ENABLED. The row that used to refuse it said what would lift
+        // it -- "the page-congruence invariant ... would ship with static byte
+        // assertions and NO RUNTIME WITNESS ... Enabling it later is deleting
+        // this row plus that witness" -- and the witness now exists:
+        // ApexRift's arm64_witness.kr, run by its test-arm64.sh under
+        // qemu-system-aarch64 -M virt.
+        //
+        // What it observes, rather than asserts: an ARX container with arch = 2
+        // is loaded by the real arx_load_image(), placed at a 4096-aligned base
+        // the arena picked at run time, and entered. Its payload does not return
+        // a constant -- it reads the answer out of a global through an ADRP+ADD
+        // pair, so a base that is not page-congruent gives the wrong answer.
+        // Measured both ways: with the loader's round-up the payload returns
+        // 0x5EED; with the round-up deleted it returns 0, silently and without
+        // faulting, which is precisely the failure mode this was worried about.
+        //
+        // The loader also refuses arch = 2 with align < 4096 (ApexRift error
+        // 176) so a container that could not survive placement cannot be built
+        // into one that is accepted.
+        //
         // riscv32 / xtensa. Unique substrings per message, as the rows above
         // document: a shared "x86_64 only" half would let a defect that routed
         // one arch to the other's arm still pass a grep.
