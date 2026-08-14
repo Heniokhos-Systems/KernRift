@@ -13052,67 +13052,86 @@ for A in x86_64 arm64; do
     t6_builds "t6_legacy_freestanding_$A" -- --legacy --arch=$A --freestanding "$T6_D/plain.kr"
 done
 
-# 5. --debug on ANY path that reaches legacy arm64 codegen. codegen_aarch64
-#    .kr has no array-bounds-check machinery at all (arr_count_lookup has 4
-#    call sites -- codegen.kr:4457/:10403 legacy x86_64, ir.kr:3844/:4868 IR
-#    x86_64 -- and none in codegen_aarch64.kr; arm64 IR checks via a
-#    different mechanism, IR_ARR_CHECK op 131). Measured: `uint64[4] a;
-#    a[99]` under --debug aborts (rc=1) on x86_64 legacy, x86_64 IR and
-#    arm64 IR, but on legacy arm64 it silently prints a garbage value and
-#    exits 0 (silent-and-exit-0 reproduces every time; the specific value
-#    read does not). --debug is a safety promise; refuse rather than ship
-#    it unmet with no diagnostic.
+# 5. --debug on ANY path that reaches legacy arm64 codegen. This block used
+#    to assert a REFUSAL. codegen_aarch64.kr had no array-bounds-check
+#    machinery at all, so `uint64[4] a; a[99]` under --debug aborted (rc=1)
+#    on x86_64 legacy, x86_64 IR and arm64 IR, and on legacy arm64 read past
+#    the array and exited 0; --debug is a safety promise, so the flag was
+#    refused rather than shipped unmet. The checks are now implemented --
+#    codegen_aarch64.kr emits them at the same two subscript sites legacy
+#    x86_64 does, from the same arr_count_lookup -- so the refusal is gone
+#    and these command lines BUILD again. The rows below are inverted
+#    accordingly; what they assert is that no route back into legacy arm64
+#    codegen is refused any more, and the executing rows in the block after
+#    them are what assert the checks actually fire.
 #
-#    The rule is DERIVED from the codegen dispatch (arch == 1 &&
-#    (emit_ir_mode == 0 || emit_mode == 3 || emit_mode == 7)), not
-#    enumerated: --legacy is the obvious way in, but --emit=obj (3) and
-#    --emit=lkm (7) select legacy on arm64 unconditionally, even with no
-#    --legacy on the line at all (both need it for extern relocations).
-#    Verified below by exhaustively trying --arch=arm64 --debug against
-#    every --emit= spelling this compiler accepts today (a hardcoded
-#    28-item list, checked against itself for count and NOT independently
-#    cross-checked against src/main.kr here -- emit_valid_list_is_complete
-#    elsewhere in this file is what derives the spelling set mechanically
-#    from src/main.kr's str_eq_full(emit_str, ...) arms and would catch a
-#    spelling this list drifted out of sync with; --help is not that check,
-#    it lists only 8 of the 28 accepted spellings).
-t6_refuses "t6_legacy_arm64_debug_refused" "--debug" "--legacy" -- \
-    --legacy --arch=arm64 --debug "$T6_D/arr.kr"
+#    Why no front-end predicate replaces the refusal: the refusal had to be
+#    DERIVED from the codegen dispatch (arch == 1 && (emit_ir_mode == 0 ||
+#    emit_mode == 3 || emit_mode == 7)) rather than enumerated from flag
+#    spellings, because --emit=obj (3) and --emit=lkm (7) select legacy on
+#    arm64 with no --legacy on the line at all (both need it for extern
+#    relocations), and the fat path's four arm64 slices were a third family
+#    again. The check now lives in the codegen itself, so every one of those
+#    routes -- and any added later -- carries it by construction. The
+#    exhaustive --emit= enumeration below is kept for exactly that reason:
+#    it is now a NO-ROUTE-REFUSED sweep over every --emit= spelling this
+#    compiler accepts today (a hardcoded 28-item list, checked against
+#    itself for count and NOT independently cross-checked against
+#    src/main.kr here -- emit_valid_list_is_complete elsewhere in this file
+#    is what derives the spelling set mechanically from src/main.kr's
+#    str_eq_full(emit_str, ...) arms and would catch a spelling this list
+#    drifted out of sync with; --help is not that check, it lists only 8 of
+#    the 28 accepted spellings).
+t6_builds "t6_legacy_arm64_debug_builds" -- --legacy --arch=arm64 --debug "$T6_D/arr.kr"
 # --emit=obj reaches legacy arm64 codegen with NO --legacy anywhere on the
-# line -- this is the case that was missed until the rule was derived from
-# the dispatch instead of enumerated from the two cases known at the time.
-t6_refuses "t6_emit_obj_arm64_debug_refused" "--debug" "--emit=obj" -- \
-    --arch=arm64 --emit=obj --debug "$T6_D/arr.kr"
-# --emit=lkm reaches it too (same dispatch condition). It is ALSO refused
-# for an unrelated reason (x86_64-only), but that check runs later --
-# measured, THIS refusal wins, so the message really is the --debug one
-# (t6_refuses pins both "--debug" and "arm64", so this does assert which
-# message wins, not just that some refusal fired).
-t6_refuses "t6_emit_lkm_arm64_debug_refused" "--debug" "arm64" -- \
-    --arch=arm64 --emit=lkm --debug "$T6_D/arr.kr"
+# line -- the case that was missed until the old refusal was derived from
+# the dispatch instead of enumerated. It builds under --debug again now,
+# and (see t6_debug_obj_x86_64_still_traps' arm64 twin below) the object it
+# emits carries the check.
+t6_builds "t6_emit_obj_arm64_debug_builds" -- --arch=arm64 --emit=obj --debug "$T6_D/arr.kr"
+# --emit=lkm on arm64 is STILL refused -- but now for the unrelated,
+# pre-existing reason (loadable kernel modules are x86_64-only), which used
+# to be masked because the --debug refusal ran first and won. Pinned on the
+# x86_64-only wording precisely to assert that the message CHANGED: a row
+# that only asserted "some refusal fired" would have passed unchanged
+# across this whole commit and proved nothing.
+TOTAL=$((TOTAL + 1))
+T6_LKM_ERR=$("$T6_KRC" --arch=arm64 --emit=lkm --debug "$T6_D/arr.kr" -o "$T6_D/lkm_out" 2>&1); T6_LKM_ST=$?
+if [ "$T6_LKM_ST" != "0" ] && echo "$T6_LKM_ERR" | grep -q -- "--emit=lkm" \
+   && echo "$T6_LKM_ERR" | grep -q "x86_64" \
+   && ! echo "$T6_LKM_ERR" | grep -q -- "--debug"; then
+    PASS=$((PASS + 1)); echo "  t6_emit_lkm_arm64_debug_refused_for_arch: PASS (x86_64-only message, no --debug refusal left)"
+else
+    echo "FAIL: t6_emit_lkm_arm64_debug_refused_for_arch (exit $T6_LKM_ST: '$T6_LKM_ERR')"; FAIL=$((FAIL + 1))
+fi
+rm -f "$T6_D/lkm_out"
 # --legacy + arm64 WITHOUT --debug must keep working (also covered by
 # t6_legacy_hosted_arm64 above; repeated here with the exact repro flags,
-# no --target=, for direct correspondence with the refusal case).
+# no --target=, for direct correspondence with the --debug case).
 t6_builds "t6_legacy_arm64_no_debug_builds" -- --legacy --arch=arm64 "$T6_D/arr.kr"
 # --emit=obj on arm64 WITHOUT --debug must also keep working -- it is the
 # legacy backend's own normal path (obj always uses legacy, on any arch),
-# untouched by this refusal because debug_mode == 0.
+# and debug_mode == 0 means no check is emitted at all.
 t6_builds "t6_emit_obj_arm64_no_debug_builds" -- --arch=arm64 --emit=obj "$T6_D/arr.kr"
 # The fat-binary path (no --arch at all -- bare `krc` emits a FAT binary)
-# reaches the same defective slice: compile_fat's arm64 slices honor
-# --legacy exactly like the single-target path, and the default fat build
-# (no --targets=) always includes all 4 arm64 (OS, arch) slices. Refuse
-# there too, deliberately, rather than let it through by accident.
-t6_refuses "t6_legacy_debug_fat_refused" "--debug" "--legacy" -- \
-    --legacy --debug "$T6_D/arr.kr"
+# reaches the arm64 slices: compile_fat's arm64 slices honor --legacy
+# exactly like the single-target path, and the default fat build (no
+# --targets=) always includes all 4 arm64 (OS, arch) slices. This was the
+# likeliest way a real user hit the old refusal without ever typing arm64;
+# it builds again.
+t6_builds "t6_legacy_debug_fat_builds" -- --legacy --debug "$T6_D/arr.kr"
 
 # Exhaustive check: every --emit= spelling this compiler accepts today,
-# against --arch=arm64 --debug, with NO --legacy. Per the derived rule,
-# exactly two (obj, lkm) should reach legacy arm64 codegen and be refused;
-# every other spelling must still build (image/uefi refuse too, but for the
-# unrelated "requires --target=none" reason -- not exercised here since no
-# --target= is passed, so they hit that refusal first regardless of
-# --debug). The 28-item list below is a hardcoded snapshot, not derived
+# against --arch=arm64 --debug, with NO --legacy. NOTHING may be refused
+# for a --debug reason any more -- obj and lkm are the two that reach
+# legacy arm64 codegen, and both now carry the bounds check instead of
+# being turned away. Three spellings still fail here, each for a reason
+# that has nothing to do with --debug and predates it: image and uefi
+# require --target=none (not passed here), and lkm is x86_64-only. Those
+# three are asserted on their OWN wording, and every row additionally
+# asserts that the word "--debug" does not appear in the failure -- which
+# is what makes this a no-route-refused sweep rather than a snapshot of
+# which refusal happens to win. The 28-item list below is a hardcoded snapshot, not derived
 # from source -- the count check just below only catches this list being
 # edited down, not the compiler's accepted-spelling set drifting away from
 # it. emit_valid_list_is_complete (elsewhere in this file) is the test that
@@ -13132,27 +13151,32 @@ for ES in $EMIT_SPELLINGS; do
     TOTAL=$((TOTAL + 1))
     rm -f "$T6_D/es_out"
     ES_ERR=$("$T6_KRC" --arch=arm64 --debug --emit=$ES "$T6_D/arr.kr" -o "$T6_D/es_out" 2>&1); ES_ST=$?
-    ES_WANT_REFUSED=0
-    if [ "$ES" = "obj" ] || [ "$ES" = "lkm" ]; then ES_WANT_REFUSED=1; fi
-    if [ "$ES_WANT_REFUSED" = "1" ]; then
-        if [ "$ES_ST" != "0" ] && [ ! -f "$T6_D/es_out" ]; then
-            PASS=$((PASS + 1))
-        else
-            echo "FAIL: t6_emit_spelling_$ES (expected refused, got exit $ES_ST, artifact $([ -f "$T6_D/es_out" ] && echo present || echo absent))"
-            FAIL=$((FAIL + 1)); ES_BAD="$ES_BAD $ES"
-        fi
+    # No spelling may be turned away FOR BEING --debug any more. Checked on
+    # every row, including the ones that legitimately fail for another
+    # reason -- this single assertion is what would catch the refusal (or
+    # any successor to it) creeping back in on any route.
+    if [ "$ES_ST" != "0" ] && echo "$ES_ERR" | grep -q -- "--debug"; then
+        echo "FAIL: t6_emit_spelling_$ES (refused with a message naming --debug -- a --debug refusal is back on this route: '$ES_ERR')"
+        FAIL=$((FAIL + 1)); ES_BAD="$ES_BAD $ES"
     else
-        # image/uefi need --target=none (a different, already-tested
-        # refusal) so they fail here too, for the OTHER reason -- assert
-        # only that the message names --target=none, not --debug, so a
-        # future change that makes them ALSO reach legacy arm64 codegen
-        # (and starts refusing for THIS reason without --target=none) would
-        # still be caught.
+        # image/uefi need --target=none, and lkm is x86_64-only: three
+        # pre-existing refusals with nothing to do with --debug. Assert
+        # each on its own wording so a future change that made one of them
+        # start refusing for a --debug reason would still be caught above.
         if [ "$ES" = "image" ] || [ "$ES" = "uefi" ]; then
             if [ "$ES_ST" != "0" ] && echo "$ES_ERR" | grep -q -- "--target=none"; then
                 PASS=$((PASS + 1))
             else
                 echo "FAIL: t6_emit_spelling_$ES (expected the --target=none refusal, got exit $ES_ST: '$ES_ERR')"
+                FAIL=$((FAIL + 1)); ES_BAD="$ES_BAD $ES"
+            fi
+        elif [ "$ES" = "lkm" ]; then
+            # Was refused for --debug before the arm64-legacy bounds checks
+            # existed; that refusal ran first and masked this one entirely.
+            if [ "$ES_ST" != "0" ] && echo "$ES_ERR" | grep -q "x86_64"; then
+                PASS=$((PASS + 1))
+            else
+                echo "FAIL: t6_emit_spelling_$ES (expected the x86_64-only refusal, got exit $ES_ST: '$ES_ERR')"
                 FAIL=$((FAIL + 1)); ES_BAD="$ES_BAD $ES"
             fi
         elif [ "$ES" = "ir" ]; then
@@ -13175,14 +13199,17 @@ for ES in $EMIT_SPELLINGS; do
     rm -f "$T6_D/es_out"
 done
 if [ -z "$ES_BAD" ]; then
-    echo "  t6_emit_spelling_enumeration: PASS (28/28 -- reaches-legacy-arm64 is exactly {obj, lkm})"
+    echo "  t6_emit_spelling_enumeration: PASS (28/28 -- no --debug refusal on any route; image/uefi/lkm fail for their own pre-existing reasons)"
 else
     echo "  t6_emit_spelling_enumeration: see failures above for:$ES_BAD"
 fi
 
-# An actual out-of-bounds index, to prove the STILL-WORKING configs really
-# do trap rather than merely "not refuse" -- the refusal above must not
-# have accidentally widened into something that also swallows these.
+# An actual out-of-bounds index, to prove these configs really do trap
+# rather than merely "not refuse". Three of the four configurations are
+# covered here (arm64 IR, x86_64 legacy, x86_64 obj) because they were the
+# three that already worked when this block was written; the fourth, arm64
+# legacy, plus the in-bounds and store-side cases for all four, are in the
+# arm64_legacy_bounds block near the end of this file.
 printf 'fn main() {\n    uint64[4] a\n    uint64 v = a[99]\n    println(v)\n    exit(0)\n}\n' > "$T6_D/oob.kr"
 
 # arm64 IR: this row EXECUTES its artifact, so it is built for arm64
@@ -21624,6 +21651,226 @@ if [ "$MRC_FNS_OK" = "1" ]; then
 else
     FAIL=$((FAIL + 1))
     echo "FAIL: fmt_nan_smoke_example_exits_0"
+fi
+
+# --- arm64_legacy_bounds: --debug array bounds checks on all four configs ---
+#
+# The fourth configuration. `--debug` promises array bounds checks; three of
+# the four backend/arch configurations delivered them and the legacy arm64
+# backend did not -- `uint64[4] a; a[99]` read past the array and exited 0
+# there while the other three exited 1. That gap was closed for a while by
+# REFUSING --debug on every command line reaching legacy arm64 codegen; it is
+# now closed properly, by emitting the check in codegen_aarch64.kr at the same
+# two subscript sites legacy x86_64 uses.
+#
+# WHAT THIS BLOCK IS FOR, and why it is not just "does a[99] abort":
+#
+#   * A check that cannot fail is not a check, and a check that always fires
+#     is not one either. Every configuration is asserted on BOTH sides: the
+#     three out-of-range cases must abort, and the in-range case must run to
+#     completion AND RETURN THE RIGHT VALUE (84, computed through eight
+#     in-bounds stores and eight in-bounds loads, including index 7 -- the
+#     last valid one). A backend that aborted on everything would pass an
+#     out-of-range-only row.
+#   * The boundary case (index == count, not index >> count) is separate on
+#     purpose: it is the one an off-by-one in the comparison direction gets
+#     wrong, and `a[99]` cannot catch that. B.LO admits 0..count-1; B.LS
+#     would admit count as well, and only this case would notice.
+#   * STORES as well as loads: the two subscript sites are independent pieces
+#     of codegen, and an implementation that checked only the read path would
+#     pass every row that indexes on the right-hand side.
+#   * All four configurations, so this block would have caught the original
+#     defect and catches a regression on any one of them -- including the
+#     three that were already correct.
+#   * The abort must MATCH, not merely happen. All four exit statuses are
+#     collected and compared: an arm64 legacy check that aborted with a
+#     different status would be a new divergence, and diff_ir_legacy.sh would
+#     say so. Asserted here too, where the diagnostic names the cause.
+#
+# ARCH DISCIPLINE: every row here EXECUTES its artifact, and both arches are
+# exercised, so neither arch may be hardcoded as "the one we run natively".
+# $RUN_ARCH names the host; the other arch goes through qemu. Hardcoding
+# --arch=arm64 on an executing row has turned the native ARM64 CI job red
+# three times in this repo -- there, arm64 is the direct-execution arch and
+# x86_64 is the emulated one, exactly backwards from a developer laptop.
+echo ""
+echo "--- arm64_legacy_bounds: --debug bounds checks, all four configs ---"
+
+# Raw compiler binary, not the $KRC wrapper: under `make test` $KRC injects
+# --arch=x86_64 ahead of every test's arguments, which would silently rewrite
+# every --arch=arm64 below into an x86_64 build that passes for the wrong
+# reason. Same build/krc2 then build/krc3 fallback the blocks above use.
+if [ -f "$DIR/../build/krc2" ]; then
+    BCB_KRC=$(cd "$DIR/../build" && pwd)/krc2
+elif [ -f "$DIR/../build/krc3" ]; then
+    BCB_KRC=$(cd "$DIR/../build" && pwd)/krc3
+else
+    BCB_KRC=""
+fi
+
+# Command prefix needed to run a binary of arch $1 on this host: empty when it
+# is the native arch, an emulator when it is not, the literal "SKIP" when this
+# machine can run it neither way.
+bcb_runner() {
+    if [ "$1" = "$RUN_ARCH" ]; then echo ""; return 0; fi
+    if [ "$1" = "arm64" ]; then
+        if command -v qemu-aarch64-static > /dev/null 2>&1; then echo "qemu-aarch64-static"; return 0; fi
+        if command -v qemu-aarch64 > /dev/null 2>&1; then echo "qemu-aarch64"; return 0; fi
+    else
+        if command -v qemu-x86_64-static > /dev/null 2>&1; then echo "qemu-x86_64-static"; return 0; fi
+        if command -v qemu-x86_64 > /dev/null 2>&1; then echo "qemu-x86_64"; return 0; fi
+    fi
+    echo "SKIP"
+}
+
+if [ -z "$BCB_KRC" ]; then
+    echo "  arm64_legacy_bounds: SKIP (no build/krc2 or build/krc3)"
+else
+BCB_D=$(mktemp -d)
+
+# Variable out-of-range index, READ. The original repro.
+printf 'fn main() {\n    uint64[4] a\n    uint64 i = 99\n    uint64 v = a[i]\n    exit(v)\n}\n' > "$BCB_D/oob_var.kr"
+# CONSTANT out-of-range index, READ. Measured on this tree: this is NOT
+# caught at compile time on any of the four configurations -- all four
+# compile it clean at exit 0 and catch it at RUNTIME, through the same
+# check as the variable case (the constant is materialised into the index
+# register and compared like any other value). Kept as its own case rather
+# than folded into the one above precisely because that is not obvious: a
+# reader who assumes constant folding catches it would not test it, and a
+# future constant-folding pass that DID catch it at compile time would turn
+# this row red and force the assumption to be restated.
+printf 'fn main() {\n    uint64[4] a\n    uint64 v = a[99]\n    exit(v)\n}\n' > "$BCB_D/oob_const.kr"
+# Index == count exactly. The off-by-one case: B.LO/`jb` admit 0..count-1,
+# and a comparison that used B.LS/`jbe` instead would admit count too and
+# pass every other row in this block.
+printf 'fn main() {\n    uint64[4] a\n    uint64 i = 4\n    uint64 v = a[i]\n    exit(v)\n}\n' > "$BCB_D/oob_edge.kr"
+# Out-of-range STORE. The write path is a separate site in every backend.
+printf 'fn main() {\n    uint64[4] a\n    uint64 i = 99\n    a[i] = 7\n    exit(0)\n}\n' > "$BCB_D/oob_store.kr"
+# Entirely IN-RANGE, and the answer is checked. Eight stores and eight loads
+# covering every valid index including the last (7), summing to 84 -- so a
+# backend whose check fires spuriously fails this whether it aborts or merely
+# corrupts the value.
+printf 'fn main() {\n    uint32[8] t\n    uint64 i = 0\n    while i < 8 { t[i] = i * 3\n        i = i + 1 }\n    uint64 s = 0\n    uint64 j = 0\n    while j < 8 { s = s + t[j]\n        j = j + 1 }\n    exit(s)\n}\n' > "$BCB_D/inbounds.kr"
+
+# Statuses of the four configs on oob_var, for the divergence check below.
+BCB_STATUSES=""
+BCB_CFG_NAMES=""
+# How many configs this machine could actually run, so the agreement row
+# below can tell "3 configs agree" apart from "3 agree and the fourth never
+# produced a status because its build was refused" -- which is exactly the
+# state this whole change fixes, and which would otherwise let that row pass
+# on the broken tree.
+BCB_EXECUTABLE=0
+
+# $1 = config label, $2 = arch, $3 = extra krc flags
+bcb_config() {
+    bcb_arch="$2"
+    bcb_run=$(bcb_runner "$bcb_arch")
+    if [ "$bcb_run" = "SKIP" ]; then
+        echo "  arm64_legacy_bounds_$1: SKIP (cannot execute $bcb_arch binaries on RUN_ARCH=$RUN_ARCH -- no qemu)"
+        return 0
+    fi
+    BCB_EXECUTABLE=$((BCB_EXECUTABLE + 1))
+    for bcb_case in oob_var oob_const oob_edge oob_store inbounds; do
+        TOTAL=$((TOTAL + 1))
+        rm -f "$BCB_D/out"
+        if ! $BCB_KRC --arch="$bcb_arch" $3 --debug "$BCB_D/$bcb_case.kr" -o "$BCB_D/out" > /dev/null 2>&1; then
+            echo "FAIL: arm64_legacy_bounds_$1_$bcb_case (build failed -- --debug refused or miscompiled)"
+            FAIL=$((FAIL + 1))
+            continue
+        fi
+        chmod +x "$BCB_D/out"
+        $bcb_run "$BCB_D/out" > /dev/null 2>&1
+        bcb_st=$?
+        if [ "$bcb_case" = "inbounds" ]; then
+            # In range: must run to completion AND produce 84. Anything else
+            # -- an abort, or a wrong sum -- is a spurious or miscompiled
+            # check, and both read the same from here, so say both.
+            if [ "$bcb_st" = "84" ]; then
+                PASS=$((PASS + 1))
+            else
+                echo "FAIL: arm64_legacy_bounds_$1_inbounds (exit $bcb_st, want 84 -- the check fires on in-range indices, or the indexed access is miscompiled)"
+                FAIL=$((FAIL + 1))
+            fi
+        else
+            if [ "$bcb_st" != "0" ]; then
+                PASS=$((PASS + 1))
+            else
+                echo "FAIL: arm64_legacy_bounds_$1_$bcb_case (exit 0 -- the bounds check did not fire)"
+                FAIL=$((FAIL + 1))
+            fi
+            if [ "$bcb_case" = "oob_var" ]; then
+                BCB_STATUSES="$BCB_STATUSES $bcb_st"
+                BCB_CFG_NAMES="$BCB_CFG_NAMES $1"
+            fi
+        fi
+    done
+    echo "  arm64_legacy_bounds_$1: 5 cases run ($bcb_arch$([ -n "$bcb_run" ] && echo " via $bcb_run" || echo " native"))"
+    rm -f "$BCB_D/out"
+}
+
+bcb_config "x86_64_legacy" "x86_64" "--legacy"
+bcb_config "x86_64_ir"     "x86_64" ""
+bcb_config "arm64_legacy"  "arm64"  "--legacy"
+bcb_config "arm64_ir"      "arm64"  ""
+
+# The abort must be the SAME abort everywhere. The other three configs exit 1
+# silently (no message, no signal); an arm64 legacy check that exited 2, or
+# died on a signal, would be a new divergence between the backends rather than
+# the missing check being filled in -- and diff_ir_legacy.sh compares exactly
+# this. Asserted on the collected statuses rather than on a hardcoded 1, so
+# this row says "they agree" and names the value, instead of silently becoming
+# a pin on whatever the first backend happens to do.
+TOTAL=$((TOTAL + 1))
+BCB_FIRST=""
+BCB_DIVERGE=0
+BCB_N=0
+for bcb_s in $BCB_STATUSES; do
+    BCB_N=$((BCB_N + 1))
+    if [ -z "$BCB_FIRST" ]; then BCB_FIRST="$bcb_s"
+    elif [ "$bcb_s" != "$BCB_FIRST" ]; then BCB_DIVERGE=1; fi
+done
+if [ "$BCB_N" != "$BCB_EXECUTABLE" ]; then
+    echo "FAIL: arm64_legacy_bounds_abort_status_agrees ($BCB_EXECUTABLE configs are runnable here but only $BCB_N produced a status -- a config failed to build, so this row has nothing to compare)"
+    FAIL=$((FAIL + 1))
+elif [ "$BCB_EXECUTABLE" -lt 2 ]; then
+    PASS=$((PASS + 1))
+    echo "  arm64_legacy_bounds_abort_status_agrees: SKIP (only $BCB_EXECUTABLE config(s) executable here)"
+elif [ "$BCB_DIVERGE" = "0" ] && [ "$BCB_FIRST" = "1" ]; then
+    PASS=$((PASS + 1))
+    echo "  arm64_legacy_bounds_abort_status_agrees: PASS ($BCB_N/4 configs, all exit 1)"
+else
+    echo "FAIL: arm64_legacy_bounds_abort_status_agrees (statuses:$BCB_STATUSES for configs:$BCB_CFG_NAMES -- want all 1)"
+    FAIL=$((FAIL + 1))
+fi
+
+# The check must be ABSENT without --debug: a release build that paid for a
+# compare and a branch on every indexed access would be a silent performance
+# regression, and "it aborts under --debug" is equally satisfied by a backend
+# that aborts always. Run on the arm64 legacy config specifically -- the one
+# this change touched -- and assert the out-of-range read does NOT abort.
+BCB_A64_RUN=$(bcb_runner arm64)
+TOTAL=$((TOTAL + 1))
+if [ "$BCB_A64_RUN" = "SKIP" ]; then
+    PASS=$((PASS + 1))
+    echo "  arm64_legacy_bounds_absent_without_debug: SKIP (cannot execute arm64 here)"
+elif $BCB_KRC --arch=arm64 --legacy "$BCB_D/oob_store.kr" -o "$BCB_D/nodbg" > /dev/null 2>&1; then
+    chmod +x "$BCB_D/nodbg"
+    $BCB_A64_RUN "$BCB_D/nodbg" > /dev/null 2>&1
+    bcb_nodbg_st=$?
+    if [ "$bcb_nodbg_st" = "0" ]; then
+        PASS=$((PASS + 1))
+        echo "  arm64_legacy_bounds_absent_without_debug: PASS (release build does not check)"
+    else
+        echo "FAIL: arm64_legacy_bounds_absent_without_debug (exit $bcb_nodbg_st -- the check is emitted with no --debug)"
+        FAIL=$((FAIL + 1))
+    fi
+    rm -f "$BCB_D/nodbg"
+else
+    echo "FAIL: arm64_legacy_bounds_absent_without_debug (build failed)"; FAIL=$((FAIL + 1))
+fi
+
+rm -rf "$BCB_D"
 fi
 
 # --- Summary ---

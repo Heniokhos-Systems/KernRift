@@ -46,7 +46,7 @@ reasoning for anything non-obvious.
 | Unaligned load / store (non-atomic)     | Defined  | Both x86 and ARMv8 permit; a few microbenchmarks pay a penalty. |
 | Unaligned atomic load / store           | **Undefined** | ARMv8 traps. x86 works but is not portable. |
 | Load / store of an invalid pointer      | **Undefined** | No bounds tracking. Typically SIGSEGV. |
-| Array indexing out-of-bounds            | **Undefined** in release; trap under `--debug` | Compile with `--debug` to turn every indexed access of a compile-time-sized array (stack or static) into a bounds check that `exit(1)`s on violation. Release builds elide the check. Applies to the IR backend on x86_64 and arm64, and to the legacy backend on x86_64; the legacy arm64 backend (`codegen_aarch64.kr`) has no such codegen, so `--debug` is refused at compile time on every command line that would reach it — a single arm64 target (`--legacy --arch=arm64 --debug`, and also `--arch=arm64 --emit=obj --debug` / `--arch=arm64 --emit=lkm --debug`, since obj/lkm select legacy codegen on arm64 even without `--legacy`, for extern relocations; and `--emit=android --legacy --debug`, which names no arch at all because Android resolves to arm64) or a fat (`.krbo`) build carrying an arm64 slice (including plain `krc prog.kr --legacy --debug` with no `--arch` at all — see `docs/DEBUGGING.md` for the full enumeration). Refusing the whole command line, not just the missing check, also disables the overflow/divide-by-zero/null-pointer checks below on those same command lines, even though they DO work on legacy arm64 — see `docs/DEBUGGING.md` for why that trade was accepted. |
+| Array indexing out-of-bounds            | **Undefined** in release; trap under `--debug` | Compile with `--debug` to turn every indexed access of a compile-time-sized array (stack or static) into a bounds check that `exit(1)`s on violation. Release builds elide the check. Applies to **all four** backend/arch configurations: the IR backend on x86_64 and arm64, and the legacy backend on x86_64 and arm64. The index is compared **unsigned**, so a negative-looking index from signed math becomes a huge positive and fails the check; the trap is silent (no message) and the exit status is 1 on every configuration. Both the read (`v = a[i]`) and the store (`a[i] = v`) are checked, and a constant out-of-range index is caught at **runtime** by this same check, not at compile time. Arrays whose element count is not known at compile time (a pointer, or a `T[N]` whose `N` the front end could not resolve) are not checked on any backend, and neither are arrays **of structs** — measured, `P[4] arr; arr[99].x` runs to completion on all four configurations, because a struct element goes through a separate stride-multiply path that no backend instruments. Until this landed, `codegen_aarch64.kr` had no such codegen and `--debug` was **refused** on every command line reaching it; that refusal is gone, along with the collateral loss of the overflow/divide-by-zero/null-pointer checks below, which always worked on legacy arm64. `--debug` remains refused with `--target=none`, for the unrelated reason that a failed check has no kernel to exit to on bare metal. |
 | Use-after-free (`dealloc` then access)  | **Undefined** | The backing allocator is `mmap` / `HeapAlloc`; behavior varies. |
 | Double `dealloc`                        | **Undefined** | Allocator-dependent. |
 | Read of an uninitialized stack slot     | Unspecified | Whatever value happens to be on the stack. Not cleared by prologue. |
@@ -216,8 +216,8 @@ Items tracked against the UB surface:
   trapping exists only on the legacy backend under `--debug`, and its
   add/sub guard (`jno`/`b.vc`) catches signed overflow only — unsigned
   carry wraps silently. The default IR backend emits no overflow checks.
-  In practice this means x86_64 only: every command line that reaches
-  legacy arm64 codegen under `--debug` is refused (see the array-indexing
-  row above), which also makes the legacy arm64 overflow/null/divide-by-zero
-  guards unreachable even though their codegen is correct — the refusal is
-  on the whole command line, not just the missing bounds check.
+  This applies on both arches: the legacy arm64 overflow, null-pointer and
+  divide-by-zero guards have always been correct, and they are reachable
+  again now that the `--debug` refusal on legacy arm64 (which used to
+  disable them as collateral) has been removed — see the array-indexing row
+  above.

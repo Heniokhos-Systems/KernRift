@@ -1663,6 +1663,40 @@ fn gen_expr_a64(uint64 node) {
         uint32 idx_child = ast_child(node)
         uint64 wi = idx_child
         gen_expr_a64(wi)
+        // Bounds check under --debug for arrays with a known compile-time
+        // length — the arm64 twin of the legacy x86_64 check in codegen.kr's
+        // gen_expr (same arr_count_lookup, same unsigned comparison, same
+        // silent exit(1), so an out-of-range index aborts identically on both
+        // legacy backends and diff_ir_legacy stays quiet). The index is in x0
+        // here, before it is parked in x10 for the scaled load below.
+        //
+        // Unsigned on purpose: a negative-looking index from signed math
+        // becomes a huge positive and fails the check, which is what we want.
+        // CMP X0, X11 is SUBS XZR, X0, X11 — C is clear exactly when
+        // x0 < x11 unsigned — so B.LO (cond 3) is the in-range skip, the
+        // exact counterpart of x86's `jb`. x11 is dead here: the scalar read
+        // path never uses it (only the struct-element path above does, and
+        // that path returned already), and MOVZ/MOVK do not touch NZCV.
+        //
+        // The count goes through a full 64-bit MOV rather than an immediate
+        // form: x86 uses `cmp rax, imm32`, which sign-extends and so cannot
+        // express a count >= 2^31, and arm64's CMP immediate is imm12. Both
+        // backends behave identically for every count arr_count_lookup can
+        // actually return (it reserves 0xFFFFFFFF for "not known").
+        if debug_mode != 0 {
+            uint64 bc_count_a = arr_count_lookup(warrta)
+            if bc_count_a != 0xFFFFFFFF {
+                emit_a64_mov_imm(11, bc_count_a)
+                emit_a64_cmp(0, 11)
+                uint64 bc_br_a = out_len
+                emit_a64(0x54000000 | 3)  // b.lo +0 (placeholder)
+                emit_a64_mov_imm(0, 1)
+                if target_os == 2 { emit_a64_win_call_iat(0) }
+                else { if target_os == 1 { emit_a64_syscall_nr(1) } else { emit_a64_syscall_nr(93) }; emit_a64_svc("array bounds check (--debug)") }
+                uint64 bc_off_a = out_len - bc_br_a
+                patch_u32(bc_br_a, 0x54000000 | (a64_check_b19(bc_off_a) << 5) | 3)
+            }
+        }
         emit_a64_mov(10, 0)
         if arr_offset != 0xFFFFFFFF {
             emit_a64_load_x0(arr_offset)
@@ -5621,6 +5655,32 @@ fn gen_stmt_a64(uint64 node) {
             uint64 warrtb = arr_tok
             uint64 arr_offset = var_lookup(arr_tok)
             uint64 elem_sz_w = arr_elem_lookup(arr_tok)
+            // Bounds check under --debug — same shape as the read path in
+            // gen_expr_a64 above, and the twin of legacy x86_64's indexed-
+            // assignment check in codegen.kr. Placed HERE, before the base is
+            // loaded, rather than next to the scaling below: by the time the
+            // index is reloaded for scaling the base is already live in x10,
+            // and the trap's exit-syscall number goes into x8/x16 while x11
+            // holds the count, so checking first keeps the trap from having
+            // to preserve anything. Both spellings of this statement reach
+            // it: the plain `arr[i] = v` and the compound `arr[i] OP= v`
+            // (data4 == 1) branches above both leave the index parked in
+            // ia_idx_slot_a, so one check covers both.
+            if debug_mode != 0 {
+                uint64 bca_count_a = arr_count_lookup(arr_tok)
+                if bca_count_a != 0xFFFFFFFF {
+                    emit_a64_load_x0(ia_idx_slot_a)
+                    emit_a64_mov_imm(11, bca_count_a)
+                    emit_a64_cmp(0, 11)
+                    uint64 bca_br_a = out_len
+                    emit_a64(0x54000000 | 3)  // b.lo +0 (placeholder)
+                    emit_a64_mov_imm(0, 1)
+                    if target_os == 2 { emit_a64_win_call_iat(0) }
+                    else { if target_os == 1 { emit_a64_syscall_nr(1) } else { emit_a64_syscall_nr(93) }; emit_a64_svc("array bounds check (--debug)") }
+                    uint64 bca_off_a = out_len - bca_br_a
+                    patch_u32(bca_br_a, 0x54000000 | (a64_check_b19(bca_off_a) << 5) | 3)
+                }
+            }
             if arr_offset != 0xFFFFFFFF {
                 emit_a64_load_x0(arr_offset)
             } else {
