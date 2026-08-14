@@ -7,7 +7,7 @@
 class Kernrift < Formula
   desc "Self-hosted systems language compiler for kernel and bare-metal development"
   homepage "https://kernrift.org"
-  version "2.9.0"
+  version "2.10.0"
   license "Apache-2.0"
 
   REL = "https://github.com/Heniokhos-Systems/KernRift/releases/download/v#{version}".freeze
@@ -16,18 +16,18 @@ class Kernrift < Formula
   on_macos do
     on_arm do
       url "#{REL}/krc-macos-arm64"
-      sha256 "fcb1f5212b523ec02319ddb84c4ab10ebd8d600b65ba034f7c1b9838e155dc33"
+      sha256 "a29bc4bbefa5befdc53642ea4471aeb429d4e7bee6fef7af84b0166a0ad4d954"
       resource "kr" do
         url "#{REL}/kr-macos-arm64"
-        sha256 "739cc3faed07e2b99f302f62c4384c501c232b3c19ec2289aabc6ecc9cf113a3"
+        sha256 "3bb41c94389e5b2b0ea0cd016e0e88b54ec44cd205f3ee589a2df05ea500cbdc"
       end
     end
     on_intel do
       url "#{REL}/krc-macos-x86_64"
-      sha256 "f63c4de71dac229656e0334cad6d17a1f1de84cdc55df81a2ac91683c4dd55d6"
+      sha256 "b6e5720566d6ca4ce2362a082c284fd5ff0e78a168273ed0518f8feb2a54b8b8"
       resource "kr" do
         url "#{REL}/kr-macos-x86_64"
-        sha256 "038f4ba591f25e53f3e416b04ce6a5ed4475baad242389fd01468fcfc337684f"
+        sha256 "29e4a6b7e298b36e97f1efa443e62798c9d29a83dfd4a7c17b888840bdf01213"
       end
     end
   end
@@ -35,18 +35,18 @@ class Kernrift < Formula
   on_linux do
     on_arm do
       url "#{REL}/krc-linux-arm64"
-      sha256 "15578e49f04a2e1f1e3ec8ca4d6b6ff6eee66c4293dfa037ffacae1517418f8c"
+      sha256 "d8005c5c8038c63961492f9deb006650c54cf19708473bf59216e28bddcc2100"
       resource "kr" do
         url "#{REL}/kr-linux-arm64"
-        sha256 "3767aeb4ac34664ee03554d638e0d263b9302cd9981a8fd298bb70e8cb1e3be4"
+        sha256 "d715600aefe61832ea5088a96a8f3e1183bd76041bbd95f9aaec4c3f61677184"
       end
     end
     on_intel do
       url "#{REL}/krc-linux-x86_64"
-      sha256 "d278c07613948c484146e66b36efd66b79739cf54e6fcf2f68d47e82befb1b6e"
+      sha256 "987354c9bfcfbad36d3c433cbdd9b11870de78cb6010b7668a7806e681a6b003"
       resource "kr" do
         url "#{REL}/kr-linux-x86_64"
-        sha256 "c1066890d90524ed558c9478ae83acc55631df395ab25e31e122e8c3842da3a5"
+        sha256 "67a79330f7ce43454f8f7d8094c0b02df5808394aea7d0335240205cb157370f"
       end
     end
   end
@@ -83,6 +83,6 @@ class Kernrift < Formula
     KR
     system bin/"krc", "t.kr", "-o", "t.krbo"
     assert_predicate testpath/"t.krbo", :exist?
-    assert_match "2.9.0", shell_output("#{bin}/krc --version")
+    assert_match "2.10.0", shell_output("#{bin}/krc --version")
   end
 end

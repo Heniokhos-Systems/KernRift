@@ -1,6 +1,6 @@
 # Maintainer: Pantelis Christou <pantelis@kernrift.org>
 pkgname=kernrift
-pkgver=2.9.0
+pkgver=2.10.0
 pkgrel=1
 pkgdesc="Self-hosted systems language compiler for kernel and bare-metal development"
 arch=('x86_64' 'aarch64')
@@ -71,8 +71,8 @@ source_aarch64=(
 )
 
 sha256sums_x86_64=(
-    'd278c07613948c484146e66b36efd66b79739cf54e6fcf2f68d47e82befb1b6e'  # krc
-    'c1066890d90524ed558c9478ae83acc55631df395ab25e31e122e8c3842da3a5'  # kr
+    '987354c9bfcfbad36d3c433cbdd9b11870de78cb6010b7668a7806e681a6b003'  # krc
+    '67a79330f7ce43454f8f7d8094c0b02df5808394aea7d0335240205cb157370f'  # kr
     'f7e549370bfd4f80fc8cb9dfa6404167647be8425a444ee3a1be30fd218ea673'  # alloc
     '82894056976fb5cd7d87db9ca30eb78a6652d77a6b207ca9dfd5044899ea6df4'  # string
     '574754be2a710936f88dc2d87f27d78585b6a4b30072660db143bdd639be83a7'  # io
@@ -90,14 +90,14 @@ sha256sums_x86_64=(
     '43781ed32dc543f1f979bdd9085956ec14ec3544ec557ab293884e1ca1091545'  # widget
     'd82f5b9e4a5e32b7dacde39db70e1b0f6eac29de5a8ad1c5aaaf182549a8502a'  # time
     'e1d6a129ce6780634cab6c42ca26f9c19d7ac35d7cd8ba67c29e6c1b5e1637ea'  # log
-    '810abc52b9c111def5ab3f1d47f0799cba0e3c667351ddc9a385412313789623'  # net
+    'd9497a4131daf91230142e22a2d5add56eaeeaa3552f051291b4a4cae6f19683'  # net
     '16aff9d58df1d26de5e7afe6ace3bb0eef2cfd6334c49e42b049d8a295dafece'  # sha256
     'cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30'  # LICENSE
 )
 
 sha256sums_aarch64=(
-    '15578e49f04a2e1f1e3ec8ca4d6b6ff6eee66c4293dfa037ffacae1517418f8c'  # krc
-    '3767aeb4ac34664ee03554d638e0d263b9302cd9981a8fd298bb70e8cb1e3be4'  # kr
+    'd8005c5c8038c63961492f9deb006650c54cf19708473bf59216e28bddcc2100'  # krc
+    'd715600aefe61832ea5088a96a8f3e1183bd76041bbd95f9aaec4c3f61677184'  # kr
     'f7e549370bfd4f80fc8cb9dfa6404167647be8425a444ee3a1be30fd218ea673'  # alloc
     '82894056976fb5cd7d87db9ca30eb78a6652d77a6b207ca9dfd5044899ea6df4'  # string
     '574754be2a710936f88dc2d87f27d78585b6a4b30072660db143bdd639be83a7'  # io
@@ -115,7 +115,7 @@ sha256sums_aarch64=(
     '43781ed32dc543f1f979bdd9085956ec14ec3544ec557ab293884e1ca1091545'  # widget
     'd82f5b9e4a5e32b7dacde39db70e1b0f6eac29de5a8ad1c5aaaf182549a8502a'  # time
     'e1d6a129ce6780634cab6c42ca26f9c19d7ac35d7cd8ba67c29e6c1b5e1637ea'  # log
-    '810abc52b9c111def5ab3f1d47f0799cba0e3c667351ddc9a385412313789623'  # net
+    'd9497a4131daf91230142e22a2d5add56eaeeaa3552f051291b4a4cae6f19683'  # net
     '16aff9d58df1d26de5e7afe6ace3bb0eef2cfd6334c49e42b049d8a295dafece'  # sha256
     'cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30'  # LICENSE
 )
