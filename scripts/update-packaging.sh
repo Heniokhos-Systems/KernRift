@@ -74,7 +74,15 @@ p = 'packaging/aur/PKGBUILD'
 s = open(p).read()
 s = re.sub(r'^pkgver=.*$', f'pkgver={version}', s, count=1, flags=re.M)
 
-std = re.search(r'^_std=\((.*?)\)$', s, flags=re.M).group(1).split()
+# DERIVE the module list from std/, do not read it back out of the manifest.
+# Reading it from the PKGBUILD meant the generator could only ever rehash the
+# modules already listed -- so when std/ grew from 19 to 35, every packaging
+# channel kept shipping 19 and nothing noticed. The .deb had the identical bug
+# (fixed in 739cba9). A manifest that lists a stale subset installs cleanly and
+# only fails when a user imports the module that is not there.
+std = sorted(f[:-3] for f in os.listdir('std') if f.endswith('.kr'))
+assert len(std) >= 30, f'only {len(std)} std modules found -- refusing to write a short manifest'
+s = re.sub(r'^_std=\(.*?\)$', '_std=(' + ' '.join(std) + ')', s, count=1, flags=re.M)
 
 def sums_block(arch_krc, arch_kr):
     rows = [(sums[arch_krc], 'krc'), (sums[arch_kr], 'kr')]
@@ -82,6 +90,23 @@ def sums_block(arch_krc, arch_kr):
         rows.append((sha_local(f'std/{m}.kr'), m))
     rows.append((sums['LICENSE'], 'LICENSE'))
     return '\n'.join(f"    '{h}'  # {n}" for h, n in rows)
+
+# Rewrite the SOURCE arrays from the same derived list. They name every module
+# explicitly, so regenerating only the checksum arrays would leave the sources
+# short and the two arrays different lengths -- makepkg rejects that outright,
+# which is the good failure, but the manifest would still be wrong.
+def src_block(krc_asset, kr_asset):
+    rows = [f'    "krc::${{_base}}/{krc_asset}"', f'    "kr::${{_base}}/{kr_asset}"']
+    for m in std:
+        rows.append(f'    "{m}.kr::${{_raw}}/std/{m}.kr"')
+    rows.append('    "LICENSE::${_raw}/LICENSE"')
+    return '\n'.join(rows)
+
+for arr, krc_a, kr_a in (('source_x86_64', 'krc-linux-x86_64', 'kr-linux-x86_64'),
+                         ('source_aarch64', 'krc-linux-arm64', 'kr-linux-arm64')):
+    new_src = f"{arr}=(\n{src_block(krc_a, kr_a)}\n)"
+    s, n = re.subn(rf'^{arr}=\(.*?^\)', lambda _m: new_src, s, count=1, flags=re.M | re.S)
+    assert n == 1, f'{arr} block not found in PKGBUILD'
 
 for arr, krc, kr in (('sha256sums_x86_64', 'krc-linux-x86_64', 'kr-linux-x86_64'),
                      ('sha256sums_aarch64', 'krc-linux-arm64', 'kr-linux-arm64')):
@@ -92,6 +117,28 @@ for arr, krc, kr in (('sha256sums_x86_64', 'krc-linux-x86_64', 'kr-linux-x86_64'
     s, n = re.subn(rf'^{arr}=\(.*?^\)', lambda _m: new, s, count=1, flags=re.M | re.S)
     assert n == 1, f'{arr} block not found in PKGBUILD'
 open(p, 'w').write(s); changed.append(p)
+
+# --- Homebrew stdlib list ------------------------------------------------
+# Same derived list, same reason: the formula carried a hardcoded %w[] of 19
+# modules while std/ had 35, so `brew install` produced a compiler missing
+# every bare-metal module.
+hb = 'packaging/homebrew/kernrift.rb'
+if os.path.exists(hb):
+    h = open(hb).read()
+    rows = []
+    line = '      '
+    for m in std:
+        if len(line) + len(m) > 72:
+            rows.append(line.rstrip()); line = '      '
+        line += m + ' '
+    rows.append(line.rstrip())
+    block = '    %w[\n' + '\n'.join(rows) + '\n    ]'
+    h2, n = re.subn(r'    %w\[.*?^    \]', lambda _m: block, h, count=1, flags=re.M | re.S)
+    assert n == 1, 'homebrew %w[] stdlib block not found'
+    if h2 != h:
+        open(hb, 'w').write(h2)
+        if hb not in changed: changed.append(hb)
+
 
 # --- Homebrew formula ---------------------------------------------------
 p = 'packaging/homebrew/kernrift.rb'

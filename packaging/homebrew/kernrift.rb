@@ -63,8 +63,10 @@ class Kernrift < Formula
     std = share/"kernrift/std"
     std.mkpath
     %w[
-      alloc string io math math_float fmt mem memfast vec map
-      color fb fixedpoint font widget time log net sha256
+      alloc color console cstr fb fixedpoint fmt font fw_cfg fw_cfg_mmio
+      gzip heap_bump idt io log map math math_float mem memfast mouse
+      net pci ps2 ramfb serial sha256 string time uart_16550 uart_pl011
+      vec vga_text widget x86
     ].each do |m|
       system "curl", "-fsSL", "-o", std/"#{m}.kr", "#{RAW}/std/#{m}.kr"
     end
