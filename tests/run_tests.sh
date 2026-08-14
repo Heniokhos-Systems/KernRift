@@ -21650,11 +21650,31 @@ elif [ "$README_N" != "2" ]; then
     FAIL=$((FAIL + 1))
     echo "FAIL: readme_test_count_matches_suite (README states the count $README_N times, want 2)"
     echo "  README.md carries the number in the CI paragraph and in the stats paragraph"
-elif [ "$README_UNIQ" != "$TOTAL" ]; then
+elif [ "$TOTAL" -gt "$README_UNIQ" ]; then
+    # $TOTAL IS ENVIRONMENT-DEPENDENT and the first version of this row did not
+    # account for it: ~84 rows are gated on optional tooling and neither run nor
+    # COUNT when it is absent, so CI's x86_64 job counts 1307 where a fully
+    # equipped machine counts 1382. Comparing for equality turned CI red on a
+    # green tree at v2.10.0 -- a false positive, which is worse than the drift
+    # this row exists to catch, because it teaches people to ignore the row.
+    #
+    # The asymmetry is what makes it checkable without a tool list: a partial
+    # run can only ever count FEWER rows than a full one. So more rows than the
+    # README claims means rows were genuinely added and the README was not
+    # updated -- which is exactly the drift that happened twice on 2026-08-14.
     FAIL=$((FAIL + 1))
-    echo "FAIL: readme_test_count_matches_suite (README says '$README_UNIQ', suite ran $TOTAL)"
-    echo "  if the two README numbers differ from each other they are both shown above;"
-    echo "  update BOTH '**N tests**' occurrences in README.md to $TOTAL"
+    echo "FAIL: readme_test_count_matches_suite (suite ran $TOTAL, README says '$README_UNIQ')"
+    echo "  a run can only count FEWER rows than a full one, never more, so this is"
+    echo "  rows added without updating README.md -- set BOTH '**N tests**' to $TOTAL"
+elif [ "$TOTAL" -lt "$README_UNIQ" ]; then
+    # Fewer than claimed: either a partial toolchain (expected in CI) or rows
+    # were deleted. Those are indistinguishable from here, so say so rather
+    # than guessing -- and do not pass silently, which would make this row look
+    # like coverage it is not providing on this machine.
+    PASS=$((PASS + 1))
+    echo "  readme_test_count_matches_suite: SKIP (ran $TOTAL, README says $README_UNIQ --"
+    echo "    expected when optional tooling is absent; if this is a FULL run, rows were"
+    echo "    deleted and README.md needs updating to $TOTAL)"
 else
     PASS=$((PASS + 1))
     echo "  readme_test_count_matches_suite: PASS (README and suite both say $TOTAL)"
