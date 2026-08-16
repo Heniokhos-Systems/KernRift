@@ -19870,14 +19870,44 @@ fn main() {
     exit(r)
 }
 KREOF
+# THE CAP IS NOW 32, so this source must BUILD AND RUN, not be refused. It
+# still earns its place: `bump(77)` is the 7th argument, so a build that
+# quietly dropped it would return 21 instead of 98 and this row would catch
+# exactly the silent-drop the old refusal existed to prevent.
 TOTAL=$((TOTAL + 1))
-CP_ERR=$($KRC --arch=$RUN_ARCH "$CP_SRC" -o "$CP_BIN" 2>&1); CP_ST=$?
-if [ "$CP_ST" != "0" ] && echo "$CP_ERR" | grep -q "too many call_ptr arguments (max 6)"; then
-    PASS=$((PASS + 1)); echo "  call_ptr_args_7_rejected: PASS (exit $CP_ST, clean diagnostic)"
+rm -f "$CP_BIN"
+if $KRC --arch=$RUN_ARCH "$CP_SRC" -o "$CP_BIN" >/dev/null 2>&1 && [ -s "$CP_BIN" ]; then
+    chmod +x "$CP_BIN"; "$CP_BIN"; CP7_RUN=$?
+    if [ "$CP7_RUN" = "98" ]; then
+        PASS=$((PASS + 1)); echo "  call_ptr_args_7_accepted: PASS (runs, returns 98 -- the 7th argument arrived)"
+    else
+        echo "FAIL: call_ptr_args_7_accepted (returned $CP7_RUN, want 98; 21 means the 7th argument was dropped)"
+        FAIL=$((FAIL + 1))
+    fi
 else
-    echo "FAIL: call_ptr_args_7_rejected (expected non-zero + 'too many call_ptr arguments', got exit $CP_ST: '$CP_ERR')"
+    echo "FAIL: call_ptr_args_7_accepted (7 arguments must now compile)"; FAIL=$((FAIL + 1))
+fi
+# The cap still exists and still refuses -- 33 on the IR backend. A cap that
+# never fires is not a cap, and cp_arg_vregs holds exactly 32 slots, so a 33rd
+# argument's value would never be collected and its side effects would vanish.
+CP33_SRC="/tmp/krc_callptr33_$$.kr"
+{
+  printf 'fn f33('
+  i=1; while [ $i -le 33 ]; do [ $i -gt 1 ] && printf ', '; printf 'uint64 a%d' $i; i=$((i+1)); done
+  printf ') -> uint64 { return a1 }\n'
+  printf 'fn main() {\n    uint64 p = fn_addr("f33")\n    uint64 r = call_ptr(p'
+  i=1; while [ $i -le 33 ]; do printf ', %d' $i; i=$((i+1)); done
+  printf ')\n    exit(r)\n}\n'
+} > "$CP33_SRC"
+TOTAL=$((TOTAL + 1))
+CP33_ERR=$($KRC --arch=$RUN_ARCH "$CP33_SRC" -o "$CP_BIN" 2>&1); CP33_ST=$?
+if [ "$CP33_ST" != "0" ] && echo "$CP33_ERR" | grep -q "too many call_ptr arguments (max 32)"; then
+    PASS=$((PASS + 1)); echo "  call_ptr_args_33_rejected: PASS (exit $CP33_ST, clean diagnostic)"
+else
+    echo "FAIL: call_ptr_args_33_rejected (expected refusal naming max 32, got exit $CP33_ST: '$CP33_ERR')"
     FAIL=$((FAIL + 1))
 fi
+rm -f "$CP33_SRC"
 # Positive control: exactly 6 args must still compile and run correctly.
 CP6_SRC="/tmp/krc_callptrargs6_$$.kr"
 cat > "$CP6_SRC" <<'KREOF'
@@ -19916,14 +19946,38 @@ fi
 # expects a refusal) -- and this project has a native ARM64 CI job, so that is
 # a red CI, not a hypothetical. DO NOT "fix" it by adding a cap to
 # codegen_aarch64.kr: that would DELETE working 7- and 8-argument support.
+# The legacy x86 lowering now places overflow arguments too, so 7 must BUILD
+# here as well. Compile-only, for the arch-pinning reason spelled out above.
 TOTAL=$((TOTAL + 1))
-CP_LG_ERR=$($KRC --arch=x86_64 --legacy "$CP_SRC" -o "$CP_BIN" 2>&1); CP_LG_ST=$?
-if [ "$CP_LG_ST" != "0" ] && echo "$CP_LG_ERR" | grep -q "too many call_ptr arguments (max 6)"; then
-    PASS=$((PASS + 1)); echo "  call_ptr_args_7_rejected_legacy: PASS (exit $CP_LG_ST, clean diagnostic)"
+rm -f "$CP_BIN"
+if $KRC --arch=x86_64 --legacy "$CP_SRC" -o "$CP_BIN" >/dev/null 2>&1 && [ -s "$CP_BIN" ]; then
+    PASS=$((PASS + 1)); echo "  call_ptr_args_7_accepted_legacy_x86: PASS (compiles; not run -- may be a foreign arch here)"
 else
-    echo "FAIL: call_ptr_args_7_rejected_legacy (expected non-zero + 'too many call_ptr arguments', got exit $CP_LG_ST: '$CP_LG_ERR')"
+    echo "FAIL: call_ptr_args_7_accepted_legacy_x86 (7 arguments must now compile on the legacy backend)"; FAIL=$((FAIL + 1))
+fi
+# The legacy cap is 12, NOT 32, and the number is measured: 13 arguments -- the
+# seventh overflow -- comes back 0 there while the IR backend is correct, with
+# no cause established. It refuses rather than emitting that silently. If this
+# row starts failing because 13 now works, that is good news: raise the cap in
+# src/codegen.kr and change this row deliberately.
+CP13_SRC="/tmp/krc_callptr13_$$.kr"
+{
+  printf 'fn f13('
+  i=1; while [ $i -le 13 ]; do [ $i -gt 1 ] && printf ', '; printf 'uint64 a%d' $i; i=$((i+1)); done
+  printf ') -> uint64 { return a13 }\n'
+  printf 'fn main() {\n    uint64 p = fn_addr("f13")\n    uint64 r = call_ptr(p'
+  i=1; while [ $i -le 13 ]; do printf ', %d' $i; i=$((i+1)); done
+  printf ')\n    exit(r)\n}\n'
+} > "$CP13_SRC"
+TOTAL=$((TOTAL + 1))
+CP13_ERR=$($KRC --arch=x86_64 --legacy "$CP13_SRC" -o "$CP_BIN" 2>&1); CP13_ST=$?
+if [ "$CP13_ST" != "0" ] && echo "$CP13_ERR" | grep -q "max 12"; then
+    PASS=$((PASS + 1)); echo "  call_ptr_args_13_rejected_legacy: PASS (refuses at the verified boundary)"
+else
+    echo "FAIL: call_ptr_args_13_rejected_legacy (expected refusal naming max 12, got exit $CP13_ST: '$CP13_ERR')"
     FAIL=$((FAIL + 1))
 fi
+rm -f "$CP13_SRC"
 TOTAL=$((TOTAL + 1))
 rm -f "$CP_BIN"
 # TWO ASSERTIONS, TWO ARCHES, AND THE SPLIT IS THE WHOLE POINT.

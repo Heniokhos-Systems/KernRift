@@ -3268,11 +3268,11 @@ fn ir_lower_expr(uint64 node) -> uint64 {
             // First arg is the function pointer
             uint64 ptr_v = ir_lower_expr(wfa)
             // Remaining args are the actual call arguments
-            uint64[6] cp_arg_vregs
+            uint64[32] cp_arg_vregs
             uint32 call_arg = ast_next(wfa)
             uint64 wca = call_arg
             uint64 cp_count = 0
-            while wca != 0 && cp_count < 6 {
+            while wca != 0 && cp_count < 32 {
                 uint64 av = ir_lower_expr(wca)
                 uint64 avp = cp_arg_vregs + cp_count * 8
                 unsafe { *(avp as uint64) = av }
@@ -3280,14 +3280,19 @@ fn ir_lower_expr(uint64 node) -> uint64 {
                 uint32 anxt = ast_next(wca)
                 wca = anxt
             }
-            // Without this guard, a 7th call_ptr argument is silently
-            // dropped -- and not merely unpassed: cp_arg_vregs only holds 6
-            // slots, so the 7th argument's ir_lower_expr result is simply
-            // never collected and its side effects vanish. The direct-call
-            // path (below, ~line 3426) has the equivalent guard; this
-            // message is worded differently so the two are distinguishable.
+            // Arguments 0-5 go in registers, 6+ on the stack -- same as a
+            // direct call, whose cap this now matches. Beyond 32 the values
+            // are simply never collected (cp_arg_vregs has 32 slots) and a
+            // 33rd argument's side effects would vanish, so it still refuses.
+            // The direct-call path has the equivalent guard; this message is
+            // worded differently so the two remain distinguishable.
+            //
+            // LENGTH IS DERIVED, NOT COUNTED. The old literal 43 was right for
+            // "(max 6)" and would have been one short for "(max 32)", which is
+            // the exact shape of the 30 wrong write() lengths fixed in 563b0f3.
             if wca != 0 {
-                write(2, "error: too many call_ptr arguments (max 6)\n", 43)
+                uint64 cpe = "error: too many call_ptr arguments (max 32)\n"
+                write(2, cpe, str_len(cpe))
                 exit(1)
             }
             // Emit ARGs for call arguments
@@ -3309,7 +3314,13 @@ fn ir_lower_expr(uint64 node) -> uint64 {
                 f64_ret_flag = 1
                 ir_vreg_fkind_set(dest, 1)
             }
-            ir_emit(IR_CALL_IND, dest, ptr_v, 0, f64_ret_flag, ir_current_bb)
+            // imm packs BOTH the f64-return flag (bit 0) and the argument
+            // count (bits 1+). It cannot go in src2: ir_compute_use_count and
+            // ir_compute_liveness read src2 as a vreg for op 87 -- it is not in
+            // their exclusion list -- so a count there would be miscounted as a
+            // use of whatever vreg has that number. imm is only read as a vreg
+            // for ops 72/76/83/93/98/148, so it is free here.
+            ir_emit(IR_CALL_IND, dest, ptr_v, 0, f64_ret_flag | (cp_count << 1), ir_current_bb)
             return dest
         }
 
@@ -8555,6 +8566,149 @@ fn x86_nyi_op(uint64 op) {
     exit(1)
 }
 
+// Outgoing stack arguments for a call with more than six of them.
+// SHARED by IR_CALL (50) and IR_CALL_IND (87). It lived inside op 50 and
+// was therefore unreachable for indirect calls, which is the whole reason
+// call_ptr was capped at six. Moved here VERBATIM -- gate 1 compares 147
+// artifacts byte-for-byte, so any drift in the direct path shows up there.
+//
+// Returns the number of stack args, which the caller must hand back to
+// ir_x86_emit_call_stack_cleanup AFTER the call instruction.
+fn ir_x86_emit_call_stack_args(uint64 call_arg_count) -> uint64 {
+    uint64 stack_args = 0
+    if call_arg_count > 6 {
+            stack_args = call_arg_count - 6
+            // Resolve all overflow arg values BEFORE modifying rsp
+            // Use sub rsp + mov [rsp+N] approach instead of push to avoid
+            // spill offset issues (push changes rsp, making subsequent resolves wrong)
+            uint64 aligned_stack = stack_args
+            if (aligned_stack & 1) != 0 { aligned_stack = aligned_stack + 1 }
+            uint64 stack_bytes = aligned_stack * 8
+            // First, resolve all overflow args into a temp buffer (physical values)
+            uint64[16] ov_vals
+            uint64 oi = 0
+            while oi < ir_overflow_arg_count {
+                uint64 op_ptr = ir_overflow_args + oi * 8
+                uint64 arg_vreg = 0
+                unsafe { *(op_ptr as uint64) -> arg_vreg }
+                uint64 arg_r = ir_resolve_src(arg_vreg, 0)
+                ir_emit_mov_r64_r64(0, arg_r)
+                // Store rax value to the temp buf position on the current (unmodified) stack
+                // Actually we can't use a temp buffer easily. Use a different approach:
+                // resolve to rax and push immediately. The key insight: spill offsets are
+                // relative to current rsp. After each push, rsp decreases by 8, so subsequent
+                // resolves need adjusted offsets. Instead, let's just resolve all to rax and
+                // push in one pass, going from LAST to FIRST. But each push changes rsp...
+
+                // Better approach: sub rsp first, then use mov [rsp+N] with adjusted offsets
+                oi = oi + 1
+            }
+            // Simpler approach: sub rsp, then store. Adjust resolve offsets manually.
+            // sub rsp, stack_bytes — imm8 form fits up to 127; switch to
+            // imm32 for larger allocations so calls with >16 stack args
+            // don't wrap the signed-byte immediate silently.
+            if stack_bytes < 128 {
+                emit_byte(0x48); emit_byte(0x83); emit_byte(0xEC)
+                uint8 sb8 = stack_bytes
+                emit_byte(sb8)
+            } else {
+                emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC)
+                emit_u32_le(stack_bytes)
+            }
+            // Now rsp has shifted down. Spill slots are now at rsp + stack_bytes + original_offset
+            // We need to re-resolve each overflow arg with the shifted rsp
+            oi = 0
+            while oi < ir_overflow_arg_count {
+                uint64 op_ptr = ir_overflow_args + oi * 8
+                uint64 arg_vreg = 0
+                unsafe { *(op_ptr as uint64) -> arg_vreg }
+                // The vreg might be in a register (fine) or spilled.
+                // If spilled, the spill is at [old_rsp + spill_off] = [new_rsp + stack_bytes + spill_off]
+                // We need to adjust the spill load. Let's just check the physical reg:
+                uint64 arg_r = ir_get_phys_reg(arg_vreg)
+                // XMM-homed f64 arg: this is the one emitter that reads
+                // spill slots directly instead of via the funnels, so it
+                // needs its own home check — the slot of a homed vreg is
+                // never written. Pull the bits into rax and let the
+                // register path below store them to the outgoing slot.
+                if arg_r == 0xFFFFFFFF {
+                    uint64 arg_xh = ir_x86_xmm_home(arg_vreg)
+                    if arg_xh != 0xFFFFFFFF {
+                        ir_emit_movq_r_x(0, arg_xh)
+                        arg_r = 0
+                    }
+                }
+                if arg_r != 0xFFFFFFFF {
+                    // Value is in a register — just mov to [rsp + oi*8]
+                    uint64 soff = oi * 8
+                    uint8 st_rex = 0x48
+                    if arg_r >= 8 { st_rex = st_rex | 4 }
+                    emit_byte(st_rex); emit_byte(0x89)
+                    if soff == 0 {
+                        uint8 stm = ((arg_r & 7) << 3) | 4
+                        emit_byte(stm); emit_byte(0x24)
+                    } else if soff < 128 {
+                        uint8 stm = 0x44 | ((arg_r & 7) << 3)
+                        emit_byte(stm); emit_byte(0x24)
+                        uint8 so8 = soff
+                        emit_byte(so8)
+                    } else {
+                        uint8 stm = 0x84 | ((arg_r & 7) << 3)
+                        emit_byte(stm); emit_byte(0x24)
+                        emit_u32_le(soff)
+                    }
+                } else {
+                    // Value is spilled — need to load from adjusted offset
+                    // Original spill at [rsp + spill_off], now at [rsp + stack_bytes + spill_off]
+                    // (must mirror ir_spill_offset's one-slot-per-vreg mapping)
+                    uint64 spill_off = (arg_vreg - 1) * 8
+                    uint64 adj_off = stack_bytes + spill_off
+                    // mov rax, [rsp + adj_off]
+                    emit_byte(0x48); emit_byte(0x8B)
+                    if adj_off < 128 {
+                        emit_byte(0x44); emit_byte(0x24)
+                        uint8 ao8 = adj_off
+                        emit_byte(ao8)
+                    } else {
+                        emit_byte(0x84); emit_byte(0x24)
+                        emit_u32_le(adj_off)
+                    }
+                    // mov [rsp + oi*8], rax
+                    uint64 soff = oi * 8
+                    emit_byte(0x48); emit_byte(0x89)
+                    if soff == 0 {
+                        emit_byte(0x04); emit_byte(0x24)
+                    } else if soff < 128 {
+                        emit_byte(0x44); emit_byte(0x24)
+                        uint8 so8 = soff
+                        emit_byte(so8)
+                    } else {
+                        emit_byte(0x84); emit_byte(0x24)
+                        emit_u32_le(soff)
+                    }
+                }
+                oi = oi + 1
+            }
+    }
+    return stack_args
+}
+
+fn ir_x86_emit_call_stack_cleanup(uint64 stack_args) {
+    if stack_args > 0 {
+            uint64 aligned_stack = stack_args
+            if (aligned_stack & 1) != 0 { aligned_stack = aligned_stack + 1 }
+            uint64 cleanup = aligned_stack * 8
+            if cleanup < 128 {
+                emit_byte(0x48); emit_byte(0x83); emit_byte(0xC4)
+                uint8 cl8 = cleanup
+                emit_byte(cl8)
+            } else {
+                emit_byte(0x48); emit_byte(0x81); emit_byte(0xC4)
+                emit_u32_le(cleanup)
+            }
+    }
+}
+
 fn ir_emit_x86_insn(uint64 ii) {
     uint64 op = ir_insn_opcode(ii)
     // NOP: LICM blanks an instruction in place rather than removing it, so
@@ -10153,121 +10307,7 @@ fn ir_emit_x86_insn(uint64 ii) {
         // IR_CALL: call rel32 (will be resolved by fixup system)
         // src1 = arg_count (0 for old-style calls with <=6 args)
         uint64 call_arg_count = s1_v
-        uint64 stack_args = 0
-        if call_arg_count > 6 {
-            stack_args = call_arg_count - 6
-            // Resolve all overflow arg values BEFORE modifying rsp
-            // Use sub rsp + mov [rsp+N] approach instead of push to avoid
-            // spill offset issues (push changes rsp, making subsequent resolves wrong)
-            uint64 aligned_stack = stack_args
-            if (aligned_stack & 1) != 0 { aligned_stack = aligned_stack + 1 }
-            uint64 stack_bytes = aligned_stack * 8
-            // First, resolve all overflow args into a temp buffer (physical values)
-            uint64[16] ov_vals
-            uint64 oi = 0
-            while oi < ir_overflow_arg_count {
-                uint64 op_ptr = ir_overflow_args + oi * 8
-                uint64 arg_vreg = 0
-                unsafe { *(op_ptr as uint64) -> arg_vreg }
-                uint64 arg_r = ir_resolve_src(arg_vreg, 0)
-                ir_emit_mov_r64_r64(0, arg_r)
-                // Store rax value to the temp buf position on the current (unmodified) stack
-                // Actually we can't use a temp buffer easily. Use a different approach:
-                // resolve to rax and push immediately. The key insight: spill offsets are
-                // relative to current rsp. After each push, rsp decreases by 8, so subsequent
-                // resolves need adjusted offsets. Instead, let's just resolve all to rax and
-                // push in one pass, going from LAST to FIRST. But each push changes rsp...
-
-                // Better approach: sub rsp first, then use mov [rsp+N] with adjusted offsets
-                oi = oi + 1
-            }
-            // Simpler approach: sub rsp, then store. Adjust resolve offsets manually.
-            // sub rsp, stack_bytes — imm8 form fits up to 127; switch to
-            // imm32 for larger allocations so calls with >16 stack args
-            // don't wrap the signed-byte immediate silently.
-            if stack_bytes < 128 {
-                emit_byte(0x48); emit_byte(0x83); emit_byte(0xEC)
-                uint8 sb8 = stack_bytes
-                emit_byte(sb8)
-            } else {
-                emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC)
-                emit_u32_le(stack_bytes)
-            }
-            // Now rsp has shifted down. Spill slots are now at rsp + stack_bytes + original_offset
-            // We need to re-resolve each overflow arg with the shifted rsp
-            oi = 0
-            while oi < ir_overflow_arg_count {
-                uint64 op_ptr = ir_overflow_args + oi * 8
-                uint64 arg_vreg = 0
-                unsafe { *(op_ptr as uint64) -> arg_vreg }
-                // The vreg might be in a register (fine) or spilled.
-                // If spilled, the spill is at [old_rsp + spill_off] = [new_rsp + stack_bytes + spill_off]
-                // We need to adjust the spill load. Let's just check the physical reg:
-                uint64 arg_r = ir_get_phys_reg(arg_vreg)
-                // XMM-homed f64 arg: this is the one emitter that reads
-                // spill slots directly instead of via the funnels, so it
-                // needs its own home check — the slot of a homed vreg is
-                // never written. Pull the bits into rax and let the
-                // register path below store them to the outgoing slot.
-                if arg_r == 0xFFFFFFFF {
-                    uint64 arg_xh = ir_x86_xmm_home(arg_vreg)
-                    if arg_xh != 0xFFFFFFFF {
-                        ir_emit_movq_r_x(0, arg_xh)
-                        arg_r = 0
-                    }
-                }
-                if arg_r != 0xFFFFFFFF {
-                    // Value is in a register — just mov to [rsp + oi*8]
-                    uint64 soff = oi * 8
-                    uint8 st_rex = 0x48
-                    if arg_r >= 8 { st_rex = st_rex | 4 }
-                    emit_byte(st_rex); emit_byte(0x89)
-                    if soff == 0 {
-                        uint8 stm = ((arg_r & 7) << 3) | 4
-                        emit_byte(stm); emit_byte(0x24)
-                    } else if soff < 128 {
-                        uint8 stm = 0x44 | ((arg_r & 7) << 3)
-                        emit_byte(stm); emit_byte(0x24)
-                        uint8 so8 = soff
-                        emit_byte(so8)
-                    } else {
-                        uint8 stm = 0x84 | ((arg_r & 7) << 3)
-                        emit_byte(stm); emit_byte(0x24)
-                        emit_u32_le(soff)
-                    }
-                } else {
-                    // Value is spilled — need to load from adjusted offset
-                    // Original spill at [rsp + spill_off], now at [rsp + stack_bytes + spill_off]
-                    // (must mirror ir_spill_offset's one-slot-per-vreg mapping)
-                    uint64 spill_off = (arg_vreg - 1) * 8
-                    uint64 adj_off = stack_bytes + spill_off
-                    // mov rax, [rsp + adj_off]
-                    emit_byte(0x48); emit_byte(0x8B)
-                    if adj_off < 128 {
-                        emit_byte(0x44); emit_byte(0x24)
-                        uint8 ao8 = adj_off
-                        emit_byte(ao8)
-                    } else {
-                        emit_byte(0x84); emit_byte(0x24)
-                        emit_u32_le(adj_off)
-                    }
-                    // mov [rsp + oi*8], rax
-                    uint64 soff = oi * 8
-                    emit_byte(0x48); emit_byte(0x89)
-                    if soff == 0 {
-                        emit_byte(0x04); emit_byte(0x24)
-                    } else if soff < 128 {
-                        emit_byte(0x44); emit_byte(0x24)
-                        uint8 so8 = soff
-                        emit_byte(so8)
-                    } else {
-                        emit_byte(0x84); emit_byte(0x24)
-                        emit_u32_le(soff)
-                    }
-                }
-                oi = oi + 1
-            }
-        }
+        uint64 stack_args = ir_x86_emit_call_stack_args(call_arg_count)
         emit_byte(0xE8)
         uint64 call_patch = out_len
         emit_u32_le(0)
@@ -10281,19 +10321,7 @@ fn ir_emit_x86_insn(uint64 ii) {
         unsafe { *(fe4 as uint32) = ct }
         fixup_count = fixup_count + 1
         // Clean up overflow args from stack
-        if stack_args > 0 {
-            uint64 aligned_stack = stack_args
-            if (aligned_stack & 1) != 0 { aligned_stack = aligned_stack + 1 }
-            uint64 cleanup = aligned_stack * 8
-            if cleanup < 128 {
-                emit_byte(0x48); emit_byte(0x83); emit_byte(0xC4)
-                uint8 cl8 = cleanup
-                emit_byte(cl8)
-            } else {
-                emit_byte(0x48); emit_byte(0x81); emit_byte(0xC4)
-                emit_u32_le(cleanup)
-            }
-        }
+        ir_x86_emit_call_stack_cleanup(stack_args)
         // Reset overflow arg count
         ir_overflow_arg_count = 0
         // Result in rax. A statement-level call (`f()` as an ExprStmt) still
@@ -10368,15 +10396,60 @@ fn ir_emit_x86_insn(uint64 ii) {
         // xmm0 bits into the dest GPR via `movq r64, xmm0`
         // (66 REX.W 0F 7E /r) so BinOp/StoreF64 downstream see the
         // right bit pattern. imm == 0 is the integer-return path.
-        uint64 ptr_r = ir_resolve_src(s1_v, 0)
-        ir_emit_mov_r64_r64(0, ptr_r)
+        // imm packs the f64-return flag in bit 0 and the ARGUMENT COUNT in
+        // bits 1+. It used to hold the flag alone and be tested with
+        // `imm == 1`; that test is now wrong by construction, because any
+        // call with arguments sets higher bits (a 2-arg f64 call gives 5).
+        uint64 ci_f64 = imm & 1
+        uint64 ci_argc = imm >> 1
+        uint64 ci_stack = ir_x86_emit_call_stack_args(ci_argc)
+        if ci_stack == 0 {
+            // Unchanged six-or-fewer path, byte for byte.
+            uint64 ptr_r = ir_resolve_src(s1_v, 0)
+            ir_emit_mov_r64_r64(0, ptr_r)
+        } else {
+            // The pointer is resolved AFTER the outgoing slots are written:
+            // that loop uses rax as its scratch and would clobber a pointer
+            // parked there first. And ir_resolve_src cannot be used here at
+            // all -- `sub rsp` has already moved the frame, so a spilled
+            // pointer's slot is stack_bytes further up than it thinks.
+            uint64 ci_aligned = ci_stack
+            if (ci_aligned & 1) != 0 { ci_aligned = ci_aligned + 1 }
+            uint64 ci_bytes = ci_aligned * 8
+            uint64 ptr_phys = ir_get_phys_reg(s1_v)
+            if ptr_phys == 0xFFFFFFFF {
+                // An xmm-homed vreg's spill slot is never written -- same
+                // check the overflow-store loop makes for its arguments.
+                uint64 pxh = ir_x86_xmm_home(s1_v)
+                if pxh != 0xFFFFFFFF {
+                    ir_emit_movq_r_x(0, pxh)
+                    ptr_phys = 0
+                }
+            }
+            if ptr_phys != 0xFFFFFFFF {
+                ir_emit_mov_r64_r64(0, ptr_phys)
+            } else {
+                uint64 poff = ci_bytes + (s1_v - 1) * 8
+                emit_byte(0x48); emit_byte(0x8B)
+                if poff < 128 {
+                    emit_byte(0x44); emit_byte(0x24)
+                    uint8 po8 = poff
+                    emit_byte(po8)
+                } else {
+                    emit_byte(0x84); emit_byte(0x24)
+                    emit_u32_le(poff)
+                }
+            }
+        }
         // call rax: FF D0
         emit_byte(0xFF); emit_byte(0xD0)
+        ir_x86_emit_call_stack_cleanup(ci_stack)
+        ir_overflow_arg_count = 0
         // Unread result: emit no capture at all (see IR_CALL above). Checked
         // before the f64 movq, which would otherwise write dst_r for nothing.
         if ir_use_count_get(dest_v) == 0 { return }
         uint64 result_reg = 0   // rax for int return
-        if imm == 1 {
+        if ci_f64 == 1 {
             // movq dst_r (or rax if spilled), xmm0
             uint64 target = dst_r
             if target == 0xFFFFFFFF { target = 0 }

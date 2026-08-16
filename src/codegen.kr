@@ -7815,8 +7815,29 @@ fn gen_expr(uint64 node) {
             // the shared IR lowering's call_ptr guard (src/ir.kr), so both
             // backends refuse identically instead of the legacy path being
             // the quiet way around it.
-            if arg_count > 6 {
-                write(2, "error: too many call_ptr arguments (max 6)\n", 43)
+            // 12, not the IR backend's 32, and the number is MEASURED rather
+            // than chosen. 7 through 12 arguments were verified against the
+            // direct call for every width; 13 -- the seventh overflow argument
+            // -- comes back 0 while the same program on the IR backend is
+            // correct. Caller emission, frame arithmetic and the callee's
+            // abi_overflow_offset all agree on inspection, so the cause is NOT
+            // established, and a cap where behaviour is proven beats a silent
+            // wrong answer past it. Raise this only with a repro that passes.
+            if arg_count > 12 {
+                uint64 cpe2 = "error: too many call_ptr arguments on the legacy backend (max 12; the IR backend takes 32)\n"
+                write(2, cpe2, str_len(cpe2))
+                exit(1)
+            }
+            // Windows x64 passes only four arguments in registers and requires
+            // 32 bytes of shadow space the caller must reserve. Neither the
+            // loader below nor this block does that, so a fifth argument would
+            // be evaluated and then never placed -- the same silent-drop shape
+            // this whole change exists to remove. REFUSE loudly instead of
+            // implementing half of it; SysV is what --emit=obj and --legacy
+            // actually exercise here.
+            if target_os == 2 && arg_count > 4 {
+                uint64 cpw = "error: call_ptr on --target=windows supports at most 4 arguments (Win64 passes 4 in registers and needs caller-reserved shadow space)\n"
+                write(2, cpw, str_len(cpw))
                 exit(1)
             }
 
@@ -7865,6 +7886,7 @@ fn gen_expr(uint64 node) {
             }
 
             // Load args into registers.
+            uint64 cp_stack_bytes = 0
             if target_os == 2 {
                 // Windows x64: positional — the Nth arg uses gpr[N] OR xmm[N]
                 // (rcx/xmm0, rdx/xmm1, r8/xmm2, r9/xmm3). Load high→low so a
@@ -7950,13 +7972,71 @@ fn gen_expr(uint64 node) {
                         if sii == 5 { emit_byte(0x49); emit_byte(0x89); emit_byte(0xC1) } // mov r9, rax
                     }
                 }
+                // Arguments that found no register go on the stack, in ARGUMENT
+                // order -- the same rule as a direct call. cp_iidx/cp_fidx above
+                // already carry each argument's per-class index, so an argument
+                // overflows exactly when its own class ran out: 6 GPRs, and 6
+                // xmm here because that is how many the loader above fills.
+                uint64 cpo = alloc(arg_count * 8 + 8)
+                uint64 cpo_n = 0
+                uint64 cq = 0
+                while cq < arg_count {
+                    uint64 qfp = cp_fkinds + cq * 8
+                    uint64 qfk = 0
+                    unsafe { *(qfp as uint64) -> qfk }
+                    uint64 q_stack = 0
+                    if qfk != 0 {
+                        uint64 qfip = cp_fidx + cq * 8
+                        uint64 qfi = 0
+                        unsafe { *(qfip as uint64) -> qfi }
+                        if qfi >= 6 { q_stack = 1 }
+                    } else {
+                        uint64 qiip = cp_iidx + cq * 8
+                        uint64 qii = 0
+                        unsafe { *(qiip as uint64) -> qii }
+                        if qii >= 6 { q_stack = 1 }
+                    }
+                    if q_stack != 0 {
+                        uint64 qop = cpo + cpo_n * 8
+                        unsafe { *(qop as uint64) = cq }
+                        cpo_n = cpo_n + 1
+                    }
+                    cq = cq + 1
+                }
+                if cpo_n > 0 {
+                    uint64 cps = cpo_n
+                    if (cps & 1) != 0 { cps = cps + 1 }
+                    cp_stack_bytes = cps * 8
+                    // sub rsp, cp_stack_bytes
+                    emit_byte(0x48); emit_byte(0x83); emit_byte(0xEC)
+                    uint8 cpsb = cp_stack_bytes
+                    emit_byte(cpsb)
+                    uint64 cpi2 = 0
+                    while cpi2 < cpo_n {
+                        uint64 cgp = cpo + cpi2 * 8
+                        uint64 csrc = 0
+                        unsafe { *(cgp as uint64) -> csrc }
+                        emit_load_rax_from_stack(arg_slots_base + csrc * 8 + cp_stack_bytes)
+                        emit_store_rax_to_stack(cpi2 * 8)
+                        cpi2 = cpi2 + 1
+                    }
+                }
             }
 
-            // Load fn_ptr into rax, then call rax
-            emit_load_rax_from_stack(ptr_slot)
+            // Load fn_ptr into rax, then call rax. The pointer lives in a
+            // frame slot, so if outgoing args just moved rsp its slot is
+            // cp_stack_bytes further up -- exactly the adjustment the arg
+            // copies above make.
+            emit_load_rax_from_stack(ptr_slot + cp_stack_bytes)
             // call rax: FF D0
             emit_byte(0xFF)
             emit_byte(0xD0)
+            if cp_stack_bytes > 0 {
+                // add rsp, cp_stack_bytes
+                emit_byte(0x48); emit_byte(0x83); emit_byte(0xC4)
+                uint8 cpcl = cp_stack_bytes
+                emit_byte(cpcl)
+            }
             return
         }
 
@@ -9733,30 +9813,88 @@ fn gen_expr(uint64 node) {
             }
         }
 
-        // Push overflow args (7+) onto stack AFTER register loads (SysV x86_64)
-        // Done below, after register arg loading, to avoid rsp shift issues
+        // Outgoing stack arguments (SysV x86_64), AFTER the register loads so
+        // no rsp shift can disturb them.
+        //
+        // WHICH ARGS GO ON THE STACK IS NOT POSITIONAL. This used to take
+        // arguments 6.. and copy them, which is only correct when every
+        // register argument precedes every stack one. SysV fills GPRs and XMMs
+        // from SEPARATE counters, so slot 6 is the 7th ARGUMENT, not the 7th
+        // INTEGER argument. Measured before the fix:
+        //     fn m(f64 x, f64 y, uint64 a..h)   m(2.0,3.0,1,2,3,4,5,6,7,8)
+        //     IR backend and both arm64 backends: 587654321
+        //     --legacy --arch=x86_64:            565654321
+        // -- it put ints 4 and 5 where the callee reads ints 6 and 7. Moving the
+        // two floats to the END of the parameter list hid it, which is why the
+        // existing tests never saw this.
+        //
+        // The overflow set is replayed from the SAME rule the two passes above
+        // use: a float that found no xmm (8 of them), an int that found no GPR
+        // (6, less one when sret has taken rdi). Order is ARGUMENT order.
+        uint64 ovf_idx = alloc(arg_count * 8 + 8)
+        uint64 ovf_n = 0
+        uint64 ovf_has_struct = 0
+        uint64 ovf_f = 0
+        uint64 ovf_i = 0
+        if caller_sret_needed != 0 { ovf_i = 1 }
+        uint64 oa = 0
+        while oa < arg_count {
+            uint64 oaf = arg_float_flags + oa * 8
+            uint64 oafv = 0
+            unsafe { *(oaf as uint64) -> oafv }
+            uint64 oas = arg_struct_flags + oa * 8
+            uint64 oasv = 0
+            unsafe { *(oas as uint64) -> oasv }
+            if oasv != 0xFFFFFFFF && abi_struct_pass_by_val != 0 { ovf_has_struct = 1 }
+            uint64 on_stack = 0
+            if oafv != 0 {
+                if ovf_f < 8 { ovf_f = ovf_f + 1 } else { on_stack = 1 }
+            } else {
+                if ovf_i < 6 { ovf_i = ovf_i + 1 } else { on_stack = 1 }
+            }
+            if on_stack != 0 {
+                uint64 ovp = ovf_idx + ovf_n * 8
+                unsafe { *(ovp as uint64) = oa }
+                ovf_n = ovf_n + 1
+            }
+            oa = oa + 1
+        }
+        // A by-value struct consumes one OR TWO integer registers depending on
+        // its ABI class, which the replay above does not model. Rather than
+        // trade one wrong answer for another, fall back to the historical
+        // positional copy whenever such an argument is present: unchanged
+        // behaviour for that case, correct behaviour for every other.
+        if ovf_has_struct != 0 {
+            ovf_n = 0
+            if arg_count > 6 {
+                uint64 pa = 6
+                while pa < arg_count {
+                    uint64 pvp = ovf_idx + ovf_n * 8
+                    unsafe { *(pvp as uint64) = pa }
+                    ovf_n = ovf_n + 1
+                    pa = pa + 1
+                }
+            }
+        }
         uint64 stack_args = 0
-        if arg_count > 6 && target_os != 2 {
-            stack_args = arg_count - 6
+        if ovf_n > 0 && target_os != 2 {
+            stack_args = ovf_n
             if (stack_args & 1) != 0 { stack_args = stack_args + 1 }
         }
 
-        // emit: call rel32 (placeholder)
-        // First, push overflow args (using saved register values would clobber,
-        // so we use rax to load from temp slots and push)
         if stack_args > 0 {
-            // Allocate stack space for overflow args + alignment
             uint64 stack_bytes = stack_args * 8
             // sub rsp, stack_bytes
             emit_byte(0x48); emit_byte(0x83); emit_byte(0xEC)
             uint8 sb8 = stack_bytes
             emit_byte(sb8)
-            // Store overflow args at [rsp+0], [rsp+8], ...
-            // After sub rsp, original data is now at +stack_bytes higher offset
-            uint64 real_overflow = arg_count - 6
+            // After sub rsp the temp slots sit stack_bytes higher.
             uint64 oi = 0
-            while oi < real_overflow {
-                emit_load_rax_from_stack(arg_slots_base + (6 + oi) * 8 + stack_bytes)
+            while oi < ovf_n {
+                uint64 ovg = ovf_idx + oi * 8
+                uint64 ovsrc = 0
+                unsafe { *(ovg as uint64) -> ovsrc }
+                emit_load_rax_from_stack(arg_slots_base + ovsrc * 8 + stack_bytes)
                 emit_store_rax_to_stack(oi * 8)
                 oi = oi + 1
             }
