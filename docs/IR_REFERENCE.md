@@ -190,7 +190,7 @@ $ krc --emit=ir prog.kr     # prog.kr does `println(some_f64)`
 
 ## 3. The per-OS dispatch shape, and where a new case goes
 
-`target_os` values (assigned in `src/main.kr:8795`–`5258`, defaults at
+`target_os` values (assigned in `src/main.kr:8844`–`5258`, defaults at
 `3631`/`3859`/`4113`/`4361`/`4486`/`4618`):
 
 | Value | OS |
@@ -246,7 +246,7 @@ matters and it has not changed.
   guard cannot see it, because no trap instruction is emitted. Three such
   sites shipped in this compiler; see §9.
 - **A new arch × OS pair is validated by an allow-list**, not a blacklist:
-  `arch_os_pair_supported()` (`src/main.kr:7263`) is per-row
+  `arch_os_pair_supported()` (`src/main.kr:7304`) is per-row
   `if os == n { return 1 }` with a `return 0` fall-through, checked on the
   resolved pair before every compile entry. Adding an arch without adding its
   row is a hard error at the first build. Before it existed,
@@ -835,7 +835,7 @@ alias analysis and a load cannot be assumed to return the same value twice.
   the compiler did not diagnose something.)
 - **AST-level DCE seeds only `main` and `@export`** (`dce_scan`,
   `src/codegen.kr:13219`). `_start` is not a seed, so freestanding riscv32 and
-  xtensa entry points had to be added explicitly (`src/main.kr:2454`–`2374`).
+  xtensa entry points had to be added explicitly (`src/main.kr:2495`–`2374`).
 - **A provider reached only through override resolution gets pruned.** Under
   `--target=none`, `println` reroutes to the `@builtin_override fn write`
   provider, and an f-string's buffer reroutes to the `alloc` provider — but
@@ -855,7 +855,7 @@ The driver is `ir_optimize()` (`src/ir.kr:13484`). **There is no
 document. It runs once per function, after lowering and before liveness.
 
 `--O0` sets `ir_opt_level = 0` (`src/ir.kr:12247`, written only at
-`src/main.kr:8952`) and each backend skips the whole call
+`src/main.kr:9001`) and each backend skips the whole call
 (`src/ir.kr:14325`, `src/ir_aarch64.kr:3356`, `src/ir_riscv.kr:2414`,
 `src/ir_xtensa.kr:2816`). Note the spelling: **`--O0`**, two dashes. There is
 no `-O0`, `-O1`, `--O2` — no other write to `ir_opt_level` exists.
@@ -1521,7 +1521,7 @@ opcodes that were never emitted.
 | cmp-with-immediate fusion | arch 0 **and** 1 (`src/ir.kr:12522`, arm64 capped at imm12 4095) | arch 0 only (`ir.mlr:11590`) |
 | pow2 `MUL` → `SHL_IMM` | ungated, with a shamt guard for arch 2/3 | present, gated to arch 0/1 — *not* absent, contrary to an older project note |
 | `--emit=lkm` | yes; the IR gate is `emit_mode != 3 && emit_mode != 7` | no; the gate is `emit_mode != 3` alone |
-| `arch_os_pair_supported()` | yes (`src/main.kr:7263`) | **absent** — no arch × OS allow-list |
+| `arch_os_pair_supported()` | yes (`src/main.kr:7304`) | **absent** — no arch × OS allow-list |
 | `--target=amdgpu-native` | no | yes |
 | var map | FNV-1a open-addressed 4096-slot hash (`src/ir.kr:978`) | linear scan (`ir.mlr:1013`) |
 | per-BB instruction lists for colouring | flat lists via `ir_build_bb_lists` (`src/ir.kr:13240`) | a 65536-entry walk stack |

@@ -145,7 +145,7 @@ src/ir_xtensa.kr:522 1066a0cf8f83
 src/ir_xtensa.kr:1713 1e6f86d4d4bd
 src/ir_xtensa.kr:1954 743fd331a82f
 src/ir_xtensa.kr:2816 68aff4cb352d
-src/main.kr:2454 844fbed9235f
-src/main.kr:7263 1f6a3a8734b0
-src/main.kr:8795 1a76db0f6e20
-src/main.kr:8952 70dc2d2f69ae
+src/main.kr:2495 844fbed9235f
+src/main.kr:7304 1f6a3a8734b0
+src/main.kr:8844 1a76db0f6e20
+src/main.kr:9001 70dc2d2f69ae
