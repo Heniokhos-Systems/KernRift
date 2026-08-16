@@ -1159,7 +1159,10 @@ fn load_proposal_overrides() {
     uint64 fsize = file_size(fd)
     if fsize == 0 { file_close(fd); return }
     uint64 buf = alloc(fsize + 1)
-    file_read(fd, buf, fsize)
+    // read_exact rather than file_read: the loop is the fix here, so a short
+    // return no longer truncates. The count is not inspected -- living mode
+    // re-reads on change, so a bad read self-corrects rather than shipping.
+    uint64 _lg1 = read_exact(fd, buf, fsize)
     file_close(fd)
     uint64 tpn = buf + fsize
     uint8 nulc = 0
@@ -1916,7 +1919,7 @@ fn run_lc_undo(uint64 input_path) {
     }
     uint64 bsize = file_size(bfd)
     uint64 bbuf = alloc(bsize + 1)
-    file_read(bfd, bbuf, bsize)
+    uint64 _lg2 = read_exact(bfd, bbuf, bsize)
     file_close(bfd)
 
     uint64 ofd = file_open(input_path, 1)
@@ -1944,7 +1947,7 @@ fn run_migration(uint64 input_path, uint64 dry_run) {
     }
     uint64 fsize = file_size(fd)
     uint64 src_buf = alloc(fsize + 1)
-    file_read(fd, src_buf, fsize)
+    uint64 _lg3 = read_exact(fd, src_buf, fsize)
     file_close(fd)
     uint64 tp = src_buf + fsize
     uint8 z = 0

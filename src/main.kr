@@ -623,6 +623,38 @@ fn import_check_file(uint64 path) {
     file_close(fd)
 }
 
+// Read exactly `want` bytes; return how many actually arrived.
+//
+// EVERY CALLER OF file_read IN THIS COMPILER DISCARDED ITS COUNT, and that was
+// not a theoretical gap -- it was measured. A provider that under-reported by
+// one byte while copying the right bytes produced a BYTE-IDENTICAL artifact and
+// passed every test, because nothing ever looked at the number. Two independent
+// callers (this one and the --slice= reader) both threw it away, so the hole was
+// a property of the compiler rather than of any one call site.
+//
+// The dangerous direction is the reverse: a genuinely SHORT read. The bytes that
+// did arrive parse as a complete module -- a truncated one -- so the compile
+// succeeds and emits a binary built from source nobody wrote. Silent, and it
+// survives a byte-for-byte comparison against nothing, because the only record
+// of what should have been there is the file that was not fully read.
+//
+// A LOOP, not a single call plus a comparison. read(2) is explicitly permitted
+// to return less than asked for without anything being wrong, so treating one
+// short return as an error would break legitimate reads. Only a read that
+// returns 0 before `want` is reached is a truncation.
+fn read_exact(uint64 fd, uint64 buf, uint64 want) -> uint64 {
+    uint64 got = 0
+    while got < want {
+        uint64 n = file_read(fd, buf + got, want - got)
+        if n == 0 { return got }
+        // A provider claiming to have written more than there was room for is
+        // lying; believing it would advance `got` past the buffer.
+        if n > want - got { return got }
+        got = got + n
+    }
+    return got
+}
+
 fn import_process(uint64 file_path) {
     if import_is_seen(file_path) != 0 { return }
     import_mark_seen(file_path)
@@ -651,8 +683,17 @@ fn import_process(uint64 file_path) {
     }
     uint64 size = file_size(fd)
     uint64 tmp = alloc(size + 1)
-    file_read(fd, tmp, size)
+    uint64 got = read_exact(fd, tmp, size)
     file_close(fd)
+    if got != size {
+        uint64 sre = "error: short read on '"
+        write(2, sre, str_len(sre))
+        write(2, file_path, str_len(file_path))
+        sre = "': the file ended before the size it reported, so this module is truncated. Refusing rather than compiling source that was never written\n"
+        write(2, sre, str_len(sre))
+        import_failed = 1
+        return
+    }
 
     // Scan for import lines at the beginning
     uint64 pos = 0
@@ -7864,8 +7905,16 @@ fn fatimg_read_slice(uint64 path) -> uint64 {
         exit(1)
     }
     uint64 buf = alloc(sz)
-    file_read(fd, buf, sz)
+    uint64 sgot = read_exact(fd, buf, sz)
     file_close(fd)
+    if sgot != sz {
+        uint64 ss = "error: --slice=: short read on '"
+        write(2, ss, str_len(ss))
+        write(2, path, str_len(path))
+        ss = "': the file ended before the size it reported, so the slice is truncated and would be composed into the image as a boot path that enters half a program\n"
+        write(2, ss, str_len(ss))
+        exit(1)
+    }
     fatimg_read_len = sz
     return buf
 }

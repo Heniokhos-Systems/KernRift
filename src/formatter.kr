@@ -12,8 +12,13 @@ fn fmt_file(uint64 path) {
     }
     uint64 size = file_size(fd)
     uint64 src = alloc(size + 1)
-    file_read(fd, src, size)
+    uint64 fgot = read_exact(fd, src, size)
     file_close(fd)
+    if fgot != size {
+        uint64 fe = "error: short read: the file ended before the size it reported; refusing to format a truncated file\n"
+        write(2, fe, str_len(fe))
+        exit(1)
+    }
 
     // Null-terminate
     uint64 ep = src + size

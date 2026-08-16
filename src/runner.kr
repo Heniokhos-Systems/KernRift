@@ -332,8 +332,13 @@ fn main() {
     uint64 fd = file_open(krbo_path, 0)
     uint64 fsize = file_size(fd)
     uint64 data = alloc(fsize)
-    file_read(fd, data, fsize)
+    uint64 rgot = read_exact(fd, data, fsize)
     file_close(fd)
+    if rgot != fsize {
+        uint64 re = "error: short read: the file ended before the size it reported; refusing to run a truncated image\n"
+        write(2, re, str_len(re))
+        exit(1)
+    }
 
     uint32 m0 = 0
     unsafe { *(data as uint32) -> m0 }
