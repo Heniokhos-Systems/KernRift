@@ -8842,6 +8842,10 @@ PYEOF
         echo "FAIL: ir_reference_citations (moved: $cite_bad)"
         echo "  fix the citations in docs/IR_REFERENCE.md, then:"
         echo "    python3 scripts/gen-ir-reference-citations.py"
+        echo "  BUT READ THIS FIRST: the manifest may hold the CORRECT line and"
+        echo "  the DOC the stale one, in which case regenerating destroys the"
+        echo "  only record of where the code is. Check which side points at"
+        echo "  something worth citing before running the generator."
     fi
 fi
 
@@ -19254,6 +19258,43 @@ if [ "$VER_RUNNER_COUNT" = "1" ] && [ "$VER_RUNNER_SET" = "$VER_CHANGELOG" ]; th
 else
     FAIL=$((FAIL + 1))
     echo "FAIL: version_runner_matches_changelog (kr strings: $(printf '%s' "$VER_RUNNER_SET" | tr '\n' ' '); CHANGELOG: $VER_CHANGELOG)"
+fi
+
+# --- every citation in the doc must be present in the manifest --------------
+#
+# The row above checks manifest -> source: it catches a recorded line whose
+# CONTENT moved. It never looks at the doc, so it cannot see the doc and the
+# manifest naming DIFFERENT lines -- and that is exactly what happened.
+# Measured 2026-08-17: 72 citations had drifted, uniformly -8 across ir.kr and
+# +8/+72/+94 in three regions of codegen.kr, while every manifest entry still
+# resolved and this suite stayed green. The doc claimed `tok_text_eq()` was at
+# codegen.kr:1160, which is `str_len = str_len + 1`.
+#
+# One-directional on purpose: a manifest entry the doc no longer cites is
+# harmless (there is one, src/ir.kr:13494), but a doc citation with no manifest
+# entry means the two have diverged and nothing is checking that citation.
+TOTAL=$((TOTAL + 1))
+CITE_DOC="$DIR/../docs/IR_REFERENCE.md"
+if [ ! -f "$CITE_DOC" ] || [ ! -f "$CITE_MANIFEST" ]; then
+    PASS=$((PASS + 1)); echo "  ir_reference_doc_agrees: SKIP (doc or manifest missing)"
+else
+    doc_orphan=$(python3 - "$CITE_DOC" "$CITE_MANIFEST" <<'PYEOF'
+import re, sys
+doc, manifest = sys.argv[1], sys.argv[2]
+man = {l.split()[0] for l in open(manifest) if l.strip() and not l.startswith("#")}
+cites = {f"src/{f}:{n}" for f, n in re.findall(r"src/([a-z_0-9]+\.kr):(\d+)", open(doc).read())}
+bad = sorted(cites - man)
+print(" ".join(bad[:6]) + (f" (+{len(bad)-6} more)" if len(bad) > 6 else ""))
+PYEOF
+)
+    if [ -z "$doc_orphan" ]; then
+        PASS=$((PASS + 1)); echo "  ir_reference_doc_agrees: PASS (every doc citation is tracked by the manifest)"
+    else
+        FAIL=$((FAIL + 1))
+        echo "FAIL: ir_reference_doc_agrees (doc cites lines the manifest does not track: $doc_orphan)"
+        echo "  the doc and the manifest have diverged -- decide WHICH is right before"
+        echo "  regenerating; the manifest may be the only record of the real line."
+    fi
 fi
 
 # --- packaging/aur/.SRCINFO must be in sync with its PKGBUILD ---------------
