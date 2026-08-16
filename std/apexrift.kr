@@ -1,0 +1,192 @@
+// KernRift Standard Library — ApexRift as a target
+//
+//     import "std/apexrift.kr"
+//     krc --arch=x86_64 --target=none --emit=arx prog.kr -o prog.arx
+//
+// One import and a bare-metal program becomes an ApexRift program: `print`,
+// `alloc`, `file_open` and the rest stop being refused and start trapping into
+// the kernel through `int 0x80`.
+//
+// WHY THIS EXISTS AS A LIBRARY AND NOT A `--target=`. ApexRift is an operating
+// system this compiler happens to be able to target, not a property of the
+// compiler. The whole difference is which twelve numbers the builtins lower to,
+// and `@builtin_override` already expresses that -- exactly as std/uart_16550.kr
+// expresses "this board's console is COM1". A new `target_os` value would mean
+// touching the 124 places codegen branches on one, to encode a fact that fits
+// in this file.
+//
+// WHAT WAS ALREADY FINE, measured rather than assumed: `print`, `println`,
+// `print_str` and `write` work on bare metal as soon as ANY `write` provider is
+// imported -- they are built on it. The builtins that genuinely refuse are the
+// ones needing something only a machine has: a heap (`alloc`), a process model
+// (`exit`), a filesystem (`file_*`), a clock (`time_ns`). Refusing those is
+// correct; a silent default would be a wrong answer rather than a missing one.
+// This file supplies them, so the refusals stop being refusals.
+//
+// WHAT THIS FILE DELIBERATELY DOES NOT DO: argv. Setting up `cli_argc`/
+// `cli_argv` means ASSIGNING statics the PROGRAM declares, and a static must be
+// declared before use while an import must precede every declaration -- so the
+// argv half can only ever be concatenated AFTER the program, never imported
+// before it. That half stays in ApexRift's tools/krc_shim.kr, which is what krc
+// and kr use. A program that does not need argv needs only this import, and its
+// entry is its own `main`.
+
+// The twelve. Kernel side: apex-kr/syscall.kr's sys_dispatch, which decodes
+// these as literals 1-12. Number 0 is reserved and refused.
+static uint64 SYS_CON_WRITE = 1
+static uint64 SYS_F_OPEN    = 2
+static uint64 SYS_F_READ    = 3
+static uint64 SYS_F_WRITE   = 4
+static uint64 SYS_F_CLOSE   = 5
+static uint64 SYS_F_SIZE    = 6
+static uint64 SYS_MEM_ALLOC = 7
+static uint64 SYS_MEM_FREE  = 8
+static uint64 SYS_PROC_EXIT = 9
+static uint64 SYS_CMDLINE   = 10
+static uint64 SYS_TIME_NS   = 11
+static uint64 SYS_PROGNAME  = 12
+
+// `int 0x80`, NOT a services table of kernel function pointers. A ring-3
+// program can neither call into ring 0 nor read a table living in kernel
+// memory; a trap number lets the program name an OPERATION instead of an
+// address. Argument 4 will go in r10 rather than rcx, matching the SYSCALL ABI,
+// so moving to `syscall` later is an entry-stub change and not a rewrite of
+// every call site. Nothing needs four arguments yet, so only these forms exist.
+fn sys0(uint64 n) -> uint64 {
+    uint64 r = 0
+    asm { "int 0x80" } in(n -> rax) out(rax -> r)
+    return r
+}
+fn sys1(uint64 n, uint64 a1) -> uint64 {
+    uint64 r = 0
+    asm { "int 0x80" } in(n -> rax, a1 -> rdi) out(rax -> r)
+    return r
+}
+fn sys2(uint64 n, uint64 a1, uint64 a2) -> uint64 {
+    uint64 r = 0
+    asm { "int 0x80" } in(n -> rax, a1 -> rdi, a2 -> rsi) out(rax -> r)
+    return r
+}
+fn sys3(uint64 n, uint64 a1, uint64 a2, uint64 a3) -> uint64 {
+    uint64 r = 0
+    asm { "int 0x80" } in(n -> rax, a1 -> rdi, a2 -> rsi, a3 -> rdx) out(rax -> r)
+    return r
+}
+
+// The console provider. `print`, `println`, `print_str` and `println_str` all
+// reach the kernel through this one function.
+@builtin_override
+fn write(uint64 _fd, uint64 buf, uint64 len) -> uint64 {
+    return sys2(SYS_CON_WRITE, buf, len)
+}
+
+@builtin_override
+fn file_open(uint64 path, uint64 mode) -> uint64 {
+    return sys2(SYS_F_OPEN, path, mode)
+}
+@builtin_override
+fn file_read(uint64 h, uint64 buf, uint64 len) -> uint64 {
+    return sys3(SYS_F_READ, h, buf, len)
+}
+@builtin_override
+fn file_write(uint64 h, uint64 buf, uint64 len) -> uint64 {
+    return sys3(SYS_F_WRITE, h, buf, len)
+}
+@builtin_override
+fn file_close(uint64 h) -> uint64 {
+    return sys1(SYS_F_CLOSE, h)
+}
+@builtin_override
+fn file_size(uint64 h) -> uint64 {
+    return sys1(SYS_F_SIZE, h)
+}
+
+// Print v as hex, a digit at a time, straight out of the digit table.
+//
+// No scratch buffer: this runs only after an allocation has just been REFUSED,
+// so it must not itself need writable memory. A string literal is already an
+// address, so `HEX + d` points at the character and con_write takes it with
+// length 1.
+//
+// The table is a LOCAL, not a static. `static uint64 X = "..."` does not store
+// the literal's address in this compiler -- the same limitation that stops
+// static initialisers const-folding -- so a static reads back as 0 and prints
+// nothing. Measured: an earlier version of this printed empty digits.
+fn apx_put_hex(uint64 v) {
+    uint64 HEX = "0123456789abcdef"
+    if v == 0 { sys2(SYS_CON_WRITE, HEX, 1); return }
+    uint64 sh = 60
+    uint64 seen = 0
+    while sh < 64 {
+        uint64 d = (v >> sh) & 15
+        if d != 0 { seen = 1 }
+        if seen != 0 { sys2(SYS_CON_WRITE, HEX + d, 1) }
+        if sh == 0 { sh = 64 } else { sh = sh - 4 }
+    }
+}
+
+// FAILS LOUDLY, and that is not pedantry. Every KernRift program is compiled
+// against an `alloc` that CANNOT fail -- on Linux it lowers to a lazy mmap --
+// so nothing checks the result. Returning 0 here is a trap, not a polite
+// refusal: krc reserved a large register-allocator matrix and memset it
+// immediately, which meant a memset from address ZERO across the page tables,
+// with no exception possible because the structures needed to deliver one were
+// exactly what got destroyed.
+@builtin_override
+fn alloc(uint64 n) -> uint64 {
+    // A zero-byte request is NOT an error. The kernel returns 0 for n == 0 by
+    // contract, and on Linux the same call hands back a valid pointer, so
+    // callers make zero-size allocations without checking -- and the loud
+    // failure below then killed a healthy program with a bogus "out of memory".
+    // Ask for one byte: the caller gets a real, distinct, freeable pointer.
+    if n == 0 { n = 1 }
+    uint64 p = sys1(SYS_MEM_ALLOC, n)
+    if p == 0 {
+        sys2(SYS_CON_WRITE, "out of memory, wanted 0x", 24)
+        apx_put_hex(n)
+        sys2(SYS_CON_WRITE, " bytes\n", 7)
+        sys1(SYS_PROC_EXIT, 137)
+    }
+    return p
+}
+
+@builtin_override
+fn dealloc(uint64 p) {
+    sys1(SYS_MEM_FREE, p)
+}
+
+@builtin_override
+fn exit(uint64 code) {
+    sys1(SYS_PROC_EXIT, code)
+}
+
+@builtin_override
+fn time_ns() -> uint64 {
+    return sys0(SYS_TIME_NS)
+}
+
+// The program's own name, as the kernel launched it. argv[0] on a hosted
+// system; here it is the only way a shared binary can introduce itself
+// correctly rather than hardcoding a name.
+fn apx_progname() -> uint64 {
+    return sys0(SYS_PROGNAME)
+}
+
+// The command line as one string, un-split. Splitting it into argv means
+// writing NULs into it and assigning the program's own `cli_argv`, which an
+// import cannot do -- see the note at the top of this file.
+fn apx_cmdline() -> uint64 {
+    return sys0(SYS_CMDLINE)
+}
+
+// REFUSES, with a negative errno rather than 0.
+//
+// Raw syscalls go around the file_* builtins entirely -- krc uses one to mkdir
+// its `.kernrift` cache -- and there is no Linux kernel here to trap into. 0 is
+// the tempting lie: to a syscall caller 0 means SUCCESS, so the program would
+// believe a directory exists that does not. An error is a result its existing
+// failure path already handles.
+@builtin_override
+fn syscall_raw(uint64 _nr, uint64 _a0, uint64 _a1, uint64 _a2, uint64 _a3, uint64 _a4, uint64 _a5) -> uint64 {
+    return 0xFFFFFFFFFFFFFFFF
+}
