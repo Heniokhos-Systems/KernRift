@@ -4,6 +4,31 @@
 
 // BCJ filters are linked via cat (see Makefile/CI)
 
+// A LOCAL COPY of main.kr's read_exact, and it has to be one. The runner is a
+// SEPARATE program -- `cat src/runner.kr src/bcj.kr` (Makefile) -- and
+// src/runner.kr is not in SRCS, so nothing here can see src/main.kr. The
+// definition cannot be hoisted into bcj.kr either: that file IS in SRCS, so a
+// definition there would collide with main.kr's in the compiler build. The two
+// copies must be kept in sync by hand; `make test` catches the missing one,
+// because build/kr-bin is a prerequisite of it.
+//
+// A LOOP, not a single call plus a comparison. read(2) is explicitly permitted
+// to return less than asked for without anything being wrong, so treating one
+// short return as an error would break legitimate reads. Only a read that
+// returns 0 before `want` is reached is a truncation.
+fn read_exact(uint64 fd, uint64 buf, uint64 want) -> uint64 {
+    uint64 got = 0
+    while got < want {
+        uint64 n = file_read(fd, buf + got, want - got)
+        if n == 0 { return got }
+        // A provider claiming to have written more than there was room for is
+        // lying; believing it would advance `got` past the buffer.
+        if n > want - got { return got }
+        got = got + n
+    }
+    return got
+}
+
 fn str_len_r(uint64 s) -> uint64 {
     uint64 i = 0
     uint64 p = s + i
