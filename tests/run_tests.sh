@@ -20063,6 +20063,88 @@ else
 fi
 rm -f "$CP_SRC" "$CP6_SRC" "$CP_BIN"
 
+# --- call_ptr_f64: the f64 return path, which had NO coverage at all ---------
+#
+# `grep -c call_ptr_f64` over this suite was 0, and the builtin appears in no
+# example, no doc and no stdlib module, and the compiler never calls it. That
+# is exactly how it stayed broken: on x86_64 it returned garbage at EVERY arity
+# while arm64 was correct, because the x86 emitter pulled the result out of
+# xmm0 on the assumption that a callee returns f64 there. It does not -- this
+# tree returns an f64 as its bit pattern in the integer return register, which
+# is what IR_CALL and the arm64 handler both read.
+#
+# THE ORACLE IS direct == indirect, so no expected float text is hand-written
+# and the row cannot rot against a formatting change. Exit code is a bitmask of
+# which comparison failed, so a failure says WHICH arity broke.
+CPF_SRC="/tmp/krc_callptrf64_$$.kr"
+CPF_BIN="/tmp/krc_callptrf64_$$.bin"
+cat > "$CPF_SRC" <<'KREOF'
+fn c0() -> f64 { return 7.5 }
+fn id1(f64 a) -> f64 { return a }
+fn sum2(f64 a, f64 b) -> f64 { return a + b }
+fn mix(uint64 n, f64 a, f64 b) -> f64 {
+    f64 nn = int_to_f64(n)
+    return nn + a + b
+}
+fn main() {
+    uint64 bad = 0
+    f64 d0 = c0()
+    f64 i0 = call_ptr_f64(fn_addr("c0"))
+    if d0 != i0 { bad = bad + 1 }
+    f64 d1 = id1(3.25)
+    f64 i1 = call_ptr_f64(fn_addr("id1"), 3.25)
+    if d1 != i1 { bad = bad + 2 }
+    f64 d2 = sum2(1.5, 2.25)
+    f64 i2 = call_ptr_f64(fn_addr("sum2"), 1.5, 2.25)
+    if d2 != i2 { bad = bad + 4 }
+    f64 d3 = mix(10, 1.5, 2.25)
+    f64 i3 = call_ptr_f64(fn_addr("mix"), 10, 1.5, 2.25)
+    if d3 != i3 { bad = bad + 8 }
+    exit(bad)
+}
+KREOF
+TOTAL=$((TOTAL + 1))
+rm -f "$CPF_BIN"
+if $KRC --arch=$RUN_ARCH "$CPF_SRC" -o "$CPF_BIN" >/dev/null 2>&1 && [ -s "$CPF_BIN" ]; then
+    chmod +x "$CPF_BIN"; "$CPF_BIN"; CPF_RUN=$?
+    if [ "$CPF_RUN" = "0" ]; then
+        PASS=$((PASS + 1)); echo "  call_ptr_f64_matches_direct: PASS (0/1/2 args and mixed int+f64, native $RUN_ARCH)"
+    else
+        echo "FAIL: call_ptr_f64_matches_direct (bitmask $CPF_RUN: 1=0-arg 2=1-arg 4=2-arg 8=mixed)"
+        FAIL=$((FAIL + 1))
+    fi
+else
+    echo "FAIL: call_ptr_f64_matches_direct (should compile to a non-empty artifact)"; FAIL=$((FAIL + 1))
+fi
+# A positive control on the ORACLE itself: a deliberately wrong comparison must
+# fail, otherwise `direct == indirect` could be passing vacuously on f64s that
+# never compare unequal.
+TOTAL=$((TOTAL + 1))
+CPFN_SRC="/tmp/krc_callptrf64neg_$$.kr"
+cat > "$CPFN_SRC" <<'KREOF'
+fn c0() -> f64 { return 7.5 }
+fn main() {
+    f64 a = c0()
+    f64 b = 7.25
+    uint64 bad = 0
+    if a != b { bad = 1 }
+    exit(bad)
+}
+KREOF
+rm -f "$CPF_BIN"
+if $KRC --arch=$RUN_ARCH "$CPFN_SRC" -o "$CPF_BIN" >/dev/null 2>&1; then
+    chmod +x "$CPF_BIN"; "$CPF_BIN"; CPFN_RUN=$?
+    if [ "$CPFN_RUN" = "1" ]; then
+        PASS=$((PASS + 1)); echo "  call_ptr_f64_oracle_can_fail: PASS (unequal f64s do compare unequal)"
+    else
+        echo "FAIL: call_ptr_f64_oracle_can_fail (7.5 != 7.25 returned $CPFN_RUN, want 1 -- the oracle above proves nothing)"
+        FAIL=$((FAIL + 1))
+    fi
+else
+    echo "FAIL: call_ptr_f64_oracle_can_fail (control should compile)"; FAIL=$((FAIL + 1))
+fi
+rm -f "$CPF_SRC" "$CPFN_SRC" "$CPF_BIN"
+
 echo ""
 echo "--- float literal return kinds ---"
 # tc_expr_kind reported EVERY FloatLit as f64, ignoring the `f` suffix, so the

@@ -3314,13 +3314,21 @@ fn ir_lower_expr(uint64 node) -> uint64 {
                 f64_ret_flag = 1
                 ir_vreg_fkind_set(dest, 1)
             }
-            // imm packs BOTH the f64-return flag (bit 0) and the argument
-            // count (bits 1+). It cannot go in src2: ir_compute_use_count and
-            // ir_compute_liveness read src2 as a vreg for op 87 -- it is not in
-            // their exclusion list -- so a count there would be miscounted as a
-            // use of whatever vreg has that number. imm is only read as a vreg
-            // for ops 72/76/83/93/98/148, so it is free here.
-            ir_emit(IR_CALL_IND, dest, ptr_v, 0, f64_ret_flag | (cp_count << 1), ir_current_bb)
+            // imm carries the ARGUMENT COUNT. It cannot go in src2:
+            // ir_compute_use_count and ir_compute_liveness read src2 as a vreg
+            // for op 87 -- it is not in their exclusion list -- so a count there
+            // would be miscounted as a use of whatever vreg has that number.
+            // imm is only read as a vreg for ops 72/76/83/93/98/148.
+            //
+            // NO f64 FLAG. It used to ride in bit 0 so the x86 emitter could
+            // pull the result out of xmm0, and that was simply the wrong
+            // convention: this tree returns an f64 as its BIT PATTERN in the
+            // integer return register, which is what IR_CALL (op 50) reads from
+            // rax and what the arm64 handler reads from x0. `is_call_ptr_f64`
+            // still matters -- it tags the dest vreg via ir_vreg_fkind_set just
+            // below, which is what makes downstream BinOp lowering pick
+            // FMUL/FADD -- but the emitter needs nothing from it.
+            ir_emit(IR_CALL_IND, dest, ptr_v, 0, cp_count, ir_current_bb)
             return dest
         }
 
@@ -10396,12 +10404,9 @@ fn ir_emit_x86_insn(uint64 ii) {
         // xmm0 bits into the dest GPR via `movq r64, xmm0`
         // (66 REX.W 0F 7E /r) so BinOp/StoreF64 downstream see the
         // right bit pattern. imm == 0 is the integer-return path.
-        // imm packs the f64-return flag in bit 0 and the ARGUMENT COUNT in
-        // bits 1+. It used to hold the flag alone and be tested with
-        // `imm == 1`; that test is now wrong by construction, because any
-        // call with arguments sets higher bits (a 2-arg f64 call gives 5).
-        uint64 ci_f64 = imm & 1
-        uint64 ci_argc = imm >> 1
+        // imm is the argument count. There is no f64 flag: an f64 return
+        // arrives as a bit pattern in rax, exactly like an integer one.
+        uint64 ci_argc = imm
         uint64 ci_stack = ir_x86_emit_call_stack_args(ci_argc)
         if ci_stack == 0 {
             // Unchanged six-or-fewer path, byte for byte.
@@ -10448,22 +10453,15 @@ fn ir_emit_x86_insn(uint64 ii) {
         // Unread result: emit no capture at all (see IR_CALL above). Checked
         // before the f64 movq, which would otherwise write dst_r for nothing.
         if ir_use_count_get(dest_v) == 0 { return }
-        uint64 result_reg = 0   // rax for int return
-        if ci_f64 == 1 {
-            // movq dst_r (or rax if spilled), xmm0
-            uint64 target = dst_r
-            if target == 0xFFFFFFFF { target = 0 }
-            uint8 mq_rex = 0x48
-            if target >= 8 { mq_rex = mq_rex | 0x01 }
-            emit_byte(0x66); emit_byte(mq_rex)
-            emit_byte(0x0F); emit_byte(0x7E)
-            uint8 mq_mod = 0xC0 | ((0 & 7) << 3) | (target & 7)
-            emit_byte(mq_mod)
-            result_reg = target
-        }
-        // For int return, the result is already in rax. For f64 we
-        // just moved xmm0 → (dst_r or rax). Either way, if the dest
-        // vreg got a physical reg and it's not the result_reg, copy.
+        // The result is in rax whether it is an integer or an f64 bit
+        // pattern. This block used to emit `movq dst, xmm0` for the f64 case,
+        // on the assumption that a callee returns f64 in xmm0. IT DOES NOT --
+        // measured: call_ptr_f64 returned garbage at every arity on x86_64
+        // while arm64 was correct, and arm64 is correct precisely because its
+        // handler reads the integer return register too. IR_CALL (op 50) reads
+        // rax for both cases as well, so this now matches both of them.
+        uint64 result_reg = 0   // rax, for an integer OR an f64 bit pattern
+        // If the dest vreg got a physical reg and it is not result_reg, copy.
         if dst_r != 0xFFFFFFFF && dst_r != result_reg {
             ir_emit_mov_r64_r64(dst_r, result_reg)
         }
