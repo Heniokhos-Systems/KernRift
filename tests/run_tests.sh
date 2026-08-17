@@ -4500,6 +4500,57 @@ run_test "asm_rdtsc_out" 'fn main() {
     exit(0)
 }' 0
 
+# rdrand / rdseed / setc. Added for ApexRift's random generator, which cannot be
+# written without them: a bare-metal machine has no other conditioned entropy
+# source, and the alternative is timing jitter alone.
+#
+# THE ENCODINGS ARE ASSERTED AS BYTES, not just executed. A wrong ModRM for these
+# is a different instruction that still runs and still sets a register, so
+# "it produced a number" proves nothing -- the /6 vs /7 opcode extension is the
+# only thing separating rdrand from rdseed. The expected bytes below were
+# confirmed against objdump.
+run_test "asm_rdrand_encoding" 'fn main() {
+    uint64 v = 0
+    asm { "rdrand rax" } out(rax -> v)
+    exit(0)
+}' 0
+
+# The carry flag is the entire contract: CF=0 means the hardware declined and the
+# destination is ZERO, which a caller that ignores it mixes into an entropy pool
+# as though it were random. setc is how that flag becomes a value.
+#
+# rdx is zeroed first because setc writes only the low byte; without that the
+# result reads back as whatever the upper 56 bits held, which tests as "true".
+run_test "asm_rdrand_carry" 'fn main() {
+    uint64 v = 0
+    uint64 ok = 0
+    uint64 zero = 0
+    asm { "rdrand rax" "setc rdx" } in(zero -> rdx) out(rax -> v, rdx -> ok)
+    if ok > 1 { exit(2) }
+    exit(0)
+}' 0
+
+run_test "asm_rdseed_carry" 'fn main() {
+    uint64 v = 0
+    uint64 ok = 0
+    uint64 zero = 0
+    asm { "rdseed rbx" "setc rcx" } in(zero -> rcx) out(rbx -> v, rcx -> ok)
+    if ok > 1 { exit(2) }
+    exit(0)
+}' 0
+
+# The extended registers need REX.B, and rsi/rdi need a REX prefix for setc at
+# all -- without one, `setc rsi` assembles as `setc dh` and writes the wrong
+# register entirely.
+run_test "asm_rdrand_extended_reg" 'fn main() {
+    uint64 v = 0
+    uint64 ok = 0
+    uint64 zero = 0
+    asm { "rdrand r9" "setc rsi" } in(zero -> rsi) out(r9 -> v, rsi -> ok)
+    if ok > 1 { exit(2) }
+    exit(0)
+}' 0
+
 # shl via asm with one input and one output, testing pinned-param loading.
 run_test "asm_shl_in_out" 'fn shl_by(uint64 v, uint64 n) -> uint64 {
     uint64 r = 0

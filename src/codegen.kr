@@ -10356,6 +10356,58 @@ fn asm_emit_x86(uint64 str_tok) {
             }
         }
     }
+    // `rdrand <reg>` / `rdseed <reg>` -- REX.W + 0F C7 /6 and /7, r64.
+    //
+    // BOTH SET THE CARRY FLAG rather than always producing a value: CF=1 means
+    // the destination holds a real result, CF=0 means the hardware declined and
+    // the destination is ZERO. A caller that ignores CF therefore mixes zeroes
+    // into an entropy pool believing they are random, and nothing observable goes
+    // wrong -- which is why these are exposed as instructions rather than wrapped
+    // in a helper that hides the flag.
+    //
+    // They exist here because ApexRift's random generator cannot be written
+    // without them: a bare-metal machine has no other conditioned entropy source,
+    // and the alternative is timing jitter alone.
+    if asm_match(sptr, 0, "rdrand ", 7) != 0 && slen > 7 {
+        uint64 rr = asm_x86_reg(sptr, 7, slen - 7)
+        if rr != 0xFFFF {
+            if rr >= 8 { emit_byte(0x49) } else { emit_byte(0x48) }
+            emit_byte(0x0F); emit_byte(0xC7)
+            emit_byte(0xC0 | (6 << 3) | (rr & 7))
+            return
+        }
+    }
+    if asm_match(sptr, 0, "rdseed ", 7) != 0 && slen > 7 {
+        uint64 rs = asm_x86_reg(sptr, 7, slen - 7)
+        if rs != 0xFFFF {
+            if rs >= 8 { emit_byte(0x49) } else { emit_byte(0x48) }
+            emit_byte(0x0F); emit_byte(0xC7)
+            emit_byte(0xC0 | (7 << 3) | (rs & 7))
+            return
+        }
+    }
+    // `setc <reg>` -- 0F 92, SETcc r/m8, writing the carry flag into the LOW BYTE
+    // of the named 64-bit register. The register name is the 64-bit one because
+    // this assembler has no 8-bit register table, and naming `rdx` while writing
+    // `dl` is less surprising than inventing one.
+    //
+    // ONLY THE LOW BYTE IS WRITTEN. The other 56 bits keep whatever they held, so
+    // a caller that wants a clean 0 or 1 must zero the register first -- which is
+    // what `in(_zero -> rdx)` is for. This is stated because a flag read that
+    // returns 0x00000000DEADBE01 tests as "true" and looks like it worked.
+    //
+    // Encoding note: for rsp/rbp/rsi/rdi a REX prefix is required to name spl/bpl/
+    // sil/dil rather than ah/ch/dh/bh, so one is emitted for reg >= 4 even when no
+    // REX bit is otherwise needed.
+    if asm_match(sptr, 0, "setc ", 5) != 0 && slen > 5 {
+        uint64 sc = asm_x86_reg(sptr, 5, slen - 5)
+        if sc != 0xFFFF {
+            if sc >= 8 { emit_byte(0x41) } else { if sc >= 4 { emit_byte(0x40) } }
+            emit_byte(0x0F); emit_byte(0x92)
+            emit_byte(0xC0 | (sc & 7))
+            return
+        }
+    }
     if asm_match(sptr, 0, "cpuid", 5) != 0 && slen == 5 { emit_byte(0x0F); emit_byte(0xA2); return }
     if asm_match(sptr, 0, "rdtsc", 5) != 0 && slen == 5 { emit_byte(0x0F); emit_byte(0x31); return }
     if asm_match(sptr, 0, "rdmsr", 5) != 0 && slen == 5 { emit_byte(0x0F); emit_byte(0x32); return }
