@@ -18801,8 +18801,14 @@ rm -f "$ESP_H_BIN" "$ESP_H_PAY" "$ESP_H_CODE" "$ESP_H_DIS"
 #   strbuf_grow: "error: str_buf overflow (max 65536)"
 #   fixup_grow:  "error: fixup_table overflow (max 32768)"  (via --legacy;
 #                the IR path hits the separate ir_insn cap first)
+#   statics_grow: "error: static_table overflow (max 1024)"
 # With growable buffers all three must compile AND the binaries must run
 # correctly (growth that corrupts data would show up as a wrong exit code).
+#
+# static_table is CAPPED rather than growable, so its cases come in a pair: one
+# just under the cap that must work, and two just over it that must be refused
+# with the documented message. The accepting side alone would pass with no guard
+# at all.
 echo "--- growable buffer tests ---"
 GROW_DIR=$(mktemp -d /tmp/krc_grow_XXXXXX)
 
@@ -18906,6 +18912,80 @@ else
     echo "FAIL: grow_ir_insn_66k (expected exit 1, got $GROW_EC2)"
 fi
 
+# 5) static_table and its five parallel tables: 2040 named statics, just under
+#    the cap of 2048 (old cap: 1024). Every one is read back, which is the point
+#    -- "it compiled" is a weak assertion here. alloc() is a page-rounded mmap,
+#    so a table sized for 1024 entries still has slack for a few hundred more and
+#    silently works; only near the real ceiling does a short table run off its
+#    mapping. A test at ~1400 statics passes against five of six deliberately
+#    shortened tables, which is why this one sits at 2040 and not lower.
+#
+#    Arrays are declared FIRST so they hold the low static numbers and the
+#    scalars the high ones, exercising both static_declare_array() and
+#    static_declare() past the old cap, and both the size/elem-size tables and
+#    the init-value table at indices the old build could not reach.
+#
+#    exit 0 = every static correct; 1 = an array element read back wrong;
+#    2 = the initialised scalars did not sum to 519690 (== 1019*1020/2).
+TOTAL=$((TOTAL + 1))
+{ for gi in $(seq 0 1019); do printf 'static u8[4] A%d\n' "$gi"; done
+  for gi in $(seq 0 1019); do printf 'static uint64 S%d = %d\n' "$gi" "$gi"; done
+  printf 'fn main() {\n'
+  for gi in $(seq 0 1019); do printf '    A%d[3] = %d\n' "$gi" "$((gi % 251 + 1))"; done
+  printf '    uint64 bad = 0\n'
+  for gi in $(seq 0 1019); do printf '    if A%d[3] != %d { bad = bad + 1 }\n' "$gi" "$((gi % 251 + 1))"; done
+  printf '    uint64 acc = 0\n'
+  for gi in $(seq 0 1019); do printf '    acc = acc + S%d\n' "$gi"; done
+  printf '    if bad != 0 { exit(1) }\n    if acc != 519690 { exit(2) }\n    exit(0)\n}\n'
+} > "$GROW_DIR/statics_grow.kr"
+GROW_EC3="compile-failed"
+if $KRC $KRC_FLAGS "$GROW_DIR/statics_grow.kr" -o "$GROW_DIR/statics_grow" >/dev/null 2>&1; then
+    chmod +x "$GROW_DIR/statics_grow"
+    "$GROW_DIR/statics_grow" >/dev/null 2>&1
+    GROW_EC3=$?
+fi
+if [ "$GROW_EC3" = 0 ]; then
+    PASS=$((PASS + 1))
+    echo "  grow_static_table_2040: PASS (2040 statics read back, old cap 1024)"
+else
+    FAIL=$((FAIL + 1))
+    echo "FAIL: grow_static_table_2040 (expected exit 0, got $GROW_EC3)"
+fi
+
+# 6) The other side of the cap: 2100 statics must be REFUSED, and refused with
+#    the documented message rather than by crashing or by miscompiling. A cap
+#    test that only checks the accepting side would pass just as well with no
+#    guard at all, and the failure mode of a missing guard is a wild write into
+#    whatever mmap handed back next.
+TOTAL=$((TOTAL + 1))
+{ for gi in $(seq 0 2099); do printf 'static uint64 T%d = %d\n' "$gi" "$gi"; done
+  printf 'fn main() {\n    exit(T0)\n}\n'
+} > "$GROW_DIR/statics_over.kr"
+GROW_OVER=$($KRC $KRC_FLAGS "$GROW_DIR/statics_over.kr" -o "$GROW_DIR/statics_over" 2>&1)
+if echo "$GROW_OVER" | grep -qF "static_table overflow (max 2048)"; then
+    PASS=$((PASS + 1))
+    echo "  grow_static_table_over_cap: PASS (2100 statics refused with the documented message)"
+else
+    FAIL=$((FAIL + 1))
+    echo "FAIL: grow_static_table_over_cap (expected 'static_table overflow (max 2048)', got '$(echo "$GROW_OVER" | tail -1)')"
+fi
+
+# 7) The SAME cap from the array side. static_declare_array() carries its own
+#    copy of the guard, and case 6 declares only scalars, so it cannot reach it:
+#    disabling the array guard alone leaves cases 5 and 6 both passing. This case
+#    is the only one that fails, which is the whole reason it exists.
+TOTAL=$((TOTAL + 1))
+{ for gi in $(seq 0 2099); do printf 'static u8[4] B%d\n' "$gi"; done
+  printf 'fn main() {\n    B0[0] = 1\n    exit(B0[0] - 1)\n}\n'
+} > "$GROW_DIR/arrays_over.kr"
+GROW_AOVER=$($KRC $KRC_FLAGS "$GROW_DIR/arrays_over.kr" -o "$GROW_DIR/arrays_over" 2>&1)
+if echo "$GROW_AOVER" | grep -qF "static_table overflow (max 2048)"; then
+    PASS=$((PASS + 1))
+    echo "  grow_static_array_over_cap: PASS (2100 array statics refused)"
+else
+    FAIL=$((FAIL + 1))
+    echo "FAIL: grow_static_array_over_cap (expected 'static_table overflow (max 2048)', got '$(echo "$GROW_AOVER" | tail -1)')"
+fi
 
 rm -rf "$GROW_DIR"
 

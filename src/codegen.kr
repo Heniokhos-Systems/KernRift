@@ -167,8 +167,21 @@ static uint64 fnaddr_fixup_table = 0
 static uint64 fnaddr_fixup_count = 0
 static uint64 fnaddr_fixup_cap = 0
 
+// Capacity of the static tables. ONE constant for all six of them and for both
+// overflow guards, which is not tidiness: the tables are parallel, indexed by the
+// same static number, and a short one is almost undetectable. alloc() is a
+// page-rounded mmap, so a table sized for 1024 entries still has slack for a few
+// hundred more and quietly works; past that it runs into whatever mmap returned
+// next. Sizing them from a single name is what makes "raise one, forget the
+// others" impossible to write rather than merely warned against.
+//
+// The two overflow messages still spell the number out, because write() takes an
+// explicit byte count and there is nothing to interpolate into: changing this
+// constant means editing those two strings and their lengths as well.
+static uint64 STATIC_TABLE_CAP = 2048
+
 // Static variable table: maps name token → data offset in data section
-// [name_tok_idx(4), data_offset(4)] × 256
+// [name_tok_idx(4), data_offset(4)] × STATIC_TABLE_CAP
 static uint64 static_table = 0
 static uint64 static_count = 0
 static uint64 static_data_size = 0
@@ -486,12 +499,22 @@ fn codegen_init(uint64 capacity, uint64 source, uint64 tokens) {
     match_end_fixup_count = 0
     enum_table = alloc(512 * 16)
     enum_count = 0
-    static_table = alloc(1024 * 8)
-    static_array_sizes = alloc(1024 * 4)
-    static_init_values = alloc(1024 * 8)
-    static_elem_sizes = alloc(1024 * 4)
-    static_fkinds = alloc(1024 * 4)
-    static_kinds = alloc(1024 * 4)
+    // STATIC_TABLE_CAP static declarations, raised from 1024.
+    //
+    // The old ceiling was reached by a real program rather than a synthetic one: ApexRift, a
+    // bare-metal OS written in KernRift, sits at over a thousand named statics -- error-code
+    // constants, hardware register offsets, a colour palette, protocol tag values -- and hit
+    // the limit mid-feature. Most of those are DOCUMENTATION as much as code, and trimming
+    // them to fit a compiler table is the tail wagging the dog.
+    //
+    // 2048 * 8 is 16 KiB for the widest of them, which is nothing next to the arena; if this
+    // is reached again the honest fix is growth on demand, as static_fixups already does.
+    static_table = alloc(STATIC_TABLE_CAP * 8)
+    static_array_sizes = alloc(STATIC_TABLE_CAP * 4)
+    static_init_values = alloc(STATIC_TABLE_CAP * 8)
+    static_elem_sizes = alloc(STATIC_TABLE_CAP * 4)
+    static_fkinds = alloc(STATIC_TABLE_CAP * 4)
+    static_kinds = alloc(STATIC_TABLE_CAP * 4)
     slice_len_table = alloc(32 * 8)
     device_table = alloc(64 * 16)
     device_field_table = alloc(256 * 16)
@@ -2146,8 +2169,8 @@ fn enum_lookup(uint64 enum_tok, uint64 field_tok) -> uint64 {
 
 @export
 fn static_declare(uint64 name_tok) -> uint64 {
-    if static_count >= 1024 {
-        write(2, "error: static_table overflow (max 1024)\n", 40)
+    if static_count >= STATIC_TABLE_CAP {
+        write(2, "error: static_table overflow (max 2048)\n", 40)
         exit(1)
     }
     uint64 offset = static_data_size
@@ -2385,8 +2408,8 @@ fn slice_len_lookup(uint64 ptr_off) -> uint64 {
 
 @export
 fn static_declare_array(uint64 name_tok, uint64 byte_size) -> uint64 {
-    if static_count >= 1024 {
-        write(2, "error: static_table overflow (max 1024)\n", 40)
+    if static_count >= STATIC_TABLE_CAP {
+        write(2, "error: static_table overflow (max 2048)\n", 40)
         exit(1)
     }
     // Align static_data_size up to 8 for clean placement
