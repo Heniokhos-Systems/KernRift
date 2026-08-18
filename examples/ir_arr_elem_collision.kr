@@ -1,0 +1,63 @@
+// Reproducer for the cross-function arr_elem_table collision on the IR path.
+//
+// arr_elem_count is zeroed by var_reset(), which only gen_function (legacy
+// x86) and gen_function_a64 call. IR codegen has been the default since
+// emit_ir_mode landed, and it lowers through ir_lower_function -- which reset
+// struct_var_count, ir_stack_array_bytes and ir_bm_scratch_off, but not this.
+// So the table accumulated across the whole translation unit, and
+// arr_elem_lookup scans from index 0 matching on token TEXT: the FIRST
+// function to declare a given array name decided the element size for every
+// later function that reused it.
+//
+// WHY NO TEST CAUGHT IT FOR SO LONG. The wrong element size is used for both
+// the address arithmetic and the access width, so it is self-consistent: a
+// value written and read through the same wrong scale round-trips, and
+// checking that buf[i] == what you just put in buf[i] passes. It is only
+// observable when the value does not fit the stale width -- which is what this
+// program does, and why it stores 70000 rather than a small sentinel.
+//
+// Same shape as codegen_struct_var_collision.kr, which was fixed for
+// struct_var_table while the array table kept the bug.
+
+// Declared FIRST, so this registration is the one a stale lookup finds.
+// Element size 2.
+fn touch_u16() -> u64 {
+    u16[64] buf
+    u64 i = 0
+    buf[i] = 7
+    return buf[i]
+}
+
+// The SAME name, element size 8. 70000 needs more than sixteen bits, so a
+// two-byte store truncates it to 70000 & 0xFFFF = 4464.
+fn touch_u64() -> u64 {
+    u64[8] buf
+    u64 o = 1
+    buf[o] = 70000
+    return buf[o]
+}
+
+fn main() {
+    u64 fail = 0
+    u64 a = touch_u16()
+    if a != 7 {
+        print("BUG touch_u16 returned ")
+        println(a)
+        fail = fail + 1
+    }
+    u64 b = touch_u64()
+    if b != 70000 {
+        print("BUG touch_u64 returned ")
+        println(b)
+        print("  (70000 truncated to 16 bits is 4464)")
+        println(0)
+        fail = fail + 1
+    }
+    if fail == 0 {
+        println("PASS")
+    } else {
+        print("FAIL count=")
+        println(fail)
+    }
+    exit(0)
+}

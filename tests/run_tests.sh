@@ -3,6 +3,30 @@
 
 DIR="$(cd "$(dirname "$0")" && pwd)"
 KRC="${KRC:-$DIR/../build/krc3}"
+
+# THE COMPILER UNDER TEST MUST BE NEWER THAN THE COMPILER'S SOURCE.
+#
+# This default points at build/krc3, which NO Makefile target builds -- `make`
+# stops at krc2, and krc3 is produced by hand. So the default invocation tests
+# whichever stage-3 binary happens to be sitting in build/, and a stale one
+# fails rows for bugs that were fixed weeks ago while passing rows for bugs
+# that are back. That is not a red suite, it is a suite measuring the wrong
+# artifact: a six-day-old krc3 reported 91 failures on a tree whose real count
+# was different, including two rows asserting the exact behaviour the source
+# had just been changed to fix.
+#
+# Refuse rather than report. An unrunnable suite is recoverable; a suite that
+# quietly grades the wrong binary is what this check exists to prevent.
+if [ -z "${KRC_ALLOW_STALE:-}" ] && [ -f "$KRC" ]; then
+    KRC_NEWEST_SRC="$(find "$DIR/../src" -name '*.kr' -newer "$KRC" -print -quit 2>/dev/null)"
+    if [ -n "$KRC_NEWEST_SRC" ]; then
+        echo "FATAL: $KRC is older than $KRC_NEWEST_SRC" >&2
+        echo "  The suite would be grading a stale compiler. Rebuild it:" >&2
+        echo "    make build/krc2 && ./build/krc2 --arch=\$(uname -m) build/krc.kr -o build/krc3" >&2
+        echo "  Or set KRC to the binary you mean, or KRC_ALLOW_STALE=1 to override." >&2
+        exit 1
+    fi
+fi
 ARCH=$(uname -m)
 KRC_FLAGS="${KRC_FLAGS:---arch=$ARCH}"
 # Arch for tests that COMPILE AND THEN EXECUTE the artifact. Hardcoding
@@ -18987,6 +19011,60 @@ else
     echo "FAIL: grow_static_array_over_cap (expected 'static_table overflow (max 2048)', got '$(echo "$GROW_AOVER" | tail -1)')"
 fi
 
+# --- arr_elem_table is per-function again ----------------------------------
+#
+# Two regressions from one missing line. arr_elem_count is zeroed by
+# var_reset(), which only gen_function and gen_function_a64 call; IR codegen has
+# been the DEFAULT since emit_ir_mode landed and lowers through
+# ir_lower_function, which reset struct_var_count and ir_stack_array_bytes but
+# not this. The table therefore accumulated for the whole translation unit.
+#
+# Both cases live in examples/ as well, for reading. They are RUN here, because
+# examples/codegen_struct_var_collision.kr -- the same bug in struct_var_table,
+# found and fixed long ago -- is referenced by nothing in this suite, and a
+# reproducer nobody executes is a document, not a test.
+
+# 1) The documented per-function "max 512" was really program-wide. 20
+#    functions, 30 arrays each: no function is near the limit, the program
+#    totals 600. Before the fix: "error: arr_elem_table overflow (max 512)".
+#    The sum is checked, not just the exit status -- a compile that stops
+#    erroring proves nothing about whether the arrays still work.
+TOTAL=$((TOTAL + 1))
+AET_OUT=""
+if $KRC $KRC_FLAGS "$DIR/../examples/ir_arr_elem_table_accum.kr" -o /tmp/kraet_$$ >/dev/null 2>&1; then
+    chmod +x /tmp/kraet_$$
+    AET_OUT=$(/tmp/kraet_$$ 2>/dev/null)
+fi
+rm -f /tmp/kraet_$$
+if [ "$AET_OUT" = "PASS" ]; then
+    PASS=$((PASS + 1))
+    echo "  ir_arr_elem_accum: PASS (600 arrays over 20 functions, per-function cap 512)"
+else
+    FAIL=$((FAIL + 1))
+    echo "FAIL: ir_arr_elem_accum (expected 'PASS', got '$AET_OUT')"
+fi
+
+# 2) THE SILENT ONE. arr_elem_lookup scans from index 0 and matches on token
+#    TEXT, so an array name reused in a later function resolved to the EARLIER
+#    function's element size. It hid because that one stale size drives both the
+#    address arithmetic and the access WIDTH, so a value round-trips through the
+#    wrong scale unchanged. This stores 70000 in a u64[8] named `buf` after a
+#    u16[64] named `buf` in the function before it: unfixed, it reads back 4464.
+TOTAL=$((TOTAL + 1))
+AEC_OUT=""
+if $KRC $KRC_FLAGS "$DIR/../examples/ir_arr_elem_collision.kr" -o /tmp/kraec_$$ >/dev/null 2>&1; then
+    chmod +x /tmp/kraec_$$
+    AEC_OUT=$(/tmp/kraec_$$ 2>/dev/null)
+fi
+rm -f /tmp/kraec_$$
+if [ "$AEC_OUT" = "PASS" ]; then
+    PASS=$((PASS + 1))
+    echo "  ir_arr_elem_collision: PASS (u16[64] buf does not set the size of u64[8] buf)"
+else
+    FAIL=$((FAIL + 1))
+    echo "FAIL: ir_arr_elem_collision (expected 'PASS', got '$AEC_OUT' -- 4464 means 70000 was truncated to 16 bits)"
+fi
+
 rm -rf "$GROW_DIR"
 
 # --- Import path length tests ---
@@ -20826,8 +20904,18 @@ emit_recipe() {
         # the loop{} source. uefi promises the same MZ magic as pe and a very
         # different container; the magic alone does not separate them, which is
         # what uefi_pe_header_fields_* and the boot gate's L7/L8 are for.
-        uefi)  echo "4d5a0000|--target=none|$EV_BM" ;;
-        image) echo "RAW|--target=none --load-addr=0x400000|$EV_BM" ;;
+        # THESE TWO CARRY THEIR OWN --arch, and must. The loop below is the one
+        # place that does not pass $KRC_FLAGS, and both of these aliases now
+        # REFUSE a defaulted arch on purpose: --emit=image validates --load-addr
+        # per-arch (arm64 demands 4096-alignment, x86_64 does not) and
+        # --emit=uefi writes the CPU into the PE Machine field. So the compiler
+        # was right and the recipe was stale -- the rows had been reporting
+        # "alias must keep working" while the alias worked and the test did not
+        # ask it to. $RUN_ARCH, not $ARCH: krc spells it arm64, uname says
+        # aarch64, and passing the uname spelling would trade this failure for
+        # a different one on an ARM runner.
+        uefi)  echo "4d5a0000|--arch=$RUN_ARCH --target=none|$EV_BM" ;;
+        image) echo "RAW|--arch=$RUN_ARCH --target=none --load-addr=0x400000|$EV_BM" ;;
         # ARX is bare-metal too, but it is HOSTED: ApexRift loads it, so it
         # takes neither --load-addr= nor --stack-top= (both refused outside
         # --emit=image) and needs an explicit --arch. Its magic is its own.

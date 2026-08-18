@@ -5663,6 +5663,36 @@ fn ir_lower_function(uint64 fn_node) {
     // field, which then resolves to a garbage offset). See
     // examples/codegen_struct_var_collision.kr.
     struct_var_count = 0
+    // arr_elem_table is per-function for exactly the same reason, and for
+    // longer than anyone noticed. var_reset() zeroes this counter, but only
+    // gen_function and gen_function_a64 call var_reset -- and IR codegen has
+    // been the default since emit_ir_mode landed, so every program compiled
+    // through here accumulated one entry per local array declaration for the
+    // whole translation unit. Two consequences, and the second is the one that
+    // cost a day:
+    //
+    //   1. The documented "max 512" became a PROGRAM-WIDE budget. 600 arrays
+    //      spread ten-at-a-time across sixty functions overflowed a table
+    //      sized for one function's worth, and the diagnostic says per-array
+    //      nothing about which function or that the limit is cumulative.
+    //      examples/ir_arr_elem_table_accum.kr is that program.
+    //
+    //   2. A SILENT MISCOMPILE, which is the real reason this is a bug and not
+    //      a limit. arr_elem_lookup and arr_count_lookup scan from index 0 and
+    //      match on token TEXT, so an array name reused in a later function
+    //      resolved to the EARLIER function's element size -- the same shape as
+    //      the struct_var_table collision above, which was found and fixed
+    //      while this one was left in place.
+    //
+    //      It hid because the wrong scale is self-consistent. Both the address
+    //      arithmetic and the access WIDTH come from that one stale entry, so
+    //      a value written and read through the same wrong element size round-
+    //      trips and every obvious test passes. It becomes visible only when
+    //      the value does not fit the stale width: with `u16[64] buf` in one
+    //      function, `u64[8] buf` in the next, storing 70000 and reading it
+    //      back gave 4464 -- 70000 truncated to sixteen bits.
+    //      examples/ir_arr_elem_collision.kr is that program.
+    arr_elem_count = 0
     ir_stack_array_bytes = 0
     // The bare-metal print scratch is a slice of this function's stack-array
     // region, so its offset is meaningless in the next function. Not resetting
