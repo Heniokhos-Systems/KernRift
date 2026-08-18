@@ -1421,19 +1421,47 @@ static uint64 var_table_size = 0
 static uint64 var_type_table = 0
 static uint64 var_type_count = 0
 
+// THE NAME-KEYED TABLES BOTH CODE PATHS CONSULT, reset in one place.
+//
+// Each maps a variable NAME to a property of its declaration, and each is
+// looked up by scanning from index 0 and comparing token text -- so the first
+// function to declare a name decides the answer for every later function that
+// reuses it, unless the table is cleared between functions.
+//
+//   struct_var_table: name -> struct index. `w` typed as struct A in f() must
+//   not leak into g() where `w` is a struct B, or struct_field_offset returns
+//   A's byte offset for a field of B. See examples/codegen_struct_var_collision.kr.
+//
+//   arr_elem_table: name -> element size and declared count. `u16[64] buf` in
+//   f() must not decide the stride for `u64[8] buf` in g(). It did, and because
+//   the stale size drives both the address arithmetic and the access WIDTH the
+//   wrong answer round-trips unchanged and reads as correct. See
+//   examples/ir_arr_elem_collision.kr.
+//
+// THIS FUNCTION EXISTS BECAUSE THE LIST HAD TO BE MAINTAINED TWICE. var_reset()
+// is called only by gen_function and gen_function_a64; the IR path -- the
+// default -- resets what it needs inline in ir_lower_function, and hand-mirrored
+// struct_var_count while missing arr_elem_count. The bug then had to be found
+// twice, in the same shape, years apart. Anything added HERE is reset on both
+// paths. Anything added to var_reset() alone is reset on the legacy path only,
+// which is exactly how the second instance happened.
+//
+// var_count, var_frame_size, var_table_size and var_type_count deliberately
+// stay in var_reset: they belong to the legacy stack allocator and its type
+// table, which the IR path does not use at all (it allocates vregs and tracks
+// stack arrays in ir_stack_array_bytes). Resetting them here would be harmless
+// but would misrepresent what is shared.
+fn shared_name_tables_reset() {
+    arr_elem_count = 0
+    struct_var_count = 0
+}
+
 fn var_reset() {
     var_count = 0
     var_frame_size = 0
     var_table_size = 0
-    arr_elem_count = 0
     var_type_count = 0
-    // struct_var_table is per-function: a variable named `w` typed as
-    // struct A in fn f() must NOT leak into fn g() where `w` is typed as
-    // struct B. Without this reset, struct_var_lookup(w) in g() would
-    // return A's struct index (registered first), and struct_field_offset
-    // would compute the wrong byte offset for fields shared by both
-    // structs — producing silent garbage reads.
-    struct_var_count = 0
+    shared_name_tables_reset()
 }
 
 fn var_type_init() {

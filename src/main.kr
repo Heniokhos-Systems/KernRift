@@ -322,6 +322,138 @@ fn import_dir_of(uint64 path) -> uint64 {
     return last_slash
 }
 
+// Collapse `./` and `seg/../` so one file has exactly one import key.
+//
+// import_resolve below concatenates dirname(importer) with the spec and stops
+// there. That is fine while every import reads downward -- kernel.kr's
+// "std/rsa.kr" and std/tls_conn.kr's "rsa.kr" both land on "std/rsa.kr", which
+// is why a flat tree never noticed. It stops being fine the moment a file in a
+// subdirectory reaches back up: core/gdt.kr importing "../std/x86.kr" yields
+// "core/../std/x86.kr", and import_is_seen compares that against "std/x86.kr"
+// as a STRING, finds them different, and includes the file a second time. Every
+// function in it is then a redefinition, and the error points at the innocent
+// file rather than at the two spellings that caused it.
+//
+// So this is not a convenience: without it a project cannot put its sources in
+// subdirectories at all while sharing a library between them, because there is
+// no root-relative import form to fall back on -- a nested file MUST spell it
+// with `..`, and that spelling MUST collide.
+//
+// Leading `..` is preserved: `../KernRift/build/krc.kr` has nothing above it to
+// cancel against, and rewriting it would break the sibling-checkout imports that
+// already work today.
+fn import_path_normalize(uint64 path) -> uint64 {
+    uint64 len = str_len(path)
+    uint64 buf = alloc(len + 1)
+    memcpy(buf, path, len)
+    uint64 zp = buf + len
+    uint8 zb = 0
+    unsafe { *(zp as uint8) = zb }
+
+    // Leading "./" contributes nothing.
+    uint64 changed = 1
+    while changed == 1 {
+        changed = 0
+        len = str_len(buf)
+
+        // "/./" -> "/" , and a leading "./"
+        uint64 i = 0
+        while i + 2 < len + 1 {
+            uint64 a = buf + i
+            uint64 c0 = 0
+            unsafe { *(a as uint8) -> c0 }
+            uint64 b = buf + i + 1
+            uint64 c1 = 0
+            unsafe { *(b as uint8) -> c1 }
+            uint64 c = buf + i + 2
+            uint64 c2 = 0
+            unsafe { *(c as uint8) -> c2 }
+            uint64 hit = 0
+            if i == 0 { if c0 == 46 { if c1 == 47 { hit = 2 } } }
+            if c0 == 47 { if c1 == 46 { if c2 == 47 { hit = 2 } } }
+            if hit != 0 {
+                uint64 from = i + hit
+                uint64 j = i
+                while from <= len {
+                    uint64 sp = buf + from
+                    uint64 dp = buf + j
+                    uint64 ch = 0
+                    unsafe { *(sp as uint8) -> ch }
+                    uint8 cb = ch
+                    unsafe { *(dp as uint8) = cb }
+                    from = from + 1
+                    j = j + 1
+                }
+                changed = 1
+                i = len
+            }
+            i = i + 1
+        }
+        if changed == 1 { continue }
+
+        // "seg/../" -> "" , where seg is not itself ".."
+        len = str_len(buf)
+        uint64 k = 1
+        while k + 3 < len + 1 {
+            uint64 p0 = buf + k
+            uint64 d0 = 0
+            unsafe { *(p0 as uint8) -> d0 }
+            uint64 p1 = buf + k + 1
+            uint64 d1 = 0
+            unsafe { *(p1 as uint8) -> d1 }
+            uint64 p2 = buf + k + 2
+            uint64 d2 = 0
+            unsafe { *(p2 as uint8) -> d2 }
+            uint64 p3 = buf + k + 3
+            uint64 d3 = 0
+            unsafe { *(p3 as uint8) -> d3 }
+            uint64 is_dotdot = 0
+            if d0 == 47 { if d1 == 46 { if d2 == 46 { if d3 == 47 { is_dotdot = 1 } } } }
+            if is_dotdot == 1 {
+                // Start of the segment that precedes this "/../".
+                uint64 sstart = 0
+                uint64 m = 0
+                while m < k {
+                    uint64 mp = buf + m
+                    uint64 mc = 0
+                    unsafe { *(mp as uint8) -> mc }
+                    if mc == 47 { sstart = m + 1 }
+                    m = m + 1
+                }
+                // A ".." segment cannot cancel another one.
+                uint64 prev_dotdot = 0
+                if k - sstart == 2 {
+                    uint64 q0 = buf + sstart
+                    uint64 e0 = 0
+                    unsafe { *(q0 as uint8) -> e0 }
+                    uint64 q1 = buf + sstart + 1
+                    uint64 e1 = 0
+                    unsafe { *(q1 as uint8) -> e1 }
+                    if e0 == 46 { if e1 == 46 { prev_dotdot = 1 } }
+                }
+                if prev_dotdot == 0 {
+                    uint64 from2 = k + 4
+                    uint64 j2 = sstart
+                    while from2 <= len {
+                        uint64 sp2 = buf + from2
+                        uint64 dp2 = buf + j2
+                        uint64 ch2 = 0
+                        unsafe { *(sp2 as uint8) -> ch2 }
+                        uint8 cb2 = ch2
+                        unsafe { *(dp2 as uint8) = cb2 }
+                        from2 = from2 + 1
+                        j2 = j2 + 1
+                    }
+                    changed = 1
+                    k = len
+                }
+            }
+            k = k + 1
+        }
+    }
+    return buf
+}
+
 fn import_resolve(uint64 base_path, uint64 name, uint64 name_len) -> uint64 {
     uint64 dir_len = import_dir_of(base_path)
     uint64 result = alloc(dir_len + name_len + 1)
@@ -348,7 +480,8 @@ fn import_resolve(uint64 base_path, uint64 name, uint64 name_len) -> uint64 {
     uint64 tp = result + dir_len + name_len
     uint8 z = 0
     unsafe { *(tp as uint8) = z }
-    return result
+    // One key per file, whatever spelling reached it.
+    return import_path_normalize(result)
 }
 
 fn import_check_import_line(uint64 buf, uint64 size, uint64 pos) -> uint64 {

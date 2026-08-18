@@ -19065,6 +19065,91 @@ else
     echo "FAIL: ir_arr_elem_collision (expected 'PASS', got '$AEC_OUT' -- 4464 means 70000 was truncated to 16 bits)"
 fi
 
+# 3) The OTHER table behind the same reset. examples/codegen_struct_var_collision.kr
+#    has sat in the tree unreferenced since the struct_var_table version of this
+#    bug was fixed -- so the fix had a reproducer and no test. Both tables are
+#    now cleared by shared_name_tables_reset(), which makes one function
+#    responsible for both, and a shared owner with only one of its cases covered
+#    is how the array table came to be missed in the first place.
+TOTAL=$((TOTAL + 1))
+SVC_OUT=""
+if $KRC $KRC_FLAGS "$DIR/../examples/codegen_struct_var_collision.kr" -o /tmp/krsvc_$$ >/dev/null 2>&1; then
+    chmod +x /tmp/krsvc_$$
+    SVC_OUT=$(/tmp/krsvc_$$ 2>/dev/null)
+fi
+rm -f /tmp/krsvc_$$
+if [ "$SVC_OUT" = "PASS" ]; then
+    PASS=$((PASS + 1))
+    echo "  struct_var_collision: PASS (struct A w does not set the layout of struct B w)"
+else
+    FAIL=$((FAIL + 1))
+    echo "FAIL: struct_var_collision (expected 'PASS', got '$SVC_OUT')"
+fi
+
+# --- one file, one import key ----------------------------------------------
+#
+# import_resolve concatenates dirname(importer) with the spec and used to stop
+# there, so a subdirectory reaching back up produced a SECOND NAME for a file
+# already imported: core/gdt.kr importing "../std/x86.kr" resolved to
+# "core/../std/x86.kr" while kernel.kr reached the same file as "std/x86.kr".
+# import_is_seen compares those as strings, so the file was included twice and
+# every function in it became a redefinition -- reported against the innocent
+# file, not against the two spellings.
+#
+# A FLAT PROJECT CANNOT HIT THIS, which is why it survived so long: imports that
+# only ever read downward all resolve without a `..` segment. It appeared the
+# first time ApexRift's sources were moved into subdirectories, and since there
+# is no root-relative import form, a nested file MUST spell it with `..` -- so
+# the bug made subdirectories impossible for any project sharing a library.
+IMP_DIR=$(mktemp -d /tmp/krc_imp_XXXXXX)
+mkdir -p "$IMP_DIR/lib" "$IMP_DIR/sub" "$IMP_DIR/a/b"
+echo 'fn lib_val() -> uint64 { return 7 }' > "$IMP_DIR/lib/helper.kr"
+printf 'import "../lib/helper.kr"\nfn mid_val() -> uint64 { return lib_val() }\n' \
+    > "$IMP_DIR/sub/mid.kr"
+printf 'import "../../lib/helper.kr"\nfn deep_val() -> uint64 { return lib_val() }\n' \
+    > "$IMP_DIR/a/b/deep.kr"
+# The root reaches helper.kr a THIRD way, through "./", so all three spellings
+# plus the plain one have to collapse onto a single key.
+printf 'import "./lib/helper.kr"\nimport "sub/mid.kr"\nimport "a/b/deep.kr"\nfn main() {\n    println(lib_val() + mid_val() + deep_val())\n    exit(0)\n}\n' \
+    > "$IMP_DIR/main.kr"
+TOTAL=$((TOTAL + 1))
+IMP_OUT=""
+if $KRC $KRC_FLAGS "$IMP_DIR/main.kr" -o "$IMP_DIR/out" >/dev/null 2>&1; then
+    chmod +x "$IMP_DIR/out"
+    IMP_OUT=$("$IMP_DIR/out" 2>/dev/null)
+fi
+if [ "$IMP_OUT" = "21" ]; then
+    PASS=$((PASS + 1))
+    echo "  import_path_normalize: PASS (one key for ./x, ../x and ../../x)"
+else
+    FAIL=$((FAIL + 1))
+    echo "FAIL: import_path_normalize (expected 21, got '$IMP_OUT' -- empty means the"
+    echo "  file was included once per spelling and every function redefined)"
+fi
+
+# A LEADING `..` HAS NOTHING TO CANCEL AGAINST and must survive untouched.
+# ApexRift's scripts import a sibling KernRift checkout as ../KernRift/..., and
+# a normalizer that ate the leading segment would break every one of them while
+# the test above still passed.
+mkdir -p "$IMP_DIR/outside"
+echo 'fn sib_val() -> uint64 { return 5 }' > "$IMP_DIR/outside/s.kr"
+printf 'import "../outside/s.kr"\nfn main() { println(sib_val())\n exit(0) }\n' \
+    > "$IMP_DIR/sub/topup.kr"
+TOTAL=$((TOTAL + 1))
+IMP_OUT2=""
+if $KRC $KRC_FLAGS "$IMP_DIR/sub/topup.kr" -o "$IMP_DIR/out2" >/dev/null 2>&1; then
+    chmod +x "$IMP_DIR/out2"
+    IMP_OUT2=$("$IMP_DIR/out2" 2>/dev/null)
+fi
+if [ "$IMP_OUT2" = "5" ]; then
+    PASS=$((PASS + 1))
+    echo "  import_leading_dotdot: PASS (a leading ../ still resolves)"
+else
+    FAIL=$((FAIL + 1))
+    echo "FAIL: import_leading_dotdot (expected 5, got '$IMP_OUT2')"
+fi
+rm -rf "$IMP_DIR"
+
 rm -rf "$GROW_DIR"
 
 # --- Import path length tests ---
