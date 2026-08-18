@@ -20249,29 +20249,245 @@ if $KRC --arch=x86_64 --legacy "$CP_SRC" -o "$CP_BIN" >/dev/null 2>&1 && [ -s "$
 else
     echo "FAIL: call_ptr_args_7_accepted_legacy_x86 (7 arguments must now compile on the legacy backend)"; FAIL=$((FAIL + 1))
 fi
-# The legacy cap is 12, NOT 32, and the number is measured: 13 arguments -- the
-# seventh overflow -- comes back 0 there while the IR backend is correct, with
-# no cause established. It refuses rather than emitting that silently. If this
-# row starts failing because 13 now works, that is good news: raise the cap in
-# src/codegen.kr and change this row deliberately.
+# 13 arguments was the old legacy cap, and it was a cap around a DEFECT: the
+# 13th came back 0, the cause was not established, and the backend refused
+# rather than lie about it. The cause is now known and fixed -- the CALLEE's
+# prologue spilled every parameter with a disp8 offset, and parameter 12's
+# frame slot is exactly 0x80, so it was stored at [rsp-128]. This row flipped
+# from "must refuse" to "must be RIGHT", and it RUNS at $RUN_ARCH: a 13-argument
+# call that merely compiles proves nothing, because the old bug compiled fine
+# and returned the wrong number.
 CP13_SRC="/tmp/krc_callptr13_$$.kr"
 {
   printf 'fn f13('
   i=1; while [ $i -le 13 ]; do [ $i -gt 1 ] && printf ', '; printf 'uint64 a%d' $i; i=$((i+1)); done
-  printf ') -> uint64 { return a13 }\n'
+  printf ') -> uint64 { return '
+  i=1; while [ $i -le 13 ]; do [ $i -gt 1 ] && printf ' + '; printf 'a%d * %d' $i $i; i=$((i+1)); done
+  printf ' }\n'
   printf 'fn main() {\n    uint64 p = fn_addr("f13")\n    uint64 r = call_ptr(p'
   i=1; while [ $i -le 13 ]; do printf ', %d' $i; i=$((i+1)); done
-  printf ')\n    exit(r)\n}\n'
+  printf ')\n    exit(r & 255)\n}\n'
 } > "$CP13_SRC"
+# sum of k*k for k=1..13 is 819, and 819 & 255 = 51.
+for CP13_MODE in "ir" "legacy"; do
+    if [ "$CP13_MODE" = "legacy" ]; then CP13_FLAG="--legacy"; else CP13_FLAG=""; fi
+    TOTAL=$((TOTAL + 1))
+    rm -f "$CP_BIN"
+    if $KRC --arch=$RUN_ARCH $CP13_FLAG "$CP13_SRC" -o "$CP_BIN" >/dev/null 2>&1 && [ -s "$CP_BIN" ]; then
+        chmod +x "$CP_BIN"; "$CP_BIN"; CP13_RUN=$?
+        if [ "$CP13_RUN" = "51" ]; then
+            PASS=$((PASS + 1)); echo "  call_ptr_args_13_correct_$CP13_MODE: PASS (returns 51)"
+        else
+            echo "FAIL: call_ptr_args_13_correct_$CP13_MODE (returned $CP13_RUN, want 51 -- parameter 12 spills to frame slot 0x80)"
+            FAIL=$((FAIL + 1))
+        fi
+    else
+        echo "FAIL: call_ptr_args_13_correct_$CP13_MODE (13 arguments must compile)"; FAIL=$((FAIL + 1))
+    fi
+done
+rm -f "$CP13_SRC"
+
+# --- wide argument lists: four independent width bugs, one repro shape -------
+#
+# std/qwen3.mlr in the MLRift fork calls a 25-argument mega-kernel launcher.
+# That call segfaulted the compiler under --legacy and --emit=obj while the IR
+# backend compiled it correctly, and bisecting it turned up four separate
+# defects that all present as "wide calls":
+#
+#   1. arg_float_flags / arg_struct_flags were uint64[16] frames indexed by
+#      argument number with nothing bounding the index -- 17 arguments wrote
+#      past the end of the frame, silently to 22 and fatally at 23.
+#   2. the callee prologue spilled parameters with a disp8 offset, so the
+#      first parameter whose slot reached 128 went to [rsp-128]. 13 arguments.
+#   3. `sub rsp, N` / `add rsp, N` around the outgoing stack arguments were
+#      imm8-only; N reaches 128 at 16 stack arguments, i.e. 22 total.
+#   4. overflow_patches was uint64[16] and unchecked (x86), and the aarch64
+#      twin refused at 24 arguments where every other path allows 32.
+#
+# Each width below sits on one of those boundaries, and every row RUNS, at
+# $RUN_ARCH: three of the four bugs produced a WRONG ANSWER rather than a
+# crash, so a compile-only row would have passed throughout.
+MA_SRC="/tmp/krc_manyargs_$$.kr"
+MA_BIN="/tmp/krc_manyargs_$$.bin"
+for MA_N in 13 16 22 25 32; do
+    {
+      printf 'fn ma('
+      i=1; while [ $i -le $MA_N ]; do [ $i -gt 1 ] && printf ', '; printf 'uint64 a%d' $i; i=$((i+1)); done
+      printf ') -> uint64 {\n    uint64 acc = '
+      i=1; while [ $i -le $MA_N ]; do [ $i -gt 1 ] && printf ' + '; printf 'a%d * %d' $i $i; i=$((i+1)); done
+      # The branch is what keeps this callee OUT of the inliner. Without it the
+      # AST inliner (which runs even at -O0) folds the whole call into main, no
+      # call is emitted, and every row below passes while testing nothing --
+      # which is exactly what these rows did when first written.
+      printf '\n    if acc == 999999 { write(1, "x", 1) }\n    return acc\n}\n'
+      # b is an opaque 0: without it the whole call folds away at compile time
+      # and the row silently stops testing the argument path at all.
+      printf 'fn main() {\n    uint64 b = write(1, "", 0)\n    exit(ma('
+      i=1; while [ $i -le $MA_N ]; do [ $i -gt 1 ] && printf ', '; printf 'b + %d' $i; i=$((i+1)); done
+      printf ') & 255)\n}\n'
+    } > "$MA_SRC"
+    # expected = (sum of k*k for k=1..N) & 255
+    MA_EXP=$(awk -v n=$MA_N 'BEGIN{s=0; for(k=1;k<=n;k++) s+=k*k; print s%256}')
+    for MA_MODE in "ir" "legacy"; do
+        if [ "$MA_MODE" = "legacy" ]; then MA_FLAG="--legacy"; else MA_FLAG=""; fi
+        TOTAL=$((TOTAL + 1))
+        rm -f "$MA_BIN"
+        if $KRC --arch=$RUN_ARCH $MA_FLAG "$MA_SRC" -o "$MA_BIN" >/dev/null 2>&1 && [ -s "$MA_BIN" ]; then
+            chmod +x "$MA_BIN"; "$MA_BIN"; MA_RUN=$?
+            if [ "$MA_RUN" = "$MA_EXP" ]; then
+                PASS=$((PASS + 1)); echo "  many_args_${MA_N}_$MA_MODE: PASS (returns $MA_EXP)"
+            else
+                echo "FAIL: many_args_${MA_N}_$MA_MODE (returned $MA_RUN, want $MA_EXP)"; FAIL=$((FAIL + 1))
+            fi
+        else
+            echo "FAIL: many_args_${MA_N}_$MA_MODE ($MA_N arguments must compile)"; FAIL=$((FAIL + 1))
+        fi
+    done
+done
+# --emit=obj is the mode the fork's std modules actually died in, and it forces
+# the LEGACY backend regardless of the default. Compile-only, so it may pin an
+# arch; x86_64 is the arch three of the four defects lived on. The object is
+# checked for a real .text, not merely for exit 0: an emitter that wrote an
+# empty section would otherwise pass.
+MA_OBJ="/tmp/krc_manyargs_$$.o"
 TOTAL=$((TOTAL + 1))
-CP13_ERR=$($KRC --arch=x86_64 --legacy "$CP13_SRC" -o "$CP_BIN" 2>&1); CP13_ST=$?
-if [ "$CP13_ST" != "0" ] && echo "$CP13_ERR" | grep -q "max 12"; then
-    PASS=$((PASS + 1)); echo "  call_ptr_args_13_rejected_legacy: PASS (refuses at the verified boundary)"
+rm -f "$MA_OBJ"
+MA_OBJ_OK=0
+if $KRC --arch=x86_64 --emit=obj "$MA_SRC" -o "$MA_OBJ" >/dev/null 2>&1 \
+   && [ -s "$MA_OBJ" ] \
+   && readelf -S "$MA_OBJ" 2>/dev/null | grep -q '\.text'; then
+    if ! command -v objdump >/dev/null 2>&1; then
+        MA_OBJ_OK=1   # cannot check for the call; the .text check still stands
+    elif objdump -d "$MA_OBJ" 2>/dev/null | grep -q 'call.*<ma>'; then
+        MA_OBJ_OK=1
+    fi
+fi
+if [ "$MA_OBJ_OK" = "1" ]; then
+    PASS=$((PASS + 1)); echo "  many_args_emit_obj_x86: PASS (32-argument call emits .text and a real call to ma)"
 else
-    echo "FAIL: call_ptr_args_13_rejected_legacy (expected refusal naming max 12, got exit $CP13_ST: '$CP13_ERR')"
+    echo "FAIL: many_args_emit_obj_x86 (--emit=obj must produce .text containing an actual call to ma -- if the call vanished, the inliner ate it and every many_args row above is vacuous)"
     FAIL=$((FAIL + 1))
 fi
-rm -f "$CP13_SRC"
+# The cap itself still fires, on both backends, at 33. A cap that never fires
+# is not a cap -- and past 32 the flag frames really would overflow again.
+MA33_SRC="/tmp/krc_manyargs33_$$.kr"
+{
+  printf 'fn ma33('
+  i=1; while [ $i -le 33 ]; do [ $i -gt 1 ] && printf ', '; printf 'uint64 a%d' $i; i=$((i+1)); done
+  printf ') -> uint64 {\n    uint64 acc = '
+  i=1; while [ $i -le 33 ]; do [ $i -gt 1 ] && printf ' + '; printf 'a%d * %d' $i $i; i=$((i+1)); done
+  # Same anti-inlining branch as above: `return a1` folds into the caller and
+  # the cap never gets a call to fire on.
+  printf '\n    if acc == 999999 { write(1, "x", 1) }\n    return acc\n}\n'
+  printf 'fn main() {\n    uint64 b = write(1, "", 0)\n    exit(ma33('
+  i=1; while [ $i -le 33 ]; do [ $i -gt 1 ] && printf ', '; printf 'b + %d' $i; i=$((i+1)); done
+  printf ') & 255)\n}\n'
+} > "$MA33_SRC"
+for MA33_MODE in "ir" "legacy"; do
+    if [ "$MA33_MODE" = "legacy" ]; then MA33_FLAG="--legacy"; else MA33_FLAG=""; fi
+    TOTAL=$((TOTAL + 1))
+    MA33_ERR=$($KRC --arch=x86_64 $MA33_FLAG "$MA33_SRC" -o "$MA_BIN" 2>&1); MA33_ST=$?
+    if [ "$MA33_ST" != "0" ] && echo "$MA33_ERR" | grep -q "max 32"; then
+        PASS=$((PASS + 1)); echo "  many_args_33_rejected_$MA33_MODE: PASS (clean diagnostic, exit $MA33_ST)"
+    else
+        echo "FAIL: many_args_33_rejected_$MA33_MODE (expected a refusal naming max 32, got exit $MA33_ST: '$MA33_ERR')"
+        FAIL=$((FAIL + 1))
+    fi
+done
+rm -f "$MA_SRC" "$MA_BIN" "$MA_OBJ" "$MA33_SRC"
+# Two more defects in the same family, and NEITHER is visible to the
+# all-integer rows above.
+#
+# 5. The overflow set was POSITIONAL on aarch64 -- arguments 8.. -- which is
+#    only right when every register argument precedes every stack one. AAPCS64
+#    fills x0-x7 and v0-v7 from SEPARATE counters, and the callee's prologue
+#    already used separate counters, so the two ends disagreed the moment a
+#    float sat among the first eight arguments. A 14-argument mixed call
+#    returned 177 against the IR backend's 247. (The x86_64 twin of this was
+#    fixed earlier; this is the arm64 half.)
+#
+# 6. A float parameter past the 8th was never received AT ALL. The prologue
+#    spilled dN/xmmN only while a register was left and emitted nothing
+#    afterwards, so a 9-f64 function quietly returned the 8-argument answer on
+#    both legacy backends while the IR backend was correct.
+#
+# The mixed row puts an f64 at every third position, so floats and integers
+# both overflow and the callee has to find them in ARGUMENT order.
+MF_SRC="/tmp/krc_manyfloat_$$.kr"
+MF_BIN="/tmp/krc_manyfloat_$$.bin"
+for MF_N in 9 12 16; do
+    {
+      printf 'fn fl('
+      i=1; while [ $i -le $MF_N ]; do [ $i -gt 1 ] && printf ', '; printf 'f64 a%d' $i; i=$((i+1)); done
+      printf ') -> uint64 {\n    uint64 acc = '
+      i=1; while [ $i -le $MF_N ]; do [ $i -gt 1 ] && printf ' + '; printf 'f64_to_int(a%d) * %d' $i $i; i=$((i+1)); done
+      printf '\n    if acc == 999999 { write(1, "x", 1) }\n    return acc\n}\n'
+      printf 'fn main() {\n    exit(fl('
+      i=1; while [ $i -le $MF_N ]; do [ $i -gt 1 ] && printf ', '; printf '%d.0' $i; i=$((i+1)); done
+      printf ') & 255)\n}\n'
+    } > "$MF_SRC"
+    MF_EXP=$(awk -v n=$MF_N 'BEGIN{s=0; for(k=1;k<=n;k++) s+=k*k; print s%256}')
+    for MF_MODE in "ir" "legacy"; do
+        if [ "$MF_MODE" = "legacy" ]; then MF_FLAG="--legacy"; else MF_FLAG=""; fi
+        TOTAL=$((TOTAL + 1))
+        rm -f "$MF_BIN"
+        if $KRC --arch=$RUN_ARCH $MF_FLAG "$MF_SRC" -o "$MF_BIN" >/dev/null 2>&1 && [ -s "$MF_BIN" ]; then
+            chmod +x "$MF_BIN"; "$MF_BIN"; MF_RUN=$?
+            if [ "$MF_RUN" = "$MF_EXP" ]; then
+                PASS=$((PASS + 1)); echo "  many_float_params_${MF_N}_$MF_MODE: PASS (returns $MF_EXP)"
+            else
+                echo "FAIL: many_float_params_${MF_N}_$MF_MODE (returned $MF_RUN, want $MF_EXP -- float parameter 9+ arrives on the stack)"
+                FAIL=$((FAIL + 1))
+            fi
+        else
+            echo "FAIL: many_float_params_${MF_N}_$MF_MODE ($MF_N f64 parameters must compile)"; FAIL=$((FAIL + 1))
+        fi
+    done
+done
+# Mixed: every third argument is an f64, so the float and integer counters
+# both run out and the overflow set is interleaved.
+for MX_N in 14 24 32; do
+    {
+      printf 'fn mx('
+      i=1; while [ $i -le $MX_N ]; do
+          [ $i -gt 1 ] && printf ', '
+          if [ $(( (i-1) % 3 )) -eq 0 ]; then printf 'f64 a%d' $i; else printf 'uint64 a%d' $i; fi
+          i=$((i+1))
+      done
+      printf ') -> uint64 {\n    uint64 acc = '
+      i=1; while [ $i -le $MX_N ]; do
+          [ $i -gt 1 ] && printf ' + '
+          if [ $(( (i-1) % 3 )) -eq 0 ]; then printf 'f64_to_int(a%d) * %d' $i $i; else printf 'a%d * %d' $i $i; fi
+          i=$((i+1))
+      done
+      printf '\n    if acc == 999999 { write(1, "x", 1) }\n    return acc\n}\n'
+      printf 'fn main() {\n    exit(mx('
+      i=1; while [ $i -le $MX_N ]; do
+          [ $i -gt 1 ] && printf ', '
+          if [ $(( (i-1) % 3 )) -eq 0 ]; then printf '%d.0' $i; else printf '%d' $i; fi
+          i=$((i+1))
+      done
+      printf ') & 255)\n}\n'
+    } > "$MF_SRC"
+    MX_EXP=$(awk -v n=$MX_N 'BEGIN{s=0; for(k=1;k<=n;k++) s+=k*k; print s%256}')
+    for MX_MODE in "ir" "legacy"; do
+        if [ "$MX_MODE" = "legacy" ]; then MX_FLAG="--legacy"; else MX_FLAG=""; fi
+        TOTAL=$((TOTAL + 1))
+        rm -f "$MF_BIN"
+        if $KRC --arch=$RUN_ARCH $MX_FLAG "$MF_SRC" -o "$MF_BIN" >/dev/null 2>&1 && [ -s "$MF_BIN" ]; then
+            chmod +x "$MF_BIN"; "$MF_BIN"; MX_RUN=$?
+            if [ "$MX_RUN" = "$MX_EXP" ]; then
+                PASS=$((PASS + 1)); echo "  mixed_float_int_args_${MX_N}_$MX_MODE: PASS (returns $MX_EXP)"
+            else
+                echo "FAIL: mixed_float_int_args_${MX_N}_$MX_MODE (returned $MX_RUN, want $MX_EXP -- the overflow set is not positional)"
+                FAIL=$((FAIL + 1))
+            fi
+        else
+            echo "FAIL: mixed_float_int_args_${MX_N}_$MX_MODE ($MX_N mixed arguments must compile)"; FAIL=$((FAIL + 1))
+        fi
+    done
+done
+rm -f "$MF_SRC" "$MF_BIN"
 TOTAL=$((TOTAL + 1))
 rm -f "$CP_BIN"
 # TWO ASSERTIONS, TWO ARCHES, AND THE SPLIT IS THE WHOLE POINT.

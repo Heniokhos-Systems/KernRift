@@ -3554,6 +3554,31 @@ fn emit_store_xmmN_f64(uint64 reg, uint64 offset) {
     }
 }
 
+// `mov [rsp+offset], reg` for the parameter spills in the prologue, choosing
+// the disp8 or disp32 encoding the same way emit_store_xmmN_f64 does. Every
+// one of those spills used to hard-code the disp8 form with a uint8-truncated
+// offset, so the moment a parameter's frame slot reached 128 the store went
+// to [rsp-128] instead: a 13-argument call read back garbage for its last
+// argument, silently and on every call, and more parameters only widened the
+// window. The load side of the same spill was already patched as a disp32,
+// which is why only the store was wrong. `reg` is the ModRM reg field (0-7);
+// `rex` carries REX.R for r8/r9.
+fn emit_store_regN_to_stack(uint64 rex, uint64 reg, uint64 offset) {
+    emit_byte(rex)
+    emit_byte(0x89)
+    uint8 reg3 = reg << 3
+    if offset < 128 {
+        uint8 mb = 0x44 | reg3
+        emit_byte(mb); emit_byte(0x24)
+        uint8 off8 = offset
+        emit_byte(off8)
+    } else {
+        uint8 mb = 0x84 | reg3
+        emit_byte(mb); emit_byte(0x24)
+        emit_u32_le(offset)
+    }
+}
+
 // Pre-pass helpers used by the type checker to register return-types
 // before codegen runs without leaving stray duplicates behind.
 @export
@@ -7866,16 +7891,23 @@ fn gen_expr(uint64 node) {
             // the shared IR lowering's call_ptr guard (src/ir.kr), so both
             // backends refuse identically instead of the legacy path being
             // the quiet way around it.
-            // 12, not the IR backend's 32, and the number is MEASURED rather
-            // than chosen. 7 through 12 arguments were verified against the
-            // direct call for every width; 13 -- the seventh overflow argument
-            // -- comes back 0 while the same program on the IR backend is
-            // correct. Caller emission, frame arithmetic and the callee's
-            // abi_overflow_offset all agree on inspection, so the cause is NOT
-            // established, and a cap where behaviour is proven beats a silent
-            // wrong answer past it. Raise this only with a repro that passes.
-            if arg_count > 12 {
-                uint64 cpe2 = "error: too many call_ptr arguments on the legacy backend (max 12; the IR backend takes 32)\n"
+            // 32 now, matching the IR backend. This used to be 12, because 13
+            // -- the seventh overflow argument -- came back 0 and I could not
+            // find the cause, so I capped it where behaviour was proven. The
+            // cause is now established and fixed: it was never in the call at
+            // all, it was the CALLEE's prologue. Every parameter spill emitted
+            // `mov [rsp+off], reg` in the disp8 form with a uint8-truncated
+            // offset, so the first parameter whose frame slot reached 128 was
+            // stored at [rsp-128] instead -- and with 13 parameters, slot 12
+            // is exactly 0x80. See emit_store_regN_to_stack. Two more limits
+            // of the same shape sat behind it: `sub rsp, N` around the
+            // outgoing arguments was imm8-only (N reaches 128 at 16 stack
+            // arguments) and arg_float_flags/arg_struct_flags were 16-entry
+            // frames indexed by argument number with nothing bounding them.
+            // All four widths are verified against the IR backend and against
+            // arm64, 7 through 32, by many_args_direct_call_matches_ir below.
+            if arg_count > 32 {
+                uint64 cpe2 = "error: too many call_ptr arguments on the legacy backend (max 32)\n"
                 write(2, cpe2, str_len(cpe2))
                 exit(1)
             }
@@ -8058,10 +8090,16 @@ fn gen_expr(uint64 node) {
                     uint64 cps = cpo_n
                     if (cps & 1) != 0 { cps = cps + 1 }
                     cp_stack_bytes = cps * 8
-                    // sub rsp, cp_stack_bytes
-                    emit_byte(0x48); emit_byte(0x83); emit_byte(0xEC)
-                    uint8 cpsb = cp_stack_bytes
-                    emit_byte(cpsb)
+                    // sub rsp, cp_stack_bytes -- imm8 stops at 15 stack args
+                    // (120 bytes); the 16th makes 128, which is -128 signed.
+                    if cp_stack_bytes < 128 {
+                        emit_byte(0x48); emit_byte(0x83); emit_byte(0xEC)
+                        uint8 cpsb = cp_stack_bytes
+                        emit_byte(cpsb)
+                    } else {
+                        emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC)
+                        emit_u32_le(cp_stack_bytes)
+                    }
                     uint64 cpi2 = 0
                     while cpi2 < cpo_n {
                         uint64 cgp = cpo + cpi2 * 8
@@ -8084,9 +8122,14 @@ fn gen_expr(uint64 node) {
             emit_byte(0xD0)
             if cp_stack_bytes > 0 {
                 // add rsp, cp_stack_bytes
-                emit_byte(0x48); emit_byte(0x83); emit_byte(0xC4)
-                uint8 cpcl = cp_stack_bytes
-                emit_byte(cpcl)
+                if cp_stack_bytes < 128 {
+                    emit_byte(0x48); emit_byte(0x83); emit_byte(0xC4)
+                    uint8 cpcl = cp_stack_bytes
+                    emit_byte(cpcl)
+                } else {
+                    emit_byte(0x48); emit_byte(0x81); emit_byte(0xC4)
+                    emit_u32_le(cp_stack_bytes)
+                }
             }
             return
         }
@@ -9506,13 +9549,26 @@ fn gen_expr(uint64 node) {
         uint64 acrem = var_frame_size & 15
         if acrem != 0 { var_frame_size = var_frame_size + 16 - acrem }
 
+        // 32 entries, not 16: `ai` below indexes these by argument number and
+        // nothing bounded it, so a 17-argument call already wrote past the end
+        // of the frame. It stayed quiet up to 22 and then took the compiler
+        // itself down -- a 25-argument call segfaulted the legacy backend under
+        // both --legacy and --emit=obj, while the IR backend compiled the very
+        // same call correctly. The IR path bounds its own uint64[32]
+        // call_arg_vregs and errors past 32; this is that capacity and that
+        // message, so both backends now refuse exactly the same programs
+        // instead of one crashing where the other diagnoses.
+        if arg_count > 32 {
+            write(2, "error: too many call arguments (max 32)\n", 40)
+            exit(1)
+        }
         // Evaluate all args and store to temp slots.
         // Track which args are float (0=int, 1=f64, 2=f32) in a local array.
-        uint64[16] arg_float_flags
+        uint64[32] arg_float_flags
         // Track which args are structs (0xFFFFFFFF = not struct, else struct index)
-        uint64[16] arg_struct_flags
+        uint64[32] arg_struct_flags
         uint64 asfi = 0
-        while asfi < 16 {
+        while asfi < 32 {
             uint64 asf_addr = arg_struct_flags + asfi * 8
             uint64 none_val = 0xFFFFFFFF
             unsafe { *(asf_addr as uint64) = none_val }
@@ -9935,10 +9991,16 @@ fn gen_expr(uint64 node) {
 
         if stack_args > 0 {
             uint64 stack_bytes = stack_args * 8
-            // sub rsp, stack_bytes
-            emit_byte(0x48); emit_byte(0x83); emit_byte(0xEC)
-            uint8 sb8 = stack_bytes
-            emit_byte(sb8)
+            // sub rsp, stack_bytes -- imm8 only holds 15 stack args (120 bytes);
+            // the 16th makes N=128, which sign-extends to -128.
+            if stack_bytes < 128 {
+                emit_byte(0x48); emit_byte(0x83); emit_byte(0xEC)
+                uint8 sb8 = stack_bytes
+                emit_byte(sb8)
+            } else {
+                emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC)
+                emit_u32_le(stack_bytes)
+            }
             // After sub rsp the temp slots sit stack_bytes higher.
             uint64 oi = 0
             while oi < ovf_n {
@@ -9958,9 +10020,14 @@ fn gen_expr(uint64 node) {
         // Clean up overflow args from stack (SysV)
         if stack_args > 0 {
             uint64 cleanup = stack_args * 8
-            emit_byte(0x48); emit_byte(0x83); emit_byte(0xC4)
-            uint8 cl8 = cleanup
-            emit_byte(cl8) // add rsp, N
+            if cleanup < 128 {
+                emit_byte(0x48); emit_byte(0x83); emit_byte(0xC4)
+                uint8 cl8 = cleanup
+                emit_byte(cl8) // add rsp, N
+            } else {
+                emit_byte(0x48); emit_byte(0x81); emit_byte(0xC4)
+                emit_u32_le(cleanup) // add rsp, N
+            }
         }
 
         // Clean up Windows shadow space + overflow
@@ -12077,7 +12144,10 @@ fn gen_function(uint64 fn_node) {
     if body_check == 0 { return }
 
     // Overflow arg patch tracking (for functions with >6 params)
-    uint64[16] overflow_patches
+    // 32 slots, one per stack-passed parameter, matching the 32-argument
+    // call cap. This was 16 and unchecked, so a function declaring more
+    // than 22 parameters wrote past the end of the prologue's own frame.
+    uint64[32] overflow_patches
     uint64 overflow_patch_count = 0
 
     // Reset variable table for this function
@@ -12329,6 +12399,9 @@ fn gen_function(uint64 fn_node) {
     uint64 pidx = 0
     uint64 int_pidx = 0
     uint64 float_pidx = 0
+    // Outgoing stack parameters, counted in ARGUMENT order so a float
+    // and an integer that both overflow land where the caller put them.
+    uint64 stack_pidx = 0
 
     // If this function returns a MEMORY-class struct, the hidden sret pointer
     // arrives in rdi (SysV) or rcx (Windows) as the first argument.  Spill it
@@ -12383,7 +12456,6 @@ fn gen_function(uint64 fn_node) {
             uint64 pt_kind_spill = tok_kind_at_raw(pt_spill)
             uint64 param_is_float = is_float_type(pt_kind_spill)
             if poff != 0xFFFFFFFF {
-                uint8 po8 = poff
                 // Check for struct parameter (by-value receiving)
                 uint64 param_si_spill = struct_lookup(pt_spill)
                 if gf_is_method != 0 && spill_ordinal == 0 {
@@ -12699,31 +12771,49 @@ fn gen_function(uint64 fn_node) {
                     }
                     emit_store_rax_to_stack(poff)
                 } else if param_is_float != 0 && target_os != 2 {
-                    // SysV float param: spill xmmN to stack
-                    // movsd [rsp+offset], xmmN
-                    emit_store_xmmN_f64(float_pidx, poff)
+                    if float_pidx < 8 {
+                        // SysV float param: spill xmmN to stack
+                        // movsd [rsp+offset], xmmN
+                        emit_store_xmmN_f64(float_pidx, poff)
+                    } else {
+                        // Past xmm7 the argument arrived on the STACK, and this
+                        // branch used to emit nothing at all -- the parameter
+                        // was simply never read. Same placeholder-load-and-patch
+                        // the integer overflow path below uses; an f64 is eight
+                        // bytes either way, so the plain 64-bit move is right.
+                        emit_byte(0x48); emit_byte(0x8B); emit_byte(0x84)
+                        emit_byte(0x24)
+                        uint64 fpatch_loc = out_len
+                        emit_u32_le(0) // placeholder -- patched later
+                        if stack_pidx >= 32 {
+                            write(2, "error: too many stack parameters (max 32)\n", 42)
+                            exit(1)
+                        }
+                        uint64 fop_entry = overflow_patches + stack_pidx * 8
+                        uint32 fpl32 = fpatch_loc
+                        unsafe { *(fop_entry as uint32) = fpl32 }
+                        overflow_patch_count = stack_pidx + 1
+                        stack_pidx = stack_pidx + 1
+                        emit_store_regN_to_stack(0x48, 0, poff)
+                    }
                     float_pidx = float_pidx + 1
                 } else if target_os == 2 {
                     // Windows calling convention (positional, no change)
                     if pidx == 0 {
                         // mov [rsp+off], rcx
-                        emit_byte(0x48); emit_byte(0x89); emit_byte(0x4C)
-                        emit_byte(0x24); emit_byte(po8)
+                        emit_store_regN_to_stack(0x48, 1, poff)
                     }
                     if pidx == 1 {
                         // mov [rsp+off], rdx
-                        emit_byte(0x48); emit_byte(0x89); emit_byte(0x54)
-                        emit_byte(0x24); emit_byte(po8)
+                        emit_store_regN_to_stack(0x48, 2, poff)
                     }
                     if pidx == 2 {
                         // mov [rsp+off], r8
-                        emit_byte(0x4C); emit_byte(0x89); emit_byte(0x44)
-                        emit_byte(0x24); emit_byte(po8)
+                        emit_store_regN_to_stack(0x4C, 0, poff)
                     }
                     if pidx == 3 {
                         // mov [rsp+off], r9
-                        emit_byte(0x4C); emit_byte(0x89); emit_byte(0x4C)
-                        emit_byte(0x24); emit_byte(po8)
+                        emit_store_regN_to_stack(0x4C, 1, poff)
                     }
                     if pidx >= 4 {
                         // Stack-passed arg (Windows overflow): emit mov rax, [rsp+PLACEHOLDER]
@@ -12734,13 +12824,16 @@ fn gen_function(uint64 fn_node) {
                         emit_u32_le(0) // placeholder — patched later
                         // Save patch location for this overflow arg
                         uint64 opi = pidx - 4
+                        if opi >= 32 {
+                            write(2, "error: too many stack parameters (max 32)\n", 42)
+                            exit(1)
+                        }
                         uint64 op_entry = overflow_patches + opi * 8
                         uint32 pl32 = patch_loc
                         unsafe { *(op_entry as uint32) = pl32 }
                         overflow_patch_count = opi + 1
                         // mov [rsp+off], rax
-                        emit_byte(0x48); emit_byte(0x89); emit_byte(0x44)
-                        emit_byte(0x24); emit_byte(po8)
+                        emit_store_regN_to_stack(0x48, 0, poff)
                     }
                     int_pidx = int_pidx + 1
                 } else {
@@ -12751,34 +12844,28 @@ fn gen_function(uint64 fn_node) {
                             emit_byte(0x48); emit_byte(0x89); emit_byte(0xFB)
                         } else {
                             // mov [rsp+off], rdi
-                            emit_byte(0x48); emit_byte(0x89); emit_byte(0x7C)
-                            emit_byte(0x24); emit_byte(po8)
+                            emit_store_regN_to_stack(0x48, 7, poff)
                         }
                     }
                     if int_pidx == 1 {
                         // mov [rsp+off], rsi
-                        emit_byte(0x48); emit_byte(0x89); emit_byte(0x74)
-                        emit_byte(0x24); emit_byte(po8)
+                        emit_store_regN_to_stack(0x48, 6, poff)
                     }
                     if int_pidx == 2 {
                         // mov [rsp+off], rdx
-                        emit_byte(0x48); emit_byte(0x89); emit_byte(0x54)
-                        emit_byte(0x24); emit_byte(po8)
+                        emit_store_regN_to_stack(0x48, 2, poff)
                     }
                     if int_pidx == 3 {
                         // mov [rsp+off], rcx
-                        emit_byte(0x48); emit_byte(0x89); emit_byte(0x4C)
-                        emit_byte(0x24); emit_byte(po8)
+                        emit_store_regN_to_stack(0x48, 1, poff)
                     }
                     if int_pidx == 4 {
                         // mov [rsp+off], r8
-                        emit_byte(0x4C); emit_byte(0x89); emit_byte(0x44)
-                        emit_byte(0x24); emit_byte(po8)
+                        emit_store_regN_to_stack(0x4C, 0, poff)
                     }
                     if int_pidx == 5 {
                         // mov [rsp+off], r9
-                        emit_byte(0x4C); emit_byte(0x89); emit_byte(0x4C)
-                        emit_byte(0x24); emit_byte(po8)
+                        emit_store_regN_to_stack(0x4C, 1, poff)
                     }
                     if int_pidx >= 6 {
                         // Stack-passed arg: emit mov rax, [rsp+PLACEHOLDER]
@@ -12788,14 +12875,22 @@ fn gen_function(uint64 fn_node) {
                         uint64 patch_loc = out_len
                         emit_u32_le(0) // placeholder — patched later
                         // Save patch location for this overflow arg
-                        uint64 opi = int_pidx - 6
+                        // ARGUMENT order, not int-overflow order: the caller
+                        // pushes floats and ints into one area in argument
+                        // order, so `int_pidx - 6` only agreed with it when no
+                        // float overflowed too.
+                        uint64 opi = stack_pidx
+                        if opi >= 32 {
+                            write(2, "error: too many stack parameters (max 32)\n", 42)
+                            exit(1)
+                        }
                         uint64 op_entry = overflow_patches + opi * 8
                         uint32 pl32 = patch_loc
                         unsafe { *(op_entry as uint32) = pl32 }
                         overflow_patch_count = opi + 1
+                        stack_pidx = stack_pidx + 1
                         // mov [rsp+off], rax
-                        emit_byte(0x48); emit_byte(0x89); emit_byte(0x44)
-                        emit_byte(0x24); emit_byte(po8)
+                        emit_store_regN_to_stack(0x48, 0, poff)
                     }
                     int_pidx = int_pidx + 1
                 }

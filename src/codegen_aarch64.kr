@@ -4602,13 +4602,26 @@ fn gen_expr_a64(uint64 node) {
         uint64 acrem = var_frame_size & 15
         if acrem != 0 { var_frame_size = var_frame_size + 16 - acrem }
 
+        // 32 entries, not 16: `ai` below indexes these by argument number and
+        // nothing bounded it, so a 17-argument call already wrote past the end
+        // of the frame. It stayed quiet up to 22 and then took the compiler
+        // itself down -- a 25-argument call segfaulted the legacy backend under
+        // both --legacy and --emit=obj, while the IR backend compiled the very
+        // same call correctly. The IR path bounds its own uint64[32]
+        // call_arg_vregs and errors past 32; this is that capacity and that
+        // message, so both backends now refuse exactly the same programs
+        // instead of one crashing where the other diagnoses.
+        if arg_count > 32 {
+            write(2, "error: too many call arguments (max 32)\n", 40)
+            exit(1)
+        }
         // Evaluate all args and store to temp slots.
         // Track which args are float (0=int, 1=f64, 2=f32).
-        uint64[16] arg_float_flags_a
+        uint64[32] arg_float_flags_a
         // Track which args are structs (0xFFFFFFFF = not struct, else struct index)
-        uint64[16] arg_struct_flags_a
+        uint64[32] arg_struct_flags_a
         uint64 asfi_a = 0
-        while asfi_a < 16 {
+        while asfi_a < 32 {
             uint64 asf_init = arg_struct_flags_a + asfi_a * 8
             uint64 none_val_a = 0xFFFFFFFF
             unsafe { *(asf_init as uint64) = none_val_a }
@@ -4789,10 +4802,71 @@ fn gen_expr_a64(uint64 node) {
             }
         }
 
-        // Push overflow args (9+) onto stack (AAPCS64: x0-x7 = first 8 args)
+        // Outgoing stack arguments (AAPCS64).
+        //
+        // WHICH ARGS GO ON THE STACK IS NOT POSITIONAL. This used to copy
+        // arguments 8.. , which is only correct when every register argument
+        // precedes every stack one. AAPCS64 fills x0-x7 and v0-v7 from
+        // SEPARATE counters -- exactly the mistake the x86_64 legacy path made
+        // and had fixed -- so "argument 8" is not "the first overflow
+        // argument". The callee's prologue already walks its parameters with
+        // separate float_pidx_a / int_pidx_a counters, so the two ends
+        // disagreed the moment a float sat among the first eight arguments.
+        // Measured before the fix, a 14-argument call mixing f64 and integer
+        // arguments returned 177 where the IR backend and both x86_64 backends
+        // agreed on 247.
+        //
+        // The overflow set is replayed from the SAME rule the two register
+        // passes above use: a float that found no v register (8 of them), an
+        // int that found no x register (8). Order is ARGUMENT order.
+        uint64 ovf_idx_a = alloc(arg_count * 8 + 8)
+        uint64 ovf_n_a = 0
+        uint64 ovf_has_struct_a = 0
+        uint64 ovf_f_a = 0
+        uint64 ovf_i_a = 0
+        uint64 oa_a = 0
+        while oa_a < arg_count {
+            uint64 oaf_a = arg_float_flags_a + oa_a * 8
+            uint64 oafv_a = 0
+            unsafe { *(oaf_a as uint64) -> oafv_a }
+            uint64 oas_a = arg_struct_flags_a + oa_a * 8
+            uint64 oasv_a = 0
+            unsafe { *(oas_a as uint64) -> oasv_a }
+            if oasv_a != 0xFFFFFFFF && abi_struct_pass_by_val != 0 { ovf_has_struct_a = 1 }
+            uint64 on_stack_a = 0
+            if oafv_a != 0 {
+                if ovf_f_a < 8 { ovf_f_a = ovf_f_a + 1 } else { on_stack_a = 1 }
+            } else {
+                if ovf_i_a < 8 { ovf_i_a = ovf_i_a + 1 } else { on_stack_a = 1 }
+            }
+            if on_stack_a != 0 {
+                uint64 ovp_a = ovf_idx_a + ovf_n_a * 8
+                unsafe { *(ovp_a as uint64) = oa_a }
+                ovf_n_a = ovf_n_a + 1
+            }
+            oa_a = oa_a + 1
+        }
+        // A by-value struct consumes one OR TWO x registers depending on its
+        // ABI class, and an HFA consumes up to four v registers -- none of
+        // which the replay above models. Rather than trade one wrong answer
+        // for another, fall back to the historical positional copy whenever
+        // such an argument is present: unchanged behaviour for that case,
+        // correct behaviour for every other.
+        if ovf_has_struct_a != 0 {
+            ovf_n_a = 0
+            if arg_count > 8 {
+                uint64 pa_a = 8
+                while pa_a < arg_count {
+                    uint64 pvp_a = ovf_idx_a + ovf_n_a * 8
+                    unsafe { *(pvp_a as uint64) = pa_a }
+                    ovf_n_a = ovf_n_a + 1
+                    pa_a = pa_a + 1
+                }
+            }
+        }
         uint64 stack_args = 0
-        if arg_count > 8 {
-            stack_args = arg_count - 8
+        if ovf_n_a > 0 {
+            stack_args = ovf_n_a
             if (stack_args & 1) != 0 { stack_args = stack_args + 1 }
         }
         if stack_args > 0 {
@@ -4801,11 +4875,13 @@ fn gen_expr_a64(uint64 node) {
             uint64 sub_insn = 0xD1000000 | (stack_bytes << 10) | (31 << 5) | 31
             emit_a64(sub_insn)
             // Store overflow args at [sp+0], [sp+8], ...
-            uint64 real_overflow = arg_count - 8
             uint64 oi = 0
-            while oi < real_overflow {
-                // Load from temp slot (offset shifted by stack_bytes because sp moved)
-                emit_a64_ldr(9, 31, a64_var_base + arg_slots_base + (8 + oi) * 8 + stack_bytes)
+            while oi < ovf_n_a {
+                uint64 ovg_a = ovf_idx_a + oi * 8
+                uint64 ovsrc_a = 0
+                unsafe { *(ovg_a as uint64) -> ovsrc_a }
+                // Load from temp slot (offset shifted by stack_bytes: sp moved)
+                emit_a64_ldr(9, 31, a64_var_base + arg_slots_base + ovsrc_a * 8 + stack_bytes)
                 emit_a64_str(9, 31, oi * 8)
                 oi = oi + 1
             }
@@ -6038,7 +6114,10 @@ fn gen_function_a64(uint64 fn_node) {
     uint64 is_noreturn = ann_flags & 1
 
     // Overflow arg patch tracking (for functions with >8 params)
-    uint64[16] a64_overflow_patches
+    // 32 slots: 8 parameters arrive in x0-x7 and the rest on the stack,
+    // so 16 held only a 24-argument function -- short of the 32-argument
+    // cap the IR and x86 legacy backends both allow.
+    uint64[32] a64_overflow_patches
     uint64 a64_overflow_patch_count = 0
 
     var_reset()
@@ -6255,6 +6334,9 @@ fn gen_function_a64(uint64 fn_node) {
     uint64 pidx = 0
     uint64 int_pidx_a = 0
     uint64 float_pidx_a = 0
+    // Outgoing stack parameters, counted in ARGUMENT order so a float and
+    // an integer that both overflow land where the caller put them.
+    uint64 stack_pidx_a = 0
     uint64 wp2 = first_param
     while wp2 != 0 {
         uint32 pk2 = ast_kind(wp2)
@@ -6345,6 +6427,24 @@ fn gen_function_a64(uint64 fn_node) {
                     // Float param: spill dN to stack
                     if float_pidx_a <= 7 {
                         emit_a64_store_dN(float_pidx_a, poff)
+                    } else {
+                        // Past d7 the argument arrived on the STACK, and this
+                        // used to emit nothing at all -- the parameter was
+                        // never read. Same placeholder-load-and-patch the
+                        // integer overflow path uses; a f64 is eight bytes
+                        // either way, so moving it through x0 is right.
+                        uint64 fpatch_loc_a = out_len
+                        emit_a64(0xF9400000 | (31 << 5) | 0) // ldr x0, [sp, #0] placeholder
+                        emit_a64_str(0, 31, a64_var_base + poff)
+                        if stack_pidx_a >= 32 {
+                            write(2, "error: a64_overflow_patches overflow (max 32)\n", 46)
+                            exit(1)
+                        }
+                        uint64 fop_entry_a = a64_overflow_patches + stack_pidx_a * 8
+                        uint32 fpl32_a = fpatch_loc_a
+                        unsafe { *(fop_entry_a as uint32) = fpl32_a }
+                        a64_overflow_patch_count = stack_pidx_a + 1
+                        stack_pidx_a = stack_pidx_a + 1
                     }
                     float_pidx_a = float_pidx_a + 1
                 } else {
@@ -6361,15 +6461,20 @@ fn gen_function_a64(uint64 fn_node) {
                         // str x0, [sp, #(a64_var_base + poff)]
                         emit_a64_str(0, 31, a64_var_base + poff)
                         // Save patch location
-                        uint64 opi = reg - 8
-                        if opi >= 16 {
-                            write(2, "error: a64_overflow_patches overflow (max 16)\n", 46)
+                        // ARGUMENT order, not int-overflow order: the caller
+                        // pushes floats and ints into one area in argument
+                        // order, so `reg - 8` only agreed with it when no
+                        // float overflowed too.
+                        uint64 opi = stack_pidx_a
+                        if opi >= 32 {
+                            write(2, "error: a64_overflow_patches overflow (max 32)\n", 46)
                             exit(1)
                         }
                         uint64 op_entry = a64_overflow_patches + opi * 8
                         uint32 pl32 = patch_loc
                         unsafe { *(op_entry as uint32) = pl32 }
                         a64_overflow_patch_count = opi + 1
+                        stack_pidx_a = stack_pidx_a + 1
                     }
                     int_pidx_a = int_pidx_a + 1
                     // Slice param: spill length register to the length slot
