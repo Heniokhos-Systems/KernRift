@@ -20356,13 +20356,35 @@ MA_OBJ_OK=0
 if $KRC --arch=x86_64 --emit=obj "$MA_SRC" -o "$MA_OBJ" >/dev/null 2>&1 \
    && [ -s "$MA_OBJ" ] \
    && readelf -S "$MA_OBJ" 2>/dev/null | grep -q '\.text'; then
-    if ! command -v objdump >/dev/null 2>&1; then
-        MA_OBJ_OK=1   # cannot check for the call; the .text check still stands
-    elif objdump -d "$MA_OBJ" 2>/dev/null | grep -q 'call.*<ma>'; then
+    # ASK THE DISASSEMBLER WHAT IT CAN READ, do not infer it from its name.
+    #
+    # The first version tested `command -v objdump` and treated a missing tool as
+    # "cannot check". On an ARM64 runner objdump is PRESENT and cannot read an
+    # x86-64 object, so it produced nothing, the grep found no call, and the row
+    # reported that the call had vanished -- a red gate for a green compiler, on
+    # the one arch that cannot disassemble the artifact. The x86_64 cross binutils
+    # the job installs are spelled x86_64-linux-gnu-objdump, not objdump.
+    #
+    # So each candidate is asked to disassemble THIS object and is accepted only
+    # if it emits a .text disassembly. Absent that, the check has not run and says
+    # so, rather than borrowing the failure of a tool for the failure of the code.
+    MA_OD=""
+    for MA_CAND in x86_64-linux-gnu-objdump objdump llvm-objdump; do
+        command -v "$MA_CAND" >/dev/null 2>&1 || continue
+        if "$MA_CAND" -d "$MA_OBJ" 2>/dev/null | grep -q 'Disassembly of section .text'; then
+            MA_OD="$MA_CAND"; break
+        fi
+    done
+    if [ -z "$MA_OD" ]; then
+        MA_OBJ_OK=2   # no disassembler here understands x86-64; the .text check stands
+    elif "$MA_OD" -d "$MA_OBJ" 2>/dev/null | grep -q 'call.*<ma>'; then
         MA_OBJ_OK=1
     fi
 fi
-if [ "$MA_OBJ_OK" = "1" ]; then
+if [ "$MA_OBJ_OK" = "2" ]; then
+    PASS=$((PASS + 1))
+    echo "  many_args_emit_obj_x86: PASS (.text present; no x86-64 disassembler here, call unverified)"
+elif [ "$MA_OBJ_OK" = "1" ]; then
     PASS=$((PASS + 1)); echo "  many_args_emit_obj_x86: PASS (32-argument call emits .text and a real call to ma)"
 else
     echo "FAIL: many_args_emit_obj_x86 (--emit=obj must produce .text containing an actual call to ma -- if the call vanished, the inliner ate it and every many_args row above is vacuous)"
