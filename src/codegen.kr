@@ -1421,6 +1421,44 @@ static uint64 var_table_size = 0
 static uint64 var_type_table = 0
 static uint64 var_type_count = 0
 
+// The function whose body is being generated, for diagnostics that report a
+// PER-FUNCTION limit.
+//
+// "error: arr_elem_table overflow (max 512)" names an internal table and a
+// number and leaves the reader to work out the rest. It does not say which of
+// their functions it means, and -- worse -- it does not say the budget is per
+// function at all. A reader who assumes it is program-wide starts packing
+// declarations together to save slots, which is a real cost paid for a
+// misunderstanding. That is not hypothetical: ApexRift collapsed four
+// out-param triples in its DER parser for exactly that reason and carried the
+// packing until the underlying bug was found.
+static uint64 cg_current_fn_tok = 0
+
+fn cg_set_current_fn(uint64 tok) { cg_current_fn_tok = tok }
+
+// A capacity limit was hit. `per_fn` decides the sentence that matters: whether
+// the answer is "split this function up" or "this compiler's table is too small
+// for your program". Getting that wrong sends the reader to the wrong fix.
+fn cap_overflow(uint64 what, uint64 max, uint64 per_fn) {
+    write(2, "error: ", 7)
+    write(2, what, str_len(what))
+    write(2, " (max ", 6)
+    uint8[32] nb
+    uint64 nl = fmt_uint(nb, max)
+    write(2, nb, nl)
+    if per_fn != 0 {
+        write(2, " per function", 13)
+        if cg_current_fn_tok != 0 {
+            write(2, ", in fn ", 8)
+            uint64 st = tok_text_start(cg_current_fn_tok)
+            write(2, cg_source + st, tok_text_len(cg_current_fn_tok))
+        }
+    } else {
+        write(2, " for the whole program", 22)
+    }
+    write(2, ")\n", 2)
+}
+
 // THE NAME-KEYED TABLES BOTH CODE PATHS CONSULT, reset in one place.
 //
 // Each maps a variable NAME to a property of its declaration, and each is
@@ -1495,7 +1533,7 @@ fn var_type_register(uint64 name_tok, uint64 type_kind) {
         vti = vti + 1
     }
     if var_type_count >= 1024 {
-        write(2, "error: var_type_table overflow (max 1024)\n", 42)
+        cap_overflow("too many typed locals", 1024, 1)
         exit(1)
     }
     uint64 entry = var_type_table + var_type_count * 8
@@ -1727,7 +1765,7 @@ fn var_declare(uint64 name_tok) -> uint64 {
         return existing
     }
     if var_table_size >= 4096 {
-        write(2, "error: var_table overflow (max 4096)\n", 37)
+        cap_overflow("too many locals", 4096, 1)
         exit(1)
     }
     uint64 offset = var_count * 8
@@ -2058,7 +2096,7 @@ fn struct_abi_flags(uint64 struct_idx) -> uint64 {
 // Track which variables are struct-typed
 fn struct_var_register(uint64 var_tok, uint64 struct_idx) {
     if struct_var_count >= 1024 {
-        write(2, "error: struct_var_table overflow (max 1024)\n", 44)
+        cap_overflow("too many struct locals", 1024, 1)
         exit(1)
     }
     uint64 entry = struct_var_table + struct_var_count * 8
@@ -2153,7 +2191,7 @@ fn static_struct_lookup(uint64 name_tok) -> uint64 {
 @export
 fn enum_register(uint64 enum_tok, uint64 field_tok, uint64 value) {
     if enum_count >= 512 {
-        write(2, "error: enum_table overflow (max 512)\n", 37)
+        cap_overflow("too many enum members", 512, 0)
         exit(1)
     }
     uint64 entry = enum_table + enum_count * 16
@@ -2198,7 +2236,7 @@ fn enum_lookup(uint64 enum_tok, uint64 field_tok) -> uint64 {
 @export
 fn static_declare(uint64 name_tok) -> uint64 {
     if static_count >= STATIC_TABLE_CAP {
-        write(2, "error: static_table overflow (max 2048)\n", 40)
+        cap_overflow("too many statics and consts", 2048, 0)
         exit(1)
     }
     uint64 offset = static_data_size
@@ -2294,7 +2332,7 @@ fn static_fkind_of(uint64 name_tok) -> uint64 {
 @export
 fn device_register(uint64 name_tok, uint64 base_addr) -> uint64 {
     if device_count >= 64 {
-        write(2, "error: device_table overflow (max 64)\n", 38)
+        cap_overflow("too many devices", 64, 0)
         exit(1)
     }
     uint64 entry = device_table + device_count * 16
@@ -2310,7 +2348,7 @@ fn device_register(uint64 name_tok, uint64 base_addr) -> uint64 {
 @export
 fn device_add_field(uint64 dev_idx, uint64 field_tok, uint64 offset, uint64 size) {
     if device_field_count >= 256 {
-        write(2, "error: device_field_table overflow (max 256)\n", 45)
+        cap_overflow("too many device fields", 256, 0)
         exit(1)
     }
     uint64 entry = device_field_table + device_field_count * 16
@@ -2403,7 +2441,7 @@ fn device_field_size_of(uint64 dev_idx, uint64 field_tok) -> uint64 {
 // Record a slice parameter's length slot. Per-function, cleared on function entry.
 fn slice_len_register(uint64 ptr_off, uint64 len_off) {
     if slice_len_count >= 32 {
-        write(2, "error: slice_len_table overflow (max 32)\n", 41)
+        cap_overflow("too many slice locals", 32, 1)
         exit(1)
     }
     uint64 entry = slice_len_table + slice_len_count * 8
@@ -2437,7 +2475,7 @@ fn slice_len_lookup(uint64 ptr_off) -> uint64 {
 @export
 fn static_declare_array(uint64 name_tok, uint64 byte_size) -> uint64 {
     if static_count >= STATIC_TABLE_CAP {
-        write(2, "error: static_table overflow (max 2048)\n", 40)
+        cap_overflow("too many statics and consts", 2048, 0)
         exit(1)
     }
     // Align static_data_size up to 8 for clean placement
@@ -2650,7 +2688,7 @@ fn static_lookup_by_name(uint64 name_str, uint64 name_len) -> uint64 {
 @export
 fn type_alias_register(uint64 name_tok, uint64 target_size) {
     if type_alias_count >= 64 {
-        write(2, "error: type_alias_table overflow (max 64)\n", 42)
+        cap_overflow("too many type aliases", 64, 0)
         exit(1)
     }
     uint64 entry = type_alias_table + type_alias_count * 8
@@ -2707,7 +2745,7 @@ fn type_tok_elem_size(uint64 type_tok) -> uint64 {
 // Register a local array's element size so that index ops can scale correctly.
 fn arr_elem_register(uint64 name_tok, uint64 elem_size) {
     if arr_elem_count >= 512 {
-        write(2, "error: arr_elem_table overflow (max 512)\n", 41)
+        cap_overflow("too many local arrays", 512, 1)
         exit(1)
     }
     uint64 entry = arr_elem_table + arr_elem_count * 16
@@ -2984,7 +3022,7 @@ fn fn_register(uint64 name_tok, uint64 code_offset) {
 @export
 fn export_fn_register(uint64 name_tok) {
     if export_fn_count >= 4096 {
-        write(2, "error: export_fn_table overflow (max 4096)\n", 43)
+        cap_overflow("too many exported functions", 4096, 0)
         exit(1)
     }
     uint64 entry = export_fn_table + export_fn_count * 8
@@ -3202,7 +3240,7 @@ fn fn_lookup(uint64 name_tok) -> uint64 {
 @export
 fn extern_fn_register(uint64 name_tok) -> uint64 {
     if extern_fn_count >= 256 {
-        write(2, "error: extern_fn_table overflow (max 256)\n", 42)
+        cap_overflow("too many extern functions", 256, 0)
         exit(1)
     }
     uint64 idx = extern_fn_count
@@ -3218,7 +3256,7 @@ fn extern_fn_register(uint64 name_tok) -> uint64 {
 @export
 fn builtin_override_register(uint64 name_tok) {
     if builtin_override_count >= 64 {
-        write(2, "error: builtin_override_table overflow (max 64)\n", 48)
+        cap_overflow("too many builtin overrides", 64, 0)
         exit(1)
     }
     uint64 entry = builtin_override_table + builtin_override_count * 8
@@ -3292,7 +3330,7 @@ fn extern_fn_lookup(uint64 name_tok) -> uint64 {
 //   ARM64:  the start of the BL instruction
 fn extern_call_record(uint64 code_off, uint64 extern_idx) {
     if extern_call_count >= 1024 {
-        write(2, "error: extern_call_sites overflow (max 1024)\n", 45)
+        cap_overflow("too many extern call sites", 1024, 0)
         exit(1)
     }
     uint64 entry = extern_call_sites + extern_call_count * 16
@@ -3600,7 +3638,7 @@ fn fn_ret_float_count_set(uint64 v) { fn_ret_float_count = v }
 fn fn_ret_float_register(uint64 name_tok, uint64 float_kind) {
     if fn_ret_float_lookup(name_tok) != 0 { return }
     if fn_ret_float_count >= 512 {
-        write(2, "error: fn_ret_float_table overflow (max 512)\n", 45)
+        cap_overflow("too many float-returning functions", 512, 0)
         exit(1)
     }
     uint64 entry = fn_ret_float_table + fn_ret_float_count * 8
@@ -3635,7 +3673,7 @@ fn fn_ret_float_lookup(uint64 name_tok) -> uint64 {
 // Record that a function's declared return type is a signed integer.
 fn fn_ret_signed_register(uint64 name_tok) {
     if fn_ret_signed_count >= 512 {
-        write(2, "error: fn_ret_signed_table overflow (max 512)\n", 46)
+        cap_overflow("too many signed-returning functions", 512, 0)
         exit(1)
     }
     uint64 entry = fn_ret_signed_table + fn_ret_signed_count * 8
@@ -3666,7 +3704,7 @@ fn fn_ret_signed_lookup(uint64 name_tok) -> uint64 {
 // Register a function's struct return type
 fn fn_ret_struct_register(uint64 name_tok, uint64 struct_idx) {
     if fn_ret_struct_count >= 512 {
-        write(2, "error: fn_ret_struct_table overflow (max 512)\n", 46)
+        cap_overflow("too many struct-returning functions", 512, 0)
         exit(1)
     }
     uint64 entry = fn_ret_struct_table + fn_ret_struct_count * 8
@@ -3702,7 +3740,7 @@ fn fn_method_reset() { fn_method_count = 0 }
 fn fn_method_register(uint64 name_tok) {
     if fn_method_table == 0 { fn_method_table = alloc(512 * 4) }
     if fn_method_count >= 512 {
-        write(2, "error: fn_method_table overflow (max 512)\n", 42)
+        cap_overflow("too many methods", 512, 0)
         exit(1)
     }
     uint64 entry = fn_method_table + fn_method_count * 4
@@ -4125,7 +4163,7 @@ fn emit_mov_rdx_rax() {
 
 fn win_fixup_add(uint64 patch_off, uint64 slot) {
     if win_iat_fixup_count >= 4096 {
-        write(2, "error: win_iat_fixups overflow (max 4096)\n", 42)
+        cap_overflow("too many Windows import fixups", 4096, 0)
         exit(1)
     }
     uint64 entry = win_iat_fixups + win_iat_fixup_count * 8
@@ -6526,7 +6564,7 @@ fn gen_expr(uint64 node) {
                     uint64 je_p = out_len
                     emit_u32_le(0)
                     if je_count >= 8 {
-                        write(2, "error: je_bodies overflow (max 8)\n", 34)
+                        cap_overflow("too many match arms", 8, 1)
                         exit(1)
                     }
                     uint64 slot = je_bodies + je_count * 8
@@ -6556,7 +6594,7 @@ fn gen_expr(uint64 node) {
             uint64 wbody = body_idx
             gen_expr(wbody)
             if match_end_fixup_count >= 256 {
-                write(2, "error: match_end_fixups overflow (max 256)\n", 43)
+                cap_overflow("too many match arms", 256, 1)
                 exit(1)
             }
             emit_byte(0xE9)
@@ -11348,7 +11386,7 @@ fn gen_stmt(uint64 node) {
         emit_u32_le(0)
         // Record fixup
         if ret_fixup_count >= 256 {
-            write(2, "error: ret_fixups overflow (max 256)\n", 37)
+            cap_overflow("too many returns", 256, 1)
             exit(1)
         }
         uint64 rentry = ret_fixups + ret_fixup_count * 4
@@ -11488,7 +11526,7 @@ fn gen_stmt(uint64 node) {
 
         // Push loop context
         if loop_depth >= 16 {
-            write(2, "error: loop_stack overflow (max 16)\n", 36)
+            cap_overflow("too many nested loops", 16, 1)
             exit(1)
         }
         uint64 lentry = loop_stack + loop_depth * 16
@@ -11555,7 +11593,7 @@ fn gen_stmt(uint64 node) {
         // loop would re-patch it, corrupting emitted code (M1/H9).
         if loop_depth == 0 { return }
         if break_fixup_count >= 256 {
-            write(2, "error: break_fixups overflow (max 256)\n", 39)
+            cap_overflow("too many break/continue statements", 256, 1)
             exit(1)
         }
         emit_byte(0xE9)
@@ -11637,7 +11675,7 @@ fn gen_stmt(uint64 node) {
                     uint64 je_p = out_len
                     emit_u32_le(0)
                     if je_count >= 8 {
-                        write(2, "error: je_bodies overflow (max 8)\n", 34)
+                        cap_overflow("too many match arms", 8, 1)
                         exit(1)
                     }
                     uint64 slot = je_bodies + je_count * 8
@@ -11671,7 +11709,7 @@ fn gen_stmt(uint64 node) {
             gen_block(wbody)
             // jmp end_match (stored in match_end_fixups)
             if match_end_fixup_count >= 256 {
-                write(2, "error: match_end_fixups overflow (max 256)\n", 43)
+                cap_overflow("too many match arms", 256, 1)
                 exit(1)
             }
             emit_byte(0xE9)
@@ -12130,6 +12168,7 @@ fn scan_assigns(uint64 node, uint64 target_offset) -> uint64 {
 @export
 fn gen_function(uint64 fn_node) {
     uint32 name_tok = ast_data1(fn_node)
+    cg_set_current_fn(name_tok)
 
     // Check annotation flags: bit 0 = noreturn, bit 1 = naked, bit 3 = extern
     uint32 ann_flags = ast_data4(fn_node)

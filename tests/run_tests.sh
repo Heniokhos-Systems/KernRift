@@ -18986,12 +18986,12 @@ TOTAL=$((TOTAL + 1))
   printf 'fn main() {\n    exit(T0)\n}\n'
 } > "$GROW_DIR/statics_over.kr"
 GROW_OVER=$($KRC $KRC_FLAGS "$GROW_DIR/statics_over.kr" -o "$GROW_DIR/statics_over" 2>&1)
-if echo "$GROW_OVER" | grep -qF "static_table overflow (max 2048)"; then
+if echo "$GROW_OVER" | grep -qF "too many statics and consts (max 2048 for the whole program)"; then
     PASS=$((PASS + 1))
     echo "  grow_static_table_over_cap: PASS (2100 statics refused with the documented message)"
 else
     FAIL=$((FAIL + 1))
-    echo "FAIL: grow_static_table_over_cap (expected 'static_table overflow (max 2048)', got '$(echo "$GROW_OVER" | tail -1)')"
+    echo "FAIL: grow_static_table_over_cap (expected 'too many statics and consts (max 2048 for the whole program)', got '$(echo "$GROW_OVER" | tail -1)')"
 fi
 
 # 7) The SAME cap from the array side. static_declare_array() carries its own
@@ -19003,12 +19003,12 @@ TOTAL=$((TOTAL + 1))
   printf 'fn main() {\n    B0[0] = 1\n    exit(B0[0] - 1)\n}\n'
 } > "$GROW_DIR/arrays_over.kr"
 GROW_AOVER=$($KRC $KRC_FLAGS "$GROW_DIR/arrays_over.kr" -o "$GROW_DIR/arrays_over" 2>&1)
-if echo "$GROW_AOVER" | grep -qF "static_table overflow (max 2048)"; then
+if echo "$GROW_AOVER" | grep -qF "too many statics and consts (max 2048 for the whole program)"; then
     PASS=$((PASS + 1))
     echo "  grow_static_array_over_cap: PASS (2100 array statics refused)"
 else
     FAIL=$((FAIL + 1))
-    echo "FAIL: grow_static_array_over_cap (expected 'static_table overflow (max 2048)', got '$(echo "$GROW_AOVER" | tail -1)')"
+    echo "FAIL: grow_static_array_over_cap (expected 'too many statics and consts (max 2048 for the whole program)', got '$(echo "$GROW_AOVER" | tail -1)')"
 fi
 
 # --- arr_elem_table is per-function again ----------------------------------

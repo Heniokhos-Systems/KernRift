@@ -556,7 +556,7 @@ fn emit_a64_blr(uint64 rn) {
 // Record an IAT fixup: patch_off = output offset of MOVZ instruction, slot = IAT slot index
 fn a64_win_fixup_add(uint64 patch_off, uint64 slot) {
     if a64_win_iat_fixup_count >= 4096 {
-        write(2, "error: a64_win_iat_fixups overflow (max 4096)\n", 46)
+        cap_overflow("too many Windows import fixups", 4096, 0)
         exit(1)
     }
     uint64 entry = a64_win_iat_fixups + a64_win_iat_fixup_count * 8
@@ -2269,7 +2269,7 @@ fn gen_expr_a64(uint64 node) {
                     uint64 beq_p = out_len
                     emit_a64(0x54000000)   // B.EQ +0 (patched)
                     if beq_count >= 8 {
-                        write(2, "error: beq_patches overflow (max 8)\n", 36)
+                        cap_overflow("too many match arms", 8, 1)
                         exit(1)
                     }
                     uint64 slot = beq_patches + beq_count * 8
@@ -2296,7 +2296,7 @@ fn gen_expr_a64(uint64 node) {
             uint64 wbody = body_idx
             gen_expr_a64(wbody)
             if match_end_fixup_count >= 256 {
-                write(2, "error: match_end_fixups overflow (max 256)\n", 43)
+                cap_overflow("too many match arms", 256, 1)
                 exit(1)
             }
             uint64 end_patch = out_len
@@ -5398,7 +5398,7 @@ fn gen_stmt_a64(uint64 node) {
 
         uint64 loop_start = out_len
         if loop_depth >= 16 {
-            write(2, "error: loop_stack overflow (max 16)\n", 36)
+            cap_overflow("too many nested loops", 16, 1)
             exit(1)
         }
         uint64 lentry = loop_stack + loop_depth * 16
@@ -5448,7 +5448,7 @@ fn gen_stmt_a64(uint64 node) {
         // prevents a dangling break_fixups entry being re-patched later). M1.
         if loop_depth == 0 { return }
         if break_fixup_count >= 256 {
-            write(2, "error: break_fixups overflow (max 256)\n", 39)
+            cap_overflow("too many break/continue statements", 256, 1)
             exit(1)
         }
         uint64 brk_off = out_len
@@ -5523,7 +5523,7 @@ fn gen_stmt_a64(uint64 node) {
                     uint64 beq_p = out_len
                     emit_a64(0x54000000)   // B.EQ +0 (patched)
                     if beq_count >= 8 {
-                        write(2, "error: beq_patches overflow (max 8)\n", 36)
+                        cap_overflow("too many match arms", 8, 1)
                         exit(1)
                     }
                     uint64 slot = beq_patches + beq_count * 8
@@ -5555,7 +5555,7 @@ fn gen_stmt_a64(uint64 node) {
             // genuine `break` in the arm body still reaches the enclosing
             // loop's patch pass). H9.
             if match_end_fixup_count >= 256 {
-                write(2, "error: match_end_fixups overflow (max 256)\n", 43)
+                cap_overflow("too many match arms", 256, 1)
                 exit(1)
             }
             uint64 end_patch = out_len
@@ -6098,6 +6098,7 @@ fn emit_program_header_a64(uint64 text_size) {
 @export
 fn gen_function_a64(uint64 fn_node) {
     uint32 name_tok = ast_data1(fn_node)
+    cg_set_current_fn(name_tok)
 
     // Check annotation flags: bit 0 = noreturn, bit 1 = naked, bit 3 = extern
     uint32 ann_flags = ast_data4(fn_node)
@@ -6437,7 +6438,7 @@ fn gen_function_a64(uint64 fn_node) {
                         emit_a64(0xF9400000 | (31 << 5) | 0) // ldr x0, [sp, #0] placeholder
                         emit_a64_str(0, 31, a64_var_base + poff)
                         if stack_pidx_a >= 32 {
-                            write(2, "error: a64_overflow_patches overflow (max 32)\n", 46)
+                            cap_overflow("too many overflow-checked operations", 32, 1)
                             exit(1)
                         }
                         uint64 fop_entry_a = a64_overflow_patches + stack_pidx_a * 8
@@ -6467,7 +6468,7 @@ fn gen_function_a64(uint64 fn_node) {
                         // float overflowed too.
                         uint64 opi = stack_pidx_a
                         if opi >= 32 {
-                            write(2, "error: a64_overflow_patches overflow (max 32)\n", 46)
+                            cap_overflow("too many overflow-checked operations", 32, 1)
                             exit(1)
                         }
                         uint64 op_entry = a64_overflow_patches + opi * 8

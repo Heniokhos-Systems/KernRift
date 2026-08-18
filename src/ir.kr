@@ -5652,6 +5652,9 @@ fn ir_defer_emit_all() {
 // ---------------------------------------------------------------------------
 
 fn ir_lower_function(uint64 fn_node) {
+    // Named first, so a capacity diagnostic raised anywhere below can say which
+    // function it is talking about.
+    cg_set_current_fn(ast_data1(fn_node))
     ir_reset()
     ir_var_map_init()
     ir_defer_reset()
