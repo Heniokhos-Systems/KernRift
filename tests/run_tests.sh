@@ -21223,6 +21223,74 @@ else
     echo "FAIL: arx_page_congruence (no artifact)"; FAIL=$((FAIL + 1))
 fi
 
+# W^X AT THE CONTAINER LEVEL: code and statics in SEPARATE segments.
+#
+# One R|X segment over the whole payload is what this emitted for as long as the
+# format existed, and it is why ApexRift's doc called the per-segment flags
+# "recorded, not enforced (no MMU)". The MMU stopped being the reason -- that
+# kernel enforces page permissions now and found it could not enforce these,
+# because the single segment claims R|X over memory the program WRITES. krc
+# assigns cli_argc before anything else, so honouring the flags faulted it on
+# its first instruction.
+#
+# THE SOURCE MUST HAVE A STATIC, or this row tests nothing: with no statics the
+# producer collapses the table back to one entry (correctly -- a zero-length
+# segment describes memory that is not there), which is the case the row above
+# already covers.
+#
+# The two claims that matter are the NEGATIVE ones, and they are checked as bit
+# tests rather than as equality on 5 and 3: seg0 must not be writable and seg1
+# must not be executable. An emitter that set every bit on both segments would
+# satisfy "flags are present" and give W^X in name only.
+TOTAL=$((TOTAL + 1))
+AXW_SRC=$(mktemp /tmp/krc_arxwx_XXXX.kr)
+printf 'static uint64 axw_counter = 0\nfn main() -> uint64 {\n    axw_counter = axw_counter + 7\n    return axw_counter\n}\n' > "$AXW_SRC"
+AXW_BIN=/tmp/krc_arxwx_$$
+rm -f "$AXW_BIN"
+$KRC $KRC_FLAGS "$AXW_SRC" -o "$AXW_BIN" --arch=x86_64 --target=none --emit=arx >/dev/null 2>&1
+if [ ! -f "$AXW_BIN" ]; then
+    echo "FAIL: arx_wx_two_segments (no artifact produced)"; FAIL=$((FAIL + 1))
+else
+    axw_bad=""
+    axw_tsz=$(ue_u64 "$AXW_BIN" 80)
+    [ "$axw_tsz" = "80" ] || axw_bad="$axw_bad table_size(want 80, got $axw_tsz)"
+    # segment 0 at 88, segment 1 at 128
+    axw_f0=$(ue_u32 "$AXW_BIN" 120); axw_f1=$(ue_u32 "$AXW_BIN" 160)
+    axw_m0=$(ue_u64 "$AXW_BIN" 96);  axw_m1=$(ue_u64 "$AXW_BIN" 136)
+    axw_s0=$(ue_u64 "$AXW_BIN" 112); axw_s1=$(ue_u64 "$AXW_BIN" 152)
+    axw_o1=$(ue_u64 "$AXW_BIN" 128)
+    axw_img=$(ue_u64 "$AXW_BIN" 32)
+    # R and X set, W CLEAR on the code segment.
+    [ $((axw_f0 & 1)) -eq 1 ] || axw_bad="$axw_bad seg0_not_readable"
+    [ $((axw_f0 & 4)) -eq 4 ] || axw_bad="$axw_bad seg0_not_executable"
+    [ $((axw_f0 & 2)) -eq 0 ] || axw_bad="$axw_bad SEG0_WRITABLE(flags=$axw_f0)"
+    # R and W set, X CLEAR on the data segment.
+    [ $((axw_f1 & 1)) -eq 1 ] || axw_bad="$axw_bad seg1_not_readable"
+    [ $((axw_f1 & 2)) -eq 2 ] || axw_bad="$axw_bad seg1_not_writable"
+    [ $((axw_f1 & 4)) -eq 0 ] || axw_bad="$axw_bad SEG1_EXECUTABLE(flags=$axw_f1)"
+    # Both segments must start on a page, or a loader cannot give them
+    # different permissions however correct the flags are.
+    [ "$axw_m0" = "0" ] || axw_bad="$axw_bad seg0_mem_off($axw_m0)"
+    [ $((axw_m1 % 4096)) -eq 0 ] || axw_bad="$axw_bad seg1_mem_off_unaligned($axw_m1)"
+    [ $((axw_s0 % 4096)) -eq 0 ] || axw_bad="$axw_bad seg0_size_unpaged($axw_s0)"
+    # Adjacent, not overlapping, and together exactly the image.
+    [ "$axw_m1" = "$axw_s0" ] || axw_bad="$axw_bad gap_or_overlap(seg0 ends $axw_s0, seg1 starts $axw_m1)"
+    [ "$axw_img" = "$((axw_s0 + axw_s1))" ] || axw_bad="$axw_bad image_size($axw_img != $axw_s0 + $axw_s1)"
+    # The arm64 ADRP congruence has to survive on the SECOND segment too; it is
+    # the one whose file_off and mem_off both moved.
+    [ $(( (axw_o1 - axw_m1) % 4096 )) -eq 0 ] || axw_bad="$axw_bad seg1_congruence($axw_o1 - $axw_m1)"
+    # And it must be non-empty, or the source had no statics and every check
+    # above passed on a segment describing nothing.
+    [ "$axw_s1" -gt 0 ] || axw_bad="$axw_bad seg1_empty(source had no statics?)"
+    if [ -z "$axw_bad" ]; then
+        PASS=$((PASS + 1))
+        echo "  arx_wx_two_segments: PASS (R-X $axw_s0 bytes @0, RW- $axw_s1 bytes @$axw_m1)"
+    else
+        echo "FAIL: arx_wx_two_segments:$axw_bad"; FAIL=$((FAIL + 1))
+    fi
+fi
+rm -f "$AXW_SRC" "$AXW_BIN"
+
 # The checksum, recomputed by an INDEPENDENT implementation.
 #
 # Deliberately NOT by calling the compiler: recomputing with the emitter's own

@@ -61,7 +61,9 @@ fn emit_arx_headers(uint64 arch_id, uint64 entry_rel, uint64 payload) -> uint64 
     emit_u16_le(1)                  // flags: bit 0 PIC. Always set — this tree
                                     // emits nothing else, and the loader
                                     // refuses a clear bit rather than guessing.
-    emit_u32_le(1)                  // table_count
+    emit_u32_le(1)                  // table_count: one SEGMENT table. It holds
+                                    // TWO entries now; the count is tables, not
+                                    // segments.
     emit_u64_le(64)                 // table_off: directory sits right after the
                                     // header, inside the reserved region
     emit_u64_le(entry_rel)
@@ -81,21 +83,48 @@ fn emit_arx_headers(uint64 arch_id, uint64 entry_rel, uint64 payload) -> uint64 
                                     // that stops an older loader silently
                                     // mis-loading a newer file.
     emit_u64_le(88)                 // off: 64 header + 24 directory
-    emit_u64_le(40)                 // size: one segment entry
+    emit_u64_le(80)                 // size: TWO segment entries. Patched down
+                                    // to 40 when the payload has no statics --
+                                    // see patch_arx_headers.
 
-    // ---- segment entry, 40 bytes ----
+    // ---- TWO segments: R|X code, R|W data --------------------------------
+    //
+    // This emitted ONE R|X segment over the whole payload for as long as the
+    // format existed, and ApexRift's format doc called the per-segment flags
+    // "recorded, not enforced (no MMU)". The MMU stopped being the reason: that
+    // kernel enforces page permissions now, and discovered it could not enforce
+    // these, because the one segment it was handed claims R|X over memory the
+    // program WRITES. krc assigns cli_argc before it does anything else, so
+    // honouring the flags as emitted faulted it on its first instruction.
+    //
+    // The split is the same one --emit=uefi makes between .text and .data, at
+    // the same place and for the same reason, and main.kr now takes the page
+    // boundary for both. Sizes are zero here and patched once the payload
+    // exists, exactly like image_size.
+    //
+    // ---- segment 0: code + string literals, 40 bytes ----
     emit_u64_le(ARX_HDR_REGION)     // file_off — the congruence constraint
     emit_u64_le(0)                  // mem_off
-    emit_u64_le(payload)            // filesz
-    emit_u64_le(payload)            // memsz (no bss today)
+    emit_u64_le(0)                  // filesz  — patched
+    emit_u64_le(0)                  // memsz   — patched
     emit_u32_le(5)                  // flags R|X. The X bit is not cosmetic:
                                     // the loader requires the entry to land in
                                     // an executable segment and refuses
                                     // otherwise.
     emit_u32_le(0)                  // align: RESERVED, must be 0
 
+    // ---- segment 1: static data, 40 bytes ----
+    emit_u64_le(0)                  // file_off — patched
+    emit_u64_le(0)                  // mem_off  — patched
+    emit_u64_le(0)                  // filesz   — patched
+    emit_u64_le(0)                  // memsz    — patched
+    emit_u32_le(3)                  // flags R|W. NOT X: a program that can
+                                    // write its data and execute it has W^X in
+                                    // name only.
+    emit_u32_le(0)                  // align: RESERVED, must be 0
+
     // ---- pad the rest of the region ----
-    uint64 i = 128
+    uint64 i = 168
     while i < ARX_HDR_REGION { emit_byte(0); i = i + 1 }
     return ARX_HDR_REGION
 }
@@ -119,14 +148,34 @@ fn emit_arx_headers(uint64 arch_id, uint64 entry_rel, uint64 payload) -> uint64 
 // recomputed the checksum, which meant a container the compiler emitted could
 // not run as emitted -- and a compiler that cannot emit a runnable copy of a
 // services program cannot bootstrap one.
-fn patch_arx_headers(uint64 entry_rel, uint64 payload, uint64 wants_services) {
+fn patch_arx_headers(uint64 entry_rel, uint64 payload, uint64 wants_services,
+                     uint64 data_rel) {
     uint64 fl = 1                   // bit 0 PIC, always
     if wants_services != 0 { fl = fl | 2 }
     patch_u16(10, fl)               // header flags
     patch_u64(24, entry_rel)        // header entry
     patch_u64(32, payload)          // header image_size
-    patch_u64(88 + 16, payload)     // segment filesz
-    patch_u64(88 + 24, payload)     // segment memsz
+
+    // Segment 0 ends where the statics begin. main.kr took a page boundary
+    // there, so both segments are page-granular and a loader can give them
+    // different permissions.
+    patch_u64(88 + 16, data_rel)            // seg0 filesz
+    patch_u64(88 + 24, data_rel)            // seg0 memsz
+
+    // Segment 1 covers the rest. file_off keeps the (file_off - mem_off) % 4096
+    // congruence the arm64 ADRP arithmetic depends on: both offsets shift by
+    // the same page-aligned data_rel, so the difference is unchanged at
+    // ARX_HDR_REGION.
+    patch_u64(128 + 0, ARX_HDR_REGION + data_rel)   // seg1 file_off
+    patch_u64(128 + 8, data_rel)                    // seg1 mem_off
+    patch_u64(128 + 16, payload - data_rel)         // seg1 filesz
+    patch_u64(128 + 24, payload - data_rel)         // seg1 memsz
+
+    // A PAYLOAD WITH NO STATICS would leave a zero-length second segment. The
+    // loader tolerates one, but describing memory that is not there invites a
+    // reader -- human or machine -- to reason about a segment with no bytes. So
+    // the table shrinks to the one real entry instead.
+    if payload == data_rel { patch_u64(80, 40) }
 }
 
 // FNV-1a over the finished file with the 8 checksum bytes treated as zero, then

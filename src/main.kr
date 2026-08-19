@@ -4585,7 +4585,17 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
     // already in the buffer, cannot rewind, and pays for it by re-emitting
     // them and re-resolving every displacement. Cost here is at most 4095
     // zero bytes.
+    // --emit=arx (10) wants the same page boundary, for the same reason one
+    // level down: ApexRift maps a loaded image and enforces per-segment R/W/X,
+    // and page attributes are per page. Without this the statics share their
+    // first page with the tail of the code, so the container cannot describe
+    // one as writable and the other as executable without lying about one of
+    // them. A single R|X segment over both -- which is what this emitted before
+    // -- is the lie that made the flags unenforceable.
     if emit_mode == 9 {
+        while (codegen_output_len() & 0xFFF) != 0 { emit_byte(0) }
+    }
+    if emit_mode == 10 {
         while (codegen_output_len() & 0xFFF) != 0 { emit_byte(0) }
     }
     uint64 data_start = codegen_output_len()
@@ -5381,7 +5391,10 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
             write(2, axe_e, str_len(axe_e))
             exit(1)
         }
-        patch_arx_headers(entry_off - header_size, ax_payload, arx_entry_takes_services)
+        // data_start is a FILE offset; the container speaks in payload-relative
+        // offsets, exactly as it does for the entry.
+        patch_arx_headers(entry_off - header_size, ax_payload,
+                          arx_entry_takes_services, data_start - header_size)
         // LAST, and it must be: the checksum covers every byte, so any patch
         // after it invalidates it silently.
         arx_patch_checksum(codegen_output_len())
