@@ -93,6 +93,11 @@ static u64 idt_cs = 0
 // reporter runs on a faulted machine and must not allocate.
 static u8[32] idt_numbuf
 
+// Where the 32 stubs jump. Zero means the built-in reporter, which halts.
+// A kernel that can SURVIVE a fault -- one with a user process to kill, or a
+// scheduler to go back to -- sets this instead; see idt_set_common_handler.
+static u64 idt_common_fn = 0
+
 // --- reading CS -------------------------------------------------------------
 
 // `mov ax, cs` as raw bytes: the assembler has no mnemonic for a segment-register
@@ -187,7 +192,8 @@ fn idt_stub_addr(u64 vec) -> u64 {
 
 // Assemble all 32 stubs. Called by idt_init.
 fn idt_build_stubs() {
-    u64 common = fn_addr("isr_common")
+    u64 common = idt_common_fn
+    if common == 0 { common = fn_addr("isr_common") }
     u64 v = 0
     while v < IDT_CPU_VECTORS {
         u64 p = idt_stubs + (v * IDT_GATE_SIZE)
@@ -325,6 +331,36 @@ fn idt_install_default_handlers() {
         idt_set_handler(v, idt_stub_addr(v))
         v = v + 1
     }
+}
+
+// Send every stub to YOUR handler instead of the halting reporter.
+//
+// The default is correct for a program: a fault means the machine is in a state
+// nobody designed, and continuing from it invents behaviour. It is wrong for a
+// kernel that runs other people's code -- there, a user program's #PF is a
+// routine event with an obvious response (kill it) and halting the machine
+// hands any unprivileged program a reset button.
+//
+// This module cannot make that decision, because it does not know whether
+// there is anything to return TO. So it stays out of the way: point this at a
+// handler and the stubs jump there; pass 0 to go back to halting.
+//
+// THE CONTRACT YOUR HANDLER MUST MEET is isr_common's, documented above it in
+// full, and it is not negotiable -- the stubs are already assembled around it:
+//
+//   * `@naked`. A prologue moves RSP and every offset below shifts with it.
+//   * The frame is at [rsp+0x100] vector, +0x108 error code, +0x110 RIP,
+//     +0x118 CS, +0x120 RFLAGS, +0x128 RSP, +0x130 SS.
+//   * RSP is 8 mod 16 on entry, so a plain `call` is correctly aligned.
+//
+// Read CS to learn the privilege level the fault came from: `cs & 3` is the
+// CPL, and 3 means a user process faulted rather than the kernel.
+//
+// Safe to call after idt_init and after idt_load: only the stubs' jump target
+// changes, and the gates already point at the stubs.
+fn idt_set_common_handler(u64 addr) {
+    idt_common_fn = addr
+    idt_build_stubs()
 }
 
 // Build the pseudo-descriptor and `lidt` it.

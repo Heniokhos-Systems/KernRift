@@ -5884,6 +5884,140 @@ else
 fi
 rm -f "$DIR/../idtflt_in_$$.kr" "$DIR/../idtflt_tmp_$$.kr" "/tmp/idtflt_$$.log"
 
+# idt_set_common_handler: the stubs must jump to YOUR handler instead of the
+# built-in reporter, and your handler must be able to read the frame the stubs
+# built.
+#
+# THE ASSERTION THAT CARRIES THIS ROW IS `cs=`, not the custom marker. A
+# retarget that worked but handed the handler a frame at the wrong offset would
+# still print MINE, so the handler reads [rsp+0x118] and the test demands the
+# LIVE code selector -- which is 0x8 under multiboot and 0x18 from the reset
+# vector. A hardcoded offset that happens to be right for one image form fails
+# the other, and reading the neighbouring slots gives RIP (0x1xxxxx) or RFLAGS
+# (0x2) instead, neither of which can be mistaken for a selector. That offset is
+# the whole reason a downstream kernel can tell a user fault from a kernel one.
+#
+# The absence of EXCEPTION is asserted too: without it a hook that ADDED a
+# handler rather than replacing one would pass, and the default halts, which is
+# exactly the behaviour a kernel installs this to escape.
+TOTAL=$((TOTAL + 1))
+cat > "$DIR/../idthk_in_$$.kr" <<'IDTHEOF'
+import "std/idt.kr"
+static u8[32] idthk_buf
+@noreturn
+fn idthk_report(u64 vec, u64 err, u64 rip, u64 cs) {
+    u64 b = idthk_buf
+    serial_puts("MINE vec=")
+    cstr_u64_dec(b, 32, vec)
+    serial_puts(b)
+    serial_puts(" err=")
+    cstr_u64_hex0x(b, 32, err, 0)
+    serial_puts(b)
+    serial_puts(" cs=")
+    cstr_u64_hex0x(b, 32, cs, 0)
+    serial_puts(b)
+    serial_puts(" rip=")
+    cstr_u64_hex0x(b, 32, rip, 0)
+    serial_puts(b)
+    serial_putc(10)
+    halt_forever()
+}
+@naked
+fn idthk_common() {
+    u64 vec = 0
+    u64 err = 0
+    u64 rip = 0
+    u64 cs = 0
+    asm { "mov rax, [rsp+0x100]" } out(rax -> vec)
+    asm { "mov rax, [rsp+0x108]" } out(rax -> err)
+    asm { "mov rax, [rsp+0x110]" } out(rax -> rip)
+    asm { "mov rax, [rsp+0x118]" } out(rax -> cs)
+    idthk_report(vec, err, rip, cs)
+}
+fn main() -> uint32 {
+    serial_init()
+    idt_init()
+    idt_install_default_handlers()
+    idt_set_common_handler(__HOOK__)
+    idt_load()
+    u64 bad = 0x0000700000000000
+    store64(bad, 1)
+    serial_putsn("NOFAULT")
+    halt_forever()
+    return 0
+}
+IDTHEOF
+if ! command -v qemu-system-x86_64 >/dev/null 2>&1; then
+    PASS=$((PASS + 1)); echo "  idt_common_handler_hook: PASS (SKIPPED -- no qemu-system-x86_64)"
+else
+    idthk_ok=1
+    idthk_notes=""
+    # "own" installs the hook; "back" passes 0 and must fall back to the
+    # built-in reporter -- so the row also covers un-installing, which is the
+    # half a one-way test would leave to hope.
+    for idthk_case in own back; do
+        if [ "$idthk_case" = "own" ]; then
+            sed 's/__HOOK__/fn_addr("idthk_common")/' "$DIR/../idthk_in_$$.kr" > "$DIR/../idthk_tmp_$$.kr"
+        else
+            sed 's/__HOOK__/0/' "$DIR/../idthk_in_$$.kr" > "$DIR/../idthk_tmp_$$.kr"
+        fi
+        idthk_k="/tmp/idthk_k_$$.img"; idthk_b="/tmp/idthk_b_$$.img"
+        if ! $KRC --target=none --arch=x86_64 --emit=image --load-addr=0x100000 \
+                  --stack-top=0x90000 "$DIR/../idthk_tmp_$$.kr" -o "$idthk_k" >/dev/null 2>&1 \
+        || ! $KRC --target=none --arch=x86_64 --emit=image --reset-vector \
+                  --stack-top=0x90000 "$DIR/../idthk_tmp_$$.kr" -o "$idthk_b" >/dev/null 2>&1; then
+            idthk_ok=0; idthk_notes="$idthk_notes $idthk_case:compile"
+            continue
+        fi
+        idthk_hi=$((1048576 + $(wc -c < "$idthk_k")))
+        for idthk_form in kernel bios; do
+            if [ "$idthk_case" = "own" ]; then idthk_mark="MINE"; else idthk_mark="EXCEPTION"; fi
+            if [ "$idthk_form" = "kernel" ]; then
+                idt_boot_wait -kernel "$idthk_k" "/tmp/idthk_$$.log" "$idthk_mark"
+                idthk_cs="0x8"
+            else
+                idt_boot_wait -bios "$idthk_b" "/tmp/idthk_$$.log" "$idthk_mark"
+                idthk_cs="0x18"
+            fi
+            idthk_txt=$(tr -d '\r' < "/tmp/idthk_$$.log" 2>/dev/null)
+            if [ "$idthk_case" = "back" ]; then
+                # Passing 0 must restore the default, and must NOT leave the
+                # custom handler reachable.
+                case "$idthk_txt" in
+                    *"EXCEPTION 14 (#PF) err=0x2 rip=0x"*) ;;
+                    *) idthk_ok=0; idthk_notes="$idthk_notes [back/$idthk_form: no default report]" ;;
+                esac
+                case "$idthk_txt" in
+                    *MINE*) idthk_ok=0; idthk_notes="$idthk_notes [back/$idthk_form: hook still live]" ;;
+                esac
+                continue
+            fi
+            case "$idthk_txt" in
+                *"MINE vec=14 err=0x2 cs=$idthk_cs rip=0x"*) ;;
+                *) idthk_ok=0
+                   idthk_line=$(printf '%s' "$idthk_txt" | grep -o 'MINE .*' | head -1)
+                   idthk_notes="$idthk_notes [own/$idthk_form: '${idthk_line:-<silent: triple fault?>}' want cs=$idthk_cs]"
+                   continue ;;
+            esac
+            case "$idthk_txt" in
+                *EXCEPTION*) idthk_ok=0; idthk_notes="$idthk_notes [own/$idthk_form: default reporter also ran]" ;;
+            esac
+            idthk_rip=$(printf '%s' "$idthk_txt" | sed -n 's/.*MINE .* rip=\(0x[0-9a-f]*\).*/\1/p' | head -1)
+            idthk_ripd=$((idthk_rip))
+            if [ "$idthk_ripd" -lt 1048576 ] || [ "$idthk_ripd" -ge "$idthk_hi" ]; then
+                idthk_ok=0; idthk_notes="$idthk_notes [own/$idthk_form: rip $idthk_rip outside payload]"
+            fi
+        done
+        rm -f "$idthk_k" "$idthk_b"
+    done
+    if [ "$idthk_ok" = "1" ]; then
+        PASS=$((PASS + 1)); echo "  idt_common_handler_hook: PASS (own handler sees vec/err/cs/rip; 0 restores the default; -kernel and -bios)"
+    else
+        FAIL=$((FAIL + 1)); echo "FAIL: idt_common_handler_hook:$idthk_notes"
+    fi
+fi
+rm -f "$DIR/../idthk_in_$$.kr" "$DIR/../idthk_tmp_$$.kr" "/tmp/idthk_$$.log"
+
 # --- std/gzip.kr: output must satisfy a REAL gunzip, not our own reader ---
 #
 # A self-written decoder would agree with a self-written encoder about a shared
