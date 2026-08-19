@@ -4571,6 +4571,23 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
     // detection on newer kernels.
     while (codegen_output_len() & 7) != 0 { emit_byte(0) }
     while (codegen_output_len() & 7) != 0 { emit_byte(0) }
+    // --emit=uefi wants a PAGE here, not eight bytes, and it has to be taken
+    // BEFORE data_start is read. The PE declares .text over the code and
+    // .data over the statics, and both sections keep PointerToRawData ==
+    // VirtualAddress so that file offset == RVA holds for the whole artifact
+    // (format_pe.kr's C1). Section boundaries are page boundaries, so the
+    // statics have to begin on one.
+    //
+    // Doing it here is the entire reason this split is cheap. The statics are
+    // written once, at an address the fixup resolvers below then bake, and
+    // the two section headers are a DESCRIPTION of bytes that never move.
+    // The --emit=pe arm64 path decides the same thing after the statics are
+    // already in the buffer, cannot rewind, and pays for it by re-emitting
+    // them and re-resolving every displacement. Cost here is at most 4095
+    // zero bytes.
+    if emit_mode == 9 {
+        while (codegen_output_len() & 0xFFF) != 0 { emit_byte(0) }
+    }
     uint64 data_start = codegen_output_len()
     emit_static_data()
     // For LKM output (emit_mode 7), DON'T bake static-var displacements
@@ -5227,10 +5244,14 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
         // the arm is written before it has anything to patch rather than
         // added alongside the fields that need it.
         //
-        // FIVE FIELDS ARE PATCHED HERE (Task 2), all through
-        // patch_uefi_headers so that this file never learns a header offset:
-        // SizeOfCode, AddressOfEntryPoint, SizeOfImage, the section's
-        // VirtualSize and its SizeOfRawData. Three of the five are boot
+        // TEN FIELDS ARE PATCHED HERE, all through patch_uefi_headers so
+        // that this file never learns a header offset: SizeOfCode,
+        // SizeOfInitializedData, AddressOfEntryPoint, SizeOfImage, .text's
+        // VirtualSize and SizeOfRawData, and .data's VirtualSize,
+        // VirtualAddress, SizeOfRawData and PointerToRawData. data_start is
+        // handed over for the same reason -- it is the only number the
+        // header work needs that this file already knows. Three of them are
+        // boot
         // oracles rather than bookkeeping — a VirtualSize that is too small
         // and a SizeOfRawData of 0 each raise a loud fault whose dump names
         // EntryPoint= and ImageBase=, and the two out-of-payload
@@ -5289,7 +5310,7 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
         uint64 uf_payload = codegen_output_len() - header_size
         uint64 uf_raw = (uf_payload + 0xFFF) & ~0xFFF
         while codegen_output_len() < header_size + uf_raw { emit_byte(0) }
-        uint64 uf_image = patch_uefi_headers(entry_off, uf_payload)
+        uint64 uf_image = patch_uefi_headers(entry_off, uf_payload, data_start)
         uint64 uf_size = codegen_output_len()
         if uf_size != uf_image {
             // The two numbers are computed from the same payload length by

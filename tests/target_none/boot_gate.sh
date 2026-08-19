@@ -875,7 +875,7 @@ PY
 # original, which is not what the row wanted -- but a control that expects the
 # pristine verdict stays GREEN while printing a claim about a byte it never
 # changed. That is measured, not hypothetical: mislocating UEFI_OFF_SECTCHARS to
-# offset 6000 left L7_control_read_only_section_still_runs passing and asserting
+# offset 6000 left L7_control_statics_in_code_section_still_runs passing and asserting
 # "the same byte change that makes the arm64 twin abort".
 #
 # Naming the OLD value turns a mislocated offset into a refusal, which
@@ -2518,7 +2518,7 @@ uefi_boot() {
 # the shape a RAN-first verdict scores as success. That shape is not
 # hypothetical — it is how the read-only-section experiment presents on arm64
 # (first line and computed value on the wire, then a Synchronous Exception on
-# the store), and it is L8_control_read_only_section_printed_then_faulted below.
+# the store), and it is L8_control_statics_in_code_section_printed_then_faulted below.
 # PRINTED_THEN_FAULTED is therefore its OWN outcome and is tested FIRST of the
 # three, so it can be absorbed into neither RAN nor LOADED_FAULTED. If you
 # "simplify" this back to five by folding it into either, that control reds —
@@ -2706,7 +2706,12 @@ uefi_status_is() { [ -n "$UEFI_OURS" ] && grep -qa "failed to load Boot$UEFI_OUR
 #      "the offset is right"; see img_patch's header for the row that was
 #      measured passing on a patch that landed in padding.
 # =============================================================================
-# PE32+ field offsets in an --emit=uefi artifact, one section, e_lfanew = 0x40.
+# PE32+ field offsets in an --emit=uefi artifact, TWO sections, e_lfanew = 0x40.
+# The artifact grew a .data section: the statics used to live in .text and a
+# CODE-flagged section is mapped read-only by AAVMF 2025.11 whatever its WRITE
+# bit says, so every store to a static faulted. .text is RX now and .data is RW.
+# The .text offsets below are unchanged -- its header is still the first entry
+# at 0x148 -- and the .data ones are that entry plus 40.
 UEFI_OFF_NSECTIONS=70       # 0x46 u16
 UEFI_OFF_MACHINE=68         # 0x44 u16
 UEFI_OFF_SIZEOFOPTHDR=84    # 0x54 u16
@@ -2715,10 +2720,20 @@ UEFI_OFF_ENTRY=104          # 0x68 u32
 UEFI_OFF_SIZEOFIMAGE=144    # 0x90 u32
 UEFI_OFF_SUBSYSTEM=156      # 0x9C u16
 UEFI_OFF_NUMRVA=196         # 0xC4 u32
-UEFI_OFF_VIRTUALSIZE=336    # 0x150 u32
-UEFI_OFF_SECTCHARS=364      # 0x16C u32
-UEFI_OFF_SIZEOFRAWDATA=344  # 0x158 u32
-UEFI_SECTCHARS=3758096416   # 0xE0000020 -- read, write, execute, code
+UEFI_OFF_VIRTUALSIZE=336    # 0x150 u32  .text VirtualSize
+UEFI_OFF_SECTCHARS=364      # 0x16C u32  .text Characteristics
+UEFI_OFF_SIZEOFRAWDATA=344  # 0x158 u32  .text SizeOfRawData
+UEFI_SECTCHARS=1610612768   # 0x60000020 -- code, execute, read. NO write: see
+                            # the note above, and note that clearing the write
+                            # bit HERE is no longer a meaningful mutation,
+                            # which is why the read-only controls moved to
+                            # .data.
+UEFI_OFF_DATA_VIRTUALSIZE=376   # 0x178 u32  .data VirtualSize
+UEFI_OFF_DATA_VA=380            # 0x17C u32  .data VirtualAddress
+UEFI_OFF_DATA_SIZEOFRAWDATA=384 # 0x180 u32  .data SizeOfRawData
+UEFI_OFF_DATA_PTRRAW=388        # 0x184 u32  .data PointerToRawData
+UEFI_OFF_DATA_SECTCHARS=404     # 0x194 u32  .data Characteristics
+UEFI_DATA_SECTCHARS=3221225536  # 0xC0000040 -- initialised data, read, write
 leg7() {
     echo "--- L7: x86_64 UEFI application under OVMF (q35) ---"
     UEFI_BATCH_POS=""
@@ -2733,8 +2748,12 @@ leg7() {
         bad "L7_uefi_x86_boots" "uefi_sentinel_x86.kr did not build as a UEFI application"; return
     fi
     # The mutants are anchored on the ARTIFACT, not on the emitter's source: if
-    # this is not a one-section PE32+ with the DOS stub the offsets above assume,
-    # every patch below lands somewhere else and the controls test nothing.
+    # this is not the two-section PE32+ with the DOS stub the offsets above
+    # assume, every patch below lands somewhere else and the controls test
+    # nothing. NumberOfSections is checked for exactly 2 rather than "at least
+    # 2": the .data offsets are the first section header plus 40, so a third
+    # section would leave them pointing at .data while the leg believed
+    # otherwise, and dropping back to 1 would put them in the header padding.
     # SizeOfOptionalHeader IS PART OF THIS (Task 3 review, Minor 4): the three
     # section-table offsets (336/344/364) are `0x58 + SizeOfOptionalHeader + k`,
     # so a 240 that became something else moves all three while
@@ -2745,10 +2764,22 @@ leg7() {
     soh=$(mb_u32 "$img" "$UEFI_OFF_SIZEOFOPTHDR") || soh="READFAIL"
     # mb_u32 reads 4 bytes; NumberOfSections, Magic and SizeOfOptionalHeader
     # are u16, so mask.
-    if [ "$nsec" = READFAIL ] || [ $(( nsec & 0xFFFF )) != 1 ] \
+    if [ "$nsec" = READFAIL ] || [ $(( nsec & 0xFFFF )) != 2 ] \
        || [ "$magic" = READFAIL ] || [ $(( magic & 0xFFFF )) != 523 ] \
        || [ "$soh" = READFAIL ] || [ $(( soh & 0xFFFF )) != 240 ]; then
-        bad "L7_uefi_x86_boots" "the artifact is not the one-section PE32+ these offsets assume (NumberOfSections=$nsec Magic=$magic SizeOfOptionalHeader=$soh) -- every control below would patch the wrong bytes"; return
+        bad "L7_uefi_x86_boots" "the artifact is not the two-section PE32+ these offsets assume (NumberOfSections=$nsec Magic=$magic SizeOfOptionalHeader=$soh) -- every control below would patch the wrong bytes"; return
+    fi
+    # .data has to BE there and be RW, or the read-only control below patches a
+    # field that is not what it thinks and the leg still goes green.
+    local dchars dva dptr
+    dchars=$(mb_u32 "$img" "$UEFI_OFF_DATA_SECTCHARS") || dchars="READFAIL"
+    dva=$(mb_u32 "$img" "$UEFI_OFF_DATA_VA") || dva="READFAIL"
+    dptr=$(mb_u32 "$img" "$UEFI_OFF_DATA_PTRRAW") || dptr="READFAIL"
+    if [ "$dchars" != "$UEFI_DATA_SECTCHARS" ]; then
+        bad "L7_uefi_x86_boots" "the second section's characteristics are $dchars, not $UEFI_DATA_SECTCHARS (0xC0000040) -- L7_control_statics_in_code_section_still_runs would be patching the wrong bytes"; return
+    fi
+    if [ "$dva" = READFAIL ] || [ "$dva" != "$dptr" ]; then
+        bad "L7_uefi_x86_boots" ".data VirtualAddress ($dva) != PointerToRawData ($dptr): the delta-0 geometry this format depends on does not hold for the second section"; return
     fi
     # VirtualSize is READ rather than written down: the two rows that name it
     # would otherwise carry a number that goes stale the next time the sentinel
@@ -2814,10 +2845,20 @@ leg7() {
             bad "L7_control_rva_count_inconsistent_not_loaded" "NOT_LOADED but not with 'Unsupported': '$(uefi_first_match "$UEFI_SER" 'failed to load Boot[0-9A-Fa-f]{4}[^[:cntrl:]]*')'"
         fi
     fi
-    if uefi_control L7_control_size_of_image_too_small_not_loaded x86 "$img" x7_szimg NOT_LOADED \
-            "SizeOfImage 8192 -> 4096, i.e. smaller than the section it must cover" "u32was:$UEFI_OFF_SIZEOFIMAGE:8192:4096"; then
+    # SizeOfImage is READ, not written down. It was the literal 8192, which was
+    # right for a one-section artifact and became 12288 the moment .data
+    # arrived -- so the `u32was` guard refused the patch and the control
+    # reported "never ran". That is the guard working, and the fix is to derive
+    # the old value the same way this leg already derives VirtualSize a few
+    # lines up, rather than to write down a second number that goes stale.
+    local szimg
+    szimg=$(mb_u32 "$img" "$UEFI_OFF_SIZEOFIMAGE") || szimg="READFAIL"
+    if [ "$szimg" = READFAIL ] || [ "$szimg" -le 4096 ]; then
+        bad "L7_control_size_of_image_too_small_not_loaded" "could not read a SizeOfImage greater than one page ($szimg) -- patching it to 4096 would not be a shrink"
+    elif uefi_control L7_control_size_of_image_too_small_not_loaded x86 "$img" x7_szimg NOT_LOADED \
+            "SizeOfImage $szimg -> 4096, i.e. smaller than the sections it must cover" "u32was:$UEFI_OFF_SIZEOFIMAGE:$szimg:4096"; then
         if uefi_status_is "$UEFI_SER" "Unsupported"; then
-            ok "L7_control_size_of_image_too_small_not_loaded" "SizeOfImage := 4096 (the section ends at 8192) => NOT_LOADED, status 'Unsupported'"
+            ok "L7_control_size_of_image_too_small_not_loaded" "SizeOfImage := 4096 (the image really ends at $szimg) => NOT_LOADED, status 'Unsupported'"
         else
             bad "L7_control_size_of_image_too_small_not_loaded" "NOT_LOADED but not with 'Unsupported': '$(uefi_first_match "$UEFI_SER" 'failed to load Boot[0-9A-Fa-f]{4}[^[:cntrl:]]*')'"
         fi
@@ -2831,8 +2872,16 @@ leg7() {
             "VirtualSize -> 1 (the loader copies one byte of a ${vsz}-byte payload)" "u32was:$UEFI_OFF_VIRTUALSIZE:$vsz:1"; then
         ok "L7_control_virtual_size_too_small_faults" "VirtualSize := 1 => the image LOADS ('starting Boot<ours>' present) and then faults with nothing of ours on the wire: '$(uefi_first_match "$UEFI_SER" 'X64 Exception Type[^!]*')'"
     fi
-    if uefi_control L7_control_size_of_raw_data_zero_faults x86 "$img" x7_srd0 LOADED_FAULTED \
-            "SizeOfRawData -> 0 (nothing is copied from the file at all)" "u32was:$UEFI_OFF_SIZEOFRAWDATA:4096:0"; then
+    # Derived, for the reason SizeOfImage above is: .text's raw size was 4096
+    # while the whole payload fitted in one page and it is data_start - 0x1000
+    # now, so a written-down 4096 is one sentinel edit away from turning this
+    # control into a silent "never ran".
+    local srd
+    srd=$(mb_u32 "$img" "$UEFI_OFF_SIZEOFRAWDATA") || srd="READFAIL"
+    if [ "$srd" = READFAIL ] || [ "$srd" -lt 1 ]; then
+        bad "L7_control_size_of_raw_data_zero_faults" "could not read a plausible .text SizeOfRawData ($srd) -- patching it to 0 would not be a change"
+    elif uefi_control L7_control_size_of_raw_data_zero_faults x86 "$img" x7_srd0 LOADED_FAULTED \
+            "SizeOfRawData $srd -> 0 (nothing is copied from the file at all)" "u32was:$UEFI_OFF_SIZEOFRAWDATA:$srd:0"; then
         ok "L7_control_size_of_raw_data_zero_faults" "SizeOfRawData := 0 => LOADS and faults: '$(uefi_first_match "$UEFI_SER" 'X64 Exception Type[^!]*')'"
     fi
     # ---- one that LOADS, RUNS AND SAYS NOTHING ------------------------------
@@ -2866,9 +2915,28 @@ leg7() {
     # closes it: name the old value and a wrong offset becomes a refusal that
     # uefi_control reports as "the control never ran". Do not weaken it back to
     # `u32`; there is no verdict this row could compare against instead.
-    if uefi_control L7_control_read_only_section_still_runs x86 "$img" x7_ro RAN \
-            "section characteristics 0xE0000020 -> 0x60000020 (write bit cleared)" "u32was:$UEFI_OFF_SECTCHARS:$UEFI_SECTCHARS:1610612768"; then
-        ok "L7_control_read_only_section_still_runs" "write bit cleared (the old value 0xE0000020 was asserted at the patch site, so this is that byte and not another) => x86_64 STILL RUNS ('$UEFI_LIT' and $UEFI_COMP) -- the same change that makes the arm64 twin abort on its store"
+    # RETARGETED TO .data WHEN THE STATICS MOVED THERE, and the mutation
+    # changed with it -- the retarget alone would have produced a row that
+    # passes forever while testing nothing.
+    #
+    # It used to clear the WRITE bit on .text. Two things are wrong with that
+    # now. .text is 0x60000020 already, so the patch would write a field the
+    # value it already holds and `u32was` would refuse it outright. And the
+    # write bit turns out not to be the mechanism at all: MEASURED on AAVMF
+    # 2024.02, .data patched to 0x40000040 -- read-only DATA -- still RAN,
+    # both markers and no fault. Firmware applies image protection to
+    # CODE-FLAGGED sections; a data section is mapped writable whether or not
+    # its write bit is set.
+    #
+    # So the mutation is the CODE bit: .data becomes 0x60000020, a read-only
+    # code section holding the statics, which is exactly the shape the
+    # pre-split artifact had and exactly what this change exists to undo.
+    # MEASURED to reproduce the fault on the arm64 twin below on 2024.02, and
+    # a CODE section is read-only on 2025.11 regardless of its write bit, so
+    # the same mutation bites on both firmware generations.
+    if uefi_control L7_control_statics_in_code_section_still_runs x86 "$img" x7_ro RAN \
+            ".data characteristics 0xC0000040 -> 0x60000020 (statics put back in a read-only code section)" "u32was:$UEFI_OFF_DATA_SECTCHARS:$UEFI_DATA_SECTCHARS:1610612768"; then
+        ok "L7_control_statics_in_code_section_still_runs" ".data re-flagged as a read-only code section (the old value 0xC0000040 was asserted at the patch site, so this is that byte and not another) => x86_64 STILL RUNS ('$UEFI_LIT' and $UEFI_COMP) -- the same change that makes the arm64 twin abort on its store"
     fi
 }
 
@@ -2916,10 +2984,23 @@ leg8() {
     nsec=$(mb_u32 "$img" "$UEFI_OFF_NSECTIONS") || nsec="READFAIL"
     machine=$(mb_u32 "$img" "$UEFI_OFF_MACHINE") || machine="READFAIL"
     soh=$(mb_u32 "$img" "$UEFI_OFF_SIZEOFOPTHDR") || soh="READFAIL"
-    if [ "$nsec" = READFAIL ] || [ $(( nsec & 0xFFFF )) != 1 ] \
+    if [ "$nsec" = READFAIL ] || [ $(( nsec & 0xFFFF )) != 2 ] \
        || [ "$machine" = READFAIL ] || [ $(( machine & 0xFFFF )) != 43620 ] \
        || [ "$soh" = READFAIL ] || [ $(( soh & 0xFFFF )) != 240 ]; then
-        bad "L8_uefi_a64_boots" "the artifact is not the one-section AArch64 PE32+ these offsets assume (NumberOfSections=$nsec Machine=$machine SizeOfOptionalHeader=$soh)"; return
+        bad "L8_uefi_a64_boots" "the artifact is not the two-section AArch64 PE32+ these offsets assume (NumberOfSections=$nsec Machine=$machine SizeOfOptionalHeader=$soh)"; return
+    fi
+    # .data, same pre-flight as L7 and for the same reason: this leg's
+    # read-only control patches that section, so its shape has to be the
+    # shape the offsets assume before anything is patched.
+    local dchars dva dptr
+    dchars=$(mb_u32 "$img" "$UEFI_OFF_DATA_SECTCHARS") || dchars="READFAIL"
+    dva=$(mb_u32 "$img" "$UEFI_OFF_DATA_VA") || dva="READFAIL"
+    dptr=$(mb_u32 "$img" "$UEFI_OFF_DATA_PTRRAW") || dptr="READFAIL"
+    if [ "$dchars" != "$UEFI_DATA_SECTCHARS" ]; then
+        bad "L8_uefi_a64_boots" "the second section's characteristics are $dchars, not $UEFI_DATA_SECTCHARS (0xC0000040) -- L8_control_statics_in_code_section_printed_then_faulted would be patching the wrong bytes"; return
+    fi
+    if [ "$dva" = READFAIL ] || [ "$dva" != "$dptr" ]; then
+        bad "L8_uefi_a64_boots" ".data VirtualAddress ($dva) != PointerToRawData ($dptr): the delta-0 geometry this format depends on does not hold for the second section"; return
     fi
     vsz=$(mb_u32 "$img" "$UEFI_OFF_VIRTUALSIZE") || vsz="READFAIL"
     if [ "$vsz" = READFAIL ] || [ "$vsz" -lt 2 ]; then
@@ -2951,9 +3032,15 @@ leg8() {
     # computed value, and then aborts on `usink = v`. Score RAN before checking
     # for a fault and this is a green run of a machine that crashed; score
     # LOADED_FAULTED first and the two arm64 fault rows become the same row.
-    if uefi_control L8_control_read_only_section_printed_then_faulted a64 "$img" a8_ro PRINTED_THEN_FAULTED \
-            "section characteristics 0xE0000020 -> 0x60000020 (write bit cleared)" "u32was:$UEFI_OFF_SECTCHARS:$UEFI_SECTCHARS:1610612768"; then
-        ok "L8_control_read_only_section_printed_then_faulted" "write bit cleared => '$UEFI_LIT' AND $UEFI_COMP reach the wire and THEN '$(uefi_first_match "$UEFI_SER" 'Synchronous Exception at [0-9A-Fa-fx]*')' -- a RAN-first verdict scores this as success and a FAULTED-first one loses it into the row above; both red here"
+    # RETARGETED TO .data, AND THE MUTATION IS THE CODE BIT, NOT THE WRITE BIT
+    # -- see L7's twin for the measurement that settled it. Clearing .data's
+    # write bit leaves this leg RAN on AAVMF 2024.02, which would have made
+    # this row a permanent failure read as "the fix broke the control"; giving
+    # .data the CODE flag puts the statics back in a read-only code section
+    # and reproduces the fault the split exists to remove.
+    if uefi_control L8_control_statics_in_code_section_printed_then_faulted a64 "$img" a8_ro PRINTED_THEN_FAULTED \
+            ".data characteristics 0xC0000040 -> 0x60000020 (statics put back in a read-only code section)" "u32was:$UEFI_OFF_DATA_SECTCHARS:$UEFI_DATA_SECTCHARS:1610612768"; then
+        ok "L8_control_statics_in_code_section_printed_then_faulted" ".data re-flagged as a read-only code section => '$UEFI_LIT' AND $UEFI_COMP reach the wire and THEN '$(uefi_first_match "$UEFI_SER" 'Synchronous Exception at [0-9A-Fa-fx]*')' -- a RAN-first verdict scores this as success and a FAULTED-first one loses it into the row above; both red here"
     fi
 }
 
@@ -3654,10 +3741,10 @@ run_leg leg7 L7_uefi_x86_boots L7_control_subsystem_3_not_loaded \
              L7_control_virtual_size_too_small_faults \
              L7_control_size_of_raw_data_zero_faults \
              L7_control_entry_at_section_start_silent \
-             L7_control_read_only_section_still_runs
+             L7_control_statics_in_code_section_still_runs
 run_leg leg8 L8_uefi_a64_boots L8_control_subsystem_3_not_loaded \
              L8_control_virtual_size_too_small_faults \
-             L8_control_read_only_section_printed_then_faulted
+             L8_control_statics_in_code_section_printed_then_faulted
 run_leg leg9 L9_reset_vector_report_and_anchors L9_reset_vector_boots L9_halt_parked \
              L9_control_map_1gib_no_long_mode L9_control_gdt_08_64bit_no_protected_mode \
              L9_control_reset_jmp_spins_silent \

@@ -288,27 +288,67 @@ fn emit_pe_idata(uint64 idata_rva) -> uint64 {
 // says something false about the file, and "raw data past EOF" is a
 // documented OVMF rejection one arithmetic slip away from it.
 //
-// ONE SECTION, AND IT IS WRITABLE (0xE0000020). The statics share the section
-// with the code — that is what one section means — so a read-only code
-// section makes every write to a static a fault on arm64, which enforces the
-// characteristics; x86 does not.
+// TWO SECTIONS: .text (0x60000020, RX) AND .data (0xC0000040, RW).
+// This was ONE writable section, and the history matters because the reason
+// it changed is not a reason the old measurements could have shown.
 //
-// MEASURED HERE, and the shape is narrower than "arm64 needs a writable
-// .text". Under AAVMF 2024.02, with a payload that only READS its statics, a
-// 0x60000020 section RAN — the image loads and executes fine. With a payload
-// that WRITES one, 0x60000020 printed its first line and then took
-// `Synchronous Exception at 0x...5CB572BC`, i.e. the abort is on the STORE,
-// not at load time. 0xE0000020 ran in both. x86_64 ran in all four. So the
-// bit is load-bearing, but a test whose payload never stores to a static
-// cannot see it — which is precisely how a read-only code section would ship.
+// The old shape put the statics in the same section as the code — that is
+// what one section means — and set the WRITE bit so that stores to them were
+// legal. MEASURED at the time, under AAVMF 2024.02: a payload that only READS
+// its statics RAN from a 0x60000020 section, while one that WRITES one printed
+// its first line and then took `Synchronous Exception at 0x...5CB572BC` — the
+// abort on the STORE, not at load time. 0xE0000020 ran in both, x86_64 ran in
+// all four. All of that is still true. It stopped being sufficient.
 //
-// The two remedies that suggest themselves instead of the WRITE bit are both
-// wrong: --emit=pe's three-section layout is the Windows path this format
-// exists to avoid, and --emit=lkm's code/data split is safe only because
-// main.kr suppresses static-fixup baking for mode 7 and emits relocations
-// instead — which a `.reloc`-less UEFI image cannot do. A second section
-// would also introduce a second RVA-to-offset delta and make C1 strictly
-// harder.
+// AAVMF 2025.11 APPLIES IMAGE MEMORY PROTECTION TO CODE-FLAGGED SECTIONS. A
+// section carrying IMAGE_SCN_CNT_CODE is mapped read-only WHATEVER the WRITE
+// bit says, so 0xE0000020 no longer buys anything: the first store to a static
+// faults exactly as 0x60000020 did on the older build. MEASURED on a
+// Raspberry Pi 400 (native aarch64, AAVMF 2025.11-3ubuntu7, QEMU 10.2.1): the
+// pristine image prints `KRUEFI-A64` and `4000000016` and then takes a
+// Synchronous Exception — byte-for-byte the signature the boot gate documents
+// for its deliberately-broken write-bit-cleared control. The same image on
+// AAVMF 2024.02 still returns cleanly. This is newer ENFORCEMENT in firmware,
+// not new behaviour in this emitter, and OVMF has not started enforcing it
+// yet — which is the only reason the x86 leg went on booting.
+//
+// So the statics have to leave the code section, and the objection this
+// comment used to raise against that — "a second section would introduce a
+// second RVA-to-offset delta and make C1 strictly harder" — is answered by
+// giving .data the SAME delta rather than a different one. C1 asks for
+// (SectionRVA - PointerToRawData) == 0 mod 4096; .data is declared with
+// PointerToRawData == VirtualAddress == its file offset, so its delta is 0
+// like .text's, and file offset == RVA still holds for every byte in the
+// artifact. One geometry, two sections.
+//
+// AND THEN NOTHING MOVES. main.kr page-aligns the output immediately before
+// emit_static_data() on this mode, so the bytes are already where both
+// sections want them and the split is a matter of DESCRIBING them, not
+// relocating them. The statics keep the addresses resolve_static_fixups
+// already baked, and none of the three architecture-specific resolvers is
+// touched. Contrast --emit=pe's arm64 arm (main.kr, "separate .data section
+// for statics"), which discovers the need after the statics are written,
+// cannot rewind, and so RE-EMITS them — leaving the first copy as dead bytes
+// and re-resolving every displacement against a new base. That would cost
+// 303 KB of duplication on the shipped tree. This costs up to 4095 bytes of
+// padding and no fixup work at all.
+//
+// BOTH ARCHES ARE SPLIT, and x86_64 does not need it yet. OVMF has not
+// started enforcing image protection, so the x86 leg would go on booting from
+// one RWX section indefinitely. It is split anyway, for the reason the
+// geometry paragraph above gives for holding x86 to arm64's page rule: one
+// layout, one set of patch offsets, one set of section headers to reason
+// about. The alternative is a per-arch divergence in this file that buys
+// nothing today and has to be undone the moment OVMF catches up — and a
+// second layout is exactly the kind of thing that goes unmeasured on the arch
+// where it is not load-bearing. MEASURED on OVMF 2024.02 after the split:
+// both the x86 sentinel and ApexRift's 933 KB BOOTX64.EFI still boot.
+//
+// STRINGS STAY IN .text, deliberately. They are emitted before the statics
+// and are read-only in practice, which is also what the Windows path's
+// "code + strings only" comment assumes. If something ever writes to a
+// string literal it will now fault where it used to be tolerated, and that
+// fault is correct.
 //
 // NO `.reloc`, AND NEVER `RELOCS_STRIPPED`. The payload is position-
 // independent (0 `movabs`, 29 RIP-relative operands; a `lea rax,[rip+0]`
@@ -322,8 +362,9 @@ fn emit_pe_idata(uint64 idata_rva) -> uint64 {
 //   0x040  PE\0\0
 //   0x044  COFF header, 20 B
 //   0x058  optional header, 240 B (112 fixed + 16 data directories)
-//   0x148  the one section header, 40 B
-//   0x170  zero to 0x1000
+//   0x148  .text section header, 40 B
+//   0x170  .data section header, 40 B
+//   0x198  zero to 0x1000
 // patch_uefi_headers below owns every offset that is filled in afterwards;
 // this function and that one are the only places that know these numbers.
 @export
@@ -352,7 +393,7 @@ fn emit_uefi_headers(uint64 machine) -> uint64 {
                             // A different firmware may well be silent; what is
                             // measured is one build, and 0xAA64 on x86 is a
                             // counted control (L7) while 0x14c is not.
-    emit_u16_le(1)          // NumberOfSections: one, .text
+    emit_u16_le(2)          // NumberOfSections: .text then .data
     emit_u32_le(0)          // TimeDateStamp: zero, so the artifact is
                             // reproducible. Measured on the same one build: a
                             // 0xDEADBEEF stamp still RAN, both sentinels on
@@ -391,9 +432,9 @@ fn emit_uefi_headers(uint64 machine) -> uint64 {
                             // keyed on the Subsystem — but OVMF rejects it.
     emit_byte(0); emit_byte(0)   // Major/MinorLinkerVersion
     emit_u32_le(0)          // SizeOfCode            -- patched
-    emit_u32_le(0)          // SizeOfInitializedData: the statics live inside
-                            // the one section with the code, so there is no
-                            // second section to describe here.
+    emit_u32_le(0)          // SizeOfInitializedData -- patched. This was a
+                            // hard zero for as long as the statics lived in
+                            // .text; it now describes .data's raw size.
     emit_u32_le(0)          // SizeOfUninitializedData: no BSS. The payload
                             // carries its zero statics as real bytes and
                             // firmware zero-fills nothing.
@@ -455,11 +496,35 @@ fn emit_uefi_headers(uint64 machine) -> uint64 {
     emit_u32_le(0)          // PointerToLinenumbers
     emit_u16_le(0)          // NumberOfRelocations
     emit_u16_le(0)          // NumberOfLinenumbers
-    emit_u32_le(0xE0000020) // CODE | EXECUTE | READ | WRITE. The WRITE bit is
-                            // arm64's — measured, a 0x60000020 section takes a
-                            // Synchronous Exception on the first STORE to a
-                            // static there (it loads and starts fine), while
-                            // x86 tolerates it. See the note above this fn.
+    emit_u32_le(0x60000020) // CODE | EXECUTE | READ. No WRITE: nothing in this
+                            // section is written any more, and on AAVMF
+                            // 2025.11 the bit would not have helped if it
+                            // were — a CODE-flagged section is mapped
+                            // read-only whatever the WRITE bit says. See the
+                            // note above this fn.
+
+    // ---- .data section header (0x170..0x197) ----
+    // Every field here is patched except the name and the flags, because
+    // .data's position and size are both consequences of where the statics
+    // happened to land. VirtualAddress and PointerToRawData are patched to
+    // the SAME number, which is what keeps this section's RVA-to-offset
+    // delta 0 like .text's; uefi_page_congruence_* asserts that from the
+    // artifact rather than trusting this comment.
+    emit_byte(0x2E); emit_byte(0x64); emit_byte(0x61); emit_byte(0x74)
+    emit_byte(0x61); emit_byte(0); emit_byte(0); emit_byte(0)   // ".data"
+    emit_u32_le(0)          // VirtualSize           -- patched
+    emit_u32_le(0)          // VirtualAddress        -- patched
+    emit_u32_le(0)          // SizeOfRawData         -- patched
+    emit_u32_le(0)          // PointerToRawData      -- patched, == VirtualAddress
+    emit_u32_le(0)          // PointerToRelocations
+    emit_u32_le(0)          // PointerToLinenumbers
+    emit_u16_le(0)          // NumberOfRelocations
+    emit_u16_le(0)          // NumberOfLinenumbers
+    emit_u32_le(0xC0000040) // INITIALIZED_DATA | READ | WRITE. No CODE bit:
+                            // that bit is the one that draws firmware image
+                            // protection, and carrying it here would put the
+                            // statics straight back behind a read-only
+                            // mapping with the WRITE bit set and ignored.
 
     // ---- Zero to the start of the payload ----
     while out_len < 0x1000 { emit_byte(0) }
@@ -475,9 +540,10 @@ fn emit_uefi_headers(uint64 machine) -> uint64 {
     return out_len
 }
 
-// Fill in the five fields that are not knowable until the payload has been
+// Fill in the ten fields that are not knowable until the payload has been
 // laid out, and return SizeOfImage so the caller can report it without
-// recomputing the rounding.
+// recomputing the rounding. It was five while there was one section; the
+// five new ones are SizeOfInitializedData and .data's four placement fields.
 //
 // THE CALLER MUST HAVE PADDED THE FILE to 0x1000 + the returned raw size
 // BEFORE the artifact is written: SizeOfRawData is rounded up to
@@ -494,14 +560,48 @@ fn emit_uefi_headers(uint64 machine) -> uint64 {
 // uefi_page_congruence_*, so if the geometry is ever changed this line stops
 // being a no-op conversion and the test says so.
 @export
-fn patch_uefi_headers(uint64 entry_rva, uint64 payload_size) -> uint64 {
+fn patch_uefi_headers(uint64 entry_rva, uint64 payload_size, uint64 data_start) -> uint64 {
     uint64 raw = (payload_size + 0xFFF) & ~0xFFF
     uint64 image_size = 0x1000 + raw
-    patch_u32(0x5C, raw)            // opt+4   SizeOfCode
+
+    // data_start is a FILE OFFSET, and under the delta-0 geometry it is
+    // .data's RVA as well. It is page-aligned by main.kr before the statics
+    // are emitted, so .text ends on a page boundary and the two sections
+    // partition the payload with nothing left over and nothing moved.
+    if (data_start & 0xFFF) != 0 {
+        uint64 uda_e = "error: internal: --emit=uefi static data does not start on a page boundary, so .text and .data cannot both keep PointerToRawData == VirtualAddress\n"
+        write(2, uda_e, str_len(uda_e))
+        exit(1)
+    }
+    if data_start < 0x1000 || data_start > 0x1000 + payload_size {
+        uint64 udr_e = "error: internal: --emit=uefi static data starts outside the payload\n"
+        write(2, udr_e, str_len(udr_e))
+        exit(1)
+    }
+    uint64 text_raw = data_start - 0x1000
+    uint64 data_raw = raw - text_raw
+    uint64 data_vsize = 0x1000 + payload_size - data_start
+
+    patch_u32(0x5C, text_raw)       // opt+4   SizeOfCode
+    patch_u32(0x60, data_raw)       // opt+8   SizeOfInitializedData
     patch_u32(0x68, entry_rva)      // opt+16  AddressOfEntryPoint
     patch_u32(0x90, image_size)     // opt+56  SizeOfImage
-    patch_u32(0x150, payload_size)  // sec+8   VirtualSize
-    patch_u32(0x158, raw)           // sec+16  SizeOfRawData
+
+    // .text covers code and strings. Its VirtualSize is the whole aligned
+    // span rather than the exact content length: the tail is the page
+    // padding main.kr added to put data_start on a boundary, the loader
+    // copies it, and it is zeros. Naming a shorter VirtualSize here would be
+    // the LOADED_FAULTED shape described above for no gain.
+    patch_u32(0x150, text_raw)      // .text VirtualSize
+    patch_u32(0x158, text_raw)      // .text SizeOfRawData
+
+    // .data covers the statics. VirtualSize is the EXACT remaining payload,
+    // SizeOfRawData the file-aligned rounding of it, and the two placement
+    // fields are the same number so the delta stays 0.
+    patch_u32(0x178, data_vsize)    // .data VirtualSize
+    patch_u32(0x17C, data_start)    // .data VirtualAddress
+    patch_u32(0x180, data_raw)      // .data SizeOfRawData
+    patch_u32(0x184, data_start)    // .data PointerToRawData
     return image_size
 }
 

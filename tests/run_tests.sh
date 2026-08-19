@@ -14878,87 +14878,118 @@ else
 fi
 rm -f /tmp/krc_uefist_$$ "$UEFI_ST"
 
-# 17-18. THE PAYLOAD ROW (see this section's header). Per arch: the uefi
-#        artifact's bytes from 4096 on begin with the --emit=image artifact
-#        for the same source, BYTE FOR BYTE, and everything after that is
-#        zero file-alignment padding.
+# Field readers, defined before the first row that uses them: the payload
+# row below reads the section table to find .data, so these can no longer
+# live down with the header-fields row.
+ue_u16() { od -An -tu2 -j "$2" -N2 -v "$1" 2>/dev/null | tr -d ' '; }
+ue_u32() { od -An -tu4 -j "$2" -N4 -v "$1" 2>/dev/null | tr -d ' '; }
+ue_u64() { od -An -tu8 -j "$2" -N8 -v "$1" 2>/dev/null | tr -d ' '; }
+ue_hex() { od -An -tx1 -j "$2" -N"$3" -v "$1" 2>/dev/null | tr -d ' \n'; }
+
+# 17-18. THE PAYLOAD ROW (see this section's header). Per arch, comparing the
+#        uefi artifact against the --emit=image artifact for the same source.
 #
-#        WHY THIS IS NO LONGER AN EXACT-LENGTH COMPARE (Task 2). At Task 1 the
-#        artifact was exactly 4096 + payload, because nothing constrained its
-#        tail. Task 2's header declares FileAlignment 0x1000, and a PE section's
-#        SizeOfRawData must be a multiple of FileAlignment -- so the choice is
-#        between padding the file and writing a SizeOfRawData that runs past
-#        EOF, which the derivation reference lists as a REJECTION. The file is
-#        padded. All three clauses below are asserted, so the row still fails
-#        on a truncated payload, on unresolved fixups, on dropped statics and
-#        -- on arm64 -- on a non-page-congruent header region; it additionally
-#        now fails if the padding is not zero or not the exact amount the
-#        declared alignment requires.
+#        THIS WAS A BYTE-FOR-BYTE COMPARE OF THE WHOLE PAYLOAD AND NO LONGER
+#        CAN BE, because the two geometries now differ on purpose. --emit=uefi
+#        page-aligns before the statics so the PE can declare .text over the
+#        code and .data over the statics; --emit=image does not. The statics
+#        therefore sit at a different offset in the two artifacts, and every
+#        baked reference to them differs -- MEASURED on this source, exactly 2
+#        bytes on x86_64 and 2 on arm64, which is the one static's reference in
+#        each. Asserting whole-payload identity would now be asserting that the
+#        alignment did not happen.
 #
-#        WHY BYTE-FOR-BYTE IS AVAILABLE AT ALL, and it is not a coincidence:
-#        --load-addr is echoed and never embedded, x86_64 image output is
-#        RIP-relative throughout, and arm64's adrp/add pairs survive a shift
-#        that is a whole number of pages.
+#        WHAT IS STILL ASSERTED, and each clause is here because it can fail
+#        on its own:
+#          * COMPLETENESS. .text VirtualSize + .data VirtualSize accounts for
+#            the image payload plus less than one page of alignment. Fails on
+#            a truncated payload or on dropped statics.
+#          * THE STATICS ARE BYTE-IDENTICAL to the image payload's tail. This
+#            is the content that MOVED, so it is the content most worth
+#            checking arrived intact; it is also what would go wrong if
+#            emit_static_data() were run twice or the wrong region were
+#            declared as .data.
+#          * THE ALIGNMENT PAD IS ZERO -- both the gap inside .text between the
+#            code and the page boundary, and the file-alignment tail after
+#            .data. Non-zero there means .text's declared VirtualSize is
+#            covering bytes nobody wrote deliberately.
 #
-#        THE ARM64 ARM IS THE CONGRUENCE CHECK; THE x86_64 ARM IS NOT, and
-#        the difference was measured rather than assumed. Rebuilding the
-#        compiler with the reserved region set to 0x200 instead of 0x1000 and
-#        re-running both arms:
-#          * arm64  -> payload DIFFERS. Two independent mechanisms, and the
-#            weaker source only needs the first: the `add` half of each
-#            adrp/add pair carries `target & 0xFFF`, which any non-4096
-#            multiple moves (measured on this 3-line source, 56-byte payload);
-#            and on a payload that spans pages the `adrp` page difference
-#            itself moves (measured separately on a 4544-byte payload).
-#          * x86_64 -> payload still IDENTICAL, at 0x200 and at 0x1000 alike.
-#            It is RIP-relative throughout and genuinely immune, so its arm
-#            here proves payload COMPLETENESS and nothing about geometry.
-#        So do not read the x86_64 row as covering C1. Only arm64 does.
+#        C1 IS NOT COVERED BY THIS ROW ANY MORE. It used to be, through the
+#        arm64 arm: a non-page geometry moved the `add` half of each adrp/add
+#        pair and the payload compare saw it. That signal is gone with the
+#        byte-for-byte compare, so C1's offline oracle is now
+#        uefi_page_congruence_* -- which asserts delta 0 for BOTH sections,
+#        having been extended when .data arrived -- and its live oracle is the
+#        L7/L8 boots in the gate, where a wrong geometry is a LOADED_FAULTED.
+#        Do not read this row as covering geometry; read the congruence row.
 #
 #        The source carries a static AND a cross-function call on purpose:
 #        a leaf that returns a constant has no fixups to resolve, so it would
 #        pass this row with the static-fixup and call-fixup passes skipped
-#        entirely -- and with no static there is no adrp/add pair, which is
-#        the only thing the arm64 arm can see a bad geometry through.
+#        entirely.
 for UA in x86_64 arm64; do
     ULOAD=0x400000
     if [ "$UA" = "arm64" ]; then ULOAD=0x40400000; fi
     TOTAL=$((TOTAL + 1))
-    rm -f /tmp/krc_ue_$$ /tmp/krc_ui_$$ /tmp/krc_ut_$$
+    rm -f /tmp/krc_ue_$$ /tmp/krc_ui_$$ /tmp/krc_ut_$$ /tmp/krc_us_$$
     $KRC $KRC_FLAGS "$UEFI_SRC" -o /tmp/krc_ue_$$ --arch=$UA --target=none --emit=uefi >/dev/null 2>&1
     $KRC $KRC_FLAGS "$UEFI_SRC" -o /tmp/krc_ui_$$ --arch=$UA --target=none --emit=image --load-addr=$ULOAD >/dev/null 2>&1
+    up_bad=""
     if [ -f /tmp/krc_ue_$$ ] && [ -f /tmp/krc_ui_$$ ]; then
         ue_n=$(wc -c < /tmp/krc_ue_$$); ui_n=$(wc -c < /tmp/krc_ui_$$)
-        ui_pad=$(( (ui_n + 4095) / 4096 * 4096 ))
-        tail -c +4097 /tmp/krc_ue_$$ | head -c "$ui_n" > /tmp/krc_ut_$$
-        ue_tailnz=$(tail -c +$((4097 + ui_n)) /tmp/krc_ue_$$ | tr -d '\000' | wc -c)
-        if [ "$ue_n" -eq "$((ui_pad + 4096))" ] && cmp -s /tmp/krc_ut_$$ /tmp/krc_ui_$$ && [ "$ue_tailnz" = "0" ]; then
-            PASS=$((PASS + 1)); echo "  uefi_payload_is_the_image_payload_$UA: PASS ($ue_n = 4096 + $ui_n payload + $((ui_pad - ui_n)) zero pad, payload byte-identical)"
-        else
-            echo "FAIL: uefi_payload_is_the_image_payload_$UA (uefi=$ue_n want $((ui_pad + 4096)); image=$ui_n; payload $(cmp -s /tmp/krc_ut_$$ /tmp/krc_ui_$$ && echo matches || echo DIFFERS); $ue_tailnz non-zero bytes in the pad)"; FAIL=$((FAIL + 1))
+        up_tvs=$(ue_u32 /tmp/krc_ue_$$ 336); up_dvs=$(ue_u32 /tmp/krc_ue_$$ 376)
+        up_dva=$(ue_u32 /tmp/krc_ue_$$ 380); up_drw=$(ue_u32 /tmp/krc_ue_$$ 384)
+        # completeness, within one page of alignment
+        up_pad=$((up_tvs + up_dvs - ui_n))
+        [ "$up_pad" -ge 0 ] && [ "$up_pad" -lt 4096 ] || up_bad="$up_bad completeness(text=$up_tvs data=$up_dvs image=$ui_n pad=$up_pad)"
+        # the statics: .data's content vs the image payload's tail
+        up_k="$up_dvs"
+        if [ "$up_k" -gt 0 ]; then
+            tail -c "$up_k" /tmp/krc_ui_$$ > /tmp/krc_ut_$$
+            dd if=/tmp/krc_ue_$$ bs=1 skip="$up_dva" count="$up_k" of=/tmp/krc_us_$$ status=none 2>/dev/null
+            cmp -s /tmp/krc_ut_$$ /tmp/krc_us_$$ || up_bad="$up_bad statics_differ"
         fi
+        # the alignment gap inside .text, between the code and the page boundary
+        up_code=$((ui_n - up_dvs))
+        up_gapnz=$(dd if=/tmp/krc_ue_$$ bs=1 skip=$((4096 + up_code)) count=$((up_tvs - up_code)) status=none 2>/dev/null | tr -d '\000' | wc -c)
+        [ "$up_gapnz" = "0" ] || up_bad="$up_bad text_pad_not_zero($up_gapnz)"
+        # the file-alignment tail after .data's content
+        up_tailnz=$(tail -c +$((up_dva + up_dvs + 1)) /tmp/krc_ue_$$ | tr -d '\000' | wc -c)
+        [ "$up_tailnz" = "0" ] || up_bad="$up_bad data_pad_not_zero($up_tailnz)"
+        # and the file is exactly the two raw sizes plus the header
+        [ "$ue_n" = "$((4096 + up_tvs + up_drw))" ] || up_bad="$up_bad file_size($ue_n)"
     else
-        echo "FAIL: uefi_payload_is_the_image_payload_$UA (one of the two builds produced no artifact)"; FAIL=$((FAIL + 1))
+        up_bad=" one of the two builds produced no artifact"
     fi
-    rm -f /tmp/krc_ue_$$ /tmp/krc_ui_$$ /tmp/krc_ut_$$
+    if [ -z "$up_bad" ]; then
+        PASS=$((PASS + 1)); echo "  uefi_payload_completeness_$UA: PASS (image payload $ui_n = $((ui_n - up_dvs)) code + $up_dvs statics; statics byte-identical in .data; $((up_tvs - (ui_n - up_dvs))) B alignment gap and the tail both zero)"
+    else
+        echo "FAIL: uefi_payload_completeness_$UA:$up_bad"; FAIL=$((FAIL + 1))
+    fi
+    rm -f /tmp/krc_ue_$$ /tmp/krc_ui_$$ /tmp/krc_ut_$$ /tmp/krc_us_$$
 done
 
 # 19. The reserved header region is now FILLED (Task 2). At Task 1 this row
 #     asserted 4096 zero bytes and carried a note telling Task 2 to come here
 #     and say what it wrote; this is that. The region is still exactly 4096
 #     bytes -- the geometry did not move -- but it is no longer empty, and the
-#     tail of it (past the one section header, 0x170) is still zero, so a
-#     header that grew past its region would red this rather than silently
-#     overwrite the first instruction of the payload.
+#     tail of it is still zero, so a header that grew past its region would red
+#     this rather than silently overwrite the first instruction of the payload.
+#
+#     THE BOUNDARY IS 0x198 NOW, NOT 0x170. A second section header arrived
+#     when the statics moved out of .text, and it occupies 0x170-0x197. Left at
+#     0x170 this row would have failed on the 11 non-zero bytes of the .data
+#     header -- correctly reporting a change, but reporting it as "the header
+#     overflowed its region", which it had not.
 TOTAL=$((TOTAL + 1))
 rm -f /tmp/krc_uez_$$
 $KRC $KRC_FLAGS "$UEFI_SRC" -o /tmp/krc_uez_$$ --arch=x86_64 --target=none --emit=uefi >/dev/null 2>&1
 uez_nz=$(head -c 4096 /tmp/krc_uez_$$ 2>/dev/null | tr -d '\000' | wc -c)
-uez_tail=$(head -c 4096 /tmp/krc_uez_$$ 2>/dev/null | tail -c +369 | tr -d '\000' | wc -c)
+uez_tail=$(head -c 4096 /tmp/krc_uez_$$ 2>/dev/null | tail -c +409 | tr -d '\000' | wc -c)
 if [ -f /tmp/krc_uez_$$ ] && [ "$uez_nz" -gt 0 ] && [ "$uez_tail" = "0" ]; then
-    PASS=$((PASS + 1)); echo "  uefi_header_region_filled: PASS ($uez_nz non-zero bytes in 0x0-0x170, 0 after)"
+    PASS=$((PASS + 1)); echo "  uefi_header_region_filled: PASS ($uez_nz non-zero bytes in 0x0-0x198, 0 after)"
 else
-    echo "FAIL: uefi_header_region_filled (artifact=$([ -f /tmp/krc_uez_$$ ] && echo yes || echo no), $uez_nz non-zero bytes in the region want >0, $uez_tail non-zero past 0x170 want 0)"; FAIL=$((FAIL + 1))
+    echo "FAIL: uefi_header_region_filled (artifact=$([ -f /tmp/krc_uez_$$ ] && echo yes || echo no), $uez_nz non-zero bytes in the region want >0, $uez_tail non-zero past 0x198 want 0)"; FAIL=$((FAIL + 1))
 fi
 rm -f /tmp/krc_uez_$$
 
@@ -14999,10 +15030,6 @@ rm -f /tmp/krc_uez_$$
 #        SizeOfOptionalHeader is checked for the CONSISTENCY rule OVMF
 #        actually enforces -- SizeOfOptionalHeader - 112 == NumberOfRvaAndSizes
 #        * 8 -- and not merely for the value 240.
-ue_u16() { od -An -tu2 -j "$2" -N2 -v "$1" 2>/dev/null | tr -d ' '; }
-ue_u32() { od -An -tu4 -j "$2" -N4 -v "$1" 2>/dev/null | tr -d ' '; }
-ue_u64() { od -An -tu8 -j "$2" -N8 -v "$1" 2>/dev/null | tr -d ' '; }
-ue_hex() { od -An -tx1 -j "$2" -N"$3" -v "$1" 2>/dev/null | tr -d ' \n'; }
 uh_bad=""
 uh_chk() { [ "$2" = "$3" ] || uh_bad="$uh_bad $1(want=$2 got=$3)"; }
 for UA in x86_64 arm64; do
@@ -15026,7 +15053,7 @@ for UA in x86_64 arm64; do
         uh_chk pe_signature      50450000   "$(ue_hex /tmp/krc_uh_$$ 64 4)"
         # COFF header
         uh_chk machine           "$UMACH"   "$(ue_u16 /tmp/krc_uh_$$ 68)"
-        uh_chk number_of_sections 1         "$(ue_u16 /tmp/krc_uh_$$ 70)"
+        uh_chk number_of_sections 2         "$(ue_u16 /tmp/krc_uh_$$ 70)"
         uh_soh=$(ue_u16 /tmp/krc_uh_$$ 84)
         uh_nrs=$(ue_u32 /tmp/krc_uh_$$ 196)
         uh_chk size_of_opt_header_consistency "$((uh_nrs * 8))" "$((uh_soh - 112))"
@@ -15035,13 +15062,19 @@ for UA in x86_64 arm64; do
         uh_chk executable_image_set    2    "$((uh_char & 2))"
         # Optional header (PE32+)
         uh_chk magic_pe32plus    523        "$(ue_u16 /tmp/krc_uh_$$ 88)"   # 0x20b
-        uh_chk size_of_code      "$uh_raw"  "$(ue_u32 /tmp/krc_uh_$$ 92)"
+        # .text no longer spans the whole payload, so SizeOfCode is its raw
+        # size and not the file's. Both are derived from the artifact.
+        uh_trw=$(ue_u32 /tmp/krc_uh_$$ 344)     # .text SizeOfRawData
+        uh_drw=$(ue_u32 /tmp/krc_uh_$$ 384)     # .data SizeOfRawData
+        uh_chk size_of_code      "$uh_trw"  "$(ue_u32 /tmp/krc_uh_$$ 92)"
+        uh_chk size_of_initialized_data "$uh_drw" "$(ue_u32 /tmp/krc_uh_$$ 96)"
         uh_chk entry_point       "$uh_ent"  "$(ue_u32 /tmp/krc_uh_$$ 104)"
         uh_chk base_of_code      4096       "$(ue_u32 /tmp/krc_uh_$$ 108)"
         uh_chk image_base        0          "$(ue_u64 /tmp/krc_uh_$$ 112)"
         uh_chk section_alignment 4096       "$(ue_u32 /tmp/krc_uh_$$ 120)"
         uh_chk file_alignment    4096       "$(ue_u32 /tmp/krc_uh_$$ 124)"
         uh_chk size_of_image     "$((4096 + uh_raw))" "$(ue_u32 /tmp/krc_uh_$$ 144)"
+        uh_chk raw_sizes_cover_the_file "$uh_raw" "$((uh_trw + uh_drw))"
         uh_chk size_of_headers   4096       "$(ue_u32 /tmp/krc_uh_$$ 148)"
         uh_chk subsystem         10         "$(ue_u16 /tmp/krc_uh_$$ 156)"
         uh_chk number_of_rva_and_sizes 16   "$uh_nrs"
@@ -15050,25 +15083,50 @@ for UA in x86_64 arm64; do
         uh_chk data_directories_all_zero 0 \
             "$(ue_hex /tmp/krc_uh_$$ 200 128 | tr -d '0' | wc -c)"
         uh_chk no_kernel32 0 "$(grep -c kernel32 /tmp/krc_uh_$$ 2>/dev/null)"
-        # The one section header
+        # ---- .text, the first section header (0x148) ----
         uh_chk section_name      2e74657874000000 "$(ue_hex /tmp/krc_uh_$$ 328 8)"
-        uh_chk virtual_size      "$uh_pay"  "$(ue_u32 /tmp/krc_uh_$$ 336)"
+        uh_tvs=$(ue_u32 /tmp/krc_uh_$$ 336)
         uh_chk virtual_address   4096       "$(ue_u32 /tmp/krc_uh_$$ 340)"
-        uh_chk size_of_raw_data  "$uh_raw"  "$(ue_u32 /tmp/krc_uh_$$ 344)"
         uh_chk pointer_to_raw_data 4096     "$(ue_u32 /tmp/krc_uh_$$ 348)"
         uh_chk pointer_to_relocations 0     "$(ue_u32 /tmp/krc_uh_$$ 352)"
         uh_chk pointer_to_linenumbers 0     "$(ue_u32 /tmp/krc_uh_$$ 356)"
         uh_chk number_of_relocations  0     "$(ue_u16 /tmp/krc_uh_$$ 360)"
         uh_chk number_of_linenumbers  0     "$(ue_u16 /tmp/krc_uh_$$ 362)"
-        # 0xE0000020 = CODE|EXECUTE|READ|WRITE. The WRITE bit is arm64's, and
-        # it is not cosmetic -- but the way it fails is narrower than "arm64
-        # needs a writable .text", and the difference decides whether a test
-        # can see it at all. Measured under AAVMF 2024.02 with 0x60000020:
-        # a payload that only READS its statics RAN; a payload that WRITES one
-        # printed its first line and then took `Synchronous Exception`, i.e.
-        # the abort is on the STORE, not at load. x86_64 ran in every case.
-        # One layout for both arches, so both carry the bit.
-        uh_chk section_characteristics 3758096416 "$(ue_u32 /tmp/krc_uh_$$ 364)"
+        # ---- .data, the second section header (0x170) ----
+        uh_chk data_section_name 2e64617461000000 "$(ue_hex /tmp/krc_uh_$$ 368 8)"
+        uh_dvs=$(ue_u32 /tmp/krc_uh_$$ 376)
+        uh_dva=$(ue_u32 /tmp/krc_uh_$$ 380)
+        uh_chk data_pointer_to_raw_data "$uh_dva" "$(ue_u32 /tmp/krc_uh_$$ 388)"
+        uh_chk data_pointer_to_relocations 0 "$(ue_u32 /tmp/krc_uh_$$ 392)"
+        uh_chk data_number_of_relocations  0 "$(ue_u16 /tmp/krc_uh_$$ 400)"
+        # 0xC0000040 = INITIALIZED_DATA|READ|WRITE, and NO CODE bit -- the CODE
+        # bit is what draws firmware image protection, which is the whole
+        # reason the statics are no longer in .text.
+        uh_chk data_section_characteristics 3221225536 "$(ue_u32 /tmp/krc_uh_$$ 404)"
+        # THE TWO SECTIONS PARTITION THE PAYLOAD, stated as a relation rather
+        # than as two literals so a geometry change has to satisfy it: .text
+        # ends exactly where .data begins, and .data begins on a page.
+        uh_chk sections_are_contiguous "$uh_dva" "$((4096 + uh_tvs))"
+        uh_chk data_starts_on_a_page 0 "$((uh_dva % 4096))"
+        uh_chk data_virtual_size_fits 1 "$([ "$uh_dvs" -le "$uh_drw" ] && echo 1 || echo 0)"
+        # STILL CROSS-CHECKED AGAINST --emit=image, which is what catches a
+        # payload that quietly lost or gained content. It is now an inequality
+        # rather than an equality: mode 9 page-aligns before the statics and
+        # mode 8 does not, so the UEFI payload is longer by that padding --
+        # by less than one page, and never shorter.
+        uh_pad=$((uh_tvs + uh_dvs - uh_pay))
+        uh_chk payload_matches_image_within_one_page 1 \
+            "$([ "$uh_pad" -ge 0 ] && [ "$uh_pad" -lt 4096 ] && echo 1 || echo 0)"
+        # 0x60000020 = CODE|EXECUTE|READ. This was 0xE0000020, CODE|...|WRITE,
+        # for as long as the statics lived here. The WRITE bit stopped being
+        # enough: AAVMF 2025.11 maps any CODE-flagged section read-only
+        # whatever that bit says, so the first store to a static faulted --
+        # measured on a Pi 400, the pristine image printing both markers and
+        # then taking a Synchronous Exception, which is exactly the signature
+        # the boot gate documents for its deliberately-broken control. The
+        # statics moved to .data and this section is RX. One layout for both
+        # arches, so both carry it.
+        uh_chk section_characteristics 1610612768 "$(ue_u32 /tmp/krc_uh_$$ 364)"
     else
         uh_bad=" no artifact (uefi=$([ -f /tmp/krc_uh_$$ ] && echo yes || echo no) image=$([ -f /tmp/krc_uhi_$$ ] && echo yes || echo no))"
     fi
@@ -15097,14 +15155,25 @@ for UA in x86_64 arm64; do
     if [ -f /tmp/krc_uc_$$ ]; then
         uc_rva=$(ue_u32 /tmp/krc_uc_$$ 340); uc_ptr=$(ue_u32 /tmp/krc_uc_$$ 348)
         uc_delta=$((uc_rva - uc_ptr))
+        # BOTH SECTIONS, not just the first. This row was written when the
+        # artifact had one section, and the objection originally raised
+        # against adding a second was precisely that it would introduce a
+        # second RVA-to-offset delta. It does not -- .data is declared with
+        # PointerToRawData == VirtualAddress like .text -- but "it does not"
+        # is a claim, and this is where it is checked. A .data with its own
+        # delta would leave every baked static address wrong while .text went
+        # on satisfying the rule and this row went on passing.
+        uc_drva=$(ue_u32 /tmp/krc_uc_$$ 380); uc_dptr=$(ue_u32 /tmp/krc_uc_$$ 388)
+        uc_ddelta=$((uc_drva - uc_dptr))
         # `-gt 0` is not decoration: without it this row passes on an artifact
         # with NO HEADER AT ALL, where both fields read 0 and 0 - 0 is trivially
         # congruent. Measured -- it passed exactly that way against the Task 1
         # binary before the header existed.
-        if [ "$uc_ptr" -gt 0 ] && [ "$uc_rva" -gt 0 ] && [ $((uc_delta % 4096)) -eq 0 ]; then
-            PASS=$((PASS + 1)); echo "  uefi_page_congruence_$UA: PASS (RVA $uc_rva - PointerToRawData $uc_ptr = $uc_delta, 0 mod 4096)"
+        if [ "$uc_ptr" -gt 0 ] && [ "$uc_rva" -gt 0 ] && [ $((uc_delta % 4096)) -eq 0 ] \
+           && [ "$uc_dptr" -gt 0 ] && [ "$uc_drva" -gt 0 ] && [ $((uc_ddelta % 4096)) -eq 0 ]; then
+            PASS=$((PASS + 1)); echo "  uefi_page_congruence_$UA: PASS (.text $uc_rva-$uc_ptr=$uc_delta, .data $uc_drva-$uc_dptr=$uc_ddelta, both 0 mod 4096)"
         else
-            echo "FAIL: uefi_page_congruence_$UA (RVA $uc_rva, PointerToRawData $uc_ptr, delta $uc_delta -- both must be non-zero and the delta 0 mod 4096, or every baked arm64 adrp page delta in the payload is wrong and the image loads and faults with no diagnostic)"; FAIL=$((FAIL + 1))
+            echo "FAIL: uefi_page_congruence_$UA (.text RVA $uc_rva ptr $uc_ptr delta $uc_delta; .data RVA $uc_drva ptr $uc_dptr delta $uc_ddelta -- all four must be non-zero and both deltas 0 mod 4096, or every baked arm64 adrp page delta in the payload is wrong and the image loads and faults with no diagnostic)"; FAIL=$((FAIL + 1))
         fi
     else
         echo "FAIL: uefi_page_congruence_$UA (no artifact)"; FAIL=$((FAIL + 1))
