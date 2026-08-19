@@ -10591,11 +10591,23 @@ fn asm_emit_x86(uint64 str_tok) {
     if asm_match(sptr, 0, "outw", 4) != 0 && slen == 4 { emit_byte(0x66); emit_byte(0xEF); return }
     if asm_match(sptr, 0, "ind", 3) != 0 && slen == 3 { emit_byte(0xED); return }
     if asm_match(sptr, 0, "outd", 4) != 0 && slen == 4 { emit_byte(0xEF); return }
-    // Control register moves
+    // Control register moves.
+    //
+    // CR2 IS HERE BECAUSE A KERNEL CANNOT REPORT A PAGE FAULT WITHOUT IT. It
+    // holds the faulting linear address, so it is the difference between "a
+    // #PF happened" and "a #PF happened at this address" -- and it was the one
+    // control register this block omitted, while accepting its three
+    // neighbours. A downstream kernel that needs it has to write the opcode by
+    // hand (`asm { "0x0F 0x20 0xD0" }`), which puts magic bytes in a fault
+    // handler: the place in a kernel where a reader can least afford to have
+    // to decode them. ModRM 11 010 000 selects cr2 in the reg field and rax in
+    // the rm field, which is the same shape as the cr3/cr4 rows above.
     if asm_match(sptr, 0, "mov cr0, rax", 12) != 0 { emit_byte(0x0F); emit_byte(0x22); emit_byte(0xC0); return }
+    if asm_match(sptr, 0, "mov cr2, rax", 12) != 0 { emit_byte(0x0F); emit_byte(0x22); emit_byte(0xD0); return }
     if asm_match(sptr, 0, "mov cr3, rax", 12) != 0 { emit_byte(0x0F); emit_byte(0x22); emit_byte(0xD8); return }
     if asm_match(sptr, 0, "mov cr4, rax", 12) != 0 { emit_byte(0x0F); emit_byte(0x22); emit_byte(0xE0); return }
     if asm_match(sptr, 0, "mov rax, cr0", 12) != 0 { emit_byte(0x0F); emit_byte(0x20); emit_byte(0xC0); return }
+    if asm_match(sptr, 0, "mov rax, cr2", 12) != 0 { emit_byte(0x0F); emit_byte(0x20); emit_byte(0xD0); return }
     if asm_match(sptr, 0, "mov rax, cr3", 12) != 0 { emit_byte(0x0F); emit_byte(0x20); emit_byte(0xD8); return }
     if asm_match(sptr, 0, "mov rax, cr4", 12) != 0 { emit_byte(0x0F); emit_byte(0x20); emit_byte(0xE0); return }
     // Privileged instructions

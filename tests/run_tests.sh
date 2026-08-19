@@ -6695,6 +6695,51 @@ fi
 # Compile-only, so the arch may be pinned.
 TOTAL=$((TOTAL + 1))
 bm_ok=1
+# CR2's ENCODING, asserted as BYTES rather than as "it compiled".
+#
+# The compile-only row below proves the mnemonic is accepted. It cannot prove it
+# is accepted as the RIGHT instruction: these six control-register rows differ
+# only in one ModRM nibble, so a cr2 entry that copied cr3's 0xD8 assembles
+# cleanly, runs, and silently reads the page-table base every time a fault
+# handler asks for the faulting address. That bug is invisible until a kernel
+# reports a #PF at an address that is actually its own CR3.
+#
+# 0F 20 /r reads a control register, 0F 22 /r writes one; ModRM 11-010-000 puts
+# cr2 in the reg field and rax in the rm field, giving D0. Both directions are
+# checked because they are separate table rows and only one of them is exercised
+# by any real kernel.
+TOTAL=$((TOTAL + 1))
+if [ "$RUN_ARCH" = "x86_64" ]; then
+    cr2_bad=""
+    cat > "$DIR/../cr2_tmp_$$.kr" <<'CR2EOF'
+fn rd() -> uint64 {
+    uint64 v = 0
+    asm { "mov rax, cr2" } out(rax -> v)
+    return v
+}
+fn wr(uint64 v) { asm { "mov cr2, rax" } in(v -> rax) }
+fn main() -> uint32 { wr(rd()) return 0 }
+CR2EOF
+    if ! $KRC --arch=x86_64 "$DIR/../cr2_tmp_$$.kr" -o /tmp/cr2_$$ >/dev/null 2>&1; then
+        cr2_bad="$cr2_bad compile-failed"
+    else
+        cr2_hex="$(xxd -p /tmp/cr2_$$ | tr -d '\n')"
+        printf '%s' "$cr2_hex" | grep -q '0f20d0' || cr2_bad="$cr2_bad read(want 0f20d0)"
+        printf '%s' "$cr2_hex" | grep -q '0f22d0' || cr2_bad="$cr2_bad write(want 0f22d0)"
+        # cr3's encoding must NOT appear: that is the copy-paste this row exists
+        # to catch, and it would satisfy a test that only asked "did it compile".
+        printf '%s' "$cr2_hex" | grep -q '0f20d8' && cr2_bad="$cr2_bad read-emitted-cr3(0f20d8)"
+    fi
+    if [ -z "$cr2_bad" ]; then
+        PASS=$((PASS + 1)); echo "  asm_cr2_encoding: PASS (0F 20 D0 read, 0F 22 D0 write, no cr3 bleed)"
+    else
+        FAIL=$((FAIL + 1)); echo "FAIL: asm_cr2_encoding:$cr2_bad"
+    fi
+    rm -f "$DIR/../cr2_tmp_$$.kr" /tmp/cr2_$$
+else
+    PASS=$((PASS + 1)); echo "  asm_cr2_encoding: PASS (SKIPPED -- x86_64 only)"
+fi
+
 cat > "$DIR/../bm_tmp_$$.kr" <<'BMEOF'
 import "std/cstr.kr"
 import "std/x86.kr"
@@ -6707,6 +6752,7 @@ fn main() -> uint32 {
     outb(0x3F8, 65)
     u64 v = inb(0x3F8)
     write_cr3(read_cr3())
+    write_cr2(read_cr2())
     invlpg(0x1000)
     lgdt(0x2000)
     wrmsr(0xC0000080, rdmsr(0xC0000080))

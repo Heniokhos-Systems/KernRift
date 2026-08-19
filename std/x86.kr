@@ -160,6 +160,19 @@ fn read_cr4() -> uint64 {
     return v
 }
 
+// THE FAULTING ADDRESS, and the reason a #PF handler is worth writing. The CPU
+// puts the linear address that faulted here, so this is the difference between
+// "a page fault happened" and "a page fault happened at this address" -- which
+// is the whole diagnostic value of the exception.
+//
+// Valid only until the next page fault, including one taken inside the
+// handler: read it FIRST, before anything that might fault.
+fn read_cr2() -> uint64 {
+    uint64 v = 0
+    asm { "mov rax, cr2" } out(rax -> v)
+    return v
+}
+
 fn write_cr0(uint64 v) {
     asm { "mov cr0, rax" } in(v -> rax)
 }
@@ -171,6 +184,13 @@ fn write_cr3(uint64 v) {
 
 fn write_cr4(uint64 v) {
     asm { "mov cr4, rax" } in(v -> rax)
+}
+
+// Writable, and almost never something you want: the CPU overwrites it on the
+// next page fault. Here because the instruction exists and a test needs to
+// prove the encoding round-trips, not because a kernel should call it.
+fn write_cr2(uint64 v) {
+    asm { "mov cr2, rax" } in(v -> rax)
 }
 
 // Invalidate one page's TLB entry -- cheaper than reloading CR3 when a single
