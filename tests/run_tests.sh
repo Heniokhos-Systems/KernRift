@@ -15139,7 +15139,16 @@ TOTAL=$((TOTAL + 1))
 rm -f /tmp/krc_uf_$$
 $KRC $KRC_FLAGS "$UEFI_SRC" -o /tmp/krc_uf_$$ --arch=x86_64 --target=none --emit=uefi >/dev/null 2>&1
 uf_says=$(file -b /tmp/krc_uf_$$ 2>/dev/null)
-if echo "$uf_says" | grep -q "PE32+ executable" && echo "$uf_says" | grep -q "EFI application"; then
+# file(1) RE-WORDED THIS BETWEEN 5.45 AND 5.46, and the row was pinned to one
+# spelling of a third-party tool's prose:
+#   5.45: PE32+ executable (EFI application) x86-64
+#   5.46: PE32+ executable for EFI (application), x86-64 (stripped to ...)
+# The claim is that file(1) recognises the artifact as a PE32+ EFI application;
+# which side of the parenthesis the word "application" falls on is not the
+# claim. Both spellings are accepted; anything that is not an EFI application
+# still fails, which is what the control row below pins.
+if echo "$uf_says" | grep -q "PE32+ executable" \
+   && echo "$uf_says" | grep -qE "EFI application|for EFI \(application\)"; then
     PASS=$((PASS + 1)); echo "  uefi_file_says_efi_application: PASS ($uf_says)"
 else
     echo "FAIL: uefi_file_says_efi_application (file(1) says '$uf_says')"; FAIL=$((FAIL + 1))
@@ -15164,7 +15173,8 @@ rm -f /tmp/krc_ufs_$$
 TOTAL=$((TOTAL + 1))
 cp /tmp/krc_uf_$$ /tmp/krc_ufm_$$; ue_poke /tmp/krc_ufm_$$ 88 11 1
 ufm_says=$(file -b /tmp/krc_ufm_$$ 2>/dev/null)
-if echo "$ufm_says" | grep -q "PE32 executable" && echo "$ufm_says" | grep -q "EFI application"; then
+if echo "$ufm_says" | grep -q "PE32 executable" \
+   && echo "$ufm_says" | grep -qE "EFI application|for EFI \(application\)"; then
     PASS=$((PASS + 1)); echo "  uefi_file_control_magic: PASS (magic 0x10b -> '$ufm_says')"
 else
     echo "FAIL: uefi_file_control_magic (magic patched to 0x10b and file(1) says '$ufm_says', expected a PE32 (not PE32+) EFI application)"; FAIL=$((FAIL + 1))
@@ -20376,14 +20386,25 @@ if $KRC --arch=x86_64 --emit=obj "$MA_SRC" -o "$MA_OBJ" >/dev/null 2>&1 \
         fi
     done
     if [ -z "$MA_OD" ]; then
-        MA_OBJ_OK=2   # no disassembler here understands x86-64; the .text check stands
+        MA_OBJ_OK=3   # nothing here can read x86-64; see the verdict below
     elif "$MA_OD" -d "$MA_OBJ" 2>/dev/null | grep -q 'call.*<ma>'; then
         MA_OBJ_OK=1
     fi
 fi
-if [ "$MA_OBJ_OK" = "2" ]; then
-    PASS=$((PASS + 1))
-    echo "  many_args_emit_obj_x86: PASS (.text present; no x86-64 disassembler here, call unverified)"
+if [ "$MA_OBJ_OK" = "3" ]; then
+    # NOT a pass. The first fix here made this an "unverified" PASS, which is the
+    # wrong stance and inconsistent with provider_uart_store_in_bytes twenty rows
+    # up: both need an x86-64 disassembler, and that row already decided the
+    # question -- "this leg is the artifact proof, not an optional extra". This
+    # leg is a VACUITY guard: without it nothing checks that the 32-argument call
+    # survived, and every many_args row above it could be passing on a call the
+    # inliner removed. A guard that quietly excuses itself on one architecture is
+    # the silent-skip failure mode this suite exists to refuse.
+    #
+    # CI's ARM64 job installs the cross binutils, so it takes the real branch
+    # above and verifies the call. A bare machine gets told what to install.
+    echo "FAIL: many_args_emit_obj_x86 (no objdump on PATH can disassemble x86-64 -- install binutils-x86-64-linux-gnu; this leg is the vacuity guard for every many_args row above it, not an optional extra)"
+    FAIL=$((FAIL + 1))
 elif [ "$MA_OBJ_OK" = "1" ]; then
     PASS=$((PASS + 1)); echo "  many_args_emit_obj_x86: PASS (32-argument call emits .text and a real call to ma)"
 else

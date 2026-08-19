@@ -376,12 +376,13 @@ PARKED_PC=NOQMPRUN        # never a stale value
 # drift, and the mode that drifted would be the one nobody re-derived.
 #   boot_wait <qemu pid> <serial file> <expect>
 boot_wait() {
-    local pid="$1" ser="$2" expect="$3" n=0
+    local pid="$1" ser="$2" expect="$3" excl="${4:-}" n=0
     local limit="$BOOT_DEADLINE_TICKS"
     [ "$expect" = "RUNOUT" ] && limit="$BOOT_SILENCE_TICKS"
     while [ "$n" -lt "$limit" ]; do
-        if [ "$expect" != "RUNOUT" ] && [ "$expect" != "SELFEXIT" ] &&
-           [ -s "$ser" ] && grep -qE "$expect" "$ser" 2>/dev/null; then
+        if [ "$expect" != "RUNOUT" ] && [ "$expect" != "SELFEXIT" ] && [ -s "$ser" ] &&
+           { [ -z "$excl" ] && grep -qE "$expect" "$ser" 2>/dev/null ||
+             { [ -n "$excl" ] && grep -aE "$expect" "$ser" 2>/dev/null | grep -qvF "$excl"; }; }; then
             break
         fi
         # Self-exit early-out: once qemu is gone no further byte can arrive,
@@ -403,7 +404,22 @@ boot_run() {
     # shellcheck disable=SC2086
     timeout "$BOOT_TIMEOUT" "$qemu" $machine -display none -serial "file:$ser" "$@" >/dev/null 2>"$ser.err" &
     local pid=$!
-    boot_wait "$pid" "$ser" "$expect"
+    if [ "$expect" = "$UEFI_DONE_RE" ]; then
+        # TWO PHASES, because the terminator cannot be written until the firmware
+        # has told us which option is ours. Phase 1 waits for BDS to reach ANY
+        # option (or fail, or fault); phase 2 waits for the real end with our own
+        # option excluded, so "BDS moved on" cannot be satisfied by the line that
+        # says our app is about to start.
+        boot_wait "$pid" "$ser" "$UEFI_PHASE1_RE"
+        UEFI_OURS="$(uefi_our_option "$ser")"
+        if [ -n "$UEFI_OURS" ]; then
+            boot_wait "$pid" "$ser" "$expect" "BdsDxe: loading Boot$UEFI_OURS"
+        else
+            boot_wait "$pid" "$ser" "$expect"
+        fi
+    else
+        boot_wait "$pid" "$ser" "$expect"
+    fi
     kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null
     BOOT_QEMU_RC=$?
     # No capture file => qemu never opened it => no boot occurred.
@@ -2323,6 +2339,54 @@ fi
 # `Boot000[^1]` is "any boot option that is not ours"; our app is Boot0001 under
 # both firmwares, and a capture in which Boot0001 never appears at all is a
 # HARNESS_ERROR below rather than a verdict.
+# WHICH BOOT OPTION IS OURS, read from the capture rather than assumed.
+#
+# This was `Boot0001` in four places, with the assumption written down and made
+# loud: "our app is Boot0001 under both firmwares measured here; if a future
+# firmware orders the options differently this must be loud". A Raspberry Pi 400
+# running OVMF from Ubuntu 25.x is that firmware -- it enumerates our ESP as
+# Boot0002 -- and the guard did exactly its job: HARNESS_ERROR:no-boot0001,
+# refusing to interpret the run rather than filing a successful boot as
+# NOT_LOADED. The capture showed the payload had printed both markers.
+#
+# The number is incidental; the disk is not. BDS names the option it is loading:
+#     BdsDxe: loading Boot0002 "UEFI QEMU HARDDISK QM00001 "
+# so ours is the option whose description names the disk. Nothing else in the
+# gate depends on which slot the firmware happened to put it in.
+#
+# THE TERMINATOR IS WHY THIS MATTERS MORE THAN A NICER ERROR. `loading
+# Boot000[^1]` means "an option that is not ours", and boot_wait BREAKS on it
+# and the run is killed. With ours at 0002 that pattern matches our own line, so
+# the wait ended as our app was loaded and before it could print -- on this Pi
+# the sentinel survived only because a tick's slack let it through. That is a
+# false LOADED_SILENT waiting to happen, on the rows that separate "crashed"
+# from "ran silently".
+UEFI_OURS=""
+uefi_our_option() {
+    # NOT BY DISK NAME. The first version keyed on "HARDDISK", which is what OVMF
+    # calls the ESP -- and AAVMF calls the same device "UEFI Misc Device", so the
+    # arm64 leg went from a working boot to no-boot-option-for-our-disk. Caught by
+    # running it, not by reading it.
+    #
+    # What holds on both firmwares is that OURS IS THE FIRST OPTION THAT IS NOT
+    # ONE OF THE FIRMWARE'S OWN. BDS tries the removable media before it falls
+    # back to UiApp or a shell, so the first non-internal option it loads, starts
+    # or fails to load is the one carrying our ESP -- whatever slot it sits in and
+    # whatever the firmware chose to call the device.
+    #
+    # `failed to load` is in the list deliberately: that is the NOT_LOADED shape,
+    # and an extractor blind to it would turn every rejection control into a
+    # harness error instead of a verdict.
+    local m
+    m=$(grep -aoE 'BdsDxe: (loading|starting|failed to load) Boot[0-9A-Fa-f]{4} "[^"]*"' "$1" 2>/dev/null \
+        | grep -vE '"(UiApp|EFI Internal Shell|UEFI Shell|Boot Manager Menu|EFI Hard Drive)"' \
+        | head -1)
+    [ -n "$m" ] || { printf ''; return 1; }
+    m="${m#*Boot}"; printf '%s' "${m%% *}"
+}
+# The terminator, once ours is known. Same three alternatives; the third now
+# excludes ours by value rather than by assuming it is 0001.
+UEFI_PHASE1_RE='Exception|BdsDxe: failed to load Boot|BdsDxe: starting Boot[0-9A-Fa-f]{4}'
 UEFI_DONE_RE='Exception|BdsDxe: failed to load Boot|BdsDxe: loading Boot000[^1]'
 # What a fault looks like. x86_64/OVMF: `!!!! X64 Exception Type - 06(#UD …)`.
 # arm64/AAVMF: `Synchronous Exception at 0x…`. Both measured this session, and
@@ -2513,7 +2577,8 @@ uefi_verdict() {
     [ -f "$ser" ] || { echo "HARNESS_ERROR:no-capture"; return 0; }
     [ -s "$ser" ] || { echo "HARNESS_ERROR:empty-capture"; return 0; }
     grep -qa 'BdsDxe:' "$ser" || { echo "HARNESS_ERROR:no-bds"; return 0; }
-    grep -qa 'Boot0001' "$ser" || { echo "HARNESS_ERROR:no-boot0001"; return 0; }
+    local ours; ours="$(uefi_our_option "$ser")"
+    [ -n "$ours" ] || { echo "HARNESS_ERROR:no-boot-option-for-our-disk"; return 0; }
     grep -qaE "$UEFI_DONE_RE" "$ser" || { echo "HARNESS_ERROR:no-terminator"; return 0; }
     local sawlit=1 sawcomp=1 sawfault=1
     grep -qa "$lit"  "$ser" && sawlit=0
@@ -2530,8 +2595,8 @@ uefi_verdict() {
     # 4. some of it, no fault. Nobody expects this; see the header.
     if [ "$sawlit" = 0 ] || [ "$sawcomp" = 0 ]; then echo PRINTED_PARTIAL; return 0; fi
     # 5. the firmware said no, or never started the image.
-    if grep -qa 'failed to load Boot0001' "$ser"; then echo NOT_LOADED; return 0; fi
-    grep -qa 'starting Boot0001' "$ser" || { echo NOT_LOADED; return 0; }
+    if grep -qa "failed to load Boot$ours" "$ser"; then echo NOT_LOADED; return 0; fi
+    grep -qa "starting Boot$ours" "$ser" || { echo NOT_LOADED; return 0; }
     # 6. loaded, started, and produced nothing. EXERCISED by
     # L7_control_entry_at_section_start_silent -- it was not, until the Task 3
     # review pointed out that this was the one arm of the crashed-vs-silent
@@ -2597,7 +2662,9 @@ uefi_control() {
 # staging bug on its own, without leaning on the batch positive. `Subsystem 3`
 # is deliberately NOT one of them: it produces `Not Found`, and it is the row
 # that shows why the batch positive has to exist.
-uefi_status_is() { grep -qa "failed to load Boot0001.*: $2" "$1"; }
+# $UEFI_OURS is set by the boot this is asked about; empty would make the
+# pattern match any option, so it is required rather than defaulted.
+uefi_status_is() { [ -n "$UEFI_OURS" ] && grep -qa "failed to load Boot$UEFI_OURS.*: $2" "$1"; }
 
 # =============================================================================
 # L7 — x86_64 UEFI APPLICATION under OVMF (q35). Nine boots: the subject, five
@@ -2716,14 +2783,14 @@ leg7() {
     # L7_uefi_x86_boots ran in this same batch, through this same staging.
     if uefi_control L7_control_subsystem_3_not_loaded x86 "$img" x7_sub3 NOT_LOADED \
             "Subsystem 10 -> 3 (Windows console)" "hexwas:$UEFI_OFF_SUBSYSTEM:0a00:0300"; then
-        ok "L7_control_subsystem_3_not_loaded" "Subsystem := 3 => NOT_LOADED ('$(uefi_first_match "$UEFI_SER" 'failed to load Boot0001[^[:cntrl:]]*')') -- the status is 'Not Found', the SAME text an empty ESP and a misnamed file produce, so the batch positive above is what makes this a rejection and not a staging bug"
+        ok "L7_control_subsystem_3_not_loaded" "Subsystem := 3 => NOT_LOADED ('$(uefi_first_match "$UEFI_SER" 'failed to load Boot[0-9A-Fa-f]{4}[^[:cntrl:]]*')') -- the status is 'Not Found', the SAME text an empty ESP and a misnamed file produce, so the batch positive above is what makes this a rejection and not a staging bug"
     fi
     if uefi_control L7_control_magic_pe32_not_loaded x86 "$img" x7_magic NOT_LOADED \
             "optional header Magic 0x20b (PE32+) -> 0x10b (PE32)" "hexwas:$UEFI_OFF_MAGIC:0b02:0b01"; then
         if uefi_status_is "$UEFI_SER" "Unsupported"; then
             ok "L7_control_magic_pe32_not_loaded" "Magic := 0x10b => NOT_LOADED, status 'Unsupported' -- a word no missing file can produce, so this row discriminates on its own"
         else
-            bad "L7_control_magic_pe32_not_loaded" "NOT_LOADED but not with 'Unsupported': '$(uefi_first_match "$UEFI_SER" 'failed to load Boot0001[^[:cntrl:]]*')'"
+            bad "L7_control_magic_pe32_not_loaded" "NOT_LOADED but not with 'Unsupported': '$(uefi_first_match "$UEFI_SER" 'failed to load Boot[0-9A-Fa-f]{4}[^[:cntrl:]]*')'"
         fi
     fi
     if uefi_control L7_control_machine_arm64_not_loaded x86 "$img" x7_mach NOT_LOADED \
@@ -2731,7 +2798,7 @@ leg7() {
         if uefi_status_is "$UEFI_SER" "Unsupported"; then
             ok "L7_control_machine_arm64_not_loaded" "Machine := 0xaa64 => NOT_LOADED, status 'Unsupported' -- the field is read, and a defaulted Machine would not be"
         else
-            bad "L7_control_machine_arm64_not_loaded" "NOT_LOADED but not with 'Unsupported': '$(uefi_first_match "$UEFI_SER" 'failed to load Boot0001[^[:cntrl:]]*')'"
+            bad "L7_control_machine_arm64_not_loaded" "NOT_LOADED but not with 'Unsupported': '$(uefi_first_match "$UEFI_SER" 'failed to load Boot[0-9A-Fa-f]{4}[^[:cntrl:]]*')'"
         fi
     fi
     # SizeOfOptionalHeader and NumberOfRvaAndSizes must satisfy
@@ -2744,7 +2811,7 @@ leg7() {
         if uefi_status_is "$UEFI_SER" "Unsupported"; then
             ok "L7_control_rva_count_inconsistent_not_loaded" "NumberOfRvaAndSizes := 8 (240-112 != 8*8) => NOT_LOADED, status 'Unsupported'"
         else
-            bad "L7_control_rva_count_inconsistent_not_loaded" "NOT_LOADED but not with 'Unsupported': '$(uefi_first_match "$UEFI_SER" 'failed to load Boot0001[^[:cntrl:]]*')'"
+            bad "L7_control_rva_count_inconsistent_not_loaded" "NOT_LOADED but not with 'Unsupported': '$(uefi_first_match "$UEFI_SER" 'failed to load Boot[0-9A-Fa-f]{4}[^[:cntrl:]]*')'"
         fi
     fi
     if uefi_control L7_control_size_of_image_too_small_not_loaded x86 "$img" x7_szimg NOT_LOADED \
@@ -2752,7 +2819,7 @@ leg7() {
         if uefi_status_is "$UEFI_SER" "Unsupported"; then
             ok "L7_control_size_of_image_too_small_not_loaded" "SizeOfImage := 4096 (the section ends at 8192) => NOT_LOADED, status 'Unsupported'"
         else
-            bad "L7_control_size_of_image_too_small_not_loaded" "NOT_LOADED but not with 'Unsupported': '$(uefi_first_match "$UEFI_SER" 'failed to load Boot0001[^[:cntrl:]]*')'"
+            bad "L7_control_size_of_image_too_small_not_loaded" "NOT_LOADED but not with 'Unsupported': '$(uefi_first_match "$UEFI_SER" 'failed to load Boot[0-9A-Fa-f]{4}[^[:cntrl:]]*')'"
         fi
     fi
     # ---- two that LOAD and then fault --------------------------------------
@@ -2762,7 +2829,7 @@ leg7() {
     # (or 0 bytes) long. Nothing of ours prints, and the machine faults.
     if uefi_control L7_control_virtual_size_too_small_faults x86 "$img" x7_vsize LOADED_FAULTED \
             "VirtualSize -> 1 (the loader copies one byte of a ${vsz}-byte payload)" "u32was:$UEFI_OFF_VIRTUALSIZE:$vsz:1"; then
-        ok "L7_control_virtual_size_too_small_faults" "VirtualSize := 1 => the image LOADS ('starting Boot0001' present) and then faults with nothing of ours on the wire: '$(uefi_first_match "$UEFI_SER" 'X64 Exception Type[^!]*')'"
+        ok "L7_control_virtual_size_too_small_faults" "VirtualSize := 1 => the image LOADS ('starting Boot<ours>' present) and then faults with nothing of ours on the wire: '$(uefi_first_match "$UEFI_SER" 'X64 Exception Type[^!]*')'"
     fi
     if uefi_control L7_control_size_of_raw_data_zero_faults x86 "$img" x7_srd0 LOADED_FAULTED \
             "SizeOfRawData -> 0 (nothing is copied from the file at all)" "u32was:$UEFI_OFF_SIZEOFRAWDATA:4096:0"; then
@@ -2783,7 +2850,7 @@ leg7() {
     # fault hits, neither marker, control back to BDS.
     if uefi_control L7_control_entry_at_section_start_silent x86 "$img" x7_ent0 LOADED_SILENT \
             "AddressOfEntryPoint $entry -> 4096 (the section start, i.e. the first function and not the entry)" "u32was:$UEFI_OFF_ENTRY:$entry:4096"; then
-        ok "L7_control_entry_at_section_start_silent" "entry := 4096 => the image LOADS and STARTS ('starting Boot0001' on the wire), faults NOWHERE, prints NEITHER marker and returns to BDS -- the one outcome no other row here reaches"
+        ok "L7_control_entry_at_section_start_silent" "entry := 4096 => the image LOADS and STARTS ('starting Boot<ours>' on the wire), faults NOWHERE, prints NEITHER marker and returns to BDS -- the one outcome no other row here reaches"
     fi
     # ---- the asymmetry that makes L8's printed-then-faulted row a control ----
     # Same mutation, other arch. Clearing the write bit is fatal on arm64 and
@@ -2871,7 +2938,7 @@ leg8() {
     # ---- the rejection whose status is the ambiguous one --------------------
     if uefi_control L8_control_subsystem_3_not_loaded a64 "$img" a8_sub3 NOT_LOADED \
             "Subsystem 10 -> 3 (Windows console)" "hexwas:$UEFI_OFF_SUBSYSTEM:0a00:0300"; then
-        ok "L8_control_subsystem_3_not_loaded" "Subsystem := 3 => NOT_LOADED ('$(uefi_first_match "$UEFI_SER" 'failed to load Boot0001[^[:cntrl:]]*')') -- measured byte-identical to an empty ESP and to a misnamed file on this firmware, so L8_uefi_a64_boots in this same batch is the entire reason it counts"
+        ok "L8_control_subsystem_3_not_loaded" "Subsystem := 3 => NOT_LOADED ('$(uefi_first_match "$UEFI_SER" 'failed to load Boot[0-9A-Fa-f]{4}[^[:cntrl:]]*')') -- measured byte-identical to an empty ESP and to a misnamed file on this firmware, so L8_uefi_a64_boots in this same batch is the entire reason it counts"
     fi
     # ---- faulted having printed NOTHING ------------------------------------
     if uefi_control L8_control_virtual_size_too_small_faults a64 "$img" a8_vsize LOADED_FAULTED \
