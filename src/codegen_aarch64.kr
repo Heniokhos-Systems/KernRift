@@ -4636,17 +4636,17 @@ fn gen_expr_a64(uint64 node) {
         // call_arg_vregs and errors past 32; this is that capacity and that
         // message, so both backends now refuse exactly the same programs
         // instead of one crashing where the other diagnoses.
-        if arg_count > 32 {
-            write(2, "error: too many call arguments (max 32)\n", 40)
+        if arg_count > 64 {
+            write(2, "error: too many call arguments (max 64)\n", 40)
             exit(1)
         }
         // Evaluate all args and store to temp slots.
         // Track which args are float (0=int, 1=f64, 2=f32).
-        uint64[32] arg_float_flags_a
+        uint64[64] arg_float_flags_a
         // Track which args are structs (0xFFFFFFFF = not struct, else struct index)
-        uint64[32] arg_struct_flags_a
+        uint64[64] arg_struct_flags_a
         uint64 asfi_a = 0
-        while asfi_a < 32 {
+        while asfi_a < 64 {
             uint64 asf_init = arg_struct_flags_a + asfi_a * 8
             uint64 none_val_a = 0xFFFFFFFF
             unsafe { *(asf_init as uint64) = none_val_a }
@@ -6143,7 +6143,10 @@ fn gen_function_a64(uint64 fn_node) {
     // 32 slots: 8 parameters arrive in x0-x7 and the rest on the stack,
     // so 16 held only a 24-argument function -- short of the 32-argument
     // cap the IR and x86 legacy backends both allow.
-    uint64[32] a64_overflow_patches
+    // 64 entries, matching the 64-argument call cap. Indexed by argument
+    // number with the guards below as their only bound, so the two numbers
+    // have to move together.
+    uint64[64] a64_overflow_patches
     uint64 a64_overflow_patch_count = 0
 
     var_reset()
@@ -6462,8 +6465,8 @@ fn gen_function_a64(uint64 fn_node) {
                         uint64 fpatch_loc_a = out_len
                         emit_a64(0xF9400000 | (31 << 5) | 0) // ldr x0, [sp, #0] placeholder
                         emit_a64_str(0, 31, a64_var_base + poff)
-                        if stack_pidx_a >= 32 {
-                            cap_overflow("too many overflow-checked operations", 32, 1)
+                        if stack_pidx_a >= 64 {
+                            cap_overflow("too many stack parameters", 64, 1)
                             exit(1)
                         }
                         uint64 fop_entry_a = a64_overflow_patches + stack_pidx_a * 8
@@ -6492,8 +6495,8 @@ fn gen_function_a64(uint64 fn_node) {
                         // order, so `reg - 8` only agreed with it when no
                         // float overflowed too.
                         uint64 opi = stack_pidx_a
-                        if opi >= 32 {
-                            cap_overflow("too many overflow-checked operations", 32, 1)
+                        if opi >= 64 {
+                            cap_overflow("too many stack parameters", 64, 1)
                             exit(1)
                         }
                         uint64 op_entry = a64_overflow_patches + opi * 8

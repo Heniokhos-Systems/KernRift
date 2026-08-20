@@ -7963,8 +7963,8 @@ fn gen_expr(uint64 node) {
             // frames indexed by argument number with nothing bounding them.
             // All four widths are verified against the IR backend and against
             // arm64, 7 through 32, by many_args_direct_call_matches_ir below.
-            if arg_count > 32 {
-                uint64 cpe2 = "error: too many call_ptr arguments on the legacy backend (max 32)\n"
+            if arg_count > 64 {
+                uint64 cpe2 = "error: too many call_ptr arguments on the legacy backend (max 64)\n"
                 write(2, cpe2, str_len(cpe2))
                 exit(1)
             }
@@ -9615,17 +9615,17 @@ fn gen_expr(uint64 node) {
         // call_arg_vregs and errors past 32; this is that capacity and that
         // message, so both backends now refuse exactly the same programs
         // instead of one crashing where the other diagnoses.
-        if arg_count > 32 {
-            write(2, "error: too many call arguments (max 32)\n", 40)
+        if arg_count > 64 {
+            write(2, "error: too many call arguments (max 64)\n", 40)
             exit(1)
         }
         // Evaluate all args and store to temp slots.
         // Track which args are float (0=int, 1=f64, 2=f32) in a local array.
-        uint64[32] arg_float_flags
+        uint64[64] arg_float_flags
         // Track which args are structs (0xFFFFFFFF = not struct, else struct index)
-        uint64[32] arg_struct_flags
+        uint64[64] arg_struct_flags
         uint64 asfi = 0
-        while asfi < 32 {
+        while asfi < 64 {
             uint64 asf_addr = arg_struct_flags + asfi * 8
             uint64 none_val = 0xFFFFFFFF
             unsafe { *(asf_addr as uint64) = none_val }
@@ -12217,7 +12217,10 @@ fn gen_function(uint64 fn_node) {
     // 32 slots, one per stack-passed parameter, matching the 32-argument
     // call cap. This was 16 and unchecked, so a function declaring more
     // than 22 parameters wrote past the end of the prologue's own frame.
-    uint64[32] overflow_patches
+    // 64 entries, matching the 64-argument call cap. Indexed by argument
+    // number with the guard above as their only bound, so the two numbers
+    // have to move together.
+    uint64[64] overflow_patches
     uint64 overflow_patch_count = 0
 
     // Reset variable table for this function
@@ -12855,8 +12858,8 @@ fn gen_function(uint64 fn_node) {
                         emit_byte(0x24)
                         uint64 fpatch_loc = out_len
                         emit_u32_le(0) // placeholder -- patched later
-                        if stack_pidx >= 32 {
-                            write(2, "error: too many stack parameters (max 32)\n", 42)
+                        if stack_pidx >= 64 {
+                            write(2, "error: too many stack parameters (max 64)\n", 42)
                             exit(1)
                         }
                         uint64 fop_entry = overflow_patches + stack_pidx * 8
@@ -12894,8 +12897,8 @@ fn gen_function(uint64 fn_node) {
                         emit_u32_le(0) // placeholder — patched later
                         // Save patch location for this overflow arg
                         uint64 opi = pidx - 4
-                        if opi >= 32 {
-                            write(2, "error: too many stack parameters (max 32)\n", 42)
+                        if opi >= 64 {
+                            write(2, "error: too many stack parameters (max 64)\n", 42)
                             exit(1)
                         }
                         uint64 op_entry = overflow_patches + opi * 8
@@ -12950,8 +12953,8 @@ fn gen_function(uint64 fn_node) {
                         // order, so `int_pidx - 6` only agreed with it when no
                         // float overflowed too.
                         uint64 opi = stack_pidx
-                        if opi >= 32 {
-                            write(2, "error: too many stack parameters (max 32)\n", 42)
+                        if opi >= 64 {
+                            write(2, "error: too many stack parameters (max 64)\n", 42)
                             exit(1)
                         }
                         uint64 op_entry = overflow_patches + opi * 8

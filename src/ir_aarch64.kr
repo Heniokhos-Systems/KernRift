@@ -1653,8 +1653,13 @@ fn ir_emit_arm64_insn(uint64 ii) {
             // call would build the x86 slices and then abort the build on
             // the arm64 one.
             uint64 oi = imm - 8
-            if oi >= 24 {
-                write(2, "error: a64 overflow args overflow (max 24)\n", 43)
+            // 56 slots = the 64-argument cap less the eight that arrive in
+            // x0-x7. The shared front-end refuses a 65th before this is
+            // reached, so this is the invariant rather than the user-facing
+            // limit -- and it stays LOUD for the reason above: it was once
+            // `oi < 16` with no else.
+            if oi >= 56 {
+                write(2, "error: a64 overflow args overflow (max 56 slots = 64 args)\n", 59)
                 exit(1)
             }
             uint64 src_reg = ir_a64_resolve_src(s1_v, 9)

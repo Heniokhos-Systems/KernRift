@@ -351,7 +351,10 @@ fn ir_init() {
     ir_loop_count = 0
 
     if ir_overflow_args == 0 {
-        ir_overflow_args = alloc(32 * 8)
+        // 64 slots, matching the call-argument cap. Sized larger than an
+        // overflow index can actually reach (cap - 6) on purpose: the guard
+        // that reads it fails SILENTLY, so headroom is cheaper than that.
+        ir_overflow_args = alloc(64 * 8)
     }
     ir_overflow_arg_count = 0
 }
@@ -3268,11 +3271,11 @@ fn ir_lower_expr(uint64 node) -> uint64 {
             // First arg is the function pointer
             uint64 ptr_v = ir_lower_expr(wfa)
             // Remaining args are the actual call arguments
-            uint64[32] cp_arg_vregs
+            uint64[64] cp_arg_vregs
             uint32 call_arg = ast_next(wfa)
             uint64 wca = call_arg
             uint64 cp_count = 0
-            while wca != 0 && cp_count < 32 {
+            while wca != 0 && cp_count < 64 {
                 uint64 av = ir_lower_expr(wca)
                 uint64 avp = cp_arg_vregs + cp_count * 8
                 unsafe { *(avp as uint64) = av }
@@ -3281,9 +3284,13 @@ fn ir_lower_expr(uint64 node) -> uint64 {
                 wca = anxt
             }
             // Arguments 0-5 go in registers, 6+ on the stack -- same as a
-            // direct call, whose cap this now matches. Beyond 32 the values
-            // are simply never collected (cp_arg_vregs has 32 slots) and a
-            // 33rd argument's side effects would vanish, so it still refuses.
+            // direct call, whose cap this MATCHES and has to: raising the
+            // direct-call cap to 64 while leaving this at 32 would mean
+            // f(...33 args) compiled and call_ptr(p, ...33 args) did not,
+            // an asymmetry that did not exist before. Beyond the cap the
+            // values are simply never collected (cp_arg_vregs has that many
+            // slots) and the next argument's side effects would vanish, so
+            // it still refuses.
             // The direct-call path has the equivalent guard; this message is
             // worded differently so the two remain distinguishable.
             //
@@ -3291,7 +3298,7 @@ fn ir_lower_expr(uint64 node) -> uint64 {
             // "(max 6)" and would have been one short for "(max 32)", which is
             // the exact shape of the 30 wrong write() lengths fixed in 563b0f3.
             if wca != 0 {
-                uint64 cpe = "error: too many call_ptr arguments (max 32)\n"
+                uint64 cpe = "error: too many call_ptr arguments (max 64)\n"
                 write(2, cpe, str_len(cpe))
                 exit(1)
             }
@@ -3517,16 +3524,30 @@ fn ir_lower_expr(uint64 node) -> uint64 {
 
         // General call: evaluate all arg exprs first, then emit ARGs + CALL
         // This prevents nested calls from clobbering arg registers.
-        // Capacity is 32 args (6 register + up to 26 stack); pushing higher
-        // also requires bumping ir_overflow_args / IR_ARG's oi guard below.
-        uint64[32] call_arg_vregs
+        // Capacity is 64 args (6 register + up to 58 stack). RAISING THIS IS
+        // NOT ONE CONSTANT. Four things move together and they do not fail
+        // alike:
+        //   * this array, the loop bound and the "max N" refusal -- all loud,
+        //   * ir_overflow_args' size and the `oi < N` guard at IR_ARG --
+        //     SILENT. Past that bound the argument is not recorded and
+        //     nothing is emitted, so the call runs with it missing and no
+        //     diagnostic. oi is `index - 6`, so a stale 32 there starts
+        //     losing arguments at the 39th while the refusal still says 64,
+        //   * ir_aarch64.kr's own `oi >= N` overflow bound, which is the
+        //     REAL ceiling: leave it and x86_64 takes 64 while arm64 still
+        //     refuses at 33. It refuses loudly, which is the only reason
+        //     that gap is cheap to find.
+        // Was 32; raised because a caller needed more. Costs are all bounded:
+        // IR fields are u32, this frame goes 256 B -> 512 B, and the legacy
+        // backends' two per-call flag frames go 512 B -> 1 KB.
+        uint64[64] call_arg_vregs
         uint32 arg = ast_child(node)
         uint64 warg = arg
         uint64 arg_count = 0
         // Method call: `self` (argument 0) is BY REFERENCE (LANGUAGE.md §7)
         // — pass the receiver's real address, never a copy.
         uint64 callee_is_method = fn_method_lookup(callee_tok)
-        while warg != 0 && arg_count < 32 {
+        while warg != 0 && arg_count < 64 {
             // Reset the struct-expression tracker so a stale value left by
             // an earlier lowering can never be mistaken for this argument.
             ir_fa_struct_idx = 0xFFFFFFFF
@@ -3573,7 +3594,7 @@ fn ir_lower_expr(uint64 node) -> uint64 {
             warg = anxt
         }
         if warg != 0 {
-            write(2, "error: too many call arguments (max 32)\n", 40)
+            write(2, "error: too many call arguments (max 64)\n", 40)
             exit(1)
         }
         // Now emit ARG instructions
@@ -10300,7 +10321,9 @@ fn ir_emit_x86_insn(uint64 ii) {
         } else if imm >= 6 {
             // Overflow arg: save vreg to overflow buffer for IR_CALL to handle
             uint64 oi = imm - 6
-            if oi < 32 {
+            // < 64, matching ir_overflow_args and the argument cap. THIS
+            // GUARD IS SILENT: past it the argument is simply not recorded.
+            if oi < 64 {
                 uint64 op_ptr = ir_overflow_args + oi * 8
                 uint64 sv = s1_v
                 unsafe { *(op_ptr as uint64) = sv }
