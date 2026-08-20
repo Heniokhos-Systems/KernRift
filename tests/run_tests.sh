@@ -2844,6 +2844,14 @@ README_COUNTS=$( { grep -oE '\*\*[0-9]+ tests\*\*' "$DIR/../README.md"
 # An empty capture must FAIL, never compare "" against "" and pass.
 README_N=$(printf '%s\n' "$README_COUNTS" | grep -c '^[0-9][0-9]*$')
 README_UNIQ=$(printf '%s\n' "$README_COUNTS" | sort -u | tr '\n' ' ' | sed 's/ *$//')
+# HOW MANY DISTINCT counts, not how many mentions. Part B compares $TOTAL against
+# $README_UNIQ with `[ -gt ]`, so two disagreeing spellings make that a two-word
+# string, the comparison dies with "integer expression expected", bash reads the
+# error as false, and the ladder falls through to its else -- PASSING, and
+# printing "README and suite both say 1495 1498". Measured: the README carried
+# 1495 in the support matrix and 1498 in two other paragraphs, and this row
+# reported PASS across every run while claiming to check exactly that.
+README_UNIQ_N=$(printf '%s\n' "$README_COUNTS" | sort -u | grep -c '^[0-9][0-9]*$')
 
 # 6. std/ DOES NOT COMPILE FOR riscv32, and that is a DELIBERATE SCOPE BOUNDARY,
 #    NOT A GAP. The stdlib is written for 64-bit hosts; riscv32 exists as
@@ -3074,6 +3082,28 @@ run_test "atomic_store_load" 'fn main() {
     uint64 v = atomic_load(buf)
     exit(v)
 }' 42
+
+# REGRESSION: atomic_store must not clobber the register holding its value.
+#
+# The x86 lowering was `lock xchg [ptr], val`, and xchg SWAPS -- it wrote val to
+# memory and loaded the OLD memory contents back into val's register, with
+# nothing telling the register allocator. Every use of the value after an
+# atomic_store therefore read whatever had been in memory beforehand.
+#
+# atomic_store_load above passed throughout, because it stores a literal and
+# never looks at it again. THIS row reuses the operand afterwards and seeds the
+# target with something else first, so a swapping lowering is forced to show
+# itself: under the bug s becomes 99 and this exits 106 instead of 14.
+#
+# Found in a downstream kernel, where the field written immediately after an
+# atomic_store silently took the pre-swap value on every call.
+run_test "atomic_store_preserves_value_operand" 'fn main() {
+    uint64 buf = alloc(64)
+    store64(buf, 99)
+    uint64 s = 7
+    atomic_store(buf, s)
+    exit(s + load64(buf))
+}' 14
 
 run_test "atomic_add_basic" 'fn main() {
     uint64 buf = alloc(64)
@@ -6654,6 +6684,56 @@ fn main() {
     chk(cstr_parse_hex("0xff", 0), 255, 19)
     exit(9)
 }' 9
+
+# save_flags_cli/restore_flags: PIN THE EMITTED PAIRING, because source review
+# cannot see it. Both hand a value between two separate asm blocks through the
+# stack, so their correctness is a property of the machine code, not of the
+# source: anything the compiler emits between the pushfq and its pop -- a spill,
+# a prologue, a call frame -- makes the pop load the wrong word, and the source
+# still reads exactly right. Every other pushfq/pop handoff in this tree sits
+# inside an @naked body for that reason; these two do not, and this row is what
+# says they may stay that way.
+#
+# Compile-only, and it cannot be otherwise: cli is ring 0 and faults hosted, so
+# the behaviour is unrunnable here. The bytes are the evidence available.
+#
+# Worth the row because this is the same failure class as
+# atomic_store_preserves_value_operand above -- an instruction-level property
+# that every source-level test passes straight over.
+TOTAL=$((TOTAL + 1))
+FL_SRC="$DIR/../flagpair_$$.kr"
+FL_ASM="$DIR/../flagpair_$$.s"
+cat > "$FL_SRC" <<'FLEOF'
+import "std/x86.kr"
+static uint64 sink = 0
+fn main() {
+    uint64 f = save_flags_cli()
+    sink = f
+    restore_flags(f)
+}
+FLEOF
+if ! $KRC --arch=x86_64 --target=none --emit=asm "$FL_SRC" -o "$FL_ASM" >/dev/null 2>&1; then
+    FAIL=$((FAIL + 1)); echo "FAIL: x86_flag_pair_emission (would not compile)"
+else
+    fl_save=$(nk_bytes "$FL_ASM" save_flags_cli)
+    fl_rest=$(nk_bytes "$FL_ASM" restore_flags)
+    fl_bad=""
+    # 9c = pushfq, 58 = pop rax: adjacent, nothing between.
+    case "$fl_save" in *9c58*) ;; *) fl_bad="save_flags_cli lacks an adjacent 9c58" ;; esac
+    # fa = cli, and it must come AFTER the pop rather than before it.
+    case "$fl_save" in *9c58*fa*) ;; *) fl_bad="$fl_bad; cli does not follow the pop" ;; esac
+    # 50 = push rax, 9d = popfq: adjacent, nothing between.
+    case "$fl_rest" in *509d*) ;; *) fl_bad="$fl_bad; restore_flags lacks an adjacent 509d" ;; esac
+    if [ -z "$fl_bad" ]; then
+        PASS=$((PASS + 1)); echo "  x86_flag_pair_emission: PASS (9c58..fa and 509d emitted adjacently)"
+    else
+        FAIL=$((FAIL + 1))
+        echo "FAIL: x86_flag_pair_emission ($fl_bad)"
+        echo "  save_flags_cli: $fl_save"
+        echo "  restore_flags:  $fl_rest"
+    fi
+fi
+rm -f "$FL_SRC" "$FL_ASM"
 
 # std/x86.kr: only the NON-PRIVILEGED surface can run hosted -- port I/O,
 # control registers, MSRs, cli/sti and lgdt/lidt are ring 0 and fault in
@@ -23522,6 +23602,12 @@ elif [ "$README_N" -lt "2" ]; then
     echo "FAIL: readme_test_count_matches_suite (README states the count $README_N times, want 2+)"
     echo "  README.md carries it in the CI paragraph, the stats paragraph, the status"
     echo "  table and the support matrix -- all spellings must agree"
+elif [ "$README_UNIQ_N" -gt "1" ]; then
+    # Disagreeing spellings, caught BEFORE any arithmetic compare, because the
+    # compare is what silently swallowed this case.
+    FAIL=$((FAIL + 1))
+    echo "FAIL: readme_test_count_matches_suite (README states $README_UNIQ_N different counts: $README_UNIQ)"
+    echo "  every spelling must agree -- set them all to $TOTAL"
 elif [ "$TOTAL" -gt "$README_UNIQ" ]; then
     # $TOTAL IS ENVIRONMENT-DEPENDENT and the first version of this row did not
     # account for it: ~84 rows are gated on optional tooling and neither run nor

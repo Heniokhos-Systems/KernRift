@@ -94,7 +94,7 @@ static uint64 IR_FN_ADDR = 86        // dest = lea function address; imm = strin
 static uint64 IR_CALL_IND = 87       // dest = indirect call result; src1 = fn pointer vreg
 static uint64 IR_MEMCMP = 88         // dest = (memcmp(src1, src2, imm) == 0) ? 1 : 0
 
-static uint64 IR_ATOMIC_STORE = 90   // atomic_store(ptr, val): lock xchg [ptr], val
+static uint64 IR_ATOMIC_STORE = 90   // atomic_store(ptr, val): mov [ptr], val (release)
 static uint64 IR_ATOMIC_LOAD = 91    // atomic_load(ptr): mov + mfence
 static uint64 IR_ATOMIC_ADD = 92     // atomic_add(ptr, val): lock xadd [ptr], val → old value
 static uint64 IR_ATOMIC_CAS = 93     // atomic_cas(ptr, expected, desired): lock cmpxchg
@@ -10618,16 +10618,43 @@ fn ir_emit_x86_insn(uint64 ii) {
     }
 
     if op == 90 {
-        // IR_ATOMIC_STORE: lock xchg [ptr], val
+        // IR_ATOMIC_STORE: mov [ptr], val -- a release store.
+        //
+        // THIS WAS `lock xchg [ptr], val` AND THAT WAS A MISCOMPILE, not merely
+        // a slow choice. xchg SWAPS: it writes val to memory and loads the OLD
+        // memory contents back into val's register. Nothing told the register
+        // allocator, so every use of the value after an atomic_store read
+        // whatever had been in memory beforehand. Reduced to nine lines:
+        //
+        //     store64(p + 24, 0)
+        //     atomic_store(p + 24, s)
+        //     head = s            // stored 0, not s
+        //
+        // emitting `mov r12, rsi / lock xchg [rbx], r12 / mov rax, r12` with no
+        // reload. It reached ApexRift's crash record, where the header field
+        // written just after the atomic_store took the pre-swap value on every
+        // event -- so the ring could not survive the reboot it exists for,
+        // while every test that read it inside the writing boot stayed green.
+        //
+        // A PLAIN MOV IS THE CORRECT LOWERING, not a workaround for the bug.
+        // x86-TSO does not reorder stores with stores, so an aligned naturally
+        // sized mov already publishes every preceding store before this one --
+        // which is release semantics, and exactly what the arm64 backend has
+        // always emitted here (`stlr Xt, [Xn]`, ir_aarch64.kr). The two
+        // backends now mean the same thing. Callers wanting a full fence must
+        // ask for one; they cannot get it as a side effect of a store.
+        //
+        // Same ModRM layout as the xchg it replaces -- 87 /r and 89 /r encode
+        // reg and r/m identically -- so only the opcode byte and the dropped
+        // F0 differ.
         uint64 ptr_r = ir_resolve_src(s1_v, 0)
         uint64 val_r = ir_resolve_src(s2_v, 1)
-        // lock xchg [ptr_r], val_r: F0 REX.W 87 modrm
-        emit_byte(0xF0)
+        // mov [ptr_r], val_r: REX.W 89 modrm
         uint8 as_rex = 0x48
         if val_r >= 8 { as_rex = as_rex | 4 }
         if ptr_r >= 8 { as_rex = as_rex | 1 }
         emit_byte(as_rex)
-        emit_byte(0x87)
+        emit_byte(0x89)
         uint8 as_modrm = ((val_r & 7) << 3) | (ptr_r & 7)
         if (ptr_r & 7) == 4 {
             emit_byte(as_modrm); emit_byte(0x24)

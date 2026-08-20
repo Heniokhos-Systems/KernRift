@@ -82,6 +82,38 @@ fn sti() {
     asm { "sti" }
 }
 
+// Mask interrupts and return the PREVIOUS RFLAGS, to be handed back to
+// restore_flags. Use this pair, not cli()/sti(), whenever the code might run
+// with interrupts already off -- a fault handler, an early-boot path, or any
+// callee of one. Bare sti() there does not restore a state, it INVENTS one, and
+// hands the machine back to the interrupt it was in the middle of servicing.
+//
+//     uint64 f = save_flags_cli()
+//     ... critical section ...
+//     restore_flags(f)
+//
+// ORDINARY FUNCTIONS RATHER THAN @naked, and that was checked against emitted
+// code rather than assumed, because the pairing spans two asm blocks and a
+// prologue or a spill between them would make the pop load the wrong word.
+// --emit=asm shows 9c (pushfq) immediately followed by 58 (pop rax), then the
+// move to the local, then fa (cli); restore_flags emits push/pop/push then 9d
+// (popfq). Inserting any statement between the two asm blocks of either
+// function can break that, so re-check the disassembly if you edit them.
+fn save_flags_cli() -> uint64 {
+    uint64 f = 0
+    asm { "pushfq" }
+    asm { "pop rax" } out(rax -> f)
+    asm { "cli" }
+    return f
+}
+
+// Restore RFLAGS saved by save_flags_cli. Interrupts come back on only if they
+// were on when it was called.
+fn restore_flags(uint64 f) {
+    asm { "push rax" } in(f -> rax)
+    asm { "popfq" }
+}
+
 // Stop permanently: mask interrupts, then halt in a loop so a spurious NMI
 // cannot resume execution past this point.
 fn halt_forever() {
