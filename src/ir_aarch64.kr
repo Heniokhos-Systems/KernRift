@@ -822,8 +822,16 @@ fn ir_emit_arm64_win_syscall(uint64 abstract_nr, uint64 dest_v, uint64 dst_r) {
         // MSDN: lpNumberOfBytesWritten may be NULL only when lpOverlapped is
         // non-NULL. We do synchronous writes, so a real scratch slot is
         // required. Allocate 16 bytes on the stack for alignment, pre-zero
-        // the DWORD slot, and point x3 at it; the value isn't read back
-        // because write() ignores its return count for now.
+        // the DWORD slot, and point x3 at it.
+        //
+        // AND READ IT BACK. This said "the value isn't read back because
+        // write() ignores its return count for now" -- but write() IS the
+        // count: every other target returns the bytes written, and leaving
+        // rax/x0 as WriteFile's BOOL made write(1,"abc",3) answer 1, and a
+        // 0-length write answer 1 rather than 0. The ReadFile twin below
+        // already learned this the hard way -- its comment records the BOOL
+        // "made the CI test read 1 instead of 8 on ARM64 Windows" -- and the
+        // write side was left as it was.
         emit_a64_sub_sp_imm(16)           // sub sp, sp, #16
         emit_a64_mov_imm(9, 0)
         emit_a64(0xF90003E9)              // str x9, [sp]   — pre-zero
@@ -832,6 +840,7 @@ fn ir_emit_arm64_win_syscall(uint64 abstract_nr, uint64 dest_v, uint64 dst_r) {
         emit_a64_mov(2, 12)               // x2 = len
         emit_a64_mov(1, 11)               // x1 = buf
         emit_a64_win_call_iat(2)          // WriteFile
+        emit_a64(0xB94003E0)              // ldr w0, [sp]   — bytesWritten (zero-extends)
         emit_a64_add_sp_imm(16)           // add sp, sp, #16
     }
 

@@ -222,6 +222,20 @@ jobs:
           file /tmp/cross-win-arm.exe | grep -q "PE32+"
           echo "Windows ARM64 PE: OK"
 
+          # write() MUST RETURN THE BYTE COUNT ON WINDOWS, and only a Windows
+          # runner can say so. The lowering calls WriteFile and used to hand
+          # back its BOOL, so write(1,"abc",3) answered 1 and a 0-length write
+          # answered 1 rather than 0 -- on every Windows backend, silently,
+          # while Linux and macOS were correct. cross.kr is `exit(42)` and
+          # never calls write, so nothing here could see it. exit code 7 means
+          # both counts were right; 1 means they were not.
+          printf 'fn main() {\n    uint64 a = write(1, "abc", 3)\n    uint64 b = write(1, "", 0)\n    if a == 3 { if b == 0 { exit(7) } }\n    exit(1)\n}\n' > /tmp/winret.kr
+          ./build/krc2 --arch=x86_64 --emit=pe /tmp/winret.kr -o /tmp/winret-x64.exe
+          ./build/krc2 --arch=arm64  --emit=pe /tmp/winret.kr -o /tmp/winret-arm.exe
+          file /tmp/winret-x64.exe | grep -q "PE32+"
+          file /tmp/winret-arm.exe | grep -q "PE32+"
+          echo "Windows write()-return probes: OK"
+
           ./build/krc2 --emit=android /tmp/cross.kr -o /tmp/cross-android-arm
           file /tmp/cross-android-arm | grep -q "ARM aarch64"
           echo "Android ARM64 PIE: OK"
@@ -366,6 +380,8 @@ jobs:
             /tmp/cross-macos-arm
             /tmp/cross-win-x64.exe
             /tmp/cross-win-arm.exe
+            /tmp/winret-x64.exe
+            /tmp/winret-arm.exe
 
   build-test-linux-arm64:
     name: Build and Test (Linux ARM64, native)
@@ -734,6 +750,18 @@ jobs:
           Write-Host "PASS: Windows x86_64 exit(42)"
           exit 0
 
+      - name: Windows x86_64 write() returns the byte count
+        shell: pwsh
+        run: |
+          & C:\tmp\bins\winret-x64.exe
+          $code = $LASTEXITCODE
+          if ($code -ne 7) {
+            Write-Host "FAIL: write() did not return the byte count (exit $code, want 7). WriteFile's BOOL is being returned instead of lpNumberOfBytesWritten."
+            exit 1
+          }
+          Write-Host "PASS: Windows x86_64 write() returns 3 and 0, not 1"
+          exit 0
+
       - name: Fat-binary krc via kr runner (Windows x86_64)
         shell: pwsh
         continue-on-error: true
@@ -794,6 +822,18 @@ jobs:
           Write-Host "Exit code: $code"
           if ($code -ne 42) { Write-Host "FAIL: expected 42, got $code"; exit 1 }
           Write-Host "PASS: Windows ARM64 exit(42)"
+          exit 0
+
+      - name: Windows ARM64 write() returns the byte count
+        shell: pwsh
+        run: |
+          & C:\tmp\bins\winret-arm.exe
+          $code = $LASTEXITCODE
+          if ($code -ne 7) {
+            Write-Host "FAIL: write() did not return the byte count (exit $code, want 7). WriteFile's BOOL is being returned instead of lpNumberOfBytesWritten."
+            exit 1
+          }
+          Write-Host "PASS: Windows ARM64 write() returns 3 and 0, not 1"
           exit 0
           exit 0
 

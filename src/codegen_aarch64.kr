@@ -2400,16 +2400,33 @@ fn gen_expr_a64(uint64 node) {
                 // Save handle to pk0_write (fd no longer needed)
                 emit_a64_store_x0(pk0_write)
                 // WriteFile(handle, buf, len, &bytesWritten, NULL)
-                // Use wr_extra+8 carefully — but we can just pass NULL for bytesWritten
-                // since we don't need the count from write()
-                emit_a64_mov_imm(4, 0)
-                emit_a64_mov_imm(3, 0)
-                emit_a64_load_x0(wr_extra)
-                emit_a64_mov(2, 0)
+                //
+                // THIS USED TO PASS NULL FOR bytesWritten, on the reasoning
+                // that "we don't need the count from write()". write() IS the
+                // count: every other target returns the bytes written, and
+                // returning WriteFile's BOOL instead made write(1,"abc",3)
+                // answer 1, and a 0-length write answer 1 rather than 0. Any
+                // `while written < len` loop or `write(...) != len` check was
+                // wrong on this target and said nothing. The file_read path
+                // below has always done this properly -- it hands ReadFile a
+                // real out-param and loads the count back -- which is what
+                // makes this an oversight and not a convention.
+                //
+                // pk1_write is reused as the output slot, exactly as
+                // file_read reuses pk1_fileread: buf is taken into x1 FIRST,
+                // so the slot is free by the time it is zeroed.
                 emit_a64_load_x0(pk1_write)
-                emit_a64_mov(1, 0)
-                emit_a64_load_x0(pk0_write)
+                emit_a64_mov(1, 0)                 // x1 = buf, before the reuse
+                emit_a64_mov_imm(0, 0)
+                emit_a64_store_x0(pk1_write)       // zero the count slot
+                emit_a64_add_imm(3, 31, a64_var_base + pk1_write)  // x3 = &bytesWritten
+                emit_a64_mov_imm(4, 0)             // x4 = NULL (lpOverlapped)
+                emit_a64_load_x0(wr_extra)
+                emit_a64_mov(2, 0)                 // x2 = len
+                emit_a64_load_x0(pk0_write)        // x0 = handle
                 emit_a64_win_call_iat(2)
+                // x0 = bytesWritten, not the BOOL
+                emit_a64_load_x0(pk1_write)
             } else {
                 emit_a64_mov(2, 0)
                 emit_a64_load_x0(pk1_write)
@@ -2627,14 +2644,22 @@ fn gen_expr_a64(uint64 node) {
                 uint64 fw_etr = var_frame_size & 15
                 if fw_etr != 0 { var_frame_size = var_frame_size + 16 - fw_etr }
                 emit_a64_store_x0(fw_extra)
-                emit_a64_mov_imm(4, 0)
-                emit_a64_mov_imm(3, 0)
-                emit_a64_load_x0(fw_extra)
-                emit_a64_mov(2, 0)
+                // Same fix as write() above: bytesWritten was NULL and the
+                // BOOL was returned, so file_write reported 1 for every
+                // successful write. pk1_filewrite becomes the output slot,
+                // taken into x1 first.
                 emit_a64_load_x0(pk1_filewrite)
-                emit_a64_mov(1, 0)
-                emit_a64_load_x0(pk0_filewrite)
+                emit_a64_mov(1, 0)                 // x1 = buf, before the reuse
+                emit_a64_mov_imm(0, 0)
+                emit_a64_store_x0(pk1_filewrite)   // zero the count slot
+                emit_a64_add_imm(3, 31, a64_var_base + pk1_filewrite)  // x3 = &bytesWritten
+                emit_a64_mov_imm(4, 0)             // x4 = NULL (lpOverlapped)
+                emit_a64_load_x0(fw_extra)
+                emit_a64_mov(2, 0)                 // x2 = len
+                emit_a64_load_x0(pk0_filewrite)    // x0 = handle
                 emit_a64_win_call_iat(2)
+                // x0 = bytesWritten, not the BOOL
+                emit_a64_load_x0(pk1_filewrite)
             } else {
                 emit_a64_mov(2, 0)
                 emit_a64_load_x0(pk1_filewrite)

@@ -6701,10 +6701,23 @@ fn gen_expr(uint64 node) {
                 emit_mov_rdx_rax()
                 emit_load_rax_from_stack(extra_tmp)
                 emit_mov_r8_rax()
-                emit_mov_r9_imm(0)
                 emit_win_alloc_stack(0x30)
                 emit_win_stack_arg5(0)
+                // lpNumberOfBytesWritten USED TO BE NULL (emit_mov_r9_imm(0)),
+                // so this returned WriteFile's BOOL -- 1 for any successful
+                // write, where every other target returns the byte count:
+                // write(1, "abc", 3) gave 1, not 3, and a 0-length write gave
+                // 1 rather than 0. The read path in this same file always did
+                // it correctly and says so ("Return bytesRead (not the BOOL)"),
+                // which is what makes this an oversight and not a convention.
+                // mov dword [rsp+0x28], 0 -- a WriteFile that fails need not
+                // touch the slot, and a stale value would read as a count.
+                emit_byte(0xC7); emit_byte(0x44); emit_byte(0x24); emit_byte(0x28); emit_u32_le(0)
+                // lea r9, [rsp+0x28] -- &bytesWritten
+                emit_byte(0x4C); emit_byte(0x8D); emit_byte(0x4C); emit_byte(0x24); emit_byte(0x28)
                 emit_win_call_iat(2)
+                // mov eax, [rsp+0x28] -- the count, not the BOOL
+                emit_byte(0x8B); emit_byte(0x44); emit_byte(0x24); emit_byte(0x28)
                 emit_win_free_stack(0x30)
             } else {
                 // rax = len -> rdx
@@ -7003,6 +7016,12 @@ fn gen_expr(uint64 node) {
                 emit_byte(0x4C); emit_byte(0x8D); emit_byte(0x4C); emit_byte(0x24); emit_byte(0x28)
                 emit_win_stack_arg5(0)
                 emit_win_call_iat(2)
+                // AND READ THE COUNT BACK. This site already pointed r9 at
+                // [rsp+0x28] and zeroed it, so its out-param was right all
+                // along -- it just returned rax, WriteFile's BOOL, and threw
+                // the count away. file_write reported 1 for every successful
+                // write.
+                emit_byte(0x8B); emit_byte(0x44); emit_byte(0x24); emit_byte(0x28)  // mov eax, [rsp+0x28]
                 emit_win_free_stack(0x30)
             } else {
                 emit_mov_rdx_rax()
