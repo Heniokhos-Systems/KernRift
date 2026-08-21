@@ -33,6 +33,29 @@ freestanding paths — so structs and `alloc()` work only on hosted riscv32.
 `--emit=lkm` also gained its first test coverage in v2.8.28
 (`tests/helpers/lkm_check.py`).
 
+**Also tracked: arm64 `in`/`out` asm constraints are documented, not
+implemented.** Found porting ApexRift's crash record to native arm64 (not an
+embedded target, but the same IR). `docs/LANGUAGE.md:1057` lists `x0`…`x30` as
+valid ARM64 register names for `in`/`out` clauses, and that section's own
+Limitations list does not exclude them — but `krc2 --arch=arm64` rejects any
+such constraint with `unknown inline-asm constraint register 'x0' (want rax
+rcx rdx rbx rsp rbp rsi rdi r8-r15)`: the accepted set is x86-only regardless
+of `--arch`. This is a doc/implementation mismatch, not just a missing
+feature. The natural escape hatch, `@naked` on a value-returning function, is
+also blocked — the all-paths-return check runs before naked-ness is
+considered, so `@naked fn f() -> uint64 {...}` fails "may not return a value
+on all paths" even when the body is one asm block that sets the return
+register (`docs/CHEATSHEET.md:252` shows only the void form). Net effect: no
+supported way to read an arm64 system register into a KernRift variable —
+`arch/arm64/a64_sysreg.kr` in ApexRift works around it by storing the
+register to memory from asm and reading it back with `load64`, an unchecked
+x0-liveness assumption verified once by disassembly rather than by the
+language. Cheapest fix first: correct LANGUAGE.md's Limitations list; then
+allow `@naked` on an all-asm value-returning body; then implement the ARM64
+constraint registers already documented. **Status:** not started. Filed
+2026-08-21 (KernRift @ 466a2e7); full repro in ApexRift's
+`.superpowers/sdd/2026-08-21-crash-record-on-phone/kernrift-gap-report.md`.
+
 ### R0-next: ESP32 M2 — second-stage bootloader
 
 M1 is RAM-only, which caps a program at the 127 KiB IRAM window. M2 is the
