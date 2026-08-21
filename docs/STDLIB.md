@@ -1,12 +1,16 @@
 # KernRift Standard Library Reference
 
-The standard library lives in `std/*.kr` — **35 modules, 553 functions**. This
+The standard library lives in `std/*.kr` — **39 modules, 590 functions**. This
 document covers the **19 general-purpose modules** listed below (313 of those
-functions). The remaining 16 are the bare-metal drivers added for the boot
-work — `console`, `cstr`, `fw_cfg`, `fw_cfg_mmio`, `gzip`, `heap_bump`, `idt`,
-`mouse`, `pci`, `ps2`, `ramfb`, `serial`, `uart_16550`, `uart_pl011`,
-`vga_text`, `x86` (240 functions) — and are **not documented here yet**. Read
-their source directly.
+functions). The remaining 20 are **not documented here yet** — read their source
+directly:
+
+- the bare-metal drivers added for the boot work — `console`, `cstr`, `fw_cfg`,
+  `fw_cfg_mmio`, `gzip`, `heap_bump`, `idt`, `mouse`, `pci`, `pci_core`,
+  `pci_ecam`, `pci_port`, `ps2`, `ramfb`, `serial`, `uart_16550`, `uart_pl011`,
+  `vga_text`, `x86` (19 modules, 259 functions);
+- `apexrift` (18 functions), which this document has never listed in either
+  group — the previous counts summed the other two and were short by it.
 
 Import a module with its `std/` path:
 

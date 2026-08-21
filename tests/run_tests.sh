@@ -2878,9 +2878,9 @@ for _std in "$DIR"/../std/*.kr; do
     fi
 done
 # Guard the loop against doing nothing: an empty glob would leave RV_OK=1.
-if [ "$RV_SEEN" != "36" ]; then
+if [ "$RV_SEEN" != "39" ]; then
     RV_OK=0
-    echo "  swept $RV_SEEN std modules, expected 36 -- the glob found the wrong set"
+    echo "  swept $RV_SEEN std modules, expected 39 -- the glob found the wrong set"
 fi
 if [ "$RV_OK" = "1" ]; then
     PASS=$((PASS + 1)); echo "  std_rejected_on_riscv32: PASS (all $RV_SEEN modules rejected at their first u64)"
