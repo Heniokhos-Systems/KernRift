@@ -1,0 +1,148 @@
+// KernRift Standard Library — PCI configuration space over ECAM (MMIO)
+//
+// The memory-mapped transport for std/pci_core.kr, used wherever there are no
+// I/O ports -- arm64 in particular, where QEMU `-M virt` exposes PCIe only
+// this way. Same six `pci_config_*` names as std/pci_port.kr, so a caller
+// switches transports by switching the import (the same split as
+// std/fw_cfg.kr vs std/fw_cfg_mmio.kr).
+//
+// FREESTANDING-SAFE: volatile MMIO and static storage only, no allocation.
+//
+// NOT arch-specific KernRift -- nothing here is x86 or arm64 as such. What is
+// board-specific is the BASE ADDRESS, which is why it is a parameter and not a
+// constant: read it from the device tree (`pci-host-ecam-generic`, the `reg`
+// property) and hand it to pci_ecam_init. Hard-coding QEMU virt's window here
+// would be the same mistake std/fw_cfg_mmio.kr's header warns about.
+//
+//     import "std/pci_ecam.kr"
+//     import "std/pci_core.kr"
+//     pci_ecam_init(base_from_dtb, size_from_dtb)
+//
+// ADDRESS FORMAT (PCIe r3.0 §7.2.2): a device's 4 KiB of configuration space
+// sits at
+//
+//     base + (bus << 20) + (dev << 15) + (func << 12) + offset
+//
+// so one bus occupies 1 MiB and the window's size in MiB is exactly the number
+// of buses it reaches.
+
+// Zero until pci_ecam_init runs. Reads are refused while it is zero rather
+// than dereferencing a null-relative address: on arm64 an unmapped access is a
+// synchronous external abort, so the failure mode of "forgot to init" would
+// otherwise be a fault with no diagnosis instead of an empty bus.
+static u64 pci_ecam_base  = 0
+static u64 pci_ecam_buses = 0
+
+// Config accesses this transport has REFUSED as out of window. Diagnostic, and
+// the only way the enumeration layer's own bus bound can be observed: the two
+// bounds are defence in depth, so deleting pci_core.kr's leaves this one still
+// refusing and the results still correct -- just after probing buses that
+// cannot exist. Without a count, that regression is invisible. A scan that
+// respects pci_bus_count() must never make this move.
+static u64 pci_ecam_refused = 0
+
+fn pci_ecam_refusals() -> u64 { return pci_ecam_refused }
+
+// `size` is the window's byte length from the device tree, NOT a bus count.
+// One bus per MiB; a window smaller than 1 MiB reaches no buses at all and is
+// stored as such rather than rounded up to one.
+// Deliberately does NOT reset pci_ecam_refused: the count is cumulative for the
+// life of the program, so a caller that re-initialises the window cannot erase
+// evidence of refusals that already happened.
+fn pci_ecam_init(u64 base, u64 size) {
+    pci_ecam_base  = base
+    pci_ecam_buses = size >> 20
+}
+
+fn pci_ecam_ready() -> u64 {
+    if pci_ecam_base == 0 { return 0 }
+    return 1
+}
+
+// --- transport contract ---------------------------------------------------------
+
+// How many buses this transport can reach. std/pci_port.kr returns 256 because
+// the port mechanism answers all-ones for an absent device across the whole bus
+// number space. ECAM does not.
+//
+// WHAT IS ACTUALLY PAST THE WINDOW depends on the board, and an earlier draft of
+// this comment claimed it is always an external abort. It is not. Measured on
+// QEMU 8.2.2:
+//   * `-M virt` (window 0x40_10000000 + 256 MiB): bus 256 computes to
+//     0x40_20000000, which is unmapped -- the guest takes a synchronous
+//     external abort and dies.
+//   * `-M virt,highmem-ecam=off` (window 0x3F000000 + 16 MiB): bus 16 computes
+//     to 0x40000000, which is DRAM. No fault at all; the read returns memory
+//     contents dressed up as configuration space, and a scan can fabricate a
+//     device out of whatever happens to be in RAM.
+// The second is the worse failure and the quieter one, which is why the guard
+// refuses rather than relying on the bus to float high.
+//
+// MEASURED, and it is not the number an earlier draft of this file guessed:
+// QEMU 8.2.2 `-M virt` puts the window at 0x40_10000000 with size 0x10000000
+// -- 256 MiB, so 256 buses, and `bus-range = <0 0xff>` agrees (dumpdtb,
+// `pci-host-ecam-generic`). On virt the bound therefore never fires, which is
+// exactly why it must be asserted with a deliberately undersized window rather
+// than by booting: a normal virt boot cannot tell this function from
+// `return 256`.
+fn pci_bus_count() -> u64 { return pci_ecam_buses }
+
+// The MMIO address of one byte of configuration space. Bounded by the bus
+// count, so an out-of-window request is answered by the read wrappers below
+// rather than performed.
+fn pci_ecam_addr(u64 bus, u64 dev, u64 func, u64 off) -> u64 {
+    return pci_ecam_base + (bus << 20) + (dev << 15) + ((func & 7) << 12) + (off & 0xFFF)
+}
+
+// 1 if this address is inside the window and the window exists.
+fn pci_ecam_in_window(u64 bus, u64 dev, u64 func) -> u64 {
+    if pci_ecam_base == 0 { pci_ecam_refused = pci_ecam_refused + 1  return 0 }
+    if bus >= pci_ecam_buses { pci_ecam_refused = pci_ecam_refused + 1  return 0 }
+    if dev >= 32 { pci_ecam_refused = pci_ecam_refused + 1  return 0 }
+    if func >= 8 { pci_ecam_refused = pci_ecam_refused + 1  return 0 }
+    return 1
+}
+
+// --- configuration reads and writes -------------------------------------------
+//
+// An out-of-window read returns all-ones, which is exactly what a bus returns
+// for an absent device -- so pci_device_exists reports "nothing there" instead
+// of taking an abort. Writes out of window are dropped.
+//
+// The loads are the volatile forms: config space is a device, and a compiler
+// that cached or reordered these would produce a bus scan that reports one
+// device eight times.
+
+fn pci_config_read32(u64 bus, u64 dev, u64 func, u64 off) -> u64 {
+    if pci_ecam_in_window(bus, dev, func) == 0 { return 0xFFFFFFFF }
+    return vload32(pci_ecam_addr(bus, dev, func, off & 0xFFC)) & 0xFFFFFFFF
+}
+
+// Aligned to the field's own width, which is the MMIO equivalent of
+// std/pci_port.kr reading the DATA port offset by the low address bits. An
+// implementation that read the containing dword and returned its low half
+// would report the vendor ID for every even offset.
+fn pci_config_read16(u64 bus, u64 dev, u64 func, u64 off) -> u64 {
+    if pci_ecam_in_window(bus, dev, func) == 0 { return 0xFFFF }
+    return vload16(pci_ecam_addr(bus, dev, func, off & 0xFFE)) & 0xFFFF
+}
+
+fn pci_config_read8(u64 bus, u64 dev, u64 func, u64 off) -> u64 {
+    if pci_ecam_in_window(bus, dev, func) == 0 { return 0xFF }
+    return vload8(pci_ecam_addr(bus, dev, func, off)) & 0xFF
+}
+
+fn pci_config_write32(u64 bus, u64 dev, u64 func, u64 off, u64 val) {
+    if pci_ecam_in_window(bus, dev, func) == 0 { return }
+    vstore32(pci_ecam_addr(bus, dev, func, off & 0xFFC), val & 0xFFFFFFFF)
+}
+
+fn pci_config_write16(u64 bus, u64 dev, u64 func, u64 off, u64 val) {
+    if pci_ecam_in_window(bus, dev, func) == 0 { return }
+    vstore16(pci_ecam_addr(bus, dev, func, off & 0xFFE), val & 0xFFFF)
+}
+
+fn pci_config_write8(u64 bus, u64 dev, u64 func, u64 off, u64 val) {
+    if pci_ecam_in_window(bus, dev, func) == 0 { return }
+    vstore8(pci_ecam_addr(bus, dev, func, off), val & 0xFF)
+}

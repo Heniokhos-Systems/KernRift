@@ -1,0 +1,328 @@
+// KernRift Standard Library — PCI enumeration, transport-independent
+//
+// Enumerate the machine: what is plugged in, what it is, and where its
+// registers live. Everything here is expressed in terms of the six
+// `pci_config_read/write{32,16,8}` functions and `pci_bus_count`, which a
+// TRANSPORT module supplies:
+//
+//     std/pci_port.kr   0xCF8/0xCFC legacy port I/O   (x86_64)
+//     std/pci_ecam.kr   memory-mapped ECAM            (arm64, and anything
+//                                                      without I/O ports)
+//
+// This module imports neither. KernRift resolves a call in one file against a
+// definition in another that the entry imported, so the pairing is done by the
+// caller -- std/pci.kr does it for x86, an arm64 entry imports pci_ecam.kr and
+// this file. Verified by compiling both shapes, not assumed.
+//
+// THE PAIRING CANNOT BE GOT WRONG SILENTLY, also measured:
+//   * importing the facade AND this file is deduplicated and compiles clean,
+//     so a caller that does both by accident is fine;
+//   * importing BOTH transports is 7 duplicate-definition errors -- the six
+//     pci_config_* names and pci_bus_count -- so the one mistake that would
+//     matter is a hard compile failure rather than a silent pick;
+//   * importing NEITHER is an undefined-function error at the first call.
+// The only unguarded case is an arm64 build that imports the x86 facade, which
+// fails at the assembler ("unrecognized asm instruction out dx, eax") the
+// moment a config access is reached.
+//
+// FREESTANDING-SAFE: no allocation.
+//
+// PRECEDENCE. In KernRift `&`, `|` and `^` bind TIGHTER than `+` and `<<` (the
+// reverse of C). Every mask-and-shift here is parenthesised for that reason.
+
+// pci_find_device's miss value, and what a vendor read returns for an absent
+// device. A real vendor ID is never 0xFFFF: the bus floats high when nothing
+// answers, which is exactly how absence is detected.
+const u64 PCI_NOT_FOUND      = 0xFFFFFFFF
+const u64 PCI_VENDOR_NONE    = 0xFFFF
+
+// Offsets into configuration space, header type 0.
+const u64 PCI_VENDOR_ID   = 0x00
+const u64 PCI_DEVICE_ID   = 0x02
+const u64 PCI_COMMAND     = 0x04
+const u64 PCI_STATUS      = 0x06
+const u64 PCI_REVISION    = 0x08
+const u64 PCI_PROG_IF     = 0x09
+const u64 PCI_SUBCLASS    = 0x0A
+const u64 PCI_CLASS       = 0x0B
+const u64 PCI_HEADER_TYPE = 0x0E
+const u64 PCI_BAR0        = 0x10
+const u64 PCI_SUBSYS_VENDOR = 0x2C
+const u64 PCI_SUBSYS_ID     = 0x2E
+const u64 PCI_INT_LINE    = 0x3C
+const u64 PCI_INT_PIN     = 0x3D
+
+// Header-type bit 7: this device has functions beyond 0. Without it set,
+// probing functions 1-7 is wasted bus traffic.
+const u64 PCI_HEADER_MULTIFUNCTION = 0x80
+
+// The header layout itself lives in bits 6:0. 0 is an ordinary device, 1 a
+// PCI-to-PCI bridge (where BAR2..5 become bus numbers, so pci_bar is only
+// meaningful for slots 0 and 1).
+const u64 PCI_HEADER_TYPE_DEVICE = 0x00
+const u64 PCI_HEADER_TYPE_BRIDGE = 0x01
+
+// Command-register bits worth naming: without these a device's BARs are
+// decoded by nobody and it will not answer, and without BUS_MASTER it cannot
+// DMA.
+const u64 PCI_COMMAND_IO      = 0x0001
+const u64 PCI_COMMAND_MEMORY  = 0x0002
+const u64 PCI_COMMAND_MASTER  = 0x0004
+
+// --- identity -----------------------------------------------------------------
+
+fn pci_vendor_id(u64 bus, u64 dev, u64 func) -> u64 {
+    return pci_config_read16(bus, dev, func, PCI_VENDOR_ID)
+}
+
+fn pci_device_id(u64 bus, u64 dev, u64 func) -> u64 {
+    return pci_config_read16(bus, dev, func, PCI_DEVICE_ID)
+}
+
+// 1 if something answers at this address.
+fn pci_device_exists(u64 bus, u64 dev, u64 func) -> u64 {
+    if pci_vendor_id(bus, dev, func) == PCI_VENDOR_NONE { return 0 }
+    return 1
+}
+
+fn pci_class(u64 bus, u64 dev, u64 func) -> u64 {
+    return pci_config_read8(bus, dev, func, PCI_CLASS)
+}
+
+fn pci_subclass(u64 bus, u64 dev, u64 func) -> u64 {
+    return pci_config_read8(bus, dev, func, PCI_SUBCLASS)
+}
+
+fn pci_prog_if(u64 bus, u64 dev, u64 func) -> u64 {
+    return pci_config_read8(bus, dev, func, PCI_PROG_IF)
+}
+
+fn pci_revision(u64 bus, u64 dev, u64 func) -> u64 {
+    return pci_config_read8(bus, dev, func, PCI_REVISION)
+}
+
+// The whole byte, multi-function bit included. Mask with 0x7F for the layout.
+fn pci_header_type(u64 bus, u64 dev, u64 func) -> u64 {
+    return pci_config_read8(bus, dev, func, PCI_HEADER_TYPE)
+}
+
+fn pci_is_multifunction(u64 bus, u64 dev, u64 func) -> u64 {
+    if (pci_header_type(bus, dev, func) & PCI_HEADER_MULTIFUNCTION) != 0 { return 1 }
+    return 0
+}
+
+// --- base address registers ---------------------------------------------------
+//
+// `slot` is the RAW BAR index 0..5, matching how every tool prints them
+// (`lspci -v`, QEMU's `info pci`). That matters because a 64-bit memory BAR
+// occupies TWO slots: slot n holds the low half and its type bits, slot n+1
+// holds the high 32 bits and is not a BAR of its own. A walker must therefore
+// ask pci_bar_is_64 and skip the following slot, or it will report a garbage
+// device region -- see pci_bar_next below, which does exactly that.
+
+fn pci_bar_raw(u64 bus, u64 dev, u64 func, u64 slot) -> u64 {
+    return pci_config_read32(bus, dev, func, PCI_BAR0 + (slot * 4))
+}
+
+// Bit 0 selects the space: 1 = I/O, 0 = memory.
+fn pci_bar_is_io(u64 bus, u64 dev, u64 func, u64 slot) -> u64 {
+    if (pci_bar_raw(bus, dev, func, slot) & 1) != 0 { return 1 }
+    return 0
+}
+
+// Memory BAR type field, bits 2:1. 00b = 32-bit, 10b = 64-bit (the high half
+// is the next slot), 01b = below-1MiB, obsolete.
+fn pci_bar_is_64(u64 bus, u64 dev, u64 func, u64 slot) -> u64 {
+    u64 raw = pci_bar_raw(bus, dev, func, slot)
+    if (raw & 1) != 0 { return 0 }
+    if ((raw >> 1) & 3) == 2 { return 1 }
+    return 0
+}
+
+// Memory BAR bit 3: prefetchable.
+fn pci_bar_is_prefetchable(u64 bus, u64 dev, u64 func, u64 slot) -> u64 {
+    u64 raw = pci_bar_raw(bus, dev, func, slot)
+    if (raw & 1) != 0 { return 0 }
+    if (raw & 8) != 0 { return 1 }
+    return 0
+}
+
+// Decode a raw BAR dword into an address: flag bits removed, and for a 64-bit
+// memory BAR the next slot's dword (`hi`) joined on as the high half. `hi` is
+// ignored for I/O and 32-bit memory BARs.
+//
+// Separate from pci_bar because it is the half that can be WRONG in a way no
+// live BAR on a QEMU i440fx would reveal. The two mask widths are not the
+// same: an I/O BAR carries flags in bits 1:0 so it masks 2, a memory BAR
+// carries them in bits 3:0 so it masks 4. The memory width is observable on
+// the real machine (00:02.0 BAR0 reads 0xfd000008, and a 2-bit mask would
+// leave the 8 in place) -- but the I/O width is NOT: every I/O BAR the machine
+// hands out is at least 16-byte aligned, so 0x0000c041 masks to 0x0000c040
+// under BOTH widths. Feeding this function 0x0000c04d is the only way to tell
+// the mask that loses the low nibble of a port number from the one that keeps
+// it.
+fn pci_bar_decode(u64 raw, u64 hi) -> u64 {
+    if (raw & 1) != 0 { return raw & 0xFFFFFFFC }
+    u64 lo = raw & 0xFFFFFFF0
+    if ((raw >> 1) & 3) == 2 { return ((hi & 0xFFFFFFFF) << 32) | lo }
+    return lo
+}
+
+// The address of BAR `slot`, reading the high half from slot+1 when the BAR is
+// 64-bit.
+fn pci_bar(u64 bus, u64 dev, u64 func, u64 slot) -> u64 {
+    if slot > 5 { return 0 }
+    u64 raw = pci_bar_raw(bus, dev, func, slot)
+    u64 hi = 0
+    if slot < 5 { hi = pci_bar_raw(bus, dev, func, slot + 1) }
+    return pci_bar_decode(raw, hi)
+}
+
+// The next slot to look at after `slot`: two on from a 64-bit memory BAR, one
+// otherwise. Walk a device's BARs with this rather than by incrementing.
+fn pci_bar_next(u64 bus, u64 dev, u64 func, u64 slot) -> u64 {
+    if pci_bar_is_64(bus, dev, func, slot) != 0 { return slot + 2 }
+    return slot + 1
+}
+
+// --- bus/device/function packing ----------------------------------------------
+
+fn pci_bdf(u64 bus, u64 dev, u64 func) -> u64 {
+    return (bus << 16) | (dev << 8) | (func & 7)
+}
+
+fn pci_bdf_bus(u64 bdf) -> u64 { return (bdf >> 16) & 0xFF }
+fn pci_bdf_dev(u64 bdf) -> u64 { return (bdf >> 8) & 0x1F }
+fn pci_bdf_fn(u64 bdf)  -> u64 { return bdf & 7 }
+
+// --- enumeration ---------------------------------------------------------------
+//
+// EVERY WALK BELOW IS BOUNDED BY pci_bus_count(), NOT BY 256. That was a
+// constant until ECAM arrived, and it cannot be one now: the port transport
+// answers all-ones for an absent device across the whole 8-bit bus space, but
+// past the end of an ECAM window there is no mapping at all, and on arm64 that
+// read is a synchronous external abort. A walk to 255 finds every device on
+// x86 and faults on bus 16 under QEMU virt.
+
+// Visit every device that answers, calling
+//
+//     callback(bus, dev, func, vendor_id, device_id, class_subclass)
+//
+// where class_subclass is `(class << 8) | subclass`. Get the address with
+// fn_addr("your_callback"), which takes a string literal.
+//
+// SIX ARGUMENTS IS THE CEILING, not a style choice: call_ptr silently drops
+// everything past the sixth (src/ir.kr, `uint64[6] cp_arg_vregs`), with no
+// diagnostic. A seventh field here would arrive as garbage. That is why class
+// and subclass are packed into one word instead of passed separately.
+//
+// Function 0 is probed first and functions 1-7 only when its header type says
+// the device is multi-function. Note that the functions present need not be
+// contiguous: QEMU's PIIX3 answers on 0, 1 and 3 with a hole at 2, so a walk
+// that stops at the first absent function finds two thirds of it.
+fn pci_scan(u64 callback) {
+    u64 nbus = pci_bus_count()
+    u64 bus = 0
+    while bus < nbus {
+        u64 dev = 0
+        while dev < 32 {
+            if pci_device_exists(bus, dev, 0) != 0 {
+                pci_scan_visit(callback, bus, dev, 0)
+                if pci_is_multifunction(bus, dev, 0) != 0 {
+                    u64 func = 1
+                    while func < 8 {
+                        if pci_device_exists(bus, dev, func) != 0 {
+                            pci_scan_visit(callback, bus, dev, func)
+                        }
+                        func = func + 1
+                    }
+                }
+            }
+            dev = dev + 1
+        }
+        bus = bus + 1
+    }
+}
+
+fn pci_scan_visit(u64 callback, u64 bus, u64 dev, u64 func) {
+    u64 vid = pci_vendor_id(bus, dev, func)
+    u64 did = pci_device_id(bus, dev, func)
+    u64 cls = (pci_class(bus, dev, func) << 8) | pci_subclass(bus, dev, func)
+    call_ptr(callback, bus, dev, func, vid, did, cls)
+}
+
+// First device matching vendor:device, as a packed bdf, or PCI_NOT_FOUND.
+//
+// The second parameter is `dev_id`, not `device`: `device` is a KernRift
+// keyword (the MMIO storage qualifier), and using it as a parameter name turns
+// the rest of the file into 46 cascading parse errors that point everywhere
+// except the actual line.
+fn pci_find_device(u64 vendor, u64 dev_id) -> u64 {
+    u64 nbus = pci_bus_count()
+    u64 bus = 0
+    while bus < nbus {
+        u64 dev = 0
+        while dev < 32 {
+            if pci_device_exists(bus, dev, 0) != 0 {
+                u64 nfn = 1
+                if pci_is_multifunction(bus, dev, 0) != 0 { nfn = 8 }
+                u64 func = 0
+                while func < nfn {
+                    if pci_device_exists(bus, dev, func) != 0 {
+                        if pci_vendor_id(bus, dev, func) == vendor {
+                            if pci_device_id(bus, dev, func) == dev_id {
+                                return pci_bdf(bus, dev, func)
+                            }
+                        }
+                    }
+                    func = func + 1
+                }
+            }
+            dev = dev + 1
+        }
+        bus = bus + 1
+    }
+    return PCI_NOT_FOUND
+}
+
+// First device matching a class/subclass pair (e.g. 0x02/0x00 for an Ethernet
+// controller), as a packed bdf, or PCI_NOT_FOUND. Finding a device by what it
+// IS rather than by who made it is what a driver actually wants.
+fn pci_find_class(u64 class_code, u64 subclass) -> u64 {
+    u64 nbus = pci_bus_count()
+    u64 bus = 0
+    while bus < nbus {
+        u64 dev = 0
+        while dev < 32 {
+            if pci_device_exists(bus, dev, 0) != 0 {
+                u64 nfn = 1
+                if pci_is_multifunction(bus, dev, 0) != 0 { nfn = 8 }
+                u64 func = 0
+                while func < nfn {
+                    if pci_device_exists(bus, dev, func) != 0 {
+                        if pci_class(bus, dev, func) == class_code {
+                            if pci_subclass(bus, dev, func) == subclass {
+                                return pci_bdf(bus, dev, func)
+                            }
+                        }
+                    }
+                    func = func + 1
+                }
+            }
+            dev = dev + 1
+        }
+        bus = bus + 1
+    }
+    return PCI_NOT_FOUND
+}
+
+// --- command register ----------------------------------------------------------
+
+// Turn on memory decoding and bus mastering, which is what a driver needs
+// before it can touch a BAR region or set up DMA. Firmware usually does this
+// already; a program that booted from the reset vector has no firmware.
+fn pci_enable_device(u64 bus, u64 dev, u64 func) {
+    u64 cmd = pci_config_read16(bus, dev, func, PCI_COMMAND)
+    pci_config_write16(bus, dev, func, PCI_COMMAND,
+                       cmd | PCI_COMMAND_IO | PCI_COMMAND_MEMORY | PCI_COMMAND_MASTER)
+}
