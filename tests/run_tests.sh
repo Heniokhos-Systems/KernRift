@@ -21138,6 +21138,50 @@ if $KRC --arch=$RUN_ARCH "$FR_SRC" -o "$FR_BIN" > /dev/null 2>&1; then
 else
     echo "FAIL: f32_literal_to_f32_param_accepted (should compile)"; FAIL=$((FAIL + 1))
 fi
+
+# Non-local assignment targets used to be checked by NOTHING: Assign(11) covers
+# `name = expr` only, so field assignment, static assignment and pointer stores
+# all skipped both the struct-kind and float-kind rules. An f64 value into an
+# f32 destination stored f64 bits and read back 0.0; a wrong struct type was
+# accepted outright. Recursive callee so the inliner cannot fold the call and
+# hide the ABI.
+FR_NL_PRE='fn f64src(uint64 n) -> f64 {\n if n > 1000000 { return f64src(n - 1) }\n return 1.5\n}\n'
+for NL_CASE in field static ptrstore fieldstruct staticstruct; do
+    TOTAL=$((TOTAL + 1))
+    case "$NL_CASE" in
+      field)  printf "struct S { f32 a }\n${FR_NL_PRE}fn main() { S s; s.a = f64src(1); exit(0) }\n" > "$FR_SRC"
+              NL_WANT="field assignment float kind does not match" ;;
+      static) printf "static f32 g = 0.0f\n${FR_NL_PRE}fn main() { g = f64src(1); exit(0) }\n" > "$FR_SRC"
+              NL_WANT="assignment to static float kind does not match" ;;
+      ptrstore) printf "${FR_NL_PRE}fn main() { uint64 p = alloc(32); unsafe { *(p as f32) = f64src(1) } exit(0) }\n" > "$FR_SRC"
+              NL_WANT="pointer store float kind does not match" ;;
+      fieldstruct) printf "struct A { uint64 x }\nstruct B { uint64 y }\nstruct H { A inner }\nfn mkB() -> B { B b; b.y = 7; return b }\nfn main() { H h; B b = mkB(); h.inner = b; exit(0) }\n" > "$FR_SRC"
+              NL_WANT="field assignment struct kind does not match" ;;
+      staticstruct) printf "struct A { uint64 x }\nstruct B { uint64 y }\nstatic A g_a\nfn mkB() -> B { B b; b.y = 7; return b }\nfn main() { B b = mkB(); g_a = b; exit(0) }\n" > "$FR_SRC"
+              NL_WANT="assignment struct kind does not match" ;;
+    esac
+    FR_ERR=$($KRC --arch=$RUN_ARCH "$FR_SRC" -o "$FR_BIN" 2>&1); FR_ST=$?
+    if [ "$FR_ST" != "0" ] && echo "$FR_ERR" | grep -q "$NL_WANT"; then
+        PASS=$((PASS + 1)); echo "  nonlocal_assign_${NL_CASE}_rejected: PASS"
+    else
+        echo "FAIL: nonlocal_assign_${NL_CASE}_rejected (want '$NL_WANT', got exit $FR_ST: '$FR_ERR')"
+        FAIL=$((FAIL + 1))
+    fi
+done
+# Positive control: the correct forms must still compile AND round-trip, so the
+# rules above cannot be satisfied by rejecting everything.
+TOTAL=$((TOTAL + 1))
+printf 'struct S { f32 a }\nstatic f32 g = 0.0f\nfn f64src(uint64 n) -> f64 {\n if n > 1000000 { return f64src(n - 1) }\n return 1.5\n}\nfn main() {\n S s\n s.a = f64_to_f32(f64src(1))\n g = f64_to_f32(f64src(1))\n uint64 p = alloc(32)\n unsafe { *(p as f32) = f64_to_f32(f64src(1)) }\n f32 r = 0.0f\n unsafe { *(p as f32) -> r }\n exit(f32_to_int((s.a + g + r) * 2.0f))\n}\n' > "$FR_SRC"
+if $KRC --arch=$RUN_ARCH "$FR_SRC" -o "$FR_BIN" > /dev/null 2>&1; then
+    "$FR_BIN"; FR_RUN=$?
+    if [ "$FR_RUN" = "9" ]; then
+        PASS=$((PASS + 1)); echo "  nonlocal_assign_explicit_convert_accepted: PASS (1.5*3*2 == 9)"
+    else
+        echo "FAIL: nonlocal_assign_explicit_convert_accepted (want 9, got $FR_RUN)"; FAIL=$((FAIL + 1))
+    fi
+else
+    echo "FAIL: nonlocal_assign_explicit_convert_accepted (should compile)"; FAIL=$((FAIL + 1))
+fi
 rm -f "$FR_SRC" "$FR_BIN"
 
 # --- float call result in the LEFT operand position (arm64 regression) ---

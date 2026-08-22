@@ -952,10 +952,11 @@ fn parse_ptr_compound_store(uint64 addr_expr, uint64 type_size, uint64 fk_bits) 
     ast_set_child(node, ae)
     uint32 bp = binop
     ast_set_data2(node, bp)
-    // Stores carry no float kind — keep only the volatile bit, matching the
-    // plain `*(addr as TYPE) = val` paths.
-    uint64 vol_only = fk_bits & 16
-    uint32 sd3 = vol_only
+    // Keep BOTH the float kind (bits 0..3) and the volatile bit (bit 4).
+    // ir.kr reads only `(sd3 >> 4) & 1` here, and codegen.kr / analysis.kr
+    // ignore data3 on a store, so carrying the kind is free — and it is what
+    // lets a checker see that the destination is f32.
+    uint32 sd3 = fk_bits
     ast_set_data3(node, sd3)
     // data4 = 1: compound. Evaluate the address ONCE, before the value.
     uint32 one = 1
@@ -1756,6 +1757,16 @@ fn parse_stmt() -> uint64 {
             ast_set_child(node, ae)
             uint32 ve = val_expr
             ast_set_data2(node, ve)
+            // Record the destination float kind in bits 0..3 (volatile is bit
+            // 4, so they do not collide). This used to be left clear on the
+            // grounds that "stores carry no float kind", which meant nothing
+            // downstream could tell an f32 store from a u32 one — an f64 value
+            // stored through `*(p as f32)` wrote f64 bits and read back 0.0.
+            uint32 sfk = 0
+            if type_kind == 96 { sfk = 1 }
+            else if type_kind == 95 { sfk = 2 }
+            else if type_kind == 94 { sfk = 3 }
+            ast_set_data3(node, sfk)
             return node
         }
         // Compound store: *(addr as TYPE) OP= val  (+= -= *= /= %= &= |= ^=).

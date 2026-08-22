@@ -762,6 +762,86 @@ fn tc_check_stmt(uint64 node) {
         return
     }
 
+    // ---- C9: pointer-store float-kind mismatch ----
+    // `*(p as f32) = expr` is PtrStore(42): child = address, data2 = value,
+    // data3 bits 0..3 = destination float kind (1=f64, 2=f32, 3=f16), bit 4 =
+    // volatile. Nothing checked it, so an f64 value stored through an f32
+    // destination wrote f64 bits and read back 0.0.
+    if wkind == 42 {
+        uint32 ps_addr = ast_child(node)
+        uint64 wpsa = ps_addr
+        if wpsa != 0 { tc_check_expr(wpsa) }
+        uint32 ps_val = ast_data2(node)
+        uint64 wpsv = ps_val
+        if wpsv != 0 {
+            tc_check_expr(wpsv)
+            uint32 psd3 = ast_data3(node)
+            uint64 wpsd3 = psd3
+            uint64 dest_fk = wpsd3 & 15
+            uint64 dk = 0
+            if dest_fk == 1 { dk = 96 }
+            if dest_fk == 2 { dk = 95 }
+            if dest_fk == 3 { dk = 94 }
+            if dk != 0 {
+                uint64 vk3 = tc_expr_kind(wpsv)
+                if vk3 != 0 && vk3 != 0xFFFFFFFF {
+                    if tc_is_float_kind(vk3) != 0 {
+                        if dk != vk3 {
+                            // The plain `*(p as T) = v` path never sets a
+                            // token on the store node, so point at the value.
+                            uint32 pst = ast_tok(node)
+                            if pst == 0 { pst = ast_tok(wpsv) }
+                            diag_emit_str(pst, 0, "pointer store float kind does not match destination type")
+                        }
+                    }
+                }
+            }
+        }
+        return
+    }
+
+    // ---- C8: field-assign kind mismatch ----
+    // `s.f = expr` is a FieldAccess(36) carrying the store: data4=1, data3 =
+    // the value, child = the object, data2 = the field name token (parser.kr
+    // "Overlay the original FieldAccess to carry the store"). tc_check_stmt
+    // had no case for it, so NOTHING checked a field assignment: an f64 value
+    // into an f32 field silently stored f64 bits and read back 0.0, and a
+    // struct of the wrong type was accepted outright. Assign(11) covers only
+    // `name = expr`.
+    if wkind == 36 {
+        uint32 fa_v = ast_data3(node)
+        uint64 wfav = fa_v
+        uint32 fa_is_store = ast_data4(node)
+        if fa_is_store == 1 && wfav != 0 {
+            tc_check_expr(wfav)
+            uint32 fa_obj = ast_child(node)
+            uint64 wfo = fa_obj
+            uint64 ok2 = tc_expr_kind(wfo)
+            if ok2 >= 200 && ok2 != 0xFFFFFFFF {
+                uint64 si2 = ok2 - 200
+                uint32 ftok2 = ast_data2(node)
+                uint64 wft2 = ftok2
+                uint64 fk2 = struct_field_type_kind_by_tok(si2, wft2)
+                uint64 vk2 = tc_expr_kind(wfav)
+                if fk2 != 0 && vk2 != 0 && vk2 != 0xFFFFFFFF {
+                    if tc_is_float_kind(fk2) != 0 && tc_is_float_kind(vk2) != 0 {
+                        if fk2 != vk2 {
+                            uint32 fdt = ast_tok(node)
+                            diag_emit_str(fdt, 0, "field assignment float kind does not match field type")
+                        }
+                    }
+                    if tc_is_struct_kind(fk2) != 0 && tc_is_struct_kind(vk2) != 0 {
+                        if fk2 != vk2 {
+                            uint32 fdt2 = ast_tok(node)
+                            diag_emit_str(fdt2, 0, "field assignment struct kind does not match field type")
+                        }
+                    }
+                }
+            }
+        }
+        return
+    }
+
     // Assign (11): data1=name_tok, child=value_expr.
     if wkind == 11 {
         uint32 c = ast_child(node)
@@ -776,6 +856,23 @@ fn tc_check_stmt(uint64 node) {
         uint32 lhs_name = ast_data1(node)
         uint64 wln = lhs_name
         uint64 lk = tc_local_lookup(wln)
+        // A module-level static is not in the local table, so this check used
+        // to skip it entirely — `g_a = b` with mismatched structs, and
+        // `g_f32 = f64fn()`, were both accepted in silence.
+        uint64 lhs_is_static = 0
+        if lk == 0 {
+            // Same resolution order as the Ident case above: a file-scope
+            // `static Point p` is struct-typed and static_kind_of would only
+            // report the type token's lexer kind, so try the struct table first.
+            uint64 ssi2 = static_struct_lookup(wln)
+            if ssi2 != 0xFFFFFFFF {
+                lk = 200 + ssi2
+                lhs_is_static = 1
+            } else {
+                lk = static_kind_of(wln)
+                if lk != 0 { lhs_is_static = 1 }
+            }
+        }
         uint64 rk = tc_expr_kind(c)
         if lk != 0 && rk != 0 && rk != 0xFFFFFFFF {
             uint64 lhs_struct = tc_is_struct_kind(lk)
@@ -785,6 +882,17 @@ fn tc_check_stmt(uint64 node) {
             if lhs_struct != 0 && rhs_struct != 0 && lk != rk {
                 uint32 atok = ast_tok(node)
                 diag_emit_str(atok, 0, "assignment struct kind does not match")
+            }
+            // Float kind: a LOCAL f32 slot coerces (ir.kr emits IR_F64TOF32 on
+            // the local-assign path), so only a static clashes — its store
+            // skips that narrow and writes f64 bits into the f32 slot.
+            if lhs_is_static == 1 {
+                if tc_is_float_kind(lk) != 0 && tc_is_float_kind(rk) != 0 {
+                    if lk != rk {
+                        uint32 satok = ast_tok(node)
+                        diag_emit_str(satok, 0, "assignment to static float kind does not match declared type")
+                    }
+                }
             }
         }
         return
