@@ -1616,6 +1616,28 @@ fn ir_lower_print_bare_metal(uint64 node, uint64 is_println, uint64 wtok) {
     }
 }
 
+// Narrow/widen a value to a destination's declared float kind (95=f32,
+// 96=f64 — the struct_field_type_kind_by_tok encoding). Field stores used to
+// skip this entirely, so `s.f32field = <f64 expr>` wrote f64 bits into the f32
+// slot and the next read came back 0.0. The local-assign path always had the
+// conversion; the field path did not.
+fn ir_coerce_float_store(uint64 val_v, uint64 ftk) -> uint64 {
+    uint64 vfk = ir_vreg_fkind_get(val_v)
+    if ftk == 95 && vfk == 1 {
+        uint64 nv = ir_new_vreg()
+        ir_emit(IR_F64TOF32, nv, val_v, 0, 0, ir_current_bb)
+        ir_vreg_fkind_set(nv, 2)
+        return nv
+    }
+    if ftk == 96 && vfk == 2 {
+        uint64 wv = ir_new_vreg()
+        ir_emit(IR_F32TOF64, wv, val_v, 0, 0, ir_current_bb)
+        ir_vreg_fkind_set(wv, 1)
+        return wv
+    }
+    return val_v
+}
+
 fn ir_lower_expr(uint64 node) -> uint64 {
     if node == 0 { return 0xFFFFFFFF }
     uint32 kind = ast_kind(node)
@@ -4554,6 +4576,23 @@ fn ir_lower_stmt(uint64 node) {
         // Check if this is a static variable
         uint64 st_off = static_lookup(wnt)
         if st_off != 0xFFFFFFFF {
+            // Narrow/widen exactly as the local path above does. Without this
+            // a static f32 assigned an f64 value stored f64 bits into the f32
+            // slot and the next read came back 0.0 — the local path had the
+            // conversion, the static path did not.
+            uint64 st_fk = static_fkind_of(wnt)
+            if st_fk == 2 && val_fk == 1 {
+                uint64 st_nv = ir_new_vreg()
+                ir_emit(IR_F64TOF32, st_nv, val, 0, 0, ir_current_bb)
+                ir_vreg_fkind_set(st_nv, 2)
+                val = st_nv
+            }
+            if st_fk == 1 && val_fk == 2 {
+                uint64 st_wv = ir_new_vreg()
+                ir_emit(IR_F32TOF64, st_wv, val, 0, 0, ir_current_bb)
+                ir_vreg_fkind_set(st_wv, 1)
+                val = st_wv
+            }
             ir_emit(IR_STATIC_STORE, 0, val, 0, st_off, ir_current_bb)
             return
         }
@@ -5063,11 +5102,27 @@ fn ir_lower_stmt(uint64 node) {
         } else {
             val_v = ir_lower_expr(val_node)
         }
-        // data3 bit 4 = volatile (see parser.kr). Stores carry no float kind,
-        // so the low bits are always clear here.
+        // data3: float kind in bits 0..3 (1=f64, 2=f32, 3=f16), volatile in
+        // bit 4 (see parser.kr). The kind used to be cleared here, which is
+        // why an f64 value stored through `*(p as f32)` wrote f64 bits and the
+        // next load read 0.0 — the same narrow the local-assign path does.
         uint32 sd3_32 = ast_data3(node)
         uint64 sd3 = sd3_32
         uint64 s_vol = (sd3 >> 4) & 1
+        uint64 s_destfk = sd3 & 15
+        uint64 s_valfk = ir_vreg_fkind_get(val_v)
+        if s_destfk == 2 && s_valfk == 1 {
+            uint64 s_nv = ir_new_vreg()
+            ir_emit(IR_F64TOF32, s_nv, val_v, 0, 0, ir_current_bb)
+            ir_vreg_fkind_set(s_nv, 2)
+            val_v = s_nv
+        }
+        if s_destfk == 1 && s_valfk == 2 {
+            uint64 s_wv = ir_new_vreg()
+            ir_emit(IR_F32TOF64, s_wv, val_v, 0, 0, ir_current_bb)
+            ir_vreg_fkind_set(s_wv, 1)
+            val_v = s_wv
+        }
         if s_vol != 0 {
             // Same lowering as the vstore8/16/32/64 builtins: mfence + sized
             // store on x86, STLRB/H/W/X on arm64. Width goes in the DEST slot
@@ -5309,6 +5364,8 @@ fn ir_lower_stmt(uint64 node) {
                             ir_emit(IR_ADD, addr_v, inner_addr, off_v, 0, ir_current_bb)
                         }
                         uint64 val_v = ir_lower_expr(val_node)
+                        uint64 ftk_n = struct_field_type_kind_by_tok(inner_si, field_tok)
+                        val_v = ir_coerce_float_store(val_v, ftk_n)
                         ir_emit(IR_STORE, fsz, addr_v, val_v, 0, ir_current_bb)
                     }
                     return
@@ -5341,6 +5398,8 @@ fn ir_lower_stmt(uint64 node) {
                             ir_emit(IR_ADD, addr_v, elem_v, foff_v, 0, ir_current_bb)
                         }
                         uint64 val_v = ir_lower_expr(val_node)
+                        uint64 ftk_a = struct_field_type_kind_by_tok(sia, field_tok)
+                        val_v = ir_coerce_float_store(val_v, ftk_a)
                         ir_emit(IR_STORE, fsz_i, addr_v, val_v, 0, ir_current_bb)
                     }
                     return
@@ -5386,6 +5445,8 @@ fn ir_lower_stmt(uint64 node) {
                     ir_emit(IR_ADD, addr_v, base_v, off_v, 0, ir_current_bb)
                 }
                 uint64 val_v = ir_lower_expr(val_node)
+                uint64 ftk_p = struct_field_type_kind_by_tok(si, field_tok)
+                val_v = ir_coerce_float_store(val_v, ftk_p)
                 ir_emit(IR_STORE, fsz, addr_v, val_v, 0, ir_current_bb)
             }
         }

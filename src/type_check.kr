@@ -762,41 +762,17 @@ fn tc_check_stmt(uint64 node) {
         return
     }
 
-    // ---- C9: pointer-store float-kind mismatch ----
-    // `*(p as f32) = expr` is PtrStore(42): child = address, data2 = value,
-    // data3 bits 0..3 = destination float kind (1=f64, 2=f32, 3=f16), bit 4 =
-    // volatile. Nothing checked it, so an f64 value stored through an f32
-    // destination wrote f64 bits and read back 0.0.
+    // PtrStore(42): the destination float kind now drives a narrow/widen in
+    // ir.kr, so a float mismatch here is converted rather than rejected — the
+    // same rule a local assignment follows. Still recurse so the address and
+    // value expressions get their own checks.
     if wkind == 42 {
         uint32 ps_addr = ast_child(node)
         uint64 wpsa = ps_addr
         if wpsa != 0 { tc_check_expr(wpsa) }
         uint32 ps_val = ast_data2(node)
         uint64 wpsv = ps_val
-        if wpsv != 0 {
-            tc_check_expr(wpsv)
-            uint32 psd3 = ast_data3(node)
-            uint64 wpsd3 = psd3
-            uint64 dest_fk = wpsd3 & 15
-            uint64 dk = 0
-            if dest_fk == 1 { dk = 96 }
-            if dest_fk == 2 { dk = 95 }
-            if dest_fk == 3 { dk = 94 }
-            if dk != 0 {
-                uint64 vk3 = tc_expr_kind(wpsv)
-                if vk3 != 0 && vk3 != 0xFFFFFFFF {
-                    if tc_is_float_kind(vk3) != 0 {
-                        if dk != vk3 {
-                            // The plain `*(p as T) = v` path never sets a
-                            // token on the store node, so point at the value.
-                            uint32 pst = ast_tok(node)
-                            if pst == 0 { pst = ast_tok(wpsv) }
-                            diag_emit_str(pst, 0, "pointer store float kind does not match destination type")
-                        }
-                    }
-                }
-            }
-        }
+        if wpsv != 0 { tc_check_expr(wpsv) }
         return
     }
 
@@ -824,12 +800,10 @@ fn tc_check_stmt(uint64 node) {
                 uint64 fk2 = struct_field_type_kind_by_tok(si2, wft2)
                 uint64 vk2 = tc_expr_kind(wfav)
                 if fk2 != 0 && vk2 != 0 && vk2 != 0xFFFFFFFF {
-                    if tc_is_float_kind(fk2) != 0 && tc_is_float_kind(vk2) != 0 {
-                        if fk2 != vk2 {
-                            uint32 fdt = ast_tok(node)
-                            diag_emit_str(fdt, 0, "field assignment float kind does not match field type")
-                        }
-                    }
+                    // Float kind needs no rule: ir.kr now narrows/widens the
+                    // value to the field's declared kind, as the local-assign
+                    // path always did. Struct kind still clashes — there is
+                    // nothing to convert between two different struct types.
                     if tc_is_struct_kind(fk2) != 0 && tc_is_struct_kind(vk2) != 0 {
                         if fk2 != vk2 {
                             uint32 fdt2 = ast_tok(node)
@@ -883,17 +857,8 @@ fn tc_check_stmt(uint64 node) {
                 uint32 atok = ast_tok(node)
                 diag_emit_str(atok, 0, "assignment struct kind does not match")
             }
-            // Float kind: a LOCAL f32 slot coerces (ir.kr emits IR_F64TOF32 on
-            // the local-assign path), so only a static clashes — its store
-            // skips that narrow and writes f64 bits into the f32 slot.
-            if lhs_is_static == 1 {
-                if tc_is_float_kind(lk) != 0 && tc_is_float_kind(rk) != 0 {
-                    if lk != rk {
-                        uint32 satok = ast_tok(node)
-                        diag_emit_str(satok, 0, "assignment to static float kind does not match declared type")
-                    }
-                }
-            }
+            // Float kind needs no rule here: both the local and the static
+            // store paths in ir.kr now narrow/widen the value to the slot.
         }
         return
     }

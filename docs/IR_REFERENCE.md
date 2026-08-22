@@ -478,7 +478,7 @@ is false; it is still present in MLRift's copy of this document.)*
 | 87 | `IR_CALL_IND` | `dest = (*src1)()` | **SE** |
 
 - **`IR_BR_COND` does not "fall through".** The false target is the block's
-  `succ0` field, read separately (`src/ir.kr:14750`). The emitter then picks
+  `succ0` field, read separately (`src/ir.kr:14811`). The emitter then picks
   one of four layout cases against the *next* block index — both-next (emit
   nothing), true-next (invert the condition, one `jcc`), false-next (`jcc`,
   no trailing `jmp`), neither (`jcc` + `jmp`). If you write a pass that
@@ -555,7 +555,7 @@ optimizer products.
 The old text called all six "riscv32-only". **That is wrong for 143**, which
 is created by the pow2-`MUL`→`SHL` strength reduction for *every* arch
 (`src/ir.kr:12708`) and has handlers on all four backends. 140–142 and
-144–145 are created only under `target_arch == 2` (`src/ir.kr:12914`), even
+144–145 are created only under `target_arch == 2` (`src/ir.kr:12975`), even
 though xtensa carries handlers for them (`src/ir_xtensa.kr:1954`, `1975`) —
 those xtensa arms are dead code today.
 
@@ -863,7 +863,7 @@ document. It runs once per function, after lowering and before liveness.
 
 `--O0` sets `ir_opt_level = 0` (`src/ir.kr:12384`, written only at
 `src/main.kr:9168`) and each backend skips the whole call
-(`src/ir.kr:14485`, `src/ir_aarch64.kr:3370`, `src/ir_riscv.kr:2414`,
+(`src/ir.kr:14546`, `src/ir_aarch64.kr:3370`, `src/ir_riscv.kr:2414`,
 `src/ir_xtensa.kr:2816`). Note the spelling: **`--O0`**, two dashes. There is
 no `-O0`, `-O1`, `--O2` — no other write to `ir_opt_level` exists.
 
@@ -1062,9 +1062,9 @@ fixup sequences and macOS's syscall-number register) and x18
 
 **Wide-mode gate — exactly two disqualifiers.** The function contains an
 `IR_ASM_BLOCK` (op 96) anywhere in its body, or it is `@naked`.
-`ir_x86_fn_wide_ok` (`src/ir.kr:6344`) / `ir_a64_fn_wide_ok`
+`ir_x86_fn_wide_ok` (`src/ir.kr:6405`) / `ir_a64_fn_wide_ok`
 (`src/ir_aarch64.kr:289`) test only the former; the call sites
-(`src/ir.kr:14485`, `src/ir_aarch64.kr:3390`) add `&& is_naked == 0`. The asm
+(`src/ir.kr:14546`, `src/ir_aarch64.kr:3390`) add `&& is_naked == 0`. The asm
 check must stay a **whole-body scan, not a constraint-list scan** — the
 comment at `src/ir.kr:6320` records a real case where a CPUID block wrote r13
 with no constraint naming it. `@naked` is excluded because it gets
@@ -1351,7 +1351,7 @@ removed; do not re-add them without re-verifying.
     comment as pre-existing and deliberately unchanged.
 12. **Dead handler arms.** Xtensa's `IR_AND_IMM`/`OR_IMM`/`XOR_IMM`/
     `SHR_IMM`/`SAR_IMM` cases (`src/ir_xtensa.kr:1954`, `1975`) are
-    unreachable — their only producer (`src/ir.kr:12914`) is gated to
+    unreachable — their only producer (`src/ir.kr:12975`) is gated to
     `target_arch == 2` and xtensa is arch 3. Harmless, but do not mistake
     their presence for coverage. Relatedly, 140–145 are absent from **both**
     wide-safe whitelists, so any block containing one caps to the
