@@ -21110,6 +21110,34 @@ else
     echo "FAIL: f64_literal_in_f32_fn_rejected (expected the C7 diagnostic, got exit $FR_ST: '$FR_ERR')"
     FAIL=$((FAIL + 1))
 fi
+
+# C6f negative controls: the ARGUMENT side of the same silent miscompile. C7
+# guarded returns only, so `sink(1.5)` into an `f32` parameter put f64 bits in
+# the register and the callee read 0.0, with no diagnostic at all. Recursive
+# callee so the AST inliner cannot fold it and hide the ABI.
+TOTAL=$((TOTAL + 1))
+printf 'fn sink(f32 v) -> f32 {\n if v > 1000000.0f { return sink(v - 1.0f) }\n return v\n}\nfn main() { exit(f32_to_int(sink(1.5))) }\n' > "$FR_SRC"
+FR_ERR=$($KRC --arch=$RUN_ARCH "$FR_SRC" -o "$FR_BIN" 2>&1); FR_ST=$?
+if [ "$FR_ST" != "0" ] && echo "$FR_ERR" | grep -q "argument float kind does not match"; then
+    PASS=$((PASS + 1)); echo "  f64_literal_to_f32_param_rejected: PASS (exit $FR_ST)"
+else
+    echo "FAIL: f64_literal_to_f32_param_rejected (expected the C6f diagnostic, got exit $FR_ST: '$FR_ERR')"
+    FAIL=$((FAIL + 1))
+fi
+# Positive control: the suffixed literal must still compile AND round-trip the
+# value, so C6f cannot be "passed" by rejecting everything.
+TOTAL=$((TOTAL + 1))
+printf 'fn sink(f32 v) -> f32 {\n if v > 1000000.0f { return sink(v - 1.0f) }\n return v\n}\nfn main() { exit(f32_to_int(sink(1.5f) * 4.0f)) }\n' > "$FR_SRC"
+if $KRC --arch=$RUN_ARCH "$FR_SRC" -o "$FR_BIN" > /dev/null 2>&1; then
+    "$FR_BIN"; FR_RUN=$?
+    if [ "$FR_RUN" = "6" ]; then
+        PASS=$((PASS + 1)); echo "  f32_literal_to_f32_param_accepted: PASS (1.5f*4 == 6)"
+    else
+        echo "FAIL: f32_literal_to_f32_param_accepted (want 6, got $FR_RUN)"; FAIL=$((FAIL + 1))
+    fi
+else
+    echo "FAIL: f32_literal_to_f32_param_accepted (should compile)"; FAIL=$((FAIL + 1))
+fi
 rm -f "$FR_SRC" "$FR_BIN"
 
 # --- float call result in the LEFT operand position (arm64 regression) ---

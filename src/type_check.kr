@@ -502,6 +502,20 @@ fn tc_check_expr(uint64 node) {
                             uint32 atok = ast_tok(wai)
                             diag_emit_str(atok, 0, "argument struct kind does not match parameter type")
                         }
+                        // ---- C6f: call-arg float-kind mismatch ----
+                        // Same silent-miscompile class C7 catches on the return
+                        // path, which had no equivalent here: passing an f64
+                        // value (or an unsuffixed literal, which is f64) to an
+                        // f32 parameter put f64 bits in the register and the
+                        // callee read 0.0. Non-inlined only — a one-expression
+                        // callee gets inlined and hides it, which is why this
+                        // survived. Write 1.5f, or convert explicitly.
+                        if tc_is_float_kind(expected) != 0 && tc_is_float_kind(actual) != 0 {
+                            if expected != actual {
+                                uint32 atok = ast_tok(wai)
+                                diag_emit_str(atok, 0, "argument float kind does not match parameter type")
+                            }
+                        }
                     }
                     uint32 pn = ast_next(wp)
                     wp = pn
