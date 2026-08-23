@@ -260,3 +260,61 @@ the IR backend's in-memory buffer.
 - ARM64 f16 conversions not implemented (test gated on x86_64 only).
 - `naked_fn` / `asm_*` tests are x86-only (inline asm uses raw x86
   opcodes); already gated on `$ARCH != aarch64` in `tests/run_tests.sh`.
+
+## R7: inline asm — missing x86 cache instructions, and raw hex is not arch-checked
+
+Found while giving ApexRift's crash record a durable write path
+(`arch/x86_64/x86_cache.kr`, `arch/arm64/a64_sysreg.kr`). Two separate
+problems, both measured against the pinned `krc2`.
+
+### R7a — the x86 textual assembler knows no cache-maintenance instruction
+
+```
+$ cat t.kr
+fn p(uint64 a) { asm { "clflush [rax]" } in(a -> rax) }
+$ krc2 --arch=x86_64 --target=none --freestanding --emit=image ... t.kr
+error: unrecognized asm instruction 'clflush [rax]'
+  hint: use raw hex bytes instead, e.g. asm("0x48 0xD3 0xE0")
+```
+
+`clflush`, `sfence`, `mfence` and `wbinvd` are all rejected. Every one of them
+is required by any program that has to make a store outlive a reset — which for
+a freestanding target is not a niche case, it is what a crash record, a
+persistent log and a DMA descriptor ring all need. The workaround is raw hex
+(`0x0F 0xAE 0x38` for `clflush (%rax)`, from llvm-mc), which works and is what
+ApexRift ships, but it moves the encoding out of the compiler's sight — see
+R7b for why that matters more than it sounds.
+
+`clflushopt`, `clwb` and `lfence` are in the same family and presumably also
+missing; only the four above were measured.
+
+### R7b — raw hex bypasses the arch check, silently
+
+Textual instructions are validated against `--arch`. Raw hex is not, and the
+result is not even a faithful byte copy:
+
+```
+$ cat m.kr
+fn p(uint64 a) { asm { "0x0F 0xAE 0x38" } in(a -> rax)  asm { "0x0F 0xAE 0xF8" } }
+fn main() -> uint64 { p(0x1000)  return 0 }
+$ krc2 --arch=arm64 --target=none --freestanding --emit=image --image-header ... m.kr
+image: arch=arm64 entry=204 filesz=224 memsz=224     # no error, no warning
+```
+
+The emitted arm64 bytes are `38 00 ae 00  f8 00 ae 00` — the x86 backend takes
+space-separated bytes while the arm64 backend takes one 32-bit word per token,
+so the same source text means different things per target and neither says so.
+A file of x86 raw hex built for arm64 produces a working binary full of
+nonsense.
+
+The `in(...)`/`out(...)` constraints do not help: x86 register names are the
+only names accepted on any target (`in(a -> rax)` above compiles clean for
+arm64, and `x0` is rejected for arm64 — the mirror-image complaint already
+recorded in `docs/LANGUAGE.md:1057` vs. what the compiler implements). So there
+is no way to write a raw-hex asm block that refuses to build for the wrong
+architecture.
+
+Either fix resolves it: make the textual assembler cover these instructions
+(R7a), or tag raw-hex blocks with the architecture they were written for and
+reject a mismatch. The second is the more general fix — raw hex will always be
+the escape hatch for something.
