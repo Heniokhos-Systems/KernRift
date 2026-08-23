@@ -109,6 +109,185 @@ fn tok_kind_name(uint64 kind) -> uint64 {
     return "token"
 }
 
+// ---------------------------------------------------------------------------
+// Compile-time constant expressions
+// ---------------------------------------------------------------------------
+//
+// WHAT THIS REPLACES WAS NOT A MISSING FEATURE, IT WAS A SILENT WRONG ANSWER.
+// Array sizes and const/static initialisers each read ONE token and ran it
+// through parse_int_token, which digit-scans the token's TEXT. Handed an
+// identifier it does not stop: `static u8[N] a` with `const u64 N = 64` scanned
+// 'N', ASCII 78, as the digit 78 - 48 = 30, and reserved 32 bytes after
+// alignment. It compiled, it linked, it ran, and the array was half the size
+// the source asked for. `u8[Z]` gave 48 and `u8[NN]` gave 336; the value is a
+// function of the SPELLING of the name.
+//
+// The initialisers were wrong in the same silence: `static u64 X = 5 * 7` took
+// the first literal and stopped, storing 5; `1 << 5` stored 1; anything
+// starting with a name stored 0 (the "skipped -- issue #53" path). Only
+// `TYPE[expr]` was ever loud, and only because the parser wanted ']' where the
+// operator was.
+//
+// So this is one folder used by both, and the rule it enforces is that a form
+// which cannot be folded is an ERROR rather than a number nobody chose.
+//
+// A NAME MEANS THE VALUE IT WAS DECLARED WITH, and must be declared EARLIER --
+// the parser is single-pass and the static table is built as it goes. `static`
+// is accepted beside `const` because module-scope `static NAME = <literal>` is
+// how this codebase and ApexRift both spell a constant; there is no third
+// concept to appeal to. A mutable static reassigned at run time still sizes its
+// array by the declared value, which is the only meaning an array size can
+// have.
+//
+// STRING INITIALISERS ARE NOT ROUTED HERE. `static uint64 S = "text"` is a real
+// pattern (ApexRift's board_begonia.kr has one) handled by a later fixup, so
+// StrLit keeps falling through to the skip path it always used. Float literals
+// keep their own branch for the same reason.
+static uint64 pce_ok = 1
+
+// p_err_count IS THE GATE, p_err_reported is only the 20-message cap. The first
+// version of this bumped the cap counter alone, printed a perfect diagnostic --
+// right message, right caret -- and then exited 0 with a binary on disk, which
+// is a worse failure than the bug it was written to replace. Nothing recovers
+// to a sync token here: the caller's own expect() does that a token later, and
+// the gate has already been armed.
+fn pce_err(uint64 tok, uint64 msg) -> uint64 {
+    if parse_err_should_report() != 0 {
+        p_err_reported = p_err_reported + 1
+        diag_loc_head(tok, 0)
+        write(2, msg, str_len(msg))
+        write(2, "\n", 1)
+        diag_span_of(tok)
+    }
+    p_err_count = p_err_count + 1
+    pce_ok = 0
+    return 0
+}
+
+fn pce_primary() -> uint64 {
+    uint32 k = cur_kind()
+    if k == 10 {
+        advance_tok()
+        uint64 v = pce_or()
+        if cur_kind() != 11 { return pce_err(p_tok_pos, "expected ')' closing a constant expression") }
+        advance_tok()
+        return v
+    }
+    if k == 31 { advance_tok(); return 0 - pce_primary() }
+    if k == 26 { advance_tok(); return ~pce_primary() }
+    if k == 2 { return parse_int_token(advance_tok()) }
+    if k == 4 { return parse_int_token(advance_tok()) }
+    if k == 77 { advance_tok(); return 1 }
+    if k == 78 { advance_tok(); return 0 }
+    if k == 1 {
+        uint64 nt = p_tok_pos
+        if static_index_of(nt) == 0xFFFFFFFF {
+            advance_tok()
+            return pce_err(nt, "not a const or static declared earlier, so it has no compile-time value")
+        }
+        advance_tok()
+        return static_init_of(nt)
+    }
+    return pce_err(p_tok_pos, "expected a compile-time constant")
+}
+
+fn pce_mul() -> uint64 {
+    uint64 v = pce_primary()
+    while pce_ok != 0 {
+        uint32 k = cur_kind()
+        if k == 22 { advance_tok(); v = v * pce_primary() }
+        else if k == 32 {
+            uint64 dt = p_tok_pos
+            advance_tok()
+            uint64 d = pce_primary()
+            if pce_ok == 0 { return 0 }
+            // The compiler would divide by zero itself, which is a crash and
+            // not a diagnostic. Named here so the source line is the answer.
+            if d == 0 { return pce_err(dt, "division by zero in a constant expression") }
+            v = v / d
+        }
+        else if k == 33 {
+            uint64 mt = p_tok_pos
+            advance_tok()
+            uint64 m = pce_primary()
+            if pce_ok == 0 { return 0 }
+            if m == 0 { return pce_err(mt, "remainder by zero in a constant expression") }
+            v = v % m
+        }
+        else { return v }
+    }
+    return v
+}
+
+fn pce_add() -> uint64 {
+    uint64 v = pce_mul()
+    while pce_ok != 0 {
+        uint32 k = cur_kind()
+        if k == 30 { advance_tok(); v = v + pce_mul() }
+        else if k == 31 { advance_tok(); v = v - pce_mul() }
+        else { return v }
+    }
+    return v
+}
+
+fn pce_shift() -> uint64 {
+    uint64 v = pce_add()
+    while pce_ok != 0 {
+        uint32 k = cur_kind()
+        if k == 43 { advance_tok(); v = v << pce_add() }
+        else if k == 44 { advance_tok(); v = v >> pce_add() }
+        else { return v }
+    }
+    return v
+}
+
+fn pce_and() -> uint64 {
+    uint64 v = pce_shift()
+    while pce_ok != 0 {
+        if cur_kind() == 23 { advance_tok(); v = v & pce_shift() }
+        else { return v }
+    }
+    return v
+}
+
+fn pce_xor() -> uint64 {
+    uint64 v = pce_and()
+    while pce_ok != 0 {
+        if cur_kind() == 25 { advance_tok(); v = v ^ pce_and() }
+        else { return v }
+    }
+    return v
+}
+
+fn pce_or() -> uint64 {
+    uint64 v = pce_xor()
+    while pce_ok != 0 {
+        if cur_kind() == 24 { advance_tok(); v = v | pce_xor() }
+        else { return v }
+    }
+    return v
+}
+
+// Fold the constant expression at the cursor. pce_ok reports whether it folded;
+// the diagnostic has already been written when it did not.
+fn parse_const_expr() -> uint64 {
+    pce_ok = 1
+    return pce_or()
+}
+
+// An array size, with the two bounds the declaration form implies. Zero is
+// rejected because every consumer treats a zero size as "not an array" -- the
+// AST stores the size in the same slot that means "scalar" when it is 0 -- so a
+// `u8[0]` would silently become a scalar rather than an empty array.
+fn parse_const_array_size() -> uint64 {
+    uint64 tok0 = p_tok_pos
+    uint64 v = parse_const_expr()
+    if pce_ok == 0 { return 1 }
+    if v == 0 { pce_err(tok0, "array size must be greater than zero"); return 1 }
+    if v > 0xFFFFFFFF { pce_err(tok0, "array size does not fit in 32 bits"); return 1 }
+    return v
+}
+
 fn expect(uint32 kind) -> uint64 {
     if cur_kind() != kind {
         // "file:line:col: error: expected X, got Y 'text'" + source span/caret.
@@ -1076,17 +1255,20 @@ fn parse_stmt() -> uint64 {
         // Check for array syntax: TYPE[SIZE] name
         if cur_kind() == 14 {
             advance_tok()
-            uint64 size_tok = advance_tok()
+            uint64 arr_len = parse_const_array_size()
             expect(15)
             uint64 name_tok = expect(1)
-            // Create VarDecl with data3 = array size (stored as token index)
+            // data3 = the FOLDED array size, not a token index. It held the
+            // token and ir_lower_stmt ran parse_int_token over it, which
+            // digit-scans the text -- so `u8[N]` reserved a size derived from
+            // the spelling of N. See the constant-expression folder above.
             uint64 node = ast_alloc(AstKind.VarDecl)
             uint32 tt = type_tok
             uint32 nt = name_tok
             ast_set_data1(node, tt)
             ast_set_data2(node, nt)
             ast_set_tok(node, tt)
-            uint32 st = size_tok
+            uint32 st = arr_len
             ast_set_data3(node, st)
             return node
         }
@@ -1794,7 +1976,7 @@ fn parse_stmt() -> uint64 {
             // Check for struct array: StructName[N] name
             if cur_kind() == 14 {
                 advance_tok()
-                uint64 size_tok = advance_tok()
+                uint64 arr_len = parse_const_array_size()
                 expect(15)
                 uint64 name_tok = expect(1)
                 uint64 node = ast_alloc(AstKind.VarDecl)
@@ -1803,7 +1985,8 @@ fn parse_stmt() -> uint64 {
                 ast_set_data1(node, tt)
                 ast_set_data2(node, nt)
                 ast_set_tok(node, tt)
-                uint32 st = size_tok
+                // The folded size, as for plain arrays above.
+                uint32 st = arr_len
                 ast_set_data3(node, st)
                 // Mark as struct: data4 = struct_idx + 1
                 uint32 si4 = maybe_struct + 1
@@ -2474,12 +2657,23 @@ fn parse_module() -> uint64 {
                 if cur_kind() == 31 { init_neg = 1; advance_tok() }
                 else if cur_kind() == 26 { init_inv = 1; advance_tok() }
                 uint32 init_kind = cur_kind()
-                if init_kind == 2 || init_kind == 4 || init_kind == 77 || init_kind == 78 {
-                    uint64 init_tok = advance_tok()
-                    uint64 init_val = parse_int_token(init_tok)
-                    if init_neg != 0 { init_val = 0 - init_val }
-                    if init_inv != 0 { init_val = ~init_val }
-                    static_set_init_last(init_val)
+                // 1 and 10 -- a name and '(' -- join the literal kinds, which
+                // is what makes `const u64 C = A * B` mean 35 instead of the 0
+                // the skip path below used to store. StrLit is deliberately
+                // NOT here: `static uint64 S = "text"` is a live pattern with
+                // its own later fixup, and routing it through the folder would
+                // turn a working declaration into an error.
+                // 255 is TokenKind.Error -- a malformed literal like `0x` or `0b1012`.
+                // Without it here the skip path below swallows it and the
+                // static keeps its default 0, which is quieter than the 72
+                // that `0x` used to produce and just as unasked-for.
+                if init_kind == 2 || init_kind == 4 || init_kind == 77 || init_kind == 78 || init_kind == 1 || init_kind == 10 || init_kind == 255 {
+                    uint64 init_val = parse_const_expr()
+                    if pce_ok != 0 {
+                        if init_neg != 0 { init_val = 0 - init_val }
+                        if init_inv != 0 { init_val = ~init_val }
+                        static_set_init_last(init_val)
+                    }
                 } else {
                     // Skip unsupported initializer (function calls, etc.) — value stays 0.
                     while cur_kind() != 60 && cur_kind() != 71 && cur_kind() != 70 && cur_kind() != 72 && cur_kind() != 73 && cur_kind() != 21 && cur_kind() != 89 && cur_kind() != 0 {
@@ -2504,42 +2698,13 @@ fn parse_module() -> uint64 {
             // Check for array syntax: static TYPE[N] name
             if cur_kind() == 14 {
                 advance_tok()
-                uint64 size_tok = advance_tok()
-                // Parse the integer literal from the token text
-                uint64 stsz_start = tok_start_at(size_tok)
-                uint64 stsz_len = tok_len_at(size_tok)
-                uint64 stsz_val = 0
-                uint64 stsz_i = 0
-                // Support decimal and 0x hex
-                uint64 sbp0 = src_ptr + stsz_start
-                uint64 sbc0 = 0
-                unsafe { *(sbp0 as uint8) -> sbc0 }
-                uint64 sbp1 = src_ptr + stsz_start + 1
-                uint64 sbc1 = 0
-                if stsz_len > 1 { unsafe { *(sbp1 as uint8) -> sbc1 } }
-                if sbc0 == 48 && sbc1 == 120 {
-                    // 0x... hex
-                    stsz_i = 2
-                    while stsz_i < stsz_len {
-                        uint64 sbpx = src_ptr + stsz_start + stsz_i
-                        uint64 sbcx = 0
-                        unsafe { *(sbpx as uint8) -> sbcx }
-                        uint64 dv = 0
-                        if sbcx >= 48 && sbcx <= 57 { dv = sbcx - 48 }
-                        else if sbcx >= 97 && sbcx <= 102 { dv = sbcx - 87 }
-                        else if sbcx >= 65 && sbcx <= 70 { dv = sbcx - 55 }
-                        stsz_val = stsz_val * 16 + dv
-                        stsz_i = stsz_i + 1
-                    }
-                } else {
-                    while stsz_i < stsz_len {
-                        uint64 sbp = src_ptr + stsz_start + stsz_i
-                        uint64 sbc = 0
-                        unsafe { *(sbp as uint8) -> sbc }
-                        stsz_val = stsz_val * 10 + (sbc - 48)
-                        stsz_i = stsz_i + 1
-                    }
-                }
+                // WAS A HAND-ROLLED DIGIT SCAN over the token's text, decimal
+                // and 0x, with no check that the token WAS a number. Given an
+                // identifier it kept going: `static u8[N] a` scanned 'N' as
+                // 78 - 48 and reserved 30 bytes, padded to 32, for what the
+                // source called 64. The folder handles both bases, names, and
+                // expressions, and refuses what it cannot fold.
+                uint64 stsz_val = parse_const_array_size()
                 expect(15)
                 uint64 name_tok = expect(1)
                 // Compute element size from type keyword kind
@@ -2608,12 +2773,19 @@ fn parse_module() -> uint64 {
                     if cur_kind() == 31 { sinit_neg = 1; advance_tok() }
                     else if cur_kind() == 26 { sinit_inv = 1; advance_tok() }
                     uint32 sinit_kind = cur_kind()
-                    if sinit_kind == 2 || sinit_kind == 4 || sinit_kind == 77 || sinit_kind == 78 {
-                        uint64 sinit_tok = advance_tok()
-                        uint64 sinit_val = parse_int_token(sinit_tok)
-                        if sinit_neg != 0 { sinit_val = 0 - sinit_val }
-                        if sinit_inv != 0 { sinit_val = ~sinit_val }
-                        static_set_init_last(sinit_val)
+                    // Same widening as the const branch above, and the same
+                    // exclusions: FloatLit keeps the branch below it, StrLit
+                    // keeps the skip path. `static u64 X = 5 * 7` stored 5
+                    // before this -- the first literal, with the rest of the
+                    // expression dropped on the floor.
+                    // 255 = TokenKind.Error, as in the const branch above.
+                    if sinit_kind == 2 || sinit_kind == 4 || sinit_kind == 77 || sinit_kind == 78 || sinit_kind == 1 || sinit_kind == 10 || sinit_kind == 255 {
+                        uint64 sinit_val = parse_const_expr()
+                        if pce_ok != 0 {
+                            if sinit_neg != 0 { sinit_val = 0 - sinit_val }
+                            if sinit_inv != 0 { sinit_val = ~sinit_val }
+                            static_set_init_last(sinit_val)
+                        }
                     } else if sinit_kind == 5 {
                         // FloatLit: parse digits+dot into int_val, frac_val,
                         // frac_divisor; compute as f64; pack bits via the
@@ -2637,6 +2809,11 @@ fn parse_module() -> uint64 {
                             uint64 fch = 0
                             unsafe { *(fbp as uint8) -> fch }
                             if fch == 46 { fpast = 1 }
+                            // '_' is skipped for the same reason as in the
+                            // three other float scanners: ffrac_digits
+                            // drives the divisor, so a separator counted
+                            // as a digit shifts the value by a decade.
+                            else if fch == 95 { }
                             else if fch == 102 { }   // trailing 'f' — narrowing is driven by the static's declared type, not the literal suffix
                             else if fch == 101 || fch == 69 {
                                 // 'e' / 'E' — switch to exponent mode.

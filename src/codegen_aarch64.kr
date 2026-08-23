@@ -1094,6 +1094,11 @@ fn gen_expr_a64(uint64 node) {
             uint64 ch_f = 0
             unsafe { *(cp_f as uint8) -> ch_f }
             if ch_f == 46 { past_dot = 1; fi = fi + 1; continue }
+            // '_' contributes nothing and must not reach the digit
+            // branches: in the fraction each digit also bumps
+            // frac_digits, which sets the divisor, so a separator
+            // counted there would divide by ten too many.
+            if ch_f == 95 { fi = fi + 1; continue }
             if ch_f == 102 { fi = fi + 1; continue }
             if ch_f >= 48 && ch_f <= 57 {
                 if past_dot == 0 {
@@ -5043,7 +5048,12 @@ fn gen_stmt_a64(uint64 node) {
         uint32 struct_marker = ast_data4(node)
         uint64 wsm = struct_marker
         if was != 0 && wsm == 0 {
-            uint64 arr_size = parse_int_token(was)
+            // THE FOLDED SIZE, as in ir.kr. This read parse_int_token(was)
+            // when was was a token index; data3 now carries the value, and
+            // digit-scanning it as a token index is how `uint32[8] t` hung
+            // the compiler for 47 minutes -- token 8's text scanned to a
+            // huge count and the slot loop below counted up to it.
+            uint64 arr_size = was
             uint32 type_tok_v = ast_data1(node)
             uint64 elem_size_v = type_tok_elem_size(type_tok_v)
             uint64 total_bytes = arr_size * elem_size_v
@@ -5109,9 +5119,9 @@ fn gen_stmt_a64(uint64 node) {
                 return
             }
             uint64 ssize = struct_total_size(sidx)
-            // Struct array support: count from data3 (if set)
+            // Struct array support: the folded count from data3 (if set)
             uint64 count = 1
-            if was != 0 { count = parse_int_token(was) }
+            if was != 0 { count = was }
             uint64 total_bytes = ssize * count
             uint64 n_slots = (total_bytes + 7) / 8
             uint64 struct_off = var_count * 8

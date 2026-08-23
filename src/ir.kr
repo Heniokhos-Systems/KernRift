@@ -1718,6 +1718,11 @@ fn ir_lower_expr(uint64 node) -> uint64 {
         while fi < tlen {
             uint64 ch = tok_source_byte(wlt, fi)
             if ch == 46 { past_dot = 1; fi = fi + 1; continue }
+            // '_' contributes nothing and must not reach the digit
+            // branches: in the fraction each digit also bumps
+            // frac_digits, which sets the divisor, so a separator
+            // counted there would divide by ten too many.
+            if ch == 95 { fi = fi + 1; continue }
             if ch == 102 { is_f32 = 1; fi = fi + 1; continue }
             if ch == 101 || ch == 69 {
                 // 'e' / 'E' — switch to exponent parsing, consume
@@ -4322,7 +4327,7 @@ fn ir_lower_stmt(uint64 node) {
     // VarDecl (10)
     if kind == 10 {
         uint32 name_tok = ast_data2(node)
-        // Check for array declaration (data3 != 0 means array size token)
+        // Check for array declaration (data3 != 0 means array size)
         uint32 arr_size_tok = ast_data3(node)
         uint64 was = arr_size_tok
         uint32 struct_marker = ast_data4(node)
@@ -4332,7 +4337,10 @@ fn ir_lower_stmt(uint64 node) {
             // get stack storage (IR_STACK_ADDR) — a per-call IR_ALLOC is an
             // mmap/VirtualAlloc syscall and was ~2 µs per invocation on hot
             // scratch patterns like a uint64[1] atomic-add trampoline.
-            uint64 arr_size = parse_int_token(was)
+            // The folded size, straight from the AST. It used to be a token
+            // index run through parse_int_token, which digit-scans text and so
+            // turned `u8[N]` into a size derived from the name's spelling.
+            uint64 arr_size = was
             uint32 type_tok_v = ast_data1(node)
             uint64 elem_size_v = type_tok_elem_size(type_tok_v)
             uint64 total_bytes = arr_size * elem_size_v
@@ -4382,11 +4390,11 @@ fn ir_lower_stmt(uint64 node) {
                 return
             }
             // No init: allocate and zero-initialize
-            // Check if this is a struct array (data3 = array size token)
+            // Check if this is a struct array (data3 = folded array size)
             uint64 alloc_size = struct_size
             uint64 arr_count = 1
             if wsarr_check != 0 {
-                arr_count = parse_int_token(wsarr_check)
+                arr_count = wsarr_check
                 alloc_size = struct_size * arr_count
             }
             uint64 buf_v = ir_new_vreg()

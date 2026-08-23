@@ -132,6 +132,39 @@ run_test_output() {
     rm -f "$REPO_ROOT/test_tmp_$$.kr" /tmp/krc_test_$$
 }
 
+# A source that must NOT compile, and the diagnostic that must say why.
+#
+# BOTH HALVES, because "the compiler refused it" is satisfied by a crash, a cap
+# overflow, or an unrelated syntax error three lines later. The rows using this
+# exist because a specific condition used to be folded into a wrong number in
+# silence, so what they have to assert is that the condition is NAMED -- a
+# non-zero exit alone would pass against a compiler that had merely broken in a
+# different way.
+run_test_rejects() {
+    local name="$1"
+    local input="$2"
+    local needle="$3"
+    TOTAL=$((TOTAL + 1))
+
+    local REPO_ROOT="$DIR/.."
+    printf '%s\n' "$input" > "$REPO_ROOT/test_tmp_$$.kr"
+    local out
+    local rc
+    out="$($KRC $KRC_FLAGS "$REPO_ROOT/test_tmp_$$.kr" -o /tmp/krc_test_$$ 2>&1)"
+    rc=$?
+    rm -f "$REPO_ROOT/test_tmp_$$.kr" /tmp/krc_test_$$
+    if [ $rc -eq 0 ]; then
+        echo "FAIL: $name (compiled; expected a rejection)"
+        FAIL=$((FAIL + 1))
+    elif printf '%s' "$out" | grep -qF "$needle"; then
+        PASS=$((PASS + 1))
+    else
+        echo "FAIL: $name (rejected, but not for '$needle')"
+        printf '%s' "$out" | head -2 | sed 's/^/    /'
+        FAIL=$((FAIL + 1))
+    fi
+}
+
 echo "=== KernRift Self-Hosted Compiler Test Suite ==="
 echo ""
 
@@ -2835,6 +2868,8 @@ rm -f "$DIR/../docpin_fmt_$$.kr"
 #    the comparison once $TOTAL is final. TOTAL is incremented HERE so that the
 #    number README must state includes this row.
 TOTAL=$((TOTAL + 1))
+
+
 # Catch BOTH spellings. The row originally matched only '**N tests**', and two
 # '**N-test**' strings (the status table and the support matrix) sat stale at
 # 1356 for three releases underneath a green pin -- a check that could not see
@@ -23673,6 +23708,185 @@ echo ""
 # regression was "expected, not a regression". Removed at E Task 4 rather than
 # left standing. If a future task deliberately lands a red row again, add the
 # annotation back here, for that row, with that task's name on it.
+# --- constant expressions in array sizes and static initialisers -------------
+#
+# EVERY ROW BELOW WAS A SILENT WRONG NUMBER, not an unsupported form. Array
+# sizes and const/static initialisers each read ONE token and ran it through
+# parse_int_token, which digit-scans the token's TEXT and does not stop at a
+# non-digit. `static u8[N] a` with `const u64 N = 64` scanned 'N' -- ASCII 78 --
+# as 78 - 48 = 30 and reserved 32 bytes after alignment. `u8[Z]` gave 48 and
+# `u8[NN]` gave 336: the size was a function of the SPELLING of the name. It
+# compiled, it linked, it ran.
+#
+# The initialisers were wrong the same way: `static u64 X = 5 * 7` stored 5,
+# `1 << 5` stored 1, and anything starting with a name stored 0. Only
+# `TYPE[expr]` was ever loud, and only because the parser wanted ']'.
+#
+# THE PAIRS ARE THE POINT. Each "folds" row has a rejection row beside it, and
+# the rejections assert the MESSAGE and not merely a non-zero exit -- a crash,
+# a cap overflow or an unrelated syntax error would satisfy "refused", and what
+# is being tested is that a specific condition is now named.
+#
+# b - a MEASURES THE RESERVED BYTES, which is what makes these rows detect the
+# original bug rather than restate the source. Two adjacent statics; the gap
+# between them is what the allocator actually set aside. A row that only
+# checked "it compiles" was green throughout the entire history of the bug.
+run_test "const_array_size_named" 'const u64 N = 64
+static u8[N] a
+static u8[8] b
+fn main() -> u64 { return b - a }' 64
+run_test "const_array_size_product" 'const u64 A = 8
+const u64 B = 8
+static u8[A * B] a
+static u8[8] b
+fn main() -> u64 { return b - a }' 64
+run_test "const_array_size_literal_unchanged" 'static u8[64] a
+static u8[8] b
+fn main() -> u64 { return b - a }' 64
+run_test "const_array_size_hex_unchanged" 'static u8[0x40] a
+static u8[8] b
+fn main() -> u64 { return b - a }' 64
+run_test "const_array_size_local_product" 'const u64 A = 8
+const u64 B = 8
+fn main() -> u64 { u8[A * B] a; u8[8] b; return b - a }' 64
+run_test "const_array_size_struct_named" 'struct P { u64 x }
+const u64 N = 4
+fn main() -> u64 { P[N] ps; ps[3].x = 7; return ps[3].x }' 7
+run_test "static_init_folds_product" 'static u64 X = 5 * 7
+fn main() -> u64 { return X }' 35
+run_test "static_init_folds_shift" 'static u64 X = 1 << 5
+fn main() -> u64 { return X }' 32
+run_test "static_init_folds_names" 'const u64 A = 5
+const u64 B = 7
+static u64 X = A * B
+fn main() -> u64 { return X }' 35
+run_test "const_init_folds_names" 'const u64 A = 5
+const u64 B = 7
+const u64 C = A * B
+fn main() -> u64 { return C }' 35
+run_test "static_init_folds_parens" 'static u64 X = (2 + 3) * 7
+fn main() -> u64 { return X }' 35
+run_test "static_init_folds_mask" 'static u64 X = 0xFF & 0x3C
+fn main() -> u64 { return X }' 60
+# The unary prefixes are handled by the folder now instead of by the two flags
+# the call site used to keep, so both need a row that would notice a sign lost
+# in the move.
+run_test "static_init_negative_unchanged" 'static u64 X = -5
+fn main() -> u64 { return X + 5 }' 0
+run_test "static_init_complement_unchanged" 'static u64 X = ~0
+fn main() -> u64 { return X + 1 }' 0
+# NOT ROUTED THROUGH THE FOLDER, and these two rows are what says so. A string
+# initialiser has a later fixup and a float literal has its own branch; sending
+# either to the folder turns a working declaration into a compile error, which
+# is exactly the regression the widened condition could have caused.
+run_test "static_string_init_still_compiles" 'static uint64 S = "text"
+fn main() -> u64 { return 0 }' 0
+run_test "static_float_init_still_compiles" 'static f64 x = 1.5
+fn main() -> u64 { return 0 }' 0
+run_test_rejects "const_array_size_unknown_name" 'static u8[UNKNOWN] a
+fn main() -> u64 { return 0 }' "no compile-time value"
+run_test_rejects "const_array_size_forward_ref" 'static u8[LATER] a
+const u64 LATER = 8
+fn main() -> u64 { return 0 }' "declared earlier"
+run_test_rejects "const_array_size_zero" 'static u8[0] a
+fn main() -> u64 { return 0 }' "greater than zero"
+run_test_rejects "const_expr_div_zero" 'static u8[8 / 0] a
+fn main() -> u64 { return 0 }' "division by zero"
+run_test_rejects "static_init_not_constant" 'fn f() -> u64 { return 1 }
+static u64 X = f()
+fn main() -> u64 { return X }' "no compile-time value"
+
+# --- integer literal bases ---------------------------------------------------
+#
+# THE SAME ASCII-AS-DIGITS FAILURE AS THE BLOCK ABOVE, one layer down. The lexer
+# special-cased 0x and let everything else fall to the decimal scan, which stops
+# at the first non-digit and hands parse_int_token whatever text it collected:
+#
+#   0b1010  lexed as IntLit "0" plus an identifier `b1010`  -> the value 0
+#   0x      lexed as IntLit "0x", decimal-scanned as '0' then 'x' (120)
+#           -> 0 * 10 + (120 - 48) = 72, stored and compiled
+#
+# 0b is NEW syntax rather than repaired syntax -- nothing lexed it before, so no
+# source can depend on the old reading -- while 0X and the empty-prefix case are
+# repairs. The rejection rows are the ones that matter most: a prefix with no
+# digits after it now produces an Error token instead of a number derived from
+# the letter naming the base.
+run_test "binary_literal_local" 'fn main() -> u64 { u64 x = 0b1010; return x }' 10
+run_test "binary_literal_static" 'static u64 X = 0b1010
+fn main() -> u64 { return X }' 10
+run_test "binary_literal_capital_b" 'static u64 X = 0B1010
+fn main() -> u64 { return X }' 10
+run_test "binary_literal_wide" 'fn main() -> u64 { u64 x = 0b11111111; return x - 255 }' 0
+run_test "binary_literal_as_array_size" 'static u8[0b1000000] a
+static u8[8] b
+fn main() -> u64 { return b - a }' 64
+run_test "hex_capital_prefix" 'static u64 X = 0X1F
+fn main() -> u64 { return X }' 31
+run_test "hex_lower_prefix_unchanged" 'static u64 X = 0x1F
+fn main() -> u64 { return X }' 31
+run_test "decimal_unchanged" 'static u64 X = 31
+fn main() -> u64 { return X }' 31
+run_test "float_literal_unchanged" 'fn main() -> u64 { f64 x = 0.5; if x > 0.4 { return 7 } return 0 }' 7
+# A MALFORMED LITERAL IS DIAGNOSED, NOT SKIPPED. These reach the folder through
+# TokenKind.Error (255) being listed beside the literal kinds at both initialiser
+# sites. Without that they fall to the "skip unsupported initializer" path and
+# the static keeps its default 0 -- quieter than the 72 `0x` used to produce, and
+# just as unasked-for. The array-size row is here because that position reaches
+# the folder directly and would have been the one place already covered.
+run_test_rejects "hex_prefix_no_digits" 'static u64 X = 0x
+fn main() -> u64 { return X }' "expected a compile-time constant"
+run_test_rejects "binary_prefix_no_digits" 'static u64 X = 0b
+fn main() -> u64 { return X }' "expected a compile-time constant"
+run_test_rejects "hex_prefix_separator_only" 'static u64 X = 0x_
+fn main() -> u64 { return X }' "expected a compile-time constant"
+run_test_rejects "binary_literal_bad_digit" 'static u64 X = 0b1012
+fn main() -> u64 { return X }' "expected a compile-time constant"
+run_test_rejects "hex_prefix_no_digits_array_size" 'static u8[0x] a
+fn main() -> u64 { return 0 }' "expected a compile-time constant"
+
+# --- digit separators --------------------------------------------------------
+#
+# EACH ROW HERE HAS A SPECIFIC WRONG ANSWER IT EXCLUDES, because the natural way
+# to write the conversion is wrong in a way that still produces a number. The
+# loops scale the accumulator and then add, so a separator that fell through
+# instead of being skipped multiplies by the base and adds nothing:
+#
+#   0b1_0  correct 2   ->  fell through: 0b100 = 4
+#   0x1_F  correct 31  ->  fell through: 0x1 * 16 * 16 + 15 = 271
+#   1_0    correct 10  ->  fell through: (1*10 + 95-48) * 10 = 570
+#
+# So these are not "does the syntax parse" rows. Each asserts the value that
+# distinguishes a skip from a fall-through, which is the only difference a
+# reader of the conversion loop could plausibly get wrong.
+#
+# FLOATS TOO, and the fraction is where the trap bites hardest: every digit
+# after the dot also bumps frac_digits, which sets the divisor, so a separator
+# counted as a digit divides by an extra ten. 1_0.5 would read as 10.05. Each
+# of the four float scanners skips '_' before its digit branches, and the rows
+# below check a fraction, an exponent and the f32 suffix so all four paths are
+# covered rather than just whichever one a default build happens to take.
+run_test "sep_decimal_local" 'fn main() -> u64 { u64 x = 1_0; return x }' 10
+run_test "sep_decimal_static" 'static u64 X = 1_0
+fn main() -> u64 { return X }' 10
+run_test "sep_hex" 'static u64 X = 0x1_F
+fn main() -> u64 { return X }' 31
+run_test "sep_binary" 'static u64 X = 0b1_0
+fn main() -> u64 { return X }' 2
+run_test "sep_binary_grouped" 'fn main() -> u64 { u64 x = 0b1111_1111; return x - 255 }' 0
+run_test "sep_hex_grouped" 'fn main() -> u64 { u64 x = 0xFF_FF; return x - 65535 }' 0
+run_test "sep_decimal_grouped" 'fn main() -> u64 { u64 x = 1_000_000; return x - 1000000 }' 0
+run_test "sep_as_array_size" 'static u8[6_4] a
+static u8[8] b
+fn main() -> u64 { return b - a }' 64
+run_test "sep_leading_in_hex" 'static u64 X = 0x_1F
+fn main() -> u64 { return X }' 31
+run_test "sep_float_integer_part" 'fn main() -> u64 { f64 x = 1_0.5; if x > 10.4 { if x < 10.6 { return 7 } } return 0 }' 7
+run_test "sep_float_fraction" 'fn main() -> u64 { f64 x = 0.12_5; if x > 0.124 { if x < 0.126 { return 7 } } return 0 }' 7
+run_test "sep_float_exponent" 'fn main() -> u64 { f64 x = 1e1_0; if x > 9.9e9 { return 7 } return 0 }' 7
+run_test "sep_float_static" 'static f64 X = 1_0.5
+fn main() -> u64 { if X > 10.4 { if X < 10.6 { return 7 } } return 0 }' 7
+run_test "sep_float_f32_suffix" 'fn main() -> u64 { f32 x = 1_0.5f; if x > 10.4 { if x < 10.6 { return 7 } } return 0 }' 7
+
 # --- Documentation pin 5, PART B (see Part A above) --------------------------
 # README.md advertises this suite's test count. Compare it against the total
 # only now, when $TOTAL is final and already includes this row (Part A did the

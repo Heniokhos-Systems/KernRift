@@ -555,25 +555,96 @@ fn lex_one_token() {
         return
     }
 
-    // Integer literal (decimal or 0x hex)
+    // Integer literal (decimal, 0x/0X hex, or 0b/0B binary)
+    //
+    // A PREFIX WITH NO DIGITS IS AN ERROR TOKEN, and that is the half of this
+    // worth reading. `0x` alone used to lex as the IntLit "0x", and
+    // parse_int_token's decimal fallback then scanned its TEXT: '0' then 'x',
+    // ASCII 120, as the digit 120 - 48 = 72. `static u64 X = 0x` compiled and
+    // stored 72. The same shape gave `0b1010` the value 0, because the decimal
+    // scan stopped at 'b' and left `b1010` behind as an identifier.
+    //
+    // 0b IS NEW rather than repaired: nothing lexed it before, so no source can
+    // depend on the old reading. 0X is repaired -- 0x worked and its capital
+    // has always been an accident of which letter the check named.
     if is_digit(ch) != 0 {
-        if ch == 48 && peek_at(1) == 120 {
+        uint64 pfx = peek_at(1)
+        if ch == 48 && (pfx == 120 || pfx == 88) {
             // 0x hex literal
             advance()
             advance()
             // Consume hex digits (avoid break-in-if: use condition in while)
+            uint64 hex_n = 0
             uint64 hex_ok = 1
             while pos < src_len && hex_ok != 0 {
                 uint64 c = peek()
                 if is_digit(c) != 0 || (c >= 97 && c <= 102) || (c >= 65 && c <= 70) {
                     advance()
+                    hex_n = hex_n + 1
+                } else if c == 95 {
+                    // A separator does not count towards hex_n: `0x_` has to
+                    // stay an error, and it is hex_n that says so.
+                    advance()
                 } else {
                     hex_ok = 0
                 }
             }
-        } else {
-            while pos < src_len && is_digit(peek()) != 0 {
+            if hex_n == 0 {
+                emit_token(TokenKind.Error, start, pos - start, tok_line)
+                return
+            }
+        } else if ch == 48 && (pfx == 98 || pfx == 66) {
+            // 0b binary literal
+            advance()
+            advance()
+            uint64 bin_n = 0
+            uint64 bin_ok = 1
+            while pos < src_len && bin_ok != 0 {
+                uint64 cb = peek()
+                if cb == 48 || cb == 49 {
+                    advance()
+                    bin_n = bin_n + 1
+                } else if cb == 95 {
+                    advance()
+                } else {
+                    bin_ok = 0
+                }
+            }
+            if bin_n == 0 {
+                emit_token(TokenKind.Error, start, pos - start, tok_line)
+                return
+            }
+            // A decimal digit straight after the binary ones is a typo, not two
+            // tokens: `0b1012` would otherwise lex as 0b101 followed by 2, and
+            // the stray 2 is not always where it would be noticed. Letters are
+            // deliberately NOT rejected here -- number-then-identifier
+            // adjacency is meaningful elsewhere (see the `42exit` note in the
+            // exponent scan below).
+            if pos < src_len && peek() >= 50 && peek() <= 57 {
                 advance()
+                emit_token(TokenKind.Error, start, pos - start, tok_line)
+                return
+            }
+            emit_token(TokenKind.IntLit, start, pos - start, tok_line)
+            return
+        } else {
+            // SEPARATORS RUN THROUGH FLOATS TOO, which costs a skip in each
+            // of the four scanners that read float TEXT -- the parser's static
+            // initialiser, the IR, and both codegens. Each is one branch beside
+            // the one already there for the `f` suffix, and each has to sit
+            // BEFORE the digit branches: in the fraction every digit also bumps
+            // frac_digits, which sets the divisor, so a separator counted as a
+            // digit divides by an extra ten and 1_0.5 would read as 10.05.
+            uint64 dec_ok = 1
+            while pos < src_len && dec_ok != 0 {
+                uint64 cd = peek()
+                if is_digit(cd) != 0 {
+                    advance()
+                } else if cd == 95 {
+                    advance()
+                } else {
+                    dec_ok = 0
+                }
             }
             // Float literal: `digits . digits [exp] [f]` OR `digits exp [f]`.
             // Scientific-notation exponent (e|E)(+|-)?digits enables the
@@ -584,8 +655,10 @@ fn lex_one_token() {
                 uint64 after_dot = peek_at(1)
                 if after_dot >= 48 && after_dot <= 57 {
                     advance()
-                    while pos < src_len && is_digit(peek()) != 0 {
-                        advance()
+                    uint64 fr_ok = 1
+                    while pos < src_len && fr_ok != 0 {
+                        uint64 cf = peek()
+                        if is_digit(cf) != 0 || cf == 95 { advance() } else { fr_ok = 0 }
                     }
                     is_float = 1
                 }
@@ -603,8 +676,10 @@ fn lex_one_token() {
                 if c1 >= 48 && c1 <= 57 {
                     advance()
                     if peek() == 43 || peek() == 45 { advance() }
-                    while pos < src_len && is_digit(peek()) != 0 {
-                        advance()
+                    uint64 ex_ok = 1
+                    while pos < src_len && ex_ok != 0 {
+                        uint64 ce = peek()
+                        if is_digit(ce) != 0 || ce == 95 { advance() } else { ex_ok = 0 }
                     }
                     is_float = 1
                 }
