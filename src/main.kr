@@ -9282,6 +9282,37 @@ fn main() {
     if emit_mode == 1 && target_os == 0 { target_os = 1 }
     if emit_mode == 2 && target_os == 0 { target_os = 2 }
     if emit_mode == 4 && target_os == 0 { target_os = 3 }
+    // ARX SAYS WHICH MACHINE IT RUNS ON, exactly as macho and pe do, and this
+    // row is what was missing rather than a rule invented for it. Without it
+    // mode 10 kept the linux default and the check further down refused the
+    // build with "--emit=arx requires --target=none" -- a flag the format
+    // already implies, demanded of every single invocation. `--emit=macho`
+    // has never asked anyone to add `--target=macos`.
+    //
+    // 4 is none/bare-metal, which is the honest resolution: the container is
+    // loaded by ApexRift, so it must not carry a hosted OS's syscalls. What it
+    // does NOT yet do is supply ApexRift's own -- a program still reaches those
+    // through `import "std/apexrift.kr"`, and the refusal it gets otherwise now
+    // names the builtin and the remedy instead of the flag.
+    // target_arg_seen, NOT `target_os == 0`, and the difference is the whole
+    // correctness of this row. 0 doubles as "linux" and as "nobody said", so the
+    // three rows above cannot tell `--emit=macho --target=linux` from a bare
+    // `--emit=macho` -- they silently win either way. Reusing that shape here
+    // would have thrown away the explicit refusal this replaces: a user who
+    // asks for `--target=linux --emit=arx` is asking for something that cannot
+    // work, and must be told so rather than quietly handed a bare-metal build.
+    // (The three rows above are left exactly as they are; widening them is a
+    // change to three formats' behaviour, not a fix to this one.)
+    //
+    // freestanding TOO, because --target=none sets BOTH. Setting only target_os
+    // left main()'s auto-exit epilogue in place, and it lowers to a SYSCALL
+    // that bare metal has nowhere to send -- measured: `--emit=arx` without
+    // --target then died with "SYSCALL reached the emitter from 'main()
+    // epilogue auto-exit'", which is a worse error than the one being removed.
+    if emit_mode == 10 && target_arg_seen == 0 {
+        target_os = 4
+        freestanding = 1
+    }
     // emit_mode=4 (android): default to arm64 unless --arch was explicitly set
     if emit_mode == 4 && arch_set == 0 { arch = 1 }
 

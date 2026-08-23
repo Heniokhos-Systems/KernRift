@@ -21577,7 +21577,33 @@ ax_refuse() {   # <name> <unique-substring> <flags...>
         *) echo "FAIL: $nm (wanted substring '$want', got: $(printf '%s' "$out" | head -1))"; FAIL=$((FAIL + 1)) ;;
     esac
 }
-ax_refuse arx_refuses_hosted_target "requires --target=none" --arch=x86_64 --emit=arx
+# THE REFUSAL NOW NEEDS AN EXPLICIT HOSTED TARGET TO FIRE. A bare
+# `--emit=arx` used to be refused and told to add --target=none -- a flag the
+# format already implies, demanded of every invocation, which `--emit=macho`
+# has never asked of anyone. It now resolves to bare metal like macho and pe
+# resolve to their own, and the refusal is kept for the case where it says
+# something: a user who ASKED for a hosted target and arx together.
+ax_refuse arx_refuses_hosted_target "requires --target=none" --arch=x86_64 --target=linux --emit=arx
+# And the implication itself, both halves. Building is the visible half; the
+# freestanding half is not, and is what the second row is for -- setting only
+# target_os left main()'s auto-exit epilogue in place, which lowers to a
+# SYSCALL bare metal cannot make, so `--emit=arx` died with "SYSCALL reached
+# the emitter" instead of building. A row that only checked the exit status
+# would have passed on the version that still emitted the epilogue, because
+# that version failed too -- for a different reason.
+TOTAL=$((TOTAL + 1))
+ax_imp_out=$(./build/krc2 --arch=x86_64 --emit=arx "$ARX_SRC" -o /tmp/krc_aximp_$$ 2>&1)
+if [ -s /tmp/krc_aximp_$$ ]; then
+    PASS=$((PASS + 1)); echo "  arx_implies_target_none: PASS (built with no --target)"
+else
+    FAIL=$((FAIL + 1)); echo "FAIL: arx_implies_target_none ($(printf '%s' "$ax_imp_out" | head -1))"
+fi
+rm -f /tmp/krc_aximp_$$
+TOTAL=$((TOTAL + 1))
+case "$ax_imp_out" in
+    *SYSCALL*) FAIL=$((FAIL + 1)); echo "FAIL: arx_implies_freestanding (auto-exit epilogue survived: $(printf '%s' "$ax_imp_out" | head -1))" ;;
+    *) PASS=$((PASS + 1)); echo "  arx_implies_freestanding: PASS (no auto-exit syscall emitted)" ;;
+esac
 # NOT via ax_refuse, and NOT via $KRC. Two layers inject an arch: KRC_FLAGS
 # defaults to --arch=$ARCH, and the make-test wrapper is literally
 # `exec ./build/krc2 --arch=x86_64 "$@"`. Either one makes the condition under
