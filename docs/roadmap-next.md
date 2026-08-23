@@ -318,3 +318,41 @@ Either fix resolves it: make the textual assembler cover these instructions
 (R7a), or tag raw-hex blocks with the architecture they were written for and
 reject a mismatch. The second is the more general fix — raw hex will always be
 the escape hatch for something.
+
+## R8: a local array over 4096 bytes silently becomes a heap allocation
+
+Measured with the pinned `krc2`, `--arch=x86_64 --target=none --freestanding`:
+
+```c
+fn f() -> uint64 { u8[4096] b  uint64 p = b  store8(p, 1)  return load8(p) }   // builds
+fn f() -> uint64 { u8[4097] b  uint64 p = b  store8(p, 1)  return load8(p) }   // fails
+```
+
+The threshold is exactly 4096; 4097, 5000, 6144, 8191 and 8192 all fail. Above
+it the local is lowered to `alloc()`, and in a freestanding image the failure
+surfaces as:
+
+```
+error: --target=none: SYSCALL reached the emitter from 'alloc': there is no
+operating system to trap into on bare metal.
+```
+
+The lowering itself is defensible — a 64 KB stack frame in a kernel is worse
+than a heap allocation. **The diagnostic is not.** It names neither the array,
+nor the function, nor the size, nor the threshold, so the message a user gets
+for writing one array one byte too large is a claim about `alloc` and system
+calls, which is not a thing their code mentions. Found while writing ApexRift's
+USB pipe tests (`u8[8192]` for a drain buffer); the cause took a threshold
+bisection to establish.
+
+Either fix works:
+
+- report it at the declaration — "local array `tbuf` is 8192 bytes, over the
+  4096-byte limit for stack locals; declare it `static`" — which is a message
+  that names the fix;
+- or, for `--freestanding`, refuse the implicit heap lowering outright with that
+  same wording, since there is no heap on that target and the allocation could
+  never have worked.
+
+The second is the better default: silently moving a freestanding kernel's buffer
+to a heap that does not exist is not a lowering, it is a build that cannot link.
