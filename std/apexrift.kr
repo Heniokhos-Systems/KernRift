@@ -80,9 +80,26 @@ fn write(uint64 _fd, uint64 buf, uint64 len) -> uint64 {
     return sys2(SYS_CON_WRITE, buf, len)
 }
 
+// THE ONE WRAPPER THAT HAS TO TRANSLATE, and the reason is a disagreement
+// about how failure is spelled. ApexRift's handle table is 1-based: svc_f_open
+// returns 0 when it cannot open, and 0 is reserved for exactly that. Every
+// KernRift program is written against the hosted contract, where open() returns
+// -1 and the test is `fd >= 0xFFFFFFFF`. Testing for 0 instead is not open to a
+// caller: on Linux 0 is stdin, a real handle.
+//
+// Untranslated, a file that does not exist comes back as a VALID handle, reads
+// give zero bytes, and the program proceeds over an empty file. Measured in
+// krc itself, which is the largest program that runs this way: a mistyped
+// source name produced "needs an entry function ('_start' or 'main')" -- a
+// complaint about the program, for a file that was never opened.
+//
+// The neighbours below need no such translation: they return COUNTS, where zero
+// is a legitimate answer rather than a sentinel.
 @builtin_override
 fn file_open(uint64 path, uint64 mode) -> uint64 {
-    return sys2(SYS_F_OPEN, path, mode)
+    uint64 h = sys2(SYS_F_OPEN, path, mode)
+    if h == 0 { return 0xFFFFFFFFFFFFFFFF }
+    return h
 }
 @builtin_override
 fn file_read(uint64 h, uint64 buf, uint64 len) -> uint64 {
