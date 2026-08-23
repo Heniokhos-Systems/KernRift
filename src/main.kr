@@ -2659,10 +2659,33 @@ fn find_entry_node(uint64 root) -> uint64 {
 // The riscv32/xtensa refusals are deliberately NOT routed here -- they name
 // their own arch and their own flag (`freestanding riscv32`), which is a
 // different message for a different path, not a copy of this one.
+// THE FLAG THE USER TYPED, not a constant. This said `--emit=image`
+// unconditionally, and four call sites reach it -- the arx path among them. A
+// user who ran `--emit=arx` was told their --emit=image had no entry function,
+// which names a flag they did not pass and sends them to look at the wrong one.
+//
+// The string rather than the mode NUMBER, because the numbers are assigned in a
+// forty-branch chain of aliases (elf/linux/elfexe all mean 0) and a second
+// mapping from number back to name is a second thing to keep in step. This one
+// cannot drift: it is the argument text.
+static uint64 cg_emit_flag = 0
+
 fn entry_missing_die() {
-    uint64 em_msg = "error: --emit=image needs an entry function ('_start' or 'main')\n"
+    uint64 em_msg = "error: --emit="
     write(2, em_msg, str_len(em_msg))
-    em_msg = "A bare-metal image has no loader to call: name the first function to run either '_start' or 'main'\n"
+    if cg_emit_flag != 0 {
+        write(2, cg_emit_flag, str_len(cg_emit_flag))
+    } else {
+        em_msg = "image"
+        write(2, em_msg, str_len(em_msg))
+    }
+    em_msg = " needs an entry function ('_start' or 'main')\n"
+    write(2, em_msg, str_len(em_msg))
+    // WAS "a bare-metal image has no loader to call", which is false for the
+    // path that most often hits this: an ARX container IS loaded, by ApexRift.
+    // What is true of every output that reaches here is that nothing calls in
+    // on its own.
+    em_msg = "Nothing calls into this output for you: name the first function to run either '_start' or 'main'\n"
     write(2, em_msg, str_len(em_msg))
     exit(1)
 }
@@ -8695,6 +8718,10 @@ fn main() {
                 // always describes the LAST --emit= and never a superseded one.
                 uefi_set = 0
                 uint64 emit_str = arg + 7
+                // Recorded for entry_missing_die, which used to name a flag the
+                // caller may never have passed. Set before the alias chain so
+                // every spelling reports itself rather than its canonical form.
+                cg_emit_flag = emit_str
                 if str_eq_full(emit_str, "elfexe") != 0 {
                     emit_mode = 0
                 } else if str_eq_full(emit_str, "elf") != 0
