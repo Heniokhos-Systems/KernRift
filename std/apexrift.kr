@@ -125,10 +125,13 @@ fn file_size(uint64 h) -> uint64 {
 // address, so `HEX + d` points at the character and con_write takes it with
 // length 1.
 //
-// The table is a LOCAL, not a static. `static uint64 X = "..."` does not store
-// the literal's address in this compiler -- the same limitation that stops
-// static initialisers const-folding -- so a static reads back as 0 and prints
-// nothing. Measured: an earlier version of this printed empty digits.
+// The table is a LOCAL, not a static, and now it has to be: `static uint64 X =
+// "..."` is REFUSED by the compiler rather than silently storing 0. It used to
+// compile and read back as zero -- measured here first, when an earlier version
+// of this function printed empty digits, and later in ApexRift's begonia board,
+// where the same shape left a device-tree needle null and the match it existed
+// to make impossible. (The const-folding half of that old note is also gone:
+// static initialisers fold now.)
 fn apx_put_hex(uint64 v) {
     uint64 HEX = "0123456789abcdef"
     if v == 0 { sys2(SYS_CON_WRITE, HEX, 1); return }

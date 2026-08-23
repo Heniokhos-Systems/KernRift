@@ -288,6 +288,41 @@ fn parse_const_array_size() -> uint64 {
     return v
 }
 
+// A STRING LITERAL CANNOT INITIALISE A STATIC, and this says so instead of
+// storing 0. StrLit fell to the "skip unsupported initializer" path, so
+//
+//     static uint64 NEEDLE = "xiaomi,begonia"
+//
+// compiled, linked, ran, and read back as ZERO. ApexRift shipped one: its
+// begonia board matched that needle against every device tree it scanned to
+// tell LK's edited copy -- the one carrying the framebuffer address -- from any
+// other blob in memory. With a null needle, fdt_contains dereferences address 0
+// on its first line and the distinction the code was written to make cannot
+// happen at all. Two files in this tree carry comments describing the silence
+// as a known quirk; a quirk that costs a device its display is a defect.
+//
+// REFUSED RATHER THAN IMPLEMENTED. Storing the address means patching the data
+// segment after the string table is laid out, which is a relocation, and a
+// different one per output format -- absolute for a flat image or ARX, a
+// RELATIVE reloc for a PIE ELF. That is a feature, not a bug fix, and until it
+// exists the only honest answer is to name the working form. Which is already
+// the idiom this tree uses: crypto/chain.kr and crypto/der.kr spell their OID
+// constants exactly that way, five times.
+fn str_static_init_die(uint64 tok) {
+    if parse_err_should_report() != 0 {
+        p_err_reported = p_err_reported + 1
+        diag_loc_head(tok, 0)
+        uint64 m = "a string literal cannot initialise a static or const: its address is not known until the string table is laid out and nothing patches it in, so the static would read back as 0"
+        write(2, m, str_len(m))
+        write(2, "\n", 1)
+        diag_span_of(tok)
+        m = "  use a function instead:  fn name() -> uint64 { return \"...\" }"
+        write(2, m, str_len(m))
+        write(2, "\n", 1)
+    }
+    p_err_count = p_err_count + 1
+}
+
 fn expect(uint32 kind) -> uint64 {
     if cur_kind() != kind {
         // "file:line:col: error: expected X, got Y 'text'" + source span/caret.
@@ -2667,6 +2702,7 @@ fn parse_module() -> uint64 {
                 // Without it here the skip path below swallows it and the
                 // static keeps its default 0, which is quieter than the 72
                 // that `0x` used to produce and just as unasked-for.
+                if init_kind == 3 { str_static_init_die(p_tok_pos) }
                 if init_kind == 2 || init_kind == 4 || init_kind == 77 || init_kind == 78 || init_kind == 1 || init_kind == 10 || init_kind == 255 {
                     uint64 init_val = parse_const_expr()
                     if pce_ok != 0 {
@@ -2779,6 +2815,7 @@ fn parse_module() -> uint64 {
                     // before this -- the first literal, with the rest of the
                     // expression dropped on the floor.
                     // 255 = TokenKind.Error, as in the const branch above.
+                    if sinit_kind == 3 { str_static_init_die(p_tok_pos) }
                     if sinit_kind == 2 || sinit_kind == 4 || sinit_kind == 77 || sinit_kind == 78 || sinit_kind == 1 || sinit_kind == 10 || sinit_kind == 255 {
                         uint64 sinit_val = parse_const_expr()
                         if pce_ok != 0 {

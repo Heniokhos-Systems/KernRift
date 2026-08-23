@@ -23805,8 +23805,25 @@ fn main() -> u64 { return X + 1 }' 0
 # initialiser has a later fixup and a float literal has its own branch; sending
 # either to the folder turns a working declaration into a compile error, which
 # is exactly the regression the widened condition could have caused.
-run_test "static_string_init_still_compiles" 'static uint64 S = "text"
-fn main() -> u64 { return 0 }' 0
+# WAS "still compiles", and it did -- storing 0. That row was written when the
+# widened initialiser condition could have turned a working declaration into an
+# error, and it was right to guard that. What it guarded turned out to be a
+# defect: ApexRift's begonia board matched a device-tree needle it had declared
+# this way, so the needle was null and the match it existed to make could not
+# happen. Refused now, with the working form named.
+run_test_rejects "static_string_init_refused" 'static uint64 S = "text"
+fn main() -> u64 { return 0 }' "cannot initialise a static or const"
+run_test_rejects "const_string_init_refused" 'const uint64 S = "text"
+fn main() -> u64 { return 0 }' "cannot initialise a static or const"
+run_test "string_literal_via_fn_works" 'fn needle() -> u64 { return "xy" }
+fn main() -> u64 {
+    u64 p = needle()
+    if p == 0 { return 1 }
+    u64 c = 0
+    unsafe { *(p as uint8) -> c }
+    if c == 120 { return 7 }
+    return 2
+}' 7
 run_test "static_float_init_still_compiles" 'static f64 x = 1.5
 fn main() -> u64 { return 0 }' 0
 run_test_rejects "const_array_size_unknown_name" 'static u8[UNKNOWN] a
