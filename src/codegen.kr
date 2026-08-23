@@ -647,6 +647,42 @@ fn bare_metal_trap_refused(uint64 insn, uint64 what) {
 //
 // Sub-project E makes inline asm considerably more capable; do not read this
 // carve-out as a gap that was missed when revisiting it then.
+// ---------------------------------------------------------------------------
+// ApexRift's syscall ABI
+// ---------------------------------------------------------------------------
+//
+// ARX IS LOADED BY AN OS, which is what separates it from every other
+// --target=none output. `--emit=arx` therefore has a provider for the builtins
+// that need a machine underneath, exactly as emit_mode 7 (LKM) already switches
+// alloc/dealloc from mmap to the kernel slab allocator -- same file, same
+// mechanism, different host.
+//
+// x86_64 ONLY, and that is ApexRift's limit rather than a shortcut here: its
+// gate is `int 0x80` through a DPL-3 IDT entry (core/arxsvc.kr) and there is no
+// arm64 SVC handler at all. `--emit=arx --arch=arm64` keeps refusing, which is
+// the truthful answer until that exists.
+//
+// A SEPARATE NUMBER RANGE, because the abstract numbers IR_SYSCALL carries are
+// Linux's and ApexRift's twelve collide with them -- its con_write is 1 and so
+// is Linux's write. Adding a base keeps one dispatch able to tell which ABI an
+// instruction belongs to without a second flag threaded beside it.
+static uint64 APX_SYSCALL_BASE = 9000
+
+fn apx_abi() -> uint64 {
+    if cg_emit_mode != 10 { return 0 }
+    if target_arch != 0 { return 0 }
+    return 1
+}
+
+// Not emit_x86_syscall_insn: that one refuses under target_os == 4, and it is
+// right to -- a bare `syscall` on bare metal has nowhere to go. This is a trap
+// INTO an operating system, so it is the one case where target_os == 4 and a
+// trap instruction belong together.
+fn emit_x86_int80_insn() {
+    emit_byte(0xCD)
+    emit_byte(0x80)
+}
+
 fn emit_x86_syscall_insn(uint64 what) {
     if target_os == 4 && what != 0 {
         uint64 x86sc = "SYSCALL"

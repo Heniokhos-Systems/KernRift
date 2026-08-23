@@ -23930,6 +23930,56 @@ run_test "sep_float_static" 'static f64 X = 1_0.5
 fn main() -> u64 { if X > 10.4 { if X < 10.6 { return 7 } } return 0 }' 7
 run_test "sep_float_f32_suffix" 'fn main() -> u64 { f32 x = 1_0.5f; if x > 10.4 { if x < 10.6 { return 7 } } return 0 }' 7
 
+# --- ApexRift's syscall ABI under --emit=arx --------------------------------
+#
+# ARX IS LOADED BY AN OS, which is what separates it from every other
+# --target=none output, and emit_mode 7 (LKM) already switches alloc/dealloc to
+# the kernel slab allocator on exactly that reasoning. So `--emit=arx` supplies
+# the builtins that need a machine underneath: no --target=none to type, and no
+# `import "std/apexrift.kr"` -- which krc running INSIDE ApexRift could not
+# resolve anyway, since the guest filesystem holds /bin and nothing else.
+#
+# THE BYTE CHECK IS THE POINT. "It compiled" is satisfied by a build that
+# refused nothing and emitted nothing either; what has to be true is that the
+# call left through ApexRift's gate, `int 0x80` = CD 80. Measured end to end
+# besides: the same container printed "hello from arx" under `run /bin/hello`
+# in the guest, which is the assertion this suite cannot make from here.
+APXA_D=$(mktemp -d)
+printf 'fn main() -> u64 {\n    print("hi")\n    return 0\n}\n' > "$APXA_D/p.kr"
+TOTAL=$((TOTAL + 1))
+if ./build/krc2 --arch=x86_64 --emit=arx "$APXA_D/p.kr" -o "$APXA_D/p.arx" >/dev/null 2>&1; then
+    PASS=$((PASS + 1)); echo "  arx_print_needs_no_import: PASS"
+else
+    FAIL=$((FAIL + 1)); echo "FAIL: arx_print_needs_no_import ($(./build/krc2 --arch=x86_64 --emit=arx "$APXA_D/p.kr" -o /dev/null 2>&1 | head -1))"
+fi
+TOTAL=$((TOTAL + 1))
+if [ -s "$APXA_D/p.arx" ] && od -An -tx1 -v "$APXA_D/p.arx" | tr -d ' \n' | grep -q "cd80"; then
+    PASS=$((PASS + 1)); echo "  arx_write_lowers_to_int80: PASS"
+else
+    FAIL=$((FAIL + 1)); echo "FAIL: arx_write_lowers_to_int80 (no CD 80 in the container)"
+fi
+# arm64 KEEPS REFUSING, and that is correct rather than unfinished: ApexRift's
+# gate is a DPL-3 IDT entry and it has no arm64 SVC handler at all, so there is
+# nothing on that arch to trap into. A row here so the x86 provider cannot be
+# widened to arm64 by accident.
+TOTAL=$((TOTAL + 1))
+apxa_a64=$(./build/krc2 --arch=arm64 --emit=arx "$APXA_D/p.kr" -o "$APXA_D/p64.arx" 2>&1)
+case "$apxa_a64" in
+    *"not available on bare metal"*) PASS=$((PASS + 1)); echo "  arx_arm64_still_refuses: PASS" ;;
+    *) FAIL=$((FAIL + 1)); echo "FAIL: arx_arm64_still_refuses (got: $(printf '%s' "$apxa_a64" | head -1))" ;;
+esac
+# AND A USER OVERRIDE STILL WINS. The provider is consulted only when the
+# program supplied none; a board that wants its own console must keep it.
+TOTAL=$((TOTAL + 1))
+printf '@builtin_override\nfn write(uint64 fd, uint64 buf, uint64 len) -> uint64 { return 42 }\nfn main() -> u64 {\n    print("hi")\n    return 0\n}\n' > "$APXA_D/o.kr"
+if ./build/krc2 --arch=x86_64 --emit=arx "$APXA_D/o.kr" -o "$APXA_D/o.arx" >/dev/null 2>&1 \
+   && ! od -An -tx1 -v "$APXA_D/o.arx" | tr -d ' \n' | grep -q "cd80"; then
+    PASS=$((PASS + 1)); echo "  arx_user_write_override_wins: PASS (no int 0x80 emitted)"
+else
+    FAIL=$((FAIL + 1)); echo "FAIL: arx_user_write_override_wins (compiler provider displaced the program's own write)"
+fi
+rm -rf "$APXA_D"
+
 # --- Documentation pin 5, PART B (see Part A above) --------------------------
 # README.md advertises this suite's test count. Compare it against the total
 # only now, when $TOTAL is final and already includes this row (Part A did the

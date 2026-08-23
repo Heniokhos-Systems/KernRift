@@ -1496,6 +1496,22 @@ fn ir_bm_str_const(uint64 s, uint64 n) -> uint64 {
 // is `wtok`. fd is always 1: a board with one UART has one output, and the
 // providers in std/ ignore fd for exactly that reason.
 fn ir_bm_emit_write(uint64 wtok, uint64 ptr_v, uint64 len_v) {
+    // 0xFFFFFFFF means the program supplied no provider. Everywhere else that
+    // is a refusal; under --emit=arx it means THE COMPILER is the provider, and
+    // the bytes go out through ApexRift's con_write. Reached only when the
+    // callers below decline to refuse, which they do only when apx_abi() holds.
+    //
+    // The bare-metal path rather than the hosted one, deliberately: the hosted
+    // print accumulates into a 4096-byte IR_ALLOC, and a heap is the next thing
+    // ApexRift would have to provide. This one walks the arguments straight out
+    // through the provider and needs no allocator at all.
+    if wtok == 0xFFFFFFFF {
+        ir_emit(IR_ARG, 0, ptr_v, 0, 0, ir_current_bb)
+        ir_emit(IR_ARG, 0, len_v, 0, 1, ir_current_bb)
+        uint64 aw = ir_new_vreg()
+        ir_emit_syscall(aw, APX_SYSCALL_BASE + 1, ir_current_bb, "write")
+        return
+    }
     uint64 fd_v = ir_new_vreg()
     ir_emit(IR_CONST, fd_v, 0, 0, 1, ir_current_bb)
     ir_emit(IR_ARG, 0, fd_v, 0, 0, ir_current_bb)
@@ -2211,7 +2227,7 @@ fn ir_lower_expr(uint64 node) -> uint64 {
         }
         // write(fd, buf, len) → syscall 1
         if skip_builtin == 0 && tok_matches(wct, "write", 5) != 0 {
-            if target_os == 4 {
+            if target_os == 4 && apx_abi() == 0 {
                 uint64 bmw = "write"
                 bare_metal_builtin_refused(bmw, bm_fix_write())
             }
@@ -2221,6 +2237,17 @@ fn ir_lower_expr(uint64 node) -> uint64 {
             uint64 buf = ir_lower_expr(arg2)
             uint32 arg3 = ast_next(arg2)
             uint64 len = ir_lower_expr(arg3)
+            // ApexRift's console call takes NO fd -- con_write(buf, len). `fd`
+            // is still lowered above and then dropped, so an argument with a
+            // side effect still has it; silently not evaluating an argument
+            // would be a different program, not a smaller one.
+            if apx_abi() != 0 {
+                ir_emit(IR_ARG, 0, buf, 0, 0, ir_current_bb)
+                ir_emit(IR_ARG, 0, len, 0, 1, ir_current_bb)
+                uint64 adest = ir_new_vreg()
+                ir_emit_syscall(adest, APX_SYSCALL_BASE + 1, ir_current_bb, "write")
+                return adest
+            }
             ir_emit(IR_ARG, 0, fd, 0, 0, ir_current_bb)
             ir_emit(IR_ARG, 0, buf, 0, 1, ir_current_bb)
             ir_emit(IR_ARG, 0, len, 0, 2, ir_current_bb)
@@ -2717,7 +2744,7 @@ fn ir_lower_expr(uint64 node) -> uint64 {
         if skip_builtin == 0 && tok_matches(wct, "print_str", 9) != 0 {
             if target_os == 4 {
                 uint64 ps_wtok = ir_bm_write_provider()
-                if ps_wtok == 0xFFFFFFFF {
+                if ps_wtok == 0xFFFFFFFF && apx_abi() == 0 {
                     uint64 bmps = "print_str"
                     bare_metal_builtin_refused(bmps, bm_fix_write())
                 }
@@ -2750,7 +2777,7 @@ fn ir_lower_expr(uint64 node) -> uint64 {
         if skip_builtin == 0 && tok_matches(wct, "println_str", 11) != 0 {
             if target_os == 4 {
                 uint64 pls_wtok = ir_bm_write_provider()
-                if pls_wtok == 0xFFFFFFFF {
+                if pls_wtok == 0xFFFFFFFF && apx_abi() == 0 {
                     uint64 bmpls = "println_str"
                     bare_metal_builtin_refused(bmpls, bm_fix_write())
                 }
@@ -3021,7 +3048,7 @@ fn ir_lower_expr(uint64 node) -> uint64 {
             // actionable.
             if target_os == 4 {
                 uint64 pr_wtok = ir_bm_write_provider()
-                if pr_wtok == 0xFFFFFFFF {
+                if pr_wtok == 0xFFFFFFFF && apx_abi() == 0 {
                     uint64 bmpr = "print"
                     if is_println != 0 { bmpr = "println" }
                     bare_metal_builtin_refused(bmpr, bm_fix_write())
@@ -10404,6 +10431,22 @@ fn ir_emit_x86_insn(uint64 ii) {
 
     if op == 52 {
         // IR_SYSCALL: dispatch by target_os
+        //
+        // ApexRift first, and by NUMBER RANGE rather than by target_os: it
+        // shares target_os 4 with every other bare-metal output, and those must
+        // keep reaching emit_x86_syscall_insn's refusal. The base is what says
+        // "this instruction was lowered for ApexRift's ABI".
+        if imm >= APX_SYSCALL_BASE {
+            ir_emit_mov_r64_imm64(0, imm - APX_SYSCALL_BASE)
+            emit_x86_int80_insn()
+            if dst_r != 0xFFFFFFFF && dst_r != 0 {
+                ir_emit_mov_r64_r64(dst_r, 0)
+            }
+            if dst_r == 0xFFFFFFFF {
+                ir_emit_store_spill(0, dest_v)
+            }
+            return
+        }
         if target_os == 2 {
             ir_emit_x86_win_syscall(imm, dest_v, dst_r)
             return
