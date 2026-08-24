@@ -10372,8 +10372,13 @@ fn main() {
         // run_semantic_checks, the same pass a normal compile runs. Without
         // it, `krc check` reported "OK" for every file. Run both and report
         // the detailed diagnostics.
-        uint64 errors = run_analysis(root)
+        // run_semantic_checks FIRST: it calls sema_init, which sets the
+        // source/token globals diag_report_all needs to print a file:line:col.
+        // run_analysis reports through the same diagnostic buffer, so running
+        // it first meant reporting against null state (a segfault) or, before
+        // it reported at all, against a buffer run_semantic_checks then reset.
         uint64 sema_errs = run_semantic_checks(root, source, my_tokens)
+        uint64 errors = run_analysis(root)
         // Mirror the compile path: resolve inferred `let` types, then run the
         // (now-fatal) type checker, so `krc check` — and the VS Code LSP that
         // shells out to it — surface the same struct-field / return-type /

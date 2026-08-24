@@ -2734,23 +2734,83 @@ rm -f "$DIR/../docpin_bc_body_$$.kr" "$DIR/../docpin_bc_top_$$.kr"
 #    that, deleting or renaming them drives the call-site count to zero and this
 #    row would go green on a tree where the symbols no longer exist at all.
 TOTAL=$((TOTAL + 1))
-# Count DEFINITIONS, not defining files: both live in src/analysis.kr, so a
-# per-file count would say 1 and this row would have been born red.
+# The analyses ARE wired now. This row is the inverse of the one it replaces:
+# it used to assert 0 call sites and a DESIGN-ONLY banner, which is what being
+# dead looked like. Keep the anti-vacuity guard — both functions must still be
+# DEFINED, so deleting them cannot turn this green — and require the doc's
+# dead-code banner to be GONE.
 ann_defs=$(cat "$DIR"/../src/*.kr | grep -cE '^[[:space:]]*fn[[:space:]]+(ann_register|lock_add_edge)[[:space:]]*\(')
 ann_calls=$(cat "$DIR"/../src/*.kr \
     | sed 's://.*::' \
     | grep -E '(ann_register|lock_add_edge)[[:space:]]*\(' \
     | grep -vcE '^[[:space:]]*fn[[:space:]]')
 ann_doc=$(grep -c 'Status: DESIGN ONLY' "$DIR/../docs/EFFECT_SYSTEM.md")
-if [ "$ann_defs" = "2" ] && [ "$ann_calls" = "0" ] && [ "$ann_doc" = "1" ]; then
-    PASS=$((PASS + 1)); echo "  effect_analyses_are_inert: PASS (both defined, 0 call sites, doc says DESIGN ONLY)"
+if [ "$ann_defs" = "2" ] && [ "$ann_calls" -gt 0 ] && [ "$ann_doc" = "0" ]; then
+    PASS=$((PASS + 1)); echo "  effect_analyses_are_wired: PASS (both defined, $ann_calls call sites, no DESIGN-ONLY banner)"
 else
     FAIL=$((FAIL + 1))
-    echo "FAIL: effect_analyses_are_inert (definitions=$ann_defs want 2, call sites=$ann_calls want 0, doc DESIGN-ONLY marker=$ann_doc want 1)"
-    echo "  if you WIRED THE ANALYSES UP, that is good news -- now drop the 'DESIGN ONLY' banner"
-    echo "  and the four 'NOT IMPLEMENTED' headings from docs/EFFECT_SYSTEM.md in the same commit;"
-    echo "  if you deleted or renamed the functions, update that doc and this row together"
+    echo "FAIL: effect_analyses_are_wired (definitions=$ann_defs want 2, call sites=$ann_calls want >0, DESIGN-ONLY marker=$ann_doc want 0)"
 fi
+
+# Each of the four passes must actually FIRE, and must stay silent on a clean
+# program. Static call-site counting cannot show that -- these run krc check.
+ANA_SRC="/tmp/krc_ana_$$.kr"
+ANA_BIN="/tmp/krc_ana_$$.bin"
+# @ctx: an irq function calling a task function. Also pins that the walk reaches
+# a call in a VarDecl initializer, which the pre-rewrite traversal missed.
+TOTAL=$((TOTAL + 1))
+printf '@ctx(task)\nfn task_only() -> uint64 { return 1 }\n@ctx(irq)\nfn irq_h() -> uint64 {\n uint64 a = task_only()\n return a\n}\nfn main() { exit(0) }\n' > "$ANA_SRC"
+if $KRC check "$ANA_SRC" 2>&1 | grep -q "ctx-check"; then
+    PASS=$((PASS + 1)); echo "  analysis_ctx_fires: PASS"
+else
+    FAIL=$((FAIL + 1)); echo "FAIL: analysis_ctx_fires (no ctx-check diagnostic)"
+fi
+# @eff: alloc inside an @eff(none) body, again via a VarDecl initializer.
+TOTAL=$((TOTAL + 1))
+printf '@eff(none)\nfn pure_h(uint64 x) -> uint64 {\n uint64 p = alloc(16)\n return x + p\n}\nfn main() { exit(0) }\n' > "$ANA_SRC"
+if $KRC check "$ANA_SRC" 2>&1 | grep -q "eff-check"; then
+    PASS=$((PASS + 1)); echo "  analysis_eff_fires: PASS"
+else
+    FAIL=$((FAIL + 1)); echo "FAIL: analysis_eff_fires (no eff-check diagnostic)"
+fi
+# Locks: a THREE-lock cycle. The old pairwise check found 2-cycles only, so
+# this shape is exactly what it could not see.
+TOTAL=$((TOTAL + 1))
+printf '@acquires(a, b)\nfn f1() -> uint64 { return 0 }\n@acquires(b, c)\nfn f2() -> uint64 { return 0 }\n@acquires(c, a)\nfn f3() -> uint64 { return 0 }\nfn main() { exit(0) }\n' > "$ANA_SRC"
+if $KRC check "$ANA_SRC" 2>&1 | grep -q "lock-check"; then
+    PASS=$((PASS + 1)); echo "  analysis_lock_cycle_fires: PASS (3-cycle, not just a pair)"
+else
+    FAIL=$((FAIL + 1)); echo "FAIL: analysis_lock_cycle_fires (3-cycle not detected)"
+fi
+# An acyclic lock order must NOT warn, or the row above passes vacuously.
+TOTAL=$((TOTAL + 1))
+printf '@acquires(a, b)\nfn f1() -> uint64 { return 0 }\n@acquires(b, c)\nfn f2() -> uint64 { return 0 }\nfn main() { exit(0) }\n' > "$ANA_SRC"
+if $KRC check "$ANA_SRC" 2>&1 | grep -q "lock-check"; then
+    FAIL=$((FAIL + 1)); echo "FAIL: analysis_lock_acyclic_quiet (acyclic graph reported a cycle)"
+else
+    PASS=$((PASS + 1)); echo "  analysis_lock_acyclic_quiet: PASS"
+fi
+# @caps is opt-in per module: silent with no @caps anywhere, fires once one exists.
+TOTAL=$((TOTAL + 1))
+printf '@caps(mmio)\nfn drv(uint64 fd) -> uint64 { return write(fd, 0, 0) }\nfn sneaky(uint64 fd) -> uint64 { return write(fd, 0, 0) }\nfn main() { exit(0) }\n' > "$ANA_SRC"
+ana_optin=$($KRC check "$ANA_SRC" 2>&1 | grep -c "cap-check")
+printf 'fn plain(uint64 fd) -> uint64 { return write(fd, 0, 0) }\nfn main() { exit(0) }\n' > "$ANA_SRC"
+ana_optout=$($KRC check "$ANA_SRC" 2>&1 | grep -c "cap-check")
+if [ "$ana_optin" -gt 0 ] && [ "$ana_optout" = "0" ]; then
+    PASS=$((PASS + 1)); echo "  analysis_caps_opt_in: PASS (fires when the module declares @caps, silent otherwise)"
+else
+    FAIL=$((FAIL + 1)); echo "FAIL: analysis_caps_opt_in (opted-in=$ana_optin want >0, opted-out=$ana_optout want 0)"
+fi
+# A clean annotated program must pass with exit 0 -- guards against a pass that
+# fires on everything.
+TOTAL=$((TOTAL + 1))
+printf '@ctx(task)\n@eff(alloc)\nfn helper(uint64 x) -> uint64 {\n uint64 p = alloc(16)\n return x + p\n}\n@ctx(task)\nfn main() { exit(0) }\n' > "$ANA_SRC"
+if $KRC check "$ANA_SRC" > /dev/null 2>&1; then
+    PASS=$((PASS + 1)); echo "  analysis_clean_program_quiet: PASS"
+else
+    FAIL=$((FAIL + 1)); echo "FAIL: analysis_clean_program_quiet (a correctly annotated program was rejected)"
+fi
+rm -f "$ANA_SRC" "$ANA_BIN"
 
 # 3. arm64 volatile emits NO completion barrier. On the default IR backend
 #    vload32/vstore32 become LDAR/STLR -- acquire/release ORDERING, not a DSB.
@@ -5647,20 +5707,22 @@ fn main() {
 }
 KREOF
 $KRC check /tmp/krc_critregion_$$.kr > /tmp/krc_critregion_out_$$.txt 2>&1
+critregion_rc=$?
 critregion_err=$(python3 -c "
 data = open('/tmp/krc_critregion_out_$$.txt', 'rb').read()
 checks = [
     (b'\\x00' not in data, 'stray NUL byte in check output'),
-    (b'critical-region: alloc inside critical section\n' in data, 'critical-region message missing or malformed'),
+    (b'critical-region: alloc inside a critical section' in data, 'critical-region message missing or malformed'),
+    (b'krc_critregion' in data and b': error: ' in data, 'diagnostic carries no file:line: prefix -- it must go through diag_emit_str, not a bare write()'),
 ]
 bad = [msg for ok, msg in checks if not ok]
 if bad:
     print('; '.join(bad)); raise SystemExit(1)
 " 2>&1)
-if [ -z "$critregion_err" ]; then
-    PASS=$((PASS + 1)); echo "  analysis_critical_region_bytes_exact: PASS"
+if [ -z "$critregion_err" ] && [ "$critregion_rc" != "0" ]; then
+    PASS=$((PASS + 1)); echo "  analysis_critical_region_bytes_exact: PASS (fatal, with a location)"
 else
-    FAIL=$((FAIL + 1)); echo "FAIL: analysis_critical_region_bytes_exact ($critregion_err)"
+    FAIL=$((FAIL + 1)); echo "FAIL: analysis_critical_region_bytes_exact ($critregion_err; exit=$critregion_rc want non-zero)"
 fi
 rm -f /tmp/krc_critregion_$$.kr /tmp/krc_critregion_out_$$.txt
 
@@ -5678,45 +5740,25 @@ rm -f /tmp/krc_critregion_$$.kr /tmp/krc_critregion_out_$$.txt
 # string's real encoded length, so a future length regression is still
 # caught the moment it's introduced, before the day these become reachable.
 TOTAL=$((TOTAL + 1))
-analysis_static_err=$(python3 -c "
-import re
-src = open('$DIR/../src/analysis.kr', 'rb').read().decode('utf-8')
-# (search text, expected write() length constant). The source shape is
-# always \`uint64 msg = \"<lit>\"\` followed, a line or two later, by
-# \`write(2, msg, N)\` -- not an inline write(2, \"...\", N), so the literal
-# and its length live on different lines.
-pairs = [
-    ('ctx-check: context violation in ', 32),
-    ('eff-check: undeclared effect in ', 32),
-    ('lock-cycle: potential deadlock between locks\n', 45),
-]
-bad = []
-for lit, want_len in pairs:
-    real_len = len(lit.encode('utf-8'))
-    if real_len != want_len:
-        bad.append(f'{lit!r}: encodes to {real_len} bytes, test expected {want_len}')
-        continue
-    escaped = lit.replace(chr(10), '\\\\n')
-    pat = 'uint64 msg = ' + re.escape('\"' + escaped + '\"')
-    m = re.search(pat, src)
-    if not m:
-        bad.append(f'{lit!r}: literal not found in analysis.kr')
-        continue
-    tail = src[m.end():m.end() + 200]
-    wm = re.search(r'write\(2,\s*msg,\s*(\d+)\)', tail)
-    if not wm:
-        bad.append(f'{lit!r}: no write(2, msg, N) within 200 chars after the literal')
-        continue
-    got = int(wm.group(1))
-    if got != want_len:
-        bad.append(f'{lit!r}: write() uses {got}, should be {want_len}')
-if bad:
-    print('; '.join(bad)); raise SystemExit(1)
-" 2>&1)
-if [ -z "$analysis_static_err" ]; then
-    PASS=$((PASS + 1)); echo "  analysis_unreachable_write_lengths_pinned: PASS"
+# WAS: a byte-length pin on the write(2, msg, N) calls inside the three passes
+# that could never run. It existed because a length in unreachable code cannot
+# be proven by execution, so the honest test was a static pin rather than a
+# fabricated run.
+#
+# Those three diagnostics now go through diag_emit_str, which takes a pointer
+# and no length, so that whole class of bug is gone from them -- and the passes
+# are reachable, so they are covered by real execution rows above instead.
+#
+# What is still worth pinning: analysis.kr must not go BACK to hand-counted
+# write() diagnostics in these passes. Any reintroduced ctx/eff/lock/cap
+# message with a literal length is a regression to the shape this replaced.
+analysis_handrolled=$(grep -cE 'write\(2, *"(ctx|eff|lock|cap)-check' "$DIR/../src/analysis.kr" || true)
+if [ "$analysis_handrolled" = "0" ]; then
+    PASS=$((PASS + 1)); echo "  analysis_diagnostics_use_diag_emit: PASS (no hand-counted write() diagnostics)"
 else
-    FAIL=$((FAIL + 1)); echo "FAIL: analysis_unreachable_write_lengths_pinned ($analysis_static_err)"
+    FAIL=$((FAIL + 1))
+    echo "FAIL: analysis_diagnostics_use_diag_emit ($analysis_handrolled hand-rolled write() diagnostic(s) in analysis.kr)"
+    echo "  use diag_emit_str(tok, 0, \"...\") so the message carries file:line:col and cannot have a wrong length"
 fi
 
 # --- std/idt.kr: interrupt descriptor table and fault reporting ---

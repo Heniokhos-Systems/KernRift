@@ -36,13 +36,25 @@ static uint64 diag_warn_count = 0
 // 2 = caps (capability: mmio, dma, irq, port_io, sched)
 // 3 = export
 
+// NOTE: this deliberately does NOT reset ann_count. The parser fills the
+// annotation table during parse_module(), which runs BEFORE both call sites
+// (run_analysis and the living-compiler path). Clearing here discarded every
+// annotation, which is one half of why the four passes could never fire.
 @export
 fn analysis_init() {
-    ann_table = alloc(4096 * 16)
-    ann_count = 0
+    if ann_table == 0 {
+        ann_table = alloc(4096 * 16)
+        ann_count = 0
+    }
 }
 
 fn ann_register(uint64 fn_tok, uint64 ann_type, uint64 ann_data) {
+    // Lazily allocate: the parser calls this before analysis_init() runs.
+    if ann_table == 0 {
+        ann_table = alloc(4096 * 16)
+        ann_count = 0
+    }
+    if ann_count >= 4096 { return }
     uint64 entry = ann_table + ann_count * 16
     uint32 ft = fn_tok
     unsafe { *(entry as uint32) = ft }
@@ -104,7 +116,7 @@ fn check_ctx(uint64 root) {
             uint32 body = ast_data3(wchild)
             uint64 wbody = body
             if wbody != 0 {
-                check_ctx_block(wbody, fn_tok, caller_ctx)
+                check_ctx_walk(wbody, fn_tok, caller_ctx)
             }
         }
         uint32 nxt = ast_next(wchild)
@@ -112,64 +124,57 @@ fn check_ctx(uint64 root) {
     }
 }
 
-fn check_ctx_block(uint64 block_node, uint64 caller_tok, uint64 caller_ctx) {
-    uint32 child = ast_child(block_node)
-    uint64 wchild = child
-    while wchild != 0 {
-        check_ctx_stmt(wchild, caller_tok, caller_ctx)
-        uint32 nxt = ast_next(wchild)
-        wchild = nxt
-    }
-}
-
-fn check_ctx_stmt(uint64 node, uint64 caller_tok, uint64 caller_ctx) {
-    uint32 kind = ast_kind(node)
-    // Expression statement containing a call
-    if kind == 16 {
-        uint32 expr = ast_child(node)
-        uint64 wexpr = expr
-        check_ctx_expr(wexpr, caller_tok, caller_ctx)
-    }
-    // If statement: check both branches
-    if kind == 13 {
-        uint32 then_body = ast_data1(node)
-        uint64 wt = then_body
-        if wt != 0 { check_ctx_block(wt, caller_tok, caller_ctx) }
-        uint32 else_body = ast_data2(node)
-        uint64 we = else_body
-        if we != 0 {
-            uint32 ek = ast_kind(we)
-            if ek == 13 { check_ctx_stmt(we, caller_tok, caller_ctx) }
-            else { check_ctx_block(we, caller_tok, caller_ctx) }
+// One generic walk over the subtree. The three hand-written functions this
+// replaces covered statement kinds 16/13/14 and, in expressions, only a Call
+// at the very top — so a call inside `return f()`, `uint64 x = f()`,
+// `x = f()`, a call ARGUMENT (`f(g())`) or a BinOp operand (`a + f()`) was
+// never examined. That is most call sites in real code.
+//
+// Node layout (parser.kr): child/next are always node links; If(13) keeps
+// then/else in data1/data2, While(14) its body in data1, BinOp-likes their rhs
+// in data2, Return(12) its tuple slots in data3/data4, and a field-assign
+// FieldAccess(36) its value in data3. Call(35)'s data1 is a TOKEN — never
+// recurse into it.
+fn check_ctx_walk(uint64 node, uint64 caller_tok, uint64 caller_ctx) {
+    uint64 wn = node
+    while wn != 0 {
+        uint64 k = ast_kind(wn)
+        if k == 35 {
+            uint32 callee_tok = ast_data1(wn)
+            uint64 callee_ctx = ann_lookup(callee_tok, 0)
+            if callee_ctx == 0xFFFFFFFF { callee_ctx = 0 }
+            if caller_ctx > callee_ctx && callee_ctx != 0 {
+                uint32 ctok = ast_tok(wn)
+                diag_emit_str(ctok, 0, "ctx-check: this context is stricter than the callee's")
+                ctx_errors = ctx_errors + 1
+            }
         }
-    }
-    // While: check body
-    if kind == 14 {
-        uint32 body = ast_data1(node)
-        uint64 wb = body
-        if wb != 0 { check_ctx_block(wb, caller_tok, caller_ctx) }
-    }
-}
-
-fn check_ctx_expr(uint64 node, uint64 caller_tok, uint64 caller_ctx) {
-    uint32 kind = ast_kind(node)
-    if kind == 35 {
-        // Function call: check callee context
-        uint32 callee_tok = ast_data1(node)
-        uint64 callee_ctx = ann_lookup(callee_tok, 0)
-        if callee_ctx == 0xFFFFFFFF { callee_ctx = 0 }
-        // If caller is in a restricted context (irq/nmi) and callee requires task context
-        if caller_ctx > callee_ctx && callee_ctx != 0 {
-            // Context violation!
-            uint64 msg = "ctx-check: context violation in "
-            write(2, msg, 32)
-            uint64 ts = tok_text_start(caller_tok)
-            uint64 tl = tok_text_len(caller_tok)
-            write(2, cg_source + ts, tl)
-            msg = "\n"
-            write(2, msg, 1)
-            ctx_errors = ctx_errors + 1
+        uint32 ch = ast_child(wn)
+        if ch != 0 { check_ctx_walk(ch, caller_tok, caller_ctx) }
+        if k == 13 {
+            uint32 tb = ast_data1(wn)
+            if tb != 0 { check_ctx_walk(tb, caller_tok, caller_ctx) }
+            uint32 eb = ast_data2(wn)
+            if eb != 0 { check_ctx_walk(eb, caller_tok, caller_ctx) }
         }
+        if k == 14 {
+            uint32 wb = ast_data1(wn)
+            if wb != 0 { check_ctx_walk(wb, caller_tok, caller_ctx) }
+        }
+        if k == 33 || k == 38 || k == 39 || k == 40 || k == 42 {
+            uint32 r2 = ast_data2(wn)
+            if r2 != 0 { check_ctx_walk(r2, caller_tok, caller_ctx) }
+        }
+        if k == 12 || k == 36 {
+            uint32 d3 = ast_data3(wn)
+            if d3 != 0 { check_ctx_walk(d3, caller_tok, caller_ctx) }
+        }
+        if k == 12 {
+            uint32 d4 = ast_data4(wn)
+            if d4 != 0 { check_ctx_walk(d4, caller_tok, caller_ctx) }
+        }
+        uint32 nx = ast_next(wn)
+        wn = nx
     }
 }
 
@@ -197,17 +202,11 @@ fn check_effects(uint64 root) {
             uint64 wbody = body
             uint64 actual_eff = 0
             if wbody != 0 {
-                actual_eff = compute_effects_block(wbody)
+                actual_eff = compute_effects_walk(wbody)
             }
             // Check: actual must be subset of declared
             if (actual_eff & ~declared_eff) != 0 {
-                uint64 msg = "eff-check: undeclared effect in "
-                write(2, msg, 32)
-                uint64 ts = tok_text_start(fn_tok)
-                uint64 tl = tok_text_len(fn_tok)
-                write(2, cg_source + ts, tl)
-                msg = "\n"
-                write(2, msg, 1)
+                diag_emit_str(fn_tok, 0, "eff-check: body has an effect this @eff does not declare")
                 eff_errors = eff_errors + 1
             }
         }
@@ -216,58 +215,58 @@ fn check_effects(uint64 root) {
     }
 }
 
-fn compute_effects_block(uint64 block_node) -> uint64 {
+// One recursive walk that ORs the effects of an entire subtree. The three
+// functions this replaces covered statement kinds 16/13/14 and matched a Call
+// only at the top of an expression, so `uint64 p = alloc(16)` — an alloc in a
+// VarDecl initializer, the commonest shape there is — contributed NO effect
+// and `@eff(none)` could not be violated. Same traversal bug as check_ctx had.
+// Call(35)'s data1 is a TOKEN, never a node.
+fn compute_effects_walk(uint64 node) -> uint64 {
     uint64 effects = 0
-    uint32 child = ast_child(block_node)
-    uint64 wchild = child
-    while wchild != 0 {
-        effects = effects | compute_effects_stmt(wchild)
-        uint32 nxt = ast_next(wchild)
-        wchild = nxt
+    uint64 wn = node
+    while wn != 0 {
+        uint64 k = ast_kind(wn)
+        if k == 35 {
+            uint32 callee_tok = ast_data1(wn)
+            if tok_matches(callee_tok, "alloc", 5) != 0 { effects = effects | 2 }
+            if tok_matches(callee_tok, "write", 5) != 0 { effects = effects | 1 }
+            if tok_matches(callee_tok, "file_open", 9) != 0 { effects = effects | 16 }
+            if tok_matches(callee_tok, "file_read", 9) != 0 { effects = effects | 16 }
+            if tok_matches(callee_tok, "file_write", 10) != 0 { effects = effects | 16 }
+            // Transitive: an annotated callee contributes its declared set.
+            uint64 callee_eff = ann_lookup(callee_tok, 1)
+            if callee_eff != 0xFFFFFFFF { effects = effects | callee_eff }
+        }
+        uint32 ch = ast_child(wn)
+        if ch != 0 { effects = effects | compute_effects_walk(ch) }
+        if k == 13 {
+            uint32 tb = ast_data1(wn)
+            if tb != 0 { effects = effects | compute_effects_walk(tb) }
+            uint32 eb = ast_data2(wn)
+            if eb != 0 { effects = effects | compute_effects_walk(eb) }
+        }
+        if k == 14 {
+            uint32 wb = ast_data1(wn)
+            if wb != 0 { effects = effects | compute_effects_walk(wb) }
+        }
+        if k == 33 || k == 38 || k == 39 || k == 40 || k == 42 {
+            uint32 r2 = ast_data2(wn)
+            if r2 != 0 { effects = effects | compute_effects_walk(r2) }
+        }
+        if k == 12 || k == 36 {
+            uint32 d3 = ast_data3(wn)
+            if d3 != 0 { effects = effects | compute_effects_walk(d3) }
+        }
+        if k == 12 {
+            uint32 d4 = ast_data4(wn)
+            if d4 != 0 { effects = effects | compute_effects_walk(d4) }
+        }
+        uint32 nx = ast_next(wn)
+        wn = nx
     }
     return effects
 }
 
-fn compute_effects_stmt(uint64 node) -> uint64 {
-    uint32 kind = ast_kind(node)
-    uint64 effects = 0
-    if kind == 16 {
-        uint32 expr = ast_child(node)
-        uint64 wexpr = expr
-        effects = effects | compute_effects_expr(wexpr)
-    }
-    if kind == 13 {
-        uint32 then_body = ast_data1(node)
-        uint64 wt = then_body
-        if wt != 0 { effects = effects | compute_effects_block(wt) }
-        uint32 else_body = ast_data2(node)
-        uint64 we = else_body
-        if we != 0 { effects = effects | compute_effects_block(we) }
-    }
-    if kind == 14 {
-        uint32 body = ast_data1(node)
-        uint64 wb = body
-        if wb != 0 { effects = effects | compute_effects_block(wb) }
-    }
-    return effects
-}
-
-fn compute_effects_expr(uint64 node) -> uint64 {
-    uint32 kind = ast_kind(node)
-    if kind == 35 {
-        uint32 callee_tok = ast_data1(node)
-        // Check for known effectful builtins
-        if tok_matches(callee_tok, "alloc", 5) != 0 { return 2 }
-        if tok_matches(callee_tok, "write", 5) != 0 { return 1 }
-        if tok_matches(callee_tok, "file_open", 9) != 0 { return 16 }
-        if tok_matches(callee_tok, "file_read", 9) != 0 { return 16 }
-        if tok_matches(callee_tok, "file_write", 10) != 0 { return 16 }
-        // Look up callee's declared effects (transitive)
-        uint64 callee_eff = ann_lookup(callee_tok, 1)
-        if callee_eff != 0xFFFFFFFF { return callee_eff }
-    }
-    return 0
-}
 
 // ---------------------------------------------------------------------------
 // Lock graph (deadlock detection)
@@ -280,12 +279,22 @@ static uint64 lock_edges = 0
 static uint64 lock_edge_count = 0
 
 @export
+// Like analysis_init: does NOT reset the graph, because the parser builds it
+// during parse_module() and run_analysis calls this afterwards.
 fn lock_graph_init() {
-    lock_edges = alloc(1024 * 16)
-    lock_edge_count = 0
+    if lock_edges == 0 {
+        lock_edges = alloc(1024 * 16)
+        lock_edge_count = 0
+    }
 }
 
 fn lock_add_edge(uint64 from_tok, uint64 to_tok) {
+    // Lazily allocate for the same reason as ann_register.
+    if lock_edges == 0 {
+        lock_edges = alloc(1024 * 16)
+        lock_edge_count = 0
+    }
+    if lock_edge_count >= 1024 { return }
     uint64 entry = lock_edges + lock_edge_count * 16
     uint32 ft = from_tok
     unsafe { *(entry as uint32) = ft }
@@ -295,45 +304,113 @@ fn lock_add_edge(uint64 from_tok, uint64 to_tok) {
     lock_edge_count = lock_edge_count + 1
 }
 
-// Detect cycles using DFS (simplified)
-@export
-fn check_lock_cycles() -> uint64 {
-    // For each lock, do DFS from it. If we revisit it, cycle found.
-    // Simplified: just check for direct A→B and B→A pairs
+// Real cycle detection. The previous version's own comment said "Simplified:
+// just check for direct A→B and B→A pairs" — it found 2-cycles only, so
+// A→B→C→A deadlocked silently. This is a proper three-colour DFS over the
+// edge list: white(0) unvisited, grey(1) on the current stack, black(2) done.
+// An edge into a grey node is a back edge, i.e. a cycle of any length.
+static uint64 lock_nodes = 0
+static uint64 lock_node_n = 0
+static uint64 lock_color = 0
+
+fn lock_node_id(uint64 tok) -> uint64 {
     uint64 i = 0
-    while i < lock_edge_count {
-        uint64 entry_i = lock_edges + i * 16
-        uint32 from_i = 0
-        unsafe { *(entry_i as uint32) -> from_i }
-        uint64 ei4 = entry_i + 4
-        uint32 to_i = 0
-        unsafe { *(ei4 as uint32) -> to_i }
-        // Check if reverse edge exists
-        uint64 j = 0
-        while j < lock_edge_count {
-            if j != i {
-                uint64 entry_j = lock_edges + j * 16
-                uint32 from_j = 0
-                unsafe { *(entry_j as uint32) -> from_j }
-                uint64 ej4 = entry_j + 4
-                uint32 to_j = 0
-                unsafe { *(ej4 as uint32) -> to_j }
-                uint64 wfi = from_i
-                uint64 wfj = from_j
-                uint64 wti = to_i
-                uint64 wtj = to_j
-                if tok_text_eq(wfi, wtj) != 0 && tok_text_eq(wti, wfj) != 0 {
-                    uint64 msg = "lock-cycle: potential deadlock between locks\n"
-                    write(2, msg, 45)
-                    return 1
+    while i < lock_node_n {
+        uint64 p = lock_nodes + i * 8
+        uint64 t = 0
+        unsafe { *(p as uint64) -> t }
+        if tok_text_eq(t, tok) != 0 { return i }
+        i = i + 1
+    }
+    if lock_node_n >= 256 { return 0xFFFFFFFF }
+    uint64 np = lock_nodes + lock_node_n * 8
+    unsafe { *(np as uint64) = tok }
+    lock_node_n = lock_node_n + 1
+    return lock_node_n - 1
+}
+
+fn lock_color_get(uint64 id) -> uint64 {
+    uint64 p = lock_color + id
+    uint64 v = 0
+    unsafe { *(p as uint8) -> v }
+    return v
+}
+
+fn lock_color_set(uint64 id, uint64 v) {
+    uint64 p = lock_color + id
+    uint8 b = v
+    unsafe { *(p as uint8) = b }
+}
+
+// Returns 1 if a back edge is reachable from `id`.
+fn lock_dfs(uint64 id) -> uint64 {
+    lock_color_set(id, 1)
+    uint64 e = 0
+    while e < lock_edge_count {
+        uint64 entry = lock_edges + e * 16
+        uint32 from_t = 0
+        unsafe { *(entry as uint32) -> from_t }
+        uint64 e4 = entry + 4
+        uint32 to_t = 0
+        unsafe { *(e4 as uint32) -> to_t }
+        uint64 fid = lock_node_id(from_t)
+        if fid == id {
+            uint64 tid = lock_node_id(to_t)
+            if tid != 0xFFFFFFFF {
+                uint64 c = lock_color_get(tid)
+                if c == 1 { return 1 }
+                if c == 0 {
+                    if lock_dfs(tid) != 0 { return 1 }
                 }
             }
-            j = j + 1
+        }
+        e = e + 1
+    }
+    lock_color_set(id, 2)
+    return 0
+}
+
+@export
+fn check_lock_cycles() -> uint64 {
+    if lock_edge_count == 0 { return 0 }
+    if lock_nodes == 0 { lock_nodes = alloc(256 * 8) }
+    if lock_color == 0 { lock_color = alloc(256) }
+    lock_node_n = 0
+    // Intern every endpoint first so ids are stable across the walk.
+    uint64 e = 0
+    while e < lock_edge_count {
+        uint64 entry = lock_edges + e * 16
+        uint32 ft = 0
+        unsafe { *(entry as uint32) -> ft }
+        uint64 e4 = entry + 4
+        uint32 tt = 0
+        unsafe { *(e4 as uint32) -> tt }
+        lock_node_id(ft)
+        lock_node_id(tt)
+        e = e + 1
+    }
+    uint64 i = 0
+    while i < lock_node_n {
+        lock_color_set(i, 0)
+        i = i + 1
+    }
+    uint64 found = 0
+    i = 0
+    while i < lock_node_n {
+        if lock_color_get(i) == 0 {
+            if lock_dfs(i) != 0 { found = 1 }
         }
         i = i + 1
     }
-    return 0
+    if found != 0 {
+        uint64 p0 = lock_nodes
+        uint64 t0 = 0
+        unsafe { *(p0 as uint64) -> t0 }
+        diag_emit_str(t0, 0, "lock-check: lock acquisition order has a cycle (possible deadlock)")
+    }
+    return found
 }
+
 
 // ---------------------------------------------------------------------------
 // Capability check
@@ -341,12 +418,37 @@ fn check_lock_cycles() -> uint64 {
 // Verify that functions only use capabilities declared in their module
 
 static uint64 cap_errors = 0
+static uint64 crit_errors = 0
 
 @export
 fn check_caps(uint64 root) {
     cap_errors = 0
-    // Module-level caps would be declared via @caps annotation on the module
-    // For now, just count how many functions use capabilities without declaring them
+    // The body of this was a comment: it looked up fn_caps and did nothing, so
+    // cap_errors never left 0 and the `cap-check` message in EFFECT_SYSTEM.md
+    // §4 had never been printed. It is a shell, not a starved implementation.
+    //
+    // Rule as implemented: capability checking is OPT-IN PER MODULE. If no
+    // function in the file declares @caps, nothing is checked. Once ANY does,
+    // the module has opted into capability partitioning and every function
+    // that performs a capability-bearing operation must declare @caps too.
+    //
+    // This is narrower than §4's bare "use site must declare", deliberately:
+    // that rule applied unconditionally fires on every program that prints,
+    // since println reaches `write`. Recorded in the doc rather than silently
+    // chosen.
+    uint64 any_caps = 0
+    uint32 scan = ast_child(root)
+    uint64 wscan = scan
+    while wscan != 0 {
+        if ast_kind(wscan) == 2 {
+            uint32 ft = ast_data1(wscan)
+            if ann_lookup(ft, 2) != 0xFFFFFFFF { any_caps = 1 }
+        }
+        uint32 sn = ast_next(wscan)
+        wscan = sn
+    }
+    if any_caps == 0 { return }
+
     uint32 child = ast_child(root)
     uint64 wchild = child
     while wchild != 0 {
@@ -354,8 +456,19 @@ fn check_caps(uint64 root) {
         if ck == 2 {
             uint32 fn_tok = ast_data1(wchild)
             uint64 fn_caps = ann_lookup(fn_tok, 2)
-            // If function has unsafe blocks but no @caps declaration, warn
-            // (simplified check — full version would track specific capabilities)
+            if fn_caps == 0xFFFFFFFF {
+                uint32 body = ast_data3(wchild)
+                uint64 wbody = body
+                if wbody != 0 {
+                    // io (bit 0) and file (bit 4) are the capability-bearing
+                    // families EFFECT_SYSTEM.md §4 names.
+                    uint64 used = compute_effects_walk(wbody)
+                    if (used & 17) != 0 {
+                        diag_emit_str(fn_tok, 0, "cap-check: uses a capability but declares no @caps (module opted in)")
+                        cap_errors = cap_errors + 1
+                    }
+                }
+            }
         }
         uint32 nxt = ast_next(wchild)
         wchild = nxt
@@ -400,8 +513,52 @@ fn check_critical_block(uint64 block_node, uint64 in_critical) -> uint64 {
     return depth
 }
 
+// Find the token of the first `alloc` call anywhere under `node`, or 0.
+// A forbidden call hides in a VarDecl initializer (`uint64 p = alloc(16)` —
+// the commonest shape), an assignment or a return, none of which the
+// statement-kind-16 arm below covers.
+fn crit_find_alloc(uint64 node) -> uint64 {
+    uint64 wn = node
+    while wn != 0 {
+        uint64 k = ast_kind(wn)
+        if k == 35 {
+            uint32 ct = ast_data1(wn)
+            if tok_matches(ct, "alloc", 5) != 0 { return ct }
+        }
+        uint32 ch = ast_child(wn)
+        if ch != 0 {
+            uint64 r = crit_find_alloc(ch)
+            if r != 0 { return r }
+        }
+        if k == 33 || k == 38 || k == 42 {
+            uint32 r2 = ast_data2(wn)
+            if r2 != 0 {
+                uint64 r = crit_find_alloc(r2)
+                if r != 0 { return r }
+            }
+        }
+        if k == 12 || k == 36 {
+            uint32 d3 = ast_data3(wn)
+            if d3 != 0 {
+                uint64 r = crit_find_alloc(d3)
+                if r != 0 { return r }
+            }
+        }
+        uint32 nx = ast_next(wn)
+        wn = nx
+    }
+    return 0
+}
+
 fn check_critical_stmt(uint64 node, uint64 depth) -> uint64 {
     uint32 kind = ast_kind(node)
+    if depth > 0 && kind != 16 {
+        uint64 atok = crit_find_alloc(node)
+        if atok != 0 {
+            diag_emit_str(atok, 0, "critical-region: alloc inside a critical section")
+            crit_errors = crit_errors + 1
+        }
+    }
     if kind == 16 {
         uint32 expr = ast_child(node)
         uint64 wexpr = expr
@@ -418,8 +575,12 @@ fn check_critical_stmt(uint64 node, uint64 depth) -> uint64 {
             // Check for forbidden ops inside critical section
             if depth > 0 {
                 if tok_matches(callee_tok, "alloc", 5) != 0 {
-                    uint64 msg = "critical-region: alloc inside critical section\n"
-                    write(2, msg, 47)
+                    // Was a bare write(2, ...) with no location that did not
+                    // even increment a counter, so it could not fail a build.
+                    // The other four passes report file:line:col and are
+                    // fatal; leaving this one advisory made it the odd one out.
+                    diag_emit_str(callee_tok, 0, "critical-region: alloc inside a critical section")
+                    crit_errors = crit_errors + 1
                 }
             }
         }
@@ -435,12 +596,21 @@ fn check_critical_stmt(uint64 node, uint64 depth) -> uint64 {
 fn run_analysis(uint64 root) -> uint64 {
     analysis_init()
     lock_graph_init()
+    // These passes report through diag_emit_str, which COLLECTS rather than
+    // prints. run_analysis now runs AFTER run_semantic_checks (so sema_init
+    // has set the source/token globals diag_report_all needs), and appends to
+    // the same buffer main.kr flushes after the type checker.
+    if diag_table == 0 { diag_init() }
     check_ctx(root)
     check_effects(root)
     check_caps(root)
+    crit_errors = 0
     check_critical_regions(root)
     uint64 cycle = check_lock_cycles()
-    return ctx_errors + eff_errors + cycle
+    // No diag_report_all() here: main.kr's check path flushes the shared
+    // buffer after the type checker, and reporting here too printed every
+    // analysis diagnostic twice.
+    return ctx_errors + eff_errors + cap_errors + crit_errors + cycle
 }
 
 // ---------------------------------------------------------------------------

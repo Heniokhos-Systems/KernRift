@@ -1,25 +1,20 @@
 # KernRift Effect & Capability System
 
-> ## ⚠️ Status: DESIGN ONLY — four of the five passes cannot fire
+> ## Status: IMPLEMENTED — all five passes run and can fail a build
 >
-> **`@ctx`, `@eff`, `@acquires` / `@releases` and `@caps` do nothing today.**
-> The parser accepts the annotation syntax and then discards it: nothing ever
-> calls `ann_register` or `lock_add_edge` (`src/analysis.kr:45` and `:288` —
-> both have **zero call sites**, a fact `src/main.kr:8753` records in a comment
-> of its own). The annotation table and the lock graph are therefore always
-> empty, so `check_ctx`, `check_effects`, `check_caps` and `check_lock_cycles`
-> run on every `krc check` and can never report anything. There is no program
-> you can write that makes them warn.
+> `@ctx`, `@eff`, `@acquires` / `@releases` and `@caps` are parsed, recorded and
+> checked. `krc check` reports violations as errors with `file:line:col` and a
+> caret, and exits non-zero.
 >
-> **One pass is real: critical regions** (§5). It is annotation-independent —
-> it matches the *names* `acquire`, `release` and `alloc` on bare call
-> statements — and it does warn. See §7 for a reproducer that actually
-> produces output.
->
-> Sections 1–4 below describe the **intended** design, kept because it is the
-> specification the implementation is being written against. Read every
-> "Rule" and "Implementation" heading in them as *planned*, not *current*.
-> Do not rely on any of it to catch a bug.
+> This replaces a "DESIGN ONLY" banner. Previously the parser accepted the
+> annotation syntax and discarded it — nothing called `ann_register` or
+> `lock_add_edge`, so the tables were always empty and no program could make
+> the passes warn. Three separate things had to change: the parser had to
+> capture the arguments (a generic "skip to `)`" arm was swallowing them),
+> `analysis_init` had to stop resetting the table *after* parsing had filled
+> it, and the ctx/effect traversals had to become recursive — they covered
+> statement kinds 16/13/14 only, so a call in `return f()`, `uint64 x = f()`,
+> `x = f()`, `f(g())` or `a + f()` was never examined.
 
 Design for four annotation-driven analysis passes in `src/analysis.kr`, plus
 one implemented pass:
@@ -86,9 +81,14 @@ A function with context `C` may only call functions with context `C`
 or broader. Expressed numerically:
 
 ```
-caller_ctx >= callee_ctx  → legal
-caller_ctx <  callee_ctx  → error: "caller's context is stricter"
+callee_ctx == any        → legal (a callee that declares nothing constrains nothing)
+caller_ctx <= callee_ctx → legal
+caller_ctx >  callee_ctx → error: the caller's context is stricter than the callee's
 ```
+
+(An earlier revision of this document stated the comparison the other way
+round, which contradicted all three of the worked examples below. The
+implementation follows the examples: `caller_ctx > callee_ctx && callee_ctx != 0`.)
 
 Concretely:
 - An `@ctx(irq)` function calling an `@ctx(any)` helper: fine.
@@ -98,16 +98,13 @@ Concretely:
   helper is more restrictive than us, so it doesn't do anything we
   can't).
 
-### Implementation — NOT IMPLEMENTED
+### Implementation
 
-`check_ctx` exists and runs, but `@ctx` is never recorded: `ann_register`
-has no callers, so `ann_lookup` returns the "unannotated" default for both
-caller and callee on every comparison and the pass is a no-op. **No `@ctx`
-violation is diagnosable today.** The intended behaviour is that `check_ctx`
-walks each function's body, and on every `Call` node looks up the callee's
-`@ctx`, compares to the caller's `@ctx`, and emits a diagnostic on violation.
+`check_ctx` walks each function's body via `check_ctx_walk` — one recursive
+walk over the whole subtree — and on every `Call` looks up the callee's `@ctx`,
+compares it to the caller's, and reports a violation with `file:line:col`.
 
-Limitations of that intended design, once it is wired up:
+Limitations of the current design:
 - Indirect calls (`call_ptr`) are not tracked — the callee's context
   is unknown at analysis time.
 - No transitive inference. If `foo()` calls `bar()` which calls an
@@ -160,17 +157,14 @@ If the body computes effects the annotation doesn't cover, error:
 eff-check: undeclared effect in parse_line
 ```
 
-### Implementation — NOT IMPLEMENTED
+### Implementation
 
-`check_effects` exists and runs, but `@eff` is never recorded, so the declared
-mask is always the unannotated default ("any effect allowed") and nothing can
-be outside it. **No `eff-check` diagnostic is reachable today** — the message
-text quoted above has never been printed by a released compiler. The intended
-behaviour is that `check_effects` walks each function, bitwise-ORs the effects
-of every expression in the body, and compares against the declared bitmask,
-with any bit in actual-but-not-declared an error.
+`check_effects` walks each function via `compute_effects_walk`, bitwise-ORs the
+effects of every expression in the body — including the effects an annotated
+callee declares, so the set is transitive — and compares against the declared
+bitmask. Any bit in actual-but-not-declared is an error.
 
-Limitations of that intended design, once it is wired up:
+Limitations of the current design:
 - No arithmetic on effect sets — the `~declared & actual != 0` check is
   clear for bits but awkward for richer lattices.
 - Control-flow insensitive (an effect inside `if false { ... }` still
@@ -207,17 +201,16 @@ where an edge `L1 → L2` means "some function holds L1 and acquires L2."
 possible (even if not reachable in any actual call path, which is
 harder to prove).
 
-### Implementation — NOT IMPLEMENTED
+### Implementation
 
-`lock_add_edge` (`src/analysis.kr:288`) would add (from, to) to a static table,
-but **it has no callers**, so the graph is empty on every run and
-`check_lock_cycles` always returns "no cycle". **No deadlock warning is
-reachable today.** When wired up, `check_lock_cycles` does a pairwise check —
-for every edge (A, B), look for a reverse edge (B, A). That catches the simple
-two-lock deadlock; it does **not** catch longer cycles (A → B → C → A). A
-proper DFS-based SCC check is on the roadmap.
+The parser adds an edge for every ordered pair in an `@acquires` list, and
+`check_lock_cycles` runs a three-colour DFS over the resulting graph: white
+unvisited, grey on the current stack, black finished. An edge into a grey node
+is a back edge, so **cycles of any length are detected**, not just the
+two-lock case. (An earlier revision checked only for a reverse edge (B, A) and
+missed A → B → C → A.)
 
-Limitations of that intended design, once it is wired up:
+Limitations of the current design:
 - No `try_acquire` modeling — non-blocking acquires don't deadlock.
 - No RAII-style guards — the `acquire` / `release` helpers are plain
   function calls, and the pass counts them textually. Forgetting a
@@ -256,20 +249,25 @@ manifesto, the error is:
 cap-check: undeclared capability 'mmio' in driver_init
 ```
 
-### Implementation — NOT IMPLEMENTED
+### Implementation
 
-`check_caps` exists and runs, but `@caps` is never recorded, so there is no
-declared set to compare against and the pass reports nothing. **The
-`cap-check` message above has never been printed.** The intended behaviour is
-that `check_caps` walks each function looking for known effect-bearing calls
-(currently only the I/O family) and warns if the enclosing function's `@caps`
-doesn't cover them.
+`check_caps` was a shell: its body was a comment, `cap_errors` never left 0,
+and the `cap-check` message above had never been printed. It now has logic.
 
-Limitations of that intended design, once it is wired up:
-- Module-level `@caps` is not parsed — only per-function.
-- No mechanism to declare "this module **grants** a cap to functions
-  that import it." Grants and demands don't have separate syntax.
-- The cap set is hardcoded in the analyzer; no way to define new caps.
+**The implemented rule is narrower than the "use site must declare" above, and
+deliberately so.** Applied unconditionally that rule fires on every program
+that prints, because `println` reaches `write`. So capability checking is
+**opt-in per module**: if no function in the file declares `@caps`, nothing is
+checked. Once any function declares one, the module has opted into capability
+partitioning and every function performing a capability-bearing operation
+(the `io` and `file` families) must declare `@caps` too.
+
+Limitations of the current design:
+- Capability *tags* are counted, not compared — declaring `@caps(mmio)` and
+  then using a `file` operation is accepted. Subset checking per tag needs the
+  tag tokens stored, not just their count.
+- The capability-bearing set is the I/O family only, inherited from the effect
+  lattice; `mmio`, `dma` and the rest are not yet tied to any operation.
 
 ---
 

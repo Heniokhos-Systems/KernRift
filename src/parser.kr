@@ -2407,6 +2407,17 @@ fn parse_module() -> uint64 {
         // function; @module_license / @module_author / @module_description
         // / @module_name are module-wide singletons registered into a
         // side-table that emit_elf_lkm reads at emit time.
+        // @ctx / @eff / @caps / @acquires / @releases — the four analysis
+        // annotations. Until now the loop below matched none of them, so the
+        // generic "skip to ')'" arm swallowed the arguments and nothing ever
+        // called ann_register / lock_add_edge. See docs/EFFECT_SYSTEM.md.
+        uint64 ann_ctx_val = 0
+        uint64 ann_ctx_set = 0
+        uint64 ann_eff_mask = 0
+        uint64 ann_eff_set = 0
+        uint64 ann_caps_n = 0
+        uint64[8] ann_acq_toks
+        uint64 ann_acq_n = 0
         uint64 ann_noreturn = 0
         uint64 ann_naked = 0
         uint64 ann_packed = 0
@@ -2433,6 +2444,20 @@ fn parse_module() -> uint64 {
             }
             if ann_len_v == 5 {
                 if tok_matches(ann_tok, "naked", 5) != 0 { ann_naked = 1 }
+            }
+            uint64 is_ctx = 0
+            uint64 is_eff = 0
+            uint64 is_caps = 0
+            uint64 is_acq = 0
+            if ann_len_v == 3 {
+                if tok_matches(ann_tok, "ctx", 3) != 0 { is_ctx = 1 }
+                if tok_matches(ann_tok, "eff", 3) != 0 { is_eff = 1 }
+            }
+            if ann_len_v == 4 {
+                if tok_matches(ann_tok, "caps", 4) != 0 { is_caps = 1 }
+            }
+            if ann_len_v == 8 {
+                if tok_matches(ann_tok, "acquires", 8) != 0 { is_acq = 1 }
             }
             if ann_len_v == 6 {
                 if tok_matches(ann_tok, "packed", 6) != 0 { ann_packed = 1 }
@@ -2558,6 +2583,36 @@ fn parse_module() -> uint64 {
                         module_info_set_pci_driver(captured_start, captured_len)
                     }
                 }
+                // Capture the analysis-annotation arguments. Identifiers only;
+                // anything else falls through to the generic skip below.
+                while cur_kind() == 1 && (is_ctx | is_eff | is_caps | is_acq) != 0 {
+                    uint64 arg_tok = advance_tok()
+                    if is_ctx != 0 {
+                        // any(0) task(1) irq(2) nmi(3) — EFFECT_SYSTEM.md §1.
+                        ann_ctx_set = 1
+                        if tok_matches(arg_tok, "any", 3) != 0 { ann_ctx_val = 0 }
+                        if tok_matches(arg_tok, "task", 4) != 0 { ann_ctx_val = 1 }
+                        if tok_matches(arg_tok, "irq", 3) != 0 { ann_ctx_val = 2 }
+                        if tok_matches(arg_tok, "nmi", 3) != 0 { ann_ctx_val = 3 }
+                    }
+                    if is_eff != 0 {
+                        // io(0) alloc(1) file(4) — EFFECT_SYSTEM.md §2.
+                        // `none` declares the empty set, so set the flag and
+                        // OR nothing.
+                        ann_eff_set = 1
+                        if tok_matches(arg_tok, "io", 2) != 0 { ann_eff_mask = ann_eff_mask | 1 }
+                        if tok_matches(arg_tok, "alloc", 5) != 0 { ann_eff_mask = ann_eff_mask | 2 }
+                        if tok_matches(arg_tok, "file", 4) != 0 { ann_eff_mask = ann_eff_mask | 16 }
+                    }
+                    if is_caps != 0 { ann_caps_n = ann_caps_n + 1 }
+                    if is_acq != 0 {
+                        if ann_acq_n < 8 {
+                            ann_acq_toks[ann_acq_n] = arg_tok
+                            ann_acq_n = ann_acq_n + 1
+                        }
+                    }
+                    if cur_kind() == 16 { advance_tok() }
+                }
                 while cur_kind() != 11 && cur_kind() != 0 {
                     advance_tok()
                 }
@@ -2591,6 +2646,24 @@ fn parse_module() -> uint64 {
             // the lookup stays consistent with fn_table indexing.
             uint32 fn_name_tok = ast_data1(fn_node)
             uint64 wfn_name = fn_name_tok
+            // Feed the analysis passes. ann_register / lock_add_edge lazily
+            // allocate, so this is safe before analysis_init() runs.
+            // Types: 0 = ctx, 1 = eff, 2 = caps (see analysis.kr's header).
+            if ann_ctx_set != 0 { ann_register(wfn_name, 0, ann_ctx_val) }
+            if ann_eff_set != 0 { ann_register(wfn_name, 1, ann_eff_mask) }
+            if ann_caps_n != 0 { ann_register(wfn_name, 2, ann_caps_n) }
+            // An edge L1 -> L2 means "some function holds L1 and acquires L2"
+            // (EFFECT_SYSTEM.md §3), so every ordered pair in one @acquires
+            // list is an edge.
+            uint64 la = 0
+            while la < ann_acq_n {
+                uint64 lb = la + 1
+                while lb < ann_acq_n {
+                    lock_add_edge(ann_acq_toks[la], ann_acq_toks[lb])
+                    lb = lb + 1
+                }
+                la = la + 1
+            }
             // @builtin_override: register the name so every builtin-dispatch
             // chain (legacy x86_64/arm64, IR lowering) routes calls to the
             // user body instead of the built-in. Methods are excluded: they
