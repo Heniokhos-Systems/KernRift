@@ -46,8 +46,15 @@ fn mqd_init(u64 mqd, u64 mqd_gpu, u64 ring_gpu, u64 ring_log2_dw,
     _ms(mqd, MQD_PQ_RPTR_REPORT_LO, rptr_gpu & 0xffffffff)
     _ms(mqd, MQD_PQ_WPTR_POLL_LO, wptr_gpu & 0xffffffff)
     _ms(mqd, MQD_PQ_DOORBELL_CTRL, ((doorbell_idx << 2) & 0x3ffffffc) | DOORBELL_EN)
-    _ms(mqd, MQD_PQ_CONTROL, ring_log2_dw & 0x3f)              // QUEUE_SIZE (TODO: rptr/unord bits)
-    _ms(mqd, MQD_CONTROL, 0)
+    // PQ_CONTROL — silicon-verified against the LIVE amdgpu compute MQD read
+    // from this card (0xf030890a @ QUEUE_SIZE=10; PQ_EMPTY bit15 is runtime,
+    // excluded). Template 0xf0300900 = RPTR_BLOCK_SIZE=9 (order_base_2(PAGE/4)-1,
+    // ring-size-independent) | MIN_AVAIL_SIZE=3 | UNORD_DISPATCH | TUNNEL_DISPATCH
+    // | PRIV_STATE | KMD_QUEUE (kfd_mqd_manager_v11.c init_mqd + sh_mask names).
+    // QUEUE_SIZE = order_base_2(ring_dwords)-1 = ring_log2_dw-1 (was off by one).
+    _ms(mqd, MQD_PQ_CONTROL, (0xf0300900 | ((ring_log2_dw - 1) & 0x3f)))
+    _ms(mqd, MQD_HQD_PERSISTENT, 0x0be05501)   // live-verified (was unset; = default)
+    _ms(mqd, MQD_CONTROL, 0x100)               // CP_MQD_CONTROL.PRIV_STATE (live=0x100, was 0)
 }
 
 // Build a KIQ MAP_QUEUES packet into buf at dword idx. me/pipe/queue select the
