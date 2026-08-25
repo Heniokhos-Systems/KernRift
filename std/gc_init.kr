@@ -1,0 +1,89 @@
+// std/gc_init.kr — CAPSTONE: full gfx11 GPU bring-up orchestrator for a
+// from-scratch OS. Wires the whole chain in order:
+//   discover/map (caller) -> IMU -> GFXOFF-off -> RLC -> CP(PFP/ME/MEC) ->
+//   MES -> compute-queue map -> doorbell -> PM4 dispatch.
+//
+// The caller supplies: bar5 (BAR5 reg aperture ptr), db2 (BAR2 doorbell ptr),
+// mp1 (SMU base = NAVI32_MP1), a VRAM staging region (CPU-mapped host ptr +
+// its GPU address, via a bump allocator ctx), and the firmware images
+// (read from your OS's filesystem/embedded blobs).
+//
+// PREP: this drives real hardware writes/polls — run only on a GPU the OS
+// OWNS (not amdgpu-bound). Firmware parses + register/packet encodings are all
+// validated offline (see per-module demos); on-hardware sequencing + the
+// flagged TODO bits (CP multi-pipe activate, MQD tuning, secure-boot) are the
+// integration frontier.
+import "gpu_portable.kr"
+import "gpu_navi32.kr"
+import "gpu_activate.kr"
+import "gpu_imu_load.kr"
+import "gpu_rlc_load.kr"
+import "gpu_cp_load.kr"
+import "gpu_mes_load.kr"
+import "gpu_pm4.kr"
+import "gpu_queue.kr"
+
+// ---- VRAM bump allocator. ctx = [host_base(0), gpu_base(8), cursor(16)] ----
+fn gc_valloc_init(u64 ctx, u64 host_base, u64 gpu_base) {
+    store64(ctx + 0, host_base)
+    store64(ctx + 8, gpu_base)
+    store64(ctx + 16, 0)
+}
+fn gc_valloc(u64 ctx, u64 size, u64 align) -> u64 {
+    u64 cur = load64(ctx + 16)
+    cur = (cur + (align - 1)) & ((align - 1) ^ 0xffffffffffffffff)
+    store64(ctx + 16, cur + size)
+    return cur                          // returns offset from base
+}
+fn gc_vhost(u64 ctx, u64 off) -> u64 { return load64(ctx + 0) + off }
+fn gc_vgpu(u64 ctx, u64 off)  -> u64 { return load64(ctx + 8) + off }
+
+// stage a firmware segment into a fresh VRAM buffer; return its GPU address.
+fn gc_stage(u64 ctx, u64 src, u64 n) -> u64 {
+    u64 off = gc_valloc(ctx, n, 0x1000)
+    mes_copy(gc_vhost(ctx, off), src, n)     // mes_copy is a generic dword copy
+    return gc_vgpu(ctx, off)
+}
+
+// Full bring-up. Returns 0 on success, or a stage code on failure.
+fn gc_init(u64 bar5, u64 db2, u64 mp1, u64 ctx,
+           u64 imu_fw, u64 rlc_fw, u64 pfp_fw, u64 me_fw, u64 mec_fw, u64 mes_fw) -> u64 {
+    // 1. IMU: stream ucode via RAM ports (no VRAM), start, wait for GC
+    imu_load_microcode(bar5, imu_fw)
+    if imu_start(bar5) != 0 { return 1 }
+
+    // 2. defeat GFXOFF so GC/CP/MES stay powered
+    if gpu_gfxoff_disable(bar5, mp1) != 1 { return 2 }
+
+    // 3. RLC: stream ucode via GPM port, enable
+    rlc_load_microcode(bar5, rlc_fw)
+    rlc_start(bar5)
+
+    // 4. CP PFP/ME/MEC: stage ucode+data in VRAM, point IC/DC bases
+    u64 pfp_ic = gc_stage(ctx, pfp_fw + cp_ucode_off(pfp_fw), cp_ucode_size(pfp_fw))
+    u64 pfp_dc = gc_stage(ctx, pfp_fw + cp_data_off(pfp_fw),  cp_data_size(pfp_fw))
+    u64 me_ic  = gc_stage(ctx, me_fw  + cp_ucode_off(me_fw),  cp_ucode_size(me_fw))
+    u64 me_dc  = gc_stage(ctx, me_fw  + cp_data_off(me_fw),   cp_data_size(me_fw))
+    cp_gfx_load(bar5, pfp_ic, me_ic, pfp_dc, me_dc)
+    // MEC staging (compute): IC-base reg TODO -> staged, activation deferred
+    u64 _mec_ic = gc_stage(ctx, mec_fw + cp_ucode_off(mec_fw), cp_ucode_size(mec_fw))
+    u64 _mec_dc = gc_stage(ctx, mec_fw + cp_data_off(mec_fw),  cp_data_size(mec_fw))
+
+    // 5. MES: stage ucode+data, direct load
+    u64 mes_ic = gc_stage(ctx, mes_fw + mes_ucode_off(mes_fw), mes_ucode_size(mes_fw))
+    u64 mes_md = gc_stage(ctx, mes_fw + mes_data_off(mes_fw),  mes_data_size(mes_fw))
+    mes_load_direct(bar5, mes_ic, mes_md, mes_uc_start(mes_fw))
+
+    // 6. compute queue: ring + MQD + rptr/wptr, fill + map + (doorbell at submit)
+    u64 ring_off = gc_valloc(ctx, 0x1000, 0x100)      // 1 KiB ring
+    u64 mqd_off  = gc_valloc(ctx, 0x800, 0x1000)
+    u64 rptr_off = gc_valloc(ctx, 0x8, 0x100)
+    u64 wptr_off = gc_valloc(ctx, 0x8, 0x100)
+    u64 mqd_host = gc_vhost(ctx, mqd_off)
+    u64 z = 0
+    while z < 0x800 { store32(mqd_host + z, 0); z = z + 4 }
+    mqd_init(mqd_host, gc_vgpu(ctx, mqd_off), gc_vgpu(ctx, ring_off), 10,
+             0x40, gc_vgpu(ctx, rptr_off), gc_vgpu(ctx, wptr_off))
+    // caller: build MAP_QUEUES on the KIQ ring + doorbell_ring(db2,...) to submit.
+    return 0
+}

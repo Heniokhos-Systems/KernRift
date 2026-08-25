@@ -1,0 +1,25 @@
+// gc_init_demo.kr — integration compile-check + allocator self-test for the
+// full bring-up capstone. Does NOT run gc_init end-to-end (its register polls
+// need real hardware); tests the deterministic VRAM allocator + staging math.
+import "../std/io.kr"
+import "../std/gpu_portable.kr"
+import "../std/gpu_navi32.kr"
+import "../std/gc_init.kr"
+fn phex(u64 v){u64 b=alloc(19);store8(b,48);store8(b+1,120);u64 i=0;while i<16{u64 sh=(15-i)*4;u64 n=(v>>sh)&0xf;u64 c=n+48;if n>=10{c=n+87}store8(b+2+i,c);i=i+1}store8(b+18,0);print_str(b)}
+fn check(u64 got,u64 want,u64 lab){print_str(lab);if got==want{print_str(" PASS ")}else{print_str(" FAIL ")}print_str("got=");phex(got);print_str(" want=");phex(want);print_str("\n")}
+fn main(){
+    print_str("gc_init.kr capstone self-test (allocator + staging)\n")
+    u64 ctx=alloc(24)
+    gc_valloc_init(ctx, 0x400000000, 0x20000000)   // host base (fake), gpu base
+    u64 a=gc_valloc(ctx, 0x100, 0x1000)            // first: aligned to 0
+    check(a, 0, "alloc0 off")
+    u64 b=gc_valloc(ctx, 0x40, 0x1000)             // next: aligned up to 0x1000
+    check(b, 0x1000, "alloc1 off (align)")
+    check(gc_vgpu(ctx,b), 0x20001000, "alloc1 gpu addr")
+    check(gc_vhost(ctx,b), 0x400001000, "alloc1 host addr")
+    u64 c=gc_valloc(ctx, 0x10, 0x100)
+    check(c, 0x1100, "alloc2 off (align 0x100)")
+    print_str("integration: all 11 modules linked + gc_init built OK\n")
+    print_str("done — full bring-up capstone ready (run on OS-owned card)\n")
+    exit(0)
+}
