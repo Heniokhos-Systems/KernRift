@@ -1,0 +1,80 @@
+// std/gpu_imu_load.kr — IMU firmware parse + load/start for gfx11.
+// The IMU (Integrated Management Unit) powers up GC clocks/rails; it must run
+// BEFORE MES/CP load. PREP: writes GFX_IMU_* registers — run only on a card
+// the OS owns (not amdgpu-bound). Ported from amdgpu imu_v11_0.c.
+//
+// IMU fw (gc_11_0_3_imu.bin, imu_firmware_header_v1_0):
+//   header (0x100) | ucode: IRAM (iram_size) then DRAM (dram_size)
+// Load = stream IRAM to the I_RAM index/data port, DRAM to D_RAM port, then
+// program C2PMSG_16 / SCRATCH_10 and start by clearing GFX_IMU_CORE_CTRL.CRESET.
+//
+// KernRift: & | ^ bind tighter than << >> — mixed terms parenthesized.
+
+import "gpu_portable.kr"
+import "gpu_navi32.kr"
+
+// common_firmware_header + imu_firmware_header_v1_0 field offsets
+static u64 CMNH_UCODE_VERSION = 0x10
+static u64 CMNH_UCODE_ARR_OFF = 0x18
+static u64 IMUH_IRAM_SIZE = 0x20
+static u64 IMUH_IRAM_OFF  = 0x24
+static u64 IMUH_DRAM_SIZE = 0x28
+static u64 IMUH_DRAM_OFF  = 0x2c
+
+fn imu_ucode_arr_off(u64 fw) -> u64 { return load32(fw + CMNH_UCODE_ARR_OFF) }
+fn imu_version(u64 fw) -> u64 { return load32(fw + CMNH_UCODE_VERSION) }
+fn imu_iram_size(u64 fw) -> u64 { return load32(fw + IMUH_IRAM_SIZE) }
+fn imu_iram_off(u64 fw)  -> u64 { return load32(fw + IMUH_IRAM_OFF) }
+fn imu_dram_size(u64 fw) -> u64 { return load32(fw + IMUH_DRAM_SIZE) }
+fn imu_dram_off(u64 fw)  -> u64 { return load32(fw + IMUH_DRAM_OFF) }
+
+// GFX_IMU registers (dword, BASE_IDX 1 -> GC1 base)
+static u64 regGFX_IMU_C2PMSG_16      = 0x4010
+static u64 regGFX_IMU_SCRATCH_10     = 0x4072
+static u64 regGFX_IMU_CORE_CTRL      = 0x40b6
+static u64 regGFX_IMU_GFX_RESET_CTRL = 0x40bc
+static u64 regGFX_IMU_D_RAM_ADDR     = 0x40fc
+static u64 regGFX_IMU_D_RAM_DATA     = 0x40fd
+static u64 regGFX_IMU_I_RAM_ADDR     = 0x5f90
+static u64 regGFX_IMU_I_RAM_DATA     = 0x5f91
+
+// stream a segment (n bytes at src) to an ADDR/DATA autoincrement port pair.
+fn _imu_stream(u64 bar5, u64 g, u64 addr_reg, u64 data_reg, u64 src, u64 n, u64 version) {
+    gpu_reg_w32(bar5, g, addr_reg, 0)
+    u64 i = 0
+    while (i + 4) <= n {
+        gpu_reg_w32(bar5, g, data_reg, load32(src + i))
+        i = i + 4
+    }
+    gpu_reg_w32(bar5, g, addr_reg, version)     // final marker = fw version
+}
+
+// Load IMU IRAM + DRAM from the parsed firmware image `fw`.
+fn imu_load_microcode(u64 bar5, u64 fw) {
+    u64 g = NAVI32_GC1
+    u64 ucode = fw + imu_ucode_arr_off(fw)
+    u64 ver = imu_version(fw)
+    _imu_stream(bar5, g, regGFX_IMU_I_RAM_ADDR, regGFX_IMU_I_RAM_DATA,
+                ucode + imu_iram_off(fw), imu_iram_size(fw), ver)
+    _imu_stream(bar5, g, regGFX_IMU_D_RAM_ADDR, regGFX_IMU_D_RAM_DATA,
+                ucode + imu_dram_off(fw), imu_dram_size(fw), ver)
+}
+
+// Program + start the IMU, then wait for GC to come out of reset.
+fn imu_start(u64 bar5) -> u64 {
+    u64 g = NAVI32_GC1
+    u64 v = gpu_reg_r32(bar5, g, regGFX_IMU_C2PMSG_16)
+    gpu_reg_w32(bar5, g, regGFX_IMU_C2PMSG_16, v | 0x1)
+    v = gpu_reg_r32(bar5, g, regGFX_IMU_SCRATCH_10)
+    gpu_reg_w32(bar5, g, regGFX_IMU_SCRATCH_10, v | 0x10007)
+    // start: clear CORE_CTRL.CRESET (bit 0)
+    v = gpu_reg_r32(bar5, g, regGFX_IMU_CORE_CTRL)
+    gpu_reg_w32(bar5, g, regGFX_IMU_CORE_CTRL, v & 0xfffffffe)
+    // wait for GFX_IMU_GFX_RESET_CTRL low 5 bits == 0x1f (GC released)
+    u64 spin = 0
+    while spin < 2000000 {
+        if (gpu_reg_r32(bar5, g, regGFX_IMU_GFX_RESET_CTRL) & 0x1f) == 0x1f { return 0 }
+        spin = spin + 1
+    }
+    return 1   // timeout
+}
