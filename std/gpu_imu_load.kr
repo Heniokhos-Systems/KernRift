@@ -29,6 +29,8 @@ fn imu_dram_size(u64 fw) -> u64 { return load32(fw + IMUH_DRAM_SIZE) }
 fn imu_dram_off(u64 fw)  -> u64 { return load32(fw + IMUH_DRAM_OFF) }
 
 // GFX_IMU registers (dword, BASE_IDX 1 -> GC1 base)
+static u64 regGFX_IMU_C2PMSG_ACCESS_CTRL0 = 0x4040
+static u64 regGFX_IMU_C2PMSG_ACCESS_CTRL1 = 0x4041
 static u64 regGFX_IMU_C2PMSG_16      = 0x4010
 static u64 regGFX_IMU_SCRATCH_10     = 0x4072
 static u64 regGFX_IMU_CORE_CTRL      = 0x40b6
@@ -37,6 +39,12 @@ static u64 regGFX_IMU_D_RAM_ADDR     = 0x40fc
 static u64 regGFX_IMU_D_RAM_DATA     = 0x40fd
 static u64 regGFX_IMU_I_RAM_ADDR     = 0x5f90
 static u64 regGFX_IMU_I_RAM_DATA     = 0x5f91
+
+// amdgpu imu_v11_0_setup writes C2PMSG_16 |= 1 ONLY in DEBUG_MODE. Production
+// (PROD_MODE) must NOT force the IMU into debug or it stalls GC bring-up.
+// Keep this 0 for real hardware; set to 1 only to mirror an amdgpu built with
+// adev->gfx.imu.mode == DEBUG_MODE.
+static u64 IMU_DEBUG_MODE = 0
 
 // stream a segment (n bytes at src) to an ADDR/DATA autoincrement port pair.
 fn _imu_stream(u64 bar5, u64 g, u64 addr_reg, u64 data_reg, u64 src, u64 n, u64 version) {
@@ -63,8 +71,17 @@ fn imu_load_microcode(u64 bar5, u64 fw) {
 // Program + start the IMU, then wait for GC to come out of reset.
 fn imu_start(u64 bar5) -> u64 {
     u64 g = NAVI32_GC1
-    u64 v = gpu_reg_r32(bar5, g, regGFX_IMU_C2PMSG_16)
-    gpu_reg_w32(bar5, g, regGFX_IMU_C2PMSG_16, v | 0x1)
+    // imu_v11_0_setup: enable host C2PMSG access BEFORE any C2PMSG write.
+    // ACCESS_CTRL0 = 0xffffff, ACCESS_CTRL1 = 0xffff (unconditional).
+    gpu_reg_w32(bar5, g, regGFX_IMU_C2PMSG_ACCESS_CTRL0, 0xffffff)
+    gpu_reg_w32(bar5, g, regGFX_IMU_C2PMSG_ACCESS_CTRL1, 0xffff)
+    // C2PMSG_16 |= 1 is DEBUG_MODE-only in amdgpu — gated so PROD_MODE is clean.
+    u64 v = 0
+    if IMU_DEBUG_MODE == 1 {
+        v = gpu_reg_r32(bar5, g, regGFX_IMU_C2PMSG_16)
+        gpu_reg_w32(bar5, g, regGFX_IMU_C2PMSG_16, v | 0x1)
+    }
+    // disable imu Rtavfs, SmsRepair, DfllBTC, ClkB (SCRATCH_10 |= 0x10007).
     v = gpu_reg_r32(bar5, g, regGFX_IMU_SCRATCH_10)
     gpu_reg_w32(bar5, g, regGFX_IMU_SCRATCH_10, v | 0x10007)
     // start: clear CORE_CTRL.CRESET (bit 0)

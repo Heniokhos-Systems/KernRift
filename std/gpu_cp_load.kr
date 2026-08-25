@@ -9,10 +9,18 @@
 // reset->activate the engine's pipes via CP_ME_CNTL (PFP/ME) or
 // CP_MEC_RS64_CNTL (MEC).
 //
-// HONEST: the firmware PARSE below is validated on the real blobs. The exact
-// multi-pipe reset/activate dance (PFP/ME ACTIVE bit positions, MEC IC-base
-// register, DC_BASE0 vs DC_BASE1 split) needs on-hardware verification and is
-// marked TODO — do not treat the orchestration as complete.
+// The firmware PARSE below is validated on the real blobs. The load sequence is
+// transcribed from amdgpu gfx_v11_0.c RS64 path (gc_11_0_3):
+//   cp_gfx_load()      -> pfp/me IC+DC base, cache invalidate + prime
+//   cp_gfx_set_entry() -> per-pipe CP_{PFP,ME}_PRGRM_CNTR_START + pipe reset
+//   cp_gfx_activate()  -> unhalt PFP+ME via CP_ME_CNTL (clear PFP_HALT/ME_HALT)
+//   cp_mec_load()      -> MEC RS64 load: CPC IC base, MEC MDBASE, RS64 entry,
+//                         4 pipes under grbm_select(me=1); DC+IC invalidate
+//   cp_mec_enable()    -> reset/halt (0) or activate all 4 MEC pipes (1)
+// WIRING: gc_init.kr currently calls only cp_gfx_load() + stages MEC. To run the
+// engines it must also call cp_gfx_set_entry(bar5, cp_start(pfp_fw),
+// cp_start(me_fw)); cp_gfx_activate(bar5); cp_mec_load(bar5, mec_ic, mec_md,
+// cp_start(mec_fw)); cp_mec_enable(bar5, 1). (gc_init.kr edit is out of scope.)
 import "gpu_portable.kr"
 import "gpu_navi32.kr"
 
@@ -33,38 +41,220 @@ fn cp_start(u64 fw) -> u64 {
     return lo | (hi << 32)
 }
 
+// GRBM select (soc21_grbm_select target)
+static u64 regGRBM_GFX_CNTL        = 0x0900
+
 // CP RS64 registers (dword, BASE_IDX 1 -> GC1 base)
 static u64 regCP_ME_CNTL           = 0x0803
-static u64 regCP_MEC_RS64_CNTL     = 0x2904
+static u64 regCP_STAT              = 0x0f40
+// --- PFP instruction cache ---
 static u64 regCP_PFP_IC_BASE_LO    = 0x5840
 static u64 regCP_PFP_IC_BASE_HI    = 0x5841
 static u64 regCP_PFP_IC_BASE_CNTL  = 0x5842
+static u64 regCP_PFP_IC_OP_CNTL    = 0x5843
+static u64 regCP_PFP_PRGRM_CNTR_START    = 0x1e44
+static u64 regCP_PFP_PRGRM_CNTR_START_HI = 0x1e59
+// --- ME instruction cache ---
 static u64 regCP_ME_IC_BASE_LO     = 0x5844
 static u64 regCP_ME_IC_BASE_HI     = 0x5845
+static u64 regCP_ME_IC_BASE_CNTL   = 0x5846
+static u64 regCP_ME_IC_OP_CNTL     = 0x5847
+static u64 regCP_ME_PRGRM_CNTR_START     = 0x1e45
+static u64 regCP_ME_PRGRM_CNTR_START_HI  = 0x1e79
+// --- GFX (PFP+ME) RS64 data cache ---
 static u64 regCP_GFX_RS64_DC_BASE0_LO = 0x5863
+static u64 regCP_GFX_RS64_DC_BASE0_HI = 0x5865
 static u64 regCP_GFX_RS64_DC_BASE1_LO = 0x5864
+static u64 regCP_GFX_RS64_DC_BASE1_HI = 0x5866
+static u64 regCP_GFX_RS64_DC_BASE_CNTL = 0x2a08
+static u64 regCP_GFX_RS64_DC_OP_CNTL   = 0x2a09
+// --- MEC (compute) RS64 ---
+static u64 regCP_MEC_RS64_CNTL     = 0x2904
+static u64 regCP_CPC_IC_BASE_LO    = 0x584c
+static u64 regCP_CPC_IC_BASE_HI    = 0x584d
+static u64 regCP_CPC_IC_BASE_CNTL  = 0x584e
+static u64 regCP_CPC_IC_OP_CNTL    = 0x297a
+static u64 regCP_MEC_MDBASE_LO     = 0x5870
+static u64 regCP_MEC_MDBASE_HI     = 0x5871
+static u64 regCP_MEC_RS64_PRGRM_CNTR_START    = 0x2900
+static u64 regCP_MEC_RS64_PRGRM_CNTR_START_HI = 0x2938
+static u64 regCP_MEC_DC_BASE_CNTL  = 0x290b
+static u64 regCP_MEC_DC_OP_CNTL    = 0x290c
 
-// CP_ME_CNTL reset bits (gc_11_0_0_sh_mask.h). NOTE: ACTIVE bit positions for
-// PFP/ME not yet confirmed -> TODO before running.
+// gfx11 rs64 topology (gfx_v11_0_sw_init, gc_11_0_3): PFP/ME = 1 pipe each,
+// MEC = 4 pipes.
+static u64 CP_NUM_PIPE_PER_ME  = 1
+static u64 CP_NUM_PIPE_PER_MEC = 4
+
+// CP_ME_CNTL reset/halt bits (gc_11_0_0_sh_mask.h). RESET positions verified
+// correct against sh_mask; HALT positions added (PFP_HALT 0x1a, ME_HALT 0x1c).
 static u64 PFP_PIPE0_RESET = 1 << 0x12
 static u64 PFP_PIPE1_RESET = 1 << 0x13
 static u64 ME_PIPE0_RESET  = 1 << 0x14
 static u64 ME_PIPE1_RESET  = 1 << 0x15
-// CP_MEC_RS64_CNTL bits
+static u64 PFP_HALT        = 1 << 0x1a
+static u64 ME_HALT         = 1 << 0x1c
+// CP_MEC_RS64_CNTL bits (gc_11_0_0_sh_mask.h)
 static u64 MEC_INVALIDATE_ICACHE = 1 << 4
 static u64 MEC_PIPE0_RESET  = 1 << 0x10
+static u64 MEC_PIPE1_RESET  = 1 << 0x11
+static u64 MEC_PIPE2_RESET  = 1 << 0x12
+static u64 MEC_PIPE3_RESET  = 1 << 0x13
 static u64 MEC_PIPE0_ACTIVE = 1 << 0x1a
+static u64 MEC_PIPE1_ACTIVE = 1 << 0x1b
+static u64 MEC_PIPE2_ACTIVE = 1 << 0x1c
+static u64 MEC_PIPE3_ACTIVE = 1 << 0x1d
+static u64 MEC_HALT         = 1 << 0x1e
+// CP_*_IC_OP_CNTL bits (pfp/me/cpc share the layout)
+static u64 IC_INVALIDATE_CACHE          = 1 << 0
+static u64 IC_INVALIDATE_CACHE_COMPLETE = 1 << 1
+static u64 IC_PRIME_ICACHE              = 1 << 4
+static u64 IC_ICACHE_PRIMED             = 1 << 5
+// CP_*_DC_OP_CNTL bits (gfx_rs64/mec share the layout)
+static u64 DC_INVALIDATE_DCACHE          = 1 << 0
+static u64 DC_INVALIDATE_DCACHE_COMPLETE = 1 << 1
+
+// soc21_grbm_select: regGRBM_GFX_CNTL = PIPEID[1:0] | MEID[3:2] | VMID[7:4] |
+// QUEUEID[10:8]. me=0 for PFP/ME (graphics), me=1 for MEC (compute).
+fn cp_grbm_select(u64 bar5, u64 me, u64 pipe, u64 queue, u64 vmid) {
+    u64 v = (pipe & 0x3) | ((me & 0x3) << 2) | ((vmid & 0xf) << 4) | ((queue & 0x7) << 8)
+    gpu_reg_w32(bar5, NAVI32_GC1, regGRBM_GFX_CNTL, v)
+}
 
 // Point an engine's instruction cache at a staged VRAM ucode buffer.
 fn cp_set_ic_base(u64 bar5, u64 base_lo_reg, u64 base_hi_reg, u64 ic_addr) {
     gpu_reg_w32(bar5, NAVI32_GC1, base_lo_reg, ic_addr & 0xffffffff)
     gpu_reg_w32(bar5, NAVI32_GC1, base_hi_reg, (ic_addr >> 32) & 0xffffffff)
 }
-// PFP + ME instruction cache load (data cache via DC_BASE0/1). Caller stages
-// ucode/data in VRAM first. Reset/activate orchestration = TODO (see header).
+
+// Poll an IC_OP_CNTL register until a completion bit is set (bounded).
+fn cp_ic_wait(u64 bar5, u64 op_reg, u64 done_bit) {
+    u64 i = 0
+    while i < 50000 {
+        if (gpu_reg_r32(bar5, NAVI32_GC1, op_reg) & done_bit) != 0 { break }
+        i = i + 1
+    }
+}
+
+// PFP/ME RS64 instruction-cache load: base -> IC_BASE_CNTL(0) -> wait invalidate
+// -> prime -> wait primed, for BOTH pfp and me, then program the RS64 data
+// caches (DC_BASE0=pfp, DC_BASE1=me) and invalidate them. Mirrors the register
+// programming of gfx_v11_0_cp_gfx_load_pfp/me_microcode_rs64 that does NOT depend
+// on the ucode start address. Call cp_gfx_set_entry() next for the per-pipe
+// PRGRM_CNTR_START, then cp_gfx_activate() to unhalt. Caller stages VRAM first.
 fn cp_gfx_load(u64 bar5, u64 pfp_ic, u64 me_ic, u64 dc0, u64 dc1) {
+    u64 g = NAVI32_GC1
+    // --- PFP instruction cache ---
     cp_set_ic_base(bar5, regCP_PFP_IC_BASE_LO, regCP_PFP_IC_BASE_HI, pfp_ic)
-    cp_set_ic_base(bar5, regCP_ME_IC_BASE_LO,  regCP_ME_IC_BASE_HI,  me_ic)
-    gpu_reg_w32(bar5, NAVI32_GC1, regCP_GFX_RS64_DC_BASE0_LO, dc0 & 0xffffffff)
-    gpu_reg_w32(bar5, NAVI32_GC1, regCP_GFX_RS64_DC_BASE1_LO, dc1 & 0xffffffff)
+    gpu_reg_w32(bar5, g, regCP_PFP_IC_BASE_CNTL, 0)     // VMID/CACHE_POLICY/EXE_DISABLE=0
+    cp_ic_wait(bar5, regCP_PFP_IC_OP_CNTL, IC_INVALIDATE_CACHE_COMPLETE)
+    u64 p = gpu_reg_r32(bar5, g, regCP_PFP_IC_OP_CNTL)
+    gpu_reg_w32(bar5, g, regCP_PFP_IC_OP_CNTL, p | IC_PRIME_ICACHE)
+    cp_ic_wait(bar5, regCP_PFP_IC_OP_CNTL, IC_ICACHE_PRIMED)
+    // --- ME instruction cache ---
+    cp_set_ic_base(bar5, regCP_ME_IC_BASE_LO, regCP_ME_IC_BASE_HI, me_ic)
+    gpu_reg_w32(bar5, g, regCP_ME_IC_BASE_CNTL, 0)
+    cp_ic_wait(bar5, regCP_ME_IC_OP_CNTL, IC_INVALIDATE_CACHE_COMPLETE)
+    u64 m = gpu_reg_r32(bar5, g, regCP_ME_IC_OP_CNTL)
+    gpu_reg_w32(bar5, g, regCP_ME_IC_OP_CNTL, m | IC_PRIME_ICACHE)
+    cp_ic_wait(bar5, regCP_ME_IC_OP_CNTL, IC_ICACHE_PRIMED)
+    // --- RS64 data caches (DC_BASE0 = pfp data, DC_BASE1 = me data) ---
+    gpu_reg_w32(bar5, g, regCP_GFX_RS64_DC_BASE0_LO, dc0 & 0xffffffff)
+    gpu_reg_w32(bar5, g, regCP_GFX_RS64_DC_BASE0_HI, (dc0 >> 32) & 0xffffffff)
+    gpu_reg_w32(bar5, g, regCP_GFX_RS64_DC_BASE1_LO, dc1 & 0xffffffff)
+    gpu_reg_w32(bar5, g, regCP_GFX_RS64_DC_BASE1_HI, (dc1 >> 32) & 0xffffffff)
+    gpu_reg_w32(bar5, g, regCP_GFX_RS64_DC_BASE_CNTL, 0)   // VMID/CACHE_POLICY=0
+    gpu_reg_w32(bar5, g, regCP_GFX_RS64_DC_OP_CNTL, DC_INVALIDATE_DCACHE)
+    cp_ic_wait(bar5, regCP_GFX_RS64_DC_OP_CNTL, DC_INVALIDATE_DCACHE_COMPLETE)
+}
+
+// Program the PFP/ME RS64 ucode entry point per pipe (rs64: 1 pipe each, me=0)
+// and pulse that pipe's reset in CP_ME_CNTL so the new PRGRM_CNTR_START takes
+// effect. pfp_start/me_start = cp_start(pfp_fw)/cp_start(me_fw).
+// Mirrors the grbm-selected loop in gfx_v11_0_cp_gfx_load_pfp/me_microcode_rs64.
+fn cp_gfx_set_entry(u64 bar5, u64 pfp_start, u64 me_start) {
+    u64 g = NAVI32_GC1
+    cp_grbm_select(bar5, 0, 0, 0, 0)                   // me=0, pipe=0
+    // PFP entry: START = (hi<<30)|(lo>>2), START_HI = hi>>2
+    u64 plo = pfp_start & 0xffffffff
+    u64 phi = (pfp_start >> 32) & 0xffffffff
+    gpu_reg_w32(bar5, g, regCP_PFP_PRGRM_CNTR_START, ((plo >> 2) | (phi << 30)) & 0xffffffff)
+    gpu_reg_w32(bar5, g, regCP_PFP_PRGRM_CNTR_START_HI, (phi >> 2) & 0xffffffff)
+    u64 t = gpu_reg_r32(bar5, g, regCP_ME_CNTL)
+    gpu_reg_w32(bar5, g, regCP_ME_CNTL, t | PFP_PIPE0_RESET)
+    gpu_reg_w32(bar5, g, regCP_ME_CNTL, t & (PFP_PIPE0_RESET ^ 0xffffffff))
+    // ME entry
+    u64 mlo = me_start & 0xffffffff
+    u64 mhi = (me_start >> 32) & 0xffffffff
+    gpu_reg_w32(bar5, g, regCP_ME_PRGRM_CNTR_START, ((mlo >> 2) | (mhi << 30)) & 0xffffffff)
+    gpu_reg_w32(bar5, g, regCP_ME_PRGRM_CNTR_START_HI, (mhi >> 2) & 0xffffffff)
+    u64 t2 = gpu_reg_r32(bar5, g, regCP_ME_CNTL)
+    gpu_reg_w32(bar5, g, regCP_ME_CNTL, t2 | ME_PIPE0_RESET)
+    gpu_reg_w32(bar5, g, regCP_ME_CNTL, t2 & (ME_PIPE0_RESET ^ 0xffffffff))
+    cp_grbm_select(bar5, 0, 0, 0, 0)                   // restore
+}
+
+// Unhalt PFP + ME (gfx_v11_0_cp_gfx_enable(true)): clear PFP_HALT and ME_HALT
+// in CP_ME_CNTL, then wait for CP_STAT to read idle (0). Returns 0 on idle.
+fn cp_gfx_activate(u64 bar5) -> u64 {
+    u64 g = NAVI32_GC1
+    u64 t = gpu_reg_r32(bar5, g, regCP_ME_CNTL)
+    t = t & (ME_HALT ^ 0xffffffff)
+    t = t & (PFP_HALT ^ 0xffffffff)
+    gpu_reg_w32(bar5, g, regCP_ME_CNTL, t)
+    u64 i = 0
+    while i < 50000 {
+        if gpu_reg_r32(bar5, g, regCP_STAT) == 0 { return 0 }
+        i = i + 1
+    }
+    return 1   // timeout: CP never went idle
+}
+
+// MEC reset/halt (enable=0) or unhalt/activate all 4 pipes (enable=1).
+// gfx_v11_0_cp_compute_enable RS64 path: every field of CP_MEC_RS64_CNTL is
+// written, so a full overwrite is exact (active = 0x3C000000, reset = 0x400F0010).
+fn cp_mec_enable(u64 bar5, u64 enable) {
+    u64 g = NAVI32_GC1
+    u64 d = 0
+    if enable == 1 {
+        d = MEC_PIPE0_ACTIVE | MEC_PIPE1_ACTIVE | MEC_PIPE2_ACTIVE | MEC_PIPE3_ACTIVE
+    } else {
+        d = MEC_INVALIDATE_ICACHE | MEC_PIPE0_RESET | MEC_PIPE1_RESET | MEC_PIPE2_RESET | MEC_PIPE3_RESET | MEC_HALT
+    }
+    gpu_reg_w32(bar5, g, regCP_MEC_RS64_CNTL, d)
+    // settle (amdgpu udelay(50)) — bounded read-spin
+    u64 s = 0
+    while s < 20000 { gpu_reg_r32(bar5, g, regCP_MEC_RS64_CNTL); s = s + 1 }
+}
+
+// MEC RS64 load (gfx_v11_0_cp_compute_load_microcode_rs64). mec_ic/mec_md =
+// staged VRAM ucode/data addrs; mec_start = cp_start(mec_fw). Caller stages
+// VRAM first. Follow with cp_mec_enable(bar5, 1) to run the compute engine.
+fn cp_mec_load(u64 bar5, u64 mec_ic, u64 mec_md, u64 mec_start) {
+    u64 g = NAVI32_GC1
+    // reset/halt MEC before load
+    cp_mec_enable(bar5, 0)
+    // CPC instruction + MEC data base cntl: VMID/EXE_DISABLE/CACHE_POLICY = 0
+    gpu_reg_w32(bar5, g, regCP_CPC_IC_BASE_CNTL, 0)
+    gpu_reg_w32(bar5, g, regCP_MEC_DC_BASE_CNTL, 0)
+    u64 slo = mec_start & 0xffffffff
+    u64 shi = (mec_start >> 32) & 0xffffffff
+    // per-pipe: MEC data base, RS64 entry point, CPC instruction base (me=1)
+    u64 i = 0
+    while i < CP_NUM_PIPE_PER_MEC {
+        cp_grbm_select(bar5, 1, i, 0, 0)
+        gpu_reg_w32(bar5, g, regCP_MEC_MDBASE_LO, mec_md & 0xffffffff)
+        gpu_reg_w32(bar5, g, regCP_MEC_MDBASE_HI, (mec_md >> 32) & 0xffffffff)
+        gpu_reg_w32(bar5, g, regCP_MEC_RS64_PRGRM_CNTR_START, ((slo >> 2) | (shi << 30)) & 0xffffffff)
+        gpu_reg_w32(bar5, g, regCP_MEC_RS64_PRGRM_CNTR_START_HI, (shi >> 2) & 0xffffffff)
+        gpu_reg_w32(bar5, g, regCP_CPC_IC_BASE_LO, mec_ic & 0xffffffff)
+        gpu_reg_w32(bar5, g, regCP_CPC_IC_BASE_HI, (mec_ic >> 32) & 0xffffffff)
+        i = i + 1
+    }
+    cp_grbm_select(bar5, 0, 0, 0, 0)                   // restore
+    // invalidate the L1 data cache, then the L1 instruction cache
+    gpu_reg_w32(bar5, g, regCP_MEC_DC_OP_CNTL, DC_INVALIDATE_DCACHE)
+    cp_ic_wait(bar5, regCP_MEC_DC_OP_CNTL, DC_INVALIDATE_DCACHE_COMPLETE)
+    gpu_reg_w32(bar5, g, regCP_CPC_IC_OP_CNTL, IC_INVALIDATE_CACHE)
+    cp_ic_wait(bar5, regCP_CPC_IC_OP_CNTL, IC_INVALIDATE_CACHE_COMPLETE)
 }

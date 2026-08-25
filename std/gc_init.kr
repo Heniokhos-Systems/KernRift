@@ -59,15 +59,20 @@ fn gc_init(u64 bar5, u64 db2, u64 mp1, u64 ctx,
     rlc_load_microcode(bar5, rlc_fw)
     rlc_start(bar5)
 
-    // 4. CP PFP/ME/MEC: stage ucode+data in VRAM, point IC/DC bases
+    // 4. CP PFP/ME (graphics RS64): stage ucode+data, load caches, set the
+    //    per-pipe entry point, then unhalt + wait for CP_STAT idle.
     u64 pfp_ic = gc_stage(ctx, pfp_fw + cp_ucode_off(pfp_fw), cp_ucode_size(pfp_fw))
     u64 pfp_dc = gc_stage(ctx, pfp_fw + cp_data_off(pfp_fw),  cp_data_size(pfp_fw))
     u64 me_ic  = gc_stage(ctx, me_fw  + cp_ucode_off(me_fw),  cp_ucode_size(me_fw))
     u64 me_dc  = gc_stage(ctx, me_fw  + cp_data_off(me_fw),   cp_data_size(me_fw))
     cp_gfx_load(bar5, pfp_ic, me_ic, pfp_dc, me_dc)
-    // MEC staging (compute): IC-base reg TODO -> staged, activation deferred
-    u64 _mec_ic = gc_stage(ctx, mec_fw + cp_ucode_off(mec_fw), cp_ucode_size(mec_fw))
-    u64 _mec_dc = gc_stage(ctx, mec_fw + cp_data_off(mec_fw),  cp_data_size(mec_fw))
+    cp_gfx_set_entry(bar5, cp_start(pfp_fw), cp_start(me_fw))
+    if cp_gfx_activate(bar5) != 0 { return 4 }
+    // 4b. MEC (compute RS64): stage, load all 4 pipes under grbm_select, activate.
+    u64 mec_ic = gc_stage(ctx, mec_fw + cp_ucode_off(mec_fw), cp_ucode_size(mec_fw))
+    u64 mec_md = gc_stage(ctx, mec_fw + cp_data_off(mec_fw),  cp_data_size(mec_fw))
+    cp_mec_load(bar5, mec_ic, mec_md, cp_start(mec_fw))
+    cp_mec_enable(bar5, 1)
 
     // 5. MES: stage ucode+data, direct load
     u64 mes_ic = gc_stage(ctx, mes_fw + mes_ucode_off(mes_fw), mes_ucode_size(mes_fw))

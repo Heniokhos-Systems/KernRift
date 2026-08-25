@@ -23,7 +23,7 @@ static u64 NAVI32_NBIF2  = 0x00000D20   // RCC_CONFIG_MEMSIZE base
 
 static u64 regRCC_CONFIG_MEMSIZE = 0x00c3   // VRAM MB (always-on)
 static u64 regGRBM_STATUS  = 0x0da4         // GC engine status (GFXOFF-gated)
-static u64 regGRBM_STATUS2 = 0x0da3
+static u64 regGRBM_STATUS2 = 0x0da2         // 0x0da3 is GRBM_PWR_CNTL, not STATUS2
 static u64 regCP_STAT      = 0x0f40
 static u64 regCP_CPC_STATUS = 0x0e24
 static u64 regGB_ADDR_CONFIG = 0x13de       // tiling config (fixed ASIC value)

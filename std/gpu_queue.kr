@@ -71,6 +71,9 @@ fn map_queues(u64 buf, u64 idx, u64 mqd_gpu, u64 wptr_gpu,
 
 // Ring a doorbell: write the ring wptr (in dwords) to the BAR2 doorbell page at
 // slot doorbell_idx. db2 = mapped BAR2 doorbell aperture pointer.
+// doorbell_idx is a DWORD index (same value the MQD DOORBELL_OFFSET / MAP_QUEUES
+// encode via <<2), so its byte offset in the aperture is idx*4 == idx<<2. amdgpu
+// WDOORBELL32(index) writes at (u32*)ptr[index], i.e. byte 4*index — matches.
 fn doorbell_ring(u64 db2, u64 doorbell_idx, u64 wptr_dw) {
-    store32(db2 + (doorbell_idx << 3), wptr_dw & 0xffffffff)   // 8B per doorbell
+    store32(db2 + (doorbell_idx << 2), wptr_dw & 0xffffffff)   // 4B per dword slot
 }

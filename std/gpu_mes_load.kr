@@ -34,6 +34,9 @@ fn mes_uc_start(u64 fw) -> u64 {
     return lo | (hi << 32)
 }
 
+// ---- GRBM select (soc21_grbm_select target, BASE_IDX 1 -> GC1 base) ----
+static u64 regGRBM_GFX_CNTL              = 0x0900
+
 // ---- CP_MES registers (dword offsets, BASE_IDX 1 -> GC1 base) ----
 static u64 regCP_MES_PRGRM_CNTR_START    = 0x2800
 static u64 regCP_MES_CNTL                = 0x2807
@@ -48,11 +51,24 @@ static u64 regCP_MES_MIBOUND_LO          = 0x585b
 static u64 regCP_MES_MDBOUND_LO          = 0x585d
 
 // ---- CP_MES_CNTL field bits (gc_11_0_0_sh_mask.h) ----
-static u64 MES_INVALIDATE_ICACHE = 1 << 4
+static u64 MES_INVALIDATE_ICACHE = 1 << 4    // CP_MES_CNTL.MES_INVALIDATE_ICACHE
 static u64 MES_PIPE0_RESET  = 1 << 16
 static u64 MES_PIPE1_RESET  = 1 << 17
-static u64 MES_PIPE0_ACTIVE = 1 << 26
+static u64 MES_PIPE0_ACTIVE = 1 << 26        // 0x04000000 (scheduler-only enable)
 static u64 MES_PIPE1_ACTIVE = 1 << 27
+static u64 MES_HALT         = 1 << 30        // CP_MES_CNTL.MES_HALT (shift 0x1e)
+
+// ---- CP_MES_IC_OP_CNTL field bits (gc_11_0_0_sh_mask.h) ----
+static u64 MES_IC_INVALIDATE_CACHE = 1 << 0  // CP_MES_IC_OP_CNTL.INVALIDATE_CACHE
+static u64 MES_IC_PRIME_ICACHE     = 1 << 4  // CP_MES_IC_OP_CNTL.PRIME_ICACHE
+
+// soc21_grbm_select: regGRBM_GFX_CNTL = PIPEID[1:0] | MEID[3:2] | VMID[7:4] |
+// QUEUEID[10:8]. amdgpu wraps all per-pipe CP_MES_* programming in
+// grbm_select(me=3, pipe) ... grbm_select(0,0,0,0).
+fn mes_grbm_select(u64 bar5, u64 me, u64 pipe, u64 queue, u64 vmid) {
+    u64 v = (pipe & 0x3) | ((me & 0x3) << 2) | ((vmid & 0xf) << 4) | ((queue & 0x7) << 8)
+    gpu_reg_w32(bar5, NAVI32_GC1, regGRBM_GFX_CNTL, v)
+}
 
 // Copy `n` bytes from src to dst (for staging ucode into a VRAM buffer).
 fn mes_copy(u64 dst, u64 src, u64 n) {
@@ -63,25 +79,58 @@ fn mes_copy(u64 dst, u64 src, u64 n) {
 
 // DIRECT MES load. ic_addr / md_addr = GPU VRAM addresses of the staged
 // instruction and data segments; uc_start = mes_uc_start(fw). PREP: writes.
+// This is the scheduler-pipe direct path (enable_mes_kiq = false), so only
+// AMDGPU_MES_SCHED_PIPE (pipe 0) is programmed and only PIPE0 is activated.
 fn mes_load_direct(u64 bar5, u64 ic_addr, u64 md_addr, u64 uc_start) {
     u64 g = NAVI32_GC1
-    // 1. hold MES pipes in reset
-    gpu_reg_w32(bar5, g, regCP_MES_CNTL, MES_PIPE0_RESET | MES_PIPE1_RESET)
-    // 2. program the entry address (uc_start >> 2)
-    gpu_reg_w32(bar5, g, regCP_MES_IC_BASE_CNTL, 0)
     u64 ua = uc_start >> 2
+
+    // --- mes_v11_0_enable(false): halt + reset MES before load. Scheduler-only
+    //     -> PIPE1_RESET = 0 (no KIQ). CP_MES_CNTL full write.
+    gpu_reg_w32(bar5, g, regCP_MES_CNTL,
+                MES_INVALIDATE_ICACHE | MES_PIPE0_RESET | MES_HALT)
+
+    // --- mes_v11_0_load_microcode(SCHED_PIPE, prime=true): every CP_MES_*
+    //     register is programmed under grbm_select(me=3, pipe=0). ---
+    mes_grbm_select(bar5, 3, 0, 0, 0)
+    gpu_reg_w32(bar5, g, regCP_MES_IC_BASE_CNTL, 0)
+    // ucode start address (uc_start >> 2)
     gpu_reg_w32(bar5, g, regCP_MES_PRGRM_CNTR_START, ua & 0xffffffff)
     gpu_reg_w32(bar5, g, regCP_MES_PRGRM_CNTR_START_HI, (ua >> 32) & 0xffffffff)
-    // 3. instruction cache base + bound
+    // instruction cache base + 2M-1 bound
     gpu_reg_w32(bar5, g, regCP_MES_IC_BASE_LO, ic_addr & 0xffffffff)
     gpu_reg_w32(bar5, g, regCP_MES_IC_BASE_HI, (ic_addr >> 32) & 0xffffffff)
     gpu_reg_w32(bar5, g, regCP_MES_MIBOUND_LO, 0x1FFFFF)
-    // 4. data base + bound
+    // data base + 512K-1 bound
     gpu_reg_w32(bar5, g, regCP_MES_MDBASE_LO, md_addr & 0xffffffff)
     gpu_reg_w32(bar5, g, regCP_MES_MDBASE_HI, (md_addr >> 32) & 0xffffffff)
     gpu_reg_w32(bar5, g, regCP_MES_MDBOUND_LO, 0x7FFFF)
-    // 5. invalidate the instruction cache
-    gpu_reg_w32(bar5, g, regCP_MES_IC_OP_CNTL, 1)
-    // 6. release from reset -> activate pipes (MES starts executing)
-    gpu_reg_w32(bar5, g, regCP_MES_CNTL, MES_PIPE0_ACTIVE | MES_PIPE1_ACTIVE)
+    // prime_icache: invalidate (PRIME=0, INVALIDATE=1) THEN prime (PRIME=1),
+    // read-modify-write each step exactly as amdgpu does.
+    u64 op = gpu_reg_r32(bar5, g, regCP_MES_IC_OP_CNTL)
+    op = op & (MES_IC_PRIME_ICACHE ^ 0xffffffff)
+    op = op | MES_IC_INVALIDATE_CACHE
+    gpu_reg_w32(bar5, g, regCP_MES_IC_OP_CNTL, op)
+    op = gpu_reg_r32(bar5, g, regCP_MES_IC_OP_CNTL)
+    op = op | MES_IC_PRIME_ICACHE
+    gpu_reg_w32(bar5, g, regCP_MES_IC_OP_CNTL, op)
+    mes_grbm_select(bar5, 0, 0, 0, 0)
+
+    // --- mes_v11_0_enable(true) ---
+    // hold pipe0 in reset (PIPE1_RESET = 0, no KIQ)
+    u64 c = gpu_reg_r32(bar5, g, regCP_MES_CNTL)
+    c = c | MES_PIPE0_RESET
+    c = c & (MES_PIPE1_RESET ^ 0xffffffff)
+    gpu_reg_w32(bar5, g, regCP_MES_CNTL, c)
+    // re-arm ucode start per pipe under grbm_select (the enable() loop)
+    mes_grbm_select(bar5, 3, 0, 0, 0)
+    gpu_reg_w32(bar5, g, regCP_MES_PRGRM_CNTR_START, ua & 0xffffffff)
+    gpu_reg_w32(bar5, g, regCP_MES_PRGRM_CNTR_START_HI, (ua >> 32) & 0xffffffff)
+    mes_grbm_select(bar5, 0, 0, 0, 0)
+    // unhalt + activate PIPE0 ONLY via a FULL CP_MES_CNTL overwrite = 0x04000000
+    // (NOT PIPE0_ACTIVE|PIPE1_ACTIVE — PIPE1 belongs to the KIQ path).
+    gpu_reg_w32(bar5, g, regCP_MES_CNTL, MES_PIPE0_ACTIVE)
+    // settle (amdgpu udelay(500)) — bounded read-spin on CP_MES_CNTL
+    u64 s = 0
+    while s < 100000 { gpu_reg_r32(bar5, g, regCP_MES_CNTL); s = s + 1 }
 }
