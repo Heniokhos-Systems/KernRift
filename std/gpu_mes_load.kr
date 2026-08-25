@@ -1,0 +1,87 @@
+// std/gpu_mes_load.kr — MES firmware parse + DIRECT load for gfx11 (stage B).
+// PREP: the load sequence writes CP_MES_* registers — run only on a card the
+// OS OWNS (not amdgpu-bound). This is the NON-PSP direct path (amdgpu's
+// mes_v11_0_load_microcode + enable): copy the MES ucode+data segments into
+// VRAM, point the MES microcontroller at them, invalidate its icache, and
+// release it from reset. Bypasses the PSP GC-autoload wall — though a
+// secure-boot-locked gfx11 may still require PSP load (verify on hardware).
+//
+// MES fw layout (gc_11_0_3_mes_2.bin, mes_firmware_header_v1_0):
+//   header (0x100) | instruction ucode | data segment
+// Copy [ucode_off .. +ucode_size] to VRAM buffer IC_ADDR, and
+// [data_off .. +data_size] to VRAM buffer MD_ADDR, then mes_load_direct().
+//
+// KernRift: & | ^ bind tighter than << >> — mixed terms parenthesized.
+
+import "gpu_portable.kr"
+import "gpu_navi32.kr"
+
+// ---- MES firmware header field offsets (mes_firmware_header_v1_0) ----
+static u64 MESH_UCODE_SIZE  = 0x24
+static u64 MESH_UCODE_OFF   = 0x28
+static u64 MESH_DATA_SIZE   = 0x30
+static u64 MESH_DATA_OFF    = 0x34
+static u64 MESH_UC_START_LO = 0x38
+static u64 MESH_UC_START_HI = 0x3c
+
+fn mes_ucode_size(u64 fw) -> u64 { return load32(fw + MESH_UCODE_SIZE) }
+fn mes_ucode_off(u64 fw)  -> u64 { return load32(fw + MESH_UCODE_OFF) }
+fn mes_data_size(u64 fw)  -> u64 { return load32(fw + MESH_DATA_SIZE) }
+fn mes_data_off(u64 fw)   -> u64 { return load32(fw + MESH_DATA_OFF) }
+fn mes_uc_start(u64 fw) -> u64 {
+    u64 lo = load32(fw + MESH_UC_START_LO)
+    u64 hi = load32(fw + MESH_UC_START_HI)
+    return lo | (hi << 32)
+}
+
+// ---- CP_MES registers (dword offsets, BASE_IDX 1 -> GC1 base) ----
+static u64 regCP_MES_PRGRM_CNTR_START    = 0x2800
+static u64 regCP_MES_CNTL                = 0x2807
+static u64 regCP_MES_IC_OP_CNTL          = 0x2820
+static u64 regCP_MES_PRGRM_CNTR_START_HI = 0x289d
+static u64 regCP_MES_IC_BASE_LO          = 0x5850
+static u64 regCP_MES_IC_BASE_HI          = 0x5851
+static u64 regCP_MES_IC_BASE_CNTL        = 0x5852
+static u64 regCP_MES_MDBASE_LO           = 0x5854
+static u64 regCP_MES_MDBASE_HI           = 0x5855
+static u64 regCP_MES_MIBOUND_LO          = 0x585b
+static u64 regCP_MES_MDBOUND_LO          = 0x585d
+
+// ---- CP_MES_CNTL field bits (gc_11_0_0_sh_mask.h) ----
+static u64 MES_INVALIDATE_ICACHE = 1 << 4
+static u64 MES_PIPE0_RESET  = 1 << 16
+static u64 MES_PIPE1_RESET  = 1 << 17
+static u64 MES_PIPE0_ACTIVE = 1 << 26
+static u64 MES_PIPE1_ACTIVE = 1 << 27
+
+// Copy `n` bytes from src to dst (for staging ucode into a VRAM buffer).
+fn mes_copy(u64 dst, u64 src, u64 n) {
+    u64 i = 0
+    while (i + 4) <= n { store32(dst + i, load32(src + i)); i = i + 4 }
+    while i < n { store8(dst + i, load8(src + i)); i = i + 1 }
+}
+
+// DIRECT MES load. ic_addr / md_addr = GPU VRAM addresses of the staged
+// instruction and data segments; uc_start = mes_uc_start(fw). PREP: writes.
+fn mes_load_direct(u64 bar5, u64 ic_addr, u64 md_addr, u64 uc_start) {
+    u64 g = NAVI32_GC1
+    // 1. hold MES pipes in reset
+    gpu_reg_w32(bar5, g, regCP_MES_CNTL, MES_PIPE0_RESET | MES_PIPE1_RESET)
+    // 2. program the entry address (uc_start >> 2)
+    gpu_reg_w32(bar5, g, regCP_MES_IC_BASE_CNTL, 0)
+    u64 ua = uc_start >> 2
+    gpu_reg_w32(bar5, g, regCP_MES_PRGRM_CNTR_START, ua & 0xffffffff)
+    gpu_reg_w32(bar5, g, regCP_MES_PRGRM_CNTR_START_HI, (ua >> 32) & 0xffffffff)
+    // 3. instruction cache base + bound
+    gpu_reg_w32(bar5, g, regCP_MES_IC_BASE_LO, ic_addr & 0xffffffff)
+    gpu_reg_w32(bar5, g, regCP_MES_IC_BASE_HI, (ic_addr >> 32) & 0xffffffff)
+    gpu_reg_w32(bar5, g, regCP_MES_MIBOUND_LO, 0x1FFFFF)
+    // 4. data base + bound
+    gpu_reg_w32(bar5, g, regCP_MES_MDBASE_LO, md_addr & 0xffffffff)
+    gpu_reg_w32(bar5, g, regCP_MES_MDBASE_HI, (md_addr >> 32) & 0xffffffff)
+    gpu_reg_w32(bar5, g, regCP_MES_MDBOUND_LO, 0x7FFFF)
+    // 5. invalidate the instruction cache
+    gpu_reg_w32(bar5, g, regCP_MES_IC_OP_CNTL, 1)
+    // 6. release from reset -> activate pipes (MES starts executing)
+    gpu_reg_w32(bar5, g, regCP_MES_CNTL, MES_PIPE0_ACTIVE | MES_PIPE1_ACTIVE)
+}

@@ -1,0 +1,36 @@
+// gpu_mes_load_demo.kr — parse the REAL MES firmware + verify header fields;
+// self-test the load register math. Does NOT run mes_load_direct (needs an
+// OS-owned card). Reads /tmp/mes_2.bin (decompressed gc_11_0_3_mes_2.bin.zst).
+import "../std/io.kr"
+import "../std/gpu_portable.kr"
+import "../std/gpu_navi32.kr"
+import "../std/gpu_mes_load.kr"
+
+fn phex(u64 v) {
+    u64 b = alloc(11); store8(b,48); store8(b+1,120)
+    u64 i=0
+    while i<8 { u64 sh=(7-i)*4; u64 n=(v>>sh)&0xf; u64 c=n+48; if n>=10 {c=n+87} store8(b+2+i,c); i=i+1 }
+    store8(b+10,0); print_str(b)
+}
+fn check(u64 got, u64 want, u64 lab) {
+    print_str(lab); if got==want { print_str(" PASS ") } else { print_str(" FAIL ") }
+    print_str("got="); phex(got); print_str(" want="); phex(want); print_str("\n")
+}
+fn main() {
+    print_str("gpu_mes_load.kr self-test (real firmware parse)\n")
+    u64 fw = read_file("/tmp/mes_2.bin")
+    if fw == 0 { print_str("FAIL read /tmp/mes_2.bin\n"); exit(1) }
+    check(mes_ucode_size(fw), 0x1b8f0, "mes_ucode_size")
+    check(mes_ucode_off(fw),  0x100,   "mes_ucode_off")
+    check(mes_data_size(fw),  0x20000, "mes_data_size")
+    check(mes_data_off(fw),   0x1b9f0, "mes_data_off")
+    check(mes_uc_start(fw) & 0xffffffff, 0xf0005000, "mes_uc_start lo")
+    // load register offsets (all BASE_IDX 1 -> GC1)
+    check(gpu_reg_off(NAVI32_GC1, regCP_MES_IC_BASE_LO), (0xa000 + 0x5850) * 4, "IC_BASE_LO off")
+    check(gpu_reg_off(NAVI32_GC1, regCP_MES_CNTL), (0xa000 + 0x2807) * 4, "MES_CNTL off")
+    // CNTL bit fields
+    check(MES_PIPE0_RESET | MES_PIPE1_RESET, 0x30000, "reset bits")
+    check(MES_PIPE0_ACTIVE | MES_PIPE1_ACTIVE, 0xc000000, "active bits")
+    print_str("done — MES fw parsed + load sequence prepped (run only on owned card)\n")
+    exit(0)
+}
