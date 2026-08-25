@@ -3133,6 +3133,129 @@ fn main() {
     exit(r)
 }' 42
 
+# --- call_ptr on --target=windows: >4 args + shadow space (legacy backend) ---
+#
+# Win64 passes the first four arguments in rcx/rdx/r8/r9, ALWAYS reserves 32
+# bytes of shadow space (even for <=4 args), and spills the 5th argument
+# onward to [rsp+32], [rsp+40], ... in argument order. The call_ptr legacy
+# path used to REFUSE >4 args on windows and, worse, reserved NO shadow space
+# at all for <=4 -- a latent ABI violation. This exercises the fixed path
+# (needed to call UEFI GetVariable/SetVariable, both 5-arg) by disassembling
+# the emitted caller and asserting the exact ABI placement. Compile-only: a
+# Win64 PE cannot execute on this host, so the bytes are the artifact. The
+# CALLEE's parameter prologue is the already-correct named-call Win64 path, so
+# a caller that agrees with it byte-for-byte is validated end to end. Mirrors
+# many_args_direct_call_matches_ir's disassembly discipline, for call_ptr.
+if ! command -v objdump >/dev/null 2>&1 || ! command -v xxd >/dev/null 2>&1; then
+    echo "  call_ptr_windows_shadow_overflow: SKIP (objdump/xxd not installed)"
+else
+    # Disassemble `main`'s bytes from a --target=windows --legacy --emit=asm
+    # listing as Win64 x86-64, in Intel syntax. nk_bytes (defined above) pulls
+    # the objective byte column; KRC's own mnemonic text is never trusted.
+    cpw_disasm() { # <src> -> Intel disassembly of main, or empty on failure
+        local _s="$DIR/../cpwin_$$.kr"
+        local _a="/tmp/krc_cpwin_$$.s"
+        printf '%s\n' "$1" > "$_s"
+        if ! $KRC --arch=x86_64 --target=windows --legacy --emit=asm "$_s" -o "$_a" >/dev/null 2>&1; then
+            rm -f "$_s" "$_a"; return
+        fi
+        local _hex
+        _hex=$(nk_bytes "$_a" main)
+        rm -f "$_s" "$_a"
+        [ ${#_hex} -lt 16 ] && return
+        local _b="/tmp/krc_cpwin_$$.bin"
+        printf '%s' "$_hex" | xxd -r -p > "$_b"
+        # Isolate the call_ptr sequence: the indirect `call rax` (ff d0)
+        # uniquely marks it -- exit() and every other outgoing call go through
+        # the IAT as `call QWORD PTR [rip+...]`, never `call rax`. Emit the
+        # window from the `sub rsp` that reserved this call's stack through the
+        # matching `add rsp` cleanup, so the assertions cannot be satisfied by
+        # some OTHER call's shadow space elsewhere in main.
+        objdump -D -b binary -m i386:x86-64 -M intel "$_b" 2>/dev/null | awk '
+            { L[NR]=$0 }
+            /call[ ]+rax/ && !seen { c=NR; seen=1 }
+            END {
+                if (!seen) exit
+                s=1; for (i=c; i>=1; i--) if (L[i] ~ /sub[ ]+rsp/) { s=i; break }
+                e=NR; for (i=c; i<=NR; i++) if (L[i] ~ /add[ ]+rsp/) { e=i; break }
+                for (i=s; i<=e; i++) print L[i]
+            }'
+        rm -f "$_b"
+    }
+
+    CPW5_SRC='fn addfive(uint64 a, uint64 b, uint64 c, uint64 d, uint64 e) -> uint64 { return ((((a + b) + c) + d) + e) }
+fn main() {
+    uint64 fp = fn_addr("addfive")
+    uint64 r = call_ptr(fp, 1, 2, 4, 8, 16)
+    exit(r)
+}'
+    CPW6_SRC='fn addsix(uint64 a, uint64 b, uint64 c, uint64 d, uint64 e, uint64 f0) -> uint64 { return (((((a + b) + c) + d) + e) + f0) }
+fn main() {
+    uint64 fp = fn_addr("addsix")
+    uint64 r = call_ptr(fp, 1, 2, 4, 8, 16, 32)
+    exit(r)
+}'
+    CPW4_SRC='fn addfour(uint64 a, uint64 b, uint64 c, uint64 d) -> uint64 { return (((a + b) + c) + d) }
+fn main() {
+    uint64 fp = fn_addr("addfour")
+    uint64 r = call_ptr(fp, 1, 2, 4, 8)
+    exit(r)
+}'
+
+    # cpw_assert <label> <disasm> <regex...>: every regex must match once.
+    cpw_assert() {
+        local _name="$1"; shift
+        local _dis="$1"; shift
+        TOTAL=$((TOTAL + 1))
+        if [ -z "$_dis" ]; then
+            FAIL=$((FAIL + 1)); echo "FAIL: $_name (no disassembly produced)"; return
+        fi
+        local _miss=""
+        local _re
+        for _re in "$@"; do
+            printf '%s\n' "$_dis" | grep -qiE "$_re" || _miss="$_miss [$_re]"
+        done
+        if [ -z "$_miss" ]; then
+            PASS=$((PASS + 1)); echo "  $_name: PASS"
+        else
+            FAIL=$((FAIL + 1)); echo "FAIL: $_name (missing:$_miss)"
+        fi
+    }
+
+    CPW5_DIS=$(cpw_disasm "$CPW5_SRC")
+    CPW6_DIS=$(cpw_disasm "$CPW6_SRC")
+    CPW4_DIS=$(cpw_disasm "$CPW4_SRC")
+
+    # 5 args: shadow(32)+1 overflow=40 -> 16-aligned = 0x30. 5th arg at [rsp+0x20]
+    # (=rsp+32, first slot past shadow). rcx/rdx/r8/r9 loaded; indirect call;
+    # matching cleanup.
+    cpw_assert "call_ptr_win5_shadow_overflow" "$CPW5_DIS" \
+        'sub +rsp,0x30' \
+        'mov +QWORD PTR \[rsp\+0x20\],rax' \
+        'mov +rcx,rax' 'mov +rdx,rax' 'mov +r8,rax' 'mov +r9,rax' \
+        'call +rax' \
+        'add +rsp,0x30'
+
+    # 6 args: shadow(32)+2 overflow=48 = 0x30. 5th at [rsp+0x20], 6th at [rsp+0x28]
+    # (=rsp+40), argument order preserved.
+    cpw_assert "call_ptr_win6_two_overflow" "$CPW6_DIS" \
+        'sub +rsp,0x30' \
+        'mov +QWORD PTR \[rsp\+0x20\],rax' \
+        'mov +QWORD PTR \[rsp\+0x28\],rax' \
+        'mov +rcx,rax' 'mov +rdx,rax' 'mov +r8,rax' 'mov +r9,rax' \
+        'call +rax' \
+        'add +rsp,0x30'
+
+    # 4 args (the latent-bug fix): 32 bytes of shadow space are now ALWAYS
+    # reserved -- sub rsp,0x20 / add rsp,0x20 -- where the old path reserved
+    # none. No overflow store past shadow.
+    cpw_assert "call_ptr_win4_shadow_always" "$CPW4_DIS" \
+        'sub +rsp,0x20' \
+        'mov +rcx,rax' 'mov +rdx,rax' 'mov +r8,rax' 'mov +r9,rax' \
+        'call +rax' \
+        'add +rsp,0x20'
+fi
+
 # --- uint16 pointer operations ---
 run_test "uint16_store_load" 'fn main() {
     uint64 buf = alloc(64)

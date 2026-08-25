@@ -8045,18 +8045,14 @@ fn gen_expr(uint64 node) {
                 write(2, cpe2, str_len(cpe2))
                 exit(1)
             }
-            // Windows x64 passes only four arguments in registers and requires
-            // 32 bytes of shadow space the caller must reserve. Neither the
-            // loader below nor this block does that, so a fifth argument would
-            // be evaluated and then never placed -- the same silent-drop shape
-            // this whole change exists to remove. REFUSE loudly instead of
-            // implementing half of it; SysV is what --emit=obj and --legacy
-            // actually exercise here.
-            if target_os == 2 && arg_count > 4 {
-                uint64 cpw = "error: call_ptr on --target=windows supports at most 4 arguments (Win64 passes 4 in registers and needs caller-reserved shadow space)\n"
-                write(2, cpw, str_len(cpw))
-                exit(1)
-            }
+            // Windows x64 passes four arguments in registers and requires 32
+            // bytes of shadow space the caller must reserve, plus a stack slot
+            // per argument beyond the fourth. The Windows loader below now does
+            // all three -- shadow space, overflow-arg spill, and the +cp_stack
+            // adjustment on every frame-slot load -- exactly mirroring the
+            // named-call Win64 path, so a 5- or 6-argument call_ptr (e.g. UEFI
+            // GetVariable/SetVariable) compiles correctly. The only remaining
+            // cap is the shared >64 guard above.
 
             // Allocate temp slots: 1 for fn_ptr + arg_count for args
             uint64 ptr_slot = var_count * 8
@@ -8105,24 +8101,71 @@ fn gen_expr(uint64 node) {
             // Load args into registers.
             uint64 cp_stack_bytes = 0
             if target_os == 2 {
-                // Windows x64: positional — the Nth arg uses gpr[N] OR xmm[N]
-                // (rcx/xmm0, rdx/xmm1, r8/xmm2, r9/xmm3). Load high→low so a
-                // float arg never clobbers a not-yet-loaded slot via xmm0.
+                // Windows x64: 32 bytes of shadow space are ALWAYS reserved
+                // (even for <=4 args, as the ABI mandates), plus one 8-byte
+                // slot per overflow argument (5th onward), 16-aligned. This
+                // mirrors the named-call Win64 path exactly. cp_stack_bytes
+                // carries the reservation to the shared tail below, which uses
+                // it for both the fn-ptr slot load and the `add rsp` cleanup.
+                uint64 win_overflow = 0
+                if arg_count > 4 { win_overflow = arg_count - 4 }
+                uint64 win_stack = 32 + win_overflow * 8
+                uint64 win_rem = win_stack & 15
+                if win_rem != 0 { win_stack = win_stack + 16 - win_rem }
+                cp_stack_bytes = win_stack
+
+                // sub rsp, win_stack
+                if win_stack < 128 {
+                    emit_byte(0x48); emit_byte(0x83); emit_byte(0xEC)
+                    uint8 cpws8 = win_stack; emit_byte(cpws8)
+                } else {
+                    emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC)
+                    emit_u32_le(win_stack)
+                }
+
+                // Store overflow args (5th onward) at [rsp + 32 + (i-4)*8], in
+                // argument order. Frame slots moved up by cp_stack_bytes after
+                // the sub, so load from arg_slots_base + i*8 + cp_stack_bytes.
+                // Uses rax as scratch; the register loads below run after this,
+                // so nothing they need is clobbered. Overflow floats spill via
+                // the same integer slot they were stored into (bit pattern),
+                // exactly like an overflow int -- Win64 puts stack floats in
+                // memory, not a register.
+                uint64 woi = 4
+                while woi < arg_count {
+                    emit_load_rax_from_stack(arg_slots_base + woi * 8 + cp_stack_bytes)
+                    uint64 wsofs = 32 + (woi - 4) * 8
+                    if wsofs < 128 {
+                        // mov [rsp + wsofs], rax (48 89 44 24 imm8)
+                        emit_byte(0x48); emit_byte(0x89); emit_byte(0x44)
+                        emit_byte(0x24); uint8 wso8 = wsofs; emit_byte(wso8)
+                    } else {
+                        // mov [rsp + wsofs], rax (48 89 84 24 imm32)
+                        emit_byte(0x48); emit_byte(0x89); emit_byte(0x84)
+                        emit_byte(0x24); emit_u32_le(wsofs)
+                    }
+                    woi = woi + 1
+                }
+
+                // Load the first four args positionally — the Nth arg uses
+                // gpr[N] OR xmm[N] (rcx/xmm0, rdx/xmm1, r8/xmm2, r9/xmm3),
+                // never both. Load high→low so a float arg never clobbers a
+                // not-yet-loaded slot via xmm0. Frame slots are +cp_stack_bytes
+                // because they were written before the sub rsp above.
                 uint64 wi = arg_count
+                if wi > 4 { wi = 4 }
                 while wi > 0 {
                     wi = wi - 1
                     uint64 wfkp = cp_fkinds + wi * 8
                     uint64 wfk2 = 0
                     unsafe { *(wfkp as uint64) -> wfk2 }
-                    uint64 wsoff = arg_slots_base + wi * 8
+                    uint64 wsoff = arg_slots_base + wi * 8 + cp_stack_bytes
                     if wfk2 != 0 {
-                        // float arg → xmm[wi] (only first 4 are register args)
-                        if wi < 4 {
-                            if wfk2 == 2 {
-                                emit_load_xmmN_f32(wi, wsoff)
-                            } else {
-                                emit_load_xmmN_f64(wi, wsoff)
-                            }
+                        // float arg → xmm[wi]
+                        if wfk2 == 2 {
+                            emit_load_xmmN_f32(wi, wsoff)
+                        } else {
+                            emit_load_xmmN_f64(wi, wsoff)
                         }
                     } else {
                         emit_load_rax_from_stack(wsoff)
