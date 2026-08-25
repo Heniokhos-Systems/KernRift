@@ -1,0 +1,18 @@
+import "../std/io.kr"
+import "../std/gpu_portable.kr"
+import "../std/gpu_navi32.kr"
+import "../std/gpu_rlc_load.kr"
+fn phex(u64 v){u64 b=alloc(11);store8(b,48);store8(b+1,120);u64 i=0;while i<8{u64 sh=(7-i)*4;u64 n=(v>>sh)&0xf;u64 c=n+48;if n>=10{c=n+87}store8(b+2+i,c);i=i+1}store8(b+10,0);print_str(b)}
+fn check(u64 got,u64 want,u64 lab){print_str(lab);if got==want{print_str(" PASS ")}else{print_str(" FAIL ")}print_str("got=");phex(got);print_str(" want=");phex(want);print_str("\n")}
+fn main(){
+    print_str("gpu_rlc_load.kr self-test (real firmware parse)\n")
+    u64 fw=read_file("/tmp/rlc.bin")
+    if fw==0 {print_str("FAIL read /tmp/rlc.bin\n");exit(1)}
+    check(rlc_ucode_size(fw),0x6200,"rlc_ucode_size")
+    check(rlc_ucode_off(fw),0x100,"rlc_ucode_off")
+    check(rlc_version(fw),0x5a,"rlc_version")
+    check(gpu_reg_off(NAVI32_GC1,regRLC_GPM_UCODE_ADDR),(0xa000+0x5b60)*4,"GPM_UCODE_ADDR off")
+    check(gpu_reg_off(NAVI32_GC1,regRLC_CNTL),(0xa000+0x4c00)*4,"RLC_CNTL off")
+    print_str("done — RLC fw parsed + load/start prepped\n")
+    exit(0)
+}

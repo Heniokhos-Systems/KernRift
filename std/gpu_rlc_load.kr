@@ -1,0 +1,46 @@
+// std/gpu_rlc_load.kr — RLC firmware parse + load/start for gfx11.
+// RLC (Run-List Controller) manages power/clock-gating + queue lists; loaded
+// after IMU, before CP/MES. PREP: writes RLC_* regs — OS-owned card only.
+// Ported from amdgpu gfx_v11_0_rlc_load_microcode + rlc_start.
+//
+// RLC fw (gc_11_0_3_rlc.bin, rlc_firmware_header_v2_x): common header then the
+// RLC-G ucode at ucode_array_offset (v2_x save/restore lists follow, not needed
+// for the core load). KernRift: parenthesize mixed & | << terms.
+import "gpu_portable.kr"
+import "gpu_navi32.kr"
+
+static u64 CMNH_UCODE_VERSION = 0x10
+static u64 CMNH_UCODE_SIZE    = 0x14
+static u64 CMNH_UCODE_ARR_OFF = 0x18
+fn rlc_ucode_size(u64 fw) -> u64 { return load32(fw + CMNH_UCODE_SIZE) }
+fn rlc_ucode_off(u64 fw)  -> u64 { return load32(fw + CMNH_UCODE_ARR_OFF) }
+fn rlc_version(u64 fw)    -> u64 { return load32(fw + CMNH_UCODE_VERSION) }
+
+// RLC registers (dword, BASE_IDX 1 -> GC1 base)
+static u64 regRLC_CNTL            = 0x4c00
+static u64 regRLC_GPM_UCODE_ADDR  = 0x5b60
+static u64 regRLC_GPM_UCODE_DATA  = 0x5b61
+static u64 RLC_ENABLE_F32 = 1 << 0
+
+fn rlc_set_enable(u64 bar5, u64 on) {
+    u64 g = NAVI32_GC1
+    u64 v = gpu_reg_r32(bar5, g, regRLC_CNTL)
+    if on == 1 { v = v | RLC_ENABLE_F32 } else { v = v & (RLC_ENABLE_F32 ^ 0xffffffff) }
+    gpu_reg_w32(bar5, g, regRLC_CNTL, v)
+}
+
+// Load the RLC-G ucode via the GPM_UCODE ADDR/DATA autoincrement port.
+fn rlc_load_microcode(u64 bar5, u64 fw) {
+    u64 g = NAVI32_GC1
+    rlc_set_enable(bar5, 0)                       // halt RLC F32
+    u64 src = fw + rlc_ucode_off(fw)
+    u64 n = rlc_ucode_size(fw)
+    gpu_reg_w32(bar5, g, regRLC_GPM_UCODE_ADDR, 0)
+    u64 i = 0
+    while (i + 4) <= n {
+        gpu_reg_w32(bar5, g, regRLC_GPM_UCODE_DATA, load32(src + i))
+        i = i + 4
+    }
+    gpu_reg_w32(bar5, g, regRLC_GPM_UCODE_ADDR, rlc_version(fw))
+}
+fn rlc_start(u64 bar5) { rlc_set_enable(bar5, 1) }
