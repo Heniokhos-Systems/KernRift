@@ -1,0 +1,81 @@
+// std/gpu_activate.kr — compute-queue ACTIVATION sequence for gfx11 (Navi 3x).
+// PREP / DESIGN — do NOT run against a live amdgpu-bound card (writes here race
+// amdgpu's SMU+MES and wedge the GPU -> cold power-cycle). Intended for a
+// from-scratch OS that OWNS the GPU (no amdgpu), run in order after
+// gpu_portable discovery + BAR mapping.
+//
+// The activation problem in stages (this file implements the parts that are
+// well-specified and flags the frontier):
+//   A. Defeat GFXOFF (SMU DisallowGfxOff) so the GC/CP/MES block is powered
+//      and its registers are live.                              [IMPLEMENTED]
+//   B. Confirm MES/MEC firmware is running (CP_MES_INSTR_PNTR advancing).
+//      On a bare OS you must first LOAD MES/MEC ucode via PSP or the RLC
+//      autoload path — that firmware bring-up is the hard frontier.  [OUTLINE]
+//   C. Build a compute queue: allocate ring + MQD in VRAM, fill the gfx11 MQD,
+//      assign a doorbell, and map it via KIQ PACKET3_MAP_QUEUES (or MES
+//      ADD_QUEUE), then ring the doorbell.                          [OUTLINE]
+//
+// SMU (MP1) mailbox protocol (v13): write ARG then MESSAGE, poll RESP (1=ok).
+
+import "gpu_portable.kr"
+import "gpu_navi32.kr"
+
+// MP1 SMU mailbox registers (dword offsets from the MP1 base, BASE_IDX 0).
+static u64 SMU_C2PMSG_MESSAGE = 0x0282   // regMP1_SMN_C2PMSG_66
+static u64 SMU_C2PMSG_ARG     = 0x0292   // regMP1_SMN_C2PMSG_82
+static u64 SMU_C2PMSG_RESP    = 0x029a   // regMP1_SMN_C2PMSG_90
+
+// SMU v13 message ids (smu_v13_0_0_ppsmc.h).
+static u64 SMU_MSG_AllowGfxOff    = 0x28
+static u64 SMU_MSG_DisallowGfxOff = 0x29
+
+// Send an SMU mailbox message; returns response word (1 = success, 0 = timeout).
+fn smu_send_msg(u64 bar5, u64 mp1, u64 msg, u64 arg) -> u64 {
+    // wait for the mailbox to be ready (previous response present)
+    u64 spin = 0
+    while spin < 2000000 {
+        if gpu_reg_r32(bar5, mp1, SMU_C2PMSG_RESP) != 0 { break }
+        spin = spin + 1
+    }
+    gpu_reg_w32(bar5, mp1, SMU_C2PMSG_RESP, 0)      // clear response
+    gpu_reg_w32(bar5, mp1, SMU_C2PMSG_ARG, arg)     // argument
+    gpu_reg_w32(bar5, mp1, SMU_C2PMSG_MESSAGE, msg) // fire message
+    u64 resp = 0
+    u64 s2 = 0
+    while s2 < 2000000 {
+        resp = gpu_reg_r32(bar5, mp1, SMU_C2PMSG_RESP)
+        if resp != 0 { break }
+        s2 = s2 + 1
+    }
+    return resp
+}
+
+// Stage A: keep the GC block powered (defeat GFXOFF) so MES/CP is reachable.
+fn gpu_gfxoff_disable(u64 bar5, u64 mp1) -> u64 {
+    return smu_send_msg(bar5, mp1, SMU_MSG_DisallowGfxOff, 0)
+}
+fn gpu_gfxoff_enable(u64 bar5, u64 mp1) -> u64 {
+    return smu_send_msg(bar5, mp1, SMU_MSG_AllowGfxOff, 0)
+}
+
+// Stage A+B(read): after gfxoff-disable, MES PC should be non-zero if MES fw
+// is running. Returns CP_MES_INSTR_PNTR (0 = MES not up / still gated).
+static u64 regCP_MES_INSTR_PNTR = 0x2813   // BASE_IDX 1 -> GC1 base
+fn gpu_mes_pc(u64 bar5) -> u64 {
+    return gpu_reg_r32(bar5, NAVI32_GC1, regCP_MES_INSTR_PNTR)
+}
+
+// Orchestrated prep: the ordered activation entry point for a from-scratch OS.
+// Returns 0 on "GC powered + MES running", else a stage code (1=gfxoff fail,
+// 2=MES not running -> needs firmware load, the frontier).
+fn gpu_activate_stageAB(u64 bar5, u64 mp1) -> u64 {
+    u64 r = gpu_gfxoff_disable(bar5, mp1)
+    if r != 1 { return 1 }
+    if gpu_mes_pc(bar5) == 0 { return 2 }   // MES fw not loaded -> stage-B frontier
+    return 0
+    // Stage C (queue map) goes here once MES is confirmed running:
+    //   * alloc ring + MQD in VRAM (BAR0), fill gfx11 MQD (cp_hqd_* mirror)
+    //   * pick a doorbell dword in BAR2, set MQD.doorbell_offset
+    //   * build a KIQ ring with PACKET3_MAP_QUEUES (see std/gpu_pm4.kr helpers)
+    //   * ring the KIQ doorbell; MES maps the queue; then submit via gpu_pm4.
+}

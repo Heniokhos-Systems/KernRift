@@ -1,0 +1,44 @@
+// gpu_activate_demo.kr — compile + offline self-test for std/gpu_activate.kr.
+// Validates the deterministic pieces (SMU mailbox register offsets, message
+// ids). Does NOT run smu_send_msg — that requires a card the OS owns (writing
+// SMU on a live amdgpu-bound card wedges the GPU).
+//
+// Build: ./build/krc2 --arch=x86_64 --target=linux --emit=elfexe examples/gpu_activate_demo.kr -o /tmp/act
+// Run:   /tmp/act
+
+import "../std/io.kr"
+import "../std/gpu_portable.kr"
+import "../std/gpu_navi32.kr"
+import "../std/gpu_activate.kr"
+
+fn phex(u64 v) {
+    u64 buf = alloc(11)
+    store8(buf, 48); store8(buf + 1, 120)
+    u64 i = 0
+    while i < 8 { u64 sh = (7 - i) * 4; u64 nyb = (v >> sh) & 0xf; u64 ch = nyb + 48; if nyb >= 10 { ch = nyb + 87 } store8(buf + 2 + i, ch); i = i + 1 }
+    store8(buf + 10, 0); print_str(buf)
+}
+fn check(u64 got, u64 want, u64 lab) {
+    print_str(lab)
+    if got == want { print_str(" PASS ") } else { print_str(" FAIL ") }
+    print_str("got="); phex(got); print_str(" want="); phex(want); print_str("\n")
+}
+
+fn main() {
+    print_str("gpu_activate.kr self-test (offsets + ids; no hardware run)\n")
+
+    // SMU mailbox register BAR5 byte offsets = (MP1_base + reg) * 4
+    check(gpu_reg_off(NAVI32_MP1, SMU_C2PMSG_MESSAGE), 0x58a08, "C2PMSG_66(msg) off")
+    check(gpu_reg_off(NAVI32_MP1, SMU_C2PMSG_ARG),     0x58a48, "C2PMSG_82(arg) off")
+    check(gpu_reg_off(NAVI32_MP1, SMU_C2PMSG_RESP),    0x58a68, "C2PMSG_90(resp) off")
+
+    // message ids (smu_v13_0_0_ppsmc.h)
+    check(SMU_MSG_DisallowGfxOff, 0x29, "DisallowGfxOff id")
+    check(SMU_MSG_AllowGfxOff,    0x28, "AllowGfxOff id")
+
+    // MES PC register offset (GC1 base + 0x2813)
+    check(gpu_reg_off(NAVI32_GC1, regCP_MES_INSTR_PNTR), (0xa000 + 0x2813) * 4, "MES_INSTR_PNTR off")
+
+    print_str("done — activation sequence prepped (stage A ready, B/C = frontier)\n")
+    exit(0)
+}
