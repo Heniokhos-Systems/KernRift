@@ -44,6 +44,61 @@ fn pci_bar_base(u64 ecam, u64 bus, u64 dev, u64 pfn, u64 bar_off) -> u64 {
     return lo & 0xfffffff0
 }
 
+// ---- PCI enumeration: find the GPU + read its BARs (OS-agnostic) ----
+// A device's config base = ecam + (bus<<20 | dev<<15 | pfn<<12). Scan helpers
+// take a *bus window* pointer = ecam + (bus<<20).
+static u64 PCI_VENDOR_AMD    = 0x1002
+static u64 PCI_CFG_CLASS_REV = 0x08
+static u64 PCI_CLASS_DISPLAY = 0x03
+static u64 PCI_CFG_BAR0      = 0x10
+
+// ACPI MCFG: ECAM base of the first segment (base_address u64 at table+0x2c).
+fn mcfg_ecam_base(u64 mcfg) -> u64 {
+    u64 lo = mmio_r32(mcfg, 0x2c)
+    u64 hi = mmio_r32(mcfg, 0x30)
+    return lo | (hi << 32)
+}
+
+fn pci_dev_off(u64 dev, u64 pfn) -> u64 {
+    return (dev << 15) | (pfn << 12)
+}
+fn pci_vendor(u64 cfg) -> u64 { return mmio_r32(cfg, PCI_CFG_VENDOR_DEVICE) & 0xffff }
+fn pci_device(u64 cfg) -> u64 { return (mmio_r32(cfg, PCI_CFG_VENDOR_DEVICE) >> 16) & 0xffff }
+fn pci_baseclass(u64 cfg) -> u64 { return (mmio_r32(cfg, PCI_CFG_CLASS_REV) >> 24) & 0xff }
+
+// Scan one bus (bus_base = ecam + bus<<20) for an AMD display device.
+// Returns (dev<<3 | pfn) or 0xffff.
+fn pci_scan_bus_for_gpu(u64 bus_base, u64 want_vendor) -> u64 {
+    u64 dev = 0
+    while dev < 32 {
+        u64 pfn = 0
+        while pfn < 8 {
+            u64 cfg = bus_base + pci_dev_off(dev, pfn)
+            u64 vd = mmio_r32(cfg, PCI_CFG_VENDOR_DEVICE)
+            if (vd & 0xffff) != 0xffff {
+                if (vd & 0xffff) == want_vendor {
+                    if pci_baseclass(cfg) == PCI_CLASS_DISPLAY { return (dev << 3) | pfn }
+                }
+            }
+            pfn = pfn + 1
+        }
+        dev = dev + 1
+    }
+    return 0xffff
+}
+
+// Read a BAR: 32-bit mem, 64-bit mem (type [2:1]==0b10 -> hi at off+4), or I/O.
+fn pci_bar(u64 cfg, u64 bar_off) -> u64 {
+    u64 lo = mmio_r32(cfg, bar_off)
+    if (lo & 0x1) != 0 { return lo & 0xfffffffc }
+    u64 base = lo & 0xfffffff0
+    if (lo & 0x6) == 0x4 {
+        u64 hi = mmio_r32(cfg, bar_off + 4)
+        base = base | (hi << 32)
+    }
+    return base
+}
+
 // ---- SMN-indirect register access on BAR5 (bar5 = pointer to BAR5 phys) ----
 fn smn_r32(u64 bar5, u64 reg) -> u64 {
     mmio_w32(bar5, SMN_INDEX2, reg << SMN_SHIFT)

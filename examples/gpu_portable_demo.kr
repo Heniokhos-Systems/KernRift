@@ -49,10 +49,28 @@ fn main() {
     check(smn_r32(bar, 0x0c400000), 0x0000cafe, "smn_r32 round-trip")
     check(mmio_r32(bar, 0x38), 0x31000000, "INDEX2 after smn_r32")
 
-    // 3) BAR base mask (strip low flag bits) — fake a config dword.
-    mmio_w32(bar, 0x00, 0xdfb00004)          // BAR value with mem-type/prefetch bits
-    // pci_bar_base reads via ecam addressing; emulate by pointing ecam at bar-0
-    check(mmio_r32(bar, 0x00) & 0xfffffff0, 0xdfb00000, "BAR base mask")
+    // 3) MCFG ECAM base parse (fake table: base 0xe0000000 at +0x2c)
+    u64 mcfg = alloc(0x40)
+    mmio_w32(mcfg, 0x2c, 0xe0000000)
+    mmio_w32(mcfg, 0x30, 0x00000000)
+    check(mcfg_ecam_base(mcfg), 0xe0000000, "mcfg_ecam_base")
+
+    // 4) PCI bus scan + BAR read against a synthetic ECAM bus window with an
+    //    AMD display device planted at dev=2 fn=0.
+    u64 busw = alloc(0x11000)
+    u64 cfg = busw + pci_dev_off(2, 0)
+    mmio_w32(cfg, 0x00, (0x747e << 16) | 0x1002)   // vendor/device
+    mmio_w32(cfg, 0x08, 0x03 << 24)                // base class = display
+    mmio_w32(cfg, 0x10, 0x00000004)                // BAR0 lo: 64-bit mem type
+    mmio_w32(cfg, 0x14, 0x000000f8)                // BAR0 hi
+    mmio_w32(cfg, 0x24, 0xdfb00000)                // BAR5: 32-bit mem
+
+    check(pci_scan_bus_for_gpu(busw, PCI_VENDOR_AMD), (2 << 3) | 0, "scan finds dev2.fn0")
+    check(pci_vendor(cfg), 0x1002, "pci_vendor")
+    check(pci_device(cfg), 0x747e, "pci_device")
+    check(pci_baseclass(cfg), 0x03, "pci_baseclass")
+    check(pci_bar(cfg, PCI_CFG_BAR0), 0xf800000000, "BAR0 (64-bit) VRAM")
+    check(pci_bar(cfg, 0x24), 0xdfb00000, "BAR5 (32-bit) regs")
 
     print_str("done\n")
     exit(0)
