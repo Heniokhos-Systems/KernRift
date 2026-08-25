@@ -3939,6 +3939,26 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
         xt_setup_pcbase_tok()
     }
 
+    // UEFI x86_64 (sub-project D): firmware enters the entry function via the
+    // Microsoft x64 (Win64) ABI — ImageHandle in rcx, SystemTable in rdx (then
+    // r8/r9), 32 bytes of shadow reserved by the caller. Record the entry's
+    // name token so the IR backend reads the Win64 argument registers for that
+    // ONE function's params; every other function keeps KernRift's internal
+    // SysV convention, so internal calls are unchanged. Gated on arch == 0:
+    // arm64 UEFI (BOOTAA64) needs nothing because AAPCS64 already passes
+    // arg0/arg1 in x0/x1 exactly as UEFI does, and the arm64 sentinel proves
+    // it. find_entry_node runs on the DCE'd AST (available here) and applies
+    // the same `_start`-then-`main` rule the finalize block uses to resolve the
+    // artifact's entry, so the flipped function is exactly the one firmware
+    // calls — not a helper the entry itself calls through SysV.
+    cg_uefi_entry_tok = 0
+    if emit_mode == 9 && arch == 0 {
+        uint64 uefi_entry_node = find_entry_node(root)
+        if uefi_entry_node != 0 {
+            cg_uefi_entry_tok = ast_data1(uefi_entry_node)
+        }
+    }
+
     // Generate code for each function (skip dead functions via DCE)
     uint32 child = ast_child(root)
     uint64 wchild = child

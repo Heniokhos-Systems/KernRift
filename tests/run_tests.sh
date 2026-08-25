@@ -3256,6 +3256,85 @@ fn main() {
         'add +rsp,0x20'
 fi
 
+# --- UEFI (IR backend) Win64 entry + call_ptr (sub-project D) ---------------
+# --emit=uefi enters through the Microsoft x64 (Win64) ABI: firmware passes
+# ImageHandle in rcx and SystemTable in rdx to the entry, and a call_ptr into a
+# firmware service must place args in rcx/rdx/r8/r9 with 32-byte shadow, NOT
+# SysV rdi/rsi. This differs from the --target=windows legacy cpw tests above
+# in two load-bearing ways: it exercises the DEFAULT IR backend (the one that
+# actually compiles uefi apps), and it does so on a BARE-METAL --target=none
+# build where target_os is 4, not 2 -- so the Win64 routing is keyed on
+# --emit=uefi, not on the OS. The artifact is a flat PE whose entry function
+# (main) sits at file offset == RVA == the reported entry=, so disassembling
+# from there yields main directly. Compile-only: the placement bytes are the
+# artifact (the OVMF boot in tests/target_none/boot_gate.sh L7 is what proves
+# the same bytes EXECUTE against real firmware).
+if ! command -v objdump >/dev/null 2>&1; then
+    echo "  uefi_win64_call_ptr_ir: SKIP (objdump not installed)"
+else
+    UEFI_CP_SRC='static uint64 sink = 0
+fn svc(uint64 a, uint64 b, uint64 c, uint64 d, uint64 e) -> uint64 { return ((((a + b) + c) + d) + e) }
+fn main(uint64 image_handle, uint64 system_table) -> uint64 {
+    uint64 fp = fn_addr("svc")
+    uint64 r = call_ptr(fp, system_table, image_handle, 3, 4, 5)
+    sink = r
+    return 0
+}'
+    UEFI_CP_KR="$DIR/../uefi_cp_$$.kr"
+    UEFI_CP_EFI="/tmp/krc_uefi_cp_$$.efi"
+    printf '%s\n' "$UEFI_CP_SRC" > "$UEFI_CP_KR"
+    UEFI_CP_ENTRY=$($KRC --arch=x86_64 --target=none --emit=uefi "$UEFI_CP_KR" -o "$UEFI_CP_EFI" 2>&1 \
+        | sed -n 's/^uefi: .* entry=\([0-9][0-9]*\) .*$/\1/p')
+    UEFI_CP_DIS=""
+    if [ -n "$UEFI_CP_ENTRY" ] && [ -f "$UEFI_CP_EFI" ]; then
+        # main only: start at its offset (svc is emitted earlier, at a lower
+        # offset, so it is excluded); a 512-byte window covers main entirely.
+        UEFI_CP_DIS=$(objdump -D -b binary -m i386:x86-64 -M intel \
+            --start-address="$UEFI_CP_ENTRY" --stop-address=$((UEFI_CP_ENTRY + 512)) \
+            "$UEFI_CP_EFI" 2>/dev/null)
+    fi
+    rm -f "$UEFI_CP_KR" "$UEFI_CP_EFI"
+
+    # Reuse cpw_assert if the cpw block defined it (objdump+xxd present);
+    # otherwise define an equivalent here so this test never silently skips.
+    if ! type cpw_assert >/dev/null 2>&1; then
+        cpw_assert() {
+            local _name="$1"; shift; local _dis="$1"; shift
+            TOTAL=$((TOTAL + 1))
+            if [ -z "$_dis" ]; then FAIL=$((FAIL + 1)); echo "FAIL: $_name (no disassembly produced)"; return; fi
+            local _miss="" _re
+            for _re in "$@"; do printf '%s\n' "$_dis" | grep -qiE "$_re" || _miss="$_miss [$_re]"; done
+            if [ -z "$_miss" ]; then PASS=$((PASS + 1)); echo "  $_name: PASS"
+            else FAIL=$((FAIL + 1)); echo "FAIL: $_name (missing:$_miss)"; fi
+        }
+    fi
+
+    # Entry: ImageHandle in rcx, SystemTable in rdx (Win64), read into the
+    # callee-saved homes the IR backend picks. SysV would read rdi/rsi.
+    cpw_assert "uefi_win64_entry_params" "$UEFI_CP_DIS" \
+        'mov +r[a-z0-9]+,rcx' \
+        'mov +r[a-z0-9]+,rdx'
+    # 5-arg call_ptr: shadow(32)+1 overflow=40 -> 16-aligned 0x30; 5th arg at
+    # [rsp+0x20]; args 1-4 in rcx/rdx/r8/r9; indirect call; matching cleanup.
+    cpw_assert "uefi_win64_call_ptr_placement" "$UEFI_CP_DIS" \
+        'sub +rsp,0x30' \
+        'mov +QWORD PTR \[rsp\+0x20\],' \
+        'mov +rcx,' 'mov +rdx,' 'mov +r8,' 'mov +r9,' \
+        'call +rax' \
+        'add +rsp,0x30'
+    # NOT SysV: main must not marshal call arguments through rdi/rsi. (main
+    # calls nothing directly -- only through the call_ptr -- so any rdi/rsi
+    # here would be the SysV arg path leaking into the firmware call.)
+    TOTAL=$((TOTAL + 1))
+    if [ -z "$UEFI_CP_DIS" ]; then
+        FAIL=$((FAIL + 1)); echo "FAIL: uefi_win64_not_sysv (no disassembly produced)"
+    elif printf '%s\n' "$UEFI_CP_DIS" | grep -qiE 'mov +rdi,|mov +rsi,'; then
+        FAIL=$((FAIL + 1)); echo "FAIL: uefi_win64_not_sysv (rdi/rsi used as arg registers)"
+    else
+        PASS=$((PASS + 1)); echo "  uefi_win64_not_sysv: PASS (Win64 placement, no SysV rdi/rsi)"
+    fi
+fi
+
 # --- uint16 pointer operations ---
 run_test "uint16_store_load" 'fn main() {
     uint64 buf = alloc(64)

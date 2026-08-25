@@ -105,6 +105,19 @@ static uint64 extern_call_count = 0
 // Set via set_emit_mode() before the AST walk.
 static uint64 cg_emit_mode = 0
 
+// --emit=uefi (mode 9), x86_64 ONLY: the name token of the function firmware
+// enters through (the resolved entry — `_start` if live, else `main`). UEFI
+// firmware calls that entry with the Microsoft x64 (Win64) ABI: ImageHandle in
+// rcx, SystemTable in rdx (then r8/r9), 32-byte shadow reserved by the caller.
+// The IR backend's param-init reads this token to decide, for that ONE
+// function, whether to read the Win64 argument registers instead of KernRift's
+// internal SysV ones — every other function keeps SysV, so internal
+// KernRift->KernRift calls are unchanged. 0 means "no uefi entry" (every
+// non-uefi build, and arm64 uefi, which needs nothing: AAPCS64 already puts
+// arg0/arg1 in x0/x1 exactly as UEFI does). Set in compile() BEFORE the emit
+// loop, from find_entry_node(root).
+static uint64 cg_uefi_entry_tok = 0
+
 // LKM slab-allocator usage flags. When kernel-mode alloc()/dealloc() are
 // emitted, these record that __kmalloc_noprof / kfree must be added to the
 // .ko symtab as UND globals so the module loader resolves them. emit_elf_lkm

@@ -3356,13 +3356,28 @@ fn ir_lower_expr(uint64 node) -> uint64 {
                 write(2, cpe, str_len(cpe))
                 exit(1)
             }
-            // Emit ARGs for call arguments
+            // Emit ARGs for call arguments.
+            //
+            // UEFI x86_64: a call_ptr IS the firmware-service call primitive,
+            // so under --emit=uefi it must use the Microsoft x64 (Win64) ABI
+            // regardless of target_os (which is 4/bare-metal here, not 2). The
+            // args are tagged with a +200 marker on the IR_ARG index so the
+            // op-51 emitter places them in rcx/rdx/r8/r9 (args 1-4) or the
+            // overflow buffer (args 5+, e.g. GetVariable's 5th), and op-87
+            // reserves the 32-byte shadow. The marker range [200,264) is free:
+            // op-51 otherwise uses 0-5 (reg), 6-63 (SysV overflow) and 100+
+            // (asm-input), none of which reach 200. Direct calls (IR_CALL) are
+            // untouched, so KernRift's internal SysV convention is unchanged.
+            uint64 cp_win64 = 0
+            if cg_emit_mode == 9 && target_arch == 0 { cp_win64 = 1 }
             uint64 cpi = 0
             while cpi < cp_count {
                 uint64 avp = cp_arg_vregs + cpi * 8
                 uint64 av = 0
                 unsafe { *(avp as uint64) -> av }
-                ir_emit(IR_ARG, 0, av, 0, cpi, ir_current_bb)
+                uint64 arg_idx = cpi
+                if cp_win64 != 0 { arg_idx = cpi + 200 }
+                ir_emit(IR_ARG, 0, av, 0, arg_idx, ir_current_bb)
                 cpi = cpi + 1
             }
             uint64 dest = ir_new_vreg()
@@ -6253,6 +6268,17 @@ static uint64 ir_callee_save_bytes = 0
 // code. Every emitter that can pick a register for itself has to consult
 // this. Mirrors ir_xtensa.kr's xt_cur_is_naked.
 static uint64 ir_x86_naked_fn = 0
+
+// Is the x86_64 function currently being emitted the UEFI firmware entry?
+// Set once per function in ir_emit_x86_function (BEFORE lowering), by matching
+// the function name against cg_uefi_entry_tok. Read ONLY by the op-61
+// param-init handler: when set, param 0-3 are read from the Win64 argument
+// registers (rcx/rdx/r8/r9) rather than SysV's (rdi/rsi/rdx/rcx), because
+// firmware entered this function through the Microsoft x64 ABI. Every other
+// function keeps SysV param-init, so the KernRift-internal calling convention
+// is untouched and only the firmware->entry boundary flips. Stays 0 on every
+// non-uefi build and on arm64 (whose ABI already matches UEFI).
+static uint64 ir_uefi_entry_fn = 0
 
 // Colour->physical-register table, shared by every backend. Sized once for
 // the LARGEST colour file any of them uses (arm64 wide: 23), so an arch
@@ -10333,6 +10359,53 @@ fn ir_emit_x86_insn(uint64 ii) {
             }
         } else {
             // Param init: imm = param index
+            //
+            // UEFI x86_64 entry: firmware entered via the Win64 ABI, so the
+            // first four params are in rcx(1)/rdx(2)/r8(8)/r9(9) and the fifth
+            // onward sit on the caller's stack ABOVE the 32-byte shadow it
+            // reserved. imm < 100 excludes the asm-output path (imm >= 100),
+            // which an entry function never takes. Only the entry function
+            // sets ir_uefi_entry_fn, so every other function falls through to
+            // the SysV mapping below and the internal ABI is untouched.
+            if ir_uefi_entry_fn != 0 && imm < 100 {
+                uint64 wpr = 1
+                if imm == 1 { wpr = 2 }
+                if imm == 2 { wpr = 8 }
+                if imm == 3 { wpr = 9 }
+                if imm < 4 {
+                    if dst_r != 0xFFFFFFFF {
+                        ir_emit_mov_r64_r64(dst_r, wpr)
+                    } else {
+                        ir_emit_mov_r64_r64(0, wpr)
+                        ir_emit_store_spill(0, dest_v)
+                    }
+                } else {
+                    // [rsp + frame + callee_saves + 8(ret) + 32(shadow) + (imm-4)*8]
+                    uint64 w_ov_off = ir_frame_size + ir_callee_save_bytes + 8 + 32 + (imm - 4) * 8
+                    uint64 wtgt = 0
+                    if dst_r != 0xFFFFFFFF { wtgt = dst_r }
+                    uint8 wov_rex = 0x48
+                    if wtgt >= 8 { wov_rex = wov_rex | 4 }
+                    emit_byte(wov_rex)
+                    emit_byte(0x8B)
+                    if w_ov_off < 128 {
+                        uint8 wovm = 0x44 | ((wtgt & 7) << 3)
+                        emit_byte(wovm)
+                        emit_byte(0x24)
+                        uint8 wovo = w_ov_off
+                        emit_byte(wovo)
+                    } else {
+                        uint8 wovm = 0x84 | ((wtgt & 7) << 3)
+                        emit_byte(wovm)
+                        emit_byte(0x24)
+                        emit_u32_le(w_ov_off)
+                    }
+                    if dst_r == 0xFFFFFFFF {
+                        ir_emit_store_spill(0, dest_v)
+                    }
+                }
+                return
+            }
             // SysV ABI param regs: rdi(7), rsi(6), rdx(2), rcx(1), r8(8), r9(9)
             uint64 pr = 7
             if imm == 1 { pr = 6 }
@@ -10391,6 +10464,37 @@ fn ir_emit_x86_insn(uint64 ii) {
 
     if op == 51 {
         // IR_ARG: move src to the correct argument register
+        //
+        // Win64 marked arg (UEFI call_ptr): imm in [200,264) carries a
+        // firmware-call argument at index imm-200. Args 1-4 go in
+        // rcx(1)/rdx(2)/r8(8)/r9(9); args 5+ are recorded in the overflow
+        // buffer (slot index-4), which op-87's Win64 path stores at
+        // [rsp+32+slot*8] above the shadow space. Checked FIRST so the marker
+        // never collides with the asm-input path (imm >= 100). Only call_ptr
+        // under --emit=uefi produces this marker, so direct calls are
+        // untouched. The bit pattern is moved in a GPR exactly as the SysV arg
+        // path does — UEFI firmware services take pointers/integers, never
+        // floats, so no xmm placement is needed.
+        if imm >= 200 {
+            uint64 w_idx = imm - 200
+            if w_idx < 4 {
+                uint64 wtarget = 1
+                if w_idx == 1 { wtarget = 2 }
+                if w_idx == 2 { wtarget = 8 }
+                if w_idx == 3 { wtarget = 9 }
+                uint64 wsrc = ir_resolve_src(s1_v, 0)
+                ir_emit_mov_r64_r64(wtarget, wsrc)
+            } else {
+                uint64 woi = w_idx - 4
+                if woi < 64 {
+                    uint64 wop_ptr = ir_overflow_args + woi * 8
+                    uint64 wsv = s1_v
+                    unsafe { *(wop_ptr as uint64) = wsv }
+                    if woi >= ir_overflow_arg_count { ir_overflow_arg_count = woi + 1 }
+                }
+            }
+            return
+        }
         // SysV ABI: rdi(7), rsi(6), rdx(2), rcx(1), r8(8), r9(9)
         uint64 target = ir_x86_arg_reg(imm)
         if imm < 6 {
@@ -10566,6 +10670,137 @@ fn ir_emit_x86_insn(uint64 ii) {
         // imm is the argument count. There is no f64 flag: an f64 return
         // arrives as a bit pattern in rax, exactly like an integer one.
         uint64 ci_argc = imm
+
+        // UEFI x86_64: this IR_CALL_IND is a firmware-service call_ptr and must
+        // use the Microsoft x64 (Win64) ABI. Args 1-4 are already in
+        // rcx/rdx/r8/r9 (placed by the marked IR_ARGs above); args 5+ are in
+        // the overflow buffer. Reserve 32 bytes of shadow space ALWAYS (ABI
+        // mandated, even for <=4 args), plus one 8-byte slot per overflow arg,
+        // 16-aligned — mirroring the committed legacy Win64 call_ptr path
+        // (codegen.kr). call_ptr is the ONLY producer of IR_CALL_IND, so under
+        // --emit=uefi every one of them is a firmware call: gating on
+        // cg_emit_mode alone is exact.
+        if cg_emit_mode == 9 && target_arch == 0 {
+            uint64 w_overflow = ir_overflow_arg_count
+            uint64 w_stack = 32 + w_overflow * 8
+            uint64 w_rem = w_stack & 15
+            if w_rem != 0 { w_stack = w_stack + 16 - w_rem }
+            // sub rsp, w_stack
+            if w_stack < 128 {
+                emit_byte(0x48); emit_byte(0x83); emit_byte(0xEC)
+                uint8 ws8 = w_stack
+                emit_byte(ws8)
+            } else {
+                emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC)
+                emit_u32_le(w_stack)
+            }
+            // Store overflow args at [rsp + 32 + i*8], re-resolving each vreg
+            // against the shifted frame (+w_stack). Uses rax as scratch; the
+            // reg args (rcx/rdx/r8/r9) were placed before this and the wide
+            // colour file caps every IR_ARG operand to the callee-saved prefix,
+            // so an overflow vreg never lives in rcx/rdx/r8/r9 — nothing the
+            // reg args need is clobbered here.
+            uint64 wi = 0
+            while wi < w_overflow {
+                uint64 wop_ptr = ir_overflow_args + wi * 8
+                uint64 warg_vreg = 0
+                unsafe { *(wop_ptr as uint64) -> warg_vreg }
+                uint64 warg_r = ir_get_phys_reg(warg_vreg)
+                if warg_r == 0xFFFFFFFF {
+                    uint64 warg_xh = ir_x86_xmm_home(warg_vreg)
+                    if warg_xh != 0xFFFFFFFF {
+                        ir_emit_movq_r_x(0, warg_xh)
+                        warg_r = 0
+                    }
+                }
+                uint64 wsofs = 32 + wi * 8
+                if warg_r != 0xFFFFFFFF {
+                    // mov [rsp + wsofs], warg_r
+                    uint8 wst_rex = 0x48
+                    if warg_r >= 8 { wst_rex = wst_rex | 4 }
+                    emit_byte(wst_rex); emit_byte(0x89)
+                    if wsofs < 128 {
+                        uint8 wstm = 0x44 | ((warg_r & 7) << 3)
+                        emit_byte(wstm); emit_byte(0x24)
+                        uint8 wso8 = wsofs
+                        emit_byte(wso8)
+                    } else {
+                        uint8 wstm = 0x84 | ((warg_r & 7) << 3)
+                        emit_byte(wstm); emit_byte(0x24)
+                        emit_u32_le(wsofs)
+                    }
+                } else {
+                    // Spilled: load from [rsp + w_stack + (vreg-1)*8] into rax,
+                    // store to [rsp + wsofs].
+                    uint64 wadj = w_stack + (warg_vreg - 1) * 8
+                    emit_byte(0x48); emit_byte(0x8B)
+                    if wadj < 128 {
+                        emit_byte(0x44); emit_byte(0x24)
+                        uint8 wa8 = wadj
+                        emit_byte(wa8)
+                    } else {
+                        emit_byte(0x84); emit_byte(0x24)
+                        emit_u32_le(wadj)
+                    }
+                    emit_byte(0x48); emit_byte(0x89)
+                    if wsofs < 128 {
+                        emit_byte(0x44); emit_byte(0x24)
+                        uint8 wso8b = wsofs
+                        emit_byte(wso8b)
+                    } else {
+                        emit_byte(0x84); emit_byte(0x24)
+                        emit_u32_le(wsofs)
+                    }
+                }
+                wi = wi + 1
+            }
+            // Resolve the fn pointer into rax AFTER the stores (they use rax as
+            // scratch). A spilled pointer's slot moved up by w_stack.
+            uint64 wptr_phys = ir_get_phys_reg(s1_v)
+            if wptr_phys == 0xFFFFFFFF {
+                uint64 wpxh = ir_x86_xmm_home(s1_v)
+                if wpxh != 0xFFFFFFFF {
+                    ir_emit_movq_r_x(0, wpxh)
+                    wptr_phys = 0
+                }
+            }
+            if wptr_phys != 0xFFFFFFFF {
+                ir_emit_mov_r64_r64(0, wptr_phys)
+            } else {
+                uint64 wpoff = w_stack + (s1_v - 1) * 8
+                emit_byte(0x48); emit_byte(0x8B)
+                if wpoff < 128 {
+                    emit_byte(0x44); emit_byte(0x24)
+                    uint8 wpo8 = wpoff
+                    emit_byte(wpo8)
+                } else {
+                    emit_byte(0x84); emit_byte(0x24)
+                    emit_u32_le(wpoff)
+                }
+            }
+            // call rax
+            emit_byte(0xFF); emit_byte(0xD0)
+            // add rsp, w_stack
+            if w_stack < 128 {
+                emit_byte(0x48); emit_byte(0x83); emit_byte(0xC4)
+                uint8 wc8 = w_stack
+                emit_byte(wc8)
+            } else {
+                emit_byte(0x48); emit_byte(0x81); emit_byte(0xC4)
+                emit_u32_le(w_stack)
+            }
+            ir_overflow_arg_count = 0
+            if ir_use_count_get(dest_v) == 0 { return }
+            uint64 w_result_reg = 0
+            if dst_r != 0xFFFFFFFF && dst_r != w_result_reg {
+                ir_emit_mov_r64_r64(dst_r, w_result_reg)
+            }
+            if dst_r == 0xFFFFFFFF {
+                ir_emit_store_spill(w_result_reg, dest_v)
+            }
+            return
+        }
+
         uint64 ci_stack = ir_x86_emit_call_stack_args(ci_argc)
         if ci_stack == 0 {
             // Unchanged six-or-fewer path, byte for byte.
@@ -14559,6 +14794,18 @@ fn ir_emit_x86_function(uint64 fn_node) {
     // this `f64_fn() * local_f64` picks IR_MUL instead of IR_FMUL
     // inside the BinOp lowering (silent wrong math).
     uint32 ir_fn_name_tok = ast_data1(fn_node)
+
+    // UEFI entry detection (x86_64 only). If this is the function firmware
+    // enters (cg_uefi_entry_tok, set in compile()), its parameters arrive in
+    // the Win64 argument registers, so the op-61 param-init handler must read
+    // rcx/rdx/r8/r9. cg_uefi_entry_tok is 0 on every non-uefi build and on
+    // arm64, so this stays 0 there and SysV param-init is used unchanged.
+    ir_uefi_entry_fn = 0
+    if cg_uefi_entry_tok != 0 && target_arch == 0 {
+        uint64 wu_fn = ir_fn_name_tok
+        if tok_text_eq(wu_fn, cg_uefi_entry_tok) != 0 { ir_uefi_entry_fn = 1 }
+    }
+
     uint32 ir_ret_type_tok = ast_data2(fn_node)
     uint64 wirt = ir_ret_type_tok
     if wirt != 0 {
