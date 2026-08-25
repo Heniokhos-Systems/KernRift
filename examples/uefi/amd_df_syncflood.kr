@@ -1,0 +1,172 @@
+// amd_df_syncflood.kr — KernRift UEFI application.
+//
+// Disables AMD Data Fabric sync-flood propagation on this MSI MAG B650
+// TOMAHAWK (Ryzen 9 7900X / Raphael) by editing the SUPPRESSED AGESA setup
+// questions that live in the `AmdSetupRPL` NVRAM varstore. MSI hides these
+// from the visible BIOS menu, but the questions exist in the setup database;
+// this app reads the varstore via the UEFI Runtime Service GetVariable,
+// reports the current sync-flood setting, and (only when DO_WRITE == 1)
+// writes the three bytes that turn the platform-resetting sync flood into a
+// contained/logged error, then persists it via SetVariable.
+//
+// WHY: an uncorrected PCIe error from the dGPU (Unsupported Request) is
+// escalated by the DF into a whole-machine sync flood (FCH reset reason
+// 0x08000800). There is no PCIe DPC/AER containment on this board and no
+// visible BIOS toggle, so the setup variable is the only lever.
+//
+// Values verified byte-for-byte against the live BIOS IFR (option labels,
+// not the double-negative question names):
+//   AmdSetupRPL[0x39] : "Disable DF to external downstream IP Sync Flood
+//                        Propagation"  -> 0x01 = "Sync flood disabled"
+//   AmdSetupRPL[0x3A] : "Disable DF sync flood propagation"
+//                        -> 0x01 = "Sync flood disabled"
+//   AmdSetupRPL[0x3B] : "Freeze DF module queues on error"
+//                        -> 0x00 = "Disabled" (sets DisImmSyncFloodOnFatalError)
+// (0x00 for 0x39/0x3A is "Sync flood ENABLED" — the wrong way. Do not flip.)
+//
+// Build:
+//   build/krc2 --emit=uefi --target=none --arch=x86_64 \
+//       examples/uefi/amd_df_syncflood.kr -o BOOTX64.EFI
+// Stage as EFI/BOOT/BOOTX64.EFI on a FAT ESP and boot it (UEFI shell entry,
+// or a one-shot boot option). It changes NVRAM; a reboot applies the setting.
+// Recovery if the board won't POST: clear CMOS (JBAT1) — the varstore reverts.
+
+import "../../std/uart_16550.kr"
+
+// ============================================================
+// SAFETY GATE. 0 = read-only dry run (GetVariable + report only, NO write).
+// 1 = apply the change (patch + SetVariable). Rebuild to flip it — the write
+// is never silent.
+// ============================================================
+static uint64 DO_WRITE = 0
+
+// ---- EFI_SYSTEM_TABLE / EFI_RUNTIME_SERVICES field byte offsets (UEFI spec) ----
+static uint64 ST_RUNTIME_SERVICES = 88   // EFI_SYSTEM_TABLE.RuntimeServices
+static uint64 RS_GET_VARIABLE      = 72  // EFI_RUNTIME_SERVICES.GetVariable
+static uint64 RS_SET_VARIABLE      = 88  // EFI_RUNTIME_SERVICES.SetVariable
+
+// ---- the three AmdSetupRPL byte offsets (from the live IFR) ----
+static uint64 OFF_EXTIP   = 0x39   // ext downstream IP sync flood prop
+static uint64 OFF_GENERAL = 0x3A   // DF sync flood prop (general)
+static uint64 OFF_FREEZE  = 0x3B   // freeze DF module queues on error
+
+// ---- static storage (no heap on bare metal; an array name decays to its
+//      base address, which is what the by-pointer service args need) ----
+// NOTE: array size goes on the TYPE (`uint8[N] name`), and the array name
+// decays to its base address — `static uint8 name[N]` mis-parses as a scalar.
+// No initializer needed: a bare static array is zero-filled (BSS).
+static uint8[32] g_name    // CHAR16 "AmdSetupRPL\0"
+static uint8[16] g_guid    // AmdSetupRPL varstore GUID
+static uint8[8]  g_size    // UINTN DataSize (in/out)
+static uint8[4]  g_attr    // UINT32 Attributes (out from GetVariable)
+static uint8[4096] g_data  // varstore data buffer
+
+// Build the CHAR16 (UTF-16LE) variable name "AmdSetupRPL". Even bytes carry
+// the ASCII code; odd bytes and the terminator stay 0 (static zero-init).
+fn fill_name() {
+    store8(g_name +  0, 65)    // 'A'
+    store8(g_name +  2, 109)   // 'm'
+    store8(g_name +  4, 100)   // 'd'
+    store8(g_name +  6, 83)    // 'S'
+    store8(g_name +  8, 101)   // 'e'
+    store8(g_name + 10, 116)   // 't'
+    store8(g_name + 12, 117)   // 'u'
+    store8(g_name + 14, 112)   // 'p'
+    store8(g_name + 16, 82)    // 'R'
+    store8(g_name + 18, 80)    // 'P'
+    store8(g_name + 20, 76)    // 'L'
+}
+
+// EFI_GUID {3A997502-647A-4C82-998E-52EF9486A247} in on-disk byte order:
+// Data1 (u32 LE), Data2 (u16 LE), Data3 (u16 LE), Data4[8] as-is.
+fn fill_guid() {
+    store8(g_guid +  0, 0x02); store8(g_guid +  1, 0x75)
+    store8(g_guid +  2, 0x99); store8(g_guid +  3, 0x3A)
+    store8(g_guid +  4, 0x7A); store8(g_guid +  5, 0x64)
+    store8(g_guid +  6, 0x82); store8(g_guid +  7, 0x4C)
+    store8(g_guid +  8, 0x99); store8(g_guid +  9, 0x8E)
+    store8(g_guid + 10, 0x52); store8(g_guid + 11, 0xEF)
+    store8(g_guid + 12, 0x94); store8(g_guid + 13, 0x86)
+    store8(g_guid + 14, 0xA2); store8(g_guid + 15, 0x47)
+}
+
+// Print the resolved option string for a "Disable ... Sync Flood" question
+// (offsets 0x39 / 0x3A). Never print a bare number for a polarity-sensitive
+// field.
+fn report_flood(uint64 v) {
+    if v == 0   { println_str("  = value 0  : Sync flood ENABLED  (this arms the reset)") }
+    if v == 1   { println_str("  = value 1  : Sync flood disabled  (contained -- what we want)") }
+    if v == 255 { println_str("  = value 255: Auto  (= hardware default = flood ON)") }
+    if v == 3   { println_str("  = value 3  : Auto  (= flood ON)") }
+}
+
+// Print the resolved option for "Freeze DF module queues on error" (0x3B):
+// 0 = Disabled (sets DisImmSyncFloodOnFatalError = no immediate flood).
+fn report_freeze(uint64 v) {
+    if v == 0 { println_str("  = value 0  : Disabled  (sets DisImmSyncFloodOnFatalError -- what we want)") }
+    if v == 1 { println_str("  = value 1  : Enabled  (freezes queues AND forces a flood)") }
+    if v == 3 { println_str("  = value 3  : Auto  (= flood ON on fatal)") }
+}
+
+fn main(uint64 image_handle, uint64 system_table) -> uint64 {
+    uart16550_init()
+    println_str("=== KernRift: AMD DF sync-flood fixer (AmdSetupRPL) ===")
+
+    fill_name()
+    fill_guid()
+
+    uint64 rs     = load64(system_table + ST_RUNTIME_SERVICES)
+    uint64 getvar = load64(rs + RS_GET_VARIABLE)
+    uint64 setvar = load64(rs + RS_SET_VARIABLE)
+
+    // GetVariable(Name, Guid, &Attributes, &DataSize, Data)
+    store64(g_size, 4096)
+    uint64 st = call_ptr(getvar, g_name, g_guid, g_attr, g_size, g_data)
+    if st != 0 {
+        // High bit set = EFI error. EFI_NOT_FOUND (…0E) is expected under OVMF,
+        // where AmdSetupRPL does not exist -- a clean nonzero return still
+        // proves the 5-arg Win64 service call executed correctly.
+        println_str("GetVariable returned a non-success status (hex-ish decimal):")
+        println(st)
+        return 1
+    }
+
+    uint64 sz = load64(g_size)
+    println_str("GetVariable OK. varstore size:")
+    println(sz)
+
+    uint64 cur_ext    = load8(g_data + OFF_EXTIP)
+    uint64 cur_gen    = load8(g_data + OFF_GENERAL)
+    uint64 cur_freeze = load8(g_data + OFF_FREEZE)
+
+    println_str("[0x39] Disable DF to external downstream IP Sync Flood Propagation")
+    report_flood(cur_ext)
+    println_str("[0x3A] Disable DF sync flood propagation")
+    report_flood(cur_gen)
+    println_str("[0x3B] Freeze DF module queues on error")
+    report_freeze(cur_freeze)
+
+    if DO_WRITE == 0 {
+        println_str("DRY RUN: no NVRAM written. Rebuild with DO_WRITE=1 to apply.")
+        return 0
+    }
+
+    // Apply the verified change. 0x39/0x3A -> 1 ("Sync flood disabled");
+    // 0x3B -> 0 ("Disabled").
+    store8(g_data + OFF_EXTIP,   1)
+    store8(g_data + OFF_GENERAL, 1)
+    store8(g_data + OFF_FREEZE,  0)
+
+    // Preserve the variable's attributes (NV|BS|RT = 0x7) that GetVariable
+    // reported. SetVariable(Name, Guid, Attributes, DataSize, Data).
+    uint64 attrs = load32(g_attr)
+    uint64 st2 = call_ptr(setvar, g_name, g_guid, attrs, sz, g_data)
+    if st2 != 0 {
+        println_str("SetVariable FAILED (status below). No change persisted.")
+        println(st2)
+        return 2
+    }
+
+    println_str("SetVariable OK: DF sync-flood propagation DISABLED. Reboot to apply.")
+    return 0
+}
