@@ -22,6 +22,7 @@ import "gpu_cp_load.kr"
 import "gpu_mes_load.kr"
 import "gpu_pm4.kr"
 import "gpu_queue.kr"
+import "gpu_mes_queue.kr"
 
 // ---- VRAM bump allocator. ctx = [host_base(0), gpu_base(8), cursor(16)] ----
 fn gc_valloc_init(u64 ctx, u64 host_base, u64 gpu_base) {
@@ -79,16 +80,69 @@ fn gc_init(u64 bar5, u64 db2, u64 mp1, u64 ctx,
     u64 mes_md = gc_stage(ctx, mes_fw + mes_data_off(mes_fw),  mes_data_size(mes_fw))
     mes_load_direct(bar5, mes_ic, mes_md, mes_uc_start(mes_fw))
 
-    // 6. compute queue: ring + MQD + rptr/wptr, fill + map + (doorbell at submit)
-    u64 ring_off = gc_valloc(ctx, 0x1000, 0x100)      // 1 KiB ring
-    u64 mqd_off  = gc_valloc(ctx, 0x800, 0x1000)
-    u64 rptr_off = gc_valloc(ctx, 0x8, 0x100)
-    u64 wptr_off = gc_valloc(ctx, 0x8, 0x100)
-    u64 mqd_host = gc_vhost(ctx, mqd_off)
+    // 6. compute queue via MES (SKIP the dead KIQ MAP_QUEUES path):
+    //    program the MES scheduler-ring HQD directly, then SET_HW_RESOURCES ->
+    //    poll -> ADD_QUEUE -> poll. On gfx11 the doorbell-routing mux is owned
+    //    by MES, so this is the only live queue-map path.
+
+    // 6a. compute queue resources (the queue ADD_QUEUE maps). Its MQD is the
+    //     v11 compute MQD (gpu_queue.kr mqd_init); ADD_QUEUE.mqd_addr -> it.
+    //     Its doorbell (CQ_DB) is its OWN dword index, separate from the MES ring.
+    u64 cq_ring_off = gc_valloc(ctx, 0x1000, 0x100)   // 1024-dword ring (log2=10)
+    u64 cq_mqd_off  = gc_valloc(ctx, 0x800, 0x1000)
+    u64 cq_rptr_off = gc_valloc(ctx, 0x8, 0x100)
+    u64 cq_wptr_off = gc_valloc(ctx, 0x8, 0x100)
+    u64 cq_mqd_host = gc_vhost(ctx, cq_mqd_off)
     u64 z = 0
-    while z < 0x800 { store32(mqd_host + z, 0); z = z + 4 }
-    mqd_init(mqd_host, gc_vgpu(ctx, mqd_off), gc_vgpu(ctx, ring_off), 10,
-             0x40, gc_vgpu(ctx, rptr_off), gc_vgpu(ctx, wptr_off))
-    // caller: build MAP_QUEUES on the KIQ ring + doorbell_ring(db2,...) to submit.
+    while z < 0x800 { store32(cq_mqd_host + z, 0); z = z + 4 }
+    u64 CQ_DB = 0x10                                   // compute queue doorbell idx
+    mqd_init(cq_mqd_host, gc_vgpu(ctx, cq_mqd_off), gc_vgpu(ctx, cq_ring_off), 10,
+             CQ_DB, gc_vgpu(ctx, cq_rptr_off), gc_vgpu(ctx, cq_wptr_off))
+
+    // 6b. MES scheduler ring + its HQD (this is what consumes our packets).
+    u64 sr_ring_off = gc_valloc(ctx, 0x1000, 0x100)   // 1024-dword MES ring (log2=10)
+    u64 sr_mqd_off  = gc_valloc(ctx, 0x800, 0x1000)
+    u64 sr_eop_off  = gc_valloc(ctx, 0x800, 0x100)    // MES_EOP_SIZE = 2048
+    u64 sr_rptr_off = gc_valloc(ctx, 0x8, 0x100)
+    u64 sr_wptr_off = gc_valloc(ctx, 0x8, 0x100)
+    u64 sr_mqd_host = gc_vhost(ctx, sr_mqd_off)
+    u64 SR_DB = 0x08                                   // MES ring doorbell idx (even; 64-bit)
+    mes_sched_mqd_init(sr_mqd_host, gc_vgpu(ctx, sr_mqd_off), gc_vgpu(ctx, sr_ring_off),
+                       gc_vgpu(ctx, sr_eop_off), 10, SR_DB,
+                       gc_vgpu(ctx, sr_rptr_off), gc_vgpu(ctx, sr_wptr_off))
+    mes_sched_hqd_program(bar5, sr_mqd_host, 0)        // pipe 0 = AMDGPU_MES_SCHED_PIPE
+
+    // 6c. MES scheduler context + fence buffers (bump-allocated in VRAM).
+    u64 sch_ctx_off  = gc_valloc(ctx, 0x1000, 0x1000)  // g_sch_ctx_gpu_mc_ptr
+    u64 qfence_off   = gc_valloc(ctx, 0x1000, 0x1000)  // query_status_fence_gpu_mc_ptr
+    u64 shr_stat_off = gc_valloc(ctx, 0x8, 0x100)      // SET_HW_RESOURCES completion fence
+    u64 aq_stat_off  = gc_valloc(ctx, 0x8, 0x100)      // ADD_QUEUE completion fence
+    u64 frame_off    = gc_valloc(ctx, 0x100, 0x100)    // 256-byte packet scratch
+    u64 frame_host   = gc_vhost(ctx, frame_off)
+    store64(gc_vhost(ctx, shr_stat_off), 0)            // clear poll targets
+    store64(gc_vhost(ctx, aq_stat_off), 0)
+
+    // 6d. SET_HW_RESOURCES: tell MES its HW once. IP bases are SOC15 seg0
+    //     (GC0/MMHUB/OSS). Fence addr = GPU MC of shr_stat; poll its host mirror.
+    mes_build_set_hw_resources(frame_host, 0xfffe, 0xfffe, 0,
+        0xff,
+        gc_vgpu(ctx, sch_ctx_off), gc_vgpu(ctx, qfence_off),
+        NAVI32_GC0, NAVI32_MMHUB, NAVI32_OSS,
+        gc_vgpu(ctx, shr_stat_off), 1)
+    u64 sw = mes_submit_sched(gc_vhost(ctx, sr_ring_off), gc_vgpu(ctx, sr_ring_off),
+                              0, 1024, db2, SR_DB, frame_host)
+    if mes_poll_fence(gc_vhost(ctx, shr_stat_off), 1) != 1 { return 6 }
+
+    // 6e. ADD_QUEUE: map the compute queue through MES.
+    u64 proc_ctx_off = gc_valloc(ctx, 0x1000, 0x1000)
+    u64 gang_ctx_off = gc_valloc(ctx, 0x1000, 0x1000)
+    mes_build_add_queue(frame_host, 1, 0,
+        gc_vgpu(ctx, proc_ctx_off), gc_vgpu(ctx, gang_ctx_off),
+        CQ_DB, gc_vgpu(ctx, cq_mqd_off), gc_vgpu(ctx, cq_wptr_off),
+        MES_QUEUE_TYPE_COMPUTE, 0, 0,
+        gc_vgpu(ctx, aq_stat_off), 1)
+    sw = mes_submit_sched(gc_vhost(ctx, sr_ring_off), gc_vgpu(ctx, sr_ring_off),
+                          sw, 1024, db2, SR_DB, frame_host)
+    if mes_poll_fence(gc_vhost(ctx, aq_stat_off), 1) != 1 { return 7 }
     return 0
 }

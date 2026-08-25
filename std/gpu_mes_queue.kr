@@ -1,0 +1,432 @@
+// std/gpu_mes_queue.kr — MES (MicroEngine Scheduler) queue-registration path for
+// gfx11 (RDNA3 / Navi3x, gc_11_0_3). OS-AGNOSTIC. Two halves:
+//
+//   (A) PACKET PRIMITIVE — ported byte-for-byte from the verified MLRift
+//       std/mes.mlr (native offsetof + 47/47 CPU self-test). SET_HW_RESOURCES /
+//       ADD_QUEUE frame builders + ring submit + fence poll. EVERY offset,
+//       header constant and the doorbell convention (byte off = idx<<2) is
+//       IDENTICAL to mes.mlr — do not change them, they are ground truth.
+//
+//   (B) MES SCHEDULER-RING HQD SETUP — port of mes_v11_0.c's
+//       mes_v11_0_mqd_init + mes_v11_0_queue_init_register. This is the
+//       "SKIP the KIQ, program the sched HQD directly" step: we allocate the
+//       MES ring ourselves and program its HQD via CP_HQD_*/CP_MQD_* so MES
+//       consumes packets from OUR ring (no KIQ MAP_QUEUES).
+//
+// WHY: on gfx11 the doorbell-routing mux is owned by the MES micro-engine. A
+// compute queue is activated by ADD_QUEUE on the MES ring (KIQ MAP_QUEUES does
+// NOT route the doorbell on this generation — project_sp2_kiq_doorbell_wall).
+// SET_HW_RESOURCES must run once before the first ADD_QUEUE.
+//
+// GROUND TRUTH (transcribed, do not re-derive):
+//   header/frame  : drivers/gpu/drm/amd/include/mes_v11_api_def.h
+//   packet driver : drivers/gpu/drm/amd/amdgpu/mes_v11_0.c
+//                   set_hw_resources:971  add_hw_queue:321  submit:176
+//                   mqd_init:1415  queue_init_register:1519
+//   HQD regs      : gc/gc_11_0_0_offset.h (BASE_IDX 0 -> GC0 seg, NAVI32_GC0)
+//   field masks   : gc/gc_11_0_0_sh_mask.h   defaults: gc/gc_11_0_0_default.h
+//
+// KernRift footgun: & | ^ bind TIGHTER than << >> — every mixed shift/mask
+// term below is fully parenthesized. Bitwise NOT is `x ^ 0xffffffffffffffff`.
+
+import "gpu_portable.kr"
+import "gpu_navi32.kr"
+import "gpu_mes_load.kr"        // reuse mes_grbm_select (GRBM_GFX_CNTL @ GC1)
+
+// =====================================================================
+// (A) PACKET PRIMITIVE — offsets/headers IDENTICAL to MLRift std/mes.mlr
+// =====================================================================
+
+// Header dword0 = type | (opcode<<4) | (dwsize<<12).
+static u64 MES_API_TYPE_SCHEDULER = 1
+static u64 MES_SCH_API_SET_HW_RSRC = 0       // mes_v11_api_def.h:50
+static u64 MES_SCH_API_ADD_QUEUE   = 2       // mes_v11_api_def.h:52
+static u64 MES_FRAME_DWSIZE = 0x40           // API_FRAME_SIZE_IN_DWORDS = 64
+static u64 MES_FRAME_BYTES  = 256            // 64 dwords * 4
+
+// Precomputed header dwords (validated in mes.mlr self-test):
+static u64 MES_HDR_SET_HW_RESOURCES = 0x00040001  // 1|(0<<4)|(0x40<<12)
+static u64 MES_HDR_ADD_QUEUE        = 0x00040021  // 1|(2<<4)|(0x40<<12)
+
+// MES_QUEUE_TYPE (mes_v11_api_def.h:91)
+static u64 MES_QUEUE_TYPE_GFX     = 0
+static u64 MES_QUEUE_TYPE_COMPUTE = 1
+static u64 MES_QUEUE_TYPE_SDMA    = 2
+
+// ---- MESAPI_SET_HW_RESOURCES field byte offsets (verified by offsetof) ----
+static u64 SHR_OFF_HEADER          = 0    // union MES_API_HEADER (u32)
+static u64 SHR_OFF_VMID_MASK_MMHUB = 4
+static u64 SHR_OFF_VMID_MASK_GFXHUB = 8
+static u64 SHR_OFF_GDS_SIZE        = 12
+static u64 SHR_OFF_PAGING_VMID     = 16
+static u64 SHR_OFF_COMPUTE_HQD_MASK = 20  // u32[MAX_COMPUTE_PIPES=8]
+static u64 SHR_OFF_GFX_HQD_MASK    = 52   // u32[2]
+static u64 SHR_OFF_SDMA_HQD_MASK   = 60   // u32[2]
+static u64 SHR_OFF_AGG_DOORBELLS   = 68   // u32[5]
+static u64 SHR_OFF_G_SCH_CTX_PTR   = 88   // u64 g_sch_ctx_gpu_mc_ptr
+static u64 SHR_OFF_QUERY_FENCE_PTR = 96   // u64 query_status_fence_gpu_mc_ptr
+static u64 SHR_OFF_GC_BASE         = 104  // u32[8]
+static u64 SHR_OFF_MMHUB_BASE      = 136  // u32[8]
+static u64 SHR_OFF_OSSSYS_BASE     = 168  // u32[8]
+static u64 SHR_OFF_API_STATUS      = 200  // struct MES_API_STATUS
+static u64 SHR_OFF_FLAGS           = 216  // bitfield word
+static u64 SHR_OFF_OVERSUB_TIMER   = 220
+static u64 SHR_OFF_DOORBELL_INFO   = 224
+static u64 SHR_OFF_EVENT_INTR_HIST = 232
+static u64 SHR_OFF_TIMESTAMP       = 240
+static u64 SHR_OFF_OS_TDR_TIMEOUT  = 248
+
+// SET_HW_RESOURCES flags word amdgpu writes (mes_v11_0.c:1014-1018):
+//   disable_reset(0)|use_diff_vmid_compute(1)|disable_mes_log(2)|
+//   enable_level_process_quantum_chk(6)|enable_reg_active_poll(10)
+//   = 1|2|4|0x40|0x400 = 0x447
+static u64 MES_SHR_FLAGS_DEFAULT   = 0x447
+static u64 MES_SHR_OVERSUB_DEFAULT = 50   // mes_v11_0.c:1019
+
+// ---- MESAPI__ADD_QUEUE field byte offsets (verified by offsetof) ----
+static u64 AQ_OFF_HEADER          = 0
+static u64 AQ_OFF_PROCESS_ID      = 4
+static u64 AQ_OFF_PAGE_TABLE_BASE = 8     // u64
+static u64 AQ_OFF_PROC_VA_START   = 16    // u64
+static u64 AQ_OFF_PROC_VA_END     = 24    // u64
+static u64 AQ_OFF_PROC_QUANTUM    = 32    // u64
+static u64 AQ_OFF_PROC_CTX_ADDR   = 40    // u64
+static u64 AQ_OFF_GANG_QUANTUM    = 48    // u64
+static u64 AQ_OFF_GANG_CTX_ADDR   = 56    // u64
+static u64 AQ_OFF_INPROC_GANG_PRI = 64
+static u64 AQ_OFF_GANG_GLOBAL_PRI = 68
+static u64 AQ_OFF_DOORBELL_OFFSET = 72    // u32 RAW, no shift (mes_v11_0.c:349)
+static u64 AQ_OFF_MQD_ADDR        = 80    // u64
+static u64 AQ_OFF_WPTR_ADDR       = 88    // u64
+static u64 AQ_OFF_H_CONTEXT       = 96    // u64
+static u64 AQ_OFF_H_QUEUE         = 104   // u64
+static u64 AQ_OFF_QUEUE_TYPE      = 112
+static u64 AQ_OFF_GDS_BASE        = 116
+static u64 AQ_OFF_GDS_SIZE        = 120
+static u64 AQ_OFF_GWS_BASE        = 124
+static u64 AQ_OFF_GWS_SIZE        = 128
+static u64 AQ_OFF_OA_MASK         = 132
+static u64 AQ_OFF_TRAP_HANDLER    = 136   // u64
+static u64 AQ_OFF_VM_CONTEXT_CNTL = 144
+static u64 AQ_OFF_FLAGS           = 148   // bitfield word
+static u64 AQ_OFF_API_STATUS      = 152   // struct MES_API_STATUS
+static u64 AQ_OFF_TMA_ADDR        = 160   // u64
+static u64 AQ_OFF_SCH_ID          = 168
+
+// ADD_QUEUE flags-word (offset 148) bit positions (mes_v11_api_def.h:305):
+static u64 AQ_FLAG_PAGING         = 0x001   // bit0
+static u64 AQ_FLAG_IS_KFD_PROCESS = 0x200   // bit9
+static u64 AQ_FLAG_IS_AQL_QUEUE   = 0x800   // bit11
+
+// struct MES_API_STATUS sub-field offsets:
+static u64 APISTAT_OFF_FENCE_ADDR  = 0   // u64 addr MES writes = poll target
+static u64 APISTAT_OFF_FENCE_VALUE = 8   // u64 value MES writes (amdgpu uses 1)
+
+// ---- little-endian host-memory store/load (two u32 for a u64, LE, like mes.mlr) ----
+fn mes_store32(u64 buf, u64 off, u64 val) { store32(buf + off, val) }
+fn mes_load32(u64 buf, u64 off) -> u64 { return load32(buf + off) }
+fn mes_store64(u64 buf, u64 off, u64 val) {
+    mes_store32(buf, off, val & 0xffffffff)
+    mes_store32(buf, off + 4, (val >> 32) & 0xffffffff)
+}
+fn mes_load64(u64 buf, u64 off) -> u64 {
+    u64 lo = mes_load32(buf, off)
+    u64 hi = mes_load32(buf, off + 4)
+    return lo | (hi << 32)
+}
+fn mes_zero(u64 buf, u64 n) {
+    u64 i = 0
+    while i < n { mes_store32(buf, i, 0); i = i + 4 }
+}
+// dword0 header: type | (opcode<<4) | (dwsize<<12).
+fn mes_hdr(u64 opcode) -> u64 {
+    return MES_API_TYPE_SCHEDULER | ((opcode << 4) | (MES_FRAME_DWSIZE << 12))
+}
+
+// Build a 256-byte SET_HW_RESOURCES frame (mes_v11_0_set_hw_resources:971).
+fn mes_build_set_hw_resources(u64 buf, u64 vmid_mask_mmhub, u64 vmid_mask_gfxhub,
+                              u64 gds_size, u64 compute_hqd_mask0,
+                              u64 sched_ctx_gpu_mc, u64 query_fence_gpu_mc,
+                              u64 gc_base0, u64 mmhub_base0, u64 oss_base0,
+                              u64 api_status_ptr, u64 api_status_val) {
+    mes_zero(buf, MES_FRAME_BYTES)
+    mes_store32(buf, SHR_OFF_HEADER, mes_hdr(MES_SCH_API_SET_HW_RSRC))
+    mes_store32(buf, SHR_OFF_VMID_MASK_MMHUB, vmid_mask_mmhub)
+    mes_store32(buf, SHR_OFF_VMID_MASK_GFXHUB, vmid_mask_gfxhub)
+    mes_store32(buf, SHR_OFF_GDS_SIZE, gds_size)
+    mes_store32(buf, SHR_OFF_COMPUTE_HQD_MASK, compute_hqd_mask0)
+    mes_store64(buf, SHR_OFF_G_SCH_CTX_PTR, sched_ctx_gpu_mc)
+    mes_store64(buf, SHR_OFF_QUERY_FENCE_PTR, query_fence_gpu_mc)
+    mes_store32(buf, SHR_OFF_GC_BASE, gc_base0)
+    mes_store32(buf, SHR_OFF_MMHUB_BASE, mmhub_base0)
+    mes_store32(buf, SHR_OFF_OSSSYS_BASE, oss_base0)
+    mes_store64(buf, SHR_OFF_API_STATUS + APISTAT_OFF_FENCE_ADDR, api_status_ptr)
+    mes_store64(buf, SHR_OFF_API_STATUS + APISTAT_OFF_FENCE_VALUE, api_status_val)
+    mes_store32(buf, SHR_OFF_FLAGS, MES_SHR_FLAGS_DEFAULT)
+    mes_store32(buf, SHR_OFF_OVERSUB_TIMER, MES_SHR_OVERSUB_DEFAULT)
+}
+
+// Build a 256-byte ADD_QUEUE frame (mes_v11_0_add_hw_queue:321). doorbell_idx
+// is written RAW (no shift) — amdgpu sets pkt.doorbell_offset = input directly
+// (mes_v11_0.c:349); it is the doorbell dword index in the aperture.
+fn mes_build_add_queue(u64 buf, u64 process_id, u64 page_table_base,
+                       u64 process_ctx_gpu, u64 gang_ctx_gpu, u64 doorbell_idx,
+                       u64 mqd_gpu, u64 wptr_gpu, u64 queue_type,
+                       u64 vm_context_cntl, u64 flags,
+                       u64 api_status_ptr, u64 api_status_val) {
+    mes_zero(buf, MES_FRAME_BYTES)
+    mes_store32(buf, AQ_OFF_HEADER, mes_hdr(MES_SCH_API_ADD_QUEUE))
+    mes_store32(buf, AQ_OFF_PROCESS_ID, process_id)
+    mes_store64(buf, AQ_OFF_PAGE_TABLE_BASE, page_table_base)
+    mes_store64(buf, AQ_OFF_PROC_CTX_ADDR, process_ctx_gpu)
+    mes_store64(buf, AQ_OFF_GANG_CTX_ADDR, gang_ctx_gpu)
+    mes_store32(buf, AQ_OFF_DOORBELL_OFFSET, doorbell_idx)     // RAW, no shift
+    mes_store64(buf, AQ_OFF_MQD_ADDR, mqd_gpu)
+    mes_store64(buf, AQ_OFF_WPTR_ADDR, wptr_gpu)
+    mes_store32(buf, AQ_OFF_QUEUE_TYPE, queue_type)
+    mes_store32(buf, AQ_OFF_VM_CONTEXT_CNTL, vm_context_cntl)
+    mes_store32(buf, AQ_OFF_FLAGS, flags)
+    mes_store64(buf, AQ_OFF_API_STATUS + APISTAT_OFF_FENCE_ADDR, api_status_ptr)
+    mes_store64(buf, AQ_OFF_API_STATUS + APISTAT_OFF_FENCE_VALUE, api_status_val)
+}
+
+// Copy a 64-dword frame into the MES ring at ring_wptr_dw (dword granularity,
+// wrap at ring_size_dw pow2), advance wptr, ring the MES doorbell. 32-bit
+// doorbell write at byte (idx<<2) — IDENTICAL to mes.mlr mes_submit (kept for
+// parity/self-test). Returns the new wptr (dwords).
+fn mes_submit(u64 ring_host, u64 ring_gpu, u64 ring_wptr_dw, u64 ring_size_dw,
+              u64 db2, u64 mes_doorbell_idx, u64 frame_host) -> u64 {
+    u64 k = 0
+    while k < MES_FRAME_DWSIZE {
+        u64 slot = (ring_wptr_dw + k) & (ring_size_dw - 1)
+        u64 dw = mes_load32(frame_host, k * 4)
+        mes_store32(ring_host, slot * 4, dw)
+        k = k + 1
+    }
+    u64 new_wptr = ring_wptr_dw + MES_FRAME_DWSIZE
+    mes_store32(db2, mes_doorbell_idx << 2, new_wptr)
+    return new_wptr
+}
+
+// Same as mes_submit but rings a 64-bit doorbell (WDOORBELL64, mes_v11_0.c:87)
+// — the ACTUAL amdgpu behavior for the MES ring (support_64bit_ptrs). wptr fits
+// in 32 bits so the high dword is 0. Use this for the MES scheduler ring.
+fn mes_submit_sched(u64 ring_host, u64 ring_gpu, u64 ring_wptr_dw, u64 ring_size_dw,
+                    u64 db2, u64 mes_doorbell_idx, u64 frame_host) -> u64 {
+    u64 k = 0
+    while k < MES_FRAME_DWSIZE {
+        u64 slot = (ring_wptr_dw + k) & (ring_size_dw - 1)
+        u64 dw = mes_load32(frame_host, k * 4)
+        mes_store32(ring_host, slot * 4, dw)
+        k = k + 1
+    }
+    u64 new_wptr = ring_wptr_dw + MES_FRAME_DWSIZE
+    mes_store64(db2, mes_doorbell_idx << 2, new_wptr)   // WDOORBELL64
+    return new_wptr
+}
+
+// Spin-poll the api_status completion fence in host-visible memory. Returns 1
+// if *host == expected within the spin bound, else 0. SAFE: reads only the
+// completion qword (no HQD/GC register scan).
+fn mes_poll_fence(u64 api_status_ptr_host, u64 expected) -> u64 {
+    u64 i = 0
+    while i < 2000000 {
+        u64 v = mes_load64(api_status_ptr_host, 0)
+        if v == expected { return 1 }
+        i = i + 1
+    }
+    return 0
+}
+
+// =====================================================================
+// (B) MES SCHEDULER-RING HQD SETUP  (mes_v11_0.c mqd_init + queue_init_register)
+// Program the MES scheduler queue's HQD directly so MES reads packets from OUR
+// ring — the "SKIP the KIQ" path (queue_init_register, NOT kiq_enable_queue).
+// =====================================================================
+
+// ---- CP_HQD_* / CP_MQD_* register dword offsets (gc_11_0_0_offset.h).
+//      ALL BASE_IDX 0  ->  NAVI32_GC0 (seg0 base 0x1260). GRBM_GFX_CNTL is
+//      BASE_IDX 1 -> GC1 and is driven via mes_grbm_select (gpu_mes_load.kr). ----
+static u64 regCP_MQD_BASE_ADDR              = 0x1fa9   // offset.h:4600
+static u64 regCP_MQD_BASE_ADDR_HI           = 0x1faa   // offset.h:4602
+static u64 regCP_HQD_ACTIVE                 = 0x1fab   // offset.h:4604
+static u64 regCP_HQD_VMID                   = 0x1fac   // offset.h:4606
+static u64 regCP_HQD_PERSISTENT_STATE       = 0x1fad   // offset.h:4608
+static u64 regCP_HQD_PQ_BASE                = 0x1fb1   // offset.h:4616
+static u64 regCP_HQD_PQ_BASE_HI             = 0x1fb2   // offset.h:4618
+static u64 regCP_HQD_PQ_RPTR_REPORT_ADDR    = 0x1fb4   // offset.h:4622
+static u64 regCP_HQD_PQ_RPTR_REPORT_ADDR_HI = 0x1fb5   // offset.h:4624
+static u64 regCP_HQD_PQ_WPTR_POLL_ADDR      = 0x1fb6   // offset.h:4626
+static u64 regCP_HQD_PQ_WPTR_POLL_ADDR_HI   = 0x1fb7   // offset.h:4628
+static u64 regCP_HQD_PQ_DOORBELL_CONTROL    = 0x1fb8   // offset.h:4630
+static u64 regCP_HQD_PQ_CONTROL             = 0x1fba   // offset.h:4632
+static u64 regCP_MQD_CONTROL                = 0x1fcb   // offset.h:4672
+
+// ---- register DEFAULT values (gc_11_0_0_default.h) ----
+static u64 CP_HQD_PQ_CONTROL_DEFAULT       = 0x00308509  // default.h:2097
+static u64 CP_HQD_PERSISTENT_STATE_DEFAULT = 0x0be05501  // default.h:2085 (PRELOAD=0x55)
+static u64 CP_HQD_IB_CONTROL_DEFAULT       = 0x00300000  // default.h:2101
+static u64 CP_MQD_CONTROL_DEFAULT          = 0x00000100  // default.h:2117
+
+// ---- field masks (gc_11_0_0_sh_mask.h) ----
+static u64 CP_HQD_VMID__VMID_MASK              = 0x0000000f  // sh_mask.h:17275
+static u64 PQC_QUEUE_SIZE_MASK                 = 0x0000003f  // sh_mask.h:17384
+static u64 PQC_RPTR_BLOCK_SIZE_MASK            = 0x00003f00  // sh_mask.h:17387
+static u64 PQC_NO_UPDATE_RPTR_MASK             = 0x08000000  // sh_mask.h:17396
+static u64 PQC_UNORD_DISPATCH_MASK             = 0x10000000  // sh_mask.h:17397
+static u64 PQC_TUNNEL_DISPATCH_MASK            = 0x20000000  // sh_mask.h:17398
+static u64 PQC_PRIV_STATE_MASK                 = 0x40000000  // sh_mask.h:17399
+static u64 PQC_KMD_QUEUE_MASK                  = 0x80000000  // sh_mask.h:17400
+static u64 DOORBELL_OFFSET_MASK                = 0x0ffffffc  // sh_mask.h:17361
+static u64 DOORBELL_EN_MASK                    = 0x40000000  // sh_mask.h:17364
+
+// ---- v11_compute_mqd field byte offsets (v11_structs.h; field_index*4) ----
+static u64 MQDF_HEADER                = 0x000
+static u64 MQDF_PIPELINESTAT_ENABLE   = 0x02c
+static u64 MQDF_THREAD_MGMT_SE0       = 0x05c
+static u64 MQDF_THREAD_MGMT_SE1       = 0x060
+static u64 MQDF_THREAD_MGMT_SE2       = 0x068
+static u64 MQDF_THREAD_MGMT_SE3       = 0x06c
+static u64 MQDF_MISC_RESERVED         = 0x080
+static u64 MQDF_MQD_BASE_ADDR_LO      = 0x200
+static u64 MQDF_MQD_BASE_ADDR_HI      = 0x204
+static u64 MQDF_HQD_ACTIVE            = 0x208
+static u64 MQDF_HQD_VMID              = 0x20c
+static u64 MQDF_PERSISTENT_STATE      = 0x210
+static u64 MQDF_HQD_QUANTUM           = 0x21c
+static u64 MQDF_PQ_BASE_LO            = 0x220
+static u64 MQDF_PQ_BASE_HI            = 0x224
+static u64 MQDF_PQ_RPTR              = 0x228
+static u64 MQDF_PQ_RPTR_REPORT_LO     = 0x22c
+static u64 MQDF_PQ_RPTR_REPORT_HI     = 0x230
+static u64 MQDF_PQ_WPTR_POLL_LO       = 0x234
+static u64 MQDF_PQ_WPTR_POLL_HI       = 0x238
+static u64 MQDF_PQ_DOORBELL_CONTROL   = 0x23c
+static u64 MQDF_PQ_CONTROL            = 0x244
+static u64 MQDF_IB_CONTROL            = 0x254
+static u64 MQDF_IQ_TIMER              = 0x258
+static u64 MQDF_MQD_CONTROL           = 0x288
+static u64 MQDF_EOP_BASE_ADDR_LO      = 0x294
+static u64 MQDF_EOP_BASE_ADDR_HI      = 0x298
+static u64 MQDF_EOP_CONTROL           = 0x29c
+
+static u64 MES_MQD_HEADER_MAGIC = 0xc0310800  // mes_v11_0.c:1423
+// EOP_CONTROL: default 0x6, EOP_SIZE = order_base_2(MES_EOP_SIZE(2048)/4)-1 = 8
+static u64 MES_EOP_CONTROL_VAL  = 0x00000008  // mes_v11_0.c:1434-1440
+
+// REG_SET_FIELD(reg, mask, shift, val) = (reg & ~mask) | ((val<<shift) & mask).
+fn mesq_set_field(u64 reg, u64 mask, u64 shift, u64 val) -> u64 {
+    u64 cleared = reg & (mask ^ 0xffffffffffffffff)
+    u64 setv = (val << shift) & mask
+    return cleared | setv
+}
+
+// CP_HQD_PQ_CONTROL for the sched ring (mes_v11_0.c:1474-1484). ring_log2_dw =
+// log2(ring size in dwords). NOTE the amdgpu RPTR_BLOCK_SIZE double-shift quirk:
+// it passes ((order_base_2(PAGE/4)-1)<<8)=0x900 as the field VALUE, then
+// REG_SET_FIELD shifts it AGAIN by 8 -> (0x900<<8)&0x3f00 = 0, so the field ends
+// up 0. Reproduced faithfully below.
+fn mesq_pq_control(u64 ring_log2_dw) -> u64 {
+    u64 t = CP_HQD_PQ_CONTROL_DEFAULT
+    t = mesq_set_field(t, PQC_QUEUE_SIZE_MASK, 0, ring_log2_dw - 1)
+    t = mesq_set_field(t, PQC_RPTR_BLOCK_SIZE_MASK, 8, 0x900)  // -> 0 (quirk)
+    t = mesq_set_field(t, PQC_NO_UPDATE_RPTR_MASK, 27, 1)
+    t = mesq_set_field(t, PQC_UNORD_DISPATCH_MASK, 28, 1)
+    t = mesq_set_field(t, PQC_TUNNEL_DISPATCH_MASK, 29, 0)
+    t = mesq_set_field(t, PQC_PRIV_STATE_MASK, 30, 1)
+    t = mesq_set_field(t, PQC_KMD_QUEUE_MASK, 31, 1)
+    return t
+}
+
+// CP_HQD_PQ_DOORBELL_CONTROL: DOORBELL_OFFSET = doorbell_idx (dword), DOORBELL_EN
+// = 1, SOURCE=0, HIT=0 (mes_v11_0.c:1487-1500). Field shift = 2.
+fn mesq_doorbell_ctrl(u64 doorbell_idx) -> u64 {
+    u64 off = (doorbell_idx << 2) & DOORBELL_OFFSET_MASK
+    return off | DOORBELL_EN_MASK
+}
+
+// Build the MES scheduler ring's v11_compute_mqd in host memory (the buffer is
+// GPU-visible; MES/CP read it via CP_MQD_BASE_ADDR). Port of mes_v11_0_mqd_init
+// (mes_v11_0.c:1415). Caller passes a >=0x800 buffer; we zero it.
+//   mqd_gpu/ring_gpu/eop_gpu/rptr_gpu/wptr_gpu = GPU MC addresses.
+//   ring_log2_dw = log2(ring dwords). doorbell_idx = MES ring doorbell dword idx.
+fn mes_sched_mqd_init(u64 mqd, u64 mqd_gpu, u64 ring_gpu, u64 eop_gpu,
+                      u64 ring_log2_dw, u64 doorbell_idx,
+                      u64 rptr_gpu, u64 wptr_gpu) {
+    mes_zero(mqd, 0x800)
+    store32(mqd + MQDF_HEADER, MES_MQD_HEADER_MAGIC)
+    store32(mqd + MQDF_PIPELINESTAT_ENABLE, 1)
+    store32(mqd + MQDF_THREAD_MGMT_SE0, 0xffffffff)
+    store32(mqd + MQDF_THREAD_MGMT_SE1, 0xffffffff)
+    store32(mqd + MQDF_THREAD_MGMT_SE2, 0xffffffff)
+    store32(mqd + MQDF_THREAD_MGMT_SE3, 0xffffffff)
+    store32(mqd + MQDF_MISC_RESERVED, 0x00000007)
+    // EOP buffer (eop_gpu>>8), size field = 8
+    u64 eop_sh = eop_gpu >> 8
+    store32(mqd + MQDF_EOP_BASE_ADDR_LO, eop_sh & 0xffffffff)
+    store32(mqd + MQDF_EOP_BASE_ADDR_HI, (eop_sh >> 32) & 0xffffffff)
+    store32(mqd + MQDF_EOP_CONTROL, MES_EOP_CONTROL_VAL)
+    // MQD self-pointer + control (memory MQD keeps default 0x100; register write
+    // uses literal 0 per queue_init_register:1546).
+    store32(mqd + MQDF_MQD_BASE_ADDR_LO, mqd_gpu & 0xfffffffc)
+    store32(mqd + MQDF_MQD_BASE_ADDR_HI, (mqd_gpu >> 32) & 0xffffffff)
+    store32(mqd + MQDF_MQD_CONTROL, CP_MQD_CONTROL_DEFAULT)
+    // PQ ring base (ring_gpu>>8)
+    u64 pq_sh = ring_gpu >> 8
+    store32(mqd + MQDF_PQ_BASE_LO, pq_sh & 0xffffffff)
+    store32(mqd + MQDF_PQ_BASE_HI, (pq_sh >> 32) & 0xffffffff)
+    // rptr report (masked 0xfffffffc; hi masked 16-bit)
+    store32(mqd + MQDF_PQ_RPTR_REPORT_LO, rptr_gpu & 0xfffffffc)
+    store32(mqd + MQDF_PQ_RPTR_REPORT_HI, (rptr_gpu >> 32) & 0xffff)
+    // wptr poll (masked 0xfffffff8; hi masked 16-bit)
+    store32(mqd + MQDF_PQ_WPTR_POLL_LO, wptr_gpu & 0xfffffff8)
+    store32(mqd + MQDF_PQ_WPTR_POLL_HI, (wptr_gpu >> 32) & 0xffff)
+    store32(mqd + MQDF_PQ_CONTROL, mesq_pq_control(ring_log2_dw))
+    store32(mqd + MQDF_PQ_DOORBELL_CONTROL, mesq_doorbell_ctrl(doorbell_idx))
+    store32(mqd + MQDF_HQD_VMID, 0)
+    store32(mqd + MQDF_HQD_ACTIVE, 1)
+    store32(mqd + MQDF_PERSISTENT_STATE, CP_HQD_PERSISTENT_STATE_DEFAULT)
+    store32(mqd + MQDF_IB_CONTROL, CP_HQD_IB_CONTROL_DEFAULT)
+    store32(mqd + MQDF_IQ_TIMER, 0)
+    store32(mqd + MQDF_HQD_QUANTUM, 0)
+    store32(mqd + MQDF_PQ_RPTR, 0)
+}
+
+// Program the sched HQD registers from the built MQD (mes_v11_0_queue_init_register
+// :1519). Wrapped in grbm_select(me=3, pipe, 0, 0) ... grbm_select(0,0,0,0). All
+// CP_HQD_*/CP_MQD_* are BASE_IDX 0 -> NAVI32_GC0. PREP: drives real MMIO writes.
+fn mes_sched_hqd_program(u64 bar5, u64 mqd, u64 pipe) {
+    u64 g = NAVI32_GC0
+    mes_grbm_select(bar5, 3, pipe, 0, 0)
+    // CP_HQD_VMID.VMID = 0
+    u64 d = gpu_reg_r32(bar5, g, regCP_HQD_VMID)
+    d = mesq_set_field(d, CP_HQD_VMID__VMID_MASK, 0, 0)
+    gpu_reg_w32(bar5, g, regCP_HQD_VMID, d)
+    // CP_HQD_PQ_DOORBELL_CONTROL.DOORBELL_EN = 0 (disable before setup)
+    d = gpu_reg_r32(bar5, g, regCP_HQD_PQ_DOORBELL_CONTROL)
+    d = mesq_set_field(d, DOORBELL_EN_MASK, 0, 0)
+    gpu_reg_w32(bar5, g, regCP_HQD_PQ_DOORBELL_CONTROL, d)
+    // CP_MQD_BASE_ADDR / HI
+    gpu_reg_w32(bar5, g, regCP_MQD_BASE_ADDR, load32(mqd + MQDF_MQD_BASE_ADDR_LO))
+    gpu_reg_w32(bar5, g, regCP_MQD_BASE_ADDR_HI, load32(mqd + MQDF_MQD_BASE_ADDR_HI))
+    // CP_MQD_CONTROL = literal 0 (amdgpu quirk at queue_init_register:1546)
+    gpu_reg_w32(bar5, g, regCP_MQD_CONTROL, 0)
+    // CP_HQD_PQ_BASE / HI
+    gpu_reg_w32(bar5, g, regCP_HQD_PQ_BASE, load32(mqd + MQDF_PQ_BASE_LO))
+    gpu_reg_w32(bar5, g, regCP_HQD_PQ_BASE_HI, load32(mqd + MQDF_PQ_BASE_HI))
+    // CP_HQD_PQ_RPTR_REPORT_ADDR / HI
+    gpu_reg_w32(bar5, g, regCP_HQD_PQ_RPTR_REPORT_ADDR, load32(mqd + MQDF_PQ_RPTR_REPORT_LO))
+    gpu_reg_w32(bar5, g, regCP_HQD_PQ_RPTR_REPORT_ADDR_HI, load32(mqd + MQDF_PQ_RPTR_REPORT_HI))
+    // CP_HQD_PQ_CONTROL
+    gpu_reg_w32(bar5, g, regCP_HQD_PQ_CONTROL, load32(mqd + MQDF_PQ_CONTROL))
+    // CP_HQD_PQ_WPTR_POLL_ADDR / HI
+    gpu_reg_w32(bar5, g, regCP_HQD_PQ_WPTR_POLL_ADDR, load32(mqd + MQDF_PQ_WPTR_POLL_LO))
+    gpu_reg_w32(bar5, g, regCP_HQD_PQ_WPTR_POLL_ADDR_HI, load32(mqd + MQDF_PQ_WPTR_POLL_HI))
+    // CP_HQD_PQ_DOORBELL_CONTROL (final, enables doorbell)
+    gpu_reg_w32(bar5, g, regCP_HQD_PQ_DOORBELL_CONTROL, load32(mqd + MQDF_PQ_DOORBELL_CONTROL))
+    // CP_HQD_PERSISTENT_STATE
+    gpu_reg_w32(bar5, g, regCP_HQD_PERSISTENT_STATE, load32(mqd + MQDF_PERSISTENT_STATE))
+    // CP_HQD_ACTIVE = 1
+    gpu_reg_w32(bar5, g, regCP_HQD_ACTIVE, load32(mqd + MQDF_HQD_ACTIVE))
+    mes_grbm_select(bar5, 0, 0, 0, 0)
+}
