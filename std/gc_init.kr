@@ -122,10 +122,19 @@ fn gc_init(u64 bar5, u64 db2, u64 mp1, u64 ctx,
     store64(gc_vhost(ctx, shr_stat_off), 0)            // clear poll targets
     store64(gc_vhost(ctx, aq_stat_off), 0)
 
-    // 6d. SET_HW_RESOURCES: tell MES its HW once. IP bases are SOC15 seg0
-    //     (GC0/MMHUB/OSS). Fence addr = GPU MC of shr_stat; poll its host mirror.
-    mes_build_set_hw_resources(frame_host, 0xfffe, 0xfffe, 0,
-        0xff,
+    // 6d. SET_HW_RESOURCES: tell MES its HW once. Real gc_11_0_3 values
+    //     (amdgpu_mes.c:126-159, gfx_v11_0.c:7273):
+    //       vmid_mask_mmhub = 0xFF00 (literal),
+    //       vmid_mask_gfxhub = 0xFFFF & ~((1<<first_kfd_vmid=8)-1) = 0xFF00,
+    //       gds_size = 0x1000,
+    //       compute_hqd_mask = ((1<<num_queue_per_pipe=8)-1) & ~0 = 0xFF
+    //         (num_reserved_hqd=0 for a MES-managed driver; filled pipes 0..3).
+    //     IP bases: only SOC15 seg0 (GC0/MMHUB/OSS) filled; amdgpu fills 5
+    //     segments -> segs 1..4 are the Navi32 IP-discovery continuation
+    //     (FRONTIER: needs live IP discovery or the published per-ASIC table).
+    //     Fence addr = GPU MC of shr_stat; poll its host mirror.
+    mes_build_set_hw_resources(frame_host, 0xFF00, 0xFF00, 0x1000,
+        0xFF,
         gc_vgpu(ctx, sch_ctx_off), gc_vgpu(ctx, qfence_off),
         NAVI32_GC0, NAVI32_MMHUB, NAVI32_OSS,
         gc_vgpu(ctx, shr_stat_off), 1)
@@ -134,6 +143,12 @@ fn gc_init(u64 bar5, u64 db2, u64 mp1, u64 ctx,
     if mes_poll_fence(gc_vhost(ctx, shr_stat_off), 1) != 1 { return 6 }
 
     // 6e. ADD_QUEUE: map the compute queue through MES.
+    // FRONTIER (real GMC dependency, not a placeholder we can pin from source):
+    //   page_table_base_addr = the queue VM's GART/page-table base, and
+    //   vm_context_cntl = GFXHUB regVM_CONTEXT0_CNTL (amdgpu add_hw_queue reads
+    //   hub->vm_cntx_cntl; MLRift std/gmc.mlr programs this as ~0x3fffc3).
+    // KernRift has no GMC/GART stage yet, so both are passed 0 here; a real run
+    // needs a GMC bring-up (port of std/gmc.mlr) feeding these two values.
     u64 proc_ctx_off = gc_valloc(ctx, 0x1000, 0x1000)
     u64 gang_ctx_off = gc_valloc(ctx, 0x1000, 0x1000)
     mes_build_add_queue(frame_host, 1, 0,

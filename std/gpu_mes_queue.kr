@@ -154,12 +154,23 @@ fn mes_build_set_hw_resources(u64 buf, u64 vmid_mask_mmhub, u64 vmid_mask_gfxhub
     mes_store32(buf, SHR_OFF_VMID_MASK_MMHUB, vmid_mask_mmhub)
     mes_store32(buf, SHR_OFF_VMID_MASK_GFXHUB, vmid_mask_gfxhub)
     mes_store32(buf, SHR_OFF_GDS_SIZE, gds_size)
-    mes_store32(buf, SHR_OFF_COMPUTE_HQD_MASK, compute_hqd_mask0)
+    // compute_hqd_mask[i] for every active MEC pipe (gfx11 num_pipe_per_mec=4;
+    // amdgpu_mes.c:149-159 fills pipes < num_pipe_per_mec, rest 0).
+    u64 p = 0
+    while p < 4 { mes_store32(buf, SHR_OFF_COMPUTE_HQD_MASK + (p * 4), compute_hqd_mask0); p = p + 1 }
     mes_store64(buf, SHR_OFF_G_SCH_CTX_PTR, sched_ctx_gpu_mc)
     mes_store64(buf, SHR_OFF_QUERY_FENCE_PTR, query_fence_gpu_mc)
-    mes_store32(buf, SHR_OFF_GC_BASE, gc_base0)
-    mes_store32(buf, SHR_OFF_MMHUB_BASE, mmhub_base0)
-    mes_store32(buf, SHR_OFF_OSSSYS_BASE, oss_base0)
+    // IP-base segments (amdgpu fills 5 per IP from reg_offset[HWIP][0][0..4]).
+    // GC seg0/1/2 = NAVI32_GC0/GC1/GC2 (0x1260/0xA000/0x1C000) — the same three
+    // SOC15 segments the rest of this stack drives (CP_HQD@seg0, CP_MES@seg1);
+    // segs 3..4, and MMHUB/OSS segs 1..4, are 0 for every register this ASIC
+    // touches (gpu_navi32.kr exposes no GC3/GC4/MMHUB1/OSS1). If a future reg
+    // needs a higher segment, add its discovered base here.
+    mes_store32(buf, SHR_OFF_GC_BASE + 0, gc_base0)      // seg0 (GRBM/CP_HQD)
+    mes_store32(buf, SHR_OFF_GC_BASE + 4, NAVI32_GC1)    // seg1 (CP_MES/IMU)
+    mes_store32(buf, SHR_OFF_GC_BASE + 8, NAVI32_GC2)    // seg2
+    mes_store32(buf, SHR_OFF_MMHUB_BASE, mmhub_base0)    // seg0 (only seg used)
+    mes_store32(buf, SHR_OFF_OSSSYS_BASE, oss_base0)     // seg0 (only seg used)
     mes_store64(buf, SHR_OFF_API_STATUS + APISTAT_OFF_FENCE_ADDR, api_status_ptr)
     mes_store64(buf, SHR_OFF_API_STATUS + APISTAT_OFF_FENCE_VALUE, api_status_val)
     mes_store32(buf, SHR_OFF_FLAGS, MES_SHR_FLAGS_DEFAULT)
