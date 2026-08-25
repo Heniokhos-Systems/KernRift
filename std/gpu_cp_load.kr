@@ -1,0 +1,70 @@
+// std/gpu_cp_load.kr — CP microengine (PFP/ME/MEC) firmware parse + RS64 load
+// scaffold for gfx11 (chain brick 4). Loaded after RLC, before MES queue map.
+// PREP: writes CP_* regs — OS-owned card only. From amdgpu gfx_v11_0 RS64 path.
+//
+// gfx11 CP is RS64 (64-bit microcontrollers). Each engine's fw is
+// gfx_firmware_header_v2_0: instruction ucode + a data segment, plus a
+// ucode_start_addr. Load = stage ucode+data in VRAM, point the engine's
+// IC_BASE (instruction) + DC_BASE (data) at them, invalidate icache, then
+// reset->activate the engine's pipes via CP_ME_CNTL (PFP/ME) or
+// CP_MEC_RS64_CNTL (MEC).
+//
+// HONEST: the firmware PARSE below is validated on the real blobs. The exact
+// multi-pipe reset/activate dance (PFP/ME ACTIVE bit positions, MEC IC-base
+// register, DC_BASE0 vs DC_BASE1 split) needs on-hardware verification and is
+// marked TODO — do not treat the orchestration as complete.
+import "gpu_portable.kr"
+import "gpu_navi32.kr"
+
+// gfx_firmware_header_v2_0 fields (RS64: pfp/me/mec)
+static u64 GFXH_UCODE_SIZE  = 0x24
+static u64 GFXH_UCODE_OFF   = 0x28
+static u64 GFXH_DATA_SIZE   = 0x2c
+static u64 GFXH_DATA_OFF    = 0x30
+static u64 GFXH_START_LO    = 0x34
+static u64 GFXH_START_HI    = 0x38
+fn cp_ucode_size(u64 fw) -> u64 { return load32(fw + GFXH_UCODE_SIZE) }
+fn cp_ucode_off(u64 fw)  -> u64 { return load32(fw + GFXH_UCODE_OFF) }
+fn cp_data_size(u64 fw)  -> u64 { return load32(fw + GFXH_DATA_SIZE) }
+fn cp_data_off(u64 fw)   -> u64 { return load32(fw + GFXH_DATA_OFF) }
+fn cp_start(u64 fw) -> u64 {
+    u64 lo = load32(fw + GFXH_START_LO)
+    u64 hi = load32(fw + GFXH_START_HI)
+    return lo | (hi << 32)
+}
+
+// CP RS64 registers (dword, BASE_IDX 1 -> GC1 base)
+static u64 regCP_ME_CNTL           = 0x0803
+static u64 regCP_MEC_RS64_CNTL     = 0x2904
+static u64 regCP_PFP_IC_BASE_LO    = 0x5840
+static u64 regCP_PFP_IC_BASE_HI    = 0x5841
+static u64 regCP_PFP_IC_BASE_CNTL  = 0x5842
+static u64 regCP_ME_IC_BASE_LO     = 0x5844
+static u64 regCP_ME_IC_BASE_HI     = 0x5845
+static u64 regCP_GFX_RS64_DC_BASE0_LO = 0x5863
+static u64 regCP_GFX_RS64_DC_BASE1_LO = 0x5864
+
+// CP_ME_CNTL reset bits (gc_11_0_0_sh_mask.h). NOTE: ACTIVE bit positions for
+// PFP/ME not yet confirmed -> TODO before running.
+static u64 PFP_PIPE0_RESET = 1 << 0x12
+static u64 PFP_PIPE1_RESET = 1 << 0x13
+static u64 ME_PIPE0_RESET  = 1 << 0x14
+static u64 ME_PIPE1_RESET  = 1 << 0x15
+// CP_MEC_RS64_CNTL bits
+static u64 MEC_INVALIDATE_ICACHE = 1 << 4
+static u64 MEC_PIPE0_RESET  = 1 << 0x10
+static u64 MEC_PIPE0_ACTIVE = 1 << 0x1a
+
+// Point an engine's instruction cache at a staged VRAM ucode buffer.
+fn cp_set_ic_base(u64 bar5, u64 base_lo_reg, u64 base_hi_reg, u64 ic_addr) {
+    gpu_reg_w32(bar5, NAVI32_GC1, base_lo_reg, ic_addr & 0xffffffff)
+    gpu_reg_w32(bar5, NAVI32_GC1, base_hi_reg, (ic_addr >> 32) & 0xffffffff)
+}
+// PFP + ME instruction cache load (data cache via DC_BASE0/1). Caller stages
+// ucode/data in VRAM first. Reset/activate orchestration = TODO (see header).
+fn cp_gfx_load(u64 bar5, u64 pfp_ic, u64 me_ic, u64 dc0, u64 dc1) {
+    cp_set_ic_base(bar5, regCP_PFP_IC_BASE_LO, regCP_PFP_IC_BASE_HI, pfp_ic)
+    cp_set_ic_base(bar5, regCP_ME_IC_BASE_LO,  regCP_ME_IC_BASE_HI,  me_ic)
+    gpu_reg_w32(bar5, NAVI32_GC1, regCP_GFX_RS64_DC_BASE0_LO, dc0 & 0xffffffff)
+    gpu_reg_w32(bar5, NAVI32_GC1, regCP_GFX_RS64_DC_BASE1_LO, dc1 & 0xffffffff)
+}

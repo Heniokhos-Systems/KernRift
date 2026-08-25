@@ -1,0 +1,26 @@
+import "../std/io.kr"
+import "../std/gpu_portable.kr"
+import "../std/gpu_navi32.kr"
+import "../std/gpu_cp_load.kr"
+fn phex(u64 v){u64 b=alloc(11);store8(b,48);store8(b+1,120);u64 i=0;while i<8{u64 sh=(7-i)*4;u64 n=(v>>sh)&0xf;u64 c=n+48;if n>=10{c=n+87}store8(b+2+i,c);i=i+1}store8(b+10,0);print_str(b)}
+fn check(u64 got,u64 want,u64 lab){print_str(lab);if got==want{print_str(" PASS ")}else{print_str(" FAIL ")}print_str("got=");phex(got);print_str(" want=");phex(want);print_str("\n")}
+fn one(u64 lab, u64 fw, u64 usz, u64 uoff, u64 dsz, u64 doff){
+    print_str(lab); print_str(":\n")
+    check(cp_ucode_size(fw),usz,"  ucode_size")
+    check(cp_ucode_off(fw),uoff,"  ucode_off")
+    check(cp_data_size(fw),dsz,"  data_size")
+    check(cp_data_off(fw),doff,"  data_off")
+    check(cp_start(fw)&0xffffffff, 0x3000, "  start_lo")
+}
+fn main(){
+    print_str("gpu_cp_load.kr self-test (real pfp/me/mec parse)\n")
+    u64 pfp=read_file("/tmp/pfp.bin"); u64 me=read_file("/tmp/me.bin"); u64 mec=read_file("/tmp/mec.bin")
+    if pfp==0 {print_str("FAIL read fw\n");exit(1)}
+    one("PFP",pfp,0x15da0,0x100,0x22000,0x15ea0)
+    one("ME", me, 0x3ab40,0x100,0x22000,0x3ac40)
+    one("MEC",mec,0x41520,0x100,0x22000,0x41620)
+    check(gpu_reg_off(NAVI32_GC1,regCP_PFP_IC_BASE_LO),(0xa000+0x5840)*4,"PFP_IC_BASE off")
+    check(PFP_PIPE0_RESET|ME_PIPE0_RESET, (1<<0x12)|(1<<0x14),"cntl reset bits")
+    print_str("done — CP fw parsed; RS64 load scaffold (orchestration = TODO)\n")
+    exit(0)
+}
