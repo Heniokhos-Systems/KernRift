@@ -1,0 +1,57 @@
+// gpu_pm4_demo.kr — build + verify a gfx11 compute-dispatch PM4 stream.
+// Pure offline test of the command-stream builder (std/gpu_pm4.kr). The
+// stream is correct; RUNNING it needs compute-queue activation (MES/HQD +
+// doorbell), which is the separate hard step.
+//
+// Build: ./build/krc2 --arch=x86_64 --target=linux --emit=elfexe examples/gpu_pm4_demo.kr -o /tmp/pm4
+// Run:   /tmp/pm4
+
+import "../std/io.kr"
+import "../std/gpu_navi32.kr"
+import "../std/gpu_pm4.kr"
+
+fn phex(u64 v) {
+    u64 buf = alloc(11)
+    store8(buf, 48); store8(buf + 1, 120)
+    u64 i = 0
+    while i < 8 { u64 sh = (7 - i) * 4; u64 nyb = (v >> sh) & 0xf; u64 ch = nyb + 48; if nyb >= 10 { ch = nyb + 87 } store8(buf + 2 + i, ch); i = i + 1 }
+    store8(buf + 10, 0); print_str(buf)
+}
+fn check(u64 got, u64 want, u64 lab) {
+    print_str(lab)
+    if got == want { print_str(" PASS ") } else { print_str(" FAIL ") }
+    print_str("got="); phex(got); print_str(" want="); phex(want); print_str("\n")
+}
+
+fn main() {
+    print_str("gpu_pm4.kr self-test\n")
+
+    // header encodings
+    check(pm4_type3(PM4_SET_SH_REG, 2), 0xc0027600, "pm4_type3(SET_SH_REG,2)")
+    check(pm4_type3(PM4_SET_SH_REG, 3), 0xc0037600, "pm4_type3(SET_SH_REG,3)")
+    check(pm4_type3_compute(PM4_DISPATCH_DIRECT, 3), 0xc0031502, "DISPATCH_DIRECT(compute)")
+    // SH register packet offsets (must land in [0x0,0x400) SH window)
+    check(pm4_sh_off(NAVI32_GC0, COMPUTE_PGM_LO), 0x20c, "sh_off(PGM_LO)")
+    check(pm4_sh_off(NAVI32_GC0, COMPUTE_PGM_RSRC1), 0x212, "sh_off(RSRC1)")
+    check(pm4_sh_off(NAVI32_GC0, COMPUTE_NUM_THREAD_X), 0x207, "sh_off(NUM_THREAD_X)")
+
+    // build a full dispatch: shader@0x1000000, 64x1x1 threads, 1x1x1 grid
+    u64 buf = alloc(256)
+    u64 end = pm4_build_dispatch(buf, 0, NAVI32_GC0,
+        0x01000000, 0x00000000,       // pgm lo/hi (shader gpu addr >> 8 in real use)
+        0x00000000, 0x00000000,       // rsrc1/2
+        64, 1, 1,                     // threads/group
+        1, 1, 1,                      // grid
+        0x00000001)                   // COMPUTE_SHADER_EN
+    check(end, 18, "total dwords")
+    // spot-check stream layout
+    u64 w0 = load32(buf + (0 << 2))
+    u64 w1 = load32(buf + (1 << 2))
+    u64 w13 = load32(buf + (13 << 2))
+    check(w0, 0xc0027600, "stream[0]=SET_SH_REG hdr")
+    check(w1, 0x20c, "stream[1]=PGM_LO off")
+    check(w13, 0xc0031502, "stream[13]=DISPATCH hdr")
+
+    print_str("done — PM4 dispatch stream built + verified (activation = next step)\n")
+    exit(0)
+}

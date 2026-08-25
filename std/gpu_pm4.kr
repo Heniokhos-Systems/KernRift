@@ -1,0 +1,89 @@
+// std/gpu_pm4.kr — PM4 command-stream builder for gfx11 (Navi 3x) compute.
+// Builds the packet stream that dispatches a compute shader. Pure data
+// construction (store32 into a ring buffer) — fully testable offline.
+//
+// SCOPE / HONESTY: this is the "what to submit" half of GPU compute. The
+// OTHER half — ACTIVATING a compute queue so the CP executes this stream
+// (MQD/HQD setup + MES mapping + doorbell ring) — is the hard frontier and
+// is NOT solved here. On this hardware even the amdgpu-resident experiments
+// hit the "KIQ/MES doorbell wall" (see memory: sp2_kiq_doorbell_wall,
+// mes_wedge). From a bare OS it needs MEC/MES firmware bring-up first. So
+// this module produces a correct command stream; running it needs the
+// queue-activation work that comes after GFXOFF-wake + MES init.
+//
+// KernRift: & | ^ bind TIGHTER than << >> — every mixed term is parenthesized
+// and combined via temporaries.
+
+// ---- PM4 Type-3 opcodes (from soc15d.h) ----
+static u64 PM4_NOP             = 0x10
+static u64 PM4_DISPATCH_DIRECT = 0x15
+static u64 PM4_WRITE_DATA      = 0x37
+static u64 PM4_INDIRECT_BUFFER = 0x3F
+static u64 PM4_EVENT_WRITE     = 0x46
+static u64 PM4_ACQUIRE_MEM     = 0x58
+static u64 PM4_SET_SH_REG      = 0x76
+static u64 PM4_SET_SH_REG_START = 0x2c00
+
+// ---- gfx11 compute SH register dwords (relative to the GC base) ----
+static u64 COMPUTE_DISPATCH_INITIATOR = 0x1ba0
+static u64 COMPUTE_NUM_THREAD_X = 0x1ba7
+static u64 COMPUTE_NUM_THREAD_Y = 0x1ba8
+static u64 COMPUTE_NUM_THREAD_Z = 0x1ba9
+static u64 COMPUTE_PGM_LO       = 0x1bac
+static u64 COMPUTE_PGM_HI       = 0x1bad
+static u64 COMPUTE_PGM_RSRC1    = 0x1bb2
+static u64 COMPUTE_PGM_RSRC2    = 0x1bb3
+static u64 COMPUTE_USER_DATA_0  = 0x1be0
+
+// PACKET3(op, n): n = (data dwords after header) - 1.
+fn pm4_type3(u64 op, u64 n) -> u64 {
+    u64 a = 3 << 30
+    u64 b = (op & 0xff) << 8
+    u64 c = (n & 0x3fff) << 16
+    return (a | b) | c
+}
+// compute-engine variant sets bit 1.
+fn pm4_type3_compute(u64 op, u64 n) -> u64 {
+    return pm4_type3(op, n) | (1 << 1)
+}
+// SET_SH_REG packet register offset for a compute reg at GC base gc0.
+fn pm4_sh_off(u64 gc0, u64 reg) -> u64 {
+    return (gc0 + reg) - PM4_SET_SH_REG_START
+}
+
+// ring writer: store a dword at index, return next index.
+fn pm4_push(u64 buf, u64 idx, u64 val) -> u64 {
+    store32(buf + (idx << 2), val)
+    return idx + 1
+}
+
+// Build a full compute-dispatch command stream into buf starting at dword idx.
+// Returns the new dword index (total dwords = ret - idx).
+fn pm4_build_dispatch(u64 buf, u64 idx, u64 gc0,
+                      u64 pgm_lo, u64 pgm_hi, u64 rsrc1, u64 rsrc2,
+                      u64 ntx, u64 nty, u64 ntz,
+                      u64 gx, u64 gy, u64 gz, u64 initiator) -> u64 {
+    // shader program address (PGM_LO, PGM_HI = 2 consecutive regs)
+    idx = pm4_push(buf, idx, pm4_type3(PM4_SET_SH_REG, 2))
+    idx = pm4_push(buf, idx, pm4_sh_off(gc0, COMPUTE_PGM_LO))
+    idx = pm4_push(buf, idx, pgm_lo)
+    idx = pm4_push(buf, idx, pgm_hi)
+    // resource descriptors (RSRC1, RSRC2)
+    idx = pm4_push(buf, idx, pm4_type3(PM4_SET_SH_REG, 2))
+    idx = pm4_push(buf, idx, pm4_sh_off(gc0, COMPUTE_PGM_RSRC1))
+    idx = pm4_push(buf, idx, rsrc1)
+    idx = pm4_push(buf, idx, rsrc2)
+    // threadgroup dims (NUM_THREAD_X/Y/Z)
+    idx = pm4_push(buf, idx, pm4_type3(PM4_SET_SH_REG, 3))
+    idx = pm4_push(buf, idx, pm4_sh_off(gc0, COMPUTE_NUM_THREAD_X))
+    idx = pm4_push(buf, idx, ntx)
+    idx = pm4_push(buf, idx, nty)
+    idx = pm4_push(buf, idx, ntz)
+    // dispatch grid + initiator
+    idx = pm4_push(buf, idx, pm4_type3_compute(PM4_DISPATCH_DIRECT, 3))
+    idx = pm4_push(buf, idx, gx)
+    idx = pm4_push(buf, idx, gy)
+    idx = pm4_push(buf, idx, gz)
+    idx = pm4_push(buf, idx, initiator)
+    return idx
+}
