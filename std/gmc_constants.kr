@@ -1,0 +1,102 @@
+// std/gmc_constants.kr — MMHUB / VM_CONTEXT0 / L2 cache register dword
+// offsets + PTE flag constants for Navi 32 (gc_11_0_3 / mmhub_3.0.0).
+// Ported 1:1 from MLRift std/gmc_constants.mlr (validated live: MMHUB MMU
+// up + 2-page SW GART, 4/4 checks green).
+//
+// All register dword offsets come from
+// linux/drivers/gpu/drm/amd/include/asic_reg/mmhub/mmhub_3_0_0_offset.h
+// All registers have BASE_IDX = 0, so byte_off = (NAVI32_MMHUB + reg_dw)*4
+// within BAR5. With NAVI32_MMHUB = 0x1A000, all addresses land at BAR5
+// byte 0x69000..0x6A3FF (well under 1 MiB).
+//
+// PTE / PDE flag values from drivers/gpu/drm/amd/amdgpu/amdgpu_vm.h
+// (gfx10+ layout).
+//
+// KernRift: & | ^ bind TIGHTER than << >> — parenthesize mixed terms.
+
+// =====================================================================
+// MMHUB register dword offsets (BASE_IDX 0).
+// =====================================================================
+
+// MC VM aperture registers:
+static u64 regMMMC_VM_AGP_TOP                       = 0x08ee
+static u64 regMMMC_VM_AGP_BOT                       = 0x08ef
+static u64 regMMMC_VM_AGP_BASE                      = 0x08f0
+static u64 regMMMC_VM_SYSTEM_APERTURE_LOW_ADDR      = 0x08f1
+static u64 regMMMC_VM_SYSTEM_APERTURE_HIGH_ADDR     = 0x08f2
+static u64 regMMMC_VM_MX_L1_TLB_CNTL                = 0x08f3
+static u64 regMMMC_VM_SYSTEM_APERTURE_DEFAULT_ADDR_LSB = 0x08d8
+static u64 regMMMC_VM_SYSTEM_APERTURE_DEFAULT_ADDR_MSB = 0x08d9
+
+// FB aperture (VRAM identity-mapped window):
+//   FB_LOCATION_BASE/TOP units: MC VA >> 24 (16 MiB granularity).
+//   FB_OFFSET: bias applied to FB-aperture-translated addresses.
+static u64 regMMMC_VM_FB_OFFSET                     = 0x08d7
+static u64 regMMMC_VM_FB_LOCATION_BASE              = 0x08ec
+static u64 regMMMC_VM_FB_LOCATION_TOP               = 0x08ed
+
+// VM L2 cache + TLB control registers:
+static u64 regMMVM_L2_CNTL                          = 0x0700
+static u64 regMMVM_L2_CNTL2                         = 0x0701
+static u64 regMMVM_L2_CNTL3                         = 0x0702
+static u64 regMMVM_L2_CNTL4                         = 0x0718
+static u64 regMMVM_L2_CNTL5                         = 0x071e
+
+// L2 protection fault redirect + status:
+static u64 regMMVM_L2_PROTECTION_FAULT_CNTL         = 0x0708
+static u64 regMMVM_L2_PROTECTION_FAULT_CNTL2        = 0x0709
+static u64 regMMVM_L2_PROTECTION_FAULT_STATUS       = 0x070c
+static u64 regMMVM_L2_PROTECTION_FAULT_ADDR_LO32    = 0x070d
+static u64 regMMVM_L2_PROTECTION_FAULT_ADDR_HI32    = 0x070e
+static u64 regMMVM_L2_PROTECTION_FAULT_DEFAULT_ADDR_LO32 = 0x070f
+static u64 regMMVM_L2_PROTECTION_FAULT_DEFAULT_ADDR_HI32 = 0x0710
+
+// L2 identity aperture (we DISABLE this — write 0xffffffff/0 pair):
+static u64 regMMVM_L2_CONTEXT1_IDENTITY_APERTURE_LOW_ADDR_LO32  = 0x0712
+static u64 regMMVM_L2_CONTEXT1_IDENTITY_APERTURE_LOW_ADDR_HI32  = 0x0713
+static u64 regMMVM_L2_CONTEXT1_IDENTITY_APERTURE_HIGH_ADDR_LO32 = 0x0714
+static u64 regMMVM_L2_CONTEXT1_IDENTITY_APERTURE_HIGH_ADDR_HI32 = 0x0715
+
+// VM Context 0 — our active page table:
+static u64 regMMVM_CONTEXT0_CNTL                            = 0x0740
+static u64 regMMVM_CONTEXT0_PAGE_TABLE_BASE_ADDR_LO32       = 0x07ab
+static u64 regMMVM_CONTEXT0_PAGE_TABLE_BASE_ADDR_HI32       = 0x07ac
+static u64 regMMVM_CONTEXT0_PAGE_TABLE_START_ADDR_LO32      = 0x07cb
+static u64 regMMVM_CONTEXT0_PAGE_TABLE_START_ADDR_HI32      = 0x07cc
+static u64 regMMVM_CONTEXT0_PAGE_TABLE_END_ADDR_LO32        = 0x07eb
+static u64 regMMVM_CONTEXT0_PAGE_TABLE_END_ADDR_HI32        = 0x07ec
+
+// TLB invalidate engines (18 total, ENG0 is the first; pattern is
+// LO32 at 0x0787 + eng_i*2, HI32 at 0x0788 + eng_i*2):
+static u64 regMMVM_INVALIDATE_ENG0_ADDR_RANGE_LO32 = 0x0787
+static u64 regMMVM_INVALIDATE_ENG0_ADDR_RANGE_HI32 = 0x0788
+
+// =====================================================================
+// PTE / PDE flag bits (gfx10+, Navi 1x and later).
+// Format: PTE = (paddr & 0xFFFFFFFFFFFFF000) | flags
+// =====================================================================
+static u64 AMDGPU_PTE_VALID         = 1
+static u64 AMDGPU_PTE_SYSTEM        = 2
+static u64 AMDGPU_PTE_SNOOPED       = 4
+static u64 AMDGPU_PTE_TMZ           = 8
+static u64 AMDGPU_PTE_EXECUTABLE    = 0x10
+static u64 AMDGPU_PTE_READABLE      = 0x20
+static u64 AMDGPU_PTE_WRITEABLE     = 0x40
+
+// MTYPE_UC = 0 for Navi 1x+ (contribution is 0, elided; kept for doc):
+static u64 GMC_MTYPE_UC             = 0
+
+static u64 GMC_PTE_ADDR_MASK        = 0xFFFFFFFFFFFFF000
+
+// =====================================================================
+// Hardware constants
+// =====================================================================
+static u64 GMC_PAGE_SIZE_BYTES      = 4096
+static u64 GMC_PT_ENTRY_COUNT       = 512        // 4096 bytes / 8 bytes per PTE
+static u64 GMC_PT_COVERAGE_BYTES    = 0x200000   // 512 * 4096 = 2 MiB
+
+// MC virtual address bit layout (2-level, fits our use case):
+//   bits [11:0]  : page offset within 4 KiB
+//   bits [20:12] : PT entry index (9 bits, 512 entries per PT)
+//   bits [29:21] : PD0 entry index (9 bits)
+//   bits [38:30] : PD1 entry (unused in 2-level — we only use PD0)

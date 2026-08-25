@@ -23,6 +23,7 @@ import "gpu_mes_load.kr"
 import "gpu_pm4.kr"
 import "gpu_queue.kr"
 import "gpu_mes_queue.kr"
+import "gmc.kr"
 
 // ---- VRAM bump allocator. ctx = [host_base(0), gpu_base(8), cursor(16)] ----
 fn gc_valloc_init(u64 ctx, u64 host_base, u64 gpu_base) {
@@ -55,6 +56,23 @@ fn gc_init(u64 bar5, u64 db2, u64 mp1, u64 ctx,
 
     // 2. defeat GFXOFF so GC/CP/MES stay powered
     if gpu_gfxoff_disable(bar5, mp1) != 1 { return 2 }
+
+    // 2b. GMC: MMHUB 2-level GART + GFXHUB identity (std/gmc.kr, port of
+    //     the live-validated MLRift std/gmc.mlr). Ordering: amdgpu runs
+    //     gmc_v11_0 hw_init in the GMC ip block, BEFORE the gfx block
+    //     that starts RLC/CP/MES (soc21.c ip-block list: common -> gmc ->
+    //     ... -> gfx), so the hubs translate before any GC client fetches
+    //     ucode. It must still come AFTER stage 2: GCVM/GCMC writes are
+    //     GC-domain and are silently dropped under GFXOFF (SP3 Task0b).
+    //     pt_sysmem=0: the ctx staging region is VRAM (VRAM-resident
+    //     PD/PT, no SYSTEM/SNOOPED PTE bits — amdgpu's normal config).
+    //     GMC failure returns a distinct 100+rc stage code (101..125).
+    u64 gmc_out_off = gc_valloc(ctx, 0x10, 0x100)
+    u64 gmc_out = gc_vhost(ctx, gmc_out_off)
+    u64 grc = gmc_init(bar5, ctx, 0, gmc_out)
+    if grc != 0 { return 100 + grc }
+    u64 gmc_pt_base = load64(gmc_out + 0)   // ADD_QUEUE page_table_base_addr
+    u64 gmc_vm_cntl = load64(gmc_out + 8)   // ADD_QUEUE vm_context_cntl (0x3FFFC3)
 
     // 3. RLC: stream ucode via GPM port, enable
     rlc_load_microcode(bar5, rlc_fw)
@@ -143,18 +161,25 @@ fn gc_init(u64 bar5, u64 db2, u64 mp1, u64 ctx,
     if mes_poll_fence(gc_vhost(ctx, shr_stat_off), 1) != 1 { return 6 }
 
     // 6e. ADD_QUEUE: map the compute queue through MES.
-    // FRONTIER (real GMC dependency, not a placeholder we can pin from source):
-    //   page_table_base_addr = the queue VM's GART/page-table base, and
-    //   vm_context_cntl = GFXHUB regVM_CONTEXT0_CNTL (amdgpu add_hw_queue reads
-    //   hub->vm_cntx_cntl; MLRift std/gmc.mlr programs this as ~0x3fffc3).
-    // KernRift has no GMC/GART stage yet, so both are passed 0 here; a real run
-    // needs a GMC bring-up (port of std/gmc.mlr) feeding these two values.
+    //   page_table_base_addr = gmc_pt_base — the PD0 GPU address | PTE flags,
+    //     the exact value stage 2b programmed into MMHUB
+    //     CONTEXT0_PAGE_TABLE_BASE (gmc_init out+0).
+    //   vm_context_cntl = gmc_vm_cntl = GMC_CTX0_CNTL_GART (0x3FFFC3) — the
+    //     live-validated depth-1 context CNTL (amdgpu add_hw_queue packs
+    //     hub->vm_cntx_cntl here; ours matches the 2-level GART it pairs with).
+    // FRONTIER (on-hardware): amdgpu mes_v11_0 subtracts adev->gmc.vram_start
+    // (FB_LOCATION base) from page_table_base_addr before packing; we never
+    // program FB_LOCATION, so verify regMMMC_VM_FB_LOCATION_BASE on the live
+    // card before trusting the raw value. Also: the GART window covers only
+    // GMC_GART_MC_VA_BASE+0x2000 — the MQD/ring/wptr addresses passed below
+    // are raw MC addresses reached via the GFXHUB identity aperture, not GART
+    // VAs; whether MES requires them inside the queue VM is a live question.
     u64 proc_ctx_off = gc_valloc(ctx, 0x1000, 0x1000)
     u64 gang_ctx_off = gc_valloc(ctx, 0x1000, 0x1000)
-    mes_build_add_queue(frame_host, 1, 0,
+    mes_build_add_queue(frame_host, 1, gmc_pt_base,
         gc_vgpu(ctx, proc_ctx_off), gc_vgpu(ctx, gang_ctx_off),
         CQ_DB, gc_vgpu(ctx, cq_mqd_off), gc_vgpu(ctx, cq_wptr_off),
-        MES_QUEUE_TYPE_COMPUTE, 0, 0,
+        MES_QUEUE_TYPE_COMPUTE, gmc_vm_cntl, 0,
         gc_vgpu(ctx, aq_stat_off), 1)
     sw = mes_submit_sched(gc_vhost(ctx, sr_ring_off), gc_vgpu(ctx, sr_ring_off),
                           sw, 1024, db2, SR_DB, frame_host)

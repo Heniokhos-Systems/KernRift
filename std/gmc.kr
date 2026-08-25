@@ -1,0 +1,538 @@
+// std/gmc.kr — Navi 32 (gc_11_0_3) GMC bring-up: MMHUB 2-level GART +
+// GFXHUB (GCVM) system-aperture identity, for a from-scratch KernRift OS.
+//
+// Ported from MLRift std/gmc.mlr + std/gmc_constants.mlr, which are
+// VALIDATED LIVE on the RX 7800 XT (MMHUB MMU up via direct writes,
+// VM_CONTEXT0_CNTL = 0x3FFFC3, 2-page SW GART, 4/4 fence checks green;
+// GFXHUB identity offsets validated in the warm-handoff work). Register
+// offsets/values are reused verbatim — do not re-derive.
+//
+// References: tinygrad runtime/support/am/ip.py:117-152 (init_hub),
+// kernel gmc_v11_0.c + mmhub_v3_0.c + gfxhub_v3_0.c.
+//
+// Adaptations for KernRift (documented, not re-derived):
+//   * MLRift allocated PT pages via gpu_dma_alloc_aligned (Linux IOMMU
+//     sysmem). Here PD0/PT/scratch come from the caller's VRAM staging
+//     bump allocator (gc_init.kr ctx = [host_base, gpu_base, cursor]).
+//     A `pt_sysmem` flag selects the PTE flag set: 1 = tables/targets in
+//     sysmem (SYSTEM|SNOOPED, the exact validated MLRift config), 0 =
+//     tables/targets in VRAM (amdgpu's normal VRAM-resident PD/PT: no
+//     SYSTEM/SNOOPED bits — the walker reads via the VRAM controller).
+//   * The MLRift puts()-based hex dumps are replaced by out-buffer
+//     diagnostics (freestanding OS has no libc).
+//
+// All MMIO goes through gpu_reg_r32/w32(bar5, NAVI32_MMHUB|NAVI32_GC0|
+// NAVI32_GC1, reg_dw) — direct BAR5, no SMN needed (all bases are low).
+//
+// KernRift: & | ^ bind TIGHTER than << >> — every mixed shift/mask term
+// below is fully parenthesized.
+
+import "gpu_portable.kr"
+import "gpu_navi32.kr"
+import "gmc_constants.kr"
+
+// The validated CONTEXT0 CNTL value (MLRift gmc.mlr:323, live 4/4). Also
+// the vm_context_cntl handed to MES ADD_QUEUE: amdgpu's add_hw_queue
+// packs hub->vm_cntx_cntl (the per-VMID context CNTL template); ours is
+// depth=1 to match the 2-level PD0+PT — self-consistent with the
+// page_table_base_addr gmc_init returns.
+static u64 GMC_CTX0_CNTL_GART = 0x3FFFC3
+
+// =====================================================================
+// Local mirror of the gc_init.kr VRAM bump allocator (same ctx layout:
+// [host_base(0), gpu_base(8), cursor(16)]). gmc.kr cannot import
+// gc_init.kr (gc_init imports gmc), so the 3 one-liners are mirrored.
+// =====================================================================
+fn _gmc_valloc(u64 ctx, u64 size, u64 align) -> u64 {
+    u64 cur = load64(ctx + 16)
+    cur = (cur + (align - 1)) & ((align - 1) ^ 0xffffffffffffffff)
+    store64(ctx + 16, cur + size)
+    return cur                          // returns offset from base
+}
+fn _gmc_vhost(u64 ctx, u64 off) -> u64 { return load64(ctx + 0) + off }
+fn _gmc_vgpu(u64 ctx, u64 off)  -> u64 { return load64(ctx + 8) + off }
+
+fn _gmc_zero_page(u64 host) {
+    u64 i = 0
+    while i < GMC_PAGE_SIZE_BYTES { store64(host + i, 0); i = i + 8 }
+}
+
+// =====================================================================
+// gmc_map — populate PD0 (1 PDE) + PT (N PTEs) to map [mc_va_base,
+// mc_va_base+size_bytes) to GPU addresses starting at buf_gpu.
+//
+// Layout: bits [11:0] = page offset, [20:12] = PT index (512 entries),
+//         [29:21] = PD0 index. Whole range must fit one 2-MiB chunk
+//         (single PT).
+//
+// pt_sysmem: 1 = PT page + targets live in sysmem -> PDE/PTE carry
+// SYSTEM|SNOOPED (validated MLRift config); 0 = VRAM-resident.
+//
+// Returns: 0 ok; 1 mc_va_base not 4K-aligned; 2 size not 4K-aligned or
+// zero; 3 range crosses a 2-MiB boundary (would need multiple PTs).
+// =====================================================================
+fn gmc_map(u64 pd_host, u64 pt_host, u64 pt_gpu,
+           u64 mc_va_base, u64 buf_gpu, u64 size_bytes,
+           u64 pt_sysmem) -> u64 {
+    if (mc_va_base & 0xFFF) != 0 { return 1 }
+    if size_bytes == 0 { return 2 }
+    if (size_bytes & 0xFFF) != 0 { return 2 }
+    u64 end = (mc_va_base + size_bytes) - 1
+    if (mc_va_base & 0xFFFFFFFFFFE00000) != (end & 0xFFFFFFFFFFE00000) {
+        return 3
+    }
+
+    u64 mem_flags = 0
+    if pt_sysmem != 0 { mem_flags = AMDGPU_PTE_SYSTEM | AMDGPU_PTE_SNOOPED }
+
+    // 2-LEVEL GART (CONTEXT0 with depth=1): PD0[pde_idx] points at PT,
+    // then PT[pte_idx] holds the leaf PTE. pde_idx = mc_va[29:21],
+    // pte_idx = mc_va[20:12]. SYSTEM+SNOOPED on the PDE tells the GMC
+    // walker the target PT page is in sysmem (sysmem config only).
+    u64 pde_idx = (mc_va_base >> 21) & 0x1FF
+    u64 pde_val = (pt_gpu & GMC_PTE_ADDR_MASK) | (AMDGPU_PTE_VALID | mem_flags)
+    store64(pd_host + (pde_idx * 8), pde_val)
+
+    u64 pt_start_idx = (mc_va_base >> 12) & 0x1FF
+    u64 leaf_flags = (AMDGPU_PTE_VALID | mem_flags) | (AMDGPU_PTE_READABLE | AMDGPU_PTE_WRITEABLE | AMDGPU_PTE_EXECUTABLE)
+    u64 n_pages = size_bytes / GMC_PAGE_SIZE_BYTES
+    u64 i = 0
+    while i < n_pages {
+        u64 page_gpu = buf_gpu + (i * GMC_PAGE_SIZE_BYTES)
+        u64 pte_val = (page_gpu & GMC_PTE_ADDR_MASK) | leaf_flags
+        store64(pt_host + ((pt_start_idx + i) * 8), pte_val)
+        i = i + 1
+    }
+    return 0
+}
+
+// =====================================================================
+// MMHUB / GFXHUB MMIO primitives — thin wrappers over gpu_reg_r32/w32.
+// =====================================================================
+fn _mmhub_w32(u64 bar5, u64 reg_dw, u64 val) {
+    gpu_reg_w32(bar5, NAVI32_MMHUB, reg_dw, val)
+}
+fn _mmhub_r32(u64 bar5, u64 reg_dw) -> u64 {
+    return gpu_reg_r32(bar5, NAVI32_MMHUB, reg_dw)
+}
+fn _gfxhub_w32(u64 bar5, u64 reg_dw, u64 val) {
+    gpu_reg_w32(bar5, NAVI32_GC0, reg_dw, val)
+}
+fn _gfxhub_r32(u64 bar5, u64 reg_dw) -> u64 {
+    return gpu_reg_r32(bar5, NAVI32_GC0, reg_dw)
+}
+
+// =====================================================================
+// gmc_init_mmhub — MMHUB GART-init register sequence, tinygrad
+// init_hub("MM") order (ip.py:117-152), skipping the FB_LOCATION /
+// VRAM-aperture writes. Per-group readback fences abort BEFORE the
+// final VM_CONTEXT0_CNTL.enable_context=1 commit if any prior group
+// silently dropped writes. VALIDATED LIVE (MLRift gmc.mlr, 4/4).
+//
+// pt_base_full = (pd0_gpu & GMC_PTE_ADDR_MASK) | VALID [| SYSTEM|SNOOPED]
+//   — the exact 64-bit value programmed into CONTEXT0_PAGE_TABLE_BASE.
+// sys_apert_lo/hi units: MC VA >> 18. lo=0, hi=0xFFFF disables the
+//   system aperture's identity fast-path so translations go through PTEs.
+// default_addr_phys = page-aligned GPU address of a zero-filled scratch
+//   page (fallback target for faulting accesses).
+//
+// Returns: 0 ok; 1 PAGE_TABLE_BASE_LO readback mismatch; 2 CONTEXT0
+// enable_context not set; 3 L1 TLB enable not set; 4 L2 cache enable
+// not set; 5 readback 0xFFFFFFFF (suspected wedge).
+// =====================================================================
+fn gmc_init_mmhub(u64 bar5, u64 pt_base_full,
+                  u64 mc_va_base, u64 mc_va_size,
+                  u64 sys_apert_lo, u64 sys_apert_hi,
+                  u64 default_addr_phys) -> u64 {
+    // ---- AGP aperture: disabled (BOT=0xFFFFFF > TOP=0 => disabled). ----
+    _mmhub_w32(bar5, regMMMC_VM_AGP_BASE, 0)
+    _mmhub_w32(bar5, regMMMC_VM_AGP_BOT,  0xFFFFFF)
+    _mmhub_w32(bar5, regMMMC_VM_AGP_TOP,  0)
+
+    // ---- System aperture (fast-path disabled by caller's lo/hi). ----
+    _mmhub_w32(bar5, regMMMC_VM_SYSTEM_APERTURE_LOW_ADDR,  sys_apert_lo)
+    _mmhub_w32(bar5, regMMMC_VM_SYSTEM_APERTURE_HIGH_ADDR, sys_apert_hi)
+    _mmhub_w32(bar5, regMMMC_VM_SYSTEM_APERTURE_DEFAULT_ADDR_LSB, default_addr_phys >> 12)
+    _mmhub_w32(bar5, regMMMC_VM_SYSTEM_APERTURE_DEFAULT_ADDR_MSB, (default_addr_phys >> 12) >> 32)
+
+    // ---- L2 protection-fault redirect. ----
+    _mmhub_w32(bar5, regMMVM_L2_PROTECTION_FAULT_DEFAULT_ADDR_LO32, default_addr_phys >> 12)
+    _mmhub_w32(bar5, regMMVM_L2_PROTECTION_FAULT_DEFAULT_ADDR_HI32, (default_addr_phys >> 12) >> 32)
+    // CNTL2.active_page_migration_pte_read_retry = bit 12.
+    _mmhub_w32(bar5, regMMVM_L2_PROTECTION_FAULT_CNTL2, 0x1000)
+
+    // ---- L1 TLB enable: enable_l1_tlb(b0)=1, system_access_mode(b3..4)=3,
+    // enable_advanced_driver_model(b6)=1, mtype=UC(0) -> 0x59. ----
+    _mmhub_w32(bar5, regMMMC_VM_MX_L1_TLB_CNTL, 0x59)
+    u64 rb_tlb = _mmhub_r32(bar5, regMMMC_VM_MX_L1_TLB_CNTL)
+    if rb_tlb == 0xFFFFFFFF { return 5 }
+    if (rb_tlb & 0x1) == 0 { return 3 }
+
+    // ---- L2 cache enable: enable_l2_cache(b0) | default_page_out(b1) |
+    // context1_identity_access_mode(b18..19)=1 -> 0x40003. ----
+    _mmhub_w32(bar5, regMMVM_L2_CNTL, 0x40003)
+    u64 rb_l2 = _mmhub_r32(bar5, regMMVM_L2_CNTL)
+    if rb_l2 == 0xFFFFFFFF { return 5 }
+    if (rb_l2 & 0x1) == 0 { return 4 }
+
+    // L2_CNTL2: invalidate_all_l1_tlbs(b0) | invalidate_l2_cache(b1) = 0x3
+    _mmhub_w32(bar5, regMMVM_L2_CNTL2, 0x3)
+    // L2_CNTL3: 4k_assoc(b0) | bigk_assoc(b4) | bank_select(b5..9)=9 |
+    //   bigk_fragment_size(b15..20)=6 -> 0x30131
+    _mmhub_w32(bar5, regMMVM_L2_CNTL3, 0x30131)
+    // L2_CNTL4: l2_cache_4k_partition_count(b0..4)=1
+    _mmhub_w32(bar5, regMMVM_L2_CNTL4, 0x1)
+    // L2_CNTL5: walker_priority_client_id(b0..8)=0x1ff
+    _mmhub_w32(bar5, regMMVM_L2_CNTL5, 0x1FF)
+
+    // ---- VM_CONTEXT0 page-table pointers + bounds (units: MC VA>>12). ----
+    u64 pt_start = mc_va_base >> 12
+    u64 pt_end   = ((mc_va_base + mc_va_size) - 1) >> 12
+    _mmhub_w32(bar5, regMMVM_CONTEXT0_PAGE_TABLE_START_ADDR_LO32, pt_start & 0xFFFFFFFF)
+    _mmhub_w32(bar5, regMMVM_CONTEXT0_PAGE_TABLE_START_ADDR_HI32, pt_start >> 32)
+    _mmhub_w32(bar5, regMMVM_CONTEXT0_PAGE_TABLE_END_ADDR_LO32,   pt_end & 0xFFFFFFFF)
+    _mmhub_w32(bar5, regMMVM_CONTEXT0_PAGE_TABLE_END_ADDR_HI32,   pt_end >> 32)
+
+    // PAGE_TABLE_BASE_ADDR carries pd0 | VALID (+SYSTEM|SNOOPED when the
+    // root table is in sysmem — without SYSTEM the walker reads PD via
+    // the VRAM controller; live FAULT_STATUS=0xd32 confirmed that path).
+    _mmhub_w32(bar5, regMMVM_CONTEXT0_PAGE_TABLE_BASE_ADDR_LO32, pt_base_full & 0xFFFFFFFF)
+    _mmhub_w32(bar5, regMMVM_CONTEXT0_PAGE_TABLE_BASE_ADDR_HI32, pt_base_full >> 32)
+    u64 rb_base = _mmhub_r32(bar5, regMMVM_CONTEXT0_PAGE_TABLE_BASE_ADDR_LO32)
+    if rb_base == 0xFFFFFFFF { return 5 }
+    if rb_base != (pt_base_full & 0xFFFFFFFF) { return 1 }
+
+    // ---- Disable identity aperture (tinygrad: 0xFFFFFFFFF / 0). ----
+    _mmhub_w32(bar5, regMMVM_L2_CONTEXT1_IDENTITY_APERTURE_LOW_ADDR_LO32,  0xFFFFFFFF)
+    _mmhub_w32(bar5, regMMVM_L2_CONTEXT1_IDENTITY_APERTURE_LOW_ADDR_HI32,  0xF)
+    _mmhub_w32(bar5, regMMVM_L2_CONTEXT1_IDENTITY_APERTURE_HIGH_ADDR_LO32, 0)
+    _mmhub_w32(bar5, regMMVM_L2_CONTEXT1_IDENTITY_APERTURE_HIGH_ADDR_HI32, 0)
+
+    // ---- Pre-size the 18 invalidate engines to a generous range. ----
+    u64 eng_i = 0
+    while eng_i < 18 {
+        _mmhub_w32(bar5, regMMVM_INVALIDATE_ENG0_ADDR_RANGE_LO32 + (eng_i * 2), 0xFFFFFFFF)
+        _mmhub_w32(bar5, regMMVM_INVALIDATE_ENG0_ADDR_RANGE_HI32 + (eng_i * 2), 0x1F)
+        eng_i = eng_i + 1
+    }
+
+    // ---- LAST WRITE: VM_CONTEXT0_CNTL = 0x3FFFC3 (validated live):
+    //   ENABLE_CONTEXT(b0)=1 | PAGE_TABLE_DEPTH(b1..2)=1 (2-level) |
+    //   RETRY_PERMISSION_OR_INVALID_PAGE_FAULT(b6)=1 | RETRY_OTHER(b7)=1 |
+    //   all 7 *_PROTECTION_FAULT INT+DEFAULT pairs (b8..21)=1.
+    _mmhub_w32(bar5, regMMVM_CONTEXT0_CNTL, GMC_CTX0_CNTL_GART)
+    u64 rb_ctx = _mmhub_r32(bar5, regMMVM_CONTEXT0_CNTL)
+    if rb_ctx == 0xFFFFFFFF { return 5 }
+    if (rb_ctx & 0x1) == 0 { return 2 }
+    return 0
+}
+
+// =====================================================================
+// gmc_init_aperture_identity — MMHUB system-aperture identity ONLY (no
+// PT walker): MC VA in [lo<<18, hi<<18] routes to the bus at the same
+// address. CONTEXT0_CNTL=0x1 (ENABLE, depth=0) — the context must be
+// ENABLED for the L2 aperture comparator to route requests (kernel
+// mmhub_v3_0_enable_system_domain pattern). VALIDATED LIVE (this is the
+// config that made PSP load_kdb go GREEN in slice ε.0c).
+// Returns 0 ok; 3 TLB not enabled; 4 L2 not enabled; 5 readback all-Fs.
+// =====================================================================
+fn gmc_init_aperture_identity(u64 bar5,
+                              u64 apert_mc_lo, u64 apert_mc_hi,
+                              u64 default_addr_phys) -> u64 {
+    _mmhub_w32(bar5, regMMMC_VM_AGP_BASE, 0)
+    _mmhub_w32(bar5, regMMMC_VM_AGP_BOT,  0xFFFFFF)
+    _mmhub_w32(bar5, regMMMC_VM_AGP_TOP,  0)
+
+    _mmhub_w32(bar5, regMMMC_VM_SYSTEM_APERTURE_LOW_ADDR,  apert_mc_lo)
+    _mmhub_w32(bar5, regMMMC_VM_SYSTEM_APERTURE_HIGH_ADDR, apert_mc_hi)
+    _mmhub_w32(bar5, regMMMC_VM_SYSTEM_APERTURE_DEFAULT_ADDR_LSB, default_addr_phys >> 12)
+    _mmhub_w32(bar5, regMMMC_VM_SYSTEM_APERTURE_DEFAULT_ADDR_MSB, (default_addr_phys >> 12) >> 32)
+
+    _mmhub_w32(bar5, regMMVM_L2_PROTECTION_FAULT_DEFAULT_ADDR_LO32, default_addr_phys >> 12)
+    _mmhub_w32(bar5, regMMVM_L2_PROTECTION_FAULT_DEFAULT_ADDR_HI32, (default_addr_phys >> 12) >> 32)
+    _mmhub_w32(bar5, regMMVM_L2_PROTECTION_FAULT_CNTL2, 0x1000)
+
+    _mmhub_w32(bar5, regMMMC_VM_MX_L1_TLB_CNTL, 0x59)
+    u64 rb_tlb = _mmhub_r32(bar5, regMMMC_VM_MX_L1_TLB_CNTL)
+    if rb_tlb == 0xFFFFFFFF { return 5 }
+    if (rb_tlb & 0x1) == 0 { return 3 }
+
+    _mmhub_w32(bar5, regMMVM_L2_CNTL, 0x40003)
+    u64 rb_l2 = _mmhub_r32(bar5, regMMVM_L2_CNTL)
+    if rb_l2 == 0xFFFFFFFF { return 5 }
+    if (rb_l2 & 0x1) == 0 { return 4 }
+
+    _mmhub_w32(bar5, regMMVM_L2_CNTL2,  0x3)
+    _mmhub_w32(bar5, regMMVM_L2_CNTL3,  0x30131)
+    _mmhub_w32(bar5, regMMVM_L2_CNTL4,  0x1)
+    _mmhub_w32(bar5, regMMVM_L2_CNTL5,  0x1FF)
+
+    _mmhub_w32(bar5, regMMVM_L2_CONTEXT1_IDENTITY_APERTURE_LOW_ADDR_LO32,  0xFFFFFFFF)
+    _mmhub_w32(bar5, regMMVM_L2_CONTEXT1_IDENTITY_APERTURE_LOW_ADDR_HI32,  0xF)
+    _mmhub_w32(bar5, regMMVM_L2_CONTEXT1_IDENTITY_APERTURE_HIGH_ADDR_LO32, 0)
+    _mmhub_w32(bar5, regMMVM_L2_CONTEXT1_IDENTITY_APERTURE_HIGH_ADDR_HI32, 0)
+
+    u64 eng_i = 0
+    while eng_i < 18 {
+        _mmhub_w32(bar5, regMMVM_INVALIDATE_ENG0_ADDR_RANGE_LO32 + (eng_i * 2), 0xFFFFFFFF)
+        _mmhub_w32(bar5, regMMVM_INVALIDATE_ENG0_ADDR_RANGE_HI32 + (eng_i * 2), 0x1F)
+        eng_i = eng_i + 1
+    }
+
+    _mmhub_w32(bar5, regMMVM_CONTEXT0_CNTL, 0x1)
+    return 0
+}
+
+// =====================================================================
+// GFXHUB (GCVM/GCMC) system-aperture identity. GC clients (MES/MEC/CP)
+// fetch through GFXHUB, NOT MMHUB — MES ucode ICACHE fetch of
+// CP_MES_IC_BASE needs THIS hub up. Byte-for-byte mirror of the MMHUB
+// identity sequence at GCVM/GCMC offsets @ NAVI32_GC0 (BASE_IDX 0);
+// offsets verified vs gc_11_0_0_offset.h in MLRift gmc.mlr:441-463
+// (same UTCL2 IP/field layout as MMHUB). depth-0 CONTEXT0 => GC-client
+// MC addr == bus address (no page-table walk).
+// =====================================================================
+static u64 regGCMC_VM_AGP_BASE_g                 = 0x167c
+static u64 regGCMC_VM_AGP_BOT_g                  = 0x167b
+static u64 regGCMC_VM_AGP_TOP_g                  = 0x167a
+static u64 regGCMC_VM_SYS_APERT_LOW_g            = 0x167d
+static u64 regGCMC_VM_SYS_APERT_HIGH_g           = 0x167e
+static u64 regGCMC_VM_SYS_APERT_DEF_LSB_g        = 0x15a8
+static u64 regGCMC_VM_SYS_APERT_DEF_MSB_g        = 0x15a9
+static u64 regGCVM_L2_PF_DEFAULT_ADDR_LO32_g     = 0x15cb
+static u64 regGCVM_L2_PF_DEFAULT_ADDR_HI32_g     = 0x15cc
+static u64 regGCVM_L2_PF_CNTL2_g                 = 0x15c5
+static u64 regGCMC_VM_MX_L1_TLB_CNTL_g           = 0x167f
+static u64 regGCVM_L2_CNTL_g                     = 0x15bc
+static u64 regGCVM_L2_CNTL2_g                    = 0x15bd
+static u64 regGCVM_L2_CNTL3_g                    = 0x15be
+static u64 regGCVM_L2_CNTL4_g                    = 0x15d4
+static u64 regGCVM_L2_CNTL5_g                    = 0x15da
+static u64 regGCVM_L2_CTX1_IDENT_LOW_LO32_g      = 0x15ce
+static u64 regGCVM_L2_CTX1_IDENT_LOW_HI32_g      = 0x15cf
+static u64 regGCVM_L2_CTX1_IDENT_HIGH_LO32_g     = 0x15d0
+static u64 regGCVM_L2_CTX1_IDENT_HIGH_HI32_g     = 0x15d1
+static u64 regGCVM_INVAL_ENG0_RANGE_LO32_g       = 0x16cf
+static u64 regGCVM_INVAL_ENG0_RANGE_HI32_g       = 0x16d0
+static u64 regGCVM_CONTEXT0_CNTL_g               = 0x1688
+
+// apert_mc_lo/hi = base>>18 .. (base+size-1)>>18. default_addr_phys =
+// zero scratch page (fault redirect). Returns 0 ok; 3 TLB not enabled;
+// 4 L2 not enabled; 5 readback all-Fs (dead aperture / GFXOFF-gated —
+// on a warm card these writes are DROPPED unless GFXOFF is defeated
+// first: gc_init stage 2 gpu_gfxoff_disable must precede this).
+fn gmc_init_gfxhub_identity(u64 bar5,
+                            u64 apert_mc_lo, u64 apert_mc_hi,
+                            u64 default_addr_phys) -> u64 {
+    _gfxhub_w32(bar5, regGCMC_VM_AGP_BASE_g, 0)
+    _gfxhub_w32(bar5, regGCMC_VM_AGP_BOT_g,  0xFFFFFF)
+    _gfxhub_w32(bar5, regGCMC_VM_AGP_TOP_g,  0)
+
+    _gfxhub_w32(bar5, regGCMC_VM_SYS_APERT_LOW_g,  apert_mc_lo)
+    _gfxhub_w32(bar5, regGCMC_VM_SYS_APERT_HIGH_g, apert_mc_hi)
+    _gfxhub_w32(bar5, regGCMC_VM_SYS_APERT_DEF_LSB_g, default_addr_phys >> 12)
+    _gfxhub_w32(bar5, regGCMC_VM_SYS_APERT_DEF_MSB_g, (default_addr_phys >> 12) >> 32)
+
+    _gfxhub_w32(bar5, regGCVM_L2_PF_DEFAULT_ADDR_LO32_g, default_addr_phys >> 12)
+    _gfxhub_w32(bar5, regGCVM_L2_PF_DEFAULT_ADDR_HI32_g, (default_addr_phys >> 12) >> 32)
+    _gfxhub_w32(bar5, regGCVM_L2_PF_CNTL2_g, 0x1000)
+
+    _gfxhub_w32(bar5, regGCMC_VM_MX_L1_TLB_CNTL_g, 0x59)
+    u64 rb_tlb = _gfxhub_r32(bar5, regGCMC_VM_MX_L1_TLB_CNTL_g)
+    if rb_tlb == 0xFFFFFFFF { return 5 }
+    if (rb_tlb & 0x1) == 0 { return 3 }
+
+    _gfxhub_w32(bar5, regGCVM_L2_CNTL_g, 0x40003)
+    u64 rb_l2 = _gfxhub_r32(bar5, regGCVM_L2_CNTL_g)
+    if rb_l2 == 0xFFFFFFFF { return 5 }
+    if (rb_l2 & 0x1) == 0 { return 4 }
+
+    _gfxhub_w32(bar5, regGCVM_L2_CNTL2_g, 0x3)
+    _gfxhub_w32(bar5, regGCVM_L2_CNTL3_g, 0x30131)
+    _gfxhub_w32(bar5, regGCVM_L2_CNTL4_g, 0x1)
+    _gfxhub_w32(bar5, regGCVM_L2_CNTL5_g, 0x1FF)
+
+    _gfxhub_w32(bar5, regGCVM_L2_CTX1_IDENT_LOW_LO32_g,  0xFFFFFFFF)
+    _gfxhub_w32(bar5, regGCVM_L2_CTX1_IDENT_LOW_HI32_g,  0xF)
+    _gfxhub_w32(bar5, regGCVM_L2_CTX1_IDENT_HIGH_LO32_g, 0)
+    _gfxhub_w32(bar5, regGCVM_L2_CTX1_IDENT_HIGH_HI32_g, 0)
+
+    u64 eng_i = 0
+    while eng_i < 18 {
+        _gfxhub_w32(bar5, regGCVM_INVAL_ENG0_RANGE_LO32_g + (eng_i * 2), 0xFFFFFFFF)
+        _gfxhub_w32(bar5, regGCVM_INVAL_ENG0_RANGE_HI32_g + (eng_i * 2), 0x1F)
+        eng_i = eng_i + 1
+    }
+
+    // CONTEXT0: ENABLE_CONTEXT=1, PAGE_TABLE_DEPTH=0 (identity) — LAST.
+    _gfxhub_w32(bar5, regGCVM_CONTEXT0_CNTL_g, 0x1)
+    return 0
+}
+
+// =====================================================================
+// RLC safe-mode — quiesce the RLC so direct GC-domain register writes
+// are not re-clobbered by RLC golden-state replay / clock-gating cycling
+// (amdgpu gfx_v11_0_set/unset_safe_mode). Needed only on a WARM card
+// with RLC already running; on cold bring-up before rlc_start it is a
+// no-op lever. regRLC_SAFE_MODE @ GC1 dword 0x0980 (gc_11_0_0_offset.h):
+// CMD=b0, MESSAGE=b1..4. Enter = write 0x3, poll CMD clear. Exit = 0x1.
+// =====================================================================
+static u64 regRLC_SAFE_MODE_gc1 = 0x0980
+static u64 regRLC_CNTL_gc1      = 0x4c00   // RLC_ENABLE_F32 = b0
+
+fn rlc_cntl_read(u64 bar5) -> u64 {
+    return gpu_reg_r32(bar5, NAVI32_GC1, regRLC_CNTL_gc1)
+}
+
+// Returns 0 if safe mode entered (CMD acked/cleared), 1 on timeout.
+fn rlc_enter_safe_mode(u64 bar5) -> u64 {
+    gpu_reg_w32(bar5, NAVI32_GC1, regRLC_SAFE_MODE_gc1, 0x3)
+    u64 i = 0
+    while i < 100000 {
+        u64 v = gpu_reg_r32(bar5, NAVI32_GC1, regRLC_SAFE_MODE_gc1)
+        if (v & 0x1) == 0 { return 0 }
+        i = i + 1
+    }
+    return 1
+}
+
+fn rlc_exit_safe_mode(u64 bar5) {
+    gpu_reg_w32(bar5, NAVI32_GC1, regRLC_SAFE_MODE_gc1, 0x1)
+}
+
+// gc_disable_clock_gating — force GC clocks ON + disable CGCG/CGLS
+// (amdgpu gfx_v11_0_update_medium/coarse_grain_clock_gating(false)).
+// Call inside RLC safe-mode. regRLC_CGTT_MGCG_OVERRIDE @ GC1 0x4c48,
+// regRLC_CGCG_CGLS_CTRL @ GC1 0x4c49 (gc_11_0_0_offset.h). Override
+// bits: RLC_CGTT_SCLK=0x2, GFXIP_MGCG=0x4, GFXIP_CGCG=0x8,
+// GRBM_CGTT_SCLK=0x20; CGCG_EN=0x1, CGLS_EN=0x2.
+// Returns MGCG_OVERRIDE packed (before<<32)|after as a write-landed
+// WITNESS — only a before->after DELTA is decisive.
+static u64 regRLC_CGTT_MGCG_OVERRIDE_gc1 = 0x4c48
+static u64 regRLC_CGCG_CGLS_CTRL_gc1     = 0x4c49
+
+fn gc_disable_clock_gating(u64 bar5) -> u64 {
+    u64 ov_init = gpu_reg_r32(bar5, NAVI32_GC1, regRLC_CGTT_MGCG_OVERRIDE_gc1)
+    u64 ov = ov_init | (0x2 | 0x4 | 0x8 | 0x20)
+    gpu_reg_w32(bar5, NAVI32_GC1, regRLC_CGTT_MGCG_OVERRIDE_gc1, ov)
+    u64 cc = gpu_reg_r32(bar5, NAVI32_GC1, regRLC_CGCG_CGLS_CTRL_gc1)
+    cc = cc & 0xFFFFFFFC                       // clear CGCG_EN | CGLS_EN
+    gpu_reg_w32(bar5, NAVI32_GC1, regRLC_CGCG_CGLS_CTRL_gc1, cc)
+    u64 rb = gpu_reg_r32(bar5, NAVI32_GC1, regRLC_CGTT_MGCG_OVERRIDE_gc1)
+    return (ov_init << 32) | rb
+}
+
+// =====================================================================
+// Diagnostics (freestanding: values written to a caller buffer instead
+// of the MLRift puts() hex dump).
+// =====================================================================
+
+// gmc_readback_sanity — write 5 u32s to out (20 bytes):
+//   +0 PT_BASE_LO, +4 PT_BASE_HI, +8 CTX0_CNTL, +12 TLB_CNTL, +16 L2_CNTL.
+// Returns 0 if CONTEXT0 enable_context (b0) is set; 1 otherwise.
+fn gmc_readback_sanity(u64 bar5, u64 out) -> u64 {
+    store32(out + 0,  _mmhub_r32(bar5, regMMVM_CONTEXT0_PAGE_TABLE_BASE_ADDR_LO32))
+    store32(out + 4,  _mmhub_r32(bar5, regMMVM_CONTEXT0_PAGE_TABLE_BASE_ADDR_HI32))
+    u64 ctx0 = _mmhub_r32(bar5, regMMVM_CONTEXT0_CNTL)
+    store32(out + 8,  ctx0)
+    store32(out + 12, _mmhub_r32(bar5, regMMMC_VM_MX_L1_TLB_CNTL))
+    store32(out + 16, _mmhub_r32(bar5, regMMVM_L2_CNTL))
+    if (ctx0 & 0x1) == 0 { return 1 }
+    return 0
+}
+
+// gmc_fault_status — latch-read the MMHUB L2 protection-fault regs into
+// out (16 bytes): +0 STATUS, +4 ADDR_LO, +8 ADDR_HI, +12 CNTL. Returns
+// STATUS. Decode: b0 MORE_FAULTS, b1 WALKER_ERROR, b2 PERMISSION_FAULTS,
+// b3 MAPPING_ERROR, b9..12 VMID.
+fn gmc_fault_status(u64 bar5, u64 out) -> u64 {
+    u64 status = _mmhub_r32(bar5, regMMVM_L2_PROTECTION_FAULT_STATUS)
+    store32(out + 0,  status)
+    store32(out + 4,  _mmhub_r32(bar5, regMMVM_L2_PROTECTION_FAULT_ADDR_LO32))
+    store32(out + 8,  _mmhub_r32(bar5, regMMVM_L2_PROTECTION_FAULT_ADDR_HI32))
+    store32(out + 12, _mmhub_r32(bar5, regMMVM_L2_PROTECTION_FAULT_CNTL))
+    return status
+}
+
+// =====================================================================
+// gmc_init — the GC-init GMC stage. Builds a 2-page SW GART (PD0 + one
+// PT) in the caller's staging region, maps a small window at
+// GMC_GART_MC_VA_BASE, brings up the MMHUB 2-level-GART CONTEXT0
+// (validated sequence), then the GFXHUB identity path (GC clients:
+// MES/MEC/CP fetch through GFXHUB), and hands back the two values the
+// MES ADD_QUEUE packet needs.
+//
+// Inputs:
+//   bar5       mapped BAR5 register aperture.
+//   ctx        gc_init.kr bump-allocator ctx [host_base, gpu_base, cursor].
+//   pt_sysmem  1 = staging region is IOMMU sysmem (validated MLRift PTE
+//              flags SYSTEM|SNOOPED); 0 = staging region is VRAM.
+//   out        16-byte host buffer:
+//                +0 u64 page_table_base_addr — PD0 GPU address | flags,
+//                   the exact value programmed into MMHUB
+//                   CONTEXT0_PAGE_TABLE_BASE -> ADD_QUEUE
+//                   page_table_base_addr.
+//                +8 u64 vm_context_cntl = GMC_CTX0_CNTL_GART (0x3FFFC3)
+//                   -> ADD_QUEUE vm_context_cntl (amdgpu packs
+//                   hub->vm_cntx_cntl there; ours = the validated
+//                   depth-1 CONTEXT0 value, matching this GART).
+//
+// FRONTIER (flagged, on-hardware only): amdgpu's mes_v11_0 add_hw_queue
+// packs page_table_base_addr MINUS adev->gmc.vram_start (FB_LOCATION
+// base). We never program FB_LOCATION; whether the staging region's GPU
+// addresses need that rebase on a UEFI-POSTed card is a live-hardware
+// question — verify FB_LOCATION_BASE (regMMMC_VM_FB_LOCATION_BASE)
+// before trusting the raw value.
+//
+// Returns: 0 ok;
+//   1..5   = gmc_init_mmhub rc (see above);
+//   13..15 = 10 + gmc_init_gfxhub_identity rc;
+//   21..23 = 20 + gmc_map rc.
+// =====================================================================
+static u64 GMC_GART_MC_VA_BASE = 0x100000    // MC VA window the GART covers
+static u64 GMC_GART_MC_VA_SIZE = 0x2000      // 2 mapped pages (fits one PT)
+static u64 GMC_GFX_APERT_BYTES = 0x10000000  // GFXHUB identity span: 256 MiB
+
+fn gmc_init(u64 bar5, u64 ctx, u64 pt_sysmem, u64 out) -> u64 {
+    // ---- allocate PD0 + PT + scratch(fault-redirect) + mapped target ----
+    u64 pd_off = _gmc_valloc(ctx, GMC_PAGE_SIZE_BYTES, GMC_PAGE_SIZE_BYTES)
+    u64 pt_off = _gmc_valloc(ctx, GMC_PAGE_SIZE_BYTES, GMC_PAGE_SIZE_BYTES)
+    u64 sc_off = _gmc_valloc(ctx, GMC_PAGE_SIZE_BYTES, GMC_PAGE_SIZE_BYTES)
+    u64 tg_off = _gmc_valloc(ctx, GMC_GART_MC_VA_SIZE, GMC_PAGE_SIZE_BYTES)
+    u64 pd_host = _gmc_vhost(ctx, pd_off)
+    u64 pt_host = _gmc_vhost(ctx, pt_off)
+    _gmc_zero_page(pd_host)
+    _gmc_zero_page(pt_host)
+    _gmc_zero_page(_gmc_vhost(ctx, sc_off))
+
+    // ---- build the 2-level GART: PD0 -> PT -> target buffer ----
+    u64 rc = gmc_map(pd_host, pt_host, _gmc_vgpu(ctx, pt_off),
+                     GMC_GART_MC_VA_BASE, _gmc_vgpu(ctx, tg_off),
+                     GMC_GART_MC_VA_SIZE, pt_sysmem)
+    if rc != 0 { return 20 + rc }
+
+    // ---- MMHUB: validated 2-level-GART CONTEXT0 sequence. sys aperture
+    // lo=0/hi=0xFFFF (fast-path off, translations via PTEs — the
+    // validated gmc_init_mmhub config). ----
+    u64 mem_flags = 0
+    if pt_sysmem != 0 { mem_flags = AMDGPU_PTE_SYSTEM | AMDGPU_PTE_SNOOPED }
+    u64 pt_base_full = (_gmc_vgpu(ctx, pd_off) & GMC_PTE_ADDR_MASK) | (AMDGPU_PTE_VALID | mem_flags)
+    u64 sc_gpu = _gmc_vgpu(ctx, sc_off)
+    rc = gmc_init_mmhub(bar5, pt_base_full,
+                        GMC_GART_MC_VA_BASE, GMC_GART_MC_VA_SIZE,
+                        0, 0xFFFF, sc_gpu)
+    if rc != 0 { return rc }
+
+    // ---- GFXHUB identity over the staging region (GC ucode fetches +
+    // MQD/ring reads go through here; identity => MC addr == bus addr,
+    // matching how gc_init hands raw gc_vgpu addresses to CP/MES). ----
+    u64 gpu_base = load64(ctx + 8)
+    u64 alo = gpu_base >> 18
+    u64 ahi = ((gpu_base + GMC_GFX_APERT_BYTES) - 1) >> 18
+    rc = gmc_init_gfxhub_identity(bar5, alo, ahi, sc_gpu)
+    if rc != 0 { return 10 + rc }
+
+    store64(out + 0, pt_base_full)
+    store64(out + 8, GMC_CTX0_CNTL_GART)
+    return 0
+}
