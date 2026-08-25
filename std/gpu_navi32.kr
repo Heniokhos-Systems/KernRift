@@ -1,0 +1,31 @@
+// std/gpu_navi32.kr — AMD Navi 32 (gfx1101 / gc_11_0_3, RX 7700/7800 XT)
+// IP base + key register constants for a from-scratch KernRift OS.
+//
+// Fixed SOC15 IP base dwords for this ASIC (validated live: RCC_CONFIG_MEMSIZE
+// read 16368 MB via direct BAR5 (NBIF2 base + 0xc3)*4, and SMN 0x0c400000 read
+// 0x1). A UEFI-inherited GPU has PSP/TMR locked so IP discovery can't be parsed
+// post-POST — use these constants directly.
+//
+// Access (std/gpu_portable.kr): low bases via gpu_reg_r32(bar5, BASE, reg);
+// high bases (0x024xxxx / 0x00Dxxxx / 0x00Exxxx) via smn_r32(bar5, base+reg).
+
+static u64 NAVI32_GC0    = 0x00001260   // graphics/compute (GRBM, CP)
+static u64 NAVI32_GC1    = 0x0000A000
+static u64 NAVI32_GC2    = 0x0001C000
+static u64 NAVI32_MMHUB  = 0x0001A000
+static u64 NAVI32_MP0    = 0x00016000   // PSP mailbox
+static u64 NAVI32_MP1    = 0x00016000   // SMU (shares base)
+static u64 NAVI32_OSS    = 0x000010A0   // IH / OSSSYS
+static u64 NAVI32_HDP    = 0x00000F20
+static u64 NAVI32_ATHUB  = 0x00000C00
+static u64 NAVI32_NBIF0  = 0x00000000   // PCIE_INDEX2 aperture
+static u64 NAVI32_NBIF2  = 0x00000D20   // RCC_CONFIG_MEMSIZE base
+
+static u64 regRCC_CONFIG_MEMSIZE = 0x00c3   // VRAM MB (always-on)
+static u64 regGRBM_STATUS  = 0x0da4         // GC engine status (GFXOFF-gated)
+static u64 regGRBM_STATUS2 = 0x0da3
+static u64 regCP_STAT      = 0x0f40
+static u64 regCP_CPC_STATUS = 0x0e24
+static u64 regGB_ADDR_CONFIG = 0x13de       // tiling config (fixed ASIC value)
+
+static u64 NAVI32_VRAM_MB = 16368

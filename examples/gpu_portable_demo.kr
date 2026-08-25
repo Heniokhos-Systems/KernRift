@@ -10,6 +10,7 @@
 
 import "../std/io.kr"
 import "../std/gpu_portable.kr"
+import "../std/gpu_navi32.kr"
 
 fn phex(u64 v) {
     u64 buf = alloc(11)
@@ -71,6 +72,13 @@ fn main() {
     check(pci_baseclass(cfg), 0x03, "pci_baseclass")
     check(pci_bar(cfg, PCI_CFG_BAR0), 0xf800000000, "BAR0 (64-bit) VRAM")
     check(pci_bar(cfg, 0x24), 0xdfb00000, "BAR5 (32-bit) regs")
+
+    // 5) direct SOC15 register offset math (byte = (base+reg)*4)
+    check(gpu_reg_off(NAVI32_GC0, regGRBM_STATUS), (0x1260 + 0xda4) * 4, "GRBM_STATUS off")
+    check(gpu_reg_off(NAVI32_NBIF2, regRCC_CONFIG_MEMSIZE), (0xd20 + 0xc3) * 4, "MEMSIZE off")
+    // round-trip a direct register through a fake BAR
+    gpu_reg_w32(busw, NAVI32_GC0, regGRBM_STATUS, 0x12345678)
+    check(gpu_reg_r32(busw, NAVI32_GC0, regGRBM_STATUS), 0x12345678, "gpu_reg round-trip")
 
     print_str("done\n")
     exit(0)

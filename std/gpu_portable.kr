@@ -99,6 +99,19 @@ fn pci_bar(u64 cfg, u64 bar_off) -> u64 {
     return base
 }
 
+// ---- direct SOC15 register access in BAR5: byte off = (base_dw + reg_dw)*4.
+//      Valid for low-base IPs (GC/MMHUB/OSS/HDP/NBIF); high bases (0x024xxxx,
+//      0x00Dxxxx/0x00Exxxx) are SMN-routed -> use smn_r32/w32 instead. ----
+fn gpu_reg_off(u64 base_dw, u64 reg_dw) -> u64 {
+    return (base_dw + reg_dw) * 4
+}
+fn gpu_reg_r32(u64 bar5, u64 base_dw, u64 reg_dw) -> u64 {
+    return mmio_r32(bar5, gpu_reg_off(base_dw, reg_dw))
+}
+fn gpu_reg_w32(u64 bar5, u64 base_dw, u64 reg_dw, u64 val) {
+    mmio_w32(bar5, gpu_reg_off(base_dw, reg_dw), val)
+}
+
 // ---- SMN-indirect register access on BAR5 (bar5 = pointer to BAR5 phys) ----
 fn smn_r32(u64 bar5, u64 reg) -> u64 {
     mmio_w32(bar5, SMN_INDEX2, reg << SMN_SHIFT)
