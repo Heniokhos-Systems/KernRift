@@ -1,0 +1,931 @@
+// thumb_emu.kr — a Thumb-2 interpreter (in KernRift) to trace the SMN register
+// accesses of the AMD PSP ABL1 GDDR6 training blob. Self-hosted alternative to
+// Unicorn. Loads ABL1 into a flat 512KB memory at 0x10000; hooks the internal
+// SMN write-wrapper (0x14558) to log (reg,val); stubs external ABL0/IPL calls
+// (PC<0x10000) and svc to return 0; models register reads as 0 so the training
+// path runs on its default branch and we capture the register-write sequence.
+//
+// NOTE: KernRift binds & | ^ TIGHTER than << >> + - , so every mixed
+// shift/mask expression here is fully parenthesized.
+//
+// Build:  ./build/krc2 --arch=x86_64 --target=linux --emit=elfexe examples/thumb_emu.kr -o /tmp/temu
+// Run:    /tmp/temu
+
+import "../std/io.kr"
+
+static u64 MEM   = 0            // base of the 512KB flat emulated memory (host ptr)
+static u64 REGS  = 0            // 16 * 8 bytes register file (host ptr)
+static u64 FN    = 0            // flags
+static u64 FZ    = 0
+static u64 FC    = 0
+static u64 FV    = 0
+static u64 STOP  = 0            // set to 1 to end emulation
+static u64 NWRITE = 0
+static u64 QUIET = 0            // 1 = counting scan (suppress per-write prints)
+static u64 STUBVAL = 0xffffffff // value external service stubs return in r0
+static u64 NEXT_UNIMPL = 0      // last unimplemented halfword (for reporting)
+static u64 TRACE = 0            // 1 = print each external service call + args
+static u64 CUR_OFF = 0          // offset of function currently being run (for headers)
+static u64 PRINTCAP = 48        // max writes printed per function (runaways counted silently)
+static u64 MODE = 0             // 0 = scan all prologues; 1 = run only the training roots
+
+// training-root handlers (global roots that IPL invokes with a context arg)
+fn is_root(u64 off) -> u64 {
+    if off == 0x187c { return 1 }
+    if off == 0x1a3c { return 1 }
+    if off == 0x1f20 { return 1 }
+    if off == 0x28b0 { return 1 }
+    if off == 0x1906 { return 1 }
+    return 0
+}
+
+static u64 CODE_VA = 0x10000
+static u64 WRAP_WRITE = 0x14558
+static u64 SENT = 0x00ff0000
+
+// ---- memory helpers (vaddr == offset into MEM; out-of-range = unmapped device: read 0 / ignore) ----
+static u64 MEMSZ = 0x80000
+fn r8(u64 a) -> u64 { if a >= MEMSZ { return 0 } return load8(MEM + a) }
+fn w8(u64 a, u64 v) { if a >= MEMSZ { return } store8(MEM + a, v & 0xff) }
+fn r16(u64 a) -> u64 { if a >= (MEMSZ - 1) { return 0 } return load8(MEM + a) | (load8(MEM + a + 1) << 8) }
+fn r32(u64 a) -> u64 {
+    if a >= (MEMSZ - 3) { return 0 }
+    u64 b0 = load8(MEM + a)
+    u64 b1 = load8(MEM + a + 1)
+    u64 b2 = load8(MEM + a + 2)
+    u64 b3 = load8(MEM + a + 3)
+    return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
+}
+fn w32(u64 a, u64 v) {
+    if a >= (MEMSZ - 3) { return }
+    store8(MEM + a, v & 0xff)
+    store8(MEM + a + 1, (v >> 8) & 0xff)
+    store8(MEM + a + 2, (v >> 16) & 0xff)
+    store8(MEM + a + 3, (v >> 24) & 0xff)
+}
+
+// ---- register helpers ----
+fn gr(u64 n) -> u64 {
+    u64 p = REGS + (n << 3)
+    return load8(p) | (load8(p+1) << 8) | (load8(p+2) << 16) | (load8(p+3) << 24)
+}
+fn sr(u64 n, u64 v) {
+    u64 p = REGS + (n << 3)
+    v = v & 0xffffffff
+    store8(p, v & 0xff)
+    store8(p+1, (v >> 8) & 0xff)
+    store8(p+2, (v >> 16) & 0xff)
+    store8(p+3, (v >> 24) & 0xff)
+}
+
+// ---- hex printing (self-contained) ----
+fn phex(u64 v) {
+    u64 buf = alloc(11)
+    store8(buf, 48)          // '0'
+    store8(buf+1, 120)       // 'x'
+    u64 i = 0
+    while i < 8 {
+        u64 sh = (7 - i) * 4
+        u64 nyb = (v >> sh) & 0xf
+        u64 ch = nyb + 48
+        if nyb >= 10 { ch = nyb + 87 }
+        store8(buf + 2 + i, ch)
+        i = i + 1
+    }
+    store8(buf + 10, 0)
+    print_str(buf)
+}
+
+fn ror32(u64 v, u64 r) -> u64 {
+    r = r & 31
+    if r == 0 { return v & 0xffffffff }
+    return ((v >> r) | (v << (32 - r))) & 0xffffffff
+}
+// Thumb ExpandImm: inputs i(1) imm3(3) imm8(8)
+fn expand_imm(u64 i, u64 imm3, u64 imm8) -> u64 {
+    u64 v12 = (i << 11) | (imm3 << 8) | imm8
+    u64 hi2 = (v12 >> 10) & 0x3
+    if hi2 == 0 {
+        u64 sel = (v12 >> 8) & 0x3
+        if sel == 0 { return imm8 }
+        if sel == 1 { return ((imm8 << 16) | imm8) & 0xffffffff }
+        if sel == 2 { return ((imm8 << 24) | (imm8 << 8)) & 0xffffffff }
+        return ((imm8 << 24) | (imm8 << 16) | (imm8 << 8) | imm8) & 0xffffffff
+    }
+    u64 unrot = 0x80 | (imm8 & 0x7f)
+    u64 rot = (v12 >> 7) & 0x1f
+    return ror32(unrot, rot)
+}
+
+fn setNZ(u64 res) {
+    res = res & 0xffffffff
+    if res == 0 { FZ = 1 } else { FZ = 0 }
+    if (res & 0x80000000) != 0 { FN = 1 } else { FN = 0 }
+}
+
+// bit n of hw
+fn bits(u64 v, u64 lo, u64 width) -> u64 {
+    u64 m = (1 << width) - 1
+    return (v >> lo) & m
+}
+
+fn main() {
+    MEM  = alloc(0x80000)
+    REGS = alloc(16 * 8)
+    // zero regs
+    u64 z = 0
+    while z < 16 { sr(z, 0); z = z + 1 }
+
+    // load ABL1 blob at CODE_VA
+    u64 blob = read_file("/home/pantelis/Desktop/Projects/Work/MLRift/psp_fuzz/captures/psp_blobs/ABL1_0x87c00.bin")
+    if blob == 0 { print_str("FAIL read ABL1 blob\n"); return }
+    // copy 0x5000 bytes into MEM at CODE_VA
+    u64 i = 0
+    while i < 0x5000 { store8(MEM + CODE_VA + i, load8(blob + i)); i = i + 1 }
+
+    // ---- SCAN MODE: run from every function prologue, count SMN writes ----
+    // Reveals which functions emit register writes when run in isolation
+    // (unconditional inits vs context-gated training loops).
+    QUIET = 0
+    MODE = 0            // 0 = in-order scan (shared MEM approximates boot sequence); 1 = roots-only
+    TRACE = 0
+    print_str("== scanning ABL1 function prologues in flash order (shared MEM) ==\n")
+    u64 scan_off = 0
+    u64 nfns = 0
+    u64 nhit = 0
+    while scan_off < 0x5000 {
+        u64 h0 = r16(CODE_VA + scan_off)
+        u64 isprologue = 0
+        if (h0 & 0xff00) == 0xb500 { isprologue = 1 }            // push {..,lr}
+        if h0 == 0xe92d { if (r16(CODE_VA + scan_off + 2) & 0x4000) != 0 { isprologue = 1 } }  // stmdb sp!,{..,lr}
+        if isprologue == 0 { scan_off = scan_off + 2; continue }
+        if MODE == 1 { if is_root(scan_off) == 0 { scan_off = scan_off + 2; continue } }
+        nfns = nfns + 1
+
+        // fresh context for this entry
+        u64 zz = 0
+        while zz < 16 { sr(zz, 0); zz = zz + 1 }
+        sr(13, 0x40000); sr(14, SENT | 1)
+        sr(0, 0x50000); sr(1, 0x51000); sr(2, 0x52000); sr(3, 0)
+        NWRITE = 0; STOP = 0; FN = 0; FZ = 0; FC = 0; FV = 0
+        CUR_OFF = scan_off
+        u64 pc = CODE_VA + scan_off
+        u64 budget = 60000
+
+    while STOP == 0 {
+        if budget == 0 { if QUIET == 0 { print_str("\n[budget exhausted]\n") } break }
+        budget = budget - 1
+
+        // ---- hooks ----
+        if (pc & 0xfffffffe) == SENT { if QUIET == 0 { print_str("\n[returned to sentinel — done]\n") } break }
+        if pc == WRAP_WRITE {
+            u64 reg = gr(0)
+            u64 val = gr(1)
+            if QUIET == 0 {
+                if NWRITE == 0 { print_str("\n-- entry +"); phex(CUR_OFF); print_str(" --\n") }
+                if NWRITE < PRINTCAP {
+                    print_str("  SMN["); phex(reg); print_str("] = "); phex(val)
+                    print_str("   (from +"); phex((gr(14) & 0xfffffffe) - CODE_VA); print_str(")\n")
+                }
+            }
+            NWRITE = NWRITE + 1
+            sr(0, 1)
+            pc = gr(14) & 0xfffffffe
+            continue
+        }
+        if pc < CODE_VA {
+            // external ABL0/IPL service: stub -> return STUBVAL (models reg-reads/queries)
+            if TRACE == 1 {
+                print_str("  EXT@"); phex(pc); print_str(" from +"); phex((gr(14) & 0xfffffffe) - CODE_VA)
+                print_str("  r0="); phex(gr(0)); print_str(" r1="); phex(gr(1))
+                print_str(" r2="); phex(gr(2)); print_str(" r3="); phex(gr(3)); print_str("\n")
+            }
+            sr(0, STUBVAL)
+            pc = gr(14) & 0xfffffffe
+            continue
+        }
+
+        // ---- fetch ----
+        u64 hw = r16(pc)
+        u64 top5 = (hw >> 11) & 0x1f
+        u64 is32 = 0
+        if top5 == 0x1d { is32 = 1 }
+        if top5 == 0x1e { is32 = 1 }
+        if top5 == 0x1f { is32 = 1 }
+
+        if is32 == 0 {
+            // ===== 16-bit Thumb =====
+            u64 op = (hw >> 10) & 0x3f
+            // -- shift/add/sub/mov/cmp (00xxxx) --
+            if ((hw >> 11) & 0x1f) == 0x00 {          // LSLS imm (00000)
+                u64 rd = hw & 0x7
+                u64 rm = (hw >> 3) & 0x7
+                u64 imm = (hw >> 6) & 0x1f
+                u64 res = (gr(rm) << imm) & 0xffffffff
+                sr(rd, res); setNZ(res); pc = pc + 2; continue
+            }
+            if ((hw >> 11) & 0x1f) == 0x04 {          // MOVS imm (00100)
+                u64 rd = (hw >> 8) & 0x7
+                u64 imm = hw & 0xff
+                sr(rd, imm); setNZ(imm); pc = pc + 2; continue
+            }
+            if ((hw >> 11) & 0x1f) == 0x05 {          // CMP imm (00101)
+                u64 rn = (hw >> 8) & 0x7
+                u64 imm = hw & 0xff
+                setNZ((gr(rn) - imm) & 0xffffffff)
+                pc = pc + 2; continue
+            }
+            if ((hw >> 11) & 0x1f) == 0x06 {          // ADDS imm8 (00110)
+                u64 rd = (hw >> 8) & 0x7
+                u64 imm = hw & 0xff
+                u64 res = (gr(rd) + imm) & 0xffffffff
+                sr(rd, res); setNZ(res); pc = pc + 2; continue
+            }
+            if ((hw >> 11) & 0x1f) == 0x07 {          // SUBS imm8 (00111)
+                u64 rd = (hw >> 8) & 0x7
+                u64 imm = hw & 0xff
+                u64 res = (gr(rd) - imm) & 0xffffffff
+                sr(rd, res); setNZ(res); pc = pc + 2; continue
+            }
+            if (hw & 0xff00) == 0xbf00 {              // NOP-hints / IT (treat as nop)
+                pc = pc + 2; continue
+            }
+            if (hw & 0xf800) == 0xe000 {              // B unconditional (11100)
+                u64 imm11 = hw & 0x7ff
+                u64 off = imm11 << 1
+                if (imm11 & 0x400) != 0 { off = off - 0x1000 }   // sign extend
+                pc = (pc + 4 + off) & 0xffffffff; continue
+            }
+            if (hw & 0xf000) == 0xd000 {              // B<cond> (1101)
+                u64 cond = (hw >> 8) & 0xf
+                u64 imm8 = hw & 0xff
+                u64 off = imm8 << 1
+                if (imm8 & 0x80) != 0 { off = off - 0x200 }
+                u64 take = 0
+                if cond == 0 { if FZ == 1 { take = 1 } }          // EQ
+                if cond == 1 { if FZ == 0 { take = 1 } }          // NE
+                if cond == 2 { if FC == 1 { take = 1 } }          // CS/HS
+                if cond == 3 { if FC == 0 { take = 1 } }          // CC/LO
+                if cond == 4 { if FN == 1 { take = 1 } }          // MI
+                if cond == 5 { if FN == 0 { take = 1 } }          // PL
+                if cond == 8 { if FC == 1 { if FZ == 0 { take = 1 } } } // HI
+                if cond == 9 { if FC == 0 { take = 1 } else { if FZ == 1 { take = 1 } } } // LS
+                if take == 1 { pc = (pc + 4 + off) & 0xffffffff } else { pc = pc + 2 }
+                continue
+            }
+            if (hw & 0xf500) == 0xb100 {              // CBZ/CBNZ (0xb1/0xb3=CBZ, 0xb9/0xbb=CBNZ)
+                u64 rn = hw & 0x7
+                u64 nonzero = (hw >> 11) & 0x1    // 1=CBNZ
+                u64 imm = (((hw >> 9) & 0x1) << 6) | (((hw >> 3) & 0x1f) << 1)
+                u64 v = gr(rn)
+                u64 take = 0
+                if nonzero == 0 { if v == 0 { take = 1 } } else { if v != 0 { take = 1 } }
+                if take == 1 { pc = (pc + 4 + imm) & 0xffffffff } else { pc = pc + 2 }
+                continue
+            }
+            if ((hw >> 11) & 0x1f) == 0x01 {          // LSRS imm (00001)
+                u64 rd = hw & 0x7
+                u64 rm = (hw >> 3) & 0x7
+                u64 imm = (hw >> 6) & 0x1f
+                if imm == 0 { imm = 32 }
+                u64 res = (gr(rm) >> imm) & 0xffffffff
+                sr(rd, res); setNZ(res); pc = pc + 2; continue
+            }
+            if ((hw >> 11) & 0x1f) == 0x02 {          // ASRS imm (00010) — treat as LSR (approx, sign rare here)
+                u64 rd = hw & 0x7
+                u64 rm = (hw >> 3) & 0x7
+                u64 imm = (hw >> 6) & 0x1f
+                if imm == 0 { imm = 32 }
+                u64 res = (gr(rm) >> imm) & 0xffffffff
+                sr(rd, res); setNZ(res); pc = pc + 2; continue
+            }
+            if (hw & 0xfe00) == 0x1800 {              // ADDS reg (0001100)
+                u64 rd = hw & 0x7
+                u64 rn = (hw >> 3) & 0x7
+                u64 rm = (hw >> 6) & 0x7
+                u64 res = (gr(rn) + gr(rm)) & 0xffffffff
+                sr(rd, res); setNZ(res); pc = pc + 2; continue
+            }
+            if (hw & 0xfe00) == 0x1a00 {              // SUBS reg (0001101)
+                u64 rd = hw & 0x7
+                u64 rn = (hw >> 3) & 0x7
+                u64 rm = (hw >> 6) & 0x7
+                u64 res = (gr(rn) - gr(rm)) & 0xffffffff
+                sr(rd, res); setNZ(res); pc = pc + 2; continue
+            }
+            if (hw & 0xfe00) == 0x1c00 {              // ADDS imm3 (0001110)
+                u64 rd = hw & 0x7
+                u64 rn = (hw >> 3) & 0x7
+                u64 imm = (hw >> 6) & 0x7
+                u64 res = (gr(rn) + imm) & 0xffffffff
+                sr(rd, res); setNZ(res); pc = pc + 2; continue
+            }
+            if (hw & 0xfe00) == 0x1e00 {              // SUBS imm3 (0001111)
+                u64 rd = hw & 0x7
+                u64 rn = (hw >> 3) & 0x7
+                u64 imm = (hw >> 6) & 0x7
+                u64 res = (gr(rn) - imm) & 0xffffffff
+                sr(rd, res); setNZ(res); pc = pc + 2; continue
+            }
+            if (hw & 0xfc00) == 0x4000 {              // data-processing register (010000)
+                u64 opc = (hw >> 6) & 0xf
+                u64 rd = hw & 0x7
+                u64 rm = (hw >> 3) & 0x7
+                u64 a = gr(rd)
+                u64 b = gr(rm)
+                u64 res = a
+                if opc == 0x0 { res = a & b }                 // AND
+                if opc == 0x1 { res = a ^ b }                 // EOR
+                if opc == 0x2 { res = (a << (b & 0xff)) & 0xffffffff } // LSL
+                if opc == 0x3 { res = (a >> (b & 0xff)) }     // LSR
+                if opc == 0x4 { res = (a >> (b & 0xff)) }     // ASR (approx)
+                if opc == 0x6 { res = a }                     // SBC (skip carry, approx)
+                if opc == 0x8 { setNZ(a & b); pc = pc + 2; continue }  // TST
+                if opc == 0xa { setNZ((a - b) & 0xffffffff); pc = pc + 2; continue } // CMP
+                if opc == 0xb { setNZ((a + b) & 0xffffffff); pc = pc + 2; continue } // CMN
+                if opc == 0xc { res = a | b }                 // ORR
+                if opc == 0xd { res = (a * b) & 0xffffffff }  // MUL
+                if opc == 0xe { res = a & (b ^ 0xffffffff) }  // BIC
+                if opc == 0xf { res = (b ^ 0xffffffff) & 0xffffffff } // MVN
+                res = res & 0xffffffff
+                sr(rd, res); setNZ(res); pc = pc + 2; continue
+            }
+            if (hw & 0xff00) == 0x4600 {              // MOV hi reg (010001 10)
+                u64 rd = (hw & 0x7) | (((hw >> 7) & 0x1) << 3)
+                u64 rm = (hw >> 3) & 0xf
+                u64 v = gr(rm)
+                if rm == 15 { v = (pc + 4) & 0xfffffffe }
+                sr(rd, v)
+                if rd == 15 { pc = v & 0xfffffffe } else { pc = pc + 2 }
+                continue
+            }
+            if (hw & 0xff00) == 0x4400 {              // ADD hi reg (010001 00)
+                u64 rd = (hw & 0x7) | (((hw >> 7) & 0x1) << 3)
+                u64 rm = (hw >> 3) & 0xf
+                u64 v = (gr(rd) + gr(rm)) & 0xffffffff
+                sr(rd, v)
+                if rd == 15 { pc = v & 0xfffffffe } else { pc = pc + 2 }
+                continue
+            }
+            if (hw & 0xff00) == 0x4500 {              // CMP hi reg (010001 01)
+                u64 rn = (hw & 0x7) | (((hw >> 7) & 0x1) << 3)
+                u64 rm = (hw >> 3) & 0xf
+                setNZ((gr(rn) - gr(rm)) & 0xffffffff); pc = pc + 2; continue
+            }
+            if (hw & 0xff80) == 0x4700 {              // BX / BLX reg (010001 11)
+                u64 link = (hw >> 7) & 0x1
+                u64 rm = (hw >> 3) & 0xf
+                u64 tgt = gr(rm)
+                if link == 1 { sr(14, (pc + 2) | 1) }
+                pc = tgt & 0xfffffffe; continue
+            }
+            if ((hw >> 11) & 0x1f) == 0x09 {          // LDR literal (01001)
+                u64 rt = (hw >> 8) & 0x7
+                u64 imm = (hw & 0xff) << 2
+                u64 addr = (((pc + 4) & 0xfffffffc) + imm)
+                sr(rt, r32(addr)); pc = pc + 2; continue
+            }
+            if ((hw >> 11) & 0x1f) == 0x0c {          // STR imm5 (01100)
+                u64 rt = hw & 0x7
+                u64 rn = (hw >> 3) & 0x7
+                u64 imm = ((hw >> 6) & 0x1f) << 2
+                w32((gr(rn) + imm) & 0xffffffff, gr(rt)); pc = pc + 2; continue
+            }
+            if ((hw >> 11) & 0x1f) == 0x0d {          // LDR imm5 (01101)
+                u64 rt = hw & 0x7
+                u64 rn = (hw >> 3) & 0x7
+                u64 imm = ((hw >> 6) & 0x1f) << 2
+                sr(rt, r32((gr(rn) + imm) & 0xffffffff)); pc = pc + 2; continue
+            }
+            if ((hw >> 11) & 0x1f) == 0x0e {          // STRB imm5 (01110)
+                u64 rt = hw & 0x7
+                u64 rn = (hw >> 3) & 0x7
+                u64 imm = (hw >> 6) & 0x1f
+                w8((gr(rn) + imm) & 0xffffffff, gr(rt) & 0xff); pc = pc + 2; continue
+            }
+            if ((hw >> 11) & 0x1f) == 0x0f {          // LDRB imm5 (01111)
+                u64 rt = hw & 0x7
+                u64 rn = (hw >> 3) & 0x7
+                u64 imm = (hw >> 6) & 0x1f
+                sr(rt, r8((gr(rn) + imm) & 0xffffffff)); pc = pc + 2; continue
+            }
+            if ((hw >> 11) & 0x1f) == 0x10 {          // STRH imm5 (10000)
+                u64 rt = hw & 0x7
+                u64 rn = (hw >> 3) & 0x7
+                u64 imm = ((hw >> 6) & 0x1f) << 1
+                u64 va = (gr(rn) + imm) & 0xffffffff
+                w8(va, gr(rt) & 0xff); w8(va+1, (gr(rt) >> 8) & 0xff); pc = pc + 2; continue
+            }
+            if ((hw >> 11) & 0x1f) == 0x11 {          // LDRH imm5 (10001)
+                u64 rt = hw & 0x7
+                u64 rn = (hw >> 3) & 0x7
+                u64 imm = ((hw >> 6) & 0x1f) << 1
+                sr(rt, r16((gr(rn) + imm) & 0xffffffff)); pc = pc + 2; continue
+            }
+            if ((hw >> 11) & 0x1f) == 0x12 {          // STR sp-rel (10010)
+                u64 rt = (hw >> 8) & 0x7
+                u64 imm = (hw & 0xff) << 2
+                w32((gr(13) + imm) & 0xffffffff, gr(rt)); pc = pc + 2; continue
+            }
+            if ((hw >> 11) & 0x1f) == 0x13 {          // LDR sp-rel (10011)
+                u64 rt = (hw >> 8) & 0x7
+                u64 imm = (hw & 0xff) << 2
+                sr(rt, r32((gr(13) + imm) & 0xffffffff)); pc = pc + 2; continue
+            }
+            if ((hw >> 11) & 0x1f) == 0x15 {          // ADD sp-rel / ADR (10101 = add r,pc)
+                u64 rd = (hw >> 8) & 0x7
+                u64 imm = (hw & 0xff) << 2
+                sr(rd, (((pc + 4) & 0xfffffffc) + imm) & 0xffffffff); pc = pc + 2; continue
+            }
+            if ((hw >> 11) & 0x1f) == 0x14 {          // ADD rd, pc (10100 = ADR)
+                u64 rd = (hw >> 8) & 0x7
+                u64 imm = (hw & 0xff) << 2
+                sr(rd, (((pc + 4) & 0xfffffffc) + imm) & 0xffffffff); pc = pc + 2; continue
+            }
+            if (hw & 0xff80) == 0xb000 {              // ADD sp, imm7
+                u64 imm = (hw & 0x7f) << 2
+                sr(13, (gr(13) + imm) & 0xffffffff); pc = pc + 2; continue
+            }
+            if (hw & 0xff80) == 0xb080 {              // SUB sp, imm7
+                u64 imm = (hw & 0x7f) << 2
+                sr(13, (gr(13) - imm) & 0xffffffff); pc = pc + 2; continue
+            }
+            if (hw & 0xffc0) == 0xb2c0 {              // UXTB
+                u64 rd = hw & 0x7
+                u64 rm = (hw >> 3) & 0x7
+                sr(rd, gr(rm) & 0xff); pc = pc + 2; continue
+            }
+            if (hw & 0xffc0) == 0xb280 {              // UXTH
+                u64 rd = hw & 0x7
+                u64 rm = (hw >> 3) & 0x7
+                sr(rd, gr(rm) & 0xffff); pc = pc + 2; continue
+            }
+            if (hw & 0xfe00) == 0xb400 {              // PUSH {list} (no lr)
+                u64 list = hw & 0xff
+                u64 sp = gr(13)
+                u64 k = 7
+                while k < 8 {                         // count-down 7..0
+                    if ((list >> k) & 1) == 1 { sp = sp - 4; w32(sp, gr(k)) }
+                    if k == 0 { break }
+                    k = k - 1
+                }
+                sr(13, sp); pc = pc + 2; continue
+            }
+            if (hw & 0xfe00) == 0xb500 {              // PUSH {list, lr}
+                u64 list = hw & 0xff
+                u64 sp = gr(13)
+                sp = sp - 4; w32(sp, gr(14))
+                u64 k = 7
+                while k < 8 {
+                    if ((list >> k) & 1) == 1 { sp = sp - 4; w32(sp, gr(k)) }
+                    if k == 0 { break }
+                    k = k - 1
+                }
+                sr(13, sp); pc = pc + 2; continue
+            }
+            if (hw & 0xfe00) == 0xbc00 {              // POP {list} (no pc)
+                u64 list = hw & 0xff
+                u64 sp = gr(13)
+                u64 k = 0
+                while k < 8 { if ((list >> k) & 1) == 1 { sr(k, r32(sp)); sp = sp + 4 } k = k + 1 }
+                sr(13, sp); pc = pc + 2; continue
+            }
+            if (hw & 0xfe00) == 0xbe00 {              // BKPT / hint region — nop
+                pc = pc + 2; continue
+            }
+            if (hw & 0xfe00) == 0xbd00 {              // POP {list, pc}
+                u64 list = hw & 0xff
+                u64 sp = gr(13)
+                u64 k = 0
+                while k < 8 { if ((list >> k) & 1) == 1 { sr(k, r32(sp)); sp = sp + 4 } k = k + 1 }
+                u64 newpc = r32(sp); sp = sp + 4
+                sr(13, sp); pc = newpc & 0xfffffffe; continue
+            }
+            if (hw & 0xff00) == 0xdf00 {              // SVC
+                pc = pc + 2; continue                 // stub svc
+            }
+            if (hw & 0xf000) == 0x5000 {              // load/store register-offset (0101 xxx)
+                u64 op3 = (hw >> 9) & 0x7
+                u64 rt = hw & 0x7
+                u64 rn = (hw >> 3) & 0x7
+                u64 rm = (hw >> 6) & 0x7
+                u64 addr = (gr(rn) + gr(rm)) & 0xffffffff
+                if op3 == 0 { w32(addr, gr(rt)) }                                                   // STR
+                if op3 == 1 { w8(addr, gr(rt) & 0xff); w8(addr+1, (gr(rt) >> 8) & 0xff) }           // STRH
+                if op3 == 2 { w8(addr, gr(rt) & 0xff) }                                             // STRB
+                if op3 == 3 { u64 v = r8(addr); if (v & 0x80) != 0 { v = v | 0xffffff00 } sr(rt, v & 0xffffffff) }   // LDRSB
+                if op3 == 4 { sr(rt, r32(addr)) }                                                   // LDR
+                if op3 == 5 { sr(rt, r16(addr)) }                                                   // LDRH
+                if op3 == 6 { sr(rt, r8(addr)) }                                                    // LDRB
+                if op3 == 7 { u64 v = r16(addr); if (v & 0x8000) != 0 { v = v | 0xffff0000 } sr(rt, v & 0xffffffff) } // LDRSH
+                pc = pc + 2; continue
+            }
+            // unimplemented 16-bit
+            NEXT_UNIMPL = hw
+            print_str("\n[UNIMPL 16-bit ") ; phex(hw) ; print_str(" at PC ") ; phex(pc) ; print_str("]\n")
+            break
+        } else {
+            // ===== 32-bit Thumb-2 =====
+            u64 hw2 = r16(pc + 2)
+            // BL / BLX (11110 ... 11xx ...) — both are calls; external targets get stubbed
+            if (hw & 0xf800) == 0xf000 { if (hw2 & 0xc000) == 0xc000 {
+                // BL/BLX: compute target (BL formula; exact BLX low bits don't matter — stubbed)
+                u64 s = (hw >> 10) & 1
+                u64 imm10 = hw & 0x3ff
+                u64 j1 = (hw2 >> 13) & 1
+                u64 j2 = (hw2 >> 11) & 1
+                u64 imm11 = hw2 & 0x7ff
+                u64 i1 = 1 - (j1 ^ s)
+                u64 i2 = 1 - (j2 ^ s)
+                u64 off = (imm11 << 1) | (imm10 << 12) | (i2 << 22) | (i1 << 23) | (s << 24)
+                if s == 1 { off = off - 0x2000000 }              // sign extend 25-bit
+                sr(14, (pc + 4) | 1)                              // LR = return | thumb
+                pc = (pc + 4 + off) & 0xffffffff
+                continue
+            } }
+            // LDRD/STRD (immediate) T1: 1110100 P U 1 W L rn   (bit6 = 1)
+            if (hw & 0xfe40) == 0xe840 {
+                u64 P = (hw >> 8) & 1
+                u64 U = (hw >> 7) & 1
+                u64 W = (hw >> 5) & 1
+                u64 L = (hw >> 4) & 1
+                u64 rn = hw & 0xf
+                u64 rt = (hw2 >> 12) & 0xf
+                u64 rt2 = (hw2 >> 8) & 0xf
+                u64 off = (hw2 & 0xff) << 2
+                u64 base = gr(rn)
+                u64 preaddr = base
+                if U == 1 { preaddr = (base + off) & 0xffffffff } else { preaddr = (base - off) & 0xffffffff }
+                u64 addr = base
+                if P == 1 { addr = preaddr }
+                addr = addr & 0xffffffff
+                if L == 1 { sr(rt, r32(addr)); sr(rt2, r32((addr + 4) & 0xffffffff)) }
+                else { w32(addr, gr(rt)); w32((addr + 4) & 0xffffffff, gr(rt2)) }
+                if W == 1 { sr(rn, preaddr & 0xffffffff) }
+                if P == 0 { sr(rn, preaddr & 0xffffffff) }
+                pc = pc + 4; continue
+            }
+            // LDM/STM (IA: 0xe88x-0xe8bx, DB: 0xe90x-0xe93x) — generalizes push.w/pop.w
+            u64 ismult = 0
+            u64 dbflag = 0
+            if (hw & 0xffc0) == 0xe880 { ismult = 1; dbflag = 0 }
+            if (hw & 0xffc0) == 0xe900 { ismult = 1; dbflag = 1 }
+            if ismult == 1 {
+                u64 L = (hw >> 4) & 1
+                u64 W = (hw >> 5) & 1
+                u64 rn = hw & 0xf
+                u64 list = hw2
+                u64 cnt = 0
+                u64 kk = 0
+                while kk < 16 { if ((list >> kk) & 1) == 1 { cnt = cnt + 1 } kk = kk + 1 }
+                u64 base = gr(rn)
+                u64 addr = base
+                if dbflag == 1 { addr = (base - (cnt << 2)) & 0xffffffff }
+                u64 k = 0
+                u64 newpc = 0
+                u64 haspc = 0
+                while k < 16 {
+                    if ((list >> k) & 1) == 1 {
+                        if L == 1 {
+                            if k == 15 { newpc = r32(addr); haspc = 1 } else { sr(k, r32(addr)) }
+                        } else {
+                            w32(addr, gr(k))
+                        }
+                        addr = (addr + 4) & 0xffffffff
+                    }
+                    k = k + 1
+                }
+                if W == 1 {
+                    if dbflag == 1 { sr(rn, (base - (cnt << 2)) & 0xffffffff) }
+                    else { sr(rn, (base + (cnt << 2)) & 0xffffffff) }
+                }
+                if haspc == 1 { pc = newpc & 0xfffffffe } else { pc = pc + 4 }
+                continue
+            }
+            // ADDW rd,rn,#imm12 (0xf20x) / SUBW rd,rn,#imm12 (0xf2ax) — plain binary immediate
+            if (hw & 0xfbf0) == 0xf200 {
+                u64 rn = hw & 0xf
+                u64 rd = (hw2 >> 8) & 0xf
+                u64 i = (hw >> 10) & 1
+                u64 imm3 = (hw2 >> 12) & 0x7
+                u64 imm8 = hw2 & 0xff
+                u64 imm = (i << 11) | (imm3 << 8) | imm8
+                sr(rd, (gr(rn) + imm) & 0xffffffff); pc = pc + 4; continue
+            }
+            if (hw & 0xfbf0) == 0xf2a0 {
+                u64 rn = hw & 0xf
+                u64 rd = (hw2 >> 8) & 0xf
+                u64 i = (hw >> 10) & 1
+                u64 imm3 = (hw2 >> 12) & 0x7
+                u64 imm8 = hw2 & 0xff
+                u64 imm = (i << 11) | (imm3 << 8) | imm8
+                sr(rd, (gr(rn) - imm) & 0xffffffff); pc = pc + 4; continue
+            }
+            // MOVW rd,#imm16  0xf24x / 0xf2 0b0100
+            if (hw & 0xfbf0) == 0xf240 {
+                u64 rd = (hw2 >> 8) & 0xf
+                u64 imm4 = hw & 0xf
+                u64 i = (hw >> 10) & 1
+                u64 imm3 = (hw2 >> 12) & 0x7
+                u64 imm8 = hw2 & 0xff
+                u64 v = (imm4 << 12) | (i << 11) | (imm3 << 8) | imm8
+                sr(rd, v); pc = pc + 4; continue
+            }
+            // MOVT rd,#imm16  0xf2cx
+            if (hw & 0xfbf0) == 0xf2c0 {
+                u64 rd = (hw2 >> 8) & 0xf
+                u64 imm4 = hw & 0xf
+                u64 i = (hw >> 10) & 1
+                u64 imm3 = (hw2 >> 12) & 0x7
+                u64 imm8 = hw2 & 0xff
+                u64 v = (imm4 << 12) | (i << 11) | (imm3 << 8) | imm8
+                sr(rd, (gr(rd) & 0xffff) | (v << 16)); pc = pc + 4; continue
+            }
+            // data-processing modified immediate: 0xf0.. / 0xf1.. (bit15..) op=hw[9:5]
+            if (hw & 0xfa00) == 0xf000 { if (hw2 & 0x8000) == 0 {
+                u64 opc = (hw >> 5) & 0xf
+                u64 rn = hw & 0xf
+                u64 rd = (hw2 >> 8) & 0xf
+                u64 i = (hw >> 10) & 1
+                u64 imm3 = (hw2 >> 12) & 0x7
+                u64 imm8 = hw2 & 0xff
+                u64 setf = (hw >> 4) & 1
+                u64 imm = expand_imm(i, imm3, imm8)
+                u64 a = gr(rn)
+                u64 res = a
+                u64 isres = 1
+                if opc == 0x0 { res = a & imm ; if rd == 15 { setNZ(a & imm); isres = 0 } }   // AND / TST
+                if opc == 0x1 { res = a ^ imm }                                                // BIC? no: 0x1=BIC
+                if opc == 0x2 { res = a | imm }                                                // ORR / MOV(if rn=15)
+                if opc == 0x3 { res = a | (imm ^ 0xffffffff) }                                 // ORN / MVN
+                if opc == 0x4 { res = a ^ imm ; if rd == 15 { setNZ(a ^ imm); isres = 0 } }    // EOR / TEQ
+                if opc == 0x8 { res = (a + imm) & 0xffffffff ; if rd == 15 { setNZ(res); isres = 0 } } // ADD / CMN
+                if opc == 0xd { res = (a - imm) & 0xffffffff ; if rd == 15 { setNZ(res); isres = 0 } } // SUB / CMP
+                if opc == 0xe { res = (a - imm) & 0xffffffff }                                 // RSB (approx)
+                // opc 0x1 is actually BIC (a & ~imm); fix:
+                if opc == 0x1 { res = a & (imm ^ 0xffffffff) }
+                if isres == 1 {
+                    res = res & 0xffffffff
+                    // MOV/MVN special: rn==15 for orr/orn means MOV/MVN (rd=imm)
+                    if opc == 0x2 { if rn == 15 { res = imm } }
+                    if opc == 0x3 { if rn == 15 { res = imm ^ 0xffffffff } }
+                    sr(rd, res)
+                    if setf == 1 { setNZ(res) }
+                }
+                pc = pc + 4; continue
+            } }
+            // UBFX  0xf3c0
+            if (hw & 0xfff0) == 0xf3c0 {
+                u64 rn = hw & 0xf
+                u64 rd = (hw2 >> 8) & 0xf
+                u64 lsb = (((hw2 >> 12) & 0x7) << 2) | ((hw2 >> 6) & 0x3)
+                u64 widthm1 = hw2 & 0x1f
+                u64 width = widthm1 + 1
+                u64 mask = (1 << width) - 1
+                sr(rd, (gr(rn) >> lsb) & mask); pc = pc + 4; continue
+            }
+            // BFI  0xf360
+            if (hw & 0xfff0) == 0xf360 {
+                u64 rn = hw & 0xf
+                u64 rd = (hw2 >> 8) & 0xf
+                u64 lsb = (((hw2 >> 12) & 0x7) << 2) | ((hw2 >> 6) & 0x3)
+                u64 msb = hw2 & 0x1f
+                u64 width = msb - lsb + 1
+                u64 mask = ((1 << width) - 1) << lsb
+                u64 srcv = (gr(rn) << lsb) & mask
+                sr(rd, (gr(rd) & (mask ^ 0xffffffff)) | srcv); pc = pc + 4; continue
+            }
+            // LDR.W/STR.W/LDRB.W/STRB.W/LDRH.W/STRH.W (imm12, P=1 U=1)  0xf8[c/d/8/9/a/b]0|rn
+            if (hw & 0xfff0) == 0xf8d0 {              // LDR.W rt,[rn,#imm12]
+                u64 rn = hw & 0xf
+                u64 rt = (hw2 >> 12) & 0xf
+                u64 imm = hw2 & 0xfff
+                sr(rt, r32((gr(rn) + imm) & 0xffffffff)); pc = pc + 4; continue
+            }
+            if (hw & 0xfff0) == 0xf8c0 {              // STR.W rt,[rn,#imm12]
+                u64 rn = hw & 0xf
+                u64 rt = (hw2 >> 12) & 0xf
+                u64 imm = hw2 & 0xfff
+                w32((gr(rn) + imm) & 0xffffffff, gr(rt)); pc = pc + 4; continue
+            }
+            if (hw & 0xfff0) == 0xf890 {              // LDRB.W rt,[rn,#imm12]
+                u64 rn = hw & 0xf
+                u64 rt = (hw2 >> 12) & 0xf
+                u64 imm = hw2 & 0xfff
+                sr(rt, r8((gr(rn) + imm) & 0xffffffff)); pc = pc + 4; continue
+            }
+            if (hw & 0xfff0) == 0xf880 {              // STRB.W rt,[rn,#imm12]
+                u64 rn = hw & 0xf
+                u64 rt = (hw2 >> 12) & 0xf
+                u64 imm = hw2 & 0xfff
+                w8((gr(rn) + imm) & 0xffffffff, gr(rt) & 0xff); pc = pc + 4; continue
+            }
+            if (hw & 0xfff0) == 0xf8b0 {              // LDRH.W rt,[rn,#imm12]
+                u64 rn = hw & 0xf
+                u64 rt = (hw2 >> 12) & 0xf
+                u64 imm = hw2 & 0xfff
+                sr(rt, r16((gr(rn) + imm) & 0xffffffff)); pc = pc + 4; continue
+            }
+            if (hw & 0xfff0) == 0xf8a0 {              // STRH.W rt,[rn,#imm12]
+                u64 rn = hw & 0xf
+                u64 rt = (hw2 >> 12) & 0xf
+                u64 imm = hw2 & 0xfff
+                u64 va = (gr(rn) + imm) & 0xffffffff
+                w8(va, gr(rt) & 0xff); w8(va+1, (gr(rt) >> 8) & 0xff); pc = pc + 4; continue
+            }
+            // LDR/STR (register T2, or imm8 T3/T4) — bit7=0 distinguishes from imm12 forms above
+            u64 hs = hw & 0xff70
+            u64 islsr = 0
+            if hs == 0xf800 { islsr = 1 }     // STRB
+            if hs == 0xf810 { islsr = 1 }     // LDRB
+            if hs == 0xf820 { islsr = 1 }     // STRH
+            if hs == 0xf830 { islsr = 1 }     // LDRH
+            if hs == 0xf840 { islsr = 1 }     // STR
+            if hs == 0xf850 { islsr = 1 }     // LDR
+            if hs == 0xf910 { islsr = 1 }     // LDRSB
+            if hs == 0xf930 { islsr = 1 }     // LDRSH
+            if islsr == 1 { if (hw & 0x0080) == 0 {
+                u64 rn = hw & 0xf
+                u64 rt = (hw2 >> 12) & 0xf
+                u64 base = gr(rn)
+                u64 addr = base
+                u64 wb = 0
+                u64 newbase = base
+                if (hw2 & 0x0800) != 0 {
+                    // imm8 form (T3/T4): P U W imm8
+                    u64 P = (hw2 >> 10) & 1
+                    u64 U = (hw2 >> 9) & 1
+                    u64 W = (hw2 >> 8) & 1
+                    u64 off = hw2 & 0xff
+                    u64 preaddr = base
+                    if U == 1 { preaddr = (base + off) & 0xffffffff } else { preaddr = (base - off) & 0xffffffff }
+                    if P == 1 { addr = preaddr } else { addr = base }
+                    if W == 1 { wb = 1; newbase = preaddr }
+                    if P == 0 { wb = 1; newbase = preaddr }
+                } else {
+                    // register form (T2): rm, imm2 shift
+                    u64 rm = hw2 & 0xf
+                    u64 imm2 = (hw2 >> 4) & 0x3
+                    addr = (base + ((gr(rm) << imm2) & 0xffffffff)) & 0xffffffff
+                }
+                addr = addr & 0xffffffff
+                if hs == 0xf800 { w8(addr, gr(rt) & 0xff) }                                         // STRB
+                if hs == 0xf810 { sr(rt, r8(addr)) }                                                // LDRB
+                if hs == 0xf820 { w8(addr, gr(rt) & 0xff); w8(addr+1, (gr(rt) >> 8) & 0xff) }       // STRH
+                if hs == 0xf830 { sr(rt, r16(addr)) }                                               // LDRH
+                if hs == 0xf840 { w32(addr, gr(rt)) }                                               // STR
+                if hs == 0xf850 { sr(rt, r32(addr)) }                                               // LDR
+                if hs == 0xf910 { u64 v = r8(addr); if (v & 0x80) != 0 { v = v | 0xffffff00 } sr(rt, v & 0xffffffff) }   // LDRSB
+                if hs == 0xf930 { u64 v = r16(addr); if (v & 0x8000) != 0 { v = v | 0xffff0000 } sr(rt, v & 0xffffffff) } // LDRSH
+                if wb == 1 { sr(rn, newbase & 0xffffffff) }
+                pc = pc + 4; continue
+            } }
+            // B.W and B<cond>.W  (0xf0.. with hw2 10x1xxxx)
+            if (hw & 0xf800) == 0xf000 { if (hw2 & 0xd000) == 0x9000 {   // B.W T4 (bit15=1,bit14=0,bit12=1)
+                u64 s = (hw >> 10) & 1
+                u64 imm10 = hw & 0x3ff
+                u64 j1 = (hw2 >> 13) & 1
+                u64 j2 = (hw2 >> 11) & 1
+                u64 imm11 = hw2 & 0x7ff
+                u64 i1 = 1 - (j1 ^ s)
+                u64 i2 = 1 - (j2 ^ s)
+                u64 off = (imm11 << 1) | (imm10 << 12) | (i2 << 22) | (i1 << 23) | (s << 24)
+                if s == 1 { off = off - 0x2000000 }
+                pc = (pc + 4 + off) & 0xffffffff; continue
+            } }
+            if (hw & 0xf800) == 0xf000 { if (hw2 & 0xd000) == 0x8000 {   // B<cond>.W (10.0)
+                u64 cond = (hw >> 6) & 0xf
+                u64 s = (hw >> 10) & 1
+                u64 imm6 = hw & 0x3f
+                u64 j1 = (hw2 >> 13) & 1
+                u64 j2 = (hw2 >> 11) & 1
+                u64 imm11 = hw2 & 0x7ff
+                u64 off = (imm11 << 1) | (imm6 << 12) | (j1 << 18) | (j2 << 19) | (s << 20)
+                if s == 1 { off = off - 0x200000 }
+                u64 take = 0
+                if cond == 0 { if FZ == 1 { take = 1 } }
+                if cond == 1 { if FZ == 0 { take = 1 } }
+                if cond == 2 { if FC == 1 { take = 1 } }
+                if cond == 3 { if FC == 0 { take = 1 } }
+                if cond == 4 { if FN == 1 { take = 1 } }
+                if cond == 5 { if FN == 0 { take = 1 } }
+                if cond == 8 { if FC == 1 { if FZ == 0 { take = 1 } } }
+                if cond == 9 { if FC == 0 { take = 1 } else { if FZ == 1 { take = 1 } } }
+                if take == 1 { pc = (pc + 4 + off) & 0xffffffff } else { pc = pc + 4 }
+                continue
+            } }
+            // ---- data-processing register (0xea.. / 0xeb..) ----
+            if (hw & 0xfe00) == 0xea00 {
+                u64 op4 = (hw >> 5) & 0xf
+                u64 setf = (hw >> 4) & 1
+                u64 rn = hw & 0xf
+                u64 rd = (hw2 >> 8) & 0xf
+                u64 rm = hw2 & 0xf
+                u64 imm3 = (hw2 >> 12) & 0x7
+                u64 imm2 = (hw2 >> 6) & 0x3
+                u64 typ = (hw2 >> 4) & 0x3
+                u64 sh = (imm3 << 2) | imm2
+                u64 v = gr(rm) & 0xffffffff
+                if typ == 0 { v = (v << sh) & 0xffffffff }
+                if typ == 1 { if sh == 0 { sh = 32 } v = (v >> sh) }
+                if typ == 2 { if sh == 0 { sh = 32 } v = (v >> sh) }        // ASR approx
+                if typ == 3 { v = ror32(v, sh) }
+                u64 a = gr(rn) & 0xffffffff
+                u64 res = a
+                u64 isres = 1
+                if op4 == 0x0 { res = a & v ; if rd == 15 { setNZ(a & v); isres = 0 } }   // AND/TST
+                if op4 == 0x1 { res = a & (v ^ 0xffffffff) }                              // BIC
+                if op4 == 0x2 { if rn == 15 { res = v } else { res = a | v } }            // ORR/MOV(shift)
+                if op4 == 0x3 { if rn == 15 { res = v ^ 0xffffffff } else { res = a | (v ^ 0xffffffff) } } // ORN/MVN
+                if op4 == 0x4 { res = a ^ v ; if rd == 15 { setNZ(a ^ v); isres = 0 } }   // EOR/TEQ
+                if op4 == 0x8 { res = (a + v) & 0xffffffff ; if rd == 15 { setNZ(res); isres = 0 } } // ADD/CMN
+                if op4 == 0xd { res = (a - v) & 0xffffffff ; if rd == 15 { setNZ(res); isres = 0 } } // SUB/CMP
+                if op4 == 0xe { res = (v - a) & 0xffffffff }                              // RSB
+                if isres == 1 { res = res & 0xffffffff ; sr(rd, res) ; if setf == 1 { setNZ(res) } }
+                pc = pc + 4; continue
+            }
+            // shift register (LSL/LSR/ASR/ROR .W)  0xfa0x..0xfa6x, hw2 = 1111 rd 0000 rm
+            if (hw & 0xff80) == 0xfa00 { if (hw2 & 0xf0f0) == 0xf000 {
+                u64 typ2 = (hw >> 5) & 0x3
+                u64 rn = hw & 0xf
+                u64 rd = (hw2 >> 8) & 0xf
+                u64 rm = hw2 & 0xf
+                u64 sh = gr(rm) & 0xff
+                u64 v = gr(rn) & 0xffffffff
+                u64 res = v
+                if typ2 == 0 { if sh >= 32 { res = 0 } else { res = (v << sh) & 0xffffffff } }   // LSL
+                if typ2 == 1 { if sh >= 32 { res = 0 } else { res = (v >> sh) } }                // LSR
+                if typ2 == 2 { if sh >= 32 { sh = 31 } res = (v >> sh) }                         // ASR (approx)
+                if typ2 == 3 { res = ror32(v, sh & 31) }                                         // ROR
+                u64 setf = (hw >> 4) & 1
+                sr(rd, res & 0xffffffff)
+                if setf == 1 { setNZ(res) }
+                pc = pc + 4; continue
+            } }
+            // ---- long multiply / divide (0xfb..) ----
+            if (hw & 0xff80) == 0xfb00 {              // MUL.W / MLA / MLS (0xfb0)
+                u64 rn = hw & 0xf
+                u64 rd = (hw2 >> 8) & 0xf
+                u64 rm = hw2 & 0xf
+                u64 ra = (hw2 >> 12) & 0xf
+                u64 res = (gr(rn) * gr(rm)) & 0xffffffff
+                if ra != 15 {
+                    u64 op2 = (hw2 >> 4) & 0xf
+                    if op2 == 1 { res = (gr(ra) - res) & 0xffffffff }   // MLS
+                    else { res = (res + gr(ra)) & 0xffffffff }          // MLA
+                }
+                sr(rd, res); pc = pc + 4; continue
+            }
+            if (hw & 0xfff0) == 0xfb80 {              // SMULL
+                u64 rn = hw & 0xf ; u64 rm = hw2 & 0xf
+                u64 rdlo = (hw2 >> 12) & 0xf ; u64 rdhi = (hw2 >> 8) & 0xf
+                u64 a = gr(rn) ; u64 b = gr(rm)
+                if (a & 0x80000000) != 0 { a = a | 0xffffffff00000000 }
+                if (b & 0x80000000) != 0 { b = b | 0xffffffff00000000 }
+                u64 p = a * b
+                sr(rdlo, p & 0xffffffff); sr(rdhi, (p >> 32) & 0xffffffff); pc = pc + 4; continue
+            }
+            if (hw & 0xfff0) == 0xfba0 {              // UMULL
+                u64 rn = hw & 0xf ; u64 rm = hw2 & 0xf
+                u64 rdlo = (hw2 >> 12) & 0xf ; u64 rdhi = (hw2 >> 8) & 0xf
+                u64 p = (gr(rn) & 0xffffffff) * (gr(rm) & 0xffffffff)
+                sr(rdlo, p & 0xffffffff); sr(rdhi, (p >> 32) & 0xffffffff); pc = pc + 4; continue
+            }
+            if (hw & 0xfff0) == 0xfbb0 {              // UDIV
+                u64 rn = hw & 0xf ; u64 rm = hw2 & 0xf ; u64 rd = (hw2 >> 8) & 0xf
+                u64 b = gr(rm) & 0xffffffff
+                u64 res = 0
+                if b != 0 { res = ((gr(rn) & 0xffffffff) / b) & 0xffffffff }
+                sr(rd, res); pc = pc + 4; continue
+            }
+            if (hw & 0xfff0) == 0xfb90 {              // SDIV (approx via sign handling)
+                u64 rn = hw & 0xf ; u64 rm = hw2 & 0xf ; u64 rd = (hw2 >> 8) & 0xf
+                u64 a = gr(rn) & 0xffffffff ; u64 b = gr(rm) & 0xffffffff
+                u64 res = 0
+                if b != 0 {
+                    u64 na = 0 ; u64 nb = 0
+                    if (a & 0x80000000) != 0 { a = (0x100000000 - a) & 0xffffffff ; na = 1 }
+                    if (b & 0x80000000) != 0 { b = (0x100000000 - b) & 0xffffffff ; nb = 1 }
+                    u64 q = a / b
+                    if (na ^ nb) == 1 { q = (0x100000000 - q) & 0xffffffff }
+                    res = q & 0xffffffff
+                }
+                sr(rd, res); pc = pc + 4; continue
+            }
+            // unimplemented 32-bit
+            NEXT_UNIMPL = hw
+            print_str("\n[UNIMPL 32-bit ") ; phex(hw) ; print_str(" ") ; phex(hw2) ; print_str(" at PC ") ; phex(pc) ; print_str("]\n")
+            break
+        }
+    }
+
+        if NWRITE > 0 {
+            nhit = nhit + 1
+            print_str("  (entry +"); phex(scan_off); print_str(" total writes "); println(NWRITE)
+        }
+        scan_off = scan_off + 2
+    }
+
+    print_str("\n== scan done: "); print_str("functions="); println(nfns)
+    print_str("   functions that emitted >=1 SMN write: "); println(nhit)
+}

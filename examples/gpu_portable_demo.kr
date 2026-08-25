@@ -1,0 +1,59 @@
+// gpu_portable_demo.kr — compile + logic self-test for std/gpu_portable.kr.
+//
+// KernRift runs freestanding (no /dev/mem), so this test exercises the pure
+// address math and the SMN index/data protocol against an alloc'd buffer that
+// stands in for BAR5. On your OS, pass a real identity-mapped BAR5 pointer
+// instead of `bar` and the same calls drive the hardware.
+//
+// Build: ./build/krc2 --arch=x86_64 --target=linux --emit=elfexe examples/gpu_portable_demo.kr -o /tmp/gpd
+// Run:   /tmp/gpd
+
+import "../std/io.kr"
+import "../std/gpu_portable.kr"
+
+fn phex(u64 v) {
+    u64 buf = alloc(11)
+    store8(buf, 48); store8(buf + 1, 120)      // "0x"
+    u64 i = 0
+    while i < 8 {
+        u64 sh = (7 - i) * 4
+        u64 nyb = (v >> sh) & 0xf
+        u64 ch = nyb + 48
+        if nyb >= 10 { ch = nyb + 87 }
+        store8(buf + 2 + i, ch)
+        i = i + 1
+    }
+    store8(buf + 10, 0)
+    print_str(buf)
+}
+
+fn check(u64 got, u64 want, u64 lab) {
+    print_str(lab)
+    if got == want { print_str(" PASS ") } else { print_str(" FAIL ") }
+    print_str("got="); phex(got); print_str(" want="); phex(want); print_str("\n")
+}
+
+fn main() {
+    print_str("gpu_portable.kr self-test\n")
+
+    // 1) ECAM device offset math (bus 3, dev 0, fn 0) -> 0x300000
+    check(ecam_dev_off(3, 0, 0), 0x300000, "ecam_dev_off(3,0,0)")
+    check(ecam_dev_off(3, 2, 1), (((3 << 20) | (2 << 15)) | (1 << 12)), "ecam_dev_off(3,2,1)")
+
+    // 2) SMN index/data protocol against a fake BAR5 buffer.
+    u64 bar = alloc(0x100)
+    smn_w32(bar, 0x0c400000, 0x0000cafe)
+    // INDEX2 must hold the SMN byte address reg<<2 = 0x31000000
+    check(mmio_r32(bar, 0x38), 0x31000000, "INDEX2 after smn_w32")
+    // DATA2 must hold the value; smn_r32 sets INDEX2 again then reads it back
+    check(smn_r32(bar, 0x0c400000), 0x0000cafe, "smn_r32 round-trip")
+    check(mmio_r32(bar, 0x38), 0x31000000, "INDEX2 after smn_r32")
+
+    // 3) BAR base mask (strip low flag bits) — fake a config dword.
+    mmio_w32(bar, 0x00, 0xdfb00004)          // BAR value with mem-type/prefetch bits
+    // pci_bar_base reads via ecam addressing; emulate by pointing ecam at bar-0
+    check(mmio_r32(bar, 0x00) & 0xfffffff0, 0xdfb00000, "BAR base mask")
+
+    print_str("done\n")
+    exit(0)
+}

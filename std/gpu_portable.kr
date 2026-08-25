@@ -1,0 +1,55 @@
+// std/gpu_portable.kr — OS-agnostic GPU register access for KernRift.
+//
+// Pure volatile MMIO (vload32/vstore32, each a barriered access) + PCIe ECAM
+// config-space access. ZERO syscalls, freestanding-ready: on your own OS you
+// identity-map (or page-table map) the physical MMIO regions and pass the
+// resulting pointers in. Ported 1:1 from MLRift std/gpu_portable.mlr.
+//
+// PCIe config via ECAM (MMCONFIG): device (bus,dev,pfn) config space at
+//   ecam_base + (bus<<20 | dev<<15 | pfn<<12) + reg_off
+// ECAM base comes from the ACPI MCFG table (this box: 0xe0000000).
+//
+// NOTE: KernRift binds & | ^ TIGHTER than << >> + - , so every mixed
+// shift/mask expression below is fully parenthesized.
+
+// SMN-indirect ports on the GPU register BAR (BAR5), BIF BX0 BASE_IDX=0.
+static u64 SMN_INDEX2 = 0x38     // regBIF_BX0_PCIE_INDEX2 (dword 0x0e)
+static u64 SMN_DATA2  = 0x3c     // regBIF_BX0_PCIE_DATA2  (dword 0x0f)
+static u64 SMN_SHIFT  = 2        // SMN byte addr = reg << 2 (ABL1 convention)
+
+// PCI config register offsets.
+static u64 PCI_CFG_VENDOR_DEVICE = 0x00
+static u64 PCI_CFG_BAR5          = 0x24
+
+// ---- pure volatile 32-bit MMIO (base = pointer to a phys MMIO region) ----
+fn mmio_r32(u64 base, u64 off) -> u64 {
+    u32 v = vload32(base + off)
+    u64 r = v
+    return r
+}
+fn mmio_w32(u64 base, u64 off, u64 val) {
+    u32 v = val
+    vstore32(base + off, v)
+}
+
+// ---- ECAM PCIe config-space access (pure MMIO) ----
+fn ecam_dev_off(u64 bus, u64 dev, u64 pfn) -> u64 {
+    return ((bus << 20) | (dev << 15)) | (pfn << 12)
+}
+fn ecam_cfg_r32(u64 ecam, u64 bus, u64 dev, u64 pfn, u64 off) -> u64 {
+    return mmio_r32(ecam + ecam_dev_off(bus, dev, pfn), off)
+}
+fn pci_bar_base(u64 ecam, u64 bus, u64 dev, u64 pfn, u64 bar_off) -> u64 {
+    u64 lo = ecam_cfg_r32(ecam, bus, dev, pfn, bar_off)
+    return lo & 0xfffffff0
+}
+
+// ---- SMN-indirect register access on BAR5 (bar5 = pointer to BAR5 phys) ----
+fn smn_r32(u64 bar5, u64 reg) -> u64 {
+    mmio_w32(bar5, SMN_INDEX2, reg << SMN_SHIFT)
+    return mmio_r32(bar5, SMN_DATA2)
+}
+fn smn_w32(u64 bar5, u64 reg, u64 val) {
+    mmio_w32(bar5, SMN_INDEX2, reg << SMN_SHIFT)
+    mmio_w32(bar5, SMN_DATA2, val)
+}
