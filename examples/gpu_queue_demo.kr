@@ -1,0 +1,26 @@
+import "../std/io.kr"
+import "../std/gpu_portable.kr"
+import "../std/gpu_navi32.kr"
+import "../std/gpu_pm4.kr"
+import "../std/gpu_queue.kr"
+fn phex(u64 v){u64 b=alloc(11);store8(b,48);store8(b+1,120);u64 i=0;while i<8{u64 sh=(7-i)*4;u64 n=(v>>sh)&0xf;u64 c=n+48;if n>=10{c=n+87}store8(b+2+i,c);i=i+1}store8(b+10,0);print_str(b)}
+fn check(u64 got,u64 want,u64 lab){print_str(lab);if got==want{print_str(" PASS ")}else{print_str(" FAIL ")}print_str("got=");phex(got);print_str(" want=");phex(want);print_str("\n")}
+fn main(){
+    print_str("gpu_queue.kr self-test (MQD fill + MAP_QUEUES)\n")
+    u64 mqd=alloc(0x800)
+    // zero
+    u64 z=0; while z<0x800 { store32(mqd+z,0); z=z+4 }
+    mqd_init(mqd, 0x10000000, 0x20000000, 12, 0x40, 0x30000000, 0x30001000)
+    check(load32(mqd+MQD_BASE_ADDR_LO), 0x10000000, "mqd base lo")
+    check(load32(mqd+MQD_HQD_ACTIVE), 1, "hqd active")
+    check(load32(mqd+MQD_PQ_BASE_LO), 0x20000000>>8, "pq base lo (>>8)")
+    check(load32(mqd+MQD_PQ_DOORBELL_CTRL), ((0x40<<2)&0x3ffffffc)|(1<<30), "doorbell ctrl")
+    // MAP_QUEUES packet
+    u64 buf=alloc(64); u64 end=map_queues(buf,0, 0x10000000, 0x30001000, 0x40, 1, 0, 0)
+    check(end, 7, "map_queues dwords")
+    check(load32(buf+0), (3<<30)|(0xA2<<8)|(5<<16), "MAP_QUEUES hdr")
+    check(load32(buf+8), (0x40<<2)&0x1fffffff, "doorbell offset dw")
+    check(load32(buf+12), 0x10000000, "mqd_lo dw")
+    print_str("done — MQD + MAP_QUEUES prepped (stage C); ring on OS-owned card\n")
+    exit(0)
+}

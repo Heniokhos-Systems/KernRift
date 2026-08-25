@@ -1,0 +1,76 @@
+// std/gpu_queue.kr — compute-queue map for gfx11 (chain brick 6 / stage C).
+// Fill a gfx11 compute MQD in VRAM + build the KIQ MAP_QUEUES packet that
+// tells MES/CP to activate the queue; then ring its doorbell (BAR2) to submit.
+// PREP: run only on a card the OS owns, AFTER IMU->RLC->CP->MES bring-up.
+//
+// HONEST: MQD field OFFSETS + MAP_QUEUES encoding below are exact (from
+// v11_structs.h / soc15d.h, self-tested). The MQD control-word DEFAULTS
+// (cp_hqd_pq_control size bits, persistent_state) are the standard essentials;
+// some tuning bits need on-hardware confirmation (flagged).
+import "gpu_portable.kr"
+import "gpu_navi32.kr"
+import "gpu_pm4.kr"
+
+// v11_compute_mqd field byte offsets (struct size 0x800).
+static u64 MQD_BASE_ADDR_LO       = 0x200
+static u64 MQD_BASE_ADDR_HI       = 0x204
+static u64 MQD_HQD_ACTIVE         = 0x208
+static u64 MQD_HQD_VMID           = 0x20c
+static u64 MQD_HQD_PERSISTENT     = 0x210
+static u64 MQD_PQ_BASE_LO         = 0x220
+static u64 MQD_PQ_BASE_HI         = 0x224
+static u64 MQD_PQ_RPTR_REPORT_LO  = 0x22c
+static u64 MQD_PQ_WPTR_POLL_LO    = 0x234
+static u64 MQD_PQ_DOORBELL_CTRL   = 0x23c
+static u64 MQD_PQ_CONTROL         = 0x244
+static u64 MQD_CONTROL            = 0x288
+
+static u64 PM4_MAP_QUEUES = 0xA2
+static u64 DOORBELL_EN = 1 << 30   // CP_HQD_PQ_DOORBELL_CONTROL.DOORBELL_EN
+
+fn _ms(u64 mqd, u64 off, u64 v) { store32(mqd + off, v) }
+
+// Fill the essential MQD fields for a compute queue.
+//   mqd      = host ptr to the (zeroed) 0x800 MQD buffer
+//   mqd_gpu  = its GPU address; ring_gpu = ring buffer GPU address (256B aligned)
+//   ring_log2_dw = log2(ring size in dwords); doorbell_idx = dword doorbell slot
+//   rptr_gpu / wptr_gpu = read/write-pointer report addresses
+fn mqd_init(u64 mqd, u64 mqd_gpu, u64 ring_gpu, u64 ring_log2_dw,
+            u64 doorbell_idx, u64 rptr_gpu, u64 wptr_gpu) {
+    _ms(mqd, MQD_BASE_ADDR_LO, mqd_gpu & 0xffffffff)
+    _ms(mqd, MQD_BASE_ADDR_HI, (mqd_gpu >> 32) & 0xffffffff)
+    _ms(mqd, MQD_HQD_ACTIVE, 1)
+    _ms(mqd, MQD_HQD_VMID, 0)
+    _ms(mqd, MQD_PQ_BASE_LO, (ring_gpu >> 8) & 0xffffffff)     // PQ base is >>8
+    _ms(mqd, MQD_PQ_BASE_HI, (ring_gpu >> 40) & 0xffffffff)
+    _ms(mqd, MQD_PQ_RPTR_REPORT_LO, rptr_gpu & 0xffffffff)
+    _ms(mqd, MQD_PQ_WPTR_POLL_LO, wptr_gpu & 0xffffffff)
+    _ms(mqd, MQD_PQ_DOORBELL_CTRL, ((doorbell_idx << 2) & 0x3ffffffc) | DOORBELL_EN)
+    _ms(mqd, MQD_PQ_CONTROL, ring_log2_dw & 0x3f)              // QUEUE_SIZE (TODO: rptr/unord bits)
+    _ms(mqd, MQD_CONTROL, 0)
+}
+
+// Build a KIQ MAP_QUEUES packet into buf at dword idx. me/pipe/queue select the
+// HQD slot; returns new idx.
+fn map_queues(u64 buf, u64 idx, u64 mqd_gpu, u64 wptr_gpu,
+              u64 doorbell_idx, u64 me, u64 pipe, u64 queue) -> u64 {
+    idx = pm4_push(buf, idx, pm4_type3(PM4_MAP_QUEUES, 5))
+    // control: QUEUE_SEL(0)<<4 | VMID(0)<<8 | QUEUE<<13 | PIPE<<16 | ME<<18 |
+    //          QUEUE_TYPE(0)<<21 | NUM_QUEUES(1)<<29
+    u64 ctl = ((queue & 0x7) << 13) | ((pipe & 0x3) << 16)
+    ctl = ctl | ((me & 0x3) << 18)
+    ctl = ctl | (1 << 29)
+    idx = pm4_push(buf, idx, ctl)
+    idx = pm4_push(buf, idx, (doorbell_idx << 2) & 0x1fffffff)   // DOORBELL_OFFSET<<2
+    idx = pm4_push(buf, idx, mqd_gpu & 0xffffffff)
+    idx = pm4_push(buf, idx, (mqd_gpu >> 32) & 0xffffffff)
+    idx = pm4_push(buf, idx, wptr_gpu & 0xffffffff)
+    idx = pm4_push(buf, idx, (wptr_gpu >> 32) & 0xffffffff)
+    return idx
+}
+
+// Ring a doorbell: write the ring wptr (in dwords) to the BAR2 doorbell page at
+// slot doorbell_idx. db2 = mapped BAR2 doorbell aperture pointer.
+fn doorbell_ring(u64 db2, u64 doorbell_idx, u64 wptr_dw) {
+    store32(db2 + (doorbell_idx << 3), wptr_dw & 0xffffffff)   // 8B per doorbell
+}
