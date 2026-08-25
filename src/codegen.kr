@@ -14983,7 +14983,7 @@ fn emit_elf_lkm(uint64 text_len, uint64 data_len, uint64 arch) {
     }
 
     // Phase C.2: PCI-driver mode. When @module_register_pci_driver is
-    // present we emit a `struct pci_driver` into .data (280 bytes) with
+    // present we emit a `struct pci_driver` into .data (288 bytes, 7.0 layout) with
     // its name/probe/remove fields wired via .rela.data. The struct is
     // not yet registered (that is Task 3 / init_module wiring); this task
     // only lands the struct + relocations in the .ko.
@@ -15128,15 +15128,20 @@ fn emit_elf_lkm(uint64 text_len, uint64 data_len, uint64 arch) {
     data_len = data_len + misc_data_extra
 
     // PCI-driver mode .data extras (Phase C.2). The struct pci_driver
-    // (280 bytes, 0x118) and its NUL-terminated name string land AFTER
+    // (288 bytes, 0x120) and its NUL-terminated name string land AFTER
     // the misc extras (data_len already includes misc_data_extra above).
     //   pci_struct_data_off : base of struct pci_driver
     //   pci_name_data_off   : NUL-terminated name string
     uint64 pci_data_extra = 0
-    uint64 pci_struct_data_off = data_len
-    uint64 pci_name_data_off = data_len + 280
+    // 8-align the struct pci_driver base. The misc-device name string emitted
+    // just above is variable-length, so without this pad the struct — which
+    // embeds pci_dynids (a spinlock + list_head) — would land at a misaligned
+    // .data offset. pci_pad zero bytes are emitted before the struct below.
+    uint64 pci_pad = (8 - (data_len & 7)) & 7
+    uint64 pci_struct_data_off = data_len + pci_pad
+    uint64 pci_name_data_off = pci_struct_data_off + 288
     if pci_drv_mode != 0 {
-        pci_data_extra = 280 + pci_drv_name_len + 1
+        pci_data_extra = pci_pad + 288 + pci_drv_name_len + 1
     }
     data_len = data_len + pci_data_extra
 
@@ -15884,15 +15889,25 @@ fn emit_elf_lkm(uint64 text_len, uint64 data_len, uint64 arch) {
         emit_byte(0)   // NUL terminator
     }
     if pci_drv_mode != 0 {
-        // struct pci_driver (280 bytes, 0x118) at pci_struct_data_off.
+        // struct pci_driver (288 bytes, 0x120) at pci_struct_data_off.
         //   off 0x00..0x08: name pointer (reloc → name string)
         //   off 0x08..0x10: id_table pointer (NULL — left 0)
         //   off 0x10..0x18: probe fn pointer (reloc → @pci_probe_handler)
         //   off 0x18..0x20: remove fn pointer (reloc → @pci_remove_handler)
-        //   off 0x20..0x118: zero (sriov_configure, err_handler, driver, ...)
-        // All 280 bytes start as zero; .rela.data patches in the pointers.
+        //   off 0x20..0x118: zero (sriov_configure, err_handler, driver, dynids, ...)
+        //   off 0x118 (280): driver_managed_dma (_Bool) + 7 pad → MUST be zero.
+        // Kernel 7.0's struct pci_driver is 288 bytes (was mis-sized 280, which
+        // put the name string's 'm' where the kernel reads driver_managed_dma@280
+        // → UBSAN invalid-load 'load of value 109 is not valid _Bool'). The PCI
+        // core copies name/probe/remove into the embedded device_driver at
+        // register time, so only those three fields need relocs.
+        // All 288 bytes start as zero; .rela.data patches in the pointers.
+        // First emit pci_pad zero bytes so the struct base is 8-aligned (see
+        // the pci_pad computation above — must match pci_struct_data_off).
+        uint64 ppad = 0
+        while ppad < pci_pad { emit_byte(0); ppad = ppad + 1 }
         uint64 pzi = 0
-        while pzi < 280 { emit_byte(0); pzi = pzi + 1 }
+        while pzi < 288 { emit_byte(0); pzi = pzi + 1 }
 
         // PCI driver name string at offset pci_name_data_off.
         uint64 pnsi = 0
@@ -16058,13 +16073,13 @@ fn emit_elf_lkm(uint64 text_len, uint64 data_len, uint64 arch) {
     uint64 lkm_pci_drv_sym_idx = local_count
     uint64 lkm_pci_name_sym_idx = local_count + 1
     if pci_drv_mode != 0 {
-        // _lkm_pci_drv: 280-byte OBJECT in .data at pci_struct_data_off
+        // _lkm_pci_drv: 288-byte OBJECT in .data at pci_struct_data_off
         emit_u32_le(lkm_pci_drv_name_off)
         emit_byte(0x01)              // STB_LOCAL << 4 | STT_OBJECT
         emit_byte(0)
         emit_u16_le(2)               // st_shndx = .data (section 2)
         emit_u64_le(pci_struct_data_off)
-        emit_u64_le(280)
+        emit_u64_le(288)
         // _lkm_pci_name: name string + NUL
         emit_u32_le(lkm_pci_name_name_off)
         emit_byte(0x01)
