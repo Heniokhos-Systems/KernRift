@@ -1708,6 +1708,7 @@ fn parse_stmt() -> uint64 {
             expect(11)
             uint32 st32 = str_tok
             ast_set_data1(asm_node, st32)
+            asm_seen_record(str_tok)
         } else if cur_kind() == 12 {
             // Multi-line: asm { "str1"; "str2"; ... }
             advance_tok()
@@ -1718,6 +1719,7 @@ fn parse_stmt() -> uint64 {
                 uint64 s_node = ast_alloc(31)
                 uint32 st = s_tok
                 ast_set_data1(s_node, st)
+                asm_seen_record(s_tok)
                 if first_str == 0 {
                     first_str = s_node
                 } else {

@@ -3278,6 +3278,7 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
     ast_init(524288)
     codegen_init(4194304, source, my_tokens)
     parser_init(my_tokens, tcount)
+    asm_seen_reset()
     uint64 root = parse_module()
 
     // Semantic validation: check arg counts, missing returns, duplicate functions
@@ -3303,6 +3304,12 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
         write(2, " error(s) found\n", 16)
         exit(1)
     }
+
+    // --asm-strict only: arch-check every asm block, reachable or not. See the
+    // asm_strict declaration for why this is not the default. After the error
+    // gate above, so a file that does not parse reports that rather than a pile
+    // of consequential asm complaints.
+    if asm_strict != 0 { asm_check_module() }
 
     // Function inlining: substitute pure single-expression callees at
     // every call site. Runs before DCE; for translation-unit emit modes
@@ -5984,6 +5991,7 @@ fn compile_fat(uint64 input_path, uint64 output_path) {
     ast_init(524288)
     codegen_init(4194304, source, my_tokens)
     parser_init(my_tokens, saved_tcount)
+    asm_seen_reset()
     uint64 root = parse_module()
 
     // Semantic validation: check arg counts, missing returns, duplicate functions
@@ -6146,6 +6154,7 @@ fn compile_fat(uint64 input_path, uint64 output_path) {
     restore_src_and_tokens(source, size, src_snapshot, my_tokens, tok_bytes, tok_snapshot)
     ast_init(524288)
     parser_init(my_tokens, saved_tcount)
+    asm_seen_reset()
     uint64 root2 = parse_module()
     resolve_inferred_types(root2)
 
@@ -6259,6 +6268,7 @@ fn compile_fat(uint64 input_path, uint64 output_path) {
     restore_src_and_tokens(source, size, src_snapshot, my_tokens, tok_bytes, tok_snapshot)
     ast_init(524288)
     parser_init(my_tokens, saved_tcount)
+    asm_seen_reset()
     uint64 root3 = parse_module()
     resolve_inferred_types(root3)
     inline_pass(root3)
@@ -6375,6 +6385,7 @@ fn compile_fat(uint64 input_path, uint64 output_path) {
     restore_src_and_tokens(source, size, src_snapshot, my_tokens, tok_bytes, tok_snapshot)
     ast_init(524288)
     parser_init(my_tokens, saved_tcount)
+    asm_seen_reset()
     uint64 root4 = parse_module()
     resolve_inferred_types(root4)
     inline_pass(root4)
@@ -6514,6 +6525,7 @@ fn compile_fat(uint64 input_path, uint64 output_path) {
     restore_src_and_tokens(source, size, src_snapshot, my_tokens, tok_bytes, tok_snapshot)
     ast_init(524288)
     parser_init(my_tokens, saved_tcount)
+    asm_seen_reset()
     uint64 root5 = parse_module()
     resolve_inferred_types(root5)
     inline_pass(root5)
@@ -6621,6 +6633,7 @@ fn compile_fat(uint64 input_path, uint64 output_path) {
     restore_src_and_tokens(source, size, src_snapshot, my_tokens, tok_bytes, tok_snapshot)
     ast_init(524288)
     parser_init(my_tokens, saved_tcount)
+    asm_seen_reset()
     uint64 root6 = parse_module()
     resolve_inferred_types(root6)
     inline_pass(root6)
@@ -6764,6 +6777,7 @@ fn compile_fat(uint64 input_path, uint64 output_path) {
     restore_src_and_tokens(source, size, src_snapshot, my_tokens, tok_bytes, tok_snapshot)
     ast_init(524288)
     parser_init(my_tokens, saved_tcount)
+    asm_seen_reset()
     uint64 root8 = parse_module()
     resolve_inferred_types(root8)
     inline_pass(root8)
@@ -6890,6 +6904,7 @@ fn compile_fat(uint64 input_path, uint64 output_path) {
     restore_src_and_tokens(source, size, src_snapshot, my_tokens, tok_bytes, tok_snapshot)
     ast_init(524288)
     parser_init(my_tokens, saved_tcount)
+    asm_seen_reset()
     uint64 root7 = parse_module()
     resolve_inferred_types(root7)
     inline_pass(root7)
@@ -7320,6 +7335,23 @@ static uint64 cli_argv = 0
 // emergency builds. Phase 1 rules emit errors; Phase 2 rules (added
 // later) emit warnings until their violation counts are triaged.
 static uint64 check_types_enabled = 1
+
+// --asm-strict: arch-check EVERY inline asm block, reachable or not.
+//
+// DEFAULT OFF, AND THAT IS A DELIBERATE CONTRACT rather than caution. krc lowers
+// asm only where it is reached, so a module may carry x86_64 port I/O beside
+// portable helpers and an arm64 program that calls only the helpers builds and
+// runs. std/vga_text.kr is exactly that shape and tests/run_tests.sh asserts
+// both halves of it: `vga_attr` must build for arm64, and `vga_move_cursor`
+// must fail loudly there. Checking every block by default breaks the first
+// assertion to strengthen the second.
+//
+// It is worth having as an OPTION because the default has a blind spot: a file
+// full of foreign asm can sit in a build for months looking fine, and the error
+// arrives only when somebody first calls into it -- possibly on hardware,
+// possibly as silence. Turning this on in CI answers "does this program contain
+// asm for a machine it is not being built for" ahead of that moment.
+static uint64 asm_strict = 0
 
 // Living compiler CLI options
 static uint64 lc_ci_mode = 0
@@ -9175,6 +9207,8 @@ fn main() {
                 write(1, "  --check-types             type checker (default on)\n", 54)
                 uint64 wmsg_w = "  -w                        suppress warnings (errors unaffected)\n"
                 write(1, wmsg_w, 66)
+                uint64 wmsg_asmst = "  --asm-strict              arch-check every asm block, even unreachable ones\n"
+                write(1, wmsg_asmst, str_len(wmsg_asmst))
                 uint64 wmsg_5200 = "  --no-check-types          disable type checker\n"
                 write(1, wmsg_5200, str_len(wmsg_5200))
                 write(1, "  --O0                      disable IR optimizations (CF/DCE/CSE/LICM)\n", 71)
@@ -9222,6 +9256,8 @@ fn main() {
                 // that a prefix match would also swallow "-wsomething" and
                 // silently accept a typo.
                 diag_set_no_warnings(1)
+            } else if str_starts_with(arg, "--asm-strict", 12) != 0 {
+                asm_strict = 1
             } else if str_starts_with(arg, "--no-check-types", 16) != 0 {
                 check_types_enabled = 0
             } else if str_starts_with(arg, "--check-types", 13) != 0 {
@@ -10383,6 +10419,7 @@ fn main() {
         ast_init(524288)
         codegen_init(1048576, source, my_tokens)
         parser_init(my_tokens, tcount)
+        asm_seen_reset()
         uint64 root = parse_module()
         // run_analysis runs the annotation/effect/lock passes. These are
         // currently inert: annotations are not parsed yet, so ann_register
@@ -10457,6 +10494,7 @@ fn main() {
         ast_init(524288)
         codegen_init(1048576, source, my_tokens)
         parser_init(my_tokens, tcount)
+        asm_seen_reset()
         uint64 root = parse_module()
         // Run analysis first to populate lock graph
         analysis_init()

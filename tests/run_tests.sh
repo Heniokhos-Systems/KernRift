@@ -24224,6 +24224,167 @@ else
 fi
 rm -rf "$APXA_D"
 
+# --- the arm64 inline assembler, and the guards around inline asm ------------
+#
+# ANCHOR A64ASM. Every expected word below came from `llvm-mc --triple=aarch64
+# --show-encoding` and is HARDCODED here rather than computed, so this suite
+# does not need llvm installed and so a wrong encoding cannot be "confirmed" by
+# the same arithmetic that produced it.
+A64A_D="/tmp/krc_a64asm_$$"
+mkdir -p "$A64A_D"
+
+# One row, many instructions: the byte-for-byte comparison. `mov x0, sp` and
+# `mov sp, x0` are in the list on purpose -- SP and XZR are both register 31 and
+# the `mov` encoding differs by which was written, so an assembler that treats
+# them alike still passes on every other line here.
+TOTAL=$((TOTAL + 1))
+cat > "$A64A_D/enc.txt" <<'A64ENC'
+mov x0, x1|AA0103E0
+mov x0, sp|910003E0
+mov sp, x0|9100001F
+mov x7, #1234|D2809A47
+movz x3, #0x30, lsl #16|D2A00603
+movk x3, #0xABCD|F29579A3
+add x1, x2, #16|91004041
+sub x1, x2, #4095|D13FFC41
+add x1, x2, x3|8B030041
+br x7|D61F00E0
+blr x8|D63F0100
+ldr x2, [x3, #8]|F9400462
+str x4, [x5, #4088]|F907FCA4
+stp x29, x30, [sp, #-16]!|A9BF7BFD
+ldp x29, x30, [sp], #16|A8C17BFD
+msr cpacr_el1, x0|D5181040
+mrs x2, esr_el2|D53C5202
+msr vbar_el2, x3|D51CC003
+A64ENC
+{
+  echo 'fn go() {'
+  cut -d'|' -f1 "$A64A_D/enc.txt" | while IFS= read -r insn; do
+      printf '    asm { "%s" }\n' "$insn"
+  done
+  echo '}'
+  echo 'fn main() -> uint64 { go()  return 0 }'
+} > "$A64A_D/enc.kr"
+if ! $KRC --arch=arm64 --emit=arx "$A64A_D/enc.kr" -o "$A64A_D/enc.arx" >/dev/null 2>&1; then
+    FAIL=$((FAIL + 1)); echo "FAIL: a64_asm_encodings_match_llvm_mc (build failed)"
+else
+    a64_bad=$(python3 - "$A64A_D/enc.txt" "$A64A_D/enc.arx" <<'A64PY'
+import sys
+rows=[l.rstrip("\n").split("|") for l in open(sys.argv[1]) if "|" in l]
+exp=[bytes.fromhex(w)[::-1] for _,w in rows]
+blob=open(sys.argv[2],"rb").read()
+start=blob.find(exp[0])
+if start < 0:
+    print("first instruction not found in output"); sys.exit(0)
+bad=[]
+for i,(src,word) in enumerate(rows):
+    got=blob[start+4*i:start+4*i+4]
+    if got!=exp[i]:
+        bad.append("%s: want %s got %08X" % (src, word, int.from_bytes(got,"little")))
+print("; ".join(bad))
+A64PY
+)
+    if [ -z "$a64_bad" ]; then
+        a64_n=$(grep -c '|' "$A64A_D/enc.txt")
+        PASS=$((PASS + 1)); echo "  a64_asm_encodings_match_llvm_mc: PASS ($a64_n instructions, byte for byte)"
+    else
+        FAIL=$((FAIL + 1)); echo "FAIL: a64_asm_encodings_match_llvm_mc ($a64_bad)"
+    fi
+fi
+
+# A raw hex word is the ONE form nothing else checks -- no mnemonic table sees
+# it -- so its width is the only thing standing between a typo and a silently
+# different instruction. "0xD5" used to emit 0x000000D5 and two words in one
+# string used to be multiplied together into one.
+TOTAL=$((TOTAL + 1))
+a64h_ok=1; a64h_note=""
+printf 'fn main() -> uint64 { asm { "0xD5" }  return 0 }\n' > "$A64A_D/h1.kr"
+$KRC --arch=arm64 --emit=arx "$A64A_D/h1.kr" -o "$A64A_D/h1.arx" >/dev/null 2>&1 && { a64h_ok=0; a64h_note="short word accepted"; }
+printf 'fn main() -> uint64 { asm { "0xD503201F 0xD5033FDF" }  return 0 }\n' > "$A64A_D/h2.kr"
+$KRC --arch=arm64 --emit=arx "$A64A_D/h2.kr" -o "$A64A_D/h2.arx" >/dev/null 2>&1 && { a64h_ok=0; a64h_note="two words in one string accepted"; }
+printf 'fn main() -> uint64 { asm { "0xD503201F" }  return 0 }\n' > "$A64A_D/h3.kr"
+$KRC --arch=arm64 --emit=arx "$A64A_D/h3.kr" -o "$A64A_D/h3.arx" >/dev/null 2>&1 || { a64h_ok=0; a64h_note="a correct eight-digit word was REJECTED"; }
+if [ "$a64h_ok" = "1" ]; then
+    PASS=$((PASS + 1)); echo "  a64_raw_hex_is_exactly_eight_digits: PASS"
+else
+    FAIL=$((FAIL + 1)); echo "FAIL: a64_raw_hex_is_exactly_eight_digits ($a64h_note)"
+fi
+
+# The x86 twin. "0xABC" used to emit 0xAB and drop the C; a group with no `0x`
+# prefix at all used to emit NOTHING, which is the worst of the three because an
+# asm block that assembles to zero bytes leaves nothing to find later.
+TOTAL=$((TOTAL + 1))
+x86h_ok=1; x86h_note=""
+printf 'fn main() -> uint64 { asm { "0xABC" }  return 0 }\n' > "$A64A_D/x1.kr"
+$KRC --arch=x86_64 "$A64A_D/x1.kr" -o "$A64A_D/x1.bin" >/dev/null 2>&1 && { x86h_ok=0; x86h_note="three-digit group accepted"; }
+printf 'fn main() -> uint64 { asm { "0x0F 0x01 0xD0" }  return 0 }\n' > "$A64A_D/x2.kr"
+$KRC --arch=x86_64 "$A64A_D/x2.kr" -o "$A64A_D/x2.bin" >/dev/null 2>&1 || { x86h_ok=0; x86h_note="a correct byte run was REJECTED"; }
+if [ "$x86h_ok" = "1" ]; then
+    PASS=$((PASS + 1)); echo "  x86_raw_hex_is_two_digit_groups: PASS"
+else
+    FAIL=$((FAIL + 1)); echo "FAIL: x86_raw_hex_is_two_digit_groups ($x86h_note)"
+fi
+
+# An unknown system-register name used to leave `sreg` at its initial 0, so
+# `msr <anything-not-in-the-table>, x0` assembled as 0xD5100000 -- a real
+# instruction, writing a different register, with no diagnostic at all.
+TOTAL=$((TOTAL + 1))
+printf 'fn main() -> uint64 { asm { "msr not_a_register_el1, x0" }  return 0 }\n' > "$A64A_D/sr.kr"
+sr_err=$($KRC --arch=arm64 --emit=arx "$A64A_D/sr.kr" -o "$A64A_D/sr.arx" 2>&1)
+if [ -f "$A64A_D/sr.arx" ]; then
+    FAIL=$((FAIL + 1)); echo "FAIL: a64_unknown_sysreg_is_an_error (accepted, and would have written a different register)"
+elif printf '%s' "$sr_err" | grep -q "unknown arm64 system register"; then
+    PASS=$((PASS + 1)); echo "  a64_unknown_sysreg_is_an_error: PASS"
+else
+    FAIL=$((FAIL + 1)); echo "FAIL: a64_unknown_sysreg_is_an_error (got: $(printf '%s' "$sr_err" | head -1))"
+fi
+
+# A known mnemonic with operands that do not parse must say THAT, not "unknown
+# instruction" -- which would send the reader looking for a missing `mov`.
+TOTAL=$((TOTAL + 1))
+printf 'fn main() -> uint64 { asm { "mov x0, x99" }  return 0 }\n' > "$A64A_D/op.kr"
+op_err=$($KRC --arch=arm64 --emit=arx "$A64A_D/op.kr" -o "$A64A_D/op.arx" 2>&1)
+if printf '%s' "$op_err" | grep -q "bad operands in arm64 asm"; then
+    PASS=$((PASS + 1)); echo "  a64_bad_operands_name_the_mnemonic: PASS"
+else
+    FAIL=$((FAIL + 1)); echo "FAIL: a64_bad_operands_name_the_mnemonic (got: $(printf '%s' "$op_err" | head -1))"
+fi
+
+# THE DEFAULT CONTRACT, pinned so --asm-strict cannot quietly become the
+# default later: asm is checked where it is LOWERED, so foreign asm in a
+# function nothing calls is allowed. std/vga_text.kr depends on this and so does
+# the vga_attr row far above; this states it directly rather than leaving it as
+# a side effect of that test.
+TOTAL=$((TOTAL + 1))
+printf 'fn never_called() { asm { "push rbx" } }\nfn main() -> uint64 { return 0 }\n' > "$A64A_D/unreach.kr"
+if $KRC --arch=arm64 --emit=arx "$A64A_D/unreach.kr" -o "$A64A_D/unreach.arx" >/dev/null 2>&1; then
+    PASS=$((PASS + 1)); echo "  asm_unreachable_foreign_is_allowed_by_default: PASS"
+else
+    FAIL=$((FAIL + 1)); echo "FAIL: asm_unreachable_foreign_is_allowed_by_default (the std/vga_text.kr pattern would break)"
+fi
+
+# ...and --asm-strict is what turns that blind spot into an error, in BOTH
+# directions. One direction passing proves only that something is rejected.
+TOTAL=$((TOTAL + 1))
+strict_ok=1; strict_note=""
+st_a=$($KRC --asm-strict --arch=arm64 --emit=arx "$A64A_D/unreach.kr" -o "$A64A_D/s1.arx" 2>&1)
+[ -f "$A64A_D/s1.arx" ] && { strict_ok=0; strict_note="x86 asm accepted in an arm64 build"; }
+printf '%s' "$st_a" | grep -q "LOOKS LIKE x86_64 ASSEMBLY" || { strict_ok=0; strict_note="arm64 build did not name the arch mismatch"; }
+printf 'fn never_called() { asm { "msr cpacr_el1, x0" } }\nfn main() -> uint64 { return 0 }\n' > "$A64A_D/rev.kr"
+st_b=$($KRC --asm-strict --arch=x86_64 "$A64A_D/rev.kr" -o "$A64A_D/s2.bin" 2>&1)
+[ -f "$A64A_D/s2.bin" ] && { strict_ok=0; strict_note="arm64 asm accepted in an x86_64 build"; }
+printf '%s' "$st_b" | grep -q "LOOKS LIKE arm64 ASSEMBLY" || { strict_ok=0; strict_note="x86_64 build did not name the arch mismatch"; }
+# and it must not reject code that is genuinely right for the target
+printf 'fn never_called() { asm { "msr cpacr_el1, x0" } }\nfn main() -> uint64 { return 0 }\n' > "$A64A_D/good.kr"
+$KRC --asm-strict --arch=arm64 --emit=arx "$A64A_D/good.kr" -o "$A64A_D/s3.arx" >/dev/null 2>&1 || { strict_ok=0; strict_note="rejected arm64 asm in an arm64 build"; }
+if [ "$strict_ok" = "1" ]; then
+    PASS=$((PASS + 1)); echo "  asm_strict_catches_foreign_asm_both_ways: PASS"
+else
+    FAIL=$((FAIL + 1)); echo "FAIL: asm_strict_catches_foreign_asm_both_ways ($strict_note)"
+fi
+rm -rf "$A64A_D"
+
 # --- Documentation pin 5, PART B (see Part A above) --------------------------
 # README.md advertises this suite's test count. Compare it against the total
 # only now, when $TOTAL is final and already includes this row (Part A did the

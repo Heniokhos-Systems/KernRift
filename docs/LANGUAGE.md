@@ -2468,6 +2468,7 @@ krc --no-coalesce <file.kr>          # disable Briggs/George copy coalescing (de
 krc --coalesce <file.kr>             # ...and its explicit positive form (the default)
 krc --no-check-types <file.kr>       # disable the type checker (default on)
 krc --check-types <file.kr>          # ...and its explicit positive form (the default)
+krc --asm-strict <file.kr>           # arch-check every asm block, even unreachable ones
 krc --O0 <file.kr>                   # disable the IR optimizer (CF/DCE/CSE/LICM)
 krc --debug <file.kr>                # runtime safety checks (bounds, null, some div-by-zero)
 krc -g <file.kr> -o out              # emit DWARF debug info (.debug_line/info/abbrev/str)
@@ -2516,6 +2517,24 @@ failed check has no kernel to exit to on bare metal.
 
 A static type checker runs by default on every compile (and under
 `krc check`). Its errors are **fatal** — they abort the build with a
+### `--asm-strict`
+
+Inline `asm` is arch-checked **when it is lowered**, and krc only lowers what it
+reaches. So a module may carry x86_64 port I/O beside portable helpers, and an
+arm64 program that calls only the helpers builds and runs — `std/vga_text.kr` is
+exactly that shape, and it is deliberate. The cost is a blind spot: a file full
+of assembly for another machine can sit in a build indefinitely looking healthy,
+and the error arrives only when something first calls into it.
+
+`--asm-strict` checks every `asm` block in the module, reachable or not, against
+the target architecture. It answers "does this program contain assembly for a
+machine it is not being built for" before that first call rather than after, and
+it is meant for CI rather than for the default path — turning it on will reject
+the `std/vga_text.kr` pattern above, which is legitimate.
+
+When the text looks like the other architecture's assembly, the error says so
+outright instead of reporting an unknown mnemonic.
+
 `file:line:col` message, source line, and caret. Pass `--no-check-types`
 to disable it (e.g. to compile a file it rejects while you investigate).
 
