@@ -5337,7 +5337,11 @@ fn ir_lower_stmt(uint64 node) {
                 if target_arch == 2 {
                     rcode = rv_reg_code(rtok)
                 } else {
-                    rcode = x86_reg_code(rtok)
+                    if target_arch == 1 {
+                        rcode = a64_reg_code_strict(rtok)
+                    } else {
+                        rcode = x86_reg_code(rtok)
+                    }
                 }
                 if rcode != 0xFFFF {
                     // Move var value to the target physical register
@@ -5370,7 +5374,11 @@ fn ir_lower_stmt(uint64 node) {
                 if target_arch == 2 {
                     rcode2 = rv_reg_code(rtok2)
                 } else {
-                    rcode2 = x86_reg_code(rtok2)
+                    if target_arch == 1 {
+                        rcode2 = a64_reg_code_strict(rtok2)
+                    } else {
+                        rcode2 = x86_reg_code(rtok2)
+                    }
                 }
                 if rcode2 != 0xFFFF {
                     uint64 out_v = ir_new_vreg()

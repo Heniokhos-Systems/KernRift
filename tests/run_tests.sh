@@ -7636,8 +7636,19 @@ else
 fi
 # port I/O on arm64 must be refused, loudly
 va_err=$($KRC --arch=arm64 "$DIR/../vattr2_tmp_$$.kr" -o /tmp/vattr3_$$ 2>&1)
-if [ -f /tmp/vattr3_$$ ] || ! printf '%s' "$va_err" | grep -q "unrecognized asm instruction"; then
-    va_ok=0; va_note="port I/O silently accepted on arm64"
+# EITHER DIAGNOSTIC SATISFIES THIS ROW, and the reason both exist is worth
+# stating. What is being asserted is that x86 port I/O is REFUSED on arm64, not
+# which sentence says so. Before arm64 constraint registers existed, the
+# `out(rdx -> v)` binding resolved through the x86 table and the refusal came
+# later, from the assembler, as "unrecognized asm instruction 'outb'". Now the
+# constraint itself is rejected first -- earlier, and naming the actual problem.
+# Pinning the old wording would have made a better diagnostic look like a
+# regression; the file's ABSENCE is the part that matters and is checked
+# separately.
+if [ -f /tmp/vattr3_$$ ]; then
+    va_ok=0; va_note="port I/O silently accepted on arm64 (an output file was produced)"
+elif ! printf '%s' "$va_err" | grep -qE "unrecognized asm instruction|unknown arm64 inline-asm constraint register"; then
+    va_ok=0; va_note="refused, but with an unrecognised message: $(printf '%s' "$va_err" | head -1)"
 fi
 if [ "$va_ok" = "1" ]; then
     PASS=$((PASS + 1)); echo "  vga_attr_packs_bg_high_fg_low: PASS (both arches; port I/O still refused on arm64${va_note:+; $va_note})"
@@ -24384,6 +24395,51 @@ else
     FAIL=$((FAIL + 1)); echo "FAIL: asm_strict_catches_foreign_asm_both_ways ($strict_note)"
 fi
 rm -rf "$A64A_D"
+
+# --- arm64 inline-asm I/O constraints ----------------------------------------
+#
+# ANCHOR A64CON. arch 1 resolved constraint register names through x86_reg_code,
+# which ir.kr calls "a pre-existing bug, audit §11". The consequence was that
+# inline asm on arm64 could not take an argument or return a value at all, so
+# every sysreg reader in a bare-metal arm64 tree had to pass a scratch ADDRESS
+# in and store through it.
+A64C_D="/tmp/krc_a64con_$$"
+mkdir -p "$A64C_D"
+
+TOTAL=$((TOTAL + 1))
+printf 'fn f(uint64 a, uint64 b) -> uint64 {\n    uint64 r = 0\n    asm { "add x9, x0, x1" } in(a -> x0, b -> x1) out(x9 -> r)\n    return r\n}\nfn main() -> uint64 { return f(40, 2) }\n' > "$A64C_D/c.kr"
+if $KRC --arch=arm64 --emit=arx "$A64C_D/c.kr" -o "$A64C_D/c.arx" >/dev/null 2>&1 \
+   && od -An -tx1 -v "$A64C_D/c.arx" | tr -d ' \n' | grep -q "0900018b"; then
+    PASS=$((PASS + 1)); echo "  a64_asm_constraints_bind_registers: PASS (add x9, x0, x1 emitted)"
+else
+    FAIL=$((FAIL + 1)); echo "FAIL: a64_asm_constraints_bind_registers (arm64 in()/out() did not compile)"
+fi
+
+# An x86 register name in an arm64 build must FAIL LOUD. The old lookup accepted
+# `rdx` on arm64 and bound register 2, so the mistake surfaced later or not at
+# all -- the silent-skip family this fail-loud discipline is named after.
+TOTAL=$((TOTAL + 1))
+printf 'fn f(uint64 a) -> uint64 {\n    uint64 r = 0\n    asm { "nop" } in(a -> rax) out(rdx -> r)\n    return r\n}\nfn main() -> uint64 { return f(1) }\n' > "$A64C_D/bad.kr"
+bad_err=$($KRC --arch=arm64 --emit=arx "$A64C_D/bad.kr" -o "$A64C_D/bad.arx" 2>&1)
+if [ -f "$A64C_D/bad.arx" ]; then
+    FAIL=$((FAIL + 1)); echo "FAIL: a64_asm_constraints_reject_x86_names (accepted, and bound some register)"
+elif printf '%s' "$bad_err" | grep -q "unknown arm64 inline-asm constraint register"; then
+    PASS=$((PASS + 1)); echo "  a64_asm_constraints_reject_x86_names: PASS"
+else
+    FAIL=$((FAIL + 1)); echo "FAIL: a64_asm_constraints_reject_x86_names (got: $(printf '%s' "$bad_err" | head -1))"
+fi
+
+# ...and the x86_64 path is untouched. One direction passing proves only that
+# something changed; this is the row that says nothing that compiled before
+# stopped compiling.
+TOTAL=$((TOTAL + 1))
+printf 'fn f(uint64 a) -> uint64 {\n    uint64 r = 0\n    asm { "nop" } in(a -> rax) out(rax -> r)\n    return r\n}\nfn main() -> uint64 { return f(7) }\n' > "$A64C_D/x86.kr"
+if $KRC --arch=x86_64 --emit=arx "$A64C_D/x86.kr" -o "$A64C_D/x86.arx" >/dev/null 2>&1; then
+    PASS=$((PASS + 1)); echo "  x86_asm_constraints_still_work: PASS"
+else
+    FAIL=$((FAIL + 1)); echo "FAIL: x86_asm_constraints_still_work (the x86 path regressed)"
+fi
+rm -rf "$A64C_D"
 
 # --- Documentation pin 5, PART B (see Part A above) --------------------------
 # README.md advertises this suite's test count. Compare it against the total

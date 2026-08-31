@@ -76,7 +76,7 @@ single-def checks; see §10.
 The `next` field is why the arena is *not* walked as a contiguous index
 range. LICM appends hoisted instructions at high indices and splices them
 into a preheader's list; liveness and colouring walk the linked list, which
-is what makes that correct (`src/ir.kr:13961`–`13024`).
+is what makes that correct (`src/ir.kr:13969`–`13024`).
 
 Three parallel, index-keyed side tables share `ir_insn_cap` and leave the
 32-byte record untouched:
@@ -458,7 +458,7 @@ is false; it is still present in MLRift's copy of this document.)*
   interference. Get this wrong and you get a use-after-free of a register.
   See the constant's comment, `src/ir.kr:203`–`205`.
 - **147/148 are arm64-only.** Produced solely by `ir_opt_fuse_lea_mem`, which
-  is called under `if target_arch == 1` (`src/ir.kr:13961`). Handlers exist
+  is called under `if target_arch == 1` (`src/ir.kr:13969`). Handlers exist
   only at `src/ir_aarch64.kr:1438` and `1412`.
 
 ### 5.5 Control flow (40–43, 50–52, 61, 85–87)
@@ -841,7 +841,7 @@ alias analysis and a load cannot be assumed to return the same value twice.
   diagnostic that lands on line 6. Print the *whole* output before concluding
   the compiler did not diagnose something.)
 - **AST-level DCE seeds only `main` and `@export`** (`dce_scan`,
-  `src/codegen.kr:13860`). `_start` is not a seed, so freestanding riscv32 and
+  `src/codegen.kr:13896`). `_start` is not a seed, so freestanding riscv32 and
   xtensa entry points had to be added explicitly (`src/main.kr:2628`–`2374`).
 - **A provider reached only through override resolution gets pruned.** Under
   `--target=none`, `println` reroutes to the `@builtin_override fn write`
@@ -857,7 +857,7 @@ alias analysis and a load cannot be assumed to return the same value twice.
 
 ## 10. Optimizer
 
-The driver is `ir_optimize()` (`src/ir.kr:13907`). **There is no
+The driver is `ir_optimize()` (`src/ir.kr:13915`). **There is no
 `ir_opt_run()`** — that name appears only in older revisions of this
 document. It runs once per function, after lowering and before liveness.
 

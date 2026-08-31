@@ -3947,6 +3947,42 @@ fn vardecl_resolved_kind(uint64 node) -> uint64 {
 // non-x86 constraint register names exist in live source, and xtensa's
 // documented `in(v -> r15)` fallthrough (src/ir_xtensa.kr:2929) resolves to
 // 15 exactly as before.
+// Resolve an AArch64 constraint register name, FAILING LOUD on an unknown one.
+//
+// WHY A WRAPPER AND NOT A PARSER. src/codegen_aarch64.kr already has
+// a64_reg_code, which parses x0..x30 for the LEGACY arm64 backend. The IR path
+// never used it: ir.kr routed arch 1 to x86_reg_code, which ir.kr's own comment
+// calls "a pre-existing bug, audit §11 -- deliberately left unchanged so the
+// bootstrap stays identical". The consequence was that inline asm on arm64
+// could not take an argument or return a value at all -- `out(x0 -> v)` was
+// rejected with a list of x86 register names -- so every sysreg reader in
+// ApexRift's arch/arm64/ passes a scratch ADDRESS in and stores through it.
+//
+// The backend needed nothing: src/ir_aarch64.kr already honours the
+// `imm >= 100` physical-register marker in both directions and uses the code as
+// an arm64 register number. Only the name lookup was missing, and it already
+// existed one file over.
+//
+// The 0xFFFF it returns is the silent-skip sentinel this family of bugs is
+// named after -- every caller used to skip the binding and leave the variable
+// at its stale value. So it is converted to a hard error here rather than
+// passed on.
+//
+// THE BOOTSTRAP IS UNAFFECTED: it is arch 0, which still routes to
+// x86_reg_code, and no non-x86 constraint register names existed in live source
+// before this.
+fn a64_reg_code_strict(uint64 name_tok) -> uint64 {
+    uint64 r = a64_reg_code(name_tok)
+    if r != 0xFFFF { return r }
+    uint64 atlen = tok_text_len(name_tok)
+    uint64 atstart = tok_text_start(name_tok)
+    write(2, "error: unknown arm64 inline-asm constraint register '", 53)
+    write(2, cg_source + atstart, atlen)
+    write(2, "' (want x0-x30)\n", 16)
+    exit(1)
+    return 0xFFFF
+}
+
 fn x86_reg_code(uint64 name_tok) -> uint64 {
     if tok_matches(name_tok, "rax", 3) != 0 { return 0 }
     if tok_matches(name_tok, "rcx", 3) != 0 { return 1 }
