@@ -841,7 +841,7 @@ alias analysis and a load cannot be assumed to return the same value twice.
   diagnostic that lands on line 6. Print the *whole* output before concluding
   the compiler did not diagnose something.)
 - **AST-level DCE seeds only `main` and `@export`** (`dce_scan`,
-  `src/codegen.kr:13896`). `_start` is not a seed, so freestanding riscv32 and
+  `src/codegen.kr:13897`). `_start` is not a seed, so freestanding riscv32 and
   xtensa entry points had to be added explicitly (`src/main.kr:2628`–`2374`).
 - **A provider reached only through override resolution gets pruned.** Under
   `--target=none`, `println` reroutes to the `@builtin_override fn write`

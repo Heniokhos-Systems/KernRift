@@ -11421,6 +11421,7 @@ fn asm_a64_sysreg(uint64 sptr, uint64 off, uint64 slen) -> uint64 {
     if asm_a64_name_at(sptr, off, slen, "spsr_el2", 8) != 0 { return 0xC4000 }
     if asm_a64_name_at(sptr, off, slen, "far_el2", 7) != 0 { return 0xC6000 }
     if asm_a64_name_at(sptr, off, slen, "cnthctl_el2", 11) != 0 { return 0xCE100 }
+    if asm_a64_name_at(sptr, off, slen, "cntvoff_el2", 11) != 0 { return 0xCE060 }
     return 0xFFFFFFFF
 }
 
