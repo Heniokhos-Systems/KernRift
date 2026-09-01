@@ -11405,6 +11405,22 @@ fn asm_a64_sysreg(uint64 sptr, uint64 off, uint64 slen) -> uint64 {
     if asm_a64_name_at(sptr, off, slen, "cntvct_el0", 10) != 0 { return 0xBE040 }
     if asm_a64_name_at(sptr, off, slen, "cntp_ctl_el0", 12) != 0 { return 0xBE220 }
     if asm_a64_name_at(sptr, off, slen, "cntp_tval_el0", 13) != 0 { return 0xBE200 }
+    if asm_a64_name_at(sptr, off, slen, "cntv_ctl_el0", 12) != 0 { return 0xBE320 }
+    if asm_a64_name_at(sptr, off, slen, "cntv_tval_el0", 13) != 0 { return 0xBE300 }
+    // GICv3's CPU interface is SYSTEM REGISTERS, not MMIO, which is the whole
+    // difference from GICv2 -- an interrupt controller a kernel cannot name is an
+    // interrupt controller it cannot use, so a machine with a GICv3 has no timer
+    // interrupt and therefore no preemption without these. Every value here was
+    // round-tripped through llvm-mc rather than derived, and the format is
+    // confirmed by cntp_ctl_el0 two lines up computing to the same 0xBE220 it
+    // already had: (o0 << 19) | (op1 << 16) | (CRn << 12) | (CRm << 8) | (op2 << 5).
+    if asm_a64_name_at(sptr, off, slen, "icc_sre_el1", 11) != 0 { return 0x8CCA0 }
+    if asm_a64_name_at(sptr, off, slen, "icc_pmr_el1", 11) != 0 { return 0x84600 }
+    if asm_a64_name_at(sptr, off, slen, "icc_igrpen1_el1", 15) != 0 { return 0x8CCE0 }
+    if asm_a64_name_at(sptr, off, slen, "icc_ctlr_el1", 12) != 0 { return 0x8CC80 }
+    if asm_a64_name_at(sptr, off, slen, "icc_bpr1_el1", 12) != 0 { return 0x8CC60 }
+    if asm_a64_name_at(sptr, off, slen, "icc_iar1_el1", 12) != 0 { return 0x8CC00 }
+    if asm_a64_name_at(sptr, off, slen, "icc_eoir1_el1", 13) != 0 { return 0x8CC20 }
     if asm_a64_name_at(sptr, off, slen, "clidr_el1", 9) != 0 { return 0x90020 }
     if asm_a64_name_at(sptr, off, slen, "ccsidr_el1", 10) != 0 { return 0x90000 }
     if asm_a64_name_at(sptr, off, slen, "csselr_el1", 10) != 0 { return 0xA0000 }
