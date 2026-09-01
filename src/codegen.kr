@@ -11445,6 +11445,33 @@ fn asm_a64_sysreg(uint64 sptr, uint64 off, uint64 slen) -> uint64 {
     if asm_a64_name_at(sptr, off, slen, "ccsidr_el1", 10) != 0 { return 0x90000 }
     if asm_a64_name_at(sptr, off, slen, "csselr_el1", 10) != 0 { return 0xA0000 }
     if asm_a64_name_at(sptr, off, slen, "id_aa64mmfr0_el1", 16) != 0 { return 0x80700 }
+    // ARMv8.5 RNDR/RNDRRS, and the feature word that says whether they exist.
+    //
+    // A KERNEL WITHOUT THESE HAS NO HARDWARE ENTROPY ON arm64 AT ALL. x86_64 has
+    // rdrand and rdseed as ordinary instructions; AArch64 puts its generator
+    // behind two system registers, so a compiler whose table does not name them
+    // leaves a freestanding kernel with timing jitter and nothing else -- which
+    // is exactly the position ApexRift's core/rng.kr was in when this was added.
+    //
+    // ID_AA64ISAR0_EL1[63:60] IS THE GATE and reading it is not optional: RNDR
+    // is unimplemented on everything before ARMv8.5 (the Cortex-A55 this was
+    // developed against included), and MRS of an unimplemented system register
+    // traps rather than returning zero.
+    //
+    // RNDR SIGNALS FAILURE IN THE FLAGS, not in the value -- PSTATE.NZCV reads
+    // 0b0100 when it could not return a genuine random number, and the
+    // destination register is zeroed. So nzcv joins the table with them: a
+    // caller that cannot read the flags cannot tell entropy from a zero, which
+    // is the same trap the carry flag sets for rdseed on the other architecture.
+    //
+    // Same packing as everything else here, and checked against the two
+    // neighbours that already encode it: daif is S3_3_C4_C2_1 -> 0xB4220, so
+    // nzcv at S3_3_C4_C2_0 is 0xB4200; id_aa64mmfr0_el1 is CRm 7 -> 0x80700, so
+    // id_aa64isar0_el1 at CRm 6 is 0x80600.
+    if asm_a64_name_at(sptr, off, slen, "id_aa64isar0_el1", 16) != 0 { return 0x80600 }
+    if asm_a64_name_at(sptr, off, slen, "rndrrs", 6) != 0 { return 0xB2420 }
+    if asm_a64_name_at(sptr, off, slen, "rndr", 4) != 0 { return 0xB2400 }
+    if asm_a64_name_at(sptr, off, slen, "nzcv", 4) != 0 { return 0xB4200 }
     if asm_a64_name_at(sptr, off, slen, "sctlr_el2", 9) != 0 { return 0xC1000 }
     if asm_a64_name_at(sptr, off, slen, "cptr_el2", 8) != 0 { return 0xC1140 }
     if asm_a64_name_at(sptr, off, slen, "hcr_el2", 7) != 0 { return 0xC1100 }
