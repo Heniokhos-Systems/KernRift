@@ -1925,6 +1925,26 @@ fn struct_register(uint64 name_tok) -> uint64 {
     uint64 fc_addr = base + 4
     uint32 zero = 0
     unsafe { *(fc_addr as uint32) = zero }
+    // TOTAL SIZE, AND IT WAS THE ONE FIELD NOBODY INITIALISED. struct_add_field
+    // reads this back as the running offset and refuses the struct if
+    // total + field_size exceeds 65535, so an entry that starts as whatever the
+    // allocator last held rejects a legal declaration.
+    //
+    // IT LOOKED CORRECT FOR AS LONG AS EVERY HOST HANDED BACK ZEROED MEMORY.
+    // alloc() has no such contract -- it is malloc-shaped and grow_buf does not
+    // zero its new tail either -- but on Linux it lowers to a lazy mmap, whose
+    // pages the kernel guarantees zero, and a QEMU machine starts with zeroed
+    // RAM. Both hid this completely.
+    //
+    // A REAL HANDSET DOES NOT. ApexRift on a Redmi Note 8 Pro runs krc out of an
+    // arena in DRAM the bootloader has already used, so this read returned
+    // nonzero and `struct Telemetry` -- thirteen uint64 fields, 104 bytes --
+    // died with "struct size overflow (max 65535)". Deterministically, at the
+    // same arena peak every boot, while the same container compiled the same
+    // source clean under QEMU and under qemu-user.
+    uint64 ts_addr = base + 8
+    uint16 tzero = 0
+    unsafe { *(ts_addr as uint16) = tzero }
     uint64 idx = struct_count
     struct_count = struct_count + 1
     return idx
