@@ -422,6 +422,43 @@ fn asm_ret_note(uint64 str_tok) {
     }
 }
 
+// @naked MUST SIT ON THE LINE ABOVE ITS FUNCTION, WITH NOTHING IN BETWEEN.
+//
+// This is the placement rule, and it is the only check here that catches the
+// mistake AT THE MOMENT IT IS MADE rather than through a consequence.
+//
+// Attributes bind to the next function the parser sees. There is nothing
+// anomalous in the token stream when one has drifted -- `@naked` sits above a
+// function, that function takes it, and the function it was WRITTEN for is now
+// an ordinary one. Both compile. What is anomalous is the gap: writing a
+// declaration between an attribute and its function pushes them apart, and so
+// does inserting a comment block, which is how it happened in ApexRift's
+// arxsvc twins. Every one of the 21 @naked uses across that tree and this one
+// sits exactly one line above its `fn`; the two that did not were the bug.
+//
+// ONLY @naked, and that asymmetry is the point. @export is separated from its
+// function by a doc comment in 12 of 440 uses here, and rightly -- losing it
+// makes a symbol private, which fails at link time, loudly. Losing @naked puts
+// a compiler prologue under a hand-written frame and corrupts the stack of a
+// caller that has already returned. The attribute whose loss is silent is the
+// one worth pinning tightly to what it describes.
+//
+// The remedy is free: put the comment ABOVE the attribute.
+fn naked_detached_die(uint64 naked_tok, uint64 fn_tok) {
+    if parse_err_should_report() != 0 {
+        p_err_reported = p_err_reported + 1
+        diag_loc_head(fn_tok, 0)
+        uint64 m = "@naked is not on the line directly above this function: an attribute binds to the NEXT function the parser sees, so anything written between them takes the attribute and the function below loses it -- silently, with both still compiling"
+        write(2, m, str_len(m))
+        write(2, "\n", 1)
+        diag_span_of(naked_tok)
+        m = "  move any comment ABOVE the @naked, and check that no declaration was inserted between them"
+        write(2, m, str_len(m))
+        write(2, "\n", 1)
+    }
+    p_err_count = p_err_count + 1
+}
+
 fn asm_ret_needs_naked_die(uint64 tok) {
     if parse_err_should_report() != 0 {
         p_err_reported = p_err_reported + 1
@@ -2538,6 +2575,7 @@ fn parse_module() -> uint64 {
         uint64 ann_acq_n = 0
         uint64 ann_noreturn = 0
         uint64 ann_naked = 0
+        uint64 ann_naked_tok = 0
         uint64 ann_packed = 0
         uint64 ann_export = 0
         uint64 ann_builtin_override = 0
@@ -2561,7 +2599,7 @@ fn parse_module() -> uint64 {
                 if tok_matches(ann_tok, "noreturn", 8) != 0 { ann_noreturn = 1 }
             }
             if ann_len_v == 5 {
-                if tok_matches(ann_tok, "naked", 5) != 0 { ann_naked = 1 }
+                if tok_matches(ann_tok, "naked", 5) != 0 { ann_naked = 1  ann_naked_tok = ann_tok }
             }
             uint64 is_ctx = 0
             uint64 is_eff = 0
@@ -2742,6 +2780,14 @@ fn parse_module() -> uint64 {
         if kind == 60 {
             p_asm_ret_seen = 0
             p_asm_ret_tok = 0
+            // Captured BEFORE the body is parsed: p_tok_pos is the `fn` keyword
+            // itself here, and afterwards it is wherever the body ended.
+            uint64 fn_kw_tok = p_tok_pos
+            if ann_naked != 0 {
+                uint64 nl = srcmap_line(tok_text_start(ann_naked_tok))
+                uint64 fl = srcmap_line(tok_text_start(fn_kw_tok))
+                if fl > nl + 1 { naked_detached_die(ann_naked_tok, fn_kw_tok) }
+            }
             uint64 fn_node = parse_fn_decl()
             // data4 bit layout:
             //   bit 0 = noreturn

@@ -24066,6 +24066,37 @@ fn main() -> u64 { return X + 1 }' 0
 # defect: ApexRift's begonia board matched a device-tree needle it had declared
 # this way, so the needle was null and the match it existed to make could not
 # happen. Refused now, with the working form named.
+# @naked MUST SIT ON THE LINE DIRECTLY ABOVE ITS FUNCTION. The only check of the
+# three here that catches the mistake AT THE MOMENT IT IS MADE rather than
+# through a consequence: nothing in the token stream is anomalous when an
+# attribute has drifted -- it sits above a function, that function takes it, and
+# the one it was written for is now ordinary. What IS anomalous is the gap.
+#
+# Verified against the real defect: reconstructing the 2026-09-01 edit in
+# ApexRift's arch/arm64/arxsvc_a64.kr -- moving a function back between @naked
+# and svc_trampoline -- is refused here, and by the assembly-return rule below at
+# svc_trampoline's own `ret`. Both fire; the tree compiles clean once restored.
+#
+# ONLY @naked. @export is separated from its function by a doc comment in 12 of
+# its 440 uses across that tree and this one, and rightly: losing @export makes a
+# symbol private and fails at link time, loudly. Losing @naked corrupts the stack
+# of a caller that has already returned. Every one of the 21 @naked uses across
+# both trees sits exactly one line above its `fn`.
+run_test_rejects "naked_detached_by_comment_refused" '@naked
+// a comment written between the attribute and the function
+fn slid_onto_me() -> uint64 { return 1 }
+fn main() -> u64 { return 0 }' "@naked is not on the line directly above this function"
+run_test_rejects "naked_detached_by_blank_line_refused" '@naked
+
+fn slid_onto_me() -> uint64 { return 1 }
+fn main() -> u64 { return 0 }' "@naked is not on the line directly above this function"
+# The remedy, and it is free: the comment goes ABOVE the attribute.
+run_test "naked_comment_above_attribute_accepted" '// what this stub is for
+@naked
+fn leaves() -> uint64 { asm { "ret" }
+    return 0 }
+fn main() -> u64 { return 0 }' 0
+
 # AN ASSEMBLY RETURN IN A FUNCTION THAT IS NOT @naked. The instruction leaves
 # without unwinding the prologue the compiler emitted, so the caller resumes on a
 # stack off by one frame -- which does not fault where it happened and often does
