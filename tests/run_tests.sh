@@ -24066,6 +24066,53 @@ fn main() -> u64 { return X + 1 }' 0
 # defect: ApexRift's begonia board matched a device-tree needle it had declared
 # this way, so the needle was null and the match it existed to make could not
 # happen. Refused now, with the working form named.
+# AN ASSEMBLY RETURN IN A FUNCTION THAT IS NOT @naked. The instruction leaves
+# without unwinding the prologue the compiler emitted, so the caller resumes on a
+# stack off by one frame -- which does not fault where it happened and often does
+# not fault at all until something far away reads the wrong slot.
+#
+# Worth a diagnostic because of how it arrives: attributes bind to the NEXT
+# function the parser sees, so inserting a declaration between `@naked` and the
+# function it was written above moves the attribute onto the newcomer and takes
+# it off the original, and BOTH still compile. ApexRift's arm64 svc_trampoline
+# lost its @naked exactly that way, kept its hand-written frame and its `ret`,
+# and the handset took a PC alignment fault on the first program it launched. The
+# identical edit had silently broken the x86_64 twin as well.
+run_test_rejects "asm_ret_without_naked_refused" 'fn leaves() -> uint64 { asm { "ret" }
+    return 0 }
+fn main() -> u64 { return 0 }' "assembly return in a function that is not @naked"
+# NESTED IN A CONDITIONAL AND STILL CAUGHT. The check counts at parse time rather
+# than walking the finished tree, for the reason asm_seen_record gives in
+# codegen.kr: If keeps its branches in data1/data2, While its body in data1, and
+# those fields hold token indices for other kinds -- a generic walker checks a
+# fraction of the program and reports success over the rest. An earlier version
+# of this check was such a walker and passed this exact case.
+run_test_rejects "asm_ret_inside_if_without_naked_refused" 'fn leaves(uint64 c) -> uint64 {
+    if c != 0 { asm { "ret" } }
+    return 0 }
+fn main() -> u64 { return 0 }' "assembly return in a function that is not @naked"
+run_test "asm_ret_with_naked_accepted" '@naked
+fn leaves() -> uint64 { asm { "ret" }
+    return 0 }
+fn main() -> u64 { return 0 }' 0
+# THE FLAG MUST RESET PER FUNCTION. Without the reset, the `ret` in the naked
+# function above would still be recorded when `plain` closes and this would be
+# rejected for an instruction in a different function.
+run_test "asm_ret_flag_resets_between_functions" '@naked
+fn leaves() -> uint64 { asm { "ret" }
+    return 0 }
+fn plain() -> uint64 { return 3 }
+fn main() -> u64 { return 0 }' 0
+# AND A @naked BODY WITH NO ASSEMBLY AT ALL STAYS LEGAL. That was the first rule
+# tried here and it was wrong: it is a supported thing, and the four naked-stub
+# fixtures above depend on it to check that naked-body temporaries stay out of
+# callee-saved registers. The defect is not the absence of assembly, it is a
+# return that skips a prologue that exists.
+run_test "naked_body_without_asm_still_accepted" 'static u64 c = 0
+@naked
+fn stub() { c = c + 1 }
+fn main() -> u64 { u64 k = fn_addr("stub")  c = c + k  return 0 }' 0
+
 run_test_rejects "static_string_init_refused" 'static uint64 S = "text"
 fn main() -> u64 { return 0 }' "cannot initialise a static or const"
 run_test_rejects "const_string_init_refused" 'const uint64 S = "text"
