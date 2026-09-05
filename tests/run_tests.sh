@@ -22062,6 +22062,16 @@ emit_recipe() {
         # takes neither --load-addr= nor --stack-top= (both refused outside
         # --emit=image) and needs an explicit --arch. Its magic is its own.
         arx)   echo "7f415258|--target=none --arch=x86_64|$EV_BM" ;;
+        # A MODULE IS THE SAME CONTAINER AND THE SAME MAGIC. What separates it
+        # from `arx` is header flag bit 2 and a MODINFO table, neither of which
+        # a magic check can see -- so this row proves only that the alias is
+        # accepted and produces an ARX. arxmod_sets_module_flag_and_modinfo
+        # below is what checks the two things that actually differ.
+        #
+        # --mod-name and --mod-abi are REQUIRED by the compiler and are here for
+        # that reason, not as decoration: without them this row fails with
+        # "requires --mod-name=NAME" rather than emitting anything.
+        arxmod) echo "7f415258|--target=none --arch=x86_64 --mod-name=recipe --mod-abi=1|$EV_BM" ;;
         # fatimage's first four bytes are 4d 5a 00 91 -- the one 32-bit word
         # that is both "MZ" to a PE loader and `add x13, x18, #0x16` to an
         # AArch64 core. Pinned as the MAGIC rather than as RAW precisely
@@ -24291,6 +24301,92 @@ if [ -s "$APXA_D/p.arx" ] && od -An -tx1 -v "$APXA_D/p.arx" | tr -d ' \n' | grep
 else
     FAIL=$((FAIL + 1)); echo "FAIL: arx_write_lowers_to_int80 (no CD 80 in the container)"
 fi
+# --emit=arxmod: THE TWO THINGS THAT ACTUALLY DIFFER FROM --emit=arx.
+#
+# The emit_recipe row above proves only that the alias is accepted and produces
+# an ARX -- a module and a program share magic, payload, segment split, align
+# and checksum, so a magic check cannot tell them apart. What separates them is
+# header flag bit 2 and a MODINFO table the loader reads BEFORE entering
+# anything, and those are checked here by reading the bytes.
+#
+# EACH FIELD IS READ AT ITS OWN OFFSET rather than grepped for, because every
+# value here is small and would match by accident somewhere in a 8 KiB
+# container: abi 1 as a byte occurs hundreds of times.
+APXM_D=$(mktemp -d)
+printf 'static u64 d = 32\nfn main(u64 svc) -> u64 { return d }\n' > "$APXM_D/m.kr"
+./build/krc2 --arch=x86_64 --target=none --emit=arxmod --mod-name=gatemod --mod-abi=3 \
+    --mod-version=9 "$APXM_D/m.kr" -o "$APXM_D/m.arxm" >/dev/null 2>&1
+apxm_field() { od -An -tu"$2" -j"$1" -N"$2" -v "$APXM_D/m.arxm" | tr -d ' \n'; }
+TOTAL=$((TOTAL + 1))
+apxm_fl=$(apxm_field 10 2)
+# 7 = PIC(1) | WANTS_SERVICES(2) | MODULE(4). The services bit is set because
+# main takes an argument, which is exactly how a module receives its table.
+if [ "$apxm_fl" = "7" ]; then
+    PASS=$((PASS + 1)); echo "  arxmod_sets_module_flag: PASS (flags 7 = PIC|SERVICES|MODULE)"
+else
+    FAIL=$((FAIL + 1)); echo "FAIL: arxmod_sets_module_flag (flags=$apxm_fl, want 7)"
+fi
+TOTAL=$((TOTAL + 1))
+# Directory entry 1 at offset 88: kind 6 (MODINFO), flags 1 (MANDATORY). The
+# MANDATORY bit is the load-bearing half -- a loader that does not know kind 6
+# must REFUSE rather than load a privileged image without checking its ABI.
+apxm_tc=$(apxm_field 12 4)
+apxm_k=$(apxm_field 88 4)
+apxm_kf=$(apxm_field 92 4)
+if [ "$apxm_tc" = "2" ] && [ "$apxm_k" = "6" ] && [ "$apxm_kf" = "1" ]; then
+    PASS=$((PASS + 1)); echo "  arxmod_modinfo_is_mandatory: PASS (2 tables, kind 6, MANDATORY)"
+else
+    FAIL=$((FAIL + 1)); echo "FAIL: arxmod_modinfo_is_mandatory (tables=$apxm_tc kind=$apxm_k flags=$apxm_kf, want 2/6/1)"
+fi
+TOTAL=$((TOTAL + 1))
+# MODINFO contents at 192: abi, version, reserved, then the NUL-terminated
+# name. THE NAME OFFSET IS THE ONE THAT SILENTLY ROTTED ONCE -- the emitter's
+# pad cursor still assumed the one-table layout, so every field landed 24 bytes
+# past where its own directory entry said. Every value is read at its offset.
+apxm_abi=$(apxm_field 192 8)
+apxm_ver=$(apxm_field 200 8)
+apxm_rsv=$(apxm_field 208 8)
+apxm_name=$(dd if="$APXM_D/m.arxm" bs=1 skip=216 count=7 2>/dev/null | tr -d '\0')
+if [ "$apxm_abi" = "3" ] && [ "$apxm_ver" = "9" ] && [ "$apxm_rsv" = "0" ] && [ "$apxm_name" = "gatemod" ]; then
+    PASS=$((PASS + 1)); echo "  arxmod_modinfo_fields: PASS (abi 3, version 9, name gatemod)"
+else
+    FAIL=$((FAIL + 1)); echo "FAIL: arxmod_modinfo_fields (abi=$apxm_abi ver=$apxm_ver rsv=$apxm_rsv name=$apxm_name)"
+fi
+TOTAL=$((TOTAL + 1))
+# THE HEADER REGION IS STILL EXACTLY 4096 BYTES, and this row exists because
+# the other three do not notice when it is not. The MODINFO fields are emitted
+# in order, so a bug in the PAD CURSOR leaves every field at the right offset
+# and simply writes too many zeros afterwards -- the payload then starts 24
+# bytes late while seg0 still declares file_off 4096, and the loader copies an
+# image shifted out from under its own entry point. Measured: reinstating the
+# old literal cursor produces exactly that container, and rows one to three all
+# still pass on it.
+#
+# 4096 is not a preference. Every arm64 ADRP page computation is baked assuming
+# (file_off - mem_off) % 4096 == 0, and this region's size is that difference.
+apxm_len=$(wc -c < "$APXM_D/m.arxm")
+apxm_img=$(apxm_field 32 8)
+apxm_sfo=$(od -An -tu8 -j112 -N8 -v "$APXM_D/m.arxm" | tr -d ' \n')
+if [ "$apxm_sfo" = "4096" ] && [ "$apxm_len" = "$((4096 + apxm_img))" ]; then
+    PASS=$((PASS + 1)); echo "  arxmod_header_region_is_4096: PASS (file = 4096 + image_size)"
+else
+    FAIL=$((FAIL + 1)); echo "FAIL: arxmod_header_region_is_4096 (seg0 file_off=$apxm_sfo, file=$apxm_len, image_size=$apxm_img, want 4096 and $((4096 + apxm_img)))"
+fi
+TOTAL=$((TOTAL + 1))
+# AND --emit=arx IS UNCHANGED BY ALL OF IT. The module path moves the segment
+# table from 88 to 112 to make room for a second directory entry; a plain
+# container must still declare one table with its segments at 88, or every
+# existing ApexRift program stops loading.
+./build/krc2 --arch=x86_64 --target=none --emit=arx "$APXA_D/p.kr" -o "$APXM_D/plain.arx" >/dev/null 2>&1
+apxm_pfl=$(od -An -tu2 -j10 -N2 -v "$APXM_D/plain.arx" | tr -d ' \n')
+apxm_ptc=$(od -An -tu4 -j12 -N4 -v "$APXM_D/plain.arx" | tr -d ' \n')
+apxm_pso=$(od -An -tu8 -j72 -N8 -v "$APXM_D/plain.arx" | tr -d ' \n')
+if [ "$apxm_ptc" = "1" ] && [ "$apxm_pso" = "88" ] && [ "$apxm_pfl" != "" ] && [ $((apxm_pfl & 4)) -eq 0 ]; then
+    PASS=$((PASS + 1)); echo "  arx_is_not_a_module: PASS (1 table at 88, MODULE bit clear)"
+else
+    FAIL=$((FAIL + 1)); echo "FAIL: arx_is_not_a_module (flags=$apxm_pfl tables=$apxm_ptc segoff=$apxm_pso, want MODULE clear / 1 / 88)"
+fi
+rm -rf "$APXM_D"
 # arm64 KEEPS REFUSING, and that is correct rather than unfinished: ApexRift's
 # gate is a DPL-3 IDT entry and it has no arm64 SVC handler at all, so there is
 # nothing on that arch to trap into. A row here so the x86 provider cannot be

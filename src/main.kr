@@ -2608,6 +2608,23 @@ fn emit_asm_listing(uint64 output_path, uint64 arch, uint64 text_start, uint64 s
 // property of the program, not of either arm.
 static uint64 arx_entry_takes_services = 0
 
+// --- --emit=arxmod -----------------------------------------------------------
+//
+// A module needs three things the compiler cannot work out for itself: what it
+// is called, which kernel ABI it was built against, and its own version. All
+// three are read by the LOADER before it enters anything, which is the point --
+// a module discovers a mismatched ABI while it is already loaded and already
+// privileged, and that is too late to refuse.
+//
+// `mod_abi` has no default. A module built with no stated ABI would load
+// against any kernel and be right by luck, which is precisely the failure the
+// field exists to prevent, so the absence is an error rather than a zero.
+static uint64 emit_arxmod   = 0
+static uint64 mod_name      = 0
+static uint64 mod_abi       = 0
+static uint64 mod_abi_set   = 0
+static uint64 mod_version   = 0
+
 // Parameters of a function declaration node. Delegates to the inliner's walk,
 // which counts a function node's direct children -- verified against both
 // shapes that matter here: a `_start(services)` entry reports 1 and a bare
@@ -3694,6 +3711,7 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
         // choice the user never made -- or worse, accepted by the wrong loader.
         uint64 ax_arch_id = 1
         if arch == 1 { ax_arch_id = 2 }
+        if emit_arxmod != 0 { arx_set_module(mod_name, mod_abi, mod_version) }
         header_size = emit_arx_headers(ax_arch_id, 0, 0)
     }
 
@@ -8880,6 +8898,21 @@ fn main() {
                     // refused outside --emit=image with a message that says
                     // hosted containers manage the stack through their loader.
                     emit_mode = 10
+                } else if str_eq_full(emit_str, "arxmod") != 0 {
+                    // ARX MODULE: the same container as `arx`, plus header flag
+                    // bit 2 and a MODINFO table. NOT a separate emit_mode --
+                    // every byte of the payload and every other header field is
+                    // identical, and a second mode would be a second thing to
+                    // keep in step with the first for no difference in output.
+                    //
+                    // The distinction is a FLAG ON THE CONTAINER rather than an
+                    // inference from the source, unlike WANTS_SERVICES. That
+                    // one is derivable -- the entry either takes an argument or
+                    // it does not -- and module-ness is not derivable from
+                    // anything the compiler can see: a module's init and a
+                    // services program's main have the same signature.
+                    emit_mode = 10
+                    emit_arxmod = 1
                 } else {
                     write(2, "error: unknown emit format '", 28)
                     uint64 esl = str_len(emit_str)
@@ -8895,10 +8928,17 @@ fn main() {
                     // must appear here and every name here must be an arm --
                     // because this is exactly the enumeration a new emit mode
                     // falsifies, and --emit=uefi did falsify it.
-                    uint64 evl = "valid: elfexe, elf, elf-arm64, elf-x86_64, linux, linux-x86_64, linux-arm64, linux-x86-64, macho, mac, macos, mac-x64, mac-arm64, darwin, windows, windows-x64, windows-arm64, win, win-x64, win-arm64, pe, obj, android, asm, ir, lkm, image, uefi, fatimage, arx\n"
+                    uint64 evl = "valid: elfexe, elf, elf-arm64, elf-x86_64, linux, linux-x86_64, linux-arm64, linux-x86-64, macho, mac, macos, mac-x64, mac-arm64, darwin, windows, windows-x64, windows-arm64, win, win-x64, win-arm64, pe, obj, android, asm, ir, lkm, image, uefi, fatimage, arx, arxmod\n"
                     write(2, evl, str_len(evl))
                     exit(1)
                 }
+            } else if str_starts_with(arg, "--mod-name=", 11) != 0 {
+                mod_name = arg + 11
+            } else if str_starts_with(arg, "--mod-abi=", 10) != 0 {
+                mod_abi = parse_load_addr(arg + 10)
+                mod_abi_set = 1
+            } else if str_starts_with(arg, "--mod-version=", 14) != 0 {
+                mod_version = parse_load_addr(arg + 14)
             } else if str_starts_with(arg, "--load-addr=", 12) != 0 {
                 // An explicit arm, and it must precede the final
                 // `else { input_path = arg }` fallthrough: before this,
@@ -9179,6 +9219,8 @@ fn main() {
                 write(1, h_pa, str_len(h_pa))
                 uint64 h_arx = "  --emit=arx               ARX container: a program ApexRift loads from its own filesystem and enters (bare metal, HOSTED; needs --target=none and --arch=x86_64|arm64; takes no --load-addr/--stack-top -- the loader chooses the address at run time and supplies the stack; arm64 containers declare align 4096 because the loader must place them page-congruently for ADRP)\n"
                 write(1, h_arx, str_len(h_arx))
+                uint64 h_axm = "  --emit=arxmod            the same container as --emit=arx plus header flag bit 2 and a MODINFO table: an ApexRift LOADABLE KERNEL MODULE. Requires --mod-name=NAME and --mod-abi=N (the kernel module ABI it was built against); --mod-version=N is optional. The loader reads all three before it enters anything, which is the point -- a module discovers a mismatched ABI while it is already loaded and already privileged\n"
+                write(1, h_axm, str_len(h_axm))
                 uint64 h_la = "  --load-addr=<addr>       where the image will be loaded; validated (arm64: 4096-aligned) and reported, never embedded\n"
                 write(1, h_la, str_len(h_la))
                 // EVERY x86_64 NUMBER ON THIS LINE IS THE MULTIBOOT STUB's, AND
@@ -9368,6 +9410,47 @@ fn main() {
     if emit_mode == 10 && target_arg_seen == 0 {
         target_os = 4
         freestanding = 1
+    }
+    // --emit=arxmod REQUIRES a name and an ABI, and neither gets a default.
+    //
+    // A nameless module cannot be reported by `lsmod` or named by `rmmod`, and
+    // the loader has no other handle on it. A module with no stated ABI would
+    // load against ANY kernel and be right only by luck -- which is exactly the
+    // failure the field exists to prevent, so its absence is an error and not a
+    // zero. Both are checked here rather than at emit time so the message names
+    // the flag while the command line is still what the user typed.
+    if emit_arxmod != 0 {
+        if mod_name == 0 {
+            uint64 mn_e = "error: --emit=arxmod requires --mod-name=NAME. The loader records the name before it enters the module, so a module that fails to initialise can still be named in the report; there is no other handle on it\n"
+            write(2, mn_e, str_len(mn_e))
+            exit(1)
+        }
+        if str_len(mod_name) == 0 {
+            uint64 me_e = "error: --mod-name= is empty. A module with no name cannot be listed or unloaded\n"
+            write(2, me_e, str_len(me_e))
+            exit(1)
+        }
+        if str_len(mod_name) > 63 {
+            uint64 ml_e = "error: --mod-name= is longer than 63 characters. The loader stores the name in a fixed field so a module can be named after its image is gone\n"
+            write(2, ml_e, str_len(ml_e))
+            exit(1)
+        }
+        if mod_abi_set == 0 {
+            uint64 ma_e = "error: --emit=arxmod requires --mod-abi=N, the kernel module ABI this was built against. Without it the module would load against any kernel and be correct only by luck, which is the failure the field exists to prevent\n"
+            write(2, ma_e, str_len(ma_e))
+            exit(1)
+        }
+    }
+    // --mod-name/--mod-abi/--mod-version OUTSIDE --emit=arxmod are refused
+    // rather than ignored: a build line that carries them has asked for a
+    // module, and silently emitting a plain program from it produces an
+    // artifact that loads as a program and can never load as a module.
+    if emit_arxmod == 0 {
+        if mod_name != 0 || mod_abi_set != 0 || mod_version != 0 {
+            uint64 mo_e = "error: --mod-name/--mod-abi/--mod-version are only meaningful with --emit=arxmod. Emitting a plain container from a line that asked for a module would produce something that loads as a program and never as a module\n"
+            write(2, mo_e, str_len(mo_e))
+            exit(1)
+        }
     }
     // emit_mode=4 (android): default to arm64 unless --arch was explicitly set
     if emit_mode == 4 && arch_set == 0 { arch = 1 }

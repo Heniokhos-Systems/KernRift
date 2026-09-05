@@ -2905,11 +2905,12 @@ fn main() {
 
 ## 25. Binary formats
 
-All eleven `--emit=` modes, and the two formats that are reached by other flags:
+All twelve `--emit=` modes, and the two formats that are reached by other flags:
 
 | Format | Produced by | Use |
 |---|---|---|
 | ARX container | `--emit=arx` | A program ApexRift loads from its own filesystem (hosted; the OS supplies the stack) |
+| ARX kernel module | `--emit=arxmod` | The same container plus header flag bit 2 and a MODINFO table: an ApexRift **loadable kernel module**. Requires `--mod-name=` and `--mod-abi=`; see below |
 | `.krbo` fat binary | default (no `--arch`) | Cross-platform distribution — `kr` picks the right slice |
 | ELF executable | `--emit=elfexe` (the default), `--arch=x86_64` / `--arch=arm64` on Linux | Native Linux binary |
 | ELF relocatable | `--emit=obj` (or `-c`) | Link into an external object (`.o`) |
@@ -2923,6 +2924,34 @@ All eleven `--emit=` modes, and the two formats that are reached by other flags:
 | UEFI application | `--emit=uefi` | PE32+ image firmware loads and enters — needs `--target=none` |
 | Fat boot image | `--emit=fatimage` | ONE file, several boot paths (x86_64 multiboot + UEFI, arm64 `Image`) — needs `--target=none` and `--arch=x86_64,arm64` |
 | ESP32 flash image | `--arch=xtensa --freestanding --target=esp32` | Not an `--emit=` mode: the machine target selects it |
+
+### `--emit=arxmod` and its three flags
+
+A module is not a second format. The payload, the two-segment R-X/R-W split, the
+4096 alignment and the checksum are byte-for-byte what `--emit=arx` produces;
+what a module adds is **header flag bit 2** and a **MODINFO table** (kind 6,
+MANDATORY) that the loader reads *before it enters anything*.
+
+| Flag | Required | Meaning |
+|---|---|---|
+| `--mod-name=NAME` | yes | The module's name, 1–63 characters. The loader stores it before entering the module, so a module that fails to initialise can still be named by `lsmod` and `rmmod`; there is no other handle on it |
+| `--mod-abi=N` | yes | The kernel module ABI this was built against. **No default**: a module with no stated ABI would load against any kernel and be right only by luck, which is the failure the field exists to prevent |
+| `--mod-version=N` | no | The module's own version. Informational — the loader records and reports it, and never decides anything on it |
+
+All three are **refused outside `--emit=arxmod`** rather than ignored: a build
+line carrying them has asked for a module, and quietly emitting a plain program
+from it produces an artifact that loads as a program and can never load as a
+module.
+
+Module-ness is a flag rather than an inference from the source, unlike
+`WANTS_SERVICES` — that one is derivable, because the entry either takes an
+argument or it does not, and module-ness is not derivable from anything the
+compiler can see: a module's init and a services program's `main` have the same
+signature.
+
+The entry function is still named `main` or `_start`, and for a module it **is**
+the init: `main(services) -> descriptor`. The container format's own contract is
+specified outside this tree, in ApexRift's `docs/MODULE_FORMAT.md`.
 
 The last **three** have no place on a hosted OS, and the two bare-metal
 `--emit=` modes **require** `--target=none` rather than merely accepting it.

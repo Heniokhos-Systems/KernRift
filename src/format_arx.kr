@@ -34,6 +34,44 @@
 static uint64 ARX_HDR_REGION = 4096   // see the congruence note above
 static uint64 ARX_MAGIC_LE   = 0x5852417F   // bytes 7F 'A' 'R' 'X'
 
+// --- modules (--emit=arxmod) -------------------------------------------------
+//
+// A MODULE IS THE SAME CONTAINER WITH TWO ADDITIONS: header flag bit 2, and a
+// MODINFO table the loader reads BEFORE it enters anything. It is not a second
+// format -- the payload, the segment split, the alignment rule and the checksum
+// are identical, and a module that differed in any of those would need a second
+// loader to be wrong in a second way.
+//
+// WHY THE ABI GOES IN THE CONTAINER AND NOT IN THE MODULE'S CODE. The obvious
+// cheaper design is for the module's own init to check the services table's
+// version and refuse. That check runs too late: the module is already loaded,
+// already entered, and already privileged when it discovers it does not
+// understand the kernel it is talking to. A version the LOADER can read without
+// executing anything is the only kind that can refuse before that point.
+//
+// The name is here for the same reason: `lsmod` and `rmmod` need to name a
+// module that failed to initialise, and a name that lives only in code the
+// kernel declined to run is a name nobody can print.
+static uint64 ARX_KIND_MODINFO = 6
+static uint64 arx_is_module  = 0
+static uint64 arx_mod_name   = 0     // pointer to the NUL-terminated name
+static uint64 arx_mod_abi    = 0
+static uint64 arx_mod_ver    = 0
+
+// WHERE THE SEGMENT TABLE STARTS depends on how many directory entries precede
+// it, and a module has two. Held in a static rather than recomputed at each
+// patch site: patch_arx_headers writes six segment fields by offset, and six
+// places that each add 88 or 112 by hand is six places to get it wrong once.
+static uint64 arx_seg_tab = 88
+
+@export
+fn arx_set_module(uint64 name, uint64 abi, uint64 ver) {
+    arx_is_module = 1
+    arx_mod_name  = name
+    arx_mod_abi   = abi
+    arx_mod_ver   = ver
+}
+
 // Emit the header region and return its size, so the finalize arm cannot drift
 // from it — the same contract emit_uefi_headers has, and for the same reason.
 //
@@ -61,9 +99,9 @@ fn emit_arx_headers(uint64 arch_id, uint64 entry_rel, uint64 payload) -> uint64 
     emit_u16_le(1)                  // flags: bit 0 PIC. Always set — this tree
                                     // emits nothing else, and the loader
                                     // refuses a clear bit rather than guessing.
-    emit_u32_le(1)                  // table_count: one SEGMENT table. It holds
-                                    // TWO entries now; the count is tables, not
-                                    // segments.
+    // table_count: one SEGMENT table (which holds TWO entries -- the count is
+    // tables, not segments), plus MODINFO for a module.
+    if arx_is_module != 0 { emit_u32_le(2) } else { emit_u32_le(1) }
     emit_u64_le(64)                 // table_off: directory sits right after the
                                     // header, inside the reserved region
     emit_u64_le(entry_rel)
@@ -74,7 +112,14 @@ fn emit_arx_headers(uint64 arch_id, uint64 entry_rel, uint64 payload) -> uint64 
     emit_u64_le(0)                  // reserved, must be 0 (the loader refuses
                                     // nonzero so the field stays usable)
 
-    // ---- table directory, one 24-byte entry ----
+    // ---- table directory: one 24-byte entry, or two for a module ----
+    //
+    // THE SEGMENT TABLE MOVES when a second directory entry is added, and it
+    // has to: the directory is contiguous from table_off, so entry 1 occupies
+    // exactly the 24 bytes the segment table used to start at. Emitting two
+    // entries and leaving the segments at 88 would put the second directory
+    // entry on top of segment 0.
+    if arx_is_module != 0 { arx_seg_tab = 112 } else { arx_seg_tab = 88 }
     emit_u32_le(1)                  // kind = SEGMENT
     emit_u32_le(1)                  // flags = MANDATORY. The format makes this
                                     // a PRODUCER OBLIGATION, not a hint: later
@@ -82,10 +127,19 @@ fn emit_arx_headers(uint64 arch_id, uint64 entry_rel, uint64 payload) -> uint64 
                                     // `version`, so this flag is the only thing
                                     // that stops an older loader silently
                                     // mis-loading a newer file.
-    emit_u64_le(88)                 // off: 64 header + 24 directory
+    emit_u64_le(arx_seg_tab)        // off: after the header and the directory
     emit_u64_le(80)                 // size: TWO segment entries. Patched down
                                     // to 40 when the payload has no statics --
                                     // see patch_arx_headers.
+    if arx_is_module != 0 {
+        // MANDATORY, and that is the whole point of the flag. A loader that
+        // does not know kind 6 must REFUSE this file rather than load a
+        // privileged image without checking what ABI it was built against.
+        emit_u32_le(ARX_KIND_MODINFO)
+        emit_u32_le(1)              // MANDATORY
+        emit_u64_le(192)            // off: 112 segment table + 80 bytes of it
+        emit_u64_le(24 + str_len(arx_mod_name) + 1)
+    }
 
     // ---- TWO segments: R|X code, R|W data --------------------------------
     //
@@ -123,8 +177,38 @@ fn emit_arx_headers(uint64 arch_id, uint64 entry_rel, uint64 payload) -> uint64 
                                     // name only.
     emit_u32_le(0)                  // align: RESERVED, must be 0
 
+    // ---- MODINFO contents, when this is a module ----
+    //
+    // 24 fixed bytes then the name, NUL-terminated. The name is stored inline
+    // rather than as an offset into a string table because there is exactly one
+    // string: a STRTAB (kind 3) for a single name would be a table the loader
+    // has to validate for no gain.
+    // THE CURSOR IS DERIVED, NOT WRITTEN DOWN. It was the literal 168 -- correct
+    // for the one-table layout and 24 bytes short for a module's two, which put
+    // MODINFO's contents 24 bytes past the offset its own directory entry
+    // declared. The loader read three zeros and a name that was one stray byte.
+    // arx_seg_tab + 80 is the same arithmetic the directory entry used, so the
+    // two cannot disagree again.
+    uint64 i = arx_seg_tab + 80
+    if arx_is_module != 0 {
+        emit_u64_le(arx_mod_abi)
+        emit_u64_le(arx_mod_ver)
+        emit_u64_le(0)              // reserved, must be 0
+        i = i + 24
+        uint64 ni = 0
+        while ni < str_len(arx_mod_name) {
+            uint8 nb = 0
+            uint64 np = arx_mod_name + ni
+            unsafe { *(np as uint8) -> nb }
+            emit_byte(nb)
+            ni = ni + 1
+            i = i + 1
+        }
+        emit_byte(0)
+        i = i + 1
+    }
+
     // ---- pad the rest of the region ----
-    uint64 i = 168
     while i < ARX_HDR_REGION { emit_byte(0); i = i + 1 }
     return ARX_HDR_REGION
 }
@@ -152,6 +236,7 @@ fn patch_arx_headers(uint64 entry_rel, uint64 payload, uint64 wants_services,
                      uint64 data_rel) {
     uint64 fl = 1                   // bit 0 PIC, always
     if wants_services != 0 { fl = fl | 2 }
+    if arx_is_module != 0 { fl = fl | 4 }
     patch_u16(10, fl)               // header flags
     patch_u64(24, entry_rel)        // header entry
     patch_u64(32, payload)          // header image_size
@@ -159,17 +244,17 @@ fn patch_arx_headers(uint64 entry_rel, uint64 payload, uint64 wants_services,
     // Segment 0 ends where the statics begin. main.kr took a page boundary
     // there, so both segments are page-granular and a loader can give them
     // different permissions.
-    patch_u64(88 + 16, data_rel)            // seg0 filesz
-    patch_u64(88 + 24, data_rel)            // seg0 memsz
+    patch_u64(arx_seg_tab + 16, data_rel)   // seg0 filesz
+    patch_u64(arx_seg_tab + 24, data_rel)   // seg0 memsz
 
     // Segment 1 covers the rest. file_off keeps the (file_off - mem_off) % 4096
     // congruence the arm64 ADRP arithmetic depends on: both offsets shift by
     // the same page-aligned data_rel, so the difference is unchanged at
     // ARX_HDR_REGION.
-    patch_u64(128 + 0, ARX_HDR_REGION + data_rel)   // seg1 file_off
-    patch_u64(128 + 8, data_rel)                    // seg1 mem_off
-    patch_u64(128 + 16, payload - data_rel)         // seg1 filesz
-    patch_u64(128 + 24, payload - data_rel)         // seg1 memsz
+    patch_u64(arx_seg_tab + 40 + 0, ARX_HDR_REGION + data_rel)   // seg1 file_off
+    patch_u64(arx_seg_tab + 40 + 8, data_rel)                    // seg1 mem_off
+    patch_u64(arx_seg_tab + 40 + 16, payload - data_rel)         // seg1 filesz
+    patch_u64(arx_seg_tab + 40 + 24, payload - data_rel)         // seg1 memsz
 
     // A PAYLOAD WITH NO STATICS would leave a zero-length second segment. The
     // loader tolerates one, but describing memory that is not there invites a
