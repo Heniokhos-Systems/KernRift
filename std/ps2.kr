@@ -39,6 +39,12 @@ const u64 PS2_KEY_RIGHT = 0x103
 const u64 PS2_KEY_HOME  = 0x104
 const u64 PS2_KEY_END   = 0x105
 const u64 PS2_KEY_DEL   = 0x106
+// Page Up and Page Down. A console with a scrollback needs them, and until now
+// this table returned 0 for both -- so on a physical keyboard they simply did
+// not arrive, while the same keys over a serial line (ESC [ 5 ~ and ESC [ 6 ~)
+// were a caller's problem to decode.
+const u64 PS2_KEY_PGUP  = 0x107
+const u64 PS2_KEY_PGDN  = 0x108
 
 // --- tables -----------------------------------------------------------------
 //
@@ -255,6 +261,8 @@ fn ps2_extended_key(u64 sc) -> u64 {
     if sc == 0x47 { return PS2_KEY_HOME }
     if sc == 0x4F { return PS2_KEY_END }
     if sc == 0x53 { return PS2_KEY_DEL }
+    if sc == 0x49 { return PS2_KEY_PGUP }
+    if sc == 0x51 { return PS2_KEY_PGDN }
     return 0
 }
 
