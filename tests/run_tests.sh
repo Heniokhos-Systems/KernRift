@@ -19565,8 +19565,9 @@ else
     echo "FAIL: grow_ir_insn_66k (expected exit 1, got $GROW_EC2)"
 fi
 
-# 5) static_table and its five parallel tables: 2040 named statics, just under
-#    the cap of 2048 (old cap: 1024). Every one is read back, which is the point
+# 5) static_table and its five parallel tables: 2040 named statics, which was
+#    just under the cap of 2048 when this row was written and is now merely a
+#    large number -- see the two rows below. Every one is read back, which is the point
 #    -- "it compiled" is a weak assertion here. alloc() is a page-rounded mmap,
 #    so a table sized for 1024 entries still has slack for a few hundred more and
 #    silently works; only near the real ceiling does a short table run off its
@@ -19605,40 +19606,138 @@ else
     echo "FAIL: grow_static_table_2040 (expected exit 0, got $GROW_EC3)"
 fi
 
-# 6) The other side of the cap: 2100 statics must be REFUSED, and refused with
-#    the documented message rather than by crashing or by miscompiling. A cap
-#    test that only checks the accepting side would pass just as well with no
-#    guard at all, and the failure mode of a missing guard is a wild write into
-#    whatever mmap handed back next.
+# 6) THESE TWO ROWS USED TO ASSERT THE REFUSAL, and they are kept -- inverted --
+#    rather than deleted, because they are the rows that catch a silent
+#    regression back to a fixed table. 2100 statics, past the old cap of 2048,
+#    must now COMPILE AND READ BACK CORRECTLY.
+#
+#    READ BACK, not merely compiled. A table that stopped refusing but did not
+#    actually grow writes past its mapping, and alloc() is a page-rounded mmap
+#    with slack, so "it compiled" is exactly the assertion such a build would
+#    still satisfy. The sum is what distinguishes them.
 TOTAL=$((TOTAL + 1))
 { for gi in $(seq 0 2099); do printf 'static uint64 T%d = %d\n' "$gi" "$gi"; done
-  printf 'fn main() {\n    exit(T0)\n}\n'
+  printf 'fn main() {\n    uint64 acc = 0\n'
+  for gi in $(seq 0 2099); do printf '    acc = acc + T%d\n' "$gi"; done
+  printf '    if acc != 2203950 { exit(1) }\n    exit(0)\n}\n'
 } > "$GROW_DIR/statics_over.kr"
-GROW_OVER=$($KRC $KRC_FLAGS "$GROW_DIR/statics_over.kr" -o "$GROW_DIR/statics_over" 2>&1)
-if echo "$GROW_OVER" | grep -qF "too many statics and consts (max 2048 for the whole program)"; then
+GROW_OVER_EC="compile-failed"
+if $KRC $KRC_FLAGS "$GROW_DIR/statics_over.kr" -o "$GROW_DIR/statics_over" >/dev/null 2>&1; then
+    chmod +x "$GROW_DIR/statics_over"
+    "$GROW_DIR/statics_over" >/dev/null 2>&1
+    GROW_OVER_EC=$?
+fi
+if [ "$GROW_OVER_EC" = 0 ]; then
     PASS=$((PASS + 1))
-    echo "  grow_static_table_over_cap: PASS (2100 statics refused with the documented message)"
+    echo "  grow_static_table_past_old_cap: PASS (2100 statics, past the old 2048 ceiling)"
 else
     FAIL=$((FAIL + 1))
-    echo "FAIL: grow_static_table_over_cap (expected 'too many statics and consts (max 2048 for the whole program)', got '$(echo "$GROW_OVER" | tail -1)')"
+    echo "FAIL: grow_static_table_past_old_cap (expected exit 0, got $GROW_OVER_EC --"
+    echo "  1 means the values read back wrong, which is a table that grew short)"
 fi
 
-# 7) The SAME cap from the array side. static_declare_array() carries its own
-#    copy of the guard, and case 6 declares only scalars, so it cannot reach it:
-#    disabling the array guard alone leaves cases 5 and 6 both passing. This case
-#    is the only one that fails, which is the whole reason it exists.
+# 7) THE SAME THING FROM THE ARRAY SIDE. static_declare_array() carries its own
+#    call to static_table_ensure, and case 6 declares only scalars, so it cannot
+#    reach it: removing the array-side growth alone leaves cases 5 and 6 both
+#    passing. This case is the only one that fails, which is the whole reason it
+#    exists -- it was true of the guard it replaced and it is true of the growth.
 TOTAL=$((TOTAL + 1))
 { for gi in $(seq 0 2099); do printf 'static u8[4] B%d\n' "$gi"; done
-  printf 'fn main() {\n    B0[0] = 1\n    exit(B0[0] - 1)\n}\n'
+  printf 'fn main() {\n'
+  printf '    B0[0] = 1\n    B2099[3] = 7\n'
+  printf '    if B0[0] != 1 { exit(1) }\n    if B2099[3] != 7 { exit(2) }\n    exit(0)\n}\n'
 } > "$GROW_DIR/arrays_over.kr"
-GROW_AOVER=$($KRC $KRC_FLAGS "$GROW_DIR/arrays_over.kr" -o "$GROW_DIR/arrays_over" 2>&1)
-if echo "$GROW_AOVER" | grep -qF "too many statics and consts (max 2048 for the whole program)"; then
+GROW_AOVER_EC="compile-failed"
+if $KRC $KRC_FLAGS "$GROW_DIR/arrays_over.kr" -o "$GROW_DIR/arrays_over" >/dev/null 2>&1; then
+    chmod +x "$GROW_DIR/arrays_over"
+    "$GROW_DIR/arrays_over" >/dev/null 2>&1
+    GROW_AOVER_EC=$?
+fi
+if [ "$GROW_AOVER_EC" = 0 ]; then
     PASS=$((PASS + 1))
-    echo "  grow_static_array_over_cap: PASS (2100 array statics refused)"
+    echo "  grow_static_array_past_old_cap: PASS (2100 array statics, both ends read back)"
 else
     FAIL=$((FAIL + 1))
-    echo "FAIL: grow_static_array_over_cap (expected 'too many statics and consts (max 2048 for the whole program)', got '$(echo "$GROW_AOVER" | tail -1)')"
+    echo "FAIL: grow_static_array_past_old_cap (expected exit 0, got $GROW_AOVER_EC)"
 fi
+
+# --- the static table has no ceiling, and its index grows with it ------------
+#
+# G9 IN APEXRIFT'S GAP LIST, REACHED TWICE BY REAL PROGRAMS. The six parallel
+# static tables were a fixed 2048 entries, and the note in codegen_init asked
+# for exactly this fix: "if this is reached again the honest fix is growth on
+# demand, as static_fixups already does". It was reached again -- ApexRift's
+# handset board file came to rest at EXACTLY 2048 and bought its last slots by
+# rewriting constants as functions returning literals.
+#
+# 6000 STATICS, WHICH IS PAST BOTH THINGS THAT HAD TO CHANGE. Past 2048 exercises
+# the table doubling; past 4096 exercises the hash index, which was a FIXED 4096
+# slots with linear probing and no load check. Removing the table cap without
+# growing the index turns a clean error into a HANG -- the placement loop spins
+# forever looking for a free slot in a full table. Verified by mutation: pinning
+# the index back at 4096 makes this program compile forever rather than fail.
+#
+# THE ARRAYS ARE THE PART THAT MATTERS. static_elem_sizes drives both the address
+# stride and the access width of an indexed read of a static array, and it is one
+# of the two parallel tables static_declare never writes -- it depends on the
+# memory arriving zero. So an ungrown or unzeroed tail shows up here as a WRONG
+# VALUE, not a crash, which is the failure this row exists to catch. Also verified
+# by mutation: leaving static_elem_sizes out of the growth crashes the compiler.
+# The three groups sit past 2100, 4200 and 5900 so each lands in memory that only
+# exists because of a different doubling.
+#
+# The program checks itself and exits non-zero at the first wrong value, so this
+# row does not depend on matching printed text.
+TOTAL=$((TOTAL + 1))
+G9SRC="$DIR/../test_tmp_g9_$$.kr"
+{
+    echo 'fn main() -> uint64 {'
+    echo '    uint64 sum = 0'
+    awk 'BEGIN { for (i = 0; i < 6000; i += 7) printf "    sum = sum + S%d\n", i }'
+    echo '    if sum != 7721571 { exit(1) }'
+    for g in 0 1 2; do
+        echo "    A$g[0] = 0x1122334455667788   A$g[3] = 99"
+        echo "    B$g[0] = 0xAABBCCDD           B$g[3] = 7"
+        echo "    C$g[0] = 0x5A                 C$g[7] = 3"
+        echo "    if A$g[0] != 0x1122334455667788 { exit(2) }"
+        echo "    if A$g[3] != 99 { exit(3) }"
+        echo "    if B$g[0] != 0xAABBCCDD { exit(4) }"
+        echo "    if B$g[3] != 7 { exit(5) }"
+        echo "    if C$g[0] != 0x5A { exit(6) }"
+        echo "    if C$g[7] != 3 { exit(7) }"
+    done
+    echo '    return 0'
+    echo '}'
+} > "$G9SRC.body"
+{
+    awk 'BEGIN { for (i = 0; i < 6000; i++) printf "static uint64 S%d = %d\n", i, i * 3 + 1 }'
+    for g in 0 1 2; do
+        echo "static uint64[4] A$g"
+        echo "static uint32[4] B$g"
+        echo "static uint8[8]  C$g"
+    done
+    cat "$G9SRC.body"
+} > "$G9SRC"
+rm -f "$G9SRC.body"
+if $KRC $KRC_FLAGS "$G9SRC" -o /tmp/krc_g9_$$ > /dev/null 2>&1; then
+    chmod +x /tmp/krc_g9_$$
+    G9GOT=0
+    /tmp/krc_g9_$$ > /dev/null 2>&1 || G9GOT=$?
+    if [ "$G9GOT" = "0" ]; then
+        PASS=$((PASS + 1))
+        echo "  static_table_grows_past_the_old_cap: PASS (6000 statics, past the table AND its hash index)"
+    else
+        FAIL=$((FAIL + 1))
+        echo "FAIL: static_table_grows_past_the_old_cap (program exited $G9GOT --"
+        echo "  1=sum, 2/3=u64 array, 4/5=u32 array, 6/7=u8 array; a wrong array"
+        echo "  value means a parallel table was not grown or not zeroed)"
+    fi
+else
+    FAIL=$((FAIL + 1))
+    echo "FAIL: static_table_grows_past_the_old_cap (6000 statics did not compile)"
+fi
+rm -f "$G9SRC" /tmp/krc_g9_$$
+
 
 # --- arr_elem_table is per-function again ----------------------------------
 #

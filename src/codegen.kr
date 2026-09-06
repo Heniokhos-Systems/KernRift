@@ -180,18 +180,29 @@ static uint64 fnaddr_fixup_table = 0
 static uint64 fnaddr_fixup_count = 0
 static uint64 fnaddr_fixup_cap = 0
 
-// Capacity of the static tables. ONE constant for all six of them and for both
-// overflow guards, which is not tidiness: the tables are parallel, indexed by the
-// same static number, and a short one is almost undetectable. alloc() is a
-// page-rounded mmap, so a table sized for 1024 entries still has slack for a few
-// hundred more and quietly works; past that it runs into whatever mmap returned
-// next. Sizing them from a single name is what makes "raise one, forget the
-// others" impossible to write rather than merely warned against.
+// STARTING capacity of the static tables -- no longer a ceiling. ONE constant
+// for all six of them, which is not tidiness: the tables are parallel, indexed
+// by the same static number, and a short one is almost undetectable. Sizing them
+// from a single name is what makes "raise one, forget the others" impossible to
+// write rather than merely warned against.
 //
-// The two overflow messages still spell the number out, because write() takes an
-// explicit byte count and there is nothing to interpolate into: changing this
-// constant means editing those two strings and their lengths as well.
+// THE CEILING IS GONE, and the note that stood here asked for exactly this:
+// "if this is reached again the honest fix is growth on demand, as static_fixups
+// already does". It was reached again. ApexRift's boards/begonia/begonia.kr came
+// to rest at EXACTLY 2048 -- measured by adding probe statics until the build
+// failed -- and paid for the last few slots by rewriting constants as functions
+// returning literals, which cost no slot and read identically. That is the same
+// shape as the rsa_arena packing and the der.kr out-param collapse before it:
+// a workaround for a compiler table, written into a program that had nothing
+// wrong with it.
+//
+// STRING LITERALS COST SLOTS TOO, which is what made this ceiling arrive without
+// warning. The program that hit it was not carrying two thousand constants; it
+// was carrying the sentences its shell prints. A limit that a program can reach
+// by explaining itself to its operator is a limit in the wrong place.
 static uint64 STATIC_TABLE_CAP = 2048
+// Live capacity. Doubles in static_table_ensure; never read before codegen_init.
+static uint64 static_cap = 0
 
 // Static variable table: maps name token → data offset in data section
 // [name_tok_idx(4), data_offset(4)] × STATIC_TABLE_CAP
@@ -472,6 +483,41 @@ fn static_fixups_ensure() {
     static_fixup_cap = static_fixup_cap * 2
 }
 
+// Ensure one free slot in all six parallel static tables. Doubles on demand.
+//
+// SIX TABLES, ONE COUNT, ONE CAPACITY. They are indexed by the same static
+// number, so growing five of them is a silent out-of-bounds write on the sixth
+// -- which is why the capacity was a single name even when it was a constant.
+//
+// THE NEW TAIL IS ZEROED, and that is a correctness requirement rather than
+// hygiene. static_declare writes name, offset, array_size, init_value and fkind
+// for each new index and DOES NOT write elem_size or kind: those two are read
+// back as "0 means unset", so they depend on the memory arriving zero. On Linux
+// alloc() is a fresh mmap and always does; krc running on bare metal inside
+// ApexRift takes its arena from DRAM the bootloader has already used, and there
+// it does not. That exact difference is why the pin moved at 874422d -- a struct
+// table read back offsets it never wrote, was correct by luck under every
+// harness, and died deterministically on the handset. static_elem_sizes drives
+// both the address stride and the access width of every indexed read of a
+// static array, so garbage there is a miscompile, not a crash.
+fn static_table_ensure() {
+    if static_count < static_cap { return }
+    uint64 ncap = static_cap * 2
+    static_table       = grow_buf(static_table,       static_cap * 8, ncap * 8)
+    static_array_sizes = grow_buf(static_array_sizes, static_cap * 4, ncap * 4)
+    static_init_values = grow_buf(static_init_values, static_cap * 8, ncap * 8)
+    static_elem_sizes  = grow_buf(static_elem_sizes,  static_cap * 4, ncap * 4)
+    static_fkinds      = grow_buf(static_fkinds,      static_cap * 4, ncap * 4)
+    static_kinds       = grow_buf(static_kinds,       static_cap * 4, ncap * 4)
+    memset(static_table       + static_cap * 8, 0, static_cap * 8)
+    memset(static_array_sizes + static_cap * 4, 0, static_cap * 4)
+    memset(static_init_values + static_cap * 8, 0, static_cap * 8)
+    memset(static_elem_sizes  + static_cap * 4, 0, static_cap * 4)
+    memset(static_fkinds      + static_cap * 4, 0, static_cap * 4)
+    memset(static_kinds       + static_cap * 4, 0, static_cap * 4)
+    static_cap = ncap
+}
+
 // Ensure str_buf can hold `needed` total bytes. Doubles until it fits.
 fn str_buf_ensure(uint64 needed) {
     if needed <= str_buf_cap { return }
@@ -512,22 +558,29 @@ fn codegen_init(uint64 capacity, uint64 source, uint64 tokens) {
     match_end_fixup_count = 0
     enum_table = alloc(512 * 16)
     enum_count = 0
-    // STATIC_TABLE_CAP static declarations, raised from 1024.
+    // STATIC_TABLE_CAP static declarations to start with, and it GROWS from
+    // there -- see static_table_ensure. The old ceiling was reached by real
+    // programs twice: at 1024 by ApexRift's x86_64 kernel, at 2048 by its
+    // handset board file, both of which then rewrote working code to fit a
+    // compiler table.
     //
-    // The old ceiling was reached by a real program rather than a synthetic one: ApexRift, a
-    // bare-metal OS written in KernRift, sits at over a thousand named statics -- error-code
-    // constants, hardware register offsets, a colour palette, protocol tag values -- and hit
-    // the limit mid-feature. Most of those are DOCUMENTATION as much as code, and trimming
-    // them to fit a compiler table is the tail wagging the dog.
-    //
-    // 2048 * 8 is 16 KiB for the widest of them, which is nothing next to the arena; if this
-    // is reached again the honest fix is growth on demand, as static_fixups already does.
-    static_table = alloc(STATIC_TABLE_CAP * 8)
-    static_array_sizes = alloc(STATIC_TABLE_CAP * 4)
-    static_init_values = alloc(STATIC_TABLE_CAP * 8)
-    static_elem_sizes = alloc(STATIC_TABLE_CAP * 4)
-    static_fkinds = alloc(STATIC_TABLE_CAP * 4)
-    static_kinds = alloc(STATIC_TABLE_CAP * 4)
+    // ZEROED AT BIRTH as well as on growth. static_declare leaves elem_size and
+    // kind unwritten and every reader treats 0 as "unset", so this is the same
+    // requirement static_table_ensure explains at length -- and alloc() promises
+    // nothing about zeroed memory once krc is running on bare metal.
+    static_cap = STATIC_TABLE_CAP
+    static_table = alloc(static_cap * 8)
+    static_array_sizes = alloc(static_cap * 4)
+    static_init_values = alloc(static_cap * 8)
+    static_elem_sizes = alloc(static_cap * 4)
+    static_fkinds = alloc(static_cap * 4)
+    static_kinds = alloc(static_cap * 4)
+    memset(static_table, 0, static_cap * 8)
+    memset(static_array_sizes, 0, static_cap * 4)
+    memset(static_init_values, 0, static_cap * 8)
+    memset(static_elem_sizes, 0, static_cap * 4)
+    memset(static_fkinds, 0, static_cap * 4)
+    memset(static_kinds, 0, static_cap * 4)
     slice_len_table = alloc(32 * 8)
     device_table = alloc(64 * 16)
     device_field_table = alloc(256 * 16)
@@ -2325,10 +2378,7 @@ fn enum_lookup(uint64 enum_tok, uint64 field_tok) -> uint64 {
 
 @export
 fn static_declare(uint64 name_tok) -> uint64 {
-    if static_count >= STATIC_TABLE_CAP {
-        cap_overflow("too many statics and consts", 2048, 0)
-        exit(1)
-    }
+    static_table_ensure()
     uint64 offset = static_data_size
     uint64 entry = static_table + static_count * 8
     uint32 nt = name_tok
@@ -2579,10 +2629,7 @@ fn slice_len_lookup(uint64 ptr_off) -> uint64 {
 
 @export
 fn static_declare_array(uint64 name_tok, uint64 byte_size) -> uint64 {
-    if static_count >= STATIC_TABLE_CAP {
-        cap_overflow("too many statics and consts", 2048, 0)
-        exit(1)
-    }
+    static_table_ensure()
     // Align static_data_size up to 8 for clean placement
     uint64 rem = static_data_size & 7
     if rem != 0 { static_data_size = static_data_size + 8 - rem }
@@ -2669,11 +2716,24 @@ fn static_array_size_of(uint64 name_tok) -> uint64 {
 }
 
 // Hash index over static_table, built lazily so every registration path
-// (scalars, arrays) is covered without touching them. 4096 slots of
+// (scalars, arrays) is covered without touching them. Slots of
 // [name_tok u32, idx u32]; idx 0xFFFFFFFF = empty. First-wins on duplicate
 // names to preserve the linear scan's first-match semantics.
+//
+// IT GROWS WITH THE TABLE, AND IT HAD TO. This was a fixed 4096 slots with
+// linear probing and no load check, which was safe only because the static
+// table could never hold more than 2048 entries. Removing that ceiling turned
+// it into a HANG: at 4096 statics the placement loop below spins forever
+// looking for an empty slot in a table that has none, with no diagnostic and
+// no progress -- the worst way for a compiler to fail. The table is kept at
+// twice the live count, so probe chains stay short and one is always free.
+//
+// It stores INDICES, not pointers, which is what makes growing static_table
+// underneath it safe.
 static uint64 static_hash_tbl = 0
 static uint64 static_hash_built_n = 0
+static uint64 static_hash_cap = 0
+static uint64 static_hash_mask = 0
 
 fn tok_text_hash(uint64 name_tok) -> uint64 {
     uint64 start = tok_text_start(name_tok)
@@ -2693,14 +2753,27 @@ fn tok_text_hash(uint64 name_tok) -> uint64 {
 }
 
 fn static_hash_of(uint64 name_tok) -> uint64 {
-    return tok_text_hash(name_tok) & 4095
+    return tok_text_hash(name_tok) & static_hash_mask
 }
 
 fn static_hash_sync() {
-    if static_hash_tbl == 0 {
-        static_hash_tbl = alloc(4096 * 8)
+    // REBUILT FROM SCRATCH WHEN IT GROWS, not rehashed in place: the slot of an
+    // entry depends on the mask, so every existing placement is wrong at the new
+    // size. Resetting built_n to 0 hands that job to the loop below, which is
+    // the same code that placed them the first time -- one placement path rather
+    // than two that must agree.
+    uint64 need = (static_count + 1) * 2
+    if static_hash_cap < need {
+        uint64 ncap = static_hash_cap
+        if ncap == 0 { ncap = 4096 }
+        while ncap < need { ncap = ncap * 2 }
+        if static_hash_tbl != 0 { dealloc(static_hash_tbl) }
+        static_hash_tbl = alloc(ncap * 8)
+        static_hash_cap = ncap
+        static_hash_mask = ncap - 1
+        static_hash_built_n = 0
         uint64 ci = 0
-        while ci < 4096 {
+        while ci < ncap {
             uint64 sp = static_hash_tbl + ci * 8 + 4
             uint32 ff = 0xFFFFFFFF
             unsafe { *(sp as uint32) = ff }
@@ -2731,7 +2804,7 @@ fn static_hash_sync() {
                 uint64 wsnt = snt
                 // Duplicate name: keep the first entry (first-match wins).
                 if tok_text_eq(wsnt, wnt) != 0 { placed = 1 }
-                else { h = (h + 1) & 4095 }
+                else { h = (h + 1) & static_hash_mask }
             }
         }
         static_hash_built_n = static_hash_built_n + 1
@@ -2752,7 +2825,7 @@ fn static_index_of(uint64 name_tok) -> uint64 {
         unsafe { *(slot as uint32) -> snt }
         uint64 wsnt = snt
         if tok_text_eq(wsnt, name_tok) != 0 { return sidx }
-        h = (h + 1) & 4095
+        h = (h + 1) & static_hash_mask
     }
     return 0xFFFFFFFF
 }
