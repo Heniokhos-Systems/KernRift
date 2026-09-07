@@ -24791,6 +24791,82 @@ else
 fi
 rm -rf "$G18_D"
 
+# --- logical ops, the bitmask immediate, and the x86 cache pair --------------
+#
+# The rest of G18. Three rows, and the middle one is the reason this took a
+# separate pass: AArch64 does not carry a logical immediate as a field. It
+# encodes (N, immr, imms) -- a rotated run of ones repeated at some element size
+# -- and MOST 64-BIT VALUES HAVE NO ENCODING AT ALL. An encoder that produces a
+# plausible triple for an unrepresentable value assembles cleanly and masks the
+# wrong bits, which is why the refusal half below is not optional.
+TOTAL=$((TOTAL + 1))
+G18L_D=$(mktemp -d /tmp/krc_g18l_XXXX)
+g18l_emit() {
+    printf 'fn main() -> uint64 {\n' > "$1"
+    while IFS='|' read -r mn hx; do
+        [ -z "$mn" ] && continue
+        if [ "$2" = "1" ]; then printf '    asm { "%s" }\n' "$mn" >> "$1"
+        else printf '    asm { "%s" }\n' "$hx" >> "$1"; fi
+    done <<'G18LEOF'
+orr x0, x0, x1|0xAA010000
+bic x16, x16, #4|0x927DFA10
+and x0, x0, x1|0x8A010000
+eor x2, x3, x4|0xCA040062
+bic x5, x6, x7|0x8A2700C5
+and x0, x0, #0xff|0x92401C00
+orr x1, x2, #1|0xB2400041
+eor x3, x4, #0xf|0xD2400C83
+G18LEOF
+    printf '    return 0\n}\n' >> "$1"
+}
+g18l_emit "$G18L_D/mn.kr" 1
+g18l_emit "$G18L_D/hx.kr" 2
+G18L_F="--arch=arm64 --freestanding --target=none --asm-strict --emit=image"
+G18L_F="$G18L_F --load-addr=0x40080000 --stack-top=0x41000000"
+$KRC $G18L_F "$G18L_D/mn.kr" -o "$G18L_D/mn.bin" >/dev/null 2>&1
+$KRC $G18L_F "$G18L_D/hx.kr" -o "$G18L_D/hx.bin" >/dev/null 2>&1
+if [ -f "$G18L_D/mn.bin" ] && cmp -s "$G18L_D/mn.bin" "$G18L_D/hx.bin"; then
+    PASS=$((PASS + 1)); echo "  a64_logical_encodings: PASS (8 forms, register and bitmask-immediate)"
+else
+    FAIL=$((FAIL + 1)); echo "FAIL: a64_logical_encodings (mnemonics do not match the measured words)"
+fi
+
+# THE REFUSAL HALF. #5 is 0b101 -- not a contiguous run at any element size --
+# and #0 and #0x1234 are unrepresentable for the same reason. A representable
+# value is checked alongside them, or a build that refused EVERY immediate would
+# pass this row while being useless.
+TOTAL=$((TOTAL + 1))
+g18l_bad=0
+for g18l_i in "and x0, x0, #5" "and x0, x0, #0" "orr x0, x0, #0x1234"; do
+    printf 'fn main() -> uint64 {\n    asm { "%s" }\n    return 0\n}\n' "$g18l_i" > "$G18L_D/b.kr"
+    if $KRC $G18L_F "$G18L_D/b.kr" -o /dev/null >/dev/null 2>&1; then g18l_bad=$((g18l_bad + 1)); fi
+done
+printf 'fn main() -> uint64 {\n    asm { "and x0, x0, #7" }\n    return 0\n}\n' > "$G18L_D/g.kr"
+g18l_good=0
+$KRC $G18L_F "$G18L_D/g.kr" -o /dev/null >/dev/null 2>&1 && g18l_good=1
+if [ "$g18l_bad" = "0" ] && [ "$g18l_good" = "1" ]; then
+    PASS=$((PASS + 1)); echo "  a64_bitmask_refuses_unencodable: PASS (3 refused, #7 still accepted)"
+else
+    FAIL=$((FAIL + 1))
+    echo "FAIL: a64_bitmask_refuses_unencodable ($g18l_bad of 3 unencodable accepted, good=$g18l_good)"
+fi
+
+# The x86 half of the same function: ApexRift's rec_persist is clflush+sfence,
+# and both were raw bytes for want of a mnemonic.
+TOTAL=$((TOTAL + 1))
+printf 'fn main() -> uint64 {\n    asm { "clflush [rax]" }\n    asm { "sfence" }\n    return 0\n}\n' > "$G18L_D/x1.kr"
+printf 'fn main() -> uint64 {\n    asm { "0x0F 0xAE 0x38" }\n    asm { "0x0F 0xAE 0xF8" }\n    return 0\n}\n' > "$G18L_D/x2.kr"
+X86_F="--arch=x86_64 --freestanding --target=none --asm-strict --emit=image"
+X86_F="$X86_F --load-addr=0x400000 --stack-top=0x3F0000"
+$KRC $X86_F "$G18L_D/x1.kr" -o "$G18L_D/x1.bin" >/dev/null 2>&1
+$KRC $X86_F "$G18L_D/x2.kr" -o "$G18L_D/x2.bin" >/dev/null 2>&1
+if [ -f "$G18L_D/x1.bin" ] && cmp -s "$G18L_D/x1.bin" "$G18L_D/x2.bin"; then
+    PASS=$((PASS + 1)); echo "  x86_cache_mnemonics: PASS (clflush [rax] and sfence == their raw bytes)"
+else
+    FAIL=$((FAIL + 1)); echo "FAIL: x86_cache_mnemonics (clflush/sfence do not match their bytes)"
+fi
+rm -rf "$G18L_D"
+
 # --- Documentation pin 5, PART B (see Part A above) --------------------------
 # README.md advertises this suite's test count. Compare it against the total
 # only now, when $TOTAL is final and already includes this row (Part A did the

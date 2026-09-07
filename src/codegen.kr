@@ -11057,6 +11057,29 @@ fn asm_emit_x86(uint64 str_tok) {
     if asm_match(sptr, 0, "rdmsr", 5) != 0 && slen == 5 { emit_byte(0x0F); emit_byte(0x32); return }
     if asm_match(sptr, 0, "wrmsr", 5) != 0 && slen == 5 { emit_byte(0x0F); emit_byte(0x30); return }
     if asm_match(sptr, 0, "iretq", 5) != 0 && slen == 5 { emit_byte(0x48); emit_byte(0xCF); return }
+    // --- cache maintenance and the fence that orders it ------------------------
+    //
+    // The x86 half of the same problem the arm64 SYS aliases solved: ApexRift's
+    // arch/x86_64/x86_cache.kr writes rec_persist as `0x0F 0xAE 0x38` and
+    // `0x0F 0xAE 0xF8`, raw bytes, because these had no mnemonic. A wrong byte
+    // there does not fault -- the line is simply not flushed, and the crash
+    // record it was protecting is lost on the next reset. Same failure, same
+    // invisibility to every emulator, other architecture.
+    //
+    // CLFLUSH's operand is a ModRM byte and only the [reg] forms are accepted:
+    // 0x38 is mod=00 reg=7 rm=000, i.e. [rax]. Spelling the others out rather
+    // than parsing a general memory operand keeps this honest about what it
+    // supports -- an addressing mode this does not handle must be a refusal,
+    // not a silently wrong ModRM.
+    if asm_match(sptr, 0, "sfence", 6) != 0 && slen == 6 { emit_byte(0x0F); emit_byte(0xAE); emit_byte(0xF8); return }
+    if asm_match(sptr, 0, "lfence", 6) != 0 && slen == 6 { emit_byte(0x0F); emit_byte(0xAE); emit_byte(0xE8); return }
+    if asm_match(sptr, 0, "mfence", 6) != 0 && slen == 6 { emit_byte(0x0F); emit_byte(0xAE); emit_byte(0xF0); return }
+    if asm_match(sptr, 0, "clflush [rax]", 13) != 0 && slen == 13 { emit_byte(0x0F); emit_byte(0xAE); emit_byte(0x38); return }
+    if asm_match(sptr, 0, "clflush [rcx]", 13) != 0 && slen == 13 { emit_byte(0x0F); emit_byte(0xAE); emit_byte(0x39); return }
+    if asm_match(sptr, 0, "clflush [rdx]", 13) != 0 && slen == 13 { emit_byte(0x0F); emit_byte(0xAE); emit_byte(0x3A); return }
+    if asm_match(sptr, 0, "clflush [rbx]", 13) != 0 && slen == 13 { emit_byte(0x0F); emit_byte(0xAE); emit_byte(0x3B); return }
+    if asm_match(sptr, 0, "clflush [rsi]", 13) != 0 && slen == 13 { emit_byte(0x0F); emit_byte(0xAE); emit_byte(0x3E); return }
+    if asm_match(sptr, 0, "clflush [rdi]", 13) != 0 && slen == 13 { emit_byte(0x0F); emit_byte(0xAE); emit_byte(0x3F); return }
     // what = 0: an explicit inline `asm { "syscall" }`. Permitted under
     // --target=none because the programmer typed the instruction (see
     // emit_x86_syscall_insn); routed through the choke point anyway so the
@@ -11303,6 +11326,124 @@ fn asm_a64_movwide(uint64 sptr, uint64 slen, uint64 off, uint64 base) {
 }
 
 // ADD / SUB, immediate or register: `add xD, xN, #imm` / `add xD, xN, xM`.
+// --- the logical bitmask immediate -------------------------------------------
+//
+// THE ONE GENUINELY NON-TRIVIAL ENCODER IN THIS ASSEMBLER. `and x16, x16, #~4`
+// does not carry its immediate as a field: AArch64 encodes logical immediates
+// as (N, immr, imms), a rotated run of ones repeated at some element size, and
+// most 64-bit values HAVE NO ENCODING AT ALL. That is why this space stayed as
+// raw hex long after the rest -- and why the failure mode is the bad one: an
+// encoder that computes a plausible-looking triple for an unrepresentable value
+// assembles cleanly and masks the wrong bits.
+//
+// So this returns 0 rather than guessing, and every caller refuses on 0.
+//
+// The algorithm is the standard one (ARM ARM DecodeBitMasks, run backwards):
+// find the smallest element size at which the value repeats, require the
+// element to be a contiguous run of ones once rotated, and derive the triple
+// from where that run starts and how long it is.
+static uint64 a64_bm_n = 0
+static uint64 a64_bm_immr = 0
+static uint64 a64_bm_imms = 0
+
+fn a64_ctz(uint64 v) -> uint64 {
+    if v == 0 { return 64 }
+    uint64 n = 0
+    uint64 x = v
+    while (x & 1) == 0 { x = x >> 1  n = n + 1 }
+    return n
+}
+fn a64_cto(uint64 v) -> uint64 {
+    uint64 n = 0
+    uint64 x = v
+    while (x & 1) != 0 {
+        x = x >> 1
+        n = n + 1
+        if n == 64 { return 64 }
+    }
+    return n
+}
+fn a64_clo(uint64 v) -> uint64 {
+    uint64 n = 0
+    uint64 b = 63
+    while 1 == 1 {
+        if ((v >> b) & 1) == 0 { return n }
+        n = n + 1
+        if b == 0 { return n }
+        b = b - 1
+    }
+    return n
+}
+// A contiguous run of ones, possibly shifted up. All-ones counts.
+fn a64_is_shifted_mask(uint64 v) -> uint64 {
+    if v == 0 { return 0 }
+    uint64 t = v >> a64_ctz(v)
+    if (t & (t + 1)) == 0 { return 1 }
+    return 0
+}
+
+fn a64_bitmask_encode(uint64 imm0) -> uint64 {
+    // Neither all-zeroes nor all-ones is representable, and both are things a
+    // caller might reasonably write -- so they are refusals, not asserts.
+    if imm0 == 0 { return 0 }
+    if imm0 == 0xFFFFFFFFFFFFFFFF { return 0 }
+    uint64 imm = imm0
+    uint64 size = 64
+    while 1 == 1 {
+        size = size >> 1
+        uint64 m = 0xFFFFFFFFFFFFFFFF >> (64 - size)
+        if (imm & m) != ((imm >> size) & m) { size = size << 1  break }
+        if size <= 2 { break }
+    }
+    uint64 mask = 0xFFFFFFFFFFFFFFFF
+    if size < 64 { mask = 0xFFFFFFFFFFFFFFFF >> (64 - size) }
+    imm = imm & mask
+    uint64 i = 0
+    uint64 cto = 0
+    if a64_is_shifted_mask(imm) != 0 {
+        i = a64_ctz(imm)
+        cto = a64_cto(imm >> i)
+    } else {
+        imm = imm | ~mask
+        if a64_is_shifted_mask(~imm) == 0 { return 0 }
+        uint64 clo = a64_clo(imm)
+        i = 64 - clo
+        cto = clo + a64_cto(imm) - (64 - size)
+    }
+    uint64 immr = (size - i) & (size - 1)
+    uint64 nimms = (~(size - 1)) << 1
+    nimms = nimms | (cto - 1)
+    a64_bm_n = ((nimms >> 6) & 1) ^ 1
+    a64_bm_immr = immr
+    a64_bm_imms = nimms & 0x3F
+    return 1
+}
+
+// AND / ORR / EOR / BIC. rbase is the shifted-register form, ibase the
+// immediate one; `inv` inverts the immediate, which is what makes BIC an alias
+// of AND rather than a separate encoding.
+fn asm_a64_logical(uint64 sptr, uint64 slen, uint64 off, uint64 rbase, uint64 ibase, uint64 inv) {
+    uint64 o = asm_a64_ws(sptr, off, slen)
+    uint64 rd = asm_a64_reg(sptr, o, slen)
+    if rd == 0xFF { asm_a64_operr(sptr, slen) }
+    o = asm_a64_want(sptr, o + a64_tok_len, slen, 44)
+    if o == 0xFFFFFFFF { asm_a64_operr(sptr, slen) }
+    uint64 rn = asm_a64_reg(sptr, o, slen)
+    if rn == 0xFF { asm_a64_operr(sptr, slen) }
+    o = asm_a64_want(sptr, o + a64_tok_len, slen, 44)
+    if o == 0xFFFFFFFF { asm_a64_operr(sptr, slen) }
+    uint64 rm = asm_a64_reg(sptr, o, slen)
+    if rm != 0xFF { emit_a64(rbase | (rm << 16) | (rn << 5) | rd)  return }
+    if ibase == 0 { asm_a64_operr(sptr, slen) }
+    uint64 iv = asm_a64_imm(sptr, o, slen)
+    if a64_tok_len == 0 { asm_a64_operr(sptr, slen) }
+    if a64_imm_neg != 0 { asm_a64_operr(sptr, slen) }
+    uint64 want = iv
+    if inv != 0 { want = ~iv }
+    if a64_bitmask_encode(want) == 0 { asm_a64_operr(sptr, slen) }
+    emit_a64(ibase | (a64_bm_n << 22) | (a64_bm_immr << 16) | (a64_bm_imms << 10) | (rn << 5) | rd)
+}
+
 fn asm_a64_addsub(uint64 sptr, uint64 slen, uint64 off, uint64 ibase, uint64 rbase) {
     uint64 o = asm_a64_ws(sptr, off, slen)
     uint64 rd = asm_a64_reg(sptr, o, slen)
@@ -11845,6 +11986,14 @@ fn asm_emit_a64(uint64 str_tok) {
     }
     if asm_match(sptr, 0, "movz ", 5) != 0 { asm_a64_movwide(sptr, slen, 5, 0xD2800000)  return }
     if asm_match(sptr, 0, "movk ", 5) != 0 { asm_a64_movwide(sptr, slen, 5, 0xF2800000)  return }
+    if asm_match(sptr, 0, "and ", 4) != 0 { asm_a64_logical(sptr, slen, 4, 0x8A000000, 0x92000000, 0)  return }
+    if asm_match(sptr, 0, "orr ", 4) != 0 { asm_a64_logical(sptr, slen, 4, 0xAA000000, 0xB2000000, 0)  return }
+    if asm_match(sptr, 0, "eor ", 4) != 0 { asm_a64_logical(sptr, slen, 4, 0xCA000000, 0xD2000000, 0)  return }
+    // BIC is AND with the complement. The register form has its own encoding
+    // (N=1 in the shift field); the immediate form is AND of the inverted value,
+    // which is why `inv` exists rather than a fourth base.
+    if asm_match(sptr, 0, "bic ", 4) != 0 { asm_a64_logical(sptr, slen, 4, 0x8A200000, 0x92000000, 1)  return }
+    if asm_match(sptr, 0, "orn ", 4) != 0 { asm_a64_logical(sptr, slen, 4, 0xAA200000, 0, 0)  return }
     if asm_match(sptr, 0, "add ", 4) != 0 { asm_a64_addsub(sptr, slen, 4, 0x91000000, 0x8B000000)  return }
     if asm_match(sptr, 0, "sub ", 4) != 0 { asm_a64_addsub(sptr, slen, 4, 0xD1000000, 0xCB000000)  return }
     if asm_match(sptr, 0, "br ", 3) != 0 {
