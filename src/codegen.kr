@@ -11489,6 +11489,14 @@ fn asm_a64_sysreg(uint64 sptr, uint64 off, uint64 slen) -> uint64 {
     if asm_a64_name_at(sptr, off, slen, "daif", 4) != 0 { return 0xB4220 }
     if asm_a64_name_at(sptr, off, slen, "currentel", 9) != 0 { return 0x84240 }
     if asm_a64_name_at(sptr, off, slen, "mpidr_el1", 9) != 0 { return 0x800A0 }
+    // Read-only identification and interrupt-status registers. ApexRift reads
+    // all four and had to spell every one as a raw hex word until now; see
+    // docs/KERNRIFT_GAPS.md G18 in that tree. op0=3, op1=0 throughout, so the
+    // field is CRn<<12 | CRm<<8 | op2<<5 with bit 19 set for op0=3.
+    if asm_a64_name_at(sptr, off, slen, "midr_el1", 8) != 0 { return 0x80000 }
+    if asm_a64_name_at(sptr, off, slen, "id_aa64pfr0_el1", 15) != 0 { return 0x80400 }
+    if asm_a64_name_at(sptr, off, slen, "id_aa64isar1_el1", 16) != 0 { return 0x80620 }
+    if asm_a64_name_at(sptr, off, slen, "isr_el1", 7) != 0 { return 0x8C100 }
     if asm_a64_name_at(sptr, off, slen, "sp_el0", 6) != 0 { return 0x84100 }
     if asm_a64_name_at(sptr, off, slen, "sp_el1", 6) != 0 { return 0xC4100 }
     if asm_a64_name_at(sptr, off, slen, "tpidr_el0", 9) != 0 { return 0xBD040 }
@@ -11582,6 +11590,36 @@ fn asm_a64_hexerr(uint64 sptr, uint64 slen) {
     exit(1)
 }
 
+// `SYS`-alias emitter for the DC/IC/TLBI forms that take a register operand.
+// off is where the register text starts; the caller supplies the (op1, CRn,
+// CRm, op2) tuple, which is what distinguishes one alias from another.
+fn asm_a64_sys(uint64 sptr, uint64 slen, uint64 off, uint64 op1, uint64 crn, uint64 crm, uint64 op2) {
+    uint64 c = asm_a64_ws(sptr, off, slen)
+    uint64 rt = asm_a64_reg(sptr, c, slen)
+    if rt == 0xFF { asm_a64_operr(sptr, slen) }
+    emit_a64(0xD5080000 | (op1 << 16) | (crn << 12) | (crm << 8) | (op2 << 5) | rt)
+}
+
+// `msr DAIFSet, #imm` / `msr DAIFClr, #imm`. The immediate is four bits and
+// sits in the CRm field; anything wider is refused rather than truncated,
+// because a silently narrowed mask is a set of interrupts left unmasked.
+fn asm_a64_pstate(uint64 sptr, uint64 slen, uint64 off, uint64 op2) {
+    uint64 iv = asm_a64_imm(sptr, off, slen)
+    if a64_tok_len == 0 { asm_a64_operr(sptr, slen) }
+    if a64_imm_neg != 0 { asm_a64_operr(sptr, slen) }
+    if iv > 15 { asm_a64_operr(sptr, slen) }
+    emit_a64(0xD500401F | (3 << 16) | (iv << 8) | (op2 << 5))
+}
+
+// imm16 at bit 5, for `smc` and `brk`. Same refusal rule and the same reason.
+fn asm_a64_imm16(uint64 sptr, uint64 slen, uint64 off, uint64 base) {
+    uint64 iv = asm_a64_imm(sptr, off, slen)
+    if a64_tok_len == 0 { asm_a64_operr(sptr, slen) }
+    if a64_imm_neg != 0 { asm_a64_operr(sptr, slen) }
+    if iv > 65535 { asm_a64_operr(sptr, slen) }
+    emit_a64(base | (iv << 5))
+}
+
 fn asm_emit_a64(uint64 str_tok) {
     uint64 tstart = tok_text_start(str_tok)
     uint64 tlen = tok_text_len(str_tok)
@@ -11643,6 +11681,53 @@ fn asm_emit_a64(uint64 str_tok) {
     if asm_match(sptr, 0, "dmb sy", 6) != 0 { emit_a64(0xD5033FBF); return }
     if asm_match(sptr, 0, "dsb ish", 7) != 0 { emit_a64(0xD5033B9F); return }
     if asm_match(sptr, 0, "dmb ish", 7) != 0 { emit_a64(0xD5033BBF); return }
+    // --- cache, TLB and system instructions -----------------------------------
+    //
+    // DC, IC, TLBI and AT ARE ALL ONE ENCODING. They are aliases of
+    // `SYS #op1, Cn, Cm, #op2{, Xt}`:
+    //
+    //     0xD5080000 | op1<<16 | CRn<<12 | CRm<<8 | op2<<5 | Rt
+    //
+    // with Rt = 31 (xzr) for the forms that take no register. So seven table
+    // rows and one emitter cover the whole space this assembler was missing --
+    // which is worth stating because the alternative on offer was seven more
+    // hand-written words, and hand-written words are exactly what this space
+    // must not need.
+    //
+    // WHY IT MATTERS MORE THAN ITS SIZE. Raw hex is the one form nothing checks:
+    // it is not architecture-checked, and until 4403bb6 it was not even
+    // width-checked. A wrong word here does not fault -- `dc cvac` with the
+    // wrong CRm cleans nothing, and the caller's data quietly stays in a cache
+    // line the next reset discards. ApexRift's rec_persist is exactly that, and
+    // its own comment records that no automated row can catch it because no
+    // emulator models a cache that drops dirty lines on reset.
+    if asm_match(sptr, 0, "dc cvac, ", 9) != 0  { asm_a64_sys(sptr, slen, 9, 3, 7, 10, 1)  return }
+    if asm_match(sptr, 0, "dc cvau, ", 9) != 0  { asm_a64_sys(sptr, slen, 9, 3, 7, 11, 1)  return }
+    if asm_match(sptr, 0, "dc civac, ", 10) != 0 { asm_a64_sys(sptr, slen, 10, 3, 7, 14, 1)  return }
+    if asm_match(sptr, 0, "dc cvap, ", 9) != 0  { asm_a64_sys(sptr, slen, 9, 3, 7, 12, 1)  return }
+    if asm_match(sptr, 0, "dc ivac, ", 9) != 0  { asm_a64_sys(sptr, slen, 9, 0, 7, 6, 1)  return }
+    if asm_match(sptr, 0, "dc isw, ", 8) != 0   { asm_a64_sys(sptr, slen, 8, 0, 7, 6, 2)  return }
+    if asm_match(sptr, 0, "dc csw, ", 8) != 0   { asm_a64_sys(sptr, slen, 8, 0, 7, 10, 2)  return }
+    if asm_match(sptr, 0, "dc cisw, ", 9) != 0  { asm_a64_sys(sptr, slen, 9, 0, 7, 14, 2)  return }
+    if asm_match(sptr, 0, "ic ivau, ", 9) != 0  { asm_a64_sys(sptr, slen, 9, 3, 7, 5, 1)  return }
+    if asm_match(sptr, 0, "ic iallu", 8) != 0 && slen == 8   { emit_a64(0xD508751F); return }
+    if asm_match(sptr, 0, "ic ialluis", 10) != 0 && slen == 10 { emit_a64(0xD508711F); return }
+    if asm_match(sptr, 0, "tlbi vmalle1is", 14) != 0 && slen == 14 { emit_a64(0xD508831F); return }
+    if asm_match(sptr, 0, "tlbi vmalle1", 12) != 0 && slen == 12 { emit_a64(0xD508871F); return }
+    if asm_match(sptr, 0, "tlbi alle1", 10) != 0 && slen == 10 { emit_a64(0xD50C879F); return }
+    if asm_match(sptr, 0, "tlbi alle2", 10) != 0 && slen == 10 { emit_a64(0xD50C871F); return }
+    if asm_match(sptr, 0, "tlbi alle3", 10) != 0 && slen == 10 { emit_a64(0xD50E871F); return }
+    // PSTATE writes: `msr <field>, #imm`, which is NOT the system-register form
+    // and never reaches asm_a64_sysreg -- the field names DAIFSet and DAIFClr
+    // are not registers and the immediate lives where CRm does:
+    //
+    //     0xD500401F | op1<<16 | CRm<<8 | op2<<5,  (op1, op2) = (3, 6) set
+    //                                                           (3, 7) clear
+    if asm_match(sptr, 0, "msr daifset, ", 13) != 0 { asm_a64_pstate(sptr, slen, 13, 6)  return }
+    if asm_match(sptr, 0, "msr daifclr, ", 13) != 0 { asm_a64_pstate(sptr, slen, 13, 7)  return }
+    // Secure monitor call and breakpoint, both imm16 at bit 5.
+    if asm_match(sptr, 0, "smc ", 4) != 0 { asm_a64_imm16(sptr, slen, 4, 0xD4000003)  return }
+    if asm_match(sptr, 0, "brk ", 4) != 0 { asm_a64_imm16(sptr, slen, 4, 0xD4200000)  return }
     if asm_match(sptr, 0, "ret", 3) != 0 && slen == 3 { emit_a64(0xD65F03C0); return }
     if asm_match(sptr, 0, "eret", 4) != 0 && slen == 4 { emit_a64(0xD69F03E0); return }
     // Supervisor call: svc #N (16-bit imm)

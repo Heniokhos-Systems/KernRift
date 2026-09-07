@@ -24714,6 +24714,83 @@ else
 fi
 rm -rf "$A64C_D"
 
+# --- the cache, TLB and system-instruction space has mnemonics ---------------
+#
+# G18 in ApexRift's gap list: DC, IC, TLBI, the PSTATE writes, smc/brk and four
+# identification registers had no spelling at all, so a kernel reached for raw
+# hex -- the ONE form this assembler does not check. Its rec_persist is `dc
+# cvac` written as a word, and its own comment records that no automated row can
+# catch a wrong one, because no emulator models a cache that drops dirty lines
+# on reset. A wrong word there does not fault; it leaves the crash record in a
+# line the next reset discards.
+#
+# EVERY INSTRUCTION IS ASSERTED AGAINST ITS RAW-HEX SPELLING, not against a
+# recomputation of the same formula. The words came from `llvm-mc -triple=aarch64
+# -show-encoding`; comparing the mnemonic against arithmetic this file also
+# performs would only prove the encoder agrees with itself. Two independent
+# spellings of the same 25 instructions must produce identical images.
+#
+# THE LIST INCLUDES FORMS THE ENCODER GOT WRONG WHILE BEING WRITTEN. `tlbi
+# alle1` and `tlbi alle2` were first emitted as the SAME word -- ALLE1 is op2=4,
+# ALLE2 is op2=0 -- which assembles cleanly, invalidates the wrong TLBs, and is
+# invisible to anything but a row like this one.
+TOTAL=$((TOTAL + 1))
+G18_D=$(mktemp -d /tmp/krc_g18_XXXX)
+g18_emit() {
+    # $1 = output file, $2 = field to take from each pair (1 = mnemonic, 2 = hex)
+    printf 'fn main() -> uint64 {\n' > "$1"
+    while IFS='|' read -r mn hx; do
+        [ -z "$mn" ] && continue
+        if [ "$2" = "1" ]; then printf '    asm { "%s" }\n' "$mn" >> "$1"
+        else printf '    asm { "%s" }\n' "$hx" >> "$1"; fi
+    done <<'G18EOF'
+dc cvac, x0|0xD50B7A20
+dc civac, x0|0xD50B7E20
+dc cvau, x0|0xD50B7B20
+dc cvap, x0|0xD50B7C20
+dc ivac, x0|0xD5087620
+dc isw, x0|0xD5087640
+dc csw, x0|0xD5087A40
+dc cisw, x0|0xD5087E40
+ic ivau, x0|0xD50B7520
+ic iallu|0xD508751F
+ic ialluis|0xD508711F
+tlbi vmalle1|0xD508871F
+tlbi vmalle1is|0xD508831F
+tlbi alle1|0xD50C879F
+tlbi alle2|0xD50C871F
+tlbi alle3|0xD50E871F
+msr daifset, #2|0xD50342DF
+msr daifclr, #2|0xD50342FF
+msr daifset, #15|0xD5034FDF
+smc #0|0xD4000003
+brk #0|0xD4200000
+mrs x1, midr_el1|0xD5380001
+mrs x1, id_aa64isar1_el1|0xD5380621
+mrs x1, id_aa64pfr0_el1|0xD5380401
+mrs x0, isr_el1|0xD538C100
+G18EOF
+    printf '    return 0\n}\n' >> "$1"
+}
+g18_emit "$G18_D/mn.kr" 1
+g18_emit "$G18_D/hx.kr" 2
+G18_FLAGS="--arch=arm64 --freestanding --target=none --asm-strict --emit=image"
+G18_FLAGS="$G18_FLAGS --load-addr=0x40080000 --stack-top=0x41000000"
+$KRC $G18_FLAGS "$G18_D/mn.kr" -o "$G18_D/mn.bin" >/dev/null 2>&1
+G18_MRC=$?
+$KRC $G18_FLAGS "$G18_D/hx.kr" -o "$G18_D/hx.bin" >/dev/null 2>&1
+G18_HRC=$?
+if [ "$G18_MRC" != 0 ] || [ "$G18_HRC" != 0 ]; then
+    FAIL=$((FAIL + 1)); echo "FAIL: a64_sys_mnemonics (a spelling did not compile: mn=$G18_MRC hex=$G18_HRC)"
+elif cmp -s "$G18_D/mn.bin" "$G18_D/hx.bin"; then
+    PASS=$((PASS + 1)); echo "  a64_sys_mnemonics: PASS (25 instructions, mnemonic == llvm-mc word)"
+else
+    FAIL=$((FAIL + 1))
+    echo "FAIL: a64_sys_mnemonics (the mnemonics do not encode to the measured words)"
+    cmp -l "$G18_D/mn.bin" "$G18_D/hx.bin" 2>/dev/null | head -4 | sed 's/^/      /'
+fi
+rm -rf "$G18_D"
+
 # --- Documentation pin 5, PART B (see Part A above) --------------------------
 # README.md advertises this suite's test count. Compare it against the total
 # only now, when $TOTAL is final and already includes this row (Part A did the
