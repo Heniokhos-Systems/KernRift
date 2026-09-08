@@ -11643,6 +11643,21 @@ fn asm_a64_sysreg(uint64 sptr, uint64 off, uint64 slen) -> uint64 {
     if asm_a64_name_at(sptr, off, slen, "tpidr_el0", 9) != 0 { return 0xBD040 }
     if asm_a64_name_at(sptr, off, slen, "tpidr_el1", 9) != 0 { return 0x8D080 }
     if asm_a64_name_at(sptr, off, slen, "tpidr_el2", 9) != 0 { return 0xCD040 }
+    // THE PERFORMANCE MONITOR'S CYCLE COUNTER. op0=3, op1=3 throughout, so the
+    // same (o0 << 19) | (op1 << 16) | (CRn << 12) | (CRm << 8) | (op2 << 5) the
+    // GIC block below documents. Round-tripped through llvm-mc, not derived:
+    // `mrs x1, pmccntr_el0` is D53B9D01, and D53B9D01 - D5300000 - Rt is B9D00.
+    //
+    // Wanted because cntvct_el0 counts a FIXED 13 MHz on the handset this was
+    // added for, which measures wall time and says nothing about how fast a
+    // core is running. Cycles over ticks is a core's actual frequency, and on a
+    // big.LITTLE part where secondary cores come up at an unknown clock that is
+    // the difference between a measurement and a guess.
+    if asm_a64_name_at(sptr, off, slen, "pmcr_el0", 8) != 0 { return 0xB9C00 }
+    if asm_a64_name_at(sptr, off, slen, "pmcntenset_el0", 14) != 0 { return 0xB9C20 }
+    if asm_a64_name_at(sptr, off, slen, "pmccntr_el0", 11) != 0 { return 0xB9D00 }
+    if asm_a64_name_at(sptr, off, slen, "pmuserenr_el0", 13) != 0 { return 0xB9E00 }
+    if asm_a64_name_at(sptr, off, slen, "pmccfiltr_el0", 13) != 0 { return 0xBEFE0 }
     if asm_a64_name_at(sptr, off, slen, "cntfrq_el0", 10) != 0 { return 0xBE000 }
     if asm_a64_name_at(sptr, off, slen, "cntvct_el0", 10) != 0 { return 0xBE040 }
     if asm_a64_name_at(sptr, off, slen, "cntp_ctl_el0", 12) != 0 { return 0xBE220 }
@@ -11868,6 +11883,14 @@ fn asm_emit_a64(uint64 str_tok) {
     if asm_match(sptr, 0, "msr daifclr, ", 13) != 0 { asm_a64_pstate(sptr, slen, 13, 7)  return }
     // Secure monitor call and breakpoint, both imm16 at bit 5.
     if asm_match(sptr, 0, "smc ", 4) != 0 { asm_a64_imm16(sptr, slen, 4, 0xD4000003)  return }
+    // HYPERVISOR call, the same shape one bit down. Both conduits are normal:
+    // firmware with an EL3 monitor publishes PSCI over smc, while QEMU's -M
+    // virt publishes it over hvc when the guest runs at EL1 with no EL3. A tree
+    // that can only spell `smc` cannot talk to PSCI under emulation at all, so
+    // anything that starts a second CPU has no emulated home and every
+    // iteration of it costs a flash cycle on real hardware. llvm-mc: hvc #0 is
+    // D4000002 and hvc #3 is D4000062, i.e. base | imm << 5.
+    if asm_match(sptr, 0, "hvc ", 4) != 0 { asm_a64_imm16(sptr, slen, 4, 0xD4000002)  return }
     if asm_match(sptr, 0, "brk ", 4) != 0 { asm_a64_imm16(sptr, slen, 4, 0xD4200000)  return }
     if asm_match(sptr, 0, "ret", 3) != 0 && slen == 3 { emit_a64(0xD65F03C0); return }
     if asm_match(sptr, 0, "eret", 4) != 0 && slen == 4 { emit_a64(0xD69F03E0); return }
