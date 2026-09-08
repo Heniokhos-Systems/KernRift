@@ -11653,6 +11653,13 @@ fn asm_a64_sysreg(uint64 sptr, uint64 off, uint64 slen) -> uint64 {
     // core is running. Cycles over ticks is a core's actual frequency, and on a
     // big.LITTLE part where secondary cores come up at an unknown clock that is
     // the difference between a measurement and a guess.
+    // CPUECTLR_EL1 -- IMPLEMENTATION DEFINED, S3_1_C15_C2_1 on Cortex-A55 and
+    // A76, and the register every SMP bring-up has to write. Bit 6 is SMPEN:
+    // with it clear a core's data cache does not participate in coherency, so
+    // the core runs but its caches do not, and it looks like a clock problem
+    // rather than a missing enable. llvm-mc: mrs x1, s3_1_c15_c2_1 is D539F221,
+    // and D539F221 - D5300000 - Rt gives the B... 9F220 below.
+    if asm_a64_name_at(sptr, off, slen, "cpuectlr_el1", 12) != 0 { return 0x9F220 }
     if asm_a64_name_at(sptr, off, slen, "pmcr_el0", 8) != 0 { return 0xB9C00 }
     if asm_a64_name_at(sptr, off, slen, "pmcntenset_el0", 14) != 0 { return 0xB9C20 }
     if asm_a64_name_at(sptr, off, slen, "pmccntr_el0", 11) != 0 { return 0xB9D00 }
