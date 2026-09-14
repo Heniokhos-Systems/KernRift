@@ -20506,6 +20506,44 @@ else
 fi
 rm -f "$ESP_IMP_OK_SRC" "$ESP_IMP_OK_BIN"
 
+# --- a write that runs out of space must fail the build ---
+# codegen_write_output checked the OPEN and ignored the WRITE, so a full disk left
+# a truncated artifact, printed "K bytes -> path" and exited 0. Found on
+# ApexRift's phone, where a 7 MiB ramdisk filled mid-compile and the output held
+# 794624 of 1025064 bytes. /dev/full accepts the open and fails every write with
+# ENOSPC, which is exactly that shape. The exit code is asserted, not the text:
+# the old compiler printed its success line here, so text alone proves nothing.
+# The positive control is the same build to a real file.
+echo ""
+echo "--- a short write to the output fails the build ---"
+if [ -w /dev/full ]; then
+    WF_SRC="/tmp/krc_write_full_src_$$.kr"
+    WF_OK="/tmp/krc_write_full_ok_$$.bin"
+    printf 'fn main() -> uint64 { return 7 }\n' > "$WF_SRC"
+    $KRC --arch=x86_64 "$WF_SRC" -o /dev/full >/dev/null 2>&1
+    WF_EXIT=$?
+    TOTAL=$((TOTAL + 1))
+    if [ "$WF_EXIT" = 1 ]; then
+        PASS=$((PASS + 1))
+        echo "  output_write_full_fails: PASS (exit=1 writing to /dev/full)"
+    else
+        echo "FAIL: output_write_full_fails (expected exit 1 writing to /dev/full, got exit=$WF_EXIT)"
+        FAIL=$((FAIL + 1))
+    fi
+    rm -f "$WF_OK"
+    $KRC --arch=x86_64 "$WF_SRC" -o "$WF_OK" >/dev/null 2>&1
+    WF_OK_EXIT=$?
+    TOTAL=$((TOTAL + 1))
+    if [ "$WF_OK_EXIT" = 0 ] && [ -s "$WF_OK" ]; then
+        PASS=$((PASS + 1))
+        echo "  output_write_ok_control: PASS (exit=0, file written)"
+    else
+        echo "FAIL: output_write_ok_control (expected exit 0 and a file, got exit=$WF_OK_EXIT)"
+        FAIL=$((FAIL + 1))
+    fi
+    rm -f "$WF_SRC" "$WF_OK"
+fi
+
 echo ""
 echo "--- --arch value validation ---"
 ARCHV_SRC="/tmp/krc_archv_$$.kr"

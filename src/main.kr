@@ -4496,7 +4496,7 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
             // material for the segments). A flash image is data, not a host
             // executable: no set_executable.
             uint64 esp_fd = open_output_or_die(output_path)
-            write(esp_fd, esp_image_buf, esp_image_len)
+            write_all_or_die(esp_fd, esp_image_buf, esp_image_len, output_path)
             file_close(esp_fd)
             uint8[64] esnb
             uint64 estl = fmt_uint(esnb, esp_image_len)
@@ -8624,7 +8624,7 @@ fn compile_fatimage(uint64 input_path, uint64 output_path) {
 
     // ---- write ------------------------------------------------------------
     uint64 fd = open_output_or_die(output_path)
-    file_write(fd, img, total)
+    write_all_or_die(fd, img, total, output_path)
     file_close(fd)
 
     // ---- report -----------------------------------------------------------

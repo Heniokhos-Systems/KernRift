@@ -19032,9 +19032,42 @@ fn open_output_or_die(uint64 output_path) -> uint64 {
     return fd
 }
 
+// THE WRITE IS CHECKED TOO, for the same reason the open is. A full disk made
+// the write short, and nothing looked: the compiler printed "K bytes -> path"
+// and exited 0 with a truncated artifact on disk. Measured on ApexRift's phone,
+// whose 7 MiB ramdisk filled mid-compile -- the output held 794624 of its
+// 1025064 bytes, and the only symptom was a checksum that did not match. A
+// write that returns fewer bytes is retried from where it stopped (a POSIX
+// write may legitimately be partial); one that makes no progress or reports an
+// error is fatal, with the path and how far it got.
+fn write_all_or_die(uint64 fd, uint64 buf, uint64 len, uint64 output_path) {
+    uint64 off = 0
+    while off < len {
+        uint64 n = file_write(fd, buf + off, len - off)
+        if n == 0 || n >= 0xFFFFFFFF || n > len - off {
+            uint64 werr = "error: could not write the whole output file (is the disk full?): "
+            write(2, werr, str_len(werr))
+            write(2, output_path, str_len(output_path))
+            uint64 wat = " -- stopped at byte "
+            write(2, wat, str_len(wat))
+            uint8[24] wnb
+            uint64 wl = fmt_uint(wnb, off)
+            write(2, wnb, wl)
+            uint64 wof = " of "
+            write(2, wof, str_len(wof))
+            wl = fmt_uint(wnb, len)
+            write(2, wnb, wl)
+            write(2, "\n", 1)
+            file_close(fd)
+            exit(1)
+        }
+        off = off + n
+    }
+}
+
 fn codegen_write_output(uint64 output_path) {
     uint64 fd = open_output_or_die(output_path)
-    file_write(fd, out_buf, out_len)
+    write_all_or_die(fd, out_buf, out_len, output_path)
     file_close(fd)
 }
 
