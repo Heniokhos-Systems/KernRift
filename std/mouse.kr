@@ -1,7 +1,8 @@
 // KernRift Standard Library — PS/2 mouse
 //
 // A pointer with no OS, no interrupt handler and no driver stack: enable the
-// auxiliary device on the 8042 and read its 3-byte movement packets.
+// auxiliary device on the 8042 and read its movement packets -- 3 bytes, or 4
+// when the device takes the IntelliMouse handshake and reports a scroll wheel.
 //
 // FREESTANDING-SAFE: no allocation.
 //
@@ -35,6 +36,8 @@ const u64 MOUSE_FLAG_X_OVF    = 0x40
 const u64 MOUSE_FLAG_Y_OVF    = 0x80
 
 // Device commands (sent through ps2_aux_write).
+const u64 MOUSE_CMD_SET_SAMPLE_RATE  = 0xF3
+const u64 MOUSE_CMD_GET_ID           = 0xF2
 const u64 MOUSE_CMD_ENABLE_REPORTING  = 0xF4
 const u64 MOUSE_CMD_DISABLE_REPORTING = 0xF5
 const u64 MOUSE_CMD_SET_DEFAULTS      = 0xF6
@@ -49,10 +52,17 @@ static u64 mouse_pos_y    = 0
 static u64 mouse_max_x    = 639
 static u64 mouse_max_y    = 479
 static u64 mouse_btn      = 0
-// Packet assembly: 0, 1 or 2 bytes collected so far.
+// Packet assembly: how many bytes of the current packet are collected so far.
 static u64 mouse_phase    = 0
 static u64 mouse_b0       = 0
 static u64 mouse_b1       = 0
+static u64 mouse_b2       = 0
+// 3 for a plain PS/2 mouse, 4 once the IntelliMouse handshake succeeded.
+static u64 mouse_pkt_len  = 3
+// Wheel steps not yet taken by the caller, one counter per direction so no
+// signed arithmetic leaks into the interface.
+static u64 mouse_wheel_up_n   = 0
+static u64 mouse_wheel_down_n = 0
 // Diagnostics, worth having when a mouse "does nothing".
 static u64 mouse_packets  = 0
 static u64 mouse_resyncs  = 0
@@ -63,6 +73,20 @@ fn mouse_buttons() -> u64 { return mouse_btn }
 fn mouse_is_ready() -> u64 { return mouse_ready }
 fn mouse_packet_count() -> u64 { return mouse_packets }
 fn mouse_resync_count() -> u64 { return mouse_resyncs }
+fn mouse_has_wheel() -> u64 { return mouse_pkt_len == 4 }
+
+// Wheel steps since the last call, and the counter is cleared. "Up" is the
+// finger pushing the wheel away, which a scrolling view shows as going back.
+fn mouse_take_wheel_up() -> u64 {
+    u64 n = mouse_wheel_up_n
+    mouse_wheel_up_n = 0
+    return n
+}
+fn mouse_take_wheel_down() -> u64 {
+    u64 n = mouse_wheel_down_n
+    mouse_wheel_down_n = 0
+    return n
+}
 
 // Cursor is clamped to [0, max]. Call before polling; defaults suit 640x480.
 fn mouse_set_bounds(u64 w, u64 h) {
@@ -98,10 +122,28 @@ fn mouse_init() -> u64 {
     ps2_aux_write(MOUSE_CMD_SET_DEFAULTS)
     ps2_wait_read()                         // its ACK
 
+    // THE INTELLIMOUSE HANDSHAKE, before streaming starts: sample rates 200,
+    // 100, 80 in that order, then ask the device who it is. A wheel mouse
+    // answers ID 3 and from then on sends a FOURTH byte, the signed wheel
+    // movement. A plain mouse ignores the sequence and answers 0, and packets
+    // stay three bytes -- so this is asked, not assumed, because reading a
+    // 3-byte device as a 4-byte one shifts every packet after the first.
+    mouse_pkt_len = 3
+    mouse_intellimouse_rate(200)
+    mouse_intellimouse_rate(100)
+    mouse_intellimouse_rate(80)
+    if ps2_aux_write(MOUSE_CMD_GET_ID) != 0 {
+        if ps2_wait_read() == MOUSE_ACK {
+            if ps2_wait_read() == 3 { mouse_pkt_len = 4 }
+        }
+    }
+
     if ps2_aux_write(MOUSE_CMD_ENABLE_REPORTING) == 0 { return 0 }
     u64 ack = ps2_wait_read()
     if ack != MOUSE_ACK { return 0 }
 
+    mouse_wheel_up_n = 0
+    mouse_wheel_down_n = 0
     mouse_phase = 0
     mouse_btn = 0
     mouse_packets = 0
@@ -109,6 +151,14 @@ fn mouse_init() -> u64 {
     ps2_clear_overflow()
     mouse_ready = 1
     return 1
+}
+
+// One "set sample rate": the command, its ACK, the rate, its ACK.
+fn mouse_intellimouse_rate(u64 rate) {
+    ps2_aux_write(MOUSE_CMD_SET_SAMPLE_RATE)
+    ps2_wait_read()
+    ps2_aux_write(rate)
+    ps2_wait_read()
 }
 
 // Recover from a desynchronised packet stream.
@@ -168,6 +218,18 @@ fn mouse_apply(u64 flags, u64 xb, u64 yb) {
     }
 }
 
+// The fourth byte's low nibble is the wheel movement, 4-bit two's complement:
+// 1..7 is toward the user (down), 8..15 is -8..-1, away (up).
+fn mouse_apply_wheel(u64 b) {
+    u64 z = b & 0x0F
+    if z == 0 { return }
+    if z < 8 {
+        mouse_wheel_down_n = mouse_wheel_down_n + z
+    } else {
+        mouse_wheel_up_n = mouse_wheel_up_n + (16 - z)
+    }
+}
+
 // Non-blocking. Consumes whatever is pending and returns 1 if the cursor or
 // button state changed, else 0.
 fn mouse_poll() -> u64 {
@@ -193,8 +255,19 @@ fn mouse_poll() -> u64 {
         } else if mouse_phase == 1 {
             mouse_b1 = b
             mouse_phase = 2
+        } else if mouse_phase == 2 {
+            if mouse_pkt_len == 4 {
+                mouse_b2 = b
+                mouse_phase = 3
+            } else {
+                mouse_apply(mouse_b0, mouse_b1, b)
+                mouse_phase = 0
+                mouse_packets = mouse_packets + 1
+                changed = 1
+            }
         } else {
-            mouse_apply(mouse_b0, mouse_b1, b)
+            mouse_apply(mouse_b0, mouse_b1, mouse_b2)
+            mouse_apply_wheel(b)
             mouse_phase = 0
             mouse_packets = mouse_packets + 1
             changed = 1

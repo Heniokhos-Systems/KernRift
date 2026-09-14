@@ -53,6 +53,16 @@ fn vga_set_attr(u64 attr) { vga_cur_attr = attr }
 fn vga_get_attr() -> u64 { return vga_cur_attr }
 fn vga_get_row() -> u64 { return vga_row }
 fn vga_get_col() -> u64 { return vga_col }
+// Where the next character goes, and the blinking cursor with it. Out-of-range
+// values are clamped to the last row or column rather than refused: a caller
+// moving "left by n" past column 0 wants column 0.
+fn vga_set_pos(u64 row, u64 col) {
+    vga_row = row
+    vga_col = col
+    if vga_row > VGA_ROWS - 1 { vga_row = VGA_ROWS - 1 }
+    if vga_col > VGA_COLS - 1 { vga_col = VGA_COLS - 1 }
+    vga_sync_cursor()
+}
 
 // --- raw cell access --------------------------------------------------------
 
