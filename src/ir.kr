@@ -4646,8 +4646,25 @@ fn ir_lower_stmt(uint64 node) {
             ir_emit(IR_STATIC_STORE, 0, val, 0, st_off, ir_current_bb)
             return
         }
-        ir_var_set(name_tok, val)
-        return
+        // NEITHER A LOCAL NOR A STATIC. This used to call ir_var_set, which
+        // quietly created a local on first assignment: `tk = 0` in a function
+        // that never declared tk compiled, ran, and would have become a write
+        // to a same-named static the day one was added. A read of the same
+        // undeclared name has always been an error; a write is the same
+        // mistake and is now reported the same way.
+        diag_loc_head(wnt, 0)
+        write(2, "assignment to undeclared variable '", 35)
+        uint64 ats = tok_text_start(wnt)
+        uint64 atl = tok_text_len(wnt)
+        write(2, cg_source + ats, atl)
+        write(2, "' (declare it with a type first)", 32)
+        diag_sugg_reset()
+        diag_sugg_scan(wnt, ir_var_map, ir_var_map_count)
+        diag_sugg_scan(wnt, static_table, static_count)
+        diag_sugg_print()
+        write(2, "\n", 1)
+        diag_span_of(wnt)
+        exit(1)
     }
 
     // Return (12)

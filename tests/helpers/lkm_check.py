@@ -87,12 +87,16 @@ if mode == 'misc':
             die("%s must be UNDEFINED (resolved by the kernel at load)" % ext)
 
 if mode == 'pci':
-    # struct pci_driver is 280 bytes. Same reasoning as file_operations above:
-    # these are kernel ABI sizes, pinned so a codegen change cannot drift them.
+    # struct pci_driver is 288 bytes on kernel 7.0 x86_64 -- BTF,
+    # /sys/kernel/btf/vmlinux: STRUCT 'pci_driver' size=288. It was 280 on 6.17,
+    # and the examples were ported to 7.0's layout in 6368c04 while this pin
+    # stayed behind, so the check failed a correct module. file_operations (272)
+    # and miscdevice (80) are unchanged on 7.0. Same reasoning as above: kernel
+    # ABI sizes, pinned so a codegen change cannot drift them.
     if '_lkm_pci_drv' not in syms:
         die("PCI module has no _lkm_pci_drv object")
-    if syms['_lkm_pci_drv']['size'] != 280:
-        die("_lkm_pci_drv is %d bytes, kernel struct pci_driver is 280"
+    if syms['_lkm_pci_drv']['size'] != 288:
+        die("_lkm_pci_drv is %d bytes, kernel 7.0 struct pci_driver is 288"
             % syms['_lkm_pci_drv']['size'])
     for ext in ('__pci_register_driver', 'pci_unregister_driver'):
         if ext not in syms:

@@ -2973,9 +2973,11 @@ for _std in "$DIR"/../std/*.kr; do
     fi
 done
 # Guard the loop against doing nothing: an empty glob would leave RV_OK=1.
-if [ "$RV_SEEN" != "39" ]; then
+# 52 since the GPU bring-up modules joined std/ (f54921f..5f1cb95); every one
+# is still rejected at its first u64.
+if [ "$RV_SEEN" != "52" ]; then
     RV_OK=0
-    echo "  swept $RV_SEEN std modules, expected 39 -- the glob found the wrong set"
+    echo "  swept $RV_SEEN std modules, expected 52 -- the glob found the wrong set"
 fi
 if [ "$RV_OK" = "1" ]; then
     PASS=$((PASS + 1)); echo "  std_rejected_on_riscv32: PASS (all $RV_SEEN modules rejected at their first u64)"
@@ -9343,6 +9345,11 @@ run_warning_check() {
 echo ""
 echo "--- Compiler diagnostics ---"
 run_error_check "diag_undef_var" 'fn main() { exit(xyz_undefined_name) }' "undeclared identifier"
+# A WRITE to an undeclared name is the same mistake as a read of one. It used to
+# create a local silently, so a typo'd or never-declared name compiled and ran --
+# and would have turned into a write to a static the day one was declared with
+# that name. Found by review in ApexRift (`tk = 0` in a function with no tk).
+run_error_check "diag_assign_undeclared" 'fn main() { tk_undeclared = 5  exit(0) }' "assignment to undeclared variable"
 run_warning_check "diag_unreachable_return" 'fn foo() -> uint64 { return 1; uint64 x = 2; return x } fn main() { exit(0) }' "unreachable code"
 run_warning_check "diag_unreachable_break" 'fn main() { while 1 == 1 { break; uint64 x = 1 } exit(0) }' "unreachable code"
 # ExprStmt after a terminator. These two were SILENTLY MISSED: the diagnostic
@@ -20217,7 +20224,7 @@ fi
 # MLRift (BAR mmap, IOMMU map at a caller-chosen IOVA, MSI-X/eventfd, PCI
 # probe), ~800 lines each, importing 31 kernel symbols. They are the strongest
 # evidence the LKM backend handles more than a hello-world: struct pci_driver
-# (280 B), file_operations (272 B) and miscdevice (80 B) are all laid out by
+# (288 B on kernel 7.0), file_operations (272 B) and miscdevice (80 B) are all laid out by
 # hand and pinned here, so a codegen change cannot drift a kernel ABI size
 # without CI saying so.
 #
@@ -20233,7 +20240,7 @@ for LKM_DRV in mlrift_pci_warm mlrift_pci_cold; do
     if $KRC --arch=x86_64 --emit=lkm "$DIR/../examples/$LKM_DRV.kr" -o "$LKM_DIR/$LKM_DRV.ko" >/dev/null 2>&1 \
        && python3 "$DIR/helpers/lkm_check.py" "$LKM_DIR/$LKM_DRV.ko" pci >/dev/null 2>&1; then
         PASS=$((PASS + 1))
-        echo "  lkm_driver_$LKM_DRV: PASS (pci_driver 280 B, fops 272 B, miscdev 80 B, kernel syms undefined)"
+        echo "  lkm_driver_$LKM_DRV: PASS (pci_driver 288 B, fops 272 B, miscdev 80 B, kernel syms undefined)"
     else
         FAIL=$((FAIL + 1))
         echo "FAIL: lkm_driver_$LKM_DRV ($(python3 "$DIR/helpers/lkm_check.py" "$LKM_DIR/$LKM_DRV.ko" pci 2>&1 | tail -1))"
