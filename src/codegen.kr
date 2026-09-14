@@ -11685,6 +11685,13 @@ fn asm_a64_sysreg(uint64 sptr, uint64 off, uint64 slen) -> uint64 {
     if asm_a64_name_at(sptr, off, slen, "icc_bpr1_el1", 12) != 0 { return 0x8CC60 }
     if asm_a64_name_at(sptr, off, slen, "icc_iar1_el1", 12) != 0 { return 0x8CC00 }
     if asm_a64_name_at(sptr, off, slen, "icc_eoir1_el1", 13) != 0 { return 0x8CC20 }
+    // ICC_SGI1R_EL1 (S3_0_C12_C11_5) raises a software-generated interrupt on
+    // another core: the wake-up an SMP kernel needs, because `sev` is not one.
+    // An event can be lost to a core entering low-power WFE (measured on a
+    // Cortex-A76 that slept through a posted job); an SGI stays PENDING until
+    // the target acknowledges it. llvm-mc: msr icc_sgi1r_el1, x0 = D518CBA0,
+    // and D518CBA0 - D5100000 is the 8CBA0 here. Write-only in the architecture.
+    if asm_a64_name_at(sptr, off, slen, "icc_sgi1r_el1", 13) != 0 { return 0x8CBA0 }
     if asm_a64_name_at(sptr, off, slen, "clidr_el1", 9) != 0 { return 0x90020 }
     if asm_a64_name_at(sptr, off, slen, "ccsidr_el1", 10) != 0 { return 0x90000 }
     if asm_a64_name_at(sptr, off, slen, "csselr_el1", 10) != 0 { return 0xA0000 }
