@@ -6780,19 +6780,47 @@ fn resolve_fnaddr_fixups_a64() {
 
         if found != 0 {
             uint64 wpo = patch_off
-            // For ARM64, ADRP+ADD is PC-relative
-            // ADRP uses page-aligned PC-relative addressing
-            // For simplicity in flat binary: use ADR x0, target (if within ±1MB)
-            // ADR: bits [31]=0, [30:29]=immlo, [28:24]=10000, [23:5]=immhi, [4:0]=Rd
-            uint64 disp = target_off - wpo
-            uint64 imm21 = disp & 0x1FFFFF
-            uint64 immlo = imm21 & 3
-            uint64 immhi = (imm21 >> 2) & 0x7FFFF
-            // ADR x0, disp
-            uint32 adr_instr = 0x10000000 | (immlo << 29) | (immhi << 5) | 0
-            patch_u32(wpo, adr_instr)
-            // NOP the second instruction (ADD)
-            patch_u32(wpo + 4, 0xD503201F)
+            // ADRP + ADD, THE PAIR BOTH BACKENDS RESERVED, and not ADR + NOP.
+            //
+            // This used to patch `ADR x0, disp` and NOP the ADD. ADR reaches
+            // +/-1 MB, and the displacement was masked to 21 bits with no range
+            // check -- so a fn_addr() more than 1 MB from its target compiled
+            // cleanly into an address somewhere else entirely (a 1.29 MB image
+            // pointed a forward reference 803 KB BEHIND its own start). A
+            // bare-metal kernel whose code passes 1 MB is one layout change from
+            // installing a wrong interrupt or syscall handler.
+            //
+            // ADRP reaches +/-4 GB. The page arithmetic is the one
+            // resolve_static_fixups_a64 uses, on the same a64_compute_va, so a
+            // fn_addr is correct wherever a static already is.
+            //
+            // THE REGISTERS ARE THE PLACEHOLDERS' OWN. The legacy backend
+            // reserves `ADRP x0` + `ADD x0, x0`; the IR backend reserves
+            // `ADRP x16` + `ADD x0, x16`. Only the immediates are patched.
+            uint64 code_va = a64_compute_va(wpo)
+            uint64 target_va = a64_compute_va(target_off)
+            uint64 page_delta = (target_va >> 12) - (code_va >> 12)
+            // Signed 21-bit page count. Unreachable in any image this compiler
+            // can emit today, but a wrong address is never an acceptable way to
+            // find out.
+            if page_delta + 0x100000 >= 0x200000 {
+                write(2, "error: fn_addr: '", 17)
+                write(2, cg_source + name_start, name_len)
+                write(2, "' is more than 4 GB from its use (ADRP range)\n", 46)
+                exit(1)
+            }
+            uint64 immlo = page_delta & 3
+            uint64 immhi = (page_delta >> 2) & 0x7FFFF
+            uint32 old_adrp = 0
+            uint64 adrp_addr = out_buf + wpo
+            unsafe { *(adrp_addr as uint32) -> old_adrp }
+            uint64 wadrp = old_adrp
+            patch_u32(wpo, 0x90000000 | (immlo << 29) | (immhi << 5) | (wadrp & 0x1F))
+            uint32 old_add = 0
+            uint64 add_addr = out_buf + wpo + 4
+            unsafe { *(add_addr as uint32) -> old_add }
+            uint64 wadd = old_add
+            patch_u32(wpo + 4, (wadd & 0xFFC003FF) | ((target_va & 0xFFF) << 10))
         } else {
             write(2, "error: fn_addr: undefined function '", 36)
             write(2, cg_source + name_start, name_len)

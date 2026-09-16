@@ -3135,6 +3135,79 @@ fn main() {
     exit(r)
 }' 42
 
+# fn_addr() MORE THAN 1 MB FROM ITS TARGET, on arm64, both backends, both
+# directions.
+#
+# The arm64 resolver used to patch `ADR x0` (+/-1 MB) with the displacement
+# masked to 21 bits and no range check: a far fn_addr compiled cleanly into the
+# address of something else, and call_ptr jumped there (SIGSEGV here; a wrong
+# interrupt handler in a bare-metal kernel). The rows the suite already had all
+# sit a few bytes from their targets, so every one of them passed against it.
+#
+# The padding is ~1.17 MB of IR code (3.2 MB legacy) between main and the
+# target. It is kept alive by a call behind a runtime-false gate -- an
+# uncalled function is dropped, which would silently shrink the gap to nothing
+# -- so the row also asserts the image really is past 1 MB. The near variant is
+# the control: same program, three pad functions, must also return 42.
+#
+# arm64 rows EXECUTE, so they run natively on an arm64 host and under qemu on
+# any other; without either they are not counted.
+fnfar_gen() { # <fwd|back> <nfuncs> <out>
+    awk -v mode="$1" -v F="$2" 'BEGIN {
+      main_src = "fn main() {\n    uint64 gate = alloc(8)\n    store64(gate, 0)\n    if load64(gate) != 0 { exit(pad0(1, 2, 3, 4)) }\n    uint64 fp = fn_addr(\"far_target\")\n    exit(call_ptr(fp))\n}"
+      if (mode == "back") print "fn far_target() -> uint64 { return 42 }"
+      for (f = 0; f < F; f++) {
+        n = (f + 1 < F) ? f + 1 : F - 1
+        printf "fn pad%d(uint64 a, uint64 b, uint64 c, uint64 d) -> uint64 {\n    uint64 x = a\n", f
+        for (i = 0; i < 60; i++)
+          printf "    x = pad%d(x, pad%d(a, b, c, d), pad%d(b, c, d, a), pad%d(c, d, a, b))\n", n, n, n, n
+        print "    return x\n}"
+        if (mode == "fwd" && f == 0) print main_src
+      }
+      if (mode == "back") print main_src
+      if (mode == "fwd") print "fn far_target() -> uint64 { return 42 }"
+    }' > "$3"
+}
+FNFAR_RUN=""
+if [ "$RUN_ARCH" = "arm64" ]; then FNFAR_RUN="native"
+else
+    FNFAR_RUN="$(command -v qemu-aarch64-static || command -v qemu-aarch64 || true)"
+fi
+if [ -n "$FNFAR_RUN" ]; then
+    TOTAL=$((TOTAL + 1))
+    FNFAR_OK=1
+    FNFAR_RAN=0
+    for _m in fwd back; do
+        for _n in 200 3; do
+            fnfar_gen "$_m" "$_n" "$DIR/../fnfar_$$.kr"
+            for _be in "" "--legacy"; do
+                _bin="/tmp/krc_fnfar_$$"
+                if ! $KRC --arch=arm64 $_be "$DIR/../fnfar_$$.kr" -o "$_bin" >/dev/null 2>&1; then
+                    FNFAR_OK=0; echo "  fnfar $_m/$_n ${_be:-IR}: COMPILE FAILED"; continue
+                fi
+                _sz=$(wc -c < "$_bin")
+                if [ "$_n" = "200" ] && [ "$_sz" -le 1100000 ]; then
+                    FNFAR_OK=0; echo "  fnfar $_m/$_n ${_be:-IR}: image only $_sz bytes -- the gap is not past 1 MB"
+                fi
+                if [ "$FNFAR_RUN" = "native" ]; then "$_bin" >/dev/null 2>&1; else "$FNFAR_RUN" "$_bin" >/dev/null 2>&1; fi
+                _rc=$?
+                FNFAR_RAN=$((FNFAR_RAN + 1))
+                [ "$_rc" = "42" ] || { FNFAR_OK=0; echo "  fnfar $_m/$_n ${_be:-IR}: got $_rc, want 42"; }
+                rm -f "$_bin"
+            done
+        done
+    done
+    rm -f "$DIR/../fnfar_$$.kr"
+    [ "$FNFAR_RAN" = "8" ] || { FNFAR_OK=0; echo "  only $FNFAR_RAN/8 fnfar runs executed"; }
+    if [ "$FNFAR_OK" = "1" ]; then
+        echo "  fn_addr_arm64_beyond_1mb: PASS (fwd+back, IR+legacy, far+near control)"
+        PASS=$((PASS + 1))
+    else
+        echo "FAIL: fn_addr_arm64_beyond_1mb"
+        FAIL=$((FAIL + 1))
+    fi
+fi
+
 # --- call_ptr on --target=windows: >4 args + shadow space (legacy backend) ---
 #
 # Win64 passes the first four arguments in rcx/rdx/r8/r9, ALWAYS reserves 32
