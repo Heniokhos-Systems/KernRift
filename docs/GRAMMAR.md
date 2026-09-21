@@ -106,8 +106,12 @@ extern_decl = "extern" "fn" IDENT param_list return_type? ";"?
 
 const_decl  = "const" type IDENT ("=" const_init)?
 static_decl = "static" type IDENT ("=" const_init)?
-            | "static" type "[" INT_LIT "]" IDENT ("=" const_init)?
+            | "static" type "[" const_expr "]" IDENT ("=" const_init)?
 const_init  = INT_LIT | CHAR_LIT | "true" | "false"   (* only literals honoured *)
+const_expr  = (* a compile-time constant expression -- see "Constant
+                 expressions" below. NOT merely INT_LIT: an array size may be
+                 any const-folded expression, including a const or static
+                 NAME declared earlier. *)
 
 struct_decl = "struct" IDENT "{" field* "}"
 field       = type IDENT ";"?  ","?
@@ -164,11 +168,11 @@ defer_stmt  = "defer" block
                Requires the IR backend — `--legacy` rejects it. *)
 
 var_decl        = type IDENT ("=" expr)?
-                | type "[" INT_LIT "]" IDENT    (* stack array *)
+                | type "[" const_expr "]" IDENT (* stack array *)
                 | "let" IDENT "=" expr          (* type inferred from RHS;
                                                    the initializer is required *)
 struct_var_decl = IDENT IDENT ("=" expr)?       (* IDENT is known struct *)
-                | IDENT "[" INT_LIT "]" IDENT   (* struct array *)
+                | IDENT "[" const_expr "]" IDENT (* struct array *)
 tuple_destruct  = "(" type IDENT "," type IDENT ("," type IDENT)? ")" "=" expr
 
 return_stmt = "return" expr?
@@ -332,3 +336,75 @@ The stdlib (`std/*.kr`) layers additional helpers (`str_len`, `opt_some`,
    single expression (see `match_expr` above). Exactly one arm runs.
 8. **`unsafe` / `volatile` blocks wrap exactly one pointer op.** They are
    statement forms, not expression wrappers.
+
+## Constant expressions
+
+An **array size** is a compile-time constant expression, not merely an `INT_LIT`.
+This document said `"[" INT_LIT "]"` in all three array productions until
+2026-09-21; that was stale, and it cost a downstream project real work — a gap
+was reported against the compiler that does not exist, and a gate row plus two
+mutants were written to police two literals that could simply have been one.
+
+```
+const_expr  = const_or
+const_or    = const_xor ("|" const_xor)*
+const_xor   = const_and ("^" const_and)*
+const_and   = const_shift ("&" const_shift)*
+const_shift = const_add (("<<" | ">>") const_add)*
+const_add   = const_mul (("+" | "-") const_mul)*
+const_mul   = const_prim (("*" | "/") const_prim)*
+const_prim  = INT_LIT                     (* decimal or 0x hex *)
+            | "true" | "false"            (* 1 and 0 *)
+            | IDENT                       (* a const or static declared EARLIER *)
+            | "-" const_prim | "~" const_prim
+            | "(" const_expr ")"
+```
+
+Implemented by `parse_const_expr()` / `parse_const_array_size()` in
+`src/parser.kr`; the `pce_*` chain above it is this precedence ladder.
+
+**The one real restriction is ordering.** An `IDENT` must name a `const` or
+`static` declared *earlier* in the file. A forward reference, or any runtime
+variable, is rejected:
+
+```
+static u8[LATER] BUF        (* error: not a const or static declared earlier, *)
+const uint64 LATER = 8      (*        so it has no compile-time value         *)
+```
+
+**Do not confuse this with `const_init`,** which is a different position and
+genuinely is literal-only. A `static`'s *initializer* does not fold:
+`static uint64 X = 16 * 1024` does not yield 16384. So sizes fold; initializers
+do not — and because an `IDENT` in a `const_expr` resolves to the declared
+initializer, a name is only as good as the literal it was given.
+
+Verified against `build/krc2` at 7d23940 on 2026-09-21 — and verified to the
+emitted code, not just to "the parser accepted it":
+
+1. **Identical codegen.** One program, compiled twice, differing *only* in how
+   the three array sizes are spelled (`[CAP]`/`[NP]` versus `[64]`/`[8]`, with
+   the consts still declared in both so only the spelling varies) produces
+   **byte-identical** executables. The constant is folded and codegen is handed
+   the same number.
+2. **Correct at run time.** A harness fills two `const`-sized statics, a
+   `const`-sized stack array, a `const`-sized struct array and a 100,000-byte
+   static, then verifies every element *after* all the writes, so any overlap
+   or short allocation shows up. It exits 0.
+3. **The harness can fail.** Three mutants, each caught with its own exit code:
+   a wrong expected fill value, a wrong byte at index 99,999, and — the one that
+   matters — shrinking a static to 8 bytes so its neighbour's fill overruns it,
+   which the harness detects. A green run therefore means something.
+4. The reported image size tracks the constant exactly (`N + fixed overhead` at
+   1 KiB, 64 KiB, 1 MiB and 4 MiB). Note the *on-disk* file shrinks for large
+   `N` as the array moves to `.bss`; the compiler's reported size is the honest
+   witness, not `stat`.
+
+The forms verified:
+
+```
+const uint64 CAP = 64
+static u8[CAP] BUF                  fn main() -> uint64 { u8[CAP] b  ... }
+static u8[CAP*2] BUF2               struct P { uint64 x }
+static u8[32*2] BUF3                fn main() -> uint64 { P[CAP] ps  ... }
+static u8[0x100] BUF4
+```
