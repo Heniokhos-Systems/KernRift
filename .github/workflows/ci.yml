@@ -79,6 +79,53 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y -qq qemu-system-x86 qemu-system-arm ovmf qemu-efi-aarch64
 
+      # THE OPTIONAL CROSS-TARGET TOOLING, BEST-EFFORT. Without it the suite
+      # still passes -- it just SKIPS the riscv32 and xtensa rows and then says
+      # so ("ran 1508, README says 1618"). That message was being read as noise;
+      # it is the suite reporting that ~86 rows on x86_64 and ~110 on arm64 were
+      # never graded. These four packages are what a full local run has.
+      #
+      # EACH PACKAGE INSTALLS ON ITS OWN, AND A MISSING ONE IS NOT FATAL.
+      # Package names differ across releases -- on Ubuntu 26.04 arm64
+      # qemu-user-static has no candidate and the package is qemu-user
+      # (measured) -- and the runners move to 26 in October 2026. A job must not
+      # go red because a name changed; the rows skip themselves and say why.
+      - name: Install optional cross-target tooling (riscv32, xtensa, qemu-user)
+        run: |
+          sudo apt-get update -qq
+          for p in qemu-system-misc binutils-riscv64-linux-gnu binutils-xtensa-lx106 \
+                   qemu-user-static qemu-user; do
+              if sudo apt-get install -y -qq "$p" >/dev/null 2>&1; then
+                  echo "  installed: $p"
+              else
+                  echo "  unavailable (rows will SKIP): $p"
+              fi
+          done
+          # BRIDGE THE NAME. THE BINARIES ARE THE SAME ONES. The suite asks for
+          # qemu-<arch>-static in 65 places. On Ubuntu 26.04 the qemu-user
+          # package ABSORBED qemu-user-static -- it declares
+          # `Replaces: qemu-user-static`, its description is literally "QEMU
+          # user mode emulation (static binaries)", and unpacking the .deb on a
+          # native arm64 machine shows /usr/bin/qemu-aarch64, qemu-riscv32 and
+          # qemu-x86_64 with no suffix at all. So these ARE the static
+          # emulators; Ubuntu dropped the suffix in the rename. Linking the
+          # name is therefore exact, not an approximation, and it beats
+          # rewriting 65 call sites. A no-op on 24.04, where qemu-user-static
+          # still installs under its own name.
+          for a in aarch64 riscv32 x86_64; do
+              if ! command -v "qemu-$a-static" >/dev/null 2>&1 \
+                 && command -v "qemu-$a" >/dev/null 2>&1; then
+                  sudo ln -sf "$(command -v "qemu-$a")" "/usr/local/bin/qemu-$a-static"
+                  echo "  linked qemu-$a-static -> qemu-$a"
+              fi
+          done
+          echo "--- what the suite can now reach ---"
+          for t in qemu-system-xtensa qemu-system-riscv32 qemu-riscv32-static \
+                   qemu-x86_64-static riscv64-linux-gnu-objdump riscv64-linux-gnu-ld \
+                   xtensa-lx106-elf-objdump; do
+              printf '  %-30s %s\n' "$t" "$(command -v $t >/dev/null 2>&1 && echo yes || echo NO)"
+          done
+
       - name: Test suite
         run: |
           # The suite asserts the kr runner's reported version against the
@@ -438,6 +485,53 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq qemu-system-x86 qemu-system-arm ovmf qemu-efi-aarch64
+
+      # THE OPTIONAL CROSS-TARGET TOOLING, BEST-EFFORT. Without it the suite
+      # still passes -- it just SKIPS the riscv32 and xtensa rows and then says
+      # so ("ran 1508, README says 1618"). That message was being read as noise;
+      # it is the suite reporting that ~86 rows on x86_64 and ~110 on arm64 were
+      # never graded. These four packages are what a full local run has.
+      #
+      # EACH PACKAGE INSTALLS ON ITS OWN, AND A MISSING ONE IS NOT FATAL.
+      # Package names differ across releases -- on Ubuntu 26.04 arm64
+      # qemu-user-static has no candidate and the package is qemu-user
+      # (measured) -- and the runners move to 26 in October 2026. A job must not
+      # go red because a name changed; the rows skip themselves and say why.
+      - name: Install optional cross-target tooling (riscv32, xtensa, qemu-user)
+        run: |
+          sudo apt-get update -qq
+          for p in qemu-system-misc binutils-riscv64-linux-gnu binutils-xtensa-lx106 \
+                   qemu-user-static qemu-user; do
+              if sudo apt-get install -y -qq "$p" >/dev/null 2>&1; then
+                  echo "  installed: $p"
+              else
+                  echo "  unavailable (rows will SKIP): $p"
+              fi
+          done
+          # BRIDGE THE NAME. THE BINARIES ARE THE SAME ONES. The suite asks for
+          # qemu-<arch>-static in 65 places. On Ubuntu 26.04 the qemu-user
+          # package ABSORBED qemu-user-static -- it declares
+          # `Replaces: qemu-user-static`, its description is literally "QEMU
+          # user mode emulation (static binaries)", and unpacking the .deb on a
+          # native arm64 machine shows /usr/bin/qemu-aarch64, qemu-riscv32 and
+          # qemu-x86_64 with no suffix at all. So these ARE the static
+          # emulators; Ubuntu dropped the suffix in the rename. Linking the
+          # name is therefore exact, not an approximation, and it beats
+          # rewriting 65 call sites. A no-op on 24.04, where qemu-user-static
+          # still installs under its own name.
+          for a in aarch64 riscv32 x86_64; do
+              if ! command -v "qemu-$a-static" >/dev/null 2>&1 \
+                 && command -v "qemu-$a" >/dev/null 2>&1; then
+                  sudo ln -sf "$(command -v "qemu-$a")" "/usr/local/bin/qemu-$a-static"
+                  echo "  linked qemu-$a-static -> qemu-$a"
+              fi
+          done
+          echo "--- what the suite can now reach ---"
+          for t in qemu-system-xtensa qemu-system-riscv32 qemu-riscv32-static \
+                   qemu-x86_64-static riscv64-linux-gnu-objdump riscv64-linux-gnu-ld \
+                   xtensa-lx106-elf-objdump; do
+              printf '  %-30s %s\n' "$t" "$(command -v $t >/dev/null 2>&1 && echo yes || echo NO)"
+          done
 
       - name: Self-compile + tests (everything to debug-kit)
         continue-on-error: true
