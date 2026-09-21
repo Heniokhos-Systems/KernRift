@@ -2108,13 +2108,30 @@ nk_bytes() { # <listing> <label>
     ' "$1"
 }
 
+# AN X86-CAPABLE OBJDUMP, WHICH IS NOT THE SAME THING AS "objdump EXISTS".
+# On an arm64 host the system objdump is built for aarch64 only: measured on a
+# native ARM64 machine, `objdump -i` lists ZERO i386 entries, so
+# `-m i386:x86-64` silently produces nothing. Every row below that reads x86
+# machine code then reported "no disassembly produced" and FAILED, when the
+# honest answer is that this machine cannot disassemble x86 -- five rows on the
+# native ARM64 CI job, for 44 commits, while the x86_64 job stayed green.
+# CI installs binutils-x86-64-linux-gnu, so prefer the system objdump when it
+# really supports x86 and fall back to the cross one; empty means neither can,
+# and callers SKIP rather than FAIL.
+x86_objdump() {
+    if objdump -i 2>/dev/null | grep -q 'i386'; then echo objdump
+    elif command -v x86_64-linux-gnu-objdump >/dev/null 2>&1; then echo x86_64-linux-gnu-objdump
+    fi
+}
+X86_OBJDUMP="$(x86_objdump)"
+
 # Disassemble a hex byte string as x86-64 and print every instruction that
 # WRITES a callee-saved register: destination-last operand in AT&T syntax,
 # plus the pop forms.
 nk_x86_bad() { # <hex>
     local _b="/tmp/krc_naked_$$.bin"
     printf '%s' "$1" | xxd -r -p > "$_b"
-    objdump -D -b binary -m i386:x86-64 "$_b" 2>/dev/null \
+    "$X86_OBJDUMP" -D -b binary -m i386:x86-64 "$_b" 2>/dev/null \
         | grep -E ',%(rbx|ebx|bx|bl|bh|rbp|ebp|bp|bpl|r1[2-5][dwb]?)$|pop +%(rbx|rbp|r1[2-5])$'
     rm -f "$_b"
 }
@@ -3221,8 +3238,11 @@ fi
 # CALLEE's parameter prologue is the already-correct named-call Win64 path, so
 # a caller that agrees with it byte-for-byte is validated end to end. Mirrors
 # many_args_direct_call_matches_ir's disassembly discipline, for call_ptr.
-if ! command -v objdump >/dev/null 2>&1 || ! command -v xxd >/dev/null 2>&1; then
-    echo "  call_ptr_windows_shadow_overflow: SKIP (objdump/xxd not installed)"
+# THE GUARD TESTS CAPABILITY, NOT PRESENCE. `command -v objdump` is true on an
+# arm64 host whose objdump cannot disassemble x86 at all, which is how these
+# rows came to FAIL with "no disassembly produced" instead of skipping.
+if [ -z "$X86_OBJDUMP" ] || ! command -v xxd >/dev/null 2>&1; then
+    echo "  call_ptr_windows_shadow_overflow: SKIP (no x86-capable objdump, or xxd missing)"
 else
     # Disassemble `main`'s bytes from a --target=windows --legacy --emit=asm
     # listing as Win64 x86-64, in Intel syntax. nk_bytes (defined above) pulls
@@ -3246,7 +3266,7 @@ else
         # window from the `sub rsp` that reserved this call's stack through the
         # matching `add rsp` cleanup, so the assertions cannot be satisfied by
         # some OTHER call's shadow space elsewhere in main.
-        objdump -D -b binary -m i386:x86-64 -M intel "$_b" 2>/dev/null | awk '
+        "$X86_OBJDUMP" -D -b binary -m i386:x86-64 -M intel "$_b" 2>/dev/null | awk '
             { L[NR]=$0 }
             /call[ ]+rax/ && !seen { c=NR; seen=1 }
             END {
@@ -3364,7 +3384,7 @@ fn main(uint64 image_handle, uint64 system_table) -> uint64 {
     if [ -n "$UEFI_CP_ENTRY" ] && [ -f "$UEFI_CP_EFI" ]; then
         # main only: start at its offset (svc is emitted earlier, at a lower
         # offset, so it is excluded); a 512-byte window covers main entirely.
-        UEFI_CP_DIS=$(objdump -D -b binary -m i386:x86-64 -M intel \
+        UEFI_CP_DIS=$("$X86_OBJDUMP" -D -b binary -m i386:x86-64 -M intel \
             --start-address="$UEFI_CP_ENTRY" --stop-address=$((UEFI_CP_ENTRY + 512)) \
             "$UEFI_CP_EFI" 2>/dev/null)
     fi
@@ -3384,6 +3404,16 @@ fn main(uint64 image_handle, uint64 system_table) -> uint64 {
         }
     fi
 
+    # NO X86 DISASSEMBLER, NO VERDICT. Without this the three rows below read an
+    # EMPTY disassembly: two FAIL with "no disassembly produced", and -- worse --
+    # uefi_win64_not_sysv PASSES, because it asserts the ABSENCE of rdi/rsi and
+    # empty text trivially contains none. A vacuous pass is the one outcome a
+    # gate must never produce, so all three skip together.
+    if [ -z "$X86_OBJDUMP" ]; then
+        echo "  uefi_win64_entry_params: SKIP (no x86-capable objdump)"
+        echo "  uefi_win64_call_ptr_placement: SKIP (no x86-capable objdump)"
+        echo "  uefi_win64_not_sysv: SKIP (no x86-capable objdump)"
+    else
     # Entry: ImageHandle in rcx, SystemTable in rdx (Win64), read into the
     # callee-saved homes the IR backend picks. SysV would read rdi/rsi.
     cpw_assert "uefi_win64_entry_params" "$UEFI_CP_DIS" \
@@ -3408,6 +3438,7 @@ fn main(uint64 image_handle, uint64 system_table) -> uint64 {
     else
         PASS=$((PASS + 1)); echo "  uefi_win64_not_sysv: PASS (Win64 placement, no SysV rdi/rsi)"
     fi
+    fi   # end of the x86-capable-objdump guard
 fi
 
 # --- uint16 pointer operations ---
@@ -7515,22 +7546,30 @@ rm -f "$DIR/../asmop_tmp_$$.kr" /tmp/asmop_$$
 # and passed (measured). Assert on the compiler's stderr as well as the run.
 TOTAL=$((TOTAL + 1))
 #
-# THIS ROW EXECUTES, so the INSTRUCTION has to follow $RUN_ARCH -- `rdtsc` is
-# x86-only and the native ARM64 CI job rejected it ('unrecognized asm
-# instruction'). The property under test is not x86-specific at all (an asm
-# out() operand initialises its variable), so the row keeps its coverage on
-# both arches rather than skipping: arm64 uses a raw-hex NOP, which the
-# compiler's own hint recommends. The constraint register keeps its x86
-# spelling on BOTH backends -- arm64 rejects `x0` and wants `rax`.
+# THIS ROW EXECUTES, so BOTH the INSTRUCTION and the CONSTRAINT REGISTER have
+# to follow $RUN_ARCH. `rdtsc` is x86-only and the native ARM64 job rejected it
+# ('unrecognized asm instruction'), so arm64 uses a raw-hex NOP, which the
+# compiler's own hint recommends. The property under test is not x86-specific
+# at all (an asm out() operand initialises its variable), so the row keeps its
+# coverage on both arches rather than skipping.
+#
+# THE REGISTER SPELLING IS PER-ARCH, and this comment used to claim the
+# opposite -- "arm64 rejects `x0` and wants `rax`". That stopped being true
+# when 2e26c18 (feat(asm): arm64 inline-asm I/O constraints) taught the arm64
+# backend to validate constraint names, and the row then failed on the native
+# ARM64 job with "unknown arm64 inline-asm constraint register 'rax'
+# (want x0-x30)" -- for 44 commits, because CI had not run in that window.
+# Measured: with x0 the arm64 build compiles and exits 9.
 #
 # Whatever the instruction leaves in the register is irrelevant: `v & 0`
 # masks it, so only the diagnostic and the exit code are being asserted.
 ASMOI_INSN='"rdtsc"'
-if [ "$RUN_ARCH" != "x86_64" ]; then ASMOI_INSN='"0xD503201F"'; fi
+ASMOI_REG='rax'
+if [ "$RUN_ARCH" != "x86_64" ]; then ASMOI_INSN='"0xD503201F"'; ASMOI_REG='x0'; fi
 cat > "$DIR/../asmoi_tmp_$$.kr" <<ASMOIEOF
 fn g() -> uint64 {
     uint64 v
-    asm { $ASMOI_INSN } out(rax -> v)
+    asm { $ASMOI_INSN } out($ASMOI_REG -> v)
     return v & 0
 }
 fn main() { exit(g() + 9) }
