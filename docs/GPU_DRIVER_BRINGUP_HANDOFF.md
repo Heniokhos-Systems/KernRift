@@ -25,7 +25,17 @@ and authoritative amdgpu headers. Stage A (SMU) is also validated live on hardwa
 | `gpu_cp_load.kr` | PFP/ME/MEC RS64 fw parse + IC/DC load | fw-parse 15/15 |
 | `gpu_mes_load.kr` | MES fw parse + direct load | fw-parse 9/9 |
 | `gpu_queue.kr` | compute MQD fill + KIQ MAP_QUEUES + doorbell | self-test 8/8 |
+| `gmc.kr` | GMC bring-up: MMHUB 2-level GART + GFXHUB system-aperture identity | ported 1:1 from MLRift (19 fns) |
+| `gmc_constants.kr` | MMHUB / VM_CONTEXT0 / L2 register offsets + PTE flags | constants only, no functions |
+| `gpu_mes_queue.kr` | MES queue-registration path (the other half of `gpu_mes_load`) | 16 fns |
 | `gc_init.kr` | full bring-up orchestrator + VRAM bump allocator | integration test |
+
+**Three of those were missing from this table until 2026-09-26** — `gmc.kr`,
+`gmc_constants.kr` and `gpu_mes_queue.kr` were not mentioned anywhere in this
+document, which matters most for `gmc.kr`: without the memory controller
+programmed there is no GART, and a handoff that skips it reads as though the
+address path comes for free. `gmc_constants.kr` defining no functions is the
+honest number for a register/flag table, not a sign the count is broken.
 
 ---
 
