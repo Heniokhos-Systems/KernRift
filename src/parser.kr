@@ -217,17 +217,55 @@ fn pce_err(uint64 tok, uint64 msg) -> uint64 {
     return 0
 }
 
+// The size `sizeof(T)` yields, from the token that names T. Extracted so the
+// expression parser and the constant folder read it from ONE place: they used
+// to disagree, because the folder had no sizeof at all.
+fn pce_sizeof_of(uint64 arg_tok) -> uint64 {
+    uint32 arg_kind = tok_kind_at(arg_tok)
+    uint64 size = target_word_size()
+    if arg_kind == 80 || arg_kind == 84 || arg_kind == 98 || arg_kind == 99 { size = 1 }
+    else if arg_kind == 81 || arg_kind == 85 { size = 2 }
+    else if arg_kind == 82 || arg_kind == 86 { size = 4 }
+    else if arg_kind == 83 || arg_kind == 87 { size = 8 }
+    else if arg_kind == 94 { size = 2 }
+    else if arg_kind == 95 { size = 4 }
+    else if arg_kind == 96 { size = 8 }
+    else {
+        uint64 si = struct_lookup(arg_tok)
+        if si != 0xFFFFFFFF { size = struct_total_size(si) }
+    }
+    return size
+}
+
 fn pce_primary() -> uint64 {
     uint32 k = cur_kind()
     if k == 10 {
         advance_tok()
-        uint64 v = pce_or()
+        uint64 v = pce_ternary()
         if cur_kind() != 11 { return pce_err(p_tok_pos, "expected ')' closing a constant expression") }
         advance_tok()
         return v
     }
     if k == 31 { advance_tok(); return 0 - pce_primary() }
     if k == 26 { advance_tok(); return ~pce_primary() }
+    if k == 27 {
+        advance_tok()
+        uint64 nv = pce_primary()
+        if nv == 0 { return 1 }
+        return 0
+    }
+    if k == 97 {
+        // sizeof(T). Without this the declaration fell off the allow-list at
+        // the call site and the static silently kept 0 -- `static u64 S =
+        // sizeof(uint64)` was 0 while `sizeof(uint64)` in a body was 8.
+        advance_tok()
+        if cur_kind() != 10 { return pce_err(p_tok_pos, "expected '(' after sizeof") }
+        advance_tok()
+        uint64 sz_arg = advance_tok()
+        if cur_kind() != 11 { return pce_err(p_tok_pos, "expected ')' closing sizeof") }
+        advance_tok()
+        return pce_sizeof_of(sz_arg)
+    }
     if k == 2 { return parse_int_token(advance_tok()) }
     if k == 4 { return parse_int_token(advance_tok()) }
     if k == 77 { advance_tok(); return 1 }
@@ -244,15 +282,62 @@ fn pce_primary() -> uint64 {
     return pce_err(p_tok_pos, "expected a compile-time constant")
 }
 
-fn pce_mul() -> uint64 {
+// THE LADDER BELOW MUST MATCH binop_precedence, AND FOR A LONG TIME IT DID NOT.
+// It nested C's way -- `|` loosest, then `^`, `&`, `<<`, `+`, `*` -- while this
+// language binds `& | ^` TIGHTEST (8), then `<< >>` (7), `* / %` (6), `+ -` (5).
+// So the same expression meant two different things depending only on where it
+// was written, and nothing warned:
+//
+//     static uint64 S = 2 + 3 & 4      folded to 4      (runtime: 2)
+//     static uint64 S = 1 << 2 * 3     folded to 64     (runtime: 12)
+//     static uint64 S = 6 & 1 + 1      folded to 2      (runtime: 1)
+//
+// The chain also stopped at `|`, so everything looser -- comparison, equality,
+// `&&`, `||`, `?:` -- was left unconsumed rather than refused: `static uint64 X
+// = A > 2` folded to A and dropped the `> 2`. The levels are all here now, and
+// pce_trailing_guard turns any operator this chain still cannot take into an
+// error instead of a quiet truncation.
+//
+// In recursive descent the OUTERMOST function is the LOOSEST operator, so
+// precedence 8 -- pce_bit -- is the one that calls pce_primary.
+//
+// COMPARISONS FOLD UNSIGNED. Every value in this folder is a bare u64 bit
+// pattern with no type beside it, and that is also how a folded initializer is
+// stored, so unsigned is the reading that matches what the static holds. Write
+// `signed_lt`-style comparisons in a body, not in an initializer.
+
+fn pce_bit() -> uint64 {
     uint64 v = pce_primary()
     while pce_ok != 0 {
         uint32 k = cur_kind()
-        if k == 22 { advance_tok(); v = v * pce_primary() }
+        if k == 23 { advance_tok(); v = v & pce_primary() }
+        else if k == 24 { advance_tok(); v = v | pce_primary() }
+        else if k == 25 { advance_tok(); v = v ^ pce_primary() }
+        else { return v }
+    }
+    return v
+}
+
+fn pce_shift() -> uint64 {
+    uint64 v = pce_bit()
+    while pce_ok != 0 {
+        uint32 k = cur_kind()
+        if k == 43 { advance_tok(); v = v << pce_bit() }
+        else if k == 44 { advance_tok(); v = v >> pce_bit() }
+        else { return v }
+    }
+    return v
+}
+
+fn pce_mul() -> uint64 {
+    uint64 v = pce_shift()
+    while pce_ok != 0 {
+        uint32 k = cur_kind()
+        if k == 22 { advance_tok(); v = v * pce_shift() }
         else if k == 32 {
             uint64 dt = p_tok_pos
             advance_tok()
-            uint64 d = pce_primary()
+            uint64 d = pce_shift()
             if pce_ok == 0 { return 0 }
             // The compiler would divide by zero itself, which is a crash and
             // not a diagnostic. Named here so the source line is the answer.
@@ -262,7 +347,7 @@ fn pce_mul() -> uint64 {
         else if k == 33 {
             uint64 mt = p_tok_pos
             advance_tok()
-            uint64 m = pce_primary()
+            uint64 m = pce_shift()
             if pce_ok == 0 { return 0 }
             if m == 0 { return pce_err(mt, "remainder by zero in a constant expression") }
             v = v % m
@@ -283,49 +368,130 @@ fn pce_add() -> uint64 {
     return v
 }
 
-fn pce_shift() -> uint64 {
+fn pce_cmp() -> uint64 {
     uint64 v = pce_add()
     while pce_ok != 0 {
         uint32 k = cur_kind()
-        if k == 43 { advance_tok(); v = v << pce_add() }
-        else if k == 44 { advance_tok(); v = v >> pce_add() }
+        if k == 37 {
+            advance_tok()
+            uint64 r = pce_add()
+            if v < r { v = 1 } else { v = 0 }
+        }
+        else if k == 38 {
+            advance_tok()
+            uint64 r2 = pce_add()
+            if v <= r2 { v = 1 } else { v = 0 }
+        }
+        else if k == 39 {
+            advance_tok()
+            uint64 r3 = pce_add()
+            if v > r3 { v = 1 } else { v = 0 }
+        }
+        else if k == 40 {
+            advance_tok()
+            uint64 r4 = pce_add()
+            if v >= r4 { v = 1 } else { v = 0 }
+        }
         else { return v }
     }
     return v
 }
 
-fn pce_and() -> uint64 {
-    uint64 v = pce_shift()
+fn pce_eq() -> uint64 {
+    uint64 v = pce_cmp()
     while pce_ok != 0 {
-        if cur_kind() == 23 { advance_tok(); v = v & pce_shift() }
+        uint32 k = cur_kind()
+        if k == 35 {
+            advance_tok()
+            uint64 r = pce_cmp()
+            if v == r { v = 1 } else { v = 0 }
+        }
+        else if k == 36 {
+            advance_tok()
+            uint64 r2 = pce_cmp()
+            if v != r2 { v = 1 } else { v = 0 }
+        }
         else { return v }
     }
     return v
 }
 
-fn pce_xor() -> uint64 {
-    uint64 v = pce_and()
+fn pce_land() -> uint64 {
+    uint64 v = pce_eq()
     while pce_ok != 0 {
-        if cur_kind() == 25 { advance_tok(); v = v ^ pce_and() }
+        if cur_kind() == 41 {
+            advance_tok()
+            uint64 r = pce_eq()
+            // BOTH SIDES ARE FOLDED, unlike the runtime operator, which
+            // short-circuits. Nothing here can have an effect to skip, and
+            // stopping early would leave the right-hand tokens on the cursor
+            // for the caller's expect() to trip over.
+            if v != 0 && r != 0 { v = 1 } else { v = 0 }
+        }
         else { return v }
     }
     return v
 }
 
-fn pce_or() -> uint64 {
-    uint64 v = pce_xor()
+fn pce_lor() -> uint64 {
+    uint64 v = pce_land()
     while pce_ok != 0 {
-        if cur_kind() == 24 { advance_tok(); v = v | pce_xor() }
+        if cur_kind() == 42 {
+            advance_tok()
+            uint64 r = pce_land()
+            if v != 0 || r != 0 { v = 1 } else { v = 0 }
+        }
         else { return v }
     }
     return v
+}
+
+fn pce_ternary() -> uint64 {
+    uint64 c = pce_lor()
+    if pce_ok == 0 { return 0 }
+    if cur_kind() != 28 { return c }
+    advance_tok()
+    uint64 a = pce_ternary()
+    if pce_ok == 0 { return 0 }
+    if cur_kind() != 19 { return pce_err(p_tok_pos, "expected ':' in a constant ternary") }
+    advance_tok()
+    uint64 b = pce_ternary()
+    if pce_ok == 0 { return 0 }
+    if c != 0 { return a }
+    return b
+}
+
+// An operator left on the cursor means the chain above could not take it, and
+// the old behaviour -- return what was folded so far and let the caller's
+// expect() blame the operator, or worse, accept it -- is how `A > 2` came to
+// fold to A. Anything binary that survives to here is a gap in this folder and
+// says so.
+fn pce_trailing_guard() {
+    if pce_ok == 0 { return }
+    uint32 k = cur_kind()
+    if k == 22 || k == 23 || k == 24 || k == 25 || k == 30 || k == 31
+       || k == 32 || k == 33 || k == 35 || k == 36 || k == 37 || k == 38
+       || k == 39 || k == 40 || k == 41 || k == 42 || k == 43 || k == 44 {
+        pce_err(p_tok_pos, "this operator is not folded in a constant expression")
+        return
+    }
+    // The compound assignments and `=`. These are not folded and never should
+    // be -- an initializer is not a place to assign -- but they are binary
+    // operator tokens, so without this arm `static u64 X = A += 1` stored A
+    // and walked on, which is the same silent truncation by another spelling.
+    if k == 34 || k == 45 || k == 46 || k == 47 || k == 48 || k == 49
+       || k == 50 || k == 51 || k == 52 || k == 53 || k == 54 {
+        pce_err(p_tok_pos, "assignment is not a constant expression")
+    }
 }
 
 // Fold the constant expression at the cursor. pce_ok reports whether it folded;
 // the diagnostic has already been written when it did not.
 fn parse_const_expr() -> uint64 {
     pce_ok = 1
-    return pce_or()
+    uint64 v = pce_ternary()
+    pce_trailing_guard()
+    return v
 }
 
 // An array size, with the two bounds the declaration form implies. Zero is
@@ -2996,12 +3162,15 @@ fn parse_module() -> uint64 {
                 // NOT here: `static uint64 S = "text"` is a live pattern with
                 // its own later fixup, and routing it through the folder would
                 // turn a working declaration into an error.
+                // 97 is `sizeof` and 27 is `!`, both of which the folder now
+                // takes; without them here the skip path below swallowed the
+                // whole initializer and the static silently kept 0.
                 // 255 is TokenKind.Error -- a malformed literal like `0x` or `0b1012`.
                 // Without it here the skip path below swallows it and the
                 // static keeps its default 0, which is quieter than the 72
                 // that `0x` used to produce and just as unasked-for.
                 if init_kind == 3 { str_static_init_die(p_tok_pos) }
-                if init_kind == 2 || init_kind == 4 || init_kind == 77 || init_kind == 78 || init_kind == 1 || init_kind == 10 || init_kind == 255 {
+                if init_kind == 2 || init_kind == 4 || init_kind == 77 || init_kind == 78 || init_kind == 1 || init_kind == 10 || init_kind == 97 || init_kind == 27 || init_kind == 255 {
                     uint64 init_val = parse_const_expr()
                     if pce_ok != 0 {
                         if init_neg != 0 { init_val = 0 - init_val }
@@ -3114,7 +3283,7 @@ fn parse_module() -> uint64 {
                     // expression dropped on the floor.
                     // 255 = TokenKind.Error, as in the const branch above.
                     if sinit_kind == 3 { str_static_init_die(p_tok_pos) }
-                    if sinit_kind == 2 || sinit_kind == 4 || sinit_kind == 77 || sinit_kind == 78 || sinit_kind == 1 || sinit_kind == 10 || sinit_kind == 255 {
+                    if sinit_kind == 2 || sinit_kind == 4 || sinit_kind == 77 || sinit_kind == 78 || sinit_kind == 1 || sinit_kind == 10 || sinit_kind == 97 || sinit_kind == 27 || sinit_kind == 255 {
                         uint64 sinit_val = parse_const_expr()
                         if pce_ok != 0 {
                             if sinit_neg != 0 { sinit_val = 0 - sinit_val }

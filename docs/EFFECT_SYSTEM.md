@@ -16,23 +16,29 @@
 > statement kinds 16/13/14 only, so a call in `return f()`, `uint64 x = f()`,
 > `x = f()`, `f(g())` or `a + f()` was never examined.
 
-Design for four annotation-driven analysis passes in `src/analysis.kr`, plus
-one implemented pass:
+Five annotation-driven analysis passes in `src/analysis.kr`. **All five are
+implemented and all five are fatal** — each reports through `diag_emit_str`
+with `file:line:col` and a caret, and each increments the error count:
 
 1. **Context** (`@ctx`) — which execution mode a function is legal in
-   (task / IRQ / NMI). *Not implemented.*
+   (task / IRQ / NMI). `ctx-check: this context is stricter than the callee's`
 2. **Effects** (`@eff`) — what an operation is allowed to do
-   (I/O, allocate, acquire a lock). *Not implemented.*
+   (I/O, allocate, acquire a lock).
+   `eff-check: body has an effect this @eff does not declare`
 3. **Locks** (`@acquires` / `@releases`) — deadlock detection via a
-   lock-order graph. *Not implemented.*
+   lock-order graph.
+   `lock-check: lock acquisition order has a cycle (possible deadlock)`
 4. **Capabilities** (`@caps`) — coarse-grained permission tags.
-   *Not implemented.*
+   `cap-check: uses a capability but declares no @caps (module opted in)`
 5. **Critical regions** — `alloc` between `acquire` and `release`.
-   **Implemented**, with the limits documented in §5.
+   `critical-region: alloc inside a critical section`, with the limits
+   documented in §5.
 
-Even for the implemented pass the diagnostics are advisory: they print to
-stderr with no `file:line:` prefix, `krc check` still reports `- OK`, and the
-exit status stays 0.
+**`krc check` is the only command that runs them.** An ordinary compile does
+not: a file whose `@ctx(irq)` function calls an `@ctx(task)` helper builds and
+exits 0 under `krc file.kr -o out`, and fails only under `krc check file.kr`.
+That is deliberate — the passes are a lint step, not part of codegen — but it
+means a build being green says nothing about these five.
 
 This document supersedes the one-line note in `ARCHITECTURE.md` that
 mentioned "ctx, eff, lock, caps, critical" as passes with no further
@@ -313,23 +319,23 @@ Current limitations — these are narrow, and you will hit them immediately:
   `acquire` opens a region, whether or not it takes a lock.
 - **`alloc` is the only forbidden call.** Blocking syscalls and stricter-`@ctx`
   callees, both listed under "Rationale" above, are not checked.
-- **The diagnostic has no `file:line:` prefix** and does not affect the exit
-  status — `krc check` still prints `- OK` and exits 0 (see §7).
 - No awareness of unreachable paths.
-- No support for "releasing *from* the current scope *on return*"
-  (i.e., no RAII / defer).
+- **The pass does not know about `defer`.** The language has it — `defer {
+  release(1) }` runs on every exit path, early returns included — but the
+  critical-region matcher looks for a bare `release` *call statement*, so a
+  lock released through `defer` reads to this pass as never released. Code
+  written the safe way is the code this pass understands least.
 
 ---
 
 ## 6. Roadmap
 
-The current passes are a useful first draft — they catch obvious bugs
-and give annotations a home. The next steps are to promote them from
-advisory to authoritative:
+Three of the seven items below are **done**: diagnostics now route through the
+diagnostic table (1), `defer` exists in the language (6), and violations are
+hard errors rather than warnings (7). The rest stand.
 
-1. **Diagnostics go through `diag_emit`.** Today each pass prints
-   directly to stderr. Routing through the diagnostic table would give
-   us consistent `file:line: error:` prefixes and an error count.
+1. ~~**Diagnostics go through `diag_emit`.**~~ **Done.** Every pass reports
+   through `diag_emit_str` with `file:line:col`, a caret and an error count.
 2. **Transitive effect/ctx inference.** Let the compiler compute
    `caller's minimum ctx` = `min over all callees` and warn only
    on user-declared mismatches, not on the inferred transitivity.
@@ -339,19 +345,20 @@ advisory to authoritative:
    release pattern per basic block, not lexically.
 5. **Module-level capability manifesto.** `@caps(mmio, irq_mask)` at
    the top of a file.
-6. **`defer { release(lock) }`.** A scope-exit action that runs on
-   every exit path, including early returns. Halves the chance of
-   leaked locks.
-7. **Reject violations, don't just warn.** Once (1)–(6) are solid,
-   promote to hard errors. Until then, tooling-only.
+6. ~~**`defer { release(lock) }`.**~~ **Done in the language, not in this
+   pass.** `defer` is a keyword and its block runs on every exit path,
+   including early returns. What is left is teaching the critical-region
+   matcher to count a deferred `release` as a release — see §5.
+7. ~~**Reject violations, don't just warn.**~~ **Done.** All five passes are
+   hard errors under `krc check`, which exits 1. This did not wait for
+   (1)–(6); what it waited for was (1).
 
 ---
 
 ## 7. Minimal reproducer
 
-There is no program that exercises "every pass", because four of the five
-cannot produce output at all (see the status box at the top). This reproducer
-exercises the **one** pass that works. Save it as `demo_eff.kr`:
+All five passes produce output; this reproducer exercises the critical-region
+one, which is the pass with the interesting limits. Save it as `demo_eff.kr`:
 
 ```kr
 // The critical-region pass matches `acquire` / `release` / `alloc` by name,
@@ -368,39 +375,48 @@ fn main() {
 }
 ```
 
-Measured with krc 2.9.0:
+Measured on this tree:
 
 ```
 $ krc check demo_eff.kr
-critical-region: alloc inside critical section
-krc check: demo_eff.kr - OK
+demo_eff.kr:6:5: error: critical-region: alloc inside a critical section
+     6 |     alloc(8)            // reported
+       |     ^~~~~
+
+1 error(s), 0 warning(s)
+
+krc: 1 error(s) found in demo_eff.kr
 $ echo $?
-0
+1
 ```
 
-Exactly one line, on stderr, with no `file:line:` prefix — and note that
-`check` still says `- OK` and exits 0, so this diagnostic will not fail a
-build or a CI step.
+A located error with a caret, counted, and a non-zero exit — so it *will* fail
+a CI step that runs `krc check`.
 
-Two edits that make even that one warning disappear, both worth knowing
-because they are how normal code is written:
+**One of the two old escape hatches is closed and one is still open**, and the
+difference is worth knowing because both are how normal code gets written:
 
 ```kr
     acquire(1)
-    u64 b = alloc(8)    // SILENT: a declaration, not a bare call statement
+    u64 b = alloc(8)    // CAUGHT since the traversals became recursive
     release(1)
 ```
 
 ```kr
     acquire(1)
     if 1 == 1 {
-        alloc(8)        // SILENT: the pass does not descend into nested blocks
-    }
+        alloc(8)        // STILL SILENT: the pass does not descend into
+    }                   // nested blocks
     release(1)
 ```
 
-Both were run against krc 2.9.0 and produced `krc check: … - OK` with no
-`critical-region` line.
+The first now reports at `6:13`, pointing at the `alloc` rather than the
+statement — a declaration is no longer a way around the check. The second
+still produces `krc check: … - OK` and exit 0: `check_critical_block` walks one
+block's statements and does not recurse into the bodies of `if` / `while` /
+`for`, so wrapping the allocation in any nested block hides it. That is the
+real limit of this pass, and it is a limit of the *traversal*, not of the
+matching.
 
 ### What the old version of this section claimed
 

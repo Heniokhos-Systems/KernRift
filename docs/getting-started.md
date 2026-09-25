@@ -105,9 +105,12 @@ zero. Remainder: `7 % 2 == 1`.
 to exit a loop early and `continue` to skip to the next iteration
 (`continue` works in every loop form, including `for`).
 
-**Literals**: decimal `42`, hex `0x2A`, character `'A'` / `'\n'` / `'\t'`
-/ `'\\'` / `'\''` / `'\0'` (evaluate to their byte value; use them
-directly in comparisons: `if c == 'a' { ... }`).
+**Literals**: decimal `42`, hex `0x2A` (capital `0X` too), binary `0b1010`,
+character `'A'` / `'\n'` / `'\t'` / `'\\'` / `'\''` / `'\0'` (evaluate to their
+byte value; use them directly in comparisons: `if c == 'a' { ... }`). `_` is a
+digit separator anywhere in a number — `1_000_000`, `0xFF_FF`, `0b1010_1010` —
+and it works inside floats as well. There are **no octal (`0o`) literals** and
+no `\u{...}` escape.
 
 **Printing**:
 

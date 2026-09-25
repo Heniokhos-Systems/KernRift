@@ -4,6 +4,18 @@ All notable changes to `kernriftc` are documented in this file.
 
 ## Unreleased
 
+**Fixed: `krc check` rejected correct programs — the critical region did not end
+at the `release`.** `crit_find_alloc` was handed one statement and then followed
+`ast_next` from it, so a search started at one statement ran on through every
+*later* statement in the same block. Its caller only asks while the region depth
+is above zero, so an `alloc` written **after** the matching `release` was
+reported as being inside the region, and a `defer` placed before an `alloc`
+reported that one allocation **twice**. Both were fatal, because this pass stopped
+being advisory: a program doing nothing wrong failed `krc check` with exit 1. The
+sibling walk is still needed — `ast_child` and the data2/data3 slots are list
+heads — so it moved to `crit_find_alloc_list`, and the entry point now examines
+one node and the subtree below it. (`src/analysis.kr`.)
+
 **Fixed: every `f32` built-in returned `0` for a float literal.** `sqrt_f32(16.0)`
 answered `0.0` while `sqrt_f32(x)` for an `f32` `x` answered `4.0`, on both
 backends. A float literal is materialised as an `f64`; handed straight to an
@@ -19,6 +31,39 @@ well. (`src/ir.kr`, `ir_lower_expr_as_f32`.)
 least likely to be recognised as keywords by whoever just used one as a variable
 name. Every operator, every compound assignment, `extern`, `sizeof` and the
 sized integer aliases were also anonymous. The table is now complete.
+
+**Docs: the stale-claim sweep.** Every figure below was re-measured on this
+tree rather than carried forward.
+
+* `docs/GRAMMAR.md` said binary literals and `_` digit separators were **not
+  implemented**. Both work — `0b101` is 5, `1_000` is 1000, `1_0.5` is 10.5 —
+  and the lexical grammar now has `BIN_LIT`, the separator in every numeric
+  production, and the error-token rules for a prefix with no digits. Octal and
+  `\u{...}` really are still missing and now say so on their own. Its keyword
+  list held 39 of the 51 keywords (`defer`, `import`, `loop`, `f16` and the
+  eight long integer spellings were absent) and its built-in list named seven
+  things that do not exist — `mmap`, `munmap`, `open`, `close`, `syscall`,
+  `memcmp`, `memzero` — while omitting about thirty that do. Both lists are now
+  checked to be byte-identical to `src/lexer.kr` and `src/analysis.kr`.
+* `docs/EFFECT_SYSTEM.md` contradicted itself: a banner saying all five passes
+  are implemented and fatal, and three paragraphs later four of them marked
+  *Not implemented* with the fifth "advisory ... exit status stays 0". The
+  banner was right. The body, the reproducer's transcript and the roadmap are
+  rewritten against measured output, including which of the two documented
+  escape hatches is now closed (a declaration) and which is still open (a
+  nested block).
+* `docs/ARCHITECTURE.md` put the self-compile at "near 48%" of the token cap.
+  It is at **66%** — 350,849 of 524,288 — so the headroom to the 80% failure
+  line is 14 points, not 32. `src/format_arx.kr` was missing from the source
+  tree listing entirely, and the container list named four formats out of
+  thirteen emit modes.
+* `docs/STDLIB.md` and `README.md` said the standard library had 39 modules and
+  590 functions; it has **52 and 704**. `README.md` contradicted itself, saying
+  52 in one paragraph and 39 in three others. `std/sha256.kr` had a section but
+  no row in the module index.
+* `README.md`'s self-compilation figures were a stale run: 328,104 tokens and
+  1.12 MB are now 350,849 and 1.22 MB, and the legacy/IR timing table is
+  re-measured on the same machine it was first measured on.
 
 **Docs.** `docs/LANGUAGE.md` gained a reserved-words list (all 51, checked
 against `src/lexer.kr`), and the float/conversion built-ins, `bit_toggle` and

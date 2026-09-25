@@ -517,35 +517,55 @@ fn check_critical_block(uint64 block_node, uint64 in_critical) -> uint64 {
 // A forbidden call hides in a VarDecl initializer (`uint64 p = alloc(16)` —
 // the commonest shape), an assignment or a return, none of which the
 // statement-kind-16 arm below covers.
-fn crit_find_alloc(uint64 node) -> uint64 {
-    uint64 wn = node
+//
+// THE SUBTREE, NEVER THE SIBLINGS. One function used to do both jobs: its
+// loop followed `ast_next` from the node it was handed, so a search started
+// at ONE statement ran on through every statement after it in the same block.
+// The caller only asks while depth > 0, so an `alloc` written AFTER the
+// matching `release` was reported as being inside the region, and a `defer`
+// before it made the same `alloc` report twice — once for itself and once
+// through the defer's sibling walk. With this pass fatal (§7) that rejected
+// correct programs rather than merely nagging about them.
+//
+// The sibling walk is still needed, because `ast_child` and the data2/data3
+// slots are LIST HEADS, so it moves to crit_find_alloc_list and the entry
+// point examines exactly one node and what hangs below it.
+fn crit_find_alloc_list(uint64 first) -> uint64 {
+    uint64 wn = first
     while wn != 0 {
-        uint64 k = ast_kind(wn)
-        if k == 35 {
-            uint32 ct = ast_data1(wn)
-            if tok_matches(ct, "alloc", 5) != 0 { return ct }
-        }
-        uint32 ch = ast_child(wn)
-        if ch != 0 {
-            uint64 r = crit_find_alloc(ch)
-            if r != 0 { return r }
-        }
-        if k == 33 || k == 38 || k == 42 {
-            uint32 r2 = ast_data2(wn)
-            if r2 != 0 {
-                uint64 r = crit_find_alloc(r2)
-                if r != 0 { return r }
-            }
-        }
-        if k == 12 || k == 36 {
-            uint32 d3 = ast_data3(wn)
-            if d3 != 0 {
-                uint64 r = crit_find_alloc(d3)
-                if r != 0 { return r }
-            }
-        }
+        uint64 r = crit_find_alloc(wn)
+        if r != 0 { return r }
         uint32 nx = ast_next(wn)
         wn = nx
+    }
+    return 0
+}
+
+fn crit_find_alloc(uint64 node) -> uint64 {
+    if node == 0 { return 0 }
+    uint64 k = ast_kind(node)
+    if k == 35 {
+        uint32 ct = ast_data1(node)
+        if tok_matches(ct, "alloc", 5) != 0 { return ct }
+    }
+    uint32 ch = ast_child(node)
+    if ch != 0 {
+        uint64 r = crit_find_alloc_list(ch)
+        if r != 0 { return r }
+    }
+    if k == 33 || k == 38 || k == 42 {
+        uint32 r2 = ast_data2(node)
+        if r2 != 0 {
+            uint64 r2f = crit_find_alloc_list(r2)
+            if r2f != 0 { return r2f }
+        }
+    }
+    if k == 12 || k == 36 {
+        uint32 d3 = ast_data3(node)
+        if d3 != 0 {
+            uint64 d3f = crit_find_alloc_list(d3)
+            if d3f != 0 { return d3f }
+        }
     }
     return 0
 }

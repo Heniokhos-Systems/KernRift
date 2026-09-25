@@ -7,7 +7,9 @@ per shape of failure** so the standard library, example code, and every
 future stdlib addition stay consistent.
 
 The three patterns below cover every error-returning function in the
-stdlib as of v2.8.14.
+stdlib. They were settled at v2.8.14, when `std/` had 39 modules; it now has
+52, and the conventions are unchanged — a new module picks one of these three
+rather than inventing a fourth.
 
 ---
 
@@ -89,9 +91,12 @@ failure:
 u64[1] out
 u64 ok = parse_config_u64(line, out)
 if ok == 0 { println("bad line"); exit(1) }
-u64 v = 0
-unsafe { *(out as uint64) -> v }
+u64 v = load64(out)
 ```
+
+`load64` is the spelling to use. The older `unsafe { *(out as uint64) -> v }`
+still compiles and still means the same thing, but the load/store built-ins are
+what `living.kr` migrates that form towards, and they need no `unsafe` block.
 
 This matches how `atomic_cas` already works today: it returns `1` on
 swap, `0` on mismatch, and the next-value read is separate.

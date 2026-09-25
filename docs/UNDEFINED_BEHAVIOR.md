@@ -70,7 +70,7 @@ reasoning for anything non-obvious.
 | Operation                               | Status   | Notes |
 |-----------------------------------------|----------|-------|
 | `atomic_load` / `atomic_store` (aligned, same size) | Defined | Sequential consistency on both x86 and ARM64. ARM64 uses the acquire/release forms `LDAR` / `STLR` — **not** a `DMB ISH`, which earlier revisions of this table claimed; x86 uses `lock` / `mfence`. |
-| `atomic_cas` success path               | Defined  | Returns 1 on success, 0 on failure. Out-param always written with the current value. |
+| `atomic_cas` success path               | Defined  | `atomic_cas(addr, expected, desired)` — three arguments, no out-parameter. Returns **1** when the swap happened and **0** when it did not; it does **not** return the previous value. Read the current value with a separate `atomic_load` if you need it. An earlier revision of this table described an out-param that has never existed. |
 | `atomic_add` / `sub` / `and` / `or` / `xor` | Defined | Return the previous value. Sequentially consistent — an `LDAXR`/`STLXR` retry loop on ARM64, a `lock`-prefixed instruction on x86. (The `--emit=asm` disassembler labels those two encodings `ldxr`/`stxr`; the encodings themselves have the acquire/release bit set.) |
 | Data race (non-atomic concurrent access) | **Undefined** | Torn reads / writes observable. |
 | `dmb()` / `dsb()` / `isb()`              | Defined  | Emit the corresponding ARMv8 barrier; no-op on x86. |
@@ -208,7 +208,17 @@ block.
 
 Items tracked against the UB surface:
 
-- #53 — `static T x = expr` silently drops non-literal initializers.
+- ~~#53 — `static T x = expr` silently drops non-literal initializers.~~
+  **Closed.** Initializers fold: `16 * 1024` is 16384, `A + 1` reads an earlier
+  `static`, and `sizeof(uint64)`, comparisons, `&&` / `||` and `?:` all work.
+  Two real defects sat behind this item and are fixed with it. The folder's
+  precedence ladder nested C's way while the language binds `& | ^` tightest,
+  so a constant expression could mean something different from the same text in
+  a body — `static uint64 S = 2 + 3 & 4` folded to 4 where a body evaluates 2 —
+  and the ladder stopped at `|`, leaving looser operators unconsumed instead of
+  refused. An operator the folder cannot take is now an error. Comparisons fold
+  **unsigned**, and folded `&&` / `||` evaluate both sides; see
+  `docs/GRAMMAR.md` "Constant expressions".
 - Bounds-checked slice indexing (opt-in `--safe` mode): not started; on
   the roadmap. Compile-time-sized array indexing already traps under
   `--debug` (both stack `T[N] name` and `static T[N] name`).

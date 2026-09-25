@@ -1,6 +1,6 @@
 # Architecture
 
-The KernRift compiler (`krc`) is a self-hosting compiler written entirely in KernRift. It compiles itself to a bit-identical fixed point. No external assembler, linker, or C toolchain is involved — `krc` writes ELF, Mach-O, PE, and ESP32 esp-image headers plus native machine code directly to disk.
+The KernRift compiler (`krc`) is a self-hosting compiler written entirely in KernRift. It compiles itself to a bit-identical fixed point. No external assembler, linker, or C toolchain is involved — `krc` writes every container itself, plus native machine code, directly to disk. The emit modes are `elfexe`, `macho`, `pe`, `android`, `obj`, `asm`, `ir`, `image` (a flat position-independent blob), `fatimage` (x86_64 and arm64 in one bootable file), `uefi` (a PE the firmware loads), `lkm` (a Linux kernel module), `arx` and `arxmod` (ApexRift's own container, program and loadable module) — thirteen in all, and `--emit=` selects one.
 
 ## Source Structure
 
@@ -26,6 +26,9 @@ src/
 ├── format_macho.kr    macOS Mach-O header emission
 ├── format_pe.kr       Windows PE/COFF headers + import table
 ├── format_espimage.kr ESP32 esp-image container (byte-identical to esptool)
+├── format_arx.kr      ARX container (--emit=arx / --emit=arxmod) — ApexRift's
+│                      own executable format; the spec lives in ApexRift's
+│                      docs/ARX_FORMAT.md, so this file implements a contract
 ├── format_android.kr  Android ELF quirks (DT_FLAGS_1, soname)
 ├── format_archive.kr  AR archives, KRBO objects, KrboFat v2 (BCJ + LZ-Rift)
 ├── bcj.kr             Branch/call/jump filter for better compression
@@ -106,7 +109,7 @@ This bypasses the SELinux file-label transition Termux uses to block execve of u
 ## Key Design Decisions
 
 - **Flat AST**: 32-byte nodes (8 fixed 4-byte slots: kind, data1–data4, tok, child, next) in a contiguous arena, 1-indexed. No pointers, just indices. Tokens are 16-byte records in a parallel arena.
-- **Arenas, some fixed and some growable**: the token buffer is sized for 524288 tokens and the AST arena similarly; the self-compile sits near 48%, and `make check` fails if it crosses 80% (raise `max_tok` in `main.kr` before that). Several tables that used to have hard caps now grow on demand through the shared `grow_buf` helper (`codegen.kr`) — a fresh mmap, a copy, then release of the old mapping. That covers the IR instruction arena and its parallel source-token table, the IR basic-block lists, the struct table and each struct's field list, and the import machinery (seen-set, search paths, path buffer). Because `grow_buf` moves the base pointer, any code holding a raw offset into one of these tables must re-derive it after a growth. Tables that still have fixed caps fail loud on overflow rather than truncating.
+- **Arenas, some fixed and some growable**: the token buffer is sized for 524288 tokens and the AST arena similarly. **The self-compile is at 66% of that cap — 350,849 tokens of 524,288 — and `make check` fails at 80%.** That is 14 points of headroom, not the 32 this document claimed while the figure sat at 48%, so the number is worth re-measuring rather than assuming: `make check` prints it, and raising `max_tok` in `main.kr` is the fix when it gets there. Several tables that used to have hard caps now grow on demand through the shared `grow_buf` helper (`codegen.kr`) — a fresh mmap, a copy, then release of the old mapping. That covers the IR instruction arena and its parallel source-token table, the IR basic-block lists, the struct table and each struct's field list, and the import machinery (seen-set, search paths, path buffer). Because `grow_buf` moves the base pointer, any code holding a raw offset into one of these tables must re-derive it after a growth. Tables that still have fixed caps fail loud on overflow rather than truncating.
 - **IR (not SSA)**: target-independent opcodes (115 as of v2.9.0; see [IR_REFERENCE.md](IR_REFERENCE.md)), virtual registers, liveness, graph-coloring register allocator with Briggs/George copy coalescing, an AST-level inliner, LICM, constant folding, DCE, and CSE. Linear three-address code over unbounded vregs — named variables reuse one vreg across assignments, so no phi is ever needed and `IR_PHI` has zero construction sites. Added in v2.8.2, replacing the "no IR" stance of earlier versions.
 - **Per-target emitters, shared IR**: Linux/macOS/Windows/Android syscall conventions, Mach-O argc/argv in x0/x1, Windows IAT calls — all handled at emission time from the same abstract opcodes.
 - **No external tools**: the compiler writes binaries directly; there is no assembler, linker, or libc in the build graph.

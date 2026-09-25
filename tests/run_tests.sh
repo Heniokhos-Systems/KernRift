@@ -6040,6 +6040,161 @@ else
 fi
 rm -f /tmp/krc_critregion_$$.kr /tmp/krc_critregion_out_$$.txt
 
+# THE REGION ENDS AT THE RELEASE, and until this fix it did not. crit_find_alloc
+# was handed one statement and then followed `ast_next` from it, so the search
+# ran on through every LATER statement in the same block. The caller only asks
+# while depth > 0, so an `alloc` written AFTER the matching `release` was
+# reported as being inside the region -- and since this pass is fatal, `krc
+# check` REJECTED a correct program. `uint64 z = 1` is what makes the bug
+# reachable: it is the non-ExprStmt statement inside the region that triggers
+# the subtree search in the first place, so deleting it hides the regression.
+TOTAL=$((TOTAL + 1))
+cat > /tmp/krc_critafter_$$.kr <<'KREOF'
+fn acquire(uint64 l) { }
+fn release(uint64 l) { }
+fn main() {
+    acquire(1)
+    uint64 z = 1
+    release(1)
+    alloc(8)
+    println(z)
+    exit(0)
+}
+KREOF
+$KRC check /tmp/krc_critafter_$$.kr > /tmp/krc_critafter_out_$$.txt 2>&1
+critafter_rc=$?
+if [ "$critafter_rc" = "0" ] && ! grep -q 'critical-region' /tmp/krc_critafter_out_$$.txt; then
+    PASS=$((PASS + 1)); echo "  analysis_critical_region_ends_at_release: PASS (alloc after release accepted)"
+else
+    FAIL=$((FAIL + 1))
+    echo "FAIL: analysis_critical_region_ends_at_release (exit=$critafter_rc want 0)"
+    echo "  an alloc AFTER the release was reported as inside the region --"
+    echo "  crit_find_alloc is walking siblings again, not just the subtree"
+    sed 's/^/    /' /tmp/krc_critafter_out_$$.txt
+fi
+rm -f /tmp/krc_critafter_$$.kr /tmp/krc_critafter_out_$$.txt
+
+# ONE ALLOC, ONE DIAGNOSTIC. The same sibling walk made a `defer` placed before
+# the alloc report it TWICE: once when the defer statement's own subtree search
+# ran on into its siblings and found the alloc, and once for the alloc itself.
+# Counting is the whole point of this row -- the message was right both times,
+# so only the count says the traversal is wrong.
+TOTAL=$((TOTAL + 1))
+cat > /tmp/krc_critonce_$$.kr <<'KREOF'
+fn acquire(uint64 l) { }
+fn release(uint64 l) { }
+fn main() {
+    acquire(1)
+    defer { release(1) }
+    alloc(8)
+    exit(0)
+}
+KREOF
+$KRC check /tmp/krc_critonce_$$.kr > /tmp/krc_critonce_out_$$.txt 2>&1
+critonce_n=$(grep -c 'critical-region: alloc inside a critical section' /tmp/krc_critonce_out_$$.txt)
+if [ "$critonce_n" = "1" ]; then
+    PASS=$((PASS + 1)); echo "  analysis_critical_region_reports_once: PASS (one alloc, one diagnostic)"
+else
+    FAIL=$((FAIL + 1))
+    echo "FAIL: analysis_critical_region_reports_once (got $critonce_n diagnostics for one alloc, want 1)"
+fi
+rm -f /tmp/krc_critonce_$$.kr /tmp/krc_critonce_out_$$.txt
+
+# A CONSTANT EXPRESSION MUST MEAN WHAT THE SAME EXPRESSION MEANS IN A BODY.
+# The folder used to nest C's way -- `|` loosest, then `^`, `&`, `<<`, `+`, `*`
+# -- while binop_precedence binds `& | ^` TIGHTEST (8), then `<< >>` (7),
+# `* / %` (6), `+ -` (5). So `static uint64 S = 2 + 3 & 4` folded to 4 while the
+# same text in a body evaluated to 2, silently. The chain also stopped at `|`,
+# leaving comparison, equality, `&&`, `||` and `?:` unconsumed rather than
+# refused -- `A > 2` folded to A and dropped the rest -- and `sizeof` was not on
+# the initializer allow-list at all, so the static quietly kept 0.
+#
+# THIS ROW COMPARES, IT DOES NOT TABULATE. Each line prints the folded value and
+# the runtime value of the SAME expression; the check is that the two agree.
+# Hardcoding the answers would go stale the next time precedence moves, and
+# would not be testing the property that matters.
+TOTAL=$((TOTAL + 1))
+cat > /tmp/krc_constprec_$$.kr <<'KREOF'
+const uint64 A = 5
+const uint64 B = 0
+static uint64 S1 = 2 + 3 & 4
+static uint64 S2 = 1 << 2 * 3
+static uint64 S3 = 6 & 1 + 1
+static uint64 S4 = A > 2
+static uint64 S5 = A == 5
+static uint64 S6 = A > 2 && A < 10
+static uint64 S7 = B || A == 5
+static uint64 S8 = A > 3 ? 100 : 200
+static uint64 S9 = !B
+static uint64 S10 = sizeof(uint64)
+static uint64 S11 = sizeof(uint32) * 2
+static uint64 S12 = (A + 1) * sizeof(u8)
+fn main() -> uint64 {
+    println(S1, 2 + 3 & 4)
+    println(S2, 1 << 2 * 3)
+    println(S3, 6 & 1 + 1)
+    println(S4, A > 2)
+    println(S5, A == 5)
+    println(S6, A > 2 && A < 10)
+    println(S7, B || A == 5)
+    println(S8, A > 3 ? 100 : 200)
+    println(S9, !B)
+    println(S10, sizeof(uint64))
+    println(S11, sizeof(uint32) * 2)
+    println(S12, (A + 1) * sizeof(u8))
+    return 0
+}
+KREOF
+constprec_err=""
+for cparch in x86_64 arm64; do
+    cprun=""
+    if [ "$cparch" = "x86_64" ]; then
+        $KRC /tmp/krc_constprec_$$.kr --arch=x86_64 -o /tmp/krc_constprec_$$ >/dev/null 2>&1 \
+            && cprun=$(/tmp/krc_constprec_$$ 2>&1)
+    elif command -v qemu-aarch64-static >/dev/null 2>&1; then
+        $KRC /tmp/krc_constprec_$$.kr --arch=arm64 -o /tmp/krc_constprec_$$ >/dev/null 2>&1 \
+            && cprun=$(qemu-aarch64-static /tmp/krc_constprec_$$ 2>&1)
+    else
+        continue
+    fi
+    if [ -z "$cprun" ]; then constprec_err="$constprec_err $cparch:no-output"; continue; fi
+    # Every line is "<folded> <runtime>" -- they must be equal, and there must
+    # be one line per static, so a program that died halfway cannot pass.
+    cpbad=$(printf '%s\n' "$cprun" | awk 'NF!=2 || $1!=$2 {print NR": "$0} END{if (NR!=12) print "line-count "NR" want 12"}')
+    [ -n "$cpbad" ] && constprec_err="$constprec_err $cparch:[$cpbad]"
+done
+if [ -z "$constprec_err" ]; then
+    PASS=$((PASS + 1)); echo "  const_fold_agrees_with_runtime: PASS (12 expressions, folded == evaluated)"
+else
+    FAIL=$((FAIL + 1))
+    echo "FAIL: const_fold_agrees_with_runtime ($constprec_err)"
+    echo "  a static initializer folded to a different value than the same"
+    echo "  expression in a body -- the pce_* ladder has drifted from binop_precedence"
+fi
+rm -f /tmp/krc_constprec_$$.kr /tmp/krc_constprec_$$
+
+# AND AN OPERATOR THE FOLDER CANNOT TAKE IS AN ERROR, NOT A TRUNCATION. This is
+# the guard that makes the row above hard to regress quietly: if a future
+# operator is added to binop_precedence and not to the pce_* chain, the folder
+# refuses the declaration instead of storing a prefix of it. Checked with a
+# compound assignment, which is a binary operator token the folder has never
+# handled and never should.
+TOTAL=$((TOTAL + 1))
+cat > /tmp/krc_consttrail_$$.kr <<'KREOF'
+static uint64 A = 5
+static uint64 X = A += 1
+fn main() -> uint64 { println(X)  return 0 }
+KREOF
+$KRC /tmp/krc_consttrail_$$.kr --arch=x86_64 -o /tmp/krc_consttrail_$$ > /tmp/krc_consttrail_out_$$.txt 2>&1
+consttrail_rc=$?
+if [ "$consttrail_rc" != "0" ]; then
+    PASS=$((PASS + 1)); echo "  const_fold_refuses_leftover_tokens: PASS (garbage after a constant is an error)"
+else
+    FAIL=$((FAIL + 1))
+    echo "FAIL: const_fold_refuses_leftover_tokens (exit=0; a truncated initializer was accepted)"
+fi
+rm -f /tmp/krc_consttrail_$$.kr /tmp/krc_consttrail_$$ /tmp/krc_consttrail_out_$$.txt
+
 # The other three analysis.kr write() length fixes (ctx-check :165,
 # eff-check :205, lock-cycle :327) cannot be exercised the same way: their
 # callers require populated annotation/lock-graph tables, and

@@ -19,11 +19,12 @@ Notation:
 
 ```
 IDENT       = [A-Za-z_] [A-Za-z0-9_]*
-INT_LIT     = DEC_LIT | HEX_LIT
-DEC_LIT     = [0-9]+
-HEX_LIT     = "0x" [0-9A-Fa-f]+
-FLOAT_LIT   = [0-9]+ "." [0-9]+ ([eE] [+-]? [0-9]+)? "f"?
-            | [0-9]+ [eE] [+-]? [0-9]+ "f"?
+INT_LIT     = DEC_LIT | HEX_LIT | BIN_LIT
+DEC_LIT     = [0-9] [0-9_]*
+HEX_LIT     = ("0x" | "0X") ( [0-9A-Fa-f] | "_" )*    (* at least one hex digit *)
+BIN_LIT     = ("0b" | "0B") ( [01] | "_" )*           (* at least one binary digit *)
+FLOAT_LIT   = [0-9] [0-9_]* "." [0-9] [0-9_]* ([eE] [+-]? [0-9]+)? "f"?
+            | [0-9] [0-9_]* [eE] [+-]? [0-9]+ "f"?
 STR_LIT     = '"' (char_escape | [^"\\])* '"'
 CHAR_LIT    = "'" (char_escape | [^'\\]) "'"
 FSTR        = f"..." with embedded { expr } holes  (see Expressions)
@@ -36,26 +37,50 @@ COMMENT     = "//" [^\n]*                     (discarded)
 **There are no block comments.** `/* ... */` is not a comment — the lexer
 (`skip_whitespace_and_comments` in `src/lexer.kr`) recognises `//` and nothing
 else, so `/*` lexes as a `/` followed by a `*` and the parser reports
-`error: unexpected token in expression`. Use `//` on each line.
+`error: unexpected '/' in expression`. Use `//` on each line.
 
 Whitespace (spaces, tabs, CR, LF) is a token separator; no significant
-indentation. `TokenKind` in `src/lexer.kr` has 95 members; only the subset relevant to
+indentation. `TokenKind` in `src/lexer.kr` has 96 members (counting `Eof` and `Error`); only the subset relevant to
 grammar is referenced below.
 
-Binary (`0b...`) and octal (`0o...`) literals, `_` digit separators, and
-`\u{...}` escapes are **not implemented**: `0b101` lexes as `0` followed
-by the identifier `b101`, `1_000` as `1` followed by `_000`, and
-`'\u{41}'` silently evaluates to `'u'` (117), not `'A'`.
+**Binary literals and `_` digit separators are implemented.** `0b101` is 5,
+`0B1010` is 10, and `1_000` is 1000; the separator is allowed in decimal, hex
+and binary literals and runs through floats as well, so `1_0.5` is 10.5 and not
+10.05. `0x` accepts a capital `X` too. A *prefix with no digits* — `0x`, `0X`,
+`0b`, `0B`, `0x_` — is an **error token**, not a number: `static u64 X = 0x`
+once compiled and stored 72, because the decimal fallback read the text `0x` as
+the digit `'x' - '0'`. A decimal digit immediately after a binary literal
+(`0b1012`) is an error too, rather than `0b101` followed by a stray `2`.
+
+**Octal (`0o...`) literals and `\u{...}` escapes are still not implemented.**
+`0o17` is `0` followed by the identifier `o17` — an undeclared-identifier error
+at the point of use — and `'\u{41}'` silently evaluates to `'u'` (117), not
+`'A'`, because the lexer's escape set has no `u` case and the backslash simply
+escapes the next byte.
 
 ## Keywords
 
+All **51** of them, as `match_keyword` in `src/lexer.kr` spells them:
+
 ```
-fn return if else while for in break continue match let unsafe volatile asm
-static const struct enum type true false sizeof extern device at
-u8 u16 u32 u64 i8 i16 i32 i64 f32 f64 bool char float double
+asm at break const continue defer device else enum extern false fn for if
+import in let loop match return sizeof static struct true type unsafe volatile
+while
+
+bool char double float f16 f32 f64
+i8 i16 i32 i64            int8 int16 int32 int64
+u8 u16 u32 u64            uint8 uint16 uint32 uint64
 ```
 
-`float` is an alias for `f32`; `double` for `f64`.
+The three type rows are 23 of the 51. `float` is an alias for `f32` and
+`double` for `f64`; `uint8`..`uint64` and `int8`..`int64` are the long spellings
+of `u8`..`u64` and `i8`..`i64`, and the two forms are interchangeable — a
+function declared to take a `u64` accepts a `uint64` argument, and the type
+checker never sees a difference.
+
+**`defer`, `device`, `at` and `loop` are keywords**, which is the part of this
+list worth reading: they are the four most likely to be reached for as ordinary
+variable names, and using one is a parse error rather than a shadowing warning.
 
 ## Module
 
@@ -290,24 +315,43 @@ fstring     = FSTR_BEGIN (STR_PART | expr)* FSTR_END
 
 ## Reserved / built-in identifiers
 
-These bind to compiler-provided intrinsics, not user functions:
+These bind to compiler-provided intrinsics, not user functions. All **82**,
+as `is_builtin` in `src/analysis.kr` lists them — that function is the
+canonical set, and defining a function with one of these names is an error
+(`@builtin_override` shadows one deliberately):
 
 ```
-alloc  dealloc  memcpy  memset  memcmp  memzero
-read  write  open  close  mmap  munmap  exit
-load8 load16 load32 load64  store8 store16 store32 store64
-vload8 vload16 vload32 vload64  vstore8 vstore16 vstore32 vstore64
-atomic_load atomic_store atomic_cas atomic_add atomic_sub atomic_and atomic_or atomic_xor
+alloc dealloc memcpy memset            exit read write
+print println print_str println_str    fmt_uint
+file_open file_read file_write file_close file_size
+str_len str_eq
+load8 load16 load32 load64             store8 store16 store32 store64
+vload8 vload16 vload32 vload64         vstore8 vstore16 vstore32 vstore64
+atomic_load atomic_store atomic_cas
+atomic_add atomic_sub atomic_and atomic_or atomic_xor
+bit_get bit_set bit_clear bit_toggle bit_range bit_insert
+signed_lt signed_gt signed_le signed_ge
+sqrt sqrt_f32 sqrt_f64 fma_f64
+int_to_f32 int_to_f64  f32_to_int f64_to_int
+f32_to_f64 f64_to_f32  f16_to_f32 f32_to_f16
+call_ptr call_ptr_f64 fn_addr
 dmb dsb isb  dcache_flush icache_invalidate
-sizeof  time_ns  exec_process exec_process_argv set_executable
-syscall syscall_raw  get_target_os get_arch_id get_module_path
+asm syscall_raw time_ns
+exec_process exec_process_argv set_executable
+get_target_os get_arch_id get_module_path
 ```
 
-(`cpuid`/`rdrand` are *not* builtins — `cpuid` is only an inline-`asm`
-mnemonic. The canonical builtin list is `src/analysis.kr`.)
+**Names that are *not* builtins, though they read like they should be.**
+`mmap`, `munmap`, `open`, `close` and `syscall` do not exist at all — calling
+one is `error: undefined function`. `memcmp` and `memzero` are **stdlib**
+functions in `std/mem.kr`, not intrinsics, so they need the import like any
+other library call. `sizeof` is a *keyword*, listed with the keywords above,
+not an identifier that could be shadowed. `cpuid` and `rdrand` are inline-`asm`
+mnemonics only.
 
-The stdlib (`std/*.kr`) layers additional helpers (`str_len`, `opt_some`,
-`realloc`, `alloc_aligned`, …) on top of these.
+The stdlib (`std/*.kr`) layers additional helpers (`str_index_of`, `opt_some`,
+`realloc`, `alloc_aligned`, …) on top of these — see
+[STDLIB.md](STDLIB.md).
 
 ## Grammar notes and foot-guns
 
@@ -346,22 +390,50 @@ was reported against the compiler that does not exist, and a gate row plus two
 mutants were written to police two literals that could simply have been one.
 
 ```
-const_expr  = const_or
-const_or    = const_xor ("|" const_xor)*
-const_xor   = const_and ("^" const_and)*
-const_and   = const_shift ("&" const_shift)*
-const_shift = const_add (("<<" | ">>") const_add)*
-const_add   = const_mul (("+" | "-") const_mul)*
-const_mul   = const_prim (("*" | "/") const_prim)*
-const_prim  = INT_LIT                     (* decimal or 0x hex *)
-            | "true" | "false"            (* 1 and 0 *)
-            | IDENT                       (* a const or static declared EARLIER *)
-            | "-" const_prim | "~" const_prim
-            | "(" const_expr ")"
+const_expr    = const_tern
+const_tern    = const_lor ("?" const_tern ":" const_tern)?   (* right-assoc *)
+const_lor     = const_land ("||" const_land)*
+const_land    = const_eq (("&&") const_eq)*
+const_eq      = const_cmp (("==" | "!=") const_cmp)*
+const_cmp     = const_add (("<" | "<=" | ">" | ">=") const_add)*   (* UNSIGNED *)
+const_add     = const_mul (("+" | "-") const_mul)*
+const_mul     = const_shift (("*" | "/" | "%") const_shift)*
+const_shift   = const_bit (("<<" | ">>") const_bit)*
+const_bit     = const_prim (("&" | "|" | "^") const_prim)*
+const_prim    = INT_LIT                     (* decimal, 0x hex or 0b binary *)
+              | CHAR_LIT
+              | "true" | "false"            (* 1 and 0 *)
+              | IDENT                       (* a const or static declared EARLIER *)
+              | "sizeof" "(" type_or_struct_name ")"
+              | "-" const_prim | "~" const_prim | "!" const_prim
+              | "(" const_expr ")"
 ```
 
+**This ladder is the same one as the expression grammar above** — `& | ^`
+tightest at 8, then `<< >>`, `* / %`, `+ -`, comparison, equality, `&&`, `||`,
+`?:` — and that is newer than it looks. Until this revision the folder nested
+C's way, with `|` loosest and `&` below `<<`, so a constant expression *silently*
+meant something different from the same text in a function body:
+`static uint64 S = 2 + 3 & 4` folded to 4 where the body evaluates 2, and
+`1 << 2 * 3` folded to 64 where the body evaluates 12. The chain also stopped at
+`|`, so everything looser was left on the cursor rather than refused — `A > 2`
+folded to `A` and dropped the `> 2`.
+
+Two consequences worth knowing:
+
+* **Comparisons fold unsigned.** There is no type beside a value in the folder,
+  and a folded initializer is stored as a bare `u64` bit pattern, so `<` `<=`
+  `>` `>=` are unsigned there. A signed comparison belongs in a body.
+* **`&&` and `||` do not short-circuit when folded.** Both sides are evaluated.
+  Nothing in a constant expression can have an effect, and stopping early would
+  leave the right-hand tokens on the cursor.
+
+An operator this ladder cannot take is now an **error** rather than a silent
+truncation: `static uint64 X = A += 1` is refused, where it used to store `A`.
+
 Implemented by `parse_const_expr()` / `parse_const_array_size()` in
-`src/parser.kr`; the `pce_*` chain above it is this precedence ladder.
+`src/parser.kr`; the `pce_*` chain above it is this precedence ladder, and
+`pce_trailing_guard` is the refusal.
 
 **The one real restriction is ordering.** An `IDENT` must name a `const` or
 `static` declared *earlier* in the file. A forward reference, or any runtime
@@ -372,11 +444,22 @@ static u8[LATER] BUF        (* error: not a const or static declared earlier, *)
 const uint64 LATER = 8      (*        so it has no compile-time value         *)
 ```
 
-**Do not confuse this with `const_init`,** which is a different position and
-genuinely is literal-only. A `static`'s *initializer* does not fold:
-`static uint64 X = 16 * 1024` does not yield 16384. So sizes fold; initializers
-do not — and because an `IDENT` in a `const_expr` resolves to the declared
-initializer, a name is only as good as the literal it was given.
+**A `static`'s initializer folds too, and this document said for a long time
+that it did not.** `static uint64 X = 16 * 1024` **is** 16384; so are
+`static uint64 B = A + 1` (referring to an earlier `static`), `1 << 12`,
+`sizeof(uint64)` and `A > 2 ? 10 : 20`. The claim that initializers were
+"genuinely literal-only" was wrong, and it was believed downstream — it is the
+kind of stale sentence that makes people write out `4096` by hand and add a
+comment explaining why they had to.
+
+What is true is that the *initializer* position has a narrower **entry**
+condition than the folder: the declaration parser only routes an initializer
+into `parse_const_expr` when it starts with one of a listed set of tokens. A
+string literal deliberately stays out (it has its own later fixup), and a float
+literal keeps its own branch. Anything else that fails to match used to fall
+through to a skip path and leave the static at `0` — which is how
+`static uint64 S = sizeof(uint64)` came to be `0` while `sizeof(uint64)` in a
+body was `8`. `sizeof` and `!` are on that list now.
 
 Verified against `build/krc2` at 7d23940 on 2026-09-21 — and verified to the
 emitted code, not just to "the parser accepted it":

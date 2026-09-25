@@ -1,16 +1,24 @@
 # KernRift Standard Library Reference
 
-The standard library lives in `std/*.kr` — **39 modules, 590 functions**. This
-document covers the **19 general-purpose modules** listed below (313 of those
-functions). The remaining 20 are **not documented here yet** — read their source
-directly:
+The standard library lives in `std/*.kr` — **52 modules, 704 functions**. This
+document covers the **19 general-purpose modules** in the index below (313 of
+those functions). The other **33 modules (391 functions) are not documented
+here** — read their source directly. They fall into three groups:
 
 - the bare-metal drivers added for the boot work — `console`, `cstr`, `fw_cfg`,
   `fw_cfg_mmio`, `gzip`, `heap_bump`, `idt`, `mouse`, `pci`, `pci_core`,
   `pci_ecam`, `pci_port`, `ps2`, `ramfb`, `serial`, `uart_16550`, `uart_pl011`,
-  `vga_text`, `x86` (19 modules, 259 functions);
-- `apexrift` (18 functions), which this document has never listed in either
-  group — the previous counts summed the other two and were short by it.
+  `vga_text`, `x86` (19 modules, 265 functions);
+- the AMD GPU bring-up modules — `gc_init`, `gmc`, `gmc_constants`,
+  `gpu_activate`, `gpu_cp_load`, `gpu_imu_load`, `gpu_mes_load`,
+  `gpu_mes_queue`, `gpu_navi32`, `gpu_pm4`, `gpu_portable`, `gpu_queue`,
+  `gpu_rlc_load` (13 modules, 108 functions);
+- `apexrift` (18 functions).
+
+**Three of those modules define no functions at all** — `gmc_constants`,
+`gpu_navi32` and `pci` are register and constant tables that other modules
+import, so a function count of zero is the honest number for them and not a
+sign the count is broken.
 
 Import a module with its `std/` path:
 
@@ -61,6 +69,7 @@ nothing to return; `0` is *not* distinguishable from a stored zero.
 | [`std/mem.kr`](#stdmemkr--memory-operations) | realloc, aligned alloc, memcmp, memzero, memmove |
 | [`std/memfast.kr`](#stdmemfastkr--block-memory-operations) | Word-sized block copy/fill (32/64-bit units) |
 | [`std/net.kr`](#stdnetkr--networking) | TCP/UDP socket syscall wrappers (Linux) |
+| [`std/sha256.kr`](#stdsha256kr--sha-256) | SHA-256 over a buffer, incremental context, hex digest |
 | [`std/string.kr`](#stdstringkr--strings) | The big one: search, slicing, case, split/join, UTF-8, string builder, char predicates |
 | [`std/time.kr`](#stdtimekr--time) | Monotonic clock and sleep (Linux) |
 | [`std/vec.kr`](#stdveckr--dynamic-array) | Growable array of u64 |

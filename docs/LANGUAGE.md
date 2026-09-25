@@ -117,7 +117,16 @@ char bad = 97              // compile error — int literal not assignable
 ### Literals
 
 - Decimal: `42`, `1000000`
-- Hex: `0x1000`, `0xDEADBEEF`
+- Hex: `0x1000`, `0xDEADBEEF` — a capital `0X` prefix works too
+- Binary: `0b1010` (10), `0B1111_0000` (240)
+- **`_` is a digit separator** and may appear anywhere among the digits of a
+  decimal, hex, binary or float literal: `1_000_000`, `0xFF_FF`,
+  `0b1010_1010`, `1_0.5` (which is 10.5, not 10.05).
+- A **prefix with no digits** — `0x`, `0X`, `0b`, `0B`, `0x_` — is an error
+  token, not a number, and so is a decimal digit glued to the end of a binary
+  literal (`0b1012`). There are **no octal (`0o`) literals** and no `\u{...}`
+  escape: `0o17` is `0` followed by the identifier `o17`, and `'\u{41}'` is
+  silently `'u'` (117), not `'A'`.
 - Float: `1.5`, `-3.14`, `2e10`, `1.5f` (f32 suffix)
 - Bool: `true`, `false` (strict `bool` type)
 - String: `"hello"` with `\n`, `\t`, `\\`, `\"`, `\0` escapes
@@ -799,13 +808,39 @@ fn tick() {
 ```
 
 Static variables live in the data section for the lifetime of the program.
-A literal initializer — `= 42`, `= 0x3F200000`, `= 'A'`, `= true`, with an
-optional leading `-` or `~` — is honoured and emitted into the binary.
-Without an initializer the slot is zero (BSS). Non-literal initializers
-(calls, named constants, arithmetic such as `= 5 + 3`) are **not**
-evaluated: only a leading literal, if any, is kept and the rest is
-silently dropped (`= 5 + 3` stores 5; tracked as issue #53). Set those
-values at startup instead.
+Without an initializer the slot is zero (BSS).
+
+**The initializer is a constant expression, not merely a literal.** This
+section said the opposite for a long time — that `= 5 + 3` stored `5` and the
+rest was silently dropped, tracked as issue #53. It is not so, and the wrong
+sentence cost real work downstream: it is the kind of claim that makes people
+write `16777216` by hand with a comment saying `// 16 * 1024 * 1024`.
+
+```kr
+static u64 a = 5 + 3               // 8
+static u64 b = 16 * 1024 * 1024    // 16777216
+static u64 c = 1 << 12             // 4096
+static u64 d = a + 1               // 9 -- an earlier static or const by name
+static u64 e = sizeof(uint64)      // 8
+static u64 f = a > 2               // 1
+static u64 g = a > 2 ? 10 : 20     // 10
+static u8[sizeof(u64)] buf         // sizes fold too, and always did
+```
+
+Literals with a leading `-` or `~` still work, as do `'A'` and `true` /
+`false`. The full grammar and its precedence ladder are in
+[GRAMMAR.md](GRAMMAR.md) under "Constant expressions"; two points matter at the
+call site:
+
+* the ladder is **the same** as the expression grammar, so `2 + 3 & 4` folds to
+  `2` exactly as a body evaluates it. That is newer than it sounds — the folder
+  used to nest C's way and quietly disagree with the language;
+* comparisons fold **unsigned**, and an operator the folder cannot take is an
+  **error** rather than a silent truncation.
+
+What an initializer still cannot be is a **function call** or a string literal —
+a call has no compile-time value, and a string initializer has its own separate
+fixup. Set those at startup.
 
 ### const
 
