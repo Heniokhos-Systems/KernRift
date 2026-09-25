@@ -6343,6 +6343,51 @@ else
 fi
 rm -f /tmp/krc_nakedalt_$$.kr /tmp/krc_nakedalt_$$
 
+# docs/GRAMMAR.md's TWO LISTS ARE CHECKED AGAINST THE COMPILER, not proofread.
+#
+# Both had rotted badly and nobody noticed, because a list of words is exactly
+# the kind of thing a reader skims. The keyword block held 39 of the 51 keywords
+# -- `defer`, `import`, `loop`, `f16` and the eight long integer spellings were
+# absent, and `defer`/`at` are the two most likely to be reached for as variable
+# names. The built-in block named SEVEN things that do not exist (`mmap`,
+# `munhmap`... `munmap`, `open`, `close`, `syscall`, `memcmp`, `memzero`) while
+# omitting about thirty that do.
+#
+# EXTRACTED BY FUNCTION NAME, NEVER BY LINE NUMBER. The obvious way to pull
+# is_builtin out of analysis.kr is `awk NR>=1264`, and that broke the moment a
+# fix a few hundred lines above it shifted the file -- it then reported zero
+# built-ins and an "identical" empty comparison. ir_reference_citations exists
+# because line numbers rot; this row must not depend on them.
+TOTAL=$((TOTAL + 1))
+gram_err=""
+gk_doc=$(awk '/^## Keywords/{f=1} f&&/^```/{n++; if(n==2) exit; next} f&&n==1' "$DIR/../docs/GRAMMAR.md" \
+         | tr ' ' '\n' | grep -vE '^$' | sort -u)
+gk_real=$(grep -oE 'match_keyword\(start, len, "[a-z0-9_]+"' "$DIR/../src/lexer.kr" \
+          | sed 's/.*"\(.*\)"/\1/' | sort -u)
+if [ -z "$gk_doc" ] || [ -z "$gk_real" ]; then
+    gram_err="$gram_err could-not-extract-keywords"
+elif [ "$gk_doc" != "$gk_real" ]; then
+    gram_err="$gram_err keywords-differ:[$(comm -3 <(printf '%s\n' "$gk_doc") <(printf '%s\n' "$gk_real") | tr -d '\t' | tr '\n' ' ')]"
+fi
+gb_doc=$(awk '/^## Reserved \/ built-in/{f=1} f&&/^```/{n++; if(n==2) exit; next} f&&n==1' "$DIR/../docs/GRAMMAR.md" \
+         | tr ' ' '\n' | grep -vE '^$' | sort -u)
+gb_real=$(awk '/^fn is_builtin\(/{f=1} f{print} f&&/^}/{exit}' "$DIR/../src/analysis.kr" \
+          | grep -oE 'sema_tok_matches\(tok_idx, "[a-z0-9_]+"' | sed 's/.*"\(.*\)"/\1/' | sort -u)
+if [ -z "$gb_doc" ] || [ -z "$gb_real" ]; then
+    gram_err="$gram_err could-not-extract-builtins"
+elif [ "$gb_doc" != "$gb_real" ]; then
+    gram_err="$gram_err builtins-differ:[$(comm -3 <(printf '%s\n' "$gb_doc") <(printf '%s\n' "$gb_real") | tr -d '\t' | tr '\n' ' ')]"
+fi
+if [ -z "$gram_err" ]; then
+    PASS=$((PASS + 1))
+    echo "  grammar_lists_match_the_compiler: PASS ($(printf '%s\n' "$gk_real" | wc -l) keywords, $(printf '%s\n' "$gb_real" | wc -l) built-ins)"
+else
+    FAIL=$((FAIL + 1))
+    echo "FAIL: grammar_lists_match_the_compiler ($gram_err)"
+    echo "  docs/GRAMMAR.md's keyword and built-in blocks must equal the sets in"
+    echo "  src/lexer.kr's match_keyword and src/analysis.kr's is_builtin exactly."
+fi
+
 # The other three analysis.kr write() length fixes (ctx-check :165,
 # eff-check :205, lock-cycle :327) cannot be exercised the same way: their
 # callers require populated annotation/lock-graph tables, and
