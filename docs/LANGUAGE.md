@@ -1482,7 +1482,7 @@ signed_le(a, b)    signed_ge(a, b)
 
 | Function | Description |
 |---|---|
-| `fn_addr(name)` | Get the address of a named function. The name is a string literal, resolved at link time. |
+| `fn_addr("name")` | Get the address of a named function. **The name is a string literal**, resolved at link time — `fn_addr(name)` with a bare identifier is refused, because the resolver strips the quotes it expects and would otherwise look up a name two characters shorter than the one you wrote. |
 | `call_ptr(addr, ...)` | Call a function by address with any number of arguments. The caller's signature must match the target's or the result is undefined. |
 | `call_ptr_f64(addr, ...)` | As `call_ptr`, for a callee returning `f64`. The result comes back in the float return register, which `call_ptr` does not read. |
 

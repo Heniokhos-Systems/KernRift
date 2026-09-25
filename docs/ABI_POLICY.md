@@ -4,7 +4,7 @@ This document defines what "ABI compatibility" means in KernRift, which
 versions are compatible with which, and what we promise not to break
 between releases.
 
-The current release is **v2.8.24**. KernRift is pre-1.0. The policy below
+The current release is **v2.10.0**. KernRift is pre-1.0. The policy below
 describes what we do today; it will tighten at 1.0.
 
 ## Scope of the ABI
@@ -18,6 +18,9 @@ This is the contract between a caller and a callee compiled by the same
 `krc` build. It includes register assignments, argument passing,
 return values, stack layout, and struct packing.
 
+All eight fat-binary targets, as `compile_fat` names its slices, plus the two
+embedded backends:
+
 | Target                | Convention                                   | Stable? |
 |-----------------------|----------------------------------------------|---------|
 | Linux x86_64          | System V AMD64                               | Yes     |
@@ -25,7 +28,23 @@ return values, stack layout, and struct packing.
 | macOS x86_64          | System V AMD64                               | Yes     |
 | macOS AArch64 (ARM64) | AAPCS64 (Apple variant — arg spill rules)    | Yes     |
 | Windows x86_64        | Microsoft x64                                | Yes     |
+| Windows AArch64       | Microsoft ARM64                              | Yes     |
 | Android AArch64       | AAPCS64                                      | Yes     |
+| Android x86_64        | System V AMD64                               | Yes     |
+| Freestanding riscv32  | RV32 calling convention, 4-byte word         | Yes     |
+| Freestanding xtensa   | CALL0, 4-byte word                           | Yes     |
+
+This table listed six of them until this revision; Windows AArch64 and Android
+x86_64 were missing although both have shipped in every fat binary, and the two
+32-bit embedded backends were absent entirely. **Their word size is 4 bytes, not
+8**, which is the one ABI difference that changes source: 64-bit integer types
+are refused at their declaration site on those two targets.
+
+**One convention is chosen by the emit mode, not the target,** and it catches
+people out: `call_ptr` uses System V on `--emit=image` and Microsoft x64 on
+`--emit=uefi` for the same `--arch=x86_64`, because UEFI's own calling
+convention is Microsoft's. A hand-built blob entered through `call_ptr` must
+take its arguments from the right registers for the mode it was built in.
 
 **Promise.** The calling convention for each target follows the platform
 ABI exactly. A KernRift `fn foo(u64 a, u64 b) -> u64` can be called from

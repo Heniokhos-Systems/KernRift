@@ -4,6 +4,17 @@ All notable changes to `kernriftc` are documented in this file.
 
 ## Unreleased
 
+**Fixed: `fn_addr(name)` blamed a function nobody had written.** The lowering took
+`ast_data1` of whatever the argument was and handed that token to the resolver,
+which strips the quotes it assumes are there — offset + 1, length − 2. So
+`fn_addr(target)`, the spelling every other language would use, became the name
+`arge`: the first and last characters of `target` removed. The compiler then said
+`error: fn_addr: undefined function 'arge'` **with no location**, sending the
+reader to look for a function that had never existed. It now refuses a
+non-string-literal argument with a located error and a caret under the argument,
+and says what to write instead. The string-literal form and the message for a
+genuinely absent name are unchanged. (`src/ir.kr`.)
+
 **Fixed: `krc check` rejected correct programs — the critical region did not end
 at the `release`.** `crit_find_alloc` was handed one statement and then followed
 `ast_next` from it, so a search started at one statement ran on through every

@@ -33,7 +33,39 @@ freestanding paths — so structs and `alloc()` work only on hosted riscv32.
 `--emit=lkm` also gained its first test coverage in v2.8.28
 (`tests/helpers/lkm_check.py`).
 
-**Also tracked: arm64 `in`/`out` asm constraints are documented, not
+**Also tracked: arm64 `in`/`out` asm constraints — ✅ NOW IMPLEMENTED; the
+`@naked` half is still open.** Re-measured 2026-09-26. The constraints work:
+
+    fn add_via_asm(u64 a, u64 b) -> u64 {
+        u64 r = 0
+        asm { "add x9, x0, x1" } in(a -> x0, b -> x1) out(x9 -> r)
+        return r
+    }
+
+returns 42 for `(40, 2)` under `qemu-aarch64`, and the rejection message is
+arm64-aware rather than x86-only — `unknown arm64 inline-asm constraint register
+'zz9' (want x0-x30)`. So the doc/implementation mismatch below is closed, and
+LANGUAGE.md's list of `x0`…`x30` is now simply correct.
+
+**What is still open is the `@naked` escape hatch**, and it no longer matters
+much now that the constraints work — but the diagnostic is actively misleading:
+
+    @naked
+    fn readctr() -> uint64 { asm { "mrs x0, cntvct_el0" }  asm { "ret" } }
+
+    error: function may not return a value on all paths — add a final
+    else/return after the conditional
+
+There is no conditional. The all-paths-return check runs before naked-ness is
+considered, and its message assumes the ordinary cause. Whether `@naked` *should*
+be allowed on a value-returning body is a real question — the compiler cannot
+verify that the asm sets `x0` — but the message should say which rule refused and
+why, not suggest an edit that cannot apply.
+
+The original report follows, kept because it records what the workaround in
+ApexRift was and why.
+
+**(Historic) arm64 `in`/`out` asm constraints are documented, not
 implemented.** Found porting ApexRift's crash record to native arm64 (not an
 embedded target, but the same IR). `docs/LANGUAGE.md:1057` lists `x0`…`x30` as
 valid ARM64 register names for `in`/`out` clauses, and that section's own
@@ -52,7 +84,8 @@ register to memory from asm and reading it back with `load64`, an unchecked
 x0-liveness assumption verified once by disassembly rather than by the
 language. Cheapest fix first: correct LANGUAGE.md's Limitations list; then
 allow `@naked` on an all-asm value-returning body; then implement the ARM64
-constraint registers already documented. **Status:** not started. Filed
+constraint registers already documented. **Status: the third item shipped and
+the first is moot; only the `@naked` item remains** — see the note above. Filed
 2026-08-21 (KernRift @ 466a2e7); full repro in ApexRift's
 `.superpowers/sdd/2026-08-21-crash-record-on-phone/kernrift-gap-report.md`.
 

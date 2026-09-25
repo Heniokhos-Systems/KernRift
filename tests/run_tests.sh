@@ -6195,6 +6195,72 @@ else
 fi
 rm -f /tmp/krc_consttrail_$$.kr /tmp/krc_consttrail_$$ /tmp/krc_consttrail_out_$$.txt
 
+# fn_addr TAKES A STRING LITERAL, AND THE ERROR USED TO BLAME A NAME NOBODY WROTE.
+# The lowering took ast_data1 of whatever the argument was and handed that token to
+# the resolver, which strips the quotes it assumes are there -- offset + 1,
+# length - 2. So `fn_addr(target)`, the spelling every other language uses, became
+# the name `arge`: the first and last characters of `target` removed. The compiler
+# then said `error: fn_addr: undefined function 'arge'` with no location, sending
+# the reader to look for a function that had never existed.
+#
+# THE ROW CHECKS WHAT IT DOES NOT SAY AS WELL AS WHAT IT DOES. An error mentioning
+# `arge` is the regression; an error that is merely present is not enough, because
+# the old behaviour was also an error.
+TOTAL=$((TOTAL + 1))
+cat > /tmp/krc_fnaddr_$$.kr <<'KREOF'
+fn target(uint64 a) -> uint64 { return a }
+fn main() -> uint64 { return fn_addr(target) }
+KREOF
+$KRC --arch=x86_64 /tmp/krc_fnaddr_$$.kr -o /dev/null --emit=elf > /tmp/krc_fnaddr_out_$$.txt 2>&1
+fnaddr_rc=$?
+fnaddr_err=""
+[ "$fnaddr_rc" = "0" ] && fnaddr_err="$fnaddr_err accepted-a-bare-identifier"
+grep -q "STRING LITERAL" /tmp/krc_fnaddr_out_$$.txt || fnaddr_err="$fnaddr_err no-mention-of-string-literal"
+# The OLD message, matched exactly. A bare `grep arge` also matches the word
+# `target` in the echoed source line, so it failed against the fixed compiler --
+# caught by running this row against both binaries, which is the only reason to.
+grep -q "undefined function 'arge'" /tmp/krc_fnaddr_out_$$.txt && fnaddr_err="$fnaddr_err blames-the-mangled-name-arge"
+grep -q "krc_fnaddr_$$.kr:2:" /tmp/krc_fnaddr_out_$$.txt || fnaddr_err="$fnaddr_err no-file-line-location"
+grep -q '\^~~~~~' /tmp/krc_fnaddr_out_$$.txt || fnaddr_err="$fnaddr_err no-caret-under-the-argument"
+if [ -z "$fnaddr_err" ]; then
+    PASS=$((PASS + 1)); echo "  fnaddr_bare_identifier_is_refused: PASS (located, and does not invent a name)"
+else
+    FAIL=$((FAIL + 1)); echo "FAIL: fnaddr_bare_identifier_is_refused ($fnaddr_err)"
+    sed 's/^/    /' /tmp/krc_fnaddr_out_$$.txt | head -5
+fi
+rm -f /tmp/krc_fnaddr_$$.kr /tmp/krc_fnaddr_out_$$.txt
+
+# AND THE LITERAL FORM STILL RESOLVES, so the check above cannot be satisfied by
+# refusing fn_addr outright. A genuinely absent name keeps its own message.
+TOTAL=$((TOTAL + 1))
+cat > /tmp/krc_fnaddr2_$$.kr <<'KREOF'
+fn target(uint64 a) -> uint64 { return a + 1 }
+fn main() -> uint64 {
+    uint64 p = fn_addr("target")
+    if p == 0 { return 1 }
+    return call_ptr(p, 41)
+}
+KREOF
+fnaddr2_err=""
+if $KRC --arch=x86_64 /tmp/krc_fnaddr2_$$.kr -o /tmp/krc_fnaddr2_$$ --emit=elf >/dev/null 2>&1; then
+    /tmp/krc_fnaddr2_$$; fa2rc=$?
+    [ "$fa2rc" = "42" ] || fnaddr2_err="called-through-fn_addr-gave-$fa2rc-want-42"
+else
+    fnaddr2_err="the-string-literal-form-stopped-compiling"
+fi
+cat > /tmp/krc_fnaddr3_$$.kr <<'KREOF'
+fn main() -> uint64 { return fn_addr("no_such_function_here") }
+KREOF
+$KRC --arch=x86_64 /tmp/krc_fnaddr3_$$.kr -o /dev/null --emit=elf > /tmp/krc_fnaddr3_out_$$.txt 2>&1
+grep -q "undefined function 'no_such_function_here'" /tmp/krc_fnaddr3_out_$$.txt \
+    || fnaddr2_err="$fnaddr2_err an-absent-name-lost-its-own-message"
+if [ -z "$fnaddr2_err" ]; then
+    PASS=$((PASS + 1)); echo "  fnaddr_string_literal_still_resolves: PASS (called through it, and absent names still named)"
+else
+    FAIL=$((FAIL + 1)); echo "FAIL: fnaddr_string_literal_still_resolves ($fnaddr2_err)"
+fi
+rm -f /tmp/krc_fnaddr2_$$.kr /tmp/krc_fnaddr2_$$ /tmp/krc_fnaddr3_$$.kr /tmp/krc_fnaddr3_out_$$.txt
+
 # The other three analysis.kr write() length fixes (ctx-check :165,
 # eff-check :205, lock-cycle :327) cannot be exercised the same way: their
 # callers require populated annotation/lock-graph tables, and

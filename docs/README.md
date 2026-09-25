@@ -19,7 +19,7 @@ contributors and the curious; **Project** tracks direction and process.
 - [Embedded targets](../README.md#embedded-targets-riscv32--xtensa--esp32) —
   the riscv32 / xtensa / ESP32 backends: the verified support matrix (no
   floats, no 64-bit integers, no structs when freestanding, and **none of the
-  35 `std/` modules**), the freestanding `fn main() -> uint32` programming
+  52 `std/` modules**), the freestanding `fn main() -> uint32` programming
   model, and the ESP32 IRAM/DRAM budget.
 - [Freestanding mode](LANGUAGE.md#23-freestanding-mode) — the same ground from
   the language side: what `--freestanding` changes, the embedded-target subset,
@@ -35,8 +35,9 @@ contributors and the curious; **Project** tracks direction and process.
 - [Language Reference](LANGUAGE.md) — the complete language: types,
   operators, control flow, structs, functions, builtins, annotations.
 - [Grammar](GRAMMAR.md) — the EBNF grammar and lexical rules.
-- [Standard Library](STDLIB.md) — 19 of the 35 `std/*.kr` modules, function
-  by function. The 16 bare-metal driver modules are not written up yet.
+- [Standard Library](STDLIB.md) — 19 of the 52 `std/*.kr` modules, function
+  by function. The other 33 — the bare-metal drivers, the AMD GPU bring-up
+  modules and `apexrift` — are not written up yet; read their source.
 - [Undefined Behavior](UNDEFINED_BEHAVIOR.md) — what is defined, what
   traps under `--debug`, and what is genuinely UB. **Read before writing
   `unsafe` code.**
@@ -55,9 +56,10 @@ contributors and the curious; **Project** tracks direction and process.
   passes, the register allocator.
 - [ABI Policy](ABI_POLICY.md) — calling conventions and platform ABI
   decisions.
-- [Effect System](EFFECT_SYSTEM.md) — the `@ctx` / `@eff` / `@caps`
-  analysis annotations. **Design only** — those three and the lock-cycle
-  check cannot fire today; only the critical-region pass is implemented.
+- [Effect System](EFFECT_SYSTEM.md) — the `@ctx` / `@eff` / `@acquires` /
+  `@caps` analysis annotations. **All five passes are implemented and fatal**
+  under `krc check`, which exits 1; an ordinary compile does not run them.
+  (This entry said "design only" long after that stopped being true.)
 
 ## Project
 
@@ -66,3 +68,7 @@ contributors and the curious; **Project** tracks direction and process.
 - [Contributing](../CONTRIBUTING.md) — building, testing, and the CI gate.
 - [Living Compiler](LIVING_COMPILER.md) — the `lc` self-evolution vision.
 - [Android debug kit](android-debug-kit.md) — platform-specific tooling.
+- [Phase B design](PHASE_B_DESIGN.md), [MLRift port scope](MLRIFT_PORT_SCOPE.md)
+  and [GPU driver bring-up handoff](GPU_DRIVER_BRINGUP_HANDOFF.md) — working
+  notes for specific pieces of work rather than reference material, listed here
+  because this page claims to be the full index.

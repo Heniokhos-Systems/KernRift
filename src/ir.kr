@@ -3308,9 +3308,36 @@ fn ir_lower_expr(uint64 node) -> uint64 {
         }
 
         // fn_addr("name") → address of named function
+        //
+        // THE ARGUMENT MUST BE A STRING LITERAL, AND SAYING SO IS THE WHOLE
+        // POINT OF THIS CHECK. It used to take ast_data1 of whatever the child
+        // was and hand that token to the resolver, which strips the quotes it
+        // assumes are there -- offset + 1, length - 2. So `fn_addr(target)`,
+        // the spelling every other language would use, became the name `arge`:
+        // the first and last characters of `target` removed. The compiler then
+        // reported `error: fn_addr: undefined function 'arge'`, blaming a name
+        // the programmer never wrote and pointing at nothing. AstKind.StrLit is
+        // 31.
         if skip_builtin == 0 && tok_matches(wct, "fn_addr", 7) != 0 {
             uint32 name_arg = ast_child(node)
             uint64 wna = name_arg
+            if wna == 0 {
+                write(2, "error: fn_addr() needs one argument: the function name as a string literal, e.g. fn_addr(\"main\")\n", 97)
+                exit(1)
+            }
+            if ast_kind(wna) != 31 {
+                // LOCATED, like the undeclared-identifier arm above, and not a
+                // bare write(2, ...). The resolver's own two fn_addr errors are
+                // bare because they fire at fixup time with no token to hand;
+                // this one has the argument's AST node, so there is no excuse
+                // for making the reader search for the call.
+                uint64 fa_tok = ast_tok(wna)
+                diag_loc_head(fa_tok, 0)
+                write(2, "fn_addr() takes the function name as a STRING LITERAL, not a bare identifier -- write fn_addr(\"name\")", 101)
+                write(2, "\n", 1)
+                diag_span_of(fa_tok)
+                exit(1)
+            }
             uint32 str_tok = ast_data1(wna)
             uint64 dest = ir_new_vreg()
             ir_emit(IR_FN_ADDR, dest, 0, 0, str_tok, ir_current_bb)

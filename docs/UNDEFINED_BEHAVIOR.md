@@ -104,7 +104,7 @@ reasoning for anything non-obvious.
 | Stack overflow                          | Unspecified | Platform-dependent — usually SIGSEGV on the guard page. |
 | Allocator exhaustion                    | Defined  | `alloc` returns 0. Callers must check. See [Allocation failure](#allocation-failure) for what each target tests. |
 | `dealloc(0)`                            | Defined  | No-op. The guard precedes the size-header load, so freeing a failed allocation is safe. |
-| `static` array initializer              | Defined  | Zero-initialized. Non-literal initializers are silently ignored (tracked as issue #53). |
+| `static` array initializer              | Defined  | Zero-initialized, and **an initializer on a static ARRAY is silently dropped** — `static uint64[4] A = 1` leaves every element 0, with no warning. This is a separate thing from the scalar case that used to share issue #53 with it: a scalar initializer *does* fold now (`static uint64 X = 16 * 1024` is 16384, see §10 of LANGUAGE.md), and #53 is closed on that basis. The array form is still open, and it is the silence that makes it worth listing here rather than the behaviour. The array's SIZE is a folded constant expression and always was. |
 
 ### Allocation failure
 
