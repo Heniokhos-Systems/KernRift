@@ -11147,6 +11147,88 @@ fn asm_emit_x86(uint64 str_tok) {
     if asm_match(sptr, 0, "sidt [rax]", 10) != 0 { emit_byte(0x0F); emit_byte(0x01); emit_byte(0x08); return }
     if asm_match(sptr, 0, "invlpg [rax]", 12) != 0 { emit_byte(0x0F); emit_byte(0x01); emit_byte(0x38); return }
     if asm_match(sptr, 0, "ltr ax", 6) != 0 { emit_byte(0x0F); emit_byte(0x00); emit_byte(0xD8); return }
+    // --- GS-relative absolute moves, the per-CPU slot a SYSCALL entry needs ---
+    //
+    // `mov gs:[<disp>], <reg64>` and `mov <reg64>, gs:[<disp>]`.
+    //
+    // WHY THESE AND NOT SOMETHING GENERAL. `swapgs` has been assemblable for a
+    // long time and was useless on its own: it swaps the GS base and nothing
+    // here could then ADDRESS through it. The pair exists for exactly one
+    // shape of code -- a SYSCALL entry stub -- and that shape has no
+    // alternative. SYSCALL leaves NO free register (rcx holds the return RIP,
+    // r11 the flags, rax and rdi/rsi/rdx/r10/r8/r9 the call) and does NOT
+    // switch stacks, so the kernel arrives on the caller's stack with nothing
+    // to spare. Reaching a per-CPU save slot without a free register is
+    // precisely what segment-relative addressing is for, and why every real
+    // kernel does it this way.
+    //
+    // ABSOLUTE DISPLACEMENT, NO BASE, NO INDEX: mod=00, rm=100 with SIB=0x25
+    // selects disp32 alone. The register goes in ModRM.reg and REX.R extends
+    // it, which is why r8-r15 differ only in the REX byte:
+    //
+    //     mov gs:[0x10], r15   65 4C 89 3C 25 10 00 00 00
+    //     mov gs:[0x10], rax   65 48 89 04 25 10 00 00 00
+    //
+    // Both directions verified against GNU as across rax/rsp/r8/r15 rather
+    // than derived from the manual and hoped for.
+    if asm_match(sptr, 0, "mov gs:[", 8) != 0 {
+        uint64 gclose = 8
+        while gclose < slen {
+            uint64 gc = 0
+            unsafe { *((sptr + gclose) as uint8) -> gc }
+            if gc == 93 { break }
+            gclose = gclose + 1
+        }
+        if gclose < slen {
+            uint64 gdisp = asm_parse_num(sptr, 8, gclose - 8)
+            // `], ` then the register.
+            uint64 gr = asm_x86_reg(sptr, gclose + 3, slen - gclose - 3)
+            if gdisp != 0xFFFFFFFFFFFFFFFF && gr != 0xFFFF {
+                uint64 grex = 0x48
+                if gr >= 8 { grex = grex | 0x04 }
+                emit_byte(0x65)
+                emit_byte(grex)
+                emit_byte(0x89)
+                emit_byte(((gr & 7) << 3) | 0x04)
+                emit_byte(0x25)
+                emit_u32_le(gdisp)
+                return
+            }
+        }
+    }
+    if asm_match(sptr, 0, "mov ", 4) != 0 && asm_contains(sptr, slen, ", gs:[", 6) != 0 {
+        uint64 lcomma = 4
+        while lcomma < slen {
+            uint64 lc = 0
+            unsafe { *((sptr + lcomma) as uint8) -> lc }
+            if lc == 44 { break }
+            lcomma = lcomma + 1
+        }
+        if lcomma < slen {
+            uint64 lr = asm_x86_reg(sptr, 4, lcomma - 4)
+            // ", gs:[" is six characters, then the displacement to the "]".
+            uint64 lopen = lcomma + 6
+            uint64 lclose = lopen
+            while lclose < slen {
+                uint64 lc2 = 0
+                unsafe { *((sptr + lclose) as uint8) -> lc2 }
+                if lc2 == 93 { break }
+                lclose = lclose + 1
+            }
+            uint64 ldisp = asm_parse_num(sptr, lopen, lclose - lopen)
+            if lr != 0xFFFF && lclose < slen && ldisp != 0xFFFFFFFFFFFFFFFF {
+                uint64 lrex = 0x48
+                if lr >= 8 { lrex = lrex | 0x04 }
+                emit_byte(0x65)
+                emit_byte(lrex)
+                emit_byte(0x8B)
+                emit_byte(((lr & 7) << 3) | 0x04)
+                emit_byte(0x25)
+                emit_u32_le(ldisp)
+                return
+            }
+        }
+    }
     if asm_match(sptr, 0, "swapgs", 6) != 0 && slen == 6 { emit_byte(0x0F); emit_byte(0x01); emit_byte(0xF8); return }
     // Unrecognized mnemonic — hard error. Use raw hex ("0x48 0xD3 0xE0")
     // for instructions not in the built-in table.
