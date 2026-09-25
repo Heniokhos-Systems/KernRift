@@ -11171,6 +11171,36 @@ fn asm_emit_x86(uint64 str_tok) {
     //
     // Both directions verified against GNU as across rax/rsp/r8/r15 rather
     // than derived from the manual and hoped for.
+    // `push gs:[<disp>]` -- push straight from the per-CPU block, no register.
+    //
+    // THE POINT IS THE REGISTER IT DOES NOT NEED. A SYSCALL entry stub has none
+    // to spare, so building the frame through a register means PARKING one in
+    // the per-CPU block and fetching it back -- five instructions and a slot,
+    // spent entirely on the borrowing. This pushes the memory operand directly.
+    //
+    // 65 FF /6 with mod=00, rm=100 and SIB=0x25: the same absolute-disp32 form
+    // the moves above use, with no REX because PUSH defaults to 64-bit operand
+    // size in long mode. Taken from GNU as, not the manual.
+    if asm_match(sptr, 0, "push gs:[", 9) != 0 {
+        uint64 pclose = 9
+        while pclose < slen {
+            uint64 pc = 0
+            unsafe { *((sptr + pclose) as uint8) -> pc }
+            if pc == 93 { break }
+            pclose = pclose + 1
+        }
+        if pclose < slen {
+            uint64 pdisp = asm_parse_num(sptr, 9, pclose - 9)
+            if pdisp != 0xFFFFFFFFFFFFFFFF {
+                emit_byte(0x65)
+                emit_byte(0xFF)
+                emit_byte(0x34)
+                emit_byte(0x25)
+                emit_u32_le(pdisp)
+                return
+            }
+        }
+    }
     if asm_match(sptr, 0, "mov gs:[", 8) != 0 {
         uint64 gclose = 8
         while gclose < slen {

@@ -25062,7 +25062,11 @@ else
 fi
 rm -rf "$SR_D"
 
-# GS-RELATIVE MOVES, the other half of what a SYSCALL entry needs. `swapgs` has
+# GS-RELATIVE MOVES AND PUSH, the other half of what a SYSCALL entry needs.
+# The push form is there for the register it does NOT need: an entry stub has
+# none to spare, so building a frame through a register means parking one in the
+# per-CPU block and fetching it back, which is instructions spent entirely on
+# the borrowing. `swapgs` has
 # been assemblable for a long time and was useless alone: it swaps the GS base
 # and nothing could then ADDRESS through it.
 #
@@ -25082,6 +25086,7 @@ GS_F="$GS_F --load-addr=0x400000 --stack-top=0x3F0000"
   printf '    asm { "mov rax, gs:[0]" }\n'
   printf '    asm { "mov rsp, gs:[8]" }\n'
   printf '    asm { "mov r15, gs:[16]" }\n'
+  printf '    asm { "push gs:[24]" }\n'
   printf '}\nfn main() -> uint64 { p()\n    return 0 }\n'; } > "$GS_D/m.kr"
 { printf '@naked\nfn p() {\n'
   printf '    asm { "0x65 0x48 0x89 0x04 0x25 0x00 0x00 0x00 0x00" }\n'
@@ -25090,11 +25095,12 @@ GS_F="$GS_F --load-addr=0x400000 --stack-top=0x3F0000"
   printf '    asm { "0x65 0x48 0x8B 0x04 0x25 0x00 0x00 0x00 0x00" }\n'
   printf '    asm { "0x65 0x48 0x8B 0x24 0x25 0x08 0x00 0x00 0x00" }\n'
   printf '    asm { "0x65 0x4C 0x8B 0x3C 0x25 0x10 0x00 0x00 0x00" }\n'
+  printf '    asm { "0x65 0xFF 0x34 0x25 0x18 0x00 0x00 0x00" }\n'
   printf '}\nfn main() -> uint64 { p()\n    return 0 }\n'; } > "$GS_D/r.kr"
 $KRC $GS_F "$GS_D/m.kr" -o "$GS_D/m.bin" >/dev/null 2>&1
 $KRC $GS_F "$GS_D/r.kr" -o "$GS_D/r.bin" >/dev/null 2>&1
 if [ -f "$GS_D/m.bin" ] && cmp -s "$GS_D/m.bin" "$GS_D/r.bin"; then
-    PASS=$((PASS + 1)); echo "  x86_gs_relative_moves: PASS (6 forms == their raw bytes, rax and r15 both ways)"
+    PASS=$((PASS + 1)); echo "  x86_gs_relative_moves: PASS (7 forms == their raw bytes, incl. push and r15 both ways)"
 else
     FAIL=$((FAIL + 1)); echo "FAIL: x86_gs_relative_moves (mnemonics do not match their bytes)"
 fi
