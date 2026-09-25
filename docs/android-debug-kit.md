@@ -10,10 +10,15 @@ could not chase on qemu-aarch64:
   backend by default. The R1 reproduction section below is kept as
   historical documentation in case a similar regression appears.
 
-- **R3** — The `device_block_read_write` test uses
-  `syscall_raw(mmap, 0x66666000, …)` at a fixed VA. qemu-user can't
-  honor `MAP_FIXED` at an absolute VA, so the test is skipped on CI.
-  We want to confirm it actually passes on real ARM64 Linux.
+- **R3** — *Answered 2026-09-26, and the premise was wrong.* The claim was
+  that qemu-user cannot honor `MAP_FIXED` at an absolute VA, so
+  `device_block_read_write` had to be skipped for arm64. It is not skipped and
+  it does not need to be: built `--arch=arm64` and run under
+  `qemu-aarch64-static`, the test exits **49** — the expected value — and the
+  `mmap` returns **exactly** `0x66666000`, not a relocated address. So
+  qemu-user honors it, and the row covers arm64 as it stands. A handset run
+  would still be worth having for a different reason (the guest kernel's own
+  VA policy, not the emulator's), but nothing is blocked on it.
 
 You have network-free USB access to the phone via adb. Do not flash,
 reboot, or modify the system partition. Work entirely from

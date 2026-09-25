@@ -370,15 +370,19 @@ fn uart_init() {
 }
 
 fn main() {
-    // ILLUSTRATIVE ONLY -- this does not assemble today. `asm()` takes a
-    // small mnemonic table plus raw hex words and hard-errors on anything
-    // else, including `adrp`, and it cannot reference a symbol at all:
-    //   error: unrecognized asm instruction 'adrp x0, vectors_el1; ...'
-    // Symbol references from asm are tracked as future work; until then a
-    // vector table has to be placed at a known absolute address instead.
-    u64 vbar = 0
-    asm("adrp x0, vectors_el1; add x0, x0, :lo12:vectors_el1") out(x0 -> vbar)
+    // `adrp` STILL DOES NOT ASSEMBLE, and asm cannot reference a symbol:
+    //   error: unrecognized asm instruction 'adrp x0, vectors_el1'
+    // (re-checked 2026-09-26). But the thing it was reached for -- the address
+    // of a named function -- has a supported answer that needs no asm at all:
+    u64 vbar = fn_addr("vectors_el1")
     install_vectors(vbar)
+
+    // fn_addr takes the name as a STRING LITERAL; `fn_addr(vectors_el1)` with a
+    // bare identifier is refused. It is how a real kernel does this: ApexRift's
+    // arch/arm64/a64_vectors.kr installs its table with fn_addr and an
+    // `msr vbar_el1, x0` through an out()/in() constraint, and never needs a
+    // vector table at a hardcoded absolute address -- which is what the older
+    // version of this tutorial told you to do.
 
     uart_init()
 
@@ -431,7 +435,11 @@ bytes if you hold a key down, the interrupt-driven one won't.
   *if* you're running at EL1 with no GIC in between. On real hardware you
   need GIC programming, which this repository does not yet have an example
   for — which is also why `examples/tutorial-uart/` echoes by polling rather
-  than from the ISR.
+  than from the ISR. (A worked GICv3 bring-up in KernRift does exist, outside
+  this repo: ApexRift's `arch/arm64/a64_gic.kr` programs the distributor and
+  the per-core redistributors on a real handset, and its SGI path is how that
+  kernel wakes secondary cores. Nothing here depends on it; it is named because
+  "no example exists" reads as "nobody has done it".)
 - **Two UART FIFO levels.** If you're echoing at >1 MBaud, the 32-byte
   FIFO can overflow between ISRs. Set `LCR_H.FEN = 1` (we do) and enable
   the receive timeout interrupt (IMSC bit 6, `UART011_RTIM`) instead of
