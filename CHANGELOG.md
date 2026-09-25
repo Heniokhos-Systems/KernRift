@@ -4,6 +4,20 @@ All notable changes to `kernriftc` are documented in this file.
 
 ## Unreleased
 
+**Fixed: the `@naked` return-type refusal suggested an edit that could not be
+made.** `@naked fn readctr() -> uint64 { asm { "mrs x0, cntvct_el0" } asm { "ret" } }`
+was refused with *"function may not return a value on all paths — add a final
+else/return after the conditional"*. There is no conditional: the all-paths-return
+check runs before naked-ness is considered and its message assumes the ordinary
+cause, so the only edit it named was impossible. The refusal itself stands —
+nothing can verify that hand-written asm sets the return register — but it now
+says which rule refused and points at the form that works, an ordinary function
+with an `out()` constraint. The ordinary case keeps its own advice, and a test row
+asserts both messages **and** that the recommended form compiles and runs, because
+a diagnostic pointing at something that does not work is worse than one pointing
+at nothing: arm64 `in`/`out` constraints were "documented, not implemented" for
+weeks. (`src/analysis.kr`.)
+
 **Fixed: `fn_addr(name)` blamed a function nobody had written.** The lowering took
 `ast_data1` of whatever the argument was and handed that token to the resolver,
 which strips the quotes it assumes are there — offset + 1, length − 2. So

@@ -254,7 +254,8 @@ fn main() {
 ```kr
 @export            fn api() { }           // keep symbol in output
 @noreturn          fn panic() { exit(1) }
-@naked             fn isr() { }           // no prologue/epilogue
+@naked             fn isr() { }           // no prologue/epilogue; NO return type
+                                          // (use out(x0 -> r) on a normal fn instead)
 @section(".text.init") fn boot() { }      // place in a named section
 
 // Deliberately shadow a built-in:

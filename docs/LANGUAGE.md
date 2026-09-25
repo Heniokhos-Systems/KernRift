@@ -1576,6 +1576,33 @@ and low-level entry points that manage their own stack.
 }
 ```
 
+**A `@naked` function may not declare a return type**, and this is a real limit
+rather than an oversight: the all-paths-return check cannot see into an asm body,
+and nothing in the compiler can verify that the asm leaves a value in the return
+register. `@naked fn f() -> uint64 { ... }` is refused.
+
+**The way to get a register into a variable is an `out()` constraint on an
+ordinary function**, which needs no `@naked` at all:
+
+```kr
+fn readctr() -> uint64 {
+    u64 r = 0
+    asm { "mrs x0, cntvct_el0" } out(x0 -> r)
+    return r
+}
+```
+
+That compiles on arm64 and returns the counter. The older workaround — store the
+register to memory from asm and read it back with `load64` — is no longer
+necessary; it rested on an unchecked assumption about which register was still
+live.
+
+**And `@naked` binds to the NEXT function declaration, with nothing in
+between.** An attribute separated from its function by an inserted declaration
+silently attaches to that declaration instead, which for a hand-written stack
+frame means the frame and the annotation end up on different functions. The
+parser refuses a detached `@naked` for exactly this reason.
+
 ### `@noreturn`
 
 Marks a function that never returns (e.g. `panic`, infinite loops).

@@ -6261,6 +6261,88 @@ else
 fi
 rm -f /tmp/krc_fnaddr2_$$.kr /tmp/krc_fnaddr2_$$ /tmp/krc_fnaddr3_$$.kr /tmp/krc_fnaddr3_out_$$.txt
 
+# A @naked FUNCTION THAT RETURNS A VALUE IS REFUSED, AND THE MESSAGE USED TO BE
+# WRONG RATHER THAN MERELY UNHELPFUL. The all-paths-return check runs before
+# naked-ness is considered, so it said "add a final else/return after the
+# conditional" to a body that is two asm blocks and contains no conditional --
+# the one edit it suggested could not be made. The refusal stands (nothing can
+# verify hand-written asm sets the return register); the message now names the
+# rule and points at the out() constraint form, which works.
+#
+# THE ROW ALSO CHECKS THE ORDINARY CASE STILL GETS THE ORDINARY MESSAGE, because
+# the cheap way to "fix" this is to reword the shared string and lose the advice
+# that is right for the common cause.
+TOTAL=$((TOTAL + 1))
+cat > /tmp/krc_naked_$$.kr <<'KREOF'
+@naked
+fn readctr() -> uint64 {
+    asm { "mrs x0, cntvct_el0" }
+    asm { "ret" }
+}
+fn main() -> uint64 { return 0 }
+KREOF
+cat > /tmp/krc_naked2_$$.kr <<'KREOF'
+fn f(u64 a) -> u64 {
+    if a > 1 { return 1 }
+}
+fn main() -> uint64 { return f(2) }
+KREOF
+$KRC --arch=arm64 /tmp/krc_naked_$$.kr -o /dev/null --emit=elf > /tmp/krc_naked_out_$$.txt 2>&1
+naked_rc=$?
+$KRC --arch=x86_64 /tmp/krc_naked2_$$.kr -o /dev/null --emit=elf > /tmp/krc_naked2_out_$$.txt 2>&1
+naked_err=""
+[ "$naked_rc" = "0" ] && naked_err="$naked_err accepted-a-naked-value-returning-fn"
+grep -q '@naked function may not declare a return type' /tmp/krc_naked_out_$$.txt \
+    || naked_err="$naked_err naked-message-does-not-name-the-rule"
+grep -q 'out(x0 -> result)' /tmp/krc_naked_out_$$.txt \
+    || naked_err="$naked_err naked-message-does-not-point-at-the-working-form"
+grep -q 'after the conditional' /tmp/krc_naked_out_$$.txt \
+    && naked_err="$naked_err naked-still-gets-the-conditional-advice"
+grep -q 'after the conditional' /tmp/krc_naked2_out_$$.txt \
+    || naked_err="$naked_err the-ordinary-case-LOST-its-own-message"
+if [ -z "$naked_err" ]; then
+    PASS=$((PASS + 1)); echo "  naked_value_return_names_its_own_rule: PASS (and the ordinary case kept its advice)"
+else
+    FAIL=$((FAIL + 1)); echo "FAIL: naked_value_return_names_its_own_rule ($naked_err)"
+    sed 's/^/    /' /tmp/krc_naked_out_$$.txt | head -4
+fi
+rm -f /tmp/krc_naked_$$.kr /tmp/krc_naked2_$$.kr /tmp/krc_naked_out_$$.txt /tmp/krc_naked2_out_$$.txt
+
+# AND THE FORM THE MESSAGE RECOMMENDS COMPILES AND RUNS. A diagnostic that points
+# at something that does not work is worse than one that points at nothing, and
+# this is the row that stops the advice above from rotting: arm64 in/out
+# constraints were "documented, not implemented" for weeks.
+TOTAL=$((TOTAL + 1))
+cat > /tmp/krc_nakedalt_$$.kr <<'KREOF'
+fn readctr() -> uint64 {
+    u64 r = 0
+    asm { "mrs x0, cntvct_el0" } out(x0 -> r)
+    return r
+}
+fn main() -> uint64 {
+    if readctr() != 0 { return 7 }
+    return 1
+}
+KREOF
+nakedalt_err=""
+if $KRC --arch=arm64 /tmp/krc_nakedalt_$$.kr -o /tmp/krc_nakedalt_$$ --emit=elf >/dev/null 2>&1; then
+    if command -v qemu-aarch64-static >/dev/null 2>&1; then
+        qemu-aarch64-static /tmp/krc_nakedalt_$$; nart=$?
+        [ "$nart" = "7" ] || nakedalt_err="ran-and-gave-$nart-want-7"
+        if [ -z "$nakedalt_err" ]; then
+            PASS=$((PASS + 1)); echo "  naked_alternative_out_constraint_works: PASS (read cntvct_el0 into a variable)"
+        else
+            FAIL=$((FAIL + 1)); echo "FAIL: naked_alternative_out_constraint_works ($nakedalt_err)"
+        fi
+    else
+        PASS=$((PASS + 1)); echo "  naked_alternative_out_constraint_works: SKIP (compiles; no qemu-aarch64-static to run it)"
+    fi
+else
+    FAIL=$((FAIL + 1))
+    echo "FAIL: naked_alternative_out_constraint_works (the form the @naked message recommends does not compile)"
+fi
+rm -f /tmp/krc_nakedalt_$$.kr /tmp/krc_nakedalt_$$
+
 # The other three analysis.kr write() length fixes (ctx-check :165,
 # eff-check :205, lock-cycle :327) cannot be exercised the same way: their
 # callers require populated annotation/lock-graph tables, and

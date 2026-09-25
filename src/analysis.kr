@@ -2222,7 +2222,21 @@ fn sema_check_returns(uint64 root) {
                 if block_has_return(wbody) == 0 {
                     uint32 name_tok = ast_data1(wchild)
                     uint64 wname = name_tok
-                    report_error_at(wname, "function may not return a value on all paths — add a final else/return after the conditional")
+                    // A @naked FUNCTION GETS ITS OWN MESSAGE, because the
+                    // ordinary one is not merely unhelpful there, it is wrong:
+                    // it says "add a final else/return after the conditional"
+                    // to a body that is two asm blocks and has no conditional,
+                    // so the only edit it suggests cannot be made. The refusal
+                    // itself stands -- nothing here can verify that hand-written
+                    // asm sets the return register -- but it should say which
+                    // rule refused and what does work instead. ast_data4 bit 1
+                    // is @naked; the parser sets it before this pass runs.
+                    uint32 nflags = ast_data4(wchild)
+                    if (nflags & 2) != 0 {
+                        report_error_at(wname, "a @naked function may not declare a return type: this check cannot see into an asm body, and nothing can verify the return register is set. Use an ordinary function with an out() constraint -- asm { \"mrs x0, cntvct_el0\" } out(x0 -> result) -- or write the value to an address the caller passes in")
+                    } else {
+                        report_error_at(wname, "function may not return a value on all paths — add a final else/return after the conditional")
+                    }
                     sema_errors = sema_errors + 1
                 }
             }
