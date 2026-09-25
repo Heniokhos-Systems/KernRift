@@ -68,7 +68,10 @@ contributors and the curious; **Project** tracks direction and process.
 - [Contributing](../CONTRIBUTING.md) — building, testing, and the CI gate.
 - [Living Compiler](LIVING_COMPILER.md) — the `lc` self-evolution vision.
 - [Android debug kit](android-debug-kit.md) — platform-specific tooling.
-- [Phase B design](PHASE_B_DESIGN.md), [MLRift port scope](MLRIFT_PORT_SCOPE.md)
-  and [GPU driver bring-up handoff](GPU_DRIVER_BRINGUP_HANDOFF.md) — working
-  notes for specific pieces of work rather than reference material, listed here
-  because this page claims to be the full index.
+- [GPU driver bring-up handoff](GPU_DRIVER_BRINGUP_HANDOFF.md) — working notes
+  for one piece of work rather than reference material, listed because this page
+  claims to be the full index.
+
+(`docs/PHASE_B_DESIGN.md` and `docs/MLRIFT_PORT_SCOPE.md` exist in a working
+tree but are **gitignored**, so they are deliberately not linked here — a link
+to either is a broken link in a fresh clone.)
