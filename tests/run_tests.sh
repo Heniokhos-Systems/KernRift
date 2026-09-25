@@ -2709,9 +2709,15 @@ fi
 # Assert the diagnostic, not merely a non-zero exit: any unrelated breakage
 # also exits non-zero, and would otherwise keep this row green for the wrong
 # reason.
-if ! printf '%s' "$bc_out" | grep -q 'error: unexpected token in expression'; then
+# The message names the token now. It used to read "unexpected token in
+# expression" only because tok_kind_name had no entry for '/' and fell through
+# to the bare word "token"; completing that table turned it into
+# "unexpected '/' in expression", which is the same refusal said properly.
+# Pinned on the '/' so this still cannot be satisfied by an unrelated parse
+# error somewhere else in the file.
+if ! printf '%s' "$bc_out" | grep -q "error: unexpected '/' in expression"; then
     BC_OK=0
-    echo "  expected 'error: unexpected token in expression', got: $(printf '%s' "$bc_out" | head -2)"
+    echo "  expected \"error: unexpected '/' in expression\", got: $(printf '%s' "$bc_out" | head -2)"
 fi
 # ...and that it points at the `/*` line (line 2 of the probe), so a parse
 # error somewhere else in the file cannot satisfy this row.

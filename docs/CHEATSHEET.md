@@ -220,9 +220,14 @@ device UART at 0x10000000 {
 fn main() {
     u64 p = alloc(8)
     atomic_store(p, 5)
-    exit(atomic_load(p))    // also atomic_cas, atomic_add/sub/and/or/xor
+    u64 ok  = atomic_cas(p, 5, 9)   // 1 if swapped, 0 if not -- NOT the old value
+    u64 old = atomic_add(p, 3)      // returns the OLD value
+    exit(atomic_load(p))            // also atomic_sub/and/or/xor
 }
 ```
+
+`atomic_cas` returns a condition; the read-modify-writes return the previous
+value. See [LANGUAGE.md §12](LANGUAGE.md#12-volatile-and-atomic).
 
 ## Bitfields
 

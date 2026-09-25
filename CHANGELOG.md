@@ -2,6 +2,31 @@
 
 All notable changes to `kernriftc` are documented in this file.
 
+## Unreleased
+
+**Fixed: every `f32` built-in returned `0` for a float literal.** `sqrt_f32(16.0)`
+answered `0.0` while `sqrt_f32(x)` for an `f32` `x` answered `4.0`, on both
+backends. A float literal is materialised as an `f64`; handed straight to an
+`f32` operation it was read as the low 32 bits of that pattern, which for
+`16.0` are all zero — so the failure was a plausible number, not a crash.
+`f32_to_f64` and `f32_to_int` had it too. The argument is now narrowed by its
+own fkind, so an `f64` *variable* is converted rather than reinterpreted as
+well. (`src/ir.kr`, `ir_lower_expr_as_f32`.)
+
+**Fixed: parse errors said `got token` instead of naming the token.**
+`tok_kind_name` covered 52 of the token kinds and fell through to the bare word
+`"token"` for the rest — including `at` and `device`, which are the keywords
+least likely to be recognised as keywords by whoever just used one as a variable
+name. Every operator, every compound assignment, `extern`, `sizeof` and the
+sized integer aliases were also anonymous. The table is now complete.
+
+**Docs.** `docs/LANGUAGE.md` gained a reserved-words list (all 51, checked
+against `src/lexer.kr`), and the float/conversion built-ins, `bit_toggle` and
+`call_ptr_f64` — which existed and were documented nowhere. The atomics section
+no longer shows `atomic_cas`'s result as `old`: it returns 1 on success, not the
+previous value, and the ARM64 lowering is `LDAXR`/`STLXR` (acquire/release), not
+plain `LDXR`/`STXR`.
+
 ## v2.10.0 — 2026-08-14
 
 **The release where bare metal stopped meaning QEMU.** A KernRift program,

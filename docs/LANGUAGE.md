@@ -180,6 +180,32 @@ parameters, fields and statics still spell out their types.
 | `<<=` | left shift     |
 | `>>=` | right shift    |
 
+### Reserved words
+
+These 51 words are keywords and **cannot be used as identifiers**. The list is
+the one `src/lexer.kr` actually matches, not a curated subset:
+
+```
+asm      at       bool     break    char     const    continue defer
+device   double   else     enum     extern   f16      f32      f64
+false    float    fn       for      i8       i16      i32      i64
+if       import   in       int8     int16    int32    int64    let
+loop     match    return   sizeof   static   struct   true     type
+u8       u16      u32      u64      uint8    uint16   uint32   uint64
+unsafe   volatile while
+```
+
+Most of these look like keywords. A few do not, and they are the ones that
+cost time: **`at`** (used by `device` blocks), **`in`**, **`let`**, **`type`**,
+**`match`**, **`char`**, **`float`** and **`double`**. Naming a variable after
+one produces `expected identifier, got '<word>'` at the declaration, followed
+by a cascade of downstream errors — including errors in *other* files, because
+an `import` after the broken declaration is no longer at the top level.
+
+**When a parse error points at a line that looks obviously correct, check the
+variable name against this list before reading anything else.** Rename and
+recompile; the follow-on errors are noise.
+
 ---
 
 ## 4. Operators
@@ -883,19 +909,33 @@ the same thing.
 Lock-free atomic primitives are available as builtins:
 
 ```kr
-u64 v = atomic_load(addr)
+u64 v   = atomic_load(addr)
 atomic_store(addr, v)
-u64 old = atomic_cas(addr, expected, desired)   // compare-and-swap
-u64 old = atomic_add(addr, delta)               // returns old value
+u64 ok  = atomic_cas(addr, expected, desired)   // 1 if swapped, 0 if not
+u64 old = atomic_add(addr, delta)               // returns the OLD value
 u64 old = atomic_sub(addr, delta)
 u64 old = atomic_and(addr, mask)
 u64 old = atomic_or(addr, mask)
 u64 old = atomic_xor(addr, mask)
 ```
 
-These compile to `LOCK`-prefixed instructions on x86_64 and `LDXR`/`STXR`
-exclusive pairs on ARM64. `atomic_cas` returns `1` on success, `0` on
-failure.
+**`atomic_cas` does not return the previous value.** It returns `1` when the
+compare matched and the swap happened, `0` when it did not — so it is a
+condition, not a value. The read-modify-write family (`atomic_add` and the
+four below it) *does* return the old value. Getting these two conventions the
+wrong way round turns a spin loop into a function that returns immediately,
+which no single-threaded test can see.
+
+What is emitted, measured with `--emit=asm` and by decoding the raw words:
+
+- **x86_64**: `LOCK`-prefixed instructions.
+- **ARM64**: `atomic_cas` and the read-modify-writes become **`LDAXR`/`STLXR`**
+  retry loops — the *acquire/release* exclusive forms, not plain `LDXR`/`STXR`.
+  `atomic_load` and `atomic_store` become **`LDAR`** and **`STLR`**.
+
+That the ARM64 forms carry acquire/release ordering is not incidental: it is
+what lets a lock built from `atomic_cas` and `atomic_store` publish the writes
+made inside its critical section without an explicit `dmb`.
 
 ---
 
@@ -1375,6 +1415,7 @@ manually-built buffer — reach for `print_str` / `println_str`.
 | `bit_clear(v, n)` | Return `v` with bit `n` cleared. |
 | `bit_range(v, start, width)` | Extract `width` bits starting at `start`. |
 | `bit_insert(v, start, width, bits)` | Insert `bits` into `v` at position `start`. |
+| `bit_toggle(v, n)` | Return `v` with bit `n` flipped. |
 
 ### Signed comparison
 
@@ -1408,6 +1449,7 @@ signed_le(a, b)    signed_ge(a, b)
 |---|---|
 | `fn_addr(name)` | Get the address of a named function. The name is a string literal, resolved at link time. |
 | `call_ptr(addr, ...)` | Call a function by address with any number of arguments. The caller's signature must match the target's or the result is undefined. |
+| `call_ptr_f64(addr, ...)` | As `call_ptr`, for a callee returning `f64`. The result comes back in the float return register, which `call_ptr` does not read. |
 
 Example — passing a comparator to a generic sort-ish loop:
 
@@ -1427,6 +1469,25 @@ fn main() {
 ```
 
 ### Cache and memory-ordering builtins (ARM64 / x86)
+
+| Function | Description |
+|---|---|
+| `sqrt(x)` / `sqrt_f64(x)` | Square root of an `f64`. The same operation under two names. |
+| `sqrt_f32(x)` | Square root of an `f32`. |
+| `fma_f64(a, b, c)` | Fused multiply-add: `a * b + c`, rounded once. |
+| `f32_to_f64(x)` / `f64_to_f32(x)` | Widen and narrow between the two float widths. |
+| `f32_to_int(x)` / `f64_to_int(x)` | Truncate a float to an integer. |
+| `int_to_f32(n)` / `int_to_f64(n)` | Convert an integer to a float. |
+| `f16_to_f32(bits)` / `f32_to_f16(x)` | Half-precision conversion. `f32_to_f16` yields the 16 bits as an integer; `f16_to_f32` takes them back. |
+| `signed_lt/le/gt/ge(a, b)` | Signed comparison of two `u64`-typed values, for when the bits are known to be a signed quantity. |
+
+A float literal is an `f64`, and passing one to an `f32` built-in narrows it
+automatically. **That was not true up to and including v2.10.0**, where
+`sqrt_f32(16.0)` answered `0.0` while `sqrt_f32(x)` for an `f32` `x` answered
+`4.0` — the literal's f64 bit pattern was read as an f32, and the low half of
+`16.0` (`0x4030000000000000`) is all zeros, so the wrong answer was a clean,
+plausible zero rather than a crash. `f32_to_f64` and `f32_to_int` had it too.
+On a compiler that old, narrow explicitly with `f64_to_f32`.
 
 | Function | ARM64 | x86_64 | Description |
 |---|---|---|---|

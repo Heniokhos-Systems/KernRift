@@ -405,6 +405,18 @@ fn ir_vreg_fkind_set(uint64 vreg, uint64 fk) {
     }
 }
 
+// Lower an expression that an f32 operation is about to consume, narrowing it
+// when it came out as an f64. See the note at the f64_to_f32 lowering for what
+// this fixes and how it presented.
+fn ir_lower_expr_as_f32(uint32 node) -> uint64 {
+    uint64 v = ir_lower_expr(node)
+    if ir_vreg_fkind_get(v) != FKIND_F64 { return v }
+    uint64 nar = ir_new_vreg()
+    ir_emit(IR_F64TOF32, nar, v, 0, 0, ir_current_bb)
+    ir_vreg_fkind_set(nar, FKIND_F32)
+    return nar
+}
+
 fn ir_vreg_fkind_get(uint64 vreg) -> uint64 {
     if vreg < ir_vreg_fkind_cap {
         uint64 p = ir_vreg_fkind_buf + vreg
@@ -2566,7 +2578,7 @@ fn ir_lower_expr(uint64 node) -> uint64 {
         // sqrt_f32(x) → IR_FSQRT32
         if skip_builtin == 0 && tok_matches(wct, "sqrt_f32", 8) != 0 {
             uint32 first_arg = ast_child(node)
-            uint64 src_v = ir_lower_expr(first_arg)
+            uint64 src_v = ir_lower_expr_as_f32(first_arg)
             uint64 dest = ir_new_vreg()
             ir_emit(IR_FSQRT32, dest, src_v, 0, 0, ir_current_bb)
             ir_vreg_fkind_set(dest, 2)
@@ -3448,7 +3460,7 @@ fn ir_lower_expr(uint64 node) -> uint64 {
         // f32_to_int(x): convert f32 bit pattern to integer
         if skip_builtin == 0 && tok_matches(wct, "f32_to_int", 10) != 0 {
             uint32 first_arg = ast_child(node)
-            uint64 src_v = ir_lower_expr(first_arg)
+            uint64 src_v = ir_lower_expr_as_f32(first_arg)
             uint64 dest = ir_new_vreg()
             ir_emit(IR_FTOI32, dest, src_v, 0, 0, ir_current_bb)
             ir_vreg_fkind_set(dest, 0)
@@ -3485,13 +3497,26 @@ fn ir_lower_expr(uint64 node) -> uint64 {
         // f32_to_f64(x): widen f32 to f64
         if skip_builtin == 0 && tok_matches(wct, "f32_to_f64", 10) != 0 {
             uint32 first_arg = ast_child(node)
-            uint64 src_v = ir_lower_expr(first_arg)
+            uint64 src_v = ir_lower_expr_as_f32(first_arg)
             uint64 dest = ir_new_vreg()
             ir_emit(IR_F32TOF64, dest, src_v, 0, 0, ir_current_bb)
             ir_vreg_fkind_set(dest, 1)
             return dest
         }
 
+        // A FLOAT LITERAL IS AN f64, AND AN f32 BUILT-IN MUST NARROW IT.
+        //
+        // `sqrt_f32(16.0)` returned 0.0 while `sqrt_f32(x)` for an f32 `x`
+        // returned 4.0, on BOTH backends. A float literal is materialised as an
+        // f64 bit pattern; handed straight to an f32 operation it is read as the
+        // LOW 32 BITS of that pattern, which for 16.0 (0x4030000000000000) are
+        // all zero -- hence a clean, plausible 0.0 rather than a crash. Every
+        // f32-taking built-in had it: f32_to_f64, f32_to_int and sqrt_f32 all
+        // answered 0 for a literal and correctly for a variable.
+        //
+        // The narrowing is driven by the argument's own fkind rather than by
+        // whether it looks like a literal, so an f64 VARIABLE passed to an f32
+        // built-in is converted too instead of being reinterpreted.
         // f64_to_f32(x): narrow f64 to f32
         if skip_builtin == 0 && tok_matches(wct, "f64_to_f32", 10) != 0 {
             uint32 first_arg = ast_child(node)

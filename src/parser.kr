@@ -106,6 +106,59 @@ fn tok_kind_name(uint64 kind) -> uint64 {
     if kind == 96 { return "'f64'" }
     if kind == 79 { return "'defer'" }
     if kind == 103 { return "'let'" }
+    // THE REST OF THE TABLE, added because the gap was not harmless. Every kind
+    // missing from here printed as the bare word "token", so `expected
+    // identifier, got token` was the whole message -- and the two kinds that
+    // most often produce it are `at` and `device`, which are the keywords least
+    // likely to be recognised as keywords by whoever just used one as a
+    // variable name. The error named every other keyword and those two it did
+    // not, which is exactly backwards.
+    if kind == 4 { return "character literal" }
+    if kind == 5 { return "float literal" }
+    if kind == 19 { return "':'" }
+    if kind == 20 { return "'->'" }
+    if kind == 21 { return "'@'" }
+    if kind == 22 { return "'*'" }
+    if kind == 23 { return "'&'" }
+    if kind == 24 { return "'|'" }
+    if kind == 25 { return "'^'" }
+    if kind == 26 { return "'~'" }
+    if kind == 27 { return "'!'" }
+    if kind == 28 { return "'?'" }
+    if kind == 30 { return "'+'" }
+    if kind == 31 { return "'-'" }
+    if kind == 32 { return "'/'" }
+    if kind == 33 { return "'%'" }
+    if kind == 35 { return "'=='" }
+    if kind == 36 { return "'!='" }
+    if kind == 37 { return "'<'" }
+    if kind == 38 { return "'<='" }
+    if kind == 39 { return "'>'" }
+    if kind == 40 { return "'>='" }
+    if kind == 41 { return "'&&'" }
+    if kind == 42 { return "'||'" }
+    if kind == 43 { return "'<<'" }
+    if kind == 44 { return "'>>'" }
+    if kind == 45 { return "'+='" }
+    if kind == 46 { return "'-='" }
+    if kind == 47 { return "'*='" }
+    if kind == 48 { return "'/='" }
+    if kind == 49 { return "'%='" }
+    if kind == 50 { return "'&='" }
+    if kind == 51 { return "'|='" }
+    if kind == 52 { return "'^='" }
+    if kind == 53 { return "'<<='" }
+    if kind == 54 { return "'>>='" }
+    if kind == 74 { return "'extern'" }
+    if kind == 81 { return "'uint16'" }
+    if kind == 82 { return "'uint32'" }
+    if kind == 84 { return "'int8'" }
+    if kind == 85 { return "'int16'" }
+    if kind == 86 { return "'int32'" }
+    if kind == 87 { return "'int64'" }
+    if kind == 92 { return "'device'" }
+    if kind == 93 { return "'at'" }
+    if kind == 97 { return "'sizeof'" }
     return "token"
 }
 
