@@ -11057,6 +11057,23 @@ fn asm_emit_x86(uint64 str_tok) {
     if asm_match(sptr, 0, "rdmsr", 5) != 0 && slen == 5 { emit_byte(0x0F); emit_byte(0x32); return }
     if asm_match(sptr, 0, "wrmsr", 5) != 0 && slen == 5 { emit_byte(0x0F); emit_byte(0x30); return }
     if asm_match(sptr, 0, "iretq", 5) != 0 && slen == 5 { emit_byte(0x48); emit_byte(0xCF); return }
+    // SYSRET, AND THE TWO FORMS ARE NOT INTERCHANGEABLE.
+    //
+    // `sysretq` (REX.W + 0F 07) returns to 64-bit mode; `sysret` (0F 07)
+    // returns to 32-bit COMPATIBILITY mode. A 64-bit kernel that writes the
+    // short one sends its userspace to a 32-bit CS with the high half of every
+    // register truncated -- which does not fault at the instruction, so the
+    // symptom appears later and somewhere else. Both are spelled out here
+    // rather than aliased, so the choice is made by whoever types it.
+    //
+    // THE PARSER ALREADY KNEW THESE WERE RETURNS (parser.kr's
+    // asm_str_mnemonic_is list) and refused them outside a @naked function --
+    // it was only the ENCODER that was missing, so the compiler diagnosed an
+    // instruction it could not then emit. Found while wiring ApexRift's
+    // SYSCALL fast path, where `swapgs`, `wrmsr`, `rdmsr` and `syscall` were
+    // all present and the return half was not.
+    if asm_match(sptr, 0, "sysretq", 7) != 0 && slen == 7 { emit_byte(0x48); emit_byte(0x0F); emit_byte(0x07); return }
+    if asm_match(sptr, 0, "sysret", 6) != 0 && slen == 6 { emit_byte(0x0F); emit_byte(0x07); return }
     // --- cache maintenance and the fence that orders it ------------------------
     //
     // The x86 half of the same problem the arm64 SYS aliases solved: ApexRift's

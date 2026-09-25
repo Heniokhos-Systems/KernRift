@@ -25022,6 +25022,46 @@ if [ -f "$G18L_D/x1.bin" ] && cmp -s "$G18L_D/x1.bin" "$G18L_D/x2.bin"; then
 else
     FAIL=$((FAIL + 1)); echo "FAIL: x86_cache_mnemonics (clflush/sfence do not match their bytes)"
 fi
+
+# SYSRET, THE RETURN HALF OF THE SYSCALL FAST PATH. `syscall`, `swapgs`,
+# `wrmsr` and `rdmsr` were all assembled and `sysret` was not -- while
+# parser.kr's asm-return list already NAMED it, so the compiler diagnosed an
+# instruction it could not then emit.
+#
+# THE TWO FORMS ARE ASSERTED SEPARATELY BECAUSE THEY ARE NOT THE SAME
+# INSTRUCTION. `sysretq` (REX.W + 0F 07) returns to 64-bit mode; `sysret`
+# (0F 07) returns to 32-bit COMPATIBILITY mode. A 64-bit kernel that emits the
+# short one sends userspace to a 32-bit CS with the high half of every register
+# truncated, and it does not fault where the mistake is. A test that accepted
+# either would let exactly that through.
+#
+# @naked IS REQUIRED and is part of what is being checked: both are returns, so
+# parser.kr refuses them in a function whose prologue the compiler emitted.
+TOTAL=$((TOTAL + 1))
+SR_D=$(mktemp -d)
+SR_F="--arch=x86_64 --freestanding --target=none --asm-strict --emit=image"
+SR_F="$SR_F --load-addr=0x400000 --stack-top=0x3F0000"
+printf '@naked\nfn p() { asm { "sysretq" } }\nfn main() -> uint64 { p()\n    return 0 }\n' > "$SR_D/q.kr"
+printf '@naked\nfn p() { asm { "0x48 0x0F 0x07" } }\nfn main() -> uint64 { p()\n    return 0 }\n' > "$SR_D/qraw.kr"
+printf '@naked\nfn p() { asm { "sysret" } }\nfn main() -> uint64 { p()\n    return 0 }\n' > "$SR_D/s.kr"
+printf '@naked\nfn p() { asm { "0x0F 0x07" } }\nfn main() -> uint64 { p()\n    return 0 }\n' > "$SR_D/sraw.kr"
+for f in q qraw s sraw; do $KRC $SR_F "$SR_D/$f.kr" -o "$SR_D/$f.bin" >/dev/null 2>&1; done
+sr_ok=0
+[ -f "$SR_D/q.bin" ] && cmp -s "$SR_D/q.bin" "$SR_D/qraw.bin" && sr_ok=$((sr_ok + 1))
+[ -f "$SR_D/s.bin" ] && cmp -s "$SR_D/s.bin" "$SR_D/sraw.bin" && sr_ok=$((sr_ok + 1))
+# AND THEY MUST DIFFER FROM EACH OTHER. Without this the whole test passes with
+# both mnemonics wired to the same encoding, which is the mistake it exists to
+# catch.
+sr_differ=0
+cmp -s "$SR_D/q.bin" "$SR_D/s.bin" || sr_differ=1
+if [ "$sr_ok" = "2" ] && [ "$sr_differ" = "1" ]; then
+    PASS=$((PASS + 1)); echo "  x86_sysret_mnemonics: PASS (both forms == their raw bytes, and differ)"
+else
+    FAIL=$((FAIL + 1))
+    echo "FAIL: x86_sysret_mnemonics ($sr_ok of 2 match their bytes, differ=$sr_differ)"
+fi
+rm -rf "$SR_D"
+
 rm -rf "$G18L_D"
 
 # --- Documentation pin 5, PART B (see Part A above) --------------------------
