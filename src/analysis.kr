@@ -20,6 +20,7 @@ static uint64 ann_count = 0
 // Semantic validation statics
 static uint64 fn_sig_table = 0
 static uint64 fn_sig_count = 0
+static uint64 fn_sig_cap   = 0   // entries the table can hold; grows when full
 static uint64 sema_errors = 0
 static uint64 sema_source = 0
 static uint64 sema_tok_buf = 0
@@ -638,7 +639,8 @@ fn run_analysis(uint64 root) -> uint64 {
 // ---------------------------------------------------------------------------
 
 fn sema_init(uint64 source, uint64 tok_buf) {
-    fn_sig_table = alloc(4096 * 16)
+    fn_sig_cap = 4096
+    fn_sig_table = alloc(fn_sig_cap * 16)
     fn_sig_count = 0
     sema_errors = 0
     sema_source = source
@@ -1163,6 +1165,19 @@ fn sema_tok_text_eq(uint64 tok_a, uint64 tok_b) -> uint64 {
 
 // Register a function signature: name_tok, param_count, has_return
 fn fn_sig_register(uint64 name_tok, uint64 param_count, uint64 has_return) {
+    // GROW WHEN FULL. The table used to be a fixed alloc(4096*16) written with no
+    // bounds check, so a unit past 4096 functions overflowed the heap buffer AND
+    // silently broke fn_sig_lookup / fn_sig_returns -- the latter feeds codegen's
+    // return handling, so a large program could miscompile with no diagnostic.
+    // Double the table instead; the old copy is freed after the move.
+    if fn_sig_count >= fn_sig_cap {
+        uint64 newcap = fn_sig_cap * 2
+        uint64 newtab = alloc(newcap * 16)
+        memcpy(newtab, fn_sig_table, fn_sig_count * 16)
+        dealloc(fn_sig_table)
+        fn_sig_table = newtab
+        fn_sig_cap = newcap
+    }
     uint64 entry = fn_sig_table + fn_sig_count * 16
     uint32 nt = name_tok
     unsafe { *(entry as uint32) = nt }
