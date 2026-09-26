@@ -21,6 +21,9 @@
 //   C6  call-arg-struct-mismatch   — passing struct B where param is A, or
 //                                    a non-struct where a struct is expected
 //   C10 match-arm-type-mismatch    — pattern type incompatible with scrutinee
+//   C11 init-float-integer-mix     — `uint64 n = <f64>` (bit pattern stored and
+//                                    the float kind inherited) or `f64 x = 5`
+//                                    (integer bits read as a float, ~0.0)
 //
 // TypeKind tags reuse the lexer's type-keyword token kinds where possible:
 //   0     = unknown / unresolved
@@ -756,6 +759,44 @@ fn tc_check_stmt(uint64 node) {
                 if lhs_struct != 0 && rhs_struct != 0 && tk != ik {
                     uint32 it = ast_tok(node)
                     diag_emit_str(it, 0, "initializer struct kind does not match declared type")
+                }
+                // ---- C11: initializer mixes float and integer ----
+                //
+                // THE DECLARED TYPE WAS IGNORED AND THE VARIABLE INHERITED THE
+                // INITIALIZER'S FLOAT KIND. `f64 x = 3.5  uint64 n = x` gave a
+                // variable that printed as 3.500000, added as a float against an
+                // integer literal, and added as an INTEGER against a real
+                // integer -- the f64 bit pattern plus 7. And the other direction,
+                // `f64 x = 5`, printed 0.000000: the integer 5 read as an f64 bit
+                // pattern is a denormal near zero. Both silent.
+                //
+                // The language already refuses this mix INSIDE an expression
+                // ("Mixing float and integer in one expression is a compile
+                // error -- use the explicit conversion builtins"); the
+                // declaration was the same mistake in a position nothing checked.
+                //
+                // ONLY THE SAFE DIRECTION IS GENERAL, and that is deliberate.
+                // tc_expr_kind consults fn_ret_float_lookup, which is a table of
+                // USER functions -- it does not know a builtin's return kind, so
+                // `int_to_f64(6)` reports as an integer. Refusing "declared float
+                // + integer initializer" in general would therefore reject
+                // `f64 a = int_to_f64(6)`, which is correct code and an example
+                // in LANGUAGE.md. So:
+                //   - declared integer + FLOAT initializer  -> always refused;
+                //     a builtin misreported as integer just means no error, which
+                //     is a false negative and safe.
+                //   - declared float + integer initializer  -> refused only when
+                //     the initializer is literally an IntLit (30), which no
+                //     builtin call can be.
+                uint64 lhs_f = tc_is_float_kind(tk)
+                uint64 rhs_f = tc_is_float_kind(ik)
+                if lhs_f == 0 && rhs_f != 0 && lhs_struct == 0 {
+                    uint32 it2 = ast_tok(node)
+                    diag_emit_str(it2, 0, "a float initializer in an integer variable is not converted -- the bit pattern is stored and the variable keeps its float kind; use f64_to_int() or f32_to_int()")
+                }
+                if lhs_f != 0 && ast_kind(winit) == 30 {
+                    uint32 it3 = ast_tok(node)
+                    diag_emit_str(it3, 0, "an integer literal does not convert to a float here -- its bits are read as a float and give ~0.0; write it with a decimal point, or use int_to_f64() / int_to_f32()")
                 }
             }
         }

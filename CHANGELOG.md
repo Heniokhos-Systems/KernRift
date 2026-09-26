@@ -4,6 +4,38 @@ All notable changes to `kernriftc` are documented in this file.
 
 ## Unreleased
 
+**Fixed: a variable's declared type was ignored when its initializer was a float
+(check C11).** Both directions were silently wrong:
+
+```kr
+f64 x = 3.5
+uint64 n = x        // printed 3.500000; `n + 1` was a FLOAT add against an
+                    // integer literal; `m + n` with a real integer m was an
+                    // INTEGER add of the f64 bit pattern -- 4615063718147915776 + 7
+f64 y = 5           // printed 0.000000 -- the integer 5 read as an f64 bit
+                    // pattern is a denormal near zero
+```
+
+The variable inherited the initializer's float kind instead of taking its declared
+one, so the same `n` behaved as a float in one expression and as an integer in the
+next depending on what it was combined with. `n + 1` is the nastiest of the three:
+the answer *looks* unchanged, because the integer `1` reinterpreted as an f64 is
+almost zero. KernRift already refused this mix *inside* an expression — "Mixing
+float and integer in one expression is a compile error" — and the declaration was
+the same mistake in a position nothing checked.
+
+**Only one direction is refused in general, deliberately.** `tc_expr_kind`
+consults `fn_ret_float_lookup`, a table of *user* functions, so it reports
+`int_to_f64(6)` as an integer; a general "declared float + integer initializer"
+rule would reject `f64 a = int_to_f64(6)`, which is correct code and an example in
+`docs/LANGUAGE.md`. So a float initializer in an integer variable is always
+refused — a builtin misreported as integer merely means no error fires, a safe
+false negative — while an integer initializer in a float variable is refused only
+when it is literally an `IntLit`, which no call can be. The test row asserts the
+six accepted forms as well as the three refused ones, because that asymmetry is
+what stops the check being tightened into a false positive.
+(`src/type_check.kr`.)
+
 **Fixed: the `@naked` return-type refusal suggested an edit that could not be
 made.** `@naked fn readctr() -> uint64 { asm { "mrs x0, cntvct_el0" } asm { "ret" } }`
 was refused with *"function may not return a value on all paths — add a final

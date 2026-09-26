@@ -6308,6 +6308,67 @@ else
 fi
 rm -f /tmp/krc_naked_$$.kr /tmp/krc_naked2_$$.kr /tmp/krc_naked_out_$$.txt /tmp/krc_naked2_out_$$.txt
 
+# C11: AN INITIALIZER MAY NOT MIX FLOAT AND INTEGER, and until this check both
+# directions were silently wrong.
+#
+#     f64 x = 3.5
+#     uint64 n = x        // n printed as 3.500000, added as a FLOAT against an
+#                         // integer literal, and as an INTEGER against a real
+#                         // integer -- the f64 bit pattern plus 7
+#     f64 y = 5           // printed 0.000000: the integer 5 read as an f64 bit
+#                         // pattern is a denormal near zero
+#
+# The declared type was ignored and the variable inherited the initializer's float
+# kind. The language already refused this mix INSIDE an expression; the
+# declaration was the same mistake in a position nothing checked.
+#
+# THE ROW'S SECOND HALF IS THE IMPORTANT ONE. tc_expr_kind consults
+# fn_ret_float_lookup, a table of USER functions, so it reports `int_to_f64(6)` as
+# an integer -- a general "declared float + integer initializer" rule would reject
+# `f64 a = int_to_f64(6)`, which is correct and is an example in LANGUAGE.md. So
+# the accepted cases are asserted too, and they are what stops this check being
+# tightened into a false positive.
+TOTAL=$((TOTAL + 1))
+c11_err=""
+c11_try() {   # name, source, want-refused(1/0)
+    cat > /tmp/krc_c11_$$.kr <<KREOF
+fn main() -> uint64 {
+$2
+    return 0
+}
+KREOF
+    if $KRC --arch=x86_64 /tmp/krc_c11_$$.kr -o /tmp/krc_c11_$$ --emit=elf > /tmp/krc_c11_out_$$.txt 2>&1; then
+        [ "$3" = "1" ] && c11_err="$c11_err ACCEPTED:$1"
+    else
+        [ "$3" = "0" ] && c11_err="$c11_err REJECTED:$1"
+    fi
+    rm -f /tmp/krc_c11_$$.kr /tmp/krc_c11_$$ /tmp/krc_c11_out_$$.txt
+}
+c11_try float-var-into-int   '    f64 x = 3.5
+    uint64 n = x
+    println(n)' 1
+c11_try float-lit-into-int   '    uint64 n = 3.5
+    println(n)' 1
+c11_try int-lit-into-float   '    f64 x = 5
+    println(x)' 1
+c11_try int_to_f64-into-f64  '    f64 a = int_to_f64(6)
+    println(a)' 0
+c11_try float-lit-into-f64   '    f64 b = 1.5
+    println(b)' 0
+c11_try f32-suffix-into-f32  '    f32 c = 2.5f
+    println(c)' 0
+c11_try f64_to_int-into-int  '    uint64 d = f64_to_int(3.9)
+    println(d)' 0
+c11_try alloc-into-int       '    uint64 e = alloc(8)
+    println(e * 0)' 0
+c11_try sqrt-into-f64        '    f64 g = sqrt(4.0)
+    println(g)' 0
+if [ -z "$c11_err" ]; then
+    PASS=$((PASS + 1)); echo "  init_float_integer_mix_refused: PASS (3 refused, 6 accepted)"
+else
+    FAIL=$((FAIL + 1)); echo "FAIL: init_float_integer_mix_refused ($c11_err)"
+fi
+
 # AND THE FORM THE MESSAGE RECOMMENDS COMPILES AND RUNS. A diagnostic that points
 # at something that does not work is worse than one that points at nothing, and
 # this is the row that stops the advice above from rotting: arm64 in/out

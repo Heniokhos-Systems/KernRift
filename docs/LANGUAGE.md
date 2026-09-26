@@ -1172,6 +1172,21 @@ Operators `+`, `-`, `*`, `/` work on matching float types. Mixing
 float and integer in one expression is a compile error — use the
 explicit conversion builtins.
 
+**The same applies to a declaration's initializer** (check C11). `uint64 n = x`
+where `x` is an `f64` is refused, and so is `f64 y = 5` — an integer literal's
+*bits* read as a float give approximately zero, not the number you wrote. Write
+`f64 y = 5.0`, or convert explicitly:
+
+```kr
+f64 a = int_to_f64(6)      // 6.0
+uint64 b = f64_to_int(3.9) // 3, truncating
+```
+
+Both of those were accepted silently before: the variable inherited the
+initializer's float kind rather than its declared type, so it formatted as a
+float, added as a float against an integer literal, and added as an integer
+against a real integer — the bit pattern, not the value.
+
 ### Comparisons
 
 ```kr
