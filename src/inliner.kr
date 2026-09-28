@@ -7,8 +7,14 @@
 //     loads, no stores, no field/index, no f-strings, no asm)
 //   - Each parameter is referenced at most once in the body so that
 //     substituting the call's argument expression doesn't duplicate
-//     side effects. Argument purity isn't checked — single-use means
-//     one evaluation regardless of arg shape
+//     side effects
+//   - Every argument at the call site is itself effect-free (same pure
+//     kinds as above). Substitution relocates an argument to wherever
+//     its parameter appears, which can drop it (parameter unused),
+//     reorder it (parameters used out of order) or make it conditional
+//     (parameter on the rhs of &&/||); none of that is observable for
+//     an effect-free argument, and any other argument blocks the
+//     inline so the real call evaluates it once, in source order
 //   - Function is not the entry point and isn't recursive (caller
 //     never inlines its own body)
 //
@@ -694,6 +700,29 @@ fn inline_try_call(uint64 call_node, uint64 root) -> uint64 {
 
     uint32 args_first = ast_child(call_node)
     uint64 wargs = args_first
+
+    // Argument-effect guard. Inlining works by substituting each
+    // argument's AST into the position(s) where its parameter appears
+    // in the callee body. That relocation is only sound for arguments
+    // with no side effects, because substitution can change *whether*,
+    // *when* and *how often* an argument runs:
+    //   - a parameter used 0 times drops its argument entirely
+    //     (f(p(), q(), r()) with body `return x` never ran q()/r())
+    //   - parameters used out of parameter order swap the evaluation
+    //     order of their arguments (body `return y - x`)
+    //   - a parameter on the rhs of `&&`/`||` makes its argument
+    //     conditional (body `return a || b` skipped b's argument)
+    // Rather than model the body's evaluation order, require every
+    // argument to be effect-free; when one isn't, we decline to inline
+    // and the real call is emitted, which evaluates every argument
+    // exactly once in source order. Cheap: the args of an inline
+    // candidate are near-always Idents or literals.
+    uint64 eff_arg = wargs
+    while eff_arg != 0 {
+        if inline_expr_is_pure(eff_arg) == 0 { return 0 }
+        uint32 eff_nxt = ast_next(eff_arg)
+        eff_arg = eff_nxt
+    }
 
     // Rotation-shape candidates: require all args to be trivial (Ident
     // or literal), and populate the body-locals table from the

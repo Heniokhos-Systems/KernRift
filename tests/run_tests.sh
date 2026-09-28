@@ -10922,6 +10922,250 @@ else
 fi
 rm -f /tmp/krc_inl_obj_$$.kr /tmp/krc_inl_obj_$$.o
 
+# --- inliner: an argument's side effects survive parameter substitution ------
+#
+# inline_try_call replaces a Call with the callee's return expression, cloning
+# each argument's AST into the position(s) where its parameter appears.
+# Eligibility (inline_params_single_use) only required each parameter to be used
+# AT MOST once -- and ZERO satisfies that -- so an argument whose parameter
+# never appeared in the body was never cloned anywhere and its side effects
+# were deleted along with the Call node:
+#
+#     fn f(u64 x, u64 y, u64 z) -> u64 { return x }
+#     println(f(p(), q(), r()))        // printed "10 10": q() and r() never ran
+#
+# The defect hid behind the callee's SIZE rather than its source (enlarge the
+# body past the inline threshold and the identical program is correct) and it
+# hid in the RETURN VALUE too, which stayed 10. Only the missing printed lines
+# showed it -- which is why every row below asserts the transcript or a call-
+# order accumulator, never the exit status alone.
+#
+# Two siblings share the one mechanism, because substitution RELOCATES an
+# argument to wherever its parameter is: parameters read out of parameter order
+# swap their arguments' evaluation order (body `return y - x` ran q() before
+# p()), and a parameter on the rhs of &&/|| makes its argument conditional
+# (body `return a || b` never ran b's argument).
+#
+# The fix is one guard in inline_try_call: a call is inlined only if EVERY
+# argument is effect-free, so relocation is unobservable. All three shapes die
+# to that one guard. inline_pure_args_still_inlined below is the vacuity guard
+# -- without it, degrading the fix into "never inline" would leave every
+# correctness row green while silently killing the pass.
+echo ""
+echo "--- inliner: argument side effects survive substitution ---"
+
+IARG_ROOT="$DIR/.."
+
+# (1) All three shapes, across both backends, both optimisation settings and
+#     both arches. Each source accumulates a decimal digit per argument call in
+#     `seq` (execution order) AND checks the returned value, then exits 7. The
+#     order alone would pass if the result were wrong; the value alone passes
+#     on the buggy compiler, which returned 10 correctly while dropping two
+#     calls. Same shape as the evaluation-order rows above.
+TOTAL=$((TOTAL + 1))
+IARG_OK=1
+IARG_OTHER="arm64"
+if [ "$RUN_ARCH" = "arm64" ]; then IARG_OTHER="x86_64"; fi
+IARG_QEMU=""
+if [ "$IARG_OTHER" = "arm64" ]; then
+    IARG_QEMU="$(command -v qemu-aarch64-static || command -v qemu-aarch64 || true)"
+fi
+
+# 1a. A parameter used ZERO times must not delete its argument.
+cat > "$IARG_ROOT/iarg_unused_$$.kr" <<'IARG_UNUSED'
+static u64 seq = 0
+fn ia() -> u64 { seq = seq * 10 + 1  return 10 }
+fn ib() -> u64 { seq = seq * 10 + 2  return 20 }
+fn ic() -> u64 { seq = seq * 10 + 3  return 30 }
+fn f3(u64 x, u64 y, u64 z) -> u64 { return x }
+fn main() {
+    u64 v = f3(ia(), ib(), ic())
+    if seq != 123 { exit(1) }
+    if v != 10 { exit(2) }
+    exit(7)
+}
+IARG_UNUSED
+
+# 1b. Parameters read out of parameter order must not reorder the arguments.
+cat > "$IARG_ROOT/iarg_order_$$.kr" <<'IARG_ORDER'
+static u64 seq = 0
+fn ia() -> u64 { seq = seq * 10 + 1  return 10 }
+fn ib() -> u64 { seq = seq * 10 + 2  return 20 }
+fn f2(u64 x, u64 y) -> u64 { return y - x }
+fn main() {
+    u64 v = f2(ia(), ib())
+    if seq != 12 { exit(1) }
+    if v != 10 { exit(2) }
+    exit(7)
+}
+IARG_ORDER
+
+# 1c. A parameter on the rhs of `||` must not make its argument conditional.
+#     The short-circuit is the callee's business; the ARGUMENT is evaluated at
+#     the call, exactly once, before the callee runs.
+cat > "$IARG_ROOT/iarg_shortcircuit_$$.kr" <<'IARG_SC'
+static u64 seq = 0
+fn ib() -> u64 { seq = seq * 10 + 2  return 20 }
+fn fo(u64 a, u64 b) -> u64 { return a || b }
+fn main() {
+    u64 v = fo(1, ib())
+    if seq != 2 { exit(1) }
+    if v != 1 { exit(2) }
+    exit(7)
+}
+IARG_SC
+
+IARG_RAN=0
+iarg_run() { # <arch> <flags> <src> <runner-or-empty>
+    local _bin="/tmp/krc_iarg_$$"
+    if ! $KRC --arch="$1" $2 "$3" -o "$_bin" >/dev/null 2>&1; then
+        IARG_OK=0; echo "  $(basename $3) $1 ${2:-IR}: COMPILE FAILED"
+        return
+    fi
+    if [ -n "$4" ]; then $4 "$_bin" >/dev/null 2>&1; else "$_bin" >/dev/null 2>&1; fi
+    local _rc=$?
+    IARG_RAN=$((IARG_RAN + 1))
+    # 7 = order and value both correct. 1 = an argument was dropped or
+    # reordered, 2 = wrong result.
+    [ "$_rc" = "7" ] || { IARG_OK=0; echo "  $(basename $3) $1 ${2:-IR}: got $_rc, want 7"; }
+    rm -f "$_bin"
+}
+for _src in "$IARG_ROOT/iarg_unused_$$.kr" "$IARG_ROOT/iarg_order_$$.kr" \
+            "$IARG_ROOT/iarg_shortcircuit_$$.kr"; do
+    iarg_run "$RUN_ARCH" ""          "$_src" ""
+    iarg_run "$RUN_ARCH" "--legacy"  "$_src" ""
+    iarg_run "$RUN_ARCH" "--O0"      "$_src" ""
+    if [ -n "$IARG_QEMU" ]; then
+        iarg_run "$IARG_OTHER" ""         "$_src" "$IARG_QEMU"
+        iarg_run "$IARG_OTHER" "--legacy" "$_src" "$IARG_QEMU"
+    fi
+done
+# Guard against the loop silently doing nothing. 3 sources x 3 host configs
+# always; x2 more per source when the other arch is runnable.
+IARG_WANT=9
+if [ -n "$IARG_QEMU" ]; then IARG_WANT=15; fi
+[ "$IARG_RAN" = "$IARG_WANT" ] || { IARG_OK=0; echo "  only $IARG_RAN/$IARG_WANT config-runs executed"; }
+if [ "$IARG_OK" = "1" ]; then
+    PASS=$((PASS + 1))
+    echo "  inline_arg_effects_preserved: PASS ($IARG_RAN config-runs)"
+else
+    echo "FAIL: inline_arg_effects_preserved"
+    FAIL=$((FAIL + 1))
+fi
+rm -f "$IARG_ROOT/iarg_unused_$$.kr" "$IARG_ROOT/iarg_order_$$.kr" \
+      "$IARG_ROOT/iarg_shortcircuit_$$.kr"
+
+# (2) The same three shapes as PRINTED TRANSCRIPTS, in the exact form the
+#     defect was reported in. The accumulator rows above can only see effects a
+#     program can observe in its own memory; these see what a user sees, and
+#     they are the rows whose "got" string names the two lines that went
+#     missing.
+run_test_output "inline_argeff_unused_transcript" '
+import "std/io.kr"
+fn p() -> u64 { println(10) return 10 }
+fn q() -> u64 { println(11) return 20 }
+fn r() -> u64 { println(12) return 30 }
+fn f(u64 x, u64 y, u64 z) -> u64 { return x }
+fn main() { println(f(p(), q(), r())) exit(0) }' '10
+11
+12
+10'
+run_test_output "inline_argeff_order_transcript" '
+import "std/io.kr"
+fn p() -> u64 { println(10) return 10 }
+fn q() -> u64 { println(11) return 20 }
+fn g(u64 x, u64 y) -> u64 { return y - x }
+fn main() { println(g(p(), q())) exit(0) }' '10
+11
+10'
+run_test_output "inline_argeff_shortcircuit_transcript" '
+import "std/io.kr"
+fn q() -> u64 { println(11) return 20 }
+fn h(u64 a, u64 b) -> u64 { return a || b }
+fn main() { println(h(1, q())) exit(0) }' '11
+1'
+
+# (3) THE GUARD FIRES, observed in the artifact rather than inferred. `side()`
+#     writes a static -- a REAL effect, and not itself an inline candidate --
+#     and `pick`'s body never mentions the parameter it is passed to. Before
+#     the fix main contained NO call at all: pick was inlined and side() was
+#     deleted with the argument list. After it, main calls pick, which calls
+#     side(). Two calls, and the VALUE is asserted too, since the right IR
+#     shape with the wrong arithmetic would otherwise pass.
+TOTAL=$((TOTAL + 1))
+IEFF_OK=1
+cat > "$IARG_ROOT/iarg_emit_$$.kr" <<'IARG_EMIT'
+static u64 hit = 0
+fn side() -> uint64 { hit = 1  return 4 }
+fn pick(uint64 a, uint64 b, uint64 c) -> uint64 { return a + c }
+fn main() {
+    u64 v = pick(7, side(), 9)
+    if hit != 1 { exit(1) }
+    if v != 16 { exit(2) }
+    exit(7)
+}
+IARG_EMIT
+IEFF_IR=$($KRC --emit=ir --arch="$RUN_ARCH" "$IARG_ROOT/iarg_emit_$$.kr" 2>/dev/null)
+# Sanity first: a dump with no `function main:` in it is not evidence.
+echo "$IEFF_IR" | grep -q "function main:" || { IEFF_OK=0; echo "  no 'function main:' in IR dump -- dump is not what we think"; }
+IEFF_N=$(echo "$IEFF_IR" | sed -n '/function main:/,$p' | grep -c "call @")
+[ "$IEFF_N" -ge 1 ] || { IEFF_OK=0; echo "  main holds $IEFF_N calls: the effecting argument was inlined away"; }
+for _fl in "" "--legacy" "--O0"; do
+    if $KRC --arch="$RUN_ARCH" $_fl "$IARG_ROOT/iarg_emit_$$.kr" -o "/tmp/krc_ieff_$$" >/dev/null 2>&1; then
+        "/tmp/krc_ieff_$$" >/dev/null 2>&1; _rc=$?
+        [ "$_rc" = "7" ] || { IEFF_OK=0; echo "  ${_fl:-IR}: got $_rc, want 7"; }
+    else
+        IEFF_OK=0; echo "  ${_fl:-IR}: COMPILE FAILED"
+    fi
+    rm -f "/tmp/krc_ieff_$$"
+done
+if [ "$IEFF_OK" = "1" ]; then
+    PASS=$((PASS + 1))
+    echo "  inline_effecting_arg_emits_real_call: PASS ($IEFF_N call(s) kept in main)"
+else
+    echo "FAIL: inline_effecting_arg_emits_real_call"
+    FAIL=$((FAIL + 1))
+fi
+rm -f "$IARG_ROOT/iarg_emit_$$.kr"
+
+# (4) VACUITY GUARD. The guard is per-CALL-SITE, not per-callee: a candidate
+#     must still be inlined wherever its arguments are idents, literals or
+#     arithmetic over them, which is every site in this tree's own corpus.
+#     Without this row, replacing the fix with "never inline anything" would
+#     leave every row above green and silently delete the pass.
+TOTAL=$((TOTAL + 1))
+IVAC_OK=1
+cat > "$IARG_ROOT/iarg_vacuity_$$.kr" <<'IARG_VAC'
+fn pick(uint64 a, uint64 b, uint64 c) -> uint64 { return a + b }
+fn main() {
+    u64 t = 3
+    u64 v = pick(t, t + 1, 9)
+    if v != 7 { exit(1) }
+    exit(7)
+}
+IARG_VAC
+IVAC_IR=$($KRC --emit=ir --arch="$RUN_ARCH" "$IARG_ROOT/iarg_vacuity_$$.kr" 2>/dev/null)
+echo "$IVAC_IR" | grep -q "function main:" || { IVAC_OK=0; echo "  no 'function main:' in IR dump -- dump is not what we think"; }
+IVAC_N=$(echo "$IVAC_IR" | sed -n '/function main:/,$p' | grep -c "call @")
+[ "$IVAC_N" = "0" ] || { IVAC_OK=0; echo "  main holds $IVAC_N call(s): pure-argument call sites stopped being inlined"; }
+for _fl in "" "--legacy" "--O0"; do
+    if $KRC --arch="$RUN_ARCH" $_fl "$IARG_ROOT/iarg_vacuity_$$.kr" -o "/tmp/krc_ivac_$$" >/dev/null 2>&1; then
+        "/tmp/krc_ivac_$$" >/dev/null 2>&1; _rc=$?
+        [ "$_rc" = "7" ] || { IVAC_OK=0; echo "  ${_fl:-IR}: got $_rc, want 7"; }
+    else
+        IVAC_OK=0; echo "  ${_fl:-IR}: COMPILE FAILED"
+    fi
+    rm -f "/tmp/krc_ivac_$$"
+done
+if [ "$IVAC_OK" = "1" ]; then
+    PASS=$((PASS + 1))
+    echo "  inline_pure_args_still_inlined: PASS (no call left in main)"
+else
+    echo "FAIL: inline_pure_args_still_inlined"
+    FAIL=$((FAIL + 1))
+fi
+rm -f "$IARG_ROOT/iarg_vacuity_$$.kr"
+
 # --- std/alloc.kr smoke ---
 echo ""
 echo "--- std/alloc arenas + pools ---"
