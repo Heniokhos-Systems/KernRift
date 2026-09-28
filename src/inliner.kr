@@ -717,6 +717,21 @@ fn inline_try_call(uint64 call_node, uint64 root) -> uint64 {
     // and the real call is emitted, which evaluates every argument
     // exactly once in source order. Cheap: the args of an inline
     // candidate are near-always Idents or literals.
+    //
+    // DO NOT "OPTIMISE" THIS BY WHITELISTING Index OR FieldAccess IN
+    // inline_kind_is_pure. It looks like free speed -- it is the one
+    // and only site in this tree's whole corpus where the guard costs
+    // anything (tests/target_none/corpus/arith.kr:27,
+    // `add3(counter, table[i], i)` -- ONE static call site declined,
+    // whose emitted call then runs eight times because the site sits
+    // inside a `while i < 8` loop) -- and it is the same mistake as
+    // the `/` and `%` entries already in that whitelist, which let a
+    // dropped argument take a SIGFPE with it.
+    // An index read can fault, and under --debug it emits a bounds
+    // check that aborts; a field access through a bad base faults too.
+    // Dropping, reordering or making either conditional is therefore
+    // observable, and "it is only a load" is not the test. The missed
+    // optimisation is accepted deliberately.
     uint64 eff_arg = wargs
     while eff_arg != 0 {
         if inline_expr_is_pure(eff_arg) == 0 { return 0 }
@@ -792,13 +807,6 @@ fn inline_walk(uint64 node, uint64 root) {
     if node == 0 { return }
     uint32 k = ast_kind(node)
     uint64 wk = k
-
-    if wk == 35 {
-        // Try to inline before we recurse — children get substituted
-        // into the new tree and don't need a second visit.
-        uint64 ok = inline_try_call(node, root)
-        if ok != 0 { return }
-    }
 
     // Children list (linked via `next`).
     uint32 c = ast_child(node)
@@ -882,6 +890,39 @@ fn inline_walk(uint64 node, uint64 root) {
             inline_current_fn_tok = saved
         }
     }
+
+    // BOTTOM-UP, and the order is load-bearing now that inline_try_call
+    // requires every argument to be effect-free. Trying the call BEFORE
+    // its children (the original order) meant an argument that was itself
+    // an un-inlined candidate call read as impure, so `outer(inner(x))` --
+    // the ordinary helper-over-helper idiom -- declined `outer` and left a
+    // real call behind. Recursing first inlines `inner`, which leaves an
+    // effect-free argument, and then `outer` inlines too.
+    //
+    // THE ATTEMPT IS THE LAST STATEMENT IN THIS FUNCTION, after the
+    // side-link blocks and not merely after the children loop, and there
+    // is deliberately NO early return. A Call (kind 35) matches none of
+    // the side-link blocks above today, so the two placements are
+    // behaviourally identical right now -- but if a Call ever gains a
+    // node-valued side field, an attempt sitting before those blocks would
+    // inline the call before that field had been walked, which is exactly
+    // the class of bug the Index (kind 37) data2 case above was. Last
+    // statement placement cannot acquire it. MLRift's sibling inliner
+    // (d3c2390) is written the same way for the same reason; keeping the
+    // two identical is intentional.
+    //
+    // No early return is needed because nothing follows, and nothing needs
+    // a second visit after a successful inline: a candidate body is
+    // call-free by construction, and the only other material in the
+    // substituted tree is the cloned arguments, which the guard has
+    // already established are call-free too.
+    //
+    // Measured, on this tree and on MLRift's: every artifact in the
+    // example/smoke/diff/target_none/benchmark corpus on x86_64 and arm64,
+    // and the compiler compiling its own source on both arches, is
+    // BYTE-IDENTICAL to the original top-down order, and the self-compile
+    // fixed point is the same size. A strict improvement, not a trade.
+    if wk == 35 { inline_try_call(node, root) }
 }
 
 // Top-level entry point. Call after sema has validated the AST and

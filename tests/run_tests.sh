@@ -11166,6 +11166,146 @@ else
 fi
 rm -f "$IARG_ROOT/iarg_vacuity_$$.kr"
 
+# (5) BOTTOM-UP WALK: a candidate argument must not block its caller. The
+#     argument-effect guard above reads an un-inlined candidate CALL as impure,
+#     so with the old top-down walk (`inline_try_call` before the children
+#     loop) the ordinary helper-over-helper idiom `outer(inner(x))` declined
+#     `outer` and left a real call behind -- a pessimisation introduced by the
+#     guard, not by the defect it fixes. Walking children first inlines
+#     `inner`, which makes the argument effect-free, and then `outer` inlines
+#     too. Both calls must be gone, and the VALUE is asserted as well because
+#     the right IR shape with the wrong arithmetic would otherwise pass.
+TOTAL=$((TOTAL + 1))
+INEST_OK=1
+cat > "$IARG_ROOT/iarg_nested_$$.kr" <<'IARG_NEST'
+fn inner(uint64 x) -> uint64 { return x + 1 }
+fn outer(uint64 a, uint64 b) -> uint64 { return a * b }
+fn main() {
+    u64 t = 3
+    u64 v = outer(inner(t), 2)
+    if v != 8 { exit(1) }
+    exit(7)
+}
+IARG_NEST
+INEST_IR=$($KRC --emit=ir --arch="$RUN_ARCH" "$IARG_ROOT/iarg_nested_$$.kr" 2>/dev/null)
+echo "$INEST_IR" | grep -q "function main:" || { INEST_OK=0; echo "  no 'function main:' in IR dump -- dump is not what we think"; }
+INEST_N=$(echo "$INEST_IR" | sed -n '/function main:/,$p' | grep -c "call @")
+[ "$INEST_N" = "0" ] || { INEST_OK=0; echo "  main holds $INEST_N call(s): a candidate argument is still blocking its caller (top-down walk?)"; }
+for _fl in "" "--legacy" "--O0"; do
+    if $KRC --arch="$RUN_ARCH" $_fl "$IARG_ROOT/iarg_nested_$$.kr" -o "/tmp/krc_inest_$$" >/dev/null 2>&1; then
+        "/tmp/krc_inest_$$" >/dev/null 2>&1; _rc=$?
+        [ "$_rc" = "7" ] || { INEST_OK=0; echo "  ${_fl:-IR}: got $_rc, want 7"; }
+    else
+        INEST_OK=0; echo "  ${_fl:-IR}: COMPILE FAILED"
+    fi
+    rm -f "/tmp/krc_inest_$$"
+done
+if [ "$INEST_OK" = "1" ]; then
+    PASS=$((PASS + 1))
+    echo "  inline_nested_candidate_inlines_through: PASS (no call left in main)"
+else
+    echo "FAIL: inline_nested_candidate_inlines_through"
+    FAIL=$((FAIL + 1))
+fi
+rm -f "$IARG_ROOT/iarg_nested_$$.kr"
+
+# (6) INLINING MUST NOT DECIDE WHETHER A PROGRAM WORKS.
+#
+# THIS ROW DOES NOT ASSERT THAT A CRASH IS CORRECT. It asserts that the
+# inliner is not the variable, and it exists because the argument-effect guard
+# UNMASKED a pre-existing `--legacy` defect that the inliner had been hiding.
+#
+# The defect (registered separately, not fixed here): under `--legacy`, a
+# struct-by-value call used as a NESTED ARGUMENT -- `h(get(bx), 2)` -- crashes
+# on both x86_64 and arm64, while `get(bx)` on its own is fine. It has nothing
+# to do with inlining: with `h` made a non-candidate it crashed before this fix
+# too. But while `h` WAS being inlined, `get(bx)` was relocated into h's body
+# and the crash did not happen, so the same source worked or died depending on
+# whether the callee happened to be small enough to inline. That is the thing
+# this row pins: the two spellings must now agree.
+#
+# So the check is a COMPARISON, not an expected exit code. It passes today with
+# both spellings failing, and it will keep passing on the day the `--legacy`
+# struct-by-value defect is fixed and both spellings succeed. It fails only if
+# inlining starts changing the answer again. The IR backend is asserted
+# CORRECT (7) in both spellings, so the row cannot pass by everything being
+# broken everywhere.
+TOTAL=$((TOTAL + 1))
+ISBV_OK=1
+cat > "$IARG_ROOT/iarg_sbv_cand_$$.kr" <<'IARG_SBV_C'
+struct SBox { u64 v }
+fn sget(SBox b) -> u64 { return b.v }
+fn sh(u64 a, u64 b) -> u64 { return a + b }
+fn main() {
+    SBox bx
+    bx.v = 5
+    u64 v = sh(sget(bx), 2)
+    if v != 7 { exit(1) }
+    exit(7)
+}
+IARG_SBV_C
+# Same program, `sh` deliberately NOT an inline candidate (two statements, so
+# inline_body_expr rejects it). Everything else is identical.
+cat > "$IARG_ROOT/iarg_sbv_nocand_$$.kr" <<'IARG_SBV_N'
+struct SBox { u64 v }
+static u64 sink = 0
+fn sget(SBox b) -> u64 { return b.v }
+fn sh(u64 a, u64 b) -> u64 { sink = 1  return a + b }
+fn main() {
+    SBox bx
+    bx.v = 5
+    u64 v = sh(sget(bx), 2)
+    if v != 7 { exit(1) }
+    exit(7)
+}
+IARG_SBV_N
+isbv_rc() { # <arch> <flags> <src> -> echoes the exit status, or 200 on a compile failure
+    local _bin="/tmp/krc_isbv_$$"
+    if ! $KRC --arch="$1" $2 "$3" -o "$_bin" >/dev/null 2>&1; then echo 200; return; fi
+    if [ "$1" = "$RUN_ARCH" ]; then "$_bin" >/dev/null 2>&1
+    elif [ -n "$IARG_QEMU" ]; then $IARG_QEMU "$_bin" >/dev/null 2>&1
+    else rm -f "$_bin"; echo skip; return; fi
+    local _rc=$?
+    rm -f "$_bin"
+    echo "$_rc"
+}
+# The IR backend must be CORRECT for both spellings -- this is the half that
+# keeps the comparison below from being satisfied by universal breakage.
+ISBV_NOTE=""
+for _sp in cand nocand; do
+    _rc=$(isbv_rc "$RUN_ARCH" "" "$IARG_ROOT/iarg_sbv_${_sp}_$$.kr")
+    [ "$_rc" = "7" ] || { ISBV_OK=0; echo "  IR $_sp: got $_rc, want 7"; }
+done
+# And `--legacy` must give the SAME answer either way, on every runnable arch.
+for _a in "$RUN_ARCH" "$IARG_OTHER"; do
+    _c=$(isbv_rc "$_a" "--legacy" "$IARG_ROOT/iarg_sbv_cand_$$.kr")
+    _n=$(isbv_rc "$_a" "--legacy" "$IARG_ROOT/iarg_sbv_nocand_$$.kr")
+    [ "$_c" = "skip" ] && continue
+    # 200 is isbv_rc's compile-failure sentinel, and it must FAIL rather than
+    # compare equal. The IR half above cannot see this: if --legacy ever
+    # started REFUSING both spellings, "they agree" would be satisfied by
+    # total legacy breakage and this row would pass with a note.
+    for _s in "$_c" "$_n"; do
+        [ "$_s" = "200" ] && { ISBV_OK=0; echo "  $_a --legacy: compile FAILED (sentinel 200) -- not an outcome this row accepts"; }
+    done
+    if [ "$_c" != "$_n" ]; then
+        ISBV_OK=0
+        echo "  $_a --legacy: inlined spelling gave $_c, non-inlined gave $_n -- inlining is deciding whether this program works"
+    fi
+    ISBV_NOTE="$ISBV_NOTE $_a=$_c"
+    # A note, never a failure: 139 is the known `--legacy` struct-by-value
+    # nested-argument defect. When it is fixed both become 7 and this row
+    # still passes; only the note changes.
+done
+if [ "$ISBV_OK" = "1" ]; then
+    PASS=$((PASS + 1))
+    echo "  inline_does_not_decide_struct_byval_outcome: PASS (IR correct both spellings; --legacy agrees:$ISBV_NOTE -- 139 = the known legacy struct-by-value nested-arg defect, not asserted as correct)"
+else
+    echo "FAIL: inline_does_not_decide_struct_byval_outcome"
+    FAIL=$((FAIL + 1))
+fi
+rm -f "$IARG_ROOT/iarg_sbv_cand_$$.kr" "$IARG_ROOT/iarg_sbv_nocand_$$.kr"
+
 # --- std/alloc.kr smoke ---
 echo ""
 echo "--- std/alloc arenas + pools ---"
