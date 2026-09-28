@@ -165,11 +165,79 @@ fi
 # in the commit message which rows moved and why. Do not re-base it to silence a
 # surprise.
 #
-# One consequence of pinning it to a MERGED commit rather than a fork point:
-# BEFORE is now HEAD's own sources compiled by the compiler under test, so a
-# freshly re-based gate 1 is a self-build comparison and passes only at the
-# bootstrap fixed point. Run `make bootstrap` first if it reports a wide diff.
-TN_BASE="${TN_BASE:-6e37819a60b0783436d0f219ee08e23617db09ad}"
+# One consequence of pinning it to a COMMIT rather than a fork point: BEFORE is
+# TN_BASE's sources compiled by the compiler under test. If TN_BASE is set to
+# HEAD itself that degenerates into a self-build comparison which passes only at
+# the bootstrap fixed point -- run `make bootstrap` first if it reports a wide
+# diff. It is NOT set to HEAD today; see the re-base note below, which pins it
+# one codegen commit behind HEAD on purpose so the comparison still has two
+# distinct source trees in it.
+#
+# RE-BASED 2026-09-28 to daf57b7, the inliner argument-effect fix, which moved
+# 12 of these 147 rows. Recorded here so the next reader does not have to
+# reconstruct it:
+#
+#   WHAT MOVED. Every row whose input is tests/target_none/corpus/arith.kr --
+#   bm_image / bm_image_stub / bm_uefi / bm_arx on both arches,
+#   bm_resetvec_x86_64_arith, rv32_hosted_arith, rv32_freestanding_arith and
+#   xt_freestanding_arith. Nothing else in the matrix moved, on any arch, any
+#   container or any backend; bmarr.kr and probe_io.kr are untouched.
+#
+#   WHY. arith.kr:27 is `counter = add3(counter, table[i], i)`. daf57b7 made
+#   the inliner decline a call whose argument is not effect-free, and
+#   `table[i]` is an Index node, which inline_kind_is_pure does not whitelist
+#   and deliberately must not (an index read can fault, and under --debug it
+#   emits a bounds check that aborts). So add3 is no longer inlined there: ONE
+#   static call site loses its inline, and because that site sits in the
+#   `while i < 8` loop the emitted call runs eight times. One declined site,
+#   not eight -- the earlier wording of this note said "eight declined calls",
+#   which overstated it.
+#
+#   WHY THAT IS SAFE. add3's body reads each parameter exactly once, in
+#   parameter order, unconditionally, so inlining WAS sound there; declining is
+#   a missed optimisation, not a correctness change. Verified by EXECUTION, not
+#   argued. arith.kr parks in `loop { }` and cannot be run, so the argument uses
+#   a variant with `exit(counter & 0xFF)` in place of the park, built by three
+#   compilers -- base ab51c92, the guard commit daf57b7, and HEAD -- and run
+#   on every target among these 12 rows that can be executed here:
+#
+#     --arch=riscv32 {IR, --legacy, --O0}, qemu-riscv32-static
+#         rc=209 from all three compilers in all three configs (9 runs)
+#     --arch=riscv32 --freestanding, qemu-system-riscv32 -machine virt -bios
+#         status=209 from all three compilers
+#     --arch=xtensa --freestanding, qemu-system-xtensa -M lx60 -semihosting
+#         status=209 from all three compilers
+#     --arch=x86_64 and --arch=arm64, {IR, --O0}
+#         rc=209 from all three compilers (arm64 under qemu-aarch64-static)
+#
+#   and the declined inline is visible in the artifact: `call @` in main for
+#   --emit=ir --arch=riscv32 goes 1 (base) -> 2 (HEAD), the second being add3.
+#
+#   ONE CAVEAT, STATED BECAUSE AN EARLIER VERSION OF THIS NOTE GOT IT WRONG:
+#   under --legacy the hosted x86_64 and arm64 variant returns rc=139, NOT 209.
+#   That is NOT caused by this change -- it is identical on base, on the
+#   top-down guard and on HEAD, and it is a pre-existing --legacy defect in the
+#   `static uint32 table[8]` indexed in a loop. The riscv32 --legacy leg is
+#   unaffected (209). An earlier draft of this comment claimed 209 "on the IR
+#   backend, --legacy and --O0", which was false for the two 64-bit --legacy
+#   legs; the conclusion stands because the number is the same before and
+#   after, but the sentence did not.
+#
+#   The 4 x86_64/arm64 bare-metal container rows per arch plus
+#   bm_resetvec_x86_64_arith are not executed here -- there is no boot harness
+#   for them in this script (that is boot_gate.sh's job). They share the IR and
+#   codegen paths with the hosted x86_64/arm64 legs above, which do execute at
+#   209 on all three compilers.
+#
+#   The baseline is therefore re-seeded rather than left reporting. A gate
+#   that is known-noisy stops being read, and the next person could not have
+#   told this expected delta from a real one.
+#
+# Pinned to daf57b7 and NOT to HEAD on purpose: d4c0aa7 (the bottom-up
+# inline_walk) is a codegen-ORDER change that was measured byte-identical, and
+# keeping the baseline one commit behind it means gate 1 actively re-asserts
+# that on every run instead of comparing HEAD against itself.
+TN_BASE="${TN_BASE:-daf57b723b66decd17a9fdb07de62e6d28bc7513}"
 
 MODE="both"
 case "${1:-}" in
