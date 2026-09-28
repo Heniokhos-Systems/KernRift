@@ -63,8 +63,20 @@ packaging/deb/ext/
 /docs/reviews/
 /docs/PHASE_B_DESIGN.md
 
+# Agent scratch tree (specs, plans, review reports). Only /docs/superpowers/
+# was listed, so this 30 KB tree of working notes was UNTRACKED-BUT-VISIBLE and
+# a single `git add -A` would have committed it. MLRift's .gitignore has
+# carried this line for a while; this tree's did not.
+.superpowers/
+
 # --target=none acceptance-gate scratch (tests/target_none/prove_no_syscalls.sh)
 /krc_tn_gate_*/
+# ...and boot_gate.sh's sibling, which was missing. Both scripts mktemp their
+# work dir INSIDE the repo on purpose (imports resolve against the importing
+# file, so a /tmp dir would silently pick up an installed stdlib instead of the
+# tree under test), so both leave a repo-root directory behind if the run is
+# SIGKILLed past their traps. Only one of the two was listed.
+/krc_boot_gate_*/
 
 # Example build artifacts
 examples/*/kernel.img
