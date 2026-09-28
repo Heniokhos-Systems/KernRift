@@ -223,11 +223,32 @@ fi
 #   legs; the conclusion stands because the number is the same before and
 #   after, but the sentence did not.
 #
-#   The 4 x86_64/arm64 bare-metal container rows per arch plus
-#   bm_resetvec_x86_64_arith are not executed here -- there is no boot harness
-#   for them in this script (that is boot_gate.sh's job). They share the IR and
-#   codegen paths with the hosted x86_64/arm64 legs above, which do execute at
-#   209 on all three compilers.
+#   WHAT IS STILL EXECUTION-UNVERIFIED, AND IT IS NOT COVERED ELSEWHERE.
+#   Of the 9 bare-metal rows among these 12 -- bm_image / bm_image_stub /
+#   bm_uefi / bm_arx on each of x86_64 and arm64, plus
+#   bm_resetvec_x86_64_arith -- 5 have never been booted by anything:
+#   bm_uefi on both arches, bm_arx on both arches, and bm_resetvec.
+#
+#   DO NOT read "boot_gate.sh is the tree's boot harness" as a pointer to
+#   coverage for them. It is not. boot_gate.sh boots its OWN programs --
+#   tests/target_none/boot/{sentinel,uefi_sentinel,heap*}_{x86,a64}.kr -- and
+#   the string "arith.kr" does not appear in it. No script in this tree boots
+#   arith.kr under any container. The argument for those 5 rows is therefore
+#   an inference, not a measurement: they share the IR and codegen paths with
+#   the hosted x86_64/arm64 legs above, which DO execute at 209 on all three
+#   compilers. If you need them proven, they need a harness written.
+#
+#   4 of the 9 HAVE been executed, externally and by hand rather than by this
+#   script: bm_image and bm_image_stub on both arches, built with
+#   boot_gate.sh's own --emit=image --stack-top= --load-addr= recipe and run
+#   under qemu (x86_64 via -kernel; arm64 via -device loader with force-raw
+#   plus a reset-PC loader) using an arith variant that prints its result over
+#   the 16550 / PL011 instead of exiting. All four rows produced
+#   serial='ARITH=209' on base, on the guard commit and on HEAD, with sentinel
+#   controls printing first so the harness was proven live rather than
+#   silently dead. Recorded because it narrows the unverified set from 9 to 5;
+#   NOT automated here, so a future run of this script does not re-establish
+#   it.
 #
 #   The baseline is therefore re-seeded rather than left reporting. A gate
 #   that is known-noisy stops being read, and the next person could not have
