@@ -71,7 +71,8 @@ static uint64 IAT_BCryptGenRandom = 37
 // slot 38: null qword -- bcrypt's thunk terminator. Never a call target.
 // The block between the two `@@pe-known-imports` markers is compiled ON ITS
 // OWN by run_tests.sh row pe_import_slot_lookup, so it must stay
-// self-contained: no calls out of it, no statics other than IAT_SLOT_COUNT.
+// self-contained: no calls to anything outside it, and every static it reads
+// (IAT_SLOT_COUNT, PE_IMPORT_NO_SLOT) is declared inside it.
 // @@pe-known-imports-begin
 // Qwords in the ILT region, and again in the IAT region, nulls included.
 static uint64 IAT_SLOT_COUNT = 39

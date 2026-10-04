@@ -9226,62 +9226,108 @@ echo ""
 echo "--- PE import table: kernel32 + ws2_32 + bcrypt (fixed slots) ---"
 # The .idata section is a FIXED 2048-byte table, emitted whole for every
 # --emit=pe build so no IAT slot ever shifts (format_pe.kr, emit_pe_idata).
-# The row pins ALL of it against a committed golden: every name, its slot
-# order, every ILT/IAT thunk, the three null terminators, the IDT offsets and
-# the DLL-name strings. A typo in one name (Windows then refuses to load EVERY
-# KernRift .exe) or two swapped names (loads fine, calls land in the wrong
-# function) changes these bytes; a presence check on a few names does not.
-# Coreutils only (od, dd, cmp): no tool dependency, so no silent degradation.
+# These rows pin ALL of it against a committed golden per arch: every name,
+# its slot order, every ILT/IAT thunk, the three null terminators, the IDT
+# offsets and the DLL-name strings. A typo in one name (Windows then refuses
+# to load EVERY KernRift .exe) or two swapped names (loads fine, calls land in
+# the wrong function) changes these bytes; a presence check on a few names
+# does not. Tools: od, dd, tr, cmp, wc (coreutils) and sed: no optional tool,
+# so no silent degradation.
 #
-# The section is LOCATED by walking the PE section table, not by a fixed file
-# offset, and its RVA must be 0x2000 -- the golden's thunks and IDT carry
-# absolute RVAs, so a moved .idata is reported as such, not as a byte diff.
+# .idata is LOCATED by walking the PE section table, not by a fixed file
+# offset. Its RVA, both sizes, the import data-directory (entry 1: must point
+# at the section, size 0x800), SizeOfImage and the three IDT FirstThunks are
+# each required by value, so a header-plumbing slip is named as such rather
+# than surfacing as a byte diff. The data-directory check is the one thing
+# the golden cannot see: it lives in the headers, which x86_64 fills before
+# codegen and arm64 patches after.
+#
+# TWO GOLDENS, NOT ONE GOLDEN PLUS RVA NORMALISATION. The arm64 table is the
+# x86_64 table shifted by 0x1000 (a .data page sits before .idata). Shifting
+# 9 IDT dwords and 72 thunk qwords in shell would be more code than the thing
+# it checks, and a bug in that arithmetic could cancel a bug in the
+# compiler's. A second literal golden checks the arm64 bytes as emitted.
+# What keeps the two from drifting apart when one is regenerated: everything
+# from the hint/name table on (offset 704 = golden line 45 onward) holds no
+# RVA, so it must be byte-identical between them -- checked below.
 # Regenerate (only for a DELIBERATE table change, after checking it with
 # `llvm-objdump -p`): build the fixture as below, then
-#   od -An -v -tx1 -j <PointerToRawData> -N 2048 out.exe > tests/golden/pe_imports_x86_64.idata.hex
-TOTAL=$((TOTAL + 1))
+#   od -An -v -tx1 -j <PointerToRawData> -N 2048 out.exe > tests/golden/pe_imports_<arch>.idata.hex
 PEI_OUT=/tmp/krc_pe_imports_$$.exe
-PEI_GOLD="$DIR/golden/pe_imports_x86_64.idata.hex"
-PEI_WHY=""
 pei_u() { od -An -v --endian=little -tu"$2" -j "$1" -N "$2" "$PEI_OUT" | tr -d ' \n'; }
-if [ ! -s "$PEI_GOLD" ]; then
-    PEI_WHY="golden missing: $PEI_GOLD"
-elif ! $KRC --arch=x86_64 --target=windows --emit=pe "$DIR/fixtures/pe_imports.kr" -o "$PEI_OUT" > /dev/null 2>&1; then
-    PEI_WHY="compile failed"
-else
-    PEI_LFA=$(pei_u 60 4)
-    PEI_NSEC=$(pei_u $((PEI_LFA + 6)) 2)
-    PEI_OPTSZ=$(pei_u $((PEI_LFA + 20)) 2)
-    PEI_SEC=$((PEI_LFA + 24 + PEI_OPTSZ))
-    PEI_PTR=""
-    _i=0
-    while [ "$_i" -lt "${PEI_NSEC:-0}" ]; do
-        _h=$((PEI_SEC + _i * 40))
-        _nm=$(dd if="$PEI_OUT" bs=1 skip="$_h" count=8 2>/dev/null | tr -d '\000')
-        if [ "$_nm" = ".idata" ]; then
-            PEI_VA=$(pei_u $((_h + 12)) 4)
-            PEI_RAW=$(pei_u $((_h + 16)) 4)
-            PEI_PTR=$(pei_u $((_h + 20)) 4)
-        fi
-        _i=$((_i + 1))
-    done
-    if [ -z "$PEI_PTR" ]; then
-        PEI_WHY="no .idata section in ${PEI_NSEC:-?} section headers"
-    elif [ "$PEI_VA" != "8192" ] || [ "$PEI_RAW" != "2048" ]; then
-        PEI_WHY=".idata at RVA $PEI_VA size $PEI_RAW, golden assumes RVA 8192 size 2048"
+# pei_check NAME ARCH GOLDEN VA IMAGESIZE FT_kernel32 FT_ws2_32 FT_bcrypt
+pei_check() {
+    local name="$1" arch="$2" gold="$3" xva="$4" ximg="$5" xft1="$6" xft2="$7" xft3="$8"
+    local why="" lfa nsec optsz sec h nm i va vsz raw ptr dva dsz img ft1 ft2 ft3 diff
+    TOTAL=$((TOTAL + 1))
+    if [ ! -s "$gold" ]; then
+        why="golden missing: $gold"
+    elif ! $KRC --arch="$arch" --target=windows --emit=pe "$DIR/fixtures/pe_imports.kr" -o "$PEI_OUT" > /dev/null 2>&1; then
+        why="compile failed"
     else
-        PEI_DIFF=$(od -An -v -tx1 -j "$PEI_PTR" -N 2048 "$PEI_OUT" | cmp - "$PEI_GOLD" 2>&1)
-        [ -z "$PEI_DIFF" ] || PEI_WHY=".idata differs from golden: $PEI_DIFF"
+        lfa=$(pei_u 60 4)
+        nsec=$(pei_u $((lfa + 6)) 2)
+        optsz=$(pei_u $((lfa + 20)) 2)
+        sec=$((lfa + 24 + optsz))
+        ptr=""
+        i=0
+        while [ "$i" -lt "${nsec:-0}" ]; do
+            h=$((sec + i * 40))
+            nm=$(dd if="$PEI_OUT" bs=1 skip="$h" count=8 2>/dev/null | tr -d '\000')
+            if [ "$nm" = ".idata" ]; then
+                vsz=$(pei_u $((h + 8)) 4)
+                va=$(pei_u $((h + 12)) 4)
+                raw=$(pei_u $((h + 16)) 4)
+                ptr=$(pei_u $((h + 20)) 4)
+            fi
+            i=$((i + 1))
+        done
+        # PE32+ optional header: SizeOfImage at +56, data directory 1 at +120.
+        img=$(pei_u $((lfa + 24 + 56)) 4)
+        dva=$(pei_u $((lfa + 24 + 120)) 4)
+        dsz=$(pei_u $((lfa + 24 + 124)) 4)
+        if [ -z "$ptr" ]; then
+            why="no .idata section in ${nsec:-?} section headers"
+        else
+            [ "$va" = "$xva" ] || why="$why .idata_RVA=$va(want $xva)"
+            [ "$vsz" = "2048" ] || why="$why VirtualSize=$vsz(want 2048)"
+            [ "$raw" = "2048" ] || why="$why RawSize=$raw(want 2048)"
+            [ "$dva" = "$xva" ] || why="$why ImportDir.RVA=$dva(want $xva)"
+            [ "$dsz" = "2048" ] || why="$why ImportDir.Size=$dsz(want 2048)"
+            [ "$img" = "$ximg" ] || why="$why SizeOfImage=$img(want $ximg)"
+            ft1=$(pei_u $((ptr + 16)) 4); ft2=$(pei_u $((ptr + 36)) 4); ft3=$(pei_u $((ptr + 56)) 4)
+            [ "$ft1 $ft2 $ft3" = "$xft1 $xft2 $xft3" ] || why="$why FirstThunks=$ft1/$ft2/$ft3(want $xft1/$xft2/$xft3)"
+            diff=$(od -An -v -tx1 -j "$ptr" -N 2048 "$PEI_OUT" | cmp - "$gold" 2>&1)
+            [ -z "$diff" ] || why="$why .idata differs from golden: $diff"
+        fi
     fi
-fi
-if [ -z "$PEI_WHY" ]; then
+    if [ -z "$why" ]; then
+        PASS=$((PASS + 1))
+        echo "  $name: PASS"
+    else
+        FAIL=$((FAIL + 1))
+        echo "  $name: FAIL ($why)"
+    fi
+    rm -f "$PEI_OUT"
+}
+#                                                  .idata  SizeOf  FirstThunks (IAT region +0/+160/+296)
+pei_check pe_imports_three_dlls x86_64 "$DIR/golden/pe_imports_x86_64.idata.hex" \
+    8192  12288  8584  8744  8880     # 0x2000 0x3000  0x2188 0x2228 0x22B0
+pei_check pe_imports_three_dlls_arm64 arm64 "$DIR/golden/pe_imports_arm64.idata.hex" \
+    12288 16384  12680 12840 12976    # 0x3000 0x4000  0x3188 0x3228 0x32B0
+# The RVA-free tail (hint/name table + DLL names) must match across the two
+# goldens, so regenerating one cannot quietly leave the other describing a
+# different table. Counted: it is the cross-arch half of the pin.
+TOTAL=$((TOTAL + 1))
+if [ -s "$DIR/golden/pe_imports_x86_64.idata.hex" ] && [ -s "$DIR/golden/pe_imports_arm64.idata.hex" ] \
+   && [ "$(sed -n '45,128p' "$DIR/golden/pe_imports_x86_64.idata.hex" | wc -l)" = "84" ] \
+   && sed -n '45,128p' "$DIR/golden/pe_imports_x86_64.idata.hex" | cmp -s - <(sed -n '45,128p' "$DIR/golden/pe_imports_arm64.idata.hex"); then
     PASS=$((PASS + 1))
-    echo "  pe_imports_three_dlls: PASS"
+    echo "  pe_imports_goldens_agree: PASS"
 else
     FAIL=$((FAIL + 1))
-    echo "  pe_imports_three_dlls: FAIL ($PEI_WHY)"
+    echo "  pe_imports_goldens_agree: FAIL (hint/name + DLL-name bytes differ between the x86_64 and arm64 goldens, or one is missing/short)"
 fi
-rm -f "$PEI_OUT"
 
 # Name -> slot lookup (pe_import_slot), the interface later stages map an
 # `extern fn` name through. The table block is cut out of format_pe.kr between
