@@ -69,6 +69,10 @@ static uint64 IAT_WSACreateEvent = 35
 // --- bcrypt.dll: FirstThunk = IAT region + 296 (slot 37) ---
 static uint64 IAT_BCryptGenRandom = 37
 // slot 38: null qword -- bcrypt's thunk terminator. Never a call target.
+// The block between the two `@@pe-known-imports` markers is compiled ON ITS
+// OWN by run_tests.sh row pe_import_slot_lookup, so it must stay
+// self-contained: no calls out of it, no statics other than IAT_SLOT_COUNT.
+// @@pe-known-imports-begin
 // Qwords in the ILT region, and again in the IAT region, nulls included.
 static uint64 IAT_SLOT_COUNT = 39
 
@@ -117,6 +121,45 @@ fn pe_import_name_at_slot(uint64 slot) -> uint64 {
     if slot == 37 { return "BCryptGenRandom" }
     return 0
 }
+
+// Name -> IAT slot: the inverse of pe_import_name_at_slot, over the same table.
+// `name_ptr`/`name_len` need NOT be NUL-terminated (a token in the source
+// buffer is fine). The match is exact and case-sensitive over the whole name:
+// "sen" and "sendx" do not match "send". Returns PE_IMPORT_NO_SLOT for a name
+// the table does not know; the null terminator slots never match anything.
+static uint64 PE_IMPORT_NO_SLOT = 0xFFFFFFFF
+fn pe_import_slot(uint64 name_ptr, uint64 name_len) -> uint64 {
+    uint64 slot = 0
+    while slot < IAT_SLOT_COUNT {
+        uint64 nm = pe_import_name_at_slot(slot)
+        if nm != 0 {
+            uint64 i = 0
+            uint64 same = 1
+            while i < name_len {
+                uint8 a = 0
+                uint8 b = 0
+                uint64 pa = name_ptr + i
+                uint64 pb = nm + i
+                unsafe { *(pa as uint8) -> a }
+                unsafe { *(pb as uint8) -> b }
+                // b == 0 ends the table name early: the query is longer.
+                if b == 0 { same = 0; i = name_len } else {
+                    if a != b { same = 0; i = name_len } else { i = i + 1 }
+                }
+            }
+            if same == 1 {
+                // The table name must end exactly here: the query is no shorter.
+                uint8 t = 0
+                uint64 pt = nm + name_len
+                unsafe { *(pt as uint8) -> t }
+                if t == 0 { return slot }
+            }
+        }
+        slot = slot + 1
+    }
+    return PE_IMPORT_NO_SLOT
+}
+// @@pe-known-imports-end
 
 // Compute .idata section size -- a COMPILE-TIME CONSTANT over the FULL table.
 // It is read BEFORE codegen (emit_pe_headers_x64 / _a64) to fill the .idata
@@ -235,6 +278,9 @@ fn emit_pe_idata(uint64 idata_rva) -> uint64 {
     while slot < IAT_SLOT_COUNT {
         uint64 nm = pe_import_name_at_slot(slot)
         if nm != 0 {
+            // Round-trip: a duplicated name would make the name->slot lookup
+            // answer the FIRST copy's slot, so calls would land elsewhere.
+            if pe_import_slot(nm, str_len(nm)) != slot { pe_idata_fail("import name is not unique in the known-import table") }
             uint64 entry_start = out_len
             emit_u16_le(0)                  // Hint
             pe_emit_cstr(nm)

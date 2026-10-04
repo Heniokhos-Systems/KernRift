@@ -9224,30 +9224,54 @@ fn main() {
 
 echo ""
 echo "--- PE import table: kernel32 + ws2_32 + bcrypt (fixed slots) ---"
-# The .idata section is a FIXED table, emitted whole for every --emit=pe build
-# so no IAT slot ever shifts (format_pe.kr, emit_pe_idata). The DLL-name strings
-# exist in the artifact ONLY if that table emits them -- a trivial `main` does
-# not mention any of them -- so finding all three is non-vacuous. When
-# llvm-objdump is present the row also requires the import directory to PARSE
-# as exactly three DLLs carrying the boundary functions of each block (first
-# kernel32, last kernel32 reserve, first/last ws2_32, bcrypt): a name string
-# sitting in a corrupt directory would pass the grep but not this.
+# The .idata section is a FIXED 2048-byte table, emitted whole for every
+# --emit=pe build so no IAT slot ever shifts (format_pe.kr, emit_pe_idata).
+# The row pins ALL of it against a committed golden: every name, its slot
+# order, every ILT/IAT thunk, the three null terminators, the IDT offsets and
+# the DLL-name strings. A typo in one name (Windows then refuses to load EVERY
+# KernRift .exe) or two swapped names (loads fine, calls land in the wrong
+# function) changes these bytes; a presence check on a few names does not.
+# Coreutils only (od, dd, cmp): no tool dependency, so no silent degradation.
+#
+# The section is LOCATED by walking the PE section table, not by a fixed file
+# offset, and its RVA must be 0x2000 -- the golden's thunks and IDT carry
+# absolute RVAs, so a moved .idata is reported as such, not as a byte diff.
+# Regenerate (only for a DELIBERATE table change, after checking it with
+# `llvm-objdump -p`): build the fixture as below, then
+#   od -An -v -tx1 -j <PointerToRawData> -N 2048 out.exe > tests/golden/pe_imports_x86_64.idata.hex
 TOTAL=$((TOTAL + 1))
 PEI_OUT=/tmp/krc_pe_imports_$$.exe
+PEI_GOLD="$DIR/golden/pe_imports_x86_64.idata.hex"
 PEI_WHY=""
-if ! $KRC --arch=x86_64 --target=windows --emit=pe "$DIR/fixtures/pe_imports.kr" -o "$PEI_OUT" > /dev/null 2>&1; then
+pei_u() { od -An -v --endian=little -tu"$2" -j "$1" -N "$2" "$PEI_OUT" | tr -d ' \n'; }
+if [ ! -s "$PEI_GOLD" ]; then
+    PEI_WHY="golden missing: $PEI_GOLD"
+elif ! $KRC --arch=x86_64 --target=windows --emit=pe "$DIR/fixtures/pe_imports.kr" -o "$PEI_OUT" > /dev/null 2>&1; then
     PEI_WHY="compile failed"
 else
-    for _dll in kernel32.dll ws2_32.dll bcrypt.dll; do
-        grep -qaF "$_dll" "$PEI_OUT" || PEI_WHY="$PEI_WHY missing:$_dll"
+    PEI_LFA=$(pei_u 60 4)
+    PEI_NSEC=$(pei_u $((PEI_LFA + 6)) 2)
+    PEI_OPTSZ=$(pei_u $((PEI_LFA + 20)) 2)
+    PEI_SEC=$((PEI_LFA + 24 + PEI_OPTSZ))
+    PEI_PTR=""
+    _i=0
+    while [ "$_i" -lt "${PEI_NSEC:-0}" ]; do
+        _h=$((PEI_SEC + _i * 40))
+        _nm=$(dd if="$PEI_OUT" bs=1 skip="$_h" count=8 2>/dev/null | tr -d '\000')
+        if [ "$_nm" = ".idata" ]; then
+            PEI_VA=$(pei_u $((_h + 12)) 4)
+            PEI_RAW=$(pei_u $((_h + 16)) 4)
+            PEI_PTR=$(pei_u $((_h + 20)) 4)
+        fi
+        _i=$((_i + 1))
     done
-    if [ -z "$PEI_WHY" ] && command -v llvm-objdump > /dev/null 2>&1; then
-        PEI_P=$(llvm-objdump -p "$PEI_OUT" 2>&1)
-        PEI_N=$(printf '%s\n' "$PEI_P" | grep -c 'DLL Name:')
-        [ "$PEI_N" = "3" ] || PEI_WHY="$PEI_WHY dll_count:$PEI_N"
-        for _fn in ExitProcess MoveFileExA WSAStartup select WSACreateEvent BCryptGenRandom; do
-            printf '%s\n' "$PEI_P" | grep -qE "^ +[0-9]+ +$_fn\$" || PEI_WHY="$PEI_WHY unparsed:$_fn"
-        done
+    if [ -z "$PEI_PTR" ]; then
+        PEI_WHY="no .idata section in ${PEI_NSEC:-?} section headers"
+    elif [ "$PEI_VA" != "8192" ] || [ "$PEI_RAW" != "2048" ]; then
+        PEI_WHY=".idata at RVA $PEI_VA size $PEI_RAW, golden assumes RVA 8192 size 2048"
+    else
+        PEI_DIFF=$(od -An -v -tx1 -j "$PEI_PTR" -N 2048 "$PEI_OUT" | cmp - "$PEI_GOLD" 2>&1)
+        [ -z "$PEI_DIFF" ] || PEI_WHY=".idata differs from golden: $PEI_DIFF"
     fi
 fi
 if [ -z "$PEI_WHY" ]; then
@@ -9258,6 +9282,50 @@ else
     echo "  pe_imports_three_dlls: FAIL ($PEI_WHY)"
 fi
 rm -f "$PEI_OUT"
+
+# Name -> slot lookup (pe_import_slot), the interface later stages map an
+# `extern fn` name through. The table block is cut out of format_pe.kr between
+# its @@pe-known-imports markers and compiled on its own, so this runs the
+# real source, not a copy. Covers: first/middle/last DLL, a name passed as a
+# non-NUL-terminated prefix of a longer buffer, and the sentinel for an
+# unknown name, a strict prefix ("sen") and an extension ("sendx").
+TOTAL=$((TOTAL + 1))
+PIS_SRC=/tmp/krc_pe_slot_$$.kr
+PIS_BIN=/tmp/krc_pe_slot_$$
+sed -n '/^\/\/ @@pe-known-imports-begin$/,/^\/\/ @@pe-known-imports-end$/p' "$DIR/../src/format_pe.kr" > "$PIS_SRC"
+cat >> "$PIS_SRC" <<'KREOF'
+fn main() {
+    if pe_import_slot("ExitProcess", 11) != 0 { exit(1) }
+    if pe_import_slot("send", 4) != 24 { exit(2) }
+    if pe_import_slot("recv", 4) != 25 { exit(3) }
+    if pe_import_slot("BCryptGenRandom", 15) != 37 { exit(4) }
+    if pe_import_slot("MoveFileExA", 11) != 18 { exit(5) }
+    if pe_import_slot("sendto", 4) != 24 { exit(6) }
+    if pe_import_slot("sen", 3) != 0xFFFFFFFF { exit(7) }
+    if pe_import_slot("sendx", 5) != 0xFFFFFFFF { exit(8) }
+    if pe_import_slot("GetFileSizeEy", 13) != 0xFFFFFFFF { exit(9) }
+    if pe_import_slot("", 0) != 0xFFFFFFFF { exit(10) }
+    exit(0)
+}
+KREOF
+if ! grep -q '^fn pe_import_slot(' "$PIS_SRC"; then
+    FAIL=$((FAIL + 1))
+    echo "  pe_import_slot_lookup: FAIL (@@pe-known-imports block not found in src/format_pe.kr)"
+elif ! $KRC $KRC_FLAGS "$PIS_SRC" -o "$PIS_BIN" > /dev/null 2>&1; then
+    FAIL=$((FAIL + 1))
+    echo "  pe_import_slot_lookup: FAIL (extracted block does not compile on its own)"
+else
+    chmod +x "$PIS_BIN"
+    "$PIS_BIN" > /dev/null 2>&1; PIS_RC=$?
+    if [ "$PIS_RC" = "0" ]; then
+        PASS=$((PASS + 1))
+        echo "  pe_import_slot_lookup: PASS"
+    else
+        FAIL=$((FAIL + 1))
+        echo "  pe_import_slot_lookup: FAIL (check #$PIS_RC failed)"
+    fi
+fi
+rm -f "$PIS_SRC" "$PIS_BIN"
 
 echo ""
 echo "--- extern fn (libc linking) ---"
