@@ -9373,6 +9373,64 @@ else
 fi
 rm -f "$PIS_SRC" "$PIS_BIN"
 
+# const_os_cond: an `if get_target_os() == <lit>` / `get_arch_id() ==/!= <lit>`
+# branch is decided at compile time, and its not-taken arm is pruned from BOTH
+# dead-code elimination and the If lowering. std/sys.kr depends on this: its
+# Windows arms call externs that only a PE build can resolve.
+OSP_BIN=/tmp/krc_os_prune_$$
+# (1) The Windows-only arm's extern is dead on Linux, so the executable builds
+#     and never names it (ELF has no import table; a pruned callee is never
+#     registered, so its name cannot reach the image).
+TOTAL=$((TOTAL + 1))
+rm -f "$OSP_BIN"
+OSP_ERR=$($KRC $KRC_FLAGS --target=linux --emit=elfexe "$DIR/fixtures/os_prune.kr" -o "$OSP_BIN" 2>&1 >/dev/null)
+if [ ! -s "$OSP_BIN" ]; then
+    FAIL=$((FAIL + 1))
+    echo "  os_prune_dead_windows_arm: FAIL (Linux build refused: $(echo "$OSP_ERR" | head -1))"
+elif grep -q WSAStartup "$OSP_BIN"; then
+    FAIL=$((FAIL + 1))
+    echo "  os_prune_dead_windows_arm: FAIL (binary still names WSAStartup)"
+else
+    PASS=$((PASS + 1))
+    echo "  os_prune_dead_windows_arm: PASS"
+fi
+# (2) Literal-only contract: the same test through a variable is UNKNOWN, both
+#     arms stay live, and the Linux build still refuses the extern by name.
+TOTAL=$((TOTAL + 1))
+rm -f "$OSP_BIN"
+OSP_ERR=$($KRC $KRC_FLAGS --target=linux --emit=elfexe "$DIR/fixtures/os_prune_nonliteral.kr" -o "$OSP_BIN" 2>&1 >/dev/null)
+if [ -s "$OSP_BIN" ]; then
+    FAIL=$((FAIL + 1))
+    echo "  os_prune_nonliteral_stays_live: FAIL (a non-literal OS test was pruned; the build succeeded)"
+elif ! echo "$OSP_ERR" | grep -q "WSAStartup' is never defined"; then
+    FAIL=$((FAIL + 1))
+    echo "  os_prune_nonliteral_stays_live: FAIL (refused, but not for the live extern: $(echo "$OSP_ERR" | head -1))"
+else
+    PASS=$((PASS + 1))
+    echo "  os_prune_nonliteral_stays_live: PASS"
+fi
+# (3) Behaviour: the TAKEN arm runs and the NOT_TAKEN arm does not, for ==,
+#     !=, literal-on-the-left, get_arch_id, an else-if chain and an else-less
+#     if. Status 63 = every expected bit and no 64; an inverted or
+#     always-taken predicate cannot produce it.
+TOTAL=$((TOTAL + 1))
+rm -f "$OSP_BIN"
+if ! $KRC $KRC_FLAGS --target=linux --emit=elfexe "$DIR/fixtures/os_prune_exit.kr" -o "$OSP_BIN" > /dev/null 2>&1; then
+    FAIL=$((FAIL + 1))
+    echo "  os_prune_taken_arm_runs: FAIL (did not compile)"
+else
+    chmod +x "$OSP_BIN"
+    "$OSP_BIN" > /dev/null 2>&1; OSP_RC=$?
+    if [ "$OSP_RC" = "63" ]; then
+        PASS=$((PASS + 1))
+        echo "  os_prune_taken_arm_runs: PASS"
+    else
+        FAIL=$((FAIL + 1))
+        echo "  os_prune_taken_arm_runs: FAIL (status $OSP_RC, want 63)"
+    fi
+fi
+rm -f "$OSP_BIN"
+
 echo ""
 echo "--- extern fn (libc linking) ---"
 # These tests link against the HOST gcc's libc. On cross-compile runs

@@ -4772,6 +4772,16 @@ fn ir_lower_stmt(uint64 node) {
     // If (13)
     if kind == 13 {
         uint32 cond_node = ast_child(node)
+        // A constant OS/arch test (const_os_cond, src/codegen.kr): 1 TAKEN,
+        // 2 NOT_TAKEN, 0 UNKNOWN. The dead arm's BODY is not lowered -- DCE
+        // pruned the same arm, so a call in it may name a callee that was
+        // never registered (a Windows-only extern on a Linux build). The
+        // branch, both BBs, the snapshot and the COPY-to-merge wiring are
+        // all kept exactly as for a live arm: the dead BB just holds no
+        // statements, COPYs nothing (no var changed), and branches to merge.
+        // The constant BR_COND is folded to a BR later (IR const-branch
+        // fold), which also orphans the empty block.
+        uint64 if_osc = const_os_cond(cond_node)
         uint64 cond = ir_lower_expr(cond_node)
         uint64 bb_then = ir_new_bb()
         uint64 bb_merge = ir_new_bb()
@@ -4797,7 +4807,7 @@ fn ir_lower_stmt(uint64 node) {
         ir_current_bb = bb_then
         uint32 then_body = ast_data1(node)
         uint64 wthen = then_body
-        if wthen != 0 { ir_lower_block(wthen) }
+        if wthen != 0 && if_osc != 2 { ir_lower_block(wthen) }
         // Emit COPY for changed variables (then → merge)
         ir_emit_copy_to_snapshot(if_snap, if_snap_count, ir_current_bb)
         ir_emit(IR_BR, 0, 0, 0, bb_merge, ir_current_bb)
@@ -4817,7 +4827,9 @@ fn ir_lower_stmt(uint64 node) {
         if welse != 0 {
             ir_current_bb = bb_else
             uint32 else_kind = ast_kind(welse)
-            if else_kind == 15 {
+            if if_osc == 1 {
+                // TAKEN: the else arm (block or else-if chain) is dead.
+            } else if else_kind == 15 {
                 ir_lower_block(welse)
             } else {
                 ir_lower_stmt(welse)

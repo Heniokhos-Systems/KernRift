@@ -14890,6 +14890,92 @@ fn dce_lookup_fn(uint64 name_tok) -> uint64 {
     return 0
 }
 
+// The compile-time value of a zero-argument get_target_os()/get_arch_id()
+// Call node, or 0xFFFFFFFFFFFFFFFF if `node` is not such a call (every real
+// value is 0..12, so the sentinel cannot collide).
+// MUST agree with the IR lowerings of the two builtins (src/ir.kr, the
+// get_target_os / get_arch_id arms of the Call case): const_os_cond below
+// prunes an `if` arm on this answer, so a disagreement deletes the arm the
+// running program would have taken. A @builtin_override of either name makes
+// the call an ordinary user call, so it is not a constant here either.
+fn const_os_call_value(uint64 node) -> uint64 {
+    uint64 none = 0xFFFFFFFFFFFFFFFF
+    if node == 0 { return none }
+    if ast_kind(node) != 35 { return none }
+    uint32 callee_tok = ast_data1(node)
+    uint64 wct = callee_tok
+    if ast_child(node) != 0 { return none }
+    if builtin_override_lookup(wct) != 0 { return none }
+    if tok_matches(wct, "get_target_os", 13) != 0 { return target_os }
+    if tok_matches(wct, "get_arch_id", 11) != 0 {
+        uint64 arch_id = 1
+        if target_os == 4 {
+            arch_id = 9
+            if target_arch == 1 { arch_id = 10 }
+            if target_arch == 2 { arch_id = 11 }
+            if target_arch == 3 { arch_id = 12 }
+        } else if target_arch == 1 {
+            arch_id = 2
+            if target_os == 2 { arch_id = 4 }
+            if target_os == 1 { arch_id = 6 }
+            if target_os == 3 { arch_id = 7 }
+        } else {
+            if target_os == 2 { arch_id = 3 }
+            if target_os == 1 { arch_id = 5 }
+            if target_os == 3 { arch_id = 8 }
+        }
+        return arch_id
+    }
+    return none
+}
+
+// Is an `if` condition a compile-time constant OS/arch test?
+//   0 UNKNOWN    -- anything else; both arms are scanned and lowered as before
+//   1 TAKEN      -- the then-arm always runs; the else-arm is dead
+//   2 NOT_TAKEN  -- the then-arm never runs; the else-arm (if any) is live
+// Recognised, and ONLY this (the "literal only" contract std/sys.kr relies on):
+// a Compare node (kind 38 -- the parser builds every comparison as Compare,
+// never BinOp 33; same layout: data1=op tok, child=lhs, data2=rhs) with op
+// `==` (35) or `!=` (36) whose one side is a zero-argument
+// get_target_os()/get_arch_id() Call and whose other side is an IntLit, in
+// either order. `u64 o = get_target_os()  if o == 2` is UNKNOWN on purpose.
+// Consumers: dce_scan_node's If case (below) and ir_lower_stmt's If case
+// (src/ir.kr), which must prune the SAME arm or a call kept live by one is
+// lowered against a callee the other dropped.
+fn const_os_cond(uint64 cond_node) -> uint64 {
+    if cond_node == 0 { return 0 }
+    if ast_kind(cond_node) != 38 { return 0 }
+    uint32 op_tok = ast_data1(cond_node)
+    uint64 op_kind = tok_kind_at_raw(op_tok)
+    if op_kind != 35 && op_kind != 36 { return 0 }
+    uint32 lhs32 = ast_child(cond_node)
+    uint32 rhs32 = ast_data2(cond_node)
+    uint64 lhs = lhs32
+    uint64 rhs = rhs32
+    if lhs == 0 || rhs == 0 { return 0 }
+    uint64 none = 0xFFFFFFFFFFFFFFFF
+    uint64 cv = none
+    uint64 lit = 0
+    uint64 lcv = const_os_call_value(lhs)
+    uint64 rcv = const_os_call_value(rhs)
+    if lcv != none && ast_kind(rhs) == 30 {
+        cv = lcv
+        lit = rhs
+    } else if rcv != none && ast_kind(lhs) == 30 {
+        cv = rcv
+        lit = lhs
+    } else {
+        return 0
+    }
+    uint32 lit_tok = ast_data1(lit)
+    uint64 lit_val = parse_int_token(lit_tok)
+    uint64 equal = 0
+    if cv == lit_val { equal = 1 }
+    if op_kind == 36 { equal = 1 - equal }
+    if equal != 0 { return 1 }
+    return 2
+}
+
 // Recursively scan an AST node for Call and fn_addr references
 fn dce_scan_node(uint64 node) {
     if node == 0 { return }
@@ -14968,14 +15054,19 @@ fn dce_scan_node(uint64 node) {
     }
 
     // For nodes that store sub-node indices in data1/data2
-    // If: data1=then_body, data2=else_body
+    // If: data1=then_body, data2=else_body. The cond (the only child) was
+    // scanned by the child walk above. A constant OS/arch test (const_os_cond)
+    // scans only the arm that runs on this target; the IR If lowering prunes
+    // the same arm, so nothing it lowers calls a callee pruned here.
     if kind == 13 {
+        uint32 if_cond = ast_child(node)
+        uint64 if_osc = const_os_cond(if_cond)
         uint32 then_body = ast_data1(node)
         uint64 wtb = then_body
-        if wtb != 0 { dce_scan_node(wtb) }
+        if wtb != 0 && if_osc != 2 { dce_scan_node(wtb) }
         uint32 else_body = ast_data2(node)
         uint64 web = else_body
-        if web != 0 { dce_scan_node(web) }
+        if web != 0 && if_osc != 1 { dce_scan_node(web) }
     }
     // While: data1=body
     if kind == 14 {

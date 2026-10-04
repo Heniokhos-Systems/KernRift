@@ -1,0 +1,12 @@
+// The "literal only" contract: the OS value travels through a variable, so the
+// condition is NOT a direct literal comparison and both arms stay live. A
+// Linux executable build must still refuse the Windows-only extern.
+extern fn WSAStartup(uint64 ver, uint64 wsadata) -> uint64
+fn main() -> uint32 {
+    u64 o = get_target_os()
+    if o == 2 {
+        u8[512] wd
+        WSAStartup(514, wd)
+    }
+    return 0
+}

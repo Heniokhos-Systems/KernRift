@@ -1,0 +1,22 @@
+// Every taken arm adds a distinct bit; every arm that must NOT run adds 64.
+// On a hosted Linux build (target_os 0) the status is 1+2+4+8+16+32 = 63.
+// An inverted or always-taken predicate runs a dead arm and the status
+// carries 64 (or misses a bit). r is assigned in BOTH arms of every `if`, so
+// the merge of a pruned arm's (absent) assignment is exercised too.
+fn main() -> uint32 {
+    uint64 r = 0
+    if get_target_os() == 0 { r = r + 1 } else { r = r + 64 }
+    if get_target_os() != 0 { r = r + 64 } else { r = r + 2 }
+    if 0 == get_target_os() { r = r + 4 } else { r = r + 64 }
+    if get_arch_id() == 0 { r = r + 64 } else { r = r + 8 }
+    if get_target_os() == 2 {
+        r = r + 64
+    } else if get_target_os() == 0 {
+        r = r + 16
+    } else {
+        r = r + 64
+    }
+    if get_arch_id() != 0 { r = r + 32 }
+    exit(r)
+    return 0
+}

@@ -1,0 +1,8 @@
+extern fn WSAStartup(uint64 ver, uint64 wsadata) -> uint64
+fn main() -> uint32 {
+    if get_target_os() == 2 {
+        u8[512] wd
+        WSAStartup(514, wd)
+    }
+    return 0
+}
