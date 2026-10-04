@@ -1,20 +1,31 @@
 // KernRift self-hosted compiler — PE/COFF output format (Windows)
 //
-// PE32+ with .text + .idata sections for Windows x86_64 and AArch64
-// Import table provides: ExitProcess, GetStdHandle, WriteFile,
-// CreateFileA, ReadFile, CloseHandle, VirtualAlloc
+// PE32+ with .text + .idata sections for Windows x86_64 and AArch64.
+// Import table: kernel32.dll, ws2_32.dll and bcrypt.dll, ALWAYS emitted whole
+// (see the slot map below), so no IAT slot ever moves between builds.
 
 // ---------------------------------------------------------------------------
 // PE import table (IAT) layout
 // ---------------------------------------------------------------------------
-// .idata section contains:
+// .idata section contains, in this order:
 //   Import Directory Table (IDT): one entry per DLL + null terminator
-//   Import Lookup Table (ILT): one entry per function + null terminator
-//   Import Address Table (IAT): same as ILT, patched by loader
-//   Hint/Name entries: hint(2) + name string + padding
-//   DLL name string
+//   ILT region: ONE contiguous run of qwords, every DLL's thunks back to back,
+//     each DLL's run closed by its own null qword
+//   IAT region: identical shape to the ILT region, patched by the loader
+//   Hint/Name entries: hint(2) + name string + padding, 32 bytes each
+//   DLL name strings
+//
+// WHY ONE CONTIGUOUS ILT AND ONE CONTIGUOUS IAT, NOT PER-DLL BLOCKS.
+// Call sites resolve a slot FLAT: target = iat_rva + slot * 8
+// (resolve_win_iat_fixups, codegen.kr; resolve_a64_win_iat_fixups,
+// codegen_aarch64.kr). A slot number is therefore a qword index into ONE IAT
+// region, and each IDT entry's FirstThunk points at its DLL's sub-range of it.
+// That is legal PE: the loader walks each FirstThunk until a null qword, and
+// the null qwords between DLLs (slots 19, 36, 38) are exactly those
+// terminators. Interleaving ILT/IAT per DLL would break the flat formula.
 
-// IAT slot indices (used by codegen to generate indirect calls)
+// IAT slot indices (used by codegen to generate indirect calls).
+// --- kernel32.dll: FirstThunk = IAT region + 0 (slot 0) ---
 static uint64 IAT_ExitProcess = 0
 static uint64 IAT_GetStdHandle = 1
 static uint64 IAT_WriteFile = 2
@@ -31,214 +42,221 @@ static uint64 IAT_GetModuleFileNameA = 12
 static uint64 IAT_VirtualFree = 13
 static uint64 IAT_QueryPerformanceCounter = 14
 static uint64 IAT_QueryPerformanceFrequency = 15
-static uint64 IAT_ENTRY_COUNT = 16
+// Reserved now (Stage 1b) so adding their users later shifts no later slot.
+static uint64 IAT_GetEnvironmentVariableA = 16
+static uint64 IAT_CreateDirectoryA = 17
+static uint64 IAT_MoveFileExA = 18
+// slot 19: null qword -- kernel32's thunk terminator. Never a call target.
+// --- ws2_32.dll: FirstThunk = IAT region + 160 (slot 20) ---
+static uint64 IAT_WSAStartup = 20
+static uint64 IAT_WSAGetLastError = 21
+static uint64 IAT_socket = 22
+static uint64 IAT_connect = 23
+static uint64 IAT_send = 24
+static uint64 IAT_recv = 25
+static uint64 IAT_closesocket = 26
+static uint64 IAT_setsockopt = 27
+static uint64 IAT_shutdown = 28
+static uint64 IAT_bind = 29
+static uint64 IAT_listen = 30
+static uint64 IAT_accept = 31
+static uint64 IAT_select = 32
+// Reserved now (Stage 2 console/socket multiplex).
+static uint64 IAT_WSAEventSelect = 33
+static uint64 IAT_WSAEnumNetworkEvents = 34
+static uint64 IAT_WSACreateEvent = 35
+// slot 36: null qword -- ws2_32's thunk terminator. Never a call target.
+// --- bcrypt.dll: FirstThunk = IAT region + 296 (slot 37) ---
+static uint64 IAT_BCryptGenRandom = 37
+// slot 38: null qword -- bcrypt's thunk terminator. Never a call target.
+// Qwords in the ILT region, and again in the IAT region, nulls included.
+static uint64 IAT_SLOT_COUNT = 39
 
-// Compute .idata section size
+// Known-import table: IAT slot -> function name (C string), or 0 for one of the
+// three null terminator slots (19, 36, 38) and for anything past the table.
+// The ONE place the names live: emit_pe_idata writes the hint/name entries and
+// the ILT/IAT thunks by walking this, so a name and its slot cannot disagree.
+// Every name must fit a 32-byte hint/name slot: 2 (hint) + len + 1 (NUL) <= 32,
+// i.e. len <= 29. The longest is QueryPerformanceFrequency at 25.
+fn pe_import_name_at_slot(uint64 slot) -> uint64 {
+    if slot == 0 { return "ExitProcess" }
+    if slot == 1 { return "GetStdHandle" }
+    if slot == 2 { return "WriteFile" }
+    if slot == 3 { return "CreateFileA" }
+    if slot == 4 { return "ReadFile" }
+    if slot == 5 { return "CloseHandle" }
+    if slot == 6 { return "VirtualAlloc" }
+    if slot == 7 { return "GetCommandLineA" }
+    if slot == 8 { return "GetFileSizeEx" }
+    if slot == 9 { return "CreateProcessA" }
+    if slot == 10 { return "WaitForSingleObject" }
+    if slot == 11 { return "GetExitCodeProcess" }
+    if slot == 12 { return "GetModuleFileNameA" }
+    if slot == 13 { return "VirtualFree" }
+    if slot == 14 { return "QueryPerformanceCounter" }
+    if slot == 15 { return "QueryPerformanceFrequency" }
+    if slot == 16 { return "GetEnvironmentVariableA" }
+    if slot == 17 { return "CreateDirectoryA" }
+    if slot == 18 { return "MoveFileExA" }
+    if slot == 20 { return "WSAStartup" }
+    if slot == 21 { return "WSAGetLastError" }
+    if slot == 22 { return "socket" }
+    if slot == 23 { return "connect" }
+    if slot == 24 { return "send" }
+    if slot == 25 { return "recv" }
+    if slot == 26 { return "closesocket" }
+    if slot == 27 { return "setsockopt" }
+    if slot == 28 { return "shutdown" }
+    if slot == 29 { return "bind" }
+    if slot == 30 { return "listen" }
+    if slot == 31 { return "accept" }
+    if slot == 32 { return "select" }
+    if slot == 33 { return "WSAEventSelect" }
+    if slot == 34 { return "WSAEnumNetworkEvents" }
+    if slot == 35 { return "WSACreateEvent" }
+    if slot == 37 { return "BCryptGenRandom" }
+    return 0
+}
+
+// Compute .idata section size -- a COMPILE-TIME CONSTANT over the FULL table.
+// It is read BEFORE codegen (emit_pe_headers_x64 / _a64) to fill the .idata
+// section header and the Import Directory size, so it cannot depend on which
+// imports a program uses.
+//   IDT: 4 entries x 20 (kernel32, ws2_32, bcrypt, null)        =   80
+//   ILT region: kernel32 19 + null, ws2_32 16 + null,
+//               bcrypt 1 + null = 39 qwords x 8                  =  312
+//   IAT region: identical                                        =  312
+//   Hint/Name table: 36 named functions x 32                     = 1152
+//   DLL names: "kernel32.dll\0" 13 + "ws2_32.dll\0" 11
+//              + "bcrypt.dll\0" 11                               =   35
+//   Total: 80 + 312 + 312 + 1152 + 35 = 1891, padded to 2048
+//
+// ONE PAGE IS LOAD-BEARING. Every PE ImageSize computation assumes .idata fits
+// in a single 0x1000 page: main.kr's arm64-PE and x86_64-PE finalize arms
+// (`image_size = 0x1000 + text_va_size [+ data_va_size] + 0x1000`) and the two
+// fat-binary slices (image_size3, image_size4). Growing this past 0x1000
+// REQUIRES revisiting all four sites, or the loader maps a truncated .idata.
 fn pe_idata_size() -> uint64 {
-    // IDT: 1 entry (20 bytes) + null terminator (20 bytes) = 40
-    // ILT: 16 entries × 8 + null (8) = 136
-    // IAT: same = 136
-    // Hint/Name table: 16 × 32 = 512  (32-byte slots accommodate the longest
-    //   kernel32 names we import, QueryPerformanceFrequency at 25 chars)
-    // DLL name: "kernel32.dll\0" = 13
-    // Total: 40 + 136 + 136 + 512 + 13 = 837, padded to 1024
-    return 1024
+    return 2048
+}
+
+// Emit `s` as a NUL-terminated byte string.
+fn pe_emit_cstr(uint64 s) {
+    uint64 i = 0
+    uint64 n = str_len(s)
+    while i < n {
+        uint8 b = 0
+        uint64 p = s + i
+        unsafe { *(p as uint8) -> b }
+        emit_byte(b)
+        i = i + 1
+    }
+    emit_byte(0)
+}
+
+fn pe_idata_fail(uint64 msg) {
+    uint64 pre = "error: internal: PE .idata: "
+    write(2, pre, str_len(pre))
+    write(2, msg, str_len(msg))
+    write(2, "\n", 1)
+    exit(1)
+}
+
+// Emit the ILT or IAT region (identical bytes): one qword per slot -- the RVA
+// of that slot's hint/name entry, or 0 for a terminator slot.
+fn pe_emit_thunk_region(uint64 hints_rva) {
+    uint64 slot = 0
+    uint64 h = 0
+    while slot < IAT_SLOT_COUNT {
+        if pe_import_name_at_slot(slot) == 0 {
+            emit_u64_le(0)
+        } else {
+            emit_u64_le(hints_rva + h * 32)
+            h = h + 1
+        }
+        slot = slot + 1
+    }
 }
 
 // Emit the .idata section content at the current output position
-// Returns the RVA of the IAT (for code to reference)
+// Returns the RVA of the IAT region (for code to reference: iat + slot*8)
 @export
 fn emit_pe_idata(uint64 idata_rva) -> uint64 {
     uint64 base = out_len
 
-    // Layout offsets within .idata (16 IAT entries, 32-byte hint/name slots):
+    // Layout offsets within .idata (see pe_idata_size for the arithmetic):
     uint64 idt_off = 0
-    uint64 ilt_off = 40
-    uint64 iat_off = 176
-    uint64 hints_off = 312
-    uint64 dllname_off = 824
+    uint64 ilt_off = 80                  // idt_off + 4 * 20
+    uint64 iat_off = 392                 // ilt_off + 39 * 8
+    uint64 hints_off = 704               // iat_off + 39 * 8
+    uint64 dllname_off = 1856            // hints_off + 36 * 32
+    // DLL name strings, back to back from dllname_off:
+    uint64 kernel32_name = dllname_off        // "kernel32.dll\0" (13)
+    uint64 ws2_32_name = dllname_off + 13     // "ws2_32.dll\0"   (11)
+    uint64 bcrypt_name = dllname_off + 24     // "bcrypt.dll\0"   (11)
+    // Each DLL's first slot, as a byte offset into the ILT/IAT regions:
+    uint64 kernel32_thunk = 0                 // slot 0
+    uint64 ws2_32_thunk = 160                 // slot 20 * 8
+    uint64 bcrypt_thunk = 296                 // slot 37 * 8
 
-    // IDT entry for kernel32.dll (20 bytes)
-    emit_u32_le(idata_rva + ilt_off)     // OriginalFirstThunk → ILT
-    emit_u32_le(0)                        // TimeDateStamp
-    emit_u32_le(0)                        // ForwarderChain
-    emit_u32_le(idata_rva + dllname_off)  // Name → "kernel32.dll"
-    emit_u32_le(idata_rva + iat_off)      // FirstThunk → IAT
+    // IDT entry: kernel32.dll (20 bytes)
+    emit_u32_le(idata_rva + ilt_off + kernel32_thunk)  // OriginalFirstThunk
+    emit_u32_le(0)                                      // TimeDateStamp
+    emit_u32_le(0)                                      // ForwarderChain
+    emit_u32_le(idata_rva + kernel32_name)              // Name
+    emit_u32_le(idata_rva + iat_off + kernel32_thunk)  // FirstThunk
+
+    // IDT entry: ws2_32.dll
+    emit_u32_le(idata_rva + ilt_off + ws2_32_thunk)
+    emit_u32_le(0)
+    emit_u32_le(0)
+    emit_u32_le(idata_rva + ws2_32_name)
+    emit_u32_le(idata_rva + iat_off + ws2_32_thunk)
+
+    // IDT entry: bcrypt.dll
+    emit_u32_le(idata_rva + ilt_off + bcrypt_thunk)
+    emit_u32_le(0)
+    emit_u32_le(0)
+    emit_u32_le(idata_rva + bcrypt_name)
+    emit_u32_le(idata_rva + iat_off + bcrypt_thunk)
 
     // Null IDT terminator (20 bytes)
     uint64 z = 0
     while z < 20 { emit_byte(0); z = z + 1 }
 
-    // ILT: 16 entries + null (each is 8 bytes = RVA to hint/name)
-    uint64 h = 0
-    while h < 16 {
-        emit_u64_le(idata_rva + hints_off + h * 32)
-        h = h + 1
+    if out_len - base != ilt_off { pe_idata_fail("IDT size drifted from ilt_off") }
+    pe_emit_thunk_region(idata_rva + hints_off)     // ILT region
+    if out_len - base != iat_off { pe_idata_fail("ILT size drifted from iat_off") }
+    pe_emit_thunk_region(idata_rva + hints_off)     // IAT region (loader patches)
+    if out_len - base != hints_off { pe_idata_fail("IAT size drifted from hints_off") }
+
+    // Hint/Name entries, 32 bytes each, in slot order (terminators skipped)
+    uint64 slot = 0
+    while slot < IAT_SLOT_COUNT {
+        uint64 nm = pe_import_name_at_slot(slot)
+        if nm != 0 {
+            uint64 entry_start = out_len
+            emit_u16_le(0)                  // Hint
+            pe_emit_cstr(nm)
+            if out_len - entry_start > 32 { pe_idata_fail("import name overflows its 32-byte hint/name slot") }
+            while out_len - entry_start < 32 { emit_byte(0) }
+        }
+        slot = slot + 1
     }
-    emit_u64_le(0)  // null terminator
+    if out_len - base != dllname_off { pe_idata_fail("hint/name table drifted from dllname_off") }
 
-    // IAT: identical to ILT (loader patches this at runtime)
-    h = 0
-    while h < 16 {
-        emit_u64_le(idata_rva + hints_off + h * 32)
-        h = h + 1
-    }
-    emit_u64_le(0)
+    // DLL name strings
+    pe_emit_cstr("kernel32.dll")
+    if out_len - base != ws2_32_name { pe_idata_fail("kernel32.dll name drifted") }
+    pe_emit_cstr("ws2_32.dll")
+    if out_len - base != bcrypt_name { pe_idata_fail("ws2_32.dll name drifted") }
+    pe_emit_cstr("bcrypt.dll")
 
-    // Hint/Name entries (32 bytes each, padded)
-    // 0: ExitProcess
-    emit_u16_le(0)
-    emit_byte(69); emit_byte(120); emit_byte(105); emit_byte(116)
-    emit_byte(80); emit_byte(114); emit_byte(111); emit_byte(99)
-    emit_byte(101); emit_byte(115); emit_byte(115); emit_byte(0)
-    uint64 pe_pad_i = 0
-    while pe_pad_i < 18 { emit_byte(0); pe_pad_i = pe_pad_i + 1 }
+    // Pad to the constant section size the headers already declared
+    if out_len - base > pe_idata_size() { pe_idata_fail("table exceeds pe_idata_size()") }
+    while out_len - base < pe_idata_size() { emit_byte(0) }
 
-    // 1: GetStdHandle
-    emit_u16_le(0)
-    emit_byte(71); emit_byte(101); emit_byte(116); emit_byte(83)
-    emit_byte(116); emit_byte(100); emit_byte(72); emit_byte(97)
-    emit_byte(110); emit_byte(100); emit_byte(108); emit_byte(101); emit_byte(0)
-    pe_pad_i = 0
-    while pe_pad_i < 17 { emit_byte(0); pe_pad_i = pe_pad_i + 1 }
-
-    // 2: WriteFile
-    emit_u16_le(0)
-    emit_byte(87); emit_byte(114); emit_byte(105); emit_byte(116)
-    emit_byte(101); emit_byte(70); emit_byte(105); emit_byte(108)
-    emit_byte(101); emit_byte(0)
-    pe_pad_i = 0
-    while pe_pad_i < 20 { emit_byte(0); pe_pad_i = pe_pad_i + 1 }
-
-    // 3: CreateFileA
-    emit_u16_le(0)
-    emit_byte(67); emit_byte(114); emit_byte(101); emit_byte(97)
-    emit_byte(116); emit_byte(101); emit_byte(70); emit_byte(105)
-    emit_byte(108); emit_byte(101); emit_byte(65); emit_byte(0)
-    pe_pad_i = 0
-    while pe_pad_i < 18 { emit_byte(0); pe_pad_i = pe_pad_i + 1 }
-
-    // 4: ReadFile
-    emit_u16_le(0)
-    emit_byte(82); emit_byte(101); emit_byte(97); emit_byte(100)
-    emit_byte(70); emit_byte(105); emit_byte(108); emit_byte(101); emit_byte(0)
-    pe_pad_i = 0
-    while pe_pad_i < 21 { emit_byte(0); pe_pad_i = pe_pad_i + 1 }
-
-    // 5: CloseHandle
-    emit_u16_le(0)
-    emit_byte(67); emit_byte(108); emit_byte(111); emit_byte(115)
-    emit_byte(101); emit_byte(72); emit_byte(97); emit_byte(110)
-    emit_byte(100); emit_byte(108); emit_byte(101); emit_byte(0)
-    pe_pad_i = 0
-    while pe_pad_i < 18 { emit_byte(0); pe_pad_i = pe_pad_i + 1 }
-
-    // 6: VirtualAlloc
-    emit_u16_le(0)
-    emit_byte(86); emit_byte(105); emit_byte(114); emit_byte(116)
-    emit_byte(117); emit_byte(97); emit_byte(108); emit_byte(65)
-    emit_byte(108); emit_byte(108); emit_byte(111); emit_byte(99); emit_byte(0)
-    pe_pad_i = 0
-    while pe_pad_i < 17 { emit_byte(0); pe_pad_i = pe_pad_i + 1 }
-
-    // 7: GetCommandLineA
-    emit_u16_le(0)
-    emit_byte(71); emit_byte(101); emit_byte(116); emit_byte(67)
-    emit_byte(111); emit_byte(109); emit_byte(109); emit_byte(97)
-    emit_byte(110); emit_byte(100); emit_byte(76); emit_byte(105)
-    emit_byte(110); emit_byte(101); emit_byte(65); emit_byte(0)
-    pe_pad_i = 0
-    while pe_pad_i < 14 { emit_byte(0); pe_pad_i = pe_pad_i + 1 }
-
-    // 8: GetFileSizeEx
-    emit_u16_le(0)
-    emit_byte(71); emit_byte(101); emit_byte(116); emit_byte(70)
-    emit_byte(105); emit_byte(108); emit_byte(101); emit_byte(83)
-    emit_byte(105); emit_byte(122); emit_byte(101); emit_byte(69)
-    emit_byte(120); emit_byte(0)
-    pe_pad_i = 0
-    while pe_pad_i < 16 { emit_byte(0); pe_pad_i = pe_pad_i + 1 }
-
-    // 9: CreateProcessA
-    emit_u16_le(0)
-    emit_byte(67); emit_byte(114); emit_byte(101); emit_byte(97)
-    emit_byte(116); emit_byte(101); emit_byte(80); emit_byte(114)
-    emit_byte(111); emit_byte(99); emit_byte(101); emit_byte(115)
-    emit_byte(115); emit_byte(65); emit_byte(0)
-    pe_pad_i = 0
-    while pe_pad_i < 15 { emit_byte(0); pe_pad_i = pe_pad_i + 1 }
-
-    // 10: WaitForSingleObject
-    emit_u16_le(0)
-    emit_byte(87); emit_byte(97); emit_byte(105); emit_byte(116)
-    emit_byte(70); emit_byte(111); emit_byte(114); emit_byte(83)
-    emit_byte(105); emit_byte(110); emit_byte(103); emit_byte(108)
-    emit_byte(101); emit_byte(79); emit_byte(98); emit_byte(106)
-    emit_byte(101); emit_byte(99); emit_byte(116); emit_byte(0)
-    pe_pad_i = 0
-    while pe_pad_i < 10 { emit_byte(0); pe_pad_i = pe_pad_i + 1 }
-
-    // 11: GetExitCodeProcess
-    emit_u16_le(0)
-    emit_byte(71); emit_byte(101); emit_byte(116); emit_byte(69)
-    emit_byte(120); emit_byte(105); emit_byte(116); emit_byte(67)
-    emit_byte(111); emit_byte(100); emit_byte(101); emit_byte(80)
-    emit_byte(114); emit_byte(111); emit_byte(99); emit_byte(101)
-    emit_byte(115); emit_byte(115); emit_byte(0)
-    pe_pad_i = 0
-    while pe_pad_i < 11 { emit_byte(0); pe_pad_i = pe_pad_i + 1 }
-
-    // 12: GetModuleFileNameA
-    emit_u16_le(0)
-    emit_byte(71); emit_byte(101); emit_byte(116); emit_byte(77)
-    emit_byte(111); emit_byte(100); emit_byte(117); emit_byte(108)
-    emit_byte(101); emit_byte(70); emit_byte(105); emit_byte(108)
-    emit_byte(101); emit_byte(78); emit_byte(97); emit_byte(109)
-    emit_byte(101); emit_byte(65); emit_byte(0)
-    pe_pad_i = 0
-    while pe_pad_i < 11 { emit_byte(0); pe_pad_i = pe_pad_i + 1 }
-
-    // 13: VirtualFree
-    emit_u16_le(0)
-    emit_byte(86); emit_byte(105); emit_byte(114); emit_byte(116)
-    emit_byte(117); emit_byte(97); emit_byte(108); emit_byte(70)
-    emit_byte(114); emit_byte(101); emit_byte(101); emit_byte(0)
-    pe_pad_i = 0
-    while pe_pad_i < 18 { emit_byte(0); pe_pad_i = pe_pad_i + 1 }
-
-    // 14: QueryPerformanceCounter
-    emit_u16_le(0)
-    emit_byte(81); emit_byte(117); emit_byte(101); emit_byte(114)
-    emit_byte(121); emit_byte(80); emit_byte(101); emit_byte(114)
-    emit_byte(102); emit_byte(111); emit_byte(114); emit_byte(109)
-    emit_byte(97); emit_byte(110); emit_byte(99); emit_byte(101)
-    emit_byte(67); emit_byte(111); emit_byte(117); emit_byte(110)
-    emit_byte(116); emit_byte(101); emit_byte(114); emit_byte(0)
-    pe_pad_i = 0
-    while pe_pad_i < 6 { emit_byte(0); pe_pad_i = pe_pad_i + 1 }
-
-    // 15: QueryPerformanceFrequency
-    emit_u16_le(0)
-    emit_byte(81); emit_byte(117); emit_byte(101); emit_byte(114)
-    emit_byte(121); emit_byte(80); emit_byte(101); emit_byte(114)
-    emit_byte(102); emit_byte(111); emit_byte(114); emit_byte(109)
-    emit_byte(97); emit_byte(110); emit_byte(99); emit_byte(101)
-    emit_byte(70); emit_byte(114); emit_byte(101); emit_byte(113)
-    emit_byte(117); emit_byte(101); emit_byte(110); emit_byte(99)
-    emit_byte(121); emit_byte(0)
-    pe_pad_i = 0
-    while pe_pad_i < 4 { emit_byte(0); pe_pad_i = pe_pad_i + 1 }
-
-    // DLL name: "kernel32.dll\0"
-    emit_byte(107); emit_byte(101); emit_byte(114); emit_byte(110)
-    emit_byte(101); emit_byte(108); emit_byte(51); emit_byte(50)
-    emit_byte(46); emit_byte(100); emit_byte(108); emit_byte(108)
-    emit_byte(0)
-
-    // Pad to 512 bytes
-    while out_len - base < 1024 { emit_byte(0) }
-
-    // Return IAT RVA (for call [rip+disp] to use)
+    // Return IAT region RVA (for call [rip+disp] / ADRP+LDR to use)
     return idata_rva + iat_off
 }
 

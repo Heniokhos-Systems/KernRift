@@ -5631,7 +5631,7 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
             // Patch SizeOfCode
             patch_u32(0x5C, text_aligned)
             // Patch ImageSize
-            uint64 image_size = 0x1000 + text_va_size + data_va_size + 0x1000
+            uint64 image_size = 0x1000 + text_va_size + data_va_size + 0x1000  // last 0x1000 = .idata page: needs pe_idata_size() <= 0x1000 (format_pe.kr)
             patch_u32(0x90, image_size)
             // Resolve ARM64 IAT fixups
             resolve_a64_win_iat_fixups(text_start, iat_rva_val)
@@ -5657,7 +5657,7 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
             // SizeOfCode
             patch_u32(0x5C, text_aligned)
             // ImageSize
-            uint64 image_size = 0x1000 + text_va_size + 0x1000
+            uint64 image_size = 0x1000 + text_va_size + 0x1000  // last 0x1000 = .idata page: needs pe_idata_size() <= 0x1000 (format_pe.kr)
             patch_u32(0x90, image_size)
             // Resolve x86_64 IAT fixups
             resolve_win_iat_fixups(text_start, iat_rva_val)
@@ -6343,7 +6343,7 @@ fn compile_fat(uint64 input_path, uint64 output_path) {
     patch_u32(0x170 + 20, idata_file_off3)
     patch_u32(0xD0, idata_rva3)
     patch_u32(0x5C, text_aligned3)
-    uint64 image_size3 = 0x1000 + text_va_size3 + 0x1000
+    uint64 image_size3 = 0x1000 + text_va_size3 + 0x1000  // last 0x1000 = .idata page: needs pe_idata_size() <= 0x1000 (format_pe.kr)
     patch_u32(0x90, image_size3)
     resolve_win_iat_fixups(text_start3, iat_rva_val3)
 
@@ -6483,7 +6483,7 @@ fn compile_fat(uint64 input_path, uint64 output_path) {
     patch_u32(0x198 + 20, idata_file_off4)
     patch_u32(0xD0, idata_rva4)
     patch_u32(0x5C, text_aligned4)
-    uint64 image_size4 = 0x1000 + text_va_size4 + data_va_size4 + 0x1000
+    uint64 image_size4 = 0x1000 + text_va_size4 + data_va_size4 + 0x1000  // last 0x1000 = .idata page: needs pe_idata_size() <= 0x1000 (format_pe.kr)
     patch_u32(0x90, image_size4)
     resolve_a64_win_iat_fixups(text_start4, iat_rva_val4)
 

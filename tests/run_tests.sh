@@ -9223,6 +9223,43 @@ fn main() {
 }' 96
 
 echo ""
+echo "--- PE import table: kernel32 + ws2_32 + bcrypt (fixed slots) ---"
+# The .idata section is a FIXED table, emitted whole for every --emit=pe build
+# so no IAT slot ever shifts (format_pe.kr, emit_pe_idata). The DLL-name strings
+# exist in the artifact ONLY if that table emits them -- a trivial `main` does
+# not mention any of them -- so finding all three is non-vacuous. When
+# llvm-objdump is present the row also requires the import directory to PARSE
+# as exactly three DLLs carrying the boundary functions of each block (first
+# kernel32, last kernel32 reserve, first/last ws2_32, bcrypt): a name string
+# sitting in a corrupt directory would pass the grep but not this.
+TOTAL=$((TOTAL + 1))
+PEI_OUT=/tmp/krc_pe_imports_$$.exe
+PEI_WHY=""
+if ! $KRC --arch=x86_64 --target=windows --emit=pe "$DIR/fixtures/pe_imports.kr" -o "$PEI_OUT" > /dev/null 2>&1; then
+    PEI_WHY="compile failed"
+else
+    for _dll in kernel32.dll ws2_32.dll bcrypt.dll; do
+        grep -qaF "$_dll" "$PEI_OUT" || PEI_WHY="$PEI_WHY missing:$_dll"
+    done
+    if [ -z "$PEI_WHY" ] && command -v llvm-objdump > /dev/null 2>&1; then
+        PEI_P=$(llvm-objdump -p "$PEI_OUT" 2>&1)
+        PEI_N=$(printf '%s\n' "$PEI_P" | grep -c 'DLL Name:')
+        [ "$PEI_N" = "3" ] || PEI_WHY="$PEI_WHY dll_count:$PEI_N"
+        for _fn in ExitProcess MoveFileExA WSAStartup select WSACreateEvent BCryptGenRandom; do
+            printf '%s\n' "$PEI_P" | grep -qE "^ +[0-9]+ +$_fn\$" || PEI_WHY="$PEI_WHY unparsed:$_fn"
+        done
+    fi
+fi
+if [ -z "$PEI_WHY" ]; then
+    PASS=$((PASS + 1))
+    echo "  pe_imports_three_dlls: PASS"
+else
+    FAIL=$((FAIL + 1))
+    echo "  pe_imports_three_dlls: FAIL ($PEI_WHY)"
+fi
+rm -f "$PEI_OUT"
+
+echo ""
 echo "--- extern fn (libc linking) ---"
 # These tests link against the HOST gcc's libc. On cross-compile runs
 # (arm64 host but KRC_FLAGS=--arch=x86_64 for example) the object file
