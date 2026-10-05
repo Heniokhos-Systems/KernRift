@@ -14890,42 +14890,56 @@ fn dce_lookup_fn(uint64 name_tok) -> uint64 {
     return 0
 }
 
+// get_arch_id()'s compile-time value for this build -- the ONE copy of the
+// arch+OS crosstable the IR backend uses. Both the IR lowering of the builtin
+// (src/ir.kr, the get_arch_id arm of the Call case) and const_os_call_value
+// below call this, so the value an `if` is pruned on cannot drift from the
+// value the program computes. (The legacy backends' builtin dispatch,
+// codegen.kr / codegen_aarch64.kr, keeps its own per-arch copy.)
+//   x86_64:  linux=1, windows=3, macos=5, android=8, NONE=9
+//   arm64:   linux=2, windows=4, macos=6, android=7, NONE=10
+//   riscv32: NONE=11        xtensa: NONE=12
+// target_arch is 0 x86_64, 1 arm64, 2 riscv32, 3 xtensa (from main.kr).
+// See src/ir.kr's get_arch_id arm for why target_os == 4 has its own arm and
+// why the bare-metal ids are new values rather than reused hosted ones.
+fn target_arch_id() -> uint64 {
+    uint64 arch_id = 1
+    if target_os == 4 {
+        arch_id = 9
+        if target_arch == 1 { arch_id = 10 }
+        if target_arch == 2 { arch_id = 11 }
+        if target_arch == 3 { arch_id = 12 }
+    } else if target_arch == 1 {
+        arch_id = 2
+        if target_os == 2 { arch_id = 4 }
+        if target_os == 1 { arch_id = 6 }
+        if target_os == 3 { arch_id = 7 }
+    } else {
+        if target_os == 2 { arch_id = 3 }
+        if target_os == 1 { arch_id = 5 }
+        if target_os == 3 { arch_id = 8 }
+    }
+    return arch_id
+}
+
 // The compile-time value of a zero-argument get_target_os()/get_arch_id()
 // Call node, or 0xFFFFFFFFFFFFFFFF if `node` is not such a call (every real
-// value is 0..12, so the sentinel cannot collide).
-// MUST agree with the IR lowerings of the two builtins (src/ir.kr, the
-// get_target_os / get_arch_id arms of the Call case): const_os_cond below
-// prunes an `if` arm on this answer, so a disagreement deletes the arm the
-// running program would have taken. A @builtin_override of either name makes
-// the call an ordinary user call, so it is not a constant here either.
+// value is 0..12, so the sentinel cannot collide). Returns exactly what the IR
+// lowering emits for the call: target_os verbatim, and target_arch_id() --
+// the same function the lowering calls. A @builtin_override of either name
+// makes the lowering skip the builtin and call the user's fn, so the value is
+// not a compile-time constant and this returns the sentinel.
 fn const_os_call_value(uint64 node) -> uint64 {
     uint64 none = 0xFFFFFFFFFFFFFFFF
-    if node == 0 { return none }
     if ast_kind(node) != 35 { return none }
     uint32 callee_tok = ast_data1(node)
     uint64 wct = callee_tok
+    // Defensive: sema already rejects a builtin called with arguments, so a
+    // Call reaching here with a child is never get_target_os/get_arch_id.
     if ast_child(node) != 0 { return none }
     if builtin_override_lookup(wct) != 0 { return none }
     if tok_matches(wct, "get_target_os", 13) != 0 { return target_os }
-    if tok_matches(wct, "get_arch_id", 11) != 0 {
-        uint64 arch_id = 1
-        if target_os == 4 {
-            arch_id = 9
-            if target_arch == 1 { arch_id = 10 }
-            if target_arch == 2 { arch_id = 11 }
-            if target_arch == 3 { arch_id = 12 }
-        } else if target_arch == 1 {
-            arch_id = 2
-            if target_os == 2 { arch_id = 4 }
-            if target_os == 1 { arch_id = 6 }
-            if target_os == 3 { arch_id = 7 }
-        } else {
-            if target_os == 2 { arch_id = 3 }
-            if target_os == 1 { arch_id = 5 }
-            if target_os == 3 { arch_id = 8 }
-        }
-        return arch_id
-    }
+    if tok_matches(wct, "get_arch_id", 11) != 0 { return target_arch_id() }
     return none
 }
 
@@ -14938,11 +14952,21 @@ fn const_os_call_value(uint64 node) -> uint64 {
 // never BinOp 33; same layout: data1=op tok, child=lhs, data2=rhs) with op
 // `==` (35) or `!=` (36) whose one side is a zero-argument
 // get_target_os()/get_arch_id() Call and whose other side is an IntLit, in
-// either order. `u64 o = get_target_os()  if o == 2` is UNKNOWN on purpose.
+// either order. UNKNOWN on purpose, each pinned by a tests/run_tests.sh row:
+// `u64 o = get_target_os()  if o == 2` (no call), `if get_target_os() == two`
+// (call vs a non-literal), `if get_arch_id() < 5` (only == and != count), and
+// any call to a user @builtin_override of either name.
+// SCOPE: `if` / `else if` conditions ONLY. A ternary (`c ? a : b`) and a
+// `while` with the same literal condition do NOT consult this: both of their
+// arms stay live, so an extern in one is still refused on a target that
+// cannot resolve it. std/sys.kr must use `if`.
 // Consumers: dce_scan_node's If case (below) and ir_lower_stmt's If case
 // (src/ir.kr), which must prune the SAME arm or a call kept live by one is
 // lowered against a callee the other dropped.
 fn const_os_cond(uint64 cond_node) -> uint64 {
+    // Defensive, unreachable from the parser (an If always has a condition,
+    // a Compare always both operands); kept because Tasks 3/4 call this on
+    // nodes they find themselves, and ast_kind(0) would read the null node.
     if cond_node == 0 { return 0 }
     if ast_kind(cond_node) != 38 { return 0 }
     uint32 op_tok = ast_data1(cond_node)
@@ -14952,7 +14976,7 @@ fn const_os_cond(uint64 cond_node) -> uint64 {
     uint32 rhs32 = ast_data2(cond_node)
     uint64 lhs = lhs32
     uint64 rhs = rhs32
-    if lhs == 0 || rhs == 0 { return 0 }
+    if lhs == 0 || rhs == 0 { return 0 }   // defensive, see above
     uint64 none = 0xFFFFFFFFFFFFFFFF
     uint64 cv = none
     uint64 lit = 0

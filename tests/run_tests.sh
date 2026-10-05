@@ -9394,25 +9394,39 @@ else
     PASS=$((PASS + 1))
     echo "  os_prune_dead_windows_arm: PASS"
 fi
-# (2) Literal-only contract: the same test through a variable is UNKNOWN, both
-#     arms stay live, and the Linux build still refuses the extern by name.
-TOTAL=$((TOTAL + 1))
-rm -f "$OSP_BIN"
-OSP_ERR=$($KRC $KRC_FLAGS --target=linux --emit=elfexe "$DIR/fixtures/os_prune_nonliteral.kr" -o "$OSP_BIN" 2>&1 >/dev/null)
-if [ -s "$OSP_BIN" ]; then
-    FAIL=$((FAIL + 1))
-    echo "  os_prune_nonliteral_stays_live: FAIL (a non-literal OS test was pruned; the build succeeded)"
-elif ! echo "$OSP_ERR" | grep -q "WSAStartup' is never defined"; then
-    FAIL=$((FAIL + 1))
-    echo "  os_prune_nonliteral_stays_live: FAIL (refused, but not for the live extern: $(echo "$OSP_ERR" | head -1))"
-else
-    PASS=$((PASS + 1))
-    echo "  os_prune_nonliteral_stays_live: PASS"
-fi
-# (3) Behaviour: the TAKEN arm runs and the NOT_TAKEN arm does not, for ==,
-#     !=, literal-on-the-left, get_arch_id, an else-if chain and an else-less
-#     if. Status 63 = every expected bit and no 64; an inverted or
-#     always-taken predicate cannot produce it.
+# (2) UNKNOWN stays UNKNOWN. Each fixture is a condition const_os_cond must
+#     NOT decide, with the Windows-only extern in its then-arm: both arms stay
+#     live, so the Linux executable build must refuse the extern BY NAME. A
+#     build that succeeds means the arm was pruned on a guess.
+osp_refused() {   # <row name> <fixture> <what an over-eager predicate did>
+    TOTAL=$((TOTAL + 1))
+    rm -f "$OSP_BIN"
+    OSP_ERR=$($KRC $KRC_FLAGS --target=linux --emit=elfexe "$DIR/fixtures/$2" -o "$OSP_BIN" 2>&1 >/dev/null)
+    if [ -s "$OSP_BIN" ]; then
+        FAIL=$((FAIL + 1))
+        echo "  $1: FAIL ($3; the build succeeded)"
+    elif ! echo "$OSP_ERR" | grep -q "WSAStartup' is never defined"; then
+        FAIL=$((FAIL + 1))
+        echo "  $1: FAIL (refused, but not for the live extern: $(echo "$OSP_ERR" | head -1))"
+    else
+        PASS=$((PASS + 1))
+        echo "  $1: PASS"
+    fi
+}
+#     `u64 o = get_target_os()  if o == 2` -- no call in the condition at all
+osp_refused os_prune_nonliteral_stays_live os_prune_nonliteral.kr "a non-literal OS test was pruned"
+#     `if get_target_os() == two` -- a call compared to a variable, not an IntLit
+osp_refused os_prune_call_vs_ident_stays_live os_prune_call_vs_ident.kr "a call compared to an identifier was pruned"
+#     `if get_arch_id() < 5` -- only == and != are recognised
+osp_refused os_prune_lt_stays_live os_prune_lt.kr "a '<' comparison was pruned"
+#     a user `@builtin_override fn get_target_os` -- an ordinary call, not a constant
+osp_refused os_prune_override_stays_live os_prune_override.kr "a call to a @builtin_override was pruned on the builtin's value"
+# (3) Behaviour: the TAKEN arm runs and the NOT_TAKEN arm does not. Status 63
+#     needs every expected bit and no 64, so an inverted or always-taken
+#     predicate cannot produce it. Exactly what it covers: get_target_os() with
+#     `==`, `!=`, the literal on the left, an else-if chain whose second arm is
+#     taken, and an else-less if; get_arch_id() only as `== 0` / `!= 0`, i.e.
+#     "the id is nonzero" -- the actual ids are pinned by (5) and (6) below.
 TOTAL=$((TOTAL + 1))
 rm -f "$OSP_BIN"
 if ! $KRC $KRC_FLAGS --target=linux --emit=elfexe "$DIR/fixtures/os_prune_exit.kr" -o "$OSP_BIN" > /dev/null 2>&1; then
@@ -9429,6 +9443,96 @@ else
         echo "  os_prune_taken_arm_runs: FAIL (status $OSP_RC, want 63)"
     fi
 fi
+# (4) The override's answer, not the builtin's, picks the arm at run time: the
+#     override returns 2, so on Linux the then-arm must run (status 5). Pruning
+#     on the builtin's 0 would delete that arm -- status 0, neither arm.
+TOTAL=$((TOTAL + 1))
+rm -f "$OSP_BIN"
+if ! $KRC $KRC_FLAGS --target=linux --emit=elfexe "$DIR/fixtures/os_prune_override_run.kr" -o "$OSP_BIN" > /dev/null 2>&1; then
+    FAIL=$((FAIL + 1))
+    echo "  os_prune_override_arm_runs: FAIL (did not compile)"
+else
+    chmod +x "$OSP_BIN"
+    "$OSP_BIN" > /dev/null 2>&1; OSP_RC=$?
+    if [ "$OSP_RC" = "5" ]; then
+        PASS=$((PASS + 1))
+        echo "  os_prune_override_arm_runs: PASS"
+    else
+        FAIL=$((FAIL + 1))
+        echo "  os_prune_override_arm_runs: FAIL (status $OSP_RC, want 5)"
+    fi
+fi
+# (5) Hosted Linux arch ids, RUN: the x86_64 build must exit 1 and the arm64
+#     build 2. Each leg runs natively on its own host arch, or the arm64 leg
+#     under qemu-aarch64 when present; a leg that cannot run anywhere here is
+#     named in the PASS line, never silently dropped. At least one leg runs on
+#     every host this suite supports (x86_64 or arm64).
+TOTAL=$((TOTAL + 1))
+OSPA_QEMU="$(command -v qemu-aarch64-static || command -v qemu-aarch64 || true)"
+OSPA_WHY=""
+OSPA_RAN=""
+for ospa in "x86_64 1" "arm64 2"; do
+    read -r ospa_arch ospa_want <<< "$ospa"
+    OSPA_RUNNER=""
+    if [ "$ospa_arch" = "$RUN_ARCH" ]; then OSPA_RUNNER="native"
+    elif [ "$ospa_arch" = "arm64" ] && [ -n "$OSPA_QEMU" ]; then OSPA_RUNNER="$OSPA_QEMU"
+    fi
+    if [ -z "$OSPA_RUNNER" ]; then OSPA_RAN="$OSPA_RAN $ospa_arch:not-run"; continue; fi
+    rm -f "$OSP_BIN"
+    if ! $KRC $KRC_FLAGS --arch="$ospa_arch" --target=linux --emit=elfexe "$DIR/fixtures/os_prune_arch_run.kr" -o "$OSP_BIN" > /dev/null 2>&1; then
+        OSPA_WHY="$OSPA_WHY $ospa_arch:did-not-compile"; continue
+    fi
+    chmod +x "$OSP_BIN"
+    if [ "$OSPA_RUNNER" = "native" ]; then "$OSP_BIN" > /dev/null 2>&1; OSP_RC=$?
+    else "$OSPA_RUNNER" "$OSP_BIN" > /dev/null 2>&1; OSP_RC=$?; fi
+    if [ "$OSP_RC" != "$ospa_want" ]; then OSPA_WHY="$OSPA_WHY $ospa_arch:status-$OSP_RC-want-$ospa_want"; fi
+    OSPA_RAN="$OSPA_RAN $ospa_arch:ran"
+done
+if [ -n "$OSPA_WHY" ]; then
+    FAIL=$((FAIL + 1))
+    echo "  os_prune_arch_hosted_runs: FAIL ($OSPA_WHY )"
+elif ! echo "$OSPA_RAN" | grep -q ":ran"; then
+    FAIL=$((FAIL + 1))
+    echo "  os_prune_arch_hosted_runs: FAIL (no leg could run on this host:$OSPA_RAN )"
+else
+    PASS=$((PASS + 1))
+    echo "  os_prune_arch_hosted_runs: PASS ($OSPA_RAN )"
+fi
+# (6) The whole get_arch_id crosstable, through the IR: for every target,
+#     `if get_arch_id() == <its documented id> { r = 77 } else { r = 88 }`
+#     must keep `const 77` and drop `const 88`. The ids are the ones
+#     docs/LANGUAGE.md promises, typed here independently of the compiler, so
+#     a drift in target_arch_id() (the one table the lowering and the pruning
+#     share) prunes the then-arm and reddens the row. Two rows: the hosted
+#     OSes, and --target=none on all four arches (ids 9..12; uint32 because
+#     riscv32/xtensa have no 64-bit integers).
+osp_ir_sweep() {   # <row name> <"os arch id" ...>
+    local row="$1"; shift
+    TOTAL=$((TOTAL + 1))
+    local why="" t
+    for t in "$@"; do
+        set -- $t
+        printf 'fn main() -> uint32 {\n    uint32 r = 0\n    if get_arch_id() == %s { r = 77 } else { r = 88 }\n    return r\n}\n' "$3" > "$OSP_BIN.kr"
+        local ir
+        ir=$($KRC $KRC_FLAGS --arch="$2" --target="$1" --emit=ir "$OSP_BIN.kr" 2>&1)
+        if ! echo "$ir" | grep -q 'const 77$' || echo "$ir" | grep -q 'const 88$'; then
+            why="$why $1/$2==$3"
+        fi
+    done
+    rm -f "$OSP_BIN.kr"
+    if [ -z "$why" ]; then
+        PASS=$((PASS + 1))
+        echo "  $row: PASS"
+    else
+        FAIL=$((FAIL + 1))
+        echo "  $row: FAIL (then-arm not kept alone for:$why)"
+    fi
+}
+osp_ir_sweep os_prune_arch_ids_hosted \
+    "linux x86_64 1" "linux arm64 2" "windows x86_64 3" "windows arm64 4" \
+    "macos x86_64 5" "macos arm64 6" "android arm64 7" "android x86_64 8"
+osp_ir_sweep os_prune_arch_ids_bare_metal \
+    "none x86_64 9" "none arm64 10" "none riscv32 11" "none xtensa 12"
 rm -f "$OSP_BIN"
 
 echo ""

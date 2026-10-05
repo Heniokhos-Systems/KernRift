@@ -1493,6 +1493,8 @@ signed_le(a, b)    signed_ge(a, b)
 | `fmt_uint(buf, val)` | Format `val` as decimal into `buf`. Returns length. |
 | `syscall_raw(nr, a1, a2, a3, a4, a5, a6)` | Raw syscall with up to 6 args. |
 
+**Compile-time OS branches.** An `if` (or `else if`) whose condition is exactly `get_target_os()` or `get_arch_id()` compared with `==` or `!=` against an integer literal, in either order, is decided at compile time: the arm that cannot run on this target is dropped entirely, so it may call an `extern fn` that only another target can resolve (e.g. a Windows import in the `get_target_os() == 2` arm of a Linux build). Nothing else qualifies, and those cases keep both arms, so an unresolvable extern in either arm is still refused: the value passed through a variable (`u64 o = get_target_os()  if o == 2`), a comparison against a non-literal, any other operator (`<`, `>=`, ...), a `@builtin_override` of either function, a ternary (`get_target_os() == 2 ? a() : b()`), and a `while` condition.
+
 ### Function pointers
 
 | Function | Description |

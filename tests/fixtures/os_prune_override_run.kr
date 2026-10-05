@@ -1,0 +1,13 @@
+// The override answers 2, so the then-arm must run (exit 5) even on Linux,
+// where the builtin would have answered 0. Pruning on the builtin's value
+// would drop the then-arm and the program would exit 0 (neither arm).
+@builtin_override
+fn get_target_os() -> uint64 {
+    return 2
+}
+fn main() -> uint32 {
+    uint64 r = 0
+    if get_target_os() == 2 { r = 5 } else { r = 6 }
+    exit(r)
+    return 0
+}

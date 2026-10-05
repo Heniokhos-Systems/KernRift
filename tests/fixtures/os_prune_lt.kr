@@ -1,0 +1,11 @@
+// Only == and != are recognised. `<` is UNKNOWN: both arms live, so a Linux
+// executable build must refuse the extern. (Linux x86_64 answers 1, so a
+// predicate that read `<` as `==` would call this NOT_TAKEN and prune it.)
+extern fn WSAStartup(uint64 ver, uint64 wsadata) -> uint64
+fn main() -> uint32 {
+    if get_arch_id() < 5 {
+        u8[512] wd
+        WSAStartup(514, wd)
+    }
+    return 0
+}

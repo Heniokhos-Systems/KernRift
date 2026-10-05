@@ -1,0 +1,15 @@
+// A user @builtin_override of get_target_os makes the call an ordinary user
+// call, so the condition is NOT a compile-time constant: both arms stay live
+// and a Linux executable build must refuse the Windows-only extern.
+extern fn WSAStartup(uint64 ver, uint64 wsadata) -> uint64
+@builtin_override
+fn get_target_os() -> uint64 {
+    return 2
+}
+fn main() -> uint32 {
+    if get_target_os() == 2 {
+        u8[512] wd
+        WSAStartup(514, wd)
+    }
+    return 0
+}

@@ -1,0 +1,11 @@
+// The call is compared to a variable, not an IntLit: UNKNOWN, both arms live,
+// so a Linux executable build must refuse the Windows-only extern.
+extern fn WSAStartup(uint64 ver, uint64 wsadata) -> uint64
+fn main() -> uint32 {
+    uint64 two = 2
+    if get_target_os() == two {
+        u8[512] wd
+        WSAStartup(514, wd)
+    }
+    return 0
+}

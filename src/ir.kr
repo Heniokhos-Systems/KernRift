@@ -3621,23 +3621,12 @@ fn ir_lower_expr(uint64 node) -> uint64 {
         // -- every such site in this tree is guarded by a syscall that
         // --target=none refuses first -- but user code doing the same must
         // add the none ids. docs/LANGUAGE.md documents them.
+        //
+        // The crosstable itself lives in ONE place, target_arch_id()
+        // (src/codegen.kr), shared with const_os_cond's `if` pruning so the
+        // pruned arm and the computed value can never disagree.
         if skip_builtin == 0 && tok_matches(wct, "get_arch_id", 11) != 0 {
-            uint64 arch_id = 1
-            if target_os == 4 {
-                arch_id = 9
-                if target_arch == 1 { arch_id = 10 }
-                if target_arch == 2 { arch_id = 11 }
-                if target_arch == 3 { arch_id = 12 }
-            } else if target_arch == 1 {
-                arch_id = 2
-                if target_os == 2 { arch_id = 4 }
-                if target_os == 1 { arch_id = 6 }
-                if target_os == 3 { arch_id = 7 }
-            } else {
-                if target_os == 2 { arch_id = 3 }
-                if target_os == 1 { arch_id = 5 }
-                if target_os == 3 { arch_id = 8 }
-            }
+            uint64 arch_id = target_arch_id()
             uint64 dest = ir_new_vreg()
             ir_emit(IR_CONST, dest, 0, 0, arch_id, ir_current_bb)
             return dest
