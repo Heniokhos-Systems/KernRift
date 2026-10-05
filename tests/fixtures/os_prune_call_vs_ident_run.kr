@@ -1,0 +1,17 @@
+// RUN twin of os_prune_call_vs_ident.kr. `get_target_os() == <variable>` is
+// UNKNOWN to const_os_cond, so BOTH arms of each `if` must survive and the
+// comparison is made at run time. On hosted Linux (target_os 0):
+//   the first test is TRUE at run time  -> its then-arm must run (+1)
+//   the second test is FALSE at run time -> its else-arm must run (+2)
+// Status 3 needs both. A mis-decision either way drops the arm that should
+// run (NOT_TAKEN on the first test, or TAKEN on the second) and the status
+// carries 64 or misses a bit.
+fn main() -> uint32 {
+    uint64 zero = 0
+    uint64 two = 2
+    uint64 r = 0
+    if get_target_os() == zero { r = r + 1 } else { r = r + 64 }
+    if get_target_os() == two { r = r + 64 } else { r = r + 2 }
+    exit(r)
+    return 0
+}

@@ -3708,12 +3708,29 @@ fn ir_lower_expr(uint64 node) -> uint64 {
             exit(1)
         }
         // Now emit ARG instructions
+        //
+        // x86_64 call to a known Windows import (is_routed_win_import): the
+        // callee is a DLL function, so it takes the Microsoft x64 ABI, not
+        // KernRift's internal SysV one. Tag each arg with the +200 Win64
+        // marker op-51 already understands (rcx/rdx/r8/r9, then the overflow
+        // buffer); op-50 sees the same predicate and reserves the 32-byte
+        // shadow + overflow area and calls through the IAT. This is a SECOND
+        // producer of the marker, separate from call_ptr's --emit=uefi one,
+        // gated inside the predicate (target_os 2 + an executable build), never
+        // on cg_emit_mode being pe -- compile_fat never sets it.
+        // arm64 needs no marker: Windows ARM64 is AAPCS64, same as KernRift.
+        uint64 ca_win64 = 0
+        if target_arch == 0 && is_routed_win_import(callee_tok) != PE_IMPORT_NO_SLOT {
+            ca_win64 = 1
+        }
         uint64 ai = 0
         while ai < arg_count {
             uint64 avp = call_arg_vregs + ai * 8
             uint64 av = 0
             unsafe { *(avp as uint64) -> av }
-            ir_emit(IR_ARG, 0, av, 0, ai, ir_current_bb)
+            uint64 ca_idx = ai
+            if ca_win64 != 0 { ca_idx = ai + 200 }
+            ir_emit(IR_ARG, 0, av, 0, ca_idx, ir_current_bb)
             ai = ai + 1
         }
         uint64 dest = ir_new_vreg()
@@ -8819,6 +8836,102 @@ fn x86_nyi_op(uint64 op) {
     exit(1)
 }
 
+// Microsoft x64 (Win64) outgoing call frame: reserve 32 bytes of shadow space
+// ALWAYS (ABI mandated, even for <=4 args) plus one 8-byte slot per overflow
+// argument, 16-aligned, and store the overflow args (recorded by op-51's +200
+// marker path) at [rsp + 32 + i*8]. Returns the bytes reserved, which the
+// caller releases with ir_x86_win64_call_release after the call. Shared by
+// op-87's --emit=uefi call_ptr path and op-50's routed Windows-import path
+// (is_routed_win_import), so the two Win64 call sites cannot drift.
+fn ir_x86_win64_call_frame() -> uint64 {
+    uint64 w_overflow = ir_overflow_arg_count
+    uint64 w_stack = 32 + w_overflow * 8
+    uint64 w_rem = w_stack & 15
+    if w_rem != 0 { w_stack = w_stack + 16 - w_rem }
+    // sub rsp, w_stack
+    if w_stack < 128 {
+        emit_byte(0x48); emit_byte(0x83); emit_byte(0xEC)
+        uint8 ws8 = w_stack
+        emit_byte(ws8)
+    } else {
+        emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC)
+        emit_u32_le(w_stack)
+    }
+    // Store overflow args at [rsp + 32 + i*8], re-resolving each vreg
+    // against the shifted frame (+w_stack). Uses rax as scratch; the
+    // reg args (rcx/rdx/r8/r9) were placed before this and the wide
+    // colour file caps every IR_ARG operand to the callee-saved prefix,
+    // so an overflow vreg never lives in rcx/rdx/r8/r9 — nothing the
+    // reg args need is clobbered here.
+    uint64 wi = 0
+    while wi < w_overflow {
+        uint64 wop_ptr = ir_overflow_args + wi * 8
+        uint64 warg_vreg = 0
+        unsafe { *(wop_ptr as uint64) -> warg_vreg }
+        uint64 warg_r = ir_get_phys_reg(warg_vreg)
+        if warg_r == 0xFFFFFFFF {
+            uint64 warg_xh = ir_x86_xmm_home(warg_vreg)
+            if warg_xh != 0xFFFFFFFF {
+                ir_emit_movq_r_x(0, warg_xh)
+                warg_r = 0
+            }
+        }
+        uint64 wsofs = 32 + wi * 8
+        if warg_r != 0xFFFFFFFF {
+            // mov [rsp + wsofs], warg_r
+            uint8 wst_rex = 0x48
+            if warg_r >= 8 { wst_rex = wst_rex | 4 }
+            emit_byte(wst_rex); emit_byte(0x89)
+            if wsofs < 128 {
+                uint8 wstm = 0x44 | ((warg_r & 7) << 3)
+                emit_byte(wstm); emit_byte(0x24)
+                uint8 wso8 = wsofs
+                emit_byte(wso8)
+            } else {
+                uint8 wstm = 0x84 | ((warg_r & 7) << 3)
+                emit_byte(wstm); emit_byte(0x24)
+                emit_u32_le(wsofs)
+            }
+        } else {
+            // Spilled: load from [rsp + w_stack + (vreg-1)*8] into rax,
+            // store to [rsp + wsofs].
+            uint64 wadj = w_stack + (warg_vreg - 1) * 8
+            emit_byte(0x48); emit_byte(0x8B)
+            if wadj < 128 {
+                emit_byte(0x44); emit_byte(0x24)
+                uint8 wa8 = wadj
+                emit_byte(wa8)
+            } else {
+                emit_byte(0x84); emit_byte(0x24)
+                emit_u32_le(wadj)
+            }
+            emit_byte(0x48); emit_byte(0x89)
+            if wsofs < 128 {
+                emit_byte(0x44); emit_byte(0x24)
+                uint8 wso8b = wsofs
+                emit_byte(wso8b)
+            } else {
+                emit_byte(0x84); emit_byte(0x24)
+                emit_u32_le(wsofs)
+            }
+        }
+        wi = wi + 1
+    }
+    return w_stack
+}
+
+// add rsp, w_stack -- undoes ir_x86_win64_call_frame.
+fn ir_x86_win64_call_release(uint64 w_stack) {
+    if w_stack < 128 {
+        emit_byte(0x48); emit_byte(0x83); emit_byte(0xC4)
+        uint8 wc8 = w_stack
+        emit_byte(wc8)
+    } else {
+        emit_byte(0x48); emit_byte(0x81); emit_byte(0xC4)
+        emit_u32_le(w_stack)
+    }
+}
+
 // Outgoing stack arguments for a call with more than six of them.
 // SHARED by IR_CALL (50) and IR_CALL_IND (87). It lived inside op 50 and
 // was therefore unreachable for indirect calls, which is the whole reason
@@ -10656,21 +10769,34 @@ fn ir_emit_x86_insn(uint64 ii) {
         // IR_CALL: call rel32 (will be resolved by fixup system)
         // src1 = arg_count (0 for old-style calls with <=6 args)
         uint64 call_arg_count = s1_v
-        uint64 stack_args = ir_x86_emit_call_stack_args(call_arg_count)
-        emit_byte(0xE8)
-        uint64 call_patch = out_len
-        emit_u32_le(0)
-        // Record fixup: imm holds the callee token
-        fixup_table_ensure()
-        uint64 fentry = fixup_table + fixup_count * 8
-        uint32 fo = call_patch
-        unsafe { *(fentry as uint32) = fo }
-        uint64 fe4 = fentry + 4
-        uint32 ct = imm
-        unsafe { *(fe4 as uint32) = ct }
-        fixup_count = fixup_count + 1
-        // Clean up overflow args from stack
-        ir_x86_emit_call_stack_cleanup(stack_args)
+        // A known Windows import (is_routed_win_import, imm = callee token):
+        // the lowering tagged its args with the Win64 marker, so they sit in
+        // rcx/rdx/r8/r9 + the overflow buffer. Reserve the Win64 shadow +
+        // overflow frame, call through the IAT slot (FF 15, resolved by
+        // resolve_win_iat_fixups), release. No name fixup: the PE loader
+        // binds the slot.
+        uint64 x86_iat_slot = is_routed_win_import(imm)
+        if x86_iat_slot != PE_IMPORT_NO_SLOT {
+            uint64 rw_stack = ir_x86_win64_call_frame()
+            emit_win_call_iat(x86_iat_slot)
+            ir_x86_win64_call_release(rw_stack)
+        } else {
+            uint64 stack_args = ir_x86_emit_call_stack_args(call_arg_count)
+            emit_byte(0xE8)
+            uint64 call_patch = out_len
+            emit_u32_le(0)
+            // Record fixup: imm holds the callee token
+            fixup_table_ensure()
+            uint64 fentry = fixup_table + fixup_count * 8
+            uint32 fo = call_patch
+            unsafe { *(fentry as uint32) = fo }
+            uint64 fe4 = fentry + 4
+            uint32 ct = imm
+            unsafe { *(fe4 as uint32) = ct }
+            fixup_count = fixup_count + 1
+            // Clean up overflow args from stack
+            ir_x86_emit_call_stack_cleanup(stack_args)
+        }
         // Reset overflow arg count
         ir_overflow_arg_count = 0
         // Result in rax. A statement-level call (`f()` as an ExprStmt) still
@@ -10759,79 +10885,7 @@ fn ir_emit_x86_insn(uint64 ii) {
         // --emit=uefi every one of them is a firmware call: gating on
         // cg_emit_mode alone is exact.
         if cg_emit_mode == 9 && target_arch == 0 {
-            uint64 w_overflow = ir_overflow_arg_count
-            uint64 w_stack = 32 + w_overflow * 8
-            uint64 w_rem = w_stack & 15
-            if w_rem != 0 { w_stack = w_stack + 16 - w_rem }
-            // sub rsp, w_stack
-            if w_stack < 128 {
-                emit_byte(0x48); emit_byte(0x83); emit_byte(0xEC)
-                uint8 ws8 = w_stack
-                emit_byte(ws8)
-            } else {
-                emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC)
-                emit_u32_le(w_stack)
-            }
-            // Store overflow args at [rsp + 32 + i*8], re-resolving each vreg
-            // against the shifted frame (+w_stack). Uses rax as scratch; the
-            // reg args (rcx/rdx/r8/r9) were placed before this and the wide
-            // colour file caps every IR_ARG operand to the callee-saved prefix,
-            // so an overflow vreg never lives in rcx/rdx/r8/r9 — nothing the
-            // reg args need is clobbered here.
-            uint64 wi = 0
-            while wi < w_overflow {
-                uint64 wop_ptr = ir_overflow_args + wi * 8
-                uint64 warg_vreg = 0
-                unsafe { *(wop_ptr as uint64) -> warg_vreg }
-                uint64 warg_r = ir_get_phys_reg(warg_vreg)
-                if warg_r == 0xFFFFFFFF {
-                    uint64 warg_xh = ir_x86_xmm_home(warg_vreg)
-                    if warg_xh != 0xFFFFFFFF {
-                        ir_emit_movq_r_x(0, warg_xh)
-                        warg_r = 0
-                    }
-                }
-                uint64 wsofs = 32 + wi * 8
-                if warg_r != 0xFFFFFFFF {
-                    // mov [rsp + wsofs], warg_r
-                    uint8 wst_rex = 0x48
-                    if warg_r >= 8 { wst_rex = wst_rex | 4 }
-                    emit_byte(wst_rex); emit_byte(0x89)
-                    if wsofs < 128 {
-                        uint8 wstm = 0x44 | ((warg_r & 7) << 3)
-                        emit_byte(wstm); emit_byte(0x24)
-                        uint8 wso8 = wsofs
-                        emit_byte(wso8)
-                    } else {
-                        uint8 wstm = 0x84 | ((warg_r & 7) << 3)
-                        emit_byte(wstm); emit_byte(0x24)
-                        emit_u32_le(wsofs)
-                    }
-                } else {
-                    // Spilled: load from [rsp + w_stack + (vreg-1)*8] into rax,
-                    // store to [rsp + wsofs].
-                    uint64 wadj = w_stack + (warg_vreg - 1) * 8
-                    emit_byte(0x48); emit_byte(0x8B)
-                    if wadj < 128 {
-                        emit_byte(0x44); emit_byte(0x24)
-                        uint8 wa8 = wadj
-                        emit_byte(wa8)
-                    } else {
-                        emit_byte(0x84); emit_byte(0x24)
-                        emit_u32_le(wadj)
-                    }
-                    emit_byte(0x48); emit_byte(0x89)
-                    if wsofs < 128 {
-                        emit_byte(0x44); emit_byte(0x24)
-                        uint8 wso8b = wsofs
-                        emit_byte(wso8b)
-                    } else {
-                        emit_byte(0x84); emit_byte(0x24)
-                        emit_u32_le(wsofs)
-                    }
-                }
-                wi = wi + 1
-            }
+            uint64 w_stack = ir_x86_win64_call_frame()
             // Resolve the fn pointer into rax AFTER the stores (they use rax as
             // scratch). A spilled pointer's slot moved up by w_stack.
             uint64 wptr_phys = ir_get_phys_reg(s1_v)
@@ -10858,15 +10912,7 @@ fn ir_emit_x86_insn(uint64 ii) {
             }
             // call rax
             emit_byte(0xFF); emit_byte(0xD0)
-            // add rsp, w_stack
-            if w_stack < 128 {
-                emit_byte(0x48); emit_byte(0x83); emit_byte(0xC4)
-                uint8 wc8 = w_stack
-                emit_byte(wc8)
-            } else {
-                emit_byte(0x48); emit_byte(0x81); emit_byte(0xC4)
-                emit_u32_le(w_stack)
-            }
+            ir_x86_win64_call_release(w_stack)
             ir_overflow_arg_count = 0
             if ir_use_count_get(dest_v) == 0 { return }
             uint64 w_result_reg = 0

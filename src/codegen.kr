@@ -3502,6 +3502,53 @@ fn extern_fn_lookup(uint64 name_tok) -> uint64 {
     return 0xFFFFFFFF
 }
 
+// A call to `name_tok` that a Windows build binds through the PE import table
+// rather than a linker: returns its IAT slot, or PE_IMPORT_NO_SLOT.
+//
+// All FOUR conditions, and each one is load-bearing:
+//   target_os == 2 -- the OS gate. NOT cg_emit_mode == <pe>: compile_fat
+//     builds its two PE slices with target_os = 2 and never calls
+//     set_emit_mode, so a "mode is pe" gate would leave every fat build's
+//     Windows slices on the refusal path.
+//   the build is an EXECUTABLE (emit_mode_is_executable(cg_emit_mode)) --
+//     the converse exclusion, which compile_fat passes because cg_emit_mode
+//     stays 0 (elfexe) there. --target=windows --emit=obj runs the legacy
+//     codegen, which routes too, and an object file has no IAT: its extern
+//     calls must stay `E8 rel32` + IMAGE_REL_AMD64_REL32 for the linker
+//     (measured: without this gate every such call became `FF 15` with a
+//     zero displacement and no relocation). asm/ir dumps and lkm likewise.
+//   the name is in format_pe.kr's fixed table -- pe_import_slot, the ONE
+//     name->slot map; there is no second list here to drift from it.
+//   it is DECLARED `extern fn` -- extern_fn_lookup hits. A user-defined
+//     `fn send()` shares a table name and must stay an ordinary direct call
+//     to the user's own body.
+// Every consumer -- the call lowering on both arches and both backends, the
+// refusal exemption, and the stub skip -- asks THIS function, so the routing
+// decision and the "nothing will resolve it" decision cannot disagree.
+@export
+fn is_routed_win_import(uint64 name_tok) -> uint64 {
+    if target_os != 2 { return PE_IMPORT_NO_SLOT }
+    if emit_mode_is_executable(cg_emit_mode) == 0 { return PE_IMPORT_NO_SLOT }
+    if extern_fn_lookup(name_tok) == 0xFFFFFFFF { return PE_IMPORT_NO_SLOT }
+    uint64 ts = tok_text_start(name_tok)
+    uint64 tl = tok_text_len(name_tok)
+    return pe_import_slot(cg_source + ts, tl)
+}
+
+// A body-less `extern fn` declaration (FnDecl, data4 bit 3) that a Windows
+// build routes through the IAT. Its call sites never reference a local
+// symbol, so no stub body is emitted and the name is never registered: a
+// registered zero-length function would alias whatever is emitted next.
+@export
+fn decl_is_routed_win_import(uint64 fn_node) -> uint64 {
+    uint32 rw_flags = ast_data4(fn_node)
+    if (rw_flags & 8) == 0 { return 0 }
+    uint32 rw_name = ast_data1(fn_node)
+    uint64 wrn = rw_name
+    if is_routed_win_import(wrn) == PE_IMPORT_NO_SLOT { return 0 }
+    return 1
+}
+
 // Record an extern call site for later relocation emission.
 // code_off is the byte offset inside the .text section:
 //   x86_64: the start of the 4-byte disp32 (call site + 1)
@@ -10332,9 +10379,19 @@ fn gen_expr(uint64 node) {
             }
         }
 
-        emit_byte(0xE8)
-        uint64 fixup_off = out_len
-        emit_u32_le(0)
+        // A known Windows import (is_routed_win_import): call through its IAT
+        // slot. The Win64 register/shadow/overflow setup above already applies
+        // to every call on target_os 2, so only the call form changes. No
+        // fixup and no extern call record -- the loader binds the slot.
+        uint64 lg_iat_slot = is_routed_win_import(callee_tok)
+        uint64 fixup_off = 0
+        if lg_iat_slot != PE_IMPORT_NO_SLOT {
+            emit_win_call_iat(lg_iat_slot)
+        } else {
+            emit_byte(0xE8)
+            fixup_off = out_len
+            emit_u32_le(0)
+        }
 
         // Clean up overflow args from stack (SysV)
         if stack_args > 0 {
@@ -10428,6 +10485,7 @@ fn gen_expr(uint64 node) {
         // If the callee is an extern fn, record a call site for the linker
         // relocation and skip the internal fixup table — the linker fills the
         // disp32 at .o emit time with R_X86_64_PLT32.
+        if lg_iat_slot != PE_IMPORT_NO_SLOT { return }
         uint64 wct_ext = callee_tok
         uint64 ext_idx = extern_fn_lookup(wct_ext)
         if ext_idx != 0xFFFFFFFF {
@@ -15312,7 +15370,13 @@ fn refuse_unresolved_externs(uint64 check) {
         uint32 name_tok = 0
         unsafe { *(entry as uint32) -> name_tok }
         uint64 wnt = name_tok
-        if dce_is_live(wnt) != 0 {
+        // A Windows build resolves a known import itself: the PE loader binds
+        // its IAT slot, and every call site is an indirect call through that
+        // slot (is_routed_win_import -- the SAME predicate the call lowering
+        // uses, so an exempted extern is always a routed one).
+        uint64 rue_routed = 0
+        if is_routed_win_import(wnt) != PE_IMPORT_NO_SLOT { rue_routed = 1 }
+        if rue_routed == 0 && dce_is_live(wnt) != 0 {
             diag_loc_head(wnt, 0)
             uint64 em1 = "extern fn '"
             write(2, em1, str_len(em1))

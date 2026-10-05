@@ -9462,13 +9462,37 @@ else
         echo "  os_prune_override_arm_runs: FAIL (status $OSP_RC, want 5)"
     fi
 fi
+# (4b) The run twin of os_prune_call_vs_ident_stays_live. That row only fails
+#      when the UNKNOWN comparison is pruned as NOT_TAKEN (the extern vanishes
+#      and the build succeeds); a TAKEN mis-decision keeps the extern and still
+#      refuses. Here both arms of two variable comparisons must survive and the
+#      run-time answer must pick them: status 3 (see the fixture).
+TOTAL=$((TOTAL + 1))
+rm -f "$OSP_BIN"
+if ! $KRC $KRC_FLAGS --target=linux --emit=elfexe "$DIR/fixtures/os_prune_call_vs_ident_run.kr" -o "$OSP_BIN" > /dev/null 2>&1; then
+    FAIL=$((FAIL + 1))
+    echo "  os_prune_call_vs_ident_runs_both_arms: FAIL (did not compile)"
+else
+    chmod +x "$OSP_BIN"
+    "$OSP_BIN" > /dev/null 2>&1; OSP_RC=$?
+    if [ "$OSP_RC" = "3" ]; then
+        PASS=$((PASS + 1))
+        echo "  os_prune_call_vs_ident_runs_both_arms: PASS"
+    else
+        FAIL=$((FAIL + 1))
+        echo "  os_prune_call_vs_ident_runs_both_arms: FAIL (status $OSP_RC, want 3)"
+    fi
+fi
 # (5) Hosted Linux arch ids, RUN: the x86_64 build must exit 1 and the arm64
-#     build 2. Each leg runs natively on its own host arch, or the arm64 leg
-#     under qemu-aarch64 when present; a leg that cannot run anywhere here is
-#     named in the PASS line, never silently dropped. At least one leg runs on
-#     every host this suite supports (x86_64 or arm64).
+#     build 2. Each leg runs natively on its own host arch, or under
+#     qemu-aarch64 / qemu-x86_64 (user mode) when present -- the x86_64 leg on
+#     an arm64 host (the ARM CI runner) needs the latter. A leg that cannot run
+#     anywhere here is reported as a visible SKIP inside the row's line, never
+#     silently dropped; at least one leg runs on every host this suite
+#     supports (x86_64 or arm64), and a host where none can is a FAIL.
 TOTAL=$((TOTAL + 1))
 OSPA_QEMU="$(command -v qemu-aarch64-static || command -v qemu-aarch64 || true)"
+OSPA_QEMU_X86="$(command -v qemu-x86_64-static || command -v qemu-x86_64 || true)"
 OSPA_WHY=""
 OSPA_RAN=""
 for ospa in "x86_64 1" "arm64 2"; do
@@ -9476,8 +9500,9 @@ for ospa in "x86_64 1" "arm64 2"; do
     OSPA_RUNNER=""
     if [ "$ospa_arch" = "$RUN_ARCH" ]; then OSPA_RUNNER="native"
     elif [ "$ospa_arch" = "arm64" ] && [ -n "$OSPA_QEMU" ]; then OSPA_RUNNER="$OSPA_QEMU"
+    elif [ "$ospa_arch" = "x86_64" ] && [ -n "$OSPA_QEMU_X86" ]; then OSPA_RUNNER="$OSPA_QEMU_X86"
     fi
-    if [ -z "$OSPA_RUNNER" ]; then OSPA_RAN="$OSPA_RAN $ospa_arch:not-run"; continue; fi
+    if [ -z "$OSPA_RUNNER" ]; then OSPA_RAN="$OSPA_RAN $ospa_arch:SKIP(no-native-or-qemu-runner)"; continue; fi
     rm -f "$OSP_BIN"
     if ! $KRC $KRC_FLAGS --arch="$ospa_arch" --target=linux --emit=elfexe "$DIR/fixtures/os_prune_arch_run.kr" -o "$OSP_BIN" > /dev/null 2>&1; then
         OSPA_WHY="$OSPA_WHY $ospa_arch:did-not-compile"; continue
@@ -9496,7 +9521,11 @@ elif ! echo "$OSPA_RAN" | grep -q ":ran"; then
     echo "  os_prune_arch_hosted_runs: FAIL (no leg could run on this host:$OSPA_RAN )"
 else
     PASS=$((PASS + 1))
-    echo "  os_prune_arch_hosted_runs: PASS ($OSPA_RAN )"
+    if echo "$OSPA_RAN" | grep -q "SKIP"; then
+        echo "  os_prune_arch_hosted_runs: PASS, one leg SKIP ($OSPA_RAN )"
+    else
+        echo "  os_prune_arch_hosted_runs: PASS ($OSPA_RAN )"
+    fi
 fi
 # (6) The whole get_arch_id crosstable, through the IR: for every target,
 #     `if get_arch_id() == <its documented id> { r = 77 } else { r = 88 }`
@@ -9534,6 +9563,306 @@ osp_ir_sweep os_prune_arch_ids_hosted \
 osp_ir_sweep os_prune_arch_ids_bare_metal \
     "none x86_64 9" "none arm64 10" "none riscv32 11" "none xtensa 12"
 rm -f "$OSP_BIN"
+
+# Routed Windows imports (is_routed_win_import, codegen.kr). On a Windows
+# build, a call to an `extern fn` whose name is in format_pe.kr's fixed import
+# table is an indirect call through its IAT slot -- FF 15 disp32 on x86_64,
+# ADRP x16 / LDR x16,[x16,#lo12] / BLR x16 on arm64 -- with no stub body and
+# no unresolved-extern refusal. The call sites are DECODED here, not grepped:
+# the slot is the decoded target minus the IAT base (the first import
+# descriptor's FirstThunk, read from the image), and the name is read back
+# from the parallel ILT entry's hint/name, so "20 WSAStartup" is what the
+# image itself says. Header fields come from od; only x86_64 instruction
+# BOUNDARIES need a disassembler (an FF 15 pair inside another instruction is
+# not a call), and arm64 needs none (fixed-width words).
+pe_u() {   # <file> <offset> <2|4> -> unsigned decimal
+    od -An -tu"$3" -j "$2" -N"$3" "$1" | tr -d ' \n'
+}
+pe_lfanew() { pe_u "$1" 60 4; }
+pe_image_base() {
+    local lf; lf=$(pe_lfanew "$1")
+    echo $(( $(pe_u "$1" $((lf + 48)) 4) + ($(pe_u "$1" $((lf + 52)) 4) << 32) ))
+}
+pe_section() {   # <file> <rva | .text> -> "va size rawptr" of the section holding it
+    local f="$1" want="$2" lf nsec osz sh i b vs va rs rp sz nm
+    lf=$(pe_lfanew "$f"); nsec=$(pe_u "$f" $((lf + 6)) 2); osz=$(pe_u "$f" $((lf + 20)) 2)
+    sh=$((lf + 24 + osz))
+    for ((i = 0; i < nsec; i++)); do
+        b=$((sh + i * 40))
+        vs=$(pe_u "$f" $((b + 8)) 4); va=$(pe_u "$f" $((b + 12)) 4)
+        rs=$(pe_u "$f" $((b + 16)) 4); rp=$(pe_u "$f" $((b + 20)) 4)
+        sz=$vs; [ "$rs" -gt "$sz" ] && sz=$rs
+        if [ "$want" = ".text" ]; then
+            nm=$(dd if="$f" bs=1 skip="$b" count=8 2>/dev/null | tr -d '\0')
+            [ "$nm" = ".text" ] && { echo "$va $rs $rp"; return; }
+        elif [ "$want" -ge "$va" ] && [ "$want" -lt $((va + sz)) ]; then
+            echo "$va $sz $rp"; return
+        fi
+    done
+}
+pe_rva_off() {   # <file> <rva> -> file offset
+    local s; s=$(pe_section "$1" "$2"); [ -z "$s" ] && return 1
+    set -- $s "$2"; echo $(( $3 + $4 - $1 ))
+}
+pe_slot_name() {   # <file> <ilt_rva> <slot>
+    local e o
+    e=$(pe_u "$1" "$(pe_rva_off "$1" $(($2 + $3 * 8)))" 4)
+    [ "$e" = "0" ] && { echo "<none>"; return; }
+    o=$(pe_rva_off "$1" "$e") || { echo "<bad>"; return; }
+    dd if="$1" bs=1 skip=$((o + 2)) count=48 2>/dev/null | tr '\0' '\n' | head -1
+}
+PE_X86_DIS=""
+if command -v llvm-objdump > /dev/null 2>&1; then PE_X86_DIS=llvm-objdump
+elif objdump -i 2>/dev/null | grep -q 'pei-x86-64'; then PE_X86_DIS=objdump
+fi
+# "<va_hex> <byte> <byte> ..." per instruction, from the x86 disassembler.
+pe_x86_insns() {
+    "$PE_X86_DIS" -d "$1" 2>/dev/null \
+        | sed -nE 's/^ *([0-9a-f]+):[[:space:]]+(([0-9a-f]{2} )+).*/\1 \2/p'
+}
+# One line per call: "iat <rva_hex> <slot> <name>" or "direct <rva_hex> <target_rva_hex>".
+pe_calls() {   # <pe> <x86_64|arm64>
+    local f="$1" ib lf idt idt_off iat ilt
+    ib=$(pe_image_base "$f"); lf=$(pe_lfanew "$f")
+    idt=$(pe_u "$f" $((lf + 144)) 4)
+    idt_off=$(pe_rva_off "$f" "$idt") || { echo "noimports"; return; }
+    ilt=$(pe_u "$f" "$idt_off" 4); iat=$(pe_u "$f" $((idt_off + 16)) 4)
+    pe_emit() {   # <call_rva> <target_rva>
+        local d=$(( $2 - iat ))
+        if [ "$d" -ge 0 ] && [ $((d % 8)) = 0 ]; then
+            printf 'iat 0x%x %d %s\n' "$1" $((d / 8)) "$(pe_slot_name "$f" "$ilt" $((d / 8)))"
+        else
+            printf 'badiat 0x%x 0x%x\n' "$1" "$2"
+        fi
+    }
+    if [ "$2" = "x86_64" ]; then
+        local va b0 b1 b2 b3 b4 b5 extra rva disp
+        while read -r va b0 b1 b2 b3 b4 b5 extra; do
+            rva=$(( 0x$va - ib ))
+            if [ "$b0 $b1" = "ff 15" ] && [ -n "$b5" ] && [ -z "$extra" ]; then
+                disp=$(( 0x$b5$b4$b3$b2 )); [ "$disp" -ge 2147483648 ] && disp=$((disp - 4294967296))
+                pe_emit "$rva" $((rva + 6 + disp))
+            elif [ "$b0" = "e8" ] && [ -n "$b4" ] && [ -z "$b5" ]; then
+                disp=$(( 0x$b4$b3$b2$b1 )); [ "$disp" -ge 2147483648 ] && disp=$((disp - 4294967296))
+                printf 'direct 0x%x 0x%x\n' "$rva" $((rva + 5 + disp))
+            fi
+        done < <(pe_x86_insns "$f")
+    else
+        local tx va rs rp i n w ldr imm pc page
+        tx=$(pe_section "$f" .text); set -- $tx; va=$1; rs=$2; rp=$3
+        local -a W=($(od -An -v -tu4 -j "$rp" -N "$rs" "$f"))
+        n=${#W[@]}
+        for ((i = 0; i < n; i++)); do
+            w=${W[$i]}
+            if [ $((w & 0xFC000000)) = $((0x94000000)) ]; then
+                imm=$((w & 0x3FFFFFF)); [ $((imm & 0x2000000)) != 0 ] && imm=$((imm - 0x4000000))
+                printf 'direct 0x%x 0x%x\n' $((va + i * 4)) $((va + i * 4 + imm * 4))
+            elif [ $((w & 0x9F00001F)) = $((0x90000010)) ] && [ $((i + 2)) -lt "$n" ] \
+                 && [ $((W[i + 1] & 0xFFC003FF)) = $((0xF9400210)) ] && [ "${W[$((i + 2))]}" = $((0xD63F0200)) ]; then
+                ldr=${W[$((i + 1))]}
+                imm=$(( (((w >> 5) & 0x7FFFF) << 2) | ((w >> 29) & 3) ))
+                [ $((imm & 0x100000)) != 0 ] && imm=$((imm - 0x200000))
+                pc=$((ib + va + i * 4)); page=$(( (pc & ~0xFFF) + (imm << 12) ))
+                pe_emit $((va + i * 4 + 8)) $((page + ((ldr >> 10) & 0xFFF) * 8 - ib))
+            fi
+        done
+    fi
+}
+RWI_DIR=/tmp/krc_rwi_$$
+mkdir -p "$RWI_DIR"
+# Number of return instructions in .text: `c3` on x86_64 (whole instruction,
+# from the disassembler), RET = 0xD65F03C0 on arm64 (from od).
+pe_ret_count() {   # <pe> <arch>
+    if [ "$2" = "x86_64" ]; then
+        pe_x86_insns "$1" | grep -c '^[0-9a-f]* c3 $'
+    else
+        local tx; tx=$(pe_section "$1" .text); set -- "$1" $tx
+        od -An -v -tu4 -j "$4" -N "$3" "$1" | tr -s ' ' '\n' | grep -cx "$((0xD65F03C0))"
+    fi
+}
+# os_prune.kr's Windows arm calls WSAStartup (ws2_32, IAT slot 20). The build
+# must succeed (no refusal), main's call must be an IAT call to slot 20 named
+# WSAStartup, there must be no direct call anywhere, and .text must hold
+# exactly ONE return -- main's. A stub body emitted for the routed extern
+# (decl_is_routed_win_import's skip missing) is a second function with its
+# own return, called by nothing, which no call-site check can see.
+rwi_check_osp() {   # <row> <pe> <arch>
+    local calls rets; calls=$(pe_calls "$2" "$3"); rets=$(pe_ret_count "$2" "$3")
+    if ! echo "$calls" | grep -qx 'iat 0x[0-9a-f]* 20 WSAStartup'; then
+        FAIL=$((FAIL + 1)); echo "  $1: FAIL (no IAT call to slot 20 = WSAStartup; calls: $(echo $calls))"
+    elif echo "$calls" | grep -q '^direct\|^badiat'; then
+        FAIL=$((FAIL + 1)); echo "  $1: FAIL (a direct/stray call remains: $(echo $calls))"
+    elif [ "$rets" != "1" ]; then
+        FAIL=$((FAIL + 1)); echo "  $1: FAIL ($rets return instructions in .text, want 1 -- a stub was emitted for the routed extern)"
+    else
+        PASS=$((PASS + 1)); echo "  $1: PASS"
+    fi
+}
+# (1) x86_64 and arm64 single-target PE, IR backend (the default) and --legacy.
+for rwi in "win_import_routes_x86_64 x86_64" "win_import_routes_arm64 arm64" \
+           "win_import_routes_legacy_x86_64 x86_64 --legacy" "win_import_routes_legacy_arm64 arm64 --legacy"; do
+    set -- $rwi
+    TOTAL=$((TOTAL + 1))
+    rm -f "$RWI_DIR/o.exe"
+    RWI_ERR=$($KRC $3 --arch="$2" --target=windows --emit=pe "$DIR/fixtures/os_prune.kr" -o "$RWI_DIR/o.exe" 2>&1 >/dev/null)
+    if [ ! -s "$RWI_DIR/o.exe" ]; then
+        FAIL=$((FAIL + 1)); echo "  $1: FAIL (Windows build refused: $(echo "$RWI_ERR" | head -1))"
+    elif [ "$2" = "x86_64" ] && [ -z "$PE_X86_DIS" ]; then
+        PASS=$((PASS + 1)); echo "  $1: SKIP (no llvm-objdump or pei-x86-64 objdump for instruction boundaries)"
+    else
+        rwi_check_osp "$1" "$RWI_DIR/o.exe" "$2"
+    fi
+done
+# (2) The fat build: compile_fat sets target_os = 2 for its PE slices but
+#     never cg_emit_mode, so this is what pins the gate to target_os. The
+#     slice is pulled out of the .krbo by tests/helpers/krbo_slice.py
+#     (LZ-Rift + BCJ decode) and decoded like (1).
+for rwi in "win_import_routes_fat_win_x64 win-x64 3 x86_64" "win_import_routes_fat_win_arm64 win-arm64 4 arm64"; do
+    set -- $rwi
+    TOTAL=$((TOTAL + 1))
+    rm -f "$RWI_DIR/o.krbo" "$RWI_DIR/o.exe"
+    RWI_ERR=$($KRC --targets="$2" "$DIR/fixtures/os_prune.kr" -o "$RWI_DIR/o.krbo" 2>&1 >/dev/null)
+    if [ ! -s "$RWI_DIR/o.krbo" ]; then
+        FAIL=$((FAIL + 1)); echo "  $1: FAIL (fat build refused: $(echo "$RWI_ERR" | head -1))"
+    elif ! command -v python3 > /dev/null 2>&1; then
+        PASS=$((PASS + 1)); echo "  $1: SKIP (no python3)"
+    elif ! python3 "$DIR/helpers/krbo_slice.py" "$RWI_DIR/o.krbo" "$3" "$RWI_DIR/o.exe"; then
+        FAIL=$((FAIL + 1)); echo "  $1: FAIL (could not extract slice $3)"
+    elif [ "$4" = "x86_64" ] && [ -z "$PE_X86_DIS" ]; then
+        PASS=$((PASS + 1)); echo "  $1: SKIP (no llvm-objdump or pei-x86-64 objdump for instruction boundaries)"
+    else
+        rwi_check_osp "$1" "$RWI_DIR/o.exe" "$4"
+    fi
+done
+# (3) A USER-DEFINED `fn send` shares ws2_32's name (slot 24) but is not an
+#     `extern fn`: main's call must stay a DIRECT call to that body, and
+#     nothing may call through slot 24. Both arches, IR and --legacy.
+for rwi in "win_import_user_send_direct_x86_64 x86_64" "win_import_user_send_direct_arm64 arm64" \
+           "win_import_user_send_direct_legacy x86_64 --legacy"; do
+    set -- $rwi
+    TOTAL=$((TOTAL + 1))
+    rm -f "$RWI_DIR/o.exe"
+    $KRC $3 --arch="$2" --target=windows --emit=pe "$DIR/fixtures/user_send.kr" -o "$RWI_DIR/o.exe" > /dev/null 2>&1
+    if [ ! -s "$RWI_DIR/o.exe" ]; then
+        FAIL=$((FAIL + 1)); echo "  $1: FAIL (did not compile)"
+    elif [ "$2" = "x86_64" ] && [ -z "$PE_X86_DIS" ]; then
+        PASS=$((PASS + 1)); echo "  $1: SKIP (no llvm-objdump or pei-x86-64 objdump for instruction boundaries)"
+    else
+        RWI_CALLS=$(pe_calls "$RWI_DIR/o.exe" "$2")
+        if echo "$RWI_CALLS" | grep -q '^iat 0x[0-9a-f]* 24 '; then
+            FAIL=$((FAIL + 1)); echo "  $1: FAIL (the user's send was routed through IAT slot 24)"
+        elif [ "$(echo "$RWI_CALLS" | grep -c '^direct')" != "1" ]; then
+            FAIL=$((FAIL + 1)); echo "  $1: FAIL (want exactly one direct call, main -> send; calls: $(echo $RWI_CALLS))"
+        else
+            PASS=$((PASS + 1)); echo "  $1: PASS"
+        fi
+    fi
+done
+# (3b) --emit=obj is NOT routed: an object file has no IAT, and its extern
+#      calls are bound by the platform linker. --target=windows --emit=obj
+#      runs the legacy codegen, which does route on an executable build, so
+#      the predicate's "executable build" clause is what keeps these as
+#      relocations. win_iat_abi.kr makes five extern calls; the COFF .text
+#      section header (the first section, NumberOfRelocations at +32) must
+#      count exactly five relocations on both arches. Routed calls carry no
+#      relocation, so a leak drops the count to 0.
+TOTAL=$((TOTAL + 1))
+RWI_WHY=""
+for rwi_a in x86_64 arm64; do
+    rm -f "$RWI_DIR/o.obj"
+    $KRC --arch="$rwi_a" --target=windows --emit=obj "$DIR/fixtures/win_iat_abi.kr" -o "$RWI_DIR/o.obj" > /dev/null 2>&1
+    if [ ! -s "$RWI_DIR/o.obj" ]; then RWI_WHY="$RWI_WHY $rwi_a:no-build"; continue; fi
+    if [ "$(dd if="$RWI_DIR/o.obj" bs=1 skip=20 count=5 2>/dev/null)" != ".text" ]; then
+        RWI_WHY="$RWI_WHY $rwi_a:first-section-not-.text"; continue
+    fi
+    RWI_NREL=$(pe_u "$RWI_DIR/o.obj" 52 2)
+    [ "$RWI_NREL" = "5" ] || RWI_WHY="$RWI_WHY $rwi_a:$RWI_NREL-relocations-want-5"
+done
+if [ -z "$RWI_WHY" ]; then
+    PASS=$((PASS + 1)); echo "  win_import_obj_keeps_relocations: PASS"
+else
+    FAIL=$((FAIL + 1)); echo "  win_import_obj_keeps_relocations: FAIL ($RWI_WHY )"
+fi
+# (4) The Win64 ABI of a routed call with more than four arguments, x86_64.
+#     win_iat_abi.kr calls CreateFileA (slot 3, 7 args) and WriteFile (slot 2,
+#     5 args). Between each call's `sub rsp, N` and its FF 15 the stack args
+#     must be stored at [rsp+32], [rsp+40], ... -- above the 32-byte shadow --
+#     and N must be shadow + slots, 16-aligned: CreateFileA 0x40 with stores
+#     at 32/40/48, WriteFile 0x30 with a store at 32. Byte-decoded:
+#     48 83 EC ib = sub rsp; REX.W 89 /r with mod=01 rm=100 SIB 24 = store.
+TOTAL=$((TOTAL + 1))
+rm -f "$RWI_DIR/abi.exe"
+$KRC --arch=x86_64 --target=windows --emit=pe "$DIR/fixtures/win_iat_abi.kr" -o "$RWI_DIR/abi.exe" > /dev/null 2>&1
+if [ ! -s "$RWI_DIR/abi.exe" ]; then
+    FAIL=$((FAIL + 1)); echo "  win_import_win64_stack_args: FAIL (did not compile)"
+elif [ -z "$PE_X86_DIS" ]; then
+    PASS=$((PASS + 1)); echo "  win_import_win64_stack_args: SKIP (no llvm-objdump or pei-x86-64 objdump)"
+else
+    RWI_IB=$(pe_image_base "$RWI_DIR/abi.exe")
+    RWI_LF=$(pe_lfanew "$RWI_DIR/abi.exe")
+    RWI_IAT=$(pe_u "$RWI_DIR/abi.exe" $(( $(pe_rva_off "$RWI_DIR/abi.exe" "$(pe_u "$RWI_DIR/abi.exe" $((RWI_LF + 144)) 4)") + 16 )) 4)
+    RWI_SPANS=""
+    RWI_FRAME=""; RWI_ST=""
+    while read -r va b0 b1 b2 b3 b4 b5 extra; do
+        if [ "$b0 $b1 $b2" = "48 83 ec" ] && [ -z "$b4" ]; then
+            RWI_FRAME=$((0x$b3)); RWI_ST=""
+        elif { [ "$b0" = "48" ] || [ "$b0" = "4c" ]; } && [ "$b1" = "89" ] && [ "$b3" = "24" ] \
+             && [ $((0x$b2 & 0xC7)) = $((0x44)) ] && [ -n "$b4" ] && [ -z "$b5" ] && [ -n "$RWI_FRAME" ]; then
+            RWI_ST="$RWI_ST,$((0x$b4))"
+        elif [ "$b0 $b1" = "ff 15" ] && [ -z "$extra" ]; then
+            disp=$(( 0x$b5$b4$b3$b2 )); [ "$disp" -ge 2147483648 ] && disp=$((disp - 4294967296))
+            RWI_SLOT=$(( (0x$va - RWI_IB + 6 + disp - RWI_IAT) / 8 ))
+            RWI_SPANS="$RWI_SPANS slot$RWI_SLOT:frame$RWI_FRAME:st${RWI_ST:-,}"
+            RWI_FRAME=""; RWI_ST=""
+        fi
+    done < <(pe_x86_insns "$RWI_DIR/abi.exe")
+    if echo " $RWI_SPANS " | grep -q ' slot3:frame64:st,32,40,48 ' \
+       && [ "$(echo " $RWI_SPANS " | grep -o ' slot2:frame48:st,32 ' | wc -l)" = "2" ]; then
+        PASS=$((PASS + 1)); echo "  win_import_win64_stack_args: PASS"
+    else
+        FAIL=$((FAIL + 1)); echo "  win_import_win64_stack_args: FAIL (want slot3:frame64:st,32,40,48 and two slot2:frame48:st,32; got:$RWI_SPANS)"
+    fi
+fi
+# (5) RUN it. Under Wine the routed calls reach the real kernel32: status 42,
+#     "routed-ok" on stdout, and kr_win_iat_abi.tmp holding "routed\n" (only
+#     possible if CreateFileA's 5th argument, the first stack slot, arrived as
+#     CREATE_ALWAYS). user_send.exe must exit 6 and os_prune.exe 0 (WSAStartup
+#     really called). Wine is found as $KR_WINE or `wine` on PATH; without it
+#     the row is a counted SKIP. NOTE: Wine STUBS imports it cannot resolve
+#     rather than refusing to load, so this proves the calls ran correctly,
+#     not that a strict loader would bind every name.
+TOTAL=$((TOTAL + 1))
+RWI_WINE="${KR_WINE:-$(command -v wine 2>/dev/null || true)}"
+if [ -z "$RWI_WINE" ] || [ ! -x "$RWI_WINE" ]; then
+    PASS=$((PASS + 1)); echo "  win_import_runs_under_wine: SKIP (no wine; set KR_WINE=<path to wine>)"
+else
+    RWI_WHY=""
+    mkdir -p "$RWI_DIR/run" "$RWI_DIR/pfx"
+    $KRC --arch=x86_64 --target=windows --emit=pe "$DIR/fixtures/win_iat_abi.kr" -o "$RWI_DIR/run/abi.exe" > /dev/null 2>&1 || RWI_WHY="$RWI_WHY abi:no-build"
+    $KRC --arch=x86_64 --target=windows --emit=pe "$DIR/fixtures/user_send.kr" -o "$RWI_DIR/run/us.exe" > /dev/null 2>&1 || RWI_WHY="$RWI_WHY user_send:no-build"
+    $KRC --arch=x86_64 --target=windows --emit=pe "$DIR/fixtures/os_prune.kr" -o "$RWI_DIR/run/osp.exe" > /dev/null 2>&1 || RWI_WHY="$RWI_WHY os_prune:no-build"
+    if [ -z "$RWI_WHY" ]; then
+        RWI_OUT=$(cd "$RWI_DIR/run" && WINEPREFIX="$RWI_DIR/pfx" WINEDEBUG=-all timeout 180 "$RWI_WINE" abi.exe 2>/dev/null); RWI_RC=$?
+        [ "$RWI_RC" = "42" ] || RWI_WHY="$RWI_WHY abi:status-$RWI_RC"
+        echo "$RWI_OUT" | grep -q '^routed-ok' || RWI_WHY="$RWI_WHY abi:no-stdout"
+        [ "$(od -An -c "$RWI_DIR/run/kr_win_iat_abi.tmp" 2>/dev/null | tr -d ' \n')" = 'routed\n' ] || RWI_WHY="$RWI_WHY abi:file-wrong"
+        (cd "$RWI_DIR/run" && WINEPREFIX="$RWI_DIR/pfx" WINEDEBUG=-all timeout 120 "$RWI_WINE" us.exe > /dev/null 2>&1); RWI_RC=$?
+        [ "$RWI_RC" = "6" ] || RWI_WHY="$RWI_WHY user_send:status-$RWI_RC"
+        (cd "$RWI_DIR/run" && WINEPREFIX="$RWI_DIR/pfx" WINEDEBUG=-all timeout 120 "$RWI_WINE" osp.exe > /dev/null 2>&1); RWI_RC=$?
+        [ "$RWI_RC" = "0" ] || RWI_WHY="$RWI_WHY os_prune:status-$RWI_RC"
+    fi
+    if [ -z "$RWI_WHY" ]; then
+        PASS=$((PASS + 1)); echo "  win_import_runs_under_wine: PASS"
+    else
+        FAIL=$((FAIL + 1)); echo "  win_import_runs_under_wine: FAIL ($RWI_WHY )"
+    fi
+fi
+# Wine's server keeps writing into the prefix after the last process exits;
+# wait for it (wineserver -w) so the scratch dir can be removed.
+if [ -n "$RWI_WINE" ] && [ -x "$(dirname "$RWI_WINE")/wineserver" ]; then
+    WINEPREFIX="$RWI_DIR/pfx" "$(dirname "$RWI_WINE")/wineserver" -w > /dev/null 2>&1
+fi
+rm -rf "$RWI_DIR"
 
 echo ""
 echo "--- extern fn (libc linking) ---"

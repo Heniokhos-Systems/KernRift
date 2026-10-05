@@ -3991,7 +3991,10 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
         uint32 ck = ast_kind(wchild)
         if ck == 2 {
             uint32 fn_name = ast_data1(wchild)
-            if dce_is_live(fn_name) != 0 {
+            // A routed Windows import (decl_is_routed_win_import, codegen.kr)
+            // is bound by the PE loader through its IAT slot: no stub body, no
+            // registered symbol. Same skip in every compile_fat slice loop.
+            if dce_is_live(fn_name) != 0 && decl_is_routed_win_import(wchild) == 0 {
                 if emit_ir_mode != 0 && arch == 0 && emit_mode != 3 && emit_mode != 7 {
                     // IR codegen (skip for --emit=obj and --emit=lkm; both
                     // need legacy codegen for extern relocations)
@@ -6075,7 +6078,7 @@ fn compile_fat(uint64 input_path, uint64 output_path) {
             // opts a release build back onto the direct-walking codegen if a
             // downstream issue is ever traced to the IR path; the old codegen
             // is kept intact for that reason.
-            if dce_is_live(fn_name) != 0 {
+            if dce_is_live(fn_name) != 0 && decl_is_routed_win_import(wchild) == 0 {
                 if emit_ir_mode != 0 {
                     fn_register(fn_name, out_len)
                     ir_init()
@@ -6192,7 +6195,7 @@ fn compile_fat(uint64 input_path, uint64 output_path) {
         uint32 ck2 = ast_kind(wchild2)
         if ck2 == 2 {
             uint32 fn_name2 = ast_data1(wchild2)
-            if dce_is_live(fn_name2) != 0 {
+            if dce_is_live(fn_name2) != 0 && decl_is_routed_win_import(wchild2) == 0 {
                 // ARM64 slices go through IR by default (R1 is fixed — the
                 // IR ARM64 backend handles compile_fat itself correctly). The
                 // legacy path is retained behind `--legacy` as an explicit
@@ -6303,7 +6306,7 @@ fn compile_fat(uint64 input_path, uint64 output_path) {
         uint32 ck3 = ast_kind(wchild3)
         if ck3 == 2 {
             uint32 fn_name3 = ast_data1(wchild3)
-            if dce_is_live(fn_name3) != 0 {
+            if dce_is_live(fn_name3) != 0 && decl_is_routed_win_import(wchild3) == 0 {
                 if emit_ir_mode != 0 {
                     fn_register(fn_name3, out_len)
                     ir_init()
@@ -6420,7 +6423,7 @@ fn compile_fat(uint64 input_path, uint64 output_path) {
         uint32 ck4 = ast_kind(wchild4)
         if ck4 == 2 {
             uint32 fn_name4 = ast_data1(wchild4)
-            if dce_is_live(fn_name4) != 0 {
+            if dce_is_live(fn_name4) != 0 && decl_is_routed_win_import(wchild4) == 0 {
                 if emit_ir_mode != 0 {
                     fn_register(fn_name4, out_len)
                     ir_init()
@@ -6560,7 +6563,7 @@ fn compile_fat(uint64 input_path, uint64 output_path) {
         uint32 ck5 = ast_kind(wchild5)
         if ck5 == 2 {
             uint32 fn_name5 = ast_data1(wchild5)
-            if dce_is_live(fn_name5) != 0 {
+            if dce_is_live(fn_name5) != 0 && decl_is_routed_win_import(wchild5) == 0 {
                 if emit_ir_mode != 0 {
                     fn_register(fn_name5, out_len)
                     ir_init()
@@ -6668,7 +6671,7 @@ fn compile_fat(uint64 input_path, uint64 output_path) {
         uint32 ck6 = ast_kind(wchild6)
         if ck6 == 2 {
             uint32 fn_name6 = ast_data1(wchild6)
-            if dce_is_live(fn_name6) != 0 {
+            if dce_is_live(fn_name6) != 0 && decl_is_routed_win_import(wchild6) == 0 {
                 if emit_ir_mode != 0 {
                     fn_register(fn_name6, out_len)
                     ir_init()
@@ -6812,7 +6815,7 @@ fn compile_fat(uint64 input_path, uint64 output_path) {
         uint32 ck8 = ast_kind(wchild8)
         if ck8 == 2 {
             uint32 fn_name8 = ast_data1(wchild8)
-            if dce_is_live(fn_name8) != 0 {
+            if dce_is_live(fn_name8) != 0 && decl_is_routed_win_import(wchild8) == 0 {
                 if emit_ir_mode != 0 {
                     fn_register(fn_name8, out_len)
                     ir_init()
@@ -6939,7 +6942,7 @@ fn compile_fat(uint64 input_path, uint64 output_path) {
         uint32 ck7 = ast_kind(wchild7)
         if ck7 == 2 {
             uint32 fn_name7 = ast_data1(wchild7)
-            if dce_is_live(fn_name7) != 0 {
+            if dce_is_live(fn_name7) != 0 && decl_is_routed_win_import(wchild7) == 0 {
                 if emit_ir_mode != 0 {
                     fn_register(fn_name7, out_len)
                     ir_init()

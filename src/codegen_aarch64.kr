@@ -4938,9 +4938,18 @@ fn gen_expr_a64(uint64 node) {
             }
         }
 
-        // BL rel26 (placeholder, fixup needed)
+        // BL rel26 (placeholder, fixup needed) -- or, for a known Windows
+        // import (is_routed_win_import), an indirect call through its IAT
+        // slot. Windows ARM64 is AAPCS64 (x0-x7 + stack), the same placement
+        // done above, so only the call form changes; the loader binds the
+        // slot, so there is no fixup and no extern call record.
+        uint64 lg_iat_slot_a = is_routed_win_import(callee_tok)
         uint64 fixup_off = out_len
-        emit_a64_bl(0)
+        if lg_iat_slot_a != PE_IMPORT_NO_SLOT {
+            emit_a64_win_call_iat(lg_iat_slot_a)
+        } else {
+            emit_a64_bl(0)
+        }
 
         // Clean up overflow args from stack
         if stack_args > 0 {
@@ -5007,6 +5016,7 @@ fn gen_expr_a64(uint64 node) {
         // If the callee is an extern fn, record a call site for a linker
         // relocation and skip the internal fixup (the BL's imm26 stays zero
         // until the linker patches it with R_AARCH64_CALL26).
+        if lg_iat_slot_a != PE_IMPORT_NO_SLOT { return }
         uint64 wct_ext_a = callee_tok
         uint64 ext_idx_a = extern_fn_lookup(wct_ext_a)
         if ext_idx_a != 0xFFFFFFFF {

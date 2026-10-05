@@ -1,0 +1,11 @@
+// A USER-DEFINED `send` -- the same name as ws2_32's send (IAT slot 24).
+// On a Windows build it must stay an ordinary direct call to this body,
+// never an IAT call: is_routed_win_import requires an `extern fn`.
+// The body is two statements (an assignment) so the inliner cannot fold the
+// call away -- the row asserts the CALL FORM, so a call has to survive.
+fn send(uint64 a, uint64 b, uint64 c) -> uint64 {
+    uint64 s = a + b
+    s = s + c
+    return s
+}
+fn main() -> uint32 { return send(1, 2, 3) }

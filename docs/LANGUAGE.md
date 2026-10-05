@@ -3021,6 +3021,23 @@ The compiler emits relocations in the native format of each target:
 | Windows x64   | COFF    | `IMAGE_REL_AMD64_REL32`   |
 | Windows ARM64 | COFF    | `IMAGE_REL_ARM64_BRANCH26`|
 
+**Windows executables need no linker for the built-in import table.** On a
+Windows build that produces an executable (`--target=windows --emit=pe`, and
+the two Windows slices of a fat build), an `extern fn` whose name is one of the
+imports every KernRift PE carries — the kernel32 set (`ExitProcess`,
+`GetStdHandle`, `WriteFile`, `CreateFileA`, `ReadFile`, `CloseHandle`,
+`VirtualAlloc`, `VirtualFree`, ...), the ws2_32 set (`WSAStartup`, `socket`,
+`connect`, `send`, `recv`, `bind`, `listen`, `accept`, `select`, ...) and
+`BCryptGenRandom` — is bound by the Windows loader: each call is an indirect
+call through that import's IAT slot, using the Windows calling convention
+(x86_64: Microsoft x64 — `rcx`/`rdx`/`r8`/`r9`, the rest on the stack above a
+32-byte shadow area; ARM64: AAPCS64, `x0`–`x7` then the stack). The result is
+the raw `rax`/`x0`: a Win32 `BOOL` or `DWORD` return only defines the low 32
+bits, so mask it (`ok & 0xFFFFFFFF`) before testing it. The name must be
+declared `extern fn` — a function you define yourself with the same name
+(`fn send(...) { ... }`) is an ordinary call to your body — and any other
+unresolved `extern fn` is still refused when building an executable.
+
 `extern fn` names shadow built-ins: if you declare `extern fn write(...)`,
 calls to `write` resolve to the libc symbol instead of the `write` syscall
 built-in. This lets you opt into the platform runtime on demand.

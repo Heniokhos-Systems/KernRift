@@ -1673,17 +1673,27 @@ fn ir_emit_arm64_insn(uint64 ii) {
         // Overflow args (>8 args) were already written to [SP + oi*8]
         // by IR_ARG — the caller's bottom-of-frame overflow reserve
         // lines them up with the callee's arg-9 slot.
-        uint64 call_patch = out_len
-        emit_a64(0x94000000)    // BL #0 (placeholder)
-        // Record fixup: imm holds the callee token
-        fixup_table_ensure()
-        uint64 fentry = fixup_table + fixup_count * 8
-        uint32 fo = call_patch
-        unsafe { *(fentry as uint32) = fo }
-        uint64 fe4 = fentry + 4
-        uint32 ct = imm
-        unsafe { *(fe4 as uint32) = ct }
-        fixup_count = fixup_count + 1
+        //
+        // A known Windows import (is_routed_win_import, imm = callee token):
+        // Windows ARM64 is AAPCS64 -- x0-x7, then [SP + oi*8] -- which is
+        // exactly the placement IR_ARG already did, so routing only swaps
+        // the BL + name fixup for an indirect call through the IAT slot.
+        uint64 a64_iat_slot = is_routed_win_import(imm)
+        if a64_iat_slot != PE_IMPORT_NO_SLOT {
+            emit_a64_win_call_iat(a64_iat_slot)
+        } else {
+            uint64 call_patch = out_len
+            emit_a64(0x94000000)    // BL #0 (placeholder)
+            // Record fixup: imm holds the callee token
+            fixup_table_ensure()
+            uint64 fentry = fixup_table + fixup_count * 8
+            uint32 fo = call_patch
+            unsafe { *(fentry as uint32) = fo }
+            uint64 fe4 = fentry + 4
+            uint32 ct = imm
+            unsafe { *(fe4 as uint32) = ct }
+            fixup_count = fixup_count + 1
+        }
         ir_overflow_arg_count = 0
         // Result in x0. A statement-level call still gets a dest vreg from
         // the lowering; capturing x0 into it wrote a register nobody reads.

@@ -1,0 +1,33 @@
+// Win64 ABI proof for routed import calls (is_routed_win_import): every call
+// below goes through the PE IAT with the Microsoft x64 convention, and each
+// result is OBSERVABLE, so a wrong register or stack slot shows up as a
+// status, not as a quietly different binary.
+//
+//   CreateFileA's 5th argument (dwCreationDisposition = CREATE_ALWAYS) is the
+//   first stack argument, at [rsp+32] above the shadow space; the 6th and 7th
+//   follow at [rsp+40]/[rsp+48]. Any shift of the overflow slots puts 0x80 or
+//   0 where the disposition belongs and the call fails -> status 10.
+//   WriteFile's 4th argument (lpNumberOfBytesWritten, r9) must receive 7 ->
+//   status 12 otherwise; its 5th (lpOverlapped) must be NULL.
+//   GetStdHandle(-11) + WriteFile prints "routed-ok" on stdout.
+// Success is status 42 plus the file kr_win_iat_abi.tmp holding "routed\n".
+extern fn CreateFileA(uint64 name, uint64 access, uint64 share, uint64 sec, uint64 disp, uint64 flags, uint64 tmpl) -> uint64
+extern fn WriteFile(uint64 h, uint64 buf, uint64 n, uint64 written, uint64 ov) -> uint64
+extern fn CloseHandle(uint64 h) -> uint64
+extern fn GetStdHandle(uint64 which) -> uint64
+
+fn main() -> uint32 {
+    u8[8] w
+    uint64 h = CreateFileA("kr_win_iat_abi.tmp", 0x40000000, 0, 0, 2, 0x80, 0)
+    if h == 0xFFFFFFFFFFFFFFFF { return 10 }
+    uint64 ok = WriteFile(h, "routed\n", 7, w, 0)
+    if (ok & 0xFFFFFFFF) == 0 { return 11 }
+    uint32 got = 0
+    unsafe { *(w as uint32) -> got }
+    if got != 7 { return 12 }
+    CloseHandle(h)
+    uint64 so = GetStdHandle(0xFFFFFFF5)
+    uint64 ok2 = WriteFile(so, "routed-ok\n", 10, w, 0)
+    if (ok2 & 0xFFFFFFFF) == 0 { return 13 }
+    return 42
+}
