@@ -937,8 +937,20 @@ fn win_syscall_raw_refused(uint64 tok) {
     // discarded, so its syscall_raw never ships (fat_slice_ships, main.kr).
     if fat_slice_ships() == 0 { return }
     diag_loc_head(tok, 0)
-    uint64 wsr = "syscall_raw is not available on Windows: the NT syscall ABI is unstable; use the std/sys.kr Windows path\n"
-    write(2, wsr, str_len(wsr))
+    // The slice is named from target_arch in EVERY mode (a single-target
+    // --target=windows build is the win-x64 or win-arm64 slice too), so the
+    // reader of a fat build's error knows which slice refused.
+    uint64 wsr1 = "syscall_raw is reachable in the win-x64 slice: Windows has no\n"
+    if target_arch == 1 { wsr1 = "syscall_raw is reachable in the win-arm64 slice: Windows has no\n" }
+    write(2, wsr1, str_len(wsr1))
+    uint64 wsr2 = "stable syscall ABI. Use std (std/sys.kr, std/net.kr, ...) or guard it with\n`if get_target_os() != 2 { ... }` (a literal comparison). Raw numbers also differ\nper CPU on Linux: select them with get_arch_id().\n"
+    write(2, wsr2, str_len(wsr2))
+    // Only a fat build HAS slices to omit; a single-target build would be
+    // told about a flag that does not apply to it.
+    if in_compile_fat != 0 {
+        uint64 wsr3 = "(--targets= can omit the Windows slices.)\n"
+        write(2, wsr3, str_len(wsr3))
+    }
     diag_span_of(tok)
     exit(1)
 }
@@ -3630,7 +3642,10 @@ fn decl_is_routed_win_import(uint64 fn_node) -> uint64 {
         uint32 rw_pn = ast_next(wrp)
         wrp = rw_pn
     }
-    if rw_float != 0 {
+    // Like every per-slice refusal, it fires only for a slice that ships
+    // (fat_slice_ships, main.kr): `--targets=linux-x64` must not be refused
+    // by the discarded win-x64 slice. The decl is routed either way.
+    if rw_float != 0 && fat_slice_ships() != 0 {
         diag_loc_head(wrn, 0)
         write(2, "routed Windows import '", 23)
         write(2, cg_source + tok_text_start(wrn), tok_text_len(wrn))

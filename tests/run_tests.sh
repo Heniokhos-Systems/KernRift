@@ -9901,15 +9901,29 @@ rm -rf "$RWI_DIR"
 # get_target_os() comparison is never lowered (const_os_cond) and builds.
 WSR_DIR=/tmp/krc_wsr_$$
 mkdir -p "$WSR_DIR"
-WSR_MSG='syscall_raw is not available on Windows: the NT syscall ABI is unstable; use the std/sys.kr Windows path'
-# <row> <stderr> <file:line:col> <source fragment>: all four parts of the
-# located diagnostic, and no output file.
+# The message body after the slice name, verbatim (spec C6), and the line
+# that only a fat build prints.
+WSR_BODY='stable syscall ABI. Use std (std/sys.kr, std/net.kr, ...) or guard it with
+`if get_target_os() != 2 { ... }` (a literal comparison). Raw numbers also differ
+per CPU on Linux: select them with get_arch_id().'
+WSR_FATLINE='(--targets= can omit the Windows slices.)'
+# <row> <stderr> <file:line:col> <source fragment> <output> <slice> <fat 0|1>:
+# all parts of the located diagnostic -- the location, the slice that refused
+# (win-x64 / win-arm64), the whole message as one contiguous block, the
+# --targets= line present exactly when the build is fat -- and no output file.
 wsr_check_located() {
-    local row="$1" err="$2" loc="$3" src="$4" out="$5"
+    local row="$1" err="$2" loc="$3" src="$4" out="$5" slice="$6" fat="$7"
+    local want="$loc: error: syscall_raw is reachable in the $slice slice: Windows has no
+$WSR_BODY"
     if [ -s "$out" ]; then
         FAIL=$((FAIL + 1)); echo "  $row: FAIL (built an artifact; want a refusal)"
-    elif ! printf '%s\n' "$err" | grep -qF "$loc: error: $WSR_MSG"; then
-        FAIL=$((FAIL + 1)); echo "  $row: FAIL (no located '$loc: error: <syscall_raw on Windows>' line: $(printf '%s' "$err" | head -1))"
+    elif [[ "$err" != *"$want"* ]]; then
+        FAIL=$((FAIL + 1)); echo "  $row: FAIL (no located '$loc: error: <syscall_raw reachable in the $slice slice>' message: $(printf '%s' "$err" | head -1))"
+    elif [ "$fat" = "1" ] && [[ "$err" != *"$want
+$WSR_FATLINE"* ]]; then
+        FAIL=$((FAIL + 1)); echo "  $row: FAIL (fat build: no '$WSR_FATLINE' line after the message)"
+    elif [ "$fat" = "0" ] && [[ "$err" == *"$WSR_FATLINE"* ]]; then
+        FAIL=$((FAIL + 1)); echo "  $row: FAIL (single-target build printed the fat-only '$WSR_FATLINE' line)"
     elif ! printf '%s\n' "$err" | grep -qF "| $src" || ! printf '%s\n' "$err" | grep -qE '\| +\^~{10}$'; then
         FAIL=$((FAIL + 1)); echo "  $row: FAIL (no source span + 11-column caret under syscall_raw)"
     else
@@ -9923,8 +9937,19 @@ for wsr in "win_syscall_raw_refused_x86_64 x86_64" "win_syscall_raw_refused_arm6
     set -- $wsr
     TOTAL=$((TOTAL + 1))
     rm -f "$WSR_DIR/o.exe"
+    WSR_SL=win-x64; [ "$2" = "arm64" ] && WSR_SL=win-arm64
     WSR_ERR=$($KRC $3 --arch="$2" --target=windows --emit=pe "$DIR/fixtures/win_syscall_raw.kr" -o "$WSR_DIR/o.exe" 2>&1 >/dev/null)
-    wsr_check_located "$1" "$WSR_ERR" "win_syscall_raw.kr:1:23" "fn main() -> uint32 { syscall_raw(" "$WSR_DIR/o.exe"
+    wsr_check_located "$1" "$WSR_ERR" "win_syscall_raw.kr:1:23" "fn main() -> uint32 { syscall_raw(" "$WSR_DIR/o.exe" "$WSR_SL" 0
+done
+# (1b) --emit=obj --target=windows takes the LEGACY backend (no IR), so it
+#      reaches the legacy mirrors of the refusal: refused, located, both
+#      arches -- an object file must not regain a bare SYSCALL / SVC #0.
+for wsr in "win_syscall_raw_refused_obj_x86_64 x86_64 win-x64" "win_syscall_raw_refused_obj_arm64 arm64 win-arm64"; do
+    set -- $wsr
+    TOTAL=$((TOTAL + 1))
+    rm -f "$WSR_DIR/o.o"
+    WSR_ERR=$($KRC --arch="$2" --target=windows --emit=obj "$DIR/fixtures/win_syscall_raw.kr" -o "$WSR_DIR/o.o" 2>&1 >/dev/null)
+    wsr_check_located "$1" "$WSR_ERR" "win_syscall_raw.kr:1:23" "fn main() -> uint32 { syscall_raw(" "$WSR_DIR/o.o" "$3" 0
 done
 # (2) Guarded (`if get_target_os() != 2 { syscall_raw(...) }`), IR backend:
 #     must BUILD, and the pruned arm must really be gone -- no SYSCALL byte
@@ -9962,8 +9987,9 @@ for wsr in "win_syscall_raw_guarded_legacy_refused_x86_64 x86_64" "win_syscall_r
     set -- $wsr
     TOTAL=$((TOTAL + 1))
     rm -f "$WSR_DIR/o.exe"
+    WSR_SL=win-x64; [ "$2" = "arm64" ] && WSR_SL=win-arm64
     WSR_ERR=$($KRC --legacy --arch="$2" --target=windows --emit=pe "$DIR/fixtures/win_syscall_raw_guarded.kr" -o "$WSR_DIR/o.exe" 2>&1 >/dev/null)
-    wsr_check_located "$1" "$WSR_ERR" "win_syscall_raw_guarded.kr:7:9" "        syscall_raw(" "$WSR_DIR/o.exe"
+    wsr_check_located "$1" "$WSR_ERR" "win_syscall_raw_guarded.kr:7:9" "        syscall_raw(" "$WSR_DIR/o.exe" "$WSR_SL" 0
 done
 # (4) No other target changes. The same unguarded fixture BUILDS for every
 #     hosted non-Windows (OS, arch), and the host-arch Linux build RUNS
@@ -10001,10 +10027,13 @@ fi
 #     whenever it ships -- win-x64 alone, win-arm64 alone, linux+win, and the
 #     default (all 8) -- located, like (1); a Linux-only selection builds,
 #     and its slice runs.
-for wsr in "win_syscall_raw_fat_win_x64_refused --targets=win-x64" \
-           "win_syscall_raw_fat_win_arm64_refused --targets=win-arm64" \
-           "win_syscall_raw_fat_linux_and_win_refused --targets=linux-x64,win-x64" \
-           "win_syscall_raw_fat_default_refused -"; do
+#     The slice named is the one that refused (the default build compiles
+#     win-x64 before win-arm64), and only these fat builds print the
+#     --targets= line.
+for wsr in "win_syscall_raw_fat_win_x64_refused --targets=win-x64 win-x64" \
+           "win_syscall_raw_fat_win_arm64_refused --targets=win-arm64 win-arm64" \
+           "win_syscall_raw_fat_linux_and_win_refused --targets=linux-x64,win-x64 win-x64" \
+           "win_syscall_raw_fat_default_refused - win-x64"; do
     set -- $wsr
     # The default case needs NO --arch (that is what selects the fat path),
     # so it calls build/krc2 directly: `make test`'s $KRC wrapper always
@@ -10014,7 +10043,7 @@ for wsr in "win_syscall_raw_fat_win_x64_refused --targets=win-x64" \
     TOTAL=$((TOTAL + 1))
     rm -f "$WSR_DIR/o.krbo"
     WSR_ERR=$($WSR_K $WSR_T "$DIR/fixtures/win_syscall_raw.kr" -o "$WSR_DIR/o.krbo" 2>&1 >/dev/null)
-    wsr_check_located "$1" "$WSR_ERR" "win_syscall_raw.kr:1:23" "fn main() -> uint32 { syscall_raw(" "$WSR_DIR/o.krbo"
+    wsr_check_located "$1" "$WSR_ERR" "win_syscall_raw.kr:1:23" "fn main() -> uint32 { syscall_raw(" "$WSR_DIR/o.krbo" "$3" 1
 done
 TOTAL=$((TOTAL + 1))
 if [ "$RUN_ARCH" = "arm64" ]; then WSR_HOST=linux-arm64; WSR_ID=2; else WSR_HOST=linux-x64; WSR_ID=1; fi
@@ -10060,6 +10089,27 @@ if [ ! -s "$WSR_DIR/o2.krbo" ] && printf '%s' "$WSR_ERR" | grep -qF "win_import_
     PASS=$((PASS + 1)); echo "  win_import_unguarded_fat_with_linux_refused: PASS"
 else
     FAIL=$((FAIL + 1)); echo "  win_import_unguarded_fat_with_linux_refused: FAIL ($(printf '%s' "$WSR_ERR" | head -1))"
+fi
+# (6b) ...and for decl_is_routed_win_import's float refusal (codegen.kr). A
+#      routed import with an f64 parameter, called only under
+#      `get_target_os() == 2`: --targets=linux-x64 BUILDS (the win slices
+#      that would refuse it are discarded), --targets=win-x64 refuses it,
+#      located at the declaration.
+TOTAL=$((TOTAL + 1))
+WSR_WHY=""
+rm -f "$WSR_DIR/fl.krbo"
+WSR_ERR=$($KRC --targets=linux-x64 "$DIR/fixtures/win_import_float_guarded.kr" -o "$WSR_DIR/fl.krbo" 2>&1 >/dev/null)
+[ -s "$WSR_DIR/fl.krbo" ] || WSR_WHY="$WSR_WHY linux-x64:refused($(printf '%s' "$WSR_ERR" | grep 'error:' | head -1))"
+rm -f "$WSR_DIR/fl.krbo"
+WSR_ERR=$($KRC --targets=win-x64 "$DIR/fixtures/win_import_float_guarded.kr" -o "$WSR_DIR/fl.krbo" 2>&1 >/dev/null)
+if [ -s "$WSR_DIR/fl.krbo" ]; then WSR_WHY="$WSR_WHY win-x64:built"
+elif ! printf '%s' "$WSR_ERR" | grep -qF "win_import_float_guarded.kr:6:11: error: routed Windows import 'WSAStartup' has a float parameter or return type"; then
+    WSR_WHY="$WSR_WHY win-x64:wrong-error($(printf '%s' "$WSR_ERR" | head -1))"
+fi
+if [ -z "$WSR_WHY" ]; then
+    PASS=$((PASS + 1)); echo "  win_import_float_fat_unshipped_slice_builds: PASS"
+else
+    FAIL=$((FAIL + 1)); echo "  win_import_float_fat_unshipped_slice_builds: FAIL ($WSR_WHY )"
 fi
 # (7) The --targets bit of every one of the 8 slices (fat_slice_ships). An
 #     undefined extern called only under `get_arch_id() <op> <that slice's

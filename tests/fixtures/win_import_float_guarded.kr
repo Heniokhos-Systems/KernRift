@@ -1,0 +1,11 @@
+// A routed Windows import (WSAStartup) wrongly declared with an f64
+// parameter, called ONLY under a literal get_target_os() == 2. Its float
+// refusal is per-slice: a fat build whose --targets ships no Windows slice
+// must build; one that ships a Windows slice must refuse it at line 6.
+// (Keep the extern on line 6: the row pins the location.)
+extern fn WSAStartup(f64 a, uint64 b) -> uint64
+fn main() -> uint32 {
+    u8[512] wd
+    if get_target_os() == 2 { WSAStartup(1.0, wd) }
+    return 0
+}
