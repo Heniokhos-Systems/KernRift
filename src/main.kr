@@ -9557,6 +9557,16 @@ fn main() {
     // "--target=none" leaves the user to guess which of the other flags on
     // the line to drop, and these combinations are reached by flags that are
     // individually correct.
+    //
+    // The same pair with --target=windows: an LKM is a LINUX kernel module
+    // (.ko with .modinfo and init_module/cleanup_module); Windows has no
+    // loader for it. Before this it was accepted, and the build went on to
+    // run Windows-only refusals (syscall_raw) against a kernel module.
+    if target_os == 2 && emit_mode == 7 {
+        uint64 lkmw_msg = "error: --emit=lkm conflicts with --target=windows: a loadable kernel module (.ko) is a Linux kernel module; Windows cannot load it\n"
+        write(2, lkmw_msg, str_len(lkmw_msg))
+        exit(1)
+    }
     if target_os == 4 {
         if emit_mode == 7 {
             uint64 lkm_msg = "error: --emit=lkm conflicts with --target=none: a loadable kernel module has no kernel to load into\n"

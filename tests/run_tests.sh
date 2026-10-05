@@ -9909,18 +9909,25 @@ WSR_BODY_IR='stable syscall ABI. Use std (std/sys.kr, std/net.kr, ...) or guard 
 `if get_target_os() != 2 { ... }` (a literal comparison). Raw numbers also differ
 per CPU on Linux: select them with get_arch_id().'
 WSR_BODY_LEGACY='stable syscall ABI. This backend does not prune OS guards, so a `get_target_os()`
-guard will not help here; build without --legacy (or as an executable instead of
---emit=obj), or use std (std/sys.kr, std/net.kr, ...). Raw numbers also differ
+guard will not help here; build without --legacy, or use std (std/sys.kr,
+std/net.kr, ...). Raw numbers also differ
+per CPU on Linux: select them with get_arch_id().'
+# --emit=obj always runs on legacy, so its one working escape is a different
+# emit, not dropping --legacy.
+WSR_BODY_OBJ='stable syscall ABI. This backend does not prune OS guards, so a `get_target_os()`
+guard will not help here; build an executable (--emit=pe) instead of --emit=obj,
+or use std (std/sys.kr, std/net.kr, ...). Raw numbers also differ
 per CPU on Linux: select them with get_arch_id().'
 WSR_FATLINE='(--targets= can omit the Windows slices.)'
 # <row> <stderr> <file:line:col> <source fragment> <output> <slice> <fat 0|1>
-# <ir|legacy>: all parts of the located diagnostic -- the location, the slice
+# <ir|legacy|obj>: all parts of the located diagnostic -- the location, the slice
 # that refused (win-x64 / win-arm64), the whole message for that backend as
 # one contiguous block, the --targets= line present exactly when the build is
 # fat -- and no output file.
 wsr_check_located() {
     local row="$1" err="$2" loc="$3" src="$4" out="$5" slice="$6" fat="$7" body="$WSR_BODY_IR"
     [ "$8" = "legacy" ] && body="$WSR_BODY_LEGACY"
+    [ "$8" = "obj" ] && body="$WSR_BODY_OBJ"
     local want="$loc: error: syscall_raw is reachable in the $slice slice: Windows has no
 $body"
     if [ -s "$out" ]; then
@@ -9958,15 +9965,19 @@ for wsr in "win_syscall_raw_refused_obj_x86_64 x86_64 win-x64" "win_syscall_raw_
     TOTAL=$((TOTAL + 1))
     rm -f "$WSR_DIR/o.o"
     WSR_ERR=$($KRC --arch="$2" --target=windows --emit=obj "$DIR/fixtures/win_syscall_raw.kr" -o "$WSR_DIR/o.o" 2>&1 >/dev/null)
-    wsr_check_located "$1" "$WSR_ERR" "win_syscall_raw.kr:1:23" "fn main() -> uint32 { syscall_raw(" "$WSR_DIR/o.o" "$3" 0 legacy
+    wsr_check_located "$1" "$WSR_ERR" "win_syscall_raw.kr:1:23" "fn main() -> uint32 { syscall_raw(" "$WSR_DIR/o.o" "$3" 0 obj
 done
 # (1c) The remedy matches the backend, both arches: the IR text advises the
 #      literal get_target_os() guard (it prunes one); --legacy and
 #      --emit=obj say they do not prune, and never advise the guard (a
-#      guarded call is refused there all the same -- see (3)).
+#      guarded call is refused there all the same -- see (3)). Each names
+#      only the escape that works for its command line: --legacy is told to
+#      drop --legacy (and never about --emit=obj); --emit=obj, which runs on
+#      legacy with or without the flag, is told to build an executable (and
+#      never about --legacy).
 for wsr in "win_syscall_raw_advice_ir --emit=pe guard" \
-           "win_syscall_raw_advice_legacy --legacy,--emit=pe noprune" \
-           "win_syscall_raw_advice_obj --emit=obj noprune"; do
+           "win_syscall_raw_advice_legacy --legacy,--emit=pe legacy" \
+           "win_syscall_raw_advice_obj --emit=obj obj"; do
     set -- $wsr
     TOTAL=$((TOTAL + 1))
     WSR_WHY=""
@@ -9980,6 +9991,13 @@ for wsr in "win_syscall_raw_advice_ir --emit=pe guard" \
         else
             [[ "$WSR_ERR" == *"This backend does not prune OS guards"* ]] || WSR_WHY="$WSR_WHY $wsr_a:no-no-prune-text"
             [[ "$WSR_ERR" != *"guard it with"* && "$WSR_ERR" != *'`if get_target_os() != 2 { ... }`'* ]] || WSR_WHY="$WSR_WHY $wsr_a:advises-the-guard"
+            if [ "$3" = "legacy" ]; then
+                [[ "$WSR_ERR" == *"build without --legacy"* ]] || WSR_WHY="$WSR_WHY $wsr_a:no-drop-legacy-advice"
+                [[ "$WSR_ERR" != *"--emit=obj"* ]] || WSR_WHY="$WSR_WHY $wsr_a:mentions-emit-obj"
+            else
+                [[ "$WSR_ERR" == *"build an executable (--emit=pe) instead of --emit=obj"* ]] || WSR_WHY="$WSR_WHY $wsr_a:no-executable-advice"
+                [[ "$WSR_ERR" != *"--legacy"* ]] || WSR_WHY="$WSR_WHY $wsr_a:mentions-legacy"
+            fi
         fi
     done
     if [ -z "$WSR_WHY" ]; then
@@ -9988,6 +10006,25 @@ for wsr in "win_syscall_raw_advice_ir --emit=pe guard" \
         FAIL=$((FAIL + 1)); echo "  $1: FAIL ($WSR_WHY )"
     fi
 done
+# (1d) --emit=lkm --target=windows is refused as a PAIR at option validation
+#      (main.kr): an LKM is a Linux kernel module, which Windows cannot load.
+#      It used to be accepted and emit a .ko. Control: the same module builds
+#      for --target=linux, so the refusal is the pair, not the source.
+TOTAL=$((TOTAL + 1))
+WSR_WHY=""
+rm -f "$WSR_DIR/m.ko"
+WSR_ERR=$($KRC --arch=x86_64 --target=windows --emit=lkm "$DIR/../examples/hello_lkm.kr" -o "$WSR_DIR/m.ko" 2>&1 >/dev/null)
+[ -s "$WSR_DIR/m.ko" ] && WSR_WHY="$WSR_WHY windows:built"
+printf '%s' "$WSR_ERR" | grep -qxF "error: --emit=lkm conflicts with --target=windows: a loadable kernel module (.ko) is a Linux kernel module; Windows cannot load it" \
+    || WSR_WHY="$WSR_WHY windows:wrong-error($(printf '%s' "$WSR_ERR" | head -1))"
+rm -f "$WSR_DIR/m.ko"
+$KRC --arch=x86_64 --target=linux --emit=lkm "$DIR/../examples/hello_lkm.kr" -o "$WSR_DIR/m.ko" > /dev/null 2>&1
+[ -s "$WSR_DIR/m.ko" ] || WSR_WHY="$WSR_WHY linux:control-refused"
+if [ -z "$WSR_WHY" ]; then
+    PASS=$((PASS + 1)); echo "  emit_lkm_target_windows_refused: PASS"
+else
+    FAIL=$((FAIL + 1)); echo "  emit_lkm_target_windows_refused: FAIL ($WSR_WHY )"
+fi
 # (2) Guarded (`if get_target_os() != 2 { syscall_raw(...) }`), IR backend:
 #     must BUILD, and the pruned arm must really be gone -- no SYSCALL byte
 #     pair 0F 05 / no SVC #0 word (0xD4000001) anywhere in .text. The x86
@@ -10066,21 +10103,33 @@ fi
 #     and its slice runs.
 #     The slice named is the one that refused (the default build compiles
 #     win-x64 before win-arm64), and only these fat builds print the
-#     --targets= line.
-for wsr in "win_syscall_raw_fat_win_x64_refused --targets=win-x64 win-x64" \
-           "win_syscall_raw_fat_win_arm64_refused --targets=win-arm64 win-arm64" \
-           "win_syscall_raw_fat_linux_and_win_refused --targets=linux-x64,win-x64 win-x64" \
-           "win_syscall_raw_fat_default_refused - win-x64"; do
+#     --targets= line. A --legacy fat build gets the legacy body PLUS the
+#     fat line ('+' separates the flags in the table).
+for wsr in "win_syscall_raw_fat_win_x64_refused --targets=win-x64 win-x64 ir" \
+           "win_syscall_raw_fat_win_arm64_refused --targets=win-arm64 win-arm64 ir" \
+           "win_syscall_raw_fat_linux_and_win_refused --targets=linux-x64,win-x64 win-x64 ir" \
+           "win_syscall_raw_fat_legacy_win_x64_refused --legacy+--targets=win-x64 win-x64 legacy" \
+           "win_syscall_raw_fat_legacy_win_arm64_refused --legacy+--targets=win-arm64 win-arm64 legacy" \
+           "win_syscall_raw_fat_default_refused - win-x64 ir"; do
     set -- $wsr
-    # The default case needs NO --arch (that is what selects the fat path),
-    # so it calls build/krc2 directly: `make test`'s $KRC wrapper always
-    # adds --arch=x86_64. --targets forces the fat path either way.
-    WSR_K="$KRC"; WSR_T="$2"
-    if [ "$WSR_T" = "-" ]; then WSR_T=""; WSR_K="$DIR/../build/krc2"; fi
+    # The default case is the ONE fat row that cannot go through $KRC: it
+    # needs NO --arch and NO --targets (that absence is the default-fat
+    # entrance), and `make test`'s $KRC is a wrapper that always injects
+    # --arch=x86_64, which no later flag can take back. So it runs the raw
+    # compiler -- the same build/krc2-then-krc3 fallback the other raw-binary
+    # rows use (TN_RAW_KRC, GOV_KRC) -- and a harness that swaps $KRC for a
+    # wrapper must swap this binary too, or set KRC_RAW to it.
+    WSR_K="$KRC"; WSR_T="${2//+/ }"
+    if [ "$WSR_T" = "-" ]; then
+        WSR_T=""
+        if [ -n "${KRC_RAW:-}" ]; then WSR_K="$KRC_RAW"
+        elif [ -f "$DIR/../build/krc2" ]; then WSR_K="$DIR/../build/krc2"
+        else WSR_K="$DIR/../build/krc3"; fi
+    fi
     TOTAL=$((TOTAL + 1))
     rm -f "$WSR_DIR/o.krbo"
     WSR_ERR=$($WSR_K $WSR_T "$DIR/fixtures/win_syscall_raw.kr" -o "$WSR_DIR/o.krbo" 2>&1 >/dev/null)
-    wsr_check_located "$1" "$WSR_ERR" "win_syscall_raw.kr:1:23" "fn main() -> uint32 { syscall_raw(" "$WSR_DIR/o.krbo" "$3" 1 ir
+    wsr_check_located "$1" "$WSR_ERR" "win_syscall_raw.kr:1:23" "fn main() -> uint32 { syscall_raw(" "$WSR_DIR/o.krbo" "$3" 1 "$4"
 done
 TOTAL=$((TOTAL + 1))
 if [ "$RUN_ARCH" = "arm64" ]; then WSR_HOST=linux-arm64; WSR_ID=2; else WSR_HOST=linux-x64; WSR_ID=1; fi
@@ -10130,19 +10179,23 @@ fi
 # (6b) ...and for decl_is_routed_win_import's float refusal (codegen.kr). A
 #      routed import with an f64 parameter, called only under
 #      `get_target_os() == 2`: --targets=linux-x64 BUILDS (the win slices
-#      that would refuse it are discarded), --targets=win-x64 refuses it,
-#      located at the declaration.
+#      that would refuse it are discarded), and --targets=win-x64 and
+#      --targets=win-arm64 each refuse it, located at the declaration (each
+#      Windows slice consults its OWN bit).
 TOTAL=$((TOTAL + 1))
 WSR_WHY=""
 rm -f "$WSR_DIR/fl.krbo"
 WSR_ERR=$($KRC --targets=linux-x64 "$DIR/fixtures/win_import_float_guarded.kr" -o "$WSR_DIR/fl.krbo" 2>&1 >/dev/null)
 [ -s "$WSR_DIR/fl.krbo" ] || WSR_WHY="$WSR_WHY linux-x64:refused($(printf '%s' "$WSR_ERR" | grep 'error:' | head -1))"
 rm -f "$WSR_DIR/fl.krbo"
-WSR_ERR=$($KRC --targets=win-x64 "$DIR/fixtures/win_import_float_guarded.kr" -o "$WSR_DIR/fl.krbo" 2>&1 >/dev/null)
-if [ -s "$WSR_DIR/fl.krbo" ]; then WSR_WHY="$WSR_WHY win-x64:built"
-elif ! printf '%s' "$WSR_ERR" | grep -qF "win_import_float_guarded.kr:6:11: error: routed Windows import 'WSAStartup' has a float parameter or return type"; then
-    WSR_WHY="$WSR_WHY win-x64:wrong-error($(printf '%s' "$WSR_ERR" | head -1))"
-fi
+for wsr_t in win-x64 win-arm64; do
+    rm -f "$WSR_DIR/fl.krbo"
+    WSR_ERR=$($KRC --targets="$wsr_t" "$DIR/fixtures/win_import_float_guarded.kr" -o "$WSR_DIR/fl.krbo" 2>&1 >/dev/null)
+    if [ -s "$WSR_DIR/fl.krbo" ]; then WSR_WHY="$WSR_WHY $wsr_t:built"
+    elif ! printf '%s' "$WSR_ERR" | grep -qF "win_import_float_guarded.kr:6:11: error: routed Windows import 'WSAStartup' has a float parameter or return type"; then
+        WSR_WHY="$WSR_WHY $wsr_t:wrong-error($(printf '%s' "$WSR_ERR" | head -1))"
+    fi
+done
 if [ -z "$WSR_WHY" ]; then
     PASS=$((PASS + 1)); echo "  win_import_float_fat_unshipped_slice_builds: PASS"
 else
