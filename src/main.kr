@@ -5821,6 +5821,10 @@ fn restore_src_and_tokens(uint64 source, uint64 size, uint64 src_snap, uint64 to
 //   0 linux-x64, 1 linux-arm64, 2 win-x64, 3 win-arm64,
 //   4 macos-x64, 5 macos-arm64, 6 android-arm64, 7 android-x64.
 static uint64 target_mask = 0
+// 1 once any --targets= was given, even one whose names were all unknown
+// (target_mask then stays 0). Read by the --emit=lkm refusal, which is
+// about the flag on the command line, not about the mask it produced.
+static uint64 targets_arg_given = 0
 
 // Compare a fixed-length string `s` of length `len` against a nul-terminated
 // literal `lit`. Return 1 iff they match exactly (including length).
@@ -9083,6 +9087,7 @@ fn main() {
                 write(2, "error: -c takes no value\n", 25)
                 exit(1)
             } else if str_starts_with(arg, "--targets=", 10) != 0 {
+                targets_arg_given = 1
                 parse_targets_arg(arg + 10)
             } else if str_starts_with(arg, "--target=", 9) != 0 {
                 uint64 tgt_str = arg + 9
@@ -9563,6 +9568,14 @@ fn main() {
     // -- Windows has no loader for it, and a macOS kernel extension is not a
     // .ko. Both were accepted and emitted a .ko. --target=android stays
     // ALLOWED: Android runs a Linux kernel and loads .ko modules.
+    // An LKM is also ONE module for ONE kernel: --targets= (a fat binary of
+    // hosted slices) cannot carry one. Before this, the fat path compiled the
+    // module as 8 hosted programs and died on "no 'main' function found".
+    if emit_mode == 7 && targets_arg_given != 0 {
+        uint64 lkmf_msg = "error: --emit=lkm conflicts with --targets=: a loadable kernel module (.ko) is a single-target Linux/Android kernel module, not a fat binary; drop --targets= and build it with --arch=x86_64 --target=linux (or android)\n"
+        write(2, lkmf_msg, str_len(lkmf_msg))
+        exit(1)
+    }
     if emit_mode == 7 && (target_os == 2 || target_os == 1) {
         uint64 lkmw1 = "error: --emit=lkm conflicts with --target="
         write(2, lkmw1, str_len(lkmw1))

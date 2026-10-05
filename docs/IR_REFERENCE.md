@@ -190,7 +190,7 @@ $ krc --emit=ir prog.kr     # prog.kr does `println(some_f64)`
 
 ## 3. The per-OS dispatch shape, and where a new case goes
 
-`target_os` values (parsed at `src/main.kr:9132`, derived from `--emit` at
+`target_os` values (parsed at `src/main.kr:9137`, derived from `--emit` at
 `9255`–`9257`, reset per slice by `compile_fat` at `5939` and `6942`):
 
 <!-- The previous version of this line read "assigned in 9011-5258, defaults at
@@ -253,7 +253,7 @@ matters and it has not changed.
   guard cannot see it, because no trap instruction is emitted. Three such
   sites shipped in this compiler; see §9.
 - **A new arch × OS pair is validated by an allow-list**, not a blacklist:
-  `arch_os_pair_supported()` (`src/main.kr:7566`) is per-row
+  `arch_os_pair_supported()` (`src/main.kr:7570`) is per-row
   `if os == n { return 1 }` with a `return 0` fall-through, checked on the
   resolved pair before every compile entry. Adding an arch without adding its
   row is a hard error at the first build. Before it existed,
@@ -655,14 +655,14 @@ See also the
 ### `IR_CALL` (50) carries a token index, resolved by text
 
 `imm` on an `IR_CALL` is the index of a token in the *source text*. At
-fixup time, `fn_lookup()` (`src/codegen.kr:3449`) walks the function table
-comparing with `tok_text_eq()` (`src/codegen.kr:1428`), which compares byte
+fixup time, `fn_lookup()` (`src/codegen.kr:3458`) walks the function table
+comparing with `tok_text_eq()` (`src/codegen.kr:1437`), which compares byte
 by byte through `cg_source`.
 
 **Consequence: a compiler-synthesised call to a name that has no token in the
 program's source is impossible.** There is no "make me a symbol" path. Any
 lowering that wants to call something must find a real token for it. This is
-why `builtin_override_tok_of()` (`src/codegen.kr:3527`) exists and returns
+why `builtin_override_tok_of()` (`src/codegen.kr:3536`) exists and returns
 the *definition's* token: the `--target=none` print rerouting needs a token
 to put in an `IR_CALL`, and the only one available is the one on the
 `@builtin_override fn write` declaration. Designs that assume otherwise have
@@ -841,14 +841,14 @@ alias analysis and a load cannot be assumed to return the same value twice.
   diagnostic that lands on line 6. Print the *whole* output before concluding
   the compiler did not diagnose something.)
 - **AST-level DCE seeds only `main` and `@export`** (`dce_scan`,
-  `src/codegen.kr:14606`). `_start` is not a seed, so freestanding riscv32 and
+  `src/codegen.kr:14615`). `_start` is not a seed, so freestanding riscv32 and
   xtensa entry points had to be added explicitly (`src/main.kr:2645`–`2374`).
 - **A provider reached only through override resolution gets pruned.** Under
   `--target=none`, `println` reroutes to the `@builtin_override fn write`
   provider, and an f-string's buffer reroutes to the `alloc` provider — but
   neither reroute is a `Call` node in the AST, so the provider is dead to
   `dce_scan` and is pruned. Both needed explicit seeds
-  (`src/codegen.kr:14404`–`12035`). The seeds are deliberately *narrow* —
+  (`src/codegen.kr:14413`–`12035`). The seeds are deliberately *narrow* —
   gated on `target_os == 4`, on the callee really being one of the four print
   builtins, and on that name not itself being overridden — so that the test
   proving the seed is load-bearing cannot pass vacuously.
@@ -862,7 +862,7 @@ The driver is `ir_optimize()` (`src/ir.kr:14034`). **There is no
 document. It runs once per function, after lowering and before liveness.
 
 `--O0` sets `ir_opt_level = 0` (`src/ir.kr:12789`, written only at
-`src/main.kr:9291`) and each backend skips the whole call
+`src/main.kr:9296`) and each backend skips the whole call
 (`src/ir.kr:14963`, `src/ir_aarch64.kr:3380`, `src/ir_riscv.kr:2414`,
 `src/ir_xtensa.kr:2816`). Note the spelling: **`--O0`**, two dashes. There is
 no `-O0`, `-O1`, `--O2` — no other write to `ir_opt_level` exists.
@@ -1528,7 +1528,7 @@ opcodes that were never emitted.
 | cmp-with-immediate fusion | arch 0 **and** 1 (`src/ir.kr:13064`, arm64 capped at imm12 4095) | arch 0 only (`ir.mlr:11590`) |
 | pow2 `MUL` → `SHL_IMM` | ungated, with a shamt guard for arch 2/3 | present, gated to arch 0/1 — *not* absent, contrary to an older project note |
 | `--emit=lkm` | yes; the IR gate is `emit_mode != 3 && emit_mode != 7` | no; the gate is `emit_mode != 3` alone |
-| `arch_os_pair_supported()` | yes (`src/main.kr:7566`) | **absent** — no arch × OS allow-list |
+| `arch_os_pair_supported()` | yes (`src/main.kr:7570`) | **absent** — no arch × OS allow-list |
 | `--target=amdgpu-native` | no | yes |
 | var map | FNV-1a open-addressed 4096-slot hash (`src/ir.kr:993`) | linear scan (`ir.mlr:1013`) |
 | per-BB instruction lists for colouring | flat lists via `ir_build_bb_lists` (`src/ir.kr:13782`) | a 65536-entry walk stack |

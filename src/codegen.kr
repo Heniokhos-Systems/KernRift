@@ -936,10 +936,16 @@ fn bare_metal_builtin_refused(uint64 name, uint64 fix) {
 // no_prune: 1 from the legacy dispatches (--legacy, and --emit=obj, which
 // runs on legacy), 0 from ir.kr. A backend that does not prune OS guards
 // must not advise one -- the guarded call would be refused all the same --
-// so it gets its own remedy sentence, and that sentence names the ONE
-// escape that works for the command line: --emit=obj (cg_emit_mode 3)
-// always runs on legacy, so dropping --legacy would not help it; anything
-// else here is legacy only because of --legacy. Everything else is shared.
+// so it gets its own remedy sentence, and that sentence names the escape
+// that works for the command line. Three cases reach here (emit_ir_mode is
+// 0 exactly when --legacy was passed; main.kr sets it):
+//   --emit=obj, no --legacy  -> obj always runs on legacy, so the fix is an
+//                               executable: "--emit=pe instead of --emit=obj"
+//   --emit=obj AND --legacy  -> an executable is STILL legacy while --legacy
+//                               stays, so both must go: "--emit=pe without
+//                               --legacy"
+//   --legacy, any other emit -> "build without --legacy"
+// Everything else is shared.
 fn win_syscall_raw_refused(uint64 tok, uint64 no_prune) {
     // A compile_fat PE slice that --targets did not select is generated and
     // discarded, so its syscall_raw never ships (fat_slice_ships, main.kr).
@@ -956,6 +962,9 @@ fn win_syscall_raw_refused(uint64 tok, uint64 no_prune) {
         wsr2 = "stable syscall ABI. This backend does not prune OS guards, so a `get_target_os()`\nguard will not help here; build without --legacy, or use std (std/sys.kr,\nstd/net.kr, ...). Raw numbers also differ\nper CPU on Linux: select them with get_arch_id().\n"
         if cg_emit_mode == 3 {
             wsr2 = "stable syscall ABI. This backend does not prune OS guards, so a `get_target_os()`\nguard will not help here; build an executable (--emit=pe) instead of --emit=obj,\nor use std (std/sys.kr, std/net.kr, ...). Raw numbers also differ\nper CPU on Linux: select them with get_arch_id().\n"
+            if emit_ir_mode == 0 {
+                wsr2 = "stable syscall ABI. This backend does not prune OS guards, so a `get_target_os()`\nguard will not help here; build an executable (--emit=pe) without --legacy,\nor use std (std/sys.kr, std/net.kr, ...). Raw numbers also differ\nper CPU on Linux: select them with get_arch_id().\n"
+            }
         }
     }
     write(2, wsr2, str_len(wsr2))

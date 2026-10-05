@@ -9974,10 +9974,13 @@ done
 #      only the escape that works for its command line: --legacy is told to
 #      drop --legacy (and never about --emit=obj); --emit=obj, which runs on
 #      legacy with or without the flag, is told to build an executable (and
-#      never about --legacy).
+#      never about --legacy). --legacy --emit=obj needs BOTH changes (an
+#      executable is still legacy while --legacy stays), so it is told
+#      exactly that, and neither single-change sentence.
 for wsr in "win_syscall_raw_advice_ir --emit=pe guard" \
            "win_syscall_raw_advice_legacy --legacy,--emit=pe legacy" \
-           "win_syscall_raw_advice_obj --emit=obj obj"; do
+           "win_syscall_raw_advice_obj --emit=obj obj" \
+           "win_syscall_raw_advice_legacy_obj --legacy,--emit=obj legacyobj"; do
     set -- $wsr
     TOTAL=$((TOTAL + 1))
     WSR_WHY=""
@@ -9994,6 +9997,10 @@ for wsr in "win_syscall_raw_advice_ir --emit=pe guard" \
             if [ "$3" = "legacy" ]; then
                 [[ "$WSR_ERR" == *"build without --legacy"* ]] || WSR_WHY="$WSR_WHY $wsr_a:no-drop-legacy-advice"
                 [[ "$WSR_ERR" != *"--emit=obj"* ]] || WSR_WHY="$WSR_WHY $wsr_a:mentions-emit-obj"
+            elif [ "$3" = "legacyobj" ]; then
+                [[ "$WSR_ERR" == *"build an executable (--emit=pe) without --legacy,"* ]] || WSR_WHY="$WSR_WHY $wsr_a:no-both-changes-advice"
+                [[ "$WSR_ERR" != *"instead of --emit=obj"* ]] || WSR_WHY="$WSR_WHY $wsr_a:obj-only-advice"
+                [[ "$WSR_ERR" != *"build without --legacy"* ]] || WSR_WHY="$WSR_WHY $wsr_a:legacy-only-advice"
             else
                 [[ "$WSR_ERR" == *"build an executable (--emit=pe) instead of --emit=obj"* ]] || WSR_WHY="$WSR_WHY $wsr_a:no-executable-advice"
                 [[ "$WSR_ERR" != *"--legacy"* ]] || WSR_WHY="$WSR_WHY $wsr_a:mentions-legacy"
@@ -10028,6 +10035,25 @@ for wsr_o in windows macos; do
         FAIL=$((FAIL + 1)); echo "  emit_lkm_target_${wsr_o}_refused: FAIL ($WSR_WHY )"
     fi
 done
+# (1d2) --emit=lkm with --targets= (a fat binary) is refused at the same
+#      point: an LKM is one module for one kernel. It used to compile the
+#      module as 8 hosted programs and die on "no 'main' function found".
+#      Refused for a real slice list and for an all-unknown one alike -- the
+#      refusal is about the flag.
+TOTAL=$((TOTAL + 1))
+WSR_WHY=""
+for wsr_t in linux-x64 android-x64 all bogus; do
+    rm -f "$WSR_DIR/m.ko"
+    WSR_ERR=$($KRC --emit=lkm --targets="$wsr_t" "$DIR/../examples/hello_lkm.kr" -o "$WSR_DIR/m.ko" 2>&1 >/dev/null)
+    [ -s "$WSR_DIR/m.ko" ] && WSR_WHY="$WSR_WHY $wsr_t:built"
+    printf '%s' "$WSR_ERR" | grep -qxF "error: --emit=lkm conflicts with --targets=: a loadable kernel module (.ko) is a single-target Linux/Android kernel module, not a fat binary; drop --targets= and build it with --arch=x86_64 --target=linux (or android)" \
+        || WSR_WHY="$WSR_WHY $wsr_t:wrong-error($(printf '%s' "$WSR_ERR" | grep error | head -1))"
+done
+if [ -z "$WSR_WHY" ]; then
+    PASS=$((PASS + 1)); echo "  emit_lkm_targets_refused: PASS"
+else
+    FAIL=$((FAIL + 1)); echo "  emit_lkm_targets_refused: FAIL ($WSR_WHY )"
+fi
 # (1e) ...and --target=android stays ACCEPTED (Android runs a Linux kernel
 #      and loads .ko modules), so the refusal above cannot silently widen:
 #      a relocatable x86-64 ELF (.ko) comes out, with no error.
