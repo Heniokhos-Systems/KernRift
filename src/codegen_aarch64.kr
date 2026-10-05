@@ -4280,7 +4280,7 @@ fn gen_expr_a64(uint64 node) {
         if is_extern_call == 0 && tok_matches(wct, "syscall_raw", 11) != 0 {
             // Windows refusal (see the x86_64 legacy twin in codegen.kr: no
             // constant-OS prune here either, so a guarded call is refused).
-            if target_os == 2 { win_syscall_raw_refused(wct) }
+            if target_os == 2 { win_syscall_raw_refused(wct, 1) }
             // Evaluate all 7 args into temp slots
             uint32 sc_arg = ast_child(node)
             uint64 sc_warg = sc_arg

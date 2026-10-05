@@ -932,7 +932,12 @@ fn bare_metal_builtin_refused(uint64 name, uint64 fix) {
 // NOT_TAKEN arm of a literal get_target_os() comparison is never lowered
 // (const_os_cond), so `if get_target_os() != 2 { syscall_raw(...) }`
 // compiles; the legacy backends lower both arms and refuse it.
-fn win_syscall_raw_refused(uint64 tok) {
+//
+// no_prune: 1 from the legacy dispatches (--legacy, and --emit=obj, which
+// runs on legacy), 0 from ir.kr. A backend that does not prune OS guards
+// must not advise one -- the guarded call would be refused all the same --
+// so it gets its own remedy sentence; everything else is shared.
+fn win_syscall_raw_refused(uint64 tok, uint64 no_prune) {
     // A compile_fat PE slice that --targets did not select is generated and
     // discarded, so its syscall_raw never ships (fat_slice_ships, main.kr).
     if fat_slice_ships() == 0 { return }
@@ -944,6 +949,9 @@ fn win_syscall_raw_refused(uint64 tok) {
     if target_arch == 1 { wsr1 = "syscall_raw is reachable in the win-arm64 slice: Windows has no\n" }
     write(2, wsr1, str_len(wsr1))
     uint64 wsr2 = "stable syscall ABI. Use std (std/sys.kr, std/net.kr, ...) or guard it with\n`if get_target_os() != 2 { ... }` (a literal comparison). Raw numbers also differ\nper CPU on Linux: select them with get_arch_id().\n"
+    if no_prune != 0 {
+        wsr2 = "stable syscall ABI. This backend does not prune OS guards, so a `get_target_os()`\nguard will not help here; build without --legacy (or as an executable instead of\n--emit=obj), or use std (std/sys.kr, std/net.kr, ...). Raw numbers also differ\nper CPU on Linux: select them with get_arch_id().\n"
+    }
     write(2, wsr2, str_len(wsr2))
     // Only a fat build HAS slices to omit; a single-target build would be
     // told about a flag that does not apply to it.
@@ -9622,7 +9630,7 @@ fn gen_expr(uint64 node) {
             // --target=windows. Accepted: nothing in the tree passes
             // --legacy, and refusing is the safe direction. Pinned by the
             // win_syscall_raw_legacy_* rows.
-            if target_os == 2 { win_syscall_raw_refused(wct) }
+            if target_os == 2 { win_syscall_raw_refused(wct, 1) }
             rax_invalidate()
             // Evaluate all 7 args into temp slots
             uint32 sc_arg = ast_child(node)

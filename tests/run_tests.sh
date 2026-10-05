@@ -9902,19 +9902,27 @@ rm -rf "$RWI_DIR"
 WSR_DIR=/tmp/krc_wsr_$$
 mkdir -p "$WSR_DIR"
 # The message body after the slice name, verbatim (spec C6), and the line
-# that only a fat build prints.
-WSR_BODY='stable syscall ABI. Use std (std/sys.kr, std/net.kr, ...) or guard it with
+# that only a fat build prints. The IR backend prunes a literal
+# get_target_os() guard, so it advises one; the legacy backends (--legacy,
+# and --emit=obj, which runs on legacy) do not prune, so they must not.
+WSR_BODY_IR='stable syscall ABI. Use std (std/sys.kr, std/net.kr, ...) or guard it with
 `if get_target_os() != 2 { ... }` (a literal comparison). Raw numbers also differ
 per CPU on Linux: select them with get_arch_id().'
+WSR_BODY_LEGACY='stable syscall ABI. This backend does not prune OS guards, so a `get_target_os()`
+guard will not help here; build without --legacy (or as an executable instead of
+--emit=obj), or use std (std/sys.kr, std/net.kr, ...). Raw numbers also differ
+per CPU on Linux: select them with get_arch_id().'
 WSR_FATLINE='(--targets= can omit the Windows slices.)'
-# <row> <stderr> <file:line:col> <source fragment> <output> <slice> <fat 0|1>:
-# all parts of the located diagnostic -- the location, the slice that refused
-# (win-x64 / win-arm64), the whole message as one contiguous block, the
-# --targets= line present exactly when the build is fat -- and no output file.
+# <row> <stderr> <file:line:col> <source fragment> <output> <slice> <fat 0|1>
+# <ir|legacy>: all parts of the located diagnostic -- the location, the slice
+# that refused (win-x64 / win-arm64), the whole message for that backend as
+# one contiguous block, the --targets= line present exactly when the build is
+# fat -- and no output file.
 wsr_check_located() {
-    local row="$1" err="$2" loc="$3" src="$4" out="$5" slice="$6" fat="$7"
+    local row="$1" err="$2" loc="$3" src="$4" out="$5" slice="$6" fat="$7" body="$WSR_BODY_IR"
+    [ "$8" = "legacy" ] && body="$WSR_BODY_LEGACY"
     local want="$loc: error: syscall_raw is reachable in the $slice slice: Windows has no
-$WSR_BODY"
+$body"
     if [ -s "$out" ]; then
         FAIL=$((FAIL + 1)); echo "  $row: FAIL (built an artifact; want a refusal)"
     elif [[ "$err" != *"$want"* ]]; then
@@ -9939,7 +9947,8 @@ for wsr in "win_syscall_raw_refused_x86_64 x86_64" "win_syscall_raw_refused_arm6
     rm -f "$WSR_DIR/o.exe"
     WSR_SL=win-x64; [ "$2" = "arm64" ] && WSR_SL=win-arm64
     WSR_ERR=$($KRC $3 --arch="$2" --target=windows --emit=pe "$DIR/fixtures/win_syscall_raw.kr" -o "$WSR_DIR/o.exe" 2>&1 >/dev/null)
-    wsr_check_located "$1" "$WSR_ERR" "win_syscall_raw.kr:1:23" "fn main() -> uint32 { syscall_raw(" "$WSR_DIR/o.exe" "$WSR_SL" 0
+    WSR_BK=ir; [ "$3" = "--legacy" ] && WSR_BK=legacy
+    wsr_check_located "$1" "$WSR_ERR" "win_syscall_raw.kr:1:23" "fn main() -> uint32 { syscall_raw(" "$WSR_DIR/o.exe" "$WSR_SL" 0 "$WSR_BK"
 done
 # (1b) --emit=obj --target=windows takes the LEGACY backend (no IR), so it
 #      reaches the legacy mirrors of the refusal: refused, located, both
@@ -9949,7 +9958,35 @@ for wsr in "win_syscall_raw_refused_obj_x86_64 x86_64 win-x64" "win_syscall_raw_
     TOTAL=$((TOTAL + 1))
     rm -f "$WSR_DIR/o.o"
     WSR_ERR=$($KRC --arch="$2" --target=windows --emit=obj "$DIR/fixtures/win_syscall_raw.kr" -o "$WSR_DIR/o.o" 2>&1 >/dev/null)
-    wsr_check_located "$1" "$WSR_ERR" "win_syscall_raw.kr:1:23" "fn main() -> uint32 { syscall_raw(" "$WSR_DIR/o.o" "$3" 0
+    wsr_check_located "$1" "$WSR_ERR" "win_syscall_raw.kr:1:23" "fn main() -> uint32 { syscall_raw(" "$WSR_DIR/o.o" "$3" 0 legacy
+done
+# (1c) The remedy matches the backend, both arches: the IR text advises the
+#      literal get_target_os() guard (it prunes one); --legacy and
+#      --emit=obj say they do not prune, and never advise the guard (a
+#      guarded call is refused there all the same -- see (3)).
+for wsr in "win_syscall_raw_advice_ir --emit=pe guard" \
+           "win_syscall_raw_advice_legacy --legacy,--emit=pe noprune" \
+           "win_syscall_raw_advice_obj --emit=obj noprune"; do
+    set -- $wsr
+    TOTAL=$((TOTAL + 1))
+    WSR_WHY=""
+    for wsr_a in x86_64 arm64; do
+        WSR_ERR=$($KRC ${2//,/ } --arch="$wsr_a" --target=windows "$DIR/fixtures/win_syscall_raw.kr" -o "$WSR_DIR/adv.out" 2>&1 >/dev/null)
+        rm -f "$WSR_DIR/adv.out"
+        if [ "$3" = "guard" ]; then
+            [[ "$WSR_ERR" == *'or guard it with
+`if get_target_os() != 2 { ... }` (a literal comparison).'* ]] || WSR_WHY="$WSR_WHY $wsr_a:no-guard-advice"
+            [[ "$WSR_ERR" != *"does not prune"* ]] || WSR_WHY="$WSR_WHY $wsr_a:says-no-prune"
+        else
+            [[ "$WSR_ERR" == *"This backend does not prune OS guards"* ]] || WSR_WHY="$WSR_WHY $wsr_a:no-no-prune-text"
+            [[ "$WSR_ERR" != *"guard it with"* && "$WSR_ERR" != *'`if get_target_os() != 2 { ... }`'* ]] || WSR_WHY="$WSR_WHY $wsr_a:advises-the-guard"
+        fi
+    done
+    if [ -z "$WSR_WHY" ]; then
+        PASS=$((PASS + 1)); echo "  $1: PASS"
+    else
+        FAIL=$((FAIL + 1)); echo "  $1: FAIL ($WSR_WHY )"
+    fi
 done
 # (2) Guarded (`if get_target_os() != 2 { syscall_raw(...) }`), IR backend:
 #     must BUILD, and the pruned arm must really be gone -- no SYSCALL byte
@@ -9989,7 +10026,7 @@ for wsr in "win_syscall_raw_guarded_legacy_refused_x86_64 x86_64" "win_syscall_r
     rm -f "$WSR_DIR/o.exe"
     WSR_SL=win-x64; [ "$2" = "arm64" ] && WSR_SL=win-arm64
     WSR_ERR=$($KRC --legacy --arch="$2" --target=windows --emit=pe "$DIR/fixtures/win_syscall_raw_guarded.kr" -o "$WSR_DIR/o.exe" 2>&1 >/dev/null)
-    wsr_check_located "$1" "$WSR_ERR" "win_syscall_raw_guarded.kr:7:9" "        syscall_raw(" "$WSR_DIR/o.exe" "$WSR_SL" 0
+    wsr_check_located "$1" "$WSR_ERR" "win_syscall_raw_guarded.kr:7:9" "        syscall_raw(" "$WSR_DIR/o.exe" "$WSR_SL" 0 legacy
 done
 # (4) No other target changes. The same unguarded fixture BUILDS for every
 #     hosted non-Windows (OS, arch), and the host-arch Linux build RUNS
@@ -10043,7 +10080,7 @@ for wsr in "win_syscall_raw_fat_win_x64_refused --targets=win-x64 win-x64" \
     TOTAL=$((TOTAL + 1))
     rm -f "$WSR_DIR/o.krbo"
     WSR_ERR=$($WSR_K $WSR_T "$DIR/fixtures/win_syscall_raw.kr" -o "$WSR_DIR/o.krbo" 2>&1 >/dev/null)
-    wsr_check_located "$1" "$WSR_ERR" "win_syscall_raw.kr:1:23" "fn main() -> uint32 { syscall_raw(" "$WSR_DIR/o.krbo" "$3" 1
+    wsr_check_located "$1" "$WSR_ERR" "win_syscall_raw.kr:1:23" "fn main() -> uint32 { syscall_raw(" "$WSR_DIR/o.krbo" "$3" 1 ir
 done
 TOTAL=$((TOTAL + 1))
 if [ "$RUN_ARCH" = "arm64" ]; then WSR_HOST=linux-arm64; WSR_ID=2; else WSR_HOST=linux-x64; WSR_ID=1; fi
