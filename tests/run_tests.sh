@@ -10006,24 +10006,40 @@ for wsr in "win_syscall_raw_advice_ir --emit=pe guard" \
         FAIL=$((FAIL + 1)); echo "  $1: FAIL ($WSR_WHY )"
     fi
 done
-# (1d) --emit=lkm --target=windows is refused as a PAIR at option validation
-#      (main.kr): an LKM is a Linux kernel module, which Windows cannot load.
-#      It used to be accepted and emit a .ko. Control: the same module builds
-#      for --target=linux, so the refusal is the pair, not the source.
+# (1d) --emit=lkm with --target=windows or --target=macos is refused as a
+#      PAIR at option validation (main.kr): an LKM is a Linux/Android .ko,
+#      which neither OS can load. Both used to be accepted and emit a .ko.
+#      Control: the same module builds for --target=linux, so the refusal is
+#      the pair, not the source.
+for wsr_o in windows macos; do
+    TOTAL=$((TOTAL + 1))
+    WSR_WHY=""
+    rm -f "$WSR_DIR/m.ko"
+    WSR_ERR=$($KRC --arch=x86_64 --target="$wsr_o" --emit=lkm "$DIR/../examples/hello_lkm.kr" -o "$WSR_DIR/m.ko" 2>&1 >/dev/null)
+    [ -s "$WSR_DIR/m.ko" ] && WSR_WHY="$WSR_WHY $wsr_o:built"
+    printf '%s' "$WSR_ERR" | grep -qxF "error: --emit=lkm conflicts with --target=$wsr_o: a loadable kernel module (.ko) is a Linux/Android kernel module, which $wsr_o cannot load" \
+        || WSR_WHY="$WSR_WHY $wsr_o:wrong-error($(printf '%s' "$WSR_ERR" | head -1))"
+    rm -f "$WSR_DIR/m.ko"
+    $KRC --arch=x86_64 --target=linux --emit=lkm "$DIR/../examples/hello_lkm.kr" -o "$WSR_DIR/m.ko" > /dev/null 2>&1
+    [ -s "$WSR_DIR/m.ko" ] || WSR_WHY="$WSR_WHY linux:control-refused"
+    if [ -z "$WSR_WHY" ]; then
+        PASS=$((PASS + 1)); echo "  emit_lkm_target_${wsr_o}_refused: PASS"
+    else
+        FAIL=$((FAIL + 1)); echo "  emit_lkm_target_${wsr_o}_refused: FAIL ($WSR_WHY )"
+    fi
+done
+# (1e) ...and --target=android stays ACCEPTED (Android runs a Linux kernel
+#      and loads .ko modules), so the refusal above cannot silently widen:
+#      a relocatable x86-64 ELF (.ko) comes out, with no error.
 TOTAL=$((TOTAL + 1))
-WSR_WHY=""
 rm -f "$WSR_DIR/m.ko"
-WSR_ERR=$($KRC --arch=x86_64 --target=windows --emit=lkm "$DIR/../examples/hello_lkm.kr" -o "$WSR_DIR/m.ko" 2>&1 >/dev/null)
-[ -s "$WSR_DIR/m.ko" ] && WSR_WHY="$WSR_WHY windows:built"
-printf '%s' "$WSR_ERR" | grep -qxF "error: --emit=lkm conflicts with --target=windows: a loadable kernel module (.ko) is a Linux kernel module; Windows cannot load it" \
-    || WSR_WHY="$WSR_WHY windows:wrong-error($(printf '%s' "$WSR_ERR" | head -1))"
-rm -f "$WSR_DIR/m.ko"
-$KRC --arch=x86_64 --target=linux --emit=lkm "$DIR/../examples/hello_lkm.kr" -o "$WSR_DIR/m.ko" > /dev/null 2>&1
-[ -s "$WSR_DIR/m.ko" ] || WSR_WHY="$WSR_WHY linux:control-refused"
-if [ -z "$WSR_WHY" ]; then
-    PASS=$((PASS + 1)); echo "  emit_lkm_target_windows_refused: PASS"
+WSR_ERR=$($KRC --arch=x86_64 --target=android --emit=lkm "$DIR/../examples/hello_lkm.kr" -o "$WSR_DIR/m.ko" 2>&1 >/dev/null)
+if [ -s "$WSR_DIR/m.ko" ] && [ "$(od -An -tx1 -N4 "$WSR_DIR/m.ko" | tr -d ' ')" = "7f454c46" ] \
+   && [ "$(od -An -tu2 -j16 -N2 "$WSR_DIR/m.ko" | tr -d ' ')" = "1" ] \
+   && ! printf '%s' "$WSR_ERR" | grep -q 'error'; then
+    PASS=$((PASS + 1)); echo "  emit_lkm_target_android_accepted: PASS"
 else
-    FAIL=$((FAIL + 1)); echo "  emit_lkm_target_windows_refused: FAIL ($WSR_WHY )"
+    FAIL=$((FAIL + 1)); echo "  emit_lkm_target_android_accepted: FAIL (no ET_REL ELF, or an error: $(printf '%s' "$WSR_ERR" | grep error | head -1))"
 fi
 # (2) Guarded (`if get_target_os() != 2 { syscall_raw(...) }`), IR backend:
 #     must BUILD, and the pruned arm must really be gone -- no SYSCALL byte

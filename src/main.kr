@@ -9558,13 +9558,21 @@ fn main() {
     // the line to drop, and these combinations are reached by flags that are
     // individually correct.
     //
-    // The same pair with --target=windows: an LKM is a LINUX kernel module
-    // (.ko with .modinfo and init_module/cleanup_module); Windows has no
-    // loader for it. Before this it was accepted, and the build went on to
-    // run Windows-only refusals (syscall_raw) against a kernel module.
-    if target_os == 2 && emit_mode == 7 {
-        uint64 lkmw_msg = "error: --emit=lkm conflicts with --target=windows: a loadable kernel module (.ko) is a Linux kernel module; Windows cannot load it\n"
-        write(2, lkmw_msg, str_len(lkmw_msg))
+    // The same flag with --target=windows or --target=macos: an LKM is a
+    // Linux kernel module (.ko with .modinfo and init_module/cleanup_module)
+    // -- Windows has no loader for it, and a macOS kernel extension is not a
+    // .ko. Both were accepted and emitted a .ko. --target=android stays
+    // ALLOWED: Android runs a Linux kernel and loads .ko modules.
+    if emit_mode == 7 && (target_os == 2 || target_os == 1) {
+        uint64 lkmw1 = "error: --emit=lkm conflicts with --target="
+        write(2, lkmw1, str_len(lkmw1))
+        uint64 lkmw_os = target_os_flag_name(target_os)
+        write(2, lkmw_os, str_len(lkmw_os))
+        uint64 lkmw2 = ": a loadable kernel module (.ko) is a Linux/Android kernel module, which "
+        write(2, lkmw2, str_len(lkmw2))
+        write(2, lkmw_os, str_len(lkmw_os))
+        uint64 lkmw3 = " cannot load\n"
+        write(2, lkmw3, str_len(lkmw3))
         exit(1)
     }
     if target_os == 4 {
