@@ -3527,18 +3527,62 @@ fn extern_fn_lookup(uint64 name_tok) -> uint64 {
 // decision and the "nothing will resolve it" decision cannot disagree.
 @export
 fn is_routed_win_import(uint64 name_tok) -> uint64 {
-    if target_os != 2 { return PE_IMPORT_NO_SLOT }
-    if emit_mode_is_executable(cg_emit_mode) == 0 { return PE_IMPORT_NO_SLOT }
-    if extern_fn_lookup(name_tok) == 0xFFFFFFFF { return PE_IMPORT_NO_SLOT }
     uint64 ts = tok_text_start(name_tok)
     uint64 tl = tok_text_len(name_tok)
-    return pe_import_slot(cg_source + ts, tl)
+    return routed_win_import_by_name(cg_source + ts, tl)
+}
+
+// The same predicate keyed by a name in memory rather than a token, for the
+// one caller that holds only text: the fn_addr fixup resolvers, whose name
+// comes from a string literal. is_routed_win_import is a thin wrapper over
+// THIS, so there is still exactly one routing decision.
+@export
+fn routed_win_import_by_name(uint64 name_ptr, uint64 name_len) -> uint64 {
+    if target_os != 2 { return PE_IMPORT_NO_SLOT }
+    if emit_mode_is_executable(cg_emit_mode) == 0 { return PE_IMPORT_NO_SLOT }
+    // Declared `extern fn` -- the by-name form of extern_fn_lookup.
+    uint64 rw_declared = 0
+    uint64 rw_i = 0
+    while rw_i < extern_fn_count {
+        uint64 rw_entry = extern_fn_table + rw_i * 8
+        uint32 rw_tok = 0
+        unsafe { *(rw_entry as uint32) -> rw_tok }
+        uint64 wrt = rw_tok
+        if tok_matches(wrt, name_ptr, name_len) != 0 { rw_declared = 1 }
+        rw_i = rw_i + 1
+    }
+    if rw_declared == 0 { return PE_IMPORT_NO_SLOT }
+    return pe_import_slot(name_ptr, name_len)
+}
+
+// fn_addr("X") found no KernRift function named X. If X is a routed Windows
+// import, say so: the name IS declared (`extern fn`), it just has no address
+// in this image -- the loader binds it in the IAT. Otherwise the plain
+// "undefined function" error. Shared by the x86_64 and arm64 resolvers.
+@export
+fn fnaddr_undefined_error(uint64 name_ptr, uint64 name_len) {
+    if routed_win_import_by_name(name_ptr, name_len) != PE_IMPORT_NO_SLOT {
+        write(2, "error: fn_addr: '", 17)
+        write(2, name_ptr, name_len)
+        uint64 fe_msg = "' is a Windows import bound through the IAT; its address is not a KernRift function\n"
+        write(2, fe_msg, str_len(fe_msg))
+        exit(1)
+    }
+    write(2, "error: fn_addr: undefined function '", 36)
+    write(2, name_ptr, name_len)
+    write(2, "'\n", 2)
+    exit(1)
 }
 
 // A body-less `extern fn` declaration (FnDecl, data4 bit 3) that a Windows
 // build routes through the IAT. Its call sites never reference a local
 // symbol, so no stub body is emitted and the name is never registered: a
 // registered zero-length function would alias whatever is emitted next.
+//
+// Also REFUSES a routed import with a float (f32/f64) parameter or return:
+// routed calls pass every argument in a GPR (op-51's Win64 marker path moves
+// bit patterns; nothing loads xmm0-3) and read the result from rax/x0, so a
+// float would arrive in the wrong register. No table import takes one.
 @export
 fn decl_is_routed_win_import(uint64 fn_node) -> uint64 {
     uint32 rw_flags = ast_data4(fn_node)
@@ -3546,6 +3590,31 @@ fn decl_is_routed_win_import(uint64 fn_node) -> uint64 {
     uint32 rw_name = ast_data1(fn_node)
     uint64 wrn = rw_name
     if is_routed_win_import(wrn) == PE_IMPORT_NO_SLOT { return 0 }
+    uint64 rw_float = 0
+    // Return type: an extern FnDecl keeps its return-type token in data2
+    // (parser.kr; fn_ret_float_register is never called for externs).
+    uint32 rw_rt = ast_data2(fn_node)
+    uint64 wrrt = rw_rt
+    if wrrt != 0 && is_float_type(tok_kind_at_raw(wrrt)) != 0 { rw_float = 1 }
+    uint32 rw_p = ast_child(fn_node)
+    uint64 wrp = rw_p
+    while wrp != 0 {
+        if ast_kind(wrp) == 3 {
+            uint32 rw_pt = ast_data1(wrp)
+            if is_float_type(tok_kind_at_raw(rw_pt)) != 0 { rw_float = 1 }
+        }
+        uint32 rw_pn = ast_next(wrp)
+        wrp = rw_pn
+    }
+    if rw_float != 0 {
+        diag_loc_head(wrn, 0)
+        write(2, "routed Windows import '", 23)
+        write(2, cg_source + tok_text_start(wrn), tok_text_len(wrn))
+        uint64 rf_msg = "' has a float parameter or return type; routed Windows imports take integer/pointer arguments only\n"
+        write(2, rf_msg, str_len(rf_msg))
+        diag_span_of(wrn)
+        exit(1)
+    }
     return 1
 }
 
@@ -14695,10 +14764,7 @@ fn resolve_fnaddr_fixups() {
             uint64 disp = target_off - wpo - 4
             patch_u32(wpo, disp)
         } else {
-            write(2, "error: fn_addr: undefined function '", 36)
-            write(2, cg_source + name_start, name_len)
-            write(2, "'\n", 2)
-            exit(1)
+            fnaddr_undefined_error(cg_source + name_start, name_len)
         }
         i = i + 1
     }

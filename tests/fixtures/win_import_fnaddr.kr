@@ -1,0 +1,11 @@
+// fn_addr of a routed Windows import. WSAStartup is a declared `extern fn`
+// and a Windows build binds it through the IAT, so there is no KernRift
+// function at any address in the image: the build must refuse, naming the
+// IAT binding -- not "undefined function", which blames a declaration the
+// program does have.
+extern fn WSAStartup(uint64 ver, uint64 wsadata) -> uint64
+fn main() -> uint32 {
+    uint64 p = fn_addr("WSAStartup")
+    if p == 0 { return 1 }
+    return 0
+}

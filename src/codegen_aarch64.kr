@@ -6832,10 +6832,7 @@ fn resolve_fnaddr_fixups_a64() {
             uint64 wadd = old_add
             patch_u32(wpo + 4, (wadd & 0xFFC003FF) | ((target_va & 0xFFF) << 10))
         } else {
-            write(2, "error: fn_addr: undefined function '", 36)
-            write(2, cg_source + name_start, name_len)
-            write(2, "'\n", 2)
-            exit(1)
+            fnaddr_undefined_error(cg_source + name_start, name_len)
         }
         i = i + 1
     }

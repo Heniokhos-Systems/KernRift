@@ -1,0 +1,15 @@
+// os_prune.kr plus a string literal made of 0xC3 bytes (x86 RET). Literals
+// are emitted at the END of .text, so a byte scanner or linear-sweep
+// disassembler that does not stop at the code end reads them as `ret`
+// instructions -- a "count the returns" stub check would false-fail here.
+// The routing rows use this fixture to pin that the stub check does not.
+extern fn WSAStartup(uint64 ver, uint64 wsadata) -> uint64
+fn main() -> uint32 {
+    uint64 tail = "\xC3\xC3\xC3"
+    if get_target_os() == 2 {
+        u8[512] wd
+        WSAStartup(514, wd)
+    }
+    if tail == 0 { return 1 }
+    return 0
+}

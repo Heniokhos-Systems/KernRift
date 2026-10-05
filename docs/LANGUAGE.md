@@ -3031,12 +3031,21 @@ imports every KernRift PE carries — the kernel32 set (`ExitProcess`,
 `BCryptGenRandom` — is bound by the Windows loader: each call is an indirect
 call through that import's IAT slot, using the Windows calling convention
 (x86_64: Microsoft x64 — `rcx`/`rdx`/`r8`/`r9`, the rest on the stack above a
-32-byte shadow area; ARM64: AAPCS64, `x0`–`x7` then the stack). The result is
+32-byte shadow area; ARM64: AAPCS64, `x0`–`x7` then the stack). Routed imports
+take integer/pointer arguments only: every argument travels in a
+general-purpose register or stack slot, so declaring one with an `f32`/`f64`
+parameter or return type is a compile error at the declaration. The result is
 the raw `rax`/`x0`: a Win32 `BOOL` or `DWORD` return only defines the low 32
 bits, so mask it (`ok & 0xFFFFFFFF`) before testing it. The name must be
 declared `extern fn` — a function you define yourself with the same name
 (`fn send(...) { ... }`) is an ordinary call to your body — and any other
-unresolved `extern fn` is still refused when building an executable.
+unresolved `extern fn` is still refused when building an executable. A routed
+import has no KernRift address: `fn_addr("WSAStartup")` is refused with an
+error saying it is bound through the IAT. Routing happens only when an
+executable is produced, so `--emit=asm` and `--emit=ir` dumps for
+`--target=windows` show the pre-routing form (a stub body for the extern and
+a direct call to it), while the `.exe` calls through the IAT; `--emit=obj`
+keeps ordinary linker relocations.
 
 `extern fn` names shadow built-ins: if you declare `extern fn write(...)`,
 calls to `write` resolve to the libc symbol instead of the `write` syscall

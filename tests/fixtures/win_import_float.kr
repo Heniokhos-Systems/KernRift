@@ -1,0 +1,9 @@
+// A routed Windows import (send, ws2_32 slot 24) declared with an f64
+// parameter. Routed calls pass every argument in a general-purpose register
+// and read the result from rax/x0, so a float would arrive in the wrong
+// register: the Windows build must refuse, located at the declaration.
+extern fn send(uint64 s, uint64 buf, f64 len, uint64 flags) -> uint64
+fn main() -> uint32 {
+    send(0, 0, 1.5, 0)
+    return 0
+}
