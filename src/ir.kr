@@ -3214,6 +3214,9 @@ fn ir_lower_expr(uint64 node) -> uint64 {
                 uint64 bmsr = "syscall_raw"
                 bare_metal_builtin_refused(bmsr, "there is no kernel to trap into; use inline asm if the target really needs that raw instruction")
             }
+            // Windows: a kernel, but no stable syscall ABI -- located refusal
+            // (codegen.kr). A guarded call in a pruned arm never gets here.
+            if target_os == 2 { win_syscall_raw_refused(wct) }
             // Evaluate all 7 args
             uint64[7] sc_vregs
             uint32 sc_arg = ast_child(node)

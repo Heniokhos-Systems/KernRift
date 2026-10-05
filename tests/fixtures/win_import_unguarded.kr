@@ -1,0 +1,10 @@
+// os_prune.kr WITHOUT the get_target_os() guard: WSAStartup is live on every
+// slice. A Windows slice routes it through the IAT; any other slice refuses
+// it as an unresolved extern -- but only when that slice ships
+// (fat_slice_ships, main.kr), so `--targets=win-x64` builds.
+extern fn WSAStartup(uint64 ver, uint64 wsadata) -> uint64
+fn main() -> uint32 {
+    u8[512] wd
+    WSAStartup(514, wd)
+    return 0
+}

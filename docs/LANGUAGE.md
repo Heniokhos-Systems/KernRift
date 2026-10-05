@@ -3265,7 +3265,11 @@ Address Table (IAT) against `kernel32.dll`:
 
 `syscall_raw` is **not supported** on Windows — the platform has no
 stable syscall numbering. The `--target=windows` PE output uses IAT
-imports exclusively.
+imports exclusively. A `syscall_raw` reachable in a Windows build (a
+`--target=windows` build, or a Windows slice that a fat build ships) is a
+compile error naming its `file:line:col`. One inside the not-taken arm of a
+literal `if get_target_os() != 2 { ... }` is never lowered for Windows and
+compiles (the `--legacy` backend does not prune such arms and refuses it).
 
 ## Appendix C. `--emit=obj` section layout
 

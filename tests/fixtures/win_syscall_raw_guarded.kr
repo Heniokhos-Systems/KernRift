@@ -1,0 +1,10 @@
+// The Windows-safe shape of win_syscall_raw.kr: the raw Linux syscall sits in
+// the NOT_TAKEN arm of a literal get_target_os() comparison, which the If
+// lowering never lowers on --target=windows (const_os_cond), so the
+// syscall_raw refusal must not fire. On every other OS the arm is TAKEN.
+fn main() -> uint32 {
+    if get_target_os() != 2 {
+        syscall_raw(1, 1, 0, 0, 0, 0, 0)
+    }
+    return 0
+}

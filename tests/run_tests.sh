@@ -9894,6 +9894,218 @@ if [ -n "$RWI_WINE" ] && [ -x "$(dirname "$RWI_WINE")/wineserver" ]; then
 fi
 rm -rf "$RWI_DIR"
 
+# syscall_raw on Windows (win_syscall_raw_refused, codegen.kr). Windows has a
+# kernel but no stable syscall ABI, so a REACHABLE syscall_raw on target_os 2
+# is a LOCATED compile error -- file:line:col, the message, and the source
+# span with its caret -- while one in the NOT_TAKEN arm of a literal
+# get_target_os() comparison is never lowered (const_os_cond) and builds.
+WSR_DIR=/tmp/krc_wsr_$$
+mkdir -p "$WSR_DIR"
+WSR_MSG='syscall_raw is not available on Windows: the NT syscall ABI is unstable; use the std/sys.kr Windows path'
+# <row> <stderr> <file:line:col> <source fragment>: all four parts of the
+# located diagnostic, and no output file.
+wsr_check_located() {
+    local row="$1" err="$2" loc="$3" src="$4" out="$5"
+    if [ -s "$out" ]; then
+        FAIL=$((FAIL + 1)); echo "  $row: FAIL (built an artifact; want a refusal)"
+    elif ! printf '%s\n' "$err" | grep -qF "$loc: error: $WSR_MSG"; then
+        FAIL=$((FAIL + 1)); echo "  $row: FAIL (no located '$loc: error: <syscall_raw on Windows>' line: $(printf '%s' "$err" | head -1))"
+    elif ! printf '%s\n' "$err" | grep -qF "| $src" || ! printf '%s\n' "$err" | grep -qE '\| +\^~{10}$'; then
+        FAIL=$((FAIL + 1)); echo "  $row: FAIL (no source span + 11-column caret under syscall_raw)"
+    else
+        PASS=$((PASS + 1)); echo "  $row: PASS"
+    fi
+}
+# (1) Unguarded, IR backend, both arches, and the legacy backends (which carry
+#     a mirror of the refusal).
+for wsr in "win_syscall_raw_refused_x86_64 x86_64" "win_syscall_raw_refused_arm64 arm64" \
+           "win_syscall_raw_refused_legacy_x86_64 x86_64 --legacy" "win_syscall_raw_refused_legacy_arm64 arm64 --legacy"; do
+    set -- $wsr
+    TOTAL=$((TOTAL + 1))
+    rm -f "$WSR_DIR/o.exe"
+    WSR_ERR=$($KRC $3 --arch="$2" --target=windows --emit=pe "$DIR/fixtures/win_syscall_raw.kr" -o "$WSR_DIR/o.exe" 2>&1 >/dev/null)
+    wsr_check_located "$1" "$WSR_ERR" "win_syscall_raw.kr:1:23" "fn main() -> uint32 { syscall_raw(" "$WSR_DIR/o.exe"
+done
+# (2) Guarded (`if get_target_os() != 2 { syscall_raw(...) }`), IR backend:
+#     must BUILD, and the pruned arm must really be gone -- no SYSCALL byte
+#     pair 0F 05 / no SVC #0 word (0xD4000001) anywhere in .text. The x86
+#     scan is disassembler-free, so a 0F 05 inside some other instruction
+#     would FAIL this row (conservative); none occurs in this tiny image.
+for wsr in "win_syscall_raw_guarded_builds_x86_64 x86_64" "win_syscall_raw_guarded_builds_arm64 arm64"; do
+    set -- $wsr
+    TOTAL=$((TOTAL + 1))
+    rm -f "$WSR_DIR/o.exe"
+    WSR_ERR=$($KRC --arch="$2" --target=windows --emit=pe "$DIR/fixtures/win_syscall_raw_guarded.kr" -o "$WSR_DIR/o.exe" 2>&1 >/dev/null)
+    if [ ! -s "$WSR_DIR/o.exe" ]; then
+        FAIL=$((FAIL + 1)); echo "  $1: FAIL (refused: $(printf '%s' "$WSR_ERR" | head -1))"
+    elif [ "$2" = "x86_64" ]; then
+        WSR_TX=$(pe_section "$WSR_DIR/o.exe" .text); set -- "$1" $WSR_TX
+        if od -An -v -tx1 -j "$4" -N "$3" "$WSR_DIR/o.exe" | tr -s ' \n' ' ' | grep -q ' 0f 05 '; then
+            FAIL=$((FAIL + 1)); echo "  $1: FAIL (a SYSCALL 0F 05 survived the prune)"
+        else
+            PASS=$((PASS + 1)); echo "  $1: PASS"
+        fi
+    else
+        WSR_TX=$(pe_section "$WSR_DIR/o.exe" .text); set -- "$1" $WSR_TX
+        if od -An -v -tu4 -j "$4" -N "$3" "$WSR_DIR/o.exe" | tr -s ' ' '\n' | grep -qx "$((0xD4000001))"; then
+            FAIL=$((FAIL + 1)); echo "  $1: FAIL (an SVC #0 survived the prune)"
+        else
+            PASS=$((PASS + 1)); echo "  $1: PASS"
+        fi
+    fi
+done
+# (3) Guarded, LEGACY backends: refused. The legacy If gen emits both arms
+#     (no const_os_cond prune), so the refusal mirror sees the guarded call.
+#     Documented in codegen.kr as accepted (nothing passes --legacy); pinned
+#     here so it stays a decision, not an accident.
+for wsr in "win_syscall_raw_guarded_legacy_refused_x86_64 x86_64" "win_syscall_raw_guarded_legacy_refused_arm64 arm64"; do
+    set -- $wsr
+    TOTAL=$((TOTAL + 1))
+    rm -f "$WSR_DIR/o.exe"
+    WSR_ERR=$($KRC --legacy --arch="$2" --target=windows --emit=pe "$DIR/fixtures/win_syscall_raw_guarded.kr" -o "$WSR_DIR/o.exe" 2>&1 >/dev/null)
+    wsr_check_located "$1" "$WSR_ERR" "win_syscall_raw_guarded.kr:7:9" "        syscall_raw(" "$WSR_DIR/o.exe"
+done
+# (4) No other target changes. The same unguarded fixture BUILDS for every
+#     hosted non-Windows (OS, arch), and the host-arch Linux build RUNS
+#     (write(1, 0, 0) -> status 0); --target=none still refuses with its own
+#     bare-metal text and never the Windows one.
+TOTAL=$((TOTAL + 1))
+WSR_WHY=""
+for wsr_t in "linux x86_64" "linux arm64" "macos x86_64" "macos arm64" "android x86_64" "android arm64"; do
+    set -- $wsr_t
+    rm -f "$WSR_DIR/o.bin"
+    $KRC --arch="$2" --target="$1" "$DIR/fixtures/win_syscall_raw.kr" -o "$WSR_DIR/o.bin" > /dev/null 2>&1
+    [ -s "$WSR_DIR/o.bin" ] || WSR_WHY="$WSR_WHY $1/$2:refused"
+done
+rm -f "$WSR_DIR/o.bin"
+$KRC --arch="$RUN_ARCH" --target=linux "$DIR/fixtures/win_syscall_raw.kr" -o "$WSR_DIR/o.bin" > /dev/null 2>&1
+if [ -s "$WSR_DIR/o.bin" ]; then
+    chmod +x "$WSR_DIR/o.bin"; "$WSR_DIR/o.bin" > /dev/null 2>&1 || WSR_WHY="$WSR_WHY linux/$RUN_ARCH:run-status-$?"
+fi
+if [ -z "$WSR_WHY" ]; then
+    PASS=$((PASS + 1)); echo "  syscall_raw_other_hosted_targets_unaffected: PASS"
+else
+    FAIL=$((FAIL + 1)); echo "  syscall_raw_other_hosted_targets_unaffected: FAIL ($WSR_WHY )"
+fi
+TOTAL=$((TOTAL + 1))
+WSR_ERR=$($KRC --arch=x86_64 --target=none --emit=image --load-addr=0x400000 "$DIR/fixtures/win_syscall_raw.kr" -o "$WSR_DIR/o.img" 2>&1 >/dev/null)
+if printf '%s' "$WSR_ERR" | grep -qF "error: --target=none: 'syscall_raw' is not available on bare metal" \
+   && ! printf '%s' "$WSR_ERR" | grep -q 'Windows'; then
+    PASS=$((PASS + 1)); echo "  syscall_raw_none_keeps_bare_metal_refusal: PASS"
+else
+    FAIL=$((FAIL + 1)); echo "  syscall_raw_none_keeps_bare_metal_refusal: FAIL ($(printf '%s' "$WSR_ERR" | head -1))"
+fi
+# (5) Fat builds. compile_fat generates ALL 8 slices on every run and packs
+#     only the --targets selection, so a per-slice refusal fires only for a
+#     slice that SHIPS (fat_slice_ships, main.kr). The Windows slice refuses
+#     whenever it ships -- win-x64 alone, win-arm64 alone, linux+win, and the
+#     default (all 8) -- located, like (1); a Linux-only selection builds,
+#     and its slice runs.
+for wsr in "win_syscall_raw_fat_win_x64_refused --targets=win-x64" \
+           "win_syscall_raw_fat_win_arm64_refused --targets=win-arm64" \
+           "win_syscall_raw_fat_linux_and_win_refused --targets=linux-x64,win-x64" \
+           "win_syscall_raw_fat_default_refused -"; do
+    set -- $wsr
+    # The default case needs NO --arch (that is what selects the fat path),
+    # so it calls build/krc2 directly: `make test`'s $KRC wrapper always
+    # adds --arch=x86_64. --targets forces the fat path either way.
+    WSR_K="$KRC"; WSR_T="$2"
+    if [ "$WSR_T" = "-" ]; then WSR_T=""; WSR_K="$DIR/../build/krc2"; fi
+    TOTAL=$((TOTAL + 1))
+    rm -f "$WSR_DIR/o.krbo"
+    WSR_ERR=$($WSR_K $WSR_T "$DIR/fixtures/win_syscall_raw.kr" -o "$WSR_DIR/o.krbo" 2>&1 >/dev/null)
+    wsr_check_located "$1" "$WSR_ERR" "win_syscall_raw.kr:1:23" "fn main() -> uint32 { syscall_raw(" "$WSR_DIR/o.krbo"
+done
+TOTAL=$((TOTAL + 1))
+if [ "$RUN_ARCH" = "arm64" ]; then WSR_HOST=linux-arm64; WSR_ID=2; else WSR_HOST=linux-x64; WSR_ID=1; fi
+rm -f "$WSR_DIR/o.krbo" "$WSR_DIR/o.bin"
+WSR_ERR=$($KRC --targets="$WSR_HOST" "$DIR/fixtures/win_syscall_raw.kr" -o "$WSR_DIR/o.krbo" 2>&1 >/dev/null)
+if [ ! -s "$WSR_DIR/o.krbo" ]; then
+    FAIL=$((FAIL + 1)); echo "  win_syscall_raw_fat_linux_only_builds: FAIL (refused: $(printf '%s' "$WSR_ERR" | head -1))"
+elif ! command -v python3 > /dev/null 2>&1; then
+    PASS=$((PASS + 1)); echo "  win_syscall_raw_fat_linux_only_builds: PASS, run SKIP (no python3)"
+elif ! python3 "$DIR/helpers/krbo_slice.py" "$WSR_DIR/o.krbo" "$WSR_ID" "$WSR_DIR/o.bin"; then
+    FAIL=$((FAIL + 1)); echo "  win_syscall_raw_fat_linux_only_builds: FAIL (could not extract slice $WSR_ID)"
+else
+    chmod +x "$WSR_DIR/o.bin"; "$WSR_DIR/o.bin" > /dev/null 2>&1; WSR_RC=$?
+    if [ "$WSR_RC" = "0" ]; then
+        PASS=$((PASS + 1)); echo "  win_syscall_raw_fat_linux_only_builds: PASS"
+    else
+        FAIL=$((FAIL + 1)); echo "  win_syscall_raw_fat_linux_only_builds: FAIL (slice ran with status $WSR_RC, want 0)"
+    fi
+fi
+# (6) The same rule for refuse_unresolved_externs. An UNGUARDED routed import
+#     (win_import_unguarded.kr) under a Windows-only --targets builds -- the
+#     linux slice that would refuse it is discarded -- and the shipped slice
+#     calls WSAStartup through IAT slot 20 (rwi_check_osp, as Task 3's fat
+#     rows). A selection that ships a non-Windows slice still refuses it.
+for wsr in "win_import_unguarded_fat_win_x64 win-x64 3 x86_64 32" "win_import_unguarded_fat_win_arm64 win-arm64 4 arm64 -"; do
+    set -- $wsr
+    TOTAL=$((TOTAL + 1))
+    rm -f "$WSR_DIR/o.krbo" "$WSR_DIR/o.exe"
+    WSR_ERR=$($KRC --targets="$2" "$DIR/fixtures/win_import_unguarded.kr" -o "$WSR_DIR/o.krbo" 2>&1 >/dev/null)
+    if [ ! -s "$WSR_DIR/o.krbo" ]; then
+        FAIL=$((FAIL + 1)); echo "  $1: FAIL (fat build refused: $(printf '%s' "$WSR_ERR" | head -1))"
+    elif ! command -v python3 > /dev/null 2>&1; then
+        PASS=$((PASS + 1)); echo "  $1: SKIP (no python3)"
+    elif ! python3 "$DIR/helpers/krbo_slice.py" "$WSR_DIR/o.krbo" "$3" "$WSR_DIR/o.exe"; then
+        FAIL=$((FAIL + 1)); echo "  $1: FAIL (could not extract slice $3)"
+    else
+        rwi_check_osp "$1" "$WSR_DIR/o.exe" "$4" "$5"
+    fi
+done
+TOTAL=$((TOTAL + 1))
+WSR_ERR=$($KRC --targets=linux-x64,win-x64 "$DIR/fixtures/win_import_unguarded.kr" -o "$WSR_DIR/o2.krbo" 2>&1 >/dev/null)
+if [ ! -s "$WSR_DIR/o2.krbo" ] && printf '%s' "$WSR_ERR" | grep -qF "win_import_unguarded.kr:5:11: error: extern fn 'WSAStartup' is never defined"; then
+    PASS=$((PASS + 1)); echo "  win_import_unguarded_fat_with_linux_refused: PASS"
+else
+    FAIL=$((FAIL + 1)); echo "  win_import_unguarded_fat_with_linux_refused: FAIL ($(printf '%s' "$WSR_ERR" | head -1))"
+fi
+# (7) The --targets bit of every one of the 8 slices (fat_slice_ships). An
+#     undefined extern called only under `get_arch_id() <op> <that slice's
+#     arch id>`: with `!=`, every slice EXCEPT the selected one has it live,
+#     and a lone --targets=<slice> must build; with `==`, only the selected
+#     slice has it live, and the build must refuse. A wrong bit for any slice
+#     flips one of the two.
+TOTAL=$((TOTAL + 1))
+WSR_WHY=""
+for wsr_t in "linux-x64 1" "linux-arm64 2" "win-x64 3" "win-arm64 4" \
+             "macos-x64 5" "macos-arm64 6" "android-arm64 7" "android-x64 8"; do
+    set -- $wsr_t
+    for wsr_op in "!= build" "== refuse"; do
+        set -- "$1" "$2" $wsr_op
+        printf 'extern fn kr_wsr_nowhere() -> uint64\nfn main() -> uint32 {\n    if get_arch_id() %s %s { kr_wsr_nowhere() }\n    return 0\n}\n' "$3" "$2" > "$WSR_DIR/bit.kr"
+        rm -f "$WSR_DIR/bit.krbo"
+        WSR_ERR=$($KRC --targets="$1" "$WSR_DIR/bit.kr" -o "$WSR_DIR/bit.krbo" 2>&1 >/dev/null)
+        if [ "$4" = "build" ] && [ ! -s "$WSR_DIR/bit.krbo" ]; then WSR_WHY="$WSR_WHY $1:refused-an-unshipped-slice"; fi
+        if [ "$4" = "refuse" ] && { [ -s "$WSR_DIR/bit.krbo" ] || ! printf '%s' "$WSR_ERR" | grep -q "extern fn 'kr_wsr_nowhere' is never defined"; }; then
+            WSR_WHY="$WSR_WHY $1:shipped-slice-not-refused"
+        fi
+    done
+done
+if [ -z "$WSR_WHY" ]; then
+    PASS=$((PASS + 1)); echo "  fat_slice_ships_bit_per_slice: PASS"
+else
+    FAIL=$((FAIL + 1)); echo "  fat_slice_ships_bit_per_slice: FAIL ($WSR_WHY )"
+fi
+# (8) krc itself still builds for Windows (`make dist`'s two --emit=pe
+#     lines). The compiler's own sources had two unguarded syscall_raw calls
+#     (living.kr's .kernrift mkdir); this refusal is what found them, and the
+#     literal get_target_os() guard there is what lets these builds through.
+TOTAL=$((TOTAL + 1))
+WSR_WHY=""
+for wsr_a in x86_64 arm64; do
+    rm -f "$WSR_DIR/krc.exe"
+    WSR_ERR=$($KRC --arch="$wsr_a" --emit=pe "$DIR/../build/krc.kr" -o "$WSR_DIR/krc.exe" 2>&1 >/dev/null)
+    [ -s "$WSR_DIR/krc.exe" ] || WSR_WHY="$WSR_WHY $wsr_a:$(printf '%s' "$WSR_ERR" | grep 'error:' | head -1)"
+done
+if [ -z "$WSR_WHY" ]; then
+    PASS=$((PASS + 1)); echo "  krc_self_builds_for_windows: PASS"
+else
+    FAIL=$((FAIL + 1)); echo "  krc_self_builds_for_windows: FAIL ($WSR_WHY )"
+fi
+rm -rf "$WSR_DIR"
+
 echo ""
 echo "--- extern fn (libc linking) ---"
 # These tests link against the HOST gcc's libc. On cross-compile runs

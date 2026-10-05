@@ -919,6 +919,30 @@ fn bare_metal_builtin_refused(uint64 name, uint64 fix) {
     exit(1)
 }
 
+// syscall_raw reached on a Windows build (target_os == 2: --target=windows,
+// and each compile_fat PE slice that ships). Windows has a kernel, but its NT syscall
+// numbers change between builds and are not a public ABI, so a raw `syscall`
+// / `svc #0` there executes an arbitrary NT service. Unlike
+// bare_metal_builtin_refused this is LOCATED (file:line:col + source span):
+// a Windows port is a worklist of every leftover Unix call, and the location
+// is what makes it one. Called from the syscall_raw lowering on all three
+// paths that have one -- ir.kr (IR backend, both arches) and the legacy
+// x86_64 / arm64 dispatches -- AFTER builtin_override_lookup, like the
+// bare-metal refusals above. On the IR backend a syscall_raw in the
+// NOT_TAKEN arm of a literal get_target_os() comparison is never lowered
+// (const_os_cond), so `if get_target_os() != 2 { syscall_raw(...) }`
+// compiles; the legacy backends lower both arms and refuse it.
+fn win_syscall_raw_refused(uint64 tok) {
+    // A compile_fat PE slice that --targets did not select is generated and
+    // discarded, so its syscall_raw never ships (fat_slice_ships, main.kr).
+    if fat_slice_ships() == 0 { return }
+    diag_loc_head(tok, 0)
+    uint64 wsr = "syscall_raw is not available on Windows: the NT syscall ABI is unstable; use the std/sys.kr Windows path\n"
+    write(2, wsr, str_len(wsr))
+    diag_span_of(tok)
+    exit(1)
+}
+
 // The three shared remedies, spelled once so every builtin in a family gives
 // the same advice. A per-builtin string is used where the advice differs.
 fn bm_fix_io() -> uint64 {
@@ -9575,6 +9599,15 @@ fn gen_expr(uint64 node) {
 
         // Built-in: syscall_raw(nr, a0, a1, a2, a3, a4, a5) → raw syscall
         if is_extern_call == 0 && tok_matches(wct, "syscall_raw", 11) != 0 {
+            // Windows refusal, mirrored from ir.kr. This backend does NOT
+            // prune a constant get_target_os() branch (the legacy If gen
+            // emits both arms), so even a guarded
+            // `if get_target_os() != 2 { syscall_raw(...) }` -- i.e. any
+            // std/sys.kr importer -- is refused under --legacy
+            // --target=windows. Accepted: nothing in the tree passes
+            // --legacy, and refusing is the safe direction. Pinned by the
+            // win_syscall_raw_legacy_* rows.
+            if target_os == 2 { win_syscall_raw_refused(wct) }
             rax_invalidate()
             // Evaluate all 7 args into temp slots
             uint32 sc_arg = ast_child(node)
@@ -15430,6 +15463,9 @@ fn emit_mode_is_executable(uint64 mode) -> uint64 {
 // pass 1 directly instead of a meaningless mode number.
 fn refuse_unresolved_externs(uint64 check) {
     if check == 0 { return }
+    // A compile_fat slice that --targets did not select is generated and
+    // discarded; its externs resolve nothing that ships (main.kr).
+    if fat_slice_ships() == 0 { return }
     uint64 i = 0
     while i < extern_fn_count {
         uint64 entry = extern_fn_table + i * 8

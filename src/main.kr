@@ -5902,6 +5902,35 @@ fn parse_targets_arg(uint64 list) {
     target_mask = mask
 }
 
+// compile_fat compiles ALL 8 (OS, arch) slices on every run and only then
+// packs the ones --targets selected (the custom-subset pass below the slice
+// blocks); an unselected slice's code is generated and thrown away. So a
+// per-slice REFUSAL must ask whether its slice actually ships, or a slice
+// the user never asked for refuses the build: measured before this existed,
+// `--targets=win-x64` refused an unguarded routed import (WSAStartup) from
+// the discarded linux-x64 slice, and `--targets=linux-x64` refused an
+// unguarded syscall_raw from the discarded win-x64 slice. 1 outside
+// compile_fat (a single-target build always ships), 1 for every slice of a
+// default/`all` fat build, else the slice's --targets bit (see target_mask).
+static uint64 in_compile_fat = 0
+
+fn fat_slice_ships() -> uint64 {
+    if in_compile_fat == 0 { return 1 }
+    if target_mask == 0 { return 1 }
+    uint64 fsb = 0
+    if target_os == 0 { fsb = 0 }
+    if target_os == 2 { fsb = 2 }
+    if target_os == 1 { fsb = 4 }
+    if target_os == 3 {
+        // android-arm64 is bit 6 and android-x64 bit 7 (the reverse of the
+        // other three OS pairs).
+        if target_arch == 1 { return (target_mask >> 6) & 1 }
+        return (target_mask >> 7) & 1
+    }
+    if target_arch == 1 { fsb = fsb + 1 }
+    return (target_mask >> fsb) & 1
+}
+
 fn slot_load_u64(uint64 p) -> uint64 {
     uint64 v = 0
     unsafe { *(p as uint64) -> v }
@@ -5963,6 +5992,7 @@ fn compress_pair_best(
 
 fn compile_fat(uint64 input_path, uint64 output_path) {
     uint64 t_start_fat = time_ns()
+    in_compile_fat = 1
     import_init()
     import_check_file(input_path)
     import_process(input_path)
@@ -7019,6 +7049,7 @@ fn compile_fat(uint64 input_path, uint64 output_path) {
 
     // Reset target_os for fat binary emission
     target_os = 0
+    in_compile_fat = 0
 
     // === BCJ filter before compression ===
     // x86_64 slices: filter E8/E9 CALL/JMP
