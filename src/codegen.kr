@@ -320,6 +320,23 @@ static uint64 static_fkinds = 0
 // the static's exact type (signedness, float-ness), not just float-ness.
 static uint64 static_kinds = 0
 
+// Per-static DECLARATION record (u64 each) — parallel to static_table. What
+// the duplicate-declaration check (parser.kr, p_static_dup_check) needs about
+// the FIRST declaration of a name to judge a later one:
+//   bits  0..31  the type token as written (`uint64`, `Point`, ...)
+//   bit  32      declared `const`
+//   bit  33      declared `@shared`
+// Written by static_set_decl_last right after static_declare*, which zero it.
+static uint64 static_decls = 0
+
+// --report-duplicates: report every duplicate static/const as a WARNING and
+// keep the historical behaviour (the later declaration appends a dead slot,
+// the first one wins every lookup). An internal switch for sweeping a tree
+// before the error lands in it -- never the default.
+static uint64 static_dup_report_only = 0
+@export
+fn set_static_dup_report_only(uint64 v) { static_dup_report_only = v }
+
 // Local array element size table — records the per-element size of each
 // local `TYPE[N] name` declaration so that index reads/writes can scale the
 // index and use the right load/store width. Without this, u64[N]/u32[N]/
@@ -483,10 +500,10 @@ fn static_fixups_ensure() {
     static_fixup_cap = static_fixup_cap * 2
 }
 
-// Ensure one free slot in all six parallel static tables. Doubles on demand.
+// Ensure one free slot in all seven parallel static tables. Doubles on demand.
 //
-// SIX TABLES, ONE COUNT, ONE CAPACITY. They are indexed by the same static
-// number, so growing five of them is a silent out-of-bounds write on the sixth
+// SEVEN TABLES, ONE COUNT, ONE CAPACITY. They are indexed by the same static
+// number, so growing six of them is a silent out-of-bounds write on the seventh
 // -- which is why the capacity was a single name even when it was a constant.
 //
 // THE NEW TAIL IS ZEROED, and that is a correctness requirement rather than
@@ -509,12 +526,14 @@ fn static_table_ensure() {
     static_elem_sizes  = grow_buf(static_elem_sizes,  static_cap * 4, ncap * 4)
     static_fkinds      = grow_buf(static_fkinds,      static_cap * 4, ncap * 4)
     static_kinds       = grow_buf(static_kinds,       static_cap * 4, ncap * 4)
+    static_decls       = grow_buf(static_decls,       static_cap * 8, ncap * 8)
     memset(static_table       + static_cap * 8, 0, static_cap * 8)
     memset(static_array_sizes + static_cap * 4, 0, static_cap * 4)
     memset(static_init_values + static_cap * 8, 0, static_cap * 8)
     memset(static_elem_sizes  + static_cap * 4, 0, static_cap * 4)
     memset(static_fkinds      + static_cap * 4, 0, static_cap * 4)
     memset(static_kinds       + static_cap * 4, 0, static_cap * 4)
+    memset(static_decls       + static_cap * 8, 0, static_cap * 8)
     static_cap = ncap
 }
 
@@ -575,12 +594,14 @@ fn codegen_init(uint64 capacity, uint64 source, uint64 tokens) {
     static_elem_sizes = alloc(static_cap * 4)
     static_fkinds = alloc(static_cap * 4)
     static_kinds = alloc(static_cap * 4)
+    static_decls = alloc(static_cap * 8)
     memset(static_table, 0, static_cap * 8)
     memset(static_array_sizes, 0, static_cap * 4)
     memset(static_init_values, 0, static_cap * 8)
     memset(static_elem_sizes, 0, static_cap * 4)
     memset(static_fkinds, 0, static_cap * 4)
     memset(static_kinds, 0, static_cap * 4)
+    memset(static_decls, 0, static_cap * 8)
     slice_len_table = alloc(32 * 8)
     device_table = alloc(64 * 16)
     device_field_table = alloc(256 * 16)
@@ -2455,6 +2476,10 @@ fn static_declare(uint64 name_tok) -> uint64 {
     // Default fkind = 0 (int/other)
     uint64 fk = static_fkinds + static_count * 4
     unsafe { *(fk as uint32) = zero32 }
+    // Declaration record: written explicitly, because a re-parse (one per fat
+    // slice) reuses the slots with static_count back at 0.
+    uint64 dr = static_decls + static_count * 8
+    unsafe { *(dr as uint64) = 0 }
     static_count = static_count + 1
     static_data_size = static_data_size + 8
     return offset
@@ -2493,6 +2518,94 @@ fn static_set_kind_last(uint64 kind) {
     uint64 ep = static_kinds + idx * 4
     uint32 k32 = kind
     unsafe { *(ep as uint32) = k32 }
+}
+
+// ---------------------------------------------------------------------------
+// Duplicate-declaration support (parser.kr, p_static_dup_check and friends).
+// Everything here reads or writes ONE NAMED index -- never "the last one" --
+// because a duplicate that is accepted (`@shared`) is merged into the FIRST
+// declaration's entry, and the *_last setters above would hit some other
+// static entirely.
+// ---------------------------------------------------------------------------
+
+// Record the declaration of the most recently declared static: the type token
+// as written plus the const/@shared bits (see static_decls).
+@export
+fn static_set_decl_last(uint64 type_tok, uint64 flags) {
+    if static_count == 0 { return }
+    uint64 idx = static_count - 1
+    uint64 dr = static_decls + idx * 8
+    uint64 v = (type_tok & 0xFFFFFFFF) | (flags << 32)
+    unsafe { *(dr as uint64) = v }
+}
+
+// The index of an ALREADY-DECLARED static or const named like name_tok in this
+// parse, or 0xFFFFFFFF. BOUNDED BY static_count, and the bound is load-bearing:
+// a fat build re-parses once per slice with static_count back at 0 while the
+// name hash still holds the previous slice's placements, so without it a
+// name's first declaration in slice 2 finds ITSELF (its slice-1 index, which
+// is exactly the static_count it is about to be registered at) and every fat
+// build of a program with a static is refused.
+@export
+fn static_prior_index(uint64 name_tok) -> uint64 {
+    uint64 idx = static_index_of(name_tok)
+    if idx == 0xFFFFFFFF { return 0xFFFFFFFF }
+    if idx >= static_count { return 0xFFFFFFFF }
+    return idx
+}
+
+@export
+fn static_decl_at(uint64 idx) -> uint64 {
+    uint64 dr = static_decls + idx * 8
+    uint64 v = 0
+    unsafe { *(dr as uint64) -> v }
+    return v
+}
+
+@export
+fn static_name_tok_at(uint64 idx) -> uint64 {
+    uint64 entry = static_table + idx * 8
+    uint32 nt = 0
+    unsafe { *(entry as uint32) -> nt }
+    return nt
+}
+
+@export
+fn static_kind_at(uint64 idx) -> uint64 {
+    uint64 ep = static_kinds + idx * 4
+    uint32 k = 0
+    unsafe { *(ep as uint32) -> k }
+    return k
+}
+
+@export
+fn static_array_size_at(uint64 idx) -> uint64 {
+    uint64 ae = static_array_sizes + idx * 4
+    uint32 sz = 0
+    unsafe { *(ae as uint32) -> sz }
+    return sz
+}
+
+@export
+fn static_elem_size_at(uint64 idx) -> uint64 {
+    uint64 es = static_elem_sizes + idx * 4
+    uint32 sz = 0
+    unsafe { *(es as uint32) -> sz }
+    return sz
+}
+
+@export
+fn static_init_at(uint64 idx) -> uint64 {
+    uint64 iv = static_init_values + idx * 8
+    uint64 v = 0
+    unsafe { *(iv as uint64) -> v }
+    return v
+}
+
+@export
+fn static_set_init_at(uint64 idx, uint64 value) {
+    uint64 iv = static_init_values + idx * 8
+    unsafe { *(iv as uint64) = value }
 }
 
 // The compile-time initial value recorded for a const or static, by name_tok.
@@ -2713,6 +2826,8 @@ fn static_declare_array(uint64 name_tok, uint64 byte_size) -> uint64 {
     uint64 fkp = static_fkinds + static_count * 4
     uint32 zero_fk = 0
     unsafe { *(fkp as uint32) = zero_fk }
+    uint64 dra = static_decls + static_count * 8
+    unsafe { *(dra as uint64) = 0 }
     static_count = static_count + 1
     // Allocate byte_size bytes, padded to 8-byte boundary
     uint64 padded = byte_size

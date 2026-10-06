@@ -23,8 +23,12 @@ static uint64 a64_digit_buf = 0
 // ---------------------------------------------------------------------------
 // [patch_offset(4), iat_slot(4)] × 1024
 // patch_offset points to the MOVZ instruction that starts the IAT call sequence
-static uint64 a64_win_iat_fixups = 0
-static uint64 a64_win_iat_fixup_count = 0
+//
+// The table itself -- a64_win_iat_fixups / a64_win_iat_fixup_count -- is
+// declared in codegen.kr beside its x86_64 twin, and allocated there in
+// codegen_init. It was declared HERE as well, which compiled only because
+// duplicate statics used to alias silently into one slot; they are refused
+// now, and this copy was the redundant one.
 
 // ---------------------------------------------------------------------------
 // AArch64 instruction emitters

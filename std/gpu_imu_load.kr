@@ -13,9 +13,8 @@
 import "gpu_portable.kr"
 import "gpu_navi32.kr"
 
-// common_firmware_header + imu_firmware_header_v1_0 field offsets
-static u64 CMNH_UCODE_VERSION = 0x10
-static u64 CMNH_UCODE_ARR_OFF = 0x18
+// imu_firmware_header_v1_0 field offsets (the common_firmware_header ones,
+// CMNH_*, are in gpu_navi32.kr)
 static u64 IMUH_IRAM_SIZE = 0x20
 static u64 IMUH_IRAM_OFF  = 0x24
 static u64 IMUH_DRAM_SIZE = 0x28

@@ -9337,6 +9337,11 @@ fn main() {
                 // that a prefix match would also swallow "-wsomething" and
                 // silently accept a typo.
                 diag_set_no_warnings(1)
+            } else if str_eq_full(arg, "--report-duplicates") != 0 {
+                // Internal, undocumented in --help: report every duplicate
+                // static/const as a warning instead of refusing it, so a tree
+                // can be swept before the error lands in it. Exact match.
+                set_static_dup_report_only(1)
             } else if str_starts_with(arg, "--asm-strict", 12) != 0 {
                 asm_strict = 1
             } else if str_starts_with(arg, "--no-check-types", 16) != 0 {

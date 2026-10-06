@@ -9,9 +9,8 @@
 import "gpu_portable.kr"
 import "gpu_navi32.kr"
 
-static u64 CMNH_UCODE_VERSION = 0x10
+// CMNH_UCODE_VERSION / CMNH_UCODE_ARR_OFF: gpu_navi32.kr
 static u64 CMNH_UCODE_SIZE    = 0x14
-static u64 CMNH_UCODE_ARR_OFF = 0x18
 fn rlc_ucode_size(u64 fw) -> u64 { return load32(fw + CMNH_UCODE_SIZE) }
 fn rlc_ucode_off(u64 fw)  -> u64 { return load32(fw + CMNH_UCODE_ARR_OFF) }
 fn rlc_version(u64 fw)    -> u64 { return load32(fw + CMNH_UCODE_VERSION) }

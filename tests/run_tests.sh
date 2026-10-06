@@ -26779,6 +26779,268 @@ rm -rf "$LOG_D"
 
 rm -rf "$G18L_D"
 
+# --- Duplicate `static` / `const` declarations, and `@shared` (spec C8) -----
+#
+# Two declarations of one name used to ALIAS SILENTLY into one slot: the second
+# appended a dead slot, every lookup found the first, the first initializer won
+# and conflicting types compiled. ApexRift carried a live bug of that shape --
+# the local console's escape-sequence state and the remote shell's were one
+# variable, because kernel.kr and core/ansi.kr each declared `ansi_state`.
+# Measured over every KernRift and ApexRift build input before the error went
+# on: 11 such duplicates, none of them consts, none deliberate.
+#
+# Every row compiles files in a scratch directory by ABSOLUTE path, so the
+# located messages carry that path and the rows can pin BOTH sites exactly.
+# An imported file is parsed BEFORE its importer: a.kr is always "first".
+DUP_D=$(mktemp -d /tmp/krdup_XXXXXX)
+dup_put() { printf '%s\n' "$2" > "$DUP_D/$1"; }
+# dup_reject <row> <needle>... -- m.kr must be refused, printing every needle;
+# a needle starting with '!' must NOT be printed.
+dup_reject() {
+    local name="$1"; shift
+    TOTAL=$((TOTAL + 1))
+    local out rc n
+    out=$($KRC $KRC_FLAGS "$DUP_D/m.kr" -o "$DUP_D/m.bin" 2>&1); rc=$?
+    rm -f "$DUP_D/m.bin"
+    if [ $rc -eq 0 ]; then
+        FAIL=$((FAIL + 1)); echo "FAIL: $name (compiled; expected a refusal)"; return
+    fi
+    for n in "$@"; do
+        if [ "${n#!}" != "$n" ]; then
+            if printf '%s' "$out" | grep -qF -- "${n#!}"; then
+                FAIL=$((FAIL + 1)); echo "FAIL: $name (printed '${n#!}', which it must not)"; return
+            fi
+        elif ! printf '%s' "$out" | grep -qF -- "$n"; then
+            FAIL=$((FAIL + 1)); echo "FAIL: $name (refused, but did not print '$n')"
+            printf '%s\n' "$out" | grep -m2 -E 'error|warning' | sed 's/^/    /'; return
+        fi
+    done
+    PASS=$((PASS + 1)); echo "  $name: PASS"
+}
+# dup_run <row> <expected exit> [program args...] -- m.kr must compile and the
+# program must exit with the expected code.
+dup_run() {
+    local name="$1" want="$2"; shift 2
+    TOTAL=$((TOTAL + 1))
+    local out got
+    if ! out=$($KRC $KRC_FLAGS "$DUP_D/m.kr" -o "$DUP_D/m.bin" 2>&1); then
+        FAIL=$((FAIL + 1)); echo "FAIL: $name (compilation failed)"
+        printf '%s\n' "$out" | grep -m2 error | sed 's/^/    /'; return
+    fi
+    chmod +x "$DUP_D/m.bin"
+    "$DUP_D/m.bin" "$@" > /dev/null 2>&1; got=$?
+    rm -f "$DUP_D/m.bin"
+    if [ "$got" = "$want" ]; then
+        PASS=$((PASS + 1)); echo "  $name: PASS (exit $got)"
+    else
+        FAIL=$((FAIL + 1)); echo "FAIL: $name (expected exit $want, got $got)"
+    fi
+}
+DUP_STATIC_ADVICE='; rename one, or mark EVERY declaration `@shared` if they are meant to be the same variable'
+
+# Two files: the error is located at the SECOND declaration and names the
+# first, and the text is the whole of the static remedy.
+dup_put a.kr 'static uint64 counter = 1
+fn a_get() -> uint64 { return counter }'
+dup_put m.kr 'import "a.kr"
+static uint64 counter = 2
+fn main() -> uint64 { return a_get() }'
+dup_reject "dup_static_two_files_refused" \
+    "$DUP_D/m.kr:2:15: error: duplicate static \`counter\` (first declared at $DUP_D/a.kr:1)$DUP_STATIC_ADVICE"
+
+# Same file -- most of the measured hits were.
+dup_put m.kr 'static uint64 x = 1
+fn main() -> uint64 { return x }
+static uint64 x = 2'
+dup_reject "dup_static_same_file_refused" \
+    "$DUP_D/m.kr:3:15: error: duplicate static \`x\` (first declared at $DUP_D/m.kr:1)$DUP_STATIC_ADVICE"
+
+# Consts are never shared, so their text carries no @shared advice -- whichever
+# of the two declarations is the const.
+dup_put m.kr 'const uint64 K = 1
+const uint64 K = 2
+fn main() -> uint64 { return K }'
+dup_reject "dup_const_const_refused" \
+    "$DUP_D/m.kr:2:14: error: duplicate const \`K\` (first declared at $DUP_D/m.kr:1); keep one definition" '!@shared'
+dup_put m.kr 'const uint64 K = 1
+static uint64 K = 2
+fn main() -> uint64 { return K }'
+dup_reject "dup_const_then_static_refused" \
+    "$DUP_D/m.kr:2:15: error: duplicate const \`K\` (first declared at $DUP_D/m.kr:1); keep one definition" '!@shared'
+dup_put m.kr 'static uint64 K = 1
+const uint64 K = 2
+fn main() -> uint64 { return K }'
+dup_reject "dup_static_then_const_refused" \
+    "$DUP_D/m.kr:2:14: error: duplicate const \`K\` (first declared at $DUP_D/m.kr:1); keep one definition" '!@shared'
+
+# @shared must be on EVERY declaration: a mixed set is the plain error, in
+# either order.
+dup_put a.kr '@shared
+static uint64 v
+fn a_get() -> uint64 { return v }'
+dup_put m.kr 'import "a.kr"
+static uint64 v
+fn main() -> uint64 { return a_get() }'
+dup_reject "dup_shared_then_plain_refused" \
+    "$DUP_D/m.kr:2:15: error: duplicate static \`v\` (first declared at $DUP_D/a.kr:2)$DUP_STATIC_ADVICE"
+dup_put a.kr 'static uint64 v
+fn a_get() -> uint64 { return v }'
+dup_put m.kr 'import "a.kr"
+@shared
+static uint64 v
+fn main() -> uint64 { return a_get() }'
+dup_reject "dup_plain_then_shared_refused" \
+    "$DUP_D/m.kr:3:15: error: duplicate static \`v\` (first declared at $DUP_D/a.kr:1)$DUP_STATIC_ADVICE"
+
+# Conflicting types are an error even with @shared: one row per component of
+# the type, each built so that ONLY that component's check can name it (they
+# run in this order, and each pair agrees on every component checked before).
+dup_type_row() {   # <row> <a.kr decl> <m.kr decl> <component> [extra a.kr lines]
+    dup_put a.kr "$5
+@shared
+$2"
+    dup_put m.kr "import \"a.kr\"
+@shared
+$3
+fn main() -> uint64 { return 0 }"
+    local aline; aline=$(grep -n '^@shared' "$DUP_D/a.kr" | head -1 | cut -d: -f1); aline=$((aline + 1))
+    dup_reject "$1" "$DUP_D/m.kr:3:" "@shared static \`b\` is declared with a different $4 than its first declaration at $DUP_D/a.kr:$aline; every declaration of a shared static must have the identical type"
+}
+dup_type_row "dup_shared_array_size_refused"  'static u8[8] b'   'static u8[16] b'  "array size"
+dup_type_row "dup_shared_elem_size_refused"   'static u8[8] b'   'static u64[1] b'  "element size"
+dup_type_row "dup_shared_struct_type_refused" 'static SA b'      'static SB b'      "struct type" \
+    'struct SA { uint64 x }
+struct SB { uint64 y }'
+dup_type_row "dup_shared_type_keyword_refused" 'static uint32 b' 'static uint64 b'  "type"
+dup_type_row "dup_shared_type_named_refused"   'static TA b'     'static TB b'      "type" \
+    'type TA = uint64
+type TB = uint64'
+
+# @shared binds to the next declaration; on anything but a static it is refused
+# rather than ignored.
+dup_put m.kr '@shared
+const uint64 K = 1
+fn main() -> uint64 { return K }'
+dup_reject "shared_on_const_refused" "$DUP_D/m.kr:1:2: error: @shared applies only to a \`static\` declaration"
+dup_put m.kr '@shared
+fn f() -> uint64 { return 1 }
+fn main() -> uint64 { return f() }'
+dup_reject "shared_on_fn_refused" "$DUP_D/m.kr:1:2: error: @shared applies only to a \`static\` declaration"
+
+# The merge: ONE variable, and the one non-zero initializer wins wherever it is
+# written -- here in the LATER-parsed file, which the old first-wins aliasing
+# lost. main bumps it through its own declaration and reads it back through
+# a.kr's: 42 + 1.
+#
+# `w` sits between the two declarations in all three merge rows below, so the
+# entry most recently REGISTERED is not v's: a follow-up that writes "the last
+# static" -- the parser's *_last setters -- instead of the first declaration
+# lands on w, and the row sees it (v keeps 0, and w is not 1).
+dup_put a.kr '@shared
+static uint64 v
+fn a_get() -> uint64 { return v }'
+dup_put m.kr 'import "a.kr"
+static uint64 w = 1
+@shared
+static uint64 v = 42
+fn main() -> uint64 { v = v + w  return a_get() }'
+dup_run "dup_shared_later_initializer_wins" 43
+# And an explicit `= 0` in the later file does NOT clobber the first's value:
+# the parser calls the initializer setter for `= 0` too.
+dup_put a.kr '@shared
+static uint64 v = 7
+fn a_get() -> uint64 { return v }'
+dup_put m.kr 'import "a.kr"
+static uint64 w = 1
+@shared
+static uint64 v = 0
+fn main() -> uint64 { return a_get() * w }'
+dup_run "dup_shared_zero_initializer_keeps_first" 7
+# A float initializer goes through its own setter call; 2.5 * 2 read back via
+# a.kr, whose declaration (first) carries the float kind. Nor may the merged
+# declaration's TYPE land on w: `let t = w` infers t's type from w's recorded
+# kind, and an f64 kind there makes t * 3 float arithmetic on integer bits.
+# 5 + 1 * 3.
+dup_put a.kr '@shared
+static f64 v
+fn a_get() -> uint64 { return f64_to_int(v * 2.0) }'
+dup_put m.kr 'import "a.kr"
+static uint64 w = 1
+@shared
+static f64 v = 2.5
+fn main() -> uint64 { let t = w  return a_get() + t * 3 }'
+dup_run "dup_shared_float_initializer_merged" 8
+# Two non-zero initializers is an error, even when they agree.
+dup_put a.kr '@shared
+static uint64 v = 1
+fn a_get() -> uint64 { return v }'
+dup_put m.kr 'import "a.kr"
+@shared
+static uint64 v = 1
+fn main() -> uint64 { return a_get() }'
+dup_reject "dup_shared_two_initializers_refused" \
+    "$DUP_D/m.kr:3:15: error: @shared static \`v\` has a second non-zero initializer (the first declaration at $DUP_D/a.kr:2 already has one)"
+# Identical struct types merge (the struct compare is not over-strict): a field
+# written through one declaration is read through the other.
+dup_put a.kr 'struct P { uint64 x
+uint64 y }
+@shared
+static P p
+fn a_get() -> uint64 { return p.y }'
+dup_put m.kr 'import "a.kr"
+@shared
+static P p
+fn main() -> uint64 { p.y = 9  return a_get() }'
+dup_run "dup_shared_struct_accepted" 9
+# The convention @shared exists for: cli_argc declared by a program AND by a
+# file it imports is one variable, the one the startup code fills. 4 = the
+# program plus three arguments, seen through both declarations.
+dup_put a.kr '@shared
+static uint64 cli_argc
+fn a_argc() -> uint64 { return cli_argc }'
+dup_put m.kr 'import "a.kr"
+@shared
+static uint64 cli_argc
+fn main() -> uint64 { return a_argc() * 10 + cli_argc }'
+dup_run "dup_shared_cli_argc_one_variable" 44 x y z
+
+# --report-duplicates, the internal sweep switch: a warning naming both sites,
+# and the historical behaviour (first declaration wins: 1, not 2).
+dup_put a.kr 'static uint64 counter = 1
+fn a_get() -> uint64 { return counter }'
+dup_put m.kr 'import "a.kr"
+static uint64 counter = 2
+fn main() -> uint64 { return a_get() }'
+TOTAL=$((TOTAL + 1))
+DUPR_OUT=$($KRC $KRC_FLAGS --report-duplicates "$DUP_D/m.kr" -o "$DUP_D/m.bin" 2>&1); DUPR_RC=$?
+if [ $DUPR_RC -ne 0 ]; then
+    FAIL=$((FAIL + 1)); echo "FAIL: dup_report_only_warns_and_builds (refused under --report-duplicates)"
+elif ! printf '%s' "$DUPR_OUT" | grep -qF "$DUP_D/m.kr:2:15: warning: duplicate static \`counter\` (first declared at $DUP_D/a.kr:1)"; then
+    FAIL=$((FAIL + 1)); echo "FAIL: dup_report_only_warns_and_builds (no located warning)"
+else
+    chmod +x "$DUP_D/m.bin"; "$DUP_D/m.bin" > /dev/null 2>&1; DUPR_GOT=$?
+    if [ "$DUPR_GOT" = "1" ]; then
+        PASS=$((PASS + 1)); echo "  dup_report_only_warns_and_builds: PASS"
+    else
+        FAIL=$((FAIL + 1)); echo "FAIL: dup_report_only_warns_and_builds (exit $DUPR_GOT, want the historical first-wins 1)"
+    fi
+fi
+
+# A FAT build parses the program once per slice with the static table restarted
+# and the name hash still holding the previous slice's entries. A name's first
+# declaration in slice 2 must not read as a duplicate of itself.
+dup_put m.kr 'static uint64 s1 = 3
+static uint64 s2 = 4
+fn main() -> uint64 { return s1 + s2 }'
+TOTAL=$((TOTAL + 1))
+DUPF_OUT=$("$DIR/../build/krc2" "$DUP_D/m.kr" -o "$DUP_D/m.krbo" 2>&1); DUPF_RC=$?
+if [ $DUPF_RC -eq 0 ] && ! printf '%s' "$DUPF_OUT" | grep -q "duplicate"; then
+    PASS=$((PASS + 1)); echo "  dup_check_fat_reparse_clean: PASS"
+else
+    FAIL=$((FAIL + 1)); echo "FAIL: dup_check_fat_reparse_clean (rc=$DUPF_RC: $(printf '%s' "$DUPF_OUT" | grep -m1 error))"
+fi
+rm -rf "$DUP_D"
+
 # --- Documentation pin 5, PART B (see Part A above) --------------------------
 # README.md advertises this suite's test count. Compare it against the total
 # only now, when $TOTAL is final and already includes this row (Part A did the

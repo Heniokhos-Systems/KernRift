@@ -41,12 +41,11 @@ fn cp_start(u64 fw) -> u64 {
     return lo | (hi << 32)
 }
 
-// GRBM select (soc21_grbm_select target)
-static u64 regGRBM_GFX_CNTL        = 0x0900
+// GRBM select (soc21_grbm_select target): regGRBM_GFX_CNTL, in gpu_navi32.kr.
 
 // CP RS64 registers (dword, BASE_IDX 1 -> GC1 base)
 static u64 regCP_ME_CNTL           = 0x0803
-static u64 regCP_STAT              = 0x0f40
+// regCP_STAT is in gpu_navi32.kr.
 // --- PFP instruction cache ---
 static u64 regCP_PFP_IC_BASE_LO    = 0x5840
 static u64 regCP_PFP_IC_BASE_HI    = 0x5841

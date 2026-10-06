@@ -852,6 +852,38 @@ const u64 UART_BASE = 0x3F201000
 `const` creates a compile-time integer constant. At use sites the value is
 inlined — there is no runtime storage.
 
+### One declaration per name, and `@shared`
+
+A name may be declared as a `static` or a `const` **once** per compilation —
+the whole import graph of one `krc` invocation, the same file included. A second
+declaration is a compile error naming both sites:
+
+```
+b.kr:3:15: error: duplicate static `count` (first declared at a.kr:7); rename one, or mark EVERY declaration `@shared` if they are meant to be the same variable
+k.kr:2:14: error: duplicate const `K` (first declared at k.kr:1); keep one definition
+```
+
+(Until this was an error, the second declaration silently became the SAME
+variable as the first — first initializer kept, conflicting types accepted.)
+
+When two files really are meant to share one variable — the `cli_argc` /
+`cli_argv` convention, where a library and the program both name the static
+the startup code fills — mark **every** declaration `@shared`:
+
+```kr
+// args.kr                          // main.kr
+@shared                             import "args.kr"
+static u64 cli_argc                 @shared
+                                    static u64 cli_argc
+```
+
+`@shared` declarations of one name are accepted only when all of them carry
+it, all have the identical type (type name, array size, element size, struct
+type) and at most one has a non-zero initializer — that one is the value,
+whichever file it is in. A mixed set, a type mismatch or two initializers is an
+error. `@shared` applies to `static` only: consts are never shared (keep one
+definition), and `@shared` on anything else is refused.
+
 ---
 
 ## 11. Pointer operations
@@ -1653,6 +1685,19 @@ fn str_len(uint64 s) -> uint64 {
 `extern fn write(...)` shadows the built-in without any annotation
 (see section 24). Struct methods (`fn Type.name`) never collide with
 built-ins — they dispatch via dot syntax — so they need no annotation.
+
+### `@shared`
+
+Placed on a `static`: the static is deliberately declared in more than one file
+and every declaration is the same variable. Every declaration of the name must
+carry it, with the identical type and at most one non-zero initializer. See
+[One declaration per name, and `@shared`](#one-declaration-per-name-and-shared)
+in section 10.
+
+```kr
+@shared
+static u64 cli_argc
+```
 
 ### `@packed`
 

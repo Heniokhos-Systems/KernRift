@@ -35,7 +35,7 @@ fn mes_uc_start(u64 fw) -> u64 {
 }
 
 // ---- GRBM select (soc21_grbm_select target, BASE_IDX 1 -> GC1 base) ----
-static u64 regGRBM_GFX_CNTL              = 0x0900
+// regGRBM_GFX_CNTL is in gpu_navi32.kr, shared with gpu_cp_load.kr.
 
 // ---- CP_MES registers (dword offsets, BASE_IDX 1 -> GC1 base) ----
 static u64 regCP_MES_PRGRM_CNTR_START    = 0x2800
