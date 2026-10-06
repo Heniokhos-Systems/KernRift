@@ -5835,6 +5835,38 @@ else
 fi
 rm -f /tmp/krc_venc_$$.kr /tmp/krc_venc_out_$$ "$VENC_LISTING"
 
+# A barrier must stop CSE of a static load. isb/dcache_flush/icache_invalidate/
+# dsb/dmb (IR ops 126-130) were missing from ir_opt_cse_invalidates, so
+# `a = g; dmb(); b = g` emitted ONE load of g and the barrier ordered nothing:
+# a value another core or a device published behind the barrier was never
+# re-read. Observing that at run time needs a second agent writing g, so pin
+# the code instead: exactly two loads of g, on both IR backends that implement
+# the barriers (riscv32 and xtensa reject ops 126-130 loudly; their fences
+# exist only as inline asm, which already invalidates). The listing goes to
+# the -o path.
+for BAR in "isb()" "dsb()" "dmb()" "dcache_flush(0)" "icache_invalidate(0)"; do
+    for BARCH in x86_64 arm64; do
+        TOTAL=$((TOTAL + 1))
+        printf 'static u64 g = 5\nfn main() {\n    u64 a = g\n    %s\n    u64 b = g\n    exit(a + b)\n}\n' "$BAR" > /tmp/krc_bcse_$$.kr
+        rm -f /tmp/krc_bcse_$$.s
+        BCSE_N="no listing"
+        if $KRC --arch=$BARCH --emit=asm /tmp/krc_bcse_$$.kr -o /tmp/krc_bcse_$$.s > /dev/null 2>&1 && [ -f /tmp/krc_bcse_$$.s ]; then
+            if [ "$BARCH" = "x86_64" ]; then
+                BCSE_N=$(grep -acE 'mov r[a-z0-9]+, \[rip' /tmp/krc_bcse_$$.s)
+            else
+                BCSE_N=$(grep -acE 'ldr x[0-9]+, \[x16' /tmp/krc_bcse_$$.s)
+            fi
+        fi
+        if [ "$BCSE_N" = "2" ]; then
+            PASS=$((PASS + 1))
+        else
+            echo "FAIL: barrier_stops_static_cse $BARCH $BAR (static loads: $BCSE_N, want 2)"
+            FAIL=$((FAIL + 1))
+        fi
+    done
+done
+rm -f /tmp/krc_bcse_$$.kr /tmp/krc_bcse_$$.s
+
 echo ""
 echo "--- v2.6 method calls ---"
 run_test "method_call" 'struct P { u64 x; u64 y }

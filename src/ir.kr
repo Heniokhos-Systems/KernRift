@@ -13615,6 +13615,11 @@ fn ir_opt_cse_invalidates(uint64 op) -> uint64 {
     if op == 87 { return 1 }  // CALL_IND
     if op >= 90 && op <= 96 { return 1 }    // atomics, vstore/vload, asm
     if op >= 109 && op <= 115 { return 1 }  // atomic RMW, exec, set_exec
+    // isb / dcache_flush / icache_invalidate / dsb / dmb. A barrier exists to
+    // make a later read observe what another agent (core, device, DMA) wrote,
+    // so a static_load must not be CSE'd across one: `a = g; dmb(); b = g`
+    // emitted a single load of g, with the barrier ordering nothing.
+    if op >= 126 && op <= 130 { return 1 }
     return 0
 }
 

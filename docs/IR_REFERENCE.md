@@ -76,7 +76,7 @@ single-def checks; see §10.
 The `next` field is why the arena is *not* walked as a contiguous index
 range. LICM appends hoisted instructions at high indices and splices them
 into a preheader's list; liveness and colouring walk the linked list, which
-is what makes that correct (`src/ir.kr:14038`–`13024`).
+is what makes that correct (`src/ir.kr:14043`–`13024`).
 
 Three parallel, index-keyed side tables share `ir_insn_cap` and leave the
 32-byte record untouched:
@@ -303,7 +303,7 @@ function main:
 - `v0 = ret v7` — `v0` is the reserved "no destination" vreg.
 - `arg v1 [0]` — argument position in `imm`.
 - Blocks print in index order, which is *also* the emission order
-  (`src/ir.kr:15058`), but not the order the lowering created edges in: an
+  (`src/ir.kr:15063`), but not the order the lowering created edges in: an
   `if`'s join block can have a lower index than its `else` arm.
 
 ---
@@ -365,7 +365,7 @@ Notes, all verified:
   `ir_opt_const_fold` rewrites `IR_ADD`/`IR_SUB`/`IR_MUL` into them when one
   source is a known constant. 138 fires only for `target_arch == 0`
   (`src/ir.kr:13084`); 139's producer is gated to arch 0 and 1
-  (`src/ir.kr:14118`).
+  (`src/ir.kr:14123`).
 
 ### 5.2 Compares (14–19 unsigned, 120–123 signed)
 
@@ -411,7 +411,7 @@ is false; it is still present in MLRift's copy of this document.)*
 - **`IR_FFMA` is a misnomer.** It emits `mulsd` + `addsd` on x86_64
   (verified by disassembly: no `vfmadd`) and `FMUL d0` + `FADD` on arm64
   (`src/ir_aarch64.kr:2987`/`2871`). Two roundings, not one — results differ
-  from a true FMA. The source says so at `src/ir.kr:13912`: *"The current
+  from a true FMA. The source says so at `src/ir.kr:13917`: *"The current
   FFMA emit isn't actually a hardware FMA instruction — it just inlines
   mulsd+addsd back-to-back."* Its value is skipping the GPR round-trip
   between the FMUL and the FADD, not accuracy.
@@ -458,7 +458,7 @@ is false; it is still present in MLRift's copy of this document.)*
   interference. Get this wrong and you get a use-after-free of a register.
   See the constant's comment, `src/ir.kr:203`–`205`.
 - **147/148 are arm64-only.** Produced solely by `ir_opt_fuse_lea_mem`, which
-  is called under `if target_arch == 1` (`src/ir.kr:14038`). Handlers exist
+  is called under `if target_arch == 1` (`src/ir.kr:14043`). Handlers exist
   only at `src/ir_aarch64.kr:1438` and `1412`.
 
 ### 5.5 Control flow (40–43, 50–52, 61, 85–87)
@@ -478,7 +478,7 @@ is false; it is still present in MLRift's copy of this document.)*
 | 87 | `IR_CALL_IND` | `dest = (*src1)()` | **SE** |
 
 - **`IR_BR_COND` does not "fall through".** The false target is the block's
-  `succ0` field, read separately (`src/ir.kr:15178`). The emitter then picks
+  `succ0` field, read separately (`src/ir.kr:15183`). The emitter then picks
   one of four layout cases against the *next* block index — both-next (emit
   nothing), true-next (invert the condition, one `jcc`), false-next (`jcc`,
   no trailing `jmp`), neither (`jcc` + `jmp`). If you write a pass that
@@ -486,7 +486,7 @@ is false; it is still present in MLRift's copy of this document.)*
   the terminator's `imm`.
 - Terminators are **not** emitted from the per-instruction dispatch on any
   backend. x86 has explicit no-op cases at `src/ir.kr:12681`/`11713` and
-  skips them in the block loop (`src/ir.kr:15078`); arm64/riscv32/xtensa have
+  skips them in the block loop (`src/ir.kr:15083`); arm64/riscv32/xtensa have
   no case at all and emit terminators in their function-level loop.
 
 ### 5.6 Multi-value returns (80–83)
@@ -857,13 +857,13 @@ alias analysis and a load cannot be assumed to return the same value twice.
 
 ## 10. Optimizer
 
-The driver is `ir_optimize()` (`src/ir.kr:13984`). **There is no
+The driver is `ir_optimize()` (`src/ir.kr:13989`). **There is no
 `ir_opt_run()`** — that name appears only in older revisions of this
 document. It runs once per function, after lowering and before liveness.
 
 `--O0` sets `ir_opt_level = 0` (`src/ir.kr:12739`, written only at
 `src/main.kr:9257`) and each backend skips the whole call
-(`src/ir.kr:14913`, `src/ir_aarch64.kr:3370`, `src/ir_riscv.kr:2414`,
+(`src/ir.kr:14918`, `src/ir_aarch64.kr:3370`, `src/ir_riscv.kr:2414`,
 `src/ir_xtensa.kr:2816`). Note the spelling: **`--O0`**, two dashes. There is
 no `-O0`, `-O1`, `--O2` — no other write to `ir_opt_level` exists.
 
@@ -896,7 +896,7 @@ So const-fold runs once or twice, DCE up to six times, LICM up to eight inner
 iterations, everything else exactly once. **There is no outer fixpoint loop
 over the whole pipeline.**
 
-`ir_licm_enabled` (`src/ir.kr:13962`) gates step 5 but is **never assigned
+`ir_licm_enabled` (`src/ir.kr:13967`) gates step 5 but is **never assigned
 anywhere** — a dead knob with no CLI flag.
 
 Ordering rationale recorded in source, worth preserving:
@@ -910,7 +910,7 @@ Ordering rationale recorded in source, worth preserving:
 - LICM appends hoisted instructions at **high arena indices but low block
   positions**. Anything that assumes instruction index order matches
   execution order breaks. Liveness and `ir_graph_color` are safe only because
-  they walk `ir_build_bb_lists` order (`src/ir.kr:13732`), not index ranges.
+  they walk `ir_build_bb_lists` order (`src/ir.kr:13737`), not index ranges.
 
 ### Per-pass contracts
 
@@ -944,7 +944,10 @@ See §14 for the full list; any divergence between them miscompiles.
 `{op, canon(src1), canon(src2), canon(imm)}` into a 4096-entry
 direct-mapped table; a hit rewrites the instruction to `IR_COPY <earlier>`.
 Any op in `ir_opt_cse_invalidates` (12562) bumps a generation stamp, wiping
-the table in O(1).
+the table in O(1). The barriers 126–130 (`isb`, `dcache_flush`,
+`icache_invalidate`, `dsb`, `dmb`) are in that set: `IR_STATIC_LOAD` is
+CSE-pure, so without them `a = g; dmb(); b = g` folded the second read into
+the first and the barrier ordered nothing.
 
 **`ir_opt_licm` (12988) / `ir_opt_licm_one_pass` (12893)** — crosses blocks.
 Loop metadata comes **only from the `while` lowering** (`src/ir.kr:4902`,
@@ -1064,7 +1067,7 @@ fixup sequences and macOS's syscall-number register) and x18
 `IR_ASM_BLOCK` (op 96) anywhere in its body, or it is `@naked`.
 `ir_x86_fn_wide_ok` (`src/ir.kr:6535`) / `ir_a64_fn_wide_ok`
 (`src/ir_aarch64.kr:289`) test only the former; the call sites
-(`src/ir.kr:14913`, `src/ir_aarch64.kr:3390`) add `&& is_naked == 0`. The asm
+(`src/ir.kr:14918`, `src/ir_aarch64.kr:3390`) add `&& is_naked == 0`. The asm
 check must stay a **whole-body scan, not a constraint-list scan** — the
 comment at `src/ir.kr:6450` records a real case where a CPUID block wrote r13
 with no constraint naming it. `@naked` is excluded because it gets
@@ -1144,7 +1147,7 @@ it as well.
 ### Spilling
 
 **Slots are vreg-indexed, one per vreg**, not a compacted set of spilled
-values: `ir_spill_count = ir_vreg_next - 1` (`src/ir.kr:14880`,
+values: `ir_spill_count = ir_vreg_next - 1` (`src/ir.kr:14885`,
 `src/ir_aarch64.kr:3412`). The comments at `src/ir.kr:8144` and
 `src/ir_aarch64.kr:353` explain why the older `vreg - IR_NUM_REGS - 1`
 mapping was removed: it assumed a low-numbered vreg could never spill, but a
@@ -1531,7 +1534,7 @@ opcodes that were never emitted.
 | `arch_os_pair_supported()` | yes (`src/main.kr:7532`) | **absent** — no arch × OS allow-list |
 | `--target=amdgpu-native` | no | yes |
 | var map | FNV-1a open-addressed 4096-slot hash (`src/ir.kr:993`) | linear scan (`ir.mlr:1013`) |
-| per-BB instruction lists for colouring | flat lists via `ir_build_bb_lists` (`src/ir.kr:13732`) | a 65536-entry walk stack |
+| per-BB instruction lists for colouring | flat lists via `ir_build_bb_lists` (`src/ir.kr:13737`) | a 65536-entry walk stack |
 | CTZ | open-codes `ir_popcount64(iso - 1)` at each site | has `ir_ctz64` (`ir.mlr:5495`) — MLRift is ahead here |
 | builtin-name dispatch | linear | (first char × name length) 128×32 prefilter (`ir_bi_filter_init`, `ir.mlr:916`) — MLRift is ahead |
 | conditional cleanup DCE | yes — `ir_opt_rewrites` deltas gate all six (19 uses in `ir.kr`) | no — all six cleanup DCEs run unconditionally (0 uses). Compile-time only, no codegen difference |
