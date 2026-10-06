@@ -3039,7 +3039,12 @@ the raw `rax`/`x0`: a Win32 `BOOL` or `DWORD` return only defines the low 32
 bits, so mask it (`ok & 0xFFFFFFFF`) before testing it. The name must be
 declared `extern fn` — a function you define yourself with the same name
 (`fn send(...) { ... }`) is an ordinary call to your body — and any other
-unresolved `extern fn` is still refused when building an executable. A routed
+unresolved `extern fn` is still refused when building an executable. The
+reserved prefix `_kr_w32_` names the same imports: `extern fn
+_kr_w32_send(...)` routes to ws2_32's `send` (the loader binds the real
+export name). KernRift's std declares its Win32 externs this way, so they
+never claim `send`, `select`, ... in your program. The prefix is exact and
+case-sensitive and strips once (`_kr_w32__kr_w32_send` is not `send`). A routed
 import has no KernRift address: `fn_addr("WSAStartup")` is refused with an
 error saying it is bound through the IAT. Routing happens only when an
 executable is produced, so `--emit=asm` and `--emit=ir` dumps for

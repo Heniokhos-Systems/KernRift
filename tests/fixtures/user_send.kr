@@ -1,4 +1,4 @@
-// A USER-DEFINED `send` -- the same name as ws2_32's send (IAT slot 24).
+// A USER-DEFINED `send` -- the same name as ws2_32's send import.
 // On a Windows build it must stay an ordinary direct call to this body,
 // never an IAT call: is_routed_win_import requires an `extern fn`.
 // The body is two statements (an assignment) so the inliner cannot fold the

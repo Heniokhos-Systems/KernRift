@@ -1,0 +1,12 @@
+// std declares its Win32 externs under the reserved `_kr_w32_` prefix so it
+// never injects `WSAStartup`/`send`/... into an importer's namespace. On a
+// Windows build the prefixed extern must route to the REAL export: an IAT
+// call whose slot holds the name WSAStartup (format_pe.kr, pe_import_slot).
+extern fn _kr_w32_WSAStartup(uint64 ver, uint64 wsadata) -> uint64
+fn main() -> uint32 {
+    if get_target_os() == 2 {
+        u8[512] wd
+        _kr_w32_WSAStartup(514, wd)
+    }
+    return 0
+}

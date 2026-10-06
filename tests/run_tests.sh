@@ -9225,7 +9225,10 @@ fn main() {
 echo ""
 echo "--- PE import table: kernel32 + ws2_32 + bcrypt (fixed slots) ---"
 # The .idata section is a FIXED 2048-byte table, emitted whole for every
-# --emit=pe build so no IAT slot ever shifts (format_pe.kr, emit_pe_idata).
+# --emit=pe build so every program gets the same slots (format_pe.kr,
+# emit_pe_idata). Slots are internal to each binary: an append to the table
+# shifts later slots, which is a golden regeneration here, and every routed-
+# call row below keys on the import NAME, never on a slot number.
 # These rows pin ALL of it against a committed golden per arch: every name,
 # its slot order, every ILT/IAT thunk, the three null terminators, the IDT
 # offsets and the DLL-name strings. A typo in one name (Windows then refuses
@@ -9244,11 +9247,11 @@ echo "--- PE import table: kernel32 + ws2_32 + bcrypt (fixed slots) ---"
 #
 # TWO GOLDENS, NOT ONE GOLDEN PLUS RVA NORMALISATION. The arm64 table is the
 # x86_64 table shifted by 0x1000 (a .data page sits before .idata). Shifting
-# 9 IDT dwords and 72 thunk qwords in shell would be more code than the thing
+# 9 IDT dwords and 84 thunk qwords in shell would be more code than the thing
 # it checks, and a bug in that arithmetic could cancel a bug in the
 # compiler's. A second literal golden checks the arm64 bytes as emitted.
 # What keeps the two from drifting apart when one is regenerated: everything
-# from the hint/name table on (offset 704 = golden line 45 onward) holds no
+# from the hint/name table on (offset 752 = golden line 48 onward) holds no
 # RVA, so it must be byte-identical between them -- checked below.
 # Regenerate (only for a DELIBERATE table change, after checking it with
 # `llvm-objdump -p`): build the fixture as below, then
@@ -9310,18 +9313,18 @@ pei_check() {
     fi
     rm -f "$PEI_OUT"
 }
-#                                                  .idata  SizeOf  FirstThunks (IAT region +0/+160/+296)
+#                                                  .idata  SizeOf  FirstThunks (IAT region +416, then +0/+176/+320)
 pei_check pe_imports_three_dlls x86_64 "$DIR/golden/pe_imports_x86_64.idata.hex" \
-    8192  12288  8584  8744  8880     # 0x2000 0x3000  0x2188 0x2228 0x22B0
+    8192  12288  8608  8784  8928     # 0x2000 0x3000  0x21A0 0x2250 0x22E0
 pei_check pe_imports_three_dlls_arm64 arm64 "$DIR/golden/pe_imports_arm64.idata.hex" \
-    12288 16384  12680 12840 12976    # 0x3000 0x4000  0x3188 0x3228 0x32B0
+    12288 16384  12704 12880 13024    # 0x3000 0x4000  0x31A0 0x3250 0x32E0
 # The RVA-free tail (hint/name table + DLL names) must match across the two
 # goldens, so regenerating one cannot quietly leave the other describing a
 # different table. Counted: it is the cross-arch half of the pin.
 TOTAL=$((TOTAL + 1))
 if [ -s "$DIR/golden/pe_imports_x86_64.idata.hex" ] && [ -s "$DIR/golden/pe_imports_arm64.idata.hex" ] \
-   && [ "$(sed -n '45,128p' "$DIR/golden/pe_imports_x86_64.idata.hex" | wc -l)" = "84" ] \
-   && sed -n '45,128p' "$DIR/golden/pe_imports_x86_64.idata.hex" | cmp -s - <(sed -n '45,128p' "$DIR/golden/pe_imports_arm64.idata.hex"); then
+   && [ "$(sed -n '48,128p' "$DIR/golden/pe_imports_x86_64.idata.hex" | wc -l)" = "81" ] \
+   && sed -n '48,128p' "$DIR/golden/pe_imports_x86_64.idata.hex" | cmp -s - <(sed -n '48,128p' "$DIR/golden/pe_imports_arm64.idata.hex"); then
     PASS=$((PASS + 1))
     echo "  pe_imports_goldens_agree: PASS"
 else
@@ -9334,7 +9337,15 @@ fi
 # its @@pe-known-imports markers and compiled on its own, so this runs the
 # real source, not a copy. Covers: first/middle/last DLL, a name passed as a
 # non-NUL-terminated prefix of a longer buffer, and the sentinel for an
-# unknown name, a strict prefix ("sen") and an extension ("sendx").
+# unknown name, a strict prefix ("sen") and an extension ("sendx"). The
+# kernel32 tail (VirtualProtect 19, Sleep 20) and ws2_32's getsockname (35)
+# resolve. The reserved `_kr_w32_` prefix (std's Win32 externs) strips to the
+# real export: `_kr_w32_send` -> send's slot. NOT stripped, each its own
+# exit code: `_kr_w32_` alone and `_kr_w32_sen`, both passed as tokens of the
+# longer buffer "_kr_w32_send" (a strip that measured the remainder to the
+# NUL instead of by name_len would find "send"), `_kr_w32_sen` as its own
+# literal, `_kr_w32__kr_w32_send` (no recursive strip), `_KR_W32_send` (the
+# prefix is case-sensitive) and `kr_w32_send` (the leading `_` is required).
 TOTAL=$((TOTAL + 1))
 PIS_SRC=/tmp/krc_pe_slot_$$.kr
 PIS_BIN=/tmp/krc_pe_slot_$$
@@ -9342,15 +9353,27 @@ sed -n '/^\/\/ @@pe-known-imports-begin$/,/^\/\/ @@pe-known-imports-end$/p' "$DI
 cat >> "$PIS_SRC" <<'KREOF'
 fn main() {
     if pe_import_slot("ExitProcess", 11) != 0 { exit(1) }
-    if pe_import_slot("send", 4) != 24 { exit(2) }
-    if pe_import_slot("recv", 4) != 25 { exit(3) }
-    if pe_import_slot("BCryptGenRandom", 15) != 37 { exit(4) }
+    if pe_import_slot("send", 4) != 26 { exit(2) }
+    if pe_import_slot("recv", 4) != 27 { exit(3) }
+    if pe_import_slot("BCryptGenRandom", 15) != 40 { exit(4) }
     if pe_import_slot("MoveFileExA", 11) != 18 { exit(5) }
-    if pe_import_slot("sendto", 4) != 24 { exit(6) }
+    if pe_import_slot("sendto", 4) != 26 { exit(6) }
     if pe_import_slot("sen", 3) != 0xFFFFFFFF { exit(7) }
     if pe_import_slot("sendx", 5) != 0xFFFFFFFF { exit(8) }
     if pe_import_slot("GetFileSizeEy", 13) != 0xFFFFFFFF { exit(9) }
     if pe_import_slot("", 0) != 0xFFFFFFFF { exit(10) }
+    if pe_import_slot("VirtualProtect", 14) != 19 { exit(11) }
+    if pe_import_slot("Sleep", 5) != 20 { exit(12) }
+    if pe_import_slot("getsockname", 11) != 35 { exit(13) }
+    if pe_import_slot("WSACreateEvent", 14) != 38 { exit(14) }
+    if pe_import_slot("_kr_w32_send", 12) != 26 { exit(15) }
+    if pe_import_slot("_kr_w32_BCryptGenRandom", 23) != 40 { exit(16) }
+    if pe_import_slot("_kr_w32_send", 8) != 0xFFFFFFFF { exit(17) }
+    if pe_import_slot("_kr_w32_send", 11) != 0xFFFFFFFF { exit(18) }
+    if pe_import_slot("_kr_w32_sen", 11) != 0xFFFFFFFF { exit(19) }
+    if pe_import_slot("_kr_w32__kr_w32_send", 20) != 0xFFFFFFFF { exit(20) }
+    if pe_import_slot("_KR_W32_send", 12) != 0xFFFFFFFF { exit(21) }
+    if pe_import_slot("kr_w32_send", 11) != 0xFFFFFFFF { exit(22) }
     exit(0)
 }
 KREOF
@@ -9570,9 +9593,15 @@ rm -f "$OSP_BIN"
 # on x86_64, ADRP x16 / LDR x16,[x16,#lo12] / BLR x16 on arm64 -- with no stub
 # body and no unresolved-extern refusal. The call sites are DECODED here, not
 # grepped: the slot is the decoded target minus the IAT base (the first
-# import descriptor's FirstThunk, read from the image), and the name is read
-# back from the parallel ILT entry's hint/name, so "20 WSAStartup" is what the
-# image itself says.
+# import descriptor's FirstThunk, read from the image), and the name is the
+# one the LOADER would bind there: pe_slot_name walks every import
+# descriptor's FirstThunk to its null qword, as the Windows loader does, and
+# reads the hint/name at the same index of that descriptor's
+# OriginalFirstThunk. So "<slot> WSAStartup" is what the image itself says,
+# and a target no descriptor covers (a wrong FirstThunk offset leaves that
+# slot unpatched at run time) decodes as "<unbound>", never as a name. Rows key on the NAME, never on the slot number: the
+# table grows (slots are internal to each binary), and a row pinning a number
+# that moved would go silently vacuous.
 #
 # NO DISASSEMBLER, on either arch: everything is od/dd/bash, so these rows run
 # (never SKIP) on every host, including an arm64 runner whose binutils has no
@@ -9614,12 +9643,23 @@ pe_rva_off() {   # <file> <rva> -> file offset
     local s; s=$(pe_section "$1" "$2"); [ -z "$s" ] && return 1
     set -- $s "$2"; echo $(( $3 + $4 - $1 ))
 }
-pe_slot_name() {   # <file> <ilt_rva> <slot>
-    local e o
-    e=$(pe_u "$1" "$(pe_rva_off "$1" $(($2 + $3 * 8)))" 4)
-    [ "$e" = "0" ] && { echo "<none>"; return; }
-    o=$(pe_rva_off "$1" "$e") || { echo "<bad>"; return; }
-    dd if="$1" bs=1 skip=$((o + 2)) count=48 2>/dev/null | tr '\0' '\n' | head -1
+pe_slot_name() {   # <file> <idt_file_off> <target_rva> -> the name bound there
+    local f="$1" d k oft ft j e o
+    for ((k = 0; ; k++)); do
+        d=$(($2 + k * 20))
+        oft=$(pe_u "$f" "$d" 4); ft=$(pe_u "$f" $((d + 16)) 4)
+        [ "$oft" = "0" ] && [ "$ft" = "0" ] && break
+        for ((j = 0; ; j++)); do
+            e=$(pe_u "$f" "$(pe_rva_off "$f" $((ft + j * 8)))" 8)
+            { [ -z "$e" ] || [ "$e" = "0" ]; } && break
+            [ $((ft + j * 8)) = "$3" ] || continue
+            e=$(pe_u "$f" "$(pe_rva_off "$f" $((oft + j * 8)))" 8)
+            o=$(pe_rva_off "$f" "$e") || { echo "<bad>"; return; }
+            dd if="$f" bs=1 skip=$((o + 2)) count=48 2>/dev/null | tr '\0' '\n' | head -1
+            return
+        done
+    done
+    echo "<unbound>"
 }
 # One line per call site found in .text:
 #   iat <call_rva_hex> <slot> <name> <frame>   frame = the 14-byte shape's
@@ -9632,11 +9672,11 @@ pe_slot_name() {   # <file> <ilt_rva> <slot>
 #   every `mov [rsp+disp8], r64` (REX.W/REX.WR 89, mod=01 rm=100, SIB 24)
 #   between that sub and the call.
 pe_calls() {   # <pe> <x86_64|arm64>
-    local f="$1" ib lf idt idt_off iat ilt tx va rs rp
+    local f="$1" ib lf idt idt_off iat tx va rs rp
     ib=$(pe_image_base "$f"); lf=$(pe_lfanew "$f")
     idt=$(pe_u "$f" $((lf + 144)) 4)
     idt_off=$(pe_rva_off "$f" "$idt") || { echo "noimports"; return; }
-    ilt=$(pe_u "$f" "$idt_off" 4); iat=$(pe_u "$f" $((idt_off + 16)) 4)
+    iat=$(pe_u "$f" $((idt_off + 16)) 4)
     tx=$(pe_section "$f" .text); set -- "$1" "$2" $tx; va=$3; rs=$4; rp=$5
     pe_slot_of() {   # <target_rva> -> slot or empty
         local d=$(( $1 - iat ))
@@ -9654,7 +9694,7 @@ pe_calls() {   # <pe> <x86_64|arm64>
                 if [ "$i" -ge 4 ] && [ "${B[i-4]}${B[i-3]}${B[i-2]}" = "4883ec" ] && [ "${B[i-1]}" = "${B[i+9]}" ]; then
                     frame=$((0x${B[i+9]}))
                 fi
-                printf 'iat 0x%x %d %s %s\n' $((va + i)) "$slot" "$(pe_slot_name "$f" "$ilt" "$slot")" "$frame"
+                printf 'iat 0x%x %d %s %s\n' $((va + i)) "$slot" "$(pe_slot_name "$f" "$idt_off" "$tgt")" "$frame"
                 sub=""
                 for ((k = i - 4; k >= 0 && k >= i - 160; k--)); do
                     if [ "${B[k]}${B[k+1]}${B[k+2]}" = "4883ec" ] && [ "${B[k+3]}" = "${B[i+9]}" ]; then sub=$k; break; fi
@@ -9691,16 +9731,16 @@ pe_calls() {   # <pe> <x86_64|arm64>
                 pc=$((ib + va + i * 4)); page=$(( (pc & ~0xFFF) + (imm << 12) ))
                 tgt=$((page + ((ldr >> 10) & 0xFFF) * 8 - ib)); slot=$(pe_slot_of "$tgt")
                 if [ -z "$slot" ]; then printf 'badiat 0x%x 0x%x\n' $((va + i * 4 + 8)) "$tgt"
-                else printf 'iat 0x%x %d %s -\n' $((va + i * 4 + 8)) "$slot" "$(pe_slot_name "$f" "$ilt" "$slot")"; fi
+                else printf 'iat 0x%x %d %s -\n' $((va + i * 4 + 8)) "$slot" "$(pe_slot_name "$f" "$idt_off" "$tgt")"; fi
             fi
         done
     fi
 }
 RWI_DIR=/tmp/krc_rwi_$$
 mkdir -p "$RWI_DIR"
-# os_prune.kr's Windows arm calls WSAStartup (ws2_32, IAT slot 20). The build
-# must succeed (no refusal) and main's call must be an IAT call to slot 20
-# named WSAStartup. <frame> pins the IR backend's Win64 frame around it: two
+# os_prune.kr's Windows arm calls WSAStartup (ws2_32). The build must succeed
+# (no refusal) and main's call must be an IAT call whose slot, decoded from
+# the image, holds the import NAMED WSAStartup. <frame> pins the IR backend's Win64 frame around it: two
 # register args, no stack args, so exactly the 32-byte shadow (`-` = do not
 # check: the legacy backend loads args between its sub and the call).
 #
@@ -9712,9 +9752,9 @@ mkdir -p "$RWI_DIR"
 # .text can fake -- os_prune_c3.kr is that case and must pass too.
 rwi_check_osp() {   # <row> <pe> <arch> <frame>
     local calls tx; calls=$(pe_calls "$2" "$3"); tx=$(pe_section "$2" .text)
-    if ! echo "$calls" | grep -q "^iat 0x[0-9a-f]* 20 WSAStartup "; then
-        FAIL=$((FAIL + 1)); echo "  $1: FAIL (no IAT call to slot 20 = WSAStartup; calls: $(echo $calls))"
-    elif [ "$4" != "-" ] && ! echo "$calls" | grep -q "^iat 0x[0-9a-f]* 20 WSAStartup $4\$"; then
+    if ! echo "$calls" | grep -q "^iat 0x[0-9a-f]* [0-9][0-9]* WSAStartup "; then
+        FAIL=$((FAIL + 1)); echo "  $1: FAIL (no IAT call named WSAStartup; calls: $(echo $calls))"
+    elif [ "$4" != "-" ] && ! echo "$calls" | grep -q "^iat 0x[0-9a-f]* [0-9][0-9]* WSAStartup $4\$"; then
         FAIL=$((FAIL + 1)); echo "  $1: FAIL (WSAStartup's Win64 frame is not sub/add rsp,$4 around the call; calls: $(echo $calls))"
     elif echo "$calls" | grep -q '^badiat'; then
         FAIL=$((FAIL + 1)); echo "  $1: FAIL (a call-shaped site targets no IAT slot: $(echo $calls))"
@@ -9758,9 +9798,25 @@ for rwi in "win_import_routes_fat_win_x64 win-x64 3 x86_64 32" "win_import_route
         rwi_check_osp "$1" "$RWI_DIR/o.exe" "$4" "$5"
     fi
 done
-# (3) A USER-DEFINED `fn send` shares ws2_32's name (slot 24) but is not an
-#     `extern fn`: main's call must stay a DIRECT call to that body, and
-#     nothing may call through slot 24. send is declared first, so its body
+# (2b) The reserved `_kr_w32_` prefix (std's Win32 externs). The fixture
+#      declares `extern fn _kr_w32_WSAStartup`; pe_import_slot strips the
+#      prefix, so the build must succeed and the call must land on the IAT
+#      entry NAMED WSAStartup -- the hint/name table carries the real export,
+#      never the declared one. Same check as (1), both arches.
+for rwi in "win_import_prefix_routes_x86_64 x86_64 32" "win_import_prefix_routes_arm64 arm64 -"; do
+    set -- $rwi
+    TOTAL=$((TOTAL + 1))
+    rm -f "$RWI_DIR/o.exe"
+    RWI_ERR=$($KRC --arch="$2" --target=windows --emit=pe "$DIR/fixtures/win_import_prefix.kr" -o "$RWI_DIR/o.exe" 2>&1 >/dev/null)
+    if [ ! -s "$RWI_DIR/o.exe" ]; then
+        FAIL=$((FAIL + 1)); echo "  $1: FAIL (Windows build refused: $(echo "$RWI_ERR" | head -1))"
+    else
+        rwi_check_osp "$1" "$RWI_DIR/o.exe" "$2" "$3"
+    fi
+done
+# (3) A USER-DEFINED `fn send` shares ws2_32's name but is not an
+#     `extern fn`: main's call must stay a DIRECT call to that body, and no
+#     IAT call may be NAMED send (name-keyed: send's slot number moves). send is declared first, so its body
 #     is the first byte of .text: the row wants exactly one direct call whose
 #     target is the .text VA. Both arches, IR and --legacy.
 for rwi in "win_import_user_send_direct_x86_64 x86_64" "win_import_user_send_direct_arm64 arm64" \
@@ -9775,8 +9831,8 @@ for rwi in "win_import_user_send_direct_x86_64 x86_64" "win_import_user_send_dir
         RWI_CALLS=$(pe_calls "$RWI_DIR/o.exe" "$2")
         RWI_TX=$(pe_section "$RWI_DIR/o.exe" .text)
         RWI_SEND=$(printf '0x%x' "${RWI_TX%% *}")
-        if echo "$RWI_CALLS" | grep -q '^iat 0x[0-9a-f]* 24 '; then
-            FAIL=$((FAIL + 1)); echo "  $1: FAIL (the user's send was routed through IAT slot 24)"
+        if echo "$RWI_CALLS" | grep -q '^iat 0x[0-9a-f]* [0-9][0-9]* send '; then
+            FAIL=$((FAIL + 1)); echo "  $1: FAIL (the user's send was routed through the IAT entry named send)"
         elif [ "$(echo "$RWI_CALLS" | grep -c "^direct 0x[0-9a-f]* $RWI_SEND\$")" != "1" ]; then
             FAIL=$((FAIL + 1)); echo "  $1: FAIL (want exactly one direct call to send at $RWI_SEND; calls: $(echo $RWI_CALLS))"
         else
@@ -10200,7 +10256,7 @@ fi
 # (6) The same rule for refuse_unresolved_externs. An UNGUARDED routed import
 #     (win_import_unguarded.kr) under a Windows-only --targets builds -- the
 #     linux slice that would refuse it is discarded -- and the shipped slice
-#     calls WSAStartup through IAT slot 20 (rwi_check_osp, as Task 3's fat
+#     calls WSAStartup through the IAT (rwi_check_osp, as Task 3's fat
 #     rows). A selection that ships a non-Windows slice still refuses it.
 for wsr in "win_import_unguarded_fat_win_x64 win-x64 3 x86_64 32" "win_import_unguarded_fat_win_arm64 win-arm64 4 arm64 -"; do
     set -- $wsr
