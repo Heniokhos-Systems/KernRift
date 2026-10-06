@@ -26601,7 +26601,7 @@ rm -rf "$GS_D"
 LOG_KRC="$DIR/../build/krc2"
 LOG_D=$(mktemp -d)
 # err_of <file>: the compiler's "file:line:col: error: msg" line, scratch path stripped.
-log_err() { grep -m1 'error' "$1" 2>/dev/null | sed 's|[^ ]*/||' | cut -c1-110; }
+log_err() { grep -m1 ': error:' "$1" 2>/dev/null | sed 's|[^ ]*/||' | cut -c1-110; }
 # (a) the runner builds for Windows exactly as ci.yml/release.yml do
 #     (--emit=pe), and --emit=pe is byte-identical to --emit=pe --target=windows
 #     (main.kr sets target_os 2 for --emit=pe), so the equivalence is pinned.
@@ -26609,9 +26609,12 @@ TOTAL=$((TOTAL + 1))
 cat "$DIR/../src/bcj.kr" "$DIR/../src/runner.kr" > "$LOG_D/kr.kr"
 LOG_WHY=""
 for LOG_A in x86_64 arm64; do
-    $LOG_KRC --arch=$LOG_A --emit=pe "$LOG_D/kr.kr" -o "$LOG_D/kr-$LOG_A.exe" > "$LOG_D/e1" 2>&1 || LOG_WHY="$LOG_WHY $LOG_A:emit-pe[$(log_err "$LOG_D/e1")]"
-    $LOG_KRC --arch=$LOG_A --emit=pe --target=windows "$LOG_D/kr.kr" -o "$LOG_D/krt-$LOG_A.exe" > "$LOG_D/e2" 2>&1 || LOG_WHY="$LOG_WHY $LOG_A:target-windows[$(log_err "$LOG_D/e2")]"
-    cmp -s "$LOG_D/kr-$LOG_A.exe" "$LOG_D/krt-$LOG_A.exe" || LOG_WHY="$LOG_WHY $LOG_A:emit-pe!=target-windows"
+    LOG_B1=0; LOG_B2=0
+    $LOG_KRC --arch=$LOG_A --emit=pe "$LOG_D/kr.kr" -o "$LOG_D/kr-$LOG_A.exe" > "$LOG_D/e1" 2>&1 || { LOG_B1=1; LOG_WHY="$LOG_WHY $LOG_A:emit-pe[$(log_err "$LOG_D/e1")]"; }
+    $LOG_KRC --arch=$LOG_A --emit=pe --target=windows "$LOG_D/kr.kr" -o "$LOG_D/krt-$LOG_A.exe" > "$LOG_D/e2" 2>&1 || { LOG_B2=1; LOG_WHY="$LOG_WHY $LOG_A:target-windows[$(log_err "$LOG_D/e2")]"; }
+    if [ "$LOG_B1$LOG_B2" = "00" ]; then
+        cmp -s "$LOG_D/kr-$LOG_A.exe" "$LOG_D/krt-$LOG_A.exe" || LOG_WHY="$LOG_WHY $LOG_A:emit-pe!=target-windows"
+    fi
 done
 if [ -z "$LOG_WHY" ]; then
     PASS=$((PASS + 1)); echo "  runner_builds_for_windows: PASS (x86_64 + arm64 PE; --emit=pe == --target=windows byte for byte)"
@@ -26682,6 +26685,7 @@ else
         LOG_OUT=$(log_wine kr-x86_64.exe bt.krbo); LOG_RC=$?
         [ "$LOG_RC" = "0" ] || LOG_WHY="$LOG_WHY fat:status-$LOG_RC"
         echo "$LOG_OUT" | grep -q 'pages 0 and 1 survived' || LOG_WHY="$LOG_WHY fat:no-stdout"
+        [ "$(stat -c %s "$LOG_D/kr_tutorial_btree.db" 2>/dev/null)" = "65536" ] || LOG_WHY="$LOG_WHY fat:db-size"
     fi
     if [ -z "$LOG_WHY" ]; then
         PASS=$((PASS + 1)); echo "  tutorial_btree_works_on_windows: PASS (--emit=pe and fat .krbo via kr.exe, exit 0, 64 KiB db)"
