@@ -87,6 +87,18 @@ fn db_sync(u64 base, u64 size) -> u64 {
 }
 ```
 
+**On Windows** there is no `syscall_raw` at all, and the compiler refuses one
+that is reachable in the Windows slice of a default (fat) build. The shipped
+`examples/tutorial-btree/pager.kr` therefore keeps the mmap code above as the
+`else` arm of a literal `if get_target_os() == 2 { ... }` and gives Windows its
+own arm built from cross-platform builtins: `alloc` for the page buffer,
+`file_read` to load it in `db_open`, and `file_write` to write it back in
+`db_sync` (these lower to `ReadFile`/`WriteFile` on Windows). The guard must be
+a literal comparison with an `else` arm: a local (`u64 o = get_target_os()`) or
+an early `return` followed by `syscall_raw` is not pruned and is refused.
+`main.kr` uses a relative database path on Windows, since `/tmp` does not
+exist there.
+
 A raw syscall returns `-errno` in the range `[-4095, -1]`, which as an
 unsigned value is `> 0xFFFFFFFFFFFFF000` — that is the error test above, and
 it is the same threshold `std/io.kr`'s `is_errno` uses. `is_errno` itself is

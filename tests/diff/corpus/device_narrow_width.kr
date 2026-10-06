@@ -10,6 +10,11 @@
 //
 // Self-checking: exit 0 means agree-and-correct. The harness compares exit
 // code and stdout between the two builds.
+//
+// Windows: this fixture maps a fixed address with a raw mmap syscall, which has
+// no Windows equivalent, so on target_os 2 it prints
+// "device access not supported on Windows" and exits 0 BEFORE touching the
+// device (the Windows slice builds and exits cleanly; it never faults).
 device Fake at 0x66666000 {
     Data   at 0x00 : u32
     Status at 0x04 : u8
@@ -17,6 +22,10 @@ device Fake at 0x66666000 {
 }
 
 fn main() {
+    if get_target_os() == 2 {
+        println_str("device access not supported on Windows")
+        exit(0)
+    }
     u64 nr = 9
     u64 aid = get_arch_id()
     if aid == 2 { nr = 222 }

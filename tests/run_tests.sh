@@ -26598,18 +26598,23 @@ rm -rf "$GS_D"
 # prunes an OS branch whose condition is a LITERAL get_target_os() comparison.
 # The kr runner and three sources guarded Android/Linux-only code through a
 # local (`u64 os = get_target_os(); if os == 3`), so their Windows builds broke.
-# (a) the runner builds for Windows exactly as ci.yml/release.yml do (plus the
-#     explicit --target=windows form, which is the one that reaches the check).
-TOTAL=$((TOTAL + 1))
+LOG_KRC="$DIR/../build/krc2"
 LOG_D=$(mktemp -d)
+# err_of <file>: the compiler's "file:line:col: error: msg" line, scratch path stripped.
+log_err() { grep -m1 'error' "$1" 2>/dev/null | sed 's|[^ ]*/||' | cut -c1-110; }
+# (a) the runner builds for Windows exactly as ci.yml/release.yml do
+#     (--emit=pe), and --emit=pe is byte-identical to --emit=pe --target=windows
+#     (main.kr sets target_os 2 for --emit=pe), so the equivalence is pinned.
+TOTAL=$((TOTAL + 1))
 cat "$DIR/../src/bcj.kr" "$DIR/../src/runner.kr" > "$LOG_D/kr.kr"
 LOG_WHY=""
 for LOG_A in x86_64 arm64; do
-    "$DIR/../build/krc2" --arch=$LOG_A --emit=pe "$LOG_D/kr.kr" -o "$LOG_D/kr-$LOG_A.exe" > /dev/null 2>&1 || LOG_WHY="$LOG_WHY $LOG_A:ci-recipe"
-    "$DIR/../build/krc2" --arch=$LOG_A --emit=pe --target=windows "$LOG_D/kr.kr" -o "$LOG_D/krt-$LOG_A.exe" > "$LOG_D/err-$LOG_A" 2>&1 || LOG_WHY="$LOG_WHY $LOG_A:target-windows($(grep -m1 'syscall_raw' "$LOG_D/err-$LOG_A" | cut -c1-60))"
+    $LOG_KRC --arch=$LOG_A --emit=pe "$LOG_D/kr.kr" -o "$LOG_D/kr-$LOG_A.exe" > "$LOG_D/e1" 2>&1 || LOG_WHY="$LOG_WHY $LOG_A:emit-pe[$(log_err "$LOG_D/e1")]"
+    $LOG_KRC --arch=$LOG_A --emit=pe --target=windows "$LOG_D/kr.kr" -o "$LOG_D/krt-$LOG_A.exe" > "$LOG_D/e2" 2>&1 || LOG_WHY="$LOG_WHY $LOG_A:target-windows[$(log_err "$LOG_D/e2")]"
+    cmp -s "$LOG_D/kr-$LOG_A.exe" "$LOG_D/krt-$LOG_A.exe" || LOG_WHY="$LOG_WHY $LOG_A:emit-pe!=target-windows"
 done
 if [ -z "$LOG_WHY" ]; then
-    PASS=$((PASS + 1)); echo "  runner_builds_for_windows: PASS (x86_64 + arm64 PE, CI recipe and --target=windows)"
+    PASS=$((PASS + 1)); echo "  runner_builds_for_windows: PASS (x86_64 + arm64 PE; --emit=pe == --target=windows byte for byte)"
 else
     FAIL=$((FAIL + 1)); echo "FAIL: runner_builds_for_windows ($LOG_WHY )"
 fi
@@ -26617,35 +26622,84 @@ fi
 TOTAL=$((TOTAL + 1))
 LOG_WHY=""
 for LOG_F in examples/mmio_driver.kr examples/tutorial-btree/main.kr tests/diff/corpus/device_narrow_width.kr; do
-    "$DIR/../build/krc2" "$DIR/../$LOG_F" -o "$LOG_D/fat.krbo" > "$LOG_D/err" 2>&1 || LOG_WHY="$LOG_WHY $LOG_F($(grep -m1 'syscall_raw' "$LOG_D/err" | cut -c1-50))"
+    $LOG_KRC "$DIR/../$LOG_F" -o "$LOG_D/fat.krbo" > "$LOG_D/err" 2>&1 || LOG_WHY="$LOG_WHY $LOG_F[$(log_err "$LOG_D/err")]"
 done
 if [ -z "$LOG_WHY" ]; then
     PASS=$((PASS + 1)); echo "  tree_sources_build_fat: PASS (mmio_driver, tutorial-btree, device_narrow_width)"
 else
     FAIL=$((FAIL + 1)); echo "FAIL: tree_sources_build_fat ($LOG_WHY )"
 fi
-# (d) the x86_64 Windows runner actually RUNS a .krbo under Wine (counted SKIP
-#     without wine: set KR_WINE=<path to wine>).
+# (e) the early-return shape is NOT pruned (only if/else ARMS are): a syscall_raw
+#     after `if get_target_os() == 2 { return }` is refused; the else form builds.
 TOTAL=$((TOTAL + 1))
-LOG_WINE="${KR_WINE:-$(command -v wine 2>/dev/null || true)}"
-if [ -z "$LOG_WINE" ] || [ ! -x "$LOG_WINE" ]; then
-    PASS=$((PASS + 1)); echo "  runner_windows_runs_krbo_under_wine: SKIP (no wine; set KR_WINE=<path to wine>)"
+printf 'fn f() -> u64 {\n    if get_target_os() == 2 { return 1 }\n    return syscall_raw(39, 0, 0, 0, 0, 0, 0)\n}\nfn main() { exit(f()) }\n' > "$LOG_D/early.kr"
+printf 'fn f() -> u64 {\n    if get_target_os() == 2 { return 1 } else { return syscall_raw(39, 0, 0, 0, 0, 0, 0) }\n    return 0\n}\nfn main() { exit(f()) }\n' > "$LOG_D/else.kr"
+LOG_WHY=""
+if $LOG_KRC --emit=pe "$LOG_D/early.kr" -o "$LOG_D/early.exe" > "$LOG_D/ee" 2>&1; then LOG_WHY="$LOG_WHY early-return-accepted"
+elif ! grep -q 'syscall_raw is reachable in the win-x64 slice' "$LOG_D/ee"; then LOG_WHY="$LOG_WHY early-return-wrong-error[$(log_err "$LOG_D/ee")]"; fi
+$LOG_KRC --emit=pe "$LOG_D/else.kr" -o "$LOG_D/else.exe" > "$LOG_D/ee2" 2>&1 || LOG_WHY="$LOG_WHY else-form-refused[$(log_err "$LOG_D/ee2")]"
+if [ -z "$LOG_WHY" ]; then
+    PASS=$((PASS + 1)); echo "  os_guard_early_return_not_pruned: PASS (early-return refused, else form builds)"
 else
-    echo 'fn main() { println("hello-krbo")
-    exit(7) }' > "$LOG_D/h.kr"
+    FAIL=$((FAIL + 1)); echo "FAIL: os_guard_early_return_not_pruned ($LOG_WHY )"
+fi
+# (d) Wine rows: the SHIPPED runner (kr-x86_64.exe, the ci.yml/release.yml
+#     recipe) runs a .krbo, and the tutorial pager and the narrow-width fixture
+#     WORK on Windows. Counted SKIPs without wine (set KR_WINE=<path to wine>).
+LOG_WINE="${KR_WINE:-$(command -v wine 2>/dev/null || true)}"
+log_wine() { (cd "$LOG_D" && WINEPREFIX="$LOG_D/pfx" WINEDEBUG=-all timeout 180 "$LOG_WINE" "$@" 2>/dev/null); }
+TOTAL=$((TOTAL + 3))
+if [ -z "$LOG_WINE" ] || [ ! -x "$LOG_WINE" ]; then
+    for LOG_R in runner_windows_runs_krbo_under_wine tutorial_btree_works_on_windows device_narrow_width_clean_on_windows; do
+        PASS=$((PASS + 1)); echo "  $LOG_R: SKIP (no wine; set KR_WINE=<path to wine>)"
+    done
+else
     mkdir -p "$LOG_D/pfx"
+    printf 'fn main() { println("hello-krbo")\n    exit(7) }\n' > "$LOG_D/h.kr"
     LOG_WHY=""
-    "$DIR/../build/krc2" "$LOG_D/h.kr" -o "$LOG_D/h.krbo" > /dev/null 2>&1 || LOG_WHY="$LOG_WHY no-krbo"
-    [ -f "$LOG_D/krt-x86_64.exe" ] || LOG_WHY="$LOG_WHY no-runner"
+    $LOG_KRC "$LOG_D/h.kr" -o "$LOG_D/h.krbo" > /dev/null 2>&1 || LOG_WHY="$LOG_WHY no-krbo"
+    [ -f "$LOG_D/kr-x86_64.exe" ] || LOG_WHY="$LOG_WHY no-runner"
     if [ -z "$LOG_WHY" ]; then
-        LOG_OUT=$(cd "$LOG_D" && WINEPREFIX="$LOG_D/pfx" WINEDEBUG=-all timeout 180 "$LOG_WINE" krt-x86_64.exe h.krbo 2>/dev/null); LOG_RC=$?
+        LOG_OUT=$(log_wine kr-x86_64.exe h.krbo); LOG_RC=$?
         [ "$LOG_RC" = "7" ] || LOG_WHY="$LOG_WHY status-$LOG_RC"
         echo "$LOG_OUT" | grep -q '^hello-krbo' || LOG_WHY="$LOG_WHY no-stdout"
     fi
     if [ -z "$LOG_WHY" ]; then
-        PASS=$((PASS + 1)); echo "  runner_windows_runs_krbo_under_wine: PASS (hello.krbo exit 7 under Wine)"
+        PASS=$((PASS + 1)); echo "  runner_windows_runs_krbo_under_wine: PASS (shipped --emit=pe runner, hello.krbo exit 7)"
     else
         FAIL=$((FAIL + 1)); echo "FAIL: runner_windows_runs_krbo_under_wine ($LOG_WHY )"
+    fi
+    # tutorial pager: --emit=pe build AND the default fat .krbo via the shipped runner
+    LOG_WHY=""
+    $LOG_KRC --arch=x86_64 --emit=pe "$DIR/../examples/tutorial-btree/main.kr" -o "$LOG_D/bt.exe" > "$LOG_D/e3" 2>&1 || LOG_WHY="$LOG_WHY bt-build[$(log_err "$LOG_D/e3")]"
+    $LOG_KRC "$DIR/../examples/tutorial-btree/main.kr" -o "$LOG_D/bt.krbo" > "$LOG_D/e4" 2>&1 || LOG_WHY="$LOG_WHY btfat-build[$(log_err "$LOG_D/e4")]"
+    if [ -z "$LOG_WHY" ]; then
+        LOG_OUT=$(log_wine bt.exe); LOG_RC=$?
+        [ "$LOG_RC" = "0" ] || LOG_WHY="$LOG_WHY pe:status-$LOG_RC"
+        echo "$LOG_OUT" | grep -q 'pages 0 and 1 survived' || LOG_WHY="$LOG_WHY pe:no-stdout"
+        [ "$(stat -c %s "$LOG_D/kr_tutorial_btree.db" 2>/dev/null)" = "65536" ] || LOG_WHY="$LOG_WHY pe:db-size"
+        rm -f "$LOG_D/kr_tutorial_btree.db"
+        LOG_OUT=$(log_wine kr-x86_64.exe bt.krbo); LOG_RC=$?
+        [ "$LOG_RC" = "0" ] || LOG_WHY="$LOG_WHY fat:status-$LOG_RC"
+        echo "$LOG_OUT" | grep -q 'pages 0 and 1 survived' || LOG_WHY="$LOG_WHY fat:no-stdout"
+    fi
+    if [ -z "$LOG_WHY" ]; then
+        PASS=$((PASS + 1)); echo "  tutorial_btree_works_on_windows: PASS (--emit=pe and fat .krbo via kr.exe, exit 0, 64 KiB db)"
+    else
+        FAIL=$((FAIL + 1)); echo "FAIL: tutorial_btree_works_on_windows ($LOG_WHY )"
+    fi
+    # fixture: clean exit + message instead of a fault on the unmapped fixed address
+    LOG_WHY=""
+    $LOG_KRC --arch=x86_64 --emit=pe "$DIR/../tests/diff/corpus/device_narrow_width.kr" -o "$LOG_D/dnw.exe" > "$LOG_D/e5" 2>&1 || LOG_WHY="$LOG_WHY build[$(log_err "$LOG_D/e5")]"
+    if [ -z "$LOG_WHY" ]; then
+        LOG_OUT=$(log_wine dnw.exe); LOG_RC=$?
+        [ "$LOG_RC" = "0" ] || LOG_WHY="$LOG_WHY status-$LOG_RC"
+        echo "$LOG_OUT" | grep -q 'device access not supported on Windows' || LOG_WHY="$LOG_WHY no-message"
+    fi
+    if [ -z "$LOG_WHY" ]; then
+        PASS=$((PASS + 1)); echo "  device_narrow_width_clean_on_windows: PASS (message + exit 0, no fault)"
+    else
+        FAIL=$((FAIL + 1)); echo "FAIL: device_narrow_width_clean_on_windows ($LOG_WHY )"
     fi
     if [ -x "$(dirname "$LOG_WINE")/wineserver" ]; then
         WINEPREFIX="$LOG_D/pfx" "$(dirname "$LOG_WINE")/wineserver" -w > /dev/null 2>&1

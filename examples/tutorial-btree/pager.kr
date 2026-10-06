@@ -19,14 +19,32 @@ fn pager_failed(u64 r) -> u64 {
     return 0
 }
 
+// Windows has no syscall_raw and no mmap here, so the Windows arm keeps the
+// "mapping" in an alloc()'d buffer, loads it with file_read on open and writes
+// it back with file_write on db_sync (file_* lower to kernel32 there). The
+// POSIX arm is the mmap path, unchanged. Both guards are LITERAL
+// get_target_os() == 2 comparisons: that is what lets the compiler prune the
+// syscall_raw arm from the Windows slice.
+static u64 pager_path = 0
+
 // Returns the mapped base address, or 0 on failure. `fd_out` receives the fd
 // so the caller can close it; pass 0 to ignore.
 fn db_open(u64 path, u64 size, u64 fd_out) -> u64 {
-    // Windows has no syscall_raw; this pager is POSIX-only. The literal guard keeps
-    // the file buildable there (it just reports failure).
     u64 fd = 0
     u64 base = 0
-    if get_target_os() != 2 {
+    if get_target_os() == 2 {
+        pager_path = path
+        base = alloc(size)
+        if base == 0 { return 0 }
+        u64 z = 0
+        while z < size { store64(base + z, 0)  z = z + 8 }
+        u64 rf = file_open(path, 0)
+        if rf != 0xFFFFFFFFFFFFFFFF && rf != 0 {
+            file_read(rf, base, size)
+            file_close(rf)
+        }
+        if fd_out != 0 { store64(fd_out, 0) }
+    } else {
         // openat(AT_FDCWD = -100, path, O_RDWR|O_CREAT = 0x42, 0644)
         fd = syscall_raw(nr_openat(), 0xFFFFFFFFFFFFFF9C, path, 0x42, 420, 0, 0)
         if pager_failed(fd) != 0 { return 0 }
@@ -39,11 +57,20 @@ fn db_open(u64 path, u64 size, u64 fd_out) -> u64 {
     return base
 }
 
-// msync(base, size, MS_SYNC). Returns 0 on success.
+// msync(base, size, MS_SYNC); on Windows, write the buffer back to the file.
+// Returns 0 on success.
 fn db_sync(u64 base, u64 size) -> u64 {
-    u64 r = 1
-    if get_target_os() != 2 { r = syscall_raw(nr_msync(), base, size, 4, 0, 0, 0) }
-    return pager_failed(r)
+    if get_target_os() == 2 {
+        u64 wf = file_open(pager_path, 1)
+        if wf == 0xFFFFFFFFFFFFFFFF || wf == 0 { return 1 }
+        u64 n = file_write(wf, base, size)
+        file_close(wf)
+        if n != size { return 1 }
+        return 0
+    } else {
+        return pager_failed(syscall_raw(nr_msync(), base, size, 4, 0, 0, 0))
+    }
+    return 1
 }
 
 fn db_close(u64 fd) {

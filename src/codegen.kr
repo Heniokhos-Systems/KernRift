@@ -15150,7 +15150,10 @@ fn const_os_call_value(uint64 node) -> uint64 {
 // either order. UNKNOWN on purpose, each pinned by a tests/run_tests.sh row:
 // `u64 o = get_target_os()  if o == 2` (no call), `if get_target_os() == two`
 // (call vs a non-literal), `if get_arch_id() < 5` (only == and != count), and
-// any call to a user @builtin_override of either name.
+// any call to a user @builtin_override of either name. Also NOT pruned, by
+// design (only if/else ARMS are): statements AFTER `if get_target_os() == 2 {
+// return ... }` -- a syscall_raw following such an early return is still
+// reachable in the Windows slice and refused; put it in the `else` arm.
 // SCOPE: `if` / `else if` conditions ONLY. A ternary (`c ? a : b`) and a
 // `while` with the same literal condition do NOT consult this: both of their
 // arms stay live, so an extern in one is still refused on a target that

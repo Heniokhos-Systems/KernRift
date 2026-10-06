@@ -21,6 +21,7 @@ const u64 DBSIZE = 65536
 
 fn main() -> uint32 {
     u64 path = "/tmp/kr_tutorial_btree.db"
+    if get_target_os() == 2 { path = "kr_tutorial_btree.db" }
     u64[1] fdslot
 
     u64 base = db_open(path, DBSIZE, fdslot)
