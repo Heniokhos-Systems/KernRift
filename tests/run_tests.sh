@@ -9976,11 +9976,17 @@ done
 #      legacy with or without the flag, is told to build an executable (and
 #      never about --legacy). --legacy --emit=obj needs BOTH changes (an
 #      executable is still legacy while --legacy stays), so it is told
-#      exactly that, and neither single-change sentence.
+#      exactly that, and neither single-change sentence. --ir and --legacy
+#      both set emit_ir_mode and the LAST one wins: `--ir --emit=obj` has no
+#      legacy in force (plain obj advice), `--ir --legacy --emit=obj` does
+#      (legacy+obj advice) -- so the check must key on --legacy's value (0),
+#      not on "not the default" (1).
 for wsr in "win_syscall_raw_advice_ir --emit=pe guard" \
            "win_syscall_raw_advice_legacy --legacy,--emit=pe legacy" \
            "win_syscall_raw_advice_obj --emit=obj obj" \
-           "win_syscall_raw_advice_legacy_obj --legacy,--emit=obj legacyobj"; do
+           "win_syscall_raw_advice_legacy_obj --legacy,--emit=obj legacyobj" \
+           "win_syscall_raw_advice_ir_obj --ir,--emit=obj obj" \
+           "win_syscall_raw_advice_ir_legacy_obj --ir,--legacy,--emit=obj legacyobj"; do
     set -- $wsr
     TOTAL=$((TOTAL + 1))
     WSR_WHY=""
