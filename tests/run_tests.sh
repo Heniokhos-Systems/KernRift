@@ -2840,11 +2840,13 @@ rm -f "$ANA_SRC" "$ANA_BIN"
 #    docs/LANGUAGE.md and README.md both carry the measured table this pins:
 #      x86_64 IR 2 x mfence | arm64 IR 0 x DSB (LDAR/STLR) | arm64 legacy 2 x DSB SY
 #
-#    MATCH ON THE ENCODING, NEVER THE MNEMONIC. The `--emit=asm` decoder prints
-#    the LDAR/STLR encodings with a BLANK mnemonic field, so `grep -i stlr` finds
-#    nothing on a tree that emits STLR perfectly. That is precisely how the false
-#    "arm64 volatile emits DSB SY" claim survived: someone grepped for `stlr`,
-#    saw zero, and concluded the barrier form must be in use.
+#    MATCH ON THE ENCODING, NEVER THE MNEMONIC. The `--emit=asm` decoder used to
+#    print the LDAR/STLR encodings with a BLANK mnemonic field, so `grep -i stlr`
+#    found nothing on a tree that emitted STLR perfectly. That is precisely how
+#    the false "arm64 volatile emits DSB SY" claim survived: someone grepped for
+#    `stlr`, saw zero, and concluded the barrier form must be in use. The decoder
+#    now prints them (arm64_asm_listing_exclusive_forms pins the text), but the
+#    word is what the hardware runs, so this row still matches the word.
 #      88dffe.. = LDAR Wt,[Xn]    889ffe.. = STLR Wt,[Xn]
 #
 #    Compile-only (the listing is inspected, never executed), so pinning arches
@@ -5776,9 +5778,10 @@ run_test "vstore_narrow_no_clobber" 'fn main() {
 # barrier would keep them green while dropping the ordering guarantee MMIO
 # depends on. Pin the emitted words for all eight forms.
 #
-# Asserts the hex column, NOT a mnemonic -- main.kr has no STLR/LDAR decoder at
-# any width, so these listing lines have a blank mnemonic column and a grep for
-# "stlrb" would silently never fire.
+# Asserts the hex column, NOT a mnemonic. main.kr's STLR/LDAR decoder used to
+# miss every width (a blank mnemonic column, so a grep for "stlrb" silently
+# never fired); the text is now pinned separately by
+# arm64_asm_listing_exclusive_forms, and this row pins the words.
 #
 # Five hex digits only: word = base | (Rn << 5) | Rt, so bits 11:8 are
 # 0xC | ((Rn >> 3) & 3) and the 6th digit varies with the address register.
@@ -5834,6 +5837,77 @@ else
     FAIL=$((FAIL + 1))
 fi
 rm -f /tmp/krc_venc_$$.kr /tmp/krc_venc_out_$$ "$VENC_LISTING"
+
+# The arm64 --emit=asm decoder matched the exclusive/acquire-release class
+# with mask 0x3FE00000, which includes o2 (bit 23): its ldar/stlr arms could
+# never match, so every LDAR/STLR printed with a blank mnemonic, LDAXR printed
+# as ldxr, STLXR as stxr without its status register, and no b/h size suffix
+# ever printed. Two rows. The first feeds every single-register form at every
+# size (b/h/w/x) through raw asm words and compares the listing text with
+# llvm-mc's disassembly of the same words (LDXP 0xC87F0C20 is a pair form the
+# decoder does not claim, so it stays blank). The second pins what the backend
+# itself emits: the volatile B/H/W/X stores and loads and an atomic_add's
+# LDAXR/STLXR. Parent compiler: both red. Listing text only; no binary changes.
+AXF_WORDS="085F7C20 485F7C20 885F7C20 C85F7C20 085FFC20 485FFC20 885FFC20 C85FFC20 08027C20 48027C20 88027C20 C8027C20 0802FC20 4802FC20 8802FC20 C802FC20 08DFFC20 48DFFC20 88DFFC20 C8DFFC20 089FFC20 489FFC20 889FFC20 C89FFC20 08DF7C20 089F7C20 885FFFE0 C89FFC3F C87F0C20"
+AXF_WANT="ldxrb w0, [x1]|ldxrh w0, [x1]|ldxr w0, [x1]|ldxr x0, [x1]|ldaxrb w0, [x1]|ldaxrh w0, [x1]|ldaxr w0, [x1]|ldaxr x0, [x1]|stxrb w2, w0, [x1]|stxrh w2, w0, [x1]|stxr w2, w0, [x1]|stxr w2, x0, [x1]|stlxrb w2, w0, [x1]|stlxrh w2, w0, [x1]|stlxr w2, w0, [x1]|stlxr w2, x0, [x1]|ldarb w0, [x1]|ldarh w0, [x1]|ldar w0, [x1]|ldar x0, [x1]|stlrb w0, [x1]|stlrh w0, [x1]|stlr w0, [x1]|stlr x0, [x1]|ldlarb w0, [x1]|stllrb w0, [x1]|ldaxr w0, [sp]|stlr xzr, [x1]||"
+{
+    echo 'fn main() {'
+    echo '    asm {'
+    for AXF_W in $AXF_WORDS; do echo "        \"0x$AXF_W\""; done
+    echo '    }'
+    echo '    exit(0)'
+    echo '}'
+} > /tmp/krc_axf_$$.kr
+TOTAL=$((TOTAL + 1))
+rm -f /tmp/krc_axf_$$.s
+AXF_GOT="(listing not produced)"
+if $KRC --arch=arm64 --emit=asm /tmp/krc_axf_$$.kr -o /tmp/krc_axf_$$.s > /dev/null 2>&1 && [ -f /tmp/krc_axf_$$.s ]; then
+    AXF_GOT=""
+    for AXF_W in $AXF_WORDS; do
+        AXF_LW=$(echo "$AXF_W" | tr 'A-F' 'a-f')
+        AXF_T=$(grep -aE "^  [0-9a-f]{8}: $AXF_LW  " /tmp/krc_axf_$$.s | head -1 | sed -E "s/^  [0-9a-f]{8}: $AXF_LW  //")
+        AXF_GOT="$AXF_GOT$AXF_T|"
+    done
+fi
+if [ "$AXF_GOT" = "$AXF_WANT" ]; then
+    PASS=$((PASS + 1))
+else
+    echo "FAIL: arm64_asm_listing_exclusive_forms"
+    echo "    want: $AXF_WANT"
+    echo "    got:  $AXF_GOT"
+    FAIL=$((FAIL + 1))
+fi
+AXF_SRC='fn main() {
+    u64 p = alloc(64)
+    vstore8(p, 1)
+    vstore16(p, 2)
+    vstore32(p, 3)
+    vstore64(p, 4)
+    u64 a = vload8(p)
+    u64 b = vload16(p)
+    u64 c = vload32(p)
+    u64 d = vload64(p)
+    u64 e = atomic_add(p, 1)
+    exit(a + b + c + d + e)
+}'
+AXF_WANT2="stlrb w stlrh w stlr w stlr x ldarb w ldarh w ldar w ldar x ldaxr x stlxr w x "
+printf '%s\n' "$AXF_SRC" > /tmp/krc_axf_$$.kr
+TOTAL=$((TOTAL + 1))
+rm -f /tmp/krc_axf_$$.s
+AXF_GOT2="(listing not produced)"
+if $KRC --arch=arm64 --emit=asm /tmp/krc_axf_$$.kr -o /tmp/krc_axf_$$.s > /dev/null 2>&1 && [ -f /tmp/krc_axf_$$.s ]; then
+    AXF_GOT2=$(grep -aoE '  (ld|st)[a-z]*(ar|lr|xr)[bh]? [wx][0-9]+(, [wx][0-9]+)?, \[' /tmp/krc_axf_$$.s \
+        | sed -E 's/^  //; s/[0-9]+//g; s/, \[$//; s/,//g' | tr '\n' ' ')
+fi
+if [ "$AXF_GOT2" = "$AXF_WANT2" ]; then
+    PASS=$((PASS + 1))
+else
+    echo "FAIL: arm64_asm_listing_volatile_atomic_mnemonics"
+    echo "    want: $AXF_WANT2"
+    echo "    got:  $AXF_GOT2"
+    FAIL=$((FAIL + 1))
+fi
+rm -f /tmp/krc_axf_$$.kr /tmp/krc_axf_$$.s
 
 # A barrier must stop CSE of a static load. isb/dcache_flush/icache_invalidate/
 # dsb/dmb (IR ops 126-130) were missing from ir_opt_cse_invalidates, so

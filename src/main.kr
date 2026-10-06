@@ -1626,35 +1626,43 @@ fn emit_asm_listing(uint64 output_path, uint64 arch, uint64 text_start, uint64 s
                     write(fd, ", ", 2)
                     write_a64_xreg(fd, rd)
                 }
-                // LDXR/LDAR
-                else if (wi & 0x3FE00000) == 0x08400000 {
-                    if (wi & 0x00800000) != 0 {
-                        write(fd, "ldar ", 5)
+                // Load/store exclusive and load-acquire/store-release, the
+                // single-register forms (o1 = 0): size[31:30] 001000 o2[23]
+                // L[22] o1[21] Rs[20:16] o0[15] Rt2[14:10] Rn Rt. o2 = 0 is
+                // LDXR/LDAXR (L = 1) and STXR/STLXR (L = 0, status in Ws =
+                // Rs); o2 = 1 is LDLAR/LDAR (L = 1) and STLLR/STLR (L = 0).
+                // o0 = 1 picks the acquire/release form; size 0/1/2/3 is
+                // b/h/w/x. The old mask 0x3FE00000 included o2, so the
+                // LDAR/STLR arms could never match (every volatile access
+                // printed as nothing), LDAXR printed as ldxr, STLXR as stxr
+                // without its status register, and no b/h suffix printed.
+                else if (wi & 0x3F200000) == 0x08000000 {
+                    uint64 ex_o2 = (wi >> 23) & 1
+                    uint64 ex_l = (wi >> 22) & 1
+                    uint64 ex_o0 = (wi >> 15) & 1
+                    uint64 ex_sz = (wi >> 30) & 3
+                    if ex_o2 == 0 && ex_l != 0 {
+                        if ex_o0 != 0 { write(fd, "ldaxr", 5) } else { write(fd, "ldxr", 4) }
+                    } else if ex_o2 == 0 {
+                        if ex_o0 != 0 { write(fd, "stlxr", 5) } else { write(fd, "stxr", 4) }
+                    } else if ex_l != 0 {
+                        if ex_o0 != 0 { write(fd, "ldar", 4) } else { write(fd, "ldlar", 5) }
                     } else {
-                        write(fd, "ldxr ", 5)
+                        if ex_o0 != 0 { write(fd, "stlr", 4) } else { write(fd, "stllr", 5) }
                     }
-                    uint64 is_64 = (wi >> 30) & 1
-                    if is_64 != 0 {
-                        write_a64_xreg(fd, rd)
-                    } else {
+                    if ex_sz == 0 { write(fd, "b", 1) }
+                    if ex_sz == 1 { write(fd, "h", 1) }
+                    write(fd, " ", 1)
+                    if ex_o2 == 0 && ex_l == 0 {
+                        write_a64_wreg(fd, rm)
+                        write(fd, ", ", 2)
+                    }
+                    if ex_sz != 3 {
                         write_a64_wreg(fd, rd)
-                    }
-                    write(fd, ", [", 3)
-                    write_a64_xreg(fd, rn)
-                    write(fd, "]", 1)
-                }
-                // STXR/STLR
-                else if (wi & 0x3FE00000) == 0x08000000 {
-                    if (wi & 0x00800000) != 0 {
-                        write(fd, "stlr ", 5)
+                    } else if rd == 31 {
+                        write(fd, "xzr", 3)
                     } else {
-                        write(fd, "stxr ", 5)
-                    }
-                    uint64 is_64 = (wi >> 30) & 1
-                    if is_64 != 0 {
                         write_a64_xreg(fd, rd)
-                    } else {
-                        write_a64_wreg(fd, rd)
                     }
                     write(fd, ", [", 3)
                     write_a64_xreg(fd, rn)

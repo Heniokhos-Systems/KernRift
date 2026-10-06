@@ -932,9 +932,11 @@ If you are on ARM64 with the default backend and you need the access to have
 waiting on its effect — add an explicit `dsb()`. Do not assume the volatile
 form does it for you.
 
-Note when checking this yourself: the `--emit=asm` disassembler prints the
-`LDAR`/`STLR` encodings with a blank mnemonic, so grepping the listing for
-`stlr` reports nothing. Decode the raw words (`88dffe74`, `889ffe75`).
+Note when checking this yourself: the `--emit=asm` listing prints these as
+`ldar` / `stlr` (with `b`/`h` for the narrow widths). Listings from compilers
+before the decoder fix printed the `LDAR`/`STLR` encodings with a blank
+mnemonic, so grepping one of those for `stlr` reports nothing; decode the raw
+words (`88dffe..`, `889ffe..`) instead.
 
 `volatile { *(addr as u32) = val }` is the equivalent block form and does
 the same thing.
