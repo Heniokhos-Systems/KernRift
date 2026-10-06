@@ -9346,6 +9346,9 @@ fi
 # NUL instead of by name_len would find "send"), `_kr_w32_sen` as its own
 # literal, `_kr_w32__kr_w32_send` (no recursive strip), `_KR_W32_send` (the
 # prefix is case-sensitive) and `kr_w32_send` (the leading `_` is required).
+# The prefix compare's FIRST and LAST byte are each pinned by a same-length
+# name differing only there: `Xkr_w32_send` and `_kr_w32Xsend` (a compare
+# starting at byte 1, or stopping one byte early, would route them to send).
 TOTAL=$((TOTAL + 1))
 PIS_SRC=/tmp/krc_pe_slot_$$.kr
 PIS_BIN=/tmp/krc_pe_slot_$$
@@ -9374,6 +9377,8 @@ fn main() {
     if pe_import_slot("_kr_w32__kr_w32_send", 20) != 0xFFFFFFFF { exit(20) }
     if pe_import_slot("_KR_W32_send", 12) != 0xFFFFFFFF { exit(21) }
     if pe_import_slot("kr_w32_send", 11) != 0xFFFFFFFF { exit(22) }
+    if pe_import_slot("Xkr_w32_send", 12) != 0xFFFFFFFF { exit(23) }
+    if pe_import_slot("_kr_w32Xsend", 12) != 0xFFFFFFFF { exit(24) }
     exit(0)
 }
 KREOF
@@ -9913,7 +9918,9 @@ rwi_refuses win_import_float_return_refused win_import_float_ret.kr \
 #     "routed-ok" on stdout, and kr_win_iat_abi.tmp holding "routed\n" (only
 #     possible if CreateFileA's 5th argument, the first stack slot, arrived as
 #     CREATE_ALWAYS). user_send.exe must exit 6 and os_prune.exe 0 (WSAStartup
-#     really called). Wine is found as $KR_WINE or `wine` on PATH; without it
+#     really called). win_import_prefix.exe must exit 9: its prefixed
+#     `_kr_w32_WSAStartup` reached the real ws2_32 export, returned 0 and
+#     filled WSADATA's wVersion with 2.2. Wine is found as $KR_WINE or `wine` on PATH; without it
 #     the row is a counted SKIP. NOTE: Wine STUBS imports it cannot resolve
 #     rather than refusing to load, so this proves the calls ran correctly,
 #     not that a strict loader would bind every name.
@@ -9927,6 +9934,7 @@ else
     $KRC --arch=x86_64 --target=windows --emit=pe "$DIR/fixtures/win_iat_abi.kr" -o "$RWI_DIR/run/abi.exe" > /dev/null 2>&1 || RWI_WHY="$RWI_WHY abi:no-build"
     $KRC --arch=x86_64 --target=windows --emit=pe "$DIR/fixtures/user_send.kr" -o "$RWI_DIR/run/us.exe" > /dev/null 2>&1 || RWI_WHY="$RWI_WHY user_send:no-build"
     $KRC --arch=x86_64 --target=windows --emit=pe "$DIR/fixtures/os_prune.kr" -o "$RWI_DIR/run/osp.exe" > /dev/null 2>&1 || RWI_WHY="$RWI_WHY os_prune:no-build"
+    $KRC --arch=x86_64 --target=windows --emit=pe "$DIR/fixtures/win_import_prefix.kr" -o "$RWI_DIR/run/pfx.exe" > /dev/null 2>&1 || RWI_WHY="$RWI_WHY prefix:no-build"
     if [ -z "$RWI_WHY" ]; then
         RWI_OUT=$(cd "$RWI_DIR/run" && WINEPREFIX="$RWI_DIR/pfx" WINEDEBUG=-all timeout 180 "$RWI_WINE" abi.exe 2>/dev/null); RWI_RC=$?
         [ "$RWI_RC" = "42" ] || RWI_WHY="$RWI_WHY abi:status-$RWI_RC"
@@ -9936,6 +9944,8 @@ else
         [ "$RWI_RC" = "6" ] || RWI_WHY="$RWI_WHY user_send:status-$RWI_RC"
         (cd "$RWI_DIR/run" && WINEPREFIX="$RWI_DIR/pfx" WINEDEBUG=-all timeout 120 "$RWI_WINE" osp.exe > /dev/null 2>&1); RWI_RC=$?
         [ "$RWI_RC" = "0" ] || RWI_WHY="$RWI_WHY os_prune:status-$RWI_RC"
+        (cd "$RWI_DIR/run" && WINEPREFIX="$RWI_DIR/pfx" WINEDEBUG=-all timeout 120 "$RWI_WINE" pfx.exe > /dev/null 2>&1); RWI_RC=$?
+        [ "$RWI_RC" = "9" ] || RWI_WHY="$RWI_WHY prefix:status-$RWI_RC"
     fi
     if [ -z "$RWI_WHY" ]; then
         PASS=$((PASS + 1)); echo "  win_import_runs_under_wine: PASS"

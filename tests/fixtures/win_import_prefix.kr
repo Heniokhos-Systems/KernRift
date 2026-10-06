@@ -2,11 +2,21 @@
 // never injects `WSAStartup`/`send`/... into an importer's namespace. On a
 // Windows build the prefixed extern must route to the REAL export: an IAT
 // call whose slot holds the name WSAStartup (format_pe.kr, pe_import_slot).
+// Run under Wine it must really reach ws2_32: WSAStartup returns 0 and writes
+// wVersion (the first two bytes of WSADATA) = 2.2. Exit 9 on success, 3 if
+// the call failed, 4 if WSADATA was not filled in.
 extern fn _kr_w32_WSAStartup(uint64 ver, uint64 wsadata) -> uint64
 fn main() -> uint32 {
     if get_target_os() == 2 {
         u8[512] wd
-        _kr_w32_WSAStartup(514, wd)
+        uint64 p = wd
+        unsafe { *(p as uint16) = 0 }
+        uint64 r = _kr_w32_WSAStartup(514, wd)
+        if (r & 0xFFFFFFFF) != 0 { return 3 }
+        uint16 v = 0
+        unsafe { *(p as uint16) -> v }
+        if v != 514 { return 4 }
+        return 9
     }
     return 0
 }
