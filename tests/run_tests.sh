@@ -5909,6 +5909,58 @@ else
 fi
 rm -f /tmp/krc_axf_$$.kr /tmp/krc_axf_$$.s
 
+# The x86_64 --emit=asm decoder had no arm for the three-operand imul,
+# REX.W 69 /r id or REX.W 6B /r ib, which IR_MUL_IMM emits under 48/49/4C/4D.
+# The REX.W path dumped three bytes and then decoded the immediate as code:
+# `x * 1000` printed `e8 03 00 00 ..  call 0x48000003`. Two rows. The first
+# sends both forms through raw asm bytes -- REX.R and REX.B registers, a
+# negative imm8, [rbp+d8], [rsp] and [r12+d8] operands -- and compares the
+# listing text with what objdump -M intel decodes for the same bytes (the
+# immediate printed as 32 bits, an imm8 sign-extended). The second pins what
+# the backend emits for `x * 1000 + x * 3`. Parent compiler: both red.
+# Listing text only; no binary changes.
+XIM_SEQS="48_69_C0_E8_03_00_00 48_6B_C9_03 4C_69_C0_40_42_0F_00 49_6B_C1_F8 4D_69_D3_00_CA_9A_3B 48_69_45_08_E8_03_00_00 48_6B_04_24_05 4D_6B_4C_24_10_07 4C_6B_7D_F0_81"
+XIM_WANT="imul rax, rax, 0x000003e8|imul rcx, rcx, 0x00000003|imul r8, rax, 0x000f4240|imul rax, r9, 0xfffffff8|imul r10, r11, 0x3b9aca00|imul rax, [rbp+0x08], 0x000003e8|imul rax, [rsp], 0x00000005|imul r9, [r12+0x10], 0x00000007|imul r15, [rbp+0xf0], 0xffffff81|"
+{
+    echo 'fn main() {'
+    for XIM_S in $XIM_SEQS; do echo "    asm(\"0x${XIM_S//_/ 0x}\")"; done
+    echo '    exit(0)'
+    echo '}'
+} > /tmp/krc_xim_$$.kr
+TOTAL=$((TOTAL + 1))
+rm -f /tmp/krc_xim_$$.s
+XIM_GOT="(listing not produced)"
+if $KRC --arch=x86_64 --emit=asm /tmp/krc_xim_$$.kr -o /tmp/krc_xim_$$.s > /dev/null 2>&1 && [ -f /tmp/krc_xim_$$.s ]; then
+    XIM_GOT=""
+    for XIM_S in $XIM_SEQS; do
+        XIM_B=$(echo "$XIM_S" | tr 'A-F_' 'a-f ')
+        XIM_T=$(grep -aE "^  [0-9a-f]{8}: $XIM_B  " /tmp/krc_xim_$$.s | head -1 | sed -E "s/^  [0-9a-f]{8}: $XIM_B  //")
+        XIM_GOT="$XIM_GOT$XIM_T|"
+    done
+fi
+if [ "$XIM_GOT" = "$XIM_WANT" ]; then
+    PASS=$((PASS + 1))
+else
+    echo "FAIL: x86_asm_listing_imul_imm_forms"
+    echo "    want: $XIM_WANT"
+    echo "    got:  $XIM_GOT"
+    FAIL=$((FAIL + 1))
+fi
+printf 'fn scale(u64 x) -> u64 {\n    return x * 1000 + x * 3\n}\nfn main() {\n    exit(scale(7) & 255)\n}\n' > /tmp/krc_xim_$$.kr
+TOTAL=$((TOTAL + 1))
+rm -f /tmp/krc_xim_$$.s
+XIM_GOT2="(listing not produced)"
+if $KRC --arch=x86_64 --emit=asm /tmp/krc_xim_$$.kr -o /tmp/krc_xim_$$.s > /dev/null 2>&1 && [ -f /tmp/krc_xim_$$.s ]; then
+    XIM_GOT2=$(sed -n '/^scale:/,/^main:/p' /tmp/krc_xim_$$.s | grep -aoE '  (imul [a-z0-9]+, [a-z0-9]+, 0x[0-9a-f]{8}|call .*)$' | sed 's/^  //' | sed -E 's/imul [a-z0-9]+, [a-z0-9]+,/imul/' | tr '\n' '|')
+fi
+if [ "$XIM_GOT2" = "imul 0x000003e8|imul 0x00000003|" ]; then
+    PASS=$((PASS + 1))
+else
+    echo "FAIL: x86_asm_listing_imul_backend (got '$XIM_GOT2', want two imul lines and no call)"
+    FAIL=$((FAIL + 1))
+fi
+rm -f /tmp/krc_xim_$$.kr /tmp/krc_xim_$$.s
+
 # A barrier must stop CSE of a static load. isb/dcache_flush/icache_invalidate/
 # dsb/dmb (IR ops 126-130) were missing from ir_opt_cse_invalidates, so
 # `a = g; dmb(); b = g` emitted ONE load of g and the barrier ordered nothing:

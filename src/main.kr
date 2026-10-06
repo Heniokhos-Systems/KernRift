@@ -1680,6 +1680,13 @@ fn emit_asm_listing(uint64 output_path, uint64 arch, uint64 text_start, uint64 s
                 uint64 bp = out_buf + pos
                 uint64 b0 = 0
                 unsafe { *(bp as uint8) -> b0 }
+                // The opcode byte after a REX.W prefix (48-4F), read up front
+                // for the three-operand imul arm below.
+                uint64 rexw_b1 = 0
+                if (b0 & 0xF8) == 0x48 && pos + 3 <= fn_end {
+                    uint64 bp_rw1 = bp + 1
+                    unsafe { *(bp_rw1 as uint8) -> rexw_b1 }
+                }
                 // Decode some common patterns
                 if b0 == 0xC3 {
                     write_hex8(fd, b0)
@@ -1966,6 +1973,58 @@ fn emit_asm_listing(uint64 output_path, uint64 arch, uint64 text_start, uint64 s
                     uint64 mov_eax_imm = m0 | (m1 << 8) | (m2 << 16) | (m3 << 24)
                     write_hex32(fd, mov_eax_imm)
                     pos = pos + 5
+                } else if rexw_b1 == 0x69 || rexw_b1 == 0x6B {
+                    // imul r64, r/m64, imm: REX.W 69 /r id (imm32) or REX.W
+                    // 6B /r ib (imm8, sign-extended). IR_MUL_IMM emits both
+                    // under 48/49/4C/4D. Without this arm the REX.W path
+                    // dumped three bytes and decoded the immediate as code:
+                    // x * 1000 (e8 03 00 00) printed a bogus `call`. REX.R
+                    // extends the reg field, REX.B the r/m field; the
+                    // immediate prints as 32 bits, an imm8 sign-extended.
+                    uint64 bp_ii = bp + 2
+                    uint64 modrm_ii = 0
+                    unsafe { *(bp_ii as uint8) -> modrm_ii }
+                    uint64 imm_ofs_ii = 3 + x86_modrm_extra(modrm_ii)
+                    uint64 imm_len_ii = 4
+                    if rexw_b1 == 0x6B { imm_len_ii = 1 }
+                    uint64 tlen_ii = imm_ofs_ii + imm_len_ii
+                    uint64 whole_ii = 1
+                    if pos + tlen_ii > fn_end {
+                        tlen_ii = fn_end - pos
+                        whole_ii = 0
+                    }
+                    uint64 dbi_ii = 0
+                    while dbi_ii < tlen_ii {
+                        uint64 dp_ii = bp + dbi_ii
+                        uint64 db_ii = 0
+                        unsafe { *(dp_ii as uint8) -> db_ii }
+                        write_hex8(fd, db_ii)
+                        if dbi_ii + 1 < tlen_ii { write(fd, " ", 1) }
+                        dbi_ii = dbi_ii + 1
+                    }
+                    if whole_ii != 0 {
+                        write(fd, "  imul ", 7)
+                        write_x86_reg64(fd, ((modrm_ii >> 3) & 7) | (((b0 >> 2) & 1) << 3))
+                        write(fd, ", ", 2)
+                        if (modrm_ii >> 6) == 3 {
+                            write_x86_reg64(fd, (modrm_ii & 7) | ((b0 & 1) << 3))
+                        } else {
+                            write_x86_mem(fd, bp_ii, b0 & 1)
+                        }
+                        uint64 imm_ii = 0
+                        uint64 ib_ii = 0
+                        while ib_ii < imm_len_ii {
+                            uint64 ip_ii = bp + imm_ofs_ii + ib_ii
+                            uint64 iv_ii = 0
+                            unsafe { *(ip_ii as uint8) -> iv_ii }
+                            imm_ii = imm_ii | (iv_ii << (ib_ii * 8))
+                            ib_ii = ib_ii + 1
+                        }
+                        if imm_len_ii == 1 && imm_ii >= 0x80 { imm_ii = imm_ii | 0xFFFFFF00 }
+                        write(fd, ", 0x", 4)
+                        write_hex32(fd, imm_ii)
+                    }
+                    pos = pos + tlen_ii
                 } else if (b0 == 0x4C) && pos + 3 <= fn_end {
                     // REX.WR prefix (r8-r15 in reg field) + mov r/m,r or mov r,r/m
                     uint64 bp1_c = bp + 1
