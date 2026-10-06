@@ -5867,6 +5867,122 @@ for BAR in "isb()" "dsb()" "dmb()" "dcache_flush(0)" "icache_invalidate(0)"; do
 done
 rm -f /tmp/krc_bcse_$$.kr /tmp/krc_bcse_$$.s
 
+# fmt_uint writes through a caller-supplied pointer, but ir_opt_cse_invalidates
+# did not list it (IR op 74), so `a = g; fmt_uint(p, 9); b = g` with p aliasing
+# the static g CSE'd the second read into the first and returned the stale 7.
+# The program places g behind an 8-byte static array and proves that layout
+# (exit 99 if p does not alias g, so a layout change cannot pass vacuously),
+# then exits b - a + 50: 100 when the second read sees the '9' (57) fmt_uint
+# wrote, 50 when it was CSE'd. Parent compiler: 50 on x86_64 and arm64.
+FCSE_SRC='static u8[8] gbuf
+static u64 g = 7
+fn probe_layout() -> u64 {
+    u64 p = gbuf + 8
+    unsafe { *(p as u64) = 1234 }
+    return g
+}
+fn main() {
+    if probe_layout() != 1234 { exit(99) }
+    g = 7
+    u64 a = g
+    fmt_uint(gbuf + 8, 9)
+    u64 b = g
+    exit(b - a + 50)
+}'
+for FCSE_ARCH in x86_64 arm64; do
+    FCSE_RUN=""
+    if [ "$FCSE_ARCH" = "arm64" ]; then
+        [ -n "$QEMU_A64" ] || continue
+        FCSE_RUN="$QEMU_A64"
+    fi
+    TOTAL=$((TOTAL + 1))
+    printf '%s\n' "$FCSE_SRC" > /tmp/krc_fcse_$$.mlr
+    rm -f /tmp/krc_fcse_$$
+    FCSE_GOT="no binary"
+    if $KRC --arch=$FCSE_ARCH /tmp/krc_fcse_$$.mlr -o /tmp/krc_fcse_$$ > /dev/null 2>&1 && [ -f /tmp/krc_fcse_$$ ]; then
+        chmod +x /tmp/krc_fcse_$$
+        FCSE_GOT=0
+        $FCSE_RUN /tmp/krc_fcse_$$ > /dev/null 2>&1 || FCSE_GOT=$?
+    fi
+    if [ "$FCSE_GOT" = "100" ]; then
+        PASS=$((PASS + 1))
+    else
+        echo "FAIL: fmt_uint_stops_static_cse $FCSE_ARCH (exit $FCSE_GOT, want 100; 50 = stale g reused, 99 = layout probe failed)"
+        FAIL=$((FAIL + 1))
+    fi
+done
+rm -f /tmp/krc_fcse_$$.mlr /tmp/krc_fcse_$$
+
+# get_module_path (IR_MODULE_PATH, 146; Windows only) writes the path through
+# its buffer, and was missing from ir_opt_cse_invalidates the same way: with
+# the buffer aliasing g, `a = g; get_module_path(p, 8); b = g` emitted ONE load
+# of g. It cannot run here, so pin the listing: two RIP-relative loads (the
+# IAT calls are `call [rip]`, not loads). Parent compiler: 1.
+printf 'static u8[8] gbuf\nstatic u64 g = 7\nfn main() {\n    u64 a = g\n    u64 n = get_module_path(gbuf + 8, 8)\n    u64 b = g\n    exit(a + b + n)\n}\n' > /tmp/krc_mpcse_$$.kr
+TOTAL=$((TOTAL + 1))
+rm -f /tmp/krc_mpcse_$$.s
+MPCSE_N="no listing"
+if $KRC --arch=x86_64 --target=windows --emit=asm /tmp/krc_mpcse_$$.kr -o /tmp/krc_mpcse_$$.s > /dev/null 2>&1 && [ -f /tmp/krc_mpcse_$$.s ]; then
+    MPCSE_N=$(grep -acE 'mov r[a-z0-9]+, \[rip' /tmp/krc_mpcse_$$.s)
+fi
+if [ "$MPCSE_N" = "2" ]; then
+    PASS=$((PASS + 1))
+else
+    echo "FAIL: module_path_stops_static_cse (static loads: $MPCSE_N, want 2)"
+    FAIL=$((FAIL + 1))
+fi
+rm -f /tmp/krc_mpcse_$$.kr /tmp/krc_mpcse_$$.s
+
+# ir_opt_cse_invalidates is derived from ir_opt_is_side_effect minus an
+# exemption list; a hand-kept positive list had drifted from the side-effect
+# list (barriers 126-130, then 74/124/125/146/148). Pin the derivation
+# and the exact exemption set, so a new exemption is a deliberate, reviewed
+# edit of this row and not a silent loss of invalidation. Every exempt op
+# must still be in ir_opt_is_side_effect (otherwise the exemption is dead).
+TOTAL=$((TOTAL + 1))
+CSEPIN=$(python3 - "$DIR/../src/ir.kr" <<'PYEOF'
+import re, sys
+src = open(sys.argv[1]).read()
+def body(name):
+    m = re.search(r'^fn ' + name + r'\(uint64 op\) -> uint64 \{\n(.*?)^\}', src, re.S | re.M)
+    return m.group(1) if m else None
+def ops(text, ret):
+    s = set()
+    for ln in text.split("\n"):
+        ln = ln.split("//")[0]
+        if "return " + ret not in ln:
+            continue
+        m = re.search(r'op >= (\d+) && op <= (\d+)', ln)
+        if m:
+            s |= set(range(int(m.group(1)), int(m.group(2)) + 1)); continue
+        for n in re.findall(r'op == (\d+)', ln):
+            s.add(int(n))
+    return s
+se, inv = body("ir_opt_is_side_effect"), body("ir_opt_cse_invalidates")
+if se is None or inv is None:
+    print("function not found"); sys.exit()
+first = [l.strip() for l in inv.split("\n") if l.strip() and not l.strip().startswith("//")]
+if not first or first[0] != "if ir_opt_is_side_effect(op) == 0 { return 0 }":
+    print("not derived from ir_opt_is_side_effect"); sys.exit()
+if [l for l in first[1:-1] if "return 1" in l] or first[-1] != "return 1":
+    print("extra positive cases"); sys.exit()
+want = {40, 41, 42, 43, 51, 70, 71, 80, 81, 82, 83, 119, 131}
+ex = ops(inv, "0")
+if ex != want:
+    print("exemptions %s, want %s" % (sorted(ex), sorted(want))); sys.exit()
+dead = ex - ops(se, "1")
+if dead:
+    print("exempt but not side-effecting: %s" % sorted(dead)); sys.exit()
+print("ok")
+PYEOF
+)
+if [ "$CSEPIN" = "ok" ]; then
+    PASS=$((PASS + 1))
+else
+    echo "FAIL: cse_invalidate_set_pinned ($CSEPIN)"
+    FAIL=$((FAIL + 1))
+fi
+
 echo ""
 echo "--- v2.6 method calls ---"
 run_test "method_call" 'struct P { u64 x; u64 y }

@@ -13604,23 +13604,26 @@ fn ir_cse_canon_set(uint64 dest, uint64 canonical) {
     unsafe { *(p as uint32) = c }
 }
 
+// Derived from ir_opt_is_side_effect: every side-effecting op invalidates
+// unless it is on the exemption list below. A hand-kept positive list drifted
+// from the side-effect list twice -- the barriers 126-130 (`a = g; dmb();
+// b = g` emitted one load of g, so the barrier ordered nothing), then FMT_UINT (74,
+// writes through a caller-supplied pointer, so `a = g; fmt_uint(p, v); b = g`
+// with p aliasing g reused the stale g), FMT_BOOL/FMT_F64 (124/125),
+// STORE_BIS (148) and MODULE_PATH (146, writes the path through buf). A new
+// side-effecting op now invalidates by default. Each exemption below writes
+// no memory a CSE-pure op reads (IR_STATIC_LOAD 77 is the only one), so
+// exempting it loses nothing; tests/run_tests.sh cse_invalidate_set_pinned
+// holds this list.
 fn ir_opt_cse_invalidates(uint64 op) -> uint64 {
-    if op == 31 { return 1 }  // STORE
-    if op == 50 { return 1 }  // CALL
-    if op == 52 { return 1 }  // SYSCALL
-    if op == 72 { return 1 }  // MEMCPY
-    if op == 76 { return 1 }  // MEMSET
-    if op == 78 { return 1 }  // STATIC_STORE
-    if op == 85 { return 1 }  // SYSCALL_RAW
-    if op == 87 { return 1 }  // CALL_IND
-    if op >= 90 && op <= 96 { return 1 }    // atomics, vstore/vload, asm
-    if op >= 109 && op <= 115 { return 1 }  // atomic RMW, exec, set_exec
-    // isb / dcache_flush / icache_invalidate / dsb / dmb. A barrier exists to
-    // make a later read observe what another agent (core, device, DMA) wrote,
-    // so a static_load must not be CSE'd across one: `a = g; dmb(); b = g`
-    // emitted a single load of g, with the barrier ordering nothing.
-    if op >= 126 && op <= 130 { return 1 }
-    return 0
+    if ir_opt_is_side_effect(op) == 0 { return 0 }
+    if op >= 40 && op <= 43 { return 0 }  // BR..RET_VOID: a new block bumps the epoch anyway
+    if op == 51 { return 0 }              // ARG: a register move; the CALL after it invalidates
+    if op == 70 || op == 71 { return 0 }  // ALLOC/DEALLOC: mmap/munmap; write only the fresh block's size header
+    if op >= 80 && op <= 83 { return 0 }  // EXTRACT_RDX/R8, RET2/RET3: register moves
+    if op == 119 { return 0 }             // TIME_NS: writes only a stack timespec
+    if op == 131 { return 0 }             // ARR_CHECK: traps or falls through, writes nothing
+    return 1
 }
 
 fn ir_opt_cse_is_pure(uint64 op) -> uint64 {

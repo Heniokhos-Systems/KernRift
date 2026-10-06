@@ -76,7 +76,7 @@ single-def checks; see §10.
 The `next` field is why the arena is *not* walked as a contiguous index
 range. LICM appends hoisted instructions at high indices and splices them
 into a preheader's list; liveness and colouring walk the linked list, which
-is what makes that correct (`src/ir.kr:14043`–`13024`).
+is what makes that correct (`src/ir.kr:14072`–`14076`).
 
 Three parallel, index-keyed side tables share `ir_insn_cap` and leave the
 32-byte record untouched:
@@ -190,8 +190,8 @@ $ krc --emit=ir prog.kr     # prog.kr does `println(some_f64)`
 
 ## 3. The per-OS dispatch shape, and where a new case goes
 
-`target_os` values (parsed at `src/main.kr:9098`, derived from `--emit` at
-`9255`–`9257`, reset per slice by `compile_fat` at `5939` and `6942`):
+`target_os` values (parsed at `src/main.kr:9053`, derived from `--emit` at
+`9380`–`9382`, reset per slice by `compile_fat` at `6007` and `7018`):
 
 <!-- The previous version of this line read "assigned in 9011-5258, defaults at
      3631/3859/4113/4361/4486/4618". The range ran backwards and every one of
@@ -253,7 +253,7 @@ matters and it has not changed.
   guard cannot see it, because no trap instruction is emitted. Three such
   sites shipped in this compiler; see §9.
 - **A new arch × OS pair is validated by an allow-list**, not a blacklist:
-  `arch_os_pair_supported()` (`src/main.kr:7532`) is per-row
+  `arch_os_pair_supported()` (`src/main.kr:7564`) is per-row
   `if os == n { return 1 }` with a `return 0` fall-through, checked on the
   resolved pair before every compile entry. Adding an arch without adding its
   row is a hard error at the first build. Before it existed,
@@ -303,7 +303,7 @@ function main:
 - `v0 = ret v7` — `v0` is the reserved "no destination" vreg.
 - `arg v1 [0]` — argument position in `imm`.
 - Blocks print in index order, which is *also* the emission order
-  (`src/ir.kr:15063`), but not the order the lowering created edges in: an
+  (`src/ir.kr:15136`), but not the order the lowering created edges in: an
   `if`'s join block can have a lower index than its `else` arm.
 
 ---
@@ -365,7 +365,7 @@ Notes, all verified:
   `ir_opt_const_fold` rewrites `IR_ADD`/`IR_SUB`/`IR_MUL` into them when one
   source is a known constant. 138 fires only for `target_arch == 0`
   (`src/ir.kr:13084`); 139's producer is gated to arch 0 and 1
-  (`src/ir.kr:14123`).
+  (`src/ir.kr:14196`).
 
 ### 5.2 Compares (14–19 unsigned, 120–123 signed)
 
@@ -411,7 +411,7 @@ is false; it is still present in MLRift's copy of this document.)*
 - **`IR_FFMA` is a misnomer.** It emits `mulsd` + `addsd` on x86_64
   (verified by disassembly: no `vfmadd`) and `FMUL d0` + `FADD` on arm64
   (`src/ir_aarch64.kr:2987`/`2871`). Two roundings, not one — results differ
-  from a true FMA. The source says so at `src/ir.kr:13917`: *"The current
+  from a true FMA. The source says so at `src/ir.kr:14114`: *"The current
   FFMA emit isn't actually a hardware FMA instruction — it just inlines
   mulsd+addsd back-to-back."* Its value is skipping the GPR round-trip
   between the FMUL and the FADD, not accuracy.
@@ -458,7 +458,7 @@ is false; it is still present in MLRift's copy of this document.)*
   interference. Get this wrong and you get a use-after-free of a register.
   See the constant's comment, `src/ir.kr:203`–`205`.
 - **147/148 are arm64-only.** Produced solely by `ir_opt_fuse_lea_mem`, which
-  is called under `if target_arch == 1` (`src/ir.kr:14043`). Handlers exist
+  is called under `if target_arch == 1` (`src/ir.kr:14107`). Handlers exist
   only at `src/ir_aarch64.kr:1438` and `1412`.
 
 ### 5.5 Control flow (40–43, 50–52, 61, 85–87)
@@ -478,7 +478,7 @@ is false; it is still present in MLRift's copy of this document.)*
 | 87 | `IR_CALL_IND` | `dest = (*src1)()` | **SE** |
 
 - **`IR_BR_COND` does not "fall through".** The false target is the block's
-  `succ0` field, read separately (`src/ir.kr:15183`). The emitter then picks
+  `succ0` field, read separately (`src/ir.kr:15192`). The emitter then picks
   one of four layout cases against the *next* block index — both-next (emit
   nothing), true-next (invert the condition, one `jcc`), false-next (`jcc`,
   no trailing `jmp`), neither (`jcc` + `jmp`). If you write a pass that
@@ -486,7 +486,7 @@ is false; it is still present in MLRift's copy of this document.)*
   the terminator's `imm`.
 - Terminators are **not** emitted from the per-instruction dispatch on any
   backend. x86 has explicit no-op cases at `src/ir.kr:12681`/`11713` and
-  skips them in the block loop (`src/ir.kr:15083`); arm64/riscv32/xtensa have
+  skips them in the block loop (`src/ir.kr:15155`); arm64/riscv32/xtensa have
   no case at all and emit terminators in their function-level loop.
 
 ### 5.6 Multi-value returns (80–83)
@@ -842,7 +842,8 @@ alias analysis and a load cannot be assumed to return the same value twice.
   the compiler did not diagnose something.)
 - **AST-level DCE seeds only `main` and `@export`** (`dce_scan`,
   `src/codegen.kr:14417`). `_start` is not a seed, so freestanding riscv32 and
-  xtensa entry points had to be added explicitly (`src/main.kr:2645`–`2374`).
+  xtensa (and `--emit=image`) entry points had to be added explicitly
+  (`src/main.kr:3420`–`3435`).
 - **A provider reached only through override resolution gets pruned.** Under
   `--target=none`, `println` reroutes to the `@builtin_override fn write`
   provider, and an f-string's buffer reroutes to the `alloc` provider — but
@@ -857,13 +858,13 @@ alias analysis and a load cannot be assumed to return the same value twice.
 
 ## 10. Optimizer
 
-The driver is `ir_optimize()` (`src/ir.kr:13989`). **There is no
+The driver is `ir_optimize()` (`src/ir.kr:14053`). **There is no
 `ir_opt_run()`** — that name appears only in older revisions of this
 document. It runs once per function, after lowering and before liveness.
 
-`--O0` sets `ir_opt_level = 0` (`src/ir.kr:12739`, written only at
-`src/main.kr:9257`) and each backend skips the whole call
-(`src/ir.kr:14918`, `src/ir_aarch64.kr:3370`, `src/ir_riscv.kr:2414`,
+`--O0` sets `ir_opt_level = 0` (`src/ir.kr:12808`, written only at
+`src/main.kr:9291`) and each backend skips the whole call
+(`src/ir.kr:14906`, `src/ir_aarch64.kr:3370`, `src/ir_riscv.kr:2414`,
 `src/ir_xtensa.kr:2816`). Note the spelling: **`--O0`**, two dashes. There is
 no `-O0`, `-O1`, `--O2` — no other write to `ir_opt_level` exists.
 
@@ -896,7 +897,7 @@ So const-fold runs once or twice, DCE up to six times, LICM up to eight inner
 iterations, everything else exactly once. **There is no outer fixpoint loop
 over the whole pipeline.**
 
-`ir_licm_enabled` (`src/ir.kr:13967`) gates step 5 but is **never assigned
+`ir_licm_enabled` (`src/ir.kr:14039`) gates step 5 but is **never assigned
 anywhere** — a dead knob with no CLI flag.
 
 Ordering rationale recorded in source, worth preserving:
@@ -910,7 +911,7 @@ Ordering rationale recorded in source, worth preserving:
 - LICM appends hoisted instructions at **high arena indices but low block
   positions**. Anything that assumes instruction index order matches
   execution order breaks. Liveness and `ir_graph_color` are safe only because
-  they walk `ir_build_bb_lists` order (`src/ir.kr:13737`), not index ranges.
+  they walk `ir_build_bb_lists` order (`src/ir.kr:13809`), not index ranges.
 
 ### Per-pass contracts
 
@@ -940,14 +941,33 @@ opcodes really read `src2`, and the imm-as-vreg set `{72, 76, 83, 93, 98,
 148}`) is **duplicated verbatim in six other places — seven copies in total**.
 See §14 for the full list; any divergence between them miscompiles.
 
-**`ir_opt_cse` (12594)** — strictly **intra-block**. Hashes
+**`ir_opt_cse` (`src/ir.kr:13647`)** — strictly **intra-block**. Hashes
 `{op, canon(src1), canon(src2), canon(imm)}` into a 4096-entry
 direct-mapped table; a hit rewrites the instruction to `IR_COPY <earlier>`.
-Any op in `ir_opt_cse_invalidates` (12562) bumps a generation stamp, wiping
-the table in O(1). The barriers 126–130 (`isb`, `dcache_flush`,
-`icache_invalidate`, `dsb`, `dmb`) are in that set: `IR_STATIC_LOAD` is
-CSE-pure, so without them `a = g; dmb(); b = g` folded the second read into
-the first and the barrier ordered nothing.
+Any op in `ir_opt_cse_invalidates` (`src/ir.kr:13618`) bumps a generation
+stamp, wiping the table in O(1). That set is **derived** from
+`ir_opt_is_side_effect` (§9): every side-effecting op invalidates except an
+explicit exemption list — 40–43 (terminators; a new block bumps the epoch
+anyway), 51 (`ARG`), 70/71 (`ALLOC`/`DEALLOC`: mmap/munmap, writing only the
+new block's size header), 80–83 (register extracts and multi-value
+returns), 119 (`TIME_NS`, a stack timespec) and 131 (`ARR_CHECK`). None of
+those writes memory a CSE-pure op reads; `IR_STATIC_LOAD` (77) is the only
+such op. The test row `cse_invalidate_set_pinned` pins the derivation and
+the exact exemption set.
+
+The hand-kept positive list it replaced had drifted twice. The barriers
+126–130 (`isb`, `dcache_flush`, `icache_invalidate`, `dsb`, `dmb`) were
+missing, so `a = g; dmb(); b = g` folded the second read into the first and
+the barrier ordered nothing. `FMT_UINT` (74) and `MODULE_PATH` (146) were
+missing too, and both write through a caller-supplied pointer:
+`a = g; fmt_uint(p, 9); b = g` with `p` aliasing `g` returned the stale `g`
+(row `fmt_uint_stops_static_cse`), and `get_module_path(p, n)` on Windows
+emitted one load of `g` for both reads (row `module_path_stops_static_cse`).
+`FMT_BOOL`/`FMT_F64` (124/125) and `STORE_BIS` (148) were missing as well;
+those cannot be observed today (124/125 write only a compiler-owned
+scratch buffer: the f-string or print buffer just allocated, or a stack
+slot on bare metal; 148 is created after CSE runs, below), and they
+invalidate now because they are side effects.
 
 **`ir_opt_licm` (12988) / `ir_opt_licm_one_pass` (12893)** — crosses blocks.
 Loop metadata comes **only from the `while` lowering** (`src/ir.kr:4902`,
@@ -1004,10 +1024,10 @@ Two consequences worth writing down:
    longer are. The comment at 12578 acknowledges the hazard, but it was only
    fixed for 143.
 
-Also latent: `IR_STORE_BIS` (148) is in `ir_opt_is_side_effect` but **not**
-in `ir_opt_cse_invalidates`. Not exploitable today — 148 is created at step
-11, strictly after the only `ir_opt_cse()` call — but it becomes a live bug
-the moment CSE is moved or re-run.
+`IR_STORE_BIS` (148) used to be in `ir_opt_is_side_effect` but **not** in
+`ir_opt_cse_invalidates`. It was never exploitable — 148 is created at step
+11, strictly after the only `ir_opt_cse()` call — and it is closed now that
+the invalidating set is derived from the side-effect set (above).
 
 ---
 
@@ -1067,7 +1087,7 @@ fixup sequences and macOS's syscall-number register) and x18
 `IR_ASM_BLOCK` (op 96) anywhere in its body, or it is `@naked`.
 `ir_x86_fn_wide_ok` (`src/ir.kr:6535`) / `ir_a64_fn_wide_ok`
 (`src/ir_aarch64.kr:289`) test only the former; the call sites
-(`src/ir.kr:14918`, `src/ir_aarch64.kr:3390`) add `&& is_naked == 0`. The asm
+(`src/ir.kr:14929`, `src/ir_aarch64.kr:3390`) add `&& is_naked == 0`. The asm
 check must stay a **whole-body scan, not a constraint-list scan** — the
 comment at `src/ir.kr:6450` records a real case where a CPUID block wrote r13
 with no constraint naming it. `@naked` is excluded because it gets
@@ -1147,8 +1167,8 @@ it as well.
 ### Spilling
 
 **Slots are vreg-indexed, one per vreg**, not a compacted set of spilled
-values: `ir_spill_count = ir_vreg_next - 1` (`src/ir.kr:14885`,
-`src/ir_aarch64.kr:3412`). The comments at `src/ir.kr:8144` and
+values: `ir_spill_count = ir_vreg_next - 1` (`src/ir.kr:14959`,
+`src/ir_aarch64.kr:3414`). The comments at `src/ir.kr:8144` and
 `src/ir_aarch64.kr:353` explain why the older `vreg - IR_NUM_REGS - 1`
 mapping was removed: it assumed a low-numbered vreg could never spill, but a
 colour ceiling can spill **any** vreg, and the subtraction underflowed. Found
@@ -1360,10 +1380,9 @@ removed; do not re-add them without re-verifying.
     wide-safe whitelists, so any block containing one caps to the
     callee-saved prefix — the family is wide-allocator-hostile by
     construction.
-13. **`IR_STORE_BIS` (148) is in `ir_opt_is_side_effect` but not in
-    `ir_opt_cse_invalidates`.** Not exploitable today because 148 is created
-    strictly after the only `ir_opt_cse()` call, but it becomes a live bug
-    the moment CSE moves or is re-run. §10.
+13. **Closed: `IR_STORE_BIS` (148) was in `ir_opt_is_side_effect` but not in
+    `ir_opt_cse_invalidates`.** `ir_opt_cse_invalidates` is now derived from
+    the side-effect set minus a pinned exemption list. §10.
 14. **Duplicated operand-shape tables.** The "which opcodes really read
     `src2`" exclusion list and the imm-is-a-vreg set `{72, 76, 83, 93, 98,
     148}` are written out **EIGHT separate times**, all in `src/ir.kr`. Adding
@@ -1531,10 +1550,10 @@ opcodes that were never emitted.
 | cmp-with-immediate fusion | arch 0 **and** 1 (`src/ir.kr:13014`, arm64 capped at imm12 4095) | arch 0 only (`ir.mlr:11590`) |
 | pow2 `MUL` → `SHL_IMM` | ungated, with a shamt guard for arch 2/3 | present, gated to arch 0/1 — *not* absent, contrary to an older project note |
 | `--emit=lkm` | yes; the IR gate is `emit_mode != 3 && emit_mode != 7` | no; the gate is `emit_mode != 3` alone |
-| `arch_os_pair_supported()` | yes (`src/main.kr:7532`) | **absent** — no arch × OS allow-list |
+| `arch_os_pair_supported()` | yes (`src/main.kr:7564`) | **absent** — no arch × OS allow-list |
 | `--target=amdgpu-native` | no | yes |
 | var map | FNV-1a open-addressed 4096-slot hash (`src/ir.kr:993`) | linear scan (`ir.mlr:1013`) |
-| per-BB instruction lists for colouring | flat lists via `ir_build_bb_lists` (`src/ir.kr:13737`) | a 65536-entry walk stack |
+| per-BB instruction lists for colouring | flat lists via `ir_build_bb_lists` (`src/ir.kr:13809`) | a 65536-entry walk stack |
 | CTZ | open-codes `ir_popcount64(iso - 1)` at each site | has `ir_ctz64` (`ir.mlr:5495`) — MLRift is ahead here |
 | builtin-name dispatch | linear | (first char × name length) 128×32 prefilter (`ir_bi_filter_init`, `ir.mlr:916`) — MLRift is ahead |
 | conditional cleanup DCE | yes — `ir_opt_rewrites` deltas gate all six (19 uses in `ir.kr`) | no — all six cleanup DCEs run unconditionally (0 uses). Compile-time only, no codegen difference |
