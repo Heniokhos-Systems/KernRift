@@ -6009,45 +6009,75 @@ rm -f /tmp/krc_mpcse_$$.kr /tmp/krc_mpcse_$$.s
 
 # ir_opt_cse_invalidates is derived from ir_opt_is_side_effect minus an
 # exemption list; a hand-kept positive list had drifted from the side-effect
-# list (barriers 126-130, then 74/124/125/146/148). Pin the derivation
-# and the exact exemption set, so a new exemption is a deliberate, reviewed
-# edit of this row and not a silent loss of invalidation. Every exempt op
-# must still be in ir_opt_is_side_effect (otherwise the exemption is dead).
+# list (barriers 126-130, then 74/124/125/146/148). Pin the derivation,
+# the exact side-effect set and the exact exemption set, so that a new
+# side effect or a new exemption is a deliberate, reviewed edit of this row
+# and a deleted side effect is caught. Every line of both functions must be
+# `if op == N [|| op == M ...] { return R }` or `if op >= N && op <= M
+# { return R }`; any other shape (a named constant, `>`/`<`, an `else`) is
+# refused, because the set this row reads would no longer be the set the
+# compiler executes. Every exempt op must still be side-effecting.
 TOTAL=$((TOTAL + 1))
 CSEPIN=$(python3 - "$DIR/../src/ir.kr" <<'PYEOF'
 import re, sys
 src = open(sys.argv[1]).read()
-def body(name):
+# Pinned sets. A new side-effecting op, or a new exemption, is a deliberate
+# edit of these two lists.
+WANT_SE = {31, 40, 41, 42, 43, 50, 51, 52, 70, 71, 72, 74, 76, 78, 80, 81, 82, 83, 85, 87,
+          90, 91, 92, 93, 94, 95, 96, 109, 110, 111, 112, 113, 114, 115, 119,
+          124, 125, 126, 127, 128, 129, 130, 131, 146, 148}
+WANT_EX = {40, 41, 42, 43, 51, 70, 71, 80, 81, 82, 83, 119, 131}
+# Every non-comment line of both functions must have one of these exact
+# shapes (or be the fixed first/last line). Anything else -- a named
+# constant, `>`/`<`, an `else`, a second statement -- is refused, so the sets
+# read here are exactly the sets the compiler executes.
+EQ = re.compile(r'if (op == \d+(?: \|\| op == \d+)*) \{ return ([01]) \}')
+RANGE = re.compile(r'if op >= (\d+) && op <= (\d+) \{ return ([01]) \}')
+def lines(name):
+    n = len(re.findall(r'^fn ' + name + r'\b', src, re.M))
+    if n != 1:
+        return None, "%s defined %d times" % (name, n)
     m = re.search(r'^fn ' + name + r'\(uint64 op\) -> uint64 \{\n(.*?)^\}', src, re.S | re.M)
-    return m.group(1) if m else None
-def ops(text, ret):
+    if not m:
+        return None, "%s: signature or layout changed" % name
+    out = [ln.split("//")[0].strip() for ln in m.group(1).split("\n")]
+    return [ln for ln in out if ln], None
+def opset(body, ret, name):
     s = set()
-    for ln in text.split("\n"):
-        ln = ln.split("//")[0]
-        if "return " + ret not in ln:
+    for ln in body:
+        m = RANGE.fullmatch(ln)
+        if m and m.group(3) == ret and int(m.group(1)) <= int(m.group(2)):
+            s |= set(range(int(m.group(1)), int(m.group(2)) + 1))
             continue
-        m = re.search(r'op >= (\d+) && op <= (\d+)', ln)
-        if m:
-            s |= set(range(int(m.group(1)), int(m.group(2)) + 1)); continue
-        for n in re.findall(r'op == (\d+)', ln):
-            s.add(int(n))
-    return s
-se, inv = body("ir_opt_is_side_effect"), body("ir_opt_cse_invalidates")
-if se is None or inv is None:
-    print("function not found"); sys.exit()
-first = [l.strip() for l in inv.split("\n") if l.strip() and not l.strip().startswith("//")]
-if not first or first[0] != "if ir_opt_is_side_effect(op) == 0 { return 0 }":
-    print("not derived from ir_opt_is_side_effect"); sys.exit()
-if [l for l in first[1:-1] if "return 1" in l] or first[-1] != "return 1":
-    print("extra positive cases"); sys.exit()
-want = {40, 41, 42, 43, 51, 70, 71, 80, 81, 82, 83, 119, 131}
-ex = ops(inv, "0")
-if ex != want:
-    print("exemptions %s, want %s" % (sorted(ex), sorted(want))); sys.exit()
-dead = ex - ops(se, "1")
-if dead:
-    print("exempt but not side-effecting: %s" % sorted(dead)); sys.exit()
-print("ok")
+        m = EQ.fullmatch(ln)
+        if m and m.group(2) == ret:
+            s |= set(int(x) for x in re.findall(r'\d+', m.group(1)))
+            continue
+        return None, "%s: line of a refused shape: %s" % (name, ln)
+    return s, None
+def check():
+    se, err = lines("ir_opt_is_side_effect")
+    if err: return err
+    inv, err = lines("ir_opt_cse_invalidates")
+    if err: return err
+    if not se or se[-1] != "return 0":
+        return "ir_opt_is_side_effect does not end in return 0"
+    if not inv or inv[0] != "if ir_opt_is_side_effect(op) == 0 { return 0 }":
+        return "not derived from ir_opt_is_side_effect"
+    if inv[-1] != "return 1":
+        return "ir_opt_cse_invalidates does not end in return 1"
+    se_set, err = opset(se[:-1], "1", "ir_opt_is_side_effect")
+    if err: return err
+    ex, err = opset(inv[1:-1], "0", "ir_opt_cse_invalidates")
+    if err: return err
+    if se_set != WANT_SE:
+        return "side-effect set: missing %s, extra %s" % (sorted(WANT_SE - se_set), sorted(se_set - WANT_SE))
+    if ex != WANT_EX:
+        return "exemptions: missing %s, extra %s" % (sorted(WANT_EX - ex), sorted(ex - WANT_EX))
+    if ex - se_set:
+        return "exempt but not side-effecting: %s" % sorted(ex - se_set)
+    return "ok"
+print(check())
 PYEOF
 )
 if [ "$CSEPIN" = "ok" ]; then

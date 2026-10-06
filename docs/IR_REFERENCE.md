@@ -952,8 +952,12 @@ anyway), 51 (`ARG`), 70/71 (`ALLOC`/`DEALLOC`: mmap/munmap, writing only the
 new block's size header), 80–83 (register extracts and multi-value
 returns), 119 (`TIME_NS`, a stack timespec) and 131 (`ARR_CHECK`). None of
 those writes memory a CSE-pure op reads; `IR_STATIC_LOAD` (77) is the only
-such op. The test row `cse_invalidate_set_pinned` pins the derivation and
-the exact exemption set.
+such op. The test row `cse_invalidate_set_pinned` pins the derivation, the
+exact side-effect set and the exact exemption set. It reads both functions
+line by line and refuses any line that is not `if op == N [|| op == M ...]
+{ return R }` or `if op >= N && op <= M { return R }`: an exemption written
+with a named constant, with `>`/`<`, or as an `else` would otherwise pass
+unread.
 
 The hand-kept positive list it replaced had drifted twice. The barriers
 126–130 (`isb`, `dcache_flush`, `icache_invalidate`, `dsb`, `dmb`) were
