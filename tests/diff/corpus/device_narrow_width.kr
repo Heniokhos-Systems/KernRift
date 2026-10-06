@@ -23,7 +23,7 @@ fn main() {
     if aid == 4 { nr = 222 }
     if aid == 6 { nr = 222 }
     if aid == 7 { nr = 222 }
-    syscall_raw(nr, 0x66666000, 4096, 3, 0x32, 0xFFFFFFFFFFFFFFFF, 0)
+    if get_target_os() != 2 { syscall_raw(nr, 0x66666000, 4096, 3, 0x32, 0xFFFFFFFFFFFFFFFF, 0) }
 
     // Store side: the u8 write at 0x04 must not reach Other at 0x08.
     Fake.Other = 99

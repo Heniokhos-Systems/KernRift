@@ -26593,6 +26593,66 @@ else
 fi
 rm -rf "$GS_D"
 
+# --- Literal OS guards in KernRift's own tree (portable-syscall-layer task 5) --
+# The compiler refuses a syscall_raw reachable in a Windows slice and only
+# prunes an OS branch whose condition is a LITERAL get_target_os() comparison.
+# The kr runner and three sources guarded Android/Linux-only code through a
+# local (`u64 os = get_target_os(); if os == 3`), so their Windows builds broke.
+# (a) the runner builds for Windows exactly as ci.yml/release.yml do (plus the
+#     explicit --target=windows form, which is the one that reaches the check).
+TOTAL=$((TOTAL + 1))
+LOG_D=$(mktemp -d)
+cat "$DIR/../src/bcj.kr" "$DIR/../src/runner.kr" > "$LOG_D/kr.kr"
+LOG_WHY=""
+for LOG_A in x86_64 arm64; do
+    "$DIR/../build/krc2" --arch=$LOG_A --emit=pe "$LOG_D/kr.kr" -o "$LOG_D/kr-$LOG_A.exe" > /dev/null 2>&1 || LOG_WHY="$LOG_WHY $LOG_A:ci-recipe"
+    "$DIR/../build/krc2" --arch=$LOG_A --emit=pe --target=windows "$LOG_D/kr.kr" -o "$LOG_D/krt-$LOG_A.exe" > "$LOG_D/err-$LOG_A" 2>&1 || LOG_WHY="$LOG_WHY $LOG_A:target-windows($(grep -m1 'syscall_raw' "$LOG_D/err-$LOG_A" | cut -c1-60))"
+done
+if [ -z "$LOG_WHY" ]; then
+    PASS=$((PASS + 1)); echo "  runner_builds_for_windows: PASS (x86_64 + arm64 PE, CI recipe and --target=windows)"
+else
+    FAIL=$((FAIL + 1)); echo "FAIL: runner_builds_for_windows ($LOG_WHY )"
+fi
+# (b)+(c) the examples and the diff-corpus fixture build as default fat binaries.
+TOTAL=$((TOTAL + 1))
+LOG_WHY=""
+for LOG_F in examples/mmio_driver.kr examples/tutorial-btree/main.kr tests/diff/corpus/device_narrow_width.kr; do
+    "$DIR/../build/krc2" "$DIR/../$LOG_F" -o "$LOG_D/fat.krbo" > "$LOG_D/err" 2>&1 || LOG_WHY="$LOG_WHY $LOG_F($(grep -m1 'syscall_raw' "$LOG_D/err" | cut -c1-50))"
+done
+if [ -z "$LOG_WHY" ]; then
+    PASS=$((PASS + 1)); echo "  tree_sources_build_fat: PASS (mmio_driver, tutorial-btree, device_narrow_width)"
+else
+    FAIL=$((FAIL + 1)); echo "FAIL: tree_sources_build_fat ($LOG_WHY )"
+fi
+# (d) the x86_64 Windows runner actually RUNS a .krbo under Wine (counted SKIP
+#     without wine: set KR_WINE=<path to wine>).
+TOTAL=$((TOTAL + 1))
+LOG_WINE="${KR_WINE:-$(command -v wine 2>/dev/null || true)}"
+if [ -z "$LOG_WINE" ] || [ ! -x "$LOG_WINE" ]; then
+    PASS=$((PASS + 1)); echo "  runner_windows_runs_krbo_under_wine: SKIP (no wine; set KR_WINE=<path to wine>)"
+else
+    echo 'fn main() { println("hello-krbo")
+    exit(7) }' > "$LOG_D/h.kr"
+    mkdir -p "$LOG_D/pfx"
+    LOG_WHY=""
+    "$DIR/../build/krc2" "$LOG_D/h.kr" -o "$LOG_D/h.krbo" > /dev/null 2>&1 || LOG_WHY="$LOG_WHY no-krbo"
+    [ -f "$LOG_D/krt-x86_64.exe" ] || LOG_WHY="$LOG_WHY no-runner"
+    if [ -z "$LOG_WHY" ]; then
+        LOG_OUT=$(cd "$LOG_D" && WINEPREFIX="$LOG_D/pfx" WINEDEBUG=-all timeout 180 "$LOG_WINE" krt-x86_64.exe h.krbo 2>/dev/null); LOG_RC=$?
+        [ "$LOG_RC" = "7" ] || LOG_WHY="$LOG_WHY status-$LOG_RC"
+        echo "$LOG_OUT" | grep -q '^hello-krbo' || LOG_WHY="$LOG_WHY no-stdout"
+    fi
+    if [ -z "$LOG_WHY" ]; then
+        PASS=$((PASS + 1)); echo "  runner_windows_runs_krbo_under_wine: PASS (hello.krbo exit 7 under Wine)"
+    else
+        FAIL=$((FAIL + 1)); echo "FAIL: runner_windows_runs_krbo_under_wine ($LOG_WHY )"
+    fi
+    if [ -x "$(dirname "$LOG_WINE")/wineserver" ]; then
+        WINEPREFIX="$LOG_D/pfx" "$(dirname "$LOG_WINE")/wineserver" -w > /dev/null 2>&1
+    fi
+fi
+rm -rf "$LOG_D"
+
 rm -rf "$G18L_D"
 
 # --- Documentation pin 5, PART B (see Part A above) --------------------------

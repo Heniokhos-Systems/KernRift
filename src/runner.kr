@@ -386,7 +386,7 @@ fn main() {
         uint64 raw_os = get_target_os()
         uint64 tmp = "/tmp/.kr-exec"
         if raw_os == 2 { tmp = ".\\kr-run.exe" }
-        if raw_os == 3 {
+        if get_target_os() == 3 {
             // Android: try memfd_create + execveat(AT_EMPTY_PATH) first (same
             // rationale as the fat-binary path — filesystem-free exec works
             // under Termux SELinux where file-based execve is blocked).
@@ -535,7 +535,7 @@ fn main() {
     if host_os == 2 {
         tmp_path = ".\\kr-run.exe"
     }
-    if host_os == 3 {
+    if get_target_os() == 3 {
         // Android: prefer memfd_create + execveat(AT_EMPTY_PATH).
         // The binary lives in an anonymous kernel fd and execveat with
         // AT_EMPTY_PATH ignores the pathname, so nothing touches the

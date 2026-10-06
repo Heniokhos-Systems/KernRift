@@ -31,10 +31,9 @@ device FakeUART at 0x55550000 {
 }
 
 fn main() {
-    u64 os = get_target_os()
     u64 arch = get_arch_id()
 
-    if os == 0 {
+    if get_target_os() == 0 {
         // Linux: mmap a page at 0x55550000 for the demo.
         // Syscall numbers: x86_64 = 9, ARM64 = 222.
         u64 mmap_nr = 9
