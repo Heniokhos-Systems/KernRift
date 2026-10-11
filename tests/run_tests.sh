@@ -5961,6 +5961,45 @@ else
 fi
 rm -f /tmp/krc_xim_$$.kr /tmp/krc_xim_$$.s
 
+# write_x86_mem dropped the SIB index register (and REX.X, which makes it
+# r8..r15), and x86_modrm_extra counted no disp32 for a SIB with mod=00 and
+# base=101 (no base register), so the listing lost four bytes and decoded the
+# displacement as code. Raw asm bytes go through every caller of the two
+# helpers (imul 69/6B, lea, the REX.WR mov, add, xchg, imul 0F AF), and each
+# line is compared with what objdump -M intel decodes for the same bytes: an
+# index with and without REX.X, index 100 with REX.X (r12), no base with and
+# without an index, and REX.B on a no-base SIB (still no base). The listing
+# prints scale 1 as `*1` as objdump does, a disp8 as 2 unsigned hex digits and
+# a disp32 as 8. Parent compiler: red. Listing text only; no binary changes.
+SIB_SEQS="4F_69_9C_A2_94_23_55_51_82_56_8B_96 4D_69_04_EF_A0_CC_20_20 4B_6B_34_C5_90_09_50_66_A7 49_69_24_ED_BE_69_00_FF_43_5B_C3_01 4F_6B_1C_A5_B1_2E_02_6D_A3 48_69_34_25_18_D9_BB_4A_0A_17_2C_80 48_8D_44_88_10 48_8D_04_8D_00_01_00_00 4C_8B_04_C8 48_01_04_24 48_87_0C_5D_08_00_00_00 48_0F_AF_04_25_44_33_22_11"
+SIB_WANT="imul r11, [r10+r12*4+0x51552394], 0x968b5682|imul r8, [r15+rbp*8], 0x2020cca0|imul rsi, [r8*8+0x66500990], 0xffffffa7|imul rsp, [rbp*8+0xff0069be], 0x01c35b43|imul r11, [r12*4+0x6d022eb1], 0xffffffa3|imul rsi, [0x4abbd918], 0x802c170a|lea rax, [rax+rcx*4+0x10]|lea rax, [rcx*4+0x00000100]|mov r8, [rax+rcx*8]|add [rsp], rax|xchg rcx, [rbx*2+0x00000008]|imul rax, [0x11223344]|"
+{
+    echo 'fn main() {'
+    for SIB_S in $SIB_SEQS; do echo "    asm(\"0x${SIB_S//_/ 0x}\")"; done
+    echo '    exit(0)'
+    echo '}'
+} > /tmp/krc_sib_$$.kr
+TOTAL=$((TOTAL + 1))
+rm -f /tmp/krc_sib_$$.s
+SIB_GOT="(listing not produced)"
+if $KRC --arch=x86_64 --emit=asm /tmp/krc_sib_$$.kr -o /tmp/krc_sib_$$.s > /dev/null 2>&1 && [ -f /tmp/krc_sib_$$.s ]; then
+    SIB_GOT=""
+    for SIB_S in $SIB_SEQS; do
+        SIB_B=$(echo "$SIB_S" | tr 'A-F_' 'a-f ')
+        SIB_T=$(grep -aE "^  [0-9a-f]{8}: $SIB_B  " /tmp/krc_sib_$$.s | head -1 | sed -E "s/^  [0-9a-f]{8}: $SIB_B  //")
+        SIB_GOT="$SIB_GOT$SIB_T|"
+    done
+fi
+if [ "$SIB_GOT" = "$SIB_WANT" ]; then
+    PASS=$((PASS + 1))
+else
+    echo "FAIL: x86_asm_listing_sib_operands"
+    echo "    want: $SIB_WANT"
+    echo "    got:  $SIB_GOT"
+    FAIL=$((FAIL + 1))
+fi
+rm -f /tmp/krc_sib_$$.kr /tmp/krc_sib_$$.s
+
 # A barrier must stop CSE of a static load. isb/dcache_flush/icache_invalidate/
 # dsb/dmb (IR ops 126-130) were missing from ir_opt_cse_invalidates, so
 # `a = g; dmb(); b = g` emitted ONE load of g and the barrier ordered nothing:
