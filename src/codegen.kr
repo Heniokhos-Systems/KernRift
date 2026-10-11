@@ -326,13 +326,19 @@ static uint64 static_kinds = 0
 //   bits  0..31  the type token as written (`uint64`, `Point`, ...)
 //   bit  32      declared `const`
 //   bit  33      declared `@shared`
+//   bit  34      declared with array syntax (`T[N] x`). A struct scalar is
+//                STORED as a one-element struct array, so `P[1] x` and `P x`
+//                register identical table state; this bit is what tells them
+//                apart, exactly as array size tells `uint64[1]` from `uint64`.
 // Written by static_set_decl_last right after static_declare*, which zero it.
 static uint64 static_decls = 0
 
-// --report-duplicates: report every duplicate static/const as a WARNING and
-// keep the historical behaviour (the later declaration appends a dead slot,
-// the first one wins every lookup). An internal switch for sweeping a tree
-// before the error lands in it -- never the default.
+// --report-duplicates: apply every duplicate rule, but print each REFUSAL as a
+// WARNING and build on. A refused duplicate keeps the historical behaviour
+// (the later declaration appends a dead slot, the first one wins every
+// lookup); an accepted @shared set merges exactly as it does without the
+// switch. An internal switch for sweeping a tree before the error lands in
+// it -- never the default.
 static uint64 static_dup_report_only = 0
 @export
 fn set_static_dup_report_only(uint64 v) { static_dup_report_only = v }

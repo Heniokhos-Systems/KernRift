@@ -740,10 +740,21 @@ fn p_static_dup_report(uint64 new_tok, uint64 first_tok, uint64 what, uint64 sev
 // Called with the NAME of a static or const about to be declared, BEFORE it is
 // registered. Returns the index of the first declaration when the new one is an
 // accepted @shared duplicate -- the caller then takes the merge path and
-// registers nothing. Returns 0xFFFFFFFF otherwise: no prior declaration, a
-// duplicate that was just reported as an error, or --report-duplicates. In all
-// three the caller registers as it always has, so the parse continues on
-// exactly the historical path (the error has already failed the compile).
+// registers nothing. Returns 0xFFFFFFFF otherwise: no prior declaration, or a
+// duplicate that was just reported. The caller then registers as it always
+// has, so the parse continues on exactly the historical path (an error has
+// already failed the compile).
+//
+// --report-duplicates applies EVERY rule here and in the merge helpers; the
+// only difference is that each refusal is printed as a warning and not
+// counted (p_static_dup_severity). An accepted @shared set therefore merges
+// silently and computes exactly what it computes without the switch, and a
+// type or initializer conflict keeps its own diagnosis.
+fn p_static_dup_severity() -> uint64 {
+    if static_dup_report_only != 0 { return 1 }
+    return 0
+}
+
 fn p_static_dup_check(uint64 name_tok, uint64 is_const, uint64 is_shared) -> uint64 {
     uint64 prev = static_prior_index(name_tok)
     if prev == 0xFFFFFFFF { return 0xFFFFFFFF }
@@ -751,27 +762,39 @@ fn p_static_dup_check(uint64 name_tok, uint64 is_const, uint64 is_shared) -> uin
     uint64 prev_const = (pdecl >> 32) & 1
     uint64 prev_shared = (pdecl >> 33) & 1
     uint64 first_tok = static_name_tok_at(prev)
-    uint64 what = 0
-    if is_const != 0 || prev_const != 0 { what = 1 }
-    if static_dup_report_only != 0 {
-        p_static_dup_report(name_tok, first_tok, what, 1)
-        return 0xFFFFFFFF
-    }
-    if what == 1 {
-        p_static_dup_report(name_tok, first_tok, 1, 0)
+    uint64 sev = p_static_dup_severity()
+    if is_const != 0 || prev_const != 0 {
+        p_static_dup_report(name_tok, first_tok, 1, sev)
         return 0xFFFFFFFF
     }
     if is_shared == 0 || prev_shared == 0 {
-        p_static_dup_report(name_tok, first_tok, 0, 0)
+        p_static_dup_report(name_tok, first_tok, 0, sev)
         return 0xFFFFFFFF
     }
     return prev
 }
 
+// Opens one merge-conflict diagnostic at tok and returns 1 if its text should
+// be printed. An error goes through the usual report gate; under
+// --report-duplicates it is a warning, always printed. p_static_conflict_done
+// closes it: only an error is counted.
+fn p_static_conflict_head(uint64 tok) -> uint64 {
+    if p_static_dup_severity() != 0 {
+        diag_loc_head(tok, 1)
+        return 1
+    }
+    if parse_err_should_report() == 0 { return 0 }
+    p_err_reported = p_err_reported + 1
+    diag_loc_head(tok, 0)
+    return 1
+}
+
+fn p_static_conflict_done() {
+    if p_static_dup_severity() == 0 { p_err_count = p_err_count + 1 }
+}
+
 fn p_static_type_mismatch(uint64 new_tok, uint64 first_tok, uint64 part) {
-    if parse_err_should_report() != 0 {
-        p_err_reported = p_err_reported + 1
-        diag_loc_head(new_tok, 0)
+    if p_static_conflict_head(new_tok) != 0 {
         write(2, "@shared static `", 16)
         p_write_tok(new_tok)
         write(2, "` is declared with a different ", 31)
@@ -783,17 +806,22 @@ fn p_static_type_mismatch(uint64 new_tok, uint64 first_tok, uint64 part) {
         write(2, "\n", 1)
         diag_span_of(new_tok)
     }
-    p_err_count = p_err_count + 1
+    p_static_conflict_done()
 }
 
 // The type half of the merge: the new declaration's full type against the
 // first declaration's, one component at a time. Writes nothing to the table.
 // arr_bytes is 0 for a plain scalar; elem_sz is read only for an array (or a
 // struct static, which is registered as a one-element array).
-fn p_static_merge_type(uint64 prev, uint64 name_tok, uint64 type_tok, uint64 arr_bytes, uint64 elem_sz, uint64 struct_si) {
+// is_arr: the new declaration was written with array syntax. It is compared
+// as part of the array size, so `P[1]` against `P` (struct P, whose scalar is
+// stored as a one-element array) is refused exactly as `uint64[1]` against
+// `uint64` is: the written type differs.
+fn p_static_merge_type(uint64 prev, uint64 name_tok, uint64 type_tok, uint64 arr_bytes, uint64 elem_sz, uint64 struct_si, uint64 is_arr) {
     uint64 first_tok = static_name_tok_at(prev)
     uint64 parr = static_array_size_at(prev)
-    if parr != arr_bytes { p_static_type_mismatch(name_tok, first_tok, "array size")  return }
+    uint64 prev_arr = (static_decl_at(prev) >> 34) & 1
+    if parr != arr_bytes || prev_arr != is_arr { p_static_type_mismatch(name_tok, first_tok, "array size")  return }
     if arr_bytes != 0 {
         if static_elem_size_at(prev) != elem_sz { p_static_type_mismatch(name_tok, first_tok, "element size")  return }
     }
@@ -818,9 +846,7 @@ fn p_static_init(uint64 sdup, uint64 name_tok, uint64 value) {
     if sdup == 0xFFFFFFFF { static_set_init_last(value)  return }
     if value == 0 { return }
     if static_init_at(sdup) != 0 {
-        if parse_err_should_report() != 0 {
-            p_err_reported = p_err_reported + 1
-            diag_loc_head(name_tok, 0)
+        if p_static_conflict_head(name_tok) != 0 {
             write(2, "@shared static `", 16)
             p_write_tok(name_tok)
             write(2, "` has a second non-zero initializer (the first declaration at ", 62)
@@ -830,7 +856,7 @@ fn p_static_init(uint64 sdup, uint64 name_tok, uint64 value) {
             write(2, "\n", 1)
             diag_span_of(name_tok)
         }
-        p_err_count = p_err_count + 1
+        p_static_conflict_done()
         return
     }
     static_set_init_at(sdup, value)
@@ -3411,10 +3437,11 @@ fn parse_module() -> uint64 {
                 uint64 adup = p_static_dup_check(name_tok, 0, ann_shared)
                 if adup != 0xFFFFFFFF {
                     // An accepted @shared duplicate: compare, register nothing.
-                    p_static_merge_type(adup, name_tok, stype_tok, stsz_val * elem_sz, elem_sz, sstruct_si)
+                    p_static_merge_type(adup, name_tok, stype_tok, stsz_val * elem_sz, elem_sz, sstruct_si, 1)
                 } else {
                     static_declare_array(name_tok, stsz_val * elem_sz)
-                    static_set_decl_last(stype_tok, ann_shared << 1)
+                    // flags bit 2 = bit 34: declared with array syntax.
+                    static_set_decl_last(stype_tok, (ann_shared << 1) | 4)
                     static_set_elem_size_last(elem_sz)
                     static_set_kind_last(wstk)
                     if sstruct_si != 0xFFFFFFFF { static_struct_register(name_tok, sstruct_si) }
@@ -3447,7 +3474,7 @@ fn parse_module() -> uint64 {
                 uint64 sstruct_bytes = 0
                 if sstruct_si != 0xFFFFFFFF { sstruct_bytes = struct_total_size(sstruct_si) }
                 if sdup != 0xFFFFFFFF {
-                    p_static_merge_type(sdup, name_tok, stype_tok, sstruct_bytes, sstruct_bytes, sstruct_si)
+                    p_static_merge_type(sdup, name_tok, stype_tok, sstruct_bytes, sstruct_bytes, sstruct_si, 0)
                 } else if sstruct_si != 0xFFFFFFFF {
                     static_declare_array(name_tok, sstruct_bytes)
                     static_set_elem_size_last(sstruct_bytes)

@@ -26915,6 +26915,11 @@ dup_type_row "dup_shared_type_keyword_refused" 'static uint32 b' 'static uint64 
 dup_type_row "dup_shared_type_named_refused"   'static TA b'     'static TB b'      "type" \
     'type TA = uint64
 type TB = uint64'
+# A struct scalar is STORED as a one-element struct array, so `P[1] b` and
+# `P b` register identical sizes; the written types still differ, and are
+# refused exactly as `u64[1] b` against `u64 b` is.
+dup_type_row "dup_shared_struct_array_syntax_refused" 'static P[1] b' 'static P b' "array size" \
+    'struct P { uint64 x }'
 
 # @shared binds to the next declaration; on anything but a static it is refused
 # rather than ignored.
@@ -26992,6 +26997,28 @@ dup_put m.kr 'import "a.kr"
 static P p
 fn main() -> uint64 { p.y = 9  return a_get() }'
 dup_run "dup_shared_struct_accepted" 9
+# An accepted @shared ARRAY pair: the array branch's merge path must write no
+# *_last setter either, because the last-registered static is the one in
+# between. Written through a.kr, read through m.kr: (2.5 * 2) = 5.
+# Row 1: an int32 scalar in between. A leaked float kind turns `let t = w`
+# into a float; a leaked type kind (f64) refuses `int64 u = t`. (-3 + 10) * 10.
+dup_put a.kr '@shared
+static f64[2] fa
+fn fa_set() { fa[1] = 2.5 }'
+dup_put m.kr 'import "a.kr"
+static int32 w = -3
+@shared
+static f64[2] fa
+fn main() -> uint64 { fa_set()  let t = w  int64 u = t  return f64_to_int(fa[1] * 2.0) + (u + 10) * 10 }'
+dup_run "dup_shared_array_accepted" 75
+# Row 2: a u8 ARRAY in between, so a leaked element size (8) moves bb[1] to
+# byte 8 and the byte read at bb + 1 is 0, not 7.
+dup_put m.kr 'import "a.kr"
+static u8[16] bb
+@shared
+static f64[2] fa
+fn main() -> uint64 { fa_set()  bb[1] = 7  return f64_to_int(fa[1] * 2.0) + load8(bb + 1) * 10 }'
+dup_run "dup_shared_array_accepted_after_array" 75
 # The convention @shared exists for: cli_argc declared by a program AND by a
 # file it imports is one variable, the one the startup code fills. 4 = the
 # program plus three arguments, seen through both declarations.
@@ -27025,6 +27052,71 @@ else
         FAIL=$((FAIL + 1)); echo "FAIL: dup_report_only_warns_and_builds (exit $DUPR_GOT, want the historical first-wins 1)"
     fi
 fi
+# dup_report_run <row> <expected exit> <needle>... -- under --report-duplicates
+# m.kr must BUILD, print every needle (a '!' needle must NOT be printed) and
+# exit with the expected code.
+dup_report_run() {
+    local name="$1" want="$2"; shift 2
+    TOTAL=$((TOTAL + 1))
+    local out got n
+    if ! out=$($KRC $KRC_FLAGS --report-duplicates "$DUP_D/m.kr" -o "$DUP_D/m.bin" 2>&1); then
+        FAIL=$((FAIL + 1)); echo "FAIL: $name (refused under --report-duplicates)"
+        printf '%s\n' "$out" | grep -m2 error | sed 's/^/    /'; return
+    fi
+    for n in "$@"; do
+        if [ "${n#!}" != "$n" ]; then
+            if printf '%s' "$out" | grep -qF -- "${n#!}"; then
+                FAIL=$((FAIL + 1)); echo "FAIL: $name (printed '${n#!}', which it must not)"; rm -f "$DUP_D/m.bin"; return
+            fi
+        elif ! printf '%s' "$out" | grep -qF -- "$n"; then
+            FAIL=$((FAIL + 1)); echo "FAIL: $name (did not print '$n')"
+            printf '%s\n' "$out" | grep -m2 -E 'error|warning' | sed 's/^/    /'; rm -f "$DUP_D/m.bin"; return
+        fi
+    done
+    chmod +x "$DUP_D/m.bin"; "$DUP_D/m.bin" > /dev/null 2>&1; got=$?
+    rm -f "$DUP_D/m.bin"
+    if [ "$got" = "$want" ]; then
+        PASS=$((PASS + 1)); echo "  $name: PASS (exit $got)"
+    else
+        FAIL=$((FAIL + 1)); echo "FAIL: $name (expected exit $want, got $got)"
+    fi
+}
+# The switch applies the FULL rules and only downgrades refusals. A valid
+# @shared set is not a duplicate to report: it merges silently and computes
+# what it computes without the switch -- the later initializer 9, read through
+# a.kr's declaration (the historical first-wins path would give 0).
+dup_put a.kr '@shared
+static uint64 x
+fn a_get() -> uint64 { return x }'
+dup_put m.kr 'import "a.kr"
+@shared
+static uint64 x = 9
+fn main() -> uint64 { return a_get() }'
+dup_run "dup_report_only_shared_set_same_result_plain" 9
+dup_report_run "dup_report_only_shared_set_same_result" 9 '!warning' '!duplicate'
+# A conflict keeps its OWN diagnosis under the switch, as a warning: a type
+# mismatch names the type, not the generic "rename one" advice.
+dup_put a.kr '@shared
+static uint32 b
+fn a_get() -> uint64 { return b }'
+dup_put m.kr 'import "a.kr"
+@shared
+static uint64 b
+fn main() -> uint64 { return 0 }'
+dup_report_run "dup_report_only_type_conflict_specific" 0 \
+    "$DUP_D/m.kr:3:15: warning: @shared static \`b\` is declared with a different type than its first declaration at $DUP_D/a.kr:2" \
+    '!rename one'
+# ... and a second initializer names the initializer; the first one stays.
+dup_put a.kr '@shared
+static uint64 v = 4
+fn a_get() -> uint64 { return v }'
+dup_put m.kr 'import "a.kr"
+@shared
+static uint64 v = 5
+fn main() -> uint64 { return a_get() }'
+dup_report_run "dup_report_only_second_init_specific" 4 \
+    "$DUP_D/m.kr:3:15: warning: @shared static \`v\` has a second non-zero initializer (the first declaration at $DUP_D/a.kr:2 already has one)" \
+    '!rename one'
 
 # A FAT build parses the program once per slice with the static table restarted
 # and the name hash still holding the previous slice's entries. A name's first

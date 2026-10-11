@@ -879,7 +879,8 @@ static u64 cli_argc                 @shared
 
 `@shared` declarations of one name are accepted only when all of them carry
 it, all have the identical type (type name, array size, element size, struct
-type) and at most one has a non-zero initializer — that one is the value,
+type; array-ness counts too, so `P[1] x` and `P x` differ just as `u64[1] x`
+and `u64 x` do) and at most one has a non-zero initializer — that one is the value,
 whichever file it is in. A mixed set, a type mismatch or two initializers is an
 error. `@shared` applies to `static` only: consts are never shared (keep one
 definition), and `@shared` on anything else is refused.
