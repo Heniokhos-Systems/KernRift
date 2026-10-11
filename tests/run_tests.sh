@@ -6039,6 +6039,49 @@ for FCSE_ARCH in x86_64 arm64; do
 done
 rm -f /tmp/krc_fcse_$$.mlr /tmp/krc_fcse_$$
 
+# memcpy, memset and a plain pointer store write memory too (IR ops 72, 76
+# and 31). cse_invalidate_set_pinned reads the predicates and their call
+# sites; this row runs the compiled program, so an exemption made anywhere is
+# caught by its effect. Same layout probe as fmt_uint_stops_static_cse: g sits
+# behind gbuf, and the program exits 99 if gbuf + 8 does not alias g. Each
+# program sets g = 7, reads a = g, writes the byte 9 into g through the alias,
+# reads b = g and exits b - a + 50: 52 when the second read sees the write,
+# 50 when it was CSE'd into the first. A wrapper at the CSE call site that
+# exempts 72/76/124/125 gives 50 for memcpy and memset; `op != 31 &&` in front
+# of the call gives 50 for the store. The parent compiler is correct (52).
+for WB_KIND in memset memcpy store; do
+    case $WB_KIND in
+        memset) WB_STMT='    memset(gbuf + 8, 9, 1)' ;;
+        memcpy) WB_STMT='    memcpy(gbuf + 8, sbuf, 1)' ;;
+        store)  WB_STMT='    u64 q = gbuf + 8
+    u8 nine = 9
+    unsafe { *(q as u8) = nine }' ;;
+    esac
+    for WB_ARCH in x86_64 arm64; do
+        WB_RUN=""
+        if [ "$WB_ARCH" = "arm64" ]; then
+            [ -n "$QEMU_A64" ] || continue
+            WB_RUN="$QEMU_A64"
+        fi
+        TOTAL=$((TOTAL + 1))
+        printf 'static u8[8] sbuf\nstatic u8[8] gbuf\nstatic u64 g = 7\nfn probe_layout() -> u64 {\n    u64 p = gbuf + 8\n    unsafe { *(p as u64) = 1234 }\n    return g\n}\nfn main() {\n    if probe_layout() != 1234 { exit(99) }\n    g = 7\n    memset(sbuf, 9, 1)\n    u64 a = g\n%s\n    u64 b = g\n    exit(b - a + 50)\n}\n' "$WB_STMT" > /tmp/krc_wbcse_$$.kr
+        rm -f /tmp/krc_wbcse_$$
+        WB_GOT="no binary"
+        if $KRC --arch=$WB_ARCH /tmp/krc_wbcse_$$.kr -o /tmp/krc_wbcse_$$ > /dev/null 2>&1 && [ -f /tmp/krc_wbcse_$$ ]; then
+            chmod +x /tmp/krc_wbcse_$$
+            WB_GOT=0
+            $WB_RUN /tmp/krc_wbcse_$$ > /dev/null 2>&1 || WB_GOT=$?
+        fi
+        if [ "$WB_GOT" = "52" ]; then
+            PASS=$((PASS + 1))
+        else
+            echo "FAIL: write_builtins_stop_static_cse $WB_KIND $WB_ARCH (exit $WB_GOT, want 52; 50 = stale g reused, 99 = layout probe failed)"
+            FAIL=$((FAIL + 1))
+        fi
+    done
+done
+rm -f /tmp/krc_wbcse_$$.kr /tmp/krc_wbcse_$$
+
 # get_module_path (IR_MODULE_PATH, 146; Windows only) writes the path through
 # its buffer, and was missing from ir_opt_cse_invalidates the same way: with
 # the buffer aliasing g, `a = g; get_module_path(p, 8); b = g` emitted ONE load
@@ -6061,75 +6104,294 @@ rm -f /tmp/krc_mpcse_$$.kr /tmp/krc_mpcse_$$.s
 
 # ir_opt_cse_invalidates is derived from ir_opt_is_side_effect minus an
 # exemption list; a hand-kept positive list had drifted from the side-effect
-# list (barriers 126-130, then 74/124/125/146/148). Pin the derivation,
-# the exact side-effect set and the exact exemption set, so that a new
-# side effect or a new exemption is a deliberate, reviewed edit of this row
-# and a deleted side effect is caught. Every line of both functions must be
-# `if op == N [|| op == M ...] { return R }` or `if op >= N && op <= M
-# { return R }`; any other shape (a named constant, `>`/`<`, an `else`) is
-# refused, because the set this row reads would no longer be the set the
-# compiler executes. Every exempt op must still be side-effecting.
+# list (barriers 126-130, then 74/124/125/146/148). Pin the derivation, the
+# exact side-effect set, the exact exemption set and the three places the two
+# predicates are used, so that a new side effect or a new exemption is a
+# deliberate, reviewed edit of this row and a deleted side effect is caught.
+# The row tokenises src/*.kr with comments stripped, so spacing, tabs, line
+# breaks and redundant parentheses do not matter. It reads every statement of
+# both predicates and accepts only `if <cond> { return R }` and the final
+# `return`, where <cond> is `op == N`, an `||` of those, or `op >= N &&
+# op <= M`. Any other shape (a named constant, `!=`, `>`/`<`, an `else`, a
+# literal past the opcode range) is refused by name, because the set this row
+# reads would no longer be the set the compiler executes. A renamed
+# parameter, a `uint64 op = <param>` alias line and an attribute before `fn`
+# are accepted. ir_opt_is_side_effect may be referenced only from ir_opt_dce
+# (mark and sweep) and from the first line of ir_opt_cse_invalidates, and
+# ir_opt_cse_invalidates only from ir_opt_cse. Each call site is pinned token
+# for token from the opcode load to the use of the result, so a wrapper, an
+# `op != N &&` in front of the call, or a `keep = 0` after it is refused.
+# Every exempt op must still be side-effecting.
 TOTAL=$((TOTAL + 1))
-CSEPIN=$(python3 - "$DIR/../src/ir.kr" <<'PYEOF'
-import re, sys
-src = open(sys.argv[1]).read()
+CSEPIN=$(python3 - "$DIR/../src" <<'PYEOF'
+import re, sys, os, glob
+EXT = ".kr"
+IR_FILE = "ir.kr"
 # Pinned sets. A new side-effecting op, or a new exemption, is a deliberate
 # edit of these two lists.
 WANT_SE = {31, 40, 41, 42, 43, 50, 51, 52, 70, 71, 72, 74, 76, 78, 80, 81, 82, 83, 85, 87,
           90, 91, 92, 93, 94, 95, 96, 109, 110, 111, 112, 113, 114, 115, 119,
           124, 125, 126, 127, 128, 129, 130, 131, 146, 148}
 WANT_EX = {40, 41, 42, 43, 51, 70, 71, 80, 81, 82, 83, 119, 131}
-# Every non-comment line of both functions must have one of these exact
-# shapes (or be the fixed first/last line). Anything else -- a named
-# constant, `>`/`<`, an `else`, a second statement -- is refused, so the sets
-# read here are exactly the sets the compiler executes.
-EQ = re.compile(r'if (op == \d+(?: \|\| op == \d+)*) \{ return ([01]) \}')
-RANGE = re.compile(r'if op >= (\d+) && op <= (\d+) \{ return ([01]) \}')
-def lines(name):
-    n = len(re.findall(r'^fn ' + name + r'\b', src, re.M))
-    if n != 1:
-        return None, "%s defined %d times" % (name, n)
-    m = re.search(r'^fn ' + name + r'\(uint64 op\) -> uint64 \{\n(.*?)^\}', src, re.S | re.M)
-    if not m:
-        return None, "%s: signature or layout changed" % name
-    out = [ln.split("//")[0].strip() for ln in m.group(1).split("\n")]
-    return [ln for ln in out if ln], None
-def opset(body, ret, name):
-    s = set()
-    for ln in body:
-        m = RANGE.fullmatch(ln)
-        if m and m.group(3) == ret and int(m.group(1)) <= int(m.group(2)):
-            s |= set(range(int(m.group(1)), int(m.group(2)) + 1))
+# The three call sites, pinned token for token from the opcode load to the
+# use of the predicate's result, so nothing can test or rewrite `op` (or
+# `keep`) between them.
+CALL_LINE = {"dce_mark": "uint64 keep = ir_opt_is_side_effect(op)",
+             "dce_sweep": "if ir_opt_is_side_effect(op) == 0 {",
+             "cse": "if ir_opt_cse_invalidates(op) != 0 {"}
+WINDOWS = {
+ "dce_mark": ("ir_opt_dce", """
+            uint64 op = ir_insn_opcode(ii)
+            if op == 0 { continue }
+            uint64 dest = ir_insn_dest(ii)
+            uint64 s1 = ir_insn_src1(ii)
+            uint64 s2 = ir_insn_src2(ii)
+            uint64 imm = ir_insn_imm(ii)
+            uint64 keep = ir_opt_is_side_effect(op)
+            if keep == 0 && dest > 0 && dest < 65536 {
+                uint64 lp = ir_dce_live + dest
+                uint8 lv = 0
+                unsafe { *(lp as uint8) -> lv }
+                if lv != 0 { keep = 1 }
+            }
+            if keep != 0 {
+                ir_opt_dce_mark(s1, 0)"""),
+ "dce_sweep": ("ir_opt_dce", """
+        uint64 op = ir_insn_opcode(si)
+        if op == 0 { si = si + 1; continue }
+        if ir_opt_is_side_effect(op) == 0 {
+            uint64 dest = ir_insn_dest(si)
+            uint64 is_live = 0
+            if dest > 0 && dest < 65536 {
+                uint64 lp = ir_dce_live + dest
+                uint8 lv = 0
+                unsafe { *(lp as uint8) -> lv }
+                is_live = lv
+            }
+            if is_live == 0 {
+                ir_insn_set_opcode(si, 0)
+            }
+        }
+        si = si + 1
+    }"""),
+ "cse": ("ir_opt_cse", """
+        uint64 op = ir_insn_opcode(ii)
+        if op == 0 { ii = ii + 1; continue }
+        uint64 bb = ir_insn_bb(ii)
+        if bb != cur_bb {
+            ir_cse_gen = ir_cse_gen + 1
+            cur_bb = bb
+        }
+        if op == 61 {
+            uint64 cd = ir_insn_dest(ii)
+            uint64 cs = ir_cse_canon_of(ir_insn_src1(ii))
+            ir_cse_canon_set(cd, cs)
+            ii = ii + 1
             continue
-        m = EQ.fullmatch(ln)
-        if m and m.group(2) == ret:
-            s |= set(int(x) for x in re.findall(r'\d+', m.group(1)))
+        }
+        if ir_opt_cse_invalidates(op) != 0 {
+            ir_cse_gen = ir_cse_gen + 1
+            ii = ii + 1
             continue
-        return None, "%s: line of a refused shape: %s" % (name, ln)
-    return s, None
+        }"""),
+}
+SRC_DIR = sys.argv[1]
+TOK = re.compile(r'"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\'|0[xX][0-9A-Fa-f]+|\d+|[A-Za-z_]\w*|==|!=|>=|<=|&&|\|\||->|<<|>>|\S')
+def strip_comments(t):
+    # Drop // and /* */ comments; string and char literals are kept whole.
+    out, i, n = [], 0, len(t)
+    while i < n:
+        c = t[i]
+        if c in "\"'":
+            j = i + 1
+            while j < n and t[j] != c and t[j] != "\n":
+                j += 2 if t[j] == "\\" else 1
+            out.append(t[i:j + 1]); i = j + 1
+        elif t.startswith("//", i):
+            j = t.find("\n", i); i = n if j < 0 else j
+        elif t.startswith("/*", i):
+            j = t.find("*/", i + 2); k = n if j < 0 else j + 2
+            out.append("\n" * t.count("\n", i, k)); i = k
+        else:
+            out.append(c); i += 1
+    return "".join(out)
+FILES = {}
+for p in sorted(glob.glob(os.path.join(SRC_DIR, "*" + EXT))):
+    FILES[os.path.basename(p)] = TOK.findall(strip_comments(open(p).read()))
+def fn_defs(name):
+    return [(f, i) for f, tk in FILES.items() for i in range(len(tk) - 1) if tk[i] == "fn" and tk[i + 1] == name]
+def body(name):
+    # -> (file, start index of body tokens, body tokens, param name) or error string
+    d = fn_defs(name)
+    if len(d) != 1:
+        return "%s is defined %d times in src/*%s, want 1" % (name, len(d), EXT)
+    f, i = d[0]
+    tk = FILES[f]
+    if f != IR_FILE:
+        return "%s is defined in %s, want %s" % (name, f, IR_FILE)
+    sig = tk[i:i + 9]
+    if len(sig) < 9 or sig[2] != "(" or sig[3] not in ("uint64", "u64") or not re.fullmatch(r"[A-Za-z_]\w*", sig[4]) \
+            or sig[5:8] != [")", "->", sig[7]] or sig[7] not in ("uint64", "u64") or sig[8] != "{":
+        return "%s: signature is not `fn %s(uint64 <param>) -> uint64 {`: %s" % (name, name, " ".join(sig))
+    depth, j = 1, i + 9
+    while j < len(tk) and depth:
+        depth += {"{": 1, "}": -1}.get(tk[j], 0); j += 1
+    return (f, i + 9, tk[i + 9:j - 1], sig[4])
+def body_any(name):
+    d = fn_defs(name)
+    if len(d) != 1:
+        return "%s is defined %d times in src/*%s, want 1" % (name, len(d), EXT)
+    f, i = d[0]
+    tk = FILES[f]
+    j = tk.index("{", i) + 1
+    k, depth = j, 1
+    while k < len(tk) and depth:
+        depth += {"{": 1, "}": -1}.get(tk[k], 0); k += 1
+    return (f, j, tk[j:k - 1], None)
+def lit(t):
+    if re.fullmatch(r"\d+", t): v = int(t)
+    elif re.fullmatch(r"0[xX][0-9A-Fa-f]+", t): v = int(t, 16)
+    else: return None
+    return v if v < 65536 else -1
+class Refused(Exception): pass
+def shown(tk, st):
+    # the statement at st: through its first `}`, and an `else` block after it
+    end = st
+    while tk[end] not in ("}", "<END>"): end += 1
+    if tk[end] == "}" and tk[end + 1] == "else":
+        end += 2
+        while tk[end] not in ("}", "<END>"): end += 1
+    return " ".join(t for t in tk[st:end + 1] if t != "<END>")
+def parse_cond(tk, i, vs):
+    # One condition up to the `{`. Returns (tag, value, next index). A tag is
+    # "eq"/"ge"/"le" (one comparison of the op variable with a literal) or
+    # "set" (a set of ops). `||` joins eq/set terms; `&&` joins exactly one
+    # `>=` and one `<=` into an inclusive range; parentheses group. Mixing
+    # `&&` and `||` without parentheses, `!=`, `<`, `>`, `else`, a named
+    # constant, a call or a literal >= 65536 is refused.
+    def atom(i):
+        if tk[i] == "(":
+            t, v, i = disj(i + 1)
+            if tk[i] != ")": raise Refused("unbalanced parenthesis")
+            return t, v, i + 1
+        if tk[i] in vs and tk[i + 1] in ("==", ">=", "<="):
+            n = lit(tk[i + 2])
+            if n is None: raise Refused("compares with a non-literal `%s`" % tk[i + 2])
+            if n < 0: raise Refused("literal %s is out of the opcode range" % tk[i + 2])
+            return {"==": "eq", ">=": "ge", "<=": "le"}[tk[i + 1]], n, i + 3
+        raise Refused("unrecognised comparison at `%s`" % " ".join(tk[i:i + 3]))
+    def conj(i):
+        # -> (tag, value, next, joined_by_and)
+        t, v, i = atom(i)
+        if tk[i] != "&&": return t, v, i, False
+        t2, v2, i = atom(i + 1)
+        if tk[i] == "&&": raise Refused("more than two `&&` terms")
+        if (t, t2) != ("ge", "le"): raise Refused("`&&` that is not `op >= N && op <= M`")
+        if v > v2: raise Refused("empty range %d..%d" % (v, v2))
+        return "set", set(range(v, v2 + 1)), i, True
+    def disj(i):
+        t, v, i, a = conj(i)
+        if tk[i] != "||": return t, v, i
+        terms = [(t, v, a)]
+        while tk[i] == "||":
+            t, v, i, a = conj(i + 1)
+            terms.append((t, v, a))
+        acc = set()
+        for t, v, a in terms:
+            if a: raise Refused("`&&` mixed with `||` without parentheses")
+            if t == "eq": acc.add(v)
+            elif t == "set": acc |= v
+            else: raise Refused("a lone `>=`/`<=` inside `||`")
+        return "set", acc, i
+    t, v, i = disj(i)
+    if t == "eq": return {v}, i
+    if t == "set": return v, i
+    raise Refused("a lone `>=`/`<=` condition")
+def parse_fn(name, ret_case, ret_tail, first=None):
+    b = body(name)
+    if isinstance(b, str): raise Refused(b)
+    f, start, tk, param = b
+    tk = tk + ["<END>"] * 4
+    vs, i, s = {param}, 0, set()
+    while tk[i] == ";": i += 1
+    # optional alias of the parameter: `uint64 x = param`
+    if tk[i] in ("uint64", "u64") and tk[i + 2] == "=" and tk[i + 3] == param and tk[i + 4] in ("if", "return", ";"):
+        vs.add(tk[i + 1]); i += 4
+    if first:
+        want = ["if", first, "(", "?", ")", "==", "0", "{", "return", "0", "}"]
+        got = tk[i:i + 11]
+        if not (got[:3] == want[:3] and got[3] in vs and got[4:] == want[4:]):
+            raise Refused("%s is not derived from %s: first statement is `%s`" % (name, first, shown(tk, i)))
+        i += 11
+    while True:
+        while tk[i] == ";": i += 1
+        st = i
+        if tk[i] == "return" and tk[i + 1] != ret_tail:
+            raise Refused("%s ends in `return %s`, want `return %s`" % (name, tk[i + 1], ret_tail))
+        if tk[i] == "return" and tk[i + 1] == ret_tail:
+            j = i + 2
+            while tk[j] == ";": j += 1
+            if tk[j] != "<END>":
+                raise Refused("%s: statement after the final `return %s`" % (name, ret_tail))
+            return s
+        try:
+            if tk[i] != "if": raise Refused("not an `if`")
+            ops, i = parse_cond(tk, i + 1, vs)
+            if tk[i:i + 3] != ["{", "return", ret_case]: raise Refused("the block is not `{ return %s }`" % ret_case)
+            i += 3
+            while tk[i] == ";": i += 1
+            if tk[i] != "}": raise Refused("the block has more than `return %s`" % ret_case)
+            i += 1
+            if tk[i] == "else": raise Refused("an `else`")
+        except Refused as e:
+            raise Refused("%s: statement of a refused shape (%s): %s" % (name, e, shown(tk, st)))
+        s |= ops
+def window(fn, text, label):
+    b = body_any(fn)
+    if isinstance(b, str): raise Refused(b)
+    tk = b[2]
+    w = TOK.findall(text)
+    hits = [k for k in range(len(tk) - len(w) + 1) if tk[k:k + len(w)] == w]
+    if len(hits) != 1:
+        raise Refused("%s: the pinned call site of `%s` (its statements from the opcode load to the use of the result) is found %d times in %s, want 1" % (label, CALL_LINE[label], len(hits), fn))
+    return tk
+def refs(name):
+    # every mention outside its own definition, by enclosing function
+    out = []
+    for f, tk in FILES.items():
+        cur = None
+        for k, t in enumerate(tk):
+            if t == "fn" and k + 1 < len(tk): cur = tk[k + 1]
+            if t == name and not (k > 0 and tk[k - 1] == "fn"):
+                out.append(cur)
+    return sorted(out)
 def check():
-    se, err = lines("ir_opt_is_side_effect")
-    if err: return err
-    inv, err = lines("ir_opt_cse_invalidates")
-    if err: return err
-    if not se or se[-1] != "return 0":
-        return "ir_opt_is_side_effect does not end in return 0"
-    if not inv or inv[0] != "if ir_opt_is_side_effect(op) == 0 { return 0 }":
-        return "not derived from ir_opt_is_side_effect"
-    if inv[-1] != "return 1":
-        return "ir_opt_cse_invalidates does not end in return 1"
-    se_set, err = opset(se[:-1], "1", "ir_opt_is_side_effect")
-    if err: return err
-    ex, err = opset(inv[1:-1], "0", "ir_opt_cse_invalidates")
-    if err: return err
-    if se_set != WANT_SE:
-        return "side-effect set: missing %s, extra %s" % (sorted(WANT_SE - se_set), sorted(se_set - WANT_SE))
+    se = parse_fn("ir_opt_is_side_effect", "1", "0")
+    ex = parse_fn("ir_opt_cse_invalidates", "0", "1", first="ir_opt_is_side_effect")
+    if se != WANT_SE:
+        return "side-effect set: missing %s, extra %s" % (sorted(WANT_SE - se), sorted(se - WANT_SE))
     if ex != WANT_EX:
         return "exemptions: missing %s, extra %s" % (sorted(WANT_EX - ex), sorted(ex - WANT_EX))
-    if ex - se_set:
-        return "exempt but not side-effecting: %s" % sorted(ex - se_set)
+    if ex - se:
+        return "exempt but not side-effecting: %s" % sorted(ex - se)
+    for name, want in (("ir_opt_is_side_effect", ["ir_opt_cse_invalidates", "ir_opt_dce", "ir_opt_dce"]),
+                       ("ir_opt_cse_invalidates", ["ir_opt_cse"])):
+        got = refs(name)
+        if got != want:
+            return "%s is referenced from %s, want exactly %s" % (name, got, want)
+    for label, (fn, text) in WINDOWS.items():
+        tk = window(fn, text, label)
+        if label == "dce_mark":
+            n = tk.count("keep")
+            if n != 4:
+                return "dce_mark: `keep` appears %d times in ir_opt_dce, want 4 (all in the pinned call site)" % n
     return "ok"
-print(check())
+try:
+    print(check())
+except Refused as e:
+    print(e)
+except IndexError:
+    print("ran off the end of a function body while parsing it")
 PYEOF
 )
 if [ "$CSEPIN" = "ok" ]; then
@@ -21136,7 +21398,9 @@ fi
 TOTAL=$((TOTAL + 1))
 CITE_DOC="$DIR/../docs/IR_REFERENCE.md"
 if [ ! -f "$CITE_DOC" ] || [ ! -f "$CITE_MANIFEST" ]; then
-    PASS=$((PASS + 1)); echo "  ir_reference_doc_agrees: SKIP (doc or manifest missing)"
+    # Both files are tracked; a missing one is a broken tree, not a skip, and
+    # counting it as a PASS would report a check that never ran.
+    FAIL=$((FAIL + 1)); echo "FAIL: ir_reference_doc_agrees (docs/IR_REFERENCE.md or tests/ir_reference_citations.txt is missing, so nothing was compared)"
 else
     doc_orphan=$(python3 - "$CITE_DOC" "$CITE_MANIFEST" <<'PYEOF'
 import re, sys

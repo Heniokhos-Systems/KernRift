@@ -955,11 +955,24 @@ new block's size header), 80–83 (register extracts and multi-value
 returns), 119 (`TIME_NS`, a stack timespec) and 131 (`ARR_CHECK`). None of
 those writes memory a CSE-pure op reads; `IR_STATIC_LOAD` (77) is the only
 such op. The test row `cse_invalidate_set_pinned` pins the derivation, the
-exact side-effect set and the exact exemption set. It reads both functions
-line by line and refuses any line that is not `if op == N [|| op == M ...]
-{ return R }` or `if op >= N && op <= M { return R }`: an exemption written
-with a named constant, with `>`/`<`, or as an `else` would otherwise pass
-unread.
+exact side-effect set, the exact exemption set and the three call sites. It
+tokenises the sources with comments stripped, so spacing, line breaks and
+redundant parentheses do not matter, and reads every statement of both
+functions: each must be `if <cond> { return R }`, where `<cond>` is
+`op == N`, an `||` of those, or `op >= N && op <= M`, and the last must be
+the final `return`. Any other shape (a named constant, `!=`, `>`/`<`, an
+`else`, a literal past the opcode range) is refused by name, since an
+exemption written that way would otherwise pass unread. Reading the two
+functions is not enough on its own: a wrapper around
+`ir_opt_cse_invalidates` at the CSE call site, an `op != N &&` in front of
+that call, or a `keep = 0` after DCE's call leaves both functions untouched.
+So `ir_opt_is_side_effect` may be referenced only from `ir_opt_dce` (mark
+and sweep) and from the first line of `ir_opt_cse_invalidates`, and
+`ir_opt_cse_invalidates` only from `ir_opt_cse`. Each call site is pinned
+token for token, from the opcode load to the use of the result. The row
+`write_builtins_stop_static_cse` checks the effect at run time: a static
+read before and after a `memset`, a `memcpy` or a pointer store that writes
+the static through an alias must see the write, on x86_64 and arm64.
 
 The hand-kept positive list it replaced had drifted twice. The barriers
 126–130 (`isb`, `dcache_flush`, `icache_invalidate`, `dsb`, `dmb`) were
@@ -1481,8 +1494,8 @@ removed; do not re-add them without re-verifying.
    the others fail *loudly* — the NYI helpers do, but only if the opcode
    really falls through to them.
 5. If it has a side effect, add it to `ir_opt_is_side_effect()`
-   (`src/ir.kr:13410`), in one of the two line shapes the
-   `cse_invalidate_set_pinned` row accepts, and add it to that row's
+   (`src/ir.kr:13410`), with a condition the `cse_invalidate_set_pinned` row accepts (`op == N`,
+   an `||` of those, or `op >= N && op <= M`), and add it to that row's
    `WANT_SE`; it then invalidates CSE automatically. Only if it writes no
    memory a CSE-pure op reads may it be exempted in
    `ir_opt_cse_invalidates()` (`src/ir.kr:13618`), and the exemption goes
