@@ -21432,7 +21432,7 @@ fi
 # codegen.kr:1160, which is `str_len = str_len + 1`.
 #
 # One-directional on purpose: a manifest entry the doc no longer cites is
-# harmless (there is one, src/ir.kr:13494), but a doc citation with no manifest
+# harmless (the generator emits none today), but a doc citation with no manifest
 # entry means the two have diverged and nothing is checking that citation.
 TOTAL=$((TOTAL + 1))
 CITE_DOC="$DIR/../docs/IR_REFERENCE.md"

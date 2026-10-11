@@ -25,16 +25,19 @@ not.
 
 The IR is a **flat, per-function, virtual-register instruction list with
 explicit basic blocks**. It is produced by `ir_lower_function()`
-(`src/ir.kr:5794`) from the AST and consumed by four machine-code emitters.
+(`src/ir.kr:5863`) from the AST and consumed by four machine-code emitters.
 
-**It is not SSA, despite the name of the `--emit=ir` help text.** Verified
+**It is not SSA**, whatever the `--emit=ir` help text used to say (it read
+"dump SSA IR per function"; it now reads "dump IR per function"). Verified
 two ways:
 
-1. `IR_PHI` (opcode 60) is **completely dead**. Tree-wide, the only three
-   references are the constant definition (`src/ir.kr:73`), its name string
-   in `ir_opcode_name` (`src/ir.kr:5588`), and a stale comment
-   (`src/ir_aarch64.kr:2240`). No lowering emits it and no emitter handles
-   it.
+1. `IR_PHI` (opcode 60) is **completely dead**. Tree-wide, its only code
+   references are the constant definition (`src/ir.kr:73`) and its name
+   string in `ir_opcode_name` (`src/ir.kr:5628`). The rest are comments: a
+   stale one (`src/ir_aarch64.kr:2240`), and two that say it is never built
+   (the header of `src/ir.kr`, `src/ir.kr:4`, and the one beside the
+   `--emit=ir` help text in `src/main.kr`). No lowering emits it and no
+   emitter handles it.
 2. A vreg is assigned in more than one block. Probe (`--emit=ir` on an
    if/else plus a `while`):
 
@@ -61,7 +64,7 @@ single-def checks; see §10.
 
 ### Instruction record
 
-32 bytes, fixed layout (accessors at `src/ir.kr:531`–`545`):
+32 bytes, fixed layout (accessors at `src/ir.kr:531`–`590`):
 
 | Offset | Width | Field | Notes |
 |---|---|---|---|
@@ -83,26 +86,26 @@ Three parallel, index-keyed side tables share `ir_insn_cap` and leave the
 
 | Table | Width | Purpose | Decl |
 |---|---|---|---|
-| `ir_insn_src_tok` | u32/insn | source token, for `-g` DWARF line records | `src/ir.kr:223` |
+| `ir_insn_src_tok` | u32/insn | source token, for `-g` DWARF line records | `src/ir.kr:224` |
 | `ir_insn_origin` | u64/insn | pointer to a static name literal: *which builtin lowered to this instruction* | `src/ir.kr:244` |
 | (the arena) | 32 B/insn | the instructions | `src/ir.kr:217` |
 
 Basic blocks are 16-byte records — `first_insn`, `last_insn`, `succ0`,
 `succ1`, each u32 with `0xFFFFFFFF` as the empty/none sentinel
-(`ir_new_bb`, `src/ir.kr:730`).
+(`ir_new_bb`, `src/ir.kr:728`).
 
 Initial capacities (`ir_init`, `src/ir.kr:294`): 65536 instructions, 4096
 basic blocks, 65536 vreg float-kind slots. The instruction arena grows
-(`src/ir.kr:634`); the block arena does **not** — exceeding 4096 blocks is a
-hard `error: IR basic block overflow` and `exit(1)` (`src/ir.kr:732`).
+(`src/ir.kr:632`); the block arena does **not** — exceeding 4096 blocks is a
+hard `error: IR basic block overflow` and `exit(1)` (`src/ir.kr:730`–`731`).
 
-`ir_vreg_next` starts at 1 (`src/ir.kr:323`), so **vreg 0 is reserved** and
+`ir_vreg_next` starts at 1 (`src/ir.kr:316`), so **vreg 0 is reserved** and
 means "no value".
 
 **fkind** is a per-vreg byte tag: `0` = integer, `1` = f64, `2` = f32. It
 selects the register class at emission. `ir_init` memsets the whole buffer
 because it is indexed without a length guard and a stale byte from the
-previous function would mislabel a vreg as float (`src/ir.kr:323`–`321`).
+previous function would mislabel a vreg as float (`src/ir.kr:322`–`324`).
 
 ---
 
@@ -156,7 +159,7 @@ need legacy codegen for extern relocations"*.
 > `--emit=obj` unguarded by construction. This has caught the project twice:
 > the `--target=none` `time_ns` silent-constant-zero survived a whole audit
 > round for exactly this reason, and the fix was to move the refusal helper
-> out of `ir.kr` into `codegen.kr` (`src/codegen.kr:891`–`640`).
+> out of `ir.kr` into `codegen.kr` (`src/codegen.kr:891`–`920`).
 
 Also verified, and frequently assumed backwards: **`--target=` selects the
 ABI, not the container.** `--arch=x86_64 --target=windows` emits an **ELF**
@@ -191,7 +194,8 @@ $ krc --emit=ir prog.kr     # prog.kr does `println(some_f64)`
 ## 3. The per-OS dispatch shape, and where a new case goes
 
 `target_os` values (parsed at `src/main.kr:9159`, derived from `--emit` at
-`9447`–`9449`, reset per slice by `compile_fat` at `6074` and `7085`):
+`9486`–`9488` and `9516`–`9517`, written per slice by `compile_fat` at `6113`,
+`6353`, `6611`, `6863`, `6990` and `7124`):
 
 <!-- The previous version of this line read "assigned in 9011-5258, defaults at
      3631/3859/4113/4361/4486/4618". The range ran backwards and every one of
@@ -217,8 +221,8 @@ src/codegen_xtensa.kr`), counting occurrences on non-comment lines:
 
 | Pattern | Count |
 |---|---|
-| `target_os == 2` (Windows) | 113 |
-| `target_os == 1` (macOS) | 103 |
+| `target_os == 2` (Windows) | 118 |
+| `target_os == 1` (macOS) | 108 |
 | `target_os == 4` (bare metal) | 39 |
 | `target_os != 2` | 12 |
 | `target_os == 3` (Android) | 11 |
@@ -234,11 +238,10 @@ grep -h "target_os == 0" src/ir.kr src/ir_aarch64.kr src/ir_riscv.kr \
   | grep -v '^[[:space:]]*//' | grep -o "target_os == 0" | wc -l
 ```
 
-Four explicit Linux tests against 113 Windows tests is the whole story:
+Four explicit Linux tests against 118 Windows tests is the whole story:
 Linux is not a case, it is the fall-through. The comment at
-`src/codegen.kr:661` makes the same point but quotes `116` for
-`target_os == 2` — that count is now stale by three; the *ratio* is what
-matters and it has not changed.
+`src/codegen.kr:661` makes the same point with the same counts (118 and 4,
+by the command above).
 
 ### Consequences you must design around
 
@@ -269,7 +272,7 @@ matters and it has not changed.
    (`src/codegen.kr` / `src/codegen_aarch64.kr`), because `--legacy`,
    `--emit=obj` and `--emit=lkm` never call `ir_lower_expr`.
 3. If it is an **emitter-level divergence**, remember that `ir_lower_stmt`
-   (`src/ir.kr:4389`–`5147`) contains **no `target_os` branch at all** —
+   (`src/ir.kr:4411`–`5582`) contains **no `target_os` branch at all** —
    statement-level constructs (local array decls, struct decls) are per-OS
    blind by construction. That is why the `IR_ALLOC` sites in §11 have no
    bare-metal arm.
@@ -310,7 +313,7 @@ function main:
 
 ## 5. Opcode reference
 
-Numbers are the `static uint64 IR_* = N` constants at `src/ir.kr:30`–`207`.
+Numbers are the `static uint64 IR_* = N` constants at `src/ir.kr:30`–`211`.
 Gaps (28–29, 33–39, 44–49, 53–59, 62–69, 89, 116–117) are unassigned.
 
 Legend for the *Effect* column: **SE** = in the side-effect set (survives
@@ -364,7 +367,7 @@ Notes, all verified:
 - **135/136/138/139 are optimizer products only.** No lowering emits them;
   `ir_opt_const_fold` rewrites `IR_ADD`/`IR_SUB`/`IR_MUL` into them when one
   source is a known constant. 138 fires only for `target_arch == 0`
-  (`src/ir.kr:13084`); 139's producer is gated to arch 0 and 1
+  (`src/ir.kr:13153`); 139's producer is gated to arch 0 and 1
   (`src/ir.kr:14196`).
 
 ### 5.2 Compares (14–19 unsigned, 120–123 signed)
@@ -410,7 +413,7 @@ is false; it is still present in MLRift's copy of this document.)*
 
 - **`IR_FFMA` is a misnomer.** It emits `mulsd` + `addsd` on x86_64
   (verified by disassembly: no `vfmadd`) and `FMUL d0` + `FADD` on arm64
-  (`src/ir_aarch64.kr:2987`/`2871`). Two roundings, not one — results differ
+  (`src/ir_aarch64.kr:2987`/`2989`). Two roundings, not one — results differ
   from a true FMA. The source says so at `src/ir.kr:14114`: *"The current
   FFMA emit isn't actually a hardware FMA instruction — it just inlines
   mulsd+addsd back-to-back."* Its value is skipping the GPR round-trip
@@ -418,7 +421,7 @@ is false; it is still present in MLRift's copy of this document.)*
 - **`IR_FTOI` saturates.** Verified on both arches: `1e21 → 9223372036854775807`,
   `NaN → 0`. The two arches agree.
 - **105/106 are not x86-only** (a claim the old text made). arm64 implements
-  both as software bit manipulation, `src/ir_aarch64.kr:3016` and `2938`.
+  both as software bit manipulation, `src/ir_aarch64.kr:3016` and `3056`.
 - **Float literals are materialised at runtime.** `1.5` lowers to
   `itof(1) + itof(5)/itof(10)`, and `ir_opt_const_fold` does not fold float
   ops, so the `cvtsi2sd`/`divsd` survive to codegen. Verified by disassembly:
@@ -456,10 +459,10 @@ is false; it is still present in MLRift's copy of this document.)*
   be listed alongside `IR_STORE` in every "no def" list and alongside
   `IR_FFMA` in every "imm is a vreg" list for liveness, use-counting, DCE and
   interference. Get this wrong and you get a use-after-free of a register.
-  See the constant's comment, `src/ir.kr:203`–`205`.
+  See the constant's comment, `src/ir.kr:205`–`209`.
 - **147/148 are arm64-only.** Produced solely by `ir_opt_fuse_lea_mem`, which
   is called under `if target_arch == 1` (`src/ir.kr:14107`). Handlers exist
-  only at `src/ir_aarch64.kr:1438` and `1412`.
+  only at `src/ir_aarch64.kr:1438` and `1476`.
 
 ### 5.5 Control flow (40–43, 50–52, 61, 85–87)
 
@@ -485,7 +488,7 @@ is false; it is still present in MLRift's copy of this document.)*
   reorders or renumbers blocks, you must maintain `succ0`/`succ1`, not just
   the terminator's `imm`.
 - Terminators are **not** emitted from the per-instruction dispatch on any
-  backend. x86 has explicit no-op cases at `src/ir.kr:12681`/`11713` and
+  backend. x86 has explicit no-op cases at `src/ir.kr:12750`/`12754` and
   skips them in the block loop (`src/ir.kr:15155`); arm64/riscv32/xtensa have
   no case at all and emit terminators in their function-level loop.
 
@@ -555,13 +558,13 @@ optimizer products.
 
 The old text called all six "riscv32-only". **That is wrong for 143**, which
 is created by the pow2-`MUL`→`SHL` strength reduction for *every* arch
-(`src/ir.kr:13063`) and has handlers on all four backends. 140–142 and
-144–145 are created only under `target_arch == 2` (`src/ir.kr:13330`), even
+(`src/ir.kr:13121`) and has handlers on all four backends. 140–142 and
+144–145 are created only under `target_arch == 2` (`src/ir.kr:13338`), even
 though xtensa carries handlers for them (`src/ir_xtensa.kr:1954`, `1975`) —
 those xtensa arms are dead code today.
 
 Shift-amount width is enforced in the *producer*, not the consumer:
-`src/ir.kr:13063` refuses to fold a shamt ≥ 32 when
+`src/ir.kr:13132` refuses to fold a shamt ≥ 32 when
 `target_arch == 2 || target_arch == 3`, because RV32 `slli`/`srli`/`srai` and
 the Xtensa equivalents take a 5-bit shamt while x86/arm64 take 6.
 
@@ -573,7 +576,7 @@ Four emitters, one dispatch function each:
 
 | Arch | Dispatch fn | File:line | NYI helper |
 |---|---|---|---|
-| x86_64 | `ir_emit_x86_insn` | `src/ir.kr:8895` | `x86_nyi_op`, `src/ir.kr:8741` |
+| x86_64 | `ir_emit_x86_insn` | `src/ir.kr:8964` | `x86_nyi_op`, `src/ir.kr:8810` |
 | AArch64 | `ir_emit_arm64_insn` | `src/ir_aarch64.kr:949` | `a64_nyi_op`, `src/ir_aarch64.kr:738` |
 | RV32IMC | `ir_emit_riscv_insn` | `src/ir_riscv.kr:1113` | `rv_nyi_op`, `src/ir_riscv.kr:133` |
 | Xtensa LX6 | `ir_emit_xtensa_insn` | `src/ir_xtensa.kr:1713` | `xt_nyi_op`, `src/ir_xtensa.kr:157` |
@@ -672,12 +675,12 @@ been derailed twice.
 ### The IR backend has no extern relocation on x86_64 or arm64
 
 `grep extern src/ir_aarch64.kr src/ir_xtensa.kr` returns nothing. The x86
-`IR_CALL` handler (`src/ir.kr:10574`–`9821`) records only an entry in the
+`IR_CALL` handler (`src/ir.kr:10654`–`10692`) records only an entry in the
 internal `fixup_table`; it never calls `extern_fn_lookup`. Extern symbols are
 the reason `--emit=obj` and `--emit=lkm` are routed to the legacy backend
 (§2).
 
-**One exception, and it is real:** `src/ir_riscv.kr:1579`–`1600` *does* emit
+**One exception, and it is real:** `src/ir_riscv.kr:1579`–`1604` *does* emit
 `R_RISCV_CALL_PLT` for an extern callee when `cg_emit_mode == 3`. riscv32 has
 no legacy backend, so `--emit=obj` there necessarily goes through the IR, and
 the relocation had to be implemented in it. Verified:
@@ -696,7 +699,7 @@ can, under `--emit=obj` only."*
 
 `imm` is the **canonical Linux syscall number**, not an internal kind. Each
 emitter feeds it through an arch/OS remapper (`ir_x86_syscall_nr`
-`src/ir.kr:8282`; `ir_a64_syscall_nr` `src/ir_aarch64.kr:755`;
+`src/ir.kr:8351`; `ir_a64_syscall_nr` `src/ir_aarch64.kr:754`;
 `ir_rv32_syscall_nr`), and branches on specific Linux values — `imm == 2`
 triggers the `open`→`openat` argument shift on arm64 and riscv32.
 
@@ -704,9 +707,9 @@ The mapping from builtins to numbers is **many-to-one**:
 
 | nr | Builtins that produce it | `ir_emit_syscall` call sites in `src/ir.kr` |
 |---|---|---|
-| 1 (`write`) | `write`, `print`, `println`, `print_str`, `println_str`, `file_write` | 2078, 2594, 2630, 2643, 2813, 3001 |
-| 0 (`read`) | `read`, `file_read` | 2665, 2831 |
-| 8 (`lseek`) | `file_size` (twice: END then SET) | 2852, 2858 |
+| 1 (`write`) | `write`, `print`, `println`, `print_str`, `println_str`, `file_write` | 2267, 2783, 2819, 2832, 3002, 3190 |
+| 0 (`read`) | `read`, `file_read` | 2854, 3020 |
+| 8 (`lseek`) | `file_size` (twice: END then SET) | 3041, 3047 |
 
 So the emitter **cannot** recover which builtin it is serving from `imm`
 alone. That is why `ir_insn_origin` (`src/ir.kr:244`) exists: a parallel
@@ -716,11 +719,11 @@ the surface builtin.
 **`ir_emit_syscall()` (`src/ir.kr:706`) is the only constructor of
 `IR_SYSCALL`.** Verified: the only `ir_emit` call with `IR_SYSCALL` in the
 tree is `src/ir.kr:707`, inside that function, and there is no `ir_emit(52,`
-anywhere. It has 13 call sites, all in `src/ir.kr`. A future lowering
+anywhere. It has 15 call sites, all in `src/ir.kr`. A future lowering
 therefore cannot add an anonymous `IR_SYSCALL` by accident.
 
 Readers: `ir_insn_origin_at()` (`src/ir.kr:523`), called from the op-52
-handler on all three IR backends that have one (`src/ir.kr:10526`,
+handler on all three IR backends that have one (`src/ir.kr:10642`,
 `src/ir_aarch64.kr:1723`, `src/ir_riscv.kr:2348`). Each falls back to
 `"an unnamed syscall lowering"` when the slot is 0 — never a guessed name.
 
@@ -735,15 +738,15 @@ Note that `IR_SYSCALL_RAW` (85) is a *different* opcode, emitted through plain
 
 | Op | x86 branch | arm64 branch | What differs |
 |---|---|---|---|
-| 52 `IR_SYSCALL` | `src/ir.kr:10515` | `src/ir_aarch64.kr:1705` | Windows → IAT thunks; macOS numbers get `0x2000000` OR'd; arm64 `open`→`openat` shift on Linux/Android but not macOS |
-| 70 `IR_ALLOC` | `src/ir.kr:9795`, `9072` | `src/ir_aarch64.kr:1748`, `1690` | Windows → `VirtualAlloc(NULL, size+8, 0x3000, 4)` through the IAT; elsewhere inline `mmap` with flags `0x22` (Linux/Android) vs `0x1002` (macOS) |
-| 71 `IR_DEALLOC` | `src/ir.kr:9795` | `1717` | `VirtualFree(ptr-8,0,MEM_RELEASE)` vs `munmap` |
-| 85 `IR_SYSCALL_RAW` | — | `2047` | syscall-number register is **x16 on macOS, x8 elsewhere** |
-| 113/114 `IR_EXEC*` | `10380`/`10487` | `2353`/`2446` | `CreateProcessA` + `WaitForSingleObject` + `ExitProcess` vs `execve` |
-| 115 `IR_SET_EXEC` | `10595` | `2546` | **emits nothing on Windows**; `fchmodat` on Linux/Android, `chmod` nr 15 on macOS |
-| 119 `IR_TIME_NS` | `10672`/`10705` | `2603`/`2620`/`2643` | QPC/QPF on Windows, `gettimeofday` on macOS, `clock_gettime(CLOCK_MONOTONIC)` on Linux/Android |
-| 131 `IR_ARR_CHECK` | `10816` | `2744` | trap sequence differs per OS; **on arm64 + Windows the check is skipped entirely** (`if target_os == 2 { return }`, `src/ir_aarch64.kr:2863`) |
-| 146 `IR_MODULE_PATH` | `10615` | `2581` | `GetModuleFileNameA` on Windows; otherwise the emitter loads 0 |
+| 52 `IR_SYSCALL` | `src/ir.kr:10631` | `src/ir_aarch64.kr:1705` | Windows → IAT thunks; macOS numbers get `0x2000000` OR'd; arm64 `open`→`openat` shift on Linux/Android but not macOS |
+| 70 `IR_ALLOC` | `src/ir.kr:9864`, `9911` | `src/ir_aarch64.kr:1748`, `1776` | Windows → `VirtualAlloc(NULL, size+8, 0x3000, 4)` through the IAT; elsewhere inline `mmap` with flags `0x22` (Linux/Android) vs `0x1002` (macOS) |
+| 71 `IR_DEALLOC` | `src/ir.kr:9963` | `1813` | `VirtualFree(ptr-8,0,MEM_RELEASE)` vs `munmap` |
+| 85 `IR_SYSCALL_RAW` | — | `2144` | syscall-number register is **x16 on macOS, x8 elsewhere** |
+| 113/114 `IR_EXEC*` | `11421`/`11528` | `2471`/`2564` | `CreateProcessA` + `WaitForSingleObject` + `ExitProcess` vs `execve` |
+| 115 `IR_SET_EXEC` | `11636` | `2664` | **emits nothing on Windows**; `fchmodat` on Linux/Android, `chmod` nr 15 on macOS |
+| 119 `IR_TIME_NS` | `11713`/`11746` | `2721`/`2738`/`2761` | QPC/QPF on Windows, `gettimeofday` on macOS, `clock_gettime(CLOCK_MONOTONIC)` on Linux/Android |
+| 131 `IR_ARR_CHECK` | `11857` | `2874` | trap sequence differs per OS; **on arm64 + Windows the check is skipped entirely** (`if target_os == 2 { return }`, `src/ir_aarch64.kr:2863`) |
+| 146 `IR_MODULE_PATH` | `11656` | `2699` | `GetModuleFileNameA` on Windows; otherwise the emitter loads 0 |
 
 Verified concretely — `alloc(64)` on Linux x86_64 emits an inline `mmap` and
 stores the size in an 8-byte header below the returned pointer:
@@ -768,15 +771,15 @@ Under `--emit=pe` the same program's binary contains `VirtualAlloc` and
 `ir_lower_stmt()` has **no `target_os` branch at all**. In `ir_lower_expr()`:
 
 - `file_open` bakes `0x241` (Linux/Android) vs `0x601` (macOS) into an
-  `IR_CONST` (`src/ir.kr:2933`).
+  `IR_CONST` (`src/ir.kr:2954`–`2963`).
 - `get_target_os` folds `target_os` verbatim into an `IR_CONST`
-  (`src/ir.kr:3565`).
+  (`src/ir.kr:3587`).
 - `get_arch_id` folds an OS × arch crosstable into an `IR_CONST`
-  (`src/ir.kr:3604`). Bare-metal ids are 9–12, deliberately outside the 1–8
+  (`src/ir.kr:3624`). Bare-metal ids are 9–12, deliberately outside the 1–8
   KrboFat slice space. **ABI trap**: `if get_arch_id() == 2` meaning arm64
   sees **10** under `--target=none`.
 - `get_module_path` emits `IR_MODULE_PATH` **only** when `target_os == 2`
-  (`src/ir.kr:2508`); otherwise `IR_CONST 0`.
+  (`src/ir.kr:2530`); otherwise `IR_CONST 0`.
 - `print`/`println`/`print_str`/`println_str` take a completely different
   lowering under `target_os == 4` (`ir_lower_print_bare_metal`,
   `src/ir.kr:1574`) — stack scratch plus a provider `IR_CALL`, no `IR_ALLOC`
@@ -786,8 +789,8 @@ Under `--emit=pe` the same program's binary contains `VirtualAlloc` and
 
 | Op | Divergence |
 |---|---|
-| 126 `IR_ISB` | real `ISB` on arm64 (`src/ir_aarch64.kr:2818`); **complete no-op on x86_64**, zero bytes emitted (`src/ir.kr:11722`) |
-| 128 `IR_ICACHE_INV` | `IC IVAU; DSB ISH; ISB` on arm64; **no-op on x86_64** (`src/ir.kr:11749`) |
+| 126 `IR_ISB` | real `ISB` on arm64 (`src/ir_aarch64.kr:2818`); **complete no-op on x86_64**, zero bytes emitted (`src/ir.kr:11791`) |
+| 128 `IR_ICACHE_INV` | `IC IVAU; DSB ISH; ISB` on arm64; **no-op on x86_64** (`src/ir.kr:11818`) |
 | 129 / 130 `IR_DSB` / `IR_DMB` | distinct instructions on arm64 (`DSB SY` / `DMB ISH`); **both collapse to the same `MFENCE`** on x86 — two IR ops, one instruction |
 | 127 `IR_DCACHE_FLUSH` | `CLFLUSH; MFENCE` on x86 vs `DC CIVAC; DSB ISH; ISB` to Point of Coherency on arm64 — different reach; the arm64 form needs EL1+ on real hardware |
 | 131 `IR_ARR_CHECK` | absent on arm64 + Windows (above) |
@@ -843,7 +846,7 @@ alias analysis and a load cannot be assumed to return the same value twice.
   diagnostic that lands on line 6. Print the *whole* output before concluding
   the compiler did not diagnose something.)
 - **AST-level DCE seeds only `main` and `@export`** (`dce_scan`,
-  `src/codegen.kr:14417`). `_start` is not a seed, so freestanding riscv32 and
+  `src/codegen.kr:15097`). `_start` is not a seed, so freestanding riscv32 and
   xtensa (and `--emit=image`) entry points had to be added explicitly
   (`src/main.kr:3526`–`3541`).
 - **A provider reached only through override resolution gets pruned.** Under
@@ -851,7 +854,7 @@ alias analysis and a load cannot be assumed to return the same value twice.
   provider, and an f-string's buffer reroutes to the `alloc` provider — but
   neither reroute is a `Call` node in the AST, so the provider is dead to
   `dce_scan` and is pruned. Both needed explicit seeds
-  (`src/codegen.kr:14215`–`12035`). The seeds are deliberately *narrow* —
+  (`src/codegen.kr:14932`–`14952`). The seeds are deliberately *narrow* —
   gated on `target_os == 4`, on the callee really being one of the four print
   builtins, and on that name not itself being overridden — so that the test
   proving the seed is load-bearing cannot pass vacuously.
@@ -940,7 +943,7 @@ to fixpoint, then a forward **NOP-out** sweep that sets `opcode = 0`
 lists; terminators survive via `ir_opt_is_side_effect`. It crosses blocks.
 *Breaking invariant:* the operand-shape exclusion list in `ir_opt_dce` (which
 opcodes really read `src2`, and the imm-as-vreg set `{72, 76, 83, 93, 98,
-148}`) is **duplicated verbatim in six other places — seven copies in total**.
+148}`) is **duplicated verbatim in seven other places — eight copies in total**.
 See §14 for the full list; any divergence between them miscompiles.
 
 **`ir_opt_cse` (`src/ir.kr:13647`)** — strictly **intra-block**. Hashes
@@ -1052,27 +1055,28 @@ the invalidating set is derived from the side-effect set (above).
 
 ## 11. Register allocator
 
-`ir_graph_color()` (`src/ir.kr:6882`) is shared by all four backends through
+`ir_graph_color()` (`src/ir.kr:6951`) is shared by all four backends through
 a single colour→physical-register table (`ir_phys_regs`, sized once for the
-largest file any arch uses, `src/ir.kr:6284`).
+largest file any arch uses, `src/ir.kr:6366`).
 
 **It is not Chaitin-style.** There is no simplify/select stack and no
 spill-and-rebuild loop. One pass:
 
-1. every vreg pre-set to `0xFFFFFFFF` = spilled (6852);
+1. every vreg pre-set to `0xFFFFFFFF` = spilled (7398);
 2. representatives ordered by **saturating use count, descending**, via a
-   counting sort (6872); `ir_use_count_get` saturates at 255. Any order would
+   counting sort (7407); `ir_use_count_get` saturates at 255. Any order would
    be *correct*; this one is a spill-cost priority;
 3. for each rep, take the lowest colour not used by an interfering neighbour
-   and below the rep's colour ceiling (6960). **If none is free the vreg
+   and below the rep's colour ceiling (7500). **If none is free the vreg
    simply stays `0xFFFFFFFF` and spills** — there is no retry;
-4. rep colours propagate to coalescing followers (6975).
+4. rep colours propagate to coalescing followers (7516).
 
-`ir_used_color_mask` (6405) then tells the prologue which callee-saved
-colours were actually used, so only those get pushed. *(Its own comment at
-`src/ir.kr:6865` still says "5-bit set" — stale; it is 6 bits and includes
-rbp. That comment is the likely origin of the wrong claim in earlier
-revisions of this document.)*
+`ir_used_color_mask` (6931) then tells the prologue which callee-saved
+colours were actually used, so only those get pushed. *(Its own comment,
+`src/ir.kr:6916`–`6930`, used to say "5-bit set"; it now gives the narrow x86
+file as 6 colours including rbp, and the mask as reaching bit 22 on arm64's
+23-wide file. The old wording is the likely origin of the wrong claim in
+earlier revisions of this document.)*
 
 ### Colour files, verified from the init functions
 
@@ -1081,7 +1085,7 @@ count, the set, **and** on which file is the default.
 
 | Arch | Narrow | Registers | Wide (**the default**) | Extra registers |
 |---|---|---|---|---|
-| x86_64 | 6 (`src/ir.kr:6293`) | rbx, r12, r13, r14, r15, **rbp** | **12** (`src/ir.kr:6339`) | + rsi, rdi, r8–r11 (all caller-saved) |
+| x86_64 | 6 (`src/ir.kr:6373`) | rbx, r12, r13, r14, r15, **rbp** | **12** (`src/ir.kr:6410`) | + rsi, rdi, r8–r11 (all caller-saved) |
 | arm64 | 10 (`src/ir_aarch64.kr:196`) | x19–x28 | **23** (`src/ir_aarch64.kr:240`) | colours 10–18 → x0–x8; 19–22 → x12–x15 |
 | riscv32 | 12 (`src/ir_riscv.kr:108`) | — | (none) | |
 | xtensa | 4 (`src/ir_xtensa.kr:477`) | — | 9 (`src/ir_xtensa.kr:522`) | |
@@ -1093,7 +1097,7 @@ prologue/epilogue (which look only at colours below the prefix length) need
 no change and "must survive a call" becomes simply "ceiling = prefix length".
 
 Registers deliberately excluded from the x86 wide file, and why
-(`src/ir.kr:6317`–`5937`): **rax/rcx** are the universal spill-reload
+(`src/ir.kr:6398`–`6402`): **rax/rcx** are the universal spill-reload
 scratch pair used by `ir_resolve_src`, **rcx** is also the variable-shift
 count (CL), and **rdx** is `div`/`mod`'s implicit high half and `IR_FFMA`'s
 third-operand scratch. On arm64 the exclusions are x9/x10 (scratch pair),
@@ -1104,11 +1108,11 @@ fixup sequences and macOS's syscall-number register) and x18
 
 **Wide-mode gate — exactly two disqualifiers.** The function contains an
 `IR_ASM_BLOCK` (op 96) anywhere in its body, or it is `@naked`.
-`ir_x86_fn_wide_ok` (`src/ir.kr:6535`) / `ir_a64_fn_wide_ok`
+`ir_x86_fn_wide_ok` (`src/ir.kr:6543`) / `ir_a64_fn_wide_ok`
 (`src/ir_aarch64.kr:289`) test only the former; the call sites
 (`src/ir.kr:14929`, `src/ir_aarch64.kr:3390`) add `&& is_naked == 0`. The asm
 check must stay a **whole-body scan, not a constraint-list scan** — the
-comment at `src/ir.kr:6450` records a real case where a CPUID block wrote r13
+comment at `src/ir.kr:6523` records a real case where a CPUID block wrote r13
 with no constraint naming it. `@naked` is excluded because it gets
 `frame_size = 0`, so a ceiling-forced spill would store outside any frame.
 
@@ -1125,32 +1129,32 @@ per-vreg cap: *you may only take colours below N*. Setting N to the
 callee-saved prefix length (6 on x86, 10 on arm64) confines the value to
 registers the ABI preserves.
 
-`ir_seed_wide_ceilings_generic` (`src/ir.kr:6529`) seeds these at
+`ir_seed_wide_ceilings_generic` (`src/ir.kr:6598`) seeds these at
 **instruction** granularity, not block granularity. The comment at
-`src/ir.kr:6480` records why: sha256's whole 64-round compression body is one
+`src/ir.kr:6551` records why: sha256's whole 64-round compression body is one
 block containing two small calls, so block-level capping surrendered every
 register in exactly the code the feature exists for. It walks each block
 backward and, at every "dirty" (non-whitelisted) instruction, caps everything
 live after it, its own dest, and everything live before it. Temporaries whose
 entire life sits between two dirty points keep the full file.
 
-Whitelists: `ir_x86_op_widesafe` (`src/ir.kr:6425`) and `ir_a64_op_widesafe`
+Whitelists: `ir_x86_op_widesafe` (`src/ir.kr:6494`) and `ir_a64_op_widesafe`
 (`src/ir_aarch64.kr:269`) — "safe" means the handler touches no physical
 register outside the scratch set beyond its allocator-assigned operands. The
 arm64 list additionally excludes 77/78/79/84/86, because arm64's
 static-data / str-const / fn-addr sequences materialise through **X16 *and*
 X0**. A missing whitelist entry is a lost optimisation, never a miscompile.
 
-`ir_color_ceil_to_reps` (`src/ir.kr:6737`) exists because coalescing colours
+`ir_color_ceil_to_reps` (`src/ir.kr:6806`) exists because coalescing colours
 *representatives* and propagates to followers: without pushing the tightest
 ceiling onto the rep, a capped vreg coalesced with an uncapped one would
 inherit a colour its own ceiling forbids — a value a call is about to destroy
-quietly landing in a caller-saved register. Called at `src/ir.kr:7330`, after
+quietly landing in a caller-saved register. Called at `src/ir.kr:7390`, after
 coalescing is final and before the greedy loop.
 
 **Parameter ceilings** solve a different, sharper problem.
 `ir_a64_seed_param_ceilings` (`src/ir_aarch64.kr:318`) and
-`ir_x86_seed_param_ceilings` (`src/ir.kr:6654`) cap every register-passed
+`ir_x86_seed_param_ceilings` (`src/ir.kr:6723`) cap every register-passed
 parameter to the callee-saved prefix. The leading param copies read x0–x7 /
 rdi,rsi,rdx,rcx,r8,r9 **one at a time in ascending param order**; if param 0's
 home were x3, the copy for param 3 would read a register param 0 already
@@ -1159,25 +1163,25 @@ sequencing.
 
 ### Copy coalescing
 
-Lives **inside** `ir_graph_color` (`src/ir.kr:7074`–`6843`), after the
+Lives **inside** `ir_graph_color` (`src/ir.kr:7134`–`7386`), after the
 interference graph is built and before the greedy loop. On by default;
-`ir_coalesce_enabled` (`src/ir.kr:6797`) is read only in the loop condition
-at 6640, and `--no-coalesce` clears it. **`--O0` does not disable it.**
+`ir_coalesce_enabled` (`src/ir.kr:6866`) is read only in the loop condition
+at 7183, and `--no-coalesce` clears it. **`--O0` does not disable it.**
 
 Candidates are every `IR_COPY` with non-zero dest and src1 whose
 representatives differ and do not already interfere. The **lower vreg is
-always kept** as the representative (6662) — a correctness requirement, not a
+always kept** as the representative (7198) — a correctness requirement, not a
 preference: otherwise an intermediate vreg colours against a rep that is
 still uncoloured and can collide.
 
-- **Briggs** (6666): count neighbours of the merged class whose rep's cached
+- **Briggs** (7209): count neighbours of the merged class whose rep's cached
   degree is `>= IR_NUM_REGS`; accept if that count is below `keff`.
-- **`keff` is per-merge**, not global: `min(ceil(keep), ceil(drop))` (6684).
+- **`keff` is per-merge**, not global: `min(ceil(keep), ceil(drop))` (7227).
   Note the asymmetry — the *significant-degree* test uses the global
   `IR_NUM_REGS`, the *accept threshold* uses the tightest ceiling.
-- **George** (6715) is tried only when Briggs fails, and is **skipped
-  entirely when `keff < 8`** (6730). The measurement is in the comment at
-  6724: arm64 (K=10) gains ~800 B, x86 (K=6) loses ~900 B. So George never
+- **George** (7259) is tried only when Briggs fails, and is **skipped
+  entirely when `keff < 8`** (7273). The measurement is in the comment at
+  7267–7272: arm64 (K=10) gains ~800 B, x86 (K=6) loses ~900 B. So George never
   runs for a ceiling-capped vreg, even in the wide file.
 
 Interference-freedom is necessary but **not sufficient** — Briggs/George gate
@@ -1197,20 +1201,20 @@ first on xtensa.
   `ir_emit_load_spill`/`ir_emit_store_spill` pick disp8 below 128 else
   disp32. **No offset limit, no fallback needed.**
 - **arm64:** `IR_A64_OVERFLOW_RESERVE + (vreg-1)*8`
-  (`src/ir_aarch64.kr:353`). The reserve is **not** a constant 128 — it is
+  (`ir_a64_spill_offset`, `src/ir_aarch64.kr:352`). The reserve is **not** a constant 128 — it is
   sized per function to the actual outgoing overflow-arg need
   (`src/ir_aarch64.kr:3471`), with 128 kept only as a floor for asm-block and
   Windows functions.
 - **The 32760-byte limit is real.** `ir_a64_ldr_sp` / `ir_a64_str_sp`
-  (`src/ir_aarch64.kr:694`/`649`) emit the imm12-scaled form when
+  (`src/ir_aarch64.kr:694`/`704`) emit the imm12-scaled form when
   `off <= 32760` (= 4095 × 8) and otherwise
   `MOV x11, imm; ADD x11, sp, x11; LDR/STR [x11]`. The scratch is
-  specifically **x11**. Same structure in the d-register variants (478/488).
+  specifically **x11**. Same structure in the d-register variants (533/543).
 - **Emit-time peepholes**, which are *not* part of `ir_optimize()` and are
   *not* disabled by `--O0`: a `store_spill r,v` immediately followed by
   `load_spill r,v` with no bytes emitted between is elided entirely
-  (`src/ir.kr:8095`); the same vreg into a *different* register becomes a
-  reg-reg `mov` (7721). arm64 has the load-side equivalent at
+  (`src/ir.kr:8252`); the same vreg into a *different* register becomes a
+  reg-reg `mov` (8260). arm64 has the load-side equivalent at
   `src/ir_aarch64.kr:665`.
 
 ### Floating point — two allocators, two different designs
@@ -1224,17 +1228,17 @@ but colours an independent 8-entry file `d8..d15` over representatives whose
 fkind is 1 (f64). Order is **highest vreg first**, so loop-carried values
 born deep in the function beat early constants to the homes. Because
 `d8..d15` are AAPCS **callee-saved**, no call-liveness restriction is needed
-at all. `ir_a64_fpr_used_mask` (464) lets the prologue save only the
+at all. `ir_a64_fpr_used_mask` (519) lets the prologue save only the
 d-registers actually handed out, paired via `stp`/`ldp`.
 
-**x86** — `ir_x86_xmm_alloc` (`src/ir.kr:8007`), homes `xmm2..xmm15`
+**x86** — `ir_x86_xmm_alloc` (`src/ir.kr:8076`), homes `xmm2..xmm15`
 (`xmm0`/`xmm1` are the float scratch pair and xmm0 is the SysV float return
-register). It is called **unconditionally** (`src/ir.kr:8080`) with an
+register). It is called **unconditionally** (`src/ir.kr:14951`) with an
 `enable` argument, so a stale map from the previous function can never leak.
 
 The decisive difference: **SysV x86-64 has no callee-saved XMM registers at
 all** — a call may destroy the entire XMM file. So x86 needs a bar arm64 does
-not: `ir_x86_xmm_mark_unsafe()` (`src/ir.kr:7880`) disqualifies, at
+not: `ir_x86_xmm_mark_unsafe()` (`src/ir.kr:7949`) disqualifies, at
 instruction granularity, every vreg live across a non-widesafe op. A second
 bar is coalition purity: a rep whose coalition contains any non-f64 member is
 barred, because a mixed coalition shares one storage location.
@@ -1243,7 +1247,7 @@ Enforcement on x86 is **funnel-based, not per-handler**: a homed vreg's GPR
 colour is forcibly cleared to "spilled", so all ~70 op handlers read it
 through `ir_resolve_src`/`ir_emit_load_spill` and write through
 `ir_emit_store_spill`, and those funnels redirect to a `movq` against the xmm
-home instead of a stack slot (`src/ir.kr:8246`, `src/ir.kr:8302`). The one emitter that
+home instead of a stack slot (`src/ir.kr:8246`, `src/ir.kr:8301`). The one emitter that
 reads slots directly — the >6-argument overflow path in `IR_CALL` — carries
 an explicit home check at the site (`src/ir.kr:8887`). If you add an emitter
 that touches a spill slot without going through the funnels, you must add the
@@ -1314,17 +1318,17 @@ stale.
 
 ### Known gap: six `IR_ALLOC` sites with no bare-metal arm
 
-`src/ir.kr:3682`, `3461`, `3894`, `4164`, `4192`, `4209` emit `IR_ALLOC` with
+`src/ir.kr:3704`, `3752`, `4185`, `4450`, `4478`, `4495` emit `IR_ALLOC` with
 no `target_os == 4` arm and no provider routing:
 
 | Line | Construct |
 |---|---|
-| 3413 | struct passed **by value** as a call argument (alloc + memcpy) |
-| 3461 | struct **returned** from a call |
-| 3894 | struct **literal** expression (`P { 10, 20 }`) |
-| 4164 | local array declaration **over the 4096-byte stack threshold** |
-| 4192 | struct variable declaration **with** an initializer |
-| 4209 | struct variable declaration **without** one, including arrays of structs |
+| 3704 | struct passed **by value** as a call argument (alloc + memcpy) |
+| 3752 | struct **returned** from a call |
+| 4185 | struct **literal** expression (`P { 10, 20 }`) |
+| 4450 | local array declaration **over the 4096-byte stack threshold** |
+| 4478 | struct variable declaration **with** an initializer |
+| 4495 | struct variable declaration **without** one, including arrays of structs |
 
 Three are in `ir_lower_stmt`, which has no `target_os` reference anywhere in
 its body — per-OS blindness by construction, not oversight.
@@ -1379,7 +1383,7 @@ removed; do not re-add them without re-verifying.
 9. **`--legacy --arch=arm64 --debug` emits no array bounds check.** Verified:
    the `--debug` artifact is byte-identical to the non-debug one, and an OOB
    store compiles clean and runs. Legacy x86_64 does emit the check;
-   IR arm64 does (`src/ir.kr:3804`/`4551` + trap at
+   IR arm64 does (`src/ir.kr:4137`/`5294` + trap at
    `src/ir_aarch64.kr:2879`). `arr_count_lookup` is simply absent from
    `src/codegen_aarch64.kr`. Pre-existing, all targets.
 10. **`IR_ARR_CHECK` is skipped entirely on arm64 + Windows**
@@ -1387,13 +1391,14 @@ removed; do not re-add them without re-verifying.
     the comment says the `ExitProcess`-via-IAT sequence does not fit the
     short-jump pattern — but it means `--debug` bounds checking does not
     exist on that pair.
-11. **arm64 inline-asm register names are resolved with the x86 table.**
-    `src/ir.kr:5351`/`5012` select `rv_reg_code` for riscv32 and
-    `x86_reg_code` for everything else, arm64 included. Flagged in a source
-    comment as pre-existing and deliberately unchanged.
+11. **Closed: arm64 inline-asm register names were resolved with the x86
+    table.** Since 2e26c18 the two sites, `src/ir.kr:5406`/`5443`, select
+    `rv_reg_code` for riscv32, `a64_reg_code_strict` for arm64 and
+    `x86_reg_code` for x86_64, and the source comment above the first site
+    (`src/ir.kr:5397`–`5403`) says so.
 12. **Dead handler arms.** Xtensa's `IR_AND_IMM`/`OR_IMM`/`XOR_IMM`/
     `SHR_IMM`/`SAR_IMM` cases (`src/ir_xtensa.kr:1954`, `1975`) are
-    unreachable — their only producer (`src/ir.kr:13330`) is gated to
+    unreachable — their only producer (`src/ir.kr:13338`) is gated to
     `target_arch == 2` and xtensa is arch 3. Harmless, but do not mistake
     their presence for coverage. Relatedly, 140–145 are absent from **both**
     wide-safe whitelists, so any block containing one caps to the
@@ -1439,15 +1444,17 @@ removed; do not re-add them without re-verifying.
 
 **Stale comments that have already misled this document**
 
-15. `src/ir.kr:6865` — `ir_used_color_mask` says it "returns a 5-bit set …
-    rbx/r12/r13/r14/r15". It is 6 bits and includes rbp. This is the likely
-    origin of the wrong colour count in earlier revisions of this file.
-    MLRift's copy of the same comment was corrected; KernRift's was not.
-16. `src/ir.kr:7081` — the coalescing section header says "aggressive … we
+15. **Resolved:** `ir_used_color_mask` used to say it "returns a 5-bit set …
+    rbx/r12/r13/r14/r15". Its comment (`src/ir.kr:6916`–`6930`) now gives
+    the narrow x86 file as 6 colours including rbp and says outright that
+    it no longer claims a 5-bit set. Kept here because the old wording is
+    the likely origin of the wrong colour count in earlier revisions of this
+    file.
+16. `src/ir.kr:7134` — the coalescing section header says "aggressive … we
     only check for direct interference, no Briggs degree heuristic … switch
     to conservative coalescing here", sitting directly above the Briggs and
     George implementations.
-17. `src/ir.kr:6686` — says the colour-ceiling buffer is "only ever populated
+17. `src/ir.kr:6754` — says the colour-ceiling buffer is "only ever populated
     by the xtensa driver; every other arch leaves the buffer null". x86 and
     arm64 both populate it now.
 
@@ -1568,10 +1575,10 @@ opcodes that were never emitted.
 
 | | KernRift | MLRift |
 |---|---|---|
-| `--target=none` / bare metal | **yes** — 39 `target_os == 4` sites, four trap choke points, the `ir_bm_*` lowering layer (`src/ir.kr:1466`–`1538`) | **no** — zero `target_os == 4` sites anywhere. §12 does not apply |
+| `--target=none` / bare metal | **yes** — 39 `target_os == 4` sites, four trap choke points, the `ir_bm_*` lowering layer (`src/ir.kr:1466`–`1562`) | **no** — zero `target_os == 4` sites anywhere. §12 does not apply |
 | Dynamic linking from the IR | **no** — no PLT/GOT/`DT_NEEDED` path | **yes** — `dyn_sym_registry.mlr` + `format_elf_dyn.mlr`, called from inside the x86 IR emitter: `dyn_sym_lookup` decides whether an `IR_CALL` becomes a PLT call (`ir.mlr:9410`), `dyn_call_record` registers the relocation (`:9425`), `dyn_sym_count_get() > 0` switches the whole output to dynamic ELF (`:13115`) |
-| arm64 `IR_ADD_IMM`/`IR_SUB_IMM` (135/136) | handled (`src/ir_aarch64.kr:1321`) and produced (const-fold gate includes arch 1, `src/ir.kr:13118`) | **neither** — the const-folder excludes arm64 (`ir.mlr:11683`), so the emitter has no handler. Internally consistent, but a genuine gap |
-| cmp-with-immediate fusion | arch 0 **and** 1 (`src/ir.kr:13014`, arm64 capped at imm12 4095) | arch 0 only (`ir.mlr:11590`) |
+| arm64 `IR_ADD_IMM`/`IR_SUB_IMM` (135/136) | handled (`src/ir_aarch64.kr:1321`) and produced (const-fold gate includes arch 1, `src/ir.kr:13187`) | **neither** — the const-folder excludes arm64 (`ir.mlr:11683`), so the emitter has no handler. Internally consistent, but a genuine gap |
+| cmp-with-immediate fusion | arch 0 **and** 1 (`src/ir.kr:13083`, arm64 capped at imm12 4095) | arch 0 only (`ir.mlr:11590`) |
 | pow2 `MUL` → `SHL_IMM` | ungated, with a shamt guard for arch 2/3 | present, gated to arch 0/1 — *not* absent, contrary to an older project note |
 | `--emit=lkm` | yes; the IR gate is `emit_mode != 3 && emit_mode != 7` | no; the gate is `emit_mode != 3` alone |
 | `arch_os_pair_supported()` | yes (`src/main.kr:7670`) | **absent** — no arch × OS allow-list |
@@ -1580,7 +1587,7 @@ opcodes that were never emitted.
 | per-BB instruction lists for colouring | flat lists via `ir_build_bb_lists` (`src/ir.kr:13809`) | a 65536-entry walk stack |
 | CTZ | open-codes `ir_popcount64(iso - 1)` at each site | has `ir_ctz64` (`ir.mlr:5495`) — MLRift is ahead here |
 | builtin-name dispatch | linear | (first char × name length) 128×32 prefilter (`ir_bi_filter_init`, `ir.mlr:916`) — MLRift is ahead |
-| conditional cleanup DCE | yes — `ir_opt_rewrites` deltas gate all six (19 uses in `ir.kr`) | no — all six cleanup DCEs run unconditionally (0 uses). Compile-time only, no codegen difference |
+| conditional cleanup DCE | yes — `ir_opt_rewrites` deltas gate all six (named on 19 lines of `ir.kr`, its declaration included) | no — all six cleanup DCEs run unconditionally (0 uses). Compile-time only, no codegen difference |
 
 The optimizer **pass list and order are identical** in both. The register
 allocator is identical in both, including the wide colour files, the colour
