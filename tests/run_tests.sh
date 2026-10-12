@@ -27133,6 +27133,373 @@ else
 fi
 rm -rf "$DUP_D"
 
+# --- C7: uniform Windows argv + child quoting (portable-syscall-layer spec C7) --
+# A Windows `main` (IR backend, not @naked) that has cli_argc/cli_argv parses
+# its own command line in its prologue, UCRT's way, with a self-contained
+# LEAF the compiler emits (ir.kr / ir_aarch64.kr, "C7" blocks); exec_process_argv
+# (op 114) builds the child's command line with the inverse quoting, a second
+# leaf, measured first and refused past 32767 bytes (exit 122). Before C7 the
+# prologue stored the raw GetCommandLineA pointer and the sentinel 0xFFFFFFFF
+# (a program returning cli_argc exited 255), and op 114 joined arguments with
+# bare spaces.
+#
+# x86_64 runs END TO END under Wine through the real prologue: a KernRift
+# parent calling CreateProcessA DIRECTLY delivers every line of
+# fixtures/argv_table.txt byte for byte (the spec's raw-cmdline table: plain,
+# tabs, quoted spaces, `""` inside quotes, \", \\", \\\", trailing
+# backslashes, empty "" arguments, quoted/unquoted argv[0] with backslashes,
+# and a very long line appended here), and the child (argv_echo.kr) writes the
+# argv it got plus the untouched GetCommandLineA line. arm64 has no Windows
+# runner: the hidden --dump-argv-parser= / --dump-argv-quoter= flags write the
+# two leaves, rows prove those bytes are the ones a PE embeds, and
+# argv_leafrun.kr runs the SAME tables on them under qemu-aarch64-static. The
+# expected files are hand-written (UCRT rules), shared by both arches.
+C7_D=/tmp/krc_c7_$$
+mkdir -p "$C7_D/run" "$C7_D/pfx"
+C7_FX="$DIR/fixtures"
+C7_KRC="$DIR/../build/krc2"
+C7_WINE="${KR_WINE:-$(command -v wine 2>/dev/null || true)}"
+C7_QEMU="$(command -v qemu-aarch64-static || command -v qemu-aarch64 || true)"
+c7_ok() { PASS=$((PASS + 1)); echo "  $1: PASS${2:+ ($2)}"; }
+c7_bad() { FAIL=$((FAIL + 1)); echo "  $1: FAIL ($2 )"; }
+c7_skip() { PASS=$((PASS + 1)); echo "  $1: SKIP ($2)"; }
+# Wine itself flakes, measured 2026-10-12 (Proton Experimental), in two ways
+# that are not the program's doing, so both are retried (3 tries):
+#  - the LAUNCH: `wine prog.exe` occasionally prints "ShellExecuteEx failed"
+#    and exits 1 without starting prog.exe;
+#  - CreateProcessA fails a few times per thousand calls (GetLastError 731).
+#    In the op-114 sequence that leaves hProcess 0, the wait and the exit-code
+#    read fail, and the parent exits 0 with the child never run. A row whose
+#    child must run therefore retries when the child left no argv.out and the
+#    status is 0 (c7_wine_child). A quoting or parsing bug still runs the
+#    child, so it is never retried away.
+# c7_wine <out> <err> <prog> <args...>: status of the last try.
+c7_wine() {
+    local o="$1" e="$2" t rc; shift 2
+    for t in 1 2 3; do
+        (cd "$C7_D/run" && WINEPREFIX="$C7_D/pfx" WINEDEBUG=-all timeout 300 "$C7_WINE" "$@" > "$o" 2> "$e"); rc=$?
+        [ "$rc" = "1" ] && grep -aq 'ShellExecuteEx failed' "$o" "$e" && continue
+        return $rc
+    done
+    return $rc
+}
+# c7_wine_child <prog> <args...>: run a parent whose child writes argv.out.
+c7_wine_child() {
+    local t rc
+    for t in 1 2 3; do
+        : > "$C7_D/run/argv.out"
+        c7_wine "$C7_D/co" "$C7_D/ce" "$@"; rc=$?
+        { [ "$rc" = "0" ] && [ ! -s "$C7_D/run/argv.out" ]; } || return $rc
+    done
+    return $rc
+}
+cp "$C7_FX/argv_echo.kr" "$C7_FX/argv_rawparent.kr" "$C7_FX/argv_rtparent.kr" \
+   "$C7_FX/argv_vectors.kr" "$C7_FX/argv_leafrun.kr" "$C7_D/"
+# The table plus one very long line (20000-byte argument), and its expectation.
+C7_LONG=$(head -c 20000 /dev/zero | tr '\0' x)
+cp "$C7_FX/argv_table.txt" "$C7_D/run/argv_table.txt"
+printf 'ch %s "y z"\n' "$C7_LONG" >> "$C7_D/run/argv_table.txt"
+C7_NT=$(grep -c '' "$C7_FX/argv_table.txt")
+cp "$C7_FX/argv_table.expected" "$C7_D/table.expected"
+printf '#%d rc=3\nargc=3\n<ch>\n<%s>\n<y z>\nraw=<ch %s "y z">\n' "$C7_NT" "$C7_LONG" "$C7_LONG" >> "$C7_D/table.expected"
+for C7_A in x86_64 arm64; do
+    $C7_KRC --arch=$C7_A --target=windows --emit=pe "$C7_D/argv_echo.kr" -o "$C7_D/echo-$C7_A.exe" > /dev/null 2>&1
+    $C7_KRC --arch=$C7_A --target=windows --emit=pe "$C7_D/argv_rtparent.kr" -o "$C7_D/rt-$C7_A.exe" > /dev/null 2>&1
+    $C7_KRC --arch=$C7_A --dump-argv-parser="$C7_D/parse-$C7_A.bin" --dump-argv-quoter="$C7_D/quote-$C7_A.bin" > /dev/null 2>&1
+done
+$C7_KRC --arch=x86_64 --target=windows --emit=pe "$C7_D/argv_rawparent.kr" -o "$C7_D/run/argv_rawparent.exe" > /dev/null 2>&1
+cp "$C7_D/echo-x86_64.exe" "$C7_D/run/argv_echo.exe" 2>/dev/null
+cp "$C7_D/rt-x86_64.exe" "$C7_D/run/argv_rtparent.exe" 2>/dev/null
+
+# (a) the dumped leaves ARE the shipped code: each blob occurs exactly once in
+#     the PE that uses it (the parser in every main that has cli_argc, the
+#     quoter at every exec_process_argv), at an instruction boundary on arm64.
+c7_blob_in() {   # <row> <blob> <pe> <align>
+    local r
+    TOTAL=$((TOTAL + 1))
+    r=$(python3 - "$2" "$3" "$4" <<'PYEOF' 2>&1
+import sys
+b = open(sys.argv[1], 'rb').read(); pe = open(sys.argv[2], 'rb').read(); al = int(sys.argv[3])
+if len(b) < 64: print("blob missing or short (%d bytes)" % len(b)); sys.exit()
+n = pe.count(b); at = pe.find(b)
+if n != 1: print("blob occurs %d times in the PE, want 1" % n)
+elif at % al: print("blob at file offset %d, not %d-aligned" % (at, al))
+else: print("ok %d bytes at file offset %d" % (len(b), at))
+PYEOF
+)
+    case "$r" in ok*) c7_ok "$1" "$r" ;; *) c7_bad "$1" "$r" ;; esac
+}
+if ! command -v python3 > /dev/null 2>&1; then
+    for C7_R in c7_parser_leaf_is_shipped_x86_64 c7_parser_leaf_is_shipped_arm64 \
+                c7_quoter_leaf_is_shipped_x86_64 c7_quoter_leaf_is_shipped_arm64; do
+        TOTAL=$((TOTAL + 1)); c7_skip "$C7_R" "no python3"
+    done
+else
+    c7_blob_in c7_parser_leaf_is_shipped_x86_64 "$C7_D/parse-x86_64.bin" "$C7_D/echo-x86_64.exe" 1
+    c7_blob_in c7_parser_leaf_is_shipped_arm64 "$C7_D/parse-arm64.bin" "$C7_D/echo-arm64.exe" 4
+    c7_blob_in c7_quoter_leaf_is_shipped_x86_64 "$C7_D/quote-x86_64.bin" "$C7_D/rt-x86_64.exe" 1
+    c7_blob_in c7_quoter_leaf_is_shipped_arm64 "$C7_D/quote-arm64.bin" "$C7_D/rt-arm64.exe" 4
+fi
+
+# (b) a @naked main gets NO parse (no ExitProcess epilogue to make clobbering
+#     its callee-saved registers safe): the parser leaf is absent from its PE on
+#     both arches, while the same program without @naked carries it.
+TOTAL=$((TOTAL + 1))
+printf 'static uint64 cli_argc\nstatic uint64 cli_argv\n@naked\nfn main() {\n    asm { "ret" }\n}\n' > "$C7_D/nk.kr"
+printf 'static uint64 cli_argc\nstatic uint64 cli_argv\nfn main() -> uint32 {\n    return 0\n}\n' > "$C7_D/nn.kr"
+C7_WHY=""
+for C7_A in x86_64 arm64; do
+    $C7_KRC --arch=$C7_A --target=windows --emit=pe "$C7_D/nk.kr" -o "$C7_D/nk.exe" > /dev/null 2>&1 || C7_WHY="$C7_WHY $C7_A:naked-no-build"
+    $C7_KRC --arch=$C7_A --target=windows --emit=pe "$C7_D/nn.kr" -o "$C7_D/nn.exe" > /dev/null 2>&1 || C7_WHY="$C7_WHY $C7_A:plain-no-build"
+    if [ ! -s "$C7_D/parse-$C7_A.bin" ]; then
+        C7_WHY="$C7_WHY $C7_A:no-dumped-parser"
+    elif [ -f "$C7_D/nk.exe" ] && [ -f "$C7_D/nn.exe" ] && command -v python3 > /dev/null 2>&1; then
+        C7_WHY="$C7_WHY$(python3 -c '
+import sys
+b = open(sys.argv[1], "rb").read()
+if len(b) < 64: print(" blob-missing")
+if open(sys.argv[2], "rb").read().count(b) != 0: print(" " + sys.argv[4] + ":naked-main-parses")
+if open(sys.argv[3], "rb").read().count(b) != 1: print(" " + sys.argv[4] + ":plain-main-does-not-parse")
+' "$C7_D/parse-$C7_A.bin" "$C7_D/nk.exe" "$C7_D/nn.exe" "$C7_A" | tr -d '\n')"
+    fi
+    rm -f "$C7_D/nk.exe" "$C7_D/nn.exe"
+done
+if ! command -v python3 > /dev/null 2>&1; then c7_skip c7_naked_main_not_parsed "no python3"
+elif [ -z "$C7_WHY" ]; then c7_ok c7_naked_main_not_parsed "x86_64 + arm64"
+else c7_bad c7_naked_main_not_parsed "$C7_WHY"; fi
+
+# (c) Windows arm64: no emitted instruction writes x18 (the TEB register) --
+#     every instruction of the prologue + parser (argv_echo) and of the op-114
+#     sequence + quoter (argv_rtparent) PEs, disassembled. A write is x18/w18
+#     as the destination of anything but a store/compare/branch (the exclusive
+#     stores' status register IS a destination), the second register of a
+#     load pair, or a writeback base.
+TOTAL=$((TOTAL + 1))
+if ! command -v llvm-objdump > /dev/null 2>&1 || ! command -v python3 > /dev/null 2>&1; then
+    c7_skip c7_win_arm64_never_writes_x18 "needs llvm-objdump and python3"
+else
+    C7_X18=$( { llvm-objdump -d --no-show-raw-insn "$C7_D/echo-arm64.exe"; llvm-objdump -d --no-show-raw-insn "$C7_D/rt-arm64.exe"; } | python3 -c '
+import re, sys
+reads = {"cmp","cmn","tst","ccmp","ccmn","cbz","cbnz","tbz","tbnz","br","blr","ret","prfm","prfum","msr","fcmp","fccmp","b","bl"}
+status = {"stxr","stlxr","stxp","stlxp","stxrb","stxrh","stlxrb","stlxrh"}
+pairs = {"ldp","ldnp","ldpsw","ldxp","ldaxp"}
+n = 0; hits = []
+for line in sys.stdin:
+    m = re.match(r"\s*([0-9a-f]+):\s+(\S+)\s*(.*)$", line)
+    if not m: continue
+    mn, ops = m.group(2), m.group(3).split("//")[0]
+    n += 1
+    regs = [o.strip() for o in ops.split(",")]
+    r18 = lambda s: re.fullmatch(r"[xw]18", s) is not None
+    store = mn.startswith("st") and mn not in status
+    w = (regs and r18(regs[0]) and not store and mn not in reads and not mn.startswith("b."))
+    w = w or (mn in pairs and len(regs) > 1 and r18(regs[1]))
+    w = w or re.search(r"\[[xw]18(,[^\]]*)?\]!|\[[xw]18\],", ops) is not None
+    if w: hits.append(m.group(1) + " " + mn + " " + ops.strip())
+print("insns=%d hits=%d %s" % (n, len(hits), "; ".join(hits[:4])))
+')
+    case "$C7_X18" in
+        "insns=0 "*) c7_bad c7_win_arm64_never_writes_x18 "nothing disassembled: $C7_X18" ;;
+        *" hits=0 "*) c7_ok c7_win_arm64_never_writes_x18 "${C7_X18% *}" ;;
+        *) c7_bad c7_win_arm64_never_writes_x18 "$C7_X18" ;;
+    esac
+fi
+
+# (d) Windows arm64 prologue plumbing, decoded from the image (no runner can
+#     execute it): exactly two BLs reach the parser leaf; the first is the
+#     sizing call (x1 = x2 = 0, x0 still GetCommandLineA's result), its answer
+#     goes to x20 and from there to VirtualAlloc(x0=0, x1=x20, x2=0x3000,
+#     x3=4) -- an IAT call the image binds to the NAME VirtualAlloc -- and the
+#     second is the parse with x0 = the cmdline (x19), x1 = the buffer (x21),
+#     x2 = the same x20.
+TOTAL=$((TOTAL + 1))
+if ! command -v python3 > /dev/null 2>&1; then
+    c7_skip c7_win_arm64_prologue_virtualalloc_args "no python3"
+else
+    C7_PE="$C7_D/echo-arm64.exe"
+    C7_TX=$(pe_section "$C7_PE" .text)
+    C7_VA=$(python3 - "$C7_PE" "$C7_D/parse-arm64.bin" $C7_TX 2>&1 <<'PYEOF'
+import struct, sys
+pe = open(sys.argv[1], "rb").read(); blob = open(sys.argv[2], "rb").read()
+va, rs, rp = int(sys.argv[3]), int(sys.argv[4]), int(sys.argv[5])
+W = lambda off: struct.unpack_from("<I", pe, off)[0]
+leaf = pe.find(blob)
+if leaf < 0: print("FAIL no parser leaf in the image"); sys.exit()
+bls = [o for o in range(rp, rp + rs, 4)
+       if (W(o) & 0xFC000000) == 0x94000000
+       and o + 4 * ((W(o) & 0x3FFFFFF) - ((W(o) & 0x2000000) << 1)) == leaf]
+if len(bls) != 2: print("FAIL %d BLs reach the parser leaf, want 2" % len(bls)); sys.exit()
+a, b = bls
+want_a = [0xD2800001, 0xD2800002]                       # mov x1,#0 ; mov x2,#0
+after_a = [0xAA0003F4, 0xD2800000, 0xAA1403E1, 0xD2860002, 0xD2800083]  # mov x20,x0 ; x0=0 ; x1=x20 ; x2=0x3000 ; x3=4
+want_b = [0xAA1303E0, 0xAA1503E1, 0xAA1403E2]           # x0=x19 ; x1=x21 ; x2=x20
+got = [W(a - 8), W(a - 4)]
+if got != want_a: print("FAIL sizing call args %s" % [hex(x) for x in got]); sys.exit()
+got = [W(a + 4 + 4 * i) for i in range(5)]
+if got != after_a: print("FAIL VirtualAlloc args %s" % [hex(x) for x in got]); sys.exit()
+got = [W(b - 12), W(b - 8), W(b - 4)]
+if got != want_b: print("FAIL parse call args %s" % [hex(x) for x in got]); sys.exit()
+adrp = a + 24
+w, l = W(adrp), W(adrp + 4)
+if (w & 0x9F00001F) != 0x90000010 or (l & 0xFFC003FF) != 0xF9400210 or W(adrp + 8) != 0xD63F0200:
+    print("FAIL no ADRP/LDR/BLR x16 IAT call after the VirtualAlloc arguments"); sys.exit()
+imm = (((w >> 5) & 0x7FFFF) << 2) | ((w >> 29) & 3)
+if imm & 0x100000: imm -= 0x200000
+pc = va + (adrp - rp)
+print("rva", ((pc & ~0xFFF) + (imm << 12)) + ((l >> 10) & 0xFFF) * 8)
+PYEOF
+)
+    case "$C7_VA" in
+        "rva "*)
+            C7_LF=$(pe_lfanew "$C7_PE")
+            C7_IDT=$(pe_rva_off "$C7_PE" "$(pe_u "$C7_PE" $((C7_LF + 144)) 4)")
+            C7_NM=$(pe_slot_name "$C7_PE" "$C7_IDT" "${C7_VA#rva }")
+            if [ "$C7_NM" = "VirtualAlloc" ]; then
+                c7_ok c7_win_arm64_prologue_virtualalloc_args "x0=0 x1=size x2=0x3000 x3=4, call bound to VirtualAlloc"
+            else
+                c7_bad c7_win_arm64_prologue_virtualalloc_args "the call after the arguments binds to '$C7_NM', not VirtualAlloc"
+            fi ;;
+        *) c7_bad c7_win_arm64_prologue_virtualalloc_args "$C7_VA" ;;
+    esac
+fi
+
+# (e) arm64 leaves under qemu: the full raw table through the dumped parser,
+#     and every round-trip vector through the dumped quoter then the parser.
+TOTAL=$((TOTAL + 2))
+if [ -z "$C7_QEMU" ]; then
+    c7_skip c7_parser_table_arm64_qemu "no qemu-aarch64"
+    c7_skip c7_roundtrip_leaves_arm64_qemu "no qemu-aarch64"
+elif ! $C7_KRC --arch=arm64 "$C7_D/argv_leafrun.kr" -o "$C7_D/leafrun" > /dev/null 2>&1; then
+    c7_bad c7_parser_table_arm64_qemu "argv_leafrun.kr did not build"
+    c7_bad c7_roundtrip_leaves_arm64_qemu "argv_leafrun.kr did not build"
+else
+    timeout 120 "$C7_QEMU" "$C7_D/leafrun" parse "$C7_D/parse-arm64.bin" "$C7_D/run/argv_table.txt" > "$C7_D/qp.out" 2>&1; C7_RC=$?
+    if [ "$C7_RC" = "0" ] && cmp -s "$C7_D/qp.out" "$C7_D/table.expected"; then
+        c7_ok c7_parser_table_arm64_qemu "$((C7_NT + 1)) lines"
+    else
+        c7_bad c7_parser_table_arm64_qemu "rc=$C7_RC; first difference: $(diff "$C7_D/qp.out" "$C7_D/table.expected" | head -3 | cut -c1-80 | tr '\n' '|')"
+    fi
+    timeout 120 "$C7_QEMU" "$C7_D/leafrun" rt "$C7_D/quote-arm64.bin" "$C7_D/parse-arm64.bin" > "$C7_D/qr.out" 2>&1; C7_RC=$?
+    if [ "$C7_RC" = "0" ] && cmp -s "$C7_D/qr.out" "$C7_FX/argv_roundtrip.expected"; then
+        c7_ok c7_roundtrip_leaves_arm64_qemu "$(grep -c '^#' "$C7_D/qr.out") vectors"
+    else
+        c7_bad c7_roundtrip_leaves_arm64_qemu "rc=$C7_RC; first difference: $(diff "$C7_D/qr.out" "$C7_FX/argv_roundtrip.expected" | head -3 | cut -c1-80 | tr '\n' '|')"
+    fi
+fi
+
+# (g) docs/RUNTIME_EXIT_CODES.md is the registry of the exit statuses emitted
+#     code produces on its own. Every c7_*_emit_die(code, "msg\n", len) in the
+#     two backends must: exist with the same code -> message set on BOTH
+#     arches, pass len == the message's byte count, and have a `| code |` row
+#     in the document quoting that exact message.
+TOTAL=$((TOTAL + 1))
+if ! command -v python3 > /dev/null 2>&1; then
+    c7_skip c7_runtime_exit_codes_documented "no python3"
+else
+    C7_DOC=$(python3 - "$DIR/../src/ir.kr" "$DIR/../src/ir_aarch64.kr" "$DIR/../docs/RUNTIME_EXIT_CODES.md" <<'PYEOF' 2>&1
+import re, sys
+pat = re.compile(r'c7_(x86|a64)_emit_die\((\d+), "([^"\\]*)\\n", (\d+)\)')
+sets = {}
+bad = []
+for f in sys.argv[1:3]:
+    for arch, code, msg, n in pat.findall(open(f).read()):
+        if int(n) != len(msg) + 1: bad.append("%s %s: len %s, message is %d bytes" % (arch, code, n, len(msg) + 1))
+        sets.setdefault(arch, {})[int(code)] = msg
+doc = open(sys.argv[3]).read()
+if set(sets) != {"x86", "a64"} or not sets["x86"]: bad.append("found %s" % sets)
+elif sets["x86"] != sets["a64"]: bad.append("x86 %s != arm64 %s" % (sets["x86"], sets["a64"]))
+else:
+    for code, msg in sorted(sets["x86"].items()):
+        rows = [l for l in doc.splitlines() if l.startswith("| %d |" % code)]
+        if len(rows) != 1 or ("`%s`" % msg) not in rows[0]: bad.append("%d `%s` not documented" % (code, msg))
+print("; ".join(bad) if bad else "ok " + " ".join(str(c) for c in sorted(sets["x86"])))
+PYEOF
+)
+    case "$C7_DOC" in ok*) c7_ok c7_runtime_exit_codes_documented "${C7_DOC#ok }" ;; *) c7_bad c7_runtime_exit_codes_documented "$C7_DOC" ;; esac
+fi
+
+# (f) Wine, x86_64, end to end. Counted SKIPs without wine (KR_WINE=<path>).
+TOTAL=$((TOTAL + 6))
+if [ -z "$C7_WINE" ] || [ ! -x "$C7_WINE" ]; then
+    for C7_R in c7_cli_argc_matches_linux c7_raw_cmdline_table_wine c7_exec_argv_roundtrip_wine \
+                c7_runner_krbo_arg_with_space_wine c7_exec_argv_too_long_exit_122_wine c7_exec_argv_limit_boundary_wine; do
+        c7_skip "$C7_R" "no wine; set KR_WINE=<path to wine>"
+    done
+else
+    # cli_argc is the real count: 3 for `a b`, as on Linux (was 255).
+    C7_WHY=""
+    $C7_KRC --arch=x86_64 --target=linux "$C7_D/argv_echo.kr" -o "$C7_D/run/echo-linux" > /dev/null 2>&1 || C7_WHY="$C7_WHY linux:no-build"
+    (cd "$C7_D/run" && ./echo-linux a b > /dev/null 2>&1); C7_LRC=$?
+    [ "$C7_LRC" = "3" ] || C7_WHY="$C7_WHY linux:rc-$C7_LRC"
+    : > "$C7_D/run/argv.out"
+    c7_wine "$C7_D/co" "$C7_D/ce" argv_echo.exe a b; C7_RC=$?
+    [ "$C7_RC" = "$C7_LRC" ] || C7_WHY="$C7_WHY windows:rc-$C7_RC"
+    [ "$(sed -n '3,4p' "$C7_D/run/argv.out")" = "$(printf '<a>\n<b>')" ] || C7_WHY="$C7_WHY windows:argv[1..]-wrong"
+    if [ -z "$C7_WHY" ]; then c7_ok c7_cli_argc_matches_linux "3 on both"; else c7_bad c7_cli_argc_matches_linux "$C7_WHY"; fi
+
+    # The raw-cmdline table, delivered by CreateProcessA verbatim.
+    c7_wine "$C7_D/wt.out" "$C7_D/ce" argv_rawparent.exe; C7_RC=$?
+    if [ "$C7_RC" = "0" ] && cmp -s "$C7_D/wt.out" "$C7_D/table.expected"; then
+        c7_ok c7_raw_cmdline_table_wine "$((C7_NT + 1)) lines"
+    else
+        c7_bad c7_raw_cmdline_table_wine "rc=$C7_RC; first difference: $(diff "$C7_D/wt.out" "$C7_D/table.expected" | head -3 | cut -c1-80 | tr '\n' '|')"
+    fi
+
+    # op 114 round trip: exec_process_argv(vector K) reaches the child as
+    # exactly vector K, via exactly the hand-quoted line (raw=).
+    : > "$C7_D/wr.out"
+    C7_K=0
+    while [ "$C7_K" -lt "$(grep -c '^#' "$C7_FX/argv_roundtrip.expected")" ]; do
+        c7_wine_child argv_rtparent.exe "$C7_K"; C7_RC=$?
+        printf '#%d rc=%d\n' "$C7_K" "$C7_RC" >> "$C7_D/wr.out"
+        cat "$C7_D/run/argv.out" >> "$C7_D/wr.out"
+        C7_K=$((C7_K + 1))
+    done
+    if cmp -s "$C7_D/wr.out" "$C7_FX/argv_roundtrip.expected"; then
+        c7_ok c7_exec_argv_roundtrip_wine "$C7_K vectors"
+    else
+        c7_bad c7_exec_argv_roundtrip_wine "first difference: $(diff "$C7_D/wr.out" "$C7_FX/argv_roundtrip.expected" | head -3 | cut -c1-80 | tr '\n' '|')"
+    fi
+
+    # The shipped runner: kr.exe prog.krbo "a b" -- the runner's own prologue
+    # parses "a b" as ONE argument and its op 114 quotes it for the slice.
+    C7_WHY=""
+    cat "$DIR/../src/bcj.kr" "$DIR/../src/runner.kr" > "$C7_D/kr.kr"
+    $C7_KRC --arch=x86_64 --emit=pe "$C7_D/kr.kr" -o "$C7_D/run/kr.exe" > /dev/null 2>&1 || C7_WHY="$C7_WHY runner:no-build"
+    $C7_KRC "$C7_D/argv_echo.kr" -o "$C7_D/run/echo.krbo" > /dev/null 2>&1 || C7_WHY="$C7_WHY krbo:no-build"
+    if [ -z "$C7_WHY" ]; then
+        c7_wine_child kr.exe echo.krbo "a b"; C7_RC=$?
+        [ "$C7_RC" = "2" ] || C7_WHY="$C7_WHY rc-$C7_RC"
+        [ "$(cat "$C7_D/run/argv.out")" = "$(printf 'argc=2\n<.\\kr-run.exe>\n<a b>\nraw=<.\\kr-run.exe "a b">')" ] \
+            || C7_WHY="$C7_WHY argv:$(tr '\n' '|' < "$C7_D/run/argv.out" | cut -c1-80)"
+    fi
+    if [ -z "$C7_WHY" ]; then c7_ok c7_runner_krbo_arg_with_space_wine "one argument 'a b'"; else c7_bad c7_runner_krbo_arg_with_space_wine "$C7_WHY"; fi
+
+    # > 32767 bytes with the NUL: stderr line + exit 122, the child never runs.
+    C7_WHY=""
+    : > "$C7_D/run/argv.out"
+    c7_wine "$C7_D/co" "$C7_D/e122" argv_rtparent.exe 100; C7_RC=$?
+    [ "$C7_RC" = "122" ] || C7_WHY="$C7_WHY rc-$C7_RC"
+    grep -q '^krc runtime: child command line too long$' "$C7_D/e122" || C7_WHY="$C7_WHY no-stderr-line"
+    [ -s "$C7_D/run/argv.out" ] && C7_WHY="$C7_WHY child-ran"
+    if [ -z "$C7_WHY" ]; then c7_ok c7_exec_argv_too_long_exit_122_wine "40 KiB argument"; else c7_bad c7_exec_argv_too_long_exit_122_wine "$C7_WHY"; fi
+
+    # The limit itself: exactly 32767 bytes with the NUL runs the child; one
+    # more is refused.
+    C7_WHY=""
+    c7_wine_child argv_rtparent.exe 101; C7_RC=$?
+    [ "$C7_RC" = "2" ] || C7_WHY="$C7_WHY 32767:rc-$C7_RC"
+    [ "$(sed -n 3p "$C7_D/run/argv.out" | tr -d '\n' | wc -c)" = "32766" ] || C7_WHY="$C7_WHY 32767:argument-not-32764-bytes"
+    : > "$C7_D/run/argv.out"
+    c7_wine "$C7_D/co" "$C7_D/ce" argv_rtparent.exe 102; C7_RC=$?
+    [ "$C7_RC" = "122" ] || C7_WHY="$C7_WHY 32768:rc-$C7_RC"
+    if [ -z "$C7_WHY" ]; then c7_ok c7_exec_argv_limit_boundary_wine "32767 runs, 32768 exits 122"; else c7_bad c7_exec_argv_limit_boundary_wine "$C7_WHY"; fi
+    if [ -x "$(dirname "$C7_WINE")/wineserver" ]; then
+        WINEPREFIX="$C7_D/pfx" "$(dirname "$C7_WINE")/wineserver" -w > /dev/null 2>&1
+    fi
+fi
+rm -rf "$C7_D"
+
 # --- Documentation pin 5, PART B (see Part A above) --------------------------
 # README.md advertises this suite's test count. Compare it against the total
 # only now, when $TOTAL is final and already includes this row (Part A did the

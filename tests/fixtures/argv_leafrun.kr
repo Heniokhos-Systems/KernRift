@@ -1,0 +1,172 @@
+// C7 arm64 leaf harness (Linux arm64, run under qemu-aarch64-static). There is
+// no Windows-arm64 runner, so the two self-contained leaves the compiler emits
+// into every win-arm64 image are dumped with the hidden test flags
+// --dump-argv-parser=<file> / --dump-argv-quoter=<file> and called here
+// (AAPCS64, from an RWX mapping) on the same inputs the x86_64 Wine rows use.
+//   argv_leafrun parse <parser.bin> <table.txt>
+//       every line through parse(cmdline, buf, size) -> argc; prints the
+//       format argv_rawparent.exe prints (raw= is the line itself: the
+//       parse must not write it), so argv_table.expected is shared.
+//       The sizing call parse(line, 0, 0) must answer 10*(len+2), and a
+//       buffer one byte smaller than that must be refused (argc 0).
+//   argv_leafrun rt <quoter.bin> <parser.bin>
+//       every argv_vectors.kr vector through quote(argv, 0) (measure),
+//       quote(argv, buf) (build), then parse(); prints argv_roundtrip.expected's
+//       format, raw= being the quoted line. The quoter must return the same
+//       length both times, NUL-terminate at len-1 and write nothing past len.
+import "argv_vectors.kr"
+
+static uint64 cli_argc
+static uint64 cli_argv
+
+fn put_dec(uint64 v) {
+    u8[24] d
+    uint64 n = 0
+    if v == 0 {
+        write(1, "0", 1)
+        return
+    }
+    while v != 0 {
+        store8(d + n, 48 + v % 10)
+        v = v / 10
+        n = n + 1
+    }
+    while n != 0 {
+        n = n - 1
+        write(1, d + n, 1)
+    }
+}
+
+fn slurp(uint64 path, uint64 out) -> uint64 {
+    uint64 fd = file_open(path, 0)
+    if fd > 0xFFFFFFFFFFFFF000 { return 0xFFFFFFFFFFFFFFFF }
+    uint64 cap = 1 << 20
+    uint64 buf = alloc(cap)
+    uint64 n = 0
+    while 1 == 1 {
+        uint64 r = file_read(fd, buf + n, cap - n)
+        if r == 0 || r > 0xFFFFFFFFFFFFF000 { break }
+        n = n + r
+    }
+    file_close(fd)
+    store64(out, buf)
+    return n
+}
+
+// The blob, copied into a fresh PROT_READ|WRITE|EXEC private anonymous map.
+fn load_leaf(uint64 path) -> uint64 {
+    u8[8] bp
+    uint64 n = slurp(path, bp)
+    if n == 0xFFFFFFFFFFFFFFFF || n == 0 { return 0 }
+    // mmap(NULL, 64 KiB, RWX, MAP_PRIVATE|MAP_ANONYMOUS). The literal OS guard
+    // keeps a default fat build of this file legal (no syscall_raw reachable
+    // in a Windows slice); the harness only ever runs as Linux arm64.
+    uint64 m = 0
+    if get_target_os() == 2 {
+        return 0
+    } else {
+        m = syscall_raw(222, 0, 65536, 7, 0x22, 0xFFFFFFFFFFFFFFFF, 0)
+    }
+    if m > 0xFFFFFFFFFFFFF000 { return 0 }
+    uint64 src = load64(bp)
+    uint64 i = 0
+    while i < n {
+        store8(m + i, load8(src + i))
+        i = i + 1
+    }
+    return m
+}
+
+fn show(uint64 k, uint64 argc, uint64 out, uint64 raw) {
+    write(1, "#", 1)
+    put_dec(k)
+    write(1, " rc=", 4)
+    put_dec(argc)
+    write(1, "\nargc=", 6)
+    put_dec(argc)
+    write(1, "\n", 1)
+    uint64 i = 0
+    while i < argc {
+        uint64 a = load64(out + i * 8)
+        write(1, "<", 1)
+        write(1, a, str_len(a))
+        write(1, ">\n", 2)
+        i = i + 1
+    }
+    if load64(out + argc * 8) != 0 { write(1, "argv[argc] is not 0\n", 20) }
+    write(1, "raw=<", 5)
+    write(1, raw, str_len(raw))
+    write(1, ">\n", 2)
+}
+
+fn run_parse(uint64 parser, uint64 table) -> uint32 {
+    u8[8] tp
+    uint64 tn = slurp(table, tp)
+    if tn == 0xFFFFFFFFFFFFFFFF { return 2 }
+    uint64 t = load64(tp)
+    uint64 line = alloc(1 << 16)
+    uint64 k = 0
+    uint64 pos = 0
+    while pos < tn {
+        uint64 e = pos
+        while e < tn && load8(t + e) != 10 { e = e + 1 }
+        uint64 j = 0
+        while pos + j < e {
+            store8(line + j, load8(t + pos + j))
+            j = j + 1
+        }
+        store8(line + j, 0)
+        uint64 size = 10 * (j + 2)
+        uint64 out = alloc(size)
+        if call_ptr(parser, line, 0, 0) != size {
+            write(1, "sizing call is not 10*(len+2)\n", 31)
+        }
+        if call_ptr(parser, line, out, size - 1) != 0 {
+            write(1, "small buffer accepted\n", 22)
+        }
+        uint64 argc = call_ptr(parser, line, out, size)
+        show(k, argc, out, line)
+        k = k + 1
+        pos = e + 1
+    }
+    return 0
+}
+
+fn run_rt(uint64 quoter, uint64 parser) -> uint32 {
+    uint64 argv = alloc(17 * 8)
+    uint64 k = 0
+    while k < rtv_count() {
+        rtv_build(k, argv)
+        uint64 len = call_ptr(quoter, argv, 0)
+        uint64 buf = alloc(len + 16)
+        uint64 i = 0
+        while i < len + 16 {
+            store8(buf + i, 0xAA)
+            i = i + 1
+        }
+        uint64 len2 = call_ptr(quoter, argv, buf)
+        if len2 != len { write(1, "measure and build disagree\n", 27) }
+        if len == 0 || load8(buf + len - 1) != 0 { write(1, "no NUL at len-1\n", 16) }
+        if len != 0 && str_len(buf) != len - 1 { write(1, "NUL before len-1\n", 17) }
+        if load8(buf + len) != 0xAA { write(1, "wrote past len\n", 15) }
+        uint64 size = 10 * (len + 2)
+        uint64 out = alloc(size)
+        uint64 argc = call_ptr(parser, buf, out, size)
+        show(k, argc, out, buf)
+        k = k + 1
+    }
+    return 0
+}
+
+fn main() -> uint32 {
+    if cli_argc != 4 { return 64 }
+    uint64 mode = load64(cli_argv + 8)
+    uint64 a = load_leaf(load64(cli_argv + 16))
+    if a == 0 { return 65 }
+    if load8(mode) == 112 {
+        return run_parse(a, load64(cli_argv + 24))
+    }
+    uint64 b = load_leaf(load64(cli_argv + 24))
+    if b == 0 { return 66 }
+    return run_rt(a, b)
+}

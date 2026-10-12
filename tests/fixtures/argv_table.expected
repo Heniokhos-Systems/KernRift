@@ -1,0 +1,166 @@
+#0 rc=4
+argc=4
+<ch>
+<a>
+<b>
+<c>
+raw=<ch a b c>
+#1 rc=4
+argc=4
+<ch>
+<a>
+<b>
+<c>
+raw=<ch a	b		c>
+#2 rc=2
+argc=2
+<ch>
+<a>
+raw=<ch   a  >
+#3 rc=3
+argc=3
+<ch>
+<a b>
+<c>
+raw=<ch "a b" c>
+#4 rc=2
+argc=2
+<ch>
+<a	b>
+raw=<ch "a	b">
+#5 rc=3
+argc=3
+<ch>
+<a"b>
+<c>
+raw=<ch "a""b" c>
+#6 rc=2
+argc=2
+<ch>
+<a"b c>
+raw=<ch "a""b c">
+#7 rc=2
+argc=2
+<ch>
+<a"b>
+raw=<ch a\"b>
+#8 rc=2
+argc=2
+<ch>
+<a\b c>
+raw=<ch a\\"b c">
+#9 rc=2
+argc=2
+<ch>
+<a\"b>
+raw=<ch a\\\"b>
+#10 rc=2
+argc=2
+<ch>
+<a\\b>
+raw=<ch a\\\\"b">
+#11 rc=2
+argc=2
+<ch>
+<a\b\\c>
+raw=<ch a\b\\c>
+#12 rc=3
+argc=3
+<ch>
+<a\\>
+<b\>
+raw=<ch a\\ b\>
+#13 rc=3
+argc=3
+<ch>
+<a\>
+<b>
+raw=<ch "a\\" b>
+#14 rc=2
+argc=2
+<ch>
+<a\" b>
+raw=<ch "a\\\" b">
+#15 rc=4
+argc=4
+<ch>
+<>
+<x>
+<>
+raw=<ch "" x "">
+#16 rc=2
+argc=2
+<ch>
+<>
+raw=<ch "">
+#17 rc=2
+argc=2
+<ch>
+<abc>
+raw=<ch a"b"c>
+#18 rc=2
+argc=2
+<ch>
+<a b>
+raw=<ch "a b>
+#19 rc=2
+argc=2
+<ch>
+<">
+raw=<ch """>
+#20 rc=2
+argc=2
+<ch>
+<">
+raw=<ch """">
+#21 rc=2
+argc=2
+<ch>
+<ab>
+raw=<ch a""b>
+#22 rc=2
+argc=2
+<C:\dir x\ch.exe>
+<a>
+raw=<"C:\dir x\ch.exe" a>
+#23 rc=2
+argc=2
+<C:\dir\\>
+<a>
+raw=<"C:\dir\\" a>
+#24 rc=2
+argc=2
+<C:\d\ch.exe>
+<a\b>
+raw=<C:\d\ch.exe a\b>
+#25 rc=2
+argc=2
+<C:\d\x y>
+<z>
+raw=<C:\d\"x y" z>
+#26 rc=1
+argc=1
+<ch>
+raw=<ch>
+#27 rc=2
+argc=2
+<>
+<a>
+raw=<"" a>
+#28 rc=3
+argc=3
+<child.exe>
+<a"b>
+<c\d " 	e>
+raw=<child.exe   "a""b" c\\"d "" 	e>
+#29 rc=3
+argc=3
+<>
+<ch>
+<a>
+raw=<	ch a>
+#30 rc=2
+argc=2
+<ch>
+<a>
+raw=<ch a	>

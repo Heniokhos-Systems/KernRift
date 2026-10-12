@@ -1,0 +1,31 @@
+ch a b c
+ch a	b		c
+ch   a  
+ch "a b" c
+ch "a	b"
+ch "a""b" c
+ch "a""b c"
+ch a\"b
+ch a\\"b c"
+ch a\\\"b
+ch a\\\\"b"
+ch a\b\\c
+ch a\\ b\
+ch "a\\" b
+ch "a\\\" b"
+ch "" x ""
+ch ""
+ch a"b"c
+ch "a b
+ch """
+ch """"
+ch a""b
+"C:\dir x\ch.exe" a
+"C:\dir\\" a
+C:\d\ch.exe a\b
+C:\d\"x y" z
+ch
+"" a
+child.exe   "a""b" c\\"d "" 	e
+	ch a
+ch a	

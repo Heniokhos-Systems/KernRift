@@ -2572,68 +2572,10 @@ fn ir_emit_arm64_insn(uint64 ii) {
         uint64 path_r = ir_a64_resolve_src(s1_v, 9)
         uint64 argv_r = ir_a64_resolve_src(s2_v, 10)
         if target_os == 2 {
-            // Windows ARM64: build quoted cmdline from argv and pass as
-            // lpCommandLine. Frame extends the existing 0xD0 layout by
-            // 0x400 for the cmdline buffer at sp+0xD0.
-            // Stash path & argv in x19/x20 BEFORE sub sp — regalloc scratch
-            // regs would be clobbered by the zero-init and cmdline loop.
-            emit_a64_mov(19, path_r)
-            emit_a64_mov(20, argv_r)
-            emit_a64_sub_sp_imm(0x4D0)
-            emit_a64_mov_imm(9, 0)
-            uint64 zi2 = 0
-            while zi2 < 16 {
-                emit_a64_str(9, 31, 0x40 + zi2 * 8)
-                zi2 = zi2 + 1
-            }
-            emit_a64_mov_imm(9, 104)
-            emit_a64_str32(9, 31, 0x40)
-            // ---- Build space-separated cmdline at sp+0xD0 ----
-            // No quoting — our child parser splits on 0x20 without
-            // stripping quotes (src/main.kr:21 win_init_args).
-            // x9 = write ptr, x20 = argv walk, x10 = arg*, x11 = byte
-            emit_a64_add_imm(9, 31, 0xD0)
-            // L_outer (+0): ldr x10,[x20]; cbz x10,L_done (+48)
-            emit_a64_ldr(10, 20, 0)
-            emit_a64_cbz(10, 48)
-            // L_inner (+8): ldrb w11,[x10]; cbz x11,L_end_copy (+20)
-            emit_a64_ldrb(11, 10, 0)
-            emit_a64_cbz(11, 20)
-            emit_a64_strb(11, 9, 0)
-            emit_a64_add_imm(10, 10, 1)
-            emit_a64_add_imm(9, 9, 1)
-            emit_a64(0x17FFFFFB)                // b L_inner (-20)
-            // L_end_copy (+32): space + advance
-            emit_a64_mov_imm(11, 0x20)
-            emit_a64_strb(11, 9, 0)
-            emit_a64_add_imm(9, 9, 1)
-            emit_a64_add_imm(20, 20, 8)
-            emit_a64(0x17FFFFF4)                // b L_outer (-48)
-            // L_done (+52): null-terminate
-            emit_a64_strb(31, 9, 0)
-            // ---- CreateProcessA ----
-            emit_a64_mov(0, 19)                 // x0 = path
-            emit_a64_add_imm(1, 31, 0xD0)       // x1 = cmdline
-            emit_a64_mov_imm(2, 0)
-            emit_a64_mov_imm(3, 0)
-            emit_a64_mov_imm(4, 0)
-            emit_a64_mov_imm(5, 0)
-            emit_a64_mov_imm(6, 0)
-            emit_a64_mov_imm(7, 0)
-            emit_a64_add_imm(9, 31, 0x40)
-            emit_a64_str(9, 31, 0)
-            emit_a64_add_imm(9, 31, 0xA8)
-            emit_a64_str(9, 31, 8)
-            emit_a64_win_call_iat(9)
-            emit_a64_ldr(0, 31, 0xA8)
-            emit_a64_mov_imm(1, 0xFFFFFFFF)
-            emit_a64_win_call_iat(10)
-            emit_a64_ldr(0, 31, 0xA8)
-            emit_a64_add_imm(1, 31, 0x20)
-            emit_a64_win_call_iat(11)
-            emit_a64_ldr32(0, 31, 0x20)
-            emit_a64_add_sp_imm(0x4D0)
-            emit_a64_win_call_iat(0)
+            // Windows ARM64: UCRT-inverse quoting into one command line
+            // (spec C7), paired with the child's emitted parser -- see the
+            // C7 block at the end of this file. Never returns.
+            c7_a64_emit_exec_argv(path_r, argv_r)
             return
         }
         // Linux/macOS: execve
@@ -3601,7 +3543,20 @@ fn ir_emit_arm64_function(uint64 fn_node) {
             emit_a64_static_store(envp_off_main)
         }
     }
+    uint64 c7_argc_off = 0xFFFFFFFF
+    uint64 c7_argv_off = 0xFFFFFFFF
     if tok_matches(fn_name_tok, "main", 4) != 0 && freestanding == 0 && target_os == 2 {
+        c7_argc_off = static_lookup_by_name("cli_argc", 8)
+        c7_argv_off = static_lookup_by_name("cli_argv", 8)
+    }
+    if tok_matches(fn_name_tok, "main", 4) != 0 && freestanding == 0 && target_os == 2 && is_naked == 0 && (c7_argc_off != 0xFFFFFFFF || c7_argv_off != 0xFFFFFFFF) {
+        // Windows ARM64 (spec C7): parse the command line UCRT's way into a
+        // fresh VirtualAlloc'd argv -- see the C7 block at the end of this file.
+        c7_a64_emit_main_argv(c7_argc_off, c7_argv_off)
+    } else if tok_matches(fn_name_tok, "main", 4) != 0 && freestanding == 0 && target_os == 2 {
+        // No cli_argc/cli_argv to fill, or a @naked main: the pre-C7
+        // sequence, unchanged (a @naked main sees the 0xFFFFFFFF sentinel --
+        // documented as unsupported, spec C7).
         // Windows ARM64: GetCommandLineA via IAT
         emit_a64_win_call_iat(7)
         uint64 argv_off_w = static_lookup_by_name("cli_argv", 8)
@@ -3854,4 +3809,488 @@ fn ir_emit_arm64_function(uint64 fn_node) {
 
     // Restore IR_NUM_REGS for x86_64 functions compiled later
     IR_NUM_REGS = saved_num_regs
+}
+
+// ===========================================================================
+// C7 -- uniform Windows argv, arm64 half (spec C7; contracts, rules and exit
+// codes in the C7 block at the end of ir.kr). AAPCS64 leaves; every branch
+// below goes through a C7 label (c7_label/c7_bind/c7_end), never a counted
+// offset. NOTHING here writes x18: on Windows arm64 it holds the TEB.
+// ===========================================================================
+
+// arm64 condition codes used below (B.cond).
+static uint64 C7_A64_EQ = 0
+static uint64 C7_A64_NE = 1
+static uint64 C7_A64_LO = 3
+static uint64 C7_A64_HI = 8
+
+fn c7_a64_b(uint64 l) {
+    c7_fix(out_len, l, 2)
+    emit_a64(0x14000000)
+}
+fn c7_a64_bl(uint64 l) {
+    c7_fix(out_len, l, 2)
+    emit_a64(0x94000000)
+}
+fn c7_a64_bcond(uint64 cond, uint64 l) {
+    c7_fix(out_len, l, 3)
+    emit_a64(0x54000000 | cond)
+}
+// CBZ/CBNZ, 32-bit (Wt) or 64-bit (Xt) compare.
+fn c7_a64_cbz_w(uint64 r, uint64 l) {
+    c7_fix(out_len, l, 3)
+    emit_a64(0x34000000 | r)
+}
+fn c7_a64_cbnz_w(uint64 r, uint64 l) {
+    c7_fix(out_len, l, 3)
+    emit_a64(0x35000000 | r)
+}
+fn c7_a64_cbz_x(uint64 r, uint64 l) {
+    c7_fix(out_len, l, 3)
+    emit_a64(0xB4000000 | r)
+}
+fn c7_a64_cbnz_x(uint64 r, uint64 l) {
+    c7_fix(out_len, l, 3)
+    emit_a64(0xB5000000 | r)
+}
+// CMP Wn, #imm12
+fn c7_a64_cmp_wi(uint64 n, uint64 imm) {
+    emit_a64(0x7100001F | (imm << 10) | (n << 5))
+}
+// STRB Wt, [Xn], #1  (post-index)
+fn c7_a64_strb_post1(uint64 t, uint64 n) {
+    emit_a64(0x38001400 | (n << 5) | t)
+}
+// SUB Xd, Xn, #1
+fn c7_a64_sub1(uint64 d, uint64 n) {
+    emit_a64(0xD1000400 | (n << 5) | d)
+}
+
+// Parser leaf, AAPCS64. x0 = p, x1 = buf, x2 = size then the string write
+// pointer, x3 = argc, x4 = in-quotes, x5 = backslash count, w6 = current byte,
+// x7/x8 = scratch.
+fn c7_a64_emit_parse_leaf() {
+    c7_begin()
+    uint64 l_sl = c7_label()
+    uint64 l_sd = c7_label()
+    uint64 l_have = c7_label()
+    uint64 l_ret0 = c7_label()
+    uint64 l_0 = c7_label()
+    uint64 l_0nq = c7_label()
+    uint64 l_0copy = c7_label()
+    uint64 l_0ws = c7_label()
+    uint64 l_0end = c7_label()
+    uint64 l_args = c7_label()
+    uint64 l_skip = c7_label()
+    uint64 l_done = c7_label()
+    uint64 l_arg = c7_label()
+    uint64 l_bs = c7_label()
+    uint64 l_bsd = c7_label()
+    uint64 l_nq = c7_label()
+    uint64 l_odd = c7_label()
+    uint64 l_toggle = c7_label()
+    uint64 l_copy = c7_label()
+    uint64 l_argend = c7_label()
+
+    emit_a64_movz(7, 0)                     // x7 = 0 (strlen)
+    c7_bind(l_sl)
+    emit_a64(0x38606800 | (7 << 16) | (0 << 5) | 6)   // ldrb w6, [x0, x7]
+    c7_a64_cbz_w(6, l_sd)
+    emit_a64_add_imm(7, 7, 1)
+    c7_a64_b(l_sl)
+    c7_bind(l_sd)
+    emit_a64_add_imm(7, 7, 2)               // x7 = len + 2 (pointer slots)
+    emit_a64_add_lsl(8, 7, 7, 2)            // x8 = 5 * (len + 2)
+    emit_a64_add(8, 8, 8)                   // x8 = need = 10 * (len + 2)
+    c7_a64_cbnz_x(1, l_have)
+    emit_a64_mov(0, 8)                      // buf == 0: return need
+    emit_a64_ret()
+    c7_bind(l_have)
+    emit_a64_cmp(2, 8)
+    c7_a64_bcond(C7_A64_LO, l_ret0)         // size < need: return 0
+    emit_a64_add_lsl(2, 1, 7, 3)            // x2 = buf + 8 * (len + 2)  (strings)
+    emit_a64_str(2, 1, 0)                   // argv[0] = x2
+    emit_a64_movz(3, 1)                     // argc = 1
+    emit_a64_movz(4, 0)                     // not in quotes
+    // argv[0]: quotes toggle and are dropped, no backslash rule.
+    c7_bind(l_0)
+    emit_a64_ldrb(6, 0, 0)
+    c7_a64_cbz_w(6, l_0end)
+    c7_a64_cmp_wi(6, 0x22)
+    c7_a64_bcond(C7_A64_NE, l_0nq)
+    emit_a64(0xD2400084)                    // eor x4, x4, #1
+    emit_a64_add_imm(0, 0, 1)
+    c7_a64_b(l_0)
+    c7_bind(l_0nq)
+    c7_a64_cbnz_x(4, l_0copy)
+    c7_a64_cmp_wi(6, 0x20)
+    c7_a64_bcond(C7_A64_EQ, l_0ws)
+    c7_a64_cmp_wi(6, 0x09)
+    c7_a64_bcond(C7_A64_EQ, l_0ws)
+    c7_bind(l_0copy)
+    c7_a64_strb_post1(6, 2)
+    emit_a64_add_imm(0, 0, 1)
+    c7_a64_b(l_0)
+    c7_bind(l_0ws)
+    emit_a64_add_imm(0, 0, 1)
+    c7_bind(l_0end)
+    c7_a64_strb_post1(31, 2)                // NUL (wzr)
+    // Later arguments.
+    c7_bind(l_args)
+    emit_a64_ldrb(6, 0, 0)
+    c7_a64_cmp_wi(6, 0x20)
+    c7_a64_bcond(C7_A64_EQ, l_skip)
+    c7_a64_cmp_wi(6, 0x09)
+    c7_a64_bcond(C7_A64_EQ, l_skip)
+    c7_a64_cbz_w(6, l_done)
+    emit_a64(0xF8207800 | (3 << 16) | (1 << 5) | 2)   // str x2, [x1, x3, lsl #3]
+    emit_a64_add_imm(3, 3, 1)
+    emit_a64_movz(4, 0)
+    c7_bind(l_arg)
+    emit_a64_movz(5, 0)
+    c7_bind(l_bs)
+    emit_a64_ldrb(6, 0, 0)
+    c7_a64_cmp_wi(6, 0x5C)
+    c7_a64_bcond(C7_A64_NE, l_bsd)
+    emit_a64_add_imm(0, 0, 1)
+    emit_a64_add_imm(5, 5, 1)
+    c7_a64_b(l_bs)
+    c7_bind(l_bsd)
+    c7_a64_cmp_wi(6, 0x22)
+    c7_a64_bcond(C7_A64_NE, l_nq)
+    emit_a64(0x924000A7)                    // and x7, x5, #1
+    c7_a64_cbnz_x(7, l_odd)
+    // 2n backslashes + '"': n backslashes, the '"' is a delimiter ...
+    emit_a64(0xD341FCA5)                    // lsr x5, x5, #1
+    c7_a64_parse_emit_bs()
+    c7_a64_cbz_x(4, l_toggle)
+    // ... except `""` inside quotes: a literal '"', quote mode stays on.
+    emit_a64_ldrb(7, 0, 1)
+    c7_a64_cmp_wi(7, 0x22)
+    c7_a64_bcond(C7_A64_NE, l_toggle)
+    emit_a64_add_imm(0, 0, 1)
+    c7_a64_b(l_copy)
+    c7_bind(l_toggle)
+    emit_a64(0xD2400084)                    // eor x4, x4, #1
+    emit_a64_add_imm(0, 0, 1)
+    c7_a64_b(l_arg)
+    // 2n+1 backslashes + '"': n backslashes and a literal '"'.
+    c7_bind(l_odd)
+    emit_a64(0xD341FCA5)                    // lsr x5, x5, #1
+    c7_a64_parse_emit_bs()
+    c7_a64_b(l_copy)
+    // Backslashes not before a '"' are literal.
+    c7_bind(l_nq)
+    c7_a64_parse_emit_bs()
+    c7_a64_cbz_w(6, l_argend)
+    c7_a64_cbnz_x(4, l_copy)
+    c7_a64_cmp_wi(6, 0x20)
+    c7_a64_bcond(C7_A64_EQ, l_argend)
+    c7_a64_cmp_wi(6, 0x09)
+    c7_a64_bcond(C7_A64_EQ, l_argend)
+    c7_bind(l_copy)
+    c7_a64_strb_post1(6, 2)
+    emit_a64_add_imm(0, 0, 1)
+    c7_a64_b(l_arg)
+    c7_bind(l_argend)
+    c7_a64_strb_post1(31, 2)
+    c7_a64_b(l_args)
+    c7_bind(l_skip)
+    emit_a64_add_imm(0, 0, 1)
+    c7_a64_b(l_args)
+    c7_bind(l_done)
+    emit_a64(0xF8207800 | (3 << 16) | (1 << 5) | 31)  // str xzr, [x1, x3, lsl #3]
+    emit_a64_mov(0, 3)
+    emit_a64_ret()
+    c7_bind(l_ret0)
+    emit_a64_movz(0, 0)
+    emit_a64_ret()
+    c7_end()
+}
+
+// x5 backslashes to [x2++] (x5 ends 0; w6 untouched).
+fn c7_a64_parse_emit_bs() {
+    uint64 l_b = c7_label()
+    uint64 l_be = c7_label()
+    c7_bind(l_b)
+    c7_a64_cbz_x(5, l_be)
+    emit_a64_movz(7, 0x5C)
+    c7_a64_strb_post1(7, 2)
+    c7_a64_sub1(5, 5)
+    c7_a64_b(l_b)
+    c7_bind(l_be)
+}
+
+// Quoter output of one byte from Wr: count it in x2, store it at [x1++] unless
+// x1 == 0 (measuring).
+fn c7_a64_quote_put_r(uint64 r) {
+    uint64 l_x = c7_label()
+    emit_a64_add_imm(2, 2, 1)
+    c7_a64_cbz_x(1, l_x)
+    c7_a64_strb_post1(r, 1)
+    c7_bind(l_x)
+}
+fn c7_a64_quote_put_imm(uint64 imm) {
+    emit_a64_movz(8, imm)
+    c7_a64_quote_put_r(8)
+}
+
+// x5 backslashes through the quoter output (x5 ends 0).
+fn c7_a64_quote_bs() {
+    uint64 l_b = c7_label()
+    uint64 l_be = c7_label()
+    c7_bind(l_b)
+    c7_a64_cbz_x(5, l_be)
+    c7_a64_quote_put_imm(0x5C)
+    c7_a64_sub1(5, 5)
+    c7_a64_b(l_b)
+    c7_bind(l_be)
+}
+
+// Quoter leaf, AAPCS64. x0 = argv walk, x1 = out (0 = measure), x2 = length;
+// x3 = current argument; x5 = backslash count; x6 = 0 for argv[0], 1 after;
+// w7 = byte; x8 = output scratch; x9 = scan pointer, w10 = scanned byte.
+fn c7_a64_emit_quote_leaf() {
+    c7_begin()
+    uint64 l_next = c7_label()
+    uint64 l_end = c7_label()
+    uint64 l_nosep = c7_label()
+    uint64 l_q = c7_label()
+    uint64 l_scan = c7_label()
+    uint64 l_scannext = c7_label()
+    uint64 l_plain = c7_label()
+    uint64 l_adone = c7_label()
+    uint64 l_q0 = c7_label()
+    uint64 l_qb = c7_label()
+    uint64 l_qbs = c7_label()
+    uint64 l_qbe = c7_label()
+    uint64 l_qnorm = c7_label()
+    uint64 l_qend = c7_label()
+    uint64 l_qclose = c7_label()
+
+    emit_a64_movz(2, 0)
+    emit_a64_movz(6, 0)
+    c7_bind(l_next)
+    emit_a64_ldr(3, 0, 0)
+    c7_a64_cbz_x(3, l_end)
+    c7_a64_cbz_x(6, l_nosep)
+    c7_a64_quote_put_imm(0x20)
+    c7_bind(l_nosep)
+    emit_a64_ldrb(10, 3, 0)
+    c7_a64_cbz_w(10, l_q)                   // empty -> quoted
+    emit_a64_mov(9, 3)
+    c7_bind(l_scan)
+    emit_a64_ldrb(10, 9, 0)
+    c7_a64_cbz_w(10, l_plain)
+    c7_a64_cmp_wi(10, 0x20)
+    c7_a64_bcond(C7_A64_EQ, l_q)
+    c7_a64_cmp_wi(10, 0x09)
+    c7_a64_bcond(C7_A64_EQ, l_q)
+    c7_a64_cbz_x(6, l_scannext)             // argv[0]: '"' does not force quotes
+    c7_a64_cmp_wi(10, 0x22)
+    c7_a64_bcond(C7_A64_EQ, l_q)
+    c7_bind(l_scannext)
+    emit_a64_add_imm(9, 9, 1)
+    c7_a64_b(l_scan)
+    // Nothing to quote: verbatim.
+    c7_bind(l_plain)
+    emit_a64_ldrb(7, 3, 0)
+    c7_a64_cbz_w(7, l_adone)
+    c7_a64_quote_put_r(7)
+    emit_a64_add_imm(3, 3, 1)
+    c7_a64_b(l_plain)
+    c7_bind(l_q)
+    c7_a64_quote_put_imm(0x22)
+    c7_a64_cbnz_x(6, l_qb)
+    // argv[0] quoted: verbatim between the quotes (no backslash rule there).
+    c7_bind(l_q0)
+    emit_a64_ldrb(7, 3, 0)
+    c7_a64_cbz_w(7, l_qclose)
+    c7_a64_quote_put_r(7)
+    emit_a64_add_imm(3, 3, 1)
+    c7_a64_b(l_q0)
+    // Quoted argument: count each backslash run, look at what ends it.
+    c7_bind(l_qb)
+    emit_a64_movz(5, 0)
+    c7_bind(l_qbs)
+    emit_a64_ldrb(7, 3, 0)
+    c7_a64_cmp_wi(7, 0x5C)
+    c7_a64_bcond(C7_A64_NE, l_qbe)
+    emit_a64_add_imm(5, 5, 1)
+    emit_a64_add_imm(3, 3, 1)
+    c7_a64_b(l_qbs)
+    c7_bind(l_qbe)
+    c7_a64_cbz_w(7, l_qend)
+    c7_a64_cmp_wi(7, 0x22)
+    c7_a64_bcond(C7_A64_NE, l_qnorm)
+    // n backslashes + '"' -> 2n+1 backslashes + '"'
+    emit_a64_add(5, 5, 5)
+    emit_a64_add_imm(5, 5, 1)
+    c7_a64_quote_bs()
+    c7_a64_quote_put_r(7)
+    emit_a64_add_imm(3, 3, 1)
+    c7_a64_b(l_qb)
+    c7_bind(l_qnorm)
+    c7_a64_quote_bs()
+    c7_a64_quote_put_r(7)
+    emit_a64_add_imm(3, 3, 1)
+    c7_a64_b(l_qb)
+    // n backslashes before the closing quote -> 2n.
+    c7_bind(l_qend)
+    emit_a64_add(5, 5, 5)
+    c7_a64_quote_bs()
+    c7_bind(l_qclose)
+    c7_a64_quote_put_imm(0x22)
+    c7_bind(l_adone)
+    emit_a64_add_imm(0, 0, 8)
+    emit_a64_movz(6, 1)
+    c7_a64_b(l_next)
+    c7_bind(l_end)
+    c7_a64_quote_put_r(31)                  // the NUL counts (wzr)
+    emit_a64_mov(0, 2)
+    emit_a64_ret()
+    c7_end()
+}
+
+// Writes `msg` (<= 64 bytes, built on the stack from immediates -- no data in
+// .text) to stderr and exits with `code`. Never returns.
+fn c7_a64_emit_die(uint64 code, uint64 msg, uint64 len) {
+    emit_a64_sub_sp_imm(0x60)
+    uint64 q = 0
+    while q * 8 < len {
+        uint64 v = 0
+        uint64 j = 0
+        while j < 8 {
+            uint64 b = 0
+            if q * 8 + j < len {
+                uint64 pb = msg + q * 8 + j
+                unsafe { *(pb as uint8) -> b }
+            }
+            v = v | (b << (j * 8))
+            j = j + 1
+        }
+        emit_a64_mov_imm(9, v)
+        emit_a64_str(9, 31, 0x20 + q * 8)
+        q = q + 1
+    }
+    emit_a64_mov_imm(0, 0xFFFFFFF4)         // STD_ERROR_HANDLE
+    emit_a64_win_call_iat(IAT_GetStdHandle)
+    emit_a64_add_imm(1, 31, 0x20)           // x1 = msg
+    emit_a64_mov_imm(2, len)
+    emit_a64_add_imm(3, 31, 0x18)           // x3 = &written
+    emit_a64_movz(4, 0)                     // lpOverlapped = NULL
+    emit_a64_win_call_iat(IAT_WriteFile)
+    emit_a64_mov_imm(0, code)
+    emit_a64_win_call_iat(IAT_ExitProcess)
+}
+
+// The Windows arm64 `main` prologue's argv sequence. x19-x21 are clobbered
+// before main saves anything -- safe because a Windows main never returns to
+// the loader (its epilogue calls ExitProcess). x30 is clobbered by the calls
+// for the same reason.
+fn c7_a64_emit_main_argv(uint64 argc_off, uint64 argv_off) {
+    c7_begin()
+    uint64 l_fail = c7_label()
+    uint64 l_leaf = c7_label()
+    uint64 l_over = c7_label()
+    emit_a64_win_call_iat(IAT_GetCommandLineA)
+    emit_a64_mov(19, 0)                     // x19 = cmdline
+    emit_a64_movz(1, 0)                     // buf 0: size it
+    emit_a64_movz(2, 0)
+    c7_a64_bl(l_leaf)
+    emit_a64_mov(20, 0)                     // x20 = need
+    emit_a64_movz(0, 0)                     // VirtualAlloc(NULL,
+    emit_a64_mov(1, 20)                     //   need,
+    emit_a64_movz(2, 0x3000)                //   MEM_COMMIT|MEM_RESERVE,
+    emit_a64_movz(3, 4)                     //   PAGE_READWRITE)
+    emit_a64_win_call_iat(IAT_VirtualAlloc)
+    c7_a64_cbz_x(0, l_fail)
+    emit_a64_mov(21, 0)                     // x21 = buf
+    emit_a64_mov(0, 19)
+    emit_a64_mov(1, 21)
+    emit_a64_mov(2, 20)
+    c7_a64_bl(l_leaf)
+    if argc_off != 0xFFFFFFFF { emit_a64_static_store(argc_off) }
+    emit_a64_mov(0, 21)
+    if argv_off != 0xFFFFFFFF { emit_a64_static_store(argv_off) }
+    c7_a64_b(l_over)
+    c7_bind(l_fail)
+    c7_a64_emit_die(121, "krc runtime: argv allocation failed\n", 36)
+    c7_bind(l_leaf)
+    c7_a64_emit_parse_leaf()
+    c7_bind(l_over)
+    c7_end()
+}
+
+// exec_process_argv on Windows arm64 (op 114); see c7_x86_emit_exec_argv.
+// Never returns, so x19-x22 are free.
+fn c7_a64_emit_exec_argv(uint64 path_r, uint64 argv_r) {
+    c7_begin()
+    uint64 l_long = c7_label()
+    uint64 l_nomem = c7_label()
+    uint64 l_quote = c7_label()
+    uint64 l_over = c7_label()
+    // Through the stack, so neither source can be overwritten by the other's
+    // move whatever registers the allocator picked.
+    emit_a64_stp_pre(path_r, argv_r, 31, 0xFFFFFFFFFFFFFFF0)
+    emit_a64_ldp_post(19, 20, 31, 16)       // x19 = path, x20 = argv
+    emit_a64_sub_sp_imm(0xD0)
+    emit_a64_mov(0, 20)
+    emit_a64_movz(1, 0)                     // measure
+    c7_a64_bl(l_quote)
+    emit_a64_mov_imm(9, 32767)
+    emit_a64_cmp(0, 9)
+    c7_a64_bcond(C7_A64_HI, l_long)
+    emit_a64_mov(21, 0)                     // x21 = length incl. NUL
+    emit_a64_movz(0, 0)
+    emit_a64_mov(1, 21)
+    emit_a64_movz(2, 0x3000)
+    emit_a64_movz(3, 4)
+    emit_a64_win_call_iat(IAT_VirtualAlloc)
+    c7_a64_cbz_x(0, l_nomem)
+    emit_a64_mov(22, 0)                     // x22 = command line
+    emit_a64_mov(0, 20)
+    emit_a64_mov(1, 22)
+    c7_a64_bl(l_quote)
+    // STARTUPINFOA at sp+0x40 (zeroed, cb = 104), PROCESS_INFORMATION at sp+0xA8.
+    emit_a64_movz(9, 0)
+    uint64 zi = 0
+    while zi < 16 {
+        emit_a64_str(9, 31, 0x40 + zi * 8)
+        zi = zi + 1
+    }
+    emit_a64_movz(9, 104)
+    emit_a64_str32(9, 31, 0x40)
+    // CreateProcessA(path, cmdline, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi)
+    emit_a64_mov(0, 19)
+    emit_a64_mov(1, 22)
+    emit_a64_movz(2, 0)
+    emit_a64_movz(3, 0)
+    emit_a64_movz(4, 0)
+    emit_a64_movz(5, 0)
+    emit_a64_movz(6, 0)
+    emit_a64_movz(7, 0)
+    emit_a64_add_imm(9, 31, 0x40)
+    emit_a64_str(9, 31, 0)
+    emit_a64_add_imm(9, 31, 0xA8)
+    emit_a64_str(9, 31, 8)
+    emit_a64_win_call_iat(IAT_CreateProcessA)
+    emit_a64_ldr(0, 31, 0xA8)
+    emit_a64_mov_imm(1, 0xFFFFFFFF)
+    emit_a64_win_call_iat(IAT_WaitForSingleObject)
+    emit_a64_ldr(0, 31, 0xA8)
+    emit_a64_add_imm(1, 31, 0x20)
+    emit_a64_win_call_iat(IAT_GetExitCodeProcess)
+    emit_a64_ldr32(0, 31, 0x20)
+    emit_a64_add_sp_imm(0xD0)
+    emit_a64_win_call_iat(IAT_ExitProcess)
+    c7_a64_b(l_over)                        // not reached
+    c7_bind(l_long)
+    c7_a64_emit_die(122, "krc runtime: child command line too long\n", 41)
+    c7_bind(l_nomem)
+    c7_a64_emit_die(123, "krc runtime: child command line allocation failed\n", 50)
+    c7_bind(l_quote)
+    c7_a64_emit_quote_leaf()
+    c7_bind(l_over)
+    c7_end()
 }

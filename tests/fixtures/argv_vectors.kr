@@ -1,0 +1,60 @@
+// C7 round-trip vectors (spec C7 "Child launch must match"), shared by the
+// Windows parent argv_rtparent.kr (exec_process_argv -> op 114's quoting ->
+// CreateProcessA -> the child's emitted parser, under Wine) and the arm64
+// leaf harness argv_leafrun.kr (the dumped quoting leaf, then the dumped
+// parsing leaf, under qemu-aarch64-static). Each vector is an argv the child
+// must receive byte for byte; argv_roundtrip.expected lists them.
+// Vector 0 is the spec's own: {"a b", "a\"b", "a\\", "", "x\\\\\"y"}.
+fn rtv_count() -> uint64 { return 7 }
+
+// Fills `argv` (room for 16 pointers) with vector k, NULL-terminated.
+// Returns the argument count, argv[0] included.
+fn rtv_build(uint64 k, uint64 argv) -> uint64 {
+    uint64 n = 0
+    if k == 0 {
+        store64(argv, "argv_echo.exe")
+        store64(argv + 8, "a b")
+        store64(argv + 16, "a\"b")
+        store64(argv + 24, "a\\")
+        store64(argv + 32, "")
+        store64(argv + 40, "x\\\\\"y")
+        n = 6
+    } else if k == 1 {
+        store64(argv, "argv_echo.exe")
+        store64(argv + 8, "a\tb")
+        store64(argv + 16, "\"")
+        store64(argv + 24, "\\")
+        store64(argv + 32, "\\\\")
+        store64(argv + 40, "a b\\")
+        store64(argv + 48, "a b\\\\")
+        store64(argv + 56, "\\\"")
+        store64(argv + 64, "\"\"")
+        store64(argv + 72, "plain")
+        n = 10
+    } else if k == 2 {
+        store64(argv, "C:\\my dir\\argv_echo.exe")
+        store64(argv + 8, "x")
+        n = 2
+    } else if k == 3 {
+        store64(argv, "")
+        store64(argv + 8, "a")
+        n = 2
+    } else if k == 4 {
+        store64(argv, "C:\\a b\\")
+        store64(argv + 8, "y")
+        n = 2
+    } else if k == 5 {
+        store64(argv, "e")
+        n = 1
+    } else {
+        store64(argv, "e")
+        store64(argv + 8, "a\\\\b")
+        store64(argv + 16, " lead")
+        store64(argv + 24, "trail ")
+        store64(argv + 32, "\t")
+        store64(argv + 40, "q\\\"\\")
+        n = 6
+    }
+    store64(argv + n * 8, 0)
+    return n
+}

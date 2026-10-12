@@ -43,6 +43,8 @@ contributors and the curious; **Project** tracks direction and process.
   `unsafe` code.**
 - [Error Handling](ERROR_HANDLING.md) — the sentinel/`opt`/abort
   conventions the standard library follows.
+- [Runtime Exit Codes](RUNTIME_EXIT_CODES.md) — the exit statuses emitted
+  code produces on its own (Windows argv and child command line: 121-123).
 - [Debugging](DEBUGGING.md) — `-g` DWARF, `--debug` traps, the
   miscompile bisection ladder, IR/asm dumps.
 - [Kernel Modules](LKM.md) — compiling to a loadable Linux `.ko` with

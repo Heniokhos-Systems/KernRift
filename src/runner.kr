@@ -233,6 +233,10 @@ fn win_init_args_r() {
 
 @export
 fn main() {
+    // DEAD on the IR backend since spec C7: the emitted Windows `main`
+    // prologue parses the command line itself (UCRT rules), so cli_argc is
+    // never the 0xFFFFFFFF sentinel there. Kept for a `--legacy` build, whose
+    // prologue still stores the sentinel (a declared gap).
     if cli_argc == 0xFFFFFFFF {
         win_init_args_r()
     }

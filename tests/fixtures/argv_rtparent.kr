@@ -1,0 +1,55 @@
+// C7 round-trip parent (Windows; spec C7 "Child launch must match").
+//   argv_rtparent.exe K      K < rtv_count(): exec_process_argv(argv_echo.exe,
+//                            vector K). op 114 quotes the vector into one
+//                            command line; the child's prologue must parse it
+//                            back to the same argv (argv.out, exit = argc).
+//   argv_rtparent.exe 100    one ~40 KiB argument: op 114 must refuse with
+//                            "krc runtime: child command line too long" on
+//                            stderr and exit 122 (RUNTIME_EXIT_CODES.md).
+//   argv_rtparent.exe 101    {"e", 32764 x 'x'}: the quoted line is exactly
+//                            32767 bytes with its NUL -- the CreateProcessA
+//                            limit -- so the child runs (exit 2).
+//   argv_rtparent.exe 102    one byte more: exit 122.
+// exec_process_argv never returns on Windows (the parent exits with the
+// child's status), so reaching the end of main is itself a failure (exit 77).
+import "argv_vectors.kr"
+
+static uint64 cli_argc
+static uint64 cli_argv
+
+fn rt_big(uint64 argv, uint64 n) {
+    uint64 b = alloc(n + 1)
+    uint64 i = 0
+    while i < n {
+        store8(b + i, 120)
+        i = i + 1
+    }
+    store8(b + n, 0)
+    store64(argv, "e")
+    store64(argv + 8, b)
+    store64(argv + 16, 0)
+}
+
+fn main() -> uint32 {
+    if cli_argc != 2 { return 70 }
+    uint64 s = load64(cli_argv + 8)
+    uint64 k = 0
+    while load8(s) != 0 {
+        k = k * 10 + load8(s) - 48
+        s = s + 1
+    }
+    uint64 argv = alloc(17 * 8)
+    if k < rtv_count() {
+        rtv_build(k, argv)
+    } else if k == 100 {
+        rt_big(argv, 40 * 1024)
+    } else if k == 101 {
+        rt_big(argv, 32764)
+    } else if k == 102 {
+        rt_big(argv, 32765)
+    } else {
+        return 71
+    }
+    exec_process_argv("argv_echo.exe", argv)
+    return 77
+}

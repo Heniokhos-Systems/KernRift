@@ -11576,67 +11576,10 @@ fn ir_emit_x86_insn(uint64 ii) {
         uint64 path_r = ir_resolve_src(s1_v, 0)
         uint64 argv_r = ir_resolve_src(s2_v, 1)
         if target_os == 2 {
-            // Stash both in caller-saved scratch regs that survive the sub rsp
-            // + rep stosb sequence (zero-init only clobbers rax/rcx/rdi).
-            ir_emit_mov_r64_r64(10, path_r)      // r10 = path
-            ir_emit_mov_r64_r64(11, argv_r)      // r11 = argv walk ptr
-            emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC); emit_u32_le(0x4D0)
-            emit_byte(0x48); emit_byte(0x8D); emit_byte(0x7C); emit_byte(0x24); emit_byte(0x50)
-            emit_byte(0x31); emit_byte(0xC0)
-            emit_byte(0xB9); emit_u32_le(128)
-            emit_byte(0xF3); emit_byte(0xAA)
-            emit_byte(0xC7); emit_byte(0x44); emit_byte(0x24); emit_byte(0x50); emit_u32_le(104)
-            // Build space-separated cmdline at [rsp+0xD0]. No quoting —
-            // our child parser (win_init_args) splits on 0x20 and doesn't
-            // strip quotes, so argv[i] would otherwise carry literal "
-            // bytes into the child.
-            emit_byte(0x48); emit_byte(0x8D); emit_byte(0xBC); emit_byte(0x24); emit_u32_le(0xD0)
-            // L_outer: mov rsi,[r11]; test rsi,rsi; jz L_done (+28)
-            emit_byte(0x49); emit_byte(0x8B); emit_byte(0x33)
-            emit_byte(0x48); emit_byte(0x85); emit_byte(0xF6)
-            emit_byte(0x74); emit_byte(0x1C)
-            // L_inner: mov al,[rsi]; test al,al; jz L_end_copy (+10)
-            emit_byte(0x8A); emit_byte(0x06)
-            emit_byte(0x84); emit_byte(0xC0)
-            emit_byte(0x74); emit_byte(0x0A)
-            // mov [rdi],al; inc rsi; inc rdi; jmp L_inner (-16)
-            emit_byte(0x88); emit_byte(0x07)
-            emit_byte(0x48); emit_byte(0xFF); emit_byte(0xC6)
-            emit_byte(0x48); emit_byte(0xFF); emit_byte(0xC7)
-            emit_byte(0xEB); emit_byte(0xF0)
-            // L_end_copy: mov byte [rdi],' '; inc rdi; add r11,8; jmp L_outer (-36)
-            emit_byte(0xC6); emit_byte(0x07); emit_byte(0x20)
-            emit_byte(0x48); emit_byte(0xFF); emit_byte(0xC7)
-            emit_byte(0x49); emit_byte(0x83); emit_byte(0xC3); emit_byte(0x08)
-            emit_byte(0xEB); emit_byte(0xDC)
-            // L_done: mov byte [rdi], 0
-            emit_byte(0xC6); emit_byte(0x07); emit_byte(0x00)
-            // ---- CreateProcessA ----
-            // rcx = path (from r10)
-            emit_byte(0x4C); emit_byte(0x89); emit_byte(0xD1)
-            // lea rdx, [rsp+0xD0]  (lpCommandLine)
-            emit_byte(0x48); emit_byte(0x8D); emit_byte(0x94); emit_byte(0x24); emit_u32_le(0xD0)
-            emit_byte(0x4D); emit_byte(0x31); emit_byte(0xC0)
-            emit_byte(0x4D); emit_byte(0x31); emit_byte(0xC9)
-            emit_byte(0x48); emit_byte(0xC7); emit_byte(0x44); emit_byte(0x24); emit_byte(0x20); emit_u32_le(0)
-            emit_byte(0x48); emit_byte(0xC7); emit_byte(0x44); emit_byte(0x24); emit_byte(0x28); emit_u32_le(0)
-            emit_byte(0x48); emit_byte(0xC7); emit_byte(0x44); emit_byte(0x24); emit_byte(0x30); emit_u32_le(0)
-            emit_byte(0x48); emit_byte(0xC7); emit_byte(0x44); emit_byte(0x24); emit_byte(0x38); emit_u32_le(0)
-            emit_byte(0x48); emit_byte(0x8D); emit_byte(0x44); emit_byte(0x24); emit_byte(0x50)
-            emit_byte(0x48); emit_byte(0x89); emit_byte(0x44); emit_byte(0x24); emit_byte(0x40)
-            emit_byte(0x48); emit_byte(0x8D); emit_byte(0x84); emit_byte(0x24); emit_u32_le(0xB8)
-            emit_byte(0x48); emit_byte(0x89); emit_byte(0x44); emit_byte(0x24); emit_byte(0x48)
-            emit_win_call_iat(9)
-            emit_byte(0x48); emit_byte(0x8B); emit_byte(0x8C); emit_byte(0x24); emit_u32_le(0xB8)
-            emit_byte(0xBA); emit_u32_le(0xFFFFFFFF)
-            emit_win_call_iat(10)
-            emit_byte(0x48); emit_byte(0x8B); emit_byte(0x8C); emit_byte(0x24); emit_u32_le(0xB8)
-            emit_byte(0x48); emit_byte(0x8D); emit_byte(0x54); emit_byte(0x24); emit_byte(0x20)
-            emit_win_call_iat(11)
-            emit_byte(0x8B); emit_byte(0x4C); emit_byte(0x24); emit_byte(0x20)
-            emit_byte(0x48); emit_byte(0x81); emit_byte(0xC4); emit_u32_le(0x4D0)
-            emit_win_alloc_stack(0x20)
-            emit_win_call_iat(0)
+            // Windows: UCRT-inverse quoting into one command line (spec C7),
+            // paired with the child's emitted parser -- see the C7 block at
+            // the end of this file. Never returns.
+            c7_x86_emit_exec_argv(path_r, argv_r)
             return
         }
         // Linux/macOS: execve
@@ -15009,7 +14952,22 @@ fn ir_emit_x86_function(uint64 fn_node) {
 
     // 5a. For main(): set up argc/argv BEFORE prologue modifies RSP
     uint32 fn_name_tok = ast_data1(fn_node)
+    uint64 c7_argc_off = 0xFFFFFFFF
+    uint64 c7_argv_off = 0xFFFFFFFF
     if tok_matches(fn_name_tok, "main", 4) != 0 && freestanding == 0 && target_os == 2 {
+        c7_argc_off = static_lookup_by_name("cli_argc", 8)
+        c7_argv_off = static_lookup_by_name("cli_argv", 8)
+    }
+    if tok_matches(fn_name_tok, "main", 4) != 0 && freestanding == 0 && target_os == 2 && is_naked == 0 && (c7_argc_off != 0xFFFFFFFF || c7_argv_off != 0xFFFFFFFF) {
+        // Windows (spec C7): parse the command line UCRT's way into a fresh
+        // VirtualAlloc'd argv, exactly as the Linux loader would have laid it
+        // out -- see the C7 block at the end of this file.
+        c7_x86_emit_main_argv(c7_argc_off, c7_argv_off)
+    } else if tok_matches(fn_name_tok, "main", 4) != 0 && freestanding == 0 && target_os == 2 {
+        // No cli_argc/cli_argv to fill, or a @naked main (no ExitProcess
+        // epilogue, so its callee-saved registers may not be clobbered): the
+        // pre-C7 sequence, unchanged. A @naked main that reads cli_argc sees
+        // the 0xFFFFFFFF sentinel -- documented as unsupported (spec C7).
         // Windows: call GetCommandLineA -> rax = raw command line string
         // PE entry: loader calls us, RSP = 8 mod 16.
         // Use 0x28 shadow (0x20 + 8 alignment) so RSP is 16-aligned before CALL.
@@ -15377,4 +15335,654 @@ fn ir_emit_x86_function(uint64 fn_node) {
         }
         emit_byte(0xC3)
     }
+}
+
+// ===========================================================================
+// C7 -- uniform Windows argv (portable-syscall-layer spec C7)
+// ===========================================================================
+//
+// Every Windows `main` (IR backend, not @naked) parses its own command line in
+// its prologue, so cli_argc/cli_argv mean on Windows what they mean on Linux.
+// The parse is ONE self-contained LEAF routine per arch, emitted inline in the
+// prologue behind a jump and called by it:
+//
+//   parse(cmdline, buf, size) -> argc          Win64 rcx/rdx/r8 | AAPCS64 x0-x2
+//     need = 10 * (strlen(cmdline) + 2)
+//     buf == 0     -> returns need (the prologue's sizing call)
+//     size < need  -> returns 0 (argc is never 0 otherwise: argv[0] always exists)
+//     else         -> argv pointer array at buf (room for strlen+2 entries,
+//                     argv[argc] = 0), the strings packed after it; returns argc
+//
+// `need` covers the worst case: at most strlen+1 arguments plus the null slot,
+// and at most strlen bytes of argument text plus one NUL per argument. The
+// command line is COPIED; the GetCommandLineA buffer is never written.
+//
+// Parse rules = UCRT (the current MSVC CRT), stated in full in spec C7:
+//   - whitespace is space or tab; runs of it outside quotes separate arguments;
+//   - argv[0]: everything up to the first whitespace outside quotes, every `"`
+//     toggling quote mode and being dropped, NO backslash processing (this is
+//     UCRT's own loop: `"C:\dir x\p.exe"` and `C:\d\"x y"` both work);
+//   - later arguments: 2n backslashes + `"` -> n backslashes and the `"` is a
+//     delimiter; 2n+1 backslashes + `"` -> n backslashes and a literal `"`;
+//     backslashes not before a `"` are literal; `""` INSIDE quotes is a
+//     literal `"` and quote mode stays on; an argument opened by quotes may be
+//     empty (`""` -> one empty argument).
+//
+// The child side has the INVERSE (exec_process_argv, op 114), a second leaf:
+//
+//   quote(argv, buf) -> length including the NUL   Win64 rcx/rdx | AAPCS64 x0/x1
+//     buf == 0 -> measures only; else writes exactly that many bytes.
+//     Arguments are joined by one space. argv[1..] is quoted when it is empty
+//     or contains space, tab or `"`: inside the quotes every backslash run
+//     before a `"` is doubled plus one and the `"` escaped, a run before the
+//     closing quote is doubled. argv[0] follows argv[0]'s parse rule instead:
+//     quoted (no escaping) when empty or holding space/tab; a `"` inside
+//     argv[0] cannot be represented under UCRT and is passed through.
+//
+// Neither leaf calls anything, touches a static, needs a fixup or (arm64)
+// writes x18 -- the Windows-arm64 TEB register. --dump-argv-parser= and
+// --dump-argv-quoter= (main.kr, hidden) write exactly these bytes so the arm64
+// leaves can be run under qemu-aarch64-static on Linux; a row proves the
+// dumped bytes are the ones a PE build embeds.
+//
+// Runtime exit codes (docs/RUNTIME_EXIT_CODES.md): 121 the prologue's
+// VirtualAlloc failed; 122 the quoted child command line is longer than
+// CreateProcessA's 32767 bytes (NUL included); 123 op 114's VirtualAlloc
+// failed. Each writes one line to stderr first.
+
+// Labels for the hand-emitted sequences above. Every branch in them is emitted
+// against a label and patched at c7_end(), never with a hand-counted offset.
+// Labels are allocated from one counter per top-level sequence, so a leaf
+// emitted inside the prologue just takes more labels.
+static uint64[256] c7_lbl_pos
+static uint64[512] c7_fix_off
+static uint64[512] c7_fix_lbl
+static uint64[512] c7_fix_kind
+static uint64 c7_lbl_n = 0
+static uint64 c7_fix_n = 0
+static uint64 c7_depth = 0
+
+fn c7_begin() {
+    if c7_depth == 0 {
+        c7_lbl_n = 0
+        c7_fix_n = 0
+    }
+    c7_depth = c7_depth + 1
+}
+
+fn c7_label() -> uint64 {
+    if c7_lbl_n >= 256 {
+        cap_overflow("C7 argv sequence labels", 256, 0)
+        exit(1)
+    }
+    c7_lbl_pos[c7_lbl_n] = 0xFFFFFFFFFFFFFFFF
+    c7_lbl_n = c7_lbl_n + 1
+    return c7_lbl_n - 1
+}
+
+fn c7_bind(uint64 l) {
+    c7_lbl_pos[l] = out_len
+}
+
+// kind 1: x86 rel32 at `off` (disp from off+4); 2: arm64 B/BL imm26;
+// 3: arm64 CBZ/CBNZ/B.cond imm19.
+fn c7_fix(uint64 off, uint64 l, uint64 kind) {
+    if c7_fix_n >= 512 {
+        cap_overflow("C7 argv sequence branches", 512, 0)
+        exit(1)
+    }
+    c7_fix_off[c7_fix_n] = off
+    c7_fix_lbl[c7_fix_n] = l
+    c7_fix_kind[c7_fix_n] = kind
+    c7_fix_n = c7_fix_n + 1
+}
+
+fn c7_end() {
+    c7_depth = c7_depth - 1
+    if c7_depth != 0 { return }
+    uint64 i = 0
+    while i < c7_fix_n {
+        uint64 off = c7_fix_off[i]
+        uint64 tgt = c7_lbl_pos[c7_fix_lbl[i]]
+        if tgt == 0xFFFFFFFFFFFFFFFF {
+            write(2, "internal error: C7 argv sequence branches to an unbound label\n", 62)
+            exit(1)
+        }
+        uint64 k = c7_fix_kind[i]
+        if k == 1 {
+            patch_u32(off, (tgt - (off + 4)) & 0xFFFFFFFF)
+        } else {
+            uint64 p = out_buf + off
+            uint64 w = 0
+            unsafe { *(p as uint32) -> w }
+            uint64 d = tgt - off
+            if k == 2 {
+                patch_u32(off, w | a64_check_b26(d))
+            } else {
+                patch_u32(off, w | (a64_check_b19(d) << 5))
+            }
+        }
+        i = i + 1
+    }
+}
+
+fn c7_b2(uint64 a, uint64 b) { emit_byte(a)  emit_byte(b) }
+fn c7_b3(uint64 a, uint64 b, uint64 c) { emit_byte(a)  emit_byte(b)  emit_byte(c) }
+fn c7_b4(uint64 a, uint64 b, uint64 c, uint64 d) { emit_byte(a)  emit_byte(b)  emit_byte(c)  emit_byte(d) }
+
+// jcc rel32 (0F 80+cc), jmp rel32 (E9), call rel32 (E8), all to a label.
+fn c7_x86_jcc(uint64 cc, uint64 l) {
+    emit_byte(0x0F)
+    emit_byte(0x80 + cc)
+    c7_fix(out_len, l, 1)
+    emit_u32_le(0)
+}
+fn c7_x86_jmp(uint64 l) {
+    emit_byte(0xE9)
+    c7_fix(out_len, l, 1)
+    emit_u32_le(0)
+}
+fn c7_x86_call(uint64 l) {
+    emit_byte(0xE8)
+    c7_fix(out_len, l, 1)
+    emit_u32_le(0)
+}
+
+// x86 condition codes used below.
+static uint64 C7_JB = 2
+static uint64 C7_JE = 4
+static uint64 C7_JNE = 5
+static uint64 C7_JA = 7
+
+// Parser leaf, Win64. rcx = p (input), rdx = buf (argv array), r8 = size, then
+// the string write pointer; r9 = argc; r10 = in-quotes; r11 = need, then the
+// backslash count; al = current byte. Volatile registers only.
+fn c7_x86_emit_parse_leaf() {
+    c7_begin()
+    uint64 l_sl = c7_label()
+    uint64 l_sd = c7_label()
+    uint64 l_have = c7_label()
+    uint64 l_ret0 = c7_label()
+    uint64 l_0 = c7_label()
+    uint64 l_0nq = c7_label()
+    uint64 l_0copy = c7_label()
+    uint64 l_0ws = c7_label()
+    uint64 l_0end = c7_label()
+    uint64 l_args = c7_label()
+    uint64 l_skip = c7_label()
+    uint64 l_done = c7_label()
+    uint64 l_arg = c7_label()
+    uint64 l_bs = c7_label()
+    uint64 l_bsd = c7_label()
+    uint64 l_nq = c7_label()
+    uint64 l_odd = c7_label()
+    uint64 l_toggle = c7_label()
+    uint64 l_copy = c7_label()
+    uint64 l_argend = c7_label()
+
+    c7_b2(0x31, 0xC0)                       // xor eax, eax
+    c7_bind(l_sl)
+    c7_b4(0x80, 0x3C, 0x01, 0x00)           // cmp byte [rcx+rax], 0
+    c7_x86_jcc(C7_JE, l_sd)
+    c7_b3(0x48, 0xFF, 0xC0)                 // inc rax
+    c7_x86_jmp(l_sl)
+    c7_bind(l_sd)
+    c7_b4(0x48, 0x83, 0xC0, 0x02)           // add rax, 2       (pointer slots)
+    c7_b4(0x4C, 0x8D, 0x1C, 0x80)           // lea r11, [rax+rax*4]
+    c7_b3(0x4D, 0x01, 0xDB)                 // add r11, r11     (need = 10*(len+2))
+    c7_b3(0x48, 0x85, 0xD2)                 // test rdx, rdx
+    c7_x86_jcc(C7_JNE, l_have)
+    c7_b3(0x4C, 0x89, 0xD8)                 // mov rax, r11
+    emit_byte(0xC3)                         // ret
+    c7_bind(l_have)
+    c7_b3(0x4D, 0x39, 0xD8)                 // cmp r8, r11
+    c7_x86_jcc(C7_JB, l_ret0)
+    c7_b4(0x4C, 0x8D, 0x04, 0xC2)           // lea r8, [rdx+rax*8]  (strings)
+    c7_b3(0x4C, 0x89, 0x02)                 // mov [rdx], r8        (argv[0])
+    c7_b3(0x41, 0xB9, 0x01)                 // mov r9d, 1
+    c7_b3(0x00, 0x00, 0x00)
+    c7_b3(0x45, 0x31, 0xD2)                 // xor r10d, r10d
+    // argv[0]: quotes toggle and are dropped, no backslash rule.
+    c7_bind(l_0)
+    c7_b3(0x0F, 0xB6, 0x01)                 // movzx eax, byte [rcx]
+    c7_b2(0x84, 0xC0)                       // test al, al
+    c7_x86_jcc(C7_JE, l_0end)
+    c7_b2(0x3C, 0x22)                       // cmp al, '"'
+    c7_x86_jcc(C7_JNE, l_0nq)
+    c7_b4(0x41, 0x83, 0xF2, 0x01)           // xor r10d, 1
+    c7_b3(0x48, 0xFF, 0xC1)                 // inc rcx
+    c7_x86_jmp(l_0)
+    c7_bind(l_0nq)
+    c7_b3(0x45, 0x85, 0xD2)                 // test r10d, r10d
+    c7_x86_jcc(C7_JNE, l_0copy)
+    c7_b2(0x3C, 0x20)                       // cmp al, ' '
+    c7_x86_jcc(C7_JE, l_0ws)
+    c7_b2(0x3C, 0x09)                       // cmp al, '\t'
+    c7_x86_jcc(C7_JE, l_0ws)
+    c7_bind(l_0copy)
+    c7_b3(0x41, 0x88, 0x00)                 // mov [r8], al
+    c7_b3(0x49, 0xFF, 0xC0)                 // inc r8
+    c7_b3(0x48, 0xFF, 0xC1)                 // inc rcx
+    c7_x86_jmp(l_0)
+    c7_bind(l_0ws)
+    c7_b3(0x48, 0xFF, 0xC1)                 // inc rcx
+    c7_bind(l_0end)
+    c7_b4(0x41, 0xC6, 0x00, 0x00)           // mov byte [r8], 0
+    c7_b3(0x49, 0xFF, 0xC0)                 // inc r8
+    // Later arguments.
+    c7_bind(l_args)
+    c7_b3(0x0F, 0xB6, 0x01)                 // movzx eax, byte [rcx]
+    c7_b2(0x3C, 0x20)                       // cmp al, ' '
+    c7_x86_jcc(C7_JE, l_skip)
+    c7_b2(0x3C, 0x09)                       // cmp al, '\t'
+    c7_x86_jcc(C7_JE, l_skip)
+    c7_b2(0x84, 0xC0)                       // test al, al
+    c7_x86_jcc(C7_JE, l_done)
+    c7_b4(0x4E, 0x89, 0x04, 0xCA)           // mov [rdx+r9*8], r8   (argv[argc])
+    c7_b3(0x49, 0xFF, 0xC1)                 // inc r9
+    c7_b3(0x45, 0x31, 0xD2)                 // xor r10d, r10d
+    c7_bind(l_arg)
+    c7_b3(0x45, 0x31, 0xDB)                 // xor r11d, r11d
+    c7_bind(l_bs)
+    c7_b3(0x80, 0x39, 0x5C)                 // cmp byte [rcx], '\\'
+    c7_x86_jcc(C7_JNE, l_bsd)
+    c7_b3(0x48, 0xFF, 0xC1)                 // inc rcx
+    c7_b3(0x49, 0xFF, 0xC3)                 // inc r11
+    c7_x86_jmp(l_bs)
+    c7_bind(l_bsd)
+    c7_b3(0x0F, 0xB6, 0x01)                 // movzx eax, byte [rcx]
+    c7_b2(0x3C, 0x22)                       // cmp al, '"'
+    c7_x86_jcc(C7_JNE, l_nq)
+    c7_b4(0x41, 0xF6, 0xC3, 0x01)           // test r11b, 1
+    c7_x86_jcc(C7_JNE, l_odd)
+    // 2n backslashes + '"': n backslashes, the '"' is a delimiter ...
+    c7_b3(0x49, 0xD1, 0xEB)                 // shr r11, 1
+    c7_x86_parse_emit_bs()
+    c7_b3(0x45, 0x85, 0xD2)                 // test r10d, r10d
+    c7_x86_jcc(C7_JE, l_toggle)
+    // ... except `""` inside quotes: a literal '"', quote mode stays on.
+    c7_b4(0x80, 0x79, 0x01, 0x22)           // cmp byte [rcx+1], '"'
+    c7_x86_jcc(C7_JNE, l_toggle)
+    c7_b3(0x48, 0xFF, 0xC1)                 // inc rcx
+    c7_x86_jmp(l_copy)
+    c7_bind(l_toggle)
+    c7_b4(0x41, 0x83, 0xF2, 0x01)           // xor r10d, 1
+    c7_b3(0x48, 0xFF, 0xC1)                 // inc rcx
+    c7_x86_jmp(l_arg)
+    // 2n+1 backslashes + '"': n backslashes and a literal '"'.
+    c7_bind(l_odd)
+    c7_b3(0x49, 0xD1, 0xEB)                 // shr r11, 1
+    c7_x86_parse_emit_bs()
+    c7_x86_jmp(l_copy)
+    // Backslashes not before a '"' are literal.
+    c7_bind(l_nq)
+    c7_x86_parse_emit_bs()
+    c7_b2(0x84, 0xC0)                       // test al, al
+    c7_x86_jcc(C7_JE, l_argend)
+    c7_b3(0x45, 0x85, 0xD2)                 // test r10d, r10d
+    c7_x86_jcc(C7_JNE, l_copy)
+    c7_b2(0x3C, 0x20)                       // cmp al, ' '
+    c7_x86_jcc(C7_JE, l_argend)
+    c7_b2(0x3C, 0x09)                       // cmp al, '\t'
+    c7_x86_jcc(C7_JE, l_argend)
+    c7_bind(l_copy)
+    c7_b3(0x41, 0x88, 0x00)                 // mov [r8], al
+    c7_b3(0x49, 0xFF, 0xC0)                 // inc r8
+    c7_b3(0x48, 0xFF, 0xC1)                 // inc rcx
+    c7_x86_jmp(l_arg)
+    c7_bind(l_argend)
+    c7_b4(0x41, 0xC6, 0x00, 0x00)           // mov byte [r8], 0
+    c7_b3(0x49, 0xFF, 0xC0)                 // inc r8
+    c7_x86_jmp(l_args)
+    c7_bind(l_skip)
+    c7_b3(0x48, 0xFF, 0xC1)                 // inc rcx
+    c7_x86_jmp(l_args)
+    c7_bind(l_done)
+    c7_b4(0x4A, 0xC7, 0x04, 0xCA)           // mov qword [rdx+r9*8], 0
+    emit_u32_le(0)
+    c7_b3(0x4C, 0x89, 0xC8)                 // mov rax, r9
+    emit_byte(0xC3)                         // ret
+    c7_bind(l_ret0)
+    c7_b2(0x31, 0xC0)                       // xor eax, eax
+    emit_byte(0xC3)                         // ret
+    c7_end()
+}
+
+// r11 backslashes to [r8++] (r11 ends 0; al untouched).
+fn c7_x86_parse_emit_bs() {
+    uint64 l_b = c7_label()
+    uint64 l_be = c7_label()
+    c7_bind(l_b)
+    c7_b3(0x4D, 0x85, 0xDB)                 // test r11, r11
+    c7_x86_jcc(C7_JE, l_be)
+    c7_b4(0x41, 0xC6, 0x00, 0x5C)           // mov byte [r8], '\\'
+    c7_b3(0x49, 0xFF, 0xC0)                 // inc r8
+    c7_b3(0x49, 0xFF, 0xCB)                 // dec r11
+    c7_x86_jmp(l_b)
+    c7_bind(l_be)
+}
+
+// Quoter output of one byte: count it in rax; store it at [rdx++] unless
+// rdx == 0 (measuring). `imm` < 256 is a constant byte, 256 means r10b.
+fn c7_x86_quote_put(uint64 imm) {
+    uint64 l_x = c7_label()
+    c7_b3(0x48, 0xFF, 0xC0)                 // inc rax
+    c7_b3(0x48, 0x85, 0xD2)                 // test rdx, rdx
+    c7_x86_jcc(C7_JE, l_x)
+    if imm == 256 {
+        c7_b3(0x44, 0x88, 0x12)             // mov [rdx], r10b
+    } else {
+        c7_b3(0xC6, 0x02, imm)              // mov byte [rdx], imm
+    }
+    c7_b3(0x48, 0xFF, 0xC2)                 // inc rdx
+    c7_bind(l_x)
+}
+
+// r9 backslashes through c7_x86_quote_put (r9 ends 0).
+fn c7_x86_quote_bs() {
+    uint64 l_b = c7_label()
+    uint64 l_be = c7_label()
+    c7_bind(l_b)
+    c7_b3(0x4D, 0x85, 0xC9)                 // test r9, r9
+    c7_x86_jcc(C7_JE, l_be)
+    c7_x86_quote_put(0x5C)
+    c7_b3(0x49, 0xFF, 0xC9)                 // dec r9
+    c7_x86_jmp(l_b)
+    c7_bind(l_be)
+}
+
+// Quoter leaf, Win64. rcx = argv walk, rdx = out (0 = measure), rax = length;
+// r8 = current argument; r9 = scan pointer, then backslash count; r10b = byte;
+// r11 = 0 for argv[0], 1 after. Volatile registers only.
+fn c7_x86_emit_quote_leaf() {
+    c7_begin()
+    uint64 l_next = c7_label()
+    uint64 l_end = c7_label()
+    uint64 l_nosep = c7_label()
+    uint64 l_q = c7_label()
+    uint64 l_scan = c7_label()
+    uint64 l_scannext = c7_label()
+    uint64 l_plain = c7_label()
+    uint64 l_adone = c7_label()
+    uint64 l_q0 = c7_label()
+    uint64 l_qb = c7_label()
+    uint64 l_qbs = c7_label()
+    uint64 l_qbe = c7_label()
+    uint64 l_qnorm = c7_label()
+    uint64 l_qend = c7_label()
+    uint64 l_qclose = c7_label()
+
+    c7_b2(0x31, 0xC0)                       // xor eax, eax
+    c7_b3(0x45, 0x31, 0xDB)                 // xor r11d, r11d
+    c7_bind(l_next)
+    c7_b3(0x4C, 0x8B, 0x01)                 // mov r8, [rcx]
+    c7_b3(0x4D, 0x85, 0xC0)                 // test r8, r8
+    c7_x86_jcc(C7_JE, l_end)
+    c7_b3(0x45, 0x85, 0xDB)                 // test r11d, r11d
+    c7_x86_jcc(C7_JE, l_nosep)
+    c7_x86_quote_put(0x20)
+    c7_bind(l_nosep)
+    c7_b4(0x41, 0x80, 0x38, 0x00)           // cmp byte [r8], 0
+    c7_x86_jcc(C7_JE, l_q)                  // empty -> quoted
+    c7_b3(0x4D, 0x89, 0xC1)                 // mov r9, r8
+    c7_bind(l_scan)
+    c7_b4(0x45, 0x0F, 0xB6, 0x11)           // movzx r10d, byte [r9]
+    c7_b3(0x45, 0x84, 0xD2)                 // test r10b, r10b
+    c7_x86_jcc(C7_JE, l_plain)
+    c7_b4(0x41, 0x80, 0xFA, 0x20)           // cmp r10b, ' '
+    c7_x86_jcc(C7_JE, l_q)
+    c7_b4(0x41, 0x80, 0xFA, 0x09)           // cmp r10b, '\t'
+    c7_x86_jcc(C7_JE, l_q)
+    c7_b3(0x45, 0x85, 0xDB)                 // test r11d, r11d
+    c7_x86_jcc(C7_JE, l_scannext)           // argv[0]: '"' does not force quotes
+    c7_b4(0x41, 0x80, 0xFA, 0x22)           // cmp r10b, '"'
+    c7_x86_jcc(C7_JE, l_q)
+    c7_bind(l_scannext)
+    c7_b3(0x49, 0xFF, 0xC1)                 // inc r9
+    c7_x86_jmp(l_scan)
+    // Nothing to quote: verbatim.
+    c7_bind(l_plain)
+    c7_b4(0x45, 0x0F, 0xB6, 0x10)           // movzx r10d, byte [r8]
+    c7_b3(0x45, 0x84, 0xD2)                 // test r10b, r10b
+    c7_x86_jcc(C7_JE, l_adone)
+    c7_x86_quote_put(256)
+    c7_b3(0x49, 0xFF, 0xC0)                 // inc r8
+    c7_x86_jmp(l_plain)
+    c7_bind(l_q)
+    c7_x86_quote_put(0x22)
+    c7_b3(0x45, 0x85, 0xDB)                 // test r11d, r11d
+    c7_x86_jcc(C7_JNE, l_qb)
+    // argv[0] quoted: verbatim between the quotes (no backslash rule there).
+    c7_bind(l_q0)
+    c7_b4(0x45, 0x0F, 0xB6, 0x10)           // movzx r10d, byte [r8]
+    c7_b3(0x45, 0x84, 0xD2)                 // test r10b, r10b
+    c7_x86_jcc(C7_JE, l_qclose)
+    c7_x86_quote_put(256)
+    c7_b3(0x49, 0xFF, 0xC0)                 // inc r8
+    c7_x86_jmp(l_q0)
+    // Quoted argument: count each backslash run, look at what ends it.
+    c7_bind(l_qb)
+    c7_b3(0x45, 0x31, 0xC9)                 // xor r9d, r9d
+    c7_bind(l_qbs)
+    c7_b4(0x45, 0x0F, 0xB6, 0x10)           // movzx r10d, byte [r8]
+    c7_b4(0x41, 0x80, 0xFA, 0x5C)           // cmp r10b, '\\'
+    c7_x86_jcc(C7_JNE, l_qbe)
+    c7_b3(0x49, 0xFF, 0xC1)                 // inc r9
+    c7_b3(0x49, 0xFF, 0xC0)                 // inc r8
+    c7_x86_jmp(l_qbs)
+    c7_bind(l_qbe)
+    c7_b3(0x45, 0x84, 0xD2)                 // test r10b, r10b
+    c7_x86_jcc(C7_JE, l_qend)
+    c7_b4(0x41, 0x80, 0xFA, 0x22)           // cmp r10b, '"'
+    c7_x86_jcc(C7_JNE, l_qnorm)
+    // n backslashes + '"' -> 2n+1 backslashes + '"'
+    c7_b4(0x4F, 0x8D, 0x4C, 0x09)           // lea r9, [r9+r9+1]
+    emit_byte(0x01)
+    c7_x86_quote_bs()
+    c7_x86_quote_put(256)
+    c7_b3(0x49, 0xFF, 0xC0)                 // inc r8
+    c7_x86_jmp(l_qb)
+    c7_bind(l_qnorm)
+    c7_x86_quote_bs()
+    c7_x86_quote_put(256)
+    c7_b3(0x49, 0xFF, 0xC0)                 // inc r8
+    c7_x86_jmp(l_qb)
+    // n backslashes before the closing quote -> 2n.
+    c7_bind(l_qend)
+    c7_b3(0x4D, 0x01, 0xC9)                 // add r9, r9
+    c7_x86_quote_bs()
+    c7_bind(l_qclose)
+    c7_x86_quote_put(0x22)
+    c7_bind(l_adone)
+    c7_b4(0x48, 0x83, 0xC1, 0x08)           // add rcx, 8
+    c7_b3(0x41, 0xBB, 0x01)                 // mov r11d, 1
+    c7_b3(0x00, 0x00, 0x00)
+    c7_x86_jmp(l_next)
+    c7_bind(l_end)
+    c7_x86_quote_put(0x00)                  // the NUL counts
+    emit_byte(0xC3)                         // ret
+    c7_end()
+}
+
+// Writes `msg` (<= 64 bytes, built on the stack from immediates -- no data in
+// .text) to stderr and exits with `code`. Realigns rsp itself, so it is valid
+// from any stack depth; it never returns.
+fn c7_x86_emit_die(uint64 code, uint64 msg, uint64 len) {
+    c7_b4(0x48, 0x83, 0xE4, 0xF0)           // and rsp, -16
+    c7_b4(0x48, 0x83, 0xEC, 0x70)           // sub rsp, 0x70
+    uint64 q = 0
+    while q * 8 < len {
+        uint64 v = 0
+        uint64 j = 0
+        while j < 8 {
+            uint64 b = 0
+            if q * 8 + j < len {
+                uint64 pb = msg + q * 8 + j
+                unsafe { *(pb as uint8) -> b }
+            }
+            v = v | (b << (j * 8))
+            j = j + 1
+        }
+        c7_b2(0x48, 0xB8)                   // mov rax, imm64
+        emit_u32_le(v & 0xFFFFFFFF)
+        emit_u32_le((v >> 32) & 0xFFFFFFFF)
+        c7_b4(0x48, 0x89, 0x44, 0x24)       // mov [rsp+0x30+8q], rax
+        emit_byte(0x30 + q * 8)
+        q = q + 1
+    }
+    c7_b3(0x48, 0xC7, 0xC1)                 // mov rcx, -12 (STD_ERROR_HANDLE)
+    emit_u32_le(0xFFFFFFF4)
+    emit_win_call_iat(IAT_GetStdHandle)
+    c7_b3(0x48, 0x89, 0xC1)                 // mov rcx, rax
+    c7_b4(0x48, 0x8D, 0x54, 0x24)           // lea rdx, [rsp+0x30]
+    emit_byte(0x30)
+    c7_b2(0x41, 0xB8)                       // mov r8d, len
+    emit_u32_le(len)
+    c7_b4(0x4C, 0x8D, 0x4C, 0x24)           // lea r9, [rsp+0x28]
+    emit_byte(0x28)
+    c7_b4(0x48, 0xC7, 0x44, 0x24)           // mov qword [rsp+0x20], 0
+    emit_byte(0x20)
+    emit_u32_le(0)
+    emit_win_call_iat(IAT_WriteFile)
+    emit_byte(0xB9)                         // mov ecx, code
+    emit_u32_le(code)
+    emit_win_call_iat(IAT_ExitProcess)
+}
+
+// The Windows x86_64 `main` prologue's argv sequence (see the C7 header).
+// Entered with RSP = 8 mod 16 (the loader's call); leaves RSP unchanged.
+// Clobbers rbx/rsi/rdi before main saves anything -- safe because a Windows
+// main never returns to the loader (its epilogue calls ExitProcess).
+fn c7_x86_emit_main_argv(uint64 argc_off, uint64 argv_off) {
+    c7_begin()
+    uint64 l_fail = c7_label()
+    uint64 l_leaf = c7_label()
+    uint64 l_over = c7_label()
+    emit_win_alloc_stack(0x28)
+    emit_win_call_iat(IAT_GetCommandLineA)
+    c7_b3(0x48, 0x89, 0xC6)                 // mov rsi, rax       (cmdline)
+    c7_b3(0x48, 0x89, 0xF1)                 // mov rcx, rsi
+    c7_b2(0x31, 0xD2)                       // xor edx, edx       (buf 0: size it)
+    c7_b3(0x45, 0x31, 0xC0)                 // xor r8d, r8d
+    c7_x86_call(l_leaf)
+    c7_b3(0x48, 0x89, 0xC7)                 // mov rdi, rax       (need)
+    c7_b2(0x31, 0xC9)                       // xor ecx, ecx
+    c7_b3(0x48, 0x89, 0xFA)                 // mov rdx, rdi
+    c7_b2(0x41, 0xB8)                       // mov r8d, 0x3000 (MEM_COMMIT|MEM_RESERVE)
+    emit_u32_le(0x3000)
+    c7_b2(0x41, 0xB9)                       // mov r9d, 4 (PAGE_READWRITE)
+    emit_u32_le(4)
+    emit_win_call_iat(IAT_VirtualAlloc)
+    c7_b3(0x48, 0x85, 0xC0)                 // test rax, rax
+    c7_x86_jcc(C7_JE, l_fail)
+    c7_b3(0x48, 0x89, 0xC3)                 // mov rbx, rax       (buf)
+    c7_b3(0x48, 0x89, 0xF1)                 // mov rcx, rsi
+    c7_b3(0x48, 0x89, 0xDA)                 // mov rdx, rbx
+    c7_b3(0x49, 0x89, 0xF8)                 // mov r8, rdi
+    c7_x86_call(l_leaf)
+    if argc_off != 0xFFFFFFFF { emit_static_store(argc_off) }
+    c7_b3(0x48, 0x89, 0xD8)                 // mov rax, rbx
+    if argv_off != 0xFFFFFFFF { emit_static_store(argv_off) }
+    emit_win_free_stack(0x28)
+    c7_x86_jmp(l_over)
+    c7_bind(l_fail)
+    c7_x86_emit_die(121, "krc runtime: argv allocation failed\n", 36)
+    c7_bind(l_leaf)
+    c7_x86_emit_parse_leaf()
+    c7_bind(l_over)
+    c7_end()
+}
+
+// push / pop of a 64-bit GPR (0-15).
+fn c7_x86_push(uint64 r) {
+    if r >= 8 { emit_byte(0x41) }
+    emit_byte(0x50 + (r & 7))
+}
+fn c7_x86_pop(uint64 r) {
+    if r >= 8 { emit_byte(0x41) }
+    emit_byte(0x58 + (r & 7))
+}
+
+// exec_process_argv on Windows x86_64 (op 114): quote argv into ONE command
+// line with the quoter leaf -- measured first, refused past CreateProcessA's
+// 32767 bytes (exit 122), built in a VirtualAlloc'd buffer (exit 123 if that
+// fails) -- then CreateProcessA + wait + ExitProcess(child status), as before.
+// Never returns, which is what makes clobbering r12-r15 here safe.
+fn c7_x86_emit_exec_argv(uint64 path_r, uint64 argv_r) {
+    c7_begin()
+    uint64 l_long = c7_label()
+    uint64 l_nomem = c7_label()
+    uint64 l_quote = c7_label()
+    uint64 l_over = c7_label()
+    // Through the stack, so neither source can be overwritten by the other's
+    // move whatever registers the allocator picked.
+    c7_x86_push(path_r)
+    c7_x86_push(argv_r)
+    c7_x86_pop(13)                          // r13 = argv
+    c7_x86_pop(12)                          // r12 = path
+    c7_b3(0x48, 0x81, 0xEC)                 // sub rsp, 0xD0
+    emit_u32_le(0xD0)
+    c7_b3(0x4C, 0x89, 0xE9)                 // mov rcx, r13
+    c7_b2(0x31, 0xD2)                       // xor edx, edx  (measure)
+    c7_x86_call(l_quote)
+    c7_b2(0x48, 0x3D)                       // cmp rax, 32767
+    emit_u32_le(32767)
+    c7_x86_jcc(C7_JA, l_long)
+    c7_b3(0x49, 0x89, 0xC6)                 // mov r14, rax  (length incl. NUL)
+    c7_b2(0x31, 0xC9)                       // xor ecx, ecx
+    c7_b3(0x4C, 0x89, 0xF2)                 // mov rdx, r14
+    c7_b2(0x41, 0xB8)                       // mov r8d, 0x3000
+    emit_u32_le(0x3000)
+    c7_b2(0x41, 0xB9)                       // mov r9d, 4
+    emit_u32_le(4)
+    emit_win_call_iat(IAT_VirtualAlloc)
+    c7_b3(0x48, 0x85, 0xC0)                 // test rax, rax
+    c7_x86_jcc(C7_JE, l_nomem)
+    c7_b3(0x49, 0x89, 0xC7)                 // mov r15, rax  (command line)
+    c7_b3(0x4C, 0x89, 0xE9)                 // mov rcx, r13
+    c7_b3(0x4C, 0x89, 0xFA)                 // mov rdx, r15
+    c7_x86_call(l_quote)
+    // STARTUPINFOA at [rsp+0x50] (104 bytes, cb = 104) and PROCESS_INFORMATION
+    // at [rsp+0xB8], zeroed: lea rdi,[rsp+0x50]; xor eax,eax; mov ecx,128; rep stosb
+    emit_byte(0x48); emit_byte(0x8D); emit_byte(0x7C); emit_byte(0x24); emit_byte(0x50)
+    emit_byte(0x31); emit_byte(0xC0)
+    emit_byte(0xB9); emit_u32_le(128)
+    emit_byte(0xF3); emit_byte(0xAA)
+    emit_byte(0xC7); emit_byte(0x44); emit_byte(0x24); emit_byte(0x50); emit_u32_le(104)
+    // CreateProcessA(path, cmdline, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi)
+    c7_b3(0x4C, 0x89, 0xE1)                 // mov rcx, r12
+    c7_b3(0x4C, 0x89, 0xFA)                 // mov rdx, r15
+    emit_byte(0x4D); emit_byte(0x31); emit_byte(0xC0)
+    emit_byte(0x4D); emit_byte(0x31); emit_byte(0xC9)
+    emit_byte(0x48); emit_byte(0xC7); emit_byte(0x44); emit_byte(0x24); emit_byte(0x20); emit_u32_le(0)
+    emit_byte(0x48); emit_byte(0xC7); emit_byte(0x44); emit_byte(0x24); emit_byte(0x28); emit_u32_le(0)
+    emit_byte(0x48); emit_byte(0xC7); emit_byte(0x44); emit_byte(0x24); emit_byte(0x30); emit_u32_le(0)
+    emit_byte(0x48); emit_byte(0xC7); emit_byte(0x44); emit_byte(0x24); emit_byte(0x38); emit_u32_le(0)
+    emit_byte(0x48); emit_byte(0x8D); emit_byte(0x44); emit_byte(0x24); emit_byte(0x50)
+    emit_byte(0x48); emit_byte(0x89); emit_byte(0x44); emit_byte(0x24); emit_byte(0x40)
+    emit_byte(0x48); emit_byte(0x8D); emit_byte(0x84); emit_byte(0x24); emit_u32_le(0xB8)
+    emit_byte(0x48); emit_byte(0x89); emit_byte(0x44); emit_byte(0x24); emit_byte(0x48)
+    emit_win_call_iat(IAT_CreateProcessA)
+    // WaitForSingleObject(hProcess, INFINITE)
+    emit_byte(0x48); emit_byte(0x8B); emit_byte(0x8C); emit_byte(0x24); emit_u32_le(0xB8)
+    emit_byte(0xBA); emit_u32_le(0xFFFFFFFF)
+    emit_win_call_iat(IAT_WaitForSingleObject)
+    // GetExitCodeProcess(hProcess, &code at [rsp+0x20])
+    emit_byte(0x48); emit_byte(0x8B); emit_byte(0x8C); emit_byte(0x24); emit_u32_le(0xB8)
+    emit_byte(0x48); emit_byte(0x8D); emit_byte(0x54); emit_byte(0x24); emit_byte(0x20)
+    emit_win_call_iat(IAT_GetExitCodeProcess)
+    // ExitProcess(code)
+    emit_byte(0x8B); emit_byte(0x4C); emit_byte(0x24); emit_byte(0x20)
+    emit_byte(0x48); emit_byte(0x81); emit_byte(0xC4); emit_u32_le(0xD0)
+    emit_win_alloc_stack(0x20)
+    emit_win_call_iat(IAT_ExitProcess)
+    c7_x86_jmp(l_over)                      // not reached
+    c7_bind(l_long)
+    c7_x86_emit_die(122, "krc runtime: child command line too long\n", 41)
+    c7_bind(l_nomem)
+    c7_x86_emit_die(123, "krc runtime: child command line allocation failed\n", 50)
+    c7_bind(l_quote)
+    c7_x86_emit_quote_leaf()
+    c7_bind(l_over)
+    c7_end()
 }

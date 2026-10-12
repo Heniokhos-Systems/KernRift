@@ -1,0 +1,50 @@
+#0 rc=6
+argc=6
+<argv_echo.exe>
+<a b>
+<a"b>
+<a\>
+<>
+<x\\"y>
+raw=<argv_echo.exe "a b" "a\"b" a\ "" "x\\\\\"y">
+#1 rc=10
+argc=10
+<argv_echo.exe>
+<a	b>
+<">
+<\>
+<\\>
+<a b\>
+<a b\\>
+<\">
+<"">
+<plain>
+raw=<argv_echo.exe "a	b" "\"" \ \\ "a b\\" "a b\\\\" "\\\"" "\"\"" plain>
+#2 rc=2
+argc=2
+<C:\my dir\argv_echo.exe>
+<x>
+raw=<"C:\my dir\argv_echo.exe" x>
+#3 rc=2
+argc=2
+<>
+<a>
+raw=<"" a>
+#4 rc=2
+argc=2
+<C:\a b\>
+<y>
+raw=<"C:\a b\" y>
+#5 rc=1
+argc=1
+<e>
+raw=<e>
+#6 rc=6
+argc=6
+<e>
+<a\\b>
+< lead>
+<trail >
+<	>
+<q\"\>
+raw=<e a\\b " lead" "trail " "	" "q\\\"\\">

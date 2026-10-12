@@ -1,0 +1,64 @@
+// C7 child (portable-syscall-layer spec C7). Writes the argv it received --
+// cli_argc/cli_argv as the Windows `main` prologue parsed them, or as the
+// Linux loader laid them out -- to argv.out, one `<arg>` per line after an
+// `argc=N` line, and exits with argc. The bytes between < and > are the
+// argument verbatim (tabs and quotes included), so a harness compares the
+// file byte for byte. argv[argc] must be 0. A cli_argc that is not a real
+// count (the pre-C7 Windows sentinel 0xFFFFFFFF) writes `sentinel` and exits
+// 255 instead of walking four billion pointers. On Windows a last line
+// `raw=<GetCommandLineA()>` follows: the parse COPIES, so the command line the
+// parent passed must still be there byte for byte (and for an op-114 parent it
+// is the exact quoted line).
+extern fn GetCommandLineA() -> uint64
+
+static uint64 cli_argc
+static uint64 cli_argv
+
+fn echo_dec(uint64 fd, uint64 v) {
+    u8[24] d
+    uint64 n = 0
+    if v == 0 {
+        file_write(fd, "0", 1)
+        return
+    }
+    while v != 0 {
+        store8(d + n, 48 + v % 10)
+        v = v / 10
+        n = n + 1
+    }
+    while n != 0 {
+        n = n - 1
+        file_write(fd, d + n, 1)
+    }
+}
+
+fn main() -> uint32 {
+    uint64 fd = file_open("argv.out", 1)
+    if cli_argc > 100000 {
+        file_write(fd, "sentinel\n", 9)
+        file_close(fd)
+        return 255
+    }
+    file_write(fd, "argc=", 5)
+    echo_dec(fd, cli_argc)
+    file_write(fd, "\n", 1)
+    uint64 i = 0
+    while i < cli_argc {
+        uint64 a = load64(cli_argv + i * 8)
+        file_write(fd, "<", 1)
+        file_write(fd, a, str_len(a))
+        file_write(fd, ">\n", 2)
+        i = i + 1
+    }
+    if load64(cli_argv + cli_argc * 8) != 0 {
+        file_write(fd, "argv[argc] is not 0\n", 20)
+    }
+    if get_target_os() == 2 {
+        uint64 raw = GetCommandLineA()
+        file_write(fd, "raw=<", 5)
+        file_write(fd, raw, str_len(raw))
+        file_write(fd, ">\n", 2)
+    }
+    file_close(fd)
+    return cli_argc
+}

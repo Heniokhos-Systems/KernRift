@@ -1,0 +1,107 @@
+// C7 raw-command-line parent (Windows only; spec "Testing / C7 parser").
+// For every line of argv_table.txt it calls CreateProcessA DIRECTLY (routed
+// imports, no exec_process_argv quoting in between), so the child
+// argv_echo.exe receives exactly that line as its command line and its
+// emitted `main` prologue parses it. Then it prints `#K rc=N` (the child's
+// exit status, which is its argc) followed by the child's argv.out to stdout.
+// The harness compares stdout with argv_table.expected byte for byte.
+// Exit 0 = every line ran; 2 = no table; 3 = CreateProcessA failed 5 times.
+// The retry is for Wine: measured 2026-10-12, Proton's CreateProcessA fails
+// a few times per thousand calls (GetLastError 731) with nothing wrong with
+// the call; a retry of the identical call succeeds. It cannot hide a parse
+// bug -- the child either runs and reports what it got, or the row fails.
+extern fn CreateProcessA(uint64 app, uint64 cmd, uint64 pa, uint64 ta, uint64 inh, uint64 flags, uint64 env, uint64 dir, uint64 si, uint64 pi) -> uint64
+extern fn WaitForSingleObject(uint64 h, uint64 ms) -> uint64
+extern fn GetExitCodeProcess(uint64 h, uint64 code) -> uint64
+extern fn CloseHandle(uint64 h) -> uint64
+extern fn Sleep(uint64 ms) -> uint64
+
+fn put_dec(uint64 v) {
+    u8[24] d
+    uint64 n = 0
+    if v == 0 {
+        write(1, "0", 1)
+        return
+    }
+    while v != 0 {
+        store8(d + n, 48 + v % 10)
+        v = v / 10
+        n = n + 1
+    }
+    while n != 0 {
+        n = n - 1
+        write(1, d + n, 1)
+    }
+}
+
+// Whole file into a fresh buffer; returns the byte count, buffer in *out.
+fn slurp(uint64 path, uint64 out) -> uint64 {
+    uint64 fd = file_open(path, 0)
+    if fd > 0xFFFFFFFFFFFFF000 { return 0xFFFFFFFFFFFFFFFF }
+    uint64 cap = 1 << 20
+    uint64 buf = alloc(cap)
+    uint64 n = 0
+    while 1 == 1 {
+        uint64 r = file_read(fd, buf + n, cap - n)
+        if r == 0 || r > 0xFFFFFFFFFFFFF000 { break }
+        n = n + r
+    }
+    file_close(fd)
+    store64(out, buf)
+    return n
+}
+
+fn main() -> uint32 {
+    u8[8] tp
+    uint64 tn = slurp("argv_table.txt", tp)
+    if tn == 0xFFFFFFFFFFFFFFFF { return 2 }
+    uint64 t = load64(tp)
+    u8[104] si
+    u8[24] pi
+    u8[8] code
+    uint64 line = alloc(1 << 16)
+    uint64 k = 0
+    uint64 pos = 0
+    while pos < tn {
+        uint64 e = pos
+        while e < tn && load8(t + e) != 10 { e = e + 1 }
+        uint64 j = 0
+        while pos + j < e {
+            store8(line + j, load8(t + pos + j))
+            j = j + 1
+        }
+        store8(line + j, 0)
+        uint64 z = 0
+        while z < 104 { store8(si + z, 0)  z = z + 1 }
+        z = 0
+        while z < 24 { store8(pi + z, 0)  z = z + 1 }
+        store32(si, 104)
+        uint64 fd = file_open("argv.out", 1)
+        file_close(fd)
+        uint64 ok = 0
+        uint64 tries = 0
+        while (ok & 0xFFFFFFFF) == 0 && tries < 5 {
+            if tries != 0 { Sleep(50) }
+            ok = CreateProcessA("argv_echo.exe", line, 0, 0, 0, 0, 0, 0, si, pi)
+            tries = tries + 1
+        }
+        if (ok & 0xFFFFFFFF) == 0 { return 3 }
+        uint64 h = load64(pi)
+        WaitForSingleObject(h, 0xFFFFFFFF)
+        store32(code, 0)
+        GetExitCodeProcess(h, code)
+        CloseHandle(h)
+        CloseHandle(load64(pi + 8))
+        write(1, "#", 1)
+        put_dec(k)
+        write(1, " rc=", 4)
+        put_dec(load32(code))
+        write(1, "\n", 1)
+        u8[8] op
+        uint64 on = slurp("argv.out", op)
+        if on != 0xFFFFFFFFFFFFFFFF && on != 0 { write(1, load64(op), on) }
+        k = k + 1
+        pos = e + 1
+    }
+    return 0
+}
