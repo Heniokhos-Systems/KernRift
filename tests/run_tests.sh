@@ -26996,6 +26996,19 @@ fn main() -> uint64 { v[2] = 7
 dup_run "dup_shared_byte_array_uint8_array_merges" 7
 dup_type_row "dup_shared_byte_vs_uint16_refused" 'static byte b' 'static uint16 b' "type"
 dup_type_row "dup_shared_addr_vs_uint32_refused" 'static addr b' 'static uint32 b' "type"
+# A user's own `type addr = uint32` would make `@shared static addr v` 32-bit
+# in the user's mind and 64-bit to the merge: the alias names cannot be
+# redefined, so it is refused at the definition, not merged with uint64.
+dup_put a.kr '@shared
+static addr v = 5
+fn a_get() -> uint64 { return v }'
+dup_put m.kr 'import "a.kr"
+type addr = uint32
+@shared
+static uint64 v
+fn main() -> uint64 { return a_get() }'
+dup_reject "dup_shared_user_type_addr_refused_at_definition" \
+    "$DUP_D/m.kr:2:6: error: \`addr\` is a built-in type alias of uint64 and cannot be redefined; rename it"
 
 # @shared binds to the next declaration; on anything but a static it is refused
 # rather than ignored.
@@ -27315,6 +27328,30 @@ printf 'type T = addr\nfn main() -> uint32 { return 0 }\n' > "$ALI_D/r4.kr"
 "$DIR/../build/krc2" --arch=riscv32 --freestanding "$ALI_D/r4.kr" -o "$ALI_D/r.img" 2>&1 | grep -q "r4.kr:1:10: error: 64-bit integers not supported on riscv32" || ALI_BAD="$ALI_BAD type-alias-addr-accepted"
 if [ -z "$ALI_BAD" ]; then PASS=$((PASS + 1)); echo "  alias_addr_is_64bit_on_riscv32: PASS"
 else FAIL=$((FAIL + 1)); echo "FAIL: alias_addr_is_64bit_on_riscv32 ($ALI_BAD)"; fi
+# The alias NAMES cannot be declared as types of the user's own, exactly as
+# `type u8 = ...` cannot: every `byte`/`addr` in a type position would
+# silently mean uint8/uint64 instead (`type byte = uint16` then
+# `*(p as byte)` read 1 byte, not 2). Refused at the name, located.
+ali_refuse() {   # <row> <program> <needle>
+    TOTAL=$((TOTAL + 1))
+    printf '%s\n' "$2" > "$ALI_D/rf.kr"
+    if "$DIR/../build/krc2" --arch="$RUN_ARCH" "$ALI_D/rf.kr" -o "$ALI_D/rf" > "$ALI_D/rf.log" 2>&1; then
+        FAIL=$((FAIL + 1)); echo "FAIL: $1 (compiled; the alias name was redefined silently)"
+    elif grep -qF -- "$3" "$ALI_D/rf.log"; then PASS=$((PASS + 1)); echo "  $1: PASS"
+    else FAIL=$((FAIL + 1)); echo "FAIL: $1 (refused, but not with '$3': $(grep -m1 error "$ALI_D/rf.log"))"; fi
+}
+ali_refuse alias_type_byte_redefinition_refused 'type byte = uint16
+fn main() -> uint64 {
+    u8[8] b
+    store64(b, 0x7766)
+    uint64 v = 0
+    unsafe { *(b as byte) -> v }
+    return (v >> 8) & 0xFF
+}' "rf.kr:1:6: error: \`byte\` is a built-in type alias of uint8 and cannot be redefined; rename it"
+ali_refuse alias_struct_addr_redefinition_refused 'struct addr { uint64 x  uint64 y }
+fn main() -> uint64 { return sizeof(addr) }' "rf.kr:1:8: error: \`addr\` is a built-in type alias of uint64 and cannot be redefined; rename it"
+ali_refuse alias_enum_byte_redefinition_refused 'enum byte { A, B }
+fn main() -> uint64 { return 0 }' "rf.kr:1:6: error: \`byte\` is a built-in type alias of uint8 and cannot be redefined; rename it"
 # Every type position at once, spelled with the aliases and with u8/u64: the
 # two programs must compile to the SAME bytes on both arches. This is what
 # pins the positions with no runtime-visible width of their own (a device

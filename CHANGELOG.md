@@ -15,8 +15,14 @@ struct field, a static array element or a pointer cast
 rewrites a `byte`/`addr` written as a TYPE -- a local, static, field,
 parameter, return, array element, slice element, cast, `sizeof`, `type`
 alias target or device register type -- to exactly the token `u8`/`u64` lex
-to, so every later stage sees the keyword; `addr` the variable, parameter,
-field (`p.addr`) and cast operand (`*(addr as uint32)`) is untouched. A
+to, so every later stage sees the keyword; `addr` as a variable, parameter,
+field (`p.addr`), function, array (`*(addr[i] as uint32)`), pointer-load
+destination (`*(p as T) -> addr`) or a declaration's name followed by another
+statement on the same line (`uint64 addr  x = 4`) is untouched. Neither name
+can be declared as a type of your own (`type byte = ...`, `struct addr`,
+`enum byte` are refused, located, as `type u8 = ...` is) -- otherwise the
+alias would silently override the user's definition. The pointer-load
+destination (`-> name`) must now be an identifier (it took any token). A
 program spelled with the aliases now compiles to the same bytes as the one
 spelled `u8`/`u64` (a test row compares them on both arches), and `@shared`
 merges `byte` with `uint8` and `addr` with `uint64`. Compatibility: every

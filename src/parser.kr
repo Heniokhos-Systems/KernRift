@@ -1094,7 +1094,13 @@ fn p_alias_is_type(uint64 i) -> uint64 {
     if i + 1 < p_tok_count { nk = tok_kind_at(i + 1) }
     uint64 ln = tok_line_at(i)
     if i > 0 && pk == 1 && p_tok_is(i - 1, "as", 2) != 0 { return 1 }
-    if i > 1 && pk == 20 && tok_kind_at(i - 2) == 11 { return 1 }           // ) -> T
+    // `) -> T` is a return type -- unless it is the pointer-load form
+    // `*(p as T) -> name`, where the token after `->` is the destination
+    // VARIABLE (as T ) -> name: `as` four back).
+    if i > 1 && pk == 20 && tok_kind_at(i - 2) == 11 {
+        if i > 3 && tok_kind_at(i - 4) == 1 && p_tok_is(i - 4, "as", 2) != 0 { return 0 }
+        return 1
+    }
     if i > 1 && pk == 10 && tok_kind_at(i - 2) == 97 { return 1 }           // sizeof(T
     if i > 2 && pk == 34 && tok_kind_at(i - 3) == 89 { return 1 }           // type X = T
     if i > 1 && pk == 14 && nk == 15 && i + 2 < p_tok_count {               // ([T] name / , [T] name
@@ -1103,6 +1109,20 @@ fn p_alias_is_type(uint64 i) -> uint64 {
     }
     if i > 2 && pk == 19 && tok_kind_at(i - 2) == 2 && tok_kind_at(i - 3) == 93 { return 1 }  // at N : T
     if p_alias_value_ctx(pk) != 0 { return 0 }
+    // The NAME of a declaration: right after its type on the same line --
+    // `uint64 addr  x = 4`, `u8[2] byte`, `S addr  T t` (S a struct or type
+    // alias: an identifier that itself starts a declaration). An identifier
+    // that is instead the previous declaration's NAME (`uint64 a  addr b`,
+    // after a type keyword, `]` or another identifier) or the end of an
+    // expression (`y = v  addr b = 1`) leaves `addr` starting a new one.
+    if i > 0 && tok_line_at(i - 1) == ln {
+        if is_type_keyword(pk) != 0 || pk == 15 { return 0 }
+        if pk == 1 {
+            uint64 ppk = 12
+            if i > 1 && tok_line_at(i - 2) == ln { ppk = tok_kind_at(i - 2) }
+            if ppk == 12 || ppk == 10 || ppk == 16 || ppk == 18 || ppk == 13 || ppk == 70 || ppk == 71 || ppk == 74 { return 0 }
+        }
+    }
     if nk == 1 && tok_line_at(i + 1) == ln && p_tok_is(i + 1, "as", 2) == 0 { return 1 }
     if nk == 14 {
         uint64 j = i + 1
@@ -1117,15 +1137,43 @@ fn p_alias_is_type(uint64 i) -> uint64 {
             if jk == 0 { return 0 }
             j = j + 1
         }
-        if j + 1 < p_tok_count && tok_kind_at(j + 1) == 1 && tok_line_at(j + 1) == ln { return 1 }
+        if j + 1 < p_tok_count && tok_kind_at(j + 1) == 1 && tok_line_at(j + 1) == ln
+           && p_tok_is(j + 1, "as", 2) == 0 { return 1 }
     }
     return 0
+}
+
+// `type byte = ...`, `struct addr`, `enum byte`: the alias name declared as a
+// type of the user's own. The keywords cannot be (`type u8 = uint32` is
+// `expected identifier, got 'uint8'`), and neither can the aliases -- every
+// later `byte`/`addr` in a type position would otherwise silently mean
+// uint8/uint64 and not the user's definition.
+fn p_alias_redefined(uint64 i, uint64 ak) {
+    if parse_err_should_report() != 0 {
+        p_err_reported = p_err_reported + 1
+        diag_loc_head(i, 0)
+        write(2, "`", 1)
+        p_write_tok(i)
+        uint64 m = "` is a built-in type alias of uint64 and cannot be redefined; rename it"
+        if ak == 80 { m = "` is a built-in type alias of uint8 and cannot be redefined; rename it" }
+        write(2, m, str_len(m))
+        write(2, "\n", 1)
+        diag_span_of(i)
+    }
+    p_err_count = p_err_count + 1
 }
 
 fn p_alias_types() {
     uint64 i = 0
     while i < p_tok_count {
         uint64 ak = p_alias_kind(i)
+        if ak != 0 && i > 0 {
+            uint64 dk = tok_kind_at(i - 1)
+            if dk == 89 || dk == 72 || dk == 73 {
+                p_alias_redefined(i, ak)
+                ak = 0
+            }
+        }
         if ak != 0 {
             if p_alias_is_type(i) != 0 {
                 uint32 ak32 = ak
@@ -2534,7 +2582,10 @@ fn parse_stmt() -> uint64 {
         expect(11)
         if cur_kind() == 20 {
             advance_tok()
-            uint64 dest_tok = advance_tok()
+            // The destination is a variable NAME (resolved by its text): an
+            // identifier, never a keyword. Which also pins that the alias
+            // pass leaves `*(p as T) -> addr`'s `addr` an identifier.
+            uint64 dest_tok = expect(1)
             expect(13)
             uint64 node = ast_alloc(41)
             uint32 ts = type_size
@@ -2621,7 +2672,10 @@ fn parse_stmt() -> uint64 {
         if cur_kind() == 20 {
             // PtrLoad: -> dest
             advance_tok()
-            uint64 dest_tok = advance_tok()
+            // The destination is a variable NAME (resolved by its text): an
+            // identifier, never a keyword. Which also pins that the alias
+            // pass leaves `*(p as T) -> addr`'s `addr` an identifier.
+            uint64 dest_tok = expect(1)
             expect(13)
             // Use kind 41 for PtrLoad
             uint64 node = ast_alloc(41)

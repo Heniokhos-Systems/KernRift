@@ -90,12 +90,21 @@ aliases (`u8`, `u64`, `i32`, …) are exact synonyms for the long form.
 `uint8` / `uint64` only where a type is written — a declaration's type
 (`byte b`, `addr[4] table`, a struct field, a parameter, a return type
 `-> addr`), a slice element `[byte] data`, a cast `*(p as byte)`,
-`sizeof(byte)`, a `type` alias target and a device register's type. Anywhere
-else they are ordinary names, so `uint64 addr = base` and
-`unsafe { *(addr as uint32) -> v }` work as they always have. One limit: a
-bare `addr`/`byte` used as a whole statement and followed by another
-statement on the same line (`addr  x = 1`) reads as a declaration; such a
-statement does nothing, so write the next statement on its own line.
+`sizeof(byte)`, a `type` alias target and a device register's type.
+Elsewhere they are names: a variable, parameter, field or function can be
+called `addr` or `byte` — `uint64 addr = base`, `unsafe { *(addr as uint32) -> v }`,
+`*(addr[i] as uint32)` for an array named `addr`, `*(p as uint64) -> addr`,
+`p.addr`, and a declaration named `addr` followed by another statement on the
+same line (`uint64 addr  x = 4`, `struct P { uint64 addr  P2 next }`) all
+work. The limits:
+
+- they cannot name a type of your own — `type byte = …`, `struct addr`,
+  `enum byte` are refused (`` `byte` is a built-in type alias of uint8 and
+  cannot be redefined``), as `type u8 = …` is;
+- a bare `addr`/`byte` used as a whole statement and followed by another
+  statement on the same line (`addr  x = 1`) reads as a declaration (measured:
+  a `redefinition` error, or a new variable with the same value). Such a
+  statement does nothing; put the next statement on its own line.
 Floating-point types keep their declared width (f32 in 32-bit slots, f64 in
 64-bit slots) and are tracked through the IR with a per-vreg "fkind" tag so
 the emitter picks the right load/store/convert instructions.

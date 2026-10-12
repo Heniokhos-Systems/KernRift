@@ -25,6 +25,53 @@ type TU = u8
 static byte[4] sarr
 static addr sa = 0x123456789
 
+struct P2 { uint64 z }
+// a one-line struct: a field NAMED addr, then a struct-typed field
+struct P { uint64 addr  P2 next }
+// ... and a one-line struct whose SECOND field is alias-typed
+struct Q { uint64 a  addr b }
+
+// `addr` as the NAME of declarations followed by another statement on the
+// same line, an array named addr in `*(addr[i] as T)`, and pointer loads
+// INTO variables named addr/byte (`*(p as T) -> addr`). Returns 0 or the
+// failing check's number.
+fn names(uint64 p) -> uint32 {
+    uint64 addr  uint64 x = 4
+    addr = x + 1
+    if addr != 5 { return 23 }
+    uint64[2] byte  P2 t
+    byte[1] = p
+    t.z = 3
+    uint32 v = 0
+    unsafe { *(byte[1] as uint32) -> v }
+    if v != 0x55667788 { return 24 }
+    unsafe { *(byte[1] as uint32) = 0x01020304 }
+    if load32(p) != 0x01020304 { return 25 }
+    unsafe { *(p as uint64) -> addr }
+    if addr != 0x1122334401020304 { return 26 }
+    uint64 bb = 0
+    unsafe { *(p as uint8) -> bb }
+    if bb != 4 { return 27 }
+    if t.z != 3 { return 28 }
+    // a statement ending in a NAME, then an alias-typed declaration
+    uint64 y = 0
+    y = x  addr ab = 9
+    if ab != 9 { return 29 }
+    if y != 4 { return 30 }
+    if sizeof(P) != 16 { return 31 }
+    if sizeof(Q) != 16 { return 32 }
+    return 0
+}
+
+// a struct-typed declaration NAMED addr, then another declaration on the line
+fn names2() -> uint32 {
+    P2 addr  P2 q
+    addr.z = 6
+    q.z = 7
+    if addr.z + q.z != 13 { return 33 }
+    return 0
+}
+
 fn bparam(byte x) -> byte { return x + 1 }
 fn aparam(addr x) -> addr { return x + 1 }
 // a parameter NAMED addr, and a slice of byte
@@ -90,6 +137,11 @@ fn main() -> uint32 {
     // a FIELD named addr/byte read as a value, another statement on the line
     y = d.addr  v = 2
     if y != 77 { return 22 }
+    store64(buf, 0x1122334455667788)
+    uint32 nr = names(buf)
+    if nr != 0 { return nr }
+    nr = names2()
+    if nr != 0 { return nr }
     file_write(1, "OK\n", 3)
     return 0
 }
