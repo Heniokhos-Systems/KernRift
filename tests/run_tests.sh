@@ -39,7 +39,18 @@ RUN_ARCH="x86_64"
 if [ "$ARCH" = "aarch64" ] || [ "$ARCH" = "arm64" ]; then RUN_ARCH="arm64"; fi
 PASS=0
 FAIL=0
+SKIP=0
 TOTAL=0
+
+# Every skipped row goes through skip_row: it counts in SKIP (never in PASS)
+# and prints one uniform line. The row must already be in TOTAL -- a site
+# whose row is not counted yet increments TOTAL itself first. The summary
+# checks PASS + FAIL + SKIP == TOTAL, so a skip that is not accounted for
+# fails the suite.
+skip_row() {
+    SKIP=$((SKIP + 1))
+    echo "  $1: SKIP ($2)"
+}
 
 run_test() {
     local name="$1"
@@ -1114,7 +1125,7 @@ run_test "asm_block" 'fn main() { asm { "nop"; "nop"; "nop" }; exit(7) }' 7
 if [ "$ARCH" != "aarch64" ]; then
     run_test "asm_hex" 'fn main() { asm("0x90"); exit(5) }' 5
 else
-    echo "  asm_hex: SKIP (x86-only)"; PASS=$((PASS+1)); TOTAL=$((TOTAL+1))
+    TOTAL=$((TOTAL + 1)); skip_row asm_hex "x86-only"
 fi
 
 # Signedness must survive a CALL RESULT used directly as an operand.
@@ -1234,7 +1245,7 @@ if [ "$ARCH" != "aarch64" ]; then
     }
     fn main() { raw_exit() }' 42
 else
-    echo "  naked_fn: SKIP (x86-only)"; PASS=$((PASS+1)); TOTAL=$((TOTAL+1))
+    TOTAL=$((TOTAL + 1)); skip_row naked_fn "x86-only"
 fi
 
 # @noreturn annotation (should compile fine)
@@ -3642,8 +3653,8 @@ if [ "$ARCH" != "aarch64" ]; then
     fi
     rm -f "$REPO_ROOT/test_tmp_$$.kr" /tmp/krc_test_$$
 else
-    echo "  msr_compile: SKIP (x86-only)"; PASS=$((PASS+1)); TOTAL=$((TOTAL+1))
-    echo "  msr_wrmsr_compile: SKIP (x86-only)"; PASS=$((PASS+1)); TOTAL=$((TOTAL+1))
+    TOTAL=$((TOTAL + 1)); skip_row msr_compile "x86-only"
+    TOTAL=$((TOTAL + 1)); skip_row msr_wrmsr_compile "x86-only"
 fi
 
 # --- Dead Code Elimination test ---
@@ -3839,8 +3850,7 @@ fi
 # Skip on non-x86_64 hosts where KRC_FLAGS targets arm64.
 TOTAL=$((TOTAL + 1))
 if [ "$(uname -m)" != "x86_64" ] && [ "$(uname -m)" != "amd64" ]; then
-    PASS=$((PASS + 1))
-    echo "  emit_obj_readelf: SKIP (non-x86_64 host)"
+    skip_row emit_obj_readelf "non-x86_64 host"
 elif command -v readelf > /dev/null 2>&1 && [ -f /tmp/krc_obj_$$.o ]; then
     sections=$(readelf -S /tmp/krc_obj_$$.o 2>/dev/null)
     has_text=$(echo "$sections" | grep -c '\.text')
@@ -3856,8 +3866,7 @@ elif command -v readelf > /dev/null 2>&1 && [ -f /tmp/krc_obj_$$.o ]; then
         echo "  emit_obj_readelf: FAIL (text=$has_text symtab=$has_symtab main=$has_main add=$has_add)"
     fi
 else
-    PASS=$((PASS + 1))
-    echo "  emit_obj_readelf: SKIP (readelf not found or .o missing)"
+    skip_row emit_obj_readelf "readelf not found or .o missing"
 fi
 rm -f /tmp/krc_obj_$$.kr /tmp/krc_obj_$$.o /tmp/krc_obj_c_$$.o
 
@@ -3894,8 +3903,7 @@ else
         FAIL=$((FAIL + 1))
         echo "FAIL: export_symbol_global (compilation with --emit=obj failed)"
     else
-        PASS=$((PASS + 1))
-        echo "  export_symbol_global: SKIP (readelf not found)"
+        skip_row export_symbol_global "readelf not found"
     fi
 fi
 rm -f /tmp/krc_export_$$.kr /tmp/krc_export_$$.o
@@ -4004,8 +4012,7 @@ print('OK: sections non-overlapping, .text = ' + text.hex())
         echo "  emit_obj_large_symtab_structure: FAIL (compilation failed)"
     fi
 else
-    PASS=$((PASS + 1))
-    echo "  emit_obj_large_symtab_structure: SKIP (no python3)"
+    skip_row emit_obj_large_symtab_structure "no python3"
 fi
 rm -f "$BIGSYM_KR" "$BIGSYM_O"
 
@@ -6081,6 +6088,7 @@ rm -f /tmp/krc_bcse_$$.kr /tmp/krc_bcse_$$.s
 # (exit 99 if p does not alias g, so a layout change cannot pass vacuously),
 # then exits b - a + 50: 100 when the second read sees the '9' (57) fmt_uint
 # wrote, 50 when it was CSE'd. Parent compiler: 50 on x86_64 and arm64.
+# Without qemu-aarch64 the arm64 half is a SKIP, never a pass.
 FCSE_SRC='static u8[8] gbuf
 static u64 g = 7
 fn probe_layout() -> u64 {
@@ -6097,12 +6105,15 @@ fn main() {
     exit(b - a + 50)
 }'
 for FCSE_ARCH in x86_64 arm64; do
+    TOTAL=$((TOTAL + 1))
     FCSE_RUN=""
     if [ "$FCSE_ARCH" = "arm64" ]; then
-        [ -n "$QEMU_A64" ] || continue
+        if [ -z "$QEMU_A64" ]; then
+            skip_row "fmt_uint_stops_static_cse arm64" "no qemu-aarch64"
+            continue
+        fi
         FCSE_RUN="$QEMU_A64"
     fi
-    TOTAL=$((TOTAL + 1))
     printf '%s\n' "$FCSE_SRC" > /tmp/krc_fcse_$$.mlr
     rm -f /tmp/krc_fcse_$$
     FCSE_GOT="no binary"
@@ -6121,9 +6132,10 @@ done
 rm -f /tmp/krc_fcse_$$.mlr /tmp/krc_fcse_$$
 
 # memcpy, memset and a plain pointer store write memory too (IR ops 72, 76
-# and 31). cse_invalidate_set_pinned reads the predicates and their call
-# sites; this row runs the compiled program, so an exemption made anywhere is
-# caught by its effect. Same layout probe as fmt_uint_stops_static_cse: g sits
+# and 31). This row runs the compiled program, so an exemption made anywhere
+# (in the predicates, at a call site, in a new pass) is caught by its effect;
+# cse_invalidate_set_pinned only reads the source. Without qemu-aarch64 the
+# arm64 half is a SKIP, never a pass. Same layout probe as fmt_uint_stops_static_cse: g sits
 # behind gbuf, and the program exits 99 if gbuf + 8 does not alias g. Each
 # program sets g = 7, reads a = g, writes the byte 9 into g through the alias,
 # reads b = g and exits b - a + 50: 52 when the second read sees the write,
@@ -6139,12 +6151,15 @@ for WB_KIND in memset memcpy store; do
     unsafe { *(q as u8) = nine }' ;;
     esac
     for WB_ARCH in x86_64 arm64; do
+        TOTAL=$((TOTAL + 1))
         WB_RUN=""
         if [ "$WB_ARCH" = "arm64" ]; then
-            [ -n "$QEMU_A64" ] || continue
+            if [ -z "$QEMU_A64" ]; then
+                skip_row "write_builtins_stop_static_cse $WB_KIND arm64" "no qemu-aarch64"
+                continue
+            fi
             WB_RUN="$QEMU_A64"
         fi
-        TOTAL=$((TOTAL + 1))
         printf 'static u8[8] sbuf\nstatic u8[8] gbuf\nstatic u64 g = 7\nfn probe_layout() -> u64 {\n    u64 p = gbuf + 8\n    unsafe { *(p as u64) = 1234 }\n    return g\n}\nfn main() {\n    if probe_layout() != 1234 { exit(99) }\n    g = 7\n    memset(sbuf, 9, 1)\n    u64 a = g\n%s\n    u64 b = g\n    exit(b - a + 50)\n}\n' "$WB_STMT" > /tmp/krc_wbcse_$$.kr
         rm -f /tmp/krc_wbcse_$$
         WB_GOT="no binary"
@@ -6183,101 +6198,452 @@ else
 fi
 rm -f /tmp/krc_mpcse_$$.kr /tmp/krc_mpcse_$$.s
 
-# ir_opt_cse_invalidates is derived from ir_opt_is_side_effect minus an
-# exemption list; a hand-kept positive list had drifted from the side-effect
-# list (barriers 126-130, then 74/124/125/146/148). Pin the derivation, the
-# exact side-effect set, the exact exemption set and the three places the two
-# predicates are used, so that a new side effect or a new exemption is a
-# deliberate, reviewed edit of this row and a deleted side effect is caught.
-# The row tokenises src/*.kr with comments stripped, so spacing, tabs, line
-# breaks and redundant parentheses do not matter. It reads every statement of
-# both predicates and accepts only `if <cond> { return R }` and the final
-# `return`, where <cond> is `op == N`, an `||` of those, or `op >= N &&
-# op <= M`. Any other shape (a named constant, `!=`, `>`/`<`, an `else`, a
-# literal past the opcode range) is refused by name, because the set this row
-# reads would no longer be the set the compiler executes. A renamed
-# parameter, a `uint64 op = <param>` alias line and an attribute before `fn`
-# are accepted. ir_opt_is_side_effect may be referenced only from ir_opt_dce
-# (mark and sweep) and from the first line of ir_opt_cse_invalidates, and
-# ir_opt_cse_invalidates only from ir_opt_cse. Each call site is pinned token
-# for token from the opcode load to the use of the result, so a wrapper, an
-# `op != N &&` in front of the call, or a `keep = 0` after it is refused.
-# Every exempt op must still be side-effecting.
+# THE GUARD. cse_invalidate_set_pinned (below) reads the source of the two
+# predicates, their call sites and the pass list. Source text can always be
+# bypassed by an edit it does not read -- a new pass, a pre-pass in front of a
+# pinned loop, a computed call -- so the pin is a tripwire only. These rows
+# are the guard: each compiles a program and RUNS it, on x86_64 and on arm64
+# (qemu-aarch64), and the program's exit code changes if CSE reuses a static
+# load across the op, or DCE deletes the op. So the rows go red however the op
+# was dropped: from ir_opt_is_side_effect, from ir_opt_cse_invalidates, at a
+# call site, or by a new pass.
+#
+# Layout probe: g sits behind the 8-byte gbuf, and every program exits 99 if
+# gbuf + 8 does not alias g, so a layout change cannot pass vacuously. Each
+# program sets g = 7, reads a = g, runs the op once (its result unused, so a
+# DCE that treats it as pure deletes it), reads b = g and exits b - a + 50.
+# 50 means the op was CSE'd across or deleted; the expected code is the one
+# the op's write gives. stdin is /dev/zero.
+#
+# One row per op class, per arch:
+#   call 50 (+ ARG 51)   setg(9)                         52
+#   call_ind 87          call_ptr(fn_addr("setg9"))      52
+#   static_store 78      g = 9                           52
+#   syscall 52           read(0, gbuf + 8, 1)            43 (reads a 0 byte)
+#   syscall_raw 85       syscall_raw(read, 0, gbuf + 8, 1, 0, 0, 0)  43
+#   atomic_store 90      atomic_store(gbuf + 8, 9)       52
+#   atomic_add 92        atomic_add(gbuf + 8, 2)         52
+#   atomic_cas 93        atomic_cas(gbuf + 8, 7, 9)      52
+#   atomic_sub 109       atomic_sub(gbuf + 8, 5)         45
+#   atomic_and 110       atomic_and(gbuf + 8, 3)         46
+#   atomic_or 111        atomic_or(gbuf + 8, 8)          58
+#   atomic_xor 112       atomic_xor(gbuf + 8, 14)        52
+#   vstore 94            vstore8/16/32/64(gbuf + 8, 9)   52, inline (CSE)
+#                        and inside a one-line helper (DCE: IR_VSTORE keeps
+#                        its width in `dest`, so in a large function DCE's
+#                        flow-insensitive liveness usually finds vreg 1/2/4/8
+#                        live and keeps a store it treats as pure)
+#   asm 96               asm { mov [rax], cl } in(p -> rax, 9 -> rcx), and
+#                        strb w1, [x0] in(p -> x0, 9 -> x1) on arm64   52
+#   store_bis 148        put8(gbuf, 1, 9): *(base + i * 8) = v in a helper,
+#                        52. STORE_BIS on arm64 (fuse_lea_mem), a STORE on
+#                        x86_64. Only DCE can drop it: CSE runs before
+#                        fuse_lea_mem creates it. In a helper for the same
+#                        width-in-dest reason as vstore
+#   control_flow 40/43   a while loop (back-edge BR) and an early `return`
+#                        in a void fn, 52; a dropped BR or RET_VOID runs
+#                        `g = 5` instead
+# memset 72, memcpy 76, store 31 and fmt_uint 74 have their own rows above.
+OR_HDR='static u8[8] sbuf
+static u8[8] gbuf
+static u64 g = 7
+static u64 one = 1
+static u64 zero = 0
+fn probe_layout() -> u64 {
+    u64 p = gbuf + 8
+    unsafe { *(p as u64) = 1234 }
+    return g
+}
+fn setg(u64 v) {
+    g = v
+    sbuf[1] = 1
+}
+fn setg9() {
+    g = 9
+    sbuf[1] = 1
+}
+fn vst8(u64 p) { vstore8(p, 9) }
+fn vst16(u64 p) { vstore16(p, 9) }
+fn vst32(u64 p) { vstore32(p, 9) }
+fn vst64(u64 p) { vstore64(p, 9) }
+fn put8(u64 base, u64 i, u64 v) {
+    unsafe { *((base + i * 8) as u64) = v }
+}
+fn early_loop() {
+    u64 k = 0
+    while k < 3 {
+        k = k + 1
+    }
+    if k == 3 {
+        g = 9
+        return
+    }
+    g = 5
+}'
+OR_CASES="call call_ind static_store syscall syscall_raw atomic_store atomic_add atomic_cas atomic_sub atomic_and atomic_or atomic_xor vstore8 vstore16 vstore32 vstore64 vstore8_fn vstore16_fn vstore32_fn vstore64_fn asm store_bis control_flow"
+for OR_K in $OR_CASES; do
+    OR_WANT=52
+    OR_ARCHES="x86_64 arm64"
+    case $OR_K in
+        call)         OR_STMT='    setg(9)' ;;
+        call_ind)     OR_STMT='    call_ptr(fn_addr("setg9"))' ;;
+        static_store) OR_STMT='    g = 9' ;;
+        syscall)      OR_STMT='    read(0, gbuf + 8, 1)'; OR_WANT=43 ;;
+        syscall_raw)  OR_STMT='    syscall_raw(OR_NR_READ, 0, gbuf + 8, 1, 0, 0, 0)'; OR_WANT=43 ;;
+        atomic_store) OR_STMT='    atomic_store(gbuf + 8, 9)' ;;
+        atomic_add)   OR_STMT='    atomic_add(gbuf + 8, 2)' ;;
+        atomic_cas)   OR_STMT='    atomic_cas(gbuf + 8, 7, 9)' ;;
+        atomic_sub)   OR_STMT='    atomic_sub(gbuf + 8, 5)'; OR_WANT=45 ;;
+        atomic_and)   OR_STMT='    atomic_and(gbuf + 8, 3)'; OR_WANT=46 ;;
+        atomic_or)    OR_STMT='    atomic_or(gbuf + 8, 8)'; OR_WANT=58 ;;
+        atomic_xor)   OR_STMT='    atomic_xor(gbuf + 8, 14)' ;;
+        vstore8)      OR_STMT='    vstore8(gbuf + 8, 9)' ;;
+        vstore16)     OR_STMT='    vstore16(gbuf + 8, 9)' ;;
+        vstore32)     OR_STMT='    vstore32(gbuf + 8, 9)' ;;
+        vstore64)     OR_STMT='    vstore64(gbuf + 8, 9)' ;;
+        vstore*_fn)   OR_V=${OR_K#vstore}; OR_STMT="    vst${OR_V%_fn}(gbuf + 8)" ;;
+        asm)          OR_STMT='    u64 ap = gbuf + 8
+    u64 nine = 9
+    OR_ASM_STORE9' ;;
+        store_bis)    OR_STMT='    put8(gbuf, one, 9)' ;;
+        control_flow) OR_STMT='    early_loop()' ;;
+    esac
+    for OR_ARCH in $OR_ARCHES; do
+        TOTAL=$((TOTAL + 1))
+        OR_RUN=""
+        if [ "$OR_ARCH" = "arm64" ]; then
+            if [ -z "$QEMU_A64" ]; then
+                skip_row "side_effect_runs_$OR_K arm64" "no qemu-aarch64"
+                continue
+            fi
+            OR_RUN="$QEMU_A64"
+            OR_NR=63
+            OR_ASM='asm { "0x39000001" } in(ap -> x0, nine -> x1)'
+        else
+            OR_NR=0
+            OR_ASM='asm { "0x88 0x08" } in(ap -> rax, nine -> rcx)'
+        fi
+        printf '%s\nfn main() {\n    if probe_layout() != 1234 { exit(99) }\n    g = 7\n    memset(sbuf, 9, 1)\n    u64 a = g\n%s\n    u64 b = g\n    exit(b - a + 50)\n}\n' "$OR_HDR" "$OR_STMT" \
+            | sed -e "s/OR_NR_READ/$OR_NR/" -e "s/OR_ASM_STORE9/$OR_ASM/" > /tmp/krc_or_$$.kr
+        rm -f /tmp/krc_or_$$
+        OR_GOT="no binary"
+        if $KRC --arch=$OR_ARCH /tmp/krc_or_$$.kr -o /tmp/krc_or_$$ > /dev/null 2>&1 && [ -f /tmp/krc_or_$$ ]; then
+            chmod +x /tmp/krc_or_$$
+            OR_GOT=0
+            $OR_RUN /tmp/krc_or_$$ < /dev/zero > /dev/null 2>&1 || OR_GOT=$?
+        fi
+        if [ "$OR_GOT" = "$OR_WANT" ]; then
+            PASS=$((PASS + 1))
+        else
+            echo "FAIL: side_effect_runs_$OR_K $OR_ARCH (exit $OR_GOT, want $OR_WANT; 50 = CSE'd across or deleted, 99 = layout probe failed)"
+            FAIL=$((FAIL + 1))
+        fi
+    done
+done
+rm -f /tmp/krc_or_$$.kr /tmp/krc_or_$$
+
+# Ops with no memory write a single-threaded program can read back still must
+# not be deleted, and their effect is visible another way: a fault, a trap,
+# an exec, a chmod. Each program runs the op once with its result unused, so
+# a DCE that treats the op as pure deletes it and the program reaches
+# exit(b - a + 50) = 50 instead.
+#   vload 95 / atomic_load 91   load from address 0 (a static 0)  139 SIGSEGV
+#   asm 96                      ud2 / udf #0                      132 SIGILL
+#   dealloc 71                  read after dealloc of 1 MiB       139 SIGSEGV
+#   exec 113 / exec_argv 114    exec /bin/true                    0
+#   set_exec 115                chmod +x of a scratch file        the row checks -x
+#   arr_check 131 (--debug)     arr[5] on a 2-element array       1 (the trap)
+# Core dumps are off for these runs.
+OR2_CASES="vload8 vload64 atomic_load asm_trap dealloc exec exec_argv set_exec arr_check"
+for OR2_K in $OR2_CASES; do
+    OR2_FLAGS=""
+    OR2_WANT=139
+    case $OR2_K in
+        vload8)      OR2_STMT='    u64 z = zero
+    vload8(z)' ;;
+        vload64)     OR2_STMT='    u64 z = zero
+    vload64(z)' ;;
+        atomic_load) OR2_STMT='    u64 z = zero
+    atomic_load(z)' ;;
+        asm_trap)    OR2_STMT='    asm { "OR2_UD" }'; OR2_WANT=132 ;;
+        dealloc)     OR2_STMT='    u64 p = alloc(1048576)
+    store8(p, 1)
+    dealloc(p)
+    exit(load8(p) + 60)' ;;
+        exec)        OR2_STMT='    exec_process("/bin/true")'; OR2_WANT=0 ;;
+        exec_argv)   OR2_STMT='    av[0] = "/bin/true"
+    av[1] = 0
+    exec_process_argv("/bin/true", av)'; OR2_WANT=0 ;;
+        set_exec)    OR2_STMT='    set_executable("OR2_FILE")'; OR2_WANT=x ;;
+        arr_check)   OR2_STMT='    u64 i = five
+    arr[i] = 1'; OR2_WANT=1; OR2_FLAGS="--debug" ;;
+    esac
+    for OR2_ARCH in x86_64 arm64; do
+        TOTAL=$((TOTAL + 1))
+        OR2_RUN=""
+        OR2_UD="0x0F 0x0B"
+        if [ "$OR2_ARCH" = "arm64" ]; then
+            if [ -z "$QEMU_A64" ]; then
+                skip_row "side_effect_kept_$OR2_K arm64" "no qemu-aarch64"
+                continue
+            fi
+            OR2_RUN="$QEMU_A64"
+            OR2_UD="0x00000000"
+        fi
+        rm -f /tmp/krc_or2_$$.x
+        printf 'x\n' > /tmp/krc_or2_$$.x
+        chmod 644 /tmp/krc_or2_$$.x
+        printf 'static u64 g = 7\nstatic u64 zero = 0\nstatic u64 five = 5\nstatic u64[2] arr\nstatic u64[2] av\nfn main() {\n    u64 a = g\n%s\n    u64 b = g\n    exit(b - a + 50)\n}\n' "$OR2_STMT" \
+            | sed -e "s/OR2_UD/$OR2_UD/" -e "s|OR2_FILE|/tmp/krc_or2_$$.x|" > /tmp/krc_or2_$$.kr
+        rm -f /tmp/krc_or2_$$
+        OR2_GOT="no binary"
+        if $KRC --arch=$OR2_ARCH $OR2_FLAGS /tmp/krc_or2_$$.kr -o /tmp/krc_or2_$$ > /dev/null 2>&1 && [ -f /tmp/krc_or2_$$ ]; then
+            chmod +x /tmp/krc_or2_$$
+            # in a subshell whose stderr is dropped: no "Segmentation fault" line
+            OR2_GOT=$( ( ulimit -c 0; $OR2_RUN /tmp/krc_or2_$$ < /dev/zero > /dev/null 2>&1; echo $? ) 2>/dev/null )
+            if [ "$OR2_WANT" = "x" ]; then
+                if [ -x /tmp/krc_or2_$$.x ]; then OR2_GOT=x; else OR2_GOT="exit $OR2_GOT, file not executable"; fi
+            fi
+        fi
+        if [ "$OR2_GOT" = "$OR2_WANT" ]; then
+            PASS=$((PASS + 1))
+        else
+            echo "FAIL: side_effect_kept_$OR2_K $OR2_ARCH (got $OR2_GOT, want $OR2_WANT; 50 = the op was deleted)"
+            FAIL=$((FAIL + 1))
+        fi
+    done
+done
+rm -f /tmp/krc_or2_$$.kr /tmp/krc_or2_$$ /tmp/krc_or2_$$.x
+
+# CSE across the ops above is not observable by a single-threaded run: they
+# write no memory the program reads back, and the second agent that a real
+# atomic_load, vload or asm orders against does not exist in a test. So
+# count, in the --emit=asm listing, the loads of the static g around each op:
+# two when the op invalidates the CSE table, one when the second read was
+# CSE'd into the first (or DCE deleted the op first, since DCE runs before
+# CSE). Same count as barrier_stops_static_cse; the barriers 126-130 are there.
+OR3_CASES="atomic_load vload8 vload64 asm exec exec_argv set_exec"
+for OR3_K in $OR3_CASES; do
+    case $OR3_K in
+        atomic_load) OR3_STMT='    atomic_load(0)' ;;
+        vload8)      OR3_STMT='    vload8(0)' ;;
+        vload64)     OR3_STMT='    vload64(0)' ;;
+        asm)         OR3_STMT='    asm { "OR3_NOP" }' ;;
+        exec)        OR3_STMT='    exec_process("/bin/true")' ;;
+        exec_argv)   OR3_STMT='    exec_process_argv("/bin/true", 0)' ;;
+        set_exec)    OR3_STMT='    set_executable("/nonexistent")' ;;
+    esac
+    for OR3_ARCH in x86_64 arm64; do
+        TOTAL=$((TOTAL + 1))
+        OR3_NOP="0x90"
+        [ "$OR3_ARCH" = "arm64" ] && OR3_NOP="0xD503201F"
+        printf 'static u64 g = 5\nfn main() {\n    u64 a = g\n%s\n    u64 b = g\n    exit(a + b)\n}\n' "$OR3_STMT" \
+            | sed -e "s/OR3_NOP/$OR3_NOP/" > /tmp/krc_or3_$$.kr
+        OR3_N="no listing"
+        if $KRC --arch=$OR3_ARCH --emit=asm /tmp/krc_or3_$$.kr -o /tmp/krc_or3_$$.s > /dev/null 2>&1; then
+            if [ "$OR3_ARCH" = "x86_64" ]; then
+                OR3_N=$(grep -acE 'mov r[a-z0-9]+, \[rip' /tmp/krc_or3_$$.s)
+            else
+                OR3_N=$(grep -acE 'ldr x[0-9]+, \[x16' /tmp/krc_or3_$$.s)
+            fi
+        fi
+        if [ "$OR3_N" = "2" ]; then
+            PASS=$((PASS + 1))
+        else
+            echo "FAIL: side_effect_stops_static_cse_listing $OR3_K $OR3_ARCH (static loads: $OR3_N, want 2)"
+            FAIL=$((FAIL + 1))
+        fi
+    done
+done
+rm -f /tmp/krc_or3_$$.kr /tmp/krc_or3_$$.s
+
+# get_module_path (146) exists only in a Windows build (elsewhere it is a
+# constant). module_path_stops_static_cse above uses its result, so DCE
+# keeps it whatever the side-effect set says; this one discards the result,
+# so a DCE that treats 146 as pure deletes the call, and the two loads of g
+# merge (DCE runs before CSE). Listing count under --target=windows.
 TOTAL=$((TOTAL + 1))
-CSEPIN=$(python3 - "$DIR/../src" <<'PYEOF'
-import re, sys, os, glob
+printf 'static u8[8] gbuf\nstatic u64 g = 7\nfn main() {\n    u64 a = g\n    get_module_path(gbuf + 8, 8)\n    u64 b = g\n    exit(a + b)\n}\n' > /tmp/krc_or4_$$.kr
+OR4_N="no listing"
+if $KRC --arch=x86_64 --target=windows --emit=asm /tmp/krc_or4_$$.kr -o /tmp/krc_or4_$$.s > /dev/null 2>&1; then
+    OR4_N=$(grep -acE 'mov r[a-z0-9]+, \[rip' /tmp/krc_or4_$$.s)
+fi
+if [ "$OR4_N" = "2" ]; then
+    PASS=$((PASS + 1))
+else
+    echo "FAIL: side_effect_stops_static_cse_listing module_path_unused windows-x86_64 (static loads: $OR4_N, want 2)"
+    FAIL=$((FAIL + 1))
+fi
+rm -f /tmp/krc_or4_$$.kr /tmp/krc_or4_$$.s
+
+# cse_invalidate_set_pinned is a TRIPWIRE, not the guard. ir_opt_cse_invalidates
+# is derived from ir_opt_is_side_effect minus an exemption list (a hand-kept
+# positive list had drifted from the side-effect list: barriers 126-130, then
+# 74/124/125/150/151/152). This row reads the source and fails loudly when the
+# code it reads moves: the exact side-effect set (WANT_SE), the exact
+# exemption set (WANT_EX), the derivation, every place either predicate is
+# named, and four windows pinned token for token -- the whole DCE mark loop,
+# the whole DCE sweep loop, the CSE loop from its `while` through the
+# invalidation block, and the whole ir_optimize body (the pass list). A source
+# pin can always be bypassed by an edit it does not read: a new pass called
+# from somewhere else, a pre-pass in front of a pinned loop, a call through a
+# computed pointer. The run rows above (side_effect_runs_*,
+# side_effect_kept_*, side_effect_stops_static_cse_listing,
+# barrier_stops_static_cse, fmt_uint_stops_static_cse and
+# write_builtins_stop_static_cse) are what catch a dropped op; this row only
+# makes the move visible.
+#
+# What it reads: every file in the Makefile's SRCS (std/sha256.kr included),
+# with comments stripped (string-aware) and u8/u16/u32/u64 read as
+# uint8..uint64, so spacing, tabs, line breaks and comments do not matter. A
+# mention of a predicate is its name as an identifier or as a string token
+# (fn_addr("ir_opt_is_side_effect")). ir_opt_is_side_effect may be mentioned
+# only from ir_opt_dce (twice) and the first line of ir_opt_cse_invalidates,
+# and ir_opt_cse_invalidates only from ir_opt_cse.
+#
+# What it accepts in the two predicates: an optional `uint64 x = <param>`
+# alias, then statements `if <cond> { return R }` and a final `return R`. R is
+# a decimal or hex literal in any number of parentheses; <cond> is `op == N`
+# (either side of the `==`), an `||` of those, or `op >= N && op <= M` (either
+# term first, either side of each comparison), grouped by parentheses if
+# wanted, with N below 65536. Everything else is refused by name and quoted:
+# a named constant or a call, `!=`, `<`, `>`, an `else` (so `else if` too),
+# `&&` that is not such a range, `&&` mixed with `||` without parentheses, a
+# statement after the final `return`. In the four windows nothing is
+# normalised beyond comments and the type spellings: any other token change
+# (a debug counter, a reordered statement, a renamed local) is refused, and
+# the row has to be re-pinned along with the edit.
+TOTAL=$((TOTAL + 1))
+CSEPIN=$(python3 - "$DIR/.." <<'PYEOF'
+import re, sys, os
 EXT = ".kr"
 IR_FILE = "ir.kr"
-# Pinned sets. A new side-effecting op, or a new exemption, is a deliberate
-# edit of these two lists.
+# The side-effect and exemption sets this row expects. Changing either list
+# is an edit of this row; that alone makes it a tripwire, not a guard: an
+# edit made elsewhere (a new pass, a pre-pass before a pinned loop, a
+# computed call) is not read here. The run rows above are the guard for
+# every op reachable from source; this row only says loudly that the code it
+# reads has moved.
 WANT_SE = {31, 40, 41, 42, 43, 50, 51, 52, 70, 71, 72, 74, 76, 78, 80, 81, 82, 83, 85, 87,
           90, 91, 92, 93, 94, 95, 96, 109, 110, 111, 112, 113, 114, 115, 119,
           124, 125, 126, 127, 128, 129, 130, 131, 146, 148}
 WANT_EX = {40, 41, 42, 43, 51, 70, 71, 80, 81, 82, 83, 119, 131}
-# The three call sites, pinned token for token from the opcode load to the
-# use of the predicate's result, so nothing can test or rewrite `op` (or
-# `keep`) between them.
-CALL_LINE = {"dce_mark": "uint64 keep = ir_opt_is_side_effect(op)",
-             "dce_sweep": "if ir_opt_is_side_effect(op) == 0 {",
-             "cse": "if ir_opt_cse_invalidates(op) != 0 {"}
+# Windows pinned token for token. Each starts at the `while` of its loop, so
+# a statement inserted at the top of the loop body is inside it: the whole
+# DCE mark loop, the whole DCE sweep loop, the CSE loop from its `while` to
+# the end of the invalidation block, and the whole body of ir_optimize (the
+# pass list).
 WINDOWS = {
  "dce_mark": ("ir_opt_dce", """
-            uint64 op = ir_insn_opcode(ii)
-            if op == 0 { continue }
-            uint64 dest = ir_insn_dest(ii)
-            uint64 s1 = ir_insn_src1(ii)
-            uint64 s2 = ir_insn_src2(ii)
-            uint64 imm = ir_insn_imm(ii)
-            uint64 keep = ir_opt_is_side_effect(op)
-            if keep == 0 && dest > 0 && dest < 65536 {
-                uint64 lp = ir_dce_live + dest
-                uint8 lv = 0
-                unsafe { *(lp as uint8) -> lv }
-                if lv != 0 { keep = 1 }
-            }
-            if keep != 0 {
-                ir_opt_dce_mark(s1, 0)"""),
+while ii > 0 {
+    ii = ii - 1
+    uint64 op = ir_insn_opcode(ii)
+    if op == 0 { continue }
+    uint64 dest = ir_insn_dest(ii)
+    uint64 s1 = ir_insn_src1(ii)
+    uint64 s2 = ir_insn_src2(ii)
+    uint64 imm = ir_insn_imm(ii)
+    uint64 keep = ir_opt_is_side_effect(op)
+    if keep == 0 && dest > 0 && dest < 65536 {
+        uint64 lp = ir_dce_live + dest
+        uint8 lv = 0
+        unsafe { *(lp as uint8) -> lv }
+        if lv != 0 { keep = 1 }
+    }
+    if keep != 0 {
+        ir_opt_dce_mark(s1, 0)
+        if op != 1 && op != 12 && op != 13 && op != 30 && op != 42 && op != 61 && op != 135 && op != 136 && op != 138 && (op < 140 || op > 145) {
+            ir_opt_dce_mark(s2, 0)
+        }
+        if op == 72 || op == 76 || op == 83 || op == 93 || op == 98 || op == 148 {
+            ir_opt_dce_mark(imm, 0)
+        }
+    }
+}"""),
  "dce_sweep": ("ir_opt_dce", """
-        uint64 op = ir_insn_opcode(si)
-        if op == 0 { si = si + 1; continue }
-        if ir_opt_is_side_effect(op) == 0 {
-            uint64 dest = ir_insn_dest(si)
-            uint64 is_live = 0
-            if dest > 0 && dest < 65536 {
-                uint64 lp = ir_dce_live + dest
-                uint8 lv = 0
-                unsafe { *(lp as uint8) -> lv }
-                is_live = lv
-            }
-            if is_live == 0 {
-                ir_insn_set_opcode(si, 0)
-            }
+while si < ir_insn_count {
+    uint64 op = ir_insn_opcode(si)
+    if op == 0 { si = si + 1; continue }
+    if ir_opt_is_side_effect(op) == 0 {
+        uint64 dest = ir_insn_dest(si)
+        uint64 is_live = 0
+        if dest > 0 && dest < 65536 {
+            uint64 lp = ir_dce_live + dest
+            uint8 lv = 0
+            unsafe { *(lp as uint8) -> lv }
+            is_live = lv
         }
-        si = si + 1
-    }"""),
+        if is_live == 0 {
+            ir_insn_set_opcode(si, 0)
+        }
+    }
+    si = si + 1
+}"""),
  "cse": ("ir_opt_cse", """
-        uint64 op = ir_insn_opcode(ii)
-        if op == 0 { ii = ii + 1; continue }
-        uint64 bb = ir_insn_bb(ii)
-        if bb != cur_bb {
-            ir_cse_gen = ir_cse_gen + 1
-            cur_bb = bb
-        }
-        if op == 61 {
-            uint64 cd = ir_insn_dest(ii)
-            uint64 cs = ir_cse_canon_of(ir_insn_src1(ii))
-            ir_cse_canon_set(cd, cs)
-            ii = ii + 1
-            continue
-        }
-        if ir_opt_cse_invalidates(op) != 0 {
-            ir_cse_gen = ir_cse_gen + 1
-            ii = ii + 1
-            continue
-        }"""),
+while ii < ir_insn_count {
+    uint64 op = ir_insn_opcode(ii)
+    if op == 0 { ii = ii + 1; continue }
+    uint64 bb = ir_insn_bb(ii)
+    if bb != cur_bb {
+        ir_cse_gen = ir_cse_gen + 1
+        cur_bb = bb
+    }
+    if op == 61 {
+        uint64 cd = ir_insn_dest(ii)
+        uint64 cs = ir_cse_canon_of(ir_insn_src1(ii))
+        ir_cse_canon_set(cd, cs)
+        ii = ii + 1
+        continue
+    }
+    if ir_opt_cse_invalidates(op) != 0 {
+        ir_cse_gen = ir_cse_gen + 1
+        ii = ii + 1
+        continue
+    }"""),
+ "passes": ("ir_optimize", """
+if ir_const_values == 0 { ir_const_values = alloc(65536 * 8) }
+if ir_const_known == 0 { ir_const_known = alloc(65536) }
+if ir_w32_clean == 0 { ir_w32_clean = alloc(65536) }
+uint64 opt_clear = ir_vreg_next
+if opt_clear > 65536 { opt_clear = 65536 }
+memset(ir_const_known, 0, opt_clear)
+memset(ir_w32_clean, 0, opt_clear)
+ir_opt_const_fold()
+ir_opt_dce()
+uint64 rw0 = ir_opt_rewrites
+ir_opt_cse()
+if ir_opt_rewrites != rw0 { ir_opt_dce() }
+uint64 rw1 = ir_opt_rewrites
+ir_opt_licm()
+if ir_opt_rewrites != rw1 { ir_opt_dce() }
+uint64 rw2 = ir_opt_rewrites
+ir_opt_recognize_rotate()
+if ir_opt_rewrites != rw2 {
+    ir_opt_const_fold()
+    ir_opt_dce()
 }
-SRC_DIR = sys.argv[1]
+uint64 rw3 = ir_opt_rewrites
+ir_opt_recognize_lea_bis()
+if ir_opt_rewrites != rw3 { ir_opt_dce() }
+if target_arch == 1 {
+    uint64 rw3a = ir_opt_rewrites
+    ir_compute_use_count()
+    ir_opt_fuse_lea_mem()
+    if ir_opt_rewrites != rw3a { ir_opt_dce() }
+}
+uint64 rw4 = ir_opt_rewrites
+ir_compute_use_count()
+ir_opt_recognize_ffma()
+if ir_opt_rewrites != rw4 { ir_opt_dce() }"""),
+}
+LABEL_OF = {"dce_mark": "ir_opt_is_side_effect (DCE mark loop)",
+            "dce_sweep": "ir_opt_is_side_effect (DCE sweep loop)",
+            "cse": "ir_opt_cse_invalidates (CSE loop)",
+            "passes": "the ir_optimize pass list"}
+ROOT = sys.argv[1]
 TOK = re.compile(r'"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\'|0[xX][0-9A-Fa-f]+|\d+|[A-Za-z_]\w*|==|!=|>=|<=|&&|\|\||->|<<|>>|\S')
+# u8/u16/u32/u64 are the same types as uint8..uint64; read them as one.
+ALIAS = {"u8": "uint8", "u16": "uint16", "u32": "uint32", "u64": "uint64"}
 def strip_comments(t):
     # Drop // and /* */ comments; string and char literals are kept whole.
     out, i, n = [], 0, len(t)
@@ -6296,23 +6662,41 @@ def strip_comments(t):
         else:
             out.append(c); i += 1
     return "".join(out)
+def toks(text):
+    return [ALIAS.get(t, t) for t in TOK.findall(strip_comments(text))]
+class Refused(Exception): pass
+def srcs():
+    # Every file the compiler is built from: the Makefile's SRCS, with its
+    # backslash continuations (std/sha256 is one of them, not under src/).
+    mk = open(os.path.join(ROOT, "Makefile")).read().replace("\\\n", " ")
+    m = re.search(r"^SRCS\s*=([^\n]*)", mk, re.M)
+    if not m: raise Refused("cannot read SRCS from the Makefile")
+    files = m.group(1).split()
+    if not files or any(not f.endswith(EXT) for f in files):
+        raise Refused("SRCS in the Makefile is not a list of %s files: %s" % (EXT, " ".join(files)))
+    return files
 FILES = {}
-for p in sorted(glob.glob(os.path.join(SRC_DIR, "*" + EXT))):
-    FILES[os.path.basename(p)] = TOK.findall(strip_comments(open(p).read()))
+def load():
+    for f in srcs():
+        p = os.path.join(ROOT, f)
+        if not os.path.isfile(p): raise Refused("SRCS names %s, which does not exist" % f)
+        FILES[f] = toks(open(p).read())
 def fn_defs(name):
     return [(f, i) for f, tk in FILES.items() for i in range(len(tk) - 1) if tk[i] == "fn" and tk[i + 1] == name]
+def ir_path():
+    return [f for f in FILES if os.path.basename(f) == IR_FILE]
 def body(name):
     # -> (file, start index of body tokens, body tokens, param name) or error string
     d = fn_defs(name)
     if len(d) != 1:
-        return "%s is defined %d times in src/*%s, want 1" % (name, len(d), EXT)
+        return "%s is defined %d times in the Makefile's SRCS, want 1" % (name, len(d))
     f, i = d[0]
     tk = FILES[f]
-    if f != IR_FILE:
-        return "%s is defined in %s, want %s" % (name, f, IR_FILE)
+    if os.path.basename(f) != IR_FILE:
+        return "%s is defined in %s, want src/%s" % (name, f, IR_FILE)
     sig = tk[i:i + 9]
-    if len(sig) < 9 or sig[2] != "(" or sig[3] not in ("uint64", "u64") or not re.fullmatch(r"[A-Za-z_]\w*", sig[4]) \
-            or sig[5:8] != [")", "->", sig[7]] or sig[7] not in ("uint64", "u64") or sig[8] != "{":
+    if len(sig) < 9 or sig[2] != "(" or sig[3] != "uint64" or not re.fullmatch(r"[A-Za-z_]\w*", sig[4]) \
+            or sig[5:8] != [")", "->", "uint64"] or sig[8] != "{":
         return "%s: signature is not `fn %s(uint64 <param>) -> uint64 {`: %s" % (name, name, " ".join(sig))
     depth, j = 1, i + 9
     while j < len(tk) and depth:
@@ -6321,7 +6705,7 @@ def body(name):
 def body_any(name):
     d = fn_defs(name)
     if len(d) != 1:
-        return "%s is defined %d times in src/*%s, want 1" % (name, len(d), EXT)
+        return "%s is defined %d times in the Makefile's SRCS, want 1" % (name, len(d))
     f, i = d[0]
     tk = FILES[f]
     j = tk.index("{", i) + 1
@@ -6334,7 +6718,18 @@ def lit(t):
     elif re.fullmatch(r"0[xX][0-9A-Fa-f]+", t): v = int(t, 16)
     else: return None
     return v if v < 65536 else -1
-class Refused(Exception): pass
+def ret_val(tk, i):
+    # `return` operand: a literal, optionally in parentheses. -> (value, next) or (None, i)
+    depth = 0
+    while tk[i] == "(":
+        depth += 1; i += 1
+    v = lit(tk[i])
+    if v is None or v < 0: return None, i
+    i += 1
+    for _ in range(depth):
+        if tk[i] != ")": return None, i
+        i += 1
+    return v, i
 def shown(tk, st):
     # the statement at st: through its first `}`, and an `else` block after it
     end = st
@@ -6343,30 +6738,36 @@ def shown(tk, st):
         end += 2
         while tk[end] not in ("}", "<END>"): end += 1
     return " ".join(t for t in tk[st:end + 1] if t != "<END>")
+MIRROR = {"==": "==", ">=": "<=", "<=": ">="}
 def parse_cond(tk, i, vs):
-    # One condition up to the `{`. Returns (tag, value, next index). A tag is
-    # "eq"/"ge"/"le" (one comparison of the op variable with a literal) or
-    # "set" (a set of ops). `||` joins eq/set terms; `&&` joins exactly one
-    # `>=` and one `<=` into an inclusive range; parentheses group. Mixing
-    # `&&` and `||` without parentheses, `!=`, `<`, `>`, `else`, a named
-    # constant, a call or a literal >= 65536 is refused.
+    # One condition up to the `{`. Accepted: `op == N` (or `N == op`), an
+    # `||` of those, and an inclusive range `op >= N && op <= M` with either
+    # term first and either side of each comparison (`N <= op`); parentheses
+    # group. Refused: `!=`, `<`, `>`, a named constant, a call, a literal
+    # >= 65536, `&&` that is not exactly such a range, and `&&` mixed with
+    # `||` without parentheses.
     def atom(i):
         if tk[i] == "(":
             t, v, i = disj(i + 1)
             if tk[i] != ")": raise Refused("unbalanced parenthesis")
             return t, v, i + 1
         if tk[i] in vs and tk[i + 1] in ("==", ">=", "<="):
-            n = lit(tk[i + 2])
-            if n is None: raise Refused("compares with a non-literal `%s`" % tk[i + 2])
-            if n < 0: raise Refused("literal %s is out of the opcode range" % tk[i + 2])
-            return {"==": "eq", ">=": "ge", "<=": "le"}[tk[i + 1]], n, i + 3
-        raise Refused("unrecognised comparison at `%s`" % " ".join(tk[i:i + 3]))
+            cmp_, other = tk[i + 1], tk[i + 2]
+        elif tk[i + 2] in vs and tk[i + 1] in ("==", ">=", "<=") and lit(tk[i]) is not None:
+            cmp_, other = MIRROR[tk[i + 1]], tk[i]
+        else:
+            raise Refused("unrecognised comparison at `%s`" % " ".join(tk[i:i + 3]))
+        n = lit(other)
+        if n is None: raise Refused("compares with a non-literal `%s`" % other)
+        if n < 0: raise Refused("literal %s is out of the opcode range" % other)
+        return {"==": "eq", ">=": "ge", "<=": "le"}[cmp_], n, i + 3
     def conj(i):
         # -> (tag, value, next, joined_by_and)
         t, v, i = atom(i)
         if tk[i] != "&&": return t, v, i, False
         t2, v2, i = atom(i + 1)
         if tk[i] == "&&": raise Refused("more than two `&&` terms")
+        if (t, t2) == ("le", "ge"): t, v, t2, v2 = t2, v2, t, v
         if (t, t2) != ("ge", "le"): raise Refused("`&&` that is not `op >= N && op <= M`")
         if v > v2: raise Refused("empty range %d..%d" % (v, v2))
         return "set", set(range(v, v2 + 1)), i, True
@@ -6392,63 +6793,81 @@ def parse_fn(name, ret_case, ret_tail, first=None):
     b = body(name)
     if isinstance(b, str): raise Refused(b)
     f, start, tk, param = b
-    tk = tk + ["<END>"] * 4
+    tk = tk + ["<END>"] * 6
     vs, i, s = {param}, 0, set()
     while tk[i] == ";": i += 1
     # optional alias of the parameter: `uint64 x = param`
-    if tk[i] in ("uint64", "u64") and tk[i + 2] == "=" and tk[i + 3] == param and tk[i + 4] in ("if", "return", ";"):
+    if tk[i] == "uint64" and tk[i + 2] == "=" and tk[i + 3] == param and tk[i + 4] in ("if", "return", ";"):
         vs.add(tk[i + 1]); i += 4
     if first:
-        want = ["if", first, "(", "?", ")", "==", "0", "{", "return", "0", "}"]
-        got = tk[i:i + 11]
-        if not (got[:3] == want[:3] and got[3] in vs and got[4:] == want[4:]):
+        want = ["if", first, "(", "?", ")", "==", "0", "{", "return"]
+        got = tk[i:i + 9]
+        ok = got[:3] == want[:3] and got[3] in vs and got[4:] == want[4:]
+        if ok:
+            v, j = ret_val(tk, i + 9)
+            ok = v == 0 and tk[j] == "}"
+        if not ok:
             raise Refused("%s is not derived from %s: first statement is `%s`" % (name, first, shown(tk, i)))
-        i += 11
+        i = j + 1
     while True:
         while tk[i] == ";": i += 1
         st = i
-        if tk[i] == "return" and tk[i + 1] != ret_tail:
-            raise Refused("%s ends in `return %s`, want `return %s`" % (name, tk[i + 1], ret_tail))
-        if tk[i] == "return" and tk[i + 1] == ret_tail:
-            j = i + 2
+        if tk[i] == "return":
+            v, j = ret_val(tk, i + 1)
+            if v != ret_tail:
+                raise Refused("%s ends in `return %s`, want `return %d`" % (name, " ".join(tk[i + 1:max(j, i + 2)]), ret_tail))
             while tk[j] == ";": j += 1
             if tk[j] != "<END>":
-                raise Refused("%s: statement after the final `return %s`" % (name, ret_tail))
+                raise Refused("%s: statement after the final `return %d`" % (name, ret_tail))
             return s
         try:
             if tk[i] != "if": raise Refused("not an `if`")
             ops, i = parse_cond(tk, i + 1, vs)
-            if tk[i:i + 3] != ["{", "return", ret_case]: raise Refused("the block is not `{ return %s }`" % ret_case)
-            i += 3
+            if tk[i:i + 2] != ["{", "return"]: raise Refused("the block is not `{ return %d }`" % ret_case)
+            v, i = ret_val(tk, i + 2)
+            if v != ret_case: raise Refused("the block is not `{ return %d }`" % ret_case)
             while tk[i] == ";": i += 1
-            if tk[i] != "}": raise Refused("the block has more than `return %s`" % ret_case)
+            if tk[i] != "}": raise Refused("the block has more than `return %d`" % ret_case)
             i += 1
             if tk[i] == "else": raise Refused("an `else`")
         except Refused as e:
             raise Refused("%s: statement of a refused shape (%s): %s" % (name, e, shown(tk, st)))
         s |= ops
-def window(fn, text, label):
+def window(label, fn, text):
     b = body_any(fn)
     if isinstance(b, str): raise Refused(b)
     tk = b[2]
-    w = TOK.findall(text)
+    w = toks(text)
+    if label == "passes":
+        if tk != w:
+            k = next((k for k in range(min(len(tk), len(w))) if tk[k] != w[k]), min(len(tk), len(w)))
+            raise Refused("%s differs from the pinned one at token %d: `%s` (want `%s`)"
+                          % (LABEL_OF[label], k, " ".join(tk[k:k + 8]), " ".join(w[k:k + 8])))
+        return tk
     hits = [k for k in range(len(tk) - len(w) + 1) if tk[k:k + len(w)] == w]
     if len(hits) != 1:
-        raise Refused("%s: the pinned call site of `%s` (its statements from the opcode load to the use of the result) is found %d times in %s, want 1" % (label, CALL_LINE[label], len(hits), fn))
+        raise Refused("%s: the pinned window (from the loop's `while` on) is found %d times in %s, want 1"
+                      % (LABEL_OF[label], len(hits), fn))
     return tk
 def refs(name):
-    # every mention outside its own definition, by enclosing function
+    # every mention outside its own definition, by enclosing function. A
+    # string token that is exactly the name counts too: fn_addr("<name>")
+    # reaches the function without naming it as an identifier.
     out = []
+    q = '"%s"' % name
     for f, tk in FILES.items():
         cur = None
         for k, t in enumerate(tk):
             if t == "fn" and k + 1 < len(tk): cur = tk[k + 1]
-            if t == name and not (k > 0 and tk[k - 1] == "fn"):
+            if (t == name and not (k > 0 and tk[k - 1] == "fn")) or t == q:
                 out.append(cur)
     return sorted(out)
 def check():
-    se = parse_fn("ir_opt_is_side_effect", "1", "0")
-    ex = parse_fn("ir_opt_cse_invalidates", "0", "1", first="ir_opt_is_side_effect")
+    load()
+    if len(ir_path()) != 1:
+        return "SRCS lists %d files named %s, want 1" % (len(ir_path()), IR_FILE)
+    se = parse_fn("ir_opt_is_side_effect", 1, 0)
+    ex = parse_fn("ir_opt_cse_invalidates", 0, 1, first="ir_opt_is_side_effect")
     if se != WANT_SE:
         return "side-effect set: missing %s, extra %s" % (sorted(WANT_SE - se), sorted(se - WANT_SE))
     if ex != WANT_EX:
@@ -6461,18 +6880,18 @@ def check():
         if got != want:
             return "%s is referenced from %s, want exactly %s" % (name, got, want)
     for label, (fn, text) in WINDOWS.items():
-        tk = window(fn, text, label)
+        tk = window(label, fn, text)
         if label == "dce_mark":
             n = tk.count("keep")
             if n != 4:
-                return "dce_mark: `keep` appears %d times in ir_opt_dce, want 4 (all in the pinned call site)" % n
+                return "dce_mark: `keep` appears %d times in ir_opt_dce, want 4 (all in the pinned mark loop)" % n
     return "ok"
 try:
     print(check())
 except Refused as e:
     print(e)
-except IndexError:
-    print("ran off the end of a function body while parsing it")
+except (IndexError, OSError) as e:
+    print("could not read the sources: %s" % e)
 PYEOF
 )
 if [ "$CSEPIN" = "ok" ]; then
@@ -7043,7 +7462,7 @@ if $KRC --arch=arm64 /tmp/krc_nakedalt_$$.kr -o /tmp/krc_nakedalt_$$ --emit=elf 
             FAIL=$((FAIL + 1)); echo "FAIL: naked_alternative_out_constraint_works ($nakedalt_err)"
         fi
     else
-        PASS=$((PASS + 1)); echo "  naked_alternative_out_constraint_works: SKIP (compiles; no qemu-aarch64-static to run it)"
+        skip_row naked_alternative_out_constraint_works "compiles; no qemu-aarch64-static to run it"
     fi
 else
     FAIL=$((FAIL + 1))
@@ -7241,7 +7660,7 @@ fn main() -> uint32 {
 }
 IDTCEOF
 if ! command -v qemu-system-x86_64 >/dev/null 2>&1; then
-    PASS=$((PASS + 1)); echo "  idt_selector_and_limit: PASS (SKIPPED -- no qemu-system-x86_64)"
+    skip_row idt_selector_and_limit "no qemu-system-x86_64"
 elif ! $KRC --target=none --arch=x86_64 --emit=image --load-addr=0x100000 \
             --stack-top=0x90000 "$DIR/../idtcs_tmp_$$.kr" -o "$IDTCS_K" >/dev/null 2>&1 \
   || ! $KRC --target=none --arch=x86_64 --emit=image --reset-vector \
@@ -7305,7 +7724,7 @@ fn main() -> uint32 {
 }
 IDTFEOF
 if ! command -v qemu-system-x86_64 >/dev/null 2>&1; then
-    PASS=$((PASS + 1)); echo "  idt_reports_four_faults: PASS (SKIPPED -- no qemu-system-x86_64)"
+    skip_row idt_reports_four_faults "no qemu-system-x86_64"
 else
     idtf_ok=1
     idtf_notes=""
@@ -7425,7 +7844,7 @@ fn main() -> uint32 {
 }
 IDTHEOF
 if ! command -v qemu-system-x86_64 >/dev/null 2>&1; then
-    PASS=$((PASS + 1)); echo "  idt_common_handler_hook: PASS (SKIPPED -- no qemu-system-x86_64)"
+    skip_row idt_common_handler_hook "no qemu-system-x86_64"
 else
     idthk_ok=1
     idthk_notes=""
@@ -7509,7 +7928,7 @@ rm -f "$DIR/../idthk_in_$$.kr" "$DIR/../idthk_tmp_$$.kr" "/tmp/idthk_$$.log"
 # multi-block loop at all.
 TOTAL=$((TOTAL + 1))
 if ! command -v gunzip >/dev/null 2>&1 || ! command -v gzip >/dev/null 2>&1; then
-    PASS=$((PASS + 1)); echo "  gzip_stored_roundtrips: PASS (SKIPPED -- no gzip/gunzip)"
+    skip_row gzip_stored_roundtrips "no gzip/gunzip"
 elif ! $KRC --arch=$RUN_ARCH "$DIR/../examples/gzip_stored.kr" -o /tmp/krgz_$$ >/dev/null 2>&1; then
     FAIL=$((FAIL + 1)); echo "FAIL: gzip_stored_roundtrips (compile failed)"
 else
@@ -7949,7 +8368,7 @@ rm -f "$DIR/../mnem_tmp_$$.kr" /tmp/mnem_$$.o
 # x86_64 and says so otherwise rather than pretending to have covered it.
 TOTAL=$((TOTAL + 1))
 if [ "$RUN_ARCH" != "x86_64" ]; then
-    PASS=$((PASS + 1)); echo "  asm_push_pop_mov_runtime: PASS (SKIPPED -- x86-only mnemonics, host is $RUN_ARCH)"
+    skip_row asm_push_pop_mov_runtime "x86-only mnemonics, host is $RUN_ARCH"
 else
     cat > "$DIR/../mnemr_tmp_$$.kr" <<'MNREOF'
 fn mov_through(u64 a) -> u64 {
@@ -8031,7 +8450,7 @@ fi
 # the click was never seen, and a keystroke went missing -- 3 of 3 checks red.
 TOTAL=$((TOTAL + 1))
 if ! command -v qemu-system-x86_64 >/dev/null 2>&1 || ! command -v python3 >/dev/null 2>&1; then
-    PASS=$((PASS + 1)); echo "  mouse_gui_example_runs: PASS (SKIPPED -- no qemu-system-x86_64/python3)"
+    skip_row mouse_gui_example_runs "no qemu-system-x86_64/python3"
 elif [ ! -f "$MG_IMG" ]; then
     FAIL=$((FAIL + 1)); echo "FAIL: mouse_gui_example_runs (no image from the row above)"
 else
@@ -8264,7 +8683,7 @@ CR2EOF
     fi
     rm -f "$DIR/../cr2_tmp_$$.kr" /tmp/cr2_$$
 else
-    PASS=$((PASS + 1)); echo "  asm_cr2_encoding: PASS (SKIPPED -- x86_64 only)"
+    skip_row asm_cr2_encoding "x86_64 only"
 fi
 
 cat > "$DIR/../bm_tmp_$$.kr" <<'BMEOF'
@@ -8469,7 +8888,7 @@ rm -f "$DIR/../fwm_tmp_$$.kr" /tmp/fwm_$$.img
 #   wr=1       DMA write path, against -device ramfb.
 TOTAL=$((TOTAL + 1))
 if ! command -v qemu-system-aarch64 >/dev/null 2>&1; then
-    PASS=$((PASS + 1)); echo "  fw_cfg_mmio_answers_on_virt: PASS (SKIPPED -- no qemu-system-aarch64; compile row above is the only coverage)"
+    skip_row fw_cfg_mmio_answers_on_virt "no qemu-system-aarch64; compile row above is the only coverage"
 else
 cat > "$DIR/../fwmx_tmp_$$.kr" <<'FWMXEOF'
 import "std/uart_pl011.kr"
@@ -8679,7 +9098,7 @@ fi
 # Both halves were confirmed load-bearing by breaking each on purpose.
 TOTAL=$((TOTAL + 1))
 if ! command -v qemu-system-x86_64 >/dev/null 2>&1 || ! command -v python3 >/dev/null 2>&1; then
-    PASS=$((PASS + 1)); echo "  bare_console_example_runs: PASS (SKIPPED -- no qemu-system-x86_64/python3)"
+    skip_row bare_console_example_runs "no qemu-system-x86_64/python3"
 elif [ ! -f "$BCON_IMG" ]; then
     FAIL=$((FAIL + 1)); echo "FAIL: bare_console_example_runs (no image from the row above)"
 else
@@ -8951,7 +9370,7 @@ ASMBINDEOF
     fi
     rm -f "$DIR/../asmbind_tmp_$$.kr"
 else
-    PASS=$((PASS + 1)); echo "  asm_constraint_out_rax_binds: SKIP (RUN_ARCH=$RUN_ARCH, x86 machine code)"
+    skip_row asm_constraint_out_rax_binds "RUN_ARCH=$RUN_ARCH, x86 machine code"
 fi
 
 # --- std/uart_16550.kr is a provider layered on std/serial.kr ----------------
@@ -9011,7 +9430,7 @@ fn main() -> uint64 {
 }
 UPROVEOF
 if ! command -v qemu-system-x86_64 >/dev/null 2>&1; then
-    PASS=$((PASS + 1)); echo "  uart16550_provider_prints_on_serial: PASS (SKIPPED -- no qemu-system-x86_64)"
+    skip_row uart16550_provider_prints_on_serial "no qemu-system-x86_64"
 elif ! $KRC --target=none --arch=x86_64 --emit=image --load-addr=0x100000 \
             --stack-top=0x90000 "$DIR/../uprov_tmp_$$.kr" -o /tmp/uprov_$$.img >/dev/null 2>&1; then
     FAIL=$((FAIL + 1)); echo "FAIL: uart16550_provider_prints_on_serial (compile failed)"
@@ -9056,7 +9475,7 @@ fn main() -> uint64 {
 }
 USUEOF
 if ! command -v qemu-system-x86_64 >/dev/null 2>&1; then
-    PASS=$((PASS + 1)); echo "  uart16550_beside_serial_import: PASS (SKIPPED -- no qemu-system-x86_64)"
+    skip_row uart16550_beside_serial_import "no qemu-system-x86_64"
 elif ! $KRC --target=none --arch=x86_64 --emit=image --load-addr=0x100000 \
             --stack-top=0x90000 "$DIR/../usu_tmp_$$.kr" -o /tmp/usu_$$.img >/dev/null 2>&1; then
     FAIL=$((FAIL + 1)); echo "FAIL: uart16550_beside_serial_import (compile failed)"
@@ -9247,7 +9666,7 @@ fi
 #     evaluates to 0x0 in this dialect.
 TOTAL=$((TOTAL + 1))
 if [ "$PCI_HAVE_QEMU" = "0" ]; then
-    PASS=$((PASS + 1)); echo "  pci_enumerates_default_machine: PASS (SKIPPED -- no qemu-system-x86_64)"
+    skip_row pci_enumerates_default_machine "no qemu-system-x86_64"
 elif [ "$PCI_BUILT" = "0" ]; then
     FAIL=$((FAIL + 1)); echo "FAIL: pci_enumerates_default_machine (compile failed)"
     $KRC --target=none --arch=x86_64 --emit=image --load-addr=0x100000 \
@@ -9282,7 +9701,7 @@ fi
 # Take two devices away. A baked list passes the row above and fails here.
 TOTAL=$((TOTAL + 1))
 if [ "$PCI_HAVE_QEMU" = "0" ] || [ "$PCI_BUILT" = "0" ]; then
-    PASS=$((PASS + 1)); echo "  pci_tracks_the_machine: PASS (SKIPPED -- no qemu image)"
+    skip_row pci_tracks_the_machine "no qemu image"
 else
     pci_boot /tmp/pcicut_$$.log -vga none -net none
     pci_bad=""
@@ -9310,7 +9729,7 @@ fi
 # is its high half and pci_bar_next must skip to 6, not 5.
 TOTAL=$((TOTAL + 1))
 if [ "$PCI_HAVE_QEMU" = "0" ] || [ "$PCI_BUILT" = "0" ]; then
-    PASS=$((PASS + 1)); echo "  pci_64bit_bar_consumes_two_slots: PASS (SKIPPED -- no qemu image)"
+    skip_row pci_64bit_bar_consumes_two_slots "no qemu image"
 else
     pci_boot /tmp/pcirng_$$.log -device virtio-rng-pci
     pci_bad=""
@@ -9586,8 +10005,7 @@ if shoff + shnum * 64 != len(d):
             echo "  emit_obj_no_extern: FAIL (truncated ELF)"
         fi
     else
-        PASS=$((PASS + 1))
-        echo "  emit_obj_no_extern: SKIP (no python3)"
+        skip_row emit_obj_no_extern "no python3"
     fi
 else
     FAIL=$((FAIL + 1))
@@ -9653,8 +10071,7 @@ print(f'ok: file={len(d)} total_uncomp={total_uncomp}')
             echo "  lz4_real_compression: FAIL"
         fi
     else
-        PASS=$((PASS + 1))
-        echo "  lz4_real_compression: SKIP (no python3)"
+        skip_row lz4_real_compression "no python3"
     fi
 else
     FAIL=$((FAIL + 1))
@@ -9690,8 +10107,7 @@ if "$KRCBIN" /tmp/krc_rt_$$.kr -o /tmp/krc_rt_$$.krbo > /dev/null 2>&1 \
         echo "  krbo_roundtrip: FAIL (out='$out' code=$code)"
     fi
 else
-    PASS=$((PASS + 1))
-    echo "  krbo_roundtrip: SKIP (runner build)"
+    skip_row krbo_roundtrip "runner build"
 fi
 rm -f /tmp/krc_rt_$$.kr /tmp/krc_rt_kr_$$.kr /tmp/krc_rt_$$.krbo /tmp/krc_rt_kr_$$
 
@@ -10708,7 +11124,7 @@ lc_fits=$($KRC lc "$DIR/../std/alloc.kr" 2>/dev/null | grep -oE 'fitness: [0-9]+
 lc_max=0
 for f in $lc_fits; do [ "$f" -gt "$lc_max" ] && lc_max=$f; done
 if [ -z "$lc_fits" ] || [ "$lc_max" -ge 50 ]; then
-    PASS=$((PASS + 1)); echo "  lc_ci_gate_behaviour: SKIP (std/alloc.kr has no sub-50-only pattern; max=$lc_max)"
+    skip_row lc_ci_gate_behaviour "std/alloc.kr has no sub-50-only pattern; max=$lc_max"
 else
     $KRC lc --ci "$DIR/../std/alloc.kr" >/dev/null 2>&1; lc_bare=$?
     $KRC lc --ci --min-fitness=1 "$DIR/../std/alloc.kr" >/dev/null 2>&1; lc_all=$?
@@ -11493,8 +11909,7 @@ if timeout 30 "$KRC" --targets="$HOST_TGT" "$REPO_ROOT/test_tmp_$$.kr" -o /tmp/k
             echo "FAIL: custom_fat_single (expected 77, got $actual)"; FAIL=$((FAIL + 1))
         fi
     else
-        PASS=$((PASS + 1))
-        echo "  custom_fat_single: SKIP (no runner)"
+        skip_row custom_fat_single "no runner"
     fi
 else
     echo "FAIL: custom_fat_single (compilation failed)"; FAIL=$((FAIL + 1))
@@ -11561,8 +11976,7 @@ if "$KRC" $KRC_FLAGS --emit=obj /tmp/krc_inl_obj_$$.kr -o /tmp/krc_inl_obj_$$.o 
             echo "FAIL: inline_obj_keeps_symbol (helper not in symtab)"; FAIL=$((FAIL + 1))
         fi
     else
-        PASS=$((PASS + 1))
-        echo "  inline_obj_keeps_symbol: SKIP (no readelf)"
+        skip_row inline_obj_keeps_symbol "no readelf"
     fi
 else
     echo "FAIL: inline_obj_keeps_symbol (compile failed)"; FAIL=$((FAIL + 1))
@@ -21518,8 +21932,7 @@ TOTAL=$((TOTAL + 1))
 SRCINFO_PKGBUILD="$DIR/../packaging/aur/PKGBUILD"
 SRCINFO_FILE="$DIR/../packaging/aur/.SRCINFO"
 if [ ! -f "$SRCINFO_PKGBUILD" ] || [ ! -f "$SRCINFO_FILE" ]; then
-    PASS=$((PASS + 1))
-    echo "  aur_srcinfo_in_sync: SKIP (no packaging/aur/ in this checkout)"
+    skip_row aur_srcinfo_in_sync "no packaging/aur/ in this checkout"
 else
     SRCINFO_GEN=$(bash -c '
         set -e
@@ -23137,7 +23550,7 @@ AXPY
         echo "FAIL: arx_checksum_independent ($ax_ck)"; FAIL=$((FAIL + 1))
     fi
 else
-    PASS=$((PASS + 1)); echo "  arx_checksum_independent: SKIP (no python3)"
+    skip_row arx_checksum_independent "no python3"
 fi
 
 # Refusals. Each message carries a substring unique to it, so a defect that
@@ -25082,8 +25495,7 @@ if [ "$BCB_N" != "$BCB_EXECUTABLE" ]; then
     echo "FAIL: arm64_legacy_bounds_abort_status_agrees ($BCB_EXECUTABLE configs are runnable here but only $BCB_N produced a status -- a config failed to build, so this row has nothing to compare)"
     FAIL=$((FAIL + 1))
 elif [ "$BCB_EXECUTABLE" -lt 2 ]; then
-    PASS=$((PASS + 1))
-    echo "  arm64_legacy_bounds_abort_status_agrees: SKIP (only $BCB_EXECUTABLE config(s) executable here)"
+    skip_row arm64_legacy_bounds_abort_status_agrees "only $BCB_EXECUTABLE config(s) executable here"
 elif [ "$BCB_DIVERGE" = "0" ] && [ "$BCB_FIRST" = "1" ]; then
     PASS=$((PASS + 1))
     echo "  arm64_legacy_bounds_abort_status_agrees: PASS ($BCB_N/4 configs, all exit 1)"
@@ -25100,8 +25512,7 @@ fi
 BCB_A64_RUN=$(bcb_runner arm64)
 TOTAL=$((TOTAL + 1))
 if [ "$BCB_A64_RUN" = "SKIP" ]; then
-    PASS=$((PASS + 1))
-    echo "  arm64_legacy_bounds_absent_without_debug: SKIP (cannot execute arm64 here)"
+    skip_row arm64_legacy_bounds_absent_without_debug "cannot execute arm64 here"
 elif $BCB_KRC --arch=arm64 --legacy "$BCB_D/oob_store.kr" -o "$BCB_D/nodbg" > /dev/null 2>&1; then
     chmod +x "$BCB_D/nodbg"
     $BCB_A64_RUN "$BCB_D/nodbg" > /dev/null 2>&1
@@ -26177,6 +26588,27 @@ rm -rf "$G18L_D"
 # only now, when $TOTAL is final and already includes this row (Part A did the
 # TOTAL++). Placing this comparison next to Part A would have compared README
 # against a partial count and been permanently, uselessly red.
+#
+# ROWS RUN, NOT ROWS DEFINED. Rows behind an optional tool are not counted at
+# all when it is missing, so a count below README's is ambiguous on a partial
+# toolchain. It is NOT ambiguous on a full one: when every tool this file
+# probes for is present (a qemu-X-static is satisfied by qemu-X), the host is
+# x86_64 and the opt-in ANDROID_EMULATOR is off, every row runs and counts,
+# so TOTAL must equal README exactly and a deleted row is red. On any other
+# run a count below README's is a SKIP that names what is missing, never a
+# pass. More rows than README is red everywhere: a partial run can only count
+# fewer.
+RC_MISSING=""
+for RC_TOOL in $(grep -oE 'command -v [A-Za-z0-9_.+-]+' "$DIR/run_tests.sh" | awk '{print $3}' | sort -u); do
+    case $RC_TOOL in *-) continue ;; esac   # a prefix in prose, not a tool
+    [ "$RC_TOOL" = "adb" ] && continue      # used only under ANDROID_EMULATOR=1
+    command -v "$RC_TOOL" > /dev/null 2>&1 && continue
+    case $RC_TOOL in *-static) command -v "${RC_TOOL%-static}" > /dev/null 2>&1 && continue ;; esac
+    case $RC_TOOL in qemu-*) command -v "$RC_TOOL-static" > /dev/null 2>&1 && continue ;; esac
+    RC_MISSING="$RC_MISSING $RC_TOOL"
+done
+[ "$(uname -m)" = "x86_64" ] || RC_MISSING="$RC_MISSING host-not-x86_64"
+[ "${ANDROID_EMULATOR:-0}" = "1" ] && RC_MISSING="$RC_MISSING ANDROID_EMULATOR=1-adds-rows"
 if [ "$README_N" = "0" ] || [ -z "$README_COUNTS" ]; then
     FAIL=$((FAIL + 1))
     echo "FAIL: readme_test_count_matches_suite (found NO '**N tests**' in README.md)"
@@ -26208,19 +26640,32 @@ elif [ "$TOTAL" -gt "$README_UNIQ" ]; then
     echo "FAIL: readme_test_count_matches_suite (suite ran $TOTAL, README says '$README_UNIQ')"
     echo "  a run can only count FEWER rows than a full one, never more, so this is"
     echo "  rows added without updating README.md -- set BOTH '**N tests**' to $TOTAL"
+elif [ -n "$RC_MISSING" ]; then
+    # Not a full run: rows behind a missing tool neither run nor count, so
+    # fewer rows than README states is expected here and a deleted row cannot
+    # be told apart from them. That is a SKIP, never a pass (this branch used
+    # to count it as one, so deleting a row passed on every host).
+    skip_row readme_test_count_matches_suite "ran $TOTAL, README says $README_UNIQ; not a full run, missing:$RC_MISSING"
 elif [ "$TOTAL" -lt "$README_UNIQ" ]; then
-    # Fewer than claimed: either a partial toolchain (expected in CI) or rows
-    # were deleted. Those are indistinguishable from here, so say so rather
-    # than guessing -- and do not pass silently, which would make this row look
-    # like coverage it is not providing on this machine.
-    PASS=$((PASS + 1))
-    echo "  readme_test_count_matches_suite: SKIP (ran $TOTAL, README says $README_UNIQ --"
-    echo "    expected when optional tooling is absent; if this is a FULL run, rows were"
-    echo "    deleted and README.md needs updating to $TOTAL)"
+    # A full run counts every row. Fewer than README states means rows were
+    # deleted, or a row stopped counting itself -- either way README.md or
+    # the suite is wrong.
+    FAIL=$((FAIL + 1))
+    echo "FAIL: readme_test_count_matches_suite (full run counted $TOTAL, README says $README_UNIQ)"
+    echo "  every tool the suite probes is present, so every row ran: rows were deleted"
+    echo "  or stopped counting -- restore them, or set every '**N tests**' to $TOTAL"
 else
     PASS=$((PASS + 1))
     echo "  readme_test_count_matches_suite: PASS (README and suite both say $TOTAL)"
 fi
 
-echo "=== Results: $PASS/$TOTAL passed, $FAIL failed ==="
-exit $FAIL
+if [ $((PASS + FAIL + SKIP)) -ne "$TOTAL" ]; then
+    # A row that incremented TOTAL but was never counted as a pass, a
+    # failure or a skip (or the reverse) makes every number here untrue.
+    echo "FAIL: suite_accounting (PASS $PASS + FAIL $FAIL + SKIP $SKIP != TOTAL $TOTAL)"
+    FAIL=$((FAIL + 1))
+fi
+echo "=== Results: $PASS/$TOTAL passed, $FAIL failed, $SKIP skipped ==="
+# Any failure is exit 1: `exit $FAIL` would wrap to 0 at exactly 256.
+if [ "$FAIL" -ne 0 ]; then exit 1; fi
+exit 0

@@ -126,14 +126,19 @@ nothing, i.e. that mode was already using the legacy backend.
 | **`--emit=obj` / `-c`** | **legacy** | byte-identical with and without `--legacy` (160 B both) |
 | **`--emit=lkm`** | **legacy** | byte-identical with and without `--legacy` |
 | `--emit=image`, `--emit=uefi` | **IR** | the gate excludes only modes 3 and 7; the usual "differs from `--legacy`" evidence is *unavailable* here — both require `--target=none`, and `--legacy` is refused under it (`t6_legacy_tnone_*`), so there is no legacy build to diff against |
+| `--emit=arx`, `--emit=arxmod` (mode 10) | **IR** | the gate excludes only modes 3 and 7. Mode 10 forces `--target=none` (`src/main.kr:9614`) and refuses any other target, so `--legacy` is refused and there is no legacy build to diff; instead `--O0` (IR-only) changes the bytes on x86_64 and arm64, for both spellings. riscv32 and xtensa are refused (no ARX form) |
+| `--emit=fatimage` (mode 11) | **IR**, per slice | never reaches the gate as 11: `compile_fatimage` (`src/main.kr:8521`) calls `compile()` per slice as mode 9 (x86_64 UEFI) and mode 8 (x86_64 and arm64 image), both IR. Requires `--target=none` and `--arch=x86_64,arm64`, so `--legacy` is refused; `--O0` changes the bytes |
 | `--arch=riscv32`, `--arch=xtensa` (any emit mode) | **IR** | no legacy backend exists for these arches; `--legacy` is a silent no-op |
 | `--emit=ir` | neither — lowering only | the `if emit_mode == 6` block in `compile()`, `src/main.kr` — exits before codegen |
 
-This table is per **emit mode** and all ten are now listed. It named six of
-them for a while: `--emit=image` (8) and `--emit=uefi` (9) were both missing,
-and the second row's "differs from `--legacy`" evidence *cannot* be produced
-for either of them, so adding them by pattern-matching the rows above would
-have written a claim nobody could check.
+This table is per **emit mode** and all twelve modes (0–11) are listed. It
+named six of them for a while: `--emit=image` (8) and `--emit=uefi` (9) were
+both missing, and after them `--emit=arx`/`--emit=arxmod` (10) and
+`--emit=fatimage` (11). The second row's "differs from `--legacy`" evidence
+*cannot* be produced for any of those four, because all of them require
+`--target=none`, so adding them by pattern-matching the rows above would
+have written a claim nobody could check; the mode 10 and 11 rows use `--O0`
+instead, which is IR-only.
 
 The gate is one condition, in two places — `grep -n 'emit_ir_mode != 0 && arch =='
 src/main.kr` finds both:
@@ -957,25 +962,72 @@ anyway), 51 (`ARG`), 70/71 (`ALLOC`/`DEALLOC`: mmap/munmap, writing only the
 new block's size header), 80–83 (register extracts and multi-value
 returns), 119 (`TIME_NS`, a stack timespec) and 131 (`ARR_CHECK`). None of
 those writes memory a CSE-pure op reads; `IR_STATIC_LOAD` (77) is the only
-such op. The test row `cse_invalidate_set_pinned` pins the derivation, the
-exact side-effect set, the exact exemption set and the three call sites. It
-tokenises the sources with comments stripped, so spacing, line breaks and
-redundant parentheses do not matter, and reads every statement of both
-functions: each must be `if <cond> { return R }`, where `<cond>` is
-`op == N`, an `||` of those, or `op >= N && op <= M`, and the last must be
-the final `return`. Any other shape (a named constant, `!=`, `>`/`<`, an
-`else`, a literal past the opcode range) is refused by name, since an
-exemption written that way would otherwise pass unread. Reading the two
-functions is not enough on its own: a wrapper around
-`ir_opt_cse_invalidates` at the CSE call site, an `op != N &&` in front of
-that call, or a `keep = 0` after DCE's call leaves both functions untouched.
-So `ir_opt_is_side_effect` may be referenced only from `ir_opt_dce` (mark
-and sweep) and from the first line of `ir_opt_cse_invalidates`, and
-`ir_opt_cse_invalidates` only from `ir_opt_cse`. Each call site is pinned
-token for token, from the opcode load to the use of the result. The row
-`write_builtins_stop_static_cse` checks the effect at run time: a static
-read before and after a `memset`, a `memcpy` or a pointer store that writes
-the static through an alias must see the write, on x86_64 and arm64.
+such op.
+
+**What guards this set is run rows, not the pin.** A source-text pin can
+always be bypassed by an edit it does not read (a new pass, a pre-pass in
+front of a pinned loop, a call through a computed pointer), so every
+side-effecting op class that source can reach has a row that compiles a
+program and runs it on x86_64 and on arm64 under qemu-aarch64; a missing
+qemu makes the arm64 half a SKIP, never a pass. Each program reads a static
+`g`, runs the op once with its result unused, reads `g` again and exits with
+a code that is 50 exactly when the op was CSE'd across or deleted by DCE:
+- `side_effect_runs_*`: calls (50, with `ARG` 51), `call_ptr` (87),
+  `g = 9` (78), `read` (52), `syscall_raw` (85), the atomics 90/92/93 and
+  109–112, `vstore8..64` (94, inline and in a one-line helper), an `asm`
+  store with `in()` bindings on both arches (96), a scaled store that is
+  `STORE_BIS` (148) on arm64, and a loop back-edge plus an early `return` in a
+  void function (`BR` 40, `RET_VOID` 43); with
+  `write_builtins_stop_static_cse` (memset 72, memcpy 76, a store 31) and
+  `fmt_uint_stops_static_cse` (74). `IR_VSTORE` and `IR_STORE`/`IR_STORE_BIS`
+  keep their width in `dest`, so DCE's flow-insensitive liveness asks whether
+  vreg 1/2/4/8 is live; in a large function it usually is, and a store
+  treated as pure survives by accident. The one-line helpers are where a
+  dropped store is visible to DCE. `STORE_BIS` is created by
+  `ir_opt_fuse_lea_mem`, after CSE has run, so only its DCE half can be
+  observed;
+- `side_effect_kept_*`: ops whose effect is not a memory write a single
+  thread can read back must still not be deleted — `vload` (95) and
+  `atomic_load` (91) of address 0 fault, `asm` `ud2`/`udf` traps, a read after
+  `dealloc` (71) faults, `exec_process`/`exec_process_argv` (113/114) exec
+  `/bin/true`, `set_executable` (115) makes a scratch file executable, and
+  `--debug`'s `ARR_CHECK` (131) traps;
+- `side_effect_stops_static_cse_listing` and `barrier_stops_static_cse`:
+  CSE across 91, 95, 96, 113–115 and the barriers 126–130 is not observable
+  by a single-threaded run, so these count the loads of `g` in the
+  `--emit=asm` listing (two, not one). `get_module_path` (146) exists only in
+  a Windows build, which cannot run here: `module_path_stops_static_cse` and
+  a variant with the result discarded count the same loads under
+  `--target=windows`.
+
+Each run row was shown red against a compiler built with the op dropped from
+`ir_opt_is_side_effect`, skipped at the CSE call site, or deleted in DCE's
+sweep. No row, because no program can tell: `ALLOC` (70) and
+`EXTRACT_RDX`/`EXTRACT_R8` (80/81) are deleted only when their result is
+unused, and `TIME_NS` (119) only reads the clock. `FMT_BOOL`/`FMT_F64`
+(124/125) come only from `print` and f-strings, which read their result and
+write it with a `SYSCALL` that invalidates CSE anyway. `RET2`/`RET3` (82/83)
+are covered by the `tuple*` rows; `BR_COND`/`RET` (41/42) by nearly every row.
+
+The row `cse_invalidate_set_pinned` is a tripwire on top: it fails loudly
+when the code it reads moves. It reads every file in the Makefile's `SRCS`
+(`std/sha256.kr` included) with comments stripped and `u8`..`u64` read as
+`uint8`..`uint64`. It pins the derivation, the exact side-effect set
+(`WANT_SE`), the exact exemption set (`WANT_EX`) and four windows token for
+token: the whole DCE mark loop, the whole DCE sweep loop, the CSE loop from
+its `while` through the invalidation block, and the whole `ir_optimize` body
+(the pass list). A predicate may be mentioned (as an identifier, or as a
+string token such as `fn_addr("ir_opt_is_side_effect")`) only from
+`ir_opt_dce` and the first line of `ir_opt_cse_invalidates`, or only from
+`ir_opt_cse`. In the predicates it accepts `if <cond> { return R }` and a
+final `return R`, where `R` is a decimal or hex literal in any number of
+parentheses and `<cond>` is `op == N` (either side), an `||` of those, or
+`op >= N && op <= M` (either term first, either side of each comparison),
+grouped by parentheses if wanted. It refuses, by name: a named constant or a
+call, `!=`, `<`, `>`, an `else` (so `else if` too), `&&` that is not such a
+range, `&&` mixed with `||` without parentheses, and a statement after the
+final `return`. Inside a window any token change at all (a debug counter, a
+reordered statement) is refused, and the row has to be re-pinned with it.
 
 The hand-kept positive list it replaced had drifted twice. The barriers
 126–130 (`isb`, `dcache_flush`, `icache_invalidate`, `dsb`, `dmb`) were
@@ -1215,7 +1267,7 @@ first on xtensa.
   `load_spill r,v` with no bytes emitted between is elided entirely
   (`src/ir.kr:8252`); the same vreg into a *different* register becomes a
   reg-reg `mov` (8260). arm64 has the load-side equivalent at
-  `src/ir_aarch64.kr:665`.
+  `src/ir_aarch64.kr:666`.
 
 ### Floating point — two allocators, two different designs
 
@@ -1503,7 +1555,10 @@ removed; do not re-add them without re-verifying.
 5. If it has a side effect, add it to `ir_opt_is_side_effect()`
    (`src/ir.kr:13410`), with a condition the `cse_invalidate_set_pinned` row accepts (`op == N`,
    an `||` of those, or `op >= N && op <= M`), and add it to that row's
-   `WANT_SE`; it then invalidates CSE automatically. Only if it writes no
+   `WANT_SE`; it then invalidates CSE automatically. If source can reach
+   it, also add a run row next to `side_effect_runs_*` whose exit code
+   changes when the op is CSE'd across or deleted, and show it red against a
+   compiler with the op dropped: the pin only says the code moved. Only if it writes no
    memory a CSE-pure op reads may it be exempted in
    `ir_opt_cse_invalidates()` (`src/ir.kr:13618`), and the exemption goes
    into the row's `WANT_EX` too. If it is safe to CSE, add it to
@@ -1587,7 +1642,7 @@ opcodes that were never emitted.
 | per-BB instruction lists for colouring | flat lists via `ir_build_bb_lists` (`src/ir.kr:13809`) | a 65536-entry walk stack |
 | CTZ | open-codes `ir_popcount64(iso - 1)` at each site | has `ir_ctz64` (`ir.mlr:5495`) — MLRift is ahead here |
 | builtin-name dispatch | linear | (first char × name length) 128×32 prefilter (`ir_bi_filter_init`, `ir.mlr:916`) — MLRift is ahead |
-| conditional cleanup DCE | yes — `ir_opt_rewrites` deltas gate all six (named on 19 lines of `ir.kr`, its declaration included) | no — all six cleanup DCEs run unconditionally (0 uses). Compile-time only, no codegen difference |
+| conditional cleanup DCE | yes — `ir_opt_rewrites` deltas gate all six (named on 19 lines of `ir.kr`, its declaration included) | no — five of the six cleanup DCEs run unconditionally (0 uses of `ir_opt_rewrites`); the sixth, after the arm64-only `ir_opt_fuse_lea_mem`, runs only when that pass committed a fold (`if ir_lea_mem_fused != 0 { ir_opt_dce() }` in MLRift's `ir_optimize`), a flag of its own. Compile-time only, no codegen difference |
 
 The optimizer **pass list and order are identical** in both. The register
 allocator is identical in both, including the wide colour files, the colour
