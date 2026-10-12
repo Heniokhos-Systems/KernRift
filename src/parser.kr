@@ -1087,6 +1087,53 @@ fn p_alias_kind(uint64 idx) -> uint64 {
     return 0
 }
 
+// The number of declaration words (types and names) before token i on its
+// line, walking back over identifiers and type keywords; a `[...]` group
+// belongs to the word before it (`u8[2]`, `a[0]`) and is not a word itself.
+// The walk stops at any other token (`{ ( , ; }`, a literal, `static` ...)
+// or at the line start. When it stops at a token that expects an operand
+// (`=`, an operator, `return` ...), the first word it collected is that
+// expression's tail (`y = x  addr ab`, `y = a[0]  addr ab`), not a type,
+// and is not counted.
+fn p_alias_run_len(uint64 i) -> uint64 {
+    uint64 ln = tok_line_at(i)
+    uint64 n = 0
+    uint64 j = i
+    uint64 stop_k = 12                          // line start: a statement start
+    while j > 0 {
+        uint64 jj = j - 1
+        if tok_line_at(jj) != ln { break }
+        uint64 jk = tok_kind_at(jj)
+        if jk == 15 {
+            // skip back over a balanced [ ... ] group
+            uint64 depth = 0
+            uint64 found = 0
+            while 1 == 1 {
+                uint64 gk = tok_kind_at(jj)
+                if gk == 15 { depth = depth + 1 }
+                if gk == 14 {
+                    depth = depth - 1
+                    if depth == 0 { found = 1  break }
+                }
+                if jj == 0 { break }
+                jj = jj - 1
+            }
+            if found == 0 || tok_line_at(jj) != ln { stop_k = 12  break }
+            j = jj
+            continue
+        }
+        if jk == 1 || is_type_keyword(jk) != 0 {
+            n = n + 1
+            j = jj
+            continue
+        }
+        stop_k = jk
+        break
+    }
+    if n > 0 && p_alias_value_ctx(stop_k) != 0 { n = n - 1 }
+    return n
+}
+
 fn p_alias_is_type(uint64 i) -> uint64 {
     uint64 pk = 12                              // as if after `{`: statement start
     if i > 0 { pk = tok_kind_at(i - 1) }
@@ -1109,20 +1156,13 @@ fn p_alias_is_type(uint64 i) -> uint64 {
     }
     if i > 2 && pk == 19 && tok_kind_at(i - 2) == 2 && tok_kind_at(i - 3) == 93 { return 1 }  // at N : T
     if p_alias_value_ctx(pk) != 0 { return 0 }
-    // The NAME of a declaration: right after its type on the same line --
-    // `uint64 addr  x = 4`, `u8[2] byte`, `S addr  T t` (S a struct or type
-    // alias: an identifier that itself starts a declaration). An identifier
-    // that is instead the previous declaration's NAME (`uint64 a  addr b`,
-    // after a type keyword, `]` or another identifier) or the end of an
-    // expression (`y = v  addr b = 1`) leaves `addr` starting a new one.
-    if i > 0 && tok_line_at(i - 1) == ln {
-        if is_type_keyword(pk) != 0 || pk == 15 { return 0 }
-        if pk == 1 {
-            uint64 ppk = 12
-            if i > 1 && tok_line_at(i - 2) == ln { ppk = tok_kind_at(i - 2) }
-            if ppk == 12 || ppk == 10 || ppk == 16 || ppk == 18 || ppk == 13 || ppk == 70 || ppk == 71 || ppk == 74 { return 0 }
-        }
-    }
+    // The NAME of a declaration, by declaration PARITY along the line:
+    // several declarations may share a line (`uint64 n  S addr  T m`), and
+    // each is TYPE NAME, so the words before `addr` on its line alternate
+    // type, name, type, name. p_alias_run_len counts them; an odd count
+    // makes `addr` a name (`uint64 addr  x = 4`, `u8[2] byte`,
+    // `uint64 n  P2 addr`), an even one a type (`uint64 a  addr b`).
+    if (p_alias_run_len(i) & 1) != 0 { return 0 }
     if nk == 1 && tok_line_at(i + 1) == ln && p_tok_is(i + 1, "as", 2) == 0 { return 1 }
     if nk == 14 {
         uint64 j = i + 1

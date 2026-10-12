@@ -94,9 +94,10 @@ aliases (`u8`, `u64`, `i32`, …) are exact synonyms for the long form.
 Elsewhere they are names: a variable, parameter, field or function can be
 called `addr` or `byte` — `uint64 addr = base`, `unsafe { *(addr as uint32) -> v }`,
 `*(addr[i] as uint32)` for an array named `addr`, `*(p as uint64) -> addr`,
-`p.addr`, and a declaration named `addr` followed by another statement on the
-same line (`uint64 addr  x = 4`, `struct P { uint64 addr  P2 next }`) all
-work. The limits:
+`p.addr`, and a declaration named `addr` sharing its line with others
+(`uint64 addr  x = 4`, `struct P { uint64 addr  P2 next }`,
+`struct Q { uint64 n  S addr  T m }`) all work: the words of the declarations
+on a line alternate type, name, type, name, and that position decides. The limits:
 
 - they cannot name a type of your own — `type byte = …`, `struct addr`,
   `enum byte` are refused (`` `byte` is a built-in type alias of uint8 and

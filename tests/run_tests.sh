@@ -27336,7 +27336,7 @@ ali_refuse() {   # <row> <program> <needle>
     TOTAL=$((TOTAL + 1))
     printf '%s\n' "$2" > "$ALI_D/rf.kr"
     if "$DIR/../build/krc2" --arch="$RUN_ARCH" "$ALI_D/rf.kr" -o "$ALI_D/rf" > "$ALI_D/rf.log" 2>&1; then
-        FAIL=$((FAIL + 1)); echo "FAIL: $1 (compiled; the alias name was redefined silently)"
+        FAIL=$((FAIL + 1)); echo "FAIL: $1 (compiled; expected a refusal)"
     elif grep -qF -- "$3" "$ALI_D/rf.log"; then PASS=$((PASS + 1)); echo "  $1: PASS"
     else FAIL=$((FAIL + 1)); echo "FAIL: $1 (refused, but not with '$3': $(grep -m1 error "$ALI_D/rf.log"))"; fi
 }
@@ -27352,6 +27352,68 @@ ali_refuse alias_struct_addr_redefinition_refused 'struct addr { uint64 x  uint6
 fn main() -> uint64 { return sizeof(addr) }' "rf.kr:1:8: error: \`addr\` is a built-in type alias of uint64 and cannot be redefined; rename it"
 ali_refuse alias_enum_byte_redefinition_refused 'enum byte { A, B }
 fn main() -> uint64 { return 0 }' "rf.kr:1:6: error: \`byte\` is a built-in type alias of uint8 and cannot be redefined; rename it"
+# Declarations NAMED addr/byte sharing a line with other declarations: the
+# words before `addr` on its line alternate TYPE NAME, so an odd count makes it
+# a name. Each program compiles on the pre-alias compiler with this exit
+# (measured) and must keep it -- the second or later declaration on a line
+# (struct and locals), after `;`, on the line after a statement, and after an
+# expression ending in an index (`y = a[0]  addr ab = 9` declares ab, as
+# `y = x  addr ab = 9` does).
+ali_runs() {   # <row> <exit> <program>
+    TOTAL=$((TOTAL + 1))
+    printf '%s\n' "$3" > "$ALI_D/rn.kr"
+    if ! "$DIR/../build/krc2" --arch="$RUN_ARCH" "$ALI_D/rn.kr" -o "$ALI_D/rn" > "$ALI_D/rn.log" 2>&1; then
+        FAIL=$((FAIL + 1)); echo "FAIL: $1 (refused: $(grep -m1 error "$ALI_D/rn.log"))"; return
+    fi
+    "$ALI_D/rn" > /dev/null 2>&1; local rc=$?
+    if [ "$rc" = "$2" ]; then PASS=$((PASS + 1)); echo "  $1: PASS (exit $rc)"
+    else FAIL=$((FAIL + 1)); echo "FAIL: $1 (exit $rc, want $2)"; fi
+}
+ali_runs alias_name_mid_struct_field 33 'struct S { uint64 v }
+struct T { uint64 w }
+struct Q { uint64 n  S addr  T m }
+fn main() -> uint64 { Q q
+    q.n = 1
+    q.addr.v = 30
+    q.m.w = 2
+    return q.n + q.addr.v + q.m.w }'
+ali_runs alias_name_second_local_on_line 6 'struct P2 { uint64 z }
+fn main() -> uint64 { uint64 n = 1  P2 addr  P2 m
+    addr.z = 2
+    m.z = 3
+    return n + addr.z + m.z }'
+ali_runs alias_name_four_field_struct 32 'struct S { uint64 v }
+struct Q { uint64 a  S addr  S m  uint64 n }
+fn main() -> uint64 { return sizeof(Q) }'
+ali_runs alias_name_after_semicolon 6 'struct P2 { uint64 z }
+fn main() -> uint64 { uint64 n; P2 addr  P2 m
+    n = 1
+    addr.z = 2
+    m.z = 3
+    return n + addr.z + m.z }'
+# (the previous line ends in a bare expression statement `x`: counted across
+# the line break it would flip the parity)
+ali_runs alias_name_line_after_statement 10 'struct P2 { uint64 z }
+fn main() -> uint64 {
+    uint64 x = 1
+    x
+    P2 addr  P2 q
+    addr.z = 4
+    q.z = 5
+    return x + addr.z + q.z }'
+ali_runs alias_type_after_index_expression 12 'fn main() -> uint64 { uint64[2] a
+    a[0] = 3
+    uint64 y = 0
+    y = a[0]  addr ab = 9
+    return y + ab }'
+# The pointer-load destination is a variable name: an identifier, in both
+# the unsafe and the volatile form (`-> 5` was accepted and stored nowhere).
+ali_refuse alias_ptrload_dest_must_be_identifier_unsafe 'fn main() -> uint64 { u8[8] b
+    unsafe { *(b as uint64) -> 5 }
+    return 0 }' "rf.kr:2:32: error: expected identifier, got integer '5'"
+ali_refuse alias_ptrload_dest_must_be_identifier_volatile 'fn main() -> uint64 { u8[8] b
+    volatile { *(b as uint64) -> 5 }
+    return 0 }' "rf.kr:2:34: error: expected identifier, got integer '5'"
 # Every type position at once, spelled with the aliases and with u8/u64: the
 # two programs must compile to the SAME bytes on both arches. This is what
 # pins the positions with no runtime-visible width of their own (a device
