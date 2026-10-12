@@ -28372,6 +28372,11 @@ t10_row time_ms_of_ns_arm64 arm64 time_ms_of_ns "" 0
 # (The shell's own "Segmentation fault" notice is expected here: discarded.)
 t10_row alloc_guard_fault_x86_64 x86_64 alloc_guard_fault "armed" 139 2> /dev/null
 t10_row alloc_guard_fault_arm64 arm64 alloc_guard_fault "armed" 139 2> /dev/null
+# ... and a LOAD from the guard faults too: a read-permitting guard
+# (PROT_READ / PAGE_READONLY) still faults the store above, so only this pins
+# that an overrun READ is caught as well.
+t10_row alloc_guard_fault_read_x86_64 x86_64 alloc_guard_fault_read "armed" 139 2> /dev/null
+t10_row alloc_guard_fault_read_arm64 arm64 alloc_guard_fault_read "armed" 139 2> /dev/null
 # A guard the OS refuses is fatal: alloc_install_guard reports 0 and the
 # allocators' shared fatal path prints its message and exits 1.
 for T12_P in "alloc_guard_refused_is_fatal_x86_64 x86_64" "alloc_guard_refused_is_fatal_arm64 arm64"; do
@@ -28382,8 +28387,31 @@ for T12_P in "alloc_guard_refused_is_fatal_x86_64 x86_64" "alloc_guard_refused_i
     chmod +x "$T10_D/alloc_guard_false-$2"
     if [ "$2" = "arm64" ]; then timeout 60 "$T10_QEMU" "$T10_D/alloc_guard_false-$2" > "$T10_D/out" 2> "$T10_D/err"; T12_RC=$?
     else timeout 60 "$T10_D/alloc_guard_false-$2" > "$T10_D/out" 2> "$T10_D/err"; T12_RC=$?; fi
-    if [ "$T12_RC" = "1" ] && [ "$(cat "$T10_D/err")" = "arena: mprotect guard page failed" ]; then t10_ok "$1" "rc=1, the fatal message"
+    if [ "$T12_RC" = "1" ] && [ "$(cat "$T10_D/err")" = "arena: guard page failed" ]; then t10_ok "$1" "rc=1, the fatal message"
     else t10_bad "$1" "rc=$T12_RC stderr '$(head -c 60 "$T10_D/err")' (want rc 1 + the fatal message; 2 = refusal not reported, 3 = fatal path returned)"; fi
+done
+# ... and each ALLOCATOR's own message when the OS refuses its guard
+# (alloc_guard_refused_msg.kr: arena_new/pool_new/heap_new asked for 2^40
+# bytes from an overridden bump `alloc`, so the guard lands on unmapped
+# memory). The text names no mechanism -- it is VirtualProtect on Windows.
+T12_RM_WANT="a 1 arena: guard page failed|p 1 pool: guard page failed|h 1 heap: guard page failed|"
+# Natively the byte count too: each message is exactly its text plus one
+# newline (a wrong `len` argument drops or adds bytes the text compare hides).
+T12_RM_WANT_N="a 1 arena: guard page failed 25|p 1 pool: guard page failed 24|h 1 heap: guard page failed 24|"
+for T12_P in "alloc_guard_refused_names_allocator_x86_64 x86_64" "alloc_guard_refused_names_allocator_arm64 arm64"; do
+    set -- $T12_P
+    TOTAL=$((TOTAL + 1))
+    if [ "$2" = "arm64" ] && [ -z "$T10_QEMU" ]; then t10_skip "$1" "no qemu-aarch64-static"; continue; fi
+    if ! t10_build "$2" alloc_guard_refused_msg; then t10_bad "$1" "build failed: $(grep -m1 'error' "$T10_D/alloc_guard_refused_msg-$2.log" | cut -c1-140)"; continue; fi
+    chmod +x "$T10_D/alloc_guard_refused_msg-$2"
+    T12_RM_GOT=""
+    for T12_X in a p h; do
+        if [ "$2" = "arm64" ]; then timeout 60 "$T10_QEMU" "$T10_D/alloc_guard_refused_msg-$2" $T12_X > /dev/null 2> "$T10_D/err"; T12_RC=$?
+        else timeout 60 "$T10_D/alloc_guard_refused_msg-$2" $T12_X > /dev/null 2> "$T10_D/err"; T12_RC=$?; fi
+        T12_RM_GOT="$T12_RM_GOT$T12_X $T12_RC $(cat "$T10_D/err") $(wc -c < "$T10_D/err")|"
+    done
+    if [ "$T12_RM_GOT" = "$T12_RM_WANT_N" ]; then t10_ok "$1" "arena/pool/heap: rc=1 and their own message, byte-exact"
+    else t10_bad "$1" "got '$T12_RM_GOT' want '$T12_RM_WANT_N' (2 = the constructor returned)"; fi
 done
 # net_send to a closed peer: -EPIPE and the process lives (it was SIGPIPE,
 # status 141, while net_send was sendto with flags 0).
@@ -28499,7 +28527,7 @@ else
 fi
 
 if [ -z "$T10_WINE" ]; then
-    for T10_R in net_loopback_windows_wine time_monotonic_and_sleep_windows_wine time_ms_of_ns_windows_wine alloc_guard_smoke_windows_wine alloc_guard_fault_windows_wine alloc_guard_refused_is_fatal_windows_wine std_together_windows_wine net_user_names_windows_wine; do
+    for T10_R in net_loopback_windows_wine time_monotonic_and_sleep_windows_wine time_ms_of_ns_windows_wine alloc_guard_smoke_windows_wine alloc_guard_fault_windows_wine alloc_guard_fault_read_windows_wine alloc_guard_refused_is_fatal_windows_wine alloc_guard_refused_names_allocator_windows_wine std_together_windows_wine net_user_names_windows_wine; do
         TOTAL=$((TOTAL + 1)); t10_skip "$T10_R" "no wine; set KR_WINE=<path to wine>"
     done
 else
@@ -28528,7 +28556,20 @@ else
     # The guard faults: STATUS_ACCESS_VIOLATION (0xC0000005) ends the process,
     # which a shell sees as status 5 (the program itself never exits 5).
     t12_wine alloc_guard_fault_windows_wine "$T10_FX/alloc_guard_fault.kr" "armed" 5
-    t12_wine alloc_guard_refused_is_fatal_windows_wine "$T10_FX/alloc_guard_false.kr" "" 1 "arena: mprotect guard page failed"
+    t12_wine alloc_guard_fault_read_windows_wine "$T10_FX/alloc_guard_fault_read.kr" "armed" 5
+    t12_wine alloc_guard_refused_is_fatal_windows_wine "$T10_FX/alloc_guard_false.kr" "" 1 "arena: guard page failed"
+    TOTAL=$((TOTAL + 1))
+    if $T10_KRC --arch=x86_64 --target=windows --emit=pe "$T10_FX/alloc_guard_refused_msg.kr" -o "$T10_D/t12rm.exe" > "$T10_D/w.log" 2>&1; then
+        T12_RM_GOT=""
+        for T12_X in a p h; do
+            t10_wine "$T10_D/win.out" "$T10_D/win.err" t12rm.exe $T12_X; T12_RC=$?
+            T12_RM_GOT="$T12_RM_GOT$T12_X $T12_RC $(tr -d '\r' < "$T10_D/win.err" | grep -v -i 'freetype\|truetype\|or equal\|wineserver: \|^$')|"
+        done
+        if [ "$T12_RM_GOT" = "$T12_RM_WANT" ]; then t10_ok alloc_guard_refused_names_allocator_windows_wine "arena/pool/heap: rc=1 and their own message"
+        else t10_bad alloc_guard_refused_names_allocator_windows_wine "got '$T12_RM_GOT' want '$T12_RM_WANT'; wine output tail: $(t10_errtail)"; fi
+    else
+        t10_bad alloc_guard_refused_names_allocator_windows_wine "build: $(grep -m1 error "$T10_D/w.log" | cut -c1-120)"
+    fi
     t12_wine std_together_windows_wine "$T10_FX/std_together.kr" "OK" 0
     t12_wine net_user_names_windows_wine "$T10_FX/net_user_names.kr" "OK" 0
     if [ -x "$(dirname "$T10_WINE")/wineserver" ]; then

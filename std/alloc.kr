@@ -198,7 +198,8 @@ fn alloc_install_guard(u64 raw_end) -> u64 {
 // when the mechanism exists but refused this guard -- print `msg` (`len`
 // bytes) to stderr and exit(1). A guard that silently is not there reads as
 // protection, so it is never skipped. Callers reach this only when
-// alloc_guard_supported() is 1.
+// alloc_guard_supported() is 1. The messages name no mechanism ("guard page
+// failed"): it is mprotect on Unix and VirtualProtect on Windows.
 fn _kr_alloc_guard_or_die(u64 raw_end, u64 msg, u64 len) {
     if alloc_install_guard(raw_end) == 0 {
         write(2, msg, len)
@@ -237,7 +238,7 @@ fn arena_new(u64 capacity) -> u64 {
     // allocator pretending.
     u64 guard = 0
     if alloc_guard_supported() != 0 {
-        _kr_alloc_guard_or_die(base + 40 + capacity, "arena: mprotect guard page failed\n", 34)
+        _kr_alloc_guard_or_die(base + 40 + capacity, "arena: guard page failed\n", 25)
         guard = 1
     }
     store64(base + 32, guard)     // [32] guard
@@ -315,7 +316,7 @@ fn pool_new(u64 obj_size, u64 count) -> u64 {
     // treated as a failure.
     u64 guard = 0
     if alloc_guard_supported() != 0 {
-        _kr_alloc_guard_or_die(base + 56 + data_size, "pool: mprotect guard page failed\n", 33)
+        _kr_alloc_guard_or_die(base + 56 + data_size, "pool: guard page failed\n", 24)
         guard = 1
     }
     store64(base + 48, guard)         // guard
@@ -454,7 +455,7 @@ fn heap_new(u64 capacity) -> u64 {
     // treated as a failure.
     u64 guard = 0
     if alloc_guard_supported() != 0 {
-        _kr_alloc_guard_or_die(base + 56 + capacity, "heap: mprotect guard page failed\n", 33)
+        _kr_alloc_guard_or_die(base + 56 + capacity, "heap: guard page failed\n", 24)
         guard = 1
     }
     store64(base + 48, guard)   // guard

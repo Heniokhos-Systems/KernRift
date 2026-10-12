@@ -66,6 +66,10 @@ fn time_sleep_ns(u64 ns) {
         u64 start = time_ns()
         _kr_w32_Sleep(_kr_time_ms_of_ns(ns))
         u64 done = time_ns() - start
+        // DEFENSIVE, unkillable by design: Microsoft documents that Sleep
+        // may return up to a tick EARLY; no machine the project owns does it
+        // (measured natively: 0 early wakes in 2100 sleeps), so no row can
+        // reach this loop. It keeps the ">= ns" contract off vendor timing.
         while done < ns {
             _kr_w32_Sleep(_kr_time_ms_of_ns(ns - done))
             done = time_ns() - start

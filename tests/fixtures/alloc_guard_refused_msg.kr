@@ -1,0 +1,38 @@
+// std/alloc.kr (portable-syscall-layer Task 12): the fatal message each
+// allocator prints when the OS refuses ITS guard -- arena_new, pool_new and
+// heap_new themselves, not a fixture calling the shared fatal path with a
+// message of its own. `alloc` is overridden with a bump over a static pool,
+// and the constructor under test is asked for 2^40 bytes: the header lands in
+// the pool, the guard 1 TiB past it, on memory that is not mapped (Linux:
+// mprotect -ENOMEM) or not reserved (Windows: VirtualProtect FALSE). Nothing
+// touches the capacity before the guard. The message names no mechanism (it
+// is mprotect on Unix, VirtualProtect on Windows).
+//   alloc_guard_refused_msg a|p|h -> stderr "<arena|pool|heap>: guard page failed", exit 1
+// Exit 2 = the constructor returned; 64 = bad argument.
+import "../../std/alloc.kr"
+import "../../std/args.kr"
+
+static u8[1048576] rm_pool
+static uint64 rm_used = 0
+
+@builtin_override
+fn alloc(uint64 n) -> uint64 {
+    uint64 p = (rm_pool + rm_used + 15) & 0xFFFFFFFFFFFFFFF0
+    uint64 step = n
+    if step > 524288 { step = 64 }
+    rm_used = p + step - rm_pool
+    return p
+}
+@builtin_override
+fn dealloc(uint64 p) { }
+
+fn main() -> uint32 {
+    if sys_argc() != 2 { return 64 }
+    uint64 c = load8(sys_arg(1))
+    uint64 big = 1 << 40
+    if c == 97 { arena_new(big) }
+    else if c == 112 { pool_new(16, big / 16) }
+    else if c == 104 { heap_new(big) }
+    else { return 64 }
+    return 2
+}

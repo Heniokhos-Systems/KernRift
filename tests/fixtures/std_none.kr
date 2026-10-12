@@ -8,7 +8,10 @@
 //          (a state of 1 would reach the guard's none arm, fail, and exit);
 //   time:  time_now() IS time_ns(); time_sleep_ms(1) waits on that clock
 //          until 1 ms of it has passed;
-//   net:   every socket call is -ENOSYS (-38).
+//   net:   every socket call is -ENOSYS (-38): all eight net_* calls that
+//          return a value, and the sys_* calls net.kr has no wrapper for
+//          (getsockname, shutdown, sock_close, wait_readable); sys_random
+//          reports failure (0). So every os==4 arm of sys.kr runs here.
 // Prints "NONE OK", or "NONE FAIL <n>" / "EXIT".
 import "../../std/uart_16550.kr"
 import "../../std/alloc.kr"
@@ -18,6 +21,7 @@ import "../../std/net.kr"
 static u8[65536] sn_pool
 static uint64 sn_used = 0
 static uint64 sn_clock = 0
+static u8[16] sn_buf
 
 @builtin_override
 fn alloc(uint64 n) -> uint64 {
@@ -62,6 +66,16 @@ fn main() -> uint64 {
     if s != 0 - 38 { sn_fail(7) }
     if net_send(s, 0, 0) != 0 - 38 { sn_fail(8) }
     if net_recv(s, 0, 0) != 0 - 38 { sn_fail(9) }
+    if net_bind(s, 0, 16) != 0 - 38 { sn_fail(10) }
+    if net_listen(s, 1) != 0 - 38 { sn_fail(11) }
+    if net_accept(s) != 0 - 38 { sn_fail(12) }
+    if net_connect(s, 0, 16) != 0 - 38 { sn_fail(13) }
+    if net_setsockopt(s, 1, 2, 0, 4) != 0 - 38 { sn_fail(14) }
+    if sys_getsockname(s, 0, 0) != 0 - 38 { sn_fail(15) }
+    if sys_shutdown(s, 2) != 0 - 38 { sn_fail(16) }
+    if sys_sock_close(s) != 0 - 38 { sn_fail(17) }
+    if sys_wait_readable(s, 0) != 0 - 38 { sn_fail(18) }
+    if sys_random(sn_buf, 8) != 0 { sn_fail(19) }
     println_str("NONE OK")
     while 1 == 1 { }
     return 0

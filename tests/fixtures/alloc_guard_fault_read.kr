@@ -1,0 +1,27 @@
+// std/alloc.kr (portable-syscall-layer Task 12): the guard page faults a READ
+// too. alloc_guard_fault.kr stores into the guard; a guard that permits reads
+// (PROT_READ / PAGE_READONLY) still faults that store, so this twin LOADS
+// from it instead. Every byte of the requested capacity is writable, then a
+// load one page past the usable end -- always inside the guard, whatever the
+// rounding -- must kill the process: SIGSEGV on Linux (status 139),
+// STATUS_ACCESS_VIOLATION (0xC0000005; status 5 as a byte) on Windows, where
+// the guard is VirtualProtect(PAGE_NOACCESS). "armed" is printed before the load; a
+// guard that is not there prints "survived" and exits 3.
+import "../../std/alloc.kr"
+
+// The loaded byte is stored here, so the load is not dead code.
+static uint64 sink = 0
+
+fn main() -> uint32 {
+    uint64 page = alloc_page_size()
+    uint64 a = arena_new(100)
+    if load64(a + 32) != 1 { return 2 }
+    uint64 cap = load64(a)
+    uint64 i = 0
+    while i < cap { store8(a + 40 + i, 1)  i = i + 1 }
+    uint64 raw_end = a + 40 + cap
+    file_write(1, "armed\n", 6)
+    sink = load8(raw_end + page)
+    file_write(1, "survived\n", 9)
+    return 3
+}
