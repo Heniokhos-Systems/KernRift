@@ -1,0 +1,13 @@
+// std/sys.kr on ApexRift none (os 4): every sys_* arm for it must be
+// -ENOSYS, and no syscall_raw may be reachable -- a consumer builds with
+// --target=none on both arches. Never run (there is no OS).
+import "../../std/sys.kr"
+
+fn main() -> uint32 {
+    int64 s = sys_socket(2, 1, 0)
+    if sys_random(0, 0) != 0 { return 1 }
+    if sys_wait_readable(s, 10) != 0 { return 2 }
+    if sys_send(s, 0, 0) != 0 { return 3 }
+    if sys_recv(s, 0, 0) != 0 { return 4 }
+    return 0
+}

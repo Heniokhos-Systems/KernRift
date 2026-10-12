@@ -1,0 +1,4 @@
+import "../../std/args.kr"
+static uint64 cli_envp
+
+fn main() -> uint32 { return 0 }

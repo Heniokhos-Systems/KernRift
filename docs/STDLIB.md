@@ -18,9 +18,10 @@ here** — read their source directly. They fall into four groups:
   (the Windows import skeleton) (3 modules, 20 functions);
 - `apexrift` (18 functions).
 
-**Three of those modules define no functions at all** — `gmc_constants`,
+**Four of those modules define no functions at all** — `gmc_constants`,
 `gpu_navi32` and `pci` are register and constant tables that other modules
-import, so a function count of zero is the honest number for them and not a
+import, and `win32` is the (for now empty) home of the Windows import
+declarations, so a function count of zero is the honest number for them and not a
 sign the count is broken.
 
 Import a module with its `std/` path:

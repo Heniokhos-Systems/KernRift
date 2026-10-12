@@ -36,8 +36,8 @@ contributors and the curious; **Project** tracks direction and process.
   operators, control flow, structs, functions, builtins, annotations.
 - [Grammar](GRAMMAR.md) — the EBNF grammar and lexical rules.
 - [Standard Library](STDLIB.md) — 19 of the 55 `std/*.kr` modules, function
-  by function. The other 33 — the bare-metal drivers, the AMD GPU bring-up
-  modules and `apexrift` — are not written up yet; read their source.
+  by function. The other 36 — the bare-metal drivers, the AMD GPU bring-up
+  modules, the portable system layer (`sys`, `args`, `win32`) and `apexrift` — are not written up yet; read their source.
 - [Undefined Behavior](UNDEFINED_BEHAVIOR.md) — what is defined, what
   traps under `--debug`, and what is genuinely UB. **Read before writing
   `unsafe` code.**

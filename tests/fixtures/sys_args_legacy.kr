@@ -1,0 +1,12 @@
+// A --legacy Windows build leaves cli_argc at the 0xFFFFFFFF sentinel and
+// cli_argv at the raw command line. std/args.kr must read that as no
+// arguments: exit 0 only if argc is 0 and every index is 0 (it reports through
+// the exit code because the legacy path's stdout is not reliable under Wine).
+import "../../std/args.kr"
+
+fn main() -> uint32 {
+    if sys_argc() != 0 { return 1 }
+    if sys_arg(0) != 0 { return 2 }
+    if sys_arg(1) != 0 { return 3 }
+    return 0
+}

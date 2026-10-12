@@ -27951,9 +27951,9 @@ t10_build() {
 t10_run() {
     local a="$1" f="$2"; shift 2
     if [ "$a" = "arm64" ]; then
-        "$T10_QEMU" "$T10_D/$f-$a" "$@" > "$T10_D/out" 2>/dev/null
+        timeout 60 "$T10_QEMU" "$T10_D/$f-$a" "$@" > "$T10_D/out" 2>/dev/null
     else
-        "$T10_D/$f-$a" "$@" > "$T10_D/out" 2>/dev/null
+        timeout 60 "$T10_D/$f-$a" "$@" > "$T10_D/out" 2>/dev/null
     fi
 }
 # t10_row <row> <arch> <fixture> <want stdout> <want rc> [args...]
@@ -27979,9 +27979,11 @@ t10_row sys_random_arm64 arm64 sys_random "OK" 0
 # Every fixture also builds as a Windows slice (the default fat binary ships
 # one): the Unix arm's syscall_raw is pruned by the literal os chain, so no
 # refusal fires, and sys_socket on Windows is -ENOSYS until Task 11 -- the
-# loopback program fails at its first call (exit 1), under Wine.
+# loopback program fails at its first call with exit 21 (its own code for
+# sys_socket < 0 -- unique, so Wine's own launch failure, rc 1, can never pass for it), under Wine.
 TOTAL=$((TOTAL + 1))
 T10_W=""
+# sys_none.kr is built ONLY as --target=none (below); the others are not.
 for T10_F in sys_args sys_args_all sys_args_oob sys_loopback sys_random; do
     for T10_A in x86_64 arm64; do
         $T10_KRC --arch=$T10_A --target=windows --emit=pe "$T10_FX/$T10_F.kr" -o "$T10_D/$T10_F-w$T10_A.exe" > "$T10_D/w.log" 2>&1 \
@@ -27995,7 +27997,11 @@ for T10_F in sys_args sys_args_all sys_args_oob sys_loopback sys_random; do
         done
     done
 done
-if [ -z "$T10_W" ]; then t10_ok sys_fixtures_build_for_every_slice "5 fixtures x (windows x86_64, windows arm64, fat, macos x86_64, macos arm64)"; else t10_bad sys_fixtures_build_for_every_slice "$T10_W"; fi
+for T10_N in x86_64 arm64; do
+    $T10_KRC --arch=$T10_N --target=none --emit=image --load-addr=0x400000 --stack-top=0x3F0000 "$T10_FX/sys_none.kr" -o "$T10_D/none-$T10_N" > "$T10_D/w.log" 2>&1 \
+        || T10_W="$T10_W none-$T10_N:$(grep -m1 error "$T10_D/w.log" | cut -c1-80)"
+done
+if [ -z "$T10_W" ]; then t10_ok sys_fixtures_build_for_every_slice "5 fixtures x (windows x86_64, windows arm64, fat, macos x86_64, macos arm64) + sys_none.kr as --target=none on x86_64 and arm64"; else t10_bad sys_fixtures_build_for_every_slice "$T10_W"; fi
 
 # C8 against the std @shared statics. args.kr declares `@shared static u64
 # cli_argc/cli_argv`; a program that also declares them must say @shared too.
@@ -28029,8 +28035,33 @@ else
     t10_bad sys_args_shared_user_cli_argc_one_variable "build: $(grep -m1 error "$T10_U/shared.log" | cut -c1-200)"
 fi
 
+# cli_envp is the third @shared static (spec C8): same rule as cli_argc.
+TOTAL=$((TOTAL + 1))
+T10_O=$($T10_KRC --arch=x86_64 "$T10_FX/sys_envp_plain.kr" -o "$T10_U/envp_plain" 2>&1); T10_RC=$?
+if [ $T10_RC -ne 0 ] && printf '%s' "$T10_O" | grep -q "duplicate static .cli_envp. (first declared at .*args.kr:" && printf '%s' "$T10_O" | grep -q '@shared'; then
+    t10_ok sys_args_plain_user_cli_envp_refused "names args.kr and @shared"
+else
+    t10_bad sys_args_plain_user_cli_envp_refused "rc=$T10_RC: $(printf '%s' "$T10_O" | head -2 | cut -c1-200)"
+fi
+t10_row sys_args_shared_user_cli_envp_is_the_loaders x86_64 sys_envp "" 7
+t10_row sys_args_shared_user_cli_envp_is_the_loaders_arm64 arm64 sys_envp "" 7
+
+# The macOS -ENOSYS decision cannot be run (no Mach-O runner), so its shape is
+# pinned: _kr_sys_nr is the ONLY get_arch_id() reader in sys.kr and the arch
+# ids it compares against are exactly {1,2,7,8} (Linux/Android x86_64, arm64).
+# A 5 or 6 (macOS) or a 9..12 (bare metal) would hand Linux numbers to a kernel
+# that does not speak them.
+TOTAL=$((TOTAL + 1))
+T10_IDS=$(grep -v '^ *//' "$DIR/../std/sys.kr" | grep -oE '(a|get_arch_id\(\)) *(==|!=|<=|>=|<|>) *[0-9]+' | sed 's/ //g' | sort -u | tr '\n' ' ')
+T10_NGET=$(grep -v '^ *//' "$DIR/../std/sys.kr" | grep -c 'get_arch_id()')
+if [ "$T10_IDS" = "a==1 a==2 a==7 a==8 " ] && [ "$T10_NGET" = "1" ]; then
+    t10_ok sys_nr_arch_ids_are_linux_android_only "{1,2,7,8}, one get_arch_id()"
+else
+    t10_bad sys_nr_arch_ids_are_linux_android_only "ids '$T10_IDS' get_arch_id sites $T10_NGET"
+fi
+
 if [ -z "$T10_WINE" ]; then
-    for T10_R in sys_args_windows_equals_linux_wine sys_loopback_windows_enosys_wine; do
+    for T10_R in sys_args_windows_equals_linux_wine sys_loopback_windows_enosys_wine sys_args_legacy_sentinel_reads_as_no_arguments_wine; do
         TOTAL=$((TOTAL + 1)); t10_skip "$T10_R" "no wine; set KR_WINE=<path to wine>"
     done
 else
@@ -28053,6 +28084,20 @@ else
     cp "$T10_D/sys_loopback-wx86_64.exe" "$T10_D/sys_loopback.exe" 2>/dev/null
     t10_wine "$T10_D/win.out" "$T10_D/win.err" sys_loopback.exe; T10_RC=$?
     if [ "$T10_RC" = "21" ]; then t10_ok sys_loopback_windows_enosys_wine "sys_socket is -ENOSYS until Task 11 (exit 21)"; else t10_bad sys_loopback_windows_enosys_wine "rc=$T10_RC want 21"; fi
+    # --legacy Windows (and @naked main) leaves cli_argc at the 0xFFFFFFFF
+    # sentinel and cli_argv at the raw command line; args.kr must read that as
+    # "no arguments", never walk it (it crashed with 0xC0000005).
+    TOTAL=$((TOTAL + 1))
+    if $T10_KRC --legacy --arch=x86_64 --target=windows --emit=pe "$T10_FX/sys_args_legacy.kr" -o "$T10_D/sys_legacy.exe" > "$T10_D/w.log" 2>&1; then
+        t10_wine "$T10_D/win.out" "$T10_D/win.err" sys_legacy.exe a b; T10_RC=$?
+        if [ "$T10_RC" = "0" ]; then
+            t10_ok sys_args_legacy_sentinel_reads_as_no_arguments_wine "argc 0, sys_arg(0) and (1) are 0"
+        else
+            t10_bad sys_args_legacy_sentinel_reads_as_no_arguments_wine "rc=$T10_RC (1 argc, 2/3 sys_arg, 5 = access violation)"
+        fi
+    else
+        t10_bad sys_args_legacy_sentinel_reads_as_no_arguments_wine "build: $(grep -m1 error "$T10_D/w.log" | cut -c1-120)"
+    fi
     if [ -x "$(dirname "$T10_WINE")/wineserver" ]; then
         WINEPREFIX="$T10_D/pfx" "$(dirname "$T10_WINE")/wineserver" -w > /dev/null 2>&1
     fi

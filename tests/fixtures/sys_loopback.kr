@@ -7,6 +7,8 @@ static u8[16] lb_sa
 static u8[16] lb_ga
 static u8[8] lb_len
 static u8[16] lb_buf
+static u8[8] lb_one
+static u8[16] lb_tv
 
 fn lb_fill(uint64 sa, uint64 port) {
     uint64 i = 0
@@ -21,6 +23,8 @@ fn lb_fill(uint64 sa, uint64 port) {
 fn main() -> uint32 {
     int64 ls = sys_socket(2, 1, 0)
     if ls < 0 { return 21 }
+    store32(lb_one, 1)
+    if sys_setsockopt(ls, 1, 2, lb_one, 4) != 0 { return 22 }
     lb_fill(lb_sa, 0)
     if sys_bind(ls, lb_sa, 16) != 0 { return 2 }
     if sys_listen(ls, 4) != 0 { return 3 }
@@ -39,13 +43,30 @@ fn main() -> uint32 {
     if sys_recv(a, lb_buf, 16) != 4 { return 11 }
     if load8(lb_buf) != 112 { return 12 }
     if load8(lb_buf + 3) != 103 { return 13 }
+    // SO_RCVTIMEO (SOL_SOCKET 1, option 20) = 100 ms on the idle socket: a
+    // recv must now fail with -EAGAIN (-11) instead of blocking. A
+    // setsockopt that does nothing (or reports success without doing it)
+    // would block here; the harness's timeout turns that into a failure.
+    store64(lb_tv, 0)
+    store64(lb_tv + 8, 100000)
+    if sys_setsockopt(a, 1, 20, lb_tv, 16) != 0 { return 29 }
+    if sys_recv(a, lb_buf, 16) != 0 - 11 { return 30 }
+    // A 50 ms wait on an idle socket: >= 40 ms (a kernel never wakes ppoll
+    // early; 10 ms of slack for clock granularity) and <= 2 s (generous for a
+    // loaded machine or qemu; a milliseconds-as-seconds bug is 50 s, a
+    // wrong-scale nsec bug is microseconds).
+    uint64 t0 = time_ns()
     if sys_wait_readable(a, 50) != 0 { return 14 }
+    uint64 dt = time_ns() - t0
+    if dt < 40000000 { return 23 }
+    if dt > 2000000000 { return 24 }
     sys_shutdown(cs, 1)
     if sys_wait_readable(a, 5000) != 1 { return 15 }
     if sys_recv(a, lb_buf, 16) != 0 { return 16 }
-    sys_sock_close(a)
-    sys_sock_close(cs)
-    sys_sock_close(ls)
+    if sys_sock_close(a) != 0 { return 25 }
+    if sys_sock_close(cs) != 0 { return 26 }
+    if sys_sock_close(ls) != 0 { return 27 }
+    if sys_sock_close(ls) != 0 - 9 { return 28 }
     file_write(1, "OK\n", 3)
     return 0
 }

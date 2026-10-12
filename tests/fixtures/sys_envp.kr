@@ -1,0 +1,10 @@
+// cli_envp is @shared in std/args.kr: a program that imports it and declares
+// its own @shared cli_envp has ONE variable, and on Linux the loader's envp is
+// in it (non-zero). Exit 7 = non-zero, 8 = zero.
+import "../../std/args.kr"
+@shared static uint64 cli_envp
+
+fn main() -> uint32 {
+    if cli_envp != 0 { return 7 }
+    return 8
+}

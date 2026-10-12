@@ -6,7 +6,13 @@
 // (spec C7), so the same program sees the same argv on every OS and this file
 // needs no parser and no OS split.
 //
-// cli_argc / cli_argv are @shared: the prologue finds them by NAME, so a
+// cli_envp is declared too (spec C8), and that has a behavioural consequence:
+// exec_process / exec_process_argv pass `cli_envp` to the child when the
+// program defines it, else NULL. A program that imports this file therefore
+// hands its REAL environment to its children (the C behaviour) instead of an
+// empty one. On Windows cli_envp stays 0 (spec C7: the prologue leaves it).
+//
+// cli_argc / cli_argv / cli_envp are @shared: the prologue finds them by NAME, so a
 // program that reads them directly and also imports this file is meant to
 // share one variable -- but it must say so. A program that declares
 // `static uint64 cli_argc` without @shared and imports this file gets the
@@ -16,14 +22,21 @@
 
 @shared static u64 cli_argc
 @shared static u64 cli_argv
+@shared static u64 cli_envp
+
+// A `--legacy` Windows build and a `@naked fn main` leave cli_argc at the
+// 0xFFFFFFFF sentinel with cli_argv pointing at the raw command line, not at a
+// pointer array. Both readers treat that as "no arguments" rather than walk it.
 
 // Number of arguments, argv[0] included.
 fn sys_argc() -> u64 {
+    if cli_argc == 0xFFFFFFFF { return 0 }
     return cli_argc
 }
 
 // argv[i] as a pointer to a NUL-terminated string, or 0 when i >= argc.
 fn sys_arg(u64 i) -> u64 {
+    if cli_argc == 0xFFFFFFFF { return 0 }
     if i >= cli_argc { return 0 }
     return load64(cli_argv + i * 8)
 }
