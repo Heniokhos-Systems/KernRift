@@ -27168,11 +27168,14 @@ c7_skip() { PASS=$((PASS + 1)); echo "  $1: SKIP ($2)"; }
 #  - the LAUNCH: `wine prog.exe` occasionally prints "ShellExecuteEx failed"
 #    and exits 1 without starting prog.exe;
 #  - CreateProcessA fails a few times per thousand calls (GetLastError 731).
-#    In the op-114 sequence that leaves hProcess 0, the wait and the exit-code
-#    read fail, and the parent exits 0 with the child never run. A row whose
-#    child must run therefore retries when the child left no argv.out and the
-#    status is 0 (c7_wine_child). A quoting or parsing bug still runs the
-#    child, so it is never retried away.
+#    op 114 then exits 124 with "krc runtime: child process could not be
+#    started" (RUNTIME_EXIT_CODES.md). A row whose child must run retries
+#    exactly that: status 124 AND that stderr line AND no argv.out
+#    (c7_wine_child). It cannot hide a quoting or parsing bug: CreateProcessA
+#    does not parse lpCommandLine when lpApplicationName is given, so a wrong
+#    line still starts the child, which runs and fails the row on content;
+#    and a launch failure the program causes (a wrong path, a line Windows
+#    refuses) repeats on all 3 tries and the row fails on the 124.
 # c7_wine <out> <err> <prog> <args...>: status of the last try.
 c7_wine() {
     local o="$1" e="$2" t rc; shift 2
@@ -27189,12 +27192,13 @@ c7_wine_child() {
     for t in 1 2 3; do
         : > "$C7_D/run/argv.out"
         c7_wine "$C7_D/co" "$C7_D/ce" "$@"; rc=$?
-        { [ "$rc" = "0" ] && [ ! -s "$C7_D/run/argv.out" ]; } || return $rc
+        { [ "$rc" = "124" ] && [ ! -s "$C7_D/run/argv.out" ] \
+          && grep -qx 'krc runtime: child process could not be started' "$C7_D/ce"; } || return $rc
     done
     return $rc
 }
 cp "$C7_FX/argv_echo.kr" "$C7_FX/argv_rawparent.kr" "$C7_FX/argv_rtparent.kr" \
-   "$C7_FX/argv_vectors.kr" "$C7_FX/argv_leafrun.kr" "$C7_D/"
+   "$C7_FX/argv_vectors.kr" "$C7_FX/argv_leafrun.kr" "$C7_FX/argv_nochild.kr" "$C7_D/"
 # The table plus one very long line (20000-byte argument), and its expectation.
 C7_LONG=$(head -c 20000 /dev/zero | tr '\0' x)
 cp "$C7_FX/argv_table.txt" "$C7_D/run/argv_table.txt"
@@ -27210,6 +27214,7 @@ done
 $C7_KRC --arch=x86_64 --target=windows --emit=pe "$C7_D/argv_rawparent.kr" -o "$C7_D/run/argv_rawparent.exe" > /dev/null 2>&1
 cp "$C7_D/echo-x86_64.exe" "$C7_D/run/argv_echo.exe" 2>/dev/null
 cp "$C7_D/rt-x86_64.exe" "$C7_D/run/argv_rtparent.exe" 2>/dev/null
+$C7_KRC --arch=x86_64 --target=windows --emit=pe "$C7_D/argv_nochild.kr" -o "$C7_D/run/argv_nochild.exe" > /dev/null 2>&1
 
 # (a) the dumped leaves ARE the shipped code: each blob occurs exactly once in
 #     the PE that uses it (the parser in every main that has cli_argc, the
@@ -27363,6 +27368,139 @@ PYEOF
     esac
 fi
 
+# (d2) Windows arm64 op-114 plumbing, decoded from argv_rtparent's arm64 image
+#     the same way (no Windows-arm64 runner can execute it; only its leaves run,
+#     under qemu). Exactly two BLs reach the quoter leaf: the measure and the
+#     build. Before the measure: `stp Rp, Ra, [sp, #-16]!` with Rp traced back
+#     (mov/add/adrp) to the "argv_echo.exe" literal, then `ldp x19, x20, [sp],
+#     #16` -- x19 = path, x20 = argv, whichever registers the allocator picked
+#     -- `sub sp, sp, #0xd0`, x0 = x20, x1 = 0. After it: `mov x9, #32767`,
+#     `cmp x0, x9`, `b.hi` into a die block; then VirtualAlloc(x0 = 0, x1 = x21
+#     = the length, x2 = 0x3000, x3 = 4) and `cbz x0` into a die block; the
+#     build with x0 = x20, x1 = x22 = the buffer; STARTUPINFOA zeroed at
+#     sp+0x40 with cb = 104; CreateProcessA(x0 = x19, x1 = x22, x2..x7 = 0,
+#     [sp] = sp+0x40, [sp+8] = sp+0xa8); and `cbz w0` into a die block. Each die
+#     block is decoded too: the message it builds on the stack from
+#     immediates, its length, its exit code, and IAT calls bound to the NAMES
+#     GetStdHandle, WriteFile, ExitProcess -- 122, 123 and 124 respectively.
+#     Every IAT call is resolved through pe_slot_name, by name.
+TOTAL=$((TOTAL + 1))
+if ! command -v python3 > /dev/null 2>&1; then
+    c7_skip c7_win_arm64_exec_argv_structure "no python3"
+else
+    C7_PE="$C7_D/rt-arm64.exe"
+    C7_TX=$(pe_section "$C7_PE" .text)
+    C7_EX=$(python3 - "$C7_PE" "$C7_D/quote-arm64.bin" $C7_TX 2>&1 <<'PYEOF'
+import struct, sys
+pe = open(sys.argv[1], "rb").read(); blob = open(sys.argv[2], "rb").read()
+va, rs, rp = int(sys.argv[3]), int(sys.argv[4]), int(sys.argv[5])
+W = lambda off: struct.unpack_from("<I", pe, off)[0]
+rva = lambda off: va + (off - rp)
+def fail(m): print("FAIL " + m); sys.exit()
+def sx(v, bits): return v - (1 << bits) if v & (1 << (bits - 1)) else v
+iats = []
+def iat(o, want):
+    w, l = W(o), W(o + 4)
+    if (w & 0x9F00001F) != 0x90000010 or (l & 0xFFC003FF) != 0xF9400210 or W(o + 8) != 0xD63F0200:
+        fail("no ADRP/LDR/BLR x16 IAT call for %s at .text+0x%x" % (want, o - rp))
+    imm = sx((((w >> 5) & 0x7FFFF) << 2) | ((w >> 29) & 3), 21)
+    iats.append("%d %s" % (((rva(o) & ~0xFFF) + (imm << 12)) + ((l >> 10) & 0xFFF) * 8, want))
+def words(o, want, what):
+    got = [W(o + 4 * i) for i in range(len(want))]
+    if got != want: fail("%s: %s" % (what, " ".join("%08x" % x for x in got)))
+def br19(o, mask, val, what):
+    w = W(o)
+    if (w & mask) != val: fail("%s: %08x" % (what, w))
+    return o + 4 * sx((w >> 5) & 0x7FFFF, 19)
+def die(o, code, msg):
+    words(o, [0xD10183FF], "die %d: no sub sp, sp, #0x60" % code)
+    o += 4; x9 = 0; buf = bytearray(64)
+    while True:
+        w = W(o)
+        if (w & 0xFF80001F) == 0xD2800009: x9 = ((w >> 5) & 0xFFFF) << (16 * ((w >> 21) & 3))
+        elif (w & 0xFF80001F) == 0xF2800009:
+            sh = 16 * ((w >> 21) & 3); x9 = (x9 & ~(0xFFFF << sh)) | (((w >> 5) & 0xFFFF) << sh)
+        elif (w & 0xFFC003FF) == 0xF90003E9:
+            off = ((w >> 10) & 0xFFF) * 8 - 0x20
+            if off < 0 or off > 56: fail("die %d: message store at sp+0x%x" % (code, off + 0x20))
+            buf[off:off + 8] = struct.pack("<Q", x9)
+        else: break
+        o += 4
+    while (W(o) & 0x9F00001F) != 0x90000010:                 # mov x0, #-12
+        if (W(o) & 0x1F) != 0 or o - rp > rs: fail("die %d: stray %08x before GetStdHandle" % (code, W(o)))
+        o += 4
+    iat(o, "GetStdHandle"); o += 12
+    n = len(msg) + 1
+    words(o, [0x910083E1, 0xD2800002 | (n << 5), 0x910063E3, 0xD2800004], "die %d: WriteFile args" % code)
+    iat(o + 16, "WriteFile")
+    words(o + 28, [0xD2800000 | (code << 5)], "die %d: exit code" % code)
+    iat(o + 32, "ExitProcess")
+    got = bytes(buf[:n])
+    if got != (msg + "\n").encode(): fail("die %d writes %r" % (code, got))
+leaf = pe.find(blob)
+if leaf < 0: fail("no quoter leaf in the image")
+bls = [o for o in range(rp, rp + rs, 4)
+       if (W(o) & 0xFC000000) == 0x94000000 and o + 4 * sx(W(o) & 0x3FFFFFF, 26) == leaf]
+if len(bls) != 2: fail("%d BLs reach the quoter leaf, want 2" % len(bls))
+m, b = bls
+# path / argv through the stack
+st = W(m - 20)
+if (st & 0xFFFF83E0) != 0xA9BF03E0: fail("no stp Rp, Ra, [sp, #-16]! before the measure: %08x" % st)
+words(m - 16, [0xA8C153F3, 0xD10343FF, 0xAA1403E0, 0xD2800001], "ldp x19, x20 / sub sp / measure args")
+reg, add, o = st & 31, 0, m - 24
+while o > m - 24 - 64:
+    w = W(o)
+    if (w & 0xFFE0FFE0) == 0xAA0003E0 and (w & 31) == reg: reg = (w >> 16) & 31
+    elif (w & 0xFFC00000) == 0x91000000 and (w & 31) == reg: add, reg = (w >> 10) & 0xFFF, (w >> 5) & 31
+    elif (w & 0x9F000000) == 0x90000000 and (w & 31) == reg:
+        page = (rva(o) & ~0xFFF) + (sx((((w >> 5) & 0x7FFFF) << 2) | ((w >> 29) & 3), 21) << 12)
+        lit = page + add
+        break
+    o -= 4
+else: fail("stp's first register is not traced to an ADRP")
+secs, lf = [], struct.unpack_from("<I", pe, 60)[0]
+sh = lf + 24 + struct.unpack_from("<H", pe, lf + 20)[0]
+for i in range(struct.unpack_from("<H", pe, lf + 6)[0]):
+    vs, sv, sr, sp_ = struct.unpack_from("<IIII", pe, sh + 40 * i + 8)
+    if sv <= lit < sv + max(vs, sr): secs.append(sp_ + lit - sv)
+if not secs or pe[secs[0]:secs[0] + 14] != b"argv_echo.exe\0":
+    fail("the path register is not the \"argv_echo.exe\" literal")
+# the 32767 limit
+words(m + 4, [0xD28FFFE9, 0xEB09001F], "limit: mov x9, #32767 / cmp x0, x9")
+die(br19(m + 12, 0xFF00001F, 0x54000008, "no b.hi after the limit compare"), 122, "krc runtime: child command line too long")
+words(m + 16, [0xAA0003F5, 0xD2800000, 0xAA1503E1, 0xD2860002, 0xD2800083], "VirtualAlloc args")
+iat(m + 36, "VirtualAlloc")
+die(br19(m + 48, 0xFF00001F, 0xB4000000, "no cbz x0 after VirtualAlloc"), 123, "krc runtime: child command line allocation failed")
+words(m + 52, [0xAA0003F6, 0xAA1403E0, 0xAA1603E1], "build args")
+if b != m + 64: fail("the build BL is not right after its arguments")
+words(b + 4, [0xD2800009] + [0xF90003E9 | ((8 + i) << 10) for i in range(16)] + [0xD2800D09, 0xB90043E9], "STARTUPINFOA zeroing")
+c = b + 4 + 4 * 19
+words(c, [0xAA1303E0, 0xAA1603E1] + [0xD2800000 | r for r in range(2, 8)]
+      + [0x910103E9, 0xF90003E9, 0x9102A3E9, 0xF90007E9], "CreateProcessA args")
+iat(c + 48, "CreateProcessA")
+die(br19(c + 60, 0xFF00001F, 0x34000000, "no cbz w0 after CreateProcessA"), 124, "krc runtime: child process could not be started")
+print("ok"); print("\n".join(iats))
+PYEOF
+)
+    case "$C7_EX" in
+        ok*)
+            C7_LF=$(pe_lfanew "$C7_PE")
+            C7_IDT=$(pe_rva_off "$C7_PE" "$(pe_u "$C7_PE" $((C7_LF + 144)) 4)")
+            C7_WHY=""; C7_N=0
+            while read -r C7_RV C7_WANT; do
+                C7_NM=$(pe_slot_name "$C7_PE" "$C7_IDT" "$C7_RV")
+                [ "$C7_NM" = "$C7_WANT" ] || C7_WHY="$C7_WHY $C7_WANT-call-binds-to-'$C7_NM'"
+                C7_N=$((C7_N + 1))
+            done <<< "$(echo "$C7_EX" | tail -n +2)"
+            if [ -z "$C7_WHY" ] && [ "$C7_N" = "11" ]; then
+                c7_ok c7_win_arm64_exec_argv_structure "path/argv, 32767, VirtualAlloc, CreateProcessA, dies 122/123/124; $C7_N IAT calls bound by name"
+            else
+                c7_bad c7_win_arm64_exec_argv_structure "${C7_WHY:- $C7_N IAT calls, want 11}"
+            fi ;;
+        *) c7_bad c7_win_arm64_exec_argv_structure "$C7_EX" ;;
+    esac
+fi
+
 # (e) arm64 leaves under qemu: the full raw table through the dumped parser,
 #     and every round-trip vector through the dumped quoter then the parser.
 TOTAL=$((TOTAL + 2))
@@ -27384,6 +27522,33 @@ else
         c7_ok c7_roundtrip_leaves_arm64_qemu "$(grep -c '^#' "$C7_D/qr.out") vectors"
     else
         c7_bad c7_roundtrip_leaves_arm64_qemu "rc=$C7_RC; first difference: $(diff "$C7_D/qr.out" "$C7_FX/argv_roundtrip.expected" | head -3 | cut -c1-80 | tr '\n' '|')"
+    fi
+fi
+
+# (e2) the x86_64 leaves, natively: argv_leafrun.kr built for Linux x86_64
+#     calls the dumped Win64 leaves through its SysV->Win64 shim, on the same
+#     tables. Under Wine an x86 quoter overrun is invisible (the VirtualAlloc'd
+#     line is page-rounded); here the quoter's "measure == build, NUL at len-1,
+#     nothing written past len" checks run on x86_64 too. Needs an x86_64 host.
+TOTAL=$((TOTAL + 2))
+if [ "$(uname -m)" != "x86_64" ]; then
+    c7_skip c7_parser_table_x86_64_leaf "not an x86_64 host"
+    c7_skip c7_roundtrip_leaves_x86_64 "not an x86_64 host"
+elif ! $C7_KRC --arch=x86_64 "$C7_D/argv_leafrun.kr" -o "$C7_D/leafrun-x86_64" > /dev/null 2>&1; then
+    c7_bad c7_parser_table_x86_64_leaf "argv_leafrun.kr did not build for x86_64"
+    c7_bad c7_roundtrip_leaves_x86_64 "argv_leafrun.kr did not build for x86_64"
+else
+    timeout 120 "$C7_D/leafrun-x86_64" parse "$C7_D/parse-x86_64.bin" "$C7_D/run/argv_table.txt" > "$C7_D/xp.out" 2>&1; C7_RC=$?
+    if [ "$C7_RC" = "0" ] && cmp -s "$C7_D/xp.out" "$C7_D/table.expected"; then
+        c7_ok c7_parser_table_x86_64_leaf "$((C7_NT + 1)) lines"
+    else
+        c7_bad c7_parser_table_x86_64_leaf "rc=$C7_RC; first difference: $(diff "$C7_D/xp.out" "$C7_D/table.expected" | head -3 | cut -c1-80 | tr '\n' '|')"
+    fi
+    timeout 120 "$C7_D/leafrun-x86_64" rt "$C7_D/quote-x86_64.bin" "$C7_D/parse-x86_64.bin" > "$C7_D/xr.out" 2>&1; C7_RC=$?
+    if [ "$C7_RC" = "0" ] && cmp -s "$C7_D/xr.out" "$C7_FX/argv_roundtrip.expected"; then
+        c7_ok c7_roundtrip_leaves_x86_64 "$(grep -c '^#' "$C7_D/xr.out") vectors"
+    else
+        c7_bad c7_roundtrip_leaves_x86_64 "rc=$C7_RC; first difference: $(diff "$C7_D/xr.out" "$C7_FX/argv_roundtrip.expected" | head -3 | cut -c1-80 | tr '\n' '|')"
     fi
 fi
 
@@ -27419,10 +27584,11 @@ PYEOF
 fi
 
 # (f) Wine, x86_64, end to end. Counted SKIPs without wine (KR_WINE=<path>).
-TOTAL=$((TOTAL + 6))
+TOTAL=$((TOTAL + 7))
 if [ -z "$C7_WINE" ] || [ ! -x "$C7_WINE" ]; then
     for C7_R in c7_cli_argc_matches_linux c7_raw_cmdline_table_wine c7_exec_argv_roundtrip_wine \
-                c7_runner_krbo_arg_with_space_wine c7_exec_argv_too_long_exit_122_wine c7_exec_argv_limit_boundary_wine; do
+                c7_runner_krbo_arg_with_space_wine c7_exec_argv_too_long_exit_122_wine c7_exec_argv_limit_boundary_wine \
+                c7_exec_argv_missing_child_exit_124_wine; do
         c7_skip "$C7_R" "no wine; set KR_WINE=<path to wine>"
     done
 else
@@ -27494,6 +27660,16 @@ else
     c7_wine "$C7_D/co" "$C7_D/ce" argv_rtparent.exe 102; C7_RC=$?
     [ "$C7_RC" = "122" ] || C7_WHY="$C7_WHY 32768:rc-$C7_RC"
     if [ -z "$C7_WHY" ]; then c7_ok c7_exec_argv_limit_boundary_wine "32767 runs, 32768 exits 122"; else c7_bad c7_exec_argv_limit_boundary_wine "$C7_WHY"; fi
+
+    # A child that does not exist: CreateProcessA fails, and op 114 says so on
+    # stderr and exits 124 -- not 0 as if a child had run and succeeded (on
+    # Linux the call returns with exec_errno set). Deliberately c7_wine, not
+    # c7_wine_child: this row WANTS the 124 that c7_wine_child retries.
+    C7_WHY=""
+    c7_wine "$C7_D/co" "$C7_D/e124" argv_nochild.exe; C7_RC=$?
+    [ "$C7_RC" = "124" ] || C7_WHY="$C7_WHY rc-$C7_RC"
+    grep -qx 'krc runtime: child process could not be started' "$C7_D/e124" || C7_WHY="$C7_WHY no-stderr-line"
+    if [ -z "$C7_WHY" ]; then c7_ok c7_exec_argv_missing_child_exit_124_wine "no_such_child.exe"; else c7_bad c7_exec_argv_missing_child_exit_124_wine "$C7_WHY"; fi
     if [ -x "$(dirname "$C7_WINE")/wineserver" ]; then
         WINEPREFIX="$C7_D/pfx" "$(dirname "$C7_WINE")/wineserver" -w > /dev/null 2>&1
     fi

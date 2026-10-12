@@ -4067,6 +4067,8 @@ fn c7_a64_emit_quote_leaf() {
     uint64 l_qnorm = c7_label()
     uint64 l_qend = c7_label()
     uint64 l_qclose = c7_label()
+    uint64 l_pskip = c7_label()
+    uint64 l_q0skip = c7_label()
 
     emit_a64_movz(2, 0)
     emit_a64_movz(6, 0)
@@ -4092,21 +4094,29 @@ fn c7_a64_emit_quote_leaf() {
     c7_bind(l_scannext)
     emit_a64_add_imm(9, 9, 1)
     c7_a64_b(l_scan)
-    // Nothing to quote: verbatim.
+    // Nothing to quote: verbatim, except that a `"` is dropped (only argv[0]
+    // can get here holding one; see the C7 header in ir.kr).
     c7_bind(l_plain)
     emit_a64_ldrb(7, 3, 0)
     c7_a64_cbz_w(7, l_adone)
+    c7_a64_cmp_wi(7, 0x22)
+    c7_a64_bcond(C7_A64_EQ, l_pskip)
     c7_a64_quote_put_r(7)
+    c7_bind(l_pskip)
     emit_a64_add_imm(3, 3, 1)
     c7_a64_b(l_plain)
     c7_bind(l_q)
     c7_a64_quote_put_imm(0x22)
     c7_a64_cbnz_x(6, l_qb)
-    // argv[0] quoted: verbatim between the quotes (no backslash rule there).
+    // argv[0] quoted: verbatim between the quotes (no backslash rule there),
+    // its `"` dropped as above.
     c7_bind(l_q0)
     emit_a64_ldrb(7, 3, 0)
     c7_a64_cbz_w(7, l_qclose)
+    c7_a64_cmp_wi(7, 0x22)
+    c7_a64_bcond(C7_A64_EQ, l_q0skip)
     c7_a64_quote_put_r(7)
+    c7_bind(l_q0skip)
     emit_a64_add_imm(3, 3, 1)
     c7_a64_b(l_q0)
     // Quoted argument: count each backslash run, look at what ends it.
@@ -4229,6 +4239,7 @@ fn c7_a64_emit_exec_argv(uint64 path_r, uint64 argv_r) {
     uint64 l_long = c7_label()
     uint64 l_nomem = c7_label()
     uint64 l_quote = c7_label()
+    uint64 l_nochild = c7_label()
     uint64 l_over = c7_label()
     // Through the stack, so neither source can be overwritten by the other's
     // move whatever registers the allocator picked.
@@ -4275,6 +4286,7 @@ fn c7_a64_emit_exec_argv(uint64 path_r, uint64 argv_r) {
     emit_a64_add_imm(9, 31, 0xA8)
     emit_a64_str(9, 31, 8)
     emit_a64_win_call_iat(IAT_CreateProcessA)
+    c7_a64_cbz_w(0, l_nochild)              // BOOL: no child was started
     emit_a64_ldr(0, 31, 0xA8)
     emit_a64_mov_imm(1, 0xFFFFFFFF)
     emit_a64_win_call_iat(IAT_WaitForSingleObject)
@@ -4289,6 +4301,8 @@ fn c7_a64_emit_exec_argv(uint64 path_r, uint64 argv_r) {
     c7_a64_emit_die(122, "krc runtime: child command line too long\n", 41)
     c7_bind(l_nomem)
     c7_a64_emit_die(123, "krc runtime: child command line allocation failed\n", 50)
+    c7_bind(l_nochild)
+    c7_a64_emit_die(124, "krc runtime: child process could not be started\n", 48)
     c7_bind(l_quote)
     c7_a64_emit_quote_leaf()
     c7_bind(l_over)

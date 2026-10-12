@@ -48,3 +48,14 @@ argc=6
 <	>
 <q\"\>
 raw=<e a\\b " lead" "trail " "	" "q\\\"\\">
+#7 rc=3
+argc=3
+<ab>
+<x>
+<y>
+raw=<ab x y>
+#8 rc=2
+argc=2
+<ab cd>
+<x>
+raw=<"ab cd" x>

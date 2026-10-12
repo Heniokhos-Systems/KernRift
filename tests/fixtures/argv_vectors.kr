@@ -4,8 +4,10 @@
 // leaf harness argv_leafrun.kr (the dumped quoting leaf, then the dumped
 // parsing leaf, under qemu-aarch64-static). Each vector is an argv the child
 // must receive byte for byte; argv_roundtrip.expected lists them.
+// Vectors 7 and 8 are the exception: a `"` in argv[0] is dropped (spec C7),
+// so their argv[0] arrives without it.
 // Vector 0 is the spec's own: {"a b", "a\"b", "a\\", "", "x\\\\\"y"}.
-fn rtv_count() -> uint64 { return 7 }
+fn rtv_count() -> uint64 { return 9 }
 
 // Fills `argv` (room for 16 pointers) with vector k, NULL-terminated.
 // Returns the argument count, argv[0] included.
@@ -46,6 +48,19 @@ fn rtv_build(uint64 k, uint64 argv) -> uint64 {
     } else if k == 5 {
         store64(argv, "e")
         n = 1
+    } else if k == 7 {
+        // A `"` in argv[0] has no escape under UCRT: op 114 drops it, so
+        // argv[0] arrives without it and the later arguments stay intact
+        // (passed through, the odd `"` swallowed them into argv[0]).
+        store64(argv, "a\"b")
+        store64(argv + 8, "x")
+        store64(argv + 16, "y")
+        n = 3
+    } else if k == 8 {
+        // The same inside a quoted argv[0] (it has a space).
+        store64(argv, "a\"b c\"d")
+        store64(argv + 8, "x")
+        n = 2
     } else {
         store64(argv, "e")
         store64(argv + 8, "a\\\\b")

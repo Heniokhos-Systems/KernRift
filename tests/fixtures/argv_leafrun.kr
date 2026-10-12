@@ -1,8 +1,16 @@
-// C7 arm64 leaf harness (Linux arm64, run under qemu-aarch64-static). There is
-// no Windows-arm64 runner, so the two self-contained leaves the compiler emits
-// into every win-arm64 image are dumped with the hidden test flags
-// --dump-argv-parser=<file> / --dump-argv-quoter=<file> and called here
-// (AAPCS64, from an RWX mapping) on the same inputs the x86_64 Wine rows use.
+// C7 leaf harness. There is no Windows-arm64 runner, so the two
+// self-contained leaves the compiler emits into every win-arm64 image are
+// dumped with the hidden test flags --dump-argv-parser=<file> /
+// --dump-argv-quoter=<file> and called here (AAPCS64, from an RWX mapping)
+// on the same inputs the x86_64 Wine rows use; built for Linux arm64 and run
+// under qemu-aarch64-static. Built for Linux x86_64 it runs the dumped x86_64
+// leaves natively: they are Win64 (rcx, rdx, r8), call_ptr here is SysV (rdi,
+// rsi, rdx), so load_leaf puts a 9-byte shim in front of the blob --
+// mov r8,rdx; mov rdx,rsi; mov rcx,rdi -- that falls through into it. The
+// leaves touch only rax, rcx, rdx, r8-r11, all caller-saved under SysV too.
+// That makes the quoter's "measure == build, nothing past len" checks below
+// hold on x86_64 as well, where a VirtualAlloc'd buffer (page-rounded) hides
+// a small overrun from every Wine row.
 //   argv_leafrun parse <parser.bin> <table.txt>
 //       every line through parse(cmdline, buf, size) -> argc; prints the
 //       format argv_rawparent.exe prints (raw= is the line itself: the
@@ -62,8 +70,23 @@ fn load_leaf(uint64 path) -> uint64 {
     // keeps a default fat build of this file legal (no syscall_raw reachable
     // in a Windows slice); the harness only ever runs as Linux arm64.
     uint64 m = 0
+    uint64 skip = 0
     if get_target_os() == 2 {
         return 0
+    } else if get_arch_id() == 1 {
+        m = syscall_raw(9, 0, 65536, 7, 0x22, 0xFFFFFFFFFFFFFFFF, 0)
+        if m > 0xFFFFFFFFFFFFF000 { return 0 }
+        // SysV -> Win64: mov r8,rdx ; mov rdx,rsi ; mov rcx,rdi
+        store8(m + 0, 0x49)
+        store8(m + 1, 0x89)
+        store8(m + 2, 0xD0)
+        store8(m + 3, 0x48)
+        store8(m + 4, 0x89)
+        store8(m + 5, 0xF2)
+        store8(m + 6, 0x48)
+        store8(m + 7, 0x89)
+        store8(m + 8, 0xF9)
+        skip = 9
     } else {
         m = syscall_raw(222, 0, 65536, 7, 0x22, 0xFFFFFFFFFFFFFFFF, 0)
     }
@@ -71,7 +94,7 @@ fn load_leaf(uint64 path) -> uint64 {
     uint64 src = load64(bp)
     uint64 i = 0
     while i < n {
-        store8(m + i, load8(src + i))
+        store8(m + skip + i, load8(src + i))
         i = i + 1
     }
     return m

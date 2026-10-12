@@ -15376,8 +15376,12 @@ fn ir_emit_x86_function(uint64 fn_node) {
 //     or contains space, tab or `"`: inside the quotes every backslash run
 //     before a `"` is doubled plus one and the `"` escaped, a run before the
 //     closing quote is doubled. argv[0] follows argv[0]'s parse rule instead:
-//     quoted (no escaping) when empty or holding space/tab; a `"` inside
-//     argv[0] cannot be represented under UCRT and is passed through.
+//     quoted (no escaping) when empty or holding space/tab, and every `"` in
+//     it DROPPED -- UCRT's argv[0] rule has no escape for one, and passed
+//     through an odd count would keep quote mode on over the rest of the
+//     line, corrupting argv[1..]. The child gets argv[0] without its quotes
+//     (what UCRT itself yields for any even count); argv[1..] always
+//     round-trip.
 //
 // Neither leaf calls anything, touches a static, needs a fixup or (arm64)
 // writes x18 -- the Windows-arm64 TEB register. --dump-argv-parser= and
@@ -15388,7 +15392,9 @@ fn ir_emit_x86_function(uint64 fn_node) {
 // Runtime exit codes (docs/RUNTIME_EXIT_CODES.md): 121 the prologue's
 // VirtualAlloc failed; 122 the quoted child command line is longer than
 // CreateProcessA's 32767 bytes (NUL included); 123 op 114's VirtualAlloc
-// failed. Each writes one line to stderr first.
+// failed; 124 op 114's CreateProcessA failed (no child was started -- on
+// Linux the call returns with exec_errno set instead). Each writes one line
+// to stderr first.
 
 // Labels for the hand-emitted sequences above. Every branch in them is emitted
 // against a label and patched at c7_end(), never with a hand-counted offset.
@@ -15711,6 +15717,8 @@ fn c7_x86_emit_quote_leaf() {
     uint64 l_qnorm = c7_label()
     uint64 l_qend = c7_label()
     uint64 l_qclose = c7_label()
+    uint64 l_pskip = c7_label()
+    uint64 l_q0skip = c7_label()
 
     c7_b2(0x31, 0xC0)                       // xor eax, eax
     c7_b3(0x45, 0x31, 0xDB)                 // xor r11d, r11d
@@ -15740,24 +15748,34 @@ fn c7_x86_emit_quote_leaf() {
     c7_bind(l_scannext)
     c7_b3(0x49, 0xFF, 0xC1)                 // inc r9
     c7_x86_jmp(l_scan)
-    // Nothing to quote: verbatim.
+    // Nothing to quote: verbatim, except that a `"` is dropped. Only argv[0]
+    // can get here holding one (for argv[1..] a `"` forces quotes), and
+    // UCRT's argv[0] rule has no escape for it: passed through, an odd one
+    // would leave quote mode on over the rest of the line.
     c7_bind(l_plain)
     c7_b4(0x45, 0x0F, 0xB6, 0x10)           // movzx r10d, byte [r8]
     c7_b3(0x45, 0x84, 0xD2)                 // test r10b, r10b
     c7_x86_jcc(C7_JE, l_adone)
+    c7_b4(0x41, 0x80, 0xFA, 0x22)           // cmp r10b, '"'
+    c7_x86_jcc(C7_JE, l_pskip)
     c7_x86_quote_put(256)
+    c7_bind(l_pskip)
     c7_b3(0x49, 0xFF, 0xC0)                 // inc r8
     c7_x86_jmp(l_plain)
     c7_bind(l_q)
     c7_x86_quote_put(0x22)
     c7_b3(0x45, 0x85, 0xDB)                 // test r11d, r11d
     c7_x86_jcc(C7_JNE, l_qb)
-    // argv[0] quoted: verbatim between the quotes (no backslash rule there).
+    // argv[0] quoted: verbatim between the quotes (no backslash rule there),
+    // its `"` dropped as above.
     c7_bind(l_q0)
     c7_b4(0x45, 0x0F, 0xB6, 0x10)           // movzx r10d, byte [r8]
     c7_b3(0x45, 0x84, 0xD2)                 // test r10b, r10b
     c7_x86_jcc(C7_JE, l_qclose)
+    c7_b4(0x41, 0x80, 0xFA, 0x22)           // cmp r10b, '"'
+    c7_x86_jcc(C7_JE, l_q0skip)
     c7_x86_quote_put(256)
+    c7_bind(l_q0skip)
     c7_b3(0x49, 0xFF, 0xC0)                 // inc r8
     c7_x86_jmp(l_q0)
     // Quoted argument: count each backslash run, look at what ends it.
@@ -15906,13 +15924,15 @@ fn c7_x86_pop(uint64 r) {
 // exec_process_argv on Windows x86_64 (op 114): quote argv into ONE command
 // line with the quoter leaf -- measured first, refused past CreateProcessA's
 // 32767 bytes (exit 122), built in a VirtualAlloc'd buffer (exit 123 if that
-// fails) -- then CreateProcessA + wait + ExitProcess(child status), as before.
+// fails) -- then CreateProcessA (exit 124 if it fails) + wait +
+// ExitProcess(child status).
 // Never returns, which is what makes clobbering r12-r15 here safe.
 fn c7_x86_emit_exec_argv(uint64 path_r, uint64 argv_r) {
     c7_begin()
     uint64 l_long = c7_label()
     uint64 l_nomem = c7_label()
     uint64 l_quote = c7_label()
+    uint64 l_nochild = c7_label()
     uint64 l_over = c7_label()
     // Through the stack, so neither source can be overwritten by the other's
     // move whatever registers the allocator picked.
@@ -15963,6 +15983,8 @@ fn c7_x86_emit_exec_argv(uint64 path_r, uint64 argv_r) {
     emit_byte(0x48); emit_byte(0x8D); emit_byte(0x84); emit_byte(0x24); emit_u32_le(0xB8)
     emit_byte(0x48); emit_byte(0x89); emit_byte(0x44); emit_byte(0x24); emit_byte(0x48)
     emit_win_call_iat(IAT_CreateProcessA)
+    c7_b2(0x85, 0xC0)                       // test eax, eax  (BOOL)
+    c7_x86_jcc(C7_JE, l_nochild)
     // WaitForSingleObject(hProcess, INFINITE)
     emit_byte(0x48); emit_byte(0x8B); emit_byte(0x8C); emit_byte(0x24); emit_u32_le(0xB8)
     emit_byte(0xBA); emit_u32_le(0xFFFFFFFF)
@@ -15981,6 +16003,8 @@ fn c7_x86_emit_exec_argv(uint64 path_r, uint64 argv_r) {
     c7_x86_emit_die(122, "krc runtime: child command line too long\n", 41)
     c7_bind(l_nomem)
     c7_x86_emit_die(123, "krc runtime: child command line allocation failed\n", 50)
+    c7_bind(l_nochild)
+    c7_x86_emit_die(124, "krc runtime: child process could not be started\n", 48)
     c7_bind(l_quote)
     c7_x86_emit_quote_leaf()
     c7_bind(l_over)

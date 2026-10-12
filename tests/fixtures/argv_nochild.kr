@@ -1,0 +1,17 @@
+// C7 missing child (Windows; RUNTIME_EXIT_CODES.md code 124).
+// exec_process_argv of a program that does not exist: CreateProcessA fails,
+// and op 114 must write "krc runtime: child process could not be started" to
+// stderr and exit 124 -- never exit 0 as if a child had run and succeeded
+// (Linux returns from the call with exec_errno set instead). exec_process_argv
+// never returns on Windows, so reaching the end of main is a failure (77).
+static uint64 cli_argc
+static uint64 cli_argv
+
+fn main() -> uint32 {
+    uint64 argv = alloc(3 * 8)
+    store64(argv, "no_such_child.exe")
+    store64(argv + 8, "x")
+    store64(argv + 16, 0)
+    exec_process_argv("no_such_child.exe", argv)
+    return 77
+}
