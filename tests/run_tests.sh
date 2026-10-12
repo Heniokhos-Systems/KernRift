@@ -49,7 +49,35 @@ TOTAL=0
 # fails the suite.
 skip_row() {
     SKIP=$((SKIP + 1))
+    SKIP_NAMES="$SKIP_NAMES$1
+"
     echo "  $1: SKIP ($2)"
+}
+# Every skipped row's name, one per line: on a full run the README gate at the
+# end requires each of them to be in SKIP_ALLOW (a skip with a non-tool reason,
+# named there). A tool row skipped on a full run (QEMU_A64 blanked mid-file,
+# say) is therefore red, not a quiet SKIP.
+SKIP_NAMES=""
+
+# The summary at the end sets SUMMARY_DONE=1 just before the suite's own exit.
+# Any other way out of this file -- a stray `exit 0` in a row, a `set -e`
+# casualty -- would otherwise report whatever status it had with most rows
+# never run; the trap turns it into exit 1.
+# Rows that add their own EXIT cleanup chain it in front of SUITE_EXIT_TRAP
+# and restore SUITE_EXIT_TRAP afterwards, never `trap - EXIT`.
+SUMMARY_DONE=0
+SUITE_EXIT_TRAP='[ "$SUMMARY_DONE" = 1 ] || { echo "FAIL: suite_exit (the suite exited before its summary)"; exit 1; }'
+trap "$SUITE_EXIT_TRAP" EXIT
+
+# Per-test wall-clock bound for the run_* helpers' compiled programs, so a
+# miscompile that loops cannot hang the suite: it fails as TIMEOUT. The limit
+# is generous (every row's program runs in well under a second); override with
+# RUN_TEST_TIMEOUT. rb_timed_out RC T0 says whether an exit status RC from
+# `timeout` started at $SECONDS == T0 was the limit firing (124 after TERM, 137
+# after the follow-up KILL) rather than the program's own exit code.
+RUN_TEST_TIMEOUT="${RUN_TEST_TIMEOUT:-30}"
+rb_timed_out() {
+    { [ "$1" = 124 ] || [ "$1" = 137 ]; } && [ $((SECONDS - $2)) -ge "$RUN_TEST_TIMEOUT" ]
 }
 
 run_test() {
@@ -64,8 +92,12 @@ run_test() {
         rm -f "$REPO_ROOT/test_tmp_$$.kr"
         chmod +x /tmp/krc_test_$$
         local got=0
-        /tmp/krc_test_$$ > /dev/null 2>&1 && got=0 || got=$?
-        if [ "$got" = "$expected" ]; then
+        local t0=$SECONDS
+        timeout -k 5 "$RUN_TEST_TIMEOUT" /tmp/krc_test_$$ > /dev/null 2>&1 && got=0 || got=$?
+        if rb_timed_out "$got" "$t0"; then
+            echo "FAIL: $name (TIMEOUT: still running after ${RUN_TEST_TIMEOUT}s)"
+            FAIL=$((FAIL + 1))
+        elif [ "$got" = "$expected" ]; then
             PASS=$((PASS + 1))
         else
             echo "FAIL: $name (expected $expected, got $got)"
@@ -124,9 +156,13 @@ run_test_output() {
         rm -f "$REPO_ROOT/test_tmp_$$.kr"
         chmod +x /tmp/krc_test_$$
         local got_output
-        got_output=$(/tmp/krc_test_$$ 2>/dev/null)
+        local t0=$SECONDS
+        got_output=$(timeout -k 5 "$RUN_TEST_TIMEOUT" /tmp/krc_test_$$ 2>/dev/null)
         local got_exit=$?
-        if [ "$got_output" = "$expected_output" ] && [ "$got_exit" = "$expected_exit" ]; then
+        if rb_timed_out "$got_exit" "$t0"; then
+            echo "FAIL: $name (TIMEOUT: still running after ${RUN_TEST_TIMEOUT}s)"
+            FAIL=$((FAIL + 1))
+        elif [ "$got_output" = "$expected_output" ] && [ "$got_exit" = "$expected_exit" ]; then
             PASS=$((PASS + 1))
         else
             if [ "$got_output" != "$expected_output" ]; then
@@ -930,8 +966,11 @@ run_bchk_test() {
         rm -f "$REPO_ROOT/test_tmp_$$.kr"
         chmod +x /tmp/krc_bchk_$$
         local got=0
-        /tmp/krc_bchk_$$ > /dev/null 2>&1 && got=0 || got=$?
-        if [ "$got" = "$expected" ]; then
+        local t0=$SECONDS
+        timeout -k 5 "$RUN_TEST_TIMEOUT" /tmp/krc_bchk_$$ > /dev/null 2>&1 && got=0 || got=$?
+        if rb_timed_out "$got" "$t0"; then
+            echo "FAIL: $name (TIMEOUT: still running after ${RUN_TEST_TIMEOUT}s)"; FAIL=$((FAIL + 1))
+        elif [ "$got" = "$expected" ]; then
             PASS=$((PASS + 1))
         else
             echo "FAIL: $name (expected $expected, got $got)"; FAIL=$((FAIL + 1))
@@ -1016,8 +1055,11 @@ run_store_use_test() {
         echo "FAIL: $name (false unused-variable warning)"; FAIL=$((FAIL + 1))
     else
         local got=0
-        /tmp/krc_su_$$ > /dev/null 2>&1 && got=0 || got=$?
-        if [ "$got" = "$expected" ]; then
+        local t0=$SECONDS
+        timeout -k 5 "$RUN_TEST_TIMEOUT" /tmp/krc_su_$$ > /dev/null 2>&1 && got=0 || got=$?
+        if rb_timed_out "$got" "$t0"; then
+            echo "FAIL: $name (TIMEOUT: still running after ${RUN_TEST_TIMEOUT}s)"; FAIL=$((FAIL + 1))
+        elif [ "$got" = "$expected" ]; then
             PASS=$((PASS + 1))
         else
             echo "FAIL: $name (expected exit $expected, got $got)"; FAIL=$((FAIL + 1))
@@ -3851,7 +3893,14 @@ fi
 TOTAL=$((TOTAL + 1))
 if [ "$(uname -m)" != "x86_64" ] && [ "$(uname -m)" != "amd64" ]; then
     skip_row emit_obj_readelf "non-x86_64 host"
-elif command -v readelf > /dev/null 2>&1 && [ -f /tmp/krc_obj_$$.o ]; then
+elif ! command -v readelf > /dev/null 2>&1; then
+    skip_row emit_obj_readelf "readelf not installed"
+elif [ ! -f /tmp/krc_obj_$$.o ]; then
+    # The .o comes from the -c compile above; its absence is a compiler
+    # failure, not a missing tool.
+    FAIL=$((FAIL + 1))
+    echo "  emit_obj_readelf: FAIL (no .o from the -c compile)"
+else
     sections=$(readelf -S /tmp/krc_obj_$$.o 2>/dev/null)
     has_text=$(echo "$sections" | grep -c '\.text')
     has_symtab=$(echo "$sections" | grep -c '\.symtab')
@@ -3865,8 +3914,6 @@ elif command -v readelf > /dev/null 2>&1 && [ -f /tmp/krc_obj_$$.o ]; then
         FAIL=$((FAIL + 1))
         echo "  emit_obj_readelf: FAIL (text=$has_text symtab=$has_symtab main=$has_main add=$has_add)"
     fi
-else
-    skip_row emit_obj_readelf "readelf not found or .o missing"
 fi
 rm -f /tmp/krc_obj_$$.kr /tmp/krc_obj_$$.o /tmp/krc_obj_c_$$.o
 
@@ -4564,8 +4611,10 @@ run_test_legacy() {
     printf '%s\n' "$input" > "$REPO_ROOT/test_tmp_$$.kr"
     if $KRC --arch=$LEGACY_ARCH --legacy "$REPO_ROOT/test_tmp_$$.kr" -o /tmp/krc_leg_$$ > /dev/null 2>&1; then
         rm -f "$REPO_ROOT/test_tmp_$$.kr"; chmod +x /tmp/krc_leg_$$
-        local got=0; /tmp/krc_leg_$$ > /dev/null 2>&1 && got=0 || got=$?
-        if [ "$got" = "$expected" ]; then PASS=$((PASS + 1));
+        local got=0; local t0=$SECONDS
+        timeout -k 5 "$RUN_TEST_TIMEOUT" /tmp/krc_leg_$$ > /dev/null 2>&1 && got=0 || got=$?
+        if rb_timed_out "$got" "$t0"; then echo "FAIL: $name (legacy: TIMEOUT: still running after ${RUN_TEST_TIMEOUT}s)"; FAIL=$((FAIL + 1))
+        elif [ "$got" = "$expected" ]; then PASS=$((PASS + 1));
         else echo "FAIL: $name (legacy: expected $expected, got $got)"; FAIL=$((FAIL + 1)); fi
     else
         echo "FAIL: $name (legacy compilation failed)"; FAIL=$((FAIL + 1))
@@ -6201,23 +6250,48 @@ rm -f /tmp/krc_mpcse_$$.kr /tmp/krc_mpcse_$$.s
 # THE GUARD. cse_invalidate_set_pinned (below) reads the source of the two
 # predicates, their call sites and the pass list. Source text can always be
 # bypassed by an edit it does not read -- a new pass, a pre-pass in front of a
-# pinned loop, a computed call -- so the pin is a tripwire only. These rows
-# are the guard: each compiles a program and RUNS it, on x86_64 and on arm64
-# (qemu-aarch64), and the program's exit code changes if CSE reuses a static
-# load across the op, or DCE deletes the op. So the rows go red however the op
-# was dropped: from ir_opt_is_side_effect, from ir_opt_cse_invalidates, at a
-# call site, or by a new pass.
+# pinned loop, an accessor that hides an opcode -- so the pin is a tripwire
+# only. These rows are the guard, and they guard exactly what they run: each
+# compiles one small program per (op, shape, arch) below and RUNS it (or, for
+# ops a single-threaded run cannot observe, counts the loads in its listing).
+# A dropped op is caught only if it is dropped in a program shaped like one of
+# these. What is covered:
+#   ops     every op in the three tables below, each spelled the way the
+#           table spells it (call_ptr with and without arguments,
+#           vload8/16/32/64, a `volatile { *(p as T) -> v }`
+#           read and a device-field read, alloc, time_ns, ...);
+#   shapes  S: straight line, the op between two reads of a static g;
+#           L: the op inside a two-trip `while` that reads g at the top of
+#              each trip (a LICM that hoists the static load out of the loop,
+#              or a DCE/CSE that only acts inside loops, changes the result);
+#           B: S after 150 statements of padding in the same function (a
+#              pass that changes behaviour with function size: DCE's
+#              liveness, a cutoff on the instruction count);
+#   arches  x86_64, arm64 (qemu-aarch64), riscv32 (qemu-riscv32 -R
+#           0x20000000) for the run rows; x86_64 and arm64 for the listing
+#           rows; x86_64 --target=windows for get_module_path.
+# Not covered: an op in a program shape not listed (another nesting, a
+# different operand form, a different function size class), an arch not
+# listed (xtensa, freestanding images, the legacy backends), and an op a
+# table excludes for an arch (each exclusion is named where it is made).
+# The reviewer's mutants that these rows are known to catch are listed in
+# docs/IR_REFERENCE.md (CSE section); a mutant outside the covered space can
+# still pass.
 #
-# Layout probe: g sits behind the 8-byte gbuf, and every program exits 99 if
-# gbuf + 8 does not alias g, so a layout change cannot pass vacuously. Each
-# program sets g = 7, reads a = g, runs the op once (its result unused, so a
-# DCE that treats it as pure deletes it), reads b = g and exits b - a + 50.
-# 50 means the op was CSE'd across or deleted; the expected code is the one
-# the op's write gives. stdin is /dev/zero.
+# Layout probe: g sits behind the 8-byte gbuf, and every runs-program exits
+# 99 if gbuf + 8 does not alias g, so a layout change cannot pass vacuously.
+# Each program sets g = 7, runs the op with its result unused (so a DCE that
+# treats it as pure deletes it) and exits with g's change + 50: S and B read
+# a = g, run the op, read b = g and exit(b - a + 50); L adds g at the top of
+# each of its two trips and exits(sum - 14 + 50), the same value. 50 means
+# the op was CSE'd across, hoisted past or deleted; the expected code is the
+# one the op's write gives. stdin is /dev/zero. riscv32 has no 64-bit
+# integers, so its programs are the same text with u64 read as u32.
 #
-# One row per op class, per arch:
+# One row per op class, per shape, per arch:
 #   call 50 (+ ARG 51)   setg(9)                         52
 #   call_ind 87          call_ptr(fn_addr("setg9"))      52
+#   call_ind_args 87     call_ptr(fn_addr("setg"), 9)    52
 #   static_store 78      g = 9                           52
 #   syscall 52           read(0, gbuf + 8, 1)            43 (reads a 0 byte)
 #   syscall_raw 85       syscall_raw(read, 0, gbuf + 8, 1, 0, 0, 0)  43
@@ -6233,17 +6307,60 @@ rm -f /tmp/krc_mpcse_$$.kr /tmp/krc_mpcse_$$.s
 #                        its width in `dest`, so in a large function DCE's
 #                        flow-insensitive liveness usually finds vreg 1/2/4/8
 #                        live and keeps a store it treats as pure)
+#   vptr_store 94        volatile { *(p as u64) = nine }  52
 #   asm 96               asm { mov [rax], cl } in(p -> rax, 9 -> rcx), and
-#                        strb w1, [x0] in(p -> x0, 9 -> x1) on arm64   52
+#                        strb w1, [x0] in(p -> x0, 9 -> x1) on arm64   52;
+#                        not on riscv32 (no asm bindings there), whose asm
+#                        is covered by the trap row below
 #   store_bis 148        put8(gbuf, 1, 9): *(base + i * 8) = v in a helper,
-#                        52. STORE_BIS on arm64 (fuse_lea_mem), a STORE on
-#                        x86_64. Only DCE can drop it: CSE runs before
+#                        52. STORE_BIS on arm64 (fuse_lea_mem), a STORE
+#                        elsewhere. Only DCE can drop it: CSE runs before
 #                        fuse_lea_mem creates it. In a helper for the same
 #                        width-in-dest reason as vstore
 #   control_flow 40/43   a while loop (back-edge BR) and an early `return`
 #                        in a void fn, 52; a dropped BR or RET_VOID runs
 #                        `g = 5` instead
-# memset 72, memcpy 76, store 31 and fmt_uint 74 have their own rows above.
+#   memset 72, memcpy 76, store 31, fmt_uint 74 (fmt_uint writes '9', 100):
+#                        L and B only here; their S rows are
+#                        write_builtins_stop_static_cse and
+#                        fmt_uint_stops_static_cse above.
+# riscv32 has no atomics, no vstore64 and no asm bindings in this compiler
+# (each is a compile error there), so those rows are x86_64 and arm64 only.
+QEMU_RV32=""
+if command -v qemu-riscv32-static > /dev/null 2>&1; then QEMU_RV32="qemu-riscv32-static"
+elif command -v qemu-riscv32 > /dev/null 2>&1; then QEMU_RV32="qemu-riscv32"; fi
+OR_PAD=""
+for ((OR_PI = 1; OR_PI <= 150; OR_PI++)); do OR_PAD="$OR_PAD    acc = acc * 3 + $OR_PI
+"; done
+# or_main SHAPE PROLOGUE STATEMENT -> main() of an oracle program, on stdout.
+# The program text uses u64 throughout; riscv32 callers rewrite it to u32.
+or_main() {
+    printf 'fn main() {\n%s\n' "$2"
+    case $1 in
+        S) printf '    u64 a = g\n%s\n    u64 b = g\n    exit(b - a + 50)\n' "$3" ;;
+        B) printf '    u64 acc = one\n%s    if acc == 0 { exit(1) }\n    u64 a = g\n%s\n    u64 b = g\n    exit(b - a + 50)\n' "$OR_PAD" "$3" ;;
+        L) printf '    u64 ors = 0\n    u64 ork = 0\n    while ork < 2 {\n        ors = ors + g\n%s\n        ork = ork + 1\n    }\n    exit(ors - 14 + 50)\n' "$3" ;;
+    esac
+    printf '}\n'
+}
+# or_shape_name SHAPE -> "" for S, " loop" for L, " big" for B (row-name suffix)
+or_shape_name() {
+    case $1 in S) printf '' ;; L) printf ' loop' ;; B) printf ' big' ;; esac
+}
+# or_runner ARCH ROW -> sets OR_R to the runner prefix, or skips the row (and
+# returns 1) when the arch's qemu is missing. The row is already in TOTAL.
+or_runner() {
+    OR_R=""
+    case $1 in
+        arm64)
+            if [ -z "$QEMU_A64" ]; then skip_row "$2" "no qemu-aarch64"; return 1; fi
+            OR_R="$QEMU_A64" ;;
+        riscv32)
+            if [ -z "$QEMU_RV32" ]; then skip_row "$2" "no qemu-riscv32"; return 1; fi
+            OR_R="$QEMU_RV32 -R 0x20000000" ;;
+    esac
+    return 0
+}
 OR_HDR='static u8[8] sbuf
 static u8[8] gbuf
 static u64 g = 7
@@ -6280,96 +6397,152 @@ fn early_loop() {
     }
     g = 5
 }'
-OR_CASES="call call_ind static_store syscall syscall_raw atomic_store atomic_add atomic_cas atomic_sub atomic_and atomic_or atomic_xor vstore8 vstore16 vstore32 vstore64 vstore8_fn vstore16_fn vstore32_fn vstore64_fn asm store_bis control_flow"
+OR_PRO='    if probe_layout() != 1234 { exit(99) }
+    g = 7
+    memset(sbuf, 9, 1)'
+OR_CASES="call call_ind call_ind_args static_store syscall syscall_raw atomic_store atomic_add atomic_cas atomic_sub atomic_and atomic_or atomic_xor vstore8 vstore16 vstore32 vstore64 vstore8_fn vstore16_fn vstore32_fn vstore64_fn vptr_store asm store_bis control_flow memset memcpy store fmt_uint"
 for OR_K in $OR_CASES; do
     OR_WANT=52
-    OR_ARCHES="x86_64 arm64"
+    OR_ARCHES="x86_64 arm64 riscv32"
+    OR_SHAPES="S L B"
     case $OR_K in
         call)         OR_STMT='    setg(9)' ;;
         call_ind)     OR_STMT='    call_ptr(fn_addr("setg9"))' ;;
+        call_ind_args) OR_STMT='    call_ptr(fn_addr("setg"), 9)' ;;
         static_store) OR_STMT='    g = 9' ;;
         syscall)      OR_STMT='    read(0, gbuf + 8, 1)'; OR_WANT=43 ;;
         syscall_raw)  OR_STMT='    syscall_raw(OR_NR_READ, 0, gbuf + 8, 1, 0, 0, 0)'; OR_WANT=43 ;;
-        atomic_store) OR_STMT='    atomic_store(gbuf + 8, 9)' ;;
-        atomic_add)   OR_STMT='    atomic_add(gbuf + 8, 2)' ;;
-        atomic_cas)   OR_STMT='    atomic_cas(gbuf + 8, 7, 9)' ;;
-        atomic_sub)   OR_STMT='    atomic_sub(gbuf + 8, 5)'; OR_WANT=45 ;;
-        atomic_and)   OR_STMT='    atomic_and(gbuf + 8, 3)'; OR_WANT=46 ;;
-        atomic_or)    OR_STMT='    atomic_or(gbuf + 8, 8)'; OR_WANT=58 ;;
-        atomic_xor)   OR_STMT='    atomic_xor(gbuf + 8, 14)' ;;
+        atomic_store) OR_STMT='    atomic_store(gbuf + 8, 9)'; OR_ARCHES="x86_64 arm64" ;;
+        atomic_add)   OR_STMT='    atomic_add(gbuf + 8, 2)'; OR_ARCHES="x86_64 arm64" ;;
+        atomic_cas)   OR_STMT='    atomic_cas(gbuf + 8, 7, 9)'; OR_ARCHES="x86_64 arm64" ;;
+        atomic_sub)   OR_STMT='    atomic_sub(gbuf + 8, 5)'; OR_WANT=45; OR_ARCHES="x86_64 arm64" ;;
+        atomic_and)   OR_STMT='    atomic_and(gbuf + 8, 3)'; OR_WANT=46; OR_ARCHES="x86_64 arm64" ;;
+        atomic_or)    OR_STMT='    atomic_or(gbuf + 8, 8)'; OR_WANT=58; OR_ARCHES="x86_64 arm64" ;;
+        atomic_xor)   OR_STMT='    atomic_xor(gbuf + 8, 14)'; OR_ARCHES="x86_64 arm64" ;;
         vstore8)      OR_STMT='    vstore8(gbuf + 8, 9)' ;;
         vstore16)     OR_STMT='    vstore16(gbuf + 8, 9)' ;;
         vstore32)     OR_STMT='    vstore32(gbuf + 8, 9)' ;;
-        vstore64)     OR_STMT='    vstore64(gbuf + 8, 9)' ;;
+        vstore64)     OR_STMT='    vstore64(gbuf + 8, 9)'; OR_ARCHES="x86_64 arm64" ;;
+        vstore64_fn)  OR_STMT='    vst64(gbuf + 8)'; OR_ARCHES="x86_64 arm64" ;;
         vstore*_fn)   OR_V=${OR_K#vstore}; OR_STMT="    vst${OR_V%_fn}(gbuf + 8)" ;;
+        vptr_store)   OR_STMT='    u64 vq = gbuf + 8
+    u64 vnine = 9
+    volatile { *(vq as u64) = vnine }' ;;
         asm)          OR_STMT='    u64 ap = gbuf + 8
     u64 nine = 9
-    OR_ASM_STORE9' ;;
+    OR_ASM_STORE9'; OR_ARCHES="x86_64 arm64" ;;
         store_bis)    OR_STMT='    put8(gbuf, one, 9)' ;;
         control_flow) OR_STMT='    early_loop()' ;;
+        memset)       OR_STMT='    memset(gbuf + 8, 9, 1)'; OR_SHAPES="L B" ;;
+        memcpy)       OR_STMT='    memcpy(gbuf + 8, sbuf, 1)'; OR_SHAPES="L B" ;;
+        store)        OR_STMT='    u64 q = gbuf + 8
+    u8 nine = 9
+    unsafe { *(q as u8) = nine }'; OR_SHAPES="L B" ;;
+        fmt_uint)     OR_STMT='    fmt_uint(gbuf + 8, 9)'; OR_WANT=100; OR_SHAPES="L B" ;;
     esac
-    for OR_ARCH in $OR_ARCHES; do
-        TOTAL=$((TOTAL + 1))
-        OR_RUN=""
-        if [ "$OR_ARCH" = "arm64" ]; then
-            if [ -z "$QEMU_A64" ]; then
-                skip_row "side_effect_runs_$OR_K arm64" "no qemu-aarch64"
-                continue
-            fi
-            OR_RUN="$QEMU_A64"
-            OR_NR=63
-            OR_ASM='asm { "0x39000001" } in(ap -> x0, nine -> x1)'
-        else
+    for OR_SH in $OR_SHAPES; do
+        for OR_ARCH in $OR_ARCHES; do
+            TOTAL=$((TOTAL + 1))
+            OR_ROW="side_effect_runs_$OR_K $OR_ARCH$(or_shape_name $OR_SH)"
+            or_runner $OR_ARCH "$OR_ROW" || continue
             OR_NR=0
+            OR_W=u64
             OR_ASM='asm { "0x88 0x08" } in(ap -> rax, nine -> rcx)'
-        fi
-        printf '%s\nfn main() {\n    if probe_layout() != 1234 { exit(99) }\n    g = 7\n    memset(sbuf, 9, 1)\n    u64 a = g\n%s\n    u64 b = g\n    exit(b - a + 50)\n}\n' "$OR_HDR" "$OR_STMT" \
-            | sed -e "s/OR_NR_READ/$OR_NR/" -e "s/OR_ASM_STORE9/$OR_ASM/" > /tmp/krc_or_$$.kr
-        rm -f /tmp/krc_or_$$
-        OR_GOT="no binary"
-        if $KRC --arch=$OR_ARCH /tmp/krc_or_$$.kr -o /tmp/krc_or_$$ > /dev/null 2>&1 && [ -f /tmp/krc_or_$$ ]; then
-            chmod +x /tmp/krc_or_$$
-            OR_GOT=0
-            $OR_RUN /tmp/krc_or_$$ < /dev/zero > /dev/null 2>&1 || OR_GOT=$?
-        fi
-        if [ "$OR_GOT" = "$OR_WANT" ]; then
-            PASS=$((PASS + 1))
-        else
-            echo "FAIL: side_effect_runs_$OR_K $OR_ARCH (exit $OR_GOT, want $OR_WANT; 50 = CSE'd across or deleted, 99 = layout probe failed)"
-            FAIL=$((FAIL + 1))
-        fi
+            case $OR_ARCH in
+                arm64)   OR_NR=63; OR_ASM='asm { "0x39000001" } in(ap -> x0, nine -> x1)' ;;
+                riscv32) OR_NR=63; OR_W=u32 ;;
+            esac
+            { printf '%s\n' "$OR_HDR"; or_main $OR_SH "$OR_PRO" "$OR_STMT"; } \
+                | sed -e "s/OR_NR_READ/$OR_NR/" -e "s/OR_ASM_STORE9/$OR_ASM/" -e "s/u64/$OR_W/g" > /tmp/krc_or_$$.kr
+            # riscv32 refuses vstore64 even in an uncalled helper
+            [ "$OR_ARCH" = "riscv32" ] && sed -i '/^fn vst64/d' /tmp/krc_or_$$.kr
+            rm -f /tmp/krc_or_$$
+            OR_GOT="no binary"
+            if $KRC --arch=$OR_ARCH /tmp/krc_or_$$.kr -o /tmp/krc_or_$$ > /dev/null 2>&1 && [ -f /tmp/krc_or_$$ ]; then
+                chmod +x /tmp/krc_or_$$
+                OR_GOT=0
+                timeout "$RUN_TEST_TIMEOUT" $OR_R /tmp/krc_or_$$ < /dev/zero > /dev/null 2>&1 || OR_GOT=$?
+            fi
+            if [ "$OR_GOT" = "$OR_WANT" ]; then
+                PASS=$((PASS + 1))
+            else
+                echo "FAIL: $OR_ROW (exit $OR_GOT, want $OR_WANT; 50 = CSE'd across, hoisted or deleted, 99 = layout probe failed)"
+                FAIL=$((FAIL + 1))
+            fi
+        done
     done
 done
 rm -f /tmp/krc_or_$$.kr /tmp/krc_or_$$
 
 # Ops with no memory write a single-threaded program can read back still must
 # not be deleted, and their effect is visible another way: a fault, a trap,
-# an exec, a chmod. Each program runs the op once with its result unused, so
-# a DCE that treats the op as pure deletes it and the program reaches
-# exit(b - a + 50) = 50 instead.
-#   vload 95 / atomic_load 91   load from address 0 (a static 0)  139 SIGSEGV
-#   asm 96                      ud2 / udf #0                      132 SIGILL
-#   dealloc 71                  read after dealloc of 1 MiB       139 SIGSEGV
-#   exec 113 / exec_argv 114    exec /bin/true                    0
-#   set_exec 115                chmod +x of a scratch file        the row checks -x
-#   arr_check 131 (--debug)     arr[5] on a 2-element array       1 (the trap)
-# Core dumps are off for these runs.
-OR2_CASES="vload8 vload64 atomic_load asm_trap dealloc exec exec_argv set_exec arr_check"
+# an exec, a chmod, an address gap, a syscall. Each program runs the op with
+# its result unused, so a DCE that treats the op as pure deletes it and the
+# program reaches the final exit with 50 instead. Same S, L and B shapes as
+# above (g is 7 from its initializer here).
+#   vload 95 (8/16/32/64) load from address 0 (a static 0)    139 SIGSEGV
+#   vptr_load 95          volatile { *(z as u32) -> v }, z = 0 139 SIGSEGV
+#   dev_load 95           a u16 field of `device Z at 0x0`     139 SIGSEGV
+#   atomic_load 91        load from address 0                  139 SIGSEGV
+#   asm 96                ud2 / udf #0 / an all-zero word      132 SIGILL
+#   dealloc 71            read after dealloc of 1 MiB          139 SIGSEGV
+#   alloc 70              p1 = alloc(1 MiB); alloc(1 MiB); p3 = alloc(1 MiB):
+#                         p1 and p3 are two mappings apart (52), one apart
+#                         when the middle alloc was deleted (50)
+#   time_ns 119           x86_64: prctl(PR_SET_SECCOMP, STRICT), time_ns(),
+#                         raw exit(50): clock_gettime is not allowed in
+#                         strict mode, so the kernel kills the program
+#                         (137); deleted, it exits 50. arm64: qemu-aarch64
+#                         refuses seccomp, so the row runs the program under
+#                         `qemu-aarch64 -strace` and wants a clock_gettime
+#                         call in the trace. Not on riscv32 (no time_ns there)
+#   exec 113 / exec_argv 114    exec /bin/true                 0
+#   set_exec 115                chmod +x of a scratch file     the row checks -x
+#   arr_check 131 (--debug)     arr[5] on a 2-element array    1 (the trap)
+# riscv32 runs the vloads (but not vload64), vptr_load, dev_load, the asm
+# trap, dealloc and alloc; atomics, exec, set_executable and --debug bounds
+# checks are compile errors there. Core dumps are off for these runs.
+OR2_HDR='static u64 g = 7
+static u64 one = 1
+static u64 zero = 0
+static u64 five = 5
+static u64[2] arr
+static u64[2] av
+device Z at 0x0 {
+    F16 at 0x00 : u16
+}'
+OR2_CASES="vload8 vload16 vload32 vload64 vptr_load dev_load atomic_load asm_trap dealloc alloc time_ns exec exec_argv set_exec arr_check"
 for OR2_K in $OR2_CASES; do
     OR2_FLAGS=""
     OR2_WANT=139
+    OR2_ARCHES="x86_64 arm64"
     case $OR2_K in
         vload8)      OR2_STMT='    u64 z = zero
-    vload8(z)' ;;
+    vload8(z)'; OR2_ARCHES="x86_64 arm64 riscv32" ;;
+        vload16)     OR2_STMT='    u64 z = zero
+    vload16(z)'; OR2_ARCHES="x86_64 arm64 riscv32" ;;
+        vload32)     OR2_STMT='    u64 z = zero
+    vload32(z)'; OR2_ARCHES="x86_64 arm64 riscv32" ;;
         vload64)     OR2_STMT='    u64 z = zero
     vload64(z)' ;;
+        vptr_load)   OR2_STMT='    u64 z = zero
+    u32 vv = 0
+    volatile { *(z as u32) -> vv }'; OR2_ARCHES="x86_64 arm64 riscv32" ;;
+        dev_load)    OR2_STMT='    u16 dv = Z.F16'; OR2_ARCHES="x86_64 arm64 riscv32" ;;
         atomic_load) OR2_STMT='    u64 z = zero
     atomic_load(z)' ;;
-        asm_trap)    OR2_STMT='    asm { "OR2_UD" }'; OR2_WANT=132 ;;
+        asm_trap)    OR2_STMT='    asm { "OR2_UD" }'; OR2_WANT=132; OR2_ARCHES="x86_64 arm64 riscv32" ;;
         dealloc)     OR2_STMT='    u64 p = alloc(1048576)
     store8(p, 1)
     dealloc(p)
-    exit(load8(p) + 60)' ;;
+    exit(load8(p) + 60)'; OR2_ARCHES="x86_64 arm64 riscv32" ;;
+        alloc)       OR2_STMT='    u64 p1 = alloc(1048576)
+    alloc(1048576)
+    u64 p3 = alloc(1048576)
+    u64 d = p1 - p3
+    if p3 > p1 { d = p3 - p1 }
+    if d > 1572864 { exit(52) }'; OR2_WANT=52; OR2_ARCHES="x86_64 arm64 riscv32" ;;
+        time_ns)     OR2_STMT='    OR2_TIME'; OR2_WANT=137 ;;
         exec)        OR2_STMT='    exec_process("/bin/true")'; OR2_WANT=0 ;;
         exec_argv)   OR2_STMT='    av[0] = "/bin/true"
     av[1] = 0
@@ -6378,81 +6551,132 @@ for OR2_K in $OR2_CASES; do
         arr_check)   OR2_STMT='    u64 i = five
     arr[i] = 1'; OR2_WANT=1; OR2_FLAGS="--debug" ;;
     esac
-    for OR2_ARCH in x86_64 arm64; do
-        TOTAL=$((TOTAL + 1))
-        OR2_RUN=""
-        OR2_UD="0x0F 0x0B"
-        if [ "$OR2_ARCH" = "arm64" ]; then
-            if [ -z "$QEMU_A64" ]; then
-                skip_row "side_effect_kept_$OR2_K arm64" "no qemu-aarch64"
-                continue
+    for OR2_SH in S L B; do
+        for OR2_ARCH in $OR2_ARCHES; do
+            TOTAL=$((TOTAL + 1))
+            OR2_ROW="side_effect_kept_$OR2_K $OR2_ARCH$(or_shape_name $OR2_SH)"
+            or_runner $OR2_ARCH "$OR2_ROW" || continue
+            OR2_UD="0x0F 0x0B"
+            OR2_W=u64
+            OR2_TIME='syscall_raw(157, 22, 1, 0, 0, 0, 0)\n    time_ns()\n    syscall_raw(60, 50, 0, 0, 0, 0, 0)'
+            OR2_WANT_A=$OR2_WANT
+            case $OR2_ARCH in
+                arm64)   OR2_UD="0x00000000"
+                         OR2_TIME='time_ns()'
+                         [ "$OR2_K" = "time_ns" ] && { OR2_WANT_A=traced; OR_R="$OR_R -strace"; } ;;
+                riscv32) OR2_UD="0x00000000"; OR2_W=u32 ;;
+            esac
+            rm -f /tmp/krc_or2_$$.x
+            printf 'x\n' > /tmp/krc_or2_$$.x
+            chmod 644 /tmp/krc_or2_$$.x
+            { printf '%s\n' "$OR2_HDR"; or_main $OR2_SH "" "$OR2_STMT"; } \
+                | sed -e "s/OR2_UD/$OR2_UD/" -e "s|OR2_FILE|/tmp/krc_or2_$$.x|" -e "s/OR2_TIME/$OR2_TIME/" -e "s/u64/$OR2_W/g" > /tmp/krc_or2_$$.kr
+            rm -f /tmp/krc_or2_$$
+            OR2_GOT="no binary"
+            if $KRC --arch=$OR2_ARCH $OR2_FLAGS /tmp/krc_or2_$$.kr -o /tmp/krc_or2_$$ > /dev/null 2>&1 && [ -f /tmp/krc_or2_$$ ]; then
+                chmod +x /tmp/krc_or2_$$
+                if [ "$OR2_WANT_A" = "traced" ]; then
+                    # qemu's -strace log goes to stderr; the program's own exit is 50 either way
+                    OR2_GOT=$( ( ulimit -c 0; timeout "$RUN_TEST_TIMEOUT" $OR_R /tmp/krc_or2_$$ < /dev/zero 2>&1 >/dev/null ) 2>/dev/null | grep -c clock_gettime )
+                    if [ "$OR2_GOT" -ge 1 ] 2>/dev/null; then OR2_GOT=traced; else OR2_GOT="50 (no clock_gettime in the -strace log)"; fi
+                else
+                    # in a subshell whose stderr is dropped: no "Segmentation fault" line
+                    OR2_GOT=$( ( ulimit -c 0; timeout "$RUN_TEST_TIMEOUT" $OR_R /tmp/krc_or2_$$ < /dev/zero > /dev/null 2>&1; echo $? ) 2>/dev/null )
+                fi
+                if [ "$OR2_WANT" = "x" ]; then
+                    if [ -x /tmp/krc_or2_$$.x ]; then OR2_GOT=x; else OR2_GOT="exit $OR2_GOT, file not executable"; fi
+                fi
             fi
-            OR2_RUN="$QEMU_A64"
-            OR2_UD="0x00000000"
-        fi
-        rm -f /tmp/krc_or2_$$.x
-        printf 'x\n' > /tmp/krc_or2_$$.x
-        chmod 644 /tmp/krc_or2_$$.x
-        printf 'static u64 g = 7\nstatic u64 zero = 0\nstatic u64 five = 5\nstatic u64[2] arr\nstatic u64[2] av\nfn main() {\n    u64 a = g\n%s\n    u64 b = g\n    exit(b - a + 50)\n}\n' "$OR2_STMT" \
-            | sed -e "s/OR2_UD/$OR2_UD/" -e "s|OR2_FILE|/tmp/krc_or2_$$.x|" > /tmp/krc_or2_$$.kr
-        rm -f /tmp/krc_or2_$$
-        OR2_GOT="no binary"
-        if $KRC --arch=$OR2_ARCH $OR2_FLAGS /tmp/krc_or2_$$.kr -o /tmp/krc_or2_$$ > /dev/null 2>&1 && [ -f /tmp/krc_or2_$$ ]; then
-            chmod +x /tmp/krc_or2_$$
-            # in a subshell whose stderr is dropped: no "Segmentation fault" line
-            OR2_GOT=$( ( ulimit -c 0; $OR2_RUN /tmp/krc_or2_$$ < /dev/zero > /dev/null 2>&1; echo $? ) 2>/dev/null )
-            if [ "$OR2_WANT" = "x" ]; then
-                if [ -x /tmp/krc_or2_$$.x ]; then OR2_GOT=x; else OR2_GOT="exit $OR2_GOT, file not executable"; fi
+            if [ "$OR2_GOT" = "$OR2_WANT_A" ]; then
+                PASS=$((PASS + 1))
+            else
+                echo "FAIL: $OR2_ROW (got $OR2_GOT, want $OR2_WANT_A; 50 = the op was deleted)"
+                FAIL=$((FAIL + 1))
             fi
-        fi
-        if [ "$OR2_GOT" = "$OR2_WANT" ]; then
-            PASS=$((PASS + 1))
-        else
-            echo "FAIL: side_effect_kept_$OR2_K $OR2_ARCH (got $OR2_GOT, want $OR2_WANT; 50 = the op was deleted)"
-            FAIL=$((FAIL + 1))
-        fi
+        done
     done
 done
 rm -f /tmp/krc_or2_$$.kr /tmp/krc_or2_$$ /tmp/krc_or2_$$.x
 
 # CSE across the ops above is not observable by a single-threaded run: they
 # write no memory the program reads back, and the second agent that a real
-# atomic_load, vload or asm orders against does not exist in a test. So
-# count, in the --emit=asm listing, the loads of the static g around each op:
-# two when the op invalidates the CSE table, one when the second read was
-# CSE'd into the first (or DCE deleted the op first, since DCE runs before
-# CSE). Same count as barrier_stops_static_cse; the barriers 126-130 are there.
-OR3_CASES="atomic_load vload8 vload64 asm exec exec_argv set_exec"
+# atomic_load, vload or asm orders against does not exist in a test. So count,
+# in the --emit=asm listing, the loads of the static g around each op:
+#   S  two (a = g; op; b = g), one when the second read was CSE'd into the
+#      first or DCE deleted the op first (DCE runs before CSE);
+#   B  three: the same two plus the one load of the static `one` that seeds
+#      the padding (the padding itself loads no static);
+#   L  one, and it must sit inside the loop: between the target of the
+#      loop's back-edge branch and the branch. A LICM that hoists the load
+#      out of the loop puts it before the back-edge target (zero inside).
+# The listing is main's own; the barriers 126-130 have barrier_stops_static_cse.
+# or_listing_count ARCH FILE -> "TOTAL INSIDE": loads of a static (x86_64
+# `mov r, [rip+...]`, arm64 `ldr x, [x16, ...]`), and how many of them lie in
+# the span of the backward branches (the loops). Pure awk (no gawk needed).
+or_listing_count() {
+    awk -v arch="$1" '
+    function hx(s,   i, c, v) { v = 0; s = tolower(s); sub(/^0x/, "", s)
+        for (i = 1; i <= length(s); i++) { c = index("0123456789abcdef", substr(s, i, 1)) - 1; v = v * 16 + c }
+        return v }
+    /^  [0-9a-f]+: / {
+        a = hx(substr($1, 1, length($1) - 1)); n = 0; t = ""
+        for (i = 2; i <= NF; i++) {
+            if (arch == "x86_64" && n == i - 2 && $i ~ /^[0-9a-f][0-9a-f]$/) { n++; continue }
+            if (arch == "arm64" && i == 2) { continue }
+            t = t (t == "" ? "" : " ") $i
+        }
+        if (arch == "x86_64" && t ~ /^mov r[a-z0-9]+, \[rip/) { ld[++nl] = a }
+        if (arch == "arm64" && t ~ /^ldr x[0-9]+, \[x16/) { ld[++nl] = a }
+        if (arch == "x86_64" && t ~ /^j[a-z]+ 0x[0-9a-f]+$/) {
+            r = $NF; w = length(r) - 2; d = hx(r)
+            if (w <= 2 && d >= 128) d -= 256
+            if (w > 2 && d >= 2147483648) d -= 4294967296
+            tg = a + n + d
+            if (tg <= a) { if (lo == "" || tg < lo) lo = tg; if (hi == "" || a > hi) hi = a }
+        }
+        if (arch == "arm64" && t ~ /<-[0-9]+>$/) {
+            r = $NF; gsub(/[<>-]/, "", r); tg = a - r
+            if (lo == "" || tg < lo) lo = tg; if (hi == "" || a > hi) hi = a
+        }
+    }
+    END { ins = 0; for (i = 1; i <= nl; i++) if (lo != "" && ld[i] >= lo && ld[i] <= hi) ins++; print nl + 0, ins }' "$2"
+}
+OR3_CASES="atomic_load vload8 vload16 vload32 vload64 vptr_load dev_load asm exec exec_argv set_exec"
 for OR3_K in $OR3_CASES; do
     case $OR3_K in
         atomic_load) OR3_STMT='    atomic_load(0)' ;;
         vload8)      OR3_STMT='    vload8(0)' ;;
+        vload16)     OR3_STMT='    vload16(0)' ;;
+        vload32)     OR3_STMT='    vload32(0)' ;;
         vload64)     OR3_STMT='    vload64(0)' ;;
+        vptr_load)   OR3_STMT='    u64 z = 0
+    u32 vv = 0
+    volatile { *(z as u32) -> vv }' ;;
+        dev_load)    OR3_STMT='    u16 dv = Z.F16' ;;
         asm)         OR3_STMT='    asm { "OR3_NOP" }' ;;
         exec)        OR3_STMT='    exec_process("/bin/true")' ;;
         exec_argv)   OR3_STMT='    exec_process_argv("/bin/true", 0)' ;;
         set_exec)    OR3_STMT='    set_executable("/nonexistent")' ;;
     esac
-    for OR3_ARCH in x86_64 arm64; do
-        TOTAL=$((TOTAL + 1))
-        OR3_NOP="0x90"
-        [ "$OR3_ARCH" = "arm64" ] && OR3_NOP="0xD503201F"
-        printf 'static u64 g = 5\nfn main() {\n    u64 a = g\n%s\n    u64 b = g\n    exit(a + b)\n}\n' "$OR3_STMT" \
-            | sed -e "s/OR3_NOP/$OR3_NOP/" > /tmp/krc_or3_$$.kr
-        OR3_N="no listing"
-        if $KRC --arch=$OR3_ARCH --emit=asm /tmp/krc_or3_$$.kr -o /tmp/krc_or3_$$.s > /dev/null 2>&1; then
-            if [ "$OR3_ARCH" = "x86_64" ]; then
-                OR3_N=$(grep -acE 'mov r[a-z0-9]+, \[rip' /tmp/krc_or3_$$.s)
-            else
-                OR3_N=$(grep -acE 'ldr x[0-9]+, \[x16' /tmp/krc_or3_$$.s)
+    for OR3_SH in S L B; do
+        for OR3_ARCH in x86_64 arm64; do
+            TOTAL=$((TOTAL + 1))
+            OR3_NOP="0x90"
+            [ "$OR3_ARCH" = "arm64" ] && OR3_NOP="0xD503201F"
+            { printf 'static u64 g = 5\nstatic u64 one = 1\ndevice Z at 0x0 {\n    F16 at 0x00 : u16\n}\n'; or_main $OR3_SH "" "$OR3_STMT"; } \
+                | sed -e "s/OR3_NOP/$OR3_NOP/" > /tmp/krc_or3_$$.kr
+            OR3_N="no listing"
+            if $KRC --arch=$OR3_ARCH --emit=asm /tmp/krc_or3_$$.kr -o /tmp/krc_or3_$$.s > /dev/null 2>&1; then
+                OR3_N=$(or_listing_count $OR3_ARCH /tmp/krc_or3_$$.s)
             fi
-        fi
-        if [ "$OR3_N" = "2" ]; then
-            PASS=$((PASS + 1))
-        else
-            echo "FAIL: side_effect_stops_static_cse_listing $OR3_K $OR3_ARCH (static loads: $OR3_N, want 2)"
-            FAIL=$((FAIL + 1))
-        fi
+            case $OR3_SH in S) OR3_WANT="2 0" ;; B) OR3_WANT="3 0" ;; L) OR3_WANT="1 1" ;; esac
+            if [ "$OR3_N" = "$OR3_WANT" ]; then
+                PASS=$((PASS + 1))
+            else
+                echo "FAIL: side_effect_stops_static_cse_listing $OR3_K $OR3_ARCH$(or_shape_name $OR3_SH) (static loads, in loops: $OR3_N, want $OR3_WANT)"
+                FAIL=$((FAIL + 1))
+            fi
+        done
     done
 done
 rm -f /tmp/krc_or3_$$.kr /tmp/krc_or3_$$.s
@@ -6461,19 +6685,24 @@ rm -f /tmp/krc_or3_$$.kr /tmp/krc_or3_$$.s
 # constant). module_path_stops_static_cse above uses its result, so DCE
 # keeps it whatever the side-effect set says; this one discards the result,
 # so a DCE that treats 146 as pure deletes the call, and the two loads of g
-# merge (DCE runs before CSE). Listing count under --target=windows.
-TOTAL=$((TOTAL + 1))
-printf 'static u8[8] gbuf\nstatic u64 g = 7\nfn main() {\n    u64 a = g\n    get_module_path(gbuf + 8, 8)\n    u64 b = g\n    exit(a + b)\n}\n' > /tmp/krc_or4_$$.kr
-OR4_N="no listing"
-if $KRC --arch=x86_64 --target=windows --emit=asm /tmp/krc_or4_$$.kr -o /tmp/krc_or4_$$.s > /dev/null 2>&1; then
-    OR4_N=$(grep -acE 'mov r[a-z0-9]+, \[rip' /tmp/krc_or4_$$.s)
-fi
-if [ "$OR4_N" = "2" ]; then
-    PASS=$((PASS + 1))
-else
-    echo "FAIL: side_effect_stops_static_cse_listing module_path_unused windows-x86_64 (static loads: $OR4_N, want 2)"
-    FAIL=$((FAIL + 1))
-fi
+# merge (DCE runs before CSE). Same listing counts as above (S, L, B), under
+# --target=windows. KernRift has no win_load_library, win_get_proc_address or
+# call_ptr_win64.
+for OR4_SH in S L B; do
+    TOTAL=$((TOTAL + 1))
+    { printf 'static u8[8] gbuf\nstatic u64 g = 7\nstatic u64 one = 1\n'; or_main $OR4_SH "" '    get_module_path(gbuf + 8, 8)'; } > /tmp/krc_or4_$$.kr
+    OR4_N="no listing"
+    if $KRC --arch=x86_64 --target=windows --emit=asm /tmp/krc_or4_$$.kr -o /tmp/krc_or4_$$.s > /dev/null 2>&1; then
+        OR4_N=$(or_listing_count x86_64 /tmp/krc_or4_$$.s)
+    fi
+    case $OR4_SH in S) OR4_WANT="2 0" ;; B) OR4_WANT="3 0" ;; L) OR4_WANT="1 1" ;; esac
+    if [ "$OR4_N" = "$OR4_WANT" ]; then
+        PASS=$((PASS + 1))
+    else
+        echo "FAIL: side_effect_stops_static_cse_listing module_path_unused windows-x86_64$(or_shape_name $OR4_SH) (static loads, in loops: $OR4_N, want $OR4_WANT)"
+        FAIL=$((FAIL + 1))
+    fi
+done
 rm -f /tmp/krc_or4_$$.kr /tmp/krc_or4_$$.s
 
 # cse_invalidate_set_pinned is a TRIPWIRE, not the guard. ir_opt_cse_invalidates
@@ -10094,8 +10323,17 @@ fn main() {
 KREOF
 KRCBIN="$DIR/../build/krc2"
 cat "$DIR/../src/bcj.kr" "$DIR/../src/runner.kr" > /tmp/krc_rt_kr_$$.kr
-if "$KRCBIN" /tmp/krc_rt_$$.kr -o /tmp/krc_rt_$$.krbo > /dev/null 2>&1 \
-   && "$KRCBIN" --arch=$ARCH /tmp/krc_rt_kr_$$.kr -o /tmp/krc_rt_kr_$$ > /dev/null 2>&1; then
+# Both compiles are the compiler's own job, so either failing is a FAIL of
+# this row -- never a skip: a regression in compiling src/runner.kr or
+# src/bcj.kr is exactly what this row exists to catch, and no other row
+# builds the runner.
+RT_FAT_OK=0; RT_RUN_OK=0
+"$KRCBIN" /tmp/krc_rt_$$.kr -o /tmp/krc_rt_$$.krbo > /dev/null 2>&1 && RT_FAT_OK=1
+"$KRCBIN" --arch=$ARCH /tmp/krc_rt_kr_$$.kr -o /tmp/krc_rt_kr_$$ > /dev/null 2>&1 && RT_RUN_OK=1
+if [ "$RT_FAT_OK" != "1" ] || [ "$RT_RUN_OK" != "1" ]; then
+    FAIL=$((FAIL + 1))
+    echo "  krbo_roundtrip: FAIL (compile failed: fat .krbo ok=$RT_FAT_OK, runner (runner.kr+bcj.kr) ok=$RT_RUN_OK)"
+else
     chmod +x /tmp/krc_rt_kr_$$
     out=$(/tmp/krc_rt_kr_$$ /tmp/krc_rt_$$.krbo 2>&1)
     code=$?
@@ -10106,10 +10344,12 @@ if "$KRCBIN" /tmp/krc_rt_$$.kr -o /tmp/krc_rt_$$.krbo > /dev/null 2>&1 \
         FAIL=$((FAIL + 1))
         echo "  krbo_roundtrip: FAIL (out='$out' code=$code)"
     fi
-else
-    skip_row krbo_roundtrip "runner build"
 fi
-rm -f /tmp/krc_rt_$$.kr /tmp/krc_rt_kr_$$.kr /tmp/krc_rt_$$.krbo /tmp/krc_rt_kr_$$
+# Keep the runner this row built: custom_fat_single below uses it (no other
+# row builds one, and dist/kr only exists after `make dist`).
+RT_RUNNER=""
+if [ "$RT_RUN_OK" = "1" ]; then RT_RUNNER="/tmp/krc_rt_kr_$$"; fi
+rm -f /tmp/krc_rt_$$.kr /tmp/krc_rt_kr_$$.kr /tmp/krc_rt_$$.krbo
 
 echo ""
 echo "--- float types ---"
@@ -11899,6 +12139,7 @@ fi
 if timeout 30 "$KRC" --targets="$HOST_TGT" "$REPO_ROOT/test_tmp_$$.kr" -o /tmp/krc_fat_$$ > /dev/null 2>&1; then
     KR_BIN="$REPO_ROOT/dist/kr"
     [ -x "$KR_BIN" ] || KR_BIN="$REPO_ROOT/dist/kr-android-$HOST_ARCH"
+    [ -x "$KR_BIN" ] || KR_BIN="$RT_RUNNER"
     if [ -x "$KR_BIN" ]; then
         timeout 5 "$KR_BIN" /tmp/krc_fat_$$ > /dev/null 2>&1
         actual=$?
@@ -11909,11 +12150,12 @@ if timeout 30 "$KRC" --targets="$HOST_TGT" "$REPO_ROOT/test_tmp_$$.kr" -o /tmp/k
             echo "FAIL: custom_fat_single (expected 77, got $actual)"; FAIL=$((FAIL + 1))
         fi
     else
-        skip_row custom_fat_single "no runner"
+        skip_row custom_fat_single "no runner (krbo_roundtrip could not build one)"
     fi
 else
     echo "FAIL: custom_fat_single (compilation failed)"; FAIL=$((FAIL + 1))
 fi
+[ -n "$RT_RUNNER" ] && rm -f "$RT_RUNNER"
 rm -f "$REPO_ROOT/test_tmp_$$.kr" /tmp/krc_fat_$$
 
 # Custom 2-slice is smaller than custom 8-slice (same single-slice code path).
@@ -26598,6 +26840,19 @@ rm -rf "$G18L_D"
 # run a count below README's is a SKIP that names what is missing, never a
 # pass. More rows than README is red everywhere: a partial run can only count
 # fewer.
+# On a FULL run the set of skipped rows must also be a subset of SKIP_ALLOW:
+# rows whose skip reason is not a missing tool (a precondition this file
+# cannot satisfy by itself), each named with that reason. Any other skip on a
+# full run -- a tool row whose probe variable was blanked mid-file, a new
+# precondition -- is a FAIL, so a full run cannot shed rows into SKIP.
+SKIP_ALLOW=''
+RC_BADSKIP=""
+while IFS= read -r RC_S; do
+    [ -z "$RC_S" ] && continue
+    printf '%s\n' "$SKIP_ALLOW" | cut -d'|' -f1 | grep -qxF -- "$RC_S" || RC_BADSKIP="$RC_BADSKIP [$RC_S]"
+done <<RC_SKIPS_EOF
+$SKIP_NAMES
+RC_SKIPS_EOF
 RC_MISSING=""
 for RC_TOOL in $(grep -oE 'command -v [A-Za-z0-9_.+-]+' "$DIR/run_tests.sh" | awk '{print $3}' | sort -u); do
     case $RC_TOOL in *-) continue ;; esac   # a prefix in prose, not a tool
@@ -26640,6 +26895,9 @@ elif [ "$TOTAL" -gt "$README_UNIQ" ]; then
     echo "FAIL: readme_test_count_matches_suite (suite ran $TOTAL, README says '$README_UNIQ')"
     echo "  a run can only count FEWER rows than a full one, never more, so this is"
     echo "  rows added without updating README.md -- set BOTH '**N tests**' to $TOTAL"
+elif [ -z "$RC_MISSING" ] && [ -n "$RC_BADSKIP" ]; then
+    echo "FAIL: readme_test_count_matches_suite (a full run skipped rows that are not in SKIP_ALLOW:$RC_BADSKIP)"
+    FAIL=$((FAIL + 1))
 elif [ -n "$RC_MISSING" ]; then
     # Not a full run: rows behind a missing tool neither run nor count, so
     # fewer rows than README states is expected here and a deleted row cannot
@@ -26667,5 +26925,6 @@ if [ $((PASS + FAIL + SKIP)) -ne "$TOTAL" ]; then
 fi
 echo "=== Results: $PASS/$TOTAL passed, $FAIL failed, $SKIP skipped ==="
 # Any failure is exit 1: `exit $FAIL` would wrap to 0 at exactly 256.
+SUMMARY_DONE=1
 if [ "$FAIL" -ne 0 ]; then exit 1; fi
 exit 0
