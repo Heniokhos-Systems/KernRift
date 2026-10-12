@@ -463,7 +463,11 @@ implementation): raw syscalls on Linux/Android, Winsock on Windows (no
 Win32 name is injected into the importer), `-ENOSYS` (38) on macOS in v1
 and on ApexRift bare metal. Results are a socket/byte count or −errno
 (Linux numbering on every OS) — check failures with
-`is_errno`/`get_errno` from `std/io.kr` (Pattern 2).
+`is_errno`/`get_errno` from `std/io.kr` (Pattern 2). The same condition gives
+the same −errno on every OS, except for the measured Linux/Windows differences
+listed at the top of `std/sys.kr` (all of them reached only by an unbound or
+listening socket used in the wrong role, a short address length, an unknown
+socket type, or a datagram socket).
 
 | Signature | Description |
 |---|---|
@@ -473,7 +477,7 @@ and on ApexRift bare metal. Results are a socket/byte count or −errno
 | `fn net_accept(u64 fd) -> u64` | `accept()` — returns new connection fd. |
 | `fn net_connect(u64 fd, u64 addr, u64 addr_len) -> u64` | `connect()`. |
 | `fn net_send(u64 fd, u64 buf, u64 len) -> u64` | `sys_send` — bytes sent. A peer that closed gives −EPIPE (Linux: `MSG_NOSIGNAL`, no SIGPIPE); a non-socket fd (a pipe) is written to. |
-| `fn net_recv(u64 fd, u64 buf, u64 len) -> u64` | `sys_recv` — bytes received, 0 at EOF. |
+| `fn net_recv(u64 fd, u64 buf, u64 len) -> u64` | `sys_recv` — bytes received, 0 at EOF (including after your own `shutdown(SHUT_RD)`). `len` 0 returns 0 at once on every OS. |
 | `fn net_close(u64 fd)` | `sys_sock_close`. |
 | `fn net_setsockopt(u64 fd, u64 level, u64 optname, u64 optval, u64 optlen) -> u64` | `sys_setsockopt` — Linux option numbers; Windows translates `SO_REUSEADDR` and `SO_RCVTIMEO` only. |
 | `fn net_htons(u64 port) -> u64` | Byte-swap a 16-bit port to network order. |

@@ -18,6 +18,10 @@
 //  10. sys_wait_readable on a socket just closed -> -EBADF (-9)
 //  11. SO_REUSEADDR with optlen 2 -> -EINVAL (-22)
 //  12. send after our own SHUT_WR -> -EPIPE (-32), process survives
+//  13. setsockopt at a level that is not SOL_SOCKET(1) -- 0xFFFF, which IS
+//      Windows' SOL_SOCKET -> -ENOPROTOOPT (-92): levels are Linux's too
+//  14. recv after our own shutdown(SHUT_RD), no FIN from the peer -> 0 (EOF);
+//      Windows says WSAESHUTDOWN, which the recv map reads as Linux does
 import "../../std/sys.kr"
 
 static u8[16] se_sa
@@ -88,6 +92,8 @@ fn main() -> uint32 {
     if sys_setsockopt(m, 1, 0x1001, se_one, 4) != 0 - 92 { return 16 }
     // 11. SO_REUSEADDR with an optlen shorter than an int -> -EINVAL (-22)
     if sys_setsockopt(m, 1, 2, se_one, 2) != 0 - 22 { return 32 }
+    // 13. Windows' own SOL_SOCKET number is not a Linux level
+    if sys_setsockopt(m, 0xFFFF, 2, se_one, 4) != 0 - 92 { return 36 }
     if sys_sock_close(m) != 0 { return 17 }
 
     // 4. sub-millisecond receive timeout
@@ -112,6 +118,10 @@ fn main() -> uint32 {
     store64(se_tv + 8, 0)
     if sys_setsockopt(a, 1, 20, se_tv, 16) != 0 { return 28 }
     if sys_recv(a, se_buf, 16) != 0 - 11 { return 29 }
+
+    // 14. our own SHUT_RD, the peer still open and silent: recv is EOF (0)
+    if sys_shutdown(a, 0) != 0 { return 37 }
+    if sys_recv(a, se_buf, 16) != 0 { return 38 }
 
     // 12. a send after our own shutdown(SHUT_WR) -> -EPIPE (-32), and the
     //     process lives (Linux: MSG_NOSIGNAL; Windows: WSAESHUTDOWN mapped)

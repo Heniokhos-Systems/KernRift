@@ -46,6 +46,10 @@ fn main() -> uint32 {
     if sys_recv(a, lb_buf, 16) != 4 { return 11 }
     if load8(lb_buf) != 112 { return 12 }
     if load8(lb_buf + 3) != 103 { return 13 }
+    // A zero-length recv on the idle accepted socket is 0 at once, as Linux's
+    // read(fd, buf, 0) is. Winsock's recv(s, buf, 0) waits for data; with no
+    // timeout armed here it would block forever (the harness timeout reds it).
+    if sys_recv(a, lb_buf, 0) != 0 { return 32 }
     // SO_RCVTIMEO (SOL_SOCKET 1, option 20) = 100 ms on the idle socket: a
     // recv must now fail with -EAGAIN (-11) instead of blocking. A
     // setsockopt that does nothing (or reports success without doing it)

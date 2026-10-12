@@ -31,7 +31,21 @@
 //   - WSAENOTSOCK reads -EBADF (a file handle passed as a socket too);
 //   - setsockopt supports SO_REUSEADDR and SO_RCVTIMEO only on Windows;
 //   - IPv4 only on Windows (AF_INET6 is 10 on Linux, 23 on Windows);
-//   - timeouts have the Windows timer's granularity (~15.6 ms).
+//   - timeouts have the Windows timer's granularity (~15.6 ms);
+//   - a send on an UNCONNECTED datagram socket: Linux -EDESTADDRREQ (-89),
+//     Windows -EPIPE (-32) -- the send map's ENOTCONN -> EPIPE is TCP's reading
+//     and cannot see the socket type (sys.kr is for TCP; there is no sendto);
+//   - shutdown() on a LISTENING socket: Linux 0, Windows -ENOTCONN (-107);
+//   - connect()/bind() with a short addrlen (< 16): Linux -EINVAL (-22),
+//     Windows -EFAULT (-14);
+//   - getsockname() with a too-short length: Linux 0 and the length is
+//     updated to 16, Windows -EFAULT (-14) and the length is left alone;
+//   - socket(AF_INET, <unknown type>, 0): Linux -EINVAL (-22), Windows
+//     -ESOCKTNOSUPPORT (-94);
+//   - sys_recv(s, buf, 0) is 0 at once on both, but on a CLOSED handle Linux
+//     says -EBADF and Windows 0 (the length is checked before the handle).
+// A portable caller passes 16-byte sockaddrs and lengths and a real socket
+// type, so none of these is reached by correct code.
 //
 // Private helpers carry the `_kr_` prefix. This file does not import args.kr
 // (see args.kr: importing sys.kr must not introduce cli_argc / cli_argv).
@@ -84,10 +98,14 @@ fn _kr_sys_nr(u64 k) -> u64 {
 // Linux reading is the contract, so WSAETIMEDOUT -> -EAGAIN HERE (connect keeps
 // -ETIMEDOUT). Irreducible: a keepalive failure also surfaces as WSAETIMEDOUT
 // on a recv, where Linux says ETIMEDOUT -- it reads -EAGAIN too.
+// WSAESHUTDOWN on a recv arises only after our OWN shutdown(SHUT_RD/RDWR),
+// which Linux reads as end of stream: 0 (EOF) HERE. A send keeps it as -EPIPE
+// (_kr_w32_send_errno).
 fn _kr_sys_w32_recv_ret(u64 r) -> int64 {
     if (r & 0xFFFFFFFF) != 0xFFFFFFFF { return r & 0xFFFFFFFF }
     u64 w = _kr_w32_WSAGetLastError() & 0xFFFFFFFF
     if w == 10060 { return 0 - 11 }
+    if w == 10058 { return 0 }
     return 0 - _kr_w32_errno(w)
 }
 
@@ -289,6 +307,12 @@ fn sys_recv(u64 sock, u64 buf, u64 len) -> int64 {
     if get_target_os() == 2 {
         int64 e = _kr_w32_ensure()
         if e < 0 { return e }
+        // A zero-length recv is 0 at once on Linux (read(fd, buf, 0)), idle
+        // socket or not; Winsock's recv(s, buf, 0) instead WAITS for data
+        // (or SO_RCVTIMEO), forever with no timeout armed. A caller whose
+        // remaining length reaches 0 would hang on Windows only. Closed
+        // handle: Linux -EBADF, here 0 (listed above).
+        if len == 0 { return 0 }
         u64 n = len
         if n > 0x7FFFFFFF { n = 0x7FFFFFFF }
         return _kr_sys_w32_recv_ret(_kr_w32_recv(sock, buf, n, 0))
