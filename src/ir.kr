@@ -15346,7 +15346,8 @@ fn ir_emit_x86_function(uint64 fn_node) {
 // The parse is ONE self-contained LEAF routine per arch, emitted inline in the
 // prologue behind a jump and called by it:
 //
-//   parse(cmdline, buf, size) -> argc          Win64 rcx/rdx/r8 | AAPCS64 x0-x2
+//   parse(cmdline, buf, size, lb) -> argc      Win64 rcx/rdx/r8/r9 | AAPCS64 x0-x3
+//     lb = the 12-byte CPINFO.LeadByte array of the ANSI code page (below)
 //     need = 10 * (strlen(cmdline) + 2)
 //     buf == 0     -> returns need (the prologue's sizing call)
 //     size < need  -> returns 0 (argc is never 0 otherwise: argv[0] always exists)
@@ -15366,11 +15367,35 @@ fn ir_emit_x86_function(uint64 fn_node) {
 //     delimiter; 2n+1 backslashes + `"` -> n backslashes and a literal `"`;
 //     backslashes not before a `"` are literal; `""` INSIDE quotes is a
 //     literal `"` and quote mode stays on; an argument opened by quotes may be
-//     empty (`""` -> one empty argument).
+//     empty (`""` -> one empty argument);
+//   - LEAD BYTES, in argv[0] and later: a lead byte of the ANSI code page is
+//     copied together with the byte after it, which is never interpreted --
+//     so on a DBCS code page (932/936/949/950) a trail 0x5C is not a
+//     backslash (CP932's 表 is 95 5C) and a trail `"`/space is not a quote or
+//     separator. This is UCRT's _ismbblead rule: its multibyte code page is
+//     the ANSI one at startup (measured: _ismbcupper(0xC0) at startup = that
+//     of _setmbcp(1252) on a 1252 system, not of 437 or "C"). A lead byte
+//     with NOTHING after it ends the string there; UCRT instead takes the
+//     NUL as its trail and reads past the end of the command line (measured
+//     natively: `a b\x95` + `\0 TAIL` gives argv [a, b\x95, TAIL]).
+//     GetCommandLineA is converted from UTF-16, so it only ever holds whole
+//     characters; the leaf still never reads past the NUL.
+//
+// The lead bytes: the prologue (and op 114) call GetCPInfo(CP_ACP, &cpinfo)
+// and pass &cpinfo.LeadByte; each leaf builds a 256-byte table from it on its
+// own stack (c7_*_emit_lead_table): ranges [lo, hi] INCLUSIVE, read in pairs
+// while both bytes are nonzero, at most 6 pairs -- UCRT's reading of the same
+// array, and measured equal to UCRT's _ismbblead after _setmbcp(cp) on all
+// 139 code pages Windows 11 installs except Johab 1361 (UCRT's built-in table
+// adds 81-83 there; no locale has 1361 as its ANSI code page). A failed
+// GetCPInfo zeroes the CPINFO: no lead bytes, the single-byte parse -- which
+// is what UCRT itself is left with when _setmbcp cannot read a code page, and
+// exactly right for every single-byte and UTF-8 ANSI code page, so failing
+// the whole program over it (an exit code) would be the worse trade.
 //
 // The child side has the INVERSE (exec_process_argv, op 114), a second leaf:
 //
-//   quote(argv, buf) -> length including the NUL   Win64 rcx/rdx | AAPCS64 x0/x1
+//   quote(argv, buf, lb) -> length incl. the NUL  Win64 rcx/rdx/r8 | AAPCS64 x0-x2
 //     buf == 0 -> measures only; else writes exactly that many bytes.
 //     Arguments are joined by one space. argv[1..] is quoted when it is empty
 //     or contains space, tab or `"`: inside the quotes every backslash run
@@ -15381,10 +15406,17 @@ fn ir_emit_x86_function(uint64 fn_node) {
 //     through an odd count would keep quote mode on over the rest of the
 //     line, corrupting argv[1..]. The child gets argv[0] without its quotes
 //     (what UCRT itself yields for any even count); argv[1..] always
-//     round-trip.
+//     round-trip. Lead bytes (lb, as for parse): a lead byte and its trail are
+//     one unit everywhere -- never counted as a backslash, escaped, dropped
+//     as a quote or a reason to quote -- so a trail 0x5C before a closing
+//     quote is not doubled (an MSVC child on a DBCS code page would otherwise
+//     get an extra `\` and lose the quote). A lead byte that ENDS an argument
+//     (an incomplete character) is dropped and the argument quoted: passed
+//     through, it would take the separator or closing quote as its trail.
 //
 // Neither leaf calls anything, touches a static, needs a fixup or (arm64)
-// writes x18 -- the Windows-arm64 TEB register. --dump-argv-parser= and
+// writes x18 -- the Windows-arm64 TEB register; each uses 256 bytes of stack
+// below its entry SP for the lead-byte table and restores SP before `ret`. --dump-argv-parser= and
 // --dump-argv-quoter= (main.kr, hidden) write exactly these bytes so the arm64
 // leaves can be run under qemu-aarch64-static on Linux; a row proves the
 // dumped bytes are the ones a PE build embeds.
@@ -15496,13 +15528,16 @@ fn c7_x86_call(uint64 l) {
 
 // x86 condition codes used below.
 static uint64 C7_JB = 2
+static uint64 C7_JAE = 3
 static uint64 C7_JE = 4
 static uint64 C7_JNE = 5
 static uint64 C7_JA = 7
 
 // Parser leaf, Win64. rcx = p (input), rdx = buf (argv array), r8 = size, then
-// the string write pointer; r9 = argc; r10 = in-quotes; r11 = need, then the
-// backslash count; al = current byte. Volatile registers only.
+// the string write pointer; r9 = the code page's LeadByte array (CPINFO), then
+// argc; r10 = in-quotes; r11 = need, then the backslash count; al = current
+// byte; [rsp, rsp+256) = the lead-byte table (c7_x86_emit_lead_table).
+// Volatile registers only.
 fn c7_x86_emit_parse_leaf() {
     c7_begin()
     uint64 l_sl = c7_label()
@@ -15545,10 +15580,14 @@ fn c7_x86_emit_parse_leaf() {
     c7_x86_jcc(C7_JB, l_ret0)
     c7_b4(0x4C, 0x8D, 0x04, 0xC2)           // lea r8, [rdx+rax*8]  (strings)
     c7_b3(0x4C, 0x89, 0x02)                 // mov [rdx], r8        (argv[0])
+    c7_b3(0x48, 0x81, 0xEC)                 // sub rsp, 0x100       (the table)
+    emit_u32_le(0x100)
+    c7_x86_emit_lead_table()
     c7_b3(0x41, 0xB9, 0x01)                 // mov r9d, 1
     c7_b3(0x00, 0x00, 0x00)
     c7_b3(0x45, 0x31, 0xD2)                 // xor r10d, r10d
-    // argv[0]: quotes toggle and are dropped, no backslash rule.
+    // argv[0]: quotes toggle and are dropped, no backslash rule; a lead byte
+    // takes the byte after it verbatim (whatever it is).
     c7_bind(l_0)
     c7_b3(0x0F, 0xB6, 0x01)                 // movzx eax, byte [rcx]
     c7_b2(0x84, 0xC0)                       // test al, al
@@ -15566,6 +15605,14 @@ fn c7_x86_emit_parse_leaf() {
     c7_b2(0x3C, 0x09)                       // cmp al, '\t'
     c7_x86_jcc(C7_JE, l_0ws)
     c7_bind(l_0copy)
+    c7_b3(0x41, 0x88, 0x00)                 // mov [r8], al
+    c7_b3(0x49, 0xFF, 0xC0)                 // inc r8
+    c7_b3(0x48, 0xFF, 0xC1)                 // inc rcx
+    c7_b4(0x80, 0x3C, 0x04, 0x00)           // cmp byte [rsp+rax], 0  (lead byte?)
+    c7_x86_jcc(C7_JE, l_0)
+    c7_b3(0x0F, 0xB6, 0x01)                 // movzx eax, byte [rcx]  (its trail)
+    c7_b2(0x84, 0xC0)                       // test al, al  (none: stop AT the NUL)
+    c7_x86_jcc(C7_JE, l_0end)
     c7_b3(0x41, 0x88, 0x00)                 // mov [r8], al
     c7_b3(0x49, 0xFF, 0xC0)                 // inc r8
     c7_b3(0x48, 0xFF, 0xC1)                 // inc rcx
@@ -15631,7 +15678,17 @@ fn c7_x86_emit_parse_leaf() {
     c7_x86_jcc(C7_JE, l_argend)
     c7_b2(0x3C, 0x09)                       // cmp al, '\t'
     c7_x86_jcc(C7_JE, l_argend)
+    // Copy the byte; a lead byte takes the byte after it verbatim, so a trail
+    // 0x5C is never a backslash and a trail '"' never a quote.
     c7_bind(l_copy)
+    c7_b3(0x41, 0x88, 0x00)                 // mov [r8], al
+    c7_b3(0x49, 0xFF, 0xC0)                 // inc r8
+    c7_b3(0x48, 0xFF, 0xC1)                 // inc rcx
+    c7_b4(0x80, 0x3C, 0x04, 0x00)           // cmp byte [rsp+rax], 0  (lead byte?)
+    c7_x86_jcc(C7_JE, l_arg)
+    c7_b3(0x0F, 0xB6, 0x01)                 // movzx eax, byte [rcx]  (its trail)
+    c7_b2(0x84, 0xC0)                       // test al, al  (none: l_arg ends AT the NUL)
+    c7_x86_jcc(C7_JE, l_arg)
     c7_b3(0x41, 0x88, 0x00)                 // mov [r8], al
     c7_b3(0x49, 0xFF, 0xC0)                 // inc r8
     c7_b3(0x48, 0xFF, 0xC1)                 // inc rcx
@@ -15647,11 +15704,56 @@ fn c7_x86_emit_parse_leaf() {
     c7_b4(0x4A, 0xC7, 0x04, 0xCA)           // mov qword [rdx+r9*8], 0
     emit_u32_le(0)
     c7_b3(0x4C, 0x89, 0xC8)                 // mov rax, r9
+    c7_b3(0x48, 0x81, 0xC4)                 // add rsp, 0x100
+    emit_u32_le(0x100)
     emit_byte(0xC3)                         // ret
     c7_bind(l_ret0)
     c7_b2(0x31, 0xC0)                       // xor eax, eax
     emit_byte(0xC3)                         // ret
     c7_end()
+}
+
+// The lead-byte table, inside a leaf: 256 bytes at [rsp] (the caller already
+// did `sub rsp, 0x100`), byte b nonzero iff b is a lead byte. Built from r9 =
+// CPINFO.LeadByte (12 bytes): ranges [lo, hi] INCLUSIVE, taken in pairs while
+// BOTH bytes of a pair are nonzero, at most 6 pairs -- UCRT's own reading of
+// the same array (_setmbcp), measured equal to its _ismbblead on every
+// installed code page but Johab 1361 (no locale's ANSI code page). An all-zero
+// array is a single-byte code page: no lead bytes. Clobbers rax, r9-r11.
+fn c7_x86_emit_lead_table() {
+    uint64 l_z = c7_label()
+    uint64 l_rng = c7_label()
+    uint64 l_fill = c7_label()
+    uint64 l_next = c7_label()
+    uint64 l_done = c7_label()
+    c7_b2(0x31, 0xC0)                       // xor eax, eax
+    c7_bind(l_z)
+    c7_b4(0x48, 0xC7, 0x04, 0xC4)           // mov qword [rsp+rax*8], 0
+    emit_u32_le(0)
+    c7_b2(0xFF, 0xC0)                       // inc eax
+    c7_b3(0x83, 0xF8, 0x20)                 // cmp eax, 32
+    c7_x86_jcc(C7_JB, l_z)
+    c7_b4(0x4D, 0x8D, 0x59, 0x0C)           // lea r11, [r9+12]   (end of LeadByte)
+    c7_bind(l_rng)
+    c7_b3(0x4D, 0x39, 0xD9)                 // cmp r9, r11
+    c7_x86_jcc(C7_JAE, l_done)
+    c7_b4(0x41, 0x0F, 0xB6, 0x01)           // movzx eax, byte [r9]        (lo)
+    c7_b4(0x45, 0x0F, 0xB6, 0x51)           // movzx r10d, byte [r9+1]     (hi)
+    emit_byte(0x01)
+    c7_b2(0x85, 0xC0)                       // test eax, eax
+    c7_x86_jcc(C7_JE, l_done)
+    c7_b3(0x45, 0x85, 0xD2)                 // test r10d, r10d
+    c7_x86_jcc(C7_JE, l_done)
+    c7_bind(l_fill)
+    c7_b3(0x44, 0x39, 0xD0)                 // cmp eax, r10d
+    c7_x86_jcc(C7_JA, l_next)
+    c7_b4(0xC6, 0x04, 0x04, 0x01)           // mov byte [rsp+rax], 1
+    c7_b2(0xFF, 0xC0)                       // inc eax
+    c7_x86_jmp(l_fill)
+    c7_bind(l_next)
+    c7_b4(0x49, 0x83, 0xC1, 0x02)           // add r9, 2
+    c7_x86_jmp(l_rng)
+    c7_bind(l_done)
 }
 
 // r11 backslashes to [r8++] (r11 ends 0; al untouched).
@@ -15697,9 +15799,18 @@ fn c7_x86_quote_bs() {
     c7_bind(l_be)
 }
 
-// Quoter leaf, Win64. rcx = argv walk, rdx = out (0 = measure), rax = length;
-// r8 = current argument; r9 = scan pointer, then backslash count; r10b = byte;
-// r11 = 0 for argv[0], 1 after. Volatile registers only.
+// Quoter leaf, Win64. rcx = argv walk, rdx = out (0 = measure), r8 = the code
+// page's LeadByte array (CPINFO), then the current argument; rax = length;
+// r9 = scan pointer, then backslash count; r10b = byte; r11 = 0 for argv[0],
+// 1 after; [rsp, rsp+256) = the lead-byte table. Volatile registers only.
+// A lead byte and the byte after it are ONE unit everywhere below: a trail
+// byte is never counted as a backslash, escaped or dropped as a quote, or
+// taken as a reason to quote -- which is how the child's parser (and UCRT's)
+// reads it. A lead byte that ENDS an argument (no trail: not a whole
+// character in the code page) is dropped, and the argument quoted: passed
+// through, it would take the separator or closing quote after it as its trail
+// and merge two arguments; quoted, an argument that was only that byte still
+// arrives (as "").
 fn c7_x86_emit_quote_leaf() {
     c7_begin()
     uint64 l_next = c7_label()
@@ -15707,19 +15818,22 @@ fn c7_x86_emit_quote_leaf() {
     uint64 l_nosep = c7_label()
     uint64 l_q = c7_label()
     uint64 l_scan = c7_label()
+    uint64 l_scanlead = c7_label()
     uint64 l_scannext = c7_label()
     uint64 l_plain = c7_label()
     uint64 l_adone = c7_label()
-    uint64 l_q0 = c7_label()
     uint64 l_qb = c7_label()
     uint64 l_qbs = c7_label()
     uint64 l_qbe = c7_label()
+    uint64 l_qlead = c7_label()
     uint64 l_qnorm = c7_label()
     uint64 l_qend = c7_label()
     uint64 l_qclose = c7_label()
-    uint64 l_pskip = c7_label()
-    uint64 l_q0skip = c7_label()
 
+    c7_b3(0x4D, 0x89, 0xC1)                 // mov r9, r8   (LeadByte)
+    c7_b3(0x48, 0x81, 0xEC)                 // sub rsp, 0x100  (the table)
+    emit_u32_le(0x100)
+    c7_x86_emit_lead_table()
     c7_b2(0x31, 0xC0)                       // xor eax, eax
     c7_b3(0x45, 0x31, 0xDB)                 // xor r11d, r11d
     c7_bind(l_next)
@@ -15742,9 +15856,21 @@ fn c7_x86_emit_quote_leaf() {
     c7_b4(0x41, 0x80, 0xFA, 0x09)           // cmp r10b, '\t'
     c7_x86_jcc(C7_JE, l_q)
     c7_b3(0x45, 0x85, 0xDB)                 // test r11d, r11d
-    c7_x86_jcc(C7_JE, l_scannext)           // argv[0]: '"' does not force quotes
+    c7_x86_jcc(C7_JE, l_scanlead)           // argv[0]: '"' does not force quotes
     c7_b4(0x41, 0x80, 0xFA, 0x22)           // cmp r10b, '"'
     c7_x86_jcc(C7_JE, l_q)
+    // A lead byte: its trail is skipped unread (a trail space, tab or '"' is
+    // part of a character, not a reason to quote). A lead byte that ends the
+    // argument forces quotes: it is dropped, and an argument that was only
+    // that byte must still arrive, as "".
+    c7_bind(l_scanlead)
+    c7_b4(0x42, 0x80, 0x3C, 0x14)           // cmp byte [rsp+r10], 0  (lead byte?)
+    emit_byte(0x00)
+    c7_x86_jcc(C7_JE, l_scannext)
+    c7_b4(0x41, 0x80, 0x79, 0x01)           // cmp byte [r9+1], 0     (a trail?)
+    emit_byte(0x00)
+    c7_x86_jcc(C7_JE, l_q)
+    c7_b3(0x49, 0xFF, 0xC1)                 // inc r9   (skip the trail)
     c7_bind(l_scannext)
     c7_b3(0x49, 0xFF, 0xC1)                 // inc r9
     c7_x86_jmp(l_scan)
@@ -15753,31 +15879,14 @@ fn c7_x86_emit_quote_leaf() {
     // UCRT's argv[0] rule has no escape for it: passed through, an odd one
     // would leave quote mode on over the rest of the line.
     c7_bind(l_plain)
-    c7_b4(0x45, 0x0F, 0xB6, 0x10)           // movzx r10d, byte [r8]
-    c7_b3(0x45, 0x84, 0xD2)                 // test r10b, r10b
-    c7_x86_jcc(C7_JE, l_adone)
-    c7_b4(0x41, 0x80, 0xFA, 0x22)           // cmp r10b, '"'
-    c7_x86_jcc(C7_JE, l_pskip)
-    c7_x86_quote_put(256)
-    c7_bind(l_pskip)
-    c7_b3(0x49, 0xFF, 0xC0)                 // inc r8
-    c7_x86_jmp(l_plain)
+    c7_x86_quote_verbatim(l_adone)
     c7_bind(l_q)
     c7_x86_quote_put(0x22)
     c7_b3(0x45, 0x85, 0xDB)                 // test r11d, r11d
     c7_x86_jcc(C7_JNE, l_qb)
     // argv[0] quoted: verbatim between the quotes (no backslash rule there),
     // its `"` dropped as above.
-    c7_bind(l_q0)
-    c7_b4(0x45, 0x0F, 0xB6, 0x10)           // movzx r10d, byte [r8]
-    c7_b3(0x45, 0x84, 0xD2)                 // test r10b, r10b
-    c7_x86_jcc(C7_JE, l_qclose)
-    c7_b4(0x41, 0x80, 0xFA, 0x22)           // cmp r10b, '"'
-    c7_x86_jcc(C7_JE, l_q0skip)
-    c7_x86_quote_put(256)
-    c7_bind(l_q0skip)
-    c7_b3(0x49, 0xFF, 0xC0)                 // inc r8
-    c7_x86_jmp(l_q0)
+    c7_x86_quote_verbatim(l_qclose)
     // Quoted argument: count each backslash run, look at what ends it.
     c7_bind(l_qb)
     c7_b3(0x45, 0x31, 0xC9)                 // xor r9d, r9d
@@ -15792,12 +15901,29 @@ fn c7_x86_emit_quote_leaf() {
     c7_b3(0x45, 0x84, 0xD2)                 // test r10b, r10b
     c7_x86_jcc(C7_JE, l_qend)
     c7_b4(0x41, 0x80, 0xFA, 0x22)           // cmp r10b, '"'
-    c7_x86_jcc(C7_JNE, l_qnorm)
+    c7_x86_jcc(C7_JNE, l_qlead)
     // n backslashes + '"' -> 2n+1 backslashes + '"'
     c7_b4(0x4F, 0x8D, 0x4C, 0x09)           // lea r9, [r9+r9+1]
     emit_byte(0x01)
     c7_x86_quote_bs()
     c7_x86_quote_put(256)
+    c7_b3(0x49, 0xFF, 0xC0)                 // inc r8
+    c7_x86_jmp(l_qb)
+    // A lead byte ends the run like any other byte (the run is literal); the
+    // pair goes out verbatim. With no trail it is dropped -- and the run is
+    // then the one before the closing quote.
+    c7_bind(l_qlead)
+    c7_b4(0x42, 0x80, 0x3C, 0x14)           // cmp byte [rsp+r10], 0  (lead byte?)
+    emit_byte(0x00)
+    c7_x86_jcc(C7_JE, l_qnorm)
+    c7_b4(0x41, 0x80, 0x78, 0x01)           // cmp byte [r8+1], 0     (a trail?)
+    emit_byte(0x00)
+    c7_x86_jcc(C7_JE, l_qend)
+    c7_x86_quote_bs()
+    c7_x86_quote_put(256)                   // the lead byte
+    c7_b3(0x49, 0xFF, 0xC0)                 // inc r8
+    c7_b4(0x45, 0x0F, 0xB6, 0x10)           // movzx r10d, byte [r8]
+    c7_x86_quote_put(256)                   // its trail, whatever it is
     c7_b3(0x49, 0xFF, 0xC0)                 // inc r8
     c7_x86_jmp(l_qb)
     c7_bind(l_qnorm)
@@ -15818,8 +15944,42 @@ fn c7_x86_emit_quote_leaf() {
     c7_x86_jmp(l_next)
     c7_bind(l_end)
     c7_x86_quote_put(0x00)                  // the NUL counts
+    c7_b3(0x48, 0x81, 0xC4)                 // add rsp, 0x100
+    emit_u32_le(0x100)
     emit_byte(0xC3)                         // ret
     c7_end()
+}
+
+// The argument at r8, verbatim through c7_x86_quote_put, then to `l_after`:
+// every `"` dropped, a lead byte with its trail copied as a unit (a trail `"`
+// is kept), a lead byte with no trail dropped. Used for an argument that needs
+// no quotes and for argv[0] inside its quotes.
+fn c7_x86_quote_verbatim(uint64 l_after) {
+    uint64 l_v = c7_label()
+    uint64 l_vskip = c7_label()
+    uint64 l_vlead = c7_label()
+    c7_bind(l_v)
+    c7_b4(0x45, 0x0F, 0xB6, 0x10)           // movzx r10d, byte [r8]
+    c7_b3(0x45, 0x84, 0xD2)                 // test r10b, r10b
+    c7_x86_jcc(C7_JE, l_after)
+    c7_b4(0x42, 0x80, 0x3C, 0x14)           // cmp byte [rsp+r10], 0  (lead byte?)
+    emit_byte(0x00)
+    c7_x86_jcc(C7_JNE, l_vlead)
+    c7_b4(0x41, 0x80, 0xFA, 0x22)           // cmp r10b, '"'
+    c7_x86_jcc(C7_JE, l_vskip)
+    c7_x86_quote_put(256)
+    c7_bind(l_vskip)
+    c7_b3(0x49, 0xFF, 0xC0)                 // inc r8
+    c7_x86_jmp(l_v)
+    c7_bind(l_vlead)
+    c7_b4(0x41, 0x80, 0x78, 0x01)           // cmp byte [r8+1], 0     (a trail?)
+    emit_byte(0x00)
+    c7_x86_jcc(C7_JE, l_vskip)              // no: dropped
+    c7_x86_quote_put(256)                   // the lead byte
+    c7_b3(0x49, 0xFF, 0xC0)                 // inc r8
+    c7_b4(0x45, 0x0F, 0xB6, 0x10)           // movzx r10d, byte [r8]
+    c7_x86_quote_put(256)                   // its trail
+    c7_x86_jmp(l_vskip)
 }
 
 // Writes `msg` (<= 64 bytes, built on the stack from immediates -- no data in
@@ -15867,6 +16027,23 @@ fn c7_x86_emit_die(uint64 code, uint64 msg, uint64 len) {
     emit_win_call_iat(IAT_ExitProcess)
 }
 
+// mov qword [rsp+off], 0 three times: the 20-byte CPINFO at [rsp+off] and its
+// padding, i.e. MaxCharSize 0 and no lead bytes. `off` < 0x80 is a disp8.
+fn c7_x86_zero_cpinfo(uint64 off) {
+    uint64 q = 0
+    while q < 3 {
+        if off < 0x80 {
+            c7_b4(0x48, 0xC7, 0x44, 0x24)
+            emit_byte(off + q * 8)
+        } else {
+            c7_b4(0x48, 0xC7, 0x84, 0x24)
+            emit_u32_le(off + q * 8)
+        }
+        emit_u32_le(0)
+        q = q + 1
+    }
+}
+
 // The Windows x86_64 `main` prologue's argv sequence (see the C7 header).
 // Entered with RSP = 8 mod 16 (the loader's call); leaves RSP unchanged.
 // Clobbers rbx/rsi/rdi before main saves anything -- safe because a Windows
@@ -15876,7 +16053,20 @@ fn c7_x86_emit_main_argv(uint64 argc_off, uint64 argv_off) {
     uint64 l_fail = c7_label()
     uint64 l_leaf = c7_label()
     uint64 l_over = c7_label()
-    emit_win_alloc_stack(0x28)
+    uint64 l_cpok = c7_label()
+    emit_win_alloc_stack(0x48)
+    // GetCPInfo(CP_ACP, &cpinfo at [rsp+0x28]) -- the ANSI code page's lead
+    // bytes, the ones UCRT's narrow argv parse honours. On failure the CPINFO
+    // is zeroed: no lead bytes, the single-byte parse (UCRT's own fallback
+    // when its _setmbcp cannot read a code page).
+    c7_b2(0x31, 0xC9)                       // xor ecx, ecx       (CP_ACP)
+    c7_b4(0x48, 0x8D, 0x54, 0x24)           // lea rdx, [rsp+0x28]
+    emit_byte(0x28)
+    emit_win_call_iat(IAT_GetCPInfo)
+    c7_b2(0x85, 0xC0)                       // test eax, eax
+    c7_x86_jcc(C7_JNE, l_cpok)
+    c7_x86_zero_cpinfo(0x28)
+    c7_bind(l_cpok)
     emit_win_call_iat(IAT_GetCommandLineA)
     c7_b3(0x48, 0x89, 0xC6)                 // mov rsi, rax       (cmdline)
     c7_b3(0x48, 0x89, 0xF1)                 // mov rcx, rsi
@@ -15897,11 +16087,13 @@ fn c7_x86_emit_main_argv(uint64 argc_off, uint64 argv_off) {
     c7_b3(0x48, 0x89, 0xF1)                 // mov rcx, rsi
     c7_b3(0x48, 0x89, 0xDA)                 // mov rdx, rbx
     c7_b3(0x49, 0x89, 0xF8)                 // mov r8, rdi
+    c7_b4(0x4C, 0x8D, 0x4C, 0x24)           // lea r9, [rsp+0x2E]  (CPINFO.LeadByte)
+    emit_byte(0x2E)
     c7_x86_call(l_leaf)
     if argc_off != 0xFFFFFFFF { emit_static_store(argc_off) }
     c7_b3(0x48, 0x89, 0xD8)                 // mov rax, rbx
     if argv_off != 0xFFFFFFFF { emit_static_store(argv_off) }
-    emit_win_free_stack(0x28)
+    emit_win_free_stack(0x48)
     c7_x86_jmp(l_over)
     c7_bind(l_fail)
     c7_x86_emit_die(121, "krc runtime: argv allocation failed\n", 36)
@@ -15933,6 +16125,7 @@ fn c7_x86_emit_exec_argv(uint64 path_r, uint64 argv_r) {
     uint64 l_nomem = c7_label()
     uint64 l_quote = c7_label()
     uint64 l_nochild = c7_label()
+    uint64 l_cpok = c7_label()
     uint64 l_over = c7_label()
     // Through the stack, so neither source can be overwritten by the other's
     // move whatever registers the allocator picked.
@@ -15940,10 +16133,22 @@ fn c7_x86_emit_exec_argv(uint64 path_r, uint64 argv_r) {
     c7_x86_push(argv_r)
     c7_x86_pop(13)                          // r13 = argv
     c7_x86_pop(12)                          // r12 = path
-    c7_b3(0x48, 0x81, 0xEC)                 // sub rsp, 0xD0
+    c7_b3(0x48, 0x81, 0xEC)                 // sub rsp, 0xF0
+    emit_u32_le(0xF0)
+    // GetCPInfo(CP_ACP, &cpinfo at [rsp+0xD0]); zeroed on failure, as in the
+    // main prologue. Both quoter calls get its LeadByte array.
+    c7_b2(0x31, 0xC9)                       // xor ecx, ecx       (CP_ACP)
+    c7_b4(0x48, 0x8D, 0x94, 0x24)           // lea rdx, [rsp+0xD0]
     emit_u32_le(0xD0)
+    emit_win_call_iat(IAT_GetCPInfo)
+    c7_b2(0x85, 0xC0)                       // test eax, eax
+    c7_x86_jcc(C7_JNE, l_cpok)
+    c7_x86_zero_cpinfo(0xD0)
+    c7_bind(l_cpok)
     c7_b3(0x4C, 0x89, 0xE9)                 // mov rcx, r13
     c7_b2(0x31, 0xD2)                       // xor edx, edx  (measure)
+    c7_b4(0x4C, 0x8D, 0x84, 0x24)           // lea r8, [rsp+0xD6]  (CPINFO.LeadByte)
+    emit_u32_le(0xD6)
     c7_x86_call(l_quote)
     c7_b2(0x48, 0x3D)                       // cmp rax, 32767
     emit_u32_le(32767)
@@ -15961,6 +16166,8 @@ fn c7_x86_emit_exec_argv(uint64 path_r, uint64 argv_r) {
     c7_b3(0x49, 0x89, 0xC7)                 // mov r15, rax  (command line)
     c7_b3(0x4C, 0x89, 0xE9)                 // mov rcx, r13
     c7_b3(0x4C, 0x89, 0xFA)                 // mov rdx, r15
+    c7_b4(0x4C, 0x8D, 0x84, 0x24)           // lea r8, [rsp+0xD6]
+    emit_u32_le(0xD6)
     c7_x86_call(l_quote)
     // STARTUPINFOA at [rsp+0x50] (104 bytes, cb = 104) and PROCESS_INFORMATION
     // at [rsp+0xB8], zeroed: lea rdi,[rsp+0x50]; xor eax,eax; mov ecx,128; rep stosb
@@ -15995,7 +16202,7 @@ fn c7_x86_emit_exec_argv(uint64 path_r, uint64 argv_r) {
     emit_win_call_iat(IAT_GetExitCodeProcess)
     // ExitProcess(code)
     emit_byte(0x8B); emit_byte(0x4C); emit_byte(0x24); emit_byte(0x20)
-    emit_byte(0x48); emit_byte(0x81); emit_byte(0xC4); emit_u32_le(0xD0)
+    emit_byte(0x48); emit_byte(0x81); emit_byte(0xC4); emit_u32_le(0xF0)
     emit_win_alloc_stack(0x20)
     emit_win_call_iat(IAT_ExitProcess)
     c7_x86_jmp(l_over)                      // not reached

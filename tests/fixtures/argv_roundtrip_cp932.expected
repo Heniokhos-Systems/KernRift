@@ -1,0 +1,53 @@
+#0 rc=7
+argc=7
+<argv_echo.exe>
+<a 表>
+<表"x>
+<C:\my データ\表>
+<表>
+<a 表\>
+<ソ\"z>
+raw=<argv_echo.exe "a 表" "表\"x" "C:\my データ\表" 表 "a 表\\" "ソ\\\"z">
+#1 rc=2
+argc=2
+<C:\my dir\表.exe>
+<x>
+raw=<"C:\my dir\表.exe" x>
+#2 rc=3
+argc=3
+<argv_echo.exe>
+<x>
+<y>
+raw=<argv_echo.exe "x" y>
+#3 rc=3
+argc=3
+<argv_echo.exe>
+<a b>
+<y>
+raw=<argv_echo.exe "a b" y>
+#4 rc=3
+argc=3
+<argv_echo.exe>
+<a \>
+<\>
+raw=<argv_echo.exe "a \\" "\\">
+#5 rc=2
+argc=2
+<e>
+<x>
+raw=<"e" x>
+#6 rc=2
+argc=2
+<argv_echo.exe>
+<>
+raw=<argv_echo.exe "">
+#7 rc=7
+argc=7
+<argv_echo.exe>
+<―">
+<歃">
+<濬">
+<纊">
+<ﾟ\">
+<｡\>
+raw=<argv_echo.exe "―\"" "歃\"" "濬\"" "纊\"" "ﾟ\\\"" ｡\>

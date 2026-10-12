@@ -1,0 +1,18 @@
+aï"b c
+aï b c
+aï	b c
+aï
+ch bï
+ch ï"b c
+ch ï b
+ch "aï
+ch Ä\" x
+ch †\" x
+ch ﬂ\" x
+ch ˝\" x
+ch ¸\" x
+ch Å\" x
+ch ü\" x
+ch ‡\" x
+ch \\ï\" x
+"aï" b

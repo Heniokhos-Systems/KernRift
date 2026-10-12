@@ -1,0 +1,12 @@
+#8 rc=3
+argc=3
+<a•"b>
+<x•"y>
+<p• q>
+raw=<a•"b x•"y p• q>
+#9 rc=3
+argc=3
+<a• b>
+<c•	d>
+<•"•">
+raw=<a• b c•	d •"•">

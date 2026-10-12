@@ -1,0 +1,16 @@
+ch "C:\データ\表" x
+ch 表" x
+ch ソ\" y
+ch "表\\" z
+ch 表\表 "a 表"
+ch 表表表"
+ch ｱ\" ｲ
+ch ―" x
+ch 歃" x
+ch 濬" x
+ch 纊" x
+ch ﾟ\" x
+ch ｡\" x
+"C:\Program Files\能\ch.exe" a\表
+ch "" 表 ""
+ch \\表" x

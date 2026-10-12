@@ -1,0 +1,89 @@
+#0 rc=3
+argc=3
+<ch>
+<C:\データ\表>
+<x>
+raw=<ch "C:\データ\表" x>
+#1 rc=2
+argc=2
+<ch>
+<表 x>
+raw=<ch 表" x>
+#2 rc=3
+argc=3
+<ch>
+<ソ">
+<y>
+raw=<ch ソ\" y>
+#3 rc=3
+argc=3
+<ch>
+<表\>
+<z>
+raw=<ch "表\\" z>
+#4 rc=3
+argc=3
+<ch>
+<表\表>
+<a 表>
+raw=<ch 表\表 "a 表">
+#5 rc=2
+argc=2
+<ch>
+<表表表>
+raw=<ch 表表表">
+#6 rc=3
+argc=3
+<ch>
+<ｱ">
+<ｲ>
+raw=<ch ｱ\" ｲ>
+#7 rc=2
+argc=2
+<ch>
+<― x>
+raw=<ch ―" x>
+#8 rc=2
+argc=2
+<ch>
+<歃 x>
+raw=<ch 歃" x>
+#9 rc=2
+argc=2
+<ch>
+<濬 x>
+raw=<ch 濬" x>
+#10 rc=2
+argc=2
+<ch>
+<纊 x>
+raw=<ch 纊" x>
+#11 rc=3
+argc=3
+<ch>
+<ﾟ">
+<x>
+raw=<ch ﾟ\" x>
+#12 rc=3
+argc=3
+<ch>
+<｡">
+<x>
+raw=<ch ｡\" x>
+#13 rc=2
+argc=2
+<C:\Program Files\能\ch.exe>
+<a\表>
+raw=<"C:\Program Files\能\ch.exe" a\表>
+#14 rc=4
+argc=4
+<ch>
+<>
+<表>
+<>
+raw=<ch "" 表 "">
+#15 rc=2
+argc=2
+<ch>
+<\\表 x>
+raw=<ch \\表" x>

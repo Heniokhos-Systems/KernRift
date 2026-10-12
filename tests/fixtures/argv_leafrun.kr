@@ -4,24 +4,40 @@
 // --dump-argv-quoter=<file> and called here (AAPCS64, from an RWX mapping)
 // on the same inputs the x86_64 Wine rows use; built for Linux arm64 and run
 // under qemu-aarch64-static. Built for Linux x86_64 it runs the dumped x86_64
-// leaves natively: they are Win64 (rcx, rdx, r8), call_ptr here is SysV (rdi,
-// rsi, rdx), so load_leaf puts a 9-byte shim in front of the blob --
-// mov r8,rdx; mov rdx,rsi; mov rcx,rdi -- that falls through into it. The
-// leaves touch only rax, rcx, rdx, r8-r11, all caller-saved under SysV too.
-// That makes the quoter's "measure == build, nothing past len" checks below
-// hold on x86_64 as well, where a VirtualAlloc'd buffer (page-rounded) hides
-// a small overrun from every Wine row.
-//   argv_leafrun parse <parser.bin> <table.txt>
-//       every line through parse(cmdline, buf, size) -> argc; prints the
+// leaves natively: they are Win64 (rcx, rdx, r8, r9), call_ptr here is SysV
+// (rdi, rsi, rdx, rcx), so load_leaf puts a 12-byte shim in front of the blob
+// -- mov r9,rcx; mov r8,rdx; mov rdx,rsi; mov rcx,rdi -- that falls through
+// into it. The leaves touch only rax, rcx, rdx, r8-r11 and their own 256
+// bytes below rsp, all caller-owned under SysV too. That makes the quoter's
+// "measure == build, nothing past len" checks below hold on x86_64 as well,
+// where a VirtualAlloc'd buffer (page-rounded) hides a small overrun from
+// every Wine row.
+//
+// Both leaves take the code page's CPINFO.LeadByte array last (parse's 4th
+// argument, quote's 3rd). [lb] is it in hex, up to 32 bytes: the first 12 are
+// LeadByte, bytes 12.. lie PAST it (a leaf must never read them as ranges);
+// absent, all zero -- a single-byte code page.
+//   argv_leafrun parse <parser.bin> <table.txt> [lb]
+//       every line through parse(cmdline, buf, size, lb) -> argc; prints the
 //       format argv_rawparent.exe prints (raw= is the line itself: the
-//       parse must not write it), so argv_table.expected is shared.
-//       The sizing call parse(line, 0, 0) must answer 10*(len+2), and a
-//       buffer one byte smaller than that must be refused (argc 0).
-//   argv_leafrun rt <quoter.bin> <parser.bin>
-//       every argv_vectors.kr vector through quote(argv, 0) (measure),
-//       quote(argv, buf) (build), then parse(); prints argv_roundtrip.expected's
-//       format, raw= being the quoted line. The quoter must return the same
-//       length both times, NUL-terminate at len-1 and write nothing past len.
+//       parse must not write it), so the table's .expected file is shared.
+//       The sizing call parse(line, 0, 0, lb) must answer 10*(len+2), and a
+//       buffer one byte smaller than that must be refused (argc 0). The bytes
+//       after the line's NUL are ` JUNK`: nothing may come from them.
+//   argv_leafrun rt <quoter.bin> <parser.bin> [lb]
+//   argv_leafrun rtd <quoter.bin> <parser.bin> [lb]
+//       every argv_vectors.kr vector (rt: rtv_build; rtd: rtv_dbcs_build, the
+//       cp932 set then the lead set) through quote(argv, 0, lb) (measure),
+//       quote(argv, buf, lb) (build), then parse(); prints the roundtrip
+//       .expected format, raw= being the quoted line. The quoter must return
+//       the same length both times, NUL-terminate at len-1 and write nothing
+//       past len.
+//   argv_leafrun leads <parser.bin> <lbs.txt>
+//       for every LeadByte array (one hex line each), which bytes the parser
+//       treats as lead bytes, as ranges: byte b is a lead byte iff
+//       `a b" z` parses to 3 arguments ([a, b", z]: the `"` is its trail)
+//       rather than 2 ([a, "b z"]: the `"` opens a quote). Tab, space, `"`
+//       and `\` are not probed (they are delimiters on their own).
 import "argv_vectors.kr"
 
 static uint64 cli_argc
@@ -76,17 +92,20 @@ fn load_leaf(uint64 path) -> uint64 {
     } else if get_arch_id() == 1 {
         m = syscall_raw(9, 0, 65536, 7, 0x22, 0xFFFFFFFFFFFFFFFF, 0)
         if m > 0xFFFFFFFFFFFFF000 { return 0 }
-        // SysV -> Win64: mov r8,rdx ; mov rdx,rsi ; mov rcx,rdi
+        // SysV -> Win64: mov r9,rcx ; mov r8,rdx ; mov rdx,rsi ; mov rcx,rdi
         store8(m + 0, 0x49)
         store8(m + 1, 0x89)
-        store8(m + 2, 0xD0)
-        store8(m + 3, 0x48)
+        store8(m + 2, 0xC9)
+        store8(m + 3, 0x49)
         store8(m + 4, 0x89)
-        store8(m + 5, 0xF2)
+        store8(m + 5, 0xD0)
         store8(m + 6, 0x48)
         store8(m + 7, 0x89)
-        store8(m + 8, 0xF9)
-        skip = 9
+        store8(m + 8, 0xF2)
+        store8(m + 9, 0x48)
+        store8(m + 10, 0x89)
+        store8(m + 11, 0xF9)
+        skip = 12
     } else {
         m = syscall_raw(222, 0, 65536, 7, 0x22, 0xFFFFFFFFFFFFFFFF, 0)
     }
@@ -122,7 +141,38 @@ fn show(uint64 k, uint64 argc, uint64 out, uint64 raw) {
     write(1, ">\n", 2)
 }
 
-fn run_parse(uint64 parser, uint64 table) -> uint32 {
+// 32 bytes from hex (2 digits a byte); the rest zero. 0 = all zero.
+fn lb_from_hex(uint64 hex) -> uint64 {
+    uint64 b = alloc(32)
+    uint64 i = 0
+    while i < 32 {
+        store8(b + i, 0)
+        i = i + 1
+    }
+    if hex == 0 { return b }
+    i = 0
+    while i < 32 && load8(hex + 2 * i) != 0 && load8(hex + 2 * i + 1) != 0 {
+        uint64 v = 0
+        uint64 j = 0
+        while j < 2 {
+            uint64 h = load8(hex + 2 * i + j)
+            if h >= 97 { h = h - 87 } else if h >= 65 { h = h - 55 } else { h = h - 48 }
+            v = v * 16 + h
+            j = j + 1
+        }
+        store8(b + i, v)
+        i = i + 1
+    }
+    return b
+}
+
+fn hex2(uint64 v) {
+    uint64 d = "0123456789abcdef"
+    write(1, d + (v >> 4), 1)
+    write(1, d + (v & 15), 1)
+}
+
+fn run_parse(uint64 parser, uint64 table, uint64 lb) -> uint32 {
     u8[8] tp
     uint64 tn = slurp(table, tp)
     if tn == 0xFFFFFFFFFFFFFFFF { return 2 }
@@ -139,15 +189,24 @@ fn run_parse(uint64 parser, uint64 table) -> uint32 {
             j = j + 1
         }
         store8(line + j, 0)
+        // Junk PAST the NUL: a parse that reads beyond the end of the command
+        // line (as UCRT does after a lead byte with no trail) picks up a
+        // stray ` JUNK` argument and the line's output no longer matches.
+        store8(line + j + 1, 32)
+        store8(line + j + 2, 74)
+        store8(line + j + 3, 85)
+        store8(line + j + 4, 78)
+        store8(line + j + 5, 75)
+        store8(line + j + 6, 0)
         uint64 size = 10 * (j + 2)
         uint64 out = alloc(size)
-        if call_ptr(parser, line, 0, 0) != size {
+        if call_ptr(parser, line, 0, 0, lb) != size {
             write(1, "sizing call is not 10*(len+2)\n", 31)
         }
-        if call_ptr(parser, line, out, size - 1) != 0 {
+        if call_ptr(parser, line, out, size - 1, lb) != 0 {
             write(1, "small buffer accepted\n", 22)
         }
-        uint64 argc = call_ptr(parser, line, out, size)
+        uint64 argc = call_ptr(parser, line, out, size, lb)
         show(k, argc, out, line)
         k = k + 1
         pos = e + 1
@@ -155,41 +214,105 @@ fn run_parse(uint64 parser, uint64 table) -> uint32 {
     return 0
 }
 
-fn run_rt(uint64 quoter, uint64 parser) -> uint32 {
+fn run_rt(uint64 quoter, uint64 parser, uint64 lb, uint64 dbcs) -> uint32 {
     uint64 argv = alloc(17 * 8)
     uint64 k = 0
-    while k < rtv_count() {
-        rtv_build(k, argv)
-        uint64 len = call_ptr(quoter, argv, 0)
+    uint64 cnt = rtv_count()
+    if dbcs != 0 { cnt = rtv_cp932_count() + rtv_lead_count() }
+    while k < cnt {
+        if dbcs != 0 { rtv_dbcs_build(k, argv) } else { rtv_build(k, argv) }
+        uint64 len = call_ptr(quoter, argv, 0, lb)
         uint64 buf = alloc(len + 16)
         uint64 i = 0
         while i < len + 16 {
             store8(buf + i, 0xAA)
             i = i + 1
         }
-        uint64 len2 = call_ptr(quoter, argv, buf)
+        uint64 len2 = call_ptr(quoter, argv, buf, lb)
         if len2 != len { write(1, "measure and build disagree\n", 27) }
         if len == 0 || load8(buf + len - 1) != 0 { write(1, "no NUL at len-1\n", 16) }
         if len != 0 && str_len(buf) != len - 1 { write(1, "NUL before len-1\n", 17) }
         if load8(buf + len) != 0xAA { write(1, "wrote past len\n", 15) }
         uint64 size = 10 * (len + 2)
         uint64 out = alloc(size)
-        uint64 argc = call_ptr(parser, buf, out, size)
+        uint64 argc = call_ptr(parser, buf, out, size, lb)
         show(k, argc, out, buf)
         k = k + 1
     }
     return 0
 }
 
+fn run_leads(uint64 parser, uint64 lbs) -> uint32 {
+    u8[8] tp
+    uint64 tn = slurp(lbs, tp)
+    if tn == 0xFFFFFFFFFFFFFFFF { return 2 }
+    uint64 t = load64(tp)
+    uint64 hex = alloc(80)
+    uint64 line = alloc(16)
+    uint64 out = alloc(256)
+    uint64 pos = 0
+    while pos < tn {
+        uint64 e = pos
+        while e < tn && load8(t + e) != 10 { e = e + 1 }
+        uint64 j = 0
+        while pos + j < e && j < 64 {
+            store8(hex + j, load8(t + pos + j))
+            j = j + 1
+        }
+        store8(hex + j, 0)
+        uint64 lb = lb_from_hex(hex)
+        write(1, "lb=<", 4)
+        write(1, hex, j)
+        write(1, "> leads:", 8)
+        uint64 any = 0
+        uint64 run = 0
+        uint64 b = 1
+        while b < 257 {
+            uint64 is = 0
+            if b < 256 && b != 9 && b != 32 && b != 34 && b != 92 {
+                store8(line, 97)
+                store8(line + 1, 32)
+                store8(line + 2, b)
+                store8(line + 3, 34)
+                store8(line + 4, 32)
+                store8(line + 5, 122)
+                store8(line + 6, 0)
+                if call_ptr(parser, line, out, 256, lb) == 3 { is = 1 }
+            }
+            if is == 1 && run == 0 { run = b }
+            if is == 0 && run != 0 {
+                write(1, " ", 1)
+                hex2(run)
+                if b - 1 != run {
+                    write(1, "-", 1)
+                    hex2(b - 1)
+                }
+                run = 0
+                any = 1
+            }
+            b = b + 1
+        }
+        if any == 0 { write(1, " none", 5) }
+        write(1, "\n", 1)
+        pos = e + 1
+    }
+    return 0
+}
+
 fn main() -> uint32 {
-    if cli_argc != 4 { return 64 }
+    if cli_argc != 4 && cli_argc != 5 { return 64 }
     uint64 mode = load64(cli_argv + 8)
+    uint64 lb = 0
+    if cli_argc == 5 { lb = lb_from_hex(load64(cli_argv + 32)) } else { lb = lb_from_hex(0) }
     uint64 a = load_leaf(load64(cli_argv + 16))
     if a == 0 { return 65 }
     if load8(mode) == 112 {
-        return run_parse(a, load64(cli_argv + 24))
+        return run_parse(a, load64(cli_argv + 24), lb)
+    }
+    if load8(mode) == 108 {
+        return run_leads(a, load64(cli_argv + 24))
     }
     uint64 b = load_leaf(load64(cli_argv + 24))
     if b == 0 { return 66 }
-    return run_rt(a, b)
+    return run_rt(a, b, lb, load8(mode + 2))
 }

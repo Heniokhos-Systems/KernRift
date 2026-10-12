@@ -73,3 +73,112 @@ fn rtv_build(uint64 k, uint64 argv) -> uint64 {
     store64(argv + n * 8, 0)
     return n
 }
+
+// DBCS vectors (spec C7, lead bytes): run with the CP932 LeadByte array
+// {81 9F E0 FC} -- by argv_leafrun.kr on the dumped leaves, and by
+// argv_rtparent.kr (K = 200 + k) under Wine with the ANSI code page 932.
+// Bytes >= 0x80 are written %XX and decoded by pct(): KernRift string
+// literals have no \x escape. 0x95 0x5C is CP932's 表, 0x83 0x5C ソ: a lead
+// byte whose trail is 0x5C, the byte a single-byte quoter or parser takes for
+// a backslash. Generated with the expected files by an independent model of
+// the rules whose parse was checked against ucrtbase's own (_setmbcp(932),
+// _configure_narrow_argv) on Windows 11 -- see argv_roundtrip_cp932.expected.
+//   cp932 set: whole characters after quoting (a lead byte with no trail is
+//              dropped by op 114), so it survives CreateProcessA's
+//              ANSI -> UTF-16 -> ANSI trip and runs end to end under Wine.
+//   lead set:  a lead byte followed by `"`, space or tab -- never valid text,
+//              so the OS would rewrite it; leaf rows only.
+fn pct(uint64 s) -> uint64 {
+    uint64 n = str_len(s)
+    uint64 b = alloc(n + 1)
+    uint64 i = 0
+    uint64 o = 0
+    while i < n {
+        uint64 c = load8(s + i)
+        if c == 37 {
+            uint64 v = 0
+            uint64 j = 1
+            while j < 3 {
+                uint64 h = load8(s + i + j)
+                if h >= 65 { h = h - 55 } else { h = h - 48 }
+                v = v * 16 + h
+                j = j + 1
+            }
+            store8(b + o, v)
+            i = i + 3
+        } else {
+            store8(b + o, c)
+            i = i + 1
+        }
+        o = o + 1
+    }
+    store8(b + o, 0)
+    return b
+}
+
+fn rtv_cp932_count() -> uint64 { return 8 }
+fn rtv_lead_count() -> uint64 { return 2 }
+
+// Vector k of the cp932 set (k < rtv_cp932_count()) or, for k >= it, vector
+// k - rtv_cp932_count() of the lead set. Same contract as rtv_build.
+fn rtv_dbcs_build(uint64 k, uint64 argv) -> uint64 {
+    uint64 n = 0
+    if k == 0 {
+        store64(argv + 0, pct("argv_echo.exe"))
+        store64(argv + 8, pct("a %95\\"))
+        store64(argv + 16, pct("%95\\\"x"))
+        store64(argv + 24, pct("C:\\my %83f%81[%83^\\%95\\"))
+        store64(argv + 32, pct("%95\\"))
+        store64(argv + 40, pct("a %95\\\\"))
+        store64(argv + 48, pct("%83\\\\\"z"))
+        n = 7
+    } else if k == 1 {
+        store64(argv + 0, pct("C:\\my dir\\%95\\.exe"))
+        store64(argv + 8, pct("x"))
+        n = 2
+    } else if k == 2 {
+        store64(argv + 0, pct("argv_echo.exe"))
+        store64(argv + 8, pct("x%95"))
+        store64(argv + 16, pct("y"))
+        n = 3
+    } else if k == 3 {
+        store64(argv + 0, pct("argv_echo.exe"))
+        store64(argv + 8, pct("a b%95"))
+        store64(argv + 16, pct("y"))
+        n = 3
+    } else if k == 4 {
+        store64(argv + 0, pct("argv_echo.exe"))
+        store64(argv + 8, pct("a \\%95"))
+        store64(argv + 16, pct("\\%95"))
+        n = 3
+    } else if k == 5 {
+        store64(argv + 0, pct("e%95"))
+        store64(argv + 8, pct("x"))
+        n = 2
+    } else if k == 6 {
+        store64(argv + 0, pct("argv_echo.exe"))
+        store64(argv + 8, pct("%95"))
+        n = 2
+    } else if k == 7 {
+        store64(argv + 0, pct("argv_echo.exe"))
+        store64(argv + 8, pct("%81\\\""))
+        store64(argv + 16, pct("%9F\\\""))
+        store64(argv + 24, pct("%E0\\\""))
+        store64(argv + 32, pct("%FA\\\""))
+        store64(argv + 40, pct("%DF\\\""))
+        store64(argv + 48, pct("%A1\\"))
+        n = 7
+    } else if k == 8 {
+        store64(argv + 0, pct("a%95\"b"))
+        store64(argv + 8, pct("x%95\"y"))
+        store64(argv + 16, pct("p%95 q"))
+        n = 3
+    } else if k == 9 {
+        store64(argv + 0, pct("a%95 b"))
+        store64(argv + 8, pct("c%95\td"))
+        store64(argv + 16, pct("%95\"%95\""))
+        n = 3
+    }
+    store64(argv + n * 8, 0)
+    return n
+}

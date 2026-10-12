@@ -1,0 +1,35 @@
+// C7 probe (Windows only): what GetCPInfo(CP_ACP) answers inside this
+// process -- the same call the emitted `main` prologue and op 114 make.
+// Prints `ok=<BOOL> max=<MaxCharSize> lead=<LeadByte as 24 hex digits>`. The
+// CP932 Wine rows run it first and require `ok=1 max=2 lead=819fe0fc0000...`:
+// their expectations are only meaningful if the ANSI code page really is 932
+// (Shift-JIS lead bytes 81-9F and E0-FC), not merely asked for.
+extern fn GetCPInfo(uint64 cp, uint64 info) -> uint64
+
+fn hex2(uint64 v) {
+    uint64 d = "0123456789abcdef"
+    write(1, d + (v >> 4), 1)
+    write(1, d + (v & 15), 1)
+}
+
+fn main() -> uint32 {
+    u8[20] info
+    uint64 i = 0
+    while i < 20 {
+        store8(info + i, 0)
+        i = i + 1
+    }
+    uint64 ok = GetCPInfo(0, info) & 0xFFFFFFFF
+    write(1, "ok=", 3)
+    if ok != 0 { write(1, "1", 1) } else { write(1, "0", 1) }
+    write(1, " max=", 5)
+    hex2(load32(info))
+    write(1, " lead=", 6)
+    i = 0
+    while i < 12 {
+        hex2(load8(info + 6 + i))
+        i = i + 1
+    }
+    write(1, "\n", 1)
+    return 0
+}

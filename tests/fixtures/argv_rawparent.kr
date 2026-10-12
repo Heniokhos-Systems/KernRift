@@ -1,5 +1,7 @@
 // C7 raw-command-line parent (Windows only; spec "Testing / C7 parser").
-// For every line of argv_table.txt it calls CreateProcessA DIRECTLY (routed
+// For every line of argv_table.txt (or of the table named by its one
+// argument: argv_table_cp932.txt under ACP 932) it calls CreateProcessA
+// DIRECTLY (routed
 // imports, no exec_process_argv quoting in between), so the child
 // argv_echo.exe receives exactly that line as its command line and its
 // emitted `main` prologue parses it. Then it prints `#K rc=N` (the child's
@@ -15,6 +17,9 @@ extern fn WaitForSingleObject(uint64 h, uint64 ms) -> uint64
 extern fn GetExitCodeProcess(uint64 h, uint64 code) -> uint64
 extern fn CloseHandle(uint64 h) -> uint64
 extern fn Sleep(uint64 ms) -> uint64
+
+static uint64 cli_argc
+static uint64 cli_argv
 
 fn put_dec(uint64 v) {
     u8[24] d
@@ -53,7 +58,9 @@ fn slurp(uint64 path, uint64 out) -> uint64 {
 
 fn main() -> uint32 {
     u8[8] tp
-    uint64 tn = slurp("argv_table.txt", tp)
+    uint64 table = "argv_table.txt"
+    if cli_argc == 2 { table = load64(cli_argv + 8) }
+    uint64 tn = slurp(table, tp)
     if tn == 0xFFFFFFFFFFFFFFFF { return 2 }
     uint64 t = load64(tp)
     u8[104] si

@@ -3821,6 +3821,7 @@ fn ir_emit_arm64_function(uint64 fn_node) {
 // arm64 condition codes used below (B.cond).
 static uint64 C7_A64_EQ = 0
 static uint64 C7_A64_NE = 1
+static uint64 C7_A64_HS = 2
 static uint64 C7_A64_LO = 3
 static uint64 C7_A64_HI = 8
 
@@ -3867,8 +3868,9 @@ fn c7_a64_sub1(uint64 d, uint64 n) {
 }
 
 // Parser leaf, AAPCS64. x0 = p, x1 = buf, x2 = size then the string write
-// pointer, x3 = argc, x4 = in-quotes, x5 = backslash count, w6 = current byte,
-// x7/x8 = scratch.
+// pointer, x3 = the code page's LeadByte array (CPINFO) then argc, x4 =
+// in-quotes, x5 = backslash count, w6 = current byte, x7/x8/x9 = scratch;
+// [sp, sp+256) = the lead-byte table (c7_a64_emit_lead_table).
 fn c7_a64_emit_parse_leaf() {
     c7_begin()
     uint64 l_sl = c7_label()
@@ -3910,9 +3912,12 @@ fn c7_a64_emit_parse_leaf() {
     c7_a64_bcond(C7_A64_LO, l_ret0)         // size < need: return 0
     emit_a64_add_lsl(2, 1, 7, 3)            // x2 = buf + 8 * (len + 2)  (strings)
     emit_a64_str(2, 1, 0)                   // argv[0] = x2
+    emit_a64_sub_sp_imm(0x100)              // the table
+    c7_a64_emit_lead_table(3, 8, 4, 5, 9)
     emit_a64_movz(3, 1)                     // argc = 1
     emit_a64_movz(4, 0)                     // not in quotes
-    // argv[0]: quotes toggle and are dropped, no backslash rule.
+    // argv[0]: quotes toggle and are dropped, no backslash rule; a lead byte
+    // takes the byte after it verbatim (whatever it is).
     c7_bind(l_0)
     emit_a64_ldrb(6, 0, 0)
     c7_a64_cbz_w(6, l_0end)
@@ -3928,6 +3933,12 @@ fn c7_a64_emit_parse_leaf() {
     c7_a64_cmp_wi(6, 0x09)
     c7_a64_bcond(C7_A64_EQ, l_0ws)
     c7_bind(l_0copy)
+    c7_a64_strb_post1(6, 2)
+    emit_a64_add_imm(0, 0, 1)
+    c7_a64_ldrb_sp(7, 6)                    // lead byte?
+    c7_a64_cbz_w(7, l_0)
+    emit_a64_ldrb(6, 0, 0)                  // its trail
+    c7_a64_cbz_w(6, l_0end)                 // none: stop AT the NUL
     c7_a64_strb_post1(6, 2)
     emit_a64_add_imm(0, 0, 1)
     c7_a64_b(l_0)
@@ -3988,7 +3999,15 @@ fn c7_a64_emit_parse_leaf() {
     c7_a64_bcond(C7_A64_EQ, l_argend)
     c7_a64_cmp_wi(6, 0x09)
     c7_a64_bcond(C7_A64_EQ, l_argend)
+    // Copy the byte; a lead byte takes the byte after it verbatim, so a trail
+    // 0x5C is never a backslash and a trail '"' never a quote.
     c7_bind(l_copy)
+    c7_a64_strb_post1(6, 2)
+    emit_a64_add_imm(0, 0, 1)
+    c7_a64_ldrb_sp(7, 6)                    // lead byte?
+    c7_a64_cbz_w(7, l_arg)
+    emit_a64_ldrb(6, 0, 0)                  // its trail
+    c7_a64_cbz_w(6, l_arg)                  // none: l_arg ends AT the NUL
     c7_a64_strb_post1(6, 2)
     emit_a64_add_imm(0, 0, 1)
     c7_a64_b(l_arg)
@@ -4001,11 +4020,55 @@ fn c7_a64_emit_parse_leaf() {
     c7_bind(l_done)
     emit_a64(0xF8207800 | (3 << 16) | (1 << 5) | 31)  // str xzr, [x1, x3, lsl #3]
     emit_a64_mov(0, 3)
+    emit_a64_add_sp_imm(0x100)
     emit_a64_ret()
     c7_bind(l_ret0)
     emit_a64_movz(0, 0)
     emit_a64_ret()
     c7_end()
+}
+
+// LDRB Wt, [SP, Xm]: the lead-byte table entry for the byte in Xm.
+fn c7_a64_ldrb_sp(uint64 t, uint64 m) {
+    emit_a64(0x38606800 | (m << 16) | (31 << 5) | t)
+}
+
+// The lead-byte table, inside a leaf: 256 bytes at [sp] (the caller already
+// did `sub sp, sp, #0x100`), byte b nonzero iff b is a lead byte. Built from
+// x<lb> = CPINFO.LeadByte (12 bytes) exactly as c7_x86_emit_lead_table does:
+// ranges [lo, hi] INCLUSIVE, in pairs while both bytes are nonzero, at most 6
+// pairs. Clobbers x<lb>, x<end>, x<lo>, x<hi>, x<t>.
+fn c7_a64_emit_lead_table(uint64 lb, uint64 end, uint64 lo, uint64 hi, uint64 t) {
+    uint64 l_z = c7_label()
+    uint64 l_rng = c7_label()
+    uint64 l_fill = c7_label()
+    uint64 l_next = c7_label()
+    uint64 l_done = c7_label()
+    emit_a64_movz(t, 0)
+    c7_bind(l_z)
+    emit_a64(0xF8206800 | (t << 16) | (31 << 5) | 31)  // str xzr, [sp, x<t>]
+    emit_a64_add_imm(t, t, 8)
+    c7_a64_cmp_wi(t, 256)
+    c7_a64_bcond(C7_A64_LO, l_z)
+    emit_a64_add_imm(end, lb, 12)           // end of LeadByte
+    c7_bind(l_rng)
+    emit_a64_cmp(lb, end)
+    c7_a64_bcond(C7_A64_HS, l_done)
+    emit_a64_ldrb(lo, lb, 0)
+    emit_a64_ldrb(hi, lb, 1)
+    c7_a64_cbz_w(lo, l_done)
+    c7_a64_cbz_w(hi, l_done)
+    c7_bind(l_fill)
+    emit_a64_cmp(lo, hi)
+    c7_a64_bcond(C7_A64_HI, l_next)
+    emit_a64_movz(t, 1)
+    emit_a64(0x38206800 | (lo << 16) | (31 << 5) | t)  // strb w<t>, [sp, x<lo>]
+    emit_a64_add_imm(lo, lo, 1)
+    c7_a64_b(l_fill)
+    c7_bind(l_next)
+    emit_a64_add_imm(lb, lb, 2)
+    c7_a64_b(l_rng)
+    c7_bind(l_done)
 }
 
 // x5 backslashes to [x2++] (x5 ends 0; w6 untouched).
@@ -4047,9 +4110,11 @@ fn c7_a64_quote_bs() {
     c7_bind(l_be)
 }
 
-// Quoter leaf, AAPCS64. x0 = argv walk, x1 = out (0 = measure), x2 = length;
-// x3 = current argument; x5 = backslash count; x6 = 0 for argv[0], 1 after;
-// w7 = byte; x8 = output scratch; x9 = scan pointer, w10 = scanned byte.
+// Quoter leaf, AAPCS64. x0 = argv walk, x1 = out (0 = measure), x2 = the code
+// page's LeadByte array (CPINFO), then the length; x3 = current argument;
+// x5 = backslash count; x6 = 0 for argv[0], 1 after; w7 = byte; x8 = output
+// scratch; x9 = scan pointer, w10 = scanned byte, w11 = table/trail probe;
+// [sp, sp+256) = the lead-byte table. Lead bytes as in c7_x86_emit_quote_leaf.
 fn c7_a64_emit_quote_leaf() {
     c7_begin()
     uint64 l_next = c7_label()
@@ -4057,19 +4122,20 @@ fn c7_a64_emit_quote_leaf() {
     uint64 l_nosep = c7_label()
     uint64 l_q = c7_label()
     uint64 l_scan = c7_label()
+    uint64 l_scanlead = c7_label()
     uint64 l_scannext = c7_label()
     uint64 l_plain = c7_label()
     uint64 l_adone = c7_label()
-    uint64 l_q0 = c7_label()
     uint64 l_qb = c7_label()
     uint64 l_qbs = c7_label()
     uint64 l_qbe = c7_label()
+    uint64 l_qlead = c7_label()
     uint64 l_qnorm = c7_label()
     uint64 l_qend = c7_label()
     uint64 l_qclose = c7_label()
-    uint64 l_pskip = c7_label()
-    uint64 l_q0skip = c7_label()
 
+    emit_a64_sub_sp_imm(0x100)              // the table
+    c7_a64_emit_lead_table(2, 8, 4, 5, 9)
     emit_a64_movz(2, 0)
     emit_a64_movz(6, 0)
     c7_bind(l_next)
@@ -4088,37 +4154,30 @@ fn c7_a64_emit_quote_leaf() {
     c7_a64_bcond(C7_A64_EQ, l_q)
     c7_a64_cmp_wi(10, 0x09)
     c7_a64_bcond(C7_A64_EQ, l_q)
-    c7_a64_cbz_x(6, l_scannext)             // argv[0]: '"' does not force quotes
+    c7_a64_cbz_x(6, l_scanlead)             // argv[0]: '"' does not force quotes
     c7_a64_cmp_wi(10, 0x22)
     c7_a64_bcond(C7_A64_EQ, l_q)
+    // A lead byte: its trail is skipped unread; one that ends the argument
+    // forces quotes (it is dropped; see the x86_64 leaf).
+    c7_bind(l_scanlead)
+    c7_a64_ldrb_sp(11, 10)                  // lead byte?
+    c7_a64_cbz_w(11, l_scannext)
+    emit_a64_ldrb(11, 9, 1)                 // a trail?
+    c7_a64_cbz_w(11, l_q)
+    emit_a64_add_imm(9, 9, 1)               // skip the trail
     c7_bind(l_scannext)
     emit_a64_add_imm(9, 9, 1)
     c7_a64_b(l_scan)
     // Nothing to quote: verbatim, except that a `"` is dropped (only argv[0]
     // can get here holding one; see the C7 header in ir.kr).
     c7_bind(l_plain)
-    emit_a64_ldrb(7, 3, 0)
-    c7_a64_cbz_w(7, l_adone)
-    c7_a64_cmp_wi(7, 0x22)
-    c7_a64_bcond(C7_A64_EQ, l_pskip)
-    c7_a64_quote_put_r(7)
-    c7_bind(l_pskip)
-    emit_a64_add_imm(3, 3, 1)
-    c7_a64_b(l_plain)
+    c7_a64_quote_verbatim(l_adone)
     c7_bind(l_q)
     c7_a64_quote_put_imm(0x22)
     c7_a64_cbnz_x(6, l_qb)
     // argv[0] quoted: verbatim between the quotes (no backslash rule there),
     // its `"` dropped as above.
-    c7_bind(l_q0)
-    emit_a64_ldrb(7, 3, 0)
-    c7_a64_cbz_w(7, l_qclose)
-    c7_a64_cmp_wi(7, 0x22)
-    c7_a64_bcond(C7_A64_EQ, l_q0skip)
-    c7_a64_quote_put_r(7)
-    c7_bind(l_q0skip)
-    emit_a64_add_imm(3, 3, 1)
-    c7_a64_b(l_q0)
+    c7_a64_quote_verbatim(l_qclose)
     // Quoted argument: count each backslash run, look at what ends it.
     c7_bind(l_qb)
     emit_a64_movz(5, 0)
@@ -4132,12 +4191,27 @@ fn c7_a64_emit_quote_leaf() {
     c7_bind(l_qbe)
     c7_a64_cbz_w(7, l_qend)
     c7_a64_cmp_wi(7, 0x22)
-    c7_a64_bcond(C7_A64_NE, l_qnorm)
+    c7_a64_bcond(C7_A64_NE, l_qlead)
     // n backslashes + '"' -> 2n+1 backslashes + '"'
     emit_a64_add(5, 5, 5)
     emit_a64_add_imm(5, 5, 1)
     c7_a64_quote_bs()
     c7_a64_quote_put_r(7)
+    emit_a64_add_imm(3, 3, 1)
+    c7_a64_b(l_qb)
+    // A lead byte ends the run like any other byte (the run is literal); the
+    // pair goes out verbatim. With no trail it is dropped -- and the run is
+    // then the one before the closing quote.
+    c7_bind(l_qlead)
+    c7_a64_ldrb_sp(11, 7)                   // lead byte?
+    c7_a64_cbz_w(11, l_qnorm)
+    emit_a64_ldrb(11, 3, 1)                 // a trail?
+    c7_a64_cbz_w(11, l_qend)
+    c7_a64_quote_bs()
+    c7_a64_quote_put_r(7)                   // the lead byte
+    emit_a64_add_imm(3, 3, 1)
+    emit_a64_ldrb(7, 3, 0)
+    c7_a64_quote_put_r(7)                   // its trail, whatever it is
     emit_a64_add_imm(3, 3, 1)
     c7_a64_b(l_qb)
     c7_bind(l_qnorm)
@@ -4158,8 +4232,37 @@ fn c7_a64_emit_quote_leaf() {
     c7_bind(l_end)
     c7_a64_quote_put_r(31)                  // the NUL counts (wzr)
     emit_a64_mov(0, 2)
+    emit_a64_add_sp_imm(0x100)
     emit_a64_ret()
     c7_end()
+}
+
+// The argument at x3, verbatim through the quoter output, then to `l_after`
+// (see c7_x86_quote_verbatim): every `"` dropped, a lead byte with its trail
+// copied as a unit, a lead byte with no trail dropped.
+fn c7_a64_quote_verbatim(uint64 l_after) {
+    uint64 l_v = c7_label()
+    uint64 l_vskip = c7_label()
+    uint64 l_vlead = c7_label()
+    c7_bind(l_v)
+    emit_a64_ldrb(7, 3, 0)
+    c7_a64_cbz_w(7, l_after)
+    c7_a64_ldrb_sp(11, 7)                   // lead byte?
+    c7_a64_cbnz_w(11, l_vlead)
+    c7_a64_cmp_wi(7, 0x22)
+    c7_a64_bcond(C7_A64_EQ, l_vskip)
+    c7_a64_quote_put_r(7)
+    c7_bind(l_vskip)
+    emit_a64_add_imm(3, 3, 1)
+    c7_a64_b(l_v)
+    c7_bind(l_vlead)
+    emit_a64_ldrb(11, 3, 1)                 // a trail?
+    c7_a64_cbz_w(11, l_vskip)               // no: dropped
+    c7_a64_quote_put_r(7)                   // the lead byte
+    emit_a64_add_imm(3, 3, 1)
+    emit_a64_ldrb(7, 3, 0)
+    c7_a64_quote_put_r(7)                   // its trail
+    c7_a64_b(l_vskip)
 }
 
 // Writes `msg` (<= 64 bytes, built on the stack from immediates -- no data in
@@ -4194,6 +4297,14 @@ fn c7_a64_emit_die(uint64 code, uint64 msg, uint64 len) {
     emit_a64_win_call_iat(IAT_ExitProcess)
 }
 
+// str xzr at sp+off, sp+off+8, sp+off+16: the 20-byte CPINFO and its padding
+// (MaxCharSize 0, no lead bytes). `off` is 8-aligned.
+fn c7_a64_zero_cpinfo(uint64 off) {
+    emit_a64_str(31, 31, off)
+    emit_a64_str(31, 31, off + 8)
+    emit_a64_str(31, 31, off + 16)
+}
+
 // The Windows arm64 `main` prologue's argv sequence. x19-x21 are clobbered
 // before main saves anything -- safe because a Windows main never returns to
 // the loader (its epilogue calls ExitProcess). x30 is clobbered by the calls
@@ -4202,7 +4313,17 @@ fn c7_a64_emit_main_argv(uint64 argc_off, uint64 argv_off) {
     c7_begin()
     uint64 l_fail = c7_label()
     uint64 l_leaf = c7_label()
+    uint64 l_cpok = c7_label()
     uint64 l_over = c7_label()
+    // GetCPInfo(CP_ACP, &cpinfo at [sp]) -- the ANSI code page's lead bytes;
+    // zeroed on failure (no lead bytes), as on x86_64.
+    emit_a64_sub_sp_imm(0x20)
+    emit_a64_movz(0, 0)                     // CP_ACP
+    emit_a64_add_imm(1, 31, 0)              // x1 = sp
+    emit_a64_win_call_iat(IAT_GetCPInfo)
+    c7_a64_cbnz_w(0, l_cpok)
+    c7_a64_zero_cpinfo(0)
+    c7_bind(l_cpok)
     emit_a64_win_call_iat(IAT_GetCommandLineA)
     emit_a64_mov(19, 0)                     // x19 = cmdline
     emit_a64_movz(1, 0)                     // buf 0: size it
@@ -4219,10 +4340,12 @@ fn c7_a64_emit_main_argv(uint64 argc_off, uint64 argv_off) {
     emit_a64_mov(0, 19)
     emit_a64_mov(1, 21)
     emit_a64_mov(2, 20)
+    emit_a64_add_imm(3, 31, 6)              // x3 = CPINFO.LeadByte
     c7_a64_bl(l_leaf)
     if argc_off != 0xFFFFFFFF { emit_a64_static_store(argc_off) }
     emit_a64_mov(0, 21)
     if argv_off != 0xFFFFFFFF { emit_a64_static_store(argv_off) }
+    emit_a64_add_sp_imm(0x20)
     c7_a64_b(l_over)
     c7_bind(l_fail)
     c7_a64_emit_die(121, "krc runtime: argv allocation failed\n", 36)
@@ -4240,14 +4363,24 @@ fn c7_a64_emit_exec_argv(uint64 path_r, uint64 argv_r) {
     uint64 l_nomem = c7_label()
     uint64 l_quote = c7_label()
     uint64 l_nochild = c7_label()
+    uint64 l_cpok = c7_label()
     uint64 l_over = c7_label()
     // Through the stack, so neither source can be overwritten by the other's
     // move whatever registers the allocator picked.
     emit_a64_stp_pre(path_r, argv_r, 31, 0xFFFFFFFFFFFFFFF0)
     emit_a64_ldp_post(19, 20, 31, 16)       // x19 = path, x20 = argv
-    emit_a64_sub_sp_imm(0xD0)
+    emit_a64_sub_sp_imm(0xF0)
+    // GetCPInfo(CP_ACP, &cpinfo at sp+0xD0); zeroed on failure. Both quoter
+    // calls get its LeadByte array.
+    emit_a64_movz(0, 0)                     // CP_ACP
+    emit_a64_add_imm(1, 31, 0xD0)
+    emit_a64_win_call_iat(IAT_GetCPInfo)
+    c7_a64_cbnz_w(0, l_cpok)
+    c7_a64_zero_cpinfo(0xD0)
+    c7_bind(l_cpok)
     emit_a64_mov(0, 20)
     emit_a64_movz(1, 0)                     // measure
+    emit_a64_add_imm(2, 31, 0xD6)           // CPINFO.LeadByte
     c7_a64_bl(l_quote)
     emit_a64_mov_imm(9, 32767)
     emit_a64_cmp(0, 9)
@@ -4262,6 +4395,7 @@ fn c7_a64_emit_exec_argv(uint64 path_r, uint64 argv_r) {
     emit_a64_mov(22, 0)                     // x22 = command line
     emit_a64_mov(0, 20)
     emit_a64_mov(1, 22)
+    emit_a64_add_imm(2, 31, 0xD6)
     c7_a64_bl(l_quote)
     // STARTUPINFOA at sp+0x40 (zeroed, cb = 104), PROCESS_INFORMATION at sp+0xA8.
     emit_a64_movz(9, 0)
@@ -4294,7 +4428,7 @@ fn c7_a64_emit_exec_argv(uint64 path_r, uint64 argv_r) {
     emit_a64_add_imm(1, 31, 0x20)
     emit_a64_win_call_iat(IAT_GetExitCodeProcess)
     emit_a64_ldr32(0, 31, 0x20)
-    emit_a64_add_sp_imm(0xD0)
+    emit_a64_add_sp_imm(0xF0)
     emit_a64_win_call_iat(IAT_ExitProcess)
     c7_a64_b(l_over)                        // not reached
     c7_bind(l_long)

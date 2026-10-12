@@ -9224,7 +9224,7 @@ fn main() {
 
 echo ""
 echo "--- PE import table: kernel32 + ws2_32 + bcrypt (fixed slots) ---"
-# The .idata section is a FIXED 2048-byte table, emitted whole for every
+# The .idata section is a FIXED 4096-byte table, emitted whole for every
 # --emit=pe build so every program gets the same slots (format_pe.kr,
 # emit_pe_idata). Slots are internal to each binary: an append to the table
 # shifts later slots, which is a golden regeneration here, and every routed-
@@ -9239,7 +9239,7 @@ echo "--- PE import table: kernel32 + ws2_32 + bcrypt (fixed slots) ---"
 #
 # .idata is LOCATED by walking the PE section table, not by a fixed file
 # offset. Its RVA, both sizes, the import data-directory (entry 1: must point
-# at the section, size 0x800), SizeOfImage and the three IDT FirstThunks are
+# at the section, size 0x1000), SizeOfImage and the three IDT FirstThunks are
 # each required by value, so a header-plumbing slip is named as such rather
 # than surfacing as a byte diff. The data-directory check is the one thing
 # the golden cannot see: it lives in the headers, which x86_64 fills before
@@ -9251,11 +9251,11 @@ echo "--- PE import table: kernel32 + ws2_32 + bcrypt (fixed slots) ---"
 # it checks, and a bug in that arithmetic could cancel a bug in the
 # compiler's. A second literal golden checks the arm64 bytes as emitted.
 # What keeps the two from drifting apart when one is regenerated: everything
-# from the hint/name table on (offset 752 = golden line 48 onward) holds no
+# from the hint/name table on (offset 768 = golden line 49 onward) holds no
 # RVA, so it must be byte-identical between them -- checked below.
 # Regenerate (only for a DELIBERATE table change, after checking it with
 # `llvm-objdump -p`): build the fixture as below, then
-#   od -An -v -tx1 -j <PointerToRawData> -N 2048 out.exe > tests/golden/pe_imports_<arch>.idata.hex
+#   od -An -v -tx1 -j <PointerToRawData> -N 4096 out.exe > tests/golden/pe_imports_<arch>.idata.hex
 PEI_OUT=/tmp/krc_pe_imports_$$.exe
 pei_u() { od -An -v --endian=little -tu"$2" -j "$1" -N "$2" "$PEI_OUT" | tr -d ' \n'; }
 # pei_check NAME ARCH GOLDEN VA IMAGESIZE FT_kernel32 FT_ws2_32 FT_bcrypt
@@ -9293,14 +9293,14 @@ pei_check() {
             why="no .idata section in ${nsec:-?} section headers"
         else
             [ "$va" = "$xva" ] || why="$why .idata_RVA=$va(want $xva)"
-            [ "$vsz" = "2048" ] || why="$why VirtualSize=$vsz(want 2048)"
-            [ "$raw" = "2048" ] || why="$why RawSize=$raw(want 2048)"
+            [ "$vsz" = "4096" ] || why="$why VirtualSize=$vsz(want 4096)"
+            [ "$raw" = "4096" ] || why="$why RawSize=$raw(want 4096)"
             [ "$dva" = "$xva" ] || why="$why ImportDir.RVA=$dva(want $xva)"
-            [ "$dsz" = "2048" ] || why="$why ImportDir.Size=$dsz(want 2048)"
+            [ "$dsz" = "4096" ] || why="$why ImportDir.Size=$dsz(want 4096)"
             [ "$img" = "$ximg" ] || why="$why SizeOfImage=$img(want $ximg)"
             ft1=$(pei_u $((ptr + 16)) 4); ft2=$(pei_u $((ptr + 36)) 4); ft3=$(pei_u $((ptr + 56)) 4)
             [ "$ft1 $ft2 $ft3" = "$xft1 $xft2 $xft3" ] || why="$why FirstThunks=$ft1/$ft2/$ft3(want $xft1/$xft2/$xft3)"
-            diff=$(od -An -v -tx1 -j "$ptr" -N 2048 "$PEI_OUT" | cmp - "$gold" 2>&1)
+            diff=$(od -An -v -tx1 -j "$ptr" -N 4096 "$PEI_OUT" | cmp - "$gold" 2>&1)
             [ -z "$diff" ] || why="$why .idata differs from golden: $diff"
         fi
     fi
@@ -9313,18 +9313,18 @@ pei_check() {
     fi
     rm -f "$PEI_OUT"
 }
-#                                                  .idata  SizeOf  FirstThunks (IAT region +416, then +0/+176/+320)
+#                                                  .idata  SizeOf  FirstThunks (IAT region +424, then +0/+184/+328)
 pei_check pe_imports_three_dlls x86_64 "$DIR/golden/pe_imports_x86_64.idata.hex" \
-    8192  12288  8608  8784  8928     # 0x2000 0x3000  0x21A0 0x2250 0x22E0
+    8192  12288  8616  8800  8944     # 0x2000 0x3000  0x21A8 0x2260 0x22F0
 pei_check pe_imports_three_dlls_arm64 arm64 "$DIR/golden/pe_imports_arm64.idata.hex" \
-    12288 16384  12704 12880 13024    # 0x3000 0x4000  0x31A0 0x3250 0x32E0
+    12288 16384  12712 12896 13040    # 0x3000 0x4000  0x31A8 0x3260 0x32F0
 # The RVA-free tail (hint/name table + DLL names) must match across the two
 # goldens, so regenerating one cannot quietly leave the other describing a
 # different table. Counted: it is the cross-arch half of the pin.
 TOTAL=$((TOTAL + 1))
 if [ -s "$DIR/golden/pe_imports_x86_64.idata.hex" ] && [ -s "$DIR/golden/pe_imports_arm64.idata.hex" ] \
-   && [ "$(sed -n '48,128p' "$DIR/golden/pe_imports_x86_64.idata.hex" | wc -l)" = "81" ] \
-   && sed -n '48,128p' "$DIR/golden/pe_imports_x86_64.idata.hex" | cmp -s - <(sed -n '48,128p' "$DIR/golden/pe_imports_arm64.idata.hex"); then
+   && [ "$(sed -n '49,256p' "$DIR/golden/pe_imports_x86_64.idata.hex" | wc -l)" = "208" ] \
+   && sed -n '49,256p' "$DIR/golden/pe_imports_x86_64.idata.hex" | cmp -s - <(sed -n '49,256p' "$DIR/golden/pe_imports_arm64.idata.hex"); then
     PASS=$((PASS + 1))
     echo "  pe_imports_goldens_agree: PASS"
 else
@@ -9338,8 +9338,8 @@ fi
 # real source, not a copy. Covers: first/middle/last DLL, a name passed as a
 # non-NUL-terminated prefix of a longer buffer, and the sentinel for an
 # unknown name, a strict prefix ("sen") and an extension ("sendx"). The
-# kernel32 tail (VirtualProtect 19, Sleep 20) and ws2_32's getsockname (35)
-# resolve. The reserved `_kr_w32_` prefix (std's Win32 externs) strips to the
+# kernel32 tail (VirtualProtect 19, Sleep 20, GetCPInfo 21) and ws2_32's
+# getsockname (36) resolve. The reserved `_kr_w32_` prefix (std's Win32 externs) strips to the
 # real export: `_kr_w32_send` -> send's slot. NOT stripped, each its own
 # exit code: `_kr_w32_` alone and `_kr_w32_sen`, both passed as tokens of the
 # longer buffer "_kr_w32_send" (a strip that measured the remainder to the
@@ -9356,21 +9356,21 @@ sed -n '/^\/\/ @@pe-known-imports-begin$/,/^\/\/ @@pe-known-imports-end$/p' "$DI
 cat >> "$PIS_SRC" <<'KREOF'
 fn main() {
     if pe_import_slot("ExitProcess", 11) != 0 { exit(1) }
-    if pe_import_slot("send", 4) != 26 { exit(2) }
-    if pe_import_slot("recv", 4) != 27 { exit(3) }
-    if pe_import_slot("BCryptGenRandom", 15) != 40 { exit(4) }
+    if pe_import_slot("send", 4) != 27 { exit(2) }
+    if pe_import_slot("recv", 4) != 28 { exit(3) }
+    if pe_import_slot("BCryptGenRandom", 15) != 41 { exit(4) }
     if pe_import_slot("MoveFileExA", 11) != 18 { exit(5) }
-    if pe_import_slot("sendto", 4) != 26 { exit(6) }
+    if pe_import_slot("sendto", 4) != 27 { exit(6) }
     if pe_import_slot("sen", 3) != 0xFFFFFFFF { exit(7) }
     if pe_import_slot("sendx", 5) != 0xFFFFFFFF { exit(8) }
     if pe_import_slot("GetFileSizeEy", 13) != 0xFFFFFFFF { exit(9) }
     if pe_import_slot("", 0) != 0xFFFFFFFF { exit(10) }
     if pe_import_slot("VirtualProtect", 14) != 19 { exit(11) }
     if pe_import_slot("Sleep", 5) != 20 { exit(12) }
-    if pe_import_slot("getsockname", 11) != 35 { exit(13) }
-    if pe_import_slot("WSACreateEvent", 14) != 38 { exit(14) }
-    if pe_import_slot("_kr_w32_send", 12) != 26 { exit(15) }
-    if pe_import_slot("_kr_w32_BCryptGenRandom", 23) != 40 { exit(16) }
+    if pe_import_slot("getsockname", 11) != 36 { exit(13) }
+    if pe_import_slot("WSACreateEvent", 14) != 39 { exit(14) }
+    if pe_import_slot("_kr_w32_send", 12) != 27 { exit(15) }
+    if pe_import_slot("_kr_w32_BCryptGenRandom", 23) != 41 { exit(16) }
     if pe_import_slot("_kr_w32_send", 8) != 0xFFFFFFFF { exit(17) }
     if pe_import_slot("_kr_w32_send", 11) != 0xFFFFFFFF { exit(18) }
     if pe_import_slot("_kr_w32_sen", 11) != 0xFFFFFFFF { exit(19) }
@@ -9379,6 +9379,7 @@ fn main() {
     if pe_import_slot("kr_w32_send", 11) != 0xFFFFFFFF { exit(22) }
     if pe_import_slot("Xkr_w32_send", 12) != 0xFFFFFFFF { exit(23) }
     if pe_import_slot("_kr_w32Xsend", 12) != 0xFFFFFFFF { exit(24) }
+    if pe_import_slot("GetCPInfo", 9) != 21 { exit(25) }
     exit(0)
 }
 KREOF
@@ -27155,7 +27156,7 @@ rm -rf "$DUP_D"
 # argv_leafrun.kr runs the SAME tables on them under qemu-aarch64-static. The
 # expected files are hand-written (UCRT rules), shared by both arches.
 C7_D=/tmp/krc_c7_$$
-mkdir -p "$C7_D/run" "$C7_D/pfx"
+mkdir -p "$C7_D/run" "$C7_D/pfx" "$C7_D/pfxja"
 C7_FX="$DIR/fixtures"
 C7_KRC="$DIR/../build/krc2"
 C7_WINE="${KR_WINE:-$(command -v wine 2>/dev/null || true)}"
@@ -27176,11 +27177,18 @@ c7_skip() { PASS=$((PASS + 1)); echo "  $1: SKIP ($2)"; }
 #    line still starts the child, which runs and fails the row on content;
 #    and a launch failure the program causes (a wrong path, a line Windows
 #    refuses) repeats on all 3 tries and the row fails on the 124.
-# c7_wine <out> <err> <prog> <args...>: status of the last try.
+# c7_wine <out> <err> <prog> <args...>: status of the last try. The prefix is
+# $C7_D/pfx, or $C7_D/pfxja under C7_JA=1 -- there with the Japanese locale,
+# so Wine's ANSI code page is 932 (Shift-JIS; checked from inside by
+# argv_cpinfo.exe before any row relies on it).
 c7_wine() {
     local o="$1" e="$2" t rc; shift 2
     for t in 1 2 3; do
-        (cd "$C7_D/run" && WINEPREFIX="$C7_D/pfx" WINEDEBUG=-all timeout 300 "$C7_WINE" "$@" > "$o" 2> "$e"); rc=$?
+        if [ "${C7_JA:-0}" = "1" ]; then
+            (cd "$C7_D/run" && LC_ALL=ja_JP.UTF-8 LANG=ja_JP.UTF-8 WINEPREFIX="$C7_D/pfxja" WINEDEBUG=-all timeout 300 "$C7_WINE" "$@" > "$o" 2> "$e"); rc=$?
+        else
+            (cd "$C7_D/run" && WINEPREFIX="$C7_D/pfx" WINEDEBUG=-all timeout 300 "$C7_WINE" "$@" > "$o" 2> "$e"); rc=$?
+        fi
         [ "$rc" = "1" ] && grep -aq 'ShellExecuteEx failed' "$o" "$e" && continue
         return $rc
     done
@@ -27198,7 +27206,12 @@ c7_wine_child() {
     return $rc
 }
 cp "$C7_FX/argv_echo.kr" "$C7_FX/argv_rawparent.kr" "$C7_FX/argv_rtparent.kr" \
-   "$C7_FX/argv_vectors.kr" "$C7_FX/argv_leafrun.kr" "$C7_FX/argv_nochild.kr" "$C7_D/"
+   "$C7_FX/argv_vectors.kr" "$C7_FX/argv_leafrun.kr" "$C7_FX/argv_nochild.kr" \
+   "$C7_FX/argv_cpinfo.kr" "$C7_D/"
+cp "$C7_FX/argv_table_cp932.txt" "$C7_D/run/"
+# The CP932 LeadByte array (GetCPInfo(932): lead bytes 81-9F and E0-FC) the
+# DBCS leaf rows hand the leaves; the Wine rows get it from GetCPInfo itself.
+C7_LB932=819fe0fc
 # The table plus one very long line (20000-byte argument), and its expectation.
 C7_LONG=$(head -c 20000 /dev/zero | tr '\0' x)
 cp "$C7_FX/argv_table.txt" "$C7_D/run/argv_table.txt"
@@ -27215,6 +27228,7 @@ $C7_KRC --arch=x86_64 --target=windows --emit=pe "$C7_D/argv_rawparent.kr" -o "$
 cp "$C7_D/echo-x86_64.exe" "$C7_D/run/argv_echo.exe" 2>/dev/null
 cp "$C7_D/rt-x86_64.exe" "$C7_D/run/argv_rtparent.exe" 2>/dev/null
 $C7_KRC --arch=x86_64 --target=windows --emit=pe "$C7_D/argv_nochild.kr" -o "$C7_D/run/argv_nochild.exe" > /dev/null 2>&1
+$C7_KRC --arch=x86_64 --target=windows --emit=pe "$C7_D/argv_cpinfo.kr" -o "$C7_D/run/argv_cpinfo.exe" > /dev/null 2>&1
 
 # (a) the dumped leaves ARE the shipped code: each blob occurs exactly once in
 #     the PE that uses it (the parser in every main that has cli_argc, the
@@ -27311,12 +27325,16 @@ print("insns=%d hits=%d %s" % (n, len(hits), "; ".join(hits[:4])))
 fi
 
 # (d) Windows arm64 prologue plumbing, decoded from the image (no runner can
-#     execute it): exactly two BLs reach the parser leaf; the first is the
-#     sizing call (x1 = x2 = 0, x0 still GetCommandLineA's result), its answer
-#     goes to x20 and from there to VirtualAlloc(x0=0, x1=x20, x2=0x3000,
-#     x3=4) -- an IAT call the image binds to the NAME VirtualAlloc -- and the
-#     second is the parse with x0 = the cmdline (x19), x1 = the buffer (x21),
-#     x2 = the same x20.
+#     execute it): exactly two BLs reach the parser leaf. Before the first:
+#     `sub sp, sp, #0x20`, GetCPInfo(x0 = 0 = CP_ACP, x1 = sp) -- an IAT call
+#     the image binds to the NAME GetCPInfo -- then `cbnz w0` over three
+#     `str xzr, [sp, #0/8/16]` (a failed call leaves no lead bytes), then
+#     GetCommandLineA, `mov x19, x0`; the sizing call itself has x1 = x2 = 0.
+#     Its answer goes to x20 and from there to VirtualAlloc(x0=0, x1=x20,
+#     x2=0x3000, x3=4), bound to the NAME VirtualAlloc; the second BL is the
+#     parse with x0 = the cmdline (x19), x1 = the buffer (x21), x2 = the same
+#     x20, x3 = sp+6 = CPINFO.LeadByte; and `add sp, sp, #0x20` follows before
+#     the branch out.
 TOTAL=$((TOTAL + 1))
 if ! command -v python3 > /dev/null 2>&1; then
     c7_skip c7_win_arm64_prologue_virtualalloc_args "no python3"
@@ -27328,41 +27346,56 @@ import struct, sys
 pe = open(sys.argv[1], "rb").read(); blob = open(sys.argv[2], "rb").read()
 va, rs, rp = int(sys.argv[3]), int(sys.argv[4]), int(sys.argv[5])
 W = lambda off: struct.unpack_from("<I", pe, off)[0]
+rva = lambda off: va + (off - rp)
+def fail(m): print("FAIL " + m); sys.exit()
+def sx(v, bits): return v - (1 << bits) if v & (1 << (bits - 1)) else v
+iats = []
+def iat(o, want):
+    w, l = W(o), W(o + 4)
+    if (w & 0x9F00001F) != 0x90000010 or (l & 0xFFC003FF) != 0xF9400210 or W(o + 8) != 0xD63F0200:
+        fail("no ADRP/LDR/BLR x16 IAT call for %s at .text+0x%x" % (want, o - rp))
+    imm = sx((((w >> 5) & 0x7FFFF) << 2) | ((w >> 29) & 3), 21)
+    iats.append("%d %s" % (((rva(o) & ~0xFFF) + (imm << 12)) + ((l >> 10) & 0xFFF) * 8, want))
+def words(o, want, what):
+    got = [W(o + 4 * i) for i in range(len(want))]
+    if got != want: fail("%s: %s" % (what, " ".join("%08x" % x for x in got)))
 leaf = pe.find(blob)
-if leaf < 0: print("FAIL no parser leaf in the image"); sys.exit()
+if leaf < 0: fail("no parser leaf in the image")
 bls = [o for o in range(rp, rp + rs, 4)
-       if (W(o) & 0xFC000000) == 0x94000000
-       and o + 4 * ((W(o) & 0x3FFFFFF) - ((W(o) & 0x2000000) << 1)) == leaf]
-if len(bls) != 2: print("FAIL %d BLs reach the parser leaf, want 2" % len(bls)); sys.exit()
+       if (W(o) & 0xFC000000) == 0x94000000 and o + 4 * sx(W(o) & 0x3FFFFFF, 26) == leaf]
+if len(bls) != 2: fail("%d BLs reach the parser leaf, want 2" % len(bls))
 a, b = bls
-want_a = [0xD2800001, 0xD2800002]                       # mov x1,#0 ; mov x2,#0
-after_a = [0xAA0003F4, 0xD2800000, 0xAA1403E1, 0xD2860002, 0xD2800083]  # mov x20,x0 ; x0=0 ; x1=x20 ; x2=0x3000 ; x3=4
-want_b = [0xAA1303E0, 0xAA1503E1, 0xAA1403E2]           # x0=x19 ; x1=x21 ; x2=x20
-got = [W(a - 8), W(a - 4)]
-if got != want_a: print("FAIL sizing call args %s" % [hex(x) for x in got]); sys.exit()
-got = [W(a + 4 + 4 * i) for i in range(5)]
-if got != after_a: print("FAIL VirtualAlloc args %s" % [hex(x) for x in got]); sys.exit()
-got = [W(b - 12), W(b - 8), W(b - 4)]
-if got != want_b: print("FAIL parse call args %s" % [hex(x) for x in got]); sys.exit()
-adrp = a + 24
-w, l = W(adrp), W(adrp + 4)
-if (w & 0x9F00001F) != 0x90000010 or (l & 0xFFC003FF) != 0xF9400210 or W(adrp + 8) != 0xD63F0200:
-    print("FAIL no ADRP/LDR/BLR x16 IAT call after the VirtualAlloc arguments"); sys.exit()
-imm = (((w >> 5) & 0x7FFFF) << 2) | ((w >> 29) & 3)
-if imm & 0x100000: imm -= 0x200000
-pc = va + (adrp - rp)
-print("rva", ((pc & ~0xFFF) + (imm << 12)) + ((l >> 10) & 0xFFF) * 8)
+words(a - 64, [0xD10083FF, 0xD2800000, 0x910003E1], "GetCPInfo args (sub sp, #0x20 / x0 = 0 / x1 = sp)")
+iat(a - 52, "GetCPInfo")
+w = W(a - 40)
+if (w & 0xFF00001F) != 0x35000000 or (a - 40) + 4 * sx((w >> 5) & 0x7FFFF, 19) != a - 24:
+    fail("no cbnz w0 over the CPINFO zeroing: %08x" % w)
+words(a - 36, [0xF90003FF, 0xF90007FF, 0xF9000BFF], "CPINFO zeroing on failure")
+iat(a - 24, "GetCommandLineA")
+words(a - 12, [0xAA0003F3, 0xD2800001, 0xD2800002], "sizing call args")      # x19 = x0 ; x1 = 0 ; x2 = 0
+words(a + 4, [0xAA0003F4, 0xD2800000, 0xAA1403E1, 0xD2860002, 0xD2800083], "VirtualAlloc args")  # x20 = x0 ; x0=0 ; x1=x20 ; x2=0x3000 ; x3=4
+iat(a + 24, "VirtualAlloc")
+words(b - 16, [0xAA1303E0, 0xAA1503E1, 0xAA1403E2, 0x91001BE3], "parse call args")  # x0=x19 ; x1=x21 ; x2=x20 ; x3=sp+6
+o = b + 4
+while o < b + 4 + 4 * 24 and not (W(o) == 0x910083FF and (W(o + 4) & 0xFC000000) == 0x14000000): o += 4
+if o >= b + 4 + 4 * 24: fail("no `add sp, sp, #0x20` + b after the parse")
+print("ok"); print("\n".join(iats))
 PYEOF
 )
     case "$C7_VA" in
-        "rva "*)
+        ok*)
             C7_LF=$(pe_lfanew "$C7_PE")
             C7_IDT=$(pe_rva_off "$C7_PE" "$(pe_u "$C7_PE" $((C7_LF + 144)) 4)")
-            C7_NM=$(pe_slot_name "$C7_PE" "$C7_IDT" "${C7_VA#rva }")
-            if [ "$C7_NM" = "VirtualAlloc" ]; then
-                c7_ok c7_win_arm64_prologue_virtualalloc_args "x0=0 x1=size x2=0x3000 x3=4, call bound to VirtualAlloc"
+            C7_WHY=""; C7_N=0
+            while read -r C7_RV C7_WANT; do
+                C7_NM=$(pe_slot_name "$C7_PE" "$C7_IDT" "$C7_RV")
+                [ "$C7_NM" = "$C7_WANT" ] || C7_WHY="$C7_WHY $C7_WANT-call-binds-to-'$C7_NM'"
+                C7_N=$((C7_N + 1))
+            done <<< "$(echo "$C7_VA" | tail -n +2)"
+            if [ -z "$C7_WHY" ] && [ "$C7_N" = "3" ]; then
+                c7_ok c7_win_arm64_prologue_virtualalloc_args "GetCPInfo(0, sp) zeroed on failure, x0=0 x1=size x2=0x3000 x3=4 to VirtualAlloc, parse x3=sp+6; 3 IAT calls bound by name"
             else
-                c7_bad c7_win_arm64_prologue_virtualalloc_args "the call after the arguments binds to '$C7_NM', not VirtualAlloc"
+                c7_bad c7_win_arm64_prologue_virtualalloc_args "${C7_WHY:- $C7_N IAT calls, want 3}"
             fi ;;
         *) c7_bad c7_win_arm64_prologue_virtualalloc_args "$C7_VA" ;;
     esac
@@ -27374,15 +27407,20 @@ fi
 #     build. Before the measure: `stp Rp, Ra, [sp, #-16]!` with Rp traced back
 #     (mov/add/adrp) to the "argv_echo.exe" literal, then `ldp x19, x20, [sp],
 #     #16` -- x19 = path, x20 = argv, whichever registers the allocator picked
-#     -- `sub sp, sp, #0xd0`, x0 = x20, x1 = 0. After it: `mov x9, #32767`,
+#     -- `sub sp, sp, #0xf0`, GetCPInfo(x0 = 0 = CP_ACP, x1 = sp+0xd0) with
+#     `cbnz w0` over three `str xzr` zeroing that CPINFO, then x0 = x20, x1 =
+#     0, x2 = sp+0xd6 = CPINFO.LeadByte. After it: `mov x9, #32767`,
 #     `cmp x0, x9`, `b.hi` into a die block; then VirtualAlloc(x0 = 0, x1 = x21
 #     = the length, x2 = 0x3000, x3 = 4) and `cbz x0` into a die block; the
-#     build with x0 = x20, x1 = x22 = the buffer; STARTUPINFOA zeroed at
+#     build with x0 = x20, x1 = x22 = the buffer, x2 = sp+0xd6 again;
+#     STARTUPINFOA zeroed at
 #     sp+0x40 with cb = 104; CreateProcessA(x0 = x19, x1 = x22, x2..x7 = 0,
 #     [sp] = sp+0x40, [sp+8] = sp+0xa8); and `cbz w0` into a die block. Each die
 #     block is decoded too: the message it builds on the stack from
 #     immediates, its length, its exit code, and IAT calls bound to the NAMES
-#     GetStdHandle, WriteFile, ExitProcess -- 122, 123 and 124 respectively.
+#     GetStdHandle, WriteFile, ExitProcess -- 122, 123 and 124 respectively;
+#     and `add sp, sp, #0xf0` right before the ExitProcess of the child's
+#     status.
 #     Every IAT call is resolved through pe_slot_name, by name.
 TOTAL=$((TOTAL + 1))
 if ! command -v python3 > /dev/null 2>&1; then
@@ -27444,11 +27482,17 @@ bls = [o for o in range(rp, rp + rs, 4)
 if len(bls) != 2: fail("%d BLs reach the quoter leaf, want 2" % len(bls))
 m, b = bls
 # path / argv through the stack
-st = W(m - 20)
+st = W(m - 60)
 if (st & 0xFFFF83E0) != 0xA9BF03E0: fail("no stp Rp, Ra, [sp, #-16]! before the measure: %08x" % st)
-words(m - 16, [0xA8C153F3, 0xD10343FF, 0xAA1403E0, 0xD2800001], "ldp x19, x20 / sub sp / measure args")
-reg, add, o = st & 31, 0, m - 24
-while o > m - 24 - 64:
+words(m - 56, [0xA8C153F3, 0xD103C3FF, 0xD2800000, 0x910343E1], "ldp x19, x20 / sub sp, #0xf0 / GetCPInfo args")
+iat(m - 40, "GetCPInfo")
+w = W(m - 28)
+if (w & 0xFF00001F) != 0x35000000 or (m - 28) + 4 * sx((w >> 5) & 0x7FFFF, 19) != m - 12:
+    fail("no cbnz w0 over the CPINFO zeroing: %08x" % w)
+words(m - 24, [0xF9006BFF, 0xF9006FFF, 0xF90073FF], "CPINFO zeroing on failure")
+words(m - 12, [0xAA1403E0, 0xD2800001, 0x91035BE2], "measure args")
+reg, add, o = st & 31, 0, m - 64
+while o > m - 64 - 64:
     w = W(o)
     if (w & 0xFFE0FFE0) == 0xAA0003E0 and (w & 31) == reg: reg = (w >> 16) & 31
     elif (w & 0xFFC00000) == 0x91000000 and (w & 31) == reg: add, reg = (w >> 10) & 0xFFF, (w >> 5) & 31
@@ -27471,14 +27515,18 @@ die(br19(m + 12, 0xFF00001F, 0x54000008, "no b.hi after the limit compare"), 122
 words(m + 16, [0xAA0003F5, 0xD2800000, 0xAA1503E1, 0xD2860002, 0xD2800083], "VirtualAlloc args")
 iat(m + 36, "VirtualAlloc")
 die(br19(m + 48, 0xFF00001F, 0xB4000000, "no cbz x0 after VirtualAlloc"), 123, "krc runtime: child command line allocation failed")
-words(m + 52, [0xAA0003F6, 0xAA1403E0, 0xAA1603E1], "build args")
-if b != m + 64: fail("the build BL is not right after its arguments")
+words(m + 52, [0xAA0003F6, 0xAA1403E0, 0xAA1603E1, 0x91035BE2], "build args")
+if b != m + 68: fail("the build BL is not right after its arguments")
 words(b + 4, [0xD2800009] + [0xF90003E9 | ((8 + i) << 10) for i in range(16)] + [0xD2800D09, 0xB90043E9], "STARTUPINFOA zeroing")
 c = b + 4 + 4 * 19
 words(c, [0xAA1303E0, 0xAA1603E1] + [0xD2800000 | r for r in range(2, 8)]
       + [0x910103E9, 0xF90003E9, 0x9102A3E9, 0xF90007E9], "CreateProcessA args")
 iat(c + 48, "CreateProcessA")
 die(br19(c + 60, 0xFF00001F, 0x34000000, "no cbz w0 after CreateProcessA"), 124, "krc runtime: child process could not be started")
+o = c + 64
+while o < c + 64 + 4 * 32 and W(o) != 0x9103C3FF: o += 4
+if o >= c + 64 + 4 * 32: fail("no add sp, sp, #0xf0 after CreateProcessA")
+iat(o + 4, "ExitProcess")
 print("ok"); print("\n".join(iats))
 PYEOF
 )
@@ -27492,24 +27540,168 @@ PYEOF
                 [ "$C7_NM" = "$C7_WANT" ] || C7_WHY="$C7_WHY $C7_WANT-call-binds-to-'$C7_NM'"
                 C7_N=$((C7_N + 1))
             done <<< "$(echo "$C7_EX" | tail -n +2)"
-            if [ -z "$C7_WHY" ] && [ "$C7_N" = "11" ]; then
-                c7_ok c7_win_arm64_exec_argv_structure "path/argv, 32767, VirtualAlloc, CreateProcessA, dies 122/123/124; $C7_N IAT calls bound by name"
+            if [ -z "$C7_WHY" ] && [ "$C7_N" = "13" ]; then
+                c7_ok c7_win_arm64_exec_argv_structure "path/argv, GetCPInfo + LeadByte to both quoter calls, 32767, VirtualAlloc, CreateProcessA, dies 122/123/124, frame restored; $C7_N IAT calls bound by name"
             else
-                c7_bad c7_win_arm64_exec_argv_structure "${C7_WHY:- $C7_N IAT calls, want 11}"
+                c7_bad c7_win_arm64_exec_argv_structure "${C7_WHY:- $C7_N IAT calls, want 13}"
             fi ;;
         *) c7_bad c7_win_arm64_exec_argv_structure "$C7_EX" ;;
     esac
 fi
 
+# (d3) x86_64 GetCPInfo plumbing, decoded from the images. The Wine rows run
+#     the success path end to end (a wrong LeadByte pointer fails the CP932
+#     rows), but GetCPInfo(CP_ACP) never fails there, so the failure path --
+#     zero the CPINFO, i.e. no lead bytes -- is pinned here, with the call's
+#     arguments and the pointer each leaf call gets:
+#     main prologue: `sub rsp, 0x48`, xor ecx,ecx; lea rdx,[rsp+0x28]; call
+#     [GetCPInfo]; test eax,eax; jne over three `mov qword [rsp+0x28/30/38],0`
+#     to call [GetCommandLineA]; the parse call has lea r9,[rsp+0x2E] (exactly
+#     two calls reach the parser leaf); `add rsp, 0x48` follows.
+#     op 114: `sub rsp, 0xF0`, the same with lea rdx,[rsp+0xD0] and zeroing at
+#     0xD0/D8/E0, then BOTH quoter calls (exactly two reach it) with lea
+#     r8,[rsp+0xD6]; `add rsp, 0xF0` before the ExitProcess. Every IAT call is
+#     bound by NAME.
+TOTAL=$((TOTAL + 1))
+if ! command -v python3 > /dev/null 2>&1; then
+    c7_skip c7_win_x86_64_cpinfo_structure "no python3"
+else
+    C7_X=$(python3 - "$C7_D/echo-x86_64.exe" "$C7_D/parse-x86_64.bin" $(pe_section "$C7_D/echo-x86_64.exe" .text) \
+                     "$C7_D/rt-x86_64.exe" "$C7_D/quote-x86_64.bin" $(pe_section "$C7_D/rt-x86_64.exe" .text) 2>&1 <<'PYEOF'
+import struct, sys
+def fail(m): print("FAIL " + m); sys.exit()
+out = []
+def image(i):
+    a = sys.argv[1 + 5 * i:6 + 5 * i]
+    return open(a[0], "rb").read(), open(a[1], "rb").read(), int(a[2]), int(a[3]), int(a[4])
+def calls_to(pe, rp, rs, leaf):
+    return [o for o in range(rp, rp + rs - 5) if pe[o] == 0xE8
+            and o + 5 + struct.unpack_from("<i", pe, o + 1)[0] == leaf]
+def iat(pe, va, rp, o, want, tag):
+    if pe[o:o + 2] != b"\xff\x15": fail("%s: no call [rip+disp32] for %s at .text+0x%x" % (tag, want, o - rp))
+    out.append("%d %d %s" % (tag == "op114", va + (o + 6 - rp) + struct.unpack_from("<i", pe, o + 2)[0], want))
+def seq(pe, o, want, what):
+    if pe[o:o + len(want)] != want: fail("%s: %s" % (what, pe[o:o + len(want)].hex()))
+def zero3(base):
+    b = b""
+    for q in range(3):
+        if base < 0x80: b += bytes([0x48, 0xC7, 0x44, 0x24, base + 8 * q]) + b"\0" * 4
+        else: b += bytes([0x48, 0xC7, 0x84, 0x24]) + struct.pack("<I", base + 8 * q) + b"\0" * 4
+    return b
+def cpinfo(pe, va, rp, rs, frame, off, tag):
+    pre = (bytes([0x48, 0x83, 0xEC, frame]) if frame < 0x80 else b"\x48\x81\xec" + struct.pack("<I", frame)) + b"\x31\xc9" + \
+          (bytes([0x48, 0x8D, 0x54, 0x24, off]) if off < 0x80 else b"\x48\x8d\x94\x24" + struct.pack("<I", off))
+    hits = [i for i in range(rp, rp + rs) if pe.startswith(pre + b"\xff\x15", i)]
+    if len(hits) != 1: fail("%s: %d `sub rsp, 0x%x; xor ecx, ecx; lea rdx, [rsp+0x%x]; call [..]` sequences, want 1" % (tag, len(hits), frame, off))
+    c = hits[0] + len(pre)
+    iat(pe, va, rp, c, "GetCPInfo", tag)
+    seq(pe, c + 6, b"\x85\xc0\x0f\x85", "%s: test eax, eax / jne after GetCPInfo" % tag)
+    z = zero3(off)
+    if c + 14 + struct.unpack_from("<i", pe, c + 10)[0] != c + 14 + len(z): fail("%s: the jne does not skip exactly the zeroing" % tag)
+    seq(pe, c + 14, z, "%s: CPINFO zeroing on failure" % tag)
+    return c + 14 + len(z)
+# main prologue
+pe, blob, va, rs, rp = image(0)
+leaf = pe.find(blob)
+if leaf < 0: fail("prologue: no parser leaf in the image")
+cs = calls_to(pe, rp, rs, leaf)
+if len(cs) != 2: fail("prologue: %d calls reach the parser leaf, want 2" % len(cs))
+e = cpinfo(pe, va, rp, rs, 0x48, 0x28, "prologue")
+iat(pe, va, rp, e, "GetCommandLineA", "prologue")
+seq(pe, cs[1] - 8, b"\x49\x89\xf8\x4c\x8d\x4c\x24\x2e", "prologue: parse call's mov r8, rdi / lea r9, [rsp+0x2E]")
+if pe.find(b"\x48\x83\xc4\x48", cs[1], cs[1] + 64) < 0: fail("prologue: no add rsp, 0x48 after the parse")
+# op 114
+pe, blob, va, rs, rp = image(1)
+leaf = pe.find(blob)
+if leaf < 0: fail("op114: no quoter leaf in the image")
+cs = calls_to(pe, rp, rs, leaf)
+if len(cs) != 2: fail("op114: %d calls reach the quoter leaf, want 2" % len(cs))
+e = cpinfo(pe, va, rp, rs, 0xF0, 0xD0, "op114")
+seq(pe, e, b"\x4c\x89\xe9\x31\xd2\x4c\x8d\x84\x24\xd6\x00\x00\x00", "op114: measure args (rcx = argv, edx = 0, lea r8, [rsp+0xD6])")
+if cs[0] != e + 13: fail("op114: the measure call is not right after its arguments")
+seq(pe, cs[1] - 14, b"\x4c\x89\xe9\x4c\x89\xfa\x4c\x8d\x84\x24\xd6\x00\x00\x00", "op114: build args (rcx = argv, rdx = buffer, lea r8, [rsp+0xD6])")
+x = pe.find(b"\x48\x81\xc4\xf0\x00\x00\x00\x48\x83\xec\x20\xff\x15", cs[1], cs[1] + 512)
+if x < 0: fail("op114: no add rsp, 0xF0; sub rsp, 0x20; call [..] after the build")
+iat(pe, va, rp, x + 11, "ExitProcess", "op114")
+print("ok"); print("\n".join(out))
+PYEOF
+)
+    case "$C7_X" in
+        ok*)
+            C7_WHY=""; C7_N=0
+            while read -r C7_I C7_RV C7_WANT; do
+                if [ "$C7_I" = "0" ]; then C7_PE="$C7_D/echo-x86_64.exe"; else C7_PE="$C7_D/rt-x86_64.exe"; fi
+                C7_LF=$(pe_lfanew "$C7_PE")
+                C7_IDT=$(pe_rva_off "$C7_PE" "$(pe_u "$C7_PE" $((C7_LF + 144)) 4)")
+                C7_NM=$(pe_slot_name "$C7_PE" "$C7_IDT" "$C7_RV")
+                [ "$C7_NM" = "$C7_WANT" ] || C7_WHY="$C7_WHY $C7_WANT-call-binds-to-'$C7_NM'"
+                C7_N=$((C7_N + 1))
+            done <<< "$(echo "$C7_X" | tail -n +2)"
+            if [ -z "$C7_WHY" ] && [ "$C7_N" = "4" ]; then
+                c7_ok c7_win_x86_64_cpinfo_structure "prologue + op 114: GetCPInfo(0, cpinfo) zeroed on failure, LeadByte to every leaf call, frames restored; $C7_N IAT calls bound by name"
+            else
+                c7_bad c7_win_x86_64_cpinfo_structure "${C7_WHY:- $C7_N IAT calls, want 4}"
+            fi ;;
+        *) c7_bad c7_win_x86_64_cpinfo_structure "$C7_X" ;;
+    esac
+fi
+
+# DBCS (lead bytes), the same three rows per arch, run by c7_dbcs_rows
+# <suffix> <arch> <runner...>:
+#   c7_lead_table_<suffix>: the table the parser leaf builds from a LeadByte
+#     array (argv_leads.txt: CP932's, a single range, none, a one-byte range,
+#     a pair with a zero byte ending the list early, a zero first byte, six
+#     full pairs with nonzero bytes PAST the 12, a range ending at 0xFF, lo >
+#     hi), probed byte by byte -- argv_leads.expected;
+#   c7_parser_dbcs_<suffix>: argv_table_cp932.txt (whole CP932 characters:
+#     a trail 0x5C before a quote, inside and outside quotes, the range edges
+#     81/9F/E0/FA and their single-byte neighbours DF/A1) then
+#     argv_table_lead.txt (a trail `"`, space or tab, in argv[0] and later; a
+#     lead byte with no trail, in argv[0], unquoted and quoted; 80/A0/FD/FC)
+#     through the parser with the CP932 LeadByte array;
+#   c7_roundtrip_dbcs_<suffix>: argv_vectors.kr's cp932 then lead vectors
+#     through the quoter and back, with the same checks as the round-trip row.
+# Every expected line was produced by an independent model of the rules
+# whose parse agrees with ucrtbase's own on all of these lines
+# (_setmbcp(932), Windows 11, 2026-10-12).
+c7_dbcs_rows() {
+    local sfx="$1" arch="$2" rc; shift 2
+    timeout 120 "$@" leads "$C7_D/parse-$arch.bin" "$C7_FX/argv_leads.txt" > "$C7_D/dl.out" 2>&1; rc=$?
+    if [ "$rc" = "0" ] && cmp -s "$C7_D/dl.out" "$C7_FX/argv_leads.expected"; then
+        c7_ok c7_lead_table_$sfx "$(grep -c '' "$C7_D/dl.out") LeadByte arrays"
+    else
+        c7_bad c7_lead_table_$sfx "rc=$rc; first difference: $(diff "$C7_D/dl.out" "$C7_FX/argv_leads.expected" | head -3 | cut -c1-80 | tr '\n' '|')"
+    fi
+    { timeout 120 "$@" parse "$C7_D/parse-$arch.bin" "$C7_FX/argv_table_cp932.txt" $C7_LB932 && \
+      timeout 120 "$@" parse "$C7_D/parse-$arch.bin" "$C7_FX/argv_table_lead.txt" $C7_LB932; } > "$C7_D/dp.out" 2>&1; rc=$?
+    if [ "$rc" = "0" ] && cat "$C7_FX/argv_table_cp932.expected" "$C7_FX/argv_table_lead.expected" | cmp -s "$C7_D/dp.out" -; then
+        c7_ok c7_parser_dbcs_$sfx "$(grep -c '^#' "$C7_D/dp.out") lines"
+    else
+        c7_bad c7_parser_dbcs_$sfx "rc=$rc; first difference: $(cat "$C7_FX/argv_table_cp932.expected" "$C7_FX/argv_table_lead.expected" | diff -a "$C7_D/dp.out" - | head -3 | cut -c1-80 | tr '\n' '|')"
+    fi
+    timeout 120 "$@" rtd "$C7_D/quote-$arch.bin" "$C7_D/parse-$arch.bin" $C7_LB932 > "$C7_D/dr.out" 2>&1; rc=$?
+    if [ "$rc" = "0" ] && cat "$C7_FX/argv_roundtrip_cp932.expected" "$C7_FX/argv_roundtrip_lead.expected" | cmp -s "$C7_D/dr.out" -; then
+        c7_ok c7_roundtrip_dbcs_$sfx "$(grep -c '^#' "$C7_D/dr.out") vectors"
+    else
+        c7_bad c7_roundtrip_dbcs_$sfx "rc=$rc; first difference: $(cat "$C7_FX/argv_roundtrip_cp932.expected" "$C7_FX/argv_roundtrip_lead.expected" | diff -a "$C7_D/dr.out" - | head -3 | cut -c1-80 | tr '\n' '|')"
+    fi
+}
+
 # (e) arm64 leaves under qemu: the full raw table through the dumped parser,
-#     and every round-trip vector through the dumped quoter then the parser.
-TOTAL=$((TOTAL + 2))
+#     and every round-trip vector through the dumped quoter then the parser
+#     (both with no lead bytes: the LeadByte argument all zero); then the
+#     DBCS rows above.
+TOTAL=$((TOTAL + 5))
 if [ -z "$C7_QEMU" ]; then
-    c7_skip c7_parser_table_arm64_qemu "no qemu-aarch64"
-    c7_skip c7_roundtrip_leaves_arm64_qemu "no qemu-aarch64"
+    for C7_R in c7_parser_table_arm64_qemu c7_roundtrip_leaves_arm64_qemu c7_lead_table_arm64_qemu \
+                c7_parser_dbcs_arm64_qemu c7_roundtrip_dbcs_arm64_qemu; do
+        c7_skip "$C7_R" "no qemu-aarch64"
+    done
 elif ! $C7_KRC --arch=arm64 "$C7_D/argv_leafrun.kr" -o "$C7_D/leafrun" > /dev/null 2>&1; then
-    c7_bad c7_parser_table_arm64_qemu "argv_leafrun.kr did not build"
-    c7_bad c7_roundtrip_leaves_arm64_qemu "argv_leafrun.kr did not build"
+    for C7_R in c7_parser_table_arm64_qemu c7_roundtrip_leaves_arm64_qemu c7_lead_table_arm64_qemu \
+                c7_parser_dbcs_arm64_qemu c7_roundtrip_dbcs_arm64_qemu; do
+        c7_bad "$C7_R" "argv_leafrun.kr did not build"
+    done
 else
     timeout 120 "$C7_QEMU" "$C7_D/leafrun" parse "$C7_D/parse-arm64.bin" "$C7_D/run/argv_table.txt" > "$C7_D/qp.out" 2>&1; C7_RC=$?
     if [ "$C7_RC" = "0" ] && cmp -s "$C7_D/qp.out" "$C7_D/table.expected"; then
@@ -27523,20 +27715,26 @@ else
     else
         c7_bad c7_roundtrip_leaves_arm64_qemu "rc=$C7_RC; first difference: $(diff "$C7_D/qr.out" "$C7_FX/argv_roundtrip.expected" | head -3 | cut -c1-80 | tr '\n' '|')"
     fi
+    c7_dbcs_rows arm64_qemu arm64 "$C7_QEMU" "$C7_D/leafrun"
 fi
 
 # (e2) the x86_64 leaves, natively: argv_leafrun.kr built for Linux x86_64
 #     calls the dumped Win64 leaves through its SysV->Win64 shim, on the same
 #     tables. Under Wine an x86 quoter overrun is invisible (the VirtualAlloc'd
 #     line is page-rounded); here the quoter's "measure == build, NUL at len-1,
-#     nothing written past len" checks run on x86_64 too. Needs an x86_64 host.
-TOTAL=$((TOTAL + 2))
+#     nothing written past len" checks run on x86_64 too; then the DBCS rows.
+#     Needs an x86_64 host.
+TOTAL=$((TOTAL + 5))
 if [ "$(uname -m)" != "x86_64" ]; then
-    c7_skip c7_parser_table_x86_64_leaf "not an x86_64 host"
-    c7_skip c7_roundtrip_leaves_x86_64 "not an x86_64 host"
+    for C7_R in c7_parser_table_x86_64_leaf c7_roundtrip_leaves_x86_64 c7_lead_table_x86_64_leaf \
+                c7_parser_dbcs_x86_64_leaf c7_roundtrip_dbcs_x86_64_leaf; do
+        c7_skip "$C7_R" "not an x86_64 host"
+    done
 elif ! $C7_KRC --arch=x86_64 "$C7_D/argv_leafrun.kr" -o "$C7_D/leafrun-x86_64" > /dev/null 2>&1; then
-    c7_bad c7_parser_table_x86_64_leaf "argv_leafrun.kr did not build for x86_64"
-    c7_bad c7_roundtrip_leaves_x86_64 "argv_leafrun.kr did not build for x86_64"
+    for C7_R in c7_parser_table_x86_64_leaf c7_roundtrip_leaves_x86_64 c7_lead_table_x86_64_leaf \
+                c7_parser_dbcs_x86_64_leaf c7_roundtrip_dbcs_x86_64_leaf; do
+        c7_bad "$C7_R" "argv_leafrun.kr did not build for x86_64"
+    done
 else
     timeout 120 "$C7_D/leafrun-x86_64" parse "$C7_D/parse-x86_64.bin" "$C7_D/run/argv_table.txt" > "$C7_D/xp.out" 2>&1; C7_RC=$?
     if [ "$C7_RC" = "0" ] && cmp -s "$C7_D/xp.out" "$C7_D/table.expected"; then
@@ -27550,6 +27748,7 @@ else
     else
         c7_bad c7_roundtrip_leaves_x86_64 "rc=$C7_RC; first difference: $(diff "$C7_D/xr.out" "$C7_FX/argv_roundtrip.expected" | head -3 | cut -c1-80 | tr '\n' '|')"
     fi
+    c7_dbcs_rows x86_64_leaf x86_64 "$C7_D/leafrun-x86_64"
 fi
 
 # (g) docs/RUNTIME_EXIT_CODES.md is the registry of the exit statuses emitted
@@ -27584,11 +27783,12 @@ PYEOF
 fi
 
 # (f) Wine, x86_64, end to end. Counted SKIPs without wine (KR_WINE=<path>).
-TOTAL=$((TOTAL + 7))
+TOTAL=$((TOTAL + 10))
 if [ -z "$C7_WINE" ] || [ ! -x "$C7_WINE" ]; then
     for C7_R in c7_cli_argc_matches_linux c7_raw_cmdline_table_wine c7_exec_argv_roundtrip_wine \
                 c7_runner_krbo_arg_with_space_wine c7_exec_argv_too_long_exit_122_wine c7_exec_argv_limit_boundary_wine \
-                c7_exec_argv_missing_child_exit_124_wine; do
+                c7_exec_argv_missing_child_exit_124_wine c7_acp_is_932_in_ja_prefix_wine \
+                c7_raw_cmdline_table_cp932_wine c7_exec_argv_roundtrip_cp932_wine; do
         c7_skip "$C7_R" "no wine; set KR_WINE=<path to wine>"
     done
 else
@@ -27670,8 +27870,47 @@ else
     [ "$C7_RC" = "124" ] || C7_WHY="$C7_WHY rc-$C7_RC"
     grep -qx 'krc runtime: child process could not be started' "$C7_D/e124" || C7_WHY="$C7_WHY no-stderr-line"
     if [ -z "$C7_WHY" ]; then c7_ok c7_exec_argv_missing_child_exit_124_wine "no_such_child.exe"; else c7_bad c7_exec_argv_missing_child_exit_124_wine "$C7_WHY"; fi
+
+    # DBCS, end to end: a prefix whose locale is Japanese, so the ANSI code
+    # page is 932. First proved from INSIDE (argv_cpinfo.exe asks GetCPInfo
+    # (CP_ACP) exactly as the prologue and op 114 do: MaxCharSize 2, lead
+    # bytes 81-9F and E0-FC); the two rows after it mean nothing otherwise and
+    # say so. Then the CP932 raw table through CreateProcessA directly (the
+    # child's prologue parse; whole characters only, which survive
+    # CreateProcessA's ANSI -> UTF-16 -> ANSI trip byte for byte, raw= checks
+    # that) and the cp932 round-trip vectors through op 114 (argv_rtparent.exe
+    # 200+k) -- the same expected files as the leaf rows.
+    C7_JA=1 c7_wine "$C7_D/cpi.out" "$C7_D/ce" argv_cpinfo.exe; C7_RC=$?
+    C7_ACP=$(tr -d '\r' < "$C7_D/cpi.out")
+    if [ "$C7_RC" = "0" ] && [ "$C7_ACP" = "ok=1 max=02 lead=819fe0fc0000000000000000" ]; then
+        c7_ok c7_acp_is_932_in_ja_prefix_wine "$C7_ACP"
+        C7_ACPWHY=""
+    else
+        c7_bad c7_acp_is_932_in_ja_prefix_wine "rc=$C7_RC GetCPInfo(CP_ACP) said '$C7_ACP'"
+        C7_ACPWHY=" (the prefix's ANSI code page is not 932: see c7_acp_is_932_in_ja_prefix_wine)"
+    fi
+    C7_JA=1 c7_wine "$C7_D/wt932.out" "$C7_D/ce" argv_rawparent.exe argv_table_cp932.txt; C7_RC=$?
+    if [ "$C7_RC" = "0" ] && cmp -s "$C7_D/wt932.out" "$C7_FX/argv_table_cp932.expected"; then
+        c7_ok c7_raw_cmdline_table_cp932_wine "$(grep -c '^#' "$C7_D/wt932.out") lines"
+    else
+        c7_bad c7_raw_cmdline_table_cp932_wine "rc=$C7_RC$C7_ACPWHY; first difference: $(diff -a "$C7_D/wt932.out" "$C7_FX/argv_table_cp932.expected" | head -3 | cut -c1-80 | tr '\n' '|')"
+    fi
+    : > "$C7_D/wr932.out"
+    C7_K=0
+    while [ "$C7_K" -lt "$(grep -c '^#' "$C7_FX/argv_roundtrip_cp932.expected")" ]; do
+        C7_JA=1 c7_wine_child argv_rtparent.exe "$((200 + C7_K))"; C7_RC=$?
+        printf '#%d rc=%d\n' "$C7_K" "$C7_RC" >> "$C7_D/wr932.out"
+        cat "$C7_D/run/argv.out" >> "$C7_D/wr932.out"
+        C7_K=$((C7_K + 1))
+    done
+    if cmp -s "$C7_D/wr932.out" "$C7_FX/argv_roundtrip_cp932.expected"; then
+        c7_ok c7_exec_argv_roundtrip_cp932_wine "$C7_K vectors"
+    else
+        c7_bad c7_exec_argv_roundtrip_cp932_wine "first difference$C7_ACPWHY: $(diff -a "$C7_D/wr932.out" "$C7_FX/argv_roundtrip_cp932.expected" | head -3 | cut -c1-80 | tr '\n' '|')"
+    fi
     if [ -x "$(dirname "$C7_WINE")/wineserver" ]; then
         WINEPREFIX="$C7_D/pfx" "$(dirname "$C7_WINE")/wineserver" -w > /dev/null 2>&1
+        WINEPREFIX="$C7_D/pfxja" "$(dirname "$C7_WINE")/wineserver" -w > /dev/null 2>&1
     fi
 fi
 rm -rf "$C7_D"

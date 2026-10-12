@@ -10,6 +10,9 @@
 //                            32767 bytes with its NUL -- the CreateProcessA
 //                            limit -- so the child runs (exit 2).
 //   argv_rtparent.exe 102    one byte more: exit 122.
+//   argv_rtparent.exe 200+k  k < rtv_cp932_count(): DBCS vector k (under
+//                            Wine with the ANSI code page 932), quoted by op
+//                            114 with that code page's lead bytes.
 // exec_process_argv never returns on Windows (the parent exits with the
 // child's status), so reaching the end of main is itself a failure (exit 77).
 import "argv_vectors.kr"
@@ -47,6 +50,8 @@ fn main() -> uint32 {
         rt_big(argv, 32764)
     } else if k == 102 {
         rt_big(argv, 32765)
+    } else if k >= 200 && k < 200 + rtv_cp932_count() {
+        rtv_dbcs_build(k - 200, argv)
     } else {
         return 71
     }
