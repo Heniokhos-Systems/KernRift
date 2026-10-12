@@ -5971,8 +5971,16 @@ rm -f /tmp/krc_xim_$$.kr /tmp/krc_xim_$$.s
 # without an index, and REX.B on a no-base SIB (still no base). The listing
 # prints scale 1 as `*1` as objdump does, a disp8 as 2 unsigned hex digits and
 # a disp32 as 8. Parent compiler: red. Listing text only; no binary changes.
-SIB_SEQS="4F_69_9C_A2_94_23_55_51_82_56_8B_96 4D_69_04_EF_A0_CC_20_20 4B_6B_34_C5_90_09_50_66_A7 49_69_24_ED_BE_69_00_FF_43_5B_C3_01 4F_6B_1C_A5_B1_2E_02_6D_A3 48_69_34_25_18_D9_BB_4A_0A_17_2C_80 48_8D_44_88_10 48_8D_04_8D_00_01_00_00 4C_8B_04_C8 48_01_04_24 48_87_0C_5D_08_00_00_00 48_0F_AF_04_25_44_33_22_11"
-SIB_WANT="imul r11, [r10+r12*4+0x51552394], 0x968b5682|imul r8, [r15+rbp*8], 0x2020cca0|imul rsi, [r8*8+0x66500990], 0xffffffa7|imul rsp, [rbp*8+0xff0069be], 0x01c35b43|imul r11, [r12*4+0x6d022eb1], 0xffffffa3|imul rsi, [0x4abbd918], 0x802c170a|lea rax, [rax+rcx*4+0x10]|lea rax, [rcx*4+0x00000100]|mov r8, [rax+rcx*8]|add [rsp], rax|xchg rcx, [rbx*2+0x00000008]|imul rax, [0x11223344]|"
+# Round 5: the REX.W 89/8B arm decoded the SIB by hand (base only, and no
+# disp32 for a no-base SIB), so `48 8b 04 c8` listed as `mov rax, [rax]`; the
+# REX.W 31 arm read a memory ModR/M as two registers. Both now go through the
+# helpers, and the cases below cover them. Prefixes 0x64/0x65 print `fs:`/`gs:`
+# and 0x67 makes the address registers 32-bit (eax.., r12d, eip); before, each
+# printed as a raw byte and the rest decoded unprefixed. Each expected line
+# is objdump -M intel's, in the listing's spelling (fs:0x11223344 is
+# fs:[0x11223344]).
+SIB_SEQS="4F_69_9C_A2_94_23_55_51_82_56_8B_96 4D_69_04_EF_A0_CC_20_20 4B_6B_34_C5_90_09_50_66_A7 49_69_24_ED_BE_69_00_FF_43_5B_C3_01 4F_6B_1C_A5_B1_2E_02_6D_A3 48_69_34_25_18_D9_BB_4A_0A_17_2C_80 48_8D_44_88_10 48_8D_04_8D_00_01_00_00 4C_8B_04_C8 48_01_04_24 48_87_0C_5D_08_00_00_00 48_0F_AF_04_25_44_33_22_11 48_8B_04_C8 48_89_0C_3D_31_20_AB_F5 48_8B_04_4D_3C_90_EC_18 48_89_54_FE_0C 48_8B_84_45_92_46_57_98 48_31_04_24 48_31_8C_88_00_01_00_00 64_48_8B_04_25_44_33_22_11 65_67_48_89_44_24_08 67_4C_8B_44_8D_10 67_48_8B_05_10_00_00_00 65_48_69_04_25_00_01_00_00_10_00_00_00 67_4E_6B_04_A5_10_00_00_00_05"
+SIB_WANT="imul r11, [r10+r12*4+0x51552394], 0x968b5682|imul r8, [r15+rbp*8], 0x2020cca0|imul rsi, [r8*8+0x66500990], 0xffffffa7|imul rsp, [rbp*8+0xff0069be], 0x01c35b43|imul r11, [r12*4+0x6d022eb1], 0xffffffa3|imul rsi, [0x4abbd918], 0x802c170a|lea rax, [rax+rcx*4+0x10]|lea rax, [rcx*4+0x00000100]|mov r8, [rax+rcx*8]|add [rsp], rax|xchg rcx, [rbx*2+0x00000008]|imul rax, [0x11223344]|mov rax, [rax+rcx*8]|mov [rdi*1+0xf5ab2031], rcx|mov rax, [rcx*2+0x18ec903c]|mov [rsi+rdi*8+0x0c], rdx|mov rax, [rbp+rax*2+0x98574692]|xor [rsp], rax|xor [rax+rcx*4+0x00000100], rcx|mov rax, fs:[0x11223344]|mov gs:[esp+0x08], rax|mov r8, [ebp+ecx*4+0x10]|mov rax, [eip+0x00000010]|imul rax, gs:[0x00000100], 0x00000010|imul r8, [r12d*4+0x00000010], 0x00000005|"
 {
     echo 'fn main() {'
     for SIB_S in $SIB_SEQS; do echo "    asm(\"0x${SIB_S//_/ 0x}\")"; done
@@ -5999,6 +6007,40 @@ else
     FAIL=$((FAIL + 1))
 fi
 rm -f /tmp/krc_sib_$$.kr /tmp/krc_sib_$$.s
+
+# The arms that dump a REX-prefixed instruction raw used fixed byte counts
+# (2 for most REX bytes, 3 for 49 89/8B, 7 for 48 C7 / 81, 4 for 48 83), so a
+# ModR/M naming memory left SIB/disp/imm bytes to be decoded as the next
+# instructions. x86_rex_raw_len counts REX + opcode + ModR/M + SIB/disp + imm
+# for the ModR/M opcodes the listing knows. Each case is followed by a nop:
+# the case must be one raw line holding exactly its bytes, and the nop must
+# start the next line. Parent compiler: every case splits. Listing text only.
+RAWL_SEQS="4D_89_44_24_08 48_C7_04_24_01_00_00_00 49_81_44_24_08_01_00_00_00 4A_83_2C_95_CB_CD_58_2D_77 41_8B_84_24_00_01_00_00 4C_01_04_24"
+{
+    echo 'fn main() {'
+    for RAWL_S in $RAWL_SEQS; do echo "    asm(\"0x${RAWL_S//_/ 0x}\")"; echo '    asm("0x90")'; done
+    echo '    exit(0)'
+    echo '}'
+} > /tmp/krc_rawl_$$.kr
+TOTAL=$((TOTAL + 1))
+rm -f /tmp/krc_rawl_$$.s
+RAWL_BAD="(listing not produced)"
+if $KRC --arch=x86_64 --emit=asm /tmp/krc_rawl_$$.kr -o /tmp/krc_rawl_$$.s > /dev/null 2>&1 && [ -f /tmp/krc_rawl_$$.s ]; then
+    RAWL_BAD=""
+    for RAWL_S in $RAWL_SEQS; do
+        RAWL_B=$(echo "$RAWL_S" | tr 'A-F_' 'a-f ')
+        if ! grep -aA1 -E "^  [0-9a-f]{8}: $RAWL_B ?$" /tmp/krc_rawl_$$.s | grep -qaE '^  [0-9a-f]{8}: 90 +nop$'; then
+            RAWL_BAD="$RAWL_BAD $RAWL_S"
+        fi
+    done
+fi
+if [ -z "$RAWL_BAD" ]; then
+    PASS=$((PASS + 1))
+else
+    echo "FAIL: x86_asm_listing_raw_lengths (not one whole raw line followed by the nop:$RAWL_BAD)"
+    FAIL=$((FAIL + 1))
+fi
+rm -f /tmp/krc_rawl_$$.kr /tmp/krc_rawl_$$.s
 
 # A barrier must stop CSE of a static load. isb/dcache_flush/icache_invalidate/
 # dsb/dmb (IR ops 126-130) were missing from ir_opt_cse_invalidates, so
