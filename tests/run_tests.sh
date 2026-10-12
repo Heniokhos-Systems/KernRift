@@ -28281,6 +28281,19 @@ else
         WINEPREFIX="$T10_D/pfx" "$(dirname "$T10_WINE")/wineserver" -w > /dev/null 2>&1
     fi
 fi
+
+# --- Task 12: std/net.kr, std/time.kr, std/alloc.kr on every OS (spec C5 per file) --
+# Linux FIRST: these rows were written and made green on the OLD net.kr and
+# time.kr (raw syscalls), before either file was touched, so the rewrite onto
+# sys_* (net) and the new Windows arm (time) cannot change Linux behaviour
+# unseen. net_loopback.kr drives net.kr's public API end to end (a 1000-byte
+# pattern each way checked byte by byte, then EOF after the peer's close);
+# time_basic.kr checks time_now is monotonic and that a 20 ms sleep lasts at
+# least 20 ms by the time_ns builtin.
+t10_row net_loopback_x86_64 x86_64 net_loopback "OK" 0
+t10_row net_loopback_arm64 arm64 net_loopback "OK" 0
+t10_row time_monotonic_and_sleep_x86_64 x86_64 time_basic "OK" 0
+t10_row time_monotonic_and_sleep_arm64 arm64 time_basic "OK" 0
 rm -rf "$T10_D"
 
 # --- Documentation pin 5, PART B (see Part A above) --------------------------

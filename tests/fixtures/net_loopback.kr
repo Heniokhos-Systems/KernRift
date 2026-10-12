@@ -1,0 +1,93 @@
+// std/net.kr (portable-syscall-layer Task 12): a TCP exchange on loopback
+// through net.kr's PUBLIC API -- net_socket, net_setsockopt, net_bind,
+// net_listen, net_connect, net_accept, net_send, net_recv, net_close,
+// net_addr_ipv4. (net.kr has no getsockname, so sys_getsockname from sys.kr
+// finds the port the kernel picked.) The client sends a 1000-byte pattern, the
+// server checks every byte and answers with 300 bytes of another pattern, the
+// client closes and the server must then read EOF (0). Prints OK.
+// Written and made green on the OLD net.kr (raw syscalls) before net.kr was
+// rewritten to delegate to sys_* (spec C5): the same program pins Linux
+// behaviour across the rewrite, and runs unchanged as a Windows program.
+import "../../std/net.kr"
+import "../../std/sys.kr"
+
+static u8[16] nl_ga
+static u8[8] nl_len
+static u8[8] nl_one
+static u8[1024] nl_tx
+static u8[1024] nl_rx
+
+// recv until `want` bytes have arrived (TCP may split them); 0 on success.
+fn nl_recv_all(uint64 fd, uint64 buf, uint64 want) -> uint64 {
+    uint64 got = 0
+    while got < want {
+        uint64 r = net_recv(fd, buf + got, want - got)
+        if r == 0 { return 1 }
+        if r >= 0x8000000000000000 { return 2 }
+        got = got + r
+    }
+    return 0
+}
+
+// send until `len` bytes have gone; 0 on success.
+fn nl_send_all(uint64 fd, uint64 buf, uint64 len) -> uint64 {
+    uint64 sent = 0
+    while sent < len {
+        uint64 r = net_send(fd, buf + sent, len - sent)
+        if r == 0 { return 1 }
+        if r >= 0x8000000000000000 { return 2 }
+        sent = sent + r
+    }
+    return 0
+}
+
+fn main() -> uint32 {
+    uint64 ls = net_socket(2, 1, 0)
+    if ls >= 0x8000000000000000 { return 2 }
+    store32(nl_one, 1)
+    if net_setsockopt(ls, 1, 2, nl_one, 4) != 0 { return 3 }
+    uint64 sa = net_addr_ipv4(0x7F000001, 0)
+    if net_bind(ls, sa, 16) != 0 { return 4 }
+    net_addr_free(sa)
+    if net_listen(ls, 4) != 0 { return 5 }
+    store32(nl_len, 16)
+    if sys_getsockname(ls, nl_ga, nl_len) != 0 { return 6 }
+    uint64 port = (load8(nl_ga + 2) << 8) | load8(nl_ga + 3)
+    if port == 0 { return 7 }
+
+    uint64 cs = net_socket(2, 1, 0)
+    if cs >= 0x8000000000000000 { return 8 }
+    uint64 ca = net_addr_ipv4(0x7F000001, port)
+    if net_connect(cs, ca, 16) != 0 { return 9 }
+    net_addr_free(ca)
+    uint64 a = net_accept(ls)
+    if a >= 0x8000000000000000 { return 10 }
+
+    // client -> server: 1000 bytes, every byte checked
+    uint64 i = 0
+    while i < 1000 { store8(nl_tx + i, (i * 7 + 3) & 255)  i = i + 1 }
+    if nl_send_all(cs, nl_tx, 1000) != 0 { return 11 }
+    if nl_recv_all(a, nl_rx, 1000) != 0 { return 12 }
+    i = 0
+    while i < 1000 {
+        if load8(nl_rx + i) != ((i * 7 + 3) & 255) { return 13 }
+        i = i + 1
+    }
+    // server -> client: 300 bytes of a different pattern
+    i = 0
+    while i < 300 { store8(nl_tx + i, (i * 13 + 5) & 255)  i = i + 1 }
+    if nl_send_all(a, nl_tx, 300) != 0 { return 14 }
+    if nl_recv_all(cs, nl_rx, 300) != 0 { return 15 }
+    i = 0
+    while i < 300 {
+        if load8(nl_rx + i) != ((i * 13 + 5) & 255) { return 16 }
+        i = i + 1
+    }
+    // the client closes: the server reads EOF
+    net_close(cs)
+    if net_recv(a, nl_rx, 16) != 0 { return 17 }
+    net_close(a)
+    net_close(ls)
+    file_write(1, "OK\n", 3)
+    return 0
+}

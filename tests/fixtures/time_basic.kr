@@ -1,0 +1,40 @@
+// std/time.kr (portable-syscall-layer Task 12): time_now is monotonic and
+// non-zero; time_sleep_ms(20) sleeps AT LEAST 20 ms by the time_ns builtin
+// (and not absurdly long: <= 2 s, so a ms-as-seconds scale bug fails);
+// time_elapsed agrees; time_now and time_ns read the same clock; a sub-millisecond time_sleep_ns(1500000) sleeps at
+// least 1.5 ms. Prints OK.
+// Written and made green on the OLD time.kr (raw syscalls) before its Windows
+// arm existed: it pins Linux behaviour across the rewrite, and runs unchanged
+// as a Windows program (Sleep, whose ~15.6 ms tick can return a 20 ms request
+// after one tick -- time.kr must still keep the "at least" promise).
+import "../../std/time.kr"
+
+fn main() -> uint32 {
+    uint64 t0 = time_now()
+    if t0 == 0 { return 2 }
+    uint64 t1 = time_now()
+    if t1 < t0 { return 3 }
+    // time_now reads the same clock as the time_ns builtin (CLOCK_MONOTONIC on
+    // Linux, the QPC on Windows): read back to back they agree to well within
+    // a second. A wrong unit or clock in time_now cannot hide behind deltas.
+    uint64 tn = time_ns()
+    if tn < t1 { return 11 }
+    if tn - t1 > 1000000000 { return 12 }
+    uint64 a = time_ns()
+    time_sleep_ms(20)
+    uint64 b = time_ns()
+    if b - a < 20000000 { return 4 }
+    if b - a > 2000000000 { return 5 }
+    uint64 e = time_elapsed(t0)
+    if e < 20000000 { return 6 }
+    if e > 4000000000 { return 7 }
+    uint64 t2 = time_now()
+    if t2 < t1 { return 8 }
+    a = time_ns()
+    time_sleep_ns(1500000)
+    b = time_ns()
+    if b - a < 1500000 { return 9 }
+    if b - a > 2000000000 { return 10 }
+    file_write(1, "OK\n", 3)
+    return 0
+}
