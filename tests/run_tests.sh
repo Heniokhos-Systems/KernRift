@@ -71,11 +71,13 @@ trap "$SUITE_EXIT_TRAP" EXIT
 
 # Per-test wall-clock bound for the run_* helpers' compiled programs, so a
 # miscompile that loops cannot hang the suite: it fails as TIMEOUT. The limit
-# is generous (every row's program runs in well under a second); override with
-# RUN_TEST_TIMEOUT. rb_timed_out RC T0 says whether an exit status RC from
-# `timeout` started at $SECONDS == T0 was the limit firing (124 after TERM, 137
-# after the follow-up KILL) rather than the program's own exit code.
-RUN_TEST_TIMEOUT="${RUN_TEST_TIMEOUT:-30}"
+# is generous: a row whose program is meant to fault waits for the system's
+# core-dump handler (apport here: about 7 s for one SIGSEGV on an idle box,
+# far more under load). Override with RUN_TEST_TIMEOUT. rb_timed_out RC T0
+# says whether an exit status RC from `timeout` started at $SECONDS == T0 was
+# the limit firing (124 after TERM, 137 after the follow-up KILL) rather than
+# the program's own exit code.
+RUN_TEST_TIMEOUT="${RUN_TEST_TIMEOUT:-120}"
 rb_timed_out() {
     { [ "$1" = 124 ] || [ "$1" = 137 ]; } && [ $((SECONDS - $2)) -ge "$RUN_TEST_TIMEOUT" ]
 }
@@ -9051,10 +9053,10 @@ fi
 # The claim that matters for ramfb is not "it compiled" but "QEMU scanned those
 # pixels out". check.py boots the image headless and compares QEMU's own
 # screendump against 13 expected pixel values. Needs qemu-system-x86_64 and
-# python3; noted rather than failed when absent, like the ESP rows above.
+# python3; without either the row is a SKIP (never a pass).
 TOTAL=$((TOTAL + 1))
 if ! command -v qemu-system-x86_64 >/dev/null 2>&1 || ! command -v python3 >/dev/null 2>&1; then
-    PASS=$((PASS + 1)); echo "  ramfb_example_draws: PASS (pixel check SKIPPED -- no qemu-system-x86_64/python3)"
+    skip_row ramfb_example_draws "no qemu-system-x86_64/python3"
 elif [ ! -f "$RFB_IMG" ]; then
     FAIL=$((FAIL + 1)); echo "FAIL: ramfb_example_draws (no image from the row above)"
 else

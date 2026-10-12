@@ -964,50 +964,88 @@ returns), 119 (`TIME_NS`, a stack timespec) and 131 (`ARR_CHECK`). None of
 those writes memory a CSE-pure op reads; `IR_STATIC_LOAD` (77) is the only
 such op.
 
-**What guards this set is run rows, not the pin.** A source-text pin can
-always be bypassed by an edit it does not read (a new pass, a pre-pass in
-front of a pinned loop, a call through a computed pointer), so every
-side-effecting op class that source can reach has a row that compiles a
-program and runs it on x86_64 and on arm64 under qemu-aarch64; a missing
-qemu makes the arm64 half a SKIP, never a pass. Each program reads a static
-`g`, runs the op once with its result unused, reads `g` again and exits with
-a code that is 50 exactly when the op was CSE'd across or deleted by DCE:
-- `side_effect_runs_*`: calls (50, with `ARG` 51), `call_ptr` (87),
-  `g = 9` (78), `read` (52), `syscall_raw` (85), the atomics 90/92/93 and
-  109–112, `vstore8..64` (94, inline and in a one-line helper), an `asm`
-  store with `in()` bindings on both arches (96), a scaled store that is
-  `STORE_BIS` (148) on arm64, and a loop back-edge plus an early `return` in a
-  void function (`BR` 40, `RET_VOID` 43); with
-  `write_builtins_stop_static_cse` (memset 72, memcpy 76, a store 31) and
-  `fmt_uint_stops_static_cse` (74). `IR_VSTORE` and `IR_STORE`/`IR_STORE_BIS`
+**What guards this set is run rows, not the pin — and only as far as they
+reach.** A source-text pin can always be bypassed by an edit it does not read
+(a new pass, a pre-pass in front of a pinned loop, an accessor that hides an
+opcode), so the side-effecting ops source can reach have rows that compile a
+program and run it. Those rows catch a dropped op only when it is dropped in
+a program shaped like theirs; a mutant outside that space can still pass.
+What they cover exactly (`tests/run_tests.sh`, the block under "THE GUARD"):
+
+- **Shapes.** S: the op between two reads of a static `g`. L: the op inside a
+  two-trip `while` that reads `g` at the top of each trip, so a LICM that
+  hoists the static load out of the loop (or a pass that only acts inside
+  loops) changes the result. B: S after 150 statements of padding in the
+  same function, so a pass whose behaviour depends on function size (DCE's
+  flow-insensitive liveness, an instruction-count cutoff) is exercised.
+- **Arches.** The run rows run on x86_64, on arm64 under qemu-aarch64 and on
+  riscv32 under `qemu-riscv32 -R 0x20000000`; the listing rows on x86_64 and
+  arm64; `get_module_path` under `--target=windows`. A missing qemu makes
+  that arch's rows a SKIP, and a SKIP on a full run is red (README gate).
+  xtensa, freestanding images and the legacy backends are not covered.
+- `side_effect_runs_*` (S, L, B; exit code 50 when the op was CSE'd across,
+  hoisted past or deleted): calls (50, with `ARG` 51), `call_ptr` (87) with
+  and without arguments, `g = 9` (78), `read` (52), `syscall_raw` (85), the
+  atomics 90/92/93 and 109–112, `vstore8..64` (94, inline and in a one-line
+  helper), a `volatile { *(p as u64) = v }` store (94), an `asm` store with
+  `in()` bindings (96; x86_64 and arm64), a scaled store that is
+  `STORE_BIS` (148) on arm64, a loop back-edge plus an early `return`
+  (`BR` 40, `RET_VOID` 43), and memset/memcpy/a store/fmt_uint (72/76/31/74)
+  in L and B (their S rows are `write_builtins_stop_static_cse` and
+  `fmt_uint_stops_static_cse`). riscv32 runs all but the atomics, `vstore64`
+  and `asm` (compile errors there). `IR_VSTORE` and `IR_STORE`/`IR_STORE_BIS`
   keep their width in `dest`, so DCE's flow-insensitive liveness asks whether
   vreg 1/2/4/8 is live; in a large function it usually is, and a store
   treated as pure survives by accident. The one-line helpers are where a
   dropped store is visible to DCE. `STORE_BIS` is created by
   `ir_opt_fuse_lea_mem`, after CSE has run, so only its DCE half can be
   observed;
-- `side_effect_kept_*`: ops whose effect is not a memory write a single
-  thread can read back must still not be deleted — `vload` (95) and
-  `atomic_load` (91) of address 0 fault, `asm` `ud2`/`udf` traps, a read after
-  `dealloc` (71) faults, `exec_process`/`exec_process_argv` (113/114) exec
-  `/bin/true`, `set_executable` (115) makes a scratch file executable, and
-  `--debug`'s `ARR_CHECK` (131) traps;
-- `side_effect_stops_static_cse_listing` and `barrier_stops_static_cse`:
-  CSE across 91, 95, 96, 113–115 and the barriers 126–130 is not observable
-  by a single-threaded run, so these count the loads of `g` in the
-  `--emit=asm` listing (two, not one). `get_module_path` (146) exists only in
-  a Windows build, which cannot run here: `module_path_stops_static_cse` and
-  a variant with the result discarded count the same loads under
-  `--target=windows`.
+- `side_effect_kept_*` (S, L, B): ops whose effect is not a memory write a
+  single thread can read back must still not be deleted — `vload8/16/32/64`,
+  a `volatile { *(z as u32) -> v }` read and a `device` field read (all 95)
+  and `atomic_load` (91) of address 0 fault; `asm` `ud2`/`udf`/a zero word
+  traps; a read after `dealloc` (71) faults; `alloc` (70) is observable as an
+  address gap (`p1 = alloc(1 MiB); alloc(1 MiB); p3 = alloc(1 MiB)` puts p1
+  and p3 two mappings apart, one apart when the middle call was deleted);
+  `time_ns` (119) on x86_64 runs under `prctl(PR_SET_SECCOMP, STRICT)`, which
+  kills the program at its `clock_gettime` (137; 50 when deleted), and on
+  arm64 (where qemu refuses seccomp) runs under `qemu-aarch64 -strace` and
+  must show a `clock_gettime`; `exec_process`/`exec_process_argv` (113/114)
+  exec `/bin/true`; `set_executable` (115) makes a scratch file executable;
+  `--debug`'s `ARR_CHECK` (131) traps. On riscv32: the vloads but `vload64`,
+  the volatile and device reads, the trap, dealloc and alloc;
+- `side_effect_stops_static_cse_listing` (S, L, B) and
+  `barrier_stops_static_cse`: CSE across 91, 95, 96, 113–115 and the barriers
+  126–130 is not observable by a single-threaded run, so these count the
+  loads of `g` in the `--emit=asm` listing — S two, B three (plus the one
+  load that seeds the padding), L one and inside the loop's back-edge span.
+  `get_module_path` (146) exists only in a Windows build, which cannot run
+  here: `module_path_stops_static_cse` and `module_path_unused` (S, L, B,
+  result discarded) count the same loads under `--target=windows`.
 
-Each run row was shown red against a compiler built with the op dropped from
-`ir_opt_is_side_effect`, skipped at the CSE call site, or deleted in DCE's
-sweep. No row, because no program can tell: `ALLOC` (70) and
-`EXTRACT_RDX`/`EXTRACT_R8` (80/81) are deleted only when their result is
-unused, and `TIME_NS` (119) only reads the clock. `FMT_BOOL`/`FMT_F64`
-(124/125) come only from `print` and f-strings, which read their result and
-write it with a `SYSCALL` that invalidates CSE anyway. `RET2`/`RET3` (82/83)
-are covered by the `tuple*` rows; `BR_COND`/`RET` (41/42) by nearly every row.
+**What the rows catch, measured.** For each of the 45 ops in the pin's
+`WANT_SE`, three compilers were built from this tree: the op dropped from
+`ir_opt_is_side_effect`, the op skipped at the CSE call site (so it never
+invalidates), and the op deleted by DCE's sweep when its dest is dead. Each
+of the 135 ran the full suite. 111 are red. The other 24 are equivalent to
+this compiler, so no row can tell them apart:
+- the CSE skip of 40–43, 51, 70, 71, 80–83, 119 and 131 (13 mutants):
+  `ir_opt_cse_invalidates` already returns 0 for them, so the skip changes
+  nothing;
+- the CSE skip of 148: `STORE_BIS` is created by `ir_opt_fuse_lea_mem`,
+  after CSE has run;
+- all three mutants of 124 and 125 (6): `FMT_BOOL`/`FMT_F64` come only from
+  `print` and f-strings, which read their result, so it is never dead, and
+  write it with a `SYSCALL` that invalidates CSE anyway;
+- the DCE and side-effect mutants of 80 and 81 (4): `EXTRACT_RDX`/
+  `EXTRACT_R8` are register moves after a call, and deleting one whose result
+  is unused changes nothing.
+
+`ALLOC` (70) and `TIME_NS` (119), which an earlier version of this section
+called unobservable, are red in their DCE and side-effect forms
+(`side_effect_kept_alloc`, `side_effect_kept_time_ns`). These numbers cover
+single-op mutants of the three predicates only. A pass that drops an op
+some other way is caught only if it does so in one of the shapes above.
 
 The row `cse_invalidate_set_pinned` is a tripwire on top: it fails loudly
 when the code it reads moves. It reads every file in the Makefile's `SRCS`
