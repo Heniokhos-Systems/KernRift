@@ -2,6 +2,7 @@
 // Arena: bump allocator backed by mmap slab with optional guard page
 
 import "fmt.kr"
+import "win32.kr"
 
 // ---------------------------------------------------------------------------
 // Guard-page platform layer
@@ -26,6 +27,22 @@ import "fmt.kr"
 // was handed behaves like mprotect before any guard is installed on it, and
 // the platforms this file cannot verify degrade to "no guard" rather than to a
 // wrong guard or a dead allocator.
+//
+// Every OS split is the canonical literal chain (spec C5)
+//     if get_target_os() == 2 { windows } else if get_target_os() == 4 { none } else { unix }
+// so a Windows build never sees a syscall_raw (it would be refused):
+//   - Linux / Android / macOS: mprotect by number, verified by alloc_probe();
+//   - Windows: VirtualProtect(addr, page, PAGE_NOACCESS, &old) from win32.kr.
+//     alloc_probe()'s oracle does not transfer (VirtualProtect rounds an
+//     unaligned address DOWN and succeeds, where mprotect must refuse it), so
+//     Windows skips the probe and takes the page size as 4096 -- x64 and arm64
+//     Windows both use 4 KiB pages -- through the same alloc_page_size_cache,
+//     so a pre-seeded page size drives the same arithmetic there too. The
+//     slab under every guard is VirtualAlloc'd MEM_COMMIT|MEM_RESERVE by the
+//     alloc builtin, so the guard page is always committed memory. FALSE is
+//     fatal, exactly like a failed mprotect;
+//   - ApexRift none (os 4): no guard mechanism -- state 2, unguarded, and the
+//     headers say so.
 
 // mprotect syscall number for this target, or 0 when there is no raw-syscall
 // mprotect reachable from here. get_arch_id() is a compile-time constant:
@@ -51,6 +68,10 @@ fn alloc_mprotect_nr() -> u64 {
                                         // VirtualProtect, not syscalls
 }
 
+// VirtualProtect's lpflOldProtect: it must be a valid writable pointer (NULL
+// makes the call fail), so a std-private static receives the old protection.
+static u8[8] _kr_alloc_oldprot
+
 // Measured page size; 0 until alloc_probe() has run. Writable on purpose so a
 // test can pre-seed a page size this host does not have and drive the rest of
 // the arithmetic for it.
@@ -62,6 +83,21 @@ static u64 alloc_guard_state = 0
 // which is not worth repeating on every arena_new.
 fn alloc_probe() {
     if alloc_guard_state != 0 { return }
+    if get_target_os() == 2 {
+        // VirtualProtect: no probe (see the header), 4 KiB pages.
+        alloc_guard_state = 1
+        if alloc_page_size_cache == 0 { alloc_page_size_cache = 4096 }
+    } else if get_target_os() == 4 {
+        // No guard mechanism on bare metal: unguarded, and said so.
+        alloc_guard_state = 2
+        if alloc_page_size_cache == 0 { alloc_page_size_cache = 4096 }
+    } else {
+        _kr_alloc_probe_unix()
+    }
+}
+
+// alloc_probe's Unix arm: mprotect, looked up by number and then verified.
+fn _kr_alloc_probe_unix() {
     u64 nr = alloc_mprotect_nr()
     if nr == 0 {
         // Nothing to ask, and nothing wrong: this target has no raw-syscall
@@ -139,13 +175,35 @@ fn alloc_guard_supported() -> u64 {
 // there reads as protection.
 fn alloc_install_guard(u64 raw_end) -> u64 {
     if alloc_guard_supported() == 0 { return 0 }
-    u64 nr = alloc_mprotect_nr()
     u64 ps = alloc_page_size()
     u64 mask = 0 - ps
     u64 guard_addr = (raw_end + ps - 1) & mask
-    u64 mp_ret = syscall_raw(nr, guard_addr, ps, 0, 0, 0, 0)
-    if mp_ret != 0 { return 0 }
-    return guard_addr
+    if get_target_os() == 2 {
+        // VirtualProtect(addr, size, PAGE_NOACCESS = 0x01, &old): a BOOL,
+        // 32 bits (the upper half of rax/x0 is undefined), FALSE = failed.
+        u64 ok = _kr_w32_VirtualProtect(guard_addr, ps, 0x01, _kr_alloc_oldprot) & 0xFFFFFFFF
+        if ok == 0 { return 0 }
+        return guard_addr
+    } else if get_target_os() == 4 {
+        return 0
+    } else {
+        u64 nr = alloc_mprotect_nr()
+        u64 mp_ret = syscall_raw(nr, guard_addr, ps, 0, 0, 0, 0)
+        if mp_ret != 0 { return 0 }
+        return guard_addr
+    }
+}
+
+// The allocators' shared fatal path: install the guard past `raw_end`, or --
+// when the mechanism exists but refused this guard -- print `msg` (`len`
+// bytes) to stderr and exit(1). A guard that silently is not there reads as
+// protection, so it is never skipped. Callers reach this only when
+// alloc_guard_supported() is 1.
+fn _kr_alloc_guard_or_die(u64 raw_end, u64 msg, u64 len) {
+    if alloc_install_guard(raw_end) == 0 {
+        write(2, msg, len)
+        exit(1)
+    }
 }
 
 fn arena_new(u64 capacity) -> u64 {
@@ -179,10 +237,7 @@ fn arena_new(u64 capacity) -> u64 {
     // allocator pretending.
     u64 guard = 0
     if alloc_guard_supported() != 0 {
-        if alloc_install_guard(base + 40 + capacity) == 0 {
-            write(2, "arena: mprotect guard page failed\n", 34)
-            exit(1)
-        }
+        _kr_alloc_guard_or_die(base + 40 + capacity, "arena: mprotect guard page failed\n", 34)
         guard = 1
     }
     store64(base + 32, guard)     // [32] guard
@@ -260,10 +315,7 @@ fn pool_new(u64 obj_size, u64 count) -> u64 {
     // treated as a failure.
     u64 guard = 0
     if alloc_guard_supported() != 0 {
-        if alloc_install_guard(base + 56 + data_size) == 0 {
-            write(2, "pool: mprotect guard page failed\n", 33)
-            exit(1)
-        }
+        _kr_alloc_guard_or_die(base + 56 + data_size, "pool: mprotect guard page failed\n", 33)
         guard = 1
     }
     store64(base + 48, guard)         // guard
@@ -402,10 +454,7 @@ fn heap_new(u64 capacity) -> u64 {
     // treated as a failure.
     u64 guard = 0
     if alloc_guard_supported() != 0 {
-        if alloc_install_guard(base + 56 + capacity) == 0 {
-            write(2, "heap: mprotect guard page failed\n", 33)
-            exit(1)
-        }
+        _kr_alloc_guard_or_die(base + 56 + capacity, "heap: mprotect guard page failed\n", 33)
         guard = 1
     }
     store64(base + 48, guard)   // guard

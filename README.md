@@ -41,7 +41,7 @@ wins.
 
 | Target | Status | What was actually run |
 |---|---|---|
-| Linux x86_64 | 🔵 CI-verified | Self-compiles to a bootstrap fixed point; the full **1801-test** suite passes. This is the primary development target. |
+| Linux x86_64 | 🔵 CI-verified | Self-compiles to a bootstrap fixed point; the full **1827-test** suite passes. This is the primary development target. |
 | Linux ARM64 | 🔵 CI-verified | Self-compiles to a fixed point; suite runs on a native ARM64 runner. |
 | Windows x86_64 | 🔵 CI-verified + hardware | Self-compile chain on a `windows-latest` runner every push. Also verified 2026-08-14 on a physical **Intel Core Ultra 9 275HX / Windows 11 Pro** laptop: the compiler rebuilt its own source twice on the machine and stages 1-3 are byte-identical (`sha256 5b21ae16…`), with the laptop-built compiler then compiling and running a program correctly. |
 | Windows ARM64 | 🔵 CI-verified | Self-compile chain through a fixed point on a `windows-11-arm` runner. |
@@ -161,7 +161,7 @@ krc lc program.kr
 
 ### Self-compilation (350 849 tokens, 220 516 AST nodes, 3 416 912 bytes of source)
 
-The compiler emits binaries for all 8 targets. CI verifies the **bootstrap fixed point (krc3 == krc4) and the full suite natively on Linux x86_64 and Linux ARM64** (**1801 tests**, all passing on this tree). Windows and macOS are exercised on real `windows-latest`, `windows-11-arm` and `macos-14` runners. The **Android** jobs are the weak link: they run PIE ELFs under the **glibc** loader on Linux, never bionic and never a device. See the per-target table for what each one actually ran. Numbers below were re-measured on an AMD Ryzen 9 7900X with the compiler built from this commit — see [`benchmarks/BENCHMARKS.md`](benchmarks/BENCHMARKS.md) for the gcc / rustc comparisons — note that file is a **v2.8.33 run from 2026-07-28** and has not been re-run for v2.10.0 either.
+The compiler emits binaries for all 8 targets. CI verifies the **bootstrap fixed point (krc3 == krc4) and the full suite natively on Linux x86_64 and Linux ARM64** (**1827 tests**, all passing on this tree). Windows and macOS are exercised on real `windows-latest`, `windows-11-arm` and `macos-14` runners. The **Android** jobs are the weak link: they run PIE ELFs under the **glibc** loader on Linux, never bionic and never a device. See the per-target table for what each one actually ran. Numbers below were re-measured on an AMD Ryzen 9 7900X with the compiler built from this commit — see [`benchmarks/BENCHMARKS.md`](benchmarks/BENCHMARKS.md) for the gcc / rustc comparisons — note that file is a **v2.8.33 run from 2026-07-28** and has not been re-run for v2.10.0 either.
 
 | Target | Legacy codegen | IR codegen (default) | IR vs legacy |
 |--------|---------------:|---------------------:|-------------:|
@@ -373,7 +373,7 @@ Compiler intrinsics — no imports needed.
 
 ## Standard Library
 
-55 modules, 736 functions, 12 105 lines in `std/`. The table below covers the
+55 modules, 730 functions, 12 157 lines in `std/`. The table below covers the
 19 general-purpose ones; the other 36 are the bare-metal drivers added for the
 boot work (`vga_text`, `serial`, `uart_16550`, `uart_pl011`, `ps2`, `mouse`,
 `pci`, `pci_core`, `pci_ecam`, `pci_port`, `idt`, `x86`, `ramfb`, `fw_cfg`,
@@ -404,7 +404,7 @@ layer (`sys`, `args`, `win32`) and `apexrift`, and are
 | `std/time.kr` | `time_now`, `time_sleep_ns`, `time_sleep_ms`, `time_elapsed` |
 | `std/log.kr` | `log_set_level`, `log_debug`, `log_info`, `log_warn`, `log_error`, `log_info_kv`, `log_error_int` |
 | `std/math_float.kr` | `sqrt`, `sin`, `cos`, `tan`, `exp`, `log`, `pow`, `floor`, `ceil`, `abs_f`, `fmt_f64`, `fmt_f32`, `f64_pi`, `f64_e` |
-| `std/net.kr` | `net_socket`, `net_bind`, `net_listen`, `net_accept`, `net_connect`, `net_send`, `net_recv`, `net_close`, `net_htons`, `net_htonl`, `net_addr_ipv4` |
+| `std/net.kr` | `net_socket`, `net_bind`, `net_listen`, `net_accept`, `net_connect`, `net_send`, `net_recv`, `net_close`, `net_setsockopt`, `net_htons`, `net_htonl`, `net_addr_ipv4` (Linux, Android, Windows; delegates to `sys.kr`) |
 | `std/sha256.kr` | `sha256_init`, `sha256_update`, `sha256_final`, `sha256_hash` — FIPS 180-4, streaming. **Host-only**: every declaration is `u64`, so it does not compile for riscv32/xtensa. |
 
 Import with `import "std/string.kr"` etc. The compiler searches `~/.local/share/kernrift/` automatically.
@@ -422,7 +422,7 @@ See the [`examples/`](examples/) directory for runnable programs covering every 
 
 ## Architecture
 
-79 323 lines of KernRift across the 26 source files the compiler is built from, plus 55 stdlib modules (12 105 lines). Self-compiles to a 1.22 MB x86_64 native binary in ~0.50 s (IR, default), a 1.03 MB ARM64 binary, or an 8-slice fat binary (BCJ + LZ-Rift compression) in ~3.56 s on an AMD Ryzen 9 7900X. **1801 tests** pass on this tree. Bootstrap fixed point is verified **natively on Linux x86_64, Linux ARM64, and a physical Android ARM64 handset**; Windows and macOS run their own chains on real runners. Android x86_64 is the one target executed only under a glibc loader on Linux. See [`benchmarks/BENCHMARKS.md`](benchmarks/BENCHMARKS.md) for micro-benchmarks vs gcc / rustc and peak-memory numbers (a v2.8.33 run, not re-measured for v2.10.0 either).
+79 323 lines of KernRift across the 26 source files the compiler is built from, plus 55 stdlib modules (12 157 lines). Self-compiles to a 1.22 MB x86_64 native binary in ~0.50 s (IR, default), a 1.03 MB ARM64 binary, or an 8-slice fat binary (BCJ + LZ-Rift compression) in ~3.56 s on an AMD Ryzen 9 7900X. **1827 tests** pass on this tree. Bootstrap fixed point is verified **natively on Linux x86_64, Linux ARM64, and a physical Android ARM64 handset**; Windows and macOS run their own chains on real runners. Android x86_64 is the one target executed only under a glibc loader on Linux. See [`benchmarks/BENCHMARKS.md`](benchmarks/BENCHMARKS.md) for micro-benchmarks vs gcc / rustc and peak-memory numbers (a v2.8.33 run, not re-measured for v2.10.0 either).
 
 | File | Purpose |
 |------|---------|
@@ -442,7 +442,7 @@ See the [`examples/`](examples/) directory for runnable programs covering every 
 | `bcj.kr` | BCJ filters (x86_64 + AArch64) for compression |
 | `format_*.kr` | ELF, Mach-O, PE, AR, KRBO, KrboFat, esp-image, ARX |
 | `runner.kr` | `kr` — fat-binary slice extractor / launcher |
-| `std/*.kr` | Standard library (55 modules, 736 functions, 12 105 lines) |
+| `std/*.kr` | Standard library (55 modules, 730 functions, 12 157 lines) |
 
 ## Bootstrap
 
@@ -461,7 +461,7 @@ a thing works, that column says who watched it work.
 
 | Platform | Compile | Run | Self-host | File I/O | How it is checked |
 |----------|---------|-----|-----------|----------|-------------------|
-| Linux x86_64 | ✅ | ✅ | ✅ | ✅ | CI, native runner; bootstrap fixed point + full 1801-test suite |
+| Linux x86_64 | ✅ | ✅ | ✅ | ✅ | CI, native runner; bootstrap fixed point + full 1827-test suite |
 | Linux ARM64 | ✅ | ✅ | ✅ | ✅ | CI, native ARM64 runner; bootstrap fixed point |
 | Windows x86_64 | ✅ | ✅ | ✅ | ✅ | CI, `windows-latest`; self-compile chain |
 | Windows ARM64 | ✅ | ✅ | ✅ | ✅ | CI, `windows-11-arm`; self-compile chain to fixed point |

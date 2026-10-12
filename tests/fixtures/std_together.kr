@@ -1,0 +1,21 @@
+// portable-syscall-layer Task 12: net.kr, sys.kr, time.kr, alloc.kr and
+// args.kr imported TOGETHER build as the default fat binary (all 8 slices)
+// -- no duplicate function, static or extern between them -- and run.
+import "../../std/net.kr"
+import "../../std/sys.kr"
+import "../../std/time.kr"
+import "../../std/alloc.kr"
+import "../../std/args.kr"
+
+fn main() -> uint32 {
+    uint64 t0 = time_now()
+    uint64 a = arena_new(64)
+    if arena_alloc(a, 16) == 0 { return 2 }
+    uint64 s = net_socket(2, 1, 0)
+    if s >= 0x8000000000000000 { return 3 }
+    net_close(s)
+    if sys_argc() == 0 { return 4 }
+    if time_elapsed(t0) > 60000000000 { return 5 }
+    file_write(1, "OK\n", 3)
+    return 0
+}

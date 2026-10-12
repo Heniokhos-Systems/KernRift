@@ -1,0 +1,19 @@
+// std/net.kr on ApexRift none (os 4): net.kr delegates to sys_*, whose none
+// arm is -ENOSYS, so a consumer BUILDS with --target=none on both arches (it
+// used to be refused at compile time: syscall_raw on none) and every socket
+// call reports -ENOSYS (-38) at run time. Never run here (there is no OS).
+import "../../std/net.kr"
+
+fn main() -> uint32 {
+    uint64 s = net_socket(2, 1, 0)
+    if s != 0 - 38 { return 1 }
+    if net_bind(s, 0, 16) != 0 - 38 { return 2 }
+    if net_listen(s, 1) != 0 - 38 { return 3 }
+    if net_accept(s) != 0 - 38 { return 4 }
+    if net_connect(s, 0, 16) != 0 - 38 { return 5 }
+    if net_send(s, 0, 0) != 0 - 38 { return 6 }
+    if net_recv(s, 0, 0) != 0 - 38 { return 7 }
+    if net_setsockopt(s, 1, 2, 0, 4) != 0 - 38 { return 8 }
+    net_close(s)
+    return 0
+}

@@ -1,0 +1,25 @@
+// std/time.kr (portable-syscall-layer Task 12): the Windows sleep converts
+// nanoseconds to Sleep()'s DWORD of milliseconds with _kr_time_ms_of_ns --
+// pure arithmetic, so it is pinned here on every host. Sub-millisecond
+// requests round UP (a sleep never ends before it was asked to), and the
+// result is clamped to 0xFFFFFFFE: 0xFFFFFFFF is INFINITE to Sleep, so a long
+// but finite request must never become "sleep forever". Exit 0 = all checks.
+import "../../std/time.kr"
+
+fn main() -> uint32 {
+    if _kr_time_ms_of_ns(0) != 0 { return 2 }
+    if _kr_time_ms_of_ns(1) != 1 { return 3 }
+    if _kr_time_ms_of_ns(999999) != 1 { return 4 }
+    if _kr_time_ms_of_ns(1000000) != 1 { return 5 }
+    if _kr_time_ms_of_ns(1000001) != 2 { return 6 }
+    if _kr_time_ms_of_ns(20000000) != 20 { return 7 }
+    // the largest finite DWORD, exactly
+    if _kr_time_ms_of_ns(4294967294000000) != 0xFFFFFFFE { return 8 }
+    // one nanosecond more rounds up to 0xFFFFFFFF = INFINITE: clamped
+    if _kr_time_ms_of_ns(4294967294000001) != 0xFFFFFFFE { return 9 }
+    if _kr_time_ms_of_ns(4294967295000000) != 0xFFFFFFFE { return 10 }
+    if _kr_time_ms_of_ns(4294967296000000) != 0xFFFFFFFE { return 11 }
+    // the top of u64: no overflow in the round-up
+    if _kr_time_ms_of_ns(0xFFFFFFFFFFFFFFFF) != 0xFFFFFFFE { return 12 }
+    return 0
+}

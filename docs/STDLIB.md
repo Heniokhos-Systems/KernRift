@@ -1,7 +1,7 @@
 # KernRift Standard Library Reference
 
-The standard library lives in `std/*.kr` — **55 modules, 736 functions**. This
-document covers the **19 general-purpose modules** in the index below (313 of
+The standard library lives in `std/*.kr` — **55 modules, 730 functions**. This
+document covers the **19 general-purpose modules** in the index below (307 of
 those functions). The other **36 modules (423 functions) are not documented
 here** — read their source directly. They fall into four groups:
 
@@ -73,10 +73,10 @@ nothing to return; `0` is *not* distinguishable from a stored zero.
 | [`std/math_float.kr`](#stdmath_floatkr--floating-point-math) | f64 trig/exp/log/pow approximations + float formatting |
 | [`std/mem.kr`](#stdmemkr--memory-operations) | realloc, aligned alloc, memcmp, memzero, memmove |
 | [`std/memfast.kr`](#stdmemfastkr--block-memory-operations) | Word-sized block copy/fill (32/64-bit units) |
-| [`std/net.kr`](#stdnetkr--networking) | TCP/UDP socket syscall wrappers (Linux) |
+| [`std/net.kr`](#stdnetkr--networking) | TCP/UDP sockets on Linux, Android and Windows (delegates to `sys.kr`) |
 | [`std/sha256.kr`](#stdsha256kr--sha-256) | SHA-256 over a buffer, incremental context, hex digest |
 | [`std/string.kr`](#stdstringkr--strings) | The big one: search, slicing, case, split/join, UTF-8, string builder, char predicates |
-| [`std/time.kr`](#stdtimekr--time) | Monotonic clock and sleep (Linux) |
+| [`std/time.kr`](#stdtimekr--time) | Monotonic clock and sleep (Linux, Android, Windows) |
 | [`std/vec.kr`](#stdveckr--dynamic-array) | Growable array of u64 |
 | [`std/widget.kr`](#stdwidgetkr--ui-widgets) | Framebuffer widget toolkit: panel, label, button, progress, textfield |
 
@@ -85,8 +85,12 @@ nothing to return; `0` is *not* distinguishable from a stored zero.
 ## `std/alloc.kr` — Allocators
 
 Three managed allocators over the `alloc`/`dealloc` built-ins. All place
-a `PROT_NONE` guard page after the slab (via `syscall_raw(10, …)` —
-mprotect; Linux x86_64 only in V1, a no-op elsewhere). All abort with a
+a no-access guard page after the slab: `mprotect(PROT_NONE)` by syscall
+number on Linux, Android and macOS (the number is verified at run time by
+`alloc_probe()`; a platform where it does not behave like mprotect runs
+unguarded), `VirtualProtect(PAGE_NOACCESS)` on Windows (4 KiB pages, no
+probe), and none on ApexRift bare metal (os 4: unguarded, header says so).
+A guard the OS refuses is fatal (message + `exit(1)`). All abort with a
 stderr message + `exit(1)` on exhaustion (Pattern 3) and print leak
 warnings at destroy time. `*_stats` functions use KernRift tuple
 returns: `(u64 a, u64 b) = arena_stats(h)`.
@@ -454,10 +458,12 @@ Addresses should be suitably aligned.
 > the repo source. If your *installed* copy still has the old line,
 > re-run `make install` (or the std install step) to sync it.
 
-Raw socket syscall wrappers, Linux only (selects x86_64 vs ARM64/Android
-syscall numbers via `get_arch_id()`). All wrappers return the raw
-syscall result — check failures with `is_errno`/`get_errno` from
-`std/io.kr` (Pattern 2).
+Socket wrappers that delegate to the portable layer in `std/sys.kr` (one
+implementation): raw syscalls on Linux/Android, Winsock on Windows (no
+Win32 name is injected into the importer), `-ENOSYS` (38) on macOS in v1
+and on ApexRift bare metal. Results are a socket/byte count or −errno
+(Linux numbering on every OS) — check failures with
+`is_errno`/`get_errno` from `std/io.kr` (Pattern 2).
 
 | Signature | Description |
 |---|---|
@@ -466,19 +472,17 @@ syscall result — check failures with `is_errno`/`get_errno` from
 | `fn net_listen(u64 fd, u64 backlog) -> u64` | `listen()`. |
 | `fn net_accept(u64 fd) -> u64` | `accept()` — returns new connection fd. |
 | `fn net_connect(u64 fd, u64 addr, u64 addr_len) -> u64` | `connect()`. |
-| `fn net_send(u64 fd, u64 buf, u64 len) -> u64` | `sendto()` without address — bytes sent. |
-| `fn net_recv(u64 fd, u64 buf, u64 len) -> u64` | `recvfrom()` without address — bytes received. |
-| `fn net_close(u64 fd)` | `close()`. |
-| `fn net_setsockopt(u64 fd, u64 level, u64 optname, u64 optval, u64 optlen) -> u64` | `setsockopt()`. |
+| `fn net_send(u64 fd, u64 buf, u64 len) -> u64` | `sys_send` — bytes sent. A peer that closed gives −EPIPE (Linux: `MSG_NOSIGNAL`, no SIGPIPE); a non-socket fd (a pipe) is written to. |
+| `fn net_recv(u64 fd, u64 buf, u64 len) -> u64` | `sys_recv` — bytes received, 0 at EOF. |
+| `fn net_close(u64 fd)` | `sys_sock_close`. |
+| `fn net_setsockopt(u64 fd, u64 level, u64 optname, u64 optval, u64 optlen) -> u64` | `sys_setsockopt` — Linux option numbers; Windows translates `SO_REUSEADDR` and `SO_RCVTIMEO` only. |
 | `fn net_htons(u64 port) -> u64` | Byte-swap a 16-bit port to network order. |
 | `fn net_addr_ipv4(u64 ip, u64 port) -> u64` | Build a 16-byte `sockaddr_in` (`ip` packed host-order, e.g. `0x7F000001`). Allocates; caller frees. |
 | `fn net_addr_free(u64 addr)` | Free a `net_addr_ipv4` buffer (`dealloc(addr)`). |
 
-Internal helpers: `_net_nr_socket()`, `_net_nr_bind()`,
-`_net_nr_listen()`, `_net_nr_accept()`, `_net_nr_connect()`,
-`_net_nr_sendto()`, `_net_nr_recvfrom()`, `_net_nr_close()`,
-`_net_nr_setsockopt()` — each `() -> u64`, returning the per-arch
-syscall number.
+Importing `net.kr` also imports `sys.kr` (and `win32.kr`), so the
+`sys_*` API is visible too. The old per-arch `_net_nr_*()` helpers are
+gone: the numbers live in `sys.kr`.
 
 ---
 
@@ -659,13 +663,19 @@ Each takes a byte value (0–255) and returns 0/1; non-ASCII input → 0.
 
 ## `std/time.kr` — Time
 
-Monotonic clock and sleep via raw syscalls (Linux x86_64 / ARM64 /
-Android, selected by `get_arch_id()`).
+Monotonic clock and sleep. Linux/Android: raw syscalls selected by
+`get_arch_id()` (macOS reaches the same arm with the same numbers —
+unassessed). Windows: the `time_ns` builtin (QueryPerformanceCounter) and
+`Sleep(ms)` — nanoseconds rounded **up** to ms, clamped to `0xFFFFFFFE`
+(`0xFFFFFFFF` is INFINITE), re-sleeping until the full time has passed;
+expect up to one timer tick (~15.6 ms) more than asked. ApexRift bare
+metal: the `time_ns` builtin, so it needs a clock supplied with
+`@builtin_override`.
 
 | Signature | Description |
 |---|---|
-| `fn time_now() -> u64` | Monotonic time in nanoseconds (`clock_gettime(CLOCK_MONOTONIC)`). |
-| `fn time_sleep_ns(u64 ns)` | Sleep for `ns` nanoseconds (`nanosleep`). |
+| `fn time_now() -> u64` | Monotonic time in nanoseconds (`clock_gettime(CLOCK_MONOTONIC)`; Windows: QPC) — the same clock as `time_ns()`. |
+| `fn time_sleep_ns(u64 ns)` | Sleep for at least `ns` nanoseconds (`nanosleep`; Windows `Sleep`). |
 | `fn time_sleep_ms(u64 ms)` | Sleep for `ms` milliseconds. |
 | `fn time_elapsed(u64 start) -> u64` | Nanoseconds since a `time_now()` value. |
 

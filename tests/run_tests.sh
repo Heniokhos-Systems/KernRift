@@ -22338,18 +22338,18 @@ fn main() {
     exit(0)
 }' 0
 
-# Windows has no syscall mprotect at all -- a guard there would have to go
-# through VirtualProtect -- so alloc_mprotect_nr() returns 0 for it. That
-# must mean "constructs unguarded, and says so in the header", NOT "every
-# arena/pool/heap aborts on a supported platform". The two events are
+# A platform with NO guard mechanism -- ApexRift none (os 4), and a Unix whose
+# mprotect fails alloc_probe()'s identity check -- is alloc_guard_state 2.
+# That must mean "constructs unguarded, and says so in the header", NOT
+# "every arena/pool/heap aborts on a supported platform". The two events are
 # different: a platform with no guard mechanism is not a guard mechanism
 # that failed, and only the second is a reason to exit(1).
 #
-# Forcing alloc_guard_state to 2 drives exactly the branch Windows takes,
-# on a host that can actually execute it. It is the Windows logic, not the
-# Windows ABI -- no Windows machine ran this -- but it is the half that was
-# broken, and the PE binaries are additionally exercised by
-# tests/smoke/alloc_guard.kr under the cross-platform workflow.
+# Forcing alloc_guard_state to 2 drives exactly that branch on a host that
+# can execute it. (Windows used to take it too; since portable-syscall-layer
+# Task 12 Windows guards with VirtualProtect -- see the Task 12 rows and
+# tests/smoke/alloc_guard.kr, which now wants a guard there. none's own
+# state 2 is run by std_none_runs_x86_64.)
 run_test "alloc_unguarded_platform_still_allocates" 'import "std/alloc.kr"
 fn main() {
     alloc_guard_state = 2
@@ -28294,6 +28294,188 @@ t10_row net_loopback_x86_64 x86_64 net_loopback "OK" 0
 t10_row net_loopback_arm64 arm64 net_loopback "OK" 0
 t10_row time_monotonic_and_sleep_x86_64 x86_64 time_basic "OK" 0
 t10_row time_monotonic_and_sleep_arm64 arm64 time_basic "OK" 0
+
+# --- Task 12, Windows and namespace rows (spec C5 per file) -----------------
+# Written FAILING before the rewrite (net.kr/time.kr/alloc.kr had no Windows
+# arm: every Windows build of an importer was refused at a syscall_raw). Now:
+#   net.kr delegates every socket function to sys_* in ALL arms;
+#   time.kr's Windows arm is the time_ns builtin (QPC) + Sleep(ms), ns rounded
+#     UP to ms and clamped to 0xFFFFFFFE (0xFFFFFFFF = INFINITE), re-sleeping
+#     until the full time has passed (Sleep can wake one tick early);
+#   alloc.kr's Windows guard is VirtualProtect(PAGE_NOACCESS), FALSE fatal.
+# The pure helpers run on every host; the programs run on Linux (x86_64 and
+# arm64 under qemu) and, unchanged, under Wine; arm64 Windows is pinned by
+# decoding its call sites by name.
+t10_row time_ms_of_ns_x86_64 x86_64 time_ms_of_ns "" 0
+t10_row time_ms_of_ns_arm64 arm64 time_ms_of_ns "" 0
+# The guard FAULTS (Linux: SIGSEGV, status 139) -- the Linux reference the
+# Windows run below must match in kind.
+# (The shell's own "Segmentation fault" notice is expected here: discarded.)
+t10_row alloc_guard_fault_x86_64 x86_64 alloc_guard_fault "armed" 139 2> /dev/null
+t10_row alloc_guard_fault_arm64 arm64 alloc_guard_fault "armed" 139 2> /dev/null
+# A guard the OS refuses is fatal: alloc_install_guard reports 0 and the
+# allocators' shared fatal path prints its message and exits 1.
+for T12_P in "alloc_guard_refused_is_fatal_x86_64 x86_64" "alloc_guard_refused_is_fatal_arm64 arm64"; do
+    set -- $T12_P
+    TOTAL=$((TOTAL + 1))
+    if [ "$2" = "arm64" ] && [ -z "$T10_QEMU" ]; then t10_skip "$1" "no qemu-aarch64-static"; continue; fi
+    if ! t10_build "$2" alloc_guard_false; then t10_bad "$1" "build failed: $(grep -m1 'error' "$T10_D/alloc_guard_false-$2.log" | cut -c1-140)"; continue; fi
+    chmod +x "$T10_D/alloc_guard_false-$2"
+    if [ "$2" = "arm64" ]; then timeout 60 "$T10_QEMU" "$T10_D/alloc_guard_false-$2" > "$T10_D/out" 2> "$T10_D/err"; T12_RC=$?
+    else timeout 60 "$T10_D/alloc_guard_false-$2" > "$T10_D/out" 2> "$T10_D/err"; T12_RC=$?; fi
+    if [ "$T12_RC" = "1" ] && [ "$(cat "$T10_D/err")" = "arena: mprotect guard page failed" ]; then t10_ok "$1" "rc=1, the fatal message"
+    else t10_bad "$1" "rc=$T12_RC stderr '$(head -c 60 "$T10_D/err")' (want rc 1 + the fatal message; 2 = refusal not reported, 3 = fatal path returned)"; fi
+done
+# net_send to a closed peer: -EPIPE and the process lives (it was SIGPIPE,
+# status 141, while net_send was sendto with flags 0).
+t10_row net_send_epipe_x86_64 x86_64 net_epipe $'peer -32\nsurvived' 0
+t10_row net_send_epipe_arm64 arm64 net_epipe $'peer -32\nsurvived' 0
+# Namespace: net+sys+time+alloc+args imported together, and a program with its
+# own `select`/`send`/`accept` beside net.kr, build as the DEFAULT fat binary
+# (all 8 slices) -- and run on Linux.
+for T12_F in std_together net_user_names; do
+    TOTAL=$((TOTAL + 1))
+    if $T10_KRC "$T10_FX/$T12_F.kr" -o "$T10_D/$T12_F.krbo" > "$T10_D/w.log" 2>&1; then
+        t10_ok "${T12_F}_builds_default_fat" "8 slices"
+    else
+        t10_bad "${T12_F}_builds_default_fat" "$(grep -m1 error "$T10_D/w.log" | cut -c1-160)"
+    fi
+done
+t10_row std_together_runs_x86_64 x86_64 std_together "OK" 0
+t10_row net_user_names_x86_64 x86_64 net_user_names "OK" 0
+t10_row net_user_names_arm64 arm64 net_user_names "OK" 0
+# net.kr is ONE implementation: no syscall_raw, no get_arch_id of its own, and
+# each socket function returns (or, for net_close, makes) its sys_* call.
+TOTAL=$((TOTAL + 1))
+T12_NET=$(grep -v '^ *//' "$DIR/../std/net.kr")
+T12_BAD=""
+printf '%s' "$T12_NET" | grep -q 'syscall_raw\|get_arch_id' && T12_BAD="$T12_BAD raw-syscall-or-arch-id"
+for T12_PAIR in socket:socket bind:bind listen:listen accept:accept connect:connect send:send recv:recv close:sock_close setsockopt:setsockopt; do
+    T12_N=${T12_PAIR%%:*}; T12_S=${T12_PAIR#*:}
+    T12_BODY=$(printf '%s\n' "$T12_NET" | awk -v f="fn net_$T12_N(" 'index($0, f) == 1 { on = 1; next } on && /^}/ { exit } on { print }')
+    T12_LINES=$(printf '%s\n' "$T12_BODY" | grep -c '[^ ]')
+    printf '%s\n' "$T12_BODY" | grep -Eq "^ *(return )?sys_$T12_S\(" && [ "$T12_LINES" = "1" ] || T12_BAD="$T12_BAD net_$T12_N"
+done
+if [ -z "$T12_BAD" ]; then t10_ok net_delegates_to_sys "9 socket functions, one sys_* call each, no syscall_raw"; else t10_bad net_delegates_to_sys "$T12_BAD"; fi
+
+# ApexRift none (os 4): net.kr now BUILDS there (sys_* is -ENOSYS at run
+# time) on both arches; and alloc/time/net RUN as an x86_64 bare-metal image
+# under qemu-system-x86_64 with the services none lacks supplied by
+# @builtin_override (std_none.kr): alloc unguarded (state 2), time on the
+# supplied clock, net -ENOSYS.
+TOTAL=$((TOTAL + 1))
+T12_NB=""
+for T12_A in x86_64 arm64; do
+    $T10_KRC --arch=$T12_A --target=none --emit=image --load-addr=0x400000 --stack-top=0x3F0000 "$T10_FX/net_none.kr" -o "$T10_D/net_none-$T12_A" > "$T10_D/w.log" 2>&1 \
+        || T12_NB="$T12_NB $T12_A:$(grep -m1 error "$T10_D/w.log" | cut -c1-100)"
+done
+if [ -z "$T12_NB" ]; then t10_ok net_builds_on_none "x86_64 + arm64"; else t10_bad net_builds_on_none "$T12_NB"; fi
+TOTAL=$((TOTAL + 1))
+if ! command -v qemu-system-x86_64 > /dev/null 2>&1; then
+    t10_skip std_none_runs_x86_64 "no qemu-system-x86_64"
+elif ! $T10_KRC --arch=x86_64 --target=none --emit=image --stack-top=0x90000 --load-addr=0x400000 "$T10_FX/std_none.kr" -o "$T10_D/std_none.img" > "$T10_D/w.log" 2>&1; then
+    t10_bad std_none_runs_x86_64 "build: $(grep -m1 error "$T10_D/w.log" | cut -c1-140)"
+else
+    rm -f "$T10_D/none.ser"
+    timeout 60 qemu-system-x86_64 -no-reboot -display none -serial "file:$T10_D/none.ser" -kernel "$T10_D/std_none.img" > /dev/null 2>&1 &
+    T12_QP=$!
+    for T12_I in $(seq 1 120); do
+        grep -aq 'NONE OK\|NONE FAIL\|EXIT' "$T10_D/none.ser" 2>/dev/null && break
+        sleep 0.5
+    done
+    kill "$T12_QP" 2>/dev/null; wait "$T12_QP" 2>/dev/null
+    if grep -aq 'NONE OK' "$T10_D/none.ser" 2>/dev/null; then t10_ok std_none_runs_x86_64 "serial: NONE OK"
+    else t10_bad std_none_runs_x86_64 "serial: '$(tr -d '\r' < "$T10_D/none.ser" 2>/dev/null | tr '\n' '|' | head -c 80)'"; fi
+fi
+# time.kr's none arm reads the time_ns builtin, so without a supplied clock
+# the build is refused AT time_ns ("there is no OS clock"), not at a
+# syscall_raw.
+TOTAL=$((TOTAL + 1))
+# (Imports resolve relative to the importer, even a leading /.)
+cat > "$T10_D/time_none.kr" <<KREOF
+import "$(realpath --relative-to="$T10_D" "$DIR/../std")/time.kr"
+fn main() -> uint32 {
+    uint64 t = time_now()
+    time_sleep_ms(1)
+    return t & 1
+}
+KREOF
+T12_O=$($T10_KRC --arch=x86_64 --target=none --emit=image --load-addr=0x400000 --stack-top=0x3F0000 "$T10_D/time_none.kr" -o "$T10_D/time_none" 2>&1); T12_RC=$?
+if [ "$T12_RC" != "0" ] && printf '%s' "$T12_O" | grep -q "'time_ns' is not available on bare metal" && ! printf '%s' "$T12_O" | grep -q syscall_raw; then
+    t10_ok time_none_refused_at_time_ns "no OS clock"
+else
+    t10_bad time_none_refused_at_time_ns "rc=$T12_RC: $(printf '%s' "$T12_O" | grep -m1 error | cut -c1-140)"
+fi
+
+# arm64 Windows: every Winsock / Sleep / VirtualProtect call site, decoded
+# from the image, lands on the IAT entry NAMED for its export, in the same
+# order as the x86_64 slice Wine runs; no call-shaped site targets a non-slot;
+# across the three programs the set is exactly net.kr's Winsock calls plus
+# Sleep and VirtualProtect.
+TOTAL=$((TOTAL + 1))
+T12_WANT="Sleep VirtualProtect WSAGetLastError WSAStartup accept bind closesocket connect getsockname listen recv send setsockopt socket "
+T12_BAD=""; T12_ALL=""
+for T12_F in net_loopback time_basic alloc_guard_fault; do
+    for T12_A in x86_64 arm64; do
+        if ! $T10_KRC --arch=$T12_A --target=windows --emit=pe "$T10_FX/$T12_F.kr" -o "$T10_D/$T12_F-d$T12_A.exe" > "$T10_D/d.log" 2>&1; then
+            T12_BAD="$T12_BAD $T12_F/$T12_A:build"; continue
+        fi
+        pe_calls "$T10_D/$T12_F-d$T12_A.exe" "$T12_A" > "$T10_D/$T12_F-$T12_A.calls"
+        grep -q '^badiat' "$T10_D/$T12_F-$T12_A.calls" && T12_BAD="$T12_BAD $T12_F/$T12_A:badiat"
+        awk '$1 == "iat" && $4 ~ /^(WSA|Sleep$|VirtualProtect$|socket$|connect$|send$|recv$|closesocket$|setsockopt$|shutdown$|bind$|listen$|accept$|select$|getsockname$)/ { print $4 }' \
+            "$T10_D/$T12_F-$T12_A.calls" > "$T10_D/$T12_F-$T12_A.names"
+    done
+    if [ ! -s "$T10_D/$T12_F-arm64.names" ]; then T12_BAD="$T12_BAD $T12_F:no-routed-call-on-arm64"
+    elif ! cmp -s "$T10_D/$T12_F-x86_64.names" "$T10_D/$T12_F-arm64.names"; then
+        T12_BAD="$T12_BAD $T12_F:order($(diff "$T10_D/$T12_F-x86_64.names" "$T10_D/$T12_F-arm64.names" | grep '^[<>]' | head -2 | tr '\n' ' '))"
+    fi
+    T12_ALL="$T12_ALL $(cat "$T10_D/$T12_F-arm64.names" 2>/dev/null | tr '\n' ' ')"
+done
+T12_SET=$(printf '%s\n' $T12_ALL | LC_ALL=C sort -u | tr '\n' ' ')
+[ "$T12_SET" = "$T12_WANT" ] || T12_BAD="$T12_BAD set:'$T12_SET'"
+if [ -z "$T12_BAD" ]; then
+    t10_ok std_windows_arm64_calls_route_by_name "$(printf '%s\n' $T12_ALL | grep -c '') call sites, x86_64 order, $(printf '%s' "$T12_SET" | wc -w) exports"
+else
+    t10_bad std_windows_arm64_calls_route_by_name "$T12_BAD"
+fi
+
+if [ -z "$T10_WINE" ]; then
+    for T10_R in net_loopback_windows_wine time_monotonic_and_sleep_windows_wine time_ms_of_ns_windows_wine alloc_guard_smoke_windows_wine alloc_guard_fault_windows_wine alloc_guard_refused_is_fatal_windows_wine std_together_windows_wine net_user_names_windows_wine; do
+        TOTAL=$((TOTAL + 1)); t10_skip "$T10_R" "no wine; set KR_WINE=<path to wine>"
+    done
+else
+    # t12_wine <row> <source> <want stdout> <want rc> [want stderr]: the
+    # program as a Windows x86_64 executable under Wine.
+    t12_wine() {
+        local row="$1" src="$2" want="$3" wrc="$4" werr="$5" got gerr
+        TOTAL=$((TOTAL + 1))
+        if ! $T10_KRC --arch=x86_64 --target=windows --emit=pe "$src" -o "$T10_D/t12.exe" > "$T10_D/w.log" 2>&1; then
+            t10_bad "$row" "build: $(grep -m1 error "$T10_D/w.log" | cut -c1-120)"; return
+        fi
+        t10_wine "$T10_D/win.out" "$T10_D/win.err" t12.exe; T10_RC=$?
+        got=$(tr -d '\r' < "$T10_D/win.out")
+        gerr=$(tr -d '\r' < "$T10_D/win.err" | grep -v -i 'freetype\|truetype\|or equal\|wineserver: \|^$')
+        if [ "$T10_RC" = "$wrc" ] && [ "$got" = "$want" ] && { [ -z "$werr" ] || [ "$gerr" = "$werr" ]; }; then
+            t10_ok "$row" "rc=$T10_RC$(t10_note)"
+        else
+            t10_bad "$row" "rc=$T10_RC got '$(printf '%s' "$got" | tr '\n' '|' | head -c 40)' want '$want' rc=$wrc; wine output tail: $(t10_errtail)"
+        fi
+    }
+    t12_wine net_loopback_windows_wine "$T10_FX/net_loopback.kr" "OK" 0
+    t12_wine time_monotonic_and_sleep_windows_wine "$T10_FX/time_basic.kr" "OK" 0
+    t12_wine time_ms_of_ns_windows_wine "$T10_FX/time_ms_of_ns.kr" "" 0
+    # The smoke program: arena/pool/heap all construct GUARDED on Windows now.
+    t12_wine alloc_guard_smoke_windows_wine "$DIR/smoke/alloc_guard.kr" "" 42
+    # The guard faults: STATUS_ACCESS_VIOLATION (0xC0000005) ends the process,
+    # which a shell sees as status 5 (the program itself never exits 5).
+    t12_wine alloc_guard_fault_windows_wine "$T10_FX/alloc_guard_fault.kr" "armed" 5
+    t12_wine alloc_guard_refused_is_fatal_windows_wine "$T10_FX/alloc_guard_false.kr" "" 1 "arena: mprotect guard page failed"
+    t12_wine std_together_windows_wine "$T10_FX/std_together.kr" "OK" 0
+    t12_wine net_user_names_windows_wine "$T10_FX/net_user_names.kr" "OK" 0
+    if [ -x "$(dirname "$T10_WINE")/wineserver" ]; then
+        WINEPREFIX="$T10_D/pfx" "$(dirname "$T10_WINE")/wineserver" -w > /dev/null 2>&1
+    fi
+fi
 rm -rf "$T10_D"
 
 # --- Documentation pin 5, PART B (see Part A above) --------------------------

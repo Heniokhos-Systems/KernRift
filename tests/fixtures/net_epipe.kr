@@ -1,0 +1,42 @@
+// std/net.kr (portable-syscall-layer Task 12): net_send to a peer that has
+// closed returns -EPIPE (-32) and the process LIVES. net_send now delegates
+// to sys_send, which is sendto(MSG_NOSIGNAL) on Linux (spec C2, decided
+// 2026-10-12); the old net_send was sendto(flags 0), so the same program died
+// by SIGPIPE (status 141). Prints "peer -32" then "survived".
+import "../../std/net.kr"
+import "../../std/sys.kr"
+
+static u8[16] ne_ga
+static u8[8] ne_len
+static u8[16] ne_buf
+
+fn main() -> uint32 {
+    uint64 ls = net_socket(2, 1, 0)
+    uint64 sa = net_addr_ipv4(0x7F000001, 0)
+    if net_bind(ls, sa, 16) != 0 { return 2 }
+    if net_listen(ls, 4) != 0 { return 3 }
+    store32(ne_len, 16)
+    if sys_getsockname(ls, ne_ga, ne_len) != 0 { return 4 }
+    uint64 port = (load8(ne_ga + 2) << 8) | load8(ne_ga + 3)
+    uint64 cs = net_socket(2, 1, 0)
+    uint64 ca = net_addr_ipv4(0x7F000001, port)
+    if net_connect(cs, ca, 16) != 0 { return 5 }
+    uint64 a = net_accept(ls)
+    if a >= 0x8000000000000000 { return 6 }
+    net_close(a)
+    // The first send after the peer's close is accepted locally; the peer's
+    // RST then makes a later send fail. Keep sending until it does.
+    uint64 r = 0
+    uint64 n = 0
+    while n < 50 {
+        r = net_send(cs, "x", 1)
+        if r >= 0x8000000000000000 { n = 50 }
+        if n < 50 { sys_wait_readable(cs, 10) }
+        n = n + 1
+    }
+    if r == 0 - 32 { file_write(1, "peer -32\n", 9) } else { file_write(1, "peer other\n", 11) }
+    file_write(1, "survived\n", 9)
+    net_close(cs)
+    net_close(ls)
+    return 0
+}

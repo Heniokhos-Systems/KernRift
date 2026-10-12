@@ -1,0 +1,68 @@
+// portable-syscall-layer Task 12: std/alloc.kr, std/time.kr and std/net.kr on
+// ApexRift none (os 4), RUN as an x86_64 bare-metal image under
+// qemu-system-x86_64 (serial on COM1). The program supplies the services bare
+// metal lacks with @builtin_override -- a bump `alloc` over a static pool, a
+// fake `time_ns` that advances 1000 ns per read, an `exit` that reports and
+// halts -- and checks each file's os==4 arm:
+//   alloc: no guard mechanism -> alloc_guard_state 2, arena header [32] = 0
+//          (a state of 1 would reach the guard's none arm, fail, and exit);
+//   time:  time_now() IS time_ns(); time_sleep_ms(1) waits on that clock
+//          until 1 ms of it has passed;
+//   net:   every socket call is -ENOSYS (-38).
+// Prints "NONE OK", or "NONE FAIL <n>" / "EXIT".
+import "../../std/uart_16550.kr"
+import "../../std/alloc.kr"
+import "../../std/time.kr"
+import "../../std/net.kr"
+
+static u8[65536] sn_pool
+static uint64 sn_used = 0
+static uint64 sn_clock = 0
+
+@builtin_override
+fn alloc(uint64 n) -> uint64 {
+    uint64 p = sn_pool + sn_used
+    sn_used = sn_used + ((n + 15) & 0xFFFFFFFFFFFFFFF0)
+    return p
+}
+@builtin_override
+fn dealloc(uint64 p) { }
+@builtin_override
+fn time_ns() -> uint64 {
+    sn_clock = sn_clock + 1000
+    return sn_clock
+}
+@builtin_override
+fn exit(uint64 code) {
+    println_str("EXIT")
+    while 1 == 1 { }
+}
+
+fn sn_fail(uint64 n) -> uint64 {
+    print_str("NONE FAIL ")
+    print(n)
+    println_str("")
+    while 1 == 1 { }
+    return n
+}
+
+fn main() -> uint64 {
+    uart16550_init()
+    uint64 a = arena_new(64)
+    if arena_alloc(a, 16) == 0 { sn_fail(1) }
+    if alloc_guard_state != 2 { sn_fail(2) }
+    if load64(a + 32) != 0 { sn_fail(3) }
+    uint64 c0 = sn_clock
+    uint64 t = time_now()
+    if t != c0 + 1000 { sn_fail(4) }
+    time_sleep_ms(1)
+    if sn_clock - t < 1000000 { sn_fail(5) }
+    if sn_clock - t > 1010000 { sn_fail(6) }
+    uint64 s = net_socket(2, 1, 0)
+    if s != 0 - 38 { sn_fail(7) }
+    if net_send(s, 0, 0) != 0 - 38 { sn_fail(8) }
+    if net_recv(s, 0, 0) != 0 - 38 { sn_fail(9) }
+    println_str("NONE OK")
+    while 1 == 1 { }
+    return 0
+}

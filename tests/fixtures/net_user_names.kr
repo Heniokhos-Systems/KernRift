@@ -1,0 +1,22 @@
+// portable-syscall-layer Task 12 (spec C5 compatibility note): a program that
+// defines its OWN `select`, `send` and `accept` -- the names of Winsock
+// exports -- and imports net.kr builds on every slice and calls its own
+// functions, not the IAT: std declares its Win32 externs only as
+// `_kr_w32_<Export>`, so it injects no Win32 name. net.kr still works beside
+// them. Prints OK.
+import "../../std/net.kr"
+
+fn select(uint64 a, uint64 b) -> uint64 { return a + b + 70 }
+fn send(uint64 a) -> uint64 { return a * 3 }
+fn accept() -> uint64 { return 11 }
+
+fn main() -> uint32 {
+    if select(1, 2) != 73 { return 2 }
+    if send(5) != 15 { return 3 }
+    if accept() != 11 { return 4 }
+    uint64 s = net_socket(2, 1, 0)
+    if s >= 0x8000000000000000 { return 5 }
+    net_close(s)
+    file_write(1, "OK\n", 3)
+    return 0
+}

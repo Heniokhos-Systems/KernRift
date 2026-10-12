@@ -36,11 +36,12 @@ fn main() {
     if load64(hp) != 3 { exit(3) }
     heap_free(h, hp)
 
-    // Guard pages need mprotect, which Windows does not expose as a
-    // syscall — a guard there would have to go through VirtualProtect.
-    // So on Windows the allocators must construct UNguarded and say so,
-    // and everywhere else they must construct guarded and say so. Both
-    // halves are asserted; neither platform is merely skipped.
+    // Every hosted target installs guard pages now: mprotect on Linux,
+    // Android and macOS, VirtualProtect(PAGE_NOACCESS) on Windows (spec C5;
+    // it used to construct UNguarded there, because Windows has no syscall
+    // mprotect). So the allocators must construct GUARDED and say so on
+    // every OS this corpus runs on. (Only ApexRift none, os 4, which no
+    // smoke program targets, is unguarded -- state 2.)
     //
     // The status is read straight out of the headers (arena [32], pool
     // [48], heap [48]) rather than from the new helpers, which keeps this
@@ -50,7 +51,6 @@ fn main() {
     // is pinned down separately, by
     // alloc_page_size_matches_mprotect_alignment in tests/run_tests.sh.
     u64 want = 1
-    if get_target_os() == 2 { want = 0 }
     if load64(a + 32) != want { exit(4) }
     if load64(p + 48) != want { exit(5) }
     if load64(h + 48) != want { exit(6) }

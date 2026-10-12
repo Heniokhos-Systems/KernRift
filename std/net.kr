@@ -1,119 +1,69 @@
 // KernRift Standard Library — Network Operations
 //
-// Raw socket syscalls for TCP/UDP networking (Linux only).
-// Uses get_arch_id() to select the correct syscall numbers:
-//   1 = x86_64 Linux, 2 = ARM64 Linux, 7 = Android ARM64
+// TCP/UDP sockets on every hosted OS. Every socket function DELEGATES to the
+// portable layer in sys.kr (spec C5) -- one implementation, so the per-OS
+// numbers and the Windows translation live in one place:
+//   - Linux / Android: raw syscalls (sys.kr's per-arch table);
+//   - Windows: Winsock through win32.kr's `_kr_w32_` externs (no Win32 name
+//     is injected into the importer: a program's own `send` or `select` still
+//     compiles and is still its own);
+//   - macOS: -ENOSYS (38) in v1 -- unproven, and Linux numbers must never be
+//     inherited there (the old net.kr called them, silently wrong);
+//   - ApexRift none (os 4): -ENOSYS (38) at run time.
+// Results are sys.kr's: a socket or count >= 0, or -errno (as a u64 here).
+// net_send is sys_send: on Linux sendto(MSG_NOSIGNAL), so a send to a closed
+// peer returns -EPIPE (-32) instead of killing the process with SIGPIPE, and a
+// non-socket fd (a pipe) is still written to. net_recv is sys_recv: read(2)
+// on Unix, recv() on Windows.
 
-// --- syscall number helpers ---
+import "sys.kr"
 
-fn _net_nr_socket() -> u64 {
-    u64 aid = get_arch_id()
-    if aid == 2 || aid == 7 { return 198 }
-    return 41
-}
-
-fn _net_nr_bind() -> u64 {
-    u64 aid = get_arch_id()
-    if aid == 2 || aid == 7 { return 200 }
-    return 49
-}
-
-fn _net_nr_listen() -> u64 {
-    u64 aid = get_arch_id()
-    if aid == 2 || aid == 7 { return 201 }
-    return 50
-}
-
-fn _net_nr_accept() -> u64 {
-    u64 aid = get_arch_id()
-    if aid == 2 || aid == 7 { return 202 }
-    return 43
-}
-
-fn _net_nr_connect() -> u64 {
-    u64 aid = get_arch_id()
-    if aid == 2 || aid == 7 { return 203 }
-    return 42
-}
-
-fn _net_nr_sendto() -> u64 {
-    u64 aid = get_arch_id()
-    if aid == 2 || aid == 7 { return 206 }
-    return 44
-}
-
-fn _net_nr_recvfrom() -> u64 {
-    u64 aid = get_arch_id()
-    if aid == 2 || aid == 7 { return 207 }
-    return 45
-}
-
-fn _net_nr_close() -> u64 {
-    u64 aid = get_arch_id()
-    if aid == 2 || aid == 7 { return 57 }
-    return 3
-}
-
-fn _net_nr_setsockopt() -> u64 {
-    u64 aid = get_arch_id()
-    if aid == 2 || aid == 7 { return 208 }
-    return 54
-}
-
-// --- public API ---
+// --- sockets ---
 
 // Create a socket. domain: 2=AF_INET. type: 1=SOCK_STREAM, 2=SOCK_DGRAM
 fn net_socket(u64 domain, u64 sock_type, u64 protocol) -> u64 {
-    u64 nr = _net_nr_socket()
-    return syscall_raw(nr, domain, sock_type, protocol, 0, 0, 0)
+    return sys_socket(domain, sock_type, protocol)
 }
 
 // Bind socket to address
 fn net_bind(u64 fd, u64 addr, u64 addr_len) -> u64 {
-    u64 nr = _net_nr_bind()
-    return syscall_raw(nr, fd, addr, addr_len, 0, 0, 0)
+    return sys_bind(fd, addr, addr_len)
 }
 
 // Listen for connections
 fn net_listen(u64 fd, u64 backlog) -> u64 {
-    u64 nr = _net_nr_listen()
-    return syscall_raw(nr, fd, backlog, 0, 0, 0, 0)
+    return sys_listen(fd, backlog)
 }
 
 // Accept connection (returns new fd)
 fn net_accept(u64 fd) -> u64 {
-    u64 nr = _net_nr_accept()
-    return syscall_raw(nr, fd, 0, 0, 0, 0, 0)
+    return sys_accept(fd)
 }
 
 // Connect to address
 fn net_connect(u64 fd, u64 addr, u64 addr_len) -> u64 {
-    u64 nr = _net_nr_connect()
-    return syscall_raw(nr, fd, addr, addr_len, 0, 0, 0)
+    return sys_connect(fd, addr, addr_len)
 }
 
 // Send data (returns bytes sent)
 fn net_send(u64 fd, u64 buf, u64 len) -> u64 {
-    u64 nr = _net_nr_sendto()
-    return syscall_raw(nr, fd, buf, len, 0, 0, 0)
+    return sys_send(fd, buf, len)
 }
 
 // Receive data (returns bytes received)
 fn net_recv(u64 fd, u64 buf, u64 len) -> u64 {
-    u64 nr = _net_nr_recvfrom()
-    return syscall_raw(nr, fd, buf, len, 0, 0, 0)
+    return sys_recv(fd, buf, len)
 }
 
 // Close socket
 fn net_close(u64 fd) {
-    u64 nr = _net_nr_close()
-    syscall_raw(nr, fd, 0, 0, 0, 0, 0)
+    sys_sock_close(fd)
 }
 
-// Set socket option
+// Set socket option (Linux option numbers; see sys_setsockopt for the subset
+// Windows translates)
 fn net_setsockopt(u64 fd, u64 level, u64 optname, u64 optval, u64 optlen) -> u64 {
-    u64 nr = _net_nr_setsockopt()
-    return syscall_raw(nr, fd, level, optname, optval, optlen, 0)
+    return sys_setsockopt(fd, level, optname, optval, optlen)
 }
 
 // --- address helpers ---

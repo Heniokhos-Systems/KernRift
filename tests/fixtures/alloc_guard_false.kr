@@ -1,0 +1,15 @@
+// std/alloc.kr (portable-syscall-layer Task 12): a guard the OS REFUSES is
+// fatal. Address 0x1000 is never mapped (Linux: mprotect says ENOMEM;
+// Windows: the low 64 KiB is never committed, VirtualProtect returns FALSE),
+// so alloc_install_guard must report failure (0), and the allocators' shared
+// fatal path must then print its message and exit 1 -- exactly what
+// arena_new/pool_new/heap_new do when their own guard is refused. Exit 2 = the
+// refusal was not reported; 3 = the fatal path returned.
+import "../../std/alloc.kr"
+
+fn main() -> uint32 {
+    if alloc_guard_supported() != 1 { return 4 }
+    if alloc_install_guard(0x1000) != 0 { return 2 }
+    _kr_alloc_guard_or_die(0x1000, "arena: mprotect guard page failed\n", 34)
+    return 3
+}

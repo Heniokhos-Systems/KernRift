@@ -1,38 +1,91 @@
 // KernRift Standard Library — Time Operations
 //
-// Monotonic clock and sleep using raw syscalls (Linux only).
-// Uses get_arch_id() to select the correct syscall numbers:
-//   1 = x86_64 Linux, 2 = ARM64 Linux, 7 = Android ARM64
+// Monotonic clock and sleeps, on every hosted OS (spec C5). Every OS split is
+// the canonical literal chain
+//     if get_target_os() == 2 { windows } else if get_target_os() == 4 { none } else { unix }
+// so the compiler prunes the arms a target cannot run (a Windows build never
+// sees a syscall_raw, a Linux build never sees a Win32 extern).
+//
+//   - Linux / Android (the `else` arm): raw syscalls, numbers by get_arch_id():
+//     clock_gettime(CLOCK_MONOTONIC) 228 / 113 and nanosleep 35 / 101 on
+//     x86_64 / arm64. macOS reaches this arm too with the SAME numbers --
+//     UNASSESSED: macOS is out of scope for proof in v1 (its BSD table differs;
+//     nothing here has run on a Mac).
+//   - Windows: time_now is the time_ns builtin (QueryPerformanceCounter, the
+//     same clock); sleeps call Sleep(ms) from win32.kr. Sleep takes a DWORD of
+//     MILLISECONDS: the request is rounded UP (a sleep never ends before it
+//     was asked to) and clamped to 0xFFFFFFFE, because 0xFFFFFFFF is INFINITE
+//     -- see _kr_time_ms_of_ns. Sleep's granularity is the system timer tick
+//     (~15.6 ms by default), and a request between one and two ticks may wake
+//     after ONE tick, i.e. early; so the sleep re-checks the clock and sleeps
+//     the remainder until the full time has passed. Expect up to ~one tick
+//     more than asked.
+//   - ApexRift none (os 4): time_now is the time_ns builtin, which keeps its
+//     loud, located compile-time refusal on none ("there is no OS clock")
+//     unless the program supplies time_ns with @builtin_override; the sleeps
+//     wait on that same clock. So this file still does not build on none
+//     without a clock -- now refused at time_ns rather than at syscall_raw.
+
+import "win32.kr"
+
+// Nanoseconds -> a DWORD of milliseconds for Sleep(): rounded UP, clamped to
+// 0xFFFFFFFE (0xFFFFFFFF would be INFINITE). Pure arithmetic, so it is tested
+// on every host. No overflow: the division happens before the +1.
+fn _kr_time_ms_of_ns(u64 ns) -> u64 {
+    u64 ms = ns / 1000000
+    if (ns % 1000000) != 0 { ms = ms + 1 }
+    if ms > 0xFFFFFFFE { return 0xFFFFFFFE }
+    return ms
+}
 
 // Returns monotonic time in nanoseconds
 fn time_now() -> u64 {
-    u64 buf = alloc(16)  // timespec: {tv_sec: u64, tv_nsec: u64}
-    u64 nr = 228  // clock_gettime on x86_64
-    u64 aid = get_arch_id()
-    if aid == 2 || aid == 7 { nr = 113 }  // ARM64
-    syscall_raw(nr, 1, buf, 0, 0, 0, 0)  // CLOCK_MONOTONIC = 1
-    u64 sec = 0
-    sec = load64(buf)
-    u64 nsec = 0
-    u64 bp8 = buf + 8
-    nsec = load64(bp8)
-    dealloc(buf)
-    return sec * 1000000000 + nsec
+    if get_target_os() == 2 {
+        return time_ns()
+    } else if get_target_os() == 4 {
+        return time_ns()
+    } else {
+        u64 buf = alloc(16)  // timespec: {tv_sec: u64, tv_nsec: u64}
+        u64 nr = 228  // clock_gettime on x86_64
+        u64 aid = get_arch_id()
+        if aid == 2 || aid == 7 { nr = 113 }  // ARM64
+        syscall_raw(nr, 1, buf, 0, 0, 0, 0)  // CLOCK_MONOTONIC = 1
+        u64 sec = 0
+        sec = load64(buf)
+        u64 nsec = 0
+        u64 bp8 = buf + 8
+        nsec = load64(bp8)
+        dealloc(buf)
+        return sec * 1000000000 + nsec
+    }
 }
 
 // Sleep for ns nanoseconds
 fn time_sleep_ns(u64 ns) {
-    u64 buf = alloc(16)  // timespec: {tv_sec: u64, tv_nsec: u64}
-    u64 sec = ns / 1000000000
-    u64 nsec = ns - sec * 1000000000
-    store64(buf, sec)
-    u64 bp8 = buf + 8
-    store64(bp8, nsec)
-    u64 nr = 35  // nanosleep on x86_64
-    u64 aid = get_arch_id()
-    if aid == 2 || aid == 7 { nr = 101 }  // ARM64
-    syscall_raw(nr, buf, 0, 0, 0, 0, 0)
-    dealloc(buf)
+    if get_target_os() == 2 {
+        u64 start = time_ns()
+        _kr_w32_Sleep(_kr_time_ms_of_ns(ns))
+        u64 done = time_ns() - start
+        while done < ns {
+            _kr_w32_Sleep(_kr_time_ms_of_ns(ns - done))
+            done = time_ns() - start
+        }
+    } else if get_target_os() == 4 {
+        u64 start = time_ns()
+        while time_ns() - start < ns { }
+    } else {
+        u64 buf = alloc(16)  // timespec: {tv_sec: u64, tv_nsec: u64}
+        u64 sec = ns / 1000000000
+        u64 nsec = ns - sec * 1000000000
+        store64(buf, sec)
+        u64 bp8 = buf + 8
+        store64(bp8, nsec)
+        u64 nr = 35  // nanosleep on x86_64
+        u64 aid = get_arch_id()
+        if aid == 2 || aid == 7 { nr = 101 }  // ARM64
+        syscall_raw(nr, buf, 0, 0, 0, 0, 0)
+        dealloc(buf)
+    }
 }
 
 // Sleep for ms milliseconds
