@@ -1024,6 +1024,116 @@ fn parser_init(uint64 tokens, uint64 count_val) {
     p_err_count = 0
     p_err_reported = 0
     p_last_err_pos = 0xFFFFFFFF
+    p_alias_types()
+}
+
+// ---------------------------------------------------------------------------
+// The type aliases `byte` (= uint8) and `addr` (= uint64)
+// ---------------------------------------------------------------------------
+//
+// LANGUAGE.md lists `byte` and `addr` as aliases of uint8 and uint64, but they
+// are NOT keywords: `addr` is an everyday variable name (std/uart_pl011.kr,
+// most of ApexRift), so the lexer leaves both as identifiers. Before any parse
+// this pass finds the ones written in a TYPE position and rewrites their token
+// kind to KwUint8 (80) / KwUint64 (83) -- exactly what `u8` / `u64` lex to --
+// so every later stage (sizeof, struct layout, locals, statics, params,
+// returns, casts, @shared's type compare) sees the keyword and nothing else
+// has to know about the alias. Everywhere else they stay identifiers.
+//
+// A `byte`/`addr` token is a TYPE when:
+//   - it follows `as` (a cast), `) ->` (a return type), `sizeof(`, or
+//     `type X =` (a type alias);
+//   - it is the T of a slice parameter `[T] name` (after `(` or `,`);
+//   - it is the type of a device register (`NAME at <int> : T`);
+//   - it is followed, ON THE SAME LINE, by a name (`byte x`, a local, static,
+//     field, parameter or tuple-destructure slot) or by `[...]` and then a
+//     name (`byte[4] buf`) -- unless the token before it expects an
+//     expression operand (`=`, an operator, `return`, `if`, `while`, `in`,
+//     `match`, `=>`, `:`, `.`), which makes it a value, and unless the name
+//     after it is `as` (`*(addr as uint32)`: addr is the value being cast).
+// Before this pass both were unknown names: accepted as 8-byte types in a
+// static, a struct field or a parameter, and refused as a local.
+
+// Exact text match of token idx against a literal (the lexer's source).
+fn p_tok_is(uint64 idx, uint64 txt, uint64 n) -> uint64 {
+    if tok_len_at(idx) != n { return 0 }
+    uint64 st = tok_start_at(idx)
+    uint64 i = 0
+    while i < n {
+        if load8(src_ptr + st + i) != load8(txt + i) { return 0 }
+        i = i + 1
+    }
+    return 1
+}
+
+// 1 when a token of this kind, written just before `byte`/`addr`, makes it an
+// expression operand (a value) rather than a type.
+fn p_alias_value_ctx(uint64 k) -> uint64 {
+    if k == 34 { return 1 }                     // =
+    if k >= 45 && k <= 54 { return 1 }          // op-assign
+    if k >= 22 && k <= 27 { return 1 }          // * & | ^ ~ !
+    if k >= 30 && k <= 33 { return 1 }          // + - / %
+    if k >= 35 && k <= 44 { return 1 }          // comparisons, && || << >>
+    if k == 17 || k == 19 || k == 28 || k == 29 { return 1 }   // . : ? =>
+    if k == 61 || k == 62 || k == 64 || k == 66 || k == 88 { return 1 }  // return if while in match
+    return 0
+}
+
+// The kind `byte`/`addr` at idx should take, or 0 when it is not one of them.
+fn p_alias_kind(uint64 idx) -> uint64 {
+    if tok_kind_at(idx) != 1 { return 0 }
+    if p_tok_is(idx, "byte", 4) != 0 { return 80 }
+    if p_tok_is(idx, "addr", 4) != 0 { return 83 }
+    return 0
+}
+
+fn p_alias_is_type(uint64 i) -> uint64 {
+    uint64 pk = 12                              // as if after `{`: statement start
+    if i > 0 { pk = tok_kind_at(i - 1) }
+    uint64 nk = 0
+    if i + 1 < p_tok_count { nk = tok_kind_at(i + 1) }
+    uint64 ln = tok_line_at(i)
+    if i > 0 && pk == 1 && p_tok_is(i - 1, "as", 2) != 0 { return 1 }
+    if i > 1 && pk == 20 && tok_kind_at(i - 2) == 11 { return 1 }           // ) -> T
+    if i > 1 && pk == 10 && tok_kind_at(i - 2) == 97 { return 1 }           // sizeof(T
+    if i > 2 && pk == 34 && tok_kind_at(i - 3) == 89 { return 1 }           // type X = T
+    if i > 1 && pk == 14 && nk == 15 && i + 2 < p_tok_count {               // ([T] name / , [T] name
+        uint64 bk = tok_kind_at(i - 2)
+        if (bk == 10 || bk == 16) && tok_kind_at(i + 2) == 1 { return 1 }
+    }
+    if i > 2 && pk == 19 && tok_kind_at(i - 2) == 2 && tok_kind_at(i - 3) == 93 { return 1 }  // at N : T
+    if p_alias_value_ctx(pk) != 0 { return 0 }
+    if nk == 1 && tok_line_at(i + 1) == ln && p_tok_is(i + 1, "as", 2) == 0 { return 1 }
+    if nk == 14 {
+        uint64 j = i + 1
+        uint64 depth = 0
+        while j < p_tok_count {
+            uint64 jk = tok_kind_at(j)
+            if jk == 14 { depth = depth + 1 }
+            if jk == 15 {
+                depth = depth - 1
+                if depth == 0 { break }
+            }
+            if jk == 0 { return 0 }
+            j = j + 1
+        }
+        if j + 1 < p_tok_count && tok_kind_at(j + 1) == 1 && tok_line_at(j + 1) == ln { return 1 }
+    }
+    return 0
+}
+
+fn p_alias_types() {
+    uint64 i = 0
+    while i < p_tok_count {
+        uint64 ak = p_alias_kind(i)
+        if ak != 0 {
+            if p_alias_is_type(i) != 0 {
+                uint32 ak32 = ak
+                store32(p_tok_buf + i * 16, ak32)
+            }
+        }
+        i = i + 1
+    }
 }
 
 // ---------------------------------------------------------------------------

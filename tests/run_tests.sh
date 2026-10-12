@@ -26964,6 +26964,38 @@ type TB = uint64'
 # refused exactly as `u64[1] b` against `u64 b` is.
 dup_type_row "dup_shared_struct_array_syntax_refused" 'static P[1] b' 'static P b' "array size" \
     'struct P { uint64 x }'
+# `byte` and `addr` ARE uint8 and uint64 (LANGUAGE.md section 2's alias
+# column), so a @shared pair spelled one way in one file and the other way in
+# the next is ONE variable -- both orders, scalar and array. (They were
+# unknown names compared by spelling, and refused, until they became real
+# aliases.) A genuinely different width stays refused: the keyword row above
+# (uint32 vs uint64), and byte vs uint16 / addr vs uint32 here.
+dup_alias_merge() {   # <row> <a.kr type> <m.kr type>
+    dup_put a.kr "@shared
+static $2 v = 5
+fn a_get() -> uint64 { return v }"
+    dup_put m.kr "import \"a.kr\"
+@shared
+static $3 v
+fn main() -> uint64 { v = v + 1
+    return a_get() * 10 + v }"
+    dup_run "$1" 66
+}
+dup_alias_merge "dup_shared_byte_then_uint8_merges" byte uint8
+dup_alias_merge "dup_shared_uint8_then_byte_merges" uint8 byte
+dup_alias_merge "dup_shared_addr_then_uint64_merges" addr uint64
+dup_alias_merge "dup_shared_uint64_then_addr_merges" uint64 addr
+dup_put a.kr '@shared
+static byte[4] v
+fn a_get() -> uint64 { return v[2] }'
+dup_put m.kr 'import "a.kr"
+@shared
+static uint8[4] v
+fn main() -> uint64 { v[2] = 7
+    return a_get() }'
+dup_run "dup_shared_byte_array_uint8_array_merges" 7
+dup_type_row "dup_shared_byte_vs_uint16_refused" 'static byte b' 'static uint16 b' "type"
+dup_type_row "dup_shared_addr_vs_uint32_refused" 'static addr b' 'static uint32 b' "type"
 
 # @shared binds to the next declaration; on anything but a static it is refused
 # rather than ignored.
@@ -27218,6 +27250,99 @@ else
 fi
 rm -f "$DUP_D/m.img"
 rm -rf "$DUP_D"
+
+# --- `byte` and `addr` are real type aliases (uint8 / uint64) ---------------
+# tests/fixtures/alias_byte_addr.kr checks sizeof, struct layout, a static
+# byte array's stride, locals, params, returns, pointer-cast widths and a
+# slice of byte -- and that `addr`/`byte` still work as variable, parameter
+# and field NAMES (including `*(addr as uint32)`). Until the parser's alias
+# pass, `byte` was an unknown name: 8 bytes in a struct, array or cast, and
+# refused as a local. Run natively, on arm64 under qemu, and as a Windows PE
+# under Wine.
+ALI_D=$(mktemp -d /tmp/kralias_XXXXXX)
+ALI_FX="$DIR/fixtures/alias_byte_addr.kr"
+ALI_QEMU="$(command -v qemu-aarch64-static || command -v qemu-aarch64 || true)"
+ALI_WINE="${KR_WINE:-$(command -v wine 2>/dev/null || true)}"
+ali_check() {   # <row> <rc> <stdout file>
+    if [ "$2" = "0" ] && [ "$(tr -d '\r' < "$3")" = "OK" ]; then PASS=$((PASS + 1)); echo "  $1: PASS"
+    else FAIL=$((FAIL + 1)); echo "FAIL: $1 (rc=$2 -- the failing check's number -- stdout '$(tr -d '\r' < "$3" | head -c 40)')"; fi
+}
+TOTAL=$((TOTAL + 1))
+if "$DIR/../build/krc2" --arch="$RUN_ARCH" "$ALI_FX" -o "$ALI_D/a" > "$ALI_D/b.log" 2>&1; then
+    "$ALI_D/a" > "$ALI_D/out" 2>/dev/null; ali_check "alias_byte_addr_native_$RUN_ARCH" $? "$ALI_D/out"
+else FAIL=$((FAIL + 1)); echo "FAIL: alias_byte_addr_native_$RUN_ARCH (build: $(grep -m1 error "$ALI_D/b.log"))"; fi
+TOTAL=$((TOTAL + 1))
+if [ "$RUN_ARCH" = "arm64" ]; then
+    PASS=$((PASS + 1)); echo "  alias_byte_addr_arm64_qemu: SKIP (the native row is arm64)"
+elif [ -z "$ALI_QEMU" ]; then
+    PASS=$((PASS + 1)); echo "  alias_byte_addr_arm64_qemu: SKIP (no qemu-aarch64)"
+elif "$DIR/../build/krc2" --arch=arm64 "$ALI_FX" -o "$ALI_D/aa" > "$ALI_D/b.log" 2>&1; then
+    timeout 60 "$ALI_QEMU" "$ALI_D/aa" > "$ALI_D/out" 2>/dev/null; ali_check alias_byte_addr_arm64_qemu $? "$ALI_D/out"
+else FAIL=$((FAIL + 1)); echo "FAIL: alias_byte_addr_arm64_qemu (build: $(grep -m1 error "$ALI_D/b.log"))"; fi
+TOTAL=$((TOTAL + 1))
+if [ -z "$ALI_WINE" ]; then
+    PASS=$((PASS + 1)); echo "  alias_byte_addr_windows_wine: SKIP (no wine; set KR_WINE=<path to wine>)"
+elif "$DIR/../build/krc2" --arch=x86_64 --target=windows --emit=pe "$ALI_FX" -o "$ALI_D/a.exe" > "$ALI_D/b.log" 2>&1; then
+    mkdir -p "$ALI_D/pfx"
+    for ALI_T in 1 2; do
+        (cd "$ALI_D" && WINEPREFIX="$ALI_D/pfx" WINEDEBUG=-all timeout 300 "$ALI_WINE" a.exe > "$ALI_D/out" 2>/dev/null); ALI_RC=$?
+        # status 53 with no output = Wine's fresh-prefix kernel32 load race
+        # (see t10_wine); one retry on a new prefix, anything else is final.
+        if [ "$ALI_RC" = "53" ] && [ ! -s "$ALI_D/out" ] && [ "$ALI_T" = "1" ]; then
+            WINEPREFIX="$ALI_D/pfx" "$(dirname "$ALI_WINE")/wineserver" -k > /dev/null 2>&1
+            rm -rf "$ALI_D/pfx"; mkdir -p "$ALI_D/pfx"; continue
+        fi
+        break
+    done
+    ali_check alias_byte_addr_windows_wine "$ALI_RC" "$ALI_D/out"
+    WINEPREFIX="$ALI_D/pfx" "$(dirname "$ALI_WINE")/wineserver" -k > /dev/null 2>&1
+else FAIL=$((FAIL + 1)); echo "FAIL: alias_byte_addr_windows_wine (build: $(grep -m1 error "$ALI_D/b.log"))"; fi
+# A return type and a slice element type have no runtime width on hosted
+# targets (a `-> u8` return is not truncated; `[u8] d` and `[foo] d` index
+# alike), so the one place `addr` = uint64 shows in those positions is
+# riscv32, which refuses every 64-bit integer type: `-> addr`, `[addr] d` and
+# `type T = addr` must be refused exactly as their u64 spellings are, at the
+# type token (and `byte` in the same places accepted).
+TOTAL=$((TOTAL + 1))
+ALI_BAD=""
+printf 'fn f() -> addr { return 1 }\nfn main() -> uint32 { return f() }\n' > "$ALI_D/r1.kr"
+printf 'fn s([addr] d) -> uint32 { return 0 }\nfn main() -> uint32 { return 0 }\n' > "$ALI_D/r2.kr"
+printf 'fn f() -> byte { return 1 }\nfn s([byte] d) -> uint32 { return 0 }\nfn main() -> uint32 { return f() }\n' > "$ALI_D/r3.kr"
+"$DIR/../build/krc2" --arch=riscv32 --freestanding "$ALI_D/r1.kr" -o "$ALI_D/r.img" 2>&1 | grep -q "r1.kr:1:11: error: 64-bit integers not supported on riscv32" || ALI_BAD="$ALI_BAD return-addr-accepted"
+"$DIR/../build/krc2" --arch=riscv32 --freestanding "$ALI_D/r2.kr" -o "$ALI_D/r.img" 2>&1 | grep -q "r2.kr:1:7: error: 64-bit integers not supported on riscv32" || ALI_BAD="$ALI_BAD slice-addr-accepted"
+"$DIR/../build/krc2" --arch=riscv32 --freestanding "$ALI_D/r3.kr" -o "$ALI_D/r.img" > "$ALI_D/r3.log" 2>&1 || ALI_BAD="$ALI_BAD byte-refused($(grep -m1 error "$ALI_D/r3.log"))"
+printf 'type T = addr\nfn main() -> uint32 { return 0 }\n' > "$ALI_D/r4.kr"
+"$DIR/../build/krc2" --arch=riscv32 --freestanding "$ALI_D/r4.kr" -o "$ALI_D/r.img" 2>&1 | grep -q "r4.kr:1:10: error: 64-bit integers not supported on riscv32" || ALI_BAD="$ALI_BAD type-alias-addr-accepted"
+if [ -z "$ALI_BAD" ]; then PASS=$((PASS + 1)); echo "  alias_addr_is_64bit_on_riscv32: PASS"
+else FAIL=$((FAIL + 1)); echo "FAIL: alias_addr_is_64bit_on_riscv32 ($ALI_BAD)"; fi
+# Every type position at once, spelled with the aliases and with u8/u64: the
+# two programs must compile to the SAME bytes on both arches. This is what
+# pins the positions with no runtime-visible width of their own (a device
+# register's access width, a `type` alias target, a return type), and it is
+# the definition of an alias.
+TOTAL=$((TOTAL + 1))
+ALI_BAD=""
+ali_prog() {   # <u8 spelling> <u64 spelling>
+    printf '%s\n' "device D0 at 0x10000000 {" "    R8  at 0x00 : $1" "    R64 at 0x08 : $2" "}" \
+        "type T8 = $1" "type T64 = $2" "struct S { $1 a" "    $2 b" "    T8 c }" \
+        "static $1[4] sa" "static $2 sb = 3" \
+        "fn f($1 x, $2 y, [$1] d) -> $2 { return x + y + d.len }" \
+        "fn g() -> $1 { return 7 }" \
+        "fn main() -> uint64 {" "    $1 l = 1" "    $2 m = 2" "    $2[2] w" "    w[1] = sizeof(S) + sizeof($1) + sizeof($2)" \
+        "    uint64 v = 0" "    unsafe { *(w as $1) -> v }" "    unsafe { *(w as $2) = v }" \
+        "    D0.R8 = l" "    v = v + D0.R64" "    S s" "    s.c = l" \
+        "    return f(l, m, sa, 4) + g() + sb + v + w[1] + s.c" "}"
+}
+ali_prog byte addr > "$ALI_D/al.kr"
+ali_prog u8 u64 > "$ALI_D/kw.kr"
+for ALI_A in x86_64 arm64; do
+    if ! "$DIR/../build/krc2" --arch=$ALI_A "$ALI_D/al.kr" -o "$ALI_D/al-$ALI_A" > "$ALI_D/b.log" 2>&1; then ALI_BAD="$ALI_BAD $ALI_A:alias-build($(grep -m1 error "$ALI_D/b.log"))"; continue; fi
+    if ! "$DIR/../build/krc2" --arch=$ALI_A "$ALI_D/kw.kr" -o "$ALI_D/kw-$ALI_A" > "$ALI_D/b.log" 2>&1; then ALI_BAD="$ALI_BAD $ALI_A:keyword-build"; continue; fi
+    cmp -s "$ALI_D/al-$ALI_A" "$ALI_D/kw-$ALI_A" || ALI_BAD="$ALI_BAD $ALI_A:bytes-differ"
+done
+if [ -z "$ALI_BAD" ]; then PASS=$((PASS + 1)); echo "  alias_spelling_emits_identical_bytes: PASS (x86_64, arm64)"
+else FAIL=$((FAIL + 1)); echo "FAIL: alias_spelling_emits_identical_bytes ($ALI_BAD)"; fi
+rm -rf "$ALI_D"
 
 # --- C7: uniform Windows argv + child quoting (portable-syscall-layer spec C7) --
 # A Windows `main` (IR backend, not @naked) that has cli_argc/cli_argv parses

@@ -1,0 +1,95 @@
+// `byte` (= uint8) and `addr` (= uint64) are type aliases in every TYPE
+// position, and ordinary identifiers everywhere else (LANGUAGE.md section 2).
+// Before they were made real, a `byte` in a struct, a static array or a cast
+// was an unknown name and took 8 bytes, and a `byte` local was refused.
+// Every check exits with its own code; prints OK.
+struct S {
+    byte a
+    uint8 b
+    addr c
+}
+struct B3 {
+    byte x
+    byte y
+    byte z
+}
+struct Dev {
+    uint64 addr
+    byte byte
+}
+// sizeof(<type alias>) is 8 whatever the target (a separate, pre-existing
+// gap, also for `type TU = u8`); so this only pins that `byte` there acts
+// exactly like `u8`.
+type TB = byte
+type TU = u8
+static byte[4] sarr
+static addr sa = 0x123456789
+
+fn bparam(byte x) -> byte { return x + 1 }
+fn aparam(addr x) -> addr { return x + 1 }
+// a parameter NAMED addr, and a slice of byte
+fn idparam(uint64 addr) -> uint64 { return addr * 2 }
+fn ssum([byte] data) -> uint64 {
+    uint64 t = 0
+    uint64 i = 0
+    while i < data.len { t = t + load8(data + i)  i = i + 1 }
+    return t
+}
+
+fn main() -> uint32 {
+    // sizes and layout
+    if sizeof(byte) != 1 { return 1 }
+    if sizeof(addr) != 8 { return 2 }
+    if sizeof(S) != 10 { return 3 }
+    if sizeof(B3) != 3 { return 4 }
+    if sizeof(TB) != sizeof(TU) { return 5 }
+    if sizeof(Dev) != 9 { return 6 }
+    // a static byte array: 1-byte elements
+    sarr[1] = 0x55
+    if load8(sarr + 1) != 0x55 { return 7 }
+    if load8(sarr + 2) != 0 { return 8 }
+    if sa != 0x123456789 { return 9 }
+    // locals, params, returns
+    byte l = 0x34
+    addr m = 0x123456789
+    if l != 0x34 { return 10 }
+    if m != 0x123456789 { return 11 }
+    if bparam(0x33) != 0x34 { return 12 }
+    if aparam(0x123456788) != 0x123456789 { return 13 }
+    // pointer casts read exactly the alias' width
+    u8[16] buf
+    store64(buf, 0x1122334455667788)
+    uint64 q = 0
+    unsafe { *(buf as byte) -> q }
+    if q != 0x88 { return 14 }
+    uint64 w = 0
+    unsafe { *(buf as addr) -> w }
+    if w != 0x1122334455667788 { return 15 }
+    byte[3] la
+    la[0] = 1
+    la[1] = 2
+    la[2] = 3
+    if ssum(la, 3) != 6 { return 16 }
+    // ... and identifiers: variables, a parameter and a field named addr/byte,
+    // `*(addr as T)`, a value followed by another statement on one line
+    uint64 addr = buf
+    uint64 byte = 9
+    uint64 v = 0
+    unsafe { *(addr as uint32) -> v }
+    if v != 0x55667788 { return 17 }
+    addr = addr + byte
+    if addr != buf + 9 { return 18 }
+    uint64 y = 0
+    y = byte  v = 1
+    if y != 9 { return 19 }
+    if idparam(21) != 42 { return 20 }
+    Dev d
+    d.addr = 77
+    d.byte = 5
+    if d.addr + d.byte != 82 { return 21 }
+    // a FIELD named addr/byte read as a value, another statement on the line
+    y = d.addr  v = 2
+    if y != 77 { return 22 }
+    file_write(1, "OK\n", 3)
+    return 0
+}

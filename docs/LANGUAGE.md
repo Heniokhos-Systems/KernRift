@@ -85,6 +85,17 @@ ignored — useful when you want to write multiple statements on one line.
 All integer values are stored as 64-bit words in variable slots. The specific
 width matters for pointer load/store and for struct field layout. The short
 aliases (`u8`, `u64`, `i32`, …) are exact synonyms for the long form.
+
+`byte` and `addr` are aliases too, but **not reserved words**: they mean
+`uint8` / `uint64` only where a type is written — a declaration's type
+(`byte b`, `addr[4] table`, a struct field, a parameter, a return type
+`-> addr`), a slice element `[byte] data`, a cast `*(p as byte)`,
+`sizeof(byte)`, a `type` alias target and a device register's type. Anywhere
+else they are ordinary names, so `uint64 addr = base` and
+`unsafe { *(addr as uint32) -> v }` work as they always have. One limit: a
+bare `addr`/`byte` used as a whole statement and followed by another
+statement on the same line (`addr  x = 1`) reads as a declaration; such a
+statement does nothing, so write the next statement on its own line.
 Floating-point types keep their declared width (f32 in 32-bit slots, f64 in
 64-bit slots) and are tracked through the IR with a per-vreg "fkind" tag so
 the emitter picks the right load/store/convert instructions.
@@ -885,11 +896,10 @@ whichever file it is in. A mixed set, a type mismatch or two initializers is an
 error. `@shared` applies to `static` only: consts are never shared (keep one
 definition), and `@shared` on anything else is refused.
 
-The type comparison is by the token written: a type keyword and its short form
-are one type (`u64`/`uint64`, `float`/`f32`), but a type written as a name — a
-struct, a `type` alias, or the aliases `byte` and `addr` — matches only the
-same name, so `@shared static byte v` against `@shared static uint8 v` is
-refused. Write one spelling.
+The type comparison is by type, not spelling: every alias in the §2 table is
+its type (`u64`/`uint64`/`addr`, `u8`/`uint8`/`byte`, `float`/`f32`), so
+`@shared static byte v` and `@shared static uint8 v` are one variable. A type
+written as a name — a struct or a `type` alias — matches only the same name.
 
 ---
 

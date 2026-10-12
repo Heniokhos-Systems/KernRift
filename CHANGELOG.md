@@ -4,6 +4,27 @@ All notable changes to `kernriftc` are documented in this file.
 
 ## Unreleased
 
+**Fixed: `byte` and `addr` are real type aliases again -- `uint8` and
+`uint64` -- in every type position, and still ordinary names everywhere else.**
+LANGUAGE.md has listed them as aliases since they stopped being keywords (as
+reserved words they broke every program with a variable named `addr`), but
+nothing resolved them: `byte` was an UNKNOWN name, so it took 8 bytes in a
+struct field, a static array element or a pointer cast
+(`struct { byte a  uint8 b }` was 9 bytes, `*(p as byte)` read 8), and a
+`byte` local was refused as an undeclared identifier. A pass in the parser now
+rewrites a `byte`/`addr` written as a TYPE -- a local, static, field,
+parameter, return, array element, slice element, cast, `sizeof`, `type`
+alias target or device register type -- to exactly the token `u8`/`u64` lex
+to, so every later stage sees the keyword; `addr` the variable, parameter,
+field (`p.addr`) and cast operand (`*(addr as uint32)`) is untouched. A
+program spelled with the aliases now compiles to the same bytes as the one
+spelled `u8`/`u64` (a test row compares them on both arches), and `@shared`
+merges `byte` with `uint8` and `addr` with `uint64`. Compatibility: every
+`.kr` file in KernRift (std, examples, tests) and in ApexRift that compiled
+before compiles to the same bytes -- none wrote either word as a type -- and
+both ApexRift kernel images are byte-identical. (`src/parser.kr`,
+`p_alias_types`.)
+
 **Breaking: a second `static` or `const` of the same name is now an error, and
 `@shared` is how two files declare one variable.** Previously-compiling source
 can stop compiling. Until now a second declaration of a name -- in another file
@@ -24,10 +45,10 @@ When two files really mean one variable, mark **every** declaration
 all have the identical type (type, array size and array-ness, element size,
 struct type) and at most one has a non-zero initializer, which is then the value
 wherever it is written; a mixed set, a type mismatch or two initializers is an
-error. Types compare by the token written: a type keyword and its short form are
-one type (`u64`/`uint64`, `u8`/`uint8`, `float`/`f32`), but a type written as a
-name -- a struct, a `type` alias, or the aliases `byte` and `addr` -- matches
-only the same name, so `byte` against `uint8` is refused; write one spelling.
+error. Types compare as types, not spellings: every alias in LANGUAGE.md's
+table is its type (`u64`/`uint64`/`addr`, `u8`/`uint8`/`byte`, `float`/`f32`),
+while a type written as a name -- a struct or a `type` alias -- matches only the
+same name.
 `@shared` applies to `static` only: consts are never shared, and `@shared` on a
 const or a function is refused. The consequence for the standard library:
 `std/args.kr` declares `cli_argc`, `cli_argv` and `cli_envp` `@shared`, so a
