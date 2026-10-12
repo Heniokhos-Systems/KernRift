@@ -172,6 +172,44 @@ fn hex2(uint64 v) {
     write(1, d + (v & 15), 1)
 }
 
+// The parse output buffer: size bytes plus a 16-byte canary, ALL filled with
+// 0xAA. alloc() and VirtualAlloc hand out zero pages, so on a zeroed buffer a
+// parser that never stores argv[argc] = 0, or never NUL-terminates an
+// argument, reads back exactly as one that does: both mutants passed every row
+// until this fill. With it, a missing argv[argc] prints "argv[argc] is not 0"
+// and a missing NUL runs the argument into 0xAA bytes, so the <arg> lines no
+// longer match the .expected file.
+fn parse_buf(uint64 size) -> uint64 {
+    uint64 out = alloc(size + 16)
+    aa_fill(out, size + 16)
+    return out
+}
+
+fn aa_fill(uint64 b, uint64 n) {
+    uint64 i = 0
+    while i < n {
+        store8(b + i, 0xAA)
+        i = i + 1
+    }
+}
+
+// The parse proper, into a freshly 0xAA-filled buffer, then the overrun
+// canary: the 16 bytes at out[size..] must still be 0xAA (the parser's
+// 10*(len+2) bound is otherwise only argued, never measured).
+fn parse_checked(uint64 parser, uint64 line, uint64 out, uint64 size, uint64 lb) -> uint64 {
+    aa_fill(out, size + 16)
+    uint64 argc = call_ptr(parser, line, out, size, lb)
+    uint64 i = 0
+    while i < 16 {
+        if load8(out + size + i) != 0xAA {
+            write(1, "parser wrote past size\n", 23)
+            break
+        }
+        i = i + 1
+    }
+    return argc
+}
+
 fn run_parse(uint64 parser, uint64 table, uint64 lb) -> uint32 {
     u8[8] tp
     uint64 tn = slurp(table, tp)
@@ -199,14 +237,14 @@ fn run_parse(uint64 parser, uint64 table, uint64 lb) -> uint32 {
         store8(line + j + 5, 75)
         store8(line + j + 6, 0)
         uint64 size = 10 * (j + 2)
-        uint64 out = alloc(size)
+        uint64 out = parse_buf(size)
         if call_ptr(parser, line, 0, 0, lb) != size {
             write(1, "sizing call is not 10*(len+2)\n", 31)
         }
         if call_ptr(parser, line, out, size - 1, lb) != 0 {
             write(1, "small buffer accepted\n", 22)
         }
-        uint64 argc = call_ptr(parser, line, out, size, lb)
+        uint64 argc = parse_checked(parser, line, out, size, lb)
         show(k, argc, out, line)
         k = k + 1
         pos = e + 1
@@ -234,8 +272,8 @@ fn run_rt(uint64 quoter, uint64 parser, uint64 lb, uint64 dbcs) -> uint32 {
         if len != 0 && str_len(buf) != len - 1 { write(1, "NUL before len-1\n", 17) }
         if load8(buf + len) != 0xAA { write(1, "wrote past len\n", 15) }
         uint64 size = 10 * (len + 2)
-        uint64 out = alloc(size)
-        uint64 argc = call_ptr(parser, buf, out, size, lb)
+        uint64 out = parse_buf(size)
+        uint64 argc = parse_checked(parser, buf, out, size, lb)
         show(k, argc, out, buf)
         k = k + 1
     }
