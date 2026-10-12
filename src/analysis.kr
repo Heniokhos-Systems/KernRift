@@ -882,7 +882,14 @@ fn diag_report_all() {
 
         uint64 tstart = sema_tok_text_start(wti)
         uint64 tlen = sema_tok_text_len(wti)
+        // The line WITHIN THE TOKEN'S OWN FILE. A token's recorded line counts
+        // from the start of import_buf, i.e. across every file imported before
+        // this one, so a warning in the second of two imports was reported at
+        // its line plus the first import's length (string.kr:468 for :311).
+        // srcmap_line recounts from the start of the file the byte belongs to,
+        // which is what srcmap_file already names.
         uint64 tok_line = sema_tok_line(wti)
+        if srcmap_count > 0 && sema_source == import_buf { tok_line = srcmap_line(tstart) }
         uint64 col = diag_col_of(tstart)
 
         // Print "file:line:col: severity: message"

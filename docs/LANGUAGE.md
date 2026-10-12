@@ -122,19 +122,34 @@ char bad = 97              // compile error — int literal not assignable
 - **`_` is a digit separator** and may appear anywhere among the digits of a
   decimal, hex, binary or float literal: `1_000_000`, `0xFF_FF`,
   `0b1010_1010`, `1_0.5` (which is 10.5, not 10.05).
-- A **prefix with no digits** — `0x`, `0X`, `0b`, `0B`, `0x_` — is an error
-  token, not a number, and so is a decimal digit glued to the end of a binary
-  literal (`0b1012`). There are **no octal (`0o`) literals** and no `\u{...}`
-  escape: `0o17` is `0` followed by the identifier `o17`, and `'\u{41}'` is
-  silently `'u'` (117), not `'A'`.
+- A **prefix with no digits** — `0x`, `0X`, `0b`, `0B`, `0x_` — is malformed
+  (`error: malformed number literal '0x': a base prefix needs at least one
+  digit`), not a number. There are **no octal (`0o`) literals** and no
+  `\u{...}` escape: `0o17` is `0` glued to `o17` (malformed, below), and
+  `'\u{41}'` is silently `'u'` (117), not `'A'`.
+- **A number ends where its digits end.** A letter, a digit that does not
+  belong to the base, or a quote glued straight onto a literal makes the whole
+  run ONE malformed literal, refused by the lexer: `5x`, `42exit`, `0x1Fg`,
+  `0b1012`, `10.5fx`, and `1_f"x"` / `0b1f"x"` (which used to lex as a number
+  followed by an f-string) all give
+  `error: malformed number literal '<text>': a number must not be followed
+  directly by a letter, a stray digit or a quote`. The `f` of a float literal
+  (`1.5f`, `1e3f`) is part of the literal, not a glued letter; `10f` (no
+  fraction or exponent) is not a float literal and is refused.
 - Float: `1.5`, `-3.14`, `2e10`, `1.5f` (f32 suffix)
 - Bool: `true`, `false` (strict `bool` type)
-- String: `"hello"` with `\n`, `\t`, `\\`, `\"`, `\0` escapes
+- String: `"hello"` with `\n`, `\t`, `\\`, `\"`, `\0` escapes. A string,
+  character or f-string literal still open at the end of its file is an error
+  at its opening quote (`file:line:col: error: unterminated string literal`).
+  Each imported file is lexed on its own, so a literal can never run on into
+  the file that imported it.
 - Character: `'A'`, `'\n'`, `'\t'`, `'\r'`, `'\0'`, `'\\'`, `'\''` — evaluates
   to the byte value of the character (e.g. `'A'` is 65, `'\n'` is 10).
   Use them directly in comparisons and arithmetic: `if c == 'a' { ... }`.
 - f-string: `f"pi = {3.14}, answer = {x}"` — `{expr}` interpolates with type-directed
   formatting (integers, floats, bools, chars, `@string` slots), `{{`/`}}` escape.
+  The literal segments take exactly the string escapes above (`f"a\"b"` is one
+  f-string containing a quote) — see §18.
 
 ---
 
@@ -1383,6 +1398,31 @@ Import paths are resolved:
 
 Paths are always joined to one of those roots, so an absolute path in an
 `import` does not work.
+
+**An import path is a plain path, not an escaped string.** It is the bytes
+between the quotes, on the same line as `import`, and is written with `/` on
+every host (Windows accepts `/` too). The import scanner opens exactly those
+bytes, so anything on which it and the string lexer could read the line
+differently is refused before any file is opened, at the offending `line:col`:
+
+| Import line | Diagnostic |
+|---|---|
+| `import "a\"b.kr"` (any backslash) | `import path contains a backslash; escapes are not decoded in an import path, so write it with '/' (which every host accepts)` |
+| `import "a.kr` (no closing quote on the line, or end of file) | `unterminated import path: the closing '"' must be on the same line as the opening one` |
+| `import ""` | `empty import path` |
+| a NUL byte in the path | `import path contains a NUL byte` |
+| `import` with no `"` after it on its line | `` `import` needs a quoted path on the same line, as in import "std/io.kr" `` |
+
+Before this, `import "q\" "` opened a file named `q\` while the parser saw a
+different string, and an unclosed path ran on across lines to the next quote.
+
+**KernRift and MLRift scan imports and lex source identically** — the same
+path rules, the same per-file lexing, the same number and string forms, and the
+same text for every lexer and import-scanner diagnostic (MLRift's own extension,
+`.mlr`, aside; parser and semantic diagnostics keep each compiler's own frame). The two
+deliberate differences are listed in MLRift's `docs/LANGUAGE.md` §17: MLRift
+has no `let` keyword, and under `--target=amdgpu-native` it redirects a
+`std/hip.mlr` import to `std/hip_kfd.mlr`.
 
 Circular imports are detected and rejected. Each file is compiled at most
 once regardless of how many files import it.

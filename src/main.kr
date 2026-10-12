@@ -485,9 +485,15 @@ fn import_resolve(uint64 base_path, uint64 name, uint64 name_len) -> uint64 {
 }
 
 fn import_check_import_line(uint64 buf, uint64 size, uint64 pos) -> uint64 {
-    // Check if buf[pos..] starts with: import "filename"
-    // Returns 0 if not import, or the position just past the opening quote
-    if pos + 8 >= size { return 0 }
+    // Check if buf[pos..] starts with the KEYWORD `import`. Returns
+    //   0  -- not an import (the leading run ends here),
+    //   1  -- `import` with no quoted path after it on the same line,
+    //   otherwise the position just past the opening quote.
+    // `import` must be a whole word: `importer` and `import_x` are identifiers,
+    // not imports. A bare `import` used to return 0 here, which quietly ended
+    // the leading run -- and `import` with its path on the NEXT line was then
+    // never opened, while the parser saw `import` + a string and accepted it.
+    if pos + 6 > size { return 0 }
     uint64 bp = buf + pos
     uint64 c0 = 0; uint64 c1 = 0; uint64 c2 = 0; uint64 c3 = 0; uint64 c4 = 0; uint64 c5 = 0
     unsafe { *(bp as uint8) -> c0 }
@@ -503,15 +509,86 @@ fn import_check_import_line(uint64 buf, uint64 size, uint64 pos) -> uint64 {
     uint64 ch = 0
     uint64 pp = buf + p
     if p < size { unsafe { *(pp as uint8) -> ch } }
+    if (ch >= 48 && ch <= 57) || (ch >= 65 && ch <= 90) || (ch >= 97 && ch <= 122) || ch == 95 { return 0 }
     while p < size && (ch == 32 || ch == 9) {
         p = p + 1
         pp = buf + p
         if p < size { unsafe { *(pp as uint8) -> ch } }
     }
     // Expect opening quote
-    if ch != 34 { return 0 }
+    if p >= size || ch != 34 { return 1 }
     p = p + 1
     return p
+}
+
+// A malformed import line: "file:line:col: error: <msg>", then exit. The line
+// and column are computed in the importing file's OWN bytes, so they are the
+// file's real coordinates whatever has been concatenated before it. Fatal at
+// once rather than recorded: past a malformed import line the scanner and the
+// lexer can no longer be trusted to agree on what the file says.
+fn import_scan_error(uint64 file_path, uint64 buf, uint64 at_off, uint64 msg) {
+    uint64 ln = 1
+    uint64 ls = 0
+    uint64 i = 0
+    while i < at_off {
+        uint64 cp = buf + i
+        uint64 c = 0
+        unsafe { *(cp as uint8) -> c }
+        if c == 10 { ln = ln + 1; ls = i + 1 }
+        i = i + 1
+    }
+    write(2, file_path, str_len(file_path))
+    write(2, ":", 1)
+    uint8[24] nb
+    uint64 n1 = fmt_uint(nb, ln)
+    write(2, nb, n1)
+    write(2, ":", 1)
+    uint64 n2 = fmt_uint(nb, at_off - ls + 1)
+    write(2, nb, n2)
+    write(2, ": error: ", 9)
+    write(2, msg, str_len(msg))
+    write(2, "\n", 1)
+    exit(1)
+}
+
+// The import path between the quotes, as the scanner will open it. Returns the
+// position of the closing quote.
+//
+// THE SCANNER AND THE LEXER MUST READ THE SAME STRING. The lexer treats `\"`
+// as an escaped quote; this scanner used to stop at the first `"` of any kind.
+// So `import "q\" "` opened a file named `q\` while the lexer saw one string,
+// `q" `, and a path with no closing quote ran on across lines to the next
+// quote anywhere in the file. An import path is a plain path: no escape is
+// ever decoded in it, and it is written with `/` on every host (Windows takes
+// `/` too), so a backslash in one is never needed. Rather than teach the
+// scanner escapes, every byte on which the two readings could differ is
+// refused: a backslash, a newline (or CR) before the closing quote, a NUL,
+// the end of the file, and the empty path.
+fn import_scan_name(uint64 file_path, uint64 buf, uint64 size, uint64 ns) -> uint64 {
+    uint64 ne = ns
+    while ne < size {
+        uint64 qp = buf + ne
+        uint64 qch = 0
+        unsafe { *(qp as uint8) -> qch }
+        if qch == 34 {
+            if ne == ns {
+                import_scan_error(file_path, buf, ns - 1, "empty import path")
+            }
+            return ne
+        }
+        if qch == 92 {
+            import_scan_error(file_path, buf, ne, "import path contains a backslash; escapes are not decoded in an import path, so write it with '/' (which every host accepts)")
+        }
+        if qch == 10 || qch == 13 {
+            import_scan_error(file_path, buf, ns - 1, "unterminated import path: the closing '\"' must be on the same line as the opening one")
+        }
+        if qch == 0 {
+            import_scan_error(file_path, buf, ne, "import path contains a NUL byte")
+        }
+        ne = ne + 1
+    }
+    import_scan_error(file_path, buf, ns - 1, "unterminated import path: the closing '\"' must be on the same line as the opening one")
+    return ne
 }
 
 // Stdlib search paths for imports not found relative to source file.
@@ -525,29 +602,61 @@ static uint64 import_search_count = 0
 static uint64 import_search_cap = 0
 
 fn import_read_home() -> uint64 {
-    // Read HOME from /proc/self/environ (Linux-specific)
+    // Read HOME from /proc/self/environ (Linux-specific).
+    //
+    // THE WHOLE FILE, not its first 4096 bytes. The old single read stopped
+    // there, so a HOME entry that STARTED inside the first page but ended past
+    // it was cut mid-value -- and the str_len() that measured it then ran on
+    // past the end of the 4096-byte buffer into whatever followed it, because
+    // nothing had terminated it. A HOME that started past 4096 was simply never
+    // seen. /proc reports st_size 0, so the read loops until it returns 0,
+    // growing the buffer, and every scan below is bounded by the byte count.
     uint64 fd = file_open("/proc/self/environ", 0)
     if fd >= 0xFFFFFFFF { return 0 }
-    uint64 buf = alloc(4096)
-    file_read(fd, buf, 4096)
+    uint64 cap = 4096
+    uint64 buf = alloc(cap + 1)
+    uint64 total = 0
+    uint64 reading = 1
+    while reading != 0 {
+        if total == cap {
+            buf = grow_buf(buf, total, cap * 2 + 1)
+            cap = cap * 2
+        }
+        uint64 n = file_read(fd, buf + total, cap - total)
+        // 0 is end of file; anything larger than the room left is an error
+        // return (a negative errno read as unsigned), not a count.
+        if n == 0 || n > cap - total { reading = 0 } else { total = total + n }
+    }
     file_close(fd)
+    uint64 endp = buf + total
+    uint8 ez = 0
+    unsafe { *(endp as uint8) = ez }
     // environ is null-separated: VAR=VALUE\0VAR=VALUE\0...
     uint64 pos = 0
-    while pos < 4096 {
+    while pos < total {
         uint64 p = buf + pos
         uint64 ch = 0
         unsafe { *(p as uint8) -> ch }
-        if ch == 0 { break }
-        // Check for "HOME="
-        if ch == 72 {
+        // Check for "HOME=" (all five bytes inside the data read)
+        if ch == 72 && pos + 5 <= total {
             uint64 p1 = p + 1; uint64 c1 = 0; unsafe { *(p1 as uint8) -> c1 }
             uint64 p2 = p + 2; uint64 c2 = 0; unsafe { *(p2 as uint8) -> c2 }
             uint64 p3 = p + 3; uint64 c3 = 0; unsafe { *(p3 as uint8) -> c3 }
             uint64 p4 = p + 4; uint64 c4 = 0; unsafe { *(p4 as uint8) -> c4 }
             if c1 == 79 && c2 == 77 && c3 == 69 && c4 == 61 {
-                // Found HOME=, copy value to new buffer
+                // Found HOME=, copy value to new buffer. Bounded by `total`:
+                // the terminator written above guarantees a stop even when the
+                // last entry has no NUL of its own.
                 uint64 home_ptr = p + 5
-                uint64 home_len = str_len(home_ptr)
+                uint64 home_len = 0
+                uint64 hc = 0
+                uint64 hp = home_ptr
+                unsafe { *(hp as uint8) -> hc }
+                while hc != 0 && pos + 5 + home_len < total {
+                    home_len = home_len + 1
+                    hp = home_ptr + home_len
+                    unsafe { *(hp as uint8) -> hc }
+                }
                 uint64 home_copy = alloc(home_len + 1)
                 memcpy(home_copy, home_ptr, home_len)
                 uint64 htp = home_copy + home_len
@@ -556,11 +665,12 @@ fn import_read_home() -> uint64 {
                 return home_copy
             }
         }
-        // Skip to next null
-        while pos < 4096 {
+        // Skip to the byte after the next NUL
+        uint64 skipping = 1
+        while pos < total && skipping != 0 {
             p = buf + pos
             unsafe { *(p as uint8) -> ch }
-            if ch == 0 { pos = pos + 1; break }
+            if ch == 0 { skipping = 0 }
             pos = pos + 1
         }
     }
@@ -871,18 +981,13 @@ fn import_process(uint64 file_path) {
 
         // Check if this line starts with "import"
         uint64 name_start = import_check_import_line(tmp, size, pos)
+        if name_start == 1 {
+            import_scan_error(file_path, tmp, pos, "`import` needs a quoted path on the same line, as in import \"std/io.kr\"")
+        }
         if name_start != 0 {
             // Extract filename between quotes
             uint64 ns = name_start
-            uint64 ne = ns
-            uint64 qch = 0
-            uint64 qp = tmp + ne
-            if ne < size { unsafe { *(qp as uint8) -> qch } }
-            while ne < size && qch != 34 {
-                ne = ne + 1
-                qp = tmp + ne
-                if ne < size { unsafe { *(qp as uint8) -> qch } }
-            }
+            uint64 ne = import_scan_name(file_path, tmp, size, ns)
             uint64 name_len = ne - ns
             uint64 name_ptr = tmp + ns
             // Resolve full path relative to source file

@@ -24884,22 +24884,23 @@ fn main() -> u64 { return X }' 31
 run_test "decimal_unchanged" 'static u64 X = 31
 fn main() -> u64 { return X }' 31
 run_test "float_literal_unchanged" 'fn main() -> u64 { f64 x = 0.5; if x > 0.4 { return 7 } return 0 }' 7
-# A MALFORMED LITERAL IS DIAGNOSED, NOT SKIPPED. These reach the folder through
-# TokenKind.Error (255) being listed beside the literal kinds at both initialiser
-# sites. Without that they fall to the "skip unsupported initializer" path and
-# the static keeps its default 0 -- quieter than the 72 `0x` used to produce, and
-# just as unasked-for. The array-size row is here because that position reaches
-# the folder directly and would have been the one place already covered.
+# A MALFORMED LITERAL IS DIAGNOSED, NOT SKIPPED. These used to reach the folder
+# through TokenKind.Error (255) being listed beside the literal kinds at both
+# initialiser sites ("expected a compile-time constant"); without that they fell
+# to the "skip unsupported initializer" path and the static kept its default 0.
+# The lexer now names the literal itself and refuses the compile before parsing
+# ("malformed number literal '0x'"), at every position alike -- the array-size
+# row is here because that position reached the folder directly.
 run_test_rejects "hex_prefix_no_digits" 'static u64 X = 0x
-fn main() -> u64 { return X }' "expected a compile-time constant"
+fn main() -> u64 { return X }' "malformed number literal"
 run_test_rejects "binary_prefix_no_digits" 'static u64 X = 0b
-fn main() -> u64 { return X }' "expected a compile-time constant"
+fn main() -> u64 { return X }' "malformed number literal"
 run_test_rejects "hex_prefix_separator_only" 'static u64 X = 0x_
-fn main() -> u64 { return X }' "expected a compile-time constant"
+fn main() -> u64 { return X }' "malformed number literal"
 run_test_rejects "binary_literal_bad_digit" 'static u64 X = 0b1012
-fn main() -> u64 { return X }' "expected a compile-time constant"
+fn main() -> u64 { return X }' "malformed number literal"
 run_test_rejects "hex_prefix_no_digits_array_size" 'static u8[0x] a
-fn main() -> u64 { return 0 }' "expected a compile-time constant"
+fn main() -> u64 { return 0 }' "malformed number literal"
 
 # --- digit separators --------------------------------------------------------
 #
@@ -25522,6 +25523,210 @@ fi
 rm -rf "$GS_D"
 
 rm -rf "$G18L_D"
+
+# --- lexer / import-scanner parity (ANCHOR LEXIMP) ----------------------------
+#
+# The SAME rows run in KernRift's and MLRift's suites (generated from one
+# source, only the compiler, extension and stdlib directory substituted), so a
+# divergence between the two front ends fails one of them. Every diagnostic row
+# asserts the EXACT first line of stderr, and every row was red on the parent
+# commits (KernRift ab51c92, MLRift bea4e92): the defect numbers are the
+# register's (memory/project_known_unfixed_defects.md, items 98 and 110-116).
+echo ""
+echo "--- lexer / import-scanner parity (ANCHOR LEXIMP) ---"
+LIP_D="$DIR/../test_tmp_leximp_$$"
+rm -rf "$LIP_D"; mkdir -p "$LIP_D"
+
+# lip_err <name> <want exact first stderr line, with @ for the probe dir>
+# Compiles $LIP_D/<name>/m.kr and wants a refusal whose first line is exactly that.
+lip_err() {
+    local name="$1"; local want="$2"
+    TOTAL=$((TOTAL + 1))
+    local d="$LIP_D/$name"
+    local out st first
+    out=$(cd "$d" && $KRC $KRC_FLAGS "m.kr" -o "$d/a.out" 2>&1); st=$?
+    first=$(printf '%s\n' "$out" | head -1)
+    if [ "$st" = "0" ]; then
+        echo "FAIL: $name (compiled clean, exit 0; wanted: $want)"
+        FAIL=$((FAIL + 1))
+    elif [ "$first" != "$want" ]; then
+        echo "FAIL: $name (exit $st, wrong diagnostic)"
+        echo "  want: $want"
+        echo "  got:  $first"
+        FAIL=$((FAIL + 1))
+    else
+        PASS=$((PASS + 1))
+    fi
+}
+# lip_run <name> <want stdout> <want exit> [extra flags]: compiles and RUNS.
+lip_run() {
+    local name="$1"; local want="$2"; local wexit="$3"; local extra="$4"
+    TOTAL=$((TOTAL + 1))
+    local d="$LIP_D/$name"
+    if (cd "$d" && $KRC $KRC_FLAGS $extra "m.kr" -o "$d/a.out" > "$d/cc.log" 2>&1); then
+        local got gexit
+        got=$("$d/a.out" 2>/dev/null); gexit=$?
+        if [ "$got" = "$want" ] && [ "$gexit" = "$wexit" ]; then
+            PASS=$((PASS + 1))
+        else
+            echo "FAIL: $name (want '$want' exit $wexit, got '$got' exit $gexit)"
+            FAIL=$((FAIL + 1))
+        fi
+    else
+        echo "FAIL: $name (did not compile: $(head -1 "$d/cc.log"))"
+        FAIL=$((FAIL + 1))
+    fi
+}
+lip_src() { mkdir -p "$LIP_D/$1"; printf '%b' "$3" > "$LIP_D/$1/$2"; }
+
+# 110. The import scanner read a path raw up to the next `"` while the lexer
+#      treats `\"` as an escape, so `import "q\" "` OPENED a file named `q\`
+#      (it compiled and ran, exit 7) while the parser saw a different string;
+#      an unclosed path ran across lines to the next quote anywhere; an empty
+#      path opened the importing file's DIRECTORY (MLRift: SIGSEGV). Now every
+#      byte on which the two readings could differ is refused, at its line:col.
+lip_src lip_import_backslash m.kr 'import "q\\" "\nfn main() {\n    exit(helper())\n}\n'
+printf 'fn helper() -> uint64 { return 7 }\n' > "$LIP_D/lip_import_backslash/q\\"
+lip_err lip_import_backslash "m.kr:1:10: error: import path contains a backslash; escapes are not decoded in an import path, so write it with '/' (which every host accepts)"
+lip_src lip_import_unterminated m.kr 'import "aux.kr\nfn main() {\n    exit(0)\n}\n// "\n'
+lip_err lip_import_unterminated "m.kr:1:8: error: unterminated import path: the closing '\"' must be on the same line as the opening one"
+mkdir -p "$LIP_D/lip_import_unterminated_eof"; printf 'import "aux' > "$LIP_D/lip_import_unterminated_eof/m.kr"
+lip_err lip_import_unterminated_eof "m.kr:1:8: error: unterminated import path: the closing '\"' must be on the same line as the opening one"
+lip_src lip_import_empty m.kr '// header\nimport ""\nfn main() {\n    exit(0)\n}\n'
+lip_err lip_import_empty "m.kr:2:8: error: empty import path"
+lip_src lip_import_nul m.kr 'import "a\0b.kr"\nfn main() {\n    exit(0)\n}\n'
+lip_err lip_import_nul "m.kr:1:10: error: import path contains a NUL byte"
+#      `import` with its path on the NEXT line: the scanner stopped there (so
+#      the file was never opened) while the parser saw `import` + a string and
+#      accepted it -- compiled clean with the import silently dropped.
+lip_src lip_import_path_next_line m.kr 'import\n"aux.kr"\nfn main() {\n    exit(0)\n}\n'
+printf 'fn helper() -> uint64 { return 7 }\n' > "$LIP_D/lip_import_path_next_line/aux.kr"
+lip_err lip_import_path_next_line "m.kr:1:1: error: \`import\` needs a quoted path on the same line, as in import \"std/io.kr\""
+#      Positive control: a plain import still opens, compiles and runs.
+lip_src lip_import_ok m.kr '// comment first\nimport "aux.kr"\nfn main() {\n    exit(helper())\n}\n'
+printf 'fn helper() -> uint64 { return 7 }\n' > "$LIP_D/lip_import_ok/aux.kr"
+lip_run lip_import_ok "" 7
+#      ...and so does an identifier that merely starts with `import`.
+lip_src lip_import_prefix_ident m.kr 'fn importer() -> uint64 { return 5 }\nfn main() {\n    exit(importer())\n}\n'
+lip_run lip_import_prefix_ident "" 5
+
+# 111. f-strings honour the same escapes as strings, on every backend. MLRift's
+#      f-string scanner did not skip the byte after `\`, so f"a\"b" ENDED at the
+#      escaped quote, and its three lowerings copied segments raw, so `\n`
+#      printed as backslash-n and `{{` as two braces.
+lip_src lip_fstr_quote m.kr 'fn main() {\n    u64 x = 5\n    println(f"a\\"b{x}c")\n    exit(0)\n}\n'
+lip_run lip_fstr_quote 'a"b5c' 0
+lip_run lip_fstr_quote 'a"b5c' 0 --legacy
+lip_src lip_fstr_escapes m.kr 'fn main() {\n    u64 x = 5\n    println(f"t\\tn\\\\{x}q\\"z\\x41{{}}")\n    exit(0)\n}\n'
+lip_run lip_fstr_escapes "$(printf 't\tn\\5q"zA{}')" 0
+lip_run lip_fstr_escapes "$(printf 't\tn\\5q"zA{}')" 0 --legacy
+#      An embedded NUL is part of the segment on EVERY backend: the composed
+#      string is "a\0b5", which print() ends at the NUL -- so "a". A lowering
+#      that measured the segment with strlen would copy only "a" and write the
+#      interpolation straight after it, printing "a5" on that backend alone.
+lip_src lip_fstr_nul m.kr 'fn main() {\n    u64 x = 5\n    print(f"a\\0b{x}")\n    exit(0)\n}\n'
+lip_run lip_fstr_nul "a" 0
+lip_run lip_fstr_nul "a" 0 --legacy
+
+# 112. Number literals lex the same in both trees: 0b/0B, 0X and `_` separators
+#      (MLRift lexed 0b1010 as `0` + identifier `b1010`), a prefix with no
+#      digits is malformed, and a number glued to a letter, digit or quote is
+#      ONE malformed literal -- `1_f"x"` was a number followed by an f-string
+#      in KernRift and an identifier `_f` plus a string in MLRift.
+lip_src lip_num_forms m.kr 'fn main() {\n    u64 a = 0b1010\n    u64 b = 0B1_0\n    u64 c = 0X0A\n    u64 d = 1_000\n    u64 e = 0x_F_F\n    exit(a + b + c + d + e - 1000 - 255 + 3)\n}\n'
+lip_run lip_num_forms "" 25
+lip_src lip_num_float_forms m.kr 'fn main() {\n    f32 a = 10.5f\n    f64 b = 1_0.2_5e1\n    if a > 10.4 { if b > 102.4 { if b < 102.6 { exit(7) } } }\n    exit(1)\n}\n'
+lip_run lip_num_float_forms "" 7
+lip_src lip_num_glued_ident m.kr 'fn main() {\n    u64 x = 1\n    exit(5x)\n}\n'
+lip_err lip_num_glued_ident "m.kr:3:10: error: malformed number literal '5x': a number must not be followed directly by a letter, a stray digit or a quote"
+lip_src lip_num_glued_fstr m.kr 'fn main() {\n    println(1_f"x")\n    exit(0)\n}\n'
+lip_err lip_num_glued_fstr "m.kr:2:13: error: malformed number literal '1_f': a number must not be followed directly by a letter, a stray digit or a quote"
+lip_src lip_num_glued_bin m.kr 'fn main() {\n    println(0b1f"x")\n    exit(0)\n}\n'
+lip_err lip_num_glued_bin "m.kr:2:13: error: malformed number literal '0b1f': a number must not be followed directly by a letter, a stray digit or a quote"
+lip_src lip_num_bin_digit m.kr 'static u64 X = 0b1012\nfn main() {\n    exit(X)\n}\n'
+lip_err lip_num_bin_digit "m.kr:1:16: error: malformed number literal '0b1012': a number must not be followed directly by a letter, a stray digit or a quote"
+lip_src lip_num_glued_float m.kr 'fn main() {\n    f64 v = 10.5fx\n    exit(0)\n}\n'
+lip_err lip_num_glued_float "m.kr:2:13: error: malformed number literal '10.5fx': a number must not be followed directly by a letter, a stray digit or a quote"
+lip_src lip_num_empty_prefix m.kr 'static u64 X = 0x\nfn main() {\n    exit(X)\n}\n'
+lip_err lip_num_empty_prefix "m.kr:1:16: error: malformed number literal '0x': a base prefix needs at least one digit"
+
+# 113. A mid-file `import`, even of a file that does not exist, is refused --
+#      MLRift exited 0 and wrote a binary.
+lip_src lip_import_midfile m.kr 'fn main() {\n    exit(0)\n}\nimport "nope.kr"\n'
+TOTAL=$((TOTAL + 1))
+lip_out=$(cd "$LIP_D/lip_import_midfile" && $KRC $KRC_FLAGS m.kr -o a.out 2>&1); lip_st=$?
+if [ "$lip_st" != "0" ] && printf '%s\n' "$lip_out" | head -1 | grep -q '^m\.kr:4:\(1:\)\? error: `import` must precede every declaration in its file; this one was ignored, so nothing it names is in scope$'; then
+    PASS=$((PASS + 1))
+else
+    echo "FAIL: lip_import_midfile (exit $lip_st: $(printf '%s\n' "$lip_out" | head -1))"
+    FAIL=$((FAIL + 1))
+fi
+
+# 114. Each imported file is lexed on its own: an unterminated literal at the
+#      end of an imported file is reported THERE, instead of swallowing the
+#      importer up to its next quote and erroring at an unrelated line.
+lip_src lip_unterm_str m.kr 'import "aux.kr"\nfn main() {\n    println("x")\n    exit(helper())\n}\n'
+printf 'fn helper() -> uint64 { return 7 }\nfn s() { println("abc) }\n' > "$LIP_D/lip_unterm_str/aux.kr"
+lip_err lip_unterm_str "aux.kr:2:18: error: unterminated string literal (no closing '\"' before the end of the file)"
+lip_src lip_unterm_char m.kr 'import "aux.kr"\nfn main() {\n    u64 c = '"'"'q'"'"'\n    exit(helper())\n}\n'
+printf 'fn helper() -> uint64 { return 7 }\nfn s() -> uint64 { return '"'"'a }\n' > "$LIP_D/lip_unterm_char/aux.kr"
+lip_err lip_unterm_char "aux.kr:2:27: error: unterminated character literal (no closing \"'\" before the end of the file)"
+lip_src lip_unterm_fstr m.kr 'import "aux.kr"\nfn main() {\n    println("x")\n    exit(helper())\n}\n'
+printf 'fn helper() -> uint64 { return 7 }\nfn s() { println(f"abc) }\n' > "$LIP_D/lip_unterm_fstr/aux.kr"
+lip_err lip_unterm_fstr "aux.kr:2:18: error: unterminated f-string literal (no closing '\"' before the end of the file)"
+lip_src lip_unterm_main m.kr 'fn main() {\n    println("abc)\n    exit(0)\n}\n'
+lip_err lip_unterm_main "m.kr:2:13: error: unterminated string literal (no closing '\"' before the end of the file)"
+#      A `//` comment with no final newline in an imported file stays in it.
+lip_src lip_comment_eof m.kr 'import "aux.kr"\nfn main() {\n    exit(helper())\n}\n'
+printf 'fn helper() -> uint64 { return 7 }\n// no newline at the end' > "$LIP_D/lip_comment_eof/aux.kr"
+lip_run lip_comment_eof "" 7
+
+# 98. A diagnostic in an imported file names that file AND its own line: the
+#     line used to count from the start of the concatenated buffer (b:8 here).
+lip_src lip_line_after_imports m.kr 'import "a.kr"\nimport "b.kr"\nfn main() {\n    exit(fa() + fb())\n}\n'
+printf 'fn fa() -> uint64 {\n    return 1\n}\n// a3\n// a4\n' > "$LIP_D/lip_line_after_imports/a.kr"
+printf 'fn fb() -> uint64 {\n    uint64 unused_q = 3\n    return 2\n}\n' > "$LIP_D/lip_line_after_imports/b.kr"
+TOTAL=$((TOTAL + 1))
+lip_out=$(cd "$LIP_D/lip_line_after_imports" && $KRC $KRC_FLAGS m.kr -o a.out 2>&1)
+if printf '%s\n' "$lip_out" | grep -q "^b\.kr:2:\([0-9]*:\)\? warning: unused variable (prefix with _ to suppress) 'unused_q'$"; then
+    PASS=$((PASS + 1))
+else
+    echo "FAIL: lip_line_after_imports (want the warning at b.kr:2, got: $(printf '%s\n' "$lip_out" | grep unused_q))"
+    FAIL=$((FAIL + 1))
+fi
+
+# 115. HOME is read from the WHOLE of /proc/self/environ. Only the first 4096
+#      bytes were read, so a HOME entry straddling byte 4096 was cut (and
+#      str_len ran off the end of the buffer), and one past it was never seen:
+#      the $HOME stdlib directory silently dropped out of the search path.
+if [ -r /proc/self/environ ]; then
+    lip_h="$LIP_D/home"
+    mkdir -p "$lip_h/fake/.local/share/kernrift/std" "$lip_h/w"
+    printf 'fn zz_helper() -> uint64 { return 9 }\n' > "$lip_h/fake/.local/share/kernrift/std/zzleximp.kr"
+    printf 'import "std/zzleximp.kr"\nfn main() {\n    exit(zz_helper())\n}\n' > "$lip_h/w/m.kr"
+    for lip_pad in 4085 5000; do
+        TOTAL=$((TOTAL + 1))
+        lip_p=$(head -c $lip_pad /dev/zero | tr '\0' 'a')
+        if (cd "$lip_h/w" && env -i PAD=$lip_p HOME="$lip_h/fake" $KRC $KRC_FLAGS m.kr -o a.out > /dev/null 2>&1) &&
+           (cd "$lip_h/w" && ./a.out); [ "$?" = "9" ]; then
+            PASS=$((PASS + 1))
+        else
+            echo "FAIL: lip_home_past_4096_pad$lip_pad (the \$HOME stdlib import did not resolve)"
+            FAIL=$((FAIL + 1))
+        fi
+    done
+fi
+
+# 116. A short read of a module is refused, not compiled truncated. sysfs
+#      reports st_size 4096 for a file whose read returns a few bytes, which is
+#      exactly a short read; skipped (not counted) where that file is absent.
+lip_sysf=/sys/kernel/mm/transparent_hugepage/enabled
+if [ -r "$lip_sysf" ] && [ "$(stat -L -c %s "$lip_sysf")" -gt "$(wc -c < "$lip_sysf")" ]; then
+    lip_src lip_short_read m.kr 'import "sysf.kr"\nfn main() {\n    exit(0)\n}\n'
+    ln -s "$lip_sysf" "$LIP_D/lip_short_read/sysf.kr"
+    lip_err lip_short_read "error: short read on 'sysf.kr': the file ended before the size it reported, so this module is truncated. Refusing rather than compiling source that was never written"
+fi
+rm -rf "$LIP_D"
 
 # --- Documentation pin 5, PART B (see Part A above) --------------------------
 # README.md advertises this suite's test count. Compare it against the total

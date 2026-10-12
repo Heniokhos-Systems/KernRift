@@ -259,10 +259,54 @@ fn get_lang_profile() -> uint64 {
     return lang_profile
 }
 
+// Lexical errors (an unterminated literal, a malformed number) are reported as
+// they are found and counted here; lexer_run refuses the compile once the whole
+// buffer has been scanned, so every one of them is reported, not just the first.
+static uint64 lex_err_count = 0
+
+// ONE FILE AT A TIME, even though the buffer holds every imported file.
+//
+// import_process() concatenates each module into import_buf and records where
+// each one starts in srcmap_table. Lexed as one run, an unterminated string or
+// character literal at the end of an imported file did not stop at that file:
+// it ran on into the NEXT file, swallowed the importer's code up to the next
+// quote, and the error -- if one came at all -- was reported against the
+// importer, at a line that had nothing wrong with it.
+//
+// So when the buffer being lexed is import_buf, src_len is clamped to the end
+// of the current file for the whole time that file is lexed. No scanner can
+// read past it (peek/peek_at/advance all stop at src_len), and a literal still
+// open at the clamp is reported as unterminated at its own file:line:col. Line
+// numbers keep counting across files exactly as before, so the token stream of
+// a well-formed program is byte-for-byte what it was. Any other buffer (the
+// living compiler lexing a single file, a re-lex of kernel source) is a single
+// file already and is lexed whole.
 @export
 fn lexer_run() -> uint64 {
+    lex_err_count = 0
     // Optional #lang directive on the first line sets the language profile
     lexer_parse_lang_directive()
+    uint64 full_len = src_len
+    if src_ptr == import_buf && srcmap_count > 0 {
+        uint64 si = 0
+        while si < srcmap_count {
+            uint64 seg_end = full_len
+            if si + 1 < srcmap_count {
+                uint64 nxt = srcmap_table + (si + 1) * 16
+                unsafe { *(nxt as uint64) -> seg_end }
+            }
+            if seg_end > full_len { seg_end = full_len }
+            src_len = seg_end
+            while pos < src_len {
+                skip_whitespace_and_comments()
+                if pos < src_len {
+                    lex_one_token()
+                }
+            }
+            si = si + 1
+        }
+        src_len = full_len
+    }
     while pos < src_len {
         skip_whitespace_and_comments()
         // Check again after skipping (avoid break-in-if)
@@ -272,7 +316,75 @@ fn lexer_run() -> uint64 {
     }
     // Emit EOF token
     emit_token(TokenKind.Eof, pos, 0, line)
+    if lex_err_count > 0 {
+        uint8[24] nb
+        uint64 nl = fmt_uint(nb, lex_err_count)
+        write(2, nb, nl)
+        write(2, " lex error(s)\n", 14)
+        exit(1)
+    }
     return tok_count
+}
+
+// "file:line:col: error: <msg_a>[<quoted text><msg_b>]". The location is the
+// byte `start` (the opening quote of an unterminated literal, the first digit
+// of a malformed number). In import_buf the file and line come from the
+// source map, so an error in an imported file names THAT file; elsewhere the
+// buffer is a single file and only line:col is known.
+fn lex_report(uint64 start, uint64 tok_line, uint64 msg_a, uint64 txt, uint64 txt_len, uint64 msg_b) {
+    lex_err_count = lex_err_count + 1
+    if lex_err_count > 20 { return }
+    uint64 l = tok_line
+    if src_ptr == import_buf && srcmap_count > 0 {
+        uint64 fp = srcmap_file(start)
+        if fp != 0 {
+            write(2, fp, str_len(fp))
+            write(2, ":", 1)
+        }
+        l = srcmap_line(start)
+    }
+    uint64 ls = start
+    while ls > 0 {
+        uint64 pb = src_ptr + ls - 1
+        uint64 cb = 0
+        unsafe { *(pb as uint8) -> cb }
+        if cb == 10 { break }
+        ls = ls - 1
+    }
+    uint8[24] nb
+    uint64 n1 = fmt_uint(nb, l)
+    write(2, nb, n1)
+    write(2, ":", 1)
+    uint64 n2 = fmt_uint(nb, start - ls + 1)
+    write(2, nb, n2)
+    write(2, ": error: ", 9)
+    write(2, msg_a, str_len(msg_a))
+    if txt_len != 0 {
+        write(2, "'", 1)
+        write(2, txt, txt_len)
+        write(2, "'", 1)
+        write(2, msg_b, str_len(msg_b))
+    }
+    write(2, "\n", 1)
+}
+
+// A number must END where its digits end. Called with pos just past a complete
+// literal (digits, separators, fraction, exponent, `f` suffix). If what follows
+// is a letter, a digit or a quote, the two were glued together -- `5x`,
+// `0b1012`, `1_f"x"`, `10.5fx` -- and the old reading (a number followed by an
+// identifier, or by an f-string) was never what anyone wrote. The whole run is
+// consumed and reported as one malformed literal; returns 1 if it was.
+fn lex_number_glued(uint64 start, uint64 tok_line) -> uint64 {
+    if pos >= src_len { return 0 }
+    uint64 nc = peek()
+    if is_alnum(nc) == 0 && nc != 34 && nc != 39 { return 0 }
+    while pos < src_len && is_alnum(peek()) != 0 {
+        advance()
+    }
+    lex_report(start, tok_line, "malformed number literal ", src_ptr + start, pos - start,
+               ": a number must not be followed directly by a letter, a stray digit or a quote")
+    emit_token(TokenKind.Error, start, pos - start, tok_line)
+    return 1
 }
 
 @export
@@ -538,7 +650,11 @@ fn lex_one_token() {
                 uint64 plen2 = pos - part_start
                 emit_token(TokenKind.StrPart, part_start, plen2, tok_line)
             }
-            if pos < src_len { advance() }  // consume closing '"'
+            if pos < src_len {
+                advance()  // consume closing '"'
+            } else {
+                lex_report(start, tok_line, "unterminated f-string literal (no closing '\"' before the end of the file)", 0, 0, 0)
+            }
             emit_token(TokenKind.FStrEnd, pos, 0, tok_line)
             return
         }
@@ -590,6 +706,8 @@ fn lex_one_token() {
                 }
             }
             if hex_n == 0 {
+                lex_report(start, tok_line, "malformed number literal ", src_ptr + start, pos - start,
+                           ": a base prefix needs at least one digit")
                 emit_token(TokenKind.Error, start, pos - start, tok_line)
                 return
             }
@@ -611,20 +729,17 @@ fn lex_one_token() {
                 }
             }
             if bin_n == 0 {
+                lex_report(start, tok_line, "malformed number literal ", src_ptr + start, pos - start,
+                           ": a base prefix needs at least one digit")
                 emit_token(TokenKind.Error, start, pos - start, tok_line)
                 return
             }
             // A decimal digit straight after the binary ones is a typo, not two
             // tokens: `0b1012` would otherwise lex as 0b101 followed by 2, and
-            // the stray 2 is not always where it would be noticed. Letters are
-            // deliberately NOT rejected here -- number-then-identifier
-            // adjacency is meaningful elsewhere (see the `42exit` note in the
-            // exponent scan below).
-            if pos < src_len && peek() >= 50 && peek() <= 57 {
-                advance()
-                emit_token(TokenKind.Error, start, pos - start, tok_line)
-                return
-            }
+            // the stray 2 is not always where it would be noticed. The same
+            // holds for a letter or a quote (`0b1f"x"` used to lex as 0b1
+            // followed by an f-string), so lex_number_glued covers all three.
+            if lex_number_glued(start, tok_line) != 0 { return }
             emit_token(TokenKind.IntLit, start, pos - start, tok_line)
             return
         } else {
@@ -665,8 +780,9 @@ fn lex_one_token() {
             }
             if pos < src_len && (peek() == 101 || peek() == 69) {
                 // Only consume `e`/`E` if a digit (optionally preceded by
-                // + or -) actually follows — otherwise we'd eat the 'e'
-                // out of identifiers like `42exit`.
+                // + or -) actually follows. A bare `e` is left alone, and
+                // lex_number_glued then reports `42exit` as one malformed
+                // literal rather than silently splitting it.
                 uint64 exp_probe = 1
                 uint64 c1 = peek_at(exp_probe)
                 if c1 == 43 || c1 == 45 {
@@ -686,22 +802,33 @@ fn lex_one_token() {
             }
             if is_float != 0 {
                 if pos < src_len && peek() == 102 { advance() }
+                if lex_number_glued(start, tok_line) != 0 { return }
                 emit_token(TokenKind.FloatLit, start, pos - start, tok_line)
                 return
             }
         }
+        // Integer (decimal or hex): nothing may be glued to its end -- `5x`,
+        // `1_f"x"` and `0x1Fg` are one malformed literal each, not a number
+        // followed by something else.
+        if lex_number_glued(start, tok_line) != 0 { return }
         emit_token(TokenKind.IntLit, start, pos - start, tok_line)
         return
     }
 
-    // String literal
+    // String literal. A literal still open at the end of the file (src_len is
+    // the end of the CURRENT file while import_buf is lexed -- see lexer_run)
+    // is an error at its opening quote, not a token that quietly ends there.
     if ch == 34 {
         advance()
         while pos < src_len && peek() != 34 {
             if peek() == 92 { advance() }
             advance()
         }
-        if pos < src_len { advance() }
+        if pos < src_len {
+            advance()
+        } else {
+            lex_report(start, tok_line, "unterminated string literal (no closing '\"' before the end of the file)", 0, 0, 0)
+        }
         emit_token(TokenKind.StrLit, start, pos - start, tok_line)
         return
     }
@@ -715,7 +842,11 @@ fn lex_one_token() {
             if peek() == 92 { advance() }
             advance()
         }
-        if pos < src_len { advance() }
+        if pos < src_len {
+            advance()
+        } else {
+            lex_report(start, tok_line, "unterminated character literal (no closing \"'\" before the end of the file)", 0, 0, 0)
+        }
         emit_token(TokenKind.CharLit, start, pos - start, tok_line)
         return
     }
