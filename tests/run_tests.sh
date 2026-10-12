@@ -27942,6 +27942,9 @@ t10_wine() {
     done
     return $rc
 }
+# The tail of Wine's stderr, minus its font-library banner, for a failure message.
+# (Wine reports a failed launch on STDOUT, so both streams are shown.)
+t10_errtail() { cat "$T10_D/win.err" "$T10_D/win.out" 2>/dev/null | grep -v -i 'freetype\|truetype\|or equal\|^$' | tail -c 200 | tr '\n' '|'; }
 # t10_build <arch> <fixture> [extra flags]: builds the fixture to $T10_D/<name>-<arch>
 t10_build() {
     local a="$1" f="$2"; shift 2
@@ -27965,7 +27968,7 @@ t10_row() {
     chmod +x "$T10_D/$f-$a"
     t10_run "$a" "$f" "$@"; rc=$?
     got=$(cat "$T10_D/out")
-    if [ "$got" = "$want" ] && [ "$rc" = "$wrc" ]; then t10_ok "$row" "rc=$rc"; else t10_bad "$row" "got '$(printf '%s' "$got" | head -c 60)' rc=$rc, want '$want' rc=$wrc"; fi
+    if [ "$got" = "$want" ] && [ "$rc" = "$wrc" ]; then t10_ok "$row" "rc=$rc"; else t10_bad "$row" "got '$(printf '%s' "$got" | head -c 60)' rc=$rc$([ "$rc" = 124 ] && printf ' (timed out after 60 s)'), want '$want' rc=$wrc"; fi
 }
 t10_row sys_args_hello_x86_64 x86_64 sys_args "2hello" 0 hello
 t10_row sys_args_hello_arm64 arm64 sys_args "2hello" 0 hello
@@ -28043,6 +28046,15 @@ if [ $T10_RC -ne 0 ] && printf '%s' "$T10_O" | grep -q "duplicate static .cli_en
 else
     t10_bad sys_args_plain_user_cli_envp_refused "rc=$T10_RC: $(printf '%s' "$T10_O" | head -2 | cut -c1-200)"
 fi
+# A program importing args.kr forwards its environment to a child (the args.kr
+# header's claim): the child script exits 5 if the marker the harness exports
+# is present, 6 if not. exec_process's "cli_envp if defined, else NULL" is the
+# mechanism; dropping or zeroing cli_envp turns 5 into 6.
+printf '#!/bin/sh\n[ -n "$T10_MARK" ] && exit 5\nexit 6\n' > "$T10_U/child.sh"; chmod +x "$T10_U/child.sh"
+export T10_MARK=1
+t10_row sys_args_importer_forwards_environment_x86_64 x86_64 sys_envp_exec "" 5 "$T10_U/child.sh"
+t10_row sys_args_importer_forwards_environment_arm64 arm64 sys_envp_exec "" 5 "$T10_U/child.sh"
+unset T10_MARK
 t10_row sys_args_shared_user_cli_envp_is_the_loaders x86_64 sys_envp "" 7
 t10_row sys_args_shared_user_cli_envp_is_the_loaders_arm64 arm64 sys_envp "" 7
 
@@ -28078,12 +28090,12 @@ else
     if [ "$T10_RC" = "0" ] && [ -s "$T10_D/lin.out" ] && [ "$(wc -l < "$T10_D/lin.out")" -ge 10 ] && cmp -s "$T10_D/lin.out" "$T10_D/win.out"; then
         t10_ok sys_args_windows_equals_linux_wine "$(head -1 "$T10_D/lin.out"), $(grep -c '' "$T10_D/lin.out") lines identical, argv[0] aside"
     else
-        t10_bad sys_args_windows_equals_linux_wine "rc=$T10_RC; $(diff "$T10_D/lin.out" "$T10_D/win.out" 2>&1 | head -4 | cut -c1-60 | tr '\n' '|')"
+        t10_bad sys_args_windows_equals_linux_wine "rc=$T10_RC; $(diff "$T10_D/lin.out" "$T10_D/win.out" 2>&1 | head -4 | cut -c1-60 | tr '\n' '|') wine output tail: $(t10_errtail)"
     fi
     TOTAL=$((TOTAL + 1))
     cp "$T10_D/sys_loopback-wx86_64.exe" "$T10_D/sys_loopback.exe" 2>/dev/null
     t10_wine "$T10_D/win.out" "$T10_D/win.err" sys_loopback.exe; T10_RC=$?
-    if [ "$T10_RC" = "21" ]; then t10_ok sys_loopback_windows_enosys_wine "sys_socket is -ENOSYS until Task 11 (exit 21)"; else t10_bad sys_loopback_windows_enosys_wine "rc=$T10_RC want 21"; fi
+    if [ "$T10_RC" = "21" ]; then t10_ok sys_loopback_windows_enosys_wine "sys_socket is -ENOSYS until Task 11 (exit 21)"; else t10_bad sys_loopback_windows_enosys_wine "rc=$T10_RC want 21; wine output tail: $(t10_errtail)"; fi
     # --legacy Windows (and @naked main) leaves cli_argc at the 0xFFFFFFFF
     # sentinel and cli_argv at the raw command line; args.kr must read that as
     # "no arguments", never walk it (it crashed with 0xC0000005).
@@ -28093,7 +28105,7 @@ else
         if [ "$T10_RC" = "0" ]; then
             t10_ok sys_args_legacy_sentinel_reads_as_no_arguments_wine "argc 0, sys_arg(0) and (1) are 0"
         else
-            t10_bad sys_args_legacy_sentinel_reads_as_no_arguments_wine "rc=$T10_RC (1 argc, 2/3 sys_arg, 5 = access violation)"
+            t10_bad sys_args_legacy_sentinel_reads_as_no_arguments_wine "rc=$T10_RC (1 argc, 2/3 sys_arg, 5 = access violation); wine output tail: $(t10_errtail)"
         fi
     else
         t10_bad sys_args_legacy_sentinel_reads_as_no_arguments_wine "build: $(grep -m1 error "$T10_D/w.log" | cut -c1-120)"

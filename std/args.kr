@@ -24,7 +24,7 @@
 @shared static u64 cli_argv
 @shared static u64 cli_envp
 
-// A `--legacy` Windows build and a `@naked fn main` leave cli_argc at the
+// A `--legacy` Windows build and a Windows `@naked fn main` leave cli_argc at the
 // 0xFFFFFFFF sentinel with cli_argv pointing at the raw command line, not at a
 // pointer array. Both readers treat that as "no arguments" rather than walk it.
 

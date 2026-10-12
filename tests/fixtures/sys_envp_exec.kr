@@ -1,0 +1,8 @@
+// A program that imports std/args.kr runs argv[1] as a child. exec_process
+// passes cli_envp when the program defines it, and args.kr defines it, so the
+// child sees the parent's environment. Exits with the child's exit code.
+import "../../std/args.kr"
+
+fn main() -> uint32 {
+    return exec_process(sys_arg(1))
+}
