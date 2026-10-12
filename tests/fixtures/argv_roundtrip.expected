@@ -59,3 +59,11 @@ argc=2
 <ab cd>
 <x>
 raw=<"ab cd" x>
+#9 rc=1
+argc=1
+<>
+raw=<"">
+#10 rc=1
+argc=1
+<>
+raw=<"">

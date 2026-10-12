@@ -15401,8 +15401,9 @@ fn ir_emit_x86_function(uint64 fn_node) {
 //     or contains space, tab or `"`: inside the quotes every backslash run
 //     before a `"` is doubled plus one and the `"` escaped, a run before the
 //     closing quote is doubled. argv[0] follows argv[0]'s parse rule instead:
-//     quoted (no escaping) when empty or holding space/tab, and every `"` in
-//     it DROPPED -- UCRT's argv[0] rule has no escape for one, and passed
+//     quoted (no escaping) when empty, empty once its `"` are dropped (an
+//     empty command line is one CreateProcessA replaces with the program
+//     path), or holding space/tab, and every `"` in it DROPPED -- UCRT's argv[0] rule has no escape for one, and passed
 //     through an odd count would keep quote mode on over the rest of the
 //     line, corrupting argv[1..]. The child gets argv[0] without its quotes
 //     (what UCRT itself yields for any even count); argv[1..] always
@@ -15820,6 +15821,8 @@ fn c7_x86_emit_quote_leaf() {
     uint64 l_scan = c7_label()
     uint64 l_scanlead = c7_label()
     uint64 l_scannext = c7_label()
+    uint64 l_scanend = c7_label()
+    uint64 l_s0 = c7_label()
     uint64 l_plain = c7_label()
     uint64 l_adone = c7_label()
     uint64 l_qb = c7_label()
@@ -15850,7 +15853,7 @@ fn c7_x86_emit_quote_leaf() {
     c7_bind(l_scan)
     c7_b4(0x45, 0x0F, 0xB6, 0x11)           // movzx r10d, byte [r9]
     c7_b3(0x45, 0x84, 0xD2)                 // test r10b, r10b
-    c7_x86_jcc(C7_JE, l_plain)
+    c7_x86_jcc(C7_JE, l_scanend)
     c7_b4(0x41, 0x80, 0xFA, 0x20)           // cmp r10b, ' '
     c7_x86_jcc(C7_JE, l_q)
     c7_b4(0x41, 0x80, 0xFA, 0x09)           // cmp r10b, '\t'
@@ -15874,6 +15877,21 @@ fn c7_x86_emit_quote_leaf() {
     c7_bind(l_scannext)
     c7_b3(0x49, 0xFF, 0xC1)                 // inc r9
     c7_x86_jmp(l_scan)
+    // An argv[0] made only of `"` would be EMPTY once they are dropped, and an
+    // empty command line is one CreateProcessA replaces with the program path
+    // -- so it is quoted like the empty argv[0] above, and arrives as "".
+    c7_bind(l_scanend)
+    c7_b3(0x45, 0x85, 0xDB)                 // test r11d, r11d
+    c7_x86_jcc(C7_JNE, l_plain)
+    c7_b3(0x4D, 0x89, 0xC1)                 // mov r9, r8
+    c7_bind(l_s0)
+    c7_b4(0x45, 0x0F, 0xB6, 0x11)           // movzx r10d, byte [r9]
+    c7_b3(0x45, 0x84, 0xD2)                 // test r10b, r10b
+    c7_x86_jcc(C7_JE, l_q)                  // only `"`: quoted
+    c7_b4(0x41, 0x80, 0xFA, 0x22)           // cmp r10b, '"'
+    c7_x86_jcc(C7_JNE, l_plain)             // a byte survives the drop
+    c7_b3(0x49, 0xFF, 0xC1)                 // inc r9
+    c7_x86_jmp(l_s0)
     // Nothing to quote: verbatim, except that a `"` is dropped. Only argv[0]
     // can get here holding one (for argv[1..] a `"` forces quotes), and
     // UCRT's argv[0] rule has no escape for it: passed through, an odd one

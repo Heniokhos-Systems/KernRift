@@ -45,4 +45,6 @@ which UCRT's `argv[0]` rule has no escape for. Every `"` of `argv[0]` is
 therefore **dropped**, so the child receives `argv[0]` without its quotes
 (`a"b` arrives as `ab`) and `argv[1..]` always arrive intact. Passed through,
 an odd count of `"` would have kept the child's quote mode on over the rest of
-the line and swallowed the later arguments into `argv[0]`.
+the line and swallowed the later arguments into `argv[0]`. An `argv[0]` of nothing but `"` is therefore empty, and goes out quoted
+(`""`) like an empty one: an empty command line is one `CreateProcessA`
+replaces with the program path, which the child would get as `argv[0]`.

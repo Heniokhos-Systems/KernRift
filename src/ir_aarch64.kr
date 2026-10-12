@@ -4124,6 +4124,8 @@ fn c7_a64_emit_quote_leaf() {
     uint64 l_scan = c7_label()
     uint64 l_scanlead = c7_label()
     uint64 l_scannext = c7_label()
+    uint64 l_scanend = c7_label()
+    uint64 l_s0 = c7_label()
     uint64 l_plain = c7_label()
     uint64 l_adone = c7_label()
     uint64 l_qb = c7_label()
@@ -4149,7 +4151,7 @@ fn c7_a64_emit_quote_leaf() {
     emit_a64_mov(9, 3)
     c7_bind(l_scan)
     emit_a64_ldrb(10, 9, 0)
-    c7_a64_cbz_w(10, l_plain)
+    c7_a64_cbz_w(10, l_scanend)
     c7_a64_cmp_wi(10, 0x20)
     c7_a64_bcond(C7_A64_EQ, l_q)
     c7_a64_cmp_wi(10, 0x09)
@@ -4168,6 +4170,18 @@ fn c7_a64_emit_quote_leaf() {
     c7_bind(l_scannext)
     emit_a64_add_imm(9, 9, 1)
     c7_a64_b(l_scan)
+    // An argv[0] made only of `"` would be EMPTY once they are dropped (and an
+    // empty command line becomes the program path): quoted, it arrives as "".
+    c7_bind(l_scanend)
+    c7_a64_cbnz_x(6, l_plain)
+    emit_a64_mov(9, 3)
+    c7_bind(l_s0)
+    emit_a64_ldrb(10, 9, 0)
+    c7_a64_cbz_w(10, l_q)                   // only `"`: quoted
+    c7_a64_cmp_wi(10, 0x22)
+    c7_a64_bcond(C7_A64_NE, l_plain)        // a byte survives the drop
+    emit_a64_add_imm(9, 9, 1)
+    c7_a64_b(l_s0)
     // Nothing to quote: verbatim, except that a `"` is dropped (only argv[0]
     // can get here holding one; see the C7 header in ir.kr).
     c7_bind(l_plain)
