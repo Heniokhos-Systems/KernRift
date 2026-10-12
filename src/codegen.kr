@@ -339,9 +339,18 @@ static uint64 static_decls = 0
 // lookup); an accepted @shared set merges exactly as it does without the
 // switch. An internal switch for sweeping a tree before the error lands in
 // it -- never the default.
+// Values: 0 = off, 1 = report (print each warning), 2 = report but print
+// nothing. A fat build parses the program once per slice; compile_fat moves
+// 1 to 2 after the FIRST slice's parse (static_dup_report_mute), so each
+// finding is printed once, not once per slice. The rules still run in every
+// slice, so every slice merges and builds exactly as the first did.
 static uint64 static_dup_report_only = 0
 @export
 fn set_static_dup_report_only(uint64 v) { static_dup_report_only = v }
+@export
+fn static_dup_report_mute() {
+    if static_dup_report_only != 0 { static_dup_report_only = 2 }
+}
 
 // Local array element size table — records the per-element size of each
 // local `TYPE[N] name` declaration so that index reads/writes can scale the

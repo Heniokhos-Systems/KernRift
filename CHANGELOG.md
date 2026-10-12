@@ -4,6 +4,37 @@ All notable changes to `kernriftc` are documented in this file.
 
 ## Unreleased
 
+**Breaking: a second `static` or `const` of the same name is now an error, and
+`@shared` is how two files declare one variable.** Previously-compiling source
+can stop compiling. Until now a second declaration of a name -- in another file
+of the import graph or in the same file -- silently became the SAME variable as
+the first: the first initializer was kept, the second dropped, and conflicting
+types were accepted. ApexRift carried a live bug of exactly that shape (the
+local console's escape-sequence state and the remote shell's were one variable,
+because two files each declared `ansi_state`); a sweep of every KernRift and
+ApexRift build input found 11 such duplicates, none deliberate. Now:
+
+```
+b.kr:3:15: error: duplicate static `count` (first declared at a.kr:7); rename one, or mark EVERY declaration `@shared` if they are meant to be the same variable
+k.kr:2:14: error: duplicate const `K` (first declared at k.kr:1); keep one definition
+```
+
+When two files really mean one variable, mark **every** declaration
+`@shared static`. The set is accepted only if all declarations carry `@shared`,
+all have the identical type (type, array size and array-ness, element size,
+struct type) and at most one has a non-zero initializer, which is then the value
+wherever it is written; a mixed set, a type mismatch or two initializers is an
+error. Types compare by the token written: a type keyword and its short form are
+one type (`u64`/`uint64`, `u8`/`uint8`, `float`/`f32`), but a type written as a
+name -- a struct, a `type` alias, or the aliases `byte` and `addr` -- matches
+only the same name, so `byte` against `uint8` is refused; write one spelling.
+`@shared` applies to `static` only: consts are never shared, and `@shared` on a
+const or a function is refused. The consequence for the standard library:
+`std/args.kr` declares `cli_argc`, `cli_argv` and `cli_envp` `@shared`, so a
+program that imports it and also declares one of those names must write
+`@shared` on its own declaration too -- a plain redeclaration is refused with
+that advice. (`src/parser.kr`, `src/codegen.kr`; `docs/LANGUAGE.md` §10.)
+
 **Fixed: a variable's declared type was ignored when its initializer was a float
 (check C11).** Both directions were silently wrong:
 

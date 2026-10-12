@@ -720,6 +720,8 @@ fn p_write_loc(uint64 tok) {
 // One duplicate-declaration diagnostic. what: 0 = static, 1 = const.
 // severity: 0 = error (counted), 1 = the --report-duplicates warning.
 fn p_static_dup_report(uint64 new_tok, uint64 first_tok, uint64 what, uint64 severity) {
+    // A later fat slice re-finds what the first slice already printed.
+    if severity == 1 && static_dup_report_only == 2 { return }
     if severity == 0 {
         if parse_err_should_report() == 0 { p_err_count = p_err_count + 1  return }
         p_err_reported = p_err_reported + 1
@@ -780,6 +782,7 @@ fn p_static_dup_check(uint64 name_tok, uint64 is_const, uint64 is_shared) -> uin
 // closes it: only an error is counted.
 fn p_static_conflict_head(uint64 tok) -> uint64 {
     if p_static_dup_severity() != 0 {
+        if static_dup_report_only == 2 { return 0 }
         diag_loc_head(tok, 1)
         return 1
     }

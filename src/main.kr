@@ -3297,6 +3297,9 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
     parser_init(my_tokens, tcount)
     asm_seen_reset()
     uint64 root = parse_module()
+    // --report-duplicates: --emit=fatimage calls compile() once per slice;
+    // only the first parse prints (see static_dup_report_mute).
+    static_dup_report_mute()
 
     // Semantic validation: check arg counts, missing returns, duplicate functions
     uint64 sema_errs = run_semantic_checks(root, source, my_tokens)
@@ -6048,6 +6051,9 @@ fn compile_fat(uint64 input_path, uint64 output_path) {
     parser_init(my_tokens, saved_tcount)
     asm_seen_reset()
     uint64 root = parse_module()
+    // --report-duplicates: slices 2..8 re-parse the same program and would
+    // print every warning again; the first slice's report is the inventory.
+    static_dup_report_mute()
 
     // Semantic validation: check arg counts, missing returns, duplicate functions
     uint64 sema_errs = run_semantic_checks(root, source, my_tokens)

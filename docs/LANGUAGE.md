@@ -885,6 +885,12 @@ whichever file it is in. A mixed set, a type mismatch or two initializers is an
 error. `@shared` applies to `static` only: consts are never shared (keep one
 definition), and `@shared` on anything else is refused.
 
+The type comparison is by the token written: a type keyword and its short form
+are one type (`u64`/`uint64`, `float`/`f32`), but a type written as a name — a
+struct, a `type` alias, or the aliases `byte` and `addr` — matches only the
+same name, so `@shared static byte v` against `@shared static uint8 v` is
+refused. Write one spelling.
+
 ---
 
 ## 11. Pointer operations

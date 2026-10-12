@@ -26896,6 +26896,26 @@ const uint64 K = 2
 fn main() -> uint64 { return K }'
 dup_reject "dup_static_then_const_refused" \
     "$DUP_D/m.kr:2:14: error: duplicate const \`K\` (first declared at $DUP_D/m.kr:1); keep one definition" '!@shared'
+# ... and a `@shared` static is no exception: a const is never shared, so
+# against one the text is still the const text with no `@shared` advice (which
+# would send the user to put `@shared` on the const, itself an error). Both
+# orders, across files.
+dup_put a.kr '@shared
+static uint64 K = 1
+fn a_get() -> uint64 { return K }'
+dup_put m.kr 'import "a.kr"
+const uint64 K = 2
+fn main() -> uint64 { return a_get() }'
+dup_reject "dup_shared_static_then_const_refused" \
+    "$DUP_D/m.kr:2:14: error: duplicate const \`K\` (first declared at $DUP_D/a.kr:2); keep one definition" '!@shared'
+dup_put a.kr 'const uint64 K = 1
+fn a_get() -> uint64 { return K }'
+dup_put m.kr 'import "a.kr"
+@shared
+static uint64 K = 2
+fn main() -> uint64 { return a_get() }'
+dup_reject "dup_const_then_shared_static_refused" \
+    "$DUP_D/m.kr:3:15: error: duplicate const \`K\` (first declared at $DUP_D/a.kr:1); keep one definition" '!@shared'
 
 # @shared must be on EVERY declaration: a mixed set is the plain error, in
 # either order.
@@ -27155,6 +27175,45 @@ if [ $DUPF_RC -eq 0 ] && ! printf '%s' "$DUPF_OUT" | grep -q "duplicate"; then
 else
     FAIL=$((FAIL + 1)); echo "FAIL: dup_check_fat_reparse_clean (rc=$DUPF_RC: $(printf '%s' "$DUPF_OUT" | grep -m1 error))"
 fi
+# --report-duplicates under a default (FAT) build: the program is parsed once
+# per slice, but each finding is printed ONCE -- an inventory that counts every
+# duplicate eight times is not an inventory. One plain duplicate (the
+# p_static_dup_report path) and one @shared type conflict (the
+# p_static_conflict_head path); each must appear exactly once, and the build
+# must still succeed.
+dup_put a.kr 'static uint64 counter = 1
+@shared
+static uint32 b
+fn a_get() -> uint64 { return counter + b }'
+dup_put m.kr 'import "a.kr"
+static uint64 counter = 2
+@shared
+static uint64 b
+fn main() -> uint64 { return a_get() }'
+TOTAL=$((TOTAL + 1))
+DUPFR_OUT=$("$KRC" --report-duplicates "$DUP_D/m.kr" -o "$DUP_D/m.krbo" 2>&1); DUPFR_RC=$?
+DUPFR_N1=$(printf '%s\n' "$DUPFR_OUT" | grep -cF "$DUP_D/m.kr:2:15: warning: duplicate static \`counter\` (first declared at $DUP_D/a.kr:1)")
+DUPFR_N2=$(printf '%s\n' "$DUPFR_OUT" | grep -cF "$DUP_D/m.kr:4:15: warning: @shared static \`b\` is declared with a different type than its first declaration at $DUP_D/a.kr:3")
+DUPFR_NW=$(printf '%s\n' "$DUPFR_OUT" | grep -c 'warning:')
+if [ $DUPFR_RC -eq 0 ] && [ "$DUPFR_N1" = "1" ] && [ "$DUPFR_N2" = "1" ] && [ "$DUPFR_NW" = "2" ]; then
+    PASS=$((PASS + 1)); echo "  dup_report_fat_once_per_finding: PASS"
+else
+    FAIL=$((FAIL + 1)); echo "FAIL: dup_report_fat_once_per_finding (rc=$DUPFR_RC, counter x$DUPFR_N1, b x$DUPFR_N2, warnings $DUPFR_NW; want rc 0, 1, 1, 2)"
+fi
+rm -f "$DUP_D/m.krbo"
+# Same for --emit=fatimage, which calls compile() once per slice (three here):
+# the same two findings, each printed once.
+TOTAL=$((TOTAL + 1))
+DUPFI_OUT=$("$KRC" --report-duplicates --emit=fatimage --arch=x86_64,arm64 --target=none "$DUP_D/m.kr" -o "$DUP_D/m.img" 2>&1); DUPFI_RC=$?
+DUPFI_N1=$(printf '%s\n' "$DUPFI_OUT" | grep -cF "$DUP_D/m.kr:2:15: warning: duplicate static \`counter\` (first declared at $DUP_D/a.kr:1)")
+DUPFI_N2=$(printf '%s\n' "$DUPFI_OUT" | grep -cF "$DUP_D/m.kr:4:15: warning: @shared static \`b\` is declared with a different type than its first declaration at $DUP_D/a.kr:3")
+DUPFI_NW=$(printf '%s\n' "$DUPFI_OUT" | grep -c 'warning:')
+if [ $DUPFI_RC -eq 0 ] && [ "$DUPFI_N1" = "1" ] && [ "$DUPFI_N2" = "1" ] && [ "$DUPFI_NW" = "2" ]; then
+    PASS=$((PASS + 1)); echo "  dup_report_fatimage_once_per_finding: PASS"
+else
+    FAIL=$((FAIL + 1)); echo "FAIL: dup_report_fatimage_once_per_finding (rc=$DUPFI_RC, counter x$DUPFI_N1, b x$DUPFI_N2, warnings $DUPFI_NW; want rc 0, 1, 1, 2)"
+fi
+rm -f "$DUP_D/m.img"
 rm -rf "$DUP_D"
 
 # --- C7: uniform Windows argv + child quoting (portable-syscall-layer spec C7) --

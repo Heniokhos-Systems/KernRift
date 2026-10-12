@@ -115,7 +115,19 @@ anno_args   = (IDENT | STR_LIT | INT_LIT) ("," (IDENT | STR_LIT | INT_LIT))*
 ```
 
 Recognised names (the parser sets flags for these, others are ignored but
-consumed): `noreturn`, `naked`, `packed`, `export`, `section`.
+consumed; `src/parser.kr`, the top-level annotation loop):
+
+- functions and code: `noreturn`, `naked`, `export`, `section`,
+  `builtin_override`;
+- types and storage: `packed`, `shared` (a `static` declared in more than one
+  file is one variable only if EVERY declaration carries it; see LANGUAGE.md
+  §10, "One declaration per name, and `@shared`");
+- analysis: `ctx`, `eff`, `caps`, `acquires`;
+- Linux kernel modules (`--emit=lkm`): `module_init`, `module_exit`,
+  `module_license`, `module_author`, `module_description`, `module_name`,
+  `module_register_misc_device`, `module_register_pci_driver`,
+  `lkm_ioctl_handler`, `lkm_mmap_handler`, `pci_probe_handler`,
+  `pci_remove_handler`.
 
 ## Declarations
 
