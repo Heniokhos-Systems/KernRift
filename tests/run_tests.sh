@@ -27190,8 +27190,11 @@ static uint64 counter = 2
 @shared
 static uint64 b
 fn main() -> uint64 { return a_get() }'
+# build/krc2 directly, as dup_check_fat_reparse_clean does: under `make test`
+# and CI, $KRC is a wrapper that passes --arch=x86_64, which would make this a
+# SINGLE-arch build that parses once and passes for the wrong reason.
 TOTAL=$((TOTAL + 1))
-DUPFR_OUT=$("$KRC" --report-duplicates "$DUP_D/m.kr" -o "$DUP_D/m.krbo" 2>&1); DUPFR_RC=$?
+DUPFR_OUT=$("$DIR/../build/krc2" --report-duplicates "$DUP_D/m.kr" -o "$DUP_D/m.krbo" 2>&1); DUPFR_RC=$?
 DUPFR_N1=$(printf '%s\n' "$DUPFR_OUT" | grep -cF "$DUP_D/m.kr:2:15: warning: duplicate static \`counter\` (first declared at $DUP_D/a.kr:1)")
 DUPFR_N2=$(printf '%s\n' "$DUPFR_OUT" | grep -cF "$DUP_D/m.kr:4:15: warning: @shared static \`b\` is declared with a different type than its first declaration at $DUP_D/a.kr:3")
 DUPFR_NW=$(printf '%s\n' "$DUPFR_OUT" | grep -c 'warning:')

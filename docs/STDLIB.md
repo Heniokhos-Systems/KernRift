@@ -477,7 +477,7 @@ socket type, or a datagram socket).
 | `fn net_accept(u64 fd) -> u64` | `accept()` — returns new connection fd. |
 | `fn net_connect(u64 fd, u64 addr, u64 addr_len) -> u64` | `connect()`. |
 | `fn net_send(u64 fd, u64 buf, u64 len) -> u64` | `sys_send` — bytes sent. A peer that closed gives −EPIPE (Linux: `MSG_NOSIGNAL`, no SIGPIPE); a non-socket fd (a pipe) is written to. |
-| `fn net_recv(u64 fd, u64 buf, u64 len) -> u64` | `sys_recv` — bytes received, 0 at EOF (including after your own `shutdown(SHUT_RD)`). `len` 0 returns 0 at once on every OS. |
+| `fn net_recv(u64 fd, u64 buf, u64 len) -> u64` | `sys_recv` — bytes received, 0 at EOF (including after your own `shutdown(SHUT_RD)`). `len` 0 returns 0 at once on every OS for a live socket (a closed handle is −EBADF on Linux, 0 on Windows; see the list at the top of `std/sys.kr`). |
 | `fn net_close(u64 fd)` | `sys_sock_close`. |
 | `fn net_setsockopt(u64 fd, u64 level, u64 optname, u64 optval, u64 optlen) -> u64` | `sys_setsockopt` — Linux option numbers; Windows translates `SO_REUSEADDR` and `SO_RCVTIMEO` only. |
 | `fn net_htons(u64 port) -> u64` | Byte-swap a 16-bit port to network order. |
