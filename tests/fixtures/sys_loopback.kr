@@ -58,6 +58,9 @@ fn main() -> uint32 {
     // early; 10 ms of slack for clock granularity) and <= 2 s (generous for a
     // loaded machine or qemu; a milliseconds-as-seconds bug is 50 s, a
     // wrong-scale nsec bug is microseconds).
+    // A zero timeout polls: an idle socket is not readable, at once (never
+    // "block forever", which a NULL timeval would mean on Windows).
+    if sys_wait_readable(a, 0) != 0 { return 31 }
     uint64 t0 = time_ns()
     if sys_wait_readable(a, 50) != 0 { return 14 }
     uint64 dt = time_ns() - t0

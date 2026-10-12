@@ -1,8 +1,8 @@
 # KernRift Standard Library Reference
 
-The standard library lives in `std/*.kr` — **55 modules, 734 functions**. This
+The standard library lives in `std/*.kr` — **55 modules, 736 functions**. This
 document covers the **19 general-purpose modules** in the index below (313 of
-those functions). The other **36 modules (421 functions) are not documented
+those functions). The other **36 modules (423 functions) are not documented
 here** — read their source directly. They fall into four groups:
 
 - the bare-metal drivers added for the boot work — `console`, `cstr`, `fw_cfg`,
@@ -17,7 +17,7 @@ here** — read their source directly. They fall into four groups:
   stdio, exit, time; a Unix and a Windows backend), `args` (`sys_argc`/`sys_arg`)
   and `win32` (the `_kr_w32_`-prefixed Win32 imports, the Winsock lifecycle,
   the WSAGetLastError → errno map and the Win64 `fd_set`/`timeval` builders)
-  (3 modules, 30 functions);
+  (3 modules, 32 functions);
 - `apexrift` (18 functions).
 
 **Three of those modules define no functions at all** — `gmc_constants`,

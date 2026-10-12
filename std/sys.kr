@@ -20,6 +20,19 @@
 // it is unproven in v1 and has no ppoll/getrandom, and Linux numbers must never
 // be inherited there. Arch ids 9..12 (bare metal) get -ENOSYS the same way.
 //
+// Irreducible Linux/Windows differences (documented, not translated):
+//   - listen() on an UNBOUND socket: Linux autobinds a port (0), Windows -EINVAL;
+//   - getsockname() on an unbound socket: Linux 0 (0.0.0.0:0), Windows -EINVAL;
+//   - connect() to 0.0.0.0: Linux treats it as loopback, Windows -EADDRNOTAVAIL;
+//     so a portable caller binds before listening and never connects to 0.0.0.0;
+//   - once a peer's reset has been reported, later sends read -EPIPE on Linux
+//     but keep reading -ECONNRESET on Windows;
+//   - a keepalive failure on recv reads -EAGAIN on Windows (see recv below);
+//   - WSAENOTSOCK reads -EBADF (a file handle passed as a socket too);
+//   - setsockopt supports SO_REUSEADDR and SO_RCVTIMEO only on Windows;
+//   - IPv4 only on Windows (AF_INET6 is 10 on Linux, 23 on Windows);
+//   - timeouts have the Windows timer's granularity (~15.6 ms).
+//
 // Private helpers carry the `_kr_` prefix. This file does not import args.kr
 // (see args.kr: importing sys.kr must not introduce cli_argc / cli_argv).
 
@@ -27,7 +40,7 @@ import "win32.kr"
 
 // Syscall number for operation `k` on this (arch, os), 0 when there is none.
 //   0 socket  1 connect  2 bind  3 listen  4 accept  5 getsockname
-//   6 shutdown  7 setsockopt  8 close  9 ppoll  10 getrandom
+//   6 shutdown  7 setsockopt  8 close  9 ppoll  10 getrandom  11 sendto
 // Linux and Android share a table per architecture (1/8 = x86_64, 2/7 = arm64).
 fn _kr_sys_nr(u64 k) -> u64 {
     u64 a = get_arch_id()
@@ -43,6 +56,7 @@ fn _kr_sys_nr(u64 k) -> u64 {
         if k == 8 { return 3 }
         if k == 9 { return 271 }
         if k == 10 { return 318 }
+        if k == 11 { return 44 }
         return 0
     }
     if a == 2 || a == 7 {
@@ -57,6 +71,7 @@ fn _kr_sys_nr(u64 k) -> u64 {
         if k == 8 { return 57 }
         if k == 9 { return 73 }
         if k == 10 { return 278 }
+        if k == 11 { return 206 }
         return 0
     }
     return 0
@@ -64,16 +79,22 @@ fn _kr_sys_nr(u64 k) -> u64 {
 
 // --- Windows helpers (called only from the os==2 arms) -------------------------
 
-// send/recv result: a count, or -errno. A receive (or send) timeout set with
-// SO_RCVTIMEO / SO_SNDTIMEO fails on Windows with WSAETIMEDOUT and on Linux with
-// EAGAIN; the Linux reading is the contract, so WSAETIMEDOUT -> -EAGAIN HERE
-// (connect keeps -ETIMEDOUT). Irreducible: a keepalive failure also surfaces as
-// WSAETIMEDOUT on a recv, where Linux says ETIMEDOUT -- it reads -EAGAIN too.
-fn _kr_sys_w32_io(u64 r) -> int64 {
+// recv result: a count, 0 on EOF, or -errno. A receive timeout set with
+// SO_RCVTIMEO fails on Windows with WSAETIMEDOUT and on Linux with EAGAIN; the
+// Linux reading is the contract, so WSAETIMEDOUT -> -EAGAIN HERE (connect keeps
+// -ETIMEDOUT). Irreducible: a keepalive failure also surfaces as WSAETIMEDOUT
+// on a recv, where Linux says ETIMEDOUT -- it reads -EAGAIN too.
+fn _kr_sys_w32_recv_ret(u64 r) -> int64 {
     if (r & 0xFFFFFFFF) != 0xFFFFFFFF { return r & 0xFFFFFFFF }
     u64 w = _kr_w32_WSAGetLastError() & 0xFFFFFFFF
     if w == 10060 { return 0 - 11 }
     return 0 - _kr_w32_errno(w)
+}
+
+// send result: a count, or -errno (send's own map: _kr_w32_send_errno).
+fn _kr_sys_w32_send_ret(u64 r) -> int64 {
+    if (r & 0xFFFFFFFF) != 0xFFFFFFFF { return r & 0xFFFFFFFF }
+    return 0 - _kr_w32_send_errno(_kr_w32_WSAGetLastError() & 0xFFFFFFFF)
 }
 
 // setsockopt with LINUX option numbers and value shapes (the sys_* contract),
@@ -237,20 +258,30 @@ fn sys_sock_close(u64 sock) -> int64 {
     }
 }
 
-// Single-shot send / receive: a count, 0 on EOF, or -errno. On Unix these are
-// write(2) / read(2) (so a pipe works too), the file_write / file_read builtins
-// -- on every Unix, macOS included, since no socket can exist there to send on.
+// Single-shot send / receive: a count, 0 on EOF, or -errno.
+// sys_send on Linux/Android is sendto(fd, buf, len, MSG_NOSIGNAL, NULL, 0): a
+// send to a peer that closed returns -EPIPE instead of killing the process
+// with SIGPIPE -- the same result Windows gives for the same condition. It
+// stays pipe-compatible (spec C3): on a non-socket fd sendto says -ENOTSOCK
+// and the call falls back to write(2), the file_write builtin. (A pipe write
+// can still raise SIGPIPE: that is a pipe's semantics, not a socket's.) macOS
+// has no sockets in v1 (sys_socket is -ENOSYS), so it writes directly.
+// sys_recv is read(2) on every Unix (a receive never raises SIGPIPE).
 fn sys_send(u64 sock, u64 buf, u64 len) -> int64 {
     if get_target_os() == 2 {
         int64 e = _kr_w32_ensure()
         if e < 0 { return e }
         u64 n = len
         if n > 0x7FFFFFFF { n = 0x7FFFFFFF }
-        return _kr_sys_w32_io(_kr_w32_send(sock, buf, n, 0))
+        return _kr_sys_w32_send_ret(_kr_w32_send(sock, buf, n, 0))
     } else if get_target_os() == 4 {
         return 0 - 38
     } else {
-        return file_write(sock, buf, len)
+        u64 nr = _kr_sys_nr(11)
+        if nr == 0 { return file_write(sock, buf, len) }
+        int64 r = syscall_raw(nr, sock, buf, len, 0x4000, 0, 0)
+        if r == 0 - 88 { return file_write(sock, buf, len) }
+        return r
     }
 }
 
@@ -260,7 +291,7 @@ fn sys_recv(u64 sock, u64 buf, u64 len) -> int64 {
         if e < 0 { return e }
         u64 n = len
         if n > 0x7FFFFFFF { n = 0x7FFFFFFF }
-        return _kr_sys_w32_io(_kr_w32_recv(sock, buf, n, 0))
+        return _kr_sys_w32_recv_ret(_kr_w32_recv(sock, buf, n, 0))
     } else if get_target_os() == 4 {
         return 0 - 38
     } else {
@@ -304,7 +335,12 @@ fn sys_wait_readable(u64 sock, u64 timeout_ms) -> int64 {
             tsp = ts
         }
         int64 r = syscall_raw(nr, pfd, 1, tsp, 0, 8, 0)
-        if r > 0 { return 1 }
+        if r > 0 {
+            // POLLNVAL (0x20): the fd is not open. Windows' select says
+            // WSAENOTSOCK -> -EBADF for the same call, and so does this.
+            if (load16(pfd + 6) & 0x20) != 0 { return 0 - 9 }
+            return 1
+        }
         return r
     }
 }

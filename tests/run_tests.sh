@@ -26718,7 +26718,26 @@ fi
 #     recipe) runs a .krbo, and the tutorial pager and the narrow-width fixture
 #     WORK on Windows. Counted SKIPs without wine (set KR_WINE=<path to wine>).
 LOG_WINE="${KR_WINE:-$(command -v wine 2>/dev/null || true)}"
-log_wine() { (cd "$LOG_D" && WINEPREFIX="$LOG_D/pfx" WINEDEBUG=-all timeout 180 "$LOG_WINE" "$@" 2>/dev/null); }
+# stderr is KEPT (log_errtail shows it in a FAIL). One retry of exactly "status
+# 53 with empty stdout" -- Wine's "could not load kernel32.dll, status
+# c0000135": a prefix whose initialisation did not complete (seen only inside
+# full suite runs; see t10_wine) -- on a REBUILT prefix. Nothing these rows run
+# exits 53 and Wine's launch failures are 1, so it cannot hide a regression;
+# it is recorded in $LOG_D/retried53 so the PASS text says so (log_note).
+log_wine() {
+    local out rc
+    out=$(cd "$LOG_D" && WINEPREFIX="$LOG_D/pfx" WINEDEBUG=-all timeout 180 "$LOG_WINE" "$@" 2> "$LOG_D/wine.err"); rc=$?
+    if [ "$rc" = "53" ] && [ -z "$out" ]; then
+        cp "$LOG_D/wine.err" "$LOG_D/wine.err.53" 2>/dev/null; touch "$LOG_D/retried53"
+        WINEPREFIX="$LOG_D/pfx" "$(dirname "$LOG_WINE")/wineserver" -k > /dev/null 2>&1
+        rm -rf "$LOG_D/pfx"; mkdir -p "$LOG_D/pfx"
+        out=$(cd "$LOG_D" && WINEPREFIX="$LOG_D/pfx" WINEDEBUG=-all timeout 180 "$LOG_WINE" "$@" 2> "$LOG_D/wine.err"); rc=$?
+    fi
+    printf '%s\n' "$out"
+    return $rc
+}
+log_errtail() { grep -v -i 'freetype\|truetype\|or equal\|^$' "$LOG_D/wine.err" 2>/dev/null | tail -c 200 | tr '\n' '|'; }
+log_note() { [ -f "$LOG_D/retried53" ] && printf ' (retried on a fresh prefix after Wine status 53; first stderr: %s)' "$(grep -v -i 'freetype\|truetype\|or equal\|^$' "$LOG_D/wine.err.53" 2>/dev/null | tail -c 120 | tr '\n' '|')"; }
 TOTAL=$((TOTAL + 3))
 if [ -z "$LOG_WINE" ] || [ ! -x "$LOG_WINE" ]; then
     for LOG_R in runner_windows_runs_krbo_under_wine tutorial_btree_works_on_windows device_narrow_width_clean_on_windows; do
@@ -26730,18 +26749,20 @@ else
     LOG_WHY=""
     $LOG_KRC "$LOG_D/h.kr" -o "$LOG_D/h.krbo" > /dev/null 2>&1 || LOG_WHY="$LOG_WHY no-krbo"
     [ -f "$LOG_D/kr-x86_64.exe" ] || LOG_WHY="$LOG_WHY no-runner"
+    rm -f "$LOG_D/retried53"
     if [ -z "$LOG_WHY" ]; then
         LOG_OUT=$(log_wine kr-x86_64.exe h.krbo); LOG_RC=$?
         [ "$LOG_RC" = "7" ] || LOG_WHY="$LOG_WHY status-$LOG_RC"
         echo "$LOG_OUT" | grep -q '^hello-krbo' || LOG_WHY="$LOG_WHY no-stdout"
     fi
     if [ -z "$LOG_WHY" ]; then
-        PASS=$((PASS + 1)); echo "  runner_windows_runs_krbo_under_wine: PASS (shipped --emit=pe runner, hello.krbo exit 7)"
+        PASS=$((PASS + 1)); echo "  runner_windows_runs_krbo_under_wine: PASS (shipped --emit=pe runner, hello.krbo exit 7$(log_note))"
     else
-        FAIL=$((FAIL + 1)); echo "FAIL: runner_windows_runs_krbo_under_wine ($LOG_WHY )"
+        FAIL=$((FAIL + 1)); echo "FAIL: runner_windows_runs_krbo_under_wine ($LOG_WHY ; wine stderr tail: $(log_errtail))"
     fi
     # tutorial pager: --emit=pe build AND the default fat .krbo via the shipped runner
     LOG_WHY=""
+    rm -f "$LOG_D/retried53"
     $LOG_KRC --arch=x86_64 --emit=pe "$DIR/../examples/tutorial-btree/main.kr" -o "$LOG_D/bt.exe" > "$LOG_D/e3" 2>&1 || LOG_WHY="$LOG_WHY bt-build[$(log_err "$LOG_D/e3")]"
     $LOG_KRC "$DIR/../examples/tutorial-btree/main.kr" -o "$LOG_D/bt.krbo" > "$LOG_D/e4" 2>&1 || LOG_WHY="$LOG_WHY btfat-build[$(log_err "$LOG_D/e4")]"
     if [ -z "$LOG_WHY" ]; then
@@ -26756,12 +26777,13 @@ else
         [ "$(stat -c %s "$LOG_D/kr_tutorial_btree.db" 2>/dev/null)" = "65536" ] || LOG_WHY="$LOG_WHY fat:db-size"
     fi
     if [ -z "$LOG_WHY" ]; then
-        PASS=$((PASS + 1)); echo "  tutorial_btree_works_on_windows: PASS (--emit=pe and fat .krbo via kr.exe, exit 0, 64 KiB db)"
+        PASS=$((PASS + 1)); echo "  tutorial_btree_works_on_windows: PASS (--emit=pe and fat .krbo via kr.exe, exit 0, 64 KiB db$(log_note))"
     else
-        FAIL=$((FAIL + 1)); echo "FAIL: tutorial_btree_works_on_windows ($LOG_WHY )"
+        FAIL=$((FAIL + 1)); echo "FAIL: tutorial_btree_works_on_windows ($LOG_WHY ; wine stderr tail: $(log_errtail))"
     fi
     # fixture: clean exit + message instead of a fault on the unmapped fixed address
     LOG_WHY=""
+    rm -f "$LOG_D/retried53"
     $LOG_KRC --arch=x86_64 --emit=pe "$DIR/../tests/diff/corpus/device_narrow_width.kr" -o "$LOG_D/dnw.exe" > "$LOG_D/e5" 2>&1 || LOG_WHY="$LOG_WHY build[$(log_err "$LOG_D/e5")]"
     if [ -z "$LOG_WHY" ]; then
         LOG_OUT=$(log_wine dnw.exe); LOG_RC=$?
@@ -26769,9 +26791,9 @@ else
         echo "$LOG_OUT" | grep -q 'device access not supported on Windows' || LOG_WHY="$LOG_WHY no-message"
     fi
     if [ -z "$LOG_WHY" ]; then
-        PASS=$((PASS + 1)); echo "  device_narrow_width_clean_on_windows: PASS (message + exit 0, no fault)"
+        PASS=$((PASS + 1)); echo "  device_narrow_width_clean_on_windows: PASS (message + exit 0, no fault$(log_note))"
     else
-        FAIL=$((FAIL + 1)); echo "FAIL: device_narrow_width_clean_on_windows ($LOG_WHY )"
+        FAIL=$((FAIL + 1)); echo "FAIL: device_narrow_width_clean_on_windows ($LOG_WHY ; wine stderr tail: $(log_errtail))"
     fi
     if [ -x "$(dirname "$LOG_WINE")/wineserver" ]; then
         WINEPREFIX="$LOG_D/pfx" "$(dirname "$LOG_WINE")/wineserver" -w > /dev/null 2>&1
@@ -27933,15 +27955,34 @@ t10_bad() { FAIL=$((FAIL + 1)); echo "FAIL: $1 ($2)"; }
 t10_skip() { PASS=$((PASS + 1)); echo "  $1: SKIP ($2)"; }
 # Wine can fail to LAUNCH a program (prints "ShellExecuteEx failed", exits 1,
 # program never started): retry that, exactly that, 3 tries (see c7_wine).
+# Wine has also been seen (rarely, only inside full suite runs) to end a run
+# with status 53 and NO output; its stderr then says "could not load
+# kernel32.dll, status c0000135": the PREFIX's initialisation did not complete
+# (why is not known -- never reproduced outside a full run), and every later
+# run in that prefix fails the same way. So the ONE retry of exactly "53 with
+# empty stdout" first stops that prefix's wineserver and rebuilds the prefix.
+# No program these rows launch exits 53 (their own codes are 1..35, Wine's
+# launch failures are 1), so the retry cannot hide a regression; it sets
+# T10_RETRY53=1 and the PASS text says so (t10_note). The stderr of the failed
+# attempt is kept in <err>.53 and shown in that note.
+T10_RETRY53=0
 t10_wine() {
-    local o="$1" e="$2" t rc; shift 2
+    local o="$1" e="$2" t rc r53=0; shift 2
+    T10_RETRY53=0
     for t in 1 2 3; do
         (cd "$T10_D" && WINEPREFIX="$T10_D/pfx" WINEDEBUG=-all timeout 300 "$T10_WINE" "$@" > "$o" 2> "$e"); rc=$?
         [ "$rc" = "1" ] && grep -aq 'ShellExecuteEx failed' "$o" "$e" && continue
+        if [ "$rc" = "53" ] && [ ! -s "$o" ] && [ "$r53" = "0" ]; then
+            r53=1; T10_RETRY53=1; cp "$e" "$e.53" 2>/dev/null
+            WINEPREFIX="$T10_D/pfx" "$(dirname "$T10_WINE")/wineserver" -k > /dev/null 2>&1
+            rm -rf "$T10_D/pfx"; mkdir -p "$T10_D/pfx"
+            continue
+        fi
         return $rc
     done
     return $rc
 }
+t10_note() { [ "$T10_RETRY53" = "1" ] && printf ' (retried on a fresh prefix after Wine status 53; first stderr: %s)' "$(grep -v -i 'freetype\|truetype\|or equal\|^$' "$T10_D/win.err.53" 2>/dev/null | tail -c 120 | tr '\n' '|')"; }
 # The tail of Wine's stderr, minus its font-library banner, for a failure message.
 # (Wine reports a failed launch on STDOUT, so both streams are shown.)
 t10_errtail() { cat "$T10_D/win.err" "$T10_D/win.out" 2>/dev/null | grep -v -i 'freetype\|truetype\|or equal\|^$' | tail -c 200 | tr '\n' '|'; }
@@ -28086,7 +28127,7 @@ else
     # argv[0] (line 2) is the program's own path and differs by design; the rest must match
     sed -i 2d "$T10_D/lin.out" "$T10_D/win.out"
     if [ "$T10_RC" = "0" ] && [ -s "$T10_D/lin.out" ] && [ "$(wc -l < "$T10_D/lin.out")" -ge 10 ] && cmp -s "$T10_D/lin.out" "$T10_D/win.out"; then
-        t10_ok sys_args_windows_equals_linux_wine "$(head -1 "$T10_D/lin.out"), $(grep -c '' "$T10_D/lin.out") lines identical, argv[0] aside"
+        t10_ok sys_args_windows_equals_linux_wine "$(head -1 "$T10_D/lin.out"), $(grep -c '' "$T10_D/lin.out") lines identical, argv[0] aside$(t10_note)"
     else
         t10_bad sys_args_windows_equals_linux_wine "rc=$T10_RC; $(diff "$T10_D/lin.out" "$T10_D/win.out" 2>&1 | head -4 | cut -c1-60 | tr '\n' '|') wine output tail: $(t10_errtail)"
     fi
@@ -28097,7 +28138,7 @@ else
     if $T10_KRC --legacy --arch=x86_64 --target=windows --emit=pe "$T10_FX/sys_args_legacy.kr" -o "$T10_D/sys_legacy.exe" > "$T10_D/w.log" 2>&1; then
         t10_wine "$T10_D/win.out" "$T10_D/win.err" sys_legacy.exe a b; T10_RC=$?
         if [ "$T10_RC" = "0" ]; then
-            t10_ok sys_args_legacy_sentinel_reads_as_no_arguments_wine "argc 0, sys_arg(0) and (1) are 0"
+            t10_ok sys_args_legacy_sentinel_reads_as_no_arguments_wine "argc 0, sys_arg(0) and (1) are 0$(t10_note)"
         else
             t10_bad sys_args_legacy_sentinel_reads_as_no_arguments_wine "rc=$T10_RC (1 argc, 2/3 sys_arg, 5 = access violation); wine output tail: $(t10_errtail)"
         fi
@@ -28138,6 +28179,25 @@ t10_row sys_w32_layout_arm64 arm64 sys_w32_layout "" 0
 # The error paths, Linux first: the numbers the Windows run must match.
 t10_row sys_sock_errors_x86_64 x86_64 sys_sockerr "OK" 0
 t10_row sys_sock_errors_arm64 arm64 sys_sockerr "OK" 0
+# A send that can no longer go anywhere is -EPIPE and the process LIVES:
+# sys_send is sendto(MSG_NOSIGNAL) on Linux, so no SIGPIPE (without the flag
+# the run dies by signal 13: rc 141, no "survived").
+T11_EPIPE=$'never -32\nshutwr -32\npeer -32\nsurvived'
+t10_row sys_send_epipe_x86_64 x86_64 sys_epipe "$T11_EPIPE" 0
+t10_row sys_send_epipe_arm64 arm64 sys_epipe "$T11_EPIPE" 0
+# ...and still works on a PIPE (spec C3: pipe-compatible): stdout is a pipe
+# here; sendto says -ENOTSOCK and sys_send falls back to write(2).
+for T11_P in "sys_send_on_pipe_x86_64 x86_64" "sys_send_on_pipe_arm64 arm64"; do
+    set -- $T11_P
+    TOTAL=$((TOTAL + 1))
+    if [ "$2" = "arm64" ] && [ -z "$T10_QEMU" ]; then t10_skip "$1" "no qemu-aarch64-static"; continue; fi
+    if ! t10_build "$2" sys_send_pipe; then t10_bad "$1" "build failed: $(grep -m1 'error' "$T10_D/sys_send_pipe-$2.log" | cut -c1-140)"; continue; fi
+    chmod +x "$T10_D/sys_send_pipe-$2"
+    if [ "$2" = "arm64" ]; then timeout 60 "$T10_QEMU" "$T10_D/sys_send_pipe-$2" | cat > "$T10_D/pipe.out"; T11_RC=${PIPESTATUS[0]}
+    else timeout 60 "$T10_D/sys_send_pipe-$2" | cat > "$T10_D/pipe.out"; T11_RC=${PIPESTATUS[0]}; fi
+    if [ "$T11_RC" = "0" ] && [ "$(cat "$T10_D/pipe.out")" = "piped" ]; then t10_ok "$1" "6 bytes through a pipe"
+    else t10_bad "$1" "rc=$T11_RC got '$(head -c 40 "$T10_D/pipe.out")' want 'piped' rc=0"; fi
+done
 
 # arm64 Windows: every `_kr_w32_*` call site, decoded from the image, lands on
 # the IAT entry NAMED for its export, in the same order as the x86_64 slice
@@ -28173,7 +28233,7 @@ else
 fi
 
 if [ -z "$T10_WINE" ]; then
-    for T10_R in sys_loopback_windows_wine sys_random_windows_wine sys_sock_errors_windows_wine; do
+    for T10_R in sys_loopback_windows_wine sys_random_windows_wine sys_sock_errors_windows_wine sys_send_epipe_windows_wine; do
         TOTAL=$((TOTAL + 1)); t10_skip "$T10_R" "no wine; set KR_WINE=<path to wine>"
     done
 else
@@ -28190,7 +28250,7 @@ else
             t10_wine "$T10_D/win.out" "$T10_D/win.err" "$2.exe"; T10_RC=$?
             T11_GOT=$(tr -d '\r' < "$T10_D/win.out")
             if [ "$T10_RC" = "0" ] && [ "$T11_GOT" = "OK" ]; then
-                t10_ok "$1" "rc=0, OK"
+                t10_ok "$1" "rc=0, OK$(t10_note)"
             else
                 t10_bad "$1" "rc=$T10_RC got '$(printf '%s' "$T11_GOT" | head -c 40)' want OK rc=0; wine output tail: $(t10_errtail)"
             fi
@@ -28198,6 +28258,25 @@ else
             t10_bad "$1" "build: $(grep -m1 error "$T10_D/w.log" | cut -c1-120)"
         fi
     done
+    # sys_epipe.kr under Wine. Native Windows 11 gives -32 on all three lines
+    # (measured: WSAENOTCONN / WSAESHUTDOWN / WSAECONNABORTED, mapped). WINE
+    # differs from Windows here: it reports WSAECONNRESET (-104) for "never
+    # connected" and "peer closed". Only those two lines may read -104 under
+    # Wine (normalised, and the PASS text says so); shutwr must be -32 and the
+    # process must survive.
+    TOTAL=$((TOTAL + 1))
+    if $T10_KRC --arch=x86_64 --target=windows --emit=pe "$T10_FX/sys_epipe.kr" -o "$T10_D/sys_epipe.exe" > "$T10_D/w.log" 2>&1; then
+        t10_wine "$T10_D/win.out" "$T10_D/win.err" sys_epipe.exe; T10_RC=$?
+        T11_GOT=$(tr -d '\r' < "$T10_D/win.out" | sed -e 's/^never -104$/never -32/' -e 's/^peer -104$/peer -32/')
+        T11_Q=$(tr -d '\r' < "$T10_D/win.out" | grep -c -e '^never -104$' -e '^peer -104$')
+        if [ "$T10_RC" = "0" ] && [ "$T11_GOT" = "$T11_EPIPE" ]; then
+            t10_ok sys_send_epipe_windows_wine "rc=0, $T11_Q Wine-specific -104 line(s) read as -32$(t10_note)"
+        else
+            t10_bad sys_send_epipe_windows_wine "rc=$T10_RC got '$(tr -d '\r' < "$T10_D/win.out" | tr '\n' '|' | head -c 80)'; wine output tail: $(t10_errtail)"
+        fi
+    else
+        t10_bad sys_send_epipe_windows_wine "build: $(grep -m1 error "$T10_D/w.log" | cut -c1-120)"
+    fi
     if [ -x "$(dirname "$T10_WINE")/wineserver" ]; then
         WINEPREFIX="$T10_D/pfx" "$(dirname "$T10_WINE")/wineserver" -w > /dev/null 2>&1
     fi

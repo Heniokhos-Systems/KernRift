@@ -145,6 +145,22 @@ fn _kr_w32_errno(u64 w) -> u64 {
     return 5                        // EIO
 }
 
+// The map for a failed SEND. Linux says EPIPE (32) for every "this connection
+// can no longer send": never connected, after our own SHUT_WR, after the peer
+// closed. Windows says WSAENOTCONN, WSAESHUTDOWN or WSAECONNABORTED for those
+// (measured natively), so all three read EPIPE here. A send WSAETIMEDOUT can
+// only be TCP giving up on the connection (SO_SNDTIMEO is not translated):
+// ETIMEDOUT, as on Linux -- NOT the retryable EAGAIN a recv timeout gives.
+// WSAECONNRESET stays ECONNRESET, which Linux also returns for the first send
+// after a reset. Everything else: the common map.
+fn _kr_w32_send_errno(u64 w) -> u64 {
+    if w == 10057 { return 32 }     // ENOTCONN     -> EPIPE
+    if w == 10058 { return 32 }     // ESHUTDOWN    -> EPIPE
+    if w == 10053 { return 32 }     // ECONNABORTED -> EPIPE
+    if w == 10060 { return 110 }    // ETIMEDOUT stays ETIMEDOUT
+    return _kr_w32_errno(w)
+}
+
 // --- Win64 structures ----------------------------------------------------------
 
 // fd_set holding exactly one SOCKET. Win64 layout (winsock2.h):

@@ -1,0 +1,87 @@
+// std/sys.kr (portable-syscall-layer Task 11 fix 1): "this connection can no
+// longer send" must read -EPIPE (-32) and must NOT kill the process. Prints:
+//   never <r>    send on a socket that never connected
+//   shutwr <r>   send after our own shutdown(SHUT_WR)
+//   peer <r>     the first failing send after the peer closed (a send or two
+//                may still succeed while the peer's reset is in flight)
+//   survived     reached only if no SIGPIPE killed us
+// Linux: sendto(MSG_NOSIGNAL) gives -32 for all three; without MSG_NOSIGNAL
+// the process dies by SIGPIPE at the first one. Windows (native, measured):
+// WSAENOTCONN / WSAESHUTDOWN / WSAECONNABORTED, read as -32 by sys.kr.
+import "../../std/sys.kr"
+
+static u8[16] ep_sa
+static u8[16] ep_ga
+static u8[8] ep_len
+
+fn ep_dec(int64 v) {
+    u8[24] d
+    uint64 k = 0
+    if v < 0 { file_write(1, "-", 1)  v = 0 - v }
+    uint64 u = v
+    if u == 0 { file_write(1, "0", 1) }
+    while u != 0 {
+        store8(d + k, 48 + u % 10)
+        u = u / 10
+        k = k + 1
+    }
+    while k != 0 {
+        k = k - 1
+        file_write(1, d + k, 1)
+    }
+}
+
+fn ep_line(uint64 tag, uint64 n, int64 r) {
+    file_write(1, tag, n)
+    ep_dec(r)
+    file_write(1, "\n", 1)
+}
+
+fn ep_fill(uint64 sa, uint64 port) {
+    uint64 i = 0
+    while i < 16 { store8(sa + i, 0)  i = i + 1 }
+    store8(sa + 0, 2)
+    store8(sa + 2, (port >> 8) & 255)
+    store8(sa + 3, port & 255)
+    store8(sa + 4, 127)
+    store8(sa + 7, 1)
+}
+
+fn main() -> uint32 {
+    int64 l = sys_socket(2, 1, 0)
+    if l < 0 { return 1 }
+    ep_fill(ep_sa, 0)
+    if sys_bind(l, ep_sa, 16) != 0 { return 2 }
+    if sys_listen(l, 4) != 0 { return 3 }
+    store32(ep_len, 16)
+    if sys_getsockname(l, ep_ga, ep_len) != 0 { return 4 }
+    ep_fill(ep_sa, (load8(ep_ga + 2) << 8) | load8(ep_ga + 3))
+
+    int64 n = sys_socket(2, 1, 0)
+    if n < 0 { return 5 }
+    ep_line("never ", 6, sys_send(n, "x", 1))
+
+    int64 c = sys_socket(2, 1, 0)
+    if sys_connect(c, ep_sa, 16) != 0 { return 6 }
+    int64 a = sys_accept(l)
+    if a < 0 { return 7 }
+    if sys_shutdown(c, 1) != 0 { return 8 }
+    ep_line("shutwr ", 7, sys_send(c, "x", 1))
+
+    int64 c2 = sys_socket(2, 1, 0)
+    if sys_connect(c2, ep_sa, 16) != 0 { return 9 }
+    int64 a2 = sys_accept(l)
+    if a2 < 0 { return 10 }
+    if sys_sock_close(a2) != 0 { return 11 }
+    int64 r = 0
+    uint64 i = 0
+    while i < 100 {
+        r = sys_send(c2, "x", 1)
+        if r < 0 { i = 100 } else { sys_wait_readable(n, 10) }
+        i = i + 1
+    }
+    ep_line("peer ", 5, r)
+    file_write(1, "survived\n", 9)
+    sys_sock_close(a)
+    return 0
+}

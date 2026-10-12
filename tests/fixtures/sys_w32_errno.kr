@@ -2,7 +2,9 @@
 // map is pure arithmetic, so it runs on Linux too. Prints "<wsa> <errno>" for
 // every code 10000..10115 and a few outside that band; the expected file is
 // generated INDEPENDENTLY (WSAE<X> paired by name with Linux's E<X>, from the
-// host's errno table), see tests/fixtures/sys_w32_errno.expected.
+// host's errno table), see tests/fixtures/sys_w32_errno.expected. Then the
+// SEND map for 10000..10115: the common map except ENOTCONN, ESHUTDOWN and
+// ECONNABORTED -> EPIPE and ETIMEDOUT kept (Linux's send results).
 import "../../std/win32.kr"
 
 fn dec(uint64 v) {
@@ -27,6 +29,15 @@ fn line(uint64 c) {
     file_write(1, "\n", 1)
 }
 
+// The send map: "send <wsa> <errno>" for the same codes.
+fn sline(uint64 c) {
+    file_write(1, "send ", 5)
+    dec(c)
+    file_write(1, " ", 1)
+    dec(_kr_w32_send_errno(c))
+    file_write(1, "\n", 1)
+}
+
 fn main() -> uint32 {
     line(0)
     line(4)
@@ -38,5 +49,10 @@ fn main() -> uint32 {
     }
     line(11001)
     line(0xFFFFFFFF)
+    c = 10000
+    while c < 10116 {
+        sline(c)
+        c = c + 1
+    }
     return 0
 }
