@@ -47,7 +47,19 @@ TOTAL=0
 # whose row is not counted yet increments TOTAL itself first. The summary
 # checks PASS + FAIL + SKIP == TOTAL, so a skip that is not accounted for
 # fails the suite.
+#
+# REQUIRE_FULL_RUN=1 is the mode for merge and release gating: every skip is
+# a FAIL, whatever its reason -- a missing tool, a SKIP_ALLOW precondition,
+# a sub-check that did not run, or the README gate on a partial toolchain. A
+# run in this mode passes only if every row ran and passed. The default (0)
+# keeps a skip a SKIP, for development on a partial box.
+REQUIRE_FULL_RUN="${REQUIRE_FULL_RUN:-0}"
 skip_row() {
+    if [ "$REQUIRE_FULL_RUN" = 1 ]; then
+        FAIL=$((FAIL + 1))
+        echo "FAIL: $1 (skipped, and REQUIRE_FULL_RUN=1 makes every skip a failure: $2)"
+        return
+    fi
     SKIP=$((SKIP + 1))
     SKIP_NAMES="$SKIP_NAMES$1
 "
@@ -1431,7 +1443,7 @@ vbind_run() { # <arch> <flags> <src> <runner-or-empty>
         VBIND_OK=0; echo "  $(basename $3) $1 ${2:-IR}: COMPILE FAILED"
         return
     fi
-    if [ -n "$4" ]; then $4 "$_bin" >/dev/null 2>&1; else "$_bin" >/dev/null 2>&1; fi
+    if [ -n "$4" ]; then timeout -k 5 "$RUN_TEST_TIMEOUT" $4 "$_bin" >/dev/null 2>&1; else timeout -k 5 "$RUN_TEST_TIMEOUT" "$_bin" >/dev/null 2>&1; fi
     local _rc=$?
     VBIND_RAN=$((VBIND_RAN + 1))
     [ "$_rc" = "2" ] || { VBIND_OK=0; echo "  $(basename $3) $1 ${2:-IR}: got $_rc, want 2"; }
@@ -1539,7 +1551,7 @@ ceval_run() { # <arch> <flags> <src> <runner-or-empty>
         CEVAL_OK=0; echo "  $(basename $3) $1 ${2:-IR}: COMPILE FAILED"
         return
     fi
-    if [ -n "$4" ]; then $4 "$_bin" >/dev/null 2>&1; else "$_bin" >/dev/null 2>&1; fi
+    if [ -n "$4" ]; then timeout -k 5 "$RUN_TEST_TIMEOUT" $4 "$_bin" >/dev/null 2>&1; else timeout -k 5 "$RUN_TEST_TIMEOUT" "$_bin" >/dev/null 2>&1; fi
     local _rc=$?
     CEVAL_RAN=$((CEVAL_RAN + 1))
     # 7 = reached the end with every assertion satisfied. 1 = wrong evaluation
@@ -1662,7 +1674,7 @@ sha_run() { # <arch> <flags> <src> <runner-or-empty>
         SHA_OK=0; echo "  $(basename $3) $1 ${2:-IR}: COMPILE FAILED"
         return
     fi
-    if [ -n "$4" ]; then $4 "$_bin" >/dev/null 2>&1; else "$_bin" >/dev/null 2>&1; fi
+    if [ -n "$4" ]; then timeout -k 5 "$RUN_TEST_TIMEOUT" $4 "$_bin" >/dev/null 2>&1; else timeout -k 5 "$RUN_TEST_TIMEOUT" "$_bin" >/dev/null 2>&1; fi
     local _rc=$?
     SHA_RAN=$((SHA_RAN + 1))
     # 7 = every assertion satisfied. Anything else names the assertion that
@@ -1840,7 +1852,7 @@ feval_run() { # <arch> <flags> <src> <runner-or-empty>
         FEVAL_OK=0; echo "  $(basename $3) $1 ${2:-IR}: COMPILE FAILED"
         return
     fi
-    if [ -n "$4" ]; then $4 "$_bin" >/dev/null 2>&1; else "$_bin" >/dev/null 2>&1; fi
+    if [ -n "$4" ]; then timeout -k 5 "$RUN_TEST_TIMEOUT" $4 "$_bin" >/dev/null 2>&1; else timeout -k 5 "$RUN_TEST_TIMEOUT" "$_bin" >/dev/null 2>&1; fi
     local _rc=$?
     FEVAL_RAN=$((FEVAL_RAN + 1))
     # 7 = reached the end with every assertion satisfied. Anything else names
@@ -1968,7 +1980,7 @@ tslot_run() { # <arch> <flags> <src> <runner-or-empty>
         TSLOT_OK=0; echo "  $(basename $3) $1 ${2:-IR}: COMPILE FAILED"
         return
     fi
-    if [ -n "$4" ]; then $4 "$_bin" >/dev/null 2>&1; else "$_bin" >/dev/null 2>&1; fi
+    if [ -n "$4" ]; then timeout -k 5 "$RUN_TEST_TIMEOUT" $4 "$_bin" >/dev/null 2>&1; else timeout -k 5 "$RUN_TEST_TIMEOUT" "$_bin" >/dev/null 2>&1; fi
     local _rc=$?
     TSLOT_RAN=$((TSLOT_RAN + 1))
     # 77 = the value actually reached memory. 1 = the parked value was replaced
@@ -2096,7 +2108,7 @@ eord_run() { # <arch> <flags> <src> <runner-or-empty>
         EORD_OK=0; echo "  $(basename $3) $1 ${2:-IR}: COMPILE FAILED"
         return
     fi
-    if [ -n "$4" ]; then $4 "$_bin" >/dev/null 2>&1; else "$_bin" >/dev/null 2>&1; fi
+    if [ -n "$4" ]; then timeout -k 5 "$RUN_TEST_TIMEOUT" $4 "$_bin" >/dev/null 2>&1; else timeout -k 5 "$RUN_TEST_TIMEOUT" "$_bin" >/dev/null 2>&1; fi
     local _rc=$?
     EORD_RAN=$((EORD_RAN + 1))
     # 7 = order and value both correct. 1 = wrong order, 2 = wrong value.
@@ -2523,7 +2535,7 @@ aslot_run() { # <arch> <flags> <src> <runner-or-empty>
         return
     fi
     local _out
-    if [ -n "$4" ]; then _out=$($4 "$_bin" 2>"$_eo"); else _out=$("$_bin" 2>"$_eo"); fi
+    if [ -n "$4" ]; then _out=$(timeout -k 5 "$RUN_TEST_TIMEOUT" $4 "$_bin" 2>"$_eo"); else _out=$(timeout -k 5 "$RUN_TEST_TIMEOUT" "$_bin" 2>"$_eo"); fi
     local _err="$(cat "$_eo")"
     local _wo="$(aslot_want_out "$3")"
     local _we="$(aslot_want_err "$3")"
@@ -2679,7 +2691,7 @@ dma_run() { # <arch> <flags> <src> <runner-or-empty>
         DMA_OK=0; echo "  $(basename $3) $1 ${2:-IR}: COMPILE FAILED"
         return
     fi
-    if [ -n "$4" ]; then $4 "$_bin" >/dev/null 2>&1; else "$_bin" >/dev/null 2>&1; fi
+    if [ -n "$4" ]; then timeout -k 5 "$RUN_TEST_TIMEOUT" $4 "$_bin" >/dev/null 2>&1; else timeout -k 5 "$RUN_TEST_TIMEOUT" "$_bin" >/dev/null 2>&1; fi
     local _rc=$?
     DMA_RAN=$((DMA_RAN + 1))
     # 7 = every assertion satisfied. Anything else names the assertion that
@@ -3122,7 +3134,7 @@ sstr_run() { # <arch> <flags> <src> <runner-or-empty> <expected>
         SSTR_OK=0; echo "  $(basename $3) $1 ${2:-IR}: COMPILE FAILED"
         return
     fi
-    if [ -n "$4" ]; then $4 "$_bin" >/dev/null 2>&1; else "$_bin" >/dev/null 2>&1; fi
+    if [ -n "$4" ]; then timeout -k 5 "$RUN_TEST_TIMEOUT" $4 "$_bin" >/dev/null 2>&1; else timeout -k 5 "$RUN_TEST_TIMEOUT" "$_bin" >/dev/null 2>&1; fi
     local _rc=$?
     SSTR_RAN=$((SSTR_RAN + 1))
     [ "$_rc" = "$5" ] || { SSTR_OK=0; echo "  $(basename $3) $1 ${2:-IR}: got $_rc, want $5"; }
@@ -3269,7 +3281,7 @@ if [ -n "$FNFAR_RUN" ]; then
                 if [ "$_n" = "200" ] && [ "$_sz" -le 1100000 ]; then
                     FNFAR_OK=0; echo "  fnfar $_m/$_n ${_be:-IR}: image only $_sz bytes -- the gap is not past 1 MB"
                 fi
-                if [ "$FNFAR_RUN" = "native" ]; then "$_bin" >/dev/null 2>&1; else "$FNFAR_RUN" "$_bin" >/dev/null 2>&1; fi
+                if [ "$FNFAR_RUN" = "native" ]; then timeout -k 5 "$RUN_TEST_TIMEOUT" "$_bin" >/dev/null 2>&1; else timeout -k 5 "$RUN_TEST_TIMEOUT" "$FNFAR_RUN" "$_bin" >/dev/null 2>&1; fi
                 _rc=$?
                 FNFAR_RAN=$((FNFAR_RAN + 1))
                 [ "$_rc" = "42" ] || { FNFAR_OK=0; echo "  fnfar $_m/$_n ${_be:-IR}: got $_rc, want 42"; }
@@ -3667,7 +3679,7 @@ if [ "$ARCH" != "aarch64" ]; then
     printf 'fn main() { exit(42) }\n@naked fn msr_test() { asm("rdmsr") }\n' > /tmp/krc_test_$$.kr
     if $KRC $KRC_FLAGS /tmp/krc_test_$$.kr -o /tmp/krc_test_$$ > /dev/null 2>&1; then
         chmod +x /tmp/krc_test_$$
-        /tmp/krc_test_$$ > /dev/null 2>&1; got=$?
+        timeout -k 5 "$RUN_TEST_TIMEOUT" /tmp/krc_test_$$ > /dev/null 2>&1; got=$?
         if [ "$got" = "42" ]; then
             PASS=$((PASS + 1))
         else
@@ -3684,7 +3696,7 @@ if [ "$ARCH" != "aarch64" ]; then
     printf 'fn main() { exit(42) }\n@naked fn msr_test() { asm("wrmsr") }\n' > /tmp/krc_test_$$.kr
     if $KRC $KRC_FLAGS /tmp/krc_test_$$.kr -o /tmp/krc_test_$$ > /dev/null 2>&1; then
         chmod +x /tmp/krc_test_$$
-        /tmp/krc_test_$$ > /dev/null 2>&1; got=$?
+        timeout -k 5 "$RUN_TEST_TIMEOUT" /tmp/krc_test_$$ > /dev/null 2>&1; got=$?
         if [ "$got" = "42" ]; then
             PASS=$((PASS + 1))
         else
@@ -3804,7 +3816,7 @@ if $KRC $KRC_FLAGS /tmp/krc_dce_unused_$$.kr -o /tmp/krc_dce_small_$$ > /dev/nul
     large_size=$(wc -c < /tmp/krc_dce_large_$$)
     # Verify the unused-function binary is smaller (DCE removed dead code)
     # Also verify the unused-function binary runs correctly
-    /tmp/krc_dce_small_$$ > /dev/null 2>&1; small_exit=$?
+    timeout -k 5 "$RUN_TEST_TIMEOUT" /tmp/krc_dce_small_$$ > /dev/null 2>&1; small_exit=$?
     if [ "$small_size" -lt "$large_size" ] && [ "$small_exit" = "42" ]; then
         PASS=$((PASS + 1))
         echo "  dce_eliminates_unused: PASS (unused=$small_size < used=$large_size bytes, exit=$small_exit)"
@@ -4410,7 +4422,7 @@ if [ -n "$QEMU_A64" ]; then
     if $KRC /tmp/krc_c2_$$.kr -o /tmp/krc_c2_$$.krbo >/dev/null 2>&1 \
        && $KRC --arch=arm64 /tmp/krc_c2run_$$.kr -o /tmp/krc_c2run_$$ >/dev/null 2>&1; then
         chmod +x /tmp/krc_c2run_$$
-        $QEMU_A64 /tmp/krc_c2run_$$ /tmp/krc_c2_$$.krbo >/dev/null 2>&1
+        timeout -k 5 "$RUN_TEST_TIMEOUT" $QEMU_A64 /tmp/krc_c2run_$$ /tmp/krc_c2_$$.krbo >/dev/null 2>&1
         c2got=$?
         if [ "$c2got" = "9" ]; then
             PASS=$((PASS + 1))
@@ -5407,7 +5419,7 @@ if [ -n "$QEMU_A64" ] && [ "$ARCH" = "x86_64" ]; then
         if $KRC --arch=arm64 /tmp/krc_a64_$$.kr -o /tmp/krc_a64_$$ > /dev/null 2>&1; then
             chmod +x /tmp/krc_a64_$$
             local got=0
-            $QEMU_A64 /tmp/krc_a64_$$ > /dev/null 2>&1 && got=0 || got=$?
+            timeout -k 5 "$RUN_TEST_TIMEOUT" $QEMU_A64 /tmp/krc_a64_$$ > /dev/null 2>&1 && got=0 || got=$?
             if [ "$got" = "$expected" ]; then
                 PASS=$((PASS + 1))
             else
@@ -6225,7 +6237,7 @@ for FCSE_ARCH in x86_64 arm64; do
     if $KRC --arch=$FCSE_ARCH /tmp/krc_fcse_$$.mlr -o /tmp/krc_fcse_$$ > /dev/null 2>&1 && [ -f /tmp/krc_fcse_$$ ]; then
         chmod +x /tmp/krc_fcse_$$
         FCSE_GOT=0
-        $FCSE_RUN /tmp/krc_fcse_$$ > /dev/null 2>&1 || FCSE_GOT=$?
+        timeout -k 5 "$RUN_TEST_TIMEOUT" $FCSE_RUN /tmp/krc_fcse_$$ > /dev/null 2>&1 || FCSE_GOT=$?
     fi
     if [ "$FCSE_GOT" = "100" ]; then
         PASS=$((PASS + 1))
@@ -6271,7 +6283,7 @@ for WB_KIND in memset memcpy store; do
         if $KRC --arch=$WB_ARCH /tmp/krc_wbcse_$$.kr -o /tmp/krc_wbcse_$$ > /dev/null 2>&1 && [ -f /tmp/krc_wbcse_$$ ]; then
             chmod +x /tmp/krc_wbcse_$$
             WB_GOT=0
-            $WB_RUN /tmp/krc_wbcse_$$ > /dev/null 2>&1 || WB_GOT=$?
+            timeout -k 5 "$RUN_TEST_TIMEOUT" $WB_RUN /tmp/krc_wbcse_$$ > /dev/null 2>&1 || WB_GOT=$?
         fi
         if [ "$WB_GOT" = "52" ]; then
             PASS=$((PASS + 1))
@@ -7469,7 +7481,7 @@ if $KRC lc --fix /tmp/krc_mig2_$$.kr > /dev/null 2>&1; then
         # Now verify the rewritten file still compiles and runs
         if $KRC $KRC_FLAGS /tmp/krc_mig2_$$.kr -o /tmp/krc_mig2_bin_$$ > /dev/null 2>&1; then
             chmod +x /tmp/krc_mig2_bin_$$
-            /tmp/krc_mig2_bin_$$ > /dev/null 2>&1
+            timeout -k 5 "$RUN_TEST_TIMEOUT" /tmp/krc_mig2_bin_$$ > /dev/null 2>&1
             if [ "$?" = "42" ]; then
                 PASS=$((PASS + 1))
             else
@@ -7708,7 +7720,7 @@ for cparch in x86_64 arm64; do
     cprun=""
     if [ "$cparch" = "x86_64" ]; then
         $KRC /tmp/krc_constprec_$$.kr --arch=x86_64 -o /tmp/krc_constprec_$$ >/dev/null 2>&1 \
-            && cprun=$(/tmp/krc_constprec_$$ 2>&1)
+            && cprun=$(timeout -k 5 "$RUN_TEST_TIMEOUT" /tmp/krc_constprec_$$ 2>&1)
     elif command -v qemu-aarch64-static >/dev/null 2>&1; then
         $KRC /tmp/krc_constprec_$$.kr --arch=arm64 -o /tmp/krc_constprec_$$ >/dev/null 2>&1 \
             && cprun=$(qemu-aarch64-static /tmp/krc_constprec_$$ 2>&1)
@@ -7801,7 +7813,7 @@ fn main() -> uint64 {
 KREOF
 fnaddr2_err=""
 if $KRC --arch=x86_64 /tmp/krc_fnaddr2_$$.kr -o /tmp/krc_fnaddr2_$$ --emit=elf >/dev/null 2>&1; then
-    /tmp/krc_fnaddr2_$$; fa2rc=$?
+    timeout -k 5 "$RUN_TEST_TIMEOUT" /tmp/krc_fnaddr2_$$; fa2rc=$?
     [ "$fa2rc" = "42" ] || fnaddr2_err="called-through-fn_addr-gave-$fa2rc-want-42"
 else
     fnaddr2_err="the-string-literal-form-stopped-compiling"
@@ -8429,7 +8441,7 @@ else
     gz_note=""
     for gz_n in 0 1 65535 65536 131070; do
         head -c $gz_n /dev/urandom > /tmp/krgz_in_$$ 2>/dev/null
-        if ! /tmp/krgz_$$ < /tmp/krgz_in_$$ > /tmp/krgz_out_$$.gz 2>/dev/null; then
+        if ! timeout -k 5 "$RUN_TEST_TIMEOUT" /tmp/krgz_$$ < /tmp/krgz_in_$$ > /tmp/krgz_out_$$.gz 2>/dev/null; then
             gz_ok=0; gz_note="encoder failed at $gz_n"; break
         fi
         if ! gunzip -c /tmp/krgz_out_$$.gz > /tmp/krgz_back_$$ 2>/dev/null; then
@@ -8477,20 +8489,20 @@ LCBEOF
 cp "$lcb_dir/t.kr" "$lcb_dir/orig.kr"
 lcb_ok=1
 lcb_why=""
-"$DIR/../build/krc2" lc --fix "$lcb_dir/t.kr" >/dev/null 2>&1
+timeout -k 5 "$RUN_TEST_TIMEOUT" "$DIR/../build/krc2" lc --fix "$lcb_dir/t.kr" >/dev/null 2>&1
 # A rewrite must actually have happened, or every clause below is vacuous.
 grep -q 'v = load32(buf)' "$lcb_dir/t.kr" || { lcb_ok=0; lcb_why="no rewrite happened (positive control)"; }
 [ -f "$lcb_dir/t.kr.lcbak" ] || { lcb_ok=0; lcb_why="no backup written"; }
 cmp -s "$lcb_dir/t.kr.lcbak" "$lcb_dir/orig.kr" || { lcb_ok=0; lcb_why="backup is not the original bytes"; }
-"$DIR/../build/krc2" lc undo "$lcb_dir/t.kr" >/dev/null 2>&1
+timeout -k 5 "$RUN_TEST_TIMEOUT" "$DIR/../build/krc2" lc undo "$lcb_dir/t.kr" >/dev/null 2>&1
 cmp -s "$lcb_dir/t.kr" "$lcb_dir/orig.kr" || { lcb_ok=0; lcb_why="undo did not restore the original"; }
 # --dry-run must neither write a backup nor touch the file.
 cp "$lcb_dir/orig.kr" "$lcb_dir/dry.kr"
-"$DIR/../build/krc2" lc --fix --dry-run "$lcb_dir/dry.kr" >/dev/null 2>&1
+timeout -k 5 "$RUN_TEST_TIMEOUT" "$DIR/../build/krc2" lc --fix --dry-run "$lcb_dir/dry.kr" >/dev/null 2>&1
 [ -f "$lcb_dir/dry.kr.lcbak" ] && { lcb_ok=0; lcb_why="--dry-run wrote a backup"; }
 cmp -s "$lcb_dir/dry.kr" "$lcb_dir/orig.kr" || { lcb_ok=0; lcb_why="--dry-run modified the file"; }
 # undo with no backup must FAIL loudly rather than silently doing nothing.
-"$DIR/../build/krc2" lc undo "$lcb_dir/dry.kr" >/dev/null 2>&1
+timeout -k 5 "$RUN_TEST_TIMEOUT" "$DIR/../build/krc2" lc undo "$lcb_dir/dry.kr" >/dev/null 2>&1
 [ "$?" != "0" ] || { lcb_ok=0; lcb_why="undo with no backup exited 0"; }
 if [ "$lcb_ok" = "1" ]; then
     PASS=$((PASS + 1)); echo "  lc_fix_backup_and_undo: PASS (backup==original, undo restores, dry-run inert, missing backup errors)"
@@ -8511,10 +8523,10 @@ mkdir -p "$lcx_dir"
 cp "$DIR/../src/lexer.kr" "$lcx_dir/lex.kr"
 lcx_ok=1
 lcx_why=""
-lcx_sites=$("$DIR/../build/krc2" lc --fix "$lcx_dir/lex.kr" 2>&1 | sed -n 's/^migration: \([0-9]*\) migration site.*/\1/p')
+lcx_sites=$(timeout -k 5 "$RUN_TEST_TIMEOUT" "$DIR/../build/krc2" lc --fix "$lcx_dir/lex.kr" 2>&1 | sed -n 's/^migration: \([0-9]*\) migration site.*/\1/p')
 [ -n "$lcx_sites" ] && [ "$lcx_sites" -gt 50 ] || { lcx_ok=0; lcx_why="expected a large rewrite on a real file, got '${lcx_sites:-none}'"; }
 cmp -s "$lcx_dir/lex.kr" "$DIR/../src/lexer.kr" && { lcx_ok=0; lcx_why="the file was NOT modified, so undo proves nothing"; }
-"$DIR/../build/krc2" lc undo "$lcx_dir/lex.kr" >/dev/null 2>&1
+timeout -k 5 "$RUN_TEST_TIMEOUT" "$DIR/../build/krc2" lc undo "$lcx_dir/lex.kr" >/dev/null 2>&1
 cmp -s "$lcx_dir/lex.kr" "$DIR/../src/lexer.kr" || { lcx_ok=0; lcx_why="undo did not recover the corrupted file"; }
 if [ "$lcx_ok" = "1" ]; then
     PASS=$((PASS + 1)); echo "  lc_undo_recovers_a_corrupted_source: PASS ($lcx_sites sites rewritten, fully recovered)"
@@ -8533,7 +8545,7 @@ rm -rf "$lcx_dir"
 # which emits a single ELF and no fat line at all, so $KRC could never pass.
 TOTAL=$((TOTAL + 1))
 printf 'fn main(){ exit(0) }\n' > "$DIR/../a1_tmp_$$.kr"
-a1_out=$("$DIR/../build/krc2" "$DIR/../a1_tmp_$$.kr" -o /tmp/a1_$$.krbo 2>&1)
+a1_out=$(timeout -k 5 "$RUN_TEST_TIMEOUT" "$DIR/../build/krc2" "$DIR/../a1_tmp_$$.kr" -o /tmp/a1_$$.krbo 2>&1)
 a1_ok=1
 a1_why=""
 printf '%s' "$a1_out" | grep -q 'run it with: kr' || { a1_ok=0; a1_why="no runner hint"; }
@@ -8559,8 +8571,8 @@ printf 'fn main(){ exit(0) }\n' > "$DIR/../a1c_tmp_$$.kr"
 # Name the host slice by $RUN_ARCH so this does not silently invert on arm64.
 if [ "$RUN_ARCH" = "arm64" ]; then a1_host=linux-arm64; a1_away=linux-x64
 else a1_host=linux-x64; a1_away=linux-arm64; fi
-a1c_with=$("$DIR/../build/krc2" --targets=$a1_host,win-x64 "$DIR/../a1c_tmp_$$.kr" -o /tmp/a1cw_$$.krbo 2>&1)
-a1c_without=$("$DIR/../build/krc2" --targets=$a1_away,win-x64 "$DIR/../a1c_tmp_$$.kr" -o /tmp/a1cn_$$.krbo 2>&1)
+a1c_with=$(timeout -k 5 "$RUN_TEST_TIMEOUT" "$DIR/../build/krc2" --targets=$a1_host,win-x64 "$DIR/../a1c_tmp_$$.kr" -o /tmp/a1cw_$$.krbo 2>&1)
+a1c_without=$(timeout -k 5 "$RUN_TEST_TIMEOUT" "$DIR/../build/krc2" --targets=$a1_away,win-x64 "$DIR/../a1c_tmp_$$.kr" -o /tmp/a1cn_$$.krbo 2>&1)
 a1c_ok=1
 a1c_why=""
 printf '%s' "$a1c_with" | grep -q 'run it with: kr' || { a1c_ok=0; a1c_why="no hint when the host slice IS present"; }
@@ -8900,7 +8912,7 @@ MNREOF
     for mnr_mode in "" "--legacy"; do
         if $KRC --arch=$RUN_ARCH $mnr_mode "$DIR/../mnemr_tmp_$$.kr" -o /tmp/mnemr_$$ >/dev/null 2>&1; then
             chmod +x /tmp/mnemr_$$
-            /tmp/mnemr_$$ >/dev/null 2>&1
+            timeout -k 5 "$RUN_TEST_TIMEOUT" /tmp/mnemr_$$ >/dev/null 2>&1
             mnr_rc=$?
             [ "$mnr_rc" = "9" ] || { mnr_ok=0; echo "    ${mnr_mode:-ir} exited $mnr_rc, want 9"; }
         else
@@ -9556,7 +9568,7 @@ else
     printf '%s' "$asmoi_out" | grep -q "used before initialization.*'v'" \
         && { asmoi_ok=0; asmoi_note="false use-before-init diagnostic on v"; }
     chmod +x /tmp/asmoi_$$
-    /tmp/asmoi_$$ >/dev/null 2>&1
+    timeout -k 5 "$RUN_TEST_TIMEOUT" /tmp/asmoi_$$ >/dev/null 2>&1
     asmoi_rc=$?
     [ "$asmoi_rc" = "9" ] || { asmoi_ok=0; asmoi_note="$asmoi_note; exited $asmoi_rc, want 9"; }
 fi
@@ -9700,7 +9712,7 @@ va_note=""
 # host arch, natively
 if $KRC --arch=$RUN_ARCH "$DIR/../vattr_tmp_$$.kr" -o /tmp/vattr_$$ >/dev/null 2>&1; then
     chmod +x /tmp/vattr_$$
-    /tmp/vattr_$$ >/dev/null 2>&1
+    timeout -k 5 "$RUN_TEST_TIMEOUT" /tmp/vattr_$$ >/dev/null 2>&1
     [ "$?" = "9" ] || { va_ok=0; va_note="native $RUN_ARCH run"; }
 else
     va_ok=0; va_note="native $RUN_ARCH build"
@@ -9713,7 +9725,7 @@ va_emu=""
 if [ -n "$va_emu" ]; then
     if $KRC --arch=$va_other "$DIR/../vattr_tmp_$$.kr" -o /tmp/vattr2_$$ >/dev/null 2>&1; then
         chmod +x /tmp/vattr2_$$
-        $va_emu /tmp/vattr2_$$ >/dev/null 2>&1
+        timeout -k 5 "$RUN_TEST_TIMEOUT" $va_emu /tmp/vattr2_$$ >/dev/null 2>&1
         [ "$?" = "9" ] || { va_ok=0; va_note="$va_other run"; }
     else
         va_ok=0; va_note="$va_other build (pure helpers should not drag in x86 asm)"
@@ -9737,8 +9749,11 @@ if [ -f /tmp/vattr3_$$ ]; then
 elif ! printf '%s' "$va_err" | grep -qE "unrecognized asm instruction|unknown arm64 inline-asm constraint register"; then
     va_ok=0; va_note="refused, but with an unrecognised message: $(printf '%s' "$va_err" | head -1)"
 fi
-if [ "$va_ok" = "1" ]; then
-    PASS=$((PASS + 1)); echo "  vga_attr_packs_bg_high_fg_low: PASS (both arches; port I/O still refused on arm64${va_note:+; $va_note})"
+if [ "$va_ok" = "1" ] && [ -n "$va_note" ]; then
+    # the other arch did not run (no emulator): not a pass, a SKIP that says so
+    skip_row vga_attr_packs_bg_high_fg_low "the $RUN_ARCH half passed and port I/O is still refused on arm64, but $va_note"
+elif [ "$va_ok" = "1" ]; then
+    PASS=$((PASS + 1)); echo "  vga_attr_packs_bg_high_fg_low: PASS (both arches; port I/O still refused on arm64)"
 else
     FAIL=$((FAIL + 1)); echo "FAIL: vga_attr_packs_bg_high_fg_low ($va_note)"
 fi
@@ -9847,7 +9862,7 @@ ASMBINDEOF
     for asmbind_be in "" "--legacy"; do
         if $KRC --arch=$RUN_ARCH $asmbind_be "$DIR/../asmbind_tmp_$$.kr" -o /tmp/asmbind_$$ >/dev/null 2>&1; then
             chmod +x /tmp/asmbind_$$
-            /tmp/asmbind_$$ >/dev/null 2>&1
+            timeout -k 5 "$RUN_TEST_TIMEOUT" /tmp/asmbind_$$ >/dev/null 2>&1
             asmbind_rc=$?
             [ "$asmbind_rc" = "42" ] || { asmbind_ok=0; asmbind_note="${asmbind_be:-ir} exited $asmbind_rc, want 42"; }
         else
@@ -10280,7 +10295,7 @@ else
     GOV_KRC=""
 fi
 mkdir -p "$GOV_DIR" && (cd "$GOV_DIR" && rm -rf .kernrift && \
-    "$GOV_KRC" lc --promote tail_call_intrinsic > /tmp/krc_gov_promote_$$.txt 2>&1)
+    timeout -k 5 "$RUN_TEST_TIMEOUT" "$GOV_KRC" lc --promote tail_call_intrinsic > /tmp/krc_gov_promote_$$.txt 2>&1)
 if [ -n "$GOV_KRC" ] && \
    grep -q "promoted: tail_call_intrinsic" /tmp/krc_gov_promote_$$.txt 2>/dev/null && \
    [ -f "$GOV_DIR/.kernrift/proposals" ] && \
@@ -10331,9 +10346,9 @@ if [ -f "$DIR/../build/krc.kr" ]; then
     cp "$DIR/../build/krc.kr" /tmp/krc_bootstrap_$$.kr
     $KRC $KRC_FLAGS /tmp/krc_bootstrap_$$.kr -o /tmp/krc2_$$ > /dev/null 2>&1
     chmod +x /tmp/krc2_$$ 2>/dev/null
-    /tmp/krc2_$$ --arch=$BS_ARCH /tmp/krc_bootstrap_$$.kr -o /tmp/krc3_$$ > /dev/null 2>&1
+    timeout -k 5 "$RUN_TEST_TIMEOUT" /tmp/krc2_$$ --arch=$BS_ARCH /tmp/krc_bootstrap_$$.kr -o /tmp/krc3_$$ > /dev/null 2>&1
     chmod +x /tmp/krc3_$$ 2>/dev/null
-    /tmp/krc3_$$ --arch=$BS_ARCH /tmp/krc_bootstrap_$$.kr -o /tmp/krc4_$$ > /dev/null 2>&1
+    timeout -k 5 "$RUN_TEST_TIMEOUT" /tmp/krc3_$$ --arch=$BS_ARCH /tmp/krc_bootstrap_$$.kr -o /tmp/krc4_$$ > /dev/null 2>&1
     if diff /tmp/krc3_$$ /tmp/krc4_$$ > /dev/null 2>&1; then
         PASS=$((PASS + 1))
         echo "  bootstrap: PASS (fixed point at $(wc -c < /tmp/krc3_$$) bytes)"
@@ -10447,7 +10462,7 @@ fn main() { exit(imp_after_comment_helper() + 35) }
 KREOF
 if $KRC $KRC_FLAGS "$IMPC_DIR/impmain.kr" -o "$IMPC_DIR/impbin" > /dev/null 2>&1; then
     chmod +x "$IMPC_DIR/impbin"
-    "$IMPC_DIR/impbin" > /dev/null 2>&1
+    timeout -k 5 "$RUN_TEST_TIMEOUT" "$IMPC_DIR/impbin" > /dev/null 2>&1
     imp_ec=$?
     if [ "$imp_ec" -eq 42 ]; then
         PASS=$((PASS + 1))
@@ -10528,7 +10543,7 @@ fn main() {
     exit(0)
 }
 KREOF
-if "$KRCBIN" /tmp/krc_lz4_$$.kr -o /tmp/krc_lz4_$$.krbo > /dev/null 2>&1; then
+if timeout -k 5 "$RUN_TEST_TIMEOUT" "$KRCBIN" /tmp/krc_lz4_$$.kr -o /tmp/krc_lz4_$$.krbo > /dev/null 2>&1; then
     if command -v python3 > /dev/null 2>&1; then
         if python3 -c "
 import struct, sys
@@ -10591,14 +10606,14 @@ cat "$DIR/../src/bcj.kr" "$DIR/../src/runner.kr" > /tmp/krc_rt_kr_$$.kr
 # src/bcj.kr is exactly what this row exists to catch, and no other row
 # builds the runner.
 RT_FAT_OK=0; RT_RUN_OK=0
-"$KRCBIN" /tmp/krc_rt_$$.kr -o /tmp/krc_rt_$$.krbo > /dev/null 2>&1 && RT_FAT_OK=1
-"$KRCBIN" --arch=$ARCH /tmp/krc_rt_kr_$$.kr -o /tmp/krc_rt_kr_$$ > /dev/null 2>&1 && RT_RUN_OK=1
+timeout -k 5 "$RUN_TEST_TIMEOUT" "$KRCBIN" /tmp/krc_rt_$$.kr -o /tmp/krc_rt_$$.krbo > /dev/null 2>&1 && RT_FAT_OK=1
+timeout -k 5 "$RUN_TEST_TIMEOUT" "$KRCBIN" --arch=$ARCH /tmp/krc_rt_kr_$$.kr -o /tmp/krc_rt_kr_$$ > /dev/null 2>&1 && RT_RUN_OK=1
 if [ "$RT_FAT_OK" != "1" ] || [ "$RT_RUN_OK" != "1" ]; then
     FAIL=$((FAIL + 1))
     echo "  krbo_roundtrip: FAIL (compile failed: fat .krbo ok=$RT_FAT_OK, runner (runner.kr+bcj.kr) ok=$RT_RUN_OK)"
 else
     chmod +x /tmp/krc_rt_kr_$$
-    out=$(/tmp/krc_rt_kr_$$ /tmp/krc_rt_$$.krbo 2>&1)
+    out=$(timeout -k 5 "$RUN_TEST_TIMEOUT" /tmp/krc_rt_kr_$$ /tmp/krc_rt_$$.krbo 2>&1)
     code=$?
     if [ "$out" = "roundtrip-ok" ] && [ "$code" = "123" ]; then
         PASS=$((PASS + 1))
@@ -10811,7 +10826,7 @@ fn main() {
 KREOF
     if $KRC --emit=obj /tmp/krc_ext_$$.kr -o /tmp/krc_ext_$$.o > /dev/null 2>&1 \
        && gcc /tmp/krc_ext_$$.o -o /tmp/krc_ext_linked_$$ -no-pie > /dev/null 2>&1; then
-        got=$(/tmp/krc_ext_linked_$$ 2>/dev/null)
+        got=$(timeout -k 5 "$RUN_TEST_TIMEOUT" /tmp/krc_ext_linked_$$ 2>/dev/null)
         if [ "$got" = "extern_ok" ]; then
             PASS=$((PASS + 1))
             echo "  extern_libc_write: PASS"
@@ -10839,7 +10854,7 @@ fn main() {
 KREOF
     if $KRC --emit=obj /tmp/krc_ext2_$$.kr -o /tmp/krc_ext2_$$.o > /dev/null 2>&1 \
        && gcc /tmp/krc_ext2_$$.o -o /tmp/krc_ext2_linked_$$ -no-pie > /dev/null 2>&1; then
-        got=$(/tmp/krc_ext2_linked_$$ 2>/dev/null)
+        got=$(timeout -k 5 "$RUN_TEST_TIMEOUT" /tmp/krc_ext2_linked_$$ 2>/dev/null)
         if [ "$got" = "two_externs" ]; then
             PASS=$((PASS + 1))
             echo "  extern_libc_strlen_write: PASS"
@@ -10956,7 +10971,7 @@ fn main() {
 KREOF
             if $KRC $KRC_FLAGS $BACKEND_FLAG --emit=obj /tmp/krc_extres_$$.kr -o /tmp/krc_extres_$$.o > /dev/null 2>&1 \
                && gcc /tmp/krc_extres_$$.o -o /tmp/krc_extres_bin_$$ -no-pie > /dev/null 2>&1; then
-                got=$(/tmp/krc_extres_bin_$$ 2>/dev/null)
+                got=$(timeout -k 5 "$RUN_TEST_TIMEOUT" /tmp/krc_extres_bin_$$ 2>/dev/null)
                 if [ "$got" = "extern_resolved_ok" ]; then
                     PASS=$((PASS + 1))
                     echo "  $LABEL: PASS"
@@ -11006,7 +11021,7 @@ fn main() {
 KREOF
         if $KRC $KRC_FLAGS --emit=obj /tmp/krc_aobj_$$.kr -o /tmp/krc_aobj_$$.o > /dev/null 2>&1 \
            && gcc -nostdlib -static /tmp/krc_aobj_$$.o -o /tmp/krc_aobj_bin_$$ > /dev/null 2>&1; then
-            /tmp/krc_aobj_bin_$$ > /dev/null 2>&1
+            timeout -k 5 "$RUN_TEST_TIMEOUT" /tmp/krc_aobj_bin_$$ > /dev/null 2>&1
             aobj_got=$?
             if [ "$aobj_got" = "42" ]; then
                 PASS=$((PASS + 1))
@@ -11037,7 +11052,7 @@ fn add(uint64 a, uint64 b) -> uint64 { return a + b }
 fn main() { exit(add(3, 4)) }
 KREOF
 if $KRC $KRC_FLAGS --legacy /tmp/krc_extnofp_$$.kr -o /tmp/krc_extnofp_bin_$$ > /dev/null 2>&1; then
-    /tmp/krc_extnofp_bin_$$
+    timeout -k 5 "$RUN_TEST_TIMEOUT" /tmp/krc_extnofp_bin_$$
     rc=$?
     if [ "$rc" = "7" ]; then
         PASS=$((PASS + 1))
@@ -11589,7 +11604,7 @@ if [ ! -f "$BEX_DIR/main.kr" ] || [ ! -f "$BEX_DIR/pager.kr" ]; then
 elif ! $KRC --arch="$RUN_ARCH" "$BEX_DIR/main.kr" -o "$BEX_BIN" >/dev/null 2>&1; then
     FAIL=$((FAIL + 1)); echo "FAIL: tutorial_btree_example_runs (compile failed)"
 else
-    "$BEX_BIN" >/dev/null 2>&1
+    timeout -k 5 "$RUN_TEST_TIMEOUT" "$BEX_BIN" >/dev/null 2>&1
     bex_rc=$?
     if [ "$bex_rc" = "0" ]; then
         PASS=$((PASS + 1)); echo "  tutorial_btree_example_runs: PASS (magic + value survive msync and reopen)"
@@ -11690,7 +11705,7 @@ REPO_ROOT="$DIR/.."
 printf 'fn main() { uint64 a = 10; uint64 b = 0; uint64 c = a / b; exit(c) }\n' > "$REPO_ROOT/test_tmp_$$.kr"
 if $KRC $KRC_FLAGS --debug "$REPO_ROOT/test_tmp_$$.kr" -o /tmp/krc_test_$$ > /dev/null 2>&1; then
     chmod +x /tmp/krc_test_$$
-    /tmp/krc_test_$$ > /dev/null 2>&1
+    timeout -k 5 "$RUN_TEST_TIMEOUT" /tmp/krc_test_$$ > /dev/null 2>&1
     actual=$?
     if [ "$actual" != "0" ]; then
         PASS=$((PASS + 1))
@@ -11710,7 +11725,7 @@ TOTAL=$((TOTAL + 1))
 printf 'fn main() { uint64 a = 9223372036854775807; uint64 b = a + a; exit(b) }\n' > "$REPO_ROOT/test_tmp_$$.kr"
 if $KRC $KRC_FLAGS --debug "$REPO_ROOT/test_tmp_$$.kr" -o /tmp/krc_test_$$ > /dev/null 2>&1; then
     chmod +x /tmp/krc_test_$$
-    /tmp/krc_test_$$ > /dev/null 2>&1
+    timeout -k 5 "$RUN_TEST_TIMEOUT" /tmp/krc_test_$$ > /dev/null 2>&1
     actual=$?
     if [ "$actual" != "0" ]; then
         PASS=$((PASS + 1))
@@ -11730,7 +11745,7 @@ TOTAL=$((TOTAL + 1))
 printf 'fn main() { uint64 p = 0; uint64 v = load64(p); exit(v) }\n' > "$REPO_ROOT/test_tmp_$$.kr"
 if $KRC $KRC_FLAGS --debug "$REPO_ROOT/test_tmp_$$.kr" -o /tmp/krc_test_$$ > /dev/null 2>&1; then
     chmod +x /tmp/krc_test_$$
-    /tmp/krc_test_$$ > /dev/null 2>&1
+    timeout -k 5 "$RUN_TEST_TIMEOUT" /tmp/krc_test_$$ > /dev/null 2>&1
     actual=$?
     if [ "$actual" != "0" ]; then
         PASS=$((PASS + 1))
@@ -11769,7 +11784,7 @@ fi
 # Test: binary with -g runs correctly
 TOTAL=$((TOTAL + 1))
 chmod +x /tmp/krc_g_$$
-/tmp/krc_g_$$ > /dev/null 2>&1
+timeout -k 5 "$RUN_TEST_TIMEOUT" /tmp/krc_g_$$ > /dev/null 2>&1
 actual=$?
 if [ "$actual" = "42" ]; then
     PASS=$((PASS + 1))
@@ -11822,7 +11837,7 @@ REPO_ROOT="$DIR/.."
 printf 'fn main() { exit(42) }\n' > "$REPO_ROOT/test_tmp_$$.kr"
 if $KRC $KRC_FLAGS --ir "$REPO_ROOT/test_tmp_$$.kr" -o /tmp/krc_ir_$$ > /dev/null 2>&1; then
     chmod +x /tmp/krc_ir_$$
-    /tmp/krc_ir_$$ > /dev/null 2>&1
+    timeout -k 5 "$RUN_TEST_TIMEOUT" /tmp/krc_ir_$$ > /dev/null 2>&1
     actual=$?
     if [ "$actual" = "42" ]; then
         PASS=$((PASS + 1))
@@ -11862,7 +11877,7 @@ TOTAL=$((TOTAL + 1))
 printf 'fn main() { exit(10 / 3) }\n' > "$REPO_ROOT/test_tmp_$$.kr"
 if $KRC $KRC_FLAGS --ir "$REPO_ROOT/test_tmp_$$.kr" -o /tmp/krc_ir_$$ > /dev/null 2>&1; then
     chmod +x /tmp/krc_ir_$$
-    /tmp/krc_ir_$$ > /dev/null 2>&1
+    timeout -k 5 "$RUN_TEST_TIMEOUT" /tmp/krc_ir_$$ > /dev/null 2>&1
     actual=$?
     if [ "$actual" = "3" ]; then
         PASS=$((PASS + 1))
@@ -11882,7 +11897,7 @@ TOTAL=$((TOTAL + 1))
 printf 'fn main() { uint64 x = 10; if x > 5 { exit(1) } else { exit(0) } }\n' > "$REPO_ROOT/test_tmp_$$.kr"
 if $KRC $KRC_FLAGS --ir "$REPO_ROOT/test_tmp_$$.kr" -o /tmp/krc_ir_$$ > /dev/null 2>&1; then
     chmod +x /tmp/krc_ir_$$
-    /tmp/krc_ir_$$ > /dev/null 2>&1
+    timeout -k 5 "$RUN_TEST_TIMEOUT" /tmp/krc_ir_$$ > /dev/null 2>&1
     actual=$?
     if [ "$actual" = "1" ]; then
         PASS=$((PASS + 1))
@@ -11902,7 +11917,7 @@ TOTAL=$((TOTAL + 1))
 printf 'fn main() { uint64 p = alloc(64); store64(p, 42); uint64 v = load64(p); dealloc(p); exit(v) }\n' > "$REPO_ROOT/test_tmp_$$.kr"
 if $KRC $KRC_FLAGS --ir "$REPO_ROOT/test_tmp_$$.kr" -o /tmp/krc_ir_$$ > /dev/null 2>&1; then
     chmod +x /tmp/krc_ir_$$
-    /tmp/krc_ir_$$ > /dev/null 2>&1
+    timeout -k 5 "$RUN_TEST_TIMEOUT" /tmp/krc_ir_$$ > /dev/null 2>&1
     actual=$?
     if [ "$actual" = "42" ]; then
         PASS=$((PASS + 1))
@@ -11922,7 +11937,7 @@ TOTAL=$((TOTAL + 1))
 printf 'fn main() { uint64 p = alloc(16); store8(p, 65); uint64 v = load8(p); dealloc(p); exit(v) }\n' > "$REPO_ROOT/test_tmp_$$.kr"
 if $KRC $KRC_FLAGS --ir "$REPO_ROOT/test_tmp_$$.kr" -o /tmp/krc_ir_$$ > /dev/null 2>&1; then
     chmod +x /tmp/krc_ir_$$
-    /tmp/krc_ir_$$ > /dev/null 2>&1
+    timeout -k 5 "$RUN_TEST_TIMEOUT" /tmp/krc_ir_$$ > /dev/null 2>&1
     actual=$?
     if [ "$actual" = "65" ]; then
         PASS=$((PASS + 1))
@@ -11942,7 +11957,7 @@ TOTAL=$((TOTAL + 1))
 printf 'fn main() { uint64 a = alloc(64); uint64 b = alloc(64); store64(a, 10); store64(b, 32); uint64 r = load64(a) + load64(b); dealloc(a); dealloc(b); exit(r) }\n' > "$REPO_ROOT/test_tmp_$$.kr"
 if $KRC $KRC_FLAGS --ir "$REPO_ROOT/test_tmp_$$.kr" -o /tmp/krc_ir_$$ > /dev/null 2>&1; then
     chmod +x /tmp/krc_ir_$$
-    /tmp/krc_ir_$$ > /dev/null 2>&1
+    timeout -k 5 "$RUN_TEST_TIMEOUT" /tmp/krc_ir_$$ > /dev/null 2>&1
     actual=$?
     if [ "$actual" = "42" ]; then
         PASS=$((PASS + 1))
@@ -11962,7 +11977,7 @@ cat > "$REPO_ROOT/test_tmp_$$.kr" << 'IREOF'
 fn main() { uint64 i = 0; while i < 100 { if i == 5 { break }; i = i + 1 }; exit(i) }
 IREOF
 if timeout 10 "$KRC" $KRC_FLAGS --ir "$REPO_ROOT/test_tmp_$$.kr" -o /tmp/krc_ir_$$ 2>/dev/null; then
-    chmod +x /tmp/krc_ir_$$; /tmp/krc_ir_$$; actual=$?
+    chmod +x /tmp/krc_ir_$$; timeout -k 5 "$RUN_TEST_TIMEOUT" /tmp/krc_ir_$$; actual=$?
     if [ "$actual" -eq 5 ]; then
         echo "  ir_break: PASS"
     else
@@ -11978,7 +11993,7 @@ cat > "$REPO_ROOT/test_tmp_$$.kr" << 'IREOF'
 fn main() { uint64 i = 0; uint64 s = 0; while i < 10 { i = i + 1; if i == 5 { continue }; s = s + 1 }; exit(s) }
 IREOF
 if timeout 10 "$KRC" $KRC_FLAGS --ir "$REPO_ROOT/test_tmp_$$.kr" -o /tmp/krc_ir_$$ 2>/dev/null; then
-    chmod +x /tmp/krc_ir_$$; /tmp/krc_ir_$$; actual=$?
+    chmod +x /tmp/krc_ir_$$; timeout -k 5 "$RUN_TEST_TIMEOUT" /tmp/krc_ir_$$; actual=$?
     if [ "$actual" -eq 9 ]; then
         echo "  ir_continue: PASS"
     else
@@ -11995,7 +12010,7 @@ fn add(uint64 a, uint64 b) -> uint64 { return a + b }
 fn main() { exit(add(20, 22)) }
 IREOF
 if timeout 10 "$KRC" $KRC_FLAGS --ir "$REPO_ROOT/test_tmp_$$.kr" -o /tmp/krc_ir_$$ 2>/dev/null; then
-    chmod +x /tmp/krc_ir_$$; /tmp/krc_ir_$$; actual=$?
+    chmod +x /tmp/krc_ir_$$; timeout -k 5 "$RUN_TEST_TIMEOUT" /tmp/krc_ir_$$; actual=$?
     if [ "$actual" -eq 42 ]; then
         echo "  ir_fn_call: PASS"
     else
@@ -12012,7 +12027,7 @@ fn fib(uint64 n) -> uint64 { if n <= 1 { return n }; return fib(n - 1) + fib(n -
 fn main() { exit(fib(10)) }
 IREOF
 if timeout 10 "$KRC" $KRC_FLAGS --ir "$REPO_ROOT/test_tmp_$$.kr" -o /tmp/krc_ir_$$ 2>/dev/null; then
-    chmod +x /tmp/krc_ir_$$; /tmp/krc_ir_$$; actual=$?
+    chmod +x /tmp/krc_ir_$$; timeout -k 5 "$RUN_TEST_TIMEOUT" /tmp/krc_ir_$$; actual=$?
     if [ "$actual" -eq 55 ]; then
         echo "  ir_recursion: PASS"
     else
@@ -12028,7 +12043,7 @@ cat > "$REPO_ROOT/test_tmp_$$.kr" << 'IREOF'
 fn main() { uint64 x = 2; uint64 r = 0; match x { 1 => { r = 10 } 2 => { r = 42 } 3 => { r = 30 } }; exit(r) }
 IREOF
 if timeout 10 "$KRC" $KRC_FLAGS --ir "$REPO_ROOT/test_tmp_$$.kr" -o /tmp/krc_ir_$$ 2>/dev/null; then
-    chmod +x /tmp/krc_ir_$$; /tmp/krc_ir_$$; actual=$?
+    chmod +x /tmp/krc_ir_$$; timeout -k 5 "$RUN_TEST_TIMEOUT" /tmp/krc_ir_$$; actual=$?
     if [ "$actual" -eq 42 ]; then
         echo "  ir_match: PASS"
     else
@@ -12057,7 +12072,7 @@ fn main() {
 IREOF
 if $KRC $KRC_FLAGS --ir "$REPO_ROOT/test_tmp_$$.kr" -o /tmp/krc_ir_$$ > /dev/null 2>&1; then
     chmod +x /tmp/krc_ir_$$
-    /tmp/krc_ir_$$ > /dev/null 2>&1
+    timeout -k 5 "$RUN_TEST_TIMEOUT" /tmp/krc_ir_$$ > /dev/null 2>&1
     actual=$?
     if [ "$actual" = "171" ]; then
         PASS=$((PASS + 1))
@@ -12577,7 +12592,7 @@ if echo "$INLIDX_IR" | grep -q "call @"; then
 fi
 for _fl in "" "--legacy"; do
     if $KRC --arch="$RUN_ARCH" $_fl "$REPO_ROOT/test_tmp_inlidx_$$.kr" -o "/tmp/krc_inlidx_$$" >/dev/null 2>&1; then
-        "/tmp/krc_inlidx_$$"; _rc=$?
+        timeout -k 5 "$RUN_TEST_TIMEOUT" "/tmp/krc_inlidx_$$"; _rc=$?
         [ "$_rc" = "7" ] || { INLIDX_OK=0; echo "  ${_fl:-IR}: got $_rc, want 7"; }
     else
         INLIDX_OK=0; echo "  ${_fl:-IR}: COMPILE FAILED"
@@ -12667,7 +12682,7 @@ $KRC $KRC_FLAGS "$MANYFN" -o "$MANYBIN" >/dev/null 2>&1
 MANYOUT=""
 if [ -f "$MANYBIN" ]; then
     chmod +x "$MANYBIN"
-    MANYOUT=$("$MANYBIN" 2>/dev/null)
+    MANYOUT=$(timeout -k 5 "$RUN_TEST_TIMEOUT" "$MANYBIN" 2>/dev/null)
 fi
 rm -f "$MANYFN" "$MANYBIN"
 if [ "$MANYOUT" = "8400" ]; then
@@ -15154,7 +15169,10 @@ echo "--- esp32 esp-image container byte-identity test ---"
 TOTAL=$((TOTAL + 1))
 ESP_SRC="$DIR/../test_tmp_esp_$$.kr"
 ESP_BIN="/tmp/krc_esp_$$"
-ESP_OUT="/tmp/our_image.bin"
+# The program writes the image to ESP_OUT; a fixed /tmp name let two suites
+# overwrite each other's image, so the literal below is rewritten to a
+# per-run path once the source is written.
+ESP_OUT="/tmp/krc_our_image_$$.bin"
 ESP_GOLD="$DIR/golden/esp32_ref_image.bin"
 cat > "$ESP_SRC" <<'ESP_EOF'
 import "std/sha256.kr"
@@ -15196,6 +15214,7 @@ fn main() {
     exit(0)
 }
 ESP_EOF
+sed -i "s#\"/tmp/our_image.bin\"#\"$ESP_OUT\"#" "$ESP_SRC"
 if [ ! -f "$ESP_GOLD" ]; then
     echo "FAIL: esp32_image_format (golden reference $ESP_GOLD missing)"
     FAIL=$((FAIL + 1))
@@ -15206,7 +15225,7 @@ elif ! $KRC $KRC_FLAGS "$ESP_SRC" -o "$ESP_BIN" >/dev/null 2>&1; then
 else
     chmod +x "$ESP_BIN"
     rm -f "$ESP_OUT"
-    "$ESP_BIN" >/dev/null 2>&1
+    timeout -k 5 "$RUN_TEST_TIMEOUT" "$ESP_BIN" >/dev/null 2>&1
     if cmp -s "$ESP_OUT" "$ESP_GOLD"; then
         PASS=$((PASS + 1))
         echo "  esp32_image_format: PASS ($(wc -c < "$ESP_GOLD" | tr -d ' ') bytes byte-identical to esptool reference)"
@@ -15595,7 +15614,7 @@ fi
 TOTAL=$((TOTAL + 1))
 rm -f /tmp/krc_tnone_nf1_$$
 if [ -n "$TN_RAW_KRC" ]; then
-    "$TN_RAW_KRC" --target=none "$TN_SRC" -o /tmp/krc_tnone_nf1_$$ >/dev/null 2>&1
+    timeout -k 5 "$RUN_TEST_TIMEOUT" "$TN_RAW_KRC" --target=none "$TN_SRC" -o /tmp/krc_tnone_nf1_$$ >/dev/null 2>&1
 fi
 TN_NF1_MAGIC=""
 if [ -f /tmp/krc_tnone_nf1_$$ ]; then
@@ -15708,7 +15727,7 @@ t6_refuses() {
     TOTAL=$((TOTAL + 1))
     rm -f "$T6_D/out"
     local err st
-    err=$("$T6_KRC" "$@" -o "$T6_D/out" 2>&1); st=$?
+    err=$(timeout -k 5 "$RUN_TEST_TIMEOUT" "$T6_KRC" "$@" -o "$T6_D/out" 2>&1); st=$?
     if [ -z "$T6_KRC" ]; then
         echo "FAIL: $name (no raw compiler binary found)"; FAIL=$((FAIL + 1))
     elif [ "$st" = "0" ] || [ -f "$T6_D/out" ]; then
@@ -15732,7 +15751,7 @@ t6_builds() {
     TOTAL=$((TOTAL + 1))
     rm -f "$T6_D/out"
     local err st
-    err=$("$T6_KRC" "$@" -o "$T6_D/out" 2>&1); st=$?
+    err=$(timeout -k 5 "$RUN_TEST_TIMEOUT" "$T6_KRC" "$@" -o "$T6_D/out" 2>&1); st=$?
     if [ -n "$T6_KRC" ] && [ "$st" = "0" ] && [ -f "$T6_D/out" ]; then
         PASS=$((PASS + 1)); echo "  $name: PASS"
     else
@@ -15830,7 +15849,7 @@ t6_builds "t6_emit_obj_arm64_debug_builds" -- --arch=arm64 --emit=obj --debug "$
 # that only asserted "some refusal fired" would have passed unchanged
 # across this whole commit and proved nothing.
 TOTAL=$((TOTAL + 1))
-T6_LKM_ERR=$("$T6_KRC" --arch=arm64 --emit=lkm --debug "$T6_D/arr.kr" -o "$T6_D/lkm_out" 2>&1); T6_LKM_ST=$?
+T6_LKM_ERR=$(timeout -k 5 "$RUN_TEST_TIMEOUT" "$T6_KRC" --arch=arm64 --emit=lkm --debug "$T6_D/arr.kr" -o "$T6_D/lkm_out" 2>&1); T6_LKM_ST=$?
 if [ "$T6_LKM_ST" != "0" ] && echo "$T6_LKM_ERR" | grep -q -- "--emit=lkm" \
    && echo "$T6_LKM_ERR" | grep -q "x86_64" \
    && ! echo "$T6_LKM_ERR" | grep -q -- "--debug"; then
@@ -15884,7 +15903,7 @@ ES_BAD=""
 for ES in $EMIT_SPELLINGS; do
     TOTAL=$((TOTAL + 1))
     rm -f "$T6_D/es_out"
-    ES_ERR=$("$T6_KRC" --arch=arm64 --debug --emit=$ES "$T6_D/arr.kr" -o "$T6_D/es_out" 2>&1); ES_ST=$?
+    ES_ERR=$(timeout -k 5 "$RUN_TEST_TIMEOUT" "$T6_KRC" --arch=arm64 --debug --emit=$ES "$T6_D/arr.kr" -o "$T6_D/es_out" 2>&1); ES_ST=$?
     # No spelling may be turned away FOR BEING --debug any more. Checked on
     # every row, including the ones that legitimately fail for another
     # reason -- this single assertion is what would catch the refusal (or
@@ -15951,9 +15970,9 @@ printf 'fn main() {\n    uint64[4] a\n    uint64 v = a[99]\n    println(v)\n    
 # never native-executed on a mismatched host.
 if [ -n "$QEMU_A64" ]; then
     TOTAL=$((TOTAL + 1))
-    if $T6_KRC --arch=arm64 --debug "$T6_D/oob.kr" -o "$T6_D/oob_ir_a64" >/dev/null 2>&1; then
+    if timeout -k 5 "$RUN_TEST_TIMEOUT" $T6_KRC --arch=arm64 --debug "$T6_D/oob.kr" -o "$T6_D/oob_ir_a64" >/dev/null 2>&1; then
         chmod +x "$T6_D/oob_ir_a64"
-        $QEMU_A64 "$T6_D/oob_ir_a64" >/dev/null 2>&1
+        timeout -k 5 "$RUN_TEST_TIMEOUT" $QEMU_A64 "$T6_D/oob_ir_a64" >/dev/null 2>&1
         oob_ir_a64_st=$?
         if [ "$oob_ir_a64_st" != "0" ]; then
             PASS=$((PASS + 1)); echo "  t6_debug_arm64_ir_still_traps: PASS (exit $oob_ir_a64_st)"
@@ -15975,9 +15994,9 @@ fi
 # (cannot execute), which reads as a wrong answer rather than a wrong arch.
 if [ "$RUN_ARCH" = "x86_64" ]; then
     TOTAL=$((TOTAL + 1))
-    if $T6_KRC --legacy --arch=x86_64 --debug "$T6_D/oob.kr" -o "$T6_D/oob_leg_x64" >/dev/null 2>&1; then
+    if timeout -k 5 "$RUN_TEST_TIMEOUT" $T6_KRC --legacy --arch=x86_64 --debug "$T6_D/oob.kr" -o "$T6_D/oob_leg_x64" >/dev/null 2>&1; then
         chmod +x "$T6_D/oob_leg_x64"
-        "$T6_D/oob_leg_x64" >/dev/null 2>&1
+        timeout -k 5 "$RUN_TEST_TIMEOUT" "$T6_D/oob_leg_x64" >/dev/null 2>&1
         oob_leg_x64_st=$?
         if [ "$oob_leg_x64_st" != "0" ]; then
             PASS=$((PASS + 1)); echo "  t6_debug_legacy_x86_64_still_traps: PASS (exit $oob_leg_x64_st)"
@@ -15996,9 +16015,9 @@ if [ "$RUN_ARCH" = "x86_64" ]; then
     # _link gate above (gcc, -no-pie, x86_64 host toolchain).
     if command -v gcc > /dev/null 2>&1; then
         TOTAL=$((TOTAL + 1))
-        if $T6_KRC --arch=x86_64 --emit=obj --debug "$T6_D/oob.kr" -o "$T6_D/oob_obj_x64.o" >/dev/null 2>&1 \
+        if timeout -k 5 "$RUN_TEST_TIMEOUT" $T6_KRC --arch=x86_64 --emit=obj --debug "$T6_D/oob.kr" -o "$T6_D/oob_obj_x64.o" >/dev/null 2>&1 \
            && gcc "$T6_D/oob_obj_x64.o" -o "$T6_D/oob_obj_x64" -no-pie >/dev/null 2>&1; then
-            "$T6_D/oob_obj_x64" >/dev/null 2>&1
+            timeout -k 5 "$RUN_TEST_TIMEOUT" "$T6_D/oob_obj_x64" >/dev/null 2>&1
             oob_obj_x64_st=$?
             if [ "$oob_obj_x64_st" != "0" ]; then
                 PASS=$((PASS + 1)); echo "  t6_debug_obj_x86_64_still_traps: PASS (exit $oob_obj_x64_st)"
@@ -16049,7 +16068,7 @@ t6_builds "t6_emit_elfexe_tnone" -- --emit=elfexe --arch=x86_64 --target=none "$
 #    provider-routing tests read. Assert the content, not just the exit code:
 #    an empty stream would satisfy exit 0.
 TOTAL=$((TOTAL + 1))
-T6_OUT=$("$T6_KRC" --emit=asm --arch=x86_64 --target=none "$T6_D/plain.kr" -o "$T6_D/a.s" 2>&1)
+T6_OUT=$(timeout -k 5 "$RUN_TEST_TIMEOUT" "$T6_KRC" --emit=asm --arch=x86_64 --target=none "$T6_D/plain.kr" -o "$T6_D/a.s" 2>&1)
 if [ -f "$T6_D/a.s" ] && grep -q "main" "$T6_D/a.s"; then
     PASS=$((PASS + 1)); echo "  t6_emit_asm_tnone: PASS"
 else
@@ -16057,7 +16076,7 @@ else
 fi
 rm -f "$T6_D/a.s"
 TOTAL=$((TOTAL + 1))
-T6_OUT=$("$T6_KRC" --emit=ir --arch=x86_64 --target=none "$T6_D/plain.kr" 2>&1)
+T6_OUT=$(timeout -k 5 "$RUN_TEST_TIMEOUT" "$T6_KRC" --emit=ir --arch=x86_64 --target=none "$T6_D/plain.kr" 2>&1)
 if echo "$T6_OUT" | grep -q "^function main:"; then
     PASS=$((PASS + 1)); echo "  t6_emit_ir_tnone: PASS"
 else
@@ -16166,7 +16185,7 @@ t6_builds "t6_pair_ok_riscv32_none" -- --arch=riscv32 --target=none "$T6_D/plain
 t6_builds "t6_pair_ok_xtensa_none" -- --arch=xtensa --target=none "$T6_D/plain.kr"
 t6_builds "t6_pair_ok_xtensa_freestanding" -- --arch=xtensa --freestanding "$T6_D/plain.kr"
 TOTAL=$((TOTAL + 1))
-T6_OUT=$("$T6_KRC" --arch=xtensa --target=linux "$T6_D/plain.kr" -o "$T6_D/out" 2>&1)
+T6_OUT=$(timeout -k 5 "$RUN_TEST_TIMEOUT" "$T6_KRC" --arch=xtensa --target=linux "$T6_D/plain.kr" -o "$T6_D/out" 2>&1)
 if echo "$T6_OUT" | grep -q "not a supported target pair"; then
     echo "FAIL: t6_pair_ok_xtensa_linux (rejected by the pair check; every --arch=xtensa --freestanding build carries target_os=0)"
     FAIL=$((FAIL + 1))
@@ -16312,7 +16331,7 @@ img_refuses image_targets_with_none "cannot build a fat binary" --arch=x86_64 --
 TOTAL=$((TOTAL + 1))
 if [ -f "$DIR/../build/krc2" ]; then IMG_RAW_KRC=$(cd "$DIR/../build" && pwd)/krc2; else IMG_RAW_KRC=""; fi
 rm -f /tmp/krc_imgna_$$
-imgna_out=$("$IMG_RAW_KRC" "$IMG_SRC" -o /tmp/krc_imgna_$$ --target=none --emit=image --load-addr=0x40400100 2>&1); imgna_st=$?
+imgna_out=$(timeout -k 5 "$RUN_TEST_TIMEOUT" "$IMG_RAW_KRC" "$IMG_SRC" -o /tmp/krc_imgna_$$ --target=none --emit=image --load-addr=0x40400100 2>&1); imgna_st=$?
 if [ -n "$IMG_RAW_KRC" ] && [ $imgna_st -ne 0 ] \
    && echo "$imgna_out" | grep -q "requires an explicit --arch" && [ ! -f /tmp/krc_imgna_$$ ]; then
     PASS=$((PASS + 1)); echo "  image_needs_explicit_arch: PASS"
@@ -17396,7 +17415,7 @@ uefi_refuses uefi_refuses_xtensa "no PE Machine value for xtensa" --arch=xtensa 
 TOTAL=$((TOTAL + 1))
 if [ -f "$DIR/../build/krc2" ]; then UEFI_RAW_KRC=$(cd "$DIR/../build" && pwd)/krc2; else UEFI_RAW_KRC=""; fi
 rm -f /tmp/krc_uefina_$$
-uefina_out=$("$UEFI_RAW_KRC" "$UEFI_SRC" -o /tmp/krc_uefina_$$ --target=none --emit=uefi 2>&1); uefina_st=$?
+uefina_out=$(timeout -k 5 "$RUN_TEST_TIMEOUT" "$UEFI_RAW_KRC" "$UEFI_SRC" -o /tmp/krc_uefina_$$ --target=none --emit=uefi 2>&1); uefina_st=$?
 if [ -n "$UEFI_RAW_KRC" ] && [ $uefina_st -ne 0 ] \
    && echo "$uefina_out" | grep -q "requires an explicit --arch" && [ ! -f /tmp/krc_uefina_$$ ]; then
     PASS=$((PASS + 1)); echo "  uefi_requires_explicit_arch: PASS"
@@ -19718,7 +19737,7 @@ else
 fi
 for A in x86_64 arm64; do
     TOTAL=$((TOTAL + 1))
-    CP_ERR=$("$CP_KRC" --arch=$A --target=none "$CP_SRC" -o /tmp/krc_choke_bin_$$ 2>&1); CP_ST=$?
+    CP_ERR=$(timeout -k 5 "$RUN_TEST_TIMEOUT" "$CP_KRC" --arch=$A --target=none "$CP_SRC" -o /tmp/krc_choke_bin_$$ 2>&1); CP_ST=$?
     if [ -n "$CP_KRC" ] && [ "$CP_ST" != "0" ] && echo "$CP_ERR" | grep -q "no operating system"; then
         PASS=$((PASS + 1)); echo "  choke_point_$A: PASS"
     else
@@ -19744,7 +19763,7 @@ done
 # and --legacy is not: dropping both would have deleted this block.
 for CP_FLAG in --emit=obj; do
     TOTAL=$((TOTAL + 1))
-    CP_ERR=$("$CP_KRC" $CP_FLAG --arch=x86_64 --target=none "$CP_SRC" -o /tmp/krc_choke_bin_$$ 2>&1); CP_ST=$?
+    CP_ERR=$(timeout -k 5 "$RUN_TEST_TIMEOUT" "$CP_KRC" $CP_FLAG --arch=x86_64 --target=none "$CP_SRC" -o /tmp/krc_choke_bin_$$ 2>&1); CP_ST=$?
     CP_NAME=$(echo "$CP_FLAG" | tr -d '-' | tr '=' '_')
     if [ -n "$CP_KRC" ] && [ "$CP_ST" != "0" ] && echo "$CP_ERR" | grep -q "no operating system"; then
         PASS=$((PASS + 1)); echo "  choke_point_x86_$CP_NAME: PASS"
@@ -19801,7 +19820,7 @@ for CP_B in $CP_CASE_NAMES; do
     esac
     printf 'fn main() { %s }\n' "$CP_BODY" > "$CP_SRC"
     TOTAL=$((TOTAL + 1))
-    CP_ERR=$("$CP_KRC" --emit=obj --arch=x86_64 --target=none "$CP_SRC" -o /tmp/krc_choke_bin_$$ 2>&1)
+    CP_ERR=$(timeout -k 5 "$RUN_TEST_TIMEOUT" "$CP_KRC" --emit=obj --arch=x86_64 --target=none "$CP_SRC" -o /tmp/krc_choke_bin_$$ 2>&1)
     if echo "$CP_ERR" | grep -q "reached the emitter from '$CP_B'"; then
         PASS=$((PASS + 1)); echo "  choke_point_names_${CP_B}_obj: PASS"
     else
@@ -19820,7 +19839,7 @@ printf 'fn main() { exit(0) }\n' > "$CP_SRC"
 # same reason as the block above: the IR path refuses earlier now, and
 # --legacy is refused at flag validation.
 TOTAL=$((TOTAL + 1))
-CP_ERR=$("$CP_KRC" --emit=obj --arch=arm64 --target=none "$CP_SRC" -o /tmp/krc_choke_bin_$$ 2>&1)
+CP_ERR=$(timeout -k 5 "$RUN_TEST_TIMEOUT" "$CP_KRC" --emit=obj --arch=arm64 --target=none "$CP_SRC" -o /tmp/krc_choke_bin_$$ 2>&1)
 if echo "$CP_ERR" | grep -q "before it can be used in a freestanding image\.$"; then
     PASS=$((PASS + 1)); echo "  choke_point_diag_not_truncated: PASS"
 else
@@ -19906,7 +19925,7 @@ fi
 # device, emitting no ECALL at all -- so neither arch may refuse here.
 for A in riscv32 xtensa; do
     TOTAL=$((TOTAL + 1))
-    CP_ERR=$("$CP_KRC" --arch=$A --target=none "$CP_SRC" -o /tmp/krc_choke_bin_$$ 2>&1); CP_ST=$?
+    CP_ERR=$(timeout -k 5 "$RUN_TEST_TIMEOUT" "$CP_KRC" --arch=$A --target=none "$CP_SRC" -o /tmp/krc_choke_bin_$$ 2>&1); CP_ST=$?
     if [ "$CP_ST" = "0" ] && [ -f /tmp/krc_choke_bin_$$ ]; then
         PASS=$((PASS + 1)); echo "  choke_point_${A}_exit_still_allowed: PASS"
     else
@@ -19974,7 +19993,7 @@ for A in x86_64 arm64; do
         AU_OUT="/tmp/krc_au_$$"
         TOTAL=$((TOTAL + 1))
         rm -f "$AU_OUT"
-        AU_ERR=$("$CP_KRC" --arch=$A --target=none "$AU_F" -o "$AU_OUT" 2>&1); AU_ST=$?
+        AU_ERR=$(timeout -k 5 "$RUN_TEST_TIMEOUT" "$CP_KRC" --arch=$A --target=none "$AU_F" -o "$AU_OUT" 2>&1); AU_ST=$?
         if [ "$AU_ST" = "0" ]; then
             echo "FAIL: audit_${AU_B}_$A (compiled CLEAN under --target=none -- a fall-through site was missed)"
             FAIL=$((FAIL + 1))
@@ -19999,7 +20018,7 @@ done
 # checked to its final character so a hand-counted write() length (the defect
 # 563b0f3 fixed 30 of) cannot truncate the advice off the end.
 TOTAL=$((TOTAL + 1))
-AU_ERR=$("$CP_KRC" --arch=x86_64 --target=none "$AU_D/a_exit.kr" -o /tmp/krc_au_$$ 2>&1)
+AU_ERR=$(timeout -k 5 "$RUN_TEST_TIMEOUT" "$CP_KRC" --arch=x86_64 --target=none "$AU_D/a_exit.kr" -o /tmp/krc_au_$$ 2>&1)
 if echo "$AU_ERR" | grep -q "end main with \`loop { }\` instead -- there is no parent process to return a status to$"; then
     PASS=$((PASS + 1)); echo "  audit_refusal_is_actionable: PASS"
 else
@@ -20024,7 +20043,7 @@ fn println(uint64 v) -> uint64 {
 fn main() { println(7)  loop { } }
 AUEOF
 rm -f /tmp/krc_au_ov_$$
-AU_ERR=$("$CP_KRC" --arch=x86_64 --target=none "$AU_D/ov.kr" -o /tmp/krc_au_ov_$$ 2>&1); AU_ST=$?
+AU_ERR=$(timeout -k 5 "$RUN_TEST_TIMEOUT" "$CP_KRC" --arch=x86_64 --target=none "$AU_D/ov.kr" -o /tmp/krc_au_ov_$$ 2>&1); AU_ST=$?
 if [ "$AU_ST" = "0" ] && [ -f /tmp/krc_au_ov_$$ ]; then
     PASS=$((PASS + 1)); echo "  audit_builtin_override_beats_refusal: PASS"
 else
@@ -20048,7 +20067,7 @@ AUEOF
 AU_POS_OK=1
 for A in x86_64 arm64; do
     rm -f /tmp/krc_au_pos_$$
-    "$CP_KRC" --arch=$A --target=none "$AU_D/pos.kr" -o /tmp/krc_au_pos_$$ >/dev/null 2>&1 \
+    timeout -k 5 "$RUN_TEST_TIMEOUT" "$CP_KRC" --arch=$A --target=none "$AU_D/pos.kr" -o /tmp/krc_au_pos_$$ >/dev/null 2>&1 \
         || AU_POS_OK=0
     [ -f /tmp/krc_au_pos_$$ ] || AU_POS_OK=0
 done
@@ -20082,7 +20101,7 @@ for AU_FLAG in --emit=obj; do
         TOTAL=$((TOTAL + 1))
         AU_OUT="/tmp/krc_au_lg_$$"
         rm -f "$AU_OUT"
-        AU_ERR=$("$CP_KRC" $AU_FLAG --arch=$A --target=none "$AU_D/a_time_ns.kr" -o "$AU_OUT" 2>&1); AU_ST=$?
+        AU_ERR=$(timeout -k 5 "$RUN_TEST_TIMEOUT" "$CP_KRC" $AU_FLAG --arch=$A --target=none "$AU_D/a_time_ns.kr" -o "$AU_OUT" 2>&1); AU_ST=$?
         AU_TAG=$(echo "$AU_FLAG" | tr -d '-' | tr '=' '_')
         if [ "$AU_ST" != "0" ] && [ ! -f "$AU_OUT" ] \
            && echo "$AU_ERR" | grep -q "error: --target=none: 'time_ns' is not available on bare metal"; then
@@ -20103,7 +20122,7 @@ done
 for A in riscv32 xtensa; do
     TOTAL=$((TOTAL + 1))
     printf 'static uint32 sink = 0\nfn main() {\n    sink = write(1, "x", 1)\n    loop { }\n}\n' > "$AU_D/fs.kr"
-    AU_ERR=$("$CP_KRC" --arch=$A --freestanding "$AU_D/fs.kr" -o /tmp/krc_au_fs_$$ 2>&1)
+    AU_ERR=$(timeout -k 5 "$RUN_TEST_TIMEOUT" "$CP_KRC" --arch=$A --freestanding "$AU_D/fs.kr" -o /tmp/krc_au_fs_$$ 2>&1)
     if echo "$AU_ERR" | grep -q "$A: IR op 52 not yet implemented"; then
         PASS=$((PASS + 1)); echo "  audit_${A}_freestanding_unchanged: PASS"
     else
@@ -20174,8 +20193,8 @@ for A in x86_64 arm64; do
         TOTAL=$((TOTAL + 1))
         printf 'import "%s"\nfn main() {\n    %s\n    loop { }\n}\n' "$PV_M" "$PV_CALL" > "$PV_D/r.kr"
         rm -f "$PV_D/r.out"
-        PV_ERR=$("$PV_KRC" --arch=$A --target=none "$PV_D/r.kr" -o "$PV_D/r.out" 2>&1); PV_ST=$?
-        PV_IR=$("$PV_KRC" --arch=$A --target=none --emit=ir "$PV_D/r.kr" 2>&1)
+        PV_ERR=$(timeout -k 5 "$RUN_TEST_TIMEOUT" "$PV_KRC" --arch=$A --target=none "$PV_D/r.kr" -o "$PV_D/r.out" 2>&1); PV_ST=$?
+        PV_IR=$(timeout -k 5 "$RUN_TEST_TIMEOUT" "$PV_KRC" --arch=$A --target=none --emit=ir "$PV_D/r.kr" 2>&1)
         if [ "$PV_ST" != "0" ] || [ ! -f "$PV_D/r.out" ]; then
             echo "FAIL: provider_route_${pv_i}_$A (exit $PV_ST, no artifact: '$PV_ERR')"; FAIL=$((FAIL + 1))
         elif echo "$PV_IR" | grep -q "syscall"; then
@@ -20203,8 +20222,8 @@ for A in x86_64 arm64; do
     printf 'import "%s"\nfn main() {\n    loop { }\n}\n' "$PV_M" > "$PV_D/n.kr"
     printf 'import "%s"\nfn main() {\n    println("hi")\n    loop { }\n}\n' "$PV_M" > "$PV_D/y.kr"
     rm -f "$PV_D/n.out" "$PV_D/y.out"
-    "$PV_KRC" --arch=$A --target=none "$PV_D/n.kr" -o "$PV_D/n.out" >/dev/null 2>&1
-    "$PV_KRC" --arch=$A --target=none "$PV_D/y.kr" -o "$PV_D/y.out" >/dev/null 2>&1
+    timeout -k 5 "$RUN_TEST_TIMEOUT" "$PV_KRC" --arch=$A --target=none "$PV_D/n.kr" -o "$PV_D/n.out" >/dev/null 2>&1
+    timeout -k 5 "$RUN_TEST_TIMEOUT" "$PV_KRC" --arch=$A --target=none "$PV_D/y.kr" -o "$PV_D/y.out" >/dev/null 2>&1
     if [ ! -f "$PV_D/n.out" ] || [ ! -f "$PV_D/y.out" ]; then
         echo "FAIL: provider_dce_$A (one of the two builds produced no artifact)"; FAIL=$((FAIL + 1))
     else
@@ -20252,8 +20271,8 @@ if [ -n "$PV_OD" ]; then
     printf 'import "../std/uart_16550.kr"\nfn main() {\n    loop { }\n}\n' > "$PV_D/n86.kr"
     printf 'import "../std/uart_16550.kr"\nfn main() {\n    println("hi")\n    loop { }\n}\n' > "$PV_D/y86.kr"
     rm -f "$PV_D/n86.out" "$PV_D/y86.out"
-    "$PV_KRC" --arch=x86_64 --target=none "$PV_D/n86.kr" -o "$PV_D/n86.out" >/dev/null 2>&1
-    "$PV_KRC" --arch=x86_64 --target=none "$PV_D/y86.kr" -o "$PV_D/y86.out" >/dev/null 2>&1
+    timeout -k 5 "$RUN_TEST_TIMEOUT" "$PV_KRC" --arch=x86_64 --target=none "$PV_D/n86.kr" -o "$PV_D/n86.out" >/dev/null 2>&1
+    timeout -k 5 "$RUN_TEST_TIMEOUT" "$PV_KRC" --arch=x86_64 --target=none "$PV_D/y86.kr" -o "$PV_D/y86.out" >/dev/null 2>&1
     PV_HAS=$("$PV_OD" -D -b binary -m i386:x86-64 "$PV_D/y86.out" 2>/dev/null | grep -cE "$PV_PAT")
     PV_NOT=$("$PV_OD" -D -b binary -m i386:x86-64 "$PV_D/n86.out" 2>/dev/null | grep -cE "$PV_PAT")
     if [ "$PV_HAS" -ge 1 ] && [ "$PV_NOT" = "0" ]; then
@@ -20279,7 +20298,7 @@ for PV_B in println print println_str print_str write; do
     esac
     printf 'static uint64 sink = 0\nfn main() {\n    %s\n    loop { }\n}\n' "$PV_C" > "$PV_D/no.kr"
     rm -f "$PV_D/no.out"
-    PV_ERR=$("$PV_KRC" --arch=x86_64 --target=none "$PV_D/no.kr" -o "$PV_D/no.out" 2>&1); PV_ST=$?
+    PV_ERR=$(timeout -k 5 "$RUN_TEST_TIMEOUT" "$PV_KRC" --arch=x86_64 --target=none "$PV_D/no.kr" -o "$PV_D/no.out" 2>&1); PV_ST=$?
     if [ "$PV_ST" = "0" ] || [ -f "$PV_D/no.out" ]; then
         echo "FAIL: provider_missing_refuses_$PV_B (compiled with no provider)"; FAIL=$((FAIL + 1))
     elif ! echo "$PV_ERR" | grep -q "error: --target=none: '$PV_B' is not available on bare metal"; then
@@ -20308,8 +20327,8 @@ fn main() {
 }
 PVEOF
     rm -f "$PV_D/hb.out"
-    PV_ERR=$("$PV_KRC" --arch=$A --target=none "$PV_D/hb.kr" -o "$PV_D/hb.out" 2>&1); PV_ST=$?
-    PV_IR=$("$PV_KRC" --arch=$A --target=none --emit=ir "$PV_D/hb.kr" 2>&1)
+    PV_ERR=$(timeout -k 5 "$RUN_TEST_TIMEOUT" "$PV_KRC" --arch=$A --target=none "$PV_D/hb.kr" -o "$PV_D/hb.out" 2>&1); PV_ST=$?
+    PV_IR=$(timeout -k 5 "$RUN_TEST_TIMEOUT" "$PV_KRC" --arch=$A --target=none --emit=ir "$PV_D/hb.kr" 2>&1)
     if [ "$PV_ST" != "0" ] || [ ! -f "$PV_D/hb.out" ]; then
         echo "FAIL: provider_heap_bump_$A (exit $PV_ST: '$PV_ERR')"; FAIL=$((FAIL + 1))
     elif echo "$PV_IR" | grep -qE "= alloc|dealloc v"; then
@@ -20328,7 +20347,7 @@ for A in x86_64 arm64; do
     TOTAL=$((TOTAL + 1))
     printf 'import "%s"\nimport "../std/heap_bump.kr"\nfn main() {\n    heap_bump_init(0x200000, 0x100000)\n    uint64 p = alloc(32)\n    store64(p, 5)\n    println("v=", load64(p))\n    dealloc(p)\n    loop { }\n}\n' "$PV_M" > "$PV_D/both.kr"
     rm -f "$PV_D/both.out"
-    PV_ERR=$("$PV_KRC" --arch=$A --target=none "$PV_D/both.kr" -o "$PV_D/both.out" 2>&1); PV_ST=$?
+    PV_ERR=$(timeout -k 5 "$RUN_TEST_TIMEOUT" "$PV_KRC" --arch=$A --target=none "$PV_D/both.kr" -o "$PV_D/both.out" 2>&1); PV_ST=$?
     if [ "$PV_ST" = "0" ] && [ -f "$PV_D/both.out" ]; then
         PASS=$((PASS + 1)); echo "  provider_uart_plus_heap_$A: PASS"
     else
@@ -20351,7 +20370,7 @@ for A in x86_64 arm64; do
     TOTAL=$((TOTAL + 1))
     printf 'static uint64 sink = 0\n@builtin_override\nfn write(uint64 only_one) -> uint64 { sink = only_one  return 0 }\nfn main() {\n    println("hi")\n    loop { }\n}\n' > "$PV_D/ar.kr"
     rm -f "$PV_D/ar.out"
-    PV_ERR=$("$PV_KRC" --arch=$A --target=none "$PV_D/ar.kr" -o "$PV_D/ar.out" 2>&1); PV_ST=$?
+    PV_ERR=$(timeout -k 5 "$RUN_TEST_TIMEOUT" "$PV_KRC" --arch=$A --target=none "$PV_D/ar.kr" -o "$PV_D/ar.out" 2>&1); PV_ST=$?
     if [ "$PV_ST" = "0" ] || [ -f "$PV_D/ar.out" ]; then
         echo "FAIL: provider_arity_write_$A (a 1-argument write provider took 3 synthesised arguments and compiled clean)"; FAIL=$((FAIL + 1))
     elif ! echo "$PV_ERR" | grep -q "provider declares 1 parameter(s), but print/println/print_str/println_str under --target=none lowers to 3-argument calls of it"; then
@@ -20370,7 +20389,7 @@ for A in x86_64 arm64; do
     TOTAL=$((TOTAL + 1))
     printf 'import "%s"\n@builtin_override\nfn alloc(uint64 a, uint64 b) -> uint64 { return a + b }\nfn main() {\n    uint64 y = 5\n    println(f"x {y}")\n    loop { }\n}\n' "$PV_M" > "$PV_D/ar2.kr"
     rm -f "$PV_D/ar2.out"
-    PV_ERR=$("$PV_KRC" --arch=$A --target=none "$PV_D/ar2.kr" -o "$PV_D/ar2.out" 2>&1); PV_ST=$?
+    PV_ERR=$(timeout -k 5 "$RUN_TEST_TIMEOUT" "$PV_KRC" --arch=$A --target=none "$PV_D/ar2.kr" -o "$PV_D/ar2.out" 2>&1); PV_ST=$?
     if [ "$PV_ST" = "0" ] || [ -f "$PV_D/ar2.out" ]; then
         echo "FAIL: provider_arity_alloc_$A (a 2-argument alloc provider took 1 synthesised argument and compiled clean)"; FAIL=$((FAIL + 1))
     elif ! echo "$PV_ERR" | grep -q "provider declares 2 parameter(s), but an f-string under --target=none lowers to 1-argument calls of it"; then
@@ -20383,7 +20402,7 @@ for A in x86_64 arm64; do
     TOTAL=$((TOTAL + 1))
     printf 'import "%s"\nstatic uint64 hp = 0x200000\n@builtin_override\nfn alloc(uint64 n) { hp = hp + n }\nfn main() {\n    uint64 y = 5\n    println(f"x {y}")\n    loop { }\n}\n' "$PV_M" > "$PV_D/ar3.kr"
     rm -f "$PV_D/ar3.out"
-    PV_ERR=$("$PV_KRC" --arch=$A --target=none "$PV_D/ar3.kr" -o "$PV_D/ar3.out" 2>&1); PV_ST=$?
+    PV_ERR=$(timeout -k 5 "$RUN_TEST_TIMEOUT" "$PV_KRC" --arch=$A --target=none "$PV_D/ar3.kr" -o "$PV_D/ar3.out" 2>&1); PV_ST=$?
     if [ "$PV_ST" = "0" ] || [ -f "$PV_D/ar3.out" ]; then
         echo "FAIL: provider_void_alloc_$A (a void alloc provider supplied the f-string's buffer address and compiled clean)"; FAIL=$((FAIL + 1))
     elif ! echo "$PV_ERR" | grep -q "provider returns nothing, but an f-string under --target=none uses its result"; then
@@ -20398,7 +20417,7 @@ for A in x86_64 arm64; do
     TOTAL=$((TOTAL + 1))
     printf 'import "%s"\nimport "../std/heap_bump.kr"\nfn main() {\n    heap_bump_init(0x200000, 0x100000)\n    uint64 y = 5\n    println(f"x {y}")\n    loop { }\n}\n' "$PV_M" > "$PV_D/ar4.kr"
     rm -f "$PV_D/ar4.out"
-    PV_ERR=$("$PV_KRC" --arch=$A --target=none "$PV_D/ar4.kr" -o "$PV_D/ar4.out" 2>&1); PV_ST=$?
+    PV_ERR=$(timeout -k 5 "$RUN_TEST_TIMEOUT" "$PV_KRC" --arch=$A --target=none "$PV_D/ar4.kr" -o "$PV_D/ar4.out" 2>&1); PV_ST=$?
     if [ "$PV_ST" = "0" ] && [ -f "$PV_D/ar4.out" ]; then
         PASS=$((PASS + 1)); echo "  provider_correct_shape_accepted_$A: PASS"
     else
@@ -20418,7 +20437,7 @@ for A in x86_64 arm64; do
     TOTAL=$((TOTAL + 1))
     printf 'import "%s"\nfn main() {\n    uint64 y = 5\n    println(f"x {y}")\n    loop { }\n}\n' "$PV_M" > "$PV_D/fs1.kr"
     rm -f "$PV_D/fs1.out"
-    PV_ERR=$("$PV_KRC" --arch=$A --target=none "$PV_D/fs1.kr" -o "$PV_D/fs1.out" 2>&1); PV_ST=$?
+    PV_ERR=$(timeout -k 5 "$RUN_TEST_TIMEOUT" "$PV_KRC" --arch=$A --target=none "$PV_D/fs1.kr" -o "$PV_D/fs1.out" 2>&1); PV_ST=$?
     if [ "$PV_ST" = "0" ] || [ -f "$PV_D/fs1.out" ]; then
         echo "FAIL: provider_fstring_needs_alloc_$A (compiled with no allocator)"; FAIL=$((FAIL + 1))
     elif echo "$PV_ERR" | grep -q "reached the emitter"; then
@@ -20433,8 +20452,8 @@ for A in x86_64 arm64; do
     TOTAL=$((TOTAL + 1))
     printf 'import "%s"\nimport "../std/heap_bump.kr"\nfn main() {\n    heap_bump_init(0x200000, 0x100000)\n    uint64 y = 5\n    println(f"x {y}")\n    loop { }\n}\n' "$PV_M" > "$PV_D/fs2.kr"
     rm -f "$PV_D/fs2.out"
-    PV_ERR=$("$PV_KRC" --arch=$A --target=none "$PV_D/fs2.kr" -o "$PV_D/fs2.out" 2>&1); PV_ST=$?
-    PV_IR=$("$PV_KRC" --arch=$A --target=none --emit=ir "$PV_D/fs2.kr" 2>&1)
+    PV_ERR=$(timeout -k 5 "$RUN_TEST_TIMEOUT" "$PV_KRC" --arch=$A --target=none "$PV_D/fs2.kr" -o "$PV_D/fs2.out" 2>&1); PV_ST=$?
+    PV_IR=$(timeout -k 5 "$RUN_TEST_TIMEOUT" "$PV_KRC" --arch=$A --target=none --emit=ir "$PV_D/fs2.kr" 2>&1)
     if [ "$PV_ST" != "0" ] || [ ! -f "$PV_D/fs2.out" ]; then
         echo "FAIL: provider_fstring_with_alloc_$A (exit $PV_ST: '$PV_ERR')"; FAIL=$((FAIL + 1))
     elif echo "$PV_IR" | grep -qE "syscall|= alloc"; then
@@ -20465,7 +20484,7 @@ for A in x86_64 arm64; do
             printf 'import "user_mod.kr"\nimport "%s"\nfn main() {\n    greet_twice()\n    loop { }\n}\n' "$PV_M" > "$PV_D/ord.kr"
         fi
         rm -f "$PV_D/ord.out"
-        PV_ERR=$("$PV_KRC" --arch=$A --target=none "$PV_D/ord.kr" -o "$PV_D/ord.out" 2>&1); PV_ST=$?
+        PV_ERR=$(timeout -k 5 "$RUN_TEST_TIMEOUT" "$PV_KRC" --arch=$A --target=none "$PV_D/ord.kr" -o "$PV_D/ord.out" 2>&1); PV_ST=$?
         if [ "$PV_ST" = "0" ] && [ -f "$PV_D/ord.out" ]; then
             PASS=$((PASS + 1)); echo "  provider_import_order_${PV_ORDER}_$A: PASS"
         else
@@ -20520,7 +20539,7 @@ hb_case() {
     printf 'import "hb.kr"\nfn main() {\n%s\n    exit(0)\n}\n' "$body" > "$HB_D/c.kr"
     rm -f "$HB_D/c.out"
     local err got
-    err=$("$PV_KRC" --arch=$ARCH "$HB_D/c.kr" -o "$HB_D/c.out" 2>&1)
+    err=$(timeout -k 5 "$RUN_TEST_TIMEOUT" "$PV_KRC" --arch=$ARCH "$HB_D/c.kr" -o "$HB_D/c.out" 2>&1)
     if [ ! -f "$HB_D/c.out" ]; then
         echo "FAIL: heap_bump_$name (build failed: '$err')"; FAIL=$((FAIL + 1)); return
     fi
@@ -20605,9 +20624,9 @@ fn main() {
 }
 PVEOF
 rm -f "$PV_D/hosted.out"
-if "$PV_KRC" --arch=$ARCH "$PV_D/hosted.kr" -o "$PV_D/hosted.out" >/dev/null 2>&1 \
+if timeout -k 5 "$RUN_TEST_TIMEOUT" "$PV_KRC" --arch=$ARCH "$PV_D/hosted.kr" -o "$PV_D/hosted.out" >/dev/null 2>&1 \
    && chmod +x "$PV_D/hosted.out" \
-   && [ "$("$PV_D/hosted.out" 2>/dev/null)" = "HOSTEDOK" ]; then
+   && [ "$(timeout -k 5 "$RUN_TEST_TIMEOUT" "$PV_D/hosted.out" 2>/dev/null)" = "HOSTEDOK" ]; then
     PASS=$((PASS + 1)); echo "  provider_hosted_undisturbed: PASS"
 else
     echo "FAIL: provider_hosted_undisturbed (hosted println lost its output, or the override was not called)"
@@ -20640,7 +20659,7 @@ for PV_FLAG in --emit=obj; do
             esac
             printf 'import "%s"\nfn main() {\n    %s\n    loop { }\n}\n' "$PV_M" "$PV_C" > "$PV_D/lg.kr"
             rm -f "$PV_D/lg.out"
-            PV_ERR=$("$PV_KRC" $PV_FLAG --arch=$A --target=none "$PV_D/lg.kr" -o "$PV_D/lg.out" 2>&1); PV_ST=$?
+            PV_ERR=$(timeout -k 5 "$RUN_TEST_TIMEOUT" "$PV_KRC" $PV_FLAG --arch=$A --target=none "$PV_D/lg.kr" -o "$PV_D/lg.out" 2>&1); PV_ST=$?
             PV_TAG=$(echo "$PV_FLAG" | tr -d '-' | tr '=' '_')
             if [ "$PV_ST" = "0" ] || [ -f "$PV_D/lg.out" ]; then
                 echo "FAIL: provider_legacy_${PV_B}_${PV_TAG}_$A (compiled -- the legacy backend does not route to the provider, so it must refuse)"
@@ -20667,7 +20686,7 @@ for PV_FLAG in --emit=obj; do
         PV_M=$(pv_mod "$A")
         printf 'import "%s"\nimport "../std/heap_bump.kr"\nstatic uint64 sink = 0\nfn main() {\n    heap_bump_init(0x200000, 0x100000)\n    sink = write(1, "x", 1)\n    uint64 p = alloc(16)\n    dealloc(p)\n    loop { }\n}\n' "$PV_M" > "$PV_D/lgw.kr"
         rm -f "$PV_D/lgw.out"
-        PV_ERR=$("$PV_KRC" $PV_FLAG --arch=$A --target=none "$PV_D/lgw.kr" -o "$PV_D/lgw.out" 2>&1); PV_ST=$?
+        PV_ERR=$(timeout -k 5 "$RUN_TEST_TIMEOUT" "$PV_KRC" $PV_FLAG --arch=$A --target=none "$PV_D/lgw.kr" -o "$PV_D/lgw.out" 2>&1); PV_ST=$?
         PV_TAG=$(echo "$PV_FLAG" | tr -d '-' | tr '=' '_')
         if [ "$PV_ST" = "0" ] && [ -f "$PV_D/lgw.out" ]; then
             PASS=$((PASS + 1)); echo "  provider_legacy_write_alloc_${PV_TAG}_$A: PASS"
@@ -20715,8 +20734,8 @@ tn_const_is() {
     printf 'static uint32 sink = 0\nstatic uint32 buf = 0\nfn main() {\n    sink = %s\n    loop { }\n}\n' "$want" > "$TN_D/w.kr"
     rm -f "$TN_D/e.out" "$TN_D/w.out"
     local eerr werr
-    eerr=$("$CP_KRC" "$@" "$TN_D/e.kr" -o "$TN_D/e.out" 2>&1)
-    werr=$("$CP_KRC" "$@" "$TN_D/w.kr" -o "$TN_D/w.out" 2>&1)
+    eerr=$(timeout -k 5 "$RUN_TEST_TIMEOUT" "$CP_KRC" "$@" "$TN_D/e.kr" -o "$TN_D/e.out" 2>&1)
+    werr=$(timeout -k 5 "$RUN_TEST_TIMEOUT" "$CP_KRC" "$@" "$TN_D/w.kr" -o "$TN_D/w.out" 2>&1)
     if [ ! -f "$TN_D/e.out" ]; then
         echo "FAIL: $name (expression build failed: '$eerr')"; FAIL=$((FAIL + 1))
     elif [ ! -f "$TN_D/w.out" ]; then
@@ -20804,9 +20823,9 @@ if [ "$ARCH" = "x86_64" ]; then
     TOTAL=$((TOTAL + 1))
     printf 'static uint64 mbuf = 0\nfn main() {\n    mbuf = alloc(512)\n    println(get_module_path(mbuf, 512))\n    exit(0)\n}\n' > "$TN_D/mprun.kr"
     rm -f "$TN_D/mprun"
-    "$CP_KRC" --arch=x86_64 --target=linux "$TN_D/mprun.kr" -o "$TN_D/mprun" >/dev/null 2>&1
+    timeout -k 5 "$RUN_TEST_TIMEOUT" "$CP_KRC" --arch=x86_64 --target=linux "$TN_D/mprun.kr" -o "$TN_D/mprun" >/dev/null 2>&1
     chmod +x "$TN_D/mprun" 2>/dev/null
-    TN_MPOUT=$("$TN_D/mprun" 2>&1)
+    TN_MPOUT=$(timeout -k 5 "$RUN_TEST_TIMEOUT" "$TN_D/mprun" 2>&1)
     if [ "$TN_MPOUT" = "0" ]; then
         PASS=$((PASS + 1)); echo "  tn_module_path_linux_is_zero: PASS"
     else
@@ -20820,10 +20839,10 @@ tn_mp_same_as_linux() { # name, win-mode(artifact|nyi), flags...
     local name="$1" winmode="$2"; shift 2
     TOTAL=$((TOTAL + 1))
     rm -f "$TN_D/mp_n" "$TN_D/mp_l" "$TN_D/mp_w"
-    "$CP_KRC" "$@" --target=none "$TN_D/mp.kr" -o "$TN_D/mp_n" >/dev/null 2>&1
-    "$CP_KRC" "$@" --freestanding "$TN_D/mp.kr" -o "$TN_D/mp_l" >/dev/null 2>&1
+    timeout -k 5 "$RUN_TEST_TIMEOUT" "$CP_KRC" "$@" --target=none "$TN_D/mp.kr" -o "$TN_D/mp_n" >/dev/null 2>&1
+    timeout -k 5 "$RUN_TEST_TIMEOUT" "$CP_KRC" "$@" --freestanding "$TN_D/mp.kr" -o "$TN_D/mp_l" >/dev/null 2>&1
     local werr
-    werr=$("$CP_KRC" "$@" --freestanding --target=windows "$TN_D/mp.kr" -o "$TN_D/mp_w" 2>&1)
+    werr=$(timeout -k 5 "$RUN_TEST_TIMEOUT" "$CP_KRC" "$@" --freestanding --target=windows "$TN_D/mp.kr" -o "$TN_D/mp_w" 2>&1)
     local winok=0
     if [ "$winmode" = "artifact" ]; then
         [ -f "$TN_D/mp_w" ] && ! cmp -s "$TN_D/mp_n" "$TN_D/mp_w" && winok=1
@@ -20860,8 +20879,8 @@ TOTAL=$((TOTAL + 1))
 printf 'fn main() {\n    uint64 buf = alloc(300)\n    exit(0)\n}\n' > "$TN_D/mp_nocall.kr"
 printf 'fn main() {\n    uint64 buf = alloc(300)\n    get_module_path(buf, 300)\n    exit(0)\n}\n' > "$TN_D/mp_unused.kr"
 rm -f "$TN_D/mp_nocall_w" "$TN_D/mp_unused_w"
-"$CP_KRC" --arch=x86_64 --target=windows "$TN_D/mp_nocall.kr" -o "$TN_D/mp_nocall_w" >/dev/null 2>&1
-"$CP_KRC" --arch=x86_64 --target=windows "$TN_D/mp_unused.kr" -o "$TN_D/mp_unused_w" >/dev/null 2>&1
+timeout -k 5 "$RUN_TEST_TIMEOUT" "$CP_KRC" --arch=x86_64 --target=windows "$TN_D/mp_nocall.kr" -o "$TN_D/mp_nocall_w" >/dev/null 2>&1
+timeout -k 5 "$RUN_TEST_TIMEOUT" "$CP_KRC" --arch=x86_64 --target=windows "$TN_D/mp_unused.kr" -o "$TN_D/mp_unused_w" >/dev/null 2>&1
 if [ -f "$TN_D/mp_nocall_w" ] && [ -f "$TN_D/mp_unused_w" ]; then
     MP_NC_SZ=$(wc -c < "$TN_D/mp_nocall_w")
     MP_UN_SZ=$(wc -c < "$TN_D/mp_unused_w")
@@ -20943,8 +20962,8 @@ tn_imm() { # name, file, present-regex, absent-regex
 }
 printf 'static uint32 sink = 0\nfn main() {\n    sink = get_arch_id()\n    loop { }\n}\n' > "$TN_D/aid.kr"
 rm -f "$TN_D/aid_x86" "$TN_D/aid_a64"
-"$CP_KRC" --arch=x86_64 --target=none "$TN_D/aid.kr" -o "$TN_D/aid_x86" >/dev/null 2>&1
-"$CP_KRC" --arch=arm64  --target=none "$TN_D/aid.kr" -o "$TN_D/aid_a64" >/dev/null 2>&1
+timeout -k 5 "$RUN_TEST_TIMEOUT" "$CP_KRC" --arch=x86_64 --target=none "$TN_D/aid.kr" -o "$TN_D/aid_x86" >/dev/null 2>&1
+timeout -k 5 "$RUN_TEST_TIMEOUT" "$CP_KRC" --arch=arm64  --target=none "$TN_D/aid.kr" -o "$TN_D/aid_a64" >/dev/null 2>&1
 # mov r32, 9  vs  mov r32, 1
 tn_imm tn_arch_id_immediate_x86_64 "$TN_D/aid_x86" 'b[89a-f]09000000' 'b[89a-f]01000000'
 # movz xd, #10 (imm<<5 = 0x140) vs movz xd, #2 (imm<<5 = 0x40)
@@ -21539,8 +21558,15 @@ else
     ESP_H_DIS_NOTE=" (disasm direction check SKIPPED — no xtensa-lx106-elf-objdump)"
 fi
 if [ "$ESP_H_OK" = 1 ]; then
-    PASS=$((PASS + 1))
-    echo "  esp32_hello_image: PASS (e9/02/02/20, 2 segments, entry in IRAM, checksum recomputed, 16-aligned+hash$ESP_H_HASH_NOTE$ESP_H_DIS_NOTE)"
+    case "$ESP_H_HASH_NOTE$ESP_H_DIS_NOTE" in
+        *SKIPPED*)
+            # A check that did not run is not a pass: the row is a SKIP that
+            # says which (red on a full run), though every check that ran passed.
+            skip_row esp32_hello_image "every check that ran passed, but not all ran:$ESP_H_HASH_NOTE$ESP_H_DIS_NOTE" ;;
+        *)
+            PASS=$((PASS + 1))
+            echo "  esp32_hello_image: PASS (e9/02/02/20, 2 segments, entry in IRAM, checksum recomputed, 16-aligned+hash$ESP_H_HASH_NOTE$ESP_H_DIS_NOTE)" ;;
+    esac
 else
     FAIL=$((FAIL + 1))
 fi
@@ -21574,7 +21600,7 @@ done
   printf 'fn main() {\n    exit(m0() + m99() - 99)\n}\n'
 } > "$GROW_DIR/imports100.kr"
 if $KRC $KRC_FLAGS "$GROW_DIR/imports100.kr" -o "$GROW_DIR/imports100" >/dev/null 2>&1 \
-   && chmod +x "$GROW_DIR/imports100" && "$GROW_DIR/imports100" >/dev/null 2>&1; then
+   && chmod +x "$GROW_DIR/imports100" && timeout -k 5 "$RUN_TEST_TIMEOUT" "$GROW_DIR/imports100" >/dev/null 2>&1; then
     PASS=$((PASS + 1))
     echo "  grow_import_seen_100: PASS (100 imports, old cap 64)"
 else
@@ -21592,7 +21618,7 @@ GROW_LONG=$(printf 'a%.0s' $(seq 1 256))
 GROW_OUT=""
 if $KRC $KRC_FLAGS "$GROW_DIR/strbuf_grow.kr" -o "$GROW_DIR/strbuf_grow" >/dev/null 2>&1; then
     chmod +x "$GROW_DIR/strbuf_grow"
-    GROW_OUT=$("$GROW_DIR/strbuf_grow" 2>/dev/null)
+    GROW_OUT=$(timeout -k 5 "$RUN_TEST_TIMEOUT" "$GROW_DIR/strbuf_grow" 2>/dev/null)
 fi
 if [ "$GROW_OUT" = "aaa" ]; then
     PASS=$((PASS + 1))
@@ -21613,7 +21639,7 @@ TOTAL=$((TOTAL + 1))
 GROW_EC=1
 if $KRC $KRC_FLAGS --legacy "$GROW_DIR/fixup_grow.kr" -o "$GROW_DIR/fixup_grow" >/dev/null 2>&1; then
     chmod +x "$GROW_DIR/fixup_grow"
-    "$GROW_DIR/fixup_grow" >/dev/null 2>&1
+    timeout -k 5 "$RUN_TEST_TIMEOUT" "$GROW_DIR/fixup_grow" >/dev/null 2>&1
     GROW_EC=$?
 fi
 if [ "$GROW_EC" = 232 ]; then
@@ -21652,7 +21678,7 @@ TOTAL=$((TOTAL + 1))
 GROW_EC2=0
 if $KRC $KRC_FLAGS "$GROW_DIR/insn_grow.kr" -o "$GROW_DIR/insn_grow" >/dev/null 2>&1; then
     chmod +x "$GROW_DIR/insn_grow"
-    "$GROW_DIR/insn_grow" >/dev/null 2>&1
+    timeout -k 5 "$RUN_TEST_TIMEOUT" "$GROW_DIR/insn_grow" >/dev/null 2>&1
     GROW_EC2=$?
 else
     GROW_EC2="compile-failed"
@@ -21695,7 +21721,7 @@ TOTAL=$((TOTAL + 1))
 GROW_EC3="compile-failed"
 if $KRC $KRC_FLAGS "$GROW_DIR/statics_grow.kr" -o "$GROW_DIR/statics_grow" >/dev/null 2>&1; then
     chmod +x "$GROW_DIR/statics_grow"
-    "$GROW_DIR/statics_grow" >/dev/null 2>&1
+    timeout -k 5 "$RUN_TEST_TIMEOUT" "$GROW_DIR/statics_grow" >/dev/null 2>&1
     GROW_EC3=$?
 fi
 if [ "$GROW_EC3" = 0 ]; then
@@ -21724,7 +21750,7 @@ TOTAL=$((TOTAL + 1))
 GROW_OVER_EC="compile-failed"
 if $KRC $KRC_FLAGS "$GROW_DIR/statics_over.kr" -o "$GROW_DIR/statics_over" >/dev/null 2>&1; then
     chmod +x "$GROW_DIR/statics_over"
-    "$GROW_DIR/statics_over" >/dev/null 2>&1
+    timeout -k 5 "$RUN_TEST_TIMEOUT" "$GROW_DIR/statics_over" >/dev/null 2>&1
     GROW_OVER_EC=$?
 fi
 if [ "$GROW_OVER_EC" = 0 ]; then
@@ -21750,7 +21776,7 @@ TOTAL=$((TOTAL + 1))
 GROW_AOVER_EC="compile-failed"
 if $KRC $KRC_FLAGS "$GROW_DIR/arrays_over.kr" -o "$GROW_DIR/arrays_over" >/dev/null 2>&1; then
     chmod +x "$GROW_DIR/arrays_over"
-    "$GROW_DIR/arrays_over" >/dev/null 2>&1
+    timeout -k 5 "$RUN_TEST_TIMEOUT" "$GROW_DIR/arrays_over" >/dev/null 2>&1
     GROW_AOVER_EC=$?
 fi
 if [ "$GROW_AOVER_EC" = 0 ]; then
@@ -21822,7 +21848,7 @@ rm -f "$G9SRC.body"
 if $KRC $KRC_FLAGS "$G9SRC" -o /tmp/krc_g9_$$ > /dev/null 2>&1; then
     chmod +x /tmp/krc_g9_$$
     G9GOT=0
-    /tmp/krc_g9_$$ > /dev/null 2>&1 || G9GOT=$?
+    timeout -k 5 "$RUN_TEST_TIMEOUT" /tmp/krc_g9_$$ > /dev/null 2>&1 || G9GOT=$?
     if [ "$G9GOT" = "0" ]; then
         PASS=$((PASS + 1))
         echo "  static_table_grows_past_the_old_cap: PASS (6000 statics, past the table AND its hash index)"
@@ -21861,7 +21887,7 @@ TOTAL=$((TOTAL + 1))
 AET_OUT=""
 if $KRC $KRC_FLAGS "$DIR/../examples/ir_arr_elem_table_accum.kr" -o /tmp/kraet_$$ >/dev/null 2>&1; then
     chmod +x /tmp/kraet_$$
-    AET_OUT=$(/tmp/kraet_$$ 2>/dev/null)
+    AET_OUT=$(timeout -k 5 "$RUN_TEST_TIMEOUT" /tmp/kraet_$$ 2>/dev/null)
 fi
 rm -f /tmp/kraet_$$
 if [ "$AET_OUT" = "PASS" ]; then
@@ -21882,7 +21908,7 @@ TOTAL=$((TOTAL + 1))
 AEC_OUT=""
 if $KRC $KRC_FLAGS "$DIR/../examples/ir_arr_elem_collision.kr" -o /tmp/kraec_$$ >/dev/null 2>&1; then
     chmod +x /tmp/kraec_$$
-    AEC_OUT=$(/tmp/kraec_$$ 2>/dev/null)
+    AEC_OUT=$(timeout -k 5 "$RUN_TEST_TIMEOUT" /tmp/kraec_$$ 2>/dev/null)
 fi
 rm -f /tmp/kraec_$$
 if [ "$AEC_OUT" = "PASS" ]; then
@@ -21903,7 +21929,7 @@ TOTAL=$((TOTAL + 1))
 SVC_OUT=""
 if $KRC $KRC_FLAGS "$DIR/../examples/codegen_struct_var_collision.kr" -o /tmp/krsvc_$$ >/dev/null 2>&1; then
     chmod +x /tmp/krsvc_$$
-    SVC_OUT=$(/tmp/krsvc_$$ 2>/dev/null)
+    SVC_OUT=$(timeout -k 5 "$RUN_TEST_TIMEOUT" /tmp/krsvc_$$ 2>/dev/null)
 fi
 rm -f /tmp/krsvc_$$
 if [ "$SVC_OUT" = "PASS" ]; then
@@ -21944,7 +21970,7 @@ TOTAL=$((TOTAL + 1))
 IMP_OUT=""
 if $KRC $KRC_FLAGS "$IMP_DIR/main.kr" -o "$IMP_DIR/out" >/dev/null 2>&1; then
     chmod +x "$IMP_DIR/out"
-    IMP_OUT=$("$IMP_DIR/out" 2>/dev/null)
+    IMP_OUT=$(timeout -k 5 "$RUN_TEST_TIMEOUT" "$IMP_DIR/out" 2>/dev/null)
 fi
 if [ "$IMP_OUT" = "21" ]; then
     PASS=$((PASS + 1))
@@ -21967,7 +21993,7 @@ TOTAL=$((TOTAL + 1))
 IMP_OUT2=""
 if $KRC $KRC_FLAGS "$IMP_DIR/sub/topup.kr" -o "$IMP_DIR/out2" >/dev/null 2>&1; then
     chmod +x "$IMP_DIR/out2"
-    IMP_OUT2=$("$IMP_DIR/out2" 2>/dev/null)
+    IMP_OUT2=$(timeout -k 5 "$RUN_TEST_TIMEOUT" "$IMP_DIR/out2" 2>/dev/null)
 fi
 if [ "$IMP_OUT2" = "5" ]; then
     PASS=$((PASS + 1))
@@ -22008,7 +22034,7 @@ printf 'import "a.kr"\nimport "b.kr"\nfn main() { exit(use_a() + use_b() - 41) }
 LP_EC=1
 if $KRC $KRC_FLAGS "$LP_DIR/main.kr" -o "$LP_DIR/dedup" >/dev/null 2>&1; then
     chmod +x "$LP_DIR/dedup"
-    "$LP_DIR/dedup" >/dev/null 2>&1
+    timeout -k 5 "$RUN_TEST_TIMEOUT" "$LP_DIR/dedup" >/dev/null 2>&1
     LP_EC=$?
 fi
 if [ "$LP_EC" = 42 ]; then
@@ -22032,7 +22058,7 @@ printf 'import "%s/%s/deepmod.kr"\nimport "%s"\nfn main() { exit(deep_mod() + pr
 LP_EC2=1
 if $KRC $KRC_FLAGS "$LP_DIR/main2.kr" -o "$LP_DIR/collide" >/dev/null 2>&1; then
     chmod +x "$LP_DIR/collide"
-    "$LP_DIR/collide" >/dev/null 2>&1
+    timeout -k 5 "$RUN_TEST_TIMEOUT" "$LP_DIR/collide" >/dev/null 2>&1
     LP_EC2=$?
 fi
 if [ "$LP_EC2" = 48 ]; then
@@ -22089,7 +22115,7 @@ TOTAL=$((TOTAL + 1))
 printf '@builtin_override\nfn time_ns() -> uint64 {\n    uint64 acc = 0\n    uint64 i = 0\n    while i < 3 { acc = acc + 1 i = i + 1 }\n    return acc - 3\n}\nfn main() { uint64 t = time_ns() if t == 0 { exit(42) } exit(1) }\n' > /tmp/krc_shadow_$$.kr
 if $KRC $KRC_FLAGS /tmp/krc_shadow_$$.kr -o /tmp/krc_shadow_$$ > /dev/null 2>&1; then
     chmod +x /tmp/krc_shadow_$$
-    /tmp/krc_shadow_$$ ; got=$?
+    timeout -k 5 "$RUN_TEST_TIMEOUT" /tmp/krc_shadow_$$ ; got=$?
     if [ "$got" = "42" ]; then
         PASS=$((PASS + 1))
         echo "  builtin_override_user_wins_ir: PASS (user body won)"
@@ -22108,7 +22134,7 @@ TOTAL=$((TOTAL + 1))
 printf '@builtin_override\nfn time_ns() -> uint64 {\n    uint64 acc = 0\n    uint64 i = 0\n    while i < 3 { acc = acc + 1 i = i + 1 }\n    return acc - 3\n}\nfn main() { uint64 t = time_ns() if t == 0 { exit(42) } exit(1) }\n' > /tmp/krc_shadow_$$.kr
 if $KRC $KRC_FLAGS --legacy /tmp/krc_shadow_$$.kr -o /tmp/krc_shadow_$$ > /dev/null 2>&1; then
     chmod +x /tmp/krc_shadow_$$
-    /tmp/krc_shadow_$$ ; got=$?
+    timeout -k 5 "$RUN_TEST_TIMEOUT" /tmp/krc_shadow_$$ ; got=$?
     if [ "$got" = "42" ]; then
         PASS=$((PASS + 1))
         echo "  builtin_override_user_wins_legacy: PASS (user body won)"
@@ -22164,7 +22190,7 @@ fi
 # control: a VALID stdlib import must still resolve and run
 TOTAL=$((TOTAL + 1))
 if $KRC $KRC_FLAGS examples/sha256_test.kr -o "$IMP_DIR/shaok" >/dev/null 2>&1 \
-   && "$IMP_DIR/shaok" 2>/dev/null | head -1 | grep -q "^e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855$"; then
+   && timeout -k 5 "$RUN_TEST_TIMEOUT" "$IMP_DIR/shaok" 2>/dev/null | head -1 | grep -q "^e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855$"; then
     PASS=$((PASS + 1))
     echo "  import_success_control: PASS (std import resolves, FIPS vector correct)"
 else
@@ -22206,7 +22232,7 @@ for SMOKE_SRC in "$DIR"/smoke/*.kr; do
         continue
     fi
     chmod +x "$SMOKE_BIN" 2>/dev/null
-    "$SMOKE_BIN" >/dev/null 2>&1
+    timeout -k 5 "$RUN_TEST_TIMEOUT" "$SMOKE_BIN" >/dev/null 2>&1
     SMOKE_EC=$?
     if [ "$SMOKE_EC" -eq "$SMOKE_EXP" ]; then
         PASS=$((PASS + 1))
@@ -22237,7 +22263,7 @@ TOTAL=$((TOTAL + 1))
   printf 'fn main() {\n    S0 x\n    S199 y\n    x.a = 20\n    y.b = 22\n    exit(x.a + y.b)\n}\n'
 } > "$ST_DIR/many.kr"
 if $KRC $KRC_FLAGS "$ST_DIR/many.kr" -o "$ST_DIR/many" >/dev/null 2>&1; then
-    chmod +x "$ST_DIR/many"; "$ST_DIR/many" >/dev/null 2>&1; ST_EC=$?
+    chmod +x "$ST_DIR/many"; timeout -k 5 "$RUN_TEST_TIMEOUT" "$ST_DIR/many" >/dev/null 2>&1; ST_EC=$?
 else ST_EC="compile-failed"; fi
 if [ "$ST_EC" = 42 ]; then PASS=$((PASS + 1)); echo "  struct_count_200: PASS (old cap 64)"
 else FAIL=$((FAIL + 1)); echo "FAIL: struct_count_200 (expected 42, got $ST_EC)"; fi
@@ -22247,7 +22273,7 @@ TOTAL=$((TOTAL + 1))
   printf 'fn main() {\n    Huge h\n    h.q0 = 11\n    h.q99 = 31\n    exit(h.q0 + h.q99)\n}\n'
 } > "$ST_DIR/wide.kr"
 if $KRC $KRC_FLAGS "$ST_DIR/wide.kr" -o "$ST_DIR/wide" >/dev/null 2>&1; then
-    chmod +x "$ST_DIR/wide"; "$ST_DIR/wide" >/dev/null 2>&1; ST_EC2=$?
+    chmod +x "$ST_DIR/wide"; timeout -k 5 "$RUN_TEST_TIMEOUT" "$ST_DIR/wide" >/dev/null 2>&1; ST_EC2=$?
 else ST_EC2="compile-failed"; fi
 if [ "$ST_EC2" = 42 ]; then PASS=$((PASS + 1)); echo "  struct_fields_100: PASS (old cap 16)"
 else FAIL=$((FAIL + 1)); echo "FAIL: struct_fields_100 (expected 42, got $ST_EC2)"; fi
@@ -22258,7 +22284,7 @@ TOTAL=$((TOTAL + 1))
   printf 'fn main() {\n    T0 t\n    Big b\n    t.a = 20\n    b.q39 = 22\n    exit(t.a + b.q39)\n}\n'
 } > "$ST_DIR/restride.kr"
 if $KRC $KRC_FLAGS "$ST_DIR/restride.kr" -o "$ST_DIR/restride" >/dev/null 2>&1; then
-    chmod +x "$ST_DIR/restride"; "$ST_DIR/restride" >/dev/null 2>&1; ST_EC3=$?
+    chmod +x "$ST_DIR/restride"; timeout -k 5 "$RUN_TEST_TIMEOUT" "$ST_DIR/restride" >/dev/null 2>&1; ST_EC3=$?
 else ST_EC3="compile-failed"; fi
 if [ "$ST_EC3" = 42 ]; then PASS=$((PASS + 1)); echo "  struct_restride_populated: PASS (re-base 100 entries to a wider stride)"
 else FAIL=$((FAIL + 1)); echo "FAIL: struct_restride_populated (expected 42, got $ST_EC3)"; fi
@@ -22470,7 +22496,7 @@ fi
 # The built runner binary, when present, must agree too. Built by `make kr-runner`.
 TOTAL=$((TOTAL + 1))
 if [ -x "$DIR/../build/kr-bin" ]; then
-    VER_KRBIN=$("$DIR/../build/kr-bin" --version 2>/dev/null | grep -oE "[0-9]+\.[0-9]+\.[0-9]+" | head -1)
+    VER_KRBIN=$(timeout -k 5 "$RUN_TEST_TIMEOUT" "$DIR/../build/kr-bin" --version 2>/dev/null | grep -oE "[0-9]+\.[0-9]+\.[0-9]+" | head -1)
     if [ "$VER_KRBIN" = "$VER_CHANGELOG" ]; then
         PASS=$((PASS + 1))
         echo "  version_kr_binary_matches: PASS (kr binary reports $VER_KRBIN)"
@@ -22941,7 +22967,7 @@ TOTAL=$((TOTAL + 1))
 gen_call_args 64
 rm -f "$CA_BIN"
 if $KRC --arch=$RUN_ARCH "$CA_SRC" -o "$CA_BIN" >/dev/null 2>&1 && [ -s "$CA_BIN" ]; then
-    chmod +x "$CA_BIN"; "$CA_BIN"; CA_RUN=$?
+    chmod +x "$CA_BIN"; timeout -k 5 "$RUN_TEST_TIMEOUT" "$CA_BIN"; CA_RUN=$?
     if [ "$CA_RUN" = "65" ]; then    # p1 + p64 = 1 + 64
         PASS=$((PASS + 1)); echo "  call_args_64_accepted: PASS (compiles and returns 65)"
     else
@@ -22970,7 +22996,7 @@ fi
 CA_QEMU="$(command -v qemu-aarch64-static || true)"
 if [ -n "$CA_QEMU" ] && [ -s "$CA_BIN" ]; then
     TOTAL=$((TOTAL + 1))
-    chmod +x "$CA_BIN"; "$CA_QEMU" "$CA_BIN" >/dev/null 2>&1; CA_RUN=$?
+    chmod +x "$CA_BIN"; timeout -k 5 "$RUN_TEST_TIMEOUT" "$CA_QEMU" "$CA_BIN" >/dev/null 2>&1; CA_RUN=$?
     if [ "$CA_RUN" = "65" ]; then
         PASS=$((PASS + 1)); echo "  call_args_64_runs_arm64: PASS (returns 65 under qemu)"
     else
@@ -22986,7 +23012,7 @@ rm -f "$CA_BIN"
 CA_A64_ERR=$($KRC --arch=arm64 "$CA_SRC" -o "$CA_BIN" 2>&1); CA_A64_ST=$?
 if [ "$CA_A64_ST" = "0" ] && [ -s "$CA_BIN" ]; then
     if [ -n "$CA_QEMU" ]; then
-        chmod +x "$CA_BIN"; "$CA_QEMU" "$CA_BIN" >/dev/null 2>&1; CA_RUN=$?
+        chmod +x "$CA_BIN"; timeout -k 5 "$RUN_TEST_TIMEOUT" "$CA_QEMU" "$CA_BIN" >/dev/null 2>&1; CA_RUN=$?
         if [ "$CA_RUN" = "26" ]; then
             PASS=$((PASS + 1)); echo "  call_args_25_arm64: PASS (17th stack slot, returns 26)"
         else
@@ -23039,7 +23065,7 @@ KREOF
 TOTAL=$((TOTAL + 1))
 rm -f "$CP_BIN"
 if $KRC --arch=$RUN_ARCH "$CP_SRC" -o "$CP_BIN" >/dev/null 2>&1 && [ -s "$CP_BIN" ]; then
-    chmod +x "$CP_BIN"; "$CP_BIN"; CP7_RUN=$?
+    chmod +x "$CP_BIN"; timeout -k 5 "$RUN_TEST_TIMEOUT" "$CP_BIN"; CP7_RUN=$?
     if [ "$CP7_RUN" = "98" ]; then
         PASS=$((PASS + 1)); echo "  call_ptr_args_7_accepted: PASS (runs, returns 98 -- the 7th argument arrived)"
     else
@@ -23085,7 +23111,7 @@ KREOF
 TOTAL=$((TOTAL + 1))
 rm -f "$CP_BIN"
 if $KRC --arch=$RUN_ARCH "$CP6_SRC" -o "$CP_BIN" >/dev/null 2>&1 && [ -s "$CP_BIN" ]; then
-    chmod +x "$CP_BIN"; "$CP_BIN"; CP6_RUN=$?
+    chmod +x "$CP_BIN"; timeout -k 5 "$RUN_TEST_TIMEOUT" "$CP_BIN"; CP6_RUN=$?
     if [ "$CP6_RUN" = "21" ]; then
         PASS=$((PASS + 1)); echo "  call_ptr_args_6_accepted: PASS (compiles and returns 21)"
     else
@@ -23142,7 +23168,7 @@ for CP13_MODE in "ir" "legacy"; do
     TOTAL=$((TOTAL + 1))
     rm -f "$CP_BIN"
     if $KRC --arch=$RUN_ARCH $CP13_FLAG "$CP13_SRC" -o "$CP_BIN" >/dev/null 2>&1 && [ -s "$CP_BIN" ]; then
-        chmod +x "$CP_BIN"; "$CP_BIN"; CP13_RUN=$?
+        chmod +x "$CP_BIN"; timeout -k 5 "$RUN_TEST_TIMEOUT" "$CP_BIN"; CP13_RUN=$?
         if [ "$CP13_RUN" = "51" ]; then
             PASS=$((PASS + 1)); echo "  call_ptr_args_13_correct_$CP13_MODE: PASS (returns 51)"
         else
@@ -23205,7 +23231,7 @@ for MA_N in 13 16 22 25 32 33 39 48 63 64; do
         TOTAL=$((TOTAL + 1))
         rm -f "$MA_BIN"
         if $KRC --arch=$RUN_ARCH $MA_FLAG "$MA_SRC" -o "$MA_BIN" >/dev/null 2>&1 && [ -s "$MA_BIN" ]; then
-            chmod +x "$MA_BIN"; "$MA_BIN"; MA_RUN=$?
+            chmod +x "$MA_BIN"; timeout -k 5 "$RUN_TEST_TIMEOUT" "$MA_BIN"; MA_RUN=$?
             if [ "$MA_RUN" = "$MA_EXP" ]; then
                 PASS=$((PASS + 1)); echo "  many_args_${MA_N}_$MA_MODE: PASS (returns $MA_EXP)"
             else
@@ -23337,7 +23363,7 @@ for MF_N in 9 12 16; do
         TOTAL=$((TOTAL + 1))
         rm -f "$MF_BIN"
         if $KRC --arch=$RUN_ARCH $MF_FLAG "$MF_SRC" -o "$MF_BIN" >/dev/null 2>&1 && [ -s "$MF_BIN" ]; then
-            chmod +x "$MF_BIN"; "$MF_BIN"; MF_RUN=$?
+            chmod +x "$MF_BIN"; timeout -k 5 "$RUN_TEST_TIMEOUT" "$MF_BIN"; MF_RUN=$?
             if [ "$MF_RUN" = "$MF_EXP" ]; then
                 PASS=$((PASS + 1)); echo "  many_float_params_${MF_N}_$MF_MODE: PASS (returns $MF_EXP)"
             else
@@ -23380,7 +23406,7 @@ for MX_N in 14 24 32; do
         TOTAL=$((TOTAL + 1))
         rm -f "$MF_BIN"
         if $KRC --arch=$RUN_ARCH $MX_FLAG "$MF_SRC" -o "$MF_BIN" >/dev/null 2>&1 && [ -s "$MF_BIN" ]; then
-            chmod +x "$MF_BIN"; "$MF_BIN"; MX_RUN=$?
+            chmod +x "$MF_BIN"; timeout -k 5 "$RUN_TEST_TIMEOUT" "$MF_BIN"; MX_RUN=$?
             if [ "$MX_RUN" = "$MX_EXP" ]; then
                 PASS=$((PASS + 1)); echo "  mixed_float_int_args_${MX_N}_$MX_MODE: PASS (returns $MX_EXP)"
             else
@@ -23416,7 +23442,7 @@ else
 fi
 rm -f "$CP_BIN"
 if $KRC --arch=$RUN_ARCH --legacy "$CP6_SRC" -o "$CP_BIN" >/dev/null 2>&1 && [ -s "$CP_BIN" ]; then
-    chmod +x "$CP_BIN"; "$CP_BIN"; CP6_LG_RUN=$?
+    chmod +x "$CP_BIN"; timeout -k 5 "$RUN_TEST_TIMEOUT" "$CP_BIN"; CP6_LG_RUN=$?
     if [ "$CP6_LG_RUN" = "21" ]; then
         PASS=$((PASS + 1)); echo "  call_ptr_args_6_accepted_legacy: PASS (native $RUN_ARCH, runs and returns 21)"
     else
@@ -23470,7 +23496,7 @@ KREOF
 TOTAL=$((TOTAL + 1))
 rm -f "$CPF_BIN"
 if $KRC --arch=$RUN_ARCH "$CPF_SRC" -o "$CPF_BIN" >/dev/null 2>&1 && [ -s "$CPF_BIN" ]; then
-    chmod +x "$CPF_BIN"; "$CPF_BIN"; CPF_RUN=$?
+    chmod +x "$CPF_BIN"; timeout -k 5 "$RUN_TEST_TIMEOUT" "$CPF_BIN"; CPF_RUN=$?
     if [ "$CPF_RUN" = "0" ]; then
         PASS=$((PASS + 1)); echo "  call_ptr_f64_matches_direct: PASS (0/1/2 args and mixed int+f64, native $RUN_ARCH)"
     else
@@ -23497,7 +23523,7 @@ fn main() {
 KREOF
 rm -f "$CPF_BIN"
 if $KRC --arch=$RUN_ARCH "$CPFN_SRC" -o "$CPF_BIN" >/dev/null 2>&1; then
-    chmod +x "$CPF_BIN"; "$CPF_BIN"; CPFN_RUN=$?
+    chmod +x "$CPF_BIN"; timeout -k 5 "$RUN_TEST_TIMEOUT" "$CPF_BIN"; CPFN_RUN=$?
     if [ "$CPFN_RUN" = "1" ]; then
         PASS=$((PASS + 1)); echo "  call_ptr_f64_oracle_can_fail: PASS (unequal f64s do compare unequal)"
     else
@@ -23607,7 +23633,7 @@ KREOF
 TOTAL=$((TOTAL + 1))
 FR_ERR=$($KRC --arch=$RUN_ARCH "$FR_SRC" -o "$FR_BIN" 2>&1); FR_ST=$?
 if [ "$FR_ST" = "0" ] && [ -s "$FR_BIN" ]; then
-    chmod +x "$FR_BIN"; "$FR_BIN"; FR_RUN=$?
+    chmod +x "$FR_BIN"; timeout -k 5 "$RUN_TEST_TIMEOUT" "$FR_BIN"; FR_RUN=$?
     if [ "$FR_RUN" = "0" ]; then
         PASS=$((PASS + 1)); echo "  float_literal_return_values: PASS (15 checks)"
     else
@@ -23657,7 +23683,7 @@ fi
 TOTAL=$((TOTAL + 1))
 printf 'fn sink(f32 v) -> f32 {\n if v > 1000000.0f { return sink(v - 1.0f) }\n return v\n}\nfn main() { exit(f32_to_int(sink(1.5f) * 4.0f)) }\n' > "$FR_SRC"
 if $KRC --arch=$RUN_ARCH "$FR_SRC" -o "$FR_BIN" > /dev/null 2>&1; then
-    "$FR_BIN"; FR_RUN=$?
+    timeout -k 5 "$RUN_TEST_TIMEOUT" "$FR_BIN"; FR_RUN=$?
     if [ "$FR_RUN" = "6" ]; then
         PASS=$((PASS + 1)); echo "  f32_literal_to_f32_param_accepted: PASS (1.5f*4 == 6)"
     else
@@ -23677,7 +23703,7 @@ fi
 TOTAL=$((TOTAL + 1))
 printf 'struct S { f32 a }\nstruct H { S inner }\nstatic f32 g = 0.0f\nfn f64src(uint64 n) -> f64 {\n if n > 1000000 { return f64src(n - 1) }\n return 1.5\n}\nfn main() {\n S s\n s.a = f64src(1)\n H h\n h.inner.a = f64src(1)\n g = f64src(1)\n uint64 p = alloc(32)\n unsafe { *(p as f32) = f64src(1) }\n f32 r = 0.0f\n unsafe { *(p as f32) -> r }\n exit(f32_to_int((s.a + h.inner.a + g + r) * 2.0f))\n}\n' > "$FR_SRC"
 if $KRC --arch=$RUN_ARCH "$FR_SRC" -o "$FR_BIN" > /dev/null 2>&1; then
-    "$FR_BIN"; FR_RUN=$?
+    timeout -k 5 "$RUN_TEST_TIMEOUT" "$FR_BIN"; FR_RUN=$?
     if [ "$FR_RUN" = "12" ]; then
         PASS=$((PASS + 1)); echo "  nonlocal_assign_f64_to_f32_narrows: PASS (1.5*4*2 == 12)"
     else
@@ -23691,7 +23717,7 @@ fi
 TOTAL=$((TOTAL + 1))
 printf 'struct S { f64 b }\nfn f32src(uint64 n) -> f32 {\n if n > 1000000 { return f32src(n - 1) }\n return 2.5f\n}\nfn main() {\n S s\n s.b = f32src(1)\n exit(f64_to_int(s.b * 4.0))\n}\n' > "$FR_SRC"
 if $KRC --arch=$RUN_ARCH "$FR_SRC" -o "$FR_BIN" > /dev/null 2>&1; then
-    "$FR_BIN"; FR_RUN=$?
+    timeout -k 5 "$RUN_TEST_TIMEOUT" "$FR_BIN"; FR_RUN=$?
     if [ "$FR_RUN" = "10" ]; then
         PASS=$((PASS + 1)); echo "  nonlocal_assign_f32_to_f64_widens: PASS (2.5*4 == 10)"
     else
@@ -23765,7 +23791,7 @@ fn main() {
 KREOF
 TOTAL=$((TOTAL + 1))
 if $KRC --arch=$RUN_ARCH "$FCO_SRC" -o "$FCO_BIN" >/dev/null 2>&1 && [ -s "$FCO_BIN" ]; then
-    chmod +x "$FCO_BIN"; FCO_GOT=$("$FCO_BIN" 2>&1)
+    chmod +x "$FCO_BIN"; FCO_GOT=$(timeout -k 5 "$RUN_TEST_TIMEOUT" "$FCO_BIN" 2>&1)
     if [ "$FCO_GOT" = "$FCO_WANT" ]; then
         PASS=$((PASS + 1)); echo "  float_call_operand_position_host: PASS (6 forms, $RUN_ARCH)"
     else
@@ -23783,7 +23809,7 @@ if [ -n "$FCO_QEMU" ]; then
     TOTAL=$((TOTAL + 1))
     rm -f "$FCO_BIN"
     if $KRC --arch=arm64 "$FCO_SRC" -o "$FCO_BIN" >/dev/null 2>&1 && [ -s "$FCO_BIN" ]; then
-        chmod +x "$FCO_BIN"; FCO_GOT=$("$FCO_QEMU" "$FCO_BIN" 2>&1)
+        chmod +x "$FCO_BIN"; FCO_GOT=$(timeout -k 5 "$RUN_TEST_TIMEOUT" "$FCO_QEMU" "$FCO_BIN" 2>&1)
         if [ "$FCO_GOT" = "$FCO_WANT" ]; then
             PASS=$((PASS + 1)); echo "  float_call_operand_position_arm64: PASS (6 forms under qemu)"
         else
@@ -23811,7 +23837,7 @@ KREOF
 TOTAL=$((TOTAL + 1))
 rm -f "$FCO_BIN"
 if $KRC --arch=$RUN_ARCH "$FCO_SRC" -o "$FCO_BIN" >/dev/null 2>&1 && [ -s "$FCO_BIN" ]; then
-    chmod +x "$FCO_BIN"; "$FCO_BIN"; FCO_RUN=$?
+    chmod +x "$FCO_BIN"; timeout -k 5 "$RUN_TEST_TIMEOUT" "$FCO_BIN"; FCO_RUN=$?
     if [ "$FCO_RUN" = "0" ]; then
         PASS=$((PASS + 1)); echo "  float_call_forward_declared: PASS"
     else
@@ -24085,7 +24111,7 @@ ax_refuse arx_refuses_hosted_target "requires --target=none" --arch=x86_64 --tar
 # would have passed on the version that still emitted the epilogue, because
 # that version failed too -- for a different reason.
 TOTAL=$((TOTAL + 1))
-ax_imp_out=$(./build/krc2 --arch=x86_64 --emit=arx "$ARX_SRC" -o /tmp/krc_aximp_$$ 2>&1)
+ax_imp_out=$(timeout -k 5 "$RUN_TEST_TIMEOUT" ./build/krc2 --arch=x86_64 --emit=arx "$ARX_SRC" -o /tmp/krc_aximp_$$ 2>&1)
 if [ -s /tmp/krc_aximp_$$ ]; then
     PASS=$((PASS + 1)); echo "  arx_implies_target_none: PASS (built with no --target)"
 else
@@ -24105,7 +24131,7 @@ esac
 TOTAL=$((TOTAL + 1))
 if [ -f "$DIR/../build/krc2" ]; then ARX_RAW_KRC=$(cd "$DIR/../build" && pwd)/krc2; else ARX_RAW_KRC=""; fi
 rm -f /tmp/krc_axna_$$
-ax_na=$("$ARX_RAW_KRC" "$ARX_SRC" -o /tmp/krc_axna_$$ --target=none --emit=arx 2>&1); ax_na_st=$?
+ax_na=$(timeout -k 5 "$RUN_TEST_TIMEOUT" "$ARX_RAW_KRC" "$ARX_SRC" -o /tmp/krc_axna_$$ --target=none --emit=arx 2>&1); ax_na_st=$?
 rm -f /tmp/krc_axna_$$
 if [ -z "$ARX_RAW_KRC" ] || [ $ax_na_st -eq 0 ]; then
     echo "FAIL: arx_refuses_default_arch (exit=$ax_na_st, out=$(printf '%s' "$ax_na" | head -1))"; FAIL=$((FAIL + 1))
@@ -24970,7 +24996,7 @@ pdrf_run() { # <arch> <flags> <src> <runner-or-empty>
         PDRF_OK=0; echo "  $(basename $3) $1 ${2:-IR}: COMPILE FAILED"
         return
     fi
-    if [ -n "$4" ]; then $4 "$_bin" >/dev/null 2>&1; else "$_bin" >/dev/null 2>&1; fi
+    if [ -n "$4" ]; then timeout -k 5 "$RUN_TEST_TIMEOUT" $4 "$_bin" >/dev/null 2>&1; else timeout -k 5 "$RUN_TEST_TIMEOUT" "$_bin" >/dev/null 2>&1; fi
     local _rc=$?
     PDRF_RAN=$((PDRF_RAN + 1))
     # 7 = every check inside the program passed. 1..4 name which one failed;
@@ -25127,7 +25153,7 @@ sffa_run() { # <arch> <flags> <src> <runner-or-empty>
         SFFA_OK=0; echo "  $(basename $3) $1 ${2:-IR}: COMPILE FAILED"
         return
     fi
-    if [ -n "$4" ]; then $4 "$_bin" >/dev/null 2>&1; else "$_bin" >/dev/null 2>&1; fi
+    if [ -n "$4" ]; then timeout -k 5 "$RUN_TEST_TIMEOUT" $4 "$_bin" >/dev/null 2>&1; else timeout -k 5 "$RUN_TEST_TIMEOUT" "$_bin" >/dev/null 2>&1; fi
     local _rc=$?
     SFFA_RAN=$((SFFA_RAN + 1))
     # 7 = both arguments arrived in their own registers. 1..5 name which check
@@ -25197,7 +25223,7 @@ fnso_run() { # <arch> <flags> <runner-or-empty>
         return
     fi
     local _got
-    if [ -n "$3" ]; then _got=$($3 "$_bin" 2>/dev/null); else _got=$("$_bin" 2>/dev/null); fi
+    if [ -n "$3" ]; then _got=$(timeout -k 5 "$RUN_TEST_TIMEOUT" $3 "$_bin" 2>/dev/null); else _got=$(timeout -k 5 "$RUN_TEST_TIMEOUT" "$_bin" 2>/dev/null); fi
     FNSO_RAN=$((FNSO_RAN + 1))
     if [ "$_got" != "$FNSO_WANT" ]; then
         FNSO_OK=0
@@ -25307,7 +25333,7 @@ fkn_run() { # <arch> <flags> <src> <runner-or-empty>
         FKN_OK=0; echo "  $(basename $3) $1 ${2:-IR}: COMPILE FAILED"
         return
     fi
-    if [ -n "$4" ]; then $4 "$_bin" >/dev/null 2>&1; else "$_bin" >/dev/null 2>&1; fi
+    if [ -n "$4" ]; then timeout -k 5 "$RUN_TEST_TIMEOUT" $4 "$_bin" >/dev/null 2>&1; else timeout -k 5 "$RUN_TEST_TIMEOUT" "$_bin" >/dev/null 2>&1; fi
     local _rc=$?
     FKN_RAN=$((FKN_RAN + 1))
     [ "$_rc" = "7" ] || { FKN_OK=0; echo "  $(basename $3) $1 ${2:-IR}: got $_rc, want 7"; }
@@ -25392,7 +25418,7 @@ f16rt_run() { # <arch> <flags> <runner-or-empty>
         return
     fi
     local _got
-    if [ -n "$3" ]; then _got=$($3 "$_bin" 2>/dev/null); else _got=$("$_bin" 2>/dev/null); fi
+    if [ -n "$3" ]; then _got=$(timeout -k 5 "$RUN_TEST_TIMEOUT" $3 "$_bin" 2>/dev/null); else _got=$(timeout -k 5 "$RUN_TEST_TIMEOUT" "$_bin" 2>/dev/null); fi
     F16RT_RAN=$((F16RT_RAN + 1))
     if [ "$_got" != "$F16RT_WANT" ]; then
         F16RT_OK=0
@@ -25488,8 +25514,8 @@ fse_run() { # <arch> <flags> <runner-or-empty>
         return
     fi
     chmod +x "$_bin"
-    if [ -n "$3" ]; then $3 "$_bin" > "$FSE_GOTF" 2>/dev/null
-    else "$_bin" > "$FSE_GOTF" 2>/dev/null; fi
+    if [ -n "$3" ]; then timeout -k 5 "$RUN_TEST_TIMEOUT" $3 "$_bin" > "$FSE_GOTF" 2>/dev/null
+    else timeout -k 5 "$RUN_TEST_TIMEOUT" "$_bin" > "$FSE_GOTF" 2>/dev/null; fi
     FSE_RAN=$((FSE_RAN + 1))
     if ! cmp -s "$FSE_GOTF" "$FSE_EXPF"; then
         FSE_OK=0
@@ -25688,8 +25714,8 @@ mrc_run() { # <arch> <flags> <runner-or-empty>
     fi
     chmod +x "$_bin"
     local _rc=0
-    if [ -n "$3" ]; then $3 "$_bin" >/dev/null 2>&1 || _rc=$?
-    else "$_bin" >/dev/null 2>&1 || _rc=$?; fi
+    if [ -n "$3" ]; then timeout -k 5 "$RUN_TEST_TIMEOUT" $3 "$_bin" >/dev/null 2>&1 || _rc=$?
+    else timeout -k 5 "$RUN_TEST_TIMEOUT" "$_bin" >/dev/null 2>&1 || _rc=$?; fi
     MRC_RAN=$((MRC_RAN + 1))
     if [ "$_rc" != "$MRC_WANT" ]; then
         MRC_OK=0
@@ -25792,8 +25818,8 @@ mrc_fns_run() { # <arch> <flags> <runner-or-empty>
     fi
     chmod +x "$_bin"
     local _rc=0
-    if [ -n "$3" ]; then $3 "$_bin" >/dev/null 2>&1 || _rc=$?
-    else "$_bin" >/dev/null 2>&1 || _rc=$?; fi
+    if [ -n "$3" ]; then timeout -k 5 "$RUN_TEST_TIMEOUT" $3 "$_bin" >/dev/null 2>&1 || _rc=$?
+    else timeout -k 5 "$RUN_TEST_TIMEOUT" "$_bin" >/dev/null 2>&1 || _rc=$?; fi
     MRC_FNS_RAN=$((MRC_FNS_RAN + 1))
     if [ "$_rc" != "0" ]; then
         MRC_FNS_OK=0
@@ -25940,7 +25966,7 @@ bcb_config() {
     for bcb_case in oob_var oob_const oob_edge oob_store inbounds; do
         TOTAL=$((TOTAL + 1))
         rm -f "$BCB_D/out"
-        if ! $BCB_KRC --arch="$bcb_arch" $3 --debug "$BCB_D/$bcb_case.kr" -o "$BCB_D/out" > /dev/null 2>&1; then
+        if ! timeout -k 5 "$RUN_TEST_TIMEOUT" $BCB_KRC --arch="$bcb_arch" $3 --debug "$BCB_D/$bcb_case.kr" -o "$BCB_D/out" > /dev/null 2>&1; then
             echo "FAIL: arm64_legacy_bounds_$1_$bcb_case (build failed -- --debug refused or miscompiled)"
             FAIL=$((FAIL + 1))
             continue
@@ -26020,7 +26046,7 @@ if [ "$BCB_A64_RUN" = "SKIP" ]; then
     skip_row arm64_legacy_bounds_absent_without_debug "cannot execute arm64 here"
 elif $BCB_KRC --arch=arm64 --legacy "$BCB_D/oob_store.kr" -o "$BCB_D/nodbg" > /dev/null 2>&1; then
     chmod +x "$BCB_D/nodbg"
-    $BCB_A64_RUN "$BCB_D/nodbg" > /dev/null 2>&1
+    timeout -k 5 "$RUN_TEST_TIMEOUT" $BCB_A64_RUN "$BCB_D/nodbg" > /dev/null 2>&1
     bcb_nodbg_st=$?
     if [ "$bcb_nodbg_st" = "0" ]; then
         PASS=$((PASS + 1))
@@ -26170,7 +26196,7 @@ printf '%s\n' 'import "../std/math_float.kr"
 fn main() -> uint32 { println_str(fmt_f64(1.5, 2))  return 0 }' > "$MIDIMP_D/ok.kr"
 if $KRC --arch=$RUN_ARCH "$MIDIMP_D/ok.kr" -o "$MIDIMP_D/ok.out" > /dev/null 2>&1 &&
    chmod +x "$MIDIMP_D/ok.out" &&
-   [ "$("$MIDIMP_D/ok.out" 2>&1)" = "1.50" ]; then
+   [ "$(timeout -k 5 "$RUN_TEST_TIMEOUT" "$MIDIMP_D/ok.out" 2>&1)" = "1.50" ]; then
     PASS=$((PASS + 1))
     echo "  midimp_top_of_file_still_works: PASS (compiles and runs on $RUN_ARCH)"
 else
@@ -26191,7 +26217,7 @@ import "../std/math_float.kr"
 fn main() -> uint32 { println_str(fmt_f64(1.5, 2))  return 0 }' > "$MIDIMP_D/cmt.kr"
 if $KRC --arch=$RUN_ARCH "$MIDIMP_D/cmt.kr" -o "$MIDIMP_D/cmt.out" > /dev/null 2>&1 &&
    chmod +x "$MIDIMP_D/cmt.out" &&
-   [ "$("$MIDIMP_D/cmt.out" 2>&1)" = "1.50" ]; then
+   [ "$(timeout -k 5 "$RUN_TEST_TIMEOUT" "$MIDIMP_D/cmt.out" 2>&1)" = "1.50" ]; then
     PASS=$((PASS + 1))
     echo "  midimp_comment_preamble_ok: PASS (comments do not end the leading run)"
 else
@@ -26214,7 +26240,7 @@ printf '%s\n' 'import "helper.kr"
 fn main() -> uint32 { println_str(fmt_f64(midimp_helper_val(), 2))  return 0 }' > "$MIDIMP_D/multi.kr"
 if $KRC --arch=$RUN_ARCH "$MIDIMP_D/multi.kr" -o "$MIDIMP_D/multi.out" > /dev/null 2>&1 &&
    chmod +x "$MIDIMP_D/multi.out" &&
-   [ "$("$MIDIMP_D/multi.out" 2>&1)" = "2.25" ]; then
+   [ "$(timeout -k 5 "$RUN_TEST_TIMEOUT" "$MIDIMP_D/multi.out" 2>&1)" = "2.25" ]; then
     PASS=$((PASS + 1))
     echo "  midimp_per_file_leading_run: PASS (leading run restarts at each file)"
 else
@@ -26526,10 +26552,10 @@ run_test "sep_float_f32_suffix" 'fn main() -> u64 { f32 x = 1_0.5f; if x > 10.4 
 APXA_D=$(mktemp -d)
 printf 'fn main() -> u64 {\n    print("hi")\n    return 0\n}\n' > "$APXA_D/p.kr"
 TOTAL=$((TOTAL + 1))
-if ./build/krc2 --arch=x86_64 --emit=arx "$APXA_D/p.kr" -o "$APXA_D/p.arx" >/dev/null 2>&1; then
+if timeout -k 5 "$RUN_TEST_TIMEOUT" ./build/krc2 --arch=x86_64 --emit=arx "$APXA_D/p.kr" -o "$APXA_D/p.arx" >/dev/null 2>&1; then
     PASS=$((PASS + 1)); echo "  arx_print_needs_no_import: PASS"
 else
-    FAIL=$((FAIL + 1)); echo "FAIL: arx_print_needs_no_import ($(./build/krc2 --arch=x86_64 --emit=arx "$APXA_D/p.kr" -o /dev/null 2>&1 | head -1))"
+    FAIL=$((FAIL + 1)); echo "FAIL: arx_print_needs_no_import ($(timeout -k 5 "$RUN_TEST_TIMEOUT" ./build/krc2 --arch=x86_64 --emit=arx "$APXA_D/p.kr" -o /dev/null 2>&1 | head -1))"
 fi
 TOTAL=$((TOTAL + 1))
 if [ -s "$APXA_D/p.arx" ] && od -An -tx1 -v "$APXA_D/p.arx" | tr -d ' \n' | grep -q "cd80"; then
@@ -26550,7 +26576,7 @@ fi
 # container: abi 1 as a byte occurs hundreds of times.
 APXM_D=$(mktemp -d)
 printf 'static u64 d = 32\nfn main(u64 svc) -> u64 { return d }\n' > "$APXM_D/m.kr"
-./build/krc2 --arch=x86_64 --target=none --emit=arxmod --mod-name=gatemod --mod-abi=3 \
+timeout -k 5 "$RUN_TEST_TIMEOUT" ./build/krc2 --arch=x86_64 --target=none --emit=arxmod --mod-name=gatemod --mod-abi=3 \
     --mod-version=9 "$APXM_D/m.kr" -o "$APXM_D/m.arxm" >/dev/null 2>&1
 apxm_field() { od -An -tu"$2" -j"$1" -N"$2" -v "$APXM_D/m.arxm" | tr -d ' \n'; }
 TOTAL=$((TOTAL + 1))
@@ -26613,7 +26639,7 @@ TOTAL=$((TOTAL + 1))
 # table from 88 to 112 to make room for a second directory entry; a plain
 # container must still declare one table with its segments at 88, or every
 # existing ApexRift program stops loading.
-./build/krc2 --arch=x86_64 --target=none --emit=arx "$APXA_D/p.kr" -o "$APXM_D/plain.arx" >/dev/null 2>&1
+timeout -k 5 "$RUN_TEST_TIMEOUT" ./build/krc2 --arch=x86_64 --target=none --emit=arx "$APXA_D/p.kr" -o "$APXM_D/plain.arx" >/dev/null 2>&1
 apxm_pfl=$(od -An -tu2 -j10 -N2 -v "$APXM_D/plain.arx" | tr -d ' \n')
 apxm_ptc=$(od -An -tu4 -j12 -N4 -v "$APXM_D/plain.arx" | tr -d ' \n')
 apxm_pso=$(od -An -tu8 -j72 -N8 -v "$APXM_D/plain.arx" | tr -d ' \n')
@@ -26628,7 +26654,7 @@ rm -rf "$APXM_D"
 # nothing on that arch to trap into. A row here so the x86 provider cannot be
 # widened to arm64 by accident.
 TOTAL=$((TOTAL + 1))
-apxa_a64=$(./build/krc2 --arch=arm64 --emit=arx "$APXA_D/p.kr" -o "$APXA_D/p64.arx" 2>&1)
+apxa_a64=$(timeout -k 5 "$RUN_TEST_TIMEOUT" ./build/krc2 --arch=arm64 --emit=arx "$APXA_D/p.kr" -o "$APXA_D/p64.arx" 2>&1)
 case "$apxa_a64" in
     *"not available on bare metal"*) PASS=$((PASS + 1)); echo "  arx_arm64_still_refuses: PASS" ;;
     *) FAIL=$((FAIL + 1)); echo "FAIL: arx_arm64_still_refuses (got: $(printf '%s' "$apxa_a64" | head -1))" ;;
@@ -26637,7 +26663,7 @@ esac
 # program supplied none; a board that wants its own console must keep it.
 TOTAL=$((TOTAL + 1))
 printf '@builtin_override\nfn write(uint64 fd, uint64 buf, uint64 len) -> uint64 { return 42 }\nfn main() -> u64 {\n    print("hi")\n    return 0\n}\n' > "$APXA_D/o.kr"
-if ./build/krc2 --arch=x86_64 --emit=arx "$APXA_D/o.kr" -o "$APXA_D/o.arx" >/dev/null 2>&1 \
+if timeout -k 5 "$RUN_TEST_TIMEOUT" ./build/krc2 --arch=x86_64 --emit=arx "$APXA_D/o.kr" -o "$APXA_D/o.arx" >/dev/null 2>&1 \
    && ! od -An -tx1 -v "$APXA_D/o.arx" | tr -d ' \n' | grep -q "cd80"; then
     PASS=$((PASS + 1)); echo "  arx_user_write_override_wins: PASS (no int 0x80 emitted)"
 else
