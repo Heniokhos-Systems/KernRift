@@ -41,7 +41,7 @@ wins.
 
 | Target | Status | What was actually run |
 |---|---|---|
-| Linux x86_64 | 🔵 CI-verified | Self-compiles to a bootstrap fixed point; the full **1764-test** suite passes. This is the primary development target. |
+| Linux x86_64 | 🔵 CI-verified | Self-compiles to a bootstrap fixed point; the full **1777-test** suite passes. This is the primary development target. |
 | Linux ARM64 | 🔵 CI-verified | Self-compiles to a fixed point; suite runs on a native ARM64 runner. |
 | Windows x86_64 | 🔵 CI-verified + hardware | Self-compile chain on a `windows-latest` runner every push. Also verified 2026-08-14 on a physical **Intel Core Ultra 9 275HX / Windows 11 Pro** laptop: the compiler rebuilt its own source twice on the machine and stages 1-3 are byte-identical (`sha256 5b21ae16…`), with the laptop-built compiler then compiling and running a program correctly. |
 | Windows ARM64 | 🔵 CI-verified | Self-compile chain through a fixed point on a `windows-11-arm` runner. |
@@ -72,7 +72,7 @@ QEMU.
 | ESP32 (`--target=esp32`) | 🟢 Real hardware | `examples/esp32/hello.kr` boots from flash on an ESP32-D0WD-V3 and prints over UART0. |
 | Xtensa LX6 | 🟢 Real hardware | The backend behind the ESP32 row. Freestanding blobs flashed to real boards have carried downstream projects — including **CarRift**, an ESP32 CAN interface whose KernRift firmware drives a real TI VP230 transceiver, putting actual CANH/CANL on the wire at 500 kbit/s and round-tripping frames, verified 9 resets out of 9 on an ESP32-D0WD-V3. (Bench-validated at the target vehicle's bit rate; it has not yet been attached to a live vehicle bus.) Hosted ELF emission and `-c` relocatables are refused (`not yet implemented`), and neither is on the path to an MCU: you flash a blob, you do not link objects against an OS that isn't there. |
 | riscv32 (RV32IMC) | 🟠 **Unfinished — scaffolding** | Built as a stepping stone to the Xtensa backend, not as a target in its own right: a simpler 32-bit ISA to get the shared 32-bit code paths right before tackling Xtensa and the ESP32. It works as far as it goes — hosted ELF32 and `--freestanding` blobs build, `.o` emission works, verified under `qemu-riscv32-static` — but it is **not finished and nobody should build on it**. Its job was to make the target below possible. |
-| **The standard library on riscv32 / xtensa** | ⚪ **Out of scope by design** | `std/` targets 64-bit hosts: it is written in `u64` throughout, and on a 4-byte-word target the compiler refuses that outright — `error: 64-bit integers not supported on riscv32; use uint32`. So none of the 52 modules import on these targets, and that is the type system doing its job rather than a missing port. Embedded programs are written against the builtins and fixed-size types, which is what the ESP32 example does. |
+| **The standard library on riscv32 / xtensa** | ⚪ **Out of scope by design** | `std/` targets 64-bit hosts: it is written in `u64` throughout, and on a 4-byte-word target the compiler refuses that outright — `error: 64-bit integers not supported on riscv32; use uint32`. So none of the 55 modules import on these targets, and that is the type system doing its job rather than a missing port. Embedded programs are written against the builtins and fixed-size types, which is what the ESP32 example does. |
 
 So the general-purpose, library-backed coverage of this compiler is **x86_64 and
 ARM64**. The 32-bit backends exist for one reason: to put KernRift on an ESP32.
@@ -161,7 +161,7 @@ krc lc program.kr
 
 ### Self-compilation (350 849 tokens, 220 516 AST nodes, 3 416 912 bytes of source)
 
-The compiler emits binaries for all 8 targets. CI verifies the **bootstrap fixed point (krc3 == krc4) and the full suite natively on Linux x86_64 and Linux ARM64** (**1764 tests**, all passing on this tree). Windows and macOS are exercised on real `windows-latest`, `windows-11-arm` and `macos-14` runners. The **Android** jobs are the weak link: they run PIE ELFs under the **glibc** loader on Linux, never bionic and never a device. See the per-target table for what each one actually ran. Numbers below were re-measured on an AMD Ryzen 9 7900X with the compiler built from this commit — see [`benchmarks/BENCHMARKS.md`](benchmarks/BENCHMARKS.md) for the gcc / rustc comparisons — note that file is a **v2.8.33 run from 2026-07-28** and has not been re-run for v2.10.0 either.
+The compiler emits binaries for all 8 targets. CI verifies the **bootstrap fixed point (krc3 == krc4) and the full suite natively on Linux x86_64 and Linux ARM64** (**1777 tests**, all passing on this tree). Windows and macOS are exercised on real `windows-latest`, `windows-11-arm` and `macos-14` runners. The **Android** jobs are the weak link: they run PIE ELFs under the **glibc** loader on Linux, never bionic and never a device. See the per-target table for what each one actually ran. Numbers below were re-measured on an AMD Ryzen 9 7900X with the compiler built from this commit — see [`benchmarks/BENCHMARKS.md`](benchmarks/BENCHMARKS.md) for the gcc / rustc comparisons — note that file is a **v2.8.33 run from 2026-07-28** and has not been re-run for v2.10.0 either.
 
 | Target | Legacy codegen | IR codegen (default) | IR vs legacy |
 |--------|---------------:|---------------------:|-------------:|
@@ -373,14 +373,15 @@ Compiler intrinsics — no imports needed.
 
 ## Standard Library
 
-52 modules, 704 functions, 11 460 lines in `std/`. The table below covers the
-19 general-purpose ones; the other 33 are the bare-metal drivers added for the
+55 modules, 724 functions, 11 782 lines in `std/`. The table below covers the
+19 general-purpose ones; the other 36 are the bare-metal drivers added for the
 boot work (`vga_text`, `serial`, `uart_16550`, `uart_pl011`, `ps2`, `mouse`,
 `pci`, `pci_core`, `pci_ecam`, `pci_port`, `idt`, `x86`, `ramfb`, `fw_cfg`,
 `fw_cfg_mmio`, `console`, `cstr`, `heap_bump`, `gzip`), the thirteen AMD GPU
 bring-up modules (`gc_init`, `gmc`, `gmc_constants`, `gpu_activate`,
 `gpu_cp_load`, `gpu_imu_load`, `gpu_mes_load`, `gpu_mes_queue`, `gpu_navi32`,
-`gpu_pm4`, `gpu_portable`, `gpu_queue`, `gpu_rlc_load`) and `apexrift`, and are
+`gpu_pm4`, `gpu_portable`, `gpu_queue`, `gpu_rlc_load`), the portable system
+layer (`sys`, `args`, `win32`) and `apexrift`, and are
 **not yet written up** in
 [docs/STDLIB.md](docs/STDLIB.md) — read the source for those.
 
@@ -421,7 +422,7 @@ See the [`examples/`](examples/) directory for runnable programs covering every 
 
 ## Architecture
 
-79 323 lines of KernRift across the 26 source files the compiler is built from, plus 52 stdlib modules (11 460 lines). Self-compiles to a 1.22 MB x86_64 native binary in ~0.50 s (IR, default), a 1.03 MB ARM64 binary, or an 8-slice fat binary (BCJ + LZ-Rift compression) in ~3.56 s on an AMD Ryzen 9 7900X. **1764 tests** pass on this tree. Bootstrap fixed point is verified **natively on Linux x86_64, Linux ARM64, and a physical Android ARM64 handset**; Windows and macOS run their own chains on real runners. Android x86_64 is the one target executed only under a glibc loader on Linux. See [`benchmarks/BENCHMARKS.md`](benchmarks/BENCHMARKS.md) for micro-benchmarks vs gcc / rustc and peak-memory numbers (a v2.8.33 run, not re-measured for v2.10.0 either).
+79 323 lines of KernRift across the 26 source files the compiler is built from, plus 55 stdlib modules (11 782 lines). Self-compiles to a 1.22 MB x86_64 native binary in ~0.50 s (IR, default), a 1.03 MB ARM64 binary, or an 8-slice fat binary (BCJ + LZ-Rift compression) in ~3.56 s on an AMD Ryzen 9 7900X. **1777 tests** pass on this tree. Bootstrap fixed point is verified **natively on Linux x86_64, Linux ARM64, and a physical Android ARM64 handset**; Windows and macOS run their own chains on real runners. Android x86_64 is the one target executed only under a glibc loader on Linux. See [`benchmarks/BENCHMARKS.md`](benchmarks/BENCHMARKS.md) for micro-benchmarks vs gcc / rustc and peak-memory numbers (a v2.8.33 run, not re-measured for v2.10.0 either).
 
 | File | Purpose |
 |------|---------|
@@ -441,7 +442,7 @@ See the [`examples/`](examples/) directory for runnable programs covering every 
 | `bcj.kr` | BCJ filters (x86_64 + AArch64) for compression |
 | `format_*.kr` | ELF, Mach-O, PE, AR, KRBO, KrboFat, esp-image, ARX |
 | `runner.kr` | `kr` — fat-binary slice extractor / launcher |
-| `std/*.kr` | Standard library (52 modules, 704 functions, 11 460 lines) |
+| `std/*.kr` | Standard library (55 modules, 724 functions, 11 782 lines) |
 
 ## Bootstrap
 
@@ -460,7 +461,7 @@ a thing works, that column says who watched it work.
 
 | Platform | Compile | Run | Self-host | File I/O | How it is checked |
 |----------|---------|-----|-----------|----------|-------------------|
-| Linux x86_64 | ✅ | ✅ | ✅ | ✅ | CI, native runner; bootstrap fixed point + full 1764-test suite |
+| Linux x86_64 | ✅ | ✅ | ✅ | ✅ | CI, native runner; bootstrap fixed point + full 1777-test suite |
 | Linux ARM64 | ✅ | ✅ | ✅ | ✅ | CI, native ARM64 runner; bootstrap fixed point |
 | Windows x86_64 | ✅ | ✅ | ✅ | ✅ | CI, `windows-latest`; self-compile chain |
 | Windows ARM64 | ✅ | ✅ | ✅ | ✅ | CI, `windows-11-arm`; self-compile chain to fixed point |
@@ -488,7 +489,7 @@ established by compiling a program that exercises the feature.
 | `f16` / `f32` / `f64` | Yes | **No** | **No** | **No** |
 | 64-bit integers (`u64` / `i64`) | Yes | **No** | **No** | **No** |
 | `exit()`, syscalls | Yes | Yes | **No** | **No** |
-| **Anything from `std/`** | Yes (52 modules) | **No** — `std/` is `u64` throughout, see the row above | **No** — same reason | **No** — same reason |
+| **Anything from `std/`** | Yes (55 modules) | **No** — `std/` is `u64` throughout, see the row above | **No** — same reason | **No** — same reason |
 | `.o` relocatable (`-c`) | Yes | Yes | Yes | **No** (`xtensa fixup resolution not yet implemented`) |
 
 The limitations are hard compile errors, not silent miscompiles:
@@ -502,7 +503,7 @@ The limitations are hard compile errors, not silent miscompiles:
 - **No 64-bit integers.** The word size is 4 bytes; `u64`/`i64` are rejected at
   the declaration site. Use `u32`. This is the limitation that bites first when
   porting existing KernRift code, because `u64` is the language's integer
-  default — and it is why **none of the 52 `std/` modules compile** for these
+  default — and it is why **none of the 55 `std/` modules compile** for these
   targets. Every one of them declares `u64` somewhere near the top. There is
   no standard library on riscv32 or xtensa; you write against the builtins and
   fixed-size types.

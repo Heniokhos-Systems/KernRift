@@ -19,7 +19,7 @@ contributors and the curious; **Project** tracks direction and process.
 - [Embedded targets](../README.md#embedded-targets-riscv32--xtensa--esp32) —
   the riscv32 / xtensa / ESP32 backends: the verified support matrix (no
   floats, no 64-bit integers, no structs when freestanding, and **none of the
-  52 `std/` modules**), the freestanding `fn main() -> uint32` programming
+  55 `std/` modules**), the freestanding `fn main() -> uint32` programming
   model, and the ESP32 IRAM/DRAM budget.
 - [Freestanding mode](LANGUAGE.md#23-freestanding-mode) — the same ground from
   the language side: what `--freestanding` changes, the embedded-target subset,
@@ -35,7 +35,7 @@ contributors and the curious; **Project** tracks direction and process.
 - [Language Reference](LANGUAGE.md) — the complete language: types,
   operators, control flow, structs, functions, builtins, annotations.
 - [Grammar](GRAMMAR.md) — the EBNF grammar and lexical rules.
-- [Standard Library](STDLIB.md) — 19 of the 52 `std/*.kr` modules, function
+- [Standard Library](STDLIB.md) — 19 of the 55 `std/*.kr` modules, function
   by function. The other 33 — the bare-metal drivers, the AMD GPU bring-up
   modules and `apexrift` — are not written up yet; read their source.
 - [Undefined Behavior](UNDEFINED_BEHAVIOR.md) — what is defined, what

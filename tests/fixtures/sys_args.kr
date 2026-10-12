@@ -1,0 +1,24 @@
+// std/args.kr (portable-syscall-layer Task 10). With one argument `hello` it
+// prints `2hello`: sys_argc() in decimal, then sys_arg(1) verbatim.
+import "../../std/args.kr"
+
+fn main() -> uint32 {
+    uint64 n = sys_argc()
+    u8[24] d
+    uint64 k = 0
+    if n == 0 {
+        file_write(1, "0", 1)
+    }
+    while n != 0 {
+        store8(d + k, 48 + n % 10)
+        n = n / 10
+        k = k + 1
+    }
+    while k != 0 {
+        k = k - 1
+        file_write(1, d + k, 1)
+    }
+    uint64 a = sys_arg(1)
+    if a != 0 { file_write(1, a, str_len(a)) }
+    return 0
+}

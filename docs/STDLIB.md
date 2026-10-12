@@ -1,9 +1,9 @@
 # KernRift Standard Library Reference
 
-The standard library lives in `std/*.kr` — **52 modules, 704 functions**. This
+The standard library lives in `std/*.kr` — **55 modules, 724 functions**. This
 document covers the **19 general-purpose modules** in the index below (313 of
-those functions). The other **33 modules (391 functions) are not documented
-here** — read their source directly. They fall into three groups:
+those functions). The other **36 modules (411 functions) are not documented
+here** — read their source directly. They fall into four groups:
 
 - the bare-metal drivers added for the boot work — `console`, `cstr`, `fw_cfg`,
   `fw_cfg_mmio`, `gzip`, `heap_bump`, `idt`, `mouse`, `pci`, `pci_core`,
@@ -13,6 +13,9 @@ here** — read their source directly. They fall into three groups:
   `gpu_activate`, `gpu_cp_load`, `gpu_imu_load`, `gpu_mes_load`,
   `gpu_mes_queue`, `gpu_navi32`, `gpu_pm4`, `gpu_portable`, `gpu_queue`,
   `gpu_rlc_load` (13 modules, 108 functions);
+- the portable system layer — `sys` (sockets, readiness wait, entropy,
+  stdio, exit, time; Unix backend), `args` (`sys_argc`/`sys_arg`) and `win32`
+  (the Windows import skeleton) (3 modules, 20 functions);
 - `apexrift` (18 functions).
 
 **Three of those modules define no functions at all** — `gmc_constants`,

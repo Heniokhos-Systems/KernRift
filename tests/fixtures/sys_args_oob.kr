@@ -1,0 +1,8 @@
+// sys_arg is bounds-checked: an index past argc is 0, never a read of whatever
+// follows argv. Exit 0 means sys_arg(99) == 0 with the 1 argument given.
+import "../../std/args.kr"
+
+fn main() -> uint32 {
+    if sys_arg(99) != 0 { return 1 }
+    return 0
+}

@@ -1,0 +1,40 @@
+// Task 10 step 3b: argc and every argument through std/args.kr only, in the
+// shape `argc=N` then `<arg>` per line (a tab or quote prints verbatim between
+// the angle brackets), then `oob=1` if sys_arg(argc) and sys_arg(99999) are
+// both 0. The Linux and the Windows output for the same command line must be
+// byte-identical (spec C7 seen through the @shared statics).
+import "../../std/args.kr"
+
+fn dec(uint64 v) {
+    u8[24] d
+    uint64 k = 0
+    if v == 0 { file_write(1, "0", 1) }
+    while v != 0 {
+        store8(d + k, 48 + v % 10)
+        v = v / 10
+        k = k + 1
+    }
+    while k != 0 {
+        k = k - 1
+        file_write(1, d + k, 1)
+    }
+}
+
+fn main() -> uint32 {
+    uint64 n = sys_argc()
+    file_write(1, "argc=", 5)
+    dec(n)
+    file_write(1, "\n", 1)
+    uint64 i = 0
+    while i < n {
+        uint64 a = sys_arg(i)
+        file_write(1, "<", 1)
+        file_write(1, a, str_len(a))
+        file_write(1, ">\n", 2)
+        i = i + 1
+    }
+    if sys_arg(n) == 0 {
+        if sys_arg(99999) == 0 { file_write(1, "oob=1\n", 6) }
+    }
+    return 0
+}

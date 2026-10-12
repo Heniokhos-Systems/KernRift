@@ -2996,11 +2996,12 @@ for _std in "$DIR"/../std/*.kr; do
     fi
 done
 # Guard the loop against doing nothing: an empty glob would leave RV_OK=1.
-# 52 since the GPU bring-up modules joined std/ (f54921f..5f1cb95); every one
+# 55 since sys.kr, win32.kr and args.kr joined (52 before; the GPU bring-up
+# modules joined std/ at f54921f..5f1cb95); every one
 # is still rejected at its first u64.
-if [ "$RV_SEEN" != "52" ]; then
+if [ "$RV_SEEN" != "55" ]; then
     RV_OK=0
-    echo "  swept $RV_SEEN std modules, expected 52 -- the glob found the wrong set"
+    echo "  swept $RV_SEEN std modules, expected 55 -- the glob found the wrong set"
 fi
 if [ "$RV_OK" = "1" ]; then
     PASS=$((PASS + 1)); echo "  std_rejected_on_riscv32: PASS (all $RV_SEEN modules rejected at their first u64)"
@@ -27914,6 +27915,149 @@ else
     fi
 fi
 rm -rf "$C7_D"
+
+# --- Task 10: std/sys.kr, std/args.kr, std/win32.kr, Unix backend (spec C2, C3 unix, C5) --
+# sys.kr is the portable socket/random/wait API (sys_*), args.kr the thin
+# readers of the @shared cli_argc/cli_argv statics, win32.kr the (still empty)
+# home of the _kr_w32_ externs. Every row runs the real program: Linux
+# x86_64 natively, Linux arm64 under qemu-aarch64-static (a counted SKIP
+# without it), Windows slices under Wine for the C7 convergence (step 3b).
+T10_D=/tmp/krc_t10_$$
+mkdir -p "$T10_D/pfx"
+T10_FX="$DIR/fixtures"
+T10_KRC="$DIR/../build/krc2"
+T10_WINE="${KR_WINE:-$(command -v wine 2>/dev/null || true)}"
+T10_QEMU="$(command -v qemu-aarch64-static || command -v qemu-aarch64 || true)"
+t10_ok() { PASS=$((PASS + 1)); echo "  $1: PASS${2:+ ($2)}"; }
+t10_bad() { FAIL=$((FAIL + 1)); echo "FAIL: $1 ($2)"; }
+t10_skip() { PASS=$((PASS + 1)); echo "  $1: SKIP ($2)"; }
+# Wine can fail to LAUNCH a program (prints "ShellExecuteEx failed", exits 1,
+# program never started): retry that, exactly that, 3 tries (see c7_wine).
+t10_wine() {
+    local o="$1" e="$2" t rc; shift 2
+    for t in 1 2 3; do
+        (cd "$T10_D" && WINEPREFIX="$T10_D/pfx" WINEDEBUG=-all timeout 300 "$T10_WINE" "$@" > "$o" 2> "$e"); rc=$?
+        [ "$rc" = "1" ] && grep -aq 'ShellExecuteEx failed' "$o" "$e" && continue
+        return $rc
+    done
+    return $rc
+}
+# t10_build <arch> <fixture> [extra flags]: builds the fixture to $T10_D/<name>-<arch>
+t10_build() {
+    local a="$1" f="$2"; shift 2
+    $T10_KRC --arch=$a "$@" "$T10_FX/$f.kr" -o "$T10_D/$f-$a" > "$T10_D/$f-$a.log" 2>&1
+}
+# t10_run <arch> <fixture> [args...]: runs it; stdout in $T10_D/out, status returned.
+t10_run() {
+    local a="$1" f="$2"; shift 2
+    if [ "$a" = "arm64" ]; then
+        "$T10_QEMU" "$T10_D/$f-$a" "$@" > "$T10_D/out" 2>/dev/null
+    else
+        "$T10_D/$f-$a" "$@" > "$T10_D/out" 2>/dev/null
+    fi
+}
+# t10_row <row> <arch> <fixture> <want stdout> <want rc> [args...]
+t10_row() {
+    local row="$1" a="$2" f="$3" want="$4" wrc="$5" rc got; shift 5
+    TOTAL=$((TOTAL + 1))
+    if [ "$a" = "arm64" ] && [ -z "$T10_QEMU" ]; then t10_skip "$row" "no qemu-aarch64-static"; return; fi
+    if ! t10_build "$a" "$f"; then t10_bad "$row" "build failed: $(grep -m1 'error' "$T10_D/$f-$a.log" | cut -c1-140)"; return; fi
+    chmod +x "$T10_D/$f-$a"
+    t10_run "$a" "$f" "$@"; rc=$?
+    got=$(cat "$T10_D/out")
+    if [ "$got" = "$want" ] && [ "$rc" = "$wrc" ]; then t10_ok "$row" "rc=$rc"; else t10_bad "$row" "got '$(printf '%s' "$got" | head -c 60)' rc=$rc, want '$want' rc=$wrc"; fi
+}
+t10_row sys_args_hello_x86_64 x86_64 sys_args "2hello" 0 hello
+t10_row sys_args_hello_arm64 arm64 sys_args "2hello" 0 hello
+t10_row sys_arg_out_of_range_is_0_x86_64 x86_64 sys_args_oob "" 0 hello
+t10_row sys_arg_out_of_range_is_0_arm64 arm64 sys_args_oob "" 0 hello
+t10_row sys_loopback_x86_64 x86_64 sys_loopback "OK" 0
+t10_row sys_loopback_arm64 arm64 sys_loopback "OK" 0
+t10_row sys_random_x86_64 x86_64 sys_random "OK" 0
+t10_row sys_random_arm64 arm64 sys_random "OK" 0
+
+# Every fixture also builds as a Windows slice (the default fat binary ships
+# one): the Unix arm's syscall_raw is pruned by the literal os chain, so no
+# refusal fires, and sys_socket on Windows is -ENOSYS until Task 11 -- the
+# loopback program fails at its first call (exit 1), under Wine.
+TOTAL=$((TOTAL + 1))
+T10_W=""
+for T10_F in sys_args sys_args_all sys_args_oob sys_loopback sys_random; do
+    for T10_A in x86_64 arm64; do
+        $T10_KRC --arch=$T10_A --target=windows --emit=pe "$T10_FX/$T10_F.kr" -o "$T10_D/$T10_F-w$T10_A.exe" > "$T10_D/w.log" 2>&1 \
+            || T10_W="$T10_W $T10_F/$T10_A:$(grep -m1 error "$T10_D/w.log" | cut -c1-80)"
+    done
+    $T10_KRC "$T10_FX/$T10_F.kr" -o "$T10_D/$T10_F.krbo" > "$T10_D/w.log" 2>&1 || T10_W="$T10_W $T10_F/fat:$(grep -m1 error "$T10_D/w.log" | cut -c1-80)"
+    for T10_M in macos; do
+        for T10_A in x86_64 arm64; do
+            $T10_KRC --arch=$T10_A --target=$T10_M "$T10_FX/$T10_F.kr" -o "$T10_D/$T10_F-m$T10_A" > "$T10_D/w.log" 2>&1 \
+                || T10_W="$T10_W $T10_F/macos-$T10_A:$(grep -m1 error "$T10_D/w.log" | cut -c1-80)"
+        done
+    done
+done
+if [ -z "$T10_W" ]; then t10_ok sys_fixtures_build_for_every_slice "5 fixtures x (windows x86_64, windows arm64, fat, macos x86_64, macos arm64)"; else t10_bad sys_fixtures_build_for_every_slice "$T10_W"; fi
+
+# C8 against the std @shared statics. args.kr declares `@shared static u64
+# cli_argc/cli_argv`; a program that also declares them must say @shared too.
+T10_U="$T10_D/user"; mkdir -p "$T10_U"
+cat > "$T10_U/plain.kr" <<'KREOF'
+import "STD/args.kr"
+static uint64 cli_argc
+fn main() -> uint32 { return sys_argc() }
+KREOF
+T10_REL=$(realpath --relative-to="$T10_U" "$DIR/../std")
+sed -i "s#STD#$T10_REL#" "$T10_U/plain.kr"
+cat > "$T10_U/shared.kr" <<'KREOF'
+import "STD/args.kr"
+@shared static uint64 cli_argc
+@shared static uint64 cli_argv
+fn main() -> uint32 { return sys_argc() }
+KREOF
+sed -i "s#STD#$T10_REL#" "$T10_U/shared.kr"
+TOTAL=$((TOTAL + 1))
+T10_O=$($T10_KRC --arch=x86_64 "$T10_U/plain.kr" -o "$T10_U/plain" 2>&1); T10_RC=$?
+if [ $T10_RC -ne 0 ] && printf '%s' "$T10_O" | grep -q "duplicate static .cli_argc. (first declared at .*args.kr:" && printf '%s' "$T10_O" | grep -q '@shared'; then
+    t10_ok sys_args_plain_user_cli_argc_refused "names args.kr and @shared"
+else
+    t10_bad sys_args_plain_user_cli_argc_refused "rc=$T10_RC: $(printf '%s' "$T10_O" | head -2 | cut -c1-200)"
+fi
+TOTAL=$((TOTAL + 1))
+if $T10_KRC --arch=x86_64 "$T10_U/shared.kr" -o "$T10_U/shared" > "$T10_U/shared.log" 2>&1; then
+    chmod +x "$T10_U/shared"; "$T10_U/shared" a b c > /dev/null 2>&1; T10_RC=$?
+    if [ "$T10_RC" = "4" ]; then t10_ok sys_args_shared_user_cli_argc_one_variable "argc 4 through args.kr and the user's own declaration"; else t10_bad sys_args_shared_user_cli_argc_one_variable "rc=$T10_RC want 4"; fi
+else
+    t10_bad sys_args_shared_user_cli_argc_one_variable "build: $(grep -m1 error "$T10_U/shared.log" | cut -c1-200)"
+fi
+
+if [ -z "$T10_WINE" ]; then
+    for T10_R in sys_args_windows_equals_linux_wine sys_loopback_windows_enosys_wine; do
+        TOTAL=$((TOTAL + 1)); t10_skip "$T10_R" "no wine; set KR_WINE=<path to wine>"
+    done
+else
+    # Step 3b: C7 seen through std/args.kr. The Windows program's argc and
+    # every argument must equal the Linux program's for the same arguments.
+    TOTAL=$((TOTAL + 1))
+    T10_ARGS=(a "b c" "" 'd"e' 'x\\y' 'q\"r' "t	u" 'z\')
+    t10_build x86_64 sys_args_all && chmod +x "$T10_D/sys_args_all-x86_64"
+    "$T10_D/sys_args_all-x86_64" "${T10_ARGS[@]}" > "$T10_D/lin.out" 2>/dev/null
+    cp "$T10_D/sys_args_all-wx86_64.exe" "$T10_D/sys_args_all.exe" 2>/dev/null
+    t10_wine "$T10_D/win.out" "$T10_D/win.err" sys_args_all.exe "${T10_ARGS[@]}"; T10_RC=$?
+    # argv[0] (line 2) is the program's own path and differs by design; the rest must match
+    sed -i 2d "$T10_D/lin.out" "$T10_D/win.out"
+    if [ "$T10_RC" = "0" ] && [ -s "$T10_D/lin.out" ] && [ "$(wc -l < "$T10_D/lin.out")" -ge 10 ] && cmp -s "$T10_D/lin.out" "$T10_D/win.out"; then
+        t10_ok sys_args_windows_equals_linux_wine "$(head -1 "$T10_D/lin.out"), $(grep -c '' "$T10_D/lin.out") lines identical, argv[0] aside"
+    else
+        t10_bad sys_args_windows_equals_linux_wine "rc=$T10_RC; $(diff "$T10_D/lin.out" "$T10_D/win.out" 2>&1 | head -4 | cut -c1-60 | tr '\n' '|')"
+    fi
+    TOTAL=$((TOTAL + 1))
+    cp "$T10_D/sys_loopback-wx86_64.exe" "$T10_D/sys_loopback.exe" 2>/dev/null
+    t10_wine "$T10_D/win.out" "$T10_D/win.err" sys_loopback.exe; T10_RC=$?
+    if [ "$T10_RC" = "21" ]; then t10_ok sys_loopback_windows_enosys_wine "sys_socket is -ENOSYS until Task 11 (exit 21)"; else t10_bad sys_loopback_windows_enosys_wine "rc=$T10_RC want 21"; fi
+    if [ -x "$(dirname "$T10_WINE")/wineserver" ]; then
+        WINEPREFIX="$T10_D/pfx" "$(dirname "$T10_WINE")/wineserver" -w > /dev/null 2>&1
+    fi
+fi
+rm -rf "$T10_D"
 
 # --- Documentation pin 5, PART B (see Part A above) --------------------------
 # README.md advertises this suite's test count. Compare it against the total

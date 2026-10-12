@@ -1,0 +1,262 @@
+// KernRift Standard Library -- Portable system layer
+//
+// sys_*: sockets, readiness wait, entropy, stdio, exit, time. One API, three
+// OS families (spec C2/C3):
+//   - Unix (Linux, Android, macOS): raw syscalls, numbers per (arch, os);
+//   - Windows: the `_kr_w32_` externs of win32.kr (Task 11; -ENOSYS until then);
+//   - ApexRift none (os 4): no sockets or entropy yet -- -ENOSYS.
+//
+// Contract: socket/fd results are >= 0 or -errno; byte counts; 0 is EOF.
+// Every OS split below is the CANONICAL LITERAL CHAIN
+//     if get_target_os() == 2 { windows } else if get_target_os() == 4 { none } else { unix }
+// -- the compiler prunes the arms that cannot run on the target, so a Windows
+// build never sees a syscall_raw and a Linux build never sees a Win32 extern.
+// get_arch_id() is used only inside the Unix arm, to pick the numbers.
+//
+// macOS (arch 5/6) returns -ENOSYS for sockets, readiness wait and entropy:
+// it is unproven in v1 and has no ppoll/getrandom, and Linux numbers must never
+// be inherited there. Arch ids 9..12 (bare metal) get -ENOSYS the same way.
+//
+// Private helpers carry the `_kr_` prefix. This file does not import args.kr
+// (see args.kr: importing sys.kr must not introduce cli_argc / cli_argv).
+
+import "win32.kr"
+
+// Syscall number for operation `k` on this (arch, os), 0 when there is none.
+//   0 socket  1 connect  2 bind  3 listen  4 accept  5 getsockname
+//   6 shutdown  7 setsockopt  8 close  9 ppoll  10 getrandom
+// Linux and Android share a table per architecture (1/8 = x86_64, 2/7 = arm64).
+fn _kr_sys_nr(u64 k) -> u64 {
+    u64 a = get_arch_id()
+    if a == 1 || a == 8 {
+        if k == 0 { return 41 }
+        if k == 1 { return 42 }
+        if k == 2 { return 49 }
+        if k == 3 { return 50 }
+        if k == 4 { return 43 }
+        if k == 5 { return 51 }
+        if k == 6 { return 48 }
+        if k == 7 { return 54 }
+        if k == 8 { return 3 }
+        if k == 9 { return 271 }
+        if k == 10 { return 318 }
+        return 0
+    }
+    if a == 2 || a == 7 {
+        if k == 0 { return 198 }
+        if k == 1 { return 203 }
+        if k == 2 { return 200 }
+        if k == 3 { return 201 }
+        if k == 4 { return 202 }
+        if k == 5 { return 204 }
+        if k == 6 { return 210 }
+        if k == 7 { return 208 }
+        if k == 8 { return 57 }
+        if k == 9 { return 73 }
+        if k == 10 { return 278 }
+        return 0
+    }
+    return 0
+}
+
+// --- sockets -------------------------------------------------------------------
+
+fn sys_socket(u64 domain, u64 stype, u64 proto) -> int64 {
+    if get_target_os() == 2 {
+        return 0 - 38
+    } else if get_target_os() == 4 {
+        return 0 - 38
+    } else {
+        u64 nr = _kr_sys_nr(0)
+        if nr == 0 { return 0 - 38 }
+        return syscall_raw(nr, domain, stype, proto, 0, 0, 0)
+    }
+}
+
+fn sys_connect(u64 sock, u64 sa, u64 len) -> int64 {
+    if get_target_os() == 2 {
+        return 0 - 38
+    } else if get_target_os() == 4 {
+        return 0 - 38
+    } else {
+        u64 nr = _kr_sys_nr(1)
+        if nr == 0 { return 0 - 38 }
+        return syscall_raw(nr, sock, sa, len, 0, 0, 0)
+    }
+}
+
+fn sys_bind(u64 sock, u64 sa, u64 len) -> int64 {
+    if get_target_os() == 2 {
+        return 0 - 38
+    } else if get_target_os() == 4 {
+        return 0 - 38
+    } else {
+        u64 nr = _kr_sys_nr(2)
+        if nr == 0 { return 0 - 38 }
+        return syscall_raw(nr, sock, sa, len, 0, 0, 0)
+    }
+}
+
+fn sys_listen(u64 sock, u64 backlog) -> int64 {
+    if get_target_os() == 2 {
+        return 0 - 38
+    } else if get_target_os() == 4 {
+        return 0 - 38
+    } else {
+        u64 nr = _kr_sys_nr(3)
+        if nr == 0 { return 0 - 38 }
+        return syscall_raw(nr, sock, backlog, 0, 0, 0, 0)
+    }
+}
+
+// Accept one connection; the peer address is not returned.
+fn sys_accept(u64 sock) -> int64 {
+    if get_target_os() == 2 {
+        return 0 - 38
+    } else if get_target_os() == 4 {
+        return 0 - 38
+    } else {
+        u64 nr = _kr_sys_nr(4)
+        if nr == 0 { return 0 - 38 }
+        return syscall_raw(nr, sock, 0, 0, 0, 0, 0)
+    }
+}
+
+// sa: buffer for a sockaddr; lenptr: pointer to a 32-bit in/out length.
+fn sys_getsockname(u64 sock, u64 sa, u64 lenptr) -> int64 {
+    if get_target_os() == 2 {
+        return 0 - 38
+    } else if get_target_os() == 4 {
+        return 0 - 38
+    } else {
+        u64 nr = _kr_sys_nr(5)
+        if nr == 0 { return 0 - 38 }
+        return syscall_raw(nr, sock, sa, lenptr, 0, 0, 0)
+    }
+}
+
+// how: 0 receive, 1 send (SHUT_WR), 2 both.
+fn sys_shutdown(u64 sock, u64 how) -> int64 {
+    if get_target_os() == 2 {
+        return 0 - 38
+    } else if get_target_os() == 4 {
+        return 0 - 38
+    } else {
+        u64 nr = _kr_sys_nr(6)
+        if nr == 0 { return 0 - 38 }
+        return syscall_raw(nr, sock, how, 0, 0, 0, 0)
+    }
+}
+
+fn sys_setsockopt(u64 sock, u64 level, u64 name, u64 val, u64 len) -> int64 {
+    if get_target_os() == 2 {
+        return 0 - 38
+    } else if get_target_os() == 4 {
+        return 0 - 38
+    } else {
+        u64 nr = _kr_sys_nr(7)
+        if nr == 0 { return 0 - 38 }
+        return syscall_raw(nr, sock, level, name, val, len, 0)
+    }
+}
+
+fn sys_sock_close(u64 sock) -> int64 {
+    if get_target_os() == 2 {
+        return 0 - 38
+    } else if get_target_os() == 4 {
+        return 0 - 38
+    } else {
+        u64 nr = _kr_sys_nr(8)
+        if nr == 0 { return 0 - 38 }
+        return syscall_raw(nr, sock, 0, 0, 0, 0, 0)
+    }
+}
+
+// Single-shot send / receive: a count, 0 on EOF, or -errno. On Unix these are
+// write(2) / read(2) (so a pipe works too), the file_write / file_read builtins
+// -- on every Unix, macOS included, since no socket can exist there to send on.
+fn sys_send(u64 sock, u64 buf, u64 len) -> int64 {
+    if get_target_os() == 2 {
+        return 0 - 38
+    } else if get_target_os() == 4 {
+        return 0 - 38
+    } else {
+        return file_write(sock, buf, len)
+    }
+}
+
+fn sys_recv(u64 sock, u64 buf, u64 len) -> int64 {
+    if get_target_os() == 2 {
+        return 0 - 38
+    } else if get_target_os() == 4 {
+        return 0 - 38
+    } else {
+        return file_read(sock, buf, len)
+    }
+}
+
+// 1 = readable (data, EOF or error pending), 0 = timeout, -errno. SOCKET ONLY.
+// timeout_ms == 0xFFFFFFFF blocks forever.
+fn sys_wait_readable(u64 sock, u64 timeout_ms) -> int64 {
+    if get_target_os() == 2 {
+        return 0 - 38
+    } else if get_target_os() == 4 {
+        return 0 - 38
+    } else {
+        u64 nr = _kr_sys_nr(9)
+        if nr == 0 { return 0 - 38 }
+        u8[8] pfd
+        u8[16] ts
+        store32(pfd, sock)
+        store16(pfd + 4, 1)
+        store16(pfd + 6, 0)
+        u64 tsp = 0
+        if timeout_ms != 0xFFFFFFFF {
+            store64(ts, timeout_ms / 1000)
+            store64(ts + 8, (timeout_ms % 1000) * 1000000)
+            tsp = ts
+        }
+        int64 r = syscall_raw(nr, pfd, 1, tsp, 0, 8, 0)
+        if r > 0 { return 1 }
+        return r
+    }
+}
+
+// --- entropy -------------------------------------------------------------------
+
+// Fill buf with len random bytes. 1 = filled, 0 = failed.
+fn sys_random(u64 buf, u64 len) -> u64 {
+    if get_target_os() == 2 {
+        return 0
+    } else if get_target_os() == 4 {
+        return 0
+    } else {
+        u64 nr = _kr_sys_nr(10)
+        if nr == 0 { return 0 }
+        u64 got = 0
+        while got < len {
+            int64 r = syscall_raw(nr, buf + got, len - got, 0, 0, 0, 0)
+            if r <= 0 { return 0 }
+            got = got + r
+        }
+        return 1
+    }
+}
+
+// --- stdio, exit, time (builtins; the compiler maps them per OS) ---------------
+
+fn sys_write(u64 fd, u64 buf, u64 len) -> int64 {
+    return file_write(fd, buf, len)
+}
+
+fn sys_read(u64 fd, u64 buf, u64 len) -> int64 {
+    return file_read(fd, buf, len)
+}
+
+fn sys_exit(u64 code) {
+    exit(code)
+}
+
+fn sys_time_ns() -> u64 {
+    return time_ns()
+}

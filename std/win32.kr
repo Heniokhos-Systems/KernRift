@@ -1,0 +1,27 @@
+// KernRift Standard Library -- Win32 imports (Windows only)
+//
+// The ONLY file that declares Win32 `extern fn`s (spec C5): ws2_32, bcrypt and
+// the kernel32 additions, every one under the reserved prefix `_kr_w32_<Export>`
+// (the compiler strips the prefix to find the import, so importing this file
+// injects no Win32 name into user code). It will also hold the Winsock
+// lifecycle (`_kr_w32_started`, `_kr_w32_wsadata`), the 32-bit return masking,
+// the WSAGetLastError -> errno map and the Win64 fd_set / timeval builders.
+//
+// Task 10 lands the file as a skeleton: the sections below are empty and are
+// filled by the Windows backend. Every static here carries the `_kr_w32_`
+// prefix so std state can never alias a user static.
+
+// --- Winsock lifecycle ---------------------------------------------------------
+static u64 _kr_w32_started
+
+// --- ws2_32 externs ------------------------------------------------------------
+// (Task 11)
+
+// --- bcrypt externs ------------------------------------------------------------
+// (Task 11)
+
+// --- kernel32 externs ----------------------------------------------------------
+// (Task 11)
+
+// --- errno map, fd_set / timeval builders --------------------------------------
+// (Task 11)

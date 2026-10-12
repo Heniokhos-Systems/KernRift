@@ -1,0 +1,51 @@
+// std/sys.kr (portable-syscall-layer Task 10): a TCP round trip on loopback.
+// bind 127.0.0.1:0, getsockname for the port, listen, connect, accept,
+// sys_send("ping"), sys_wait_readable(a, 5000), sys_recv, compare. Prints OK.
+import "../../std/sys.kr"
+
+static u8[16] lb_sa
+static u8[16] lb_ga
+static u8[8] lb_len
+static u8[16] lb_buf
+
+fn lb_fill(uint64 sa, uint64 port) {
+    uint64 i = 0
+    while i < 16 { store8(sa + i, 0)  i = i + 1 }
+    store8(sa + 0, 2)
+    store8(sa + 2, (port >> 8) & 255)
+    store8(sa + 3, port & 255)
+    store8(sa + 4, 127)
+    store8(sa + 7, 1)
+}
+
+fn main() -> uint32 {
+    int64 ls = sys_socket(2, 1, 0)
+    if ls < 0 { return 21 }
+    lb_fill(lb_sa, 0)
+    if sys_bind(ls, lb_sa, 16) != 0 { return 2 }
+    if sys_listen(ls, 4) != 0 { return 3 }
+    store32(lb_len, 16)
+    if sys_getsockname(ls, lb_ga, lb_len) != 0 { return 4 }
+    uint64 port = (load8(lb_ga + 2) << 8) | load8(lb_ga + 3)
+    if port == 0 { return 5 }
+    int64 cs = sys_socket(2, 1, 0)
+    if cs < 0 { return 6 }
+    lb_fill(lb_sa, port)
+    if sys_connect(cs, lb_sa, 16) != 0 { return 7 }
+    int64 a = sys_accept(ls)
+    if a < 0 { return 8 }
+    if sys_send(cs, "ping", 4) != 4 { return 9 }
+    if sys_wait_readable(a, 5000) != 1 { return 10 }
+    if sys_recv(a, lb_buf, 16) != 4 { return 11 }
+    if load8(lb_buf) != 112 { return 12 }
+    if load8(lb_buf + 3) != 103 { return 13 }
+    if sys_wait_readable(a, 50) != 0 { return 14 }
+    sys_shutdown(cs, 1)
+    if sys_wait_readable(a, 5000) != 1 { return 15 }
+    if sys_recv(a, lb_buf, 16) != 0 { return 16 }
+    sys_sock_close(a)
+    sys_sock_close(cs)
+    sys_sock_close(ls)
+    file_write(1, "OK\n", 3)
+    return 0
+}
