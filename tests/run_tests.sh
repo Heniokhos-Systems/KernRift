@@ -6761,6 +6761,213 @@ for OR4_SH in S L B; do
 done
 rm -f /tmp/krc_or4_$$.kr /tmp/krc_or4_$$.s
 
+# --- volatile oracles by width, form and backend (review round 6) ---------
+# The rows above observe ONE volatile-block read (u32, DCE) and the vload
+# builtins. Five mutants of the volatile lowering passed the whole suite: LICM
+# hoisting a vload out of a loop (the polling-loop miscompile), a u16 block
+# read lowered as a plain load, a u8 block store or a block compound without
+# its barrier, and the legacy x86 u16 load / arm64 u8 store barriers dropped.
+# Each group below turns at least one of them red; IR_REFERENCE.md lists the
+# shapes that are still not observed. Everything runs in a private directory
+# (VX_T), so two suites on one machine cannot collide in /tmp.
+VX_T=$(mktemp -d "${TMPDIR:-/tmp}/krc_vx.XXXXXX")
+# vx_run ARCH FLAGS SRC -> the exit status of the compiled program (or "no
+# binary"), with core dumps off and the program's stderr dropped. The row is
+# already in TOTAL; or_runner has set OR_R for ARCH.
+vx_run() {
+    rm -f "$VX_T/b"
+    if $KRC --arch=$1 $2 "$3" -o "$VX_T/b" > /dev/null 2>&1 && [ -f "$VX_T/b" ]; then
+        chmod +x "$VX_T/b"
+        ( ulimit -c 0; timeout "$RUN_TEST_TIMEOUT" $OR_R "$VX_T/b" < /dev/null > /dev/null 2>&1; echo $? ) 2>/dev/null
+    else
+        echo "no binary"
+    fi
+}
+# 1. The polling loop: read the location, then write it, three times. Each
+# read must see the previous trip's write: (0xF1 & 15) + 5 + 6 = 12. A read
+# hoisted out of the loop (LICM treating IR_VLOAD 95 as invariant) reads the
+# first value three times: 3. Every vload builtin and every block width, IR
+# and legacy; riscv32 has no 64-bit integers, so it runs the 8/16/32 forms.
+for VX_K in vload8 vload16 vload32 vload64 block_u8 block_u16 block_u32 block_u64; do
+    case $VX_K in
+        vload8)  VX_W=u8;  VX_RD='        u64 v = vload8(p)' ;;
+        vload16) VX_W=u16; VX_RD='        u64 v = vload16(p)' ;;
+        vload32) VX_W=u32; VX_RD='        u64 v = vload32(p)' ;;
+        vload64) VX_W=u64; VX_RD='        u64 v = vload64(p)' ;;
+        block_*) VX_W=${VX_K#block_}; VX_RD="        volatile { *(p as $VX_W) -> v }" ;;
+    esac
+    for VX_C in "x86_64|" "x86_64|--legacy" "arm64|" "arm64|--legacy" "riscv32|"; do
+        VX_A=${VX_C%%|*}; VX_M=${VX_C#*|}
+        [ "$VX_A" = riscv32 ] && [ "$VX_W" = u64 ] && continue
+        TOTAL=$((TOTAL + 1))
+        VX_ROW="volatile_polling_loop_$VX_K $VX_A${VX_M:+ $VX_M}"
+        or_runner $VX_A "$VX_ROW" || continue
+        printf 'static u64[4] buf\nfn main() {\n    u64 p = buf\n    unsafe { *(p as u64) = 0x8897A6B5C4D3E2F1 }\n    u64 i = 0\n    u64 s = 0\n    while i < 3 {\n%s\n        s = s + (v & 15)\n        unsafe { *(p as %s) = i + 5 }\n        i = i + 1\n    }\n    exit(s)\n}\n' "$VX_RD" "$VX_W" > "$VX_T/p.kr"
+        # riscv32: u64 is not a type there; the buffer word is written as u32
+        [ "$VX_A" = riscv32 ] && sed -i -e 's/(p as u64) = 0x8897A6B5C4D3E2F1/(p as u32) = 0xC4D3E2F1/' -e 's/u64/u32/g' "$VX_T/p.kr"
+        VX_GOT=$(vx_run $VX_A "$VX_M" "$VX_T/p.kr")
+        if [ "$VX_GOT" = 12 ]; then
+            PASS=$((PASS + 1))
+        else
+            echo "FAIL: $VX_ROW (got $VX_GOT, want 12; 3 = the read was hoisted out of the loop)"
+            FAIL=$((FAIL + 1))
+        fi
+    done
+done
+# 2. An unused block read of every other width from address 0 must still
+# fault (139); 50 means it was lowered as a plain load and deleted. The u32
+# read is side_effect_kept_vptr_load above. One shape: each faulting run
+# waits for the core-dump handler.
+for VX_W in u8 u16 u64 f32 f64; do
+    for VX_A in x86_64 arm64 riscv32; do
+        [ "$VX_A" = riscv32 ] && case $VX_W in u64|f32|f64) continue ;; esac
+        TOTAL=$((TOTAL + 1))
+        VX_ROW="volatile_unused_read_kept $VX_W $VX_A"
+        or_runner $VX_A "$VX_ROW" || continue
+        printf 'static u64 zero = 0\nfn main() {\n    u64 z = zero\n    volatile { *(z as %s) -> v }\n    exit(50)\n}\n' "$VX_W" > "$VX_T/z.kr"
+        [ "$VX_A" = riscv32 ] && sed -i 's/u64/u32/g' "$VX_T/z.kr"
+        VX_GOT=$(vx_run $VX_A "" "$VX_T/z.kr")
+        if [ "$VX_GOT" = 139 ]; then
+            PASS=$((PASS + 1))
+        else
+            echo "FAIL: $VX_ROW (got $VX_GOT, want 139; 50 = the read was deleted)"
+            FAIL=$((FAIL + 1))
+        fi
+    done
+done
+# 3. The barriers, which no single-threaded run can observe: count them in
+# main's --emit=asm listing for each form, width and backend, with `volatile`
+# and with `unsafe`. A load and a store have one each, a compound (a read and
+# a write) two; `unsafe` none. x86_64 (IR and legacy): mfence. arm64 IR: the
+# access itself is LDAR/STLR. arm64 legacy: `dsb sy` after a load, `dmb ish`
+# before a store. riscv32 has no listing. One row per backend and form.
+for VX_C in "x86_64|" "x86_64|--legacy" "arm64|" "arm64|--legacy"; do
+    VX_A=${VX_C%%|*}; VX_M=${VX_C#*|}
+    case "$VX_A$VX_M" in
+        x86_64*)       VX_RE='^ +[0-9a-f]+: .*mfence' ;;
+        arm64--legacy) VX_RE='^ +[0-9a-f]+: [0-9a-f]{8} +(dsb sy|dmb ish)' ;;
+        arm64)         VX_RE='^ +[0-9a-f]+: [0-9a-f]{8} +(ldar|stlr)' ;;
+    esac
+    for VX_O in load store compound; do
+        TOTAL=$((TOTAL + 1))
+        VX_WANT=1; [ "$VX_O" = compound ] && VX_WANT=2
+        VX_BAD=""
+        for VX_W in u8 u16 u32 u64 f32 f64; do
+            case $VX_W in f32) VX_V='f32 val = 1.5' ;; f64) VX_V='f64 val = 2.5' ;; *) VX_V="$VX_W val = 5" ;; esac
+            case $VX_O in
+                load)     VX_S="    $VX_W x = val
+    KW { *(p as $VX_W) -> x }" ;;
+                store)    VX_S="    KW { *(p as $VX_W) = val }" ;;
+                compound) VX_S="    KW { *(p as $VX_W) += val }" ;;
+            esac
+            VX_N=""
+            for VX_KW in volatile unsafe; do
+                printf 'static u64[2] buf\nfn main() {\n    u64 p = buf\n    %s\n%s\n    exit(0)\n}\n' "$VX_V" "$VX_S" | sed "s/KW/$VX_KW/" > "$VX_T/l.kr"
+                if $KRC --arch=$VX_A $VX_M --emit=asm "$VX_T/l.kr" -o "$VX_T/l.s" > /dev/null 2>&1; then
+                    VX_N="$VX_N $(sed -n '/^main:/,$p' "$VX_T/l.s" | grep -acE "$VX_RE")"
+                else
+                    VX_N="$VX_N no-listing"
+                fi
+            done
+            [ "$VX_N" = " $VX_WANT 0" ] || VX_BAD="$VX_BAD $VX_W:$VX_N"
+        done
+        if [ -z "$VX_BAD" ]; then
+            PASS=$((PASS + 1))
+        else
+            echo "FAIL: volatile_barriers_by_width $VX_O $VX_A${VX_M:+ $VX_M} (volatile/unsafe barrier counts, want $VX_WANT 0:$VX_BAD)"
+            FAIL=$((FAIL + 1))
+        fi
+    done
+done
+# 4. `*(p as F) -> x` with x not declared yet binds x with F's type, as
+# `F x = ...` would (3b95554's var_type_register on both legacy backends;
+# MLRift's port of f6d9b30 missed it, and `x + x` added the f64/f32 bits as
+# integers there: 1, not 3). f16 has no float register class on any
+# backend -- a declared `f16 x` is an integer bit pattern too -- so its row
+# pins that the undeclared form matches the declared one: x + x adds the
+# bits as integers, 0x3E00 + 0x3E00 = 0x7C00, high byte 124 (an f16 typed
+# as f32 adds two denormals instead: 62 on both legacy backends). unsafe
+# and volatile, every backend that runs here.
+for VX_F in f64 f32 f16; do
+    for VX_KW in unsafe volatile; do
+        if [ "$VX_F" = f16 ]; then
+            VX_P=$(printf 'fn main() {\n    u64 p = alloc(64)\n    store64(p, 0)\n    store16(p, 0x3E00)\n    %s { *(p as f16) -> x }\n    u64 r = x + x\n    exit(r >> 8)\n}\n' "$VX_KW")
+            VX_WANT=124
+        else
+            VX_P=$(printf 'fn main() {\n    u64 p = alloc(64)\n    %s v = 1.5\n    unsafe { *(p as %s) = v }\n    %s { *(p as %s) -> x }\n    %s y = x + x\n    %s w = 3.0\n    if y == w { exit(3) }\n    exit(1)\n}\n' "$VX_F" "$VX_F" "$VX_KW" "$VX_F" "$VX_F" "$VX_F")
+            VX_WANT=3
+        fi
+        printf '%s\n' "$VX_P" > "$VX_T/u.kr"
+        for VX_C in "x86_64|" "x86_64|--legacy" "arm64|" "arm64|--legacy"; do
+            VX_A=${VX_C%%|*}; VX_M=${VX_C#*|}
+            TOTAL=$((TOTAL + 1))
+            VX_ROW="ptr_load_undeclared_${VX_F}_dest $VX_KW $VX_A${VX_M:+ $VX_M}"
+            or_runner $VX_A "$VX_ROW" || continue
+            VX_GOT=$(vx_run $VX_A "$VX_M" "$VX_T/u.kr")
+            if [ "$VX_GOT" = "$VX_WANT" ]; then
+                PASS=$((PASS + 1))
+            else
+                echo "FAIL: $VX_ROW (got $VX_GOT, want $VX_WANT)"
+                FAIL=$((FAIL + 1))
+            fi
+        done
+    done
+done
+# 5. Alignment. A volatile access must be naturally aligned (LANGUAGE.md,
+# UNDEFINED_BEHAVIOR.md): arm64 IR lowers it to LDAR/STLR, which fault on a
+# misaligned address, so a misaligned one is undefined on every backend and
+# is not tested. What IS defined is pinned here: a naturally aligned access
+# of every width at an offset that is not 8-aligned (u16 at +2, u32/f32 at
+# +4, u8 at +1) round-trips on every backend. Exit 42 = all six; else the
+# number of the first width that failed.
+VX_P='static u64[4] buf
+fn main() {
+    u64 p = buf
+    u8 a8 = 0xA5
+    volatile { *(p + 1 as u8) = a8 }
+    volatile { *(p + 1 as u8) -> b8 }
+    if b8 != 0xA5 { exit(1) }
+    u16 a16 = 0xBEEF
+    volatile { *(p + 2 as u16) = a16 }
+    volatile { *(p + 2 as u16) -> b16 }
+    if b16 != 0xBEEF { exit(2) }
+    u32 a32 = 0xCAFEF00D
+    volatile { *(p + 4 as u32) = a32 }
+    volatile { *(p + 4 as u32) -> b32 }
+    if b32 != 0xCAFEF00D { exit(3) }
+    u64 a64 = 0x0123456789ABCDEF
+    volatile { *(p + 8 as u64) = a64 }
+    volatile { *(p + 8 as u64) -> b64 }
+    if b64 != 0x0123456789ABCDEF { exit(4) }
+    f32 af = 1.25
+    volatile { *(p + 20 as f32) = af }
+    volatile { *(p + 20 as f32) -> bf }
+    if bf != af { exit(5) }
+    f64 ad = 2.5
+    volatile { *(p + 24 as f64) = ad }
+    volatile { *(p + 24 as f64) -> bd }
+    if bd != ad { exit(6) }
+    exit(42)
+}'
+printf '%s\n' "$VX_P" > "$VX_T/a.kr"
+# riscv32: the 8/16/32-bit half (no 64-bit integers, no float pointer casts)
+printf '%s\n' "$VX_P" | awk '/a64 = /{skip=1} skip && /exit\(42\)/{skip=0} !skip' | sed 's/u64/u32/g' > "$VX_T/a_rv.kr"
+for VX_C in "x86_64|" "x86_64|--legacy" "arm64|" "arm64|--legacy" "riscv32|"; do
+    VX_A=${VX_C%%|*}; VX_M=${VX_C#*|}
+    TOTAL=$((TOTAL + 1))
+    VX_ROW="volatile_naturally_aligned_roundtrip $VX_A${VX_M:+ $VX_M}"
+    or_runner $VX_A "$VX_ROW" || continue
+    VX_SRC="$VX_T/a.kr"; [ "$VX_A" = riscv32 ] && VX_SRC="$VX_T/a_rv.kr"
+    VX_GOT=$(vx_run $VX_A "$VX_M" "$VX_SRC")
+    if [ "$VX_GOT" = 42 ]; then
+        PASS=$((PASS + 1))
+    else
+        echo "FAIL: $VX_ROW (got $VX_GOT, want 42; N = width N of u8 u16 u32 u64 f32 f64 failed)"
+        FAIL=$((FAIL + 1))
+    fi
+done
+rm -rf "$VX_T"
+
 # cse_invalidate_set_pinned is a TRIPWIRE, not the guard. ir_opt_cse_invalidates
 # is derived from ir_opt_is_side_effect minus an exemption list (a hand-kept
 # positive list had drifted from the side-effect list: barriers 126-130, then

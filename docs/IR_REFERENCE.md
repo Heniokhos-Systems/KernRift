@@ -452,8 +452,8 @@ is false; it is still present in MLRift's copy of this document.)*
 | 78 | `IR_STATIC_STORE` | `static_data[imm] = src1` | **SE** |
 | 84 | `IR_STATIC_ADDR` | `dest = &static_data[imm]` | pure |
 | 88 | `IR_MEMCMP` | `dest = (memcmp(src1,src2,imm) == 0)` | pure |
-| 94 | `IR_VSTORE` | volatile store, fence after | **SE** |
-| 95 | `IR_VLOAD` | volatile load, fence before | **SE** |
+| 94 | `IR_VSTORE` | volatile store at width `dest`; the barrier comes BEFORE the store: x86_64 `mfence; mov`, arm64 `STLR` (release), riscv32 a plain `sb/sh/sw` (no fence) | **SE** |
+| 95 | `IR_VLOAD` | volatile load at width `imm`; the barrier comes AFTER the load: x86_64 `mov; mfence`, arm64 `LDAR` (acquire), riscv32 a plain `lbu/lhu/lw` (no fence) | **SE** |
 | 147 | `IR_LOAD_BIS` | `dest = *(src1 + src2 << log2(imm))`; `imm` = width 4\|8 | pure |
 | 148 | `IR_STORE_BIS` | `*(src1 + imm << log2(dest)) = src2`; `imm` is the **index vreg**, `dest` is the **width** | **SE** |
 
@@ -1022,6 +1022,51 @@ What they cover exactly (`tests/run_tests.sh`, the block under "THE GUARD"):
   `get_module_path` (146) exists only in a Windows build, which cannot run
   here: `module_path_stops_static_cse` and `module_path_unused` (S, L, B,
   result discarded) count the same loads under `--target=windows`.
+- the volatile rows under "volatile oracles by width" (review round 6):
+  `volatile_polling_loop_*` reads a location in a three-trip loop that then
+  writes it, with every `vload` builtin and every `volatile { }` width, IR
+  and `--legacy`, x86_64/arm64/riscv32 (riscv32 without the 64-bit forms):
+  12, or 3 when LICM hoisted the read out of the loop.
+  `volatile_unused_read_kept` faults on an unused `volatile { }` read of
+  address 0 at u8/u16/u64/f32/f64 (u32 is `side_effect_kept_vptr_load`): 50
+  when the read was lowered as a plain load and deleted.
+  `volatile_barriers_by_width` counts the barriers in `main`'s listing for a
+  `volatile { }` load, store and compound at u8..u64/f32/f64, against the
+  same text with `unsafe`: one per load and store, two per compound, none for
+  `unsafe` -- x86_64 `mfence` (IR and legacy), arm64 IR `LDAR`/`STLR`,
+  arm64 legacy `dsb sy` after a load and `dmb ish` before a block store
+  (the `vstore*` builtins get `dsb sy` there; the rows use the block form).
+  `ptr_load_undeclared_*_dest` pins 3b95554's typing of an undeclared `->`
+  destination, and `volatile_naturally_aligned_roundtrip` the defined
+  (naturally aligned) half of §12 of LANGUAGE.md.
+
+**Volatile: measured, and what is still not observed.** The round-6 mutants
+of the volatile lowering, each a one-line change built from this tree:
+LICM treating `IR_VLOAD` as hoistable (N2, and N2b: the same edit on one
+line, so a source pin cannot see it) is red on 16 of the 18 IR
+`volatile_polling_loop_*` rows (3, want 12) on all three arches -- the u16
+forms are not hoisted by that change and stay 12; a u16 block read lowered
+as a plain load (N4) on `volatile_unused_read_kept u16` (50, want 139) on
+all three arches and the load barrier rows; a u8 block store without its
+barrier (N5), a block compound whose read has no barrier (N6), the legacy
+x86_64 u16 load barrier (N8) and the legacy arm64 u8 store barrier (N9) on
+`volatile_barriers_by_width` only -- a barrier has no effect a
+single-threaded run can see, so for those four the listing count IS the
+oracle. Not observed by any row:
+- riscv32 has no volatile barrier at all and no listing, so a riscv32
+  volatile store or compound lowered as a plain store is invisible (it
+  emits the same bytes);
+- the barrier rows count barriers, they do not check their position: a
+  fence moved from after a load to before it, with the count unchanged,
+  passes;
+- two volatile reads of one address with no write between them, merged
+  into one (CSE of `IR_VLOAD`), read the same value single-threaded; only a
+  merge across a static load shows, in `side_effect_stops_static_cse_listing`;
+- LICM of a volatile read out of a loop that does not write the location
+  reads the same value every trip; only the polling shape (read, then write
+  the same location) shows a hoist;
+- f16 and `device` fields wider than u16 are not in the width rows; xtensa
+  and freestanding images are not covered at all.
 
 **What the rows catch, measured.** For each of the 45 ops in the pin's
 `WANT_SE`, three compilers were built from this tree: the op dropped from
