@@ -48,14 +48,28 @@ program starts execution at `fn main()` (unless you pass `--freestanding`).
 ```kr
 // Line comment
 
-// There are no block comments. `/* ... */` is a parse error; use `//` on
-// each line.
+// There are no block comments; use `//` on each line. `/* ... */` is not
+// a comment: in a function body it is a parse error, and between
+// declarations it is currently skipped (see below).
 
 fn main() {
     println("Hello, KernRift!")
     exit(0)
 }
 ```
+
+**Text between declarations is not checked (known defect, register item 99).**
+At top level the parser skips, one token at a time and without a word, anything
+that cannot start a declaration. So a `/* ... */` there is dropped -- but its
+contents are still read as tokens, and a `fn` or `const` written inside it is
+compiled. Stray words (`foo bar`) vanish the same way, an annotation (`@naked`,
+`@export`) separated from its `fn` by such text is silently lost, and a `#lang`
+line anywhere but the first line of a file (§22) is skipped like any other junk.
+Inside a function body the same bytes are a parse error (`unexpected '/' in
+expression`). Making top-level junk an error is blocked on a shipped source:
+KernRift's frozen byte-identity input `tests/target_none/corpus/arith.kr`
+declares `static uint32 table[8]`, whose `[8]` this rule drops, leaving `table`
+one scalar that its loop writes past.
 
 Statements do not require trailing semicolons. Semicolons are accepted and
 ignored — useful when you want to write multiple statements on one line.
@@ -126,7 +140,7 @@ char bad = 97              // compile error — int literal not assignable
   (`error: malformed number literal '0x': a base prefix needs at least one
   digit`), not a number. There are **no octal (`0o`) literals** and no
   `\u{...}` escape: `0o17` is `0` glued to `o17` (malformed, below), and
-  `'\u{41}'` is silently `'u'` (117), not `'A'`.
+  `'\u{41}'` is an invalid escape (below).
 - **A number ends where its digits end.** A letter, a digit that does not
   belong to the base, or a quote glued straight onto a literal makes the whole
   run ONE malformed literal, refused by the lexer: `5x`, `42exit`, `0x1Fg`,
@@ -138,6 +152,14 @@ char bad = 97              // compile error — int literal not assignable
   fraction or exponent) is not a float literal and is refused.
 - Float: `1.5`, `-3.14`, `2e10`, `1.5f` (f32 suffix)
 - Bool: `true`, `false` (strict `bool` type)
+- **Escapes are checked.** A string, character or f-string literal takes
+  exactly `\n \t \r \0 \\ \' \" \a \b \f \v \e` and `\xHH`, where `\x` is
+  followed by EXACTLY two hex digits (an f-string also takes `\{` and `\}`).
+  Anything else after a backslash -- `\q`, `\u{41}`, `\x4]`, a `\x4` just
+  before the closing quote -- is a lexical error, `file:line:col: error:
+  invalid escape '<text>'`, at the backslash. (Before, `\x` took the next two
+  bytes whatever they were, so `"\x4]"` swallowed the bracket and a short
+  `\x4` printed `x4`, and an unknown letter silently became the letter.)
 - String: `"hello"` with `\n`, `\t`, `\\`, `\"`, `\0` escapes. A string,
   character or f-string literal still open at the end of its file is an error
   at its opening quote (`file:line:col: error: unterminated string literal`).
@@ -1396,8 +1418,23 @@ Import paths are resolved:
 2. Then in the standard library location: `~/.local/share/kernrift/`
    (or `%LOCALAPPDATA%\KernRift\share\` on Windows)
 
-Paths are always joined to one of those roots, so an absolute path in an
-`import` does not work.
+An **absolute** path (one starting with `/`) is used as written, with no
+search. It used to be joined to the importing file's directory too, so it
+worked from `krc m.kr` and failed from `krc sub/m.kr` (`cannot open import:
+sub//...`).
+
+Every file the import system reads -- the one named on the command line and
+each import -- may start with a `#lang` line (§22) before its imports; the
+import scanner skips it exactly as the lexer does. A file that starts with a
+UTF-8 byte-order mark is refused (`file:1:1: error: this file starts with a
+UTF-8 byte-order mark (bytes EF BB BF), which is not accepted; save it as
+UTF-8 without a BOM`): it is not skipped, so every reader of a file sees the
+same bytes. An import that names a directory, or anything else that is not a
+regular file, is refused as such (`error: cannot import '<path>': it is a
+directory or another non-regular file, not a source file`). Each file is also
+parsed within its own bounds: a declaration cut off at the end of an imported
+file (`fn tail` and nothing after it) is reported as `expected '(', got end of
+file` at the end of THAT file, not against the file that imported it.
 
 **An import path is a plain path, not an escaped string.** It is the bytes
 between the quotes, on the same line as `import`, and is written with `/` on
@@ -1453,7 +1490,8 @@ needed.
 `{expr}` with the same type-directed formatter `print` uses. The literal
 segments between the interpolations take **exactly the escape sequences a
 plain `"..."` literal takes** — `\n \t \r \0 \\ \" \' \b \f \v \a \e` and
-`\xHH` — so `f"a\nb={n}\n"` is two lines, not a backslash and an `n`. A
+`\xHH` (exactly two hex digits; any other escape is an error) — so
+`f"a\nb={n}\n"` is two lines, not a backslash and an `n`. A
 literal brace is written `{{` or `}}` (`\{` and `\}` also work). f-strings
 compose with variadic `println`:
 
@@ -2872,7 +2910,12 @@ Recognized profiles:
 | `stable` | Default. All stable features. Safe for production code. |
 | `experimental` | Also allows features under active development. |
 
-The directive must be the first non-empty line of the file. If absent,
+The directive must be the **very first line** of the file, starting at its first
+byte -- not after a blank line or a comment, where `#lang` is not a directive
+and is skipped as junk (§1, register item 99). Every file may carry one,
+imported files included, and the import scanner reads past it to the file's
+imports; the profile is set by the file named on the command line alone. If
+absent,
 the profile defaults to `stable`.
 
 Profiles are part of the Living Compiler's two-layer model: the stable

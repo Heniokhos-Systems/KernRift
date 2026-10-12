@@ -36,8 +36,11 @@ COMMENT     = "//" [^\n]*                     (discarded)
 
 **There are no block comments.** `/* ... */` is not a comment — the lexer
 (`skip_whitespace_and_comments` in `src/lexer.kr`) recognises `//` and nothing
-else, so `/*` lexes as a `/` followed by a `*` and the parser reports
-`error: unexpected '/' in expression`. Use `//` on each line.
+else, so `/*` lexes as a `/` followed by a `*`. Inside a function body the
+parser reports `error: unexpected '/' in expression`; between declarations it
+currently skips such tokens without a word, and still compiles any declaration
+written between the `/*` and the `*/` (register item 99, LANGUAGE.md §1). Use
+`//` on each line.
 
 Whitespace (spaces, tabs, CR, LF) is a token separator; no significant
 indentation. `TokenKind` in `src/lexer.kr` has 96 members (counting `Eof` and `Error`); only the subset relevant to
@@ -59,12 +62,18 @@ malformed literal, refused by the lexer with `malformed number literal
 these and an unterminated string, character or f-string literal -- are
 reported as `file:line:col: error: ...` and stop the compile before parsing.
 Each imported file is lexed on its own, so no literal crosses into the next
-file. The f-string segments take the same `char_escape` set as `STR_LIT`.
+file. The f-string segments take the same `char_escape` set as `STR_LIT`, plus
+`\{` and `\}`. The set is enforced: any other byte after a backslash, and a
+`\x` not followed by exactly two hex digits, is `error: invalid escape
+'<text>'` at the backslash. A file may begin with a `#lang` line (LANGUAGE.md
+§22); a file that begins with a UTF-8 byte-order mark is refused. Past 20
+lexical errors the rest are counted, not printed, and the count of the held-back
+ones is printed as `(N more errors not shown)`; the parser does the same past
+its own 20.
 
 **Octal (`0o...`) literals and `\u{...}` escapes are still not implemented.**
-`0o17` is a malformed literal (`0` glued to `o17`), and `'\u{41}'` silently evaluates to `'u'` (117), not
-`'A'`, because the lexer's escape set has no `u` case and the backslash simply
-escapes the next byte.
+`0o17` is a malformed literal (`0` glued to `o17`), and `'\u{41}'` is an
+invalid escape.
 
 ## Keywords
 

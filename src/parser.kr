@@ -31,7 +31,21 @@ fn tok_len_at(uint64 idx) -> uint32 {
 }
 
 // Current token helpers
+// THE FILE FENCE. The token stream is every imported file back to back, so a
+// declaration left unfinished at the end of one file -- `fn tailB` with nothing
+// after it -- used to carry on into the NEXT file's tokens, and the error came
+// out against the importer (`m.kr:1:1: expected '('`) about a line with nothing
+// wrong with it. parse_module sets p_fence_end to the end of the file each
+// top-level declaration starts in; past it cur_kind() reads end of file, so
+// the declaration stops where its file does and the error names that file.
+// Zero (no fence) for a single-file buffer. A well-formed declaration never
+// reaches the fence, so no program that parsed before parses differently.
+static uint64 p_fence_end = 0
+
 fn cur_kind() -> uint32 {
+    if p_fence_end != 0 {
+        if tok_start_at(p_tok_pos) >= p_fence_end { return 0 }
+    }
     return tok_kind_at(p_tok_pos)
 }
 
@@ -57,6 +71,45 @@ fn tok_line_at(uint64 idx) -> uint32 {
     uint32 val = 0
     unsafe { *(p as uint32) -> val }
     return val
+}
+
+// Where a parse error at token tok_idx is reported: its byte offset and the
+// length to underline. A token past the fence is the next file's; the error is
+// really the end of the fenced file, so it is placed just after that file's
+// last token -- in the file that ended too soon, at the line it ended on.
+static uint64 p_err_off = 0
+static uint64 p_err_len = 0
+
+fn parse_err_place(uint64 tok_idx) {
+    p_err_off = tok_start_at(tok_idx)
+    p_err_len = tok_len_at(tok_idx)
+    if p_fence_end != 0 && p_err_off >= p_fence_end {
+        uint64 k = tok_idx
+        while k > 0 && tok_start_at(k) >= p_fence_end { k = k - 1 }
+        p_err_off = tok_start_at(k) + tok_len_at(k)
+        p_err_len = 1
+    }
+}
+
+// "file:line:col: error: " for a parse error at token tok_idx; after the
+// message, parse_err_span() prints the source line and a caret.
+fn parse_err_head(uint64 tok_idx) {
+    parse_err_place(tok_idx)
+    diag_head_at(p_err_off, 0)
+}
+
+fn parse_err_span() {
+    diag_print_source_line(p_err_off, p_err_len, srcmap_line(p_err_off))
+}
+
+// The token's text after its kind name, for the kinds whose name alone does
+// not say what was written: "got identifier 'foo'", "unexpected character '#'".
+fn parse_err_tok_text(uint64 kind, uint64 tok_idx) {
+    if kind == 1 || kind == 2 || kind == 3 || kind == 255 {
+        write(2, " '", 2)
+        write(2, cg_source + tok_text_start(tok_idx), tok_text_len(tok_idx))
+        write(2, "'", 1)
+    }
 }
 
 fn tok_kind_name(uint64 kind) -> uint64 {
@@ -159,6 +212,10 @@ fn tok_kind_name(uint64 kind) -> uint64 {
     if kind == 92 { return "'device'" }
     if kind == 93 { return "'at'" }
     if kind == 97 { return "'sizeof'" }
+    if kind == 100 { return "f-string" }
+    if kind == 101 { return "f-string text" }
+    if kind == 102 { return "end of f-string" }
+    if kind == 255 { return "character" }
     return "token"
 }
 
@@ -698,23 +755,16 @@ fn expect(uint32 kind) -> uint64 {
         // "file:line:col: error: expected X, got Y 'text'" + source span/caret.
         if parse_err_should_report() != 0 {
             p_err_reported = p_err_reported + 1
-            diag_loc_head(p_tok_pos, 0)
+            parse_err_head(p_tok_pos)
             write(2, "expected ", 9)
             uint64 ename = tok_kind_name(kind)
             write(2, ename, str_len(ename))
             write(2, ", got ", 6)
             uint64 gname = tok_kind_name(cur_kind())
             write(2, gname, str_len(gname))
-            // Show the actual text of the unexpected token
-            if cur_kind() == 1 || cur_kind() == 2 || cur_kind() == 3 {
-                write(2, " '", 2)
-                uint64 ts = tok_text_start(p_tok_pos)
-                uint64 tl = tok_text_len(p_tok_pos)
-                write(2, cg_source + ts, tl)
-                write(2, "'", 1)
-            }
+            parse_err_tok_text(cur_kind(), p_tok_pos)
             write(2, "\n", 1)
-            diag_span_of(p_tok_pos)
+            parse_err_span()
         }
         // Panic-mode recovery: skip to a sync token and hand back the
         // current token index as a poison value. parse_module()'s error
@@ -823,6 +873,7 @@ fn parser_init(uint64 tokens, uint64 count_val) {
     p_err_count = 0
     p_err_reported = 0
     p_last_err_pos = 0xFFFFFFFF
+    p_fence_end = 0
 }
 
 // ---------------------------------------------------------------------------
@@ -1324,19 +1375,13 @@ fn parse_primary() -> uint64 {
     // Error — "file:line:col: error: unexpected X['text'] in expression" + span.
     if parse_err_should_report() != 0 {
         p_err_reported = p_err_reported + 1
-        diag_loc_head(p_tok_pos, 0)
+        parse_err_head(p_tok_pos)
         write(2, "unexpected ", 11)
         uint64 ename = tok_kind_name(kind)
         write(2, ename, str_len(ename))
-        if kind == 1 || kind == 2 || kind == 3 {
-            write(2, " '", 2)
-            uint64 ts = tok_text_start(p_tok_pos)
-            uint64 tl = tok_text_len(p_tok_pos)
-            write(2, cg_source + ts, tl)
-            write(2, "'", 1)
-        }
+        parse_err_tok_text(kind, p_tok_pos)
         write(2, " in expression\n", 15)
-        diag_span_of(p_tok_pos)
+        parse_err_span()
     }
     // Panic-mode recovery: skip to a sync token and return a poison
     // integer-literal node so the surrounding expression finishes parsing.
@@ -2770,6 +2815,18 @@ fn parse_module() -> uint64 {
 
         // Track the leading-import run for the file this token came from.
         uint64 tf = srcmap_file(tok_text_start(p_tok_pos))
+        // Fence this declaration into the file it starts in (see cur_kind).
+        if cg_source == import_buf && srcmap_count > 1 {
+            uint64 here_off = tok_start_at(p_tok_pos)
+            uint64 fi = 0
+            while fi < srcmap_count {
+                uint64 fe = srcmap_table + fi * 16
+                uint64 fe_off = 0
+                unsafe { *(fe as uint64) -> fe_off }
+                if fe_off > here_off && p_fence_end == 0 { p_fence_end = fe_off }
+                fi = fi + 1
+            }
+        }
         if tf != imp_file {
             imp_file = tf
             imp_leading = 1
@@ -3669,8 +3726,16 @@ fn parse_module() -> uint64 {
                 }
             }
         } else {
+            // Anything else at top level is skipped WITHOUT A WORD -- register
+            // item 99, deliberately left unfixed here. Making it an error
+            // refuses a shipped source: KernRift's frozen byte-identity input
+            // tests/target_none/corpus/arith.kr declares `static uint32
+            // table[8]`, a C-style array whose `[8]` is skipped here, so
+            // `table` is one scalar and the loop writes past it. That needs
+            // its own decision (the input is frozen), not a side effect.
             advance_tok()
         }
+        p_fence_end = 0
     }
 
     // Parse-error gate: if panic-mode recovery fired, report the total and
@@ -3680,6 +3745,13 @@ fn parse_module() -> uint64 {
     // this single gate covers them all.
     if p_err_count > 0 {
         uint8[24] ebuf
+        // Printing stops at 20 (parse_err_should_report); say so.
+        if p_err_reported >= 20 && p_err_count > p_err_reported {
+            write(2, "(", 1)
+            uint64 mlen = fmt_uint(ebuf, p_err_count - p_err_reported)
+            write(2, ebuf, mlen)
+            write(2, " more errors not shown)\n", 24)
+        }
         uint64 elen = fmt_uint(ebuf, p_err_count)
         write(2, ebuf, elen)
         write(2, " parse error(s)\n", 16)

@@ -256,7 +256,12 @@ fn srcmap_line(uint64 byte_offset) -> uint64 {
 // Print the "file:line:col: <severity>: " prefix for a token. Shared by the
 // immediate (write+exit) diagnostics so they match diag_report_all's format.
 fn diag_loc_head(uint64 tok_idx, uint64 severity) {
-    uint64 tok_start = tok_text_start(tok_idx)
+    diag_head_at(tok_text_start(tok_idx), severity)
+}
+
+// The same head for a byte offset rather than a token -- the parser places an
+// error that ran off the end of a file just past that file's last token.
+fn diag_head_at(uint64 tok_start, uint64 severity) {
     uint64 file_path = srcmap_file(tok_start)
     if file_path != 0 {
         write(2, file_path, str_len(file_path))
@@ -456,6 +461,14 @@ fn import_path_normalize(uint64 path) -> uint64 {
 
 fn import_resolve(uint64 base_path, uint64 name, uint64 name_len) -> uint64 {
     uint64 dir_len = import_dir_of(base_path)
+    // AN ABSOLUTE PATH IS USED AS IT IS. It used to be joined to the importing
+    // file's directory like any other, which happened to work when that
+    // directory was empty (`krc m.kr`) and produced "sub//abs/x.kr" when it
+    // was not (`krc sub/m.kr`) -- the same import line compiling or failing
+    // with where the compiler was run from.
+    uint64 n0 = 0
+    if name_len > 0 { unsafe { *(name as uint8) -> n0 } }
+    if n0 == 47 { dir_len = 0 }
     uint64 result = alloc(dir_len + name_len + 1)
     uint64 i = 0
     while i < dir_len {
@@ -866,6 +879,16 @@ fn import_check_file(uint64 path) {
     file_close(fd)
 }
 
+// An absolute import path names one file; there is no search to fall back to,
+// and joining it to a stdlib root ("/usr/share/kernrift//abs/x.kr") is noise.
+fn import_name_is_absolute(uint64 name, uint64 name_len) -> uint64 {
+    if name_len == 0 { return 0 }
+    uint64 c = 0
+    unsafe { *(name as uint8) -> c }
+    if c == 47 { return 1 }
+    return 0
+}
+
 // Read exactly `want` bytes; return how many actually arrived.
 //
 // EVERY CALLER OF file_read IN THIS COMPILER DISCARDED ITS COUNT, and that was
@@ -885,17 +908,38 @@ fn import_check_file(uint64 path) {
 // to return less than asked for without anything being wrong, so treating one
 // short return as an error would break legitimate reads. Only a read that
 // returns 0 before `want` is reached is a truncation.
+// read_exact_failed is set when a read returned an ERROR rather than end of
+// file -- the difference between a truncated file and something that is not a
+// file at all (EISDIR on a directory), which import_process reports apart.
+static uint64 read_exact_failed = 0
+
 fn read_exact(uint64 fd, uint64 buf, uint64 want) -> uint64 {
     uint64 got = 0
+    read_exact_failed = 0
     while got < want {
         uint64 n = file_read(fd, buf + got, want - got)
         if n == 0 { return got }
         // A provider claiming to have written more than there was room for is
-        // lying; believing it would advance `got` past the buffer.
-        if n > want - got { return got }
+        // lying; believing it would advance `got` past the buffer. A negative
+        // errno reads as such a count, so this is also the error return.
+        if n > want - got {
+            read_exact_failed = 1
+            return got
+        }
         got = got + n
     }
     return got
+}
+
+// The import names something that is not a regular file. Recorded rather than
+// fatal, like a missing import, so the parser still reports what it can.
+fn import_not_regular(uint64 file_path) {
+    uint64 m = "error: cannot import '"
+    write(2, m, str_len(m))
+    write(2, file_path, str_len(file_path))
+    m = "': it is a directory or another non-regular file, not a source file\n"
+    write(2, m, str_len(m))
+    import_failed = 1
 }
 
 fn import_process(uint64 file_path) {
@@ -925,9 +969,44 @@ fn import_process(uint64 file_path) {
         return
     }
     uint64 size = file_size(fd)
+    // A DIRECTORY (or a pipe, or a device) IS NOT A SOURCE FILE, and nothing
+    // said so. `import "std"` opened the directory; lseek(SEEK_END) on it
+    // reports 2^63-1 on ext4, alloc(size + 1) was handed that, and the compile
+    // died writing through the result. Where the directory reports a small
+    // size instead, the first read fails with EISDIR and the refusal came out
+    // as a "short read" -- true, and no help. file_size is lseek, which fails
+    // (a negative errno, i.e. a huge unsigned) on a pipe or a socket, so a size
+    // past 1 TiB is never a source file; the read below catches the rest.
+    if size >= 0x10000000000 {
+        file_close(fd)
+        import_not_regular(file_path)
+        return
+    }
     uint64 tmp = alloc(size + 1)
+    if tmp == 0 {
+        file_close(fd)
+        uint64 oom = "error: out of memory reading import '"
+        write(2, oom, str_len(oom))
+        write(2, file_path, str_len(file_path))
+        write(2, "'\n", 2)
+        import_failed = 1
+        return
+    }
     uint64 got = read_exact(fd, tmp, size)
+    // ONE MORE READ, which must report end of file. A regular file read to its
+    // reported size returns 0 here; a directory returns an error (EISDIR) even
+    // when its reported size is 0, which would otherwise import as an empty
+    // module; a device or a file still growing returns data.
+    uint64 tail = 0
+    if got == size {
+        uint64 tailbuf = alloc(8)
+        tail = file_read(fd, tailbuf, 1)
+    }
     file_close(fd)
+    if read_exact_failed != 0 || (got == size && tail != 0) {
+        import_not_regular(file_path)
+        return
+    }
     if got != size {
         uint64 sre = "error: short read on '"
         write(2, sre, str_len(sre))
@@ -938,8 +1017,13 @@ fn import_process(uint64 file_path) {
         return
     }
 
-    // Scan for import lines at the beginning
-    uint64 pos = 0
+    // Scan for import lines at the beginning. A BOM is refused and a `#lang`
+    // first line skipped exactly as the lexer does (lexer_file_start uses the
+    // same two helpers), so the scanner never stops short of the imports.
+    if utf8_bom_at(tmp, size, 0) != 0 {
+        import_scan_error(file_path, tmp, 0, "this file starts with a UTF-8 byte-order mark (bytes EF BB BF), which is not accepted; save it as UTF-8 without a BOM")
+    }
+    uint64 pos = lang_directive_end(tmp, size, 0)
     while pos < size {
         // Skip whitespace/newlines and // line comments so imports can live
         // after header comments. Block comments (/* */) are not supported.
@@ -996,6 +1080,9 @@ fn import_process(uint64 file_path) {
             uint64 check_fd = file_open(full_path, 0)
             if check_fd < 0xFFFFFFFF {
                 file_close(check_fd)
+            } else if import_name_is_absolute(name_ptr, name_len) != 0 {
+                // Nothing else to try; the error names the path itself.
+                import_cand_reset()
             } else {
                 // Not found locally — try stdlib search paths
                 // Build a null-terminated copy of the import name
