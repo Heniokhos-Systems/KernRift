@@ -1,0 +1,67 @@
+// std/win32.kr (portable-syscall-layer Task 11): the Win64 structure builders
+// are plain stores, so they run (and are pinned) on Linux too.
+//   fd_set  = { u_int fd_count @+0; 4 bytes padding; SOCKET fd_array[64] @+8 }, 520 B.
+//             A SOCKET at +4 (the 32-bit layout) is silently wrong on Win64.
+//   timeval = { LONG tv_sec @+0; LONG tv_usec @+4 }, 8 B -- not Linux's 16.
+//   SO_RCVTIMEO: Linux takes a 16-byte timeval, Windows a DWORD of
+//             milliseconds where 0 means "forever": the conversion rounds UP.
+// Exit 0 when every check holds, else the failed check's number.
+import "../../std/win32.kr"
+
+static u8[600] wl_buf
+static u8[16] wl_tv
+
+fn main() -> uint32 {
+    uint64 i = 0
+    while i < 600 { store8(wl_buf + i, 0xAA)  i = i + 1 }
+    _kr_w32_fdset_one(wl_buf, 0x1122334455667788)
+    if load32(wl_buf) != 1 { return 1 }
+    if load64(wl_buf + 8) != 0x1122334455667788 { return 2 }
+    // the padding and the rest of fd_array are not read by select (fd_count
+    // is 1) but the builder zeroes all 520 bytes; nothing past 520 is touched
+    if load32(wl_buf + 4) != 0 { return 3 }
+    if load64(wl_buf + 512) != 0 { return 4 }
+    if load8(wl_buf + 520) != 0xAA { return 5 }
+
+    _kr_w32_timeval(wl_tv, 61234)
+    if load32(wl_tv) != 61 { return 6 }
+    if load32(wl_tv + 4) != 234000 { return 7 }
+    _kr_w32_timeval(wl_tv, 0xFFFFFFFE)
+    if load32(wl_tv) != 4294967 { return 8 }
+    if load32(wl_tv + 4) != 294000 { return 9 }
+
+    // timeval {sec, usec} (Linux, 2 x 8 bytes) -> Windows milliseconds
+    store64(wl_tv, 0)
+    store64(wl_tv + 8, 0)
+    if _kr_w32_ms_of_timeval(wl_tv) != 0 { return 10 }
+    store64(wl_tv + 8, 1)
+    if _kr_w32_ms_of_timeval(wl_tv) != 1 { return 11 }
+    store64(wl_tv + 8, 1000)
+    if _kr_w32_ms_of_timeval(wl_tv) != 1 { return 12 }
+    store64(wl_tv + 8, 1001)
+    if _kr_w32_ms_of_timeval(wl_tv) != 2 { return 13 }
+    store64(wl_tv, 3)
+    store64(wl_tv + 8, 250000)
+    if _kr_w32_ms_of_timeval(wl_tv) != 3250 { return 14 }
+    // beyond a DWORD: clamped to the largest finite value, never wrapped
+    // (a wrap could land on 0 = forever, or on a short timeout)
+    store64(wl_tv, 4294968)
+    store64(wl_tv + 8, 0)
+    if _kr_w32_ms_of_timeval(wl_tv) != 0xFFFFFFFE { return 15 }
+    store64(wl_tv, 4294967)
+    store64(wl_tv + 8, 295000)
+    if _kr_w32_ms_of_timeval(wl_tv) != 0xFFFFFFFE { return 16 }
+    store64(wl_tv, 4294967)
+    store64(wl_tv + 8, 294000)
+    if _kr_w32_ms_of_timeval(wl_tv) != 4294967294 { return 17 }
+    // a negative tv_sec: Linux times out at once; Windows' shortest is 1 ms
+    store64(wl_tv, 0xFFFFFFFFFFFFFFFF)
+    store64(wl_tv + 8, 0)
+    if _kr_w32_ms_of_timeval(wl_tv) != 1 { return 18 }
+    // tv_sec * 1000 must not overflow u64: 2^62 * 1000 wraps to exactly 0,
+    // which Windows would read as "forever"
+    store64(wl_tv, 0x4000000000000000)
+    store64(wl_tv + 8, 0)
+    if _kr_w32_ms_of_timeval(wl_tv) != 0xFFFFFFFE { return 19 }
+    return 0
+}

@@ -27981,13 +27981,11 @@ t10_row sys_random_arm64 arm64 sys_random "OK" 0
 
 # Every fixture also builds as a Windows slice (the default fat binary ships
 # one): the Unix arm's syscall_raw is pruned by the literal os chain, so no
-# refusal fires, and sys_socket on Windows is -ENOSYS until Task 11 -- the
-# loopback program fails at its first call with exit 21 (its own code for
-# sys_socket < 0 -- unique, so Wine's own launch failure, rc 1, can never pass for it), under Wine.
+# refusal fires. The Windows slices RUN in the Task 11 block below.
 TOTAL=$((TOTAL + 1))
 T10_W=""
 # sys_none.kr is built ONLY as --target=none (below); the others are not.
-for T10_F in sys_args sys_args_all sys_args_oob sys_loopback sys_random; do
+for T10_F in sys_args sys_args_all sys_args_oob sys_loopback sys_random sys_sockerr sys_w32_errno sys_w32_layout; do
     for T10_A in x86_64 arm64; do
         $T10_KRC --arch=$T10_A --target=windows --emit=pe "$T10_FX/$T10_F.kr" -o "$T10_D/$T10_F-w$T10_A.exe" > "$T10_D/w.log" 2>&1 \
             || T10_W="$T10_W $T10_F/$T10_A:$(grep -m1 error "$T10_D/w.log" | cut -c1-80)"
@@ -28004,7 +28002,7 @@ for T10_N in x86_64 arm64; do
     $T10_KRC --arch=$T10_N --target=none --emit=image --load-addr=0x400000 --stack-top=0x3F0000 "$T10_FX/sys_none.kr" -o "$T10_D/none-$T10_N" > "$T10_D/w.log" 2>&1 \
         || T10_W="$T10_W none-$T10_N:$(grep -m1 error "$T10_D/w.log" | cut -c1-80)"
 done
-if [ -z "$T10_W" ]; then t10_ok sys_fixtures_build_for_every_slice "5 fixtures x (windows x86_64, windows arm64, fat, macos x86_64, macos arm64) + sys_none.kr as --target=none on x86_64 and arm64"; else t10_bad sys_fixtures_build_for_every_slice "$T10_W"; fi
+if [ -z "$T10_W" ]; then t10_ok sys_fixtures_build_for_every_slice "8 fixtures x (windows x86_64, windows arm64, fat, macos x86_64, macos arm64) + sys_none.kr as --target=none on x86_64 and arm64"; else t10_bad sys_fixtures_build_for_every_slice "$T10_W"; fi
 
 # C8 against the std @shared statics. args.kr declares `@shared static u64
 # cli_argc/cli_argv`; a program that also declares them must say @shared too.
@@ -28073,7 +28071,7 @@ else
 fi
 
 if [ -z "$T10_WINE" ]; then
-    for T10_R in sys_args_windows_equals_linux_wine sys_loopback_windows_enosys_wine sys_args_legacy_sentinel_reads_as_no_arguments_wine; do
+    for T10_R in sys_args_windows_equals_linux_wine sys_args_legacy_sentinel_reads_as_no_arguments_wine; do
         TOTAL=$((TOTAL + 1)); t10_skip "$T10_R" "no wine; set KR_WINE=<path to wine>"
     done
 else
@@ -28092,10 +28090,6 @@ else
     else
         t10_bad sys_args_windows_equals_linux_wine "rc=$T10_RC; $(diff "$T10_D/lin.out" "$T10_D/win.out" 2>&1 | head -4 | cut -c1-60 | tr '\n' '|') wine output tail: $(t10_errtail)"
     fi
-    TOTAL=$((TOTAL + 1))
-    cp "$T10_D/sys_loopback-wx86_64.exe" "$T10_D/sys_loopback.exe" 2>/dev/null
-    t10_wine "$T10_D/win.out" "$T10_D/win.err" sys_loopback.exe; T10_RC=$?
-    if [ "$T10_RC" = "21" ]; then t10_ok sys_loopback_windows_enosys_wine "sys_socket is -ENOSYS until Task 11 (exit 21)"; else t10_bad sys_loopback_windows_enosys_wine "rc=$T10_RC want 21; wine output tail: $(t10_errtail)"; fi
     # --legacy Windows (and @naked main) leaves cli_argc at the 0xFFFFFFFF
     # sentinel and cli_argv at the raw command line; args.kr must read that as
     # "no arguments", never walk it (it crashed with 0xC0000005).
@@ -28110,6 +28104,100 @@ else
     else
         t10_bad sys_args_legacy_sentinel_reads_as_no_arguments_wine "build: $(grep -m1 error "$T10_D/w.log" | cut -c1-120)"
     fi
+    if [ -x "$(dirname "$T10_WINE")/wineserver" ]; then
+        WINEPREFIX="$T10_D/pfx" "$(dirname "$T10_WINE")/wineserver" -w > /dev/null 2>&1
+    fi
+fi
+# --- Task 11: the Windows backend of std/sys.kr (spec C3 Windows, C5 win32.kr) --
+# win32.kr owns every Win32 extern (`_kr_w32_<Export>`), the Winsock
+# lifecycle, the 32-bit return masking, the WSAGetLastError -> errno map and
+# the Win64 fd_set / timeval builders; sys.kr's os==2 arms use them. The SAME
+# fixtures run on Linux (x86_64 native, arm64 under qemu) and on Windows
+# (x86_64 under Wine) and must give the same result: one portable test, not a
+# Windows copy. arm64 Windows has no runner, so its slice is pinned by decoding
+# every routed call site BY NAME and requiring the same import sequence as the
+# x86_64 slice that Wine runs.
+#
+# The errno map and the structure builders are pure arithmetic: they run on
+# Linux against an INDEPENDENT expectation (tests/fixtures/sys_w32_errno.expected
+# pairs each WSAE<X> with Linux's E<X> by name).
+TOTAL=$((TOTAL + 1))
+if t10_build x86_64 sys_w32_errno; then
+    chmod +x "$T10_D/sys_w32_errno-x86_64"
+    timeout 60 "$T10_D/sys_w32_errno-x86_64" > "$T10_D/errno.out" 2>/dev/null; T10_RC=$?
+    if [ "$T10_RC" = "0" ] && cmp -s "$T10_D/errno.out" "$T10_FX/sys_w32_errno.expected"; then
+        t10_ok sys_w32_errno_map "$(grep -c '' "$T10_D/errno.out") codes match the by-name model"
+    else
+        t10_bad sys_w32_errno_map "rc=$T10_RC; first difference: $(diff "$T10_D/errno.out" "$T10_FX/sys_w32_errno.expected" 2>&1 | head -3 | tr '\n' '|')"
+    fi
+else
+    t10_bad sys_w32_errno_map "build failed: $(grep -m1 'error' "$T10_D/sys_w32_errno-x86_64.log" | cut -c1-140)"
+fi
+t10_row sys_w32_layout_x86_64 x86_64 sys_w32_layout "" 0
+t10_row sys_w32_layout_arm64 arm64 sys_w32_layout "" 0
+# The error paths, Linux first: the numbers the Windows run must match.
+t10_row sys_sock_errors_x86_64 x86_64 sys_sockerr "OK" 0
+t10_row sys_sock_errors_arm64 arm64 sys_sockerr "OK" 0
+
+# arm64 Windows: every `_kr_w32_*` call site, decoded from the image, lands on
+# the IAT entry NAMED for its export, in the same order as the x86_64 slice
+# (which the Wine rows run). Only ws2_32 / bcrypt names are compared (the main
+# prologue's kernel32 calls are the C7 rows' business); no call-shaped site
+# may target a non-slot; and across the three programs every socket/entropy
+# export sys.kr uses must appear.
+TOTAL=$((TOTAL + 1))
+T11_WANT="BCryptGenRandom WSAGetLastError WSAStartup accept bind closesocket connect getsockname listen recv select send setsockopt shutdown socket "
+T11_BAD=""; T11_ALL=""
+for T11_F in sys_loopback sys_sockerr sys_random; do
+    for T11_A in x86_64 arm64; do
+        if ! $T10_KRC --arch=$T11_A --target=windows --emit=pe "$T10_FX/$T11_F.kr" -o "$T10_D/$T11_F-d$T11_A.exe" > "$T10_D/d.log" 2>&1; then
+            T11_BAD="$T11_BAD $T11_F/$T11_A:build"; continue
+        fi
+        pe_calls "$T10_D/$T11_F-d$T11_A.exe" "$T11_A" > "$T10_D/$T11_F-$T11_A.calls"
+        grep -q '^badiat' "$T10_D/$T11_F-$T11_A.calls" && T11_BAD="$T11_BAD $T11_F/$T11_A:badiat"
+        awk '$1 == "iat" && $4 ~ /^(WSA|BCrypt|socket$|connect$|send$|recv$|closesocket$|setsockopt$|shutdown$|bind$|listen$|accept$|select$|getsockname$)/ { print $4 }' \
+            "$T10_D/$T11_F-$T11_A.calls" > "$T10_D/$T11_F-$T11_A.names"
+    done
+    if [ ! -s "$T10_D/$T11_F-arm64.names" ]; then T11_BAD="$T11_BAD $T11_F:no-ws2_32-or-bcrypt-call-on-arm64"
+    elif ! cmp -s "$T10_D/$T11_F-x86_64.names" "$T10_D/$T11_F-arm64.names"; then
+        T11_BAD="$T11_BAD $T11_F:order($(diff "$T10_D/$T11_F-x86_64.names" "$T10_D/$T11_F-arm64.names" | grep '^[<>]' | head -2 | tr '\n' ' '))"
+    fi
+    T11_ALL="$T11_ALL $(cat "$T10_D/$T11_F-arm64.names" 2>/dev/null | tr '\n' ' ')"
+done
+T11_SET=$(printf '%s\n' $T11_ALL | LC_ALL=C sort -u | tr '\n' ' ')
+[ "$T11_SET" = "$T11_WANT" ] || T11_BAD="$T11_BAD set:'$T11_SET'"
+if [ -z "$T11_BAD" ]; then
+    t10_ok sys_windows_arm64_calls_route_by_name "$(printf '%s\n' $T11_ALL | grep -c '') call sites, x86_64 order, $(printf '%s' "$T11_SET" | wc -w) exports"
+else
+    t10_bad sys_windows_arm64_calls_route_by_name "$T11_BAD"
+fi
+
+if [ -z "$T10_WINE" ]; then
+    for T10_R in sys_loopback_windows_wine sys_random_windows_wine sys_sock_errors_windows_wine; do
+        TOTAL=$((TOTAL + 1)); t10_skip "$T10_R" "no wine; set KR_WINE=<path to wine>"
+    done
+else
+    # The very fixtures the Linux rows run, as Windows x86_64 programs: same
+    # stdout, same exit status. sys_loopback.kr covers WSAStartup, the 64-bit
+    # SOCKET, select's Win64 fd_set/timeval (the 40 ms .. 2 s wait window),
+    # SO_RCVTIMEO's millisecond conversion and recv's timeout -> -EAGAIN, and
+    # closesocket twice -> -EBADF; sys_sockerr.kr the refused connect, the
+    # port-stealing guard and the option-number checks.
+    for T11_R in "sys_loopback_windows_wine sys_loopback" "sys_random_windows_wine sys_random" "sys_sock_errors_windows_wine sys_sockerr"; do
+        set -- $T11_R
+        TOTAL=$((TOTAL + 1))
+        if $T10_KRC --arch=x86_64 --target=windows --emit=pe "$T10_FX/$2.kr" -o "$T10_D/$2.exe" > "$T10_D/w.log" 2>&1; then
+            t10_wine "$T10_D/win.out" "$T10_D/win.err" "$2.exe"; T10_RC=$?
+            T11_GOT=$(tr -d '\r' < "$T10_D/win.out")
+            if [ "$T10_RC" = "0" ] && [ "$T11_GOT" = "OK" ]; then
+                t10_ok "$1" "rc=0, OK"
+            else
+                t10_bad "$1" "rc=$T10_RC got '$(printf '%s' "$T11_GOT" | head -c 40)' want OK rc=0; wine output tail: $(t10_errtail)"
+            fi
+        else
+            t10_bad "$1" "build: $(grep -m1 error "$T10_D/w.log" | cut -c1-120)"
+        fi
+    done
     if [ -x "$(dirname "$T10_WINE")/wineserver" ]; then
         WINEPREFIX="$T10_D/pfx" "$(dirname "$T10_WINE")/wineserver" -w > /dev/null 2>&1
     fi

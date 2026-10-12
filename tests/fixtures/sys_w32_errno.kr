@@ -1,0 +1,42 @@
+// std/win32.kr (portable-syscall-layer Task 11): the WSAGetLastError -> errno
+// map is pure arithmetic, so it runs on Linux too. Prints "<wsa> <errno>" for
+// every code 10000..10115 and a few outside that band; the expected file is
+// generated INDEPENDENTLY (WSAE<X> paired by name with Linux's E<X>, from the
+// host's errno table), see tests/fixtures/sys_w32_errno.expected.
+import "../../std/win32.kr"
+
+fn dec(uint64 v) {
+    u8[24] d
+    uint64 k = 0
+    if v == 0 { file_write(1, "0", 1) }
+    while v != 0 {
+        store8(d + k, 48 + v % 10)
+        v = v / 10
+        k = k + 1
+    }
+    while k != 0 {
+        k = k - 1
+        file_write(1, d + k, 1)
+    }
+}
+
+fn line(uint64 c) {
+    dec(c)
+    file_write(1, " ", 1)
+    dec(_kr_w32_errno(c))
+    file_write(1, "\n", 1)
+}
+
+fn main() -> uint32 {
+    line(0)
+    line(4)
+    line(11)
+    uint64 c = 10000
+    while c < 10116 {
+        line(c)
+        c = c + 1
+    }
+    line(11001)
+    line(0xFFFFFFFF)
+    return 0
+}

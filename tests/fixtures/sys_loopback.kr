@@ -1,6 +1,9 @@
 // std/sys.kr (portable-syscall-layer Task 10): a TCP round trip on loopback.
 // bind 127.0.0.1:0, getsockname for the port, listen, connect, accept,
 // sys_send("ping"), sys_wait_readable(a, 5000), sys_recv, compare. Prints OK.
+// The SAME program runs on Linux and, unchanged, as a Windows program (Task 11:
+// Wine and native): the option numbers, the timeval and every errno it checks
+// are Linux's, and sys.kr's Windows arm translates.
 import "../../std/sys.kr"
 
 static u8[16] lb_sa

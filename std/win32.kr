@@ -3,25 +3,186 @@
 // The ONLY file that declares Win32 `extern fn`s (spec C5): ws2_32, bcrypt and
 // the kernel32 additions, every one under the reserved prefix `_kr_w32_<Export>`
 // (the compiler strips the prefix to find the import, so importing this file
-// injects no Win32 name into user code). It will also hold the Winsock
-// lifecycle (`_kr_w32_started`, `_kr_w32_wsadata`), the 32-bit return masking,
-// the WSAGetLastError -> errno map and the Win64 fd_set / timeval builders.
+// injects no Win32 name into user code; a user `fn send` keeps compiling). It
+// also holds the Winsock lifecycle, the 32-bit return masking, the
+// WSAGetLastError -> errno map and the Win64 fd_set / timeval builders that
+// sys.kr's Windows arms use.
 //
-// Task 10 lands the file as a skeleton: the sections below are empty and are
-// filled by the Windows backend. Every static here carries the `_kr_w32_`
-// prefix so std state can never alias a user static.
+// Every static and helper here carries the `_kr_w32_` prefix so std state can
+// never alias a user static. The externs are only ever CALLED from
+// `get_target_os() == 2` arms, which the compiler prunes on every other OS; the
+// helpers below that do not call an extern (the errno map, the builders) are
+// plain arithmetic and run -- and are tested -- on Linux too.
+//
+// Return values. A Win32 `int`/`BOOL`/`NTSTATUS` is 32 bits: the Win64 ABI
+// leaves the upper half of rax (x0) UNDEFINED, so every such result is masked
+// with `& 0xFFFFFFFF` before it is tested. In practice the DLLs zero-extend, so
+// no test can redden if a mask is removed -- the masks are DEFENSIVE, stated
+// here rather than claimed as tested. A SOCKET is 64 bits (a handle): only
+// socket() and accept() return one, and INVALID_SOCKET is all 64 bits set.
 
 // --- Winsock lifecycle ---------------------------------------------------------
 static u64 _kr_w32_started
+// WSADATA is 408 bytes on Win64; 512 leaves room and keeps it 8-aligned.
+static u8[512] _kr_w32_wsadata
 
 // --- ws2_32 externs ------------------------------------------------------------
-// (Task 11)
+extern fn _kr_w32_WSAStartup(u64 version, u64 wsadata) -> u64
+extern fn _kr_w32_WSAGetLastError() -> u64
+extern fn _kr_w32_socket(u64 af, u64 stype, u64 proto) -> u64
+extern fn _kr_w32_connect(u64 s, u64 sa, u64 len) -> u64
+extern fn _kr_w32_send(u64 s, u64 buf, u64 len, u64 flags) -> u64
+extern fn _kr_w32_recv(u64 s, u64 buf, u64 len, u64 flags) -> u64
+extern fn _kr_w32_closesocket(u64 s) -> u64
+extern fn _kr_w32_setsockopt(u64 s, u64 level, u64 name, u64 val, u64 len) -> u64
+extern fn _kr_w32_shutdown(u64 s, u64 how) -> u64
+extern fn _kr_w32_bind(u64 s, u64 sa, u64 len) -> u64
+extern fn _kr_w32_listen(u64 s, u64 backlog) -> u64
+extern fn _kr_w32_accept(u64 s, u64 sa, u64 lenptr) -> u64
+extern fn _kr_w32_select(u64 nfds, u64 readfds, u64 writefds, u64 exceptfds, u64 timeout) -> u64
+extern fn _kr_w32_getsockname(u64 s, u64 sa, u64 lenptr) -> u64
+// Stage 2 (event-driven I/O for an interactive shell); declared, not yet used.
+extern fn _kr_w32_WSAEventSelect(u64 s, u64 event, u64 mask) -> u64
+extern fn _kr_w32_WSAEnumNetworkEvents(u64 s, u64 event, u64 out) -> u64
+extern fn _kr_w32_WSACreateEvent() -> u64
 
 // --- bcrypt externs ------------------------------------------------------------
-// (Task 11)
+extern fn _kr_w32_BCryptGenRandom(u64 alg, u64 buf, u64 len, u64 flags) -> u64
 
 // --- kernel32 externs ----------------------------------------------------------
-// (Task 11)
+// The additions std itself calls (spec C5: std/alloc's guard page, std/time's
+// sleeps). kernel32's other imports back compiler builtins and are not declared.
+extern fn _kr_w32_VirtualProtect(u64 addr, u64 size, u64 prot, u64 oldprot) -> u64
+extern fn _kr_w32_Sleep(u64 ms) -> u64
 
-// --- errno map, fd_set / timeval builders --------------------------------------
-// (Task 11)
+// --- lifecycle -----------------------------------------------------------------
+
+// WSAStartup(2.2) once, before the first socket operation. 0, or -errno (the
+// call's own error code, mapped; the flag stays clear so a later call retries).
+fn _kr_w32_ensure() -> int64 {
+    if _kr_w32_started != 0 { return 0 }
+    u64 r = _kr_w32_WSAStartup(0x0202, _kr_w32_wsadata) & 0xFFFFFFFF
+    if r != 0 { return 0 - _kr_w32_errno(r) }
+    _kr_w32_started = 1
+    return 0
+}
+
+// --- results -------------------------------------------------------------------
+
+// -errno for the calling thread's last Winsock error. Call it IMMEDIATELY after
+// the failing call (no Win32 call in between).
+fn _kr_w32_fail() -> int64 {
+    return 0 - _kr_w32_errno(_kr_w32_WSAGetLastError() & 0xFFFFFFFF)
+}
+
+// An int-returning Winsock call: SOCKET_ERROR (-1 as a 32-bit int) -> -errno,
+// else the non-negative 32-bit result (0, a byte count, a ready count).
+fn _kr_w32_ret32(u64 r) -> int64 {
+    u64 r32 = r & 0xFFFFFFFF
+    if r32 == 0xFFFFFFFF { return _kr_w32_fail() }
+    return r32
+}
+
+// A SOCKET-returning call (socket, accept): INVALID_SOCKET (~0, all 64 bits)
+// -> -errno, else the handle. Handles are small kernel values, so a valid one
+// is never negative as an int64.
+fn _kr_w32_sock(u64 s) -> int64 {
+    if s == 0xFFFFFFFFFFFFFFFF { return _kr_w32_fail() }
+    return s
+}
+
+// WSAGetLastError code -> positive errno, in LINUX numbering (the contract of
+// every sys_* on every OS). Each WSAE<X> is 10000 + the BSD errno <X>; it maps
+// to Linux's errno of the same name. Two deliberate choices:
+//   WSAENOTSOCK -> EBADF: Windows says "not a socket" for a CLOSED or never
+//     valid handle, where Unix says EBADF (a double close must read the same);
+//   WSAEWOULDBLOCK -> EAGAIN (Linux's EWOULDBLOCK is EAGAIN, 11).
+// Anything without a Linux counterpart (WSAEPROCLIM, WSANOTINITIALISED,
+// WSASYSNOTREADY, ...) -> EIO: generic, never swallowed into success.
+fn _kr_w32_errno(u64 w) -> u64 {
+    if w == 10004 { return 4 }      // EINTR
+    if w == 10009 { return 9 }      // EBADF
+    if w == 10013 { return 13 }     // EACCES
+    if w == 10014 { return 14 }     // EFAULT
+    if w == 10022 { return 22 }     // EINVAL
+    if w == 10024 { return 24 }     // EMFILE
+    if w == 10035 { return 11 }     // EWOULDBLOCK -> EAGAIN
+    if w == 10036 { return 115 }    // EINPROGRESS
+    if w == 10037 { return 114 }    // EALREADY
+    if w == 10038 { return 9 }      // ENOTSOCK -> EBADF (see above)
+    if w == 10039 { return 89 }     // EDESTADDRREQ
+    if w == 10040 { return 90 }     // EMSGSIZE
+    if w == 10041 { return 91 }     // EPROTOTYPE
+    if w == 10042 { return 92 }     // ENOPROTOOPT
+    if w == 10043 { return 93 }     // EPROTONOSUPPORT
+    if w == 10044 { return 94 }     // ESOCKTNOSUPPORT
+    if w == 10045 { return 95 }     // EOPNOTSUPP
+    if w == 10046 { return 96 }     // EPFNOSUPPORT
+    if w == 10047 { return 97 }     // EAFNOSUPPORT
+    if w == 10048 { return 98 }     // EADDRINUSE
+    if w == 10049 { return 99 }     // EADDRNOTAVAIL
+    if w == 10050 { return 100 }    // ENETDOWN
+    if w == 10051 { return 101 }    // ENETUNREACH
+    if w == 10052 { return 102 }    // ENETRESET
+    if w == 10053 { return 103 }    // ECONNABORTED
+    if w == 10054 { return 104 }    // ECONNRESET
+    if w == 10055 { return 105 }    // ENOBUFS
+    if w == 10056 { return 106 }    // EISCONN
+    if w == 10057 { return 107 }    // ENOTCONN
+    if w == 10058 { return 108 }    // ESHUTDOWN
+    if w == 10059 { return 109 }    // ETOOMANYREFS
+    if w == 10060 { return 110 }    // ETIMEDOUT
+    if w == 10061 { return 111 }    // ECONNREFUSED
+    if w == 10062 { return 40 }     // ELOOP
+    if w == 10063 { return 36 }     // ENAMETOOLONG
+    if w == 10064 { return 112 }    // EHOSTDOWN
+    if w == 10065 { return 113 }    // EHOSTUNREACH
+    if w == 10066 { return 39 }     // ENOTEMPTY
+    if w == 10068 { return 87 }     // EUSERS
+    if w == 10069 { return 122 }    // EDQUOT
+    if w == 10070 { return 116 }    // ESTALE
+    if w == 10071 { return 66 }     // EREMOTE
+    return 5                        // EIO
+}
+
+// --- Win64 structures ----------------------------------------------------------
+
+// fd_set holding exactly one SOCKET. Win64 layout (winsock2.h):
+//   u_int fd_count @+0; 4 bytes of padding; SOCKET fd_array[64] @+8 -> 520 B.
+// It is a COUNTED ARRAY, not Unix's bitmask, and fd_array starts at +8 (a
+// SOCKET is 8-aligned): a socket stored at +4 is silently wrong. All 520 bytes
+// are written.
+fn _kr_w32_fdset_one(u64 set, u64 sock) {
+    u64 i = 0
+    while i < 520 {
+        store64(set + i, 0)
+        i = i + 8
+    }
+    store32(set, 1)
+    store64(set + 8, sock)
+}
+
+// timeval for select: two 32-bit LONGs (tv_sec @+0, tv_usec @+4), 8 bytes --
+// not Linux's two 64-bit fields. ms < 2^32, so tv_sec fits a LONG.
+fn _kr_w32_timeval(u64 tv, u64 ms) {
+    store32(tv, ms / 1000)
+    store32(tv + 4, (ms % 1000) * 1000)
+}
+
+// A Linux SO_RCVTIMEO value (struct timeval: tv_sec, tv_usec, 8 bytes each) as
+// the DWORD of milliseconds Windows takes. Windows reads 0 as "no timeout", as
+// Linux reads {0, 0}; so any non-zero time rounds UP to at least 1 ms, and a
+// time past the DWORD range clamps to 0xFFFFFFFE (never wraps onto 0 = forever
+// or onto a short timeout). A NEGATIVE tv_sec is what Linux reads as "time
+// out at once" (it stores a zero timeout and warns): that becomes 1 ms, the
+// shortest Windows timeout, since 0 there is forever. The caller validates
+// tv_usec < 1000000.
+fn _kr_w32_ms_of_timeval(u64 tv) -> u64 {
+    u64 sec = load64(tv)
+    u64 usec = load64(tv + 8)
+    if sec >= 0x8000000000000000 { return 1 }
+    if sec >= 4294968 { return 0xFFFFFFFE }
+    u64 ms = sec * 1000 + (usec + 999) / 1000
+    if ms > 0xFFFFFFFE { return 0xFFFFFFFE }
+    return ms
+}

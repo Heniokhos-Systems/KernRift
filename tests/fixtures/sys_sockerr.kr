@@ -1,0 +1,114 @@
+// std/sys.kr (portable-syscall-layer Task 11): socket ERROR paths that must
+// read the same on every OS -- the same negative errno on Linux and Windows
+// for the same condition. Prints OK; each failed check exits with its own code.
+//   1. connect to a 127.0.0.1 port that is bound but not listening -> -ECONNREFUSED (-111)
+//   2. SO_REUSEADDR on both sockets still never lets a second socket bind a
+//      port that is LISTENING -> -EADDRINUSE (-98). (Windows' own SO_REUSEADDR
+//      would let it -- port stealing -- so sys.kr must not pass it through.)
+//   3. a SOL_SOCKET option number Linux does not have (0x1001, which IS
+//      Windows' SO_SNDBUF) -> -ENOPROTOOPT (-92): numbers are Linux's on every OS
+//   4. SO_RCVTIMEO of 500 us (under one millisecond) still times out: recv
+//      -> -EAGAIN (-11). Windows takes whole milliseconds, and 0 there means
+//      "forever", so the conversion must round up.
+//   5. SO_RCVTIMEO with an optlen shorter than a timeval -> -EINVAL (-22)
+//   6. SO_RCVTIMEO with tv_usec >= 1000000 -> -EDOM (-33)
+//   7. SO_RCVTIMEO with a negative tv_sec times out at once -> recv -EAGAIN
+//   8. accept on a bound, non-listening socket -> -EINVAL (-22)
+//   9. socket() with an unknown address family -> -EAFNOSUPPORT (-97)
+import "../../std/sys.kr"
+
+static u8[16] se_sa
+static u8[16] se_ga
+static u8[8] se_len
+static u8[8] se_one
+static u8[16] se_tv
+static u8[16] se_buf
+
+fn se_fill(uint64 sa, uint64 port) {
+    uint64 i = 0
+    while i < 16 { store8(sa + i, 0)  i = i + 1 }
+    store8(sa + 0, 2)
+    store8(sa + 2, (port >> 8) & 255)
+    store8(sa + 3, port & 255)
+    store8(sa + 4, 127)
+    store8(sa + 7, 1)
+}
+
+// The port a bound socket got, 0 on failure.
+fn se_port(uint64 s) -> uint64 {
+    store32(se_len, 16)
+    if sys_getsockname(s, se_ga, se_len) != 0 { return 0 }
+    return (load8(se_ga + 2) << 8) | load8(se_ga + 3)
+}
+
+fn main() -> uint32 {
+    // 1. refused
+    int64 b = sys_socket(2, 1, 0)
+    if b < 0 { return 1 }
+    se_fill(se_sa, 0)
+    if sys_bind(b, se_sa, 16) != 0 { return 2 }
+    uint64 port = se_port(b)
+    if port == 0 { return 3 }
+    int64 c = sys_socket(2, 1, 0)
+    if c < 0 { return 4 }
+    se_fill(se_sa, port)
+    if sys_connect(c, se_sa, 16) != 0 - 111 { return 5 }
+    // 8. accept on a socket that is bound but not listening -> -EINVAL (-22):
+    //    on Windows accept() returns INVALID_SOCKET (all 64 bits), which must
+    //    become -errno, not -1
+    if sys_accept(b) != 0 - 22 { return 30 }
+    if sys_sock_close(c) != 0 { return 6 }
+    if sys_sock_close(b) != 0 { return 7 }
+    // 9. an address family nobody has -> -EAFNOSUPPORT (-97), through socket()'s
+    //    INVALID_SOCKET path
+    if sys_socket(9999, 1, 0) != 0 - 97 { return 31 }
+
+    // 2. no port stealing
+    store32(se_one, 1)
+    int64 l = sys_socket(2, 1, 0)
+    if l < 0 { return 8 }
+    if sys_setsockopt(l, 1, 2, se_one, 4) != 0 { return 9 }
+    se_fill(se_sa, 0)
+    if sys_bind(l, se_sa, 16) != 0 { return 10 }
+    if sys_listen(l, 4) != 0 { return 11 }
+    uint64 lport = se_port(l)
+    if lport == 0 { return 12 }
+    int64 m = sys_socket(2, 1, 0)
+    if m < 0 { return 13 }
+    if sys_setsockopt(m, 1, 2, se_one, 4) != 0 { return 14 }
+    se_fill(se_sa, lport)
+    if sys_bind(m, se_sa, 16) != 0 - 98 { return 15 }
+
+    // 3. a number that is not a Linux option
+    if sys_setsockopt(m, 1, 0x1001, se_one, 4) != 0 - 92 { return 16 }
+    if sys_sock_close(m) != 0 { return 17 }
+
+    // 4. sub-millisecond receive timeout
+    int64 k = sys_socket(2, 1, 0)
+    if k < 0 { return 18 }
+    if sys_connect(k, se_sa, 16) != 0 { return 19 }
+    int64 a = sys_accept(l)
+    if a < 0 { return 20 }
+    store64(se_tv, 0)
+    store64(se_tv + 8, 500)
+    if sys_setsockopt(a, 1, 20, se_tv, 16) != 0 { return 21 }
+    if sys_recv(a, se_buf, 16) != 0 - 11 { return 22 }
+
+    // 5. short optlen
+    if sys_setsockopt(a, 1, 20, se_tv, 8) != 0 - 22 { return 23 }
+    // 6. tv_usec out of range (a full second or more) -> -EDOM (-33)
+    store64(se_tv + 8, 1000000)
+    if sys_setsockopt(a, 1, 20, se_tv, 16) != 0 - 33 { return 27 }
+    // 7. a negative tv_sec: Linux times out at once (a zero timeout), so recv
+    //    must fail with -EAGAIN, not block (on Windows: 1 ms, not 49 days)
+    store64(se_tv, 0xFFFFFFFFFFFFFFFF)
+    store64(se_tv + 8, 0)
+    if sys_setsockopt(a, 1, 20, se_tv, 16) != 0 { return 28 }
+    if sys_recv(a, se_buf, 16) != 0 - 11 { return 29 }
+
+    if sys_sock_close(a) != 0 { return 24 }
+    if sys_sock_close(k) != 0 { return 25 }
+    if sys_sock_close(l) != 0 { return 26 }
+    file_write(1, "OK\n", 3)
+    return 0
+}
