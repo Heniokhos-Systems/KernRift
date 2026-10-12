@@ -6067,7 +6067,7 @@ rm -f /tmp/krc_sib_$$.kr /tmp/krc_sib_$$.s
 # The arms that dump a REX-prefixed instruction raw used fixed byte counts
 # (2 for most REX bytes, 3 for 49 89/8B, 7 for 48 C7 / 81, 4 for 48 83), so a
 # ModR/M naming memory left SIB/disp/imm bytes to be decoded as the next
-# instructions. x86_rex_raw_len counts REX + opcode + ModR/M + SIB/disp + imm
+# instructions. x86_insn_len counts REX + opcode + ModR/M + SIB/disp + imm
 # for the ModR/M opcodes the listing knows. Each case is followed by a nop:
 # the case must be one raw line holding exactly its bytes, and the nop must
 # start the next line. Parent compiler: every case splits. Listing text only.
@@ -6097,6 +6097,60 @@ else
     FAIL=$((FAIL + 1))
 fi
 rm -f /tmp/krc_rawl_$$.kr /tmp/krc_rawl_$$.s
+
+# x86_insn_len sizes every raw line (round 6). A 0x66 prefix makes the
+# immediate of 69/81/C7/F7 /0 and B8-BF two bytes, not four, unless a REX.W
+# follows it (REX.W overrides 66); the listing printed the 66 on a line of its
+# own and sized the rest as if it were absent, so the line after it ran two
+# bytes into the next instruction. A line that starts with prefixes now holds
+# the whole instruction when a 66 in them sets a 16-bit operand; any other
+# prefix (and a 66 before REX.W) stays a line of its own, because what follows
+# it is the same length without it. A LOCK line holds its whole instruction
+# too. Each case lists its expected lines (`|` between lines) and is followed
+# by a nop that must start the next line; lines are compared by their bytes
+# (a mnemonic after them is ignored). Parent compiler: red on every case but
+# 66 48 C7 (the 66 already stood alone and REX.W made the rest the right
+# length) and 48 3D (decoded by its own cmp arm). Listing text only; no
+# binary changes.
+XL_ROWS="x86_asm_listing_prefix_lengths x86_asm_listing_opcode_lengths"
+for XL_ROW in $XL_ROWS; do
+    case $XL_ROW in
+        x86_asm_listing_prefix_lengths)
+            XL_SEQS="66_45_C7_00_34_12 66_41_81_C0_34_12 66_45_69_C0_34_12 66_41_F7_C0_34_12 66_C7_04_24_34_12 66_81_44_24_08_34_12 66_69_04_24_34_12 3E_66_45_63_4E_8D 66_64_44_3B_52_47 66_89_04_24 66_41_B8_34_12 66|48_C7_04_24_78_56_34_12 F3|26|45_0F_B7_F0 F0_48_0F_C1_04_24 F0_66_41_81_00_34_12 F0_66_45_0F_B1_08" ;;
+        # The ModR/M opcodes x86_insn_len added (63 movsxd, 85 test, D3/D1/C1/C0
+        # shifts, 39/3B cmp, 0F B6/B7 movzx, F7/F6 with and without an
+        # immediate by /reg, FF/FE, C6/80 imm8, 84/88/8A/8F, cmovcc, setcc, the
+        # 0F 1F nop, SSE under F2 and 66 0F 3A, 0F 38) and the immediate-only
+        # forms (accumulator 05/3D/A9, B8-BF with imm32 and REX.W imm64, 68, 6A).
+        x86_asm_listing_opcode_lengths)
+            XL_SEQS="48_63_04_24 48_85_04_24 48_D3_24_24 48_39_44_24_08 48_3B_04_24 48_0F_B6_04_24 48_0F_B7_44_24_08 48_F7_04_24_78_56_34_12 48_F7_5C_24_08 48_FF_04_24 48_C1_24_24_03 41_C0_00_03 41_C6_00_07 41_80_00_07 48_84_04_24 41_88_00 41_8A_00 41_8F_00 48_D1_24_24 41_FE_00 41_F6_00_07 48_0F_44_04_24 41_0F_94_00 0F_1F_44_00_00 0F_B6_04_24 85_04_24 F2|0F_10_04_24 66_0F_3A_0F_C1_08 0F_38_F0_04_24 48_05_78_56_34_12 48_3D_00_F0_FF_FF 48_A9_78_56_34_12 48_B8_88_77_66_55_44_33_22_11 BB_78_56_34_12 41_BB_78_56_34_12 68_78_56_34_12 6A_07" ;;
+    esac
+    {
+        echo 'fn main() {'
+        for XL_S in $XL_SEQS; do echo "    asm(\"0x$(echo "$XL_S" | sed 's/[_|]/ 0x/g')\")"; echo '    asm("0x90")'; done
+        echo '    exit(0)'
+        echo '}'
+    } > /tmp/krc_xl_$$.kr
+    TOTAL=$((TOTAL + 1))
+    rm -f /tmp/krc_xl_$$.s
+    XL_BAD="(listing not produced)"
+    if $KRC --arch=x86_64 --emit=asm /tmp/krc_xl_$$.kr -o /tmp/krc_xl_$$.s > /dev/null 2>&1 && [ -f /tmp/krc_xl_$$.s ]; then
+        XL_BAD=""
+        # every line's bytes, `/` between lines
+        XL_ALL="/$(sed -nE 's/^  [0-9a-f]{8}: ([0-9a-f]{2}( [0-9a-f]{2})*).*/\1/p' /tmp/krc_xl_$$.s | tr '\n' '/')"
+        for XL_S in $XL_SEQS; do
+            XL_W="/$(echo "$XL_S" | tr 'A-F_|' 'a-f /')/90/"
+            case "$XL_ALL" in *"$XL_W"*) ;; *) XL_BAD="$XL_BAD $XL_S" ;; esac
+        done
+    fi
+    if [ -z "$XL_BAD" ]; then
+        PASS=$((PASS + 1))
+    else
+        echo "FAIL: $XL_ROW (not the expected lines followed by the nop:$XL_BAD)"
+        FAIL=$((FAIL + 1))
+    fi
+done
+rm -f /tmp/krc_xl_$$.kr /tmp/krc_xl_$$.s
 
 # A barrier must stop CSE of a static load. isb/dcache_flush/icache_invalidate/
 # dsb/dmb (IR ops 126-130) were missing from ir_opt_cse_invalidates, so
@@ -19474,8 +19528,8 @@ done
 # validation under --target=none (asserted by t6_legacy_tnone_* above).
 # --emit=obj is: it reaches the SAME src/codegen.kr and
 # src/codegen_aarch64.kr dispatch on both arches -- x86_64 through the
-# `emit_mode != 3` guard at src/main.kr:2611 and arm64 through the one at
-# :2621 -- so retargeting these assertions onto it keeps every legacy
+# `emit_mode != 3` guard at src/main.kr:4308 and arm64 through the one at
+# :4318 -- so retargeting these assertions onto it keeps every legacy
 # bare-metal guard live and tested rather than turning them into unreachable
 # code with no coverage. That is also why --emit=obj is ALLOWED on bare metal
 # and --legacy is not: dropping both would have deleted this block.

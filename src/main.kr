@@ -1132,30 +1132,119 @@ fn x86_lst_prefixes(uint64 bp, uint64 avail) -> uint64 {
     return n
 }
 
-// Length of a REX-prefixed instruction with a known ModR/M opcode, for the
-// arms that dump it raw instead of decoding it: REX, the opcode (0F AF is two
-// bytes), the ModR/M, its SIB and displacement (x86_modrm_extra) and the
-// immediate (imm32 for 69/C7/81, imm8 for 6B/83). Returns 0 for an opcode it
-// does not know, and the caller keeps its own count. A fixed count put the
-// next line in the middle of this instruction whenever the ModR/M named
-// memory.
-fn x86_rex_raw_len(uint64 bp) -> uint64 {
-    uint64 p1 = bp + 1
-    uint64 b1 = 0
-    unsafe { *(p1 as uint8) -> b1 }
-    if b1 == 0x0F {
-        uint64 p2 = bp + 2
-        uint64 b2 = 0
-        unsafe { *(p2 as uint8) -> b2 }
-        if b2 == 0xAF { return 4 + x86_modrm_extra(bp + 3) }
-        return 0
+// Length of one x86_64 instruction the listing dumps raw instead of decoding,
+// for the arms that print bytes without a mnemonic: up to four legacy
+// prefixes (66 67 64 65 F2 F3 2E 3E 26 36 F0), an optional REX (40-4F), the
+// opcode, and for a ModR/M opcode the ModR/M, its SIB and displacement
+// (x86_modrm_extra) and the immediate. `avail` is the number of bytes left in
+// the function. Returns 0 for an opcode it does not know (the caller keeps its
+// own count), or when the bytes run out before the ModR/M.
+//
+// The immediate follows the operand size: an imm16/32 (69, 81, C7, F7 /0-/1,
+// the accumulator forms 05..3D and A9, 68, B8-BF) is 2 bytes under a 0x66
+// prefix without REX.W, else 4 -- and B8-BF under REX.W is a full imm64.
+// imm8 for 6B 80 83 C0 C1 C6 F6 /0-/1, 04..3C, A8, B0-B7, 6A, and the
+// two-byte 0F 70-73 A4 AC BA C2 C4-C6 and every 0F 3A.
+// It sets x86_insn_osz16 to 1 when a 0x66 prefix sets the operand size to 16
+// (no REX.W after it, which would override it): the line that starts with such a prefix must hold the
+// whole instruction, because the line after a lone 66 is sized as if the
+// prefix were not there. A fixed count put the next line in the middle of the
+// instruction whenever the ModR/M named memory or a prefix was present.
+static uint64 x86_insn_osz16 = 0
+fn x86_insn_len(uint64 bp, uint64 avail) -> uint64 {
+    x86_insn_osz16 = 0
+    uint64 n = 0
+    uint64 osz = 0
+    uint64 b = 0
+    while n < avail && n < 4 {
+        uint64 pp = bp + n
+        unsafe { *(pp as uint8) -> b }
+        if b != 0x66 && b != 0x67 && b != 0x64 && b != 0x65 && b != 0xF2 && b != 0xF3 && b != 0x2E && b != 0x3E && b != 0x26 && b != 0x36 && b != 0xF0 { break }
+        if b == 0x66 { osz = 1 }
+        n = n + 1
     }
+    if n >= avail { return 0 }
+    uint64 rexw = 0
+    uint64 pr = bp + n
+    unsafe { *(pr as uint8) -> b }
+    if (b & 0xF0) == 0x40 {
+        rexw = (b >> 3) & 1
+        n = n + 1
+        if n >= avail { return 0 }
+    }
+    uint64 immz = 4
+    if osz != 0 && rexw == 0 { immz = 2 }
+    uint64 po = bp + n
+    uint64 op = 0
+    unsafe { *(po as uint8) -> op }
+    n = n + 1
     uint64 imm = 0
-    if b1 == 0x69 || b1 == 0xC7 || b1 == 0x81 { imm = 4 }
-    else if b1 == 0x6B || b1 == 0x83 { imm = 1 }
-    else if b1 == 0x89 || b1 == 0x8B || b1 == 0x01 || b1 == 0x29 || b1 == 0x31 || b1 == 0x87 || b1 == 0x8D { imm = 0 }
+    uint64 has_modrm = 1
+    if op == 0x0F {
+        if n >= avail { return 0 }
+        uint64 po2 = bp + n
+        uint64 op2 = 0
+        unsafe { *(po2 as uint8) -> op2 }
+        n = n + 1
+        if op2 == 0x38 || op2 == 0x3A {
+            // three-byte opcode: 0F 38 xx /r, 0F 3A xx /r ib
+            if op2 == 0x3A { imm = 1 }
+            n = n + 1
+        } else if op2 >= 0x70 && op2 <= 0x73 { imm = 1 }
+        else if op2 == 0xA4 || op2 == 0xAC || op2 == 0xBA || op2 == 0xC2 || op2 == 0xC4 || op2 == 0xC5 || op2 == 0xC6 { imm = 1 }
+        else if op2 >= 0x10 && op2 <= 0x1F { imm = 0 }
+        else if op2 >= 0x28 && op2 <= 0x2F { imm = 0 }
+        else if op2 >= 0x40 && op2 <= 0x6F { imm = 0 }
+        else if op2 >= 0x74 && op2 <= 0x76 { imm = 0 }
+        else if op2 == 0x7E || op2 == 0x7F { imm = 0 }
+        else if op2 >= 0x90 && op2 <= 0x9F { imm = 0 }
+        else if op2 == 0xA3 || op2 == 0xA5 || op2 == 0xAB || op2 == 0xAD || op2 == 0xAF { imm = 0 }
+        else if op2 == 0xB0 || op2 == 0xB1 || op2 == 0xB3 || op2 == 0xB6 || op2 == 0xB7 { imm = 0 }
+        else if op2 >= 0xBB && op2 <= 0xC1 { imm = 0 }
+        else if op2 == 0xC3 { imm = 0 }
+        else if op2 >= 0xD1 && op2 <= 0xFF { imm = 0 }
+        else { return 0 }
+    } else if op <= 0x3F && (op & 7) <= 3 { imm = 0 }
+    else if op <= 0x3D && (op & 7) == 4 {
+        has_modrm = 0
+        imm = 1
+    }
+    else if op <= 0x3D && (op & 7) == 5 {
+        has_modrm = 0
+        imm = immz
+    }
+    else if op == 0x63 || (op >= 0x84 && op <= 0x8B) || op == 0x8D || op == 0x8F { imm = 0 }
+    else if op >= 0xD0 && op <= 0xD3 { imm = 0 }
+    else if op == 0xFE || op == 0xFF { imm = 0 }
+    else if op == 0x6B || op == 0x80 || op == 0x83 || op == 0xC0 || op == 0xC1 || op == 0xC6 { imm = 1 }
+    else if op == 0x69 || op == 0x81 || op == 0xC7 { imm = immz }
+    else if op == 0xF6 || op == 0xF7 {
+        if n >= avail { return 0 }
+        uint64 pm = bp + n
+        uint64 mr = 0
+        unsafe { *(pm as uint8) -> mr }
+        if ((mr >> 3) & 7) <= 1 {
+            if op == 0xF6 { imm = 1 } else { imm = immz }
+        }
+    }
+    else if op == 0xA8 || op == 0x6A || (op >= 0xB0 && op <= 0xB7) {
+        has_modrm = 0
+        imm = 1
+    }
+    else if op == 0xA9 || op == 0x68 {
+        has_modrm = 0
+        imm = immz
+    }
+    else if op >= 0xB8 && op <= 0xBF {
+        has_modrm = 0
+        imm = immz
+        if rexw != 0 { imm = 8 }
+    }
     else { return 0 }
-    return 3 + x86_modrm_extra(bp + 2) + imm
+    if osz != 0 && rexw == 0 { x86_insn_osz16 = 1 }
+    if has_modrm == 0 { return n + imm }
+    if n >= avail { return 0 }
+    return n + 1 + x86_modrm_extra(bp + n) + imm
 }
 
 fn write_x86_mem(uint64 fd, uint64 bp_modrm, uint64 rex_xb) -> uint64 {
@@ -1941,8 +2030,12 @@ fn emit_asm_listing(uint64 output_path, uint64 arch, uint64 text_start, uint64 s
                         write_hex32(fd, jcc32_imm)
                         pos = pos + 6
                     } else {
-                        // Dump up to 4 bytes
-                        uint64 cnt = 2
+                        // Any other 0F opcode: the whole instruction when
+                        // x86_insn_len knows it (movzx/movsx, setcc, cmovcc,
+                        // SSE, ...), else the two opcode bytes
+                        uint64 cnt = x86_insn_len(bp, fn_end - pos)
+                        if cnt == 0 { cnt = 2 }
+                        if cnt + pos > fn_end { cnt = fn_end - pos }
                         uint64 di = 0
                         while di < cnt {
                             uint64 dp = bp + di
@@ -1955,25 +2048,43 @@ fn emit_asm_listing(uint64 output_path, uint64 arch, uint64 text_start, uint64 s
                         pos = pos + cnt
                     }
                 } else if b0 == 0xF0 {
-                    // LOCK prefix
-                    write_hex8(fd, b0)
-                    write(fd, " ", 1)
-                    uint64 wmsg_1535 = "...          lock ..."
-                    write(fd, wmsg_1535, str_len(wmsg_1535))
-                    // Dump rest of instruction (up to 7 more bytes)
-                    uint64 li = 1
-                    while li < 8 && pos + li < fn_end {
-                        uint64 lp = bp + li
-                        uint64 lb = 0
-                        unsafe { *(lp as uint8) -> lb }
-                        if lb == 0x48 || lb == 0x0F || (lb >= 0x80 && lb <= 0xCF) {
-                            li = li + 1
-                        } else {
-                            li = li + 1
-                            break
+                    // LOCK prefix: the whole instruction when x86_insn_len
+                    // knows it (lock add/sub/and/or/xor, xadd, cmpxchg,
+                    // xchg), its bytes then `lock ...`. Otherwise the old
+                    // line: f0 and a guess at the rest.
+                    uint64 lk_len = x86_insn_len(bp, fn_end - pos)
+                    if lk_len != 0 && pos + lk_len <= fn_end {
+                        uint64 lk_i = 0
+                        while lk_i < lk_len {
+                            uint64 lk_p = bp + lk_i
+                            uint64 lk_b = 0
+                            unsafe { *(lk_p as uint8) -> lk_b }
+                            write_hex8(fd, lk_b)
+                            if lk_i + 1 < lk_len { write(fd, " ", 1) }
+                            lk_i = lk_i + 1
                         }
+                        write(fd, "  lock ...", 10)
+                        pos = pos + lk_len
+                    } else {
+                        write_hex8(fd, b0)
+                        write(fd, " ", 1)
+                        uint64 wmsg_1535 = "...          lock ..."
+                        write(fd, wmsg_1535, str_len(wmsg_1535))
+                        // Dump rest of instruction (up to 7 more bytes)
+                        uint64 li = 1
+                        while li < 8 && pos + li < fn_end {
+                            uint64 lp = bp + li
+                            uint64 lb = 0
+                            unsafe { *(lp as uint8) -> lb }
+                            if lb == 0x48 || lb == 0x0F || (lb >= 0x80 && lb <= 0xCF) {
+                                li = li + 1
+                            } else {
+                                li = li + 1
+                                break
+                            }
+                        }
+                        pos = pos + li
                     }
-                    pos = pos + li
                 } else if b0 >= 0x50 && b0 <= 0x57 {
                     // push reg (0x50-0x57)
                     write_hex8(fd, b0)
@@ -2250,7 +2361,7 @@ fn emit_asm_listing(uint64 output_path, uint64 arch, uint64 text_start, uint64 s
                     } else {
                         // Unknown 4C-prefixed — dump raw: a known ModR/M
                         // opcode at its real length, anything else 3 bytes
-                        uint64 cnt_c = x86_rex_raw_len(bp)
+                        uint64 cnt_c = x86_insn_len(bp, fn_end - pos)
                         if cnt_c == 0 { cnt_c = 3 }
                         if cnt_c + pos > fn_end { cnt_c = fn_end - pos }
                         uint64 dic = 0
@@ -2352,7 +2463,7 @@ fn emit_asm_listing(uint64 output_path, uint64 arch, uint64 text_start, uint64 s
                         } else {
                             // C7 with non-register modrm: dump it raw, at its
                             // real length (SIB/disp + imm32)
-                            uint64 cnt = x86_rex_raw_len(bp)
+                            uint64 cnt = x86_insn_len(bp, fn_end - pos)
                             if cnt + pos > fn_end { cnt = fn_end - pos }
                             uint64 di = 0
                             while di < cnt {
@@ -2407,7 +2518,7 @@ fn emit_asm_listing(uint64 output_path, uint64 arch, uint64 text_start, uint64 s
                         } else {
                             // 81 with other modrm: dump it raw, at its real
                             // length (SIB/disp + imm32)
-                            uint64 cnt = x86_rex_raw_len(bp)
+                            uint64 cnt = x86_insn_len(bp, fn_end - pos)
                             if cnt + pos > fn_end { cnt = fn_end - pos }
                             uint64 di = 0
                             while di < cnt {
@@ -2446,7 +2557,7 @@ fn emit_asm_listing(uint64 output_path, uint64 arch, uint64 text_start, uint64 s
                         } else {
                             // 83 with other modrm: dump it raw, at its real
                             // length (SIB/disp + imm8)
-                            uint64 cnt = x86_rex_raw_len(bp)
+                            uint64 cnt = x86_insn_len(bp, fn_end - pos)
                             if cnt + pos > fn_end { cnt = fn_end - pos }
                             uint64 di = 0
                             while di < cnt {
@@ -2605,8 +2716,10 @@ fn emit_asm_listing(uint64 output_path, uint64 arch, uint64 text_start, uint64 s
                             }
                             pos = pos + tlen_im
                         } else {
-                            // Other 0F xx under REX.W — dump 4 bytes raw
-                            uint64 cnt_o = 4
+                            // Other 0F xx under REX.W — dump raw: the whole
+                            // instruction when x86_insn_len knows it, else 4 bytes
+                            uint64 cnt_o = x86_insn_len(bp, fn_end - pos)
+                            if cnt_o == 0 { cnt_o = 4 }
                             if cnt_o + pos > fn_end { cnt_o = fn_end - pos }
                             uint64 di_o = 0
                             while di_o < cnt_o {
@@ -2700,10 +2813,8 @@ fn emit_asm_listing(uint64 output_path, uint64 arch, uint64 text_start, uint64 s
                     } else {
                         // Other REX.W instructions — dump raw: a known ModR/M
                         // opcode at its real length, anything else 3 bytes
-                        uint64 cnt = x86_rex_raw_len(bp)
+                        uint64 cnt = x86_insn_len(bp, fn_end - pos)
                         if cnt == 0 { cnt = 3 }
-                        if b1 == 0x8B { cnt = 3 }
-                        else if b1 >= 0x00 && b1 <= 0x3F { cnt = 3 }
                         if cnt + pos > fn_end { cnt = fn_end - pos }
                         uint64 di = 0
                         while di < cnt {
@@ -2717,29 +2828,27 @@ fn emit_asm_listing(uint64 output_path, uint64 arch, uint64 text_start, uint64 s
                         pos = pos + cnt
                     }
                 } else {
-                    // Generic: dump 1 byte per line for simple format
+                    // Generic: one raw line. An instruction x86_insn_len
+                    // knows (optional prefixes and REX, then a ModR/M or
+                    // immediate opcode) is dumped whole, so the next line
+                    // starts where the next instruction does. A legacy
+                    // prefix stays a line of its own -- what follows it is
+                    // the same length without it -- unless a 0x66 in the
+                    // prefixes makes the operand 16-bit: then imm16/32 is 2
+                    // bytes, which only this line can see, so the line holds
+                    // the whole instruction. Anything unknown: one byte, a
+                    // REX byte with its opcode (2), 49 with two more (3).
                     uint64 cnt = 1
-                    // REX prefix? Read more bytes
-                    if b0 >= 0x40 && b0 <= 0x4F { cnt = 2 }
-                    // A REX byte in front of a known ModR/M opcode: dump the
-                    // whole instruction (x86_rex_raw_len), so the next line
-                    // starts where the next instruction does.
-                    uint64 rex_raw = 0
-                    if b0 >= 0x40 && b0 <= 0x4F && pos + 3 <= fn_end { rex_raw = x86_rex_raw_len(bp) }
-                    if rex_raw != 0 {
-                        cnt = rex_raw
+                    uint64 gen_len = x86_insn_len(bp, fn_end - pos)
+                    uint64 gen_pfx = 0
+                    if b0 == 0x66 || b0 == 0x67 || b0 == 0x64 || b0 == 0x65 || b0 == 0xF2 || b0 == 0xF3 || b0 == 0x2E || b0 == 0x3E || b0 == 0x26 || b0 == 0x36 { gen_pfx = 1 }
+                    if gen_len != 0 && (gen_pfx == 0 || x86_insn_osz16 != 0) {
+                        cnt = gen_len
                     } else if b0 == 0x49 {
-                        uint64 bp1 = bp + 1
-                        uint64 b1 = 0
-                        unsafe { *(bp1 as uint8) -> b1 }
-                        if b1 == 0xC7 { cnt = 7 }
-                        else if b1 == 0x89 || b1 == 0x8B { cnt = 3 }
-                        else if b1 == 0x81 { cnt = 7 }
-                        else if b1 == 0x83 { cnt = 4 }
-                        else if b1 == 0x31 { cnt = 3 }
-                        else { cnt = 3 }
+                        cnt = 3
+                    } else if b0 >= 0x40 && b0 <= 0x4F {
+                        cnt = 2
                     }
-                    if b0 == 0xB9 || b0 == 0xBA { cnt = 5 }
                     if cnt + pos > fn_end { cnt = fn_end - pos }
                     uint64 di = 0
                     while di < cnt {
