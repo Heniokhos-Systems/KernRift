@@ -45,8 +45,8 @@ TOTAL=0
 # file is a misconfiguration: wine_path yields nothing and wine_na FAILS, so a mistyped
 # path cannot turn the Windows-run rows into a green SKIP.
 KR_WINE_BAD=""
-if [ "${KR_WINE+set}" = set ] && { [ -z "$KR_WINE" ] || [ ! -x "$KR_WINE" ]; }; then
-    KR_WINE_BAD="KR_WINE='${KR_WINE}' is not an executable file"
+if [ "${KR_WINE+set}" = set ] && { [ -z "$KR_WINE" ] || [ ! -f "$KR_WINE" ] || [ ! -x "$KR_WINE" ]; }; then
+    KR_WINE_BAD="KR_WINE='${KR_WINE}' is not an executable regular file"
 fi
 wine_path() { [ -n "$KR_WINE_BAD" ] && return 0; echo "${KR_WINE:-$(command -v wine 2>/dev/null || true)}"; }
 wine_na() {   # <row>: no usable wine -- SKIP if none was asked for, FAIL if KR_WINE is wrong
@@ -26754,10 +26754,13 @@ for LOG_F in $(comm -13 "$LOG_D/ex.have" "$LOG_D/ex.uniq"); do LOG_WHY="$LOG_WHY
 for LOG_F in $(uniq -d "$LOG_D/ex.listed"); do LOG_WHY="$LOG_WHY duplicate:$LOG_F"; done
 # log_why_ok <reason> <file> <errfile>: does the build error match the reason?
 log_why_ok() {
-    local asm=0 nomain=0 ext=0 lic=0 st=0
-    grep -qE 'inline-asm|asm instruction' "$3" && asm=1
-    grep -q "no 'main' function found" "$3" && nomain=1
-    grep -q 'extern fn .* is never defined' "$3" && ext=1
+    # Only the compiler's own `error:` lines count: a located error echoes the source line, and a
+    # comment on that line must not be able to satisfy a reason.
+    local asm=0 nomain=0 ext=0 lic=0 st=0 e
+    e=$(grep -E '^([^ ]*:[0-9]+:[0-9]+: )?error:' "$3")
+    grep -qE 'inline-asm|asm instruction' <<< "$e" && asm=1
+    grep -q "no 'main' function found" <<< "$e" && nomain=1
+    grep -q 'extern fn .* is never defined' <<< "$e" && ext=1
     grep -q '@module_license' "$2" && lic=1
     grep -q 'fn _start' "$2" && st=1
     case "$1" in
@@ -26773,6 +26776,21 @@ log_why_ok() {
 }
 # log_why_all <file> <errfile>: every reason whose check passes (the matrix: exactly the declared one may).
 log_why_all() { local r o=""; for r in library lkm obj-extern bare-metal riscv xtensa; do log_why_ok "$r" "$1" "$2" && o="$o $r"; done; echo "$o"; }
+# log_verdict <reason> <file> <errfile>: prints " <problem>" or nothing. The backstop
+# (skip-reason-ambiguous) fires when the declared reason passes but so does another.
+log_verdict() {
+    if ! log_why_ok "$1" "$2" "$3"; then echo " skip-reason-mismatch:${2#*/../}($1)[$(log_err "$3")]"
+    elif [ "$(log_why_all "$2" "$3")" != " $1" ]; then echo " skip-reason-ambiguous:${2#*/../}($1;passes:$(log_why_all "$2" "$3"))"; fi
+}
+# Self-check of the matrix on made-up logs: a comment echoing "inline-asm" on an extern error
+# line is NOT an asm error (mismatch for bare-metal, clean for lkm), and a log with two real error
+# kinds is ambiguous. Deleting the backstop or the error:-line filter turns this red.
+printf '@module_license("GPL")\nfn _start() {}\n' > "$LOG_D/sc.kr"
+printf 'sc.kr:2:1: error: extern fn '"'"'foo'"'"' is never defined and this emit mode produces\n    extern fn foo() // inline-asm note\n' > "$LOG_D/sc.err"
+[ -z "$(log_verdict lkm "$LOG_D/sc.kr" "$LOG_D/sc.err")" ] || LOG_WHY="$LOG_WHY selfcheck-comment-lkm"
+case "$(log_verdict bare-metal "$LOG_D/sc.kr" "$LOG_D/sc.err")" in *mismatch*) ;; *) LOG_WHY="$LOG_WHY selfcheck-comment-bare-metal" ;; esac
+printf 'sc.kr:2:1: error: extern fn '"'"'foo'"'"' is never defined and this emit mode produces\nerror: unrecognized asm instruction '"'"'memw'"'"'\n' > "$LOG_D/sc2.err"
+case "$(log_verdict lkm "$LOG_D/sc.kr" "$LOG_D/sc2.err")" in *ambiguous*) ;; *) LOG_WHY="$LOG_WHY selfcheck-two-kinds-not-ambiguous" ;; esac
 while read -r LOG_F LOG_CLS LOG_REASON LOG_EXTRA; do
     case "$LOG_F" in ''|'#'*) continue ;; esac
     [ -f "$DIR/../$LOG_F" ] || continue
@@ -26784,8 +26802,7 @@ while read -r LOG_F LOG_CLS LOG_REASON LOG_EXTRA; do
             lkm|obj-extern|bare-metal|riscv|xtensa|library)
                 LOG_NS=$((LOG_NS + 1))
                 if $LOG_KRC "$DIR/../$LOG_F" -o "$LOG_D/sweep.krbo" > "$LOG_D/err" 2>&1; then LOG_WHY="$LOG_WHY skip-builds:$LOG_F"
-                elif ! log_why_ok "$LOG_REASON" "$DIR/../$LOG_F" "$LOG_D/err"; then LOG_WHY="$LOG_WHY skip-reason-mismatch:$LOG_F($LOG_REASON)[$(log_err "$LOG_D/err")]"
-                elif [ "$(log_why_all "$DIR/../$LOG_F" "$LOG_D/err")" != " $LOG_REASON" ]; then LOG_WHY="$LOG_WHY skip-reason-ambiguous:$LOG_F($LOG_REASON;passes:$(log_why_all "$DIR/../$LOG_F" "$LOG_D/err"))"; fi ;;
+                else LOG_WHY="$LOG_WHY$(log_verdict "$LOG_REASON" "$DIR/../$LOG_F" "$LOG_D/err")"; fi ;;
             *) LOG_WHY="$LOG_WHY bad-reason:$LOG_F($LOG_REASON)" ;;
         esac
     else
