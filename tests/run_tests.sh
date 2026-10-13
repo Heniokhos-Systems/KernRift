@@ -26757,7 +26757,10 @@ log_why_ok() {
     # Only the compiler's own `error:` lines count: a located error echoes the source line, and a
     # comment on that line must not be able to satisfy a reason.
     local asm=0 nomain=0 ext=0 lic=0 st=0 e
-    e=$(grep -E '^([^ ].*:[0-9]+:[0-9]+: )?error:' "$3")
+    # The location prefix is any path without a colon-then-digit, then :LINE:COL: . Not '.*', which would
+    # also swallow a located token quoted inside a warning or an echoed source line. Blind spot: a
+    # path that itself contains a colon followed by a digit (dir:1/x.kr) is not recognised.
+    e=$(grep -E '^((([^ :]|:[^0-9])([^:]|:[^0-9])*)?:[0-9]+:[0-9]+: )?error:' "$3")
     grep -qE 'inline-asm|asm instruction' <<< "$e" && asm=1
     grep -q "no 'main' function found" <<< "$e" && nomain=1
     grep -q 'extern fn .* is never defined' <<< "$e" && ext=1
@@ -26786,7 +26789,7 @@ log_verdict() {
 # line is NOT an asm error (mismatch for bare-metal, clean for lkm), and a log with two real error
 # kinds is ambiguous. Deleting the backstop or the error:-line filter turns this red.
 printf '@module_license("GPL")\nfn _start() {}\n' > "$LOG_D/sc.kr"
-printf 'sc.kr:2:1: error: extern fn '"'"'foo'"'"' is never defined and this emit mode produces\n     2 | extern fn foo() // error: inline-asm note\n' > "$LOG_D/sc.err"
+printf 'sc.kr:2:1: error: extern fn '"'"'foo'"'"' is never defined and this emit mode produces\n     2 | extern fn foo() // x.kr:1:2: error: inline-asm note\nx.kr:3:4: warning: "y.kr:1:2: error: inline-asm"\n' > "$LOG_D/sc.err"
 [ -z "$(log_verdict lkm "$LOG_D/sc.kr" "$LOG_D/sc.err")" ] || LOG_WHY="$LOG_WHY selfcheck-comment-lkm"
 case "$(log_verdict bare-metal "$LOG_D/sc.kr" "$LOG_D/sc.err")" in *mismatch*) ;; *) LOG_WHY="$LOG_WHY selfcheck-comment-bare-metal" ;; esac
 printf 'sc.kr:2:1: error: extern fn '"'"'foo'"'"' is never defined and this emit mode produces\nerror: unrecognized asm instruction '"'"'memw'"'"'\n' > "$LOG_D/sc2.err"
