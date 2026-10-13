@@ -1,0 +1,20 @@
+// sys_net_init: 0 on a hosted OS with sockets, twice (it is start-once), and
+// a socket works after it. On Windows it must have STARTED Winsock itself --
+// checked through win32.kr's own flag BEFORE any socket call, because every
+// socket call would start it anyway and hide an init that does nothing.
+// Prints OK. Exit codes: 1 first call, 2 second call, 5 Winsock not started,
+// 3 socket, 4 close.
+import "../../std/sys.kr"
+
+fn main() -> uint32 {
+    if sys_net_init() != 0 { return 1 }
+    if get_target_os() == 2 {
+        if _kr_w32_started != 1 { return 5 }
+    }
+    if sys_net_init() != 0 { return 2 }
+    int64 s = sys_socket(2, 1, 0)
+    if s < 0 { return 3 }
+    if sys_sock_close(s) != 0 { return 4 }
+    file_write(1, "OK\n", 3)
+    return 0
+}

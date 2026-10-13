@@ -1,6 +1,6 @@
 # KernRift Standard Library Reference
 
-The standard library lives in `std/*.kr` — **55 modules, 730 functions**. This
+The standard library lives in `std/*.kr` — **55 modules, 731 functions**. This
 document covers the **19 general-purpose modules** in the index below (307 of
 those functions). The other **36 modules (423 functions) are not documented
 here** — read their source directly. They fall into four groups:
@@ -17,7 +17,7 @@ here** — read their source directly. They fall into four groups:
   stdio, exit, time; a Unix and a Windows backend), `args` (`sys_argc`/`sys_arg`)
   and `win32` (the `_kr_w32_`-prefixed Win32 imports, the Winsock lifecycle,
   the WSAGetLastError → errno map and the Win64 `fd_set`/`timeval` builders)
-  (3 modules, 32 functions);
+  (3 modules, 33 functions);
 - `apexrift` (18 functions).
 
 **Three of those modules define no functions at all** — `gmc_constants`,
@@ -487,6 +487,13 @@ socket type, or a datagram socket).
 Importing `net.kr` also imports `sys.kr` (and `win32.kr`), so the
 `sys_*` API is visible too. The old per-arch `_net_nr_*()` helpers are
 gone: the numbers live in `sys.kr`.
+
+`sys_net_init() -> int64` starts the network stack explicitly: 0, or
+−errno (Windows: `WSAStartup(2.2)`, start-once; Linux/Android: a no-op 0;
+macOS and none: −ENOSYS, as their socket calls are). Optional — every socket
+call starts it on first use — but it lets a caller tell "the network stack
+would not start" from "this socket failed", which `sys_socket` reports as
+one −errno.
 
 ---
 

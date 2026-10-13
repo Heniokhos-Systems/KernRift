@@ -28483,6 +28483,8 @@ t10_row sys_loopback_x86_64 x86_64 sys_loopback "OK" 0
 t10_row sys_loopback_arm64 arm64 sys_loopback "OK" 0
 t10_row sys_random_x86_64 x86_64 sys_random "OK" 0
 t10_row sys_random_arm64 arm64 sys_random "OK" 0
+t10_row sys_net_init_x86_64 x86_64 sys_net_init "OK" 0
+t10_row sys_net_init_arm64 arm64 sys_net_init "OK" 0
 
 # Every fixture also builds as a Windows slice (the default fat binary ships
 # one): the Unix arm's syscall_raw is pruned by the literal os chain, so no
@@ -28490,7 +28492,7 @@ t10_row sys_random_arm64 arm64 sys_random "OK" 0
 TOTAL=$((TOTAL + 1))
 T10_W=""
 # sys_none.kr is built ONLY as --target=none (below); the others are not.
-for T10_F in sys_args sys_args_all sys_args_oob sys_loopback sys_random sys_sockerr sys_w32_errno sys_w32_layout; do
+for T10_F in sys_args sys_args_all sys_args_oob sys_loopback sys_random sys_net_init sys_sockerr sys_w32_errno sys_w32_layout; do
     for T10_A in x86_64 arm64; do
         $T10_KRC --arch=$T10_A --target=windows --emit=pe "$T10_FX/$T10_F.kr" -o "$T10_D/$T10_F-w$T10_A.exe" > "$T10_D/w.log" 2>&1 \
             || T10_W="$T10_W $T10_F/$T10_A:$(grep -m1 error "$T10_D/w.log" | cut -c1-80)"
@@ -28507,7 +28509,7 @@ for T10_N in x86_64 arm64; do
     $T10_KRC --arch=$T10_N --target=none --emit=image --load-addr=0x400000 --stack-top=0x3F0000 "$T10_FX/sys_none.kr" -o "$T10_D/none-$T10_N" > "$T10_D/w.log" 2>&1 \
         || T10_W="$T10_W none-$T10_N:$(grep -m1 error "$T10_D/w.log" | cut -c1-80)"
 done
-if [ -z "$T10_W" ]; then t10_ok sys_fixtures_build_for_every_slice "8 fixtures x (windows x86_64, windows arm64, fat, macos x86_64, macos arm64) + sys_none.kr as --target=none on x86_64 and arm64"; else t10_bad sys_fixtures_build_for_every_slice "$T10_W"; fi
+if [ -z "$T10_W" ]; then t10_ok sys_fixtures_build_for_every_slice "9 fixtures x (windows x86_64, windows arm64, fat, macos x86_64, macos arm64) + sys_none.kr as --target=none on x86_64 and arm64"; else t10_bad sys_fixtures_build_for_every_slice "$T10_W"; fi
 
 # C8 against the std @shared statics. args.kr declares `@shared static u64
 # cli_argc/cli_argv`; a program that also declares them must say @shared too.
@@ -28697,7 +28699,7 @@ else
 fi
 
 if [ -z "$T10_WINE" ]; then
-    for T10_R in sys_loopback_windows_wine sys_random_windows_wine sys_sock_errors_windows_wine sys_send_epipe_windows_wine; do
+    for T10_R in sys_loopback_windows_wine sys_random_windows_wine sys_net_init_windows_wine sys_sock_errors_windows_wine sys_send_epipe_windows_wine; do
         TOTAL=$((TOTAL + 1)); wine_na "$T10_R"
     done
 else
@@ -28707,7 +28709,7 @@ else
     # SO_RCVTIMEO's millisecond conversion and recv's timeout -> -EAGAIN, and
     # closesocket twice -> -EBADF; sys_sockerr.kr the refused connect, the
     # port-stealing guard and the option-number checks.
-    for T11_R in "sys_loopback_windows_wine sys_loopback" "sys_random_windows_wine sys_random" "sys_sock_errors_windows_wine sys_sockerr"; do
+    for T11_R in "sys_loopback_windows_wine sys_loopback" "sys_random_windows_wine sys_random" "sys_net_init_windows_wine sys_net_init" "sys_sock_errors_windows_wine sys_sockerr"; do
         set -- $T11_R
         TOTAL=$((TOTAL + 1))
         if $T10_KRC --arch=x86_64 --target=windows --emit=pe "$T10_FX/$2.kr" -o "$T10_D/$2.exe" > "$T10_D/w.log" 2>&1; then

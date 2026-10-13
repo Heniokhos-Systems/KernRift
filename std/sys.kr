@@ -147,6 +147,25 @@ fn _kr_sys_w32_setsockopt(u64 sock, u64 level, u64 name, u64 val, u64 len) -> in
 
 // --- sockets -------------------------------------------------------------------
 
+// Start the network stack EXPLICITLY: 0 when sockets are usable, or -errno.
+// Optional -- every socket call starts it on first use -- but a caller that
+// wants to tell "the machine's network stack would not start" from "this
+// socket/connect failed" calls this first: sys_socket reports both as one
+// -errno. Windows: WSAStartup(2.2) once (the same start-once routine every
+// socket call runs, so it never starts twice); a failure leaves it unstarted
+// and a later call retries. Linux/Android: nothing to start, 0. macOS and the
+// bare-metal arch ids: -ENOSYS, as every socket call there is. none: -ENOSYS.
+fn sys_net_init() -> int64 {
+    if get_target_os() == 2 {
+        return _kr_w32_ensure()
+    } else if get_target_os() == 4 {
+        return 0 - 38
+    } else {
+        if _kr_sys_nr(0) == 0 { return 0 - 38 }
+        return 0
+    }
+}
+
 fn sys_socket(u64 domain, u64 stype, u64 proto) -> int64 {
     if get_target_os() == 2 {
         int64 e = _kr_w32_ensure()
