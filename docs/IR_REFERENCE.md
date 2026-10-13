@@ -1034,37 +1034,59 @@ What they cover exactly (`tests/run_tests.sh`, the block under "THE GUARD"):
   `volatile { }` load, store and compound at u8..u64/f32/f64, against the
   same text with `unsafe`: one per load and store, two per compound, none for
   `unsafe` -- x86_64 `mfence` (IR and legacy), arm64 IR `LDAR`/`STLR`,
-  arm64 legacy `dsb sy` after a load and `dmb ish` before a block store
-  (the `vstore*` builtins get `dsb sy` there; the rows use the block form).
+  arm64 legacy `dsb sy` after a load and before a store (the block store got
+  `dmb ish` until review round 7; it now gets the `vstore*` builtins' `dsb
+  sy`, which `volatile_block_store_barrier_is_vstores` pins: the barrier
+  mnemonics of a block store and of vstoreN, in order, identical at every
+  width on every backend).
   `ptr_load_undeclared_*_dest` pins 3b95554's typing of an undeclared `->`
   destination, and `volatile_naturally_aligned_roundtrip` the defined
   (naturally aligned) half of §12 of LANGUAGE.md.
 
-**Volatile: measured, and what is still not observed.** The round-6 mutants
-of the volatile lowering, each a one-line change built from this tree:
-LICM treating `IR_VLOAD` as hoistable (N2, and N2b: the same edit on one
-line, so a source pin cannot see it) is red on 16 of the 18 IR
-`volatile_polling_loop_*` rows (3, want 12) on all three arches -- the u16
-forms are not hoisted by that change and stay 12; a u16 block read lowered
-as a plain load (N4) on `volatile_unused_read_kept u16` (50, want 139) on
-all three arches and the load barrier rows; a u8 block store without its
-barrier (N5), a block compound whose read has no barrier (N6), the legacy
-x86_64 u16 load barrier (N8) and the legacy arm64 u8 store barrier (N9) on
-`volatile_barriers_by_width` only -- a barrier has no effect a
-single-threaded run can see, so for those four the listing count IS the
-oracle. Not observed by any row:
+**Volatile: measured, and what is still not observed.** "A barrier has no
+effect a run can see" was wrong: a barrier is invisible to ONE thread, but a
+second process sharing the memory sees the order. Two run blocks:
+`store_buffering_litmus` (x86_64 hardware, IR and legacy) runs the
+two-process store-buffering test -- fork, a `MAP_SHARED` page, each side
+stores 1 to its own slot and reads the other's, 100000 lock-stepped rounds
+-- with a volatile access as the only fence between a plain store and a
+plain load: a block load/store of each width, a `vload`/`vstore` builtin of
+each width, a block compound. Any round where both sides read 0 is red; an
+unfenced control must see such rounds, or the rows are a SKIP. It is a
+one-sided oracle: red proves a missing or misplaced fence, green only that
+this run saw no reordering. (The `vv`/`blk` variants -- a volatile store
+directly followed by a volatile load, which needs a fence AFTER the store,
+LANGUAGE.md §12 -- are red on this compiler, whose store fence comes only
+before the store; that codegen change is held for review, so those two rows
+are not in the suite yet.) `volatile_read_vs_concurrent_writer` (x86_64 and
+arm64 under qemu, IR and legacy, builtin and block) reads a word another
+process is writing: two reads per trip must sometimes differ, and a poll for
+a value the writer stores late must end. The mutants of the volatile
+lowering, each a one-line change built from this tree, and the RUN rows they
+turn red (the listing rows are red on them as well):
+- a u16 block read lowered as a plain load (N4): `store_buffering_litmus
+  ld16 x86_64` and `volatile_unused_read_kept u16` (50, want 139);
+- a u8 block store without its barrier (N5): `store_buffering_litmus st8
+  x86_64`;
+- the legacy x86_64 u16 load barrier dropped (N8): `store_buffering_litmus
+  ld16 x86_64 --legacy`;
+- the IR x86_64 u8 `vload`'s mfence dropped (N18): `store_buffering_litmus
+  ld8` and `bld8 x86_64`;
+- `IR_VLOAD` treated as CSE-pure and non-invalidating (N1):
+  `volatile_read_vs_concurrent_writer cse` on x86_64 and arm64 (1, want 3);
+- LICM hoisting `IR_VLOAD` (N2, and N2b on one line): the same `cse` rows,
+  `volatile_read_vs_concurrent_writer poll` (a timeout), every IR
+  `store_buffering_litmus` row (its lock-step poll hangs), and 16 of the 18 IR
+  `volatile_polling_loop_*` rows (3, want 12).
+Not observed by any run:
+- arm64 barriers (N9: the legacy arm64 u8 store barrier dropped): the arm64
+  runs here are qemu user mode, whose memory model is TCG's, not an arm64
+  core's, so a litmus there proves nothing either way. They need a real
+  arm64 machine; until then the listing counts and
+  `volatile_block_store_barrier_is_vstores` are the only oracle for them;
 - riscv32 has no volatile barrier at all and no listing, so a riscv32
   volatile store or compound lowered as a plain store is invisible (it
   emits the same bytes);
-- the barrier rows count barriers, they do not check their position: a
-  fence moved from after a load to before it, with the count unchanged,
-  passes;
-- two volatile reads of one address with no write between them, merged
-  into one (CSE of `IR_VLOAD`), read the same value single-threaded; only a
-  merge across a static load shows, in `side_effect_stops_static_cse_listing`;
-- LICM of a volatile read out of a loop that does not write the location
-  reads the same value every trip; only the polling shape (read, then write
-  the same location) shows a hoist;
 - f16 and `device` fields wider than u16 are not in the width rows; xtensa
   and freestanding images are not covered at all.
 

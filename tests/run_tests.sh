@@ -7028,13 +7028,14 @@ done
 # main's --emit=asm listing for each form, width and backend, with `volatile`
 # and with `unsafe`. A load and a store have one each, a compound (a read and
 # a write) two; `unsafe` none. x86_64 (IR and legacy): mfence. arm64 IR: the
-# access itself is LDAR/STLR. arm64 legacy: `dsb sy` after a load, `dmb ish`
-# before a store. riscv32 has no listing. One row per backend and form.
+# access itself is LDAR/STLR. arm64 legacy: `dsb sy` after a load and before a
+# store, the vstore* builtins' barrier (a `dmb ish` does not count: the block
+# store used to get one). riscv32 has no listing. One row per backend and form.
 for VX_C in "x86_64|" "x86_64|--legacy" "arm64|" "arm64|--legacy"; do
     VX_A=${VX_C%%|*}; VX_M=${VX_C#*|}
     case "$VX_A$VX_M" in
         x86_64*)       VX_RE='^ +[0-9a-f]+: .*mfence' ;;
-        arm64--legacy) VX_RE='^ +[0-9a-f]+: [0-9a-f]{8} +(dsb sy|dmb ish)' ;;
+        arm64--legacy) VX_RE='^ +[0-9a-f]+: [0-9a-f]{8} +dsb sy' ;;
         arm64)         VX_RE='^ +[0-9a-f]+: [0-9a-f]{8} +(ldar|stlr)' ;;
     esac
     for VX_O in load store compound; do
@@ -7067,6 +7068,37 @@ for VX_C in "x86_64|" "x86_64|--legacy" "arm64|" "arm64|--legacy"; do
             FAIL=$((FAIL + 1))
         fi
     done
+done
+# 3b. The block store and the vstore* builtin are the same volatile store, so
+# they get the same barriers, in the same order, on every backend (the user's
+# request, review round 7): on arm64 --legacy the block form used to get
+# `dmb ish` before the store and the builtin `dsb sy`. The barrier mnemonics
+# in main's listing, in order, must be identical for `volatile { *(p as uW) =
+# val }` and `vstoreW(p, val)`, every width.
+for VX_C in "x86_64|" "x86_64|--legacy" "arm64|" "arm64|--legacy"; do
+    VX_A=${VX_C%%|*}; VX_M=${VX_C#*|}
+    TOTAL=$((TOTAL + 1))
+    VX_BAD=""
+    for VX_W in 8 16 32 64; do
+        VX_SEQ=""
+        for VX_FORM in block builtin; do
+            if [ $VX_FORM = block ]; then VX_S="    volatile { *(p as u$VX_W) = val }"; else VX_S="    vstore$VX_W(p, val)"; fi
+            printf 'static u64[2] buf\nfn main() {\n    u64 p = buf\n    u64 val = 5\n%s\n    exit(0)\n}\n' "$VX_S" > "$VX_T/l.kr"
+            if $KRC --arch=$VX_A $VX_M --emit=asm "$VX_T/l.kr" -o "$VX_T/l.s" > /dev/null 2>&1; then
+                VX_SEQ="$VX_SEQ|$(sed -n '/^main:/,$p' "$VX_T/l.s" | grep -aoE '(mfence|lfence|sfence|dsb [a-z]+|dmb [a-z]+|stlr[bh]?)' | tr '\n' ' ')"
+            else
+                VX_SEQ="$VX_SEQ|no-listing"
+            fi
+        done
+        VX_B1=${VX_SEQ#|}; VX_B1=${VX_B1%%|*}; VX_B2=${VX_SEQ##*|}
+        if [ "$VX_B1" != "$VX_B2" ] || [ -z "$VX_B1" ] || [ "$VX_B1" = no-listing ]; then VX_BAD="$VX_BAD u$VX_W: block [$VX_B1] builtin [$VX_B2];"; fi
+    done
+    if [ -z "$VX_BAD" ]; then
+        PASS=$((PASS + 1))
+    else
+        echo "FAIL: volatile_block_store_barrier_is_vstores $VX_A${VX_M:+ $VX_M} ($VX_BAD)"
+        FAIL=$((FAIL + 1))
+    fi
 done
 # 4. `*(p as F) -> x` with x not declared yet binds x with F's type, as
 # `F x = ...` would (3b95554's var_type_register on both legacy backends;
@@ -7173,6 +7205,138 @@ for VX_UW in "u8 125" "u16 32765" "u32 2147483645" "u64 9223372036854775805"; do
     VX_UT=${VX_UW%% *}; VX_UV=${VX_UW#* }
     printf 'fn main() {\n    u64 p = alloc(64)\n    store64(p, 0xFFFFFFFFFFFFFFFA)\n    unsafe { *(p as %s) -> x }\n    u64 s = x >> 1\n    if s != %s { exit(12) }\n    exit(3)\n}\n' "$VX_UT" "$VX_UV" > "$VX_T/u.kr"
     vx_rows "ptr_load_unsigned_dest_zero_extends $VX_UT" 3
+done
+# --- store-buffering litmus: a barrier IS observable by a run (x86 hardware) --
+# Two processes (fork, MAP_SHARED) each store 1 to their own slot and then
+# read the other's: with `x = 1; r1 = y` against `y = 1; r2 = x`, the outcome
+# r1 == r2 == 0 is possible only if a load passed the preceding store -- which
+# x86 hardware does (the store buffer) unless a fence sits between them. N
+# rounds, lock-stepped through two volatile counters; the program exits with
+# the count of both-zero rounds (capped at 250). A one-sided oracle: a red row
+# PROVES a missing or misplaced fence; a green one shows only that this run
+# saw no reordering. The `plain` control (no fence at all) must see some, or
+# this machine cannot tell a fence from none and the rows are a SKIP (on a
+# full run, a FAIL: the rows would prove nothing).
+# Each VARIANT is the fence between `*(mine) = 1` and `r = *(other)`:
+#   (vv -- vstore64(mine, 1); r = vload64(other) -- and blk, its block-form
+#   twin, are the rows that need a fence AFTER the store, LANGUAGE.md §12's
+#   promise; that codegen change is held for the user, see review round 8,
+#   so those two rows are not here yet)
+#   ldW/stW   a plain store and load around a volatile block load / store of
+#             width W at a third address (its barrier is the fence)
+#   bldW/bstW the same with the vloadW / vstoreW builtins
+#   cmp       around a `volatile { *(z as u16) += 1 }`
+# IR and --legacy, on x86_64 only: the arm64 and riscv32 runs here are qemu
+# user mode, whose TCG memory model is not the hardware's, so a red row there
+# would prove nothing about the hardware either way (arm64 needs a real core).
+SB_N=100000
+sb_prog() {
+    # sb_prog BODY -- BODY uses @S (my slot), @L (the other's) and z / zp
+    SB_BODY_A=$(printf '%s' "$1" | sed -e 's/@S/xa + i * 8/g' -e 's/@L/ya + i * 8/g')
+    SB_BODY_B=$(printf '%s' "$1" | sed -e 's/@S/ya + i * 8/g' -e 's/@L/xa + i * 8/g')
+    printf 'fn main() {\n    u64 n = %s\n    u64 one = 1\n    u64 zero = 0\n    u64 sz = n * 32 + 8192\n    u64 m = syscall_raw(9, 0, sz, 3, 0x21, 0xFFFFFFFFFFFFFFFF, 0)\n    u64 xa = m\n    u64 ya = m + n * 8\n    u64 ra = m + n * 16\n    u64 rb = m + n * 24\n    u64 ca = m + n * 32\n    u64 cb = ca + 128\n    u64 zp = ca + 512\n    u64 i = 0\n    u64 pid = syscall_raw(57, 0, 0, 0, 0, 0, 0)\n    if pid == 0 {\n        while i < n {\n            vstore64(cb, i + 1)\n            while vload64(ca) < i + 1 { }\n%s\n            store64(rb + i * 8, r)\n            i = i + 1\n        }\n        syscall_raw(60, 0, 0, 0, 0, 0, 0)\n    }\n    while i < n {\n        vstore64(ca, i + 1)\n        while vload64(cb) < i + 1 { }\n%s\n        store64(ra + i * 8, r)\n        i = i + 1\n    }\n    syscall_raw(61, pid, 0, 0, 0, 0, 0)\n    u64 both = 0\n    i = 0\n    while i < n {\n        u64 a = load64(ra + i * 8)\n        u64 b = load64(rb + i * 8)\n        if a == 0 && b == 0 { both = both + 1 }\n        i = i + 1\n    }\n    if both > 250 { both = 250 }\n    exit(both)\n}\n' "$SB_N" "$SB_BODY_B" "$SB_BODY_A"
+}
+sb_body() {
+    SB_P='            unsafe { *(@S as u64) = one }'
+    SB_Q='            unsafe { *(@L as u64) -> r }'
+    case $1 in
+        plain) printf '%s\n%s' "$SB_P" "$SB_Q" ;;
+        vv) printf '            vstore64(@S, 1)\n            u64 r = vload64(@L)' ;;
+        blk) printf '            volatile { *(@S as u64) = one }\n            volatile { *(@L as u64) -> r }' ;;
+        ld*) printf '%s\n            volatile { *(zp as u%s) -> zz }\n%s' "$SB_P" "${1#ld}" "$SB_Q" ;;
+        st*) printf '%s\n            volatile { *(zp as u%s) = zero }\n%s' "$SB_P" "${1#st}" "$SB_Q" ;;
+        bld*) printf '%s\n            u64 zz = vload%s(zp)\n%s' "$SB_P" "${1#bld}" "$SB_Q" ;;
+        bst*) printf '%s\n            vstore%s(zp, 0)\n%s' "$SB_P" "${1#bst}" "$SB_Q" ;;
+        cmp) printf '%s\n            volatile { *(zp as u16) += 1 }\n%s' "$SB_P" "$SB_Q" ;;
+    esac
+}
+# sb_run FLAGS VARIANT -> both-zero count, or "no binary"
+sb_run() {
+    sb_prog "$(sb_body $2)" > "$VX_T/sb.kr"
+    rm -f "$VX_T/sb"
+    if $KRC --arch=x86_64 $1 "$VX_T/sb.kr" -o "$VX_T/sb" > /dev/null 2>&1 && [ -f "$VX_T/sb" ]; then
+        chmod +x "$VX_T/sb"
+        ( ulimit -c 0; timeout -k 2 15 "$VX_T/sb" < /dev/null > /dev/null 2>&1; echo $? ) 2>/dev/null
+    else
+        echo "no binary"
+    fi
+}
+for SB_M in "" --legacy; do
+    SB_MN=${SB_M:+ $SB_M}
+    if [ "$ARCH" != x86_64 ]; then
+        for SB_V in ld8 ld16 ld32 ld64 st8 st16 st32 st64 bld8 bld16 bld32 bld64 bst8 bst16 bst32 bst64 cmp; do
+            TOTAL=$((TOTAL + 1)); skip_row "store_buffering_litmus $SB_V x86_64$SB_MN" "host is $ARCH, not x86_64 hardware"
+        done
+        continue
+    fi
+    SB_CTL=$(sb_run "$SB_M" plain)
+    for SB_V in ld8 ld16 ld32 ld64 st8 st16 st32 st64 bld8 bld16 bld32 bld64 bst8 bst16 bst32 bst64 cmp; do
+        TOTAL=$((TOTAL + 1))
+        SB_ROW="store_buffering_litmus $SB_V x86_64$SB_MN"
+        case $SB_CTL in
+            ''|*[!0-9]*|0) skip_row "$SB_ROW" "the unfenced control saw no reordering (got '$SB_CTL'), so this run cannot tell a fence from none"; continue ;;
+        esac
+        SB_GOT=$(sb_run "$SB_M" $SB_V)
+        if [ "$SB_GOT" = 0 ]; then
+            PASS=$((PASS + 1))
+        else
+            echo "FAIL: $SB_ROW (both-zero rounds: $SB_GOT of $SB_N, want 0 -- a load passed a store the volatile access should have fenced; the unfenced control saw $SB_CTL)"
+            FAIL=$((FAIL + 1))
+        fi
+    done
+done
+# --- volatile reads against a concurrent writer (review round 7, sb/cse2 and
+# sb/poll3): a second process (fork, MAP_SHARED) writes while this one reads,
+# so merging two volatile reads (CSE of IR_VLOAD) or hoisting one out of a
+# polling loop (LICM) changes what a RUN sees, not only the listing.
+#   cse   the child stores 1..N to one word; the parent reads it twice per
+#         trip until the child is done and counts trips where the two reads
+#         differ. Two reads merged into one never differ: exit 1, want 3.
+#   poll  the child spins, then stores 7 once; the parent polls the word
+#         until it reads 7. A read hoisted out of the loop never sees it: the
+#         row times out (124/137), want 3.
+# Builtin (vload64) and block (`volatile { *(m as u64) -> v }`) forms, IR and
+# --legacy, x86_64 and arm64 (qemu; the raw syscall numbers are per arch:
+# mmap, fork -- clone(SIGCHLD) on arm64 --, exit, wait4).
+# vx_rows_on ARCH NAME WANT -- vx_rows for one arch: IR and --legacy
+vx_rows_on() {
+    for VX_M in "" --legacy; do
+        TOTAL=$((TOTAL + 1))
+        VX_ROW="$2 $1${VX_M:+ $VX_M}"
+        or_runner $1 "$VX_ROW" || continue
+        # Bounded well under RUN_TEST_TIMEOUT: a correct run takes well
+        # under a second (qemu included); a hoisted poll never ends.
+        VX_GOT=$(RUN_TEST_TIMEOUT=15 vx_run $1 "$VX_M" "$VX_T/u.kr")
+        if [ "$VX_GOT" = "$3" ]; then
+            PASS=$((PASS + 1))
+        else
+            echo "FAIL: $VX_ROW (got $VX_GOT, want $3)"
+            FAIL=$((FAIL + 1))
+        fi
+    done
+}
+VR_CSE_B='        u64 a = vload64(m)
+        u64 b = vload64(m)'
+VR_CSE_K='        volatile { *(m as u64) -> a }
+        volatile { *(m as u64) -> b }'
+VR_POLL_B='        u64 v = vload64(m)'
+VR_POLL_K='        volatile { *(m as u64) -> v }'
+for VR_K in cse poll; do
+    for VR_F in builtin block; do
+        if [ $VR_K = cse ]; then
+            if [ $VR_F = builtin ]; then VR_R="$VR_CSE_B"; else VR_R="$VR_CSE_K"; fi
+            printf 'fn main() {\n    u64 m = syscall_raw(@MMAP, 0, 4096, 3, 0x21, 0xFFFFFFFFFFFFFFFF, 0)\n    u64 pid = syscall_raw(@FORK, 0, 0, 0, 0, 0)\n    if pid == 0 {\n        u64 k = 1\n        while k < 1000000 {\n            vstore64(m, k)\n            k = k + 1\n        }\n        vstore64(m + 64, 1)\n        syscall_raw(@EXIT, 0, 0, 0, 0, 0, 0)\n    }\n    u64 diff = 0\n    while vload64(m + 64) == 0 {\n%s\n        if a != b { diff = diff + 1 }\n    }\n    syscall_raw(@WAIT, pid, 0, 0, 0, 0, 0)\n    if diff > 0 { exit(3) }\n    exit(1)\n}\n' "$VR_R" > "$VX_T/v.kr"
+        else
+            if [ $VR_F = builtin ]; then VR_R="$VR_POLL_B"; else VR_R="$VR_POLL_K"; fi
+            printf 'fn main() {\n    u64 m = syscall_raw(@MMAP, 0, 4096, 3, 0x21, 0xFFFFFFFFFFFFFFFF, 0)\n    u64 pid = syscall_raw(@FORK, 0, 0, 0, 0, 0)\n    if pid == 0 {\n        u64 k = 0\n        while k < 1000000 { k = k + 1 }\n        vstore64(m, 7)\n        syscall_raw(@EXIT, 0, 0, 0, 0, 0, 0)\n    }\n    u64 go = 1\n    while go == 1 {\n%s\n        if v == 7 { go = 0 }\n    }\n    syscall_raw(@WAIT, pid, 0, 0, 0, 0, 0)\n    exit(3)\n}\n' "$VR_R" > "$VX_T/v.kr"
+        fi
+        for VR_A in x86_64 arm64; do
+            if [ $VR_A = x86_64 ]; then VR_SC='s/@MMAP/9/; s/@FORK/57, 0/; s/@EXIT/60/; s/@WAIT/61/'
+            else VR_SC='s/@MMAP/222/; s/@FORK/220, 17/; s/@EXIT/93/; s/@WAIT/260/'; fi
+            sed "$VR_SC" "$VX_T/v.kr" > "$VX_T/u.kr"
+            vx_rows_on $VR_A "volatile_read_vs_concurrent_writer $VR_K $VR_F" 3
+        done
+    done
 done
 # 5. Alignment. A volatile access must be naturally aligned (LANGUAGE.md,
 # UNDEFINED_BEHAVIOR.md): arm64 IR lowers it to LDAR/STLR, which fault on a

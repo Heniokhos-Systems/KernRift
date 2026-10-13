@@ -939,9 +939,9 @@ mnemonic, so grepping one of those for `stlr` reports nothing; decode the raw
 words (`88dffe..`, `889ffe..`) instead.
 
 `volatile { *(addr as u32) = val }` is the equivalent block form and does
-the same thing, at the width of its `as TYPE` (`u8`..`u64`, `f32`, `f64`) --
-except one barrier: on ARM64 `--legacy` a block STORE is preceded by
-`DMB ISH` (ordering only), not the builtin's `DSB SY`.
+the same thing, at the width of its `as TYPE` (`u8`..`u64`, `f32`, `f64`),
+with the same barriers as the builtins on every backend (on ARM64 `--legacy`
+a block store used to get `DMB ISH` instead of the builtin's `DSB SY`).
 
 **A volatile access must be naturally aligned** — a u16 at an even
 address, a u32/f32 at a multiple of 4, a u64/f64 at a multiple of 8 — as

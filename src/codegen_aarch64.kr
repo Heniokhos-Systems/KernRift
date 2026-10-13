@@ -5733,11 +5733,14 @@ fn gen_stmt_a64(uint64 node) {
         }
         emit_a64_mov(10, 0)
         emit_a64_load_x0(ps_val_slot_a)
-        // Volatile barrier before store (DSB SY — ensures device write commits)
+        // Volatile barrier before store: DSB SY, the same barrier the
+        // vstore8..64 builtins use (it waits for completion). This used to be
+        // a DMB ISH (ordering only), so the block form and vstoreN disagreed
+        // on arm64 --legacy.
         // volatile is data3 bit 4 — see the load path above.
         uint32 vol_flag2 = ast_data3(node)
         uint64 wvf2 = vol_flag2
-        if (wvf2 & 16) != 0 { emit_a64(0xD5033BBF) }
+        if (wvf2 & 16) != 0 { emit_a64(0xD5033F9F) }
         if wts == 1 { emit_a64_strb(0, 10, 0) }
         else if wts == 2 { emit_a64_strh(0, 10, 0) }
         else if wts == 4 { emit_a64_str32(0, 10, 0) }
