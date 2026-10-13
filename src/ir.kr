@@ -5194,6 +5194,31 @@ fn ir_lower_stmt(uint64 node) {
         // IR_FADD.
         uint64 vfk = ir_fkind_from_decl(fk)
         if vfk != 0 { ir_vreg_fkind_set(dest_v, vfk) }
+        // data4 = the `as TYPE` keyword when it is a SIGNED integer (84..87,
+        // see parser.kr). `*(p as i8) -> x` reads an i8: the load above
+        // zero-extends, so a narrower-than-word signed load is sign-extended
+        // here (shl then sar by word_bits - 8*width), and the vreg is marked
+        // signed so `x < 0`, `x / 2` and `x >> 1` pick the signed ops. Before
+        // this, ir_var_set rebound dest to an UNSIGNED vreg -- so a declared
+        // `i64 x` lost its sign at this load and the undeclared form was
+        // never signed at all.
+        uint32 pl_sk32 = ast_data4(node)
+        uint64 pl_sk = pl_sk32
+        if pl_sk != 0 {
+            uint64 pl_word = 64
+            if target_arch != 0 && target_arch != 1 { pl_word = 32 }
+            uint64 pl_sh = pl_word - type_size * 8
+            if type_size * 8 < pl_word {
+                uint64 pl_amt = ir_new_vreg()
+                ir_emit(IR_CONST, pl_amt, 0, 0, pl_sh, ir_current_bb)
+                uint64 pl_hi = ir_new_vreg()
+                ir_emit(IR_SHL, pl_hi, dest_v, pl_amt, 0, ir_current_bb)
+                uint64 pl_sx = ir_new_vreg()
+                ir_emit(IR_SAR, pl_sx, pl_hi, pl_amt, 0, ir_current_bb)
+                dest_v = pl_sx
+            }
+            ir_vreg_signed_set(dest_v, 1)
+        }
         // Bind dest variable
         uint32 dest_tok = ast_data2(node)
         ir_var_set(dest_tok, dest_v)

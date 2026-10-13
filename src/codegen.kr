@@ -13261,21 +13261,40 @@ fn gen_stmt(uint64 node) {
         uint32 addr_child = ast_child(node)
         uint64 wa = addr_child
         gen_expr(wa)
+        // data4 = the `as TYPE` keyword when it is a signed integer (84..87,
+        // see parser.kr), else 0: a signed cast sign-extends from its width.
+        uint32 pl_sk32 = ast_data4(node)
+        uint64 pl_sk = pl_sk32
         // rax = address. Do indirect load based on type_size.
         if wts == 1 {
-            // movzbl (%rax), %eax
-            emit_byte(0x0F)
-            emit_byte(0xB6)
-            emit_byte(0x00)
+            if pl_sk != 0 {
+                // movsbq (%rax), %rax
+                emit_byte(0x48); emit_byte(0x0F); emit_byte(0xBE); emit_byte(0x00)
+            } else {
+                // movzbl (%rax), %eax
+                emit_byte(0x0F)
+                emit_byte(0xB6)
+                emit_byte(0x00)
+            }
         } else if wts == 2 {
-            // movzwl (%rax), %eax
-            emit_byte(0x0F)
-            emit_byte(0xB7)
-            emit_byte(0x00)
+            if pl_sk != 0 {
+                // movswq (%rax), %rax
+                emit_byte(0x48); emit_byte(0x0F); emit_byte(0xBF); emit_byte(0x00)
+            } else {
+                // movzwl (%rax), %eax
+                emit_byte(0x0F)
+                emit_byte(0xB7)
+                emit_byte(0x00)
+            }
         } else if wts == 4 {
-            // movl (%rax), %eax
-            emit_byte(0x8B)
-            emit_byte(0x00)
+            if pl_sk != 0 {
+                // movslq (%rax), %rax
+                emit_byte(0x48); emit_byte(0x63); emit_byte(0x00)
+            } else {
+                // movl (%rax), %eax
+                emit_byte(0x8B)
+                emit_byte(0x00)
+            }
         } else {
             // movq (%rax), %rax
             emit_byte(0x48)
@@ -13323,6 +13342,9 @@ fn gen_stmt(uint64 node) {
         }
         if wpl_fk == 1 { var_type_register(dest_tok, 96) }
         if wpl_fk == 2 { var_type_register(dest_tok, 95) }
+        // A signed cast types dest signed (i8..i64 = 84..87), as the float
+        // kinds above type it float, so `x < 0` / `x / 2` / `x >> 1` are signed.
+        if pl_sk != 0 { var_type_register(dest_tok, pl_sk) }
         emit_store_rax_to_stack(doff)
         return
     }

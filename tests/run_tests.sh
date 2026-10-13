@@ -7102,6 +7102,78 @@ for VX_F in f64 f32 f16; do
         done
     done
 done
+# vx_rows NAME WANT -- run "$VX_T/u.kr" on every backend that runs here
+# (x86_64 and arm64, IR and --legacy) and want exit status WANT from each.
+vx_rows() {
+    for VX_C in "x86_64|" "x86_64|--legacy" "arm64|" "arm64|--legacy"; do
+        VX_A=${VX_C%%|*}; VX_M=${VX_C#*|}
+        TOTAL=$((TOTAL + 1))
+        VX_ROW="$1 $VX_A${VX_M:+ $VX_M}"
+        or_runner $VX_A "$VX_ROW" || continue
+        VX_GOT=$(vx_run $VX_A "$VX_M" "$VX_T/u.kr")
+        if [ "$VX_GOT" = "$2" ]; then
+            PASS=$((PASS + 1))
+        else
+            echo "FAIL: $VX_ROW (got $VX_GOT, want $2)"
+            FAIL=$((FAIL + 1))
+        fi
+    done
+}
+# The `as TYPE` clause types the `->` destination WHEREVER it lives, not only
+# when the load declares it (KernRift 3b95554 registers the float kind for a
+# found dest too). These are the review-round-7 type-matrix shapes the
+# undeclared-only registration got wrong on both legacy backends -- IR said 3,
+# legacy said 1 (x + x added the float bits as integers):
+#   deadscope  `if p != 0 { u64 x = 7 }` left x in the table; then `-> x`
+#   rebind     `*(p as u64) -> x` then `*(p as F) -> x`
+#   param      x is a `u64` parameter
+#   otherfloat a declared `f32 x` loaded as f64
+# Every row wants 3 (y = x + x == 3.0 in F) on all four configs. The mirror
+# shape (a declared `f64 x` loaded as f32, then `f64 y = x + x`) is not here:
+# it reaches a separate legacy defect -- `f32 a = 1.5; f64 y = a + a` is 1,
+# not 3, on both legacy backends (no f32 -> f64 widening at an f64 VarDecl;
+# MLRift's emit_float_store_convert) -- reported, not fixed in this branch.
+for VX_F in f64 f32; do
+    if [ "$VX_F" = f64 ]; then VX_O=f32; else VX_O=f64; fi
+    for VX_KW in unsafe volatile; do
+        VX_PRE=$(printf '    u64 p = alloc(64)\n    %s v = 1.5\n    unsafe { *(p as %s) = v }' "$VX_F" "$VX_F")
+        VX_CHK=$(printf '    %s y = x + x\n    %s w = 3.0\n    if y == w { exit(3) }\n    exit(1)' "$VX_F" "$VX_F")
+        printf 'fn main() {\n%s\n    if p != 0 { u64 x = 7 }\n    %s { *(p as %s) -> x }\n%s\n}\n' "$VX_PRE" "$VX_KW" "$VX_F" "$VX_CHK" > "$VX_T/u.kr"
+        vx_rows "ptr_load_found_dest deadscope $VX_F $VX_KW" 3
+        printf 'fn main() {\n%s\n    %s { *(p as u64) -> x }\n    %s { *(p as %s) -> x }\n%s\n}\n' "$VX_PRE" "$VX_KW" "$VX_KW" "$VX_F" "$VX_CHK" > "$VX_T/u.kr"
+        vx_rows "ptr_load_found_dest rebind $VX_F $VX_KW" 3
+        printf 'fn g(u64 x, u64 p) -> u64 {\n    %s { *(p as %s) -> x }\n    %s y = x + x\n    %s w = 3.0\n    if y == w { return 3 }\n    return 1\n}\nfn main() {\n%s\n    exit(g(0, p))\n}\n' "$VX_KW" "$VX_F" "$VX_F" "$VX_F" "$VX_PRE" > "$VX_T/u.kr"
+        vx_rows "ptr_load_found_dest param $VX_F $VX_KW" 3
+        if [ "$VX_F" = f64 ]; then
+            printf 'fn main() {\n%s\n    %s x = 0.0\n    %s { *(p as %s) -> x }\n    %s y = x + x\n    %s w = 3.0\n    if y == w { exit(3) }\n    exit(1)\n}\n' "$VX_PRE" "$VX_O" "$VX_KW" "$VX_F" "$VX_O" "$VX_O" > "$VX_T/u.kr"
+            vx_rows "ptr_load_found_dest otherfloat $VX_F-into-$VX_O $VX_KW" 3
+        fi
+    done
+done
+# A signed `as iN` load reads an iN: it sign-extends from N bits and types the
+# destination signed, declared or not, on every backend. The IR rebound dest
+# to an untyped vreg (a declared `i64 x` lost its sign at the load, so
+# `x < 0` was false and `x / 2` divided unsigned), the undeclared form was
+# never signed anywhere, and every narrower load zero-extended (0xFA as i8
+# read back as 250). Memory holds -6; the program exits 100 + a mask of the
+# wrong answers: 1 = `x < 0` false, 2 = `x / 2` != -3, 4 = `x >> 1` != -3.
+for VX_T8 in i8 i16 i32 i64; do
+    for VX_KW in unsafe volatile; do
+        for VX_D in declared undeclared; do
+            VX_DECL=""
+            [ "$VX_D" = declared ] && VX_DECL=$(printf '    %s x = 0' "$VX_T8")
+            printf 'fn main() {\n    u64 p = alloc(64)\n    store64(p, 0xFFFFFFFFFFFFFFFA)\n%s\n    %s { *(p as %s) -> x }\n    u64 r = 100\n    if x >= 0 { r = r + 1 }\n    i64 h = x / 2\n    if h != -3 { r = r + 2 }\n    i64 s = x >> 1\n    if s != -3 { r = r + 4 }\n    exit(r)\n}\n' "$VX_DECL" "$VX_KW" "$VX_T8" > "$VX_T/u.kr"
+            vx_rows "ptr_load_signed_dest $VX_T8 $VX_KW $VX_D" 100
+        done
+    done
+done
+# ...and an unsigned cast still zero-extends: 0x..FA as uN, then >> 1 is a
+# logical shift of the zero-extended value.
+for VX_UW in "u8 125" "u16 32765" "u32 2147483645" "u64 9223372036854775805"; do
+    VX_UT=${VX_UW%% *}; VX_UV=${VX_UW#* }
+    printf 'fn main() {\n    u64 p = alloc(64)\n    store64(p, 0xFFFFFFFFFFFFFFFA)\n    unsafe { *(p as %s) -> x }\n    u64 s = x >> 1\n    if s != %s { exit(12) }\n    exit(3)\n}\n' "$VX_UT" "$VX_UV" > "$VX_T/u.kr"
+    vx_rows "ptr_load_unsigned_dest_zero_extends $VX_UT" 3
+done
 # 5. Alignment. A volatile access must be naturally aligned (LANGUAGE.md,
 # UNDEFINED_BEHAVIOR.md): arm64 IR lowers it to LDAR/STLR, which fault on a
 # misaligned address, so a misaligned one is undefined on every backend and
