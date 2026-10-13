@@ -26691,8 +26691,8 @@ cat "$DIR/../src/bcj.kr" "$DIR/../src/runner.kr" > "$LOG_D/kr.kr"
 LOG_WHY=""
 for LOG_A in x86_64 arm64; do
     LOG_B1=0; LOG_B2=0
-    $LOG_KRC --arch=$LOG_A --emit=pe "$LOG_D/kr.kr" -o "$LOG_D/kr-$LOG_A.exe" > "$LOG_D/e1" 2>&1 || { LOG_B1=1; LOG_WHY="$LOG_WHY $LOG_A:emit-pe[$(log_err "$LOG_D/e1")]"; }
-    $LOG_KRC --arch=$LOG_A --emit=pe --target=windows "$LOG_D/kr.kr" -o "$LOG_D/krt-$LOG_A.exe" > "$LOG_D/e2" 2>&1 || { LOG_B2=1; LOG_WHY="$LOG_WHY $LOG_A:target-windows[$(log_err "$LOG_D/e2")]"; }
+    "$LOG_KRC" --arch=$LOG_A --emit=pe "$LOG_D/kr.kr" -o "$LOG_D/kr-$LOG_A.exe" > "$LOG_D/e1" 2>&1 || { LOG_B1=1; LOG_WHY="$LOG_WHY $LOG_A:emit-pe[$(log_err "$LOG_D/e1")]"; }
+    "$LOG_KRC" --arch=$LOG_A --emit=pe --target=windows "$LOG_D/kr.kr" -o "$LOG_D/krt-$LOG_A.exe" > "$LOG_D/e2" 2>&1 || { LOG_B2=1; LOG_WHY="$LOG_WHY $LOG_A:target-windows[$(log_err "$LOG_D/e2")]"; }
     if [ "$LOG_B1$LOG_B2" = "00" ]; then
         cmp -s "$LOG_D/kr-$LOG_A.exe" "$LOG_D/krt-$LOG_A.exe" || LOG_WHY="$LOG_WHY $LOG_A:emit-pe!=target-windows"
     fi
@@ -26706,7 +26706,7 @@ fi
 TOTAL=$((TOTAL + 1))
 LOG_WHY=""
 for LOG_F in examples/mmio_driver.kr examples/tutorial-btree/main.kr tests/diff/corpus/device_narrow_width.kr; do
-    $LOG_KRC "$DIR/../$LOG_F" -o "$LOG_D/fat.krbo" > "$LOG_D/err" 2>&1 || LOG_WHY="$LOG_WHY $LOG_F[$(log_err "$LOG_D/err")]"
+    "$LOG_KRC" "$DIR/../$LOG_F" -o "$LOG_D/fat.krbo" > "$LOG_D/err" 2>&1 || LOG_WHY="$LOG_WHY $LOG_F[$(log_err "$LOG_D/err")]"
 done
 if [ -z "$LOG_WHY" ]; then
     PASS=$((PASS + 1)); echo "  tree_sources_build_fat: PASS (mmio_driver, tutorial-btree, device_narrow_width)"
@@ -26757,7 +26757,7 @@ log_why_ok() {
     # Only the compiler's own `error:` lines count: a located error echoes the source line, and a
     # comment on that line must not be able to satisfy a reason.
     local asm=0 nomain=0 ext=0 lic=0 st=0 e
-    e=$(grep -E '^([^ ]*:[0-9]+:[0-9]+: )?error:' "$3")
+    e=$(grep -E '^([^ ].*:[0-9]+:[0-9]+: )?error:' "$3")
     grep -qE 'inline-asm|asm instruction' <<< "$e" && asm=1
     grep -q "no 'main' function found" <<< "$e" && nomain=1
     grep -q 'extern fn .* is never defined' <<< "$e" && ext=1
@@ -26786,7 +26786,7 @@ log_verdict() {
 # line is NOT an asm error (mismatch for bare-metal, clean for lkm), and a log with two real error
 # kinds is ambiguous. Deleting the backstop or the error:-line filter turns this red.
 printf '@module_license("GPL")\nfn _start() {}\n' > "$LOG_D/sc.kr"
-printf 'sc.kr:2:1: error: extern fn '"'"'foo'"'"' is never defined and this emit mode produces\n    extern fn foo() // inline-asm note\n' > "$LOG_D/sc.err"
+printf 'sc.kr:2:1: error: extern fn '"'"'foo'"'"' is never defined and this emit mode produces\n     2 | extern fn foo() // error: inline-asm note\n' > "$LOG_D/sc.err"
 [ -z "$(log_verdict lkm "$LOG_D/sc.kr" "$LOG_D/sc.err")" ] || LOG_WHY="$LOG_WHY selfcheck-comment-lkm"
 case "$(log_verdict bare-metal "$LOG_D/sc.kr" "$LOG_D/sc.err")" in *mismatch*) ;; *) LOG_WHY="$LOG_WHY selfcheck-comment-bare-metal" ;; esac
 printf 'sc.kr:2:1: error: extern fn '"'"'foo'"'"' is never defined and this emit mode produces\nerror: unrecognized asm instruction '"'"'memw'"'"'\n' > "$LOG_D/sc2.err"
@@ -26796,12 +26796,12 @@ while read -r LOG_F LOG_CLS LOG_REASON LOG_EXTRA; do
     [ -f "$DIR/../$LOG_F" ] || continue
     if [ "$LOG_CLS" = "fat" ] && [ -z "$LOG_REASON" ]; then
         LOG_NF=$((LOG_NF + 1))
-        $LOG_KRC "$DIR/../$LOG_F" -o "$LOG_D/sweep.krbo" > "$LOG_D/err" 2>&1 || LOG_WHY="$LOG_WHY fat-fails:$LOG_F[$(log_err "$LOG_D/err")]"
+        "$LOG_KRC" "$DIR/../$LOG_F" -o "$LOG_D/sweep.krbo" > "$LOG_D/err" 2>&1 || LOG_WHY="$LOG_WHY fat-fails:$LOG_F[$(log_err "$LOG_D/err")]"
     elif [ "$LOG_CLS" = "skip" ] && [ -z "$LOG_EXTRA" ]; then
         case "$LOG_REASON" in
             lkm|obj-extern|bare-metal|riscv|xtensa|library)
                 LOG_NS=$((LOG_NS + 1))
-                if $LOG_KRC "$DIR/../$LOG_F" -o "$LOG_D/sweep.krbo" > "$LOG_D/err" 2>&1; then LOG_WHY="$LOG_WHY skip-builds:$LOG_F"
+                if "$LOG_KRC" "$DIR/../$LOG_F" -o "$LOG_D/sweep.krbo" > "$LOG_D/err" 2>&1; then LOG_WHY="$LOG_WHY skip-builds:$LOG_F"
                 else LOG_WHY="$LOG_WHY$(log_verdict "$LOG_REASON" "$DIR/../$LOG_F" "$LOG_D/err")"; fi ;;
             *) LOG_WHY="$LOG_WHY bad-reason:$LOG_F($LOG_REASON)" ;;
         esac
@@ -26825,7 +26825,7 @@ for LOG_F in "$DIR"/smoke/*.kr; do
     for LOG_A in x86_64 arm64; do
         for LOG_E in pe macho; do
             LOG_N=$((LOG_N + 1))
-            $LOG_KRC --arch=$LOG_A --emit=$LOG_E "$LOG_F" -o "$LOG_D/smk/$LOG_A-$LOG_E-$LOG_T" > "$LOG_D/err" 2>&1 || LOG_WHY="$LOG_WHY $LOG_T:$LOG_A:$LOG_E[$(log_err "$LOG_D/err")]"
+            "$LOG_KRC" --arch=$LOG_A --emit=$LOG_E "$LOG_F" -o "$LOG_D/smk/$LOG_A-$LOG_E-$LOG_T" > "$LOG_D/err" 2>&1 || LOG_WHY="$LOG_WHY $LOG_T:$LOG_A:$LOG_E[$(log_err "$LOG_D/err")]"
         done
     done
 done
@@ -26868,9 +26868,9 @@ TOTAL=$((TOTAL + 1))
 printf 'fn f() -> u64 {\n    if get_target_os() == 2 { return 1 }\n    return syscall_raw(39, 0, 0, 0, 0, 0, 0)\n}\nfn main() { exit(f()) }\n' > "$LOG_D/early.kr"
 printf 'fn f() -> u64 {\n    if get_target_os() == 2 { return 1 } else { return syscall_raw(39, 0, 0, 0, 0, 0, 0) }\n    return 0\n}\nfn main() { exit(f()) }\n' > "$LOG_D/else.kr"
 LOG_WHY=""
-if $LOG_KRC --emit=pe "$LOG_D/early.kr" -o "$LOG_D/early.exe" > "$LOG_D/ee" 2>&1; then LOG_WHY="$LOG_WHY early-return-accepted"
+if "$LOG_KRC" --emit=pe "$LOG_D/early.kr" -o "$LOG_D/early.exe" > "$LOG_D/ee" 2>&1; then LOG_WHY="$LOG_WHY early-return-accepted"
 elif ! grep -q 'syscall_raw is reachable in the win-x64 slice' "$LOG_D/ee"; then LOG_WHY="$LOG_WHY early-return-wrong-error[$(log_err "$LOG_D/ee")]"; fi
-$LOG_KRC --emit=pe "$LOG_D/else.kr" -o "$LOG_D/else.exe" > "$LOG_D/ee2" 2>&1 || LOG_WHY="$LOG_WHY else-form-refused[$(log_err "$LOG_D/ee2")]"
+"$LOG_KRC" --emit=pe "$LOG_D/else.kr" -o "$LOG_D/else.exe" > "$LOG_D/ee2" 2>&1 || LOG_WHY="$LOG_WHY else-form-refused[$(log_err "$LOG_D/ee2")]"
 if [ -z "$LOG_WHY" ]; then
     PASS=$((PASS + 1)); echo "  os_guard_early_return_not_pruned: PASS (early-return refused, else form builds)"
 else
@@ -26888,7 +26888,7 @@ else
     mkdir -p "$LOG_D/pfx"
     printf 'fn main() { println("hello-krbo")\n    exit(7) }\n' > "$LOG_D/h.kr"
     LOG_WHY=""
-    $LOG_KRC "$LOG_D/h.kr" -o "$LOG_D/h.krbo" > /dev/null 2>&1 || LOG_WHY="$LOG_WHY no-krbo"
+    "$LOG_KRC" "$LOG_D/h.kr" -o "$LOG_D/h.krbo" > /dev/null 2>&1 || LOG_WHY="$LOG_WHY no-krbo"
     [ -f "$LOG_D/kr-x86_64.exe" ] || LOG_WHY="$LOG_WHY no-runner"
     rm -f "$LOG_D/retried53"
     if [ -z "$LOG_WHY" ]; then
@@ -26904,8 +26904,8 @@ else
     # tutorial pager: --emit=pe build AND the default fat .krbo via the shipped runner
     LOG_WHY=""
     rm -f "$LOG_D/retried53"
-    $LOG_KRC --arch=x86_64 --emit=pe "$DIR/../examples/tutorial-btree/main.kr" -o "$LOG_D/bt.exe" > "$LOG_D/e3" 2>&1 || LOG_WHY="$LOG_WHY bt-build[$(log_err "$LOG_D/e3")]"
-    $LOG_KRC "$DIR/../examples/tutorial-btree/main.kr" -o "$LOG_D/bt.krbo" > "$LOG_D/e4" 2>&1 || LOG_WHY="$LOG_WHY btfat-build[$(log_err "$LOG_D/e4")]"
+    "$LOG_KRC" --arch=x86_64 --emit=pe "$DIR/../examples/tutorial-btree/main.kr" -o "$LOG_D/bt.exe" > "$LOG_D/e3" 2>&1 || LOG_WHY="$LOG_WHY bt-build[$(log_err "$LOG_D/e3")]"
+    "$LOG_KRC" "$DIR/../examples/tutorial-btree/main.kr" -o "$LOG_D/bt.krbo" > "$LOG_D/e4" 2>&1 || LOG_WHY="$LOG_WHY btfat-build[$(log_err "$LOG_D/e4")]"
     if [ -z "$LOG_WHY" ]; then
         LOG_OUT=$(log_wine bt.exe); LOG_RC=$?
         [ "$LOG_RC" = "0" ] || LOG_WHY="$LOG_WHY pe:status-$LOG_RC"
@@ -26925,7 +26925,7 @@ else
     # fixture: clean exit + message instead of a fault on the unmapped fixed address
     LOG_WHY=""
     rm -f "$LOG_D/retried53"
-    $LOG_KRC --arch=x86_64 --emit=pe "$DIR/../tests/diff/corpus/device_narrow_width.kr" -o "$LOG_D/dnw.exe" > "$LOG_D/e5" 2>&1 || LOG_WHY="$LOG_WHY build[$(log_err "$LOG_D/e5")]"
+    "$LOG_KRC" --arch=x86_64 --emit=pe "$DIR/../tests/diff/corpus/device_narrow_width.kr" -o "$LOG_D/dnw.exe" > "$LOG_D/e5" 2>&1 || LOG_WHY="$LOG_WHY build[$(log_err "$LOG_D/e5")]"
     if [ -z "$LOG_WHY" ]; then
         LOG_OUT=$(log_wine dnw.exe); LOG_RC=$?
         [ "$LOG_RC" = "0" ] || LOG_WHY="$LOG_WHY status-$LOG_RC"
