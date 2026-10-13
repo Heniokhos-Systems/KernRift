@@ -40,6 +40,19 @@ if [ "$ARCH" = "aarch64" ] || [ "$ARCH" = "arm64" ]; then RUN_ARCH="arm64"; fi
 PASS=0
 FAIL=0
 TOTAL=0
+# Wine selection (one rule for every Wine row). KR_WINE unset: use `wine` from PATH, and
+# a missing wine is a declared SKIP (wine_na). KR_WINE set but empty or not an executable
+# file is a misconfiguration: wine_path yields nothing and wine_na FAILS, so a mistyped
+# path cannot turn the Windows-run rows into a green SKIP.
+KR_WINE_BAD=""
+if [ "${KR_WINE+set}" = set ] && { [ -z "$KR_WINE" ] || [ ! -x "$KR_WINE" ]; }; then
+    KR_WINE_BAD="KR_WINE='${KR_WINE}' is not an executable file"
+fi
+wine_path() { [ -n "$KR_WINE_BAD" ] && return 0; echo "${KR_WINE:-$(command -v wine 2>/dev/null || true)}"; }
+wine_na() {   # <row>: no usable wine -- SKIP if none was asked for, FAIL if KR_WINE is wrong
+    if [ -n "$KR_WINE_BAD" ]; then FAIL=$((FAIL + 1)); echo "FAIL: $1 ($KR_WINE_BAD)"
+    else PASS=$((PASS + 1)); echo "  $1: SKIP (no wine; set KR_WINE=<path to wine>)"; fi
+}
 
 run_test() {
     local name="$1"
@@ -9927,9 +9940,9 @@ rwi_refuses win_import_float_return_refused win_import_float_ret.kr \
 #     rather than refusing to load, so this proves the calls ran correctly,
 #     not that a strict loader would bind every name.
 TOTAL=$((TOTAL + 1))
-RWI_WINE="${KR_WINE:-$(command -v wine 2>/dev/null || true)}"
+RWI_WINE="$(wine_path)"
 if [ -z "$RWI_WINE" ] || [ ! -x "$RWI_WINE" ]; then
-    PASS=$((PASS + 1)); echo "  win_import_runs_under_wine: SKIP (no wine; set KR_WINE=<path to wine>)"
+    wine_na win_import_runs_under_wine
 else
     RWI_WHY=""
     mkdir -p "$RWI_DIR/run" "$RWI_DIR/pfx"
@@ -26701,7 +26714,7 @@ else
     FAIL=$((FAIL + 1)); echo "FAIL: tree_sources_build_fat ($LOG_WHY )"
 fi
 # Wine helpers (shared by the smoke run row and the Wine rows below).
-LOG_WINE="${KR_WINE:-$(command -v wine 2>/dev/null || true)}"
+LOG_WINE="$(wine_path)"
 # stderr is KEPT (log_errtail shows it in a FAIL). One retry of exactly "status
 # 53 with empty stdout" -- Wine's "could not load kernel32.dll, status
 # c0000135": a prefix whose initialisation did not complete (seen only inside
@@ -26741,16 +26754,25 @@ for LOG_F in $(comm -13 "$LOG_D/ex.have" "$LOG_D/ex.uniq"); do LOG_WHY="$LOG_WHY
 for LOG_F in $(uniq -d "$LOG_D/ex.listed"); do LOG_WHY="$LOG_WHY duplicate:$LOG_F"; done
 # log_why_ok <reason> <file> <errfile>: does the build error match the reason?
 log_why_ok() {
-    grep -q 'syscall_raw is reachable' "$3" && return 1
+    local asm=0 nomain=0 ext=0 lic=0 st=0
+    grep -qE 'inline-asm|asm instruction' "$3" && asm=1
+    grep -q "no 'main' function found" "$3" && nomain=1
+    grep -q 'extern fn .* is never defined' "$3" && ext=1
+    grep -q '@module_license' "$2" && lic=1
+    grep -q 'fn _start' "$2" && st=1
     case "$1" in
-        library)    grep -q "no 'main' function found" "$3" ;;
-        lkm)        grep -q 'extern fn .* is never defined' "$3" && grep -q '@module_license' "$2" ;;
-        obj-extern) grep -q 'extern fn .* is never defined' "$3" ;;
-        bare-metal) grep -qE 'inline-asm|asm instruction' "$3" || { grep -q "no 'main' function found" "$3" && grep -q 'fn _start' "$2"; } ;;
-        riscv|xtensa) grep -qE 'inline-asm|asm instruction' "$3" ;;
+        library)    [ $nomain = 1 ] && [ $st = 0 ] ;;
+        lkm)        [ $ext = 1 ] && [ $lic = 1 ] ;;
+        obj-extern) [ $ext = 1 ] && [ $lic = 0 ] ;;
+        riscv)      case "$2" in */examples/riscv-*) [ $asm = 1 ] ;; *) return 1 ;; esac ;;
+        xtensa)     case "$2" in */examples/xtensa/*) [ $asm = 1 ] ;; *) return 1 ;; esac ;;
+        bare-metal) case "$2" in */examples/riscv-*|*/examples/xtensa/*) return 1 ;; esac
+                    [ $asm = 1 ] || { [ $nomain = 1 ] && [ $st = 1 ]; } ;;
         *) return 1 ;;
     esac
 }
+# log_why_all <file> <errfile>: every reason whose check passes (the matrix: exactly the declared one may).
+log_why_all() { local r o=""; for r in library lkm obj-extern bare-metal riscv xtensa; do log_why_ok "$r" "$1" "$2" && o="$o $r"; done; echo "$o"; }
 while read -r LOG_F LOG_CLS LOG_REASON LOG_EXTRA; do
     case "$LOG_F" in ''|'#'*) continue ;; esac
     [ -f "$DIR/../$LOG_F" ] || continue
@@ -26762,7 +26784,8 @@ while read -r LOG_F LOG_CLS LOG_REASON LOG_EXTRA; do
             lkm|obj-extern|bare-metal|riscv|xtensa|library)
                 LOG_NS=$((LOG_NS + 1))
                 if $LOG_KRC "$DIR/../$LOG_F" -o "$LOG_D/sweep.krbo" > "$LOG_D/err" 2>&1; then LOG_WHY="$LOG_WHY skip-builds:$LOG_F"
-                elif ! log_why_ok "$LOG_REASON" "$DIR/../$LOG_F" "$LOG_D/err"; then LOG_WHY="$LOG_WHY skip-reason-mismatch:$LOG_F($LOG_REASON)[$(log_err "$LOG_D/err")]"; fi ;;
+                elif ! log_why_ok "$LOG_REASON" "$DIR/../$LOG_F" "$LOG_D/err"; then LOG_WHY="$LOG_WHY skip-reason-mismatch:$LOG_F($LOG_REASON)[$(log_err "$LOG_D/err")]"
+                elif [ "$(log_why_all "$DIR/../$LOG_F" "$LOG_D/err")" != " $LOG_REASON" ]; then LOG_WHY="$LOG_WHY skip-reason-ambiguous:$LOG_F($LOG_REASON;passes:$(log_why_all "$DIR/../$LOG_F" "$LOG_D/err"))"; fi ;;
             *) LOG_WHY="$LOG_WHY bad-reason:$LOG_F($LOG_REASON)" ;;
         esac
     else
@@ -26802,7 +26825,7 @@ fi
 #      without wine (set KR_WINE=<path to wine>).
 TOTAL=$((TOTAL + 1))
 if [ -z "$LOG_WINE" ] || [ ! -x "$LOG_WINE" ]; then
-    PASS=$((PASS + 1)); echo "  smoke_pe_runs_under_wine: SKIP (no wine; set KR_WINE=<path to wine>)"
+    wine_na smoke_pe_runs_under_wine
 else
     mkdir -p "$LOG_D/pfx"
     LOG_WHY=""; LOG_N=0
@@ -26842,7 +26865,7 @@ fi
 TOTAL=$((TOTAL + 3))
 if [ -z "$LOG_WINE" ] || [ ! -x "$LOG_WINE" ]; then
     for LOG_R in runner_windows_runs_krbo_under_wine tutorial_btree_works_on_windows device_narrow_width_clean_on_windows; do
-        PASS=$((PASS + 1)); echo "  $LOG_R: SKIP (no wine; set KR_WINE=<path to wine>)"
+        wine_na "$LOG_R"
     done
 else
     mkdir -p "$LOG_D/pfx"
@@ -27376,7 +27399,7 @@ rm -rf "$DUP_D"
 ALI_D=$(mktemp -d /tmp/kralias_XXXXXX)
 ALI_FX="$DIR/fixtures/alias_byte_addr.kr"
 ALI_QEMU="$(command -v qemu-aarch64-static || command -v qemu-aarch64 || true)"
-ALI_WINE="${KR_WINE:-$(command -v wine 2>/dev/null || true)}"
+ALI_WINE="$(wine_path)"
 ali_check() {   # <row> <rc> <stdout file>
     if [ "$2" = "0" ] && [ "$(tr -d '\r' < "$3")" = "OK" ]; then PASS=$((PASS + 1)); echo "  $1: PASS"
     else FAIL=$((FAIL + 1)); echo "FAIL: $1 (rc=$2 -- the failing check's number -- stdout '$(tr -d '\r' < "$3" | head -c 40)')"; fi
@@ -27395,7 +27418,7 @@ elif "$DIR/../build/krc2" --arch=arm64 "$ALI_FX" -o "$ALI_D/aa" > "$ALI_D/b.log"
 else FAIL=$((FAIL + 1)); echo "FAIL: alias_byte_addr_arm64_qemu (build: $(grep -m1 error "$ALI_D/b.log"))"; fi
 TOTAL=$((TOTAL + 1))
 if [ -z "$ALI_WINE" ]; then
-    PASS=$((PASS + 1)); echo "  alias_byte_addr_windows_wine: SKIP (no wine; set KR_WINE=<path to wine>)"
+    wine_na alias_byte_addr_windows_wine
 elif "$DIR/../build/krc2" --arch=x86_64 --target=windows --emit=pe "$ALI_FX" -o "$ALI_D/a.exe" > "$ALI_D/b.log" 2>&1; then
     mkdir -p "$ALI_D/pfx"
     for ALI_T in 1 2; do
@@ -27603,7 +27626,7 @@ C7_D=/tmp/krc_c7_$$
 mkdir -p "$C7_D/run" "$C7_D/pfx" "$C7_D/pfxja"
 C7_FX="$DIR/fixtures"
 C7_KRC="$DIR/../build/krc2"
-C7_WINE="${KR_WINE:-$(command -v wine 2>/dev/null || true)}"
+C7_WINE="$(wine_path)"
 C7_QEMU="$(command -v qemu-aarch64-static || command -v qemu-aarch64 || true)"
 c7_ok() { PASS=$((PASS + 1)); echo "  $1: PASS${2:+ ($2)}"; }
 c7_bad() { FAIL=$((FAIL + 1)); echo "  $1: FAIL ($2 )"; }
@@ -28233,7 +28256,7 @@ if [ -z "$C7_WINE" ] || [ ! -x "$C7_WINE" ]; then
                 c7_runner_krbo_arg_with_space_wine c7_exec_argv_too_long_exit_122_wine c7_exec_argv_limit_boundary_wine \
                 c7_exec_argv_missing_child_exit_124_wine c7_acp_is_932_in_ja_prefix_wine \
                 c7_raw_cmdline_table_cp932_wine c7_exec_argv_roundtrip_cp932_wine; do
-        c7_skip "$C7_R" "no wine; set KR_WINE=<path to wine>"
+        wine_na "$C7_R"
     done
 else
     # cli_argc is the real count: 3 for `a b`, as on Linux (was 255).
@@ -28369,7 +28392,7 @@ T10_D=/tmp/krc_t10_$$
 mkdir -p "$T10_D/pfx"
 T10_FX="$DIR/fixtures"
 T10_KRC="$DIR/../build/krc2"
-T10_WINE="${KR_WINE:-$(command -v wine 2>/dev/null || true)}"
+T10_WINE="$(wine_path)"
 T10_QEMU="$(command -v qemu-aarch64-static || command -v qemu-aarch64 || true)"
 t10_ok() { PASS=$((PASS + 1)); echo "  $1: PASS${2:+ ($2)}"; }
 t10_bad() { FAIL=$((FAIL + 1)); echo "FAIL: $1 ($2)"; }
@@ -28534,7 +28557,7 @@ fi
 
 if [ -z "$T10_WINE" ]; then
     for T10_R in sys_args_windows_equals_linux_wine sys_args_legacy_sentinel_reads_as_no_arguments_wine; do
-        TOTAL=$((TOTAL + 1)); t10_skip "$T10_R" "no wine; set KR_WINE=<path to wine>"
+        TOTAL=$((TOTAL + 1)); wine_na "$T10_R"
     done
 else
     # Step 3b: C7 seen through std/args.kr. The Windows program's argc and
@@ -28655,7 +28678,7 @@ fi
 
 if [ -z "$T10_WINE" ]; then
     for T10_R in sys_loopback_windows_wine sys_random_windows_wine sys_sock_errors_windows_wine sys_send_epipe_windows_wine; do
-        TOTAL=$((TOTAL + 1)); t10_skip "$T10_R" "no wine; set KR_WINE=<path to wine>"
+        TOTAL=$((TOTAL + 1)); wine_na "$T10_R"
     done
 else
     # The very fixtures the Linux rows run, as Windows x86_64 programs: same
@@ -28890,7 +28913,7 @@ fi
 
 if [ -z "$T10_WINE" ]; then
     for T10_R in net_loopback_windows_wine time_monotonic_and_sleep_windows_wine time_ms_of_ns_windows_wine alloc_guard_smoke_windows_wine alloc_guard_fault_windows_wine alloc_guard_fault_read_windows_wine alloc_guard_refused_is_fatal_windows_wine alloc_guard_refused_names_allocator_windows_wine std_together_windows_wine net_user_names_windows_wine; do
-        TOTAL=$((TOTAL + 1)); t10_skip "$T10_R" "no wine; set KR_WINE=<path to wine>"
+        TOTAL=$((TOTAL + 1)); wine_na "$T10_R"
     done
 else
     # t12_wine <row> <source> <want stdout> <want rc> [want stderr]: the
