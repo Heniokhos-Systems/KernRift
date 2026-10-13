@@ -27411,7 +27411,7 @@ ali_runs alias_type_after_index_expression 12 'fn main() -> uint64 { uint64[2] a
 # declaration rules took `addr` for a type (refused as `unexpected 'uint64'`),
 # depending on how many interpolations came before it. Output pinned to the
 # pre-alias compiler's, natively and on arm64 under qemu.
-ali_fstr() {   # <row> <stdout> <print statement>
+ali_fstr() {   # <row> <stdout, a shell glob: `*` for an unpinnable prefix> <print statement>
     printf 'fn main() -> uint64 {\n    uint64 addr = 7\n    uint64 byte = 5\n    uint64 x = 3\n    uint64 a = 1\n    uint64 b = 2\n    %s\n    return 0\n}\n' "$3" > "$ALI_D/fs.kr"
     local arch out rc
     for arch in "$RUN_ARCH" arm64; do
@@ -27423,7 +27423,7 @@ ali_fstr() {   # <row> <stdout> <print statement>
         fi
         if [ "$arch" = "arm64" ] && [ "$RUN_ARCH" != "arm64" ]; then out=$(timeout 60 "$ALI_QEMU" "$ALI_D/fs" 2>&1); rc=$?
         else out=$("$ALI_D/fs" 2>&1); rc=$?; fi
-        if [ "$rc" = "0" ] && [ "$out" = "$2" ]; then PASS=$((PASS + 1)); echo "  ${1}_$arch: PASS ($out)"
+        if [ "$rc" = "0" ] && [[ "$out" == $2 ]]; then PASS=$((PASS + 1)); echo "  ${1}_$arch: PASS ($out)"
         else FAIL=$((FAIL + 1)); echo "FAIL: ${1}_$arch (rc=$rc printed '$out', want '$2')"; fi
     done
 }
@@ -27431,6 +27431,10 @@ ali_fstr alias_fstring_adjacent_first 73 'print(f"{addr}{x}\n")'
 ali_fstr alias_fstring_after_text 'n=73' 'print(f"n={addr}{x}\n")'
 ali_fstr alias_fstring_third_of_four 1273 'print(f"{a}{b}{addr}{x}\n")'
 ali_fstr alias_fstring_byte_adjacent 53 'print(f"{byte}{x}\n")'
+# A NESTED f-string: the guard holds at depth 2 too. The inner f-string's
+# value is a string pointer that differs run to run, so only the suffix after
+# `|` is pinned (`{byte}{x}` = 53).
+ali_fstr alias_fstring_nested '*|53' 'print(f"{f"{addr}{x}"}|{byte}{x}\n")'
 # ... and the guard ENDS with the f-string: an alias-typed declaration after
 # one is a type again (and sizeof(byte) inside one is still a type position).
 ali_fstr alias_fstring_then_declaration $'31\n9' 'print(f"{x}{sizeof(byte)}\n")
