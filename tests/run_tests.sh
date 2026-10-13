@@ -27406,6 +27406,36 @@ ali_runs alias_type_after_index_expression 12 'fn main() -> uint64 { uint64[2] a
     uint64 y = 0
     y = a[0]  addr ab = 9
     return y + ab }'
+# Inside an f-string an alias is a value. The token stream of f"{addr}{x}"
+# has no braces -- it reads `addr x` -- so without the f-string guard the
+# declaration rules took `addr` for a type (refused as `unexpected 'uint64'`),
+# depending on how many interpolations came before it. Output pinned to the
+# pre-alias compiler's, natively and on arm64 under qemu.
+ali_fstr() {   # <row> <stdout> <print statement>
+    printf 'fn main() -> uint64 {\n    uint64 addr = 7\n    uint64 byte = 5\n    uint64 x = 3\n    uint64 a = 1\n    uint64 b = 2\n    %s\n    return 0\n}\n' "$3" > "$ALI_D/fs.kr"
+    local arch out rc
+    for arch in "$RUN_ARCH" arm64; do
+        TOTAL=$((TOTAL + 1))
+        if [ "$arch" = "arm64" ] && [ "$RUN_ARCH" = "arm64" ]; then PASS=$((PASS + 1)); echo "  ${1}_arm64: SKIP (the native row is arm64)"; continue; fi
+        if [ "$arch" = "arm64" ] && [ -z "$ALI_QEMU" ]; then PASS=$((PASS + 1)); echo "  ${1}_arm64: SKIP (no qemu-aarch64)"; continue; fi
+        if ! "$DIR/../build/krc2" --arch=$arch "$ALI_D/fs.kr" -o "$ALI_D/fs" > "$ALI_D/fs.log" 2>&1; then
+            FAIL=$((FAIL + 1)); echo "FAIL: ${1}_$arch (refused: $(grep -m1 error "$ALI_D/fs.log"))"; continue
+        fi
+        if [ "$arch" = "arm64" ] && [ "$RUN_ARCH" != "arm64" ]; then out=$(timeout 60 "$ALI_QEMU" "$ALI_D/fs" 2>&1); rc=$?
+        else out=$("$ALI_D/fs" 2>&1); rc=$?; fi
+        if [ "$rc" = "0" ] && [ "$out" = "$2" ]; then PASS=$((PASS + 1)); echo "  ${1}_$arch: PASS ($out)"
+        else FAIL=$((FAIL + 1)); echo "FAIL: ${1}_$arch (rc=$rc printed '$out', want '$2')"; fi
+    done
+}
+ali_fstr alias_fstring_adjacent_first 73 'print(f"{addr}{x}\n")'
+ali_fstr alias_fstring_after_text 'n=73' 'print(f"n={addr}{x}\n")'
+ali_fstr alias_fstring_third_of_four 1273 'print(f"{a}{b}{addr}{x}\n")'
+ali_fstr alias_fstring_byte_adjacent 53 'print(f"{byte}{x}\n")'
+# ... and the guard ENDS with the f-string: an alias-typed declaration after
+# one is a type again (and sizeof(byte) inside one is still a type position).
+ali_fstr alias_fstring_then_declaration $'31\n9' 'print(f"{x}{sizeof(byte)}\n")
+    byte l = 9
+    print(l)'
 # The pointer-load destination is a variable name: an identifier, in both
 # the unsafe and the volatile form (`-> 5` was accepted and stored nowhere).
 ali_refuse alias_ptrload_dest_must_be_identifier_unsafe 'fn main() -> uint64 { u8[8] b

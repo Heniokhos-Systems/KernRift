@@ -97,7 +97,9 @@ called `addr` or `byte` — `uint64 addr = base`, `unsafe { *(addr as uint32) ->
 `p.addr`, and a declaration named `addr` sharing its line with others
 (`uint64 addr  x = 4`, `struct P { uint64 addr  P2 next }`,
 `struct Q { uint64 n  S addr  T m }`) all work: the words of the declarations
-on a line alternate type, name, type, name, and that position decides. The limits:
+on a line alternate type, name, type, name, and that position decides.
+Inside an f-string interpolation they are always values (`f"{addr}{x}"`),
+except in an explicit type position such as `f"{sizeof(byte)}"`. The limits:
 
 - they cannot name a type of your own — `type byte = …`, `struct addr`,
   `enum byte` are refused (`` `byte` is a built-in type alias of uint8 and

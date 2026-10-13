@@ -18,7 +18,8 @@ alias target or device register type -- to exactly the token `u8`/`u64` lex
 to, so every later stage sees the keyword; `addr` as a variable, parameter,
 field (`p.addr`), function, array (`*(addr[i] as uint32)`), pointer-load
 destination (`*(p as T) -> addr`) or a declaration's name followed by another
-statement on the same line (`uint64 addr  x = 4`) is untouched. Neither name
+statement on the same line (`uint64 addr  x = 4`) or an f-string
+interpolation (`f"{addr}{x}"`) is untouched. Neither name
 can be declared as a type of your own (`type byte = ...`, `struct addr`,
 `enum byte` are refused, located, as `type u8 = ...` is) -- otherwise the
 alias would silently override the user's definition. The pointer-load

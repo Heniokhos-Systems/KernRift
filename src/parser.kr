@@ -1134,6 +1134,10 @@ fn p_alias_run_len(uint64 i) -> uint64 {
     return n
 }
 
+// f-string nesting depth at the token being classified (FStrBegin 100 opens,
+// FStrEnd 102 closes; an interpolation's tokens lie between them).
+static uint64 p_alias_in_fstr = 0
+
 fn p_alias_is_type(uint64 i) -> uint64 {
     uint64 pk = 12                              // as if after `{`: statement start
     if i > 0 { pk = tok_kind_at(i - 1) }
@@ -1155,6 +1159,11 @@ fn p_alias_is_type(uint64 i) -> uint64 {
         if (bk == 10 || bk == 16) && tok_kind_at(i + 2) == 1 { return 1 }
     }
     if i > 2 && pk == 19 && tok_kind_at(i - 2) == 2 && tok_kind_at(i - 3) == 93 { return 1 }  // at N : T
+    // Inside an f-string interpolation nothing is declared: past the explicit
+    // type positions above (`sizeof(byte)`), an alias there is a value. The
+    // shape rules below would misread adjacent interpolations -- the token
+    // stream of f"{addr}{x}" carries no braces, so it reads `addr x`.
+    if p_alias_in_fstr != 0 { return 0 }
     if p_alias_value_ctx(pk) != 0 { return 0 }
     // The NAME of a declaration, by declaration PARITY along the line:
     // several declarations may share a line (`uint64 n  S addr  T m`), and
@@ -1205,7 +1214,11 @@ fn p_alias_redefined(uint64 i, uint64 ak) {
 
 fn p_alias_types() {
     uint64 i = 0
+    p_alias_in_fstr = 0
     while i < p_tok_count {
+        uint64 fk = tok_kind_at(i)
+        if fk == 100 { p_alias_in_fstr = p_alias_in_fstr + 1 }
+        if fk == 102 && p_alias_in_fstr > 0 { p_alias_in_fstr = p_alias_in_fstr - 1 }
         uint64 ak = p_alias_kind(i)
         if ak != 0 && i > 0 {
             uint64 dk = tok_kind_at(i - 1)
