@@ -26700,6 +26700,59 @@ if [ -z "$LOG_WHY" ]; then
 else
     FAIL=$((FAIL + 1)); echo "FAIL: tree_sources_build_fat ($LOG_WHY )"
 fi
+# (f) the default-fat sweep (portable-syscall-layer C6): tests/examples_fat.lst
+#     classifies EVERY examples/**/*.kr. `fat` entries must build with plain
+#     krc; `skip <reason>` entries must be a known reason AND must really fail
+#     as a hosted default build (a skip that builds is a stale classification).
+#     Drift fails: an examples/ file absent from the manifest, or an entry whose
+#     file is gone, reddens the row.
+TOTAL=$((TOTAL + 1))
+LOG_LST="$DIR/examples_fat.lst"
+LOG_WHY=""
+LOG_NF=0; LOG_NS=0
+find "$DIR/../examples" -name '*.kr' | sed "s|^$DIR/../||" | sort > "$LOG_D/ex.have"
+grep -v '^#' "$LOG_LST" | grep -v '^$' | awk '{print $1}' | sort > "$LOG_D/ex.listed"
+for LOG_F in $(comm -23 "$LOG_D/ex.have" "$LOG_D/ex.listed"); do LOG_WHY="$LOG_WHY unlisted:$LOG_F"; done
+for LOG_F in $(comm -13 "$LOG_D/ex.have" "$LOG_D/ex.listed"); do LOG_WHY="$LOG_WHY missing-file:$LOG_F"; done
+for LOG_F in $(uniq -d "$LOG_D/ex.listed"); do LOG_WHY="$LOG_WHY duplicate:$LOG_F"; done
+while read -r LOG_F LOG_CLS LOG_REASON LOG_EXTRA; do
+    case "$LOG_F" in ''|'#'*) continue ;; esac
+    [ -f "$DIR/../$LOG_F" ] || continue
+    if [ "$LOG_CLS" = "fat" ] && [ -z "$LOG_REASON" ]; then
+        LOG_NF=$((LOG_NF + 1))
+        $LOG_KRC "$DIR/../$LOG_F" -o "$LOG_D/sweep.krbo" > "$LOG_D/err" 2>&1 || LOG_WHY="$LOG_WHY fat-fails:$LOG_F[$(log_err "$LOG_D/err")]"
+    elif [ "$LOG_CLS" = "skip" ] && [ -z "$LOG_EXTRA" ]; then
+        case "$LOG_REASON" in
+            lkm|obj-extern|bare-metal|riscv|xtensa|library)
+                LOG_NS=$((LOG_NS + 1))
+                if $LOG_KRC "$DIR/../$LOG_F" -o "$LOG_D/sweep.krbo" > /dev/null 2>&1; then LOG_WHY="$LOG_WHY skip-builds:$LOG_F"; fi ;;
+            *) LOG_WHY="$LOG_WHY bad-reason:$LOG_F($LOG_REASON)" ;;
+        esac
+    else
+        LOG_WHY="$LOG_WHY bad-line:$LOG_F"
+    fi
+done < "$LOG_LST"
+if [ -z "$LOG_WHY" ]; then
+    PASS=$((PASS + 1)); echo "  examples_manifest_sweep: PASS ($LOG_NF fat build, $LOG_NS declared non-hosted, none unlisted)"
+else
+    FAIL=$((FAIL + 1)); echo "FAIL: examples_manifest_sweep ($LOG_WHY )"
+fi
+# (g) every smoke file builds --emit=pe on BOTH arches (cross-platform.yml's
+#     smoke loop; its glob is tests/smoke/*.kr, so does this one).
+TOTAL=$((TOTAL + 1))
+LOG_WHY=""; LOG_N=0
+for LOG_F in "$DIR"/smoke/*.kr; do
+    for LOG_A in x86_64 arm64; do
+        LOG_N=$((LOG_N + 1))
+        $LOG_KRC --arch=$LOG_A --emit=pe "$LOG_F" -o "$LOG_D/smoke.exe" > "$LOG_D/err" 2>&1 || LOG_WHY="$LOG_WHY $(basename "$LOG_F"):$LOG_A[$(log_err "$LOG_D/err")]"
+    done
+done
+[ "$LOG_N" -gt 0 ] || LOG_WHY="$LOG_WHY no-smoke-files"
+if [ -z "$LOG_WHY" ]; then
+    PASS=$((PASS + 1)); echo "  smoke_builds_pe_both_arches: PASS ($LOG_N builds)"
+else
+    FAIL=$((FAIL + 1)); echo "FAIL: smoke_builds_pe_both_arches ($LOG_WHY )"
+fi
 # (e) the early-return shape is NOT pruned (only if/else ARMS are): a syscall_raw
 #     after `if get_target_os() == 2 { return }` is refused; the else form builds.
 TOTAL=$((TOTAL + 1))

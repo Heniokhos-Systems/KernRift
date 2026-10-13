@@ -1,0 +1,93 @@
+# Default-fat sweep manifest (portable-syscall-layer C6).
+# Every examples/**/*.kr is listed: `fat` (must build with plain krc) or
+# `skip <lkm|obj-extern|bare-metal|riscv|xtensa|library>` (must NOT build as a
+# hosted default fat binary). A file missing here, or listed but absent, reddens
+# the examples_manifest_sweep row in tests/run_tests.sh.
+examples/bare-console/main.kr skip bare-metal
+examples/codegen_bare_ident_repro.kr fat
+examples/codegen_consecutive_struct_returns.kr fat
+examples/codegen_struct_var_collision.kr fat
+examples/count_chars.kr fat
+examples/echo.kr fat
+examples/esp32/hello.kr fat
+examples/esp32/minimal.kr fat
+examples/esp32/twai_loopback.kr fat
+examples/extern_libc.kr skip obj-extern
+examples/fcmp_nan_smoke.kr fat
+examples/fib.kr fat
+examples/fizzbuzz.kr fat
+examples/fmt_nan_smoke.kr fat
+examples/gc_init_demo.kr fat
+examples/gpu_activate_demo.kr fat
+examples/gpu_cp_load_demo.kr fat
+examples/gpu_imu_load_demo.kr fat
+examples/gpu_mes_load_demo.kr fat
+examples/gpu_pm4_demo.kr fat
+examples/gpu_portable_demo.kr fat
+examples/gpu_queue_demo.kr fat
+examples/gpu_rlc_load_demo.kr fat
+examples/gzip_stored.kr fat
+examples/hello.kr fat
+examples/hello_lkm.kr skip lkm
+examples/images/arm64_slice.kr skip library
+examples/images/hello_fat.kr skip library
+examples/ir_arr_elem_collision.kr fat
+examples/ir_arr_elem_table_accum.kr fat
+examples/linked_list.kr fat
+examples/lkm_kmalloc_test.kr skip lkm
+examples/lkm_mmap_test.kr skip lkm
+examples/mlrift_pci_cold.kr skip lkm
+examples/mlrift_pci_warm.kr skip lkm
+examples/mmio_driver.kr fat
+examples/modern.kr fat
+examples/mouse-gui/main.kr skip bare-metal
+examples/pci_driver_smoke.kr skip lkm
+examples/pointers.kr fat
+examples/ramfb-demo/main.kr skip bare-metal
+examples/riscv-featuregap/t1_strconst.kr fat
+examples/riscv-featuregap/t2_static.kr fat
+examples/riscv-featuregap/t3_strloops.kr fat
+examples/riscv-featuregap/t4_memblk.kr fat
+examples/riscv-featuregap/t5_fmtuint.kr fat
+examples/riscv-featuregap/t6_stackarray.kr fat
+examples/riscv-featuregap/t7_fnptr.kr fat
+examples/riscv-featuregap/t8_ror.kr fat
+examples/riscv-featuregap/t9_asm.kr skip riscv
+examples/riscv-hello-uart/hello.kr fat
+examples/riscv-hosted/asm_sample.kr fat
+examples/riscv-hosted/asm_sysfence_sample.kr skip riscv
+examples/riscv-hosted/echo_argv.kr fat
+examples/riscv-hosted/exit_code.kr fat
+examples/riscv-hosted/heap.kr fat
+examples/riscv-hosted/hello.kr fat
+examples/riscv-hosted/link_a.kr skip obj-extern
+examples/riscv-hosted/link_b.kr skip library
+examples/riscv-hosted/obj_single.kr fat
+examples/sha256_test.kr fat
+examples/slices.kr fat
+examples/struct_arrays.kr fat
+examples/thumb_emu.kr fat
+examples/tutorial-btree/main.kr fat
+examples/tutorial-btree/pager.kr skip library
+examples/tutorial-uart/main.kr fat
+examples/tutorial-uart/uart.kr skip library
+examples/uefi/amd_df_syncflood.kr fat
+examples/xtensa/alu.kr fat
+examples/xtensa/bigframe.kr fat
+examples/xtensa/branch.kr fat
+examples/xtensa/bss.kr fat
+examples/xtensa/callind_clobber.kr fat
+examples/xtensa/call.kr fat
+examples/xtensa/capstone.kr skip xtensa
+examples/xtensa/fnptr.kr fat
+examples/xtensa/globals.kr fat
+examples/xtensa/hello.kr fat
+examples/xtensa/inline_asm.kr skip xtensa
+examples/xtensa/many_args.kr fat
+examples/xtensa/mem.kr fat
+examples/xtensa/mem_signed.kr fat
+examples/xtensa/mem_stack.kr fat
+examples/xtensa/ret42.kr fat
+examples/xtensa/stress.kr fat
+examples/xtensa/str_hello.kr fat
+examples/xtensa/str_intrin.kr fat
