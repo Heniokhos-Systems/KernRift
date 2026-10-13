@@ -29,8 +29,8 @@ examples/gpu_rlc_load_demo.kr fat
 examples/gzip_stored.kr fat
 examples/hello.kr fat
 examples/hello_lkm.kr skip lkm
-examples/images/arm64_slice.kr skip library
-examples/images/hello_fat.kr skip library
+examples/images/arm64_slice.kr skip bare-metal
+examples/images/hello_fat.kr skip bare-metal
 examples/ir_arr_elem_collision.kr fat
 examples/ir_arr_elem_table_accum.kr fat
 examples/linked_list.kr fat

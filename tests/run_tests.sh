@@ -26669,7 +26669,7 @@ rm -rf "$GS_D"
 LOG_KRC="$DIR/../build/krc2"
 LOG_D=$(mktemp -d)
 # err_of <file>: the compiler's "file:line:col: error: msg" line, scratch path stripped.
-log_err() { grep -m1 ': error:' "$1" 2>/dev/null | sed 's|[^ ]*/||' | cut -c1-110; }
+log_err() { { grep -m1 ': error:' "$1" || grep -m1 'error:' "$1"; } 2>/dev/null | sed 's|[^ ]*/||' | cut -c1-110; }
 # (a) the runner builds for Windows exactly as ci.yml/release.yml do
 #     (--emit=pe), and --emit=pe is byte-identical to --emit=pe --target=windows
 #     (main.kr sets target_os 2 for --emit=pe), so the equivalence is pinned.
@@ -26700,76 +26700,7 @@ if [ -z "$LOG_WHY" ]; then
 else
     FAIL=$((FAIL + 1)); echo "FAIL: tree_sources_build_fat ($LOG_WHY )"
 fi
-# (f) the default-fat sweep (portable-syscall-layer C6): tests/examples_fat.lst
-#     classifies EVERY examples/**/*.kr. `fat` entries must build with plain
-#     krc; `skip <reason>` entries must be a known reason AND must really fail
-#     as a hosted default build (a skip that builds is a stale classification).
-#     Drift fails: an examples/ file absent from the manifest, or an entry whose
-#     file is gone, reddens the row.
-TOTAL=$((TOTAL + 1))
-LOG_LST="$DIR/examples_fat.lst"
-LOG_WHY=""
-LOG_NF=0; LOG_NS=0
-find "$DIR/../examples" -name '*.kr' | sed "s|^$DIR/../||" | sort > "$LOG_D/ex.have"
-grep -v '^#' "$LOG_LST" | grep -v '^$' | awk '{print $1}' | sort > "$LOG_D/ex.listed"
-for LOG_F in $(comm -23 "$LOG_D/ex.have" "$LOG_D/ex.listed"); do LOG_WHY="$LOG_WHY unlisted:$LOG_F"; done
-for LOG_F in $(comm -13 "$LOG_D/ex.have" "$LOG_D/ex.listed"); do LOG_WHY="$LOG_WHY missing-file:$LOG_F"; done
-for LOG_F in $(uniq -d "$LOG_D/ex.listed"); do LOG_WHY="$LOG_WHY duplicate:$LOG_F"; done
-while read -r LOG_F LOG_CLS LOG_REASON LOG_EXTRA; do
-    case "$LOG_F" in ''|'#'*) continue ;; esac
-    [ -f "$DIR/../$LOG_F" ] || continue
-    if [ "$LOG_CLS" = "fat" ] && [ -z "$LOG_REASON" ]; then
-        LOG_NF=$((LOG_NF + 1))
-        $LOG_KRC "$DIR/../$LOG_F" -o "$LOG_D/sweep.krbo" > "$LOG_D/err" 2>&1 || LOG_WHY="$LOG_WHY fat-fails:$LOG_F[$(log_err "$LOG_D/err")]"
-    elif [ "$LOG_CLS" = "skip" ] && [ -z "$LOG_EXTRA" ]; then
-        case "$LOG_REASON" in
-            lkm|obj-extern|bare-metal|riscv|xtensa|library)
-                LOG_NS=$((LOG_NS + 1))
-                if $LOG_KRC "$DIR/../$LOG_F" -o "$LOG_D/sweep.krbo" > /dev/null 2>&1; then LOG_WHY="$LOG_WHY skip-builds:$LOG_F"; fi ;;
-            *) LOG_WHY="$LOG_WHY bad-reason:$LOG_F($LOG_REASON)" ;;
-        esac
-    else
-        LOG_WHY="$LOG_WHY bad-line:$LOG_F"
-    fi
-done < "$LOG_LST"
-if [ -z "$LOG_WHY" ]; then
-    PASS=$((PASS + 1)); echo "  examples_manifest_sweep: PASS ($LOG_NF fat build, $LOG_NS declared non-hosted, none unlisted)"
-else
-    FAIL=$((FAIL + 1)); echo "FAIL: examples_manifest_sweep ($LOG_WHY )"
-fi
-# (g) every smoke file builds --emit=pe on BOTH arches (cross-platform.yml's
-#     smoke loop; its glob is tests/smoke/*.kr, so does this one).
-TOTAL=$((TOTAL + 1))
-LOG_WHY=""; LOG_N=0
-for LOG_F in "$DIR"/smoke/*.kr; do
-    for LOG_A in x86_64 arm64; do
-        LOG_N=$((LOG_N + 1))
-        $LOG_KRC --arch=$LOG_A --emit=pe "$LOG_F" -o "$LOG_D/smoke.exe" > "$LOG_D/err" 2>&1 || LOG_WHY="$LOG_WHY $(basename "$LOG_F"):$LOG_A[$(log_err "$LOG_D/err")]"
-    done
-done
-[ "$LOG_N" -gt 0 ] || LOG_WHY="$LOG_WHY no-smoke-files"
-if [ -z "$LOG_WHY" ]; then
-    PASS=$((PASS + 1)); echo "  smoke_builds_pe_both_arches: PASS ($LOG_N builds)"
-else
-    FAIL=$((FAIL + 1)); echo "FAIL: smoke_builds_pe_both_arches ($LOG_WHY )"
-fi
-# (e) the early-return shape is NOT pruned (only if/else ARMS are): a syscall_raw
-#     after `if get_target_os() == 2 { return }` is refused; the else form builds.
-TOTAL=$((TOTAL + 1))
-printf 'fn f() -> u64 {\n    if get_target_os() == 2 { return 1 }\n    return syscall_raw(39, 0, 0, 0, 0, 0, 0)\n}\nfn main() { exit(f()) }\n' > "$LOG_D/early.kr"
-printf 'fn f() -> u64 {\n    if get_target_os() == 2 { return 1 } else { return syscall_raw(39, 0, 0, 0, 0, 0, 0) }\n    return 0\n}\nfn main() { exit(f()) }\n' > "$LOG_D/else.kr"
-LOG_WHY=""
-if $LOG_KRC --emit=pe "$LOG_D/early.kr" -o "$LOG_D/early.exe" > "$LOG_D/ee" 2>&1; then LOG_WHY="$LOG_WHY early-return-accepted"
-elif ! grep -q 'syscall_raw is reachable in the win-x64 slice' "$LOG_D/ee"; then LOG_WHY="$LOG_WHY early-return-wrong-error[$(log_err "$LOG_D/ee")]"; fi
-$LOG_KRC --emit=pe "$LOG_D/else.kr" -o "$LOG_D/else.exe" > "$LOG_D/ee2" 2>&1 || LOG_WHY="$LOG_WHY else-form-refused[$(log_err "$LOG_D/ee2")]"
-if [ -z "$LOG_WHY" ]; then
-    PASS=$((PASS + 1)); echo "  os_guard_early_return_not_pruned: PASS (early-return refused, else form builds)"
-else
-    FAIL=$((FAIL + 1)); echo "FAIL: os_guard_early_return_not_pruned ($LOG_WHY )"
-fi
-# (d) Wine rows: the SHIPPED runner (kr-x86_64.exe, the ci.yml/release.yml
-#     recipe) runs a .krbo, and the tutorial pager and the narrow-width fixture
-#     WORK on Windows. Counted SKIPs without wine (set KR_WINE=<path to wine>).
+# Wine helpers (shared by the smoke run row and the Wine rows below).
 LOG_WINE="${KR_WINE:-$(command -v wine 2>/dev/null || true)}"
 # stderr is KEPT (log_errtail shows it in a FAIL). One retry of exactly "status
 # 53 with empty stdout" -- Wine's "could not load kernel32.dll, status
@@ -26791,6 +26722,123 @@ log_wine() {
 }
 log_errtail() { grep -v -i 'freetype\|truetype\|or equal\|^$' "$LOG_D/wine.err" 2>/dev/null | tail -c 200 | tr '\n' '|'; }
 log_note() { [ -f "$LOG_D/retried53" ] && printf ' (retried on a fresh prefix after Wine status 53; first stderr: %s)' "$(grep -v -i 'freetype\|truetype\|or equal\|^$' "$LOG_D/wine.err.53" 2>/dev/null | tail -c 120 | tr '\n' '|')"; }
+# (d) the default-fat sweep (portable-syscall-layer C6): tests/examples_fat.lst
+#     classifies EVERY examples/**/*.kr. `fat` entries must build with plain
+#     krc. `skip <reason>` entries must carry a known reason, must really fail
+#     as a hosted default build, AND the failure must be the kind the reason
+#     names (a hosted example that regresses into a refusal cannot be hidden by
+#     relabelling it `skip library`). Drift fails: an examples/ file absent from
+#     the manifest, a vanished file, or a duplicate entry.
+TOTAL=$((TOTAL + 1))
+LOG_LST="$DIR/examples_fat.lst"
+LOG_WHY=""
+LOG_NF=0; LOG_NS=0
+find "$DIR/../examples" -name '*.kr' | sed "s|^$DIR/../||" | sort > "$LOG_D/ex.have"
+grep -v '^#' "$LOG_LST" | grep -v '^$' | awk '{print $1}' | sort > "$LOG_D/ex.listed"
+sort -u "$LOG_D/ex.listed" > "$LOG_D/ex.uniq"
+for LOG_F in $(comm -23 "$LOG_D/ex.have" "$LOG_D/ex.uniq"); do LOG_WHY="$LOG_WHY unlisted:$LOG_F"; done
+for LOG_F in $(comm -13 "$LOG_D/ex.have" "$LOG_D/ex.uniq"); do LOG_WHY="$LOG_WHY missing-file:$LOG_F"; done
+for LOG_F in $(uniq -d "$LOG_D/ex.listed"); do LOG_WHY="$LOG_WHY duplicate:$LOG_F"; done
+# log_why_ok <reason> <file> <errfile>: does the build error match the reason?
+log_why_ok() {
+    grep -q 'syscall_raw is reachable' "$3" && return 1
+    case "$1" in
+        library)    grep -q "no 'main' function found" "$3" ;;
+        lkm)        grep -q 'extern fn .* is never defined' "$3" && grep -q '@module_license' "$2" ;;
+        obj-extern) grep -q 'extern fn .* is never defined' "$3" ;;
+        bare-metal) grep -qE 'inline-asm|asm instruction' "$3" || { grep -q "no 'main' function found" "$3" && grep -q 'fn _start' "$2"; } ;;
+        riscv|xtensa) grep -qE 'inline-asm|asm instruction' "$3" ;;
+        *) return 1 ;;
+    esac
+}
+while read -r LOG_F LOG_CLS LOG_REASON LOG_EXTRA; do
+    case "$LOG_F" in ''|'#'*) continue ;; esac
+    [ -f "$DIR/../$LOG_F" ] || continue
+    if [ "$LOG_CLS" = "fat" ] && [ -z "$LOG_REASON" ]; then
+        LOG_NF=$((LOG_NF + 1))
+        $LOG_KRC "$DIR/../$LOG_F" -o "$LOG_D/sweep.krbo" > "$LOG_D/err" 2>&1 || LOG_WHY="$LOG_WHY fat-fails:$LOG_F[$(log_err "$LOG_D/err")]"
+    elif [ "$LOG_CLS" = "skip" ] && [ -z "$LOG_EXTRA" ]; then
+        case "$LOG_REASON" in
+            lkm|obj-extern|bare-metal|riscv|xtensa|library)
+                LOG_NS=$((LOG_NS + 1))
+                if $LOG_KRC "$DIR/../$LOG_F" -o "$LOG_D/sweep.krbo" > "$LOG_D/err" 2>&1; then LOG_WHY="$LOG_WHY skip-builds:$LOG_F"
+                elif ! log_why_ok "$LOG_REASON" "$DIR/../$LOG_F" "$LOG_D/err"; then LOG_WHY="$LOG_WHY skip-reason-mismatch:$LOG_F($LOG_REASON)[$(log_err "$LOG_D/err")]"; fi ;;
+            *) LOG_WHY="$LOG_WHY bad-reason:$LOG_F($LOG_REASON)" ;;
+        esac
+    else
+        LOG_WHY="$LOG_WHY bad-line:$LOG_F"
+    fi
+done < "$LOG_LST"
+if [ -z "$LOG_WHY" ]; then
+    PASS=$((PASS + 1)); echo "  examples_manifest_sweep: PASS ($LOG_NF fat build, $LOG_NS declared non-hosted for the stated reason, none unlisted)"
+else
+    FAIL=$((FAIL + 1)); echo "FAIL: examples_manifest_sweep ($LOG_WHY )"
+fi
+# (e) cross-platform.yml's smoke loop, in full: every tests/smoke/*.kr builds
+#     --emit=pe AND --emit=macho on BOTH arches (same glob). The x86_64 PEs are
+#     kept for the Wine row below.
+TOTAL=$((TOTAL + 1))
+LOG_WHY=""; LOG_N=0
+mkdir -p "$LOG_D/smk"
+for LOG_F in "$DIR"/smoke/*.kr; do
+    LOG_T=$(basename "$LOG_F" .kr)
+    for LOG_A in x86_64 arm64; do
+        for LOG_E in pe macho; do
+            LOG_N=$((LOG_N + 1))
+            $LOG_KRC --arch=$LOG_A --emit=$LOG_E "$LOG_F" -o "$LOG_D/smk/$LOG_A-$LOG_E-$LOG_T" > "$LOG_D/err" 2>&1 || LOG_WHY="$LOG_WHY $LOG_T:$LOG_A:$LOG_E[$(log_err "$LOG_D/err")]"
+        done
+    done
+done
+[ "$LOG_N" -gt 0 ] || LOG_WHY="$LOG_WHY no-smoke-files"
+if [ -z "$LOG_WHY" ]; then
+    PASS=$((PASS + 1)); echo "  smoke_builds_pe_macho_both_arches: PASS ($LOG_N builds)"
+else
+    FAIL=$((FAIL + 1)); echo "FAIL: smoke_builds_pe_macho_both_arches ($LOG_WHY )"
+fi
+# (f) the smoke PEs RUN: each x86_64 PE from (e) under Wine must exit with the
+#      `// expected: N` code in its header (default 0) -- the run half of
+#      cross-platform.yml's smoke job, which catches PE-only runtime bugs (a
+#      time_ns that returns 0, a clobbered file_size pointer). Counted SKIP
+#      without wine (set KR_WINE=<path to wine>).
+TOTAL=$((TOTAL + 1))
+if [ -z "$LOG_WINE" ] || [ ! -x "$LOG_WINE" ]; then
+    PASS=$((PASS + 1)); echo "  smoke_pe_runs_under_wine: SKIP (no wine; set KR_WINE=<path to wine>)"
+else
+    mkdir -p "$LOG_D/pfx"
+    LOG_WHY=""; LOG_N=0
+    rm -f "$LOG_D/retried53"
+    for LOG_F in "$DIR"/smoke/*.kr; do
+        LOG_T=$(basename "$LOG_F" .kr)
+        [ -f "$LOG_D/smk/x86_64-pe-$LOG_T" ] || continue
+        LOG_X=$(grep -oE '// expected:[[:space:]]*[0-9]+' "$LOG_F" | head -1 | grep -oE '[0-9]+$'); LOG_X=${LOG_X:-0}
+        LOG_N=$((LOG_N + 1))
+        log_wine "$LOG_D/smk/x86_64-pe-$LOG_T" > /dev/null; LOG_RC=$?
+        [ "$LOG_RC" = "$LOG_X" ] || LOG_WHY="$LOG_WHY $LOG_T:exit-$LOG_RC-want-$LOG_X[$(log_errtail)]"
+    done
+    [ "$LOG_N" -gt 0 ] || LOG_WHY="$LOG_WHY no-smoke-exes"
+    if [ -z "$LOG_WHY" ]; then
+        PASS=$((PASS + 1)); echo "  smoke_pe_runs_under_wine: PASS ($LOG_N PEs exit with their expected codes)$(log_note)"
+    else
+        FAIL=$((FAIL + 1)); echo "FAIL: smoke_pe_runs_under_wine ($LOG_WHY )"
+    fi
+fi
+# (g) the early-return shape is NOT pruned (only if/else ARMS are): a syscall_raw
+#     after `if get_target_os() == 2 { return }` is refused; the else form builds.
+TOTAL=$((TOTAL + 1))
+printf 'fn f() -> u64 {\n    if get_target_os() == 2 { return 1 }\n    return syscall_raw(39, 0, 0, 0, 0, 0, 0)\n}\nfn main() { exit(f()) }\n' > "$LOG_D/early.kr"
+printf 'fn f() -> u64 {\n    if get_target_os() == 2 { return 1 } else { return syscall_raw(39, 0, 0, 0, 0, 0, 0) }\n    return 0\n}\nfn main() { exit(f()) }\n' > "$LOG_D/else.kr"
+LOG_WHY=""
+if $LOG_KRC --emit=pe "$LOG_D/early.kr" -o "$LOG_D/early.exe" > "$LOG_D/ee" 2>&1; then LOG_WHY="$LOG_WHY early-return-accepted"
+elif ! grep -q 'syscall_raw is reachable in the win-x64 slice' "$LOG_D/ee"; then LOG_WHY="$LOG_WHY early-return-wrong-error[$(log_err "$LOG_D/ee")]"; fi
+$LOG_KRC --emit=pe "$LOG_D/else.kr" -o "$LOG_D/else.exe" > "$LOG_D/ee2" 2>&1 || LOG_WHY="$LOG_WHY else-form-refused[$(log_err "$LOG_D/ee2")]"
+if [ -z "$LOG_WHY" ]; then
+    PASS=$((PASS + 1)); echo "  os_guard_early_return_not_pruned: PASS (early-return refused, else form builds)"
+else
+    FAIL=$((FAIL + 1)); echo "FAIL: os_guard_early_return_not_pruned ($LOG_WHY )"
+fi
+# (h) Wine rows: the SHIPPED runner (kr-x86_64.exe, the ci.yml/release.yml
+#     recipe) runs a .krbo, and the tutorial pager and the narrow-width fixture
+#     WORK on Windows. Counted SKIPs without wine (set KR_WINE=<path to wine>).
 TOTAL=$((TOTAL + 3))
 if [ -z "$LOG_WINE" ] || [ ! -x "$LOG_WINE" ]; then
     for LOG_R in runner_windows_runs_krbo_under_wine tutorial_btree_works_on_windows device_narrow_width_clean_on_windows; do
