@@ -7371,12 +7371,18 @@ done
 # sb/poll3): a second process (fork, MAP_SHARED) writes while this one reads,
 # so merging two volatile reads (CSE of IR_VLOAD) or hoisting one out of a
 # polling loop (LICM) changes what a RUN sees, not only the listing.
-#   cse   the child stores 1..N to one word; the parent reads it twice per
-#         trip until the child is done and counts trips where the two reads
-#         differ. Two reads merged into one never differ: exit 1, want 3.
-#   poll  the child spins, then stores 7 once; the parent polls the word
-#         until it reads 7. A read hoisted out of the loop never sees it: the
-#         row times out (124/137), want 3.
+#   cse   once the parent is in its loop, the child stores 1, 2, 3, ... to
+#         one word until the parent has seen 100 differing pairs (or 20M
+#         stores); the parent reads the word twice per trip and counts trips
+#         where the two reads differ. Two reads merged into one never differ:
+#         exit 1, want 3.
+#   poll  once the parent is polling, the child spins, then stores 7 once;
+#         the parent polls the word until it reads 7. A read hoisted out of
+#         the loop never sees it: the row times out (124/137), want 3.
+# The child waits for the parent's go-flag in both: without it, a slow
+# parent start (qemu) let the child finish first -- the cse row then saw no
+# differing pair and went red on a correct compiler, and the poll row could
+# pass a hoisted read that happened to see the 7 at its first and only read.
 # Builtin (vload64) and block (`volatile { *(m as u64) -> v }`) forms, IR and
 # --legacy, x86_64 and arm64 (qemu; the raw syscall numbers are per arch:
 # mmap, fork -- clone(SIGCHLD) on arm64 --, exit, wait4).
@@ -7407,10 +7413,10 @@ for VR_K in cse poll; do
     for VR_F in builtin block; do
         if [ $VR_K = cse ]; then
             if [ $VR_F = builtin ]; then VR_R="$VR_CSE_B"; else VR_R="$VR_CSE_K"; fi
-            printf 'fn main() {\n    u64 m = syscall_raw(@MMAP, 0, 4096, 3, 0x21, 0xFFFFFFFFFFFFFFFF, 0)\n    u64 pid = syscall_raw(@FORK, 0, 0, 0, 0, 0)\n    if pid == 0 {\n        u64 k = 1\n        while k < 1000000 {\n            vstore64(m, k)\n            k = k + 1\n        }\n        vstore64(m + 64, 1)\n        syscall_raw(@EXIT, 0, 0, 0, 0, 0, 0)\n    }\n    u64 diff = 0\n    while vload64(m + 64) == 0 {\n%s\n        if a != b { diff = diff + 1 }\n    }\n    syscall_raw(@WAIT, pid, 0, 0, 0, 0, 0)\n    if diff > 0 { exit(3) }\n    exit(1)\n}\n' "$VR_R" > "$VX_T/v.kr"
+            printf 'fn main() {\n    u64 m = syscall_raw(@MMAP, 0, 4096, 3, 0x21, 0xFFFFFFFFFFFFFFFF, 0)\n    u64 pid = syscall_raw(@FORK, 0, 0, 0, 0, 0)\n    if pid == 0 {\n        while vload64(m + 128) == 0 { }\n        u64 k = 1\n        while vload64(m + 192) == 0 && k < 20000000 {\n            vstore64(m, k)\n            k = k + 1\n        }\n        vstore64(m + 64, 1)\n        syscall_raw(@EXIT, 0, 0, 0, 0, 0, 0)\n    }\n    vstore64(m + 128, 1)\n    u64 diff = 0\n    while vload64(m + 64) == 0 {\n%s\n        if a != b { diff = diff + 1 }\n        if diff > 100 { vstore64(m + 192, 1) }\n    }\n    syscall_raw(@WAIT, pid, 0, 0, 0, 0, 0)\n    if diff > 0 { exit(3) }\n    exit(1)\n}\n' "$VR_R" > "$VX_T/v.kr"
         else
             if [ $VR_F = builtin ]; then VR_R="$VR_POLL_B"; else VR_R="$VR_POLL_K"; fi
-            printf 'fn main() {\n    u64 m = syscall_raw(@MMAP, 0, 4096, 3, 0x21, 0xFFFFFFFFFFFFFFFF, 0)\n    u64 pid = syscall_raw(@FORK, 0, 0, 0, 0, 0)\n    if pid == 0 {\n        u64 k = 0\n        while k < 1000000 { k = k + 1 }\n        vstore64(m, 7)\n        syscall_raw(@EXIT, 0, 0, 0, 0, 0, 0)\n    }\n    u64 go = 1\n    while go == 1 {\n%s\n        if v == 7 { go = 0 }\n    }\n    syscall_raw(@WAIT, pid, 0, 0, 0, 0, 0)\n    exit(3)\n}\n' "$VR_R" > "$VX_T/v.kr"
+            printf 'fn main() {\n    u64 m = syscall_raw(@MMAP, 0, 4096, 3, 0x21, 0xFFFFFFFFFFFFFFFF, 0)\n    u64 pid = syscall_raw(@FORK, 0, 0, 0, 0, 0)\n    if pid == 0 {\n        while vload64(m + 128) == 0 { }\n        u64 k = 0\n        while k < 1000000 { k = k + 1 }\n        vstore64(m, 7)\n        syscall_raw(@EXIT, 0, 0, 0, 0, 0, 0)\n    }\n    vstore64(m + 128, 1)\n    u64 go = 1\n    while go == 1 {\n%s\n        if v == 7 { go = 0 }\n    }\n    syscall_raw(@WAIT, pid, 0, 0, 0, 0, 0)\n    exit(3)\n}\n' "$VR_R" > "$VX_T/v.kr"
         fi
         for VR_A in x86_64 arm64; do
             if [ $VR_A = x86_64 ]; then VR_SC='s/@MMAP/9/; s/@FORK/57, 0/; s/@EXIT/60/; s/@WAIT/61/'
@@ -8218,7 +8224,7 @@ for cparch in x86_64 arm64; do
             && cprun=$(timeout -k 5 "$RUN_TEST_TIMEOUT" /tmp/krc_constprec_$$ 2>&1)
     elif command -v qemu-aarch64-static >/dev/null 2>&1; then
         $KRC /tmp/krc_constprec_$$.kr --arch=arm64 -o /tmp/krc_constprec_$$ >/dev/null 2>&1 \
-            && cprun=$(qemu-aarch64-static /tmp/krc_constprec_$$ 2>&1)
+            && cprun=$(timeout -k 5 "$RUN_TEST_TIMEOUT" qemu-aarch64-static /tmp/krc_constprec_$$ 2>&1)
     else
         continue
     fi
@@ -8453,7 +8459,7 @@ KREOF
 nakedalt_err=""
 if $KRC --arch=arm64 /tmp/krc_nakedalt_$$.kr -o /tmp/krc_nakedalt_$$ --emit=elf >/dev/null 2>&1; then
     if command -v qemu-aarch64-static >/dev/null 2>&1; then
-        qemu-aarch64-static /tmp/krc_nakedalt_$$; nart=$?
+        timeout -k 5 "$RUN_TEST_TIMEOUT" qemu-aarch64-static /tmp/krc_nakedalt_$$; nart=$?
         [ "$nart" = "7" ] || nakedalt_err="ran-and-gave-$nart-want-7"
         if [ -z "$nakedalt_err" ]; then
             PASS=$((PASS + 1)); echo "  naked_alternative_out_constraint_works: PASS (read cntvct_el0 into a variable)"
@@ -14997,7 +15003,7 @@ if command -v qemu-riscv32-static >/dev/null 2>&1; then
         echo "FAIL: riscv_hosted_exit_code (compilation failed)"
         FAIL=$((FAIL + 1))
     else
-        qemu-riscv32-static "$RV_BIN" >/dev/null 2>&1
+        timeout -k 5 "$RUN_TEST_TIMEOUT" qemu-riscv32-static "$RV_BIN" >/dev/null 2>&1
         rc=$?
         if [ "$rc" = "42" ]; then
             PASS=$((PASS + 1))
@@ -15044,7 +15050,7 @@ RVEOF
         echo "FAIL: riscv_alloc_oom_returns_zero (compilation failed)"
         FAIL=$((FAIL + 1))
     else
-        qemu-riscv32-static "$RV_A_BIN" >/dev/null 2>&1
+        timeout -k 5 "$RUN_TEST_TIMEOUT" qemu-riscv32-static "$RV_A_BIN" >/dev/null 2>&1
         rc=$?
         if [ "$rc" = "44" ]; then
             PASS=$((PASS + 1))
@@ -15075,7 +15081,7 @@ if command -v qemu-riscv32-static >/dev/null 2>&1; then
         echo "FAIL: riscv_hosted_hello (compilation failed)"
         FAIL=$((FAIL + 1))
     else
-        RV_OUT=$(qemu-riscv32-static "$RV_BIN" 2>/dev/null)
+        RV_OUT=$(timeout -k 5 "$RUN_TEST_TIMEOUT" qemu-riscv32-static "$RV_BIN" 2>/dev/null)
         if [ "$RV_OUT" = "hello riscv" ]; then
             PASS=$((PASS + 1))
             echo "  riscv_hosted_hello: PASS (qemu-riscv32-static printed 'hello riscv')"
@@ -15130,7 +15136,7 @@ RVSP
         echo "FAIL: riscv_hosted_struct_param (compilation failed)"
         FAIL=$((FAIL + 1))
     else
-        qemu-riscv32-static "$RV_SP_BIN" >/dev/null 2>&1
+        timeout -k 5 "$RUN_TEST_TIMEOUT" qemu-riscv32-static "$RV_SP_BIN" >/dev/null 2>&1
         rc=$?
         if [ "$rc" = "42" ]; then
             PASS=$((PASS + 1))
@@ -15178,7 +15184,7 @@ if command -v qemu-riscv32-static >/dev/null 2>&1; then
         echo "FAIL: riscv_hosted_argv (compilation failed)"
         FAIL=$((FAIL + 1))
     else
-        RV_OUT=$(qemu-riscv32-static "$RV_BIN" HELLO 2>/dev/null)
+        RV_OUT=$(timeout -k 5 "$RUN_TEST_TIMEOUT" qemu-riscv32-static "$RV_BIN" HELLO 2>/dev/null)
         if [ "$RV_OUT" = "HELLO" ]; then
             PASS=$((PASS + 1))
             echo "  riscv_hosted_argv: PASS (qemu-riscv32-static echoed 'HELLO')"
@@ -15209,7 +15215,7 @@ if command -v qemu-riscv32-static >/dev/null 2>&1; then
         echo "FAIL: riscv_hosted_heap (compilation failed)"
         FAIL=$((FAIL + 1))
     else
-        RV_OUT=$(qemu-riscv32-static "$RV_BIN" 2>/dev/null)
+        RV_OUT=$(timeout -k 5 "$RUN_TEST_TIMEOUT" qemu-riscv32-static "$RV_BIN" 2>/dev/null)
         if [ "$RV_OUT" = "ok" ]; then
             PASS=$((PASS + 1))
             echo "  riscv_hosted_heap: PASS (qemu-riscv32-static printed 'ok')"
@@ -15247,7 +15253,7 @@ if command -v qemu-riscv32-static >/dev/null 2>&1 && command -v riscv64-linux-gn
         echo "FAIL: riscv_hosted_obj_single (link failed)"
         FAIL=$((FAIL + 1))
     else
-        qemu-riscv32-static "$RV_LINKED" >/dev/null 2>&1
+        timeout -k 5 "$RUN_TEST_TIMEOUT" qemu-riscv32-static "$RV_LINKED" >/dev/null 2>&1
         rc=$?
         if [ "$rc" = "42" ]; then
             PASS=$((PASS + 1))
@@ -15292,7 +15298,7 @@ if command -v qemu-riscv32-static >/dev/null 2>&1 && command -v riscv64-linux-gn
         echo "FAIL: riscv_hosted_link (link failed)"
         FAIL=$((FAIL + 1))
     else
-        qemu-riscv32-static "$RV_LINKED" >/dev/null 2>&1
+        timeout -k 5 "$RUN_TEST_TIMEOUT" qemu-riscv32-static "$RV_LINKED" >/dev/null 2>&1
         rc=$?
         if [ "$rc" = "42" ]; then
             PASS=$((PASS + 1))
@@ -23634,7 +23640,19 @@ fi
 TOTAL=$((TOTAL + 1))
 rm -f "$CP_BIN"
 if $KRC --arch=x86_64 --legacy "$CP_SRC" -o "$CP_BIN" >/dev/null 2>&1 && [ -s "$CP_BIN" ]; then
-    PASS=$((PASS + 1)); echo "  call_ptr_args_7_accepted_legacy_x86: PASS (compiles; not run -- may be a foreign arch here)"
+    # Built for x86_64 whatever the host is; RUN it where it can run, and say
+    # SKIP (never PASS) where it cannot -- a positive control that never
+    # executes cannot show the arguments arrive.
+    if [ "$ARCH" = "x86_64" ]; then
+        chmod +x "$CP_BIN"; timeout -k 5 "$RUN_TEST_TIMEOUT" "$CP_BIN"; CPL_RUN=$?
+        if [ "$CPL_RUN" = "98" ]; then
+            PASS=$((PASS + 1)); echo "  call_ptr_args_7_accepted_legacy_x86: PASS (runs, returns 98)"
+        else
+            echo "FAIL: call_ptr_args_7_accepted_legacy_x86 (returned $CPL_RUN, want 98)"; FAIL=$((FAIL + 1))
+        fi
+    else
+        skip_row call_ptr_args_7_accepted_legacy_x86 "built for x86_64; the host is $ARCH"
+    fi
 else
     echo "FAIL: call_ptr_args_7_accepted_legacy_x86 (7 arguments must now compile on the legacy backend)"; FAIL=$((FAIL + 1))
 fi
@@ -23931,7 +23949,19 @@ rm -f "$CP_BIN"
 # the correct expectation.
 TOTAL=$((TOTAL + 1))
 if $KRC --arch=x86_64 --legacy "$CP6_SRC" -o "$CP_BIN" >/dev/null 2>&1 && [ -s "$CP_BIN" ]; then
-    PASS=$((PASS + 1)); echo "  call_ptr_args_6_accepted_legacy_x86: PASS (compiles; not run -- may be a foreign arch here)"
+    # Built for x86_64 whatever the host is; RUN it where it can run, and say
+    # SKIP (never PASS) where it cannot -- a positive control that never
+    # executes cannot show the arguments arrive.
+    if [ "$ARCH" = "x86_64" ]; then
+        chmod +x "$CP_BIN"; timeout -k 5 "$RUN_TEST_TIMEOUT" "$CP_BIN"; CPL_RUN=$?
+        if [ "$CPL_RUN" = "21" ]; then
+            PASS=$((PASS + 1)); echo "  call_ptr_args_6_accepted_legacy_x86: PASS (runs, returns 21)"
+        else
+            echo "FAIL: call_ptr_args_6_accepted_legacy_x86 (returned $CPL_RUN, want 21)"; FAIL=$((FAIL + 1))
+        fi
+    else
+        skip_row call_ptr_args_6_accepted_legacy_x86 "built for x86_64; the host is $ARCH"
+    fi
 else
     echo "FAIL: call_ptr_args_6_accepted_legacy_x86 (six args must still compile on the arch that refuses seven)"; FAIL=$((FAIL + 1))
 fi
