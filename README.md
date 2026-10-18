@@ -41,7 +41,7 @@ wins.
 
 | Target | Status | What was actually run |
 |---|---|---|
-| Linux x86_64 | 🔵 CI-verified | Self-compiles to a bootstrap fixed point; the full **2344-test** suite passes. This is the primary development target. |
+| Linux x86_64 | 🔵 CI-verified | Self-compiles to a bootstrap fixed point; the full **2348-test** suite passes. This is the primary development target. |
 | Linux ARM64 | 🔵 CI-verified | Self-compiles to a fixed point; suite runs on a native ARM64 runner. |
 | Windows x86_64 | 🔵 CI-verified + hardware | Self-compile chain on a `windows-latest` runner every push. Also verified 2026-08-14 on a physical **Intel Core Ultra 9 275HX / Windows 11 Pro** laptop: the compiler rebuilt its own source twice on the machine and stages 1-3 are byte-identical (`sha256 5b21ae16…`), with the laptop-built compiler then compiling and running a program correctly. |
 | Windows ARM64 | 🔵 CI-verified | Self-compile chain through a fixed point on a `windows-11-arm` runner. |
@@ -112,11 +112,12 @@ This release also fixes a long list of silent miscompiles, the worst of which ma
 - **Clean pointer syntax** — `store32(addr, val)` and `load64(addr)` instead of the verbose `unsafe { *(addr as uint32) = val }` form.
 - **Slice parameters** — `fn foo([u8] data)` with `data.len` for buffer-processing functions. It is sugar for a `(ptr, len)` pair, so the **caller passes two arguments**: `foo(buf, 4)`.
 - **Fixed arrays** — `u8[256] buf` locally, `static u8[4096] page` at module level, and `Point[10] pts` with `pts[i].field` syntax for struct arrays.
-- **Volatile blocks and the `vload*`/`vstore*` builtins** — `mfence` plus a
-  width-correct load/store on x86_64; `LDARB/H/W/X` and `STLRB/H/W/X` on ARM64.
-  ARM64 gets **acquire/release ordering, not a completion barrier** — add an
-  explicit `dsb()` if you need the access to have completed rather than merely
-  to be ordered. (The `--legacy` ARM64 backend emits `DSB SY` instead.)
+- **Volatile blocks and the `vload*`/`vstore*` builtins** — a width-correct
+  load/store with `mfence` after a load and before and after a store on x86_64;
+  `LDARB/H/W/X` for a load and `STLRB/H/W/X` then `DSB SY` for a store on ARM64,
+  so a volatile store has completed before anything after it. A volatile LOAD
+  on ARM64 is ordered, not waited for. (The `--legacy` ARM64 backend brackets a
+  plain access with `DSB SY` instead.)
 - **ARM64 system registers** — MSR/MRS access in inline asm (20+ registers including SCTLR_EL1, VBAR_EL1, MPIDR_EL1).
 - **Semantic analysis** — argument count checking, missing return detection, undeclared identifier detection.
 - **`--emit=asm`** — disassembled listing with function labels.
@@ -161,7 +162,7 @@ krc lc program.kr
 
 ### Self-compilation (350 849 tokens, 220 516 AST nodes, 3 416 912 bytes of source)
 
-The compiler emits binaries for all 8 targets. CI verifies the **bootstrap fixed point (krc3 == krc4) and the full suite natively on Linux x86_64 and Linux ARM64** (**2344 tests**, all passing on this tree). Windows and macOS are exercised on real `windows-latest`, `windows-11-arm` and `macos-14` runners. The **Android** jobs are the weak link: they run PIE ELFs under the **glibc** loader on Linux, never bionic and never a device. See the per-target table for what each one actually ran. Numbers below were re-measured on an AMD Ryzen 9 7900X with the compiler built from this commit — see [`benchmarks/BENCHMARKS.md`](benchmarks/BENCHMARKS.md) for the gcc / rustc comparisons — note that file is a **v2.8.33 run from 2026-07-28** and has not been re-run for v2.10.0 either.
+The compiler emits binaries for all 8 targets. CI verifies the **bootstrap fixed point (krc3 == krc4) and the full suite natively on Linux x86_64 and Linux ARM64** (**2348 tests**, all passing on this tree). Windows and macOS are exercised on real `windows-latest`, `windows-11-arm` and `macos-14` runners. The **Android** jobs are the weak link: they run PIE ELFs under the **glibc** loader on Linux, never bionic and never a device. See the per-target table for what each one actually ran. Numbers below were re-measured on an AMD Ryzen 9 7900X with the compiler built from this commit — see [`benchmarks/BENCHMARKS.md`](benchmarks/BENCHMARKS.md) for the gcc / rustc comparisons — note that file is a **v2.8.33 run from 2026-07-28** and has not been re-run for v2.10.0 either.
 
 | Target | Legacy codegen | IR codegen (default) | IR vs legacy |
 |--------|---------------:|---------------------:|-------------:|
@@ -306,8 +307,8 @@ fn putc(u8 c) {
 }
 
 // Clean pointer builtins (no unsafe blocks required)
-// x86_64: mfence + a width-correct mov, on both backends.
-// arm64 (default IR backend): LDAR / STLR — acquire/release ORDERING, no DSB.
+// x86_64: a width-correct mov; mfence after a load, before and after a store.
+// arm64 (default IR backend): LDAR; STLR then DSB SY for a store.
 // arm64 --legacy: a plain LDR/STR with DSB SY. See the note after this block.
 u32 status = vload32(0xFEE000B0)        // volatile load
 vstore32(0xFEE000B0, 0x1)                // volatile store
@@ -336,14 +337,15 @@ above and counting instructions in `krc --emit=asm` output:
 
 | Backend | `vload32` + `vstore32` emit |
 |---|---|
-| x86_64, IR (default) | 2 × `mfence` |
-| x86_64, `--legacy` | 2 × `mfence` |
-| **arm64, IR (default — this is what ships)** | **0 × `DSB`.** `LDAR W20,[X19]` and `STLR W21,[X19]` |
-| arm64, `--legacy` | 2 × `DSB SY`, around a plain `LDR`/`STR` |
+| x86_64, IR (default) | 3 × `mfence` (one after the load, one before and one after the store) |
+| x86_64, `--legacy` | 3 × `mfence` |
+| **arm64, IR (default — this is what ships)** | **1 × `DSB SY`**, after the store: `LDAR W20,[X19]`, `STLR W21,[X19]`, `DSB SY` |
+| arm64, `--legacy` | 3 × `DSB SY`, after the plain `LDR` and around the plain `STR` |
 
-So on ARM64 you get **acquire/release ordering, not a completion barrier** —
-add an explicit `dsb()` if you need the access to have *completed* rather than
-merely to be *ordered*. (Caveat for anyone re-checking this against a listing
+So on ARM64 a volatile store has *completed* before anything after it; a
+volatile load is acquire-ordered but not waited for — add an explicit
+`dsb()` if you need a device read to have completed before something that is
+not itself a memory access. (Caveat for anyone re-checking this against a listing
 from an older compiler: the `--emit=asm` disassembler used to print
 `LDAR`/`STLR` with a blank mnemonic, so grepping such a listing for `stlr`
 finds nothing; decode the `88dffe..` / `889ffe..` words instead. The current
@@ -422,7 +424,7 @@ See the [`examples/`](examples/) directory for runnable programs covering every 
 
 ## Architecture
 
-79 532 lines of KernRift across the 27 source files the compiler is built from, plus 52 stdlib modules (11 460 lines). Self-compiles to a 1.22 MB x86_64 native binary in ~0.50 s (IR, default), a 1.03 MB ARM64 binary, or an 8-slice fat binary (BCJ + LZ-Rift compression) in ~3.56 s on an AMD Ryzen 9 7900X. **2344 tests** pass on this tree. Bootstrap fixed point is verified **natively on Linux x86_64, Linux ARM64, and a physical Android ARM64 handset**; Windows and macOS run their own chains on real runners. Android x86_64 is the one target executed only under a glibc loader on Linux. See [`benchmarks/BENCHMARKS.md`](benchmarks/BENCHMARKS.md) for micro-benchmarks vs gcc / rustc and peak-memory numbers (a v2.8.33 run, not re-measured for v2.10.0 either).
+79 568 lines of KernRift across the 27 source files the compiler is built from, plus 52 stdlib modules (11 460 lines). Self-compiles to a 1.22 MB x86_64 native binary in ~0.50 s (IR, default), a 1.03 MB ARM64 binary, or an 8-slice fat binary (BCJ + LZ-Rift compression) in ~3.56 s on an AMD Ryzen 9 7900X. **2348 tests** pass on this tree. Bootstrap fixed point is verified **natively on Linux x86_64, Linux ARM64, and a physical Android ARM64 handset**; Windows and macOS run their own chains on real runners. Android x86_64 is the one target executed only under a glibc loader on Linux. See [`benchmarks/BENCHMARKS.md`](benchmarks/BENCHMARKS.md) for micro-benchmarks vs gcc / rustc and peak-memory numbers (a v2.8.33 run, not re-measured for v2.10.0 either).
 
 | File | Purpose |
 |------|---------|
@@ -461,7 +463,7 @@ a thing works, that column says who watched it work.
 
 | Platform | Compile | Run | Self-host | File I/O | How it is checked |
 |----------|---------|-----|-----------|----------|-------------------|
-| Linux x86_64 | ✅ | ✅ | ✅ | ✅ | CI, native runner; bootstrap fixed point + full 2344-test suite |
+| Linux x86_64 | ✅ | ✅ | ✅ | ✅ | CI, native runner; bootstrap fixed point + full 2348-test suite |
 | Linux ARM64 | ✅ | ✅ | ✅ | ✅ | CI, native ARM64 runner; bootstrap fixed point |
 | Windows x86_64 | ✅ | ✅ | ✅ | ✅ | CI, `windows-latest`; self-compile chain |
 | Windows ARM64 | ✅ | ✅ | ✅ | ✅ | CI, `windows-11-arm`; self-compile chain to fixed point |

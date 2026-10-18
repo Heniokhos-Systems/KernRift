@@ -4023,6 +4023,7 @@ fn gen_expr_a64(uint64 node) {
             emit_a64_load_x0(pk0_vstore8)
             emit_a64(0xD5033F9F)
             emit_a64_strb(1, 0, 0)
+            emit_a64(0xD5033F9F)   // DSB SY after: the store completes first
             return
         }
         if is_extern_call == 0 && tok_matches(wct, "vstore16", 8) != 0 {
@@ -4038,6 +4039,7 @@ fn gen_expr_a64(uint64 node) {
             emit_a64_load_x0(pk0_vstore16)
             emit_a64(0xD5033F9F)
             emit_a64_strh(1, 0, 0)
+            emit_a64(0xD5033F9F)   // DSB SY after: the store completes first
             return
         }
         if is_extern_call == 0 && tok_matches(wct, "vstore32", 8) != 0 {
@@ -4053,6 +4055,7 @@ fn gen_expr_a64(uint64 node) {
             emit_a64_load_x0(pk0_vstore32)
             emit_a64(0xD5033F9F)
             emit_a64_str32(1, 0, 0)
+            emit_a64(0xD5033F9F)   // DSB SY after: the store completes first
             return
         }
         if is_extern_call == 0 && tok_matches(wct, "vstore64", 8) != 0 {
@@ -4068,6 +4071,7 @@ fn gen_expr_a64(uint64 node) {
             emit_a64_load_x0(pk0_vstore64)
             emit_a64(0xD5033F9F)
             emit_a64_str(1, 0, 0)
+            emit_a64(0xD5033F9F)   // DSB SY after: the store completes first
             return
         }
 
@@ -5745,6 +5749,9 @@ fn gen_stmt_a64(uint64 node) {
         else if wts == 2 { emit_a64_strh(0, 10, 0) }
         else if wts == 4 { emit_a64_str32(0, 10, 0) }
         else { emit_a64_str(0, 10, 0) }
+        // ...and DSB SY after it, as vstoreN: the store completes before
+        // anything after it (LANGUAGE.md).
+        if (wvf2 & 16) != 0 { emit_a64(0xD5033F9F) }
         return
     }
 
@@ -5969,6 +5976,8 @@ fn gen_stmt_a64(uint64 node) {
                         else if dev_sz_wa == 2 { emit_a64_strh(1, 0, 0) }
                         else if dev_sz_wa == 4 { emit_a64_str32(1, 0, 0) }
                         else { emit_a64_str(1, 0, 0) }
+                        // DSB SY after store, as vstoreN
+                        emit_a64(0xD5033F9F)
                         return
                     }
                 }

@@ -2348,6 +2348,11 @@ fn ir_emit_arm64_insn(uint64 ii) {
         if vw == 2 { vs_base = 0x489FFC00 } else if vw == 4 { vs_base = 0x889FFC00 } else if vw == 8 { vs_base = 0xC89FFC00 }
         uint64 vs = vs_base | (addr_reg << 5) | val_reg
         emit_a64(vs)
+        // DSB SY after the STLR (LANGUAGE.md: the store completes before
+        // anything after it). STLR orders it after every EARLIER access and
+        // before a later LDAR, but a later PLAIN access may be performed
+        // before the STLR is observed.
+        emit_a64(0xD5033F9F)
         return
     }
 

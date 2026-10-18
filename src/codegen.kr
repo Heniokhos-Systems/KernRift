@@ -9205,6 +9205,11 @@ fn gen_expr(uint64 node) {
             // mfence (before store)
             emit_byte(0x0F); emit_byte(0xAE); emit_byte(0xF0)
             emit_byte(0x88); emit_byte(0x08)
+            // mfence (after store): LANGUAGE.md -- the store completes before
+            // anything after it. Without it a later load could pass the store
+            // in the store buffer (the store-buffering litmus rows saw both-zero
+            // outcomes on x86 hardware).
+            emit_byte(0x0F); emit_byte(0xAE); emit_byte(0xF0)
             return
         }
         if is_extern_call == 0 && tok_matches(wct, "vstore16", 8) != 0 {
@@ -9220,6 +9225,7 @@ fn gen_expr(uint64 node) {
             emit_load_rax_from_stack(pk0_vstore16)
             emit_byte(0x0F); emit_byte(0xAE); emit_byte(0xF0)
             emit_byte(0x66); emit_byte(0x89); emit_byte(0x08)
+            emit_byte(0x0F); emit_byte(0xAE); emit_byte(0xF0)   // mfence after
             return
         }
         if is_extern_call == 0 && tok_matches(wct, "vstore32", 8) != 0 {
@@ -9235,6 +9241,7 @@ fn gen_expr(uint64 node) {
             emit_load_rax_from_stack(pk0_vstore32)
             emit_byte(0x0F); emit_byte(0xAE); emit_byte(0xF0)
             emit_byte(0x89); emit_byte(0x08)
+            emit_byte(0x0F); emit_byte(0xAE); emit_byte(0xF0)   // mfence after
             return
         }
         if is_extern_call == 0 && tok_matches(wct, "vstore64", 8) != 0 {
@@ -9250,6 +9257,7 @@ fn gen_expr(uint64 node) {
             emit_load_rax_from_stack(pk0_vstore64)
             emit_byte(0x0F); emit_byte(0xAE); emit_byte(0xF0)
             emit_byte(0x48); emit_byte(0x89); emit_byte(0x08)
+            emit_byte(0x0F); emit_byte(0xAE); emit_byte(0xF0)   // mfence after
             return
         }
 
@@ -12541,6 +12549,8 @@ fn gen_stmt(uint64 node) {
                         } else {
                             emit_byte(0x48); emit_byte(0x89); emit_byte(0x08)
                         }
+                        // mfence (barrier after store), as for vstoreN
+                        emit_byte(0x0F); emit_byte(0xAE); emit_byte(0xF0)
                         return
                     }
                 }
@@ -13441,6 +13451,14 @@ fn gen_stmt(uint64 node) {
             emit_byte(0x48)
             emit_byte(0x89)
             emit_byte(0x08)
+        }
+        // Volatile barrier AFTER the store too (LANGUAGE.md: the store
+        // completes before anything after it). The barrier before orders it
+        // after earlier accesses; only this one stops a later load from
+        // passing it in the store buffer.
+        if (wvf2 & 16) != 0 {
+            // mfence
+            emit_byte(0x0F); emit_byte(0xAE); emit_byte(0xF0)
         }
         return
     }

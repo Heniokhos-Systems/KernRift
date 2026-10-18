@@ -11234,7 +11234,7 @@ fn ir_emit_x86_insn(uint64 ii) {
     }
 
     if op == 94 {
-        // IR_VSTORE: mfence + store (volatile), width in dest_v
+        // IR_VSTORE: mfence + store + mfence (volatile), width in dest_v
         uint64 addr_reg = ir_resolve_src(s1_v, 0)
         uint64 val_reg = ir_resolve_src(s2_v, 1)
         uint64 width = dest_v
@@ -11281,6 +11281,10 @@ fn ir_emit_x86_insn(uint64 ii) {
             else if (addr_reg & 7) == 5 { uint8 stm = st_modrm | 0x40; emit_byte(stm); emit_byte(0) }
             else { uint8 stm = st_modrm; emit_byte(stm) }
         }
+        // mfence AFTER the store as well (LANGUAGE.md: the store completes
+        // before anything after it). x86 lets a LATER load pass a store still
+        // in the store buffer; the mfence before only orders earlier accesses.
+        emit_byte(0x0F); emit_byte(0xAE); emit_byte(0xF0)
         return
     }
 

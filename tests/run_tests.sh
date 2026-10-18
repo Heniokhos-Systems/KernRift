@@ -2945,11 +2945,11 @@ vol_check() { # <label> <arch> <extra-flags> <pattern> <want-count>
 }
 vol_check "arm64 IR LDAR"     arm64  ""          '88dffe' 1
 vol_check "arm64 IR STLR"     arm64  ""          '889ffe' 1
-vol_check "arm64 IR no DSB"   arm64  ""          'dsb'    0
-vol_check "x86_64 IR mfence"  x86_64 ""          'mfence' 2
-vol_check "arm64 legacy DSB"  arm64  "--legacy"  'dsb'    2
+vol_check "arm64 IR DSB"      arm64  ""          'dsb'    1
+vol_check "x86_64 IR mfence"  x86_64 ""          'mfence' 3
+vol_check "arm64 legacy DSB"  arm64  "--legacy"  'dsb'    3
 if [ "$VOL_OK" = "1" ]; then
-    PASS=$((PASS + 1)); echo "  arm64_volatile_no_dsb: PASS (LDAR+STLR, 0 DSB; x86 2 mfence; legacy 2 DSB)"
+    PASS=$((PASS + 1)); echo "  arm64_volatile_no_dsb: PASS (LDAR+STLR, 1 DSB after the store; x86 3 mfence; legacy 3 DSB)"
 else
     FAIL=$((FAIL + 1))
     echo "FAIL: arm64_volatile_no_dsb"
@@ -7108,21 +7108,22 @@ for VX_W in u8 u16 u64 f32 f64; do
 done
 # 3. The barriers, which no single-threaded run can observe: count them in
 # main's --emit=asm listing for each form, width and backend, with `volatile`
-# and with `unsafe`. A load and a store have one each, a compound (a read and
-# a write) two; `unsafe` none. x86_64 (IR and legacy): mfence. arm64 IR: the
-# access itself is LDAR/STLR. arm64 legacy: `dsb sy` after a load and before a
-# store, the vstore* builtins' barrier (a `dmb ish` does not count: the block
+# and with `unsafe`. A load has one, a store two (before and after: it
+# completes before anything after it), a compound (a read and a write) three;
+# `unsafe` none. x86_64 (IR and legacy): mfence. arm64 IR: the load is LDAR,
+# the store STLR then `dsb sy`. arm64 legacy: `dsb sy` after a load and
+# before and after a store, the vstore* builtins' barrier (a `dmb ish` does not count: the block
 # store used to get one). riscv32 has no listing. One row per backend and form.
 for VX_C in "x86_64|" "x86_64|--legacy" "arm64|" "arm64|--legacy"; do
     VX_A=${VX_C%%|*}; VX_M=${VX_C#*|}
     case "$VX_A$VX_M" in
         x86_64*)       VX_RE='^ +[0-9a-f]+: .*mfence' ;;
         arm64--legacy) VX_RE='^ +[0-9a-f]+: [0-9a-f]{8} +dsb sy' ;;
-        arm64)         VX_RE='^ +[0-9a-f]+: [0-9a-f]{8} +(ldar|stlr)' ;;
+        arm64)         VX_RE='^ +[0-9a-f]+: [0-9a-f]{8} +(ldar|stlr|dsb sy)' ;;
     esac
     for VX_O in load store compound; do
         TOTAL=$((TOTAL + 1))
-        VX_WANT=1; [ "$VX_O" = compound ] && VX_WANT=2
+        VX_WANT=1; [ "$VX_O" = store ] && VX_WANT=2; [ "$VX_O" = compound ] && VX_WANT=3
         VX_BAD=""
         for VX_W in u8 u16 u32 u64 f32 f64; do
             case $VX_W in f32) VX_V='f32 val = 1.5' ;; f64) VX_V='f64 val = 2.5' ;; *) VX_V="$VX_W val = 5" ;; esac
@@ -7300,10 +7301,9 @@ done
 # this machine cannot tell a fence from none and the rows are a SKIP (on a
 # full run, a FAIL: the rows would prove nothing).
 # Each VARIANT is the fence between `*(mine) = 1` and `r = *(other)`:
-#   (vv -- vstore64(mine, 1); r = vload64(other) -- and blk, its block-form
-#   twin, are the rows that need a fence AFTER the store, LANGUAGE.md §12's
-#   promise; that codegen change is held for the user, see review round 8,
-#   so those two rows are not here yet)
+#   vv        vstore64(mine, 1); r = vload64(other) -- LANGUAGE.md's
+#             promise that the store completes before anything after it
+#   blk       the same with `volatile { }` block store and load
 #   ldW/stW   a plain store and load around a volatile block load / store of
 #             width W at a third address (its barrier is the fence)
 #   bldW/bstW the same with the vloadW / vstoreW builtins
@@ -7346,13 +7346,13 @@ sb_run() {
 for SB_M in "" --legacy; do
     SB_MN=${SB_M:+ $SB_M}
     if [ "$ARCH" != x86_64 ]; then
-        for SB_V in ld8 ld16 ld32 ld64 st8 st16 st32 st64 bld8 bld16 bld32 bld64 bst8 bst16 bst32 bst64 cmp; do
+        for SB_V in vv blk ld8 ld16 ld32 ld64 st8 st16 st32 st64 bld8 bld16 bld32 bld64 bst8 bst16 bst32 bst64 cmp; do
             TOTAL=$((TOTAL + 1)); skip_row "store_buffering_litmus $SB_V x86_64$SB_MN" "host is $ARCH, not x86_64 hardware"
         done
         continue
     fi
     SB_CTL=$(sb_run "$SB_M" plain)
-    for SB_V in ld8 ld16 ld32 ld64 st8 st16 st32 st64 bld8 bld16 bld32 bld64 bst8 bst16 bst32 bst64 cmp; do
+    for SB_V in vv blk ld8 ld16 ld32 ld64 st8 st16 st32 st64 bld8 bld16 bld32 bld64 bst8 bst16 bst32 bst64 cmp; do
         TOTAL=$((TOTAL + 1))
         SB_ROW="store_buffering_litmus $SB_V x86_64$SB_MN"
         case $SB_CTL in

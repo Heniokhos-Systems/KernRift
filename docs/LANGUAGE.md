@@ -907,7 +907,7 @@ access, and the memory operation must complete before anything after it.
 
 ```kr
 u32 v = vload32(mmio_addr)     // volatile load, barrier after
-vstore32(mmio_addr, 0x01)      // volatile store, barrier before
+vstore32(mmio_addr, 0x01)      // volatile store, barrier before AND after
 ```
 
 All widths are available:
@@ -915,22 +915,27 @@ All widths are available:
 
 What is emitted depends on the architecture **and the backend**:
 
-- **x86_64**, both backends: `mfence` (full memory fence) alongside a
-  width-correct `mov`.
-- **ARM64, IR backend (the default)**: no barrier instruction at all. The
-  access itself becomes an acquire/release form — `LDARB`/`LDARH`/`LDAR` and
-  `STLRB`/`STLRH`/`STLR`. That gives **ordering, not completion**.
-- **ARM64, `--legacy`**: a plain `LDR`/`STR` bracketed by `DSB SY`, which does
-  wait for completion.
+A load has a barrier after it; a store has one before it (ordering it after
+every earlier access) and one after it (so nothing after it -- a later load
+included -- is performed first). Without the one after, x86 lets
+`vstore64(x, 1); r = vload64(y)` read y before x is visible: two CPUs running
+the mirror image both read 0 (the `store_buffering_litmus` rows measure it).
+
+- **x86_64**, both backends: `mfence` after a load, `mfence` before and after
+  a store, alongside a width-correct `mov`.
+- **ARM64, IR backend (the default)**: a load is an acquire form
+  (`LDARB`/`LDARH`/`LDAR`), which orders but does not wait; a store is a
+  release form (`STLRB`/`STLRH`/`STLR`) followed by `DSB SY`.
+- **ARM64, `--legacy`**: a plain `LDR` followed by `DSB SY`; a plain `STR`
+  bracketed by `DSB SY`.
 
 Measured by compiling `vload32` + `vstore32` and counting in `--emit=asm`:
-x86_64 IR 2 × `mfence`, x86_64 legacy 2 × `mfence`, **arm64 IR 0 × `DSB`**
-(`LDAR W20,[X19]` / `STLR W21,[X19]`), arm64 legacy 2 × `DSB SY`.
+x86_64 IR 3 × `mfence`, x86_64 legacy 3 × `mfence`, arm64 IR 1 × `DSB SY`
+(`LDAR W20,[X19]` / `STLR W21,[X19]` then `DSB SY`), arm64 legacy 3 × `DSB SY`.
 
-If you are on ARM64 with the default backend and you need the access to have
-*completed* — the usual requirement when poking a device register and then
-waiting on its effect — add an explicit `dsb()`. Do not assume the volatile
-form does it for you.
+A volatile LOAD on ARM64 with the default backend is ordered, not waited
+for; if you need a device read to have completed before something that is
+not itself a memory access, add an explicit `dsb()`.
 
 Note when checking this yourself: the `--emit=asm` listing prints these as
 `ldar` / `stlr` (with `b`/`h` for the narrow widths). Listings from compilers
