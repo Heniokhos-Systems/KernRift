@@ -15,7 +15,7 @@ SRCS = src/lexer.kr src/ast.kr src/parser.kr src/codegen.kr \
        src/codegen_aarch64.kr src/ir.kr src/ir_aarch64.kr src/ir_riscv.kr src/codegen_riscv.kr src/ir_xtensa.kr src/codegen_xtensa.kr src/format_macho.kr src/format_pe.kr src/format_arx.kr \
        src/format_archive.kr src/format_android.kr src/bcj.kr src/analysis.kr src/type_check.kr src/inliner.kr src/living.kr \
        std/sha256.kr src/format_espimage.kr \
-       src/runtime.kr src/formatter.kr src/main.kr
+       src/runtime.kr src/formatter.kr src/x86_len_tables.kr src/main.kr
 
 .PHONY: all build kr-runner test install dist clean bootstrap check
 
@@ -60,7 +60,7 @@ build/kr: packaging/kr.sh
 	@echo "Built build/kr (shell wrapper for kr-bin)"
 
 # $(SRCS) is main.kr's import list, hand-inlined in dependency order, so
-# main.kr's own 25 `import` lines are dead text once concatenated -- and they
+# main.kr's own 26 `import` lines are dead text once concatenated -- and they
 # land MID-FILE, past the leading run that import_process() reads. They were
 # tolerated only because the parser used to discard a stray top-level `import`
 # without a word; it now rejects one, because that silence is what made a
@@ -68,7 +68,7 @@ build/kr: packaging/kr.sh
 #
 # Dropping them costs nothing: `krc src/main.kr` (imports, no concat) and the
 # stripped concat compile to byte-identical output. The anchored pattern
-# matches only column-0 `import "`, which in $(SRCS) is exactly those 25 lines
+# matches only column-0 `import "`, which in $(SRCS) is exactly those 26 lines
 # -- an indented or otherwise-shaped import would survive the filter and then
 # fail the build loudly, which is the outcome we want.
 build/krc.kr: $(SRCS)

@@ -6117,27 +6117,26 @@ rm -f /tmp/krc_rawl_$$.kr /tmp/krc_rawl_$$.s
 # follows it (REX.W overrides 66); the listing printed the 66 on a line of its
 # own and sized the rest as if it were absent, so the line after it ran two
 # bytes into the next instruction. A line that starts with prefixes now holds
-# the whole instruction when a 66 in them sets a 16-bit operand; any other
-# prefix (and a 66 before REX.W) stays a line of its own, because what follows
-# it is the same length without it. A LOCK line holds its whole instruction
-# too. Each case lists its expected lines (`|` between lines) and is followed
-# by a nop that must start the next line; lines are compared by their bytes
-# (a mnemonic after them is ignored). Parent compiler: red on every case but
-# 66 48 C7 (the 66 already stood alone and REX.W made the rest the right
-# length) and 48 3D (decoded by its own cmp arm). Listing text only; no
-# binary changes.
+# the whole instruction -- since review round 7 every prefix does (a 66
+# before REX.W, F3 26 45 0F B7, F2 0F 10 used to stay lines of their own). A
+# LOCK line holds its whole instruction too. Each case lists its expected
+# lines (`|` between lines) and is followed by a nop that must start the
+# next line; lines are compared by their bytes (a mnemonic after them is
+# ignored). Parent compiler: red on every case but 66 48 C7 (the 66 already
+# stood alone and REX.W made the rest the right length) and 48 3D (decoded
+# by its own cmp arm). Listing text only; no binary changes.
 XL_ROWS="x86_asm_listing_prefix_lengths x86_asm_listing_opcode_lengths"
 for XL_ROW in $XL_ROWS; do
     case $XL_ROW in
         x86_asm_listing_prefix_lengths)
-            XL_SEQS="66_45_C7_00_34_12 66_41_81_C0_34_12 66_45_69_C0_34_12 66_41_F7_C0_34_12 66_C7_04_24_34_12 66_81_44_24_08_34_12 66_69_04_24_34_12 3E_66_45_63_4E_8D 66_64_44_3B_52_47 66_89_04_24 66_41_B8_34_12 66|48_C7_04_24_78_56_34_12 F3|26|45_0F_B7_F0 F0_48_0F_C1_04_24 F0_66_41_81_00_34_12 F0_66_45_0F_B1_08" ;;
+            XL_SEQS="66_45_C7_00_34_12 66_41_81_C0_34_12 66_45_69_C0_34_12 66_41_F7_C0_34_12 66_C7_04_24_34_12 66_81_44_24_08_34_12 66_69_04_24_34_12 3E_66_45_63_4E_8D 66_64_44_3B_52_47 66_89_04_24 66_41_B8_34_12 66_48_C7_04_24_78_56_34_12 F3_26_45_0F_B7_F0 F0_48_0F_C1_04_24 F0_66_41_81_00_34_12 F0_66_45_0F_B1_08" ;;
         # The ModR/M opcodes x86_insn_len added (63 movsxd, 85 test, D3/D1/C1/C0
         # shifts, 39/3B cmp, 0F B6/B7 movzx, F7/F6 with and without an
         # immediate by /reg, FF/FE, C6/80 imm8, 84/88/8A/8F, cmovcc, setcc, the
         # 0F 1F nop, SSE under F2 and 66 0F 3A, 0F 38) and the immediate-only
         # forms (accumulator 05/3D/A9, B8-BF with imm32 and REX.W imm64, 68, 6A).
         x86_asm_listing_opcode_lengths)
-            XL_SEQS="48_63_04_24 48_85_04_24 48_D3_24_24 48_39_44_24_08 48_3B_04_24 48_0F_B6_04_24 48_0F_B7_44_24_08 48_F7_04_24_78_56_34_12 48_F7_5C_24_08 48_FF_04_24 48_C1_24_24_03 41_C0_00_03 41_C6_00_07 41_80_00_07 48_84_04_24 41_88_00 41_8A_00 41_8F_00 48_D1_24_24 41_FE_00 41_F6_00_07 48_0F_44_04_24 41_0F_94_00 0F_1F_44_00_00 0F_B6_04_24 85_04_24 F2|0F_10_04_24 66_0F_3A_0F_C1_08 0F_38_F0_04_24 48_05_78_56_34_12 48_3D_00_F0_FF_FF 48_A9_78_56_34_12 48_B8_88_77_66_55_44_33_22_11 BB_78_56_34_12 41_BB_78_56_34_12 68_78_56_34_12 6A_07" ;;
+            XL_SEQS="48_63_04_24 48_85_04_24 48_D3_24_24 48_39_44_24_08 48_3B_04_24 48_0F_B6_04_24 48_0F_B7_44_24_08 48_F7_04_24_78_56_34_12 48_F7_5C_24_08 48_FF_04_24 48_C1_24_24_03 41_C0_00_03 41_C6_00_07 41_80_00_07 48_84_04_24 41_88_00 41_8A_00 41_8F_00 48_D1_24_24 41_FE_00 41_F6_00_07 48_0F_44_04_24 41_0F_94_00 0F_1F_44_00_00 0F_B6_04_24 85_04_24 F2_0F_10_04_24 66_0F_3A_0F_C1_08 0F_38_F0_04_24 48_05_78_56_34_12 48_3D_00_F0_FF_FF 48_A9_78_56_34_12 48_B8_88_77_66_55_44_33_22_11 BB_78_56_34_12 41_BB_78_56_34_12 68_78_56_34_12 6A_07" ;;
     esac
     {
         echo 'fn main() {'
@@ -6175,8 +6174,17 @@ rm -f /tmp/krc_xl_$$.kr /tmp/krc_xl_$$.s
 # a "(vex)"/"(evex)" tag). XL2_CASES is one instruction per line, each
 # checked offline against objdump as exactly one instruction of that many
 # bytes; every one is followed by a nop that must be a "nop" row at the
-# summed offset, and every case must start a row (a line of legacy prefixes
-# directly before its instruction is allowed, as objdump splits them too).
+# summed offset, and every case must BE a row: its legacy prefixes on the
+# same row as its instruction (`f3 aa` rep stosb, `f2 0f 5e ca` divsd -- the
+# compiler's own listing split 265 instructions that way, review round 7).
+# Also cases objdump calls (bad), each followed by the nop that must stay its
+# own row: `c6`/`c7` with a ModR/M reg field other than /0 (the nop's 90 is
+# /2), an EVEX with map 0, an 8F that is neither pop nor XOP; and the APX
+# map-4 EVEX with an imm8 (62 9c 95 1c 2c 2c 43 40, 8 bytes) and a VEX
+# gather with a SIB (c4 62 ed 92 14 20).
+# The two return forms, iretq (48 cf) and ret imm16 (c2 08 00), sit in a
+# @naked function: an assembly return in a non-@naked function is refused
+# once legacy-naked is merged, and the listing check is the same there.
 # Also pinned: the listing header is a whole line, an mfence row has no stray
 # byte after it, and a LOCK line ends "lock ..." (the fallback wrote 20 bytes
 # of a 21-byte string, "lock .."; xl2_lockend reached it on the parent).
@@ -6206,7 +6214,6 @@ XL2_CASES='0xC4 0xE2 0x7D 0x19 0x09
 0xF4
 0xCC
 0xCD 0x80
-0x48 0xCF
 0x0F 0x20 0xD8
 0x0F 0x22 0xD8
 0x0F 0x01 0x10
@@ -6235,7 +6242,6 @@ XL2_CASES='0xC4 0xE2 0x7D 0x19 0x09
 0x48 0xA1 0x01 0x02 0x03 0x04 0x05 0x06 0x07 0x08
 0xA0 0x01 0x02 0x03 0x04 0x05 0x06 0x07 0x08
 0x48 0xA3 0x01 0x02 0x03 0x04 0x05 0x06 0x07 0x08
-0xC2 0x08 0x00
 0xC8 0x10 0x00 0x00
 0x6A 0x05
 0x68 0x01 0x02 0x03 0x04
@@ -6291,13 +6297,26 @@ XL2_CASES='0xC4 0xE2 0x7D 0x19 0x09
 0x48 0x99
 0x99
 0x48 0x98
-0x98'
+0x98
+0xF3 0xAA
+0xF2 0x0F 0x5E 0xCA
+0x66 0x48 0x0F 0x7E 0xD3
+0xF2 0x49 0x0F 0x2A 0xD6
+0xF0 0x48 0x0F 0xB1 0x0F
+0x2E 0x3E 0x48 0x8B 0x05 0x00 0x00 0x00 0x00
+0x62 0x9C 0x95 0x1C 0x2C 0x2C 0x43 0x40
+0xC4 0x62 0xED 0x92 0x14 0x20
+0xC6
+0xC7
+0x62
+0x8F'
 TOTAL=$((TOTAL + 1))
 XL2_T=$(mktemp -d "${TMPDIR:-/tmp}/krc_xl2.XXXXXX")
 {
     printf 'fn main() {\n    asm("0x0F 0x0B")\n'
     printf '%s\n' "$XL2_CASES" | while IFS= read -r XL2_C; do printf '    asm("%s")\n    asm("0x90")\n' "$XL2_C"; done
     printf '    exit(0)\n}\n@naked fn xl2_lockend() {\n    asm("0xC3")\n    asm("0xF0")\n}\n'
+    printf '@naked fn xl2_rets() {\n    asm("0x0F 0x0B")\n    asm("0x48 0xCF")\n    asm("0x90")\n    asm("0xC2 0x08 0x00")\n    asm("0x90")\n}\n'
 } > "$XL2_T/x.kr"
 XL2_BAD="(listing not produced)"
 if $KRC --arch=x86_64 --emit=asm "$XL2_T/x.kr" -o "$XL2_T/x.s" > /dev/null 2>&1 && [ -f "$XL2_T/x.s" ]; then
@@ -6317,17 +6336,18 @@ if $KRC --arch=x86_64 --emit=asm "$XL2_T/x.kr" -o "$XL2_T/x.s" > /dev/null 2>&1 
             split(lens, L, " "); at = base; bad = ""
             for (k = 1; k in L; k++) {
                 if (!(at in rb)) {
-                    # a line of legacy prefixes may stand before the instruction
-                    ok = 0
-                    for (q = at - 1; q >= at - 4 && q >= base; q--) if (q in rb) { ok = (rb[q] ~ /^(66|67|64|65|f2|f3|2e|3e|26|36|f0)( (66|67|64|65|f2|f3|2e|3e|26|36|f0))*$/); break }
-                    if (!ok) bad = bad " case" k ":no-row"
+                    bad = bad " case" k ":no-row"
                 }
+                else if (rn[at] != L[k]) bad = bad " case" k ":row-of-" rn[at] "-bytes"
                 at += L[k]
                 if (!(at in rb) || rb[at] != "90" || rt[at] != "nop") bad = bad " case" k ":sentinel"
                 at += 1
             }
             print bad
         }' "$XL2_T/x.s")
+    # the two return forms in xl2_rets: each one whole row, then a nop row
+    XL2_R=$(sed -n '/^xl2_rets:/,$p' "$XL2_T/x.s" | sed -nE 's/^  [0-9a-f]{8}: //p' | sed -E 's/ +$//; s/ {2,}/|/' | tr '\n' '/')
+    case "$XL2_R" in "0f 0b/48 cf/90|nop/c2 08 00/90|nop/"*) ;; *) XL2_BAD="$XL2_BAD xl2_rets:[$(printf '%s' "$XL2_R" | cut -c1-60)]" ;; esac
     grep -qx '; KernRift assembly listing' "$XL2_T/x.s" || XL2_BAD="$XL2_BAD header"
     [ "$(tr -d '\000' < "$XL2_T/x.s" | wc -c)" = "$(wc -c < "$XL2_T/x.s")" ] || XL2_BAD="$XL2_BAD NUL-byte"
     # a LOCK at the very end of a function: its line must end "lock ...", never "lock .."
@@ -6342,6 +6362,68 @@ else
     FAIL=$((FAIL + 1))
 fi
 rm -rf "$XL2_T"
+
+# Makefile's build/krc.kr is SRCS concatenated with main.kr's `import` lines
+# stripped; `krc src/main.kr` follows those imports instead, and the Makefile
+# promises both build the same compiler. A source file added to SRCS but not
+# to main.kr's imports (x86_len_tables.kr, review round 8) breaks only the
+# second: "undefined function 'x86t_oppat_c'".
+TOTAL=$((TOTAL + 1))
+SIM_T=$(mktemp -d "${TMPDIR:-/tmp}/krc_sim.XXXXXX")
+SIM_A=$(cd "$DIR/../src" && $KRC main.kr -o "$SIM_T/imp" 2>&1 | grep -m1 'error:')
+SIM_B=$($KRC "$DIR/../build/krc.kr" -o "$SIM_T/cat" 2>&1 | grep -m1 'error:')
+if [ -s "$SIM_T/imp" ] && [ -s "$SIM_T/cat" ] && cmp -s "$SIM_T/imp" "$SIM_T/cat"; then
+    PASS=$((PASS + 1)); echo "  self_import_mode_matches_concat: PASS (krc src/main.kr == krc build/krc.kr, $(stat -c %s "$SIM_T/imp") B)"
+else
+    FAIL=$((FAIL + 1)); echo "FAIL: self_import_mode_matches_concat (import mode: ${SIM_A:-built}; concat: ${SIM_B:-built}; or the two differ)"
+fi
+rm -rf "$SIM_T"
+
+# The compiler's own listing against objdump, row by row (review round 7's
+# lsync4): list the compiler itself, hand every function's bytes up to its
+# last `ret` row to objdump -D -b binary, and require every row to START at
+# an instruction boundary and to hold exactly that instruction's bytes. The
+# round-7 compiler failed 265 rows here (legacy prefixes on their own row).
+TOTAL=$((TOTAL + 1))
+if ! command -v objdump > /dev/null 2>&1 || ! command -v python3 > /dev/null 2>&1; then
+    skip_row x86_asm_listing_self_vs_objdump "needs objdump and python3"
+else
+    XLS_T=$(mktemp -d "${TMPDIR:-/tmp}/krc_xls.XXXXXX")
+    XLS_OUT="no listing"
+    if [ -f "$DIR/../build/krc.kr" ] && $KRC --arch=x86_64 --emit=asm "$DIR/../build/krc.kr" -o "$XLS_T/self.s" > /dev/null 2>&1; then
+        XLS_OUT=$(cd "$XLS_T" && timeout -k 5 600 python3 - "$XLS_T/self.s" <<'PYEOF'
+import sys, re, subprocess, os, tempfile
+L = open(sys.argv[1], errors="replace").read().split("\n")
+funcs = []; cur = None
+for ln in L:
+    if re.match(r"^[A-Za-z_][\w.$]*:\s*$", ln): cur = [ln[:-1], []]; funcs.append(cur); continue
+    m = re.match(r"^  ([0-9a-f]{8}): ((?:[0-9a-f]{2} )*[0-9a-f]{2})(?: +(\S.*?))?\s*$", ln)
+    if m and cur is not None: cur[1].append((int(m.group(1), 16), bytes.fromhex(m.group(2).replace(" ", ""))))
+off = mis = rows = fns = 0; ex = []
+for name, rs in funcs:
+    lr = [i for i, r in enumerate(rs) if r[1] == b"\xc3"]
+    if not lr: continue
+    rs = rs[:lr[-1] + 1]; base = rs[0][0]; fns += 1
+    fd, p = tempfile.mkstemp(dir="."); os.write(fd, b"".join(b for _, b in rs)); os.close(fd)
+    o = subprocess.run(["objdump", "-D", "-b", "binary", "-mi386:x86-64", "-w", p], capture_output=True, text=True).stdout; os.unlink(p)
+    st = sorted(int(m.group(1), 16) for m in re.finditer(r"(?m)^\s+([0-9a-f]+):\t", o))
+    nx = {st[i]: st[i + 1] for i in range(len(st) - 1)}; ss = set(st)
+    for a, b in rs:
+        rows += 1; r = a - base
+        if r not in ss: off += 1; ex.append("%s+%x %s" % (name, r, b.hex(" ")))
+        elif r in nx and nx[r] - r != len(b): mis += 1; ex.append("%s+%x %s" % (name, r, b.hex(" ")))
+print("%d %d %d %d %s" % (fns, rows, off, mis, "; ".join(ex[:4])))
+PYEOF
+)
+    fi
+    read -r XLS_F XLS_R XLS_O XLS_M XLS_E <<< "$XLS_OUT"
+    if [ -n "$XLS_M" ] && [ "$XLS_F" -gt 1000 ] 2>/dev/null && [ "$XLS_O" = 0 ] && [ "$XLS_M" = 0 ]; then
+        PASS=$((PASS + 1)); echo "  x86_asm_listing_self_vs_objdump: PASS ($XLS_F functions, $XLS_R rows, every row an objdump instruction)"
+    else
+        FAIL=$((FAIL + 1)); echo "FAIL: x86_asm_listing_self_vs_objdump (functions rows off-boundary len-mismatch: $XLS_OUT)"
+    fi
+    rm -rf "$XLS_T"
+fi
 
 # A barrier must stop CSE of a static load. isb/dcache_flush/icache_invalidate/
 # dsb/dmb (IR ops 126-130) were missing from ir_opt_cse_invalidates, so

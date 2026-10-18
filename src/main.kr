@@ -23,6 +23,7 @@ import "../std/sha256.kr"
 import "format_espimage.kr"
 import "runtime.kr"
 import "formatter.kr"
+import "x86_len_tables.kr"
 
 // KernRift self-hosted compiler — main
 
@@ -1146,43 +1147,26 @@ fn x86_is_legacy_prefix(uint64 b) -> uint64 {
     return 0
 }
 
-// Length of one x86_64 instruction at `bp`, every encoding: any number of
+// The STRUCTURAL length of one x86_64 instruction at `bp`, for the encodings
+// x86_insn_len's measured table marks `F` (most valid ones): any number of
 // legacy prefixes (66 67 64 65 F2 F3 2E 3E 26 36 F0) in any order, an
 // optional REX (40-4F), the one-byte map, 0F, 0F 38, 0F 3A, 3DNow! (0F 0F
-// /r ib), VEX (C5 xx, C4 xx xx), EVEX (62 xx xx xx) and XOP (8F with map
-// 8-A), the ModR/M with its SIB and displacement (x86_modrm_extra) and the
-// immediate. `avail` is the number of bytes left in the function. Returns 0
-// only when the bytes run out before the instruction does. The lengths are
-// objdump's (-mi386:x86-64), including its AMD reading of 0x66 on a near
-// branch (66 E8/E9/0F 8x/C7 F8 take a rel16) and an opcode it rejects
-// ((bad): 1 byte in the one-byte map, 2 in 0F). The listing dumps whatever
-// its mnemonic arms do not decode at exactly this length, so the next line
-// always starts where the next instruction does.
+// /r ib), the ModR/M with its SIB and displacement (x86_modrm_extra) and the
+// immediate. `avail` is the number of bytes left; 0 only when they run out.
+// It follows objdump's AMD reading of 0x66 on a near branch (66 E8/E9/0F 8x/
+// C7 F8 take a rel16). What it cannot know -- which opcodes objdump rejects,
+// and how many bytes it then takes -- is the table's job (x86_insn_len).
 //
 // The immediate follows the operand size: imm16/32 (05..3D, 68, 69, 81, A9,
 // C7, F7 /0-/1, E8, E9, 0F 80-8F) is 2 bytes under a 0x66 prefix without
 // REX.W, else 4; B8-BF under REX.W is an imm64; A0-A3 carry an 8-byte
 // absolute address (moffs), 4 under 0x67. imm8: 6A 6B 70-7F 80 83 A8 B0-B7
 // C0 C1 C6 CD E0-E7 EB F6 /0-/1, 04..3C; C2/CA imm16; C8 imm16+imm8; 0F 70-73
-// A4 AC BA C2 C4-C6, every 0F 3A, 0F 0F; 66/F2 0F 78 two imm8s. VEX/EVEX:
-// imm8 in map 3 and for map-1 70-73 C2 C4-C6; C5/C4 map-1 77 (vzeroupper,
-// vzeroall) has no ModR/M. 0F 20-23 (mov cr/dr) ignore the ModR/M mod field:
-// never a SIB or displacement. A REX followed by another prefix or REX is not
-// part of an instruction (objdump's lone `rex`): it is 1 byte on its own.
-//
-// Side results, for the line that starts with a legacy prefix:
-// x86_insn_osz16 is 1 when a 0x66 prefix sets a 16-bit operand (no REX.W
-// after it), and x86_insn_pfxdep is 1 when another prefix changes the length
-// (67 on a moffs, F3 on 0F B8 popcnt, 66/F2 on 0F 78): such a line must hold
-// the whole instruction, because the line after a lone prefix is sized as if
-// the prefix were not there. x86_insn_kind is 1 for VEX, 2 for EVEX, 3 for
-// XOP, else 0.
-static uint64 x86_insn_osz16 = 0
-static uint64 x86_insn_pfxdep = 0
+// A4 AC BA C2 C4-C6, every 0F 3A, 0F 0F; 66/F2 0F 78 two imm8s. 0F 20-23 (mov
+// cr/dr) ignore the ModR/M mod field: never a SIB or displacement. A REX
+// followed by another prefix or REX is objdump's lone `rex`: 1 byte.
 static uint64 x86_insn_kind = 0
-fn x86_insn_len(uint64 bp, uint64 avail) -> uint64 {
-    x86_insn_osz16 = 0
-    x86_insn_pfxdep = 0
+fn x86_formula_len(uint64 bp, uint64 avail) -> uint64 {
     x86_insn_kind = 0
     uint64 n = 0
     uint64 osz = 0
@@ -1219,7 +1203,6 @@ fn x86_insn_len(uint64 bp, uint64 avail) -> uint64 {
     }
     uint64 immz = 4
     if osz != 0 && rexw == 0 { immz = 2 }
-    if osz != 0 && rexw == 0 { x86_insn_osz16 = 1 }
     uint64 op = x86_lb(bp + n)
     n = n + 1
     if rex2m != 0 {
@@ -1308,9 +1291,7 @@ fn x86_insn_len(uint64 bp, uint64 avail) -> uint64 {
             if op2 == 0x78 && (osz != 0 || rep == 0xF2) {
                 // extrq/insertq xmm, imm8, imm8
                 imm = 2
-                x86_insn_pfxdep = 1
             }
-            if op2 == 0xB8 { x86_insn_pfxdep = 1 }
         }
     } else if op < 0x40 {
         uint64 low = op & 7
@@ -1331,10 +1312,7 @@ fn x86_insn_len(uint64 bp, uint64 avail) -> uint64 {
         imm = 1
     } else if op >= 0xA0 && op <= 0xA3 {
         imm = 8
-        if asz != 0 {
-            imm = 4
-            x86_insn_pfxdep = 1
-        }
+        if asz != 0 { imm = 4 }
     } else if op >= 0xB8 && op <= 0xBF {
         imm = immz
         if rexw != 0 { imm = 8 }
@@ -1353,6 +1331,279 @@ fn x86_insn_len(uint64 bp, uint64 avail) -> uint64 {
     if n >= avail { return 0 }
     if noea != 0 { return n + 1 + imm }
     return n + 1 + x86_modrm_extra(bp + n) + imm
+}
+
+// 1 when `b` is a REX prefix (40-4F).
+fn x86_is_rex(uint64 b) -> uint64 {
+    if (b & 0xF0) == 0x40 { return 1 }
+    return 0
+}
+
+// One hex digit (0-9, a-f) or one base-36 digit (0-9, a-z) of a table string.
+fn x86t_digit(uint64 c) -> uint64 {
+    if c >= 97 { return c - 87 }
+    return c - 48
+}
+
+// The length code x86_len_tables records for (space, opcode, dims, ModR/M
+// class): high nibble = kind (0 formula, 1 ModR/M + displacement, 2 raw, 3
+// prefix-relative), low nibble = the count. See x86_len_tables.
+fn x86t_code(uint64 space, uint64 op, uint64 di, uint64 mi) -> uint64 {
+    uint64 g = (space * 256 + op) * 3
+    uint64 pat = x86t_digit(x86t_oppat_c(g)) * 256 + x86t_digit(x86t_oppat_c(g + 1)) * 16 + x86t_digit(x86t_oppat_c(g + 2))
+    uint64 po = pat * 4
+    uint64 off = x86t_digit(x86t_patoff_c(po)) * 4096 + x86t_digit(x86t_patoff_c(po + 1)) * 256 + x86t_digit(x86t_patoff_c(po + 2)) * 16 + x86t_digit(x86t_patoff_c(po + 3))
+    uint64 eo = (off + di) * 2
+    uint64 row = x86t_digit(x86t_patent_c(eo)) * 16 + x86t_digit(x86t_patent_c(eo + 1))
+    uint64 ci = x86t_digit(x86t_row_c(row * 80 + mi))
+    return x86t_kind_c(ci)
+}
+
+// x86_insn_len, VEX/EVEX/XOP part: `n` is the offset of the C4/C5/62/8F byte.
+// Sets x86_vx_space (6.. in x86_len_tables' order), x86_vx_di, x86_vx_t (the
+// end of the opcode) and returns 1, or returns 0 with x86_vx_t set to the
+// whole length of a header objdump rejects ((bad) of that many bytes), or
+// returns 2 when the bytes run out.
+static uint64 x86_vx_space = 0
+static uint64 x86_vx_di = 0
+static uint64 x86_vx_t = 0
+fn x86_vx_parse(uint64 bp, uint64 n, uint64 avail) -> uint64 {
+    uint64 x = x86_lb(bp + n)
+    if n + 1 >= avail { return 2 }
+    uint64 p0 = x86_lb(bp + n + 1)
+    if x == 0xC4 {
+        uint64 cm = p0 & 0x1F
+        if cm != 1 && cm != 2 && cm != 3 && cm != 7 { x86_vx_t = n + 1; return 0 }
+    }
+    if x == 0x8F {
+        uint64 xm = p0 & 0x1F
+        if xm != 8 && xm != 9 && xm != 10 { x86_vx_t = n + 1; return 0 }
+    }
+    uint64 pp = 0
+    uint64 vl = 0
+    uint64 vw = 0
+    uint64 vz = 0
+    if x == 0xC5 {
+        if n + 3 > avail { return 2 }
+        pp = p0 & 3
+        vl = (p0 >> 2) & 1
+        if ((p0 >> 3) & 15) != 15 { vz = 1 }
+        x86_vx_space = 6
+        x86_vx_di = ((pp * 2 + vl) * 2 + vw) * 2 + vz
+        x86_vx_t = n + 3
+        x86_insn_kind = 1
+        return 1
+    }
+    if x == 0x62 {
+        if n + 5 > avail { return 2 }
+        uint64 mp = p0 & 7
+        if mp == 0 { x86_vx_t = n + 1; return 0 }
+        uint64 e1 = x86_lb(bp + n + 2)
+        uint64 e2 = x86_lb(bp + n + 3)
+        pp = e1 & 3
+        vw = e1 >> 7
+        if ((e1 >> 3) & 15) != 15 { vz = 1 }
+        if mp == 4 {
+            // APX map 4: objdump's header checks, measured exhaustively over
+            // P1 x P2 (opcode-independent): ND=0 needs aaa/V'/L'L/z/vvvv =
+            // 00/1/00/0/1111 or the first 3 bytes are (bad); ND=1 needs
+            // aaa/L'L/z = 00/00/0, else (bad) of 3 bytes when vvvv = 1111
+            // and of 1 byte when it is not.
+            uint64 nd = (e2 >> 4) & 1
+            uint64 lo = e2 & 3
+            uint64 vp = (e2 >> 3) & 1
+            uint64 ll = (e2 >> 5) & 3
+            uint64 zz = e2 >> 7
+            if nd == 0 {
+                if lo != 0 || vp != 1 || ll != 0 || zz != 0 || vz != 0 { x86_vx_t = n + 3; return 0 }
+            } else {
+                if lo != 0 || ll != 0 || zz != 0 {
+                    if vz == 0 { x86_vx_t = n + 3 } else { x86_vx_t = n + 1 }
+                    return 0
+                }
+            }
+            x86_vx_di = (((pp * 2 + vw) * 2 + nd) * 2 + ((e2 >> 2) & 1)) * 2 + vz
+        } else {
+            x86_vx_di = (((pp * 2 + vw) * 4 + ((e2 >> 5) & 3)) * 2 + ((e2 >> 4) & 1)) * 2 + vz
+        }
+        x86_vx_space = 12 + mp
+        x86_vx_t = n + 5
+        x86_insn_kind = 2
+        return 1
+    }
+    // C4 (VEX, maps 1 2 3 7) or 8F (XOP, maps 8 9 A)
+    if n + 4 > avail { return 2 }
+    uint64 v1 = x86_lb(bp + n + 2)
+    pp = v1 & 3
+    vl = (v1 >> 2) & 1
+    vw = v1 >> 7
+    if ((v1 >> 3) & 15) != 15 { vz = 1 }
+    uint64 m = p0 & 0x1F
+    if x == 0xC4 {
+        if m == 7 { x86_vx_space = 9 } else { x86_vx_space = 5 + m }
+        x86_insn_kind = 1
+    } else {
+        x86_vx_space = 2 + m
+        x86_insn_kind = 3
+    }
+    x86_vx_di = ((pp * 2 + vl) * 2 + vw) * 2 + vz
+    x86_vx_t = n + 4
+    return 1
+}
+
+// Length of one x86_64 instruction at `bp`, exactly as GNU objdump
+// (-mi386:x86-64) splits the stream: valid encodings and (bad) ones, so a
+// (bad) encoding never swallows the code after it. `avail` is the number of
+// bytes left in the function; 0 only when they run out first. Structure
+// (prefixes, fwait, REX, REX2, VEX/EVEX/XOP headers and their validity, the
+// 15-byte limit) is decoded here; which opcode objdump knows in which map,
+// under which mandatory prefix, W, L, b and vvvv, and how many bytes it then
+// takes, is the measured table x86_len_tables (regenerated by
+// scripts/gen-x86-len-tables.py). x86_insn_kind is 1 for VEX, 2 for EVEX, 3
+// for XOP, else 0.
+fn x86_insn_len(uint64 bp, uint64 avail) -> uint64 {
+    uint64 l = x86_insn_len0(bp, avail)
+    if l > 15 { return 15 }
+    return l
+}
+
+fn x86_insn_len0(uint64 bp, uint64 avail) -> uint64 {
+    x86_insn_kind = 0
+    // fwait (9B) is a prefix of an x87 instruction (D8-DF) reached through
+    // legacy prefixes, more 9Bs and a REX; otherwise a 1-byte fwait.
+    uint64 k = 0
+    while k < avail && (x86_is_legacy_prefix(x86_lb(bp + k)) != 0 || x86_lb(bp + k) == 0x9B) { k = k + 1 }
+    if k < avail && x86_is_rex(x86_lb(bp + k)) != 0 { k = k + 1 }
+    uint64 x87 = 0
+    if k < avail && x86_lb(bp + k) >= 0xD8 && x86_lb(bp + k) <= 0xDF { x87 = 1 }
+    uint64 n = 0
+    if x87 == 0 {
+        while n < k {
+            if x86_lb(bp + n) == 0x9B { return n + 1 }
+            n = n + 1
+        }
+        n = 0
+    }
+    uint64 osz = 0
+    uint64 rep = 0
+    uint64 nine = 0
+    while n < avail {
+        uint64 pb = x86_lb(bp + n)
+        if pb == 0x9B && x87 != 0 {
+            nine = nine + 1
+        } else if x86_is_legacy_prefix(pb) != 0 {
+            if pb == 0x66 { osz = 1 }
+            if pb == 0xF2 || pb == 0xF3 { rep = pb }
+        } else {
+            break
+        }
+        n = n + 1
+    }
+    uint64 np = n
+    if n >= avail { return 0 }
+    uint64 ps = 0
+    if rep == 0xF3 { ps = 2 }
+    if rep == 0xF2 { ps = 3 }
+    if osz != 0 { if ps == 0 { ps = 1 } else { ps = ps + 2 } }
+    uint64 rexw = 0
+    uint64 space = 0
+    uint64 op = 0
+    uint64 t = 0
+    uint64 di = 0
+    uint64 vx = 0
+    uint64 x = x86_lb(bp + n)
+    if x == 0xD5 {
+        if n + 2 >= avail { return 0 }
+        uint64 r2 = x86_lb(bp + n + 1)
+        rexw = (r2 >> 3) & 1
+        n = n + 2
+        op = x86_lb(bp + n)
+        if (r2 >> 7) == 0 && op == 0xD5 { return n + 1 }
+        if (r2 >> 7) == 0 && (op == 0xC4 || op == 0xC5 || op == 0x62 || (op == 0x8F && n + 1 < avail && (x86_lb(bp + n + 1) & 0x38) != 0)) {
+            // REX2 (M0=0) in front of a VEX/EVEX/XOP: that, the REX2 a prefix
+            vx = 1
+        } else {
+            space = 4 + (r2 >> 7)
+            t = n + 1
+            di = ps * 2 + rexw
+        }
+    } else {
+        if x86_is_rex(x) != 0 {
+            rexw = (x >> 3) & 1
+            n = n + 1
+            if n >= avail { return 0 }
+            x = x86_lb(bp + n)
+            // a REX followed by another prefix or REX is a lone `rex`
+            if x86_is_legacy_prefix(x) != 0 || x86_is_rex(x) != 0 { return n }
+        }
+        if x == 0xC4 || x == 0xC5 || x == 0x62 || (x == 0x8F && n + 1 < avail && (x86_lb(bp + n + 1) & 0x38) != 0) {
+            vx = 1
+        } else {
+            op = x
+            n = n + 1
+            space = 0
+            if op == 0x0F {
+                if n >= avail { return 0 }
+                op = x86_lb(bp + n)
+                n = n + 1
+                space = 1
+                if op == 0x38 || op == 0x3A {
+                    if n >= avail { return 0 }
+                    if op == 0x38 { space = 2 } else { space = 3 }
+                    op = x86_lb(bp + n)
+                    n = n + 1
+                }
+            }
+            t = n
+            di = ps * 2 + rexw
+        }
+    }
+    if vx != 0 {
+        uint64 vr = x86_vx_parse(bp, n, avail)
+        if vr == 2 { return 0 }
+        if vr == 0 {
+            x86_insn_kind = 0
+            return x86_vx_t
+        }
+        space = x86_vx_space
+        di = x86_vx_di
+        t = x86_vx_t
+        op = x86_lb(bp + t - 1)
+    }
+    if t >= avail { return 0 }
+    // ModR/M class: 0-7 memory by reg, 8-71 register by reg/rm, 72-79 memory
+    // with a SIB byte by reg (a VSIB gather or an AMX tile op needs one)
+    uint64 mr = x86_lb(bp + t)
+    uint64 mi = (mr >> 3) & 7
+    if (mr >> 6) == 3 { mi = 8 + ((mr >> 3) & 7) * 8 + (mr & 7) }
+    else if (mr & 7) == 4 { mi = 72 + ((mr >> 3) & 7) }
+    uint64 code = x86t_code(space, op, di, mi)
+    uint64 cls = code >> 4
+    uint64 cv = code & 15
+    if cls == 1 {
+        if cv == 0 { return t }
+        return t + cv + x86_modrm_extra(bp + t)
+    }
+    if cls == 2 { return t + cv }
+    if cls == 3 { return np + cv }
+    // the structural formula; fwait prefixes are not part of it
+    if nine == 0 { return x86_formula_len(bp, avail) }
+    uint8[32] fb
+    uint64 fi = 0
+    uint64 fn_n = 0
+    while fi < avail && fn_n < 32 {
+        uint64 fv = x86_lb(bp + fi)
+        if fi >= np || fv != 0x9B {
+            uint64 fp = fb + fn_n
+            uint8 fv8 = fv
+            unsafe { *(fp as uint8) = fv8 }
+            fn_n = fn_n + 1
+        }
+        fi = fi + 1
+    }
+    uint64 fl = x86_formula_len(fb, fn_n)
+    if fl == 0 { return 0 }
+    return fl + nine
 }
 
 fn write_x86_mem(uint64 fd, uint64 bp_modrm, uint64 rex_xb) -> uint64 {
@@ -2975,25 +3226,16 @@ fn emit_asm_listing(uint64 output_path, uint64 arch, uint64 text_start, uint64 s
                         pos = pos + cnt
                     }
                 } else {
-                    // Generic: one raw line holding one whole instruction
-                    // at the length x86_insn_len gives, so the next line
-                    // starts where the next instruction does. A legacy
-                    // prefix stays a line of its own -- what follows it is
-                    // the same length without it -- unless a 0x66 in the
-                    // prefixes makes the operand 16-bit (imm16, rel16) or
-                    // another prefix changes the length (67 on a moffs, F3
-                    // on popcnt, 66/F2 on 0F 78): only this line can see
-                    // that, so it holds the whole instruction. Cut short by
-                    // the end of the function: the rest of it.
-                    uint64 cnt = 1
-                    uint64 gen_len = x86_insn_len(bp, fn_end - pos)
-                    uint64 gen_pfx = 0
-                    if b0 == 0x66 || b0 == 0x67 || b0 == 0x64 || b0 == 0x65 || b0 == 0xF2 || b0 == 0xF3 || b0 == 0x2E || b0 == 0x3E || b0 == 0x26 || b0 == 0x36 { gen_pfx = 1 }
-                    if gen_len != 0 && (gen_pfx == 0 || x86_insn_osz16 != 0 || x86_insn_pfxdep != 0) {
-                        cnt = gen_len
-                    } else if gen_len == 0 && gen_pfx == 0 {
-                        cnt = fn_end - pos
-                    }
+                    // Generic: one raw line holding one whole instruction,
+                    // its legacy prefixes included (`f3 aa` rep stosb, `f2 0f
+                    // 5e ca` divsd), at the length x86_insn_len gives -- the
+                    // length objdump gives, (bad) encodings included -- so
+                    // the next line starts where the next instruction does.
+                    // A prefix used to be a line of its own here, which split
+                    // 265 instructions of the compiler's own listing in two.
+                    // Cut short by the end of the function: the rest of it.
+                    uint64 cnt = x86_insn_len(bp, fn_end - pos)
+                    if cnt == 0 { cnt = fn_end - pos }
                     if cnt + pos > fn_end { cnt = fn_end - pos }
                     uint64 di = 0
                     while di < cnt {
