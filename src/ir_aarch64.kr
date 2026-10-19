@@ -1255,13 +1255,13 @@ fn ir_emit_arm64_insn(uint64 ii) {
     }
 
     // ----- IR_ROR (137): dst = right-rotate(src1, src2 mod imm) -----
-    // imm is the rotation WIDTH (ir.kr:159); the shared
+    // imm is the rotation WIDTH (ir.kr:163); the shared
     // ir_opt_recognize_rotate pass only ever produces imm=32 today.
     // Width 32 uses the 32-bit RORV (`ror wD, wN, wM`): it reads only the
     // low 32 bits of src1, rotates by src2 mod 32, and zeroes the upper
     // half — bit-identical to x86's `ROR r32, cl` lowering, so the result
     // is w32-clean and downstream `& 0xFFFFFFFF` masks stay elided
-    // (const-fold relies on that, see ir.kr:10638). The hardware count is
+    // (const-fold relies on that, see ir.kr:13391). The hardware count is
     // taken mod datasize, matching the documented `src2 mod imm` contract
     // without an explicit mask (unlike riscv, which must AND with 31).
     if op == 137 {
@@ -2334,15 +2334,15 @@ fn ir_emit_arm64_insn(uint64 ii) {
     if op == 94 {
         uint64 addr_reg = ir_a64_resolve_src(s1_v, 9)
         uint64 val_reg = ir_a64_resolve_src(s2_v, 10)
-        // Width is in the DEST slot (ir.kr:5131 for device fields, plus the
-        // vstore8/16/32/64 builtins at ir.kr:2497/2508/2192/2203).
+        // Width is in the DEST slot (ir.kr:5556 for device fields, plus the
+        // vstore8/16/32/64 builtins at ir.kr:2682/2693/2377/2388).
         // NOT dst_r: that is computed near the top of this function from
         // dest_v, which for op 94 is the width, not a vreg id.
         uint64 vw = dest_v
         // Size is bits 31:30 — STLRB / STLRH / STLR Wt / STLR Xt.
         // An unrecognised width takes the narrowest form, matching x86
-        // (ir.kr:10233): losing data locally beats corrupting neighbours.
-        // Unreachable today — parser.kr:2710-2718 is the only producer and it
+        // (ir.kr:11249): losing data locally beats corrupting neighbours.
+        // Unreachable today — parser.kr:3834-3839 is the only producer and it
         // yields 1/2/4/8 only — but defensive, and cheap.
         uint64 vs_base = 0x089FFC00
         if vw == 2 { vs_base = 0x489FFC00 } else if vw == 4 { vs_base = 0x889FFC00 } else if vw == 8 { vs_base = 0xC89FFC00 }
@@ -2356,8 +2356,8 @@ fn ir_emit_arm64_insn(uint64 ii) {
         uint64 addr_reg = ir_a64_resolve_src(s1_v, 9)
         uint64 d = dst_r
         if d == 0xFFFFFFFF { d = 9 }
-        // Width is in the IMM slot (ir.kr:3791 for device fields, plus the
-        // vload8/16/32/64 builtins at ir.kr:2480/2488/2213/2221).
+        // Width is in the IMM slot (ir.kr:4068 for device fields, plus the
+        // vload8/16/32/64 builtins at ir.kr:2665/2673/2398/2406).
         uint64 lw = imm
         // LDARB / LDARH / LDAR Wt / LDAR Xt. The narrow forms zero-extend into
         // Wt, and a Wt write zeroes Xt[63:32], so the 64-bit spill below stays
@@ -2580,7 +2580,7 @@ fn ir_emit_arm64_insn(uint64 ii) {
             emit_a64_str32(9, 31, 0x40)
             // ---- Build space-separated cmdline at sp+0xD0 ----
             // No quoting — our child parser splits on 0x20 without
-            // stripping quotes (src/main.kr:21 win_init_args).
+            // stripping quotes (src/main.kr:31 win_init_args).
             // x9 = write ptr, x20 = argv walk, x10 = arg*, x11 = byte
             emit_a64_add_imm(9, 31, 0xD0)
             // L_outer (+0): ldr x10,[x20]; cbz x10,L_done (+48)
@@ -2738,7 +2738,7 @@ fn ir_emit_arm64_insn(uint64 ii) {
         } else if target_os == 1 {
             // macOS arm64: gettimeofday(&tv, NULL), x16=116, svc #0x80.
             // timeval = { tv_sec: i64, tv_usec: i64 }. Matches the
-            // legacy codegen at src/codegen_aarch64.kr:3539. Without
+            // legacy codegen at src/codegen_aarch64.kr:4406. Without
             // this, the IR path was issuing clock_gettime-as-Linux
             // syscall 228 on Darwin, which is an invalid syscall that
             // silently returned 0 in x0 — so every time_ns() on

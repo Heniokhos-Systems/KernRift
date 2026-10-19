@@ -1,12 +1,12 @@
 // Xtensa LX6 stack-array + memory-intrinsics boot test (merged Task 4+5) —
 // exercises IR_STACK_ADDR (32) together with IR_MEMSET (76) / IR_MEMCPY (72)
-// / IR_MEMCMP (88), since ir.kr:3419 emits IR_STACK_ADDR only ever paired
+// / IR_MEMCMP (88), since ir.kr:4448 emits IR_STACK_ADDR only ever paired
 // with an unconditional IR_MEMSET zero-init for every local array — the two
 // ops can't be exercised separately.
 //
 // Part 1 (STACK_ADDR + implicit MEMSET): `u32[4] a` gets its address via
 // STACK_ADDR and its zero-init via the compiler-inserted MEMSET(a,0,16)
-// ir.kr:3428 always emits right after the STACK_ADDR. Printing a[0] BEFORE
+// ir.kr:4457 always emits right after the STACK_ADDR. Printing a[0] BEFORE
 // any explicit write proves the implicit zero-init actually ran (part of
 // the exact-match expected output below, not a separate assert mechanism).
 // Filling a[i]=i+1 and summing exercises ordinary stack-array load/store
@@ -29,7 +29,7 @@
 // the parameter form below, which is what it was written to exercise and
 // what the boot test's golden output pins. The form that reaches MEMCMP
 // without touching IR_ALLOC: struct
-// pointers arrive through ordinary FUNCTION PARAMETERS (ir.kr:4696-4698
+// pointers arrive through ordinary FUNCTION PARAMETERS (ir.kr:5912-5914
 // registers a struct-typed param for field access regardless of what
 // pointer value the caller passed), so two `static u32[2]` arrays (already
 // proven via STATIC_ADDR/array machinery, byte-identical in layout to

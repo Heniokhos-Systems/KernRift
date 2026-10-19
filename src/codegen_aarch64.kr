@@ -314,7 +314,7 @@ fn emit_a64_cmp(uint64 rn, uint64 rm) {
 // may be any length (the legacy path's emit_a64_store_x0 is not fixed-size).
 //
 // `scratch` must be dead here: x9 and x10 are both outside the arm64 wide
-// colour file (ir_aarch64.kr:178-183). x11 holds the saved size on the IR
+// colour file (ir_aarch64.kr:227-235). x11 holds the saved size on the IR
 // path — do not pass it.
 //
 // Returns the offset of the branch word, for _tail to patch.

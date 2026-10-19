@@ -1455,7 +1455,7 @@ VBIND_OK=1
 # the top of this file.
 #
 # Host arch runs natively; the other arch runs under qemu when available.
-# Resolve qemu LOCALLY: $QEMU_A64 is not set until ~line 2950, far below here,
+# Resolve qemu LOCALLY: $QEMU_A64 is not set until line 4599, far below here,
 # so referencing it would be empty and skip configs in silence.
 VBIND_OTHER="arm64"
 if [ "$RUN_ARCH" = "arm64" ]; then VBIND_OTHER="x86_64"; fi
@@ -5740,7 +5740,7 @@ fn main() {
     # The arm64 IR backend emitted a 64-bit STLR/LDAR for EVERY volatile access
     # regardless of the declared width, so a u8 write clobbered 7 neighbouring
     # bytes and a u8 read pulled them in. These rows must live inside this
-    # QEMU/x86_64 block: run_test_a64 is defined at :2953 and this block ends
+    # QEMU/x86_64 block: run_test_a64 is defined at :5594 and this block ends
     # at the `fi` below, so calling it later would emit "command not found",
     # never increment TOTAL, and silently pass.
     run_test_a64 "a64_device_narrow_store_no_clobber" 'device Fake at 0x66666000 {
@@ -6703,19 +6703,19 @@ else
     echo "  src/lexer.kr's match_keyword and src/analysis.kr's is_builtin exactly."
 fi
 
-# The other three analysis.kr write() length fixes (ctx-check :165,
-# eff-check :205, lock-cycle :327) cannot be exercised the same way: their
-# callers require populated annotation/lock-graph tables, and
-# src/main.kr's own comment at the `run_analysis` call site says why those
-# tables are permanently empty -- "annotations are not parsed yet, so
-# ann_register and lock_add_edge have no callers" (grep confirms zero call
-# sites for either, anywhere in src/*.kr). So there is no `.kr` program
-# that can reach those three write() calls today; asserting "red before,
-# green after, executed" for them would be fabricated. Pin the byte
-# lengths statically instead -- read the three literals straight out of
-# analysis.kr and assert each write() call's length argument equals the
-# string's real encoded length, so a future length regression is still
-# caught the moment it's introduced, before the day these become reachable.
+# HISTORY. f23c6fa fixed four hand-counted write() lengths in
+# src/analysis.kr. Three of them -- ctx-check, eff-check and lock-cycle
+# (analysis.kr :165, :205 and :327 as of f23c6fa) -- sat in passes nothing
+# could reach: the annotation and lock-graph tables they read had no
+# producer. So that commit pinned their byte lengths statically instead of
+# fabricating an execution test.
+#
+# Both halves of that have changed since. The passes are reachable, and
+# the analysis_ctx_fires, analysis_eff_fires and lock-check rows run them.
+# The three messages are now diag_emit_str calls (src/analysis.kr:149,
+# :210 and :410), which take a pointer and no length, so a wrong length
+# can no longer be written. The row below keeps it that way.
+#
 TOTAL=$((TOTAL + 1))
 # WAS: a byte-length pin on the write(2, msg, N) calls inside the three passes
 # that could never run. It existed because a length in unreachable code cannot
@@ -10234,32 +10234,17 @@ CITE_MANIFEST="$DIR/ir_reference_citations.txt"
 if [ ! -f "$CITE_MANIFEST" ]; then
     FAIL=$((FAIL + 1)); echo "FAIL: ir_reference_citations (manifest missing)"
 else
-    cite_bad=$(python3 - "$CITE_MANIFEST" "$DIR/.." <<'PYEOF'
-import hashlib, sys, os
-manifest, root = sys.argv[1], sys.argv[2]
-cache, bad = {}, []
-for raw in open(manifest):
-    raw = raw.strip()
-    if not raw or raw.startswith("#"):
-        continue
-    cite, want = raw.split()
-    path, num = cite.rsplit(":", 1)
-    if path not in cache:
-        p = os.path.join(root, path)
-        cache[path] = open(p).read().split("\n") if os.path.exists(p) else []
-    lines, i = cache[path], int(num)
-    got = hashlib.sha1(lines[i-1].strip().encode()).hexdigest()[:12] if i-1 < len(lines) else "MISSING"
-    if got != want:
-        bad.append(cite)
-print(" ".join(bad[:6]) + (f" (+{len(bad)-6} more)" if len(bad) > 6 else ""))
-PYEOF
-)
-    if [ -z "$cite_bad" ]; then
+    # The generator in --check mode: every line the document cites -- the
+    # start of a citation, the end of a range, a bare follow-on number --
+    # must be in the manifest with the same fingerprint, no range may run
+    # backwards, and no line may be past the end of its file.
+    cite_bad=$(python3 "$DIR/../scripts/gen-ir-reference-citations.py" --check 2>&1)
+    if [ $? -eq 0 ]; then
         cite_n=$(grep -vc '^#' "$CITE_MANIFEST")
-        PASS=$((PASS + 1)); echo "  ir_reference_citations: PASS ($cite_n citations still resolve)"
+        PASS=$((PASS + 1)); echo "  ir_reference_citations: PASS ($cite_n cited lines still resolve; no backwards range, none out of range)"
     else
         FAIL=$((FAIL + 1))
-        echo "FAIL: ir_reference_citations (moved: $cite_bad)"
+        echo "FAIL: ir_reference_citations ($(printf '%s' "$cite_bad" | head -6 | tr '\n' ';')$( [ "$(printf '%s\n' "$cite_bad" | wc -l)" -gt 6 ] && echo " ..."))"
         echo "  fix the citations in docs/IR_REFERENCE.md, then:"
         echo "    python3 scripts/gen-ir-reference-citations.py"
         echo "  BUT READ THIS FIRST: the manifest may hold the CORRECT line and"
@@ -10268,6 +10253,33 @@ PYEOF
         echo "  something worth citing before running the generator."
     fi
 fi
+
+# ...and the checker refuses the two shapes no code can make right: a range
+# whose end is before its start, and a line past the end of the file. Run
+# against a copy of the document with one of each added (and, as a control,
+# the unmodified copy, which must pass).
+TOTAL=$((TOTAL + 1))
+CSH_D=$(mktemp -d "${TMPDIR:-/tmp}/krc_csh.XXXXXX")
+mkdir -p "$CSH_D/scripts" "$CSH_D/docs" "$CSH_D/tests"
+cp "$DIR/../scripts/gen-ir-reference-citations.py" "$CSH_D/scripts/"
+ln -s "$DIR/../src" "$CSH_D/src"
+cp "$DIR/../docs/IR_REFERENCE.md" "$CSH_D/docs/"
+cp "$CITE_MANIFEST" "$CSH_D/tests/"
+CSH_WHY=""
+python3 "$CSH_D/scripts/gen-ir-reference-citations.py" --check > "$CSH_D/ok.out" 2>&1 \
+    || CSH_WHY="$CSH_WHY [the unmodified copy failed: $(head -2 "$CSH_D/ok.out" | tr '\n' ' ')]"
+printf '\nbackwards (`src/ir.kr:20`\342\200\223`10`) and past the end (`src/ir.kr:99999999`)\n' >> "$CSH_D/docs/IR_REFERENCE.md"
+python3 "$CSH_D/scripts/gen-ir-reference-citations.py" --check > "$CSH_D/bad.out" 2>&1
+CSH_RC=$?
+[ "$CSH_RC" = "1" ] || CSH_WHY="$CSH_WHY [--check exited $CSH_RC on the doctored copy, want 1]"
+grep -q "src/ir.kr:20-10 runs backwards" "$CSH_D/bad.out" || CSH_WHY="$CSH_WHY [the backwards range was not reported]"
+grep -q "src/ir.kr:99999999 is past the end of the file" "$CSH_D/bad.out" || CSH_WHY="$CSH_WHY [the out-of-range line was not reported]"
+if [ -z "$CSH_WHY" ]; then
+    PASS=$((PASS + 1)); echo "  ir_reference_citations_refuses_bad_shapes: PASS (a backwards range and an out-of-range line both fail --check; the real document passes)"
+else
+    FAIL=$((FAIL + 1)); echo "FAIL: ir_reference_citations_refuses_bad_shapes$CSH_WHY"
+fi
+rm -rf "$CSH_D"
 
 # examples/tutorial-btree ships the page manager from docs/tutorial-btree.md
 # §2 -- the mmap-backed persistence the whole tutorial rests on. The stdlib has
@@ -12197,7 +12209,7 @@ fi
 
 # --- Xtensa LX6 stack arrays + memory intrinsics (merged Task 4+5) boot test ---
 # mem_stack.kr exercises IR_STACK_ADDR (32) together with IR_MEMSET (76) /
-# IR_MEMCPY (72) / IR_MEMCMP (88) — ir.kr:3419 emits IR_STACK_ADDR only ever
+# IR_MEMCPY (72) / IR_MEMCMP (88) — ir.kr:4448 emits IR_STACK_ADDR only ever
 # paired with an unconditional IR_MEMSET zero-init for every local array, so
 # the two can't be tested apart. Part 1: `u32[4] a` prints a[0] BEFORE any
 # write (proves the implicit zero-init), fills a[i]=i+1, prints the sum.
@@ -12290,7 +12302,7 @@ fi
 # inline_asm.kr prints 'X', then an operand-less multi-line `asm { "memw" "nop" }`
 # block, then 'Y'. Boot equality (XY) proves the block did not perturb the
 # surrounding putc calls. The block is deliberately operand-less — the upstream
-# constraint binding hardcodes x86 reg codes (ir.kr:4225), out of scope here.
+# constraint binding hardcodes x86 reg codes (ir.kr:5412), out of scope here.
 # Structural gate (when the xtensa objdump is present): assert a `nop` is emitted.
 # A `memw` grep would NOT discriminate — putc emits its own MEMW MMIO barriers on
 # every device access — but NOTHING else in the backend emits `nop`, so a present
@@ -13111,8 +13123,8 @@ fi
 
 # Compiles examples/riscv-featuregap/t9_asm.kr, which exercises inline asm
 # (IR_ASM_BLOCK 96): a raw hex word `asm("0x00150513")` = `addi a0,a0,1` bound
-# to a variable via in()/out() constraints (rv_reg_code path at ir.kr:4214/
-# 4237), plus a `csrr t0,mhartid` intrinsic. NON-VACUOUS on two counts: the
+# to a variable via in()/out() constraints (rv_reg_code path at ir.kr:5407/
+# 5444), plus a `csrr t0,mhartid` intrinsic. NON-VACUOUS on two counts: the
 # raw word is a COMPRESSIBLE encoding (rd==rs1, simm6 imm) so its objdump
 # survival as a full 4-byte `addi a0,a0,1` proves the handler marked the range
 # non-compressible; and the boot proves in/out constraint binding actually
@@ -13649,7 +13661,7 @@ printf 'fn main() { exit(42) }\n' > "$XT_E_SRC"
 # esp32 must REFUSE, with the new wording, and must exit non-zero: a
 # print-and-continue regression would still match the grep below while
 # happily emitting SIMCALL into an ESP32 image (xtensa_framecap_guard,
-# tests/run_tests.sh:5936, checks its rc the same way).
+# tests/run_tests.sh:12514, checks its rc the same way).
 XT_REFUSE_ERR=$($KRC --arch=xtensa --freestanding --target=esp32 "$XT_E_SRC" -o /dev/null 2>&1)
 XT_REFUSE_RC=$?
 if [ $XT_REFUSE_RC -ne 0 ] && echo "$XT_REFUSE_ERR" | grep -q "no OS to return an exit status to"; then
@@ -13703,7 +13715,7 @@ rm -f "$XT_WR_SRC"
 
 # --- std/net.kr sockaddr byte order ---
 # net_addr_ipv4 documents its `ip` argument as host order (std/net.kr header
-# comment, STDLIB.md:444) but stored it raw, so the documented 0x7F000001
+# comment, STDLIB.md:469) but stored it raw, so the documented 0x7F000001
 # resolved to 1.0.0.127 -- while sin_port two bytes earlier WAS converted via
 # net_htons, leaving one struct carrying one field in each byte order.
 #
@@ -18432,8 +18444,8 @@ done
 # validation under --target=none (asserted by t6_legacy_tnone_* above).
 # --emit=obj is: it reaches the SAME src/codegen.kr and
 # src/codegen_aarch64.kr dispatch on both arches -- x86_64 through the
-# `emit_mode != 3` guard at src/main.kr:2611 and arm64 through the one at
-# :2621 -- so retargeting these assertions onto it keeps every legacy
+# `emit_mode != 3` guard at src/main.kr:4187 and arm64 through the one at
+# :4197 -- so retargeting these assertions onto it keeps every legacy
 # bare-metal guard live and tested rather than turning them into unreachable
 # code with no coverage. That is also why --emit=obj is ALLOWED on bare metal
 # and --legacy is not: dropping both would have deleted this block.
@@ -18471,7 +18483,7 @@ done
 # file_read; nr 8 is file_size twice), so a regression to the coarse "syscall"
 # label -- or a cross-wired name, which is worse -- must fail here.
 # println_str and time_ns are deliberately absent. The legacy backend shares
-# ONE lowering for print_str/println_str (src/codegen.kr:6405) and names it
+# ONE lowering for print_str/println_str (src/codegen.kr:7653) and names it
 # "print_str" for both, and its time_ns() body reaches the emitter through the
 # surrounding exit() first -- so asserting either name here would be asserting
 # something untrue. Both builtins ARE covered, on both arches, by the
@@ -19710,12 +19722,12 @@ fi
 # claimed every site. Three live wrong lengths sat behind that blind spot the
 # whole time, all in the --emit=asm listing writer, which writes to an opened
 # file rather than to stdout/stderr:
-#   main.kr:903   "; KernRift assembly listing\n" declared 27, real 28 -- the
+#   main.kr:1333  "; KernRift assembly listing\n" declared 27, real 28 -- the
 #                 listing header lost its newline and ran straight into
 #                 "; Architecture: x86_64". Observed on the wire.
-#   main.kr:1461  "           mfence"            declared 18, real 17 -- a NUL
+#   main.kr:1892  "           mfence"            declared 18, real 17 -- a NUL
 #                 byte after every disassembled mfence.
-#   main.kr:1535  "...          lock ..."        declared 20, real 21 -- the
+#   main.kr:1967  "...          lock ..."        declared 20, real 21 -- the
 #                 lock-prefix line lost its last ".".
 # A guard whose scope is narrower than its comment is worse than no guard: it
 # reads as coverage. Two lessons are wired in below rather than written down.
@@ -21085,11 +21097,13 @@ fi
 # Measured 2026-08-17: 72 citations had drifted, uniformly -8 across ir.kr and
 # +8/+72/+94 in three regions of codegen.kr, while every manifest entry still
 # resolved and this suite stayed green. The doc claimed `tok_text_eq()` was at
-# codegen.kr:1160, which is `str_len = str_len + 1`.
+# codegen.kr:1285, which is `str_len = str_len + 1`.
 #
-# One-directional on purpose: a manifest entry the doc no longer cites is
-# harmless (there is one, src/ir.kr:13494), but a doc citation with no manifest
-# entry means the two have diverged and nothing is checking that citation.
+# This row stays as the simplest, independent form of that check (the first
+# number of each citation only). ir_reference_citations above now runs the
+# generator in --check mode, which covers range ends and follow-on numbers as
+# well, and also refuses a manifest entry the doc no longer cites, a range that
+# runs backwards and a line past the end of its file.
 TOTAL=$((TOTAL + 1))
 CITE_DOC="$DIR/../docs/IR_REFERENCE.md"
 if [ ! -f "$CITE_DOC" ] || [ ! -f "$CITE_MANIFEST" ]; then
@@ -24150,7 +24164,7 @@ echo "--- bare-metal boot gate ---"
 TOTAL=$((TOTAL + 1))
 # The RAW compiler binary, not the --arch=x86_64 wrapper: the gate passes
 # --arch= itself and must not depend on wrapper injection. krc2-then-krc3
-# mirrors the governance test at :3319 — the fallback is not decorative, the
+# mirrors the governance test at :8971 — the fallback is not decorative, the
 # arm64 CI job self-compiles to krc3 and a job that produced only krc3 would
 # otherwise report "no compiler" on a tree that has one.
 if [ -f "$DIR/../build/krc2" ]; then

@@ -2462,20 +2462,16 @@ absence. Signing is out of scope for this mode; a signed application would need
 a key, an `sbsign`-equivalent, and a `.reloc`-free image the signer accepts —
 none of which exist here.
 
-**Boot services are out of scope, and a codegen limit blocks them.** These
-applications never touch the `EFI_SYSTEM_TABLE`: they take the firmware's
-entry, drive a UART directly and return. `efi_main(ImageHandle, SystemTable)`
-is not implemented, and calling a boot service would go through `call_ptr`,
-which **silently drops every argument past the sixth** — `src/ir.kr:3151`
-declares `uint64[6] cp_arg_vregs` and `:3155` stops the lowering loop at
-`cp_count < 6`, with no diagnostic and exit 0. Measured on this tree: a
-seven-parameter callee reached through
-`call_ptr(p, 1, 2, 4, 8, 16, 32, 7)` returns **63** on x86_64 (the seventh
-argument was never passed) and **127** on arm64 (never passed either — the
-callee read an uninitialised `x6`, which held `64` from an earlier probe). The
-legacy backend does the same thing: 63. That cap has to be fixed before boot
-services are possible, it is **codegen work rather than container work**, and
-it is not claimed to be the only thing in the way.
+**Boot services.** These applications take the firmware's entry, drive a
+UART directly and return; none of them calls a boot service. Two things this
+paragraph used to name as blockers are gone. The x86_64 entry function now
+receives `ImageHandle` in rcx and `SystemTable` in rdx under the Win64 ABI
+(`src/main.kr:4159`; arm64's AAPCS64 already matches UEFI). And `call_ptr`
+no longer drops every argument past the sixth: its argument array is
+`uint64[64]` (`src/ir.kr:3367`), and `call_ptr(p, 1, 2, 4, 8, 16, 32, 64)`
+into a seven-parameter callee returns **127** on x86_64, on arm64 and on the
+legacy backend — every argument arrives (measured on this tree). Calling a
+boot service from KernRift code is still not shown working here.
 
 **Also deliberately absent:** `--emit=uefi` for riscv32 or xtensa (neither has
 a PE `Machine` value here, and both already own a raw boot path through
