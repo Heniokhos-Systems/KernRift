@@ -98,6 +98,11 @@ build-import: build/krc2
 	chmod +x build/krc-import
 
 # Run test suite
+# The suite's compiler wrapper is a private mktemp file, removed on exit: a
+# fixed /tmp/krc-test was shared by every checkout on the box, so two
+# `make test` runs at once (in two worktrees, say) rewrote the one file under
+# each other, and with an absolute compiler path one suite could run the
+# other tree's compiler.
 # Depends on build/kr-bin because the suite asserts the RUNNER's reported
 # version matches the changelog. That check deliberately fails rather than
 # skips when the binary is absent, so the binary has to be built here --
@@ -105,8 +110,10 @@ build-import: build/krc2
 # to prevent.
 test: build/krc2 build/kr-bin
 	@echo "=== Running test suite ==="
-	@echo '#!/bin/bash' > /tmp/krc-test && echo 'exec ./build/krc2 --arch=x86_64 "$$@"' >> /tmp/krc-test && chmod +x /tmp/krc-test
-	@KRC=/tmp/krc-test bash tests/run_tests.sh
+	@w=$$(mktemp "$${TMPDIR:-/tmp}/krc-test.XXXXXX") || exit 1; \
+	 trap 'rm -f "$$w"' EXIT; trap 'exit 130' INT TERM; \
+	 printf '#!/bin/bash\nexec %s --arch=x86_64 "$$@"\n' './build/krc2' > "$$w" && chmod +x "$$w" && \
+	 KRC="$$w" bash tests/run_tests.sh
 
 # Full CI gate: bootstrap fixed point + suite + both IR-vs-legacy differential
 # harnesses (x86_64 + arm64 via qemu). Any failure aborts (each step exits
