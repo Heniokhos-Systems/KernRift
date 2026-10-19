@@ -219,9 +219,12 @@ fi
 #   top-down guard and on HEAD. It is defect #99, and the input carries it:
 #   arith.kr declares `static uint32 table[8]`, a C-style array declaration
 #   KernRift does not have. The parser swallows the stray `[8]` as top-level
-#   junk without a diagnostic, so `table` is ONE uint32 static and main's loop
-#   writes table[1..7] past it. The IR backend happens to survive that overrun
-#   (209); the --legacy x86_64 and arm64 builds crash (SIGSEGV, rc=139). The
+#   junk without a diagnostic, so `table` is ONE uint32 static, and `table[i]`
+#   on a scalar is no array access: the IR backend reads and writes table's
+#   own address whatever i is (one byte on x86_64 and arm64), which still
+#   yields 209 because only the low byte of each mix(i) reaches the sum and
+#   the result is taken & 0xFF; the --legacy x86_64 and arm64 builds index
+#   from a stack slot nothing has written and crash (SIGSEGV, rc=139). The
 #   same variant with the declaration written `static uint32[8] table` returns
 #   209 under --legacy on both (and on the IR backend and --O0), measured with
 #   this branch's compiler. The frozen input is left as is on this branch: the
