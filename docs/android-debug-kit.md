@@ -250,7 +250,7 @@ mmap'd and which address triggered the fault.
 
 ## 5. R3 — verify `device_block_read_write` on real hardware
 
-Write the minimal repro from `tests/run_tests.sh` line 1601 to a file
+Write the minimal repro from `tests/run_tests.sh` line 5810 to a file
 and run it through **both** backends. On real ARM64 Linux (including
 Android, which is Linux), `MAP_FIXED` at `0x66666000` should succeed as
 long as that VA isn't already mapped.

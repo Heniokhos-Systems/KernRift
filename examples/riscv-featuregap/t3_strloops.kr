@@ -17,9 +17,9 @@
 // Expected output: 31
 //
 // IR_MEMCMP (op 88) is ALSO implemented in this task (ir_riscv.kr,
-// mirroring ir_aarch64.kr:1344-1384, same noc-wrapped-loop shape as
+// mirroring ir_aarch64.kr:2200-2238, same noc-wrapped-loop shape as
 // str_eq) but is deliberately NOT exercised by this boot test: the IR's
-// only MEMCMP emit site is the struct `==`/`!=` comparison (ir.kr:1548),
+// only MEMCMP emit site is the struct `==`/`!=` comparison (ir.kr:2101),
 // and every source-level path to a struct value (a local `Pt p` decl, or
 // passing a struct-typed identifier as a call argument) lowers through
 // IR_ALLOC (op 70) first — an mmap/VirtualAlloc-style syscall that is (a)

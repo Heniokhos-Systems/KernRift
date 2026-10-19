@@ -9,7 +9,7 @@
 //        return    (lo | hi)         & 0xFFFFFFFF
 //      and inlines its body into the caller (so the shifts land in the
 //      SAME function as the OR — a prerequisite for the IR matcher).
-//   2. ir_opt_recognize_rotate (ir.kr:11188) rewrites the resulting
+//   2. ir_opt_recognize_rotate (ir.kr:14574) rewrites the resulting
 //        OR(AND(SHR(x,n),0xFFFFFFFF), AND(SHL(x,32-n),0xFFFFFFFF))
 //      into a single IR_ROR dest,x,n,imm=32.
 //   3. The riscv emitter (ir_riscv.kr op==137) synthesizes it from
@@ -17,7 +17,7 @@
 //      is out of the accepted ISA).
 //
 // FRAGILITY: the IR matcher does NOT copy-skip the rotated value x itself
-// (ir.kr:11235-11236), and if x (or n) is a compile-time constant the whole
+// (ir.kr:14621-14622), and if x (or n) is a compile-time constant the whole
 // rotate const-folds away — no shifts, no IR_ROR (a vacuous pass). So x and
 // n are sourced through `ident()`, a deliberately NON-inlinable barrier
 // (multi-statement body -> inline_body_expr rejects it), which makes them
