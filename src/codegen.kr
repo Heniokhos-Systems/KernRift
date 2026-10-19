@@ -743,7 +743,7 @@ fn emit_byte(uint8 b) {
 // instruction may ever reach the output. The per-OS dispatch throughout this
 // codebase is "special-case Windows/macOS, else fall through to POSIX", so
 // target_os == 4 silently INHERITS the Linux path at roughly sixty branch
-// sites (`target_os == 2` alone appears 116 times; `target_os == 0` only 4).
+// sites (`target_os == 2` alone appears 118 times; `target_os == 0` only 4).
 // Auditing those by inspection is exactly how a Linux syscall ends up inside
 // a kernel image, so every architecture instead routes its trap instruction
 // through a single emitter that refuses here:
