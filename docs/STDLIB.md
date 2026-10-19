@@ -495,6 +495,18 @@ call starts it on first use — but it lets a caller tell "the network stack
 would not start" from "this socket failed", which `sys_socket` reports as
 one −errno.
 
+**Files and the environment** (`std/sys.kr`, `std/args.kr`; Linux, Android,
+Windows). `sys_mkdir(path, mode)`, `sys_rename(from, to)` (replaces an existing
+`to`), `sys_chmod(path, mode)` and `sys_file_mode(path)` return 0 / the
+`st_mode` bits or −errno; on Windows `sys_chmod` is 0 and does nothing and
+`sys_file_mode` is −ENOSYS. `sys_last_errno(r)` is the positive errno of the
+file builtin that just returned `r` — call it **immediately**: on Windows the
+cause lives only in `GetLastError()`, which the next Win32 call overwrites.
+`sys_getenv(name, out, cap)` (`std/args.kr`) copies a variable's value: its
+length, −ENOENT if unset, −ERANGE if it does not fit; the name matches whole.
+macOS and none return −ENOSYS for the four file calls (`sys_getenv` on macOS
+walks the environment the prologue hands it; none: −ENOSYS).
+
 ---
 
 ## `std/sha256.kr` — SHA-256

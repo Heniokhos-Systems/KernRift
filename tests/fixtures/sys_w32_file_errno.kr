@@ -1,0 +1,23 @@
+// std/win32.kr (arsh Stage 1b, spec S1): _kr_w32_file_errno maps a
+// GetLastError() code to a LINUX errno. Pure arithmetic, so it runs on Linux
+// too. Every check exits with its own code; prints OK.
+import "../../std/win32.kr"
+
+fn main() -> uint32 {
+    if _kr_w32_file_errno(2) != 2 { return 1 }          // FILE_NOT_FOUND -> ENOENT
+    if _kr_w32_file_errno(3) != 2 { return 2 }          // PATH_NOT_FOUND -> ENOENT
+    if _kr_w32_file_errno(5) != 13 { return 3 }         // ACCESS_DENIED -> EACCES
+    if _kr_w32_file_errno(32) != 16 { return 4 }        // SHARING_VIOLATION -> EBUSY
+    if _kr_w32_file_errno(33) != 16 { return 5 }        // LOCK_VIOLATION -> EBUSY
+    if _kr_w32_file_errno(80) != 17 { return 6 }        // FILE_EXISTS -> EEXIST
+    if _kr_w32_file_errno(183) != 17 { return 7 }       // ALREADY_EXISTS -> EEXIST
+    if _kr_w32_file_errno(112) != 28 { return 8 }       // DISK_FULL -> ENOSPC
+    if _kr_w32_file_errno(206) != 36 { return 9 }       // FILENAME_EXCED_RANGE -> ENAMETOOLONG
+    if _kr_w32_file_errno(203) != 2 { return 10 }       // ENVVAR_NOT_FOUND -> ENOENT
+    if _kr_w32_file_errno(0) != 5 { return 11 }         // "no error" is still a failure: EIO, never 0
+    if _kr_w32_file_errno(1) != 5 { return 12 }
+    if _kr_w32_file_errno(87) != 5 { return 13 }
+    if _kr_w32_file_errno(0xFFFFFFFF) != 5 { return 14 }
+    file_write(1, "OK\n", 3)
+    return 0
+}

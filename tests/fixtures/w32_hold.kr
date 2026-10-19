@@ -1,0 +1,30 @@
+// arsh Stage 1b (spec S6, R2-I4): HOLD a file the way another process would.
+//   w32_hold.exe <path> <share 0|1> <seconds>
+// opens <path> GENERIC_READ through CreateFileA itself with dwShareMode =
+// argv[2] (0 = no sharing, 1 = FILE_SHARE_READ), prints "held", sleeps, exits.
+// No builtin can be this holder: file_open always grants FILE_SHARE_READ.
+// CreateFileA is kernel32 IAT slot 3; an `extern fn` routes by NAME and the
+// _kr_w32_ prefix is stripped, so this binds the real export. ApexRift's
+// tools/arsh-windows.sh builds this file from its bootstrapped KernRift tree.
+import "../../std/sys.kr"
+import "../../std/args.kr"
+
+extern fn _kr_w32_CreateFileA(u64 path, u64 access, u64 share, u64 sa, u64 disp, u64 flags, u64 tmpl) -> u64
+
+fn wh_num(uint64 s) -> uint64 {
+    uint64 v = 0
+    uint64 i = 0
+    while load8(s + i) >= 48 && load8(s + i) <= 57 { v = v * 10 + (load8(s + i) - 48)  i = i + 1 }
+    return v
+}
+
+fn main() -> uint32 {
+    if sys_argc() < 4 { return 1 }
+    uint64 share = wh_num(sys_arg(2))
+    uint64 secs = wh_num(sys_arg(3))
+    uint64 h = _kr_w32_CreateFileA(sys_arg(1), 0x80000000, share, 0, 3, 0x80, 0)
+    if h == 0xFFFFFFFFFFFFFFFF { file_write(1, "fail\n", 5)  return 2 }
+    file_write(1, "held\n", 5)
+    _kr_w32_Sleep(secs * 1000)
+    return 0
+}

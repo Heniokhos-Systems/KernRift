@@ -1,0 +1,33 @@
+// std/args.kr (arsh Stage 1b, spec S2): sys_getenv. The row exports
+//   KR_S2_V=hello   KR_S2_VV=longer-value
+// and leaves KR_S2_UNSET, KR_S2 and KR_S2_VVV unset. NAME MATCHING IS EXACT:
+// KR_S2_V must not match KR_S2_VV's entry, and KR_S2 (a prefix of both) and
+// KR_S2_VVV (longer than both) are unset -- the HOME / HOMEBREW_PREFIX case.
+// A value of length cap-1 fits; of length cap it is -ERANGE (-34).
+import "../../std/args.kr"
+
+static u8[64] ge_buf
+
+fn ge_same(uint64 a, uint64 b) -> uint64 {
+    uint64 i = 0
+    while load8(a + i) == load8(b + i) {
+        if load8(a + i) == 0 { return 1 }
+        i = i + 1
+    }
+    return 0
+}
+
+fn main() -> uint32 {
+    if sys_getenv("KR_S2_V", ge_buf, 64) != 5 { return 1 }
+    if ge_same(ge_buf, "hello") == 0 { return 2 }
+    if sys_getenv("KR_S2_VV", ge_buf, 64) != 12 { return 3 }
+    if ge_same(ge_buf, "longer-value") == 0 { return 4 }
+    if sys_getenv("KR_S2_UNSET", ge_buf, 64) != 0 - 2 { return 5 }
+    if sys_getenv("KR_S2", ge_buf, 64) != 0 - 2 { return 6 }
+    if sys_getenv("KR_S2_VVV", ge_buf, 64) != 0 - 2 { return 7 }
+    if sys_getenv("KR_S2_V", ge_buf, 6) != 5 { return 8 }
+    if ge_same(ge_buf, "hello") == 0 { return 9 }
+    if sys_getenv("KR_S2_V", ge_buf, 5) != 0 - 34 { return 10 }
+    file_write(1, "OK\n", 3)
+    return 0
+}

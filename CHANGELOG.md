@@ -4,6 +4,8 @@ All notable changes to `kernriftc` are documented in this file.
 
 ## Unreleased
 
+**Added (std): sys_getenv (args.kr), sys_mkdir, sys_rename, sys_chmod, sys_file_mode and sys_last_errno (sys.kr)** -- the file and environment calls arsh's profile store needs on Windows, with GetLastError() mapped to Linux errno values (32 sharing violation -> EBUSY, 183 already exists -> EEXIST, unknown -> EIO).
+
 **Added: five PE imports for arsh Stage 1b and discovery -- kernel32
 `GetLastError` (slot 22) and ws2_32 `sendto`, `recvfrom`, `ioctlsocket`,
 `getsockopt` (41-44).** Every later ws2_32/bcrypt slot moves by one or five;

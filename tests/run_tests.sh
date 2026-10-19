@@ -28995,6 +28995,98 @@ else
         WINEPREFIX="$T10_D/pfx" "$(dirname "$T10_WINE")/wineserver" -w > /dev/null 2>&1
     fi
 fi
+
+# --- arsh Stage 1b: files and environment in std (profiles spec S1, S2, S6) ---
+# sys_last_errno, sys_getenv (std/args.kr), sys_mkdir, sys_rename, sys_chmod,
+# sys_file_mode and the Win32 file-error map. The SAME fixture runs on Linux
+# x86_64, Linux arm64 (qemu) and Windows x86_64 (Wine). sys_getenv's rows are
+# also the exact-name check (Review Focus 1): KR_S2 and KR_S2_VVV must read as
+# unset while KR_S2_V and KR_S2_VV are set.
+export KR_S2_V=hello
+export KR_S2_VV=longer-value
+unset KR_S2_UNSET KR_S2 KR_S2_VVV
+t10_row sys_w32_file_errno_map_x86_64 x86_64 sys_w32_file_errno "OK" 0
+t10_row sys_w32_file_errno_map_arm64 arm64 sys_w32_file_errno "OK" 0
+t10_row sys_getenv_x86_64 x86_64 sys_getenv "OK" 0
+t10_row sys_getenv_arm64 arm64 sys_getenv "OK" 0
+for S1B_A in x86_64 arm64; do
+    rm -rf "$T10_D/s1bfs-$S1B_A"; mkdir -p "$T10_D/s1bfs-$S1B_A"
+    t10_row sys_fs_$S1B_A $S1B_A sys_fs "OK" 0 "$T10_D/s1bfs-$S1B_A"
+done
+t10_row sys_last_errno_missing_x86_64 x86_64 sys_lasterr "missing 2" 0 "$T10_D/no-such-file"
+t10_row sys_last_errno_missing_arm64 arm64 sys_lasterr "missing 2" 0 "$T10_D/no-such-file"
+# Every Stage 1b fixture builds for every slice the default fat binary ships
+# (the Unix arms' syscall_raw is pruned on Windows by the literal os chain);
+# w32_hold.kr is Windows-only and is built for both Windows CPUs.
+TOTAL=$((TOTAL + 1))
+S1B_W=""
+for S1B_F in sys_w32_file_errno sys_getenv sys_fs sys_lasterr; do
+    for S1B_A in x86_64 arm64; do
+        $T10_KRC --arch=$S1B_A --target=windows --emit=pe "$T10_FX/$S1B_F.kr" -o "$T10_D/s1b-w.exe" > "$T10_D/w.log" 2>&1 \
+            || S1B_W="$S1B_W $S1B_F/win-$S1B_A:$(grep -m1 error "$T10_D/w.log" | cut -c1-80)"
+        $T10_KRC --arch=$S1B_A --target=macos "$T10_FX/$S1B_F.kr" -o "$T10_D/s1b-m" > "$T10_D/w.log" 2>&1 \
+            || S1B_W="$S1B_W $S1B_F/macos-$S1B_A:$(grep -m1 error "$T10_D/w.log" | cut -c1-80)"
+    done
+    $T10_KRC "$T10_FX/$S1B_F.kr" -o "$T10_D/s1b.krbo" > "$T10_D/w.log" 2>&1 || S1B_W="$S1B_W $S1B_F/fat:$(grep -m1 error "$T10_D/w.log" | cut -c1-80)"
+done
+for S1B_A in x86_64 arm64; do
+    $T10_KRC --arch=$S1B_A --target=windows --emit=pe "$T10_FX/w32_hold.kr" -o "$T10_D/s1b-h.exe" > "$T10_D/w.log" 2>&1 \
+        || S1B_W="$S1B_W w32_hold/win-$S1B_A:$(grep -m1 error "$T10_D/w.log" | cut -c1-80)"
+done
+if [ -z "$S1B_W" ]; then t10_ok sys_stage1b_fixtures_build_for_every_slice "4 fixtures x (windows x86_64, windows arm64, fat, macos x86_64, macos arm64) + w32_hold for both Windows CPUs"; else t10_bad sys_stage1b_fixtures_build_for_every_slice "$S1B_W"; fi
+if [ -z "$T10_WINE" ]; then
+    for S1B_R in sys_getenv_windows_wine sys_fs_windows_wine sys_last_errno_windows_wine; do
+        TOTAL=$((TOTAL + 1)); wine_na "$S1B_R"
+    done
+else
+    # s1b_wine <row> <fixture> <want stdout> [args...]: Windows x86_64 under Wine, rc 0 required.
+    s1b_wine() {
+        local row="$1" f="$2" want="$3" got; shift 3
+        TOTAL=$((TOTAL + 1))
+        if ! $T10_KRC --arch=x86_64 --target=windows --emit=pe "$T10_FX/$f.kr" -o "$T10_D/$f.exe" > "$T10_D/w.log" 2>&1; then
+            t10_bad "$row" "build: $(grep -m1 error "$T10_D/w.log" | cut -c1-120)"; return
+        fi
+        t10_wine "$T10_D/win.out" "$T10_D/win.err" "$f.exe" "$@"; T10_RC=$?
+        got=$(tr -d '\r' < "$T10_D/win.out")
+        if [ "$T10_RC" = "0" ] && [ "$got" = "$want" ]; then t10_ok "$row" "rc=0$(t10_note)"
+        else t10_bad "$row" "rc=$T10_RC got '$(printf '%s' "$got" | tr '\n' '|' | head -c 60)' want '$want'; wine output tail: $(t10_errtail)"; fi
+    }
+    s1b_wine sys_getenv_windows_wine sys_getenv "OK"
+    rm -rf "$T10_D/s1bfs-w"; mkdir -p "$T10_D/s1bfs-w"
+    s1b_wine sys_fs_windows_wine sys_fs "OK" s1bfs-w
+    # THE HELD FILE. A second Windows process (w32_hold.exe) holds held.txt with
+    # share mode 0 -- what another arsh.exe, an editor or an AV scanner can do --
+    # and file_open of it must read as EBUSY (16), not as "missing". Both run in
+    # ONE prefix, so one wineserver enforces the share mode. Called directly, not
+    # through t10_wine: that helper's status-53 retry rebuilds the prefix, which
+    # would pull the file out from under the holder.
+    TOTAL=$((TOTAL + 1))
+    if $T10_KRC --arch=x86_64 --target=windows --emit=pe "$T10_FX/w32_hold.kr" -o "$T10_D/w32_hold.exe" > "$T10_D/w.log" 2>&1 \
+       && $T10_KRC --arch=x86_64 --target=windows --emit=pe "$T10_FX/sys_lasterr.kr" -o "$T10_D/sys_lasterr.exe" >> "$T10_D/w.log" 2>&1; then
+        printf 'held' > "$T10_D/held.txt"
+        : > "$T10_D/hold.out"
+        (cd "$T10_D" && WINEPREFIX="$T10_D/pfx" WINEDEBUG=-all timeout 120 "$T10_WINE" w32_hold.exe held.txt 0 5 > "$T10_D/hold.out" 2> "$T10_D/hold.err") &
+        S1B_HP=$!
+        S1B_I=0
+        while [ "$S1B_I" -lt 600 ] && ! tr -d '\r' < "$T10_D/hold.out" | grep -q '^held$'; do sleep 0.1; S1B_I=$((S1B_I + 1)); done
+        (cd "$T10_D" && WINEPREFIX="$T10_D/pfx" WINEDEBUG=-all timeout 120 "$T10_WINE" sys_lasterr.exe no-such-file.txt held.txt > "$T10_D/win.out" 2> "$T10_D/win.err"); T10_RC=$?
+        kill "$S1B_HP" 2>/dev/null; wait "$S1B_HP" 2>/dev/null
+        S1B_GOT=$(tr -d '\r' < "$T10_D/win.out")
+        if [ "$T10_RC" = "0" ] && [ "$S1B_GOT" = $'missing 2\nheld 16' ]; then
+            t10_ok sys_last_errno_windows_wine "missing 2, held (share mode 0) 16"
+        else
+            t10_bad sys_last_errno_windows_wine "rc=$T10_RC got '$(printf '%s' "$S1B_GOT" | tr '\n' '|')' want 'missing 2|held 16'; holder said '$(tr -d '\r' < "$T10_D/hold.out" | tr '\n' '|')'; wine output tail: $(t10_errtail)"
+        fi
+    else
+        t10_bad sys_last_errno_windows_wine "build: $(grep -m1 error "$T10_D/w.log" | cut -c1-120)"
+    fi
+    # The block above started a wineserver in $T10_D/pfx AFTER the Task 12
+    # block waited its own out: wait for this one too, before rm -rf "$T10_D".
+    if [ -x "$(dirname "$T10_WINE")/wineserver" ]; then
+        WINEPREFIX="$T10_D/pfx" "$(dirname "$T10_WINE")/wineserver" -w > /dev/null 2>&1
+    fi
+fi
+unset KR_S2_V KR_S2_VV
 rm -rf "$T10_D"
 
 # --- Documentation pin 5, PART B (see Part A above) --------------------------

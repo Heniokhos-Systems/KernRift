@@ -1,0 +1,68 @@
+// std/sys.kr (arsh Stage 1b, spec S1/S2): in the EMPTY directory argv[1]:
+// mkdir twice (0, then -EEXIST); rename a file OVER an existing one (the
+// target holds the new bytes, the source is gone); sys_last_errno after the
+// failed open of the source (ENOENT); then the mode: on Linux sys_chmod 0600
+// and sys_file_mode reads 0600 back (and 0644 after a second chmod); on
+// Windows sys_chmod is 0 and sys_file_mode is -ENOSYS. Prints OK.
+import "../../std/sys.kr"
+import "../../std/args.kr"
+
+static u8[512] fs_d
+static u8[512] fs_a
+static u8[512] fs_b
+static u8[16] fs_buf
+
+fn fs_join(uint64 out, uint64 base, uint64 leaf) {
+    uint64 i = 0
+    while load8(base + i) != 0 { store8(out + i, load8(base + i))  i = i + 1 }
+    store8(out + i, 47)
+    i = i + 1
+    uint64 j = 0
+    while load8(leaf + j) != 0 { store8(out + i + j, load8(leaf + j))  j = j + 1 }
+    store8(out + i + j, 0)
+}
+
+fn fs_put(uint64 path, uint64 s, uint64 n) -> uint64 {
+    uint64 fd = file_open(path, 1)
+    if fd > 0xFFFFFFFFFFFFF000 { return 0 }
+    uint64 w = file_write(fd, s, n)
+    file_close(fd)
+    if w != n { return 0 }
+    return 1
+}
+
+fn main() -> uint32 {
+    uint64 base = sys_arg(1)
+    if base == 0 { return 1 }
+    fs_join(fs_d, base, "d")
+    if sys_mkdir(fs_d, 448) != 0 { return 2 }
+    if sys_mkdir(fs_d, 448) != 0 - 17 { return 3 }
+    fs_join(fs_a, base, "a")
+    fs_join(fs_b, base, "b")
+    if fs_put(fs_a, "new", 3) == 0 { return 4 }
+    if fs_put(fs_b, "old!", 4) == 0 { return 5 }
+    if sys_rename(fs_a, fs_b) != 0 { return 6 }
+    uint64 fd = file_open(fs_b, 0)
+    if fd > 0xFFFFFFFFFFFFF000 { return 7 }
+    uint64 n = file_read(fd, fs_buf, 16)
+    file_close(fd)
+    if n != 3 { return 8 }
+    if load8(fs_buf) != 110 { return 9 }
+    uint64 g = file_open(fs_a, 0)
+    if g <= 0xFFFFFFFFFFFFF000 { file_close(g)  return 10 }
+    if sys_last_errno(g) != 2 { return 11 }
+    if get_target_os() == 2 {
+        if sys_chmod(fs_b, 384) != 0 { return 12 }
+        if sys_file_mode(fs_b) != 0 - 38 { return 13 }
+    } else {
+        if sys_chmod(fs_b, 384) != 0 { return 14 }
+        int64 m = sys_file_mode(fs_b)
+        if m < 0 { return 15 }
+        if (m & 511) != 384 { return 16 }
+        if sys_chmod(fs_b, 420) != 0 { return 17 }
+        if (sys_file_mode(fs_b) & 511) != 420 { return 18 }
+        if sys_file_mode(fs_a) != 0 - 2 { return 19 }
+    }
+    file_write(1, "OK\n", 3)
+    return 0
+}

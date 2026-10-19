@@ -57,12 +57,18 @@ extern fn _kr_w32_BCryptGenRandom(u64 alg, u64 buf, u64 len, u64 flags) -> u64
 
 // --- kernel32 externs ----------------------------------------------------------
 // The additions std itself calls (spec C5: std/alloc's guard page, std/time's
-// sleeps). kernel32's other imports back compiler builtins and are not declared.
+// sleeps; arsh Stage 1b: the file and environment calls of sys.kr / args.kr).
+// kernel32's other imports back compiler builtins and are not declared.
 extern fn _kr_w32_VirtualProtect(u64 addr, u64 size, u64 prot, u64 oldprot) -> u64
 extern fn _kr_w32_Sleep(u64 ms) -> u64
 // arsh Stage 1b (spec S1): the reason a file builtin failed. Read it
 // IMMEDIATELY after the failing call (sys_last_errno, std/sys.kr).
 extern fn _kr_w32_GetLastError() -> u64
+// arsh Stage 1b (spec S2): the three kernel32 imports reserved at slots 16-18
+// since Stage 1, called now by sys_getenv (args.kr), sys_mkdir, sys_rename.
+extern fn _kr_w32_GetEnvironmentVariableA(u64 name, u64 out, u64 cap) -> u64
+extern fn _kr_w32_CreateDirectoryA(u64 path, u64 sa) -> u64
+extern fn _kr_w32_MoveFileExA(u64 from, u64 to, u64 flags) -> u64
 
 // --- lifecycle -----------------------------------------------------------------
 
@@ -168,6 +174,25 @@ fn _kr_w32_send_errno(u64 w) -> u64 {
     if w == 10053 { return 32 }     // ECONNABORTED -> EPIPE
     if w == 10060 { return 110 }    // ETIMEDOUT stays ETIMEDOUT
     return _kr_w32_errno(w)
+}
+
+// GetLastError() after a failed FILE or ENVIRONMENT call -> positive errno, in
+// LINUX numbering (spec S1). The Winsock map above cannot be reused: these
+// codes are Win32 system errors (2, 3, 5, ...), not WSAE* values. Anything
+// unlisted -- 0 included, which a failed call should never leave -- is EIO:
+// generic, and never 0, so a failure can never read as success.
+fn _kr_w32_file_errno(u64 w) -> u64 {
+    if w == 2 { return 2 }          // ERROR_FILE_NOT_FOUND       -> ENOENT
+    if w == 3 { return 2 }          // ERROR_PATH_NOT_FOUND       -> ENOENT
+    if w == 5 { return 13 }         // ERROR_ACCESS_DENIED        -> EACCES
+    if w == 32 { return 16 }        // ERROR_SHARING_VIOLATION    -> EBUSY
+    if w == 33 { return 16 }        // ERROR_LOCK_VIOLATION       -> EBUSY
+    if w == 80 { return 17 }        // ERROR_FILE_EXISTS          -> EEXIST
+    if w == 183 { return 17 }       // ERROR_ALREADY_EXISTS       -> EEXIST
+    if w == 112 { return 28 }       // ERROR_DISK_FULL            -> ENOSPC
+    if w == 206 { return 36 }       // ERROR_FILENAME_EXCED_RANGE -> ENAMETOOLONG
+    if w == 203 { return 2 }        // ERROR_ENVVAR_NOT_FOUND     -> ENOENT
+    return 5                        // EIO
 }
 
 // --- Win64 structures ----------------------------------------------------------

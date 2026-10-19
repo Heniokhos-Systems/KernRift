@@ -20,6 +20,29 @@
 // it is unproven in v1 and has no ppoll/getrandom, and Linux numbers must never
 // be inherited there. Arch ids 9..12 (bare metal) get -ENOSYS the same way.
 //
+// FILES AND THE ENVIRONMENT (arsh Stage 1b, spec S1/S2). sys_mkdir,
+// sys_rename, sys_chmod, sys_file_mode, sys_last_errno here; sys_getenv lives
+// in args.kr, the owner of cli_envp. arm64 Linux has only the *at forms
+// (mkdirat, renameat, fchmodat, newfstatat, all with AT_FDCWD = -100), and its
+// struct stat puts st_mode at +16 where x86_64's puts it at +24. Windows:
+// CreateDirectoryA / MoveFileExA, failures mapped from GetLastError() by
+// _kr_w32_file_errno; sys_chmod is a no-op 0 (no ACL work) and sys_file_mode
+// is -ENOSYS (there is no mode -- callers decide what that means).
+//
+// sys_last_errno(r): the POSITIVE errno of the failing FILE BUILTIN whose
+// result was r. Linux/Android/macOS compute it from r (the builtin already
+// returned -errno). Windows' file_open returns INVALID_HANDLE_VALUE for EVERY
+// failure, so the cause is only in GetLastError(), and the value lasts only
+// until the next call that sets it: CALL sys_last_errno IMMEDIATELY after the
+// failing builtin, with nothing in between that could reach Win32 (an alloc
+// can reach VirtualAlloc). The emitted file_open makes no Win32 call after
+// CreateFileA, so the value survives to that point.
+//
+// sys_rename replaces an existing target. POSIX rename(2) is atomic within a
+// filesystem; on NTFS a same-volume MoveFileExA(REPLACE_EXISTING) means
+// "there is never a moment with no valid target", not POSIX atomicity.
+// MOVEFILE_WRITE_THROUGH only matters across volumes and is harmless here.
+//
 // Irreducible Linux/Windows differences (documented, not translated):
 //   - listen() on an UNBOUND socket: Linux autobinds a port (0), Windows -EINVAL;
 //   - getsockname() on an unbound socket: Linux 0 (0.0.0.0:0), Windows -EINVAL;
@@ -55,6 +78,7 @@ import "win32.kr"
 // Syscall number for operation `k` on this (arch, os), 0 when there is none.
 //   0 socket  1 connect  2 bind  3 listen  4 accept  5 getsockname
 //   6 shutdown  7 setsockopt  8 close  9 ppoll  10 getrandom  11 sendto
+//   15 mkdir(at)  16 rename(at)  17 chmod/fchmodat  18 stat/newfstatat
 // Linux and Android share a table per architecture (1/8 = x86_64, 2/7 = arm64).
 fn _kr_sys_nr(u64 k) -> u64 {
     u64 a = get_arch_id()
@@ -71,6 +95,10 @@ fn _kr_sys_nr(u64 k) -> u64 {
         if k == 9 { return 271 }
         if k == 10 { return 318 }
         if k == 11 { return 44 }
+        if k == 15 { return 83 }
+        if k == 16 { return 82 }
+        if k == 17 { return 90 }
+        if k == 18 { return 4 }
         return 0
     }
     if a == 2 || a == 7 {
@@ -86,6 +114,10 @@ fn _kr_sys_nr(u64 k) -> u64 {
         if k == 9 { return 73 }
         if k == 10 { return 278 }
         if k == 11 { return 206 }
+        if k == 15 { return 34 }
+        if k == 16 { return 38 }
+        if k == 17 { return 53 }
+        if k == 18 { return 79 }
         return 0
     }
     return 0
@@ -416,6 +448,94 @@ fn sys_random(u64 buf, u64 len) -> u64 {
             got = got + r
         }
         return 1
+    }
+}
+
+// --- files and directories (spec S1/S2) ------------------------------------------
+
+// 1 when this arch has only the *at file calls (arm64: mkdirat is 34), else 0.
+// Read from the table, NOT from get_arch_id(): _kr_sys_nr stays the one reader.
+fn _kr_sys_at() -> u64 {
+    if _kr_sys_nr(15) == 34 { return 1 }
+    return 0
+}
+
+fn sys_last_errno(u64 r) -> u64 {
+    if get_target_os() == 2 {
+        return _kr_w32_file_errno(_kr_w32_GetLastError() & 0xFFFFFFFF)
+    } else if get_target_os() == 4 {
+        return 38
+    } else {
+        if r > 0xFFFFFFFFFFFFF000 { return 0 - r }
+        return 0
+    }
+}
+
+// 0, or -errno (-EEXIST when it is already there). Windows ignores `mode`.
+fn sys_mkdir(u64 path, u64 mode) -> int64 {
+    if get_target_os() == 2 {
+        if (_kr_w32_CreateDirectoryA(path, 0) & 0xFFFFFFFF) != 0 { return 0 }
+        return 0 - _kr_w32_file_errno(_kr_w32_GetLastError() & 0xFFFFFFFF)
+    } else if get_target_os() == 4 {
+        return 0 - 38
+    } else {
+        u64 nr = _kr_sys_nr(15)
+        if nr == 0 { return 0 - 38 }
+        if _kr_sys_at() != 0 { return syscall_raw(nr, 0xFFFFFFFFFFFFFF9C, path, mode, 0, 0, 0) }
+        return syscall_raw(nr, path, mode, 0, 0, 0, 0)
+    }
+}
+
+// 0, or -errno. Replaces an existing `to` (see the header for the guarantee).
+fn sys_rename(u64 from, u64 to) -> int64 {
+    if get_target_os() == 2 {
+        // MOVEFILE_REPLACE_EXISTING (1) | MOVEFILE_WRITE_THROUGH (8)
+        if (_kr_w32_MoveFileExA(from, to, 9) & 0xFFFFFFFF) != 0 { return 0 }
+        return 0 - _kr_w32_file_errno(_kr_w32_GetLastError() & 0xFFFFFFFF)
+    } else if get_target_os() == 4 {
+        return 0 - 38
+    } else {
+        u64 nr = _kr_sys_nr(16)
+        if nr == 0 { return 0 - 38 }
+        if _kr_sys_at() != 0 { return syscall_raw(nr, 0xFFFFFFFFFFFFFF9C, from, 0xFFFFFFFFFFFFFF9C, to, 0, 0) }
+        return syscall_raw(nr, from, to, 0, 0, 0, 0)
+    }
+}
+
+// 0, or -errno. Windows: 0 and does nothing (no ACL work).
+fn sys_chmod(u64 path, u64 mode) -> int64 {
+    if get_target_os() == 2 {
+        return 0
+    } else if get_target_os() == 4 {
+        return 0 - 38
+    } else {
+        u64 nr = _kr_sys_nr(17)
+        if nr == 0 { return 0 - 38 }
+        if _kr_sys_at() != 0 { return syscall_raw(nr, 0xFFFFFFFFFFFFFF9C, path, mode, 0, 0, 0) }
+        return syscall_raw(nr, path, mode, 0, 0, 0, 0)
+    }
+}
+
+// The st_mode bits, or -errno. Windows: -ENOSYS (there is no mode).
+fn sys_file_mode(u64 path) -> int64 {
+    if get_target_os() == 2 {
+        return 0 - 38
+    } else if get_target_os() == 4 {
+        return 0 - 38
+    } else {
+        u64 nr = _kr_sys_nr(18)
+        if nr == 0 { return 0 - 38 }
+        u8[144] st
+        int64 r = 0
+        u64 off = 24
+        if _kr_sys_at() != 0 {
+            r = syscall_raw(nr, 0xFFFFFFFFFFFFFF9C, path, st, 0, 0, 0)
+            off = 16
+        } else {
+            r = syscall_raw(nr, path, st, 0, 0, 0, 0)
+        }
+        if r < 0 { return r }
+        return load32(st + off)
     }
 }
 
