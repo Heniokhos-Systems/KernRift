@@ -13452,8 +13452,8 @@ fn gen_stmt(uint64 node) {
             emit_byte(0x89)
             emit_byte(0x08)
         }
-        // Volatile barrier AFTER the store too (LANGUAGE.md: the store
-        // completes before anything after it). The barrier before orders it
+        // Volatile barrier AFTER the store too (LANGUAGE.md §12: on x86_64 the
+        // store completes before anything after it). The barrier before orders it
         // after earlier accesses; only this one stops a later load from
         // passing it in the store buffer.
         if (wvf2 & 16) != 0 {

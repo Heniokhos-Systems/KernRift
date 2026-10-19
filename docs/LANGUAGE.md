@@ -903,11 +903,13 @@ prefer them unless you have a reason to use `unsafe` blocks.
 ### Volatile: MMIO-safe loads and stores
 
 For memory-mapped I/O, the compiler must not reorder, elide, or cache the
-access, and the memory operation must complete before anything after it.
+access. How strongly the access is ordered against its neighbours, and
+whether it is waited for, depends on the architecture and the backend (the
+list below).
 
 ```kr
-u32 v = vload32(mmio_addr)     // volatile load, barrier after
-vstore32(mmio_addr, 0x01)      // volatile store, barrier before AND after
+u32 v = vload32(mmio_addr)     // volatile load
+vstore32(mmio_addr, 0x01)      // volatile store
 ```
 
 All widths are available:
@@ -915,12 +917,15 @@ All widths are available:
 
 What is emitted depends on the architecture **and the backend**:
 
-On x86_64 and ARM64 a load has a barrier after it; a store has one before it
-(ordering it after every earlier access) and one after it (so nothing after
-it -- a later load included -- is performed first). riscv32 and xtensa are
-the exceptions listed below. Without the one after, x86 lets
-`vstore64(x, 1); r = vload64(y)` read y before x is visible: two CPUs running
-the mirror image both read 0 (the `store_buffering_litmus` rows measure it).
+On x86_64 (both backends) and ARM64 `--legacy` a load has a full barrier after
+it and a store one on each side, so the access has completed before anything
+after it. ARM64's IR backend makes a load an acquire, which orders it but does
+not wait for it, and follows a store with `DSB SY`. The barrier after a store
+is what keeps `vstore64(x, 1); r = vload64(y)` in order: without it x86 lets
+the load pass the store in the store buffer, and two CPUs running the mirror
+image both read 0 (the `store_buffering_litmus` rows measure it). riscv32
+emits no fence at all and xtensa only a `MEMW` before each access; see their
+entries.
 
 - **x86_64**, both backends: `mfence` after a load, `mfence` before and after
   a store, alongside a width-correct `mov`.
@@ -932,10 +937,10 @@ the mirror image both read 0 (the `store_buffering_litmus` rows measure it).
 - **riscv32**: a plain access, no fence. The ordering above is NOT provided
   by a fence there: the backend relies on the target's single in-order hart
   (see `src/ir_riscv.kr`), so the promise holds only for that hart's own
-  program order, not against another hart or a bus master
+  program order, not against another hart or a bus master.
 - **xtensa**: `MEMW` before each access (a load or a store), none after: a
   volatile store is ordered before a later VOLATILE access (whose `MEMW`
-  waits for it), not before a later plain one
+  waits for it), not before a later plain one.
 
 The two exceptions are measured on the same program: riscv32 emits a plain
 `lw`/`sw` with no `fence` (IR and `--legacy` alike), and xtensa emits one

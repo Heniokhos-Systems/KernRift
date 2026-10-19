@@ -7133,8 +7133,9 @@ for VX_W in u8 u16 u64 f32 f64; do
 done
 # 3. The barriers, which no single-threaded run can observe: count them in
 # main's --emit=asm listing for each form, width and backend, with `volatile`
-# and with `unsafe`. A load has one, a store two (before and after: it
-# completes before anything after it), a compound (a read and a write) three;
+# and with `unsafe`. On x86_64 and arm64 a load has one, a store two (before
+# and after: there it completes before anything after it), a compound (a read
+# and a write) three;
 # `unsafe` none. x86_64 (IR and legacy): mfence. arm64 IR: the load is LDAR,
 # the store STLR then `dsb sy`. arm64 legacy: `dsb sy` after a load and
 # before and after a store, the vstore* builtins' barrier (a `dmb ish` does not count: the block
@@ -7327,7 +7328,7 @@ done
 # full run, a FAIL: the rows would prove nothing).
 # Each VARIANT is the fence between `*(mine) = 1` and `r = *(other)`:
 #   vv        vstore64(mine, 1); r = vload64(other) -- LANGUAGE.md's
-#             promise that the store completes before anything after it
+#             x86_64 promise that the store completes before anything after it
 #   blk       the same with `volatile { }` block store and load
 #   ldW/stW   a plain store and load around a volatile block load / store of
 #             width W at a third address (its barrier is the fence)
