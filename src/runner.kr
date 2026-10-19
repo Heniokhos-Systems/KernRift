@@ -545,57 +545,62 @@ fn kx_exec_image(uint64 image, uint64 len, uint64 argv) {
         }
         write(2, "kr: failed to create temp file\n", 31)
         exit(1)
-    }
-    if get_target_os() == 0 || get_target_os() == 3 {
-        if force_file == 0 && force_fork == 0 {
-            uint64 label = "kr"
-            uint64 mfd = syscall_raw(kx_nr(6), label, 1, 0, 0, 0, 0)
-            if kx_err(mfd) == 0 {
-                if kx_write_all(mfd, image, len) != 0 {
-                    store64(argv, label)
-                    syscall_raw(kx_nr(5), mfd, "", argv, cli_envp, 0x1000, 0)
-                }
-                syscall_raw(kx_nr(3), mfd, 0, 0, 0, 0, 0)
-            }
-        }
-        if force_fork == 0 {
-            uint64 fpath = kx_make_file(image, len)
-            if fpath != 0 {
-                // O_RDONLY|O_CLOEXEC; the name goes before the exec.
-                uint64 rfd = syscall_raw(kx_nr(1), 0xFFFFFFFFFFFFFF9C, fpath, 0x80000, 0, 0, 0)
-                kx_unlink(fpath)
-                if kx_err(rfd) == 0 {
-                    store64(argv, fpath)
-                    syscall_raw(kx_nr(5), rfd, "", argv, cli_envp, 0x1000, 0)
-                    syscall_raw(kx_nr(3), rfd, 0, 0, 0, 0, 0)
+    } else {
+        // Everything below is POSIX and sits in the else arm on purpose. A
+        // compiler that refuses syscall_raw in a Windows build skips only the
+        // not-taken arm of a literal get_target_os() test, so code after an
+        // early exit would still be lowered, and refused, for Windows.
+        if get_target_os() == 0 || get_target_os() == 3 {
+            if force_file == 0 && force_fork == 0 {
+                uint64 label = "kr"
+                uint64 mfd = syscall_raw(kx_nr(6), label, 1, 0, 0, 0, 0)
+                if kx_err(mfd) == 0 {
+                    if kx_write_all(mfd, image, len) != 0 {
+                        store64(argv, label)
+                        syscall_raw(kx_nr(5), mfd, "", argv, cli_envp, 0x1000, 0)
+                    }
+                    syscall_raw(kx_nr(3), mfd, 0, 0, 0, 0, 0)
                 }
             }
-        }
-        if get_target_os() == 3 {
-            // Termux: SELinux refuses the runner's own exec. The wrapper named
-            // a file of its own for this run; fill it and let the wrapper run it.
-            uint64 fb = kx_getenv("KR_EXEC_FALLBACK")
-            if fb != 0 && load8(fb) != 0 {
-                uint64 tfd = file_open(fb, 1)
-                if tfd < 0xFFFFFFFFFFFFF000 {
-                    file_write(tfd, image, len)
-                    file_close(tfd)
-                    set_executable(fb)
-                    exit(120)
+            if force_fork == 0 {
+                uint64 fpath = kx_make_file(image, len)
+                if fpath != 0 {
+                    // O_RDONLY|O_CLOEXEC; the name goes before the exec.
+                    uint64 rfd = syscall_raw(kx_nr(1), 0xFFFFFFFFFFFFFF9C, fpath, 0x80000, 0, 0, 0)
+                    kx_unlink(fpath)
+                    if kx_err(rfd) == 0 {
+                        store64(argv, fpath)
+                        syscall_raw(kx_nr(5), rfd, "", argv, cli_envp, 0x1000, 0)
+                        syscall_raw(kx_nr(3), rfd, 0, 0, 0, 0, 0)
+                    }
+                }
+            }
+            if get_target_os() == 3 {
+                // Termux: SELinux refuses the runner's own exec. The wrapper named
+                // a file of its own for this run; fill it and let the wrapper run it.
+                uint64 fb = kx_getenv("KR_EXEC_FALLBACK")
+                if fb != 0 && load8(fb) != 0 {
+                    uint64 tfd = file_open(fb, 1)
+                    if tfd < 0xFFFFFFFFFFFFF000 {
+                        file_write(tfd, image, len)
+                        file_close(tfd)
+                        set_executable(fb)
+                        exit(120)
+                    }
                 }
             }
         }
+        // macOS; and Linux or Android when no descriptor exec worked (a kernel
+        // without execveat, or qemu-user, which does not emulate it), or with
+        // KR_RUNNER_EXEC=fork.
+        uint64 cpath = kx_make_file(image, len)
+        if cpath == 0 {
+            write(2, "kr: failed to create temp file\n", 31)
+            exit(1)
+        }
+        store64(argv, cpath)
+        kx_run_child(cpath, argv)
     }
-    // macOS; and Linux or Android when no descriptor exec worked (a kernel
-    // without execveat, or qemu-user, which does not emulate it), or with
-    // KR_RUNNER_EXEC=fork.
-    uint64 cpath = kx_make_file(image, len)
-    if cpath == 0 {
-        write(2, "kr: failed to create temp file\n", 31)
-        exit(1)
-    }
-    store64(argv, cpath)
-    kx_run_child(cpath, argv)
 }
 
 @export
