@@ -88,6 +88,29 @@ SUMMARY_DONE=0
 SUITE_EXIT_TRAP='[ "$SUMMARY_DONE" = 1 ] || { echo "FAIL: suite_exit (the suite exited before its summary)"; exit 1; }'
 trap "$SUITE_EXIT_TRAP" EXIT
 
+# A private TMPDIR for the run, removed at the end: every row that uses
+# mktemp lands in it, so an interrupted run leaves nothing of those behind.
+SUITE_TMP=$(mktemp -d "${TMPDIR:-/tmp}/krc_suite.XXXXXX") && [ -n "$SUITE_TMP" ] && [ -d "$SUITE_TMP" ] \
+    || { echo "FATAL: mktemp -d failed under ${TMPDIR:-/tmp}" >&2; SUMMARY_DONE=1; exit 2; }
+export TMPDIR="$SUITE_TMP"
+SUITE_EXIT_TRAP="rm -rf '$SUITE_TMP'; $SUITE_EXIT_TRAP"
+trap "$SUITE_EXIT_TRAP" EXIT
+
+# Interrupted (make test's traps send TERM to the suite's process group; INT
+# and HUP the same way when run by hand): remove the private TMPDIR and the
+# files rows name after this shell's pid -- /tmp/krc_*_<pid>[...] and
+# <repo>/*_<pid>[...] -- and stop. Nothing is counted; the run is not a pass.
+suite_abort() {
+    rm -rf "$SUITE_TMP" /tmp/krc_*_$$ /tmp/krc_*_$$.* /tmp/krc_*_$$_* /tmp/krc$$_* \
+           "$DIR"/../*_$$ "$DIR"/../*_$$.* "$DIR"/../*_$$_* 2>/dev/null
+    SUMMARY_DONE=1
+    echo "FAIL: suite_interrupted (signal $1; the run stopped before its summary)"
+    exit "$1"
+}
+trap 'suite_abort 143' TERM
+trap 'suite_abort 129' HUP
+trap 'suite_abort 130' INT
+
 # Per-test wall-clock bound for the run_* helpers' compiled programs, so a
 # miscompile that loops cannot hang the suite: it fails as TIMEOUT. The limit
 # is generous: a row whose program is meant to fault waits for the system's

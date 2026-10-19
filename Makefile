@@ -98,18 +98,27 @@ build-import: build/krc2
 	chmod +x build/krc-import
 
 # Run test suite
-# The suite's compiler wrapper is a private file, removed on exit: a fixed
-# /tmp/krc-test was shared by every checkout on the box, so two `make test`
-# runs at once rewrote it under each other. The traps are set before the file
-# exists (mktemp -u names it, `set -C` creates it exclusively), so no signal
-# can leave it behind; the suite runs in the background so that INT, TERM
-# and HUP reach the trap at once (a foreground child defers it until the
-# whole suite ends) and are passed on to it, and the recipe exits 130, 143
-# or 129. The compiler's path travels in the environment, never pasted
-# into the wrapper's text, so a checkout path with spaces works; it is
-# absolute, because rows cd elsewhere before calling it. (A signal sent to
-# make ALONE is not passed on by make; the orphaned suite then removes the
-# file when it finishes.)
+# How the suite is run (review rounds 9-10):
+# - The compiler wrapper is build/krc-test, inside this checkout (build/ is
+#   ignored): no shared /tmp name, nothing to clean up. It is written to
+#   build/krc-test.<pid> and renamed into place, and it execs
+#   build/krc2 next to it by its own absolute path, so a row that cds
+#   elsewhere still finds the compiler.
+# - The suite runs in the background in its own session (setsid, where
+#   available), so INT, TERM and HUP reach this recipe's traps at once (a
+#   foreground child would defer them until the whole suite ended), and each
+#   trap sends TERM to every process in the suite's session -- the running
+#   row's children included, even those `timeout` put in a process group of
+#   their own (pkill -s; the group and the pid as a fallback) -- and exits
+#   130, 143 or 129. The suite's own TERM trap then removes its private
+#   TMPDIR and the files its rows name after its pid. The traps read $$! rather
+#   than a variable set after `&`, so there is no window where the suite has
+#   started but cannot be found.
+# - Measured (round 11): Ctrl-C, or INT/TERM/HUP sent to make's process
+#   group, ends the run within a second, no suite process left; TERM sent to
+#   make alone does the same (make passes TERM on to the recipe); INT or HUP
+#   sent to make alone is NOT passed on, so make waits and the suite runs to
+#   its end.
 # Depends on build/kr-bin because the suite asserts the RUNNER's reported
 # version matches the changelog. That check deliberately fails rather than
 # skips when the binary is absent, so the binary has to be built here --
@@ -117,15 +126,15 @@ build-import: build/krc2
 # to prevent.
 test: build/krc2 build/kr-bin
 	@echo "=== Running test suite ==="
-	@w=$$(mktemp -u "$${TMPDIR:-/tmp}/krc-test.XXXXXX") || exit 1; pid=; \
-	 trap 'rm -f "$$w"' EXIT; \
-	 trap '[ -z "$$pid" ] || kill $$pid 2>/dev/null; exit 130' INT; \
-	 trap '[ -z "$$pid" ] || kill $$pid 2>/dev/null; exit 143' TERM; \
-	 trap '[ -z "$$pid" ] || kill $$pid 2>/dev/null; exit 129' HUP; \
-	 (set -C; printf '#!/bin/bash\nexec "$$MAKE_TEST_COMPILER" --arch=x86_64 "$$@"\n' > "$$w") || exit 1; \
-	 chmod +x "$$w" || exit 1; \
-	 MAKE_TEST_COMPILER="$(CURDIR)/build/krc2" KRC="$$w" bash tests/run_tests.sh & pid=$$!; \
-	 wait $$pid; st=$$?; pid=; exit $$st
+	@t="build/krc-test.$$$$"; \
+	 trap 'rm -f "$$t"' EXIT; \
+	 trap 'p=$$!; [ -z "$$p" ] || { pkill -TERM -s "$$p" 2>/dev/null; kill -TERM -"$$p" 2>/dev/null; kill -TERM "$$p" 2>/dev/null; }; exit 130' INT; \
+	 trap 'p=$$!; [ -z "$$p" ] || { pkill -TERM -s "$$p" 2>/dev/null; kill -TERM -"$$p" 2>/dev/null; kill -TERM "$$p" 2>/dev/null; }; exit 143' TERM; \
+	 trap 'p=$$!; [ -z "$$p" ] || { pkill -TERM -s "$$p" 2>/dev/null; kill -TERM -"$$p" 2>/dev/null; kill -TERM "$$p" 2>/dev/null; }; exit 129' HUP; \
+	 printf '%s\n' '#!/bin/bash' 'exec "$${0%/*}/krc2" --arch=x86_64 "$$@"' > "$$t" && chmod +x "$$t" && mv -f "$$t" build/krc-test || exit 1; \
+	 S=; command -v setsid > /dev/null 2>&1 && S=setsid; \
+	 KRC="$(CURDIR)/build/krc-test" $$S bash tests/run_tests.sh & \
+	 wait $$!; st=$$?; exit $$st
 
 # Full CI gate: bootstrap fixed point + suite + both IR-vs-legacy differential
 # harnesses (x86_64 + arm64 via qemu). Any failure aborts (each step exits
