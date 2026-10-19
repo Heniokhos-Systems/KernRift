@@ -2997,12 +2997,19 @@ fn parse_module() -> uint64 {
             uint64 ann_tok = p_tok_pos
             if cur_kind() != 1 {
                 // `@` before something that is not a name: `@ 5`, `@(`, `@`
-                // at end of file. Nothing is consumed but the `@`.
+                // at end of file. One error: the text after the `@` is
+                // skipped to the next token that can start a declaration, so
+                // the top-level-junk error does not report it a second time
+                // (and say an annotation applies to nothing when there was
+                // none).
                 if ann_err_begin(p_tok_pos) != 0 {
                     ann_err_str("expected an annotation name after '@', got ")
                     ann_err_str(tok_kind_name(cur_kind()))
                     parse_err_tok_text(cur_kind(), p_tok_pos)
                     ann_err_end()
+                }
+                while parse_is_decl_start(cur_kind()) == 0 {
+                    advance_tok()
                 }
                 kind = cur_kind()
                 continue

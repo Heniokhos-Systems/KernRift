@@ -2908,6 +2908,15 @@ printf '@nakd\nfn s() {\n}\nfn main() { exit(0) }\n' > "$TLJ_SRC"
 tlj_check annotation_unknown_name_refused "tlj_$$.kr:1:2: error: unknown annotation '@nakd'"
 printf '@ 5\nfn main() { exit(0) }\n' > "$TLJ_SRC"
 tlj_check annotation_without_name_refused "tlj_$$.kr:1:3: error: expected an annotation name after '@', got integer '5'"
+# ...and that is the only error: the junk after `@` is not reported again.
+TOTAL=$((TOTAL + 1))
+tlj_out=$($KRC --arch=$RUN_ARCH "$TLJ_SRC" -o "$TLJ_BIN" 2>&1)
+if [ "$(printf '%s\n' "$tlj_out" | grep -c ': error: ')" = "1" ] && printf '%s' "$tlj_out" | grep -qx "1 parse error(s)"; then
+    PASS=$((PASS + 1)); echo "  annotation_without_name_one_error: PASS"
+else
+    FAIL=$((FAIL + 1)); echo "FAIL: annotation_without_name_one_error ($(printf '%s' "$tlj_out" | grep -c ': error: ') errors: $(printf '%s' "$tlj_out" | grep ': error: ' | tr '\n' '|' | cut -c1-200))"
+fi
+rm -f "$TLJ_BIN"
 printf 'fn main() { exit(0) }\n@naked\n' > "$TLJ_SRC"
 tlj_check annotation_at_end_of_file_refused "tlj_$$.kr:2:2: error: annotation '@naked' at end of file applies to nothing"
 printf 'fn main() { exit(0) }\n@section(".x"\n' > "$TLJ_SRC"
