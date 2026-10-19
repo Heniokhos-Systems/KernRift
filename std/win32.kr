@@ -41,6 +41,12 @@ extern fn _kr_w32_listen(u64 s, u64 backlog) -> u64
 extern fn _kr_w32_accept(u64 s, u64 sa, u64 lenptr) -> u64
 extern fn _kr_w32_select(u64 nfds, u64 readfds, u64 writefds, u64 exceptfds, u64 timeout) -> u64
 extern fn _kr_w32_getsockname(u64 s, u64 sa, u64 lenptr) -> u64
+// arsh discovery (spec S3/S4): datagrams that carry an address, and the timed
+// connect's non-blocking switch and outcome read.
+extern fn _kr_w32_sendto(u64 s, u64 buf, u64 len, u64 flags, u64 sa, u64 salen) -> u64
+extern fn _kr_w32_recvfrom(u64 s, u64 buf, u64 len, u64 flags, u64 sa, u64 salenptr) -> u64
+extern fn _kr_w32_ioctlsocket(u64 s, u64 cmd, u64 argp) -> u64
+extern fn _kr_w32_getsockopt(u64 s, u64 level, u64 name, u64 val, u64 lenptr) -> u64
 // Stage 2 (event-driven I/O for an interactive shell); declared, not yet used.
 extern fn _kr_w32_WSAEventSelect(u64 s, u64 event, u64 mask) -> u64
 extern fn _kr_w32_WSAEnumNetworkEvents(u64 s, u64 event, u64 out) -> u64
@@ -54,6 +60,9 @@ extern fn _kr_w32_BCryptGenRandom(u64 alg, u64 buf, u64 len, u64 flags) -> u64
 // sleeps). kernel32's other imports back compiler builtins and are not declared.
 extern fn _kr_w32_VirtualProtect(u64 addr, u64 size, u64 prot, u64 oldprot) -> u64
 extern fn _kr_w32_Sleep(u64 ms) -> u64
+// arsh Stage 1b (spec S1): the reason a file builtin failed. Read it
+// IMMEDIATELY after the failing call (sys_last_errno, std/sys.kr).
+extern fn _kr_w32_GetLastError() -> u64
 
 // --- lifecycle -----------------------------------------------------------------
 

@@ -9265,7 +9265,7 @@ echo "--- PE import table: kernel32 + ws2_32 + bcrypt (fixed slots) ---"
 # it checks, and a bug in that arithmetic could cancel a bug in the
 # compiler's. A second literal golden checks the arm64 bytes as emitted.
 # What keeps the two from drifting apart when one is regenerated: everything
-# from the hint/name table on (offset 768 = golden line 49 onward) holds no
+# from the hint/name table on (offset 848 = golden line 54 onward) holds no
 # RVA, so it must be byte-identical between them -- checked below.
 # Regenerate (only for a DELIBERATE table change, after checking it with
 # `llvm-objdump -p`): build the fixture as below, then
@@ -9327,18 +9327,18 @@ pei_check() {
     fi
     rm -f "$PEI_OUT"
 }
-#                                                  .idata  SizeOf  FirstThunks (IAT region +424, then +0/+184/+328)
+#                                                  .idata  SizeOf  FirstThunks (IAT region +464, then +0/+192/+368)
 pei_check pe_imports_three_dlls x86_64 "$DIR/golden/pe_imports_x86_64.idata.hex" \
-    8192  12288  8616  8800  8944     # 0x2000 0x3000  0x21A8 0x2260 0x22F0
+    8192  12288  8656  8848  9024     # 0x2000 0x3000  0x21D0 0x2290 0x2340
 pei_check pe_imports_three_dlls_arm64 arm64 "$DIR/golden/pe_imports_arm64.idata.hex" \
-    12288 16384  12712 12896 13040    # 0x3000 0x4000  0x31A8 0x3260 0x32F0
+    12288 16384  12752 12944 13120    # 0x3000 0x4000  0x31D0 0x3290 0x3340
 # The RVA-free tail (hint/name table + DLL names) must match across the two
 # goldens, so regenerating one cannot quietly leave the other describing a
 # different table. Counted: it is the cross-arch half of the pin.
 TOTAL=$((TOTAL + 1))
 if [ -s "$DIR/golden/pe_imports_x86_64.idata.hex" ] && [ -s "$DIR/golden/pe_imports_arm64.idata.hex" ] \
-   && [ "$(sed -n '49,256p' "$DIR/golden/pe_imports_x86_64.idata.hex" | wc -l)" = "208" ] \
-   && sed -n '49,256p' "$DIR/golden/pe_imports_x86_64.idata.hex" | cmp -s - <(sed -n '49,256p' "$DIR/golden/pe_imports_arm64.idata.hex"); then
+   && [ "$(sed -n '54,256p' "$DIR/golden/pe_imports_x86_64.idata.hex" | wc -l)" = "203" ] \
+   && sed -n '54,256p' "$DIR/golden/pe_imports_x86_64.idata.hex" | cmp -s - <(sed -n '54,256p' "$DIR/golden/pe_imports_arm64.idata.hex"); then
     PASS=$((PASS + 1))
     echo "  pe_imports_goldens_agree: PASS"
 else
@@ -9352,8 +9352,11 @@ fi
 # real source, not a copy. Covers: first/middle/last DLL, a name passed as a
 # non-NUL-terminated prefix of a longer buffer, and the sentinel for an
 # unknown name, a strict prefix ("sen") and an extension ("sendx"). The
-# kernel32 tail (VirtualProtect 19, Sleep 20, GetCPInfo 21) and ws2_32's
-# getsockname (36) resolve. The reserved `_kr_w32_` prefix (std's Win32 externs) strips to the
+# kernel32 tail (VirtualProtect 19, Sleep 20, GetCPInfo 21, GetLastError
+# 22), ws2_32's getsockname (37) and the four datagram/connect imports
+# (sendto 41, recvfrom 42, ioctlsocket 43, getsockopt 44) resolve; the three
+# slot-16..18 kernel32 names std now calls resolve unchanged. The reserved
+# `_kr_w32_` prefix (std's Win32 externs) strips to the
 # real export: `_kr_w32_send` -> send's slot. NOT stripped, each its own
 # exit code: `_kr_w32_` alone and `_kr_w32_sen`, both passed as tokens of the
 # longer buffer "_kr_w32_send" (a strip that measured the remainder to the
@@ -9370,21 +9373,21 @@ sed -n '/^\/\/ @@pe-known-imports-begin$/,/^\/\/ @@pe-known-imports-end$/p' "$DI
 cat >> "$PIS_SRC" <<'KREOF'
 fn main() {
     if pe_import_slot("ExitProcess", 11) != 0 { exit(1) }
-    if pe_import_slot("send", 4) != 27 { exit(2) }
-    if pe_import_slot("recv", 4) != 28 { exit(3) }
-    if pe_import_slot("BCryptGenRandom", 15) != 41 { exit(4) }
+    if pe_import_slot("send", 4) != 28 { exit(2) }
+    if pe_import_slot("recv", 4) != 29 { exit(3) }
+    if pe_import_slot("BCryptGenRandom", 15) != 46 { exit(4) }
     if pe_import_slot("MoveFileExA", 11) != 18 { exit(5) }
-    if pe_import_slot("sendto", 4) != 27 { exit(6) }
+    if pe_import_slot("sendto", 4) != 28 { exit(6) }
     if pe_import_slot("sen", 3) != 0xFFFFFFFF { exit(7) }
     if pe_import_slot("sendx", 5) != 0xFFFFFFFF { exit(8) }
     if pe_import_slot("GetFileSizeEy", 13) != 0xFFFFFFFF { exit(9) }
     if pe_import_slot("", 0) != 0xFFFFFFFF { exit(10) }
     if pe_import_slot("VirtualProtect", 14) != 19 { exit(11) }
     if pe_import_slot("Sleep", 5) != 20 { exit(12) }
-    if pe_import_slot("getsockname", 11) != 36 { exit(13) }
-    if pe_import_slot("WSACreateEvent", 14) != 39 { exit(14) }
-    if pe_import_slot("_kr_w32_send", 12) != 27 { exit(15) }
-    if pe_import_slot("_kr_w32_BCryptGenRandom", 23) != 41 { exit(16) }
+    if pe_import_slot("getsockname", 11) != 37 { exit(13) }
+    if pe_import_slot("WSACreateEvent", 14) != 40 { exit(14) }
+    if pe_import_slot("_kr_w32_send", 12) != 28 { exit(15) }
+    if pe_import_slot("_kr_w32_BCryptGenRandom", 23) != 46 { exit(16) }
     if pe_import_slot("_kr_w32_send", 8) != 0xFFFFFFFF { exit(17) }
     if pe_import_slot("_kr_w32_send", 11) != 0xFFFFFFFF { exit(18) }
     if pe_import_slot("_kr_w32_sen", 11) != 0xFFFFFFFF { exit(19) }
@@ -9394,6 +9397,15 @@ fn main() {
     if pe_import_slot("Xkr_w32_send", 12) != 0xFFFFFFFF { exit(23) }
     if pe_import_slot("_kr_w32Xsend", 12) != 0xFFFFFFFF { exit(24) }
     if pe_import_slot("GetCPInfo", 9) != 21 { exit(25) }
+    if pe_import_slot("GetLastError", 12) != 22 { exit(26) }
+    if pe_import_slot("sendto", 6) != 41 { exit(27) }
+    if pe_import_slot("recvfrom", 8) != 42 { exit(28) }
+    if pe_import_slot("ioctlsocket", 11) != 43 { exit(29) }
+    if pe_import_slot("getsockopt", 10) != 44 { exit(30) }
+    if pe_import_slot("_kr_w32_GetLastError", 20) != 22 { exit(31) }
+    if pe_import_slot("GetEnvironmentVariableA", 23) != 16 { exit(32) }
+    if pe_import_slot("CreateDirectoryA", 16) != 17 { exit(33) }
+    if pe_import_slot("recvfro", 7) != 0xFFFFFFFF { exit(34) }
     exit(0)
 }
 KREOF

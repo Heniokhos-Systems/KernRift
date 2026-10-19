@@ -4,6 +4,13 @@ All notable changes to `kernriftc` are documented in this file.
 
 ## Unreleased
 
+**Added: five PE imports for arsh Stage 1b and discovery -- kernel32
+`GetLastError` (slot 22) and ws2_32 `sendto`, `recvfrom`, `ioctlsocket`,
+`getsockopt` (41-44).** Every later ws2_32/bcrypt slot moves by one or five;
+slots are internal to each binary and every row keys on the import NAME. The
+`.idata` table is 2323 of its 4096 bytes. The externs are declared in
+`std/win32.kr` under the `_kr_w32_` prefix.
+
 **Fixed: `byte` and `addr` are real type aliases again -- `uint8` and
 `uint64` -- in every type position, and still ordinary names everywhere else.**
 LANGUAGE.md has listed them as aliases since they stopped being keywords (as
