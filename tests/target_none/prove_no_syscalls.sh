@@ -223,8 +223,10 @@ fi
 #   on a scalar is no array access: the IR backend reads and writes table's
 #   own address whatever i is (one byte on x86_64 and arm64), which still
 #   yields 209 because only the low byte of each mix(i) reaches the sum and
-#   the result is taken & 0xFF; the --legacy x86_64 and arm64 builds index
-#   from a stack slot nothing has written and crash (SIGSEGV, rc=139). The
+#   the result is taken & 0xFF; the --legacy x86_64 and arm64 builds take
+#   the base from a stack slot main never writes (0 under gdb on x86_64), add
+#   i unscaled and store 8 bytes there (`mov %rax,(%rcx)`, rcx = 0) -- a wild
+#   write, which faults at i = 0 (SIGSEGV, rc=139). The
 #   same variant with the declaration written `static uint32[8] table` returns
 #   209 under --legacy on both (and on the IR backend and --O0), measured with
 #   this branch's compiler. The frozen input is left as is on this branch: the
