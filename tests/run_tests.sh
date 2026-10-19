@@ -3,6 +3,13 @@
 
 DIR="$(cd "$(dirname "$0")" && pwd)"
 KRC="${KRC:-$DIR/../build/krc3}"
+# A relative compiler path ("./build/krc2", "build/krc3") is made absolute
+# here: several rows cd before calling $KRC (self_import_mode_matches_concat
+# runs from src/), and a relative path then names nothing.
+case "$KRC" in
+    /*) ;;
+    */*) KRC="$(cd "$(dirname "$KRC")" && pwd)/$(basename "$KRC")" ;;
+esac
 
 # THE COMPILER UNDER TEST MUST BE NEWER THAN THE COMPILER'S SOURCE.
 #
@@ -6377,12 +6384,19 @@ rm -rf "$XL2_T"
 # second: "undefined function 'x86t_oppat_c'".
 TOTAL=$((TOTAL + 1))
 SIM_T=$(mktemp -d "${TMPDIR:-/tmp}/krc_sim.XXXXXX")
-SIM_A=$(cd "$DIR/../src" && $KRC main.kr -o "$SIM_T/imp" 2>&1 | grep -m1 'error:')
-SIM_B=$($KRC "$DIR/../build/krc.kr" -o "$SIM_T/cat" 2>&1 | grep -m1 'error:')
-if [ -s "$SIM_T/imp" ] && [ -s "$SIM_T/cat" ] && cmp -s "$SIM_T/imp" "$SIM_T/cat"; then
+# Run from src/ so main.kr's relative imports resolve; $KRC is absolute (the
+# top of this file makes it so), so the cd cannot lose the compiler.
+SIM_A=$(cd "$DIR/../src" && $KRC main.kr -o "$SIM_T/imp" 2>&1); SIM_AR=$?
+SIM_B=$($KRC "$DIR/../build/krc.kr" -o "$SIM_T/cat" 2>&1); SIM_BR=$?
+sim_state() { # <rc> <output> <artifact>
+    if [ "$1" != "0" ]; then printf 'exit %s, %s' "$1" "$(printf '%s\n' "$2" | grep -m1 . | cut -c1-160)"
+    elif [ ! -s "$3" ]; then printf 'exit 0 but no artifact'
+    else printf 'built %s B' "$(stat -c %s "$3")"; fi
+}
+if [ "$SIM_AR" = "0" ] && [ "$SIM_BR" = "0" ] && [ -s "$SIM_T/imp" ] && [ -s "$SIM_T/cat" ] && cmp -s "$SIM_T/imp" "$SIM_T/cat"; then
     PASS=$((PASS + 1)); echo "  self_import_mode_matches_concat: PASS (krc src/main.kr == krc build/krc.kr, $(stat -c %s "$SIM_T/imp") B)"
 else
-    FAIL=$((FAIL + 1)); echo "FAIL: self_import_mode_matches_concat (import mode: ${SIM_A:-built}; concat: ${SIM_B:-built}; or the two differ)"
+    FAIL=$((FAIL + 1)); echo "FAIL: self_import_mode_matches_concat (import mode: $(sim_state "$SIM_AR" "$SIM_A" "$SIM_T/imp"); concat: $(sim_state "$SIM_BR" "$SIM_B" "$SIM_T/cat"); both built and differ if neither says otherwise)"
 fi
 rm -rf "$SIM_T"
 
