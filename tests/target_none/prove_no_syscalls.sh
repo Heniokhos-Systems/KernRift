@@ -125,8 +125,10 @@ KRC="${KRC:-$REPO/build/krc2}"
 # a bare compiler produces a fat KRBOFAT container. Anything else means $KRC
 # is injecting an arch somewhere, and gate 1 cannot measure through it.
 if [ -n "${KRC:-}" ]; then
-    _pk_src="$(mktemp /tmp/krc_archprobe_XXXXXX.kr)"
-    _pk_out="$(mktemp -u /tmp/krc_archprobe_XXXXXX.bin)"
+    _pk_src="$(mktemp "${TMPDIR:-/tmp}/krc_archprobe_XXXXXX.kr")" && [ -n "$_pk_src" ] \
+        || { echo "error: mktemp failed for the arch probe" >&2; exit 2; }
+    _pk_out="$(mktemp -u "${TMPDIR:-/tmp}/krc_archprobe_XXXXXX.bin")" && [ -n "$_pk_out" ] \
+        || { rm -f "$_pk_src"; echo "error: mktemp -u failed for the arch probe" >&2; exit 2; }
     printf 'fn main() -> uint64 {\n    return 0\n}\n' > "$_pk_src"
     if $KRC "$_pk_src" -o "$_pk_out" >/dev/null 2>&1 && [ -s "$_pk_out" ]; then
         _pk_magic="$(head -c 8 "$_pk_out" | od -An -tx1 | tr -d ' \n')"
@@ -309,13 +311,17 @@ if [ ! -x "$KRC" ]; then
     exit 2
 fi
 
-TMP=$(mktemp -d "${TMPDIR:-/tmp}/krc_tn_gate_XXXXXX")
+# A failed mktemp must stop the gate: with TMP empty every path below would
+# be rooted at / ("$TMP/base" is /base).
+TMP=$(mktemp -d "${TMPDIR:-/tmp}/krc_tn_gate_XXXXXX") && [ -n "$TMP" ] && [ -d "$TMP" ] \
+    || { echo "error: mktemp -d failed under ${TMPDIR:-/tmp}" >&2; exit 2; }
 # Gate 2's programs import "../std/...". Imports resolve against the importing
 # FILE's own directory first, then against the INSTALLED stdlib -- so a program
 # in /tmp would either fail to resolve or silently pick up whatever
 # ~/.local/share/kernrift/std happens to hold, which is not the tree under
 # test. This directory therefore has to live in the repo.
-INREPO=$(mktemp -d "$REPO/krc_tn_gate_XXXXXX")
+INREPO=$(mktemp -d "$REPO/krc_tn_gate_XXXXXX") && [ -n "$INREPO" ] && [ -d "$INREPO" ] \
+    || { rm -rf "$TMP"; echo "error: mktemp -d failed under $REPO" >&2; exit 2; }
 cleanup() { rm -rf "$TMP" "$INREPO"; }
 trap cleanup EXIT
 
