@@ -4,6 +4,11 @@ All notable changes to `kernriftc` are documented in this file.
 
 ## Unreleased
 
+**Fixed: an interrupted test run no longer leaves qemu images behind.** On
+INT/TERM/HUP the suite removed only its `/tmp/krc_*` scratch paths, so the
+qemu rows' `/tmp/uprov_<pid>.img`/`.log` and similar stayed. It now removes
+every `/tmp/<name>_<pid>` name the suite uses, read from the suite itself.
+
 **Fixed: the citation checker reads what a citation says, and covers .md
 files.** A citation can point at a line that exists and has not moved and
 still be wrong: IR_REFERENCE's "the comment at `src/ir.kr:N`" named a line of

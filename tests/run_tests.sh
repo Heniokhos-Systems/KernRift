@@ -102,6 +102,14 @@ trap "$SUITE_EXIT_TRAP" EXIT
 suite_abort() {
     rm -rf "$SUITE_TMP" /tmp/krc_*_$$ /tmp/krc_*_$$.* /tmp/krc_*_$$_* /tmp/krc$$_* \
            "$DIR"/../*_$$ "$DIR"/../*_$$.* "$DIR"/../*_$$_* 2>/dev/null
+    # ...and every other /tmp/<name>_$$ path, by the names this file uses (the
+    # qemu rows' uprov_$$.img/.log, krgz_out_$$.gz, ...), read from the file
+    # itself so a new row's scratch name cannot be missed.
+    local sa_p
+    for sa_p in $(grep -oE '/tmp/[A-Za-z0-9_]+_[$][$]' "$DIR/run_tests.sh" 2>/dev/null | sort -u); do
+        sa_p="${sa_p%??}"
+        rm -rf "$sa_p$$" "$sa_p$$".* "$sa_p$$"_* 2>/dev/null
+    done
     SUMMARY_DONE=1
     echo "FAIL: suite_interrupted (signal $1; the run stopped before its summary)"
     exit "$1"
@@ -26426,6 +26434,34 @@ else
         FAIL=$((FAIL + 1)); echo "FAIL: runner_windows_slots_are_claimed$RWS_WHY"
     fi
     rm -rf "$RWS_D"
+fi
+
+# suite_abort removes every /tmp/<name>_$$ scratch path the suite writes, not
+# only the krc_* ones: an interrupted run used to leave the qemu rows' images
+# and serial logs (uprov_<pid>.img/.log and the like) behind. suite_abort reads
+# the names from this file, so a new row's scratch name is covered without a
+# second list to keep in step. Checked in a child shell (its own $$): it
+# creates three such paths, calls the real suite_abort, and they must be gone.
+TOTAL=$((TOTAL + 1))
+sab_fn=$(sed -n '/^suite_abort() {/,/^}/p' "$DIR/run_tests.sh")
+sab_out=$(DIR="$DIR" SUITE_TMP=/nonexistent/krc_sab bash -c "$sab_fn"'
+echo "pid $$"
+mkdir -p "/tmp/uprov_$$.d"
+: > "/tmp/uprov_$$.img"; : > "/tmp/uprov_$$.log"; : > "/tmp/krgz_out_$$.gz"
+suite_abort 130' 2>&1)
+sab_rc=$?
+sab_pid=$(printf '%s\n' "$sab_out" | sed -n 's/^pid //p')
+sab_left=""
+if [ -n "$sab_pid" ]; then
+    for sab_f in "/tmp/uprov_$sab_pid.img" "/tmp/uprov_$sab_pid.log" "/tmp/krgz_out_$sab_pid.gz" "/tmp/uprov_$sab_pid.d"; do
+        [ -e "$sab_f" ] && sab_left="$sab_left $sab_f"
+    done
+    rm -rf "/tmp/uprov_$sab_pid.img" "/tmp/uprov_$sab_pid.log" "/tmp/krgz_out_$sab_pid.gz" "/tmp/uprov_$sab_pid.d"
+fi
+if [ -n "$sab_pid" ] && [ "$sab_rc" = "130" ] && [ -z "$sab_left" ]; then
+    PASS=$((PASS + 1)); echo "  suite_abort_removes_every_tmp_name: PASS (uprov_<pid>.img/.log, krgz_out_<pid>.gz and a uprov_<pid>.d dir removed; exit 130)"
+else
+    FAIL=$((FAIL + 1)); echo "FAIL: suite_abort_removes_every_tmp_name (rc=$sab_rc, left:${sab_left:- none}; output: $(printf '%s' "$sab_out" | tr '\n' '|' | head -c 160))"
 fi
 
 # --- Documentation pin 5, PART B (see Part A above) --------------------------
