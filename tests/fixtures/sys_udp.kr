@@ -1,0 +1,64 @@
+// std/sys.kr (arsh discovery, spec S3): a UDP round trip on loopback through
+// sys_sendto / sys_recvfrom. Two sockets bound to 127.0.0.1:0; B sends 48
+// bytes to A; A's recvfrom returns them AND B's own address (its port read
+// back with getsockname). A then replies to the address recvfrom produced and
+// B must get it from A's port. Prints OK; each failed check exits with its code.
+import "../../std/sys.kr"
+
+static u8[16] ud_sa
+static u8[16] ud_ga
+static u8[16] ud_from
+static u8[8] ud_len
+static u8[64] ud_buf
+static u8[64] ud_msg
+
+fn ud_fill(uint64 sa, uint64 port) {
+    uint64 i = 0
+    while i < 16 { store8(sa + i, 0)  i = i + 1 }
+    store8(sa + 0, 2)
+    store8(sa + 2, (port >> 8) & 255)
+    store8(sa + 3, port & 255)
+    store8(sa + 4, 127)
+    store8(sa + 7, 1)
+}
+
+fn ud_port(uint64 s) -> uint64 {
+    store32(ud_len, 16)
+    if sys_getsockname(s, ud_ga, ud_len) != 0 { return 0 }
+    return (load8(ud_ga + 2) << 8) | load8(ud_ga + 3)
+}
+
+fn main() -> uint32 {
+    int64 p = sys_socket(2, 2, 0)
+    if p < 0 { return 1 }
+    int64 q = sys_socket(2, 2, 0)
+    if q < 0 { return 2 }
+    ud_fill(ud_sa, 0)
+    if sys_bind(p, ud_sa, 16) != 0 { return 3 }
+    if sys_bind(q, ud_sa, 16) != 0 { return 4 }
+    uint64 pp = ud_port(p)
+    uint64 qp = ud_port(q)
+    if pp == 0 { return 5 }
+    if qp == 0 { return 6 }
+    uint64 i = 0
+    while i < 48 { store8(ud_msg + i, i + 1)  i = i + 1 }
+    ud_fill(ud_sa, pp)
+    if sys_sendto(q, ud_msg, 48, ud_sa, 16) != 48 { return 7 }
+    if sys_wait_readable(p, 5000) != 1 { return 8 }
+    store32(ud_len, 16)
+    if sys_recvfrom(p, ud_buf, 64, ud_from, ud_len) != 48 { return 9 }
+    if load8(ud_buf + 47) != 48 { return 10 }
+    if load8(ud_from + 4) != 127 { return 11 }
+    if load8(ud_from + 7) != 1 { return 12 }
+    if ((load8(ud_from + 2) << 8) | load8(ud_from + 3)) != qp { return 13 }
+    if load32(ud_len) != 16 { return 14 }
+    if sys_sendto(p, ud_buf, 48, ud_from, 16) != 48 { return 15 }
+    if sys_wait_readable(q, 5000) != 1 { return 16 }
+    store32(ud_len, 16)
+    if sys_recvfrom(q, ud_buf, 64, ud_from, ud_len) != 48 { return 17 }
+    if ((load8(ud_from + 2) << 8) | load8(ud_from + 3)) != pp { return 18 }
+    sys_sock_close(p)
+    sys_sock_close(q)
+    file_write(1, "OK\n", 3)
+    return 0
+}

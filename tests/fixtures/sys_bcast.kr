@@ -1,0 +1,48 @@
+// std/sys.kr (arsh discovery, spec S3, R2-m2): SO_BROADCAST (SOL_SOCKET 1,
+// option 6). argv[1] "lo": send to 127.255.255.255 (Linux's lo broadcast
+// route, present with NO default route); "all": 255.255.255.255 (the Wine
+// row). Without the option a broadcast send is refused -EACCES; with it, it
+// is not. A 2-byte option value is -EINVAL on both OSes. Prints
+// "without <r>" and "with <r>"; the rows judge them.
+import "../../std/sys.kr"
+import "../../std/args.kr"
+
+static u8[16] bc_sa
+static u8[48] bc_msg
+static u8[8] bc_one
+
+fn bc_put(int64 v) {
+    u8[24] d
+    uint64 dp = d
+    uint64 u = v
+    if v < 0 { file_write(1, "-", 1)  u = 0 - v }
+    uint64 k = 0
+    if u == 0 { file_write(1, "0", 1) }
+    while u != 0 { store8(dp + k, 48 + u % 10)  u = u / 10  k = k + 1 }
+    while k != 0 { k = k - 1  file_write(1, dp + k, 1) }
+}
+
+fn main() -> uint32 {
+    uint64 m = sys_arg(1)
+    if m == 0 { return 1 }
+    int64 s = sys_socket(2, 2, 0)
+    if s < 0 { return 2 }
+    uint64 i = 0
+    while i < 16 { store8(bc_sa + i, 0)  i = i + 1 }
+    store8(bc_sa + 0, 2)
+    store8(bc_sa + 3, 9)
+    store8(bc_sa + 4, 255)
+    store8(bc_sa + 5, 255)
+    store8(bc_sa + 6, 255)
+    store8(bc_sa + 7, 255)
+    if load8(m) == 108 { store8(bc_sa + 4, 127) }
+    store32(bc_one, 1)
+    if sys_setsockopt(s, 1, 6, bc_one, 2) != 0 - 22 { return 3 }
+    int64 r1 = sys_sendto(s, bc_msg, 48, bc_sa, 16)
+    if sys_setsockopt(s, 1, 6, bc_one, 4) != 0 { return 4 }
+    int64 r2 = sys_sendto(s, bc_msg, 48, bc_sa, 16)
+    file_write(1, "without ", 8)  bc_put(r1)
+    file_write(1, "\nwith ", 6)  bc_put(r2)  file_write(1, "\n", 1)
+    sys_sock_close(s)
+    return 0
+}

@@ -43,6 +43,26 @@
 // "there is never a moment with no valid target", not POSIX atomicity.
 // MOVEFILE_WRITE_THROUGH only matters across volumes and is harmless here.
 //
+// DATAGRAMS (arsh discovery, spec S3). sys_sendto / sys_recvfrom carry the
+// peer address; sys_sendto passes MSG_NOSIGNAL on Linux and clamps len to
+// 0x7FFFFFFF on Windows as sys_send does. A zero-length recvfrom is not
+// supported (Linux discards a datagram, Windows reports WSAEMSGSIZE).
+// WINDOWS UDP TRAP: after a sendto that drew an ICMP port-unreachable, the
+// NEXT recvfrom on that socket fails WSAECONNRESET (-ECONNRESET, -104). A
+// datagram caller treats it as "nothing yet" and keeps waiting.
+//
+// THE TIMED CONNECT (spec S4). sys_connect_timeout(sock, sa, len, ms):
+// non-blocking on, connect, wait for writable-or-exception up to `ms`, read
+// the connect's own result (SO_ERROR), and restore blocking mode ON EVERY PATH
+// -- left non-blocking, every later sys_recv says -EAGAIN at once on both OSes.
+// A restore failure is the result even after a successful connect. On
+// -ETIMEDOUT (or any failure) the socket is DEAD -- Winsock will not retry a
+// connect on the same handle -- so the caller closes it and opens a new one.
+// The deadline has the Windows timer's granularity (~15.6 ms); a REFUSED
+// connect measured 2.02 s on native Windows, so with a 2 s deadline "refused"
+// and "timed out" may collapse into one outcome: callers must not claim to
+// know which.
+//
 // Irreducible Linux/Windows differences (documented, not translated):
 //   - listen() on an UNBOUND socket: Linux autobinds a port (0), Windows -EINVAL;
 //   - getsockname() on an unbound socket: Linux 0 (0.0.0.0:0), Windows -EINVAL;
@@ -52,12 +72,14 @@
 //     but keep reading -ECONNRESET on Windows;
 //   - a keepalive failure on recv reads -EAGAIN on Windows (see recv below);
 //   - WSAENOTSOCK reads -EBADF (a file handle passed as a socket too);
-//   - setsockopt supports SO_REUSEADDR and SO_RCVTIMEO only on Windows;
+//   - setsockopt supports SO_REUSEADDR, SO_RCVTIMEO and SO_BROADCAST only on
+//     Windows;
 //   - IPv4 only on Windows (AF_INET6 is 10 on Linux, 23 on Windows);
 //   - timeouts have the Windows timer's granularity (~15.6 ms);
 //   - a send on an UNCONNECTED datagram socket: Linux -EDESTADDRREQ (-89),
 //     Windows -EPIPE (-32) -- the send map's ENOTCONN -> EPIPE is TCP's reading
-//     and cannot see the socket type (sys.kr is for TCP; there is no sendto);
+//     and cannot see the socket type (sys_send is for TCP; a datagram goes
+//     through sys_sendto, which carries its address);
 //   - shutdown() on a LISTENING socket: Linux 0, Windows -ENOTCONN (-107);
 //   - connect()/bind() with a short addrlen (< 16): Linux -EINVAL (-22),
 //     Windows -EFAULT (-14);
@@ -78,6 +100,7 @@ import "win32.kr"
 // Syscall number for operation `k` on this (arch, os), 0 when there is none.
 //   0 socket  1 connect  2 bind  3 listen  4 accept  5 getsockname
 //   6 shutdown  7 setsockopt  8 close  9 ppoll  10 getrandom  11 sendto
+//   12 recvfrom  13 fcntl  14 getsockopt
 //   15 mkdir(at)  16 rename(at)  17 chmod/fchmodat  18 stat/newfstatat
 // Linux and Android share a table per architecture (1/8 = x86_64, 2/7 = arm64).
 fn _kr_sys_nr(u64 k) -> u64 {
@@ -95,6 +118,9 @@ fn _kr_sys_nr(u64 k) -> u64 {
         if k == 9 { return 271 }
         if k == 10 { return 318 }
         if k == 11 { return 44 }
+        if k == 12 { return 45 }
+        if k == 13 { return 72 }
+        if k == 14 { return 55 }
         if k == 15 { return 83 }
         if k == 16 { return 82 }
         if k == 17 { return 90 }
@@ -114,6 +140,9 @@ fn _kr_sys_nr(u64 k) -> u64 {
         if k == 9 { return 73 }
         if k == 10 { return 278 }
         if k == 11 { return 206 }
+        if k == 12 { return 207 }
+        if k == 13 { return 25 }
+        if k == 14 { return 209 }
         if k == 15 { return 34 }
         if k == 16 { return 38 }
         if k == 17 { return 53 }
@@ -157,6 +186,8 @@ fn _kr_sys_w32_send_ret(u64 r) -> int64 {
 //   SOL_SOCKET(1) SO_RCVTIMEO(20): Linux takes a 16-byte timeval, Windows a
 //     DWORD of milliseconds (SO_RCVTIMEO 0x1006); converted, rounding up.
 //     optlen < 16 -> -EINVAL and tv_usec >= 1000000 -> -EDOM, as on Linux.
+//   SOL_SOCKET(1) SO_BROADCAST(6): Winsock SO_BROADCAST 0x0020, a 4-byte
+//     BOOL from the caller's int; optlen < 4 -> -EINVAL.
 // Every other (level, option) -> -ENOPROTOOPT: refused loudly rather than
 // passed through, because Windows numbers the same options differently
 // (0x1001 is Windows' SO_SNDBUF) and the value shapes differ too.
@@ -173,6 +204,13 @@ fn _kr_sys_w32_setsockopt(u64 sock, u64 level, u64 name, u64 val, u64 len) -> in
         if load64(val + 8) >= 1000000 { return 0 - 33 }
         store32(v, _kr_w32_ms_of_timeval(val))
         return _kr_w32_ret32(_kr_w32_setsockopt(sock, 0xFFFF, 0x1006, v, 4))
+    }
+    if name == 6 {
+        if len < 4 { return 0 - 22 }
+        u64 b = 0
+        if load32(val) != 0 { b = 1 }
+        store32(v, b)
+        return _kr_w32_ret32(_kr_w32_setsockopt(sock, 0xFFFF, 0x0020, v, 4))
     }
     return 0 - 92
 }
@@ -536,6 +574,153 @@ fn sys_file_mode(u64 path) -> int64 {
         }
         if r < 0 { return r }
         return load32(st + off)
+    }
+}
+
+// --- datagrams and the timed connect (spec S3/S4) --------------------------------
+
+fn sys_sendto(u64 sock, u64 buf, u64 len, u64 sa, u64 salen) -> int64 {
+    if get_target_os() == 2 {
+        int64 e = _kr_w32_ensure()
+        if e < 0 { return e }
+        u64 n = len
+        if n > 0x7FFFFFFF { n = 0x7FFFFFFF }
+        return _kr_sys_w32_send_ret(_kr_w32_sendto(sock, buf, n, 0, sa, salen))
+    } else if get_target_os() == 4 {
+        return 0 - 38
+    } else {
+        u64 nr = _kr_sys_nr(11)
+        if nr == 0 { return 0 - 38 }
+        return syscall_raw(nr, sock, buf, len, 0x4000, sa, salen)
+    }
+}
+
+// salenptr: pointer to a 32-bit in/out length (16 for an IPv4 sockaddr).
+fn sys_recvfrom(u64 sock, u64 buf, u64 len, u64 sa, u64 salenptr) -> int64 {
+    if get_target_os() == 2 {
+        int64 e = _kr_w32_ensure()
+        if e < 0 { return e }
+        u64 n = len
+        if n > 0x7FFFFFFF { n = 0x7FFFFFFF }
+        return _kr_sys_w32_recv_ret(_kr_w32_recvfrom(sock, buf, n, 0, sa, salenptr))
+    } else if get_target_os() == 4 {
+        return 0 - 38
+    } else {
+        u64 nr = _kr_sys_nr(12)
+        if nr == 0 { return 0 - 38 }
+        return syscall_raw(nr, sock, buf, len, 0, sa, salenptr)
+    }
+}
+
+// Step 3: 1 writable, 2 exception (Linux POLLERR/POLLHUP; Windows exceptfds,
+// where a failed non-blocking connect is signalled), 0 timeout, -errno.
+fn _kr_sys_wait_connect(u64 sock, u64 ms) -> int64 {
+    u64 t = ms
+    if t > 0xFFFFFFFE { t = 0xFFFFFFFE }
+    if get_target_os() == 2 {
+        u8[520] wfds
+        u8[520] efds
+        u8[8] tv
+        _kr_w32_fdset_one(wfds, sock)
+        _kr_w32_fdset_one(efds, sock)
+        _kr_w32_timeval(tv, t)
+        int64 r = _kr_w32_ret32(_kr_w32_select(0, 0, wfds, efds, tv))
+        if r < 0 { return r }
+        if r == 0 { return 0 }
+        if load32(efds) != 0 { return 2 }
+        return 1
+    } else if get_target_os() == 4 {
+        return 0 - 38
+    } else {
+        u64 nr = _kr_sys_nr(9)
+        if nr == 0 { return 0 - 38 }
+        u8[8] pfd
+        u8[16] ts
+        store32(pfd, sock)
+        store16(pfd + 4, 4)
+        store16(pfd + 6, 0)
+        store64(ts, t / 1000)
+        store64(ts + 8, (t % 1000) * 1000000)
+        int64 r = syscall_raw(nr, pfd, 1, ts, 0, 8, 0)
+        if r < 0 { return r }
+        if r == 0 { return 0 }
+        if (load16(pfd + 6) & 0x18) != 0 { return 2 }
+        return 1
+    }
+}
+
+// Step 4: the connect's own result. The POSITIVE Linux errno (0 = connected),
+// or -errno when getsockopt itself failed.
+fn _kr_sys_sock_error(u64 sock) -> int64 {
+    u8[8] ev
+    u8[8] evl
+    store32(ev, 0)
+    store32(evl, 4)
+    if get_target_os() == 2 {
+        int64 g = _kr_w32_ret32(_kr_w32_getsockopt(sock, 0xFFFF, 0x1007, ev, evl))
+        if g < 0 { return g }
+        u64 w = load32(ev)
+        if w == 0 { return 0 }
+        return _kr_w32_errno(w)
+    } else if get_target_os() == 4 {
+        return 0 - 38
+    } else {
+        u64 nr = _kr_sys_nr(14)
+        if nr == 0 { return 0 - 38 }
+        int64 g = syscall_raw(nr, sock, 1, 4, ev, evl, 0)
+        if g < 0 { return g }
+        return load32(ev)
+    }
+}
+
+// Steps 3-4 together: 0 connected, -ETIMEDOUT, or -errno. An exception with no
+// recorded error is -EIO: never "connected".
+fn _kr_sys_connect_outcome(u64 sock, u64 ms) -> int64 {
+    int64 w = _kr_sys_wait_connect(sock, ms)
+    if w < 0 { return w }
+    if w == 0 { return 0 - 110 }
+    int64 se = _kr_sys_sock_error(sock)
+    if se < 0 { return se }
+    if se != 0 { return 0 - se }
+    if w == 2 { return 0 - 5 }
+    return 0
+}
+
+fn sys_connect_timeout(u64 sock, u64 sa, u64 salen, u64 ms) -> int64 {
+    if get_target_os() == 2 {
+        int64 e = _kr_w32_ensure()
+        if e < 0 { return e }
+        u8[8] arg
+        store32(arg, 1)
+        // step 1: FIONBIO = 0x8004667E, 1 = non-blocking
+        int64 r = _kr_w32_ret32(_kr_w32_ioctlsocket(sock, 0x8004667E, arg))
+        if r < 0 { return r }
+        // step 2: WSAEWOULDBLOCK reads -EAGAIN through the map; -EINPROGRESS too
+        r = _kr_w32_ret32(_kr_w32_connect(sock, sa, salen))
+        if r == 0 - 11 || r == 0 - 115 { r = _kr_sys_connect_outcome(sock, ms) }
+        // step 5: blocking again, on every path
+        store32(arg, 0)
+        int64 rr = _kr_w32_ret32(_kr_w32_ioctlsocket(sock, 0x8004667E, arg))
+        if rr < 0 { return rr }
+        return r
+    } else if get_target_os() == 4 {
+        return 0 - 38
+    } else {
+        u64 fnr = _kr_sys_nr(13)
+        u64 cnr = _kr_sys_nr(1)
+        if fnr == 0 { return 0 - 38 }
+        // step 1: F_GETFL (3), then F_SETFL (4) with O_NONBLOCK (0x800, both arches)
+        int64 fl = syscall_raw(fnr, sock, 3, 0, 0, 0, 0)
+        if fl < 0 { return fl }
+        int64 r = syscall_raw(fnr, sock, 4, fl | 0x800, 0, 0, 0)
+        if r < 0 { return r }
+        // step 2: -EINPROGRESS (115) is in progress; -EAGAIN is accepted too
+        r = syscall_raw(cnr, sock, sa, salen, 0, 0, 0)
+        if r == 0 - 115 || r == 0 - 11 { r = _kr_sys_connect_outcome(sock, ms) }
+        // step 5: the remembered flags, on every path
+        int64 rr = syscall_raw(fnr, sock, 4, fl, 0, 0, 0)
+        if rr < 0 { return rr }
+        return r
     }
 }
 

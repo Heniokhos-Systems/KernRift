@@ -29086,6 +29086,124 @@ else
         WINEPREFIX="$T10_D/pfx" "$(dirname "$T10_WINE")/wineserver" -w > /dev/null 2>&1
     fi
 fi
+
+# --- arsh discovery: datagrams, SO_BROADCAST, the timed connect (spec S3, S4, S6) ---
+t10_row sys_udp_x86_64 x86_64 sys_udp "OK" 0
+t10_row sys_udp_arm64 arm64 sys_udp "OK" 0
+# R2-m2: 127.255.255.255 is lo's broadcast route, so this needs NO default route.
+t10_row sys_so_broadcast_x86_64 x86_64 sys_bcast $'without -13\nwith 48' 0 lo
+t10_row sys_so_broadcast_arm64 arm64 sys_bcast $'without -13\nwith 48' 0 lo
+t10_row sys_connect_timeout_restores_blocking_x86_64 x86_64 sys_cto "OK" 0 lo
+t10_row sys_connect_timeout_restores_blocking_arm64 arm64 sys_cto "OK" 0 lo
+# Review Focus 5: the step-2-success path restores too.
+t10_row sys_connect_timeout_immediate_restores_blocking_x86_64 x86_64 sys_cto "OK" 0 udp
+t10_row sys_connect_timeout_immediate_restores_blocking_arm64 arm64 sys_cto "OK" 0 udp
+for S1B_A in x86_64 arm64; do
+    TOTAL=$((TOTAL + 1))
+    S1B_ROW=sys_connect_timeout_refused_is_an_error_$S1B_A
+    if [ "$S1B_A" = "arm64" ] && [ -z "$T10_QEMU" ]; then t10_skip "$S1B_ROW" "no qemu-aarch64-static"; continue; fi
+    if ! t10_build "$S1B_A" sys_cto; then t10_bad "$S1B_ROW" "build failed: $(grep -m1 'error' "$T10_D/sys_cto-$S1B_A.log" | cut -c1-140)"; continue; fi
+    chmod +x "$T10_D/sys_cto-$S1B_A"
+    t10_run "$S1B_A" sys_cto refused; S1B_RC=$?
+    S1B_GOT=$(cat "$T10_D/out")
+    case "$S1B_GOT" in
+        "refused -"[0-9]*) if [ "$S1B_RC" = "0" ]; then t10_ok "$S1B_ROW" "$S1B_GOT"; else t10_bad "$S1B_ROW" "rc=$S1B_RC '$S1B_GOT'"; fi ;;
+        *) t10_bad "$S1B_ROW" "rc=$S1B_RC got '$S1B_GOT', want 'refused -<errno>'" ;;
+    esac
+done
+# A black hole: -110 within 1.9..2.5 s (a wait that ignores `ms` is either
+# immediate or the harness's 60 s timeout). A host with no route at all says
+# -101/-113 at once: a counted, printed SKIP, never a pass.
+for S1B_A in x86_64 arm64; do
+    TOTAL=$((TOTAL + 1))
+    S1B_ROW=sys_connect_timeout_black_hole_times_out_$S1B_A
+    if [ "$S1B_A" = "arm64" ] && [ -z "$T10_QEMU" ]; then t10_skip "$S1B_ROW" "no qemu-aarch64-static"; continue; fi
+    if ! t10_build "$S1B_A" sys_cto; then t10_bad "$S1B_ROW" "build failed: $(grep -m1 'error' "$T10_D/sys_cto-$S1B_A.log" | cut -c1-140)"; continue; fi
+    chmod +x "$T10_D/sys_cto-$S1B_A"
+    t10_run "$S1B_A" sys_cto hole; S1B_RC=$?
+    S1B_GOT=$(cat "$T10_D/out")
+    set -- $S1B_GOT
+    if [ "$S1B_RC" = "0" ] && [ "${1:-}" = "hole" ] && [ "${2:-}" = "-110" ] && [ "${3:-0}" -ge 1900 ] && [ "${3:-0}" -le 2500 ]; then t10_ok "$S1B_ROW" "$S1B_GOT"
+    elif [ "${2:-}" = "-101" ] || [ "${2:-}" = "-113" ]; then t10_skip "$S1B_ROW" "no route to 10.255.255.1 on this host ($S1B_GOT)"
+    else t10_bad "$S1B_ROW" "rc=$S1B_RC got '$S1B_GOT', want 'hole -110 <1900..2500>'"; fi
+done
+TOTAL=$((TOTAL + 1))
+S1B_W=""
+for S1B_F in sys_udp sys_bcast sys_cto; do
+    for S1B_A in x86_64 arm64; do
+        $T10_KRC --arch=$S1B_A --target=windows --emit=pe "$T10_FX/$S1B_F.kr" -o "$T10_D/s1b-w.exe" > "$T10_D/w.log" 2>&1 \
+            || S1B_W="$S1B_W $S1B_F/win-$S1B_A:$(grep -m1 error "$T10_D/w.log" | cut -c1-80)"
+        $T10_KRC --arch=$S1B_A --target=macos "$T10_FX/$S1B_F.kr" -o "$T10_D/s1b-m" > "$T10_D/w.log" 2>&1 \
+            || S1B_W="$S1B_W $S1B_F/macos-$S1B_A:$(grep -m1 error "$T10_D/w.log" | cut -c1-80)"
+    done
+    $T10_KRC "$T10_FX/$S1B_F.kr" -o "$T10_D/s1b.krbo" > "$T10_D/w.log" 2>&1 || S1B_W="$S1B_W $S1B_F/fat:$(grep -m1 error "$T10_D/w.log" | cut -c1-80)"
+done
+if [ -z "$S1B_W" ]; then t10_ok sys_datagram_fixtures_build_for_every_slice "3 fixtures x (windows x86_64, windows arm64, fat, macos x86_64, macos arm64)"; else t10_bad sys_datagram_fixtures_build_for_every_slice "$S1B_W"; fi
+# S5's decode: every Win32 name this batch calls is bound BY NAME at its call
+# sites, in the same order on both Windows CPUs.
+TOTAL=$((TOTAL + 1))
+S1B_WANT="CreateDirectoryA GetEnvironmentVariableA GetLastError MoveFileExA getsockopt ioctlsocket recvfrom sendto "
+S1B_BAD=""; S1B_ALL=""
+for S1B_F in sys_udp sys_cto sys_lasterr sys_fs sys_getenv; do
+    for S1B_A in x86_64 arm64; do
+        if ! $T10_KRC --arch=$S1B_A --target=windows --emit=pe "$T10_FX/$S1B_F.kr" -o "$T10_D/$S1B_F-d$S1B_A.exe" > "$T10_D/d.log" 2>&1; then
+            S1B_BAD="$S1B_BAD $S1B_F/$S1B_A:build"; continue
+        fi
+        pe_calls "$T10_D/$S1B_F-d$S1B_A.exe" "$S1B_A" > "$T10_D/$S1B_F-$S1B_A.calls"
+        grep -q '^badiat' "$T10_D/$S1B_F-$S1B_A.calls" && S1B_BAD="$S1B_BAD $S1B_F/$S1B_A:badiat"
+        awk '$1 == "iat" && $4 ~ /^(GetLastError|GetEnvironmentVariableA|CreateDirectoryA|MoveFileExA|sendto|recvfrom|ioctlsocket|getsockopt)$/ { print $4 }' \
+            "$T10_D/$S1B_F-$S1B_A.calls" > "$T10_D/$S1B_F-$S1B_A.names"
+    done
+    cmp -s "$T10_D/$S1B_F-x86_64.names" "$T10_D/$S1B_F-arm64.names" || S1B_BAD="$S1B_BAD $S1B_F:order"
+    S1B_ALL="$S1B_ALL $(cat "$T10_D/$S1B_F-arm64.names" 2>/dev/null | tr '\n' ' ')"
+done
+S1B_SET=$(printf '%s\n' $S1B_ALL | LC_ALL=C sort -u | tr '\n' ' ')
+[ "$S1B_SET" = "$S1B_WANT" ] || S1B_BAD="$S1B_BAD set:'$S1B_SET'"
+if [ -z "$S1B_BAD" ]; then t10_ok sys_stage1b_windows_calls_route_by_name "$(printf '%s' "$S1B_SET" | wc -w) exports, x86_64 order on arm64"; else t10_bad sys_stage1b_windows_calls_route_by_name "$S1B_BAD"; fi
+if [ -z "$T10_WINE" ]; then
+    for S1B_R in sys_udp_windows_wine sys_so_broadcast_windows_wine sys_connect_timeout_restores_blocking_windows_wine \
+                 sys_connect_timeout_immediate_restores_blocking_windows_wine sys_connect_timeout_refused_is_an_error_windows_wine \
+                 sys_connect_timeout_black_hole_times_out_windows_wine; do
+        TOTAL=$((TOTAL + 1)); wine_na "$S1B_R"
+    done
+else
+    s1b_wine sys_udp_windows_wine sys_udp "OK"
+    s1b_wine sys_connect_timeout_restores_blocking_windows_wine sys_cto "OK" lo
+    s1b_wine sys_connect_timeout_immediate_restores_blocking_windows_wine sys_cto "OK" udp
+    # 255.255.255.255 under Wine: -EACCES without the option and NOT -EACCES
+    # with it (a routeless host may say -ENETUNREACH, which must not redden).
+    TOTAL=$((TOTAL + 1))
+    if $T10_KRC --arch=x86_64 --target=windows --emit=pe "$T10_FX/sys_bcast.kr" -o "$T10_D/sys_bcast.exe" > "$T10_D/w.log" 2>&1; then
+        t10_wine "$T10_D/win.out" "$T10_D/win.err" sys_bcast.exe all; T10_RC=$?
+        S1B_GOT=$(tr -d '\r' < "$T10_D/win.out" | tr '\n' ' ')
+        set -- $S1B_GOT
+        if [ "$T10_RC" = "0" ] && [ "${1:-}" = "without" ] && [ "${2:-}" = "-13" ] && [ "${3:-}" = "with" ] && [ -n "${4:-}" ] && [ "${4:-}" != "-13" ]; then
+            t10_ok sys_so_broadcast_windows_wine "$S1B_GOT$(t10_note)"
+        else t10_bad sys_so_broadcast_windows_wine "rc=$T10_RC got '$S1B_GOT' want 'without -13 with <not -13>'; wine output tail: $(t10_errtail)"; fi
+    else t10_bad sys_so_broadcast_windows_wine "build: $(grep -m1 error "$T10_D/w.log" | cut -c1-120)"; fi
+    TOTAL=$((TOTAL + 1))
+    if $T10_KRC --arch=x86_64 --target=windows --emit=pe "$T10_FX/sys_cto.kr" -o "$T10_D/sys_cto.exe" > "$T10_D/w.log" 2>&1; then
+        t10_wine "$T10_D/win.out" "$T10_D/win.err" sys_cto.exe refused; T10_RC=$?
+        S1B_GOT=$(tr -d '\r' < "$T10_D/win.out")
+        case "$S1B_GOT" in
+            "refused -"[0-9]*) if [ "$T10_RC" = "0" ]; then t10_ok sys_connect_timeout_refused_is_an_error_windows_wine "$S1B_GOT$(t10_note)"; else t10_bad sys_connect_timeout_refused_is_an_error_windows_wine "rc=$T10_RC '$S1B_GOT'"; fi ;;
+            *) t10_bad sys_connect_timeout_refused_is_an_error_windows_wine "rc=$T10_RC got '$S1B_GOT'; wine output tail: $(t10_errtail)" ;;
+        esac
+        TOTAL=$((TOTAL + 1))
+        t10_wine "$T10_D/win.out" "$T10_D/win.err" sys_cto.exe hole; T10_RC=$?
+        S1B_GOT=$(tr -d '\r' < "$T10_D/win.out")
+        set -- $S1B_GOT
+        if [ "$T10_RC" = "0" ] && [ "${2:-}" = "-110" ] && [ "${3:-0}" -ge 1900 ] && [ "${3:-0}" -le 2500 ]; then t10_ok sys_connect_timeout_black_hole_times_out_windows_wine "$S1B_GOT"
+        elif [ "${2:-}" = "-101" ] || [ "${2:-}" = "-113" ]; then t10_skip sys_connect_timeout_black_hole_times_out_windows_wine "no route to 10.255.255.1 on this host ($S1B_GOT)"
+        else t10_bad sys_connect_timeout_black_hole_times_out_windows_wine "rc=$T10_RC got '$S1B_GOT'; wine output tail: $(t10_errtail)"; fi
+    else
+        t10_bad sys_connect_timeout_refused_is_an_error_windows_wine "build: $(grep -m1 error "$T10_D/w.log" | cut -c1-120)"
+        TOTAL=$((TOTAL + 1)); t10_bad sys_connect_timeout_black_hole_times_out_windows_wine "build failed"
+    fi
+    if [ -x "$(dirname "$T10_WINE")/wineserver" ]; then
+        WINEPREFIX="$T10_D/pfx" "$(dirname "$T10_WINE")/wineserver" -w > /dev/null 2>&1
+    fi
+fi
 unset KR_S2_V KR_S2_VV
 rm -rf "$T10_D"
 

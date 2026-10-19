@@ -507,6 +507,15 @@ length, −ENOENT if unset, −ERANGE if it does not fit; the name matches whole
 macOS and none return −ENOSYS for the four file calls (`sys_getenv` on macOS
 walks the environment the prologue hands it; none: −ENOSYS).
 
+**Datagrams and the timed connect** (`std/sys.kr`). `sys_sendto(sock, buf, len,
+sa, salen)` and `sys_recvfrom(sock, buf, len, sa, &salen)` carry the peer
+address; `sys_setsockopt(sock, 1, 6, &one, 4)` is `SO_BROADCAST` on every OS.
+On Windows a `recvfrom` after an ICMP port-unreachable says −ECONNRESET: treat
+it as "nothing yet". `sys_connect_timeout(sock, sa, salen, ms)` is 0 (connected,
+and the socket is BLOCKING again), −ETIMEDOUT, or the connect's −errno; after
+any failure the socket is dead — close it and open a new one. "Refused" and
+"timed out" can be indistinguishable on Windows (a refused connect takes ~2 s).
+
 ---
 
 ## `std/sha256.kr` — SHA-256

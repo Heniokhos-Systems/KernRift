@@ -1,0 +1,146 @@
+// std/sys.kr (arsh discovery, spec S4): sys_connect_timeout. argv[1]:
+//   hole     10.255.255.1:9 (a black hole), 2000 ms: prints
+//            "hole <result> <elapsed ms>"; the row wants -110 in 1900..2500.
+//   lo       a loopback listener; afterwards THE SOCKET MUST BE BLOCKING
+//            AGAIN (step 5): with SO_RCVTIMEO 300 ms and a silent peer, a recv
+//            WAITS ~300 ms and says -EAGAIN -- a socket left non-blocking says
+//            -EAGAIN at once. Then one byte crosses. Prints OK.
+//   refused  a loopback port nobody holds: prints "refused <r>"; r is an
+//            error, never 0 (exit 45 if it is 0).
+//   udp      a connect that completes AT ONCE (a UDP connect never waits:
+//            step 2 succeeds, step 3 is never reached) -- step 5 must run on
+//            that path too: the same 300 ms check. Prints OK.
+import "../../std/sys.kr"
+import "../../std/args.kr"
+
+static u8[16] ct_sa
+static u8[16] ct_ga
+static u8[8] ct_len
+static u8[16] ct_tv
+static u8[16] ct_buf
+
+fn ct_put(int64 v) {
+    u8[24] d
+    uint64 dp = d
+    uint64 u = v
+    if v < 0 { file_write(1, "-", 1)  u = 0 - v }
+    uint64 k = 0
+    if u == 0 { file_write(1, "0", 1) }
+    while u != 0 { store8(dp + k, 48 + u % 10)  u = u / 10  k = k + 1 }
+    while k != 0 { k = k - 1  file_write(1, dp + k, 1) }
+}
+
+fn ct_fill(uint64 b0, uint64 b1, uint64 b2, uint64 b3, uint64 port) {
+    uint64 i = 0
+    while i < 16 { store8(ct_sa + i, 0)  i = i + 1 }
+    store8(ct_sa + 0, 2)
+    store8(ct_sa + 2, (port >> 8) & 255)
+    store8(ct_sa + 3, port & 255)
+    store8(ct_sa + 4, b0)
+    store8(ct_sa + 5, b1)
+    store8(ct_sa + 6, b2)
+    store8(ct_sa + 7, b3)
+}
+
+fn ct_port(uint64 s) -> uint64 {
+    store32(ct_len, 16)
+    if sys_getsockname(s, ct_ga, ct_len) != 0 { return 0 }
+    return (load8(ct_ga + 2) << 8) | load8(ct_ga + 3)
+}
+
+// 1 when a recv on s waits out a 300 ms SO_RCVTIMEO and then says -EAGAIN.
+fn ct_blocks(uint64 s) -> uint64 {
+    store64(ct_tv, 0)
+    store64(ct_tv + 8, 300000)
+    if sys_setsockopt(s, 1, 20, ct_tv, 16) != 0 { return 0 }
+    uint64 t0 = time_ns()
+    int64 r = sys_recv(s, ct_buf, 16)
+    uint64 dt = time_ns() - t0
+    if r != 0 - 11 { return 0 }
+    if dt < 250000000 { return 0 }
+    return 1
+}
+
+fn ct_hole() -> uint32 {
+    int64 s = sys_socket(2, 1, 0)
+    if s < 0 { return 11 }
+    ct_fill(10, 255, 255, 1, 9)
+    uint64 t0 = time_ns()
+    int64 r = sys_connect_timeout(s, ct_sa, 16, 2000)
+    uint64 ms = (time_ns() - t0) / 1000000
+    file_write(1, "hole ", 5)  ct_put(r)  file_write(1, " ", 1)  ct_put(ms)  file_write(1, "\n", 1)
+    sys_sock_close(s)
+    return 0
+}
+
+fn ct_lo() -> uint32 {
+    int64 ls = sys_socket(2, 1, 0)
+    if ls < 0 { return 21 }
+    ct_fill(127, 0, 0, 1, 0)
+    if sys_bind(ls, ct_sa, 16) != 0 { return 22 }
+    if sys_listen(ls, 4) != 0 { return 23 }
+    uint64 port = ct_port(ls)
+    if port == 0 { return 24 }
+    int64 c = sys_socket(2, 1, 0)
+    if c < 0 { return 25 }
+    ct_fill(127, 0, 0, 1, port)
+    if sys_connect_timeout(c, ct_sa, 16, 2000) != 0 { return 26 }
+    int64 acc = sys_accept(ls)
+    if acc < 0 { return 27 }
+    if ct_blocks(c) == 0 { return 28 }
+    if sys_send(acc, "x", 1) != 1 { return 29 }
+    if sys_wait_readable(c, 5000) != 1 { return 30 }
+    if sys_recv(c, ct_buf, 16) != 1 { return 31 }
+    sys_sock_close(acc)
+    sys_sock_close(c)
+    sys_sock_close(ls)
+    file_write(1, "OK\n", 3)
+    return 0
+}
+
+fn ct_refused() -> uint32 {
+    int64 b = sys_socket(2, 1, 0)
+    if b < 0 { return 41 }
+    ct_fill(127, 0, 0, 1, 0)
+    if sys_bind(b, ct_sa, 16) != 0 { return 42 }
+    uint64 port = ct_port(b)
+    if port == 0 { return 43 }
+    sys_sock_close(b)
+    int64 s = sys_socket(2, 1, 0)
+    if s < 0 { return 44 }
+    ct_fill(127, 0, 0, 1, port)
+    int64 r = sys_connect_timeout(s, ct_sa, 16, 2000)
+    file_write(1, "refused ", 8)  ct_put(r)  file_write(1, "\n", 1)
+    sys_sock_close(s)
+    if r == 0 { return 45 }
+    return 0
+}
+
+fn ct_udp() -> uint32 {
+    int64 p = sys_socket(2, 2, 0)
+    if p < 0 { return 51 }
+    ct_fill(127, 0, 0, 1, 0)
+    if sys_bind(p, ct_sa, 16) != 0 { return 52 }
+    uint64 port = ct_port(p)
+    if port == 0 { return 53 }
+    int64 s = sys_socket(2, 2, 0)
+    if s < 0 { return 54 }
+    ct_fill(127, 0, 0, 1, port)
+    if sys_connect_timeout(s, ct_sa, 16, 2000) != 0 { return 55 }
+    if ct_blocks(s) == 0 { return 56 }
+    sys_sock_close(s)
+    sys_sock_close(p)
+    file_write(1, "OK\n", 3)
+    return 0
+}
+
+fn main() -> uint32 {
+    uint64 m = sys_arg(1)
+    if m == 0 { return 1 }
+    uint64 c = load8(m)
+    if c == 104 { return ct_hole() }
+    if c == 108 { return ct_lo() }
+    if c == 114 { return ct_refused() }
+    if c == 117 { return ct_udp() }
+    return 2
+}
