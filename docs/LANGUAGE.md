@@ -73,19 +73,34 @@ Ctrl-Z (0x1A). This used to be skipped one token at a time without a word
 from its `fn` by such text, and turned a C-style `static uint32 table[8]`
 into one scalar -- write `static uint32[8] table`.
 
-**An annotation must apply to something.** Each one is valid only before the
-declarations the compiler uses it on:
+**Which annotations are accepted where.** Each is accepted only before the
+declarations listed; some of those uses have no effect on the output at all:
 
 - **fn**: `@noreturn`, `@naked`, `@builtin_override`, `@module_init`,
   `@module_exit`, `@lkm_ioctl_handler`, `@lkm_mmap_handler`,
-  `@pci_probe_handler`, `@pci_remove_handler`, `@section(...)`, `@ctx(...)`,
-  `@eff(...)`, `@caps(...)`, `@acquires(...)`, `@releases(...)`;
-- **fn, static or const**: `@export`;
-- **struct**: `@packed`;
+  `@pci_probe_handler`, `@pci_remove_handler` and `@section(...)` change the
+  generated code or object. `@ctx(...)`, `@eff(...)`, `@caps(...)` and
+  `@acquires(...)` change nothing in the output; `krc check` reads them
+  (EFFECT_SYSTEM.md). `@releases(...)` is accepted and has no effect at all:
+  the parser records nothing for it.
+- **fn, static or const**: `@export`. On a fn it marks the symbol exported;
+  on a static or a const it is accepted and changes nothing (statics in the
+  compiler's own sources, and in other shipped code, carry it).
+- **struct**: `@packed`, accepted and changes nothing, because every struct
+  is already packed: fields are laid out in declaration order with no
+  padding, each at the sum of the sizes before it (`struct_add_field`,
+  src/codegen.kr). A field takes 1 byte for `u8`/`i8`/`bool`/`char`, 2 for
+  `u16`/`i16`, 4 for `u32`/`i32`, 8 for `u64`/`i64` and for `f16`/`f32`/`f64`
+  (an 8-byte slot), the size of the struct for a nested struct, and the
+  target's word size for anything else.
 - **module-wide** (they take effect where they stand, so they may precede
   anything, or end the file): `@module_license`, `@module_author`,
   `@module_description`, `@module_name`, `@module_register_misc_device`,
-  `@module_register_pci_driver`.
+  `@module_register_pci_driver`; they change only an `--emit=lkm` module.
+
+The no-effect uses are pinned byte-identical by the suite
+(`annotation_noops_are_byte_identical`), so a change in their meaning is
+noticed.
 
 Anything else is an error rather than an annotation silently dropped: one
 before a declaration it does not apply to (`annotation '@naked' applies only

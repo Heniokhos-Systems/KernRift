@@ -2937,6 +2937,45 @@ if $KRC --arch=$RUN_ARCH "$TLJ_SRC" -o "$TLJ_BIN" >/dev/null 2>&1; then
 else
     FAIL=$((FAIL + 1)); echo "FAIL: annotation_valid_forms_accepted (did not compile: @packed struct, @export static/const, @noreturn, @naked, @section and @ctx fns, a module-wide @module_license at end of file must be accepted)"
 fi
+# The annotations that are accepted and change nothing in the output --
+# @export on a static or const, @packed, @releases, and @ctx/@eff/@caps/
+# @acquires (which `krc check` reads, but the code generator does not) --
+# pinned byte-identical with and without, in an executable (IR and --legacy,
+# x86_64 and arm64) and an --emit=obj object. LANGUAGE.md §1 says they change
+# nothing in the output; if one starts to, this row goes red and the doc has
+# to change with it.
+TOTAL=$((TOTAL + 1))
+ANP_D=$(mktemp -d "${TMPDIR:-/tmp}/anp.XXXXXX")
+printf 'struct H { u8 a  u32 b }\nstatic uint64 g = 1\nconst uint64 C = 2\nfn f(uint64 x) -> uint64 { return x + 1 }\nfn main() { H h  h.b = 3  exit(f(g) + C + h.b) }\n' > "$ANP_D/base.kr"
+ANP_WHY=""
+anp_case() { # <label> <sed expression>
+    sed -e "$2" "$ANP_D/base.kr" > "$ANP_D/ann.kr"
+    cmp -s "$ANP_D/base.kr" "$ANP_D/ann.kr" && { ANP_WHY="$ANP_WHY [$1: the probe did not change]"; return; }
+    local m
+    for m in "--arch=x86_64" "--arch=x86_64 --legacy" "--arch=arm64" "--arch=x86_64 --emit=obj"; do
+        rm -f "$ANP_D/b.out" "$ANP_D/a.out"
+        $KRC $m "$ANP_D/base.kr" -o "$ANP_D/b.out" > /dev/null 2>&1
+        if ! $KRC $m "$ANP_D/ann.kr" -o "$ANP_D/a.out" > /dev/null 2>&1; then
+            ANP_WHY="$ANP_WHY [$1 $m: refused]"
+        elif [ ! -s "$ANP_D/b.out" ] || ! cmp -s "$ANP_D/a.out" "$ANP_D/b.out"; then
+            ANP_WHY="$ANP_WHY [$1 $m: output differs]"
+        fi
+    done
+}
+anp_case '@export static' 's/^static uint64 g/@export static uint64 g/'
+anp_case '@export const' 's/^const uint64 C/@export const uint64 C/'
+anp_case '@packed struct' 's/^struct H/@packed struct H/'
+anp_case '@releases fn' 's/^fn f(/@releases(L) fn f(/'
+anp_case '@acquires fn' 's/^fn f(/@acquires(L) fn f(/'
+anp_case '@ctx fn' 's/^fn f(/@ctx(task) fn f(/'
+anp_case '@eff fn' 's/^fn f(/@eff(io) fn f(/'
+anp_case '@caps fn' 's/^fn f(/@caps(X) fn f(/'
+if [ -z "$ANP_WHY" ]; then
+    PASS=$((PASS + 1)); echo "  annotation_noops_are_byte_identical: PASS (8 annotations x 4 builds)"
+else
+    FAIL=$((FAIL + 1)); echo "FAIL: annotation_noops_are_byte_identical$ANP_WHY"
+fi
+rm -rf "$ANP_D"
 # A run of stray words is ONE error, not one per word: recovery resumes at the
 # next token that can start a declaration.
 printf 'fn a() {}\nfoo bar baz\nfn main() { exit(3) }\n' > "$TLJ_SRC"
