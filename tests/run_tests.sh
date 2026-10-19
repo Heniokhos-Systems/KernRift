@@ -22010,8 +22010,10 @@ if $KRC --arch=x86_64 --legacy "$CP_SRC" -o "$CP_BIN" >/dev/null 2>&1 && [ -s "$
     # SKIP (never PASS) where it cannot -- a positive control that never
     # executes cannot show the arguments arrive.
     if [ "$ARCH" = "x86_64" ]; then
-        chmod +x "$CP_BIN"; timeout -k 5 "$RUN_TEST_TIMEOUT" "$CP_BIN"; CPL_RUN=$?
-        if [ "$CPL_RUN" = "98" ]; then
+        chmod +x "$CP_BIN"; RT_T0=$SECONDS; timeout -k 5 "$RUN_TEST_TIMEOUT" "$CP_BIN"; CPL_RUN=$?
+        if rb_timed_out "$CPL_RUN" "$RT_T0"; then
+            echo "FAIL: call_ptr_args_7_accepted_legacy_x86 (TIMEOUT: still running after ${RUN_TEST_TIMEOUT}s)"; FAIL=$((FAIL + 1))
+        elif [ "$CPL_RUN" = "98" ]; then
             PASS=$((PASS + 1)); echo "  call_ptr_args_7_accepted_legacy_x86: PASS (runs, returns 98)"
         else
             echo "FAIL: call_ptr_args_7_accepted_legacy_x86 (returned $CPL_RUN, want 98)"; FAIL=$((FAIL + 1))
@@ -22319,8 +22321,10 @@ if $KRC --arch=x86_64 --legacy "$CP6_SRC" -o "$CP_BIN" >/dev/null 2>&1 && [ -s "
     # SKIP (never PASS) where it cannot -- a positive control that never
     # executes cannot show the arguments arrive.
     if [ "$ARCH" = "x86_64" ]; then
-        chmod +x "$CP_BIN"; timeout -k 5 "$RUN_TEST_TIMEOUT" "$CP_BIN"; CPL_RUN=$?
-        if [ "$CPL_RUN" = "21" ]; then
+        chmod +x "$CP_BIN"; RT_T0=$SECONDS; timeout -k 5 "$RUN_TEST_TIMEOUT" "$CP_BIN"; CPL_RUN=$?
+        if rb_timed_out "$CPL_RUN" "$RT_T0"; then
+            echo "FAIL: call_ptr_args_6_accepted_legacy_x86 (TIMEOUT: still running after ${RUN_TEST_TIMEOUT}s)"; FAIL=$((FAIL + 1))
+        elif [ "$CPL_RUN" = "21" ]; then
             PASS=$((PASS + 1)); echo "  call_ptr_args_6_accepted_legacy_x86: PASS (runs, returns 21)"
         else
             echo "FAIL: call_ptr_args_6_accepted_legacy_x86 (returned $CPL_RUN, want 21)"; FAIL=$((FAIL + 1))
