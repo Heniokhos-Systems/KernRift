@@ -2922,7 +2922,7 @@ tlj_check annotation_at_end_of_file_refused "tlj_$$.kr:2:2: error: annotation '@
 printf 'fn main() { exit(0) }\n@section(".x"\n' > "$TLJ_SRC"
 tlj_check annotation_unclosed_arguments_refused "tlj_$$.kr:2:2: error: unclosed '(' in the arguments of annotation '@section'"
 # Control: every form the shipped sources use still compiles and runs.
-printf '@packed struct H { u8 a }\n@export static uint64 g = 1\n@export const uint64 C = 2\n@noreturn\nfn f() { exit(9) }\nfn main() { exit(g + C) }\n@module_license("GPL")\n' > "$TLJ_SRC"
+printf '@packed struct H { u8 a }\n@export static uint64 g = 1\n@export const uint64 C = 2\n@noreturn\nfn f() { exit(9) }\n@naked\nfn nk() {\n    asm { "ret" }\n}\n@section(".text.k")\nfn sk() -> uint64 { return 0 }\n@ctx(task)\nfn ck() -> uint64 { return 0 }\nfn main() { exit(g + C + sk() + ck()) }\n@module_license("GPL")\n' > "$TLJ_SRC"
 TOTAL=$((TOTAL + 1))
 rm -f "$TLJ_BIN"
 if $KRC --arch=$RUN_ARCH "$TLJ_SRC" -o "$TLJ_BIN" >/dev/null 2>&1; then
@@ -2930,12 +2930,12 @@ if $KRC --arch=$RUN_ARCH "$TLJ_SRC" -o "$TLJ_BIN" >/dev/null 2>&1; then
     if rb_timed_out "$tlj_rc" "$RT_T0"; then
         FAIL=$((FAIL + 1)); echo "FAIL: annotation_valid_forms_accepted (TIMEOUT: still running after ${RUN_TEST_TIMEOUT}s)"
     elif [ "$tlj_rc" = "3" ]; then
-        PASS=$((PASS + 1)); echo "  annotation_valid_forms_accepted: PASS (@packed struct, @export static/const, @noreturn fn, a module-wide @module_license at end of file; exits 3)"
+        PASS=$((PASS + 1)); echo "  annotation_valid_forms_accepted: PASS (@packed struct, @export static/const, @noreturn, @naked, @section and @ctx fns, a module-wide @module_license at end of file; exits 3)"
     else
         FAIL=$((FAIL + 1)); echo "FAIL: annotation_valid_forms_accepted (ran, exit $tlj_rc, want 3)"
     fi
 else
-    FAIL=$((FAIL + 1)); echo "FAIL: annotation_valid_forms_accepted (did not compile: @packed struct, @export static/const, @noreturn fn, a module-wide @module_license at end of file must be accepted)"
+    FAIL=$((FAIL + 1)); echo "FAIL: annotation_valid_forms_accepted (did not compile: @packed struct, @export static/const, @noreturn, @naked, @section and @ctx fns, a module-wide @module_license at end of file must be accepted)"
 fi
 # A run of stray words is ONE error, not one per word: recovery resumes at the
 # next token that can start a declaration.
