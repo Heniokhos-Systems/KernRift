@@ -14,9 +14,9 @@ the output over the old block, never edit the block by hand.
 import sys
 
 TREES = {
-    #        ext    stdlib dir   compiler binaries (build/<a>, else build/<b>)  name        compiler under test
-    'kr':  ('kr',  'kernrift',  'krc2', 'krc3', 'KernRift', 'KRC'),
-    'mlr': ('mlr', 'mlrift',    'mlrc', 'mlrc3', 'MLRift',  'MLRC_RAW'),
+    #        ext    stdlib dir   compiler binaries (build/<a>, else build/<b>)  name
+    'kr':  ('kr',  'kernrift',  'krc2', 'krc3', 'KernRift'),
+    'mlr': ('mlr', 'mlrift',    'mlrc', 'mlrc3', 'MLRift'),
 }
 
 B = r'''# --- lexer / import-scanner parity (ANCHOR LEXIMP) ----------------------------
@@ -38,14 +38,23 @@ rm -rf "$LIP_D"; mkdir -p "$LIP_D"
 # on the command line, and `make test` runs the suite through a wrapper that
 # execs the RELATIVE ./build/@BIN@ -- so a row that cd'd and called @CC@ ran
 # nothing (exit 127) and all 32 round-1 rows failed under the real `make test`.
-# The compiler under test comes first: $@RAW@ when it names a bare compiler
-# binary (an ELF file, not a wrapper script that injects flags), so a suite run
-# against a candidate compiler checks THAT compiler here too. Otherwise the
-# convention of the suite's other cd-ing rows: the tree's own build/@BIN@, else
-# build/@BIN3@.
-if [ -n "${@RAW@:-}" ] && [ -f "$@RAW@" ] && [ -x "$@RAW@" ] \
-   && [ "$(head -c 4 "$@RAW@" 2>/dev/null | od -An -tx1 | tr -d ' \n')" = "7f454c46" ]; then
-    LIP_CC="$(cd "$(dirname "$@RAW@")" && pwd)/$(basename "$@RAW@")"
+# The compiler under test comes first, so a suite run against a candidate
+# compiler checks THAT compiler here too. Otherwise the convention of the
+# suite's other cd-ing rows: the tree's own build/@BIN@, else build/@BIN3@.
+#@mlr{
+# $MLRC_RAW is, by the suite's contract, the compiler under test with no flags
+# injected (a binary, or a script that execs one, e.g. under a ulimit).
+if [ -n "${MLRC_RAW:-}" ] && [ -f "$MLRC_RAW" ] && [ -x "$MLRC_RAW" ]; then
+    LIP_CC="$(cd "$(dirname "$MLRC_RAW")" && pwd)/$(basename "$MLRC_RAW")"
+#@}
+#@kr{
+# $KRC may be a wrapper that injects --arch (make test's is), which these rows
+# must not get on top of their own flags, so it is used only when it is a bare
+# compiler binary (an ELF file).
+if [ -n "${KRC:-}" ] && [ -f "$KRC" ] && [ -x "$KRC" ] \
+   && [ "$(head -c 4 "$KRC" 2>/dev/null | od -An -tx1 | tr -d ' \n')" = "7f454c46" ]; then
+    LIP_CC="$(cd "$(dirname "$KRC")" && pwd)/$(basename "$KRC")"
+#@}
 elif [ -x "$DIR/../build/@BIN@" ]; then
     LIP_CC="$(cd "$DIR/../build" && pwd)/@BIN@"
 else
@@ -474,7 +483,7 @@ def main():
     if len(sys.argv) != 2 or sys.argv[1] not in TREES:
         sys.exit('usage: gen_leximp_block.py kr|mlr')
     tree = sys.argv[1]
-    ext, share, binary, binary3, _name, raw = TREES[tree]
+    ext, share, binary, binary3, _name = TREES[tree]
     out = []
     keep = True
     for line in B.split('\n'):
@@ -489,7 +498,7 @@ def main():
     text = '\n'.join(out)
     cc0 = 'krc' if tree == 'kr' else 'mlrc'
     flags = '$KRC_FLAGS' if tree == 'kr' else '$MLRC_FLAGS'
-    for k, v in (('@RAW@', raw), ('@BIN3@', binary3), ('@BIN@', binary), ('@CC0@', cc0), ('@CC@', '$' + cc0.upper()),
+    for k, v in (('@BIN3@', binary3), ('@BIN@', binary), ('@CC0@', cc0), ('@CC@', '$' + cc0.upper()),
                  ('@FL@', flags), ('@E@', ext), ('@SHARE@', share), ('@TREE@', tree)):
         text = text.replace(k, v)
     sys.stdout.write(text)
