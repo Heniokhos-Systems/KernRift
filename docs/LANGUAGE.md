@@ -2715,18 +2715,26 @@ other run shares, so any number of `kr` runs can happen at once:
   `execveat`, or qemu-user), the macOS route below.
 - macOS: the same exclusive file under `$TMPDIR`, run as a child; `kr`
   waits, removes the file, and exits with the program's status (or dies of
-  its signal).
-- Windows: `.\kr-run-<n>.exe`, the first of 64 names not held by a running
-  program. It is not removed afterwards: the runner has no way to delete a
-  file there, and `exec_process` ends the runner with the child's exit
-  code; the next runs reuse the names.
+  its signal). `SIGCHLD` is set to its default in `kr` while it waits (the
+  program gets the disposition it inherited back), so an ignored `SIGCHLD`
+  cannot turn the program's status into 0; a fork or wait that fails is an
+  error (exit 1), never a status.
+- Windows: `.\kr-run-<n>.exe` for the first of 64 slots whose lock,
+  `.\kr-run-<n>.lock`, `kr` can open for writing. `kr` holds the lock until
+  it exits -- after the program does -- so no other run can rewrite the
+  `.exe` before the program has started. Neither file is removed
+  afterwards: the runner has no way to delete a file there, and
+  `exec_process` ends the runner with the child's exit code; the next runs
+  reuse the slots.
 - Termux, where SELinux refuses the runner's own exec: the `kr` shell
   wrapper (`packaging/kr.sh`) makes a per-run file with `mktemp` and names
   it in `KR_EXEC_FALLBACK`; the runner writes the slice there and exits
   120, and the wrapper runs the file and removes it.
 
 `KR_RUNNER_EXEC=file` or `=fork` forces the file or the child route on
-Linux (the suite uses it to test them).
+Linux, and `KR_RUNNER_TRACE=1` makes `kr` name each route on stderr as it
+tries it (the last one named is the one that ran); the suite uses both to
+test the routes.
 
 ---
 
