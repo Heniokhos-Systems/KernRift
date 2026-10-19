@@ -160,15 +160,15 @@ krc check module.kr
 krc lc program.kr
 ```
 
-### Self-compilation (350 849 tokens, 220 516 AST nodes, 3 416 912 bytes of source)
+### Self-compilation (357 261 tokens, 225 187 AST nodes, 3 529 851 bytes of source)
 
 The compiler emits binaries for all 8 targets. CI verifies the **bootstrap fixed point (krc3 == krc4) and the full suite natively on Linux x86_64 and Linux ARM64** (**2348 tests**, all passing on this tree). Windows and macOS are exercised on real `windows-latest`, `windows-11-arm` and `macos-14` runners. The **Android** jobs are the weak link: they run PIE ELFs under the **glibc** loader on Linux, never bionic and never a device. See the per-target table for what each one actually ran. Numbers below were re-measured on an AMD Ryzen 9 7900X with the compiler built from this commit — see [`benchmarks/BENCHMARKS.md`](benchmarks/BENCHMARKS.md) for the gcc / rustc comparisons — note that file is a **v2.8.33 run from 2026-07-28** and has not been re-run for v2.10.0 either.
 
 | Target | Legacy codegen | IR codegen (default) | IR vs legacy |
 |--------|---------------:|---------------------:|-------------:|
-| linux   x86_64 ELF    |  ~316 ms / 1.94 MB | ~498 ms / 1.22 MB | **−37 %** size |
-| linux   arm64  ELF    |  ~301 ms / 1.70 MB | ~500 ms / 1.03 MB | **−40 %** size |
-| **Fat binary (all 8)**| — | **~3.56 s / 4.46 MB** | (IR all 8 slices) |
+| linux   x86_64 ELF    |  ~316 ms / 2.03 MiB | ~498 ms / 1.30 MiB | **−36 %** size |
+| linux   arm64  ELF    |  ~301 ms / 1.79 MiB | ~500 ms / 1.10 MiB | **−39 %** size |
+| **Fat binary (all 8)**| — | **~3.56 s / 4.60 MiB** | (IR all 8 slices) |
 
 The IR path now produces smaller binaries than legacy on both architectures. Two things landed since v2.8.8 to flip the size story: a partial used-callee-save prologue + cross-register spill-reload peephole (v2.8.21 RA work), and v2.8.24's Briggs/George copy coalescer. The function inliner (v2.8.24) also folds pure single-expression callees so DCE can drop the originals.
 
@@ -426,7 +426,7 @@ See the [`examples/`](examples/) directory for runnable programs covering every 
 
 ## Architecture
 
-79 568 lines of KernRift across the 27 source files the compiler is built from, plus 52 stdlib modules (11 460 lines). Self-compiles to a 1.22 MB x86_64 native binary in ~0.50 s (IR, default), a 1.03 MB ARM64 binary, or an 8-slice fat binary (BCJ + LZ-Rift compression) in ~3.56 s on an AMD Ryzen 9 7900X. **2348 tests** pass on this tree. Bootstrap fixed point is verified **natively on Linux x86_64, Linux ARM64, and a physical Android ARM64 handset**; Windows and macOS run their own chains on real runners. Android x86_64 is the one target executed only under a glibc loader on Linux. See [`benchmarks/BENCHMARKS.md`](benchmarks/BENCHMARKS.md) for micro-benchmarks vs gcc / rustc and peak-memory numbers (a v2.8.33 run, not re-measured for v2.10.0 either).
+79 568 lines of KernRift across the 27 source files the compiler is built from, plus 52 stdlib modules (11 460 lines). Self-compiles to a 1.30 MiB x86_64 native binary in ~0.50 s (IR, default), a 1.10 MiB ARM64 binary, or an 8-slice fat binary (BCJ + LZ-Rift compression) in ~3.56 s on an AMD Ryzen 9 7900X. **2348 tests** pass on this tree. Bootstrap fixed point is verified **natively on Linux x86_64, Linux ARM64, and a physical Android ARM64 handset**; Windows and macOS run their own chains on real runners. Android x86_64 is the one target executed only under a glibc loader on Linux. See [`benchmarks/BENCHMARKS.md`](benchmarks/BENCHMARKS.md) for micro-benchmarks vs gcc / rustc and peak-memory numbers (a v2.8.33 run, not re-measured for v2.10.0 either).
 
 | File | Purpose |
 |------|---------|
