@@ -15,6 +15,19 @@ child and removes it; Windows uses the first of 64 names no running program
 holds; the Termux wrapper hands the runner a per-run `mktemp` file and
 removes it. See LANGUAGE.md §20.
 
+**Fixed: the runner's child route, Windows route and allocations.** With
+`SIGCHLD` ignored by whoever started `kr`, the child route (macOS, and Linux
+without `execveat`) exited 0 whatever the program returned: the kernel reaped
+the program and the failed wait read as success. `kr` now sets `SIGCHLD` to
+its default while it waits, and a fork or wait that fails is an error (exit 1)
+-- including a failed fork on macOS, which returns its errno where the pid
+should be. On Windows a second run could rewrite `.\kr-run-<n>.exe` between
+the first run writing it and its program starting; each slot is now claimed
+by a lock file held until the run ends, and a short write is an error. Every
+allocation in the runner is checked ("kr: out of memory"). The Termux
+wrapper's per-run file now goes under `$TMPDIR`, else `/tmp`, never the
+current directory.
+
 **Fixed: a variable's declared type was ignored when its initializer was a float
 (check C11).** Both directions were silently wrong:
 
