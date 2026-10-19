@@ -18716,7 +18716,7 @@ done
 # file_read; nr 8 is file_size twice), so a regression to the coarse "syscall"
 # label -- or a cross-wired name, which is worse -- must fail here.
 # println_str and time_ns are deliberately absent. The legacy backend shares
-# ONE lowering for print_str/println_str (src/codegen.kr:7735) and names it
+# ONE lowering for print_str/println_str (src/codegen.kr:7763) and names it
 # "print_str" for both, and its time_ns() body reaches the emitter through the
 # surrounding exit() first -- so asserting either name here would be asserting
 # something untrue. Both builtins ARE covered, on both arches, by the
@@ -26248,6 +26248,41 @@ else
     fi
     rm -rf "$RWS_D"
 fi
+
+# --- An integer literal that does not fit 64 bits is refused, in every base --
+# parse_int_token accumulated without a carry check, so 0b followed by 65
+# ones, 0x1_0000_0000_0000_0000 and 18446744073709551616 compiled to
+# plausible wrong numbers (wrapped mod 2^64) with no diagnostic. Each must now
+# stop the compile with a located error; the largest values that do fit (64
+# ones, 0xFFFFFFFFFFFFFFFF, 18446744073709551615) and leading zeros, which add
+# no value, must still compile -- on the IR backend and under --legacy.
+TOTAL=$((TOTAL + 1))
+ILT_D=$(mktemp -d "${TMPDIR:-/tmp}/krc_ilt.XXXXXX")
+ILT_WHY=""
+ILT_ONES64=1111111111111111111111111111111111111111111111111111111111111111
+for ILT_C in "0b1$ILT_ONES64:no" "0b$ILT_ONES64:yes" "0b0$ILT_ONES64:yes" \
+             "0x1FFFFFFFFFFFFFFFF:no" "0x10000000000000000:no" "0x1_0000_0000_0000_0000:no" \
+             "0xFFFFFFFFFFFFFFFF:yes" "0x0000000000000000001:yes" \
+             "18446744073709551616:no" "99999999999999999999:no" \
+             "18446744073709551615:yes" "0018446744073709551615:yes" "1_000:yes"; do
+    ILT_L=${ILT_C%:*}; ILT_OK=${ILT_C##*:}
+    printf 'fn main() {\n    uint64 x = %s\n    exit(x & 63)\n}\n' "$ILT_L" > "$ILT_D/l.kr"
+    for ILT_F in "" "--legacy"; do
+        $KRC $ILT_F "$ILT_D/l.kr" -o "$ILT_D/l.bin" > "$ILT_D/l.out" 2>&1; ILT_RC=$?
+        if [ "$ILT_OK" = "yes" ]; then
+            [ "$ILT_RC" = "0" ] || ILT_WHY="$ILT_WHY [$ILT_L $ILT_F: refused, must compile]"
+        else
+            { [ "$ILT_RC" != "0" ] && grep -q "l.kr:2:16: error: integer literal does not fit in 64 bits" "$ILT_D/l.out"; } \
+                || ILT_WHY="$ILT_WHY [$ILT_L $ILT_F: rc $ILT_RC, want the located 'does not fit in 64 bits' error]"
+        fi
+    done
+done
+if [ -z "$ILT_WHY" ]; then
+    PASS=$((PASS + 1)); echo "  int_literal_overflow_is_refused: PASS (65-bit 0b, 0x and decimal refused with a location; 2^64-1 in every base, leading zeros and separators accepted; IR and --legacy)"
+else
+    FAIL=$((FAIL + 1)); echo "FAIL: int_literal_overflow_is_refused$ILT_WHY"
+fi
+rm -rf "$ILT_D"
 
 # --- Documentation pin 5, PART B (see Part A above) --------------------------
 # README.md advertises this suite's test count. Compare it against the total

@@ -862,7 +862,7 @@ fn rv_emit_pcrel_pair(uint64 rd, uint64 table_sel, uint64 payload) {
 // ---------------------------------------------------------------------------
 // Inline assembly (IR_ASM_BLOCK, op 96)
 //
-// asm_emit_rv is the riscv twin of asm_emit_a64 (codegen.kr:12004). Like it,
+// asm_emit_rv is the riscv twin of asm_emit_a64 (codegen.kr:12032). Like it,
 // this is NOT a general assembler — it is a raw-hex-word passthrough plus a
 // small fixed intrinsic/CSR table. Accepted forms:
 //   1. "0xXXXXXXXX"       -> one 32-bit word, emitted verbatim (escape hatch).
@@ -1012,7 +1012,7 @@ fn asm_emit_rv(uint64 str_tok) {
     if slen == 0 { return }
 
     // ----- Raw hex word: "0xXXXXXXXX" -> one 32-bit word (LE). Primary
-    //       escape hatch; identical scan to asm_emit_a64 (codegen.kr:12011). -----
+    //       escape hatch; identical scan to asm_emit_a64 (codegen.kr:12039). -----
     uint64 fc = 0
     unsafe { *(sptr as uint8) -> fc }
     if fc == 48 && slen >= 4 {
@@ -2930,7 +2930,7 @@ fn resolve_static_fixups_riscv(uint64 data_start) {
 // bytes against an arbitrary string-literal payload. Strip the quotes and
 // byte-compare against fn_table instead — ported from
 // resolve_fnaddr_fixups_a64 (codegen_aarch64.kr:6730-6832), identical to
-// the x86 resolver (codegen.kr:14662-14729).
+// the x86 resolver (codegen.kr:14690-14757).
 fn resolve_fnaddr_fixups_riscv() {
     uint64 i = 0
     while i < fnaddr_fixup_count {
@@ -2996,7 +2996,7 @@ fn resolve_fnaddr_fixups_riscv() {
             patch_u32(wpo + 4, (lo << 20) | (rd << 15) | (rd << 7) | 0x13)
         } else {
             // Undefined function — mirror the x86/arm64 fn_addr resolvers
-            // (codegen.kr:14721-14725, codegen_aarch64.kr:6824-6829): without
+            // (codegen.kr:14749-14753, codegen_aarch64.kr:6824-6829): without
             // this the placeholder pair would silently resolve to disp=0
             // (pointing at its own auipc) instead of failing to compile.
             write(2, "error: fn_addr: undefined function '", 36)

@@ -4017,7 +4017,7 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
                     // codegen so no local stub/symbol is emitted; the call
                     // site records an R_RISCV_CALL_PLT relocation instead
                     // (mirror of gen_function/gen_function_a64's extern
-                    // early-return, codegen.kr:13669 / codegen_aarch64.kr:6144).
+                    // early-return, codegen.kr:13697 / codegen_aarch64.kr:6144).
                     uint32 rv_ann_flags = ast_data4(wchild)
                     uint64 rv_is_extern = rv_ann_flags & 8
                     // Raw mode already emitted the entry function at

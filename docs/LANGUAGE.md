@@ -127,6 +127,11 @@ char bad = 97              // compile error — int literal not assignable
   literal (`0b1012`). There are **no octal (`0o`) literals** and no `\u{...}`
   escape: `0o17` is `0` followed by the identifier `o17`, and `'\u{41}'` is
   silently `'u'` (117), not `'A'`.
+- An integer literal must **fit in 64 bits**: anything above
+  18446744073709551615 (`0xFFFFFFFFFFFFFFFF`, 64 binary ones) -- a 65th
+  binary digit, a 17th significant hex digit, a decimal value of 2^64 or more
+  -- is a compile error at the literal ("integer literal does not fit in 64
+  bits"), never a wrapped value. Leading zeros add no value and are fine.
 - Float: `1.5`, `-3.14`, `2e10`, `1.5f` (f32 suffix)
 - Bool: `true`, `false` (strict `bool` type)
 - String: `"hello"` with `\n`, `\t`, `\\`, `\"`, `\0` escapes

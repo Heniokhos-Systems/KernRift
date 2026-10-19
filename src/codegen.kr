@@ -1429,13 +1429,21 @@ fn parse_int_token(uint64 tok_idx) -> uint64 {
     // through would multiply by the base and add nothing: 0b1_0 would read as
     // 0b100. The skip has to happen without touching `result`, which is why it
     // is a branch around the whole body rather than a zero contribution.
+    // A literal whose value does not fit 64 bits is refused, in every base.
+    // The loops used to wrap silently, so 0b followed by 65 ones,
+    // 0x1_0000_0000_0000_0000 and 18446744073709551616 compiled to plausible
+    // wrong numbers with no diagnostic. `over` is set before the digit that
+    // would carry out of bit 63 is added: result > (2^64 - 1 - d) / base.
+    uint64 over = 0
     if len > 2 && tok_source_byte(tok_idx, 0) == 48 && (b1 == 98 || b1 == 66) {
         i = 2
         while i < len {
             uint64 cb = tok_source_byte(tok_idx, i)
             if cb != 95 {
-                result = result * 2
-                if cb == 49 { result = result + 1 }
+                uint64 bd = 0
+                if cb == 49 { bd = 1 }
+                if result > (0xFFFFFFFFFFFFFFFF - bd) / 2 { over = 1 }
+                result = result * 2 + bd
             }
             i = i + 1
         }
@@ -1444,21 +1452,41 @@ fn parse_int_token(uint64 tok_idx) -> uint64 {
         while i < len {
             uint64 ch = tok_source_byte(tok_idx, i)
             if ch != 95 {
-                result = result * 16
-                if ch >= 48 && ch <= 57 { result = result + ch - 48 }
-                if ch >= 97 && ch <= 102 { result = result + ch - 87 }
-                if ch >= 65 && ch <= 70 { result = result + ch - 55 }
+                uint64 hd = 0
+                if ch >= 48 && ch <= 57 { hd = ch - 48 }
+                if ch >= 97 && ch <= 102 { hd = ch - 87 }
+                if ch >= 65 && ch <= 70 { hd = ch - 55 }
+                if result > (0xFFFFFFFFFFFFFFFF - hd) / 16 { over = 1 }
+                result = result * 16 + hd
             }
             i = i + 1
         }
     } else {
+        // Only a token made of decimal digits (and '_') is checked: callers
+        // also hand this function tokens that are not literals at all.
+        uint64 all_dec = 1
         while i < len {
             uint64 ch = tok_source_byte(tok_idx, i)
-            if ch != 95 { result = result * 10 + ch - 48 }
+            if ch != 95 {
+                if ch < 48 || ch > 57 { all_dec = 0 }
+                if result > (0xFFFFFFFFFFFFFFFF - (ch - 48)) / 10 { over = 1 }
+                result = result * 10 + ch - 48
+            }
             i = i + 1
         }
+        if all_dec == 0 { over = 0 }
     }
+    if over != 0 { int_literal_too_big(tok_idx) }
     return result
+}
+
+// An integer literal that does not fit 64 bits: located error, exit 1.
+fn int_literal_too_big(uint64 tok_idx) {
+    diag_loc_head(tok_idx, 0)
+    uint64 m = "integer literal does not fit in 64 bits (the largest is 18446744073709551615, 0xFFFFFFFFFFFFFFFF)\n"
+    write(2, m, str_len(m))
+    diag_span_of(tok_idx)
+    exit(1)
 }
 
 // Compare two token texts for equality

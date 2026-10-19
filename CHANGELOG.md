@@ -4,6 +4,13 @@ All notable changes to `kernriftc` are documented in this file.
 
 ## Unreleased
 
+**Fixed: an integer literal that does not fit 64 bits is an error.** The
+literal parser accumulated without a carry check, so `0b` followed by 65
+ones, `0x1_0000_0000_0000_0000` or `18446744073709551616` compiled to a
+wrapped, plausible, wrong value. Every base now stops the compile with a
+located "integer literal does not fit in 64 bits". The largest value that
+fits, written in any base, still compiles.
+
 **Fixed: two `kr` runs at once no longer collide.** The runner wrote every
 extracted program to one fixed path (`/tmp/.kr-exec`, `.\kr-run.exe`,
 `/data/local/tmp/kr-exec`), so a second run failed with "kr: failed to
