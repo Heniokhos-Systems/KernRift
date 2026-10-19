@@ -231,6 +231,373 @@ fn win_init_args_r() {
     cli_argv = argv_buf
 }
 
+// ---------------------------------------------------------------------------
+// Executing the extracted image: once per run, never through a shared name.
+//
+// The runner used to write every image to ONE fixed path -- /tmp/.kr-exec
+// (Linux, macOS), .\kr-run.exe (Windows), /data/local/tmp/kr-exec (Android)
+// -- so two runs at once overwrote each other: the second one's open for
+// writing failed with ETXTBSY while the first one's program ran ("kr: failed
+// to create temp file"), or replaced the bytes the first was about to exec.
+// Now, per host:
+//   Linux, Android: the image goes into an anonymous memfd and is executed
+//     with execveat(AT_EMPTY_PATH) -- no file at all. If memfd_create is not
+//     there, a file is created EXCLUSIVELY (O_EXCL) under $TMPDIR (else /tmp,
+//     /data/local/tmp on Android) as .kr-exec.<pid>.<n>, reopened read-only,
+//     UNLINKED, and executed through that descriptor: nothing is left behind
+//     even if the program is killed. Where no descriptor exec works (Linux
+//     < 3.19, or qemu-user, which does not emulate execveat) the macOS route
+//     below runs.
+//   macOS: the same exclusive file under $TMPDIR, run as a CHILD (fork,
+//     execve); the runner waits for it, removes the file, and exits with the
+//     child's status -- or dies of the child's signal. HUP, INT, QUIT and TERM
+//     are blocked in the runner while it waits (they stay pending and act
+//     after the file is gone); the child runs with the mask it inherited.
+//   Windows: there is no delete builtin and exec_process exits the runner
+//     with the child's code, so the file cannot be removed. It is
+//     .\kr-run-<n>.exe, the first of 64 names whose open for writing
+//     succeeds -- an image that is running cannot be opened for writing, so
+//     two runs at once never share one; a finished run's file is reused.
+//   Android under Termux, where SELinux refuses the runner's own exec: the
+//     image is written to the file the wrapper (packaging/kr.sh) names in
+//     $KR_EXEC_FALLBACK -- which it made with mktemp -- and the runner exits
+//     120; the wrapper runs it and removes it. Without the wrapper, the
+//     macOS route is tried.
+// KR_RUNNER_EXEC=file or =fork forces the descriptor-exec or the child route
+// on Linux, so the suite can run the routes it cannot otherwise reach
+// (runner_exec_paths_are_per_run).
+// ---------------------------------------------------------------------------
+
+fn kx_x86() -> uint64 {
+    uint64 a = get_arch_id()
+    if a == 1 || a == 3 || a == 5 || a == 8 { return 1 }
+    return 0
+}
+
+// Syscall numbers, per OS and arch. op: 0 getpid, 1 open(at), 2 write,
+// 3 close, 4 unlink(at), 5 execveat, 6 memfd_create, 7 fork, 8 wait4,
+// 9 sigprocmask, 10 fchmod, 11 kill, 12 fcntl.
+fn kx_nr(uint64 op) -> uint64 {
+    if get_target_os() == 1 {
+        uint64 m = 0
+        if op == 0 { m = 20 }
+        if op == 1 { m = 5 }
+        if op == 2 { m = 4 }
+        if op == 3 { m = 6 }
+        if op == 4 { m = 10 }
+        if op == 7 { m = 2 }
+        if op == 8 { m = 7 }
+        if op == 9 { m = 48 }
+        if op == 10 { m = 124 }
+        if op == 11 { m = 37 }
+        if op == 12 { m = 92 }
+        if kx_x86() != 0 { return 0x2000000 | m }
+        return m
+    }
+    if kx_x86() != 0 {
+        if op == 0 { return 39 }
+        if op == 1 { return 257 }
+        if op == 2 { return 1 }
+        if op == 3 { return 3 }
+        if op == 4 { return 263 }
+        if op == 5 { return 322 }
+        if op == 6 { return 319 }
+        if op == 7 { return 57 }
+        if op == 8 { return 61 }
+        if op == 9 { return 14 }
+        if op == 10 { return 91 }
+        if op == 11 { return 62 }
+        return 72
+    }
+    if op == 0 { return 172 }
+    if op == 1 { return 56 }
+    if op == 2 { return 64 }
+    if op == 3 { return 57 }
+    if op == 4 { return 35 }
+    if op == 5 { return 281 }
+    if op == 6 { return 279 }
+    if op == 7 { return 220 }
+    if op == 8 { return 260 }
+    if op == 9 { return 135 }
+    if op == 10 { return 52 }
+    if op == 11 { return 129 }
+    return 25
+}
+
+// A Linux syscall failed when it returned -4095..-1. On macOS a failure
+// returns the errno itself (the carry flag says which, and syscall_raw does
+// not report it), so the macOS callers check their results another way.
+fn kx_err(uint64 r) -> uint64 {
+    if r >= 0xFFFFFFFFFFFFF000 { return 1 }
+    return 0
+}
+
+// The value of NAME= in the environment, or 0.
+fn kx_getenv(uint64 name) -> uint64 {
+    if cli_envp == 0 { return 0 }
+    uint64 nl = str_len_r(name)
+    uint64 i = 0
+    uint64 e = load64(cli_envp)
+    while e != 0 {
+        uint64 j = 0
+        while j < nl && load8(e + j) == load8(name + j) { j = j + 1 }
+        if j == nl && load8(e + nl) == 61 { return e + nl + 1 }
+        i = i + 1
+        e = load64(cli_envp + i * 8)
+    }
+    return 0
+}
+
+// Append the bytes of s to buf at *pos (pos is a one-slot cell).
+fn kx_put(uint64 buf, uint64 pos, uint64 s) {
+    uint64 p = load64(pos)
+    uint64 i = 0
+    while load8(s + i) != 0 {
+        store8(buf + p, load8(s + i))
+        p = p + 1
+        i = i + 1
+    }
+    store64(pos, p)
+}
+
+fn kx_put_dec(uint64 buf, uint64 pos, uint64 v) {
+    uint64 tmp = alloc(24)
+    uint64 n = 0
+    if v == 0 { store8(tmp, 48)  n = 1 }
+    while v != 0 {
+        store8(tmp + n, 48 + v % 10)
+        v = v / 10
+        n = n + 1
+    }
+    uint64 p = load64(pos)
+    while n > 0 {
+        n = n - 1
+        store8(buf + p, load8(tmp + n))
+        p = p + 1
+    }
+    store64(pos, p)
+}
+
+// Open `path` for writing, exclusively and close-on-exec. Returns the
+// descriptor or 0xFFFFFFFFFFFFFFFF.
+fn kx_open_excl(uint64 path) -> uint64 {
+    if get_target_os() == 1 {
+        // O_WRONLY|O_CREAT|O_EXCL|O_CLOEXEC on Darwin.
+        uint64 fd = syscall_raw(kx_nr(1), path, 0x1000A01, 0x1C0, 0, 0, 0)
+        // A failure returns the errno, which looks like a small descriptor.
+        // Ours was opened close-on-exec, so F_GETFD (1) says FD_CLOEXEC (1);
+        // on a number that is not an open descriptor it returns EBADF (9).
+        if syscall_raw(kx_nr(12), fd, 1, 0, 0, 0, 0) != 1 { return 0xFFFFFFFFFFFFFFFF }
+        return fd
+    }
+    // openat(AT_FDCWD, path, O_WRONLY|O_CREAT|O_EXCL|O_CLOEXEC, 0700)
+    uint64 fd = syscall_raw(kx_nr(1), 0xFFFFFFFFFFFFFF9C, path, 0x800C1, 0x1C0, 0, 0)
+    if kx_err(fd) != 0 { return 0xFFFFFFFFFFFFFFFF }
+    return fd
+}
+
+fn kx_unlink(uint64 path) {
+    if get_target_os() == 1 {
+        syscall_raw(kx_nr(4), path, 0, 0, 0, 0, 0)
+        return
+    }
+    syscall_raw(kx_nr(4), 0xFFFFFFFFFFFFFF9C, path, 0, 0, 0, 0)
+}
+
+// Write all of buf to fd. Returns 1 on success.
+fn kx_write_all(uint64 fd, uint64 buf, uint64 len) -> uint64 {
+    uint64 done = 0
+    while done < len {
+        uint64 w = syscall_raw(kx_nr(2), fd, buf + done, len - done, 0, 0, 0)
+        if kx_err(w) != 0 || w == 0 || w > len - done { return 0 }
+        done = done + w
+    }
+    return 1
+}
+
+// Create the image as a new file under $TMPDIR (else the per-OS default),
+// named .kr-exec.<pid>.<n>, exclusively. Returns the path (and the image is
+// written, executable, closed) or 0.
+fn kx_make_file(uint64 image, uint64 len) -> uint64 {
+    uint64 dir = kx_getenv("TMPDIR")
+    if dir != 0 {
+        if load8(dir) == 0 || str_len_r(dir) > 3000 { dir = 0 }
+    }
+    if dir == 0 {
+        dir = "/tmp"
+        if get_target_os() == 3 { dir = "/data/local/tmp" }
+    }
+    uint64 pid = syscall_raw(kx_nr(0), 0, 0, 0, 0, 0, 0)
+    uint64 path = alloc(3200)
+    uint64 pos = alloc(8)
+    uint64 n = 0
+    while n < 100 {
+        store64(pos, 0)
+        kx_put(path, pos, dir)
+        kx_put(path, pos, "/.kr-exec.")
+        kx_put_dec(path, pos, pid)
+        kx_put(path, pos, ".")
+        kx_put_dec(path, pos, n)
+        store8(path + load64(pos), 0)
+        uint64 fd = kx_open_excl(path)
+        if fd != 0xFFFFFFFFFFFFFFFF {
+            uint64 ok = kx_write_all(fd, image, len)
+            syscall_raw(kx_nr(10), fd, 0x1C0, 0, 0, 0, 0)
+            syscall_raw(kx_nr(3), fd, 0, 0, 0, 0, 0)
+            if ok == 0 {
+                kx_unlink(path)
+                return 0
+            }
+            return path
+        }
+        n = n + 1
+    }
+    return 0
+}
+
+// The macOS route (and Linux without execveat): run the file as a child,
+// wait, remove it, and leave with the child's status.
+fn kx_run_child(uint64 path, uint64 argv) {
+    uint64 set = alloc(16)
+    uint64 old = alloc(16)
+    // HUP(1) INT(2) QUIT(3) TERM(15): bits sig-1.
+    store64(set, 0x4007)
+    store64(old, 0)
+    uint64 how_block = 0
+    uint64 how_setmask = 2
+    if get_target_os() == 1 {
+        how_block = 1
+        how_setmask = 3
+    }
+    syscall_raw(kx_nr(9), how_block, set, old, 8, 0, 0)
+    uint64 pid0 = syscall_raw(kx_nr(0), 0, 0, 0, 0, 0, 0)
+    uint64 child = 0
+    if get_target_os() == 1 || kx_x86() != 0 {
+        child = syscall_raw(kx_nr(7), 0, 0, 0, 0, 0, 0)
+    } else {
+        // arm64 Linux has no fork: clone(SIGCHLD, 0, 0, 0, 0).
+        child = syscall_raw(kx_nr(7), 17, 0, 0, 0, 0, 0)
+    }
+    uint64 in_child = 0
+    if get_target_os() == 1 {
+        // Darwin returns the PARENT's pid in the child; getpid tells them apart.
+        if syscall_raw(kx_nr(0), 0, 0, 0, 0, 0, 0) != pid0 { in_child = 1 }
+    } else {
+        if child == 0 { in_child = 1 }
+    }
+    if in_child != 0 {
+        syscall_raw(kx_nr(9), how_setmask, old, 0, 8, 0, 0)
+        exec_process_argv(path, argv)
+        exit(127)
+    }
+    if get_target_os() != 1 && kx_err(child) != 0 {
+        kx_unlink(path)
+        syscall_raw(kx_nr(9), how_setmask, old, 0, 8, 0, 0)
+        write(2, "kr: fork failed\n", 16)
+        exit(1)
+    }
+    uint64 st = alloc(8)
+    store64(st, 0)
+    uint64 got = syscall_raw(kx_nr(8), child, st, 0, 0, 0, 0)
+    while got != child && (got == 0xFFFFFFFFFFFFFFFC || got == 4) {
+        got = syscall_raw(kx_nr(8), child, st, 0, 0, 0, 0)
+    }
+    kx_unlink(path)
+    uint64 status = load64(st) & 0xFFFF
+    uint64 sig = status & 0x7F
+    syscall_raw(kx_nr(9), how_setmask, old, 0, 8, 0, 0)
+    if sig == 0 { exit((status >> 8) & 0xFF) }
+    syscall_raw(kx_nr(11), syscall_raw(kx_nr(0), 0, 0, 0, 0, 0, 0), sig, 0, 0, 0, 0)
+    exit(128 + sig)
+}
+
+// Run the image with argv (argv[0] is filled in here). Never returns.
+fn kx_exec_image(uint64 image, uint64 len, uint64 argv) {
+    uint64 mode = kx_getenv("KR_RUNNER_EXEC")
+    uint64 force_file = 0
+    uint64 force_fork = 0
+    if mode != 0 {
+        if str_eq_r(mode, "file") != 0 { force_file = 1 }
+        if str_eq_r(mode, "fork") != 0 { force_fork = 1 }
+    }
+    if get_target_os() == 2 {
+        // Windows: the first of .\kr-run-0.exe .. .\kr-run-63.exe that can be
+        // opened for writing (not one a running program holds).
+        uint64 wpath = alloc(32)
+        uint64 wpos = alloc(8)
+        uint64 k = 0
+        while k < 64 {
+            store64(wpos, 0)
+            kx_put(wpath, wpos, ".\\kr-run-")
+            kx_put_dec(wpath, wpos, k)
+            kx_put(wpath, wpos, ".exe")
+            store8(wpath + load64(wpos), 0)
+            uint64 wfd = file_open(wpath, 1)
+            if wfd < 0xFFFFFFFFFFFFF000 {
+                file_write(wfd, image, len)
+                file_close(wfd)
+                store64(argv, wpath)
+                exec_process_argv(wpath, argv)
+                write(2, "kr: exec failed\n", 16)
+                exit(1)
+            }
+            k = k + 1
+        }
+        write(2, "kr: failed to create temp file\n", 31)
+        exit(1)
+    }
+    if get_target_os() == 0 || get_target_os() == 3 {
+        if force_file == 0 && force_fork == 0 {
+            uint64 label = "kr"
+            uint64 mfd = syscall_raw(kx_nr(6), label, 1, 0, 0, 0, 0)
+            if kx_err(mfd) == 0 {
+                if kx_write_all(mfd, image, len) != 0 {
+                    store64(argv, label)
+                    syscall_raw(kx_nr(5), mfd, "", argv, cli_envp, 0x1000, 0)
+                }
+                syscall_raw(kx_nr(3), mfd, 0, 0, 0, 0, 0)
+            }
+        }
+        if force_fork == 0 {
+            uint64 fpath = kx_make_file(image, len)
+            if fpath != 0 {
+                // O_RDONLY|O_CLOEXEC; the name goes before the exec.
+                uint64 rfd = syscall_raw(kx_nr(1), 0xFFFFFFFFFFFFFF9C, fpath, 0x80000, 0, 0, 0)
+                kx_unlink(fpath)
+                if kx_err(rfd) == 0 {
+                    store64(argv, fpath)
+                    syscall_raw(kx_nr(5), rfd, "", argv, cli_envp, 0x1000, 0)
+                    syscall_raw(kx_nr(3), rfd, 0, 0, 0, 0, 0)
+                }
+            }
+        }
+        if get_target_os() == 3 {
+            // Termux: SELinux refuses the runner's own exec. The wrapper named
+            // a file of its own for this run; fill it and let the wrapper run it.
+            uint64 fb = kx_getenv("KR_EXEC_FALLBACK")
+            if fb != 0 && load8(fb) != 0 {
+                uint64 tfd = file_open(fb, 1)
+                if tfd < 0xFFFFFFFFFFFFF000 {
+                    file_write(tfd, image, len)
+                    file_close(tfd)
+                    set_executable(fb)
+                    exit(120)
+                }
+            }
+        }
+    }
+    // macOS; and Linux or Android when no descriptor exec worked (a kernel
+    // without execveat, or qemu-user, which does not emulate it), or with
+    // KR_RUNNER_EXEC=fork.
+    uint64 cpath = kx_make_file(image, len)
+    if cpath == 0 {
+        write(2, "kr: failed to create temp file\n", 31)
+        exit(1)
+    }
+    store64(argv, cpath)
+    kx_run_child(cpath, argv)
+}
+
 @export
 fn main() {
     if cli_argc == 0xFFFFFFFF {
@@ -383,62 +750,10 @@ fn main() {
 
     if is_fat == 0 {
         // Not fat — write as-is
-        uint64 raw_os = get_target_os()
-        uint64 tmp = "/tmp/.kr-exec"
-        if raw_os == 2 { tmp = ".\\kr-run.exe" }
-        if raw_os == 3 {
-            // Android: try memfd_create + execveat(AT_EMPTY_PATH) first (same
-            // rationale as the fat-binary path — filesystem-free exec works
-            // under Termux SELinux where file-based execve is blocked).
-            uint64 memfd_nr_nf = 319
-            uint64 execveat_nr_nf = 322
-            uint64 write_nr_nf = 1
-            if host_arch == 7 {
-                memfd_nr_nf = 279
-                execveat_nr_nf = 281
-                write_nr_nf = 64
-            }
-            uint64 mfd_label_nf = "kr"
-            uint64 mfd_fd_nf = syscall_raw(memfd_nr_nf, mfd_label_nf, 1, 0, 0, 0, 0)
-            if mfd_fd_nf < 0xFFFFFFFFFFFFF000 {
-                uint64 wrote_nf = syscall_raw(write_nr_nf, mfd_fd_nf, data, fsize, 0, 0, 0)
-                if wrote_nf == fsize {
-                    uint64 nf_argv_ptr = alloc(16)
-                    store64(nf_argv_ptr, mfd_label_nf)
-                    store64(nf_argv_ptr + 8, 0)
-                    uint64 empty_path_nf = ""
-                    syscall_raw(execveat_nr_nf, mfd_fd_nf, empty_path_nf, nf_argv_ptr, cli_envp, 0x1000, 0)
-                }
-                file_close(mfd_fd_nf)
-            }
-            tmp = "/data/local/tmp/kr-exec"
-            uint64 atfd = file_open(tmp, 1)
-            if atfd > 0xFFFFFFFFFFFFF000 {
-                tmp = "kr-exec"
-                atfd = file_open(tmp, 1)
-            }
-            if atfd < 0xFFFFFFFFFFFFF000 {
-                file_write(atfd, data, fsize)
-                file_close(atfd)
-                set_executable(tmp)
-                exec_process(tmp)
-                exit(120)
-            }
-            write(2, "kr: failed to create temp file\n", 31)
-            exit(1)
-        }
-        uint64 tfd = file_open(tmp, 1)
-        if tfd > 0xFFFFFFFFFFFFF000 {
-            write(2, "kr: failed to create temp file\n", 31)
-            exit(1)
-        }
-        file_write(tfd, data, fsize)
-        file_close(tfd)
-        set_executable(tmp)
-        exec_process(tmp)
-        uint64 wmsg_379 = "kr: exec failed\n"
-        write(2, wmsg_379, str_len_r(wmsg_379))
-        exit(1)
+        // Not a fat binary: run it as it is (no arguments are forwarded).
+        uint64 rargv = alloc(16)
+        store64(rargv + 8, 0)
+        kx_exec_image(data, fsize, rargv)
     }
 
     // Parse fat header
@@ -504,8 +819,6 @@ fn main() {
         filter_aarch64_bcj(binary, slice_uncomp_size, 0)
     }
 
-    uint64 host_os = get_target_os()
-
     // Build argv = [argv[0], original-argv[2..], NULL] to forward to execve.
     // cli_argv[0]=kr, cli_argv[1]=program.krbo, cli_argv[2..]=user args.
     // arg_offset is 16 on Android (linker shift), 8 otherwise. argv[0] gets
@@ -531,79 +844,5 @@ fn main() {
     }
     store64(nargv + (1 + n_fwd) * 8, 0)
 
-    uint64 tmp_path = "/tmp/.kr-exec"
-    if host_os == 2 {
-        tmp_path = ".\\kr-run.exe"
-    }
-    if host_os == 3 {
-        // Android: prefer memfd_create + execveat(AT_EMPTY_PATH).
-        // The binary lives in an anonymous kernel fd and execveat with
-        // AT_EMPTY_PATH ignores the pathname, so nothing touches the
-        // filesystem — no chmod, no SELinux file-label check, no noexec
-        // mount, no leftover kr-exec file in the user's cwd. Falls back to
-        // the file-based path on kernels older than 3.17 (no memfd_create).
-        uint64 memfd_nr = 319
-        uint64 execveat_nr = 322
-        uint64 write_nr = 1
-        if host_arch == 7 {
-            memfd_nr = 279
-            execveat_nr = 281
-            write_nr = 64
-        }
-        uint64 mfd_label = "kr"
-        uint64 mfd_fd = syscall_raw(memfd_nr, mfd_label, 1, 0, 0, 0, 0)
-        if mfd_fd < 0xFFFFFFFFFFFFF000 {
-            uint64 wrote = syscall_raw(write_nr, mfd_fd, binary, slice_uncomp_size, 0, 0, 0)
-            if wrote == slice_uncomp_size {
-                store64(nargv, mfd_label)
-                uint64 empty_path = ""
-                syscall_raw(execveat_nr, mfd_fd, empty_path, nargv, cli_envp, 0x1000, 0)
-                // execveat failed — fall through to file-based path.
-            }
-            file_close(mfd_fd)
-        }
-
-        // File-based fallback. Raw execve works on adb but is blocked by
-        // SELinux on Termux, so exit 120 tells the shell wrapper to retry
-        // via `./kr-exec` under its own SELinux domain.
-        tmp_path = "/data/local/tmp/kr-exec"
-        uint64 atfd = file_open(tmp_path, 1)
-        if atfd > 0xFFFFFFFFFFFFF000 {
-            tmp_path = "kr-exec"
-            atfd = file_open(tmp_path, 1)
-        }
-        if atfd < 0xFFFFFFFFFFFFF000 {
-            file_write(atfd, binary, slice_uncomp_size)
-            file_close(atfd)
-            set_executable(tmp_path)
-            store64(nargv, tmp_path)
-            exec_process_argv(tmp_path, nargv)
-            // Termux app context (Android 14+) blocks raw execve of files
-            // in /data/data/com.termux/. The interactive shell can still
-            // exec them — Termux's libc wraps execve via LD_PRELOAD — but
-            // our raw `svc 0` syscall bypasses that wrapper. Exit 120 to
-            // tell the kr-launcher shell wrapper (packaging/kr.sh) to
-            // re-exec ./kr-exec from its own shell context.
-            exit(120)
-        }
-        write(2, "kr: failed to create temp file\n", 31)
-        exit(1)
-    }
-    uint64 tfd = file_open(tmp_path, 1)
-    if tfd > 0xFFFFFFFFFFFFF000 {
-        write(2, "kr: failed to create temp file\n", 31)
-        exit(1)
-    }
-    file_write(tfd, binary, slice_uncomp_size)
-    file_close(tfd)
-    set_executable(tmp_path)
-    store64(nargv, tmp_path)
-
-    exec_process_argv(tmp_path, nargv)
-
-    write(2, "kr: exec failed (errno=", 23)
-    uint64 abs_errno2 = 0 - exec_errno
-    print(abs_errno2)
-    write(2, ")\n", 2)
-    exit(1)
+    kx_exec_image(binary, slice_uncomp_size, nargv)
 }
