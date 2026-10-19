@@ -3041,7 +3041,7 @@ TOTAL=$((TOTAL + 1))
 # as one more spelling that must agree.
 README_COUNTS=$( { grep -oE '\*\*[0-9]+ tests\*\*' "$DIR/../README.md"
                    grep -oE '[0-9]+-test' "$DIR/../README.md"
-                   grep -oE '[0-9]+ tests on this tree' "$DIR/../CONTRIBUTING.md" ; } | grep -oE '^[0-9]+')
+                   grep -oE '[0-9]+ tests on this tree' "$DIR/../CONTRIBUTING.md" ; } | grep -oE '[0-9]+')
 # An empty capture must FAIL, never compare "" against "" and pass.
 README_N=$(printf '%s\n' "$README_COUNTS" | grep -c '^[0-9][0-9]*$')
 README_UNIQ=$(printf '%s\n' "$README_COUNTS" | sort -u | tr '\n' ' ' | sed 's/ *$//')
