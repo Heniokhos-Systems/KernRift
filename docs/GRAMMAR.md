@@ -38,9 +38,10 @@ COMMENT     = "//" [^\n]*                     (discarded)
 (`skip_whitespace_and_comments` in `src/lexer.kr`) recognises `//` and nothing
 else, so `/*` lexes as a `/` followed by a `*`. Inside a function body the
 parser reports `error: unexpected '/' in expression`; between declarations it
-currently skips such tokens without a word, and still compiles any declaration
-written between the `/*` and the `*/` (register item 99, LANGUAGE.md §1). Use
-`//` on each line.
+reports `error: expected a declaration at top level (...), got '/'` (LANGUAGE.md
+§1; until register item 99 was fixed it skipped them without a word and
+compiled any declaration written between the `/*` and the `*/`). Use `//` on
+each line.
 
 Whitespace (spaces, tabs, CR, LF) is a token separator; no significant
 indentation. `TokenKind` in `src/lexer.kr` has 96 members (counting `Eof` and `Error`); only the subset relevant to

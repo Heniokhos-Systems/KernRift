@@ -834,6 +834,23 @@ fn parse_is_sync(uint64 k) -> uint64 {
     return 0
 }
 
+// Tokens that can start a top-level declaration, and end of file: where
+// parse_module resumes after junk at top level.
+fn parse_is_decl_start(uint64 k) -> uint64 {
+    if k == 0 { return 1 }     // end of file
+    if k == 21 { return 1 }    // '@' annotation
+    if k == 60 { return 1 }    // fn
+    if k == 70 { return 1 }    // const
+    if k == 71 { return 1 }    // static
+    if k == 72 { return 1 }    // struct
+    if k == 73 { return 1 }    // enum
+    if k == 74 { return 1 }    // extern
+    if k == 75 { return 1 }    // import
+    if k == 89 { return 1 }    // type
+    if k == 92 { return 1 }    // device
+    return 0
+}
+
 // Should the error at the current token be printed? Suppresses repeats at
 // the same position (cascade noise after a recovery that could not advance,
 // and the return-tuple lookahead rewind) and everything past the cap of 20.
@@ -2863,7 +2880,9 @@ fn parse_module() -> uint64 {
         uint64 ann_pci_remove = 0
         uint64 ann_section_start = 0
         uint64 ann_section_len = 0
+        uint64 ann_seen = 0
         while kind == 21 {
+            ann_seen = 1
             advance_tok()
             // Read annotation name
             uint64 ann_tok = p_tok_pos
@@ -3725,15 +3744,47 @@ fn parse_module() -> uint64 {
                     report_error_at(imp_tok, imp_msg)
                 }
             }
-        } else {
-            // Anything else at top level is skipped WITHOUT A WORD -- register
-            // item 99, deliberately left unfixed here. Making it an error
-            // refuses a shipped source: KernRift's frozen byte-identity input
-            // tests/target_none/corpus/arith.kr declares `static uint32
-            // table[8]`, a C-style array whose `[8]` is skipped here, so
-            // `table` is one scalar and the loop writes past it. That needs
-            // its own decision (the input is frozen), not a side effect.
+        } else if kind != 0 {
+            // Anything else at top level is a parse error (register item 99).
+            // It used to be skipped WITHOUT A WORD, one token at a time, and
+            // that silence hid three different mistakes:
+            //   * `/* fn hidden() { } */` -- there are no block comments, so
+            //     `/` and `*` were skipped and `fn hidden` COMPILED;
+            //   * `@naked` (or `@export`, ...) followed by anything that is not
+            //     a declaration -- the annotation was consumed, the junk
+            //     skipped, and the next `fn` got a full prologue and no flag;
+            //   * a C-style `static uint32 table[8]` -- the `[8]` was skipped,
+            //     so `table` was ONE uint32 scalar, and `table[i]` on a scalar
+            //     is no array access: the IR backend read and wrote table's
+            //     own address whatever i was (a byte on x86_64 and arm64, a
+            //     word on riscv32 and xtensa), and --legacy indexed from a
+            //     stack slot nothing had written and faulted.
+            // One error per run of junk: recovery skips to the next token that
+            // can start a declaration (or end of file), so `foo bar baz` is
+            // one message, not three. p_err_count makes the gate below exit
+            // before sema, so nothing after the junk is compiled either.
+            if parse_err_should_report() != 0 {
+                p_err_reported = p_err_reported + 1
+                parse_err_head(p_tok_pos)
+                write(2, "expected a declaration at top level (fn, static, const, struct, enum, type, extern, device or import), got ", 107)
+                uint64 tl_name = tok_kind_name(kind)
+                write(2, tl_name, str_len(tl_name))
+                parse_err_tok_text(kind, p_tok_pos)
+                if ann_seen != 0 {
+                    write(2, "; the annotation before it applies to nothing", 45)
+                }
+                if kind == 32 {
+                    write(2, "; there are no `/* */` block comments, use `//`", 47)
+                }
+                write(2, "\n", 1)
+                parse_err_span()
+            }
+            p_err_count = p_err_count + 1
+            p_last_err_pos = p_tok_pos
             advance_tok()
+            while parse_is_decl_start(cur_kind()) == 0 {
+                advance_tok()
+            }
         }
         p_fence_end = 0
     }

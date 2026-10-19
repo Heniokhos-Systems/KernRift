@@ -2672,14 +2672,12 @@ rm -f "$DIR/../dmassign_idx_$$.kr" "$DIR/../dmassign_ptr_$$.kr" \
 #    lexed as a divide operator and the parser then chokes.
 #
 #    SUBTLETY, and the exact reason the "block comments are supported" claim
-#    survived: a SINGLE-LINE `/* x */` at TOP LEVEL compiles clean. That is an
-#    accident, not support -- before a declaration the parser skips tokens it
-#    does not recognise, so the whole comment is swallowed and never reaches an
-#    expression context. Anyone who probes block comments by putting one at the
-#    top of a file therefore "confirms" a feature that does not exist. THE
-#    TOP-LEVEL FORM IS NOT A VALID PROBE. Pin the statement position instead,
-#    which genuinely errors, and pin the top-level accident too so that a
-#    partial implementation cannot land unnoticed.
+#    survived: a SINGLE-LINE `/* x */` at TOP LEVEL used to compile clean. That
+#    was an accident, not support -- before a declaration the parser skipped
+#    tokens it did not recognise (register item 99), so the whole comment was
+#    swallowed and never reached an expression context. Junk at top level is
+#    now a parse error, so both positions are pinned as refusals, each with its
+#    own diagnostic, so that a partial implementation cannot land unnoticed.
 #
 #    Parse-only: a parse error is reached before any codegen, so the arch is
 #    irrelevant -- $RUN_ARCH is used purely because it is always a valid value.
@@ -2725,16 +2723,20 @@ if ! printf '%s' "$bc_out" | grep -q 'docpin_bc_body_.*\.kr:2:5: error:'; then
     BC_OK=0
     echo "  diagnostic did not point at the '/*' at line 2 col 5"
 fi
-# The top-level accident, pinned so a top-level-only implementation is visible.
-$KRC --arch=$RUN_ARCH "$DIR/../docpin_bc_top_$$.kr" -o /tmp/krc_bct_$$ >/dev/null 2>&1
+# The top-level form: refused by the top-level-junk error, at the `/`.
+bct_out=$($KRC --arch=$RUN_ARCH "$DIR/../docpin_bc_top_$$.kr" -o /tmp/krc_bct_$$ 2>&1)
 bct_rc=$?
 rm -f /tmp/krc_bct_$$
-if [ "$bct_rc" != "0" ]; then
+if [ "$bct_rc" = "0" ]; then
     BC_OK=0
-    echo "  the top-level single-line form no longer compiles (it did, by accident, on 2026-08-14)"
+    echo "  the top-level single-line form compiled -- top-level junk is skipped again (register item 99)"
+fi
+if ! printf '%s' "$bct_out" | grep -q "docpin_bc_top_.*\.kr:1:1: error: expected a declaration at top level .*got '/'; there are no \`/\* \*/\` block comments"; then
+    BC_OK=0
+    echo "  top-level form: expected the top-level-junk error at 1:1 on '/', got: $(printf '%s' "$bct_out" | head -2)"
 fi
 if [ "$BC_OK" = "1" ]; then
-    PASS=$((PASS + 1)); echo "  block_comments_unimplemented: PASS (statement position errors; top-level form still slips through)"
+    PASS=$((PASS + 1)); echo "  block_comments_unimplemented: PASS (statement position and top level both refuse /*)"
 else
     FAIL=$((FAIL + 1))
     echo "FAIL: block_comments_unimplemented"
@@ -2742,6 +2744,56 @@ else
     echo "  do NOT 'confirm' the feature with a top-level /* */ -- that form passes without any lexer support"
 fi
 rm -f "$DIR/../docpin_bc_body_$$.kr" "$DIR/../docpin_bc_top_$$.kr"
+
+# 1b. Top-level junk is a parse error (register item 99). It used to be skipped
+#     one token at a time without a word, which hid three distinct mistakes.
+#     Each row below compiles clean on a compiler without the fix, so each
+#     fails there. Parse errors precede codegen: $RUN_ARCH is just a valid arch.
+#     tlj_check <row> <want-in-stderr> -- the probe is $TLJ_SRC; it must be
+#     refused (non-zero exit, no artifact) with that text in the diagnostic.
+TLJ_SRC="$DIR/../tlj_$$.kr"
+TLJ_BIN="/tmp/krc_tlj_$$"
+tlj_check() {
+    TOTAL=$((TOTAL + 1))
+    rm -f "$TLJ_BIN"
+    local out rc
+    out=$($KRC --arch=$RUN_ARCH "$TLJ_SRC" -o "$TLJ_BIN" 2>&1); rc=$?
+    if [ "$rc" = "0" ] || [ -e "$TLJ_BIN" ]; then
+        FAIL=$((FAIL + 1)); echo "FAIL: $1 (compiled: exit $rc$( [ -e "$TLJ_BIN" ] && echo ', artifact written'); top-level junk was skipped)"
+    elif ! printf '%s' "$out" | grep -qF -- "$2"; then
+        FAIL=$((FAIL + 1)); echo "FAIL: $1 (refused, but without '$2': $(printf '%s' "$out" | head -1))"
+    else
+        PASS=$((PASS + 1)); echo "  $1: PASS (refused: $2)"
+    fi
+    rm -f "$TLJ_BIN"
+}
+# A `fn` written inside a top-level /* */ used to be COMPILED: main called it
+# and the program exited 7.
+printf '/* fn hidden() -> uint64 { return 7 } */\nfn main() { exit(hidden()) }\n' > "$TLJ_SRC"
+tlj_check toplevel_junk_block_comment_compiles_nothing "tlj_$$.kr:1:1: error: expected a declaration at top level (fn, static, const, struct, enum, type, extern, device or import), got '/'"
+# An annotation followed by junk used to be consumed, the junk skipped, and the
+# next fn compiled with a full prologue and no @naked.
+printf '@naked\n/* c */\nfn s() {\n}\nfn main() { exit(0) }\n' > "$TLJ_SRC"
+tlj_check toplevel_junk_does_not_drop_naked "tlj_$$.kr:2:1: error: expected a declaration at top level (fn, static, const, struct, enum, type, extern, device or import), got '/'; the annotation before it applies to nothing"
+printf '@export *\nfn s() -> uint64 { return 1 }\nfn main() { exit(s()) }\n' > "$TLJ_SRC"
+tlj_check toplevel_junk_does_not_drop_export "tlj_$$.kr:1:9: error: expected a declaration at top level (fn, static, const, struct, enum, type, extern, device or import), got '*'; the annotation before it applies to nothing"
+# A C-style array declaration: the `[8]` used to be skipped, leaving `table`
+# one scalar (tests/target_none/corpus/arith.kr carried exactly this).
+printf 'static uint32 table[8]\nfn main() { exit(0) }\n' > "$TLJ_SRC"
+tlj_check toplevel_junk_c_style_array "tlj_$$.kr:1:20: error: expected a declaration at top level (fn, static, const, struct, enum, type, extern, device or import), got '['"
+# A run of stray words is ONE error, not one per word: recovery resumes at the
+# next token that can start a declaration.
+printf 'fn a() {}\nfoo bar baz\nfn main() { exit(3) }\n' > "$TLJ_SRC"
+TOTAL=$((TOTAL + 1))
+tlj_out=$($KRC --arch=$RUN_ARCH "$TLJ_SRC" -o "$TLJ_BIN" 2>&1); tlj_rc=$?
+if [ "$tlj_rc" != "0" ] && printf '%s' "$tlj_out" | grep -qF "tlj_$$.kr:2:1: error: expected a declaration at top level (fn, static, const, struct, enum, type, extern, device or import), got identifier 'foo'" \
+   && [ "$(printf '%s\n' "$tlj_out" | grep -c 'error: expected a declaration at top level')" = "1" ] \
+   && printf '%s' "$tlj_out" | grep -qx "1 parse error(s)"; then
+    PASS=$((PASS + 1)); echo "  toplevel_junk_one_error_per_run: PASS (foo bar baz is one error)"
+else
+    FAIL=$((FAIL + 1)); echo "FAIL: toplevel_junk_one_error_per_run (exit $tlj_rc: $(printf '%s' "$tlj_out" | tr '\n' '|' | head -c 300))"
+fi
+rm -f "$TLJ_SRC" "$TLJ_BIN"
 
 # 2. The @ctx / @effects / caps / lock-order analyses CANNOT FIRE. `ann_register`
 #    and `lock_add_edge` are defined in src/analysis.kr and called from nowhere:

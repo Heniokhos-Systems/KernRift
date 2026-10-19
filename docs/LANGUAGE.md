@@ -49,8 +49,8 @@ program starts execution at `fn main()` (unless you pass `--freestanding`).
 // Line comment
 
 // There are no block comments; use `//` on each line. `/* ... */` is not
-// a comment: in a function body it is a parse error, and between
-// declarations it is currently skipped (see below).
+// a comment: it is a parse error, in a function body and between
+// declarations alike (see below).
 
 fn main() {
     println("Hello, KernRift!")
@@ -58,18 +58,16 @@ fn main() {
 }
 ```
 
-**Text between declarations is not checked (known defect, register item 99).**
-At top level the parser skips, one token at a time and without a word, anything
-that cannot start a declaration. So a `/* ... */` there is dropped -- but its
-contents are still read as tokens, and a `fn` or `const` written inside it is
-compiled. Stray words (`foo bar`) vanish the same way, an annotation (`@naked`,
-`@export`) separated from its `fn` by such text is silently lost, and a `#lang`
-line anywhere but the first line of a file (§22) is skipped like any other junk.
-Inside a function body the same bytes are a parse error (`unexpected '/' in
-expression`). Making top-level junk an error is blocked on a shipped source:
-KernRift's frozen byte-identity input `tests/target_none/corpus/arith.kr`
-declares `static uint32 table[8]`, whose `[8]` this rule drops, leaving `table`
-one scalar that its loop writes past.
+**Anything between declarations that cannot start one is a parse error.** At
+top level the parser accepts declarations (`fn`, `static`, `const`, `struct`,
+`enum`, `type`, `extern`, `device`, `import`), annotations (`@...`) and nothing
+else: `error: expected a declaration at top level (...), got <token>`. One
+error is reported per run of such tokens (`foo bar baz` is one), and the
+compile stops before anything is generated. This used to be skipped one token
+at a time without a word (register item 99), which compiled a `fn` written
+inside a top-level `/* ... */`, silently dropped an annotation (`@naked`,
+`@export`) separated from its `fn` by such text, and turned a C-style
+`static uint32 table[8]` into one scalar -- write `static uint32[8] table`.
 
 Statements do not require trailing semicolons. Semicolons are accepted and
 ignored — useful when you want to write multiple statements on one line.
@@ -2912,7 +2910,7 @@ Recognized profiles:
 
 The directive must be the **very first line** of the file, starting at its first
 byte -- not after a blank line or a comment, where `#lang` is not a directive
-and is skipped as junk (§1, register item 99). Every file may carry one,
+and is a parse error like any other text between declarations (§1). Every file may carry one,
 imported files included, and the import scanner reads past it to the file's
 imports; the profile is set by the file named on the command line alone. If
 absent,
