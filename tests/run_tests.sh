@@ -2826,7 +2826,7 @@ tlj_check() {
     local out rc
     out=$($KRC --arch=$RUN_ARCH "$TLJ_SRC" -o "$TLJ_BIN" 2>&1); rc=$?
     if [ "$rc" = "0" ] || [ -e "$TLJ_BIN" ]; then
-        FAIL=$((FAIL + 1)); echo "FAIL: $1 (compiled: exit $rc$( [ -e "$TLJ_BIN" ] && echo ', artifact written'); top-level junk was skipped)"
+        FAIL=$((FAIL + 1)); echo "FAIL: $1 (compiled: exit $rc$( [ -e "$TLJ_BIN" ] && echo ', artifact written'); the probe was accepted)"
     elif ! printf '%s' "$out" | grep -qF -- "$2"; then
         FAIL=$((FAIL + 1)); echo "FAIL: $1 (refused, but without '$2': $(printf '%s' "$out" | head -1))"
     else
@@ -2857,14 +2857,46 @@ printf 'const uint64 X = 40; static uint64 Y = 2;\nfn main() { exit(X + Y) };\n'
 TOTAL=$((TOTAL + 1))
 rm -f "$TLJ_BIN"
 if $KRC --arch=$RUN_ARCH "$TLJ_SRC" -o "$TLJ_BIN" >/dev/null 2>&1; then
-    timeout -k 5 30 "$TLJ_BIN"; tlj_rc=$?
-    if [ "$tlj_rc" = "42" ]; then
+    RT_T0=$SECONDS; timeout -k 5 "$RUN_TEST_TIMEOUT" "$TLJ_BIN"; tlj_rc=$?
+    if rb_timed_out "$tlj_rc" "$RT_T0"; then
+        FAIL=$((FAIL + 1)); echo "FAIL: toplevel_semicolon_separator_accepted (TIMEOUT: still running after ${RUN_TEST_TIMEOUT}s)"
+    elif [ "$tlj_rc" = "42" ]; then
         PASS=$((PASS + 1)); echo "  toplevel_semicolon_separator_accepted: PASS (compiles, exits 42)"
     else
         FAIL=$((FAIL + 1)); echo "FAIL: toplevel_semicolon_separator_accepted (ran, exit $tlj_rc, want 42)"
     fi
 else
     FAIL=$((FAIL + 1)); echo "FAIL: toplevel_semicolon_separator_accepted (did not compile: ';' between declarations must be accepted)"
+fi
+# An annotation that applies to nothing is an error too (register item 99,
+# part 2): before a declaration it does not apply to, misspelt, `@` before a
+# non-name, at end of file, with its arguments never closed. Each of these
+# compiled clean before, the annotation simply dropped.
+printf '@naked\nstatic uint64 g = 1\nfn s() {\n}\nfn main() { exit(0) }\n' > "$TLJ_SRC"
+tlj_check annotation_on_wrong_declaration_refused "tlj_$$.kr:1:2: error: annotation '@naked' applies only to fn, not to 'static'"
+printf '@nakd\nfn s() {\n}\nfn main() { exit(0) }\n' > "$TLJ_SRC"
+tlj_check annotation_unknown_name_refused "tlj_$$.kr:1:2: error: unknown annotation '@nakd'"
+printf '@ 5\nfn main() { exit(0) }\n' > "$TLJ_SRC"
+tlj_check annotation_without_name_refused "tlj_$$.kr:1:3: error: expected an annotation name after '@', got integer '5'"
+printf 'fn main() { exit(0) }\n@naked\n' > "$TLJ_SRC"
+tlj_check annotation_at_end_of_file_refused "tlj_$$.kr:2:2: error: annotation '@naked' at end of file applies to nothing"
+printf 'fn main() { exit(0) }\n@section(".x"\n' > "$TLJ_SRC"
+tlj_check annotation_unclosed_arguments_refused "tlj_$$.kr:2:2: error: unclosed '(' in the arguments of annotation '@section'"
+# Control: every form the shipped sources use still compiles and runs.
+printf '@packed struct H { u8 a }\n@export static uint64 g = 1\n@export const uint64 C = 2\n@noreturn\nfn f() { exit(9) }\nfn main() { exit(g + C) }\n@module_license("GPL")\n' > "$TLJ_SRC"
+TOTAL=$((TOTAL + 1))
+rm -f "$TLJ_BIN"
+if $KRC --arch=$RUN_ARCH "$TLJ_SRC" -o "$TLJ_BIN" >/dev/null 2>&1; then
+    RT_T0=$SECONDS; timeout -k 5 "$RUN_TEST_TIMEOUT" "$TLJ_BIN"; tlj_rc=$?
+    if rb_timed_out "$tlj_rc" "$RT_T0"; then
+        FAIL=$((FAIL + 1)); echo "FAIL: annotation_valid_forms_accepted (TIMEOUT: still running after ${RUN_TEST_TIMEOUT}s)"
+    elif [ "$tlj_rc" = "3" ]; then
+        PASS=$((PASS + 1)); echo "  annotation_valid_forms_accepted: PASS (@packed struct, @export static/const, @noreturn fn, a module-wide @module_license at end of file; exits 3)"
+    else
+        FAIL=$((FAIL + 1)); echo "FAIL: annotation_valid_forms_accepted (ran, exit $tlj_rc, want 3)"
+    fi
+else
+    FAIL=$((FAIL + 1)); echo "FAIL: annotation_valid_forms_accepted (did not compile: @packed struct, @export static/const, @noreturn fn, a module-wide @module_license at end of file must be accepted)"
 fi
 # A run of stray words is ONE error, not one per word: recovery resumes at the
 # next token that can start a declaration.

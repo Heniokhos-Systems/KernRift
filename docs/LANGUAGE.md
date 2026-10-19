@@ -63,13 +63,36 @@ top level the parser accepts declarations (`fn`, `static`, `const`, `struct`,
 `enum`, `type`, `extern`, `device`, `import`), annotations (`@...`), and `;`
 as a separator (ignored, as between statements -- but not right after an
 annotation, which it would detach), and nothing else: `error: expected a
-declaration at top level (...), got <token>`. One
-error is reported per run of such tokens (`foo bar baz` is one), and the
-compile stops before anything is generated. This used to be skipped one token
-at a time without a word (register item 99), which compiled a `fn` written
-inside a top-level `/* ... */`, silently dropped an annotation (`@naked`,
-`@export`) separated from its `fn` by such text, and turned a C-style
-`static uint32 table[8]` into one scalar -- write `static uint32[8] table`.
+declaration at top level (...), got <token>`. One error is reported per run of
+such tokens (`foo bar baz` is one), and the compile stops before anything is
+generated. That includes text the lexer does not skip: a `#!` first line
+(there is no shebang support), a vertical tab or form feed, a trailing
+Ctrl-Z (0x1A). This used to be skipped one token at a time without a word
+(register item 99), which compiled a `fn` written inside a top-level
+`/* ... */`, silently dropped an annotation (`@naked`, `@export`) separated
+from its `fn` by such text, and turned a C-style `static uint32 table[8]`
+into one scalar -- write `static uint32[8] table`.
+
+**An annotation must apply to something.** Each one is valid only before the
+declarations the compiler uses it on:
+
+- **fn**: `@noreturn`, `@naked`, `@builtin_override`, `@module_init`,
+  `@module_exit`, `@lkm_ioctl_handler`, `@lkm_mmap_handler`,
+  `@pci_probe_handler`, `@pci_remove_handler`, `@section(...)`, `@ctx(...)`,
+  `@eff(...)`, `@caps(...)`, `@acquires(...)`, `@releases(...)`;
+- **fn, static or const**: `@export`;
+- **struct**: `@packed`;
+- **module-wide** (they take effect where they stand, so they may precede
+  anything, or end the file): `@module_license`, `@module_author`,
+  `@module_description`, `@module_name`, `@module_register_misc_device`,
+  `@module_register_pci_driver`.
+
+Anything else is an error rather than an annotation silently dropped: one
+before a declaration it does not apply to (`annotation '@naked' applies only
+to fn, not to 'static'`), an unknown name (`unknown annotation '@nakd'`), `@`
+not followed by a name, a declaration-bound annotation at the end of a file
+(`... at end of file applies to nothing`), and arguments whose `(` is never
+closed.
 
 Statements do not require trailing semicolons. Semicolons are accepted and
 ignored — useful when you want to write multiple statements on one line.
@@ -2912,11 +2935,10 @@ Recognized profiles:
 
 The directive must be the **very first line** of the file, starting at its first
 byte -- not after a blank line or a comment, where `#lang` is not a directive
-and is a parse error like any other text between declarations (§1). Every file may carry one,
-imported files included, and the import scanner reads past it to the file's
-imports; the profile is set by the file named on the command line alone. If
-absent,
-the profile defaults to `stable`.
+and is a parse error like any other text between declarations (§1). Every
+file may carry one, imported files included, and the import scanner reads past
+it to the file's imports; the profile is set by the file named on the command
+line alone. If absent, the profile defaults to `stable`.
 
 Profiles are part of the Living Compiler's two-layer model: the stable
 semantic core doesn't change, but the adaptive surface layer may gate

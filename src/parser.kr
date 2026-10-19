@@ -834,6 +834,109 @@ fn parse_is_sync(uint64 k) -> uint64 {
     return 0
 }
 
+// ---------------------------------------------------------------------------
+// Annotations that apply to nothing are errors (register item 99, part 2).
+// An annotation used to be consumed whatever followed it: before a `static`,
+// a misspelt name (`@nakd`), `@` before a non-name, at end of file or with
+// unclosed arguments it vanished without a word -- and a misspelt @naked
+// gave the next fn a full prologue. ann_class says what a name may stand
+// before, as the code below uses it (parse_module's declaration arms):
+//   0 unknown, 1 fn, 2 struct, 3 extern fn, 4 module-wide (it takes effect
+//   where it stands, so it may precede anything, or nothing), 5 fn, static
+//   or const (@export: the compiler's own sources mark statics and consts).
+// ---------------------------------------------------------------------------
+fn ann_class(uint64 tok) -> uint64 {
+    if tok_matches(tok, "noreturn", 8) != 0 { return 1 }
+    if tok_matches(tok, "naked", 5) != 0 { return 1 }
+    if tok_matches(tok, "export", 6) != 0 { return 5 }
+    if tok_matches(tok, "builtin_override", 16) != 0 { return 1 }
+    if tok_matches(tok, "module_init", 11) != 0 { return 1 }
+    if tok_matches(tok, "module_exit", 11) != 0 { return 1 }
+    if tok_matches(tok, "lkm_ioctl_handler", 17) != 0 { return 1 }
+    if tok_matches(tok, "lkm_mmap_handler", 16) != 0 { return 1 }
+    if tok_matches(tok, "pci_probe_handler", 17) != 0 { return 1 }
+    if tok_matches(tok, "pci_remove_handler", 18) != 0 { return 1 }
+    if tok_matches(tok, "section", 7) != 0 { return 1 }
+    if tok_matches(tok, "ctx", 3) != 0 { return 1 }
+    if tok_matches(tok, "eff", 3) != 0 { return 1 }
+    if tok_matches(tok, "caps", 4) != 0 { return 1 }
+    if tok_matches(tok, "acquires", 8) != 0 { return 1 }
+    if tok_matches(tok, "releases", 8) != 0 { return 1 }
+    if tok_matches(tok, "packed", 6) != 0 { return 2 }
+    if tok_matches(tok, "module_license", 14) != 0 { return 4 }
+    if tok_matches(tok, "module_author", 13) != 0 { return 4 }
+    if tok_matches(tok, "module_description", 18) != 0 { return 4 }
+    if tok_matches(tok, "module_name", 11) != 0 { return 4 }
+    if tok_matches(tok, "module_register_misc_device", 27) != 0 { return 4 }
+    if tok_matches(tok, "module_register_pci_driver", 26) != 0 { return 4 }
+    return 0
+}
+
+fn ann_class_name(uint64 c) -> uint64 {
+    if c == 1 { return "fn" }
+    if c == 2 { return "struct" }
+    if c == 5 { return "fn, static or const" }
+    return "extern fn"
+}
+
+// Opens one annotation diagnostic at tok ("file:line:col: error: "); returns
+// 0 when it is past the print cap (it is still counted, so the parse-error
+// gate stops the compile).
+fn ann_err_begin(uint64 tok) -> uint64 {
+    p_err_count = p_err_count + 1
+    if p_err_reported >= 20 { return 0 }
+    p_err_reported = p_err_reported + 1
+    parse_err_head(tok)
+    return 1
+}
+
+fn ann_err_str(uint64 s) {
+    write(2, s, str_len(s))
+}
+
+// '@NAME', the annotation's name token as written.
+fn ann_err_name(uint64 tok) {
+    ann_err_str("'@")
+    write(2, cg_source + tok_text_start(tok), tok_text_len(tok))
+    ann_err_str("'")
+}
+
+fn ann_err_end() {
+    ann_err_str("\n")
+    parse_err_span()
+}
+
+// The annotation `tok` (class c) before declaration token kind `kind`: an
+// error unless the declaration is the one the class names. Junk and `;` are
+// left to the top-level-junk error, which already says the annotation
+// applies to nothing.
+fn ann_check_target(uint64 tok, uint64 c, uint64 kind) {
+    if c == 1 && kind == 60 { return }
+    if c == 2 && kind == 72 { return }
+    if c == 3 && kind == 74 { return }
+    if c == 5 && (kind == 60 || kind == 70 || kind == 71) { return }
+    if kind == 0 {
+        if ann_err_begin(tok) != 0 {
+            ann_err_str("annotation ")
+            ann_err_name(tok)
+            ann_err_str(" at end of file applies to nothing")
+            ann_err_end()
+        }
+        return
+    }
+    if kind == 60 || kind == 70 || kind == 71 || kind == 72 || kind == 73 || kind == 74 || kind == 75 || kind == 89 || kind == 92 {
+        if ann_err_begin(tok) != 0 {
+            ann_err_str("annotation ")
+            ann_err_name(tok)
+            ann_err_str(" applies only to ")
+            ann_err_str(ann_class_name(c))
+            ann_err_str(", not to ")
+            ann_err_str(tok_kind_name(kind))
+            ann_err_end()
+        }
+    }
+}
+
 // Tokens that can start a top-level declaration, and end of file: where
 // parse_module resumes after junk at top level.
 fn parse_is_decl_start(uint64 k) -> uint64 {
@@ -2881,12 +2984,42 @@ fn parse_module() -> uint64 {
         uint64 ann_section_start = 0
         uint64 ann_section_len = 0
         uint64 ann_seen = 0
+        // The first annotation of each declaration-bound class, as token + 1
+        // (0 = none): checked against the declaration after the loop.
+        uint64 ann_fn_t = 0
+        uint64 ann_st_t = 0
+        uint64 ann_ex_t = 0
+        uint64 ann_xp_t = 0
         while kind == 21 {
             ann_seen = 1
             advance_tok()
             // Read annotation name
             uint64 ann_tok = p_tok_pos
+            if cur_kind() != 1 {
+                // `@` before something that is not a name: `@ 5`, `@(`, `@`
+                // at end of file. Nothing is consumed but the `@`.
+                if ann_err_begin(p_tok_pos) != 0 {
+                    ann_err_str("expected an annotation name after '@', got ")
+                    ann_err_str(tok_kind_name(cur_kind()))
+                    parse_err_tok_text(cur_kind(), p_tok_pos)
+                    ann_err_end()
+                }
+                kind = cur_kind()
+                continue
+            }
             advance_tok()
+            uint64 ann_c = ann_class(ann_tok)
+            if ann_c == 0 {
+                if ann_err_begin(ann_tok) != 0 {
+                    ann_err_str("unknown annotation ")
+                    ann_err_name(ann_tok)
+                    ann_err_end()
+                }
+            }
+            if ann_c == 1 && ann_fn_t == 0 { ann_fn_t = ann_tok + 1 }
+            if ann_c == 2 && ann_st_t == 0 { ann_st_t = ann_tok + 1 }
+            if ann_c == 3 && ann_ex_t == 0 { ann_ex_t = ann_tok + 1 }
+            if ann_c == 5 && ann_xp_t == 0 { ann_xp_t = ann_tok + 1 }
             uint64 ann_len_v = tok_len_at(ann_tok)
             // Check for known annotations via tok_matches (defined in
             // codegen.kr). Length is a fast pre-filter.
@@ -3067,10 +3200,20 @@ fn parse_module() -> uint64 {
                 while cur_kind() != 11 && cur_kind() != 0 {
                     advance_tok()
                 }
-                eat(11)
+                if eat(11) == 0 {
+                    if ann_err_begin(ann_tok) != 0 {
+                        ann_err_str("unclosed '(' in the arguments of annotation ")
+                        ann_err_name(ann_tok)
+                        ann_err_end()
+                    }
+                }
             }
             kind = cur_kind()
         }
+        if ann_fn_t != 0 { ann_check_target(ann_fn_t - 1, 1, kind) }
+        if ann_st_t != 0 { ann_check_target(ann_st_t - 1, 2, kind) }
+        if ann_ex_t != 0 { ann_check_target(ann_ex_t - 1, 3, kind) }
+        if ann_xp_t != 0 { ann_check_target(ann_xp_t - 1, 5, kind) }
 
         if kind == 60 {
             p_asm_ret_seen = 0
