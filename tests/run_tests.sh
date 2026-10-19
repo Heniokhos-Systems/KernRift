@@ -26075,6 +26075,35 @@ else
 fi
 rm -rf "$BSF_D"
 
+# --- Running out of memory is a clean error, never a crash or partial -o ----
+# Every allocation the compiler makes goes through cg_alloc / cg_alloc_or_die
+# (src/codegen.kr), which stops with "krc: out of memory ..." and exit 1.
+# Before, a refused allocation returned 0 and the compiler wrote through it:
+# rc 139, and possibly a partial binary at -o. Two cases, both rc 139 before:
+#   - a large static array followed by a scalar static (whose initialiser
+#     makes the compiler write the array's zero fill into its output buffer)
+#     in a 600 MB address space: the output buffer's growth is refused;
+#   - a trivial program in a 60 MB address space: the start-up tables are.
+TOTAL=$((TOTAL + 1))
+OOM_D=$(mktemp -d "${TMPDIR:-/tmp}/krc_oom.XXXXXX")
+OOM_WHY=""
+printf 'static uint64[100000000] a\nstatic uint64 b = 5\nfn main() -> uint64 { return b - 5 }\n' > "$OOM_D/static.kr"
+printf 'fn main() { exit(0) }\n' > "$OOM_D/tiny.kr"
+for OOM_C in "static 600000" "tiny 60000"; do
+    OOM_N=${OOM_C% *}; OOM_V=${OOM_C#* }
+    rm -f "$OOM_D/m.bin"
+    OOM_OUT=$( (ulimit -v "$OOM_V"; $KRC --arch=$RUN_ARCH "$OOM_D/$OOM_N.kr" -o "$OOM_D/m.bin" 2>&1) ); OOM_RC=$?
+    if [ "$OOM_RC" != "1" ] || ! printf '%s\n' "$OOM_OUT" | grep -q "^krc: out of memory" || [ -e "$OOM_D/m.bin" ]; then
+        OOM_WHY="$OOM_WHY [$OOM_N in ${OOM_V} KB: rc=$OOM_RC, output file $( [ -e "$OOM_D/m.bin" ] && echo present || echo absent ), '$(printf '%s' "$OOM_OUT" | tail -1 | cut -c1-100)']"
+    fi
+done
+if [ -z "$OOM_WHY" ]; then
+    PASS=$((PASS + 1)); echo "  oom_is_a_clean_error: PASS (a static's output-buffer growth in 600 MB and a trivial program in 60 MB: exit 1, 'krc: out of memory', no output file)"
+else
+    FAIL=$((FAIL + 1)); echo "FAIL: oom_is_a_clean_error$OOM_WHY"
+fi
+rm -rf "$OOM_D"
+
 # --- Documentation pin 5, PART B (see Part A above) --------------------------
 # README.md advertises this suite's test count. Compare it against the total
 # only now, when $TOTAL is final and already includes this row (Part A did the

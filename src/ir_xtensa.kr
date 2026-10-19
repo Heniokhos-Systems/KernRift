@@ -799,7 +799,7 @@ fn xt_lit_intern(uint64 value) -> uint64 {
     if xt_lit_count >= xt_lit_cap {
         uint64 new_cap = xt_lit_cap * 2
         if new_cap < 64 { new_cap = 64 }
-        uint64 nb = alloc(new_cap * 8)
+        uint64 nb = cg_alloc(new_cap * 8)
         if xt_lit_buf != 0 {
             memcpy(nb, xt_lit_buf, xt_lit_count * 8)
             dealloc(xt_lit_buf)
@@ -849,7 +849,7 @@ fn xt_lit_reserve() -> uint64 {
     if xt_lit_count >= xt_lit_cap {
         uint64 new_cap = xt_lit_cap * 2
         if new_cap < 64 { new_cap = 64 }
-        uint64 nb = alloc(new_cap * 8)
+        uint64 nb = cg_alloc(new_cap * 8)
         if xt_lit_buf != 0 {
             memcpy(nb, xt_lit_buf, xt_lit_count * 8)
             dealloc(xt_lit_buf)
@@ -1101,7 +1101,7 @@ fn xt_add_fixup(uint64 patch_off, uint64 target_bb, uint64 bk, uint64 rs, uint64
     if xt_br_fixup_count >= xt_br_fixups_cap {
         uint64 nc = xt_br_fixups_cap * 2
         if nc < 256 { nc = 256 }
-        uint64 nb = alloc(nc * 24)
+        uint64 nb = cg_alloc(nc * 24)
         if xt_br_fixups != 0 {
             memcpy(nb, xt_br_fixups, xt_br_fixup_count * 24)
             dealloc(xt_br_fixups)
@@ -1133,7 +1133,7 @@ fn xt_add_pool_fixup(uint64 site, uint64 slot) {
     if xt_pool_fixup_count >= xt_pool_fixups_cap {
         uint64 nc = xt_pool_fixups_cap * 2
         if nc < 256 { nc = 256 }
-        uint64 nb = alloc(nc * 8)
+        uint64 nb = cg_alloc(nc * 8)
         if xt_pool_fixups != 0 {
             memcpy(nb, xt_pool_fixups, xt_pool_fixup_count * 8)
             dealloc(xt_pool_fixups)
@@ -1195,7 +1195,7 @@ fn xt_add_addr_fixup(uint64 anchor_off, uint64 table_sel, uint64 payload, uint64
     if xt_addr_fixup_count >= xt_addr_fixups_cap {
         uint64 nc = xt_addr_fixups_cap * 2
         if nc < 256 { nc = 256 }
-        uint64 nb = alloc(nc * 16)
+        uint64 nb = cg_alloc(nc * 16)
         if xt_addr_fixups != 0 {
             memcpy(nb, xt_addr_fixups, xt_addr_fixup_count * 16)
             dealloc(xt_addr_fixups)
@@ -1466,7 +1466,7 @@ fn xt_build_relaxed() {
             if xt_relaxed_count >= xt_relaxed_cap {
                 uint64 nc = xt_relaxed_cap * 2
                 if nc < 256 { nc = 256 }
-                uint64 nb = alloc(nc * 8)
+                uint64 nb = cg_alloc(nc * 8)
                 if xt_relaxed != 0 {
                     memcpy(nb, xt_relaxed, xt_relaxed_count * 8)
                     dealloc(xt_relaxed)
@@ -1544,7 +1544,7 @@ fn xt_relax_function(uint64 code_start, uint64 line_start) {
     uint64 old_end = out_len
     if xt_relaxed_count > 0 {
         uint64 body_len = old_end - code_start
-        uint64 scratch = alloc(body_len)
+        uint64 scratch = cg_alloc(body_len)
         memcpy(scratch, out_buf + code_start, body_len)
         out_len = code_start
         uint64 prev = code_start
@@ -3166,14 +3166,14 @@ fn ir_xtensa_gen(uint64 fn_node, uint64 xt_entry_node) {
     if bo_need < 4096 { bo_need = 4096 }
     if bo_need > ir_block_offsets_cap {
         if ir_block_offsets != 0 { dealloc(ir_block_offsets) }
-        ir_block_offsets = alloc(bo_need * 8)
+        ir_block_offsets = cg_alloc(bo_need * 8)
         ir_block_offsets_cap = bo_need
     }
     uint64 ret_need = ir_bb_count
     if ret_need < 1024 { ret_need = 1024 }
     if ret_need > ir_ret_fixups_cap {
         if ir_ret_fixups != 0 { dealloc(ir_ret_fixups) }
-        ir_ret_fixups = alloc(ret_need * 4)
+        ir_ret_fixups = cg_alloc(ret_need * 4)
         ir_ret_fixups_cap = ret_need
     }
     ir_ret_fixup_count = 0

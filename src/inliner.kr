@@ -49,13 +49,13 @@ static uint64 inline_flags_buf = 0
 @export
 fn inline_init() {
     if inline_table_buf == 0 {
-        inline_table_buf = alloc(INLINE_TABLE_CAP * 8)
+        inline_table_buf = cg_alloc(INLINE_TABLE_CAP * 8)
     }
     if inline_flags_buf == 0 {
-        inline_flags_buf = alloc(INLINE_TABLE_CAP)
+        inline_flags_buf = cg_alloc(INLINE_TABLE_CAP)
     }
     if inline_locals_buf == 0 {
-        inline_locals_buf = alloc(INLINE_LOCALS_CAP * 8)
+        inline_locals_buf = cg_alloc(INLINE_LOCALS_CAP * 8)
     }
     inline_table_count = 0
     inline_locals_count = 0

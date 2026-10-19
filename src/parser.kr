@@ -3374,7 +3374,7 @@ fn parse_module() -> uint64 {
                         // f32 the runtime load is 4-byte movss, so the f32
                         // bits must sit in the low 4 bytes (and we zero the
                         // high 4 bytes by passing a uint64 with high zero).
-                        uint64 fbits_buf = alloc(8)
+                        uint64 fbits_buf = cg_alloc(8)
                         uint64 fbits = 0
                         if wstk_s == 95 {
                             // f32 static: narrow then pack as 32-bit IEEE-754.

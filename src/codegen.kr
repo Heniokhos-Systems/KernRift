@@ -430,7 +430,7 @@ fn debug_var_record(uint64 fn_idx, uint64 name_tok, uint64 stack_offset) {
 @export
 fn debug_var_record_loc(uint64 fn_idx, uint64 name_tok, uint64 loc_value, uint64 loc_kind) {
     if debug_info_mode == 0 { return }
-    if debug_var_table == 0 { debug_var_table = alloc(debug_var_cap * 16) }
+    if debug_var_table == 0 { debug_var_table = cg_alloc(debug_var_cap * 16) }
     if debug_var_count >= debug_var_cap { return }
     uint64 entry = debug_var_table + debug_var_count * 16
     uint32 fi = fn_idx
@@ -457,8 +457,48 @@ fn debug_var_record_loc(uint64 fn_idx, uint64 name_tok, uint64 loc_value, uint64
 // across a growth point — the old mapping is gone).
 // ---------------------------------------------------------------------------
 
+// Allocate `n` bytes for one of the compiler's own growable buffers, or stop
+// with a clear message and exit 1 -- MLRift's cg_alloc_or_die, the same text
+// with "krc". alloc() returns 0 when the OS refuses the request. Before this,
+// a refused growth was written through: `static uint64[100000000] a` followed
+// by a scalar static (whose initialiser materialises the 800 MB zero fill)
+// segfaulted the compiler (rc 139) in a 600 MB address space. `what` names the
+// buffer in the message.
+fn cg_alloc_or_die(uint64 n, uint64 what) -> uint64 {
+    uint64 p = alloc(n)
+    if p == 0 {
+        uint64 oom_m = "krc: out of memory growing "
+        write(2, oom_m, str_len(oom_m))
+        write(2, what, str_len(what))
+        write(2, "\n", 1)
+        exit(1)
+    }
+    return p
+}
+
+// The compiler's general-purpose allocation: alloc(n), or stop with a clear
+// message and exit 1 instead of handing a 0 to code that would write through
+// it -- MLRift's cg_alloc, the same text with "krc". Every alloc() in the
+// compiler's own sources goes through this (or through cg_alloc_or_die,
+// which names the buffer), except the sites that check the result
+// themselves; src/format_espimage.kr, which the suite also compiles on its
+// own, has its own copy (esp_alloc).
+fn cg_alloc(uint64 n) -> uint64 {
+    uint64 p = alloc(n)
+    if p == 0 {
+        uint64 oom_m = "krc: out of memory (allocating "
+        write(2, oom_m, str_len(oom_m))
+        uint8[24] nb
+        uint64 nl = fmt_uint(nb, n)
+        write(2, nb, nl)
+        write(2, " bytes)\n", 8)
+        exit(1)
+    }
+    return p
+}
+
 fn grow_buf(uint64 old_ptr, uint64 used_bytes, uint64 new_bytes) -> uint64 {
-    uint64 np = alloc(new_bytes)
+    uint64 np = cg_alloc_or_die(new_bytes, "a compiler table")
     memcpy(np, old_ptr, used_bytes)
     dealloc(old_ptr)
     return np
@@ -540,35 +580,35 @@ fn str_buf_ensure(uint64 needed) {
 
 @export
 fn codegen_init(uint64 capacity, uint64 source, uint64 tokens) {
-    out_buf = alloc(capacity)
+    out_buf = cg_alloc_or_die(capacity, "the output buffer")
     out_len = 0
     out_vzero = 0
     out_cap = capacity
     cg_source = source
     cg_tokens = tokens
-    var_table = alloc(4096 * 8)
+    var_table = cg_alloc_or_die(4096 * 8, "a compiler table")
     var_count = 0
     fn_table_cap = 1024
-    fn_table = alloc(fn_table_cap * 8)
+    fn_table = cg_alloc_or_die(fn_table_cap * 8, "a compiler table")
     fn_count = 0
-    export_fn_table = alloc(4096 * 8)
+    export_fn_table = cg_alloc_or_die(4096 * 8, "a compiler table")
     export_fn_count = 0
-    fixup_table = alloc(32768 * 8)
+    fixup_table = cg_alloc_or_die(32768 * 8, "a compiler table")
     fixup_count = 0
     fixup_cap = 32768
-    ret_fixups = alloc(256 * 4)
+    ret_fixups = cg_alloc_or_die(256 * 4, "a compiler table")
     ret_fixup_count = 0
-    struct_table = alloc(struct_cap * struct_entry_size)
+    struct_table = cg_alloc_or_die(struct_cap * struct_entry_size, "a compiler table")
     struct_count = 0
-    struct_var_table = alloc(1024 * 8)
+    struct_var_table = cg_alloc_or_die(1024 * 8, "a compiler table")
     struct_var_count = 0
-    loop_stack = alloc(16 * 16)
+    loop_stack = cg_alloc_or_die(16 * 16, "a compiler table")
     loop_depth = 0
-    break_fixups = alloc(256 * 4)
+    break_fixups = cg_alloc_or_die(256 * 4, "a compiler table")
     break_fixup_count = 0
-    match_end_fixups = alloc(256 * 4)
+    match_end_fixups = cg_alloc_or_die(256 * 4, "a compiler table")
     match_end_fixup_count = 0
-    enum_table = alloc(512 * 16)
+    enum_table = cg_alloc_or_die(512 * 16, "a compiler table")
     enum_count = 0
     // STATIC_TABLE_CAP static declarations to start with, and it GROWS from
     // there -- see static_table_ensure. The old ceiling was reached by real
@@ -581,63 +621,63 @@ fn codegen_init(uint64 capacity, uint64 source, uint64 tokens) {
     // requirement static_table_ensure explains at length -- and alloc() promises
     // nothing about zeroed memory once krc is running on bare metal.
     static_cap = STATIC_TABLE_CAP
-    static_table = alloc(static_cap * 8)
-    static_array_sizes = alloc(static_cap * 4)
-    static_init_values = alloc(static_cap * 8)
-    static_elem_sizes = alloc(static_cap * 4)
-    static_fkinds = alloc(static_cap * 4)
-    static_kinds = alloc(static_cap * 4)
+    static_table = cg_alloc_or_die(static_cap * 8, "a compiler table")
+    static_array_sizes = cg_alloc_or_die(static_cap * 4, "a compiler table")
+    static_init_values = cg_alloc_or_die(static_cap * 8, "a compiler table")
+    static_elem_sizes = cg_alloc_or_die(static_cap * 4, "a compiler table")
+    static_fkinds = cg_alloc_or_die(static_cap * 4, "a compiler table")
+    static_kinds = cg_alloc_or_die(static_cap * 4, "a compiler table")
     memset(static_table, 0, static_cap * 8)
     memset(static_array_sizes, 0, static_cap * 4)
     memset(static_init_values, 0, static_cap * 8)
     memset(static_elem_sizes, 0, static_cap * 4)
     memset(static_fkinds, 0, static_cap * 4)
     memset(static_kinds, 0, static_cap * 4)
-    slice_len_table = alloc(32 * 8)
-    device_table = alloc(64 * 16)
-    device_field_table = alloc(256 * 16)
-    extern_fn_table = alloc(256 * 8)
+    slice_len_table = cg_alloc_or_die(32 * 8, "a compiler table")
+    device_table = cg_alloc_or_die(64 * 16, "a compiler table")
+    device_field_table = cg_alloc_or_die(256 * 16, "a compiler table")
+    extern_fn_table = cg_alloc_or_die(256 * 8, "a compiler table")
     extern_fn_count = 0
-    builtin_override_table = alloc(64 * 8)
+    builtin_override_table = cg_alloc_or_die(64 * 8, "a compiler table")
     builtin_override_count = 0
-    extern_call_sites = alloc(1024 * 16)
+    extern_call_sites = cg_alloc_or_die(1024 * 16, "a compiler table")
     extern_call_count = 0
     lkm_uses_kmalloc = 0
     lkm_uses_kfree = 0
     static_count = 0
     static_data_size = 0
-    static_fixups = alloc(8192 * 8)
+    static_fixups = cg_alloc_or_die(8192 * 8, "a compiler table")
     static_fixup_count = 0
     static_fixup_cap = 8192
-    str_buf = alloc(65536)
+    str_buf = cg_alloc_or_die(65536, "a compiler table")
     str_len = 0
     str_buf_cap = 65536
-    str_fixups = alloc(4096 * 8)
+    str_fixups = cg_alloc_or_die(4096 * 8, "a compiler table")
     str_fixup_count = 0
     str_fixup_cap = 4096
     a64_var_base = 32
-    win_iat_fixups = alloc(4096 * 8)
+    win_iat_fixups = cg_alloc_or_die(4096 * 8, "a compiler table")
     win_iat_fixup_count = 0
-    a64_win_iat_fixups = alloc(4096 * 8)
+    a64_win_iat_fixups = cg_alloc_or_die(4096 * 8, "a compiler table")
     a64_win_iat_fixup_count = 0
-    a64_digit_buf = alloc(32)
-    type_alias_table = alloc(64 * 8)
+    a64_digit_buf = cg_alloc_or_die(32, "a compiler table")
+    type_alias_table = cg_alloc_or_die(64 * 8, "a compiler table")
     type_alias_count = 0
-    arr_elem_table = alloc(512 * 16)
+    arr_elem_table = cg_alloc_or_die(512 * 16, "a compiler table")
     arr_elem_count = 0
-    fnaddr_fixup_table = alloc(1024 * 8)
+    fnaddr_fixup_table = cg_alloc_or_die(1024 * 8, "a compiler table")
     fnaddr_fixup_count = 0
     fnaddr_fixup_cap = 1024
     pin_param0_offset = 0xFFFFFFFF
     pin_param1_offset = 0xFFFFFFFF
-    fn_ret_float_table = alloc(512 * 8)
-    fn_ret_signed_table = alloc(512 * 8)
+    fn_ret_float_table = cg_alloc_or_die(512 * 8, "a compiler table")
+    fn_ret_signed_table = cg_alloc_or_die(512 * 8, "a compiler table")
     fn_ret_float_count = 0
-    fn_ret_struct_table = alloc(512 * 8)
+    fn_ret_struct_table = cg_alloc_or_die(512 * 8, "a compiler table")
     fn_ret_struct_count = 0
-    line_table = alloc(65536 * 16)
+    line_table = cg_alloc_or_die(65536 * 16, "a compiler table")
     line_table_count = 0
-    debug_file_table = alloc(256 * 8)
+    debug_file_table = cg_alloc_or_die(256 * 8, "a compiler table")
     debug_file_count = 0
 }
 
@@ -684,7 +724,10 @@ fn emit_byte(uint8 b) {
         // hard swap with the old fixed cap.
         uint64 new_cap = out_cap * 2
         if new_cap < 4096 { new_cap = 4096 }
-        out_buf = grow_buf(out_buf, out_len, new_cap)
+        uint64 new_buf = cg_alloc_or_die(new_cap, "the output buffer")
+        memcpy(new_buf, out_buf, out_len)
+        dealloc(out_buf)
+        out_buf = new_buf
         out_cap = new_cap
     }
     uint64 p = out_buf + out_len
@@ -1468,7 +1511,7 @@ fn diag_edit_distance(uint64 tok_a, uint64 tok_b) -> uint64 {
     uint64 ldiff = 0
     if la > lb { ldiff = la - lb } else { ldiff = lb - la }
     if ldiff > 2 { return ldiff }
-    if diag_lev_rows == 0 { diag_lev_rows = alloc(2 * 65 * 8) }
+    if diag_lev_rows == 0 { diag_lev_rows = cg_alloc(2 * 65 * 8) }
     uint64 prev = diag_lev_rows
     uint64 cur = diag_lev_rows + 520
     uint64 j = 0
@@ -1527,7 +1570,7 @@ fn diag_edit_distance(uint64 tok_a, uint64 tok_b) -> uint64 {
 static uint64 diag_sugg_cell = 0
 
 fn diag_sugg_reset() {
-    if diag_sugg_cell == 0 { diag_sugg_cell = alloc(16) }
+    if diag_sugg_cell == 0 { diag_sugg_cell = cg_alloc(16) }
     uint64 bp = diag_sugg_cell
     uint64 dmax = 3
     unsafe { *(bp as uint64) = dmax }
@@ -1671,7 +1714,7 @@ fn var_reset() {
 
 fn var_type_init() {
     if var_type_table == 0 {
-        var_type_table = alloc(8192)
+        var_type_table = cg_alloc(8192)
     }
 }
 
@@ -2000,7 +2043,7 @@ fn struct_fields_ensure(uint64 needed) {
     uint64 new_fields = struct_fields_max
     while needed >= new_fields { new_fields = new_fields * 2 }
     uint64 new_entry = 16 + new_fields * 16
-    uint64 nt = alloc(struct_cap * new_entry)
+    uint64 nt = cg_alloc(struct_cap * new_entry)
     uint64 i = 0
     while i < struct_count {
         memcpy(nt + i * new_entry, struct_table + i * struct_entry_size, struct_entry_size)
@@ -2336,7 +2379,7 @@ static uint64 static_struct_count = 0
 fn static_struct_register(uint64 name_tok, uint64 struct_idx) {
     if static_struct_table == 0 {
         static_struct_cap = 256
-        static_struct_table = alloc(static_struct_cap * 8)
+        static_struct_table = cg_alloc(static_struct_cap * 8)
     }
     if static_struct_count >= static_struct_cap {
         uint64 old_bytes = static_struct_cap * 8
@@ -2812,7 +2855,7 @@ fn static_hash_sync() {
         if ncap == 0 { ncap = 4096 }
         while ncap < need { ncap = ncap * 2 }
         if static_hash_tbl != 0 { dealloc(static_hash_tbl) }
-        static_hash_tbl = alloc(ncap * 8)
+        static_hash_tbl = cg_alloc(ncap * 8)
         static_hash_cap = ncap
         static_hash_mask = ncap - 1
         static_hash_built_n = 0
@@ -3277,7 +3320,7 @@ static uint64 fn_section_count = 0
 
 fn fn_section_init() {
     if fn_section_table == 0 {
-        fn_section_table = alloc(1024 * 16)
+        fn_section_table = cg_alloc(1024 * 16)
     }
 }
 
@@ -3955,7 +3998,7 @@ fn fn_method_reset() { fn_method_count = 0 }
 
 @export
 fn fn_method_register(uint64 name_tok) {
-    if fn_method_table == 0 { fn_method_table = alloc(512 * 4) }
+    if fn_method_table == 0 { fn_method_table = cg_alloc(512 * 4) }
     if fn_method_count >= 512 {
         cap_overflow("too many methods", 512, 0)
         exit(1)
@@ -6804,7 +6847,7 @@ fn gen_expr(uint64 node) {
             uint64 je_bodies = 0
             uint64 je_count = 0
             if is_wild == 0 {
-                je_bodies = alloc(64)
+                je_bodies = cg_alloc(64)
                 uint64 pat = wval
                 while pat != 0 {
                     uint32 pat_k_raw = ast_kind(pat)
@@ -8256,7 +8299,7 @@ fn gen_expr(uint64 node) {
             // args go in xmm registers (SysV / Win x64 ABI) rather than GPRs —
             // passing them in integer registers silently miscompiles any
             // f64-taking callee reached through call_ptr.
-            uint64 cp_fkinds = alloc(arg_count * 8 + 8)
+            uint64 cp_fkinds = cg_alloc(arg_count * 8 + 8)
             uint64 weval = wca
             uint64 ai = 0
             while weval != 0 {
@@ -8360,8 +8403,8 @@ fn gen_expr(uint64 node) {
                 // SysV: independent counters — int args fill rdi,rsi,rdx,rcx,r8,r9
                 // and float args fill xmm0..xmm5, in source order.
                 // Determine per-arg int/float register index (source order).
-                uint64 cp_iidx = alloc(arg_count * 8 + 8)
-                uint64 cp_fidx = alloc(arg_count * 8 + 8)
+                uint64 cp_iidx = cg_alloc(arg_count * 8 + 8)
+                uint64 cp_fidx = cg_alloc(arg_count * 8 + 8)
                 uint64 nint = 0
                 uint64 nflt = 0
                 uint64 ci = 0
@@ -8418,7 +8461,7 @@ fn gen_expr(uint64 node) {
                 // already carry each argument's per-class index, so an argument
                 // overflows exactly when its own class ran out: 6 GPRs, and 6
                 // xmm here because that is how many the loader above fills.
-                uint64 cpo = alloc(arg_count * 8 + 8)
+                uint64 cpo = cg_alloc(arg_count * 8 + 8)
                 uint64 cpo_n = 0
                 uint64 cq = 0
                 while cq < arg_count {
@@ -10296,7 +10339,7 @@ fn gen_expr(uint64 node) {
         // The overflow set is replayed from the SAME rule the two passes above
         // use: a float that found no xmm (8 of them), an int that found no GPR
         // (6, less one when sret has taken rdi). Order is ARGUMENT order.
-        uint64 ovf_idx = alloc(arg_count * 8 + 8)
+        uint64 ovf_idx = cg_alloc(arg_count * 8 + 8)
         uint64 ovf_n = 0
         uint64 ovf_has_struct = 0
         uint64 ovf_f = 0
@@ -10666,7 +10709,7 @@ fn asm_seen_record(uint64 str_tok) {
     if asm_seen_count >= asm_seen_cap {
         uint64 ncap = 256
         if asm_seen_cap != 0 { ncap = asm_seen_cap * 2 }
-        uint64 nbuf = alloc(ncap * 8)
+        uint64 nbuf = cg_alloc(ncap * 8)
         uint64 i = 0
         while i < asm_seen_count {
             uint64 src = asm_seen_toks + i * 8
@@ -13101,7 +13144,7 @@ fn gen_stmt(uint64 node) {
             uint64 je_bodies = 0
             uint64 je_count = 0
             if is_wild == 0 {
-                je_bodies = alloc(64)
+                je_bodies = cg_alloc(64)
                 uint64 pat = wval
                 while pat != 0 {
                     uint32 pat_k_raw = ast_kind(pat)
@@ -14741,15 +14784,15 @@ fn dce_hash_clear(uint64 tbl, uint64 slots) {
 
 fn dce_init() {
     dce_table_cap = 2048
-    dce_table = alloc(dce_table_cap * 4)
+    dce_table = cg_alloc(dce_table_cap * 4)
     dce_count = 0
     dce_fn_map_cap = 2048
-    dce_fn_map = alloc(dce_fn_map_cap * 8)
+    dce_fn_map = cg_alloc(dce_fn_map_cap * 8)
     dce_fn_map_count = 0
     dce_enabled = 1
     dce_keep_all = 0
     dce_hash_cap = 8192
-    dce_hash_tbl = alloc(dce_hash_cap * 4)
+    dce_hash_tbl = cg_alloc(dce_hash_cap * 4)
     dce_hash_clear(dce_hash_tbl, dce_hash_cap)
 }
 
@@ -14773,7 +14816,7 @@ fn dce_capacity_ensure() {
     if (dce_count + 1) * 2 <= dce_hash_cap { return }
     uint64 ncap = dce_hash_cap * 2
     while (dce_count + 1) * 2 > ncap { ncap = ncap * 2 }
-    uint64 ntbl = alloc(ncap * 4)
+    uint64 ntbl = cg_alloc(ncap * 4)
     dce_hash_clear(ntbl, ncap)
     // Re-insert from dce_table, which is the authoritative list of live names.
     uint64 nmask = ncap - 1
@@ -15515,7 +15558,7 @@ fn emit_elf_debug_footer(uint64 text_start, uint64 input_path) {
     // Primitive-type name strings. Offsets referenced from base_type DIEs.
     // Index matches the entries emitted below: u8, u16, u32, u64, i8,
     // i16, i32, i64, f32, f64, bool (11 entries).
-    uint64 ds_type_name_offs = alloc(11 * 8)
+    uint64 ds_type_name_offs = cg_alloc(11 * 8)
     // helper-style body inline to avoid another function: write name N
     // into .debug_str and stash offset.
     uint64 ti_idx = 0
@@ -15565,7 +15608,7 @@ fn emit_elf_debug_footer(uint64 text_start, uint64 input_path) {
     emit_byte(98); emit_byte(111); emit_byte(111); emit_byte(108); emit_byte(0)  // bool
 
     // Append every function name; record its offset.
-    uint64 ds_fn_name_offs = alloc(fn_count * 8 + 8)
+    uint64 ds_fn_name_offs = cg_alloc(fn_count * 8 + 8)
     uint64 ds_fi = 0
     while ds_fi < fn_count {
         uint64 fe = fn_table + ds_fi * 8
@@ -15592,7 +15635,7 @@ fn emit_elf_debug_footer(uint64 text_start, uint64 input_path) {
     // And every debug_var name.
     uint64 ds_var_name_offs = 0
     if debug_var_count > 0 {
-        ds_var_name_offs = alloc(debug_var_count * 8)
+        ds_var_name_offs = cg_alloc(debug_var_count * 8)
         uint64 dvi = 0
         while dvi < debug_var_count {
             uint64 dve = debug_var_table + dvi * 16
@@ -15646,7 +15689,7 @@ fn emit_elf_debug_footer(uint64 text_start, uint64 input_path) {
     //   + 1 CU abbrev code + 4+4+2+4+8+8 CU attrs = 52 bytes).
     // Storing each emitted offset into a table keyed by the index
     // above lets future variable DIEs reference them via DW_FORM_ref4.
-    uint64 type_die_offs = alloc(11 * 8)
+    uint64 type_die_offs = cg_alloc(11 * 8)
     uint64 tdi = 0
     while tdi < 11 {
         uint64 tdo_slot = type_die_offs + tdi * 8
@@ -15790,7 +15833,7 @@ fn emit_elf_debug_footer(uint64 text_start, uint64 input_path) {
     while zi < 24 { emit_byte(0); zi = zi + 1 }
 
     // Build strtab: collect all function names into a temp buffer to know offsets
-    uint64 name_buf = alloc(fn_count * 64 + 64)
+    uint64 name_buf = cg_alloc(fn_count * 64 + 64)
     uint64 name_buf_pos = 1  // offset 0 is \0
     uint64[512] name_offsets  // strtab offset per function
 
@@ -16479,7 +16522,7 @@ fn emit_elf_lkm(uint64 text_len, uint64 data_len, uint64 arch) {
 
     // Save the generated code+data blob.
     uint64 blob_len = out_len
-    uint64 blob = alloc(blob_len + 16)
+    uint64 blob = cg_alloc(blob_len + 16)
     uint64 ci = 0
     while ci < blob_len {
         uint64 sp = out_buf + ci
@@ -16502,7 +16545,7 @@ fn emit_elf_lkm(uint64 text_len, uint64 data_len, uint64 arch) {
     // Order: license, author, description, srcversion. We always emit a
     // srcversion (some kernel builds reject modules without one). license
     // is required by the kernel; default to "GPL" if user omitted.
-    uint64 modinfo_buf = alloc(1024)
+    uint64 modinfo_buf = cg_alloc(1024)
     uint64 mb_zi = 0
     while mb_zi < 1024 {
         uint8 zb = 0
@@ -16597,7 +16640,7 @@ fn emit_elf_lkm(uint64 text_len, uint64 data_len, uint64 arch) {
     // __version_ext_names sections (even empty), iterates zero entries,
     // hits pr_warn_once("no extended symbol version for module_layout"),
     // and returns success. See kernel/module/version.c::check_version.
-    uint64 release_buf = alloc(128)
+    uint64 release_buf = cg_alloc(128)
     uint64 release_len = _lkm_read_osrelease(release_buf, 127)
     if release_len == 0 {
         // Fallback: hardcoded value for the bootstrap host kernel.
@@ -16634,7 +16677,7 @@ fn emit_elf_lkm(uint64 text_len, uint64 data_len, uint64 arch) {
 
     // ---- Build .gnu.linkonce.this_module content (1280 bytes) ----
     uint64 sm_size = 1280
-    uint64 sm_buf = alloc(sm_size)
+    uint64 sm_buf = cg_alloc(sm_size)
     uint64 sm_zi = 0
     while sm_zi < sm_size {
         uint8 zb = 0
@@ -16715,14 +16758,14 @@ fn emit_elf_lkm(uint64 text_len, uint64 data_len, uint64 arch) {
     // ---- Build .strtab content ----
     // Same loop as emit_elf_relocatable for fn names + extern names,
     // then add init_module, cleanup_module, __this_module.
-    uint64 strtab_buf = alloc(lkm_strtab_bytes())
+    uint64 strtab_buf = cg_alloc(lkm_strtab_bytes())
     uint64 strtab_len = 1
     uint64 sb0 = strtab_buf
     uint8 nul = 0
     unsafe { *(sb0 as uint8) = nul }
 
     uint64 sym_count_user_fns = fn_count
-    uint64 name_offsets = alloc(fn_count * 8 + 8)
+    uint64 name_offsets = cg_alloc(fn_count * 8 + 8)
     uint64 fi = 0
     uint64 main_fn_idx = 0xFFFFFFFF
     while fi < fn_count {
@@ -16756,7 +16799,7 @@ fn emit_elf_lkm(uint64 text_len, uint64 data_len, uint64 arch) {
 
     uint64 extern_name_offsets = 0
     if extern_fn_count > 0 {
-        extern_name_offsets = alloc(extern_fn_count * 8)
+        extern_name_offsets = cg_alloc(extern_fn_count * 8)
         uint64 ei = 0
         while ei < extern_fn_count {
             uint64 xe = extern_fn_table + ei * 8
@@ -18008,7 +18051,7 @@ fn emit_elf_lkm(uint64 text_len, uint64 data_len, uint64 arch) {
 fn emit_elf_relocatable(uint64 text_len, uint64 data_len, uint64 arch) {
     // Save the generated code+data blob
     uint64 blob_len = out_len
-    uint64 blob = alloc(blob_len + 16)
+    uint64 blob = cg_alloc(blob_len + 16)
     uint64 ci = 0
     while ci < blob_len {
         uint64 sp = out_buf + ci
@@ -18044,7 +18087,7 @@ fn emit_elf_relocatable(uint64 text_len, uint64 data_len, uint64 arch) {
     // idx 1: function names from fn_table, each null-terminated
     // We'll also compute symtab entries count.
     // Allocate temp buffer for strtab content
-    uint64 strtab_buf = alloc(reloc_strtab_bytes())
+    uint64 strtab_buf = cg_alloc(reloc_strtab_bytes())
     uint64 strtab_len = 1  // start at 1 (index 0 = null byte)
     uint64 sb0 = strtab_buf
     uint8 nul = 0
@@ -18058,7 +18101,7 @@ fn emit_elf_relocatable(uint64 text_len, uint64 data_len, uint64 arch) {
 
     // Build strtab: copy each function name from source
     // Also track name offsets for symtab
-    uint64 name_offsets = alloc(fn_count * 8)
+    uint64 name_offsets = cg_alloc(fn_count * 8)
     uint64 fi = 0
     // Track which function index is "main" for making it GLOBAL
     uint64 main_fn_idx = 0xFFFFFFFF
@@ -18098,7 +18141,7 @@ fn emit_elf_relocatable(uint64 text_len, uint64 data_len, uint64 arch) {
     // Append extern function names to strtab and record their offsets
     uint64 extern_name_offsets = 0
     if extern_fn_count > 0 {
-        extern_name_offsets = alloc(extern_fn_count * 8)
+        extern_name_offsets = cg_alloc(extern_fn_count * 8)
         uint64 ei = 0
         while ei < extern_fn_count {
             uint64 xe = extern_fn_table + ei * 8
@@ -18545,7 +18588,7 @@ fn emit_elf_relocatable(uint64 text_len, uint64 data_len, uint64 arch) {
 fn emit_macho_relocatable(uint64 text_len, uint64 data_len, uint64 arch) {
     // Save the generated code blob (text + data are already in out_buf).
     uint64 blob_len = out_len
-    uint64 blob = alloc(blob_len + 16)
+    uint64 blob = cg_alloc(blob_len + 16)
     uint64 mi = 0
     while mi < blob_len {
         uint64 sp = out_buf + mi
@@ -18565,14 +18608,14 @@ fn emit_macho_relocatable(uint64 text_len, uint64 data_len, uint64 arch) {
     //   idx 0: \0 (null)
     //   idx 1: _<fn_name>\0 for each local/main
     //   idx N: _<extern_name>\0 for each extern
-    uint64 strtab_buf = alloc(reloc_strtab_bytes())
+    uint64 strtab_buf = cg_alloc(reloc_strtab_bytes())
     uint64 strtab_len = 1
     uint64 sb0 = strtab_buf
     uint8 nul = 0
     unsafe { *(sb0 as uint8) = nul }
 
     // Track main fn index; track strtab offsets for each symbol
-    uint64 fn_str_offs = alloc(fn_count * 8)
+    uint64 fn_str_offs = cg_alloc(fn_count * 8)
     uint64 main_fn_idx = 0xFFFFFFFF
     uint64 mfi = 0
     while mfi < fn_count {
@@ -18610,7 +18653,7 @@ fn emit_macho_relocatable(uint64 text_len, uint64 data_len, uint64 arch) {
     // Extern names
     uint64 ext_str_offs = 0
     if extern_fn_count > 0 {
-        ext_str_offs = alloc(extern_fn_count * 8)
+        ext_str_offs = cg_alloc(extern_fn_count * 8)
         uint64 mei = 0
         while mei < extern_fn_count {
             uint64 xe = extern_fn_table + mei * 8
@@ -18864,7 +18907,7 @@ fn emit_macho_relocatable(uint64 text_len, uint64 data_len, uint64 arch) {
 @export
 fn emit_coff_relocatable(uint64 text_len, uint64 data_len, uint64 arch) {
     uint64 blob_len = out_len
-    uint64 blob = alloc(blob_len + 16)
+    uint64 blob = cg_alloc(blob_len + 16)
     uint64 ci = 0
     while ci < blob_len {
         uint64 sp = out_buf + ci
@@ -18896,7 +18939,7 @@ fn emit_coff_relocatable(uint64 text_len, uint64 data_len, uint64 arch) {
 
     // Build string table up front so we know its size.
     // String table starts with a 4-byte length field (inclusive of itself).
-    uint64 strtab_buf = alloc(reloc_strtab_bytes())
+    uint64 strtab_buf = cg_alloc(reloc_strtab_bytes())
     uint64 strtab_len = 4  // reserve first 4 bytes for length
     // Store 4 bytes of zeros initially (we'll fill at the end)
     uint64 sb0 = strtab_buf
@@ -18911,7 +18954,7 @@ fn emit_coff_relocatable(uint64 text_len, uint64 data_len, uint64 arch) {
 
     // For each symbol, decide: inline (≤8 bytes) or string-table offset
     // We record: inline_flag (u8), 8 inline bytes, or strtab offset (u32).
-    uint64 sym_meta = alloc(total_syms * 16)
+    uint64 sym_meta = cg_alloc(total_syms * 16)
     uint64 smi = 0
     while smi < fn_count {
         uint64 fentry = fn_table + smi * 8

@@ -239,8 +239,8 @@ fn lz4_compress_block(uint64 src, uint64 src_len, uint64 dst) -> uint64 {
     }
 
     uint64 hash_size = 65536
-    uint64 hash_table = alloc(hash_size * 4)
-    uint64 hash_table2 = alloc(hash_size * 4)
+    uint64 hash_table = cg_alloc(hash_size * 4)
+    uint64 hash_table2 = cg_alloc(hash_size * 4)
     memset(hash_table, 255, hash_size * 4)
     memset(hash_table2, 255, hash_size * 4)
 

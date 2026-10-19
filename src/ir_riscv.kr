@@ -591,7 +591,7 @@ static uint64 rv_noc_count = 0
 // ~42 before the guards — programs that used to compile started hard-erroring.
 // The count resets per function, so 4096 is generous rather than expensive.
 fn rv_mark_noc(uint64 start, uint64 end) {
-    if rv_noc_ranges == 0 { rv_noc_ranges = alloc(4096 * 8) }
+    if rv_noc_ranges == 0 { rv_noc_ranges = cg_alloc(4096 * 8) }
     if rv_noc_count >= 4096 {
         rv_err("error: riscv32: too many non-compressible regions\n")
     }
@@ -659,7 +659,7 @@ fn rv_compress_function(uint64 start, uint64 fix_start, uint64 line_start, uint6
     // map[i] = new ABSOLUTE offset of the instruction that was at
     // start + i*4; map[nwords] = new end-of-function offset (a block
     // offset or line record taken at the old end must remap too).
-    uint64 map = alloc((nwords + 1) * 4)
+    uint64 map = cg_alloc((nwords + 1) * 4)
     uint64 rd_off = start
     uint64 wr_off = start
     uint64 i = 0
@@ -2557,21 +2557,21 @@ fn ir_riscv_gen(uint64 fn_node) {
     if bo_need < 4096 { bo_need = 4096 }
     if bo_need > ir_block_offsets_cap {
         if ir_block_offsets != 0 { dealloc(ir_block_offsets) }
-        ir_block_offsets = alloc(bo_need * 8)
+        ir_block_offsets = cg_alloc(bo_need * 8)
         ir_block_offsets_cap = bo_need
     }
     uint64 br_need = ir_bb_count * 4
     if br_need < 2048 { br_need = 2048 }
     if br_need > ir_br_fixups_cap {
         if ir_br_fixups != 0 { dealloc(ir_br_fixups) }
-        ir_br_fixups = alloc(br_need * 8)
+        ir_br_fixups = cg_alloc(br_need * 8)
         ir_br_fixups_cap = br_need
     }
     uint64 ret_need = ir_bb_count
     if ret_need < 1024 { ret_need = 1024 }
     if ret_need > ir_ret_fixups_cap {
         if ir_ret_fixups != 0 { dealloc(ir_ret_fixups) }
-        ir_ret_fixups = alloc(ret_need * 4)
+        ir_ret_fixups = cg_alloc(ret_need * 4)
         ir_ret_fixups_cap = ret_need
     }
     ir_br_fixup_count = 0

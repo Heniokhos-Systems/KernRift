@@ -138,7 +138,7 @@ static uint64 ast_capacity = 0  // max nodes
 
 @export
 fn ast_init(uint64 max_nodes) {
-    ast_buf = alloc(max_nodes * 32)
+    ast_buf = cg_alloc(max_nodes * 32)
     ast_count = 0
     ast_capacity = max_nodes
 }

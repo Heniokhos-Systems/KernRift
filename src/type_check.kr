@@ -81,7 +81,7 @@ static uint64 tc_fn_hash_built_n = 0
 
 fn tc_fn_hash_sync() {
     if tc_fn_hash_tbl == 0 {
-        tc_fn_hash_tbl = alloc(4096 * 8)
+        tc_fn_hash_tbl = cg_alloc(4096 * 8)
         uint64 ci = 0
         while ci < 4096 {
             uint64 sp = tc_fn_hash_tbl + ci * 8 + 4
@@ -149,11 +149,11 @@ fn tc_fn_node_lookup(uint64 name_tok) -> uint64 {
 fn tc_init() {
     if tc_local_table == 0 {
         tc_local_cap = 4096
-        tc_local_table = alloc(tc_local_cap * 8)
+        tc_local_table = cg_alloc(tc_local_cap * 8)
     }
     tc_locals_reset()
     if tc_fn_node_table == 0 {
-        tc_fn_node_table = alloc(1024 * 8)
+        tc_fn_node_table = cg_alloc(1024 * 8)
     }
     tc_fn_node_count = 0
 }
@@ -169,7 +169,7 @@ static uint64 tc_local_gen = 0
 fn tc_locals_reset() {
     tc_local_count = 0
     if tc_local_hash_tbl == 0 {
-        tc_local_hash_tbl = alloc(16384 * 12)
+        tc_local_hash_tbl = cg_alloc(16384 * 12)
         memset(tc_local_hash_tbl, 0, 16384 * 12)
     }
     tc_local_gen = tc_local_gen + 1

@@ -435,7 +435,7 @@ fn ir_a64_fpr_alloc() {
     ir_a64_uses_fpr = 0
     if ir_a64_fpr_map == 0 {
         ir_a64_fpr_map_cap = 65536
-        ir_a64_fpr_map = alloc(ir_a64_fpr_map_cap)
+        ir_a64_fpr_map = cg_alloc(ir_a64_fpr_map_cap)
     }
     if vcount > ir_a64_fpr_map_cap { return }
     memset(ir_a64_fpr_map, 0, vcount)
@@ -3623,21 +3623,21 @@ fn ir_emit_arm64_function(uint64 fn_node) {
     if bo_need < 4096 { bo_need = 4096 }
     if bo_need > ir_block_offsets_cap {
         if ir_block_offsets != 0 { dealloc(ir_block_offsets) }
-        ir_block_offsets = alloc(bo_need * 8)
+        ir_block_offsets = cg_alloc(bo_need * 8)
         ir_block_offsets_cap = bo_need
     }
     uint64 br_need = ir_bb_count * 4
     if br_need < 2048 { br_need = 2048 }
     if br_need > ir_br_fixups_cap {
         if ir_br_fixups != 0 { dealloc(ir_br_fixups) }
-        ir_br_fixups = alloc(br_need * 8)
+        ir_br_fixups = cg_alloc(br_need * 8)
         ir_br_fixups_cap = br_need
     }
     uint64 ret_need = ir_bb_count
     if ret_need < 1024 { ret_need = 1024 }
     if ret_need > ir_ret_fixups_cap {
         if ir_ret_fixups != 0 { dealloc(ir_ret_fixups) }
-        ir_ret_fixups = alloc(ret_need * 4)
+        ir_ret_fixups = cg_alloc(ret_need * 4)
         ir_ret_fixups_cap = ret_need
     }
     ir_br_fixup_count = 0
