@@ -341,6 +341,8 @@ above and counting instructions in `krc --emit=asm` output:
 | x86_64, `--legacy` | 3 × `mfence` |
 | **arm64, IR (default — this is what ships)** | **1 × `DSB SY`**, after the store: `LDAR W20,[X19]`, `STLR W21,[X19]`, `DSB SY` |
 | arm64, `--legacy` | 3 × `DSB SY`, after the plain `LDR` and around the plain `STR` |
+| riscv32 | no fence: a plain `lw` / `sw` (the backend relies on the single in-order hart) |
+| xtensa | 2 × `memw`, one before the `l32i` and one before the `s32i`, none after either |
 
 So on ARM64 a volatile store has *completed* before anything after it; a
 volatile load is acquire-ordered but not waited for — add an explicit
@@ -365,7 +367,7 @@ Compiler intrinsics — no imports needed.
 | Memory | `memcpy(dst, src, len)`, `memset(dst, val, len)`, `str_len(s)`, `str_eq(a, b)` |
 | Pointer load | `load8(addr)`, `load16(addr)`, `load32(addr)`, `load64(addr)` — zero-extended to `u64` |
 | Pointer store | `store8(addr, v)`, `store16(addr, v)`, `store32(addr, v)`, `store64(addr, v)` |
-| Volatile (MMIO) | `vload8/16/32/64(addr)`, `vstore8/16/32/64(addr, v)` — x86_64: `mfence`. arm64: `LDAR`/`STLR` (ordering, **not** a completion barrier); `--legacy` uses `DSB SY` instead |
+| Volatile (MMIO) | `vload8/16/32/64(addr)`, `vstore8/16/32/64(addr, v)` — x86_64: `mfence` after a load, before and after a store. arm64: `LDAR` for a load, `STLR` then `DSB SY` for a store; `--legacy` brackets a plain access with `DSB SY`. riscv32: no fence. xtensa: `memw` before each access |
 | Atomic | `atomic_load(ptr)`, `atomic_store(ptr, v)`, `atomic_cas(ptr, exp, des)`, `atomic_add/sub/and/or/xor(ptr, v)` |
 | Bitfield | `bit_get(v, n)`, `bit_set(v, n)`, `bit_clear(v, n)`, `bit_range(v, start, width)`, `bit_insert(v, start, width, bits)` |
 | Signed cmp | `signed_lt(a, b)`, `signed_gt(a, b)`, `signed_le(a, b)`, `signed_ge(a, b)` |

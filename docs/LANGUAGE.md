@@ -915,9 +915,10 @@ All widths are available:
 
 What is emitted depends on the architecture **and the backend**:
 
-A load has a barrier after it; a store has one before it (ordering it after
-every earlier access) and one after it (so nothing after it -- a later load
-included -- is performed first). Without the one after, x86 lets
+On x86_64 and ARM64 a load has a barrier after it; a store has one before it
+(ordering it after every earlier access) and one after it (so nothing after
+it -- a later load included -- is performed first). riscv32 and xtensa are
+the exceptions listed below. Without the one after, x86 lets
 `vstore64(x, 1); r = vload64(y)` read y before x is visible: two CPUs running
 the mirror image both read 0 (the `store_buffering_litmus` rows measure it).
 
@@ -928,6 +929,17 @@ the mirror image both read 0 (the `store_buffering_litmus` rows measure it).
   release form (`STLRB`/`STLRH`/`STLR`) followed by `DSB SY`.
 - **ARM64, `--legacy`**: a plain `LDR` followed by `DSB SY`; a plain `STR`
   bracketed by `DSB SY`.
+- **riscv32**: a plain access, no fence. The ordering above is NOT provided
+  by a fence there: the backend relies on the target's single in-order hart
+  (see `src/ir_riscv.kr`), so the promise holds only for that hart's own
+  program order, not against another hart or a bus master
+- **xtensa**: `MEMW` before each access (a load or a store), none after: a
+  volatile store is ordered before a later VOLATILE access (whose `MEMW`
+  waits for it), not before a later plain one
+
+The two exceptions are measured on the same program: riscv32 emits a plain
+`lw`/`sw` with no `fence` (IR and `--legacy` alike), and xtensa emits one
+`memw` immediately before each `l32i`/`s32i` and none after it.
 
 Measured by compiling `vload32` + `vstore32` and counting in `--emit=asm`:
 x86_64 IR 3 × `mfence`, x86_64 legacy 3 × `mfence`, arm64 IR 1 × `DSB SY`
