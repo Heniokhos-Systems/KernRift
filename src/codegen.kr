@@ -19277,18 +19277,19 @@ fn write_all_or_die(uint64 fd, uint64 buf, uint64 len, uint64 output_path) {
 }
 
 fn codegen_write_output(uint64 output_path) {
+    // A pending zero tail the finalize did not truncate away (fewer than a
+    // page of them) is written in 64 KiB chunks, never materialised. The
+    // chunk is allocated BEFORE -o is opened, so running out of memory here
+    // cannot leave a partial output file behind.
+    uint64 zc = 65536
+    uint64 zb = 0
+    if out_vzero != 0 {
+        zb = cg_alloc_or_die(zc, "the zero-fill chunk")
+        memset(zb, 0, zc)
+    }
     uint64 fd = open_output_or_die(output_path)
     write_all_or_die(fd, out_buf, out_len, output_path)
-    // A pending zero tail the finalize did not truncate away (fewer than a
-    // page of them) is written in 64 KiB chunks, never materialised.
     if out_vzero != 0 {
-        uint64 zc = 65536
-        uint64 zb = alloc(zc)
-        if zb == 0 {
-            write(2, "krc: out of memory for the zero-fill chunk\n", 43)
-            exit(1)
-        }
-        memset(zb, 0, zc)
         uint64 zleft = out_vzero
         while zleft > 0 {
             uint64 zn = zleft
