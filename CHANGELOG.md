@@ -4,6 +4,12 @@ All notable changes to `kernriftc` are documented in this file.
 
 ## Unreleased
 
+**Fixed: running out of stack is a clean error.** A source nested deeper
+than the stack allows, a small `ulimit -s`, or a `ulimit -v` that stops the
+stack from growing killed `krc` with SIGSEGV (status 139) and no message. On
+Linux and Android a SIGSEGV handler on its own stack now prints
+`krc: out of stack: ...` and exits 1; any other fault still ends in SIGSEGV.
+
 **Fixed: `make test` no longer leaves files in the checkout.** The smoke
 programs file_rw and file_size write a side file under a relative name, and
 the suite ran them from the repository root, so `krc_smoke_rw.tmp` and

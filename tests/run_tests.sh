@@ -26375,6 +26375,41 @@ else
     FAIL=$((FAIL + 1)); echo "FAIL: suite_abort_removes_every_tmp_name (rc=$sab_rc, left:${sab_left:- none}; output: $(printf '%s' "$sab_out" | tr '\n' '|' | head -c 160))"
 fi
 
+# --- Running out of stack is a clean error ------------------------------------
+# A source nested deeper than the stack allows used to kill the compiler with
+# SIGSEGV (status 139, no message); so did an address-space cap that stopped
+# the stack from growing. On Linux a SIGSEGV handler on its own stack now
+# reports it and exits 1 (src/main.kr, stk_guard_init). Two checks:
+#   - 20000 nested parentheses under a 1 MiB stack: exit 1, the one-line
+#     message, no output file (status 139 before);
+#   - control: a SIGSEGV that is not the stack (sent by kill to a compiler
+#     blocked opening a FIFO) still ends the process with SIGSEGV (139), so a
+#     real crash is not turned into a tidy exit 1.
+TOTAL=$((TOTAL + 1))
+STK_D=$(mktemp -d "${TMPDIR:-/tmp}/krc_stk.XXXXXX")
+STK_WHY=""
+STK_CC="$DIR/../build/krc2"
+{ printf 'fn main() {\n    uint64 x = '
+  head -c 20000 /dev/zero | tr '\0' '('; printf '1'; head -c 20000 /dev/zero | tr '\0' ')'
+  printf '\n    exit(x)\n}\n'; } > "$STK_D/deep.kr"
+STK_OUT=$( (ulimit -v 2000000; ulimit -s 1024; timeout -k 5 60 "$STK_CC" --arch=$RUN_ARCH "$STK_D/deep.kr" -o "$STK_D/deep" 2>&1) ); STK_RC=$?
+if [ "$STK_RC" != "1" ] || ! printf '%s\n' "$STK_OUT" | grep -q "^krc: out of stack: " || [ -e "$STK_D/deep" ]; then
+    STK_WHY="$STK_WHY [deep nesting, 1 MiB stack: rc=$STK_RC, output $( [ -e "$STK_D/deep" ] && echo present || echo absent ), '$(printf '%s' "$STK_OUT" | tail -1 | cut -c1-100)']"
+fi
+mkfifo "$STK_D/f.kr"
+(ulimit -v 2000000; exec "$STK_CC" --arch=$RUN_ARCH "$STK_D/f.kr" -o "$STK_D/f" > /dev/null 2>&1) &
+STK_PID=$!
+sleep 1
+kill -SEGV "$STK_PID" 2>/dev/null
+wait "$STK_PID"; STK_RC2=$?
+[ "$STK_RC2" = "139" ] || STK_WHY="$STK_WHY [kill -SEGV: rc=$STK_RC2, want 139]"
+if [ -z "$STK_WHY" ]; then
+    PASS=$((PASS + 1)); echo "  stack_exhaustion_is_a_clean_error: PASS (deep nesting in 1 MiB: exit 1 'krc: out of stack', no output; a kill -SEGV still ends in 139)"
+else
+    FAIL=$((FAIL + 1)); echo "FAIL: stack_exhaustion_is_a_clean_error$STK_WHY"
+fi
+rm -rf "$STK_D"
+
 # --- Documentation pin 5, PART B (see Part A above) --------------------------
 # README.md advertises this suite's test count. Compare it against the total
 # only now, when $TOTAL is final and already includes this row (Part A did the

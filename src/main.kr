@@ -8696,8 +8696,104 @@ fn compile_fatimage(uint64 input_path, uint64 output_path) {
     write(1, rm, str_len(rm))
 }
 
+// ---------------------------------------------------------------------------
+// Running out of stack is a clean error, not a SIGSEGV (status 139).
+//
+// The compiler recurses over the AST, and one of its frames is ~90 KB, so a
+// deeply nested source, a small `ulimit -s`, or an address-space cap that
+// stops the stack from growing (`ulimit -v`) used to kill it with SIGSEGV and
+// no word. On Linux and Android a SIGSEGV handler now runs on its own stack
+// (sigaltstack): a fault inside the main stack's reach (its start, minus the
+// stack limit, minus 1 MiB of slack) prints one line and exits 1; any other
+// fault restores the default action and re-raises, so a real crash still
+// ends in SIGSEGV. Elsewhere (macOS, Windows, bare metal) nothing changes.
+// ---------------------------------------------------------------------------
+static uint64 stk_top = 0
+static uint64 stk_reach = 0
+static uint64 stk_dfl = 0
+
+fn stk_nr(uint64 op) -> uint64 {
+    // op: 0 rt_sigaction, 1 sigaltstack, 2 getpid, 3 kill, 4 prlimit64
+    uint64 a = get_arch_id()
+    if a == 1 || a == 3 || a == 5 || a == 8 {
+        if op == 0 { return 13 }
+        if op == 1 { return 131 }
+        if op == 2 { return 39 }
+        if op == 3 { return 62 }
+        return 302
+    }
+    if op == 0 { return 134 }
+    if op == 1 { return 132 }
+    if op == 2 { return 172 }
+    if op == 3 { return 129 }
+    return 261
+}
+
+// The handler: SA_SIGINFO, so (signal, siginfo, ucontext); si_addr is at +16.
+fn stk_fault(uint64 sig, uint64 info, uint64 uctx) {
+    uint64 addr = load64(info + 16)
+    if addr < stk_top && stk_top - addr <= stk_reach {
+        uint64 m = "krc: out of stack: the source nests too deeply for the stack this process may use (raise `ulimit -s`, or `ulimit -v` if it is capped)\n"
+        write(2, m, str_len(m))
+        exit(1)
+    }
+    // Not the stack: the default action, and the same signal again. The
+    // handler runs with SA_NODEFER, so the kill is delivered at once.
+    syscall_raw(stk_nr(0), sig, stk_dfl, 0, 8, 0, 0)
+    syscall_raw(stk_nr(3), syscall_raw(stk_nr(2), 0, 0, 0, 0, 0, 0), sig, 0, 0, 0, 0)
+    exit(139)
+}
+
+// Linux/Android only (the callers test get_target_os() with literals, so the
+// raw syscalls are unreachable in the other slices). `top` is an address in
+// main's frame.
+fn stk_guard_init(uint64 top) {
+    uint64 alt_size = 262144
+    uint64 alt = alloc(alt_size)
+    uint64 ss = alloc(24)
+    uint64 act = alloc(32)
+    uint64 rl = alloc(16)
+    stk_dfl = alloc(32)
+    if alt == 0 || ss == 0 || act == 0 || rl == 0 || stk_dfl == 0 { return }
+    memset(stk_dfl, 0, 32)
+    // The reach: RLIMIT_STACK's soft limit (infinity: 1 TiB) plus 1 MiB.
+    store64(rl, 0)
+    store64(rl + 8, 0)
+    uint64 lim = 0x10000000000
+    if syscall_raw(stk_nr(4), 0, 3, 0, rl, 0, 0) == 0 {
+        uint64 cur = load64(rl)
+        if cur < lim { lim = cur }
+    }
+    stk_top = top
+    stk_reach = lim + 1048576
+    // stack_t: ss_sp, ss_flags (int, padded), ss_size
+    store64(ss, alt)
+    store64(ss + 8, 0)
+    store64(ss + 16, alt_size)
+    if syscall_raw(stk_nr(1), ss, 0, 0, 0, 0, 0) != 0 { return }
+    // kernel sigaction: handler, flags, restorer, mask. SA_SIGINFO 0x4 |
+    // SA_ONSTACK 0x08000000 | SA_NODEFER 0x40000000. x86_64 refuses to
+    // deliver to a handler without SA_RESTORER (0x04000000: it raises a
+    // second SIGSEGV instead); the handler never returns, so the restorer is
+    // never used and names the handler itself.
+    uint64 a = get_arch_id()
+    store64(act, fn_addr("stk_fault"))
+    store64(act + 8, 0x48000004)
+    store64(act + 16, 0)
+    if a == 1 || a == 3 || a == 5 || a == 8 {
+        store64(act + 8, 0x4C000004)
+        store64(act + 16, fn_addr("stk_fault"))
+    }
+    store64(act + 24, 0)
+    syscall_raw(stk_nr(0), 11, act, 0, 8, 0, 0)
+}
+
 @export
 fn main() {
+    // Out of stack is a clean error on Linux and Android (stk_guard_init).
+    uint8[8] stk_probe
+    if get_target_os() == 0 { stk_guard_init(stk_probe) }
+    if get_target_os() == 3 { stk_guard_init(stk_probe) }
     // Windows: parse raw GetCommandLineA result into argc/argv
     if cli_argc == 0xFFFFFFFF {
         win_init_args()
