@@ -4,9 +4,10 @@
 # Termux on Android 14+ denies raw execve of files in /data/data/<app>/.
 # Our runner binary (kr-bin) does a raw syscall and gets EACCES when it
 # tries to launch the extracted slice. To work around this, this wrapper
-# makes a file of its own for the run (mktemp, under $TMPDIR, else the
-# current directory) and names it in $KR_EXEC_FALLBACK; when kr-bin cannot
-# exec, it writes the slice there, chmods it and exits 120. We catch that
+# makes a file of its own for the run (mktemp, under $TMPDIR -- which Termux
+# always sets -- else /tmp, never the current directory) and names it in
+# $KR_EXEC_FALLBACK; when kr-bin cannot exec, it writes the slice there,
+# chmods it and exits 120. We catch that
 # here and run the file from the user's shell, where the Termux libc
 # LD_PRELOAD wrapper makes exec succeed, then remove it. Two runs at once
 # get two files, and none is left behind.
@@ -23,7 +24,7 @@ if [ -z "${KRBIN:-}" ] || [ ! -x "$KRBIN" ]; then
     exit 1
 fi
 
-fb=$(mktemp "${TMPDIR:-.}/kr-exec.XXXXXX" 2>/dev/null) || fb=""
+fb=$(mktemp "${TMPDIR:-/tmp}/kr-exec.XXXXXX" 2>/dev/null) || fb=""
 [ -z "$fb" ] || trap 'rm -f "$fb"' EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
