@@ -122,7 +122,7 @@ run_test() {
         $KRC $KRC_FLAGS "$REPO_ROOT/test_tmp_$$.kr" -o /tmp/krc_test_$$ 2>&1 | head -3
         FAIL=$((FAIL + 1))
     fi
-    rm -f "$REPO_ROOT/test_tmp_$$.kr" /tmp/krc_test_$$
+    rm -f "$REPO_ROOT/test_tmp_$$.kr" /tmp/krc_test_$$ /tmp/krc_test_$$.kr
 }
 
 # Like run_test, but bounds wall-clock time. A timeout is reported distinctly
@@ -154,7 +154,7 @@ run_test_timed() {
         echo "FAIL: $name (compilation failed)"
         FAIL=$((FAIL + 1))
     fi
-    rm -f "$REPO_ROOT/test_tmp_$$.kr" /tmp/krc_test_$$
+    rm -f "$REPO_ROOT/test_tmp_$$.kr" /tmp/krc_test_$$ /tmp/krc_test_$$.kr
 }
 
 run_test_output() {
@@ -190,7 +190,7 @@ run_test_output() {
         echo "FAIL: $name (compilation failed)"
         FAIL=$((FAIL + 1))
     fi
-    rm -f "$REPO_ROOT/test_tmp_$$.kr" /tmp/krc_test_$$
+    rm -f "$REPO_ROOT/test_tmp_$$.kr" /tmp/krc_test_$$ /tmp/krc_test_$$.kr
 }
 
 # A source that must NOT compile, and the diagnostic that must say why.
@@ -213,7 +213,7 @@ run_test_rejects() {
     local rc
     out="$($KRC $KRC_FLAGS "$REPO_ROOT/test_tmp_$$.kr" -o /tmp/krc_test_$$ 2>&1)"
     rc=$?
-    rm -f "$REPO_ROOT/test_tmp_$$.kr" /tmp/krc_test_$$
+    rm -f "$REPO_ROOT/test_tmp_$$.kr" /tmp/krc_test_$$ /tmp/krc_test_$$.kr
     if [ $rc -eq 0 ]; then
         echo "FAIL: $name (compiled; expected a rejection)"
         FAIL=$((FAIL + 1))
@@ -3794,7 +3794,7 @@ if [ "$ARCH" != "aarch64" ]; then
         echo "FAIL: msr_compile (compilation failed)"
         FAIL=$((FAIL + 1))
     fi
-    rm -f "$REPO_ROOT/test_tmp_$$.kr" /tmp/krc_test_$$
+    rm -f "$REPO_ROOT/test_tmp_$$.kr" /tmp/krc_test_$$ /tmp/krc_test_$$.kr
 
     TOTAL=$((TOTAL + 1))
     printf 'fn main() { exit(42) }\n@naked fn msr_test() { asm("wrmsr") }\n' > /tmp/krc_test_$$.kr
@@ -3811,7 +3811,7 @@ if [ "$ARCH" != "aarch64" ]; then
         echo "FAIL: msr_wrmsr_compile (compilation failed)"
         FAIL=$((FAIL + 1))
     fi
-    rm -f "$REPO_ROOT/test_tmp_$$.kr" /tmp/krc_test_$$
+    rm -f "$REPO_ROOT/test_tmp_$$.kr" /tmp/krc_test_$$ /tmp/krc_test_$$.kr
 else
     TOTAL=$((TOTAL + 1)); skip_row msr_compile "x86-only"
     TOTAL=$((TOTAL + 1)); skip_row msr_wrmsr_compile "x86-only"
@@ -6106,7 +6106,7 @@ else
     echo "FAIL: migration_apply (command failed)"
     FAIL=$((FAIL + 1))
 fi
-rm -f /tmp/krc_mig2_$$.kr /tmp/krc_mig2_bin_$$
+rm -f /tmp/krc_mig2_$$.kr /tmp/krc_mig2_$$.kr.lcbak /tmp/krc_mig2_bin_$$
 
 # krc lc on a file with unsafe ops should report legacy_ptr_ops
 TOTAL=$((TOTAL + 1))
@@ -8933,7 +8933,7 @@ else
     echo "FAIL: migration_types (command failed)"
     FAIL=$((FAIL + 1))
 fi
-rm -f /tmp/krc_migtypes_$$.kr
+rm -f /tmp/krc_migtypes_$$.kr /tmp/krc_migtypes_$$.kr.lcbak
 
 # --- Bootstrap test ---
 echo ""
@@ -10320,7 +10320,7 @@ else
     echo "FAIL: debug_divzero (compilation failed)"
     FAIL=$((FAIL + 1))
 fi
-rm -f "$REPO_ROOT/test_tmp_$$.kr" /tmp/krc_test_$$
+rm -f "$REPO_ROOT/test_tmp_$$.kr" /tmp/krc_test_$$ /tmp/krc_test_$$.kr
 
 # Overflow test
 TOTAL=$((TOTAL + 1))
@@ -10340,7 +10340,7 @@ else
     echo "FAIL: debug_overflow (compilation failed)"
     FAIL=$((FAIL + 1))
 fi
-rm -f "$REPO_ROOT/test_tmp_$$.kr" /tmp/krc_test_$$
+rm -f "$REPO_ROOT/test_tmp_$$.kr" /tmp/krc_test_$$ /tmp/krc_test_$$.kr
 
 # Null pointer test
 TOTAL=$((TOTAL + 1))
@@ -10360,7 +10360,7 @@ else
     echo "FAIL: debug_null_ptr (compilation failed)"
     FAIL=$((FAIL + 1))
 fi
-rm -f "$REPO_ROOT/test_tmp_$$.kr" /tmp/krc_test_$$
+rm -f "$REPO_ROOT/test_tmp_$$.kr" /tmp/krc_test_$$ /tmp/krc_test_$$.kr
 
 echo ""
 echo "--- Debug info (-g) ---"
@@ -21503,7 +21503,7 @@ fn main() {
 # (exit 1 below); post-fix both checks pass (exit 0).
 run_test "io_read_file_empty_vs_missing" 'import "std/io.kr"
 fn main() {
-    uint64 empty_path = "/tmp/krc_test_read_file_bug5_empty.txt"
+    uint64 empty_path = "/tmp/krc_test_read_file_bug5_empty_'"$$"'.txt"
     uint64 missing_path = "/tmp/krc_test_read_file_bug5_does_not_exist_xyz.txt"
     uint64 fd = file_open(empty_path, 1)
     file_close(fd)
@@ -21517,6 +21517,7 @@ fn main() {
     }
     exit(0)
 }' 0
+rm -f /tmp/krc_test_read_file_bug5_empty_$$.txt
 
 echo ""
 echo "--- call-argument capacity ---"
