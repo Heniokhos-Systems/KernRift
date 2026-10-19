@@ -3906,8 +3906,10 @@ fn parse_module() -> uint64 {
             //     so `table` was ONE uint32 scalar, and `table[i]` on a scalar
             //     is no array access: the IR backend read and wrote table's
             //     own address whatever i was (a byte on x86_64 and arm64, a
-            //     word on riscv32 and xtensa), and --legacy indexed from a
-            //     stack slot nothing had written and faulted.
+            //     word on riscv32 and xtensa), and --legacy took the base
+            //     from a stack slot main never wrote (0 when measured), added
+            //     i unscaled and stored 8 bytes there -- a wild write, which
+            //     faulted at i = 0.
             // One error per run of junk: recovery skips to the next token that
             // can start a declaration (or end of file), so `foo bar baz` is
             // one message, not three. p_err_count makes the gate below exit

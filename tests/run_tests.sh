@@ -2814,8 +2814,9 @@ rm -f "$DIR/../docpin_bc_body_$$.kr" "$DIR/../docpin_bc_top_$$.kr"
 
 # 1b. Top-level junk is a parse error (register item 99). It used to be skipped
 #     one token at a time without a word, which hid three distinct mistakes.
-#     Each row below compiles clean on a compiler without the fix, so each
-#     fails there. Parse errors precede codegen: $RUN_ARCH is just a valid arch.
+#     Each refusal row below compiles clean on a compiler without the fix, so
+#     each fails there; the rows named *_accepted are controls that pass on
+#     both. Parse errors precede codegen: $RUN_ARCH is just a valid arch.
 #     tlj_check <row> <want-in-stderr> -- the probe is $TLJ_SRC; it must be
 #     refused (non-zero exit, no artifact) with that text in the diagnostic.
 TLJ_SRC="$DIR/../tlj_$$.kr"

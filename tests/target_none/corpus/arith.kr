@@ -13,8 +13,10 @@
 // `static uint32 table[8]`, which is not KernRift syntax: the parser skipped
 // the stray `[8]` at top level without a word, so `table` was ONE uint32
 // scalar and `table[i]` was no array access (the IR backend read and wrote
-// table's own address whatever i was; --legacy indexed from a stack slot
-// nothing had written and faulted). `static uint32[8] table` is what was meant.
+// table's own address whatever i was; --legacy took the base from a stack
+// slot main never wrote -- 0 when measured -- added i unscaled and stored 8
+// bytes there, `mov %rax,(%rcx)`, a wild write that faulted).
+// `static uint32[8] table` is what was meant.
 static uint32 counter = 0
 static uint32[8] table
 
