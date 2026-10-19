@@ -10094,7 +10094,7 @@ else
     else
         FAIL=$((FAIL + 1))
         echo "FAIL: ir_reference_citations ($(printf '%s' "$cite_bad" | head -6 | tr '\n' ';')$( [ "$(printf '%s\n' "$cite_bad" | wc -l)" -gt 6 ] && echo " ..."))"
-        echo "  fix the citations in docs/IR_REFERENCE.md, then:"
+        echo "  fix the citations it names (docs/IR_REFERENCE.md, or a .md citation in the prose), then:"
         echo "    python3 scripts/gen-ir-reference-citations.py"
         echo "  BUT READ THIS FIRST: the manifest may hold the CORRECT line and"
         echo "  the DOC the stale one, in which case regenerating destroys the"
@@ -10103,28 +10103,64 @@ else
     fi
 fi
 
-# ...and the checker refuses the two shapes no code can make right: a range
-# whose end is before its start, and a line past the end of the file. Run
-# against a copy of the document with one of each added (and, as a control,
-# the unmodified copy, which must pass).
+# ...and the checker refuses what no code can make right, and what the
+# citation's own words contradict. Run against a copy of the tree's prose (the
+# unmodified copy, as a control, must pass), each doctoring checked for its own
+# message:
+#   - a range whose end is before its start, and a line past the end of a file;
+#   - "the comment at" a line that is code (the class of a citation that read
+#     as valid while naming the wrong line: it pointed at the atomic-RMW check
+#     instead of the IR_SHL_IMM comment beside it);
+#   - a citation after a backquoted function name that is neither in that
+#     function nor mentions it;
+#   - a citation INTO a .md file whose line changed (recorded, then edited),
+#     and one past the end of the .md file.
+# No .md citation is written literally here: this file's prose is scanned too.
 TOTAL=$((TOTAL + 1))
 CSH_D=$(mktemp -d "${TMPDIR:-/tmp}/krc_csh.XXXXXX")
-mkdir -p "$CSH_D/scripts" "$CSH_D/docs" "$CSH_D/tests"
+mkdir -p "$CSH_D/scripts" "$CSH_D/tests"
 cp "$DIR/../scripts/gen-ir-reference-citations.py" "$CSH_D/scripts/"
 ln -s "$DIR/../src" "$CSH_D/src"
-cp "$DIR/../docs/IR_REFERENCE.md" "$CSH_D/docs/"
-cp "$CITE_MANIFEST" "$CSH_D/tests/"
+cp -R "$DIR/../docs" "$CSH_D/docs"
+for csh_f in "$DIR"/../*.md; do [ -f "$csh_f" ] && cp "$csh_f" "$CSH_D/"; done
+cp "$DIR/run_tests.sh" "$CITE_MANIFEST" "$CSH_D/tests/"
 CSH_WHY=""
-python3 "$CSH_D/scripts/gen-ir-reference-citations.py" --check > "$CSH_D/ok.out" 2>&1 \
-    || CSH_WHY="$CSH_WHY [the unmodified copy failed: $(head -2 "$CSH_D/ok.out" | tr '\n' ' ')]"
-printf '\nbackwards (`src/ir.kr:20`\342\200\223`10`) and past the end (`src/ir.kr:99999999`)\n' >> "$CSH_D/docs/IR_REFERENCE.md"
-python3 "$CSH_D/scripts/gen-ir-reference-citations.py" --check > "$CSH_D/bad.out" 2>&1
-CSH_RC=$?
-[ "$CSH_RC" = "1" ] || CSH_WHY="$CSH_WHY [--check exited $CSH_RC on the doctored copy, want 1]"
-grep -q "src/ir.kr:20-10 runs backwards" "$CSH_D/bad.out" || CSH_WHY="$CSH_WHY [the backwards range was not reported]"
-grep -q "src/ir.kr:99999999 is past the end of the file" "$CSH_D/bad.out" || CSH_WHY="$CSH_WHY [the out-of-range line was not reported]"
+csh_check() {   # <tag> <want rc> <grep -F pattern...>: --check on the copy as it is now
+    local tag="$1" want="$2" pat; shift 2
+    python3 "$CSH_D/scripts/gen-ir-reference-citations.py" --check > "$CSH_D/$tag.out" 2>&1
+    local rc=$?
+    [ "$rc" = "$want" ] || CSH_WHY="$CSH_WHY [$tag: --check exited $rc, want $want: $(head -2 "$CSH_D/$tag.out" | tr '\n' ' ')]"
+    for pat in "$@"; do
+        grep -qF -- "$pat" "$CSH_D/$tag.out" || CSH_WHY="$CSH_WHY [$tag: '$pat' was not reported]"
+    done
+}
+csh_doc="$CSH_D/docs/IR_REFERENCE.md"
+cp "$csh_doc" "$CSH_D/doc.orig"
+csh_check control 0
+printf '\nbackwards (`src/ir.kr:20`\342\200\223`10`) and past the end (`src/ir.kr:99999999`)\n' >> "$csh_doc"
+csh_check shapes 1 "src/ir.kr:20-10 runs backwards" "src/ir.kr:99999999 is past the end of the file"
+csh_code=$(grep -n '^fn ir_opt_cse_is_pure' "$DIR/../src/ir.kr" | cut -d: -f1)
+csh_other=$(grep -n '^fn ir_opt_dce(' "$DIR/../src/ir.kr" | cut -d: -f1)
+cp "$CSH_D/doc.orig" "$csh_doc"
+printf '\nThe comment at `src/ir.kr:%s` says so.\n' "$csh_code" >> "$csh_doc"
+csh_check comment 1 "src/ir.kr:$csh_code is cited as a comment but is code"
+cp "$CSH_D/doc.orig" "$csh_doc"
+printf '\n`ir_opt_cse_is_pure` (`src/ir.kr:%s`) is the whitelist.\n' "$csh_other" >> "$csh_doc"
+csh_check function 1 "src/ir.kr:$csh_other is cited for ir_opt_cse_is_pure but is not in it and does not mention it"
+# The .md half: cite line 1 of the document, record it, then change that line.
+cp "$CSH_D/doc.orig" "$csh_doc"
+csh_md="IR_REFERENCE.md"
+printf '\nSee `docs/%s:%s`, and `docs/%s:%s`.\n' "$csh_md" 1 "$csh_md" 3 >> "$csh_doc"
+python3 "$CSH_D/scripts/gen-ir-reference-citations.py" > /dev/null 2>&1 \
+    || CSH_WHY="$CSH_WHY [could not record the .md citations]"
+grep -qF "docs/$csh_md:1 " "$CSH_D/tests/$(basename "$CITE_MANIFEST")" \
+    || CSH_WHY="$CSH_WHY [the manifest has no docs/$csh_md:1 entry]"
+csh_check mdcontrol 0
+sed -i '1s/$/ (edited)/' "$csh_doc"
+printf 'And `%s:%s`.\n' "$csh_md" 99999999 >> "$csh_doc"
+csh_check md 1 "docs/$csh_md:1 moved" "docs/$csh_md:99999999 is past the end of the file"
 if [ -z "$CSH_WHY" ]; then
-    PASS=$((PASS + 1)); echo "  ir_reference_citations_refuses_bad_shapes: PASS (a backwards range and an out-of-range line both fail --check; the real document passes)"
+    PASS=$((PASS + 1)); echo "  ir_reference_citations_refuses_bad_shapes: PASS (backwards range, out-of-range line, comment-that-is-code, citation outside its named function, moved and out-of-range .md citations all fail --check; the real prose passes)"
 else
     FAIL=$((FAIL + 1)); echo "FAIL: ir_reference_citations_refuses_bad_shapes$CSH_WHY"
 fi
@@ -21336,7 +21372,9 @@ fi
 # number of each citation only). ir_reference_citations above now runs the
 # generator in --check mode, which covers range ends and follow-on numbers as
 # well, and also refuses a manifest entry the doc no longer cites, a range that
-# runs backwards and a line past the end of its file.
+# runs backwards, a line past the end of its file, "the comment at" a line of
+# code, a citation outside the function named just before it, and a stale
+# citation INTO a .md file anywhere in the prose.
 TOTAL=$((TOTAL + 1))
 CITE_DOC="$DIR/../docs/IR_REFERENCE.md"
 if [ ! -f "$CITE_DOC" ] || [ ! -f "$CITE_MANIFEST" ]; then

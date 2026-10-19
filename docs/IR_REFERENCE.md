@@ -1,8 +1,8 @@
 # IR Reference
 
-Line citations below are pinned by `tests/ir_reference_citations.txt` and
-checked on every `make test`; regenerate with
-`python3 scripts/gen-ir-reference-citations.py` after moving code.
+Line citations below (and every `<NAME>.md:<line>` in the prose) are pinned by
+`tests/ir_reference_citations.txt` and checked on every `make test`; regenerate
+with `python3 scripts/gen-ir-reference-citations.py` after moving code.
 
 Everything below was checked against `src/` at commit `2f13efb` (branch
 `main`) and, where the check was runnable, against the compiler built from

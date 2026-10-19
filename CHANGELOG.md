@@ -4,6 +4,17 @@ All notable changes to `kernriftc` are documented in this file.
 
 ## Unreleased
 
+**Fixed: the citation checker reads what a citation says, and covers .md
+files.** A citation can point at a line that exists and has not moved and
+still be wrong: IR_REFERENCE's "the comment at `src/ir.kr:N`" named a line of
+code beside the comment it meant. `scripts/gen-ir-reference-citations.py` now
+refuses "the comment at" a line that is not a comment, and a citation that is
+neither inside nor mentions the function named in backquotes just before it.
+It also fingerprints every `<NAME>.md:<line>` in the prose (top-level and
+docs/ Markdown, src/, tests/run_tests.sh), so a citation into STDLIB.md or
+LANGUAGE.md that goes stale fails `make test`. The citations it found wrong
+were corrected first.
+
 **Fixed: an integer literal that does not fit 64 bits is an error.** The
 literal parser accumulated without a carry check, so `0b` followed by 65
 ones, `0x1_0000_0000_0000_0000` or `18446744073709551616` compiled to a
