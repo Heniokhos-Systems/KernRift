@@ -4,6 +4,17 @@
 
 // BCJ filters are linked via cat (see Makefile/CI)
 
+// rn_alloc(n) or stop. The runner is its own program (src/runner.kr +
+// src/bcj.kr), so it cannot use the compiler's cg_alloc.
+fn rn_alloc(uint64 n) -> uint64 {
+    uint64 p = alloc(n)
+    if p == 0 {
+        write(2, "kr: out of memory\n", 18)
+        exit(1)
+    }
+    return p
+}
+
 // A LOCAL COPY of main.kr's read_exact, and it has to be one. The runner is a
 // SEPARATE program -- `cat src/runner.kr src/bcj.kr` (Makefile) -- and
 // src/runner.kr is not in SRCS, so nothing here can see src/main.kr. The
@@ -202,7 +213,7 @@ static uint64 exec_errno = 0
 
 fn win_init_args_r() {
     uint64 cmdline = cli_argv
-    uint64 argv_buf = alloc(512)
+    uint64 argv_buf = rn_alloc(512)
     uint64 argc = 0
     uint64 pos = cmdline
     uint64 ch = 0
@@ -253,19 +264,31 @@ fn win_init_args_r() {
 //     child's status -- or dies of the child's signal. HUP, INT, QUIT and TERM
 //     are blocked in the runner while it waits (they stay pending and act
 //     after the file is gone); the child runs with the mask it inherited.
+//     SIGCHLD is set to its default in the runner first: if it was ignored
+//     (inherited from the caller), the kernel reaps the child itself and the
+//     wait finds nothing, which used to read as exit status 0. The child gets
+//     the inherited disposition back before it execs. A fork or wait that
+//     fails is an error, never a status.
 //   Windows: there is no delete builtin and exec_process exits the runner
-//     with the child's code, so the file cannot be removed. It is
-//     .\kr-run-<n>.exe, the first of 64 names whose open for writing
-//     succeeds -- an image that is running cannot be opened for writing, so
-//     two runs at once never share one; a finished run's file is reused.
+//     with the child's code, so the file cannot be removed. Slot <n> is
+//     CLAIMED by opening .\kr-run-<n>.lock for writing and holding it until
+//     the runner exits -- after the program does, since exec_process waits
+//     for it -- so no other runner can write .\kr-run-<n>.exe between this
+//     one writing it and the program starting: the lock's open for writing
+//     fails while another runner holds it (sharing violation). The first of
+//     64 slots whose lock can be taken is used; a finished run's files are
+//     reused.
 //   Android under Termux, where SELinux refuses the runner's own exec: the
 //     image is written to the file the wrapper (packaging/kr.sh) names in
 //     $KR_EXEC_FALLBACK -- which it made with mktemp -- and the runner exits
 //     120; the wrapper runs it and removes it. Without the wrapper, the
 //     macOS route is tried.
 // KR_RUNNER_EXEC=file or =fork forces the descriptor-exec or the child route
-// on Linux, so the suite can run the routes it cannot otherwise reach
-// (runner_exec_paths_are_per_run).
+// on Linux, so the suite can run the routes it cannot otherwise reach.
+// KR_RUNNER_TRACE=1 makes the runner name each route on stderr as it tries
+// it ("kr: route memfd|file|child|windows|termux"); a route that fails falls
+// through to the next, so the LAST one named is the one that ran. The suite
+// uses it to see which route ran (runner_exec_paths_are_per_run).
 // ---------------------------------------------------------------------------
 
 fn kx_x86() -> uint64 {
@@ -276,7 +299,7 @@ fn kx_x86() -> uint64 {
 
 // Syscall numbers, per OS and arch. op: 0 getpid, 1 open(at), 2 write,
 // 3 close, 4 unlink(at), 5 execveat, 6 memfd_create, 7 fork, 8 wait4,
-// 9 sigprocmask, 10 fchmod, 11 kill, 12 fcntl.
+// 9 sigprocmask, 10 fchmod, 11 kill, 12 fcntl, 13 (rt_)sigaction.
 fn kx_nr(uint64 op) -> uint64 {
     if get_target_os() == 1 {
         uint64 m = 0
@@ -291,6 +314,7 @@ fn kx_nr(uint64 op) -> uint64 {
         if op == 10 { m = 124 }
         if op == 11 { m = 37 }
         if op == 12 { m = 92 }
+        if op == 13 { m = 46 }
         if kx_x86() != 0 { return 0x2000000 | m }
         return m
     }
@@ -307,6 +331,7 @@ fn kx_nr(uint64 op) -> uint64 {
         if op == 9 { return 14 }
         if op == 10 { return 91 }
         if op == 11 { return 62 }
+        if op == 13 { return 13 }
         return 72
     }
     if op == 0 { return 172 }
@@ -321,6 +346,7 @@ fn kx_nr(uint64 op) -> uint64 {
     if op == 9 { return 135 }
     if op == 10 { return 52 }
     if op == 11 { return 129 }
+    if op == 13 { return 134 }
     return 25
 }
 
@@ -348,6 +374,16 @@ fn kx_getenv(uint64 name) -> uint64 {
     return 0
 }
 
+// With KR_RUNNER_TRACE set (and not empty), say which route is taken.
+fn kx_trace(uint64 route) {
+    uint64 t = kx_getenv("KR_RUNNER_TRACE")
+    if t == 0 { return }
+    if load8(t) == 0 { return }
+    write(2, "kr: route ", 10)
+    write(2, route, str_len_r(route))
+    write(2, "\n", 1)
+}
+
 // Append the bytes of s to buf at *pos (pos is a one-slot cell).
 fn kx_put(uint64 buf, uint64 pos, uint64 s) {
     uint64 p = load64(pos)
@@ -361,7 +397,7 @@ fn kx_put(uint64 buf, uint64 pos, uint64 s) {
 }
 
 fn kx_put_dec(uint64 buf, uint64 pos, uint64 v) {
-    uint64 tmp = alloc(24)
+    uint64 tmp = rn_alloc(24)
     uint64 n = 0
     if v == 0 { store8(tmp, 48)  n = 1 }
     while v != 0 {
@@ -428,8 +464,8 @@ fn kx_make_file(uint64 image, uint64 len) -> uint64 {
         if get_target_os() == 3 { dir = "/data/local/tmp" }
     }
     uint64 pid = syscall_raw(kx_nr(0), 0, 0, 0, 0, 0, 0)
-    uint64 path = alloc(3200)
-    uint64 pos = alloc(8)
+    uint64 path = rn_alloc(3200)
+    uint64 pos = rn_alloc(8)
     uint64 n = 0
     while n < 100 {
         store64(pos, 0)
@@ -458,19 +494,33 @@ fn kx_make_file(uint64 image, uint64 len) -> uint64 {
 // The macOS route (and Linux without execveat): run the file as a child,
 // wait, remove it, and leave with the child's status.
 fn kx_run_child(uint64 path, uint64 argv) {
-    uint64 set = alloc(16)
-    uint64 old = alloc(16)
+    uint64 set = rn_alloc(16)
+    uint64 old = rn_alloc(16)
     // HUP(1) INT(2) QUIT(3) TERM(15): bits sig-1.
     store64(set, 0x4007)
     store64(old, 0)
     uint64 how_block = 0
     uint64 how_setmask = 2
+    uint64 sigchld = 17
     if get_target_os() == 1 {
         how_block = 1
         how_setmask = 3
+        sigchld = 20
+    }
+    // SIGCHLD to its default (the zeroed action is SIG_DFL in every
+    // layout: Linux's kernel_sigaction and Darwin's __sigaction alike),
+    // keeping the old action. Ignored, the child would be reaped by the
+    // kernel and never seen by wait4.
+    uint64 dfl = rn_alloc(32)
+    uint64 chld_old = rn_alloc(32)
+    if get_target_os() == 1 {
+        syscall_raw(kx_nr(13), sigchld, dfl, chld_old, 0, 0, 0)
+    } else {
+        syscall_raw(kx_nr(13), sigchld, dfl, chld_old, 8, 0, 0)
     }
     syscall_raw(kx_nr(9), how_block, set, old, 8, 0, 0)
     uint64 pid0 = syscall_raw(kx_nr(0), 0, 0, 0, 0, 0, 0)
+    kx_trace("child")
     uint64 child = 0
     if get_target_os() == 1 || kx_x86() != 0 {
         child = syscall_raw(kx_nr(7), 0, 0, 0, 0, 0, 0)
@@ -481,11 +531,24 @@ fn kx_run_child(uint64 path, uint64 argv) {
     uint64 in_child = 0
     if get_target_os() == 1 {
         // Darwin returns the PARENT's pid in the child; getpid tells them apart.
+        // A FAILED fork returns its errno in the parent, which looks like a
+        // pid: wait4 then finds no such child, and that is reported below.
         if syscall_raw(kx_nr(0), 0, 0, 0, 0, 0, 0) != pid0 { in_child = 1 }
     } else {
         if child == 0 { in_child = 1 }
     }
     if in_child != 0 {
+        // The program gets the SIGCHLD disposition it would have inherited:
+        // ignored stays ignored. Only the handler word is copied, and it can
+        // only be SIG_DFL (0) or SIG_IGN (1) -- the runner installs none.
+        if load64(chld_old) == 1 {
+            store64(dfl, 1)
+            if get_target_os() == 1 {
+                syscall_raw(kx_nr(13), sigchld, dfl, 0, 0, 0, 0)
+            } else {
+                syscall_raw(kx_nr(13), sigchld, dfl, 0, 8, 0, 0)
+            }
+        }
         syscall_raw(kx_nr(9), how_setmask, old, 0, 8, 0, 0)
         exec_process_argv(path, argv)
         exit(127)
@@ -496,16 +559,22 @@ fn kx_run_child(uint64 path, uint64 argv) {
         write(2, "kr: fork failed\n", 16)
         exit(1)
     }
-    uint64 st = alloc(8)
+    uint64 st = rn_alloc(8)
     store64(st, 0)
     uint64 got = syscall_raw(kx_nr(8), child, st, 0, 0, 0, 0)
+    // EINTR (Linux -4, Darwin 4) is retried; anything else that is not the
+    // child's pid is a failure, never a status.
     while got != child && (got == 0xFFFFFFFFFFFFFFFC || got == 4) {
         got = syscall_raw(kx_nr(8), child, st, 0, 0, 0, 0)
     }
     kx_unlink(path)
+    syscall_raw(kx_nr(9), how_setmask, old, 0, 8, 0, 0)
+    if got != child {
+        write(2, "kr: could not wait for the program (fork or wait4 failed)\n", 58)
+        exit(1)
+    }
     uint64 status = load64(st) & 0xFFFF
     uint64 sig = status & 0x7F
-    syscall_raw(kx_nr(9), how_setmask, old, 0, 8, 0, 0)
     if sig == 0 { exit((status >> 8) & 0xFF) }
     syscall_raw(kx_nr(11), syscall_raw(kx_nr(0), 0, 0, 0, 0, 0, 0), sig, 0, 0, 0, 0)
     exit(128 + sig)
@@ -521,25 +590,43 @@ fn kx_exec_image(uint64 image, uint64 len, uint64 argv) {
         if str_eq_r(mode, "fork") != 0 { force_fork = 1 }
     }
     if get_target_os() == 2 {
-        // Windows: the first of .\kr-run-0.exe .. .\kr-run-63.exe that can be
-        // opened for writing (not one a running program holds).
-        uint64 wpath = alloc(32)
-        uint64 wpos = alloc(8)
+        // Windows: claim slot k by its lock (held to the end, see above),
+        // then write .\kr-run-<k>.exe and run it.
+        uint64 wpath = rn_alloc(32)
+        uint64 lpath = rn_alloc(32)
+        uint64 wpos = rn_alloc(8)
         uint64 k = 0
         while k < 64 {
+            store64(wpos, 0)
+            kx_put(lpath, wpos, ".\\kr-run-")
+            kx_put_dec(lpath, wpos, k)
+            kx_put(lpath, wpos, ".lock")
+            store8(lpath + load64(wpos), 0)
             store64(wpos, 0)
             kx_put(wpath, wpos, ".\\kr-run-")
             kx_put_dec(wpath, wpos, k)
             kx_put(wpath, wpos, ".exe")
             store8(wpath + load64(wpos), 0)
-            uint64 wfd = file_open(wpath, 1)
-            if wfd < 0xFFFFFFFFFFFFF000 {
-                file_write(wfd, image, len)
-                file_close(wfd)
-                store64(argv, wpath)
-                exec_process_argv(wpath, argv)
-                write(2, "kr: exec failed\n", 16)
-                exit(1)
+            uint64 lfd = file_open(lpath, 1)
+            if lfd < 0xFFFFFFFFFFFFF000 {
+                // The lock is ours until this process ends; lfd is never closed.
+                uint64 wfd = file_open(wpath, 1)
+                if wfd < 0xFFFFFFFFFFFFF000 {
+                    uint64 wrote = file_write(wfd, image, len)
+                    file_close(wfd)
+                    if wrote != len {
+                        write(2, "kr: could not write the program\n", 32)
+                        exit(1)
+                    }
+                    store64(argv, wpath)
+                    kx_trace("windows")
+                    exec_process_argv(wpath, argv)
+                    write(2, "kr: exec failed\n", 16)
+                    exit(1)
+                }
+                // The .exe is busy (a program from an older runner is still
+                // running under that name): give the slot back.
+                file_close(lfd)
             }
             k = k + 1
         }
@@ -557,6 +644,7 @@ fn kx_exec_image(uint64 image, uint64 len, uint64 argv) {
                 if kx_err(mfd) == 0 {
                     if kx_write_all(mfd, image, len) != 0 {
                         store64(argv, label)
+                        kx_trace("memfd")
                         syscall_raw(kx_nr(5), mfd, "", argv, cli_envp, 0x1000, 0)
                     }
                     syscall_raw(kx_nr(3), mfd, 0, 0, 0, 0, 0)
@@ -570,6 +658,7 @@ fn kx_exec_image(uint64 image, uint64 len, uint64 argv) {
                     kx_unlink(fpath)
                     if kx_err(rfd) == 0 {
                         store64(argv, fpath)
+                        kx_trace("file")
                         syscall_raw(kx_nr(5), rfd, "", argv, cli_envp, 0x1000, 0)
                         syscall_raw(kx_nr(3), rfd, 0, 0, 0, 0, 0)
                     }
@@ -582,10 +671,13 @@ fn kx_exec_image(uint64 image, uint64 len, uint64 argv) {
                 if fb != 0 && load8(fb) != 0 {
                     uint64 tfd = file_open(fb, 1)
                     if tfd < 0xFFFFFFFFFFFFF000 {
-                        file_write(tfd, image, len)
+                        uint64 twrote = file_write(tfd, image, len)
                         file_close(tfd)
-                        set_executable(fb)
-                        exit(120)
+                        if twrote == len {
+                            set_executable(fb)
+                            kx_trace("termux")
+                            exit(120)
+                        }
                     }
                 }
             }
@@ -728,7 +820,7 @@ fn main() {
 
     uint64 fd = file_open(krbo_path, 0)
     uint64 fsize = file_size(fd)
-    uint64 data = alloc(fsize)
+    uint64 data = rn_alloc(fsize)
     uint64 rgot = read_exact(fd, data, fsize)
     file_close(fd)
     if rgot != fsize {
@@ -756,7 +848,7 @@ fn main() {
     if is_fat == 0 {
         // Not fat — write as-is
         // Not a fat binary: run it as it is (no arguments are forwarded).
-        uint64 rargv = alloc(16)
+        uint64 rargv = rn_alloc(16)
         store64(rargv + 8, 0)
         kx_exec_image(data, fsize, rargv)
     }
@@ -811,7 +903,7 @@ fn main() {
     }
 
     // Decompress the shared pair blob, then select our slice from it.
-    uint64 pair_binary = alloc(slice_pair_uncomp_size + 1)
+    uint64 pair_binary = rn_alloc(slice_pair_uncomp_size + 1)
     uint64 comp_data = data + slice_offset
     uint64 decomp_size = lz4_decompress_frame_r(comp_data, slice_comp_size, pair_binary)
     uint64 binary = pair_binary + slice_pair_off
@@ -837,7 +929,7 @@ fn main() {
     uint64 n_fwd = 0
     if cli_argc > fwd_start { n_fwd = cli_argc - fwd_start }
     uint64 argv_bytes = (n_fwd + 2) * 8
-    uint64 nargv = alloc(argv_bytes)
+    uint64 nargv = rn_alloc(argv_bytes)
     uint64 ai = 0
     while ai < n_fwd {
         uint64 src = cli_argv + (fwd_start + ai) * 8
