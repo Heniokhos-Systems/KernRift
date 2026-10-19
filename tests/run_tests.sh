@@ -2902,10 +2902,13 @@ else
 fi
 rm -f "$ANA_SRC" "$ANA_BIN"
 
-# 3. arm64 volatile emits NO completion barrier. On the default IR backend
-#    vload32/vstore32 become LDAR/STLR -- acquire/release ORDERING, not a DSB.
-#    docs/LANGUAGE.md and README.md both carry the measured table this pins:
-#      x86_64 IR 2 x mfence | arm64 IR 0 x DSB (LDAR/STLR) | arm64 legacy 2 x DSB SY
+# 3. The volatile barrier counts. On the default IR backend vload32 becomes
+#    LDAR (acquire ORDERING, no completion barrier) and vstore32 becomes STLR
+#    followed by one DSB SY, so the store has completed before anything after
+#    it. docs/LANGUAGE.md and README.md both carry the measured table this pins:
+#      x86_64 IR 3 x mfence | arm64 IR 1 x DSB SY (LDAR, STLR, DSB) | arm64 legacy 3 x DSB SY
+#    (The row was called arm64_volatile_no_dsb while arm64 emitted no DSB; it
+#    asserts one now, so it is named for what it checks.)
 #
 #    MATCH ON THE ENCODING, NEVER THE MNEMONIC. The `--emit=asm` decoder used to
 #    print the LDAR/STLR encodings with a BLANK mnemonic field, so `grep -i stlr`
@@ -2949,10 +2952,10 @@ vol_check "arm64 IR DSB"      arm64  ""          'dsb'    1
 vol_check "x86_64 IR mfence"  x86_64 ""          'mfence' 3
 vol_check "arm64 legacy DSB"  arm64  "--legacy"  'dsb'    3
 if [ "$VOL_OK" = "1" ]; then
-    PASS=$((PASS + 1)); echo "  arm64_volatile_no_dsb: PASS (LDAR+STLR, 1 DSB after the store; x86 3 mfence; legacy 3 DSB)"
+    PASS=$((PASS + 1)); echo "  volatile_barrier_counts: PASS (LDAR+STLR, 1 DSB after the store; x86 3 mfence; legacy 3 DSB)"
 else
     FAIL=$((FAIL + 1))
-    echo "FAIL: arm64_volatile_no_dsb"
+    echo "FAIL: volatile_barrier_counts"
     echo "  the volatile lowering changed -- update the barrier tables in docs/LANGUAGE.md"
     echo "  and README.md in the same commit; grep the ENCODING, not the mnemonic"
 fi
