@@ -7703,7 +7703,11 @@ LABEL_OF = {"dce_mark": "ir_opt_is_side_effect (DCE mark loop)",
 ROOT = sys.argv[1]
 TOK = re.compile(r'"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\'|0[xX][0-9A-Fa-f]+|\d+|[A-Za-z_]\w*|==|!=|>=|<=|&&|\|\||->|<<|>>|\S')
 # u8/u16/u32/u64 are the same types as uint8..uint64; read them as one.
-ALIAS = {"u8": "uint8", "u16": "uint16", "u32": "uint32", "u64": "uint64"}
+# cg_alloc is alloc that stops the compile when the allocation is refused
+# (defect-sweep routes every compiler allocation through it): to the pinned
+# pass list the two are the same call, so a merge that turns the three
+# `alloc(65536 ...)` lines of ir_optimize into cg_alloc keeps the pin green.
+ALIAS = {"u8": "uint8", "u16": "uint16", "u32": "uint32", "u64": "uint64", "cg_alloc": "alloc"}
 def strip_comments(t):
     # Drop // and /* */ comments; string and char literals are kept whole.
     out, i, n = [], 0, len(t)
