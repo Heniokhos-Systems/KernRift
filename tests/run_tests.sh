@@ -39,7 +39,60 @@ RUN_ARCH="x86_64"
 if [ "$ARCH" = "aarch64" ] || [ "$ARCH" = "arm64" ]; then RUN_ARCH="arm64"; fi
 PASS=0
 FAIL=0
+SKIP=0
 TOTAL=0
+
+# Every skipped row goes through skip_row: it counts in SKIP (never in PASS)
+# and prints one uniform line. The row must already be in TOTAL -- a site
+# whose row is not counted yet increments TOTAL itself first. The summary
+# checks PASS + FAIL + SKIP == TOTAL, so a skip that is not accounted for
+# fails the suite.
+#
+# REQUIRE_FULL_RUN=1 is the mode for merge and release gating: every skip is
+# a FAIL, whatever its reason -- a missing tool, a SKIP_ALLOW precondition,
+# a sub-check that did not run, or the README gate on a partial toolchain. A
+# run in this mode passes only if every row ran and passed. The default (0)
+# keeps a skip a SKIP, for development on a partial box.
+REQUIRE_FULL_RUN="${REQUIRE_FULL_RUN:-0}"
+skip_row() {
+    if [ "$REQUIRE_FULL_RUN" = 1 ]; then
+        FAIL=$((FAIL + 1))
+        echo "FAIL: $1 (skipped, and REQUIRE_FULL_RUN=1 makes every skip a failure: $2)"
+        return
+    fi
+    SKIP=$((SKIP + 1))
+    SKIP_NAMES="$SKIP_NAMES$1
+"
+    echo "  $1: SKIP ($2)"
+}
+# Every skipped row's name, one per line: on a full run the README gate at the
+# end requires each of them to be in SKIP_ALLOW (a skip with a non-tool reason,
+# named there). A tool row skipped on a full run (QEMU_A64 blanked mid-file,
+# say) is therefore red, not a quiet SKIP.
+SKIP_NAMES=""
+
+# The summary at the end sets SUMMARY_DONE=1 just before the suite's own exit.
+# Any other way out of this file -- a stray `exit 0` in a row, a `set -e`
+# casualty -- would otherwise report whatever status it had with most rows
+# never run; the trap turns it into exit 1.
+# Rows that add their own EXIT cleanup chain it in front of SUITE_EXIT_TRAP
+# and restore SUITE_EXIT_TRAP afterwards, never `trap - EXIT`.
+SUMMARY_DONE=0
+SUITE_EXIT_TRAP='[ "$SUMMARY_DONE" = 1 ] || { echo "FAIL: suite_exit (the suite exited before its summary)"; exit 1; }'
+trap "$SUITE_EXIT_TRAP" EXIT
+
+# Per-test wall-clock bound for the run_* helpers' compiled programs, so a
+# miscompile that loops cannot hang the suite: it fails as TIMEOUT. The limit
+# is generous: a row whose program is meant to fault waits for the system's
+# core-dump handler (apport here: about 7 s for one SIGSEGV on an idle box,
+# far more under load). Override with RUN_TEST_TIMEOUT. rb_timed_out RC T0
+# says whether an exit status RC from `timeout` started at $SECONDS == T0 was
+# the limit firing (124 after TERM, 137 after the follow-up KILL) rather than
+# the program's own exit code.
+RUN_TEST_TIMEOUT="${RUN_TEST_TIMEOUT:-120}"
+rb_timed_out() {
+    { [ "$1" = 124 ] || [ "$1" = 137 ]; } && [ $((SECONDS - $2)) -ge "$RUN_TEST_TIMEOUT" ]
+}
 
 run_test() {
     local name="$1"
@@ -53,8 +106,12 @@ run_test() {
         rm -f "$REPO_ROOT/test_tmp_$$.kr"
         chmod +x /tmp/krc_test_$$
         local got=0
-        /tmp/krc_test_$$ > /dev/null 2>&1 && got=0 || got=$?
-        if [ "$got" = "$expected" ]; then
+        local t0=$SECONDS
+        timeout -k 5 "$RUN_TEST_TIMEOUT" /tmp/krc_test_$$ > /dev/null 2>&1 && got=0 || got=$?
+        if rb_timed_out "$got" "$t0"; then
+            echo "FAIL: $name (TIMEOUT: still running after ${RUN_TEST_TIMEOUT}s)"
+            FAIL=$((FAIL + 1))
+        elif [ "$got" = "$expected" ]; then
             PASS=$((PASS + 1))
         else
             echo "FAIL: $name (expected $expected, got $got)"
@@ -113,9 +170,13 @@ run_test_output() {
         rm -f "$REPO_ROOT/test_tmp_$$.kr"
         chmod +x /tmp/krc_test_$$
         local got_output
-        got_output=$(/tmp/krc_test_$$ 2>/dev/null)
+        local t0=$SECONDS
+        got_output=$(timeout -k 5 "$RUN_TEST_TIMEOUT" /tmp/krc_test_$$ 2>/dev/null)
         local got_exit=$?
-        if [ "$got_output" = "$expected_output" ] && [ "$got_exit" = "$expected_exit" ]; then
+        if rb_timed_out "$got_exit" "$t0"; then
+            echo "FAIL: $name (TIMEOUT: still running after ${RUN_TEST_TIMEOUT}s)"
+            FAIL=$((FAIL + 1))
+        elif [ "$got_output" = "$expected_output" ] && [ "$got_exit" = "$expected_exit" ]; then
             PASS=$((PASS + 1))
         else
             if [ "$got_output" != "$expected_output" ]; then
@@ -919,8 +980,11 @@ run_bchk_test() {
         rm -f "$REPO_ROOT/test_tmp_$$.kr"
         chmod +x /tmp/krc_bchk_$$
         local got=0
-        /tmp/krc_bchk_$$ > /dev/null 2>&1 && got=0 || got=$?
-        if [ "$got" = "$expected" ]; then
+        local t0=$SECONDS
+        timeout -k 5 "$RUN_TEST_TIMEOUT" /tmp/krc_bchk_$$ > /dev/null 2>&1 && got=0 || got=$?
+        if rb_timed_out "$got" "$t0"; then
+            echo "FAIL: $name (TIMEOUT: still running after ${RUN_TEST_TIMEOUT}s)"; FAIL=$((FAIL + 1))
+        elif [ "$got" = "$expected" ]; then
             PASS=$((PASS + 1))
         else
             echo "FAIL: $name (expected $expected, got $got)"; FAIL=$((FAIL + 1))
@@ -1005,8 +1069,11 @@ run_store_use_test() {
         echo "FAIL: $name (false unused-variable warning)"; FAIL=$((FAIL + 1))
     else
         local got=0
-        /tmp/krc_su_$$ > /dev/null 2>&1 && got=0 || got=$?
-        if [ "$got" = "$expected" ]; then
+        local t0=$SECONDS
+        timeout -k 5 "$RUN_TEST_TIMEOUT" /tmp/krc_su_$$ > /dev/null 2>&1 && got=0 || got=$?
+        if rb_timed_out "$got" "$t0"; then
+            echo "FAIL: $name (TIMEOUT: still running after ${RUN_TEST_TIMEOUT}s)"; FAIL=$((FAIL + 1))
+        elif [ "$got" = "$expected" ]; then
             PASS=$((PASS + 1))
         else
             echo "FAIL: $name (expected exit $expected, got $got)"; FAIL=$((FAIL + 1))
@@ -1114,7 +1181,7 @@ run_test "asm_block" 'fn main() { asm { "nop"; "nop"; "nop" }; exit(7) }' 7
 if [ "$ARCH" != "aarch64" ]; then
     run_test "asm_hex" 'fn main() { asm("0x90"); exit(5) }' 5
 else
-    echo "  asm_hex: SKIP (x86-only)"; PASS=$((PASS+1)); TOTAL=$((TOTAL+1))
+    TOTAL=$((TOTAL + 1)); skip_row asm_hex "x86-only"
 fi
 
 # Signedness must survive a CALL RESULT used directly as an operand.
@@ -1234,7 +1301,7 @@ if [ "$ARCH" != "aarch64" ]; then
     }
     fn main() { raw_exit() }' 42
 else
-    echo "  naked_fn: SKIP (x86-only)"; PASS=$((PASS+1)); TOTAL=$((TOTAL+1))
+    TOTAL=$((TOTAL + 1)); skip_row naked_fn "x86-only"
 fi
 
 # @noreturn annotation (should compile fine)
@@ -3692,8 +3759,8 @@ if [ "$ARCH" != "aarch64" ]; then
     fi
     rm -f "$REPO_ROOT/test_tmp_$$.kr" /tmp/krc_test_$$
 else
-    echo "  msr_compile: SKIP (x86-only)"; PASS=$((PASS+1)); TOTAL=$((TOTAL+1))
-    echo "  msr_wrmsr_compile: SKIP (x86-only)"; PASS=$((PASS+1)); TOTAL=$((TOTAL+1))
+    TOTAL=$((TOTAL + 1)); skip_row msr_compile "x86-only"
+    TOTAL=$((TOTAL + 1)); skip_row msr_wrmsr_compile "x86-only"
 fi
 
 # --- Dead Code Elimination test ---
@@ -3889,9 +3956,15 @@ fi
 # Skip on non-x86_64 hosts where KRC_FLAGS targets arm64.
 TOTAL=$((TOTAL + 1))
 if [ "$(uname -m)" != "x86_64" ] && [ "$(uname -m)" != "amd64" ]; then
-    PASS=$((PASS + 1))
-    echo "  emit_obj_readelf: SKIP (non-x86_64 host)"
-elif command -v readelf > /dev/null 2>&1 && [ -f /tmp/krc_obj_$$.o ]; then
+    skip_row emit_obj_readelf "non-x86_64 host"
+elif ! command -v readelf > /dev/null 2>&1; then
+    skip_row emit_obj_readelf "readelf not installed"
+elif [ ! -f /tmp/krc_obj_$$.o ]; then
+    # The .o comes from the -c compile above; its absence is a compiler
+    # failure, not a missing tool.
+    FAIL=$((FAIL + 1))
+    echo "  emit_obj_readelf: FAIL (no .o from the -c compile)"
+else
     sections=$(readelf -S /tmp/krc_obj_$$.o 2>/dev/null)
     has_text=$(echo "$sections" | grep -c '\.text')
     has_symtab=$(echo "$sections" | grep -c '\.symtab')
@@ -3905,9 +3978,6 @@ elif command -v readelf > /dev/null 2>&1 && [ -f /tmp/krc_obj_$$.o ]; then
         FAIL=$((FAIL + 1))
         echo "  emit_obj_readelf: FAIL (text=$has_text symtab=$has_symtab main=$has_main add=$has_add)"
     fi
-else
-    PASS=$((PASS + 1))
-    echo "  emit_obj_readelf: SKIP (readelf not found or .o missing)"
 fi
 rm -f /tmp/krc_obj_$$.kr /tmp/krc_obj_$$.o /tmp/krc_obj_c_$$.o
 
@@ -3944,8 +4014,7 @@ else
         FAIL=$((FAIL + 1))
         echo "FAIL: export_symbol_global (compilation with --emit=obj failed)"
     else
-        PASS=$((PASS + 1))
-        echo "  export_symbol_global: SKIP (readelf not found)"
+        skip_row export_symbol_global "readelf not found"
     fi
 fi
 rm -f /tmp/krc_export_$$.kr /tmp/krc_export_$$.o
@@ -4054,8 +4123,7 @@ print('OK: sections non-overlapping, .text = ' + text.hex())
         echo "  emit_obj_large_symtab_structure: FAIL (compilation failed)"
     fi
 else
-    PASS=$((PASS + 1))
-    echo "  emit_obj_large_symtab_structure: SKIP (no python3)"
+    skip_row emit_obj_large_symtab_structure "no python3"
 fi
 rm -f "$BIGSYM_KR" "$BIGSYM_O"
 
@@ -4607,8 +4675,10 @@ run_test_legacy() {
     printf '%s\n' "$input" > "$REPO_ROOT/test_tmp_$$.kr"
     if $KRC --arch=$LEGACY_ARCH --legacy "$REPO_ROOT/test_tmp_$$.kr" -o /tmp/krc_leg_$$ > /dev/null 2>&1; then
         rm -f "$REPO_ROOT/test_tmp_$$.kr"; chmod +x /tmp/krc_leg_$$
-        local got=0; /tmp/krc_leg_$$ > /dev/null 2>&1 && got=0 || got=$?
-        if [ "$got" = "$expected" ]; then PASS=$((PASS + 1));
+        local got=0; local t0=$SECONDS
+        timeout -k 5 "$RUN_TEST_TIMEOUT" /tmp/krc_leg_$$ > /dev/null 2>&1 && got=0 || got=$?
+        if rb_timed_out "$got" "$t0"; then echo "FAIL: $name (legacy: TIMEOUT: still running after ${RUN_TEST_TIMEOUT}s)"; FAIL=$((FAIL + 1))
+        elif [ "$got" = "$expected" ]; then PASS=$((PASS + 1));
         else echo "FAIL: $name (legacy: expected $expected, got $got)"; FAIL=$((FAIL + 1)); fi
     else
         echo "FAIL: $name (legacy compilation failed)"; FAIL=$((FAIL + 1))
@@ -6448,7 +6518,7 @@ if $KRC --arch=arm64 /tmp/krc_nakedalt_$$.kr -o /tmp/krc_nakedalt_$$ --emit=elf 
             FAIL=$((FAIL + 1)); echo "FAIL: naked_alternative_out_constraint_works ($nakedalt_err)"
         fi
     else
-        PASS=$((PASS + 1)); echo "  naked_alternative_out_constraint_works: SKIP (compiles; no qemu-aarch64-static to run it)"
+        skip_row naked_alternative_out_constraint_works "compiles; no qemu-aarch64-static to run it"
     fi
 else
     FAIL=$((FAIL + 1))
@@ -6646,7 +6716,7 @@ fn main() -> uint32 {
 }
 IDTCEOF
 if ! command -v qemu-system-x86_64 >/dev/null 2>&1; then
-    PASS=$((PASS + 1)); echo "  idt_selector_and_limit: PASS (SKIPPED -- no qemu-system-x86_64)"
+    skip_row idt_selector_and_limit "no qemu-system-x86_64"
 elif ! $KRC --target=none --arch=x86_64 --emit=image --load-addr=0x100000 \
             --stack-top=0x90000 "$DIR/../idtcs_tmp_$$.kr" -o "$IDTCS_K" >/dev/null 2>&1 \
   || ! $KRC --target=none --arch=x86_64 --emit=image --reset-vector \
@@ -6710,7 +6780,7 @@ fn main() -> uint32 {
 }
 IDTFEOF
 if ! command -v qemu-system-x86_64 >/dev/null 2>&1; then
-    PASS=$((PASS + 1)); echo "  idt_reports_four_faults: PASS (SKIPPED -- no qemu-system-x86_64)"
+    skip_row idt_reports_four_faults "no qemu-system-x86_64"
 else
     idtf_ok=1
     idtf_notes=""
@@ -6830,7 +6900,7 @@ fn main() -> uint32 {
 }
 IDTHEOF
 if ! command -v qemu-system-x86_64 >/dev/null 2>&1; then
-    PASS=$((PASS + 1)); echo "  idt_common_handler_hook: PASS (SKIPPED -- no qemu-system-x86_64)"
+    skip_row idt_common_handler_hook "no qemu-system-x86_64"
 else
     idthk_ok=1
     idthk_notes=""
@@ -6914,7 +6984,7 @@ rm -f "$DIR/../idthk_in_$$.kr" "$DIR/../idthk_tmp_$$.kr" "/tmp/idthk_$$.log"
 # multi-block loop at all.
 TOTAL=$((TOTAL + 1))
 if ! command -v gunzip >/dev/null 2>&1 || ! command -v gzip >/dev/null 2>&1; then
-    PASS=$((PASS + 1)); echo "  gzip_stored_roundtrips: PASS (SKIPPED -- no gzip/gunzip)"
+    skip_row gzip_stored_roundtrips "no gzip/gunzip"
 elif ! $KRC --arch=$RUN_ARCH "$DIR/../examples/gzip_stored.kr" -o /tmp/krgz_$$ >/dev/null 2>&1; then
     FAIL=$((FAIL + 1)); echo "FAIL: gzip_stored_roundtrips (compile failed)"
 else
@@ -7354,7 +7424,7 @@ rm -f "$DIR/../mnem_tmp_$$.kr" /tmp/mnem_$$.o
 # x86_64 and says so otherwise rather than pretending to have covered it.
 TOTAL=$((TOTAL + 1))
 if [ "$RUN_ARCH" != "x86_64" ]; then
-    PASS=$((PASS + 1)); echo "  asm_push_pop_mov_runtime: PASS (SKIPPED -- x86-only mnemonics, host is $RUN_ARCH)"
+    skip_row asm_push_pop_mov_runtime "x86-only mnemonics, host is $RUN_ARCH"
 else
     cat > "$DIR/../mnemr_tmp_$$.kr" <<'MNREOF'
 fn mov_through(u64 a) -> u64 {
@@ -7436,7 +7506,7 @@ fi
 # the click was never seen, and a keystroke went missing -- 3 of 3 checks red.
 TOTAL=$((TOTAL + 1))
 if ! command -v qemu-system-x86_64 >/dev/null 2>&1 || ! command -v python3 >/dev/null 2>&1; then
-    PASS=$((PASS + 1)); echo "  mouse_gui_example_runs: PASS (SKIPPED -- no qemu-system-x86_64/python3)"
+    skip_row mouse_gui_example_runs "no qemu-system-x86_64/python3"
 elif [ ! -f "$MG_IMG" ]; then
     FAIL=$((FAIL + 1)); echo "FAIL: mouse_gui_example_runs (no image from the row above)"
 else
@@ -7669,7 +7739,7 @@ CR2EOF
     fi
     rm -f "$DIR/../cr2_tmp_$$.kr" /tmp/cr2_$$
 else
-    PASS=$((PASS + 1)); echo "  asm_cr2_encoding: PASS (SKIPPED -- x86_64 only)"
+    skip_row asm_cr2_encoding "x86_64 only"
 fi
 
 cat > "$DIR/../bm_tmp_$$.kr" <<'BMEOF'
@@ -7754,10 +7824,10 @@ fi
 # The claim that matters for ramfb is not "it compiled" but "QEMU scanned those
 # pixels out". check.py boots the image headless and compares QEMU's own
 # screendump against 13 expected pixel values. Needs qemu-system-x86_64 and
-# python3; noted rather than failed when absent, like the ESP rows above.
+# python3; without either the row is a SKIP (never a pass).
 TOTAL=$((TOTAL + 1))
 if ! command -v qemu-system-x86_64 >/dev/null 2>&1 || ! command -v python3 >/dev/null 2>&1; then
-    PASS=$((PASS + 1)); echo "  ramfb_example_draws: PASS (pixel check SKIPPED -- no qemu-system-x86_64/python3)"
+    skip_row ramfb_example_draws "no qemu-system-x86_64/python3"
 elif [ ! -f "$RFB_IMG" ]; then
     FAIL=$((FAIL + 1)); echo "FAIL: ramfb_example_draws (no image from the row above)"
 else
@@ -7874,7 +7944,7 @@ rm -f "$DIR/../fwm_tmp_$$.kr" /tmp/fwm_$$.img
 #   wr=1       DMA write path, against -device ramfb.
 TOTAL=$((TOTAL + 1))
 if ! command -v qemu-system-aarch64 >/dev/null 2>&1; then
-    PASS=$((PASS + 1)); echo "  fw_cfg_mmio_answers_on_virt: PASS (SKIPPED -- no qemu-system-aarch64; compile row above is the only coverage)"
+    skip_row fw_cfg_mmio_answers_on_virt "no qemu-system-aarch64; compile row above is the only coverage"
 else
 cat > "$DIR/../fwmx_tmp_$$.kr" <<'FWMXEOF'
 import "std/uart_pl011.kr"
@@ -8084,7 +8154,7 @@ fi
 # Both halves were confirmed load-bearing by breaking each on purpose.
 TOTAL=$((TOTAL + 1))
 if ! command -v qemu-system-x86_64 >/dev/null 2>&1 || ! command -v python3 >/dev/null 2>&1; then
-    PASS=$((PASS + 1)); echo "  bare_console_example_runs: PASS (SKIPPED -- no qemu-system-x86_64/python3)"
+    skip_row bare_console_example_runs "no qemu-system-x86_64/python3"
 elif [ ! -f "$BCON_IMG" ]; then
     FAIL=$((FAIL + 1)); echo "FAIL: bare_console_example_runs (no image from the row above)"
 else
@@ -8356,7 +8426,7 @@ ASMBINDEOF
     fi
     rm -f "$DIR/../asmbind_tmp_$$.kr"
 else
-    PASS=$((PASS + 1)); echo "  asm_constraint_out_rax_binds: SKIP (RUN_ARCH=$RUN_ARCH, x86 machine code)"
+    skip_row asm_constraint_out_rax_binds "RUN_ARCH=$RUN_ARCH, x86 machine code"
 fi
 
 # --- std/uart_16550.kr is a provider layered on std/serial.kr ----------------
@@ -8416,7 +8486,7 @@ fn main() -> uint64 {
 }
 UPROVEOF
 if ! command -v qemu-system-x86_64 >/dev/null 2>&1; then
-    PASS=$((PASS + 1)); echo "  uart16550_provider_prints_on_serial: PASS (SKIPPED -- no qemu-system-x86_64)"
+    skip_row uart16550_provider_prints_on_serial "no qemu-system-x86_64"
 elif ! $KRC --target=none --arch=x86_64 --emit=image --load-addr=0x100000 \
             --stack-top=0x90000 "$DIR/../uprov_tmp_$$.kr" -o /tmp/uprov_$$.img >/dev/null 2>&1; then
     FAIL=$((FAIL + 1)); echo "FAIL: uart16550_provider_prints_on_serial (compile failed)"
@@ -8461,7 +8531,7 @@ fn main() -> uint64 {
 }
 USUEOF
 if ! command -v qemu-system-x86_64 >/dev/null 2>&1; then
-    PASS=$((PASS + 1)); echo "  uart16550_beside_serial_import: PASS (SKIPPED -- no qemu-system-x86_64)"
+    skip_row uart16550_beside_serial_import "no qemu-system-x86_64"
 elif ! $KRC --target=none --arch=x86_64 --emit=image --load-addr=0x100000 \
             --stack-top=0x90000 "$DIR/../usu_tmp_$$.kr" -o /tmp/usu_$$.img >/dev/null 2>&1; then
     FAIL=$((FAIL + 1)); echo "FAIL: uart16550_beside_serial_import (compile failed)"
@@ -8652,7 +8722,7 @@ fi
 #     evaluates to 0x0 in this dialect.
 TOTAL=$((TOTAL + 1))
 if [ "$PCI_HAVE_QEMU" = "0" ]; then
-    PASS=$((PASS + 1)); echo "  pci_enumerates_default_machine: PASS (SKIPPED -- no qemu-system-x86_64)"
+    skip_row pci_enumerates_default_machine "no qemu-system-x86_64"
 elif [ "$PCI_BUILT" = "0" ]; then
     FAIL=$((FAIL + 1)); echo "FAIL: pci_enumerates_default_machine (compile failed)"
     $KRC --target=none --arch=x86_64 --emit=image --load-addr=0x100000 \
@@ -8687,7 +8757,7 @@ fi
 # Take two devices away. A baked list passes the row above and fails here.
 TOTAL=$((TOTAL + 1))
 if [ "$PCI_HAVE_QEMU" = "0" ] || [ "$PCI_BUILT" = "0" ]; then
-    PASS=$((PASS + 1)); echo "  pci_tracks_the_machine: PASS (SKIPPED -- no qemu image)"
+    skip_row pci_tracks_the_machine "no qemu image"
 else
     pci_boot /tmp/pcicut_$$.log -vga none -net none
     pci_bad=""
@@ -8715,7 +8785,7 @@ fi
 # is its high half and pci_bar_next must skip to 6, not 5.
 TOTAL=$((TOTAL + 1))
 if [ "$PCI_HAVE_QEMU" = "0" ] || [ "$PCI_BUILT" = "0" ]; then
-    PASS=$((PASS + 1)); echo "  pci_64bit_bar_consumes_two_slots: PASS (SKIPPED -- no qemu image)"
+    skip_row pci_64bit_bar_consumes_two_slots "no qemu image"
 else
     pci_boot /tmp/pcirng_$$.log -device virtio-rng-pci
     pci_bad=""
@@ -8837,8 +8907,7 @@ if [ -f "$DIR/../build/krc.kr" ]; then
     fi
     rm -f /tmp/krc_bootstrap_$$.kr /tmp/krc2_$$ /tmp/krc3_$$ /tmp/krc4_$$
 else
-    echo "  bootstrap: SKIP (no build/krc.kr)"
-    PASS=$((PASS + 1))
+    skip_row bootstrap "no build/krc.kr"
 fi
 
 echo ""
@@ -8991,8 +9060,7 @@ if shoff + shnum * 64 != len(d):
             echo "  emit_obj_no_extern: FAIL (truncated ELF)"
         fi
     else
-        PASS=$((PASS + 1))
-        echo "  emit_obj_no_extern: SKIP (no python3)"
+        skip_row emit_obj_no_extern "no python3"
     fi
 else
     FAIL=$((FAIL + 1))
@@ -9058,8 +9126,7 @@ print(f'ok: file={len(d)} total_uncomp={total_uncomp}')
             echo "  lz4_real_compression: FAIL"
         fi
     else
-        PASS=$((PASS + 1))
-        echo "  lz4_real_compression: SKIP (no python3)"
+        skip_row lz4_real_compression "no python3"
     fi
 else
     FAIL=$((FAIL + 1))
@@ -9082,8 +9149,17 @@ fn main() {
 KREOF
 KRCBIN="$DIR/../build/krc2"
 cat "$DIR/../src/bcj.kr" "$DIR/../src/runner.kr" > /tmp/krc_rt_kr_$$.kr
-if "$KRCBIN" /tmp/krc_rt_$$.kr -o /tmp/krc_rt_$$.krbo > /dev/null 2>&1 \
-   && "$KRCBIN" --arch=$ARCH /tmp/krc_rt_kr_$$.kr -o /tmp/krc_rt_kr_$$ > /dev/null 2>&1; then
+# Both compiles are the compiler's own job, so either failing is a FAIL of
+# this row -- never a skip: a regression in compiling src/runner.kr or
+# src/bcj.kr is exactly what this row exists to catch, and no other row
+# builds the runner.
+RT_FAT_OK=0; RT_RUN_OK=0
+"$KRCBIN" /tmp/krc_rt_$$.kr -o /tmp/krc_rt_$$.krbo > /dev/null 2>&1 && RT_FAT_OK=1
+"$KRCBIN" --arch=$ARCH /tmp/krc_rt_kr_$$.kr -o /tmp/krc_rt_kr_$$ > /dev/null 2>&1 && RT_RUN_OK=1
+if [ "$RT_FAT_OK" != "1" ] || [ "$RT_RUN_OK" != "1" ]; then
+    FAIL=$((FAIL + 1))
+    echo "  krbo_roundtrip: FAIL (compile failed: fat .krbo ok=$RT_FAT_OK, runner (runner.kr+bcj.kr) ok=$RT_RUN_OK)"
+else
     chmod +x /tmp/krc_rt_kr_$$
     out=$(/tmp/krc_rt_kr_$$ /tmp/krc_rt_$$.krbo 2>&1)
     code=$?
@@ -9094,11 +9170,12 @@ if "$KRCBIN" /tmp/krc_rt_$$.kr -o /tmp/krc_rt_$$.krbo > /dev/null 2>&1 \
         FAIL=$((FAIL + 1))
         echo "  krbo_roundtrip: FAIL (out='$out' code=$code)"
     fi
-else
-    PASS=$((PASS + 1))
-    echo "  krbo_roundtrip: SKIP (runner build)"
 fi
-rm -f /tmp/krc_rt_$$.kr /tmp/krc_rt_kr_$$.kr /tmp/krc_rt_$$.krbo /tmp/krc_rt_kr_$$
+# Keep the runner this row built: custom_fat_single below uses it (no other
+# row builds one, and dist/kr only exists after `make dist`).
+RT_RUNNER=""
+if [ "$RT_RUN_OK" = "1" ]; then RT_RUNNER="/tmp/krc_rt_kr_$$"; fi
+rm -f /tmp/krc_rt_$$.kr /tmp/krc_rt_kr_$$.kr /tmp/krc_rt_$$.krbo
 
 echo ""
 echo "--- float types ---"
@@ -10113,7 +10190,7 @@ lc_fits=$($KRC lc "$DIR/../std/alloc.kr" 2>/dev/null | grep -oE 'fitness: [0-9]+
 lc_max=0
 for f in $lc_fits; do [ "$f" -gt "$lc_max" ] && lc_max=$f; done
 if [ -z "$lc_fits" ] || [ "$lc_max" -ge 50 ]; then
-    PASS=$((PASS + 1)); echo "  lc_ci_gate_behaviour: SKIP (std/alloc.kr has no sub-50-only pattern; max=$lc_max)"
+    skip_row lc_ci_gate_behaviour "std/alloc.kr has no sub-50-only pattern; max=$lc_max"
 else
     $KRC lc --ci "$DIR/../std/alloc.kr" >/dev/null 2>&1; lc_bare=$?
     $KRC lc --ci --min-fitness=1 "$DIR/../std/alloc.kr" >/dev/null 2>&1; lc_all=$?
@@ -10888,6 +10965,7 @@ fi
 if timeout 30 "$KRC" --targets="$HOST_TGT" "$REPO_ROOT/test_tmp_$$.kr" -o /tmp/krc_fat_$$ > /dev/null 2>&1; then
     KR_BIN="$REPO_ROOT/dist/kr"
     [ -x "$KR_BIN" ] || KR_BIN="$REPO_ROOT/dist/kr-android-$HOST_ARCH"
+    [ -x "$KR_BIN" ] || KR_BIN="$RT_RUNNER"
     if [ -x "$KR_BIN" ]; then
         timeout 5 "$KR_BIN" /tmp/krc_fat_$$ > /dev/null 2>&1
         actual=$?
@@ -10898,12 +10976,12 @@ if timeout 30 "$KRC" --targets="$HOST_TGT" "$REPO_ROOT/test_tmp_$$.kr" -o /tmp/k
             echo "FAIL: custom_fat_single (expected 77, got $actual)"; FAIL=$((FAIL + 1))
         fi
     else
-        PASS=$((PASS + 1))
-        echo "  custom_fat_single: SKIP (no runner)"
+        skip_row custom_fat_single "no runner (krbo_roundtrip could not build one)"
     fi
 else
     echo "FAIL: custom_fat_single (compilation failed)"; FAIL=$((FAIL + 1))
 fi
+[ -n "$RT_RUNNER" ] && rm -f "$RT_RUNNER"
 rm -f "$REPO_ROOT/test_tmp_$$.kr" /tmp/krc_fat_$$
 
 # Custom 2-slice is smaller than custom 8-slice (same single-slice code path).
@@ -10966,8 +11044,7 @@ if "$KRC" $KRC_FLAGS --emit=obj /tmp/krc_inl_obj_$$.kr -o /tmp/krc_inl_obj_$$.o 
             echo "FAIL: inline_obj_keeps_symbol (helper not in symtab)"; FAIL=$((FAIL + 1))
         fi
     else
-        PASS=$((PASS + 1))
-        echo "  inline_obj_keeps_symbol: SKIP (no readelf)"
+        skip_row inline_obj_keeps_symbol "no readelf"
     fi
 else
     echo "FAIL: inline_obj_keeps_symbol (compile failed)"; FAIL=$((FAIL + 1))
@@ -20884,7 +20961,7 @@ fi
 TOTAL=$((TOTAL + 1))
 CITE_DOC="$DIR/../docs/IR_REFERENCE.md"
 if [ ! -f "$CITE_DOC" ] || [ ! -f "$CITE_MANIFEST" ]; then
-    PASS=$((PASS + 1)); echo "  ir_reference_doc_agrees: SKIP (doc or manifest missing)"
+    FAIL=$((FAIL + 1)); echo "FAIL: ir_reference_doc_agrees (docs/IR_REFERENCE.md or tests/ir_reference_citations.txt is missing, so nothing was compared)"
 else
     doc_orphan=$(python3 - "$CITE_DOC" "$CITE_MANIFEST" <<'PYEOF'
 import re, sys
@@ -20921,8 +20998,7 @@ TOTAL=$((TOTAL + 1))
 SRCINFO_PKGBUILD="$DIR/../packaging/aur/PKGBUILD"
 SRCINFO_FILE="$DIR/../packaging/aur/.SRCINFO"
 if [ ! -f "$SRCINFO_PKGBUILD" ] || [ ! -f "$SRCINFO_FILE" ]; then
-    PASS=$((PASS + 1))
-    echo "  aur_srcinfo_in_sync: SKIP (no packaging/aur/ in this checkout)"
+    skip_row aur_srcinfo_in_sync "no packaging/aur/ in this checkout"
 else
     SRCINFO_GEN=$(bash -c '
         set -e
@@ -21478,7 +21554,7 @@ if [ "$CA_A64_ST" = "0" ] && [ -s "$CA_BIN" ]; then
             echo "FAIL: call_args_25_arm64 (returned $CA_RUN, want 26)"; FAIL=$((FAIL + 1))
         fi
     else
-        PASS=$((PASS + 1)); echo "  call_args_25_arm64: PASS (cross-compiles; no qemu to run it)"
+        skip_row call_args_25_arm64 "cross-compiles; no qemu-aarch64 to run it"
     fi
 else
     echo "FAIL: call_args_25_arm64 (exit $CA_A64_ST: '$CA_A64_ERR')"; FAIL=$((FAIL + 1))
@@ -21598,7 +21674,19 @@ fi
 TOTAL=$((TOTAL + 1))
 rm -f "$CP_BIN"
 if $KRC --arch=x86_64 --legacy "$CP_SRC" -o "$CP_BIN" >/dev/null 2>&1 && [ -s "$CP_BIN" ]; then
-    PASS=$((PASS + 1)); echo "  call_ptr_args_7_accepted_legacy_x86: PASS (compiles; not run -- may be a foreign arch here)"
+    # Built for x86_64 whatever the host is; RUN it where it can run, and say
+    # SKIP (never PASS) where it cannot -- a positive control that never
+    # executes cannot show the arguments arrive.
+    if [ "$ARCH" = "x86_64" ]; then
+        chmod +x "$CP_BIN"; timeout -k 5 "$RUN_TEST_TIMEOUT" "$CP_BIN"; CPL_RUN=$?
+        if [ "$CPL_RUN" = "98" ]; then
+            PASS=$((PASS + 1)); echo "  call_ptr_args_7_accepted_legacy_x86: PASS (runs, returns 98)"
+        else
+            echo "FAIL: call_ptr_args_7_accepted_legacy_x86 (returned $CPL_RUN, want 98)"; FAIL=$((FAIL + 1))
+        fi
+    else
+        skip_row call_ptr_args_7_accepted_legacy_x86 "built for x86_64; the host is $ARCH"
+    fi
 else
     echo "FAIL: call_ptr_args_7_accepted_legacy_x86 (7 arguments must now compile on the legacy backend)"; FAIL=$((FAIL + 1))
 fi
@@ -21895,7 +21983,19 @@ rm -f "$CP_BIN"
 # the correct expectation.
 TOTAL=$((TOTAL + 1))
 if $KRC --arch=x86_64 --legacy "$CP6_SRC" -o "$CP_BIN" >/dev/null 2>&1 && [ -s "$CP_BIN" ]; then
-    PASS=$((PASS + 1)); echo "  call_ptr_args_6_accepted_legacy_x86: PASS (compiles; not run -- may be a foreign arch here)"
+    # Built for x86_64 whatever the host is; RUN it where it can run, and say
+    # SKIP (never PASS) where it cannot -- a positive control that never
+    # executes cannot show the arguments arrive.
+    if [ "$ARCH" = "x86_64" ]; then
+        chmod +x "$CP_BIN"; timeout -k 5 "$RUN_TEST_TIMEOUT" "$CP_BIN"; CPL_RUN=$?
+        if [ "$CPL_RUN" = "21" ]; then
+            PASS=$((PASS + 1)); echo "  call_ptr_args_6_accepted_legacy_x86: PASS (runs, returns 21)"
+        else
+            echo "FAIL: call_ptr_args_6_accepted_legacy_x86 (returned $CPL_RUN, want 21)"; FAIL=$((FAIL + 1))
+        fi
+    else
+        skip_row call_ptr_args_6_accepted_legacy_x86 "built for x86_64; the host is $ARCH"
+    fi
 else
     echo "FAIL: call_ptr_args_6_accepted_legacy_x86 (six args must still compile on the arch that refuses seven)"; FAIL=$((FAIL + 1))
 fi
@@ -22540,7 +22640,7 @@ AXPY
         echo "FAIL: arx_checksum_independent ($ax_ck)"; FAIL=$((FAIL + 1))
     fi
 else
-    PASS=$((PASS + 1)); echo "  arx_checksum_independent: SKIP (no python3)"
+    skip_row arx_checksum_independent "no python3"
 fi
 
 # Refusals. Each message carries a substring unique to it, so a defect that
@@ -22667,8 +22767,8 @@ rm -f "$ARX_SRC" "$ARX_BIN"
 # assert from a host that cannot run it -- and a silent skip would read as
 # coverage, so it says so.
 if [ "$RUN_ARCH" != "x86_64" ]; then
-    PASS=$((PASS + 1)); TOTAL=$((TOTAL + 1))
-    echo "  asm_call_jmp_reg: SKIP (x86_64 encodings; host is $RUN_ARCH)"
+    TOTAL=$((TOTAL + 1))
+    skip_row asm_call_jmp_reg "x86_64 encodings; host is $RUN_ARCH"
 else
 TOTAL=$((TOTAL + 1))
 CR_SRC=$(mktemp /tmp/krc_callreg_XXXX.kr)
@@ -22711,8 +22811,8 @@ fi
 # above: the assertion is a byte encoding, meaningless from a host that cannot
 # assemble it, and a silent skip would read as coverage.
 if [ "$RUN_ARCH" != "x86_64" ]; then
-    PASS=$((PASS + 1)); TOTAL=$((TOTAL + 1))
-    echo "  asm_int_imm8: SKIP (x86_64 encodings; host is $RUN_ARCH)"
+    TOTAL=$((TOTAL + 1))
+    skip_row asm_int_imm8 "x86_64 encodings; host is $RUN_ARCH"
 else
 TOTAL=$((TOTAL + 1))
 II_SRC=$(mktemp /tmp/krc_intimm_XXXX.kr)
@@ -23030,8 +23130,7 @@ if $KRC --emit=image --arch=arm64 --target=none --load-addr=0x40010000 \
         echo "FAIL: fatimg_slice_shorter_than_header (exit $fi_st: '$fi_err')"; FAIL=$((FAIL + 1))
     fi
 else
-    echo "  fatimg_slice_shorter_than_header: SKIP (the trivial arm64 image is no longer under 64 bytes, so this refusal has no fixture)"
-    PASS=$((PASS + 1))
+    skip_row fatimg_slice_shorter_than_header "the trivial arm64 image is no longer under 64 bytes, so this refusal has no fixture"
 fi
 rm -f "$FI_IMG"
 
@@ -24485,8 +24584,7 @@ if [ "$BCB_N" != "$BCB_EXECUTABLE" ]; then
     echo "FAIL: arm64_legacy_bounds_abort_status_agrees ($BCB_EXECUTABLE configs are runnable here but only $BCB_N produced a status -- a config failed to build, so this row has nothing to compare)"
     FAIL=$((FAIL + 1))
 elif [ "$BCB_EXECUTABLE" -lt 2 ]; then
-    PASS=$((PASS + 1))
-    echo "  arm64_legacy_bounds_abort_status_agrees: SKIP (only $BCB_EXECUTABLE config(s) executable here)"
+    skip_row arm64_legacy_bounds_abort_status_agrees "only $BCB_EXECUTABLE config(s) executable here"
 elif [ "$BCB_DIVERGE" = "0" ] && [ "$BCB_FIRST" = "1" ]; then
     PASS=$((PASS + 1))
     echo "  arm64_legacy_bounds_abort_status_agrees: PASS ($BCB_N/4 configs, all exit 1)"
@@ -24503,11 +24601,10 @@ fi
 BCB_A64_RUN=$(bcb_runner arm64)
 TOTAL=$((TOTAL + 1))
 if [ "$BCB_A64_RUN" = "SKIP" ]; then
-    PASS=$((PASS + 1))
-    echo "  arm64_legacy_bounds_absent_without_debug: SKIP (cannot execute arm64 here)"
+    skip_row arm64_legacy_bounds_absent_without_debug "cannot execute arm64 here"
 elif $BCB_KRC --arch=arm64 --legacy "$BCB_D/oob_store.kr" -o "$BCB_D/nodbg" > /dev/null 2>&1; then
     chmod +x "$BCB_D/nodbg"
-    $BCB_A64_RUN "$BCB_D/nodbg" > /dev/null 2>&1
+    timeout -k 5 "$RUN_TEST_TIMEOUT" $BCB_A64_RUN "$BCB_D/nodbg" > /dev/null 2>&1
     bcb_nodbg_st=$?
     if [ "$bcb_nodbg_st" = "0" ]; then
         PASS=$((PASS + 1))
@@ -26010,6 +26107,40 @@ rm -rf "$LIP_D"
 # only now, when $TOTAL is final and already includes this row (Part A did the
 # TOTAL++). Placing this comparison next to Part A would have compared README
 # against a partial count and been permanently, uselessly red.
+#
+# ROWS RUN, NOT ROWS DEFINED. Rows behind an optional tool are not counted at
+# all when it is missing, so a count below README's is ambiguous on a partial
+# toolchain. It is NOT ambiguous on a full one: when every tool this file
+# probes for is present (a qemu-X-static is satisfied by qemu-X), the host is
+# x86_64 and the opt-in ANDROID_EMULATOR is off, every row runs and counts,
+# so TOTAL must equal README exactly and a deleted row is red. On any other
+# run a count below README's is a SKIP that names what is missing, never a
+# pass. More rows than README is red everywhere: a partial run can only count
+# fewer.
+# On a FULL run the set of skipped rows must also be a subset of SKIP_ALLOW:
+# rows whose skip reason is not a missing tool (a precondition this file
+# cannot satisfy by itself), each named with that reason. Any other skip on a
+# full run -- a tool row whose probe variable was blanked mid-file, a new
+# precondition -- is a FAIL, so a full run cannot shed rows into SKIP.
+SKIP_ALLOW=''
+RC_BADSKIP=""
+while IFS= read -r RC_S; do
+    [ -z "$RC_S" ] && continue
+    printf '%s\n' "$SKIP_ALLOW" | cut -d'|' -f1 | grep -qxF -- "$RC_S" || RC_BADSKIP="$RC_BADSKIP [$RC_S]"
+done <<RC_SKIPS_EOF
+$SKIP_NAMES
+RC_SKIPS_EOF
+RC_MISSING=""
+for RC_TOOL in $(grep -oE 'command -v [A-Za-z0-9_.+-]+' "$DIR/run_tests.sh" | awk '{print $3}' | sort -u); do
+    case $RC_TOOL in *-) continue ;; esac   # a prefix in prose, not a tool
+    [ "$RC_TOOL" = "adb" ] && continue      # used only under ANDROID_EMULATOR=1
+    command -v "$RC_TOOL" > /dev/null 2>&1 && continue
+    case $RC_TOOL in *-static) command -v "${RC_TOOL%-static}" > /dev/null 2>&1 && continue ;; esac
+    case $RC_TOOL in qemu-*) command -v "$RC_TOOL-static" > /dev/null 2>&1 && continue ;; esac
+    RC_MISSING="$RC_MISSING $RC_TOOL"
+done
+[ "$(uname -m)" = "x86_64" ] || RC_MISSING="$RC_MISSING host-not-x86_64"
+[ "${ANDROID_EMULATOR:-0}" = "1" ] && RC_MISSING="$RC_MISSING ANDROID_EMULATOR=1-adds-rows"
 if [ "$README_N" = "0" ] || [ -z "$README_COUNTS" ]; then
     FAIL=$((FAIL + 1))
     echo "FAIL: readme_test_count_matches_suite (found NO '**N tests**' in README.md)"
@@ -26041,19 +26172,36 @@ elif [ "$TOTAL" -gt "$README_UNIQ" ]; then
     echo "FAIL: readme_test_count_matches_suite (suite ran $TOTAL, README says '$README_UNIQ')"
     echo "  a run can only count FEWER rows than a full one, never more, so this is"
     echo "  rows added without updating README.md -- set BOTH '**N tests**' to $TOTAL"
+elif [ -z "$RC_MISSING" ] && [ -n "$RC_BADSKIP" ]; then
+    echo "FAIL: readme_test_count_matches_suite (a full run skipped rows that are not in SKIP_ALLOW:$RC_BADSKIP)"
+    FAIL=$((FAIL + 1))
+elif [ -n "$RC_MISSING" ]; then
+    # Not a full run: rows behind a missing tool neither run nor count, so
+    # fewer rows than README states is expected here and a deleted row cannot
+    # be told apart from them. That is a SKIP, never a pass (this branch used
+    # to count it as one, so deleting a row passed on every host).
+    skip_row readme_test_count_matches_suite "ran $TOTAL, README says $README_UNIQ; not a full run, missing:$RC_MISSING"
 elif [ "$TOTAL" -lt "$README_UNIQ" ]; then
-    # Fewer than claimed: either a partial toolchain (expected in CI) or rows
-    # were deleted. Those are indistinguishable from here, so say so rather
-    # than guessing -- and do not pass silently, which would make this row look
-    # like coverage it is not providing on this machine.
-    PASS=$((PASS + 1))
-    echo "  readme_test_count_matches_suite: SKIP (ran $TOTAL, README says $README_UNIQ --"
-    echo "    expected when optional tooling is absent; if this is a FULL run, rows were"
-    echo "    deleted and README.md needs updating to $TOTAL)"
+    # A full run counts every row. Fewer than README states means rows were
+    # deleted, or a row stopped counting itself -- either way README.md or
+    # the suite is wrong.
+    FAIL=$((FAIL + 1))
+    echo "FAIL: readme_test_count_matches_suite (full run counted $TOTAL, README says $README_UNIQ)"
+    echo "  every tool the suite probes is present, so every row ran: rows were deleted"
+    echo "  or stopped counting -- restore them, or set every '**N tests**' to $TOTAL"
 else
     PASS=$((PASS + 1))
     echo "  readme_test_count_matches_suite: PASS (README and suite both say $TOTAL)"
 fi
 
-echo "=== Results: $PASS/$TOTAL passed, $FAIL failed ==="
-exit $FAIL
+if [ $((PASS + FAIL + SKIP)) -ne "$TOTAL" ]; then
+    # A row that incremented TOTAL but was never counted as a pass, a
+    # failure or a skip (or the reverse) makes every number here untrue.
+    echo "FAIL: suite_accounting (PASS $PASS + FAIL $FAIL + SKIP $SKIP != TOTAL $TOTAL)"
+    FAIL=$((FAIL + 1))
+fi
+echo "=== Results: $PASS/$TOTAL passed, $FAIL failed, $SKIP skipped ==="
+# Any failure is exit 1: `exit $FAIL` would wrap to 0 at exactly 256.
+SUMMARY_DONE=1
+if [ "$FAIL" -ne 0 ]; then exit 1; fi
+exit 0
