@@ -98,11 +98,18 @@ build-import: build/krc2
 	chmod +x build/krc-import
 
 # Run test suite
-# The suite's compiler wrapper is a private mktemp file, removed on exit: a
-# fixed /tmp/krc-test was shared by every checkout on the box, so two
-# `make test` runs at once (in two worktrees, say) rewrote the one file under
-# each other, and with an absolute compiler path one suite could run the
-# other tree's compiler.
+# The suite's compiler wrapper is a private file, removed on exit: a fixed
+# /tmp/krc-test was shared by every checkout on the box, so two `make test`
+# runs at once rewrote it under each other. The traps are set before the file
+# exists (mktemp -u names it, `set -C` creates it exclusively), so no signal
+# can leave it behind; the suite runs in the background so that INT, TERM
+# and HUP reach the trap at once (a foreground child defers it until the
+# whole suite ends) and are passed on to it, and the recipe exits 130, 143
+# or 129. The compiler's path travels in the environment, never pasted
+# into the wrapper's text, so a checkout path with spaces works; it is
+# absolute, because rows cd elsewhere before calling it. (A signal sent to
+# make ALONE is not passed on by make; the orphaned suite then removes the
+# file when it finishes.)
 # Depends on build/kr-bin because the suite asserts the RUNNER's reported
 # version matches the changelog. That check deliberately fails rather than
 # skips when the binary is absent, so the binary has to be built here --
@@ -110,10 +117,15 @@ build-import: build/krc2
 # to prevent.
 test: build/krc2 build/kr-bin
 	@echo "=== Running test suite ==="
-	@w=$$(mktemp "$${TMPDIR:-/tmp}/krc-test.XXXXXX") || exit 1; \
-	 trap 'rm -f "$$w"' EXIT; trap 'exit 130' INT TERM; \
-	 printf '#!/bin/bash\nexec %s --arch=x86_64 "$$@"\n' './build/krc2' > "$$w" && chmod +x "$$w" && \
-	 KRC="$$w" bash tests/run_tests.sh
+	@w=$$(mktemp -u "$${TMPDIR:-/tmp}/krc-test.XXXXXX") || exit 1; pid=; \
+	 trap 'rm -f "$$w"' EXIT; \
+	 trap '[ -z "$$pid" ] || kill $$pid 2>/dev/null; exit 130' INT; \
+	 trap '[ -z "$$pid" ] || kill $$pid 2>/dev/null; exit 143' TERM; \
+	 trap '[ -z "$$pid" ] || kill $$pid 2>/dev/null; exit 129' HUP; \
+	 (set -C; printf '#!/bin/bash\nexec "$$MAKE_TEST_COMPILER" --arch=x86_64 "$$@"\n' > "$$w") || exit 1; \
+	 chmod +x "$$w" || exit 1; \
+	 MAKE_TEST_COMPILER="$(CURDIR)/build/krc2" KRC="$$w" bash tests/run_tests.sh & pid=$$!; \
+	 wait $$pid; st=$$?; pid=; exit $$st
 
 # Full CI gate: bootstrap fixed point + suite + both IR-vs-legacy differential
 # harnesses (x86_64 + arm64 via qemu). Any failure aborts (each step exits
