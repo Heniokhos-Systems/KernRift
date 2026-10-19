@@ -1538,7 +1538,7 @@ fn ir_emit_riscv_insn(uint64 ii) {
 
     // ----- IR_ARG (51): move value to argument register a0-a7 -----
     // Mirror of ir_aarch64.kr:1622. imm is the 0-based arg index
-    // (ir.kr:3727 passes `ai`): < 8 = register arg in a0-a7 (RV32 psABI,
+    // (ir.kr:3727 is the site): < 8 = register arg in a0-a7 (RV32 psABI,
     // x10+i — same slot discipline as AAPCS64's x0-x7); >= 100 = direct
     // physical register target (ASM I/O constraints); 8..99 = overflow
     // arg (the 9th+), stored to the pre-reserved bottom-of-frame slots.
