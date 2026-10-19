@@ -39,9 +39,35 @@ RUN_ARCH="x86_64"
 if [ "$ARCH" = "aarch64" ] || [ "$ARCH" = "arm64" ]; then RUN_ARCH="arm64"; fi
 PASS=0
 FAIL=0
+SKIP=0
 TOTAL=0
+
+# Every skipped row goes through skip_row: it counts in SKIP (never in PASS)
+# and prints one uniform line. The row must already be in TOTAL -- a site
+# whose row is not counted yet increments TOTAL itself first.
+#
+# REQUIRE_FULL_RUN=1 is the mode for merge and release gating: every skip is
+# a FAIL, whatever its reason -- a missing tool (wine, python3, a qemu), or
+# the README gate on a partial toolchain. A run in this mode passes only if
+# every row ran and passed. The default (0) keeps a skip a SKIP, for
+# development on a partial box.
+REQUIRE_FULL_RUN="${REQUIRE_FULL_RUN:-0}"
+skip_row() {
+    if [ "$REQUIRE_FULL_RUN" = 1 ]; then
+        FAIL=$((FAIL + 1))
+        echo "FAIL: $1 (skipped, and REQUIRE_FULL_RUN=1 makes every skip a failure: $2)"
+        return
+    fi
+    SKIP=$((SKIP + 1))
+    SKIP_NAMES="$SKIP_NAMES$1
+"
+    echo "  $1: SKIP ($2)"
+}
+# Every skipped row's name, one per line.
+SKIP_NAMES=""
 # Wine selection (one rule for every Wine row). KR_WINE unset: use `wine` from PATH, and
-# a missing wine is a declared SKIP (wine_na). KR_WINE set but empty or not an executable
+# a missing wine is a SKIP through skip_row (wine_na), so a REQUIRE_FULL_RUN=1 run fails
+# and names wine. KR_WINE set but empty or not an executable
 # file is a misconfiguration: wine_path yields nothing and wine_na FAILS, so a mistyped
 # path cannot turn the Windows-run rows into a green SKIP.
 KR_WINE_BAD=""
@@ -51,7 +77,7 @@ fi
 wine_path() { [ -n "$KR_WINE_BAD" ] && return 0; echo "${KR_WINE:-$(command -v wine 2>/dev/null || true)}"; }
 wine_na() {   # <row>: no usable wine -- SKIP if none was asked for, FAIL if KR_WINE is wrong
     if [ -n "$KR_WINE_BAD" ]; then FAIL=$((FAIL + 1)); echo "FAIL: $1 ($KR_WINE_BAD)"
-    else PASS=$((PASS + 1)); echo "  $1: SKIP (no wine; set KR_WINE=<path to wine>)"; fi
+    else skip_row "$1" "no wine; set KR_WINE=<path to wine>"; fi
 }
 
 run_test() {
@@ -6410,7 +6436,7 @@ if $KRC --arch=arm64 /tmp/krc_nakedalt_$$.kr -o /tmp/krc_nakedalt_$$ --emit=elf 
             FAIL=$((FAIL + 1)); echo "FAIL: naked_alternative_out_constraint_works ($nakedalt_err)"
         fi
     else
-        PASS=$((PASS + 1)); echo "  naked_alternative_out_constraint_works: SKIP (compiles; no qemu-aarch64-static to run it)"
+        skip_row naked_alternative_out_constraint_works "compiles; no qemu-aarch64-static to run it"
     fi
 else
     FAIL=$((FAIL + 1))
@@ -6608,7 +6634,7 @@ fn main() -> uint32 {
 }
 IDTCEOF
 if ! command -v qemu-system-x86_64 >/dev/null 2>&1; then
-    PASS=$((PASS + 1)); echo "  idt_selector_and_limit: PASS (SKIPPED -- no qemu-system-x86_64)"
+    skip_row idt_selector_and_limit "no qemu-system-x86_64"
 elif ! $KRC --target=none --arch=x86_64 --emit=image --load-addr=0x100000 \
             --stack-top=0x90000 "$DIR/../idtcs_tmp_$$.kr" -o "$IDTCS_K" >/dev/null 2>&1 \
   || ! $KRC --target=none --arch=x86_64 --emit=image --reset-vector \
@@ -6672,7 +6698,7 @@ fn main() -> uint32 {
 }
 IDTFEOF
 if ! command -v qemu-system-x86_64 >/dev/null 2>&1; then
-    PASS=$((PASS + 1)); echo "  idt_reports_four_faults: PASS (SKIPPED -- no qemu-system-x86_64)"
+    skip_row idt_reports_four_faults "no qemu-system-x86_64"
 else
     idtf_ok=1
     idtf_notes=""
@@ -6792,7 +6818,7 @@ fn main() -> uint32 {
 }
 IDTHEOF
 if ! command -v qemu-system-x86_64 >/dev/null 2>&1; then
-    PASS=$((PASS + 1)); echo "  idt_common_handler_hook: PASS (SKIPPED -- no qemu-system-x86_64)"
+    skip_row idt_common_handler_hook "no qemu-system-x86_64"
 else
     idthk_ok=1
     idthk_notes=""
@@ -7398,7 +7424,7 @@ fi
 # the click was never seen, and a keystroke went missing -- 3 of 3 checks red.
 TOTAL=$((TOTAL + 1))
 if ! command -v qemu-system-x86_64 >/dev/null 2>&1 || ! command -v python3 >/dev/null 2>&1; then
-    PASS=$((PASS + 1)); echo "  mouse_gui_example_runs: PASS (SKIPPED -- no qemu-system-x86_64/python3)"
+    skip_row mouse_gui_example_runs "no qemu-system-x86_64/python3"
 elif [ ! -f "$MG_IMG" ]; then
     FAIL=$((FAIL + 1)); echo "FAIL: mouse_gui_example_runs (no image from the row above)"
 else
@@ -7719,7 +7745,7 @@ fi
 # python3; noted rather than failed when absent, like the ESP rows above.
 TOTAL=$((TOTAL + 1))
 if ! command -v qemu-system-x86_64 >/dev/null 2>&1 || ! command -v python3 >/dev/null 2>&1; then
-    PASS=$((PASS + 1)); echo "  ramfb_example_draws: PASS (pixel check SKIPPED -- no qemu-system-x86_64/python3)"
+    skip_row ramfb_example_draws "pixel check: no qemu-system-x86_64/python3"
 elif [ ! -f "$RFB_IMG" ]; then
     FAIL=$((FAIL + 1)); echo "FAIL: ramfb_example_draws (no image from the row above)"
 else
@@ -7836,7 +7862,7 @@ rm -f "$DIR/../fwm_tmp_$$.kr" /tmp/fwm_$$.img
 #   wr=1       DMA write path, against -device ramfb.
 TOTAL=$((TOTAL + 1))
 if ! command -v qemu-system-aarch64 >/dev/null 2>&1; then
-    PASS=$((PASS + 1)); echo "  fw_cfg_mmio_answers_on_virt: PASS (SKIPPED -- no qemu-system-aarch64; compile row above is the only coverage)"
+    skip_row fw_cfg_mmio_answers_on_virt "no qemu-system-aarch64; compile row above is the only coverage"
 else
 cat > "$DIR/../fwmx_tmp_$$.kr" <<'FWMXEOF'
 import "std/uart_pl011.kr"
@@ -8046,7 +8072,7 @@ fi
 # Both halves were confirmed load-bearing by breaking each on purpose.
 TOTAL=$((TOTAL + 1))
 if ! command -v qemu-system-x86_64 >/dev/null 2>&1 || ! command -v python3 >/dev/null 2>&1; then
-    PASS=$((PASS + 1)); echo "  bare_console_example_runs: PASS (SKIPPED -- no qemu-system-x86_64/python3)"
+    skip_row bare_console_example_runs "no qemu-system-x86_64/python3"
 elif [ ! -f "$BCON_IMG" ]; then
     FAIL=$((FAIL + 1)); echo "FAIL: bare_console_example_runs (no image from the row above)"
 else
@@ -8378,7 +8404,7 @@ fn main() -> uint64 {
 }
 UPROVEOF
 if ! command -v qemu-system-x86_64 >/dev/null 2>&1; then
-    PASS=$((PASS + 1)); echo "  uart16550_provider_prints_on_serial: PASS (SKIPPED -- no qemu-system-x86_64)"
+    skip_row uart16550_provider_prints_on_serial "no qemu-system-x86_64"
 elif ! $KRC --target=none --arch=x86_64 --emit=image --load-addr=0x100000 \
             --stack-top=0x90000 "$DIR/../uprov_tmp_$$.kr" -o /tmp/uprov_$$.img >/dev/null 2>&1; then
     FAIL=$((FAIL + 1)); echo "FAIL: uart16550_provider_prints_on_serial (compile failed)"
@@ -8423,7 +8449,7 @@ fn main() -> uint64 {
 }
 USUEOF
 if ! command -v qemu-system-x86_64 >/dev/null 2>&1; then
-    PASS=$((PASS + 1)); echo "  uart16550_beside_serial_import: PASS (SKIPPED -- no qemu-system-x86_64)"
+    skip_row uart16550_beside_serial_import "no qemu-system-x86_64"
 elif ! $KRC --target=none --arch=x86_64 --emit=image --load-addr=0x100000 \
             --stack-top=0x90000 "$DIR/../usu_tmp_$$.kr" -o /tmp/usu_$$.img >/dev/null 2>&1; then
     FAIL=$((FAIL + 1)); echo "FAIL: uart16550_beside_serial_import (compile failed)"
@@ -8614,7 +8640,7 @@ fi
 #     evaluates to 0x0 in this dialect.
 TOTAL=$((TOTAL + 1))
 if [ "$PCI_HAVE_QEMU" = "0" ]; then
-    PASS=$((PASS + 1)); echo "  pci_enumerates_default_machine: PASS (SKIPPED -- no qemu-system-x86_64)"
+    skip_row pci_enumerates_default_machine "no qemu-system-x86_64"
 elif [ "$PCI_BUILT" = "0" ]; then
     FAIL=$((FAIL + 1)); echo "FAIL: pci_enumerates_default_machine (compile failed)"
     $KRC --target=none --arch=x86_64 --emit=image --load-addr=0x100000 \
@@ -8649,7 +8675,7 @@ fi
 # Take two devices away. A baked list passes the row above and fails here.
 TOTAL=$((TOTAL + 1))
 if [ "$PCI_HAVE_QEMU" = "0" ] || [ "$PCI_BUILT" = "0" ]; then
-    PASS=$((PASS + 1)); echo "  pci_tracks_the_machine: PASS (SKIPPED -- no qemu image)"
+    skip_row pci_tracks_the_machine "no qemu image"
 else
     pci_boot /tmp/pcicut_$$.log -vga none -net none
     pci_bad=""
@@ -8677,7 +8703,7 @@ fi
 # is its high half and pci_bar_next must skip to 6, not 5.
 TOTAL=$((TOTAL + 1))
 if [ "$PCI_HAVE_QEMU" = "0" ] || [ "$PCI_BUILT" = "0" ]; then
-    PASS=$((PASS + 1)); echo "  pci_64bit_bar_consumes_two_slots: PASS (SKIPPED -- no qemu image)"
+    skip_row pci_64bit_bar_consumes_two_slots "no qemu image"
 else
     pci_boot /tmp/pcirng_$$.log -device virtio-rng-pci
     pci_bad=""
@@ -9823,7 +9849,7 @@ for rwi in "win_import_routes_fat_win_x64 win-x64 3 x86_64 32" "win_import_route
     if [ ! -s "$RWI_DIR/o.krbo" ]; then
         FAIL=$((FAIL + 1)); echo "  $1: FAIL (fat build refused: $(echo "$RWI_ERR" | head -1))"
     elif ! command -v python3 > /dev/null 2>&1; then
-        PASS=$((PASS + 1)); echo "  $1: SKIP (no python3)"
+        skip_row "$1" "no python3"
     elif ! python3 "$DIR/helpers/krbo_slice.py" "$RWI_DIR/o.krbo" "$3" "$RWI_DIR/o.exe"; then
         FAIL=$((FAIL + 1)); echo "  $1: FAIL (could not extract slice $3)"
     else
@@ -10279,7 +10305,7 @@ WSR_ERR=$($KRC --targets="$WSR_HOST" "$DIR/fixtures/win_syscall_raw.kr" -o "$WSR
 if [ ! -s "$WSR_DIR/o.krbo" ]; then
     FAIL=$((FAIL + 1)); echo "  win_syscall_raw_fat_linux_only_builds: FAIL (refused: $(printf '%s' "$WSR_ERR" | head -1))"
 elif ! command -v python3 > /dev/null 2>&1; then
-    PASS=$((PASS + 1)); echo "  win_syscall_raw_fat_linux_only_builds: PASS, run SKIP (no python3)"
+    skip_row win_syscall_raw_fat_linux_only_builds "built; the run needs python3"
 elif ! python3 "$DIR/helpers/krbo_slice.py" "$WSR_DIR/o.krbo" "$WSR_ID" "$WSR_DIR/o.bin"; then
     FAIL=$((FAIL + 1)); echo "  win_syscall_raw_fat_linux_only_builds: FAIL (could not extract slice $WSR_ID)"
 else
@@ -10303,7 +10329,7 @@ for wsr in "win_import_unguarded_fat_win_x64 win-x64 3 x86_64 32" "win_import_un
     if [ ! -s "$WSR_DIR/o.krbo" ]; then
         FAIL=$((FAIL + 1)); echo "  $1: FAIL (fat build refused: $(printf '%s' "$WSR_ERR" | head -1))"
     elif ! command -v python3 > /dev/null 2>&1; then
-        PASS=$((PASS + 1)); echo "  $1: SKIP (no python3)"
+        skip_row "$1" "no python3"
     elif ! python3 "$DIR/helpers/krbo_slice.py" "$WSR_DIR/o.krbo" "$3" "$WSR_DIR/o.exe"; then
         FAIL=$((FAIL + 1)); echo "  $1: FAIL (could not extract slice $3)"
     else
@@ -23653,7 +23679,7 @@ AXPY
         echo "FAIL: arx_checksum_independent ($ax_ck)"; FAIL=$((FAIL + 1))
     fi
 else
-    PASS=$((PASS + 1)); echo "  arx_checksum_independent: SKIP (no python3)"
+    skip_row arx_checksum_independent "no python3"
 fi
 
 # Refusals. Each message carries a substring unique to it, so a defect that
@@ -27444,7 +27470,7 @@ TOTAL=$((TOTAL + 1))
 if [ "$RUN_ARCH" = "arm64" ]; then
     PASS=$((PASS + 1)); echo "  alias_byte_addr_arm64_qemu: SKIP (the native row is arm64)"
 elif [ -z "$ALI_QEMU" ]; then
-    PASS=$((PASS + 1)); echo "  alias_byte_addr_arm64_qemu: SKIP (no qemu-aarch64)"
+    skip_row alias_byte_addr_arm64_qemu "no qemu-aarch64"
 elif "$DIR/../build/krc2" --arch=arm64 "$ALI_FX" -o "$ALI_D/aa" > "$ALI_D/b.log" 2>&1; then
     timeout 60 "$ALI_QEMU" "$ALI_D/aa" > "$ALI_D/out" 2>/dev/null; ali_check alias_byte_addr_arm64_qemu $? "$ALI_D/out"
 else FAIL=$((FAIL + 1)); echo "FAIL: alias_byte_addr_arm64_qemu (build: $(grep -m1 error "$ALI_D/b.log"))"; fi
@@ -27573,7 +27599,7 @@ ali_fstr() {   # <row> <stdout, a shell glob: `*` for an unpinnable prefix> <pri
     for arch in "$RUN_ARCH" arm64; do
         TOTAL=$((TOTAL + 1))
         if [ "$arch" = "arm64" ] && [ "$RUN_ARCH" = "arm64" ]; then PASS=$((PASS + 1)); echo "  ${1}_arm64: SKIP (the native row is arm64)"; continue; fi
-        if [ "$arch" = "arm64" ] && [ -z "$ALI_QEMU" ]; then PASS=$((PASS + 1)); echo "  ${1}_arm64: SKIP (no qemu-aarch64)"; continue; fi
+        if [ "$arch" = "arm64" ] && [ -z "$ALI_QEMU" ]; then skip_row ${1}_arm64 "no qemu-aarch64"; continue; fi
         if ! "$DIR/../build/krc2" --arch=$arch "$ALI_D/fs.kr" -o "$ALI_D/fs" > "$ALI_D/fs.log" 2>&1; then
             FAIL=$((FAIL + 1)); echo "FAIL: ${1}_$arch (refused: $(grep -m1 error "$ALI_D/fs.log"))"; continue
         fi
@@ -27662,7 +27688,7 @@ C7_WINE="$(wine_path)"
 C7_QEMU="$(command -v qemu-aarch64-static || command -v qemu-aarch64 || true)"
 c7_ok() { PASS=$((PASS + 1)); echo "  $1: PASS${2:+ ($2)}"; }
 c7_bad() { FAIL=$((FAIL + 1)); echo "  $1: FAIL ($2 )"; }
-c7_skip() { PASS=$((PASS + 1)); echo "  $1: SKIP ($2)"; }
+c7_skip() { skip_row "$1" "$2"; }
 # Wine itself flakes, measured 2026-10-12 (Proton Experimental), in two ways
 # that are not the program's doing, so both are retried (3 tries):
 #  - the LAUNCH: `wine prog.exe` occasionally prints "ShellExecuteEx failed"
@@ -28428,7 +28454,7 @@ T10_WINE="$(wine_path)"
 T10_QEMU="$(command -v qemu-aarch64-static || command -v qemu-aarch64 || true)"
 t10_ok() { PASS=$((PASS + 1)); echo "  $1: PASS${2:+ ($2)}"; }
 t10_bad() { FAIL=$((FAIL + 1)); echo "FAIL: $1 ($2)"; }
-t10_skip() { PASS=$((PASS + 1)); echo "  $1: SKIP ($2)"; }
+t10_skip() { skip_row "$1" "$2"; }
 # Wine can fail to LAUNCH a program (prints "ShellExecuteEx failed", exits 1,
 # program never started): retry that, exactly that, 3 tries (see c7_wine).
 # Wine has also been seen (rarely, only inside full suite runs) to end a run
@@ -29245,14 +29271,11 @@ elif [ "$TOTAL" -lt "$README_UNIQ" ]; then
     # were deleted. Those are indistinguishable from here, so say so rather
     # than guessing -- and do not pass silently, which would make this row look
     # like coverage it is not providing on this machine.
-    PASS=$((PASS + 1))
-    echo "  readme_test_count_matches_suite: SKIP (ran $TOTAL, README says $README_UNIQ --"
-    echo "    expected when optional tooling is absent; if this is a FULL run, rows were"
-    echo "    deleted and README.md needs updating to $TOTAL)"
+    skip_row readme_test_count_matches_suite "ran $TOTAL, README says $README_UNIQ -- expected when optional tooling is absent; if this is a FULL run, rows were deleted and README.md needs updating to $TOTAL"
 else
     PASS=$((PASS + 1))
     echo "  readme_test_count_matches_suite: PASS (README and suite both say $TOTAL)"
 fi
 
-echo "=== Results: $PASS/$TOTAL passed, $FAIL failed ==="
+echo "=== Results: $PASS/$TOTAL passed, $FAIL failed, $SKIP skipped ==="
 exit $FAIL

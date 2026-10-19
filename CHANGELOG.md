@@ -4,6 +4,15 @@ All notable changes to `kernriftc` are documented in this file.
 
 ## Unreleased
 
+**Fixed: a skipped test row is no longer counted as a pass.** Thirty sites in
+`tests/run_tests.sh` (every Wine row without Wine, the qemu and python3 rows
+without their tool, and the README count gate on a partial run) added to PASS
+while printing SKIP, so a box without Wine reported a clean run. They now go
+through `skip_row`, which counts them in a new SKIP total (the results line
+reads `P/T passed, F failed, S skipped`). `REQUIRE_FULL_RUN=1 make test` turns
+every skip into a FAIL that names the missing tool, for merge and release
+gating.
+
 **Added (std): sys_sendto, sys_recvfrom, SO_BROADCAST and sys_connect_timeout** -- datagrams with an address and a connect with a deadline that always leaves the socket blocking, for arsh discovery.
 
 **Added (std): sys_getenv (args.kr), sys_mkdir, sys_rename, sys_chmod, sys_file_mode and sys_last_errno (sys.kr)** -- the file and environment calls arsh's profile store needs on Windows, with GetLastError() mapped to Linux errno values (32 sharing violation -> EBUSY, 183 already exists -> EEXIST, unknown -> EIO).

@@ -40,6 +40,13 @@ and runs, aborting on the first failure:
 
 `make test` runs only step 2; `make bootstrap` only step 1.
 
+`make test` reports a skipped row as SKIP, never as a pass, so a partial
+toolchain still gives a usable answer. **For merge and release gating run
+`REQUIRE_FULL_RUN=1 make test`**: in that mode every skip is a FAIL -- a
+missing tool (wine, qemu, python3), or the README row-count gate on a partial
+toolchain -- and the failure names the missing tool, so the gate passes only
+when every row ran and passed.
+
 ## Source structure
 
 All compiler source is in `src/` (one compilation unit; see the Makefile
