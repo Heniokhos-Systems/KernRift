@@ -1,9 +1,11 @@
 // std/sys.kr (arsh discovery, spec S3, R2-m2): SO_BROADCAST (SOL_SOCKET 1,
 // option 6). argv[1] "lo": send to 127.255.255.255 (Linux's lo broadcast
-// route, present with NO default route); "all": 255.255.255.255 (the Wine
-// row). Without the option a broadcast send is refused -EACCES; with it, it
-// is not. A 2-byte option value is -EINVAL on both OSes. Prints
-// "without <r>" and "with <r>"; the rows judge them.
+// route, present with NO default route) -- the mode EVERY row uses, Wine's
+// too: Wine hands the send to the same Linux kernel path, so nothing leaves
+// the host. "all": 255.255.255.255, for a NATIVE Windows run only (it goes
+// out on the LAN; no suite row uses it). Without the option a broadcast send
+// is refused -EACCES; with it, it succeeds. A 2-byte option value is -EINVAL
+// on both OSes. Prints "without <r>" and "with <r>"; the rows judge them.
 import "../../std/sys.kr"
 import "../../std/args.kr"
 

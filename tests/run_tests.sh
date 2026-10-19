@@ -29112,20 +29112,23 @@ for S1B_A in x86_64 arm64; do
     esac
 done
 # A black hole: -110 within 1.9..2.5 s (a wait that ignores `ms` is either
-# immediate or the harness's 60 s timeout). A host with no route at all says
-# -101/-113 at once: a counted, printed SKIP, never a pass.
+# immediate or the harness's 60 s timeout). ZERO-EMISSION: sys_cto `full` is a
+# loopback listener with backlog 0 whose accept queue one un-accepted
+# connection fills; Linux then drops every further SYN silently (counted as
+# TcpExtListenOverflows), so nothing leaves the host and no route is needed.
+# (Native Windows RSTs a full backlog: `hole`, 10.255.255.1, is the fixture's
+# native variant, run by no row.)
 for S1B_A in x86_64 arm64; do
     TOTAL=$((TOTAL + 1))
     S1B_ROW=sys_connect_timeout_black_hole_times_out_$S1B_A
     if [ "$S1B_A" = "arm64" ] && [ -z "$T10_QEMU" ]; then t10_skip "$S1B_ROW" "no qemu-aarch64-static"; continue; fi
     if ! t10_build "$S1B_A" sys_cto; then t10_bad "$S1B_ROW" "build failed: $(grep -m1 'error' "$T10_D/sys_cto-$S1B_A.log" | cut -c1-140)"; continue; fi
     chmod +x "$T10_D/sys_cto-$S1B_A"
-    t10_run "$S1B_A" sys_cto hole; S1B_RC=$?
+    t10_run "$S1B_A" sys_cto full; S1B_RC=$?
     S1B_GOT=$(cat "$T10_D/out")
     set -- $S1B_GOT
-    if [ "$S1B_RC" = "0" ] && [ "${1:-}" = "hole" ] && [ "${2:-}" = "-110" ] && [ "${3:-0}" -ge 1900 ] && [ "${3:-0}" -le 2500 ]; then t10_ok "$S1B_ROW" "$S1B_GOT"
-    elif [ "${2:-}" = "-101" ] || [ "${2:-}" = "-113" ]; then t10_skip "$S1B_ROW" "no route to 10.255.255.1 on this host ($S1B_GOT)"
-    else t10_bad "$S1B_ROW" "rc=$S1B_RC got '$S1B_GOT', want 'hole -110 <1900..2500>'"; fi
+    if [ "$S1B_RC" = "0" ] && [ "${1:-}" = "full" ] && [ "${2:-}" = "-110" ] && [ "${3:-0}" -ge 1900 ] && [ "${3:-0}" -le 2500 ]; then t10_ok "$S1B_ROW" "$S1B_GOT"
+    else t10_bad "$S1B_ROW" "rc=$S1B_RC got '$S1B_GOT', want 'full -110 <1900..2500>'"; fi
 done
 TOTAL=$((TOTAL + 1))
 S1B_W=""
@@ -29170,17 +29173,10 @@ else
     s1b_wine sys_udp_windows_wine sys_udp "OK"
     s1b_wine sys_connect_timeout_restores_blocking_windows_wine sys_cto "OK" lo
     s1b_wine sys_connect_timeout_immediate_restores_blocking_windows_wine sys_cto "OK" udp
-    # 255.255.255.255 under Wine: -EACCES without the option and NOT -EACCES
-    # with it (a routeless host may say -ENETUNREACH, which must not redden).
-    TOTAL=$((TOTAL + 1))
-    if $T10_KRC --arch=x86_64 --target=windows --emit=pe "$T10_FX/sys_bcast.kr" -o "$T10_D/sys_bcast.exe" > "$T10_D/w.log" 2>&1; then
-        t10_wine "$T10_D/win.out" "$T10_D/win.err" sys_bcast.exe all; T10_RC=$?
-        S1B_GOT=$(tr -d '\r' < "$T10_D/win.out" | tr '\n' ' ')
-        set -- $S1B_GOT
-        if [ "$T10_RC" = "0" ] && [ "${1:-}" = "without" ] && [ "${2:-}" = "-13" ] && [ "${3:-}" = "with" ] && [ -n "${4:-}" ] && [ "${4:-}" != "-13" ]; then
-            t10_ok sys_so_broadcast_windows_wine "$S1B_GOT$(t10_note)"
-        else t10_bad sys_so_broadcast_windows_wine "rc=$T10_RC got '$S1B_GOT' want 'without -13 with <not -13>'; wine output tail: $(t10_errtail)"; fi
-    else t10_bad sys_so_broadcast_windows_wine "build: $(grep -m1 error "$T10_D/w.log" | cut -c1-120)"; fi
+    # 127.255.255.255 under Wine too: the Windows arm's SO_BROADCAST reaches the
+    # same Linux kernel path as the native rows, so the result is EXACT and
+    # nothing goes onto the LAN (the fixture's `all` mode is for native Windows).
+    s1b_wine sys_so_broadcast_windows_wine sys_bcast $'without -13\nwith 48' lo
     TOTAL=$((TOTAL + 1))
     if $T10_KRC --arch=x86_64 --target=windows --emit=pe "$T10_FX/sys_cto.kr" -o "$T10_D/sys_cto.exe" > "$T10_D/w.log" 2>&1; then
         t10_wine "$T10_D/win.out" "$T10_D/win.err" sys_cto.exe refused; T10_RC=$?
@@ -29190,12 +29186,13 @@ else
             *) t10_bad sys_connect_timeout_refused_is_an_error_windows_wine "rc=$T10_RC got '$S1B_GOT'; wine output tail: $(t10_errtail)" ;;
         esac
         TOTAL=$((TOTAL + 1))
-        t10_wine "$T10_D/win.out" "$T10_D/win.err" sys_cto.exe hole; T10_RC=$?
+        # `full` (zero-emission, see the Linux rows): Wine's listen and connect
+        # land on the same Linux backlog, which drops the SYN silently.
+        t10_wine "$T10_D/win.out" "$T10_D/win.err" sys_cto.exe full; T10_RC=$?
         S1B_GOT=$(tr -d '\r' < "$T10_D/win.out")
         set -- $S1B_GOT
-        if [ "$T10_RC" = "0" ] && [ "${2:-}" = "-110" ] && [ "${3:-0}" -ge 1900 ] && [ "${3:-0}" -le 2500 ]; then t10_ok sys_connect_timeout_black_hole_times_out_windows_wine "$S1B_GOT"
-        elif [ "${2:-}" = "-101" ] || [ "${2:-}" = "-113" ]; then t10_skip sys_connect_timeout_black_hole_times_out_windows_wine "no route to 10.255.255.1 on this host ($S1B_GOT)"
-        else t10_bad sys_connect_timeout_black_hole_times_out_windows_wine "rc=$T10_RC got '$S1B_GOT'; wine output tail: $(t10_errtail)"; fi
+        if [ "$T10_RC" = "0" ] && [ "${1:-}" = "full" ] && [ "${2:-}" = "-110" ] && [ "${3:-0}" -ge 1900 ] && [ "${3:-0}" -le 2500 ]; then t10_ok sys_connect_timeout_black_hole_times_out_windows_wine "$S1B_GOT"
+        else t10_bad sys_connect_timeout_black_hole_times_out_windows_wine "rc=$T10_RC got '$S1B_GOT' want 'full -110 <1900..2500>'; wine output tail: $(t10_errtail)"; fi
     else
         t10_bad sys_connect_timeout_refused_is_an_error_windows_wine "build: $(grep -m1 error "$T10_D/w.log" | cut -c1-120)"
         TOTAL=$((TOTAL + 1)); t10_bad sys_connect_timeout_black_hole_times_out_windows_wine "build failed"

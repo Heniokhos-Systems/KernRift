@@ -1,6 +1,15 @@
 // std/sys.kr (arsh discovery, spec S4): sys_connect_timeout. argv[1]:
-//   hole     10.255.255.1:9 (a black hole), 2000 ms: prints
-//            "hole <result> <elapsed ms>"; the row wants -110 in 1900..2500.
+//   full     a ZERO-EMISSION black hole, 2000 ms: a loopback listener with
+//            backlog 0 whose accept queue is filled by ONE connection nobody
+//            accepts; Linux then drops further SYNs silently, so the timed
+//            connect can only time out. Prints "full <result> <elapsed ms>";
+//            the rows (Linux x86_64, arm64 under qemu, Wine) want -110 in
+//            1900..2500. Nothing leaves the host.
+//   hole     the NATIVE WINDOWS variant (no suite row runs it): native Windows
+//            answers a SYN to a full backlog with a RST, so there `full` reads
+//            refused; `hole` connects to 10.255.255.1:9 instead and prints
+//            "hole <result> <elapsed ms>". It sends SYNs through the default
+//            gateway.
 //   lo       a loopback listener; afterwards THE SOCKET MUST BE BLOCKING
 //            AGAIN (step 5): with SO_RCVTIMEO 300 ms and a silent peer, a recv
 //            WAITS ~300 ms and says -EAGAIN -- a socket left non-blocking says
@@ -73,6 +82,31 @@ fn ct_hole() -> uint32 {
     return 0
 }
 
+fn ct_full() -> uint32 {
+    int64 ls = sys_socket(2, 1, 0)
+    if ls < 0 { return 61 }
+    ct_fill(127, 0, 0, 1, 0)
+    if sys_bind(ls, ct_sa, 16) != 0 { return 62 }
+    if sys_listen(ls, 0) != 0 { return 63 }
+    uint64 port = ct_port(ls)
+    if port == 0 { return 64 }
+    int64 f = sys_socket(2, 1, 0)
+    if f < 0 { return 65 }
+    ct_fill(127, 0, 0, 1, port)
+    // the filler: completes, then sits in the accept queue un-accepted
+    if sys_connect(f, ct_sa, 16) != 0 { return 66 }
+    int64 s = sys_socket(2, 1, 0)
+    if s < 0 { return 67 }
+    uint64 t0 = time_ns()
+    int64 r = sys_connect_timeout(s, ct_sa, 16, 2000)
+    uint64 ms = (time_ns() - t0) / 1000000
+    file_write(1, "full ", 5)  ct_put(r)  file_write(1, " ", 1)  ct_put(ms)  file_write(1, "\n", 1)
+    sys_sock_close(s)
+    sys_sock_close(f)
+    sys_sock_close(ls)
+    return 0
+}
+
 fn ct_lo() -> uint32 {
     int64 ls = sys_socket(2, 1, 0)
     if ls < 0 { return 21 }
@@ -138,6 +172,7 @@ fn main() -> uint32 {
     uint64 m = sys_arg(1)
     if m == 0 { return 1 }
     uint64 c = load8(m)
+    if c == 102 { return ct_full() }
     if c == 104 { return ct_hole() }
     if c == 108 { return ct_lo() }
     if c == 114 { return ct_refused() }
