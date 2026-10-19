@@ -8,8 +8,15 @@
 //
 // Exercises: statics, a static array, calls with 3 arguments, mul/xor/shift/
 // and/add, a while loop and the `loop { }` bare-metal park.
+//
+// RE-FROZEN for register item 99. `table` used to be declared C-style,
+// `static uint32 table[8]`, which is not KernRift syntax: the parser skipped
+// the stray `[8]` at top level without a word, so `table` was ONE uint32
+// scalar and `table[i]` was no array access (the IR backend read and wrote
+// table's own address whatever i was; --legacy indexed from a stack slot
+// nothing had written and faulted). `static uint32[8] table` is what was meant.
 static uint32 counter = 0
-static uint32 table[8]
+static uint32[8] table
 
 fn add3(uint32 a, uint32 b, uint32 c) -> uint32 { return a + b + c }
 
