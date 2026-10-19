@@ -216,37 +216,63 @@ fi
 #   ONE CAVEAT, STATED BECAUSE AN EARLIER VERSION OF THIS NOTE GOT IT WRONG:
 #   under --legacy the hosted x86_64 and arm64 variant returns rc=139, NOT 209.
 #   That is NOT caused by this change -- it is identical on base, on the
-#   top-down guard and on HEAD, and it is a pre-existing --legacy defect in the
-#   `static uint32 table[8]` indexed in a loop. The riscv32 --legacy leg is
-#   unaffected (209). An earlier draft of this comment claimed 209 "on the IR
-#   backend, --legacy and --O0", which was false for the two 64-bit --legacy
-#   legs; the conclusion stands because the number is the same before and
-#   after, but the sentence did not.
+#   top-down guard and on HEAD. It is defect #99, and the input carries it:
+#   arith.kr declares `static uint32 table[8]`, a C-style array declaration
+#   KernRift does not have. The parser swallows the stray `[8]` as top-level
+#   junk without a diagnostic, so `table` is ONE uint32 static and main's loop
+#   writes table[1..7] past it. The IR backend happens to survive that overrun
+#   (209); the --legacy x86_64 and arm64 builds crash (SIGSEGV, rc=139). The
+#   same variant with the declaration written `static uint32[8] table` returns
+#   209 under --legacy on both (and on the IR backend and --O0), measured with
+#   this branch's compiler. The frozen input is left as is on this branch: the
+#   parse error for top-level junk, the corrected arith.kr and its re-frozen
+#   pin land together on lexer-import-fixes. (An earlier version of this note
+#   called the 139 "a pre-existing --legacy defect in the static uint32
+#   table[8] indexed in a loop", which put it in the backend; it is the input.)
+#   The riscv32 --legacy leg is unaffected (209). An earlier draft of this
+#   comment claimed 209 "on the IR backend, --legacy and --O0", which was false
+#   for the two 64-bit --legacy legs; the conclusion stands because the number
+#   is the same before and after, but the sentence did not.
 #
 #   WHAT IS STILL EXECUTION-UNVERIFIED, AND IT IS NOT COVERED ELSEWHERE.
 #   Of the 9 bare-metal rows among these 12 -- bm_image / bm_image_stub /
 #   bm_uefi / bm_arx on each of x86_64 and arm64, plus
-#   bm_resetvec_x86_64_arith -- 5 have never been booted by anything:
-#   bm_uefi on both arches, bm_arx on both arches, and bm_resetvec.
+#   bm_resetvec_x86_64_arith -- 6 have never been booted by anything:
+#   bm_image on x86_64, bm_uefi on both arches, bm_arx on both arches, and
+#   bm_resetvec. bm_image on x86_64 has no --stack-top, hence no multiboot
+#   header, and `qemu-system-x86_64 -kernel` refuses it ("invalid kernel
+#   header" -- boot_gate.sh's L1_no_header_image_refused asserts exactly that);
+#   this tree has no other loader for a headerless x86_64 image.
 #
 #   DO NOT read "boot_gate.sh is the tree's boot harness" as a pointer to
 #   coverage for them. It is not. boot_gate.sh boots its OWN programs --
 #   tests/target_none/boot/{sentinel,uefi_sentinel,heap*}_{x86,a64}.kr -- and
 #   the string "arith.kr" does not appear in it. No script in this tree boots
-#   arith.kr under any container. The argument for those 5 rows is therefore
+#   arith.kr under any container. The argument for those 6 rows is therefore
 #   an inference, not a measurement: they share the IR and codegen paths with
 #   the hosted x86_64/arm64 legs above, which DO execute at 209 on all three
 #   compilers. If you need them proven, they need a harness written.
 #
-#   4 of the 9 HAVE been executed, externally and by hand rather than by this
-#   script: bm_image and bm_image_stub on both arches, built with
-#   boot_gate.sh's own --emit=image --stack-top= --load-addr= recipe and run
-#   under qemu (x86_64 via -kernel; arm64 via -device loader with force-raw
-#   plus a reset-PC loader) using an arith variant that prints its result over
-#   the 16550 / PL011 instead of exiting. All four rows produced
-#   serial='ARITH=209' on base, on the guard commit and on HEAD, with sentinel
-#   controls printing first so the harness was proven live rather than
-#   silently dead. Recorded because it narrows the unverified set from 9 to 5;
+#   3 of the 9 HAVE been executed, externally and by hand rather than by this
+#   script, with an arith variant that prints `ARITH=<counter & 0xFF>` over the
+#   16550 / PL011 instead of parking, built at boot_gate.sh's addresses
+#   (--load-addr=0x400000 / 0x40400000 and, for the stub form,
+#   --stack-top=0x90000 / 0x40800000) rather than this script's:
+#     bm_image_stub x86_64   qemu-system-x86_64 -kernel <image>
+#     bm_image_stub arm64    -device loader,file=<image>,force-raw=on plus a
+#                            reset-PC -device loader on the emitted stub
+#     bm_image arm64         the same image placement behind boot_gate.sh's
+#                            EXTERNAL make_stub.py stub, which sets SP and
+#                            branches to the entry (with the reset PC parked
+#                            on the entry itself and no SP it stays silent)
+#   All three printed serial='ARITH=209' from compilers built from base
+#   ab51c92, the guard commit daf57b7 and this branch's HEAD; the headerless
+#   x86_64 bm_image was refused by qemu on all three. An earlier version of
+#   this note said all four bm_image/bm_image_stub rows ran, the x86_64 ones
+#   "via -kernel" and all of them built with --stack-top=: a --stack-top=
+#   build IS bm_image_stub, so what ran under the bm_image name on x86_64 was
+#   the stub build, and the headerless bm_image cannot boot that way. It also
+#   said this narrowed the unverified set from 9 to 5; it narrows it to 6.
 #   NOT automated here, so a future run of this script does not re-establish
 #   it.
 #
