@@ -159,13 +159,13 @@ krc check module.kr
 krc lc program.kr
 ```
 
-### Self-compilation (351 926 tokens, 221 268 AST nodes, 3 435 428 bytes of source)
+### Self-compilation (352 172 tokens, 221 443 AST nodes, 3 438 135 bytes of source)
 
 The compiler emits binaries for all 8 targets. CI verifies the **bootstrap fixed point (krc3 == krc4) and the full suite natively on Linux x86_64 and Linux ARM64** (**1639 tests**, all passing on this tree). Windows and macOS are exercised on real `windows-latest`, `windows-11-arm` and `macos-14` runners. The **Android** jobs are the weak link: they run PIE ELFs under the **glibc** loader on Linux, never bionic and never a device. See the per-target table for what each one actually ran. Numbers below were re-measured on an AMD Ryzen 9 7900X with the compiler built from this commit — see [`benchmarks/BENCHMARKS.md`](benchmarks/BENCHMARKS.md) for the gcc / rustc comparisons — note that file is a **v2.8.33 run from 2026-07-28** and has not been re-run for v2.10.0 either.
 
 | Target | Legacy codegen | IR codegen (default) | IR vs legacy |
 |--------|---------------:|---------------------:|-------------:|
-| linux   x86_64 ELF    |  ~316 ms / 1.95 MiB | ~498 ms / 1.22 MiB | **−37 %** size |
+| linux   x86_64 ELF    |  ~316 ms / 1.95 MiB | ~498 ms / 1.23 MiB | **−37 %** size |
 | linux   arm64  ELF    |  ~301 ms / 1.71 MiB | ~500 ms / 1.03 MiB | **−40 %** size |
 | **Fat binary (all 8)**| — | **~3.56 s / 4.48 MiB** | (IR all 8 slices) |
 
@@ -421,7 +421,7 @@ See the [`examples/`](examples/) directory for runnable programs covering every 
 
 ## Architecture
 
-78 721 lines of KernRift across the 26 source files the compiler is built from, plus 52 stdlib modules (11 460 lines). Self-compiles to a 1.22 MiB x86_64 native binary in ~0.50 s (IR, default), a 1.03 MiB ARM64 binary, or an 8-slice fat binary (BCJ + LZ-Rift compression) in ~3.56 s on an AMD Ryzen 9 7900X. **1639 tests** pass on this tree. Bootstrap fixed point is verified **natively on Linux x86_64, Linux ARM64, and a physical Android ARM64 handset**; Windows and macOS run their own chains on real runners. Android x86_64 is the one target executed only under a glibc loader on Linux. See [`benchmarks/BENCHMARKS.md`](benchmarks/BENCHMARKS.md) for micro-benchmarks vs gcc / rustc and peak-memory numbers (a v2.8.33 run, not re-measured for v2.10.0 either).
+78 792 lines of KernRift across the 26 source files the compiler is built from, plus 52 stdlib modules (11 460 lines). Self-compiles to a 1.23 MiB x86_64 native binary in ~0.50 s (IR, default), a 1.03 MiB ARM64 binary, or an 8-slice fat binary (BCJ + LZ-Rift compression) in ~3.56 s on an AMD Ryzen 9 7900X. **1639 tests** pass on this tree. Bootstrap fixed point is verified **natively on Linux x86_64, Linux ARM64, and a physical Android ARM64 handset**; Windows and macOS run their own chains on real runners. Android x86_64 is the one target executed only under a glibc loader on Linux. See [`benchmarks/BENCHMARKS.md`](benchmarks/BENCHMARKS.md) for micro-benchmarks vs gcc / rustc and peak-memory numbers (a v2.8.33 run, not re-measured for v2.10.0 either).
 
 | File | Purpose |
 |------|---------|
