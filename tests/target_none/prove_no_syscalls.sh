@@ -169,7 +169,28 @@ fi
 # BEFORE is now HEAD's own sources compiled by the compiler under test, so a
 # freshly re-based gate 1 is a self-build comparison and passes only at the
 # bootstrap fixed point. Run `make bootstrap` first if it reports a wide diff.
-TN_BASE="${TN_BASE:-6e37819a60b0783436d0f219ee08e23617db09ad}"
+#
+# RE-BASED 2026-10-19 from 6e37819 to d565770, this branch's last commit that
+# moves an emitted byte in this matrix (review round 9, finding 3). Against
+# ab51c92, where the branch forks, 30 rows differ, each moved on purpose here:
+#   4b191d1, 3df4f32 (a barrier stops CSE of a static load; the CSE-
+#           invalidating set derived from the side-effect set) -- 18 rows:
+#           probe_{x86_64,arm64}_{linux,macos,windows,android}_ir (8),
+#           probe_arm64_{linux,macos,windows,android}_asm (4),
+#           probe_{x86_64,arm64}_{pe,macho} (4), fat_probe,
+#           suite_riscv32_freestanding_examples_riscv_featuregap_t5_fmtuint_kr
+#   3ebd950..f6e27b2 (the listing fixes; 3ebd950 decodes arm64 LDAR/STLR)
+#           -- 4 rows: krc_arm64_{linux,macos,windows,android}_asm
+#   the x86_64 listing fixes 35a29a8..f6e27b2 and d565770 (every x86_64 row
+#           one objdump instruction; the rows still differ at 39133d6, whose
+#           only successor before d565770 is d565770) -- 8 rows:
+#           {krc,probe}_x86_64_{linux,macos,windows,android}_asm
+# Measured by running this gate with TN_BASE at 3df4f32 (12 rows differ:
+# the asm rows), 3ced56c and 39133d6 (8: the x86_64 asm rows), d565770 and
+# edeafc5 (147/147). Pinned at d565770, not HEAD: edeafc5 (a volatile store
+# fenced after as well as before) and everything later are measured
+# byte-identical here, and this keeps the gate re-asserting that.
+TN_BASE="${TN_BASE:-d5657708034feb933ba2f3abc66889c9f7e3361c}"
 
 MODE="both"
 case "${1:-}" in
