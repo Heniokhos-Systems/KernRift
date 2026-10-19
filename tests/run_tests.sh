@@ -18488,7 +18488,7 @@ done
 # validation under --target=none (asserted by t6_legacy_tnone_* above).
 # --emit=obj is: it reaches the SAME src/codegen.kr and
 # src/codegen_aarch64.kr dispatch on both arches -- x86_64 through the
-# `emit_mode != 3` guard at src/main.kr:4187 and arm64 through the one at
+# `emit_mode != 3` guard at src/main.kr:4192 and arm64 through the one at
 # :4197 -- so retargeting these assertions onto it keeps every legacy
 # bare-metal guard live and tested rather than turning them into unreachable
 # code with no coverage. That is also why --emit=obj is ALLOWED on bare metal
@@ -19766,12 +19766,12 @@ fi
 # claimed every site. Three live wrong lengths sat behind that blind spot the
 # whole time, all in the --emit=asm listing writer, which writes to an opened
 # file rather than to stdout/stderr:
-#   main.kr:1333  "; KernRift assembly listing\n" declared 27, real 28 -- the
+#   main.kr:1338  "; KernRift assembly listing\n" declared 27, real 28 -- the
 #                 listing header lost its newline and ran straight into
 #                 "; Architecture: x86_64". Observed on the wire.
-#   main.kr:1892  "           mfence"            declared 18, real 17 -- a NUL
+#   main.kr:1897  "           mfence"            declared 18, real 17 -- a NUL
 #                 byte after every disassembled mfence.
-#   main.kr:1967  "...          lock ..."        declared 20, real 21 -- the
+#   main.kr:1972  "...          lock ..."        declared 20, real 21 -- the
 #                 lock-prefix line lost its last ".".
 # A guard whose scope is narrower than its comment is worse than no guard: it
 # reads as coverage. Two lessons are wired in below rather than written down.

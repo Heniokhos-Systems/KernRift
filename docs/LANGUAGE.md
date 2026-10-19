@@ -2466,7 +2466,7 @@ none of which exist here.
 UART directly and return; none of them calls a boot service. Two things this
 paragraph used to name as blockers are gone. The x86_64 entry function now
 receives `ImageHandle` in rcx and `SystemTable` in rdx under the Win64 ABI
-(`src/main.kr:4159`; arm64's AAPCS64 already matches UEFI). And `call_ptr`
+(`src/main.kr:4164`; arm64's AAPCS64 already matches UEFI). And `call_ptr`
 no longer drops every argument past the sixth: its argument array is
 `uint64[64]` (`src/ir.kr:3367`), and `call_ptr(p, 1, 2, 4, 8, 16, 32, 64)`
 into a seven-parameter callee returns **127** on x86_64, on arm64 and on the

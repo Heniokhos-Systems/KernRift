@@ -1226,7 +1226,7 @@ leg1() {
     # THE REPORT-vs-entry_addr CLAUSE IS A TAUTOLOGY WITH RESPECT TO THE
     # COMPILER. Both numbers are the SAME variable: `xs_start32` in
     # emit_x86_image_stub feeds `patch_u32(xs_hdr_entry, ld + xs_start32)`
-    # (src/main.kr:3132) AND `x86stub_start32_off` -> `img_stub_off` ->
+    # (src/main.kr:3137) AND `x86stub_start32_off` -> `img_stub_off` ->
     # `entry_off` (:2998, :4503, :5079), which is what the `image:` line
     # prints. They cannot disagree, so on its own this clause catches a
     # spelling or parsing mistake in THIS SCRIPT and nothing about the
