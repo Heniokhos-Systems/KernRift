@@ -4,6 +4,12 @@ All notable changes to `kernriftc` are documented in this file.
 
 ## Unreleased
 
+**Fixed: `make test` no longer leaves files in the checkout.** The smoke
+programs file_rw and file_size write a side file under a relative name, and
+the suite ran them from the repository root, so `krc_smoke_rw.tmp` and
+`krc_smoke_size.tmp` stayed there after every run. They now run in a scratch
+directory (as `tests/smoke/run.sh` already did); a row checks the root.
+
 **Fixed: an interrupted test run no longer leaves qemu images behind.** On
 INT/TERM/HUP the suite removed only its `/tmp/krc_*` scratch paths, so the
 qemu rows' `/tmp/uprov_<pid>.img`/`.log` and similar stayed. It now removes

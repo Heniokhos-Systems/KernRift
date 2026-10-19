@@ -21173,6 +21173,12 @@ rm -rf "$IMP_DIR"
 # none of which execute here, so this protects the host path and nothing more.
 echo ""
 echo "--- tests/smoke/*.kr ---"
+# Each program runs in a scratch directory of its own, as tests/smoke/run.sh
+# does: file_rw and file_size write a side file under a relative name, which
+# used to land in the checkout (krc_smoke_rw.tmp, krc_smoke_size.tmp) and stay.
+# (Older runs' copies are removed first, so the check below sees this run's.)
+(cd "$DIR/.." && rm -f krc_smoke_rw.tmp krc_smoke_size.tmp)
+SMOKE_WD=$(mktemp -d "${TMPDIR:-/tmp}/krc_smokewd.XXXXXX")
 for SMOKE_SRC in "$DIR"/smoke/*.kr; do
     [ -f "$SMOKE_SRC" ] || continue
     SMOKE_NAME=$(basename "$SMOKE_SRC" .kr)
@@ -21190,7 +21196,8 @@ for SMOKE_SRC in "$DIR"/smoke/*.kr; do
         continue
     fi
     chmod +x "$SMOKE_BIN" 2>/dev/null
-    "$SMOKE_BIN" >/dev/null 2>&1
+    rm -rf "$SMOKE_WD"/* 2>/dev/null
+    (cd "$SMOKE_WD" && "$SMOKE_BIN" >/dev/null 2>&1)
     SMOKE_EC=$?
     if [ "$SMOKE_EC" -eq "$SMOKE_EXP" ]; then
         PASS=$((PASS + 1))
@@ -21201,6 +21208,16 @@ for SMOKE_SRC in "$DIR"/smoke/*.kr; do
     fi
     rm -f "$SMOKE_BIN"
 done
+rm -rf "$SMOKE_WD"
+# ...and nothing of theirs is left in the checkout.
+TOTAL=$((TOTAL + 1))
+SMOKE_LEFT=$(cd "$DIR/.." && ls -d krc_smoke_* 2>/dev/null | tr '\n' ' ')
+if [ -z "$SMOKE_LEFT" ]; then
+    PASS=$((PASS + 1)); echo "  smoke_programs_leave_nothing_in_the_checkout: PASS (no krc_smoke_* side file in the repo root)"
+else
+    FAIL=$((FAIL + 1)); echo "FAIL: smoke_programs_leave_nothing_in_the_checkout (left in the repo root: $SMOKE_LEFT)"
+    (cd "$DIR/.." && rm -f krc_smoke_*.tmp)
+fi
 
 # --- struct table growth (old caps: 64 structs, 16 fields) ---
 # Both were size-scaling caps missed when the other buffers were converted.
