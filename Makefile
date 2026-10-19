@@ -60,7 +60,7 @@ build/kr: packaging/kr.sh
 	@echo "Built build/kr (shell wrapper for kr-bin)"
 
 # $(SRCS) is main.kr's import list, hand-inlined in dependency order, so
-# main.kr's own 26 `import` lines are dead text once concatenated -- and they
+# main.kr's own `import` lines are dead text once concatenated -- and they
 # land MID-FILE, past the leading run that import_process() reads. They were
 # tolerated only because the parser used to discard a stray top-level `import`
 # without a word; it now rejects one, because that silence is what made a
