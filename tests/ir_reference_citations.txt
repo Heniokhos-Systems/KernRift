@@ -3,7 +3,7 @@
 docs/CHEATSHEET.md:257 e39ad1e71156
 docs/LANGUAGE.md:1207 b06d39db2c81
 docs/STDLIB.md:469 fc7005b9dfc9
-src/codegen.kr:661 a0e1ba4fe3c3
+src/codegen.kr:661 5342b7fce449
 src/codegen.kr:682 38b283201eb7
 src/codegen.kr:752 ed96ab39e2ac
 src/codegen.kr:890 9b1d671c4079

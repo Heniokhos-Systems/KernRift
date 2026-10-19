@@ -217,8 +217,8 @@ src/codegen_xtensa.kr`), counting occurrences on non-comment lines:
 
 | Pattern | Count |
 |---|---|
-| `target_os == 2` (Windows) | 113 |
-| `target_os == 1` (macOS) | 103 |
+| `target_os == 2` (Windows) | 118 |
+| `target_os == 1` (macOS) | 108 |
 | `target_os == 4` (bare metal) | 39 |
 | `target_os != 2` | 12 |
 | `target_os == 3` (Android) | 11 |
@@ -234,11 +234,10 @@ grep -h "target_os == 0" src/ir.kr src/ir_aarch64.kr src/ir_riscv.kr \
   | grep -v '^[[:space:]]*//' | grep -o "target_os == 0" | wc -l
 ```
 
-Four explicit Linux tests against 113 Windows tests is the whole story:
+Four explicit Linux tests against 118 Windows tests is the whole story:
 Linux is not a case, it is the fall-through. The comment at
-`src/codegen.kr:661` makes the same point but quotes `116` for
-`target_os == 2` — that count is now stale by three; the *ratio* is what
-matters and it has not changed.
+`src/codegen.kr:661` makes the same point with the same counts (118 and 4,
+by the command above).
 
 ### Consequences you must design around
 
