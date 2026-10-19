@@ -4667,7 +4667,17 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
         while (codegen_output_len() & 0xFFF) != 0 { emit_byte(0) }
     }
     uint64 data_start = codegen_output_len()
+    // A static array's zero fill may stay pending (codegen_set_vzero_ok) only
+    // where this function's finalize copes with it: a plain ELF executable on
+    // x86_64, arm64 or riscv32 without -g (truncated to .bss, or written in
+    // chunks). The .o, Mach-O, PE, LKM, image/UEFI/ARX, raw riscv, listing and
+    // DWARF paths read out_buf and out_len directly, so there the fill is
+    // emitted as before.
+    if emit_mode == 0 && rv_raw == 0 && debug_info_mode == 0 && (arch == 0 || arch == 1 || arch == 2) {
+        codegen_set_vzero_ok(1)
+    }
     emit_static_data()
+    codegen_set_vzero_ok(0)
     // For LKM output (emit_mode 7), DON'T bake static-var displacements
     // here — static vars live in a separate .data section that loads at
     // an independent kernel address, so the refs need R_X86_64_PC32

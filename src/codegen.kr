@@ -12,6 +12,17 @@
 // Output buffer
 static uint64 out_buf = 0
 static uint64 out_len = 0
+// Zero bytes logically appended past out_len that are not in out_buf yet
+// (review round 9, finding 6). emit_static_data() records a static array's
+// zero fill here instead of emitting it byte by byte when the caller has set
+// cg_vzero_ok -- the plain-ELF path, whose finalize either truncates the
+// trailing zeros away (they become .bss: p_memsz > p_filesz) or writes them
+// in chunks (codegen_write_output). So an 800 MB uninitialised static no
+// longer makes the compiler allocate an 800 MB output buffer. Every other
+// way to touch the buffer past out_len -- emit_byte, patch_u32/u16 -- first
+// materialises them (codegen_flush_zeros), so the bytes are the same.
+static uint64 out_vzero = 0
+static uint64 cg_vzero_ok = 0
 static uint64 out_cap = 0
 
 // Source + token buffer (for reading token text)
@@ -531,6 +542,7 @@ fn str_buf_ensure(uint64 needed) {
 fn codegen_init(uint64 capacity, uint64 source, uint64 tokens) {
     out_buf = alloc(capacity)
     out_len = 0
+    out_vzero = 0
     out_cap = capacity
     cg_source = source
     cg_tokens = tokens
@@ -633,7 +645,37 @@ fn codegen_init(uint64 capacity, uint64 source, uint64 tokens) {
 // Emit helpers
 // ---------------------------------------------------------------------------
 
+// Materialise the pending zero tail (out_vzero) into out_buf.
+fn codegen_flush_zeros() {
+    uint64 n = out_vzero
+    out_vzero = 0
+    while n > 0 {
+        emit_byte(0)
+        n = n - 1
+    }
+}
+
+// n zero bytes of static fill: pending (out_vzero) when the caller allows it,
+// else emitted now.
+fn emit_zero_fill(uint64 n) {
+    if cg_vzero_ok != 0 {
+        out_vzero = out_vzero + n
+        return
+    }
+    uint64 i = 0
+    while i < n {
+        emit_byte(0)
+        i = i + 1
+    }
+}
+
+@export
+fn codegen_set_vzero_ok(uint64 v) {
+    cg_vzero_ok = v
+}
+
 fn emit_byte(uint8 b) {
+    if out_vzero != 0 { codegen_flush_zeros() }
     if out_len >= out_cap {
         // Grow the output buffer geometrically — doubling the cap and
         // memcpying the existing bytes — so callers can size codegen_init
@@ -1072,6 +1114,7 @@ fn emit_u16_le(uint64 val) {
 }
 
 fn patch_u32(uint64 offset, uint64 val) {
+    if offset + 4 > out_len { codegen_flush_zeros() }
     uint64 p = out_buf + offset
     uint8 b0 = val & 0xFF
     uint8 b1 = (val >> 8) & 0xFF
@@ -1087,6 +1130,7 @@ fn patch_u32(uint64 offset, uint64 val) {
 }
 
 fn patch_u16(uint64 offset, uint64 val) {
+    if offset + 2 > out_len { codegen_flush_zeros() }
     uint64 p = out_buf + offset
     uint8 b0 = val & 0xFF
     uint8 b1 = (val >> 8) & 0xFF
@@ -3130,9 +3174,9 @@ fn emit_static_data() {
         uint32 slot_off = 0
         unsafe { *(e4 as uint32) -> slot_off }
         // Pad with zeros up to this slot's offset
-        while emitted < slot_off {
-            emit_byte(0)
-            emitted = emitted + 1
+        if emitted < slot_off {
+            emit_zero_fill(slot_off - emitted)
+            emitted = slot_off
         }
         uint64 asp = static_array_sizes + si * 4
         uint32 asz = 0
@@ -3150,20 +3194,15 @@ fn emit_static_data() {
             }
             emitted = emitted + 8
         } else {
-            // Array: emit `asz` zero bytes
-            uint64 ai = 0
-            while ai < asz {
-                emit_byte(0)
-                ai = ai + 1
-            }
+            // Array: `asz` zero bytes
+            emit_zero_fill(asz)
             emitted = emitted + asz
         }
         si = si + 1
     }
     // Final tail of zeros (alignment/padding)
-    while emitted < static_data_size {
-        emit_byte(0)
-        emitted = emitted + 1
+    if emitted < static_data_size {
+        emit_zero_fill(static_data_size - emitted)
     }
 }
 
@@ -19197,12 +19236,31 @@ fn write_all_or_die(uint64 fd, uint64 buf, uint64 len, uint64 output_path) {
 fn codegen_write_output(uint64 output_path) {
     uint64 fd = open_output_or_die(output_path)
     write_all_or_die(fd, out_buf, out_len, output_path)
+    // A pending zero tail the finalize did not truncate away (fewer than a
+    // page of them) is written in 64 KiB chunks, never materialised.
+    if out_vzero != 0 {
+        uint64 zc = 65536
+        uint64 zb = alloc(zc)
+        if zb == 0 {
+            write(2, "krc: out of memory for the zero-fill chunk\n", 43)
+            exit(1)
+        }
+        memset(zb, 0, zc)
+        uint64 zleft = out_vzero
+        while zleft > 0 {
+            uint64 zn = zleft
+            if zn > zc { zn = zc }
+            write_all_or_die(fd, zb, zn, output_path)
+            zleft = zleft - zn
+        }
+        dealloc(zb)
+    }
     file_close(fd)
 }
 
 @export
 fn codegen_output_len() -> uint64 {
-    return out_len
+    return out_len + out_vzero
 }
 
 // Scan the output buffer backward from out_len for the last non-zero
@@ -19236,5 +19294,8 @@ fn codegen_last_nonzero_end() -> uint64 {
 fn codegen_truncate(uint64 new_len) {
     if new_len <= out_len {
         out_len = new_len
+        out_vzero = 0
+    } else if new_len < out_len + out_vzero {
+        out_vzero = new_len - out_len
     }
 }
