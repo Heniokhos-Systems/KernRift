@@ -31,10 +31,10 @@ build: build/krc2
 # clobbered, slice bus-errors at startup).
 #
 # `kr` is a shell wrapper (packaging/kr.sh) that catches exit 120 from
-# kr-bin and re-execs the extracted ./kr-exec — needed on Termux/Android
-# where raw execve from app data dirs is SELinux-denied. Other hosts hit
-# the wrapper's `exit $status` line as a no-op since the runner exec's
-# the slice directly.
+# kr-bin and runs the slice kr-bin wrote to the wrapper's own per-run file
+# ($KR_EXEC_FALLBACK) — needed on Termux/Android where raw execve from app
+# data dirs is SELinux-denied. Other hosts hit the wrapper's `exit $status`
+# line as a no-op since the runner exec's the slice directly.
 kr-runner: build/kr build/kr-bin
 
 build/kr-runner.kr: src/runner.kr src/bcj.kr
