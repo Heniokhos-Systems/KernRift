@@ -90,10 +90,11 @@ chmod +x "$INSTALL_DIR/krc"
 echo "Downloading $KR_ASSET..."
 if [ "$IS_TERMUX" = "1" ]; then
     # Termux on Android 14+ denies raw execve of files in
-    # /data/data/com.termux/. The runner extracts the slice and exits 120;
-    # the canonical packaging/kr.sh shell wrapper catches that and re-execs
-    # ./kr-exec from the user's shell context (where Termux's libc
-    # LD_PRELOAD makes execve succeed). Install both kr-bin and kr.
+    # /data/data/com.termux/. The runner writes the slice to the per-run
+    # file the canonical packaging/kr.sh shell wrapper made for it and exits
+    # 120; the wrapper runs that file from the user's shell context (where
+    # Termux's libc LD_PRELOAD makes execve succeed) and removes it. Install
+    # both kr-bin and kr.
     curl -sL -o "$INSTALL_DIR/kr-bin" "$BASE/$KR_ASSET"
     chmod +x "$INSTALL_DIR/kr-bin"
     curl -sL -o "$INSTALL_DIR/kr" \

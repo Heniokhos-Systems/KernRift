@@ -26239,6 +26239,54 @@ fi
 rm -rf "$LIP_D"
 # --- end of lexer / import-scanner parity (ANCHOR LEXIMP END) ---
 
+# --- Two runner runs at once: per-run exec paths ------------------------------
+# The runner used to write every extracted program to ONE fixed path
+# (/tmp/.kr-exec on Linux), so a second run started while the first one's
+# program was still running failed ("kr: failed to create temp file": the
+# file was busy) or overwrote the bytes the first was about to exec. Each
+# route is run twice at once here -- the memfd default, the unlinked-file
+# descriptor exec (KR_RUNNER_EXEC=file) and the child route macOS uses
+# (KR_RUNNER_EXEC=fork) -- with a fat and a plain image; both runs must exit
+# with the program's own 42 and nothing may be left in $TMPDIR. The child
+# route's file must be IN $TMPDIR while the program runs (TMPDIR honoured).
+# Red with the fixed-path runner: the second run of every pair exits 1.
+TOTAL=$((TOTAL + 1))
+RXP_D=$(mktemp -d "${TMPDIR:-/tmp}/krc_rxp.XXXXXX")
+RXP_WHY=""
+mkdir -p "$RXP_D/tmp"
+cat "$DIR/../src/runner.kr" "$DIR/../src/bcj.kr" > "$RXP_D/runner.kr"
+printf 'fn main() {\n    uint64 t0 = time_ns()\n    while time_ns() - t0 < 2000000000 { }\n    exit(42)\n}\n' > "$RXP_D/p.kr"
+if ! $KRC --arch=$RUN_ARCH "$RXP_D/runner.kr" -o "$RXP_D/kr" > /dev/null 2>&1 \
+   || ! "$DIR/../build/krc2" "$RXP_D/p.kr" -o "$RXP_D/p.krbo" > /dev/null 2>&1 \
+   || ! $KRC --arch=$RUN_ARCH "$RXP_D/p.kr" -o "$RXP_D/p.raw" > /dev/null 2>&1; then
+    RXP_WHY=" [build failed]"
+else
+    chmod +x "$RXP_D/kr"
+    for RXP_M in memfd file fork; do
+        for RXP_I in p.krbo p.raw; do
+            rm -f "$RXP_D/a.st"
+            ( KR_RUNNER_EXEC=$RXP_M TMPDIR="$RXP_D/tmp" timeout -k 5 30 "$RXP_D/kr" "$RXP_D/$RXP_I" > /dev/null 2>&1; echo $? > "$RXP_D/a.st" ) &
+            RXP_BG=$!
+            sleep 0.5
+            RXP_DURING=$(ls -A "$RXP_D/tmp" | grep -c '^\.kr-exec\.')
+            KR_RUNNER_EXEC=$RXP_M TMPDIR="$RXP_D/tmp" timeout -k 5 30 "$RXP_D/kr" "$RXP_D/$RXP_I" > "$RXP_D/b.out" 2>&1
+            RXP_B=$?
+            wait "$RXP_BG"
+            RXP_A=$(cat "$RXP_D/a.st" 2>/dev/null)
+            [ "$RXP_A" = "42" ] && [ "$RXP_B" = "42" ] || RXP_WHY="$RXP_WHY [$RXP_M $RXP_I: exits $RXP_A and $RXP_B, want 42 42; $(head -c 80 "$RXP_D/b.out" | tr '\n' ' ')]"
+            [ -z "$(ls -A "$RXP_D/tmp")" ] || RXP_WHY="$RXP_WHY [$RXP_M $RXP_I: left $(ls -A "$RXP_D/tmp" | tr '\n' ' ')in TMPDIR]"
+            if [ "$RXP_M" = "fork" ] && [ "$RXP_DURING" = "0" ]; then RXP_WHY="$RXP_WHY [fork $RXP_I: no .kr-exec.* in TMPDIR while the program ran]"; fi
+            rm -rf "$RXP_D/tmp"/.kr-exec.* 2>/dev/null
+        done
+    done
+fi
+if [ -z "$RXP_WHY" ]; then
+    PASS=$((PASS + 1)); echo "  runner_exec_paths_are_per_run: PASS (memfd, file and child routes, fat and plain images, two runs at once each; nothing left in TMPDIR)"
+else
+    FAIL=$((FAIL + 1)); echo "FAIL: runner_exec_paths_are_per_run$RXP_WHY"
+fi
+rm -rf "$RXP_D"
+
 # --- Documentation pin 5, PART B (see Part A above) --------------------------
 # README.md advertises this suite's test count. Compare it against the total
 # only now, when $TOTAL is final and already includes this row (Part A did the

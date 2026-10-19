@@ -4,6 +4,17 @@ All notable changes to `kernriftc` are documented in this file.
 
 ## Unreleased
 
+**Fixed: two `kr` runs at once no longer collide.** The runner wrote every
+extracted program to one fixed path (`/tmp/.kr-exec`, `.\kr-run.exe`,
+`/data/local/tmp/kr-exec`), so a second run failed with "kr: failed to
+create temp file" (the first run's program was executing it) or replaced the
+bytes the first was about to run. Linux and Android now execute from an
+anonymous memfd, or else from a file created exclusively under `$TMPDIR` and
+unlinked before the exec; macOS runs a per-run file under `$TMPDIR` as a
+child and removes it; Windows uses the first of 64 names no running program
+holds; the Termux wrapper hands the runner a per-run `mktemp` file and
+removes it. See LANGUAGE.md §20.
+
 **Fixed: a variable's declared type was ignored when its initializer was a float
 (check C11).** Both directions were silently wrong:
 

@@ -2824,11 +2824,29 @@ kr --help
 
 The `kr` runner auto-detects the host architecture (x86_64 / arm64 / Linux
 / Windows / macOS / Android), extracts the matching slice from `.krbo`,
-BCJ-unfilters the decompressed code, and execves it. On Android (Linux
-≥ 3.17) it uses `memfd_create` + `execveat(AT_EMPTY_PATH)` to bypass
-SELinux file-exec restrictions without writing to cwd; older kernels
-fall back to a `/data/local/tmp/kr-exec` / cwd temp file plus a
-`exit(120)` shell-wrapper trampoline.
+BCJ-unfilters the decompressed code, and executes it -- through a name no
+other run shares, so any number of `kr` runs can happen at once:
+
+- Linux and Android: from an anonymous `memfd_create` descriptor with
+  `execveat(AT_EMPTY_PATH)`, so no file is written. Failing that, from a
+  file created exclusively under `$TMPDIR` (else `/tmp`, or
+  `/data/local/tmp` on Android) as `.kr-exec.<pid>.<n>`, which is unlinked
+  before the exec. Where no descriptor exec works (a kernel without
+  `execveat`, or qemu-user), the macOS route below.
+- macOS: the same exclusive file under `$TMPDIR`, run as a child; `kr`
+  waits, removes the file, and exits with the program's status (or dies of
+  its signal).
+- Windows: `.\kr-run-<n>.exe`, the first of 64 names not held by a running
+  program. It is not removed afterwards: the runner has no way to delete a
+  file there, and `exec_process` ends the runner with the child's exit
+  code; the next runs reuse the names.
+- Termux, where SELinux refuses the runner's own exec: the `kr` shell
+  wrapper (`packaging/kr.sh`) makes a per-run file with `mktemp` and names
+  it in `KR_EXEC_FALLBACK`; the runner writes the slice there and exits
+  120, and the wrapper runs the file and removes it.
+
+`KR_RUNNER_EXEC=file` or `=fork` forces the file or the child route on
+Linux (the suite uses it to test them).
 
 ---
 
