@@ -25843,9 +25843,15 @@ rm -rf "$LIP_D"; mkdir -p "$LIP_D"
 # on the command line, and `make test` runs the suite through a wrapper that
 # execs the RELATIVE ./build/krc2 -- so a row that cd'd and called $KRC ran
 # nothing (exit 127) and all 32 round-1 rows failed under the real `make test`.
-# Same convention as the suite's other cd-ing rows: the tree's own build/krc2,
-# else build/krc3.
-if [ -x "$DIR/../build/krc2" ]; then
+# The compiler under test comes first: $KRC when it names a bare compiler
+# binary (an ELF file, not a wrapper script that injects flags), so a suite run
+# against a candidate compiler checks THAT compiler here too. Otherwise the
+# convention of the suite's other cd-ing rows: the tree's own build/krc2, else
+# build/krc3.
+if [ -n "${KRC:-}" ] && [ -f "$KRC" ] && [ -x "$KRC" ] \
+   && [ "$(head -c 4 "$KRC" 2>/dev/null | od -An -tx1 | tr -d ' \n')" = "7f454c46" ]; then
+    LIP_CC="$(cd "$(dirname "$KRC")" && pwd)/$(basename "$KRC")"
+elif [ -x "$DIR/../build/krc2" ]; then
     LIP_CC="$(cd "$DIR/../build" && pwd)/krc2"
 else
     LIP_CC="$(cd "$DIR/../build" && pwd)/krc3"
