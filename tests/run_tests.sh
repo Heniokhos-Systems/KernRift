@@ -10866,8 +10866,7 @@ if [ -f "$DIR/../build/krc.kr" ]; then
     fi
     rm -f /tmp/krc_bootstrap_$$.kr /tmp/krc2_$$ /tmp/krc3_$$ /tmp/krc4_$$
 else
-    echo "  bootstrap: SKIP (no build/krc.kr)"
-    PASS=$((PASS + 1))
+    skip_row bootstrap "no build/krc.kr"
 fi
 
 echo ""
@@ -23543,7 +23542,7 @@ if [ "$CA_A64_ST" = "0" ] && [ -s "$CA_BIN" ]; then
             echo "FAIL: call_args_25_arm64 (returned $CA_RUN, want 26)"; FAIL=$((FAIL + 1))
         fi
     else
-        PASS=$((PASS + 1)); echo "  call_args_25_arm64: PASS (cross-compiles; no qemu to run it)"
+        skip_row call_args_25_arm64 "cross-compiles; no qemu-aarch64 to run it"
     fi
 else
     echo "FAIL: call_args_25_arm64 (exit $CA_A64_ST: '$CA_A64_ERR')"; FAIL=$((FAIL + 1))
@@ -24788,8 +24787,8 @@ rm -f "$ARX_SRC" "$ARX_BIN"
 # assert from a host that cannot run it -- and a silent skip would read as
 # coverage, so it says so.
 if [ "$RUN_ARCH" != "x86_64" ]; then
-    PASS=$((PASS + 1)); TOTAL=$((TOTAL + 1))
-    echo "  asm_call_jmp_reg: SKIP (x86_64 encodings; host is $RUN_ARCH)"
+    TOTAL=$((TOTAL + 1))
+    skip_row asm_call_jmp_reg "x86_64 encodings; host is $RUN_ARCH"
 else
 TOTAL=$((TOTAL + 1))
 CR_SRC=$(mktemp /tmp/krc_callreg_XXXX.kr)
@@ -24832,8 +24831,8 @@ fi
 # above: the assertion is a byte encoding, meaningless from a host that cannot
 # assemble it, and a silent skip would read as coverage.
 if [ "$RUN_ARCH" != "x86_64" ]; then
-    PASS=$((PASS + 1)); TOTAL=$((TOTAL + 1))
-    echo "  asm_int_imm8: SKIP (x86_64 encodings; host is $RUN_ARCH)"
+    TOTAL=$((TOTAL + 1))
+    skip_row asm_int_imm8 "x86_64 encodings; host is $RUN_ARCH"
 else
 TOTAL=$((TOTAL + 1))
 II_SRC=$(mktemp /tmp/krc_intimm_XXXX.kr)
@@ -25151,8 +25150,7 @@ if $KRC --emit=image --arch=arm64 --target=none --load-addr=0x40010000 \
         echo "FAIL: fatimg_slice_shorter_than_header (exit $fi_st: '$fi_err')"; FAIL=$((FAIL + 1))
     fi
 else
-    echo "  fatimg_slice_shorter_than_header: SKIP (the trivial arm64 image is no longer under 64 bytes, so this refusal has no fixture)"
-    PASS=$((PASS + 1))
+    skip_row fatimg_slice_shorter_than_header "the trivial arm64 image is no longer under 64 bytes, so this refusal has no fixture"
 fi
 rm -f "$FI_IMG"
 
