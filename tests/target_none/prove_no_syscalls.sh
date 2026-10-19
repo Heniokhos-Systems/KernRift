@@ -169,7 +169,22 @@ fi
 # BEFORE is now HEAD's own sources compiled by the compiler under test, so a
 # freshly re-based gate 1 is a self-build comparison and passes only at the
 # bootstrap fixed point. Run `make bootstrap` first if it reports a wide diff.
-TN_BASE="${TN_BASE:-6e37819a60b0783436d0f219ee08e23617db09ad}"
+#
+# RE-BASED 2026-10-19 from 6e37819 to ab51c92, the commit this branch forks
+# from (review round 9, finding 3). 6e37819 had gone stale on main itself: 30
+# of the 147 rows differed against it on main's own compiler, every one moved
+# deliberately by three main commits after it --
+#   5823cfc fix(uefi): split the image into .text and .data      -- 4 rows:
+#           bm_uefi_{x86_64,arm64}_{arith,bmarr}
+#   4313e27 feat(arx): code and statics as separate R-X / RW segments -- 4:
+#           bm_arx_{x86_64,arm64}_{arith,bmarr}
+#   66d3435 fix(windows): write() returns the byte count            -- 22:
+#           {krc,probe}_{x86_64,arm64}_windows_{ir,legacy,obj,asm} (16),
+#           {krc,probe}_{x86_64,arm64}_pe (4), fat_krc, fat_probe
+# Against ab51c92 this branch is 147/147: its lexer, import and top-level
+# parse changes move no emitted byte, and arith.kr's re-freeze (20d9249)
+# changes gate 1's INPUT, which BEFORE and AFTER both compile.
+TN_BASE="${TN_BASE:-ab51c92cb733df11e2c9ddf48ab6c20065b4cc1f}"
 
 MODE="both"
 case "${1:-}" in
