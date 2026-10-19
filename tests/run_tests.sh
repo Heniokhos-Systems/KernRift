@@ -26012,6 +26012,39 @@ rm -rf "$GS_D"
 
 rm -rf "$G18L_D"
 
+# --- An uninitialised static's zero fill is .bss, not compiler memory -------
+# emit_static_data used to emit every zero of a static array into the output
+# buffer, which the plain-ELF finalize then truncated away (p_memsz keeps the
+# size). So `static uint64[100000000] a` -- a 169-byte file -- made the
+# compiler grow its buffer to 1 GiB (~1 GB RSS, 2.4 s). The fill is now a
+# pending count (codegen.kr's out_vzero), so the same compile fits in a 600 MB
+# address space; before the fix it ran out of memory there. IR and --legacy
+# share the finalize; both are checked, and the result must still run.
+TOTAL=$((TOTAL + 1))
+BSF_D=$(mktemp -d "${TMPDIR:-/tmp}/krc_bsf.XXXXXX")
+BSF_WHY=""
+printf 'static uint64[100000000] a\nfn main() -> uint64 {\n    a[99999999] = 7\n    return a[99999999] - 7\n}\n' > "$BSF_D/b.kr"
+for BSF_M in "" "--legacy"; do
+    rm -f "$BSF_D/b.bin"
+    BSF_OUT=$( (ulimit -v 600000; $KRC --arch=$RUN_ARCH $BSF_M "$BSF_D/b.kr" -o "$BSF_D/b.bin" 2>&1) ); BSF_RC=$?
+    if [ "$BSF_RC" != "0" ] || [ ! -s "$BSF_D/b.bin" ]; then
+        BSF_WHY="$BSF_WHY [${BSF_M:-IR}: compile under 600 MB failed, rc=$BSF_RC '$(printf '%s' "$BSF_OUT" | grep -m1 -iE 'error|memory')']"
+        continue
+    fi
+    BSF_SZ=$(stat -c %s "$BSF_D/b.bin")
+    [ "$BSF_SZ" -lt 65536 ] || BSF_WHY="$BSF_WHY [${BSF_M:-IR}: file is $BSF_SZ B, the fill was written]"
+    chmod +x "$BSF_D/b.bin"
+    RT_T0=$SECONDS; timeout -k 5 "$RUN_TEST_TIMEOUT" "$BSF_D/b.bin"; BSF_RUN=$?
+    if rb_timed_out "$BSF_RUN" "$RT_T0"; then BSF_WHY="$BSF_WHY [${BSF_M:-IR}: TIMEOUT]"
+    elif [ "$BSF_RUN" != "0" ]; then BSF_WHY="$BSF_WHY [${BSF_M:-IR}: ran, exit $BSF_RUN, want 0]"; fi
+done
+if [ -z "$BSF_WHY" ]; then
+    PASS=$((PASS + 1)); echo "  static_bss_fill_not_materialised: PASS (an 800 MB static compiles in 600 MB, IR and --legacy; small file; runs)"
+else
+    FAIL=$((FAIL + 1)); echo "FAIL: static_bss_fill_not_materialised$BSF_WHY"
+fi
+rm -rf "$BSF_D"
+
 # --- Documentation pin 5, PART B (see Part A above) --------------------------
 # README.md advertises this suite's test count. Compare it against the total
 # only now, when $TOTAL is final and already includes this row (Part A did the
