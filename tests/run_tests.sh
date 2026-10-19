@@ -81,6 +81,12 @@ SUMMARY_DONE=0
 SUITE_EXIT_TRAP='[ "$SUMMARY_DONE" = 1 ] || { echo "FAIL: suite_exit (the suite exited before its summary)"; exit 1; }'
 trap "$SUITE_EXIT_TRAP" EXIT
 
+# Whitespace in the checkout path or in TMPDIR is refused up front: rows pass
+# paths unquoted in hundreds of places ($KRC/$MLRC, $DIR, mktemp results), so
+# such a run would fail rows at random rather than say why.
+case "$DIR" in *[[:space:]]*) echo "FATAL: the checkout path '$DIR' contains whitespace, which this suite does not support; move the checkout" >&2; SUMMARY_DONE=1; exit 2 ;; esac
+case "${TMPDIR:-/tmp}" in *[[:space:]]*) echo "FATAL: TMPDIR '$TMPDIR' contains whitespace, which this suite does not support; unset it or choose another" >&2; SUMMARY_DONE=1; exit 2 ;; esac
+
 # A private TMPDIR for the run, removed at the end: every row that uses
 # mktemp lands in it, so an interrupted run leaves nothing of those behind.
 SUITE_TMP=$(mktemp -d "${TMPDIR:-/tmp}/krc_suite.XXXXXX") && [ -n "$SUITE_TMP" ] && [ -d "$SUITE_TMP" ] \
@@ -24607,7 +24613,7 @@ bcb_config() {
     for bcb_case in oob_var oob_const oob_edge oob_store inbounds; do
         TOTAL=$((TOTAL + 1))
         rm -f "$BCB_D/out"
-        if ! $BCB_KRC --arch="$bcb_arch" $3 --debug "$BCB_D/$bcb_case.kr" -o "$BCB_D/out" > /dev/null 2>&1; then
+        if ! "$BCB_KRC" --arch="$bcb_arch" $3 --debug "$BCB_D/$bcb_case.kr" -o "$BCB_D/out" > /dev/null 2>&1; then
             echo "FAIL: arm64_legacy_bounds_$1_$bcb_case (build failed -- --debug refused or miscompiled)"
             FAIL=$((FAIL + 1))
             continue
@@ -24685,7 +24691,7 @@ BCB_A64_RUN=$(bcb_runner arm64)
 TOTAL=$((TOTAL + 1))
 if [ "$BCB_A64_RUN" = "SKIP" ]; then
     skip_row arm64_legacy_bounds_absent_without_debug "cannot execute arm64 here"
-elif $BCB_KRC --arch=arm64 --legacy "$BCB_D/oob_store.kr" -o "$BCB_D/nodbg" > /dev/null 2>&1; then
+elif "$BCB_KRC" --arch=arm64 --legacy "$BCB_D/oob_store.kr" -o "$BCB_D/nodbg" > /dev/null 2>&1; then
     chmod +x "$BCB_D/nodbg"
     timeout -k 5 "$RUN_TEST_TIMEOUT" $BCB_A64_RUN "$BCB_D/nodbg" > /dev/null 2>&1
     bcb_nodbg_st=$?

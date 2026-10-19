@@ -99,6 +99,9 @@ build-import: build/krc2
 
 # Run test suite
 # How the suite is run (review rounds 9-10):
+# - Refused up front if the checkout path or TMPDIR contains whitespace: the
+#   suite passes paths unquoted in hundreds of places and does not support
+#   it.
 # - The compiler wrapper is build/krc-test, inside this checkout (build/ is
 #   ignored): no shared /tmp name, nothing to clean up. It is written to
 #   build/krc-test.<pid> and renamed into place, and it execs
@@ -126,7 +129,9 @@ build-import: build/krc2
 # to prevent.
 test: build/krc2 build/kr-bin
 	@echo "=== Running test suite ==="
-	@t="build/krc-test.$$$$"; \
+	@case "$(CURDIR)" in *[[:space:]]*) echo "error: make test: the checkout path '$(CURDIR)' contains whitespace, which the suite does not support; move the checkout" >&2; exit 2 ;; esac; \
+	 case "$${TMPDIR:-/tmp}" in *[[:space:]]*) echo "error: make test: TMPDIR '$$TMPDIR' contains whitespace, which the suite does not support; unset it or choose another" >&2; exit 2 ;; esac; \
+	 t="build/krc-test.$$$$"; \
 	 trap 'rm -f "$$t"' EXIT; \
 	 trap 'p=$$!; [ -z "$$p" ] || { pkill -TERM -s "$$p" 2>/dev/null; kill -TERM -"$$p" 2>/dev/null; kill -TERM "$$p" 2>/dev/null; }; exit 130' INT; \
 	 trap 'p=$$!; [ -z "$$p" ] || { pkill -TERM -s "$$p" 2>/dev/null; kill -TERM -"$$p" 2>/dev/null; kill -TERM "$$p" 2>/dev/null; }; exit 143' TERM; \
