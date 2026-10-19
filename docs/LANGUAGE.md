@@ -60,8 +60,10 @@ fn main() {
 
 **Anything between declarations that cannot start one is a parse error.** At
 top level the parser accepts declarations (`fn`, `static`, `const`, `struct`,
-`enum`, `type`, `extern`, `device`, `import`), annotations (`@...`) and nothing
-else: `error: expected a declaration at top level (...), got <token>`. One
+`enum`, `type`, `extern`, `device`, `import`), annotations (`@...`), and `;`
+as a separator (ignored, as between statements -- but not right after an
+annotation, which it would detach), and nothing else: `error: expected a
+declaration at top level (...), got <token>`. One
 error is reported per run of such tokens (`foo bar baz` is one), and the
 compile stops before anything is generated. This used to be skipped one token
 at a time without a word (register item 99), which compiled a `fn` written

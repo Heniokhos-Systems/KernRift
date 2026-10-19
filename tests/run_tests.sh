@@ -2848,6 +2848,24 @@ tlj_check toplevel_junk_does_not_drop_export "tlj_$$.kr:1:9: error: expected a d
 # one scalar (tests/target_none/corpus/arith.kr carried exactly this).
 printf 'static uint32 table[8]\nfn main() { exit(0) }\n' > "$TLJ_SRC"
 tlj_check toplevel_junk_c_style_array "tlj_$$.kr:1:20: error: expected a declaration at top level (fn, static, const, struct, enum, type, extern, device or import), got '['"
+# `;` between declarations is a separator, accepted as between statements
+# (control: the suite's const_* rows write `const u64 X = 42; fn main() ...`);
+# right after an annotation it would detach it, so there it is refused.
+printf '@export ;\nfn s() -> uint64 { return 1 }\nfn main() { exit(s()) }\n' > "$TLJ_SRC"
+tlj_check toplevel_junk_semicolon_after_annotation "tlj_$$.kr:1:9: error: expected a declaration at top level (fn, static, const, struct, enum, type, extern, device or import), got ';'; the annotation before it applies to nothing"
+printf 'const uint64 X = 40; static uint64 Y = 2;\nfn main() { exit(X + Y) };\n' > "$TLJ_SRC"
+TOTAL=$((TOTAL + 1))
+rm -f "$TLJ_BIN"
+if $KRC --arch=$RUN_ARCH "$TLJ_SRC" -o "$TLJ_BIN" >/dev/null 2>&1; then
+    timeout -k 5 30 "$TLJ_BIN"; tlj_rc=$?
+    if [ "$tlj_rc" = "42" ]; then
+        PASS=$((PASS + 1)); echo "  toplevel_semicolon_separator_accepted: PASS (compiles, exits 42)"
+    else
+        FAIL=$((FAIL + 1)); echo "FAIL: toplevel_semicolon_separator_accepted (ran, exit $tlj_rc, want 42)"
+    fi
+else
+    FAIL=$((FAIL + 1)); echo "FAIL: toplevel_semicolon_separator_accepted (did not compile: ';' between declarations must be accepted)"
+fi
 # A run of stray words is ONE error, not one per word: recovery resumes at the
 # next token that can start a declaration.
 printf 'fn a() {}\nfoo bar baz\nfn main() { exit(3) }\n' > "$TLJ_SRC"

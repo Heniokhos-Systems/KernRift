@@ -3744,6 +3744,12 @@ fn parse_module() -> uint64 {
                     report_error_at(imp_tok, imp_msg)
                 }
             }
+        } else if kind == 18 && ann_seen == 0 {
+            // A `;` between declarations is a separator, accepted and ignored
+            // as it is between statements (`const u64 X = 42; fn main() ...`).
+            // Not after an annotation: `@naked ; fn f` would drop the @naked,
+            // so that one falls through to the error below.
+            advance_tok()
         } else if kind != 0 {
             // Anything else at top level is a parse error (register item 99).
             // It used to be skipped WITHOUT A WORD, one token at a time, and
