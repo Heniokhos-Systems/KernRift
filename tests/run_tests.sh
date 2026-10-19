@@ -3682,8 +3682,10 @@ if [ "$ARCH" != "aarch64" ]; then
     printf 'fn main() { exit(42) }\n@naked fn msr_test() { asm("rdmsr") }\n' > /tmp/krc_test_$$.kr
     if $KRC $KRC_FLAGS /tmp/krc_test_$$.kr -o /tmp/krc_test_$$ > /dev/null 2>&1; then
         chmod +x /tmp/krc_test_$$
-        timeout -k 5 "$RUN_TEST_TIMEOUT" /tmp/krc_test_$$ > /dev/null 2>&1; got=$?
-        if [ "$got" = "42" ]; then
+        RT_T0=$SECONDS; timeout -k 5 "$RUN_TEST_TIMEOUT" /tmp/krc_test_$$ > /dev/null 2>&1; got=$?
+        if rb_timed_out "$got" "$RT_T0"; then
+            echo "FAIL: msr_compile (TIMEOUT: still running after ${RUN_TEST_TIMEOUT}s)"; FAIL=$((FAIL + 1))
+        elif [ "$got" = "42" ]; then
             PASS=$((PASS + 1))
         else
             echo "FAIL: msr_compile (expected 42, got $got)"
@@ -3699,8 +3701,10 @@ if [ "$ARCH" != "aarch64" ]; then
     printf 'fn main() { exit(42) }\n@naked fn msr_test() { asm("wrmsr") }\n' > /tmp/krc_test_$$.kr
     if $KRC $KRC_FLAGS /tmp/krc_test_$$.kr -o /tmp/krc_test_$$ > /dev/null 2>&1; then
         chmod +x /tmp/krc_test_$$
-        timeout -k 5 "$RUN_TEST_TIMEOUT" /tmp/krc_test_$$ > /dev/null 2>&1; got=$?
-        if [ "$got" = "42" ]; then
+        RT_T0=$SECONDS; timeout -k 5 "$RUN_TEST_TIMEOUT" /tmp/krc_test_$$ > /dev/null 2>&1; got=$?
+        if rb_timed_out "$got" "$RT_T0"; then
+            echo "FAIL: msr_wrmsr_compile (TIMEOUT: still running after ${RUN_TEST_TIMEOUT}s)"; FAIL=$((FAIL + 1))
+        elif [ "$got" = "42" ]; then
             PASS=$((PASS + 1))
         else
             echo "FAIL: msr_wrmsr_compile (expected 42, got $got)"
@@ -22619,8 +22623,10 @@ TOTAL=$((TOTAL + 1))
 printf '@builtin_override\nfn time_ns() -> uint64 {\n    uint64 acc = 0\n    uint64 i = 0\n    while i < 3 { acc = acc + 1 i = i + 1 }\n    return acc - 3\n}\nfn main() { uint64 t = time_ns() if t == 0 { exit(42) } exit(1) }\n' > /tmp/krc_shadow_$$.kr
 if $KRC $KRC_FLAGS /tmp/krc_shadow_$$.kr -o /tmp/krc_shadow_$$ > /dev/null 2>&1; then
     chmod +x /tmp/krc_shadow_$$
-    timeout -k 5 "$RUN_TEST_TIMEOUT" /tmp/krc_shadow_$$ ; got=$?
-    if [ "$got" = "42" ]; then
+    RT_T0=$SECONDS; timeout -k 5 "$RUN_TEST_TIMEOUT" /tmp/krc_shadow_$$ ; got=$?
+    if rb_timed_out "$got" "$RT_T0"; then
+        echo "FAIL: builtin_override_user_wins_ir (TIMEOUT: still running after ${RUN_TEST_TIMEOUT}s)"; FAIL=$((FAIL + 1))
+    elif [ "$got" = "42" ]; then
         PASS=$((PASS + 1))
         echo "  builtin_override_user_wins_ir: PASS (user body won)"
     else
@@ -22638,8 +22644,10 @@ TOTAL=$((TOTAL + 1))
 printf '@builtin_override\nfn time_ns() -> uint64 {\n    uint64 acc = 0\n    uint64 i = 0\n    while i < 3 { acc = acc + 1 i = i + 1 }\n    return acc - 3\n}\nfn main() { uint64 t = time_ns() if t == 0 { exit(42) } exit(1) }\n' > /tmp/krc_shadow_$$.kr
 if $KRC $KRC_FLAGS --legacy /tmp/krc_shadow_$$.kr -o /tmp/krc_shadow_$$ > /dev/null 2>&1; then
     chmod +x /tmp/krc_shadow_$$
-    timeout -k 5 "$RUN_TEST_TIMEOUT" /tmp/krc_shadow_$$ ; got=$?
-    if [ "$got" = "42" ]; then
+    RT_T0=$SECONDS; timeout -k 5 "$RUN_TEST_TIMEOUT" /tmp/krc_shadow_$$ ; got=$?
+    if rb_timed_out "$got" "$RT_T0"; then
+        echo "FAIL: builtin_override_user_wins_legacy (TIMEOUT: still running after ${RUN_TEST_TIMEOUT}s)"; FAIL=$((FAIL + 1))
+    elif [ "$got" = "42" ]; then
         PASS=$((PASS + 1))
         echo "  builtin_override_user_wins_legacy: PASS (user body won)"
     else
@@ -22767,9 +22775,11 @@ TOTAL=$((TOTAL + 1))
   printf 'fn main() {\n    S0 x\n    S199 y\n    x.a = 20\n    y.b = 22\n    exit(x.a + y.b)\n}\n'
 } > "$ST_DIR/many.kr"
 if $KRC $KRC_FLAGS "$ST_DIR/many.kr" -o "$ST_DIR/many" >/dev/null 2>&1; then
-    chmod +x "$ST_DIR/many"; timeout -k 5 "$RUN_TEST_TIMEOUT" "$ST_DIR/many" >/dev/null 2>&1; ST_EC=$?
+    chmod +x "$ST_DIR/many"; RT_T0=$SECONDS; timeout -k 5 "$RUN_TEST_TIMEOUT" "$ST_DIR/many" >/dev/null 2>&1; ST_EC=$?
 else ST_EC="compile-failed"; fi
-if [ "$ST_EC" = 42 ]; then PASS=$((PASS + 1)); echo "  struct_count_200: PASS (old cap 64)"
+if rb_timed_out "$ST_EC" "$RT_T0"; then
+    echo "FAIL: struct_count_200 (TIMEOUT: still running after ${RUN_TEST_TIMEOUT}s)"; FAIL=$((FAIL + 1))
+elif [ "$ST_EC" = 42 ]; then PASS=$((PASS + 1)); echo "  struct_count_200: PASS (old cap 64)"
 else FAIL=$((FAIL + 1)); echo "FAIL: struct_count_200 (expected 42, got $ST_EC)"; fi
 
 TOTAL=$((TOTAL + 1))
@@ -22777,9 +22787,11 @@ TOTAL=$((TOTAL + 1))
   printf 'fn main() {\n    Huge h\n    h.q0 = 11\n    h.q99 = 31\n    exit(h.q0 + h.q99)\n}\n'
 } > "$ST_DIR/wide.kr"
 if $KRC $KRC_FLAGS "$ST_DIR/wide.kr" -o "$ST_DIR/wide" >/dev/null 2>&1; then
-    chmod +x "$ST_DIR/wide"; timeout -k 5 "$RUN_TEST_TIMEOUT" "$ST_DIR/wide" >/dev/null 2>&1; ST_EC2=$?
+    chmod +x "$ST_DIR/wide"; RT_T0=$SECONDS; timeout -k 5 "$RUN_TEST_TIMEOUT" "$ST_DIR/wide" >/dev/null 2>&1; ST_EC2=$?
 else ST_EC2="compile-failed"; fi
-if [ "$ST_EC2" = 42 ]; then PASS=$((PASS + 1)); echo "  struct_fields_100: PASS (old cap 16)"
+if rb_timed_out "$ST_EC2" "$RT_T0"; then
+    echo "FAIL: struct_fields_100 (TIMEOUT: still running after ${RUN_TEST_TIMEOUT}s)"; FAIL=$((FAIL + 1))
+elif [ "$ST_EC2" = 42 ]; then PASS=$((PASS + 1)); echo "  struct_fields_100: PASS (old cap 16)"
 else FAIL=$((FAIL + 1)); echo "FAIL: struct_fields_100 (expected 42, got $ST_EC2)"; fi
 
 TOTAL=$((TOTAL + 1))
@@ -22788,9 +22800,11 @@ TOTAL=$((TOTAL + 1))
   printf 'fn main() {\n    T0 t\n    Big b\n    t.a = 20\n    b.q39 = 22\n    exit(t.a + b.q39)\n}\n'
 } > "$ST_DIR/restride.kr"
 if $KRC $KRC_FLAGS "$ST_DIR/restride.kr" -o "$ST_DIR/restride" >/dev/null 2>&1; then
-    chmod +x "$ST_DIR/restride"; timeout -k 5 "$RUN_TEST_TIMEOUT" "$ST_DIR/restride" >/dev/null 2>&1; ST_EC3=$?
+    chmod +x "$ST_DIR/restride"; RT_T0=$SECONDS; timeout -k 5 "$RUN_TEST_TIMEOUT" "$ST_DIR/restride" >/dev/null 2>&1; ST_EC3=$?
 else ST_EC3="compile-failed"; fi
-if [ "$ST_EC3" = 42 ]; then PASS=$((PASS + 1)); echo "  struct_restride_populated: PASS (re-base 100 entries to a wider stride)"
+if rb_timed_out "$ST_EC3" "$RT_T0"; then
+    echo "FAIL: struct_restride_populated (TIMEOUT: still running after ${RUN_TEST_TIMEOUT}s)"; FAIL=$((FAIL + 1))
+elif [ "$ST_EC3" = 42 ]; then PASS=$((PASS + 1)); echo "  struct_restride_populated: PASS (re-base 100 entries to a wider stride)"
 else FAIL=$((FAIL + 1)); echo "FAIL: struct_restride_populated (expected 42, got $ST_EC3)"; fi
 rm -rf "$ST_DIR"
 
@@ -23471,8 +23485,10 @@ TOTAL=$((TOTAL + 1))
 gen_call_args 64
 rm -f "$CA_BIN"
 if $KRC --arch=$RUN_ARCH "$CA_SRC" -o "$CA_BIN" >/dev/null 2>&1 && [ -s "$CA_BIN" ]; then
-    chmod +x "$CA_BIN"; timeout -k 5 "$RUN_TEST_TIMEOUT" "$CA_BIN"; CA_RUN=$?
-    if [ "$CA_RUN" = "65" ]; then    # p1 + p64 = 1 + 64
+    chmod +x "$CA_BIN"; RT_T0=$SECONDS; timeout -k 5 "$RUN_TEST_TIMEOUT" "$CA_BIN"; CA_RUN=$?
+    if rb_timed_out "$CA_RUN" "$RT_T0"; then
+        echo "FAIL: call_args_64_accepted (TIMEOUT: still running after ${RUN_TEST_TIMEOUT}s)"; FAIL=$((FAIL + 1))
+    elif [ "$CA_RUN" = "65" ]; then    # p1 + p64 = 1 + 64
         PASS=$((PASS + 1)); echo "  call_args_64_accepted: PASS (compiles and returns 65)"
     else
         echo "FAIL: call_args_64_accepted (ran but returned $CA_RUN, want 65)"; FAIL=$((FAIL + 1))
@@ -23500,8 +23516,10 @@ fi
 CA_QEMU="$(command -v qemu-aarch64-static || true)"
 if [ -n "$CA_QEMU" ] && [ -s "$CA_BIN" ]; then
     TOTAL=$((TOTAL + 1))
-    chmod +x "$CA_BIN"; timeout -k 5 "$RUN_TEST_TIMEOUT" "$CA_QEMU" "$CA_BIN" >/dev/null 2>&1; CA_RUN=$?
-    if [ "$CA_RUN" = "65" ]; then
+    chmod +x "$CA_BIN"; RT_T0=$SECONDS; timeout -k 5 "$RUN_TEST_TIMEOUT" "$CA_QEMU" "$CA_BIN" >/dev/null 2>&1; CA_RUN=$?
+    if rb_timed_out "$CA_RUN" "$RT_T0"; then
+        echo "FAIL: call_args_64_runs_arm64 (TIMEOUT: still running after ${RUN_TEST_TIMEOUT}s)"; FAIL=$((FAIL + 1))
+    elif [ "$CA_RUN" = "65" ]; then
         PASS=$((PASS + 1)); echo "  call_args_64_runs_arm64: PASS (returns 65 under qemu)"
     else
         echo "FAIL: call_args_64_runs_arm64 (returned $CA_RUN, want 65)"; FAIL=$((FAIL + 1))
@@ -23516,8 +23534,10 @@ rm -f "$CA_BIN"
 CA_A64_ERR=$($KRC --arch=arm64 "$CA_SRC" -o "$CA_BIN" 2>&1); CA_A64_ST=$?
 if [ "$CA_A64_ST" = "0" ] && [ -s "$CA_BIN" ]; then
     if [ -n "$CA_QEMU" ]; then
-        chmod +x "$CA_BIN"; timeout -k 5 "$RUN_TEST_TIMEOUT" "$CA_QEMU" "$CA_BIN" >/dev/null 2>&1; CA_RUN=$?
-        if [ "$CA_RUN" = "26" ]; then
+        chmod +x "$CA_BIN"; RT_T0=$SECONDS; timeout -k 5 "$RUN_TEST_TIMEOUT" "$CA_QEMU" "$CA_BIN" >/dev/null 2>&1; CA_RUN=$?
+        if rb_timed_out "$CA_RUN" "$RT_T0"; then
+            echo "FAIL: call_args_25_arm64 (TIMEOUT: still running after ${RUN_TEST_TIMEOUT}s)"; FAIL=$((FAIL + 1))
+        elif [ "$CA_RUN" = "26" ]; then
             PASS=$((PASS + 1)); echo "  call_args_25_arm64: PASS (17th stack slot, returns 26)"
         else
             echo "FAIL: call_args_25_arm64 (returned $CA_RUN, want 26)"; FAIL=$((FAIL + 1))
@@ -23569,8 +23589,10 @@ KREOF
 TOTAL=$((TOTAL + 1))
 rm -f "$CP_BIN"
 if $KRC --arch=$RUN_ARCH "$CP_SRC" -o "$CP_BIN" >/dev/null 2>&1 && [ -s "$CP_BIN" ]; then
-    chmod +x "$CP_BIN"; timeout -k 5 "$RUN_TEST_TIMEOUT" "$CP_BIN"; CP7_RUN=$?
-    if [ "$CP7_RUN" = "98" ]; then
+    chmod +x "$CP_BIN"; RT_T0=$SECONDS; timeout -k 5 "$RUN_TEST_TIMEOUT" "$CP_BIN"; CP7_RUN=$?
+    if rb_timed_out "$CP7_RUN" "$RT_T0"; then
+        echo "FAIL: call_ptr_args_7_accepted (TIMEOUT: still running after ${RUN_TEST_TIMEOUT}s)"; FAIL=$((FAIL + 1))
+    elif [ "$CP7_RUN" = "98" ]; then
         PASS=$((PASS + 1)); echo "  call_ptr_args_7_accepted: PASS (runs, returns 98 -- the 7th argument arrived)"
     else
         echo "FAIL: call_ptr_args_7_accepted (returned $CP7_RUN, want 98; 21 means the 7th argument was dropped)"
@@ -23615,8 +23637,10 @@ KREOF
 TOTAL=$((TOTAL + 1))
 rm -f "$CP_BIN"
 if $KRC --arch=$RUN_ARCH "$CP6_SRC" -o "$CP_BIN" >/dev/null 2>&1 && [ -s "$CP_BIN" ]; then
-    chmod +x "$CP_BIN"; timeout -k 5 "$RUN_TEST_TIMEOUT" "$CP_BIN"; CP6_RUN=$?
-    if [ "$CP6_RUN" = "21" ]; then
+    chmod +x "$CP_BIN"; RT_T0=$SECONDS; timeout -k 5 "$RUN_TEST_TIMEOUT" "$CP_BIN"; CP6_RUN=$?
+    if rb_timed_out "$CP6_RUN" "$RT_T0"; then
+        echo "FAIL: call_ptr_args_6_accepted (TIMEOUT: still running after ${RUN_TEST_TIMEOUT}s)"; FAIL=$((FAIL + 1))
+    elif [ "$CP6_RUN" = "21" ]; then
         PASS=$((PASS + 1)); echo "  call_ptr_args_6_accepted: PASS (compiles and returns 21)"
     else
         echo "FAIL: call_ptr_args_6_accepted (ran but returned $CP6_RUN, want 21)"; FAIL=$((FAIL + 1))
@@ -23647,8 +23671,10 @@ if $KRC --arch=x86_64 --legacy "$CP_SRC" -o "$CP_BIN" >/dev/null 2>&1 && [ -s "$
     # SKIP (never PASS) where it cannot -- a positive control that never
     # executes cannot show the arguments arrive.
     if [ "$ARCH" = "x86_64" ]; then
-        chmod +x "$CP_BIN"; timeout -k 5 "$RUN_TEST_TIMEOUT" "$CP_BIN"; CPL_RUN=$?
-        if [ "$CPL_RUN" = "98" ]; then
+        chmod +x "$CP_BIN"; RT_T0=$SECONDS; timeout -k 5 "$RUN_TEST_TIMEOUT" "$CP_BIN"; CPL_RUN=$?
+        if rb_timed_out "$CPL_RUN" "$RT_T0"; then
+            echo "FAIL: call_ptr_args_7_accepted_legacy_x86 (TIMEOUT: still running after ${RUN_TEST_TIMEOUT}s)"; FAIL=$((FAIL + 1))
+        elif [ "$CPL_RUN" = "98" ]; then
             PASS=$((PASS + 1)); echo "  call_ptr_args_7_accepted_legacy_x86: PASS (runs, returns 98)"
         else
             echo "FAIL: call_ptr_args_7_accepted_legacy_x86 (returned $CPL_RUN, want 98)"; FAIL=$((FAIL + 1))
@@ -23684,8 +23710,10 @@ for CP13_MODE in "ir" "legacy"; do
     TOTAL=$((TOTAL + 1))
     rm -f "$CP_BIN"
     if $KRC --arch=$RUN_ARCH $CP13_FLAG "$CP13_SRC" -o "$CP_BIN" >/dev/null 2>&1 && [ -s "$CP_BIN" ]; then
-        chmod +x "$CP_BIN"; timeout -k 5 "$RUN_TEST_TIMEOUT" "$CP_BIN"; CP13_RUN=$?
-        if [ "$CP13_RUN" = "51" ]; then
+        chmod +x "$CP_BIN"; RT_T0=$SECONDS; timeout -k 5 "$RUN_TEST_TIMEOUT" "$CP_BIN"; CP13_RUN=$?
+        if rb_timed_out "$CP13_RUN" "$RT_T0"; then
+            echo "FAIL: call_ptr_args_13_correct_$CP13_MODE (TIMEOUT: still running after ${RUN_TEST_TIMEOUT}s)"; FAIL=$((FAIL + 1))
+        elif [ "$CP13_RUN" = "51" ]; then
             PASS=$((PASS + 1)); echo "  call_ptr_args_13_correct_$CP13_MODE: PASS (returns 51)"
         else
             echo "FAIL: call_ptr_args_13_correct_$CP13_MODE (returned $CP13_RUN, want 51 -- parameter 12 spills to frame slot 0x80)"
@@ -23747,8 +23775,10 @@ for MA_N in 13 16 22 25 32 33 39 48 63 64; do
         TOTAL=$((TOTAL + 1))
         rm -f "$MA_BIN"
         if $KRC --arch=$RUN_ARCH $MA_FLAG "$MA_SRC" -o "$MA_BIN" >/dev/null 2>&1 && [ -s "$MA_BIN" ]; then
-            chmod +x "$MA_BIN"; timeout -k 5 "$RUN_TEST_TIMEOUT" "$MA_BIN"; MA_RUN=$?
-            if [ "$MA_RUN" = "$MA_EXP" ]; then
+            chmod +x "$MA_BIN"; RT_T0=$SECONDS; timeout -k 5 "$RUN_TEST_TIMEOUT" "$MA_BIN"; MA_RUN=$?
+            if rb_timed_out "$MA_RUN" "$RT_T0"; then
+                echo "FAIL: many_args_${MA_N}_$MA_MODE (TIMEOUT: still running after ${RUN_TEST_TIMEOUT}s)"; FAIL=$((FAIL + 1))
+            elif [ "$MA_RUN" = "$MA_EXP" ]; then
                 PASS=$((PASS + 1)); echo "  many_args_${MA_N}_$MA_MODE: PASS (returns $MA_EXP)"
             else
                 echo "FAIL: many_args_${MA_N}_$MA_MODE (returned $MA_RUN, want $MA_EXP)"; FAIL=$((FAIL + 1))
@@ -23879,8 +23909,10 @@ for MF_N in 9 12 16; do
         TOTAL=$((TOTAL + 1))
         rm -f "$MF_BIN"
         if $KRC --arch=$RUN_ARCH $MF_FLAG "$MF_SRC" -o "$MF_BIN" >/dev/null 2>&1 && [ -s "$MF_BIN" ]; then
-            chmod +x "$MF_BIN"; timeout -k 5 "$RUN_TEST_TIMEOUT" "$MF_BIN"; MF_RUN=$?
-            if [ "$MF_RUN" = "$MF_EXP" ]; then
+            chmod +x "$MF_BIN"; RT_T0=$SECONDS; timeout -k 5 "$RUN_TEST_TIMEOUT" "$MF_BIN"; MF_RUN=$?
+            if rb_timed_out "$MF_RUN" "$RT_T0"; then
+                echo "FAIL: many_float_params_${MF_N}_$MF_MODE (TIMEOUT: still running after ${RUN_TEST_TIMEOUT}s)"; FAIL=$((FAIL + 1))
+            elif [ "$MF_RUN" = "$MF_EXP" ]; then
                 PASS=$((PASS + 1)); echo "  many_float_params_${MF_N}_$MF_MODE: PASS (returns $MF_EXP)"
             else
                 echo "FAIL: many_float_params_${MF_N}_$MF_MODE (returned $MF_RUN, want $MF_EXP -- float parameter 9+ arrives on the stack)"
@@ -23922,8 +23954,10 @@ for MX_N in 14 24 32; do
         TOTAL=$((TOTAL + 1))
         rm -f "$MF_BIN"
         if $KRC --arch=$RUN_ARCH $MX_FLAG "$MF_SRC" -o "$MF_BIN" >/dev/null 2>&1 && [ -s "$MF_BIN" ]; then
-            chmod +x "$MF_BIN"; timeout -k 5 "$RUN_TEST_TIMEOUT" "$MF_BIN"; MX_RUN=$?
-            if [ "$MX_RUN" = "$MX_EXP" ]; then
+            chmod +x "$MF_BIN"; RT_T0=$SECONDS; timeout -k 5 "$RUN_TEST_TIMEOUT" "$MF_BIN"; MX_RUN=$?
+            if rb_timed_out "$MX_RUN" "$RT_T0"; then
+                echo "FAIL: mixed_float_int_args_${MX_N}_$MX_MODE (TIMEOUT: still running after ${RUN_TEST_TIMEOUT}s)"; FAIL=$((FAIL + 1))
+            elif [ "$MX_RUN" = "$MX_EXP" ]; then
                 PASS=$((PASS + 1)); echo "  mixed_float_int_args_${MX_N}_$MX_MODE: PASS (returns $MX_EXP)"
             else
                 echo "FAIL: mixed_float_int_args_${MX_N}_$MX_MODE (returned $MX_RUN, want $MX_EXP -- the overflow set is not positional)"
@@ -23956,8 +23990,10 @@ if $KRC --arch=x86_64 --legacy "$CP6_SRC" -o "$CP_BIN" >/dev/null 2>&1 && [ -s "
     # SKIP (never PASS) where it cannot -- a positive control that never
     # executes cannot show the arguments arrive.
     if [ "$ARCH" = "x86_64" ]; then
-        chmod +x "$CP_BIN"; timeout -k 5 "$RUN_TEST_TIMEOUT" "$CP_BIN"; CPL_RUN=$?
-        if [ "$CPL_RUN" = "21" ]; then
+        chmod +x "$CP_BIN"; RT_T0=$SECONDS; timeout -k 5 "$RUN_TEST_TIMEOUT" "$CP_BIN"; CPL_RUN=$?
+        if rb_timed_out "$CPL_RUN" "$RT_T0"; then
+            echo "FAIL: call_ptr_args_6_accepted_legacy_x86 (TIMEOUT: still running after ${RUN_TEST_TIMEOUT}s)"; FAIL=$((FAIL + 1))
+        elif [ "$CPL_RUN" = "21" ]; then
             PASS=$((PASS + 1)); echo "  call_ptr_args_6_accepted_legacy_x86: PASS (runs, returns 21)"
         else
             echo "FAIL: call_ptr_args_6_accepted_legacy_x86 (returned $CPL_RUN, want 21)"; FAIL=$((FAIL + 1))
@@ -23970,8 +24006,10 @@ else
 fi
 rm -f "$CP_BIN"
 if $KRC --arch=$RUN_ARCH --legacy "$CP6_SRC" -o "$CP_BIN" >/dev/null 2>&1 && [ -s "$CP_BIN" ]; then
-    chmod +x "$CP_BIN"; timeout -k 5 "$RUN_TEST_TIMEOUT" "$CP_BIN"; CP6_LG_RUN=$?
-    if [ "$CP6_LG_RUN" = "21" ]; then
+    chmod +x "$CP_BIN"; RT_T0=$SECONDS; timeout -k 5 "$RUN_TEST_TIMEOUT" "$CP_BIN"; CP6_LG_RUN=$?
+    if rb_timed_out "$CP6_LG_RUN" "$RT_T0"; then
+        echo "FAIL: call_ptr_args_6_accepted_legacy (TIMEOUT: still running after ${RUN_TEST_TIMEOUT}s)"; FAIL=$((FAIL + 1))
+    elif [ "$CP6_LG_RUN" = "21" ]; then
         PASS=$((PASS + 1)); echo "  call_ptr_args_6_accepted_legacy: PASS (native $RUN_ARCH, runs and returns 21)"
     else
         echo "FAIL: call_ptr_args_6_accepted_legacy (native $RUN_ARCH ran but returned $CP6_LG_RUN, want 21)"; FAIL=$((FAIL + 1))
@@ -24024,8 +24062,10 @@ KREOF
 TOTAL=$((TOTAL + 1))
 rm -f "$CPF_BIN"
 if $KRC --arch=$RUN_ARCH "$CPF_SRC" -o "$CPF_BIN" >/dev/null 2>&1 && [ -s "$CPF_BIN" ]; then
-    chmod +x "$CPF_BIN"; timeout -k 5 "$RUN_TEST_TIMEOUT" "$CPF_BIN"; CPF_RUN=$?
-    if [ "$CPF_RUN" = "0" ]; then
+    chmod +x "$CPF_BIN"; RT_T0=$SECONDS; timeout -k 5 "$RUN_TEST_TIMEOUT" "$CPF_BIN"; CPF_RUN=$?
+    if rb_timed_out "$CPF_RUN" "$RT_T0"; then
+        echo "FAIL: call_ptr_f64_matches_direct (TIMEOUT: still running after ${RUN_TEST_TIMEOUT}s)"; FAIL=$((FAIL + 1))
+    elif [ "$CPF_RUN" = "0" ]; then
         PASS=$((PASS + 1)); echo "  call_ptr_f64_matches_direct: PASS (0/1/2 args and mixed int+f64, native $RUN_ARCH)"
     else
         echo "FAIL: call_ptr_f64_matches_direct (bitmask $CPF_RUN: 1=0-arg 2=1-arg 4=2-arg 8=mixed)"
@@ -24051,8 +24091,10 @@ fn main() {
 KREOF
 rm -f "$CPF_BIN"
 if $KRC --arch=$RUN_ARCH "$CPFN_SRC" -o "$CPF_BIN" >/dev/null 2>&1; then
-    chmod +x "$CPF_BIN"; timeout -k 5 "$RUN_TEST_TIMEOUT" "$CPF_BIN"; CPFN_RUN=$?
-    if [ "$CPFN_RUN" = "1" ]; then
+    chmod +x "$CPF_BIN"; RT_T0=$SECONDS; timeout -k 5 "$RUN_TEST_TIMEOUT" "$CPF_BIN"; CPFN_RUN=$?
+    if rb_timed_out "$CPFN_RUN" "$RT_T0"; then
+        echo "FAIL: call_ptr_f64_oracle_can_fail (TIMEOUT: still running after ${RUN_TEST_TIMEOUT}s)"; FAIL=$((FAIL + 1))
+    elif [ "$CPFN_RUN" = "1" ]; then
         PASS=$((PASS + 1)); echo "  call_ptr_f64_oracle_can_fail: PASS (unequal f64s do compare unequal)"
     else
         echo "FAIL: call_ptr_f64_oracle_can_fail (7.5 != 7.25 returned $CPFN_RUN, want 1 -- the oracle above proves nothing)"
@@ -24161,8 +24203,10 @@ KREOF
 TOTAL=$((TOTAL + 1))
 FR_ERR=$($KRC --arch=$RUN_ARCH "$FR_SRC" -o "$FR_BIN" 2>&1); FR_ST=$?
 if [ "$FR_ST" = "0" ] && [ -s "$FR_BIN" ]; then
-    chmod +x "$FR_BIN"; timeout -k 5 "$RUN_TEST_TIMEOUT" "$FR_BIN"; FR_RUN=$?
-    if [ "$FR_RUN" = "0" ]; then
+    chmod +x "$FR_BIN"; RT_T0=$SECONDS; timeout -k 5 "$RUN_TEST_TIMEOUT" "$FR_BIN"; FR_RUN=$?
+    if rb_timed_out "$FR_RUN" "$RT_T0"; then
+        echo "FAIL: float_literal_return_values (TIMEOUT: still running after ${RUN_TEST_TIMEOUT}s)"; FAIL=$((FAIL + 1))
+    elif [ "$FR_RUN" = "0" ]; then
         PASS=$((PASS + 1)); echo "  float_literal_return_values: PASS (15 checks)"
     else
         echo "FAIL: float_literal_return_values (check #$FR_RUN returned the wrong value)"
@@ -24211,8 +24255,10 @@ fi
 TOTAL=$((TOTAL + 1))
 printf 'fn sink(f32 v) -> f32 {\n if v > 1000000.0f { return sink(v - 1.0f) }\n return v\n}\nfn main() { exit(f32_to_int(sink(1.5f) * 4.0f)) }\n' > "$FR_SRC"
 if $KRC --arch=$RUN_ARCH "$FR_SRC" -o "$FR_BIN" > /dev/null 2>&1; then
-    timeout -k 5 "$RUN_TEST_TIMEOUT" "$FR_BIN"; FR_RUN=$?
-    if [ "$FR_RUN" = "6" ]; then
+    RT_T0=$SECONDS; timeout -k 5 "$RUN_TEST_TIMEOUT" "$FR_BIN"; FR_RUN=$?
+    if rb_timed_out "$FR_RUN" "$RT_T0"; then
+        echo "FAIL: f32_literal_to_f32_param_accepted (TIMEOUT: still running after ${RUN_TEST_TIMEOUT}s)"; FAIL=$((FAIL + 1))
+    elif [ "$FR_RUN" = "6" ]; then
         PASS=$((PASS + 1)); echo "  f32_literal_to_f32_param_accepted: PASS (1.5f*4 == 6)"
     else
         echo "FAIL: f32_literal_to_f32_param_accepted (want 6, got $FR_RUN)"; FAIL=$((FAIL + 1))
@@ -24231,8 +24277,10 @@ fi
 TOTAL=$((TOTAL + 1))
 printf 'struct S { f32 a }\nstruct H { S inner }\nstatic f32 g = 0.0f\nfn f64src(uint64 n) -> f64 {\n if n > 1000000 { return f64src(n - 1) }\n return 1.5\n}\nfn main() {\n S s\n s.a = f64src(1)\n H h\n h.inner.a = f64src(1)\n g = f64src(1)\n uint64 p = alloc(32)\n unsafe { *(p as f32) = f64src(1) }\n f32 r = 0.0f\n unsafe { *(p as f32) -> r }\n exit(f32_to_int((s.a + h.inner.a + g + r) * 2.0f))\n}\n' > "$FR_SRC"
 if $KRC --arch=$RUN_ARCH "$FR_SRC" -o "$FR_BIN" > /dev/null 2>&1; then
-    timeout -k 5 "$RUN_TEST_TIMEOUT" "$FR_BIN"; FR_RUN=$?
-    if [ "$FR_RUN" = "12" ]; then
+    RT_T0=$SECONDS; timeout -k 5 "$RUN_TEST_TIMEOUT" "$FR_BIN"; FR_RUN=$?
+    if rb_timed_out "$FR_RUN" "$RT_T0"; then
+        echo "FAIL: nonlocal_assign_f64_to_f32_narrows (TIMEOUT: still running after ${RUN_TEST_TIMEOUT}s)"; FAIL=$((FAIL + 1))
+    elif [ "$FR_RUN" = "12" ]; then
         PASS=$((PASS + 1)); echo "  nonlocal_assign_f64_to_f32_narrows: PASS (1.5*4*2 == 12)"
     else
         echo "FAIL: nonlocal_assign_f64_to_f32_narrows (want 12, got $FR_RUN — 0 means f64 bits landed in the f32 slot)"
@@ -24245,8 +24293,10 @@ fi
 TOTAL=$((TOTAL + 1))
 printf 'struct S { f64 b }\nfn f32src(uint64 n) -> f32 {\n if n > 1000000 { return f32src(n - 1) }\n return 2.5f\n}\nfn main() {\n S s\n s.b = f32src(1)\n exit(f64_to_int(s.b * 4.0))\n}\n' > "$FR_SRC"
 if $KRC --arch=$RUN_ARCH "$FR_SRC" -o "$FR_BIN" > /dev/null 2>&1; then
-    timeout -k 5 "$RUN_TEST_TIMEOUT" "$FR_BIN"; FR_RUN=$?
-    if [ "$FR_RUN" = "10" ]; then
+    RT_T0=$SECONDS; timeout -k 5 "$RUN_TEST_TIMEOUT" "$FR_BIN"; FR_RUN=$?
+    if rb_timed_out "$FR_RUN" "$RT_T0"; then
+        echo "FAIL: nonlocal_assign_f32_to_f64_widens (TIMEOUT: still running after ${RUN_TEST_TIMEOUT}s)"; FAIL=$((FAIL + 1))
+    elif [ "$FR_RUN" = "10" ]; then
         PASS=$((PASS + 1)); echo "  nonlocal_assign_f32_to_f64_widens: PASS (2.5*4 == 10)"
     else
         echo "FAIL: nonlocal_assign_f32_to_f64_widens (want 10, got $FR_RUN)"; FAIL=$((FAIL + 1))
@@ -24365,8 +24415,10 @@ KREOF
 TOTAL=$((TOTAL + 1))
 rm -f "$FCO_BIN"
 if $KRC --arch=$RUN_ARCH "$FCO_SRC" -o "$FCO_BIN" >/dev/null 2>&1 && [ -s "$FCO_BIN" ]; then
-    chmod +x "$FCO_BIN"; timeout -k 5 "$RUN_TEST_TIMEOUT" "$FCO_BIN"; FCO_RUN=$?
-    if [ "$FCO_RUN" = "0" ]; then
+    chmod +x "$FCO_BIN"; RT_T0=$SECONDS; timeout -k 5 "$RUN_TEST_TIMEOUT" "$FCO_BIN"; FCO_RUN=$?
+    if rb_timed_out "$FCO_RUN" "$RT_T0"; then
+        echo "FAIL: float_call_forward_declared (TIMEOUT: still running after ${RUN_TEST_TIMEOUT}s)"; FAIL=$((FAIL + 1))
+    elif [ "$FCO_RUN" = "0" ]; then
         PASS=$((PASS + 1)); echo "  float_call_forward_declared: PASS"
     else
         echo "FAIL: float_call_forward_declared (check #$FCO_RUN wrong; f32=1 f64=2)"; FAIL=$((FAIL + 1))
