@@ -998,8 +998,8 @@ Two consequences worth writing down:
    runs *before* CSE and rewrites `ADD`→`ADD_IMM`, `MUL`→`MUL_IMM`. Those
    products are mathematically pure but not on the CSE whitelist, so
    expressions that would have been collapsed or hoisted as `ADD`/`MUL` no
-   longer are. The comment at `src/ir.kr:13617` acknowledges the hazard, but it was only
-   fixed for 143.
+   longer are. The comment in `ir_opt_cse_is_pure` at `src/ir.kr:13623`, on
+   `IR_SHL_IMM`, acknowledges the hazard, but it was only fixed for 143.
 
 Also latent: `IR_STORE_BIS` (148) is in `ir_opt_is_side_effect` but **not**
 in `ir_opt_cse_invalidates`. Not exploitable today — 148 is created at step
