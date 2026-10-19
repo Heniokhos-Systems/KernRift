@@ -3616,7 +3616,7 @@ fn ir_lower_expr(uint64 node) -> uint64 {
         // OS, so it must not borrow an OS's id.
         //
         // CONSUMER NOTE: code that dispatches on arch_id with `== 2` meaning
-        // "arm64" (src/living.kr:1213 does) sees 10 on a bare-metal arm64
+        // "arm64" (src/living.kr:1216 does) sees 10 on a bare-metal arm64
         // build and takes the x86_64 branch. That is correct-by-refusal here
         // -- every such site in this tree is guarded by a syscall that
         // --target=none refuses first -- but user code doing the same must

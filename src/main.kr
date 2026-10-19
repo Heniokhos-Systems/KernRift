@@ -3561,9 +3561,9 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
         header_size = 0
     } else if emit_mode == 8 {
         // --emit=image: raw headerless flat binary. header_size = 0 FROM THE
-        // START — the rv_raw shape (:2423-2427) — never truncation of an
+        // START — the rv_raw shape (:3490-3494) — never truncation of an
         // emitted ELF. a64_compute_va maps file offset -> 0x400000 + offset
-        // (codegen_aarch64.kr:6228) and the ADRP page arithmetic is baked
+        // (codegen_aarch64.kr:6858) and the ADRP page arithmetic is baked
         // from that map, so chopping a 0x78-byte header off a finished ELF
         // shifts every offset by a non-page amount and leaves every baked
         // page_off 0x78 too large — the image boots to SILENCE at any
@@ -3723,7 +3723,7 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
     // 64 bytes at file offset 0, EMITTED BEFORE THE FUNCTION EMIT LOOP, and
     // that ordering is the entire design. a64_compute_va maps a file offset
     // to 0x400000 + offset with no notion of a header
-    // (codegen_aarch64.kr:6214), and every ADRP page computation is baked
+    // (codegen_aarch64.kr:6844), and every ADRP page computation is baked
     // from that map DURING codegen. Emitting the prefix first therefore moves
     // the payload and re-bakes the page arithmetic around it in one step, with
     // no VA-map change and not one line in codegen_aarch64.kr. Glue the same
@@ -4017,7 +4017,7 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
                     // codegen so no local stub/symbol is emitted; the call
                     // site records an R_RISCV_CALL_PLT relocation instead
                     // (mirror of gen_function/gen_function_a64's extern
-                    // early-return, codegen.kr:10028 / codegen_aarch64.kr:5408).
+                    // early-return, codegen.kr:13669 / codegen_aarch64.kr:6144).
                     uint32 rv_ann_flags = ast_data4(wchild)
                     uint64 rv_is_extern = rv_ann_flags & 8
                     // Raw mode already emitted the entry function at
@@ -7397,7 +7397,7 @@ static uint64 freestanding = 0
 // never embedded in the artifact (x86_64 is fully RIP-relative; arm64 is
 // position-independent modulo 4 KiB, both verified by boots at shifted
 // addresses). Statics rather than locals so compile() can read them, the
-// same forward-reference shape freestanding uses at :2340.
+// same forward-reference shape as the freestanding static just above.
 static uint64 load_addr = 0
 static uint64 load_addr_set = 0
 
@@ -10642,7 +10642,7 @@ fn main() {
         // --target=none must never reach compile_fat, from ANY entrance
         // (no --arch given at all, or an explicit --targets=<list> that
         // does not happen to spell "none" as one of its elements — the
-        // :3495 refusal above only catches the latter spelling). Checked
+        // :5889 refusal above only catches the latter spelling). Checked
         // here, at the single point that actually decides fat-vs-single,
         // rather than per-entrance: freestanding is a static global, and
         // compile_fat compiles all 8 hosted slices in one process without

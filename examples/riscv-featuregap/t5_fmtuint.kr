@@ -8,10 +8,10 @@
 // `buf` (correct left-to-right order — the internal divide-by-10 loop
 // produces digits least-significant-first into the frame scratchpad, then
 // a second pass copies them into `buf` in reverse) and returns the digit
-// count. Semantics confirmed against ir.kr's emit site (ir.kr:2190-2199,
+// count. Semantics confirmed against ir.kr's emit site (ir.kr:2889-2898,
 // "fmt_uint(buf, val) -> IR_FMT_UINT": dest = digit count, src1 = buf
-// pointer, src2 = value) and both existing twins (x86 ir.kr:7414-7488,
-// arm64 ir_aarch64.kr:1058-1116) — same buf-out/dest-count-in contract on
+// pointer, src2 = value) and both existing twins (x86 ir.kr:10084-10158,
+// arm64 ir_aarch64.kr:1899-1957) — same buf-out/dest-count-in contract on
 // every backend.
 //
 // The destination is a GLOBAL `static` byte buffer (Task 2's STATIC_ADDR

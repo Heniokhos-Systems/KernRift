@@ -983,7 +983,7 @@ Both fixes are also pulled in by the v0.1.1 MLRift port.
   Three fixes:
 
   1. **`ir_emit_copy_to_snapshot` was leaking its `pairs` buffer**
-     (`ir.kr:898`). The function is called for every if/else, while,
+     (`ir.kr:1169`). The function is called for every if/else, while,
      and match merge — across the self-host's ~700 functions, that
      was thousands of unfreed allocations. Added the missing
      `dealloc(pairs)`.

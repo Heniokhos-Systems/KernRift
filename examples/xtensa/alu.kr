@@ -22,7 +22,7 @@
 // identical modulo which already-verified encoder they call).
 //
 // `/ 7` and `% 5` use non-power-of-two divisors so the shared lowering's
-// unsigned-div-by-pow2 -> shr/and strength reduction (ir.kr:1470,
+// unsigned-div-by-pow2 -> shr/and strength reduction (ir.kr:2023,
 // unconditional at lowering time regardless of opt level) does not
 // intercept them — the only way to reach the hardware QUOU/REMU path.
 //

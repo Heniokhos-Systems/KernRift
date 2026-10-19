@@ -852,12 +852,12 @@ gate2() {
     #
     # src/ir.kr emits IR_ALLOC from six sites that have no --target=none arm
     # and no provider routing:
-    #   :3413  struct copy on assignment
-    #   :3461  struct returned by value
-    #   :3894  struct literal
-    #   :4164  local array over the stack-array threshold
-    #   :4192  struct declaration with an initialiser
-    #   :4209  local array OF structs
+    #   :3704  struct argument copied for a by-value call
+    #   :3752  struct returned by value
+    #   :4185  struct literal
+    #   :4450  local array over the stack-array threshold
+    #   :4478  struct declaration with an initialiser
+    #   :4495  local array OF structs
     # Only the print/f-string IR_ALLOC was rerouted (Task 5). So on bare metal
     # a struct literal, or a `uint32[2048]`, refuses with the GENERIC message
     # naming 'alloc' -- a builtin the programmer never wrote -- and it does so
