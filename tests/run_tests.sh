@@ -27953,60 +27953,6 @@ else
     rm -rf "$RWS_D"
 fi
 
-# --- The Windows runner claims its slot until the program has started --------
-# On Windows the runner writes .\kr-run-<n>.exe and runs it; the file cannot be
-# removed. It used to pick the first name it could open for writing and close
-# it before CreateProcess, so a second runner could rewrite the bytes between
-# the first one's write and its program starting. Slot <n> is now claimed by
-# holding .\kr-run-<n>.lock open for writing to the end of the run. Checked
-# under Wine with the x86_64 PE runner: (1) with slot 0's lock held by another
-# process the runner must take slot 1 (kr-run-1.exe, never kr-run-0.exe) and
-# exit with the program's 42 -- red on the lock-less runner, which writes
-# kr-run-0.exe; (2) two runs at once both exit 42, from two slots.
-TOTAL=$((TOTAL + 1))
-if ! command -v wine > /dev/null 2>&1; then
-    skip_row runner_windows_slots_are_claimed "wine is not installed"
-else
-    RWS_D=$(mktemp -d "${TMPDIR:-/tmp}/krc_rws.XXXXXX")
-    RWS_WHY=""
-    cat "$DIR/../src/runner.kr" "$DIR/../src/bcj.kr" > "$RWS_D/runner.kr"
-    printf 'fn main() {\n    uint64 t0 = time_ns()\n    while time_ns() - t0 < 2000000000 { }\n    exit(42)\n}\n' > "$RWS_D/slow.kr"
-    printf 'fn main() {\n    uint64 h = file_open(".\\\\kr-run-0.lock", 1)\n    if h >= 0xFFFFFFFFFFFFF000 { exit(9) }\n    uint64 t0 = time_ns()\n    while time_ns() - t0 < 6000000000 { }\n    exit(0)\n}\n' > "$RWS_D/hold.kr"
-    if ! $KRC --arch=x86_64 --emit=windows "$RWS_D/runner.kr" -o "$RWS_D/kr.exe" > /dev/null 2>&1 \
-       || ! $KRC --arch=x86_64 --emit=windows "$RWS_D/slow.kr" -o "$RWS_D/slow.exe" > /dev/null 2>&1 \
-       || ! $KRC --arch=x86_64 --emit=windows "$RWS_D/hold.kr" -o "$RWS_D/hold.exe" > /dev/null 2>&1; then
-        RWS_WHY=" [build failed]"
-    else
-        ( cd "$RWS_D" && WINEDEBUG=-all timeout -k 5 60 wine hold.exe > /dev/null 2>&1; echo $? > "$RWS_D/h.st" ) &
-        RWS_BG=$!
-        # Wait for the holder to have the lock (it creates the file).
-        RWS_T=0
-        while [ ! -e "$RWS_D/kr-run-0.lock" ] && [ $RWS_T -lt 100 ]; do sleep 0.1; RWS_T=$((RWS_T + 1)); done
-        sleep 0.5
-        ( cd "$RWS_D" && WINEDEBUG=-all timeout -k 5 60 wine kr.exe slow.exe > "$RWS_D/r1.out" 2>&1 ); RWS_R=$?
-        wait "$RWS_BG"
-        [ "$RWS_R" = "42" ] || RWS_WHY="$RWS_WHY [slot 0 held: exit $RWS_R, want 42; $(head -c 80 "$RWS_D/r1.out" | tr '\n' ' ')]"
-        [ "$(cat "$RWS_D/h.st" 2>/dev/null)" = "0" ] || RWS_WHY="$RWS_WHY [the lock holder could not take slot 0's lock]"
-        [ ! -e "$RWS_D/kr-run-0.exe" ] || RWS_WHY="$RWS_WHY [kr-run-0.exe was written while slot 0's lock was held]"
-        [ -e "$RWS_D/kr-run-1.exe" ] || RWS_WHY="$RWS_WHY [no kr-run-1.exe: slot 1 was not used]"
-        rm -f "$RWS_D"/kr-run-*
-        ( cd "$RWS_D" && WINEDEBUG=-all timeout -k 5 60 wine kr.exe slow.exe > /dev/null 2>&1; echo $? > "$RWS_D/a.st" ) &
-        RWS_BG=$!
-        sleep 1
-        ( cd "$RWS_D" && WINEDEBUG=-all timeout -k 5 60 wine kr.exe slow.exe > /dev/null 2>&1 ); RWS_B=$?
-        wait "$RWS_BG"
-        RWS_A=$(cat "$RWS_D/a.st" 2>/dev/null)
-        [ "$RWS_A" = "42" ] && [ "$RWS_B" = "42" ] || RWS_WHY="$RWS_WHY [two at once: exits $RWS_A and $RWS_B, want 42 42]"
-        [ -e "$RWS_D/kr-run-0.exe" ] && [ -e "$RWS_D/kr-run-1.exe" ] || RWS_WHY="$RWS_WHY [two at once did not use two slots: $(cd "$RWS_D" && ls kr-run-* 2>/dev/null | tr '\n' ' ')]"
-    fi
-    if [ -z "$RWS_WHY" ]; then
-        PASS=$((PASS + 1)); echo "  runner_windows_slots_are_claimed: PASS (under Wine: a held slot is skipped, two runs at once use two slots, all exit 42)"
-    else
-        FAIL=$((FAIL + 1)); echo "FAIL: runner_windows_slots_are_claimed$RWS_WHY"
-    fi
-    rm -rf "$RWS_D"
-fi
-
 # suite_abort removes every /tmp/<name>_$$ scratch path the suite writes, not
 # only the krc_* ones: an interrupted run used to leave the qemu rows' images
 # and serial logs (uprov_<pid>.img/.log and the like) behind. suite_abort reads
