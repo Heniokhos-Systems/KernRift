@@ -1584,7 +1584,7 @@ fn ir_emit_riscv_insn(uint64 ii) {
         // emitting a relocatable object, record a linker relocation instead
         // of an internal fixup. R_RISCV_CALL_PLT at the auipc (call_patch)
         // covers both the auipc and the jalr. Mirror of
-        // codegen_aarch64.kr:5019-5024. Use cg_emit_mode (the readable global,
+        // codegen_aarch64.kr:5016-5021. Use cg_emit_mode (the readable global,
         // codegen.kr:106, set by set_emit_mode), NOT the compile()-local
         // emit_mode which is not in scope here; cg_emit_mode == 3 is --emit=obj.
         // This returns BEFORE the internal fixup_table append, so extern calls
@@ -2516,8 +2516,8 @@ fn ir_riscv_gen(uint64 fn_node) {
         // [sp+4]=&argv[0] (ILP32, 4-byte slots). The prologue already lowered sp
         // by total_frame, so argc/argv live at sp+total_frame+{0,4}. Stores go to
         // the data-segment statics via the pcrel pair (table_sel 1 = statics),
-        // exactly like IR_STATIC_STORE (ir_riscv.kr:1696-1702) — NOT sp-relative.
-        // Mirror of codegen_aarch64.kr:6272-6312 (Linux branch), 4-byte words.
+        // exactly like IR_STATIC_STORE (ir_riscv.kr:1696-1701) — NOT sp-relative.
+        // Mirror of codegen_aarch64.kr:6260-6313 (Linux branch), 4-byte words.
         uint32 fn_name_tok_tr = ast_data1(fn_node)
         uint64 wnt_tr = fn_name_tok_tr
         if tok_matches(wnt_tr, "main", 4) != 0 && freestanding == 0 {
@@ -2716,7 +2716,7 @@ fn ir_riscv_gen(uint64 fn_node) {
     // 11. Epilogue. Auto-exit for hosted main(): a0 already holds the
     //     return value (IR_RET / IR_RET_VOID set it before jumping here).
     //     exit(93) so main does not `ret` into an undefined ra. Mirrors
-    //     codegen_aarch64.kr:6614-6620. Freestanding keeps the bare ret.
+    //     codegen_aarch64.kr:6609-6615. Freestanding keeps the bare ret.
     uint32 fn_name_tok_rv = ast_data1(fn_node)
     uint64 wnt_rv_ep = fn_name_tok_rv
     if tok_matches(wnt_rv_ep, "main", 4) != 0 && freestanding == 0 && is_naked == 0 {
@@ -2796,7 +2796,7 @@ fn resolve_fixups_riscv() {
             patch_u32(wpo + 4, (lo << 20) | ((RV_RA & 0x1F) << 15) | ((RV_RA & 0x1F) << 7) | 0x67)
         } else {
             // Undefined function — mirror resolve_fixups_a64
-            // (codegen_aarch64.kr:6740): without this the placeholder
+            // (codegen_aarch64.kr:6735): without this the placeholder
             // pair would jump to its own auipc at runtime.
             diag_loc_head(wtt, 0)
             write(2, "undefined function '", 20)
@@ -2828,7 +2828,7 @@ fn resolve_fixups_riscv() {
 //     addi  rd, rd, %lo(disp)  @ site + 4
 // with disp = (str_start + str_offset) - site, pc-relative from the auipc.
 // The +0x800 hi-rounding compensates addi's sign-extension exactly as the
-// call resolver's jalr does (ir_riscv.kr:2597-2605). Pure file-offset math —
+// call resolver's jalr does (ir_riscv.kr:2791-2796). Pure file-offset math —
 // the flat raw image maps file offset 0 to VA 0x8000_0000, so no VA needed.
 // rd is recovered from the placeholder auipc word (the resolver is handed the
 // site, not rd). Both words are fully re-encoded, never read-modify-OR.
@@ -2996,7 +2996,7 @@ fn resolve_fnaddr_fixups_riscv() {
             patch_u32(wpo + 4, (lo << 20) | (rd << 15) | (rd << 7) | 0x13)
         } else {
             // Undefined function — mirror the x86/arm64 fn_addr resolvers
-            // (codegen.kr:14686-14690, codegen_aarch64.kr:6856-6861): without
+            // (codegen.kr:14686-14690, codegen_aarch64.kr:6856-6860): without
             // this the placeholder pair would silently resolve to disp=0
             // (pointing at its own auipc) instead of failing to compile.
             write(2, "error: fn_addr: undefined function '", 36)

@@ -4,6 +4,17 @@ All notable changes to `kernriftc` are documented in this file.
 
 ## Unreleased
 
+**Fixed: a comment in one source file that cites a line of another is checked
+too.** `scripts/gen-ir-reference-citations.py` fingerprinted the citations in
+docs/IR_REFERENCE.md and the `<NAME>.md:<line>` ones in the prose, but not the
+roughly 145 `<file>.kr:<line>` citations in comments under `src/`, and about a
+dozen of those named the wrong line (a function's caller instead of the
+function, an error path's neighbour instead of the error path, a blank line).
+They are corrected and now pinned in `tests/ir_reference_citations.txt` with
+the same checks (range, blank line, "the comment at" a line of code, a
+backquoted function the line is not in). An example diagnostic in backquotes
+and a line named "at <commit>" are not citations.
+
 **Fixed: the `--legacy` Windows `file_open` opens a file for writing with
 `FILE_SHARE_READ`, as the IR backend does.** It asked for
 `FILE_SHARE_READ|FILE_SHARE_WRITE` on every open, so a second writer could
