@@ -26267,10 +26267,15 @@ rm -rf "$RXP_D"
 # under Wine with the x86_64 PE runner: (1) with slot 0's lock held by another
 # process the runner must take slot 1 (kr-run-1.exe, never kr-run-0.exe) and
 # exit with the program's 42 -- red on the lock-less runner, which writes
-# kr-run-0.exe; (2) two runs at once both exit 42, from two slots.
+# kr-run-0.exe; (2) two runs at once both exit 42, from two slots. Wine is
+# $KR_WINE when it is set (set but not an executable file is a FAIL, never a
+# skip), else `wine` from PATH; none is a counted skip.
 TOTAL=$((TOTAL + 1))
-if ! command -v wine > /dev/null 2>&1; then
-    skip_row runner_windows_slots_are_claimed "wine is not installed"
+RWS_WINE="${KR_WINE-$(command -v wine 2>/dev/null || true)}"
+if [ -n "${KR_WINE+set}" ] && { [ -z "$KR_WINE" ] || [ ! -f "$KR_WINE" ] || [ ! -x "$KR_WINE" ]; }; then
+    FAIL=$((FAIL + 1)); echo "FAIL: runner_windows_slots_are_claimed (KR_WINE='$KR_WINE' is not an executable regular file)"
+elif [ -z "$RWS_WINE" ]; then
+    skip_row runner_windows_slots_are_claimed "no wine; set KR_WINE=<path to wine>"
 else
     RWS_D=$(mktemp -d "${TMPDIR:-/tmp}/krc_rws.XXXXXX")
     RWS_WHY=""
@@ -26282,23 +26287,23 @@ else
        || ! $KRC --arch=x86_64 --emit=windows "$RWS_D/hold.kr" -o "$RWS_D/hold.exe" > /dev/null 2>&1; then
         RWS_WHY=" [build failed]"
     else
-        ( cd "$RWS_D" && WINEDEBUG=-all timeout -k 5 60 wine hold.exe > /dev/null 2>&1; echo $? > "$RWS_D/h.st" ) &
+        ( cd "$RWS_D" && WINEDEBUG=-all timeout -k 5 60 "$RWS_WINE" hold.exe > /dev/null 2>&1; echo $? > "$RWS_D/h.st" ) &
         RWS_BG=$!
         # Wait for the holder to have the lock (it creates the file).
         RWS_T=0
         while [ ! -e "$RWS_D/kr-run-0.lock" ] && [ $RWS_T -lt 100 ]; do sleep 0.1; RWS_T=$((RWS_T + 1)); done
         sleep 0.5
-        ( cd "$RWS_D" && WINEDEBUG=-all timeout -k 5 60 wine kr.exe slow.exe > "$RWS_D/r1.out" 2>&1 ); RWS_R=$?
+        ( cd "$RWS_D" && WINEDEBUG=-all timeout -k 5 60 "$RWS_WINE" kr.exe slow.exe > "$RWS_D/r1.out" 2>&1 ); RWS_R=$?
         wait "$RWS_BG"
         [ "$RWS_R" = "42" ] || RWS_WHY="$RWS_WHY [slot 0 held: exit $RWS_R, want 42; $(head -c 80 "$RWS_D/r1.out" | tr '\n' ' ')]"
         [ "$(cat "$RWS_D/h.st" 2>/dev/null)" = "0" ] || RWS_WHY="$RWS_WHY [the lock holder could not take slot 0's lock]"
         [ ! -e "$RWS_D/kr-run-0.exe" ] || RWS_WHY="$RWS_WHY [kr-run-0.exe was written while slot 0's lock was held]"
         [ -e "$RWS_D/kr-run-1.exe" ] || RWS_WHY="$RWS_WHY [no kr-run-1.exe: slot 1 was not used]"
         rm -f "$RWS_D"/kr-run-*
-        ( cd "$RWS_D" && WINEDEBUG=-all timeout -k 5 60 wine kr.exe slow.exe > /dev/null 2>&1; echo $? > "$RWS_D/a.st" ) &
+        ( cd "$RWS_D" && WINEDEBUG=-all timeout -k 5 60 "$RWS_WINE" kr.exe slow.exe > /dev/null 2>&1; echo $? > "$RWS_D/a.st" ) &
         RWS_BG=$!
         sleep 1
-        ( cd "$RWS_D" && WINEDEBUG=-all timeout -k 5 60 wine kr.exe slow.exe > /dev/null 2>&1 ); RWS_B=$?
+        ( cd "$RWS_D" && WINEDEBUG=-all timeout -k 5 60 "$RWS_WINE" kr.exe slow.exe > /dev/null 2>&1 ); RWS_B=$?
         wait "$RWS_BG"
         RWS_A=$(cat "$RWS_D/a.st" 2>/dev/null)
         [ "$RWS_A" = "42" ] && [ "$RWS_B" = "42" ] || RWS_WHY="$RWS_WHY [two at once: exits $RWS_A and $RWS_B, want 42 42]"
