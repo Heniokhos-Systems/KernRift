@@ -21,8 +21,8 @@ and a line named "at <commit>" are not citations.
 open a file this handle held. That made the Windows runner's
 `.\kr-run-<n>.lock` no lock in a `--legacy` build: two runners could take the
 same slot. The read path keeps `FILE_SHARE_READ|FILE_SHARE_WRITE`. Both arches
-(x86_64, arm64); a new row runs the slot check with a `--legacy` runner under
-Wine.
+(x86_64, arm64); a new row checks under Wine that a second `--legacy` writer is
+refused while the file is held.
 
 
 **Fixed: `make test` no longer leaves files in the checkout.** The smoke
