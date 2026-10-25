@@ -192,7 +192,24 @@ fi
 # edeafc5 (147/147). Pinned at d565770, not HEAD: edeafc5 (a volatile store
 # fenced after as well as before) and everything later are measured
 # byte-identical here, and this keeps the gate re-asserting that.
-TN_BASE="${TN_BASE:-d5657708034feb933ba2f3abc66889c9f7e3361c}"
+TN_PIN=d5657708034feb933ba2f3abc66889c9f7e3361c
+# G1_MOVED: the rows TN_PIN is EXPECTED to differ on, one name per line, each
+# with its exit status unchanged. A commit that moves output on purpose (a
+# merge of a codegen change, say) may pin to its own parent and list here
+# exactly what it moved, instead of leaving gate 1 red or comparing HEAD with
+# itself. A row that differs and is not listed, a listed row that does not
+# differ, and a change of exit status all fail. The list belongs to the pin:
+# with TN_BASE set from outside to another commit it is empty (every row must
+# be identical) unless G1_MOVED_WANT is set too.
+# Against this pin: the --legacy Windows file_open asks for FILE_SHARE_READ
+# when it opens for writing (review round 13), which changes the four Windows
+# builds of the compiler that go through the legacy backend, and nothing else.
+G1_MOVED="krc_x86_64_windows_legacy
+krc_x86_64_windows_obj
+krc_arm64_windows_legacy
+krc_arm64_windows_obj"
+TN_BASE="${TN_BASE:-$TN_PIN}"
+if [ "$TN_BASE" = "$TN_PIN" ]; then G1_MOVED_WANT="${G1_MOVED_WANT-$G1_MOVED}"; else G1_MOVED_WANT="${G1_MOVED_WANT-}"; fi
 
 MODE="both"
 case "${1:-}" in
@@ -457,6 +474,7 @@ DERIVE
 
     # --- run the matrix -----------------------------------------------------
     G1_ROWS=0; G1_SAME=0; G1_DIFF=0; G1_ARTIFACTS=0; G1_DIFFLIST=""; G1_NOBUILD=""
+    G1_MOVED_GOT=""; G1_EXIT_CHANGED=""
     while IFS='|' read -r name flags input; do
         [ -n "$name" ] || continue
         G1_ROWS=$((G1_ROWS + 1))
@@ -482,6 +500,9 @@ DERIVE
             G1_SAME=$((G1_SAME + 1))
         else
             G1_DIFF=$((G1_DIFF + 1))
+            G1_MOVED_GOT="$G1_MOVED_GOT$name
+"
+            [ "$bst" = "$ast" ] || G1_EXIT_CHANGED="$G1_EXIT_CHANGED $name($bst->$ast)"
             G1_DIFFLIST="$G1_DIFFLIST
     $name: exit $bst->$ast, ${bh:0:12}->${ah:0:12}  [$flags $(basename "$input")]"
         fi
@@ -509,10 +530,20 @@ DERIVE
     else
         ok "gate1_build_outcomes" "144 rows built, 3 refused (the suite's own esp32-guard and riscv32 IR-op-52 negatives)"
     fi
-    if [ "$G1_DIFF" = "0" ]; then
+    G1_MOVED_GOT=$(printf '%s' "$G1_MOVED_GOT" | sed '/^$/d' | sort)
+    G1_MOVED_WANT_S=$(printf '%s\n' "$G1_MOVED_WANT" | sed 's/^ *//; /^$/d' | sort)
+    if [ "$G1_DIFF" = "0" ] && [ -z "$G1_MOVED_WANT_S" ]; then
         ok "gate1_byte_identity" "$G1_SAME/$G1_ROWS rows identical"
+    elif [ -n "$G1_MOVED_WANT_S" ] && [ "$G1_MOVED_GOT" = "$G1_MOVED_WANT_S" ] && [ -z "$G1_EXIT_CHANGED" ]; then
+        ok "gate1_byte_identity" "$G1_SAME/$G1_ROWS rows identical; the other $G1_DIFF moved exactly as G1_MOVED lists for this pin, every exit status unchanged"
     else
-        bad "gate1_byte_identity" "$G1_DIFF of $G1_ROWS rows differ:$G1_DIFFLIST"
+        G1_WHY=""
+        [ -z "$G1_EXIT_CHANGED" ] || G1_WHY="$G1_WHY exit status changed:$G1_EXIT_CHANGED;"
+        G1_UNLISTED=$(comm -23 <(printf '%s\n' "$G1_MOVED_GOT" | sed '/^$/d') <(printf '%s\n' "$G1_MOVED_WANT_S" | sed '/^$/d') | tr '\n' ' ')
+        G1_STALE=$(comm -13 <(printf '%s\n' "$G1_MOVED_GOT" | sed '/^$/d') <(printf '%s\n' "$G1_MOVED_WANT_S" | sed '/^$/d') | tr '\n' ' ')
+        [ -z "$G1_UNLISTED" ] || G1_WHY="$G1_WHY differ but not listed: $G1_UNLISTED;"
+        [ -z "$G1_STALE" ] || G1_WHY="$G1_WHY listed but identical: $G1_STALE;"
+        bad "gate1_byte_identity" "$G1_DIFF of $G1_ROWS rows differ ($G1_WHY):$G1_DIFFLIST"
     fi
 }
 
