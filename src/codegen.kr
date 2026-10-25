@@ -7213,15 +7213,22 @@ fn gen_expr(uint64 node) {
             emit_store_rax_to_stack(pk1_fileopen)
             if target_os == 2 {
                 // Windows: CreateFileA(path, access, share, NULL, disp, attrs, NULL)
-                // Use GENERIC_READ|GENERIC_WRITE (0xC0000000) + OPEN_ALWAYS(4)
+                // access GENERIC_READ|GENERIC_WRITE (0xC0000000); disposition
+                // OPEN_EXISTING (read) or CREATE_ALWAYS (write)
                 // rcx = path
                 emit_load_rax_from_stack(pk0_fileopen)
                 emit_mov_rcx_rax()
                 // rdx = 0xC0000000 (GENERIC_READ|GENERIC_WRITE)
                 emit_mov_rax_imm(0xC0000000)
                 emit_mov_rdx_rax()
-                // r8 = FILE_SHARE_READ|WRITE = 3
-                emit_mov_rax_imm(3)
+                // r8 = share: 3 - 2*flags. Read (0): FILE_SHARE_READ|WRITE = 3.
+                // Write (1): FILE_SHARE_READ = 1, as the IR backend does, so a
+                // second writer cannot open the file while this handle is
+                // held -- what makes the Windows runner's .lock a lock.
+                emit_load_rax_from_stack(pk1_fileopen)
+                emit_byte(0x48); emit_byte(0x01); emit_byte(0xC0)  // add rax, rax
+                emit_neg_rax()
+                emit_byte(0x83); emit_byte(0xC0); emit_byte(3)     // add eax, 3
                 emit_mov_r8_rax()
                 // r9 = NULL (security)
                 emit_mov_r9_imm(0)

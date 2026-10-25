@@ -4,6 +4,15 @@ All notable changes to `kernriftc` are documented in this file.
 
 ## Unreleased
 
+**Fixed: the `--legacy` Windows `file_open` opens a file for writing with
+`FILE_SHARE_READ`, as the IR backend does.** It asked for
+`FILE_SHARE_READ|FILE_SHARE_WRITE` on every open, so a second writer could
+open a file this handle held. That made the Windows runner's
+`.\kr-run-<n>.lock` no lock in a `--legacy` build: two runners could take the
+same slot. The read path keeps `FILE_SHARE_READ|FILE_SHARE_WRITE`. Both arches
+(x86_64, arm64); a new row runs the slot check with a `--legacy` runner under
+Wine.
+
 **Fixed: a character literal holds exactly one character or one escape.** The
 value used to be the first byte after the quote whatever followed: `'AB'` and
 `'ABCDEFGHI'` compiled to 65, `''` to 39 (the closing quote) and a multi-byte
