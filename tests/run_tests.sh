@@ -25906,19 +25906,23 @@ rm -rf "$LIP_D"; mkdir -p "$LIP_D"
 # on the command line, and `make test` runs the suite through a wrapper that
 # execs the RELATIVE ./build/krc2 -- so a row that cd'd and called $KRC ran
 # nothing (exit 127) and all 32 round-1 rows failed under the real `make test`.
-# The compiler under test comes first, so a suite run against a candidate
-# compiler checks THAT compiler here too. Otherwise the convention of the
-# suite's other cd-ing rows: the tree's own build/krc2, else build/krc3.
-# $KRC may be a wrapper that injects --arch (make test's is), which these rows
-# must not get on top of their own flags, so it is used only when it is a bare
-# compiler binary (an ELF file).
-if [ -n "${KRC:-}" ] && [ -f "$KRC" ] && [ -x "$KRC" ] \
+# These rows also need the compiler with no flags injected ($KRC may be a
+# wrapper that adds --arch, as make test's is). So the compiler is $KRC_RAW,
+# the compiler under test with nothing injected (`make test` sets it; a
+# binary, or a script that execs one, e.g. under a ulimit), else $KRC when
+# $KRC is itself a compiler binary (an ELF file). Nothing else: with neither,
+# every row here FAILS and says why. It never falls back to the tree's
+# build/krc2, which is the last compiler built, not the one under test.
+LIP_RAW="${KRC_RAW:-}"
+if [ -z "$LIP_RAW" ] && [ -n "${KRC:-}" ] && [ -f "$KRC" ] && [ -x "$KRC" ] \
    && [ "$(head -c 4 "$KRC" 2>/dev/null | od -An -tx1 | tr -d ' \n')" = "7f454c46" ]; then
-    LIP_CC="$(cd "$(dirname "$KRC")" && pwd)/$(basename "$KRC")"
-elif [ -x "$DIR/../build/krc2" ]; then
-    LIP_CC="$(cd "$DIR/../build" && pwd)/krc2"
+    LIP_RAW="$KRC"
+fi
+if [ -n "$LIP_RAW" ] && [ -f "$LIP_RAW" ] && [ -x "$LIP_RAW" ]; then
+    LIP_CC="$(cd "$(dirname "$LIP_RAW")" && pwd)/$(basename "$LIP_RAW")"
 else
-    LIP_CC="$(cd "$DIR/../build" && pwd)/krc3"
+    echo "  (lexer / import-scanner parity: KRC_RAW is not an executable file and $KRC is not a compiler binary, so every lip_* row FAILS; set KRC_RAW to the compiler under test)"
+    LIP_CC="/nonexistent/KRC_RAW-not-set"
 fi
 LIP_ROOT="$(cd "$DIR/.." && pwd)"
 

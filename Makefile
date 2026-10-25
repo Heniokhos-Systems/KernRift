@@ -107,6 +107,11 @@ build-import: build/krc2
 #   build/krc-test.<pid> and renamed into place, and it execs
 #   build/krc2 next to it by its own absolute path, so a row that cds
 #   elsewhere still finds the compiler.
+# - KRC_RAW is build/krc2 itself, by absolute path: the compiler under test
+#   with no flags injected, for the rows that pass their own flags (the
+#   lexer / import-scanner parity block). Those rows use KRC_RAW, else $KRC
+#   when it is a bare compiler binary, and fail when neither is one; they never
+#   fall back to a build/ compiler on their own.
 # - The suite runs in the background in its own session (setsid, where
 #   available), so INT, TERM and HUP reach this recipe's traps at once (a
 #   foreground child would defer them until the whole suite ended), and each
@@ -138,7 +143,7 @@ test: build/krc2 build/kr-bin
 	 trap 'p=$$!; [ -z "$$p" ] || { pkill -TERM -s "$$p" 2>/dev/null; kill -TERM -"$$p" 2>/dev/null; kill -TERM "$$p" 2>/dev/null; }; exit 129' HUP; \
 	 printf '%s\n' '#!/bin/bash' 'exec "$${0%/*}/krc2" --arch=x86_64 "$$@"' > "$$t" && chmod +x "$$t" && mv -f "$$t" build/krc-test || exit 1; \
 	 S=; command -v setsid > /dev/null 2>&1 && S=setsid; \
-	 KRC="$(CURDIR)/build/krc-test" $$S bash tests/run_tests.sh & \
+	 KRC="$(CURDIR)/build/krc-test" KRC_RAW="$(CURDIR)/build/krc2" $$S bash tests/run_tests.sh & \
 	 wait $$!; st=$$?; exit $$st
 
 # Full CI gate: bootstrap fixed point + suite + both IR-vs-legacy differential
