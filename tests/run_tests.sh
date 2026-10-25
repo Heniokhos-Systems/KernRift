@@ -27927,11 +27927,6 @@ rm -rf "$RXP_D"
 # kr-run-0.exe; (2) two runs at once both exit 42, from two slots. Wine is
 # $KR_WINE when it is set (set but not an executable file is a FAIL, never a
 # skip), else `wine` from PATH; none is a counted skip.
-# The --legacy build is checked the same way. Its file_open opened every file
-# with FILE_SHARE_READ|FILE_SHARE_WRITE, so a second runner could open a held
-# .\kr-run-<n>.lock for writing and the lock claimed nothing: the legacy row
-# was red (slot 0's .exe written while its lock was held) until the write path
-# asked for FILE_SHARE_READ, as the IR backend always has.
 rws_row() {   # <row> <extra compiler flags, unquoted: "" or --legacy>
     TOTAL=$((TOTAL + 1))
     RWS_WINE="${KR_WINE-$(command -v wine 2>/dev/null || true)}"
@@ -27981,7 +27976,53 @@ rws_row() {   # <row> <extra compiler flags, unquoted: "" or --legacy>
     fi
 }
 rws_row runner_windows_slots_are_claimed ""
-rws_row runner_windows_slots_are_claimed_legacy "--legacy"
+
+# --- A --legacy Windows file_open for writing holds the file ------------------
+# The runner's slot lock is file_open(path, 1) held open. The --legacy
+# backends opened every file with FILE_SHARE_READ|FILE_SHARE_WRITE, so a second
+# writer could open a held file and, in a --legacy build, the lock claimed
+# nothing; the write path now asks for FILE_SHARE_READ, as the IR backend always
+# has. Checked directly rather than through a --legacy runner: on main the
+# runner cannot be built --legacy for Windows at all (its raw syscalls are
+# refused there, since that backend does not prune OS guards). Under Wine, with
+# both programs built --legacy: while one holds .\kr-share.lock open for
+# writing, a second file_open(.\kr-share.lock, 1) must FAIL (exit 3); once the
+# holder has exited it must succeed (exit 0). Red before the fix (the second
+# open succeeded while the file was held).
+TOTAL=$((TOTAL + 1))
+LSH_WINE="${KR_WINE-$(command -v wine 2>/dev/null || true)}"
+if [ -n "${KR_WINE+set}" ] && { [ -z "$KR_WINE" ] || [ ! -f "$KR_WINE" ] || [ ! -x "$KR_WINE" ]; }; then
+    FAIL=$((FAIL + 1)); echo "FAIL: legacy_file_open_write_holds_the_file_wine (KR_WINE='$KR_WINE' is not an executable regular file)"
+elif [ -z "$LSH_WINE" ]; then
+    skip_row legacy_file_open_write_holds_the_file_wine "no wine; set KR_WINE=<path to wine>"
+else
+    LSH_D=$(mktemp -d "${TMPDIR:-/tmp}/krc_lsh.XXXXXX")
+    LSH_WHY=""
+    printf 'fn main() {\n    uint64 h = file_open(".\\\\kr-share.lock", 1)\n    if h >= 0xFFFFFFFFFFFFF000 { exit(9) }\n    uint64 t0 = time_ns()\n    while time_ns() - t0 < 6000000000 { }\n    exit(0)\n}\n' > "$LSH_D/hold.kr"
+    printf 'fn main() {\n    uint64 h = file_open(".\\\\kr-share.lock", 1)\n    if h >= 0xFFFFFFFFFFFFF000 { exit(3) }\n    exit(0)\n}\n' > "$LSH_D/probe.kr"
+    if ! $KRC --arch=x86_64 --emit=windows --legacy "$LSH_D/hold.kr" -o "$LSH_D/hold.exe" > /dev/null 2>&1 \
+       || ! $KRC --arch=x86_64 --emit=windows --legacy "$LSH_D/probe.kr" -o "$LSH_D/probe.exe" > /dev/null 2>&1; then
+        LSH_WHY=" [build failed]"
+    else
+        ( cd "$LSH_D" && WINEDEBUG=-all timeout -k 5 60 "$LSH_WINE" hold.exe > /dev/null 2>&1; echo $? > "$LSH_D/h.st" ) &
+        LSH_BG=$!
+        LSH_T=0
+        while [ ! -e "$LSH_D/kr-share.lock" ] && [ $LSH_T -lt 100 ]; do sleep 0.1; LSH_T=$((LSH_T + 1)); done
+        sleep 0.5
+        ( cd "$LSH_D" && WINEDEBUG=-all timeout -k 5 60 "$LSH_WINE" probe.exe > /dev/null 2>&1 ); LSH_HELD=$?
+        wait "$LSH_BG"
+        ( cd "$LSH_D" && WINEDEBUG=-all timeout -k 5 60 "$LSH_WINE" probe.exe > /dev/null 2>&1 ); LSH_FREE=$?
+        [ "$(cat "$LSH_D/h.st" 2>/dev/null)" = "0" ] || LSH_WHY="$LSH_WHY [the holder could not open the file: exit $(cat "$LSH_D/h.st" 2>/dev/null)]"
+        [ "$LSH_HELD" = "3" ] || LSH_WHY="$LSH_WHY [while held: exit $LSH_HELD, want 3 (a second writer must be refused)]"
+        [ "$LSH_FREE" = "0" ] || LSH_WHY="$LSH_WHY [after the holder exited: exit $LSH_FREE, want 0]"
+    fi
+    if [ -z "$LSH_WHY" ]; then
+        PASS=$((PASS + 1)); echo "  legacy_file_open_write_holds_the_file_wine: PASS (under Wine: a second --legacy writer is refused while the file is held, and opens it once it is free)"
+    else
+        FAIL=$((FAIL + 1)); echo "FAIL: legacy_file_open_write_holds_the_file_wine$LSH_WHY"
+    fi
+    rm -rf "$LSH_D"
+fi
 
 # suite_abort removes every /tmp/<name>_$$ scratch path the suite writes, not
 # only the krc_* ones: an interrupted run used to leave the qemu rows' images
