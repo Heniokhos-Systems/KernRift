@@ -169,7 +169,12 @@ fi
 # BEFORE is now HEAD's own sources compiled by the compiler under test, so a
 # freshly re-based gate 1 is a self-build comparison and passes only at the
 # bootstrap fixed point. Run `make bootstrap` first if it reports a wide diff.
-TN_BASE="${TN_BASE:-6e37819a60b0783436d0f219ee08e23617db09ad}"
+# RE-PINNED to c2ecc49 (main) on suite-skip-hygiene, review round 13. 6e37819's
+# sources no longer compile under the compiler they are compared with (main's
+# duplicate-static refusal), so gate 1 could not run at all ("the BASE sources
+# did not compile"). Against c2ecc49 every row is identical: this branch
+# changes tests only.
+TN_BASE="${TN_BASE:-c2ecc49d9d55bc5e1f8f9c9eb865702871adcfc8}"
 
 MODE="both"
 case "${1:-}" in
@@ -448,7 +453,8 @@ DERIVE
         if [ "$ah" != "absent" ]; then
             G1_ARTIFACTS=$((G1_ARTIFACTS + 1))
         else
-            G1_NOBUILD="$G1_NOBUILD$flags ${input#$REPO/}
+            g1_in=${input#$REPO/}; g1_in=${g1_in#$TMP/base/}
+            G1_NOBUILD="$G1_NOBUILD$flags $g1_in
 "
         fi
         if [ "$bst" = "$ast" ] && [ "$bh" = "$ah" ]; then
@@ -471,16 +477,24 @@ DERIVE
     else
         bad "gate1_row_count" "built $G1_ROWS rows, expected 147"
     fi
+    # The three negatives, plus the compiler's own sources for windows under
+    # --legacy and --emit=obj: main's syscall_raw refusal (a raw syscall must
+    # not be reachable in a windows slice, and those backends do not prune OS
+    # guards) stops krc.kr there, before and after alike.
     G1_NOBUILD_WANT="--arch=riscv32 --freestanding examples/riscv-hosted/hello.kr
 --arch=riscv32 --freestanding --target=esp32 examples/esp32/minimal.kr
---arch=xtensa --target=esp32 examples/esp32/minimal.kr"
+--arch=xtensa --target=esp32 examples/esp32/minimal.kr
+--arch=x86_64 --target=windows --legacy build/krc.kr
+--arch=x86_64 --target=windows --emit=obj build/krc.kr
+--arch=arm64 --target=windows --legacy build/krc.kr
+--arch=arm64 --target=windows --emit=obj build/krc.kr"
     G1_NOBUILD_GOT=$(printf '%s' "$G1_NOBUILD" | sed '/^$/d' | sort)
-    if [ "$G1_ARTIFACTS" != "144" ]; then
-        bad "gate1_build_outcomes" "$G1_ARTIFACTS of $G1_ROWS rows produced an artifact, expected 144"
+    if [ "$G1_ARTIFACTS" != "140" ]; then
+        bad "gate1_build_outcomes" "$G1_ARTIFACTS of $G1_ROWS rows produced an artifact, expected 140"
     elif [ "$G1_NOBUILD_GOT" != "$(printf '%s' "$G1_NOBUILD_WANT" | sort)" ]; then
-        bad "gate1_build_outcomes" "the rows that produced no artifact are not the three expected refusals: $(echo "$G1_NOBUILD_GOT" | tr '\n' ';')"
+        bad "gate1_build_outcomes" "the rows that produced no artifact are not the seven expected refusals: $(echo "$G1_NOBUILD_GOT" | tr '\n' ';')"
     else
-        ok "gate1_build_outcomes" "144 rows built, 3 refused (the suite's own esp32-guard and riscv32 IR-op-52 negatives)"
+        ok "gate1_build_outcomes" "140 rows built, 7 refused (the suite's own esp32-guard and riscv32 IR-op-52 negatives, and krc.kr for windows under --legacy / --emit=obj)"
     fi
     if [ "$G1_DIFF" = "0" ]; then
         ok "gate1_byte_identity" "$G1_SAME/$G1_ROWS rows identical"
