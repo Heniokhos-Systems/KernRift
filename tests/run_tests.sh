@@ -10122,13 +10122,17 @@ fi
 #   - a citation after a backquoted function name that is neither in that
 #     function nor mentions it;
 #   - a citation INTO a .md file whose line changed (recorded, then edited),
-#     and one past the end of the .md file.
+#     and one past the end of the .md file;
+#   - a comment in one source file citing another (src->src) whose line
+#     changed, and one past the end of the cited file -- and the two shapes
+#     that are not citations (an example diagnostic in backquotes, and a line
+#     named "at <commit>") are left alone.
 # No .md citation is written literally here: this file's prose is scanned too.
 TOTAL=$((TOTAL + 1))
 CSH_D=$(mktemp -d "${TMPDIR:-/tmp}/krc_csh.XXXXXX")
 mkdir -p "$CSH_D/scripts" "$CSH_D/tests"
 cp "$DIR/../scripts/gen-ir-reference-citations.py" "$CSH_D/scripts/"
-ln -s "$DIR/../src" "$CSH_D/src"
+cp -R "$DIR/../src" "$CSH_D/src"
 cp -R "$DIR/../docs" "$CSH_D/docs"
 for csh_f in "$DIR"/../*.md; do [ -f "$csh_f" ] && cp "$csh_f" "$CSH_D/"; done
 cp "$DIR/run_tests.sh" "$CITE_MANIFEST" "$CSH_D/tests/"
@@ -10167,8 +10171,20 @@ csh_check mdcontrol 0
 sed -i '1s/$/ (edited)/' "$csh_doc"
 printf 'And `%s:%s`.\n' "$csh_md" 99999999 >> "$csh_doc"
 csh_check md 1 "docs/$csh_md:1 moved" "docs/$csh_md:99999999 is past the end of the file"
+# The src->src half: main.kr cites line 1 of ir.kr; record it, then change that line.
+cp "$CSH_D/doc.orig" "$csh_doc"
+cp "$CSH_D/src/main.kr" "$CSH_D/main.orig"
+printf '\n// See ir.kr:%s. Not citations: `m.kr:%s:1: error` and ir.kr:%s at 0123abc.\n' 1 99999999 99999999 >> "$CSH_D/src/main.kr"
+python3 "$CSH_D/scripts/gen-ir-reference-citations.py" > /dev/null 2>&1 \
+    || CSH_WHY="$CSH_WHY [could not record the src->src citation]"
+grep -qF "src/ir.kr:1 " "$CSH_D/tests/$(basename "$CITE_MANIFEST")" \
+    || CSH_WHY="$CSH_WHY [the manifest has no src/ir.kr:1 entry]"
+csh_check srccontrol 0
+sed -i '1s/$/ \/\/ (edited)/' "$CSH_D/src/ir.kr"
+printf '// And ir.kr:%s.\n' 99999999 >> "$CSH_D/src/main.kr"
+csh_check src 1 "src/ir.kr:1 moved" "src/ir.kr:99999999 is past the end of the file"
 if [ -z "$CSH_WHY" ]; then
-    PASS=$((PASS + 1)); echo "  ir_reference_citations_refuses_bad_shapes: PASS (backwards range, out-of-range line, comment-that-is-code, citation outside its named function, moved and out-of-range .md citations all fail --check; the real prose passes)"
+    PASS=$((PASS + 1)); echo "  ir_reference_citations_refuses_bad_shapes: PASS (backwards range, out-of-range line, comment-that-is-code, citation outside its named function, moved and out-of-range .md and src->src citations all fail --check; an example diagnostic and a line named at a commit are not citations; the real prose passes)"
 else
     FAIL=$((FAIL + 1)); echo "FAIL: ir_reference_citations_refuses_bad_shapes$CSH_WHY"
 fi

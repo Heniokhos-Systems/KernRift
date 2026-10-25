@@ -3723,7 +3723,7 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
     // 64 bytes at file offset 0, EMITTED BEFORE THE FUNCTION EMIT LOOP, and
     // that ordering is the entire design. a64_compute_va maps a file offset
     // to 0x400000 + offset with no notion of a header
-    // (codegen_aarch64.kr:6849), and every ADRP page computation is baked
+    // (codegen_aarch64.kr:6863), and every ADRP page computation is baked
     // from that map DURING codegen. Emitting the prefix first therefore moves
     // the payload and re-bakes the page arithmetic around it in one step, with
     // no VA-map change and not one line in codegen_aarch64.kr. Glue the same
