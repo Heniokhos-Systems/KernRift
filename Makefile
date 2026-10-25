@@ -68,8 +68,9 @@ build/kr: packaging/kr.sh
 #
 # Dropping them costs nothing: `krc src/main.kr` (imports, no concat) and the
 # stripped concat compile to byte-identical output. The anchored pattern
-# matches only column-0 `import "`, which in $(SRCS) is exactly those 26 lines
-# -- an indented or otherwise-shaped import would survive the filter and then
+# matches only column-0 `import "`, which in $(SRCS) is exactly main.kr's own
+# `import` lines (no count here: it goes stale whenever a source file is
+# added) -- an indented or otherwise-shaped import would survive the filter and then
 # fail the build loudly, which is the outcome we want.
 build/krc.kr: $(SRCS)
 	@mkdir -p build
