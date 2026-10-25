@@ -4,6 +4,16 @@ All notable changes to `kernriftc` are documented in this file.
 
 ## Unreleased
 
+**Fixed: the `--legacy` Windows `file_open` opens a file for writing with
+`FILE_SHARE_READ`, as the IR backend does.** It asked for
+`FILE_SHARE_READ|FILE_SHARE_WRITE` on every open, so a second writer could
+open a file this handle held. That made the Windows runner's
+`.\kr-run-<n>.lock` no lock in a `--legacy` build: two runners could take the
+same slot. The read path keeps `FILE_SHARE_READ|FILE_SHARE_WRITE`. Both arches
+(x86_64, arm64); a new row runs the slot check with a `--legacy` runner under
+Wine.
+
+
 **Fixed: `make test` no longer leaves files in the checkout.** The smoke
 programs file_rw and file_size write a side file under a relative name, and
 the suite ran them from the repository root, so `krc_smoke_rw.tmp` and
