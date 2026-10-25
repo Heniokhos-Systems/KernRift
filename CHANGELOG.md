@@ -4,14 +4,22 @@ All notable changes to `kernriftc` are documented in this file.
 
 ## Unreleased
 
-**Fixed: a skipped test row is no longer counted as a pass.** Thirty sites in
-`tests/run_tests.sh` (every Wine row without Wine, the qemu and python3 rows
-without their tool, and the README count gate on a partial run) added to PASS
-while printing SKIP, so a box without Wine reported a clean run. They now go
-through `skip_row`, which counts them in a new SKIP total (the results line
-reads `P/T passed, F failed, S skipped`). `REQUIRE_FULL_RUN=1 make test` turns
-every skip into a FAIL that names the missing tool, for merge and release
-gating.
+**Fixed: a skipped test row is no longer counted as a pass, or not counted
+at all.** `tests/run_tests.sh` had about 120 skip sites outside `skip_row`:
+48 added to PASS while printing SKIP (every Wine row without Wine through
+`wine_na`, the qemu, python3, readelf and x86-only rows, the README count gate
+on a partial run, and the arm64-host duplicates), 4 passed a row one of whose
+legs never ran (`os_prune_arch_hosted_runs`, `vga_attr_packs_bg_high_fg_low`,
+`esp32_hello_image`, `call_args_25_arm64`), and 68 printed SKIP without
+counting the row at all. A box without Wine or qemu therefore reported a clean
+run. Every one now goes through `skip_row`, which counts it in a SKIP total
+(the results line reads `P/T passed, F failed, S skipped`); `REQUIRE_FULL_RUN=1
+make test` turns every skip into a FAIL that names the missing tool, for merge
+and release gating. The alias rows that used to "skip" on an arm64 host now run
+their second leg on x86_64 under qemu instead. A tripwire row,
+`no_skip_counted_as_pass`, reads the suite and fails if a SKIP is printed
+anywhere but `skip_row` or a PASS line says a leg did not run. (An earlier
+version of this entry said thirty sites; the first commit converted 23.)
 
 **Added (std): sys_sendto, sys_recvfrom, SO_BROADCAST and sys_connect_timeout** -- datagrams with an address and a connect with a deadline that always leaves the socket blocking, for arsh discovery.
 
