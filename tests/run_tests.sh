@@ -14581,7 +14581,7 @@ done
 TN_FAT_MAGIC="4b52424f46415400"
 # 5a. No --arch at all: the default-fat-binary path. $KRC under `make test`
 #     is a wrapper that unconditionally injects --arch=x86_64 ahead of every
-#     test's own args (see Makefile:96), which would mask exactly the
+#     test's own args (see the Makefile's test recipe), which would mask exactly the
 #     "arch_set == 0" entrance this case exists to catch. Use the raw
 #     compiler binary instead, same fallback `build/krc2` then `build/krc3`
 #     already used for this reason by the governance test above.
@@ -14679,7 +14679,7 @@ rm -f "$TN_SRC" /tmp/krc_tnone_bin_$$
 #     "else, assume POSIX" shape this sub-project exists to remove.
 echo ""
 echo "--- --debug / --legacy / emit modes / arch x OS pairs ---"
-# Raw compiler binary: under `make test` $KRC is a wrapper (Makefile:96) that
+# Raw compiler binary: under `make test` $KRC is a wrapper (the Makefile's test recipe) that
 # injects --arch=x86_64 ahead of every test's own arguments, which would mask
 # every --arch case in this block. Same build/krc2 then build/krc3 fallback
 # the blocks below use.
@@ -18704,7 +18704,7 @@ echo "--- syscall choke points under --target=none ---"
 CP_SRC="/tmp/krc_choke_$$.kr"
 printf 'fn main() { exit(0) }\n' > "$CP_SRC"
 # Use the RAW compiler binary, not $KRC: under `make test` $KRC is a wrapper
-# (Makefile:96) that unconditionally injects --arch=x86_64 ahead of every
+# (the Makefile's test recipe) that unconditionally injects --arch=x86_64 ahead of every
 # test's own arguments. --arch is last-wins today so the wrapper does not
 # actually mask these cases, but relying on that is exactly the accident
 # Task 1 hit; the raw binary keeps the invocation honest. Same build/krc2
