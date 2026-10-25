@@ -41,7 +41,7 @@ wins.
 
 | Target | Status | What was actually run |
 |---|---|---|
-| Linux x86_64 | 🔵 CI-verified | Self-compiles to a bootstrap fixed point; the full **1711-test** suite passes. This is the primary development target. |
+| Linux x86_64 | 🔵 CI-verified | Self-compiles to a bootstrap fixed point; the full **1712-test** suite passes. This is the primary development target. |
 | Linux ARM64 | 🔵 CI-verified | Self-compiles to a fixed point; suite runs on a native ARM64 runner. |
 | Windows x86_64 | 🔵 CI-verified + hardware | Self-compile chain on a `windows-latest` runner every push. Also verified 2026-08-14 on a physical **Intel Core Ultra 9 275HX / Windows 11 Pro** laptop: the compiler rebuilt its own source twice on the machine and stages 1-3 are byte-identical (`sha256 5b21ae16…`), with the laptop-built compiler then compiling and running a program correctly. |
 | Windows ARM64 | 🔵 CI-verified | Self-compile chain through a fixed point on a `windows-11-arm` runner. |
@@ -159,15 +159,15 @@ krc check module.kr
 krc lc program.kr
 ```
 
-### Self-compilation (355 244 tokens, 223 507 AST nodes, 3 465 142 bytes of source)
+### Self-compilation (355 295 tokens, 223 540 AST nodes, 3 465 987 bytes of source)
 
-The compiler emits binaries for all 8 targets. CI verifies the **bootstrap fixed point (krc3 == krc4) and the full suite natively on Linux x86_64 and Linux ARM64** (**1711 tests**, all passing on this tree). Windows and macOS are exercised on real `windows-latest`, `windows-11-arm` and `macos-14` runners. The **Android** jobs are the weak link: they run PIE ELFs under the **glibc** loader on Linux, never bionic and never a device. See the per-target table for what each one actually ran. Numbers below were re-measured on an AMD Ryzen 9 7900X with the compiler built from this commit — see [`benchmarks/BENCHMARKS.md`](benchmarks/BENCHMARKS.md) for the gcc / rustc comparisons — note that file is a **v2.8.33 run from 2026-07-28** and has not been re-run for v2.10.0 either.
+The compiler emits binaries for all 8 targets. CI verifies the **bootstrap fixed point (krc3 == krc4) and the full suite natively on Linux x86_64 and Linux ARM64** (**1712 tests**, all passing on this tree). Windows and macOS are exercised on real `windows-latest`, `windows-11-arm` and `macos-14` runners. The **Android** jobs are the weak link: they run PIE ELFs under the **glibc** loader on Linux, never bionic and never a device. See the per-target table for what each one actually ran. Numbers below were re-measured on an AMD Ryzen 9 7900X with the compiler built from this commit — see [`benchmarks/BENCHMARKS.md`](benchmarks/BENCHMARKS.md) for the gcc / rustc comparisons — note that file is a **v2.8.33 run from 2026-07-28** and has not been re-run for v2.10.0 either.
 
 | Target | Legacy codegen | IR codegen (default) | IR vs legacy |
 |--------|---------------:|---------------------:|-------------:|
 | linux   x86_64 ELF    |  ~316 ms / 1.97 MiB | ~498 ms / 1.24 MiB | **−37 %** size |
 | linux   arm64  ELF    |  ~301 ms / 1.73 MiB | ~500 ms / 1.04 MiB | **−40 %** size |
-| **Fat binary (all 8)**| — | **~3.56 s / 4.53 MiB** | (IR all 8 slices) |
+| **Fat binary (all 8)**| — | **~3.56 s / 4.54 MiB** | (IR all 8 slices) |
 
 The IR path now produces smaller binaries than legacy on both architectures. Two things landed since v2.8.8 to flip the size story: a partial used-callee-save prologue + cross-register spill-reload peephole (v2.8.21 RA work), and v2.8.24's Briggs/George copy coalescer. The function inliner (v2.8.24) also folds pure single-expression callees so DCE can drop the originals.
 
@@ -421,7 +421,7 @@ See the [`examples/`](examples/) directory for runnable programs covering every 
 
 ## Architecture
 
-79 365 lines of KernRift across the 26 source files the compiler is built from, plus 52 stdlib modules (11 460 lines). Self-compiles to a 1.24 MiB x86_64 native binary in ~0.50 s (IR, default), a 1.04 MiB ARM64 binary, or an 8-slice fat binary (BCJ + LZ-Rift compression) in ~3.56 s on an AMD Ryzen 9 7900X. **1711 tests** pass on this tree. Bootstrap fixed point is verified **natively on Linux x86_64, Linux ARM64, and a physical Android ARM64 handset**; Windows and macOS run their own chains on real runners. Android x86_64 is the one target executed only under a glibc loader on Linux. See [`benchmarks/BENCHMARKS.md`](benchmarks/BENCHMARKS.md) for micro-benchmarks vs gcc / rustc and peak-memory numbers (a v2.8.33 run, not re-measured for v2.10.0 either).
+79 377 lines of KernRift across the 26 source files the compiler is built from, plus 52 stdlib modules (11 460 lines). Self-compiles to a 1.24 MiB x86_64 native binary in ~0.50 s (IR, default), a 1.04 MiB ARM64 binary, or an 8-slice fat binary (BCJ + LZ-Rift compression) in ~3.56 s on an AMD Ryzen 9 7900X. **1712 tests** pass on this tree. Bootstrap fixed point is verified **natively on Linux x86_64, Linux ARM64, and a physical Android ARM64 handset**; Windows and macOS run their own chains on real runners. Android x86_64 is the one target executed only under a glibc loader on Linux. See [`benchmarks/BENCHMARKS.md`](benchmarks/BENCHMARKS.md) for micro-benchmarks vs gcc / rustc and peak-memory numbers (a v2.8.33 run, not re-measured for v2.10.0 either).
 
 | File | Purpose |
 |------|---------|
@@ -460,7 +460,7 @@ a thing works, that column says who watched it work.
 
 | Platform | Compile | Run | Self-host | File I/O | How it is checked |
 |----------|---------|-----|-----------|----------|-------------------|
-| Linux x86_64 | ✅ | ✅ | ✅ | ✅ | CI, native runner; bootstrap fixed point + full 1711-test suite |
+| Linux x86_64 | ✅ | ✅ | ✅ | ✅ | CI, native runner; bootstrap fixed point + full 1712-test suite |
 | Linux ARM64 | ✅ | ✅ | ✅ | ✅ | CI, native ARM64 runner; bootstrap fixed point |
 | Windows x86_64 | ✅ | ✅ | ✅ | ✅ | CI, `windows-latest`; self-compile chain |
 | Windows ARM64 | ✅ | ✅ | ✅ | ✅ | CI, `windows-11-arm`; self-compile chain to fixed point |
