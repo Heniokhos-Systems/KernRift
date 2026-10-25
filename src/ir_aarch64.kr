@@ -2738,7 +2738,7 @@ fn ir_emit_arm64_insn(uint64 ii) {
         } else if target_os == 1 {
             // macOS arm64: gettimeofday(&tv, NULL), x16=116, svc #0x80.
             // timeval = { tv_sec: i64, tv_usec: i64 }. Matches the
-            // legacy codegen at src/codegen_aarch64.kr:4406. Without
+            // legacy codegen at src/codegen_aarch64.kr:4411. Without
             // this, the IR path was issuing clock_gettime-as-Linux
             // syscall 228 on Darwin, which is an invalid syscall that
             // silently returned 0 in x0 — so every time_ns() on

@@ -12,9 +12,9 @@ src/codegen.kr:1005 c2b7df6201fd
 src/codegen.kr:1513 61445d2e2178
 src/codegen.kr:3529 971cbe948330
 src/codegen.kr:3607 40790e96ab4b
-src/codegen.kr:15062 2b091052bfe1
-src/codegen.kr:15082 c2b7df6201fd
-src/codegen.kr:15227 aa848ad63344
+src/codegen.kr:15069 2b091052bfe1
+src/codegen.kr:15089 c2b7df6201fd
+src/codegen.kr:15234 aa848ad63344
 src/codegen_aarch64.kr:407 60c115e38124
 src/ir.kr:28 c30794eca0b2
 src/ir.kr:30 f675ac83e84b

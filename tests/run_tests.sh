@@ -18760,7 +18760,7 @@ done
 # file_read; nr 8 is file_size twice), so a regression to the coarse "syscall"
 # label -- or a cross-wired name, which is worse -- must fail here.
 # println_str and time_ns are deliberately absent. The legacy backend shares
-# ONE lowering for print_str/println_str (src/codegen.kr:7783) and names it
+# ONE lowering for print_str/println_str (src/codegen.kr:7790) and names it
 # "print_str" for both, and its time_ns() body reaches the emitter through the
 # surrounding exit() first -- so asserting either name here would be asserting
 # something untrue. Both builtins ARE covered, on both arches, by the
