@@ -26410,6 +26410,45 @@ else
 fi
 rm -rf "$STK_D"
 
+# --- The compiler builds itself for every target and mode ---------------------
+# 32 builds of the compiler's own sources: x86_64 and arm64, each of linux,
+# macos, windows and android, each IR, --legacy, --emit=obj and --emit=asm.
+# A source change one backend cannot compile shows up here, not when someone
+# needs that build (MLRift's defect-ports once lost --legacy and --emit=obj for
+# every target this way; src/main.kr's stack guard briefly broke macOS
+# --legacy and Windows --emit=asm). The one tolerated failure is main's own
+# rule: a raw syscall reachable in a Windows slice is refused, and --legacy /
+# --emit=obj do not prune OS tests, so the compiler's own syscall_raw sites
+# refuse Windows --legacy and --emit=obj -- with exactly that message.
+TOTAL=$((TOTAL + 1))
+SB_D=$(mktemp -d "${TMPDIR:-/tmp}/krc_selfbuild.XXXXXX")
+SB_CC="$DIR/../build/krc2"
+SB_SRCS=$(awk '/^SRCS[ \t]*=/ { f = 1; sub(/^SRCS[ \t]*=/, "") } f { c = ($0 ~ /\\$/); sub(/\\$/, ""); print; if (!c) exit }' "$DIR/../Makefile")
+( cd "$DIR/.." && cat $SB_SRCS ) | grep -v '^import "' > "$SB_D/c.kr"
+SB_BAD=""; SB_OK=0; SB_REF=0
+for SB_A in x86_64 arm64; do
+    for SB_T in linux macos windows android; do
+        for SB_M in ir legacy obj asm; do
+            case "$SB_M" in ir) SB_F="" ;; legacy) SB_F="--legacy" ;; obj) SB_F="--emit=obj" ;; asm) SB_F="--emit=asm" ;; esac
+            rm -f "$SB_D/o"
+            if (ulimit -v 3000000; timeout -k 5 120 "$SB_CC" --arch=$SB_A --target=$SB_T $SB_F "$SB_D/c.kr" -o "$SB_D/o") > "$SB_D/l" 2>&1 && [ -s "$SB_D/o" ]; then
+                SB_OK=$((SB_OK + 1))
+            elif [ "$SB_T" = "windows" ] && { [ "$SB_M" = "legacy" ] || [ "$SB_M" = "obj" ]; } \
+                 && grep -q "error: syscall_raw is reachable in the win-" "$SB_D/l"; then
+                SB_REF=$((SB_REF + 1))
+            else
+                SB_BAD="$SB_BAD [$SB_A $SB_T $SB_M: $(grep -m1 'error' "$SB_D/l" | cut -c1-90)]"
+            fi
+        done
+    done
+done
+if [ -z "$SB_BAD" ]; then
+    PASS=$((PASS + 1)); echo "  compiler_builds_itself_every_target_and_mode: PASS ($SB_OK/32 built, $SB_REF Windows --legacy/--emit=obj refused by the syscall_raw rule)"
+else
+    FAIL=$((FAIL + 1)); echo "FAIL: compiler_builds_itself_every_target_and_mode ($SB_OK built, $SB_REF refused by the syscall_raw rule:$SB_BAD)"
+fi
+rm -rf "$SB_D"
+
 # --- Documentation pin 5, PART B (see Part A above) --------------------------
 # README.md advertises this suite's test count. Compare it against the total
 # only now, when $TOTAL is final and already includes this row (Part A did the

@@ -4,6 +4,14 @@ All notable changes to `kernriftc` are documented in this file.
 
 ## Unreleased
 
+**Added: a row that builds the compiler itself for every target and mode.**
+All 32 combinations of x86_64/arm64, linux/macos/windows/android and IR /
+`--legacy` / `--emit=obj` / `--emit=asm` are built from the compiler's own
+sources, so a change one backend cannot compile is caught when it is made.
+The only tolerated failure is main's raw-syscall refusal for Windows
+`--legacy` / `--emit=obj` (after the merge with main), with exactly its
+message.
+
 **Fixed: running out of stack is a clean error.** A source nested deeper
 than the stack allows, a small `ulimit -s`, or a `ulimit -v` that stops the
 stack from growing killed `krc` with SIGSEGV (status 139) and no message. On
