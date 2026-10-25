@@ -1490,7 +1490,6 @@ fn parse_int_token(uint64 tok_idx) -> uint64 {
     return result
 }
 
-// An integer literal that does not fit 64 bits: located error, exit 1.
 // A character literal that is not exactly one character or one escape:
 // located error, exit 1.
 fn char_literal_not_one(uint64 tok_idx) {
@@ -1501,6 +1500,7 @@ fn char_literal_not_one(uint64 tok_idx) {
     exit(1)
 }
 
+// An integer literal that does not fit 64 bits: located error, exit 1.
 fn int_literal_too_big(uint64 tok_idx) {
     diag_loc_head(tok_idx, 0)
     uint64 m = "integer literal does not fit in 64 bits (the largest is 18446744073709551615, 0xFFFFFFFFFFFFFFFF)\n"
