@@ -862,7 +862,7 @@ fn rv_emit_pcrel_pair(uint64 rd, uint64 table_sel, uint64 payload) {
 // ---------------------------------------------------------------------------
 // Inline assembly (IR_ASM_BLOCK, op 96)
 //
-// asm_emit_rv is the riscv twin of asm_emit_a64 (codegen.kr:11930). Like it,
+// asm_emit_rv is the riscv twin of asm_emit_a64 (codegen.kr:11937). Like it,
 // this is NOT a general assembler — it is a raw-hex-word passthrough plus a
 // small fixed intrinsic/CSR table. Accepted forms:
 //   1. "0xXXXXXXXX"       -> one 32-bit word, emitted verbatim (escape hatch).
@@ -1012,7 +1012,7 @@ fn asm_emit_rv(uint64 str_tok) {
     if slen == 0 { return }
 
     // ----- Raw hex word: "0xXXXXXXXX" -> one 32-bit word (LE). Primary
-    //       escape hatch; identical scan to asm_emit_a64 (codegen.kr:11937). -----
+    //       escape hatch; identical scan to asm_emit_a64 (codegen.kr:11944). -----
     uint64 fc = 0
     unsafe { *(sptr as uint8) -> fc }
     if fc == 48 && slen >= 4 {
@@ -1584,7 +1584,7 @@ fn ir_emit_riscv_insn(uint64 ii) {
         // emitting a relocatable object, record a linker relocation instead
         // of an internal fixup. R_RISCV_CALL_PLT at the auipc (call_patch)
         // covers both the auipc and the jalr. Mirror of
-        // codegen_aarch64.kr:5014-5019. Use cg_emit_mode (the readable global,
+        // codegen_aarch64.kr:5019-5024. Use cg_emit_mode (the readable global,
         // codegen.kr:106, set by set_emit_mode), NOT the compile()-local
         // emit_mode which is not in scope here; cg_emit_mode == 3 is --emit=obj.
         // This returns BEFORE the internal fixup_table append, so extern calls
@@ -2174,7 +2174,7 @@ fn ir_emit_riscv_insn(uint64 ii) {
     // interned name id and NOT the callee-name token IR_CALL's fixups use,
     // so it can't be resolved via fn_lookup(); resolve_fnaddr_fixups_riscv()
     // below strips the quotes and byte-scans fn_table, exactly like
-    // resolve_fnaddr_fixups_a64 (codegen_aarch64.kr:6757-6859). Lower to the
+    // resolve_fnaddr_fixups_a64 (codegen_aarch64.kr:6762-6864). Lower to the
     // same pcrel auipc+addi pair as STR_CONST/STATIC_ADDR (table_sel=2 =
     // fnaddr_fixup_table) — full auipc+addi, NOT arm64's ADR+NOP shortcut:
     // riscv has no single-instruction ±1 MiB pcrel-address op, and jal is a
@@ -2517,7 +2517,7 @@ fn ir_riscv_gen(uint64 fn_node) {
         // by total_frame, so argc/argv live at sp+total_frame+{0,4}. Stores go to
         // the data-segment statics via the pcrel pair (table_sel 1 = statics),
         // exactly like IR_STATIC_STORE (ir_riscv.kr:1696-1702) — NOT sp-relative.
-        // Mirror of codegen_aarch64.kr:6267-6307 (Linux branch), 4-byte words.
+        // Mirror of codegen_aarch64.kr:6272-6312 (Linux branch), 4-byte words.
         uint32 fn_name_tok_tr = ast_data1(fn_node)
         uint64 wnt_tr = fn_name_tok_tr
         if tok_matches(wnt_tr, "main", 4) != 0 && freestanding == 0 {
@@ -2716,7 +2716,7 @@ fn ir_riscv_gen(uint64 fn_node) {
     // 11. Epilogue. Auto-exit for hosted main(): a0 already holds the
     //     return value (IR_RET / IR_RET_VOID set it before jumping here).
     //     exit(93) so main does not `ret` into an undefined ra. Mirrors
-    //     codegen_aarch64.kr:6609-6615. Freestanding keeps the bare ret.
+    //     codegen_aarch64.kr:6614-6620. Freestanding keeps the bare ret.
     uint32 fn_name_tok_rv = ast_data1(fn_node)
     uint64 wnt_rv_ep = fn_name_tok_rv
     if tok_matches(wnt_rv_ep, "main", 4) != 0 && freestanding == 0 && is_naked == 0 {
@@ -2772,7 +2772,7 @@ fn ir_riscv_gen(uint64 fn_node) {
 // |disp| > 2 GiB - 2 KiB, is unreachable).
 //
 // Both words are fully re-encoded (not read-modify-OR) — the arm64
-// resolver does the same for its BL (codegen_aarch64.kr:6734).
+// resolver does the same for its BL (codegen_aarch64.kr:6739).
 fn resolve_fixups_riscv() {
     uint64 i = 0
     while i < fixup_count {
@@ -2796,7 +2796,7 @@ fn resolve_fixups_riscv() {
             patch_u32(wpo + 4, (lo << 20) | ((RV_RA & 0x1F) << 15) | ((RV_RA & 0x1F) << 7) | 0x67)
         } else {
             // Undefined function — mirror resolve_fixups_a64
-            // (codegen_aarch64.kr:6735): without this the placeholder
+            // (codegen_aarch64.kr:6740): without this the placeholder
             // pair would jump to its own auipc at runtime.
             diag_loc_head(wtt, 0)
             write(2, "undefined function '", 20)
@@ -2929,8 +2929,8 @@ fn resolve_static_fixups_riscv(uint64 data_start) {
 // fn_lookup compares token IDENTITY against that table, not raw source
 // bytes against an arbitrary string-literal payload. Strip the quotes and
 // byte-compare against fn_table instead — ported from
-// resolve_fnaddr_fixups_a64 (codegen_aarch64.kr:6757-6859), identical to
-// the x86 resolver (codegen.kr:14620-14687).
+// resolve_fnaddr_fixups_a64 (codegen_aarch64.kr:6762-6864), identical to
+// the x86 resolver (codegen.kr:14627-14694).
 fn resolve_fnaddr_fixups_riscv() {
     uint64 i = 0
     while i < fnaddr_fixup_count {
@@ -2942,7 +2942,7 @@ fn resolve_fnaddr_fixups_riscv() {
         unsafe { *(fe4 as uint32) -> str_tok }
 
         // str_tok's text includes the surrounding quotes; strip them to
-        // get the bare function name (mirrors codegen_aarch64.kr:6770-6771).
+        // get the bare function name (mirrors codegen_aarch64.kr:6775-6776).
         uint64 wst = str_tok
         uint64 sstart = tok_text_start(wst)
         uint64 slen = tok_text_len(wst)
@@ -2996,7 +2996,7 @@ fn resolve_fnaddr_fixups_riscv() {
             patch_u32(wpo + 4, (lo << 20) | (rd << 15) | (rd << 7) | 0x13)
         } else {
             // Undefined function — mirror the x86/arm64 fn_addr resolvers
-            // (codegen.kr:14679-14683, codegen_aarch64.kr:6851-6856): without
+            // (codegen.kr:14686-14690, codegen_aarch64.kr:6856-6861): without
             // this the placeholder pair would silently resolve to disp=0
             // (pointing at its own auipc) instead of failing to compile.
             write(2, "error: fn_addr: undefined function '", 36)

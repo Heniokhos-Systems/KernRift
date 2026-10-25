@@ -476,7 +476,7 @@ X86_STACK_TOP=0x90000
 # that does not exist and a grep-only parse goes green on it. Exit status
 # alone did not close that either: codegen_write_output used to ignore
 # file_write's return, so a SHORT write exited 0 (it now stops on one,
-# write_all_or_die, src/codegen.kr:19212). All three are still
+# write_all_or_die, src/codegen.kr:19219). All three are still
 # required here — exit 0, a parsable line, and on-disk size == the reported
 # filesz. The full compiler output is kept beside the artifact ($WORK survives
 # a red run) instead of going to /dev/null as the ELF form did, so a failed
