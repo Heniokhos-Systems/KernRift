@@ -18760,7 +18760,7 @@ done
 # file_read; nr 8 is file_size twice), so a regression to the coarse "syscall"
 # label -- or a cross-wired name, which is worse -- must fail here.
 # println_str and time_ns are deliberately absent. The legacy backend shares
-# ONE lowering for print_str/println_str (src/codegen.kr:7763) and names it
+# ONE lowering for print_str/println_str (src/codegen.kr:7783) and names it
 # "print_str" for both, and its time_ns() body reaches the emitter through the
 # surrounding exit() first -- so asserting either name here would be asserting
 # something untrue. Both builtins ARE covered, on both arches, by the
@@ -26311,6 +26311,40 @@ else
     fi
     rm -rf "$RWS_D"
 fi
+
+# --- A character literal holds exactly one character or one escape -----------
+# parse_int_token returned the first byte after the quote whatever followed, so
+# 'AB' and 'ABCDEFGHI' compiled to 65, '' to the closing quote's 39, and a
+# multi-byte UTF-8 character to its first byte -- silently. Each must stop the
+# compile with a located error; one character and every escape form still
+# compile to their value -- on the IR backend and under --legacy.
+TOTAL=$((TOTAL + 1))
+CLT_D=$(mktemp -d "${TMPDIR:-/tmp}/krc_clt.XXXXXX")
+CLT_WHY=""
+for CLT_C in "'AB':no" "'ABCDEFGHI':no" "'':no" "'\303\251':no" "'\\\\x41B':no" "'\\\\nn':no" \
+             "'A':65" "'\\\\n':10" "'\\\\x41':65" "'\\\\'':39" "'\\\\\\\\':92" "'\\\\0':0"; do
+    CLT_L=${CLT_C%:*}; CLT_W=${CLT_C##*:}
+    printf "const u64 CH = $CLT_L\nfn main() {\n    exit(CH)\n}\n" > "$CLT_D/c.kr"
+    for CLT_F in "" "--legacy"; do
+        rm -f "$CLT_D/c.bin"
+        $KRC $KRC_FLAGS $CLT_F "$CLT_D/c.kr" -o "$CLT_D/c.bin" > "$CLT_D/c.out" 2>&1; CLT_RC=$?
+        if [ "$CLT_W" = "no" ]; then
+            { [ "$CLT_RC" != "0" ] && grep -q "c.kr:1:16: error: a character literal holds exactly one character or one escape" "$CLT_D/c.out"; } \
+                || CLT_WHY="$CLT_WHY [$CLT_L $CLT_F: rc $CLT_RC, want the located one-character error]"
+        elif [ "$CLT_RC" != "0" ]; then
+            CLT_WHY="$CLT_WHY [$CLT_L $CLT_F: refused, must compile]"
+        else
+            chmod +x "$CLT_D/c.bin"; timeout -k 5 30 "$CLT_D/c.bin"; CLT_X=$?
+            [ "$CLT_X" = "$CLT_W" ] || CLT_WHY="$CLT_WHY [$CLT_L $CLT_F: value $CLT_X, want $CLT_W]"
+        fi
+    done
+done
+if [ -z "$CLT_WHY" ]; then
+    PASS=$((PASS + 1)); echo "  char_literal_is_one_character: PASS ('AB', 'ABCDEFGHI', '', a 2-byte UTF-8 char, '\\x41B', '\\nn' refused with a location; 'A', '\\n', '\\x41', '\\'', '\\\\', '\\0' compile to their values; IR and --legacy)"
+else
+    FAIL=$((FAIL + 1)); echo "FAIL: char_literal_is_one_character$CLT_WHY"
+fi
+rm -rf "$CLT_D"
 
 # --- An integer literal that does not fit 64 bits is refused, in every base --
 # parse_int_token accumulated without a carry check, so 0b followed by 65

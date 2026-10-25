@@ -4,6 +4,12 @@ All notable changes to `kernriftc` are documented in this file.
 
 ## Unreleased
 
+**Fixed: a character literal holds exactly one character or one escape.** The
+value used to be the first byte after the quote whatever followed: `'AB'` and
+`'ABCDEFGHI'` compiled to 65, `''` to 39 (the closing quote) and a multi-byte
+UTF-8 character to its first byte, all silently. Each is now a located error,
+"a character literal holds exactly one character or one escape".
+
 **Added: a row that builds the compiler itself for every target and mode.**
 All 32 combinations of x86_64/arm64, linux/macos/windows/android and IR /
 `--legacy` / `--emit=obj` / `--emit=asm` are built from the compiler's own

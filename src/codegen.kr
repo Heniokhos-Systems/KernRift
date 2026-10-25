@@ -1403,7 +1403,17 @@ fn parse_int_token(uint64 tok_idx) -> uint64 {
     if len == 4 && tok_source_byte(tok_idx, 0) == 116 { return 1 }
     if len == 5 && tok_source_byte(tok_idx, 0) == 102 { return 0 }
     // Check for char literal: 'x' or '\n' or '\xAB'
-    if len >= 3 && tok_source_byte(tok_idx, 0) == 39 {
+    if len >= 2 && tok_source_byte(tok_idx, 0) == 39 {
+        // EXACTLY ONE character or one escape. The value used to be the first
+        // byte after the quote, whatever followed: 'AB' and 'ABCDEFGHI' were
+        // 65, '' read the closing quote, and a multi-byte UTF-8 character
+        // compiled to its first byte.
+        uint64 cl_want = 3
+        if len >= 3 && tok_source_byte(tok_idx, 1) == 92 {
+            cl_want = 4
+            if tok_source_byte(tok_idx, 2) == 120 { cl_want = 6 }
+        }
+        if len != cl_want || tok_source_byte(tok_idx, len - 1) != 39 { char_literal_not_one(tok_idx) }
         if tok_source_byte(tok_idx, 1) == 92 {
             uint64 esc = tok_source_byte(tok_idx, 2)
             // \xHH — two-digit hex byte. Token shape is '\xHH' = 5 source bytes.
@@ -1481,6 +1491,16 @@ fn parse_int_token(uint64 tok_idx) -> uint64 {
 }
 
 // An integer literal that does not fit 64 bits: located error, exit 1.
+// A character literal that is not exactly one character or one escape:
+// located error, exit 1.
+fn char_literal_not_one(uint64 tok_idx) {
+    diag_loc_head(tok_idx, 0)
+    uint64 m = "a character literal holds exactly one character or one escape (for more than one byte, use a string)\n"
+    write(2, m, str_len(m))
+    diag_span_of(tok_idx)
+    exit(1)
+}
+
 fn int_literal_too_big(uint64 tok_idx) {
     diag_loc_head(tok_idx, 0)
     uint64 m = "integer literal does not fit in 64 bits (the largest is 18446744073709551615, 0xFFFFFFFFFFFFFFFF)\n"

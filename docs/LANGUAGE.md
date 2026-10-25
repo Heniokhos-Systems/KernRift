@@ -134,6 +134,9 @@ char bad = 97              // compile error — int literal not assignable
   bits"), never a wrapped value. Leading zeros add no value and are fine.
 - Float: `1.5`, `-3.14`, `2e10`, `1.5f` (f32 suffix)
 - Bool: `true`, `false` (strict `bool` type)
+- Char: `'A'`, `'\n'`, `'\x41'` — exactly one character or one escape. `'AB'`,
+  `''` and a multi-byte UTF-8 character are errors ("a character literal holds
+  exactly one character or one escape"); use a string for more than one byte.
 - String: `"hello"` with `\n`, `\t`, `\\`, `\"`, `\0` escapes
 - Character: `'A'`, `'\n'`, `'\t'`, `'\r'`, `'\0'`, `'\\'`, `'\''` — evaluates
   to the byte value of the character (e.g. `'A'` is 65, `'\n'` is 10).
