@@ -885,7 +885,7 @@ fn diag_report_all() {
         // The line WITHIN THE TOKEN'S OWN FILE. A token's recorded line counts
         // from the start of import_buf, i.e. across every file imported before
         // this one, so a warning in the second of two imports was reported at
-        // its line plus the first import's length (string.kr:468 for :311).
+        // its line plus the first import's length (line 468 for std/string.kr:311).
         // srcmap_line recounts from the start of the file the byte belongs to,
         // which is what srcmap_file already names.
         uint64 tok_line = sema_tok_line(wti)

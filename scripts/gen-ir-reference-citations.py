@@ -15,8 +15,17 @@ citations too, and used to drift unseen. (Those are shapes, not citations.)
 
 Citations INTO MARKDOWN rot the same way, so every `<NAME>.md:<line>` in the
 tree's prose -- the *.md files at the top and under docs/, tests/run_tests.sh
-and src/ -- is fingerprinted too. A bare `STDLIB.md:469` means docs/STDLIB.md,
-else ./STDLIB.md.
+and src/ -- is fingerprinted too. A bare `STDLIB.md:<line>` means
+docs/STDLIB.md, else ./STDLIB.md.
+
+Citations FROM ONE SOURCE FILE INTO ANOTHER rot the same way, so every
+`<file>.<ext>:<line>` (or `src/<file>.<ext>:<line>`) in a comment under src/ is
+fingerprinted as well, with its range end and its bare follow-on numbers
+(`ir.kr:80/2881`, `main.kr:1095, :3613`), and gets the two checks below. Three
+shapes are not src/ citations and are skipped: one inside a backquoted span (an
+example diagnostic such as `m.kr:1:1: expected '('`), one followed by `at
+<commit>`, which names a line as it was in that commit, and a path with a
+directory in front (std/net.kr:153).
 
 A fingerprint only says a line has not changed since it was recorded, not that
 it was the right line. Two checks look at what the citation SAYS:
@@ -50,6 +59,9 @@ TAIL = re.compile(r'`?\s*(?:-|–|\.\.)\s*`?(\d+)`?')
 CONT = re.compile(r'`?\s*(?:/|,|and)\s*`(\d{2,})`')
 TICK = re.compile(r'`([A-Za-z_][A-Za-z0-9_]*)(?:\(\))?`')
 FN = re.compile(r'^(?:pub\s+)?(?:@\w+(?:\([^)]*\))?\s+)*fn\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(')
+SRC = re.compile(r'(?<![\w/.-])(?:src/)?([a-z_0-9]+\.' + EXT + r'):(\d+)')
+SRC_MORE = re.compile(r'\s*(?:/|,)\s*:?(\d{2,})(?![\w.])')
+SRC_HIST = re.compile(r'\s+(?:at|in)\s+[0-9a-f]{7,40}\b')
 COMMENT_AT = re.compile(r'comment (?:in `[A-Za-z0-9_]+` )?(?:at|in)\s*\(?`?$', re.I)
 
 def citations(text, pat):
@@ -142,19 +154,10 @@ def record(where, rel, n, kind, start):
     rows[(rel, n)] = hashlib.sha1(content.encode()).hexdigest()[:12]
     return lines
 
-# 1. docs/IR_REFERENCE.md -> src/*.<ext>, with the two meaning checks.
-cites = citations(open(doc, encoding="utf-8").read(), MAIN)
-for i, (f, n, kind, ln, start, seg) in enumerate(cites):
-    rel = "src/" + f
-    where = f"IR_REFERENCE.md:{ln}"
-    lines = record(where, rel, n, kind, start)
-    if lines is None or kind != "start":
-        continue
-    end = n
-    if i + 1 < len(cites) and cites[i + 1][2] == "end" and cites[i + 1][3] == ln and cites[i + 1][4] == n:
-        end = cites[i + 1][1]
+def meaning(where, rel, lines, n, end, seg):
+    """The two checks of what a citation SAYS (see the docstring)."""
     if end < n or end > len(lines):
-        continue
+        return
     if COMMENT_AT.search(seg.rstrip()) and not lines[n - 1].lstrip().startswith("//"):
         problems.append(f"{where}: {rel}:{n} is cited as a comment but is code: {lines[n - 1].strip()[:60]}")
     named = TICK.findall(seg)
@@ -168,11 +171,54 @@ for i, (f, n, kind, ln, start, seg) in enumerate(cites):
             problems.append(f"{where}: {rel}:{n}" + (f"-{end}" if end != n else "")
                             + f" is cited for {', '.join(fns)} but is not in it and does not mention it")
 
+# 1. docs/IR_REFERENCE.md -> src/*.<ext>, with the two meaning checks.
+cites = citations(open(doc, encoding="utf-8").read(), MAIN)
+for i, (f, n, kind, ln, start, seg) in enumerate(cites):
+    rel = "src/" + f
+    where = f"IR_REFERENCE.md:{ln}"
+    lines = record(where, rel, n, kind, start)
+    if lines is None or kind != "start":
+        continue
+    end = n
+    if i + 1 < len(cites) and cites[i + 1][2] == "end" and cites[i + 1][3] == ln and cites[i + 1][4] == n:
+        end = cites[i + 1][1]
+    meaning(where, rel, lines, n, end, seg)
+
 # 2. <NAME>.md:<line> anywhere in the tree's prose.
 for src in prose_files():
     text = "\n".join(lines_of(src))
     for f, n, kind, ln, start, seg in citations(text, MD):
         record(f"{src}:{ln}", md_target(f), n, kind, start)
+
+# 3. src/*.<ext> -> src/*.<ext>: a comment in one source file citing another
+# (or itself), with the same two meaning checks.
+for src in prose_files():
+    if not (src.startswith("src/") and src.endswith("." + EXT)):
+        continue
+    for ln, line in enumerate(lines_of(src), 1):
+        prev = 0
+        for m in SRC.finditer(line):
+            if line.count("`", 0, m.start()) % 2 == 1 or SRC_HIST.match(line, m.end()):
+                continue
+            f, n = m.group(1), int(m.group(2))
+            rel, where, seg = "src/" + f, f"{src}:{ln}", line[prev:m.start()]
+            end, pos = n, m.end()
+            t = re.match(r'\s*(?:-|–)\s*(\d+)', line[pos:])
+            if t:
+                end = int(t.group(1))
+                pos += t.end()
+            lines = record(where, rel, n, "start", n)
+            if end != n:
+                record(where, rel, end, "end", n)
+            while True:
+                c = SRC_MORE.match(line, pos)
+                if not c:
+                    break
+                record(where, rel, int(c.group(1)), "more", int(c.group(1)))
+                pos = c.end()
+            prev = pos
+            if lines is not None:
+                meaning(where, rel, lines, n, end, seg)
 
 body = "\n".join(f"{rel}:{n} {h}" for (rel, n), h in sorted(rows.items(), key=lambda t: (t[0][0], t[0][1])))
 header = ("# Generated by scripts/gen-ir-reference-citations.py -- do not hand-edit.\n"
