@@ -527,7 +527,12 @@ anything past the first 64 addresses: pass `max` ≥ 64 to see them all. Linux
 and Android use SIOCGIFCONF + SIOCGIFFLAGS/NETMASK/BRDADDR (an address that
 vanishes mid-call is skipped); Windows uses `WSAIoctl(SIO_GET_INTERFACE_LIST)`
 and computes the broadcast itself, because Windows can report 255.255.255.255
-there (65+ addresses fail −EFAULT on Windows). macOS and none: −ENOSYS.
+there (65+ addresses fail −EFAULT on Windows). Flags carry bits 0–2 only (Windows'
+IFF_MULTICAST and IFF_POINTTOPOINT are dropped). A /31 or /32 has no directed
+broadcast: on Windows its record reads broadcast 0 with bit 1 CLEAR (a Tailscale
+/32 is IFF_BROADCAST there); Linux reports what the kernel has configured, so a
+/32 on a broadcast-capable device can read bit 1 set with broadcast 0.0.0.0 —
+skip a record whose broadcast is 0 or the address itself. macOS and none: −ENOSYS.
 `sys_ioctl(fd, req, arg)` is the raw Unix ioctl (−ENOSYS on Windows, macOS and none).
 
 ---

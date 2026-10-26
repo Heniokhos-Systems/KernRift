@@ -1,0 +1,63 @@
+// std/sys.kr: _kr_sys_w32_ifrec, the Windows INTERFACE_INFO -> record
+// conversion of sys_net_ifaces, on SYNTHETIC 76-byte entries (plain
+// arithmetic, so it runs on Linux too). Real Windows sets IFF_MULTICAST (16)
+// on every interface and has been seen to report 255.255.255.255 as the
+// broadcast; a /31 or /32 has no directed broadcast (RFC 3021) and must read
+// broadcast 0 with bit 1 CLEAR. Each failed check exits with its own code;
+// prints OK.
+import "../../std/sys.kr"
+
+static u8[76] wi_e
+static u8[16] wi_r
+
+fn wi_ip(u64 p, u64 a, u64 b, u64 c, u64 d) {
+    store8(p, a)  store8(p + 1, b)  store8(p + 2, c)  store8(p + 3, d)
+}
+
+// flags, addr a.b.c.d, mask m0.m1.m2.m3; iiBroadcastAddress = 255.255.255.255
+fn wi_entry(u64 flags, u64 a, u64 b, u64 c, u64 d, u64 m0, u64 m1, u64 m2, u64 m3) {
+    uint64 i = 0
+    while i < 76 { store8(wi_e + i, 0)  i = i + 1 }
+    store32(wi_e, flags)
+    store16(wi_e + 4, 2)   wi_ip(wi_e + 8, a, b, c, d)
+    store16(wi_e + 28, 2)  wi_ip(wi_e + 32, 255, 255, 255, 255)
+    store16(wi_e + 52, 2)  wi_ip(wi_e + 56, m0, m1, m2, m3)
+    i = 0
+    while i < 16 { store8(wi_r + i, 0xAA)  i = i + 1 }
+    _kr_sys_w32_ifrec(wi_e, wi_r, 0)
+}
+
+// 1 when the record's broadcast bytes are b0.b1.b2.b3 and its flags are f
+fn wi_is(u64 b0, u64 b1, u64 b2, u64 b3, u64 f) -> u64 {
+    if load8(wi_r + 8) != b0 || load8(wi_r + 9) != b1 { return 0 }
+    if load8(wi_r + 10) != b2 || load8(wi_r + 11) != b3 { return 0 }
+    if load32(wi_r + 12) != f { return 0 }
+    return 1
+}
+
+fn main() -> uint32 {
+    // loopback: UP|LOOPBACK|MULTICAST -> 5, no broadcast
+    wi_entry(0x15, 127, 0, 0, 1, 255, 0, 0, 0)
+    if wi_is(0, 0, 0, 0, 5) == 0 { return 1 }
+    if load8(wi_r) != 127 || load8(wi_r + 3) != 1 || load8(wi_r + 4) != 255 || load8(wi_r + 5) != 0 { return 2 }
+    // /24 UP|BROADCAST|MULTICAST, reported 255.255.255.255 -> computed, flags 3
+    wi_entry(0x13, 192, 168, 2, 10, 255, 255, 255, 0)
+    if wi_is(192, 168, 2, 255, 3) == 0 { return 3 }
+    // /30: still a directed broadcast (30 one bits)
+    wi_entry(0x13, 10, 0, 0, 1, 255, 255, 255, 252)
+    if wi_is(10, 0, 0, 3, 3) == 0 { return 4 }
+    // /31 (RFC 3021): no broadcast, bit 1 cleared
+    wi_entry(0x13, 10, 0, 0, 0, 255, 255, 255, 254)
+    if wi_is(0, 0, 0, 0, 1) == 0 { return 5 }
+    // /32 (a Tailscale address on Windows 11 is IFF_BROADCAST): none either
+    wi_entry(0x13, 100, 96, 47, 100, 255, 255, 255, 255)
+    if wi_is(0, 0, 0, 0, 1) == 0 { return 6 }
+    // UP|POINTTOPOINT|MULTICAST with no IFF_BROADCAST: flags 1, broadcast 0
+    wi_entry(0x19, 10, 9, 9, 9, 255, 255, 255, 0)
+    if wi_is(0, 0, 0, 0, 1) == 0 { return 7 }
+    // a /20 (vEthernet on the laptop): 172.18.160.1 -> 172.18.175.255
+    wi_entry(0x13, 172, 18, 160, 1, 255, 255, 240, 0)
+    if wi_is(172, 18, 175, 255, 3) == 0 { return 8 }
+    file_write(1, "OK\n", 3)
+    return 0
+}

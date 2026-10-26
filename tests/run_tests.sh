@@ -29212,8 +29212,9 @@ fi
 # runs on Linux x86_64, Linux arm64 (qemu-user, which translates SIOCGIFCONF)
 # and Windows x86_64 under Wine (whose SIO_GET_INTERFACE_LIST walks the same
 # host's getifaddrs), and nif_judge holds every run to the same four rows:
-#   loopback   "127.0.0.1 255.0.0.0 0.0.0.0 5" is a record, count >= 1, and
-#              the count line equals the number of record lines;
+#   loopback   "127.0.0.1 255.0.0.0 0.0.0.0 5" is a record, count >= 1, the
+#              count line equals the number of record lines, and EVERY
+#              record's flags fit bits 0..2 (Windows' IFF_MULTICAST is masked);
 #   broadcast  every BROADCAST (bit 1) record's broadcast is (addr & mask) |
 #              ~mask, byte by byte -- a counted SKIP on a host where only lo
 #              has an address (no BROADCAST record to judge);
@@ -29232,10 +29233,11 @@ nif_judge() {
     n=$(sed -n '1s/^count //p' "$full")
     lines=$(($(grep -c '' "$full") - 1))
     TOTAL=$((TOTAL + 1))
-    if [ "$rc" = "0" ] && [ -n "$n" ] && [ "$n" -ge 1 ] && [ "$n" = "$lines" ] && grep -qx '127.0.0.1 255.0.0.0 0.0.0.0 5' "$full"; then
-        t10_ok "${p}loopback" "count $n, lo is 127.0.0.1/255.0.0.0 flags 5 (UP|LOOPBACK)"
+    x=$(sed 1d "$full" | awk '$4 !~ /^[0-7]$/ { print $1 "=" $4 }' | tr '\n' ' ')
+    if [ "$rc" = "0" ] && [ -n "$n" ] && [ "$n" -ge 1 ] && [ "$n" = "$lines" ] && [ -z "$x" ] && grep -qx '127.0.0.1 255.0.0.0 0.0.0.0 5' "$full"; then
+        t10_ok "${p}loopback" "count $n, lo is 127.0.0.1/255.0.0.0 flags 5 (UP|LOOPBACK), every record's flags within bits 0..2"
     else
-        t10_bad "${p}loopback" "rc=$rc count '$n' over $lines lines: $(tr '\n' '|' < "$full" | head -c 160)"
+        t10_bad "${p}loopback" "rc=$rc count '$n' over $lines lines${x:+, flags outside bits 0..2: $x}: $(tr '\n' '|' < "$full" | head -c 160)"
     fi
     TOTAL=$((TOTAL + 1))
     why=""; x=0
@@ -29293,6 +29295,58 @@ for NIF_A in x86_64 arm64; do
     t10_run "$NIF_A" sys_ifaces 0; cp "$T10_D/out" "$T10_D/nif-z"
     nif_judge "$NIF_P" "$T10_D/nif-full" "$NIF_RC" "$T10_D/nif-tr" "$T10_D/nif-z" "$NIF_M"
 done
+# ONE DEVICE, TWO ADDRESSES, TWO MASKS (the label+address match). Each SIOCGIF*
+# query carries the SIOCGIFCONF entry's own address; a name-only query would
+# answer every address of a device with its FIRST address's mask. No host row
+# can see that (one address per device here), so a private network namespace
+# gets lo up with 10.1.1.1/24 and 10.1.2.1/16 added, and the fixture must
+# print exactly lo's three addresses with their own masks (flags 5, no
+# broadcast), and agree with that namespace's `ip -4 -o addr`. Runner: `unshare
+# -rn` when user namespaces are allowed (GitHub's ubuntu runners), else Docker
+# with a LOCALLY present busybox image (--pull never: nothing is fetched,
+# --network none: nothing leaves), else a counted SKIP. Output comes back on
+# stdout only (a root-owned file in $T10_D would outlive the rm -rf).
+NIF_NS_SH='ip link set lo up && ip addr add 10.1.1.1/24 dev lo && ip addr add 10.1.2.1/16 dev lo || exit 97; "$0" "$1"; echo "rc $?"; echo "--ip"; ip -4 -o addr'
+NIF_NS=""
+if command -v unshare > /dev/null 2>&1 && unshare -rn true > /dev/null 2>&1; then NIF_NS=unshare
+elif command -v docker > /dev/null 2>&1 && timeout 20 docker image inspect busybox:latest > /dev/null 2>&1; then NIF_NS=docker; fi
+for NIF_A in x86_64 arm64; do
+    NIF_ROW=sys_net_ifaces_two_masks_on_one_device_$NIF_A
+    TOTAL=$((TOTAL + 1))
+    if [ -z "$NIF_NS" ]; then t10_skip "$NIF_ROW" "no user namespaces (unshare -rn) and no local busybox image for docker"; continue; fi
+    if [ "$NIF_A" = "arm64" ] && [ -z "$T10_QEMU" ]; then t10_skip "$NIF_ROW" "no qemu-aarch64-static"; continue; fi
+    if [ ! -x "$T10_D/sys_ifaces-$NIF_A" ]; then t10_bad "$NIF_ROW" "sys_ifaces-$NIF_A was not built"; continue; fi
+    # sh -c's $0 runs with $1 as its one argument: the fixture with max 64, or
+    # qemu with the arm64 fixture (whose max then defaults to 64).
+    if [ "$NIF_NS" = "unshare" ]; then
+        if [ "$NIF_A" = "arm64" ]; then timeout 60 unshare -rn sh -c "$NIF_NS_SH" "$T10_QEMU" "$T10_D/sys_ifaces-$NIF_A" > "$T10_D/nif-ns" 2>&1
+        else timeout 60 unshare -rn sh -c "$NIF_NS_SH" "$T10_D/sys_ifaces-$NIF_A" 64 > "$T10_D/nif-ns" 2>&1; fi
+    else
+        if [ "$NIF_A" = "arm64" ]; then timeout 60 docker run --rm --pull never --network none --cap-add NET_ADMIN -v "$T10_D:/w:ro" -v "$T10_QEMU:/q:ro" \
+                busybox:latest sh -c "$NIF_NS_SH" /q "/w/sys_ifaces-$NIF_A" > "$T10_D/nif-ns" 2>&1
+        else timeout 60 docker run --rm --pull never --network none --cap-add NET_ADMIN -v "$T10_D:/w:ro" \
+                busybox:latest sh -c "$NIF_NS_SH" "/w/sys_ifaces-$NIF_A" 64 > "$T10_D/nif-ns" 2>&1; fi
+    fi
+    NIF_GOT=$(sed -n '1,/^--ip$/p' "$T10_D/nif-ns" | grep -v '^--ip$' | grep -v '^rc ' | sed 1d | LC_ALL=C sort | tr '\n' '|')
+    NIF_CNT=$(sed -n '1s/^count //p' "$T10_D/nif-ns")
+    NIF_RC=$(sed -n 's/^rc //p' "$T10_D/nif-ns")
+    NIF_IPS=$(sed -n '/^--ip$/,$p' "$T10_D/nif-ns" | sed 1d | awk '{print $4}' | LC_ALL=C sort | tr '\n' ' ')
+    NIF_MINE=$(printf '%s' "$NIF_GOT" | tr '|' '\n' | while read -r a m b f; do [ -n "$a" ] && echo "$a/$(nif_m2p "$m")"; done | LC_ALL=C sort | tr '\n' ' ')
+    NIF_WANT='10.1.1.1 255.255.255.0 0.0.0.0 5|10.1.2.1 255.255.0.0 0.0.0.0 5|127.0.0.1 255.0.0.0 0.0.0.0 5|'
+    if [ "$NIF_RC" = "0" ] && [ "$NIF_CNT" = "3" ] && [ "$NIF_GOT" = "$NIF_WANT" ] && [ "$NIF_MINE" = "$NIF_IPS" ]; then
+        t10_ok "$NIF_ROW" "via $NIF_NS: lo carries /8, /24 and /16, each with its own mask"
+    else
+        t10_bad "$NIF_ROW" "via $NIF_NS: rc '$NIF_RC' count '$NIF_CNT' got '$NIF_GOT' want '$NIF_WANT'; ip says '$NIF_IPS'; raw: $(tr '\n' '|' < "$T10_D/nif-ns" | head -c 200)"
+    fi
+done
+# _kr_sys_w32_ifrec on synthetic INTERFACE_INFO entries: flag bits 0..2 only
+# (MULTICAST/POINTTOPOINT dropped), the computed broadcast over a reported
+# 255.255.255.255, /30 and /20 broadcasts, and /31, /32 -> broadcast 0 with
+# bit 1 cleared. Plain arithmetic: Linux x86_64, arm64 and Wine.
+t10_row sys_net_ifaces_w32_conversion_x86_64 x86_64 sys_w32_ifinfo "OK" 0
+t10_row sys_net_ifaces_w32_conversion_arm64 arm64 sys_w32_ifinfo "OK" 0
+if [ -z "$T10_WINE" ]; then TOTAL=$((TOTAL + 1)); wine_na sys_net_ifaces_w32_conversion_windows_wine
+else s1b_wine sys_net_ifaces_w32_conversion_windows_wine sys_w32_ifinfo "OK"; fi
 # Every slice the default fat binary ships builds it (macOS: -ENOSYS arm), and
 # the Windows call is WSAIoctl BY NAME on both CPUs with its NINE arguments
 # placed where Win64 / AAPCS64 put them: x86_64's outgoing frame is 80 bytes
@@ -29307,9 +29361,11 @@ for NIF_A in x86_64 arm64; do
         || NIF_W="$NIF_W win-$NIF_A:$(grep -m1 error "$T10_D/w.log" | cut -c1-80)"
     $T10_KRC --arch=$NIF_A --target=macos "$T10_FX/sys_ifaces.kr" -o "$T10_D/nif-m" > "$T10_D/w.log" 2>&1 \
         || NIF_W="$NIF_W macos-$NIF_A:$(grep -m1 error "$T10_D/w.log" | cut -c1-80)"
+    $T10_KRC --arch=$NIF_A --target=windows --emit=pe "$T10_FX/sys_w32_ifinfo.kr" -o "$T10_D/nif-wi.exe" > "$T10_D/w.log" 2>&1 \
+        || NIF_W="$NIF_W w32_ifinfo/win-$NIF_A:$(grep -m1 error "$T10_D/w.log" | cut -c1-80)"
 done
 $T10_KRC "$T10_FX/sys_ifaces.kr" -o "$T10_D/nif.krbo" > "$T10_D/w.log" 2>&1 || NIF_W="$NIF_W fat:$(grep -m1 error "$T10_D/w.log" | cut -c1-80)"
-if [ -z "$NIF_W" ]; then t10_ok sys_net_ifaces_builds_for_every_slice "windows x86_64/arm64, macos x86_64/arm64, fat"; else t10_bad sys_net_ifaces_builds_for_every_slice "$NIF_W"; fi
+if [ -z "$NIF_W" ]; then t10_ok sys_net_ifaces_builds_for_every_slice "windows x86_64/arm64, macos x86_64/arm64, fat; sys_w32_ifinfo for both Windows CPUs"; else t10_bad sys_net_ifaces_builds_for_every_slice "$NIF_W"; fi
 TOTAL=$((TOTAL + 1))
 NIF_BAD=""
 if [ -s "$T10_D/nif-wx86_64.exe" ] && [ -s "$T10_D/nif-warm64.exe" ]; then

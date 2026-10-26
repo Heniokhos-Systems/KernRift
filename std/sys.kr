@@ -88,8 +88,20 @@
 //     bits. The broadcast is COMPUTED from the address and mask, (addr & mask)
 //     | ~mask, when IFF_BROADCAST is set: Windows has been seen to report
 //     255.255.255.255 in iiBroadcastAddress (EPICS pvAccess 59a65ce), which is
-//     the one value a per-interface sender must not use. 65+ addresses make
-//     the call fail -EFAULT (Windows will not truncate).
+//     the one value a per-interface sender must not use. Every other iiFlags
+//     bit (IFF_POINTTOPOINT 8, IFF_MULTICAST 16 -- real Windows sets 16 on
+//     every interface) is masked off. /31 AND /32: a mask with 31 or more one
+//     bits has NO directed broadcast (RFC 3021; the formula would give the
+//     point-to-point peer, or the address itself -- a Tailscale /32 is
+//     IFF_BROADCAST on Windows 11), so the record's broadcast is 0 and bit 1
+//     is CLEARED. _kr_sys_w32_ifrec does the conversion; it is plain
+//     arithmetic, run on Linux too by the suite. 65+ addresses make the call
+//     fail -EFAULT (Windows will not truncate).
+//   - THE OSes DIFFER on /31 and /32: Linux reports what the kernel has
+//     configured (SIOCGIFBRDADDR, and IFF_BROADCAST from the DEVICE), so a /32
+//     on a broadcast-capable device reads bit 1 set with whatever broadcast
+//     was configured (0.0.0.0 unless `brd` was given). A caller sending
+//     directed broadcasts skips a record whose broadcast is 0 or its own addr.
 //   - macOS, the bare-metal arch ids and none: -ENOSYS.
 // sys_ioctl(fd, req, arg) is the raw Unix ioctl (-ENOSYS on Windows, whose
 // ioctlsocket codes differ, and on macOS and none).
@@ -785,6 +797,27 @@ fn _kr_sys_bcast_of(u64 addr, u64 mask) -> u64 {
     return (addr & mask) | (mask ^ 0xFFFFFFFF)
 }
 
+// The number of one bits in the low 32 bits of m (byte-order independent).
+fn _kr_sys_ones32(u64 m) -> u64 {
+    u64 v = m & 0xFFFFFFFF
+    u64 n = 0
+    while v != 0 { n = n + (v & 1)  v = v >> 1 }
+    return n
+}
+
+// Windows: INTERFACE_INFO at `ie` -> record k of `out` (see the header: flags
+// bits 0..2 only; the broadcast computed, and none for /31 and /32).
+fn _kr_sys_w32_ifrec(u64 ie, u64 out, u64 k) {
+    u64 f = load32(ie) & 7
+    u64 a = load32(ie + 8)
+    u64 m = load32(ie + 56)
+    u64 b = 0
+    if (f & 2) != 0 {
+        if _kr_sys_ones32(m) >= 31 { f = f & 5 } else { b = _kr_sys_bcast_of(a, m) }
+    }
+    _kr_sys_ifrec(out, k, a, m, b, f)
+}
+
 // Linux: one SIOCGIF* query about the SIOCGIFCONF entry `e`, answered in rq.
 fn _kr_sys_ifq(u64 s, u64 req, u64 e, u64 rq) -> int64 {
     u64 j = 0
@@ -810,13 +843,7 @@ fn sys_net_ifaces(u64 out, u64 max) -> int64 {
         u64 k = 0
         u64 i = 0
         while i < n && k < max {
-            u64 ie = buf + i * 76
-            u64 f = load32(ie) & 7
-            u64 a = load32(ie + 8)
-            u64 m = load32(ie + 56)
-            u64 b = 0
-            if (f & 2) != 0 { b = _kr_sys_bcast_of(a, m) }
-            _kr_sys_ifrec(out, k, a, m, b, f)
+            _kr_sys_w32_ifrec(buf + i * 76, out, k)
             k = k + 1
             i = i + 1
         }
