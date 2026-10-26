@@ -27968,7 +27968,7 @@ rws_row() {   # <row> <extra compiler flags, unquoted: "" or --legacy>
             [ -e "$RWS_D/kr-run-0.exe" ] && [ -e "$RWS_D/kr-run-1.exe" ] || RWS_WHY="$RWS_WHY [two at once did not use two slots: $(cd "$RWS_D" && ls kr-run-* 2>/dev/null | tr '\n' ' ')]"
         fi
         if [ -z "$RWS_WHY" ]; then
-            PASS=$((PASS + 1)); echo "  $1: PASS (under Wine: a held slot is skipped, two runs at once use two slots, all exit 42)"
+            PASS=$((PASS + 1)); echo "  $1: PASS (under Wine: a held slot is passed over, two runs at once use two slots, all exit 42)"
         else
             FAIL=$((FAIL + 1)); echo "FAIL: $1$RWS_WHY"
         fi
