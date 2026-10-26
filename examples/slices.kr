@@ -3,7 +3,7 @@
 // and `data` is a regular pointer for byte indexing.
 // Callers pass 2 arguments: the pointer and the length.
 
-import "std/string.kr"
+import "../std/string.kr"
 
 fn sum_bytes([u8] data) -> u64 {
     u64 total = 0

@@ -26768,6 +26768,12 @@ sort -u "$LOG_D/ex.listed" > "$LOG_D/ex.uniq"
 for LOG_F in $(comm -23 "$LOG_D/ex.have" "$LOG_D/ex.uniq"); do LOG_WHY="$LOG_WHY unlisted:$LOG_F"; done
 for LOG_F in $(comm -13 "$LOG_D/ex.have" "$LOG_D/ex.uniq"); do LOG_WHY="$LOG_WHY missing-file:$LOG_F"; done
 for LOG_F in $(uniq -d "$LOG_D/ex.listed"); do LOG_WHY="$LOG_WHY duplicate:$LOG_F"; done
+# An example must build against THIS tree's std. `import "std/x.kr"` is resolved
+# relative to the importing file (examples/std/ -- absent) and then in the system
+# install paths, so on a machine with an installed std (/usr/share/kernrift) it
+# silently builds against THAT copy, and only a clean CI runner fails. Examples
+# use "../std/" (or "../../std/" from a subdirectory).
+for LOG_F in $(grep -rlE '^[[:space:]]*import "std/' "$DIR/../examples" --include='*.kr' | sed "s|^$DIR/../||" | sort); do LOG_WHY="$LOG_WHY imports-installed-std:$LOG_F"; done
 # log_why_ok <reason> <file> <errfile>: does the build error match the reason?
 log_why_ok() {
     # Only the compiler's own `error:` lines count: a located error echoes the source line, and a

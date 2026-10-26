@@ -1,7 +1,7 @@
 // Simple echo: read a line from stdin and print it back.
 // Demonstrates: stdlib imports, scan_str, print_str.
 
-import "std/io.kr"
+import "../std/io.kr"
 
 fn main() {
     print("Your name? ")
