@@ -11414,6 +11414,7 @@ rm -f "$IARG_ROOT/iarg_nested_$$.kr"
 # broken everywhere.
 TOTAL=$((TOTAL + 1))
 ISBV_OK=1
+ISBV_SKIP=""
 cat > "$IARG_ROOT/iarg_sbv_cand_$$.kr" <<'IARG_SBV_C'
 struct SBox { u64 v }
 fn sget(SBox b) -> u64 { return b.v }
@@ -11446,7 +11447,7 @@ isbv_rc() { # <arch> <flags> <src> -> echoes the exit status, or 200 on a compil
     if ! $KRC --arch="$1" $2 "$3" -o "$_bin" >/dev/null 2>&1; then echo 200; return; fi
     if [ "$1" = "$RUN_ARCH" ]; then "$_bin" >/dev/null 2>&1
     elif [ -n "$IARG_QEMU" ]; then $IARG_QEMU "$_bin" >/dev/null 2>&1
-    else rm -f "$_bin"; echo skip; return; fi
+    else rm -f "$_bin"; echo skip; return; fi   # tripwire: not a skip -- the helper's sentinel value; the row turns it into skip_row
     local _rc=$?
     rm -f "$_bin"
     echo "$_rc"
@@ -11462,7 +11463,7 @@ done
 for _a in "$RUN_ARCH" "$IARG_OTHER"; do
     _c=$(isbv_rc "$_a" "--legacy" "$IARG_ROOT/iarg_sbv_cand_$$.kr")
     _n=$(isbv_rc "$_a" "--legacy" "$IARG_ROOT/iarg_sbv_nocand_$$.kr")
-    [ "$_c" = "skip" ] && continue
+    if [ "$_c" = "skip" ]; then ISBV_SKIP="$ISBV_SKIP $_a --legacy (no qemu for it)"; continue; fi
     # 200 is isbv_rc's compile-failure sentinel, and it must FAIL rather than
     # compare equal. The IR half above cannot see this: if --legacy ever
     # started REFUSING both spellings, "they agree" would be satisfied by
@@ -11479,7 +11480,9 @@ for _a in "$RUN_ARCH" "$IARG_OTHER"; do
     # nested-argument defect. When it is fixed both become 7 and this row
     # still passes; only the note changes.
 done
-if [ "$ISBV_OK" = "1" ]; then
+if [ "$ISBV_OK" = "1" ] && [ -n "$ISBV_SKIP" ]; then
+    skip_row inline_does_not_decide_struct_byval_outcome "a leg did not run:$ISBV_SKIP"
+elif [ "$ISBV_OK" = "1" ]; then
     PASS=$((PASS + 1))
     echo "  inline_does_not_decide_struct_byval_outcome: PASS (IR correct both spellings; --legacy agrees:$ISBV_NOTE -- 139 = the known legacy struct-by-value nested-arg defect, not asserted as correct)"
 else
@@ -26327,7 +26330,7 @@ rws_row() {   # <row> <extra compiler flags, unquoted: "" or --legacy>
             [ -e "$RWS_D/kr-run-0.exe" ] && [ -e "$RWS_D/kr-run-1.exe" ] || RWS_WHY="$RWS_WHY [two at once did not use two slots: $(cd "$RWS_D" && ls kr-run-* 2>/dev/null | tr '\n' ' ')]"
         fi
         if [ -z "$RWS_WHY" ]; then
-            PASS=$((PASS + 1)); echo "  $1: PASS (under Wine: a held slot is skipped, two runs at once use two slots, all exit 42)"
+            PASS=$((PASS + 1)); echo "  $1: PASS (under Wine: a held slot is passed over, two runs at once use two slots, all exit 42)"
         else
             FAIL=$((FAIL + 1)); echo "FAIL: $1$RWS_WHY"
         fi
