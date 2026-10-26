@@ -2833,7 +2833,7 @@ bct_rc=$?
 rm -f /tmp/krc_bct_$$
 if [ "$bct_rc" = "0" ]; then
     BC_OK=0
-    echo "  the top-level single-line form compiled -- top-level junk is skipped again (register item 99)"
+    echo "  the top-level single-line form compiled -- top-level junk is skipped again (register item 99)"   # tripwire: not a skip -- part of a FAIL report
 fi
 if ! printf '%s' "$bct_out" | grep -q "docpin_bc_top_.*\.kr:1:1: error: expected a declaration at top level .*got '/'; there are no \`/\* \*/\` block comments"; then
     BC_OK=0
@@ -26475,7 +26475,7 @@ rws_row() {   # <row> <extra compiler flags, unquoted: "" or --legacy>
             [ -e "$RWS_D/kr-run-0.exe" ] && [ -e "$RWS_D/kr-run-1.exe" ] || RWS_WHY="$RWS_WHY [two at once did not use two slots: $(cd "$RWS_D" && ls kr-run-* 2>/dev/null | tr '\n' ' ')]"
         fi
         if [ -z "$RWS_WHY" ]; then
-            PASS=$((PASS + 1)); echo "  $1: PASS (under Wine: a held slot is skipped, two runs at once use two slots, all exit 42)"
+            PASS=$((PASS + 1)); echo "  $1: PASS (under Wine: a held slot is passed over, two runs at once use two slots, all exit 42)"
         else
             FAIL=$((FAIL + 1)); echo "FAIL: $1$RWS_WHY"
         fi
