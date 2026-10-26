@@ -1,0 +1,54 @@
+// std/sys.kr (arsh per-interface discovery): sys_net_ifaces. argv[1] is `max`
+// in decimal (64 when absent). Prints "count <r>", then one line per record:
+// "<addr> <netmask> <broadcast> <flags>" in dotted quads read byte by byte
+// from the record (network byte order), flags in decimal (1 UP, 2 BROADCAST,
+// 4 LOOPBACK). The rows judge the lines against `ip -4 -o addr`; a negative
+// result prints "count -<errno>" and exits 1.
+import "../../std/sys.kr"
+import "../../std/args.kr"
+
+static u8[1024] if_out
+
+fn if_put(u64 u) {
+    u8[24] d
+    uint64 dp = d
+    uint64 v = u
+    uint64 k = 0
+    if v == 0 { file_write(1, "0", 1) }
+    while v != 0 { store8(dp + k, 48 + v % 10)  v = v / 10  k = k + 1 }
+    while k != 0 { k = k - 1  file_write(1, dp + k, 1) }
+}
+
+fn if_quad(u64 p) {
+    if_put(load8(p))  file_write(1, ".", 1)
+    if_put(load8(p + 1))  file_write(1, ".", 1)
+    if_put(load8(p + 2))  file_write(1, ".", 1)
+    if_put(load8(p + 3))
+}
+
+fn main() -> uint32 {
+    uint64 max = 64
+    uint64 m = sys_arg(1)
+    if m != 0 {
+        max = 0
+        while load8(m) != 0 { max = max * 10 + load8(m) - 48  m = m + 1 }
+    }
+    if max > 64 { return 2 }
+    int64 n = sys_net_ifaces(if_out, max)
+    file_write(1, "count ", 6)
+    if n < 0 {
+        file_write(1, "-", 1)  if_put(0 - n)  file_write(1, "\n", 1)
+        return 1
+    }
+    if_put(n)  file_write(1, "\n", 1)
+    uint64 i = 0
+    while i < n {
+        uint64 r = if_out + i * 16
+        if_quad(r)  file_write(1, " ", 1)
+        if_quad(r + 4)  file_write(1, " ", 1)
+        if_quad(r + 8)  file_write(1, " ", 1)
+        if_put(load32(r + 12))  file_write(1, "\n", 1)
+        i = i + 1
+    }
+    return 0
+}

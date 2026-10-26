@@ -23,7 +23,7 @@
 // codegen_aarch64.kr). A slot number is therefore a qword index into ONE IAT
 // region, and each IDT entry's FirstThunk points at its DLL's sub-range of it.
 // That is legal PE: the loader walks each FirstThunk until a null qword, and
-// the null qwords between DLLs (slots 23, 45, 47) are exactly those
+// the null qwords between DLLs (slots 23, 46, 48) are exactly those
 // terminators. Interleaving ILT/IAT per DLL would break the flat formula.
 
 // IAT slot indices (used by codegen to generate indirect calls).
@@ -84,10 +84,13 @@ static uint64 IAT_sendto = 41
 static uint64 IAT_recvfrom = 42
 static uint64 IAT_ioctlsocket = 43
 static uint64 IAT_getsockopt = 44
-// slot 45: null qword -- ws2_32's thunk terminator. Never a call target.
-// --- bcrypt.dll: FirstThunk = IAT region + 368 (slot 46) ---
-static uint64 IAT_BCryptGenRandom = 46
-// slot 47: null qword -- bcrypt's thunk terminator. Never a call target.
+// Appended for arsh's per-interface discovery: sys_net_ifaces' Windows arm
+// (WSAIoctl SIO_GET_INTERFACE_LIST, nine arguments).
+static uint64 IAT_WSAIoctl = 45
+// slot 46: null qword -- ws2_32's thunk terminator. Never a call target.
+// --- bcrypt.dll: FirstThunk = IAT region + 376 (slot 47) ---
+static uint64 IAT_BCryptGenRandom = 47
+// slot 48: null qword -- bcrypt's thunk terminator. Never a call target.
 // SLOT NUMBERS ARE INTERNAL TO EACH BINARY: nothing outside the image depends
 // on them, so the table may grow again (an append shifts every later slot).
 // Tests key routed calls on the import NAME read back from the image, never on
@@ -99,10 +102,10 @@ static uint64 IAT_BCryptGenRandom = 46
 // (IAT_SLOT_COUNT, PE_IMPORT_NO_SLOT) is declared inside it.
 // @@pe-known-imports-begin
 // Qwords in the ILT region, and again in the IAT region, nulls included.
-static uint64 IAT_SLOT_COUNT = 48
+static uint64 IAT_SLOT_COUNT = 49
 
 // Known-import table: IAT slot -> function name (C string), or 0 for one of the
-// three null terminator slots (23, 45, 47) and for anything past the table.
+// three null terminator slots (23, 46, 48) and for anything past the table.
 // The ONE place the names live: emit_pe_idata writes the hint/name entries and
 // the ILT/IAT thunks by walking this, so a name and its slot cannot disagree.
 // Every name must fit a 32-byte hint/name slot: 2 (hint) + len + 1 (NUL) <= 32,
@@ -152,7 +155,8 @@ fn pe_import_name_at_slot(uint64 slot) -> uint64 {
     if slot == 42 { return "recvfrom" }
     if slot == 43 { return "ioctlsocket" }
     if slot == 44 { return "getsockopt" }
-    if slot == 46 { return "BCryptGenRandom" }
+    if slot == 45 { return "WSAIoctl" }
+    if slot == 47 { return "BCryptGenRandom" }
     return 0
 }
 
@@ -232,18 +236,19 @@ fn pe_import_slot_exact(uint64 name_ptr, uint64 name_len) -> uint64 {
 // section header and the Import Directory size, so it cannot depend on which
 // imports a program uses.
 //   IDT: 4 entries x 20 (kernel32, ws2_32, bcrypt, null)        =   80
-//   ILT region: kernel32 23 + null, ws2_32 21 + null,
-//               bcrypt 1 + null = 48 qwords x 8                  =  384
-//   IAT region: identical                                        =  384
-//   Hint/Name table: 45 named functions x 32                     = 1440
+//   ILT region: kernel32 23 + null, ws2_32 22 + null,
+//               bcrypt 1 + null = 49 qwords x 8                  =  392
+//   IAT region: identical                                        =  392
+//   Hint/Name table: 46 named functions x 32                     = 1472
 //   DLL names: "kernel32.dll\0" 13 + "ws2_32.dll\0" 11
 //              + "bcrypt.dll\0" 11                               =   35
-//   Total: 80 + 384 + 384 + 1440 + 35 = 2323, padded to 4096
+//   Total: 80 + 392 + 392 + 1472 + 35 = 2371, padded to 4096
 //   (GetCPInfo, spec C7, was the append that overflowed the old 2048; arsh
 //   Stage 1b + discovery added GetLastError, sendto, recvfrom, ioctlsocket and
-//   getsockopt: 2083 + 5 x 48 = 2323. 4096 is a multiple of FileAlignment 0x200
-//   and EXACTLY one 0x1000 page, so the one-page invariant below still holds;
-//   headroom is 1773 bytes = 36 more single appends at 48 bytes each.)
+//   getsockopt: 2083 + 5 x 48 = 2323; sys_net_ifaces added WSAIoctl: 2323 +
+//   48 = 2371. 4096 is a multiple of FileAlignment 0x200 and EXACTLY one
+//   0x1000 page, so the one-page invariant below still holds; headroom is
+//   1725 bytes = 35 more single appends at 48 bytes each.)
 //
 // ONE PAGE IS LOAD-BEARING. Every PE ImageSize computation assumes .idata fits
 // in a single 0x1000 page: main.kr's arm64-PE and x86_64-PE finalize arms
@@ -301,9 +306,9 @@ fn emit_pe_idata(uint64 idata_rva) -> uint64 {
     // Layout offsets within .idata (see pe_idata_size for the arithmetic):
     uint64 idt_off = 0
     uint64 ilt_off = 80                  // idt_off + 4 * 20
-    uint64 iat_off = 464                 // ilt_off + 48 * 8
-    uint64 hints_off = 848               // iat_off + 48 * 8
-    uint64 dllname_off = 2288            // hints_off + 45 * 32
+    uint64 iat_off = 472                 // ilt_off + 49 * 8
+    uint64 hints_off = 864               // iat_off + 49 * 8
+    uint64 dllname_off = 2336            // hints_off + 46 * 32
     // DLL name strings, back to back from dllname_off:
     uint64 kernel32_name = dllname_off        // "kernel32.dll\0" (13)
     uint64 ws2_32_name = dllname_off + 13     // "ws2_32.dll\0"   (11)
@@ -311,7 +316,7 @@ fn emit_pe_idata(uint64 idata_rva) -> uint64 {
     // Each DLL's first slot, as a byte offset into the ILT/IAT regions:
     uint64 kernel32_thunk = 0                 // slot 0
     uint64 ws2_32_thunk = 192                 // slot 24 * 8
-    uint64 bcrypt_thunk = 368                 // slot 46 * 8
+    uint64 bcrypt_thunk = 376                 // slot 47 * 8
 
     // IDT entry: kernel32.dll (20 bytes)
     emit_u32_le(idata_rva + ilt_off + kernel32_thunk)  // OriginalFirstThunk

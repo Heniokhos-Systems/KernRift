@@ -516,6 +516,20 @@ and the socket is BLOCKING again), −ETIMEDOUT, or the connect's −errno; afte
 any failure the socket is dead — close it and open a new one. "Refused" and
 "timed out" can be indistinguishable on Windows (a refused connect takes ~2 s).
 
+**Network interfaces** (`std/sys.kr`). `sys_net_ifaces(out, max)` fills up to
+`max` 16-byte records at `out`, one per IPv4 address: `u32 addr`, `u32 netmask`,
+`u32 broadcast`, `u32 flags` (bit 0 UP, bit 1 BROADCAST-capable, bit 2
+LOOPBACK). Addresses are in network byte order, the bytes a `sockaddr_in`
+carries at offset 4 (what `sys_sendto` takes); `broadcast` is the directed
+broadcast `(addr & mask) | ~mask` and 0 when bit 1 is clear. It returns the
+count written (0..`max`) or −errno. Records past `max` are dropped, and so is
+anything past the first 64 addresses: pass `max` ≥ 64 to see them all. Linux
+and Android use SIOCGIFCONF + SIOCGIFFLAGS/NETMASK/BRDADDR (an address that
+vanishes mid-call is skipped); Windows uses `WSAIoctl(SIO_GET_INTERFACE_LIST)`
+and computes the broadcast itself, because Windows can report 255.255.255.255
+there (65+ addresses fail −EFAULT on Windows). macOS and none: −ENOSYS.
+`sys_ioctl(fd, req, arg)` is the raw Unix ioctl (−ENOSYS on Windows, macOS and none).
+
 ---
 
 ## `std/sha256.kr` — SHA-256

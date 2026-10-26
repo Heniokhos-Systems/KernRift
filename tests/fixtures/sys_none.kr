@@ -10,5 +10,7 @@ fn main() -> uint32 {
     if sys_send(s, 0, 0) != 0 { return 3 }
     if sys_recv(s, 0, 0) != 0 { return 4 }
     if sys_net_init() != 0 - 38 { return 5 }
+    if sys_net_ifaces(0, 0) != 0 - 38 { return 6 }
+    if sys_ioctl(0, 0, 0) != 0 - 38 { return 7 }
     return 0
 }

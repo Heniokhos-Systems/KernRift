@@ -47,6 +47,9 @@ extern fn _kr_w32_sendto(u64 s, u64 buf, u64 len, u64 flags, u64 sa, u64 salen) 
 extern fn _kr_w32_recvfrom(u64 s, u64 buf, u64 len, u64 flags, u64 sa, u64 salenptr) -> u64
 extern fn _kr_w32_ioctlsocket(u64 s, u64 cmd, u64 argp) -> u64
 extern fn _kr_w32_getsockopt(u64 s, u64 level, u64 name, u64 val, u64 lenptr) -> u64
+// sys_net_ifaces: WSAIoctl(s, SIO_GET_INTERFACE_LIST, NULL, 0, out, outlen,
+// &bytes, NULL, NULL) -- nine arguments, five of them on the stack.
+extern fn _kr_w32_WSAIoctl(u64 s, u64 code, u64 inbuf, u64 inlen, u64 outbuf, u64 outlen, u64 bytesptr, u64 ovl, u64 completion) -> u64
 // Stage 2 (event-driven I/O for an interactive shell); declared, not yet used.
 extern fn _kr_w32_WSAEventSelect(u64 s, u64 event, u64 mask) -> u64
 extern fn _kr_w32_WSAEnumNetworkEvents(u64 s, u64 event, u64 out) -> u64

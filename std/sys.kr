@@ -63,6 +63,37 @@
 // and "timed out" may collapse into one outcome: callers must not claim to
 // know which.
 //
+// NETWORK INTERFACES (arsh per-interface discovery). sys_net_ifaces(out, max)
+// fills up to `max` 16-byte records at `out`, IPv4 only, one per address:
+//   +0 u32 addr  +4 u32 netmask  +8 u32 broadcast  +12 u32 flags
+// addresses in NETWORK byte order exactly as they sit in a sockaddr_in's
+// sin_addr (the bytes sys_sendto/sys_recvfrom carry at sa+4: 127.0.0.1 is the
+// bytes 7F 00 00 01, so load32 reads 0x0100007F on a little-endian CPU);
+// flags bit 0 UP, bit 1 BROADCAST-capable, bit 2 LOOPBACK. broadcast is 0 when
+// bit 1 is clear. Returns the count written (0..max) or -errno. Interfaces past
+// `max` are DROPPED, and so is anything past the first 64 addresses the OS
+// reports (one fixed buffer per call): pass max >= 64 to see every one there is.
+//   - Linux/Android: SIOCGIFCONF (0x8912) on an AF_INET datagram socket, then
+//     per entry SIOCGIFFLAGS (0x8913), SIOCGIFNETMASK (0x891b) and, when the
+//     interface can broadcast, SIOCGIFBRDADDR (0x8919). struct ifreq is 40
+//     bytes on 64-bit Linux (name[16] + a 24-byte union); each query is sent
+//     with the SIOCGIFCONF entry's own AF_INET address, so a device with two
+//     addresses gets each address's own mask (devinet_ioctl matches label AND
+//     address). An entry whose device or address vanished between the list and
+//     the query (-ENODEV, -EADDRNOTAVAIL) is skipped, not an error.
+//   - Windows: WSAIoctl(SIO_GET_INTERFACE_LIST 0x4004747F) on an AF_INET
+//     socket: an array of 76-byte INTERFACE_INFO (u_long iiFlags, then three
+//     24-byte sockaddr_gen: address +4, broadcast +28, netmask +52; sin_addr is
+//     at +4 inside each). IFF_UP/BROADCAST/LOOPBACK are 1/2/4, the record's own
+//     bits. The broadcast is COMPUTED from the address and mask, (addr & mask)
+//     | ~mask, when IFF_BROADCAST is set: Windows has been seen to report
+//     255.255.255.255 in iiBroadcastAddress (EPICS pvAccess 59a65ce), which is
+//     the one value a per-interface sender must not use. 65+ addresses make
+//     the call fail -EFAULT (Windows will not truncate).
+//   - macOS, the bare-metal arch ids and none: -ENOSYS.
+// sys_ioctl(fd, req, arg) is the raw Unix ioctl (-ENOSYS on Windows, whose
+// ioctlsocket codes differ, and on macOS and none).
+//
 // Irreducible Linux/Windows differences (documented, not translated):
 //   - listen() on an UNBOUND socket: Linux autobinds a port (0), Windows -EINVAL;
 //   - getsockname() on an unbound socket: Linux 0 (0.0.0.0:0), Windows -EINVAL;
@@ -102,6 +133,7 @@ import "win32.kr"
 //   6 shutdown  7 setsockopt  8 close  9 ppoll  10 getrandom  11 sendto
 //   12 recvfrom  13 fcntl  14 getsockopt
 //   15 mkdir(at)  16 rename(at)  17 chmod/fchmodat  18 stat/newfstatat
+//   19 ioctl
 // Linux and Android share a table per architecture (1/8 = x86_64, 2/7 = arm64).
 fn _kr_sys_nr(u64 k) -> u64 {
     u64 a = get_arch_id()
@@ -125,6 +157,7 @@ fn _kr_sys_nr(u64 k) -> u64 {
         if k == 16 { return 82 }
         if k == 17 { return 90 }
         if k == 18 { return 4 }
+        if k == 19 { return 16 }
         return 0
     }
     if a == 2 || a == 7 {
@@ -147,6 +180,7 @@ fn _kr_sys_nr(u64 k) -> u64 {
         if k == 16 { return 38 }
         if k == 17 { return 53 }
         if k == 18 { return 79 }
+        if k == 19 { return 29 }
         return 0
     }
     return 0
@@ -721,6 +755,124 @@ fn sys_connect_timeout(u64 sock, u64 sa, u64 salen, u64 ms) -> int64 {
         int64 rr = syscall_raw(fnr, sock, 4, fl, 0, 0, 0)
         if rr < 0 { return rr }
         return r
+    }
+}
+
+// --- network interfaces (see the header) -----------------------------------------
+
+fn sys_ioctl(u64 fd, u64 req, u64 arg) -> int64 {
+    if get_target_os() == 2 {
+        return 0 - 38
+    } else if get_target_os() == 4 {
+        return 0 - 38
+    } else {
+        u64 nr = _kr_sys_nr(19)
+        if nr == 0 { return 0 - 38 }
+        return syscall_raw(nr, fd, req, arg, 0, 0, 0)
+    }
+}
+
+fn _kr_sys_ifrec(u64 out, u64 i, u64 addr, u64 mask, u64 bcast, u64 flags) {
+    u64 p = out + i * 16
+    store32(p, addr)
+    store32(p + 4, mask)
+    store32(p + 8, bcast)
+    store32(p + 12, flags)
+}
+
+// The directed broadcast of addr/mask, in the same (network) byte order.
+fn _kr_sys_bcast_of(u64 addr, u64 mask) -> u64 {
+    return (addr & mask) | (mask ^ 0xFFFFFFFF)
+}
+
+// Linux: one SIOCGIF* query about the SIOCGIFCONF entry `e`, answered in rq.
+fn _kr_sys_ifq(u64 s, u64 req, u64 e, u64 rq) -> int64 {
+    u64 j = 0
+    while j < 40 { store8(rq + j, load8(e + j))  j = j + 1 }
+    return sys_ioctl(s, req, rq)
+}
+
+fn sys_net_ifaces(u64 out, u64 max) -> int64 {
+    if get_target_os() == 2 {
+        int64 e = _kr_w32_ensure()
+        if e < 0 { return e }
+        int64 s = _kr_w32_sock(_kr_w32_socket(2, 2, 0))
+        if s < 0 { return s }
+        u8[4864] buf
+        u8[8] nb
+        store32(nb, 0)
+        // 64 x INTERFACE_INFO (76 bytes). The result is read BEFORE the close,
+        // which would overwrite WSAGetLastError.
+        int64 r = _kr_w32_ret32(_kr_w32_WSAIoctl(s, 0x4004747F, 0, 0, buf, 4864, nb, 0, 0))
+        _kr_w32_closesocket(s)
+        if r < 0 { return r }
+        u64 n = load32(nb) / 76
+        u64 k = 0
+        u64 i = 0
+        while i < n && k < max {
+            u64 ie = buf + i * 76
+            u64 f = load32(ie) & 7
+            u64 a = load32(ie + 8)
+            u64 m = load32(ie + 56)
+            u64 b = 0
+            if (f & 2) != 0 { b = _kr_sys_bcast_of(a, m) }
+            _kr_sys_ifrec(out, k, a, m, b, f)
+            k = k + 1
+            i = i + 1
+        }
+        return k
+    } else if get_target_os() == 4 {
+        return 0 - 38
+    } else {
+        if _kr_sys_nr(19) == 0 { return 0 - 38 }
+        int64 s = sys_socket(2, 2, 0)
+        if s < 0 { return s }
+        u8[2560] buf
+        u8[16] ifc
+        u8[40] rq
+        // struct ifconf: int ifc_len, 4 bytes of padding, char *ifc_buf.
+        store32(ifc, 2560)
+        store32(ifc + 4, 0)
+        store64(ifc + 8, buf)
+        int64 r = sys_ioctl(s, 0x8912, ifc)
+        if r < 0 {
+            sys_sock_close(s)
+            return r
+        }
+        u64 n = load32(ifc) / 40
+        u64 k = 0
+        u64 i = 0
+        while i < n && k < max {
+            u64 ie = buf + i * 40
+            if load16(ie + 16) == 2 {
+                u64 a = load32(ie + 20)
+                int64 q = _kr_sys_ifq(s, 0x8913, ie, rq)
+                u64 lf = load16(rq + 16)
+                u64 m = 0
+                u64 b = 0
+                if q >= 0 {
+                    q = _kr_sys_ifq(s, 0x891B, ie, rq)
+                    m = load32(rq + 20)
+                }
+                // Linux IFF_UP 0x1, IFF_BROADCAST 0x2, IFF_LOOPBACK 0x8.
+                u64 f = lf & 3
+                if (lf & 8) != 0 { f = f | 4 }
+                if q >= 0 && (f & 2) != 0 {
+                    q = _kr_sys_ifq(s, 0x8919, ie, rq)
+                    b = load32(rq + 20)
+                }
+                if q >= 0 {
+                    _kr_sys_ifrec(out, k, a, m, b, f)
+                    k = k + 1
+                } else if q != 0 - 19 && q != 0 - 99 {
+                    sys_sock_close(s)
+                    return q
+                }
+            }
+            i = i + 1
+        }
+        sys_sock_close(s)
+        return k
     }
 }
 

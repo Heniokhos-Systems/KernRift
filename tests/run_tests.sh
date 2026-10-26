@@ -9265,7 +9265,7 @@ echo "--- PE import table: kernel32 + ws2_32 + bcrypt (fixed slots) ---"
 # it checks, and a bug in that arithmetic could cancel a bug in the
 # compiler's. A second literal golden checks the arm64 bytes as emitted.
 # What keeps the two from drifting apart when one is regenerated: everything
-# from the hint/name table on (offset 848 = golden line 54 onward) holds no
+# from the hint/name table on (offset 864 = golden line 55 onward) holds no
 # RVA, so it must be byte-identical between them -- checked below.
 # Regenerate (only for a DELIBERATE table change, after checking it with
 # `llvm-objdump -p`): build the fixture as below, then
@@ -9327,18 +9327,18 @@ pei_check() {
     fi
     rm -f "$PEI_OUT"
 }
-#                                                  .idata  SizeOf  FirstThunks (IAT region +464, then +0/+192/+368)
+#                                                  .idata  SizeOf  FirstThunks (IAT region +472, then +0/+192/+376)
 pei_check pe_imports_three_dlls x86_64 "$DIR/golden/pe_imports_x86_64.idata.hex" \
-    8192  12288  8656  8848  9024     # 0x2000 0x3000  0x21D0 0x2290 0x2340
+    8192  12288  8664  8856  9040     # 0x2000 0x3000  0x21D8 0x2298 0x2350
 pei_check pe_imports_three_dlls_arm64 arm64 "$DIR/golden/pe_imports_arm64.idata.hex" \
-    12288 16384  12752 12944 13120    # 0x3000 0x4000  0x31D0 0x3290 0x3340
+    12288 16384  12760 12952 13136    # 0x3000 0x4000  0x31D8 0x3298 0x3350
 # The RVA-free tail (hint/name table + DLL names) must match across the two
 # goldens, so regenerating one cannot quietly leave the other describing a
 # different table. Counted: it is the cross-arch half of the pin.
 TOTAL=$((TOTAL + 1))
 if [ -s "$DIR/golden/pe_imports_x86_64.idata.hex" ] && [ -s "$DIR/golden/pe_imports_arm64.idata.hex" ] \
-   && [ "$(sed -n '54,256p' "$DIR/golden/pe_imports_x86_64.idata.hex" | wc -l)" = "203" ] \
-   && sed -n '54,256p' "$DIR/golden/pe_imports_x86_64.idata.hex" | cmp -s - <(sed -n '54,256p' "$DIR/golden/pe_imports_arm64.idata.hex"); then
+   && [ "$(sed -n '55,256p' "$DIR/golden/pe_imports_x86_64.idata.hex" | wc -l)" = "202" ] \
+   && sed -n '55,256p' "$DIR/golden/pe_imports_x86_64.idata.hex" | cmp -s - <(sed -n '55,256p' "$DIR/golden/pe_imports_arm64.idata.hex"); then
     PASS=$((PASS + 1))
     echo "  pe_imports_goldens_agree: PASS"
 else
@@ -9354,8 +9354,9 @@ fi
 # unknown name, a strict prefix ("sen") and an extension ("sendx"). The
 # kernel32 tail (VirtualProtect 19, Sleep 20, GetCPInfo 21, GetLastError
 # 22), ws2_32's getsockname (37) and the four datagram/connect imports
-# (sendto 41, recvfrom 42, ioctlsocket 43, getsockopt 44) resolve; the three
-# slot-16..18 kernel32 names std now calls resolve unchanged. The reserved
+# (sendto 41, recvfrom 42, ioctlsocket 43, getsockopt 44) and sys_net_ifaces'
+# WSAIoctl (45, also through `_kr_w32_`; "WSAIoct" does not match) resolve;
+# the three slot-16..18 kernel32 names std now calls resolve unchanged. The reserved
 # `_kr_w32_` prefix (std's Win32 externs) strips to the
 # real export: `_kr_w32_send` -> send's slot. NOT stripped, each its own
 # exit code: `_kr_w32_` alone and `_kr_w32_sen`, both passed as tokens of the
@@ -9375,7 +9376,7 @@ fn main() {
     if pe_import_slot("ExitProcess", 11) != 0 { exit(1) }
     if pe_import_slot("send", 4) != 28 { exit(2) }
     if pe_import_slot("recv", 4) != 29 { exit(3) }
-    if pe_import_slot("BCryptGenRandom", 15) != 46 { exit(4) }
+    if pe_import_slot("BCryptGenRandom", 15) != 47 { exit(4) }
     if pe_import_slot("MoveFileExA", 11) != 18 { exit(5) }
     if pe_import_slot("sendto", 4) != 28 { exit(6) }
     if pe_import_slot("sen", 3) != 0xFFFFFFFF { exit(7) }
@@ -9387,7 +9388,7 @@ fn main() {
     if pe_import_slot("getsockname", 11) != 37 { exit(13) }
     if pe_import_slot("WSACreateEvent", 14) != 40 { exit(14) }
     if pe_import_slot("_kr_w32_send", 12) != 28 { exit(15) }
-    if pe_import_slot("_kr_w32_BCryptGenRandom", 23) != 46 { exit(16) }
+    if pe_import_slot("_kr_w32_BCryptGenRandom", 23) != 47 { exit(16) }
     if pe_import_slot("_kr_w32_send", 8) != 0xFFFFFFFF { exit(17) }
     if pe_import_slot("_kr_w32_send", 11) != 0xFFFFFFFF { exit(18) }
     if pe_import_slot("_kr_w32_sen", 11) != 0xFFFFFFFF { exit(19) }
@@ -9406,6 +9407,9 @@ fn main() {
     if pe_import_slot("GetEnvironmentVariableA", 23) != 16 { exit(32) }
     if pe_import_slot("CreateDirectoryA", 16) != 17 { exit(33) }
     if pe_import_slot("recvfro", 7) != 0xFFFFFFFF { exit(34) }
+    if pe_import_slot("WSAIoctl", 8) != 45 { exit(35) }
+    if pe_import_slot("_kr_w32_WSAIoctl", 16) != 45 { exit(36) }
+    if pe_import_slot("WSAIoct", 7) != 0xFFFFFFFF { exit(37) }
     exit(0)
 }
 KREOF
@@ -29197,6 +29201,149 @@ else
         t10_bad sys_connect_timeout_refused_is_an_error_windows_wine "build: $(grep -m1 error "$T10_D/w.log" | cut -c1-120)"
         TOTAL=$((TOTAL + 1)); t10_bad sys_connect_timeout_black_hole_times_out_windows_wine "build failed"
     fi
+    if [ -x "$(dirname "$T10_WINE")/wineserver" ]; then
+        WINEPREFIX="$T10_D/pfx" "$(dirname "$T10_WINE")/wineserver" -w > /dev/null 2>&1
+    fi
+fi
+# --- sys_net_ifaces: the IPv4 interface list (arsh per-interface discovery) ---
+# A multi-homed client sends one directed broadcast per interface, so it needs
+# every IPv4 address with its mask, broadcast and flags. ONE fixture
+# (sys_ifaces.kr: "count <n>", then "<addr> <mask> <bcast> <flags>" per record)
+# runs on Linux x86_64, Linux arm64 (qemu-user, which translates SIOCGIFCONF)
+# and Windows x86_64 under Wine (whose SIO_GET_INTERFACE_LIST walks the same
+# host's getifaddrs), and nif_judge holds every run to the same four rows:
+#   loopback   "127.0.0.1 255.0.0.0 0.0.0.0 5" is a record, count >= 1, and
+#              the count line equals the number of record lines;
+#   broadcast  every BROADCAST (bit 1) record's broadcast is (addr & mask) |
+#              ~mask, byte by byte -- a counted SKIP on a host where only lo
+#              has an address (no BROADCAST record to judge);
+#   ip         the records' addr/prefix multiset equals `ip -4 -o addr`'s, and
+#              the UP (bit 0) records' addresses equal `ip -4 -o addr show up`'s
+#              (a counted SKIP without iproute2);
+#   truncates  max = n-1 prints "count <n-1>" and exactly the first n-1 records
+#              of the full run, and max = 0 prints "count 0" alone (with n < 2
+#              only the max = 0 half runs, and the PASS text says so).
+NIF_IP="$(command -v ip || true)"
+# nif_m2p <dotted mask> -> its prefix length (the number of one bits)
+nif_m2p() { local o n=0 IFS=.; for o in $1; do while [ "$o" -gt 0 ]; do n=$((n + (o & 1))); o=$((o >> 1)); done; done; echo $n; }
+# nif_judge <row prefix> <full out> <rc> <out with max n-1> <out with max 0> <n-1 used>
+nif_judge() {
+    local p="$1" full="$2" rc="$3" tr="$4" z="$5" nm1="$6" n lines why a m b f x y IFS0
+    n=$(sed -n '1s/^count //p' "$full")
+    lines=$(($(grep -c '' "$full") - 1))
+    TOTAL=$((TOTAL + 1))
+    if [ "$rc" = "0" ] && [ -n "$n" ] && [ "$n" -ge 1 ] && [ "$n" = "$lines" ] && grep -qx '127.0.0.1 255.0.0.0 0.0.0.0 5' "$full"; then
+        t10_ok "${p}loopback" "count $n, lo is 127.0.0.1/255.0.0.0 flags 5 (UP|LOOPBACK)"
+    else
+        t10_bad "${p}loopback" "rc=$rc count '$n' over $lines lines: $(tr '\n' '|' < "$full" | head -c 160)"
+    fi
+    TOTAL=$((TOTAL + 1))
+    why=""; x=0
+    while read -r a m b f; do
+        [ $((f & 2)) = 0 ] && continue
+        x=$((x + 1))
+        local -a A M B
+        IFS=. read -r -a A <<< "$a"; IFS=. read -r -a M <<< "$m"; IFS=. read -r -a B <<< "$b"
+        for y in 0 1 2 3; do
+            [ $(( (A[y] & M[y]) | (255 - M[y]) )) = "${B[y]}" ] || why="$why $a/$m:$b"
+        done
+    done < <(sed 1d "$full")
+    if [ "$rc" != "0" ]; then t10_bad "${p}broadcast_is_directed" "rc=$rc"
+    elif [ "$x" = "0" ]; then t10_skip "${p}broadcast_is_directed" "no BROADCAST-capable interface has an IPv4 address on this host"
+    elif [ -z "$why" ]; then t10_ok "${p}broadcast_is_directed" "$x BROADCAST records, each (addr & mask) | ~mask"
+    else t10_bad "${p}broadcast_is_directed" "wrong broadcast:$(printf '%s' "$why" | tr ' ' '\n' | sort -u | tr '\n' ' ')"; fi
+    TOTAL=$((TOTAL + 1))
+    if [ -z "$NIF_IP" ]; then t10_skip "${p}matches_ip_addr" "no ip(8) on this host"
+    else
+        x=$(sed 1d "$full" | while read -r a m b f; do echo "$a/$(nif_m2p "$m")"; done | LC_ALL=C sort | tr '\n' ' ')
+        y=$("$NIF_IP" -4 -o addr | awk '{print $4}' | LC_ALL=C sort | tr '\n' ' ')
+        a=$(sed 1d "$full" | awk '($4 % 2) == 1 {print $1}' | LC_ALL=C sort | tr '\n' ' ')
+        b=$("$NIF_IP" -4 -o addr show up | awk '{print $4}' | cut -d/ -f1 | LC_ALL=C sort | tr '\n' ' ')
+        if [ "$rc" = "0" ] && [ -n "$y" ] && [ "$x" = "$y" ] && [ "$a" = "$b" ]; then t10_ok "${p}matches_ip_addr" "$(printf '%s' "$y" | wc -w) addr/prefix, $(printf '%s' "$b" | wc -w) UP"
+        else t10_bad "${p}matches_ip_addr" "rc=$rc got '$x' want '$y'; UP got '$a' want '$b'"; fi
+    fi
+    TOTAL=$((TOTAL + 1))
+    why=""
+    [ "$(tr -d '\r' < "$z")" = "count 0" ] || why="$why max=0 printed '$(tr '\n' '|' < "$z" | head -c 60)'"
+    if [ -n "$nm1" ]; then
+        x=$(printf 'count %s\n' "$nm1"; sed -n "2,$((nm1 + 1))p" "$full")
+        [ "$(cat "$tr")" = "$x" ] || why="$why max=$nm1 printed '$(tr '\n' '|' < "$tr" | head -c 120)' want '$(printf '%s' "$x" | tr '\n' '|' | head -c 120)'"
+    fi
+    x="max 0 is count 0"
+    if [ -n "$nm1" ]; then x="max $nm1 of $n is the first $nm1, $x"; else x="$x; only '$n' interface(s), no n-1 half"; fi
+    if [ -z "$why" ]; then t10_ok "${p}truncates_at_max" "$x"
+    else t10_bad "${p}truncates_at_max" "$why"; fi
+}
+for NIF_A in x86_64 arm64; do
+    NIF_P=sys_net_ifaces_${NIF_A}_
+    if [ "$NIF_A" = "arm64" ] && [ -z "$T10_QEMU" ]; then
+        for NIF_R in loopback broadcast_is_directed matches_ip_addr truncates_at_max; do TOTAL=$((TOTAL + 1)); t10_skip "$NIF_P$NIF_R" "no qemu-aarch64-static"; done
+        continue
+    fi
+    if ! t10_build "$NIF_A" sys_ifaces; then
+        for NIF_R in loopback broadcast_is_directed matches_ip_addr truncates_at_max; do TOTAL=$((TOTAL + 1)); t10_bad "$NIF_P$NIF_R" "build failed: $(grep -m1 'error' "$T10_D/sys_ifaces-$NIF_A.log" | cut -c1-140)"; done
+        continue
+    fi
+    chmod +x "$T10_D/sys_ifaces-$NIF_A"
+    t10_run "$NIF_A" sys_ifaces; NIF_RC=$?; cp "$T10_D/out" "$T10_D/nif-full"
+    NIF_N=$(sed -n '1s/^count //p' "$T10_D/nif-full"); NIF_M=""
+    [ -n "$NIF_N" ] && [ "$NIF_N" -ge 2 ] 2>/dev/null && NIF_M=$((NIF_N - 1))
+    : > "$T10_D/nif-tr"
+    [ -n "$NIF_M" ] && { t10_run "$NIF_A" sys_ifaces "$NIF_M"; cp "$T10_D/out" "$T10_D/nif-tr"; }
+    t10_run "$NIF_A" sys_ifaces 0; cp "$T10_D/out" "$T10_D/nif-z"
+    nif_judge "$NIF_P" "$T10_D/nif-full" "$NIF_RC" "$T10_D/nif-tr" "$T10_D/nif-z" "$NIF_M"
+done
+# Every slice the default fat binary ships builds it (macOS: -ENOSYS arm), and
+# the Windows call is WSAIoctl BY NAME on both CPUs with its NINE arguments
+# placed where Win64 / AAPCS64 put them: x86_64's outgoing frame is 80 bytes
+# (32 shadow + 5 stack qwords, 16-aligned) with stores at rsp+32..64 (pe_calls'
+# span line); arm64 passes eight in x0-x7 and the ninth at [sp], so the word
+# three before the BLR (after the ADRP+LDR of the IAT slot) is `str x9, [sp]`
+# (0xF90003E9).
+TOTAL=$((TOTAL + 1))
+NIF_W=""
+for NIF_A in x86_64 arm64; do
+    $T10_KRC --arch=$NIF_A --target=windows --emit=pe "$T10_FX/sys_ifaces.kr" -o "$T10_D/nif-w$NIF_A.exe" > "$T10_D/w.log" 2>&1 \
+        || NIF_W="$NIF_W win-$NIF_A:$(grep -m1 error "$T10_D/w.log" | cut -c1-80)"
+    $T10_KRC --arch=$NIF_A --target=macos "$T10_FX/sys_ifaces.kr" -o "$T10_D/nif-m" > "$T10_D/w.log" 2>&1 \
+        || NIF_W="$NIF_W macos-$NIF_A:$(grep -m1 error "$T10_D/w.log" | cut -c1-80)"
+done
+$T10_KRC "$T10_FX/sys_ifaces.kr" -o "$T10_D/nif.krbo" > "$T10_D/w.log" 2>&1 || NIF_W="$NIF_W fat:$(grep -m1 error "$T10_D/w.log" | cut -c1-80)"
+if [ -z "$NIF_W" ]; then t10_ok sys_net_ifaces_builds_for_every_slice "windows x86_64/arm64, macos x86_64/arm64, fat"; else t10_bad sys_net_ifaces_builds_for_every_slice "$NIF_W"; fi
+TOTAL=$((TOTAL + 1))
+NIF_BAD=""
+if [ -s "$T10_D/nif-wx86_64.exe" ] && [ -s "$T10_D/nif-warm64.exe" ]; then
+    pe_calls "$T10_D/nif-wx86_64.exe" x86_64 > "$T10_D/nif-x.calls"
+    pe_calls "$T10_D/nif-warm64.exe" arm64 > "$T10_D/nif-a.calls"
+    grep -q '^badiat' "$T10_D/nif-x.calls" "$T10_D/nif-a.calls" && NIF_BAD="$NIF_BAD badiat"
+    NIF_XS=$(awk '$1 == "iat" && $4 == "WSAIoctl" { print $3 }' "$T10_D/nif-x.calls")
+    [ "$(printf '%s\n' $NIF_XS | grep -c .)" = "1" ] || NIF_BAD="$NIF_BAD x86_64:$(printf '%s\n' $NIF_XS | grep -c .)-WSAIoctl-calls"
+    NIF_SPAN=$(awk -v s="$NIF_XS" '$1 == "span" && $2 == s { print $3, $4 }' "$T10_D/nif-x.calls")
+    [ "$NIF_SPAN" = "80 ,32,40,48,56,64" ] || NIF_BAD="$NIF_BAD x86_64-frame:'$NIF_SPAN'(want '80 ,32,40,48,56,64')"
+    NIF_AC=$(awk '$1 == "iat" && $4 == "WSAIoctl" { print $2 }' "$T10_D/nif-a.calls")
+    if [ "$(printf '%s\n' $NIF_AC | grep -c .)" != "1" ]; then NIF_BAD="$NIF_BAD arm64:$(printf '%s\n' $NIF_AC | grep -c .)-WSAIoctl-calls"
+    else
+        set -- $(pe_section "$T10_D/nif-warm64.exe" .text)
+        NIF_STR=$(pe_u "$T10_D/nif-warm64.exe" $(( NIF_AC - $1 + $3 - 12 )) 4)
+        [ "$NIF_STR" = "$((0xF90003E9))" ] || NIF_BAD="$NIF_BAD arm64-9th-arg:$(printf '0x%08X' "$NIF_STR")(want str x9,[sp] 0xF90003E9)"
+    fi
+else
+    NIF_BAD="no Windows build"
+fi
+if [ -z "$NIF_BAD" ]; then t10_ok sys_net_ifaces_wsaioctl_routes_by_name_with_nine_args "x86_64 frame $NIF_SPAN, arm64 9th arg at [sp]"; else t10_bad sys_net_ifaces_wsaioctl_routes_by_name_with_nine_args "$NIF_BAD"; fi
+if [ -z "$T10_WINE" ]; then
+    for NIF_R in loopback broadcast_is_directed matches_ip_addr truncates_at_max; do TOTAL=$((TOTAL + 1)); wine_na "sys_net_ifaces_windows_wine_$NIF_R"; done
+elif ! $T10_KRC --arch=x86_64 --target=windows --emit=pe "$T10_FX/sys_ifaces.kr" -o "$T10_D/sys_ifaces.exe" > "$T10_D/w.log" 2>&1; then
+    for NIF_R in loopback broadcast_is_directed matches_ip_addr truncates_at_max; do TOTAL=$((TOTAL + 1)); t10_bad "sys_net_ifaces_windows_wine_$NIF_R" "build: $(grep -m1 error "$T10_D/w.log" | cut -c1-120)"; done
+else
+    t10_wine "$T10_D/win.out" "$T10_D/win.err" sys_ifaces.exe; NIF_RC=$?
+    tr -d '\r' < "$T10_D/win.out" > "$T10_D/nif-full"
+    NIF_N=$(sed -n '1s/^count //p' "$T10_D/nif-full"); NIF_M=""
+    [ -n "$NIF_N" ] && [ "$NIF_N" -ge 2 ] 2>/dev/null && NIF_M=$((NIF_N - 1))
+    : > "$T10_D/nif-tr"
+    if [ -n "$NIF_M" ]; then t10_wine "$T10_D/win.out" "$T10_D/win.err" sys_ifaces.exe "$NIF_M"; tr -d '\r' < "$T10_D/win.out" > "$T10_D/nif-tr"; fi
+    t10_wine "$T10_D/win.out" "$T10_D/win.err" sys_ifaces.exe 0; tr -d '\r' < "$T10_D/win.out" > "$T10_D/nif-z"
+    nif_judge sys_net_ifaces_windows_wine_ "$T10_D/nif-full" "$NIF_RC" "$T10_D/nif-tr" "$T10_D/nif-z" "$NIF_M"
     if [ -x "$(dirname "$T10_WINE")/wineserver" ]; then
         WINEPREFIX="$T10_D/pfx" "$(dirname "$T10_WINE")/wineserver" -w > /dev/null 2>&1
     fi

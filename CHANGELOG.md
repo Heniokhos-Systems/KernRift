@@ -4,6 +4,10 @@ All notable changes to `kernriftc` are documented in this file.
 
 ## Unreleased
 
+**Added (std): sys_net_ifaces and sys_ioctl** -- the IPv4 interface list (address, netmask, directed broadcast, UP/BROADCAST/LOOPBACK flags) on Linux/Android via SIOCGIFCONF and on Windows via `WSAIoctl(SIO_GET_INTERFACE_LIST)`, so a multi-homed client can send one directed broadcast per interface. macOS and none: -ENOSYS.
+
+**Added: PE import ws2_32 `WSAIoctl` (slot 45).** bcrypt's `BCryptGenRandom` moves to 47; slots are internal to each binary and every row keys on the import NAME. The `.idata` table is 2371 of its 4096 bytes. It is the first nine-argument import: the suite pins its Win64 frame (80 bytes, stores at rsp+32..64) and its arm64 ninth argument at [sp].
+
 **Added (std): sys_sendto, sys_recvfrom, SO_BROADCAST and sys_connect_timeout** -- datagrams with an address and a connect with a deadline that always leaves the socket blocking, for arsh discovery.
 
 **Added (std): sys_getenv (args.kr), sys_mkdir, sys_rename, sys_chmod, sys_file_mode and sys_last_errno (sys.kr)** -- the file and environment calls arsh's profile store needs on Windows, with GetLastError() mapped to Linux errno values (32 sharing violation -> EBUSY, 183 already exists -> EEXIST, unknown -> EIO).
