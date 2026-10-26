@@ -26530,11 +26530,23 @@ rm -rf "$STK_D"
 # refuse Windows --legacy and --emit=obj -- with exactly that message.
 TOTAL=$((TOTAL + 1))
 SB_D=$(mktemp -d "${TMPDIR:-/tmp}/krc_selfbuild.XXXXXX")
-SB_CC="$DIR/../build/krc2"
+# The compiler UNDER TEST, never the tree's build/krc2: a run that grades a
+# copied or renamed compiler must build with that one. KRC_RAW names it when
+# set; else $KRC itself when it is a compiler binary (an ELF); else, when $KRC
+# is `make test`'s wrapper (`exec "${0%/*}/krc2" --arch=...`), the krc2 the
+# wrapper execs. Anything else is a FAIL, not a fallback.
+SB_CC="${KRC_RAW:-}"
+sb_elf() { [ -f "$1" ] && [ "$(head -c 4 "$1" 2>/dev/null | od -An -tx1 | tr -d ' \n')" = "7f454c46" ]; }
+if [ -z "$SB_CC" ]; then
+    if sb_elf "$KRC"; then SB_CC="$KRC"
+    elif [ -f "$KRC" ] && grep -q '^exec "${0%/\*}/krc2" ' "$KRC" && sb_elf "$(dirname "$KRC")/krc2"; then SB_CC="$(dirname "$KRC")/krc2"
+    fi
+fi
 SB_SRCS=$(awk '/^SRCS[ \t]*=/ { f = 1; sub(/^SRCS[ \t]*=/, "") } f { c = ($0 ~ /\\$/); sub(/\\$/, ""); print; if (!c) exit }' "$DIR/../Makefile")
 ( cd "$DIR/.." && cat $SB_SRCS ) | grep -v '^import "' > "$SB_D/c.kr"
 SB_BAD=""; SB_OK=0; SB_REF=0
-for SB_A in x86_64 arm64; do
+sb_elf "$SB_CC" || SB_BAD=" [no bare compiler under test: KRC_RAW='${KRC_RAW:-}', KRC='$KRC']"
+[ -n "$SB_BAD" ] || for SB_A in x86_64 arm64; do
     for SB_T in linux macos windows android; do
         for SB_M in ir legacy obj asm; do
             case "$SB_M" in ir) SB_F="" ;; legacy) SB_F="--legacy" ;; obj) SB_F="--emit=obj" ;; asm) SB_F="--emit=asm" ;; esac
