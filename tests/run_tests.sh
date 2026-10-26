@@ -6291,7 +6291,7 @@ $KRC --arch=x86_64 /tmp/krc_fnaddr3_$$.kr -o /dev/null --emit=elf > /tmp/krc_fna
 grep -q "undefined function 'no_such_function_here'" /tmp/krc_fnaddr3_out_$$.txt \
     || fnaddr2_err="$fnaddr2_err an-absent-name-lost-its-own-message"
 if [ -z "$fnaddr2_err" ]; then
-    PASS=$((PASS + 1)); echo "  fnaddr_string_literal_still_resolves: PASS (called through it, and absent names still named)"
+    PASS=$((PASS + 1)); echo "  fnaddr_string_literal_still_resolves: PASS (called through it, and absent names still named)"   # tripwire: not a skip -- every leg ran; "absent" is about names
 else
     FAIL=$((FAIL + 1)); echo "FAIL: fnaddr_string_literal_still_resolves ($fnaddr2_err)"
 fi
@@ -6971,7 +6971,7 @@ cmp -s "$lcb_dir/dry.kr" "$lcb_dir/orig.kr" || { lcb_ok=0; lcb_why="--dry-run mo
 "$DIR/../build/krc2" lc undo "$lcb_dir/dry.kr" >/dev/null 2>&1
 [ "$?" != "0" ] || { lcb_ok=0; lcb_why="undo with no backup exited 0"; }
 if [ "$lcb_ok" = "1" ]; then
-    PASS=$((PASS + 1)); echo "  lc_fix_backup_and_undo: PASS (backup==original, undo restores, dry-run inert, missing backup errors)"
+    PASS=$((PASS + 1)); echo "  lc_fix_backup_and_undo: PASS (backup==original, undo restores, dry-run inert, missing backup errors)"   # tripwire: not a skip -- every leg ran; a missing backup is the case tested
 else
     FAIL=$((FAIL + 1)); echo "FAIL: lc_fix_backup_and_undo ($lcb_why)"
 fi
@@ -8798,33 +8798,46 @@ else
 fi
 rm -f /tmp/krc_migtypes_$$.kr
 
-# --- No skip is counted as a pass (tripwire over this file) -------------------
-# A skipped row goes through skip_row, which counts it in SKIP and, under
-# REQUIRE_FULL_RUN=1, fails it. Over fifty sites used to print SKIP and add to
-# PASS (or count nothing at all), and a few more passed a row one of whose legs
-# never ran, so a box without a tool reported a clean run. This row reads this
-# file and fails on any of the three shapes coming back:
-#   - an `echo` of SKIP anywhere but skip_row's own line (a skip skip_row
-#     does not count);
-#   - a PASS increment on the same line as, or the line next to, such an echo;
-#   - a PASS line whose message says a leg did not run (SKIP, "no qemu",
-#     "no wine", "not installed", "no python3").
-# The lines that name these patterns carry the marker SKIP-TRIPWIRE-OWN-LINE
-# and are not scanned.
+# --- No skip is counted as a pass, or goes uncounted (tripwire over this file)
+# A row that cannot run goes through skip_row, which counts it in SKIP and,
+# under REQUIRE_FULL_RUN=1, fails it. Sites used to print SKIP and add to PASS,
+# print SKIP and count nothing, or pass a row one of whose legs never ran, so a
+# box without a tool reported a clean run. This row reads this file and fails
+# on any of those shapes coming back, in any spelling the suite uses:
+#   - an echo or printf (not a value in $( ), not piped on) whose text says
+#     skip / skipped / skipping in any case, other than skip_row's own line
+#     and other than a FAIL message;
+#   - a PASS increment -- PASS=$((PASS + N)), ((PASS++)), ((PASS+=N)),
+#     let PASS... -- on the same line as, or the line after, output that says
+#     a leg did not run: skip, missing, absent, not installed, not found,
+#     unavailable, (did) not run, or no qemu / wine / python / gcc / objdump /
+#     readelf / xxd / emulator / runner / device; or output saying so on the
+#     line after a PASS increment.
+# A line whose wording only looks like that ends in "# tripwire: not a skip"
+# with the reason; the lines of this row carry SKIP-TRIPWIRE-OWN-LINE.
 TOTAL=$((TOTAL + 1))
-SKP_HITS=$(awk '
-    function code(l) { return (l !~ /^[ \t]*#/) && (l !~ /SKIP-TRIPWIRE-OWN-LINE/) }   # SKIP-TRIPWIRE-OWN-LINE
-    function skip_echo(l) { return code(l) && (l ~ /echo[^|]*: SKIP/) && (l !~ /^[ \t]*echo "  \$1: SKIP \(\$2\)"$/) }   # SKIP-TRIPWIRE-OWN-LINE
-    function pass_inc(l)  { return code(l) && (l ~ /PASS=\$\(\(PASS *\+ *[0-9]+\)\)/) }   # SKIP-TRIPWIRE-OWN-LINE
-    function leg_gone(l)  { return pass_inc(l) && (l ~ /SKIP|no qemu|no wine|not installed|no python3/) }   # SKIP-TRIPWIRE-OWN-LINE
-    { cur = $0 }
-    skip_echo(cur) || leg_gone(cur) || (NR > 1 && ((skip_echo(prev) && pass_inc(cur)) || (pass_inc(prev) && skip_echo(cur)))) { print NR ": " substr(cur, 1, 80) }   # SKIP-TRIPWIRE-OWN-LINE
-    { prev = cur }
+SKP_HITS=$(awk '   # SKIP-TRIPWIRE-OWN-LINE
+    function code(l)     { return (l !~ /^[ \t]*#/) && (l !~ /SKIP-TRIPWIRE-OWN-LINE/) && (l !~ /# tripwire: not a skip/) }   # SKIP-TRIPWIRE-OWN-LINE
+    function outtext(l,  r) {   # SKIP-TRIPWIRE-OWN-LINE
+        if (!match(l, /(^|[;&{( \t])(echo|printf)[ \t]/)) return ""   # SKIP-TRIPWIRE-OWN-LINE
+        r = substr(l, RSTART)   # SKIP-TRIPWIRE-OWN-LINE
+        if (substr(l, 1, RSTART) ~ /\$\([^)]*$/) return ""      # inside $( ): a value, not output   # SKIP-TRIPWIRE-OWN-LINE
+        if (r ~ /^[;&{( \t]*(echo|printf)[ \t][^|]*\|[^|]/) return ""   # piped into another command   # SKIP-TRIPWIRE-OWN-LINE
+        return r   # SKIP-TRIPWIRE-OWN-LINE
+    }   # SKIP-TRIPWIRE-OWN-LINE
+    function skipword(t) { t = tolower(t); return (t ~ /(^|[^a-z_])skip(ped|ping|s)?([^a-z_]|$)/) && (t !~ /fail/) }   # SKIP-TRIPWIRE-OWN-LINE
+    function legword(t)  { t = tolower(t); if (t ~ /fail/) return 0; return t ~ /(^|[^a-z_])(missing|absent|not installed|not found|unavailable|did not run|not run|no (qemu|wine|python3?|gcc|objdump|readelf|xxd|emulator|runner|device))([^a-z_]|$)/ }   # SKIP-TRIPWIRE-OWN-LINE
+    function passinc(l)  { return code(l) && (l ~ /PASS=\$\(\( *PASS *\+|\(\( *PASS *(\+\+|\+=)|let +"?PASS|PASS=\$\[ *PASS/) }   # SKIP-TRIPWIRE-OWN-LINE
+    { cur = $0; t = code(cur) ? outtext(cur) : "" }   # SKIP-TRIPWIRE-OWN-LINE
+    t != "" && skipword(t) && cur !~ /^[ \t]*echo "  \$1: SKIP \(\$2\)"$/ { print NR ": skip printed outside skip_row: " substr(cur, 1, 90); prev = cur; pt = t; next }   # SKIP-TRIPWIRE-OWN-LINE
+    passinc(cur) && ((t != "" && legword(t)) || (pt != "" && (legword(pt) || skipword(pt)))) { print NR ": PASS where a leg did not run: " substr(cur, 1, 90) }   # SKIP-TRIPWIRE-OWN-LINE
+    passinc(prev) && t != "" && (legword(t) || skipword(t)) { print NR ": PASS where a leg did not run: " substr(cur, 1, 90) }   # SKIP-TRIPWIRE-OWN-LINE
+    { prev = cur; pt = t }   # SKIP-TRIPWIRE-OWN-LINE
 ' "$DIR/run_tests.sh")   # SKIP-TRIPWIRE-OWN-LINE
 if [ -z "$SKP_HITS" ]; then   # SKIP-TRIPWIRE-OWN-LINE
     PASS=$((PASS + 1)); echo "  no_skip_counted_as_pass: PASS (every skip in run_tests.sh goes through skip_row)"   # SKIP-TRIPWIRE-OWN-LINE
 else
-    FAIL=$((FAIL + 1)); echo "FAIL: no_skip_counted_as_pass (a skip bypasses skip_row; use it: $(printf '%s\n' "$SKP_HITS" | head -5 | tr '\n' ';'))"   # SKIP-TRIPWIRE-OWN-LINE
+    FAIL=$((FAIL + 1)); echo "FAIL: no_skip_counted_as_pass (use skip_row, or mark a false alarm: $(printf '%s\n' "$SKP_HITS" | head -5 | tr '\n' ';'))"   # SKIP-TRIPWIRE-OWN-LINE
 fi
 
 # --- Bootstrap test ---
@@ -21698,7 +21711,7 @@ if $KRC $KRC_FLAGS "$LP_DIR/main2.kr" -o "$LP_DIR/collide" >/dev/null 2>&1; then
 fi
 if [ "$LP_EC2" = 48 ]; then
     PASS=$((PASS + 1))
-    echo "  import_longpath_prefix_collision: PASS (255-char prefix twin not skipped)"
+    echo "  import_longpath_prefix_collision: PASS (255-char prefix twin not skipped)"   # tripwire: not a skip -- the twin is not skipped: that is the claim
 else
     FAIL=$((FAIL + 1))
     echo "FAIL: import_longpath_prefix_collision (expected exit 48, got $LP_EC2)"
@@ -22771,7 +22784,7 @@ fi
 TOTAL=$((TOTAL + 1))
 rm -f "$CP_BIN"
 if $KRC --arch=x86_64 --legacy "$CP_SRC" -o "$CP_BIN" >/dev/null 2>&1 && [ -s "$CP_BIN" ]; then
-    PASS=$((PASS + 1)); echo "  call_ptr_args_7_accepted_legacy_x86: PASS (compiles; not run -- may be a foreign arch here)"
+    PASS=$((PASS + 1)); echo "  call_ptr_args_7_accepted_legacy_x86: PASS (compiles; not run -- may be a foreign arch here)"   # tripwire: not a skip -- compile-only by design (arch-pinned)
 else
     echo "FAIL: call_ptr_args_7_accepted_legacy_x86 (7 arguments must now compile on the legacy backend)"; FAIL=$((FAIL + 1))
 fi
@@ -23068,7 +23081,7 @@ rm -f "$CP_BIN"
 # the correct expectation.
 TOTAL=$((TOTAL + 1))
 if $KRC --arch=x86_64 --legacy "$CP6_SRC" -o "$CP_BIN" >/dev/null 2>&1 && [ -s "$CP_BIN" ]; then
-    PASS=$((PASS + 1)); echo "  call_ptr_args_6_accepted_legacy_x86: PASS (compiles; not run -- may be a foreign arch here)"
+    PASS=$((PASS + 1)); echo "  call_ptr_args_6_accepted_legacy_x86: PASS (compiles; not run -- may be a foreign arch here)"   # tripwire: not a skip -- compile-only by design (arch-pinned)
 else
     echo "FAIL: call_ptr_args_6_accepted_legacy_x86 (six args must still compile on the arch that refuses seven)"; FAIL=$((FAIL + 1))
 fi
@@ -25424,7 +25437,7 @@ MRC_REJ_LEG=$($KRC --arch="$RUN_ARCH" --legacy "$MRC_REJ_SRC" -o /tmp/krc_mrcrej
 if printf '%s' "$MRC_REJ_OUT" | grep -q "may not return a value on all paths" \
    && printf '%s' "$MRC_REJ_LEG" | grep -q "may not return a value on all paths"; then
     PASS=$((PASS + 1))
-    echo "  mainrc_typed_fallthrough_is_rejected: PASS (both backends name the missing return)"
+    echo "  mainrc_typed_fallthrough_is_rejected: PASS (both backends name the missing return)"   # tripwire: not a skip -- the missing return is the error tested
 else
     FAIL=$((FAIL + 1))
     echo "FAIL: mainrc_typed_fallthrough_is_rejected"
@@ -25541,7 +25554,7 @@ bcb_runner() {
         if command -v qemu-x86_64-static > /dev/null 2>&1; then echo "qemu-x86_64-static"; return 0; fi
         if command -v qemu-x86_64 > /dev/null 2>&1; then echo "qemu-x86_64"; return 0; fi
     fi
-    echo "SKIP"
+    echo "SKIP"   # tripwire: not a skip -- bcb_runner's sentinel value, read by its callers
 }
 
 if [ -z "$BCB_KRC" ]; then
@@ -26849,8 +26862,8 @@ log_why_all() { local r o=""; for r in library lkm obj-extern bare-metal riscv x
 # log_verdict <reason> <file> <errfile>: prints " <problem>" or nothing. The backstop
 # (skip-reason-ambiguous) fires when the declared reason passes but so does another.
 log_verdict() {
-    if ! log_why_ok "$1" "$2" "$3"; then echo " skip-reason-mismatch:${2#*/../}($1)[$(log_err "$3")]"
-    elif [ "$(log_why_all "$2" "$3")" != " $1" ]; then echo " skip-reason-ambiguous:${2#*/../}($1;passes:$(log_why_all "$2" "$3"))"; fi
+    if ! log_why_ok "$1" "$2" "$3"; then echo " skip-reason-mismatch:${2#*/../}($1)[$(log_err "$3")]"   # tripwire: not a skip -- part of a FAIL message built by the logging rows
+    elif [ "$(log_why_all "$2" "$3")" != " $1" ]; then echo " skip-reason-ambiguous:${2#*/../}($1;passes:$(log_why_all "$2" "$3"))"; fi   # tripwire: not a skip -- part of a FAIL message built by the logging rows
 }
 # Self-check of the matrix on made-up logs: a comment echoing "inline-asm" on an extern error
 # line is NOT an asm error (mismatch for bare-metal, clean for lkm), and a log with two real error
