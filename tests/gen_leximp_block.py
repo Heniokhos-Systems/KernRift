@@ -191,7 +191,9 @@ if [ -n "$LIP_A64_RUN" ]; then
         fi
     done
 else
-    echo "  lip_fstr_escapes_arm64_*: SKIP (no aarch64 host and no qemu-aarch64)"
+    for lip_mode in ir legacy; do
+        TOTAL=$((TOTAL + 1)); skip_row lip_fstr_escapes_arm64_$lip_mode "no aarch64 host and no qemu-aarch64"
+    done
 fi
 #      An embedded NUL is part of the segment on EVERY backend: the composed
 #      string is "a\0b5", which print() ends at the NUL -- so "a". A lowering
@@ -468,7 +470,7 @@ if command -v python3 > /dev/null 2>&1; then
         FAIL=$((FAIL + 1))
     fi
 else
-    echo "  lip_block_is_generated: SKIP (no python3)"
+    TOTAL=$((TOTAL + 1)); skip_row lip_block_is_generated "no python3"
 fi
 rm -rf "$LIP_D"
 # --- end of lexer / import-scanner parity (ANCHOR LEXIMP END) ---
