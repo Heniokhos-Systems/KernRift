@@ -1,0 +1,4 @@
+# Every suite row added by #143 (Windows PE unwind tables). Each must print
+# exactly one `  <name>: PASS` line in a full local run; see
+# tests/helpers/require_rows.sh. Maintained by every task that adds a row.
+pe_unwind_checker_selftest

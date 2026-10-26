@@ -1,0 +1,27 @@
+fn f3(uint64 p, uint64 k) -> uint64 {
+    uint64 a = k * 3
+    uint64 b = a + 7
+    uint64 c = b ^ a
+    file_write(1, "f3\n", 3)
+    store8(p, 1)
+    return a + b + c
+}
+fn f2(uint64 p, uint64 k) -> uint64 {
+    uint64 x = k + 1
+    uint64 y = x * x
+    uint64 r = f3(p, y)
+    return r + x + y
+}
+fn f1(uint64 p) -> uint64 {
+    uint64 s = 0
+    uint64 i = 0
+    while i < 3 { s = s + i  i = i + 1 }
+    uint64 r = f2(p, s)
+    return r + s
+}
+fn main() -> uint32 {
+    file_write(1, "armed\n", 6)
+    uint64 r = f1(16)
+    file_write(1, "survived\n", 9)
+    return 3
+}

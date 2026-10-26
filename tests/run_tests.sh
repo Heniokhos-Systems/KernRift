@@ -28433,6 +28433,15 @@ T10_QEMU="$(command -v qemu-aarch64-static || command -v qemu-aarch64 || true)"
 t10_ok() { PASS=$((PASS + 1)); echo "  $1: PASS${2:+ ($2)}"; }
 t10_bad() { FAIL=$((FAIL + 1)); echo "FAIL: $1 ($2)"; }
 t10_skip() { PASS=$((PASS + 1)); echo "  $1: SKIP ($2)"; }
+# #143 (Windows PE unwind tables) rows report ONLY through these three, so
+# tests/helpers/require_rows.sh sees every one of them (plan rev 4, section 0).
+# Each counts the row itself (TOTAL); call exactly one of them once per row.
+# pe_row_skip is for a genuinely ABSENT tool only (named in the reason) -- a tool
+# that is present but fails is pe_row_bad. CI may skip; the local gate never
+# accepts a skip of a manifest row.
+pe_row_ok() { TOTAL=$((TOTAL + 1)); PASS=$((PASS + 1)); echo "  $1: PASS${2:+ ($2)}"; }
+pe_row_bad() { TOTAL=$((TOTAL + 1)); FAIL=$((FAIL + 1)); echo "  $1: FAIL ($2)"; }
+pe_row_skip() { TOTAL=$((TOTAL + 1)); PASS=$((PASS + 1)); echo "  $1: SKIP ($2)"; }
 # Wine can fail to LAUNCH a program (prints "ShellExecuteEx failed", exits 1,
 # program never started): retry that, exactly that, 3 tries (see c7_wine).
 # Wine has also been seen (rarely, only inside full suite runs) to end a run
@@ -28948,6 +28957,22 @@ if [ -z "$T12_BAD" ]; then
 else
     t10_bad std_windows_arm64_calls_route_by_name "$T12_BAD"
 fi
+
+# --- #143 Windows PE unwind tables: the independent checker ---------------
+# tests/helpers/pe_unwind_check.py decodes .pdata/.xdata itself, cross-checks
+# llvm-readobj, and reads the --emit=asm listing for labels + bytes only. Its
+# selftest shows every rule BITES before any row trusts it: llvm-mc's own
+# tables pass, byte mutations of them (unsorted, overlap, gap, misaligned,
+# wrong FunctionLength, no DataDirectory[3]) fail with the owning rule id, and
+# the base compiler's committed image (tests/fixtures/pe_unwind_oracle/nest.exe,
+# no tables) fails C1.
+PEU_OUT=$(bash "$DIR/helpers/pe_unwind_selftest.sh" "$T10_D/peu_selftest" 2>&1); PEU_RC=$?
+case "$PEU_RC" in
+    0) pe_row_ok pe_unwind_checker_selftest "$(tail -1 <<< "$PEU_OUT")" ;;
+    77) pe_row_skip pe_unwind_checker_selftest "$(grep -m1 '^SKIP-REASON: ' <<< "$PEU_OUT" | sed 's/^SKIP-REASON: //')" ;;
+    *) PEU_WHY=$(grep -m1 '^FAIL ' <<< "$PEU_OUT" | cut -c1-300)
+       pe_row_bad pe_unwind_checker_selftest "rc=$PEU_RC ${PEU_WHY:-$(tail -c 300 <<< "$PEU_OUT" | tr '\n' '|')}" ;;
+esac
 
 if [ -z "$T10_WINE" ]; then
     for T10_R in net_loopback_windows_wine time_monotonic_and_sleep_windows_wine time_ms_of_ns_windows_wine alloc_guard_smoke_windows_wine alloc_guard_fault_windows_wine alloc_guard_fault_read_windows_wine alloc_guard_refused_is_fatal_windows_wine alloc_guard_refused_names_allocator_windows_wine std_together_windows_wine net_user_names_windows_wine; do

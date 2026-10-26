@@ -1,0 +1,8 @@
+# Rows that FAIL on the pe-unwind base (KernRift d8f2a56, measured 2026-10-26 with
+# wine, qemu-user, python3, llvm-* , clang, lld-link and llvm-dlltool present:
+# 1928/1930). Register #143: Wine exits 0 instead of 5 because the image has no
+# unwind tables. tests/helpers/require_rows.sh enforces this list BOTH ways:
+# each must FAIL exactly once, and the commit in which one turns green removes
+# it here. The list may only shrink.
+alloc_guard_fault_windows_wine
+alloc_guard_fault_read_windows_wine
