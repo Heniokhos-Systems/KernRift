@@ -28973,6 +28973,19 @@ case "$PEU_RC" in
     *) PEU_WHY=$(grep -m1 '^FAIL ' <<< "$PEU_OUT" | cut -c1-300)
        pe_row_bad pe_unwind_checker_selftest "rc=$PEU_RC ${PEU_WHY:-$(tail -c 300 <<< "$PEU_OUT" | tr '\n' '|')}" ;;
 esac
+# The frame rules (C3-C6, C4b) bite too: llvm-mc frames of every shape pass;
+# an unbalanced path, an rbp write, a naked push, a mis-offset code, the
+# fmt_uint digit loops unannotated or top-tested, and a Wine-only epilogue
+# misprediction fail with the owning rule; the committed static-RSP prototype
+# fails C6 at f2+0x98 (= +0x11a9, measured by cdb) while the frame-pointer one
+# passes.
+PEU_OUT=$(bash "$DIR/helpers/pe_unwind_selftest.sh" "$T10_D/peu_rules" rules 2>&1); PEU_RC=$?
+case "$PEU_RC" in
+    0) pe_row_ok pe_unwind_checker_rules_selftest "$(tail -1 <<< "$PEU_OUT")" ;;
+    77) pe_row_skip pe_unwind_checker_rules_selftest "$(grep -m1 '^SKIP-REASON: ' <<< "$PEU_OUT" | sed 's/^SKIP-REASON: //')" ;;
+    *) PEU_WHY=$(grep -m1 '^FAIL ' <<< "$PEU_OUT" | cut -c1-300)
+       pe_row_bad pe_unwind_checker_rules_selftest "rc=$PEU_RC ${PEU_WHY:-$(tail -c 300 <<< "$PEU_OUT" | tr '\n' '|')}" ;;
+esac
 
 if [ -z "$T10_WINE" ]; then
     for T10_R in net_loopback_windows_wine time_monotonic_and_sleep_windows_wine time_ms_of_ns_windows_wine alloc_guard_smoke_windows_wine alloc_guard_fault_windows_wine alloc_guard_fault_read_windows_wine alloc_guard_refused_is_fatal_windows_wine alloc_guard_refused_names_allocator_windows_wine std_together_windows_wine net_user_names_windows_wine; do
