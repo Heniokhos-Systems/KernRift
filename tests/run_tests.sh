@@ -28975,7 +28975,7 @@ fi
 # wrong FunctionLength, no DataDirectory[3]) fail with the owning rule id, and
 # the base compiler's committed image (tests/fixtures/pe_unwind_oracle/nest.exe,
 # no tables) fails C1.
-PEU_OUT=$(bash "$DIR/helpers/pe_unwind_selftest.sh" "$T10_D/peu_selftest" 2>&1); PEU_RC=$?
+PEU_OUT=$(env -u PE_UNWIND_CHECK_DISABLE bash "$DIR/helpers/pe_unwind_selftest.sh" "$T10_D/peu_selftest" 2>&1); PEU_RC=$?
 case "$PEU_RC" in
     0) pe_row_ok pe_unwind_checker_selftest "$(tail -1 <<< "$PEU_OUT")" ;;
     77) pe_row_skip pe_unwind_checker_selftest "$(grep -m1 '^SKIP-REASON: ' <<< "$PEU_OUT" | sed 's/^SKIP-REASON: //')" ;;
@@ -28988,7 +28988,7 @@ esac
 # misprediction fail with the owning rule; the committed static-RSP prototype
 # fails C6 at f2+0x98 (= +0x11a9, measured by cdb) while the frame-pointer one
 # passes.
-PEU_OUT=$(bash "$DIR/helpers/pe_unwind_selftest.sh" "$T10_D/peu_rules" rules 2>&1); PEU_RC=$?
+PEU_OUT=$(env -u PE_UNWIND_CHECK_DISABLE bash "$DIR/helpers/pe_unwind_selftest.sh" "$T10_D/peu_rules" rules 2>&1); PEU_RC=$?
 case "$PEU_RC" in
     0) pe_row_ok pe_unwind_checker_rules_selftest "$(tail -1 <<< "$PEU_OUT")" ;;
     77) pe_row_skip pe_unwind_checker_rules_selftest "$(grep -m1 '^SKIP-REASON: ' <<< "$PEU_OUT" | sed 's/^SKIP-REASON: //')" ;;

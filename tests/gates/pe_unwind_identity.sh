@@ -15,12 +15,18 @@
 # chosen from the tree this script lives in (KernRift: src/main.kr; MLRift:
 # src/main.mlr, which adds the NVPTX/AMDGPU emitters).
 #
-# Prints, last line: "IDENTICAL n/n" (exit 0) or "DIFFERENT d/n" (exit 1) and
-# lists each differing (file, configuration) in <out_dir>/diffs.txt.
+# The summary separates what each job proved: BYTE-IDENTICAL (both compilers
+# built it, every output identical), BOTH-REFUSED (both rejected it, with the
+# same status/stdout/stderr -- this proves the diagnostics agree, not that any
+# code is identical), TIMED OUT, and DIFFERENT. Last line: "IDENTICAL n/n
+# (byte-identical i, both-refused r)" and exit 0 only if nothing differs and
+# nothing timed out; otherwise "NOT IDENTICAL ..." and exit 1, with each
+# differing or timed-out (file, configuration) in <out_dir>/diffs.txt.
 #
-# Resource caps (plan section 0): every compile runs under ulimit -v 2000000
-# and timeout 20 s (300 s for the serial re-run of a job that timed out under
-# the parallel load). No Wine, no GPU.
+# Resource caps: every compile runs under ulimit -v 2000000 and timeout 120 s
+# in the parallel pass; a job that timed out on either side is re-run serially
+# with timeout 600 s (phase-1 review ruling); one still timing out fails the
+# gate. No Wine, no GPU.
 set -u
 if [ $# -ne 3 ]; then echo "usage: $0 <base_compiler> <new_compiler> <out_dir>" >&2; exit 2; fi
 BASE="$(readlink -f "$1")"; NEW="$(readlink -f "$2")"; OUT="$3"
@@ -136,7 +142,7 @@ if [ "$EXT" = mlr ] && [ "${PEU_IDENTITY_SET:-nonwin}" = nonwin ]; then
 fi
 
 export BASE NEW OUT ROOT
-TMO=20; export TMO
+TMO=120; export TMO
 # one_side <compiler> <side dir> <source|-> <flags...>: compile in a private
 # directory with the SAME relative output path for both sides, then print one
 # digest of status + output files + stdout (stats/timing lines dropped) + stderr.
@@ -188,25 +194,30 @@ export -f work
 NPROC="$(nproc 2>/dev/null || echo 4)"
 tr '\t' '\034' < "$JOBS" | xargs -d '\n' -P "$NPROC" -n 1 bash -c 'IFS=$'"'"'\034'"'"' read -r a b c <<< "$1"; work "$a" "$b" "$c"' _ > "$OUT/results.tsv"
 # A timeout is not a verdict: under the parallel load a large program can miss
-# the 20 s cap on one side only. Re-run every job in which either side timed
-# out (status 124), one at a time with timeout 300; a job still timing out then
-# stays a DIFF/TIMEOUT and fails the gate.
+# the cap on one side only. Re-run every job in which either side timed out
+# (status 124), one at a time with timeout 600; a job still timing out is
+# counted as TIMED OUT and fails the gate.
 awk -F'\t' '$4 ~ /^rc124:/ || $5 ~ /^rc124:/' "$OUT/results.tsv" > "$OUT/timeouts.tsv"
 if [ -s "$OUT/timeouts.tsv" ]; then
-    TMO=300; export TMO
+    TMO=600; export TMO
     grep -v -F -x -f "$OUT/timeouts.tsv" "$OUT/results.tsv" > "$OUT/results.tmp"
     cut -f2,3 "$OUT/timeouts.tsv" | while IFS=$'\t' read -r tf tid; do
         tflags="$(awk -F'\t' -v f="$tf" -v i="$tid" '$1 == f && $2 == i { print $3; exit }' "$JOBS")"
         work "$tf" "$tid" "$tflags"
     done >> "$OUT/results.tmp"
     mv "$OUT/results.tmp" "$OUT/results.tsv"
-    echo "re-ran $(wc -l < "$OUT/timeouts.tsv") timed-out jobs serially with timeout 300" > "$OUT/retries.txt"
+    echo "re-ran $(wc -l < "$OUT/timeouts.tsv") timed-out jobs serially with timeout 600" > "$OUT/retries.txt"
 fi
 rmdir "$OUT/w" 2> /dev/null
 
-n=$(wc -l < "$JOBS"); got=$(wc -l < "$OUT/results.tsv"); d=$(grep -c '^DIFF' "$OUT/results.tsv")
+n=$(wc -l < "$JOBS"); got=$(wc -l < "$OUT/results.tsv")
+# timed out: either side still at status 124 after the serial re-run
+to=$(awk -F'\t' '$4 ~ /^rc124:/ || $5 ~ /^rc124:/' "$OUT/results.tsv" | wc -l)
+d=$(awk -F'\t' '$1 == "DIFF" && $4 !~ /^rc124:/ && $5 !~ /^rc124:/' "$OUT/results.tsv" | wc -l)
+same_ok=$(awk -F'\t' '$1 == "SAME" && $4 ~ /^rc0:/' "$OUT/results.tsv" | wc -l)
+same_ref=$(awk -F'\t' '$1 == "SAME" && $4 !~ /^rc0:/ && $4 !~ /^rc124:/' "$OUT/results.tsv" | wc -l)
 ok=$(awk -F'\t' '$4 ~ /^rc0:/' "$OUT/results.tsv" | wc -l)
-grep '^DIFF' "$OUT/results.tsv" > "$OUT/diffs.txt"
+awk -F'\t' '$1 == "DIFF" || $4 ~ /^rc124:/' "$OUT/results.tsv" > "$OUT/diffs.txt"
 {
     echo "base: $BASE $(sha256sum < "$BASE" | cut -c1-64)"
     echo "new:  $NEW $(sha256sum < "$NEW" | cut -c1-64)"
@@ -215,5 +226,6 @@ grep '^DIFF' "$OUT/results.tsv" > "$OUT/diffs.txt"
 } | tee "$OUT/summary.txt"
 if [ "$got" != "$n" ]; then echo "INCOMPLETE $got/$n results" | tee -a "$OUT/summary.txt"; exit 1; fi
 [ -f "$OUT/retries.txt" ] && cat "$OUT/retries.txt" | tee -a "$OUT/summary.txt"
-if [ "$d" = 0 ]; then echo "IDENTICAL $n/$n" | tee -a "$OUT/summary.txt"; exit 0; fi
-echo "DIFFERENT $d/$n (see $OUT/diffs.txt; per-pair outputs kept under $OUT/w/)" | tee -a "$OUT/summary.txt"; exit 1
+echo "byte-identical $same_ok, both-refused $same_ref, timed out $to, different $d (of $n)" | tee -a "$OUT/summary.txt"
+if [ "$d" = 0 ] && [ "$to" = 0 ]; then echo "IDENTICAL $n/$n (byte-identical $same_ok, both-refused $same_ref)" | tee -a "$OUT/summary.txt"; exit 0; fi
+echo "NOT IDENTICAL: $d different, $to timed out (see $OUT/diffs.txt; per-pair outputs kept under $OUT/w/)" | tee -a "$OUT/summary.txt"; exit 1

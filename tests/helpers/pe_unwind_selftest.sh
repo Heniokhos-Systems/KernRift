@@ -221,6 +221,10 @@ mutate "$W/x.obj" "$W/x_mis.obj" misaligned
 expect neg_x64_misaligned C1 FAIL --arch x86_64 "$W/x_mis.obj"
 mutate "$W/a.obj" "$W/a_unsorted.obj" a64_unsorted
 expect neg_a64_unsorted C1 FAIL --arch arm64 "$W/a_unsorted.obj"
+# the swap only reorders the entries; the ORDER check itself must report it
+python3 "$CHK" --rules C1 --arch arm64 "$W/a_unsorted.obj" 2>&1 | grep -q '^C1: FAIL entries 0/1 not strictly ascending' \
+    || fail neg_a64_unsorted_by_order "the order-only swap was not reported as unsorted: $(python3 "$CHK" --rules C1 --arch arm64 "$W/a_unsorted.obj" 2>&1)"
+N=$((N + 1)); echo "  case neg_a64_unsorted_by_order: C1 reports 'not strictly ascending' for the order-only swap"
 mutate "$W/a.obj" "$W/a_flen.obj" a64_flen
 expect neg_a64_function_length C1 FAIL --arch arm64 "$W/a_flen.obj"
 mutate "$W/a.obj" "$W/a_mis.obj" a64_misaligned
@@ -702,13 +706,92 @@ if [ "$(grep -c ': PASS' <<< "$out")" = 6 ] && grep -q '^C6: FAIL' <<< "$out" \
     N=$((N + 1)); echo "  case save_nonvol_before_set_fpreg: C1..C5 PASS, C6 FAIL at exactly +0xb under the Wine rule (wine-9.0 frame rule)"
 else fail save_nonvol_before_set_fpreg "got: $(tr '\n' '|' <<< "$out" | head -c 500)"; fi
 
+# ---- the phase-1 reviewer's adversarial cases, pinned --------------------
+# a call into the MIDDLE of a function: neither a BeginAddress nor a leaf (C2)
+mk midcall x64 <<'EOF'
+        .text
+        .def m1; .scl 2; .type 32; .endef
+        .globl m1
+        .seh_proc m1
+m1:
+        pushq %rbp
+        .seh_pushreg %rbp
+        movq %rsp, %rbp
+        .seh_setframe %rbp, 0
+        .seh_endprologue
+        callq m2_mid
+        popq %rbp
+        retq
+        .seh_endproc
+        .def m2; .scl 2; .type 32; .endef
+        .globl m2
+        .seh_proc m2
+m2:
+        pushq %rbp
+        .seh_pushreg %rbp
+        movq %rsp, %rbp
+        .seh_setframe %rbp, 0
+        .seh_endprologue
+        nop
+m2_mid:
+        popq %rbp
+        retq
+        .seh_endproc
+EOF
+expect adv_mid_function_call C2 FAIL --arch x86_64 "$W/midcall.obj"
+# epilogues that are not the prologue's mirror (C4): pops reversed, one missing
+mk_epi() {   # <name> <epilogue lines>
+    { printf '        .text\n        .def e; .scl 2; .type 32; .endef\n        .globl e\n        .seh_proc e\ne:\n'
+      printf '        pushq %%rbx\n        .seh_pushreg %%rbx\n        pushq %%rbp\n        .seh_pushreg %%rbp\n'
+      printf '        movq %%rsp, %%rbp\n        .seh_setframe %%rbp, 0\n        .seh_endprologue\n'
+      printf '%s\n        retq\n        .seh_endproc\n' "$2"; } | mk "$1" x64
+}
+mk_epi epi_reversed "$(printf '        popq %%rbx\n        popq %%rbp')"
+expect adv_pops_reversed C4 FAIL --arch x86_64 "$W/epi_reversed.obj"
+mk_epi epi_missing "$(printf '        popq %%rbp')"
+expect adv_pop_missing C4 FAIL --arch x86_64 "$W/epi_missing.obj"
+# a bare ret in the body, outside any registered leaf (C4)
+body bare_ret <<'EOF'
+        testq %rax, %rax
+        je 1f
+        retq
+1:
+EOF
+expect adv_bare_ret_outside_leaf C4 FAIL --arch x86_64 "$W/bare_ret.obj"
+# UNWIND_INFO header mutations of h1 (fp_frames): version 2, the EHANDLER flag
+# (C1); FrameOffset 1, SizeOfProlog one too long (C3)
+python3 - "$W/fp_frames.obj" "$W" <<'EOF'
+import struct, sys
+b0 = open(sys.argv[1], 'rb').read()
+def sec(b, name):
+    n = struct.unpack_from('<H', b, 2)[0]; opt = struct.unpack_from('<H', b, 16)[0]
+    for i in range(n):
+        o = 20 + opt + 40 * i
+        if b[o:o + 8].rstrip(b'\0').decode() == name:
+            return struct.unpack_from('<I', b, o + 20)[0]
+x = sec(b0, '.xdata')
+for name, off, val in (('ver2', 0, 0x02), ('ehandler', 0, 0x01 | (1 << 3)), ('frameoff1', 3, 0x15), ('prolog_plus1', 1, None)):
+    b = bytearray(b0)
+    b[x + off] = val if val is not None else b[x + off] + 1
+    open('%s/hdr_%s.obj' % (sys.argv[2], name), 'wb').write(b)
+EOF
+expect adv_unwind_info_version_2 C1 FAIL --arch x86_64 "$W/hdr_ver2.obj"
+expect adv_unwind_info_ehandler_flag C1 FAIL --arch x86_64 "$W/hdr_ehandler.obj"
+expect adv_frame_offset_1 C3 FAIL --arch x86_64 "$W/hdr_frameoff1.obj"
+expect adv_frame_offset_1_c6 C6 FAIL --arch x86_64 "$W/hdr_frameoff1.obj"
+expect adv_size_of_prolog_plus_1 C3 FAIL --arch x86_64 "$W/hdr_prolog_plus1.obj"
+# --functions / --code-end are refused without --oracle
+out=$(python3 "$CHK" --rules C6 --arch x86_64 "$OR/nest8_fp.exe" --listing "$OR/nest8_fp.asm" --functions f3 2>&1); rc=$?
+if [ "$rc" = 2 ] && grep -q 'add --oracle' <<< "$out"; then N=$((N + 1)); echo "  case escape_hatch_needs_oracle: --functions refused without --oracle (rc 2)"
+else fail escape_hatch_needs_oracle "rc=$rc: $out"; fi
+
 # ---- committed prototype images (spec section 2.4 / 1.3) ------------------
-out=$(python3 "$CHK" --rules C6 --verbose --arch x86_64 "$OR/nest8_uw.exe" --listing "$OR/nest8_uw.asm" --code-end 32c 2>&1)
+out=$(python3 "$CHK" --rules C6 --verbose --arch x86_64 "$OR/nest8_uw.exe" --listing "$OR/nest8_uw.asm" --oracle --code-end 32c 2>&1)
 if grep -q '^C6: FAIL' <<< "$out" && grep -q 'C6 problem: f2: native rule at +0x98: ' <<< "$out"; then
     N=$((N + 1)); echo "  case proto_static_rsp_nest8_uw: C6 FAIL, incl. f2+0x98 (= +0x11a9, the RetAddr-0x10 frame cdb measured)"
 else fail proto_static_rsp_nest8_uw "want C6 FAIL at f2+0x98, got: $(grep -v problem <<< "$out" | tr '\n' '|' | head -c 300)"; fi
-out=$(python3 "$CHK" --rules C3,C4,C4b,C5,C6 --arch x86_64 "$OR/nest8_fp.exe" --listing "$OR/nest8_fp.asm" --code-end 33f --functions f3,f2 2>&1)
-if [ "$(grep -c ': PASS' <<< "$out")" = 5 ]; then
-    N=$((N + 1)); echo "  case proto_frame_pointer_nest8_fp: C3..C6 PASS on f3 and f2 (main is split by the prototype's pre-prologue argv block)"
+out=$(python3 "$CHK" --rules C3,C4,C4b,C5,C6 --arch x86_64 "$OR/nest8_fp.exe" --listing "$OR/nest8_fp.asm" --oracle --code-end 33f --functions f3,f2 2>&1)
+if [ "$(grep -c ': PASS (restricted to 2 functions by --functions (--oracle)' <<< "$out")" = 5 ]; then
+    N=$((N + 1)); echo "  case proto_frame_pointer_nest8_fp: C3..C6 PASS, each saying it was restricted to f3 and f2 (main is split by the prototype's pre-prologue argv block)"
 else fail proto_frame_pointer_nest8_fp "got: $(tr '\n' '|' <<< "$out" | head -c 400)"; fi
 echo "selftest: $N cases behaved"

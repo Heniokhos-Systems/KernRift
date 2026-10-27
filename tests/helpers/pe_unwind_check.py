@@ -68,7 +68,9 @@ All offsets are hex, relative to the start of .text (= listing offset 0).
 
 --code-end HEX states the end of code for a listing made before the compiler
 printed `; uw-code-end` (the committed prototype oracles); it overrides the
-annotation.
+annotation. --code-end and --functions are escape hatches for those oracles
+only: they are refused unless --oracle is given, and a rule restricted by
+--functions says so in its PASS line.
 
 Test-only knob: PE_UNWIND_CHECK_DISABLE=C1,C2 makes the named rules report PASS
 without checking (`C6wine` instead drops only C6's Wine rule set). It exists so the selftest's red run (a checker with a rule
@@ -532,8 +534,9 @@ def exception_table(binr, rules_out):
         else:
             b, u = struct.unpack_from('<II', raw, k * entsz)
             r = A64Record(b, u)
-            if (u & 3) == 0 and u % 4:
-                raise RuleFail('entry %d: .xdata RVA 0x%x is not 4-aligned' % (k, u))
+            # (UnwindData's low two bits are the packed-record flag; a nonzero
+            # flag is refused by A64Record.decode, so an unpacked .xdata RVA is
+            # 4-aligned by construction and needs no separate check)
             if b % 4:
                 raise RuleFail('entry %d: BeginAddress 0x%x is not 4-aligned' % (k, b))
         try:
@@ -547,13 +550,18 @@ def exception_table(binr, rules_out):
 def check_c1(binr, lst, recs):
     t = binr.text
     tend = t.rva + max(t.vsize, len(t.data)) if binr.is_image else t.rva + t.rawsize
+    # order and overlap first, over the whole table, so a mis-sorted table is
+    # reported as such rather than as a by-product (e.g. an arm64
+    # FunctionLength that no longer reaches the next entry)
+    for k, r in enumerate(recs):
+        if k and not recs[k - 1].begin < r.begin:
+            raise RuleFail('entries %d/%d not strictly ascending (0x%x, 0x%x)' % (k - 1, k, recs[k - 1].begin, r.begin))
+    for k, r in enumerate(recs):
+        if k and recs[k - 1].end > r.begin:
+            raise RuleFail('entries %d/%d overlap ([..,0x%x) and [0x%x,..))' % (k - 1, k, recs[k - 1].end, r.begin))
     for k, r in enumerate(recs):
         if not (t.rva <= r.begin and r.end <= tend):
             raise RuleFail('entry %d: [0x%x,0x%x) is outside .text' % (k, r.begin, r.end))
-        if k and not recs[k - 1].begin < r.begin:
-            raise RuleFail('entries %d/%d not strictly ascending (0x%x, 0x%x)' % (k - 1, k, recs[k - 1].begin, r.begin))
-        if k and recs[k - 1].end > r.begin:
-            raise RuleFail('entries %d/%d overlap ([..,0x%x) and [0x%x,..))' % (k - 1, k, recs[k - 1].end, r.begin))
         if binr.arch == 'x86_64':
             if r.version != 1 or r.flags != 0:
                 raise RuleFail('entry %d: UNWIND_INFO version %d flags %d, want 1/0' % (k, r.version, r.flags))
@@ -2406,8 +2414,14 @@ def main(argv):
     ap.add_argument('--code-end')
     ap.add_argument('--functions')
     ap.add_argument('--verbose', action='store_true')
+    ap.add_argument('--oracle', action='store_true')
     ap.add_argument('file')
     a = ap.parse_args(argv)
+    if (a.functions or a.code_end is not None) and not a.oracle:
+        print('error: --functions and --code-end are for the committed prototype oracles only '
+              '(listings made before the compiler printed annotations); add --oracle to use them',
+              file=sys.stderr)
+        return 2
     requested = a.rules.split(',') if a.rules else None
     rules = requested or [r for r in ALL_RULES if r != 'C0' or a.listing]
     for r in rules:
@@ -2470,6 +2484,8 @@ def main(argv):
                             more = ' (+%d more)' % (len(probs) - 3) if len(probs) > 3 else ''
                             raise RuleFail('; '.join(probs[:3]) + more)
                         msg = '%d functions' % len(ctx.fns)
+                        if only:
+                            msg = 'restricted to %d functions by --functions (--oracle)' % len(ctx.fns)
                         if rule == 'C6':
                             msg += ', %d offset x rule-set unwinds' % ctx.counts.get('C6', 0)
             print('%s: PASS (%s)' % (rule, msg))

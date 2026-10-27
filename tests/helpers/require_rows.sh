@@ -18,7 +18,9 @@
 #      (`FAIL: <name> (...)` or `  <name>: FAIL (...)`). A PASS, a SKIP or an
 #      absence fails: a known red that turns green must leave the file in the
 #      same commit, and one that silently stops running is caught too;
-#   4. no FAIL line names a row outside <known_reds>, and the suite's own
+#   4. no line of the log says a checker rule was "disabled by" the test-only
+#      PE_UNWIND_CHECK_DISABLE knob (a disabled rule prints PASS);
+#   5. no FAIL line names a row outside <known_reds>, and the suite's own
 #      failure count (`=== Results: X/Y passed, N failed ===`) equals the
 #      number of known reds, which also catches a FAIL printed in some other
 #      shape.
@@ -62,7 +64,12 @@ while IFS= read -r n; do
     fi
 done < <(names "$RED")
 
-# 4. no other FAIL, and the suite's own count agrees
+# 4. no rule switched off by the test-only knob anywhere in the log
+while IFS= read -r l; do
+    problem "a checker rule ran disabled: $(printf '%s' "$l" | cut -c1-200)"
+done < <(grep -E 'disabled by PE_UNWIND_CHECK_DISABLE' "$LOG")
+
+# 5. no other FAIL, and the suite's own count agrees
 while IFS= read -r n; do
     [ -n "${ISRED[$n]+x}" ] || problem "row '$n' FAILED and is not a known red"
 done < <( { grep -oE '^FAIL: [^ (]+' "$LOG" | sed 's/^FAIL: //'; grep -oE '^  [^ ]+: FAIL' "$LOG" | sed 's/^  //; s/: FAIL$//'; } | sed 's/:$//' | sort -u)

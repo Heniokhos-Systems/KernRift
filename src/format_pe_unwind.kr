@@ -301,6 +301,23 @@ fn uw_fn_finalize() {
     uw_set(uw_cur, 24, 1)
 }
 
+// The x86_64 name of 64-bit register `r` (0..15), as the checker spells it.
+fn uw_write_reg64(uint64 fd, uint64 r) {
+    if r == 0 { write(fd, "rax", 3) } else if r == 1 { write(fd, "rcx", 3) }
+    else if r == 2 { write(fd, "rdx", 3) } else if r == 3 { write(fd, "rbx", 3) }
+    else if r == 4 { write(fd, "rsp", 3) } else if r == 5 { write(fd, "rbp", 3) }
+    else if r == 6 { write(fd, "rsi", 3) } else if r == 7 { write(fd, "rdi", 3) }
+    else if r == 8 { write(fd, "r8", 2) } else if r == 9 { write(fd, "r9", 2) }
+    else if r < 16 {
+        write(fd, "r1", 2)
+        uint8[2] db
+        uint8 d = 48 + r - 10
+        uint64 dp = db + 0
+        unsafe { *(dp as uint8) = d }
+        write(fd, db, 1)
+    } else { write(fd, "r?", 2) }
+}
+
 // ---------------------------------------------------------------------------
 // Listing annotations (spec N-Mi1): the lines tests/helpers/pe_unwind_check.py
 // reads from a --target=windows --emit=asm listing. Offsets are hex, relative
@@ -336,8 +353,9 @@ fn uw_write_annotations(uint64 fd, uint64 source) {
         write_hex32(fd, uw_tab_get(uw_loops, i, 5, 2))
         write(fd, "-", 1)
         write_hex32(fd, uw_tab_get(uw_loops, i, 5, 3))
-        uint64 c = uw_tab_get(uw_loops, i, 5, 4)
-        if c == 1 { write(fd, " rcx\n", 5) } else { write(fd, " r?\n", 4) }
+        write(fd, " ", 1)
+        uw_write_reg64(fd, uw_tab_get(uw_loops, i, 5, 4))
+        write(fd, "\n", 1)
         i = i + 1
     }
     i = 0
