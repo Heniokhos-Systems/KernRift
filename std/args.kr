@@ -32,9 +32,11 @@ import "win32.kr"
 @shared static u64 cli_argv
 @shared static u64 cli_envp
 
-// A `--legacy` Windows build and a Windows `@naked fn main` leave cli_argc at the
-// 0xFFFFFFFF sentinel with cli_argv pointing at the raw command line, not at a
-// pointer array. Both readers treat that as "no arguments" rather than walk it.
+// A `--legacy` Windows build leaves cli_argc at the 0xFFFFFFFF sentinel with
+// cli_argv pointing at the raw command line, not at a pointer array. A Windows
+// `@naked fn main` leaves cli_argc at the sentinel and cli_argv at 0 (it gets no
+// command-line sequence at all); call GetCommandLineA yourself if you need the
+// raw line. Both readers treat the sentinel as "no arguments" rather than walk it.
 
 // Number of arguments, argv[0] included.
 fn sys_argc() -> u64 {

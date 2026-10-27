@@ -27766,6 +27766,9 @@ fi
 # (b) a @naked main gets NO parse (no ExitProcess epilogue to make clobbering
 #     its callee-saved registers safe): the parser leaf is absent from its PE on
 #     both arches, while the same program without @naked carries it.
+#     #143 (A6a): on x86_64 a naked main gets no command-line sequence AT ALL --
+#     its PE makes no call to the GetCommandLineA import slot (decoded by import
+#     name, as `call [rip+disp32]` through the IAT), while the plain main does.
 TOTAL=$((TOTAL + 1))
 printf 'static uint64 cli_argc\nstatic uint64 cli_argv\n@naked\nfn main() {\n    asm { "ret" }\n}\n' > "$C7_D/nk.kr"
 printf 'static uint64 cli_argc\nstatic uint64 cli_argv\nfn main() -> uint32 {\n    return 0\n}\n' > "$C7_D/nn.kr"
@@ -27783,6 +27786,30 @@ if len(b) < 64: print(" blob-missing")
 if open(sys.argv[2], "rb").read().count(b) != 0: print(" " + sys.argv[4] + ":naked-main-parses")
 if open(sys.argv[3], "rb").read().count(b) != 1: print(" " + sys.argv[4] + ":plain-main-does-not-parse")
 ' "$C7_D/parse-$C7_A.bin" "$C7_D/nk.exe" "$C7_D/nn.exe" "$C7_A" | tr -d '\n')"
+        if [ "$C7_A" = x86_64 ]; then
+            C7_WHY="$C7_WHY$(python3 - "$DIR/helpers" "$C7_D/nk.exe" "$C7_D/nn.exe" <<'C7GCLEOF' | tr -d '\n'
+import struct, sys
+sys.path.insert(0, sys.argv[1])
+import pe_unwind_check as c
+def gcl_calls(path):
+    b = c.Binary(path, 'x86_64')
+    slots = c.import_slots(b)
+    t = b.text.data
+    n = 0
+    for i in range(len(t) - 6):
+        if t[i] == 0xFF and t[i + 1] == 0x15:
+            tgt = b.text.rva + i + 6 + struct.unpack_from('<i', t, i + 2)[0]
+            if slots.get(tgt) == 'GetCommandLineA':
+                n += 1
+    return n, len(slots)
+nk, ns = gcl_calls(sys.argv[2])
+nn, _ = gcl_calls(sys.argv[3])
+if ns == 0: print(' x86_64:no-imports-decoded')
+if nk != 0: print(' x86_64:naked-main-calls-GetCommandLineA(%d)' % nk)
+if nn < 1: print(' x86_64:plain-main-never-calls-GetCommandLineA')
+C7GCLEOF
+)"
+        fi
     fi
     rm -f "$C7_D/nk.exe" "$C7_D/nn.exe"
 done
@@ -28057,10 +28084,12 @@ fi
 #     rows), but GetCPInfo(CP_ACP) never fails there, so the failure path --
 #     zero the CPINFO, i.e. no lead bytes -- is pinned here, with the call's
 #     arguments and the pointer each leaf call gets:
-#     main prologue: `sub rsp, 0x48`, xor ecx,ecx; lea rdx,[rsp+0x28]; call
+#     main prologue: `sub rsp, 0x40`, xor ecx,ecx; lea rdx,[rsp+0x28]; call
 #     [GetCPInfo]; test eax,eax; jne over three `mov qword [rsp+0x28/30/38],0`
 #     to call [GetCommandLineA]; the parse call has lea r9,[rsp+0x2E] (exactly
-#     two calls reach the parser leaf); `add rsp, 0x48` follows.
+#     two calls reach the parser leaf); `add rsp, 0x40` follows. (#143 A6a: the
+#     block runs AFTER main's prologue, where RSP is 16-aligned, so its frame
+#     is 0x40, not the 0x48 it needed at the 8-mod-16 entry.)
 #     op 114: `sub rsp, 0xF0`, the same with lea rdx,[rsp+0xD0] and zeroing at
 #     0xD0/D8/E0, then BOTH quoter calls (exactly two reach it) with lea
 #     r8,[rsp+0xD6]; `add rsp, 0xF0` before the ExitProcess. Every IAT call is
@@ -28109,10 +28138,10 @@ leaf = pe.find(blob)
 if leaf < 0: fail("prologue: no parser leaf in the image")
 cs = calls_to(pe, rp, rs, leaf)
 if len(cs) != 2: fail("prologue: %d calls reach the parser leaf, want 2" % len(cs))
-e = cpinfo(pe, va, rp, rs, 0x48, 0x28, "prologue")
+e = cpinfo(pe, va, rp, rs, 0x40, 0x28, "prologue")
 iat(pe, va, rp, e, "GetCommandLineA", "prologue")
 seq(pe, cs[1] - 8, b"\x49\x89\xf8\x4c\x8d\x4c\x24\x2e", "prologue: parse call's mov r8, rdi / lea r9, [rsp+0x2E]")
-if pe.find(b"\x48\x83\xc4\x48", cs[1], cs[1] + 64) < 0: fail("prologue: no add rsp, 0x48 after the parse")
+if pe.find(b"\x48\x83\xc4\x40", cs[1], cs[1] + 64) < 0: fail("prologue: no add rsp, 0x40 after the parse")
 # op 114
 pe, blob, va, rs, rp = image(1)
 leaf = pe.find(blob)
@@ -29032,6 +29061,42 @@ grep -q 'Usage\|usage' "$T10_D/peu_help.txt" || PEU_WHY="$PEU_WHY --help printed
 grep -q 'test-no-unwind' "$T10_D/peu_help.txt" && PEU_WHY="$PEU_WHY --help documents it;"
 if [ -z "$PEU_WHY" ]; then pe_row_ok pe_unwind_hidden_switch_accepted "accepted, inert, not in --help"
 else pe_row_bad pe_unwind_hidden_switch_accepted "$PEU_WHY"; fi
+# win_abi_frames (#143 A6a, spec 8.5): the Windows-ABI frame shapes RUN. The
+# std-free corpus is built --freestanding --target=windows (Windows code, ELF
+# container) and executed natively and under qemu-x86_64-static: ten-parameter
+# calls, frames over a page and over 64 KiB, leaf and non-leaf, recursion. The
+# program checks its own results (exit N = check N failed).
+PEU_FR="$DIR/fixtures/win_abi_frames/frames_x86_64.kr"
+PEU_QX="$(command -v qemu-x86_64-static || command -v qemu-x86_64 || true)"
+if ! $T10_KRC --arch=x86_64 --freestanding --target=windows "$PEU_FR" -o "$T10_D/peu_fr" > "$T10_D/peu_fr.log" 2>&1; then
+    pe_row_bad win_abi_frames_exec_x86_64_ir "build: $(grep -m1 error "$T10_D/peu_fr.log" | cut -c1-120)"
+elif [ -z "$PEU_QX" ]; then
+    pe_row_skip win_abi_frames_exec_x86_64_ir "no qemu-x86_64-static"
+else
+    chmod +x "$T10_D/peu_fr"
+    PEU_N=x
+    if [ "$(uname -m)" = x86_64 ]; then timeout 60 "$T10_D/peu_fr" > /dev/null 2>&1; PEU_N=$?; fi
+    timeout 120 "$PEU_QX" "$T10_D/peu_fr" > /dev/null 2>&1; PEU_Q=$?
+    if [ "$PEU_Q" = 0 ] && { [ "$PEU_N" = 0 ] || [ "$PEU_N" = x ]; }; then
+        pe_row_ok win_abi_frames_exec_x86_64_ir "native rc=$PEU_N, qemu rc=0"
+    else
+        pe_row_bad win_abi_frames_exec_x86_64_ir "native rc=$PEU_N, qemu rc=$PEU_Q (N = check N failed)"
+    fi
+fi
+# rbp is never a colour on Windows (#143 A6a): every function of the
+# self-hosted compiler's --target=windows listing opens with pushes ending in
+# `push rbp`, `sub rsp`, `mov rbp, rsp`, and nothing writes rbp again before
+# its epilogue (tests/helpers/x86_win_rbp_scan.py: labels + byte column,
+# disassembled by objdump; the byte column must be gap-free).
+if ! command -v objdump > /dev/null 2>&1 || ! command -v python3 > /dev/null 2>&1; then
+    pe_row_skip ir_x86_win_no_rbp_colour "needs objdump and python3"
+elif ! $T10_KRC --arch=x86_64 --target=windows --emit=asm "$DIR/../build/krc.kr" -o "$T10_D/peu_self.asm" > "$T10_D/peu_self.log" 2>&1; then
+    pe_row_bad ir_x86_win_no_rbp_colour "listing build: $(grep -m1 error "$T10_D/peu_self.log" | cut -c1-120)"
+else
+    PEU_OUT=$(python3 "$DIR/helpers/x86_win_rbp_scan.py" "$T10_D/peu_self.asm" 2>&1); PEU_RC=$?
+    if [ "$PEU_RC" = 0 ]; then pe_row_ok ir_x86_win_no_rbp_colour "$(tail -1 <<< "$PEU_OUT")"
+    else pe_row_bad ir_x86_win_no_rbp_colour "$(head -2 <<< "$PEU_OUT" | tr '\n' '|')$(tail -1 <<< "$PEU_OUT")"; fi
+fi
 
 if [ -z "$T10_WINE" ]; then
     for T10_R in net_loopback_windows_wine time_monotonic_and_sleep_windows_wine time_ms_of_ns_windows_wine alloc_guard_smoke_windows_wine alloc_guard_fault_windows_wine alloc_guard_fault_read_windows_wine alloc_guard_refused_is_fatal_windows_wine alloc_guard_refused_names_allocator_windows_wine std_together_windows_wine net_user_names_windows_wine; do

@@ -6390,8 +6390,21 @@ fn ir_phys_regs_ensure() {
     ir_phys_regs_cap = 32
 }
 
+// The number of CALLEE-SAVED colours at the front of the x86_64 colour files
+// (colours 0..ir_x86_callee_colours-1). 6 (rbx, r12-r15, rbp) everywhere
+// except Windows, where rbp is the frame pointer of every non-naked function
+// (#143: the unwind tables describe each frame through it) and is never a
+// colour: 5. Every place that means "the callee-saved prefix" reads this.
+static uint64 ir_x86_callee_colours = 6
+
+fn ir_x86_set_callee_colours() {
+    ir_x86_callee_colours = 6
+    if target_os == 2 { ir_x86_callee_colours = 5 }
+}
+
 fn ir_regalloc_init() {
-    IR_NUM_REGS = 6
+    ir_x86_set_callee_colours()
+    IR_NUM_REGS = ir_x86_callee_colours
     ir_phys_regs_ensure()
     uint64 p0 = ir_phys_regs
     unsafe { *(p0 as uint64) = 3 }
@@ -6404,7 +6417,7 @@ fn ir_regalloc_init() {
     uint64 p4 = ir_phys_regs + 32
     unsafe { *(p4 as uint64) = 15 }
     uint64 p5 = ir_phys_regs + 40
-    unsafe { *(p5 as uint64) = 5 }       // rbp
+    unsafe { *(p5 as uint64) = 5 }       // rbp (colour 5 only off Windows: IR_NUM_REGS is 5 there)
 }
 
 // --- Wide x86_64 colour file ----------------------------------------------
@@ -6431,6 +6444,36 @@ fn ir_regalloc_init() {
 static uint64 IR_X86_WIDE_NUM_REGS = 12
 
 fn ir_regalloc_init_x86_wide() {
+    ir_x86_set_callee_colours()
+    if target_os == 2 {
+        // Windows: rbp is the frame pointer, so the callee-saved prefix is
+        // colours 0-4 and the six scratch registers move down to 5-10.
+        IR_NUM_REGS = IR_X86_WIDE_NUM_REGS - 1
+        ir_phys_regs_ensure()
+        uint64 w0 = ir_phys_regs
+        unsafe { *(w0 as uint64) = 3 }        // colour 0  -> rbx
+        uint64 w1 = ir_phys_regs + 8
+        unsafe { *(w1 as uint64) = 12 }       // colour 1  -> r12
+        uint64 w2 = ir_phys_regs + 16
+        unsafe { *(w2 as uint64) = 13 }       // colour 2  -> r13
+        uint64 w3 = ir_phys_regs + 24
+        unsafe { *(w3 as uint64) = 14 }       // colour 3  -> r14
+        uint64 w4 = ir_phys_regs + 32
+        unsafe { *(w4 as uint64) = 15 }       // colour 4  -> r15
+        uint64 w5 = ir_phys_regs + 40
+        unsafe { *(w5 as uint64) = 6 }        // colour 5  -> rsi
+        uint64 w6 = ir_phys_regs + 48
+        unsafe { *(w6 as uint64) = 7 }        // colour 6  -> rdi
+        uint64 w7 = ir_phys_regs + 56
+        unsafe { *(w7 as uint64) = 8 }        // colour 7  -> r8
+        uint64 w8 = ir_phys_regs + 64
+        unsafe { *(w8 as uint64) = 9 }        // colour 8  -> r9
+        uint64 w9 = ir_phys_regs + 72
+        unsafe { *(w9 as uint64) = 10 }       // colour 9  -> r10
+        uint64 w10 = ir_phys_regs + 80
+        unsafe { *(w10 as uint64) = 11 }      // colour 10 -> r11
+        return
+    }
     IR_NUM_REGS = IR_X86_WIDE_NUM_REGS
     ir_phys_regs_ensure()
     uint64 p0 = ir_phys_regs
@@ -6730,7 +6773,7 @@ fn ir_seed_wide_ceilings_generic(uint64 arch_a64, uint64 cap) {
 }
 
 fn ir_x86_seed_wide_ceilings() {
-    ir_seed_wide_ceilings_generic(0, 6)
+    ir_seed_wide_ceilings_generic(0, ir_x86_callee_colours)
 }
 
 // Cap every vreg that receives a register-passed parameter to the
@@ -6749,7 +6792,7 @@ fn ir_x86_seed_param_ceilings() {
             if ir_insn_opcode(i) == 61 {
                 if ir_insn_src1(i) == 0 {
                     if ir_insn_imm(i) < 6 {
-                        ir_color_ceil_set(ir_insn_dest(i), 6)
+                        ir_color_ceil_set(ir_insn_dest(i), ir_x86_callee_colours)
                     }
                 }
             }
@@ -14958,34 +15001,8 @@ fn ir_emit_x86_function(uint64 fn_node) {
         c7_argc_off = static_lookup_by_name("cli_argc", 8)
         c7_argv_off = static_lookup_by_name("cli_argv", 8)
     }
-    if tok_matches(fn_name_tok, "main", 4) != 0 && freestanding == 0 && target_os == 2 && is_naked == 0 && (c7_argc_off != 0xFFFFFFFF || c7_argv_off != 0xFFFFFFFF) {
-        // Windows (spec C7): parse the command line UCRT's way into a fresh
-        // VirtualAlloc'd argv, exactly as the Linux loader would have laid it
-        // out -- see the C7 block at the end of this file.
-        c7_x86_emit_main_argv(c7_argc_off, c7_argv_off)
-    } else if tok_matches(fn_name_tok, "main", 4) != 0 && freestanding == 0 && target_os == 2 {
-        // No cli_argc/cli_argv to fill, or a @naked main (no ExitProcess
-        // epilogue, so its callee-saved registers may not be clobbered): the
-        // pre-C7 sequence, unchanged. A @naked main that reads cli_argc sees
-        // the 0xFFFFFFFF sentinel -- documented as unsupported (spec C7).
-        // Windows: call GetCommandLineA -> rax = raw command line string
-        // PE entry: loader calls us, RSP = 8 mod 16.
-        // Use 0x28 shadow (0x20 + 8 alignment) so RSP is 16-aligned before CALL.
-        emit_win_alloc_stack(0x28)
-        emit_win_call_iat(7)          // GetCommandLineA (IAT slot 7) -> rax = cmdline
-        emit_win_free_stack(0x28)
-        // Store raw cmdline pointer as cli_argv (will be parsed by win_init_args)
-        uint64 argv_off_w = static_lookup_by_name("cli_argv", 8)
-        if argv_off_w != 0xFFFFFFFF {
-            emit_static_store(argv_off_w)
-        }
-        // Set cli_argc = 0xFFFFFFFF as "needs parsing" sentinel
-        ir_emit_mov_r64_imm64(0, 0xFFFFFFFF)
-        uint64 argc_off_w = static_lookup_by_name("cli_argc", 8)
-        if argc_off_w != 0xFFFFFFFF {
-            emit_static_store(argc_off_w)
-        }
-    }
+    // (Windows main: the command-line block is emitted AFTER the prologue,
+    // see 5c below -- #143: every instruction must lie inside a described frame.)
     if tok_matches(fn_name_tok, "main", 4) != 0 && freestanding == 0 && target_os != 2 {
         // Linux/macOS/Android: argc/argv on stack. [RSP]=argc, [RSP+8]=&argv[0]
         // mov rax, [rsp]  ; rax = argc
@@ -15040,6 +15057,11 @@ fn ir_emit_x86_function(uint64 fn_node) {
         // a disagreement is a mismatched push/pop count, i.e. worse than
         // the bug being fixed. @naked is untouched: it gets no prologue.
         if x86_has_asm != 0 { used_mask = used_mask | 0x3F }
+        // Windows (#143): only colours below ir_x86_callee_colours are
+        // callee-saved (wide-file colours 5+ are scratch there), and rbp is
+        // pushed by EVERY non-naked function -- it becomes the frame pointer
+        // below. Bit 5 keeps meaning "push/pop rbp" for the epilogue.
+        if target_os == 2 { used_mask = (used_mask & 0x1F) | 32 }
         // Color → physical reg encoding:
         //   color 0 → rbx (0x53)
         //   color 1 → r12 (0x41 0x54)
@@ -15099,6 +15121,54 @@ fn ir_emit_x86_function(uint64 fn_node) {
         emit_byte(0x81)
         emit_byte(0xEC)
         emit_u32_le(frame_size)
+    }
+    // 5b. Windows: establish the frame pointer -- the LAST prologue
+    // instruction, so the unwind record's SET_FPREG is its first code and the
+    // body may move RSP freely (#143, spec 4.1).
+    if target_os == 2 && is_naked == 0 {
+        emit_byte(0x48); emit_byte(0x89); emit_byte(0xE5)      // mov rbp, rsp
+    }
+
+    // 5c. Windows main(): the command line, now INSIDE the frame (RSP is
+    // 16-aligned here, so the C7 block takes 0x40 and the plain one 0x20).
+    // A @naked main gets no command-line sequence at all: cli_argc keeps the
+    // 0xFFFFFFFF sentinel and cli_argv is 0, set by plain static stores that
+    // move no stack (a naked main must call GetCommandLineA itself for the
+    // raw line; std/args.kr and the compiler's win_init_args treat cli_argv 0
+    // as "no arguments").
+    if tok_matches(fn_name_tok, "main", 4) != 0 && freestanding == 0 && target_os == 2 {
+        if is_naked != 0 {
+            uint64 nk_argv = static_lookup_by_name("cli_argv", 8)
+            if nk_argv != 0xFFFFFFFF {
+                ir_emit_mov_r64_imm64(0, 0)
+                emit_static_store(nk_argv)
+            }
+            uint64 nk_argc = static_lookup_by_name("cli_argc", 8)
+            if nk_argc != 0xFFFFFFFF {
+                ir_emit_mov_r64_imm64(0, 0xFFFFFFFF)
+                emit_static_store(nk_argc)
+            }
+        } else if c7_argc_off != 0xFFFFFFFF || c7_argv_off != 0xFFFFFFFF {
+            // Windows (spec C7): parse the command line UCRT's way into a fresh
+            // VirtualAlloc'd argv, exactly as the Linux loader would have laid it
+            // out -- see the C7 block at the end of this file.
+            c7_x86_emit_main_argv(c7_argc_off, c7_argv_off)
+        } else {
+            // No cli_argc/cli_argv to fill: the pre-C7 sequence (raw command
+            // line in cli_argv, sentinel in cli_argc; win_init_args parses it).
+            emit_win_alloc_stack(0x20)
+            emit_win_call_iat(7)          // GetCommandLineA (IAT slot 7) -> rax = cmdline
+            emit_win_free_stack(0x20)
+            uint64 argv_off_w = static_lookup_by_name("cli_argv", 8)
+            if argv_off_w != 0xFFFFFFFF {
+                emit_static_store(argv_off_w)
+            }
+            ir_emit_mov_r64_imm64(0, 0xFFFFFFFF)
+            uint64 argc_off_w = static_lookup_by_name("cli_argc", 8)
+            if argc_off_w != 0xFFFFFFFF {
+                emit_static_store(argc_off_w)
+            }
+        }
     }
 
     // 6. Allocate block offset tracking and branch/return fixup lists
@@ -16072,7 +16142,7 @@ fn c7_x86_emit_main_argv(uint64 argc_off, uint64 argv_off) {
     uint64 l_leaf = c7_label()
     uint64 l_over = c7_label()
     uint64 l_cpok = c7_label()
-    emit_win_alloc_stack(0x48)
+    emit_win_alloc_stack(0x40)   // RSP 16-aligned (after the prologue, #143)
     // GetCPInfo(CP_ACP, &cpinfo at [rsp+0x28]) -- the ANSI code page's lead
     // bytes, the ones UCRT's narrow argv parse honours. On failure the CPINFO
     // is zeroed: no lead bytes, the single-byte parse (UCRT's own fallback
@@ -16111,7 +16181,7 @@ fn c7_x86_emit_main_argv(uint64 argc_off, uint64 argv_off) {
     if argc_off != 0xFFFFFFFF { emit_static_store(argc_off) }
     c7_b3(0x48, 0x89, 0xD8)                 // mov rax, rbx
     if argv_off != 0xFFFFFFFF { emit_static_store(argv_off) }
-    emit_win_free_stack(0x48)
+    emit_win_free_stack(0x40)
     c7_x86_jmp(l_over)
     c7_bind(l_fail)
     c7_x86_emit_die(121, "krc runtime: argv allocation failed\n", 36)

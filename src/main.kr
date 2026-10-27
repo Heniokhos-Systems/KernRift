@@ -1773,8 +1773,16 @@ fn emit_asm_listing(uint64 output_path, uint64 arch, uint64 text_start, uint64 s
                     // LOCK prefix
                     write_hex8(fd, b0)
                     write(fd, " ", 1)
-                    uint64 wmsg_1535 = "...          lock ..."
-                    write(fd, wmsg_1535, str_len(wmsg_1535))
+                    // A Windows listing prints EVERY byte this line consumes
+                    // (below): the #143 checker reads the byte column as the
+                    // image (rule C0), and this walker also lands here on an
+                    // 0xF0 that is part of a displacement or immediate, after
+                    // which it skipped up to 7 bytes unprinted. Other targets
+                    // keep the old line (their listings stay byte-identical).
+                    if target_os != 2 {
+                        uint64 wmsg_1535 = "...          lock ..."
+                        write(fd, wmsg_1535, str_len(wmsg_1535))
+                    }
                     // Dump rest of instruction (up to 7 more bytes)
                     uint64 li = 1
                     while li < 8 && pos + li < fn_end {
@@ -1787,6 +1795,18 @@ fn emit_asm_listing(uint64 output_path, uint64 arch, uint64 text_start, uint64 s
                             li = li + 1
                             break
                         }
+                    }
+                    if target_os == 2 {
+                        uint64 lk = 1
+                        while lk < li {
+                            uint64 lkp = bp + lk
+                            uint64 lkb = 0
+                            unsafe { *(lkp as uint8) -> lkb }
+                            write_hex8(fd, lkb)
+                            write(fd, " ", 1)
+                            lk = lk + 1
+                        }
+                        write(fd, "         lock ...", 17)
                     }
                     pos = pos + li
                 } else if b0 >= 0x50 && b0 <= 0x57 {
@@ -8709,7 +8729,9 @@ fn main() {
     // command line itself (UCRT rules) and cli_argc is never the 0xFFFFFFFF
     // sentinel there. Kept for `--legacy --target=windows`, whose prologue
     // still stores the sentinel (a declared gap; nothing passes --legacy).
-    if cli_argc == 0xFFFFFFFF {
+    // cli_argv != 0: a Windows @naked fn main leaves cli_argc at the sentinel
+    // with cli_argv 0 (no command-line sequence, #143) -- "no arguments".
+    if cli_argc == 0xFFFFFFFF && cli_argv != 0 {
         win_init_args()
     }
 

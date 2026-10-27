@@ -273,7 +273,8 @@ class Binary:
 # Listing (labels, byte column, annotations)
 # --------------------------------------------------------------------------
 class Listing:
-    LINE_X86 = re.compile(r'^\s+([0-9a-f]{8}): ((?:[0-9a-f]{2} )+)')
+    # the last byte of a line may lack its trailing space (e.g. a lone `f3`)
+    LINE_X86 = re.compile(r'^\s+([0-9a-f]{8}): ((?:[0-9a-f]{2}(?: |$))+)')
     LINE_A64 = re.compile(r'^\s+([0-9a-f]{8}): ([0-9a-f]{8})(?:\s|$)')
     LABEL = re.compile(r'^([A-Za-z_.$][\w.$@]*):\s*$')
 

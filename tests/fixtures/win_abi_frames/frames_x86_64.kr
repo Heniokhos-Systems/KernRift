@@ -1,0 +1,129 @@
+// #143 win_abi_frames corpus, x86_64: Windows-ABI code (--target=windows)
+// built as a --freestanding ELF, so the Windows prologue/epilogue shapes
+// (rbp frame pointer, push rbp in every non-naked function) RUN natively and
+// under qemu-x86_64-static. No std, no builtins: those lower to import-table
+// calls that do not exist in an ELF. Every check is computed and compared
+// here; exit status 0 = all passed, N = check N failed (exit via raw bytes:
+// the assembler has no `mov rdi, imm` form, spec 8.5; exit_group (231),
+// because under qemu-user plain exit (60) ends only the thread and the
+// emulator then reports 0 whatever the status).
+
+// ten parameters: six in registers, four on the stack
+fn f10(uint64 a, uint64 b, uint64 c, uint64 d, uint64 e, uint64 f, uint64 g, uint64 h, uint64 i, uint64 j) -> uint64 {
+    return a * 1 + b * 2 + c * 3 + d * 4 + e * 5 + f * 6 + g * 7 + h * 8 + i * 9 + j * 10
+}
+
+// a caller of f10 that has its own locals live across the call
+fn call10(uint64 k) -> uint64 {
+    uint64 x = k + 1
+    uint64 y = k * 3
+    uint64 r = f10(x, x + 1, x + 2, x + 3, x + 4, x + 5, x + 6, x + 7, x + 8, x + 9)
+    return r + x + y
+}
+
+// a frame larger than a page: two 4 KiB arrays (an array over 4096 bytes is
+// heap-allocated on every target, so big frames are built from several)
+fn page_frame(uint64 n) -> uint64 {
+    uint64[512] a
+    uint64[512] b
+    uint64 i = 0
+    while i < 512 { a[i] = i * n  b[i] = i  i = i + 1 }
+    uint64 s = 0
+    i = 0
+    while i < 512 { s = s + a[i] + b[i]  i = i + 1 }
+    return s
+}
+
+// a frame larger than 64 KiB: seventeen 4 KiB arrays (69 632 bytes), calling out
+fn big_frame(uint64 n) -> uint64 {
+    uint64[512] a00
+    uint64[512] a01
+    uint64[512] a02
+    uint64[512] a03
+    uint64[512] a04
+    uint64[512] a05
+    uint64[512] a06
+    uint64[512] a07
+    uint64[512] a08
+    uint64[512] a09
+    uint64[512] a10
+    uint64[512] a11
+    uint64[512] a12
+    uint64[512] a13
+    uint64[512] a14
+    uint64[512] a15
+    uint64[512] a16
+    uint64 i = 0
+    while i < 512 {
+        a00[i] = i + n + 0
+        a01[i] = i + n + 1
+        a02[i] = i + n + 2
+        a03[i] = i + n + 3
+        a04[i] = i + n + 4
+        a05[i] = i + n + 5
+        a06[i] = i + n + 6
+        a07[i] = i + n + 7
+        a08[i] = i + n + 8
+        a09[i] = i + n + 9
+        a10[i] = i + n + 10
+        a11[i] = i + n + 11
+        a12[i] = i + n + 12
+        a13[i] = i + n + 13
+        a14[i] = i + n + 14
+        a15[i] = i + n + 15
+        a16[i] = i + n + 16
+        i = i + 1
+    }
+    uint64 s = 0
+    s = s + a00[511]
+    s = s + a01[511]
+    s = s + a02[511]
+    s = s + a03[511]
+    s = s + a04[511]
+    s = s + a05[511]
+    s = s + a06[511]
+    s = s + a07[511]
+    s = s + a08[511]
+    s = s + a09[511]
+    s = s + a10[511]
+    s = s + a11[511]
+    s = s + a12[511]
+    s = s + a13[511]
+    s = s + a14[511]
+    s = s + a15[511]
+    s = s + a16[511]
+    return s + page_frame(1)
+}
+
+// a leaf
+fn leaf(uint64 a, uint64 b) -> uint64 {
+    return (a ^ b) + (a & b)
+}
+
+// recursion
+fn fib(uint64 n) -> uint64 {
+    if n < 2 { return n }
+    return fib(n - 1) + fib(n - 2)
+}
+
+// recursion through a ten-parameter call
+fn rec10(uint64 n) -> uint64 {
+    if n == 0 { return 0 }
+    return f10(n, n, n, n, n, n, n, n, n, n) + rec10(n - 1)
+}
+
+fn main() {
+    // f10(1..10) = 1+4+9+...+100 = 385
+    if f10(1, 2, 3, 4, 5, 6, 7, 8, 9, 10) != 385 { asm { "0xBF 0x01 0x00 0x00 0x00 0xB8 0xE7 0x00 0x00 0x00 0x0F 0x05" } }
+    // call10(4): x = 5, f10(5..14) = sum((4+k)*k, k=1..10) = 605, + 5 + 12
+    if call10(4) != 622 { asm { "0xBF 0x02 0x00 0x00 0x00 0xB8 0xE7 0x00 0x00 0x00 0x0F 0x05" } }
+    // page_frame(2) = 3 * (0 + ... + 511) = 392448
+    if page_frame(2) != 392448 { asm { "0xBF 0x03 0x00 0x00 0x00 0xB8 0xE7 0x00 0x00 0x00 0x0F 0x05" } }
+    // big_frame(5) = sum(511 + 5 + k, k=0..16) + page_frame(1) = 8908 + 261632
+    if big_frame(5) != 270540 { asm { "0xBF 0x04 0x00 0x00 0x00 0xB8 0xE7 0x00 0x00 0x00 0x0F 0x05" } }
+    if leaf(12, 10) != 14 { asm { "0xBF 0x05 0x00 0x00 0x00 0xB8 0xE7 0x00 0x00 0x00 0x0F 0x05" } }
+    if fib(20) != 6765 { asm { "0xBF 0x06 0x00 0x00 0x00 0xB8 0xE7 0x00 0x00 0x00 0x0F 0x05" } }
+    // rec10(6) = 55 * (6+5+4+3+2+1) = 1155
+    if rec10(6) != 1155 { asm { "0xBF 0x07 0x00 0x00 0x00 0xB8 0xE7 0x00 0x00 0x00 0x0F 0x05" } }
+    asm { "0x31 0xFF 0xB8 0xE7 0x00 0x00 0x00 0x0F 0x05" }
+}

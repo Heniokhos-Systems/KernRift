@@ -5,3 +5,5 @@ pe_unwind_checker_selftest
 pe_unwind_checker_rules_selftest
 wine_crash_override_does_not_mask
 pe_unwind_hidden_switch_accepted
+win_abi_frames_exec_x86_64_ir
+ir_x86_win_no_rbp_colour
