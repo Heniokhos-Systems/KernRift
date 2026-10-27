@@ -29117,6 +29117,24 @@ else
         pe_row_bad win_abi_frames_exec_x86_64_ir "native rc=$PEU_N, qemu rc=$PEU_Q (N = check N failed)"
     fi
 fi
+# ... and the same corpus through the legacy backend (#143 A8): its Windows
+# frame is push rbx; push rbp; sub rsp,F'; mov rbp,rsp; mov [rsp+s],r12 with
+# F' = F + 8, and stack arguments at F' + 24 + 32 + i*8.
+if ! $T10_KRC --legacy --arch=x86_64 --freestanding --target=windows "$PEU_FR" -o "$T10_D/peu_frl" > "$T10_D/peu_frl.log" 2>&1; then
+    pe_row_bad win_abi_frames_exec_x86_64_legacy "build: $(grep -m1 error "$T10_D/peu_frl.log" | cut -c1-120)"
+elif [ -z "$PEU_QX" ]; then
+    pe_row_skip win_abi_frames_exec_x86_64_legacy "no qemu-x86_64-static"
+else
+    chmod +x "$T10_D/peu_frl"
+    PEU_N=x
+    if [ "$(uname -m)" = x86_64 ]; then timeout 60 "$T10_D/peu_frl" > /dev/null 2>&1; PEU_N=$?; fi
+    timeout 120 "$PEU_QX" "$T10_D/peu_frl" > /dev/null 2>&1; PEU_Q=$?
+    if [ "$PEU_Q" = 0 ] && { [ "$PEU_N" = 0 ] || [ "$PEU_N" = x ]; }; then
+        pe_row_ok win_abi_frames_exec_x86_64_legacy "native rc=$PEU_N, qemu rc=0"
+    else
+        pe_row_bad win_abi_frames_exec_x86_64_legacy "native rc=$PEU_N, qemu rc=$PEU_Q (N = check N failed)"
+    fi
+fi
 # rbp is never a colour on Windows (#143 A6a): every function of the
 # self-hosted compiler's --target=windows listing opens with pushes ending in
 # `push rbp`, `sub rsp`, `mov rbp, rsp`, and nothing writes rbp again before
@@ -29223,6 +29241,26 @@ else
     else pe_row_bad pe_unwind_tables_x86_64_ir "$PEU_N checked;$PEU_WHY"; fi
 fi
 
+# The same over every fixture that builds with --legacy (#143 A8): the
+# legacy prologue push rbx; push rbp; sub rsp,F'; mov rbp,rsp; mov [rsp+s],r12
+# (review ruling (b)) and its guarded top-tested f-string digit loops
+# (ruling (c)).
+if ! command -v python3 > /dev/null 2>&1 || ! command -v llvm-readobj > /dev/null 2>&1 || ! command -v llvm-objdump > /dev/null 2>&1; then
+    pe_row_skip pe_unwind_tables_x86_64_legacy "needs python3, llvm-readobj and llvm-objdump"
+else
+    PEU_WHY=""; PEU_N=0; PEU_LOOPS=0
+    for PEU_F in "$DIR"/fixtures/*.kr "$DIR"/smoke/*.kr; do
+        PEU_B=$(basename "$PEU_F" .kr)
+        $T10_KRC --legacy --arch=x86_64 --target=windows --emit=pe --test-listing="$T10_D/peu_c.lst" "$PEU_F" -o "$T10_D/peu_c.exe" > /dev/null 2>&1 || continue
+        PEU_N=$((PEU_N + 1))
+        grep -q '^; uw-loops .* r10$' "$T10_D/peu_c.lst" && PEU_LOOPS=$((PEU_LOOPS + 1))
+        PEU_O=$(python3 -B "$PEU_CHK" --arch x86_64 "$T10_D/peu_c.exe" --listing "$T10_D/peu_c.lst" 2>&1)
+        [ "$(grep -c ': PASS' <<< "$PEU_O")" = 8 ] || PEU_WHY="$PEU_WHY $PEU_B:$( { grep -m1 -e FAIL -e error <<< "$PEU_O" || head -1 <<< "$PEU_O"; } | cut -c1-120);"
+    done
+    if [ -z "$PEU_WHY" ] && [ "$PEU_N" -ge 40 ] && [ "$PEU_LOOPS" -ge 1 ]; then pe_row_ok pe_unwind_tables_x86_64_legacy "$PEU_N fixtures pass C0-C6 + C4b, $PEU_LOOPS with the r10 digit loops"
+    else pe_row_bad pe_unwind_tables_x86_64_legacy "$PEU_N checked, $PEU_LOOPS with the r10 digit loops (want >= 1);$PEU_WHY"; fi
+fi
+
 # Faults under Wine (spec 8.3): the image ends with STATUS_ACCESS_VIOLATION
 # (status 5), prints exactly its own output, and Wine's +unwind trace of the
 # faulting thread walks the expected functions and then leaves the image
@@ -29246,7 +29284,9 @@ peu_wine_fault() {
     ck=$(python3 -B "$PEU_CHK" --arch x86_64 "$T10_D/peu_w.exe" --listing "$T10_D/peu_w.lst" 2>&1)
     if [ "$(grep -c ': PASS' <<< "$ck")" = 8 ]; then ck="checker C0-C6 + C4b PASS"
     else ck="checker: $( { grep -m1 -e FAIL -e error <<< "$ck" || head -1 <<< "$ck"; } | cut -c1-160)"; fi
-    if [ "$rc" = 5 ] && [ "$got" = "$want" ] && [[ "$ch" == walk* ]] && [ "$ck" = "checker C0-C6 + C4b PASS" ]; then pe_row_ok "$row" "rc=5, $ch, $ck$(t10_note)"
+    local so=""
+    if [ "$want" = "-" ]; then want="$got"; so=", stdout not checked: legacy file_write(1, ..) does not reach stdout (#145)"; fi
+    if [ "$rc" = 5 ] && [ "$got" = "$want" ] && [[ "$ch" == walk* ]] && [ "$ck" = "checker C0-C6 + C4b PASS" ]; then pe_row_ok "$row" "rc=5, $ch, $ck$so$(t10_note)"
     else pe_row_bad "$row" "rc=$rc stdout '$(tr '\n' '|' <<< "$got" | head -c 40)' want rc=5 '$(tr '\n' '|' <<< "$want")'; $ch; $ck"; fi
 }
 peu_wine_fault pe_unwind_nested_fault_windows_wine pe_unwind_nested_fault "$(printf 'armed\nf3')" f3,f2,f1,main
@@ -29254,6 +29294,14 @@ peu_wine_fault pe_unwind_stack_args_fault_windows_wine pe_unwind_stack_args_faul
 peu_wine_fault pe_unwind_naked_fault_windows_wine pe_unwind_naked_fault armed poke,f1,main
 # A C7 main (it reads its command line; parse leaf + die routine inside main).
 peu_wine_fault pe_unwind_argv_main_fault_windows_wine pe_unwind_argv_main_fault "$(printf 'armed\nf2')" f2,f1,main
+# The legacy backend (#143 A8): the same faults, built --legacy (a legacy
+# @naked function is refused on Windows, so there is no legacy naked row),
+# and the expression temporaries the legacy backend pushes (println's
+# push rdi/push rcx around GetStdHandle; the f-string digit loops).
+peu_wine_fault pe_unwind_nested_fault_legacy_windows_wine pe_unwind_nested_fault - f3,f2,f1,main --legacy
+peu_wine_fault pe_unwind_stack_args_fault_legacy_windows_wine pe_unwind_stack_args_fault - f3,f2,main --legacy
+peu_wine_fault pe_unwind_argv_main_fault_legacy_windows_wine pe_unwind_argv_main_fault - f2,f1,main --legacy
+peu_wine_fault pe_unwind_temp_push_fault_windows_wine pe_unwind_temp_push_fault "$(printf '7\n3')" f2,f1,main --legacy
 
 # The compiler itself, built for Windows x86_64 with --test-listing: the image
 # is byte-identical to the one built without the switch (the listing does not

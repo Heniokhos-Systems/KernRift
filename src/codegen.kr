@@ -5612,6 +5612,8 @@ fn gen_expr(uint64 node) {
                 uint64 fs_pop_jzd = fs_pop_done - fs_pop_jz - 4
                 uint32 fs_pop_jzd32 = fs_pop_jzd
                 unsafe { *((out_buf + fs_pop_jz) as uint32) = fs_pop_jzd32 }
+                // #143: a guarded top-tested pair driven by r10 (C4b, ruling (c))
+                uw_balanced_loops(fs_dl, fs_dl_back + 4, fs_pop, fs_pop_back + 4, 10)
                 // len = rdi - r11
                 emit_byte(0x4C); emit_byte(0x29); emit_byte(0xDF)   // sub rdi, r11
                 emit_byte(0x49); emit_byte(0x89); emit_byte(0xFA)   // mov r10, rdi (len)
@@ -14163,7 +14165,11 @@ fn gen_function(uint64 fn_node) {
     // For main function: emit _start trampoline that stores argc/argv to statics
     // Skip in freestanding mode
     uint64 wnt = name_tok
-    if tok_matches(wnt, "main", 4) != 0 && target_os == 2 && freestanding == 0 {
+    // #143 A8: a non-naked Windows main reads its command line AFTER the
+    // prologue (below, 0x20 of shadow space), so the unwind data describes
+    // the frame at every offset. Only a @naked main -- refused on every
+    // shipping Windows slice (win_legacy_naked_refuse) -- keeps this block.
+    if tok_matches(wnt, "main", 4) != 0 && target_os == 2 && freestanding == 0 && is_naked != 0 {
         // All 13 IAT entries are loader-resolved. Call GetCommandLineA directly.
         // PE entry: the loader calls us, so RSP ≡ 8 mod 16.
         // Use 0x28 shadow space (0x20 + 8 alignment) so RSP is 16-aligned before CALL.
@@ -14217,7 +14223,9 @@ fn gen_function(uint64 fn_node) {
     // still covers the empty body, and it costs two bytes. The zeroing that
     // actually decides the exit status happens on the two paths that LEAVE
     // main's body: see legacy_main_zero_ret below and the epilogue.
-    if tok_matches(wnt, "main", 4) != 0 && freestanding == 0 {
+    // (#143 A8: a non-naked Windows main does this after its prologue and
+    // command-line block instead -- see the prologue below.)
+    if tok_matches(wnt, "main", 4) != 0 && freestanding == 0 && (target_os != 2 || is_naked != 0) {
         // xor eax, eax
         emit_byte(0x31); emit_byte(0xC0)
     }
@@ -14326,15 +14334,35 @@ fn gen_function(uint64 fn_node) {
     uint64 prologue_start = out_len
     uint64 frame_patch = out_len
 
+    // #143 A8 (ruling (b)): on Windows the frame is
+    //   push rbx; push rbp; sub rsp,F'; mov rbp,rsp; mov [rsp+s],r12
+    // with F' = F + 8 (keeps RSP 16-aligned after the extra push) and the r12
+    // save AFTER SET_FPREG. The unwind codes are recorded at the end of the
+    // function, once F' is known (uw_pro_* hold the instruction ends).
+    uint64 uw_pro_rbx = 0
+    uint64 uw_pro_rbp = 0
+    uint64 uw_pro_sub = 0
+    uint64 uw_pro_fp = 0
+    uint64 uw_pro_r12 = 0
     if is_naked == 0 {
         // push rbx
         emit_byte(0x53)
+        uw_pro_rbx = out_len
+        if target_os == 2 {
+            emit_byte(0x55)                         // push rbp
+            uw_pro_rbp = out_len
+        }
         // sub rsp, FRAME_SIZE (placeholder)
         emit_byte(0x48)
         emit_byte(0x81)
         emit_byte(0xEC)
         frame_patch = out_len
         emit_u32_le(0)
+        uw_pro_sub = out_len
+        if target_os == 2 {
+            emit_byte(0x48); emit_byte(0x89); emit_byte(0xE5)   // mov rbp, rsp
+            uw_pro_fp = out_len
+        }
         // Save r12 to frame slot (callee-saved, for binop register spill)
         if r12_save_slot < 128 {
             emit_byte(0x4C); emit_byte(0x89); emit_byte(0x64)
@@ -14342,6 +14370,27 @@ fn gen_function(uint64 fn_node) {
         } else {
             emit_byte(0x4C); emit_byte(0x89); emit_byte(0xA4)
             emit_byte(0x24); emit_u32_le(r12_save_slot)
+        }
+        uw_pro_r12 = out_len
+        if tok_matches(wnt, "main", 4) != 0 && target_os == 2 && freestanding == 0 {
+            // GetCommandLineA, after the prologue: RSP is 16-aligned here, so
+            // 0x20 of shadow space keeps it aligned at the call.
+            emit_win_alloc_stack(0x20)
+            emit_win_call_iat(7)          // GetCommandLineA -> rax = cmdline ptr
+            emit_win_free_stack(0x20)
+            // the raw cmdline pointer becomes cli_argv (parsed by win_init_args)
+            uint64 argv_off_w2 = static_lookup_by_name("cli_argv", 8)
+            if argv_off_w2 != 0xFFFFFFFF {
+                emit_static_store(argv_off_w2)
+            }
+            // cli_argc = 0xFFFFFFFF: the "needs parsing" sentinel
+            emit_mov_rax_imm(0xFFFFFFFF)
+            uint64 argc_off_w2 = static_lookup_by_name("cli_argc", 8)
+            if argc_off_w2 != 0xFFFFFFFF {
+                emit_static_store(argc_off_w2)
+            }
+            // main's default exit status (see legacy_main_zero_ret)
+            emit_byte(0x31); emit_byte(0xC0)        // xor eax, eax
         }
     }
 
@@ -14936,6 +14985,7 @@ fn gen_function(uint64 fn_node) {
 
     // For @naked functions, skip epilogue entirely
     if is_naked != 0 {
+        uw_fn_set_naked()   // #143: zero-code record (refused on shipping Windows slices)
         return
     }
 
@@ -14986,18 +15036,34 @@ fn gen_function(uint64 fn_node) {
         }
     }
 
+    // F' (#143 A8): one slot more on Windows, for the push rbp
+    uint64 frame_w = var_frame_size
+    if target_os == 2 { frame_w = var_frame_size + 8 }
     // add rsp, FRAME_SIZE
     emit_byte(0x48)
     emit_byte(0x81)
     emit_byte(0xC4)
-    emit_u32_le(var_frame_size)
+    emit_u32_le(frame_w)
+    // pop rbp (Windows)
+    if target_os == 2 { emit_byte(0x5D) }
     // pop rbx
     emit_byte(0x5B)
     // ret
     emit_byte(0xC3)
 
     // Patch prologue frame size
-    patch_u32(frame_patch, var_frame_size)
+    patch_u32(frame_patch, frame_w)
+
+    // #143: the unwind codes, in prologue order, now that F' is known; then
+    // the record is sealed (after every end-of-function patch, I6).
+    if target_os == 2 {
+        uw_x64_push(3, uw_pro_rbx)
+        uw_x64_push(5, uw_pro_rbp)
+        uw_x64_alloc(frame_w, uw_pro_sub)
+        uw_x64_setfp(5, uw_pro_fp)
+        uw_x64_save(12, r12_save_slot, uw_pro_r12)
+        uw_fn_finalize()
+    }
 
     // Patch overflow arg offsets (7+ params)
     // After push rbx + push r12 + sub rsp, frame_size:
@@ -15017,7 +15083,8 @@ fn gen_function(uint64 fn_node) {
             uint64 wploc = ploc
             uint64 soff = var_frame_size + 16 + oi * 8
             if target_os == 2 {
-                soff = var_frame_size + 16 + 32 + oi * 8
+                // F' + rbx + rbp + return address + 32 bytes of shadow space
+                soff = frame_w + 24 + 32 + oi * 8
             }
             patch_u32(wploc, soff)
             oi = oi + 1

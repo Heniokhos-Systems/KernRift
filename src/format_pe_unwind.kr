@@ -35,7 +35,7 @@ static uint64 uw_test_no_unwind = 0
 // it emitted, so the checker's listing equals the image by construction.
 static uint64 uw_test_listing_path = 0
 // bit (arch * 2 + legacy): arch 0 = x86_64, 1 = arm64; legacy 0 = IR, 1 = legacy
-static uint64 uw_backend_ready = 1        // A6b-1: x86_64 IR
+static uint64 uw_backend_ready = 3        // A6b-1: x86_64 IR; A8: x86_64 legacy
 
 fn uw_backend_is_ready(uint64 arch, uint64 legacy) -> uint64 {
     uint64 bit = 1 << (arch * 2 + legacy)
