@@ -4,5 +4,6 @@
 # unwind tables. tests/helpers/require_rows.sh enforces this list BOTH ways:
 # each must FAIL exactly once, and the commit in which one turns green removes
 # it here. The list may only shrink.
-alloc_guard_fault_windows_wine
-alloc_guard_fault_read_windows_wine
+# A6b-1 (x86_64 IR unwind tables): alloc_guard_fault_windows_wine and
+# alloc_guard_fault_read_windows_wine turned green and left this list; it is
+# now empty, so the suite must report 0 failed.

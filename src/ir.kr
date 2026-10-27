@@ -10285,6 +10285,7 @@ fn ir_emit_x86_insn(uint64 ii) {
         uint64 fu_back = fu_loop - out_len - 1
         uint8 fu_b8 = fu_back
         emit_byte(fu_b8)
+        uint64 fu_loop_end = out_len
         // rcx = digit count, save for return
         // mov rax, rcx (48 89 C8) — save count
         emit_byte(0x48)
@@ -10310,6 +10311,9 @@ fn ir_emit_x86_insn(uint64 ii) {
         uint64 fu_pop_back = fu_pop - out_len - 1
         uint8 fu_pb = fu_pop_back
         emit_byte(fu_pb)
+        // #143: a data-dependent push loop and its pop loop, counted in rcx;
+        // the checker's C4b proves the pair depth-neutral from the bytes.
+        uw_balanced_loops(fu_loop, fu_loop_end, fu_pop, out_len, 1)
         // rax = digit count (return value)
         if dst_r != 0xFFFFFFFF {
             ir_emit_mov_r64_r64(dst_r, 0)
@@ -12482,6 +12486,7 @@ fn ir_emit_x86_insn(uint64 ii) {
         uint64 ff_pop_p = out_buf + ff_pop_jnz
         emit_byte(0)
         unsafe { *(ff_pop_p as uint8) = ff_pop_disp }
+        uw_balanced_loops(ff_ui_loop, ff_ui_jnz + 1, ff_pop_loop, ff_pop_jnz + 1, 1)   // #143 (counter rcx)
 
         // .ff_ui_done:
         uint64 ff_ui_done = out_len
@@ -12721,6 +12726,7 @@ fn ir_emit_x86_insn(uint64 ii) {
         uint64 ff_fi_pop_p = out_buf + ff_fi_pop_jnz
         emit_byte(0)
         unsafe { *(ff_fi_pop_p as uint8) = ff_fi_pop_disp }
+        uw_balanced_loops(ff_fi_loop, ff_fi_jnz + 1, ff_fi_pop_loop, ff_fi_pop_jnz + 1, 1)   // #143 (counter rcx)
 
         // .ff_fi_done:
         uint64 ff_fi_done = out_len
@@ -15127,29 +15133,37 @@ fn ir_emit_x86_function(uint64 fn_node) {
         //   color 2 → r13 (0x41 0x55)
         //   color 3 → r14 (0x41 0x56)
         //   color 4 → r15 (0x41 0x57)
+        // (#143: each push is reported to the unwind recorder, a no-op
+        // unless target_os == 2.)
         if (used_mask & 1) != 0 {
             emit_byte(0x53)                       // push rbx
             push_count = push_count + 1
+            uw_x64_push(3, out_len)
         }
         if (used_mask & 2) != 0 {
             emit_byte(0x41); emit_byte(0x54)      // push r12
             push_count = push_count + 1
+            uw_x64_push(12, out_len)
         }
         if (used_mask & 4) != 0 {
             emit_byte(0x41); emit_byte(0x55)      // push r13
             push_count = push_count + 1
+            uw_x64_push(13, out_len)
         }
         if (used_mask & 8) != 0 {
             emit_byte(0x41); emit_byte(0x56)      // push r14
             push_count = push_count + 1
+            uw_x64_push(14, out_len)
         }
         if (used_mask & 16) != 0 {
             emit_byte(0x41); emit_byte(0x57)      // push r15
             push_count = push_count + 1
+            uw_x64_push(15, out_len)
         }
         if (used_mask & 32) != 0 {
             emit_byte(0x55)                       // push rbp
             push_count = push_count + 1
+            uw_x64_push(5, out_len)
         }
     }
     // Stash for the epilogue (which is emitted later but needs to mirror
@@ -15180,13 +15194,19 @@ fn ir_emit_x86_function(uint64 fn_node) {
         emit_byte(0x81)
         emit_byte(0xEC)
         emit_u32_le(frame_size)
+        uw_x64_alloc(frame_size, out_len)
     }
     // 5b. Windows: establish the frame pointer -- the LAST prologue
     // instruction, so the unwind record's SET_FPREG is its first code and the
     // body may move RSP freely (#143, spec 4.1).
     if target_os == 2 && is_naked == 0 {
         emit_byte(0x48); emit_byte(0x89); emit_byte(0xE5)      // mov rbp, rsp
+        uw_x64_setfp(5, out_len)
     }
+    // Every size is known now: seal the record (a naked function's is the
+    // zero-code kind 1, spec 4.3).
+    if is_naked != 0 { uw_fn_set_naked() }
+    uw_fn_finalize()
 
     // 5c. Windows main(): the command line, now INSIDE the frame (RSP is
     // 16-aligned here, so the C7 block takes 0x40 and the plain one 0x20).

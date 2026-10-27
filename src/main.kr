@@ -1136,9 +1136,15 @@ fn xtensa_nyi(uint64 what) {
     exit(1)
 }
 
+// Nonzero: where the listing's code ends (a --test-listing of a PE/COFF build,
+// whose buffer continues with strings, statics and the image's other
+// sections); 0: the end of the buffer, as --emit=asm has always done.
+static uint64 asm_listing_end_override = 0
+
 fn emit_asm_listing(uint64 output_path, uint64 arch, uint64 text_start, uint64 source, uint64 tokens) {
     uint64 fd = open_output_or_die(output_path)
     uint64 code_end = codegen_output_len()
+    if asm_listing_end_override != 0 { code_end = asm_listing_end_override }
     uint64 wmsg_903 = "; KernRift assembly listing\n"
     write(fd, wmsg_903, str_len(wmsg_903))
     if arch == 0 {
@@ -2583,7 +2589,22 @@ fn emit_asm_listing(uint64 output_path, uint64 arch, uint64 text_start, uint64 s
         }
         fi = fi + 1
     }
+    // #143: the unwind checker's annotations (end of code, leaves, balanced
+    // loops, naked functions, user asm). Windows listings only, so every other
+    // listing stays byte-identical.
+    if target_os == 2 { uw_write_annotations(fd, source, text_start) }
     file_close(fd)
+}
+
+// --test-listing=PATH: write the listing of the code this PE/COFF compile
+// emitted (after every fixup; it ends at the end of code). Windows only.
+fn uw_maybe_write_listing(uint64 path, uint64 arch, uint64 text_start, uint64 source) {
+    if path == 0 { return }
+    if target_os != 2 { return }
+    asm_listing_end_override = uw_code_end
+    if uw_code_end == 0xFFFFFFFFFFFFFFFF { asm_listing_end_override = codegen_output_len() }
+    emit_asm_listing(path, arch, text_start, source, 0)
+    asm_listing_end_override = 0
 }
 
 // Bare-metal entry selection, shared by every raw-emission path.
@@ -3330,6 +3351,45 @@ fn pe_finalize_x64(uint64 header_size, uint64 text_start, uint64 text_size) {
     uint64 image_size = 0x1000 + text_va_size + 0x1000  // last 0x1000 = .idata page: needs pe_idata_size() <= 0x1000 (format_pe.kr)
     patch_u32(0x90, image_size)
     resolve_win_iat_fixups(text_start, iat_rva_val)
+    // #143: the exception directory, in a third section .pdata right after
+    // .idata -- only when this build writes tables and its backend has been
+    // converted (uw_backend_ready); otherwise the image is exactly as before.
+    uint64 uw_legacy = 0
+    if emit_ir_mode == 0 { uw_legacy = 1 }
+    if uw_emit_tables != 0 && uw_backend_is_ready(0, uw_legacy) != 0 {
+        uint64 pdata_rva = idata_rva + 0x1000
+        uint64 pdata_file_off = codegen_output_len()
+        uint64 pdata_raw = uw_append_pdata_x64(text_start, pdata_rva)
+        uw_patch_pdata_header(0x198, pdata_rva, pdata_file_off, pdata_raw, 3, image_size)
+    }
+}
+
+// Section header + NumberOfSections + DataDirectory[3] + SizeOfImage +
+// SizeOfInitializedData for the .pdata section just appended (spec 6.1).
+fn uw_patch_pdata_header(uint64 hdr, uint64 rva, uint64 file_off, uint64 raw, uint64 nsec, uint64 image_size) {
+    // ".pdata\0\0"
+    patch_u32(hdr, 0x6164702E)
+    patch_u32(hdr + 4, 0x6174)
+    patch_u32(hdr + 8, uw_pdata_vsize)              // VirtualSize
+    patch_u32(hdr + 12, rva)                        // VirtualAddress
+    patch_u32(hdr + 16, raw)                        // SizeOfRawData
+    patch_u32(hdr + 20, file_off)                   // PointerToRawData
+    patch_u32(hdr + 24, 0)
+    patch_u32(hdr + 28, 0)
+    patch_u32(hdr + 32, 0)
+    patch_u32(hdr + 36, 0x40000040)                 // INITIALIZED_DATA | READ
+    uint64 nsp = out_buf + 0x46
+    uint16 ns16 = nsec
+    unsafe { *(nsp as uint16) = ns16 }              // NumberOfSections
+    patch_u32(0xE0, rva)                            // DataDirectory[3] (exception)
+    patch_u32(0xE4, uw_pdata_dir_size)
+    patch_u32(0x90, image_size + ((uw_pdata_vsize + 0xFFF) & ~0xFFF))   // SizeOfImage
+    uint64 initd = 0
+    uint64 ip = out_buf + 0x60
+    uint32 init32 = 0
+    unsafe { *(ip as uint32) -> init32 }
+    initd = init32
+    patch_u32(0x60, initd + raw)                    // SizeOfInitializedData
 }
 
 // arm64: a separate .data section for statics (W^X): .text = code + strings
@@ -4719,6 +4779,9 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
         // address-literals are a later task, so no resolve_fnaddr here yet.
         resolve_fixups_xtensa()
     }
+    // #143: the end of code (before any string or static byte, spec M1):
+    // the last function's record ends here, and so does a --test-listing.
+    uw_fn_end(codegen_output_len())
 
     // Emit string data BEFORE static data so trailing zero bytes from
     // uninitialised static arrays end up at the tail of the file — the
@@ -4836,6 +4899,7 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
         } else if target_os == 1 {
             emit_macho_relocatable(total_code, 0, arch)
         } else if target_os == 2 {
+            uw_maybe_write_listing(uw_test_listing_path, arch, text_start, source)
             emit_coff_relocatable(total_code, 0, arch)
         } else {
             emit_elf_relocatable(total_code, 0, arch)
@@ -5684,8 +5748,10 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
         // with compile_fat's Windows slices (pe_finalize_x64/_a64).
         if arch == 1 {
             pe_finalize_a64(header_size, text_start, text_size)
+            uw_maybe_write_listing(uw_test_listing_path, arch, text_start, source)
         } else if arch == 0 {
             pe_finalize_x64(header_size, text_start, text_size)
+            uw_maybe_write_listing(uw_test_listing_path, arch, text_start, source)
         } else {
             // arch==2 unreachable (PE header site already refused).
             riscv32_nyi("PE image emission")
@@ -9352,6 +9418,11 @@ fn main() {
             } else if str_starts_with(arg, "--dump-argv-quoter=", 19) != 0 {
                 // Same, for the op-114 command-line quoting leaf.
                 c7_dump_quoter_path = arg + 19
+            } else if str_starts_with(arg, "--test-listing=", 15) != 0 {
+                // Internal, undocumented in --help, test-only (#143): with
+                // --emit=pe / --emit=obj for Windows, also write the asm
+                // listing of the code this compile emitted to the path.
+                uw_test_listing_path = arg + 15
             } else if str_eq_full(arg, "--test-no-unwind") != 0 {
                 // Internal, undocumented in --help, test-only (#143): build a
                 // Windows image WITHOUT unwind tables, code unchanged, so the

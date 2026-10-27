@@ -1,0 +1,20 @@
+// #143: a permitted (RSP-neutral) @naked leaf faults. Its unwind record is the
+// zero-code kind 1 (the leaf rule: the return address is at [rsp]), so the
+// walk goes poke -> f1 -> main. The store is raw bytes (mov byte [16], 1),
+// which the compiler cannot classify and warns about on Windows.
+@naked
+fn poke() {
+    asm { "0xC6 0x04 0x25 0x10 0x00 0x00 0x00 0x01" }
+    asm { "ret" }
+}
+fn f1(uint64 k) -> uint64 {
+    uint64 x = k * 5
+    poke()
+    return x + 1
+}
+fn main() -> uint32 {
+    file_write(1, "armed\n", 6)
+    uint64 r = f1(3)
+    if r == 16 { file_write(1, "survived\n", 9) }
+    return 3
+}
