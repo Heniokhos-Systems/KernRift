@@ -8,9 +8,13 @@
 // because under qemu-user plain exit (60) ends only the thread and the
 // emulator then reports 0 whatever the status).
 
-// ten parameters: six in registers, four on the stack
+// ten parameters: six in registers, four on the stack. Two statements, so
+// the AST inliner (which takes a single pure `return` whose parameters are
+// each used once) leaves it a real call: inlined, no ten-parameter call
+// would ever run (it did not, on either backend, before #143 A8).
 fn f10(uint64 a, uint64 b, uint64 c, uint64 d, uint64 e, uint64 f, uint64 g, uint64 h, uint64 i, uint64 j) -> uint64 {
-    return a * 1 + b * 2 + c * 3 + d * 4 + e * 5 + f * 6 + g * 7 + h * 8 + i * 9 + j * 10
+    uint64 s = a * 1 + b * 2 + c * 3 + d * 4 + e * 5 + f * 6 + g * 7 + h * 8 + i * 9 + j * 10
+    return s
 }
 
 // a caller of f10 that has its own locals live across the call
