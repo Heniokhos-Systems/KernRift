@@ -29203,31 +29203,32 @@ if ! command -v python3 > /dev/null 2>&1; then pe_row_skip pe_unwind_test_listin
 elif [ -z "$PEU_WHY" ]; then pe_row_ok pe_unwind_test_listing_matches_image "std-importing and std-free: C0 with 0 relocated fields"
 else pe_row_bad pe_unwind_test_listing_matches_image "$PEU_WHY"; fi
 
-# Every Windows fixture that builds, except the C7 programs (their main parses
-# the command line through internal leaves, registered in A6b-2): image and
-# listing from one compile, checker C0-C6 + C4b. The C7 exclusions, explicitly:
-# every fixture importing std/args.kr.
-PEU_C7=" alloc_guard_refused_msg argv_echo argv_leafrun argv_nochild argv_rawparent argv_rtparent std_together sys_args_all sys_args sys_args_legacy sys_args_oob sys_bcast sys_cto sys_envp sys_envp_exec sys_fs sys_getenv sys_ifaces sys_lasterr w32_hold "
+# Every Windows fixture that builds, the C7 programs included (their main
+# parses the command line through the parse leaf and may reach a die routine;
+# exec_process_argv users also hold the quote leaf and three die routines, all
+# registered with uw_leaf, A6b-2): image and listing from one compile, checker
+# C0-C6 + C4b.
 if ! command -v python3 > /dev/null 2>&1 || ! command -v llvm-readobj > /dev/null 2>&1 || ! command -v llvm-objdump > /dev/null 2>&1; then
     pe_row_skip pe_unwind_tables_x86_64_ir "needs python3, llvm-readobj and llvm-objdump"
 else
     PEU_WHY=""; PEU_N=0
     for PEU_F in "$DIR"/fixtures/*.kr "$DIR"/smoke/*.kr; do
         PEU_B=$(basename "$PEU_F" .kr)
-        case "$PEU_C7" in *" $PEU_B "*) continue ;; esac
         $T10_KRC --arch=x86_64 --target=windows --emit=pe --test-listing="$T10_D/peu_c.lst" "$PEU_F" -o "$T10_D/peu_c.exe" > /dev/null 2>&1 || continue
         PEU_N=$((PEU_N + 1))
         PEU_O=$(python3 -B "$PEU_CHK" --arch x86_64 "$T10_D/peu_c.exe" --listing "$T10_D/peu_c.lst" 2>&1)
         [ "$(grep -c ': PASS' <<< "$PEU_O")" = 8 ] || PEU_WHY="$PEU_WHY $PEU_B:$( { grep -m1 -e FAIL -e error <<< "$PEU_O" || head -1 <<< "$PEU_O"; } | cut -c1-120);"
     done
-    if [ -z "$PEU_WHY" ] && [ "$PEU_N" -ge 40 ]; then pe_row_ok pe_unwind_tables_x86_64_ir "$PEU_N fixtures pass C0-C6 + C4b"
+    if [ -z "$PEU_WHY" ] && [ "$PEU_N" -ge 70 ]; then pe_row_ok pe_unwind_tables_x86_64_ir "$PEU_N fixtures, C7 included, pass C0-C6 + C4b"
     else pe_row_bad pe_unwind_tables_x86_64_ir "$PEU_N checked;$PEU_WHY"; fi
 fi
 
 # Faults under Wine (spec 8.3): the image ends with STATUS_ACCESS_VIOLATION
 # (status 5), prints exactly its own output, and Wine's +unwind trace of the
 # faulting thread walks the expected functions and then leaves the image
-# (tests/helpers/wine_unwind_chain.py; a missing trace is a FAIL).
+# (tests/helpers/wine_unwind_chain.py; a missing trace is a FAIL). The same
+# image also passes the checker (C0-C6 + C4b): Wine's walk only visits the
+# offsets this one fault reaches.
 # peu_wine_fault <row> <fixture> <want stdout> <want walk> [extra flags]
 peu_wine_fault() {
     local row="$1" f="$2" want="$3" walk="$4" rc got ch; shift 4
@@ -29242,12 +29243,34 @@ peu_wine_fault() {
     got=$(tr -d '\r' < "$T10_D/win.out")
     (cd "$T10_D" && WINEPREFIX="$T10_D/pfx" WINEDLLOVERRIDES=winedbg.exe=d WINEDEBUG=+unwind timeout 300 "$T10_WINE" peu_w.exe > /dev/null 2> "$T10_D/peu_w.trace")
     ch=$(python3 -B "$DIR/helpers/wine_unwind_chain.py" "$T10_D/peu_w.trace" "$T10_D/peu_w.lst" "$walk" 2>&1 | tail -1)
-    if [ "$rc" = 5 ] && [ "$got" = "$want" ] && [[ "$ch" == walk* ]]; then pe_row_ok "$row" "rc=5, $ch$(t10_note)"
-    else pe_row_bad "$row" "rc=$rc stdout '$(tr '\n' '|' <<< "$got" | head -c 40)' want rc=5 '$(tr '\n' '|' <<< "$want")'; $ch"; fi
+    ck=$(python3 -B "$PEU_CHK" --arch x86_64 "$T10_D/peu_w.exe" --listing "$T10_D/peu_w.lst" 2>&1)
+    if [ "$(grep -c ': PASS' <<< "$ck")" = 8 ]; then ck="checker C0-C6 + C4b PASS"
+    else ck="checker: $( { grep -m1 -e FAIL -e error <<< "$ck" || head -1 <<< "$ck"; } | cut -c1-160)"; fi
+    if [ "$rc" = 5 ] && [ "$got" = "$want" ] && [[ "$ch" == walk* ]] && [ "$ck" = "checker C0-C6 + C4b PASS" ]; then pe_row_ok "$row" "rc=5, $ch, $ck$(t10_note)"
+    else pe_row_bad "$row" "rc=$rc stdout '$(tr '\n' '|' <<< "$got" | head -c 40)' want rc=5 '$(tr '\n' '|' <<< "$want")'; $ch; $ck"; fi
 }
 peu_wine_fault pe_unwind_nested_fault_windows_wine pe_unwind_nested_fault "$(printf 'armed\nf3')" f3,f2,f1,main
 peu_wine_fault pe_unwind_stack_args_fault_windows_wine pe_unwind_stack_args_fault "$(printf 'armed\nf3')" f3,f2,main
 peu_wine_fault pe_unwind_naked_fault_windows_wine pe_unwind_naked_fault armed poke,f1,main
+# A C7 main (it reads its command line; parse leaf + die routine inside main).
+peu_wine_fault pe_unwind_argv_main_fault_windows_wine pe_unwind_argv_main_fault "$(printf 'armed\nf2')" f2,f1,main
+
+# The compiler itself, built for Windows x86_64 with --test-listing: the image
+# is byte-identical to the one built without the switch (the listing does not
+# change what ships), and the checker passes C0-C6 + C4b over every function.
+if ! command -v python3 > /dev/null 2>&1 || ! command -v llvm-readobj > /dev/null 2>&1 || ! command -v llvm-objdump > /dev/null 2>&1; then
+    pe_row_skip pe_unwind_selfhost_x86_64 "needs python3, llvm-readobj and llvm-objdump"
+elif ! $T10_KRC --arch=x86_64 --target=windows --emit=pe --test-listing="$T10_D/peu_self.lst" "$DIR/../build/krc.kr" -o "$T10_D/krc_win.exe" > "$T10_D/peu_self.log" 2>&1 \
+     || ! $T10_KRC --arch=x86_64 --target=windows --emit=pe "$DIR/../build/krc.kr" -o "$T10_D/krc_win_plain.exe" >> "$T10_D/peu_self.log" 2>&1; then
+    pe_row_bad pe_unwind_selfhost_x86_64 "build: $(grep -m1 error "$T10_D/peu_self.log" | cut -c1-100)"
+elif ! cmp -s "$T10_D/krc_win.exe" "$T10_D/krc_win_plain.exe"; then
+    pe_row_bad pe_unwind_selfhost_x86_64 "--test-listing changed the image: $(cmp "$T10_D/krc_win.exe" "$T10_D/krc_win_plain.exe" 2>&1 | head -1)"
+else
+    PEU_O=$(timeout 1200 python3 -B "$PEU_CHK" --arch x86_64 "$T10_D/krc_win.exe" --listing "$T10_D/peu_self.lst" 2>&1)
+    if [ "$(grep -c ': PASS' <<< "$PEU_O")" = 8 ]; then pe_row_ok pe_unwind_selfhost_x86_64 "krc_win.exe: $(grep '^C6: PASS' <<< "$PEU_O" | sed 's/^C6: PASS (//; s/)$//')"
+    else pe_row_bad pe_unwind_selfhost_x86_64 "$( { grep -m1 -e FAIL -e error <<< "$PEU_O" || head -1 <<< "$PEU_O"; } | cut -c1-200)"; fi
+    rm -f "$T10_D/krc_win.exe" "$T10_D/krc_win_plain.exe" "$T10_D/peu_self.lst"
+fi
 
 # A permitted (RSP-neutral) @naked function gets the zero-code kind-1 record
 # (spec 4.3) and passes C5; its listing marks it `; uw-naked`.

@@ -16263,9 +16263,13 @@ fn c7_x86_emit_main_argv(uint64 argc_off, uint64 argv_off) {
     emit_win_free_stack(0x40)
     c7_x86_jmp(l_over)
     c7_bind(l_fail)
+    uint64 uw_b = out_len
     c7_x86_emit_die(121, "krc runtime: argv allocation failed\n", 36)
+    uw_leaf(uw_b, out_len, 1, "c7_die_argv_alloc")   // #143: dead-end leaf
     c7_bind(l_leaf)
+    uw_b = out_len
     c7_x86_emit_parse_leaf()
+    uw_leaf(uw_b, out_len, 0, "c7_parse")            // #143: called leaf
     c7_bind(l_over)
     c7_end()
 }
@@ -16374,13 +16378,21 @@ fn c7_x86_emit_exec_argv(uint64 path_r, uint64 argv_r) {
     emit_win_call_iat(IAT_ExitProcess)
     c7_x86_jmp(l_over)                      // not reached
     c7_bind(l_long)
+    uint64 uw_b = out_len
     c7_x86_emit_die(122, "krc runtime: child command line too long\n", 41)
+    uw_leaf(uw_b, out_len, 1, "c7_die_cmdline_long")     // #143: dead-end leaves
     c7_bind(l_nomem)
+    uw_b = out_len
     c7_x86_emit_die(123, "krc runtime: child command line allocation failed\n", 50)
+    uw_leaf(uw_b, out_len, 1, "c7_die_cmdline_alloc")
     c7_bind(l_nochild)
+    uw_b = out_len
     c7_x86_emit_die(124, "krc runtime: child process could not be started\n", 48)
+    uw_leaf(uw_b, out_len, 1, "c7_die_create_process")
     c7_bind(l_quote)
+    uw_b = out_len
     c7_x86_emit_quote_leaf()
+    uw_leaf(uw_b, out_len, 0, "c7_quote")                // #143: called leaf
     c7_bind(l_over)
     c7_end()
 }
