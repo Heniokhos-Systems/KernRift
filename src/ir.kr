@@ -5393,6 +5393,8 @@ fn ir_lower_stmt(uint64 node) {
 
     // Inline assembly (43): asm block with optional I/O constraints
     if kind == 43 {
+        // #143: on Windows, asm that writes the frame pointer (or x18) is refused.
+        win_asm_refuse(node)
         // For ASM blocks, we emit the instructions directly during x86 emission.
         // The IR_ASM_BLOCK carries the AST node index for the x86 emitter.
         // Handle I/O constraints:
@@ -14883,10 +14885,67 @@ fn ir_naked_diagnose_generic(uint64 fn_node, uint64 arch_a64) {
 }
 
 fn ir_x86_naked_diagnose(uint64 fn_node) {
+    ir_win_naked_refuse(fn_node, 0)
     ir_naked_diagnose_generic(fn_node, 0)
 }
 
+// #143 (spec 4.3): on Windows a @naked function gets a zero-code unwind record
+// (the leaf rule), which is true only if its body never moves the stack
+// pointer. Refuse, with a located error, any IR op outside the RSP-neutral
+// whitelist: the wide-file whitelist (ir_x86_op_widesafe / ir_a64_op_widesafe,
+// ops whose handlers touch only their operands and scratch; on arm64 plus the
+// PC-relative static/string/function-address ops x86 already lists) minus
+// IR_ARR_CHECK (131), whose failure path calls ExitProcess through the IAT
+// with a moved RSP; plus the user's own asm (op 96), which the asm refusals
+// check separately. Everything else -- calls and their argument setup,
+// Windows builtins, allocation, formatting, C7 -- can move RSP/SP.
+fn ir_win_naked_op_ok(uint64 op, uint64 arch_a64) -> uint64 {
+    if op == 96 || op == 0 { return 1 }
+    if op == 131 { return 0 }
+    if arch_a64 != 0 {
+        // static load/store, string constant, static/function address: PC-
+        // relative adrp/add/ldr through x0/x9 only -- SP-neutral, but not on
+        // the arm64 wide-file list (which is about scratch registers)
+        if op == 77 || op == 78 || op == 79 || op == 84 || op == 86 { return 1 }
+        return ir_a64_op_widesafe(op)
+    }
+    return ir_x86_op_widesafe(op)
+}
+
+fn ir_win_naked_refuse(uint64 fn_node, uint64 arch_a64) {
+    if win_frame_refusals_active() == 0 { return }
+    uint64 b = 0
+    while b < ir_bb_count {
+        uint64 i = ir_bb_first_insn(b)
+        while i != 0xFFFFFFFF {
+            uint64 op = ir_insn_opcode(i)
+            if ir_win_naked_op_ok(op, arch_a64) == 0 {
+                uint64 tok = ir_insn_src_tok_at(i)
+                uint32 nt = ast_data1(fn_node)
+                if tok == 0 { tok = nt }
+                diag_loc_head(tok, 0)
+                write(2, "@naked function '", 17)
+                write(2, cg_source + tok_text_start(nt), tok_text_len(nt))
+                uint64 what = "' does something here that moves the stack pointer (IR op "
+                if op == 50 { what = "' makes a call here, which moves the stack pointer (IR op " }
+                if op == 51 { what = "' passes call arguments here, which can move the stack pointer (IR op " }
+                write(2, what, str_len(what))
+                uint8[24] obuf
+                uint64 olen = fmt_uint(obuf, op)
+                write(2, obuf, olen)
+                uint64 tail = "); on Windows a naked function's unwind record describes no frame, so its body may not move RSP/SP or write the frame pointer (#143). Move the work into a normal function, or into asm you control.\n"
+                write(2, tail, str_len(tail))
+                diag_span_of(tok)
+                exit(1)
+            }
+            i = ir_insn_next(i)
+        }
+        b = b + 1
+    }
+}
+
 fn ir_a64_naked_diagnose(uint64 fn_node) {
+    ir_win_naked_refuse(fn_node, 1)
     ir_naked_diagnose_generic(fn_node, 1)
 }
 

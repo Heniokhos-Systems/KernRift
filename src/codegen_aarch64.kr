@@ -6021,6 +6021,7 @@ fn gen_stmt_a64(uint64 node) {
 
     // Inline assembly — see x86_64 gen_stmt for the constraint contract.
     if kind == 43 {
+        win_asm_refuse(node)
         uint32 cons_head = ast_data3(node)
         uint64 wch_a = cons_head
 
@@ -6155,6 +6156,7 @@ fn gen_function_a64(uint64 fn_node) {
     // Check annotation flags: bit 0 = noreturn, bit 1 = naked, bit 3 = extern
     uint32 ann_flags = ast_data4(fn_node)
     uint64 is_naked = ann_flags & 2
+    if is_naked != 0 { win_legacy_naked_refuse(fn_node) }
     uint64 is_extern_a = ann_flags & 8
 
     // Extern declarations have no body — skip codegen.

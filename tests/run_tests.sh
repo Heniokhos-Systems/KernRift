@@ -27787,7 +27787,7 @@ if open(sys.argv[2], "rb").read().count(b) != 0: print(" " + sys.argv[4] + ":nak
 if open(sys.argv[3], "rb").read().count(b) != 1: print(" " + sys.argv[4] + ":plain-main-does-not-parse")
 ' "$C7_D/parse-$C7_A.bin" "$C7_D/nk.exe" "$C7_D/nn.exe" "$C7_A" | tr -d '\n')"
         if [ "$C7_A" = x86_64 ]; then
-            C7_WHY="$C7_WHY$(python3 - "$DIR/helpers" "$C7_D/nk.exe" "$C7_D/nn.exe" <<'C7GCLEOF' | tr -d '\n'
+            C7_WHY="$C7_WHY$(python3 -B - "$DIR/helpers" "$C7_D/nk.exe" "$C7_D/nn.exe" <<'C7GCLEOF' | tr -d '\n'
 import struct, sys
 sys.path.insert(0, sys.argv[1])
 import pe_unwind_check as c
@@ -29097,6 +29097,55 @@ else
     if [ "$PEU_RC" = 0 ]; then pe_row_ok ir_x86_win_no_rbp_colour "$(tail -1 <<< "$PEU_OUT")"
     else pe_row_bad ir_x86_win_no_rbp_colour "$(head -2 <<< "$PEU_OUT" | tr '\n' '|')$(tail -1 <<< "$PEU_OUT")"; fi
 fi
+# Windows refusals (#143 A7, spec 4.1.5 / 4.3 / 5.1.5): a @naked body whose
+# lowering moves RSP/SP, asm that writes the frame pointer (rbp; x29 or x18 on
+# arm64) decodably or through a constraint, and legacy @naked are refused with
+# a located error; opaque hex asm gets a warning. Like every Windows-only
+# refusal they follow fat_slice_ships(): --targets=linux-x64 never sees one,
+# and a default 8-slice build of an RSP-neutral naked body is accepted.
+PEU_RD="$T10_D/peu_ref"; rm -rf "$PEU_RD"; mkdir -p "$PEU_RD"
+printf '@naked\nfn nk() {\n    file_write(1, "x", 1)\n    asm { "ret" }\n}\nfn main() -> uint32 {\n    nk()\n    return 0\n}\n' > "$PEU_RD/nkb.kr"
+printf '@naked\nfn nk() {\n    asm { "ret" }\n}\nfn main() -> uint32 {\n    nk()\n    return 0\n}\n' > "$PEU_RD/nkok.kr"
+printf 'fn main() -> uint32 {\n    asm { "mov rbp, rax" }\n    return 0\n}\n' > "$PEU_RD/arbp.kr"
+printf 'fn main() -> uint32 {\n    asm { "leave" }\n    return 0\n}\n' > "$PEU_RD/aleave.kr"
+printf 'fn main() -> uint32 {\n    uint64 v = 1\n    asm { "nop" } in(v -> rbp)\n    return 0\n}\n' > "$PEU_RD/acons.kr"
+printf 'fn main() -> uint32 {\n    asm { "mov x29, sp" }\n    return 0\n}\n' > "$PEU_RD/ax29.kr"
+printf 'fn main() -> uint32 {\n    uint64 v = 1\n    asm { "nop" } in(v -> x18)\n    return 0\n}\n' > "$PEU_RD/ax18.kr"
+printf 'fn main() -> uint32 {\n    asm { "0x90" }\n    return 0\n}\n' > "$PEU_RD/ahex.kr"
+PEU_WHY=""
+# peu_ref <want rc> <grep -F text or -> <fixture> <flags...>
+peu_ref() {
+    local wrc="$1" want="$2" f="$3" rc; shift 3
+    (cd "$PEU_RD" && $T10_KRC "$@" "$f.kr" -o "$f.out" > "$f.so" 2> "$f.se"); rc=$?
+    if [ "$rc" != "$wrc" ]; then PEU_WHY="$PEU_WHY $f[$*]:rc=$rc,want=$wrc;"; return; fi
+    if [ "$want" != "-" ] && ! grep -qF -- "$want" "$PEU_RD/$f.se"; then
+        PEU_WHY="$PEU_WHY $f[$*]:message '$(grep -m1 -E 'error|warning:' "$PEU_RD/$f.se" | cut -c1-90)';"
+    fi
+}
+PEU_NK="nkb.kr:2:4: error: @naked function 'nk' passes call arguments here, which can move the stack pointer (IR op 51); on Windows a naked function's unwind record describes no frame, so its body may not move RSP/SP or write the frame pointer (#143)."
+peu_ref 1 "$PEU_NK" nkb --arch=x86_64 --target=windows --emit=pe
+peu_ref 1 "$PEU_NK" nkb --targets=win-x64
+peu_ref 1 "$PEU_NK" nkb --targets=win-arm64
+peu_ref 0 - nkb --targets=linux-x64
+peu_ref 0 - nkb --arch=x86_64 --target=linux
+peu_ref 0 - nkok
+peu_ref 0 - nkok --arch=arm64 --target=windows --emit=pe
+PEU_RBP="error: this asm instruction writes rbp -- on Windows rbp is the frame pointer every unwind record relies on (#143); use another register"
+peu_ref 1 "arbp.kr:2:11: $PEU_RBP" arbp --arch=x86_64 --target=windows --emit=pe
+peu_ref 1 "arbp.kr:2:11: $PEU_RBP" arbp --arch=x86_64 --target=windows --emit=pe --legacy
+peu_ref 0 - arbp --arch=x86_64 --target=linux
+peu_ref 1 "aleave.kr:2:11: error: \`leave\` writes rbp" aleave --arch=x86_64 --target=windows --emit=pe
+peu_ref 1 "acons.kr:3:27: error: this asm constraint binds the frame/TEB register" acons --arch=x86_64 --target=windows --emit=pe
+peu_ref 0 - acons --arch=x86_64 --target=linux
+peu_ref 1 "ax29.kr:2:11: error: this asm instruction writes x29/x18 -- on Windows x29 is the frame pointer every unwind record relies on and x18 is the TEB (#143)" ax29 --arch=arm64 --target=windows --emit=pe
+peu_ref 0 - ax29 --arch=arm64 --target=linux
+peu_ref 1 "ax18.kr:3:27: error: this asm constraint binds the frame/TEB register" ax18 --arch=arm64 --target=windows --emit=pe
+peu_ref 0 "ahex.kr:2:11: warning: asm given as raw bytes cannot be checked for writes to the frame pointer (rbp)" ahex --arch=x86_64 --target=windows --emit=pe
+peu_ref 1 "nkok.kr:2:4: error: legacy @naked on Windows requires the legacy-naked fix" nkok --arch=x86_64 --target=windows --emit=pe --legacy
+peu_ref 1 "nkok.kr:2:4: error: legacy @naked on Windows requires the legacy-naked fix" nkok --arch=arm64 --target=windows --emit=pe --legacy
+peu_ref 0 - nkok --arch=x86_64 --target=linux --legacy
+if [ -z "$PEU_WHY" ]; then pe_row_ok pe_unwind_refusals "20 cases: naked/asm/legacy-naked refused on Windows slices that ship, accepted elsewhere"
+else pe_row_bad pe_unwind_refusals "$PEU_WHY"; fi
 
 if [ -z "$T10_WINE" ]; then
     for T10_R in net_loopback_windows_wine time_monotonic_and_sleep_windows_wine time_ms_of_ns_windows_wine alloc_guard_smoke_windows_wine alloc_guard_fault_windows_wine alloc_guard_fault_read_windows_wine alloc_guard_refused_is_fatal_windows_wine alloc_guard_refused_names_allocator_windows_wine std_together_windows_wine net_user_names_windows_wine; do

@@ -11073,6 +11073,177 @@ fn asm_arch_hint(uint64 sptr, uint64 slen) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Windows frame-pointer refusals (#143, spec 4.1.5 / 5.1.5 / 4.3)
+// ---------------------------------------------------------------------------
+// On Windows every non-naked function's unwind record recovers its caller
+// through the frame pointer (rbp on x86_64, x29 on arm64), and x18 is the TEB
+// register on arm64. So user asm that WRITES one of them -- decodably, or by
+// naming it in an in/out/clobbers constraint -- is refused with a located
+// error; asm given as opaque hex bytes cannot be classified and gets a
+// warning. RSP/SP motion inside asm is allowed: the frame pointer covers it.
+// Like every Windows-only refusal, these fire only for a slice that ships
+// (fat_slice_ships): `--targets=linux-x64` never sees a discarded Windows
+// slice's refusal.
+fn win_frame_refusals_active() -> uint64 {
+    if target_os != 2 { return 0 }
+    if target_arch != 0 && target_arch != 1 { return 0 }
+    if fat_slice_ships() == 0 { return 0 }
+    return 1
+}
+
+// Is the n-byte name at src+off a frame/reserved register for this arch?
+fn win_asm_is_frame_reg(uint64 src, uint64 off, uint64 n) -> uint64 {
+    if target_arch == 0 {
+        if n == 3 && asm_match(src, off, "rbp", 3) != 0 { return 1 }
+        if n == 3 && asm_match(src, off, "ebp", 3) != 0 { return 1 }
+        if n == 3 && asm_match(src, off, "bpl", 3) != 0 { return 1 }
+        if n == 2 && asm_match(src, off, "bp", 2) != 0 { return 1 }
+        return 0
+    }
+    if n == 3 && asm_match(src, off, "x29", 3) != 0 { return 1 }
+    if n == 3 && asm_match(src, off, "w29", 3) != 0 { return 1 }
+    if n == 2 && asm_match(src, off, "fp", 2) != 0 { return 1 }
+    if n == 3 && asm_match(src, off, "x18", 3) != 0 { return 1 }
+    if n == 3 && asm_match(src, off, "w18", 3) != 0 { return 1 }
+    return 0
+}
+
+fn win_asm_is_word_char(uint64 c) -> uint64 {
+    if c >= 97 && c <= 122 { return 1 }
+    if c >= 65 && c <= 90 { return 1 }
+    if c >= 48 && c <= 57 { return 1 }
+    if c == 46 || c == 95 { return 1 }
+    return 0
+}
+
+fn win_asm_byte(uint64 p) -> uint64 {
+    uint64 c = 0
+    unsafe { *(p as uint8) -> c }
+    return c
+}
+
+fn win_asm_refuse_msg(uint64 tok, uint64 what) {
+    diag_loc_head(tok, 0)
+    write(2, what, str_len(what))
+    if target_arch == 0 {
+        uint64 m1 = " -- on Windows rbp is the frame pointer every unwind record relies on (#143); use another register\n"
+        write(2, m1, str_len(m1))
+    } else {
+        uint64 m2 = " -- on Windows x29 is the frame pointer every unwind record relies on and x18 is the TEB (#143); use another register\n"
+        write(2, m2, str_len(m2))
+    }
+    diag_span_of(tok)
+    exit(1)
+}
+
+// One asm instruction string.
+fn win_asm_check_string(uint64 str_tok) {
+    uint64 sp = cg_source + tok_text_start(str_tok) + 1
+    uint64 sl = tok_text_len(str_tok)
+    if sl < 2 { return }
+    sl = sl - 2
+    uint64 i = 0
+    while i < sl && win_asm_byte(sp + i) == 32 { i = i + 1 }
+    if i + 1 < sl && win_asm_byte(sp + i) == 48 && win_asm_byte(sp + i + 1) == 120 {
+        diag_loc_head(str_tok, 1)
+        uint64 hw = "asm given as raw bytes cannot be checked for writes to the frame pointer"
+        write(2, hw, str_len(hw))
+        if target_arch == 0 { write(2, " (rbp)", 6) } else { write(2, " (x29) or the TEB register (x18)", 32) }
+        uint64 hw2 = "; Windows unwinding relies on it (#143)\n"
+        write(2, hw2, str_len(hw2))
+        return
+    }
+    // mnemonic
+    uint64 m0 = i
+    while i < sl && win_asm_is_word_char(win_asm_byte(sp + i)) != 0 { i = i + 1 }
+    uint64 mlen = i - m0
+    if mlen == 0 { return }
+    if target_arch == 0 && mlen == 5 && asm_match(sp, m0, "leave", 5) != 0 {
+        win_asm_refuse_msg(str_tok, "`leave` writes rbp")
+    }
+    // first operand
+    while i < sl && win_asm_byte(sp + i) == 32 { i = i + 1 }
+    uint64 o0 = i
+    while i < sl && win_asm_is_word_char(win_asm_byte(sp + i)) != 0 { i = i + 1 }
+    uint64 olen = i - o0
+    // second operand (arm64 ldp/ldxp write two registers)
+    while i < sl && (win_asm_byte(sp + i) == 32 || win_asm_byte(sp + i) == 44) { i = i + 1 }
+    uint64 o1 = i
+    while i < sl && win_asm_is_word_char(win_asm_byte(sp + i)) != 0 { i = i + 1 }
+    uint64 o1len = i - o1
+    uint64 first_written = 1
+    if target_arch == 0 {
+        if (mlen == 3 && asm_match(sp, m0, "cmp", 3) != 0) || (mlen == 4 && asm_match(sp, m0, "test", 4) != 0)
+           || (mlen == 4 && asm_match(sp, m0, "push", 4) != 0) || (mlen == 2 && asm_match(sp, m0, "bt", 2) != 0) {
+            first_written = 0
+        }
+        if first_written != 0 && win_asm_is_frame_reg(sp, o0, olen) != 0 {
+            win_asm_refuse_msg(str_tok, "this asm instruction writes rbp")
+        }
+        // xchg/xadd/cmpxchg write their second operand too
+        if ((mlen == 4 && (asm_match(sp, m0, "xchg", 4) != 0 || asm_match(sp, m0, "xadd", 4) != 0))
+            || (mlen == 7 && asm_match(sp, m0, "cmpxchg", 7) != 0)) && win_asm_is_frame_reg(sp, o1, o1len) != 0 {
+            win_asm_refuse_msg(str_tok, "this asm instruction writes rbp")
+        }
+        return
+    }
+    // arm64: stores, compares and branches do not write their first operand
+    uint64 c0 = win_asm_byte(sp + m0)
+    uint64 c1 = 0
+    if mlen > 1 { c1 = win_asm_byte(sp + m0 + 1) }
+    if c0 == 115 && c1 == 116 { first_written = 0 }                      // st*
+    if mlen == 3 && (asm_match(sp, m0, "cmp", 3) != 0 || asm_match(sp, m0, "cmn", 3) != 0 || asm_match(sp, m0, "tst", 3) != 0) { first_written = 0 }
+    if c0 == 98 || (c0 == 99 && c1 == 98) || (c0 == 116 && c1 == 98) { first_written = 0 }   // b*, cb*, tb*
+    if mlen == 3 && asm_match(sp, m0, "ret", 3) != 0 { first_written = 0 }
+    if mlen == 4 && asm_match(sp, m0, "prfm", 4) != 0 { first_written = 0 }
+    if first_written != 0 && win_asm_is_frame_reg(sp, o0, olen) != 0 {
+        win_asm_refuse_msg(str_tok, "this asm instruction writes x29/x18")
+    }
+    if c0 == 108 && c1 == 100 && win_asm_byte(sp + m0 + mlen - 1) == 112 && win_asm_is_frame_reg(sp, o1, o1len) != 0 {
+        win_asm_refuse_msg(str_tok, "this asm load-pair writes x29/x18")    // ldp/ldxp/ldaxp/ldnp
+    }
+}
+
+// An asm block (AST kind 43): every string and every constraint.
+fn win_asm_refuse(uint64 asm_node) {
+    if win_frame_refusals_active() == 0 { return }
+    uint32 single = ast_data1(asm_node)
+    if single != 0 { win_asm_check_string(single) }
+    uint32 sc = ast_child(asm_node)
+    uint64 ws = sc
+    while ws != 0 {
+        uint32 st = ast_data1(ws)
+        if st != 0 { win_asm_check_string(st) }
+        uint32 nx = ast_next(ws)
+        ws = nx
+    }
+    uint32 cons = ast_data3(asm_node)
+    uint64 wc = cons
+    while wc != 0 {
+        uint32 rtok = ast_data2(wc)
+        if rtok != 0 {
+            uint64 rs = cg_source + tok_text_start(rtok)
+            if win_asm_is_frame_reg(rs, 0, tok_text_len(rtok)) != 0 {
+                uint32 ckind = ast_data1(wc)
+                if ckind == 2 { win_asm_refuse_msg(rtok, "this clobbers() names the frame/TEB register") }
+                win_asm_refuse_msg(rtok, "this asm constraint binds the frame/TEB register")
+            }
+        }
+        uint32 nc = ast_next(wc)
+        wc = nc
+    }
+}
+
+// Legacy @naked on Windows: its lowering spills parameters into the CALLER's
+// frame and falls through into the next function (spec 4.3, Mi6), which no
+// unwind record can describe. Refused until the legacy-naked work lands.
+fn win_legacy_naked_refuse(uint64 fn_node) {
+    if win_frame_refusals_active() == 0 { return }
+    uint32 nt = ast_data1(fn_node)
+    diag_fatal_at(nt, "legacy @naked on Windows requires the legacy-naked fix: its lowering cannot be described by an unwind record (#143); build without --legacy")
+}
+
 fn asm_emit_x86(uint64 str_tok) {
     // Get string content (skip opening quote)
     uint64 tstart = tok_text_start(str_tok)
@@ -13761,6 +13932,7 @@ fn gen_stmt(uint64 node) {
     // after. Clobbers are currently advisory (V1 — users must list any
     // input/output register that their block touches explicitly).
     if kind == 43 {
+        win_asm_refuse(node)
         uint32 cons_head = ast_data3(node)
         uint64 wch_x86 = cons_head
 
@@ -13911,6 +14083,7 @@ fn gen_function(uint64 fn_node) {
     // Check annotation flags: bit 0 = noreturn, bit 1 = naked, bit 3 = extern
     uint32 ann_flags = ast_data4(fn_node)
     uint64 is_naked = ann_flags & 2
+    if is_naked != 0 { win_legacy_naked_refuse(fn_node) }
     uint64 is_noreturn = ann_flags & 1
     uint64 is_extern = ann_flags & 8
 
