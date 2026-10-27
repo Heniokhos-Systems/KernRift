@@ -27,6 +27,13 @@ Compilers named below:
 | `nest8_uw.asm` | `nest8.kr` | **seed** `--arch=x86_64 --target=windows --emit=asm nest8.kr -o nest8_uw.asm` | `c80bfb9f04d7ed30e370e09d2845239a1ba303b7aa7fde3edab34c6019f78b3c` |
 | `nest8_fp.exe` | `nest8.kr` | **proto** `--arch=x86_64 --target=windows --emit=pe nest8.kr -o nest8_fp0.exe`, then `add_unwind_x64.py nest8_fp0.exe nest8_fp.exe` — the frame-pointer prototype the spec measured CORRECT (§1.3: full cdb chain natively, rc 5 under Wine) | `96586ce376b76c0be58ac11a16cff1b3a0ecd48f9a0015650408a798bbf032b0` |
 | `nest8_fp.asm` | `nest8.kr` | **proto** `--arch=x86_64 --target=windows --emit=asm nest8.kr -o nest8_fp.asm` | `5e67193ac22a845b71fea41d475b361c1f3e027038647545ef4f4523eae52327` |
+| `alloc_guard_fault.exe` | `tests/fixtures/alloc_guard_fault.kr` | **base** `--arch=x86_64 --target=windows --emit=pe tests/fixtures/alloc_guard_fault.kr -o alloc_guard_fault.exe` — register #143's red: Wine exits 0 | `9712fc81b4ddc636b19d485ef2914471b7cabbc8da54a76f8ee58be674ecc491` |
+| `alloc_guard_fault_fp.exe` | `tests/fixtures/alloc_guard_fault.kr` | **proto** `--arch=x86_64 --target=windows --emit=pe tests/fixtures/alloc_guard_fault.kr -o alloc_guard_fault_fp0.exe`, then `add_unwind_x64.py alloc_guard_fault_fp0.exe alloc_guard_fault_fp.exe` — Wine exits 5 (with `WINEDLLOVERRIDES=winedbg.exe=d`) | `286eeadd31de03c2dea4ca823b161911f71bedb4deb5c4c579074b2406b2d9ab` |
+
+The two `alloc_guard_fault*.exe` have **no listing**: `--target=windows --emit=asm` of
+that fixture is refused on the base (`--emit=asm` keeps every function, and the dead
+Unix arm of `std/alloc.kr` reaches `syscall_raw`), so they are used only as Wine
+images.
 
 The listings predate the `; uw-code-end` annotation, so a row that runs C2 or later
 rules on these images passes the end of code with the checker's `--code-end`.

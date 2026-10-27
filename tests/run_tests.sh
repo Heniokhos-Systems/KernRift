@@ -9967,15 +9967,15 @@ else
     $KRC --arch=x86_64 --target=windows --emit=pe "$DIR/fixtures/os_prune.kr" -o "$RWI_DIR/run/osp.exe" > /dev/null 2>&1 || RWI_WHY="$RWI_WHY os_prune:no-build"
     $KRC --arch=x86_64 --target=windows --emit=pe "$DIR/fixtures/win_import_prefix.kr" -o "$RWI_DIR/run/pfx.exe" > /dev/null 2>&1 || RWI_WHY="$RWI_WHY prefix:no-build"
     if [ -z "$RWI_WHY" ]; then
-        RWI_OUT=$(cd "$RWI_DIR/run" && WINEPREFIX="$RWI_DIR/pfx" WINEDEBUG=-all timeout 180 "$RWI_WINE" abi.exe 2>/dev/null); RWI_RC=$?
+        RWI_OUT=$(cd "$RWI_DIR/run" && WINEPREFIX="$RWI_DIR/pfx" WINEDLLOVERRIDES=winedbg.exe=d WINEDEBUG=-all timeout 180 "$RWI_WINE" abi.exe 2>/dev/null); RWI_RC=$?
         [ "$RWI_RC" = "42" ] || RWI_WHY="$RWI_WHY abi:status-$RWI_RC"
         echo "$RWI_OUT" | grep -q '^routed-ok' || RWI_WHY="$RWI_WHY abi:no-stdout"
         [ "$(od -An -c "$RWI_DIR/run/kr_win_iat_abi.tmp" 2>/dev/null | tr -d ' \n')" = 'routed\n' ] || RWI_WHY="$RWI_WHY abi:file-wrong"
-        (cd "$RWI_DIR/run" && WINEPREFIX="$RWI_DIR/pfx" WINEDEBUG=-all timeout 120 "$RWI_WINE" us.exe > /dev/null 2>&1); RWI_RC=$?
+        (cd "$RWI_DIR/run" && WINEPREFIX="$RWI_DIR/pfx" WINEDLLOVERRIDES=winedbg.exe=d WINEDEBUG=-all timeout 120 "$RWI_WINE" us.exe > /dev/null 2>&1); RWI_RC=$?
         [ "$RWI_RC" = "6" ] || RWI_WHY="$RWI_WHY user_send:status-$RWI_RC"
-        (cd "$RWI_DIR/run" && WINEPREFIX="$RWI_DIR/pfx" WINEDEBUG=-all timeout 120 "$RWI_WINE" osp.exe > /dev/null 2>&1); RWI_RC=$?
+        (cd "$RWI_DIR/run" && WINEPREFIX="$RWI_DIR/pfx" WINEDLLOVERRIDES=winedbg.exe=d WINEDEBUG=-all timeout 120 "$RWI_WINE" osp.exe > /dev/null 2>&1); RWI_RC=$?
         [ "$RWI_RC" = "0" ] || RWI_WHY="$RWI_WHY os_prune:status-$RWI_RC"
-        (cd "$RWI_DIR/run" && WINEPREFIX="$RWI_DIR/pfx" WINEDEBUG=-all timeout 120 "$RWI_WINE" pfx.exe > /dev/null 2>&1); RWI_RC=$?
+        (cd "$RWI_DIR/run" && WINEPREFIX="$RWI_DIR/pfx" WINEDLLOVERRIDES=winedbg.exe=d WINEDEBUG=-all timeout 120 "$RWI_WINE" pfx.exe > /dev/null 2>&1); RWI_RC=$?
         [ "$RWI_RC" = "9" ] || RWI_WHY="$RWI_WHY prefix:status-$RWI_RC"
     fi
     if [ -z "$RWI_WHY" ]; then
@@ -26739,12 +26739,12 @@ LOG_WINE="$(wine_path)"
 # it is recorded in $LOG_D/retried53 so the PASS text says so (log_note).
 log_wine() {
     local out rc
-    out=$(cd "$LOG_D" && WINEPREFIX="$LOG_D/pfx" WINEDEBUG=-all timeout 180 "$LOG_WINE" "$@" 2> "$LOG_D/wine.err"); rc=$?
+    out=$(cd "$LOG_D" && WINEPREFIX="$LOG_D/pfx" WINEDLLOVERRIDES=winedbg.exe=d WINEDEBUG=-all timeout 180 "$LOG_WINE" "$@" 2> "$LOG_D/wine.err"); rc=$?
     if [ "$rc" = "53" ] && [ -z "$out" ]; then
         cp "$LOG_D/wine.err" "$LOG_D/wine.err.53" 2>/dev/null; touch "$LOG_D/retried53"
         WINEPREFIX="$LOG_D/pfx" "$(dirname "$LOG_WINE")/wineserver" -k > /dev/null 2>&1
         rm -rf "$LOG_D/pfx"; mkdir -p "$LOG_D/pfx"
-        out=$(cd "$LOG_D" && WINEPREFIX="$LOG_D/pfx" WINEDEBUG=-all timeout 180 "$LOG_WINE" "$@" 2> "$LOG_D/wine.err"); rc=$?
+        out=$(cd "$LOG_D" && WINEPREFIX="$LOG_D/pfx" WINEDLLOVERRIDES=winedbg.exe=d WINEDEBUG=-all timeout 180 "$LOG_WINE" "$@" 2> "$LOG_D/wine.err"); rc=$?
     fi
     printf '%s\n' "$out"
     return $rc
@@ -27458,7 +27458,7 @@ if [ -z "$ALI_WINE" ]; then
 elif "$DIR/../build/krc2" --arch=x86_64 --target=windows --emit=pe "$ALI_FX" -o "$ALI_D/a.exe" > "$ALI_D/b.log" 2>&1; then
     mkdir -p "$ALI_D/pfx"
     for ALI_T in 1 2; do
-        (cd "$ALI_D" && WINEPREFIX="$ALI_D/pfx" WINEDEBUG=-all timeout 300 "$ALI_WINE" a.exe > "$ALI_D/out" 2>/dev/null); ALI_RC=$?
+        (cd "$ALI_D" && WINEPREFIX="$ALI_D/pfx" WINEDLLOVERRIDES=winedbg.exe=d WINEDEBUG=-all timeout 300 "$ALI_WINE" a.exe > "$ALI_D/out" 2>/dev/null); ALI_RC=$?
         # status 53 with no output = Wine's fresh-prefix kernel32 load race
         # (see t10_wine); one retry on a new prefix, anything else is final.
         if [ "$ALI_RC" = "53" ] && [ ! -s "$ALI_D/out" ] && [ "$ALI_T" = "1" ]; then
@@ -27688,9 +27688,9 @@ c7_wine() {
     local o="$1" e="$2" t rc; shift 2
     for t in 1 2 3; do
         if [ "${C7_JA:-0}" = "1" ]; then
-            (cd "$C7_D/run" && LC_ALL=ja_JP.UTF-8 LANG=ja_JP.UTF-8 WINEPREFIX="$C7_D/pfxja" WINEDEBUG=-all timeout 300 "$C7_WINE" "$@" > "$o" 2> "$e"); rc=$?
+            (cd "$C7_D/run" && LC_ALL=ja_JP.UTF-8 LANG=ja_JP.UTF-8 WINEPREFIX="$C7_D/pfxja" WINEDLLOVERRIDES=winedbg.exe=d WINEDEBUG=-all timeout 300 "$C7_WINE" "$@" > "$o" 2> "$e"); rc=$?
         else
-            (cd "$C7_D/run" && WINEPREFIX="$C7_D/pfx" WINEDEBUG=-all timeout 300 "$C7_WINE" "$@" > "$o" 2> "$e"); rc=$?
+            (cd "$C7_D/run" && WINEPREFIX="$C7_D/pfx" WINEDLLOVERRIDES=winedbg.exe=d WINEDEBUG=-all timeout 300 "$C7_WINE" "$@" > "$o" 2> "$e"); rc=$?
         fi
         [ "$rc" = "1" ] && grep -aq 'ShellExecuteEx failed' "$o" "$e" && continue
         return $rc
@@ -28454,12 +28454,21 @@ pe_row_skip() { TOTAL=$((TOTAL + 1)); PASS=$((PASS + 1)); echo "  $1: SKIP ($2)"
 # launch failures are 1), so the retry cannot hide a regression; it sets
 # T10_RETRY53=1 and the PASS text says so (t10_note). The stderr of the failed
 # attempt is kept in <err>.53 and shown in that note.
+#
+# WINEDLLOVERRIDES=winedbg.exe=d on EVERY Wine launch in this file (#143 A3,
+# spec 8.2): once an image carries correct unwind tables, an unhandled fault
+# reaches Wine's unhandled-exception path, which starts winedbg -- on a fresh
+# prefix that HANGS (measured: exit 124 after 120 s), on an initialised one it
+# prints a crash report on stdout. Disabling winedbg leaves exactly the
+# program's own output and the fault status (5 as a byte). It hides nothing:
+# an image WITHOUT tables still exits 0 under it (row
+# wine_crash_override_does_not_mask pins both).
 T10_RETRY53=0
 t10_wine() {
     local o="$1" e="$2" t rc r53=0; shift 2
     T10_RETRY53=0
     for t in 1 2 3; do
-        (cd "$T10_D" && WINEPREFIX="$T10_D/pfx" WINEDEBUG=-all timeout 300 "$T10_WINE" "$@" > "$o" 2> "$e"); rc=$?
+        (cd "$T10_D" && WINEPREFIX="$T10_D/pfx" WINEDLLOVERRIDES=winedbg.exe=d WINEDEBUG=-all timeout 300 "$T10_WINE" "$@" > "$o" 2> "$e"); rc=$?
         [ "$rc" = "1" ] && grep -aq 'ShellExecuteEx failed' "$o" "$e" && continue
         if [ "$rc" = "53" ] && [ ! -s "$o" ] && [ "$r53" = "0" ]; then
             r53=1; T10_RETRY53=1; cp "$e" "$e.53" 2>/dev/null
@@ -28986,6 +28995,29 @@ case "$PEU_RC" in
     *) PEU_WHY=$(grep -m1 '^FAIL ' <<< "$PEU_OUT" | cut -c1-300)
        pe_row_bad pe_unwind_checker_rules_selftest "rc=$PEU_RC ${PEU_WHY:-$(tail -c 300 <<< "$PEU_OUT" | tr '\n' '|')}" ;;
 esac
+# The Wine harness change (WINEDLLOVERRIDES=winedbg.exe=d, see t10_wine) must
+# not mask a failure: through t10_wine itself, the base compiler's table-less
+# image still exits 0 (#143's red stays visible), while the frame-pointer
+# prototype with tables exits 5 with stdout exactly "armed" -- without the
+# override it hangs in winedbg instead. Both images are committed
+# (tests/fixtures/pe_unwind_oracle/README.md).
+if [ -z "$T10_WINE" ]; then
+    if [ -n "$KR_WINE_BAD" ]; then pe_row_bad wine_crash_override_does_not_mask "$KR_WINE_BAD"
+    else pe_row_skip wine_crash_override_does_not_mask "no wine; set KR_WINE=<path to wine>"; fi
+else
+    PEU_WHY=""
+    cp "$DIR/fixtures/pe_unwind_oracle/alloc_guard_fault.exe" "$T10_D/peu_base.exe"
+    cp "$DIR/fixtures/pe_unwind_oracle/alloc_guard_fault_fp.exe" "$T10_D/peu_proto.exe"
+    printf 'armed\n' > "$T10_D/peu_armed.want"
+    t10_wine "$T10_D/peu.out" "$T10_D/peu.err" peu_base.exe; PEU_RC=$?
+    [ "$PEU_RC" = 0 ] && cmp -s "$T10_D/peu.out" "$T10_D/peu_armed.want" \
+        || PEU_WHY="$PEU_WHY base image: rc=$PEU_RC stdout '$(tr '\n' '|' < "$T10_D/peu.out" | head -c 60)', want rc=0 'armed|';"
+    t10_wine "$T10_D/peu.out" "$T10_D/peu.err" peu_proto.exe; PEU_RC=$?
+    [ "$PEU_RC" = 5 ] && cmp -s "$T10_D/peu.out" "$T10_D/peu_armed.want" \
+        || PEU_WHY="$PEU_WHY prototype image: rc=$PEU_RC$([ "$PEU_RC" = 124 ] && printf ' (timed out: winedbg?)') stdout '$(tr '\n' '|' < "$T10_D/peu.out" | head -c 60)', want rc=5 'armed|';"
+    if [ -z "$PEU_WHY" ]; then pe_row_ok wine_crash_override_does_not_mask "base rc=0, prototype rc=5, stdout exactly 'armed'$(t10_note)"
+    else pe_row_bad wine_crash_override_does_not_mask "$PEU_WHY"; fi
+fi
 
 if [ -z "$T10_WINE" ]; then
     for T10_R in net_loopback_windows_wine time_monotonic_and_sleep_windows_wine time_ms_of_ns_windows_wine alloc_guard_smoke_windows_wine alloc_guard_fault_windows_wine alloc_guard_fault_read_windows_wine alloc_guard_refused_is_fatal_windows_wine alloc_guard_refused_names_allocator_windows_wine std_together_windows_wine net_user_names_windows_wine; do
@@ -29107,11 +29139,11 @@ else
        && $T10_KRC --arch=x86_64 --target=windows --emit=pe "$T10_FX/sys_lasterr.kr" -o "$T10_D/sys_lasterr.exe" >> "$T10_D/w.log" 2>&1; then
         printf 'held' > "$T10_D/held.txt"
         : > "$T10_D/hold.out"
-        (cd "$T10_D" && WINEPREFIX="$T10_D/pfx" WINEDEBUG=-all timeout 120 "$T10_WINE" w32_hold.exe held.txt 0 5 > "$T10_D/hold.out" 2> "$T10_D/hold.err") &
+        (cd "$T10_D" && WINEPREFIX="$T10_D/pfx" WINEDLLOVERRIDES=winedbg.exe=d WINEDEBUG=-all timeout 120 "$T10_WINE" w32_hold.exe held.txt 0 5 > "$T10_D/hold.out" 2> "$T10_D/hold.err") &
         S1B_HP=$!
         S1B_I=0
         while [ "$S1B_I" -lt 600 ] && ! tr -d '\r' < "$T10_D/hold.out" | grep -q '^held$'; do sleep 0.1; S1B_I=$((S1B_I + 1)); done
-        (cd "$T10_D" && WINEPREFIX="$T10_D/pfx" WINEDEBUG=-all timeout 120 "$T10_WINE" sys_lasterr.exe no-such-file.txt held.txt > "$T10_D/win.out" 2> "$T10_D/win.err"); T10_RC=$?
+        (cd "$T10_D" && WINEPREFIX="$T10_D/pfx" WINEDLLOVERRIDES=winedbg.exe=d WINEDEBUG=-all timeout 120 "$T10_WINE" sys_lasterr.exe no-such-file.txt held.txt > "$T10_D/win.out" 2> "$T10_D/win.err"); T10_RC=$?
         kill "$S1B_HP" 2>/dev/null; wait "$S1B_HP" 2>/dev/null
         S1B_GOT=$(tr -d '\r' < "$T10_D/win.out")
         if [ "$T10_RC" = "0" ] && [ "$S1B_GOT" = $'missing 2\nheld 16' ]; then
