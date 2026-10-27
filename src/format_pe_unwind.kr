@@ -1,0 +1,362 @@
+// KernRift self-hosted compiler — Windows unwind-table recorder (#143)
+//
+// The emitters REPORT each function's frame here as they emit it; the PE/COFF
+// writer turns the records into .pdata/.xdata. The writer never infers a
+// prologue from bytes. Spec: docs/superpowers/specs/2026-10-26-pe-unwind-tables.md
+// section 3 (local, not in the tree); the checker that verifies the result is
+// tests/helpers/pe_unwind_check.py.
+//
+// TWO GATES, deliberately separate (spec R3-M1):
+//   * COLLECTION happens whenever target_os == 2, whatever the container, so a
+//     --target=windows --emit=asm listing can print the annotations the checker
+//     reads. When target_os != 2 every uw_* call returns at once, so no other
+//     target's output can change.
+//   * EMISSION (the PE/COFF table writer) is gated by uw_emit_tables, a
+//     dedicated flag (N-I1): set by compile() for a single-target
+//     --target=windows --emit=pe / --emit=obj build and by compile_fat around
+//     each Windows slice. It is NOT derived from cg_emit_mode, which
+//     compile_fat never sets.
+// Code generation never reads anything in this file.
+//
+// uw_backend_ready is temporary scaffolding (plan section 0.x, I3): a bit per
+// (arch, backend) that has been converted. The writer emits tables only for a
+// backend whose bit is set, so a Windows build of a not-yet-converted backend
+// stays byte-identical to before instead of being refused. It is removed once
+// every backend is ready (plan A13).
+//
+// --test-no-unwind (hidden, test-only, like --dump-argv-parser): suppresses
+// table emission in every writer path while leaving code generation unchanged,
+// so the suite can build the negative image of a fixture in-tree.
+
+static uint64 uw_emit_tables = 0
+static uint64 uw_test_no_unwind = 0
+// bit (arch * 2 + legacy): arch 0 = x86_64, 1 = arm64; legacy 0 = IR, 1 = legacy
+static uint64 uw_backend_ready = 0
+
+fn uw_backend_is_ready(uint64 arch, uint64 legacy) -> uint64 {
+    uint64 bit = 1 << (arch * 2 + legacy)
+    if (uw_backend_ready & bit) != 0 { return 1 }
+    return 0
+}
+
+// ---------------------------------------------------------------------------
+// The record table. One fixed-size record per function, grown by doubling
+// (like fn_table); no cap.
+//
+//   +0   fn_begin          code offset of the function's first byte
+//   +8   fn_end            offset after its last byte (set by the next
+//                          function's begin, or uw_fn_end for the last one)
+//   +16  kind              0 = frame-pointer function, 1 = naked
+//   +24  finalised         1 once uw_fn_finalize ran
+//   +32  prolog_size       x64: SizeOfProlog; arm64: prologue instruction count
+//   +40  frame_reg         x64: 5 (rbp) once SET_FPREG is recorded
+//   +48  code_count        number of entries in the code list
+//   +56  code_first        index of the first entry in uw_codes
+//   +64  epi_off           arm64: epilog start offset (bytes from fn_begin)
+//   +72  epi_index         arm64: epilog StartIndex (byte index into the codes)
+//   +80  leaf_count        internal-leaf sub-ranges recorded for this function
+//   +88  leaf_first        index of the first entry in uw_leaves
+//   +96  name_tok          the function's name token (listing annotations)
+// ---------------------------------------------------------------------------
+static uint64 UW_REC = 104
+static uint64 uw_recs = 0
+static uint64 uw_rec_cap = 0
+static uint64 uw_rec_count = 0
+static uint64 uw_cur = 0xFFFFFFFFFFFFFFFF
+
+// Codes: 4 x u64 per entry -- (op, a, b, end offset relative to fn_begin).
+//   x64 ops: 0 PUSH_NONVOL(reg) 1 ALLOC(size) 3 SET_FPREG(reg) 4 SAVE_NONVOL(reg, frame_off)
+//   arm64 op 16: one prologue instruction's code bytes (a = bytes, low byte
+//   first; b = byte count)
+static uint64 uw_codes = 0
+static uint64 uw_code_cap = 0
+static uint64 uw_code_count = 0
+
+// Leaves: 4 x u64 per entry -- (begin, end, kind 0 = called / 1 = dead-end, name pointer)
+static uint64 uw_leaves = 0
+static uint64 uw_leaf_cap = 0
+static uint64 uw_leaf_count = 0
+
+// Balanced loop pairs: 5 x u64 per entry -- (push_lo, push_hi, pop_lo, pop_hi, counter reg)
+static uint64 uw_loops = 0
+static uint64 uw_loop_cap = 0
+static uint64 uw_loop_count = 0
+
+// User asm byte ranges: 2 x u64 per entry -- (begin, end)
+static uint64 uw_asms = 0
+static uint64 uw_asm_cap = 0
+static uint64 uw_asm_count = 0
+
+// End of code: where the function-emission loop ended, before any string or
+// static byte (spec M1). 0xFFFFFFFFFFFFFFFF until recorded.
+static uint64 uw_code_end = 0xFFFFFFFFFFFFFFFF
+
+fn uw_reset() {
+    uw_rec_count = 0
+    uw_code_count = 0
+    uw_leaf_count = 0
+    uw_loop_count = 0
+    uw_asm_count = 0
+    uw_cur = 0xFFFFFFFFFFFFFFFF
+    uw_code_end = 0xFFFFFFFFFFFFFFFF
+}
+
+fn uw_collecting() -> uint64 {
+    if target_os == 2 { return 1 }
+    return 0
+}
+
+fn uw_rec(uint64 i) -> uint64 {
+    return uw_recs + i * UW_REC
+}
+
+fn uw_get(uint64 i, uint64 field) -> uint64 {
+    uint64 v = 0
+    unsafe { *((uw_rec(i) + field) as uint64) -> v }
+    return v
+}
+
+fn uw_set(uint64 i, uint64 field, uint64 v) {
+    unsafe { *((uw_rec(i) + field) as uint64) = v }
+}
+
+fn uw_tab_put(uint64 base, uint64 idx, uint64 stride, uint64 k, uint64 v) {
+    unsafe { *((base + (idx * stride + k) * 8) as uint64) = v }
+}
+
+fn uw_tab_get(uint64 base, uint64 idx, uint64 stride, uint64 k) -> uint64 {
+    uint64 v = 0
+    unsafe { *((base + (idx * stride + k) * 8) as uint64) -> v }
+    return v
+}
+
+// A new function begins at `off`. The previous record (if any) ends here.
+fn uw_fn_begin(uint64 off, uint64 is_naked) {
+    if uw_collecting() == 0 { return }
+    if uw_rec_count >= uw_rec_cap {
+        if uw_rec_cap == 0 {
+            uw_rec_cap = 256
+            uw_recs = alloc(uw_rec_cap * UW_REC)
+        } else {
+            uw_recs = grow_buf(uw_recs, uw_rec_cap * UW_REC, uw_rec_cap * 2 * UW_REC)
+            uw_rec_cap = uw_rec_cap * 2
+        }
+    }
+    if uw_rec_count > 0 { uw_set(uw_rec_count - 1, 8, off) }
+    uint64 i = uw_rec_count
+    uw_set(i, 0, off)
+    uw_set(i, 8, 0xFFFFFFFFFFFFFFFF)
+    uw_set(i, 16, is_naked)
+    uw_set(i, 24, 0)
+    uw_set(i, 32, 0)
+    uw_set(i, 40, 0)
+    uw_set(i, 48, 0)
+    uw_set(i, 56, uw_code_count)
+    uw_set(i, 64, 0)
+    uw_set(i, 72, 0)
+    uw_set(i, 80, 0)
+    uw_set(i, 88, uw_leaf_count)
+    uw_set(i, 96, 0xFFFFFFFFFFFFFFFF)
+    uw_cur = i
+    uw_rec_count = uw_rec_count + 1
+}
+
+// The current function's name token (fn_register knows it).
+fn uw_fn_name(uint64 name_tok) {
+    if uw_collecting() == 0 { return }
+    if uw_cur == 0xFFFFFFFFFFFFFFFF { return }
+    uw_set(uw_cur, 96, name_tok)
+}
+
+// The current function turns out to be naked (kind 1, no codes).
+fn uw_fn_set_naked() {
+    if uw_collecting() == 0 { return }
+    if uw_cur == 0xFFFFFFFFFFFFFFFF { return }
+    uw_set(uw_cur, 16, 1)
+}
+
+// The last function's range ends at the end of code (M1); also the listing's
+// `; uw-code-end`.
+fn uw_fn_end(uint64 off) {
+    if uw_collecting() == 0 { return }
+    if uw_rec_count > 0 { uw_set(uw_rec_count - 1, 8, off) }
+    uw_code_end = off
+}
+
+fn uw_code_push(uint64 op, uint64 a, uint64 b, uint64 end) {
+    if uw_collecting() == 0 { return }
+    if uw_cur == 0xFFFFFFFFFFFFFFFF { return }
+    if uw_code_count >= uw_code_cap {
+        if uw_code_cap == 0 {
+            uw_code_cap = 1024
+            uw_codes = alloc(uw_code_cap * 32)
+        } else {
+            uw_codes = grow_buf(uw_codes, uw_code_cap * 32, uw_code_cap * 64)
+            uw_code_cap = uw_code_cap * 2
+        }
+    }
+    uint64 rel = end - uw_get(uw_cur, 0)
+    uw_tab_put(uw_codes, uw_code_count, 4, 0, op)
+    uw_tab_put(uw_codes, uw_code_count, 4, 1, a)
+    uw_tab_put(uw_codes, uw_code_count, 4, 2, b)
+    uw_tab_put(uw_codes, uw_code_count, 4, 3, rel)
+    uw_code_count = uw_code_count + 1
+    uw_set(uw_cur, 48, uw_get(uw_cur, 48) + 1)
+    uw_set(uw_cur, 32, rel)
+}
+
+// x64 prologue instructions, in emission order; `end` is the code offset just
+// after the instruction.
+fn uw_x64_push(uint64 reg, uint64 end) { uw_code_push(0, reg, 0, end) }
+fn uw_x64_alloc(uint64 size, uint64 end) { uw_code_push(1, size, 0, end) }
+fn uw_x64_save(uint64 reg, uint64 frame_off, uint64 end) { uw_code_push(4, reg, frame_off, end) }
+fn uw_x64_setfp(uint64 reg, uint64 end) {
+    uw_code_push(3, reg, 0, end)
+    if uw_collecting() == 0 { return }
+    if uw_cur == 0xFFFFFFFFFFFFFFFF { return }
+    uw_set(uw_cur, 40, reg)
+}
+
+// arm64: one prologue instruction's unwind code bytes (1..4 bytes, low byte
+// first in `code_bytes`), in emission order.
+fn uw_a64_prolog_insn(uint64 code_bytes, uint64 nbytes, uint64 end) {
+    uw_code_push(16, code_bytes, nbytes, end)
+}
+
+// arm64: the epilog starts at `off` and shares the prologue codes from byte
+// index `start_index`.
+fn uw_a64_epilog(uint64 off, uint64 start_index) {
+    if uw_collecting() == 0 { return }
+    if uw_cur == 0xFFFFFFFFFFFFFFFF { return }
+    uw_set(uw_cur, 64, off - uw_get(uw_cur, 0))
+    uw_set(uw_cur, 72, start_index)
+}
+
+// A compiler-emitted internal leaf [begin, end) inside the current function.
+// kind 0 = called leaf (entered by call, bare ret), 1 = dead-end (entered by
+// jmp, ends in ExitProcess).
+fn uw_leaf(uint64 begin, uint64 end, uint64 kind, uint64 name) {
+    if uw_collecting() == 0 { return }
+    if uw_cur == 0xFFFFFFFFFFFFFFFF { return }
+    if uw_leaf_count >= uw_leaf_cap {
+        if uw_leaf_cap == 0 {
+            uw_leaf_cap = 64
+            uw_leaves = alloc(uw_leaf_cap * 32)
+        } else {
+            uw_leaves = grow_buf(uw_leaves, uw_leaf_cap * 32, uw_leaf_cap * 64)
+            uw_leaf_cap = uw_leaf_cap * 2
+        }
+    }
+    uw_tab_put(uw_leaves, uw_leaf_count, 4, 0, begin)
+    uw_tab_put(uw_leaves, uw_leaf_count, 4, 1, end)
+    uw_tab_put(uw_leaves, uw_leaf_count, 4, 2, kind)
+    uw_tab_put(uw_leaves, uw_leaf_count, 4, 3, name)
+    uw_leaf_count = uw_leaf_count + 1
+    uw_set(uw_cur, 80, uw_get(uw_cur, 80) + 1)
+}
+
+// A data-dependent push loop [push_lo, push_hi) and its pop loop
+// [pop_lo, pop_hi), both driven by `counter` (checker rule C4b).
+fn uw_balanced_loops(uint64 push_lo, uint64 push_hi, uint64 pop_lo, uint64 pop_hi, uint64 counter) {
+    if uw_collecting() == 0 { return }
+    if uw_loop_count >= uw_loop_cap {
+        if uw_loop_cap == 0 {
+            uw_loop_cap = 64
+            uw_loops = alloc(uw_loop_cap * 40)
+        } else {
+            uw_loops = grow_buf(uw_loops, uw_loop_cap * 40, uw_loop_cap * 80)
+            uw_loop_cap = uw_loop_cap * 2
+        }
+    }
+    uw_tab_put(uw_loops, uw_loop_count, 5, 0, push_lo)
+    uw_tab_put(uw_loops, uw_loop_count, 5, 1, push_hi)
+    uw_tab_put(uw_loops, uw_loop_count, 5, 2, pop_lo)
+    uw_tab_put(uw_loops, uw_loop_count, 5, 3, pop_hi)
+    uw_tab_put(uw_loops, uw_loop_count, 5, 4, counter)
+    uw_loop_count = uw_loop_count + 1
+}
+
+// User asm bytes [begin, end) (checker rules C5 and the asm refusals).
+fn uw_asm_range(uint64 begin, uint64 end) {
+    if uw_collecting() == 0 { return }
+    if uw_asm_count >= uw_asm_cap {
+        if uw_asm_cap == 0 {
+            uw_asm_cap = 64
+            uw_asms = alloc(uw_asm_cap * 16)
+        } else {
+            uw_asms = grow_buf(uw_asms, uw_asm_cap * 16, uw_asm_cap * 32)
+            uw_asm_cap = uw_asm_cap * 2
+        }
+    }
+    uw_tab_put(uw_asms, uw_asm_count, 2, 0, begin)
+    uw_tab_put(uw_asms, uw_asm_count, 2, 1, end)
+    uw_asm_count = uw_asm_count + 1
+}
+
+// Seal the current function's record, after the backend's end-of-function
+// patches (I6). IR paths know every size when the prologue is emitted.
+fn uw_fn_finalize() {
+    if uw_collecting() == 0 { return }
+    if uw_cur == 0xFFFFFFFFFFFFFFFF { return }
+    uw_set(uw_cur, 24, 1)
+}
+
+// ---------------------------------------------------------------------------
+// Listing annotations (spec N-Mi1): the lines tests/helpers/pe_unwind_check.py
+// reads from a --target=windows --emit=asm listing. Offsets are hex, relative
+// to the start of code (= listing offset 0). The caller prints them only when
+// target_os == 2, so no other listing changes.
+// ---------------------------------------------------------------------------
+fn uw_write_annotations(uint64 fd, uint64 source) {
+    if uw_collecting() == 0 { return }
+    if uw_code_end != 0xFFFFFFFFFFFFFFFF {
+        write(fd, "; uw-code-end ", 14)
+        write_hex32(fd, uw_code_end)
+        write(fd, "\n", 1)
+    }
+    uint64 i = 0
+    while i < uw_leaf_count {
+        write(fd, "; uw-leaf ", 10)
+        uint64 nm = uw_tab_get(uw_leaves, i, 4, 3)
+        write(fd, nm, str_len(nm))
+        if uw_tab_get(uw_leaves, i, 4, 2) == 0 { write(fd, " called ", 8) } else { write(fd, " deadend ", 9) }
+        write_hex32(fd, uw_tab_get(uw_leaves, i, 4, 0))
+        write(fd, "-", 1)
+        write_hex32(fd, uw_tab_get(uw_leaves, i, 4, 1))
+        write(fd, "\n", 1)
+        i = i + 1
+    }
+    i = 0
+    while i < uw_loop_count {
+        write(fd, "; uw-loops ", 11)
+        write_hex32(fd, uw_tab_get(uw_loops, i, 5, 0))
+        write(fd, "-", 1)
+        write_hex32(fd, uw_tab_get(uw_loops, i, 5, 1))
+        write(fd, " ", 1)
+        write_hex32(fd, uw_tab_get(uw_loops, i, 5, 2))
+        write(fd, "-", 1)
+        write_hex32(fd, uw_tab_get(uw_loops, i, 5, 3))
+        uint64 c = uw_tab_get(uw_loops, i, 5, 4)
+        if c == 1 { write(fd, " rcx\n", 5) } else { write(fd, " r?\n", 4) }
+        i = i + 1
+    }
+    i = 0
+    while i < uw_rec_count {
+        uint64 tk = uw_get(i, 96)
+        if uw_get(i, 16) == 1 && tk != 0xFFFFFFFFFFFFFFFF {
+            write(fd, "; uw-naked ", 11)
+            write(fd, source + tok_text_start(tk), tok_text_len(tk))
+            write(fd, "\n", 1)
+        }
+        i = i + 1
+    }
+    i = 0
+    while i < uw_asm_count {
+        write(fd, "; uw-asm ", 9)
+        write_hex32(fd, uw_tab_get(uw_asms, i, 2, 0))
+        write(fd, "-", 1)
+        write_hex32(fd, uw_tab_get(uw_asms, i, 2, 1))
+        write(fd, "\n", 1)
+        i = i + 1
+    }
+}

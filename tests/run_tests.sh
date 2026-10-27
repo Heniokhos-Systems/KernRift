@@ -29018,6 +29018,20 @@ else
     if [ -z "$PEU_WHY" ]; then pe_row_ok wine_crash_override_does_not_mask "base rc=0, prototype rc=5, stdout exactly 'armed'$(t10_note)"
     else pe_row_bad wine_crash_override_does_not_mask "$PEU_WHY"; fi
 fi
+# --test-no-unwind (hidden, test-only, #143): accepted, absent from --help, and
+# -- until a backend writes tables -- inert: the image is byte-identical to the
+# one built without it. Later rows build their in-tree negative images with it.
+PEU_WHY=""
+$T10_KRC --arch=x86_64 --target=windows --emit=pe "$DIR/fixtures/pe_unwind_oracle/nest.kr" -o "$T10_D/peu_sw0.exe" > "$T10_D/peu_sw.log" 2>&1 \
+    || PEU_WHY="$PEU_WHY plain build failed;"
+$T10_KRC --test-no-unwind --arch=x86_64 --target=windows --emit=pe "$DIR/fixtures/pe_unwind_oracle/nest.kr" -o "$T10_D/peu_sw1.exe" > "$T10_D/peu_sw.log" 2>&1 \
+    || PEU_WHY="$PEU_WHY --test-no-unwind refused: $(grep -m1 -i error "$T10_D/peu_sw.log" | cut -c1-120);"
+[ -z "$PEU_WHY" ] && ! cmp -s "$T10_D/peu_sw0.exe" "$T10_D/peu_sw1.exe" && PEU_WHY="$PEU_WHY image differs with --test-no-unwind;"
+$T10_KRC --help > "$T10_D/peu_help.txt" 2>&1
+grep -q 'Usage\|usage' "$T10_D/peu_help.txt" || PEU_WHY="$PEU_WHY --help printed no usage;"
+grep -q 'test-no-unwind' "$T10_D/peu_help.txt" && PEU_WHY="$PEU_WHY --help documents it;"
+if [ -z "$PEU_WHY" ]; then pe_row_ok pe_unwind_hidden_switch_accepted "accepted, inert, not in --help"
+else pe_row_bad pe_unwind_hidden_switch_accepted "$PEU_WHY"; fi
 
 if [ -z "$T10_WINE" ]; then
     for T10_R in net_loopback_windows_wine time_monotonic_and_sleep_windows_wine time_ms_of_ns_windows_wine alloc_guard_smoke_windows_wine alloc_guard_fault_windows_wine alloc_guard_fault_read_windows_wine alloc_guard_refused_is_fatal_windows_wine alloc_guard_refused_names_allocator_windows_wine std_together_windows_wine net_user_names_windows_wine; do

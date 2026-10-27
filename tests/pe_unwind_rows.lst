@@ -4,3 +4,4 @@
 pe_unwind_checker_selftest
 pe_unwind_checker_rules_selftest
 wine_crash_override_does_not_mask
+pe_unwind_hidden_switch_accepted

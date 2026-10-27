@@ -3366,6 +3366,10 @@ fn emit_static_data() {
 // find_main_offset) re-read the fn_table base per iteration and neither
 // registers while iterating, so growth here is safe.
 fn fn_register(uint64 name_tok, uint64 code_offset) {
+    // #143 unwind recorder: a function begins here (a no-op unless
+    // target_os == 2; naked functions are re-marked by their emitter).
+    uw_fn_begin(code_offset, 0)
+    uw_fn_name(name_tok)
     if fn_count >= 16777216 {
         write(2, "error: fn_table exceeded 16777216 functions (compiler bug?)\n", 60)
         exit(1)
