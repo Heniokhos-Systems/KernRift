@@ -36,9 +36,11 @@ Rules (spec section 8.1):
       and every function-address materialisation is a BeginAddress or a
       registered leaf begin inside the caller's own range.
   C3  prologue instructions map 1:1 to the codes, in order, at their exact
-      offsets; the frame pointer is established (x64: SET_FPREG/RBP is the
-      last prologue instruction; arm64: set_fp/add_fp, followed only by SP
-      allocation); every arm64 SP adjustment is a multiple of 16.
+      offsets; the frame pointer is established (x64: SET_FPREG/RBP, with no
+      SAVE_NONVOL before it and only SAVE_NONVOL stores -- [rsp+d] or [rbp+d],
+      d = the code's offset x 8 -- after it, ruling (b); arm64: set_fp/add_fp,
+      followed only by SP allocation); every arm64 SP adjustment is a
+      multiple of 16.
   C4  after the prologue nothing writes rbp/x29 except the epilogue's restore;
       every ret outside a leaf is preceded by the canonical epilogue (x64) or
       ends an epilog scope whose instructions match its codes (arm64); leaves
@@ -47,8 +49,10 @@ Rules (spec section 8.1):
       entry depth; ExitProcess calls (by import name) and jumps into dead-end
       leaves end a path; called leaves return at their own entry depth; a
       `uw-loops` pair is summarised as depth-neutral only if its bytes satisfy
-      the balanced-loop rule (counter zeroed, bottom-tested, one push + one inc,
-      one pop + `dec; jnz`).
+      the balanced-loop rule (counter zeroed; either bottom-tested -- one push
+      + one inc, one pop + `dec; jnz` -- or guarded top-tested, ruling (c) --
+      one exit test then one push + one inc and `jmp` back; `test R,R; jz
+      exit`, one pop + one dec and `jmp` back).
   C5  kind-1 (zero-code, naked) records exactly for the listing's `uw-naked`
       functions, which write neither RSP/SP nor rbp/x29 outside `uw-asm` bytes.
   C6  at every reachable instruction offset an unwind simulator, run with
@@ -1109,6 +1113,12 @@ class XI:
                 m = re.match(r'^qword ptr \[rsp( \+ (0x[0-9a-f]+|\d+))?\]$', dst)
                 if m:
                     self.kind, self.arg = 'store_rsp', (int(m.group(2), 0) if m.group(2) else 0, self.reg(ops[1]))
+            elif mn == 'mov' and len(ops) == 2 and dst and dst.startswith('qword ptr [rbp') and ops[1] in X64_R64:
+                # [rbp+d] store: a SAVE_NONVOL only in a prologue after
+                # `mov rbp,rsp` (rbp == rsp there; C3 checks the position)
+                m = re.match(r'^qword ptr \[rbp( \+ (0x[0-9a-f]+|\d+))?\]$', dst)
+                if m:
+                    self.kind, self.arg = 'store_rbp', (int(m.group(2), 0) if m.group(2) else 0, self.reg(ops[1]))
             elif mn == 'mov' and len(ops) == 2 and dst in X64_R64 and ops[1].startswith('qword ptr [rsp'):
                 m = re.match(r'^qword ptr \[rsp( \+ (0x[0-9a-f]+|\d+))?\]$', ops[1])
                 self.writes.add(self.reg(dst))
@@ -1230,16 +1240,31 @@ class X64Fn:
         ins = [i for i in self.insns if i.a < r.begin + r.prolog]
         if ins and ins[-1].a + ins[-1].n != r.begin + r.prolog:
             add('SizeOfProlog %d does not end on an instruction boundary' % r.prolog)
+        fp_set = False
         for i in ins:
             off = i.a + i.n - r.begin
+            # amended C3 (ruling (b)): with a frame register, SET_FPREG may be
+            # followed only by SAVE_NONVOL stores ([rsp+d] or [rbp+d], rbp ==
+            # rsp there), and no SAVE_NONVOL may come before it
+            if fp_set and i.kind not in ('store_rsp', 'store_rbp'):
+                add('prologue instruction at +0x%x (%s) follows SET_FPREG and is not a SAVE_NONVOL store'
+                    % (i.a - r.begin, i.mn))
+                return
             if i.kind == 'push' and i.arg is not None and i.b[0] != 0xFF:
                 want.append((off, 'PUSH_NONVOL', i.arg))
             elif i.kind == 'sub_rsp':
                 want.append((off, 'ALLOC', i.arg))
-            elif i.kind == 'store_rsp':
+            elif i.kind in ('store_rsp', 'store_rbp'):
+                if r.frame_reg != 0 and not fp_set:
+                    add('SAVE_NONVOL store at +0x%x comes before SET_FPREG' % (i.a - r.begin))
+                    return
+                if i.kind == 'store_rbp' and not fp_set:
+                    add('prologue [rbp+d] store at +0x%x before `mov rbp, rsp`' % (i.a - r.begin))
+                    return
                 want.append((off, 'SAVE_NONVOL', i.arg))
             elif i.kind == 'mov_reg_rsp' and i.arg == 5:
                 want.append((off, 'SET_FPREG', 5))
+                fp_set = True
             else:
                 add('prologue instruction at +0x%x (%s) has no unwind code' % (i.a - r.begin, i.mn))
                 return
@@ -1258,8 +1283,8 @@ class X64Fn:
         if have != want:
             add('codes %s do not describe the prologue %s' % (have, want))
             return
-        if not want or want[-1][1] != 'SET_FPREG':
-            add('SET_FPREG is not the last prologue instruction')
+        if not fp_set:
+            add('the prologue has no SET_FPREG')
         for off, name, info, opnd in r.codes:
             if name == 'ALLOC_SMALL' and not 8 <= opnd <= 128:
                 add('ALLOC_SMALL %d out of range' % opnd)
@@ -1324,6 +1349,12 @@ class X64Fn:
             d, rg = i.arg
             if t.sp is not None:
                 t.mem[t.sp + d] = t.r(rg)
+            return t, [(end, t)]
+        if k == 'store_rbp':
+            d, rg = i.arg
+            fp = t.r(5)
+            if fp[0] == 'sp' and fp[1] is not None:
+                t.mem[fp[1] + d] = t.r(rg)
             return t, [(end, t)]
         if k == 'load_rsp':
             rg, d = i.arg
@@ -2405,39 +2436,95 @@ class Ctx:
 
             def is_inc(i, d):
                 return i.mn == ('inc' if d > 0 else 'dec') and i.ops == [cn]
-            # push loop: bottom-tested (the conditional back-edge is the last
-            # instruction and the only branch), one 8-byte push, one inc
-            if push[-1].kind != 'jcc' or push[-1].tgt != pl:
-                add('push loop is not bottom-tested (its last instruction is not a branch back to its top)')
-            if any(i.kind in ('jcc', 'jmp', 'call', 'call_iat', 'ret') for i in push[:-1]):
-                add('push loop has a branch or call before its back-edge')
-            if sum(1 for i in push if i.kind == 'push' and i.arg is not None) != 1 or \
-               sum(1 for i in push if 4 in i.writes) != 1:
-                add('push loop must contain exactly one 8-byte register push and no other RSP write')
-            if sum(1 for i in push if is_inc(i, 1)) != 1 or sum(1 for i in push if c in i.writes) != 1:
-                add('push loop must increment %s exactly once and write it nowhere else' % cn)
-            # pop loop: one pop, one dec, `dec c; jnz top` at the bottom
-            if pop[-1].kind != 'jcc' or pop[-1].tgt != ql or pop[-1].b[0] not in (0x75,) and pop[-1].b[:2] != b'\x0f\x85':
-                add('pop loop does not end in `jnz` back to its top')
-            if len(pop) < 2 or not is_inc(pop[-2], -1):
-                add('pop loop back-edge is not taken on `dec %s`' % cn)
-            if any(i.kind in ('jcc', 'jmp', 'call', 'call_iat', 'ret') for i in pop[:-1]):
-                add('pop loop has a branch or call before its back-edge')
-            if sum(1 for i in pop if i.kind == 'pop' and i.arg is not None) != 1 or \
-               sum(1 for i in pop if 4 in i.writes) != 1:
-                add('pop loop must contain exactly one 8-byte register pop and no other RSP write')
-            if sum(1 for i in pop if c in i.writes) != 1:
-                add('pop loop must write %s only in its dec' % cn)
+
+            def is_step(i, d):
+                # guarded form: `inc R` / `add R,1` (d>0), `dec R` / `sub R,1`
+                return is_inc(i, d) or (i.mn == ('add' if d > 0 else 'sub') and len(i.ops) == 2
+                                        and i.ops[0] == cn and i.ops[1] in ('1', '0x1'))
+
+            def is_branch(i):
+                return i.kind in ('jcc', 'jmp', 'call', 'call_iat', 'call_ind', 'ret')
+
+            def one_push(body):
+                return sum(1 for i in body if i.kind == 'push' and i.arg is not None) == 1 and \
+                    sum(1 for i in body if 4 in i.writes) == 1
+
+            def one_pop(body):
+                return sum(1 for i in body if i.kind == 'pop' and i.arg is not None) == 1 and \
+                    sum(1 for i in body if 4 in i.writes) == 1
+            guarded = push[-1].kind == 'jmp' and push[-1].tgt == pl
+            pop_exit = None
+            if not guarded:
+                # bottom-tested: the conditional back-edge is the last
+                # instruction and the only branch; one 8-byte push, one inc
+                if push[-1].kind != 'jcc' or push[-1].tgt != pl:
+                    add('push loop is neither bottom-tested (a conditional branch back to its top as its last '
+                        'instruction) nor guarded top-tested (an unconditional `jmp` back to its top)')
+                if any(is_branch(i) for i in push[:-1]):
+                    add('push loop has a branch or call before its back-edge')
+                if not one_push(push):
+                    add('push loop must contain exactly one 8-byte register push and no other RSP write')
+                if sum(1 for i in push if is_inc(i, 1)) != 1 or sum(1 for i in push if c in i.writes) != 1:
+                    add('push loop must increment %s exactly once and write it nowhere else' % cn)
+                # pop loop: one pop, one dec, `dec c; jnz top` at the bottom
+                if pop[-1].kind != 'jcc' or pop[-1].tgt != ql or pop[-1].b[0] not in (0x75,) and pop[-1].b[:2] != b'\x0f\x85':
+                    add('pop loop does not end in `jnz` back to its top')
+                if len(pop) < 2 or not is_inc(pop[-2], -1):
+                    add('pop loop back-edge is not taken on `dec %s`' % cn)
+                if any(is_branch(i) for i in pop[:-1]):
+                    add('pop loop has a branch or call before its back-edge')
+                if not one_pop(pop):
+                    add('pop loop must contain exactly one 8-byte register pop and no other RSP write')
+                if sum(1 for i in pop if c in i.writes) != 1:
+                    add('pop loop must write %s only in its dec' % cn)
+            else:
+                # guarded top-tested (spec 8.1 C4b, ruling (c)). Push loop: a
+                # single cycle -- one exit test (any condition) leaving to the
+                # code after the loop, then a straight line holding the one
+                # 8-byte push and the one `inc R`, ending in `jmp` to the top.
+                ex = [k for k, i in enumerate(push[:-1]) if is_branch(i)]
+                if len(ex) != 1 or push[ex[0]].kind != 'jcc' or push[ex[0]].tgt != ph:
+                    add('guarded push loop must have exactly one branch before its back-edge: a conditional '
+                        'exit to 0x%x' % ph)
+                else:
+                    after = push[ex[0] + 1:-1]
+                    if not one_push(push) or not one_push(after):
+                        add('guarded push loop must contain exactly one 8-byte register push, after its exit '
+                            'test, and no other RSP write')
+                    if sum(1 for i in push if c in i.writes) != 1 or sum(1 for i in after if is_step(i, 1)) != 1:
+                        add('guarded push loop must write %s only by one `inc %s` after its exit test' % (cn, cn))
+                # pop loop: `test R,R` (or `cmp R,0`), then `jz`/`je` to its
+                # only exit; a straight-line body with one 8-byte pop and one
+                # `dec R`; an unconditional `jmp` back to the header.
+                hd = pop[0] if pop else None
+                if hd is None or not ((hd.mn == 'test' and hd.ops == [cn, cn]) or
+                                      (hd.mn == 'cmp' and len(hd.ops) == 2 and hd.ops[0] == cn
+                                       and hd.ops[1] in ('0', '0x0'))):
+                    add('guarded pop loop does not start with `test %s, %s` (or `cmp %s, 0`)' % (cn, cn, cn))
+                if len(pop) < 3 or pop[1].kind != 'jcc' or pop[1].tgt != qh or \
+                   (pop[1].b[0] != 0x74 and pop[1].b[:2] != b'\x0f\x84'):
+                    add('guarded pop loop header is not followed by `jz` to its exit 0x%x' % qh)
+                else:
+                    pop_exit = pop[1].a
+                if pop[-1].kind != 'jmp' or pop[-1].tgt != ql:
+                    add('guarded pop loop does not end in `jmp` back to its header')
+                if any(is_branch(i) for i in pop[2:-1]):
+                    add('guarded pop loop body is not straight-line')
+                if not one_pop(pop):
+                    add('pop loop must contain exactly one 8-byte register pop and no other RSP write')
+                if sum(1 for i in pop if c in i.writes) != 1 or sum(1 for i in pop[2:-1] if is_step(i, -1)) != 1:
+                    add('guarded pop loop must write %s only by one `dec %s` in its body' % (cn, cn))
             for i in mid:
                 if c in i.writes or 4 in i.writes:
                     add('%s or RSP written between the loops at 0x%x' % (cn, i.a))
-                if i.kind in ('jcc', 'jmp', 'call', 'call_iat', 'ret'):
+                if is_branch(i):
                     add('control transfer between the loops at 0x%x' % i.a)
             # single entry: nothing outside the region branches into it
             for g in f.insns:
                 if g.tgt is not None and pl < g.tgt < qh and not (pl <= g.a < qh):
                     add('0x%x branches into the loop region at 0x%x' % (g.a, g.tgt))
-                if g.tgt is not None and pl <= g.a < qh and not (pl <= g.tgt < qh):
+                if g.tgt is not None and pl <= g.a < qh and not (pl <= g.tgt < qh) \
+                   and not (g.a == pop_exit and g.tgt == qh):
                     add('0x%x branches out of the loop region' % g.a)
 
 

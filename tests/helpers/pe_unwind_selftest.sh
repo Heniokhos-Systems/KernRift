@@ -528,7 +528,60 @@ lq_e:
 EOF
 fn_wrap b "$W/loopbody.s" | mk digit_loop_top x64
 echo '; uw-loops {lp_b}-{lp_e} {lq_b}-{lq_e} rcx' | ann digit_loop_top
-expect_only body_digit_loop_top_tested C4b 'not bottom-tested' --arch x86_64 "$W/digit_loop_top.obj" --listing "$W/digit_loop_top.lst"
+# guarded top-tested (ruling (c)): the pop header tests the counter, so the
+# pair is safe at a zero count -- it passes since the C4b widening
+expect_all body_digit_loop_top_tested --arch x86_64 "$W/digit_loop_top.obj" --listing "$W/digit_loop_top.lst"
+
+# KR's LEGACY fmt_uint digit loops, byte for byte as codegen.kr emits them
+# (`xor r10,r10`; push loop `test rax,rax; jz near out ... push rdx; inc r10;
+# jmp near top`; pop loop `test r10,r10; jz near out; pop rcx ... dec r10;
+# jmp near top`): guarded top-tested, counter r10 -- must PASS
+legacy_loops() {   # <name> <push-loop body after the exit test> <between> <pop header> <pop body>
+    cat > "$W/loopbody.s" <<EOF
+        .byte 0x49,0x89,0xfb
+        .byte 0x4d,0x31,0xd2
+lp_b:
+        .byte 0x48,0x85,0xc0, 0x0f,0x84
+        .long lp_e - . - 4
+$2
+        .byte 0xe9
+        .long lp_b - . - 4
+lp_e:
+$3
+lq_b:
+$4
+        .byte 0x0f,0x84
+        .long lq_e - . - 4
+$5
+        .byte 0xe9
+        .long lq_b - . - 4
+lq_e:
+        .byte 0x4c,0x29,0xdf
+EOF
+    fn_wrap b "$W/loopbody.s" | mk "$1" x64
+    echo '; uw-loops {lp_b}-{lp_e} {lq_b}-{lq_e} r10' | ann "$1"
+}
+LL_PUSH='        .byte 0x48,0x31,0xd2, 0x48,0xb9,0x0a,0,0,0,0,0,0,0, 0x48,0xf7,0xf1, 0x48,0x83,0xc2,0x30, 0x52, 0x49,0xff,0xc2'
+LL_TEST='        .byte 0x4d,0x85,0xd2'
+LL_POP='        .byte 0x59, 0x88,0x0f, 0x48,0xff,0xc7, 0x49,0xff,0xca'
+legacy_loops legacy_loop "$LL_PUSH" '' "$LL_TEST" "$LL_POP"
+expect_all body_legacy_digit_loop --arch x86_64 "$W/legacy_loop.obj" --listing "$W/legacy_loop.lst"
+# ... and must FAIL with the guard removed (the pop header is not `test r10`)
+legacy_loops ll_noguard "$LL_PUSH" '' '        .byte 0x90,0x90,0x90' "$LL_POP"
+expect_only body_legacy_loop_guard_removed C4b 'does not start with .test r10, r10' --arch x86_64 "$W/ll_noguard.obj" --listing "$W/ll_noguard.lst"
+# ... with the guard testing a different register (r11)
+legacy_loops ll_otherreg "$LL_PUSH" '' '        .byte 0x4d,0x85,0xdb' "$LL_POP"
+expect_only body_legacy_loop_guard_other_reg C4b 'does not start with .test r10, r10' --arch x86_64 "$W/ll_otherreg.obj" --listing "$W/ll_otherreg.lst"
+# ... with two pushes per iteration
+legacy_loops ll_twopush "$LL_PUSH
+        .byte 0x52" '' "$LL_TEST" "$LL_POP"
+expect_only body_legacy_loop_two_pushes C4b 'exactly one 8-byte register push' --arch x86_64 "$W/ll_twopush.obj" --listing "$W/ll_twopush.lst"
+# ... with R written between the loops
+legacy_loops ll_midwrite "$LL_PUSH" '        .byte 0x49,0x89,0xc2' "$LL_TEST" "$LL_POP"
+expect_only body_legacy_loop_counter_written_between C4b 'r10 or RSP written between the loops' --arch x86_64 "$W/ll_midwrite.obj" --listing "$W/ll_midwrite.lst"
+# ... with the `inc` on a conditional path (skipped when rdx is zero)
+legacy_loops ll_condinc '        .byte 0x48,0x31,0xd2, 0x48,0xb9,0x0a,0,0,0,0,0,0,0, 0x48,0xf7,0xf1, 0x48,0x83,0xc2,0x30, 0x52, 0x48,0x85,0xd2, 0x74,0x03, 0x49,0xff,0xc2' '' "$LL_TEST" "$LL_POP"
+expect_only body_legacy_loop_conditional_inc C4b 'exactly one branch before its back-edge' --arch x86_64 "$W/ll_condinc.obj" --listing "$W/ll_condinc.lst"
 
 # ExitProcess ends its path: the unbalanced fall-through after it is dead
 body exitproc <<'EOF'
@@ -701,10 +754,68 @@ s1:
         .seh_endproc
 EOF
 out=$(python3 "$CHK" --rules $ALLR --verbose --arch x86_64 "$W/save_nonvol.obj" 2>&1)
-if [ "$(grep -c ': PASS' <<< "$out")" = 6 ] && grep -q '^C6: FAIL' <<< "$out" \
+if [ "$(grep -c ': PASS' <<< "$out")" = 5 ] && grep -q '^C6: FAIL' <<< "$out" \
+   && grep -q '^C3: FAIL' <<< "$out" && grep -q 's1: SAVE_NONVOL store at +0x6 comes before SET_FPREG' <<< "$out" \
    && [ "$(grep -c 'C6 problem' <<< "$out")" = 1 ] && grep -q 'C6 problem: s1: wine rule at +0xb: R12 restored' <<< "$out"; then
-    N=$((N + 1)); echo "  case save_nonvol_before_set_fpreg: C1..C5 PASS, C6 FAIL at exactly +0xb under the Wine rule (wine-9.0 frame rule)"
+    N=$((N + 1)); echo "  case save_nonvol_before_set_fpreg: C3 FAIL (amended order, ruling (b)), C6 FAIL at exactly +0xb under the Wine rule (wine-9.0 frame rule), C1 C2 C4 C4b C5 PASS"
 else fail save_nonvol_before_set_fpreg "got: $(tr '\n' '|' <<< "$out" | head -c 500)"; fi
+
+# the legacy x64 prologue of ruling (b): the r12 save FOLLOWS SET_FPREG, as
+# [rsp+d] and as [rbp+d] -- every rule passes, C6 under both rule sets
+for SV in 'movq %r12, 0x20(%rsp)' 'movq %r12, 0x20(%rbp)'; do
+    SVN=rsp; case "$SV" in *rbp*) SVN=rbp ;; esac
+    mk save_after_$SVN x64 <<EOF
+        .text
+        .def s2; .scl 2; .type 32; .endef
+        .globl s2
+        .seh_proc s2
+s2:
+        pushq %rbx
+        .seh_pushreg %rbx
+        pushq %rbp
+        .seh_pushreg %rbp
+        subq \$0x28, %rsp
+        .seh_stackalloc 0x28
+        movq %rsp, %rbp
+        .seh_setframe %rbp, 0
+        $SV
+        .seh_savereg %r12, 0x20
+        .seh_endprologue
+        movq %rax, %r12
+        movq 0x20(%rsp), %r12
+        addq \$0x28, %rsp
+        popq %rbp
+        popq %rbx
+        retq
+        .seh_endproc
+EOF
+    expect_all save_nonvol_after_set_fpreg_$SVN --arch x86_64 "$W/save_after_$SVN.obj"
+done
+# after SET_FPREG only SAVE_NONVOL stores may follow: an allocation there fails C3
+mk alloc_after_fp x64 <<'EOF'
+        .text
+        .def s3; .scl 2; .type 32; .endef
+        .globl s3
+        .seh_proc s3
+s3:
+        pushq %rbp
+        .seh_pushreg %rbp
+        movq %rsp, %rbp
+        .seh_setframe %rbp, 0
+        subq $0x20, %rsp
+        .seh_stackalloc 0x20
+        .seh_endprologue
+        addq $0x20, %rsp
+        popq %rbp
+        retq
+        .seh_endproc
+EOF
+out=$(python3 "$CHK" --rules C3 --arch x86_64 "$W/alloc_after_fp.obj" 2>&1)
+case "$out" in
+    "C3: FAIL s3: prologue instruction at +0x4 (sub) follows SET_FPREG and is not a SAVE_NONVOL store"*)
+        N=$((N + 1)); echo "  case neg_c3_alloc_after_set_fpreg: C3 FAIL as required" ;;
+    *) fail neg_c3_alloc_after_set_fpreg "got: $(tr '\n' '|' <<< "$out" | head -c 300)" ;;
+esac
 
 # ---- the phase-1 reviewer's adversarial cases, pinned --------------------
 # a call into the MIDDLE of a function: neither a BeginAddress nor a leaf (C2)
