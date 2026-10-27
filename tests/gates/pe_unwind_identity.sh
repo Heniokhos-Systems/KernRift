@@ -173,7 +173,15 @@ work() {
         printf 'SAME\t%s\t%s\t%s\n' "$f" "$id" "$hb"
         rm -rf "$OUT/w/$key"
     else
-        printf 'DIFF\t%s\t%s\t%s\t%s\n' "$f" "$id" "$hb" "$hn"
+        # name the first differing byte of every output file that differs
+        local where="" x c
+        for x in $(ls -A "$OUT/w/$key/b" "$OUT/w/$key/n" 2>/dev/null | grep -v ':$' | LC_ALL=C sort -u); do
+            case "$x" in so|se) continue ;; esac
+            if [ ! -f "$OUT/w/$key/b/$x" ] || [ ! -f "$OUT/w/$key/n/$x" ]; then where="$where $x:only-one-side"; continue; fi
+            c=$(cmp "$OUT/w/$key/b/$x" "$OUT/w/$key/n/$x" 2>&1 | head -1)
+            [ -n "$c" ] && where="$where $x:${c#*differ: }"
+        done
+        printf 'DIFF\t%s\t%s\t%s\t%s\t%s\n' "$f" "$id" "$hb" "$hn" "${where# }"
     fi
 }
 export -f work
