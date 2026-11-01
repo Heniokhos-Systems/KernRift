@@ -27769,9 +27769,10 @@ fi
 # (b) a @naked main gets NO parse (no ExitProcess epilogue to make clobbering
 #     its callee-saved registers safe): the parser leaf is absent from its PE on
 #     both arches, while the same program without @naked carries it.
-#     #143 (A6a): on x86_64 a naked main gets no command-line sequence AT ALL --
+#     #143 (A6a, A9a): a naked main gets no command-line sequence AT ALL --
 #     its PE makes no call to the GetCommandLineA import slot (decoded by import
-#     name, as `call [rip+disp32]` through the IAT), while the plain main does.
+#     name: x86_64 `call [rip+disp32]` through the IAT, arm64 `adrp x16;
+#     ldr x16, [x16, #off]; blr x16`), while the plain main does.
 TOTAL=$((TOTAL + 1))
 printf 'static uint64 cli_argc\nstatic uint64 cli_argv\n@naked\nfn main() {\n    asm { "ret" }\n}\n' > "$C7_D/nk.kr"
 printf 'static uint64 cli_argc\nstatic uint64 cli_argv\nfn main() -> uint32 {\n    return 0\n}\n' > "$C7_D/nn.kr"
@@ -27811,6 +27812,38 @@ if ns == 0: print(' x86_64:no-imports-decoded')
 if nk != 0: print(' x86_64:naked-main-calls-GetCommandLineA(%d)' % nk)
 if nn < 1: print(' x86_64:plain-main-never-calls-GetCommandLineA')
 C7GCLEOF
+)"
+        fi
+        if [ "$C7_A" = arm64 ]; then
+            # #143 (A9a): the same on arm64, where an import call is the
+            # triple adrp x16, page; ldr x16, [x16, #off]; blr x16 (decoded
+            # here and resolved to its import slot by name)
+            C7_WHY="$C7_WHY$(python3 -B - "$DIR/helpers" "$C7_D/nk.exe" "$C7_D/nn.exe" <<'C7GCLA64EOF' | tr -d '\n'
+import struct, sys
+sys.path.insert(0, sys.argv[1])
+import pe_unwind_check as c
+def gcl_calls(path):
+    b = c.Binary(path, 'arm64')
+    slots = c.import_slots(b)
+    t = b.text.data
+    n = 0
+    for i in range(0, len(t) - 11, 4):
+        w0, w1, w2 = struct.unpack_from('<III', t, i)
+        if (w0 & 0x9F00001F) != 0x90000010 or (w1 & 0xFFC003FF) != 0xF9400210 or w2 != 0xD63F0200:
+            continue
+        imm = (((w0 >> 5) & 0x7FFFF) << 2) | ((w0 >> 29) & 3)
+        if imm & (1 << 20):
+            imm -= 1 << 21
+        page = ((b.text.rva + i) & ~0xFFF) + (imm << 12)
+        if slots.get(page + ((w1 >> 10) & 0xFFF) * 8) == 'GetCommandLineA':
+            n += 1
+    return n, len(slots)
+nk, ns = gcl_calls(sys.argv[2])
+nn, _ = gcl_calls(sys.argv[3])
+if ns == 0: print(' arm64:no-imports-decoded')
+if nk != 0: print(' arm64:naked-main-calls-GetCommandLineA(%d)' % nk)
+if nn < 1: print(' arm64:plain-main-never-calls-GetCommandLineA')
+C7GCLA64EOF
 )"
         fi
     fi
@@ -29176,6 +29209,73 @@ else
     else
         pe_row_bad win_abi_frames_exec_x86_64_legacy "native rc=$PEU_N, qemu rc=$PEU_Q (N = check N failed)"
     fi
+fi
+# The arm64 corpus (#143 A9a, spec 5.1 / 8.5): the same compute corpus plus
+# d8-d15 saves, high register pressure and the SP alignment probe, built
+# --freestanding --target=windows --arch=arm64 and run under qemu-aarch64-static
+# (an arm64 ELF is entered with SP 16-aligned, as a Windows thread is, so no
+# trampoline). Like the x86_64 rows it requires real calls to f10 in the
+# listing (`bl` targets decoded from the byte column).
+PEU_FRA="$DIR/fixtures/win_abi_frames/frames_arm64.kr"
+PEU_QA="$(command -v qemu-aarch64-static || command -v qemu-aarch64 || true)"
+peu_f10_bl() {
+    python3 -B - "$1" <<'PEUF10AEOF' 2>&1
+import re, sys
+line = re.compile(r'^\s+([0-9a-f]{8}): ([0-9a-f]{8})(?:\s|$)')
+label = re.compile(r'^([A-Za-z_.$][\w.$@]*):\s*$')
+pending, labels, words = [], {}, []
+for l in open(sys.argv[1], encoding='latin-1'):
+    l = l.rstrip('\n')
+    m = label.match(l)
+    if m:
+        pending.append(m.group(1)); continue
+    m = line.match(l)
+    if m:
+        off = int(m.group(1), 16)
+        for n in pending:
+            labels[n] = off
+        pending = []
+        words.append((off, int(m.group(2), 16)))
+if 'f10' not in labels:
+    print('error: no f10 label'); sys.exit(0)
+n = 0
+for off, w in words:
+    if (w & 0xFC000000) == 0x94000000:
+        imm = w & 0x3FFFFFF
+        if imm & (1 << 25):
+            imm -= 1 << 26
+        if off + 4 * imm == labels['f10']:
+            n += 1
+print(n)
+PEUF10AEOF
+}
+if ! $T10_KRC --arch=arm64 --freestanding --target=windows "$PEU_FRA" -o "$T10_D/peu_fra" > "$T10_D/peu_fra.log" 2>&1 \
+   || ! $T10_KRC --arch=arm64 --freestanding --target=windows --emit=asm "$PEU_FRA" -o "$T10_D/peu_fra.s" >> "$T10_D/peu_fra.log" 2>&1; then
+    pe_row_bad win_abi_frames_exec_arm64_ir "build: $(grep -m1 error "$T10_D/peu_fra.log" | cut -c1-120)"
+elif PEU_C=$(peu_f10_bl "$T10_D/peu_fra.s"); [ "$PEU_C" != 4 ]; then
+    pe_row_bad win_abi_frames_exec_arm64_ir "the listing has $PEU_C real calls to f10, want 4 (inlined away?)"
+elif [ -z "$PEU_QA" ]; then
+    pe_row_skip win_abi_frames_exec_arm64_ir "no qemu-aarch64-static"
+else
+    chmod +x "$T10_D/peu_fra"
+    timeout 120 "$PEU_QA" "$T10_D/peu_fra" > /dev/null 2>&1; PEU_Q=$?
+    if [ "$PEU_Q" = 0 ]; then pe_row_ok win_abi_frames_exec_arm64_ir "qemu rc=0, 4 real calls to f10, SP alignment probe passed"
+    else pe_row_bad win_abi_frames_exec_arm64_ir "qemu rc=$PEU_Q (N = check N failed)"; fi
+fi
+# The Windows arm64 frame shape (#143 A9a, spec 5.1) of every non-naked
+# function of the compiler itself, from the byte column of its
+# --target=windows --arch=arm64 listing (tests/helpers/a64_win_frame_scan.py
+# decodes every word: sub sp,#A; the save area in order, consecutive pairs
+# only, x29/x30 once; add x29,sp,#f; the low allocation, a multiple of 16; and
+# the single epilogue sub sp,x29,#f, the exact reverse restores, add sp,#A, ret).
+if ! command -v python3 > /dev/null 2>&1; then pe_row_skip a64_win_frame_shape "no python3"
+elif ! $T10_KRC --arch=arm64 --target=windows --emit=asm "$DIR/../build/krc.kr" -o "$T10_D/peu_selfa.s" > "$T10_D/peu_selfa.log" 2>&1; then
+    pe_row_bad a64_win_frame_shape "listing build: $(grep -m1 error "$T10_D/peu_selfa.log" | cut -c1-120)"
+else
+    PEU_OUT=$(python3 -B "$DIR/helpers/a64_win_frame_scan.py" "$T10_D/peu_selfa.s" 2>&1); PEU_RC=$?
+    if [ "$PEU_RC" = 0 ]; then pe_row_ok a64_win_frame_shape "$(tail -1 <<< "$PEU_OUT")"
+    else pe_row_bad a64_win_frame_shape "$(head -2 <<< "$PEU_OUT" | tr '\n' '|')$(tail -1 <<< "$PEU_OUT")"; fi
+    rm -f "$T10_D/peu_selfa.s"
 fi
 # rbp is never a colour on Windows (#143 A6a): every function of the
 # self-hosted compiler's --target=windows listing opens with pushes ending in

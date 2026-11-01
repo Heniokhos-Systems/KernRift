@@ -139,6 +139,140 @@ fn ir_a64_emit_callee_frame(uint64 mask, uint64 dmask, uint64 cs_base, uint64 sa
 }
 
 // ---------------------------------------------------------------------------
+// Windows arm64 frame (#143 A9a, spec 5.1). The save area sits at the top of
+// the frame and is allocated first, so the unwind codes can describe every
+// save: from its base B (SP after `sub sp, sp, #cs_area`) it holds the used
+// GPR colours ascending, then x29/x30 (always, on Windows), then the used
+// d8-d15 homes ascending, 8 bytes each, rounded up to 16. Registers are
+// paired only when consecutive (save_regp / save_fregp have no other form);
+// x29/x30 are always one pair (save_fplr). Restores run in the EXACT reverse
+// of the saves, so the epilog shares the prologue's codes.
+// ---------------------------------------------------------------------------
+static uint64 ir_a64_win_fp_off = 0       // offset of the x29/x30 pair in the save area
+static uint64 ir_a64_win_ng = 0           // number of save groups
+static uint64 ir_a64_win_g = 0            // groups: 4 words each (r1, r2 or 0xFFFF, class 0 x / 1 d / 2 fplr, offset)
+
+fn ir_a64_win_layout(uint64 mask, uint64 dmask) -> uint64 {
+    if ir_a64_win_g == 0 { ir_a64_win_g = alloc(24 * 32) }
+    uint64[24] rr
+    uint64[24] cc
+    uint64 n = 0
+    uint64 c = 0
+    while c < 10 {
+        if ((mask >> c) & 1) != 0 { rr[n] = 19 + c  cc[n] = 0  n = n + 1 }
+        c = c + 1
+    }
+    ir_a64_win_fp_off = n * 8
+    rr[n] = 29  cc[n] = 2  n = n + 1
+    rr[n] = 30  cc[n] = 2  n = n + 1
+    c = 0
+    while c < 8 {
+        if ((dmask >> c) & 1) != 0 { rr[n] = 8 + c  cc[n] = 1  n = n + 1 }
+        c = c + 1
+    }
+    uint64 ng = 0
+    uint64 k = 0
+    while k < n {
+        uint64 gp = ir_a64_win_g + ng * 32
+        uint64 r2 = 0xFFFF
+        uint64 adv = 1
+        if k + 1 < n && cc[k + 1] == cc[k] && rr[k + 1] == rr[k] + 1 {
+            r2 = rr[k + 1]
+            adv = 2
+        }
+        uint64 v0 = rr[k]
+        uint64 v2 = cc[k]
+        uint64 v3 = k * 8
+        unsafe { *(gp as uint64) = v0 }
+        unsafe { *((gp + 8) as uint64) = r2 }
+        unsafe { *((gp + 16) as uint64) = v2 }
+        unsafe { *((gp + 24) as uint64) = v3 }
+        ng = ng + 1
+        k = k + adv
+    }
+    ir_a64_win_ng = ng
+    uint64 area = n * 8
+    if (area & 15) != 0 { area = area + 8 }
+    return area
+}
+
+fn ir_a64_win_gget(uint64 g, uint64 f) -> uint64 {
+    uint64 v = 0
+    unsafe { *((ir_a64_win_g + g * 32 + f * 8) as uint64) -> v }
+    return v
+}
+
+// The save (restore == 0, recording each instruction's unwind code) or the
+// restore (restore == 1, exact reverse order) of the layout above.
+fn ir_a64_win_saves(uint64 restore) {
+    uint64 i = 0
+    while i < ir_a64_win_ng {
+        uint64 g = i
+        if restore != 0 { g = ir_a64_win_ng - 1 - i }
+        uint64 r1 = ir_a64_win_gget(g, 0)
+        uint64 r2 = ir_a64_win_gget(g, 1)
+        uint64 cls = ir_a64_win_gget(g, 2)
+        uint64 off = ir_a64_win_gget(g, 3)
+        uint64 z = off / 8
+        uint64 code = 0
+        if cls == 1 {
+            uint64 xd = r1 - 8
+            if r2 != 0xFFFF {
+                if restore == 0 { ir_a64_stp_d_sp(r1, r2, off) } else { ir_a64_ldp_d_sp(r1, r2, off) }
+                code = (0xD8 | (xd >> 2)) | ((((xd & 3) << 6) | z) << 8)        // save_fregp
+            } else {
+                if restore == 0 { ir_a64_str_d_sp(r1, off) } else { ir_a64_ldr_d_sp(r1, off) }
+                code = (0xDC | (xd >> 2)) | ((((xd & 3) << 6) | z) << 8)        // save_freg
+            }
+            if restore == 0 { uw_a64_prolog_insn(code, 2, out_len) }
+        } else if cls == 2 {
+            if restore == 0 { ir_a64_stp_sp(29, 30, off) } else { ir_a64_ldp_sp(29, 30, off) }
+            if restore == 0 { uw_a64_prolog_insn(0x40 | z, 1, out_len) }          // save_fplr
+        } else {
+            uint64 xx = r1 - 19
+            if r2 != 0xFFFF {
+                if restore == 0 { ir_a64_stp_sp(r1, r2, off) } else { ir_a64_ldp_sp(r1, r2, off) }
+                code = (0xC8 | (xx >> 2)) | ((((xx & 3) << 6) | z) << 8)        // save_regp
+            } else {
+                if restore == 0 { ir_a64_str_sp(r1, off) } else { ir_a64_ldr_sp(r1, off) }
+                code = (0xD0 | (xx >> 2)) | ((((xx & 3) << 6) | z) << 8)        // save_reg
+            }
+            if restore == 0 { uw_a64_prolog_insn(code, 2, out_len) }
+        }
+        i = i + 1
+    }
+}
+
+// SUB SP, SP, #size for the part of the frame below the save area, with its
+// unwind code(s); returns the code bytes it recorded (the epilog's StartIndex).
+fn ir_a64_win_alloc_low(uint64 size) -> uint64 {
+    uint64 x = size / 16
+    if size <= 4095 {
+        emit_a64_sub_sp_imm(size)
+        if x < 32 {
+            uw_a64_prolog_insn(x, 1, out_len)                                    // alloc_s
+            return 1
+        }
+        uw_a64_prolog_insn((0xC0 | (x >> 8)) | ((x & 0xFF) << 8), 2, out_len)    // alloc_m
+        return 2
+    }
+    // mov x16, #size (one or more instructions, one `nop` code each), then
+    // sub sp, sp, x16 (alloc_l)
+    uint64 n = 0
+    uint64 st = out_len
+    emit_a64_mov_imm(16, size)
+    uint64 q = st
+    while q < out_len {
+        q = q + 4
+        uw_a64_prolog_insn(0xE3, 1, q)                                            // nop
+        n = n + 1
+    }
+    emit_a64(0xCB3063FF)
+    uw_a64_prolog_insn(0xE0 | (((x >> 16) & 0xFF) << 8) | (((x >> 8) & 0xFF) << 16) | ((x & 0xFF) << 24), 4, out_len)   // alloc_l
+    return n + 4
+}
+
+// ---------------------------------------------------------------------------
 // Register allocator setup for ARM64
 // ---------------------------------------------------------------------------
 
@@ -3414,6 +3548,9 @@ fn ir_emit_arm64_function(uint64 fn_node) {
     uint64 a64_save_lr = 0
     if a64_has_call != 0 { a64_save_lr = 1 }
     if a64_has_asm != 0 { a64_save_lr = 1 }
+    // #143 A9a: on Windows every non-naked frame saves x29/x30 and points x29
+    // at that frame record, leaves included (spec 5.1)
+    if target_os == 2 { a64_save_lr = 1 }
 
     // Size the overflow-arg reserve to what this function's calls need.
     // MUST be set before ir_snapshot_debug_vars and before any emission:
@@ -3482,6 +3619,17 @@ fn ir_emit_arm64_function(uint64 fn_node) {
     // reads [SP + callee_frame + (idx-8)*8] = caller's arg slots.
     uint64 total_frame = IR_A64_OVERFLOW_RESERVE + spill_size + ir_stack_array_bytes + scratch_size + callee_save_size
     if (total_frame & 15) != 0 { total_frame = total_frame + 16 - (total_frame & 15) }
+    // #143 A9a, Windows (spec 5.1): the save area (ir_a64_win_layout, a
+    // multiple of 16) on top, below it everything else padded to 16
+    // (`a64_win_low`); the padding sits between the scratchpad and the saves.
+    uint64 a64_win_area = 0
+    uint64 a64_win_low = 0
+    if target_os == 2 && is_naked == 0 {
+        a64_win_area = ir_a64_win_layout(a64_used_mask, a64_dmask)
+        a64_win_low = IR_A64_OVERFLOW_RESERVE + spill_size + ir_stack_array_bytes + scratch_size
+        if (a64_win_low & 15) != 0 { a64_win_low = a64_win_low + 16 - (a64_win_low & 15) }
+        total_frame = a64_win_low + a64_win_area
+    }
     if is_naked != 0 { total_frame = 0 }
 
     ir_frame_size = total_frame
@@ -3549,26 +3697,8 @@ fn ir_emit_arm64_function(uint64 fn_node) {
         c7_argc_off = static_lookup_by_name("cli_argc", 8)
         c7_argv_off = static_lookup_by_name("cli_argv", 8)
     }
-    if tok_matches(fn_name_tok, "main", 4) != 0 && freestanding == 0 && target_os == 2 && is_naked == 0 && (c7_argc_off != 0xFFFFFFFF || c7_argv_off != 0xFFFFFFFF) {
-        // Windows ARM64 (spec C7): parse the command line UCRT's way into a
-        // fresh VirtualAlloc'd argv -- see the C7 block at the end of this file.
-        c7_a64_emit_main_argv(c7_argc_off, c7_argv_off)
-    } else if tok_matches(fn_name_tok, "main", 4) != 0 && freestanding == 0 && target_os == 2 {
-        // No cli_argc/cli_argv to fill, or a @naked main: the pre-C7
-        // sequence, unchanged (a @naked main sees the 0xFFFFFFFF sentinel --
-        // documented as unsupported, spec C7).
-        // Windows ARM64: GetCommandLineA via IAT
-        emit_a64_win_call_iat(7)
-        uint64 argv_off_w = static_lookup_by_name("cli_argv", 8)
-        if argv_off_w != 0xFFFFFFFF {
-            emit_a64_static_store(argv_off_w)
-        }
-        emit_a64_mov_imm(0, 0xFFFFFFFF)
-        uint64 argc_off_w = static_lookup_by_name("cli_argc", 8)
-        if argc_off_w != 0xFFFFFFFF {
-            emit_a64_static_store(argc_off_w)
-        }
-    }
+    // (Windows main's command-line sequence is emitted after the prologue,
+    // #143 A9a -- see step 6a.)
 
     // 6. Emit prologue (skip for @naked)
     // Save only the callee-saved colours this function actually uses
@@ -3576,10 +3706,52 @@ fn ir_emit_arm64_function(uint64 fn_node) {
     // into STP pairs and is called with identical arguments from the
     // epilogue, so save and restore mirror by construction.
     uint64 cs_base = IR_A64_OVERFLOW_RESERVE + spill_size + ir_stack_array_bytes + scratch_size
-    if is_naked == 0 {
+    uint64 a64_win_low_codes = 0
+    if is_naked == 0 && target_os == 2 {
+        // #143 A9a (spec 5.1):
+        //   sub sp, sp, #area; saves; add x29, sp, #f; sub sp, sp, #low
+        // each with its unwind code (collected; the .xdata writer is A9b)
+        emit_a64_sub_sp_imm(a64_win_area)
+        uw_a64_prolog_insn(a64_win_area / 16, 1, out_len)                       // alloc_s
+        ir_a64_win_saves(0)
+        emit_a64(0x91000000 | (ir_a64_win_fp_off << 10) | (31 << 5) | 29)        // add x29, sp, #f
+        uw_a64_prolog_insn(0xE2 | ((ir_a64_win_fp_off / 8) << 8), 2, out_len)   // add_fp
+        a64_win_low_codes = ir_a64_win_alloc_low(a64_win_low)
+    } else if is_naked == 0 {
         // SUB SP, SP, #total_frame
         emit_a64_sub_sp_imm(total_frame)
         ir_a64_emit_callee_frame(a64_used_mask, a64_dmask, cs_base, a64_save_lr, 0)
+    }
+
+    // 6a. Windows main's command line, AFTER the prologue (#143 A9a, spec
+    // 5.1 item 4): SP is 16-aligned here, so the C7 sizes do not change.
+    // A @naked main gets no command-line sequence at all: cli_argc gets the
+    // 0xFFFFFFFF sentinel and cli_argv 0, by plain static stores.
+    if tok_matches(fn_name_tok, "main", 4) != 0 && freestanding == 0 && target_os == 2 {
+        if is_naked != 0 {
+            emit_a64_mov_imm(0, 0)
+            if c7_argv_off != 0xFFFFFFFF { emit_a64_static_store(c7_argv_off) }
+            emit_a64_mov_imm(0, 0xFFFFFFFF)
+            if c7_argc_off != 0xFFFFFFFF { emit_a64_static_store(c7_argc_off) }
+        } else if c7_argc_off != 0xFFFFFFFF || c7_argv_off != 0xFFFFFFFF {
+            // Windows ARM64 (spec C7): parse the command line UCRT's way into
+            // a fresh VirtualAlloc'd argv -- see the C7 block at the end of
+            // this file.
+            c7_a64_emit_main_argv(c7_argc_off, c7_argv_off)
+        } else {
+            // No cli_argc/cli_argv to fill: the pre-C7 sequence.
+            // Windows ARM64: GetCommandLineA via IAT
+            emit_a64_win_call_iat(7)
+            uint64 argv_off_w = static_lookup_by_name("cli_argv", 8)
+            if argv_off_w != 0xFFFFFFFF {
+                emit_a64_static_store(argv_off_w)
+            }
+            emit_a64_mov_imm(0, 0xFFFFFFFF)
+            uint64 argc_off_w = static_lookup_by_name("cli_argc", 8)
+            if argc_off_w != 0xFFFFFFFF {
+                emit_a64_static_store(argc_off_w)
+            }
+        }
     }
 
     // 7. Allocate branch/return fixup tracking — see ir_block_offsets_cap
@@ -3797,15 +3969,30 @@ fn ir_emit_arm64_function(uint64 fn_node) {
                 emit_a64_svc("main() epilogue auto-exit")
             }
         }
-        // Restore callee-saved registers. Exact mirror of the prologue:
-        // same helper, same arguments -> same regs, same slots (GPR
-        // colours, then x29/x30, then the used d8-d15 homes).
-        ir_a64_emit_callee_frame(a64_used_mask, a64_dmask, cs_base, a64_save_lr, 1)
-        // ADD SP, SP, #total_frame
-        emit_a64_add_sp_imm(total_frame)
-        // RET
-        emit_a64_ret()
+        if target_os == 2 {
+            // #143 A9a (spec 5.1, ruling Q5): SP from the frame pointer, the
+            // restores in exact reverse, the save area, ret. The epilog
+            // shares the prologue's codes from add_fp on (StartIndex = the
+            // code bytes of the low allocation).
+            uint64 ep_start = out_len
+            emit_a64(0xD1000000 | (ir_a64_win_fp_off << 10) | (29 << 5) | 31)   // sub sp, x29, #f
+            ir_a64_win_saves(1)
+            emit_a64_add_sp_imm(a64_win_area)
+            emit_a64_ret()
+            uw_a64_epilog(ep_start, a64_win_low_codes)
+        } else {
+            // Restore callee-saved registers. Exact mirror of the prologue:
+            // same helper, same arguments -> same regs, same slots (GPR
+            // colours, then x29/x30, then the used d8-d15 homes).
+            ir_a64_emit_callee_frame(a64_used_mask, a64_dmask, cs_base, a64_save_lr, 1)
+            // ADD SP, SP, #total_frame
+            emit_a64_add_sp_imm(total_frame)
+            // RET
+            emit_a64_ret()
+        }
     }
+    if is_naked != 0 { uw_fn_set_naked() }
+    uw_fn_finalize()
 
     // Restore IR_NUM_REGS for x86_64 functions compiled later
     IR_NUM_REGS = saved_num_regs
@@ -4362,9 +4549,13 @@ fn c7_a64_emit_main_argv(uint64 argc_off, uint64 argv_off) {
     emit_a64_add_sp_imm(0x20)
     c7_a64_b(l_over)
     c7_bind(l_fail)
+    uint64 uw_b = out_len
     c7_a64_emit_die(121, "krc runtime: argv allocation failed\n", 36)
+    uw_leaf(uw_b, out_len, 1, "c7_die_argv_alloc")   // #143: dead-end leaf
     c7_bind(l_leaf)
+    uw_b = out_len
     c7_a64_emit_parse_leaf()
+    uw_leaf(uw_b, out_len, 0, "c7_parse")            // #143: called leaf
     c7_bind(l_over)
     c7_end()
 }
@@ -4446,13 +4637,21 @@ fn c7_a64_emit_exec_argv(uint64 path_r, uint64 argv_r) {
     emit_a64_win_call_iat(IAT_ExitProcess)
     c7_a64_b(l_over)                        // not reached
     c7_bind(l_long)
+    uint64 uw_b = out_len
     c7_a64_emit_die(122, "krc runtime: child command line too long\n", 41)
+    uw_leaf(uw_b, out_len, 1, "c7_die_cmdline_long")     // #143: dead-end leaves
     c7_bind(l_nomem)
+    uw_b = out_len
     c7_a64_emit_die(123, "krc runtime: child command line allocation failed\n", 50)
+    uw_leaf(uw_b, out_len, 1, "c7_die_cmdline_alloc")
     c7_bind(l_nochild)
+    uw_b = out_len
     c7_a64_emit_die(124, "krc runtime: child process could not be started\n", 48)
+    uw_leaf(uw_b, out_len, 1, "c7_die_create_process")
     c7_bind(l_quote)
+    uw_b = out_len
     c7_a64_emit_quote_leaf()
+    uw_leaf(uw_b, out_len, 0, "c7_quote")                // #143: called leaf
     c7_bind(l_over)
     c7_end()
 }

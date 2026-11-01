@@ -1,0 +1,232 @@
+// #143 win_abi_frames corpus, arm64: Windows-ABI code (--target=windows)
+// built as a --freestanding ELF, so the Windows arm64 frame (spec 5.1: the
+// save area allocated first, consecutive-register pairs only, x29/x30 always
+// saved and x29 pointing at that record, the rest of the frame below, the
+// epilog restoring SP from x29 and reloading in exact reverse) RUNS under
+// qemu-aarch64-static. No std, no builtins that lower to imports. Every check
+// is computed and compared here; exit status 0 = all passed, N = check N
+// failed (8: a probe caller computed a wrong result; 9: SP was misaligned in
+// the probe; 10: the d8-d15 function; 11: the high-pressure function). Exits
+// are raw instruction words (one per asm string): movz x0, #N; movz x8, #94
+// (exit_group: under qemu-user plain exit ends only the thread); svc #0.
+
+// ten parameters: six in registers, four on the stack. Two statements, so
+// the AST inliner (which takes a single pure `return` whose parameters are
+// each used once) leaves it a real call: inlined, no ten-parameter call
+// would ever run (it did not, on either backend, before #143 A8).
+fn f10(uint64 a, uint64 b, uint64 c, uint64 d, uint64 e, uint64 f, uint64 g, uint64 h, uint64 i, uint64 j) -> uint64 {
+    uint64 s = a * 1 + b * 2 + c * 3 + d * 4 + e * 5 + f * 6 + g * 7 + h * 8 + i * 9 + j * 10
+    return s
+}
+
+// a caller of f10 that has its own locals live across the call
+fn call10(uint64 k) -> uint64 {
+    uint64 x = k + 1
+    uint64 y = k * 3
+    uint64 r = f10(x, x + 1, x + 2, x + 3, x + 4, x + 5, x + 6, x + 7, x + 8, x + 9)
+    return r + x + y
+}
+
+// a frame larger than a page: two 4 KiB arrays (an array over 4096 bytes is
+// heap-allocated on every target, so big frames are built from several)
+fn page_frame(uint64 n) -> uint64 {
+    uint64[512] a
+    uint64[512] b
+    uint64 i = 0
+    while i < 512 { a[i] = i * n  b[i] = i  i = i + 1 }
+    uint64 s = 0
+    i = 0
+    while i < 512 { s = s + a[i] + b[i]  i = i + 1 }
+    return s
+}
+
+// a frame larger than 64 KiB: seventeen 4 KiB arrays (69 632 bytes), calling out
+fn big_frame(uint64 n) -> uint64 {
+    uint64[512] a00
+    uint64[512] a01
+    uint64[512] a02
+    uint64[512] a03
+    uint64[512] a04
+    uint64[512] a05
+    uint64[512] a06
+    uint64[512] a07
+    uint64[512] a08
+    uint64[512] a09
+    uint64[512] a10
+    uint64[512] a11
+    uint64[512] a12
+    uint64[512] a13
+    uint64[512] a14
+    uint64[512] a15
+    uint64[512] a16
+    uint64 i = 0
+    while i < 512 {
+        a00[i] = i + n + 0
+        a01[i] = i + n + 1
+        a02[i] = i + n + 2
+        a03[i] = i + n + 3
+        a04[i] = i + n + 4
+        a05[i] = i + n + 5
+        a06[i] = i + n + 6
+        a07[i] = i + n + 7
+        a08[i] = i + n + 8
+        a09[i] = i + n + 9
+        a10[i] = i + n + 10
+        a11[i] = i + n + 11
+        a12[i] = i + n + 12
+        a13[i] = i + n + 13
+        a14[i] = i + n + 14
+        a15[i] = i + n + 15
+        a16[i] = i + n + 16
+        i = i + 1
+    }
+    uint64 s = 0
+    s = s + a00[511]
+    s = s + a01[511]
+    s = s + a02[511]
+    s = s + a03[511]
+    s = s + a04[511]
+    s = s + a05[511]
+    s = s + a06[511]
+    s = s + a07[511]
+    s = s + a08[511]
+    s = s + a09[511]
+    s = s + a10[511]
+    s = s + a11[511]
+    s = s + a12[511]
+    s = s + a13[511]
+    s = s + a14[511]
+    s = s + a15[511]
+    s = s + a16[511]
+    return s + page_frame(1)
+}
+
+// a leaf
+fn leaf(uint64 a, uint64 b) -> uint64 {
+    return (a ^ b) + (a & b)
+}
+
+// recursion
+fn fib(uint64 n) -> uint64 {
+    if n < 2 { return n }
+    return fib(n - 1) + fib(n - 2)
+}
+
+// recursion through a ten-parameter call
+fn rec10(uint64 n) -> uint64 {
+    if n == 0 { return 0 }
+    return f10(n, n, n, n, n, n, n, n, n, n) + rec10(n - 1)
+}
+
+// SP alignment probe (#143, phase-2 review M2, arm64 mirror). Its body,
+// right after its own prologue, exits with status 9 unless SP is 16-aligned:
+//   add x9, sp, #0; and x9, x9, #0xf; cbz x9, +16;
+//   movz x0, #9; movz x8, #94; svc #0
+fn rspcheck() {
+    asm { "0x910003E9" "0x92400D29" "0xB4000089" "0xD2800120" "0xD2800BC8" "0xD4000001" }
+}
+
+// callers of several frame sizes: no locals, odd and even local counts, a
+// page-sized frame, and after the ten-parameter path
+fn a_none() {
+    rspcheck()
+}
+fn a_one(uint64 n) -> uint64 {
+    uint64 x = n + 1
+    rspcheck()
+    return x
+}
+fn a_two(uint64 n) -> uint64 {
+    uint64 x = n + 1
+    uint64 y = n + 2
+    rspcheck()
+    return x + y
+}
+fn a_three(uint64 n) -> uint64 {
+    uint64 x = n + 1
+    uint64 y = n + 2
+    uint64 z = n + 3
+    rspcheck()
+    return x + y + z
+}
+fn a_page(uint64 n) -> uint64 {
+    uint64[512] a
+    uint64 i = 0
+    while i < 512 { a[i] = n  i = i + 1 }
+    rspcheck()
+    uint64 s = 0
+    i = 0
+    while i < 512 { s = s + a[i]  i = i + 1 }
+    return s
+}
+fn a_ten(uint64 n) -> uint64 {
+    uint64 r = f10(n, n + 1, n + 2, n + 3, n + 4, n + 5, n + 6, n + 7, n + 8, n + 9)
+    rspcheck()
+    return r
+}
+
+// d8-d15 saves: ten f64 values live across a call, so the allocator homes
+// them in callee-saved d-registers the frame must save and restore
+fn fheavy(uint64 n) -> uint64 {
+    f64 a = int_to_f64(n)
+    f64 b = a + a
+    f64 c = b + a
+    f64 d = c + a
+    f64 e = d + a
+    f64 f = e + a
+    f64 g = f + a
+    f64 h = g + a
+    f64 p = h + a
+    f64 q = p + a
+    rspcheck()
+    f64 s = a + b + c + d + e + f + g + h + p + q
+    return f64_to_int(s)
+}
+
+// high register pressure: fourteen integers live across a call -- more than
+// the ten callee-saved colours, so some of them spill
+fn pressure(uint64 n) -> uint64 {
+    uint64 v1 = n + 1
+    uint64 v2 = n * 2
+    uint64 v3 = n + 3
+    uint64 v4 = n * 4
+    uint64 v5 = n + 5
+    uint64 v6 = n * 6
+    uint64 v7 = n + 7
+    uint64 v8 = n * 8
+    uint64 v9 = n + 9
+    uint64 v10 = n * 10
+    uint64 v11 = n + 11
+    uint64 v12 = n * 12
+    uint64 v13 = n + 13
+    uint64 v14 = n * 14
+    rspcheck()
+    return v1 + v2 + v3 + v4 + v5 + v6 + v7 + v8 + v9 + v10 + v11 + v12 + v13 + v14
+}
+
+fn main() {
+    // f10(1..10) = 1+4+9+...+100 = 385
+    if f10(1, 2, 3, 4, 5, 6, 7, 8, 9, 10) != 385 { asm { "0xD2800020" "0xD2800BC8" "0xD4000001" } }
+    // call10(4): x = 5, f10(5..14) = sum((4+k)*k, k=1..10) = 605, + 5 + 12
+    if call10(4) != 622 { asm { "0xD2800040" "0xD2800BC8" "0xD4000001" } }
+    // page_frame(2) = 3 * (0 + ... + 511) = 392448
+    if page_frame(2) != 392448 { asm { "0xD2800060" "0xD2800BC8" "0xD4000001" } }
+    // big_frame(5) = sum(511 + 5 + k, k=0..16) + page_frame(1) = 8908 + 261632
+    if big_frame(5) != 270540 { asm { "0xD2800080" "0xD2800BC8" "0xD4000001" } }
+    if leaf(12, 10) != 14 { asm { "0xD28000A0" "0xD2800BC8" "0xD4000001" } }
+    if fib(20) != 6765 { asm { "0xD28000C0" "0xD2800BC8" "0xD4000001" } }
+    // rec10(6) = 55 * (6+5+4+3+2+1) = 1155
+    if rec10(6) != 1155 { asm { "0xD28000E0" "0xD2800BC8" "0xD4000001" } }
+    a_none()
+    if a_one(3) != 4 { asm { "0xD2800100" "0xD2800BC8" "0xD4000001" } }
+    if a_two(3) != 9 { asm { "0xD2800100" "0xD2800BC8" "0xD4000001" } }
+    if a_three(3) != 15 { asm { "0xD2800100" "0xD2800BC8" "0xD4000001" } }
+    if a_page(3) != 1536 { asm { "0xD2800100" "0xD2800BC8" "0xD4000001" } }
+    if a_ten(1) != 385 { asm { "0xD2800100" "0xD2800BC8" "0xD4000001" } }
+    rspcheck()
+    // fheavy(2) = 2 * (1+2+...+10) = 110
+    if fheavy(2) != 110 { asm { "0xD2800140" "0xD2800BC8" "0xD4000001" } }
+    // pressure(2): odd terms 3+5+7+9+11+13+15 = 63, even 4+8+12+16+20+24+28 = 112
+    if pressure(2) != 175 { asm { "0xD2800160" "0xD2800BC8" "0xD4000001" } }
+    asm { "0xD2800000" "0xD2800BC8" "0xD4000001" }
+}
