@@ -361,14 +361,14 @@ h1:
         .seh_pushreg %r12
         pushq %rbp
         .seh_pushreg %rbp
-        subq $0x98, %rsp
-        .seh_stackalloc 0x98
+        subq $0x90, %rsp
+        .seh_stackalloc 0x90
         movq %rsp, %rbp
         .seh_setframe %rbp, 0
         .seh_endprologue
         movq %rax, %rbx
         callq h2
-        addq $0x98, %rsp
+        addq $0x90, %rsp
         popq %rbp
         popq %r12
         popq %rbx
@@ -869,6 +869,47 @@ case "$out" in
         N=$((N + 1)); echo "  case neg_c3_alloc_after_set_fpreg: C3 FAIL as required" ;;
     *) fail neg_c3_alloc_after_set_fpreg "got: $(tr '\n' '|' <<< "$out" | head -c 300)" ;;
 esac
+
+# alignment (phase-2 review, M2): a frame that CALLS must keep RSP 16-aligned
+# at its calls -- 8 + 8 x pushes + ALLOC = 0 mod 16. One push and a 0x18
+# allocation is 8 + 8 + 24 = 40: C3 fails if the function calls, and the very
+# same frame in a leaf passes.
+for AL in call leaf; do
+    CALL=''; [ "$AL" = call ] && CALL='        callq al_leaf'
+    mk align_$AL x64 <<EOF
+        .text
+        .def al_f; .scl 2; .type 32; .endef
+        .globl al_f
+        .seh_proc al_f
+al_f:
+        pushq %rbp
+        .seh_pushreg %rbp
+        subq \$0x18, %rsp
+        .seh_stackalloc 0x18
+        movq %rsp, %rbp
+        .seh_setframe %rbp, 0
+        .seh_endprologue
+$CALL
+        addq \$0x18, %rsp
+        popq %rbp
+        retq
+        .seh_endproc
+        .def al_leaf; .scl 2; .type 32; .endef
+        .globl al_leaf
+        .seh_proc al_leaf
+al_leaf:
+        pushq %rbp
+        .seh_pushreg %rbp
+        movq %rsp, %rbp
+        .seh_setframe %rbp, 0
+        .seh_endprologue
+        popq %rbp
+        retq
+        .seh_endproc
+EOF
+done
+expect_only neg_c3_misaligned_calling_frame C3 'al_f: frame misaligns RSP at its calls: 8 \+ 8\*1 pushes \+ ALLOC 24 = 40' --arch x86_64 "$W/align_call.obj"
+expect_all pos_c3_misaligned_leaf_frame --arch x86_64 "$W/align_leaf.obj"
 
 # ---- the phase-1 reviewer's adversarial cases, pinned --------------------
 # a call into the MIDDLE of a function: neither a BeginAddress nor a leaf (C2)

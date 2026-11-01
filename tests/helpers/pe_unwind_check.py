@@ -39,7 +39,8 @@ Rules (spec section 8.1):
       and every function-address materialisation is a BeginAddress or a
       registered leaf begin inside the caller's own range.
   C3  prologue instructions map 1:1 to the codes, in order, at their exact
-      offsets; the frame pointer is established (x64: SET_FPREG/RBP, with no
+      offsets; an x64 frame that calls keeps RSP 16-aligned at its calls
+      (8 + 8 x pushes + ALLOC = 0 mod 16); the frame pointer is established (x64: SET_FPREG/RBP, with no
       SAVE_NONVOL before it and only SAVE_NONVOL stores -- [rsp+d] or [rbp+d],
       d = the code's offset x 8 -- after it, ruling (b); arm64: set_fp/add_fp,
       followed only by SP allocation); every arm64 SP adjustment is a
@@ -1259,6 +1260,15 @@ class X64Fn:
             return
         if not fp_set:
             add('the prologue has no SET_FPREG')
+        # alignment (phase-2 review, M2): a frame that calls keeps RSP
+        # 16-aligned at its call sites -- entry RSP is 8 mod 16, so the return
+        # address, the pushes and the allocation must sum to 0 mod 16
+        if any(i.kind in ('call', 'call_iat', 'call_ind') for i in self.insns):
+            npush = sum(1 for _, name, _ in want if name == 'PUSH_NONVOL')
+            alloc = sum(v for _, name, v in want if name == 'ALLOC')
+            if (8 + 8 * npush + alloc) % 16 != 0:
+                add('frame misaligns RSP at its calls: 8 + 8*%d pushes + ALLOC %d = %d, not 0 mod 16'
+                    % (npush, alloc, 8 + 8 * npush + alloc))
         for off, name, info, opnd in r.codes:
             if name == 'ALLOC_SMALL' and not 8 <= opnd <= 128:
                 add('ALLOC_SMALL %d out of range' % opnd)

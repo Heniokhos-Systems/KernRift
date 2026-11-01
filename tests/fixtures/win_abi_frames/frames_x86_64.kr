@@ -3,7 +3,8 @@
 // (rbp frame pointer, push rbp in every non-naked function) RUN natively and
 // under qemu-x86_64-static. No std, no builtins: those lower to import-table
 // calls that do not exist in an ELF. Every check is computed and compared
-// here; exit status 0 = all passed, N = check N failed (exit via raw bytes:
+// here; exit status 0 = all passed, N = check N failed (8: a probe caller
+// computed a wrong result; 9: RSP was misaligned in the probe; exit via raw bytes:
 // the assembler has no `mov rdi, imm` form, spec 8.5; exit_group (231),
 // because under qemu-user plain exit (60) ends only the thread and the
 // emulator then reports 0 whatever the status).
@@ -116,7 +117,57 @@ fn rec10(uint64 n) -> uint64 {
     return f10(n, n, n, n, n, n, n, n, n, n) + rec10(n - 1)
 }
 
-fn main() {
+// RSP alignment probe (#143, phase-2 review M2). Its body, right after its
+// own prologue, exits with status 9 unless RSP is 16-aligned there -- which
+// holds exactly when it was entered with RSP = 8 mod 16 (its caller's frame
+// is aligned at the call) AND its own frame is aligned. Hex bytes:
+//   mov rax,rsp; and eax,15; test eax,eax; jz +12 (over the exit);
+//   mov edi,9; mov eax,231; syscall. Not @naked: a legacy @naked function
+// is refused on Windows (#143 A7), and this way one probe serves both backends.
+fn rspcheck() {
+    asm { "0x48 0x89 0xE0 0x83 0xE0 0x0F 0x85 0xC0 0x74 0x0C 0xBF 0x09 0x00 0x00 0x00 0xB8 0xE7 0x00 0x00 0x00 0x0F 0x05" }
+}
+
+// callers of several frame sizes: no locals, odd and even local counts, a
+// page-sized frame, and the ten-parameter path
+fn a_none() {
+    rspcheck()
+}
+fn a_one(uint64 n) -> uint64 {
+    uint64 x = n + 1
+    rspcheck()
+    return x
+}
+fn a_two(uint64 n) -> uint64 {
+    uint64 x = n + 1
+    uint64 y = n + 2
+    rspcheck()
+    return x + y
+}
+fn a_three(uint64 n) -> uint64 {
+    uint64 x = n + 1
+    uint64 y = n + 2
+    uint64 z = n + 3
+    rspcheck()
+    return x + y + z
+}
+fn a_page(uint64 n) -> uint64 {
+    uint64[512] a
+    uint64 i = 0
+    while i < 512 { a[i] = n  i = i + 1 }
+    rspcheck()
+    uint64 s = 0
+    i = 0
+    while i < 512 { s = s + a[i]  i = i + 1 }
+    return s
+}
+fn a_ten(uint64 n) -> uint64 {
+    uint64 r = f10(n, n + 1, n + 2, n + 3, n + 4, n + 5, n + 6, n + 7, n + 8, n + 9)
+    rspcheck()
+    return r
+}
+
+fn checks() {
     // f10(1..10) = 1+4+9+...+100 = 385
     if f10(1, 2, 3, 4, 5, 6, 7, 8, 9, 10) != 385 { asm { "0xBF 0x01 0x00 0x00 0x00 0xB8 0xE7 0x00 0x00 0x00 0x0F 0x05" } }
     // call10(4): x = 5, f10(5..14) = sum((4+k)*k, k=1..10) = 605, + 5 + 12
@@ -129,5 +180,23 @@ fn main() {
     if fib(20) != 6765 { asm { "0xBF 0x06 0x00 0x00 0x00 0xB8 0xE7 0x00 0x00 0x00 0x0F 0x05" } }
     // rec10(6) = 55 * (6+5+4+3+2+1) = 1155
     if rec10(6) != 1155 { asm { "0xBF 0x07 0x00 0x00 0x00 0xB8 0xE7 0x00 0x00 0x00 0x0F 0x05" } }
+    // RSP alignment (#143, phase-2 review M2): every frame keeps RSP
+    // 16-aligned at its calls, whatever its size and backend
+    a_none()
+    if a_one(3) != 4 { asm { "0xBF 0x08 0x00 0x00 0x00 0xB8 0xE7 0x00 0x00 0x00 0x0F 0x05" } }
+    if a_two(3) != 9 { asm { "0xBF 0x08 0x00 0x00 0x00 0xB8 0xE7 0x00 0x00 0x00 0x0F 0x05" } }
+    if a_three(3) != 15 { asm { "0xBF 0x08 0x00 0x00 0x00 0xB8 0xE7 0x00 0x00 0x00 0x0F 0x05" } }
+    if a_page(3) != 1536 { asm { "0xBF 0x08 0x00 0x00 0x00 0xB8 0xE7 0x00 0x00 0x00 0x0F 0x05" } }
+    if a_ten(1) != 385 { asm { "0xBF 0x08 0x00 0x00 0x00 0xB8 0xE7 0x00 0x00 0x00 0x0F 0x05" } }
+    rspcheck()
+}
+
+// A --freestanding ELF enters main by a jump, with RSP = 0 mod 16, where
+// a Windows image's loader CALLS main (RSP = 8 mod 16). main therefore pushes
+// one word -- its body has no locals for that to disturb -- so that checks()
+// and everything below it run on exactly the stack alignment Windows gives.
+fn main() {
+    asm { "0x50" }
+    checks()
     asm { "0x31 0xFF 0xB8 0xE7 0x00 0x00 0x00 0x0F 0x05" }
 }

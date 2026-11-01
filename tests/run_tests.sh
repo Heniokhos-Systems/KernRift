@@ -29097,15 +29097,52 @@ grep -q 'Usage\|usage' "$T10_D/peu_help.txt" || PEU_WHY="$PEU_WHY --help printed
 grep -q 'test-no-unwind' "$T10_D/peu_help.txt" && PEU_WHY="$PEU_WHY --help documents it;"
 if [ -z "$PEU_WHY" ]; then pe_row_ok pe_unwind_hidden_switch_accepted "accepted, not in --help; x86_64: removes exactly .pdata and .xdata; arm64: inert"
 else pe_row_bad pe_unwind_hidden_switch_accepted "$PEU_WHY"; fi
-# win_abi_frames (#143 A6a, spec 8.5): the Windows-ABI frame shapes RUN. The
+# win_abi_frames (#143 A6a, spec 8.5; the RSP alignment probe and the real-call
+# check after the phase-2 review, M2 and Minor 6): the Windows-ABI frame shapes RUN. The
 # std-free corpus is built --freestanding --target=windows (Windows code, ELF
 # container) and executed natively and under qemu-x86_64-static: ten-parameter
 # calls, frames over a page and over 64 KiB, leaf and non-leaf, recursion. The
 # program checks its own results (exit N = check N failed).
 PEU_FR="$DIR/fixtures/win_abi_frames/frames_x86_64.kr"
 PEU_QX="$(command -v qemu-x86_64-static || command -v qemu-x86_64 || true)"
-if ! $T10_KRC --arch=x86_64 --freestanding --target=windows "$PEU_FR" -o "$T10_D/peu_fr" > "$T10_D/peu_fr.log" 2>&1; then
+# peu_f10_calls <listing>: the number of `call rel32` instructions whose target
+# is f10's first byte (phase-2 review Minor 6: the AST inliner once removed
+# every ten-parameter call without any row noticing; the rows now require
+# real calls). Prints the count, or an error.
+peu_f10_calls() {
+    python3 -B - "$1" <<'PEUF10EOF' 2>&1
+import re, sys
+line = re.compile(r'^\s+([0-9a-f]{8}): ((?:[0-9a-f]{2}(?: |$))+)')
+label = re.compile(r'^([A-Za-z_.$][\w.$@]*):\s*$')
+pending, labels, insns = [], {}, []
+for l in open(sys.argv[1], encoding='latin-1'):
+    l = l.rstrip('\n')
+    m = label.match(l)
+    if m:
+        pending.append(m.group(1)); continue
+    m = line.match(l)
+    if m:
+        off = int(m.group(1), 16)
+        for n in pending:
+            labels[n] = off
+        pending = []
+        insns.append((off, bytes(int(x, 16) for x in m.group(2).split())))
+if 'f10' not in labels:
+    print('error: no f10 label'); sys.exit(0)
+n = 0
+for off, b in insns:
+    if len(b) == 5 and b[0] == 0xE8:
+        rel = int.from_bytes(b[1:5], 'little', signed=True)
+        if off + 5 + rel == labels['f10']:
+            n += 1
+print(n)
+PEUF10EOF
+}
+if ! $T10_KRC --arch=x86_64 --freestanding --target=windows "$PEU_FR" -o "$T10_D/peu_fr" > "$T10_D/peu_fr.log" 2>&1 \
+   || ! $T10_KRC --arch=x86_64 --freestanding --target=windows --emit=asm "$PEU_FR" -o "$T10_D/peu_fr.s" >> "$T10_D/peu_fr.log" 2>&1; then
     pe_row_bad win_abi_frames_exec_x86_64_ir "build: $(grep -m1 error "$T10_D/peu_fr.log" | cut -c1-120)"
+elif PEU_C=$(peu_f10_calls "$T10_D/peu_fr.s"); [ "$PEU_C" != 4 ]; then
+    pe_row_bad win_abi_frames_exec_x86_64_ir "the listing has $PEU_C real calls to f10, want 4 (inlined away?)"
 elif [ -z "$PEU_QX" ]; then
     pe_row_skip win_abi_frames_exec_x86_64_ir "no qemu-x86_64-static"
 else
@@ -29114,7 +29151,7 @@ else
     if [ "$(uname -m)" = x86_64 ]; then timeout 60 "$T10_D/peu_fr" > /dev/null 2>&1; PEU_N=$?; fi
     timeout 120 "$PEU_QX" "$T10_D/peu_fr" > /dev/null 2>&1; PEU_Q=$?
     if [ "$PEU_Q" = 0 ] && { [ "$PEU_N" = 0 ] || [ "$PEU_N" = x ]; }; then
-        pe_row_ok win_abi_frames_exec_x86_64_ir "native rc=$PEU_N, qemu rc=0"
+        pe_row_ok win_abi_frames_exec_x86_64_ir "native rc=$PEU_N, qemu rc=0, 4 real calls to f10, RSP alignment probe passed"
     else
         pe_row_bad win_abi_frames_exec_x86_64_ir "native rc=$PEU_N, qemu rc=$PEU_Q (N = check N failed)"
     fi
@@ -29122,8 +29159,11 @@ fi
 # ... and the same corpus through the legacy backend (#143 A8): its Windows
 # frame is push rbx; push rbp; sub rsp,F'; mov rbp,rsp; mov [rsp+s],r12 with
 # F' = F + 8, and stack arguments at F' + 24 + 32 + i*8.
-if ! $T10_KRC --legacy --arch=x86_64 --freestanding --target=windows "$PEU_FR" -o "$T10_D/peu_frl" > "$T10_D/peu_frl.log" 2>&1; then
+if ! $T10_KRC --legacy --arch=x86_64 --freestanding --target=windows "$PEU_FR" -o "$T10_D/peu_frl" > "$T10_D/peu_frl.log" 2>&1 \
+   || ! $T10_KRC --legacy --arch=x86_64 --freestanding --target=windows --emit=asm "$PEU_FR" -o "$T10_D/peu_frl.s" >> "$T10_D/peu_frl.log" 2>&1; then
     pe_row_bad win_abi_frames_exec_x86_64_legacy "build: $(grep -m1 error "$T10_D/peu_frl.log" | cut -c1-120)"
+elif PEU_C=$(peu_f10_calls "$T10_D/peu_frl.s"); [ "$PEU_C" != 4 ]; then
+    pe_row_bad win_abi_frames_exec_x86_64_legacy "the listing has $PEU_C real calls to f10, want 4 (inlined away?)"
 elif [ -z "$PEU_QX" ]; then
     pe_row_skip win_abi_frames_exec_x86_64_legacy "no qemu-x86_64-static"
 else
@@ -29132,7 +29172,7 @@ else
     if [ "$(uname -m)" = x86_64 ]; then timeout 60 "$T10_D/peu_frl" > /dev/null 2>&1; PEU_N=$?; fi
     timeout 120 "$PEU_QX" "$T10_D/peu_frl" > /dev/null 2>&1; PEU_Q=$?
     if [ "$PEU_Q" = 0 ] && { [ "$PEU_N" = 0 ] || [ "$PEU_N" = x ]; }; then
-        pe_row_ok win_abi_frames_exec_x86_64_legacy "native rc=$PEU_N, qemu rc=0"
+        pe_row_ok win_abi_frames_exec_x86_64_legacy "native rc=$PEU_N, qemu rc=0, 4 real calls to f10, RSP alignment probe passed"
     else
         pe_row_bad win_abi_frames_exec_x86_64_legacy "native rc=$PEU_N, qemu rc=$PEU_Q (N = check N failed)"
     fi
