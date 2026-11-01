@@ -35,7 +35,7 @@ static uint64 uw_test_no_unwind = 0
 // it emitted, so the checker's listing equals the image by construction.
 static uint64 uw_test_listing_path = 0
 // bit (arch * 2 + legacy): arch 0 = x86_64, 1 = arm64; legacy 0 = IR, 1 = legacy
-static uint64 uw_backend_ready = 7        // A6b-1: x86_64 IR; A8: x86_64 legacy; A9b: arm64 IR
+static uint64 uw_backend_ready = 15       // A6b-1: x86_64 IR; A8: x86_64 legacy; A9b: arm64 IR; A10: arm64 legacy
 
 fn uw_backend_is_ready(uint64 arch, uint64 legacy) -> uint64 {
     uint64 bit = 1 << (arch * 2 + legacy)
@@ -225,6 +225,15 @@ fn uw_x64_setfp(uint64 reg, uint64 end) {
 // first in `code_bytes`), in emission order.
 fn uw_a64_prolog_insn(uint64 code_bytes, uint64 nbytes, uint64 end) {
     uw_code_push(16, code_bytes, nbytes, end)
+}
+
+// arm64: one SP allocation of `size` (a multiple of 16) as alloc_s, alloc_m or
+// alloc_l, whichever is the smallest that holds it.
+fn uw_a64_alloc_code(uint64 size, uint64 end) {
+    uint64 x = size / 16
+    if x < 32 { uw_a64_prolog_insn(x, 1, end) }
+    else if x < 2048 { uw_a64_prolog_insn((0xC0 | (x >> 8)) | ((x & 0xFF) << 8), 2, end) }
+    else { uw_a64_prolog_insn(0xE0 | (((x >> 16) & 0xFF) << 8) | (((x >> 8) & 0xFF) << 16) | ((x & 0xFF) << 24), 4, end) }
 }
 
 // arm64: the epilog starts at `off` and shares the prologue codes from byte

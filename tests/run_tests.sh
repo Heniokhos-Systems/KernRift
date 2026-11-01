@@ -29309,6 +29309,22 @@ else
     if [ "$PEU_Q" = 0 ]; then pe_row_ok win_abi_frames_exec_arm64_ir "qemu rc=0, 4 real calls to f10, SP alignment probe passed"
     else pe_row_bad win_abi_frames_exec_arm64_ir "qemu rc=$PEU_Q (N = check N failed)"; fi
 fi
+# ... and the arm64 corpus through the legacy backend (#143 A10, spec 5.2):
+# its Windows frame saves x19/x20 before setting x29 and keeps the frame in
+# leaves too; frames over 4080 bytes take the `sub sp, #hi, lsl #12` split.
+if ! $T10_KRC --legacy --arch=arm64 --freestanding --target=windows "$PEU_FRA" -o "$T10_D/peu_fral" > "$T10_D/peu_fral.log" 2>&1 \
+   || ! $T10_KRC --legacy --arch=arm64 --freestanding --target=windows --emit=asm "$PEU_FRA" -o "$T10_D/peu_fral.s" >> "$T10_D/peu_fral.log" 2>&1; then
+    pe_row_bad win_abi_frames_exec_arm64_legacy "build: $(grep -m1 error "$T10_D/peu_fral.log" | cut -c1-120)"
+elif PEU_C=$(peu_f10_bl "$T10_D/peu_fral.s"); [ "$PEU_C" != 4 ]; then
+    pe_row_bad win_abi_frames_exec_arm64_legacy "the listing has $PEU_C real calls to f10, want 4 (inlined away?)"
+elif [ -z "$PEU_QA" ]; then
+    pe_row_skip win_abi_frames_exec_arm64_legacy "no qemu-aarch64-static"
+else
+    chmod +x "$T10_D/peu_fral"
+    timeout 120 "$PEU_QA" "$T10_D/peu_fral" > /dev/null 2>&1; PEU_Q=$?
+    if [ "$PEU_Q" = 0 ]; then pe_row_ok win_abi_frames_exec_arm64_legacy "qemu rc=0, 4 real calls to f10, SP alignment probe passed"
+    else pe_row_bad win_abi_frames_exec_arm64_legacy "qemu rc=$PEU_Q (N = check N failed)"; fi
+fi
 # The Windows arm64 frame shape (#143 A9a, spec 5.1) of every non-naked
 # function of the compiler itself, from the byte column of its
 # --target=windows --arch=arm64 listing (tests/helpers/a64_win_frame_scan.py
@@ -29537,6 +29553,22 @@ else
     done
     if [ -z "$PEU_WHY" ] && [ "$PEU_N" -ge 60 ]; then pe_row_ok pe_unwind_tables_arm64_ir "$PEU_N fixtures pass C0-C6 + C4b"
     else pe_row_bad pe_unwind_tables_arm64_ir "$PEU_N checked;$PEU_WHY"; fi
+fi
+# arm64 legacy tables (#143 A10, spec 5.2): every fixture that builds for
+# Windows arm64 with --legacy, checker C0-C6 + C4b.
+if ! command -v python3 > /dev/null 2>&1 || ! command -v llvm-readobj > /dev/null 2>&1 || ! command -v llvm-objdump > /dev/null 2>&1; then
+    pe_row_skip pe_unwind_tables_arm64_legacy "needs python3, llvm-readobj and llvm-objdump"
+else
+    PEU_WHY=""; PEU_N=0
+    for PEU_F in "$DIR"/fixtures/*.kr "$DIR"/smoke/*.kr; do
+        PEU_B=$(basename "$PEU_F" .kr)
+        $T10_KRC --legacy --arch=arm64 --target=windows --emit=pe --test-listing="$T10_D/peu_c.lst" "$PEU_F" -o "$T10_D/peu_c.exe" > /dev/null 2>&1 || continue
+        PEU_N=$((PEU_N + 1))
+        PEU_O=$(python3 -B "$PEU_CHK" --arch arm64 "$T10_D/peu_c.exe" --listing "$T10_D/peu_c.lst" 2>&1)
+        [ "$(grep -c ': PASS' <<< "$PEU_O")" = 8 ] || PEU_WHY="$PEU_WHY $PEU_B:$( { grep -m1 -e FAIL -e error <<< "$PEU_O" || head -1 <<< "$PEU_O"; } | cut -c1-120);"
+    done
+    if [ -z "$PEU_WHY" ] && [ "$PEU_N" -ge 40 ]; then pe_row_ok pe_unwind_tables_arm64_legacy "$PEU_N fixtures pass C0-C6 + C4b"
+    else pe_row_bad pe_unwind_tables_arm64_legacy "$PEU_N checked;$PEU_WHY"; fi
 fi
 # The compiler itself for Windows arm64 (#143 A9b): --test-listing does not
 # change the image; the checker passes over every function; and LLVM, as an

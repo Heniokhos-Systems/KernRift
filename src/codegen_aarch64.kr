@@ -3698,8 +3698,10 @@ fn gen_expr_a64(uint64 node) {
                 // ARM64 Windows: save path in x19 (callee-saved)
                 emit_a64_store_x0(temp_slot_0)
                 // Allocate stack for STARTUPINFOA(104) + PROCESS_INFORMATION(24) + args
-                // sub sp, sp, #0xE0 (224 bytes, 16-aligned)
-                emit_a64(0xD10380FF)
+                // sub sp, sp, #0xE0 (224 bytes, 16-aligned). #154 (found by
+                // #143's checker): this word was 0xD10380FF, which encodes
+                // `sub sp, x7, #0xe0` -- SP set from whatever x7 held.
+                emit_a64(0xD10383FF)
                 // Zero out the STARTUPINFOA and PI area at sp+0x60
                 // x0 = sp+0x60, fill 128 bytes with zero
                 emit_a64(0x910180E0)  // add x0, sp, #0x60
@@ -3751,7 +3753,7 @@ fn gen_expr_a64(uint64 node) {
                 // Load exit code
                 emit_a64(0xB94003E0)  // ldr w0, [sp, #0]
                 // add sp, sp, #0xE0
-                emit_a64(0x910380FF)
+                emit_a64(0x910383FF)   // #154: was 0x910380FF = add sp, x7, #0xe0
                 // ExitProcess(w0 already in x0)
                 emit_a64_win_call_iat(0)
             } else {
@@ -6230,7 +6232,10 @@ fn gen_function_a64(uint64 fn_node) {
 
     // For main: platform-specific _start trampoline
     uint64 wnt_a64 = name_tok
-    if tok_matches(wnt_a64, "main", 4) != 0 && target_os == 2 && freestanding == 0 {
+    // #143 A10: a non-naked Windows main reads its command line AFTER the
+    // prologue (below); only a @naked main -- refused on every shipping
+    // Windows slice -- keeps this block.
+    if tok_matches(wnt_a64, "main", 4) != 0 && target_os == 2 && freestanding == 0 && is_naked != 0 {
         // All 13 IAT entries are loader-resolved. Call GetCommandLineA directly.
         emit_a64_win_call_iat(7)       // GetCommandLineA → x0 = cmdline
         uint64 argv_off_w = static_lookup_by_name("cli_argv", 8)
@@ -6304,7 +6309,9 @@ fn gen_function_a64(uint64 fn_node) {
     // empty body. The zeroing that decides the exit status happens on the two
     // paths that LEAVE the body; see legacy_main_zero_ret_a64 and the
     // epilogue, and the matching comment in codegen.kr's gen_function.
-    if tok_matches(wnt_a64, "main", 4) != 0 && freestanding == 0 {
+    // (#143 A10: a non-naked Windows main does this after its prologue and
+    // command-line block instead -- see the prologue below.)
+    if tok_matches(wnt_a64, "main", 4) != 0 && freestanding == 0 && (target_os != 2 || is_naked != 0) {
         emit_a64_mov_imm(0, 0)
     }
 
@@ -6362,7 +6369,32 @@ fn gen_function_a64(uint64 fn_node) {
     uint64 prologue_start = out_len
     uint64 stp_fp_off = 0
     uint64 stp_callee_off = 0
-    if is_naked == 0 {
+    if is_naked == 0 && target_os == 2 {
+        // #143 A10 (spec 5.2a): on Windows x19/x20 are saved BEFORE x29 is
+        // set, so set_fp is the last prologue instruction:
+        //   sub sp, #lo; stp x29, x30, [sp]; stp x19, x20, [sp, #16]; mov x29, sp
+        emit_a64(0xD1000000)  // SUB SP, SP, #imm (patched)
+        stp_fp_off = out_len
+        emit_a64(0xA9007BFD)  // stp x29, x30, [sp]
+        stp_callee_off = out_len
+        emit_a64(0xA90153F3)  // stp x19, x20, [sp, #16]
+        emit_a64_add_imm(29, 31, 0)  // mov x29, sp
+        if tok_matches(wnt_a64, "main", 4) != 0 && freestanding == 0 {
+            // GetCommandLineA, after the prologue (spec 5.2d)
+            emit_a64_win_call_iat(7)       // GetCommandLineA -> x0 = cmdline
+            uint64 argv_off_w2 = static_lookup_by_name("cli_argv", 8)
+            if argv_off_w2 != 0xFFFFFFFF {
+                emit_a64_static_store(argv_off_w2)
+            }
+            // cli_argc = 0xFFFFFFFF: the "needs parsing" sentinel
+            emit_a64_mov_imm(0, 0xFFFFFFFF)
+            uint64 argc_off_w2 = static_lookup_by_name("cli_argc", 8)
+            if argc_off_w2 != 0xFFFFFFFF {
+                emit_a64_static_store(argc_off_w2)
+            }
+            emit_a64_mov_imm(0, 0)         // main's default exit status
+        }
+    } else if is_naked == 0 {
         emit_a64(0xD1000000)  // SUB SP, SP, #imm (patched)
         stp_fp_off = out_len
         emit_a64(0xA9007BFD)  // stp x29, x30, [sp]
@@ -6590,6 +6622,7 @@ fn gen_function_a64(uint64 fn_node) {
 
     // For @naked functions, skip epilogue entirely
     if is_naked != 0 {
+        uw_fn_set_naked()   // #143: zero-code record (refused on shipping Windows slices)
         return
     }
 
@@ -6674,9 +6707,36 @@ fn gen_function_a64(uint64 fn_node) {
         }
     }
 
+    // #143 A10 (spec 5.2c): the unwind codes, now that the frame is final --
+    // in prologue order: [sub sp, #hi, lsl #12 | nop], sub sp, #lo,
+    // stp x29, x30, [sp] (save_fplr 0), stp x19, x20, [sp, #16] (save_regp
+    // x19, #16), mov x29, sp (set_fp). The epilog (ldp x19, x20; ldp x29,
+    // x30; add sp, #lo; add sp, #hi, lsl #12 | nop; ret) shares them from
+    // StartIndex 1, after set_fp.
+    if target_os == 2 {
+        uint64 pre_amt = 0
+        uint64 lo_amt = frame
+        if frame > 4080 {
+            // the same split as the patch above: lo 16-aligned, hi pages
+            lo_amt = frame & 0xFFF
+            if (lo_amt & 15) != 0 { lo_amt = lo_amt + 16 - (lo_amt & 15) }
+            pre_amt = ((frame - lo_amt) >> 12) << 12
+        }
+        if pre_amt == 0 { uw_a64_prolog_insn(0xE3, 1, pre_sub_patch + 4) }        // nop
+        else { uw_a64_alloc_code(pre_amt, pre_sub_patch + 4) }
+        uw_a64_alloc_code(lo_amt, prologue_start + 4)
+        uw_a64_prolog_insn(0x40, 1, stp_fp_off + 4)                                 // save_fplr #0
+        uw_a64_prolog_insn(0xC8 | (0x02 << 8), 2, stp_callee_off + 4)               // save_regp x19, #16
+        uw_a64_prolog_insn(0xE1, 1, stp_callee_off + 8)                             // set_fp
+        uw_a64_epilog(ldp_callee_off, 1)
+        uw_fn_finalize()
+    }
+
     // Leaf function optimization: if no BL was emitted, NOP out the STP/LDP
-    // Stack layout stays the same (a64_var_base=32), just skip the memory ops
-    if is_naked == 0 {
+    // Stack layout stays the same (a64_var_base=32), just skip the memory ops.
+    // Not on Windows (#143 A10, spec 5.2b): there the frame record is what the
+    // unwind data describes, and leaf bodies move SP too.
+    if is_naked == 0 && target_os != 2 {
         uint64 has_bl = 0
         uint64 scan = prologue_start
         while scan + 4 <= out_len {

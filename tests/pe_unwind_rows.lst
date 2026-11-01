@@ -30,3 +30,5 @@ pe_unwind_tables_arm64_ir
 pe_unwind_selfhost_arm64
 pe_unwind_arm64_clang_reference
 pe_unwind_no_unwind_switch_arm64
+win_abi_frames_exec_arm64_legacy
+pe_unwind_tables_arm64_legacy
