@@ -29219,7 +29219,11 @@ peu_ref() {
 PEU_NK="nkb.kr:2:4: error: @naked function 'nk' passes call arguments here, which can move the stack pointer (IR op 51); on Windows a naked function's unwind record describes no frame, so its body may not move RSP/SP or write the frame pointer (#143)."
 peu_ref 1 "$PEU_NK" nkb --arch=x86_64 --target=windows --emit=pe
 peu_ref 1 "$PEU_NK" nkb --targets=win-x64
-peu_ref 1 "$PEU_NK" nkb --targets=win-arm64
+# arm64 wording (phase-2 review Nit 7): arguments do not move SP there; a
+# call overwrites x30
+PEU_NKA="nkb.kr:2:4: error: @naked function 'nk' sets up a call here, and a call overwrites x30, the link register holding its return address (IR op 51); on Windows a naked function's unwind record describes no frame, so its body may not move SP, write x29 or overwrite x30 (#143)."
+peu_ref 1 "$PEU_NKA" nkb --targets=win-arm64
+peu_ref 1 "$PEU_NKA" nkb --arch=arm64 --target=windows --emit=pe
 peu_ref 0 - nkb --targets=linux-x64
 peu_ref 0 - nkb --arch=x86_64 --target=linux
 peu_ref 0 - nkok
@@ -29238,7 +29242,7 @@ peu_ref 0 "ahex.kr:2:11: warning: asm given as raw bytes cannot be checked for w
 peu_ref 1 "nkok.kr:2:4: error: legacy @naked on Windows requires the legacy-naked fix" nkok --arch=x86_64 --target=windows --emit=pe --legacy
 peu_ref 1 "nkok.kr:2:4: error: legacy @naked on Windows requires the legacy-naked fix" nkok --arch=arm64 --target=windows --emit=pe --legacy
 peu_ref 0 - nkok --arch=x86_64 --target=linux --legacy
-if [ -z "$PEU_WHY" ]; then pe_row_ok pe_unwind_refusals "20 cases: naked/asm/legacy-naked refused on Windows slices that ship, accepted elsewhere"
+if [ -z "$PEU_WHY" ]; then pe_row_ok pe_unwind_refusals "21 cases: naked/asm/legacy-naked refused on Windows slices that ship, accepted elsewhere"
 else pe_row_bad pe_unwind_refusals "$PEU_WHY"; fi
 
 # --- #143 A6b-1: x86_64 IR unwind tables ----------------------------------
@@ -29326,9 +29330,7 @@ peu_wine_fault() {
     ck=$(python3 -B "$PEU_CHK" --arch x86_64 "$T10_D/peu_w.exe" --listing "$T10_D/peu_w.lst" 2>&1)
     if [ "$(grep -c ': PASS' <<< "$ck")" = 8 ]; then ck="checker C0-C6 + C4b PASS"
     else ck="checker: $( { grep -m1 -e FAIL -e error <<< "$ck" || head -1 <<< "$ck"; } | cut -c1-160)"; fi
-    local so=""
-    if [ "$want" = "-" ]; then want="$got"; so=", stdout not checked: legacy file_write(1, ..) does not reach stdout (#145)"; fi
-    if [ "$rc" = 5 ] && [ "$got" = "$want" ] && [[ "$ch" == walk* ]] && [ "$ck" = "checker C0-C6 + C4b PASS" ]; then pe_row_ok "$row" "rc=5, $ch, $ck$so$(t10_note)"
+    if [ "$rc" = 5 ] && [ "$got" = "$want" ] && [[ "$ch" == walk* ]] && [ "$ck" = "checker C0-C6 + C4b PASS" ]; then pe_row_ok "$row" "rc=5, $ch, $ck$(t10_note)"
     else pe_row_bad "$row" "rc=$rc stdout '$(tr '\n' '|' <<< "$got" | head -c 40)' want rc=5 '$(tr '\n' '|' <<< "$want")'; $ch; $ck"; fi
 }
 peu_wine_fault pe_unwind_nested_fault_windows_wine pe_unwind_nested_fault "$(printf 'armed\nf3')" f3,f2,f1,main
@@ -29340,9 +29342,11 @@ peu_wine_fault pe_unwind_argv_main_fault_windows_wine pe_unwind_argv_main_fault 
 # @naked function is refused on Windows, so there is no legacy naked row),
 # and the expression temporaries the legacy backend pushes (println's
 # push rdi/push rcx around GetStdHandle; the f-string digit loops).
-peu_wine_fault pe_unwind_nested_fault_legacy_windows_wine pe_unwind_nested_fault - f3,f2,f1,main --legacy
-peu_wine_fault pe_unwind_stack_args_fault_legacy_windows_wine pe_unwind_stack_args_fault - f3,f2,main --legacy
-peu_wine_fault pe_unwind_argv_main_fault_legacy_windows_wine pe_unwind_argv_main_fault - f2,f1,main --legacy
+# The fixtures print through println, so stdout is checked exactly here too
+# (phase-2 review Minor 5; legacy file_write(1, ..) does not reach stdout, #145).
+peu_wine_fault pe_unwind_nested_fault_legacy_windows_wine pe_unwind_nested_fault "$(printf 'armed\nf3')" f3,f2,f1,main --legacy
+peu_wine_fault pe_unwind_stack_args_fault_legacy_windows_wine pe_unwind_stack_args_fault "$(printf 'armed\nf3')" f3,f2,main --legacy
+peu_wine_fault pe_unwind_argv_main_fault_legacy_windows_wine pe_unwind_argv_main_fault "$(printf 'armed\nf2')" f2,f1,main --legacy
 peu_wine_fault pe_unwind_temp_push_fault_windows_wine pe_unwind_temp_push_fault "$(printf '7\n3')" f2,f1,main --legacy
 
 # The compiler itself, built for Windows x86_64 with --test-listing: the image

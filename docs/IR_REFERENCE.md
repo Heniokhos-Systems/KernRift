@@ -303,7 +303,7 @@ function main:
 - `v0 = ret v7` — `v0` is the reserved "no destination" vreg.
 - `arg v1 [0]` — argument position in `imm`.
 - Blocks print in index order, which is *also* the emission order
-  (`src/ir.kr:15159`), but not the order the lowering created edges in: an
+  (`src/ir.kr:15168`), but not the order the lowering created edges in: an
   `if`'s join block can have a lower index than its `else` arm.
 
 ---
@@ -478,7 +478,7 @@ is false; it is still present in MLRift's copy of this document.)*
 | 87 | `IR_CALL_IND` | `dest = (*src1)()` | **SE** |
 
 - **`IR_BR_COND` does not "fall through".** The false target is the block's
-  `succ0` field, read separately (`src/ir.kr:15335`). The emitter then picks
+  `succ0` field, read separately (`src/ir.kr:15344`). The emitter then picks
   one of four layout cases against the *next* block index — both-next (emit
   nothing), true-next (invert the condition, one `jcc`), false-next (`jcc`,
   no trailing `jmp`), neither (`jcc` + `jmp`). If you write a pass that
@@ -486,7 +486,7 @@ is false; it is still present in MLRift's copy of this document.)*
   the terminator's `imm`.
 - Terminators are **not** emitted from the per-instruction dispatch on any
   backend. x86 has explicit no-op cases at `src/ir.kr:12724`/`11713` and
-  skips them in the block loop (`src/ir.kr:15181`); arm64/riscv32/xtensa have
+  skips them in the block loop (`src/ir.kr:15190`); arm64/riscv32/xtensa have
   no case at all and emit terminators in their function-level loop.
 
 ### 5.6 Multi-value returns (80–83)
@@ -863,7 +863,7 @@ document. It runs once per function, after lowering and before liveness.
 
 `--O0` sets `ir_opt_level = 0` (`src/ir.kr:12783`, written only at
 `src/main.kr:9380`) and each backend skips the whole call
-(`src/ir.kr:15014`, `src/ir_aarch64.kr:3322`, `src/ir_riscv.kr:2414`,
+(`src/ir.kr:15023`, `src/ir_aarch64.kr:3322`, `src/ir_riscv.kr:2414`,
 `src/ir_xtensa.kr:2816`). Note the spelling: **`--O0`**, two dashes. There is
 no `-O0`, `-O1`, `--O2` — no other write to `ir_opt_level` exists.
 
@@ -1064,7 +1064,7 @@ fixup sequences and macOS's syscall-number register) and x18
 `IR_ASM_BLOCK` (op 96) anywhere in its body, or it is `@naked`.
 `ir_x86_fn_wide_ok` (`src/ir.kr:6601`) / `ir_a64_fn_wide_ok`
 (`src/ir_aarch64.kr:289`) test only the former; the call sites
-(`src/ir.kr:15014`, `src/ir_aarch64.kr:3342`) add `&& is_naked == 0`. The asm
+(`src/ir.kr:15023`, `src/ir_aarch64.kr:3342`) add `&& is_naked == 0`. The asm
 check must stay a **whole-body scan, not a constraint-list scan** — the
 comment at `src/ir.kr:6516` records a real case where a CPUID block wrote r13
 with no constraint naming it. `@naked` is excluded because it gets
@@ -1144,7 +1144,7 @@ it as well.
 ### Spilling
 
 **Slots are vreg-indexed, one per vreg**, not a compacted set of spilled
-values: `ir_spill_count = ir_vreg_next - 1` (`src/ir.kr:14981`,
+values: `ir_spill_count = ir_vreg_next - 1` (`src/ir.kr:14990`,
 `src/ir_aarch64.kr:3364`). The comments at `src/ir.kr:8210` and
 `src/ir_aarch64.kr:353` explain why the older `vreg - IR_NUM_REGS - 1`
 mapping was removed: it assumed a low-numbered vreg could never spill, but a

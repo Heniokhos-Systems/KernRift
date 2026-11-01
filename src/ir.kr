@@ -14935,11 +14935,20 @@ fn ir_win_naked_refuse(uint64 fn_node, uint64 arch_a64) {
                 uint64 what = "' does something here that moves the stack pointer (IR op "
                 if op == 50 { what = "' makes a call here, which moves the stack pointer (IR op " }
                 if op == 51 { what = "' passes call arguments here, which can move the stack pointer (IR op " }
+                uint64 tail = "); on Windows a naked function's unwind record describes no frame, so its body may not move RSP/SP or write the frame pointer (#143). Move the work into a normal function, or into asm you control.\n"
+                if arch_a64 != 0 {
+                    // arm64 (phase-2 review Nit 7): arguments do not move SP
+                    // there; what a call breaks is x30, the link register a
+                    // frameless record says still holds the return address
+                    what = "' does something here that moves SP or overwrites x30 (IR op "
+                    if op == 50 { what = "' makes a call here, which overwrites x30, the link register holding its return address (IR op " }
+                    if op == 51 { what = "' sets up a call here, and a call overwrites x30, the link register holding its return address (IR op " }
+                    tail = "); on Windows a naked function's unwind record describes no frame, so its body may not move SP, write x29 or overwrite x30 (#143). Move the work into a normal function, or into asm you control.\n"
+                }
                 write(2, what, str_len(what))
                 uint8[24] obuf
                 uint64 olen = fmt_uint(obuf, op)
                 write(2, obuf, olen)
-                uint64 tail = "); on Windows a naked function's unwind record describes no frame, so its body may not move RSP/SP or write the frame pointer (#143). Move the work into a normal function, or into asm you control.\n"
                 write(2, tail, str_len(tail))
                 diag_span_of(tok)
                 exit(1)
