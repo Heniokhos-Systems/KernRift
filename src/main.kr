@@ -9455,6 +9455,12 @@ fn main() {
                 // --emit=pe / --emit=obj for Windows, also write the asm
                 // listing of the code this compile emitted to the path.
                 uw_test_listing_path = arg + 15
+            } else if str_starts_with(arg, "--test-a64-low-limit=", 21) != 0 {
+                // Internal, undocumented in --help, test-only (#143): lower the
+                // 256 MiB limit of a Windows arm64 frame's low area, so the
+                // refusal row can reach the located error (no program the
+                // compiler accepts comes near 256 MiB).
+                ir_a64_win_low_limit = parse_uint_arg(arg + 21)
             } else if str_eq_full(arg, "--test-a64-pe-header-0x200") != 0 {
                 // Internal, undocumented in --help, test-only (#143): build a
                 // Windows arm64 image with the pre-#143 0x200-byte headers, so

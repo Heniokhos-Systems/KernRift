@@ -27854,7 +27854,7 @@ elif [ -z "$C7_WHY" ]; then c7_ok c7_naked_main_not_parsed "x86_64 + arm64"
 else c7_bad c7_naked_main_not_parsed "$C7_WHY"; fi
 
 # (c) Windows arm64: no emitted instruction writes x18 (the TEB register) --
-#     every instruction of the prologue + parser (argv_echo) and of the op-114
+#     every instruction of main's argv block + parser (argv_echo) and of the op-114
 #     sequence + quoter (argv_rtparent) PEs, disassembled. A write is x18/w18
 #     as the destination of anything but a store/compare/branch (the exclusive
 #     stores' status register IS a destination), the second register of a
@@ -27890,8 +27890,11 @@ print("insns=%d hits=%d %s" % (n, len(hits), "; ".join(hits[:4])))
     esac
 fi
 
-# (d) Windows arm64 prologue plumbing, decoded from the image (no runner can
-#     execute it): exactly two BLs reach the parser leaf. Before the first:
+# (d) Windows arm64 main's argv block, decoded from the image (no runner can
+#     execute it). Since #143 A9a the block runs right AFTER main's prologue,
+#     not as part of it; the row keeps its historical name
+#     (c7_win_arm64_prologue_virtualalloc_args) and finds the block by decoding,
+#     wherever it sits: exactly two BLs reach the parser leaf. Before the first:
 #     `sub sp, sp, #0x20`, GetCPInfo(x0 = 0 = CP_ACP, x1 = sp) -- an IAT call
 #     the image binds to the NAME GetCPInfo -- then `cbnz w0` over three
 #     `str xzr, [sp, #0/8/16]` (a failed call leaves no lead bytes), then
@@ -29388,7 +29391,14 @@ peu_ref 0 "ahex.kr:2:11: warning: asm given as raw bytes cannot be checked for w
 peu_ref 1 "nkok.kr:2:4: error: legacy @naked on Windows requires the legacy-naked fix" nkok --arch=x86_64 --target=windows --emit=pe --legacy
 peu_ref 1 "nkok.kr:2:4: error: legacy @naked on Windows requires the legacy-naked fix" nkok --arch=arm64 --target=windows --emit=pe --legacy
 peu_ref 0 - nkok --arch=x86_64 --target=linux --legacy
-if [ -z "$PEU_WHY" ]; then pe_row_ok pe_unwind_refusals "21 cases: naked/asm/legacy-naked refused on Windows slices that ship, accepted elsewhere"
+# A Windows arm64 frame whose low area reaches 256 MiB cannot be described by
+# an alloc_l code (24 bits of size/16): a located error (#143, phase-3a review
+# finding 2). No program the compiler accepts gets near it (at most 512 local
+# arrays of at most 4 KiB), so the hidden --test-a64-low-limit lowers it here.
+printf 'fn big() -> uint64 {\n    uint64[512] a\n    a[3] = 7\n    return a[3]\n}\nfn main() -> uint32 {\n    return big()\n}\n' > "$PEU_RD/abig.kr"
+peu_ref 1 "abig.kr:1:4: error: function 'big' has a stack frame of 256 MiB or more below its saved registers; a Windows arm64 unwind record cannot describe it (#143)." abig --arch=arm64 --target=windows --emit=pe --test-a64-low-limit=4096
+peu_ref 0 - abig --arch=arm64 --target=windows --emit=pe
+if [ -z "$PEU_WHY" ]; then pe_row_ok pe_unwind_refusals "23 cases: naked/asm/legacy-naked refused on Windows slices that ship, accepted elsewhere"
 else pe_row_bad pe_unwind_refusals "$PEU_WHY"; fi
 
 # --- #143 A6b-1: x86_64 IR unwind tables ----------------------------------

@@ -243,9 +243,25 @@ fn ir_a64_win_saves(uint64 restore) {
     }
 }
 
+// The largest low area an alloc_l code can describe: it holds size/16 in 24
+// bits (#143, phase-3a review finding 2; spec 5.3). The compiler accepts at
+// most 512 local arrays of at most 4 KiB per function, so no program reaches
+// it today; hidden --test-a64-low-limit=N lowers it for the refusal row.
+static uint64 ir_a64_win_low_limit = 0x10000000
+
 // SUB SP, SP, #size for the part of the frame below the save area, with its
 // unwind code(s); returns the code bytes it recorded (the epilog's StartIndex).
-fn ir_a64_win_alloc_low(uint64 size) -> uint64 {
+// name_tok locates the error when the area is too large to describe.
+fn ir_a64_win_alloc_low(uint64 size, uint64 name_tok) -> uint64 {
+    if size >= ir_a64_win_low_limit && win_frame_refusals_active() != 0 {
+        diag_loc_head(name_tok, 0)
+        write(2, "function '", 10)
+        write(2, cg_source + tok_text_start(name_tok), tok_text_len(name_tok))
+        uint64 m = "' has a stack frame of 256 MiB or more below its saved registers; a Windows arm64 unwind record cannot describe it (#143). Move the large buffers to the heap.\n"
+        write(2, m, str_len(m))
+        diag_span_of(name_tok)
+        exit(1)
+    }
     uint64 x = size / 16
     if size <= 4095 {
         emit_a64_sub_sp_imm(size)
@@ -3716,7 +3732,7 @@ fn ir_emit_arm64_function(uint64 fn_node) {
         ir_a64_win_saves(0)
         emit_a64(0x91000000 | (ir_a64_win_fp_off << 10) | (31 << 5) | 29)        // add x29, sp, #f
         uw_a64_prolog_insn(0xE2 | ((ir_a64_win_fp_off / 8) << 8), 2, out_len)   // add_fp
-        a64_win_low_codes = ir_a64_win_alloc_low(a64_win_low)
+        a64_win_low_codes = ir_a64_win_alloc_low(a64_win_low, fn_name_tok)
     } else if is_naked == 0 {
         // SUB SP, SP, #total_frame
         emit_a64_sub_sp_imm(total_frame)
