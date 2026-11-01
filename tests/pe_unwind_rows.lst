@@ -25,3 +25,4 @@ pe_unwind_argv_main_fault_legacy_windows_wine
 pe_unwind_temp_push_fault_windows_wine
 win_abi_frames_exec_arm64_ir
 a64_win_frame_shape
+pe_a64_adrp_targets

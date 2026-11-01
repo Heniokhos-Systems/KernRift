@@ -3362,6 +3362,16 @@ fn pe_finalize_x64(uint64 header_size, uint64 text_start, uint64 text_size) {
         uw_append_tables_x64(text_start, pdata_rva)
         uw_patch_table_headers(0x198, pdata_rva, pdata_file_off, 4, image_size)
     }
+    pe_check_header_room(pe_num_sections(), header_size)
+}
+
+// NumberOfSections as written so far (u16 at 0x46).
+fn pe_num_sections() -> uint64 {
+    uint16 n16 = 0
+    uint64 np = out_buf + 0x46
+    unsafe { *(np as uint16) -> n16 }
+    uint64 n = n16
+    return n
 }
 
 // The .pdata and .xdata section headers (at hdr and hdr + 40) +
@@ -3428,10 +3438,17 @@ fn pe_finalize_a64(uint64 header_size, uint64 text_start, uint64 text_size) {
     uint64 data_rva = 0x1000 + text_va_size
     uint64 data_va_size = (data_raw_size + 0xFFF) & ~0xFFF
     if data_va_size == 0 { data_va_size = 0x1000 }
-    // Static fixups: the ADRP resolver computes a VA as 0x140000E00 + offset
-    // (a64_compute_va), so passing data_rva - 0xE00 lands every static at
-    // 0x140000000 + data_rva + offset, inside .data.
-    uint64 data_va_base = data_rva - 0xE00
+    // Static fixups: the ADRP resolver computes a VA as
+    // 0x140000000 + (0x1000 - header size) + offset (a64_compute_va), so
+    // passing data_rva - (0x1000 - header size) lands every static at
+    // 0x140000000 + data_rva + offset, inside .data. The bias must be the one
+    // a64_compute_va uses: both come from PE_A64_HEADER_SIZE (#143, spec 6.1).
+    if header_size != PE_A64_HEADER_SIZE {
+        uint64 hm = "error: internal: arm64 PE header size disagrees with PE_A64_HEADER_SIZE\n"
+        write(2, hm, str_len(hm))
+        exit(1)
+    }
+    uint64 data_va_base = data_rva - (0x1000 - header_size)
     resolve_static_fixups_a64(data_va_base)
     uint64 idata_rva = 0x1000 + text_va_size + data_va_size
     uint64 iat_rva_val = emit_pe_idata(idata_rva)
@@ -3456,6 +3473,7 @@ fn pe_finalize_a64(uint64 header_size, uint64 text_start, uint64 text_size) {
     uint64 image_size = 0x1000 + text_va_size + data_va_size + 0x1000  // last 0x1000 = .idata page: needs pe_idata_size() <= 0x1000 (format_pe.kr)
     patch_u32(0x90, image_size)
     resolve_a64_win_iat_fixups(text_start, iat_rva_val)
+    pe_check_header_room(pe_num_sections(), header_size)
 }
 
 fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode) {
@@ -9437,6 +9455,12 @@ fn main() {
                 // --emit=pe / --emit=obj for Windows, also write the asm
                 // listing of the code this compile emitted to the path.
                 uw_test_listing_path = arg + 15
+            } else if str_eq_full(arg, "--test-a64-pe-header-0x200") != 0 {
+                // Internal, undocumented in --help, test-only (#143): build a
+                // Windows arm64 image with the pre-#143 0x200-byte headers, so
+                // the suite can compare its decoded ADRP targets with the
+                // default 0x400 layout's (row pe_a64_adrp_targets).
+                PE_A64_HEADER_SIZE = 0x200
             } else if str_eq_full(arg, "--test-no-unwind") != 0 {
                 // Internal, undocumented in --help, test-only (#143): build a
                 // Windows image WITHOUT unwind tables, code unchanged, so the

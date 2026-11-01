@@ -29130,6 +29130,52 @@ grep -q 'Usage\|usage' "$T10_D/peu_help.txt" || PEU_WHY="$PEU_WHY --help printed
 grep -q 'test-no-unwind' "$T10_D/peu_help.txt" && PEU_WHY="$PEU_WHY --help documents it;"
 if [ -z "$PEU_WHY" ]; then pe_row_ok pe_unwind_hidden_switch_accepted "accepted, not in --help; x86_64: removes exactly .pdata and .xdata; arm64: inert"
 else pe_row_bad pe_unwind_hidden_switch_accepted "$PEU_WHY"; fi
+# Windows arm64 images have 0x400 bytes of headers (#143, spec 6.1 as ruled
+# after the phase-3a review: five section headers once .pdata/.xdata exist),
+# and every ADRP address the code computes depends on that size through one
+# bias (a64_compute_va, pe_finalize_a64). For three programs -- the compiler
+# itself among them -- every adrp and the add/ldr/str that uses its register
+# must land in .data, .text or an 8-byte .idata slot
+# (tests/helpers/a64_adrp_targets.py), the decoded targets must be identical
+# to those of the same program built with the old 0x200 headers (hidden
+# --test-a64-pe-header-0x200), and so must the .text bytes: .text keeps RVA
+# 0x1000 whatever the header size. A compiler that changes the header size but
+# not the bias fails here (negative control in the #143 archive).
+if ! command -v python3 > /dev/null 2>&1; then pe_row_skip pe_a64_adrp_targets "no python3"
+else
+    PEU_WHY=""; PEU_N=0
+    for PEU_F in "$DIR/fixtures/alloc_guard_fault.kr" "$DIR/fixtures/sys_args.kr" "$DIR/../build/krc.kr"; do
+        PEU_B=$(basename "$PEU_F" .kr)
+        if ! $T10_KRC --arch=arm64 --target=windows --emit=pe "$PEU_F" -o "$T10_D/peu_a4.exe" > /dev/null 2>&1 \
+           || ! $T10_KRC --arch=arm64 --target=windows --emit=pe --test-a64-pe-header-0x200 "$PEU_F" -o "$T10_D/peu_a2.exe" > /dev/null 2>&1; then
+            PEU_WHY="$PEU_WHY $PEU_B:build;"; continue
+        fi
+        PEU_O=$(python3 -B "$DIR/helpers/a64_adrp_targets.py" "$T10_D/peu_a4.exe" "$T10_D/peu_a2.exe" 2>&1)
+        case "$(tail -1 <<< "$PEU_O")" in
+            *"(SizeOfHeaders 0x400), 0 off target"*"identical to the SizeOfHeaders 0x200 image") PEU_N=$((PEU_N + 1)) ;;
+            *) PEU_WHY="$PEU_WHY $PEU_B:$(head -1 <<< "$PEU_O" | cut -c1-140);" ;;
+        esac
+        PEU_T=$(python3 -B - "$T10_D/peu_a4.exe" "$T10_D/peu_a2.exe" <<'PEUTXTEOF' 2>&1
+import struct, sys
+def text(p):
+    b = open(p, 'rb').read()
+    lfa = struct.unpack_from('<I', b, 60)[0]
+    tab = lfa + 24 + struct.unpack_from('<H', b, lfa + 20)[0]
+    for i in range(struct.unpack_from('<H', b, lfa + 6)[0]):
+        h = tab + 40 * i
+        if b[h:h + 8].rstrip(b'\0') == b'.text':
+            vs, va, raw, ptr = struct.unpack_from('<IIII', b, h + 8)
+            return va, b[ptr:ptr + raw]
+a, b = text(sys.argv[1]), text(sys.argv[2])
+print('same' if a == b else 'differ')
+PEUTXTEOF
+)
+        [ "$PEU_T" = same ] || PEU_WHY="$PEU_WHY $PEU_B:.text differs between the 0x400 and 0x200 headers ($PEU_T);"
+    done
+    rm -f "$T10_D/peu_a4.exe" "$T10_D/peu_a2.exe"
+    if [ -z "$PEU_WHY" ] && [ "$PEU_N" = 3 ]; then pe_row_ok pe_a64_adrp_targets "3 images, the compiler included: every adrp pair lands in .data/.idata/.text, targets and .text identical with 0x200 headers"
+    else pe_row_bad pe_a64_adrp_targets "$PEU_N of 3;$PEU_WHY"; fi
+fi
 # win_abi_frames (#143 A6a, spec 8.5; the RSP alignment probe and the real-call
 # check after the phase-2 review, M2 and Minor 6): the Windows-ABI frame shapes RUN. The
 # std-free corpus is built --freestanding --target=windows (Windows code, ELF

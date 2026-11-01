@@ -6853,14 +6853,14 @@ fn resolve_fnaddr_fixups_a64() {
 // VA computation depends on target format:
 //   ELF:    VA = 0x400000 + file_offset
 //   Mach-O: VA = 0x100000000 + file_offset
-//   PE:     VA = 0x140000000 + 0x1000 + (file_offset - 0x200)
-//                = 0x140000E00 + file_offset
+//   PE:     VA = 0x140000000 + 0x1000 + (file_offset - PE_A64_HEADER_SIZE)
+//           (header size 0x400 since #143: VA = 0x140000C00 + file_offset)
 
 // Compute VA from a raw file offset based on target_os
 fn a64_compute_va(uint64 file_offset) -> uint64 {
     if target_os == 2 {
-        // PE: image_base(0x140000000) + text_rva(0x1000) + (file_off - header_size(0x200))
-        return 0x140000E00 + file_offset
+        // PE: image_base(0x140000000) + text_rva(0x1000) + (file_off - header size)
+        return 0x140000000 + 0x1000 - PE_A64_HEADER_SIZE + file_offset
     }
     if target_os == 1 {
         // Mach-O: vmaddr(0x100000000) + file_offset
