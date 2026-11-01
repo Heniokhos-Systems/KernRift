@@ -781,7 +781,7 @@ fn emit_pe_headers_x64(uint64 code_size) -> uint64 {
 
     emit_u64_le(0x140000000)
     emit_u32_le(0x1000)
-    emit_u32_le(0x200)
+    emit_u32_le(0x200)      // FileAlignment (not the header size)
     emit_u16_le(6); emit_u16_le(0)
     emit_u16_le(0); emit_u16_le(0)
     emit_u16_le(6); emit_u16_le(0)
@@ -790,7 +790,7 @@ fn emit_pe_headers_x64(uint64 code_size) -> uint64 {
     uint64 idata_rva = 0x2000
     uint64 image_size = 0x3000
     emit_u32_le(image_size)
-    emit_u32_le(0x200)      // SizeOfHeaders
+    emit_u32_le(PE_X64_HEADER_SIZE)      // SizeOfHeaders
     emit_u32_le(0)
     emit_u16_le(3)           // CONSOLE
     emit_u16_le(0x8100)
@@ -818,7 +818,7 @@ fn emit_pe_headers_x64(uint64 code_size) -> uint64 {
     emit_u32_le(code_size)
     emit_u32_le(0x1000)
     emit_u32_le(text_aligned)
-    emit_u32_le(0x200)
+    emit_u32_le(PE_X64_HEADER_SIZE)     // .text PointerToRawData
     emit_u32_le(0); emit_u32_le(0)
     emit_u16_le(0); emit_u16_le(0)
     emit_u32_le(0xE0000020)  // CODE|EXECUTE|READ|WRITE (statics in .text)
@@ -829,16 +829,16 @@ fn emit_pe_headers_x64(uint64 code_size) -> uint64 {
     emit_u32_le(idata_size)
     emit_u32_le(idata_rva)
     emit_u32_le(idata_size)
-    uint64 idata_file_off = 0x200 + text_aligned
+    uint64 idata_file_off = PE_X64_HEADER_SIZE + text_aligned
     emit_u32_le(idata_file_off)
     emit_u32_le(0); emit_u32_le(0)
     emit_u16_le(0); emit_u16_le(0)
     emit_u32_le(0xC0000040)  // INITIALIZED_DATA|READ
 
     // Pad to file alignment
-    while out_len < 0x200 { emit_byte(0) }
+    while out_len < PE_X64_HEADER_SIZE { emit_byte(0) }
 
-    return 0x200
+    return PE_X64_HEADER_SIZE
 }
 
 // PE AArch64 variant (same structure, different machine type)
@@ -854,7 +854,7 @@ fn emit_pe_headers_x64(uint64 code_size) -> uint64 {
 // --test-a64-pe-header-0x200 (hidden, test-only) restores the old 0x200 for
 // the row that compares the decoded ADRP targets of both layouts.
 static uint64 PE_A64_HEADER_SIZE = 0x400
-static uint64 PE_X64_HEADER_SIZE = 0x200
+static uint64 PE_X64_HEADER_SIZE = 0x200    // used by emit_pe_headers_x64 (phase-3b review Nit)
 
 // The section table starts at 0x148 and must end within SizeOfHeaders.
 fn pe_check_header_room(uint64 nsec, uint64 header_size) {
