@@ -661,6 +661,25 @@ die_e:
 EOF
 echo '; uw-leaf die deadend {die_b}-{die_e}' | ann deadend
 expect_all body_deadend_leaf --arch x86_64 "$W/deadend.obj" --listing "$W/deadend.lst"
+# ... the same die routine NOT registered: `and rsp,-16` makes the depth
+# unknown outside a dead-end leaf, which C4b refuses (phase-2 review, M3:
+# otherwise dropping a die routine's registration went unnoticed)
+expect_only body_deadend_unregistered C4b 'makes the stack depth unknown outside a registered dead-end leaf' --arch x86_64 "$W/deadend.obj" --listing "$W/none.lst"
+# ... and entered by a conditional branch, as the C7 die routines are
+body deadend_jcc <<'EOF'
+        testq %rax, %rax
+        jne die_b
+        jmp die_e
+die_b:
+        andq $-16, %rsp
+        subq $0x20, %rsp
+        xorl %ecx, %ecx
+        callq *__imp_ExitProcess(%rip)
+die_e:
+EOF
+echo '; uw-leaf die deadend {die_b}-{die_e}' | ann deadend_jcc
+expect_all body_deadend_leaf_by_jcc --arch x86_64 "$W/deadend_jcc.obj" --listing "$W/deadend_jcc.lst"
+expect_only body_deadend_by_jcc_unregistered C4b 'makes the stack depth unknown outside a registered dead-end leaf' --arch x86_64 "$W/deadend_jcc.obj" --listing "$W/none.lst"
 # arm64: ExitProcess through adrp x16 / ldr x16 / blr x16 ends the path (R3-N1);
 # without that, the path would reach the epilog 16 bytes deep
 mk a64_exit a64 <<'EOF'
@@ -695,6 +714,45 @@ k3:
         .seh_endproc
 EOF
 expect_all a64_exitprocess_dead_end --arch arm64 "$W/a64_exit.obj"
+# arm64 mirror of M3: a die routine that realigns SP (`and sp, x16, #-16`)
+# passes only when registered as a dead-end leaf
+mk a64_die a64 <<'EOF'
+        .text
+        .def k4; .scl 2; .type 32; .endef
+        .globl k4
+        .seh_proc k4
+k4:
+        mov x9, x9
+        .seh_nop
+        stp x29, x30, [sp, #-16]!
+        .seh_save_fplr_x 16
+        mov x29, sp
+        .seh_set_fp
+        .seh_endprologue
+        cbnz x0, die_b
+        b die_e
+die_b:
+        mov x16, sp
+        and sp, x16, #-16
+        mov x0, #3
+        adrp x16, __imp_ExitProcess
+        ldr x16, [x16, :lo12:__imp_ExitProcess]
+        blr x16
+die_e:
+        .seh_startepilogue
+        mov sp, x29
+        .seh_set_fp
+        ldp x29, x30, [sp], #16
+        .seh_save_fplr_x 16
+        mov x9, x9
+        .seh_nop
+        .seh_endepilogue
+        ret
+        .seh_endproc
+EOF
+echo '; uw-leaf die deadend {die_b}-{die_e}' | ann a64_die
+expect_all a64_deadend_leaf --arch arm64 "$W/a64_die.obj" --listing "$W/a64_die.lst"
+expect_only a64_deadend_unregistered C4b 'makes the stack depth unknown outside a registered dead-end leaf' --arch arm64 "$W/a64_die.obj" --listing "$W/none.lst"
 
 # ... and the dead end is decided by the import's NAME: the same code calling
 # another import walks on into the unbalanced epilogue

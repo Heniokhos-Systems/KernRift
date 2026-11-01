@@ -51,7 +51,10 @@ Rules (spec section 8.1):
       do not write the frame register and are entered only by call/jmp.
   C4b stack-depth dataflow over each body's CFG: every path returns at the
       entry depth; ExitProcess calls (by import name) and jumps into dead-end
-      leaves end a path; called leaves return at their own entry depth; a
+      leaves end a path; called leaves return at their own entry depth; an
+      RSP/SP write that makes the depth unknown (and rsp,imm; mov rsp,reg from
+      an unknown value; an RSP load) is allowed only inside a registered
+      dead-end leaf; a
       `uw-loops` pair is summarised as depth-neutral only if its bytes satisfy
       the balanced-loop rule (counter zeroed; either bottom-tested -- one push
       + one inc, one pop + `dec; jnz` -- or guarded top-tested, ruling (c) --
@@ -1409,6 +1412,14 @@ class X64Fn:
                 out = []
             else:
                 t, succ = self.step(i, s, ctx_leaf)
+                # an RSP write that loses the depth (and rsp,imm; mov rsp,reg
+                # from an unknown value; an RSP load) is legal only inside a
+                # registered dead-end leaf (phase-2 review, M3)
+                if s.sp is not None and t.sp is None:
+                    lf = self.leaf_of(i.a)
+                    if lf is None or lf[1] != 'deadend':
+                        probs.append('0x%x (%s) makes the stack depth unknown outside a registered dead-end leaf'
+                                     % (a, i.mn))
                 if i.kind == 'call' and ctx_leaf is None:
                     lf = self.leaf_of(i.tgt)
                     if lf is not None and lf[2] == i.tgt and lf[1] == 'called':
@@ -2114,6 +2125,13 @@ class A64Fn:
                 probs.append('control reaches 0x%x outside %s' % (a, self.name))
                 continue
             t, succ = self.step(i, s)
+            # as on x64 (phase-2 review, M3): an SP write that loses the depth
+            # is legal only inside a registered dead-end leaf
+            if s.sp is not None and t.sp is None:
+                lf = self.leaf_of(i.a)
+                if lf is None or lf[1] != 'deadend':
+                    probs.append('0x%x (%s) makes the stack depth unknown outside a registered dead-end leaf'
+                                 % (a, i.text))
             if i.kind == 'ret':
                 rets.append((a, s))
             if i.kind == 'bl' and ctx_leaf is None:
