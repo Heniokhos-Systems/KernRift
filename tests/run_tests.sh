@@ -9328,10 +9328,11 @@ pei_check() {
     rm -f "$PEI_OUT"
 }
 #                                                  .idata  SizeOf  FirstThunks (IAT region +472, then +0/+192/+376)
-# x86_64 SizeOfImage includes the .pdata page after .idata (#143 A6b-1: the
-# x86_64 IR backend writes unwind tables); .idata itself is unchanged.
+# x86_64 SizeOfImage includes the .pdata and .xdata pages after .idata (#143:
+# the x86_64 backends write unwind tables, split per the phase-2 review's M1);
+# .idata itself is unchanged.
 pei_check pe_imports_three_dlls x86_64 "$DIR/golden/pe_imports_x86_64.idata.hex" \
-    8192  16384  8664  8856  9040     # 0x2000 0x4000  0x21D8 0x2298 0x2350
+    8192  20480  8664  8856  9040     # 0x2000 0x5000  0x21D8 0x2298 0x2350
 pei_check pe_imports_three_dlls_arm64 arm64 "$DIR/golden/pe_imports_arm64.idata.hex" \
     12288 16384  12760 12952 13136    # 0x3000 0x4000  0x31D8 0x3298 0x3350
 # The RVA-free tail (hint/name table + DLL names) must match across the two
@@ -29050,9 +29051,9 @@ else
     else pe_row_bad wine_crash_override_does_not_mask "$PEU_WHY"; fi
 fi
 # --test-no-unwind (hidden, test-only, #143): accepted, absent from --help.
-# Where a backend writes tables (x86_64 IR since A6b-1) it removes exactly the
-# tables: the image has one section fewer, no exception directory, and the
-# same .text bytes. Where none does yet (arm64 until A9b) it is inert: the
+# Where a backend writes tables (x86_64 since A6b-1/A8) it removes exactly the
+# tables: the image has two sections fewer (.pdata and .xdata), no exception
+# directory, and the same .text bytes. Where none does yet (arm64 until A9b) it is inert: the
 # image is byte-identical. Later rows build their in-tree negative images with it.
 PEU_WHY=""
 for PEU_A in x86_64 arm64; do
@@ -29079,8 +29080,9 @@ def pe(p):
     return nsec, dd3, secs
 n0, d0, s0 = pe(sys.argv[1]); n1, d1, s1 = pe(sys.argv[2])
 bad = []
-if n1 != n0 - 1: bad.append('sections %d with tables, %d without' % (n0, n1))
-if '.pdata' not in s0 or '.pdata' in s1: bad.append('.pdata present with tables: %s, without: %s' % ('.pdata' in s0, '.pdata' in s1))
+if n1 != n0 - 2: bad.append('sections %d with tables, %d without' % (n0, n1))
+for sn in ('.pdata', '.xdata'):
+    if sn not in s0 or sn in s1: bad.append('%s present with tables: %s, without: %s' % (sn, sn in s0, sn in s1))
 if d0 == (0, 0) or d1 != (0, 0): bad.append('DD[3] with tables %s, without %s' % (d0, d1))
 if s0.get('.text') != s1.get('.text'): bad.append('.text differs')
 if s0.get('.idata') != s1.get('.idata'): bad.append('.idata differs')
@@ -29093,7 +29095,7 @@ done
 $T10_KRC --help > "$T10_D/peu_help.txt" 2>&1
 grep -q 'Usage\|usage' "$T10_D/peu_help.txt" || PEU_WHY="$PEU_WHY --help printed no usage;"
 grep -q 'test-no-unwind' "$T10_D/peu_help.txt" && PEU_WHY="$PEU_WHY --help documents it;"
-if [ -z "$PEU_WHY" ]; then pe_row_ok pe_unwind_hidden_switch_accepted "accepted, not in --help; x86_64: removes exactly .pdata; arm64: inert"
+if [ -z "$PEU_WHY" ]; then pe_row_ok pe_unwind_hidden_switch_accepted "accepted, not in --help; x86_64: removes exactly .pdata and .xdata; arm64: inert"
 else pe_row_bad pe_unwind_hidden_switch_accepted "$PEU_WHY"; fi
 # win_abi_frames (#143 A6a, spec 8.5): the Windows-ABI frame shapes RUN. The
 # std-free corpus is built --freestanding --target=windows (Windows code, ELF

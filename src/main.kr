@@ -3359,37 +3359,51 @@ fn pe_finalize_x64(uint64 header_size, uint64 text_start, uint64 text_size) {
     if uw_emit_tables != 0 && uw_backend_is_ready(0, uw_legacy) != 0 {
         uint64 pdata_rva = idata_rva + 0x1000
         uint64 pdata_file_off = codegen_output_len()
-        uint64 pdata_raw = uw_append_pdata_x64(text_start, pdata_rva)
-        uw_patch_pdata_header(0x198, pdata_rva, pdata_file_off, pdata_raw, 3, image_size)
+        uw_append_tables_x64(text_start, pdata_rva)
+        uw_patch_table_headers(0x198, pdata_rva, pdata_file_off, 4, image_size)
     }
 }
 
-// Section header + NumberOfSections + DataDirectory[3] + SizeOfImage +
-// SizeOfInitializedData for the .pdata section just appended (spec 6.1).
-fn uw_patch_pdata_header(uint64 hdr, uint64 rva, uint64 file_off, uint64 raw, uint64 nsec, uint64 image_size) {
-    // ".pdata\0\0"
+// The .pdata and .xdata section headers (at hdr and hdr + 40) +
+// NumberOfSections + DataDirectory[3] + SizeOfImage + SizeOfInitializedData,
+// for the two sections uw_append_tables_x64 just appended (spec 6.1, M1).
+fn uw_patch_table_headers(uint64 hdr, uint64 rva, uint64 file_off, uint64 nsec, uint64 image_size) {
+    // ".pdata\0\0": exactly the RUNTIME_FUNCTION array
     patch_u32(hdr, 0x6164702E)
     patch_u32(hdr + 4, 0x6174)
-    patch_u32(hdr + 8, uw_pdata_vsize)              // VirtualSize
+    patch_u32(hdr + 8, uw_pdata_dir_size)           // VirtualSize = the directory size
     patch_u32(hdr + 12, rva)                        // VirtualAddress
-    patch_u32(hdr + 16, raw)                        // SizeOfRawData
+    patch_u32(hdr + 16, uw_pdata_raw)               // SizeOfRawData
     patch_u32(hdr + 20, file_off)                   // PointerToRawData
     patch_u32(hdr + 24, 0)
     patch_u32(hdr + 28, 0)
     patch_u32(hdr + 32, 0)
     patch_u32(hdr + 36, 0x40000040)                 // INITIALIZED_DATA | READ
+    // ".xdata\0\0": the UNWIND_INFO records
+    uint64 xh = hdr + 40
+    patch_u32(xh, 0x6164782E)
+    patch_u32(xh + 4, 0x6174)
+    patch_u32(xh + 8, uw_xdata_vsize)
+    patch_u32(xh + 12, uw_xdata_rva)
+    patch_u32(xh + 16, uw_xdata_raw)
+    patch_u32(xh + 20, uw_xdata_file_off)
+    patch_u32(xh + 24, 0)
+    patch_u32(xh + 28, 0)
+    patch_u32(xh + 32, 0)
+    patch_u32(xh + 36, 0x40000040)                  // INITIALIZED_DATA | READ
     uint64 nsp = out_buf + 0x46
     uint16 ns16 = nsec
     unsafe { *(nsp as uint16) = ns16 }              // NumberOfSections
     patch_u32(0xE0, rva)                            // DataDirectory[3] (exception)
     patch_u32(0xE4, uw_pdata_dir_size)
-    patch_u32(0x90, image_size + ((uw_pdata_vsize + 0xFFF) & ~0xFFF))   // SizeOfImage
+    uint64 pages = ((uw_pdata_dir_size + 0xFFF) & ~0xFFF) + ((uw_xdata_vsize + 0xFFF) & ~0xFFF)
+    patch_u32(0x90, image_size + pages)             // SizeOfImage
     uint64 initd = 0
     uint64 ip = out_buf + 0x60
     uint32 init32 = 0
     unsafe { *(ip as uint32) -> init32 }
     initd = init32
-    patch_u32(0x60, initd + raw)                    // SizeOfInitializedData
+    patch_u32(0x60, initd + uw_pdata_raw + uw_xdata_raw)   // SizeOfInitializedData
 }
 
 // arm64: a separate .data section for statics (W^X): .text = code + strings

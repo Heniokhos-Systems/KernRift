@@ -25,7 +25,10 @@ Rules (spec section 8.1):
   C0  listing bytes == image .text bytes (rip-relative disp32 and arm64
       adrp/add/ldr page fields are relocations: the listing holds them
       unresolved, the image resolved)
-  C1  exception directory well-formed: DataDirectory[3] inside .pdata, section
+  C1  exception directory well-formed: an image's .pdata is exactly
+      DataDirectory[3] (the RUNTIME_FUNCTION array alone) and every UnwindInfo
+      RVA lies in a read-only .xdata (split layout; --oracle exempts the
+      combined-layout prototypes), section
       flags, sizes, strictly ascending and non-overlapping entries, 4-aligned
       records, version/flags/counts, every code decodes; arm64: unpacked,
       FunctionLength == distance to the next entry (and to the end of code for
@@ -498,8 +501,14 @@ class A64Record:
 # --------------------------------------------------------------------------
 # Exception directory
 # --------------------------------------------------------------------------
-def exception_table(binr, rules_out):
-    """Locate and decode the table; raises RuleFail (C1) on structural errors."""
+def exception_table(binr, rules_out, oracle=False):
+    """Locate and decode the table; raises RuleFail (C1) on structural errors.
+    An image must use the split layout (spec 6.1 as amended after the phase-2
+    review, M1): .pdata holds exactly the RUNTIME_FUNCTION array (it starts at
+    DataDirectory[3] and its VirtualSize is the directory size), and every
+    UnwindInfo RVA lies in a read-only .xdata section. Only the committed
+    prototype oracles (--oracle) predate it: they keep the records inside
+    .pdata."""
     entsz = 12 if binr.arch == 'x86_64' else 8
     pdata = binr.section('.pdata')
     if binr.is_image:
@@ -513,6 +522,9 @@ def exception_table(binr, rules_out):
             raise RuleFail('DataDirectory[3] (0x%x+0x%x) overruns .pdata' % (rva, size))
         if s.flags != 0x40000040:
             raise RuleFail('.pdata characteristics 0x%08x, want 0x40000040' % s.flags)
+        if not oracle and (rva != s.rva or s.vsize != size):
+            raise RuleFail('.pdata (RVA 0x%x, VirtualSize 0x%x) is not exactly the exception directory '
+                           '(0x%x+0x%x): it must hold only the RUNTIME_FUNCTION array' % (s.rva, s.vsize, rva, size))
     else:
         if pdata is None:
             raise RuleFail('no .pdata section')
@@ -544,6 +556,12 @@ def exception_table(binr, rules_out):
             # 4-aligned by construction and needs no separate check)
             if b % 4:
                 raise RuleFail('entry %d: BeginAddress 0x%x is not 4-aligned' % (k, b))
+        if binr.is_image and not oracle:
+            xs = binr.section_at(u & ~3)
+            if xs is None or xs.name != '.xdata' or xs.flags != 0x40000040:
+                raise RuleFail('entry %d: UnwindInfo RVA 0x%x is in %s, want a .xdata section with '
+                               'characteristics 0x40000040' % (k, u, 'no section' if xs is None else
+                                                               '%s (0x%08x)' % (xs.name, xs.flags)))
         try:
             r.decode(binr)
         except RuleFail as ex:
@@ -612,60 +630,16 @@ def check_c1(binr, lst, recs):
 # llvm-readobj cross-check (part of C1: our decode must equal llvm's)
 # --------------------------------------------------------------------------
 def readobj_records(binr):
-    """llvm-readobj's decode. llvm-readobj (18) dumps every section NAMED
-    .pdata as a RUNTIME_FUNCTION array, ignoring the DataDirectory[3] extent;
-    with the .xdata records in the same section (spec ruling Q10) it reads them
-    as further entries, and on some images crashes on them. So llvm is given a
-    temporary copy in which (1) the RUNTIME_FUNCTION array alone is appended at
-    the end of the file as a new section named .pdata, described by the .idata
-    section header (imports play no part in unwinding), (2) the original
-    section is renamed .xdat so the UnwindInfo RVAs still resolve into it, and
-    (3) DataDirectory[3] points at the copy. The image under test is never
-    changed. The import/IAT directories of the copy are cleared, since their
-    section header now describes the copy. An llvm-readobj failure still fails
-    the check."""
-    import tempfile
+    """llvm-readobj's decode of the image or object as it is. With .pdata
+    holding exactly the RUNTIME_FUNCTION array (split layout, M1), llvm-readobj
+    -- which dumps every section named .pdata as a RUNTIME_FUNCTION array --
+    decodes exactly the real records; check_readobj requires the same count.
+    An llvm-readobj failure fails the check."""
     arch = binr.arch
-    path, tmp = binr.path, None
-    if binr.is_image:
-        rva, size = binr.dd.get(3, (0, 0))
-        ps = binr.section_at(rva) if rva else None
-        idt = binr.section('.idata')
-        if ps is not None and ps.name == '.pdata' and idt is not None:
-            b = bytearray(binr.raw)
-            arr = binr.read(rva, size)
-            while len(b) % 0x200:
-                b.append(0)
-            foff = len(b)
-            b += arr + bytes((-len(arr)) % 0x200)
-            top = max(sc.rva + max(sc.vsize, sc.rawsize) for sc in binr.sections)
-            nrva = (top + 0xFFF) & ~0xFFF
-            b[ps.hdr_off:ps.hdr_off + 8] = b'.xdat\0\0\0'
-            o = idt.hdr_off
-            b[o:o + 8] = b'.pdata\0\0'
-            struct.pack_into('<IIII', b, o + 8, size, nrva, len(arr) + (-len(arr)) % 0x200, foff)
-            struct.pack_into('<I', b, o + 36, 0x40000040)
-            pe = struct.unpack_from('<I', b, 0x3C)[0]
-            opt = pe + 24
-            struct.pack_into('<II', b, binr.dd_off + 8 * 3, nrva, size)
-            # the import and IAT directories pointed into the .idata section
-            # whose header now describes the copy: drop them (llvm resolves
-            # them eagerly; unwinding never reads them)
-            struct.pack_into('<II', b, binr.dd_off + 8 * 1, 0, 0)
-            if len(binr.dd) > 12:
-                struct.pack_into('<II', b, binr.dd_off + 8 * 12, 0, 0)
-            struct.pack_into('<I', b, opt + 56, (nrva + size + 0xFFF) & ~0xFFF)
-            fd, tmp = tempfile.mkstemp(suffix='.exe')
-            os.write(fd, bytes(b))
-            os.close(fd)
-            path = tmp
     try:
-        p = subprocess.run(['llvm-readobj', '--unwind', path], capture_output=True, text=True, timeout=60)
+        p = subprocess.run(['llvm-readobj', '--unwind', binr.path], capture_output=True, text=True, timeout=60)
     except FileNotFoundError:
         return None
-    finally:
-        if tmp:
-            os.unlink(tmp)
     if p.returncode != 0:
         raise RuleFail('llvm-readobj --unwind failed: %s' % p.stderr.strip()[:200])
     out, cur = [], None
@@ -2587,14 +2561,18 @@ def main(argv):
             else:
                 if recs is None and c1_err is None:
                     try:
-                        recs = exception_table(binr, None)
+                        recs = exception_table(binr, None, a.oracle)
                     except RuleFail as ex:
                         c1_err = str(ex)
                 if c1_err is not None:
                     raise RuleFail(c1_err if rule == 'C1' else 'no usable table (C1: %s)' % c1_err)
                 if rule == 'C1':
                     msg = check_c1(binr, lst, recs)
-                    if not a.no_readobj:
+                    if a.oracle and binr.is_image:
+                        # the prototype oracles keep their records inside
+                        # .pdata, which llvm-readobj walks as more entries
+                        msg += ', combined-layout prototype (--oracle): no split rule, no llvm-readobj cross-check'
+                    elif not a.no_readobj:
                         check_readobj(binr, recs)
                         msg += ', llvm-readobj agrees'
                 else:

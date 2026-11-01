@@ -161,7 +161,60 @@ done
 # a committed PE whose tables a real loader accepted (the frame-pointer
 # prototype): C0 and C1 (decode == llvm-readobj) must pass on an IMAGE too.
 expect proto_image_C0 C0 PASS --arch x86_64 "$OR/nest8_fp.exe" --listing "$OR/nest8_fp.asm"
-expect proto_image_C1 C1 PASS --arch x86_64 "$OR/nest8_fp.exe"
+# The prototype keeps its UNWIND_INFO inside .pdata (the layout before the
+# phase-2 review's M1): accepted only as an --oracle input ...
+expect proto_image_C1 C1 PASS --arch x86_64 "$OR/nest8_fp.exe" --oracle
+expect neg_combined_layout C1 FAIL --arch x86_64 "$OR/nest8_fp.exe"
+# ... and its split-layout derivation (spec 6.1 as amended): .pdata exactly
+# the RUNTIME_FUNCTION array, the records in an appended read-only .xdata.
+# llvm-readobj must then decode exactly the real records. Two negatives from
+# the same derivation: .pdata trimmed to the array but the UnwindInfo RVAs
+# left at the old records (no longer in any section); a writable .xdata.
+python3 - "$OR/nest8_fp.exe" "$W" <<'PYEOF' || fail split_derivation "could not derive the split images"
+import struct, sys
+src, w = sys.argv[1], sys.argv[2]
+b0 = bytearray(open(src, 'rb').read())
+pe = struct.unpack_from('<I', b0, 0x3C)[0]
+nsec = struct.unpack_from('<H', b0, pe + 6)[0]
+opt = struct.unpack_from('<H', b0, pe + 20)[0]
+tab = pe + 24 + opt
+dd3 = pe + 24 + 112 + 3 * 8
+prva, psize = struct.unpack_from('<II', b0, dd3)
+hdrs = [tab + 40 * i for i in range(nsec)]
+ph = [h for h in hdrs if b0[h:h + 8].rstrip(b'\0') == b'.pdata'][0]
+pvs, pva, praw, pptr = struct.unpack_from('<IIII', b0, ph + 8)
+def make(name, xflags, move, trim=True):
+    b = bytearray(b0)
+    recs = bytes(b[pptr + psize:pptr + pvs])           # the records after the array
+    while len(b) % 0x200:
+        b.append(0)
+    xoff = len(b)
+    top = max(struct.unpack_from('<I', b, h + 12)[0] + struct.unpack_from('<I', b, h + 8)[0] for h in hdrs)
+    xrva = (top + 0xFFF) & ~0xFFF
+    b += recs + bytes((-len(recs)) % 0x200)
+    if move:
+        for k in range(psize // 12):
+            u = struct.unpack_from('<I', b, pptr + 12 * k + 8)[0]
+            struct.pack_into('<I', b, pptr + 12 * k + 8, xrva + (u - (pva + psize)))
+    if trim:
+        struct.pack_into('<I', b, ph + 8, psize)          # .pdata VirtualSize = the array
+    xh = tab + 40 * nsec
+    b[xh:xh + 8] = b'.xdata\0\0'
+    struct.pack_into('<IIII', b, xh + 8, len(recs), xrva, len(recs) + (-len(recs)) % 0x200, xoff)
+    struct.pack_into('<I', b, xh + 36, xflags)
+    struct.pack_into('<H', b, pe + 6, nsec + 1)
+    struct.pack_into('<I', b, pe + 24 + 56, (xrva + len(recs) + 0xFFF) & ~0xFFF)
+    open('%s/%s.exe' % (w, name), 'wb').write(b)
+make('split', 0x40000040, True)
+make('split_records_in_pdata', 0x40000040, False)   # .pdata trimmed, RVAs still at the old records
+make('split_writable_xdata', 0xC0000040, True)
+PYEOF
+expect proto_split_image_C1 C1 PASS --arch x86_64 "$W/split.exe"
+python3 "$CHK" --rules C1 --arch x86_64 "$W/split.exe" 2>&1 | grep -q '^C1: PASS (4 records, llvm-readobj agrees)' \
+    || fail proto_split_image_count "llvm-readobj must decode exactly the 4 real records: $(python3 "$CHK" --rules C1 --arch x86_64 "$W/split.exe" 2>&1)"
+N=$((N + 1)); echo "  case proto_split_image_count: llvm-readobj decodes exactly the 4 real records"
+expect neg_split_records_in_pdata C1 FAIL --arch x86_64 "$W/split_records_in_pdata.exe"
+expect neg_split_writable_xdata C1 FAIL --arch x86_64 "$W/split_writable_xdata.exe"
 
 # ---------------------------------------------------------------- negatives
 # mutate <in> <out> <what>: one byte-level defect in a copy.

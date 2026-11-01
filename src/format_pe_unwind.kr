@@ -384,9 +384,12 @@ fn uw_write_annotations(uint64 fd, uint64 source, uint64 text_start) {
 }
 
 // ---------------------------------------------------------------------------
-// The x64 table writer (spec 6.1). Appended by pe_finalize_x64 right after
-// .idata, as one section `.pdata` holding the RUNTIME_FUNCTION array
-// followed by the deduplicated UNWIND_INFO records (ruling Q10).
+// The x64 table writer (spec 6.1, amended after the phase-2 review, M1).
+// Appended by pe_finalize_x64 right after .idata, as two sections: `.pdata`
+// holding exactly the RUNTIME_FUNCTION array (its VirtualSize is the
+// exception directory's size, so a tool that walks the whole section reads
+// only records), then `.xdata` (read-only) with the deduplicated UNWIND_INFO
+// records on the next page.
 // ---------------------------------------------------------------------------
 fn uw_internal_error(uint64 what, uint64 i) {
     uint64 m = "error: internal: PE unwind table: "
@@ -512,15 +515,28 @@ fn uw_x64_info(uint64 i, uint64 buf) -> uint64 {
 // (RVA 0x1000); pdata_rva: the RVA the new section gets. Returns the raw
 // (0x200-aligned) size written, and patches the RUNTIME_FUNCTION array; the
 // caller patches the headers.
-static uint64 uw_pdata_dir_size = 0
-static uint64 uw_pdata_vsize = 0
+static uint64 uw_pdata_dir_size = 0     // n * 12: .pdata VirtualSize = DataDirectory[3].Size
+static uint64 uw_pdata_raw = 0          // .pdata SizeOfRawData
+static uint64 uw_xdata_rva = 0
+static uint64 uw_xdata_file_off = 0
+static uint64 uw_xdata_vsize = 0
+static uint64 uw_xdata_raw = 0
 
-fn uw_append_pdata_x64(uint64 text_start, uint64 pdata_rva) -> uint64 {
+// .pdata at pdata_rva (file offset = the current end of output), .xdata at
+// the next page boundary after it. text_start: file/buffer offset of .text
+// (RVA 0x1000). The caller patches the headers (uw_patch_table_headers).
+fn uw_append_tables_x64(uint64 text_start, uint64 pdata_rva) {
     uw_check_records(text_start)
     uint64 sec = codegen_output_len()
     uint64 n = uw_rec_count
     uint64 i = 0
     while i < n * 12 { emit_byte(0)  i = i + 1 }
+    uw_pdata_dir_size = n * 12
+    while ((codegen_output_len() - sec) & 0x1FF) != 0 { emit_byte(0) }
+    uw_pdata_raw = codegen_output_len() - sec
+    uint64 xsec = codegen_output_len()
+    uw_xdata_file_off = xsec
+    uw_xdata_rva = pdata_rva + ((uw_pdata_dir_size + 0xFFF) & ~0xFFF)
     uint64 tmp = alloc(1024)
     uint64 uniq_off = alloc(n * 8)
     uint64 uniq_len = alloc(n * 8)
@@ -568,14 +584,13 @@ fn uw_append_pdata_x64(uint64 text_start, uint64 pdata_rva) -> uint64 {
         uint64 rf = sec + i * 12
         patch_u32(rf, 0x1000 + uw_get(i, 0) - text_start)
         patch_u32(rf + 4, 0x1000 + uw_get(i, 8) - text_start)
-        patch_u32(rf + 8, pdata_rva + info_at - sec)
+        patch_u32(rf + 8, uw_xdata_rva + info_at - xsec)
         i = i + 1
     }
     dealloc(tmp)
     dealloc(uniq_off)
     dealloc(uniq_len)
-    uw_pdata_dir_size = n * 12
-    uw_pdata_vsize = codegen_output_len() - sec
-    while ((codegen_output_len() - sec) & 0x1FF) != 0 { emit_byte(0) }
-    return codegen_output_len() - sec
+    uw_xdata_vsize = codegen_output_len() - xsec
+    while ((codegen_output_len() - xsec) & 0x1FF) != 0 { emit_byte(0) }
+    uw_xdata_raw = codegen_output_len() - xsec
 }
