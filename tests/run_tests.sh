@@ -9333,8 +9333,10 @@ pei_check() {
 # .idata itself is unchanged.
 pei_check pe_imports_three_dlls x86_64 "$DIR/golden/pe_imports_x86_64.idata.hex" \
     8192  20480  8664  8856  9040     # 0x2000 0x5000  0x21D8 0x2298 0x2350
+# arm64 SizeOfImage likewise includes the .pdata and .xdata pages (#143 A9b);
+# .idata is unchanged (the 0x400 arm64 headers move file offsets only).
 pei_check pe_imports_three_dlls_arm64 arm64 "$DIR/golden/pe_imports_arm64.idata.hex" \
-    12288 16384  12760 12952 13136    # 0x3000 0x4000  0x31D8 0x3298 0x3350
+    12288 24576  12760 12952 13136    # 0x3000 0x6000  0x31D8 0x3298 0x3350
 # The RVA-free tail (hint/name table + DLL names) must match across the two
 # goldens, so regenerating one cannot quietly leave the other describing a
 # different table. Counted: it is the cross-arch half of the pin.
@@ -29087,20 +29089,17 @@ else
     else pe_row_bad wine_crash_override_does_not_mask "$PEU_WHY"; fi
 fi
 # --test-no-unwind (hidden, test-only, #143): accepted, absent from --help.
-# Where a backend writes tables (x86_64 since A6b-1/A8) it removes exactly the
-# tables: the image has two sections fewer (.pdata and .xdata), no exception
-# directory, and the same .text bytes. Where none does yet (arm64 until A9b) it is inert: the
-# image is byte-identical. Later rows build their in-tree negative images with it.
+# Where a backend writes tables (x86_64 since A6b-1/A8, arm64 IR since A9b) it
+# removes exactly the tables: the image has two sections fewer (.pdata and
+# .xdata), no exception directory, and the same .text and .idata bytes. Later
+# rows build their in-tree negative images with it.
 PEU_WHY=""
 for PEU_A in x86_64 arm64; do
     $T10_KRC --arch=$PEU_A --target=windows --emit=pe "$DIR/fixtures/pe_unwind_oracle/nest.kr" -o "$T10_D/peu_sw0.exe" > "$T10_D/peu_sw.log" 2>&1 \
         || { PEU_WHY="$PEU_WHY $PEU_A: plain build failed;"; continue; }
     $T10_KRC --test-no-unwind --arch=$PEU_A --target=windows --emit=pe "$DIR/fixtures/pe_unwind_oracle/nest.kr" -o "$T10_D/peu_sw1.exe" > "$T10_D/peu_sw.log" 2>&1 \
         || { PEU_WHY="$PEU_WHY $PEU_A: --test-no-unwind refused: $(grep -m1 -i error "$T10_D/peu_sw.log" | cut -c1-120);"; continue; }
-    if [ "$PEU_A" = arm64 ]; then
-        cmp -s "$T10_D/peu_sw0.exe" "$T10_D/peu_sw1.exe" || PEU_WHY="$PEU_WHY arm64: image differs with --test-no-unwind (no arm64 tables yet);"
-    else
-        PEU_O=$(python3 -B - "$T10_D/peu_sw0.exe" "$T10_D/peu_sw1.exe" <<'PEUSWEOF'
+    PEU_O=$(python3 -B - "$T10_D/peu_sw0.exe" "$T10_D/peu_sw1.exe" <<'PEUSWEOF'
 import struct, sys
 def pe(p):
     b = open(p, 'rb').read()
@@ -29125,13 +29124,12 @@ if s0.get('.idata') != s1.get('.idata'): bad.append('.idata differs')
 print('; '.join(bad))
 PEUSWEOF
 2>&1)
-        [ -z "$PEU_O" ] || PEU_WHY="$PEU_WHY x86_64: $PEU_O;"
-    fi
+    [ -z "$PEU_O" ] || PEU_WHY="$PEU_WHY $PEU_A: $PEU_O;"
 done
 $T10_KRC --help > "$T10_D/peu_help.txt" 2>&1
 grep -q 'Usage\|usage' "$T10_D/peu_help.txt" || PEU_WHY="$PEU_WHY --help printed no usage;"
 grep -q 'test-no-unwind' "$T10_D/peu_help.txt" && PEU_WHY="$PEU_WHY --help documents it;"
-if [ -z "$PEU_WHY" ]; then pe_row_ok pe_unwind_hidden_switch_accepted "accepted, not in --help; x86_64: removes exactly .pdata and .xdata; arm64: inert"
+if [ -z "$PEU_WHY" ]; then pe_row_ok pe_unwind_hidden_switch_accepted "accepted, not in --help; x86_64 and arm64: removes exactly .pdata and .xdata"
 else pe_row_bad pe_unwind_hidden_switch_accepted "$PEU_WHY"; fi
 # Windows arm64 images have 0x400 bytes of headers (#143, spec 6.1 as ruled
 # after the phase-3a review: five section headers once .pdata/.xdata exist),
@@ -29520,6 +29518,67 @@ else
     if [ "$(grep -c ': PASS' <<< "$PEU_O")" = 8 ]; then pe_row_ok pe_unwind_selfhost_x86_64 "krc_win.exe: $(grep '^C6: PASS' <<< "$PEU_O" | sed 's/^C6: PASS (//; s/)$//')"
     else pe_row_bad pe_unwind_selfhost_x86_64 "$( { grep -m1 -e FAIL -e error <<< "$PEU_O" || head -1 <<< "$PEU_O"; } | cut -c1-200)"; fi
     rm -f "$T10_D/krc_win.exe" "$T10_D/krc_win_plain.exe" "$T10_D/peu_self.lst"
+fi
+
+# arm64 IR tables (#143 A9b, spec 6.1): every fixture that builds for Windows
+# arm64, image and listing from one compile, checker C0-C6 + C4b -- C6 (the
+# unwind simulator over every offset) is the primary arm64 evidence, and C1
+# requires llvm-readobj to decode exactly the same records.
+if ! command -v python3 > /dev/null 2>&1 || ! command -v llvm-readobj > /dev/null 2>&1 || ! command -v llvm-objdump > /dev/null 2>&1; then
+    pe_row_skip pe_unwind_tables_arm64_ir "needs python3, llvm-readobj and llvm-objdump"
+else
+    PEU_WHY=""; PEU_N=0
+    for PEU_F in "$DIR"/fixtures/*.kr "$DIR"/smoke/*.kr; do
+        PEU_B=$(basename "$PEU_F" .kr)
+        $T10_KRC --arch=arm64 --target=windows --emit=pe --test-listing="$T10_D/peu_c.lst" "$PEU_F" -o "$T10_D/peu_c.exe" > /dev/null 2>&1 || continue
+        PEU_N=$((PEU_N + 1))
+        PEU_O=$(python3 -B "$PEU_CHK" --arch arm64 "$T10_D/peu_c.exe" --listing "$T10_D/peu_c.lst" 2>&1)
+        [ "$(grep -c ': PASS' <<< "$PEU_O")" = 8 ] || PEU_WHY="$PEU_WHY $PEU_B:$( { grep -m1 -e FAIL -e error <<< "$PEU_O" || head -1 <<< "$PEU_O"; } | cut -c1-120);"
+    done
+    if [ -z "$PEU_WHY" ] && [ "$PEU_N" -ge 60 ]; then pe_row_ok pe_unwind_tables_arm64_ir "$PEU_N fixtures pass C0-C6 + C4b"
+    else pe_row_bad pe_unwind_tables_arm64_ir "$PEU_N checked;$PEU_WHY"; fi
+fi
+# The compiler itself for Windows arm64 (#143 A9b): --test-listing does not
+# change the image; the checker passes over every function; and LLVM, as an
+# independent encoder, agrees with every distinct prologue/epilogue shape: each
+# is rebuilt as .inst words with the .seh_* directives they stand for,
+# assembled by llvm-mc for aarch64-pc-windows-msvc, and llvm-readobj's decode
+# of LLVM's codes must mean exactly what its decode of KernRift's does (LLVM's
+# save_next/restore_next compression expanded; tests/helpers/a64_clang_reference.py).
+if ! command -v python3 > /dev/null 2>&1 || ! command -v llvm-readobj > /dev/null 2>&1 || ! command -v llvm-mc > /dev/null 2>&1 || ! command -v llvm-objdump > /dev/null 2>&1; then
+    pe_row_skip pe_unwind_selfhost_arm64 "needs python3, llvm-readobj, llvm-mc and llvm-objdump"
+    pe_row_skip pe_unwind_arm64_clang_reference "needs python3, llvm-readobj, llvm-mc and llvm-objdump"
+elif ! $T10_KRC --arch=arm64 --target=windows --emit=pe --test-listing="$T10_D/peu_selfa.lst" "$DIR/../build/krc.kr" -o "$T10_D/krc_wa.exe" > "$T10_D/peu_selfa.log" 2>&1 \
+     || ! $T10_KRC --arch=arm64 --target=windows --emit=pe "$DIR/../build/krc.kr" -o "$T10_D/krc_wa_plain.exe" >> "$T10_D/peu_selfa.log" 2>&1; then
+    pe_row_bad pe_unwind_selfhost_arm64 "build: $(grep -m1 error "$T10_D/peu_selfa.log" | cut -c1-100)"
+    pe_row_bad pe_unwind_arm64_clang_reference "build: $(grep -m1 error "$T10_D/peu_selfa.log" | cut -c1-100)"
+else
+    if ! cmp -s "$T10_D/krc_wa.exe" "$T10_D/krc_wa_plain.exe"; then
+        pe_row_bad pe_unwind_selfhost_arm64 "--test-listing changed the image: $(cmp "$T10_D/krc_wa.exe" "$T10_D/krc_wa_plain.exe" 2>&1 | head -1)"
+    else
+        PEU_O=$(timeout 1800 python3 -B "$PEU_CHK" --arch arm64 "$T10_D/krc_wa.exe" --listing "$T10_D/peu_selfa.lst" 2>&1)
+        if [ "$(grep -c ': PASS' <<< "$PEU_O")" = 8 ]; then pe_row_ok pe_unwind_selfhost_arm64 "krc for win-arm64: $(grep '^C6: PASS' <<< "$PEU_O" | sed 's/^C6: PASS (//; s/)$//')"
+        else pe_row_bad pe_unwind_selfhost_arm64 "$( { grep -m1 -e FAIL -e error <<< "$PEU_O" || head -1 <<< "$PEU_O"; } | cut -c1-200)"; fi
+    fi
+    PEU_O=$(timeout 900 python3 -B "$DIR/helpers/a64_clang_reference.py" "$T10_D/krc_wa.exe" "$T10_D/peu_selfa.lst" 2>&1); PEU_RC=$?
+    if [ "$PEU_RC" = 0 ]; then pe_row_ok pe_unwind_arm64_clang_reference "$(tail -1 <<< "$PEU_O")"
+    else pe_row_bad pe_unwind_arm64_clang_reference "$(head -1 <<< "$PEU_O" | cut -c1-160)|$(tail -1 <<< "$PEU_O")"; fi
+    rm -f "$T10_D/krc_wa.exe" "$T10_D/krc_wa_plain.exe" "$T10_D/peu_selfa.lst"
+fi
+# The in-tree NEGATIVE arm64 images (#143 A9b): --test-no-unwind leaves out the
+# arm64 tables, and the checker's C1 finds no exception directory.
+if ! command -v python3 > /dev/null 2>&1; then pe_row_skip pe_unwind_no_unwind_switch_arm64 "no python3"
+else
+    PEU_WHY=""
+    for PEU_B in pe_unwind_nested_fault pe_unwind_stack_args_fault pe_unwind_argv_main_fault; do
+        if ! $T10_KRC --test-no-unwind --arch=arm64 --target=windows --emit=pe --test-listing="$T10_D/peu_x.lst" "$DIR/fixtures/$PEU_B.kr" -o "$T10_D/peu_x.exe" > /dev/null 2>&1; then
+            PEU_WHY="$PEU_WHY $PEU_B:build;"; continue
+        fi
+        PEU_O=$(python3 -B "$PEU_CHK" --arch arm64 "$T10_D/peu_x.exe" --listing "$T10_D/peu_x.lst" --rules C1 2>&1)
+        [[ "$PEU_O" == "C1: FAIL no exception directory"* ]] || PEU_WHY="$PEU_WHY $PEU_B:C1 '$PEU_O';"
+    done
+    if [ -z "$PEU_WHY" ]; then pe_row_ok pe_unwind_no_unwind_switch_arm64 "3 images: C1 finds no exception directory"
+    else pe_row_bad pe_unwind_no_unwind_switch_arm64 "$PEU_WHY"; fi
 fi
 
 # A permitted (RSP-neutral) @naked function gets the zero-code kind-1 record

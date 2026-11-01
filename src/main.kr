@@ -3473,6 +3473,17 @@ fn pe_finalize_a64(uint64 header_size, uint64 text_start, uint64 text_size) {
     uint64 image_size = 0x1000 + text_va_size + data_va_size + 0x1000  // last 0x1000 = .idata page: needs pe_idata_size() <= 0x1000 (format_pe.kr)
     patch_u32(0x90, image_size)
     resolve_a64_win_iat_fixups(text_start, iat_rva_val)
+    // #143 A9b: the exception directory, in the split layout (spec 6.1): .pdata
+    // and .xdata after .idata, as the fourth and fifth sections (headers at
+    // 0x1C0 and 0x1E8, inside the 0x400 bytes of arm64 headers).
+    uint64 uw_legacy_a = 0
+    if emit_ir_mode == 0 { uw_legacy_a = 1 }
+    if uw_emit_tables != 0 && uw_backend_is_ready(1, uw_legacy_a) != 0 {
+        uint64 pdata_rva_a = idata_rva + 0x1000
+        uint64 pdata_file_off_a = codegen_output_len()
+        uw_append_tables(text_start, pdata_rva_a, 1)
+        uw_patch_table_headers(0x1C0, pdata_rva_a, pdata_file_off_a, 5, image_size)
+    }
     pe_check_header_room(pe_num_sections(), header_size)
 }
 
@@ -9465,8 +9476,11 @@ fn main() {
                 // Internal, undocumented in --help, test-only (#143): build a
                 // Windows arm64 image with the pre-#143 0x200-byte headers, so
                 // the suite can compare its decoded ADRP targets with the
-                // default 0x400 layout's (row pe_a64_adrp_targets).
+                // default 0x400 layout's (row pe_a64_adrp_targets). Such an
+                // image carries no unwind tables: five section headers do not
+                // fit in 0x200 bytes (the writer would refuse it).
                 PE_A64_HEADER_SIZE = 0x200
+                uw_test_no_unwind = 1
             } else if str_eq_full(arg, "--test-no-unwind") != 0 {
                 // Internal, undocumented in --help, test-only (#143): build a
                 // Windows image WITHOUT unwind tables, code unchanged, so the
