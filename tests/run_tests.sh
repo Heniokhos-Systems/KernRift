@@ -27604,6 +27604,7 @@ wfe_win win_file_errors_read_builtin_windows_wine ir win_file_errors_read "$WFE_
 wfe_shape win_file_errors_shape_x86_64 x86_64 ir abc
 wfe_shape win_file_errors_shape_x86_64_legacy x86_64 legacy abc
 wfe_shape win_file_errors_shape_arm64 arm64 ir abc
+wfe_shape win_file_errors_shape_arm64_legacy arm64 legacy abc
 [ -n "$WFE_WINE" ] && WINEPREFIX="$WFE_D/pfx" "$(dirname "$WFE_WINE")/wineserver" -k > /dev/null 2>&1
 rm -rf "$WFE_D"
 # A return type and a slice element type have no runtime width on hosted

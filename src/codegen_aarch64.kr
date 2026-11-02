@@ -2634,6 +2634,9 @@ fn gen_expr_a64(uint64 node) {
                 uint64 rd_etr = var_frame_size & 15
                 if rd_etr != 0 { var_frame_size = var_frame_size + 16 - rd_etr }
                 emit_a64_store_x0(rd_extra)       // save len
+                // fd 0..2 -> GetStdHandle (#163): only now, with len parked --
+                // until the store above it lived only in x0.
+                a64_win_std_fd_prestep(pk0_fileread)
                 // Load buf into x1 first (before we reuse pk1_fileread)
                 emit_a64_load_x0(pk1_fileread)
                 emit_a64_mov(1, 0)                 // x1 = buf
@@ -2650,8 +2653,30 @@ fn gen_expr_a64(uint64 node) {
                 // x0 = handle
                 emit_a64_load_x0(pk0_fileread)
                 emit_a64_win_call_iat(4)
-                // Load bytesRead from pk1_fileread
+                // The BOOL decides (#136), tested as w0:
+                //   TRUE                      -> the count (0 = end of file)
+                //   FALSE, count > 0          -> the count (data moved)
+                //   FALSE, ERROR_BROKEN_PIPE  -> the count, 0: end of a pipe
+                //   FALSE, anything else      -> -EIO (-5)
+                // The count is read only through the frame-slot accessor.
+                uint64 grf_ok1 = out_len
+                emit_a64(0x35000000)               // cbnz w0, .ok
+                emit_a64_load_x0(pk1_fileread)     // x0 = count
+                uint64 grf_done1 = out_len
+                emit_a64(0xB5000000)               // cbnz x0, .done (data wins)
+                emit_a64_win_call_iat(IAT_GetLastError)
+                emit_a64(0x7101B41F)               // cmp w0, #109 (ERROR_BROKEN_PIPE)
+                uint64 grf_ok2 = out_len
+                emit_a64(0x54000000)               // b.eq .ok
+                emit_a64(0x92800080)               // movn x0, #4 (x0 = -5, -EIO)
+                uint64 grf_done2 = out_len
+                emit_a64(0x14000000)               // b .done
+                a64_patch_b19_here(grf_ok1, 0x35000000)
+                a64_patch_b19_here(grf_ok2, 0x54000000)
+                // .ok: load bytesRead from pk1_fileread
                 emit_a64_load_x0(pk1_fileread)
+                a64_patch_b19_here(grf_done1, 0xB5000000)
+                a64_patch_b26_here(grf_done2)      // .done
             } else {
                 emit_a64_mov(2, 0)
                 emit_a64_load_x0(pk1_fileread)
@@ -2738,6 +2763,8 @@ fn gen_expr_a64(uint64 node) {
                 // Windows ARM64: GetFileSizeEx(handle, &size)
                 // Use temp_slot_1 as the output buffer (in our frame, no SP manipulation)
                 emit_a64_store_x0(temp_slot_0)
+                // fd 0..2 -> GetStdHandle (#165), in place in temp_slot_0.
+                a64_win_std_fd_prestep(temp_slot_0)
                 // Zero temp_slot_1 first
                 emit_a64_mov_imm(0, 0)
                 emit_a64_store_x0(temp_slot_1)
@@ -2746,8 +2773,17 @@ fn gen_expr_a64(uint64 node) {
                 // x1 = &temp_slot_1 (pointer to output in our frame)
                 emit_a64_add_imm(1, 31, a64_var_base + temp_slot_1)
                 emit_a64_win_call_iat(8)
-                // Load size from temp_slot_1
+                // The BOOL decides (#138): the size, or -EIO (the slot was
+                // zeroed, but 0 is a valid size).
+                uint64 gfs_ok = out_len
+                emit_a64(0x35000000)               // cbnz w0, .ok
+                emit_a64(0x92800080)               // movn x0, #4 (x0 = -5, -EIO)
+                uint64 gfs_done = out_len
+                emit_a64(0x14000000)               // b .done
+                a64_patch_b19_here(gfs_ok, 0x35000000)
+                // .ok: load size from temp_slot_1
                 emit_a64_load_x0(temp_slot_1)
+                a64_patch_b26_here(gfs_done)       // .done
             } else {
                 emit_a64_mov(19, 0)
                 emit_a64_mov_imm(1, 0)
