@@ -19516,8 +19516,41 @@ fn emit_macho_relocatable(uint64 text_len, uint64 data_len, uint64 arch) {
 //   [...] Symbol table (18 bytes each)
 //   [...] String table
 //
+// With unwind tables (#143, spec 6.4; uw_coff_wanted, i.e. not
+// --test-no-unwind) the object has three sections:
+//   [0]   COFF file header
+//   [20]  .text, [60] .pdata, [100] .xdata section headers
+//   [140] .text raw data, then its relocations
+//   [...] .pdata raw data (4-aligned), .xdata raw data (format_pe_unwind.kr
+//         uw_write_tables), then the .pdata relocations (ADDR32NB)
+//   [...] Symbol table: the function and extern symbols as before, then the
+//         three section symbols .text/.pdata/.xdata (STATIC, one aux record
+//         each) APPENDED, so undef_base and every existing relocation's
+//         symbol index stay as they were
+//   [...] String table
+//
 // COFF symbols ≤ 8 bytes go in-place; longer names use the string table.
 // Windows x64 doesn't prepend '_' (unlike 32-bit).
+// A STATIC section symbol (name in place, Value 0, Type 0) and its aux record
+// (IMAGE_AUX_SYMBOL section definition: Length, NumberOfRelocations,
+// NumberOfLinenumbers, CheckSum, Number, Selection, 3 unused) -- #143 A13.
+fn coff_section_symbol(uint64 name_lo, uint64 name_hi, uint64 secno, uint64 length, uint64 nrel) {
+    emit_u32_le(name_lo)
+    emit_u32_le(name_hi)
+    emit_u32_le(0)                   // Value
+    emit_u16_le(secno)               // SectionNumber
+    emit_u16_le(0)                   // Type
+    emit_byte(3)                     // STATIC
+    emit_byte(1)                     // NumberOfAuxSymbols
+    emit_u32_le(length)
+    emit_u16_le(nrel)
+    emit_u16_le(0)
+    emit_u32_le(0)
+    emit_u16_le(0)
+    emit_byte(0)
+    emit_byte(0); emit_byte(0); emit_byte(0)
+}
+
 @export
 fn emit_coff_relocatable(uint64 text_len, uint64 data_len, uint64 arch) {
     uint64 blob_len = out_len
@@ -19550,6 +19583,12 @@ fn emit_coff_relocatable(uint64 text_len, uint64 data_len, uint64 arch) {
 
     uint64 total_syms = fn_count + extern_fn_count
     uint64 sym_size = total_syms * 18
+    // #143 A13: .pdata/.xdata + three section symbols (each with an aux record)
+    uint64 uw_tabs = uw_coff_wanted()
+    uint64 nsect = 1
+    if uw_tabs != 0 { nsect = 3 }
+    uint64 sym_text = total_syms             // section symbols follow every existing one
+    uint64 sym_xdata = total_syms + 4
 
     // Build string table up front so we know its size.
     // String table starts with a 4-byte length field (inclusive of itself).
@@ -19684,7 +19723,7 @@ fn emit_coff_relocatable(uint64 text_len, uint64 data_len, uint64 arch) {
     // Layout
     uint64 hdr_size = 20
     uint64 sec_hdr_size = 40
-    uint64 text_off = hdr_size + sec_hdr_size  // 60
+    uint64 text_off = hdr_size + sec_hdr_size * nsect  // 60, or 140 with .pdata/.xdata
     uint64 nreloc = extern_call_count
     uint64 reloc_off = text_off + section_size
     uint64 reloc_size = nreloc * 10
@@ -19697,10 +19736,14 @@ fn emit_coff_relocatable(uint64 text_len, uint64 data_len, uint64 arch) {
     } else {
         emit_u16_le(0xAA64)          // IMAGE_FILE_MACHINE_ARM64
     }
-    emit_u16_le(1)                   // NumberOfSections
+    emit_u16_le(nsect)               // NumberOfSections
     emit_u32_le(0)                   // TimeDateStamp
-    emit_u32_le(symtab_off)          // PointerToSymbolTable
-    emit_u32_le(total_syms)          // NumberOfSymbols
+    emit_u32_le(symtab_off)          // PointerToSymbolTable (patched below with tables)
+    if uw_tabs != 0 {
+        emit_u32_le(total_syms + 6)  // + .text/.pdata/.xdata symbols, one aux each
+    } else {
+        emit_u32_le(total_syms)      // NumberOfSymbols
+    }
     emit_u16_le(0)                   // SizeOfOptionalHeader
     emit_u16_le(0)                   // Characteristics
 
@@ -19719,6 +19762,9 @@ fn emit_coff_relocatable(uint64 text_len, uint64 data_len, uint64 arch) {
     // Characteristics:
     // 0x00000020 CNT_CODE | 0x00500000 ALIGN_16BYTES | 0x20000000 EXECUTE | 0x40000000 READ
     emit_u32_le(0x60500020)
+    // .pdata at 60 and .xdata at 100: zero here, patched once their data is out
+    uint64 zh = 0
+    while zh < (nsect - 1) * 40 { emit_byte(0)  zh = zh + 1 }
 
     // --- Section raw data ---
     ci = 0
@@ -19751,6 +19797,31 @@ fn emit_coff_relocatable(uint64 text_len, uint64 data_len, uint64 arch) {
             emit_u16_le(3)           // IMAGE_REL_ARM64_BRANCH26
         }
         ri = ri + 1
+    }
+
+    // --- #143 A13: .pdata + .xdata raw data, then the .pdata relocations ---
+    if uw_tabs != 0 {
+        while (codegen_output_len() & 3) != 0 { emit_byte(0) }
+        uw_write_tables(0, 0, arch, 1)
+        uint64 pd_nrel = uw_coff_nrelocs(arch)
+        uint64 pd_reloff = codegen_output_len()
+        uw_coff_relocs(arch, sym_text, sym_xdata)
+        // ".pdata\0\0" header at 60
+        patch_u32(60, 0x6164702E)
+        patch_u32(64, 0x6174)
+        patch_u32(76, uw_pdata_dir_size)     // SizeOfRawData
+        patch_u32(80, uw_pdata_file_off)     // PointerToRawData
+        patch_u32(84, pd_reloff)             // PointerToRelocations
+        patch_u32(92, pd_nrel)               // NumberOfRelocations (u16; NumberOfLinenumbers 0)
+        patch_u32(96, 0x40300040)            // INITIALIZED_DATA | ALIGN_4BYTES | READ
+        // ".xdata\0\0" header at 100
+        patch_u32(100, 0x6164782E)
+        patch_u32(104, 0x6174)
+        patch_u32(116, uw_xdata_vsize)       // SizeOfRawData
+        patch_u32(120, uw_xdata_file_off)    // PointerToRawData
+        patch_u32(136, 0x40300040)
+        symtab_off = codegen_output_len()
+        patch_u32(8, symtab_off)             // PointerToSymbolTable
     }
 
     // --- Symbol table ---
@@ -19802,6 +19873,11 @@ fn emit_coff_relocatable(uint64 text_len, uint64 data_len, uint64 arch) {
             emit_byte(0)                 // NumAux
         }
         wi = wi + 1
+    }
+    if uw_tabs != 0 {
+        coff_section_symbol(0x7865742E, 0x74, 1, section_size, nreloc)                 // ".text"
+        coff_section_symbol(0x6164702E, 0x6174, 2, uw_pdata_dir_size, uw_coff_nrelocs(arch))  // ".pdata"
+        coff_section_symbol(0x6164782E, 0x6174, 3, uw_xdata_vsize, 0)                 // ".xdata"
     }
 
     // --- String table ---

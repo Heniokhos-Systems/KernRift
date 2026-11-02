@@ -29042,9 +29042,11 @@ fi
 # llvm-readobj, and reads the --emit=asm listing for labels + bytes only. Its
 # selftest shows every rule BITES before any row trusts it: llvm-mc's own
 # tables pass, byte mutations of them (unsorted, overlap, gap, misaligned,
-# wrong FunctionLength, no DataDirectory[3]) fail with the owning rule id, and
-# the base compiler's committed image (tests/fixtures/pe_unwind_oracle/nest.exe,
-# no tables) fails C1.
+# wrong FunctionLength, no DataDirectory[3]) fail with the owning rule id, a
+# call relocated against an extern is no target in its object (A13) while the
+# same call unrelocated fails C2, the --linked mode passes on llvm-mc objects
+# linked behind a host and fails with a shifted /map, and the base compiler's committed image
+# (tests/fixtures/pe_unwind_oracle/nest.exe, no tables) fails C1.
 PEU_OUT=$(env -u PE_UNWIND_CHECK_DISABLE bash "$DIR/helpers/pe_unwind_selftest.sh" "$T10_D/peu_selftest" 2>&1); PEU_RC=$?
 case "$PEU_RC" in
     0) pe_row_ok pe_unwind_checker_selftest "$(tail -1 <<< "$PEU_OUT")" ;;
@@ -29687,6 +29689,116 @@ else
     rm -rf "$T10_D/peu_fs"
     if [ -z "$PEU_WHY" ] && [ "$PEU_N" = 12 ]; then pe_row_ok pe_unwind_fat_slices "12 Windows slices (3 programs x default and win-only builds x win-x64, win-arm64) pass C0-C6 + C4b; --test-no-unwind leaves none"
     else pe_row_bad pe_unwind_fat_slices "$PEU_N of 12;$PEU_WHY"; fi
+fi
+
+# COFF objects (#143 A13, spec 6.4): --freestanding --target=windows
+# --emit=obj gets .pdata/.xdata (0x40300040), three appended section symbols
+# and ADDR32NB relocations (x64: Begin, End, UnwindInfo; arm64: Begin,
+# UnwindData). Two std-free, builtin-free, static-free programs (#152, #147,
+# #149): the checker applies the relocations and runs C0-C6 + C4b against the
+# --test-listing listing (C1 includes the llvm-readobj decode); llvm-readobj
+# must show 3 (x64) or 2 (arm64) ADDR32NB .pdata relocations per record.
+# --test-no-unwind gives the old one-section object: C1 finds no .pdata.
+for PEU_A in x86_64 arm64; do
+    PEU_ROW=pe_unwind_obj_$PEU_A
+    if ! command -v python3 > /dev/null 2>&1 || ! command -v llvm-readobj > /dev/null 2>&1 || ! command -v llvm-objdump > /dev/null 2>&1; then
+        pe_row_skip $PEU_ROW "needs python3, llvm-readobj and llvm-objdump"; continue
+    fi
+    PEU_WHY=""; PEU_N=0
+    PEU_PER=3; PEU_RT=IMAGE_REL_AMD64_ADDR32NB
+    [ "$PEU_A" = arm64 ] && { PEU_PER=2; PEU_RT=IMAGE_REL_ARM64_ADDR32NB; }
+    for PEU_S in pe_unwind_obj_chain.kr pe_unwind_cprobe/k.kr; do
+        if ! $T10_KRC --freestanding --arch=$PEU_A --target=windows --emit=obj --test-listing="$T10_D/peu_o.lst" "$DIR/fixtures/$PEU_S" -o "$T10_D/peu_o.obj" > /dev/null 2>&1; then
+            PEU_WHY="$PEU_WHY $PEU_S:build;"; continue
+        fi
+        PEU_O=$(python3 -B "$PEU_CHK" --arch $PEU_A "$T10_D/peu_o.obj" --listing "$T10_D/peu_o.lst" 2>&1)
+        if [ "$(grep -c ': PASS' <<< "$PEU_O")" = 8 ]; then PEU_N=$((PEU_N + 1))
+        else PEU_WHY="$PEU_WHY $PEU_S:$( { grep -m1 -e FAIL -e error <<< "$PEU_O" || head -1 <<< "$PEU_O"; } | cut -c1-120);"; fi
+        PEU_NR=$(llvm-readobj --unwind "$T10_D/peu_o.obj" | grep -c 'RuntimeFunction {')
+        PEU_NP=$(llvm-readobj --relocs "$T10_D/peu_o.obj" | sed -n '/Section (2) .pdata {/,/}/p' | grep -c " $PEU_RT ")
+        if [ "$PEU_NR" -gt 0 ] && [ "$PEU_NP" = $((PEU_NR * PEU_PER)) ]; then PEU_N=$((PEU_N + 1))
+        else PEU_WHY="$PEU_WHY $PEU_S: $PEU_NR records, $PEU_NP $PEU_RT .pdata relocations, want $PEU_PER each;"; fi
+        if $T10_KRC --test-no-unwind --freestanding --arch=$PEU_A --target=windows --emit=obj "$DIR/fixtures/$PEU_S" -o "$T10_D/peu_ox.obj" > /dev/null 2>&1; then
+            PEU_O=$(python3 -B "$PEU_CHK" --arch $PEU_A "$T10_D/peu_ox.obj" --rules C1 2>&1)
+            if [[ "$PEU_O" == "C1: FAIL no .pdata section"* ]]; then PEU_N=$((PEU_N + 1))
+            else PEU_WHY="$PEU_WHY $PEU_S --test-no-unwind: '$PEU_O';"; fi
+        else
+            PEU_WHY="$PEU_WHY $PEU_S --test-no-unwind:build;"
+        fi
+    done
+    rm -f "$T10_D/peu_o.obj" "$T10_D/peu_o.lst" "$T10_D/peu_ox.obj"
+    if [ -z "$PEU_WHY" ] && [ "$PEU_N" = 6 ]; then pe_row_ok $PEU_ROW "2 objects: C0-C6 + C4b pass, $PEU_PER ADDR32NB .pdata relocations per record; --test-no-unwind leaves no .pdata"
+    else pe_row_bad $PEU_ROW "$PEU_N of 6;$PEU_WHY"; fi
+done
+
+# The KR COFF probe linked with a C host (#143 A13, spec 8.4/8.5; phase-4
+# ruling): tests/fixtures/pe_unwind_cprobe/k.kr as a --freestanding object,
+# host.c by clang, kernel32 imports by llvm-dlltool from k32.def, linked by
+# lld-link /nodefaultlib /entry:start with a /map.
+#  static:   the checker's --linked mode (the KR object's functions only, the
+#            listing shifted to where lld put KR's .text) passes C0-C6 + C4b;
+#  run-time: under Wine the probe exits 11 and walk() prints the chain
+#            walk > d3 > d2 > main > start (named through the /map) >
+#            kernel32.dll > ntdll.dll, then FOUR NULL entries. The NULLs are a
+#            Wine 9.0 quirk of RtlCaptureStackBackTrace (it counts slots past
+#            RtlUserThreadStart); they are pinned so a Wine change is noticed.
+#            Natively the count is 7 (Task D / A14b native scripts);
+#  control:  the same link with a --test-no-unwind object exits 32.
+PEU_ROW=pe_unwind_obj_link_windows_wine
+if ! command -v python3 > /dev/null 2>&1 || ! command -v clang > /dev/null 2>&1 || ! command -v lld-link > /dev/null 2>&1 \
+   || ! command -v llvm-dlltool > /dev/null 2>&1 || ! command -v llvm-readobj > /dev/null 2>&1 || ! command -v llvm-objdump > /dev/null 2>&1; then
+    pe_row_skip $PEU_ROW "needs python3, clang, lld-link, llvm-dlltool, llvm-readobj and llvm-objdump"
+elif [ -z "$T10_WINE" ]; then
+    if [ -n "$KR_WINE_BAD" ]; then pe_row_bad $PEU_ROW "$KR_WINE_BAD"; else pe_row_skip $PEU_ROW "no wine"; fi
+else
+    PEU_WHY=""
+    PEU_CP="$DIR/fixtures/pe_unwind_cprobe"
+    if ! $T10_KRC --freestanding --target=windows --emit=obj --test-listing="$T10_D/peu_k.lst" "$PEU_CP/k.kr" -o "$T10_D/peu_k.obj" > /dev/null 2>&1 \
+       || ! $T10_KRC --test-no-unwind --freestanding --target=windows --emit=obj "$PEU_CP/k.kr" -o "$T10_D/peu_kn.obj" > /dev/null 2>&1 \
+       || ! llvm-dlltool -d "$PEU_CP/k32.def" -l "$T10_D/peu_k32.lib" -m i386:x86-64 > /dev/null 2>&1 \
+       || ! clang --target=x86_64-pc-windows-msvc -O1 -c "$PEU_CP/host.c" -o "$T10_D/peu_host.obj" > /dev/null 2>&1 \
+       || ! lld-link /nodefaultlib /entry:start /subsystem:console "/map:$T10_D/peu_p.map" "/out:$T10_D/peu_p.exe" "$T10_D/peu_host.obj" "$T10_D/peu_k.obj" "$T10_D/peu_k32.lib" > /dev/null 2>&1 \
+       || ! lld-link /nodefaultlib /entry:start /subsystem:console "/map:$T10_D/peu_pn.map" "/out:$T10_D/peu_pn.exe" "$T10_D/peu_host.obj" "$T10_D/peu_kn.obj" "$T10_D/peu_k32.lib" > /dev/null 2>&1; then
+        PEU_WHY="build/link failed"
+    else
+        PEU_O=$(python3 -B "$PEU_CHK" --arch x86_64 "$T10_D/peu_p.exe" --listing "$T10_D/peu_k.lst" --linked "$T10_D/peu_p.map" 2>&1)
+        [ "$(grep -c ': PASS' <<< "$PEU_O")" = 8 ] || PEU_WHY="$PEU_WHY checker --linked: $( { grep -m1 -e FAIL -e error <<< "$PEU_O" || head -1 <<< "$PEU_O"; } | cut -c1-160);"
+        for PEU_X in "peu_p:11:walk,d3,d2,main,start,kernel32.dll,ntdll.dll,NULL,NULL,NULL,NULL" "peu_pn:32:"; do
+            PEU_E=${PEU_X%%:*}; PEU_R=${PEU_X#*:}; PEU_WANT=${PEU_R#*:}; PEU_R=${PEU_R%%:*}
+            t10_wine "$T10_D/peu_w.out" "$T10_D/peu_w.err" "$PEU_E.exe"; PEU_RC=$?
+            [ "$PEU_RC" = "$PEU_R" ] || PEU_WHY="$PEU_WHY $PEU_E: Wine exit $PEU_RC, want $PEU_R;"
+            [ -n "$PEU_WANT" ] || continue
+            PEU_CH=$(python3 -B - "$T10_D/$PEU_E.map" "$T10_D/peu_w.out" "$PEU_E.exe" <<'PEULINKEOF'
+import re, sys
+syms = []
+for ln in open(sys.argv[1], encoding='latin-1'):
+    m = re.match(r'^\s*0001:[0-9a-f]{8}\s+(\S+)\s+([0-9a-f]{16})\s+\S+\s*$', ln)
+    if m:
+        syms.append((int(m.group(2), 16), m.group(1)))
+syms.sort()
+out = []
+for ln in open(sys.argv[2], encoding='latin-1', errors='replace'):
+    ln = ln.strip().replace('\r', '')
+    if not ln:
+        continue
+    pc, mod = ln.split(' ', 1)
+    pc = int(pc, 16)
+    if pc == 0:
+        out.append('NULL')
+    elif mod.lower().endswith('\\' + sys.argv[3]):
+        own = [n for a, n in syms if a <= pc]
+        out.append(own[-1] if own else '?image')
+    else:
+        out.append(mod.replace('/', '\\').split('\\')[-1].lower())
+print(','.join(out))
+PEULINKEOF
+)
+            [ "$PEU_CH" = "$PEU_WANT" ] || PEU_WHY="$PEU_WHY $PEU_E: chain $PEU_CH, want $PEU_WANT;"
+        done
+    fi
+    rm -f "$T10_D"/peu_k.lst "$T10_D"/peu_k.obj "$T10_D"/peu_kn.obj "$T10_D"/peu_k32.lib "$T10_D"/peu_host.obj "$T10_D"/peu_p.* "$T10_D"/peu_pn.* "$T10_D"/peu_w.*
+    if [ -z "$PEU_WHY" ]; then pe_row_ok $PEU_ROW "checker --linked C0-C6 + C4b pass; Wine exit 11, chain walk>d3>d2>main>start>kernel32>ntdll + 4 Wine NULLs; --test-no-unwind control exits 32"
+    else pe_row_bad $PEU_ROW "$PEU_WHY"; fi
 fi
 
 # A permitted (RSP-neutral) @naked function gets the zero-code kind-1 record

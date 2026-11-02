@@ -3376,12 +3376,11 @@ fn pe_finalize_x64(uint64 header_size, uint64 text_start, uint64 text_size) {
     uint64 image_size = 0x1000 + text_va_size + 0x1000  // last 0x1000 = .idata page: needs pe_idata_size() <= 0x1000 (format_pe.kr)
     patch_u32(0x90, image_size)
     resolve_win_iat_fixups(text_start, iat_rva_val)
-    // #143: the exception directory, in a third section .pdata right after
-    // .idata -- only when this build writes tables and its backend has been
-    // converted (uw_backend_ready); otherwise the image is exactly as before.
-    uint64 uw_legacy = 0
-    if emit_ir_mode == 0 { uw_legacy = 1 }
-    if uw_emit_tables != 0 && uw_backend_is_ready(0, uw_legacy) != 0 {
+    // #143: the exception directory, in the split layout (spec 6.1): .pdata
+    // and .xdata right after .idata -- whenever this build writes tables
+    // (uw_emit_tables; every backend has been converted since A10, so the
+    // uw_backend_ready scaffolding is gone, plan A13).
+    if uw_emit_tables != 0 {
         uint64 pdata_rva = idata_rva + 0x1000
         uint64 pdata_file_off = codegen_output_len()
         uw_append_tables_x64(text_start, pdata_rva)
@@ -3501,9 +3500,7 @@ fn pe_finalize_a64(uint64 header_size, uint64 text_start, uint64 text_size) {
     // #143 A9b: the exception directory, in the split layout (spec 6.1): .pdata
     // and .xdata after .idata, as the fourth and fifth sections (headers at
     // 0x1C0 and 0x1E8, inside the 0x400 bytes of arm64 headers).
-    uint64 uw_legacy_a = 0
-    if emit_ir_mode == 0 { uw_legacy_a = 1 }
-    if uw_emit_tables != 0 && uw_backend_is_ready(1, uw_legacy_a) != 0 {
+    if uw_emit_tables != 0 {
         uint64 pdata_rva_a = idata_rva + 0x1000
         uint64 pdata_file_off_a = codegen_output_len()
         uw_append_tables(text_start, pdata_rva_a, 1)

@@ -158,6 +158,158 @@ for r in C1 C2; do
     expect "llvm_x64_$r" "$r" PASS --arch x86_64 "$W/x.obj"
     expect "llvm_a64_$r" "$r" PASS --arch arm64 "$W/a.obj"
 done
+# A13: a call relocated against an UNDEFINED symbol (an extern) leaves the
+# object, so C2 must not read its in-place field as a target in this object.
+# The same object with .text's relocations dropped must still FAIL C2: only
+# the extern relocation exempts the site.
+cat > "$W/xe.s" <<'EOF'
+        .text
+        .def h; .scl 2; .type 32; .endef
+        .globl h
+        .seh_proc h
+h:
+        pushq %rbp
+        .seh_pushreg %rbp
+        movq %rsp, %rbp
+        .seh_setframe %rbp, 0
+        .seh_endprologue
+        callq ext
+        popq %rbp
+        retq
+        .seh_endproc
+EOF
+cat > "$W/ae.s" <<'EOF'
+        .text
+        .def h; .scl 2; .type 32; .endef
+        .globl h
+        .seh_proc h
+h:
+        stp x29, x30, [sp, #-16]!
+        .seh_save_fplr_x 16
+        mov x29, sp
+        .seh_set_fp
+        mov x9, x9
+        .seh_nop
+        .seh_endprologue
+        bl ext
+        .seh_startepilogue
+        ldp x29, x30, [sp], #16
+        .seh_save_fplr_x 16
+        .seh_endepilogue
+        ret
+        .seh_endproc
+EOF
+llvm-mc -triple=x86_64-pc-windows-msvc -filetype=obj "$W/xe.s" -o "$W/xe.obj" 2> "$W/mc.err" || fail mc_x64_ext "$(head -c 200 "$W/mc.err")"
+llvm-mc -triple=aarch64-pc-windows-msvc -filetype=obj "$W/ae.s" -o "$W/ae.obj" 2> "$W/mc.err" || fail mc_a64_ext "$(head -c 200 "$W/mc.err")"
+expect extern_call_x64 C2 PASS --arch x86_64 "$W/xe.obj"
+expect extern_call_a64 C2 PASS --arch arm64 "$W/ae.obj"
+python3 - "$W" <<'EOF'
+import struct, sys
+for n in ('xe', 'ae'):
+    b = bytearray(open('%s/%s.obj' % (sys.argv[1], n), 'rb').read())
+    for i in range(struct.unpack_from('<H', b, 2)[0]):
+        o = 20 + 40 * i
+        if b[o:o + 8].rstrip(b'\0') == b'.text':
+            struct.pack_into('<H', b, o + 32, 0)      # NumberOfRelocations = 0
+    open('%s/%s_norel.obj' % (sys.argv[1], n), 'wb').write(b)
+EOF
+expect extern_call_unrelocated_x64 C2 FAIL --arch x86_64 "$W/xe_norel.obj"
+expect extern_call_unrelocated_a64 C2 FAIL --arch arm64 "$W/ae_norel.obj"
+# --linked (A13): the llvm-mc objects above linked by lld-link behind a host
+# object (so they land at a nonzero offset in .text, and .xdata is merged into
+# .rdata). With the /map and a listing of the object's own .text, C0-C2 pass
+# on the object's functions only; without --linked C1 refuses the merged
+# layout; a map whose addresses are shifted fails C0-C2. lld-link is optional
+# for the rest of the selftest: without it these cases are reported as skipped
+# in the summary line, never counted.
+LINKED_NOTE=""
+if command -v lld-link > /dev/null 2>&1; then
+cat > "$W/hx.s" <<'EOF'
+        .text
+        .def start; .scl 2; .type 32; .endef
+        .globl start
+        .seh_proc start
+start:
+        subq $40, %rsp
+        .seh_stackalloc 40
+        .seh_endprologue
+        callq f1
+        addq $40, %rsp
+        retq
+        .seh_endproc
+EOF
+cat > "$W/ha.s" <<'EOF'
+        .text
+        .def start; .scl 2; .type 32; .endef
+        .globl start
+        .seh_proc start
+start:
+        stp x29, x30, [sp, #-16]!
+        .seh_save_fplr_x 16
+        .seh_endprologue
+        bl g1
+        .seh_startepilogue
+        ldp x29, x30, [sp], #16
+        .seh_save_fplr_x 16
+        .seh_endepilogue
+        ret
+        .seh_endproc
+EOF
+llvm-mc -triple=x86_64-pc-windows-msvc -filetype=obj "$W/hx.s" -o "$W/hx.obj" 2> "$W/mc.err" || fail mc_x64_host "$(head -c 200 "$W/mc.err")"
+llvm-mc -triple=aarch64-pc-windows-msvc -filetype=obj "$W/ha.s" -o "$W/ha.obj" 2> "$W/mc.err" || fail mc_a64_host "$(head -c 200 "$W/mc.err")"
+lld-link /nodefaultlib /entry:start /subsystem:console /machine:x64 "/map:$W/lx.map" "/out:$W/lx.exe" "$W/hx.obj" "$W/x.obj" > "$W/ld.err" 2>&1 || fail ld_x64 "$(head -c 200 "$W/ld.err")"
+lld-link /nodefaultlib /entry:start /subsystem:console /machine:arm64 "/map:$W/la.map" "/out:$W/la.exe" "$W/ha.obj" "$W/a.obj" > "$W/ld.err" 2>&1 || fail ld_a64 "$(head -c 200 "$W/ld.err")"
+# a listing of each object's .text (labels from its symbols, the byte column,
+# the end of code) and a map with the object's addresses moved down a word
+python3 - "$W" <<'EOF'
+import re, struct, sys
+w = sys.argv[1]
+for obj, arch in (('x', 'x86_64'), ('a', 'arm64')):
+    b = open('%s/%s.obj' % (w, obj), 'rb').read()
+    nsec, symptr, nsym = struct.unpack_from('<H', b, 2)[0], struct.unpack_from('<I', b, 8)[0], struct.unpack_from('<I', b, 12)[0]
+    for i in range(nsec):
+        o = 20 + 40 * i
+        if b[o:o + 8].rstrip(b'\0') == b'.text':
+            size, ptr = struct.unpack_from('<II', b, o + 16)
+            tsec = i + 1
+    code = b[ptr:ptr + size]
+    labels = {}
+    i = 0
+    while i < nsym:
+        o = symptr + 18 * i
+        name = b[o:o + 8].rstrip(b'\0').decode()
+        value, secno = struct.unpack_from('<Ih', b, o + 8)
+        typ, naux = struct.unpack_from('<H', b, o + 14)[0], b[o + 17]
+        if secno == tsec and typ == 0x20:
+            labels[value] = name
+        i += 1 + naux
+    out = []
+    step = 1 if arch == 'x86_64' else 4
+    for off in range(0, size, step):
+        if off in labels:
+            out.append('%s:' % labels[off])
+        if step == 1:
+            out.append('  %08x: %02x' % (off, code[off]))
+        else:
+            out.append('  %08x: %08x' % (off, struct.unpack_from('<I', code, off)[0]))
+    out.append('; uw-code-end %08x' % size)
+    open('%s/l%s.lst' % (w, obj), 'w').write('\n'.join(out) + '\n')
+    m = open('%s/l%s.map' % (w, obj)).read()
+    open('%s/l%s_shift.map' % (w, obj), 'w').write(re.sub(
+        r'(\s)([0-9a-f]{16})(\s+%s\.obj)' % obj,
+        lambda g: '%s%016x%s' % (g.group(1), int(g.group(2), 16) - 4, g.group(3)), m))
+EOF
+for r in C0 C1 C2; do
+    expect "linked_x64_$r" "$r" PASS --arch x86_64 "$W/lx.exe" --listing "$W/lx.lst" --linked "$W/lx.map"
+    expect "linked_a64_$r" "$r" PASS --arch arm64 "$W/la.exe" --listing "$W/la.lst" --linked "$W/la.map"
+    expect "linked_x64_shifted_$r" "$r" FAIL --arch x86_64 "$W/lx.exe" --listing "$W/lx.lst" --linked "$W/lx_shift.map"
+    expect "linked_a64_shifted_$r" "$r" FAIL --arch arm64 "$W/la.exe" --listing "$W/la.lst" --linked "$W/la_shift.map"
+done
+expect linked_x64_without_mode C1 FAIL --arch x86_64 "$W/lx.exe" --listing "$W/lx.lst"
+expect linked_a64_without_mode C1 FAIL --arch arm64 "$W/la.exe" --listing "$W/la.lst"
+else
+    LINKED_NOTE=" (the 14 --linked cases skipped: no lld-link)"
+fi
 # a committed PE whose tables a real loader accepted (the frame-pointer
 # prototype): C0 and C1 (decode == llvm-readobj) must pass on an IMAGE too.
 expect proto_image_C0 C0 PASS --arch x86_64 "$OR/nest8_fp.exe" --listing "$OR/nest8_fp.asm"
@@ -297,7 +449,7 @@ open(sys.argv[2], 'wb').write(b)
 PYEOF
 expect neg_c0_flipped_byte C0 FAIL --arch x86_64 "$W/nest_flip.exe" --listing "$OR/nest.asm"
 expect pos_c0_base_image C0 PASS --arch x86_64 "$OR/nest.exe" --listing "$OR/nest.asm"
-echo "selftest: $N cases behaved"
+echo "selftest: $N cases behaved${LINKED_NOTE:-}"
 exit 0
 fi
 
@@ -1057,4 +1209,4 @@ out=$(python3 "$CHK" --rules C3,C4,C4b,C5,C6 --arch x86_64 "$OR/nest8_fp.exe" --
 if [ "$(grep -c ': PASS (restricted to 2 functions by --functions (--oracle)' <<< "$out")" = 5 ]; then
     N=$((N + 1)); echo "  case proto_frame_pointer_nest8_fp: C3..C6 PASS, each saying it was restricted to f3 and f2 (main is split by the prototype's pre-prologue argv block)"
 else fail proto_frame_pointer_nest8_fp "got: $(tr '\n' '|' <<< "$out" | head -c 400)"; fi
-echo "selftest: $N cases behaved"
+echo "selftest: $N cases behaved${LINKED_NOTE:-}"

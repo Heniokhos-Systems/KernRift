@@ -1,0 +1,13 @@
+; #143 A13: kernel32 import library definition for the COFF probe (llvm-dlltool).
+; Derived from the reviewer's scratch ~/.cache/pe_unwind_review/t/cprobe/k32.def
+; (sha256 10a25b83197783f47c46441f01fa8d28a7ce3b9515436fab2428865c5898e3df), plus the four imports
+; host.c uses to print the frames (GetStdHandle, WriteFile, GetModuleHandleExA,
+; GetModuleFileNameA).
+LIBRARY kernel32.dll
+EXPORTS
+RtlCaptureStackBackTrace
+ExitProcess
+GetStdHandle
+WriteFile
+GetModuleHandleExA
+GetModuleFileNameA

@@ -83,6 +83,18 @@ annotation. --code-end and --functions are escape hatches for those oracles
 only: they are refused unless --oracle is given, and a rule restricted by
 --functions says so in its PASS line.
 
+--linked MAP (#143 A13): FILE is an image that lld-link built from a KR object
+and foreign (e.g. clang) objects; MAP is lld-link's /map output and --listing
+is the KR object's --test-listing. The checker locates the KR code in the
+image by the map addresses of the listing's labels (every label must be in
+the map, all from one object, all at the same shift), then applies the rules
+to the KR functions ONLY: .text is narrowed to the KR bytes, the records are
+those that begin there, llvm-readobj's records are compared over the same
+range. Foreign functions are out of scope, except that a KR direct call may
+target any record's BeginAddress. Since lld-link merges .xdata into .rdata,
+C1's split-layout rule becomes: each KR record's UnwindInfo resolves inside a
+read-only section of the image; the entry point (the host's) is not checked.
+
 Test-only knob: PE_UNWIND_CHECK_DISABLE=C1,C2 makes the named rules report PASS
 without checking (`C6wine` instead drops only C6's Wine rule set). It exists so the selftest's red run (a checker with a rule
 disabled must fail that rule's negative) can be produced without editing this
@@ -158,6 +170,7 @@ class Binary:
         else:
             self.is_image = False
             coff = 0
+        self.linked = None        # --linked: the KR code's offset in .text
         self.machine = u16(raw, coff)
         want = {'x86_64': 0x8664, 'arm64': 0xAA64}[arch]
         if self.machine != want:
@@ -199,6 +212,38 @@ class Binary:
         self.text = self.section('.text')
         if self.text is None:
             raise InputError('no .text section')
+
+    def link_narrow(self, map_path, lst):
+        """--linked: narrow .text to the KR object's bytes (see the usage)."""
+        if not self.is_image:
+            raise InputError('--linked needs a linked image')
+        line = re.compile(r'^\s*[0-9a-f]{4}:[0-9a-f]{8}\s+(\S+)\s+([0-9a-f]{16})\s+(\S+)\s*$')
+        syms = {}
+        for ln in open(map_path, encoding='latin-1'):
+            m = line.match(ln)
+            if m:
+                syms.setdefault(m.group(1), []).append((int(m.group(2), 16) - self.image_base, m.group(3)))
+        t = self.text
+        shifts, objs = set(), set()
+        for off, name in lst.labels:
+            got = syms.get(name)
+            if not got or len(got) != 1:
+                raise InputError('--linked: label %s is %s in the map' % (name, 'not' if not got else 'ambiguous'))
+            rva, obj = got[0]
+            shifts.add(rva - t.rva - off)
+            objs.add(obj)
+        if not lst.labels or len(shifts) != 1 or len(objs) != 1:
+            raise InputError('--linked: the listing labels do not map to one object at one shift (%d shifts, objects %s)'
+                             % (len(shifts), sorted(objs)))
+        d = shifts.pop()
+        n = len(lst.code)
+        if d < 0 or d + n > len(t.data):
+            raise InputError('--linked: shift 0x%x puts the KR code outside .text' % d)
+        k = Section('.text', n, t.rva + d, n, t.rawptr + d, 0, 0, t.flags)
+        k.data = t.data[d:d + n]
+        self.full_text, self.text, self.linked = t, k, d
+        self.linked_obj = objs.pop()
+        return d
 
     def section(self, name):
         for s in self.sections:
@@ -515,7 +560,11 @@ def exception_table(binr, rules_out, oracle=False):
     .pdata."""
     entsz = 12 if binr.arch == 'x86_64' else 8
     pdata = binr.section('.pdata')
-    if binr.is_image:
+    if binr.linked is not None:
+        rva, size = binr.dd.get(3, (0, 0))
+        if rva == 0 or size == 0:
+            raise RuleFail('no exception directory (DataDirectory[3] is empty)')
+    elif binr.is_image:
         rva, size = binr.dd.get(3, (0, 0))
         if rva == 0 or size == 0:
             raise RuleFail('no exception directory (DataDirectory[3] is empty)')
@@ -544,7 +593,15 @@ def exception_table(binr, rules_out, oracle=False):
         raise RuleFail('exception directory RVA 0x%x is not 4-aligned' % rva)
     raw = binr.read(rva, size)
     recs = []
+    binr.all_begins = set()
     for k in range(size // entsz):
+        if binr.linked is not None:
+            # --linked: a foreign function's entry is out of scope (packed
+            # records, padding, other frame shapes); only its begin is kept
+            b0 = struct.unpack_from('<I', raw, k * entsz)[0]
+            binr.all_begins.add(b0)
+            if not binr.text.rva <= b0 < binr.text.rva + len(binr.text.data):
+                continue
         if binr.arch == 'x86_64':
             b, e, u = struct.unpack_from('<III', raw, k * entsz)
             r = X64Record(b, e, u)
@@ -560,7 +617,12 @@ def exception_table(binr, rules_out, oracle=False):
             # 4-aligned by construction and needs no separate check)
             if b % 4:
                 raise RuleFail('entry %d: BeginAddress 0x%x is not 4-aligned' % (k, b))
-        if binr.is_image and not oracle:
+        if binr.linked is not None:
+            xs = binr.section_at(u & ~3)
+            if xs is None or xs.flags & 0xA0000000:
+                raise RuleFail('entry %d: UnwindInfo RVA 0x%x is in %s, want a read-only data section'
+                               % (k, u, 'no section' if xs is None else '%s (0x%08x)' % (xs.name, xs.flags)))
+        elif binr.is_image and not oracle:
             xs = binr.section_at(u & ~3)
             if xs is None or xs.name != '.xdata' or xs.flags != 0x40000040:
                 raise RuleFail('entry %d: UnwindInfo RVA 0x%x is in %s, want a .xdata section with '
@@ -571,6 +633,10 @@ def exception_table(binr, rules_out, oracle=False):
         except RuleFail as ex:
             raise RuleFail('entry %d (0x%x): %s' % (k, b, ex))
         recs.append(r)
+    if binr.linked is not None:
+        t = binr.text
+        if not recs:
+            raise RuleFail('no record begins in the KR code [0x%x,0x%x)' % (t.rva, t.rva + len(t.data)))
     return recs
 
 
@@ -677,7 +743,7 @@ def readobj_records(binr):
             m = re.match(r'(FunctionLength|Version|EpilogueOffset|ByteCodeLength): (\d+)', s)
             if m:
                 cur[m.group(1)] = int(m.group(2))
-            m = re.match(r'Function: .*\((0x[0-9A-Fa-f]+)\)$', s)
+            m = re.match(r'Function: (?:.*\()?(0x[0-9A-Fa-f]+)\)?$', s)   # object: "name (0x..)"; image: "0x.."
             if m:
                 cur['Function'] = int(m.group(1), 16)
             if s.startswith('Prologue ['):
@@ -706,6 +772,11 @@ def check_readobj(binr, recs):
     lr = readobj_records(binr)
     if lr is None:
         raise RuleFail('llvm-readobj not available (use --no-readobj only where the row says why)')
+    if binr.linked is not None:
+        t = binr.text
+        key = 'StartAddress' if binr.arch == 'x86_64' else 'Function'
+        lr = [l for l in lr if l.get(key) is not None
+              and t.rva <= l[key] - binr.image_base < t.rva + len(t.data)]
     if len(lr) != len(recs):
         raise RuleFail('llvm-readobj sees %d records, we decode %d' % (len(lr), len(recs)))
     for k, (r, l) in enumerate(zip(recs, lr)):
@@ -757,6 +828,12 @@ def check_c0(binr, lst):
                 if st >= 1 and st + 4 <= len(a) and a[st:st + 4] == b'\0\0\0\0' and (a[st - 1] & 0xC7) == 0x05:
                     w = st
                     break
+                # --linked: a call to an extern, which the object relocated
+                # and the linker resolved (its target is checked by C2)
+                if binr.linked is not None and st >= 1 and st + 4 <= len(a) and a[st:st + 4] == b'\0\0\0\0' \
+                   and a[st - 1] == 0xE8 and t[st - 1] == 0xE8:
+                    w = st
+                    break
             if w is None:
                 raise RuleFail('.text+0x%x: listing %02x, image %02x' % (i, a[i], t[i]))
             tgt = binr.text.rva + w + 4 + s32(t, w)
@@ -774,6 +851,8 @@ def check_c0(binr, lst):
                 ok = True              # adrp: page delta
             elif i >= 4 and (u32(a, i - 4) & 0x9F000000) == 0x90000000 and (la & ~(0xFFF << 10)) & 0xFFFFFFFF == (ta & ~(0xFFF << 10)) & 0xFFFFFFFF:
                 ok = True              # add/ldr/str imm12 after an adrp
+            elif binr.linked is not None and la == 0x94000000 and (ta & 0xFC000000) == 0x94000000:
+                ok = True              # --linked: bl to an extern, resolved by the linker (C2 checks it)
             if not ok:
                 raise RuleFail('.text+0x%x: listing %08x, image %08x' % (i, la, ta))
             nrel += 1
@@ -815,12 +894,22 @@ def direct_targets(binr, insns, code_lo, code_hi):
     materialisation inside [code_lo, code_hi), decoded from the bytes."""
     out = []
     t = binr.text
+    # objects: a call whose field is relocated against an UNDEFINED symbol (an
+    # extern) leaves the object; its in-place bytes are no target here (A13)
+    ext = set()
+    if not binr.is_image:
+        for off, si, typ in t.relocs:
+            sym = binr.symbols[si] if si < len(binr.symbols) else None
+            if sym is not None and sym[2] == 0:
+                ext.add(t.rva + off)
     if binr.arch == 'x86_64':
         for a, n, txt in insns:
             if not code_lo <= a < code_hi:
                 continue
             b = binr.read(a, n)
             if b[0] == 0xE8 and n == 5:
+                if a + 1 in ext:
+                    continue
                 out.append((a, a + 5 + s32(b, 1), 'call'))
             elif n >= 7 and b[0] in (0x48, 0x4C) and b[1] == 0x8D and (b[2] & 0xC7) == 0x05:
                 tgt = a + n + s32(b, 3)
@@ -833,6 +922,8 @@ def direct_targets(binr, insns, code_lo, code_hi):
                 continue
             w = u32(binr.read(a, 4), 0)
             if (w & 0xFC000000) == 0x94000000:
+                if a in ext:
+                    continue
                 imm = w & 0x3FFFFFF
                 if imm & 0x2000000:
                     imm -= 0x4000000
@@ -899,13 +990,15 @@ def check_c2(binr, lst, recs, insns):
                 return r
         return None
     bset = set(begins)
-    if binr.is_image and binr.entry not in bset:
+    if binr.is_image and binr.linked is None and binr.entry not in bset:
         raise RuleFail('entry point 0x%x is not a BeginAddress' % binr.entry)
     ntg = 0
     for site, tgt, kind in direct_targets(binr, insns, recs[0].begin, code_end):
         ntg += 1
         if tgt in bset:
             continue
+        if binr.linked is not None and not (t.rva <= tgt < t.rva + len(t.data)) and tgt in binr.all_begins:
+            continue                              # a foreign function's BeginAddress
         o = owner(site)
         if any(b == tgt and o is not None and o.begin <= b < o.end for _, _, b, _ in leaves):
             continue
@@ -2547,6 +2640,7 @@ def main(argv):
     ap.add_argument('--functions')
     ap.add_argument('--verbose', action='store_true')
     ap.add_argument('--oracle', action='store_true')
+    ap.add_argument('--linked')
     ap.add_argument('file')
     a = ap.parse_args(argv)
     if (a.functions or a.code_end is not None) and not a.oracle:
@@ -2568,6 +2662,10 @@ def main(argv):
             if lst is None:
                 raise InputError('--code-end needs --listing')
             lst.code_end = int(a.code_end, 16)
+        if a.linked:
+            if lst is None or a.oracle:
+                raise InputError('--linked needs --listing and excludes --oracle')
+            binr.link_narrow(a.linked, lst)
     except (InputError, OSError, struct.error, ValueError) as ex:
         print('error: %s: %s' % (a.file, ex), file=sys.stderr)
         return 2
@@ -2596,6 +2694,8 @@ def main(argv):
                     raise RuleFail(c1_err if rule == 'C1' else 'no usable table (C1: %s)' % c1_err)
                 if rule == 'C1':
                     msg = check_c1(binr, lst, recs)
+                    if binr.linked is not None:
+                        msg += ', KR object %s at .text+0x%x of the linked image' % (binr.linked_obj, binr.linked)
                     if a.oracle and binr.is_image:
                         # the prototype oracles keep their records inside
                         # .pdata, which llvm-readobj walks as more entries

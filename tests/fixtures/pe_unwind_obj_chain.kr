@@ -1,0 +1,36 @@
+// #143 A13: the COFF object rows' fixture (pe_unwind_obj_x86_64/_arm64). It
+// uses no std (#152), no Windows builtin (objects leave builtin calls
+// unrelocated, #147), no static (#149) and no string literal (arm64 objects
+// do not relocate string addresses either), so the object stands on its own:
+// a call chain with stack arguments, a loop, recursion and a frame with many
+// locals, built --freestanding --target=windows --emit=obj.
+fn six(uint64 a, uint64 b, uint64 c, uint64 d, uint64 e, uint64 f) -> uint64 {
+    return a + b * 2 + c * 3 + d * 4 + e * 5 + f * 6
+}
+fn rec(uint64 n) -> uint64 {
+    if n == 0 { return 1 }
+    uint64 r = rec(n - 1)
+    return r + n
+}
+fn wide(uint64 k) -> uint64 {
+    uint64 a = k + 1
+    uint64 b = a * 3
+    uint64 c = b ^ a
+    uint64 d = c + b
+    uint64 e = d * 5
+    uint64 f = e + c
+    uint64 g = f ^ d
+    uint64 h = g + a
+    uint64 r = six(a, b, c, d, e, f)
+    return r + g + h
+}
+fn loop3(uint64 k) -> uint64 {
+    uint64 s = 0
+    uint64 i = 0
+    while i < k { s = s + wide(i)  i = i + 1 }
+    return s
+}
+fn main() -> uint32 {
+    uint64 t = loop3(3) + rec(5)
+    return t & 0x7F
+}

@@ -18,12 +18,6 @@
 //     compile_fat never sets.
 // Code generation never reads anything in this file.
 //
-// uw_backend_ready is temporary scaffolding (plan section 0.x, I3): a bit per
-// (arch, backend) that has been converted. The writer emits tables only for a
-// backend whose bit is set, so a Windows build of a not-yet-converted backend
-// stays byte-identical to before instead of being refused. It is removed once
-// every backend is ready (plan A13).
-//
 // --test-no-unwind (hidden, test-only, like --dump-argv-parser): suppresses
 // table emission in every writer path while leaving code generation unchanged,
 // so the suite can build the negative image of a fixture in-tree.
@@ -34,14 +28,6 @@ static uint64 uw_test_no_unwind = 0
 // --emit=pe / --emit=obj build also writes the asm listing of exactly the code
 // it emitted, so the checker's listing equals the image by construction.
 static uint64 uw_test_listing_path = 0
-// bit (arch * 2 + legacy): arch 0 = x86_64, 1 = arm64; legacy 0 = IR, 1 = legacy
-static uint64 uw_backend_ready = 15       // A6b-1: x86_64 IR; A8: x86_64 legacy; A9b: arm64 IR; A10: arm64 legacy
-
-fn uw_backend_is_ready(uint64 arch, uint64 legacy) -> uint64 {
-    uint64 bit = 1 << (arch * 2 + legacy)
-    if (uw_backend_ready & bit) != 0 { return 1 }
-    return 0
-}
 
 // ---------------------------------------------------------------------------
 // The record table. One fixed-size record per function, grown by doubling
@@ -525,6 +511,7 @@ fn uw_x64_info(uint64 i, uint64 buf) -> uint64 {
 // (0x200-aligned) size written, and patches the RUNTIME_FUNCTION array; the
 // caller patches the headers.
 static uint64 uw_pdata_dir_size = 0     // n * 12: .pdata VirtualSize = DataDirectory[3].Size
+static uint64 uw_pdata_file_off = 0
 static uint64 uw_pdata_raw = 0          // .pdata SizeOfRawData
 static uint64 uw_xdata_rva = 0
 static uint64 uw_xdata_file_off = 0
@@ -603,19 +590,35 @@ fn uw_a64_info(uint64 i, uint64 buf) -> uint64 {
 // RUNTIME_FUNCTION array (12-byte {Begin, End, UnwindInfo} entries on x64,
 // 8-byte {Begin, UnwindData} on arm64), .xdata = the deduplicated records.
 fn uw_append_tables(uint64 text_start, uint64 pdata_rva, uint64 arch) {
+    uw_write_tables(text_start, pdata_rva, arch, 0)
+}
+
+// The tables at the current end of output. coff == 0: a PE image -- each
+// section padded to FileAlignment 0x200, .xdata on the page after .pdata,
+// every field an RVA (.text at 0x1000). coff == 1: a COFF object (spec 6.4,
+// A13) -- .xdata straight after .pdata (whose size is a multiple of 4), no
+// padding, every field the ADDEND of an ADDR32NB relocation: an offset into
+// .text or into .xdata (uw_coff_relocs writes the relocations).
+fn uw_write_tables(uint64 text_start, uint64 pdata_rva, uint64 arch, uint64 coff) {
     uw_check_records(text_start)
     uint64 entsz = 12
     if arch == 1 { entsz = 8 }
+    uint64 tbase = 0x1000
+    if coff != 0 { tbase = 0 }
     uint64 sec = codegen_output_len()
+    uw_pdata_file_off = sec
     uint64 n = uw_rec_count
     uint64 i = 0
     while i < n * entsz { emit_byte(0)  i = i + 1 }
     uw_pdata_dir_size = n * entsz
-    while ((codegen_output_len() - sec) & 0x1FF) != 0 { emit_byte(0) }
+    if coff == 0 {
+        while ((codegen_output_len() - sec) & 0x1FF) != 0 { emit_byte(0) }
+    }
     uw_pdata_raw = codegen_output_len() - sec
     uint64 xsec = codegen_output_len()
     uw_xdata_file_off = xsec
     uw_xdata_rva = pdata_rva + ((uw_pdata_dir_size + 0xFFF) & ~0xFFF)
+    if coff != 0 { uw_xdata_rva = 0 }
     uint64 tmp = alloc(1024)
     uint64 uniq_off = alloc(n * 8)
     uint64 uniq_len = alloc(n * 8)
@@ -662,11 +665,11 @@ fn uw_append_tables(uint64 text_start, uint64 pdata_rva, uint64 arch) {
             nuniq = nuniq + 1
         }
         uint64 rf = sec + i * entsz
-        patch_u32(rf, 0x1000 + uw_get(i, 0) - text_start)
+        patch_u32(rf, tbase + uw_get(i, 0) - text_start)
         if arch == 1 {
             patch_u32(rf + 4, uw_xdata_rva + info_at - xsec)        // UnwindData, flag bits 00 (unpacked)
         } else {
-            patch_u32(rf + 4, 0x1000 + uw_get(i, 8) - text_start)
+            patch_u32(rf + 4, tbase + uw_get(i, 8) - text_start)
             patch_u32(rf + 8, uw_xdata_rva + info_at - xsec)
         }
         i = i + 1
@@ -675,6 +678,61 @@ fn uw_append_tables(uint64 text_start, uint64 pdata_rva, uint64 arch) {
     dealloc(uniq_off)
     dealloc(uniq_len)
     uw_xdata_vsize = codegen_output_len() - xsec
-    while ((codegen_output_len() - xsec) & 0x1FF) != 0 { emit_byte(0) }
+    if coff == 0 {
+        while ((codegen_output_len() - xsec) & 0x1FF) != 0 { emit_byte(0) }
+    }
     uw_xdata_raw = codegen_output_len() - xsec
+}
+
+// ---------------------------------------------------------------------------
+// COFF objects (spec 6.4, plan A13). emit_coff_relocatable (codegen.kr) asks
+// uw_coff_wanted, writes .pdata/.xdata with uw_write_tables(.., 1), then the
+// .pdata relocations with uw_coff_relocs. Every field is an ADDR32NB against
+// a section symbol, so the linker turns it into the final RVA:
+//   x64   Begin, End -> .text; UnwindInfo -> .xdata (IMAGE_REL_AMD64_ADDR32NB 3)
+//   arm64 Begin -> .text; UnwindData -> .xdata    (IMAGE_REL_ARM64_ADDR32NB 2)
+// ---------------------------------------------------------------------------
+// An object that defines no function (e.g. a constants-only module) has no
+// code to describe and gets no .pdata/.xdata, as before. Any other object
+// gets the tables, and uw_check_records refuses it if its records are wrong.
+fn uw_coff_wanted() -> uint64 {
+    if uw_emit_tables == 0 { return 0 }
+    if fn_count == 0 { return 0 }
+    return 1
+}
+
+// The number of .pdata relocations uw_coff_relocs writes. NumberOfRelocations
+// is 16 bits and this writer does not emit IMAGE_SCN_LNK_NRELOC_OVFL, so an
+// object past that is refused rather than written with a truncated count.
+fn uw_coff_nrelocs(uint64 arch) -> uint64 {
+    uint64 per = 3
+    if arch == 1 { per = 2 }
+    uint64 nr = uw_rec_count * per
+    if nr > 0xFFFF {
+        uint64 m = "error: this Windows object has too many functions for its .pdata relocations (more than 65535; at most 21845 x86_64 or 32767 arm64 functions per --emit=obj output, #143); split the program into several objects\n"
+        write(2, m, str_len(m))
+        exit(1)
+    }
+    return nr
+}
+
+fn uw_coff_reloc(uint64 off, uint64 sym, uint64 typ) {
+    emit_u32_le(off)
+    emit_u32_le(sym)
+    emit_u16_le(typ)
+}
+
+fn uw_coff_relocs(uint64 arch, uint64 text_sym, uint64 xdata_sym) {
+    uint64 i = 0
+    while i < uw_rec_count {
+        if arch == 1 {
+            uw_coff_reloc(i * 8, text_sym, 2)            // BeginAddress
+            uw_coff_reloc(i * 8 + 4, xdata_sym, 2)       // UnwindData
+        } else {
+            uw_coff_reloc(i * 12, text_sym, 3)           // BeginAddress
+            uw_coff_reloc(i * 12 + 4, text_sym, 3)       // EndAddress
+            uw_coff_reloc(i * 12 + 8, xdata_sym, 3)      // UnwindInfoAddress
+        }
+        i = i + 1
+    }
 }

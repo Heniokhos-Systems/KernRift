@@ -1,0 +1,14 @@
+// #143 A13 (spec 8.4): the KR COFF probe, from the reviewer's scratch
+// ~/.cache/pe_unwind_review/t/cprobe/k.kr (sha256 77aa5f43d186827887bb9ae6e5d55699648f4f79a6a1aa8b0d3b4ea1c6d4d88f),
+// unchanged below this header. Built --freestanding --target=windows --emit=obj:
+// d3 -> d2 -> main call the clang host's walk() (host.c), which returns
+// RtlCaptureStackBackTrace's frame count; main returns it as the exit code.
+extern fn walk() -> uint64
+fn d3() -> uint64 { uint64 r = walk()
+    return r + 0 }
+fn d2() -> uint64 { uint64 r = d3()
+    return r + 0 }
+fn main() -> uint32 {
+    uint64 n = d2()
+    return n
+}
