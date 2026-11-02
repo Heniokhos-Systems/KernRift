@@ -17,8 +17,15 @@ run. Every one now goes through `skip_row`, which counts it in a SKIP total
 make test` turns every skip into a FAIL that names the missing tool, for merge
 and release gating. The alias rows that used to "skip" on an arm64 host now run
 their second leg on x86_64 under qemu instead. A tripwire row,
-`no_skip_counted_as_pass`, reads the suite and fails if a SKIP is printed
-anywhere but `skip_row` or a PASS line says a leg did not run. (An earlier
+`no_skip_counted_as_pass`, reads the suite as text (line by line; it is not a
+shell parser) and fails on output that says skip anywhere but `skip_row`,
+unless it is a failure message (`FAIL: ...` or `name: FAIL ...`) -- output
+being an echo or printf, piped or not, or a `cat`/`tee` heredoc not written to
+a file -- and on any assignment to PASS on the line of, or next to, output
+saying a leg did not run. It does not see skip wording built in a variable, a
+PASS assignment more than one line from that wording, or a line marked
+`# tripwire: not a skip`; a second row, `skip_tripwire_catches_each_bypass`,
+runs the scanner over a fixture for each bypass review has found. (An earlier
 version of this entry said thirty sites; the first commit converted 23.)
 
 **Added (std): sys_sendto, sys_recvfrom, SO_BROADCAST and sys_connect_timeout** -- datagrams with an address and a connect with a deadline that always leaves the socket blocking, for arsh discovery.
