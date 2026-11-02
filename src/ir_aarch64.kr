@@ -840,7 +840,23 @@ fn ir_emit_arm64_win_syscall(uint64 abstract_nr, uint64 dest_v, uint64 dst_r) {
         emit_a64_mov(2, 12)               // x2 = len
         emit_a64_mov(1, 11)               // x1 = buf
         emit_a64_win_call_iat(2)          // WriteFile
-        emit_a64(0xB94003E0)              // ldr w0, [sp]   — bytesWritten (zero-extends)
+        // write()/file_write() hand the count to the program, so the BOOL
+        // decides (#167): the count (also for a FALSE that moved data), or
+        // -EIO (-5). print* shares this arm but never exposes the result: its
+        // bytes stay exactly as they were.
+        if ir_win_sc_result_visible() != 0 {
+            emit_a64(0xB94003E9)          // ldr w9, [sp]   — bytesWritten
+            uint64 awf_ok1 = out_len
+            emit_a64(0x35000000)          // cbnz w0, .ok (TRUE)
+            uint64 awf_ok2 = out_len
+            emit_a64(0x35000009)          // cbnz w9, .ok (data wins)
+            emit_a64(0x92800089)          // movn x9, #4 (x9 = -5, -EIO)
+            a64_patch_b19_here(awf_ok1, 0x35000000)
+            a64_patch_b19_here(awf_ok2, 0x35000009)
+            emit_a64(0xAA0903E0)          // .ok: mov x0, x9
+        } else {
+            emit_a64(0xB94003E0)          // ldr w0, [sp]   — bytesWritten (zero-extends)
+        }
         emit_a64_add_sp_imm(16)           // add sp, sp, #16
     }
 

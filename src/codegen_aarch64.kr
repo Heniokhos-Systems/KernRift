@@ -2467,8 +2467,22 @@ fn gen_expr_a64(uint64 node) {
                 emit_a64_mov(2, 0)                 // x2 = len
                 emit_a64_load_x0(pk0_write)        // x0 = handle
                 emit_a64_win_call_iat(2)
-                // x0 = bytesWritten, not the BOOL
+                // The BOOL decides (#167): the count (also for a FALSE that moved
+                // data), or -EIO (-5). The count is read only through the slot
+                // accessor.
+                uint64 gw_ok = out_len
+                emit_a64(0x35000000)               // cbnz w0, .ok
                 emit_a64_load_x0(pk1_write)
+                uint64 gw_done1 = out_len
+                emit_a64(0xB5000000)               // cbnz x0, .done (data wins)
+                emit_a64(0x92800080)               // movn x0, #4 (x0 = -5, -EIO)
+                uint64 gw_done2 = out_len
+                emit_a64(0x14000000)               // b .done
+                a64_patch_b19_here(gw_ok, 0x35000000)
+                // .ok: x0 = bytesWritten, not the BOOL
+                emit_a64_load_x0(pk1_write)
+                a64_patch_b19_here(gw_done1, 0xB5000000)
+                a64_patch_b26_here(gw_done2)      // .done
             } else {
                 emit_a64_mov(2, 0)
                 emit_a64_load_x0(pk1_write)
@@ -2730,8 +2744,22 @@ fn gen_expr_a64(uint64 node) {
                 emit_a64_mov(2, 0)                 // x2 = len
                 emit_a64_load_x0(pk0_filewrite)    // x0 = handle
                 emit_a64_win_call_iat(2)
-                // x0 = bytesWritten, not the BOOL
+                // The BOOL decides (#167): the count (also for a FALSE that moved
+                // data), or -EIO (-5). The count is read only through the slot
+                // accessor.
+                uint64 gfw_ok = out_len
+                emit_a64(0x35000000)               // cbnz w0, .ok
                 emit_a64_load_x0(pk1_filewrite)
+                uint64 gfw_done1 = out_len
+                emit_a64(0xB5000000)               // cbnz x0, .done (data wins)
+                emit_a64(0x92800080)               // movn x0, #4 (x0 = -5, -EIO)
+                uint64 gfw_done2 = out_len
+                emit_a64(0x14000000)               // b .done
+                a64_patch_b19_here(gfw_ok, 0x35000000)
+                // .ok: x0 = bytesWritten, not the BOOL
+                emit_a64_load_x0(pk1_filewrite)
+                a64_patch_b19_here(gfw_done1, 0xB5000000)
+                a64_patch_b26_here(gfw_done2)      // .done
             } else {
                 emit_a64_mov(2, 0)
                 emit_a64_load_x0(pk1_filewrite)

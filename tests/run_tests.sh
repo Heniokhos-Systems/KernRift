@@ -27505,8 +27505,8 @@ WFE_KRC="$DIR/../build/krc2"
 WFE_WINE="$(wine_path)"
 WFE_QEMU="$(command -v qemu-aarch64-static || command -v qemu-aarch64 || true)"
 WFE_SHAPE="$DIR/helpers/win_file_err_shape.py"
-# Lines the Windows rows do not compare yet: the write side lands with #167.
-WFE_SKIP='^(fw_|w_)'
+# Lines the Windows rows do not compare (none: every probe is compared).
+WFE_SKIP=''
 wfe_ok() { PASS=$((PASS + 1)); echo "  $1: PASS${2:+ ($2)}"; }
 wfe_bad() { FAIL=$((FAIL + 1)); echo "FAIL: $1 ($2)"; }
 wfe_skip() { PASS=$((PASS + 1)); echo "  $1: SKIP ($2)"; }
@@ -27602,14 +27602,31 @@ done
 # Windows rows only -- the same wrap on the other targets is #172.
 wfe_win win_alloc_wrap_windows_wine ir win_alloc_wrap "$WFE_FX/win_alloc_wrap.windows.expected" none
 wfe_win win_alloc_wrap_windows_wine_legacy legacy win_alloc_wrap "$WFE_FX/win_alloc_wrap.windows.expected" none
+# #167: print* shares the IR write arm but never exposes its result, so its
+# bytes must not move: the four Windows builds of win_print_only.kr against the
+# md5s the compiler produced before the Windows I/O fixes (233af31). A change
+# here that is intended -- a later codegen change -- re-pins the file with its
+# reason in the commit.
+TOTAL=$((TOTAL + 1))
+WFE_PB=""
+for WFE_V in "x86_64:" "x86_64:--legacy" "arm64:" "arm64:--legacy"; do
+    WFE_A=${WFE_V%%:*}; WFE_L=${WFE_V#*:}; WFE_N="windows-$WFE_A${WFE_L:+-legacy}"
+    if ! "$WFE_KRC" --arch="$WFE_A" $WFE_L --target=windows --emit=pe "$WFE_FX/win_print_only.kr" -o "$WFE_D/wpo.exe" > "$WFE_D/wpo.log" 2>&1; then
+        WFE_PB="$WFE_PB $WFE_N:build"; continue
+    fi
+    WFE_M=$(md5sum < "$WFE_D/wpo.exe" | cut -c1-32)
+    grep -qx "$WFE_M $WFE_N" "$WFE_FX/win_print_only.md5" || WFE_PB="$WFE_PB $WFE_N:$WFE_M"
+done
+if [ -z "$WFE_PB" ]; then wfe_ok win_file_errors_print_identity "4 Windows builds byte-identical to 233af31"
+else wfe_bad win_file_errors_print_identity "print output moved:$WFE_PB"; fi
 # read() exists on the IR backend only
 wfe_linux win_file_errors_read_linux_x86_64 x86_64 ir win_file_errors_read "$WFE_FX/win_file_errors_read.linux.expected" none
 wfe_linux win_file_errors_read_linux_arm64_qemu arm64 ir win_file_errors_read "$WFE_FX/win_file_errors_read.linux.expected" none
 wfe_win win_file_errors_read_builtin_windows_wine ir win_file_errors_read "$WFE_FX/win_file_errors_read.windows.expected" none
-wfe_shape win_file_errors_shape_x86_64 x86_64 ir abcf
-wfe_shape win_file_errors_shape_x86_64_legacy x86_64 legacy abcf
-wfe_shape win_file_errors_shape_arm64 arm64 ir abcf
-wfe_shape win_file_errors_shape_arm64_legacy arm64 legacy abcf
+wfe_shape win_file_errors_shape_x86_64 x86_64 ir abcdf
+wfe_shape win_file_errors_shape_x86_64_legacy x86_64 legacy abcdf
+wfe_shape win_file_errors_shape_arm64 arm64 ir abcdf
+wfe_shape win_file_errors_shape_arm64_legacy arm64 legacy abcdf
 # #170: the compiler's own read_exact (src/main.kr) and the runner's copy
 # (src/runner.kr) must never count a -errno read. Each is extracted BY NAME --
 # never by line number -- and given a main whose file_size and file_read fail

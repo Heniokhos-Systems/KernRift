@@ -307,8 +307,9 @@ def check_range(arch, legacy, code, calls, rules, fname):
                     errs.append(where + ": no BOOL test and -5 after it")
             if name == "WriteFile" and "d" in rules:
                 win = code[after:after + 40]
-                if win[:2] != b"\x85\xC0" or win.count(b"\x85\xC0") < 2 or MINUS5_X86 not in win:
-                    errs.append(where + ": no BOOL test, count test and -5 after it")
+                if win[:2] != b"\x85\xC0" or 0x75 not in win[2:10] or win.count(b"\x85\xC0") < 2 \
+                        or MINUS5_X86 not in win:
+                    errs.append(where + ": no BOOL test (test eax,eax ; jnz), data-wins test and -5 after it")
             if name == "WriteFile" and "e" in rules and legacy:
                 if not x86_guard_before(code, calls, ci, 0):
                     errs.append(where + ": no std-fd guard before it")
@@ -351,9 +352,14 @@ def check_range(arch, legacy, code, calls, rules, fname):
                 if (w(after) & 0xFF00001F) != 0x35000000 or not any(w(k) == MOVN_M5 for k in range(after, after + 16, 4)):
                     errs.append(where + ": no cbnz w0 and -5 after it")
             if name == "WriteFile" and "d" in rules:
-                win = [w(k) for k in range(after, after + 32, 4)]
-                if not any((x & 0xFF00001F) == 0x35000000 for x in win) or MOVN_M5 not in win and 0x92800089 not in win:
-                    errs.append(where + ": no BOOL test and -5 after it")
+                # IR: ldr w9,[sp] ; cbnz w0 ; cbnz w9 (data wins) ; movn x9,#4
+                # legacy: cbnz w0 ; <load count> ; cbnz x0 (data wins) ; movn x0,#4
+                win = [w(k) for k in range(after, after + 40, 4)]
+                bool_t = any((x & 0xFF00001F) == 0x35000000 for x in win)
+                data_t = any((x & 0xFF00001F) in (0x35000009, 0xB5000000) for x in win)
+                m5 = MOVN_M5 in win or 0x92800089 in win
+                if not (bool_t and data_t and m5):
+                    errs.append(where + ": no BOOL test, data-wins test and -5 after it")
             if name == "WriteFile" and "e" in rules and legacy:
                 if not a64_guard_before(code, calls, ci, 0):
                     errs.append(where + ": no std-fd guard before it")
