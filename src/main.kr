@@ -9505,6 +9505,11 @@ fn main() {
                 // --emit=pe / --emit=obj for Windows, also write the asm
                 // listing of the code this compile emitted to the path.
                 uw_test_listing_path = arg + 15
+            } else if str_starts_with(arg, "--test-coff-reloc-limit=", 24) != 0 {
+                // Internal, undocumented in --help, test-only (#143 A13): lower
+                // the 65535 .pdata relocations a Windows object may hold, so
+                // the refusal row reaches it without a 21846-function program.
+                uw_coff_reloc_limit = parse_uint_arg(arg + 24)
             } else if str_starts_with(arg, "--test-a64-low-limit=", 21) != 0 {
                 // Internal, undocumented in --help, test-only (#143): lower the
                 // 256 MiB limit of a Windows arm64 frame's low area, so the

@@ -29044,8 +29044,8 @@ fi
 # tables pass, byte mutations of them (unsorted, overlap, gap, misaligned,
 # wrong FunctionLength, no DataDirectory[3]) fail with the owning rule id, a
 # call relocated against an extern is no target in its object (A13) while the
-# same call unrelocated fails C2, the --linked mode passes on llvm-mc objects
-# linked behind a host and fails with a shifted /map, and the base compiler's committed image
+# same call unrelocated fails C2, an object without a listing is an input
+# error (its end of code is the listing's), and the base compiler's committed image
 # (tests/fixtures/pe_unwind_oracle/nest.exe, no tables) fails C1.
 PEU_OUT=$(env -u PE_UNWIND_CHECK_DISABLE bash "$DIR/helpers/pe_unwind_selftest.sh" "$T10_D/peu_selftest" 2>&1); PEU_RC=$?
 case "$PEU_RC" in
@@ -29066,6 +29066,17 @@ case "$PEU_RC" in
     77) pe_row_skip pe_unwind_checker_rules_selftest "$(grep -m1 '^SKIP-REASON: ' <<< "$PEU_OUT" | sed 's/^SKIP-REASON: //')" ;;
     *) PEU_WHY=$(grep -m1 '^FAIL ' <<< "$PEU_OUT" | cut -c1-300)
        pe_row_bad pe_unwind_checker_rules_selftest "rc=$PEU_RC ${PEU_WHY:-$(tail -c 300 <<< "$PEU_OUT" | tr '\n' '|')}" ;;
+esac
+# The checker's --linked mode (A13) bites: llvm-mc objects linked by lld-link
+# behind a host pass C0-C2 on their own functions, a /map shifted by a word
+# fails C0-C2, and without --linked C1 refuses lld's merged .xdata. Its own
+# row (phase-4 review, finding 1): without lld-link it is a visible SKIP.
+PEU_OUT=$(env -u PE_UNWIND_CHECK_DISABLE bash "$DIR/helpers/pe_unwind_selftest.sh" "$T10_D/peu_linked" linked 2>&1); PEU_RC=$?
+case "$PEU_RC" in
+    0) pe_row_ok pe_unwind_checker_linked_selftest "$(tail -1 <<< "$PEU_OUT")" ;;
+    77) pe_row_skip pe_unwind_checker_linked_selftest "$(grep -m1 '^SKIP-REASON: ' <<< "$PEU_OUT" | sed 's/^SKIP-REASON: //')" ;;
+    *) PEU_WHY=$(grep -m1 '^FAIL ' <<< "$PEU_OUT" | cut -c1-300)
+       pe_row_bad pe_unwind_checker_linked_selftest "rc=$PEU_RC ${PEU_WHY:-$(tail -c 300 <<< "$PEU_OUT" | tr '\n' '|')}" ;;
 esac
 # The Wine harness change (WINEDLLOVERRIDES=winedbg.exe=d, see t10_wine) must
 # not mask a failure: through t10_wine itself, the base compiler's table-less
@@ -29654,7 +29665,8 @@ else
 fi
 
 # The Windows slices of fat binaries (#143 A12): a default 8-slice build and a
-# --targets=win-x64,win-arm64 build of three programs; both Windows slices of
+# --targets=win-x64,win-arm64 build of three programs, plus --legacy fat
+# builds of nested_fault and temp_push_fault; both Windows slices of
 # each, extracted with krbo_slices.py, pass the checker C0-C6 + C4b against the
 # listings --test-listing=PATH writes for them (PATH.win-x64, PATH.win-arm64);
 # with --test-no-unwind, C1 finds no exception directory in either.
@@ -29662,33 +29674,38 @@ if ! command -v python3 > /dev/null 2>&1 || ! command -v llvm-readobj > /dev/nul
     pe_row_skip pe_unwind_fat_slices "needs python3, llvm-readobj and llvm-objdump"
 else
     PEU_WHY=""; PEU_N=0
-    for PEU_B in pe_unwind_nested_fault pe_unwind_argv_main_fault sys_args; do
-        for PEU_T in "" "--targets=win-x64,win-arm64"; do
-            rm -rf "$T10_D/peu_fs"; mkdir -p "$T10_D/peu_fs"
-            if ! $T10_KRC $PEU_T --test-listing="$T10_D/peu_fs/l" "$DIR/fixtures/$PEU_B.kr" -o "$T10_D/peu_fs/f.krbo" > /dev/null 2>&1 \
-               || ! python3 -B "$DIR/helpers/krbo_slices.py" "$T10_D/peu_fs/f.krbo" "$T10_D/peu_fs/s" > /dev/null 2>&1; then
-                PEU_WHY="$PEU_WHY $PEU_B${PEU_T:+ $PEU_T}:build/extract;"; continue
-            fi
-            for PEU_S in x64:x86_64 arm64:arm64; do
-                PEU_O=$(python3 -B "$PEU_CHK" --arch "${PEU_S#*:}" "$T10_D/peu_fs/s/win-${PEU_S%%:*}" --listing "$T10_D/peu_fs/l.win-${PEU_S%%:*}" 2>&1)
-                if [ "$(grep -c ': PASS' <<< "$PEU_O")" = 8 ]; then PEU_N=$((PEU_N + 1))
-                else PEU_WHY="$PEU_WHY $PEU_B${PEU_T:+ $PEU_T} win-${PEU_S%%:*}:$( { grep -m1 -e FAIL -e error <<< "$PEU_O" || head -1 <<< "$PEU_O"; } | cut -c1-100);"; fi
-            done
-            # the negative: the same build without tables
-            if $T10_KRC --test-no-unwind $PEU_T "$DIR/fixtures/$PEU_B.kr" -o "$T10_D/peu_fs/x.krbo" > /dev/null 2>&1 \
-               && python3 -B "$DIR/helpers/krbo_slices.py" "$T10_D/peu_fs/x.krbo" "$T10_D/peu_fs/x" > /dev/null 2>&1; then
-                for PEU_S in x64:x86_64 arm64:arm64; do
-                    PEU_O=$(python3 -B "$PEU_CHK" --arch "${PEU_S#*:}" "$T10_D/peu_fs/x/win-${PEU_S%%:*}" --rules C1 2>&1)
-                    [[ "$PEU_O" == "C1: FAIL no exception directory"* ]] || PEU_WHY="$PEU_WHY $PEU_B${PEU_T:+ $PEU_T} --test-no-unwind win-${PEU_S%%:*}: '$PEU_O';"
-                done
-            else
-                PEU_WHY="$PEU_WHY $PEU_B${PEU_T:+ $PEU_T} --test-no-unwind:build/extract;"
-            fi
+    # program|flags: default and win-only builds of three programs, and
+    # --legacy fat builds of the two std-free legacy fixtures (phase-4 review,
+    # finding 2: compile_fat sends legacy Windows slices through gen_function)
+    for PEU_BT in pe_unwind_nested_fault\| "pe_unwind_nested_fault|--targets=win-x64,win-arm64" \
+                  pe_unwind_argv_main_fault\| "pe_unwind_argv_main_fault|--targets=win-x64,win-arm64" \
+                  sys_args\| "sys_args|--targets=win-x64,win-arm64" \
+                  "pe_unwind_nested_fault|--legacy" "pe_unwind_temp_push_fault|--legacy"; do
+        PEU_B=${PEU_BT%%|*}; PEU_T=${PEU_BT#*|}
+        rm -rf "$T10_D/peu_fs"; mkdir -p "$T10_D/peu_fs"
+        if ! $T10_KRC $PEU_T --test-listing="$T10_D/peu_fs/l" "$DIR/fixtures/$PEU_B.kr" -o "$T10_D/peu_fs/f.krbo" > /dev/null 2>&1 \
+           || ! python3 -B "$DIR/helpers/krbo_slices.py" "$T10_D/peu_fs/f.krbo" "$T10_D/peu_fs/s" > /dev/null 2>&1; then
+            PEU_WHY="$PEU_WHY $PEU_B${PEU_T:+ $PEU_T}:build/extract;"; continue
+        fi
+        for PEU_S in x64:x86_64 arm64:arm64; do
+            PEU_O=$(python3 -B "$PEU_CHK" --arch "${PEU_S#*:}" "$T10_D/peu_fs/s/win-${PEU_S%%:*}" --listing "$T10_D/peu_fs/l.win-${PEU_S%%:*}" 2>&1)
+            if [ "$(grep -c ': PASS' <<< "$PEU_O")" = 8 ]; then PEU_N=$((PEU_N + 1))
+            else PEU_WHY="$PEU_WHY $PEU_B${PEU_T:+ $PEU_T} win-${PEU_S%%:*}:$( { grep -m1 -e FAIL -e error <<< "$PEU_O" || head -1 <<< "$PEU_O"; } | cut -c1-100);"; fi
         done
+        # the negative: the same build without tables
+        if $T10_KRC --test-no-unwind $PEU_T "$DIR/fixtures/$PEU_B.kr" -o "$T10_D/peu_fs/x.krbo" > /dev/null 2>&1 \
+           && python3 -B "$DIR/helpers/krbo_slices.py" "$T10_D/peu_fs/x.krbo" "$T10_D/peu_fs/x" > /dev/null 2>&1; then
+            for PEU_S in x64:x86_64 arm64:arm64; do
+                PEU_O=$(python3 -B "$PEU_CHK" --arch "${PEU_S#*:}" "$T10_D/peu_fs/x/win-${PEU_S%%:*}" --rules C1 2>&1)
+                [[ "$PEU_O" == "C1: FAIL no exception directory"* ]] || PEU_WHY="$PEU_WHY $PEU_B${PEU_T:+ $PEU_T} --test-no-unwind win-${PEU_S%%:*}: '$PEU_O';"
+            done
+        else
+            PEU_WHY="$PEU_WHY $PEU_B${PEU_T:+ $PEU_T} --test-no-unwind:build/extract;"
+        fi
     done
     rm -rf "$T10_D/peu_fs"
-    if [ -z "$PEU_WHY" ] && [ "$PEU_N" = 12 ]; then pe_row_ok pe_unwind_fat_slices "12 Windows slices (3 programs x default and win-only builds x win-x64, win-arm64) pass C0-C6 + C4b; --test-no-unwind leaves none"
-    else pe_row_bad pe_unwind_fat_slices "$PEU_N of 12;$PEU_WHY"; fi
+    if [ -z "$PEU_WHY" ] && [ "$PEU_N" = 16 ]; then pe_row_ok pe_unwind_fat_slices "16 Windows slices (3 programs x default and win-only builds, 2 programs --legacy; x win-x64, win-arm64) pass C0-C6 + C4b; --test-no-unwind leaves none"
+    else pe_row_bad pe_unwind_fat_slices "$PEU_N of 16;$PEU_WHY"; fi
 fi
 
 # COFF objects (#143 A13, spec 6.4): --freestanding --target=windows
@@ -29730,6 +29747,57 @@ for PEU_A in x86_64 arm64; do
     if [ -z "$PEU_WHY" ] && [ "$PEU_N" = 6 ]; then pe_row_ok $PEU_ROW "2 objects: C0-C6 + C4b pass, $PEU_PER ADDR32NB .pdata relocations per record; --test-no-unwind leaves no .pdata"
     else pe_row_bad $PEU_ROW "$PEU_N of 6;$PEU_WHY"; fi
 done
+
+# The two COFF error paths of A13 (phase-4 review, finding 3), both arches:
+#  * the .pdata relocation count is refused, not truncated, past the limit:
+#    the hidden --test-coff-reloc-limit=N lowers 65535 so pe_unwind_obj_chain
+#    (5 functions: 15 x64 / 10 arm64 relocations) is refused at one below its
+#    count with the error and no output file, and builds at exactly its count;
+#  * a module that defines no function (statics only) stays a one-section
+#    object without .pdata/.xdata, while the fixture gets three sections.
+if ! command -v python3 > /dev/null 2>&1; then
+    pe_row_skip pe_unwind_obj_reloc_limit "no python3"; pe_row_skip pe_unwind_obj_no_functions "no python3"
+else
+    PEU_WHY=""
+    for PEU_AN in x86_64:15 arm64:10; do
+        PEU_A=${PEU_AN%%:*}; PEU_NR=${PEU_AN#*:}
+        rm -f "$T10_D/peu_rl.obj"
+        $T10_KRC --test-coff-reloc-limit=$((PEU_NR - 1)) --freestanding --arch=$PEU_A --target=windows --emit=obj "$DIR/fixtures/pe_unwind_obj_chain.kr" -o "$T10_D/peu_rl.obj" > "$T10_D/peu_rl.log" 2>&1; PEU_RC=$?
+        if [ "$PEU_RC" = 0 ] || ! grep -q 'error: this Windows object has too many functions for its .pdata relocations' "$T10_D/peu_rl.log" || [ -e "$T10_D/peu_rl.obj" ]; then
+            PEU_WHY="$PEU_WHY $PEU_A limit $((PEU_NR - 1)): rc=$PEU_RC $(grep -m1 error "$T10_D/peu_rl.log" | cut -c1-80)$([ -e "$T10_D/peu_rl.obj" ] && echo ', object written');"
+        fi
+        if ! $T10_KRC --test-coff-reloc-limit=$PEU_NR --freestanding --arch=$PEU_A --target=windows --emit=obj "$DIR/fixtures/pe_unwind_obj_chain.kr" -o "$T10_D/peu_rl.obj" > /dev/null 2>&1; then
+            PEU_WHY="$PEU_WHY $PEU_A limit $PEU_NR: refused;"
+        fi
+    done
+    if [ -z "$PEU_WHY" ]; then pe_row_ok pe_unwind_obj_reloc_limit "x86_64 refused at 14 and built at 15, arm64 refused at 9 and built at 10 .pdata relocations"
+    else pe_row_bad pe_unwind_obj_reloc_limit "$PEU_WHY"; fi
+    PEU_WHY=""
+    printf 'static uint64 PEU_K1 = 7\nstatic uint64 PEU_K2 = 0x1234\n' > "$T10_D/peu_consts.kr"
+    for PEU_A in x86_64 arm64; do
+        for PEU_SN in peu_consts:1 pe_unwind_obj_chain:3; do
+            PEU_S=${PEU_SN%%:*}; PEU_WANT=${PEU_SN#*:}
+            PEU_SRC="$T10_D/$PEU_S.kr"; [ -e "$PEU_SRC" ] || PEU_SRC="$DIR/fixtures/$PEU_S.kr"
+            if ! $T10_KRC --freestanding --arch=$PEU_A --target=windows --emit=obj "$PEU_SRC" -o "$T10_D/peu_nf.obj" > "$T10_D/peu_nf.log" 2>&1; then
+                PEU_WHY="$PEU_WHY $PEU_A $PEU_S: $(grep -m1 error "$T10_D/peu_nf.log" | cut -c1-80);"; continue
+            fi
+            PEU_O=$(python3 -B - "$T10_D/peu_nf.obj" <<'PEUNFEOF'
+import struct, sys
+b = open(sys.argv[1], 'rb').read()
+n = struct.unpack_from('<H', b, 2)[0]
+print(n, ','.join(b[20 + 40 * i:28 + 40 * i].rstrip(b'\0').decode() for i in range(n)))
+PEUNFEOF
+)
+            case "$PEU_WANT" in
+                1) [ "$PEU_O" = "1 .text" ] || PEU_WHY="$PEU_WHY $PEU_A $PEU_S: sections '$PEU_O', want '1 .text';" ;;
+                3) [ "$PEU_O" = "3 .text,.pdata,.xdata" ] || PEU_WHY="$PEU_WHY $PEU_A $PEU_S: sections '$PEU_O', want '3 .text,.pdata,.xdata';" ;;
+            esac
+        done
+    done
+    rm -f "$T10_D"/peu_rl.* "$T10_D"/peu_nf.* "$T10_D/peu_consts.kr"
+    if [ -z "$PEU_WHY" ]; then pe_row_ok pe_unwind_obj_no_functions "a statics-only module is a one-section object on both arches; a module with functions gets .text/.pdata/.xdata"
+    else pe_row_bad pe_unwind_obj_no_functions "$PEU_WHY"; fi
+fi
 
 # The KR COFF probe linked with a C host (#143 A13, spec 8.4/8.5; phase-4
 # ruling): tests/fixtures/pe_unwind_cprobe/k.kr as a --freestanding object,

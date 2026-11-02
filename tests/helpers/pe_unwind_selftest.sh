@@ -18,7 +18,7 @@
 set -u
 W="${1:?usage: pe_unwind_selftest.sh <workdir> [core|rules]}"
 PART="${2:-core}"
-case "$PART" in core|rules) ;; *) echo "FAIL usage: part '$PART' is not core or rules"; exit 1 ;; esac
+case "$PART" in core|rules|linked) ;; *) echo "FAIL usage: part '$PART' is not core, rules or linked"; exit 1 ;; esac
 H="$(cd "$(dirname "$0")" && pwd)"
 CHK="$H/pe_unwind_check.py"
 OR="$H/../fixtures/pe_unwind_oracle"
@@ -30,9 +30,41 @@ N=0
 fail() { echo "FAIL $1: $2"; exit 1; }
 # expect <case> <rule> PASS|FAIL <checker args...>: the checker's line for
 # <rule> must start with "<rule>: PASS" / "<rule>: FAIL".
+# autolst ARGS...: LARGS = ARGS, plus `--listing X.lst` made from the llvm-mc
+# object X.obj's own .text (mk_lst) when ARGS name an object and no listing:
+# the checker takes an object's end of code from its listing (phase-4 Nit 4)
+# An annotation-only listing given for an object (ann, none.lst) without a
+# `; uw-code-end` gets a per-object copy that adds it (.text's size: these
+# llvm-mc objects hold code only).
+autolst() {
+    local x arch="" obj="" lst="" prev="" i
+    LARGS=("$@")
+    for x in "$@"; do
+        case "$x" in x86_64|arm64) arch="$x" ;; *.obj) obj="$x" ;; esac
+        [ "$prev" = --listing ] && lst="$x"
+        prev="$x"
+    done
+    [ -n "$obj" ] || return 0
+    if [ -z "$lst" ]; then
+        mk_lst "${obj%.obj}:$arch"
+        LARGS+=(--listing "${obj%.obj}.lst")
+    elif ! grep -q '^; uw-code-end ' "$lst"; then
+        python3 - "$obj" "$lst" "${obj%.obj}.auto.lst" <<'EOF3'
+import struct, sys
+b = open(sys.argv[1], 'rb').read()
+for i in range(struct.unpack_from('<H', b, 2)[0]):
+    o = 20 + 40 * i
+    if b[o:o + 8].rstrip(b'\0') == b'.text':
+        size = struct.unpack_from('<I', b, o + 16)[0]
+open(sys.argv[3], 'w').write(open(sys.argv[2]).read().rstrip('\n') + '\n; uw-code-end %08x\n' % size)
+EOF3
+        for i in "${!LARGS[@]}"; do [ "${LARGS[$i]}" = "$lst" ] && LARGS[$i]="${obj%.obj}.auto.lst"; done
+    fi
+}
 expect() {
     local c="$1" r="$2" want="$3" out line; shift 3
-    out=$(python3 "$CHK" --rules "$r" "$@" 2>&1)
+    autolst "$@"
+    out=$(python3 "$CHK" --rules "$r" "${LARGS[@]}" 2>&1)
     line=$(grep -m1 "^$r: " <<< "$out")
     case "$line" in
         "$r: $want"*) N=$((N + 1)); echo "  case $c: $r $want as required${line#"$r: $want"}" ;;
@@ -40,7 +72,9 @@ expect() {
     esac
 }
 
-if [ "$PART" = core ]; then
+# make_xa: the llvm-mc positives x.obj and a.obj with their listings x.lst and
+# a.lst, shared by parts core and linked.
+make_xa() {
 # ---------------------------------------------------------------- positives
 cat > "$W/x.s" <<'EOF'
         .text
@@ -154,9 +188,129 @@ g2:
 EOF
 llvm-mc -triple=x86_64-pc-windows-msvc -filetype=obj "$W/x.s" -o "$W/x.obj" 2> "$W/mc.err" || fail mc_x64 "$(head -c 200 "$W/mc.err")"
 llvm-mc -triple=aarch64-pc-windows-msvc -filetype=obj "$W/a.s" -o "$W/a.obj" 2> "$W/mc.err" || fail mc_a64 "$(head -c 200 "$W/mc.err")"
+mk_lst "$W/x:x86_64" "$W/a:arm64"
+}
+
+# mk_lst PATH:ARCH...: a listing PATH.lst of the llvm-mc object PATH.obj's
+# .text (labels from its function symbols, the byte column, the end of code):
+# an object needs one for its end of code (C1 arm64, C2; finding 4 of the
+# phase-4 review).
+mk_lst() {
+python3 - "$@" <<'EOF'
+import re, struct, sys
+for obj, arch in [a.rsplit(':', 1) for a in sys.argv[1:]]:
+    b = open('%s.obj' % obj, 'rb').read()
+    nsec, symptr, nsym = struct.unpack_from('<H', b, 2)[0], struct.unpack_from('<I', b, 8)[0], struct.unpack_from('<I', b, 12)[0]
+    for i in range(nsec):
+        o = 20 + 40 * i
+        if b[o:o + 8].rstrip(b'\0') == b'.text':
+            size, ptr = struct.unpack_from('<II', b, o + 16)
+            tsec = i + 1
+    code = b[ptr:ptr + size]
+    labels = {}
+    i = 0
+    while i < nsym:
+        o = symptr + 18 * i
+        name = b[o:o + 8].rstrip(b'\0').decode()
+        value, secno = struct.unpack_from('<Ih', b, o + 8)
+        typ, naux = struct.unpack_from('<H', b, o + 14)[0], b[o + 17]
+        if secno == tsec and typ == 0x20:
+            labels[value] = name
+        i += 1 + naux
+    out = []
+    step = 1 if arch == 'x86_64' else 4
+    for off in range(0, size, step):
+        if off in labels:
+            out.append('%s:' % labels[off])
+        if step == 1:
+            out.append('  %08x: %02x' % (off, code[off]))
+        else:
+            out.append('  %08x: %08x' % (off, struct.unpack_from('<I', code, off)[0]))
+    out.append('; uw-code-end %08x' % size)
+    open('%s.lst' % obj, 'w').write('\n'.join(out) + '\n')
+EOF
+}
+
+if [ "$PART" = linked ]; then
+command -v lld-link > /dev/null 2>&1 || { echo "SKIP-REASON: no lld-link"; exit 77; }
+make_xa
+# --linked (A13): the llvm-mc objects above linked by lld-link behind a host
+# object (so they land at a nonzero offset in .text, and .xdata is merged into
+# .rdata). With the /map and a listing of the object's own .text, C0-C2 pass
+# on the object's functions only; without --linked C1 refuses the merged
+# layout; a map whose addresses are shifted fails C0-C2. Its own suite row
+# (pe_unwind_checker_linked_selftest): without lld-link the part exits 77 and
+# the row is a visible SKIP, which the local gate rejects.
+cat > "$W/hx.s" <<'EOF'
+        .text
+        .def start; .scl 2; .type 32; .endef
+        .globl start
+        .seh_proc start
+start:
+        subq $40, %rsp
+        .seh_stackalloc 40
+        .seh_endprologue
+        callq f1
+        addq $40, %rsp
+        retq
+        .seh_endproc
+EOF
+cat > "$W/ha.s" <<'EOF'
+        .text
+        .def start; .scl 2; .type 32; .endef
+        .globl start
+        .seh_proc start
+start:
+        stp x29, x30, [sp, #-16]!
+        .seh_save_fplr_x 16
+        .seh_endprologue
+        bl g1
+        .seh_startepilogue
+        ldp x29, x30, [sp], #16
+        .seh_save_fplr_x 16
+        .seh_endepilogue
+        ret
+        .seh_endproc
+EOF
+llvm-mc -triple=x86_64-pc-windows-msvc -filetype=obj "$W/hx.s" -o "$W/hx.obj" 2> "$W/mc.err" || fail mc_x64_host "$(head -c 200 "$W/mc.err")"
+llvm-mc -triple=aarch64-pc-windows-msvc -filetype=obj "$W/ha.s" -o "$W/ha.obj" 2> "$W/mc.err" || fail mc_a64_host "$(head -c 200 "$W/mc.err")"
+lld-link /nodefaultlib /entry:start /subsystem:console /machine:x64 "/map:$W/lx.map" "/out:$W/lx.exe" "$W/hx.obj" "$W/x.obj" > "$W/ld.err" 2>&1 || fail ld_x64 "$(head -c 200 "$W/ld.err")"
+lld-link /nodefaultlib /entry:start /subsystem:console /machine:arm64 "/map:$W/la.map" "/out:$W/la.exe" "$W/ha.obj" "$W/a.obj" > "$W/ld.err" 2>&1 || fail ld_a64 "$(head -c 200 "$W/ld.err")"
+python3 - "$W" <<'EOF'
+import re, sys
+w = sys.argv[1]
+for obj in ('x', 'a'):
+    m = open('%s/l%s.map' % (w, obj)).read()
+    open('%s/l%s_shift.map' % (w, obj), 'w').write(re.sub(
+        r'(\s)([0-9a-f]{16})(\s+%s\.obj)' % obj,
+        lambda g: '%s%016x%s' % (g.group(1), int(g.group(2), 16) - 4, g.group(3)), m))
+EOF
+for r in C0 C1 C2; do
+    expect "linked_x64_$r" "$r" PASS --arch x86_64 "$W/lx.exe" --listing "$W/x.lst" --linked "$W/lx.map"
+    expect "linked_a64_$r" "$r" PASS --arch arm64 "$W/la.exe" --listing "$W/a.lst" --linked "$W/la.map"
+    expect "linked_x64_shifted_$r" "$r" FAIL --arch x86_64 "$W/lx.exe" --listing "$W/x.lst" --linked "$W/lx_shift.map"
+    expect "linked_a64_shifted_$r" "$r" FAIL --arch arm64 "$W/la.exe" --listing "$W/a.lst" --linked "$W/la_shift.map"
+done
+expect linked_x64_without_mode C1 FAIL --arch x86_64 "$W/lx.exe" --listing "$W/x.lst"
+expect linked_a64_without_mode C1 FAIL --arch arm64 "$W/la.exe" --listing "$W/a.lst"
+echo "selftest: $N cases behaved"
+exit 0
+fi
+
+if [ "$PART" = core ]; then
+make_xa
 for r in C1 C2; do
     expect "llvm_x64_$r" "$r" PASS --arch x86_64 "$W/x.obj"
     expect "llvm_a64_$r" "$r" PASS --arch arm64 "$W/a.obj"
+done
+# an object checked WITHOUT a listing has no end of code: C2 (and arm64 C1)
+# refuse it as an input error (exit 2) instead of guessing from .text's size,
+# which includes any trailing strings and statics (phase-4 review, Nit 4)
+for x in x86_64:x:C2 arm64:a:C2 arm64:a:C1; do
+    IFS=: read -r xa xo xr <<< "$x"
+    out=$(python3 "$CHK" --rules "$xr" --arch "$xa" "$W/$xo.obj" 2>&1); rc=$?
+    if [ "$rc" = 2 ] && grep -q "pass --listing" <<< "$out"; then N=$((N + 1)); echo "  case object_needs_listing_${xa}_$xr: input error (rc 2) as required"
+    else fail "object_needs_listing_${xa}_$xr" "want rc 2 and 'pass --listing', got rc=$rc: $out"; fi
 done
 # A13: a call relocated against an UNDEFINED symbol (an extern) leaves the
 # object, so C2 must not read its in-place field as a target in this object.
@@ -215,101 +369,6 @@ for n in ('xe', 'ae'):
 EOF
 expect extern_call_unrelocated_x64 C2 FAIL --arch x86_64 "$W/xe_norel.obj"
 expect extern_call_unrelocated_a64 C2 FAIL --arch arm64 "$W/ae_norel.obj"
-# --linked (A13): the llvm-mc objects above linked by lld-link behind a host
-# object (so they land at a nonzero offset in .text, and .xdata is merged into
-# .rdata). With the /map and a listing of the object's own .text, C0-C2 pass
-# on the object's functions only; without --linked C1 refuses the merged
-# layout; a map whose addresses are shifted fails C0-C2. lld-link is optional
-# for the rest of the selftest: without it these cases are reported as skipped
-# in the summary line, never counted.
-LINKED_NOTE=""
-if command -v lld-link > /dev/null 2>&1; then
-cat > "$W/hx.s" <<'EOF'
-        .text
-        .def start; .scl 2; .type 32; .endef
-        .globl start
-        .seh_proc start
-start:
-        subq $40, %rsp
-        .seh_stackalloc 40
-        .seh_endprologue
-        callq f1
-        addq $40, %rsp
-        retq
-        .seh_endproc
-EOF
-cat > "$W/ha.s" <<'EOF'
-        .text
-        .def start; .scl 2; .type 32; .endef
-        .globl start
-        .seh_proc start
-start:
-        stp x29, x30, [sp, #-16]!
-        .seh_save_fplr_x 16
-        .seh_endprologue
-        bl g1
-        .seh_startepilogue
-        ldp x29, x30, [sp], #16
-        .seh_save_fplr_x 16
-        .seh_endepilogue
-        ret
-        .seh_endproc
-EOF
-llvm-mc -triple=x86_64-pc-windows-msvc -filetype=obj "$W/hx.s" -o "$W/hx.obj" 2> "$W/mc.err" || fail mc_x64_host "$(head -c 200 "$W/mc.err")"
-llvm-mc -triple=aarch64-pc-windows-msvc -filetype=obj "$W/ha.s" -o "$W/ha.obj" 2> "$W/mc.err" || fail mc_a64_host "$(head -c 200 "$W/mc.err")"
-lld-link /nodefaultlib /entry:start /subsystem:console /machine:x64 "/map:$W/lx.map" "/out:$W/lx.exe" "$W/hx.obj" "$W/x.obj" > "$W/ld.err" 2>&1 || fail ld_x64 "$(head -c 200 "$W/ld.err")"
-lld-link /nodefaultlib /entry:start /subsystem:console /machine:arm64 "/map:$W/la.map" "/out:$W/la.exe" "$W/ha.obj" "$W/a.obj" > "$W/ld.err" 2>&1 || fail ld_a64 "$(head -c 200 "$W/ld.err")"
-# a listing of each object's .text (labels from its symbols, the byte column,
-# the end of code) and a map with the object's addresses moved down a word
-python3 - "$W" <<'EOF'
-import re, struct, sys
-w = sys.argv[1]
-for obj, arch in (('x', 'x86_64'), ('a', 'arm64')):
-    b = open('%s/%s.obj' % (w, obj), 'rb').read()
-    nsec, symptr, nsym = struct.unpack_from('<H', b, 2)[0], struct.unpack_from('<I', b, 8)[0], struct.unpack_from('<I', b, 12)[0]
-    for i in range(nsec):
-        o = 20 + 40 * i
-        if b[o:o + 8].rstrip(b'\0') == b'.text':
-            size, ptr = struct.unpack_from('<II', b, o + 16)
-            tsec = i + 1
-    code = b[ptr:ptr + size]
-    labels = {}
-    i = 0
-    while i < nsym:
-        o = symptr + 18 * i
-        name = b[o:o + 8].rstrip(b'\0').decode()
-        value, secno = struct.unpack_from('<Ih', b, o + 8)
-        typ, naux = struct.unpack_from('<H', b, o + 14)[0], b[o + 17]
-        if secno == tsec and typ == 0x20:
-            labels[value] = name
-        i += 1 + naux
-    out = []
-    step = 1 if arch == 'x86_64' else 4
-    for off in range(0, size, step):
-        if off in labels:
-            out.append('%s:' % labels[off])
-        if step == 1:
-            out.append('  %08x: %02x' % (off, code[off]))
-        else:
-            out.append('  %08x: %08x' % (off, struct.unpack_from('<I', code, off)[0]))
-    out.append('; uw-code-end %08x' % size)
-    open('%s/l%s.lst' % (w, obj), 'w').write('\n'.join(out) + '\n')
-    m = open('%s/l%s.map' % (w, obj)).read()
-    open('%s/l%s_shift.map' % (w, obj), 'w').write(re.sub(
-        r'(\s)([0-9a-f]{16})(\s+%s\.obj)' % obj,
-        lambda g: '%s%016x%s' % (g.group(1), int(g.group(2), 16) - 4, g.group(3)), m))
-EOF
-for r in C0 C1 C2; do
-    expect "linked_x64_$r" "$r" PASS --arch x86_64 "$W/lx.exe" --listing "$W/lx.lst" --linked "$W/lx.map"
-    expect "linked_a64_$r" "$r" PASS --arch arm64 "$W/la.exe" --listing "$W/la.lst" --linked "$W/la.map"
-    expect "linked_x64_shifted_$r" "$r" FAIL --arch x86_64 "$W/lx.exe" --listing "$W/lx.lst" --linked "$W/lx_shift.map"
-    expect "linked_a64_shifted_$r" "$r" FAIL --arch arm64 "$W/la.exe" --listing "$W/la.lst" --linked "$W/la_shift.map"
-done
-expect linked_x64_without_mode C1 FAIL --arch x86_64 "$W/lx.exe" --listing "$W/lx.lst"
-expect linked_a64_without_mode C1 FAIL --arch arm64 "$W/la.exe" --listing "$W/la.lst"
-else
-    LINKED_NOTE=" (the 14 --linked cases skipped: no lld-link)"
-fi
 # a committed PE whose tables a real loader accepted (the frame-pointer
 # prototype): C0 and C1 (decode == llvm-readobj) must pass on an IMAGE too.
 expect proto_image_C0 C0 PASS --arch x86_64 "$OR/nest8_fp.exe" --listing "$OR/nest8_fp.asm"
@@ -427,8 +486,9 @@ expect neg_x64_misaligned C1 FAIL --arch x86_64 "$W/x_mis.obj"
 mutate "$W/a.obj" "$W/a_unsorted.obj" a64_unsorted
 expect neg_a64_unsorted C1 FAIL --arch arm64 "$W/a_unsorted.obj"
 # the swap only reorders the entries; the ORDER check itself must report it
-python3 "$CHK" --rules C1 --arch arm64 "$W/a_unsorted.obj" 2>&1 | grep -q '^C1: FAIL entries 0/1 not strictly ascending' \
-    || fail neg_a64_unsorted_by_order "the order-only swap was not reported as unsorted: $(python3 "$CHK" --rules C1 --arch arm64 "$W/a_unsorted.obj" 2>&1)"
+mk_lst "$W/a_unsorted:arm64"
+python3 "$CHK" --rules C1 --arch arm64 "$W/a_unsorted.obj" --listing "$W/a_unsorted.lst" 2>&1 | grep -q '^C1: FAIL entries 0/1 not strictly ascending' \
+    || fail neg_a64_unsorted_by_order "the order-only swap was not reported as unsorted: $(python3 "$CHK" --rules C1 --arch arm64 "$W/a_unsorted.obj" --listing "$W/a_unsorted.lst" 2>&1)"
 N=$((N + 1)); echo "  case neg_a64_unsorted_by_order: C1 reports 'not strictly ascending' for the order-only swap"
 mutate "$W/a.obj" "$W/a_flen.obj" a64_flen
 expect neg_a64_function_length C1 FAIL --arch arm64 "$W/a_flen.obj"
@@ -449,7 +509,7 @@ open(sys.argv[2], 'wb').write(b)
 PYEOF
 expect neg_c0_flipped_byte C0 FAIL --arch x86_64 "$W/nest_flip.exe" --listing "$OR/nest.asm"
 expect pos_c0_base_image C0 PASS --arch x86_64 "$OR/nest.exe" --listing "$OR/nest.asm"
-echo "selftest: $N cases behaved${LINKED_NOTE:-}"
+echo "selftest: $N cases behaved"
 exit 0
 fi
 
@@ -481,7 +541,8 @@ ALLR=C1,C2,C3,C4,C4b,C5,C6
 # expect_all <case> <checker args...>: every rule C1..C6 PASSes
 expect_all() {
     local c="$1" out; shift
-    out=$(python3 "$CHK" --rules $ALLR "$@" 2>&1)
+    autolst "$@"
+    out=$(python3 "$CHK" --rules $ALLR "${LARGS[@]}" 2>&1)
     if grep -q ': FAIL' <<< "$out" || [ "$(grep -c ': PASS' <<< "$out")" != 7 ]; then
         fail "$c" "want C1..C6 PASS, got: $(grep -v ': PASS' <<< "$out" | tr '\n' '|' | head -c 400)"
     fi
@@ -491,7 +552,8 @@ expect_all() {
 # message matching <grep>, every other rule PASSes
 expect_only() {
     local c="$1" r="$2" g="$3" out; shift 3
-    out=$(python3 "$CHK" --rules $ALLR --verbose "$@" 2>&1)
+    autolst "$@"
+    out=$(python3 "$CHK" --rules $ALLR --verbose "${LARGS[@]}" 2>&1)
     if ! grep -q "^$r: FAIL" <<< "$out" || ! grep -qE "$g" <<< "$out"; then
         fail "$c" "want $r FAIL matching '$g', got: $(tr '\n' '|' <<< "$out" | head -c 400)"
     fi
@@ -937,7 +999,8 @@ expect_all body_called_leaf_two_step --arch x86_64 "$W/leaf.obj" --listing "$W/l
 body rbpw <<'EOF'
         movq %rax, %rbp
 EOF
-out=$(python3 "$CHK" --rules C4 --arch x86_64 "$W/rbpw.obj" 2>&1)
+mk_lst "$W/rbpw:x86_64"
+out=$(python3 "$CHK" --rules C4 --arch x86_64 "$W/rbpw.obj" --listing "$W/rbpw.lst" 2>&1)
 case "$out" in "C4: FAIL"*"writes rbp"*) N=$((N + 1)); echo "  case body_rbp_write: C4 FAIL as required" ;;
     *) fail body_rbp_write "want C4 FAIL (writes rbp), got: $out" ;; esac
 
@@ -981,7 +1044,8 @@ body wine_jmp <<'EOF'
         jmp 1f
 1:
 EOF
-out=$(python3 "$CHK" --rules C6 --verbose --arch x86_64 "$W/wine_jmp.obj" 2>&1)
+mk_lst "$W/wine_jmp:x86_64"
+out=$(python3 "$CHK" --rules C6 --verbose --arch x86_64 "$W/wine_jmp.obj" --listing "$W/wine_jmp.lst" 2>&1)
 if grep -q '^C6: FAIL' <<< "$out" && grep -q 'C6 problem: b: wine rule at +0x5: ' <<< "$out" \
    && ! grep -q 'C6 problem: b: native rule at +0x5: ' <<< "$out"; then
     N=$((N + 1)); echo "  case wine_only_epilogue_jmp: at the jmp (+0x5) C6 fails under the Wine rule only, as required"
@@ -1016,7 +1080,8 @@ s1:
         retq
         .seh_endproc
 EOF
-out=$(python3 "$CHK" --rules $ALLR --verbose --arch x86_64 "$W/save_nonvol.obj" 2>&1)
+mk_lst "$W/save_nonvol:x86_64"
+out=$(python3 "$CHK" --rules $ALLR --verbose --arch x86_64 "$W/save_nonvol.obj" --listing "$W/save_nonvol.lst" 2>&1)
 if [ "$(grep -c ': PASS' <<< "$out")" = 5 ] && grep -q '^C6: FAIL' <<< "$out" \
    && grep -q '^C3: FAIL' <<< "$out" && grep -q 's1: SAVE_NONVOL store at +0x6 comes before SET_FPREG' <<< "$out" \
    && [ "$(grep -c 'C6 problem' <<< "$out")" = 1 ] && grep -q 'C6 problem: s1: wine rule at +0xb: R12 restored' <<< "$out"; then
@@ -1073,7 +1138,8 @@ s3:
         retq
         .seh_endproc
 EOF
-out=$(python3 "$CHK" --rules C3 --arch x86_64 "$W/alloc_after_fp.obj" 2>&1)
+mk_lst "$W/alloc_after_fp:x86_64"
+out=$(python3 "$CHK" --rules C3 --arch x86_64 "$W/alloc_after_fp.obj" --listing "$W/alloc_after_fp.lst" 2>&1)
 case "$out" in
     "C3: FAIL s3: prologue instruction at +0x4 (sub) follows SET_FPREG and is not a SAVE_NONVOL store"*)
         N=$((N + 1)); echo "  case neg_c3_alloc_after_set_fpreg: C3 FAIL as required" ;;
@@ -1209,4 +1275,4 @@ out=$(python3 "$CHK" --rules C3,C4,C4b,C5,C6 --arch x86_64 "$OR/nest8_fp.exe" --
 if [ "$(grep -c ': PASS (restricted to 2 functions by --functions (--oracle)' <<< "$out")" = 5 ]; then
     N=$((N + 1)); echo "  case proto_frame_pointer_nest8_fp: C3..C6 PASS, each saying it was restricted to f3 and f2 (main is split by the prototype's pre-prologue argv block)"
 else fail proto_frame_pointer_nest8_fp "got: $(tr '\n' '|' <<< "$out" | head -c 400)"; fi
-echo "selftest: $N cases behaved${LINKED_NOTE:-}"
+echo "selftest: $N cases behaved"

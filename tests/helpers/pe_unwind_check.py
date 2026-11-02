@@ -678,7 +678,7 @@ def check_c1(binr, lst, recs):
             if nxt is None and lst is not None and lst.code_end is not None:
                 nxt = t.rva + lst.code_end
             if nxt is None and not binr.is_image:
-                nxt = t.rva + t.rawsize
+                raise InputError('an object\'s end of code (where strings and statics begin) is the listing\'s `; uw-code-end`: pass --listing (the compiler\'s --test-listing)')
             if nxt is not None and r.end != nxt:
                 raise RuleFail('entry %d: FunctionLength %d words ends at 0x%x, the range ends at 0x%x'
                                % (k, r.flen, r.end, nxt))
@@ -962,7 +962,9 @@ def check_c2(binr, lst, recs, insns):
         # an object: functions from its symbol table; a listing given with an
         # object carries annotations only
         fns = sorted((t.rva + o, n) for o, n in binr.object_functions().items())
-        code_end = t.rva + t.rawsize
+        if lst is None or lst.code_end is None:
+            raise InputError('an object\'s end of code (where strings and statics begin) is the listing\'s `; uw-code-end`: pass --listing (the compiler\'s --test-listing)')
+        code_end = t.rva + lst.code_end
         leaves = [(n, k, t.rva + b, t.rva + e) for n, k, b, e in lst.leaves] if lst else []
     else:
         raise RuleFail('needs the listing (labels and end of code)')
@@ -2728,6 +2730,9 @@ def main(argv):
         except RuleFail as ex:
             ok = False
             print('%s: FAIL %s' % (rule, ex))
+        except InputError as ex:
+            print('error: %s: %s' % (a.file, ex), file=sys.stderr)
+            return 2
         except (struct.error, IndexError, KeyError, TypeError) as ex:
             ok = False
             print('%s: FAIL malformed data or unmodelled code (%s: %s)' % (rule, type(ex).__name__, ex))

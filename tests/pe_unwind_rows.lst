@@ -37,3 +37,6 @@ pe_unwind_fat_slices
 pe_unwind_obj_x86_64
 pe_unwind_obj_arm64
 pe_unwind_obj_link_windows_wine
+pe_unwind_checker_linked_selftest
+pe_unwind_obj_reloc_limit
+pe_unwind_obj_no_functions

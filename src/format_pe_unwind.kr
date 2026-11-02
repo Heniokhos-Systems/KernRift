@@ -704,11 +704,14 @@ fn uw_coff_wanted() -> uint64 {
 // The number of .pdata relocations uw_coff_relocs writes. NumberOfRelocations
 // is 16 bits and this writer does not emit IMAGE_SCN_LNK_NRELOC_OVFL, so an
 // object past that is refused rather than written with a truncated count.
+// uw_coff_reloc_limit is 0xFFFF; only the hidden --test-coff-reloc-limit=N
+// (main.kr) lowers it, for the refusal row.
+static uint64 uw_coff_reloc_limit = 0xFFFF
 fn uw_coff_nrelocs(uint64 arch) -> uint64 {
     uint64 per = 3
     if arch == 1 { per = 2 }
     uint64 nr = uw_rec_count * per
-    if nr > 0xFFFF {
+    if nr > uw_coff_reloc_limit {
         uint64 m = "error: this Windows object has too many functions for its .pdata relocations (more than 65535; at most 21845 x86_64 or 32767 arm64 functions per --emit=obj output, #143); split the program into several objects\n"
         write(2, m, str_len(m))
         exit(1)
