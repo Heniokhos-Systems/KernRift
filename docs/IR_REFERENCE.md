@@ -33,7 +33,7 @@ two ways:
 1. `IR_PHI` (opcode 60) is **completely dead**. Tree-wide, the only three
    references are the constant definition (`src/ir.kr:73`), its name string
    in `ir_opcode_name` (`src/ir.kr:5588`), and a stale comment
-   (`src/ir_aarch64.kr:2251`). No lowering emits it and no emitter handles
+   (`src/ir_aarch64.kr:2296`). No lowering emits it and no emitter handles
    it.
 2. A vreg is assigned in more than one block. Probe (`--emit=ir` on an
    if/else plus a `while`):
@@ -410,7 +410,7 @@ is false; it is still present in MLRift's copy of this document.)*
 
 - **`IR_FFMA` is a misnomer.** It emits `mulsd` + `addsd` on x86_64
   (verified by disassembly: no `vfmadd`) and `FMUL d0` + `FADD` on arm64
-  (`src/ir_aarch64.kr:2940`/`2871`). Two roundings, not one — results differ
+  (`src/ir_aarch64.kr:2985`/`2871`). Two roundings, not one — results differ
   from a true FMA. The source says so at `src/ir.kr:13955`: *"The current
   FFMA emit isn't actually a hardware FMA instruction — it just inlines
   mulsd+addsd back-to-back."* Its value is skipping the GPR round-trip
@@ -418,7 +418,7 @@ is false; it is still present in MLRift's copy of this document.)*
 - **`IR_FTOI` saturates.** Verified on both arches: `1e21 → 9223372036854775807`,
   `NaN → 0`. The two arches agree.
 - **105/106 are not x86-only** (a claim the old text made). arm64 implements
-  both as software bit manipulation, `src/ir_aarch64.kr:2969` and `2938`.
+  both as software bit manipulation, `src/ir_aarch64.kr:3014` and `2938`.
 - **Float literals are materialised at runtime.** `1.5` lowers to
   `itof(1) + itof(5)/itof(10)`, and `ir_opt_const_fold` does not fold float
   ops, so the `cvtsi2sd`/`divsd` survive to codegen. Verified by disassembly:
@@ -459,7 +459,7 @@ is false; it is still present in MLRift's copy of this document.)*
   See the constant's comment, `src/ir.kr:203`–`205`.
 - **147/148 are arm64-only.** Produced solely by `ir_opt_fuse_lea_mem`, which
   is called under `if target_arch == 1` (`src/ir.kr:14081`). Handlers exist
-  only at `src/ir_aarch64.kr:1438` and `1412`.
+  only at `src/ir_aarch64.kr:1483` and `1412`.
 
 ### 5.5 Control flow (40–43, 50–52, 61, 85–87)
 
@@ -573,7 +573,7 @@ Four emitters, one dispatch function each:
 | Arch | Dispatch fn | File:line | NYI helper |
 |---|---|---|---|
 | x86_64 | `ir_emit_x86_insn` | `src/ir.kr:9061` | `x86_nyi_op`, `src/ir.kr:8811` |
-| AArch64 | `ir_emit_arm64_insn` | `src/ir_aarch64.kr:949` | `a64_nyi_op`, `src/ir_aarch64.kr:738` |
+| AArch64 | `ir_emit_arm64_insn` | `src/ir_aarch64.kr:994` | `a64_nyi_op`, `src/ir_aarch64.kr:738` |
 | RV32IMC | `ir_emit_riscv_insn` | `src/ir_riscv.kr:1113` | `rv_nyi_op`, `src/ir_riscv.kr:133` |
 | Xtensa LX6 | `ir_emit_xtensa_insn` | `src/ir_xtensa.kr:1713` | `xt_nyi_op`, `src/ir_xtensa.kr:157` |
 
@@ -720,7 +720,7 @@ therefore cannot add an anonymous `IR_SYSCALL` by accident.
 
 Readers: `ir_insn_origin_at()` (`src/ir.kr:531`), called from the op-52
 handler on all three IR backends that have one (`src/ir.kr:10692`,
-`src/ir_aarch64.kr:1734`, `src/ir_riscv.kr:2348`). Each falls back to
+`src/ir_aarch64.kr:1779`, `src/ir_riscv.kr:2348`). Each falls back to
 `"an unnamed syscall lowering"` when the slot is 0 — never a guessed name.
 
 Note that `IR_SYSCALL_RAW` (85) is a *different* opcode, emitted through plain
@@ -734,14 +734,14 @@ Note that `IR_SYSCALL_RAW` (85) is a *different* opcode, emitted through plain
 
 | Op | x86 branch | arm64 branch | What differs |
 |---|---|---|---|
-| 52 `IR_SYSCALL` | `src/ir.kr:10681` | `src/ir_aarch64.kr:1715` | Windows → IAT thunks; macOS numbers get `0x2000000` OR'd; arm64 `open`→`openat` shift on Linux/Android but not macOS |
-| 70 `IR_ALLOC` | `src/ir.kr:9961`, `9072` | `src/ir_aarch64.kr:1759`, `1690` | Windows → `VirtualAlloc(NULL, size+8, 0x3000, 4)` through the IAT; elsewhere inline `mmap` with flags `0x22` (Linux/Android) vs `0x1002` (macOS) |
+| 52 `IR_SYSCALL` | `src/ir.kr:10681` | `src/ir_aarch64.kr:1760` | Windows → IAT thunks; macOS numbers get `0x2000000` OR'd; arm64 `open`→`openat` shift on Linux/Android but not macOS |
+| 70 `IR_ALLOC` | `src/ir.kr:9961`, `9072` | `src/ir_aarch64.kr:1804`, `1690` | Windows → `VirtualAlloc(NULL, size+8, 0x3000, 4)` through the IAT; elsewhere inline `mmap` with flags `0x22` (Linux/Android) vs `0x1002` (macOS) |
 | 71 `IR_DEALLOC` | `src/ir.kr:9961` | `1717` | `VirtualFree(ptr-8,0,MEM_RELEASE)` vs `munmap` |
 | 85 `IR_SYSCALL_RAW` | — | `2047` | syscall-number register is **x16 on macOS, x8 elsewhere** |
 | 113/114 `IR_EXEC*` | `10380`/`10487` | `2353`/`2446` | `CreateProcessA` + `WaitForSingleObject` + `ExitProcess` vs `execve` |
 | 115 `IR_SET_EXEC` | `10595` | `2546` | **emits nothing on Windows**; `fchmodat` on Linux/Android, `chmod` nr 15 on macOS |
 | 119 `IR_TIME_NS` | `10672`/`10705` | `2603`/`2620`/`2643` | QPC/QPF on Windows, `gettimeofday` on macOS, `clock_gettime(CLOCK_MONOTONIC)` on Linux/Android |
-| 131 `IR_ARR_CHECK` | `10816` | `2744` | trap sequence differs per OS; **on arm64 + Windows the check is skipped entirely** (`if target_os == 2 { return }`, `src/ir_aarch64.kr:2816`) |
+| 131 `IR_ARR_CHECK` | `10816` | `2744` | trap sequence differs per OS; **on arm64 + Windows the check is skipped entirely** (`if target_os == 2 { return }`, `src/ir_aarch64.kr:2861`) |
 | 146 `IR_MODULE_PATH` | `10615` | `2581` | `GetModuleFileNameA` on Windows; otherwise the emitter loads 0 |
 
 Verified concretely — `alloc(64)` on Linux x86_64 emits an inline `mmap` and
@@ -785,7 +785,7 @@ Under `--emit=pe` the same program's binary contains `VirtualAlloc` and
 
 | Op | Divergence |
 |---|---|
-| 126 `IR_ISB` | real `ISB` on arm64 (`src/ir_aarch64.kr:2771`); **complete no-op on x86_64**, zero bytes emitted (`src/ir.kr:11765`) |
+| 126 `IR_ISB` | real `ISB` on arm64 (`src/ir_aarch64.kr:2816`); **complete no-op on x86_64**, zero bytes emitted (`src/ir.kr:11765`) |
 | 128 `IR_ICACHE_INV` | `IC IVAU; DSB ISH; ISB` on arm64; **no-op on x86_64** (`src/ir.kr:11792`) |
 | 129 / 130 `IR_DSB` / `IR_DMB` | distinct instructions on arm64 (`DSB SY` / `DMB ISH`); **both collapse to the same `MFENCE`** on x86 — two IR ops, one instruction |
 | 127 `IR_DCACHE_FLUSH` | `CLFLUSH; MFENCE` on x86 vs `DC CIVAC; DSB ISH; ISB` to Point of Coherency on arm64 — different reach; the arm64 form needs EL1+ on real hardware |
@@ -863,7 +863,7 @@ document. It runs once per function, after lowering and before liveness.
 
 `--O0` sets `ir_opt_level = 0` (`src/ir.kr:12782`, written only at
 `src/main.kr:9336`) and each backend skips the whole call
-(`src/ir.kr:14956`, `src/ir_aarch64.kr:3323`, `src/ir_riscv.kr:2414`,
+(`src/ir.kr:14956`, `src/ir_aarch64.kr:3368`, `src/ir_riscv.kr:2414`,
 `src/ir_xtensa.kr:2816`). Note the spelling: **`--O0`**, two dashes. There is
 no `-O0`, `-O1`, `--O2` — no other write to `ir_opt_level` exists.
 
@@ -1064,7 +1064,7 @@ fixup sequences and macOS's syscall-number register) and x18
 `IR_ASM_BLOCK` (op 96) anywhere in its body, or it is `@naked`.
 `ir_x86_fn_wide_ok` (`src/ir.kr:6564`) / `ir_a64_fn_wide_ok`
 (`src/ir_aarch64.kr:289`) test only the former; the call sites
-(`src/ir.kr:14956`, `src/ir_aarch64.kr:3343`) add `&& is_naked == 0`. The asm
+(`src/ir.kr:14956`, `src/ir_aarch64.kr:3388`) add `&& is_naked == 0`. The asm
 check must stay a **whole-body scan, not a constraint-list scan** — the
 comment at `src/ir.kr:6479` records a real case where a CPUID block wrote r13
 with no constraint naming it. `@naked` is excluded because it gets
@@ -1145,7 +1145,7 @@ it as well.
 
 **Slots are vreg-indexed, one per vreg**, not a compacted set of spilled
 values: `ir_spill_count = ir_vreg_next - 1` (`src/ir.kr:14923`,
-`src/ir_aarch64.kr:3365`). The comments at `src/ir.kr:8173` and
+`src/ir_aarch64.kr:3410`). The comments at `src/ir.kr:8173` and
 `src/ir_aarch64.kr:353` explain why the older `vreg - IR_NUM_REGS - 1`
 mapping was removed: it assumed a low-numbered vreg could never spill, but a
 colour ceiling can spill **any** vreg, and the subtraction underflowed. Found
@@ -1157,7 +1157,7 @@ first on xtensa.
 - **arm64:** `IR_A64_OVERFLOW_RESERVE + (vreg-1)*8`
   (`src/ir_aarch64.kr:353`). The reserve is **not** a constant 128 — it is
   sized per function to the actual outgoing overflow-arg need
-  (`src/ir_aarch64.kr:3424`), with 128 kept only as a floor for asm-block and
+  (`src/ir_aarch64.kr:3469`), with 128 kept only as a floor for asm-block and
   Windows functions.
 - **The 32760-byte limit is real.** `ir_a64_ldr_sp` / `ir_a64_str_sp`
   (`src/ir_aarch64.kr:694`/`649`) emit the imm12-scaled form when
@@ -1338,10 +1338,10 @@ removed; do not re-add them without re-verifying.
    the `--debug` artifact is byte-identical to the non-debug one, and an OOB
    store compiles clean and runs. Legacy x86_64 does emit the check;
    IR arm64 does (`src/ir.kr:3821`/`4551` + trap at
-   `src/ir_aarch64.kr:2832`). `arr_count_lookup` is simply absent from
+   `src/ir_aarch64.kr:2877`). `arr_count_lookup` is simply absent from
    `src/codegen_aarch64.kr`. Pre-existing, all targets.
 10. **`IR_ARR_CHECK` is skipped entirely on arm64 + Windows**
-    (`src/ir_aarch64.kr:2816`, `if target_os == 2 { return }`). Deliberate —
+    (`src/ir_aarch64.kr:2861`, `if target_os == 2 { return }`). Deliberate —
     the comment says the `ExitProcess`-via-IAT sequence does not fit the
     short-jump pattern — but it means `--debug` bounds checking does not
     exist on that pair.
@@ -1524,7 +1524,7 @@ opcodes that were never emitted.
 |---|---|---|
 | `--target=none` / bare metal | **yes** — 39 `target_os == 4` sites, four trap choke points, the `ir_bm_*` lowering layer (`src/ir.kr:1474`–`1538`) | **no** — zero `target_os == 4` sites anywhere. §12 does not apply |
 | Dynamic linking from the IR | **no** — no PLT/GOT/`DT_NEEDED` path | **yes** — `dyn_sym_registry.mlr` + `format_elf_dyn.mlr`, called from inside the x86 IR emitter: `dyn_sym_lookup` decides whether an `IR_CALL` becomes a PLT call (`ir.mlr:9410`), `dyn_call_record` registers the relocation (`:9425`), `dyn_sym_count_get() > 0` switches the whole output to dynamic ELF (`:13115`) |
-| arm64 `IR_ADD_IMM`/`IR_SUB_IMM` (135/136) | handled (`src/ir_aarch64.kr:1321`) and produced (const-fold gate includes arch 1, `src/ir.kr:13161`) | **neither** — the const-folder excludes arm64 (`ir.mlr:11683`), so the emitter has no handler. Internally consistent, but a genuine gap |
+| arm64 `IR_ADD_IMM`/`IR_SUB_IMM` (135/136) | handled (`src/ir_aarch64.kr:1366`) and produced (const-fold gate includes arch 1, `src/ir.kr:13161`) | **neither** — the const-folder excludes arm64 (`ir.mlr:11683`), so the emitter has no handler. Internally consistent, but a genuine gap |
 | cmp-with-immediate fusion | arch 0 **and** 1 (`src/ir.kr:13057`, arm64 capped at imm12 4095) | arch 0 only (`ir.mlr:11590`) |
 | pow2 `MUL` → `SHL_IMM` | ungated, with a shamt guard for arch 2/3 | present, gated to arch 0/1 — *not* absent, contrary to an older project note |
 | `--emit=lkm` | yes; the IR gate is `emit_mode != 3 && emit_mode != 7` | no; the gate is `emit_mode != 3` alone |

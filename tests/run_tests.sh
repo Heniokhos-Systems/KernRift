@@ -9745,6 +9745,16 @@ pe_calls() {   # <pe> <x86_64|arm64>
                     done
                     printf 'span %d %d %s\n' "$slot" $((0x${B[i+9]})) "${st:-,}"
                 fi
+            elif [ "${B[i]}${B[i+1]}" = "ff15" ] && [ "${B[i+6]}${B[i+7]}${B[i+8]}" = "83f86d" ]; then
+                # The read/file_read builtin's ERROR_BROKEN_PIPE probe (#136):
+                # `call [GetLastError]` followed by `cmp eax,109`, inside the
+                # ReadFile call's own area -- so no sub/add rsp brackets it:
+                # frame `-`, and no span (the span scan keys on the 48 83 c4
+                # that follows a bracketed call).
+                disp=$(( 0x${B[i+5]}${B[i+4]}${B[i+3]}${B[i+2]} )); [ "$disp" -ge 2147483648 ] && disp=$((disp - 4294967296))
+                tgt=$((va + i + 6 + disp)); slot=$(pe_slot_of "$tgt")
+                if [ -z "$slot" ]; then printf 'badiat 0x%x 0x%x\n' $((va + i)) "$tgt"; continue; fi
+                printf 'iat 0x%x %d %s -\n' $((va + i)) "$slot" "$(pe_slot_name "$f" "$idt_off" "$tgt")"
             elif [ "${B[i]}" = "e8" ] && [ $((i + 5)) -le "$n" ]; then
                 disp=$(( 0x${B[i+4]}${B[i+3]}${B[i+2]}${B[i+1]} )); [ "$disp" -ge 2147483648 ] && disp=$((disp - 4294967296))
                 printf 'direct 0x%x 0x%x\n' $((va + i)) $((va + i + 5 + disp))
@@ -27593,6 +27603,7 @@ wfe_linux win_file_errors_read_linux_arm64_qemu arm64 ir win_file_errors_read "$
 wfe_win win_file_errors_read_builtin_windows_wine ir win_file_errors_read "$WFE_FX/win_file_errors_read.windows.expected" none
 wfe_shape win_file_errors_shape_x86_64 x86_64 ir abc
 wfe_shape win_file_errors_shape_x86_64_legacy x86_64 legacy abc
+wfe_shape win_file_errors_shape_arm64 arm64 ir abc
 [ -n "$WFE_WINE" ] && WINEPREFIX="$WFE_D/pfx" "$(dirname "$WFE_WINE")/wineserver" -k > /dev/null 2>&1
 rm -rf "$WFE_D"
 # A return type and a slice element type have no runtime width on hosted
