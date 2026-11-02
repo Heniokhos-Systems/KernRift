@@ -46,3 +46,4 @@ c7_leaf_blobs_unchanged
 c7_cp932_leaf_native_x86_64
 native_judge_selftest
 pe_unwind_checker_optc_selftest
+pe_unwind_sp_site_audit

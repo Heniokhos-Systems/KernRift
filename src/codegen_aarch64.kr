@@ -197,6 +197,7 @@ fn emit_a64_stp_pre(uint64 rt1, uint64 rt2, uint64 rn, uint64 offset) {
     uint64 imm7 = (offset / 8) & 0x7F
     uint64 insn = 0xA9800000 | (imm7 << 15) | (rt2 << 10) | (rn << 5) | rt1
     emit_a64(insn)
+    if rn == 31 { uw_sp_moves() }       // #143 option C backstop (spec 2.5.1)
 }
 
 // LDP X29, X30, [SP], #imm7*8 (post-index, for epilogue)
@@ -204,6 +205,7 @@ fn emit_a64_ldp_post(uint64 rt1, uint64 rt2, uint64 rn, uint64 offset) {
     uint64 imm7 = (offset / 8) & 0x7F
     uint64 insn = 0xA8C00000 | (imm7 << 15) | (rt2 << 10) | (rn << 5) | rt1
     emit_a64(insn)
+    if rn == 31 { uw_sp_moves() }
 }
 
 // SUB SP, SP, #imm (large-frame safe)
@@ -215,6 +217,7 @@ fn emit_a64_sub_sp_imm(uint64 imm) {
         emit_a64_mov_imm(16, imm)
         emit_a64(0xCB3063FF)
     }
+    uw_sp_moves()
 }
 
 // ADD SP, SP, #imm (large-frame safe)
@@ -226,6 +229,15 @@ fn emit_a64_add_sp_imm(uint64 imm) {
         emit_a64_mov_imm(16, imm)
         emit_a64(0x8B3063FF)
     }
+    uw_sp_moves()
+}
+
+// #143 option C (spec 2.5.1): one arm64 word that writes SP in a body
+// (computed `sub/add sp, sp, #n` of the >8-argument areas, the exec_process
+// and time_ns words), so it reports to the backstop like the helpers above.
+fn emit_a64_sp_word(uint64 w) {
+    emit_a64(w)
+    uw_sp_moves()
 }
 
 // ---- Range-checked branch displacement encoders ----
@@ -3320,7 +3332,8 @@ fn gen_expr_a64(uint64 node) {
             if cp_stack_args > 0 {
                 uint64 cp_stack_bytes = cp_stack_args * 8
                 uint64 cp_sub_insn = 0xD1000000 | (cp_stack_bytes << 10) | (31 << 5) | 31
-                emit_a64(cp_sub_insn)
+                uw_sp_site_set("G4")
+                emit_a64_sp_word(cp_sub_insn)
                 uint64 cp_real_overflow = arg_count - 8
                 uint64 cp_oi = 0
                 while cp_oi < cp_real_overflow {
@@ -3343,7 +3356,7 @@ fn gen_expr_a64(uint64 node) {
             if cp_stack_args > 0 {
                 uint64 cp_cleanup = cp_stack_args * 8
                 uint64 cp_add_insn = 0x91000000 | (cp_cleanup << 10) | (31 << 5) | 31
-                emit_a64(cp_add_insn)
+                emit_a64_sp_word(cp_add_insn)
             }
             return
         }
@@ -3597,6 +3610,7 @@ fn gen_expr_a64(uint64 node) {
                 emit_a64_mov(19, 0)                 // x19 = path
                 emit_a64_load_x0(pk1_execprocessa)       // x0 = argv
                 emit_a64_mov(20, 0)                 // x20 = argv (walk ptr)
+                uw_sp_site_set("G1")
                 emit_a64_sub_sp_imm(0x4E0)
                 // Zero STARTUPINFO: 8× stp xzr,xzr,[x0],#16 fills 128 bytes at sp+0x60
                 emit_a64(0x910180E0)                // add x0, sp, #0x60
@@ -3701,7 +3715,8 @@ fn gen_expr_a64(uint64 node) {
                 // sub sp, sp, #0xE0 (224 bytes, 16-aligned). #154 (found by
                 // #143's checker): this word was 0xD10380FF, which encodes
                 // `sub sp, x7, #0xe0` -- SP set from whatever x7 held.
-                emit_a64(0xD10383FF)
+                uw_sp_site_set("G1")
+                emit_a64_sp_word(0xD10383FF)
                 // Zero out the STARTUPINFOA and PI area at sp+0x60
                 // x0 = sp+0x60, fill 128 bytes with zero
                 emit_a64(0x910180E0)  // add x0, sp, #0x60
@@ -3753,7 +3768,7 @@ fn gen_expr_a64(uint64 node) {
                 // Load exit code
                 emit_a64(0xB94003E0)  // ldr w0, [sp, #0]
                 // add sp, sp, #0xE0
-                emit_a64(0x910383FF)   // #154: was 0x910380FF = add sp, x7, #0xe0
+                emit_a64_sp_word(0x910383FF)   // #154: was 0x910380FF = add sp, x7, #0xe0
                 // ExitProcess(w0 already in x0)
                 emit_a64_win_call_iat(0)
             } else {
@@ -4436,7 +4451,8 @@ fn gen_expr_a64(uint64 node) {
                 // at src/codegen.kr. AAPCS64 doesn't require shadow
                 // space, but we reserve 16 bytes for the two DWORDs-
                 // or-QWORDs the kernel32 calls write.
-                emit_a64(0xD10043FF)                       // sub sp, sp, #16
+                uw_sp_site_set("G2")
+                emit_a64_sp_word(0xD10043FF)               // sub sp, sp, #16
                 emit_a64(0x910003E0)                       // add x0, sp, #0 (&freq)
                 emit_a64_win_call_iat(15)                  // QueryPerformanceFrequency
                 emit_a64(0x910023E0)                       // add x0, sp, #8 (&counter)
@@ -4444,7 +4460,7 @@ fn gen_expr_a64(uint64 node) {
                 // Load results. x11 = counter, x12 = freq.
                 emit_a64_ldr(11, 31, 8)                    // x11 = counter
                 emit_a64_ldr(12, 31, 0)                    // x12 = freq
-                emit_a64(0x910043FF)                       // add sp, sp, #16
+                emit_a64_sp_word(0x910043FF)               // add sp, sp, #16
                 // x9 = counter / freq (secs)
                 emit_a64_udiv(9, 11, 12)
                 // x10 = counter - (secs * freq) = frac
@@ -4912,7 +4928,8 @@ fn gen_expr_a64(uint64 node) {
             uint64 stack_bytes = stack_args * 8
             // sub sp, sp, #stack_bytes
             uint64 sub_insn = 0xD1000000 | (stack_bytes << 10) | (31 << 5) | 31
-            emit_a64(sub_insn)
+            uw_sp_site_set("G3")
+            emit_a64_sp_word(sub_insn)
             // Store overflow args at [sp+0], [sp+8], ...
             uint64 oi = 0
             while oi < ovf_n_a {
@@ -4964,7 +4981,7 @@ fn gen_expr_a64(uint64 node) {
         if stack_args > 0 {
             uint64 cleanup = stack_args * 8
             uint64 add_insn = 0x91000000 | (cleanup << 10) | (31 << 5) | 31
-            emit_a64(add_insn)
+            emit_a64_sp_word(add_insn)
         }
 
         // Set expr_is_float_a64 based on callee's return type
@@ -6046,6 +6063,8 @@ fn gen_stmt_a64(uint64 node) {
             wci = nxti
         }
 
+        uw_sp_site_set("G5")
+        uw_sp_moves()   // #143 option C: an asm block is opaque, it may move SP
         uint32 single_tok = ast_data1(node)
         uint64 ws = single_tok
         if ws != 0 {

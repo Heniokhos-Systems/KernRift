@@ -29099,6 +29099,16 @@ case "$PEU_RC" in
     *) PEU_WHY=$(grep -m1 '^FAIL ' <<< "$PEU_OUT" | cut -c1-300)
        pe_row_bad pe_unwind_checker_optc_selftest "rc=$PEU_RC ${PEU_WHY:-$(tail -c 300 <<< "$PEU_OUT" | tr '\n' '|')}" ;;
 esac
+# Option C backstop pairing (#143 A19b; spec 2.5.1 check 1): every SP helper
+# calls uw_sp_moves(), every moving/folded site of tests/pe_unwind_sp_sites.lst
+# calls an SP helper, and a sweep of the four backends finds no raw RSP/SP
+# encoding outside the helpers that is not on tests/pe_unwind_sp_raw.lst.
+if ! command -v python3 > /dev/null 2>&1; then pe_row_skip pe_unwind_sp_site_audit "no python3"
+else
+    PEU_O=$(python3 "$DIR/helpers/sp_site_audit.py" "$DIR/.." 2>&1); PEU_RC=$?
+    if [ "$PEU_RC" = 0 ]; then pe_row_ok pe_unwind_sp_site_audit "$(tail -1 <<< "$PEU_O" | sed 's/^sp_site_audit: PASS (//; s/)$//')"
+    else pe_row_bad pe_unwind_sp_site_audit "rc=$PEU_RC $(grep -m1 '^FAIL' <<< "$PEU_O" | cut -c1-250) ($(tail -1 <<< "$PEU_O"))"; fi
+fi
 # The Wine harness change (WINEDLLOVERRIDES=winedbg.exe=d, see t10_wine) must
 # not mask a failure: through t10_wine itself, the base compiler's table-less
 # image still exits 0 (#143's red stays visible), while the frame-pointer

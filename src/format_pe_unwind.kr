@@ -30,6 +30,65 @@ static uint64 uw_test_no_unwind = 0
 static uint64 uw_test_listing_path = 0
 
 // ---------------------------------------------------------------------------
+// Option C (#143, spec 2.5.1): the SP-move backstop.
+//
+// Every SP helper (emit_win_alloc_stack/_free, emit_x64_push_r/_pop_r,
+// emit_x64_rsp_sub/_add, emit_a64_sub/add_sp_imm, emit_a64_stp_pre,
+// emit_a64_ldp_post, emit_a64_sp_word and the x64 IR call-frame helpers)
+// calls uw_sp_moves() after emitting a body instruction that writes RSP/SP.
+// The emitters name the site family (spec 2.5.1 site table: X1..X15, L1..L10,
+// A1..A5, G1..G6) in uw_sp_site before they reach a helper. When the current
+// Windows function was classified SP-fixed (uw_fn_sp_fixed, set by the
+// classifier before the prologue), a report is a classifier miss: the build
+// stops with a located internal error instead of shipping a wrong table.
+// Prologue and epilogue code that uses the same helpers sets uw_sp_frame.
+//
+// --test-sp-site-log=PATH (hidden, test-only): append the site id of every
+// report of a Windows compile to PATH, one per line (spec 2.5.1 check 2).
+static uint64 uw_fn_sp_fixed = 0
+static uint64 uw_sp_site = 0
+static uint64 uw_sp_frame = 0
+static uint64 uw_sp_log_path = 0
+static uint64 uw_sp_log_fd = 0xFFFFFFFFFFFFFFFF
+static uint64 uw_sp_fn_name = 0
+
+fn uw_sp_site_set(uint64 id) {
+    uw_sp_site = id
+}
+
+fn uw_sp_moves() {
+    if target_os != 2 { return }
+    if uw_sp_frame != 0 { return }
+    uint64 id = uw_sp_site
+    if id == 0 { id = "unnamed" }
+    if uw_sp_log_path != 0 {
+        if uw_sp_log_fd == 0xFFFFFFFFFFFFFFFF { uw_sp_log_fd = open_output_or_die(uw_sp_log_path) }
+        write(uw_sp_log_fd, id, str_len(id))
+        write(uw_sp_log_fd, "\n", 1)
+    }
+    if uw_fn_sp_fixed != 0 {
+        // located: the function's name token (uw_fn_name), when known
+        uint64 tk = 0xFFFFFFFFFFFFFFFF
+        if uw_cur != 0xFFFFFFFFFFFFFFFF { tk = uw_get(uw_cur, 96) }
+        if tk != 0xFFFFFFFFFFFFFFFF { diag_loc_head(tk, 0) }
+        uint64 m = "internal: SP moved in a frame-pointer-less Windows function"
+        if tk == 0xFFFFFFFFFFFFFFFF { write(2, "error: ", 7) }
+        write(2, m, str_len(m))
+        if tk != 0xFFFFFFFFFFFFFFFF {
+            write(2, " '", 2)
+            write(2, cg_source + tok_text_start(tk), tok_text_len(tk))
+            write(2, "'", 1)
+        }
+        write(2, " (site ", 7)
+        write(2, id, str_len(id))
+        uint64 m2 = "; #143 option C backstop: the classifier missed it)\n"
+        write(2, m2, str_len(m2))
+        if tk != 0xFFFFFFFFFFFFFFFF { diag_span_of(tk) }
+        exit(1)
+    }
+}
+
+// ---------------------------------------------------------------------------
 // The record table. One fixed-size record per function, grown by doubling
 // (like fn_table); no cap.
 //

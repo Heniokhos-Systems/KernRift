@@ -1,0 +1,56 @@
+# tests/pe_unwind_sp_raw.lst -- #143 option C (spec 2.5.1, check 1 (c)): the reviewed raw
+# SP-writing encodings that stay outside the SP helpers, each with its reason.
+# Format: file|function|code text (comment stripped, whitespace collapsed)|count|reason
+# Checked by tests/helpers/sp_site_audit.py both ways: a raw hit not listed fails, a stale entry fails.
+codegen.kr|asm_emit_x86|if asm_match(sptr, 0, "popfq", 5) != 0 && slen == 5 { emit_byte(0x9D); return }|1|the inline assembler; an asm block reports once as an op/node (X14, L9)
+codegen.kr|asm_emit_x86|if asm_match(sptr, 0, "pushfq", 6) != 0 && slen == 6 { emit_byte(0x9C); return }|1|the inline assembler; an asm block reports once as an op/node (X14, L9)
+codegen.kr|asm_emit_x86|if pr >= 8 { emit_byte(0x41); emit_byte(0x50 + (pr - 8)) } else { emit_byte(0x50 + pr) }|1|the inline assembler; an asm block reports once as an op/node (X14, L9)
+codegen.kr|asm_emit_x86|if qr >= 8 { emit_byte(0x41); emit_byte(0x58 + (qr - 8)) } else { emit_byte(0x58 + qr) }|1|the inline assembler; an asm block reports once as an op/node (X14, L9)
+codegen.kr|emit_elf_debug_footer|uint8 rop = 0x50 + (wdso & 0x1F)|1|DWARF data byte, not code
+codegen.kr|emit_elf_lkm|emit_byte(0x48); emit_byte(0x83); emit_byte(0xc4); emit_byte(0x08)|2|Linux kernel-module stub (target_os != 2)
+codegen.kr|emit_elf_lkm|emit_byte(0x48); emit_byte(0x83); emit_byte(0xec); emit_byte(0x08)|2|Linux kernel-module stub (target_os != 2)
+codegen.kr|emit_pop_rcx|emit_byte(0x59)|1|Linux/macOS file_size temporaries only (L11: codegen.kr emit_push_rax/emit_pop_rcx callers are non-Windows)
+codegen.kr|emit_push_rax|emit_byte(0x50)|1|Linux/macOS file_size temporaries only (L11: codegen.kr emit_push_rax/emit_pop_rcx callers are non-Windows)
+codegen.kr|emit_setcc_typed|else if op_tok_kind == 37 { emit_byte(0x9C) }|1|second byte of setl/setge (0F 9C / 0F 9D), not pushf/popf
+codegen.kr|emit_setcc_typed|else if op_tok_kind == 40 { emit_byte(0x9D) }|1|second byte of setl/setge (0F 9C / 0F 9D), not pushf/popf
+codegen.kr|emit_store_rdx_to_stack|emit_byte(0x54)|1|ModRM 0x54 + SIB 0x24 of an [rsp+disp8] operand, not push rsp
+codegen.kr|gen_expr|emit_byte(0x54); emit_byte(0x24)|3|ModRM 0x54 + SIB 0x24 of an [rsp+disp8] operand, not push rsp
+codegen.kr|gen_expr|emit_byte(0x54); emit_byte(0x24); uint8 pr_dlb = digit_buf; emit_byte(pr_dlb)|1|ModRM 0x54 + SIB 0x24 of an [rsp+disp8] operand, not push rsp
+codegen.kr|gen_expr|emit_byte(0x57)|1|Linux/macOS-only execve argv push (L11, X8 non-Windows branch)
+codegen.kr|gen_expr|emit_byte(0x6A); emit_byte(0x00)|1|Linux/macOS-only execve argv push (L11, X8 non-Windows branch)
+codegen.kr|gen_function|emit_byte(0x53)|1|prologue/epilogue (excluded: not body code; spec 2.5.1 X17, L12, A8, G8)
+codegen.kr|gen_function|emit_byte(0x55)|1|prologue/epilogue (excluded: not body code; spec 2.5.1 X17, L12, A8, G8)
+codegen.kr|gen_function|emit_byte(0x5B)|1|prologue/epilogue (excluded: not body code; spec 2.5.1 X17, L12, A8, G8)
+codegen.kr|gen_function|if target_os == 2 { emit_byte(0x5D) }|1|prologue/epilogue (excluded: not body code; spec 2.5.1 X17, L12, A8, G8)
+codegen_aarch64.kr|gen_expr_a64|emit_a64(0x910043FF)|3|Linux/macOS-only sub/add sp,#16 (execve argv, time_ns; L11/G7)
+codegen_aarch64.kr|gen_expr_a64|emit_a64(0xD10043FF)|3|Linux/macOS-only sub/add sp,#16 (execve argv, time_ns; L11/G7)
+codegen_aarch64.kr|gen_expr_a64|emit_a64_sp_word(0x910043FF)|1|helper-routed: this word (or the variable it defines) is emitted through emit_a64_sp_word, which reports (G1-G4)
+codegen_aarch64.kr|gen_expr_a64|emit_a64_sp_word(0x910383FF)|1|helper-routed: this word (or the variable it defines) is emitted through emit_a64_sp_word, which reports (G1-G4)
+codegen_aarch64.kr|gen_expr_a64|emit_a64_sp_word(0xD10043FF)|1|helper-routed: this word (or the variable it defines) is emitted through emit_a64_sp_word, which reports (G1-G4)
+codegen_aarch64.kr|gen_expr_a64|emit_a64_sp_word(0xD10383FF)|1|helper-routed: this word (or the variable it defines) is emitted through emit_a64_sp_word, which reports (G1-G4)
+codegen_aarch64.kr|gen_expr_a64|uint64 add_insn = 0x91000000 | (cleanup << 10) | (31 << 5) | 31|1|helper-routed: this word (or the variable it defines) is emitted through emit_a64_sp_word, which reports (G1-G4)
+codegen_aarch64.kr|gen_expr_a64|uint64 cp_add_insn = 0x91000000 | (cp_cleanup << 10) | (31 << 5) | 31|1|helper-routed: this word (or the variable it defines) is emitted through emit_a64_sp_word, which reports (G1-G4)
+codegen_aarch64.kr|gen_expr_a64|uint64 cp_sub_insn = 0xD1000000 | (cp_stack_bytes << 10) | (31 << 5) | 31|1|helper-routed: this word (or the variable it defines) is emitted through emit_a64_sp_word, which reports (G1-G4)
+codegen_aarch64.kr|gen_expr_a64|uint64 sub_insn = 0xD1000000 | (stack_bytes << 10) | (31 << 5) | 31|1|helper-routed: this word (or the variable it defines) is emitted through emit_a64_sp_word, which reports (G1-G4)
+codegen_aarch64.kr|gen_function_a64|patch_u32(epilogue_add, 0x91000000 | (frame << 10) | (31 << 5) | 31)|1|prologue/epilogue (excluded: not body code; spec 2.5.1 X17, L12, A8, G8)
+codegen_aarch64.kr|gen_function_a64|patch_u32(epilogue_add, 0x91000000 | (lo << 10) | (31 << 5) | 31)|1|prologue/epilogue (excluded: not body code; spec 2.5.1 X17, L12, A8, G8)
+codegen_aarch64.kr|gen_function_a64|patch_u32(post_add_patch, 0x91400000 | (hi << 10) | (31 << 5) | 31)|1|prologue/epilogue (excluded: not body code; spec 2.5.1 X17, L12, A8, G8)
+codegen_aarch64.kr|gen_function_a64|patch_u32(pre_sub_patch, 0xD1400000 | (hi << 10) | (31 << 5) | 31)|1|prologue/epilogue (excluded: not body code; spec 2.5.1 X17, L12, A8, G8)
+codegen_aarch64.kr|gen_function_a64|patch_u32(prologue_start, 0xD1000000 | (frame << 10) | (31 << 5) | 31)|1|prologue/epilogue (excluded: not body code; spec 2.5.1 X17, L12, A8, G8)
+codegen_aarch64.kr|gen_function_a64|patch_u32(prologue_start, 0xD1000000 | (lo << 10) | (31 << 5) | 31)|1|prologue/epilogue (excluded: not body code; spec 2.5.1 X17, L12, A8, G8)
+ir.kr|ir_emit_x86_function|emit_byte(0x41); emit_byte(0x54)|1|prologue/epilogue (excluded: not body code; spec 2.5.1 X17, L12, A8, G8)
+ir.kr|ir_emit_x86_function|emit_byte(0x41); emit_byte(0x55)|1|prologue/epilogue (excluded: not body code; spec 2.5.1 X17, L12, A8, G8)
+ir.kr|ir_emit_x86_function|emit_byte(0x41); emit_byte(0x56)|1|prologue/epilogue (excluded: not body code; spec 2.5.1 X17, L12, A8, G8)
+ir.kr|ir_emit_x86_function|emit_byte(0x41); emit_byte(0x57)|1|prologue/epilogue (excluded: not body code; spec 2.5.1 X17, L12, A8, G8)
+ir.kr|ir_emit_x86_function|emit_byte(0x41); emit_byte(0x5C)|1|prologue/epilogue (excluded: not body code; spec 2.5.1 X17, L12, A8, G8)
+ir.kr|ir_emit_x86_function|emit_byte(0x41); emit_byte(0x5D)|1|prologue/epilogue (excluded: not body code; spec 2.5.1 X17, L12, A8, G8)
+ir.kr|ir_emit_x86_function|emit_byte(0x41); emit_byte(0x5E)|1|prologue/epilogue (excluded: not body code; spec 2.5.1 X17, L12, A8, G8)
+ir.kr|ir_emit_x86_function|emit_byte(0x41); emit_byte(0x5F)|1|prologue/epilogue (excluded: not body code; spec 2.5.1 X17, L12, A8, G8)
+ir.kr|ir_emit_x86_function|emit_byte(0x53)|1|prologue/epilogue (excluded: not body code; spec 2.5.1 X17, L12, A8, G8)
+ir.kr|ir_emit_x86_function|emit_byte(0x55)|1|prologue/epilogue (excluded: not body code; spec 2.5.1 X17, L12, A8, G8)
+ir.kr|ir_emit_x86_function|emit_byte(0x5B)|1|prologue/epilogue (excluded: not body code; spec 2.5.1 X17, L12, A8, G8)
+ir.kr|ir_emit_x86_function|emit_byte(0x5D)|1|prologue/epilogue (excluded: not body code; spec 2.5.1 X17, L12, A8, G8)
+ir.kr|ir_emit_x86_insn|emit_byte(0x57)|1|Linux/macOS-only execve argv push (L11, X8 non-Windows branch)
+ir.kr|ir_emit_x86_insn|emit_byte(0x6A); emit_byte(0x00)|1|Linux/macOS-only execve argv push (L11, X8 non-Windows branch)
+ir.kr|ir_emit_x86_insn|if op == 123 { emit_byte(0x9D) }|1|second byte of setl/setge (0F 9C / 0F 9D), not pushf/popf
+ir_aarch64.kr|ir_a64_win_alloc_low|emit_a64(0xCB3063FF)|1|prologue/epilogue (excluded: not body code; spec 2.5.1 X17, L12, A8, G8)

@@ -1096,6 +1096,15 @@ fn ir_emit_arm64_win_syscall(uint64 abstract_nr, uint64 dest_v, uint64 dst_r) {
 // Per-instruction emitter
 // ---------------------------------------------------------------------------
 
+// #143 option C (spec 2.5.1 site table): the site family of an arm64 IR op.
+fn ir_a64_sp_site(uint64 op) -> uint64 {
+    if op == 52 { return "A1" }
+    if op == 113 { return "A2" }
+    if op == 114 { return "A3" }
+    if op == 96 { return "A5" }
+    return "unlisted"
+}
+
 fn ir_emit_arm64_insn(uint64 ii) {
     uint64 op = ir_insn_opcode(ii)
     // Opcode 0 = NOP: LICM-elided / nop-marked slots (see ir.kr). Must be
@@ -1106,6 +1115,7 @@ fn ir_emit_arm64_insn(uint64 ii) {
     uint64 s1_v = ir_insn_src1(ii)
     uint64 s2_v = ir_insn_src2(ii)
     uint64 imm = ir_insn_imm(ii)
+    if target_os == 2 { uw_sp_site_set(ir_a64_sp_site(op)) }
 
     // DWARF line-table recording — see ir.kr's ir_emit_x86_insn.
     uint64 ir_src_tok = ir_insn_src_tok_at(ii)
@@ -2534,6 +2544,7 @@ fn ir_emit_arm64_insn(uint64 ii) {
 
     // ----- IR_ASM_BLOCK (96): inline asm passthrough -----
     if op == 96 {
+        uw_sp_moves()           // #143 option C: opaque, may move SP
         uint64 asm_node = s1_v
         uint32 single_tok = ast_data1(asm_node)
         uint64 ws = single_tok
@@ -3727,12 +3738,14 @@ fn ir_emit_arm64_function(uint64 fn_node) {
         // #143 A9a (spec 5.1):
         //   sub sp, sp, #area; saves; add x29, sp, #f; sub sp, sp, #low
         // each with its unwind code (collected; the .xdata writer is A9b)
+        uw_sp_frame = 1             // prologue SP writes are not body moves (option C backstop)
         emit_a64_sub_sp_imm(a64_win_area)
         uw_a64_prolog_insn(a64_win_area / 16, 1, out_len)                       // alloc_s
         ir_a64_win_saves(0)
         emit_a64(0x91000000 | (ir_a64_win_fp_off << 10) | (31 << 5) | 29)        // add x29, sp, #f
         uw_a64_prolog_insn(0xE2 | ((ir_a64_win_fp_off / 8) << 8), 2, out_len)   // add_fp
         a64_win_low_codes = ir_a64_win_alloc_low(a64_win_low, fn_name_tok)
+        uw_sp_frame = 0
     } else if is_naked == 0 {
         // SUB SP, SP, #total_frame
         emit_a64_sub_sp_imm(total_frame)
@@ -3753,6 +3766,7 @@ fn ir_emit_arm64_function(uint64 fn_node) {
             // Windows ARM64 (spec C7): parse the command line UCRT's way into
             // a fresh VirtualAlloc'd argv -- see the C7 block at the end of
             // this file.
+            uw_sp_site_set("A4")
             c7_a64_emit_main_argv(c7_argc_off, c7_argv_off)
         } else {
             // No cli_argc/cli_argv to fill: the pre-C7 sequence.
@@ -3993,7 +4007,9 @@ fn ir_emit_arm64_function(uint64 fn_node) {
             uint64 ep_start = out_len
             emit_a64(0xD1000000 | (ir_a64_win_fp_off << 10) | (29 << 5) | 31)   // sub sp, x29, #f
             ir_a64_win_saves(1)
+            uw_sp_frame = 1
             emit_a64_add_sp_imm(a64_win_area)
+            uw_sp_frame = 0
             emit_a64_ret()
             uw_a64_epilog(ep_start, a64_win_low_codes)
         } else {

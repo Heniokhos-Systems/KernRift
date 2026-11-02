@@ -4711,6 +4711,7 @@ fn emit_win_alloc_stack(uint64 nbytes) {
     emit_byte(0xEC)
     uint8 nb = nbytes
     emit_byte(nb)
+    uw_sp_moves()                      // #143 option C backstop (spec 2.5.1)
 }
 
 fn emit_win_free_stack(uint64 nbytes) {
@@ -4719,6 +4720,42 @@ fn emit_win_free_stack(uint64 nbytes) {
     emit_byte(0xC4)
     uint8 nb = nbytes
     emit_byte(nb)
+    uw_sp_moves()
+}
+
+// #143 option C (spec 2.5.1): the x86_64 SP helpers. Every body instruction
+// that writes RSP goes through one of these (or emit_win_alloc/free_stack),
+// so it reports to the backstop (uw_sp_moves). Byte-identical to the raw
+// sequences they replaced.
+//   emit_x64_push_r / emit_x64_pop_r: push/pop of a 64-bit GPR 0-15
+//   emit_x64_rsp_adj(ext, n): ext 0xEC = sub rsp, 0xC4 = add rsp (imm8 form
+//     when n < 128, else imm32); ext 0xE4 = and rsp, imm8 n (sign-extended)
+fn emit_x64_push_r(uint64 r) {
+    if r >= 8 { emit_byte(0x41) }
+    uint8 po = 0x50 | (r & 7)
+    emit_byte(po)
+    uw_sp_moves()
+}
+
+fn emit_x64_pop_r(uint64 r) {
+    if r >= 8 { emit_byte(0x41) }
+    uint8 po = 0x58 | (r & 7)
+    emit_byte(po)
+    uw_sp_moves()
+}
+
+fn emit_x64_rsp_adj(uint64 ext, uint64 n) {
+    emit_byte(0x48)
+    uint8 e = ext
+    if ext == 0xE4 || n < 128 {
+        emit_byte(0x83); emit_byte(e)
+        uint8 n8 = n
+        emit_byte(n8)
+    } else {
+        emit_byte(0x81); emit_byte(e)
+        emit_u32_le(n)
+    }
+    uw_sp_moves()
 }
 
 // mov rcx, rax (Windows 1st arg)
@@ -5581,7 +5618,8 @@ fn gen_expr(uint64 node) {
                 emit_byte(0x48); emit_byte(0xB9); emit_u32_le(10); emit_u32_le(0) // mov rcx, 10
                 emit_byte(0x48); emit_byte(0xF7); emit_byte(0xF1)   // div rcx
                 emit_byte(0x48); emit_byte(0x83); emit_byte(0xC2); emit_byte(0x30) // add rdx, '0'
-                emit_byte(0x52)                                     // push rdx
+                uw_sp_site_set("L8")
+                emit_x64_push_r(2)                                  // push rdx
                 emit_byte(0x49); emit_byte(0xFF); emit_byte(0xC2)   // inc r10
                 emit_byte(0xE9)                                     // jmp near fs_dl
                 uint64 fs_dl_back = out_len; emit_u32_le(0)
@@ -5598,7 +5636,7 @@ fn gen_expr(uint64 node) {
                 emit_byte(0x4D); emit_byte(0x85); emit_byte(0xD2)   // test r10, r10
                 emit_byte(0x0F); emit_byte(0x84)                    // jz near pop_done
                 uint64 fs_pop_jz = out_len; emit_u32_le(0)
-                emit_byte(0x59)                                     // pop rcx
+                emit_x64_pop_r(1)                                   // pop rcx
                 emit_byte(0x88); emit_byte(0x0F)                    // mov [rdi], cl
                 emit_byte(0x48); emit_byte(0xFF); emit_byte(0xC7)   // inc rdi
                 emit_byte(0x49); emit_byte(0xFF); emit_byte(0xCA)   // dec r10
@@ -5727,7 +5765,7 @@ fn gen_expr(uint64 node) {
                 // trap: exit(1)
                 emit_mov_rax_imm(1)
                 emit_mov_rdi_rax()
-                if target_os == 2 { emit_mov_rcx_rax(); emit_win_alloc_stack(0x20); emit_win_call_iat(0) }
+                if target_os == 2 { emit_mov_rcx_rax(); uw_sp_site_set("L6"); emit_win_alloc_stack(0x20); emit_win_call_iat(0) }
                 else if target_os == 1 { emit_mov_rax_imm(0x2000001); emit_x86_syscall_insn("array bounds check (--debug)") }
                 else { emit_mov_rax_imm(231); emit_x86_syscall_insn("array bounds check (--debug)") }
                 uint64 bc_skip = out_len - bc_jb - 1
@@ -6333,7 +6371,7 @@ fn gen_expr(uint64 node) {
                 emit_mov_rdi_rax()
                 if target_os == 2 {
                     emit_mov_rcx_rax()
-                    emit_win_alloc_stack(0x20)
+                    uw_sp_site_set("L6"); emit_win_alloc_stack(0x20)
                     emit_win_call_iat(0)
                 } else if target_os == 1 {
                     emit_mov_rax_imm(0x2000001)
@@ -6358,7 +6396,7 @@ fn gen_expr(uint64 node) {
                 emit_mov_rdi_rax()
                 if target_os == 2 {
                     emit_mov_rcx_rax()
-                    emit_win_alloc_stack(0x20)
+                    uw_sp_site_set("L6"); emit_win_alloc_stack(0x20)
                     emit_win_call_iat(0)
                 } else if target_os == 1 {
                     emit_mov_rax_imm(0x2000001)
@@ -6383,7 +6421,7 @@ fn gen_expr(uint64 node) {
                 emit_mov_rdi_rax()
                 if target_os == 2 {
                     emit_mov_rcx_rax()
-                    emit_win_alloc_stack(0x20)
+                    uw_sp_site_set("L6"); emit_win_alloc_stack(0x20)
                     emit_win_call_iat(0)
                 } else if target_os == 1 {
                     emit_mov_rax_imm(0x2000001)
@@ -6418,7 +6456,7 @@ fn gen_expr(uint64 node) {
                 emit_mov_rdi_rax()
                 if target_os == 2 {
                     emit_mov_rcx_rax()
-                    emit_win_alloc_stack(0x20)
+                    uw_sp_site_set("L6"); emit_win_alloc_stack(0x20)
                     emit_win_call_iat(0)
                 } else if target_os == 1 {
                     emit_mov_rax_imm(0x2000001)
@@ -6457,7 +6495,7 @@ fn gen_expr(uint64 node) {
                 emit_mov_rdi_rax()
                 if target_os == 2 {
                     emit_mov_rcx_rax()
-                    emit_win_alloc_stack(0x20)
+                    uw_sp_site_set("L6"); emit_win_alloc_stack(0x20)
                     emit_win_call_iat(0)
                 } else if target_os == 1 {
                     emit_mov_rax_imm(0x2000001)
@@ -6525,7 +6563,7 @@ fn gen_expr(uint64 node) {
                 emit_mov_rdi_rax()
                 if target_os == 2 {
                     emit_mov_rcx_rax()
-                    emit_win_alloc_stack(0x20)
+                    uw_sp_site_set("L6"); emit_win_alloc_stack(0x20)
                     emit_win_call_iat(0)
                 } else if target_os == 1 {
                     emit_mov_rax_imm(0x2000001)
@@ -6550,7 +6588,7 @@ fn gen_expr(uint64 node) {
                 emit_mov_rdi_rax()
                 if target_os == 2 {
                     emit_mov_rcx_rax()
-                    emit_win_alloc_stack(0x20)
+                    uw_sp_site_set("L6"); emit_win_alloc_stack(0x20)
                     emit_win_call_iat(0)
                 } else if target_os == 1 {
                     emit_mov_rax_imm(0x2000001)
@@ -6575,7 +6613,7 @@ fn gen_expr(uint64 node) {
                 emit_mov_rdi_rax()
                 if target_os == 2 {
                     emit_mov_rcx_rax()
-                    emit_win_alloc_stack(0x20)
+                    uw_sp_site_set("L6"); emit_win_alloc_stack(0x20)
                     emit_win_call_iat(0)
                 } else if target_os == 1 {
                     emit_mov_rax_imm(0x2000001)
@@ -7185,7 +7223,7 @@ fn gen_expr(uint64 node) {
             if target_os == 2 {
                 // Windows: ExitProcess(code)
                 emit_mov_rcx_rax()
-                emit_win_alloc_stack(0x20)
+                uw_sp_site_set("L1"); emit_win_alloc_stack(0x20)
                 emit_win_call_iat(0)
             } else {
                 emit_mov_rdi_rax()
@@ -7224,7 +7262,7 @@ fn gen_expr(uint64 node) {
                 emit_neg_rax()
                 emit_sub_rax_imm8(10)
                 emit_mov_rcx_rax()
-                emit_win_alloc_stack(0x20)
+                uw_sp_site_set("L1"); emit_win_alloc_stack(0x20)
                 emit_win_call_iat(1)
                 emit_win_free_stack(0x20)
                 // rax = handle
@@ -7234,7 +7272,7 @@ fn gen_expr(uint64 node) {
                 emit_mov_rdx_rax()
                 emit_load_rax_from_stack(extra_tmp)
                 emit_mov_r8_rax()
-                emit_win_alloc_stack(0x30)
+                uw_sp_site_set("L1"); emit_win_alloc_stack(0x30)
                 emit_win_stack_arg5(0)
                 // lpNumberOfBytesWritten USED TO BE NULL (emit_mov_r9_imm(0)),
                 // so this returned WriteFile's BOOL -- 1 for any successful
@@ -7313,7 +7351,7 @@ fn gen_expr(uint64 node) {
                 emit_mov_r8_rax()
                 // r9 = 4 (PAGE_READWRITE)
                 emit_mov_r9_imm(4)
-                emit_win_alloc_stack(0x20)
+                uw_sp_site_set("L1"); emit_win_alloc_stack(0x20)
                 emit_win_call_iat(6)
                 emit_win_free_stack(0x20)
                 // rax = raw pointer from VirtualAlloc — NULL on failure.
@@ -7409,7 +7447,7 @@ fn gen_expr(uint64 node) {
                 emit_mov_r8_rax()
                 // r9 = NULL (security)
                 emit_mov_r9_imm(0)
-                emit_win_alloc_stack(0x40)
+                uw_sp_site_set("L1"); emit_win_alloc_stack(0x40)
                 // [rsp+32] = disposition: 3-flags (read=3=OPEN_EXISTING, write=2=CREATE_ALWAYS)
                 emit_load_rax_from_stack(pk1_fileopen + 0x40)  // flags (adjusted for stack shift)
                 emit_neg_rax()
@@ -7495,7 +7533,7 @@ fn gen_expr(uint64 node) {
                 emit_byte(0x4C); emit_byte(0x8D); emit_byte(0x4C); emit_byte(0x24)
                 uint8 br8 = br_slot
                 emit_byte(br8)
-                emit_win_alloc_stack(0x30)
+                uw_sp_site_set("L1"); emit_win_alloc_stack(0x30)
                 emit_win_stack_arg5(0)                  // lpOverlapped = NULL
                 emit_win_call_iat(4)                    // call ReadFile
                 emit_win_free_stack(0x30)
@@ -7542,7 +7580,7 @@ fn gen_expr(uint64 node) {
                 emit_mov_rdx_rax()
                 emit_load_rax_from_stack(extra_tmp)
                 emit_mov_r8_rax()
-                emit_win_alloc_stack(0x30)
+                uw_sp_site_set("L1"); emit_win_alloc_stack(0x30)
                 // zero [rsp+0x28] for bytesWritten output
                 emit_byte(0xC7); emit_byte(0x44); emit_byte(0x24); emit_byte(0x28); emit_u32_le(0)
                 // lea r9, [rsp+0x28] — point to bytesWritten
@@ -7576,7 +7614,7 @@ fn gen_expr(uint64 node) {
             if target_os == 2 {
                 // Windows: CloseHandle(handle)
                 emit_mov_rcx_rax()
-                emit_win_alloc_stack(0x20)
+                uw_sp_site_set("L1"); emit_win_alloc_stack(0x20)
                 emit_win_call_iat(5)
                 emit_win_free_stack(0x20)
             } else {
@@ -7604,7 +7642,7 @@ fn gen_expr(uint64 node) {
                 emit_byte(0x24)
                 uint8 ts1 = temp_slot_1
                 emit_byte(ts1)
-                emit_win_alloc_stack(0x20)
+                uw_sp_site_set("L1"); emit_win_alloc_stack(0x20)
                 emit_win_call_iat(8)  // GetFileSizeEx
                 emit_win_free_stack(0x20)
                 // Load size from temp_slot_1
@@ -7695,7 +7733,7 @@ fn gen_expr(uint64 node) {
                     if target_os == 2 {
                         emit_mov_rax_imm(0xFFFFFFFFFFFFFFF5)
                         emit_mov_rcx_rax()
-                        emit_win_alloc_stack(0x20)
+                        uw_sp_site_set("L1"); emit_win_alloc_stack(0x20)
                         emit_win_call_iat(1)
                         emit_win_free_stack(0x20)
                         emit_mov_rcx_rax()
@@ -7709,7 +7747,7 @@ fn gen_expr(uint64 node) {
                         emit_mov_rax_imm(1)
                         emit_mov_r8_rax()
                         emit_mov_r9_imm(0)
-                        emit_win_alloc_stack(0x30)
+                        uw_sp_site_set("L1"); emit_win_alloc_stack(0x30)
                         emit_win_stack_arg5(0)
                         emit_win_call_iat(2)
                         emit_win_free_stack(0x30)
@@ -7752,7 +7790,7 @@ fn gen_expr(uint64 node) {
                         emit_store_rax_to_stack(temp_slot_1)
                         emit_mov_rax_imm(0xFFFFFFFFFFFFFFF5)
                         emit_mov_rcx_rax()
-                        emit_win_alloc_stack(0x20)
+                        uw_sp_site_set("L1"); emit_win_alloc_stack(0x20)
                         emit_win_call_iat(1)
                         emit_win_free_stack(0x20)
                         emit_mov_rcx_rax()
@@ -7761,7 +7799,7 @@ fn gen_expr(uint64 node) {
                         emit_load_rax_from_stack(temp_slot_1)
                         emit_mov_r8_rax()
                         emit_mov_r9_imm(0)
-                        emit_win_alloc_stack(0x30)
+                        uw_sp_site_set("L1"); emit_win_alloc_stack(0x30)
                         emit_win_stack_arg5(0)
                         emit_win_call_iat(2)
                         emit_win_free_stack(0x30)
@@ -7798,7 +7836,7 @@ fn gen_expr(uint64 node) {
                     if target_os == 2 {
                         emit_mov_rax_imm(0xFFFFFFFFFFFFFFF5)
                         emit_mov_rcx_rax()
-                        emit_win_alloc_stack(0x20)
+                        uw_sp_site_set("L1"); emit_win_alloc_stack(0x20)
                         emit_win_call_iat(1)
                         emit_win_free_stack(0x20)
                         emit_mov_rcx_rax()
@@ -7811,7 +7849,7 @@ fn gen_expr(uint64 node) {
                         emit_mov_rax_imm(1)
                         emit_mov_r8_rax()
                         emit_mov_r9_imm(0)
-                        emit_win_alloc_stack(0x30)
+                        uw_sp_site_set("L1"); emit_win_alloc_stack(0x30)
                         emit_win_stack_arg5(0)
                         emit_win_call_iat(2)
                         emit_win_free_stack(0x30)
@@ -7883,17 +7921,18 @@ fn gen_expr(uint64 node) {
                         patch_u32(pr_nosign_j, out_len - pr_nosign_j - 4)
                     }
                     if target_os == 2 {
-                        emit_byte(0x57); emit_byte(0x51)
+                        uw_sp_site_set("L7")
+                        emit_x64_push_r(7); emit_x64_push_r(1)
                         emit_mov_rax_imm(0xFFFFFFFFFFFFFFF5)
                         emit_mov_rcx_rax()
-                        emit_win_alloc_stack(0x20)
+                        uw_sp_site_set("L1"); emit_win_alloc_stack(0x20)
                         emit_win_call_iat(1)
                         emit_win_free_stack(0x20)
                         emit_mov_rcx_rax()
-                        emit_byte(0x41); emit_byte(0x58)
-                        emit_byte(0x5A)
+                        emit_x64_pop_r(8)
+                        emit_x64_pop_r(2)
                         emit_mov_r9_imm(0)
-                        emit_win_alloc_stack(0x30)
+                        uw_sp_site_set("L1"); emit_win_alloc_stack(0x30)
                         emit_win_stack_arg5(0)
                         emit_win_call_iat(2)
                         emit_win_free_stack(0x30)
@@ -7925,7 +7964,7 @@ fn gen_expr(uint64 node) {
                 if target_os == 2 {
                     emit_mov_rax_imm(0xFFFFFFFFFFFFFFF5)
                     emit_mov_rcx_rax()
-                    emit_win_alloc_stack(0x20)
+                    uw_sp_site_set("L1"); emit_win_alloc_stack(0x20)
                     emit_win_call_iat(1)
                     emit_win_free_stack(0x20)
                     emit_mov_rcx_rax()
@@ -7939,7 +7978,7 @@ fn gen_expr(uint64 node) {
                     emit_mov_rax_imm(1)
                     emit_mov_r8_rax()
                     emit_mov_r9_imm(0)
-                    emit_win_alloc_stack(0x30)
+                    uw_sp_site_set("L1"); emit_win_alloc_stack(0x30)
                     emit_win_stack_arg5(0)
                     emit_win_call_iat(2)
                     emit_win_free_stack(0x30)
@@ -8011,7 +8050,7 @@ fn gen_expr(uint64 node) {
                 emit_store_rax_to_stack(temp_slot_1)
                 emit_mov_rax_imm(0xFFFFFFFFFFFFFFF5)
                 emit_mov_rcx_rax()
-                emit_win_alloc_stack(0x20)
+                uw_sp_site_set("L1"); emit_win_alloc_stack(0x20)
                 emit_win_call_iat(1)
                 emit_win_free_stack(0x20)
                 emit_mov_rcx_rax()
@@ -8020,7 +8059,7 @@ fn gen_expr(uint64 node) {
                 emit_load_rax_from_stack(temp_slot_1)
                 emit_mov_r8_rax()
                 emit_mov_r9_imm(0)
-                emit_win_alloc_stack(0x30)
+                uw_sp_site_set("L1"); emit_win_alloc_stack(0x30)
                 emit_win_stack_arg5(0)
                 emit_win_call_iat(2)
                 emit_win_free_stack(0x30)
@@ -8050,7 +8089,7 @@ fn gen_expr(uint64 node) {
                 if target_os == 2 {
                     emit_mov_rax_imm(0xFFFFFFFFFFFFFFF5)
                     emit_mov_rcx_rax()
-                    emit_win_alloc_stack(0x20)
+                    uw_sp_site_set("L1"); emit_win_alloc_stack(0x20)
                     emit_win_call_iat(1)
                     emit_win_free_stack(0x20)
                     emit_mov_rcx_rax()
@@ -8066,7 +8105,7 @@ fn gen_expr(uint64 node) {
                     emit_mov_rax_imm(1)
                     emit_mov_r8_rax()
                     emit_mov_r9_imm(0)
-                    emit_win_alloc_stack(0x30)
+                    uw_sp_site_set("L1"); emit_win_alloc_stack(0x30)
                     emit_win_stack_arg5(0)
                     emit_win_call_iat(2)
                     emit_win_free_stack(0x30)
@@ -8227,7 +8266,7 @@ fn gen_expr(uint64 node) {
                 emit_byte(0x41); emit_byte(0xB8)
                 emit_u32_le(0x8000)
                 // Shadow space + call
-                emit_win_alloc_stack(0x20)
+                uw_sp_site_set("L1"); emit_win_alloc_stack(0x20)
                 emit_win_call_iat(13)
                 emit_win_free_stack(0x20)
             } else {
@@ -8571,13 +8610,8 @@ fn gen_expr(uint64 node) {
                 cp_stack_bytes = win_stack
 
                 // sub rsp, win_stack
-                if win_stack < 128 {
-                    emit_byte(0x48); emit_byte(0x83); emit_byte(0xEC)
-                    uint8 cpws8 = win_stack; emit_byte(cpws8)
-                } else {
-                    emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC)
-                    emit_u32_le(win_stack)
-                }
+                uw_sp_site_set("L2")
+                emit_x64_rsp_adj(0xEC, win_stack)
 
                 // Store overflow args (5th onward) at [rsp + 32 + (i-4)*8], in
                 // argument order. Frame slots moved up by cp_stack_bytes after
@@ -8725,14 +8759,7 @@ fn gen_expr(uint64 node) {
                     cp_stack_bytes = cps * 8
                     // sub rsp, cp_stack_bytes -- imm8 stops at 15 stack args
                     // (120 bytes); the 16th makes 128, which is -128 signed.
-                    if cp_stack_bytes < 128 {
-                        emit_byte(0x48); emit_byte(0x83); emit_byte(0xEC)
-                        uint8 cpsb = cp_stack_bytes
-                        emit_byte(cpsb)
-                    } else {
-                        emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC)
-                        emit_u32_le(cp_stack_bytes)
-                    }
+                    emit_x64_rsp_adj(0xEC, cp_stack_bytes)
                     uint64 cpi2 = 0
                     while cpi2 < cpo_n {
                         uint64 cgp = cpo + cpi2 * 8
@@ -8755,14 +8782,7 @@ fn gen_expr(uint64 node) {
             emit_byte(0xD0)
             if cp_stack_bytes > 0 {
                 // add rsp, cp_stack_bytes
-                if cp_stack_bytes < 128 {
-                    emit_byte(0x48); emit_byte(0x83); emit_byte(0xC4)
-                    uint8 cpcl = cp_stack_bytes
-                    emit_byte(cpcl)
-                } else {
-                    emit_byte(0x48); emit_byte(0x81); emit_byte(0xC4)
-                    emit_u32_le(cp_stack_bytes)
-                }
+                emit_x64_rsp_adj(0xC4, cp_stack_bytes)
             }
             return
         }
@@ -9013,7 +9033,7 @@ fn gen_expr(uint64 node) {
                 emit_load_rax_from_stack(pk0_getmodulepat)
                 emit_mov_rdx_rax()
                 emit_byte(0x48); emit_byte(0x31); emit_byte(0xC9)
-                emit_win_alloc_stack(0x20)
+                uw_sp_site_set("L1"); emit_win_alloc_stack(0x20)
                 emit_win_call_iat(12)
                 emit_win_free_stack(0x20)
             } else if target_os == 4 {
@@ -9059,7 +9079,8 @@ fn gen_expr(uint64 node) {
                 //   0x0D0-0x4CF: cmdline buffer (1024)
                 emit_load_rax_from_stack(pk0_execprocessa)
                 emit_store_rax_to_stack(pk0_execprocessa)
-                emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC); emit_u32_le(0x4D0)
+                uw_sp_site_set("L4")
+                emit_x64_rsp_adj(0xEC, 0x4D0)
                 emit_byte(0x48); emit_byte(0x8D); emit_byte(0x7C); emit_byte(0x24); emit_byte(0x50)
                 emit_byte(0x31); emit_byte(0xC0)
                 emit_byte(0xB9); emit_u32_le(128)
@@ -9112,8 +9133,8 @@ fn gen_expr(uint64 node) {
                 emit_byte(0x48); emit_byte(0x8D); emit_byte(0x54); emit_byte(0x24); emit_byte(0x20)
                 emit_win_call_iat(11)
                 emit_byte(0x8B); emit_byte(0x4C); emit_byte(0x24); emit_byte(0x20)
-                emit_byte(0x48); emit_byte(0x81); emit_byte(0xC4); emit_u32_le(0x4D0)
-                emit_win_alloc_stack(0x20)
+                emit_x64_rsp_adj(0xC4, 0x4D0)
+                uw_sp_site_set("L4"); emit_win_alloc_stack(0x20)
                 emit_win_call_iat(0)
             } else {
                 // execve(path, argv, envp)
@@ -9149,7 +9170,8 @@ fn gen_expr(uint64 node) {
                 // Stack layout: 0x00-0x1F shadow, 0x20-0x4F stack args, 0x50-0xB7 STARTUPINFOA(104), 0xB8-0xCF PI(24)
                 emit_store_rax_to_stack(temp_slot_0)
                 // sub rsp, 0xD0
-                emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC); emit_u32_le(0xD0)
+                uw_sp_site_set("L4")
+                emit_x64_rsp_adj(0xEC, 0xD0)
                 // lea rdi, [rsp+0x50]
                 emit_byte(0x48); emit_byte(0x8D); emit_byte(0x7C); emit_byte(0x24); emit_byte(0x50)
                 // xor eax, eax
@@ -9199,9 +9221,9 @@ fn gen_expr(uint64 node) {
                 // mov ecx, [rsp+0x20] (exit code)
                 emit_byte(0x8B); emit_byte(0x4C); emit_byte(0x24); emit_byte(0x20)
                 // add rsp, 0xD0
-                emit_byte(0x48); emit_byte(0x81); emit_byte(0xC4); emit_u32_le(0xD0)
+                emit_x64_rsp_adj(0xC4, 0xD0)
                 // ExitProcess(exitCode)
-                emit_win_alloc_stack(0x20)
+                uw_sp_site_set("L4"); emit_win_alloc_stack(0x20)
                 emit_win_call_iat(0)
             } else {
                 // Linux/macOS: execve(path, argv, NULL)
@@ -9221,7 +9243,7 @@ fn gen_expr(uint64 node) {
                 if target_os == 1 { emit_mov_rax_imm(0x200003B) } else { emit_mov_rax_imm(59) }
                 emit_x86_syscall_insn("exec_process")
                 // Restore stack if execve failed (only reached on error)
-                emit_byte(0x48); emit_byte(0x83); emit_byte(0xC4); emit_byte(0x10) // add rsp, 16
+                emit_x64_rsp_adj(0xC4, 0x10) // add rsp, 16
                 // Save errno (rax) to exec_errno static if defined
                 uint64 errno_off_x = static_lookup_by_name("exec_errno", 10)
                 if errno_off_x != 0xFFFFFFFF {
@@ -9259,7 +9281,7 @@ fn gen_expr(uint64 node) {
                 emit_byte(0)
                 emit_mov_rax_imm(1)
                 emit_mov_rdi_rax()
-                if target_os == 2 { emit_mov_rcx_rax(); emit_win_alloc_stack(0x20); emit_win_call_iat(0) }
+                if target_os == 2 { emit_mov_rcx_rax(); uw_sp_site_set("L6"); emit_win_alloc_stack(0x20); emit_win_call_iat(0) }
                 else if target_os == 1 { emit_mov_rax_imm(0x2000001); emit_x86_syscall_insn("load8 null check (--debug)") }
                 else { emit_mov_rax_imm(231); emit_x86_syscall_insn("load8 null check (--debug)") }
                 uint64 l8_skip = out_len - jnz_l8 - 1
@@ -9282,7 +9304,7 @@ fn gen_expr(uint64 node) {
                 emit_byte(0)
                 emit_mov_rax_imm(1)
                 emit_mov_rdi_rax()
-                if target_os == 2 { emit_mov_rcx_rax(); emit_win_alloc_stack(0x20); emit_win_call_iat(0) }
+                if target_os == 2 { emit_mov_rcx_rax(); uw_sp_site_set("L6"); emit_win_alloc_stack(0x20); emit_win_call_iat(0) }
                 else if target_os == 1 { emit_mov_rax_imm(0x2000001); emit_x86_syscall_insn("load16 null check (--debug)") }
                 else { emit_mov_rax_imm(231); emit_x86_syscall_insn("load16 null check (--debug)") }
                 uint64 l16_skip = out_len - jnz_l16 - 1
@@ -9305,7 +9327,7 @@ fn gen_expr(uint64 node) {
                 emit_byte(0)
                 emit_mov_rax_imm(1)
                 emit_mov_rdi_rax()
-                if target_os == 2 { emit_mov_rcx_rax(); emit_win_alloc_stack(0x20); emit_win_call_iat(0) }
+                if target_os == 2 { emit_mov_rcx_rax(); uw_sp_site_set("L6"); emit_win_alloc_stack(0x20); emit_win_call_iat(0) }
                 else if target_os == 1 { emit_mov_rax_imm(0x2000001); emit_x86_syscall_insn("load32 null check (--debug)") }
                 else { emit_mov_rax_imm(231); emit_x86_syscall_insn("load32 null check (--debug)") }
                 uint64 l32_skip = out_len - jnz_l32 - 1
@@ -9328,7 +9350,7 @@ fn gen_expr(uint64 node) {
                 emit_byte(0)
                 emit_mov_rax_imm(1)
                 emit_mov_rdi_rax()
-                if target_os == 2 { emit_mov_rcx_rax(); emit_win_alloc_stack(0x20); emit_win_call_iat(0) }
+                if target_os == 2 { emit_mov_rcx_rax(); uw_sp_site_set("L6"); emit_win_alloc_stack(0x20); emit_win_call_iat(0) }
                 else if target_os == 1 { emit_mov_rax_imm(0x2000001); emit_x86_syscall_insn("load64 null check (--debug)") }
                 else { emit_mov_rax_imm(231); emit_x86_syscall_insn("load64 null check (--debug)") }
                 uint64 l64_skip = out_len - jnz_l64 - 1
@@ -9361,7 +9383,7 @@ fn gen_expr(uint64 node) {
                 emit_byte(0)
                 emit_mov_rax_imm(1)
                 emit_mov_rdi_rax()
-                if target_os == 2 { emit_mov_rcx_rax(); emit_win_alloc_stack(0x20); emit_win_call_iat(0) }
+                if target_os == 2 { emit_mov_rcx_rax(); uw_sp_site_set("L6"); emit_win_alloc_stack(0x20); emit_win_call_iat(0) }
                 else if target_os == 1 { emit_mov_rax_imm(0x2000001); emit_x86_syscall_insn("store8 null check (--debug)") }
                 else { emit_mov_rax_imm(231); emit_x86_syscall_insn("store8 null check (--debug)") }
                 uint64 s8_skip = out_len - jnz_s8 - 1
@@ -9393,7 +9415,7 @@ fn gen_expr(uint64 node) {
                 emit_byte(0)
                 emit_mov_rax_imm(1)
                 emit_mov_rdi_rax()
-                if target_os == 2 { emit_mov_rcx_rax(); emit_win_alloc_stack(0x20); emit_win_call_iat(0) }
+                if target_os == 2 { emit_mov_rcx_rax(); uw_sp_site_set("L6"); emit_win_alloc_stack(0x20); emit_win_call_iat(0) }
                 else if target_os == 1 { emit_mov_rax_imm(0x2000001); emit_x86_syscall_insn("store16 null check (--debug)") }
                 else { emit_mov_rax_imm(231); emit_x86_syscall_insn("store16 null check (--debug)") }
                 uint64 s16_skip = out_len - jnz_s16 - 1
@@ -9424,7 +9446,7 @@ fn gen_expr(uint64 node) {
                 emit_byte(0)
                 emit_mov_rax_imm(1)
                 emit_mov_rdi_rax()
-                if target_os == 2 { emit_mov_rcx_rax(); emit_win_alloc_stack(0x20); emit_win_call_iat(0) }
+                if target_os == 2 { emit_mov_rcx_rax(); uw_sp_site_set("L6"); emit_win_alloc_stack(0x20); emit_win_call_iat(0) }
                 else if target_os == 1 { emit_mov_rax_imm(0x2000001); emit_x86_syscall_insn("store32 null check (--debug)") }
                 else { emit_mov_rax_imm(231); emit_x86_syscall_insn("store32 null check (--debug)") }
                 uint64 s32_skip = out_len - jnz_s32 - 1
@@ -9455,7 +9477,7 @@ fn gen_expr(uint64 node) {
                 emit_byte(0)
                 emit_mov_rax_imm(1)
                 emit_mov_rdi_rax()
-                if target_os == 2 { emit_mov_rcx_rax(); emit_win_alloc_stack(0x20); emit_win_call_iat(0) }
+                if target_os == 2 { emit_mov_rcx_rax(); uw_sp_site_set("L6"); emit_win_alloc_stack(0x20); emit_win_call_iat(0) }
                 else if target_os == 1 { emit_mov_rax_imm(0x2000001); emit_x86_syscall_insn("store64 null check (--debug)") }
                 else { emit_mov_rax_imm(231); emit_x86_syscall_insn("store64 null check (--debug)") }
                 uint64 s64_skip = out_len - jnz_s64 - 1
@@ -9858,7 +9880,7 @@ fn gen_expr(uint64 node) {
         if is_extern_call == 0 && tok_matches(wct, "time_ns", 7) != 0 {
             if target_os == 0 || target_os == 3 {
                 // Linux / Android x86_64: clock_gettime(1, &ts) via syscall 228
-                emit_byte(0x48); emit_byte(0x83); emit_byte(0xEC); emit_byte(16) // sub rsp, 16
+                emit_x64_rsp_adj(0xEC, 16) // sub rsp, 16
                 emit_byte(0xBF); emit_byte(1); emit_byte(0); emit_byte(0); emit_byte(0) // mov edi, 1
                 emit_byte(0x48); emit_byte(0x89); emit_byte(0xE6) // mov rsi, rsp
                 emit_mov_rax_imm(228)                              // mov eax, 228
@@ -9868,11 +9890,11 @@ fn gen_expr(uint64 node) {
                 emit_u32_le(1000000000)
                 emit_byte(0x48); emit_byte(0x8B); emit_byte(0x4C); emit_byte(0x24); emit_byte(8) // mov rcx, [rsp+8]
                 emit_byte(0x48); emit_byte(0x01); emit_byte(0xC8)  // add rax, rcx
-                emit_byte(0x48); emit_byte(0x83); emit_byte(0xC4); emit_byte(16) // add rsp, 16
+                emit_x64_rsp_adj(0xC4, 16) // add rsp, 16
             } else if target_os == 1 {
                 // macOS x86_64: gettimeofday(rdi=&tv, rsi=0) via syscall 0x2000074
                 // timeval: tv_sec(8) + tv_usec(4 on macOS x86_64 = int32)
-                emit_byte(0x48); emit_byte(0x83); emit_byte(0xEC); emit_byte(16) // sub rsp, 16
+                emit_x64_rsp_adj(0xEC, 16) // sub rsp, 16
                 emit_byte(0x48); emit_byte(0x89); emit_byte(0xE7)  // mov rdi, rsp (&tv)
                 emit_byte(0x31); emit_byte(0xF6)                   // xor esi, esi (NULL tz)
                 emit_mov_rax_imm(0x2000074)                        // mov eax, gettimeofday
@@ -9886,7 +9908,7 @@ fn gen_expr(uint64 node) {
                 emit_byte(0x48); emit_byte(0x69); emit_byte(0xC9)
                 emit_u32_le(1000)
                 emit_byte(0x48); emit_byte(0x01); emit_byte(0xC8)  // add rax, rcx
-                emit_byte(0x48); emit_byte(0x83); emit_byte(0xC4); emit_byte(16) // add rsp, 16
+                emit_x64_rsp_adj(0xC4, 16) // add rsp, 16
             } else if target_os == 2 {
                 // Windows x86_64: QueryPerformanceCounter(&counter),
                 //                 QueryPerformanceFrequency(&freq).
@@ -9895,7 +9917,8 @@ fn gen_expr(uint64 node) {
                 // to avoid the overflow that counter * 1e9 hits once the system
                 // has been up long enough (counter grows ~10M/sec on most boxes).
                 // Stack: shadow (0x20) + freq@[rsp+0x20] + counter@[rsp+0x28]
-                emit_byte(0x48); emit_byte(0x83); emit_byte(0xEC); emit_byte(0x30)   // sub rsp, 0x30
+                uw_sp_site_set("L5")
+                emit_x64_rsp_adj(0xEC, 0x30)   // sub rsp, 0x30
                 emit_byte(0x48); emit_byte(0x8D); emit_byte(0x4C); emit_byte(0x24); emit_byte(0x20)  // lea rcx, [rsp+0x20]
                 emit_win_call_iat(15)                                                // QueryPerformanceFrequency
                 emit_byte(0x48); emit_byte(0x8D); emit_byte(0x4C); emit_byte(0x24); emit_byte(0x28)  // lea rcx, [rsp+0x28]
@@ -9911,7 +9934,7 @@ fn gen_expr(uint64 node) {
                 emit_byte(0x49); emit_byte(0xF7); emit_byte(0xF3)                                    // div r11
                 emit_byte(0x4D); emit_byte(0x0F); emit_byte(0xAF); emit_byte(0xD1)                   // imul r10, r9
                 emit_byte(0x4C); emit_byte(0x01); emit_byte(0xD0)                                    // add rax, r10
-                emit_byte(0x48); emit_byte(0x83); emit_byte(0xC4); emit_byte(0x30)                   // add rsp, 0x30
+                emit_x64_rsp_adj(0xC4, 0x30)                   // add rsp, 0x30
             } else if target_os == 4 {
                 // Bare metal. THIS ARM SHIPPED A SILENT CONSTANT ZERO. The
                 // chain covers 0/3, then 1, then 2, and target_os == 4 fell
@@ -10290,13 +10313,8 @@ fn gen_expr(uint64 node) {
             if win_rem != 0 { win_stack = win_stack + 16 - win_rem }
 
             // sub rsp, win_stack
-            if win_stack < 128 {
-                emit_byte(0x48); emit_byte(0x83); emit_byte(0xEC)
-                uint8 ws8 = win_stack; emit_byte(ws8)
-            } else {
-                emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC)
-                emit_u32_le(win_stack)
-            }
+            uw_sp_site_set("L3")
+            emit_x64_rsp_adj(0xEC, win_stack)
 
             // Store overflow args (5+) at [rsp + 32 + (i-4)*8]
             uint64 oi = 4
@@ -10635,14 +10653,7 @@ fn gen_expr(uint64 node) {
             uint64 stack_bytes = stack_args * 8
             // sub rsp, stack_bytes -- imm8 only holds 15 stack args (120 bytes);
             // the 16th makes N=128, which sign-extends to -128.
-            if stack_bytes < 128 {
-                emit_byte(0x48); emit_byte(0x83); emit_byte(0xEC)
-                uint8 sb8 = stack_bytes
-                emit_byte(sb8)
-            } else {
-                emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC)
-                emit_u32_le(stack_bytes)
-            }
+            emit_x64_rsp_adj(0xEC, stack_bytes)
             // After sub rsp the temp slots sit stack_bytes higher.
             uint64 oi = 0
             while oi < ovf_n {
@@ -10672,26 +10683,13 @@ fn gen_expr(uint64 node) {
         // Clean up overflow args from stack (SysV)
         if stack_args > 0 {
             uint64 cleanup = stack_args * 8
-            if cleanup < 128 {
-                emit_byte(0x48); emit_byte(0x83); emit_byte(0xC4)
-                uint8 cl8 = cleanup
-                emit_byte(cl8) // add rsp, N
-            } else {
-                emit_byte(0x48); emit_byte(0x81); emit_byte(0xC4)
-                emit_u32_le(cleanup) // add rsp, N
-            }
+            emit_x64_rsp_adj(0xC4, cleanup)
         }
 
         // Clean up Windows shadow space + overflow
         if win_stack > 0 {
             // add rsp, win_stack
-            if win_stack < 128 {
-                emit_byte(0x48); emit_byte(0x83); emit_byte(0xC4)
-                uint8 wc8 = win_stack; emit_byte(wc8)
-            } else {
-                emit_byte(0x48); emit_byte(0x81); emit_byte(0xC4)
-                emit_u32_le(win_stack)
-            }
+            emit_x64_rsp_adj(0xC4, win_stack)
         }
 
         // Set expr_is_float based on callee's return type
@@ -13704,7 +13702,7 @@ fn gen_stmt(uint64 node) {
                     emit_byte(0)
                     emit_mov_rax_imm(1)
                     emit_mov_rdi_rax()
-                    if target_os == 2 { emit_mov_rcx_rax(); emit_win_alloc_stack(0x20); emit_win_call_iat(0) }
+                    if target_os == 2 { emit_mov_rcx_rax(); uw_sp_site_set("L6"); emit_win_alloc_stack(0x20); emit_win_call_iat(0) }
                     else if target_os == 1 { emit_mov_rax_imm(0x2000001); emit_x86_syscall_insn("array bounds check (--debug)") }
                     else { emit_mov_rax_imm(231); emit_x86_syscall_insn("array bounds check (--debug)") }
                     uint64 bca_skip = out_len - bca_jb - 1
@@ -13963,6 +13961,8 @@ fn gen_stmt(uint64 node) {
             wci = nxti
         }
         rax_cache = 0   // asm block trashes the scalar-load cache
+        uw_sp_site_set("L9")
+        uw_sp_moves()   // #143 option C: an asm block is opaque, it may move RSP
 
         uint32 single_tok = ast_data1(node)
         uint64 ws = single_tok
@@ -14173,7 +14173,7 @@ fn gen_function(uint64 fn_node) {
         // All 13 IAT entries are loader-resolved. Call GetCommandLineA directly.
         // PE entry: the loader calls us, so RSP ≡ 8 mod 16.
         // Use 0x28 shadow space (0x20 + 8 alignment) so RSP is 16-aligned before CALL.
-        emit_win_alloc_stack(0x28)
+        uw_sp_site_set("L10"); emit_win_alloc_stack(0x28)
         emit_win_call_iat(7)          // GetCommandLineA → rax = cmdline ptr
         emit_win_free_stack(0x28)
         // Store raw cmdline pointer as cli_argv (will be parsed by win_init_args)
@@ -14375,7 +14375,7 @@ fn gen_function(uint64 fn_node) {
         if tok_matches(wnt, "main", 4) != 0 && target_os == 2 && freestanding == 0 {
             // GetCommandLineA, after the prologue: RSP is 16-aligned here, so
             // 0x20 of shadow space keeps it aligned at the call.
-            emit_win_alloc_stack(0x20)
+            uw_sp_site_set("L10"); emit_win_alloc_stack(0x20)
             emit_win_call_iat(7)          // GetCommandLineA -> rax = cmdline ptr
             emit_win_free_stack(0x20)
             // the raw cmdline pointer becomes cli_argv (parsed by win_init_args)
@@ -15015,7 +15015,7 @@ fn gen_function(uint64 fn_node) {
         if target_os == 2 {
             // Windows: ExitProcess(rax) — DWORD arg in rcx
             emit_mov_rcx_rax()
-            emit_win_alloc_stack(0x20)
+            uw_sp_site_set("L10"); emit_win_alloc_stack(0x20)
             emit_win_call_iat(0)
         } else {
             // Linux/macOS: exit(rax) — copy rax→rdi, then set syscall nr

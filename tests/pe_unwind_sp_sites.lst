@@ -1,0 +1,74 @@
+# tests/pe_unwind_sp_sites.lst -- #143 option C (spec 2.5.1): every emitter site
+# family that writes RSP/SP in a function body, per backend, re-derived at the
+# A19b commit from the spec's table (HEAD 59c6f4e). Read by
+# tests/helpers/sp_site_audit.py (check (b): each moving/folded entry's function,
+# or its `if op == N` block, calls an SP helper or uw_sp_moves) and by the
+# emitter-coverage row (A19g: every moving/folded id is reached).
+# Format: id|backend|file|function|op or -|class|note
+# Differences from the spec's table, each with its reason:
+#   L6  also covers the --debug bounds check on Index expressions in gen_expr
+#       (beside gen_stmt's) and the --debug load/store null checks: the same
+#       0x20 + ExitProcess dead end, found by the A19b sweep (spec table cited
+#       only the overflow traps and the gen_stmt bounds trap).
+#   X14i, X15p, X15d, X15q, A4p, A4q, A4d: the C7 leaves and the asm-input
+#       group are separate functions, so (b) checks each one by name.
+#   G6  is `classified`: a hosted arm64 legacy main writes no SP today; it is
+#       SP-moving by rule (spec 2.5.1), with no site to pair.
+#   X1..X15, L1..L10, A1..A5, G1..G5: every Windows-reachable raw encoding is
+#       now emitted through an SP helper (emit_x64_push_r/_pop_r/_rsp_adj,
+#       emit_a64_sp_word, or the existing helpers), byte-identically.
+# class: moving (keeps the frame pointer), folded (legacy, ruling Q11),
+#        excluded (not body code or not reachable on Windows), neutral (no SP
+#        write), classified (no SP write, but SP-moving by rule: a hosted main).
+X1|x64-ir|ir.kr|ir_emit_x86_win_syscall|-|moving|op 52 IR_SYSCALL: shadow areas, push/pop rsi/rdx
+X2|x64-ir|ir.kr|ir_x86_win64_call_frame|-|moving|op 50 of a routed Windows import (with ir_x86_win64_call_release)
+X3|x64-ir|ir.kr|ir_x86_emit_call_stack_args|-|moving|op 50 with call_arg_count > 6 (with ir_x86_emit_call_stack_cleanup)
+X4|x64-ir|ir.kr|ir_emit_x86_insn|87|moving|op 87 IR_CALL_IND: > 6 args (X3 helpers); --emit=uefi call frame (not Windows)
+X5|x64-ir|ir.kr|ir_emit_x86_insn|70|moving|op 70 IR_ALLOC: push size, shadow, pop rcx
+X6|x64-ir|ir.kr|ir_emit_x86_insn|71|moving|op 71 IR_DEALLOC: shadow
+X7|x64-ir|ir.kr|ir_emit_x86_insn|74|moving|op 74 IR_FMT_UINT digit loop (all targets)
+X8|x64-ir|ir.kr|ir_emit_x86_insn|113|moving|op 113 IR_EXEC Windows branch: sub/add 0xD0, ExitProcess
+X9|x64-ir|ir.kr|c7_x86_emit_exec_argv|-|moving|op 114 IR_EXEC_ARGV: c7 push/pop, sub/add 0xF0, ExitProcess
+X10|x64-ir|ir.kr|ir_emit_x86_insn|119|moving|op 119 IR_TIME_NS Windows branch: sub/add 0x30
+X11|x64-ir|ir.kr|ir_emit_x86_insn|125|moving|op 125 IR_FMT_F64: sign-mask/constant and digit pushes (all targets)
+X12|x64-ir|ir.kr|ir_emit_x86_insn|146|moving|op 146 IR_MODULE_PATH: shadow
+X13|x64-ir|ir.kr|ir_emit_x86_insn|131|moving|op 131 IR_ARR_CHECK (--debug): ExitProcess 0x20, dead end
+X14|x64-ir|ir.kr|ir_emit_x86_insn|96|moving|op 96 IR_ASM_BLOCK (reports once) and its op-51 input pushes (ir_emit_asm_in_group)
+X14i|x64-ir|ir.kr|ir_emit_asm_in_group|-|moving|op 51 imm 100-199: asm input push/pop group
+X15|x64-ir|ir.kr|c7_x86_emit_main_argv|-|moving|hosted main: C7 argv 0x40, parse leaf 0x100, die and rsp; GetCommandLineA/ExitProcess in ir_emit_x86_function
+X15p|x64-ir|ir.kr|c7_x86_emit_parse_leaf|-|moving|hosted main: the parse leaf's 0x100 table
+X15d|x64-ir|ir.kr|c7_x86_emit_die|-|moving|hosted main: the die routine's and rsp,-16 / sub 0x70
+X15q|x64-ir|ir.kr|c7_x86_emit_quote_leaf|-|moving|op 114: the quote leaf's 0x100 table
+X16|x64-ir|ir.kr|ir_emit_call_arg_group|-|excluded|@naked only (ir.kr:8753); naked bodies that move RSP are refused (spec 4.3)
+X17|x64-ir|ir.kr|ir_emit_x86_function|-|excluded|prologue/epilogue
+L1|x64-legacy|codegen.kr|emit_win_alloc_stack|-|folded|IAT builtins: 48 alloc sites (gen_expr, gen_stmt, gen_function)
+L2|x64-legacy|codegen.kr|gen_expr|-|folded|call_ptr Windows sub rsp,32+8*overflow and the shared cleanup
+L3|x64-legacy|codegen.kr|gen_expr|-|folded|every named call on Windows: sub/add rsp,win_stack
+L4|x64-legacy|codegen.kr|gen_expr|-|folded|exec_process_argv 0x4D0, exec_process 0xD0, ExitProcess
+L5|x64-legacy|codegen.kr|gen_expr|-|folded|time_ns Windows sub/add 0x30
+L6|x64-legacy|codegen.kr|gen_expr|-|folded|--debug traps: ExitProcess 0x20 (bounds, overflow, load/store null checks; and gen_stmt bounds)
+L7|x64-legacy|codegen.kr|gen_expr|-|moving|println GetStdHandle push rdi/rcx, pops
+L8|x64-legacy|codegen.kr|gen_expr|-|moving|f-string digit loop push rdx / pop rcx
+L9|x64-legacy|codegen.kr|gen_stmt|-|moving|asm blocks (the node reports once)
+L10|x64-legacy|codegen.kr|gen_function|-|moving|hosted main GetCommandLineA / ExitProcess areas
+L11|x64-legacy|codegen.kr|gen_expr|-|excluded|Linux/macOS only: file_size push/pop, execve argv, time_ns, SysV named-call and call_ptr stack arguments
+L12|x64-legacy|codegen.kr|gen_function|-|excluded|prologue/epilogue
+A1|arm64-ir|ir_aarch64.kr|ir_emit_arm64_win_syscall|-|moving|op 52: sub/add sp,#16
+A2|arm64-ir|ir_aarch64.kr|ir_emit_arm64_insn|113|moving|op 113 IR_EXEC 0xD0
+A3|arm64-ir|ir_aarch64.kr|c7_a64_emit_exec_argv|-|moving|op 114: stp/ldp pre/post, 0xF0
+A4|arm64-ir|ir_aarch64.kr|c7_a64_emit_main_argv|-|moving|hosted main: argv 0x20; parse/quote leaves 0x100, die 0x60
+A4p|arm64-ir|ir_aarch64.kr|c7_a64_emit_parse_leaf|-|moving|hosted main: the parse leaf's 0x100 table
+A4q|arm64-ir|ir_aarch64.kr|c7_a64_emit_quote_leaf|-|moving|op 114: the quote leaf's 0x100 table
+A4d|arm64-ir|ir_aarch64.kr|c7_a64_emit_die|-|moving|hosted main: the die routine's 0x60
+A5|arm64-ir|ir_aarch64.kr|ir_emit_arm64_insn|96|moving|op 96 IR_ASM_BLOCK (reports once)
+A6|arm64-ir|ir_aarch64.kr|ir_emit_arm64_insn|131|neutral|op 131 emits nothing on Windows (#159); --debug divide guards write no SP (#158)
+A7|arm64-ir|ir_aarch64.kr|ir_emit_arm64_insn|50|neutral|stack arguments are frame-resident (IR_ARG); op 50/87 move no SP
+A8|arm64-ir|ir_aarch64.kr|ir_emit_arm64_function|-|excluded|prologue/epilogue (uw_sp_frame around the Windows helpers)
+G1|arm64-legacy|codegen_aarch64.kr|gen_expr_a64|-|folded|exec_process_argv 0x4E0, exec_process 0xE0
+G2|arm64-legacy|codegen_aarch64.kr|gen_expr_a64|-|folded|time_ns Windows sub/add sp,#16
+G3|arm64-legacy|codegen_aarch64.kr|gen_expr_a64|-|folded|named call with more than 8 arguments
+G4|arm64-legacy|codegen_aarch64.kr|gen_expr_a64|-|folded|call_ptr with more than 8 arguments
+G5|arm64-legacy|codegen_aarch64.kr|gen_stmt_a64|-|moving|asm blocks (the node reports once)
+G6|arm64-legacy|codegen_aarch64.kr|gen_function_a64|-|classified|hosted main: no SP write today; classified SP-moving (spec 2.5.1)
+G7|arm64-legacy|codegen_aarch64.kr|gen_expr_a64|-|excluded|Linux/macOS only: execve, time_ns
+G8|arm64-legacy|codegen_aarch64.kr|gen_function_a64|-|excluded|prologue/epilogue patches

@@ -8458,8 +8458,8 @@ fn ir_emit_x86_win_syscall(uint64 abstract_nr, uint64 dest_v, uint64 dst_r) {
         // Then call WriteFile(handle, buf, len, NULL, NULL).
 
         // Save buf(rsi) and len(rdx) — two pushes keep stack aligned
-        emit_byte(0x56)  // push rsi (buf)
-        emit_byte(0x52)  // push rdx (len)
+        emit_x64_push_r(6)  // push rsi (buf)
+        emit_x64_push_r(2)  // push rdx (len)
 
         // Check if fd <= 2 (stdin/stdout/stderr need GetStdHandle)
         // cmp rdi, 2
@@ -8484,8 +8484,8 @@ fn ir_emit_x86_win_syscall(uint64 abstract_nr, uint64 dest_v, uint64 dst_r) {
         // skip_getstdhandle:
 
         // Pop len and buf (reverse order)
-        emit_byte(0x5A)  // pop rdx (len)
-        emit_byte(0x5E)  // pop rsi (buf)
+        emit_x64_pop_r(2)  // pop rdx (len)
+        emit_x64_pop_r(6)  // pop rsi (buf)
 
         // WriteFile(handle=rcx, buf=rdx, len=r8, lpBytesWritten=r9=0, lpOverlapped=[rsp+32]=0)
         // Save len from rdx into r8 BEFORE overwriting rdx
@@ -8524,8 +8524,8 @@ fn ir_emit_x86_win_syscall(uint64 abstract_nr, uint64 dest_v, uint64 dst_r) {
         // read(fd, buf, len): SysV rdi=fd, rsi=buf, rdx=len
         // Windows: ReadFile(handle, buf, len, &bytesRead, NULL)
         // If fd <= 2, convert via GetStdHandle; otherwise fd is already a handle.
-        emit_byte(0x56)  // push rsi (buf)
-        emit_byte(0x52)  // push rdx (len)
+        emit_x64_push_r(6)  // push rsi (buf)
+        emit_x64_push_r(2)  // push rdx (len)
 
         // cmp rdi, 2
         emit_byte(0x48); emit_byte(0x83); emit_byte(0xFF); emit_byte(0x02)
@@ -8540,8 +8540,8 @@ fn ir_emit_x86_win_syscall(uint64 abstract_nr, uint64 dest_v, uint64 dst_r) {
         emit_win_free_stack(0x20)
         ir_emit_mov_r64_r64(7, 0)    // mov rdi, rax (handle)
 
-        emit_byte(0x5A)              // pop rdx -> len
-        emit_byte(0x5E)              // pop rsi -> buf
+        emit_x64_pop_r(2)            // pop rdx -> len
+        emit_x64_pop_r(6)            // pop rsi -> buf
         emit_byte(0x49); emit_byte(0x89); emit_byte(0xD0)  // mov r8, rdx (len)
         ir_emit_mov_r64_r64(1, 7)    // rcx = handle
         ir_emit_mov_r64_r64(2, 6)    // rdx = buf
@@ -8562,9 +8562,9 @@ fn ir_emit_x86_win_syscall(uint64 abstract_nr, uint64 dest_v, uint64 dst_r) {
         // open(path, flags): SysV rdi=path, rsi=flags
         // Windows: CreateFileA(path, access, share, NULL, disposition, flags, NULL)
         // flags: 0=read(O_RDONLY), nonzero=write(O_WRONLY/O_CREAT)
-        emit_byte(0x56)  // push rsi (flags)
+        emit_x64_push_r(6)  // push rsi (flags)
         ir_emit_mov_r64_r64(1, 7)    // rcx = path
-        emit_byte(0x5E)              // pop rsi (flags)
+        emit_x64_pop_r(6)            // pop rsi (flags)
         // rdx = GENERIC_READ (0x80000000) or GENERIC_WRITE (0x40000000)
         ir_emit_mov_r64_imm64(2, 0x80000000)  // default: GENERIC_READ
         // test rsi, rsi; if nonzero, use GENERIC_WRITE
@@ -8707,16 +8707,9 @@ fn ir_emit_asm_in_group(uint64 start_ii) {
                 emit_byte(0x84); emit_byte(0x24)
                 emit_u32_le(adj_off)
             }
-            emit_byte(0x50)
+            emit_x64_push_r(0)
         } else {
-            if s_reg >= 8 {
-                emit_byte(0x41)
-                uint8 po = 0x50 | (s_reg & 7)
-                emit_byte(po)
-            } else {
-                uint8 po = 0x50 | s_reg
-                emit_byte(po)
-            }
+            emit_x64_push_r(s_reg)
         }
         k = k + 1
     }
@@ -8728,14 +8721,7 @@ fn ir_emit_asm_in_group(uint64 start_ii) {
         uint64 dp_k = mv_dst + k2 * 8
         uint64 d_reg = 0
         unsafe { *(dp_k as uint64) -> d_reg }
-        if d_reg >= 8 {
-            emit_byte(0x41)
-            uint8 po = 0x58 | (d_reg & 7)
-            emit_byte(po)
-        } else {
-            uint8 po = 0x58 | d_reg
-            emit_byte(po)
-        }
+        emit_x64_pop_r(d_reg)
     }
 }
 
@@ -8839,16 +8825,9 @@ fn ir_emit_call_arg_group(uint64 start_ii) {
                 emit_byte(0x84); emit_byte(0x24)
                 emit_u32_le(adj_off)
             }
-            emit_byte(0x50)
+            emit_x64_push_r(0)
         } else {
-            if s_reg >= 8 {
-                emit_byte(0x41)
-                uint8 po = 0x50 | (s_reg & 7)
-                emit_byte(po)
-            } else {
-                uint8 po = 0x50 | s_reg
-                emit_byte(po)
-            }
+            emit_x64_push_r(s_reg)
         }
         k = k + 1
     }
@@ -8860,14 +8839,7 @@ fn ir_emit_call_arg_group(uint64 start_ii) {
         uint64 dp_k = cg_dst + k2 * 8
         uint64 d_reg = 0
         unsafe { *(dp_k as uint64) -> d_reg }
-        if d_reg >= 8 {
-            emit_byte(0x41)
-            uint8 po = 0x58 | (d_reg & 7)
-            emit_byte(po)
-        } else {
-            uint8 po = 0x58 | d_reg
-            emit_byte(po)
-        }
+        emit_x64_pop_r(d_reg)
     }
 }
 
@@ -8897,14 +8869,7 @@ fn ir_x86_win64_call_frame() -> uint64 {
     uint64 w_rem = w_stack & 15
     if w_rem != 0 { w_stack = w_stack + 16 - w_rem }
     // sub rsp, w_stack
-    if w_stack < 128 {
-        emit_byte(0x48); emit_byte(0x83); emit_byte(0xEC)
-        uint8 ws8 = w_stack
-        emit_byte(ws8)
-    } else {
-        emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC)
-        emit_u32_le(w_stack)
-    }
+    emit_x64_rsp_adj(0xEC, w_stack)
     // Store overflow args at [rsp + 32 + i*8], re-resolving each vreg
     // against the shifted frame (+w_stack). Uses rax as scratch; the
     // reg args (rcx/rdx/r8/r9) were placed before this and the wide
@@ -8970,14 +8935,7 @@ fn ir_x86_win64_call_frame() -> uint64 {
 
 // add rsp, w_stack -- undoes ir_x86_win64_call_frame.
 fn ir_x86_win64_call_release(uint64 w_stack) {
-    if w_stack < 128 {
-        emit_byte(0x48); emit_byte(0x83); emit_byte(0xC4)
-        uint8 wc8 = w_stack
-        emit_byte(wc8)
-    } else {
-        emit_byte(0x48); emit_byte(0x81); emit_byte(0xC4)
-        emit_u32_le(w_stack)
-    }
+    emit_x64_rsp_adj(0xC4, w_stack)
 }
 
 // Outgoing stack arguments for a call with more than six of them.
@@ -9021,14 +8979,7 @@ fn ir_x86_emit_call_stack_args(uint64 call_arg_count) -> uint64 {
             // sub rsp, stack_bytes — imm8 form fits up to 127; switch to
             // imm32 for larger allocations so calls with >16 stack args
             // don't wrap the signed-byte immediate silently.
-            if stack_bytes < 128 {
-                emit_byte(0x48); emit_byte(0x83); emit_byte(0xEC)
-                uint8 sb8 = stack_bytes
-                emit_byte(sb8)
-            } else {
-                emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC)
-                emit_u32_le(stack_bytes)
-            }
+            emit_x64_rsp_adj(0xEC, stack_bytes)
             // Now rsp has shifted down. Spill slots are now at rsp + stack_bytes + original_offset
             // We need to re-resolve each overflow arg with the shifted rsp
             oi = 0
@@ -9112,15 +9063,34 @@ fn ir_x86_emit_call_stack_cleanup(uint64 stack_args) {
             uint64 aligned_stack = stack_args
             if (aligned_stack & 1) != 0 { aligned_stack = aligned_stack + 1 }
             uint64 cleanup = aligned_stack * 8
-            if cleanup < 128 {
-                emit_byte(0x48); emit_byte(0x83); emit_byte(0xC4)
-                uint8 cl8 = cleanup
-                emit_byte(cl8)
-            } else {
-                emit_byte(0x48); emit_byte(0x81); emit_byte(0xC4)
-                emit_u32_le(cleanup)
-            }
+            emit_x64_rsp_adj(0xC4, cleanup)
     }
+}
+
+// #143 option C (spec 2.5.1 site table): the site family an x86_64 IR op's
+// SP writes belong to, named in every backstop report (uw_sp_moves).
+fn ir_x86_sp_site(uint64 op, uint64 imm) -> uint64 {
+    if op == 52 { return "X1" }
+    if op == 50 {
+        if is_routed_win_import(imm) != PE_IMPORT_NO_SLOT { return "X2" }
+        return "X3"
+    }
+    if op == 87 { return "X4" }
+    if op == 70 { return "X5" }
+    if op == 71 { return "X6" }
+    if op == 74 { return "X7" }
+    if op == 113 { return "X8" }
+    if op == 114 { return "X9" }
+    if op == 119 { return "X10" }
+    if op == 125 { return "X11" }
+    if op == 146 { return "X12" }
+    if op == 131 { return "X13" }
+    if op == 96 { return "X14" }
+    if op == 51 {
+        if imm >= 100 && imm < 200 { return "X14" }
+        return "X16"
+    }
+    return "unlisted"
 }
 
 fn ir_emit_x86_insn(uint64 ii) {
@@ -9134,6 +9104,7 @@ fn ir_emit_x86_insn(uint64 ii) {
     uint64 s1_v = ir_insn_src1(ii)
     uint64 s2_v = ir_insn_src2(ii)
     uint64 imm = ir_insn_imm(ii)
+    if target_os == 2 { uw_sp_site_set(ir_x86_sp_site(op, imm)) }
 
     // Record DWARF line-table entry at the start of each instruction
     // that carries a source token. The line_table_record helper itself
@@ -10012,17 +9983,7 @@ fn ir_emit_x86_insn(uint64 ii) {
             size_reg = 0
         }
         // push original size onto stack for later
-        if size_reg >= 8 {
-            // push r8..r15: 41 5x
-            emit_byte(0x41)
-            uint64 push_opc = 0x50 | (size_reg & 7)
-            uint8 po = push_opc
-            emit_byte(po)
-        } else {
-            uint64 push_opc = 0x50 | size_reg
-            uint8 po = push_opc
-            emit_byte(po)
-        }
+        emit_x64_push_r(size_reg)
         if target_os == 2 {
             // Windows: VirtualAlloc(NULL, size+8, MEM_COMMIT|MEM_RESERVE, PAGE_READWRITE)
             // xor rcx, rcx (NULL)
@@ -10037,7 +9998,7 @@ fn ir_emit_x86_insn(uint64 ii) {
             emit_win_free_stack(0x20)
             // pop original size into rcx — on BOTH paths, so the frame stays
             // balanced when the allocation failed.
-            emit_byte(0x59)  // pop rcx
+            emit_x64_pop_r(1)  // pop rcx
             // VirtualAlloc returns NULL on failure; skip the header store and
             // return 0 (emit_x86_alloc_fail_jcc picks the Windows form).
             uint64 win_alloc_fail = emit_x86_alloc_fail_jcc()
@@ -10087,7 +10048,7 @@ fn ir_emit_x86_insn(uint64 ii) {
         // The pop happens on BOTH paths so the frame stays balanced when the
         // mmap failed; POP does not write EFLAGS, so it may precede the
         // macOS carry test emit_x86_alloc_fail_jcc uses.
-        emit_byte(0x59)  // pop rcx
+        emit_x64_pop_r(1)  // pop rcx
         // If the mmap failed, skip the header store entirely and return 0 —
         // storing through -ENOMEM is what used to segfault inside alloc.
         uint64 alloc_fail_jcc = emit_x86_alloc_fail_jcc()
@@ -10271,7 +10232,7 @@ fn ir_emit_x86_insn(uint64 ii) {
         emit_byte(0xC2)
         emit_byte(0x30)
         // push rdx (52)
-        emit_byte(0x52)
+        emit_x64_push_r(2)
         // inc rcx (48 FF C1)
         emit_byte(0x48)
         emit_byte(0xFF)
@@ -10294,7 +10255,7 @@ fn ir_emit_x86_insn(uint64 ii) {
         // .pop_loop:
         uint64 fu_pop = out_len
         // pop rdx (5A)
-        emit_byte(0x5A)
+        emit_x64_pop_r(2)
         // mov [rdi], dl (88 17)
         emit_byte(0x88)
         emit_byte(0x17)
@@ -11145,6 +11106,7 @@ fn ir_emit_x86_insn(uint64 ii) {
     if op == 96 {
         // IR_ASM_BLOCK: emit inline assembly from AST node
         // src1 = AST node index
+        uw_sp_moves()           // #143 option C: opaque, may move RSP
         uint64 asm_node = s1_v
         uint32 single_tok = ast_data1(asm_node)
         uint64 ws = single_tok
@@ -11523,7 +11485,7 @@ fn ir_emit_x86_insn(uint64 ii) {
             // SP shift is safe here — ExitProcess never returns.
             ir_emit_mov_r64_r64(7, path_r)  // save path in rdi
             // sub rsp, 0xD0 (STARTUPINFOA=104 + PI=24 + shadow+args)
-            emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC); emit_u32_le(0xD0)
+            emit_x64_rsp_adj(0xEC, 0xD0)
             // Zero the structures: lea rdi, [rsp+0x50]; xor eax,eax; mov ecx,128; rep stosb
             emit_byte(0x48); emit_byte(0x8D); emit_byte(0x7C); emit_byte(0x24); emit_byte(0x50)
             emit_byte(0x31); emit_byte(0xC0)
@@ -11567,7 +11529,7 @@ fn ir_emit_x86_insn(uint64 ii) {
             emit_win_call_iat(11)
             // ExitProcess(exitCode=[rsp+0x20])
             emit_byte(0x8B); emit_byte(0x4C); emit_byte(0x24); emit_byte(0x20)
-            emit_byte(0x48); emit_byte(0x81); emit_byte(0xC4); emit_u32_le(0xD0)
+            emit_x64_rsp_adj(0xC4, 0xD0)
             emit_win_alloc_stack(0x20)
             emit_win_call_iat(0)
             // Never reaches here
@@ -11604,7 +11566,7 @@ fn ir_emit_x86_insn(uint64 ii) {
         // comment warns is worse than a vague one.
         emit_x86_syscall_insn("exec_process")
         // If execve fails, restore stack: add rsp, 16
-        emit_byte(0x48); emit_byte(0x83); emit_byte(0xC4); emit_byte(0x10)
+        emit_x64_rsp_adj(0xC4, 0x10)
         // Save errno to exec_errno if defined
         uint64 errno_off = static_lookup_by_name("exec_errno", 10)
         if errno_off != 0xFFFFFFFF {
@@ -11754,7 +11716,7 @@ fn ir_emit_x86_insn(uint64 ii) {
         // zero often enough that the bug went unnoticed for a while.
         if target_os == 2 {
             // sub rsp, 0x30  (shadow 0x20 + freq@0x20 + counter@0x28)
-            emit_byte(0x48); emit_byte(0x83); emit_byte(0xEC); emit_byte(0x30)
+            emit_x64_rsp_adj(0xEC, 0x30)
             // lea rcx, [rsp+0x20]
             emit_byte(0x48); emit_byte(0x8D); emit_byte(0x4C); emit_byte(0x24); emit_byte(0x20)
             emit_win_call_iat(15)                                               // QueryPerformanceFrequency
@@ -11784,7 +11746,7 @@ fn ir_emit_x86_insn(uint64 ii) {
             // add rax, r10
             emit_byte(0x4C); emit_byte(0x01); emit_byte(0xD0)
             // add rsp, 0x30
-            emit_byte(0x48); emit_byte(0x83); emit_byte(0xC4); emit_byte(0x30)
+            emit_x64_rsp_adj(0xC4, 0x30)
         } else if target_os == 1 {
             // macOS x86_64: gettimeofday(rdi=&tv, rsi=NULL) via syscall
             // 0x2000074. Darwin's clock_gettime isn't 228 the way Linux's
@@ -11792,7 +11754,7 @@ fn ir_emit_x86_insn(uint64 ii) {
             // entry point that silently returns 0 in rax, which is what
             // made time_ns() come back zero on every arm64 and x86_64
             // macOS build until today.
-            emit_byte(0x48); emit_byte(0x83); emit_byte(0xEC); emit_byte(16)       // sub rsp, 16
+            emit_x64_rsp_adj(0xEC, 16)       // sub rsp, 16
             emit_byte(0x48); emit_byte(0x89); emit_byte(0xE7)                      // mov rdi, rsp
             emit_byte(0x31); emit_byte(0xF6)                                       // xor esi, esi
             ir_emit_mov_r64_imm64(0, 0x2000074)                                    // mov rax, gettimeofday
@@ -11805,10 +11767,10 @@ fn ir_emit_x86_insn(uint64 ii) {
             emit_byte(0x48); emit_byte(0x69); emit_byte(0xC9)                      // imul rcx, rcx, 1000
             emit_u32_le(1000)
             emit_byte(0x48); emit_byte(0x01); emit_byte(0xC8)                      // add rax, rcx
-            emit_byte(0x48); emit_byte(0x83); emit_byte(0xC4); emit_byte(16)       // add rsp, 16
+            emit_x64_rsp_adj(0xC4, 16)       // add rsp, 16
         } else {
             // Linux / Android x86_64: clock_gettime(CLOCK_MONOTONIC, &ts)
-            emit_byte(0x48); emit_byte(0x83); emit_byte(0xEC); emit_byte(16)
+            emit_x64_rsp_adj(0xEC, 16)
             emit_byte(0xBF); emit_byte(1); emit_byte(0); emit_byte(0); emit_byte(0)
             emit_byte(0x48); emit_byte(0x89); emit_byte(0xE6)
             uint64 cgt_nr = ir_x86_syscall_nr(228)
@@ -11819,7 +11781,7 @@ fn ir_emit_x86_insn(uint64 ii) {
             emit_u32_le(1000000000)
             emit_byte(0x48); emit_byte(0x8B); emit_byte(0x4C); emit_byte(0x24); emit_byte(8)
             emit_byte(0x48); emit_byte(0x01); emit_byte(0xC8)
-            emit_byte(0x48); emit_byte(0x83); emit_byte(0xC4); emit_byte(16)
+            emit_x64_rsp_adj(0xC4, 16)
         }
         if dst_r != 0xFFFFFFFF && dst_r != 0 {
             ir_emit_mov_r64_r64(dst_r, 0)
@@ -12372,11 +12334,11 @@ fn ir_emit_x86_insn(uint64 ii) {
         // 0x8000000000000000 little-endian:
         emit_byte(0x00); emit_byte(0x00); emit_byte(0x00); emit_byte(0x00)
         emit_byte(0x00); emit_byte(0x00); emit_byte(0x00); emit_byte(0x80)
-        emit_byte(0x50)  // push rax
+        emit_x64_push_r(0)  // push rax
         // movq xmm1, [rsp]: F3 0F 7E 0C 24
         emit_byte(0xF3); emit_byte(0x0F); emit_byte(0x7E); emit_byte(0x0C); emit_byte(0x24)
         // pop rax: 58
-        emit_byte(0x58)
+        emit_x64_pop_r(0)
         // xorpd xmm0, xmm1: 66 0F 57 C1
         emit_byte(0x66); emit_byte(0x0F); emit_byte(0x57); emit_byte(0xC1)
 
@@ -12391,10 +12353,10 @@ fn ir_emit_x86_insn(uint64 ii) {
         // 1e18 LE bytes: 00 C8 4E 67 6D C1 AB 43
         emit_byte(0x00); emit_byte(0xC8); emit_byte(0x4E); emit_byte(0x67)
         emit_byte(0x6D); emit_byte(0xC1); emit_byte(0xAB); emit_byte(0x43)
-        emit_byte(0x50)  // push rax
+        emit_x64_push_r(0)  // push rax
         // movq xmm1, [rsp]
         emit_byte(0xF3); emit_byte(0x0F); emit_byte(0x7E); emit_byte(0x0C); emit_byte(0x24)
-        emit_byte(0x58)  // pop rax
+        emit_x64_pop_r(0)  // pop rax
         // ucomisd xmm0, xmm1: 66 0F 2E C1
         emit_byte(0x66); emit_byte(0x0F); emit_byte(0x2E); emit_byte(0xC1)
         // jae .ff_big (unsigned above-or-equal = >= 1e18) — rel32 to reach far
@@ -12423,7 +12385,7 @@ fn ir_emit_x86_insn(uint64 ii) {
         // Save xmm0 (abs val) and int_part to stack for later fraction use
         // Push xmm0 bits: movq rax, xmm0; push rax
         emit_byte(0x66); emit_byte(0x48); emit_byte(0x0F); emit_byte(0x7E); emit_byte(0xC0)
-        emit_byte(0x50)  // push rax (abs val bits)
+        emit_x64_push_r(0)  // push rax (abs val bits)
 
         // Format int_part (in rcx) into r10 using divide-by-10 loop
         // rdi = r10 (current write pos); rax = int_part
@@ -12460,7 +12422,7 @@ fn ir_emit_x86_insn(uint64 ii) {
         // add dl, '0'
         emit_byte(0x80); emit_byte(0xC2); emit_byte(0x30)
         // push rdx
-        emit_byte(0x52)
+        emit_x64_push_r(2)
         // inc rcx
         emit_byte(0x48); emit_byte(0xFF); emit_byte(0xC1)
         // test rax, rax
@@ -12476,7 +12438,7 @@ fn ir_emit_x86_insn(uint64 ii) {
         // Actually: we pushed digits LSB first, so pop MSB first → correct order
         // pop_loop: pop rdx; mov [rdi], dl; inc rdi; dec rcx; jnz pop_loop
         uint64 ff_pop_loop = out_len
-        emit_byte(0x5A)  // pop rdx
+        emit_x64_pop_r(2)  // pop rdx
         emit_byte(0x88); emit_byte(0x17)   // mov [rdi], dl
         emit_byte(0x48); emit_byte(0xFF); emit_byte(0xC7)   // inc rdi
         emit_byte(0x48); emit_byte(0xFF); emit_byte(0xC9)   // dec rcx
@@ -12560,7 +12522,7 @@ fn ir_emit_x86_insn(uint64 ii) {
         emit_byte(0x49); emit_byte(0xFF); emit_byte(0xC3)   // inc r11
 
         // Restore xmm0 (abs val): pop rax; movq xmm0, rax
-        emit_byte(0x58)  // pop rax (abs val that we pushed earlier)
+        emit_x64_pop_r(0)  // pop rax (abs val that we pushed earlier)
         emit_byte(0x66); emit_byte(0x48); emit_byte(0x0F); emit_byte(0x6E); emit_byte(0xC0)
 
         // cvttsd2si rax, xmm0 (integer part again, to reconstruct int_f)
@@ -12575,9 +12537,9 @@ fn ir_emit_x86_insn(uint64 ii) {
         // 1e6 LE bytes: 00 00 00 00 80 84 2E 41
         emit_byte(0x00); emit_byte(0x00); emit_byte(0x00); emit_byte(0x00)
         emit_byte(0x80); emit_byte(0x84); emit_byte(0x2E); emit_byte(0x41)
-        emit_byte(0x50)  // push rax
+        emit_x64_push_r(0)  // push rax
         emit_byte(0xF3); emit_byte(0x0F); emit_byte(0x7E); emit_byte(0x0C); emit_byte(0x24)  // movq xmm1, [rsp]
-        emit_byte(0x58)  // pop rax
+        emit_x64_pop_r(0)  // pop rax
         // mulsd xmm0, xmm1: F2 0F 59 C1
         emit_byte(0xF2); emit_byte(0x0F); emit_byte(0x59); emit_byte(0xC1)
 
@@ -12704,7 +12666,7 @@ fn ir_emit_x86_insn(uint64 ii) {
         emit_byte(0x48); emit_byte(0x31); emit_byte(0xD2)
         emit_byte(0x49); emit_byte(0xF7); emit_byte(0xF1)   // div r9
         emit_byte(0x80); emit_byte(0xC2); emit_byte(0x30)   // add dl, '0'
-        emit_byte(0x52)  // push rdx
+        emit_x64_push_r(2)  // push rdx
         emit_byte(0x48); emit_byte(0xFF); emit_byte(0xC1)   // inc rcx
         emit_byte(0x48); emit_byte(0x85); emit_byte(0xC0)   // test rax, rax
         emit_byte(0x75)  // jnz ff_fi_loop
@@ -12716,7 +12678,7 @@ fn ir_emit_x86_insn(uint64 ii) {
 
         // pop and write digits
         uint64 ff_fi_pop_loop = out_len
-        emit_byte(0x5A)  // pop rdx
+        emit_x64_pop_r(2)  // pop rdx
         emit_byte(0x88); emit_byte(0x17)   // mov [rdi], dl
         emit_byte(0x48); emit_byte(0xFF); emit_byte(0xC7)   // inc rdi
         emit_byte(0x48); emit_byte(0xFF); emit_byte(0xC9)   // dec rcx
@@ -15240,10 +15202,12 @@ fn ir_emit_x86_function(uint64 fn_node) {
             // Windows (spec C7): parse the command line UCRT's way into a fresh
             // VirtualAlloc'd argv, exactly as the Linux loader would have laid it
             // out -- see the C7 block at the end of this file.
+            uw_sp_site_set("X15")
             c7_x86_emit_main_argv(c7_argc_off, c7_argv_off)
         } else {
             // No cli_argc/cli_argv to fill: the pre-C7 sequence (raw command
             // line in cli_argv, sentinel in cli_argc; win_init_args parses it).
+            uw_sp_site_set("X15")
             emit_win_alloc_stack(0x20)
             emit_win_call_iat(7)          // GetCommandLineA (IAT slot 7) -> rax = cmdline
             emit_win_free_stack(0x20)
@@ -15455,6 +15419,7 @@ fn ir_emit_x86_function(uint64 fn_node) {
                 // Windows: ExitProcess(rax) via IAT slot 0
                 // mov ecx, eax (32-bit DWORD ABI argument is in ecx)
                 emit_byte(0x89); emit_byte(0xC1)
+                uw_sp_site_set("X15")
                 emit_win_alloc_stack(0x20)
                 emit_win_call_iat(0)
             } else {
@@ -15739,8 +15704,7 @@ fn c7_x86_emit_parse_leaf() {
     c7_x86_jcc(C7_JB, l_ret0)
     c7_b4(0x4C, 0x8D, 0x04, 0xC2)           // lea r8, [rdx+rax*8]  (strings)
     c7_b3(0x4C, 0x89, 0x02)                 // mov [rdx], r8        (argv[0])
-    c7_b3(0x48, 0x81, 0xEC)                 // sub rsp, 0x100       (the table)
-    emit_u32_le(0x100)
+    emit_x64_rsp_adj(0xEC, 0x100)           // sub rsp, 0x100       (the table)
     c7_x86_emit_lead_table()
     c7_b3(0x41, 0xB9, 0x01)                 // mov r9d, 1
     c7_b3(0x00, 0x00, 0x00)
@@ -15863,8 +15827,7 @@ fn c7_x86_emit_parse_leaf() {
     c7_b4(0x4A, 0xC7, 0x04, 0xCA)           // mov qword [rdx+r9*8], 0
     emit_u32_le(0)
     c7_b3(0x4C, 0x89, 0xC8)                 // mov rax, r9
-    c7_b3(0x48, 0x81, 0xC4)                 // add rsp, 0x100
-    emit_u32_le(0x100)
+    emit_x64_rsp_adj(0xC4, 0x100)           // add rsp, 0x100
     emit_byte(0xC3)                         // ret
     c7_bind(l_ret0)
     c7_b2(0x31, 0xC0)                       // xor eax, eax
@@ -15992,8 +15955,7 @@ fn c7_x86_emit_quote_leaf() {
     uint64 l_qclose = c7_label()
 
     c7_b3(0x4D, 0x89, 0xC1)                 // mov r9, r8   (LeadByte)
-    c7_b3(0x48, 0x81, 0xEC)                 // sub rsp, 0x100  (the table)
-    emit_u32_le(0x100)
+    emit_x64_rsp_adj(0xEC, 0x100)           // sub rsp, 0x100  (the table)
     c7_x86_emit_lead_table()
     c7_b2(0x31, 0xC0)                       // xor eax, eax
     c7_b3(0x45, 0x31, 0xDB)                 // xor r11d, r11d
@@ -16120,8 +16082,7 @@ fn c7_x86_emit_quote_leaf() {
     c7_x86_jmp(l_next)
     c7_bind(l_end)
     c7_x86_quote_put(0x00)                  // the NUL counts
-    c7_b3(0x48, 0x81, 0xC4)                 // add rsp, 0x100
-    emit_u32_le(0x100)
+    emit_x64_rsp_adj(0xC4, 0x100)           // add rsp, 0x100
     emit_byte(0xC3)                         // ret
     c7_end()
 }
@@ -16162,8 +16123,8 @@ fn c7_x86_quote_verbatim(uint64 l_after) {
 // .text) to stderr and exits with `code`. Realigns rsp itself, so it is valid
 // from any stack depth; it never returns.
 fn c7_x86_emit_die(uint64 code, uint64 msg, uint64 len) {
-    c7_b4(0x48, 0x83, 0xE4, 0xF0)           // and rsp, -16
-    c7_b4(0x48, 0x83, 0xEC, 0x70)           // sub rsp, 0x70
+    emit_x64_rsp_adj(0xE4, 0xF0)            // and rsp, -16
+    emit_x64_rsp_adj(0xEC, 0x70)            // sub rsp, 0x70
     uint64 q = 0
     while q * 8 < len {
         uint64 v = 0
@@ -16285,12 +16246,10 @@ fn c7_x86_emit_main_argv(uint64 argc_off, uint64 argv_off) {
 
 // push / pop of a 64-bit GPR (0-15).
 fn c7_x86_push(uint64 r) {
-    if r >= 8 { emit_byte(0x41) }
-    emit_byte(0x50 + (r & 7))
+    emit_x64_push_r(r)                      // #143 option C: reports
 }
 fn c7_x86_pop(uint64 r) {
-    if r >= 8 { emit_byte(0x41) }
-    emit_byte(0x58 + (r & 7))
+    emit_x64_pop_r(r)
 }
 
 // exec_process_argv on Windows x86_64 (op 114): quote argv into ONE command
@@ -16313,8 +16272,7 @@ fn c7_x86_emit_exec_argv(uint64 path_r, uint64 argv_r) {
     c7_x86_push(argv_r)
     c7_x86_pop(13)                          // r13 = argv
     c7_x86_pop(12)                          // r12 = path
-    c7_b3(0x48, 0x81, 0xEC)                 // sub rsp, 0xF0
-    emit_u32_le(0xF0)
+    emit_x64_rsp_adj(0xEC, 0xF0)            // sub rsp, 0xF0
     // GetCPInfo(CP_ACP, &cpinfo at [rsp+0xD0]); zeroed on failure, as in the
     // main prologue. Both quoter calls get its LeadByte array.
     c7_b2(0x31, 0xC9)                       // xor ecx, ecx       (CP_ACP)
@@ -16382,7 +16340,7 @@ fn c7_x86_emit_exec_argv(uint64 path_r, uint64 argv_r) {
     emit_win_call_iat(IAT_GetExitCodeProcess)
     // ExitProcess(code)
     emit_byte(0x8B); emit_byte(0x4C); emit_byte(0x24); emit_byte(0x20)
-    emit_byte(0x48); emit_byte(0x81); emit_byte(0xC4); emit_u32_le(0xF0)
+    emit_x64_rsp_adj(0xC4, 0xF0)
     emit_win_alloc_stack(0x20)
     emit_win_call_iat(IAT_ExitProcess)
     c7_x86_jmp(l_over)                      // not reached
