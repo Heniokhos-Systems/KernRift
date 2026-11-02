@@ -40,3 +40,5 @@ pe_unwind_obj_link_windows_wine
 pe_unwind_checker_linked_selftest
 pe_unwind_obj_reloc_limit
 pe_unwind_obj_no_functions
+native_exec_cmdline_selftest
+native_env_allowlist_selftest

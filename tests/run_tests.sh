@@ -29869,6 +29869,39 @@ PEULINKEOF
     else pe_row_bad $PEU_ROW "$PEU_WHY"; fi
 fi
 
+# tests/windows/native_exec.sh (#143 A14a, spec 8.6 (a)) runs Windows rows
+# natively on the laptop; its Linux half is tested here, without the laptop
+# (the PowerShell half only natively, Task D):
+#  * the command line it builds (MSVC/UCRT quoting) against a Python reference
+#    of the UCRT parser, on the C7 vectors: the parser reproduces every line of
+#    argv_table.txt, the builder reproduces the compiler's own quoter on the
+#    round-trip vectors, and every argv survives build -> parse;
+#  * the environment allow-list: exactly the names in NATIVE_ENV that are set
+#    plus every exported KR_* / MLR_* travel, with their values intact
+#    (spaces, quotes, newlines, non-ASCII), and nothing else.
+if ! command -v python3 > /dev/null 2>&1; then
+    pe_row_skip native_exec_cmdline_selftest "no python3"; pe_row_skip native_env_allowlist_selftest "no python3"
+else
+    PEU_NX="$DIR/windows/native_exec.sh"
+    PEU_O=$(bash "$PEU_NX" --selftest-cmdline "$DIR/fixtures" 2>&1); PEU_RC=$?
+    if [ "$PEU_RC" = 0 ] && grep -q ' 0 mismatches$' <<< "$PEU_O"; then pe_row_ok native_exec_cmdline_selftest "$(tail -1 <<< "$PEU_O")"
+    else pe_row_bad native_exec_cmdline_selftest "rc=$PEU_RC $(head -3 <<< "$PEU_O" | tr '\n' '|' | cut -c1-300)"; fi
+    PEU_WHY=""
+    PEU_V=$(printf 'a b "q" \\\\x\nline2 \xce\xbb')
+    for PEU_C in "NATIVE_ENV=|KR_A,MLR_B" "NATIVE_ENV=OTHER UNSET_ONE|KR_A,MLR_B,NATIVE_ENV,OTHER" "NATIVE_ENV=KR_A|KR_A,MLR_B"; do
+        PEU_SET=${PEU_C%%|*}; PEU_WANT=${PEU_C#*|}
+        PEU_O=$(env -i PATH="$PATH" HOME="$HOME" "$PEU_SET" KR_A="$PEU_V" MLR_B=2 OTHER=o NOTKR_C=n XKR_D=x bash "$PEU_NX" --env-forward 2>&1)
+        PEU_GOT=$(cut -d= -f1 <<< "$PEU_O" | paste -sd,)
+        # NATIVE_ENV itself is listed only when named in NATIVE_ENV; drop it
+        PEU_GOT=$(tr ',' '\n' <<< "$PEU_GOT" | grep -vx NATIVE_ENV | paste -sd,); PEU_WANT=$(tr ',' '\n' <<< "$PEU_WANT" | grep -vx NATIVE_ENV | paste -sd,)
+        [ "$PEU_GOT" = "$PEU_WANT" ] || PEU_WHY="$PEU_WHY [$PEU_SET] forwards '$PEU_GOT', want '$PEU_WANT';"
+        PEU_DEC=$(grep '^KR_A=' <<< "$PEU_O" | cut -d= -f2- | base64 -d 2>/dev/null)
+        [ "$PEU_DEC" = "$PEU_V" ] || PEU_WHY="$PEU_WHY [$PEU_SET] KR_A's value does not survive its base64;"
+    done
+    if [ -z "$PEU_WHY" ]; then pe_row_ok native_env_allowlist_selftest "3 setups: NATIVE_ENV names that are set plus exported KR_*/MLR_*, values intact, nothing else"
+    else pe_row_bad native_env_allowlist_selftest "$PEU_WHY"; fi
+fi
+
 # A permitted (RSP-neutral) @naked function gets the zero-code kind-1 record
 # (spec 4.3) and passes C5; its listing marks it `; uw-naked`.
 if ! command -v python3 > /dev/null 2>&1; then pe_row_skip pe_unwind_records_naked "no python3"
