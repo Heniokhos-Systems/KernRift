@@ -44,6 +44,11 @@ import sys
 MINUS5_X86 = bytes([0x48, 0xC7, 0xC0, 0xFB, 0xFF, 0xFF, 0xFF])
 MOVN_M5 = 0x92800080          # movn x0, #4  (x0 = -5)
 CMP_W0_109 = 0x7101B41F       # cmp w0, #109
+# #171 alloc clamps, on the register that becomes VirtualAlloc's dwSize
+CLAMP_X86_IR = bytes([0x48, 0x83, 0xFA, 0x08, 0x48, 0x19, 0xC0, 0x48, 0x09, 0xC2])
+CLAMP_X86_LEGACY = bytes([0x48, 0x83, 0xF8, 0x08, 0x48, 0x19, 0xC9, 0x48, 0x09, 0xC8, 0x48, 0x89, 0xC2])
+CLAMP_A64_IR = [0xF100203F, 0xDA9F2021]                    # cmp x1,#8 ; csinv x1,x1,xzr,hs
+CLAMP_A64_LEGACY = [0xF100201F, 0xDA9F2000, 0xAA0003E1]    # cmp x0,#8 ; csinv x0,x0,xzr,hs ; mov x1,x0
 
 
 class Fail(Exception):
@@ -308,16 +313,17 @@ def check_range(arch, legacy, code, calls, rules, fname):
                 if not x86_guard_before(code, calls, ci, 0):
                     errs.append(where + ": no std-fd guard before it")
             if name == "VirtualAlloc" and "f" in rules:
-                lo = prev_end(ci)
-                seg = code[lo:pos]
-                ok = False
-                for i in range(len(seg) - 9):
-                    if seg[i] == 0x48 and seg[i + 1] == 0x83 and seg[i + 3] == 0x08 \
-                            and seg[i + 4] == 0x48 and seg[i + 5] == 0x19 \
-                            and seg[i + 7] == 0x48 and seg[i + 8] == 0x09:
-                        ok = True
+                # The clamp must act on the register that becomes the size
+                # argument (rdx): IR clamps rdx itself, legacy clamps rax and
+                # then moves it to rdx.
+                seg = code[prev_end(ci):pos]
+                if legacy:
+                    ok = CLAMP_X86_LEGACY in seg
+                else:
+                    ok = CLAMP_X86_IR in seg
                 if not ok:
-                    errs.append(where + ": no #171 clamp (cmp r,8 ; sbb ; or) before it")
+                    errs.append(where + ": no #171 clamp on the size argument (%s) before it" % (
+                        "cmp rax,8 ; sbb rcx,rcx ; or rax,rcx ; mov rdx,rax" if legacy else "cmp rdx,8 ; sbb rax,rax ; or rdx,rax"))
         else:
             w = lambda k: u32(code, k) if k + 4 <= len(code) else 0
             if name == "ReadFile" and "a" in rules:
@@ -352,13 +358,17 @@ def check_range(arch, legacy, code, calls, rules, fname):
                 if not a64_guard_before(code, calls, ci, 0):
                     errs.append(where + ": no std-fd guard before it")
             if name == "VirtualAlloc" and "f" in rules:
+                # The clamp must act on the size argument: x1 itself on IR
+                # (Rn = Rd = x1), x0 then `mov x1, x0` on legacy.
                 lo = prev_end(ci)
+                want = CLAMP_A64_LEGACY if legacy else CLAMP_A64_IR
                 ok = False
-                for k in range(lo, pos - 4, 4):
-                    if (w(k) & 0xFFFFFC1F) == 0xF100201F and (w(k + 4) & 0xFFFFFC00) == 0xDA9F2000:
+                for k in range(lo, pos - 4 * (len(want) - 1), 4):
+                    if all(w(k + 4 * j) == want[j] for j in range(len(want))):
                         ok = True
                 if not ok:
-                    errs.append(where + ": no #171 clamp (cmp x,#8 ; csinv ...,hs) before it")
+                    errs.append(where + ": no #171 clamp on the size argument (%s) before it" % (
+                        "cmp x0,#8 ; csinv x0,x0,xzr,hs ; mov x1,x0" if legacy else "cmp x1,#8 ; csinv x1,x1,xzr,hs"))
     # unguarded GetStdHandle (rule e, legacy): every GetStdHandle in the range
     # must be jumped over by a guard
     if "e" in rules and legacy:
@@ -484,6 +494,29 @@ def selftest():
     if not any("BOOL" in x for x in e):
         print("selftest FAIL: missing BOOL test not detected: %s" % e)
         fails += 1
+    # rule f: the clamp must hit the size argument, on every backend
+    def f_case(arch, legacy, pre_words_or_bytes):
+        if arch == "x86_64":
+            code = bytes(pre_words_or_bytes) + b"\xFF\x15\x00\x00\x00\x00"
+            calls = [(len(pre_words_or_bytes), "VirtualAlloc", 6)]
+        else:
+            code = b"".join(struct.pack("<I", x) for x in pre_words_or_bytes) + b"\x00" * 12
+            calls = [(4 * len(pre_words_or_bytes), "VirtualAlloc", 12)]
+        return check_range(arch, legacy, code, calls, "f", "sh_alloc")
+    cases = [
+        ("x86_64 IR right", f_case("x86_64", False, CLAMP_X86_IR), 0),
+        ("x86_64 IR wrong register (or rcx,rax)", f_case("x86_64", False, CLAMP_X86_IR[:-1] + b"\xC1"), 1),
+        ("x86_64 legacy right", f_case("x86_64", True, CLAMP_X86_LEGACY), 0),
+        ("x86_64 legacy no mov rdx,rax", f_case("x86_64", True, CLAMP_X86_LEGACY[:-3] + b"\x48\x89\xC1"), 1),
+        ("arm64 IR right", f_case("arm64", False, CLAMP_A64_IR), 0),
+        ("arm64 IR wrong register (x2)", f_case("arm64", False, [0xF100205F, 0xDA9F2042]), 1),
+        ("arm64 legacy right", f_case("arm64", True, CLAMP_A64_LEGACY), 0),
+        ("arm64 legacy no mov x1,x0", f_case("arm64", True, CLAMP_A64_LEGACY[:2] + [0xAA0003E2]), 1),
+    ]
+    for label, errs_f, want in cases:
+        if (len(errs_f) > 0) != bool(want):
+            print("selftest FAIL: rule f %s: %s" % (label, errs_f or "passed"))
+            fails += 1
     print("selftest: %s" % ("PASS" if fails == 0 else "FAIL (%d)" % fails))
     return 1 if fails else 0
 

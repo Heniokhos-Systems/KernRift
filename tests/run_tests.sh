@@ -27568,13 +27568,14 @@ wfe_win() {
     wfe_wine "$1.exe" "$5"; local rc=$?
     wfe_cmp "$1" "$rc" "$WFE_D/wine.out" "$4" "$WFE_SKIP"
 }
-# wfe_shape <row> <arch> <backend> <rules>
+# wfe_shape <row> <arch> <backend> <rules>: the IR rows use win_file_shape_ir.kr,
+# which adds sh_rd (read() exists on the IR backend only).
 wfe_shape() {
     TOTAL=$((TOTAL + 1))
     if ! command -v python3 > /dev/null 2>&1; then wfe_skip "$1" "no python3"; return; fi
-    local lg=""; [ "$3" = "legacy" ] && lg="--legacy"
-    if ! "$WFE_KRC" --arch="$2" $lg --target=windows --emit=pe "$WFE_FX/win_file_shape.kr" -o "$WFE_D/$1.exe" > "$WFE_D/$1.log" 2>&1 \
-       || ! "$WFE_KRC" --arch="$2" $lg --target=windows --emit=asm "$WFE_FX/win_file_shape.kr" -o "$WFE_D/$1.s" >> "$WFE_D/$1.log" 2>&1; then
+    local lg="" fx="win_file_shape_ir"; [ "$3" = "legacy" ] && { lg="--legacy"; fx="win_file_shape"; }
+    if ! "$WFE_KRC" --arch="$2" $lg --target=windows --emit=pe "$WFE_FX/$fx.kr" -o "$WFE_D/$1.exe" > "$WFE_D/$1.log" 2>&1 \
+       || ! "$WFE_KRC" --arch="$2" $lg --target=windows --emit=asm "$WFE_FX/$fx.kr" -o "$WFE_D/$1.s" >> "$WFE_D/$1.log" 2>&1; then
         wfe_bad "$1" "build: $(grep -m1 error "$WFE_D/$1.log")"; return
     fi
     local o; o=$(python3 -I "$WFE_SHAPE" --arch "$2" $lg --rules "$4" "$WFE_D/$1.exe" "$WFE_D/$1.s" 2>&1)
@@ -27583,7 +27584,7 @@ wfe_shape() {
 }
 TOTAL=$((TOTAL + 1))
 if ! command -v python3 > /dev/null 2>&1; then wfe_skip win_file_err_shape_selftest "no python3"
-elif WFE_O=$(python3 -I "$WFE_SHAPE" --selftest 2>&1); then wfe_ok win_file_err_shape_selftest "offset-located identical functions, duplicate label, wrong offset, missing BOOL test"
+elif WFE_O=$(python3 -I "$WFE_SHAPE" --selftest 2>&1); then wfe_ok win_file_err_shape_selftest "offset-located identical functions, duplicate label, wrong offset, missing BOOL test, clamp register"
 else wfe_bad win_file_err_shape_selftest "$WFE_O"; fi
 for WFE_B in ir legacy; do
     WFE_S=""; [ "$WFE_B" = "legacy" ] && WFE_S="_legacy"
