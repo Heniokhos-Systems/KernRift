@@ -1,0 +1,11 @@
+// Appended to the read_exact that the read_exact_rejects_errno_* rows extract
+// BY NAME from src/main.kr and src/runner.kr (#170). The file does not exist,
+// so file_size and file_read fail with the SAME -errno (Linux -9, Windows -5);
+// read_exact must not report that as a complete read.
+fn main() {
+    uint64 fd = file_open("read_exact_missing_win_file_errors.krbo", 0)
+    uint64 fsize = file_size(fd)
+    uint64 data = alloc(64)
+    uint64 rgot = read_exact(fd, data, fsize)
+    if rgot != fsize { println("short read caught") } else { println("SHORT READ NOT CAUGHT") }
+}

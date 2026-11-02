@@ -27605,6 +27605,46 @@ wfe_shape win_file_errors_shape_x86_64 x86_64 ir abc
 wfe_shape win_file_errors_shape_x86_64_legacy x86_64 legacy abc
 wfe_shape win_file_errors_shape_arm64 arm64 ir abc
 wfe_shape win_file_errors_shape_arm64_legacy arm64 legacy abc
+# #170: the compiler's own read_exact (src/main.kr) and the runner's copy
+# (src/runner.kr) must never count a -errno read. Each is extracted BY NAME --
+# never by line number -- and given a main whose file_size and file_read fail
+# with the same errno, which used to make got == want: a failure reported as a
+# complete read. The two copies are kept in sync by hand; one row pins that.
+wfe_rx_src() { awk '/^fn read_exact\(/{f=1} f{print} f&&/^}/{exit}' "$DIR/../src/$1"; }
+for WFE_R in main runner; do
+    TOTAL=$((TOTAL + 1))
+    { wfe_rx_src "$WFE_R.kr"; cat "$WFE_FX/read_exact_harness_main.kr"; } > "$WFE_D/rx_$WFE_R.kr"
+    if ! grep -q '^fn read_exact(' "$WFE_D/rx_$WFE_R.kr"; then wfe_bad "read_exact_rejects_errno_$WFE_R" "no fn read_exact in src/$WFE_R.kr"
+    elif ! "$WFE_KRC" --arch="$RUN_ARCH" "$WFE_D/rx_$WFE_R.kr" -o "$WFE_D/rx_$WFE_R" > "$WFE_D/rx.log" 2>&1; then
+        wfe_bad "read_exact_rejects_errno_$WFE_R" "build: $(grep -m1 error "$WFE_D/rx.log")"
+    else
+        WFE_O=$(cd "$WFE_D" && timeout 60 "./rx_$WFE_R" 2>/dev/null)
+        if [ "$WFE_O" = "short read caught" ]; then wfe_ok "read_exact_rejects_errno_$WFE_R" "src/$WFE_R.kr, Linux"
+        else wfe_bad "read_exact_rejects_errno_$WFE_R" "got '$WFE_O' (src/$WFE_R.kr)"; fi
+    fi
+    TOTAL=$((TOTAL + 1))
+    if [ -z "$WFE_WINE" ]; then wine_na "read_exact_rejects_errno_${WFE_R}_windows_wine"
+    elif ! "$WFE_KRC" --arch=x86_64 --target=windows --emit=pe "$WFE_D/rx_$WFE_R.kr" -o "$WFE_D/rx_$WFE_R.exe" > "$WFE_D/rx.log" 2>&1; then
+        wfe_bad "read_exact_rejects_errno_${WFE_R}_windows_wine" "build: $(grep -m1 error "$WFE_D/rx.log")"
+    else
+        wfe_wine "rx_$WFE_R.exe" none; WFE_RC=$?
+        WFE_O=$(tr -d '\r' < "$WFE_D/wine.out")
+        if [ "$WFE_RC" = "0" ] && [ "$WFE_O" = "short read caught" ]; then wfe_ok "read_exact_rejects_errno_${WFE_R}_windows_wine" "src/$WFE_R.kr, -5 and -5"
+        else wfe_bad "read_exact_rejects_errno_${WFE_R}_windows_wine" "rc=$WFE_RC got '$WFE_O'"; fi
+    fi
+done
+TOTAL=$((TOTAL + 1))
+if [ -n "$(wfe_rx_src main.kr)" ] && [ "$(wfe_rx_src main.kr)" = "$(wfe_rx_src runner.kr)" ]; then wfe_ok read_exact_copies_agree "src/main.kr and src/runner.kr"
+else wfe_bad read_exact_copies_agree "the hand-synced read_exact bodies of src/main.kr and src/runner.kr differ"; fi
+TOTAL=$((TOTAL + 1))
+if [ ! -x "$DIR/../build/kr-bin" ]; then wfe_bad runner_missing_krbo_is_an_error "no build/kr-bin (make build/kr-bin)"
+else
+    WFE_O=$(cd "$WFE_D" && timeout 30 "$DIR/../build/kr-bin" "$WFE_D/nonexistent_win_file_errors.krbo" 2>&1 >/dev/null); WFE_RC=$?
+    case "$WFE_O" in
+        "error: cannot open"*) [ "$WFE_RC" = "1" ] && wfe_ok runner_missing_krbo_is_an_error "rc 1" || wfe_bad runner_missing_krbo_is_an_error "rc=$WFE_RC" ;;
+        *) wfe_bad runner_missing_krbo_is_an_error "rc=$WFE_RC stderr '$(echo "$WFE_O" | head -c 80)'" ;;
+    esac
+fi
 [ -n "$WFE_WINE" ] && WINEPREFIX="$WFE_D/pfx" "$(dirname "$WFE_WINE")/wineserver" -k > /dev/null 2>&1
 rm -rf "$WFE_D"
 # A return type and a slice element type have no runtime width on hosted

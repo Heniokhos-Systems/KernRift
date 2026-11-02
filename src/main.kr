@@ -779,6 +779,11 @@ fn read_exact(uint64 fd, uint64 buf, uint64 want) -> uint64 {
     uint64 got = 0
     while got < want {
         uint64 n = file_read(fd, buf + got, want - got)
+        // A failed read is -errno, a huge unsigned value: never add it to the
+        // count. When file_size failed with the SAME errno the caller asked
+        // for `want` = that value, and adding it made got == want -- a
+        // failure reported as a complete read (#170).
+        if n > 0xFFFFFFFFFFFFF000 { return got }
         if n == 0 { return got }
         // A provider claiming to have written more than there was room for is
         // lying; believing it would advance `got` past the buffer.
