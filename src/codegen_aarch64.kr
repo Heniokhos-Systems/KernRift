@@ -2433,14 +2433,10 @@ fn gen_expr_a64(uint64 node) {
                 uint64 wr_etr = var_frame_size & 15
                 if wr_etr != 0 { var_frame_size = var_frame_size + 16 - wr_etr }
                 emit_a64_store_x0(wr_extra)
-                // GetStdHandle: x0 = -(10 + fd)
-                emit_a64_load_x0(pk0_write)
-                emit_a64_neg(0, 0)
-                emit_a64_mov_imm(9, 10)
-                emit_a64_sub(0, 0, 9)
-                emit_a64_win_call_iat(1)
-                // Save handle to pk0_write (fd no longer needed)
-                emit_a64_store_x0(pk0_write)
+                // fd 0..2 -> GetStdHandle(-(10 + fd)), in place in pk0_write;
+                // any other value is the HANDLE itself. This used to send EVERY
+                // fd through GetStdHandle (#168).
+                a64_win_std_fd_prestep(pk0_write)
                 // WriteFile(handle, buf, len, &bytesWritten, NULL)
                 //
                 // THIS USED TO PASS NULL FOR bytesWritten, on the reasoning
@@ -2730,6 +2726,8 @@ fn gen_expr_a64(uint64 node) {
                 uint64 fw_etr = var_frame_size & 15
                 if fw_etr != 0 { var_frame_size = var_frame_size + 16 - fw_etr }
                 emit_a64_store_x0(fw_extra)
+                // fd 0..2 -> GetStdHandle (#145), with len parked.
+                a64_win_std_fd_prestep(pk0_filewrite)
                 // Same fix as write() above: bytesWritten was NULL and the
                 // BOOL was returned, so file_write reported 1 for every
                 // successful write. pk1_filewrite becomes the output slot,

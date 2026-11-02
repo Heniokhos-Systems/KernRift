@@ -1,0 +1,57 @@
+// The write side of the standard-stream rule (#145, #168): fds 0..2 are the
+// standard handles for file_write and write, and any other value is a HANDLE
+// from file_open. --legacy Windows used to pass file_write(1, ...)'s 1 as a
+// HANDLE (nothing printed) and to send every write() fd through GetStdHandle
+// (a file handle got nothing). Each probe twice: print-free and printing,
+// with one file per copy.
+
+fn p_fw1() -> uint64 {
+    return file_write(1, "z\n", 2)
+}
+
+fn p_wh(uint64 path) -> uint64 {
+    uint64 h = file_open(path, 1)
+    uint64 n = write(h, "abcd", 4)
+    file_close(h)
+    return n
+}
+
+fn p_bytes(uint64 path) -> uint64 {
+    uint64 b = alloc(16)
+    uint64 h = file_open(path, 0)
+    uint64 n = file_read(h, b, 16)
+    file_close(h)
+    return n
+}
+
+fn show(uint64 tag, uint64 v) {
+    int64 sv = v
+    print_str(tag)
+    print(" ")
+    println(sv)
+}
+
+fn s_fw1() {
+    uint64 r = file_write(1, "z\n", 2)
+    int64 sr = r
+    print("fw1_m ")
+    println(sr)
+}
+
+fn s_wh(uint64 path) {
+    uint64 h = file_open(path, 1)
+    uint64 n = write(h, "abcd", 4)
+    file_close(h)
+    int64 sn = n
+    print("wh_m ")
+    println(sn)
+}
+
+fn main() {
+    show("fw1", p_fw1())
+    s_fw1()
+    show("wh", p_wh("wfw_p.tmp"))
+    s_wh("wfw_m.tmp")
+    show("wh_bytes", p_bytes("wfw_p.tmp"))
+    show("wh_bytes_m", p_bytes("wfw_m.tmp"))
+}
