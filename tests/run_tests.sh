@@ -29401,13 +29401,14 @@ else
     else pe_row_bad ir_x86_win_no_rbp_colour "$(head -2 <<< "$PEU_OUT" | tr '\n' '|')$(tail -1 <<< "$PEU_OUT")"; fi
 fi
 # Option C, x86_64 IR (#143 A19c; ruling Q12, spec 2.5.2): in
-# tests/fixtures/win_rbp_colour.kr `hp` keeps six values live across a call,
-# so as an SP-fixed function it allocates rbp: `push rbp` without
-# `mov rbp, rsp`, its record has PUSH_NONVOL rbp and no frame register; `fib`
-# (register-argument calls, op 51) is SP-fixed; `show` (println) and main stay
-# SP-moving with `mov rbp, rsp` and FrameRegister RBP. The image passes C0-C6 +
-# C3b + C4b and prints the right values under Wine (a caller's rbp clobbered
-# by a callee would show there).
+# tests/fixtures/win_rbp_colour.kr `hp` and `outer` keep six values live
+# across a call, so as SP-fixed functions they allocate rbp: `push rbp`
+# without `mov rbp, rsp`, records with PUSH_NONVOL rbp and no frame register;
+# `fib` (register-argument calls, op 51) is SP-fixed; `show` (println) and main
+# stay SP-moving with `mov rbp, rsp` and FrameRegister RBP. The image passes
+# C0-C6 + C3b + C4b and prints 95/998/610 under Wine: `outer` keeps a value in
+# rbp across its call to `hp`, so a callee writing rbp without saving it
+# (A19c review finding 1: the push-mask mutant) prints 1068 instead of 998.
 PEU_RC_FX="$DIR/fixtures/win_rbp_colour.kr"
 if ! command -v objdump > /dev/null 2>&1 || ! command -v python3 > /dev/null 2>&1 || ! command -v llvm-readobj > /dev/null 2>&1; then
     pe_row_skip ir_x86_win_rbp_colour_when_sp_fixed "needs objdump, llvm-readobj and python3"
@@ -29415,7 +29416,7 @@ elif ! $T10_KRC --arch=x86_64 --target=windows --emit=pe "$PEU_RC_FX" -o "$T10_D
     pe_row_bad ir_x86_win_rbp_colour_when_sp_fixed "build: $(grep -m1 error "$T10_D/peu_rc.log" | cut -c1-120)"
 else
     PEU_WHY=""
-    PEU_O=$(python3 "$DIR/helpers/x86_win_rbp_scan.py" "$T10_D/peu_rc.lst" --want-sp-fixed=hp,fib --want-sp-moving=show,main --want-rbp-colour=hp 2>&1) \
+    PEU_O=$(python3 "$DIR/helpers/x86_win_rbp_scan.py" "$T10_D/peu_rc.lst" --want-sp-fixed=hp,fib,outer --want-sp-moving=show,main --want-rbp-colour=hp,outer 2>&1) \
         || PEU_WHY="shape: $(head -2 <<< "$PEU_O" | tr '\n' '|')"
     llvm-readobj --unwind "$T10_D/peu_rc.exe" > "$T10_D/peu_rc.uw" 2>&1
     PEU_O2=$(python3 - "$T10_D/peu_rc.lst" "$T10_D/peu_rc.uw" <<'PEURCEOF' 2>&1
@@ -29448,9 +29449,10 @@ def rec(n):
     if r is None:
         bad.append('%s: no record' % n)
     return r
-r = rec('hp')
-if r and (r['fr'] != '-' or not r['rbp']):
-    bad.append('hp: FrameRegister %s, PUSH_NONVOL rbp %s; want none and present' % (r['fr'], r['rbp']))
+for n in ('hp', 'outer'):
+    r = rec(n)
+    if r and (r['fr'] != '-' or not r['rbp']):
+        bad.append('%s: FrameRegister %s, PUSH_NONVOL rbp %s; want none and present' % (n, r['fr'], r['rbp']))
 r = rec('fib')
 if r and r['fr'] != '-':
     bad.append('fib: FrameRegister %s, want none' % r['fr'])
@@ -29458,7 +29460,7 @@ for n in ('show', 'main'):
     r = rec(n)
     if r and not (r['fr'] or '').startswith('RBP'):
         bad.append('%s: FrameRegister %s, want RBP' % (n, r['fr']))
-print('; '.join(bad) if bad else 'records: hp PUSH_NONVOL rbp + no frame register, fib none, show/main RBP')
+print('; '.join(bad) if bad else 'records: hp/outer PUSH_NONVOL rbp + no frame register, fib none, show/main RBP')
 sys.exit(1 if bad else 0)
 PEURCEOF
     ) || PEU_WHY="$PEU_WHY records: $PEU_O2;"
@@ -29468,12 +29470,12 @@ PEURCEOF
     if [ -n "$T10_WINE" ]; then
         cp "$T10_D/peu_rc.exe" "$T10_D/peu_rc_w.exe"
         t10_wine "$T10_D/win.out" "$T10_D/win.err" ./peu_rc_w.exe; PEU_RRC=$?
-        if [ "$PEU_RRC" = 0 ] && [ "$(tr -d '\r' < "$T10_D/win.out")" = "$(printf '95\n196\n610')" ]; then PEU_RUN=", Wine prints 95/196/610$(t10_note)"
+        if [ "$PEU_RRC" = 0 ] && [ "$(tr -d '\r' < "$T10_D/win.out")" = "$(printf '95\n998\n610')" ]; then PEU_RUN=", Wine prints 95/998/610$(t10_note)"
         else PEU_WHY="$PEU_WHY Wine rc=$PEU_RRC out='$(tr -d '\r' < "$T10_D/win.out" | tr '\n' ' ' | head -c 40)' $(t10_errtail);"; fi
     else
         PEU_RUN=" (no Wine: static checks only)"
     fi
-    if [ -z "$PEU_WHY" ]; then pe_row_ok ir_x86_win_rbp_colour_when_sp_fixed "hp/fib SP-fixed, hp allocates rbp; show/main keep the frame pointer; C0-C6 + C3b + C4b PASS$PEU_RUN"
+    if [ -z "$PEU_WHY" ]; then pe_row_ok ir_x86_win_rbp_colour_when_sp_fixed "hp/outer/fib SP-fixed, hp and outer allocate rbp, outer across its call to hp; show/main keep the frame pointer; C0-C6 + C3b + C4b PASS$PEU_RUN"
     else pe_row_bad ir_x86_win_rbp_colour_when_sp_fixed "$PEU_WHY"; fi
 fi
 # The x86_64 IR allow-list itself (#143 A19c; spec 2.5.1, re-review-2 finding

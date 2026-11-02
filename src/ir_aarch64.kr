@@ -1115,7 +1115,7 @@ fn ir_emit_arm64_insn(uint64 ii) {
     uint64 s1_v = ir_insn_src1(ii)
     uint64 s2_v = ir_insn_src2(ii)
     uint64 imm = ir_insn_imm(ii)
-    if target_os == 2 { uw_sp_site_set(ir_a64_sp_site(op)) }
+    if target_os == 2 { uw_sp_op_site_set(ir_a64_sp_site(op)) }
 
     // DWARF line-table recording — see ir.kr's ir_emit_x86_insn.
     uint64 ir_src_tok = ir_insn_src_tok_at(ii)
@@ -3767,7 +3767,7 @@ fn ir_emit_arm64_function(uint64 fn_node) {
             // Windows ARM64 (spec C7): parse the command line UCRT's way into
             // a fresh VirtualAlloc'd argv -- see the C7 block at the end of
             // this file.
-            uw_sp_site_set("A4")
+            uw_sp_op_site_set("A4")
             c7_a64_emit_main_argv(c7_argc_off, c7_argv_off)
         } else {
             // No cli_argc/cli_argv to fill: the pre-C7 sequence.
@@ -4029,6 +4029,7 @@ fn ir_emit_arm64_function(uint64 fn_node) {
 
     // Restore IR_NUM_REGS for x86_64 functions compiled later
     IR_NUM_REGS = saved_num_regs
+    uw_sp_state_reset()        // #143 option C: no backstop state outlives the function (A19a-c review finding 3)
 }
 
 // ===========================================================================

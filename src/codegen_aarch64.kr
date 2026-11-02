@@ -3356,7 +3356,7 @@ fn gen_expr_a64(uint64 node) {
             if cp_stack_args > 0 {
                 uint64 cp_cleanup = cp_stack_args * 8
                 uint64 cp_add_insn = 0x91000000 | (cp_cleanup << 10) | (31 << 5) | 31
-                emit_a64_sp_word(cp_add_insn)
+                uw_sp_site_set("G4"); emit_a64_sp_word(cp_add_insn)
             }
             return
         }
@@ -3674,7 +3674,7 @@ fn gen_expr_a64(uint64 node) {
                 emit_a64_win_call_iat(11)
                 // ExitProcess(exitCode=[sp+0x18])
                 emit_a64_ldr32(0, 31, 0x18)
-                emit_a64_add_sp_imm(0x4E0)
+                uw_sp_site_set("G1"); emit_a64_add_sp_imm(0x4E0)
                 emit_a64_win_call_iat(0)
             } else {
                 // execve(path, argv, envp)
@@ -3768,7 +3768,7 @@ fn gen_expr_a64(uint64 node) {
                 // Load exit code
                 emit_a64(0xB94003E0)  // ldr w0, [sp, #0]
                 // add sp, sp, #0xE0
-                emit_a64_sp_word(0x910383FF)   // #154: was 0x910380FF = add sp, x7, #0xe0
+                uw_sp_site_set("G1"); emit_a64_sp_word(0x910383FF)   // #154: was 0x910380FF = add sp, x7, #0xe0
                 // ExitProcess(w0 already in x0)
                 emit_a64_win_call_iat(0)
             } else {
@@ -4460,7 +4460,7 @@ fn gen_expr_a64(uint64 node) {
                 // Load results. x11 = counter, x12 = freq.
                 emit_a64_ldr(11, 31, 8)                    // x11 = counter
                 emit_a64_ldr(12, 31, 0)                    // x12 = freq
-                emit_a64_sp_word(0x910043FF)               // add sp, sp, #16
+                uw_sp_site_set("G2"); emit_a64_sp_word(0x910043FF)               // add sp, sp, #16
                 // x9 = counter / freq (secs)
                 emit_a64_udiv(9, 11, 12)
                 // x10 = counter - (secs * freq) = frac
@@ -4981,7 +4981,7 @@ fn gen_expr_a64(uint64 node) {
         if stack_args > 0 {
             uint64 cleanup = stack_args * 8
             uint64 add_insn = 0x91000000 | (cleanup << 10) | (31 << 5) | 31
-            emit_a64_sp_word(add_insn)
+            uw_sp_site_set("G3"); emit_a64_sp_word(add_insn)
         }
 
         // Set expr_is_float_a64 based on callee's return type
@@ -6643,6 +6643,7 @@ fn gen_function_a64(uint64 fn_node) {
     // For @naked functions, skip epilogue entirely
     if is_naked != 0 {
         uw_fn_set_naked()   // #143: zero-code record (refused on shipping Windows slices)
+        uw_sp_state_reset()
         return
     }
 
@@ -6780,6 +6781,7 @@ fn gen_function_a64(uint64 fn_node) {
             patch_u32(ldp_fp_off, 0xD503201F)
         }
     }
+    uw_sp_state_reset()        // #143 option C: no backstop state outlives the function (A19a-c review finding 3)
 }
 
 // ---------------------------------------------------------------------------

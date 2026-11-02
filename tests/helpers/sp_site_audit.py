@@ -8,7 +8,10 @@ backstop.
       function that exists and whose body (or the named op block in it) calls
       an SP helper or uw_sp_moves() -- no listed site is left raw;
   (c) a sweep of the four backends for raw SP-writing encodings outside the
-      SP helpers finds nothing that is not on the committed list of reviewed
+      SP helpers (x64: sub/add/and rsp, push/pop and pop m64, pushf/popf,
+      enter/leave, push imm, mov/lea/xchg with rsp as the destination in the
+      ModRM; arm64: add/sub with Rd = SP, pre/post-indexed accesses on SP)
+      finds nothing that is not on the committed list of reviewed
       raw hits (tests/pe_unwind_sp_raw.lst: prologue/epilogue code, non-Windows
       paths and decoder false positives, each with its reason).
 
@@ -60,7 +63,28 @@ def op_block(body, op):
 # raw SP encodings (spec 2.5.1 check 1 (c))
 X64_PAIR = re.compile(r'emit_byte\(0x48\);\s*emit_byte\(0x8[13]\);\s*emit_byte\(0x(EC|C4|E4)\)', re.I)
 X64_C7 = re.compile(r'c7_b[34]\(0x48,\s*0x8[13],\s*0x(EC|C4|E4)', re.I)
-X64_OP = re.compile(r'emit_byte\(0x(5[0-9A-F]|9C|9D|C8|C9|6A|68)\)', re.I)
+X64_OP = re.compile(r'emit_byte\(0x(5[0-9A-F]|9C|9D|C8|C9|6A|68|8F)\)', re.I)
+# REX.W + mov/lea/xchg with a ModRM byte, all on one line: the ModRM decides
+# whether RSP is the destination (A19a-c review finding 2)
+X64_MODRM = re.compile(r'emit_byte\(0x(4[89CD])\);\s*emit_byte\(0x(89|8B|8D|87)\);\s*emit_byte\(0x([0-9A-F]{2})\)', re.I)
+X64_C7_MODRM = re.compile(r'c7_b[34]\(0x(4[89CD]),\s*0x(89|8B|8D|87),\s*0x([0-9A-F]{2})', re.I)
+
+
+def x64_modrm_writes_rsp(rex, op, modrm):
+    """mov r/m64, r (89) with rm = rsp; mov r, r/m64 (8B) and lea (8D) with
+    reg = rsp; xchg (87) with rsp as either operand. REX.B / REX.R would
+    make the register r12, not rsp."""
+    mod, reg, rm = modrm >> 6, (modrm >> 3) & 7, modrm & 7
+    rex_r, rex_b = (rex >> 2) & 1, rex & 1
+    rm_rsp = mod == 3 and rm == 4 and not rex_b
+    reg_rsp = reg == 4 and not rex_r
+    if op == 0x89:
+        return rm_rsp
+    if op in (0x8B, 0x8D):
+        return reg_rsp
+    if op == 0x87:
+        return rm_rsp or reg_rsp
+    return False
 X64_CALC = re.compile(r'0x5[08]\s*[|+]')
 A64_WORD = re.compile(r'0x([0-9A-F]{8})', re.I)
 A64_CALC = re.compile(r'0x(D1|91)[0-9A-F]{6}\s*\|.*\(31 << 5\)\s*\|\s*31\b', re.I)
@@ -132,13 +156,18 @@ def sweep(fname, text, funcs):
         if fname in ('ir.kr', 'codegen.kr'):
             if X64_PAIR.search(c) or X64_C7.search(c):
                 why.append('rsp sub/add/and')
+            for mm in list(X64_MODRM.finditer(c)) + list(X64_C7_MODRM.finditer(c)):
+                if x64_modrm_writes_rsp(int(mm.group(1), 16), int(mm.group(2), 16), int(mm.group(3), 16)):
+                    why.append('mov/lea/xchg into rsp (%s %s %s)' % mm.groups())
             m = X64_OP.search(c)
             if m and x64_opcode_position(lines, i, c, m):
-                why.append('push/pop/pushf/enter/leave/push-imm byte')
+                why.append('push/pop/pushf/enter/leave/push-imm/pop-m64 byte')
             if X64_CALC.search(c):
                 why.append('computed push/pop')
         else:
             for m in A64_WORD.finditer(c):
+                if c[:m.start()].rstrip().endswith('emit_a64_sp_word('):
+                    continue        # the word is the helper's argument: it reports
                 if a64_word_writes_sp(int(m.group(1), 16)):
                     why.append('SP-writing word %s' % m.group(1))
             if A64_CALC.search(c):

@@ -9090,29 +9090,45 @@ fn ir_x86_call_args_on_stack(uint64 call_arg_count) -> uint64 {
     return 0
 }
 
-fn ir_x86_call_moves_sp_core(uint64 op, uint64 argc, uint64 routed, uint64 uefi) -> uint64 {
+// The call's shape: 0 = register arguments only (moves no RSP), 1 = a Win64
+// call frame around it (a routed Windows import; op 87 under --emit=uefi),
+// 2 = stack arguments (> 6). The emitters branch on this, and the classifier
+// treats every nonzero kind as SP-moving (A19c review finding 5: one decision).
+fn ir_x86_call_kind_core(uint64 op, uint64 argc, uint64 routed, uint64 uefi) -> uint64 {
     if op == 50 {
         if routed != 0 { return 1 }                 // X2: Win64 call frame
-        return ir_x86_call_args_on_stack(argc)      // X3
+        if ir_x86_call_args_on_stack(argc) != 0 { return 2 }    // X3
+        return 0
     }
     if op == 87 {
         if uefi != 0 { return 1 }                   // X4: --emit=uefi call frame
-        return ir_x86_call_args_on_stack(argc)      // X4: > 6 args
+        if ir_x86_call_args_on_stack(argc) != 0 { return 2 }    // X4: > 6 args
+        return 0
+    }
+    return 0
+}
+
+fn ir_x86_call_moves_sp_core(uint64 op, uint64 argc, uint64 routed, uint64 uefi) -> uint64 {
+    if ir_x86_call_kind_core(op, argc, routed, uefi) != 0 { return 1 }
+    return 0
+}
+
+fn ir_x86_call_kind(uint64 op, uint64 s1, uint64 imm) -> uint64 {
+    if op == 50 {
+        uint64 routed = 0
+        if is_routed_win_import(imm) != PE_IMPORT_NO_SLOT { routed = 1 }
+        return ir_x86_call_kind_core(50, s1, routed, 0)
+    }
+    if op == 87 {
+        uint64 uefi = 0
+        if cg_emit_mode == 9 && target_arch == 0 { uefi = 1 }
+        return ir_x86_call_kind_core(87, imm, 0, uefi)
     }
     return 0
 }
 
 fn ir_x86_call_moves_sp(uint64 op, uint64 s1, uint64 imm) -> uint64 {
-    if op == 50 {
-        uint64 routed = 0
-        if is_routed_win_import(imm) != PE_IMPORT_NO_SLOT { routed = 1 }
-        return ir_x86_call_moves_sp_core(50, s1, routed, 0)
-    }
-    if op == 87 {
-        uint64 uefi = 0
-        if cg_emit_mode == 9 && target_arch == 0 { uefi = 1 }
-        return ir_x86_call_moves_sp_core(87, imm, 0, uefi)
-    }
+    if ir_x86_call_kind(op, s1, imm) != 0 { return 1 }
     return 0
 }
 
@@ -9253,7 +9269,7 @@ fn ir_emit_x86_insn(uint64 ii) {
     uint64 s1_v = ir_insn_src1(ii)
     uint64 s2_v = ir_insn_src2(ii)
     uint64 imm = ir_insn_imm(ii)
-    if target_os == 2 { uw_sp_site_set(ir_x86_sp_site(op, imm)) }
+    if target_os == 2 { uw_sp_op_site_set(ir_x86_sp_site(op, imm)) }
 
     // Record DWARF line-table entry at the start of each instruction
     // that carries a source token. The line_table_record helper itself
@@ -10938,7 +10954,7 @@ fn ir_emit_x86_insn(uint64 ii) {
         // resolve_win_iat_fixups), release. No name fixup: the PE loader
         // binds the slot.
         uint64 x86_iat_slot = is_routed_win_import(imm)
-        if x86_iat_slot != PE_IMPORT_NO_SLOT {
+        if ir_x86_call_kind(50, call_arg_count, imm) == 1 {     // #143 option C: the shared decision
             uint64 rw_stack = ir_x86_win64_call_frame()
             emit_win_call_iat(x86_iat_slot)
             ir_x86_win64_call_release(rw_stack)
@@ -11046,7 +11062,7 @@ fn ir_emit_x86_insn(uint64 ii) {
         // (codegen.kr). call_ptr is the ONLY producer of IR_CALL_IND, so under
         // --emit=uefi every one of them is a firmware call: gating on
         // cg_emit_mode alone is exact.
-        if cg_emit_mode == 9 && target_arch == 0 {
+        if ir_x86_call_kind(87, 0, imm) == 1 {      // #143 option C: the shared decision (--emit=uefi)
             uint64 w_stack = ir_x86_win64_call_frame()
             // Resolve the fn pointer into rax AFTER the stores (they use rax as
             // scratch). A spilled pointer's slot moved up by w_stack.
@@ -15366,12 +15382,12 @@ fn ir_emit_x86_function(uint64 fn_node) {
             // Windows (spec C7): parse the command line UCRT's way into a fresh
             // VirtualAlloc'd argv, exactly as the Linux loader would have laid it
             // out -- see the C7 block at the end of this file.
-            uw_sp_site_set("X15")
+            uw_sp_op_site_set("X15")
             c7_x86_emit_main_argv(c7_argc_off, c7_argv_off)
         } else {
             // No cli_argc/cli_argv to fill: the pre-C7 sequence (raw command
             // line in cli_argv, sentinel in cli_argc; win_init_args parses it).
-            uw_sp_site_set("X15")
+            uw_sp_op_site_set("X15")
             emit_win_alloc_stack(0x20)
             emit_win_call_iat(7)          // GetCommandLineA (IAT slot 7) -> rax = cmdline
             emit_win_free_stack(0x20)
@@ -15583,7 +15599,7 @@ fn ir_emit_x86_function(uint64 fn_node) {
                 // Windows: ExitProcess(rax) via IAT slot 0
                 // mov ecx, eax (32-bit DWORD ABI argument is in ecx)
                 emit_byte(0x89); emit_byte(0xC1)
-                uw_sp_site_set("X15")
+                uw_sp_op_site_set("X15")
                 emit_win_alloc_stack(0x20)
                 emit_win_call_iat(0)
             } else {
@@ -15622,6 +15638,7 @@ fn ir_emit_x86_function(uint64 fn_node) {
         }
         emit_byte(0xC3)
     }
+    uw_sp_state_reset()        // #143 option C: no backstop state outlives the function (A19a-c review finding 3)
 }
 
 // ===========================================================================

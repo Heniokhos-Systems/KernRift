@@ -46,21 +46,41 @@ static uint64 uw_test_listing_path = 0
 // --test-sp-site-log=PATH (hidden, test-only): append the site id of every
 // report of a Windows compile to PATH, one per line (spec 2.5.1 check 2).
 static uint64 uw_fn_sp_fixed = 0
-static uint64 uw_sp_site = 0
+static uint64 uw_sp_site = 0       // one-shot: the site of the next report, cleared by it
+static uint64 uw_sp_op_site = 0    // scope: the IR op (or hosted-main block) being emitted
 static uint64 uw_sp_frame = 0
 static uint64 uw_sp_log_path = 0
 static uint64 uw_sp_log_fd = 0xFFFFFFFFFFFFFFFF
 static uint64 uw_sp_fn_name = 0
 
+// The site of the NEXT report only: uw_sp_moves clears it, so a legacy id can
+// never be credited to a later, unrelated SP write (A19a-c review finding 4).
 fn uw_sp_site_set(uint64 id) {
     uw_sp_site = id
+}
+
+// The site family of everything the current IR op (or hosted-main block)
+// emits: set at every op dispatch, cleared at function end and slice start.
+fn uw_sp_op_site_set(uint64 id) {
+    uw_sp_op_site = id
+}
+
+// Clear every piece of backstop state: at the end of every function emitter
+// (after its epilogue) and at every slice start (A19a-c review finding 3).
+fn uw_sp_state_reset() {
+    uw_fn_sp_fixed = 0
+    uw_sp_frame = 0
+    uw_sp_site = 0
+    uw_sp_op_site = 0
 }
 
 fn uw_sp_moves() {
     if target_os != 2 { return }
     if uw_sp_frame != 0 { return }
     uint64 id = uw_sp_site
-    if id == 0 { id = "unnamed" }
+    if id == 0 { id = uw_sp_op_site }
+    if id == 0 { id = "unnamed" }        // a report no emitter named: the coverage row rejects it
+    uw_sp_site = 0
     if uw_sp_log_path != 0 {
         if uw_sp_log_fd == 0xFFFFFFFFFFFFFFFF { uw_sp_log_fd = open_output_or_die(uw_sp_log_path) }
         write(uw_sp_log_fd, id, str_len(id))
@@ -141,6 +161,7 @@ static uint64 uw_asm_count = 0
 static uint64 uw_code_end = 0xFFFFFFFFFFFFFFFF
 
 fn uw_reset() {
+    uw_sp_state_reset()         // a new slice starts with no backstop state (#143 option C)
     uw_rec_count = 0
     uw_code_count = 0
     uw_leaf_count = 0
