@@ -96,6 +96,9 @@ static uint64 IAT_BCryptGenRandom = 47
 // Tests key routed calls on the import NAME read back from the image, never on
 // a slot number that can move; kernel32 0-15 are also hard-coded by codegen's
 // runtime helpers (emit_win_call_iat(N)), so appends go AFTER them.
+// The Windows I/O builtin arms (read/file_read's ERROR_BROKEN_PIPE probe)
+// also call GetLastError, by NAME (emit_win_call_iat(IAT_GetLastError)), so
+// that slot may move like any other append.
 // The block between the two `@@pe-known-imports` markers is compiled ON ITS
 // OWN by run_tests.sh row pe_import_slot_lookup, so it must stay
 // self-contained: no calls to anything outside it, and every static it reads

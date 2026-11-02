@@ -288,6 +288,39 @@ fn emit_a64_cbz(uint64 rt, uint64 offset) {
     emit_a64(insn)
 }
 
+// Windows I/O builtin arms (#136, #138, #163, #165, #167, #168): patch a
+// branch emitted at `pos` with its base encoding `base` (CBZ/CBNZ/B.cond, the
+// imm19 field zero) so that it lands on the current out_len. The slot
+// accessors can emit more than one instruction, so no distance is ever written
+// as a constant.
+fn a64_patch_b19_here(uint64 pos, uint64 base) {
+    uint64 rel19 = a64_check_b19(out_len - pos)
+    patch_u32(pos, base | (rel19 << 5))
+}
+
+// The same for an unconditional B emitted at `pos`.
+fn a64_patch_b26_here(uint64 pos) {
+    uint64 rel26 = a64_check_b26(out_len - pos)
+    patch_u32(pos, 0x14000000 | rel26)
+}
+
+// fd -> HANDLE for a legacy arm64 Windows I/O arm, in place in its frame slot
+// (the arm64 twin of emit_win_std_fd_prestep, codegen.kr): fds 0..2 become
+// GetStdHandle(-(10 + fd)), every other value is a HANDLE and is left alone.
+// Nothing is kept in a register across the call -- x0..x17 are volatile in the
+// Windows arm64 ABI -- so the value goes back to the slot.
+fn a64_win_std_fd_prestep(uint64 slot) {
+    emit_a64_load_x0(slot)
+    emit_a64(0xF100081F)                  // cmp x0, #2
+    uint64 asfp_skip = out_len
+    emit_a64(0x54000008)                  // b.hi .h (a real HANDLE)
+    emit_a64_neg(0, 0)
+    emit_a64(0xD1002800)                  // sub x0, x0, #10
+    emit_a64_win_call_iat(IAT_GetStdHandle)
+    emit_a64_store_x0(slot)
+    a64_patch_b19_here(asfp_skip, 0x54000008)
+}
+
 // CBNZ Xt, offset (compare and branch if non-zero)
 fn emit_a64_cbnz(uint64 rt, uint64 offset) {
     uint64 rel19 = a64_check_b19(offset)

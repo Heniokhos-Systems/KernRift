@@ -1713,6 +1713,7 @@ fn ir_emit_arm64_insn(uint64 ii) {
     // ----- IR_SYSCALL (52) -----
     if op == 52 {
         if target_os == 2 {
+            ir_win_sc_origin = ir_insn_origin_at(ii)
             ir_emit_arm64_win_syscall(imm, dest_v, dst_r)
             return
         }

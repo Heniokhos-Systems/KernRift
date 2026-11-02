@@ -243,6 +243,14 @@ static uint64 ir_current_src_tok = 0
 // label -- never a guessed one: a wrong attribution is worse than a vague one.
 static uint64 ir_insn_origin = 0
 
+// The origin of the IR_SYSCALL being lowered by a Windows shim, copied from
+// ir_insn_origin by the op-52 dispatch on target_os == 2 only. The write arms
+// of ir_emit_x86_win_syscall / ir_emit_arm64_win_syscall read it: write() and
+// file_write() hand their count to the program, so a failed WriteFile must
+// become -EIO there (#167); print/println/print_str/println_str share the arm
+// but never expose a result, so their bytes stay as they were.
+static uint64 ir_win_sc_origin = 0
+
 @export
 fn ir_set_current_src_tok(uint64 tok) { ir_current_src_tok = tok }
 
@@ -10746,6 +10754,7 @@ fn ir_emit_x86_insn(uint64 ii) {
             return
         }
         if target_os == 2 {
+            ir_win_sc_origin = ir_insn_origin_at(ii)
             ir_emit_x86_win_syscall(imm, dest_v, dst_r)
             return
         }

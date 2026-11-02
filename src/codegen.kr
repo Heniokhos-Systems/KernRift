@@ -4717,6 +4717,86 @@ fn emit_win_free_stack(uint64 nbytes) {
     emit_byte(nb)
 }
 
+// ---------------------------------------------------------------------------
+// Windows I/O builtin helpers (#136, #138, #162, #163, #165, #167, #168)
+// ---------------------------------------------------------------------------
+//
+// The Windows arms of read/file_read/file_size/write/file_write/alloc turn a
+// Win32 BOOL into the Linux-shaped result (a count, 0 at EOF, or -EIO = -5)
+// with a few short forward branches. Each is emitted as a placeholder rel8 and
+// patched here once its target is known. The arms are a few dozen bytes long,
+// so a distance past 127 is a compiler bug, not a property of the program, and
+// it stops the build instead of silently wrapping.
+fn win_patch_rel8(uint64 pos) {
+    uint64 dist = out_len - pos - 1
+    if dist > 127 {
+        write(2, "internal error: Windows I/O arm rel8 branch out of range\n", 57)
+        exit(1)
+    }
+    uint8 d = dist
+    uint64 p = out_buf + pos
+    unsafe { *(p as uint8) = d }
+}
+
+// lea <reg>, [rsp + off] for a FRAME SLOT address handed to a Win32 call.
+//
+// The disp8 form is SIGNED. The legacy file_read arm used to emit its
+// `lea r9, [rsp + br_slot]` with the slot offset truncated to a byte, so in any
+// function whose frame had grown past 0x80 -- and every legacy Windows
+// file_read reserves two more slots -- it assembled as `lea r9, [rsp-0x70]`:
+// ReadFile wrote its byte count below rsp or over a live local, file_read
+// returned 0, and the stack could be corrupted into a crash (#162).
+//
+// The encoding is chosen from the FINAL displacement, never from the logical
+// slot offset, so that anything added to the offset before it is encoded (a
+// frame bias) can never resurrect the truncation. REX.W, plus REX.R for
+// r8-r15; below 0x80 the bytes are exactly the old ones (4C 8D 4C 24 d8 for
+// r9, 48 8D 54 24 d8 for rdx).
+fn emit_win_rsp_lea(uint64 reg, uint64 logical_off) {
+    uint64 final_off = logical_off
+    uint64 rex = 0x48
+    if reg >= 8 { rex = 0x4C }
+    uint8 rx = rex
+    uint64 r3 = reg & 7
+    emit_byte(rx); emit_byte(0x8D)
+    if final_off < 128 {
+        uint8 m8 = 0x44 | (r3 << 3)
+        uint8 o8 = final_off
+        emit_byte(m8); emit_byte(0x24); emit_byte(o8)
+    } else {
+        uint8 m32 = 0x84 | (r3 << 3)
+        emit_byte(m32); emit_byte(0x24); emit_u32_le(final_off)
+    }
+}
+
+// fd -> HANDLE for a legacy Windows I/O arm, in place in its frame slot.
+//
+// 0, 1 and 2 are the standard streams: GetStdHandle(-(10 + fd)). Every other
+// value is a HANDLE from file_open and is left alone. This is the rule the IR
+// read/write arms have always used; the legacy file_read, file_size and
+// file_write arms passed 0..2 straight through as a HANDLE (stdin read as
+// empty, file_write(1, ...) printed nothing: #163, #165, #145), and legacy
+// write() sent EVERY fd through GetStdHandle (#168). The comparison is
+// unsigned, so a pseudo-handle such as -1 is never mistaken for a std fd.
+//
+// Call it only once every argument of the builtin is parked in its slot: the
+// GetStdHandle call clobbers rax, rcx, rdx and r8-r11. On return rax holds the
+// slot's value on both paths; the cache is cleared anyway.
+fn emit_win_std_fd_prestep(uint64 slot) {
+    emit_load_rax_from_stack(slot)
+    emit_byte(0x48); emit_byte(0x83); emit_byte(0xF8); emit_byte(0x02)   // cmp rax, 2
+    emit_byte(0x77); uint64 sfp_skip = out_len; emit_byte(0)             // ja .h (a real HANDLE)
+    emit_neg_rax()
+    emit_sub_rax_imm8(10)
+    emit_mov_rcx_rax()
+    emit_win_alloc_stack(0x20)
+    emit_win_call_iat(IAT_GetStdHandle)
+    emit_win_free_stack(0x20)
+    emit_store_rax_to_stack(slot)
+    win_patch_rel8(sfp_skip)
+    rax_invalidate()
+}
+
 // mov rcx, rax (Windows 1st arg)
 fn emit_mov_rcx_rax() {
     emit_byte(0x48)
