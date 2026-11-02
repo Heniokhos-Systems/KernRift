@@ -36,9 +36,11 @@ ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 mkdir -p "$OUT"; OUT="$(cd "$OUT" && pwd)"
 if [ -f "$ROOT/src/main.kr" ]; then EXT=kr; else EXT=mlr; fi
 
-# Configurations: "<id>|<flags>". Every one has target_os != 2. The default
-# fat build (.krbo/.mlrbo) is NOT here: it contains Windows slices; its
-# non-Windows slices are compared once tests/helpers/krbo_slices.py exists (A12).
+# Configurations: "<id>|<flags>". Every one has target_os != 2, except the
+# default fat build, which contains Windows slices: config fatnw (#143 A12)
+# builds it and compares only its six NON-Windows slices, extracted by
+# tests/helpers/krbo_slices.py (KernRift; the compiler's "fat binary:" summary
+# line, which lists the Windows slice sizes too, is left out of the digest).
 CFGS=(
   "lx|--arch=x86_64 --target=linux"
   "la|--arch=arm64 --target=linux"
@@ -86,6 +88,7 @@ CFGS=(
   "irnx|--target=none --arch=x86_64 --emit=ir"
   "irna|--target=none --arch=arm64 --emit=ir"
 )
+if [ "$EXT" = kr ]; then CFGS+=("fatnw|--peu-fat-nonwin-slices"); fi
 
 # PEU_IDENTITY_SET=windows swaps in the Windows configurations instead: the
 # refactor tasks that must leave Windows output byte-identical too (plan A4,
@@ -150,9 +153,21 @@ one_side() {
     local cc="$1" d="$2" src="$3"; shift 3
     rm -rf "$d"; mkdir -p "$d"
     local rc
+    local fatnw=0
+    if [ "${1:-}" = "--peu-fat-nonwin-slices" ]; then fatnw=1; shift; fi
     if [ "$src" = "-" ]; then
         # source-less emitter: the flag value is the output path
         ( cd "$d" && ulimit -v 2000000 && timeout "$TMO" "$cc" "${1}out" > so 2> se ); rc=$?
+    elif [ "$fatnw" = 1 ]; then
+        # default fat build: keep only the non-Windows slices (A12)
+        ( cd "$d" && ulimit -v 2000000 && timeout "$TMO" "$cc" "$@" "$src" -o out.krbo > so.raw 2> se ); rc=$?
+        grep -v '^fat binary: ' "$d/so.raw" > "$d/so"; rm -f "$d/so.raw"
+        if [ "$rc" = 0 ]; then
+            python3 -B "$ROOT/tests/helpers/krbo_slices.py" "$d/out.krbo" "$d/slices" > /dev/null 2>> "$d/se" || rc=99
+            rm -f "$d/out.krbo" "$d/slices/win-x64" "$d/slices/win-arm64"
+            for x in "$d"/slices/*; do [ -f "$x" ] && mv "$x" "$d/slice-$(basename "$x")"; done
+            rmdir "$d/slices" 2> /dev/null
+        fi
     else
         ( cd "$d" && ulimit -v 2000000 && timeout "$TMO" "$cc" "$@" "$src" -o out > so 2> se ); rc=$?
     fi

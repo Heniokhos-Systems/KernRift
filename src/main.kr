@@ -2596,6 +2596,31 @@ fn emit_asm_listing(uint64 output_path, uint64 arch, uint64 text_start, uint64 s
     file_close(fd)
 }
 
+// PATH + suffix, a fresh NUL-terminated string (fat --test-listing names
+// PATH.win-x64 / PATH.win-arm64, #143 A12).
+fn uw_suffixed_path(uint64 path, uint64 suffix) -> uint64 {
+    uint64 pl = str_len(path)
+    uint64 sl = str_len(suffix)
+    uint64 buf = alloc(pl + sl + 1)
+    uint64 i = 0
+    while i < pl {
+        uint8 c = 0
+        unsafe { *((path + i) as uint8) -> c }
+        unsafe { *((buf + i) as uint8) = c }
+        i = i + 1
+    }
+    i = 0
+    while i < sl {
+        uint8 c2 = 0
+        unsafe { *((suffix + i) as uint8) -> c2 }
+        unsafe { *((buf + pl + i) as uint8) = c2 }
+        i = i + 1
+    }
+    uint8 z = 0
+    unsafe { *((buf + pl + sl) as uint8) = z }
+    return buf
+}
+
 // --test-listing=PATH: write the listing of the code this PE/COFF compile
 // emitted (after every fixup; it ends at the end of code). Windows only.
 fn uw_maybe_write_listing(uint64 path, uint64 arch, uint64 text_start, uint64 source) {
@@ -6454,6 +6479,10 @@ fn compile_fat(uint64 input_path, uint64 output_path) {
     win_iat_fixup_count = 0
     a64_win_iat_fixup_count = 0
     uw_reset()
+    // #143 A12: this slice is a Windows PE -- record and write its unwind
+    // tables (unless --test-no-unwind); cleared again after pe_finalize_x64.
+    uw_emit_tables = 0
+    if uw_test_no_unwind == 0 { uw_emit_tables = 1 }
 
     restore_src_and_tokens(source, size, src_snapshot, my_tokens, tok_bytes, tok_snapshot)
     ast_init(524288)
@@ -6490,6 +6519,7 @@ fn compile_fat(uint64 input_path, uint64 output_path) {
     }
     resolve_fixups()
     resolve_fnaddr_fixups()
+    uw_fn_end(codegen_output_len())     // #143 A12: end of code, before data (Mi1)
     while (codegen_output_len() & 7) != 0 { emit_byte(0) }
     uint64 data_start3 = codegen_output_len()
     emit_static_data()
@@ -6500,6 +6530,10 @@ fn compile_fat(uint64 input_path, uint64 output_path) {
     uint64 text_size3 = codegen_output_len() - text_start3
 
     pe_finalize_x64(header3, text_start3, text_size3)
+    if uw_test_listing_path != 0 {
+        uw_maybe_write_listing(uw_suffixed_path(uw_test_listing_path, ".win-x64"), 0, text_start3, source)
+    }
+    uw_emit_tables = 0
 
     uint64 pe_x86_len = codegen_output_len()
     uint64 pe_x86_buf = alloc(pe_x86_len)
@@ -6554,6 +6588,9 @@ fn compile_fat(uint64 input_path, uint64 output_path) {
     win_iat_fixup_count = 0
     a64_win_iat_fixup_count = 0
     uw_reset()
+    // #143 A12: the arm64 Windows slice records and writes its tables too.
+    uw_emit_tables = 0
+    if uw_test_no_unwind == 0 { uw_emit_tables = 1 }
 
     restore_src_and_tokens(source, size, src_snapshot, my_tokens, tok_bytes, tok_snapshot)
     ast_init(524288)
@@ -6590,6 +6627,7 @@ fn compile_fat(uint64 input_path, uint64 output_path) {
     }
     resolve_fixups_a64()
     resolve_fnaddr_fixups_a64()
+    uw_fn_end(codegen_output_len())     // #143 A12: end of code (Mi1)
     while (codegen_output_len() & 7) != 0 { emit_byte(0) }
     uint64 data_start4 = codegen_output_len()
     emit_static_data()
@@ -6600,6 +6638,10 @@ fn compile_fat(uint64 input_path, uint64 output_path) {
     uint64 text_size4 = codegen_output_len() - text_start4
 
     pe_finalize_a64(header4, text_start4, text_size4)
+    if uw_test_listing_path != 0 {
+        uw_maybe_write_listing(uw_suffixed_path(uw_test_listing_path, ".win-arm64"), 1, text_start4, source)
+    }
+    uw_emit_tables = 0
 
     uint64 pe_a64_len = codegen_output_len()
     uint64 pe_a64_buf = alloc(pe_a64_len)

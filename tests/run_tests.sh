@@ -29613,6 +29613,82 @@ else
     else pe_row_bad pe_unwind_no_unwind_switch_arm64 "$PEU_WHY"; fi
 fi
 
+# tests/helpers/krbo_slices.py (#143 A12, spec 6.3) reimplements the runner's
+# read path: the KRBOFAT v2 container, the LZ4 frames with LZ-Rift blocks, the
+# inverse BCJ filters. Self-check: the linux slices it extracts from a fat
+# binary must behave exactly as the runner itself executing that .krbo --
+# natively on x86_64 and, for arm64, the arm64 runner under qemu-aarch64-static
+# (the fat_slice_let_arm64 pattern) -- same stdout, same exit status.
+PEU_QA2="$(command -v qemu-aarch64-static || command -v qemu-aarch64 || true)"
+if ! command -v python3 > /dev/null 2>&1; then pe_row_skip krbo_slices_selftest "no python3"
+elif [ -z "$PEU_QA2" ]; then pe_row_skip krbo_slices_selftest "no qemu-aarch64-static"
+else
+    PEU_WHY=""
+    printf 'fn main() -> uint32 {\n    uint64 s = 0\n    uint64 i = 0\n    while i < 10 { s = s + i * i  i = i + 1 }\n    println(s)\n    println("slices")\n    return 23\n}\n' > "$T10_D/peu_fat.kr"
+    cat "$DIR/../src/runner.kr" "$DIR/../src/bcj.kr" > "$T10_D/peu_run.kr"
+    if ! $T10_KRC "$T10_D/peu_fat.kr" -o "$T10_D/peu_fat.krbo" > /dev/null 2>&1 \
+       || ! $T10_KRC --arch=x86_64 "$T10_D/peu_run.kr" -o "$T10_D/peu_runx" > /dev/null 2>&1 \
+       || ! $T10_KRC --arch=arm64 "$T10_D/peu_run.kr" -o "$T10_D/peu_runa" > /dev/null 2>&1; then
+        PEU_WHY="build failed"
+    elif ! python3 -B "$DIR/helpers/krbo_slices.py" "$T10_D/peu_fat.krbo" "$T10_D/peu_sl" > "$T10_D/peu_sl.txt" 2>&1; then
+        PEU_WHY="extraction: $(tail -1 "$T10_D/peu_sl.txt")"
+    else
+        chmod +x "$T10_D/peu_runx" "$T10_D/peu_runa" "$T10_D/peu_sl/linux-x64" "$T10_D/peu_sl/linux-arm64"
+        PEU_A=""; PEU_B=""
+        if [ "$(uname -m)" = x86_64 ]; then
+            PEU_A="$(timeout 60 "$T10_D/peu_runx" "$T10_D/peu_fat.krbo" 2>&1; echo "rc=$?")"
+            PEU_B="$(timeout 60 "$T10_D/peu_sl/linux-x64" 2>&1; echo "rc=$?")"
+            [ "$PEU_A" = "$PEU_B" ] || PEU_WHY="$PEU_WHY x86_64: runner '$(tr '\n' '|' <<< "$PEU_A")' vs slice '$(tr '\n' '|' <<< "$PEU_B")';"
+        fi
+        PEU_A="$(timeout 120 "$PEU_QA2" "$T10_D/peu_runa" "$T10_D/peu_fat.krbo" 2>&1; echo "rc=$?")"
+        PEU_B="$(timeout 120 "$PEU_QA2" "$T10_D/peu_sl/linux-arm64" 2>&1; echo "rc=$?")"
+        [ "$PEU_A" = "$PEU_B" ] || PEU_WHY="$PEU_WHY arm64: runner '$(tr '\n' '|' <<< "$PEU_A")' vs slice '$(tr '\n' '|' <<< "$PEU_B")';"
+        [ "$PEU_B" = "$(printf '285\nslices\nrc=23')" ] || PEU_WHY="$PEU_WHY arm64 slice printed '$(tr '\n' '|' <<< "$PEU_B")', want 285|slices|rc=23;"
+        [ "$(grep -c '^' "$T10_D/peu_sl.txt")" = 8 ] || PEU_WHY="$PEU_WHY $(grep -c '^' "$T10_D/peu_sl.txt") slices extracted, want 8;"
+    fi
+    if [ -z "$PEU_WHY" ]; then pe_row_ok krbo_slices_selftest "8 slices extracted; linux-x64 natively and linux-arm64 under qemu behave exactly as the runner running the .krbo"
+    else pe_row_bad krbo_slices_selftest "$PEU_WHY"; fi
+    rm -rf "$T10_D/peu_sl"
+fi
+
+# The Windows slices of fat binaries (#143 A12): a default 8-slice build and a
+# --targets=win-x64,win-arm64 build of three programs; both Windows slices of
+# each, extracted with krbo_slices.py, pass the checker C0-C6 + C4b against the
+# listings --test-listing=PATH writes for them (PATH.win-x64, PATH.win-arm64);
+# with --test-no-unwind, C1 finds no exception directory in either.
+if ! command -v python3 > /dev/null 2>&1 || ! command -v llvm-readobj > /dev/null 2>&1 || ! command -v llvm-objdump > /dev/null 2>&1; then
+    pe_row_skip pe_unwind_fat_slices "needs python3, llvm-readobj and llvm-objdump"
+else
+    PEU_WHY=""; PEU_N=0
+    for PEU_B in pe_unwind_nested_fault pe_unwind_argv_main_fault sys_args; do
+        for PEU_T in "" "--targets=win-x64,win-arm64"; do
+            rm -rf "$T10_D/peu_fs"; mkdir -p "$T10_D/peu_fs"
+            if ! $T10_KRC $PEU_T --test-listing="$T10_D/peu_fs/l" "$DIR/fixtures/$PEU_B.kr" -o "$T10_D/peu_fs/f.krbo" > /dev/null 2>&1 \
+               || ! python3 -B "$DIR/helpers/krbo_slices.py" "$T10_D/peu_fs/f.krbo" "$T10_D/peu_fs/s" > /dev/null 2>&1; then
+                PEU_WHY="$PEU_WHY $PEU_B${PEU_T:+ $PEU_T}:build/extract;"; continue
+            fi
+            for PEU_S in x64:x86_64 arm64:arm64; do
+                PEU_O=$(python3 -B "$PEU_CHK" --arch "${PEU_S#*:}" "$T10_D/peu_fs/s/win-${PEU_S%%:*}" --listing "$T10_D/peu_fs/l.win-${PEU_S%%:*}" 2>&1)
+                if [ "$(grep -c ': PASS' <<< "$PEU_O")" = 8 ]; then PEU_N=$((PEU_N + 1))
+                else PEU_WHY="$PEU_WHY $PEU_B${PEU_T:+ $PEU_T} win-${PEU_S%%:*}:$( { grep -m1 -e FAIL -e error <<< "$PEU_O" || head -1 <<< "$PEU_O"; } | cut -c1-100);"; fi
+            done
+            # the negative: the same build without tables
+            if $T10_KRC --test-no-unwind $PEU_T "$DIR/fixtures/$PEU_B.kr" -o "$T10_D/peu_fs/x.krbo" > /dev/null 2>&1 \
+               && python3 -B "$DIR/helpers/krbo_slices.py" "$T10_D/peu_fs/x.krbo" "$T10_D/peu_fs/x" > /dev/null 2>&1; then
+                for PEU_S in x64:x86_64 arm64:arm64; do
+                    PEU_O=$(python3 -B "$PEU_CHK" --arch "${PEU_S#*:}" "$T10_D/peu_fs/x/win-${PEU_S%%:*}" --rules C1 2>&1)
+                    [[ "$PEU_O" == "C1: FAIL no exception directory"* ]] || PEU_WHY="$PEU_WHY $PEU_B${PEU_T:+ $PEU_T} --test-no-unwind win-${PEU_S%%:*}: '$PEU_O';"
+                done
+            else
+                PEU_WHY="$PEU_WHY $PEU_B${PEU_T:+ $PEU_T} --test-no-unwind:build/extract;"
+            fi
+        done
+    done
+    rm -rf "$T10_D/peu_fs"
+    if [ -z "$PEU_WHY" ] && [ "$PEU_N" = 12 ]; then pe_row_ok pe_unwind_fat_slices "12 Windows slices (3 programs x default and win-only builds x win-x64, win-arm64) pass C0-C6 + C4b; --test-no-unwind leaves none"
+    else pe_row_bad pe_unwind_fat_slices "$PEU_N of 12;$PEU_WHY"; fi
+fi
+
 # A permitted (RSP-neutral) @naked function gets the zero-code kind-1 record
 # (spec 4.3) and passes C5; its listing marks it `; uw-naked`.
 if ! command -v python3 > /dev/null 2>&1; then pe_row_skip pe_unwind_records_naked "no python3"
