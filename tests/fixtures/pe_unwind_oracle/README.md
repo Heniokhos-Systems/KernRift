@@ -29,6 +29,10 @@ Compilers named below:
 | `nest8_fp.asm` | `nest8.kr` | **proto** `--arch=x86_64 --target=windows --emit=asm nest8.kr -o nest8_fp.asm` | `5e67193ac22a845b71fea41d475b361c1f3e027038647545ef4f4523eae52327` |
 | `alloc_guard_fault.exe` | `tests/fixtures/alloc_guard_fault.kr` | **base** `--arch=x86_64 --target=windows --emit=pe tests/fixtures/alloc_guard_fault.kr -o alloc_guard_fault.exe` — register #143's red: Wine exits 0 | `9712fc81b4ddc636b19d485ef2914471b7cabbc8da54a76f8ee58be674ecc491` |
 | `alloc_guard_fault_fp.exe` | `tests/fixtures/alloc_guard_fault.kr` | **proto** `--arch=x86_64 --target=windows --emit=pe tests/fixtures/alloc_guard_fault.kr -o alloc_guard_fault_fp0.exe`, then `add_unwind_x64.py alloc_guard_fault_fp0.exe alloc_guard_fault_fp.exe` — Wine exits 5 (with `WINEDLLOVERRIDES=winedbg.exe=d`) | `286eeadd31de03c2dea4ca823b161911f71bedb4deb5c4c579074b2406b2d9ab` |
+| `c7_parse-x86_64.bin` | — (the compiler's C7 argv parsing leaf) | **base** `--arch=x86_64 --dump-argv-parser=c7_parse-x86_64.bin` (A14b row `c7_leaf_blobs_unchanged`: the leaf bytes must not change) | `bf98f22d3e9f7068eb4b6e9353777df32cc4c2c2c54c42075838c4f426b634c4` |
+| `c7_parse-arm64.bin` | — (the compiler's C7 argv parsing leaf) | **base** `--arch=arm64 --dump-argv-parser=c7_parse-arm64.bin` (A14b row `c7_leaf_blobs_unchanged`: the leaf bytes must not change) | `f937dfe0f3a3a7ee5a636732a4b0ea9dd481e7855df2bea88d05fea5cc2664b1` |
+| `c7_quote-x86_64.bin` | — (the compiler's C7 child command-line quoting leaf) | **base** `--arch=x86_64 --dump-argv-quoter=c7_quote-x86_64.bin` (A14b row `c7_leaf_blobs_unchanged`: the leaf bytes must not change) | `a574c0a7276adec398c91edd2eafaaa5b51f58a061f80d879afd10e8130a1baa` |
+| `c7_quote-arm64.bin` | — (the compiler's C7 child command-line quoting leaf) | **base** `--arch=arm64 --dump-argv-quoter=c7_quote-arm64.bin` (A14b row `c7_leaf_blobs_unchanged`: the leaf bytes must not change) | `a999627d7c2f5de8b2561b0a9925adb06ed658014acd3740144468ccb755b504` |
 
 The two `alloc_guard_fault*.exe` have **no listing**: `--target=windows --emit=asm` of
 that fixture is refused on the base (`--emit=asm` keeps every function, and the dead

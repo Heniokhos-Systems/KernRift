@@ -29902,6 +29902,66 @@ else
     else pe_row_bad native_env_allowlist_selftest "$PEU_WHY"; fi
 fi
 
+# C7 on the laptop (#143 A14b, spec 8.6 (a)): its ANSI code page is not 932,
+# so the native proof of the lead-byte logic is in-suite:
+#  * c7_leaf_blobs_unchanged: the parse and quote leaves the compiler emits
+#    (dumped with --dump-argv-parser/quoter) are byte-identical to the base
+#    compiler's (tests/fixtures/pe_unwind_oracle/c7_*.bin, provenance in its
+#    README): #143 moves only their call site, never the leaves;
+#  * c7_cp932_leaf_native_x86_64: tests/helpers/c7_leaf_harness.c (gcc,
+#    ms_abi calls into the mmapped x86_64 leaves) runs the CP932 and
+#    lead-byte parse tables and the DBCS round-trip vectors of
+#    argv_vectors.kr with the CP932 LeadByte array, natively; the output must
+#    equal the .expected files the Wine and qemu rows use.
+PEU_OR="$DIR/fixtures/pe_unwind_oracle"
+PEU_WHY=""
+for PEU_A in x86_64 arm64; do
+    if ! $T10_KRC --arch=$PEU_A --dump-argv-parser="$T10_D/peu_p-$PEU_A.bin" --dump-argv-quoter="$T10_D/peu_q-$PEU_A.bin" > /dev/null 2>&1; then
+        PEU_WHY="$PEU_WHY $PEU_A: dump failed;"; continue
+    fi
+    cmp -s "$T10_D/peu_p-$PEU_A.bin" "$PEU_OR/c7_parse-$PEU_A.bin" || PEU_WHY="$PEU_WHY $PEU_A parse leaf differs from base;"
+    cmp -s "$T10_D/peu_q-$PEU_A.bin" "$PEU_OR/c7_quote-$PEU_A.bin" || PEU_WHY="$PEU_WHY $PEU_A quote leaf differs from base;"
+done
+if [ -z "$PEU_WHY" ]; then pe_row_ok c7_leaf_blobs_unchanged "x86_64 and arm64 parse + quote leaves identical to base d8f2a56"
+else pe_row_bad c7_leaf_blobs_unchanged "$PEU_WHY"; fi
+if ! command -v gcc > /dev/null 2>&1 || ! command -v python3 > /dev/null 2>&1; then
+    pe_row_skip c7_cp932_leaf_native_x86_64 "needs gcc and python3"
+elif [ "$(uname -m)" != x86_64 ]; then
+    pe_row_skip c7_cp932_leaf_native_x86_64 "not an x86_64 host"
+elif ! gcc -O1 -o "$T10_D/peu_c7h" "$DIR/helpers/c7_leaf_harness.c" > "$T10_D/peu_c7h.log" 2>&1; then
+    pe_row_bad c7_cp932_leaf_native_x86_64 "harness build: $(head -c 200 "$T10_D/peu_c7h.log")"
+elif [ ! -s "$T10_D/peu_p-x86_64.bin" ] || [ ! -s "$T10_D/peu_q-x86_64.bin" ]; then
+    pe_row_bad c7_cp932_leaf_native_x86_64 "no dumped x86_64 leaves"
+else
+    PEU_WHY=""
+    # the DBCS round-trip vectors, extracted from argv_vectors.kr (pct strings)
+    python3 -B - "$DIR/fixtures/argv_vectors.kr" "$T10_D/peu_vec.txt" <<'PEUVECEOF'
+import re, sys
+src = open(sys.argv[1], encoding='latin-1').read()
+body = src[src.index('fn rtv_dbcs_build'):]
+body = body[:body.index('\n}\n')]
+out = bytearray()
+for k, blk in enumerate(re.split(r'\n    (?:\} else )?if k == \d+ \{', body)[1:]):
+    out += b'#%d\n' % k
+    for lit in re.findall(r'pct\("((?:[^"\\]|\\.)*)"\)', blk):
+        s = re.sub(r'\\(.)', lambda m: {'t': '\t', 'n': '\n'}.get(m.group(1), m.group(1)), lit)
+        out += b'<' + re.sub(r'%([0-9A-F]{2})', lambda m: chr(int(m.group(1), 16)), s).encode('latin-1') + b'>\n'
+open(sys.argv[2], 'wb').write(bytes(out))
+PEUVECEOF
+    { timeout 120 "$T10_D/peu_c7h" parse "$T10_D/peu_p-x86_64.bin" "$DIR/fixtures/argv_table_cp932.txt" 819fe0fc && \
+      timeout 120 "$T10_D/peu_c7h" parse "$T10_D/peu_p-x86_64.bin" "$DIR/fixtures/argv_table_lead.txt" 819fe0fc; } > "$T10_D/peu_c7p.out" 2>&1 \
+        || PEU_WHY="$PEU_WHY parse rc=$?;"
+    cat "$DIR/fixtures/argv_table_cp932.expected" "$DIR/fixtures/argv_table_lead.expected" | cmp -s "$T10_D/peu_c7p.out" - \
+        || PEU_WHY="$PEU_WHY parse tables differ: $(cat "$DIR/fixtures/argv_table_cp932.expected" "$DIR/fixtures/argv_table_lead.expected" | diff -a "$T10_D/peu_c7p.out" - | head -3 | cut -c1-80 | tr '\n' '|');"
+    timeout 120 "$T10_D/peu_c7h" rt "$T10_D/peu_q-x86_64.bin" "$T10_D/peu_p-x86_64.bin" "$T10_D/peu_vec.txt" 819fe0fc > "$T10_D/peu_c7r.out" 2>&1 \
+        || PEU_WHY="$PEU_WHY rt rc=$?;"
+    cat "$DIR/fixtures/argv_roundtrip_cp932.expected" "$DIR/fixtures/argv_roundtrip_lead.expected" | cmp -s "$T10_D/peu_c7r.out" - \
+        || PEU_WHY="$PEU_WHY round trip differs: $(cat "$DIR/fixtures/argv_roundtrip_cp932.expected" "$DIR/fixtures/argv_roundtrip_lead.expected" | diff -a "$T10_D/peu_c7r.out" - | head -3 | cut -c1-80 | tr '\n' '|');"
+    if [ -z "$PEU_WHY" ]; then pe_row_ok c7_cp932_leaf_native_x86_64 "$(grep -c '^#' "$T10_D/peu_c7p.out") CP932/lead lines parsed, $(grep -c '^#' "$T10_D/peu_c7r.out") DBCS vectors round-tripped, natively, as expected"
+    else pe_row_bad c7_cp932_leaf_native_x86_64 "$PEU_WHY"; fi
+fi
+rm -f "$T10_D"/peu_p-*.bin "$T10_D"/peu_q-*.bin "$T10_D"/peu_c7* "$T10_D/peu_vec.txt"
+
 # A permitted (RSP-neutral) @naked function gets the zero-code kind-1 record
 # (spec 4.3) and passes C5; its listing marks it `; uw-naked`.
 if ! command -v python3 > /dev/null 2>&1; then pe_row_skip pe_unwind_records_naked "no python3"

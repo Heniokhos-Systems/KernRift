@@ -42,3 +42,5 @@ pe_unwind_obj_reloc_limit
 pe_unwind_obj_no_functions
 native_exec_cmdline_selftest
 native_env_allowlist_selftest
+c7_leaf_blobs_unchanged
+c7_cp932_leaf_native_x86_64
