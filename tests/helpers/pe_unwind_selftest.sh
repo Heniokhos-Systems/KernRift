@@ -312,6 +312,15 @@ for x in x86_64:x:C2 arm64:a:C2 arm64:a:C1; do
     if [ "$rc" = 2 ] && grep -q "pass --listing" <<< "$out"; then N=$((N + 1)); echo "  case object_needs_listing_${xa}_$xr: input error (rc 2) as required"
     else fail "object_needs_listing_${xa}_$xr" "want rc 2 and 'pass --listing', got rc=$rc: $out"; fi
 done
+# ... and a listing WITHOUT `; uw-code-end` is the same input error on both
+# arches (phase-5 review, Nit 9)
+for x in x86_64:x arm64:a; do
+    IFS=: read -r xa xo <<< "$x"
+    grep -v '^; uw-code-end ' "$W/$xo.lst" > "$W/${xo}_noend.lst"
+    out=$(python3 "$CHK" --rules C2 --arch "$xa" "$W/$xo.obj" --listing "$W/${xo}_noend.lst" 2>&1); rc=$?
+    if [ "$rc" = 2 ] && grep -q "uw-code-end" <<< "$out"; then N=$((N + 1)); echo "  case listing_without_code_end_${xa}: input error (rc 2) as required"
+    else fail "listing_without_code_end_${xa}" "want rc 2 naming uw-code-end, got rc=$rc: $out"; fi
+done
 # A13: a call relocated against an UNDEFINED symbol (an extern) leaves the
 # object, so C2 must not read its in-place field as a target in this object.
 # The same object with .text's relocations dropped must still FAIL C2: only

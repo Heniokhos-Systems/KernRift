@@ -954,7 +954,8 @@ def check_c2(binr, lst, recs, insns):
     t = binr.text
     if lst is not None and (lst.labels or binr.is_image):
         if lst.code_end is None:
-            raise RuleFail('the listing has no `; uw-code-end` annotation')
+            raise InputError('the listing has no `; uw-code-end` annotation (the end of code); '
+                             'pass the compiler\'s --test-listing')
         fns = [(t.rva + o, n) for o, n in lst.labels]
         code_end = t.rva + lst.code_end
         leaves = [(n, k, t.rva + b, t.rva + e) for n, k, b, e in lst.leaves]

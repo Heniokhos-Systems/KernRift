@@ -1,0 +1,22 @@
+# native_reclass.lst -- the corpus rows whose native FAIL is reclassified, and
+# what proves them natively instead (#143 A14b, phase-5 review finding 2).
+#   <row> | <class> | <native proof>
+# A class in native_judge.py's RULES reclassifies a FAIL as SKIP only when the
+# FAILURE REASON matches the class's rule; a class in SCRIPTED replaces the row
+# by a per-row native script's result, which must be PASS.
+pe_unwind_nested_fault_windows_wine            | fault     | cdb_chain.sh pe_unwind_nested_fault f3,f2,f1,main (Task D step 3)
+pe_unwind_stack_args_fault_windows_wine        | fault     | cdb_chain.sh pe_unwind_stack_args_fault f3,f2,main (Task D step 3)
+pe_unwind_naked_fault_windows_wine             | fault     | cdb_chain.sh pe_unwind_naked_fault poke,f1,main (Task D step 3)
+pe_unwind_argv_main_fault_windows_wine         | fault     | cdb_chain.sh pe_unwind_argv_main_fault f2,f1,main (Task D step 3)
+pe_unwind_nested_fault_legacy_windows_wine     | fault     | cdb_chain.sh pe_unwind_nested_fault --legacy f3,f2,f1,main (Task D step 3)
+pe_unwind_stack_args_fault_legacy_windows_wine | fault     | cdb_chain.sh pe_unwind_stack_args_fault --legacy f3,f2,main (Task D step 3)
+pe_unwind_argv_main_fault_legacy_windows_wine  | fault     | cdb_chain.sh pe_unwind_argv_main_fault --legacy f2,f1,main (Task D step 3)
+pe_unwind_temp_push_fault_windows_wine         | fault     | cdb_chain.sh pe_unwind_temp_push_fault --legacy f2,f1,main, and --bp "KERNELBASE!GetStdHandle 3" (Task D steps 3, 3b)
+c7_acp_is_932_in_ja_prefix_wine                | cp932     | c7_leaf_blobs_unchanged, c7_cp932_leaf_native_x86_64, the Wine CP932 rows; natively only after a user-approved locale switch
+c7_raw_cmdline_table_cp932_wine                | cp932     | c7_leaf_blobs_unchanged, c7_cp932_leaf_native_x86_64, the Wine CP932 rows; natively only after a user-approved locale switch
+c7_exec_argv_roundtrip_cp932_wine              | cp932     | c7_leaf_blobs_unchanged, c7_cp932_leaf_native_x86_64, the Wine CP932 rows; natively only after a user-approved locale switch
+pe_unwind_obj_link_windows_wine                | linkprobe | native_probe.sh: the linked COFF probe exits 7 x3 with chain walk,d3,d2,main,start,KERNEL32,NTDLL; control not 7 (Task D step 4)
+wine_crash_override_does_not_mask              | override  | Wine-only (winedbg); natively main's image is checked by cdb_chain.sh failing on it (Task D step 7)
+sys_last_errno_windows_wine                    | concurrent | native_concurrent.sh
+sys_so_broadcast_windows_wine                  | hostrows  | native_hostrows.sh
+sys_net_ifaces_windows_wine_matches_ip_addr    | hostrows  | native_hostrows.sh

@@ -14,12 +14,14 @@
 #    the send must be refused -EACCES (-13), with it it must send 48 bytes.
 #  * sys_net_ifaces_windows_wine_matches_ip_addr: the row compares the
 #    interface list with Linux `ip -4 addr`; natively it is compared with the
-#    laptop's own Get-NetIPAddress: the IPv4 address/prefix of every adapter
-#    that is Up (and loopback), and the UP set. sys_net_ifaces enumerates
-#    with Winsock's SIO_GET_INTERFACE_LIST, which leaves out the addresses
-#    of adapters that are not operational (measured: the 169.254/16
-#    autoconfiguration addresses of disconnected adapters); those are listed
-#    in the PASS detail, not compared.
+#    laptop's own Get-NetIPAddress: the IPv4 address/prefix of every address
+#    whose interface (Get-NetIPInterface) is Connected -- loopback included,
+#    no special case -- both as the full list and as the UP set.
+#    sys_net_ifaces enumerates with Winsock's SIO_GET_INTERFACE_LIST, which
+#    leaves out Disconnected interfaces (their Tentative addresses, measured:
+#    the 169.254/16 autoconfiguration addresses of disconnected adapters);
+#    each such address is printed with a check that it is absent from the
+#    program's list.
 # Prints "<row>: PASS|FAIL (detail)"; exits 0 when both pass, 1 otherwise,
 # 2 on a transport error.
 set -u -o pipefail
@@ -39,7 +41,7 @@ for f in sys_bcast sys_ifaces; do
 done
 rps "New-Item -ItemType Directory -Force '$RD' | Out-Null; exit 0" > /dev/null || { rm -rf "$L"; echo "native_hostrows.sh: remote mkdir failed" >&2; exit 2; }
 scp -q -o BatchMode=yes "$L/sys_bcast.exe" "$L/sys_ifaces.exe" "$NATIVE_HOST:$RDF/" < /dev/null || { cleanup; exit 2; }
-OUT=$(rps "Set-Location '$RD'; \$b=& '$RD\\sys_bcast.exe' all; 'BC_RC=' + \$LASTEXITCODE; \$b | ForEach-Object { 'BC=' + \$_ }; \$f=& '$RD\\sys_ifaces.exe'; 'IF_RC=' + \$LASTEXITCODE; \$f | ForEach-Object { 'IF=' + \$_ }; Get-NetIPAddress -AddressFamily IPv4 | ForEach-Object { 'NA=' + \$_.IPAddress + '/' + \$_.PrefixLength + ' ' + (Get-NetAdapter -InterfaceIndex \$_.InterfaceIndex -ErrorAction SilentlyContinue).Status + ' ' + \$_.InterfaceAlias }; exit 0" | tr -d '\r')
+OUT=$(rps "Set-Location '$RD'; \$b=& '$RD\\sys_bcast.exe' all; 'BC_RC=' + \$LASTEXITCODE; \$b | ForEach-Object { 'BC=' + \$_ }; \$f=& '$RD\\sys_ifaces.exe'; 'IF_RC=' + \$LASTEXITCODE; \$f | ForEach-Object { 'IF=' + \$_ }; Get-NetIPAddress -AddressFamily IPv4 | ForEach-Object { 'NA=' + \$_.IPAddress + '/' + \$_.PrefixLength + ' ' + (Get-NetIPInterface -InterfaceIndex \$_.InterfaceIndex -AddressFamily IPv4).ConnectionState + ' ' + \$_.AddressState }; exit 0" | tr -d '\r')
 TRC=$?
 cleanup
 [ "$TRC" = 0 ] || { echo "native_hostrows.sh: remote run failed ($TRC)" >&2; exit 2; }
@@ -53,13 +55,17 @@ fi
 m2p() { local m="$1" n=0 o; for o in ${m//./ }; do while [ "$o" -gt 0 ]; do n=$((n + (o & 1))); o=$((o >> 1)); done; done; echo "$n"; }
 X=$(grep '^IF=' <<< "$OUT" | cut -c4- | sed 1d | while read -r a m b f; do echo "$a/$(m2p "$m")"; done | LC_ALL=C sort | tr '\n' ' ')
 A=$(grep '^IF=' <<< "$OUT" | cut -c4- | sed 1d | awk '($4 % 2) == 1 {print $1}' | LC_ALL=C sort | tr '\n' ' ')
-# Get-NetIPAddress lists loopback's 127.0.0.1/8 under "Loopback Pseudo-Interface 1",
-# which has no NetAdapter object: it is Up by definition
-Y=$(grep '^NA=' <<< "$OUT" | cut -c4- | awk '$2 == "Up" || $1 ~ /^127\./ {print $1}' | LC_ALL=C sort | tr '\n' ' ')
-NOTUP=$(grep '^NA=' <<< "$OUT" | cut -c4- | awk '!($2 == "Up" || $1 ~ /^127\./) {print $1}' | LC_ALL=C sort | tr '\n' ' ')
-B=$(grep '^NA=' <<< "$OUT" | cut -c4- | awk '$2 == "Up" || $1 ~ /^127\./ {print $1}' | cut -d/ -f1 | LC_ALL=C sort | tr '\n' ' ')
+Y=$(grep '^NA=' <<< "$OUT" | cut -c4- | awk '$2 == "Connected" {print $1}' | LC_ALL=C sort | tr '\n' ' ')
+B=$(grep '^NA=' <<< "$OUT" | cut -c4- | awk '$2 == "Connected" {print $1}' | cut -d/ -f1 | LC_ALL=C sort | tr '\n' ' ')
+# every address of a Disconnected interface, and whether it is absent from
+# the program's list (it must be)
+NOTC=""; for e in $(grep '^NA=' <<< "$OUT" | cut -c4- | awk '$2 != "Connected" {print $1 "|" $2 "|" $3}'); do
+    a=${e%%|*}; r=${e#*|}
+    if grep -qw -- "${a%/*}" <<< "$X $A"; then NOTC="$NOTC $a (${r/|/,}) PRESENT in the program's list;"; bad=1
+    else NOTC="$NOTC $a (${r/|/,}) absent from Winsock's list;"; fi
+done
 if grep -qx 'IF_RC=0' <<< "$OUT" && [ -n "$Y" ] && [ "$X" = "$Y" ] && [ "$A" = "$B" ]; then
-    echo "sys_net_ifaces_windows_wine_matches_ip_addr: PASS (natively vs Get-NetIPAddress: $(wc -w <<< "$Y") addr/prefix, $(wc -w <<< "$B") UP; adapters not Up, not in Winsock's list: ${NOTUP:-none})"
+    echo "sys_net_ifaces_windows_wine_matches_ip_addr: PASS (natively vs Get-NetIPAddress: $(wc -w <<< "$Y") addr/prefix, $(wc -w <<< "$B") UP;${NOTC:- no Disconnected interface})"
 else
     echo "sys_net_ifaces_windows_wine_matches_ip_addr: FAIL (natively: got '$X' want '$Y'; UP got '$A' want '$B')"; bad=1
 fi

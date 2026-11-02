@@ -38,8 +38,10 @@
 #
 # Environment: an allow-list -- every name in NATIVE_ENV (space-separated) and
 # every exported KR_* / MLR_* variable -- is forwarded (values base64) through
-# ProcessStartInfo.Environment with UseShellExecute=$false; every KR_* / MLR_*
-# variable the laptop process would otherwise pass on is removed first.
+# ProcessStartInfo.Environment with UseShellExecute=$false. Every KR_* / MLR_*
+# variable the laptop process would otherwise pass on, and every NATIVE_ENV
+# name that is unset here, is removed there (an unset name reads unset, never
+# as the laptop's own value). A value that is not UTF-8 refuses the run (125).
 # NATIVE_TEST_LAPTOP_ENV=NAME=VALUE (test hook, Task D) sets a variable in the
 # laptop's PowerShell process before the start info is built.
 #
@@ -85,6 +87,7 @@ $p=New-Object Diagnostics.ProcessStartInfo; $p.FileName=Join-Path $Run $kv['EXE'
 $p.Arguments=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($kv['ARGS64']));
 $p.WorkingDirectory=$Run; $p.UseShellExecute=$false; $p.RedirectStandardOutput=$true; $p.RedirectStandardError=$true; $p.RedirectStandardInput=$true;
 foreach ($n in @($p.Environment.Keys)) { if (($n -like 'KR_*' -or $n -like 'MLR_*') -and -not $ev.ContainsKey($n)) { [void]$p.Environment.Remove($n) } };
+if ($kv['NAMES']) { foreach ($n in $kv['NAMES'].Split(' ')) { if ($n -and -not $ev.ContainsKey($n)) { [void]$p.Environment.Remove($n) } } };
 foreach ($n in $ev.Keys) { $p.Environment[$n]=$ev[$n] };
 $x=[Diagnostics.Process]::Start($p); $so=[IO.File]::Create((Join-Path $Out 'stdout.bin')); $se=[IO.File]::Create((Join-Path $Out 'stderr.bin'));
 $a=$x.StandardOutput.BaseStream.CopyToAsync($so); $b=$x.StandardError.BaseStream.CopyToAsync($se); $x.StandardInput.Close();
@@ -178,6 +181,19 @@ def ucrt_parse(line):
         argv.append(cur)
     return argv
 
+def rawrest(line):
+    """The bytes of a raw command line after its argv[0] token (the UCRT
+    program-name rule: up to the closing quote or the first space/tab) and the
+    one space or tab that ends it."""
+    i, q = 0, False
+    while i < len(line):
+        if line[i] == 0x22:
+            q = not q
+        elif not q and line[i] in (0x20, 0x09):
+            break
+        i += 1
+    return line[i + 1:]
+
 def read_expected(path):
     """argv_table.expected / argv_roundtrip.expected: blocks of
     '#k rc=N', 'argc=N', '<arg>' lines, 'raw=<line>'."""
@@ -197,15 +213,7 @@ if cmd == 'quote':                    # quote ARGS... -> base64 of the line afte
     a0 = argv_quote(sys.argv[2:3])
     print(base64.b64encode(line[len(a0) + 1:].encode('utf-8')).decode())
 elif cmd == 'rawrest':                # rawrest B64 -> base64 of the raw line after its argv[0]
-    line = base64.b64decode(sys.argv[2])
-    i, q = 0, False
-    while i < len(line):
-        if line[i] == 0x22:
-            q = not q
-        elif not q and line[i] in (0x20, 0x09):
-            break
-        i += 1
-    print(base64.b64encode(line[i + 1:]).decode())
+    print(base64.b64encode(rawrest(base64.b64decode(sys.argv[2]))).decode())
 elif cmd == 'manifest':               # manifest CWD EXE -> lines "<sha|D> <rel>"; blobs list
     cwd, exe = sys.argv[2], sys.argv[3]
     seen = {}
@@ -233,9 +241,19 @@ elif cmd == 'manifest':               # manifest CWD EXE -> lines "<sha|D> <rel>
 elif cmd == 'envlist':                # envlist -> NAME=base64 lines (the allow-list)
     names = set((os.environ.get('NATIVE_ENV') or '').split())
     names |= set(k for k in os.environ if k.startswith('KR_') or k.startswith('MLR_'))
+    out = []
     for k in sorted(names):
         if k in os.environ:
-            print('%s=%s' % (k, base64.b64encode(os.environ[k].encode('utf-8')).decode()))
+            try:
+                out.append('%s=%s' % (k, base64.b64encode(os.environ[k].encode('utf-8')).decode()))
+            except UnicodeEncodeError:
+                # a value that is not UTF-8 cannot be given to the laptop
+                # exactly: refuse the whole run, never forward a partial list
+                sys.stderr.write('native_exec.sh: %s is not UTF-8; it cannot be forwarded exactly\n' % k)
+                sys.exit(125)
+    print('\n'.join(out))
+elif cmd == 'envnames':               # envnames -> the NATIVE_ENV names, one line
+    print(' '.join(sorted(set((os.environ.get('NATIVE_ENV') or '').split()))))
 elif cmd == 'selftest-cmdline':       # selftest-cmdline FIXTURES
     fx, bad, n = sys.argv[2], [], 0
     # 1. the reference parser reproduces the C7 table (raw line -> argv)
@@ -261,6 +279,18 @@ elif cmd == 'selftest-cmdline':       # selftest-cmdline FIXTURES
         n += 1
         if ucrt_parse(argv_quote(argv)) != argv:
             bad.append('table #%d argv: %r -> %r' % (k, argv, ucrt_parse(argv_quote(argv))))
+    # 4. NATIVE_RAW_CMDLINE: the program sees '"<exe path>"' + ' ' + rawrest
+    #    (ProcessStartInfo), so argv[1..] of every raw table line must parse
+    #    exactly as the line's own; the separator after argv[0] and trailing
+    #    whitespace after a lone argv[0] are not carried (argv-level exact).
+    for k, l in enumerate(lines):
+        if not l and k == len(lines) - 1:
+            continue
+        rest = rawrest(l.encode('latin-1')).decode('latin-1')
+        seen = '"C:\\s\\p.exe"' + (' ' + rest if rest else '')
+        n += 1
+        if ucrt_parse(seen)[1:] != ucrt_parse(l)[1:]:
+            bad.append('raw table #%d: rest %r parses to %r, the line to %r' % (k, rest, ucrt_parse(seen)[1:], ucrt_parse(l)[1:]))
     for b in bad[:5]:
         print('FAIL ' + b)
     print('%d vectors, %d mismatches' % (n, len(bad)))
@@ -272,7 +302,7 @@ PYEOF
 
 case "${1:-}" in
     --selftest-cmdline) py selftest-cmdline "${2:?fixtures dir}"; exit $? ;;
-    --env-forward) py envlist; exit 0 ;;
+    --env-forward) py envlist; exit $? ;;
     --end-session)
         [ -n "${NATIVE_SESSION:-}" ] || die "--end-session needs NATIVE_SESSION"
         rrm "$REMOTE_ROOT\\$NATIVE_SESSION" || die "remote session tree $NATIVE_SESSION still exists"
@@ -308,11 +338,13 @@ while read -r h p; do
     grep -qx "$h" "$ST/cached.lst" && continue
     cp "$p" "$LJ/blobs/$h"; NEW=$((NEW + 1))
 done < "$LJ/blobs.lst"
+py envlist > "$LJ/env.lst" || { cleanup_local; exit 125; }
 {
     echo "EXE=$EXEREL"
     echo "ARGS64=$ARGS64"
     echo "TIMEOUT=${NATIVE_TIMEOUT:-300}"
-    py envlist | sed 's/^/ENV=/'
+    echo "NAMES=$(py envnames)"
+    sed '/^$/d; s/^/ENV=/' "$LJ/env.lst"
     if [ -n "${NATIVE_TEST_LAPTOP_ENV:-}" ]; then echo "LAPTOPENV=$NATIVE_TEST_LAPTOP_ENV"; fi
 } > "$LJ/up/$JOB/job.txt"
 cp "$LJ/manifest.txt" "$LJ/up/$JOB/"

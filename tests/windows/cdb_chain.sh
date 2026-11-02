@@ -12,7 +12,8 @@
 #   --bp SYM:  bp $exentry; g; bp SYM; g; .lastevent; k 30; q  (stops at
 #              the first call of SYM, e.g. KERNELBASE!GetStdHandle, after the
 #              image's entry: the image's frames are live)
-# then parses the `k` stack. Every frame in the image (module+0xRVA) is named
+# then requires the last event to be "Access violation - code c0000005"
+# (default) or "Hit breakpoint 1" (--bp) and parses the `k` stack. Every frame in the image (module+0xRVA) is named
 # by the listing (--test-listing of the same build; .text at RVA 0x1000). The
 # assertion: the image frames, in order, are exactly <want> (comma-separated,
 # innermost first; a leading `...,` allows any image frames before the rest),
@@ -45,7 +46,7 @@ cleanup
 [ "$TRC" = 0 ] || { echo "cdb_chain.sh: remote cdb run failed ($TRC)" >&2; exit 2; }
 TF="${CDB_TRANSCRIPT:-$(mktemp)}"
 printf '%s\n' "$OUT" > "$TF"
-python3 -B - "$LST" "${NAME%.*}" "$WANT" "$TF" <<'PYEOF'
+python3 -B - "$LST" "${NAME%.*}" "$WANT" "$TF" "$BP" <<'PYEOF'
 import re, sys
 lst, mod, want = sys.argv[1], sys.argv[2].lower(), sys.argv[3].split(',')
 labels, code_end = [], None
@@ -86,6 +87,12 @@ for l in out.split('\n'):
         else:
             frames.append(('ext', '%s!%s' % (mo, fn) if fn else site))
 names = [n for _, n in frames]
+# what stopped the program: the fault (default) or the breakpoint (--bp)
+stop = 'Hit breakpoint 1' if sys.argv[5] else 'Access violation - code c0000005'
+if stop not in out:
+    print('chain: ' + ' > '.join(names) if names else 'chain: (no k output)')
+    print('FAIL: the last event is not "%s"' % stop)
+    sys.exit(1)
 print('chain: ' + ' > '.join(names) if names else 'chain: (no k output)')
 i = 0
 while i < len(frames) and frames[i][0] != 'img':

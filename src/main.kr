@@ -7683,6 +7683,26 @@ static uint64 fat_cap_entry = 0
 // doesn't matter).
 static uint64 machine_target = 0
 
+// --test-coff-reloc-limit=N (#143, phase-5 review Nit 8): N must be 1 to 6
+// decimal digits and at most 65535 (a 16-bit NumberOfRelocations); anything
+// else is refused rather than read as 0 or as a count the field cannot hold.
+fn parse_reloc_limit_arg(uint64 s) -> uint64 {
+    uint64 n = 0
+    uint64 c = load8(s)
+    uint64 val = 0
+    while c >= 48 && c <= 57 && n < 7 {
+        val = val * 10 + (c - 48)
+        n = n + 1
+        c = load8(s + n)
+    }
+    if n == 0 || n > 6 || c != 0 || val > 0xFFFF {
+        uint64 m = "error: --test-coff-reloc-limit= takes a decimal number from 0 to 65535\n"
+        write(2, m, str_len(m))
+        exit(1)
+    }
+    return val
+}
+
 fn parse_uint_arg(uint64 s) -> uint64 {
     uint64 val = 0
     uint64 i = 0
@@ -9509,7 +9529,7 @@ fn main() {
                 // Internal, undocumented in --help, test-only (#143 A13): lower
                 // the 65535 .pdata relocations a Windows object may hold, so
                 // the refusal row reaches it without a 21846-function program.
-                uw_coff_reloc_limit = parse_uint_arg(arg + 24)
+                uw_coff_reloc_limit = parse_reloc_limit_arg(arg + 24)
             } else if str_starts_with(arg, "--test-a64-low-limit=", 21) != 0 {
                 // Internal, undocumented in --help, test-only (#143): lower the
                 // 256 MiB limit of a Windows arm64 frame's low area, so the

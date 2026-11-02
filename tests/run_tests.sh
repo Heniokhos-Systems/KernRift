@@ -28459,7 +28459,13 @@ else
         c7_ok c7_acp_is_932_in_ja_prefix_wine "$C7_ACP"
         C7_ACPWHY=""
     else
-        c7_bad c7_acp_is_932_in_ja_prefix_wine "rc=$C7_RC GetCPInfo(CP_ACP) said '$C7_ACP'"
+        # a single-byte answer names its cause, so a native run (where the
+        # laptop's ANSI code page is not 932) can tell it from a broken call
+        if [ "$C7_RC" = "0" ] && [[ "$C7_ACP" == "ok=1 max=01 "* ]]; then
+            c7_bad c7_acp_is_932_in_ja_prefix_wine "rc=$C7_RC (the ANSI code page is not 932: single-byte) GetCPInfo(CP_ACP) said '$C7_ACP'"
+        else
+            c7_bad c7_acp_is_932_in_ja_prefix_wine "rc=$C7_RC GetCPInfo(CP_ACP) said '$C7_ACP'"
+        fi
         C7_ACPWHY=" (the prefix's ANSI code page is not 932: see c7_acp_is_932_in_ja_prefix_wine)"
     fi
     C7_JA=1 c7_wine "$C7_D/wt932.out" "$C7_D/ce" argv_rawparent.exe argv_table_cp932.txt; C7_RC=$?
@@ -29770,7 +29776,13 @@ else
             PEU_WHY="$PEU_WHY $PEU_A limit $PEU_NR: refused;"
         fi
     done
-    if [ -z "$PEU_WHY" ]; then pe_row_ok pe_unwind_obj_reloc_limit "x86_64 refused at 14 and built at 15, arm64 refused at 9 and built at 10 .pdata relocations"
+    # the switch itself takes only a decimal 0..65535 (phase-5 review Nit 8)
+    for PEU_V in abc 70000 12x ""; do
+        $T10_KRC --test-coff-reloc-limit=$PEU_V --freestanding --target=windows --emit=obj "$DIR/fixtures/pe_unwind_obj_chain.kr" -o "$T10_D/peu_rl.obj" > "$T10_D/peu_rl.log" 2>&1 \
+            && PEU_WHY="$PEU_WHY --test-coff-reloc-limit='$PEU_V' accepted;"
+        grep -q 'takes a decimal number from 0 to 65535' "$T10_D/peu_rl.log" || PEU_WHY="$PEU_WHY --test-coff-reloc-limit='$PEU_V': no refusal message;"
+    done
+    if [ -z "$PEU_WHY" ]; then pe_row_ok pe_unwind_obj_reloc_limit "x86_64 refused at 14 and built at 15, arm64 refused at 9 and built at 10 .pdata relocations; the switch refuses abc, 70000, 12x and empty"
     else pe_row_bad pe_unwind_obj_reloc_limit "$PEU_WHY"; fi
     PEU_WHY=""
     printf 'static uint64 PEU_K1 = 7\nstatic uint64 PEU_K2 = 0x1234\n' > "$T10_D/peu_consts.kr"
@@ -29878,7 +29890,8 @@ fi
 #    round-trip vectors, and every argv survives build -> parse;
 #  * the environment allow-list: exactly the names in NATIVE_ENV that are set
 #    plus every exported KR_* / MLR_* travel, with their values intact
-#    (spaces, quotes, newlines, non-ASCII), and nothing else.
+#    (spaces, quotes, newlines, non-ASCII), and nothing else; a value that is
+#    not UTF-8 refuses the run (exit 125).
 if ! command -v python3 > /dev/null 2>&1; then
     pe_row_skip native_exec_cmdline_selftest "no python3"; pe_row_skip native_env_allowlist_selftest "no python3"
 else
@@ -29898,8 +29911,26 @@ else
         PEU_DEC=$(grep '^KR_A=' <<< "$PEU_O" | cut -d= -f2- | base64 -d 2>/dev/null)
         [ "$PEU_DEC" = "$PEU_V" ] || PEU_WHY="$PEU_WHY [$PEU_SET] KR_A's value does not survive its base64;"
     done
-    if [ -z "$PEU_WHY" ]; then pe_row_ok native_env_allowlist_selftest "3 setups: NATIVE_ENV names that are set plus exported KR_*/MLR_*, values intact, nothing else"
+    # a value that is not UTF-8 cannot travel exactly: the whole run is
+    # refused (125), never forwarded without it or the variables after it
+    PEU_O=$(env -i PATH="$PATH" HOME="$HOME" KR_A=a KR_B=$'\xff\xfe' KR_C=c bash "$PEU_NX" --env-forward 2>&1); PEU_RC=$?
+    [ "$PEU_RC" = 125 ] && grep -q 'KR_B is not UTF-8' <<< "$PEU_O" || PEU_WHY="$PEU_WHY non-UTF-8 KR_B: rc=$PEU_RC '$(tr '\n' '|' <<< "$PEU_O" | cut -c1-80)', want 125 and a refusal;"
+    if [ -z "$PEU_WHY" ]; then pe_row_ok native_env_allowlist_selftest "3 setups: NATIVE_ENV names that are set plus exported KR_*/MLR_*, values intact, nothing else; a non-UTF-8 value refuses the run (125)"
     else pe_row_bad native_env_allowlist_selftest "$PEU_WHY"; fi
+fi
+
+# The judge of a native suite run (tests/windows/native_judge.py, phase-5
+# review findings 1-2) cannot pass vacuously: a complete synthetic run built
+# from native_corpus.lst and native_reclass.lst passes, and an empty log, a
+# truncated log, a missing / doubled / SKIPped corpus row, a FAIL outside the
+# corpus, a fault row with the wrong exit code or a failing checker, a CP932
+# row failing for another reason and a missing or FAILed per-row script
+# result each fail it.
+if ! command -v python3 > /dev/null 2>&1; then pe_row_skip native_judge_selftest "no python3"
+else
+    PEU_O=$(python3 -B "$DIR/windows/native_judge.py" --selftest 2>&1); PEU_RC=$?
+    if [ "$PEU_RC" = 0 ] && grep -q ', 0 wrong$' <<< "$PEU_O"; then pe_row_ok native_judge_selftest "$(tail -1 <<< "$PEU_O")"
+    else pe_row_bad native_judge_selftest "rc=$PEU_RC $(grep -m2 WRONG <<< "$PEU_O" | tr '\n' '|' | cut -c1-200)$(tail -1 <<< "$PEU_O")"; fi
 fi
 
 # C7 on the laptop (#143 A14b, spec 8.6 (a)): its ANSI code page is not 932,

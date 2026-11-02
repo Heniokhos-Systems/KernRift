@@ -17,11 +17,14 @@
  *       10*(len+2), a buffer one byte smaller is refused (argc 0), nothing
  *       past the buffer is written (0xAA canary), argv[argc] is 0, and bytes
  *       after the line's NUL (" JUNK") never become an argument.
- *   h rt <quoter.bin> <parser.bin> <vectors.expected> [lbhex]
- *       every argv of an argv_roundtrip*.expected file through the quoter
- *       (measure, then build: same length, NUL at len-1 and nowhere before,
- *       nothing written past len), then the parser; printed in the same
- *       format, so the output must equal the file.
+ *   h rt <quoter.bin> <parser.bin> <vectors> [lbhex]
+ *       every argv of <vectors> (blocks of `#k` then `<arg>` lines; the suite
+ *       row extracts the DBCS vectors from argv_vectors.kr's rtv_dbcs_build,
+ *       the argv lists themselves, not a post-parse .expected file) through
+ *       the quoter (measure, then build: same length, NUL at len-1 and
+ *       nowhere before, nothing written past len), then the parser; printed
+ *       in the argv_roundtrip*.expected format, so the output must equal
+ *       argv_roundtrip_cp932.expected + argv_roundtrip_lead.expected.
  * [lbhex] is the code page's CPINFO.LeadByte array in hex (up to 32 bytes;
  * absent = all zero, a single-byte code page).
  */
