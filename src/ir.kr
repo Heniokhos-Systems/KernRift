@@ -6394,14 +6394,25 @@ fn ir_phys_regs_ensure() {
 
 // The number of CALLEE-SAVED colours at the front of the x86_64 colour files
 // (colours 0..ir_x86_callee_colours-1). 6 (rbx, r12-r15, rbp) everywhere
-// except Windows, where rbp is the frame pointer of every non-naked function
-// (#143: the unwind tables describe each frame through it) and is never a
-// colour: 5. Every place that means "the callee-saved prefix" reads this.
+// except a Windows function that sets up rbp as its frame pointer (#143
+// option C, ruling Q12, spec 2.5.2: ir_win_fp == 1, an SP-moving function;
+// and @naked, whose file never holds rbp): 5. An SP-fixed Windows function
+// (ir_win_fp == 0) has no frame pointer and gets the base 12-colour maps with
+// rbp as colour 5. Every place that means "the callee-saved prefix" reads
+// this.
 static uint64 ir_x86_callee_colours = 6
+
+// #143 option C (spec 2.5.1, 2.5.2): 1 when the current Windows x86_64 IR
+// function moves RSP after its prologue (it gets the frame pointer), 0 when
+// it is SP-fixed (and everywhere off Windows). Set by ir_win_fn_moves_sp at
+// every function start, BEFORE ir_x86_set_callee_colours and the ceiling
+// seeding; a static shared by every function and every fat slice, so it is
+// reset there each time.
+static uint64 ir_win_fp = 0
 
 fn ir_x86_set_callee_colours() {
     ir_x86_callee_colours = 6
-    if target_os == 2 { ir_x86_callee_colours = 5 }
+    if target_os == 2 && (ir_win_fp != 0 || ir_x86_naked_fn != 0) { ir_x86_callee_colours = 5 }
 }
 
 fn ir_regalloc_init() {
@@ -6419,7 +6430,7 @@ fn ir_regalloc_init() {
     uint64 p4 = ir_phys_regs + 32
     unsafe { *(p4 as uint64) = 15 }
     uint64 p5 = ir_phys_regs + 40
-    unsafe { *(p5 as uint64) = 5 }       // rbp (colour 5 only off Windows: IR_NUM_REGS is 5 there)
+    unsafe { *(p5 as uint64) = 5 }       // rbp (colour 5 unless the function has the frame pointer: IR_NUM_REGS is 5 then)
 }
 
 // --- Wide x86_64 colour file ----------------------------------------------
@@ -6447,9 +6458,11 @@ static uint64 IR_X86_WIDE_NUM_REGS = 12
 
 fn ir_regalloc_init_x86_wide() {
     ir_x86_set_callee_colours()
-    if target_os == 2 {
-        // Windows: rbp is the frame pointer, so the callee-saved prefix is
-        // colours 0-4 and the six scratch registers move down to 5-10.
+    if ir_x86_callee_colours == 5 {
+        // Windows with the frame pointer (ir_win_fp == 1): rbp is not a
+        // colour, so the callee-saved prefix is colours 0-4 and the six
+        // scratch registers move down to 5-10. (#143 option C: an SP-fixed
+        // Windows function takes the base map below, rbp = colour 5.)
         IR_NUM_REGS = IR_X86_WIDE_NUM_REGS - 1
         ir_phys_regs_ensure()
         uint64 w0 = ir_phys_regs
@@ -8948,7 +8961,7 @@ fn ir_x86_win64_call_release(uint64 w_stack) {
 // ir_x86_emit_call_stack_cleanup AFTER the call instruction.
 fn ir_x86_emit_call_stack_args(uint64 call_arg_count) -> uint64 {
     uint64 stack_args = 0
-    if call_arg_count > 6 {
+    if ir_x86_call_args_on_stack(call_arg_count) != 0 {      // #143 option C: the shared predicate
             stack_args = call_arg_count - 6
             // Resolve all overflow arg values BEFORE modifying rsp
             // Use sub rsp + mov [rsp+N] approach instead of push to avoid
@@ -9065,6 +9078,142 @@ fn ir_x86_emit_call_stack_cleanup(uint64 stack_args) {
             uint64 cleanup = aligned_stack * 8
             emit_x64_rsp_adj(0xC4, cleanup)
     }
+}
+
+// #143 option C (spec 2.5.1): does an op-50/87 call move RSP? The one
+// definition, shared by the classifier (ir_x86_win_op_sp_neutral) and the
+// emitters (ir_x86_emit_call_stack_args, the routed-import and UEFI paths).
+// ir_x86_call_moves_sp_core takes the facts explicitly so the hidden
+// --selftest-win-sp-neutral can check every case without a program.
+fn ir_x86_call_args_on_stack(uint64 call_arg_count) -> uint64 {
+    if call_arg_count > 6 { return 1 }
+    return 0
+}
+
+fn ir_x86_call_moves_sp_core(uint64 op, uint64 argc, uint64 routed, uint64 uefi) -> uint64 {
+    if op == 50 {
+        if routed != 0 { return 1 }                 // X2: Win64 call frame
+        return ir_x86_call_args_on_stack(argc)      // X3
+    }
+    if op == 87 {
+        if uefi != 0 { return 1 }                   // X4: --emit=uefi call frame
+        return ir_x86_call_args_on_stack(argc)      // X4: > 6 args
+    }
+    return 0
+}
+
+fn ir_x86_call_moves_sp(uint64 op, uint64 s1, uint64 imm) -> uint64 {
+    if op == 50 {
+        uint64 routed = 0
+        if is_routed_win_import(imm) != PE_IMPORT_NO_SLOT { routed = 1 }
+        return ir_x86_call_moves_sp_core(50, s1, routed, 0)
+    }
+    if op == 87 {
+        uint64 uefi = 0
+        if cg_emit_mode == 9 && target_arch == 0 { uefi = 1 }
+        return ir_x86_call_moves_sp_core(87, imm, 0, uefi)
+    }
+    return 0
+}
+
+// #143 option C (spec 2.5.1): the audited allow-list of x86_64 IR ops whose
+// Windows lowering never writes RSP. Its own list, NOT ir_x86_op_widesafe
+// (a register-clobber audit: an op added there for register reasons must not
+// silently become an SP verdict, which is how op 131 got in -- review
+// finding 11). Each entry was audited against its lowering in
+// ir_emit_x86_insn (a literal-byte sweep found the push/pop bytes only in ops
+// 52, 70, 74, 96, 113, 114, 125 and the C7/prologue code):
+//   0 elided; 1-19 const/alu/div/shifts/cmps; 20-27 float via rax+xmm;
+//   30-32 load/store/stack_addr ([rsp+off] moves); 40-43 br/ret; 61 copy;
+//   77-79, 84, 86 static load/store/str_const/static_addr/fn_addr (rip-rel);
+//   97-104, 107, 108, 118 float conversions/sqrt/fma; 120-123 signed cmps;
+//   132-139 sdiv/smod/sar/add_imm/sub_imm/ror/mul_imm/lea_bis; 143 shl_imm.
+// Op 51 IR_ARG (re-review finding 1): imm < 6 is a register move and 6-99
+// only records the overflow slot (the SP move belongs to op 50/87 and
+// ir_x86_call_moves_sp); imm >= 200 is the Win64 marker of a UEFI or routed
+// call, neutral itself because its call is SP-moving through the predicate;
+// imm 100-199 is the asm-input push/pop group (X14) -- defence in depth, it
+// only exists together with op 96, which is not on the list.
+// Ops 50 and 87 are neutral only when ir_x86_call_moves_sp says so. Op 131
+// (--debug bounds check, ExitProcess with a shadow area, X13) is NOT on the
+// list. Anything else -- including any op added later -- moves SP.
+fn ir_x86_win_op_sp_neutral(uint64 op, uint64 s1, uint64 imm) -> uint64 {
+    if op == 0 { return 1 }
+    if op >= 1 && op <= 19 { return 1 }
+    if op >= 20 && op <= 27 { return 1 }
+    if op >= 30 && op <= 32 { return 1 }
+    if op >= 40 && op <= 43 { return 1 }
+    if op == 61 { return 1 }
+    if op == 77 || op == 78 || op == 79 { return 1 }
+    if op == 84 || op == 86 { return 1 }
+    if op >= 97 && op <= 104 { return 1 }
+    if op == 107 || op == 108 { return 1 }
+    if op == 118 { return 1 }
+    if op >= 120 && op <= 123 { return 1 }
+    if op >= 132 && op <= 139 { return 1 }
+    if op == 143 { return 1 }
+    if op == 51 {
+        if imm < 100 { return 1 }
+        if imm >= 200 { return 1 }
+        return 0
+    }
+    if op == 50 || op == 87 {
+        if ir_x86_call_moves_sp(op, s1, imm) == 0 { return 1 }
+        return 0
+    }
+    return 0
+}
+
+// #143 option C (spec 2.5.1): does the current x86_64 IR function move RSP
+// after its prologue? Runs on the final IR (after the optimiser, before
+// register allocation). A hosted Windows main (non-naked, freestanding == 0)
+// is always SP-moving: its C7 / GetCommandLineA / ExitProcess sequences are
+// emitted at prologue and epilogue time, outside any IR op (finding 10).
+fn ir_win_fn_moves_sp(uint64 name_tok) -> uint64 {
+    if freestanding == 0 && tok_matches(name_tok, "main", 4) != 0 { return 1 }
+    uint64 b = 0
+    while b < ir_bb_count {
+        uint64 i = ir_bb_first_insn(b)
+        while i != 0xFFFFFFFF {
+            if ir_x86_win_op_sp_neutral(ir_insn_opcode(i), ir_insn_src1(i), ir_insn_imm(i)) == 0 { return 1 }
+            i = ir_insn_next(i)
+        }
+        b = b + 1
+    }
+    return 0
+}
+
+// --selftest-win-sp-neutral (hidden, test-only; re-review-2 finding 1): the
+// allow-list itself, case by case. Prints one line per case; exit 0 when
+// every case gives the expected verdict, else 1.
+fn ir_x86_win_sp_neutral_case(uint64 name, uint64 got, uint64 want) -> uint64 {
+    write(1, name, str_len(name))
+    if got == want { write(1, ": ok\n", 5)  return 0 }
+    write(1, ": WRONG\n", 8)
+    return 1
+}
+
+fn ir_x86_win_sp_neutral_selftest() {
+    uint64 bad = 0
+    bad = bad + ir_x86_win_sp_neutral_case("op 51 imm 0 neutral", ir_x86_win_op_sp_neutral(51, 0, 0), 1)
+    bad = bad + ir_x86_win_sp_neutral_case("op 51 imm 5 neutral", ir_x86_win_op_sp_neutral(51, 0, 5), 1)
+    bad = bad + ir_x86_win_sp_neutral_case("op 51 imm 6 neutral", ir_x86_win_op_sp_neutral(51, 0, 6), 1)
+    bad = bad + ir_x86_win_sp_neutral_case("op 51 imm 99 neutral", ir_x86_win_op_sp_neutral(51, 0, 99), 1)
+    bad = bad + ir_x86_win_sp_neutral_case("op 51 imm 100 SP-moving", ir_x86_win_op_sp_neutral(51, 0, 100), 0)
+    bad = bad + ir_x86_win_sp_neutral_case("op 51 imm 199 SP-moving", ir_x86_win_op_sp_neutral(51, 0, 199), 0)
+    bad = bad + ir_x86_win_sp_neutral_case("op 51 imm 200 neutral", ir_x86_win_op_sp_neutral(51, 0, 200), 1)
+    bad = bad + ir_x86_win_sp_neutral_case("op 51 imm 200 then a routed op 50: the call is SP-moving", ir_x86_call_moves_sp_core(50, 2, 1, 0), 1)
+    bad = bad + ir_x86_win_sp_neutral_case("op 51 imm 200 then a UEFI op 87: the call is SP-moving", ir_x86_call_moves_sp_core(87, 2, 0, 1), 1)
+    bad = bad + ir_x86_win_sp_neutral_case("op 50, 6 register args, not routed: neutral call", ir_x86_call_moves_sp_core(50, 6, 0, 0), 0)
+    bad = bad + ir_x86_win_sp_neutral_case("op 50, 7 args: stack arguments, SP-moving", ir_x86_call_moves_sp_core(50, 7, 0, 0), 1)
+    bad = bad + ir_x86_win_sp_neutral_case("op 87, 6 args: neutral call", ir_x86_call_moves_sp_core(87, 6, 0, 0), 0)
+    bad = bad + ir_x86_win_sp_neutral_case("op 87, 7 args: SP-moving", ir_x86_call_moves_sp_core(87, 7, 0, 0), 1)
+    bad = bad + ir_x86_win_sp_neutral_case("op 131 (--debug bounds check) SP-moving", ir_x86_win_op_sp_neutral(131, 0, 0), 0)
+    bad = bad + ir_x86_win_sp_neutral_case("op 96 (asm block) SP-moving", ir_x86_win_op_sp_neutral(96, 0, 0), 0)
+    bad = bad + ir_x86_win_sp_neutral_case("op 52 (syscall) SP-moving", ir_x86_win_op_sp_neutral(52, 0, 0), 0)
+    bad = bad + ir_x86_win_sp_neutral_case("op 144 (not audited) SP-moving", ir_x86_win_op_sp_neutral(144, 0, 0), 0)
+    if bad != 0 { exit(1) }
+    exit(0)
 }
 
 // #143 option C (spec 2.5.1 site table): the site family an x86_64 IR op's
@@ -14974,6 +15123,19 @@ fn ir_emit_x86_function(uint64 fn_node) {
     // 2. Compute liveness
     ir_compute_liveness()
 
+    // 2b. #143 option C (spec 2.5.1, 2.5.2): classify the Windows function
+    // before the colour file is chosen -- an SP-fixed one (no RSP write after
+    // its prologue) gets no frame pointer and rbp back as colour 5. Reset for
+    // every function (the statics are shared across functions and fat
+    // slices). uw_fn_sp_fixed arms the backstop: an SP helper reached while
+    // it is set stops the build (the classifier missed a site).
+    ir_win_fp = 0
+    uw_fn_sp_fixed = 0
+    if target_os == 2 && is_naked == 0 {
+        ir_win_fp = ir_win_fn_moves_sp(ir_fn_name_tok)
+        if ir_win_fp == 0 { uw_fn_sp_fixed = 1 }
+    }
+
     // 3. Register allocation. The wide 12-colour file (callee-saved six
     // plus rsi/rdi/r8-r11) applies to every function without inline asm
     // and not @naked; ir_x86_seed_wide_ceilings caps everything a
@@ -15095,9 +15257,11 @@ fn ir_emit_x86_function(uint64 fn_node) {
         if x86_has_asm != 0 { used_mask = used_mask | 0x3F }
         // Windows (#143): only colours below ir_x86_callee_colours are
         // callee-saved (wide-file colours 5+ are scratch there), and rbp is
-        // pushed by EVERY non-naked function -- it becomes the frame pointer
-        // below. Bit 5 keeps meaning "push/pop rbp" for the epilogue.
-        if target_os == 2 { used_mask = (used_mask & 0x1F) | 32 }
+        // pushed by every SP-moving function -- it becomes the frame pointer
+        // below. Bit 5 keeps meaning "push/pop rbp" for the epilogue: in an
+        // SP-fixed function (option C, ruling Q12) it is set only when
+        // colour 5 (rbp) was allocated, an ordinary nonvolatile.
+        if target_os == 2 && ir_win_fp != 0 { used_mask = (used_mask & 0x1F) | 32 }
         // Color → physical reg encoding:
         //   color 0 → rbx (0x53)
         //   color 1 → r12 (0x41 0x54)
@@ -15170,8 +15334,8 @@ fn ir_emit_x86_function(uint64 fn_node) {
     // 5b. Windows: establish the frame pointer -- the LAST prologue
     // instruction, so the unwind record's SET_FPREG is its first code and the
     // body may move RSP freely (#143, spec 4.1).
-    if target_os == 2 && is_naked == 0 {
-        emit_byte(0x48); emit_byte(0x89); emit_byte(0xE5)      // mov rbp, rsp
+    if target_os == 2 && is_naked == 0 && ir_win_fp != 0 {
+        emit_byte(0x48); emit_byte(0x89); emit_byte(0xE5)      // mov rbp, rsp (SP-moving functions only, option C)
         uw_x64_setfp(5, out_len)
     }
     // Every size is known now: seal the record (a naked function's is the

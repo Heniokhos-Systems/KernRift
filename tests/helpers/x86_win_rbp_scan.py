@@ -1,16 +1,26 @@
 #!/usr/bin/env python3
 """x86_win_rbp_scan.py <listing> -- #143 row ir_x86_win_no_rbp_colour.
 
-On Windows every non-naked x86_64 IR function establishes rbp as its frame
-pointer and never hands rbp to a value (it is not a colour there). This scan
-checks that on a `--target=windows --emit=asm` listing, using only its labels
-and byte column (the listing's own mnemonics are not trusted): each function's
-bytes are disassembled with objdump, and
+Option C (#143, spec 2.5.2 / 2.5.5): on Windows an x86_64 IR function that
+moves RSP after its prologue establishes rbp as its frame pointer and never
+hands rbp to a value; an SP-fixed one has no frame pointer and may use rbp as
+an ordinary callee-saved colour (ruling Q12). This scan checks that on a
+`--target=windows --emit=asm` listing, using only its labels and byte column
+(the listing's own mnemonics are not trusted): each function's bytes are
+disassembled with objdump, its prologue is `push` r64..., an optional
+`sub rsp, imm`, and then
 
-  * the prologue is `push` r64... (ending with `push rbp`), an optional
-    `sub rsp, imm`, then `mov rbp, rsp`;
-  * after that, nothing writes rbp/ebp/bp/bpl until the function's epilogue:
-    the first `pop rbp` that is followed only by pops and `ret`.
+  * SP-moving shape: the pushes end with `push rbp` and `mov rbp, rsp` follows;
+    after that nothing writes rbp/ebp/bp/bpl until the function's epilogue
+    (the first `pop rbp` that is followed only by pops and `ret`);
+  * SP-fixed shape: no `mov rbp, rsp`; the body may write rbp only if the
+    prologue pushed it (and then the epilogue pops it); without a `push rbp`
+    nothing writes rbp at all.
+
+The summary counts both shapes; --want-sp-fixed=NAME[,NAME] and
+--want-sp-moving=NAME[,NAME] additionally require those functions to have
+that shape, and --want-rbp-colour=NAME requires NAME to be SP-fixed and to
+write rbp in its body (rbp allocated as a colour).
 
 The byte column must be gap-free (every line starts where the previous one
 ended); a gap is reported, because it means the printer dropped bytes. A
@@ -61,10 +71,15 @@ def writes_rbp(t):
 
 
 def main():
+    args = [a for a in sys.argv[1:] if not a.startswith('--')]
+    opts = dict(a[2:].split('=', 1) for a in sys.argv[1:] if a.startswith('--') and '=' in a)
+    want_fixed = set(x for x in opts.get('want-sp-fixed', '').split(',') if x)
+    want_moving = set(x for x in opts.get('want-sp-moving', '').split(',') if x)
+    want_colour = set(x for x in opts.get('want-rbp-colour', '').split(',') if x)
     code = bytearray()
     labels = []
     gaps = []
-    for n, line in enumerate(open(sys.argv[1], encoding='latin-1'), 1):
+    for n, line in enumerate(open(args[0], encoding='latin-1'), 1):
         line = line.rstrip('\n')
         m = LINE.match(line)
         if m:
@@ -83,6 +98,8 @@ def main():
         return 1
     bad = []
     nfn = 0
+    shapes = {}
+    colour = set()
     for k, (start, name) in enumerate(labels):
         end = labels[k + 1][0] if k + 1 < len(labels) else len(code)
         if end <= start:
@@ -92,13 +109,24 @@ def main():
         i = 0
         while i < len(ins) and mn_ops(ins[i][1])[0] == 'push':
             i += 1
-        if i == 0 or ins[i - 1][1].replace(' ', '') != 'pushrbp':
-            bad.append('%s: prologue does not end its pushes with push rbp' % name)
-            continue
+        pushed_rbp = any(ins[j][1].replace(' ', '') == 'pushrbp' for j in range(i))
         if i < len(ins) and re.match(r'^sub\s+rsp,', ins[i][1]):
             i += 1
-        if i >= len(ins) or ins[i][1].replace(' ', '') != 'movrbp,rsp':
-            bad.append('%s: no `mov rbp, rsp` after the pushes and the frame allocation' % name)
+        if i < len(ins) and ins[i][1].replace(' ', '') == 'movrbp,rsp':
+            shapes[name] = 'moving'
+            if i == 0 or not pushed_rbp or ins[[j for j in range(i) if mn_ops(ins[j][1])[0] == 'push'][-1]][1].replace(' ', '') != 'pushrbp':
+                bad.append('%s: SP-moving prologue does not end its pushes with push rbp' % name)
+                continue
+        else:
+            # SP-fixed (option C): rbp is a nonvolatile; written only if pushed
+            shapes[name] = 'fixed'
+            for a, t in ins[i:]:
+                if writes_rbp(t):
+                    if not pushed_rbp:
+                        bad.append('%s+0x%x: writes rbp (%s) in an SP-fixed function that did not push it'
+                                   % (name, a - start, t))
+                        break
+                    colour.add(name)
             continue
         i += 1
         ok_end = False
@@ -118,9 +146,20 @@ def main():
         else:
             if not ok_end and not any(b.startswith(name + '+') for b in bad):
                 bad.append('%s: no epilogue (pop rbp ... ret) found' % name)
+    for n in sorted(want_fixed):
+        if shapes.get(n) != 'fixed':
+            bad.append('%s: want SP-fixed (no `mov rbp, rsp`), got %s' % (n, shapes.get(n, 'no such function')))
+    for n in sorted(want_moving):
+        if shapes.get(n) != 'moving':
+            bad.append('%s: want SP-moving (`mov rbp, rsp`), got %s' % (n, shapes.get(n, 'no such function')))
+    for n in sorted(want_colour):
+        if shapes.get(n) != 'fixed' or n not in colour:
+            bad.append('%s: want rbp allocated as a colour (SP-fixed, body writes rbp after `push rbp`)' % n)
     for b in bad[:20]:
         print(b)
-    print('%d functions scanned, %d do not conform' % (nfn, len(bad)))
+    nm = sum(1 for v in shapes.values() if v == 'moving')
+    print('%d functions scanned (%d SP-moving with mov rbp,rsp, %d SP-fixed, %d of them with rbp as a colour), '
+          '%d do not conform' % (nfn, nm, nfn - nm, len(colour), len(bad)))
     return 0 if not bad and nfn else 1
 
 

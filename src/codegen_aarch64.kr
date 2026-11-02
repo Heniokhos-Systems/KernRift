@@ -6171,6 +6171,7 @@ fn emit_program_header_a64(uint64 text_size) {
 
 @export
 fn gen_function_a64(uint64 fn_node) {
+    uw_fn_sp_fixed = 0          // #143 option C: no classifier here yet (A19d/A19e); never inherit one
     uint32 name_tok = ast_data1(fn_node)
     cg_set_current_fn(name_tok)
 

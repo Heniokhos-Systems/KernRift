@@ -1,0 +1,34 @@
+// #143 option C (ruling Q12, spec 2.5.2): rbp is an ordinary callee-saved
+// colour in an SP-fixed Windows x86_64 IR function. `hp` keeps six values
+// live across a call -- one more than rbx and r12-r15 can hold -- so with rbp
+// a colour its prologue pushes rbp without `mov rbp, rsp`; `fib` passes its
+// arguments in registers (op 51) and is SP-fixed too; `show` prints (an IAT
+// call with a shadow area), so it is SP-moving and keeps `mov rbp, rsp`.
+// Row ir_x86_win_rbp_colour_when_sp_fixed; the Wine run also catches a
+// caller's rbp clobbered by a callee that used it without saving it.
+fn leafr(uint64 n) -> uint64 {
+    if n == 0 { return 1 }
+    return leafr(n - 1) + 1
+}
+fn hp(uint64 a) -> uint64 {
+    uint64 b = a + 1
+    uint64 c = a * 3
+    uint64 d = a ^ 5
+    uint64 e = a + 7
+    uint64 f = a * 11
+    uint64 g = a + 13
+    uint64 r = leafr(a)
+    return b + c + d + e + f + g + r
+}
+fn fib(uint64 n) -> uint64 {
+    if n <= 1 { return n }
+    return fib(n - 1) + fib(n - 2)
+}
+fn show(uint64 v) {
+    println(v)
+}
+fn main() {
+    show(hp(4))
+    show(hp(9))
+    show(fib(15))
+}

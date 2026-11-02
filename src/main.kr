@@ -9520,6 +9520,10 @@ fn main() {
             } else if str_starts_with(arg, "--dump-argv-quoter=", 19) != 0 {
                 // Same, for the op-114 command-line quoting leaf.
                 c7_dump_quoter_path = arg + 19
+            } else if str_eq_full(arg, "--selftest-win-sp-neutral") != 0 {
+                // Internal, undocumented in --help, test-only (#143 option C):
+                // check ir_x86_win_op_sp_neutral case by case and exit.
+                ir_x86_win_sp_neutral_selftest()
             } else if str_starts_with(arg, "--test-sp-site-log=", 19) != 0 {
                 // Internal, undocumented in --help, test-only (#143 option C):
                 // append the site id of every SP-move report of a Windows

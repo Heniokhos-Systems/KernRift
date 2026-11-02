@@ -3469,6 +3469,7 @@ fn ir_emit_arm64_insn(uint64 ii) {
 
 @export
 fn ir_emit_arm64_function(uint64 fn_node) {
+    uw_fn_sp_fixed = 0          // #143 option C: no classifier here yet (A19d/A19e); never inherit one
     // Check for @naked attribute
     uint32 ann_flags = ast_data4(fn_node)
     uint64 is_naked = ann_flags & 2

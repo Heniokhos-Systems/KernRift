@@ -47,3 +47,6 @@ c7_cp932_leaf_native_x86_64
 native_judge_selftest
 pe_unwind_checker_optc_selftest
 pe_unwind_sp_site_audit
+ir_x86_win_rbp_colour_when_sp_fixed
+ir_x86_win_sp_neutral_selftest
+pe_unwind_debug_windows_x86_64_ir

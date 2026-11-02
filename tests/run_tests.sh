@@ -29384,11 +29384,13 @@ else
     else pe_row_bad a64_win_frame_shape "$(head -2 <<< "$PEU_OUT" | tr '\n' '|')$(tail -1 <<< "$PEU_OUT")"; fi
     rm -f "$T10_D/peu_selfa.s"
 fi
-# rbp is never a colour on Windows (#143 A6a): every function of the
-# self-hosted compiler's --target=windows listing opens with pushes ending in
-# `push rbp`, `sub rsp`, `mov rbp, rsp`, and nothing writes rbp again before
-# its epilogue (tests/helpers/x86_win_rbp_scan.py: labels + byte column,
-# disassembled by objdump; the byte column must be gap-free).
+# rbp on Windows (#143 A6a; option C, ruling Q12, spec 2.5.2): every function
+# of the self-hosted compiler's --target=windows listing has one of two
+# shapes. SP-moving: pushes ending in `push rbp`, `sub rsp`, `mov rbp, rsp`,
+# and nothing writes rbp again before its epilogue. SP-fixed: no
+# `mov rbp, rsp`, and rbp is written by the body only if the prologue pushed
+# it (rbp allocated as a colour). tests/helpers/x86_win_rbp_scan.py: labels +
+# byte column, disassembled by objdump; the byte column must be gap-free.
 if ! command -v objdump > /dev/null 2>&1 || ! command -v python3 > /dev/null 2>&1; then
     pe_row_skip ir_x86_win_no_rbp_colour "needs objdump and python3"
 elif ! $T10_KRC --arch=x86_64 --target=windows --emit=asm "$DIR/../build/krc.kr" -o "$T10_D/peu_self.asm" > "$T10_D/peu_self.log" 2>&1; then
@@ -29397,6 +29399,121 @@ else
     PEU_OUT=$(python3 "$DIR/helpers/x86_win_rbp_scan.py" "$T10_D/peu_self.asm" 2>&1); PEU_RC=$?
     if [ "$PEU_RC" = 0 ]; then pe_row_ok ir_x86_win_no_rbp_colour "$(tail -1 <<< "$PEU_OUT")"
     else pe_row_bad ir_x86_win_no_rbp_colour "$(head -2 <<< "$PEU_OUT" | tr '\n' '|')$(tail -1 <<< "$PEU_OUT")"; fi
+fi
+# Option C, x86_64 IR (#143 A19c; ruling Q12, spec 2.5.2): in
+# tests/fixtures/win_rbp_colour.kr `hp` keeps six values live across a call,
+# so as an SP-fixed function it allocates rbp: `push rbp` without
+# `mov rbp, rsp`, its record has PUSH_NONVOL rbp and no frame register; `fib`
+# (register-argument calls, op 51) is SP-fixed; `show` (println) and main stay
+# SP-moving with `mov rbp, rsp` and FrameRegister RBP. The image passes C0-C6 +
+# C3b + C4b and prints the right values under Wine (a caller's rbp clobbered
+# by a callee would show there).
+PEU_RC_FX="$DIR/fixtures/win_rbp_colour.kr"
+if ! command -v objdump > /dev/null 2>&1 || ! command -v python3 > /dev/null 2>&1 || ! command -v llvm-readobj > /dev/null 2>&1; then
+    pe_row_skip ir_x86_win_rbp_colour_when_sp_fixed "needs objdump, llvm-readobj and python3"
+elif ! $T10_KRC --arch=x86_64 --target=windows --emit=pe "$PEU_RC_FX" -o "$T10_D/peu_rc.exe" --test-listing="$T10_D/peu_rc.lst" > "$T10_D/peu_rc.log" 2>&1; then
+    pe_row_bad ir_x86_win_rbp_colour_when_sp_fixed "build: $(grep -m1 error "$T10_D/peu_rc.log" | cut -c1-120)"
+else
+    PEU_WHY=""
+    PEU_O=$(python3 "$DIR/helpers/x86_win_rbp_scan.py" "$T10_D/peu_rc.lst" --want-sp-fixed=hp,fib --want-sp-moving=show,main --want-rbp-colour=hp 2>&1) \
+        || PEU_WHY="shape: $(head -2 <<< "$PEU_O" | tr '\n' '|')"
+    llvm-readobj --unwind "$T10_D/peu_rc.exe" > "$T10_D/peu_rc.uw" 2>&1
+    PEU_O2=$(python3 - "$T10_D/peu_rc.lst" "$T10_D/peu_rc.uw" <<'PEURCEOF' 2>&1
+import re, sys
+labels = {}
+last = None
+for l in open(sys.argv[1], encoding='latin-1'):
+    m = re.match(r'^([A-Za-z_]\w*):\s*$', l)
+    if m:
+        labels[m.group(1)] = None
+        last = m.group(1)
+        continue
+    m = re.match(r'^\s+([0-9a-f]{8}): ', l)
+    if m and last and labels.get(last) is None:
+        labels[last] = int(m.group(1), 16)
+recs = {}
+cur = None
+for l in open(sys.argv[2]).read().split('\n'):
+    m = re.search(r'StartAddress: \(0x([0-9A-F]+)\)', l)
+    if m:
+        cur = int(m.group(1), 16) - 0x140001000
+        recs[cur] = {'fr': None, 'rbp': False}
+    elif cur is not None and 'FrameRegister:' in l:
+        recs[cur]['fr'] = l.split(':', 1)[1].strip()
+    elif cur is not None and 'PUSH_NONVOL reg=RBP' in l:
+        recs[cur]['rbp'] = True
+bad = []
+def rec(n):
+    r = recs.get(labels.get(n))
+    if r is None:
+        bad.append('%s: no record' % n)
+    return r
+r = rec('hp')
+if r and (r['fr'] != '-' or not r['rbp']):
+    bad.append('hp: FrameRegister %s, PUSH_NONVOL rbp %s; want none and present' % (r['fr'], r['rbp']))
+r = rec('fib')
+if r and r['fr'] != '-':
+    bad.append('fib: FrameRegister %s, want none' % r['fr'])
+for n in ('show', 'main'):
+    r = rec(n)
+    if r and not (r['fr'] or '').startswith('RBP'):
+        bad.append('%s: FrameRegister %s, want RBP' % (n, r['fr']))
+print('; '.join(bad) if bad else 'records: hp PUSH_NONVOL rbp + no frame register, fib none, show/main RBP')
+sys.exit(1 if bad else 0)
+PEURCEOF
+    ) || PEU_WHY="$PEU_WHY records: $PEU_O2;"
+    PEU_C=$(env -u PE_UNWIND_CHECK_DISABLE python3 "$DIR/helpers/pe_unwind_check.py" --arch x86_64 "$T10_D/peu_rc.exe" --listing "$T10_D/peu_rc.lst" 2>&1)
+    [ "$(grep -c ': PASS' <<< "$PEU_C")" = 9 ] || PEU_WHY="$PEU_WHY checker: $(grep -m1 -e FAIL -e error <<< "$PEU_C" | cut -c1-120);"
+    PEU_RUN=""
+    if [ -n "$T10_WINE" ]; then
+        cp "$T10_D/peu_rc.exe" "$T10_D/peu_rc_w.exe"
+        t10_wine "$T10_D/win.out" "$T10_D/win.err" ./peu_rc_w.exe; PEU_RRC=$?
+        if [ "$PEU_RRC" = 0 ] && [ "$(tr -d '\r' < "$T10_D/win.out")" = "$(printf '95\n196\n610')" ]; then PEU_RUN=", Wine prints 95/196/610$(t10_note)"
+        else PEU_WHY="$PEU_WHY Wine rc=$PEU_RRC out='$(tr -d '\r' < "$T10_D/win.out" | tr '\n' ' ' | head -c 40)' $(t10_errtail);"; fi
+    else
+        PEU_RUN=" (no Wine: static checks only)"
+    fi
+    if [ -z "$PEU_WHY" ]; then pe_row_ok ir_x86_win_rbp_colour_when_sp_fixed "hp/fib SP-fixed, hp allocates rbp; show/main keep the frame pointer; C0-C6 + C3b + C4b PASS$PEU_RUN"
+    else pe_row_bad ir_x86_win_rbp_colour_when_sp_fixed "$PEU_WHY"; fi
+fi
+# The x86_64 IR allow-list itself (#143 A19c; spec 2.5.1, re-review-2 finding
+# 1): the hidden --selftest-win-sp-neutral checks ir_x86_win_op_sp_neutral
+# case by case -- op 51 neutral at imm 0, 5, 6, 99 and 200, SP-moving at 100
+# and 199; after an imm-200 marker a routed op 50 and a UEFI op 87 are
+# SP-moving through ir_x86_call_moves_sp; >6-argument calls SP-moving; ops
+# 131, 96, 52 and an unaudited op SP-moving.
+PEU_O=$($T10_KRC --selftest-win-sp-neutral 2>&1); PEU_RC=$?
+if [ "$PEU_RC" = 0 ] && [ "$(grep -c ': ok$' <<< "$PEU_O")" = 17 ] && ! grep -q WRONG <<< "$PEU_O"; then
+    pe_row_ok ir_x86_win_sp_neutral_selftest "17 cases"
+else
+    pe_row_bad ir_x86_win_sp_neutral_selftest "rc=$PEU_RC $(grep -m1 -v ': ok$' <<< "$PEU_O" | cut -c1-160)"
+fi
+# --debug on Windows x86_64 IR (#143 A19c; spec 2.5.1 X13, 2.5.5): in
+# tests/fixtures/win_debug_traps.kr `bc`'s bounds check (op 131: ExitProcess
+# behind a shadow area) makes it SP-moving, `ar` stays SP-fixed; the image
+# passes C0-C6 + C3b + C4b; under Wine it prints 3/7/15 and the trap exits 1.
+PEU_DT_FX="$DIR/fixtures/win_debug_traps.kr"
+if ! command -v objdump > /dev/null 2>&1 || ! command -v python3 > /dev/null 2>&1; then
+    pe_row_skip pe_unwind_debug_windows_x86_64_ir "needs objdump and python3"
+elif ! $T10_KRC --debug --arch=x86_64 --target=windows --emit=pe "$PEU_DT_FX" -o "$T10_D/peu_dt.exe" --test-listing="$T10_D/peu_dt.lst" > "$T10_D/peu_dt.log" 2>&1; then
+    pe_row_bad pe_unwind_debug_windows_x86_64_ir "build: $(grep -m1 error "$T10_D/peu_dt.log" | cut -c1-120)"
+else
+    PEU_WHY=""
+    PEU_O=$(python3 "$DIR/helpers/x86_win_rbp_scan.py" "$T10_D/peu_dt.lst" --want-sp-fixed=ar --want-sp-moving=bc,main 2>&1) \
+        || PEU_WHY="shape: $(head -2 <<< "$PEU_O" | tr '\n' '|')"
+    PEU_C=$(env -u PE_UNWIND_CHECK_DISABLE python3 "$DIR/helpers/pe_unwind_check.py" --arch x86_64 "$T10_D/peu_dt.exe" --listing "$T10_D/peu_dt.lst" 2>&1)
+    [ "$(grep -c ': PASS' <<< "$PEU_C")" = 9 ] || PEU_WHY="$PEU_WHY checker: $(grep -m1 -e FAIL -e error <<< "$PEU_C" | cut -c1-120);"
+    PEU_RUN=""
+    if [ -n "$T10_WINE" ]; then
+        cp "$T10_D/peu_dt.exe" "$T10_D/peu_dt_w.exe"
+        t10_wine "$T10_D/win.out" "$T10_D/win.err" ./peu_dt_w.exe; PEU_RRC=$?
+        if [ "$PEU_RRC" = 1 ] && [ "$(tr -d '\r' < "$T10_D/win.out")" = "$(printf '3\n7\n15')" ]; then PEU_RUN=", Wine prints 3/7/15 and the trap exits 1$(t10_note)"
+        else PEU_WHY="$PEU_WHY Wine rc=$PEU_RRC out='$(tr -d '\r' < "$T10_D/win.out" | tr '\n' ' ' | head -c 40)' $(t10_errtail);"; fi
+    else
+        PEU_RUN=" (no Wine: static checks only)"
+    fi
+    if [ -z "$PEU_WHY" ]; then pe_row_ok pe_unwind_debug_windows_x86_64_ir "bc SP-moving (bounds check), ar SP-fixed; C0-C6 + C3b + C4b PASS$PEU_RUN"
+    else pe_row_bad pe_unwind_debug_windows_x86_64_ir "$PEU_WHY"; fi
 fi
 # Windows refusals (#143 A7, spec 4.1.5 / 4.3 / 5.1.5): a @naked body whose
 # lowering moves RSP/SP, asm that writes the frame pointer (rbp; x29 or x18 on

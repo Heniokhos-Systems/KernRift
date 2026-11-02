@@ -14079,6 +14079,7 @@ fn scan_assigns(uint64 node, uint64 target_offset) -> uint64 {
 // Generate code for a function declaration
 @export
 fn gen_function(uint64 fn_node) {
+    uw_fn_sp_fixed = 0          // #143 option C: no classifier here yet (A19d/A19e); never inherit one
     uint32 name_tok = ast_data1(fn_node)
     cg_set_current_fn(name_tok)
 
