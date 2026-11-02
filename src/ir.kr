@@ -10034,6 +10034,19 @@ fn ir_emit_x86_insn(uint64 ii) {
             ir_emit_mov_r64_r64(2, size_reg)    // rdx = size
             // add rdx, 8
             emit_byte(0x48); emit_byte(0x83); emit_byte(0xC2); emit_byte(0x08)
+            // size + 8 wraps for a size within 7 of 2^64, to a length of 1..7
+            // bytes that VirtualAlloc happily maps -- and the caller got a
+            // non-null pointer to "2^64 - 5" bytes (#171). Only a wrap can make
+            // the length < 8, so clamp that case to all-ones: VirtualAlloc then
+            // fails and the NULL path below returns 0. (rax is free: the size
+            // is already pushed and copied.) A constant size is known here: it
+            // needs the clamp only if it is itself in the wrap range, so the
+            // compiler's own buffers (print's 4096 bytes, ...) are unchanged.
+            if s1_v != 0 || imm > 0xFFFFFFFFFFFFFFF7 {
+                emit_byte(0x48); emit_byte(0x83); emit_byte(0xFA); emit_byte(0x08)   // cmp rdx, 8
+                emit_byte(0x48); emit_byte(0x19); emit_byte(0xC0)                     // sbb rax, rax (-1 if rdx < 8)
+                emit_byte(0x48); emit_byte(0x09); emit_byte(0xC2)                     // or rdx, rax
+            }
             ir_emit_mov_r64_imm64(8, 0x3000)    // r8 = MEM_COMMIT|MEM_RESERVE
             ir_emit_mov_r64_imm64(9, 4)          // r9 = PAGE_READWRITE
             emit_win_alloc_stack(0x20)

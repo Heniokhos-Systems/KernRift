@@ -1,0 +1,40 @@
+// alloc(size) for a size within 7 of 2^64 wraps the size + 8 header add to
+// 1..7 bytes; Windows mapped that and returned a non-null pointer to a few
+// bytes (#171). Every such size must give 0, as a size whose length is
+// exactly 0 or 2^64 - 1 already did. Windows rows only: Linux, macOS and
+// Android have the same wrap (#172, a later release), so this file is not a
+// cross-target reference. Each probe twice, print-free and printing.
+
+fn p_alloc(uint64 n) -> uint64 {
+    return alloc(n)
+}
+
+fn s_alloc(uint64 tag, uint64 n) {
+    uint64 p = alloc(n)
+    print_str(tag)
+    if p == 0 { println(" 0") } else {
+        if n < 4096 { println(" ok") } else { println(" NON-NULL") }
+    }
+}
+
+fn shown(uint64 tag, uint64 p, uint64 n) {
+    print_str(tag)
+    if p == 0 { println(" 0") } else {
+        if n < 4096 { println(" ok") } else { println(" NON-NULL") }
+    }
+}
+
+fn main() {
+    shown("a1", p_alloc(0 - 1), 0 - 1)
+    s_alloc("a1_m", 0 - 1)
+    shown("a5", p_alloc(0 - 5), 0 - 5)
+    s_alloc("a5_m", 0 - 5)
+    shown("a7", p_alloc(0 - 7), 0 - 7)
+    s_alloc("a7_m", 0 - 7)
+    shown("a8", p_alloc(0 - 8), 0 - 8)
+    s_alloc("a8_m", 0 - 8)
+    shown("a9", p_alloc(0 - 9), 0 - 9)
+    s_alloc("a9_m", 0 - 9)
+    shown("a16", p_alloc(16), 16)
+    s_alloc("a16_m", 16)
+}

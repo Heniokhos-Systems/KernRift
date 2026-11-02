@@ -27597,14 +27597,18 @@ for WFE_B in ir legacy; do
     wfe_win "win_file_std_windows_wine$WFE_S" "$WFE_B" win_file_std "$WFE_FX/win_file_std.expected" "file:$WFE_FX/wfs.in"
     wfe_win "win_file_std_pipe_windows_wine$WFE_S" "$WFE_B" win_file_std_pipe "$WFE_FX/win_file_std_pipe.expected" "pipe:hi"
 done
+# #171: alloc of a size whose size + 8 header add wraps returns 0 on Windows.
+# Windows rows only -- the same wrap on the other targets is #172.
+wfe_win win_alloc_wrap_windows_wine ir win_alloc_wrap "$WFE_FX/win_alloc_wrap.windows.expected" none
+wfe_win win_alloc_wrap_windows_wine_legacy legacy win_alloc_wrap "$WFE_FX/win_alloc_wrap.windows.expected" none
 # read() exists on the IR backend only
 wfe_linux win_file_errors_read_linux_x86_64 x86_64 ir win_file_errors_read "$WFE_FX/win_file_errors_read.linux.expected" none
 wfe_linux win_file_errors_read_linux_arm64_qemu arm64 ir win_file_errors_read "$WFE_FX/win_file_errors_read.linux.expected" none
 wfe_win win_file_errors_read_builtin_windows_wine ir win_file_errors_read "$WFE_FX/win_file_errors_read.windows.expected" none
-wfe_shape win_file_errors_shape_x86_64 x86_64 ir abc
-wfe_shape win_file_errors_shape_x86_64_legacy x86_64 legacy abc
-wfe_shape win_file_errors_shape_arm64 arm64 ir abc
-wfe_shape win_file_errors_shape_arm64_legacy arm64 legacy abc
+wfe_shape win_file_errors_shape_x86_64 x86_64 ir abcf
+wfe_shape win_file_errors_shape_x86_64_legacy x86_64 legacy abcf
+wfe_shape win_file_errors_shape_arm64 arm64 ir abcf
+wfe_shape win_file_errors_shape_arm64_legacy arm64 legacy abcf
 # #170: the compiler's own read_exact (src/main.kr) and the runner's copy
 # (src/runner.kr) must never count a -errno read. Each is extracted BY NAME --
 # never by line number -- and given a main whose file_size and file_read fail

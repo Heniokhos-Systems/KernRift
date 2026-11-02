@@ -1805,6 +1805,14 @@ fn ir_emit_arm64_insn(uint64 ii) {
             // Windows ARM64: VirtualAlloc(NULL, size+8, MEM_COMMIT|MEM_RESERVE, PAGE_READWRITE)
             emit_a64_mov_imm(0, 0)
             emit_a64_add_imm(1, size_reg, 8)
+            // A wrapped size + 8 (1..7, from a size within 7 of 2^64) would be
+            // mapped: clamp it to all-ones so VirtualAlloc fails and the NULL
+            // path returns 0 (#171). A constant size needs it only if it is
+            // itself in the wrap range (print's own buffers stay unchanged).
+            if s1_v != 0 || imm > 0xFFFFFFFFFFFFFFF7 {
+                emit_a64(0xF100203F)          // cmp x1, #8
+                emit_a64(0xDA9F2021)          // csinv x1, x1, xzr, hs
+            }
             emit_a64_mov_imm(2, 0x3000)
             emit_a64_mov_imm(3, 4)
             emit_a64_win_call_iat(6)

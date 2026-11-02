@@ -7376,6 +7376,14 @@ fn gen_expr(uint64 node) {
             // add rax, 8 — allocate 8 extra bytes for size header
             emit_byte(0x48); emit_byte(0x83); emit_byte(0xC0); emit_byte(8)
             if target_os == 2 {
+                // A size within 7 of 2^64 wraps size + 8 to 1..7 bytes, which
+                // VirtualAlloc maps: a non-null pointer to a few bytes (#171).
+                // Only a wrap makes it < 8; clamp that to all-ones so the call
+                // fails and the NULL path returns 0. First thing in this arm,
+                // so the shared add above and the other targets are untouched.
+                emit_byte(0x48); emit_byte(0x83); emit_byte(0xF8); emit_byte(0x08)   // cmp rax, 8
+                emit_byte(0x48); emit_byte(0x19); emit_byte(0xC9)                     // sbb rcx, rcx (-1 if rax < 8)
+                emit_byte(0x48); emit_byte(0x09); emit_byte(0xC8)                     // or rax, rcx
                 // Windows: VirtualAlloc(NULL, size, MEM_COMMIT|MEM_RESERVE, PAGE_READWRITE)
                 // rax = size+8
                 emit_mov_rdx_rax()

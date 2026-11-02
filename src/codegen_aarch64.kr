@@ -2492,6 +2492,11 @@ fn gen_expr_a64(uint64 node) {
             emit_a64_add_imm(0, 0, 8)
             if target_os == 2 {
                 // Windows ARM64: VirtualAlloc(NULL, size+8, MEM_COMMIT|MEM_RESERVE, PAGE_READWRITE)
+                // A wrapped size + 8 (1..7) would be mapped: clamp it to
+                // all-ones so VirtualAlloc fails and the NULL path returns 0
+                // (#171). Inside this arm; the shared add is untouched.
+                emit_a64(0xF100201F)               // cmp x0, #8
+                emit_a64(0xDA9F2000)               // csinv x0, x0, xzr, hs
                 emit_a64_mov(1, 0)
                 emit_a64_mov_imm(0, 0)
                 emit_a64_mov_imm(2, 0x3000)
