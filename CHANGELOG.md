@@ -4,6 +4,43 @@ All notable changes to `kernriftc` are documented in this file.
 
 ## Unreleased
 
+**Fixed: on Windows the I/O builtins report failure, and fds 0..2 are the
+standard handles everywhere (#136, #138, #145, #163, #165, #167, #168).**
+`read`/`file_read`, `write`/`file_write` and `file_size` used to report a
+failed Win32 call as 0 -- which is also end of file and a 0-byte write -- or,
+for `file_size`, as whatever the stack slot held, so no caller's error branch
+was reachable. They now return the count (0 at end of file), or **-5 (-EIO)**
+for every failure, on all four Windows backends (x86_64 and arm64, IR and
+`--legacy`, which is also the `--emit=obj` path): a read or write that fails
+after moving data returns the count, as `read(2)` returns a short count; a
+read that ends with ERROR_BROKEN_PIPE -- the writer of an anonymous pipe has
+closed, the end of every `type x | prog.exe` -- is still 0. The cause is left
+in `GetLastError()`, so `sys_last_errno` still reports it. File descriptors 0,
+1 and 2 are the standard handles for every I/O builtin on every backend:
+`--legacy` used to read nothing from `file_read(0, ...)`, print nothing from
+`file_write(1, ...)`, and send every `write()` fd -- a file handle included --
+through GetStdHandle, so `write(h, ...)` to a file wrote nothing; `file_size(0)`
+was garbage on every backend. The import table is unchanged (GetLastError was
+already imported), `print`/`println`/`print_str`/`println_str` output is
+byte-identical, and non-Windows output is unchanged.
+
+**Fixed: `--legacy` Windows `file_read` returned 0 for every read, and could
+crash, in a function with a few reads or enough locals (#162).** Its
+`lea r9, [rsp + bytesRead slot]` truncated the slot offset to a signed byte:
+past 0x80 ReadFile wrote its count below the stack pointer or over a live
+local, the read reported 0, and the corrupted frame could fault.
+
+**Fixed: on Windows, `alloc` of a size within 7 of 2^64 returned a non-null
+pointer to a few bytes (#171).** The size + 8 header add wrapped to a 1..7-byte
+mapping; such a size now returns 0. The same wrap exists on Linux, macOS and
+Android (mmap of 1..7 bytes succeeds) and is not changed in this release.
+
+**Fixed: the compiler's `read_exact` counted a failed read, and `kr` crashed on
+a `.krbo` it could not open (#170).** When `file_size` and `file_read` failed
+with the same errno, the failure passed as a complete read; a missing `.krbo`
+made the runner segfault. Now a failed read is a short read, and `kr` reports
+`error: cannot open '<path>'` and exits 1.
+
 **Added (std): sys_net_ifaces and sys_ioctl** -- the IPv4 interface list (address, netmask, directed broadcast, UP/BROADCAST/LOOPBACK flags) on Linux/Android via SIOCGIFCONF and on Windows via `WSAIoctl(SIO_GET_INTERFACE_LIST)`, so a multi-homed client can send one directed broadcast per interface. macOS and none: -ENOSYS.
 
 **Added: PE import ws2_32 `WSAIoctl` (slot 45).** bcrypt's `BCryptGenRandom` moves to 47; slots are internal to each binary and every row keys on the import NAME. The `.idata` table is 2371 of its 4096 bytes. It is the first nine-argument import: the suite pins its Win64 frame (80 bytes, stores at rsp+32..64) and its arm64 ninth argument at [sp].

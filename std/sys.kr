@@ -30,13 +30,18 @@
 // is -ENOSYS (there is no mode -- callers decide what that means).
 //
 // sys_last_errno(r): the POSITIVE errno of the failing FILE BUILTIN whose
-// result was r. Linux/Android/macOS compute it from r (the builtin already
-// returned -errno). Windows' file_open returns INVALID_HANDLE_VALUE for EVERY
-// failure, so the cause is only in GetLastError(), and the value lasts only
-// until the next call that sets it: CALL sys_last_errno IMMEDIATELY after the
-// failing builtin, with nothing in between that could reach Win32 (an alloc
-// can reach VirtualAlloc). The emitted file_open makes no Win32 call after
-// CreateFileA, so the value survives to that point.
+// result was r (file_open, file_read, read, file_write, write, file_size).
+// Linux/Android compute it from r (the builtin already returned -errno).
+// macOS does NOT: a failing Darwin syscall returns a POSITIVE errno with the
+// carry flag set and the builtins do not negate it, so r is not errno-shaped
+// there (a known defect). Windows' file_open returns INVALID_HANDLE_VALUE and
+// the other file builtins -5 (EIO) for EVERY failure, so the cause is only in
+// GetLastError(), and the value lasts only until the next call that sets it:
+// CALL sys_last_errno IMMEDIATELY after the failing builtin, with nothing in
+// between that could reach Win32 (an alloc can reach VirtualAlloc). The
+// emitted builtins make no Win32 call after the failing one except
+// GetLastError itself (file_read's end-of-pipe test), which does not change
+// it, so the value survives to that point.
 //
 // sys_rename replaces an existing target. POSIX rename(2) is atomic within a
 // filesystem; on NTFS a same-volume MoveFileExA(REPLACE_EXISTING) means

@@ -237,7 +237,9 @@ static uint64 ir_current_src_tok = 0
 // have to say "syscall" six different ways. The lowering records the name
 // here instead (via ir_emit_syscall), and the trap emitters on all three IR
 // backends read it back, so the refusal names the construct the programmer
-// actually wrote. That is what makes the guard's output a worklist.
+// actually wrote. That is what makes the guard's output a worklist. The
+// Windows write arms read it too (ir_win_sc_origin, below): write() and
+// file_write() get the failure check, print* keeps its bytes.
 //
 // Zero means "no name recorded" and every reader falls back to a generic
 // label -- never a guessed one: a wrong attribution is worse than a vague one.
