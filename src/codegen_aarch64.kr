@@ -197,7 +197,7 @@ fn emit_a64_stp_pre(uint64 rt1, uint64 rt2, uint64 rn, uint64 offset) {
     uint64 imm7 = (offset / 8) & 0x7F
     uint64 insn = 0xA9800000 | (imm7 << 15) | (rt2 << 10) | (rn << 5) | rt1
     emit_a64(insn)
-    if rn == 31 { uw_sp_moves() }       // #143 option C backstop (spec 2.5.1)
+    if rn == 31 { cg_win_audit_site(0)  uw_sp_moves() }       // #143 option C backstop (spec 2.5.1)
 }
 
 // LDP X29, X30, [SP], #imm7*8 (post-index, for epilogue)
@@ -205,7 +205,7 @@ fn emit_a64_ldp_post(uint64 rt1, uint64 rt2, uint64 rn, uint64 offset) {
     uint64 imm7 = (offset / 8) & 0x7F
     uint64 insn = 0xA8C00000 | (imm7 << 15) | (rt2 << 10) | (rn << 5) | rt1
     emit_a64(insn)
-    if rn == 31 { uw_sp_moves() }
+    if rn == 31 { cg_win_audit_site(0)  uw_sp_moves() }
 }
 
 // SUB SP, SP, #imm (large-frame safe)
@@ -217,6 +217,7 @@ fn emit_a64_sub_sp_imm(uint64 imm) {
         emit_a64_mov_imm(16, imm)
         emit_a64(0xCB3063FF)
     }
+    cg_win_audit_site(imm)
     uw_sp_moves()
 }
 
@@ -229,6 +230,7 @@ fn emit_a64_add_sp_imm(uint64 imm) {
         emit_a64_mov_imm(16, imm)
         emit_a64(0x8B3063FF)
     }
+    cg_win_audit_site(0)
     uw_sp_moves()
 }
 
@@ -237,6 +239,10 @@ fn emit_a64_add_sp_imm(uint64 imm) {
 // and time_ns words), so it reports to the backstop like the helpers above.
 fn emit_a64_sp_word(uint64 w) {
     emit_a64(w)
+    uint64 amt = 0
+    if (w & 0xFF800000) == 0xD1000000 { amt = (w >> 10) & 0xFFF }               // sub sp, sp, #imm
+    if (w & 0xFF800000) == 0xD1400000 { amt = ((w >> 10) & 0xFFF) << 12 }       // sub sp, sp, #imm, lsl #12
+    cg_win_audit_site(amt)
     uw_sp_moves()
 }
 
@@ -1028,7 +1034,7 @@ fn gen_expr_a64(uint64 node) {
         uint64 si = struct_lookup(wsn)
         uint64 ssize = struct_total_size(si)
         // Allocate temp stack area for struct
-        uint64 slit_base = var_count * 8
+        uint64 slit_base = cg_slot_off(var_count)
         uint64 slots_needed = (ssize + 7) / 8
         var_count = var_count + slots_needed
         var_frame_size = var_count * 8
@@ -1245,11 +1251,11 @@ fn gen_expr_a64(uint64 node) {
         // growing var_frame_size here is safe), then for each segment copy the
         // string bytes / format the interpolated integer into the buffer at a
         // running offset (held in fsa_slot_o). Returns x0 = buffer address.
-        uint64 fs_bufoff = var_count * 8         // 4096-byte result buffer
+        uint64 fs_bufoff = cg_slot_off(var_count)         // 4096-byte result buffer
         uint64 fs_ns = 512
         uint64 fs_kk = 0
         while fs_kk < fs_ns { var_count = var_count + 1; fs_kk = fs_kk + 1 }
-        uint64 fs_scroff = var_count * 8         // 32-byte digit scratch
+        uint64 fs_scroff = cg_slot_off(var_count)         // 32-byte digit scratch
         var_count = var_count + 4
         var_frame_size = var_count * 8
         uint64 fs_alg = var_frame_size & 15
@@ -1785,7 +1791,7 @@ fn gen_expr_a64(uint64 node) {
         gen_expr_a64(wlhs)
         uint64 lhs_is_float_b = expr_is_float_a64
         // Save lhs to temp slot
-        uint64 binop_temp = var_count * 8
+        uint64 binop_temp = cg_slot_off(var_count)
         var_count = var_count + 1
         var_frame_size = var_count * 8
         uint64 brem = var_frame_size & 15
@@ -2003,7 +2009,7 @@ fn gen_expr_a64(uint64 node) {
         if lhs_si_pre_a != 0xFFFFFFFF && rhs_si_pre_a != 0xFFFFFFFF {
             // Both operands are struct variables — emit qword-by-qword comparison
             gen_expr_a64(wlhs)
-            uint64 sc_lhs_a = var_count * 8
+            uint64 sc_lhs_a = cg_slot_off(var_count)
             var_count = var_count + 1
             var_frame_size = var_count * 8
             uint64 scr1a = var_frame_size & 15
@@ -2011,9 +2017,9 @@ fn gen_expr_a64(uint64 node) {
             emit_a64_store_x0(sc_lhs_a)
 
             gen_expr_a64(wrhs_pre_a)
-            uint64 sc_rhs_a = var_count * 8
+            uint64 sc_rhs_a = cg_slot_off(var_count)
             var_count = var_count + 1
-            uint64 sc_acc_a = var_count * 8
+            uint64 sc_acc_a = cg_slot_off(var_count)
             var_count = var_count + 1
             var_frame_size = var_count * 8
             uint64 scr2a = var_frame_size & 15
@@ -2072,7 +2078,7 @@ fn gen_expr_a64(uint64 node) {
 
         gen_expr_a64(wlhs)
         uint64 lhs_is_float_c = expr_is_float_a64
-        uint64 cmp_temp = var_count * 8
+        uint64 cmp_temp = cg_slot_off(var_count)
         var_count = var_count + 1
         var_frame_size = var_count * 8
         uint64 crem = var_frame_size & 15
@@ -2250,7 +2256,7 @@ fn gen_expr_a64(uint64 node) {
         uint32 scrutinee = ast_child(node)
         uint64 wscr = scrutinee
         gen_expr_a64(wscr)
-        uint64 match_temp = var_count * 8
+        uint64 match_temp = cg_slot_off(var_count)
         var_count = var_count + 1
         var_frame_size = var_count * 8
         uint64 mrem = var_frame_size & 15
@@ -2406,7 +2412,7 @@ fn gen_expr_a64(uint64 node) {
                 // pk0_write had fd, pk1_write had buf — save them differently
                 // Actually: at this point x0=len, pk0_write=fd, pk1_write=buf
                 // We need all three. Use var_frame_size for len only.
-                uint64 wr_extra = var_count * 8
+                uint64 wr_extra = cg_slot_off(var_count)
                 var_count = var_count + 1
                 var_frame_size = var_count * 8
                 uint64 wr_etr = var_frame_size & 15
@@ -2607,7 +2613,7 @@ fn gen_expr_a64(uint64 node) {
                 // Windows ARM64: ReadFile(handle, buf, len, &bytesRead, NULL)
                 // Slots: pk0_fileread=handle, pk1_fileread=buf, x0=len
                 // Use pk1_fileread for bytesRead output (reuse after buf is in x1)
-                uint64 rd_extra = var_count * 8
+                uint64 rd_extra = cg_slot_off(var_count)
                 var_count = var_count + 1
                 var_frame_size = var_count * 8
                 uint64 rd_etr = var_frame_size & 15
@@ -2659,7 +2665,7 @@ fn gen_expr_a64(uint64 node) {
             gen_expr_a64(wa3)
             if target_os == 2 {
                 // Windows ARM64: WriteFile(handle, buf, len, NULL, NULL)
-                uint64 fw_extra = var_count * 8
+                uint64 fw_extra = cg_slot_off(var_count)
                 var_count = var_count + 1
                 var_frame_size = var_count * 8
                 uint64 fw_etr = var_frame_size & 15
@@ -2763,7 +2769,7 @@ fn gen_expr_a64(uint64 node) {
             // `sub sp` is patched to the final frame size at function end).
             // Using var_frame_size as the base put the buffer on the CALLER's
             // saved x29/x30, smashing the return address on its return (H7).
-            uint64 digit_buf = var_count * 8
+            uint64 digit_buf = cg_slot_off(var_count)
             var_count = var_count + 3
             var_frame_size = var_count * 8
             uint64 a64_db_rem = var_frame_size & 15
@@ -3286,9 +3292,9 @@ fn gen_expr_a64(uint64 node) {
             }
 
             // Allocate temp slots
-            uint64 ptr_slot = var_count * 8
+            uint64 ptr_slot = cg_slot_off(var_count)
             var_count = var_count + 1
-            uint64 arg_slots_base = var_count * 8
+            uint64 arg_slots_base = cg_slot_off(var_count)
             uint64 ac = 0
             while ac < arg_count {
                 var_count = var_count + 1
@@ -3507,7 +3513,7 @@ fn gen_expr_a64(uint64 node) {
             return
         }
         if is_extern_call == 0 && tok_matches(wct, "bit_insert", 10) != 0 {
-            uint64 bi_extra = var_count * 8
+            uint64 bi_extra = cg_slot_off(var_count)
             var_count = var_count + 4
             var_frame_size = var_count * 8
             uint64 birem = var_frame_size & 15
@@ -4305,7 +4311,7 @@ fn gen_expr_a64(uint64 node) {
             // Evaluate all 7 args into temp slots
             uint32 sc_arg = ast_child(node)
             uint64 sc_warg = sc_arg
-            uint64 sc_base = var_count * 8
+            uint64 sc_base = cg_slot_off(var_count)
             uint64 sc_i = 0
             while sc_i < 7 {
                 var_count = var_count + 1
@@ -4647,7 +4653,7 @@ fn gen_expr_a64(uint64 node) {
         }
 
         // Allocate temp slots for args
-        uint64 arg_slots_base = var_count * 8
+        uint64 arg_slots_base = cg_slot_off(var_count)
         uint64 ac = 0
         while ac < arg_count {
             var_count = var_count + 1
@@ -4953,7 +4959,7 @@ fn gen_expr_a64(uint64 node) {
                 caller_sret_needed_a = 1
                 uint64 caller_ret_sz_a = struct_total_size(caller_sret_si_a)
                 uint64 caller_ret_sl_a = (caller_ret_sz_a + 7) / 8
-                caller_sret_area_a = var_count * 8
+                caller_sret_area_a = cg_slot_off(var_count)
                 uint64 csi_a = 0
                 while csi_a < caller_ret_sl_a { var_count = var_count + 1; csi_a = csi_a + 1 }
                 var_frame_size = var_count * 8
@@ -5004,7 +5010,7 @@ fn gen_expr_a64(uint64 node) {
                 uint64 ret_is_hfa_c = ret_sflags_c & 1
                 uint64 ret_ssize_a = struct_total_size(ret_struct_si_a)
                 uint64 ret_sslots_a = (ret_ssize_a + 7) / 8
-                uint64 ret_soff_a = var_count * 8
+                uint64 ret_soff_a = cg_slot_off(var_count)
                 uint64 rsi2_a = 0
                 while rsi2_a < ret_sslots_a { var_count = var_count + 1; rsi2_a = rsi2_a + 1 }
                 var_frame_size = var_count * 8
@@ -5094,7 +5100,7 @@ fn gen_stmt_a64(uint64 node) {
             uint64 elem_size_v = type_tok_elem_size(type_tok_v)
             uint64 total_bytes = arr_size * elem_size_v
             uint64 n_slots = (total_bytes + 7) / 8
-            uint64 arr_offset = var_count * 8
+            uint64 arr_offset = cg_slot_off(var_count)
             uint64 si = 0
             while si < n_slots { var_count = var_count + 1; si = si + 1 }
             var_frame_size = var_count * 8
@@ -5118,7 +5124,7 @@ fn gen_stmt_a64(uint64 node) {
                     // Value semantics: copy struct to own stack area
                     uint64 copy_size_a = struct_total_size(sidx)
                     uint64 copy_slots_a = (copy_size_a + 7) / 8
-                    uint64 copy_off_a = var_count * 8
+                    uint64 copy_off_a = cg_slot_off(var_count)
                     uint64 csi_a = 0
                     while csi_a < copy_slots_a {
                         var_count = var_count + 1
@@ -5160,7 +5166,7 @@ fn gen_stmt_a64(uint64 node) {
             if was != 0 { count = was }
             uint64 total_bytes = ssize * count
             uint64 n_slots = (total_bytes + 7) / 8
-            uint64 struct_off = var_count * 8
+            uint64 struct_off = cg_slot_off(var_count)
             uint64 ssi = 0
             while ssi < n_slots { var_count = var_count + 1; ssi = ssi + 1 }
             var_frame_size = var_count * 8
@@ -5458,7 +5464,7 @@ fn gen_stmt_a64(uint64 node) {
             gen_expr_a64(wfe_child_a)
             // Its own frame slot: the value must survive the whole body, and
             // a nested for loop parks in a different one.
-            uint64 fe_slot_a = var_count * 8
+            uint64 fe_slot_a = cg_slot_off(var_count)
             var_count = var_count + 1
             var_frame_size = var_count * 8
             uint64 ferem_a = var_frame_size & 15
@@ -5549,7 +5555,7 @@ fn gen_stmt_a64(uint64 node) {
         uint32 scrutinee = ast_child(node)
         uint64 wscr = scrutinee
         gen_expr_a64(wscr)
-        uint64 match_temp = var_count * 8
+        uint64 match_temp = cg_slot_off(var_count)
         var_count = var_count + 1
         var_frame_size = var_count * 8
         uint64 mrem = var_frame_size & 15
@@ -6064,6 +6070,7 @@ fn gen_stmt_a64(uint64 node) {
         }
 
         uw_sp_site_set("G5")
+        cg_win_audit_site(0)
         uw_sp_moves()   // #143 option C: an asm block is opaque, it may move SP
         uint32 single_tok = ast_data1(node)
         uint64 ws = single_tok
@@ -6185,6 +6192,7 @@ fn gen_function_a64(uint64 fn_node) {
     if is_extern_a != 0 { return }
     uint32 body_check_a = ast_data3(fn_node)
     if body_check_a == 0 { return }
+    cg_win_prescan(fn_node, 1)           // #143 option C (spec 2.5.7): OUT and the SP-fixed verdict
 
     // Leaf function optimization disabled for now — needs register allocator
     uint64 is_leaf = 0
@@ -6202,11 +6210,11 @@ fn gen_function_a64(uint64 fn_node) {
 
     var_reset()
     expr_is_float_a64 = 0
-    temp_slot_0 = var_count * 8
+    temp_slot_0 = cg_slot_off(var_count)
     var_count = var_count + 1
-    temp_slot_1 = var_count * 8
+    temp_slot_1 = cg_slot_off(var_count)
     var_count = var_count + 1
-    compound_temp_slot = var_count * 8
+    compound_temp_slot = cg_slot_off(var_count)
     var_count = var_count + 1
     var_frame_size = var_count * 8
     uint64 rem0 = var_frame_size & 15
@@ -6241,7 +6249,7 @@ fn gen_function_a64(uint64 fn_node) {
             uint64 sret_c0_a = struct_abi_class0(sret_si_a)
             if sret_c0_a == 3 {
                 // Reserve a stack slot for the x8 sret pointer
-                sret_slot_a64 = var_count * 8
+                sret_slot_a64 = cg_slot_off(var_count)
                 var_count = var_count + 1
                 var_frame_size = var_count * 8
                 uint64 sret_rem_a = var_frame_size & 15
@@ -6361,7 +6369,7 @@ fn gen_function_a64(uint64 fn_node) {
             uint32 pflag_a = ast_data4(wparam)
             uint64 wpflag_a = pflag_a
             if wpflag_a == 1 {
-                uint64 len_off_a = var_count * 8
+                uint64 len_off_a = cg_slot_off(var_count)
                 var_count = var_count + 1
                 var_frame_size = var_count * 8
                 uint64 srem_spa = var_frame_size & 15
@@ -6469,7 +6477,7 @@ fn gen_function_a64(uint64 fn_node) {
                     // AAPCS64 struct by value: allocate struct-sized area on stack
                     uint64 sv_ssize_a = struct_total_size(param_si_spill_a)
                     uint64 sv_sslots_a = (sv_ssize_a + 7) / 8
-                    uint64 struct_area_a = var_count * 8
+                    uint64 struct_area_a = cg_slot_off(var_count)
                     uint64 sv_ci_a = 0
                     while sv_ci_a < sv_sslots_a { var_count = var_count + 1; sv_ci_a = sv_ci_a + 1 }
                     var_frame_size = var_count * 8

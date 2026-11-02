@@ -1,0 +1,37 @@
+// #143 option C (spec 2.5.7; plan A19d(i)): known pre-scan verdicts for the
+// legacy backends on Windows, printed by --test-out-audit as
+// "out-audit-fn: '<name>' SP-fixed|SP-moving OUT <bytes>":
+//   stamp   time_ns                 x86_64 SP-fixed OUT 48, arm64 SP-fixed OUT 16
+//   six     a 6-argument call       x86_64 SP-fixed OUT 48, arm64 SP-fixed OUT 0
+//   ten     a 10-argument call      x86_64 SP-fixed OUT 80, arm64 SP-fixed OUT 16
+//   say     println                 x86_64 SP-moving (push rdi/rcx), arm64 SP-fixed OUT 0
+//   opaque  an asm block            SP-moving on both
+// Row win_legacy_out_audit.
+fn add6(uint64 a, uint64 b, uint64 c, uint64 d, uint64 e, uint64 f) -> uint64 {
+    if a == 0 { return b + c + d + e + f }
+    return add6(a - 1, b, c, d, e, f + 1)
+}
+fn add10(uint64 a, uint64 b, uint64 c, uint64 d, uint64 e, uint64 f, uint64 g, uint64 h, uint64 i, uint64 j) -> uint64 {
+    if a == 0 { return b + c + d + e + f + g + h + i + j }
+    return add10(a - 1, b, c, d, e, f, g, h, i, j + 1)
+}
+fn stamp() -> uint64 {
+    return time_ns()
+}
+fn six(uint64 x) -> uint64 {
+    return add6(x, 1, 2, 3, 4, 5)
+}
+fn ten(uint64 x) -> uint64 {
+    return add10(x, 1, 2, 3, 4, 5, 6, 7, 8, 9)
+}
+fn say(uint64 v) {
+    println(v)
+}
+fn opaque() {
+    asm { "nop" }
+}
+fn main() {
+    uint64 t = stamp()
+    say(six(2) + ten(3) + (t & 0))
+    opaque()
+}

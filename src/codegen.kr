@@ -1869,7 +1869,7 @@ fn legacy_node_is_signed(uint64 ast_node) -> uint64 {
 // recycled: a store statement costs 8 bytes of frame, once, at compile time.
 // Shared by both legacy backends (they share var_count / var_frame_size).
 fn alloc_scratch_slot() -> uint64 {
-    uint64 offset = var_count * 8
+    uint64 offset = cg_slot_off(var_count)
     var_count = var_count + 1
     var_frame_size = var_count * 8
     uint64 rem = var_frame_size & 15
@@ -1986,7 +1986,7 @@ fn var_declare(uint64 name_tok) -> uint64 {
         cap_overflow("too many locals", 4096, 1)
         exit(1)
     }
-    uint64 offset = var_count * 8
+    uint64 offset = cg_slot_off(var_count)
     uint64 entry = var_table + var_table_size * 8
     uint32 nt = name_tok
     unsafe { *(entry as uint32) = nt }
@@ -4701,6 +4701,294 @@ fn win_fixup_add(uint64 patch_off, uint64 slot) {
     win_iat_fixup_count = win_iat_fixup_count + 1
 }
 
+// ---------------------------------------------------------------------------
+// #143 option C, legacy backends (spec 2.5.1, 2.5.7; plan A19d): the AST
+// pre-scan that runs before a Windows legacy function's prologue.
+//
+// It computes OUT, the largest area any sized site of the function allocates
+// below RSP/SP (x86_64: the 32-byte shadow space plus overflow slots of every
+// named call and call_ptr, the fixed areas of the IAT builtins, the --debug
+// trap's shadow area; arm64: the >8-argument stack area of named calls and
+// call_ptr, and the time_ns / exec_process scratch areas), and whether the
+// function has any OTHER construct that moves SP (println/print's pushes,
+// f-strings' digit loop, asm blocks, a builtin it cannot size, a hosted main).
+// The node walk is an allow-list: a node kind it does not know makes the
+// function SP-moving. The sizes come from the same helpers the emitters use to
+// size their allocations (cg_win_call_area / cg_a64_call_area), or, for the
+// fixed-size builtin sequences, from cg_win_builtin_area / cg_a64_builtin_area,
+// checked against every emitted allocation by --test-out-audit.
+//
+// A19d(i) measures only: nothing is folded and cg_win_out_bias stays 0.
+// ---------------------------------------------------------------------------
+static uint64 cg_win_out = 0           // OUT, 16-aligned
+static uint64 cg_win_ps_fixed = 0      // 1: no SP-moving construct besides sized sites
+static uint64 cg_win_ps_moving = 0     // walk state
+static uint64 cg_win_ps_arm = 0        // the walk sizes for: 0 = x86_64, 1 = arm64
+static uint64 cg_win_out_bias = 0      // added to every frame-slot offset (0 until a fold, A19d(ii)/(iii))
+static uint64 cg_win_folded = 0        // the current function is folded (A19d(ii)/(iii))
+static uint64 cg_test_out_audit = 0    // --test-out-audit (hidden, test-only)
+static uint64 cg_win_ps_name = 0       // the current function's name token (audit messages)
+
+// x86_64 named call / call_ptr: 32 bytes of shadow plus 8 per argument after
+// the fourth, 16-aligned. The call emitters size their `sub rsp` with this.
+fn cg_win_call_area(uint64 argc) -> uint64 {
+    uint64 ov = 0
+    if argc > 4 { ov = argc - 4 }
+    uint64 w = 32 + ov * 8
+    uint64 r = w & 15
+    if r != 0 { w = w + 16 - r }
+    return w
+}
+
+// arm64 named call / call_ptr with more than 8 arguments: the stack-argument
+// area, an even number of 8-byte slots (AAPCS64: x0-x7 first).
+fn cg_a64_call_area(uint64 argc) -> uint64 {
+    if argc <= 8 { return 0 }
+    uint64 n = argc - 8
+    if (n & 1) != 0 { n = n + 1 }
+    return n * 8
+}
+
+// x86_64 legacy builtins on Windows: the largest area any of its sequences
+// allocates below RSP (0 = moves no RSP), or 0xFFFFFFFF when it moves RSP in a
+// way that cannot be folded (println/print push their arguments around
+// GetStdHandle). The emitter's literal sizes (codegen.kr gen_expr) are the
+// source; --test-out-audit checks every emitted allocation against OUT.
+fn cg_win_builtin_area(uint64 t, uint64 argc) -> uint64 {
+    if tok_matches(t, "println", 7) != 0 || tok_matches(t, "print", 5) != 0 { return 0xFFFFFFFF }
+    if tok_matches(t, "exit", 4) != 0 { return 32 }
+    if tok_matches(t, "write", 5) != 0 { return 48 }
+    if tok_matches(t, "alloc", 5) != 0 { return 32 }
+    if tok_matches(t, "dealloc", 7) != 0 { return 32 }
+    if tok_matches(t, "file_open", 9) != 0 { return 64 }
+    if tok_matches(t, "file_read", 9) != 0 { return 48 }
+    if tok_matches(t, "file_write", 10) != 0 { return 48 }
+    if tok_matches(t, "file_close", 10) != 0 { return 32 }
+    if tok_matches(t, "file_size", 9) != 0 { return 32 }
+    if tok_matches(t, "print_str", 9) != 0 || tok_matches(t, "println_str", 11) != 0 { return 48 }
+    if tok_matches(t, "get_module_path", 15) != 0 { return 32 }
+    if tok_matches(t, "exec_process_argv", 17) != 0 { return 0x4D0 }
+    if tok_matches(t, "exec_process", 12) != 0 { return 0xD0 }
+    if tok_matches(t, "time_ns", 7) != 0 { return 0x30 }
+    if tok_matches(t, "call_ptr", 8) != 0 {
+        uint64 n = 0
+        if argc > 0 { n = argc - 1 }
+        return cg_win_call_area(n)
+    }
+    // load8..store64: the --debug null check's ExitProcess (0x20); covered by
+    // the --debug floor in cg_win_prescan. Every other builtin moves no RSP.
+    return 0
+}
+
+// arm64 legacy builtins on Windows (codegen_aarch64.kr gen_expr_a64).
+fn cg_a64_builtin_area(uint64 t, uint64 argc) -> uint64 {
+    if tok_matches(t, "exec_process_argv", 17) != 0 { return 0x4E0 }
+    if tok_matches(t, "exec_process", 12) != 0 { return 0xE0 }
+    if tok_matches(t, "time_ns", 7) != 0 { return 16 }
+    if tok_matches(t, "call_ptr", 8) != 0 {
+        uint64 n = 0
+        if argc > 0 { n = argc - 1 }
+        return cg_a64_call_area(n)
+    }
+    return 0
+}
+
+// The 77 names gen_expr / gen_expr_a64 treat as builtins (unless an extern
+// fn or @builtin_override shadows them); anything else is a named call.
+fn cg_win_is_builtin(uint64 t) -> uint64 {
+    uint64 s = cg_source + tok_text_start(t)
+    uint64 l = tok_text_len(t)
+    uint64 names = "|alloc|atomic_add|atomic_and|atomic_cas|atomic_load|atomic_or|atomic_store|atomic_sub|atomic_xor|bit_clear|bit_get|bit_insert|bit_range|bit_set|call_ptr|dcache_flush|dealloc|dmb|dsb|exec_process|exec_process_argv|exit|f16_to_f32|f32_to_f16|f32_to_f64|f32_to_int|f64_to_f32|f64_to_int|file_close|file_open|file_read|file_size|file_write|fma_f64|fn_addr|get_arch_id|get_module_path|get_target_os|icache_invalidate|int_to_f32|int_to_f64|isb|load16|load32|load64|load8|memcpy|memset|print|println|println_str|print_str|set_executable|signed_ge|signed_gt|signed_le|signed_lt|sqrt|sqrt_f32|sqrt_f64|store16|store32|store64|store8|str_eq|str_len|syscall_raw|time_ns|vload16|vload32|vload64|vload8|vstore16|vstore32|vstore64|vstore8|write|"
+    uint64 nl = str_len(names)
+    uint64 i = 0
+    while i + l + 1 < nl {
+        if load8(names + i) == 124 {
+            uint64 k = 0
+            uint64 eq = 1
+            while k < l {
+                if load8(names + i + 1 + k) != load8(s + k) { eq = 0 }
+                k = k + 1
+            }
+            if eq == 1 && load8(names + i + 1 + l) == 124 { return 1 }
+        }
+        i = i + 1
+    }
+    return 0
+}
+
+fn cg_win_ps_need(uint64 n) {
+    if n == 0xFFFFFFFF { cg_win_ps_moving = 1  return }
+    uint64 r = n & 15
+    if r != 0 { n = n + 16 - r }
+    if n > cg_win_out { cg_win_out = n }
+}
+
+fn cg_win_ps_call(uint64 node) {
+    uint32 ct = ast_data1(node)
+    uint64 t = ct
+    uint64 argc = 0
+    uint32 a = ast_child(node)
+    uint64 wa = a
+    while wa != 0 {
+        argc = argc + 1
+        uint32 nx = ast_next(wa)
+        wa = nx
+    }
+    uint64 shadowed = 0
+    if extern_fn_lookup(t) != 0xFFFFFFFF { shadowed = 1 }
+    if builtin_override_lookup(t) != 0 { shadowed = 1 }
+    if shadowed == 0 && cg_win_is_builtin(t) != 0 {
+        if cg_win_ps_arm == 0 { cg_win_ps_need(cg_win_builtin_area(t, argc)) }
+        else { cg_win_ps_need(cg_a64_builtin_area(t, argc)) }
+        return
+    }
+    // a named call (a user function, an extern or routed import)
+    if cg_win_ps_arm == 0 { cg_win_ps_need(cg_win_call_area(argc)) }
+    else { cg_win_ps_need(cg_a64_call_area(argc)) }
+}
+
+fn cg_win_ps_node(uint64 node) {
+    if node == 0 { return }
+    if cg_win_ps_moving != 0 { return }
+    uint32 k32 = ast_kind(node)
+    uint64 kind = k32
+    // the allow-list of node kinds the walk knows (AstKind, src/ast.kr)
+    uint64 known = 0
+    if kind >= 10 && kind <= 20 { known = 1 }
+    if kind >= 30 && kind <= 42 { known = 1 }
+    if kind == 44 || kind == 46 || kind == 47 || kind == 48 || kind == 49 { known = 1 }
+    if kind >= 51 && kind <= 57 { known = 1 }
+    if known == 0 { cg_win_ps_moving = 1  return }     // asm (43), f-string (50), anything new
+    if kind == 35 { cg_win_ps_call(node) }
+    // children, then the node-index fields (the dce_scan_node layout)
+    uint32 ch = ast_child(node)
+    uint64 wch = ch
+    while wch != 0 {
+        cg_win_ps_node(wch)
+        uint32 nxt = ast_next(wch)
+        wch = nxt
+    }
+    if kind == 13 || kind == 20 || kind == 53 || kind == 52 {
+        uint32 d1 = ast_data1(node)
+        uint32 d2 = ast_data2(node)
+        cg_win_ps_node(d1)
+        cg_win_ps_node(d2)
+    }
+    if kind == 14 || kind == 51 {
+        uint32 d1b = ast_data1(node)
+        cg_win_ps_node(d1b)
+    }
+    if kind == 19 || kind == 54 {
+        uint32 arm = ast_data1(node)
+        uint64 warm = arm
+        while warm != 0 {
+            cg_win_ps_node(warm)
+            uint32 an = ast_next(warm)
+            warm = an
+        }
+    }
+    if kind == 33 || kind == 38 || kind == 39 || kind == 40 || kind == 37 || kind == 42 {
+        uint32 d2b = ast_data2(node)
+        cg_win_ps_node(d2b)
+    }
+    if kind == 36 {
+        uint32 d3 = ast_data3(node)
+        cg_win_ps_node(d3)
+    }
+    if kind == 12 {
+        uint32 r2 = ast_data3(node)
+        uint32 r3 = ast_data4(node)
+        cg_win_ps_node(r2)
+        cg_win_ps_node(r3)
+    }
+}
+
+// Run the pre-scan for a Windows legacy function (arm = 0 x86_64, 1 arm64).
+// Sets cg_win_out and cg_win_ps_fixed; off Windows, for @naked and for a
+// hosted main both stay 0 / not fixed.
+fn cg_win_prescan(uint64 fn_node, uint64 arm) {
+    cg_win_out = 0
+    cg_win_ps_fixed = 0
+    cg_win_ps_moving = 0
+    cg_win_out_bias = 0
+    cg_win_folded = 0
+    cg_win_ps_arm = arm
+    uint32 nt = ast_data1(fn_node)
+    cg_win_ps_name = nt
+    if target_os != 2 { return }
+    uint32 af = ast_data4(fn_node)
+    if (af & 2) != 0 { return }                                  // @naked
+    uint64 wnt = nt
+    if freestanding == 0 && tok_matches(wnt, "main", 4) != 0 { return }    // hosted main: SP-moving
+    // --debug traps: overflow / bounds / null checks end in ExitProcess behind
+    // a 0x20 shadow area (x86_64, L6); any function may hold one
+    if debug_mode != 0 && arm == 0 { cg_win_ps_need(32) }
+    uint32 body = ast_data3(fn_node)
+    cg_win_ps_node(body)
+    if cg_win_ps_moving == 0 { cg_win_ps_fixed = 1 }
+    if cg_test_out_audit != 0 {
+        // one line per function, so the audit row can see what it checked
+        write(2, "out-audit-fn: '", 15)
+        write(2, cg_source + tok_text_start(wnt), tok_text_len(wnt))
+        if cg_win_ps_fixed != 0 { write(2, "' SP-fixed OUT ", 15) } else { write(2, "' SP-moving OUT ", 16) }
+        uint8[24] ob
+        uint64 ol = fmt_uint(ob, cg_win_out)
+        write(2, ob, ol)
+        write(2, "\n", 1)
+    }
+}
+
+// The sized-site classes of the spec 2.5.1 site table.
+fn cg_win_site_sized(uint64 id) -> uint64 {
+    if id == 0 { return 0 }
+    if load8(id) == 76 {                                 // 'L'
+        uint64 d = load8(id + 1)
+        if load8(id + 2) == 0 && d >= 49 && d <= 54 { return 1 }   // L1..L6
+        return 0
+    }
+    if load8(id) == 71 {                                 // 'G'
+        uint64 g = load8(id + 1)
+        if load8(id + 2) == 0 && g >= 49 && g <= 52 { return 1 }   // G1..G4
+    }
+    return 0
+}
+
+// --test-out-audit: in a Windows legacy function the pre-scan judged SP-fixed,
+// every SP report must come from a sized site whose area fits OUT. Called by
+// the SP helpers before they report (amount = the bytes allocated, 0 for a
+// release). A violation is printed and counted; output is unchanged.
+static uint64 cg_out_audit_fails = 0
+fn cg_win_audit_site(uint64 amount) {
+    if cg_test_out_audit == 0 || target_os != 2 || cg_win_ps_fixed == 0 { return }
+    if uw_sp_frame != 0 { return }
+    uint64 id = uw_sp_site
+    if id == 0 { id = uw_sp_op_site }
+    if cg_win_site_sized(id) == 0 || amount > cg_win_out {
+        cg_out_audit_fails = cg_out_audit_fails + 1
+        write(2, "out-audit: '", 12)
+        write(2, cg_source + tok_text_start(cg_win_ps_name), tok_text_len(cg_win_ps_name))
+        write(2, "': site ", 8)
+        if id == 0 { write(2, "unnamed", 7) } else { write(2, id, str_len(id)) }
+        uint8[24] b
+        write(2, " needs ", 7)
+        uint64 l = fmt_uint(b, amount)
+        write(2, b, l)
+        write(2, ", OUT ", 6)
+        l = fmt_uint(b, cg_win_out)
+        write(2, b, l)
+        if cg_win_site_sized(id) == 0 { write(2, " (not a sized site: the pre-scan missed an SP-moving construct)", 63) }
+        write(2, "\n", 1)
+    }
+}
+
+// Frame-slot offset of the n-th 8-byte slot (#143 option C, spec 2.5.7): every
+// legacy slot offset is made here, displaced by cg_win_out_bias -- OUT in a
+// folded Windows function, 0 everywhere else -- so the whole frame moves up by
+// OUT with no per-site arithmetic.
+fn cg_slot_off(uint64 n) -> uint64 {
+    return n * 8 + cg_win_out_bias
+}
+
 // sub rsp, N for Windows API calls (N must keep RSP 16-byte aligned)
 // After prologue (push rbx + sub rsp, frame), RSP is 16-aligned
 // So we need N divisible by 16 for alignment
@@ -4711,6 +4999,7 @@ fn emit_win_alloc_stack(uint64 nbytes) {
     emit_byte(0xEC)
     uint8 nb = nbytes
     emit_byte(nb)
+    cg_win_audit_site(nbytes)
     uw_sp_moves()                      // #143 option C backstop (spec 2.5.1)
 }
 
@@ -4720,6 +5009,7 @@ fn emit_win_free_stack(uint64 nbytes) {
     emit_byte(0xC4)
     uint8 nb = nbytes
     emit_byte(nb)
+    cg_win_audit_site(0)
     uw_sp_moves()
 }
 
@@ -4734,6 +5024,7 @@ fn emit_x64_push_r(uint64 r) {
     if r >= 8 { emit_byte(0x41) }
     uint8 po = 0x50 | (r & 7)
     emit_byte(po)
+    cg_win_audit_site(0)
     uw_sp_moves()
 }
 
@@ -4741,6 +5032,7 @@ fn emit_x64_pop_r(uint64 r) {
     if r >= 8 { emit_byte(0x41) }
     uint8 po = 0x58 | (r & 7)
     emit_byte(po)
+    cg_win_audit_site(0)
     uw_sp_moves()
 }
 
@@ -4755,6 +5047,7 @@ fn emit_x64_rsp_adj(uint64 ext, uint64 n) {
         emit_byte(0x81); emit_byte(e)
         emit_u32_le(n)
     }
+    if ext == 0xEC { cg_win_audit_site(n) } else { cg_win_audit_site(0) }
     uw_sp_moves()
 }
 
@@ -5184,7 +5477,7 @@ fn gen_expr(uint64 node) {
         uint64 si = struct_lookup(wsn)
         uint64 ssize = struct_total_size(si)
         // Allocate temp stack area for struct
-        uint64 slit_base = var_count * 8
+        uint64 slit_base = cg_slot_off(var_count)
         uint64 slots_needed = (ssize + 7) / 8
         var_count = var_count + slots_needed
         var_frame_size = var_count * 8
@@ -5445,7 +5738,7 @@ fn gen_expr(uint64 node) {
         // Reserve a 4096-byte result buffer INSIDE the frame (prologue sub rsp
         // is patched to the final var_frame_size at function end). Using
         // var_frame_size as the base overran saved rbx / the return addr (H7).
-        uint64 fs_buf_off = var_count * 8
+        uint64 fs_buf_off = cg_slot_off(var_count)
         uint64 fs_bkk = 0
         while fs_bkk < 512 { var_count = var_count + 1; fs_bkk = fs_bkk + 1 }
         var_frame_size = var_count * 8
@@ -6183,7 +6476,7 @@ fn gen_expr(uint64 node) {
             lhs_is_float = expr_is_float
             if lhs_is_float != 0 {
                 // Float LHS: store xmm0 to temp
-                uint64 ft0 = var_count * 8
+                uint64 ft0 = cg_slot_off(var_count)
                 var_count = var_count + 1
                 var_frame_size = var_count * 8
                 uint64 ft0r = var_frame_size & 15
@@ -6238,7 +6531,7 @@ fn gen_expr(uint64 node) {
             lhs_is_float = expr_is_float
             if lhs_is_float != 0 {
                 // Float LHS: store xmm0 to temp (can't use r12 for float)
-                uint64 ft1 = var_count * 8
+                uint64 ft1 = cg_slot_off(var_count)
                 var_count = var_count + 1
                 var_frame_size = var_count * 8
                 uint64 ft1r = var_frame_size & 15
@@ -6293,7 +6586,7 @@ fn gen_expr(uint64 node) {
             // r12 in use (nested): fall back to stack
             gen_expr(wlhs)
             lhs_is_float = expr_is_float
-            uint64 binop_temp = var_count * 8
+            uint64 binop_temp = cg_slot_off(var_count)
             var_count = var_count + 1
             var_frame_size = var_count * 8
             uint64 brem = var_frame_size & 15
@@ -6690,7 +6983,7 @@ fn gen_expr(uint64 node) {
         if lhs_si_pre != 0xFFFFFFFF && rhs_si_pre != 0xFFFFFFFF {
             // Both operands are struct variables — emit qword-by-qword comparison
             gen_expr(wlhs)
-            uint64 sc_lhs_slot = var_count * 8
+            uint64 sc_lhs_slot = cg_slot_off(var_count)
             var_count = var_count + 1
             var_frame_size = var_count * 8
             uint64 sc_rem1 = var_frame_size & 15
@@ -6698,9 +6991,9 @@ fn gen_expr(uint64 node) {
             emit_store_rax_to_stack(sc_lhs_slot)
 
             gen_expr(wrhs_pre)
-            uint64 sc_rhs_slot = var_count * 8
+            uint64 sc_rhs_slot = cg_slot_off(var_count)
             var_count = var_count + 1
-            uint64 sc_acc_slot = var_count * 8
+            uint64 sc_acc_slot = cg_slot_off(var_count)
             var_count = var_count + 1
             var_frame_size = var_count * 8
             uint64 sc_rem2 = var_frame_size & 15
@@ -6827,7 +7120,7 @@ fn gen_expr(uint64 node) {
             uint64 lhs_is_float_s = expr_is_float
             if lhs_is_float_s != 0 {
                 // Float LHS: store xmm0 to temp, eval RHS, ucomisd
-                uint64 fcmp_temp_s = var_count * 8
+                uint64 fcmp_temp_s = cg_slot_off(var_count)
                 var_count = var_count + 1
                 var_frame_size = var_count * 8
                 uint64 fcrem_s = var_frame_size & 15
@@ -6872,7 +7165,7 @@ fn gen_expr(uint64 node) {
             uint64 lhs_is_float_r = expr_is_float
             if lhs_is_float_r != 0 {
                 // Float LHS: store xmm0 to temp, eval RHS, ucomisd
-                uint64 fcmp_temp_r = var_count * 8
+                uint64 fcmp_temp_r = cg_slot_off(var_count)
                 var_count = var_count + 1
                 var_frame_size = var_count * 8
                 uint64 fcrem_r = var_frame_size & 15
@@ -6918,7 +7211,7 @@ fn gen_expr(uint64 node) {
         } else {
             gen_expr(wlhs)
             uint64 lhs_is_float_k = expr_is_float
-            uint64 cmp_temp = var_count * 8
+            uint64 cmp_temp = cg_slot_off(var_count)
             var_count = var_count + 1
             var_frame_size = var_count * 8
             uint64 crem = var_frame_size & 15
@@ -7095,7 +7388,7 @@ fn gen_expr(uint64 node) {
         uint32 scrutinee = ast_child(node)
         uint64 wscr = scrutinee
         gen_expr(wscr)
-        uint64 match_temp = var_count * 8
+        uint64 match_temp = cg_slot_off(var_count)
         var_count = var_count + 1
         var_frame_size = var_count * 8
         uint64 mrem = var_frame_size & 15
@@ -7251,7 +7544,7 @@ fn gen_expr(uint64 node) {
             if target_os == 2 {
                 // Windows: GetStdHandle(-(10+fd)) then WriteFile(handle, buf, len, NULL, NULL)
                 // Save len to extra temp (reserved frame slot, not above-frame — H7)
-                uint64 extra_tmp = var_count * 8
+                uint64 extra_tmp = cg_slot_off(var_count)
                 var_count = var_count + 1
                 var_frame_size = var_count * 8
                 uint64 wr_etr = var_frame_size & 15
@@ -7510,7 +7803,7 @@ fn gen_expr(uint64 node) {
             if target_os == 2 {
                 // Windows: ReadFile(handle, buf, len, &bytesRead, NULL)
                 // Reserve two frame slots: extra_tmp (len) + br_slot (bytesRead) — H7
-                uint64 extra_tmp = var_count * 8
+                uint64 extra_tmp = cg_slot_off(var_count)
                 var_count = var_count + 2
                 var_frame_size = var_count * 8
                 uint64 rd_etr = var_frame_size & 15
@@ -7568,7 +7861,7 @@ fn gen_expr(uint64 node) {
             gen_expr(wa3)
             if target_os == 2 {
                 // Windows: WriteFile(handle, buf, len, &bytesWritten, NULL)
-                uint64 extra_tmp = var_count * 8
+                uint64 extra_tmp = cg_slot_off(var_count)
                 var_count = var_count + 1
                 var_frame_size = var_count * 8
                 uint64 fw_etr = var_frame_size & 15
@@ -7712,7 +8005,7 @@ fn gen_expr(uint64 node) {
             // `sub rsp` is patched to the final var_frame_size at function end).
             // Using var_frame_size as the base put the buffer on saved rbx /
             // the return address, smashing it on return (H7).
-            uint64 digit_buf = var_count * 8
+            uint64 digit_buf = cg_slot_off(var_count)
             var_count = var_count + 3
             var_frame_size = var_count * 8
             uint64 db_rem = var_frame_size & 15
@@ -8550,9 +8843,9 @@ fn gen_expr(uint64 node) {
             // cap is the shared >64 guard above.
 
             // Allocate temp slots: 1 for fn_ptr + arg_count for args
-            uint64 ptr_slot = var_count * 8
+            uint64 ptr_slot = cg_slot_off(var_count)
             var_count = var_count + 1
-            uint64 arg_slots_base = var_count * 8
+            uint64 arg_slots_base = cg_slot_off(var_count)
             uint64 ac = 0
             while ac < arg_count {
                 var_count = var_count + 1
@@ -8602,11 +8895,8 @@ fn gen_expr(uint64 node) {
                 // mirrors the named-call Win64 path exactly. cp_stack_bytes
                 // carries the reservation to the shared tail below, which uses
                 // it for both the fn-ptr slot load and the `add rsp` cleanup.
-                uint64 win_overflow = 0
-                if arg_count > 4 { win_overflow = arg_count - 4 }
-                uint64 win_stack = 32 + win_overflow * 8
-                uint64 win_rem = win_stack & 15
-                if win_rem != 0 { win_stack = win_stack + 16 - win_rem }
+                // #143 option C: the shared accounting the pre-scan sizes OUT with
+                uint64 win_stack = cg_win_call_area(arg_count)
                 cp_stack_bytes = win_stack
 
                 // sub rsp, win_stack
@@ -8964,7 +9254,7 @@ fn gen_expr(uint64 node) {
         // bit_insert(val, start, width, bits) — (val & ~(mask << start)) | ((bits & mask) << start)
         if is_extern_call == 0 && tok_matches(wct, "bit_insert", 10) != 0 {
             // Allocate extra temps
-            uint64 bi_extra = var_count * 8
+            uint64 bi_extra = cg_slot_off(var_count)
             var_count = var_count + 4
             var_frame_size = var_count * 8
             uint64 birem = var_frame_size & 15
@@ -9808,7 +10098,7 @@ fn gen_expr(uint64 node) {
             // Evaluate all 7 args into temp slots
             uint32 sc_arg = ast_child(node)
             uint64 sc_warg = sc_arg
-            uint64 sc_base = var_count * 8
+            uint64 sc_base = cg_slot_off(var_count)
             uint64 sc_i = 0
             while sc_i < 7 {
                 var_count = var_count + 1
@@ -10204,7 +10494,7 @@ fn gen_expr(uint64 node) {
         }
 
         // Allocate temp slots for each arg
-        uint64 arg_slots_base = var_count * 8
+        uint64 arg_slots_base = cg_slot_off(var_count)
         uint64 ac = 0
         while ac < arg_count {
             var_count = var_count + 1
@@ -10291,7 +10581,7 @@ fn gen_expr(uint64 node) {
                 // Allocate stack space for the return value
                 uint64 caller_ret_sz = struct_total_size(caller_sret_check)
                 uint64 caller_ret_sl = (caller_ret_sz + 7) / 8
-                caller_sret_area = var_count * 8
+                caller_sret_area = cg_slot_off(var_count)
                 uint64 csi = 0
                 while csi < caller_ret_sl { var_count = var_count + 1; csi = csi + 1 }
                 var_frame_size = var_count * 8
@@ -10305,12 +10595,8 @@ fn gen_expr(uint64 node) {
             // Windows x64: shadow space (32 bytes min) + overflow args
             uint64 reg_args = arg_count
             if reg_args > 4 { reg_args = 4 }
-            uint64 overflow_count = 0
-            if arg_count > 4 { overflow_count = arg_count - 4 }
-            win_stack = 32 + overflow_count * 8
-            // Align to 16
-            uint64 win_rem = win_stack & 15
-            if win_rem != 0 { win_stack = win_stack + 16 - win_rem }
+            // #143 option C: the shared accounting the pre-scan sizes OUT with
+            win_stack = cg_win_call_area(arg_count)
 
             // sub rsp, win_stack
             uw_sp_site_set("L3")
@@ -10716,7 +11002,7 @@ fn gen_expr(uint64 node) {
                 // Small struct (INTEGER/SSE): unpack from registers into stack area
                 uint64 ret_ssize = struct_total_size(ret_struct_si)
                 uint64 ret_sslots = (ret_ssize + 7) / 8
-                uint64 ret_soff = var_count * 8
+                uint64 ret_soff = cg_slot_off(var_count)
                 uint64 rsi2 = 0
                 while rsi2 < ret_sslots { var_count = var_count + 1; rsi2 = rsi2 + 1 }
                 var_frame_size = var_count * 8
@@ -12729,7 +13015,7 @@ fn gen_stmt(uint64 node) {
             // Round up to 8-byte slots
             uint64 n_slots = (total_bytes + 7) / 8
             // Allocate slots
-            uint64 arr_offset = var_count * 8
+            uint64 arr_offset = cg_slot_off(var_count)
             uint64 si = 0
             while si < n_slots {
                 var_count = var_count + 1
@@ -12780,7 +13066,7 @@ fn gen_stmt(uint64 node) {
                     // Value semantics: copy struct to own stack area
                     uint64 copy_size = struct_total_size(sidx)
                     uint64 copy_slots = (copy_size + 7) / 8
-                    uint64 copy_off = var_count * 8
+                    uint64 copy_off = cg_slot_off(var_count)
                     uint64 csi = 0
                     while csi < copy_slots {
                         var_count = var_count + 1
@@ -12847,7 +13133,7 @@ fn gen_stmt(uint64 node) {
             }
             uint64 total_bytes = ssize * count
             uint64 n_slots = (total_bytes + 7) / 8
-            uint64 struct_off = var_count * 8
+            uint64 struct_off = cg_slot_off(var_count)
             uint64 ssi = 0
             while ssi < n_slots {
                 var_count = var_count + 1
@@ -13422,7 +13708,7 @@ fn gen_stmt(uint64 node) {
             gen_expr(wfe_child)
             // Its own frame slot: the value must survive the whole body, and
             // a nested for loop parks in a different one.
-            uint64 fe_slot = var_count * 8
+            uint64 fe_slot = cg_slot_off(var_count)
             var_count = var_count + 1
             var_frame_size = var_count * 8
             uint64 ferem = var_frame_size & 15
@@ -13536,7 +13822,7 @@ fn gen_stmt(uint64 node) {
         uint64 wscr = scrutinee
         gen_expr(wscr)
         // Allocate temp for scrutinee
-        uint64 match_temp = var_count * 8
+        uint64 match_temp = cg_slot_off(var_count)
         var_count = var_count + 1
         var_frame_size = var_count * 8
         uint64 mrem = var_frame_size & 15
@@ -13962,6 +14248,7 @@ fn gen_stmt(uint64 node) {
         }
         rax_cache = 0   // asm block trashes the scalar-load cache
         uw_sp_site_set("L9")
+        cg_win_audit_site(0)
         uw_sp_moves()   // #143 option C: an asm block is opaque, it may move RSP
 
         uint32 single_tok = ast_data1(node)
@@ -14095,6 +14382,7 @@ fn gen_function(uint64 fn_node) {
     if is_extern != 0 { return }
     uint32 body_check = ast_data3(fn_node)
     if body_check == 0 { return }
+    cg_win_prescan(fn_node, 0)           // #143 option C (spec 2.5.7): OUT and the SP-fixed verdict
 
     // Overflow arg patch tracking (for functions with >6 params)
     // 32 slots, one per stack-passed parameter, matching the 32-argument
@@ -14111,13 +14399,13 @@ fn gen_function(uint64 fn_node) {
     expr_is_float = 0
 
     // Reserve temp slots + r12 save slot
-    temp_slot_0 = var_count * 8
+    temp_slot_0 = cg_slot_off(var_count)
     var_count = var_count + 1
-    temp_slot_1 = var_count * 8
+    temp_slot_1 = cg_slot_off(var_count)
     var_count = var_count + 1
-    compound_temp_slot = var_count * 8
+    compound_temp_slot = cg_slot_off(var_count)
     var_count = var_count + 1
-    r12_save_slot = var_count * 8
+    r12_save_slot = cg_slot_off(var_count)
     var_count = var_count + 1
     r12_in_use = 0
     var_frame_size = var_count * 8
@@ -14154,7 +14442,7 @@ fn gen_function(uint64 fn_node) {
             uint64 sret_c0 = struct_abi_class0(sret_si)
             if sret_c0 == 3 {
                 // Reserve a stack slot for the sret pointer
-                sret_slot = var_count * 8
+                sret_slot = cg_slot_off(var_count)
                 var_count = var_count + 1
                 var_frame_size = var_count * 8
                 uint64 sret_rem = var_frame_size & 15
@@ -14261,7 +14549,7 @@ fn gen_function(uint64 fn_node) {
             uint32 pflag = ast_data4(wparam)
             uint64 wpflag = pflag
             if wpflag == 1 {
-                uint64 len_off_x = var_count * 8
+                uint64 len_off_x = cg_slot_off(var_count)
                 var_count = var_count + 1
                 var_frame_size = var_count * 8
                 uint64 srem_sp = var_frame_size & 15
@@ -14468,7 +14756,7 @@ fn gen_function(uint64 fn_node) {
                     // SysV struct by value: allocate struct-sized area on stack
                     uint64 sv_ssize = struct_total_size(param_si_spill)
                     uint64 sv_sslots = (sv_ssize + 7) / 8
-                    uint64 struct_area = var_count * 8
+                    uint64 struct_area = cg_slot_off(var_count)
                     uint64 sv_ci = 0
                     while sv_ci < sv_sslots { var_count = var_count + 1; sv_ci = sv_ci + 1 }
                     var_frame_size = var_count * 8
@@ -14677,7 +14965,7 @@ fn gen_function(uint64 fn_node) {
                     // Windows struct by value (<=8 bytes arrives as value in register)
                     uint64 wv_ssize = struct_total_size(param_si_spill)
                     uint64 wv_sslots = (wv_ssize + 7) / 8
-                    uint64 wv_struct_area = var_count * 8
+                    uint64 wv_struct_area = cg_slot_off(var_count)
                     uint64 wv_ci = 0
                     while wv_ci < wv_sslots { var_count = var_count + 1; wv_ci = wv_ci + 1 }
                     var_frame_size = var_count * 8
