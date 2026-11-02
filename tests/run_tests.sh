@@ -27575,7 +27575,7 @@ TOTAL=$((TOTAL + 1))
 if ! command -v python3 > /dev/null 2>&1; then wfe_skip win_file_err_shape_selftest "no python3"
 elif WFE_O=$(python3 -I "$WFE_SHAPE" --selftest 2>&1); then wfe_ok win_file_err_shape_selftest "offset-located identical functions, duplicate label, wrong offset, missing BOOL test"
 else wfe_bad win_file_err_shape_selftest "$WFE_O"; fi
-for WFE_B in legacy; do
+for WFE_B in ir legacy; do
     WFE_S=""; [ "$WFE_B" = "legacy" ] && WFE_S="_legacy"
     wfe_linux "win_file_errors_linux_x86_64$WFE_S" x86_64 "$WFE_B" win_file_errors "$WFE_FX/win_file_errors.linux.expected" none
     wfe_linux "win_file_errors_linux_arm64_qemu$WFE_S" arm64 "$WFE_B" win_file_errors "$WFE_FX/win_file_errors.linux.expected" none
@@ -27587,6 +27587,11 @@ for WFE_B in legacy; do
     wfe_win "win_file_std_windows_wine$WFE_S" "$WFE_B" win_file_std "$WFE_FX/win_file_std.expected" "file:$WFE_FX/wfs.in"
     wfe_win "win_file_std_pipe_windows_wine$WFE_S" "$WFE_B" win_file_std_pipe "$WFE_FX/win_file_std_pipe.expected" "pipe:hi"
 done
+# read() exists on the IR backend only
+wfe_linux win_file_errors_read_linux_x86_64 x86_64 ir win_file_errors_read "$WFE_FX/win_file_errors_read.linux.expected" none
+wfe_linux win_file_errors_read_linux_arm64_qemu arm64 ir win_file_errors_read "$WFE_FX/win_file_errors_read.linux.expected" none
+wfe_win win_file_errors_read_builtin_windows_wine ir win_file_errors_read "$WFE_FX/win_file_errors_read.windows.expected" none
+wfe_shape win_file_errors_shape_x86_64 x86_64 ir abc
 wfe_shape win_file_errors_shape_x86_64_legacy x86_64 legacy abc
 [ -n "$WFE_WINE" ] && WINEPREFIX="$WFE_D/pfx" "$(dirname "$WFE_WINE")/wineserver" -k > /dev/null 2>&1
 rm -rf "$WFE_D"
