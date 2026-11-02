@@ -16,9 +16,9 @@
 # 1 = a case did not (the line says which); 77 = a required tool is absent
 # (the last line says which -- the suite turns that into a counted SKIP).
 set -u
-W="${1:?usage: pe_unwind_selftest.sh <workdir> [core|rules]}"
+W="${1:?usage: pe_unwind_selftest.sh <workdir> [core|rules|linked|optc]}"
 PART="${2:-core}"
-case "$PART" in core|rules|linked) ;; *) echo "FAIL usage: part '$PART' is not core, rules or linked"; exit 1 ;; esac
+case "$PART" in core|rules|linked|optc) ;; *) echo "FAIL usage: part '$PART' is not core, rules, linked or optc"; exit 1 ;; esac
 H="$(cd "$(dirname "$0")" && pwd)"
 CHK="$H/pe_unwind_check.py"
 OR="$H/../fixtures/pe_unwind_oracle"
@@ -27,7 +27,10 @@ for t in python3 llvm-mc llvm-readobj llvm-objdump; do
 done
 rm -rf "$W"; mkdir -p "$W"
 N=0
-fail() { echo "FAIL $1: $2"; exit 1; }
+# SELFTEST_KEEP_GOING=1 (red-before runs only): report every failing case
+# instead of stopping at the first, and exit 1 at the end if any failed
+BAD=0
+fail() { echo "FAIL $1: $2"; if [ "${SELFTEST_KEEP_GOING:-0}" = 1 ]; then BAD=$((BAD + 1)); return 1; fi; exit 1; }
 # expect <case> <rule> PASS|FAIL <checker args...>: the checker's line for
 # <rule> must start with "<rule>: PASS" / "<rule>: FAIL".
 # autolst ARGS...: LARGS = ARGS, plus `--listing X.lst` made from the llvm-mc
@@ -68,7 +71,7 @@ expect() {
     line=$(grep -m1 "^$r: " <<< "$out")
     case "$line" in
         "$r: $want"*) N=$((N + 1)); echo "  case $c: $r $want as required${line#"$r: $want"}" ;;
-        *) fail "$c" "want $r $want, got: $(tr '\n' '|' <<< "$out" | head -c 300)" ;;
+        *) fail "$c" "want $r $want, got: $(tr '\n' '|' <<< "$out" | head -c 300)" || return 0 ;;
     esac
 }
 
@@ -546,14 +549,14 @@ open(sys.argv[2], 'w').write(re.sub(r'\{(\w+)\}', lambda m: '%x' % syms[m.group(
 EOF2
 }
 command -v llvm-nm > /dev/null 2>&1 || { echo "SKIP-REASON: no llvm-nm"; exit 77; }
-ALLR=C1,C2,C3,C4,C4b,C5,C6
-# expect_all <case> <checker args...>: every rule C1..C6 PASSes
+ALLR=C1,C2,C3,C3b,C4,C4b,C5,C6
+# expect_all <case> <checker args...>: every rule C1..C6 (C3b included) PASSes
 expect_all() {
     local c="$1" out; shift
     autolst "$@"
     out=$(python3 "$CHK" --rules $ALLR "${LARGS[@]}" 2>&1)
-    if grep -q ': FAIL' <<< "$out" || [ "$(grep -c ': PASS' <<< "$out")" != 7 ]; then
-        fail "$c" "want C1..C6 PASS, got: $(grep -v ': PASS' <<< "$out" | tr '\n' '|' | head -c 400)"
+    if grep -q ': FAIL' <<< "$out" || [ "$(grep -c ': PASS' <<< "$out")" != "$(tr ',' '\n' <<< "$ALLR" | wc -l)" ]; then
+        fail "$c" "want C1..C6 PASS, got: $(grep -v ': PASS' <<< "$out" | tr '\n' '|' | head -c 400)" || return 0
     fi
     N=$((N + 1)); echo "  case $c: C1..C6 PASS as required"
 }
@@ -564,12 +567,18 @@ expect_only() {
     autolst "$@"
     out=$(python3 "$CHK" --rules $ALLR --verbose "${LARGS[@]}" 2>&1)
     if ! grep -q "^$r: FAIL" <<< "$out" || ! grep -qE "$g" <<< "$out"; then
-        fail "$c" "want $r FAIL matching '$g', got: $(tr '\n' '|' <<< "$out" | head -c 400)"
+        fail "$c" "want $r FAIL matching '$g', got: $(tr '\n' '|' <<< "$out" | head -c 400)" || return 0
     fi
     local others; others=$(grep ': FAIL' <<< "$out" | grep -v "^$r: FAIL")
-    [ -z "$others" ] || fail "$c" "only $r may fail, also: $(tr '\n' '|' <<< "$others" | head -c 300)"
+    [ -z "$others" ] || { fail "$c" "only $r may fail, also: $(tr '\n' '|' <<< "$others" | head -c 300)" || return 0; }
     N=$((N + 1)); echo "  case $c: $r FAIL as required, every other rule PASS"
 }
+if [ "$PART" = optc ]; then
+    . "$H/pe_unwind_selftest_optc.sh"
+    if [ "$BAD" != 0 ]; then echo "selftest: $BAD cases did not behave ($N did)"; exit 1; fi
+    echo "selftest: $N cases behaved"
+    exit 0
+fi
 
 # ---- llvm-mc positives: FP frames, SAVE-free shapes, every ALLOC form ------
 mk fp_frames x64 <<'EOF'
@@ -1091,10 +1100,10 @@ s1:
 EOF
 mk_lst "$W/save_nonvol:x86_64"
 out=$(python3 "$CHK" --rules $ALLR --verbose --arch x86_64 "$W/save_nonvol.obj" --listing "$W/save_nonvol.lst" 2>&1)
-if [ "$(grep -c ': PASS' <<< "$out")" = 5 ] && grep -q '^C6: FAIL' <<< "$out" \
+if [ "$(grep -c ': PASS' <<< "$out")" = 6 ] && grep -q '^C6: FAIL' <<< "$out" \
    && grep -q '^C3: FAIL' <<< "$out" && grep -q 's1: SAVE_NONVOL store at +0x6 comes before SET_FPREG' <<< "$out" \
    && [ "$(grep -c 'C6 problem' <<< "$out")" = 1 ] && grep -q 'C6 problem: s1: wine rule at +0xb: R12 restored' <<< "$out"; then
-    N=$((N + 1)); echo "  case save_nonvol_before_set_fpreg: C3 FAIL (amended order, ruling (b)), C6 FAIL at exactly +0xb under the Wine rule (wine-9.0 frame rule), C1 C2 C4 C4b C5 PASS"
+    N=$((N + 1)); echo "  case save_nonvol_before_set_fpreg: C3 FAIL (amended order, ruling (b)), C6 FAIL at exactly +0xb under the Wine rule (wine-9.0 frame rule), C1 C2 C3b C4 C4b C5 PASS"
 else fail save_nonvol_before_set_fpreg "got: $(tr '\n' '|' <<< "$out" | head -c 500)"; fi
 
 # the legacy x64 prologue of ruling (b): the r12 save FOLLOWS SET_FPREG, as

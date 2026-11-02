@@ -1308,8 +1308,13 @@ class X64Fn:
         if self.naked:
             return
         add = lambda m: self.rep.add('C3', '%s: %s' % (self.name, m))
-        if r.frame_reg != 5 or r.frame_off != 0:
-            add('FrameRegister %d / FrameOffset %d, want RBP / 0' % (r.frame_reg, r.frame_off))
+        # option C (spec 2.5.4): a record either has the frame register (RBP,
+        # offset 0, with SET_FPREG) or none at all (FrameRegister 0, no
+        # SET_FPREG): an SP-fixed function described relative to RSP
+        if r.frame_reg not in (0, 5) or r.frame_off != 0:
+            add('FrameRegister %d / FrameOffset %d, want RBP / 0 or none' % (r.frame_reg, r.frame_off))
+        if r.frame_reg == 0 and any(c[1] == 'SET_FPREG' for c in r.codes):
+            add('SET_FPREG code in a record with FrameRegister 0')
         want = []          # (end offset, code) in prologue order
         ins = [i for i in self.insns if i.a < r.begin + r.prolog]
         if ins and ins[-1].a + ins[-1].n != r.begin + r.prolog:
@@ -1327,6 +1332,8 @@ class X64Fn:
             if i.kind == 'push' and i.arg is not None and i.b[0] != 0xFF:
                 want.append((off, 'PUSH_NONVOL', i.arg))
             elif i.kind == 'sub_rsp':
+                if i.arg == 0:
+                    add('zero-size allocation at +0x%x (option C, spec 2.5.4)' % (i.a - r.begin))
                 want.append((off, 'ALLOC', i.arg))
             elif i.kind in ('store_rsp', 'store_rbp'):
                 if r.frame_reg != 0 and not fp_set:
@@ -1357,8 +1364,17 @@ class X64Fn:
         if have != want:
             add('codes %s do not describe the prologue %s' % (have, want))
             return
-        if not fp_set:
+        if not fp_set and r.frame_reg != 0:
             add('the prologue has no SET_FPREG')
+        if r.frame_reg == 0:
+            # rbp is then an ordinary nonvolatile (ruling Q12): the body may
+            # write it only if the prologue pushed it
+            pushed = any(name == 'PUSH_NONVOL' and v == 5 for _, name, v in want)
+            if not pushed:
+                for i in self.insns:
+                    if i.a >= r.begin + r.prolog and 5 in i.writes:
+                        add('writes rbp at 0x%x (%s) without a PUSH_NONVOL rbp code (FrameRegister 0)' % (i.a, i.mn))
+                        break
         # alignment (phase-2 review, M2): a frame that calls keeps RSP
         # 16-aligned at its call sites -- entry RSP is 8 mod 16, so the return
         # address, the pushes and the allocation must sum to 0 mod 16
@@ -1369,10 +1385,41 @@ class X64Fn:
                 add('frame misaligns RSP at its calls: 8 + 8*%d pushes + ALLOC %d = %d, not 0 mod 16'
                     % (npush, alloc, 8 + 8 * npush + alloc))
         for off, name, info, opnd in r.codes:
+            if name in ('ALLOC_SMALL', 'ALLOC_LARGE') and opnd == 0:
+                add('zero-size ALLOC code (option C, spec 2.5.4)')
             if name == 'ALLOC_SMALL' and not 8 <= opnd <= 128:
                 add('ALLOC_SMALL %d out of range' % opnd)
             if name == 'ALLOC_LARGE' and info == 0 and opnd <= 128:
                 add('ALLOC_LARGE/0 for a small size %d' % opnd)
+
+    # ---- C3b: a frame pointer exactly where RSP moves (option C) -------
+    def c3b(self):
+        r = self.r
+        if self.naked or r.frame_reg != 0:
+            return
+        epi = set()
+        seq = self._epilogue_seq()
+        for i in self.insns:
+            if i.kind != 'ret':
+                continue
+            a, addrs = i.a, []
+            for kind, arg in reversed(seq):
+                prev = [x for x in self.insns if x.a + x.n == a]
+                if not prev or prev[0].kind != kind or prev[0].arg != arg:
+                    addrs = []
+                    break
+                a = prev[0].a
+                addrs.append(a)
+            epi.update(addrs)
+        for i in self.insns:
+            if i.a < r.begin + r.prolog or i.a in epi:
+                continue
+            if i.kind in ('call', 'call_iat', 'call_ind', 'ret', 'jmp_iat', 'jmp_ind') or i.mn in ('syscall', 'int'):
+                continue
+            if 4 in i.writes:
+                self.rep.add('C3b', '%s: body writes RSP at 0x%x (%s %s) in a record without a frame register'
+                             % (self.name, i.a, i.mn, ','.join(i.ops)))
+                return
 
     # ---- dataflow (C4b; states for C6) --------------------------------
     def entry_state(self):
@@ -1597,8 +1644,10 @@ class X64Fn:
             for a, st in states.items():
                 if lf[2] <= a < lf[3] and self.at[a].kind == 'ret':
                     add4b('dead-end leaf %s reaches ret at 0x%x' % (lf[0], a))
-        # C4: no frame-register write after the prologue except the epilogue's pop
-        if not self.naked:
+        # C4: no frame-register write after the prologue except the epilogue's
+        # pop -- only when the record has a frame register (option C: with
+        # FrameRegister 0, rbp is a nonvolatile, C3 checks it was pushed)
+        if not self.naked and r.frame_reg != 0:
             for i in self.insns:
                 if i.a < r.begin + r.prolog or 5 not in i.writes:
                     continue
@@ -1940,6 +1989,10 @@ class AI:
             else:
                 if l and not v:
                     self.writes.update((rd, rt2))
+                # option C (C3b, spec 2.5.4): a pre/post-indexed pair of any
+                # size on sp writes SP
+                if rn == 31 and mode in (1, 3):
+                    self.writes.add(31)
         elif (w & 0xFFC00000) in (0xF9000000, 0xF9400000, 0xFD000000, 0xFD400000):
             l = (w >> 22) & 1
             v = (w >> 26) & 1
@@ -1956,6 +2009,12 @@ class AI:
                 self.writes.add(rd)
             if rn == 31:
                 self.writes.add(31)
+        elif (w & 0x3B200C00) in (0x38000400, 0x38000C00):
+            # load/store register, pre/post-indexed, any size other than the
+            # 64-bit X/D forms above (option C, C3b): writes back to Rn
+            self.writes.add(rn)
+            if not ((w >> 22) & 3) == 0 and not (w >> 26) & 1:
+                self.writes.add(rd)
         elif (w & 0x9F000000) == 0x90000000:
             self.kind = 'adrp'
             imm = (((w >> 5) & 0x7FFFF) << 2) | ((w >> 29) & 3)
@@ -2103,20 +2162,41 @@ class A64Fn:
             add('prologue codes %s do not describe the prologue %s' % (have, want))
             return
         fr = [k for k, c in enumerate(want) if c[0] in ('set_fp', 'add_fp')]
-        if not fr:
-            add('no set_fp/add_fp: the frame pointer is not established')
-        else:
+        # option C (spec 2.5.3): no set_fp/add_fp = an SP-fixed record,
+        # described relative to SP (C3b checks the body)
+        if fr:
             for c in want[fr[-1] + 1:]:
                 if c[0] not in ('alloc', 'nop'):
                     add('%s follows the frame-establishing code' % (c,))
         for c in want:
             if c[0] == 'alloc' and c[1] % 16:
                 add('SP adjustment %d is not a multiple of 16' % c[1])
+            if c[0] == 'alloc' and c[1] == 0:
+                add('zero-size allocation in the prologue (option C, spec 2.5.4)')
         for start, codes in self.epilogs():
             for c in codes:
                 t = a64_code_tuple(c)
                 if t[0] == 'alloc' and t[1] % 16:
                     add('epilog SP adjustment %d is not a multiple of 16' % t[1])
+                if t[0] == 'alloc' and t[1] == 0:
+                    add('zero-size allocation in an epilog (option C, spec 2.5.4)')
+
+    def c3b(self):
+        """Option C (spec 2.5.4): a record without set_fp/add_fp is valid
+        only if no body instruction writes SP."""
+        if self.naked or any(a64_code_tuple(c)[0] in ('set_fp', 'add_fp') for c in self.pro):
+            return
+        n_pro = len(self.pro)
+        epi = set()
+        for start, codes in self.epilogs():
+            epi.update(range(start, start + 4 * len(codes), 4))
+        for i in self.insns[n_pro:]:
+            if i.a in epi or i.kind in ('bl', 'blr', 'ret', 'br'):
+                continue
+            if 31 in i.writes or i.kind in ('sp_add', 'sp_other', 'sp_from_fp', 'sp_sub_reg'):
+                self.rep.add('C3b', '%s: body writes SP at 0x%x (%s) in a record without a frame pointer'
+                             % (self.name, i.a, i.text))
+                return
 
     def entry_state(self):
         regs = {k: ('orig', k) for k in A64_CALLEE}
@@ -2480,6 +2560,8 @@ class Ctx:
         for f in self.fns:
             if 'C3' in rules:
                 f.c3()
+            if 'C3b' in rules:
+                f.c3b()
             if rules & {'C4', 'C4b', 'C6'}:
                 f.analyse()
             if 'C6' in rules:
@@ -2629,7 +2711,7 @@ class Ctx:
 # --------------------------------------------------------------------------
 # driver
 # --------------------------------------------------------------------------
-ALL_RULES = ['C0', 'C1', 'C2', 'C3', 'C4', 'C4b', 'C5', 'C6']
+ALL_RULES = ['C0', 'C1', 'C2', 'C3', 'C3b', 'C4', 'C4b', 'C5', 'C6']
 
 
 def main(argv):
