@@ -8,8 +8,8 @@ src/codegen.kr:946 200c44e86c3f
 src/codegen.kr:1473 61445d2e2178
 src/codegen.kr:3588 971cbe948330
 src/codegen.kr:3666 40790e96ab4b
-src/codegen.kr:14623 29a3178fa31e
-src/codegen.kr:14825 e6a2209ec1cc
+src/codegen.kr:14663 29a3178fa31e
+src/codegen.kr:14865 e6a2209ec1cc
 src/codegen_aarch64.kr:444 60c115e38124
 src/ir.kr:28 c30794eca0b2
 src/ir.kr:30 f675ac83e84b
