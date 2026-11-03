@@ -57,3 +57,4 @@ pe_unwind_debug_windows_x86_64_legacy
 win_legacy_folded_outgoing_arm64
 pe_unwind_debug_windows_arm64_legacy
 win_a64_legacy_exec_words
+win_is_builtin_matches_gen_expr

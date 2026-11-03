@@ -29674,6 +29674,19 @@ else
     if [ -z "$PEU_WHY" ]; then pe_row_ok pe_unwind_debug_windows_arm64_legacy "ar and bc folded (no body SP write, no set_fp), main keeps set_fp; C0-C6 + C3b + C4b PASS"
     else pe_row_bad pe_unwind_debug_windows_arm64_legacy "$PEU_WHY"; fi
 fi
+# The legacy pre-scan's builtin set (#143 A19d review finding 2):
+# cg_win_is_builtin's name list (codegen.kr) decides "builtin or named call"
+# before the prologue; gen_expr / gen_expr_a64 decide it again by
+# tok_matches(wct, "<name>", n). The sets must be equal on both legacy
+# backends -- a builtin missing from the list would be pre-scanned as a named
+# call (and one whose area exceeds a call area would stop the build), a name
+# no emitter handles is dead (tests/helpers/win_builtin_set_check.py).
+if ! command -v python3 > /dev/null 2>&1; then pe_row_skip win_is_builtin_matches_gen_expr "needs python3"
+else
+    PEU_O=$(python3 -B "$DIR/helpers/win_builtin_set_check.py" "$DIR/../src" 2>&1); PEU_RC=$?
+    if [ "$PEU_RC" = 0 ]; then pe_row_ok win_is_builtin_matches_gen_expr "$(tail -1 <<< "$PEU_O")"
+    else pe_row_bad win_is_builtin_matches_gen_expr "$(head -2 <<< "$PEU_O" | tr '\n' '|')$(tail -1 <<< "$PEU_O")"; fi
+fi
 # #174 (found by the A19d review): the literal words of the Windows arm64
 # legacy exec builtins (site G1) addressed through x7 instead of sp, "zeroed"
 # STARTUPINFO with an ldp into xzr, pointed &pi into STARTUPINFO and read
