@@ -5009,8 +5009,27 @@ fn cg_slot_off(uint64 n) -> uint64 {
 // raw bytes (A19d(ii) mutation 5 is an equivalent mutant today).
 fn cg_win_fold_site(uint64 need) {
     if need > cg_win_out {
-        uint64 m = "error: internal: a folded Windows call site needs more than the function's outgoing area (#143 option C: the pre-scan and the emitter disagree)\n"
+        // located (spec 2.5.1; A19d review finding 3): the function, the site
+        // id and need/OUT, then the source span
+        uint64 id = uw_sp_site
+        if id == 0 { id = uw_sp_op_site }
+        if id == 0 { id = "unnamed" }
+        diag_loc_head(cg_win_ps_name, 0)
+        uint64 m = "internal: a folded Windows call site needs more than the function's outgoing area in '"
         write(2, m, str_len(m))
+        write(2, cg_source + tok_text_start(cg_win_ps_name), tok_text_len(cg_win_ps_name))
+        write(2, "' (site ", 8)
+        write(2, id, str_len(id))
+        write(2, ", need ", 7)
+        uint8[24] nb
+        uint64 nl = fmt_uint(nb, need)
+        write(2, nb, nl)
+        write(2, ", OUT ", 6)
+        nl = fmt_uint(nb, cg_win_out)
+        write(2, nb, nl)
+        uint64 m2 = "; #143 option C: the pre-scan and the emitter disagree)\n"
+        write(2, m2, str_len(m2))
+        diag_span_of(cg_win_ps_name)
         exit(1)
     }
     rax_cache = 0
@@ -10632,16 +10651,17 @@ fn gen_expr(uint64 node) {
             if reg_args > 4 { reg_args = 4 }
             // #143 option C: the shared accounting the pre-scan sizes OUT with
             win_stack = cg_win_call_area(arg_count)
+            uw_sp_site_set("L3")
             if cg_win_folded != 0 {
                 // folded (#143 option C): the area is the frame's [rsp+0, OUT);
-                // the slots do not move, so there is no compensation
+                // the slots do not move, so there is no compensation. The
+                // site id is set first so a located error names it.
                 cg_win_fold_site(win_stack)
                 win_stack = 0
+            } else {
+                // sub rsp, win_stack
+                emit_x64_rsp_adj(0xEC, win_stack)
             }
-
-            // sub rsp, win_stack
-            uw_sp_site_set("L3")
-            emit_x64_rsp_adj(0xEC, win_stack)
 
             // Store overflow args (5+) at [rsp + 32 + (i-4)*8]
             uint64 oi = 4
