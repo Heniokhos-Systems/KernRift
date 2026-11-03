@@ -29998,6 +29998,18 @@ for peu_m in "pe_unwind_mixed_fault_arm64_ir|" "pe_unwind_mixed_fault_arm64_lega
     if [ -z "$PEU_WHY" ]; then pe_row_ok "$peu_mr" "a, c SP-fixed; b, main SP-moving; C0-C6 + C3b + C4b PASS (static; the run is the A18 windows-11-arm job)"
     else pe_row_bad "$peu_mr" "$PEU_WHY"; fi
 done
+# Instruction-count calibration (#143 A15, spec 9): tests/perf/calib.kr at
+# N = 1000 and 2000 under qemu-user (-one-insn-per-tb -d exec,nochain) must
+# differ by exactly 1000 x its loop body's disassembled length, on x86_64 and
+# arm64 -- the counting method the perf gate (tests/gates/pe_unwind_perf.sh)
+# relies on.
+if ! command -v qemu-x86_64-static > /dev/null 2>&1 || ! command -v qemu-aarch64-static > /dev/null 2>&1 || ! command -v llvm-objdump > /dev/null 2>&1; then
+    pe_row_skip perf_insn_count_calibration "needs qemu-x86_64-static, qemu-aarch64-static and llvm-objdump"
+else
+    PEU_O=$(PEU_PERF_TMP="$T10_D" bash "$DIR/gates/pe_unwind_perf.sh" --calibration-only "$T10_KRC" "$T10_D/peu_perf" 2>&1); PEU_RC=$?
+    if [ "$PEU_RC" = 0 ]; then pe_row_ok perf_insn_count_calibration "$(grep '^calibration' <<< "$PEU_O" | sed 's/^calibration //' | tr '\n' ';')"
+    else pe_row_bad perf_insn_count_calibration "$(grep -m2 -e FAIL -e error <<< "$PEU_O" | tr '\n' '|' | cut -c1-200)"; fi
+fi
 # The golden classification (#143 option C; spec 2.5.5, finding 21): every
 # function of the frames corpus and of the mixed fixtures, on all four
 # backends, has the class (and arm64 IR shape) of

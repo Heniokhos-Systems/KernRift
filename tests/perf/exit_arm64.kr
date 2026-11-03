@@ -1,0 +1,7 @@
+// The arm64 Linux exits of the perf ports (movz x0, #0|#1; movz x8, #93; svc #0), one word per string.
+fn pe_exit_ok() {
+    asm { "0xD2800000" "0xD2800BA8" "0xD4000001" }
+}
+fn pe_exit_bad() {
+    asm { "0xD2800020" "0xD2800BA8" "0xD4000001" }
+}

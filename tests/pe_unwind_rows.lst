@@ -68,3 +68,4 @@ pe_unwind_win_frame_classes
 pe_unwind_sp_sites_reached
 a64_win_sp_selftest
 a64_listing_prints_lsl12
+perf_insn_count_calibration

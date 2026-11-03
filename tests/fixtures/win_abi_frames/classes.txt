@@ -21,9 +21,10 @@
 #     main asm or hosted (A4/A5); mixed b asm. S2 where a save offset would
 #     pass 504 (one spill slot per vreg), else S1.
 #   arm64 legacy: rspcheck/main asm or hosted (G5/G6); mixed b asm.
-# Measured outside the suite (tests/perf/ is not in the tree; the A15 perf
-# gate checks them), arm64 IR, --freestanding: fib.kr fib S1; sha256.kr rotr
-# S1, block S2, digest S2, k_init S2 (spec 2.5.3's prediction holds).
+# The perf ports (tests/perf/, A15; plan A15, A19e-h review finding 3), arm64
+# IR, --freestanding, each built with its exit_arm64.kr: fib S1; sha256 rotr
+# S1, block S2, digest S2, k_init S2 (spec 2.5.3's prediction). Only these
+# functions are compared for a "+" fixture (the exit helpers are harness).
 #
 # backend|fixture (under tests/fixtures)|flags|function|class|shape
 x64-ir|win_abi_frames/frames_x86_64.kr|--freestanding|f10|SP-fixed|-
@@ -108,3 +109,8 @@ arm64-legacy|pe_unwind_mixed_fault_arm64.kr|--legacy|c|SP-fixed|-
 arm64-legacy|pe_unwind_mixed_fault_arm64.kr|--legacy|b|SP-moving|-
 arm64-legacy|pe_unwind_mixed_fault_arm64.kr|--legacy|a|SP-fixed|-
 arm64-legacy|pe_unwind_mixed_fault_arm64.kr|--legacy|main|SP-moving|-
+arm64-ir|../perf/fib.kr+../perf/exit_arm64.kr|--freestanding|fib|SP-fixed|S1
+arm64-ir|../perf/sha256.kr+../perf/exit_arm64.kr|--freestanding|rotr|SP-fixed|S1
+arm64-ir|../perf/sha256.kr+../perf/exit_arm64.kr|--freestanding|block|SP-fixed|S2
+arm64-ir|../perf/sha256.kr+../perf/exit_arm64.kr|--freestanding|digest|SP-fixed|S2
+arm64-ir|../perf/sha256.kr+../perf/exit_arm64.kr|--freestanding|k_init|SP-fixed|S2

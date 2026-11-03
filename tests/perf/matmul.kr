@@ -1,0 +1,42 @@
+// Port of benchmarks/matmul.kr: N x N integer matrix product on local
+// (stack) arrays passed by address (see README: no static arrays).
+fn init(uint64 a, uint64 b, uint64 c, uint64 n) {
+    uint64 i = 0
+    while i < n {
+        uint64 j = 0
+        while j < n {
+            store64(a + (i * n + j) * 8, (i + j) & 0xFF)
+            store64(b + (i * n + j) * 8, (i + j) & 0xFF)
+            store64(c + (i * n + j) * 8, 0)
+            j = j + 1
+        }
+        i = i + 1
+    }
+}
+fn mul(uint64 a, uint64 b, uint64 c, uint64 n) {
+    uint64 i = 0
+    while i < n {
+        uint64 k = 0
+        while k < n {
+            uint64 aik = load64(a + (i * n + k) * 8)
+            uint64 j = 0
+            while j < n {
+                uint64 p = c + (i * n + j) * 8
+                store64(p, load64(p) + aik * load64(b + (k * n + j) * 8))
+                j = j + 1
+            }
+            k = k + 1
+        }
+        i = i + 1
+    }
+}
+fn main() {
+    uint64[484] a
+    uint64[484] b
+    uint64[484] c
+    uint64 r = 0
+    while r < 10 { init(a, b, c, 22)  mul(a, b, c, 22)  r = r + 1 }
+    // C[0][0] = sum k^2 for k < 22 = 3311; C[21][21] = sum (21+k)^2 for k < 22 = 22715
+    if load64(c) == 3311 && load64(c + (21 * 22 + 21) * 8) == 22715 { pe_exit_ok() }
+    pe_exit_bad()
+}

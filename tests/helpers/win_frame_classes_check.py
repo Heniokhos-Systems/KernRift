@@ -37,8 +37,15 @@ def main():
     bad, nf = [], 0
     for i, (be, fx, flags) in enumerate(order):
         stem = os.path.join(work, 'c%d' % i)
+        src = os.path.join(tdir, 'fixtures', fx)
+        if '+' in fx:
+            # a perf port and its exit file (tests/perf/, A15): concatenated
+            src = stem + '.kr'
+            with open(src, 'w') as o:
+                for part in fx.split('+'):
+                    o.write(open(os.path.join(tdir, 'fixtures', part)).read() + '\n')
         cmd = [krc] + flags.split() + ['--arch=' + ARCH[be], '--target=windows', '--emit=pe',
-               '--test-listing=' + stem + '.lst', os.path.join(tdir, 'fixtures', fx), '-o', stem + '.exe']
+               '--test-listing=' + stem + '.lst', src, '-o', stem + '.exe']
         try:
             r = subprocess.run(cmd, capture_output=True, text=True, timeout=120, preexec_fn=cap)
         except subprocess.TimeoutExpired:
@@ -55,6 +62,10 @@ def main():
             if len(p) == 3:
                 got[p[0]] = (p[1], p[2])
         want = groups[(be, fx, flags)]
+        if '+' in fx:
+            # a perf port: only the functions the list names (its exit
+            # helpers are the port's harness, not part of the claim)
+            got = {k: v for k, v in got.items() if k in want}
         for fn in sorted(set(want) | set(got)):
             nf += 1
             if want.get(fn) != got.get(fn):
