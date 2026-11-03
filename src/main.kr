@@ -9520,6 +9520,10 @@ fn main() {
             } else if str_starts_with(arg, "--dump-argv-quoter=", 19) != 0 {
                 // Same, for the op-114 command-line quoting leaf.
                 c7_dump_quoter_path = arg + 19
+            } else if str_eq_full(arg, "--selftest-a64-win-sp") != 0 {
+                // Internal, undocumented in --help, test-only (#143 option C):
+                // the arm64 IR allow-list and the SP-word sizes, then exit.
+                ir_a64_win_sp_selftest()
             } else if str_eq_full(arg, "--selftest-win-sp-neutral") != 0 {
                 // Internal, undocumented in --help, test-only (#143 option C):
                 // check ir_x86_win_op_sp_neutral case by case and exit.

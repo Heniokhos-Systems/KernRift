@@ -29512,6 +29512,18 @@ if [ "$PEU_RC" = 0 ] && [ "$(grep -c ': ok$' <<< "$PEU_O")" = 17 ] && ! grep -q 
 else
     pe_row_bad ir_x86_win_sp_neutral_selftest "rc=$PEU_RC $(grep -m1 -v ': ok$' <<< "$PEU_O" | cut -c1-160)"
 fi
+# The arm64 side (#143 A19e; A19e-h review finding 2): the hidden
+# --selftest-a64-win-sp checks ir_a64_win_op_sp_neutral (calls, op 51 below
+# 100 and op 131 neutral; 52, 76, 96, 113, 114, op 51 at 100 and an unaudited
+# op SP-moving) and the sizes emit_a64_sp_word reports to the out-audit:
+# `sub sp, sp, #imm` and the S2 hi form `sub sp, sp, #imm, lsl #12`
+# (imm << 12; the old 0xFF800000 mask read it as imm), a release 0.
+PEU_O=$($T10_KRC --selftest-a64-win-sp 2>&1); PEU_RC=$?
+if [ "$PEU_RC" = 0 ] && [ "$(grep -c ': ok$' <<< "$PEU_O")" = 17 ] && ! grep -q WRONG <<< "$PEU_O"; then
+    pe_row_ok a64_win_sp_selftest "17 cases"
+else
+    pe_row_bad a64_win_sp_selftest "rc=$PEU_RC $(grep -m1 -v ': ok$' <<< "$PEU_O" | cut -c1-160)"
+fi
 # --debug on Windows x86_64 IR (#143 A19c; spec 2.5.1 X13, 2.5.5): in
 # tests/fixtures/win_debug_traps.kr `bc`'s bounds check (op 131: ExitProcess
 # behind a shadow area) makes it SP-moving, `ar` stays SP-fixed; the image

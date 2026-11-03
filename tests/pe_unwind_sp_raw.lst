@@ -50,3 +50,9 @@ ir.kr|ir_emit_x86_insn|emit_byte(0x57)|1|Linux/macOS-only execve argv push (L11,
 ir.kr|ir_emit_x86_insn|emit_byte(0x6A); emit_byte(0x00)|1|Linux/macOS-only execve argv push (L11, X8 non-Windows branch)
 ir.kr|ir_emit_x86_insn|if op == 123 { emit_byte(0x9D) }|1|second byte of setl/setge (0F 9C / 0F 9D), not pushf/popf
 ir_aarch64.kr|ir_a64_win_alloc_low|emit_a64(0xCB3063FF)|1|prologue/epilogue (excluded: not body code; spec 2.5.1 X17, L12, A8, G8)
+ir_aarch64.kr|ir_a64_win_sp_selftest|bad = bad + ir_x86_win_sp_neutral_case("sp word sub sp, sp, #16 allocates 16", a64_sp_word_alloc(0xD10043FF), 16)|1|selftest data: the word is an argument to a64_sp_word_alloc, never emitted
+ir_aarch64.kr|ir_a64_win_sp_selftest|bad = bad + ir_x86_win_sp_neutral_case("sp word sub sp, sp, #0xe0 allocates 224", a64_sp_word_alloc(0xD10383FF), 224)|1|selftest data: the word is an argument to a64_sp_word_alloc, never emitted
+ir_aarch64.kr|ir_a64_win_sp_selftest|bad = bad + ir_x86_win_sp_neutral_case("sp word sub sp, sp, #1, lsl #12 allocates 4096", a64_sp_word_alloc(0xD14007FF), 4096)|1|selftest data: the word is an argument to a64_sp_word_alloc, never emitted
+ir_aarch64.kr|ir_a64_win_sp_selftest|bad = bad + ir_x86_win_sp_neutral_case("sp word sub sp, sp, #12, lsl #12 allocates 49152", a64_sp_word_alloc(0xD14033FF), 49152)|1|selftest data: the word is an argument to a64_sp_word_alloc, never emitted
+ir_aarch64.kr|ir_a64_win_sp_selftest|bad = bad + ir_x86_win_sp_neutral_case("sp word add sp, sp, #16 allocates 0", a64_sp_word_alloc(0x910043FF), 0)|1|selftest data: the word is an argument to a64_sp_word_alloc, never emitted
+ir_aarch64.kr|ir_a64_win_sp_selftest|bad = bad + ir_x86_win_sp_neutral_case("sp word add sp, sp, #1, lsl #12 allocates 0", a64_sp_word_alloc(0x914007FF), 0)|1|selftest data: the word is an argument to a64_sp_word_alloc, never emitted

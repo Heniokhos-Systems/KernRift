@@ -1167,6 +1167,32 @@ fn ir_a64_win_fn_moves_sp(uint64 name_tok) -> uint64 {
     return 0
 }
 
+// --selftest-a64-win-sp (hidden, test-only; A19e-h review finding 2): the
+// arm64 IR allow-list and the SP-word sizes, case by case. One line per case;
+// exit 0 when every case gives the expected answer, else 1.
+fn ir_a64_win_sp_selftest() {
+    uint64 bad = 0
+    bad = bad + ir_x86_win_sp_neutral_case("a64 op 50 (call) neutral", ir_a64_win_op_sp_neutral(50, 0), 1)
+    bad = bad + ir_x86_win_sp_neutral_case("a64 op 87 (indirect call) neutral", ir_a64_win_op_sp_neutral(87, 0), 1)
+    bad = bad + ir_x86_win_sp_neutral_case("a64 op 51 imm 99 neutral", ir_a64_win_op_sp_neutral(51, 99), 1)
+    bad = bad + ir_x86_win_sp_neutral_case("a64 op 51 imm 100 SP-moving", ir_a64_win_op_sp_neutral(51, 100), 0)
+    bad = bad + ir_x86_win_sp_neutral_case("a64 op 131 neutral (emits nothing on Windows)", ir_a64_win_op_sp_neutral(131, 0), 1)
+    bad = bad + ir_x86_win_sp_neutral_case("a64 op 52 (syscall) SP-moving", ir_a64_win_op_sp_neutral(52, 0), 0)
+    bad = bad + ir_x86_win_sp_neutral_case("a64 op 76 (memset, not audited) SP-moving", ir_a64_win_op_sp_neutral(76, 0), 0)
+    bad = bad + ir_x86_win_sp_neutral_case("a64 op 96 (asm) SP-moving", ir_a64_win_op_sp_neutral(96, 0), 0)
+    bad = bad + ir_x86_win_sp_neutral_case("a64 op 113 (exec) SP-moving", ir_a64_win_op_sp_neutral(113, 0), 0)
+    bad = bad + ir_x86_win_sp_neutral_case("a64 op 114 (exec_argv) SP-moving", ir_a64_win_op_sp_neutral(114, 0), 0)
+    bad = bad + ir_x86_win_sp_neutral_case("a64 op 149 (not audited) SP-moving", ir_a64_win_op_sp_neutral(149, 0), 0)
+    bad = bad + ir_x86_win_sp_neutral_case("sp word sub sp, sp, #16 allocates 16", a64_sp_word_alloc(0xD10043FF), 16)
+    bad = bad + ir_x86_win_sp_neutral_case("sp word sub sp, sp, #0xe0 allocates 224", a64_sp_word_alloc(0xD10383FF), 224)
+    bad = bad + ir_x86_win_sp_neutral_case("sp word sub sp, sp, #1, lsl #12 allocates 4096", a64_sp_word_alloc(0xD14007FF), 4096)
+    bad = bad + ir_x86_win_sp_neutral_case("sp word sub sp, sp, #12, lsl #12 allocates 49152", a64_sp_word_alloc(0xD14033FF), 49152)
+    bad = bad + ir_x86_win_sp_neutral_case("sp word add sp, sp, #16 allocates 0", a64_sp_word_alloc(0x910043FF), 0)
+    bad = bad + ir_x86_win_sp_neutral_case("sp word add sp, sp, #1, lsl #12 allocates 0", a64_sp_word_alloc(0x914007FF), 0)
+    if bad != 0 { exit(1) }
+    exit(0)
+}
+
 fn ir_a64_sp_site(uint64 op) -> uint64 {
     if op == 52 { return "A1" }
     if op == 113 { return "A2" }

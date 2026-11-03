@@ -66,3 +66,4 @@ pe_unwind_mixed_fault_arm64_ir
 pe_unwind_mixed_fault_arm64_legacy
 pe_unwind_win_frame_classes
 pe_unwind_sp_sites_reached
+a64_win_sp_selftest

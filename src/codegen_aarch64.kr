@@ -246,11 +246,18 @@ fn emit_a64_sp_word(uint64 w) {
     if cg_win_folded != 0 && (w & 0xFFC003FF) == 0xD10003FF { cg_win_fold_site((w >> 10) & 0xFFF)  return }
     if cg_win_folded != 0 && (w & 0xFFC003FF) == 0x910003FF { uw_sp_site = 0  return }
     emit_a64(w)
-    uint64 amt = 0
-    if (w & 0xFF800000) == 0xD1000000 { amt = (w >> 10) & 0xFFF }               // sub sp, sp, #imm
-    if (w & 0xFF800000) == 0xD1400000 { amt = ((w >> 10) & 0xFFF) << 12 }       // sub sp, sp, #imm, lsl #12
-    cg_win_audit_site(amt)
+    cg_win_audit_site(a64_sp_word_alloc(w))
     uw_sp_moves()
+}
+
+// The bytes an SP word allocates (0 for a release or any other form): `sub
+// sp, sp, #imm` and `sub sp, sp, #imm, lsl #12`. Bit 22 is the shift, so the
+// mask keeps it (A19e-h review finding 2: 0xFF800000 matched both forms as
+// the unshifted one).
+fn a64_sp_word_alloc(uint64 w) -> uint64 {
+    if (w & 0xFFC00000) == 0xD1000000 { return (w >> 10) & 0xFFF }             // sub sp, sp, #imm
+    if (w & 0xFFC00000) == 0xD1400000 { return ((w >> 10) & 0xFFF) << 12 }     // sub sp, sp, #imm, lsl #12
+    return 0
 }
 
 // ---- Range-checked branch displacement encoders ----
