@@ -1,0 +1,87 @@
+# native_corpus_nonrows.lst -- the names in tests/run_tests.sh that match the
+# native corpus pattern (wine|windows|win_|_win|c7_) but are not suite rows
+# (#143, A15-17 review finding 1). tests/windows/native_corpus_check.py (row
+# native_corpus_matches_suite) requires every such name to be either a row
+# in native_corpus.lst or listed here, so a new Windows row cannot be left
+# out of the native corpus; an entry that no longer occurs in run_tests.sh
+# fails as stale.
+
+# helper programs (tests/helpers/*.py, *.c) and the programs they run
+a64_win_exec_words
+a64_win_frame_scan
+a64_win_legacy_fold_scan
+a64_win_shape_codes
+c7_leaf_harness
+c7_wine_child
+win_builtin_set_check
+win_frame_classes
+win_frame_classes_check
+wine_unwind_chain
+x86_win_rbp_scan
+
+# shell functions of run_tests.sh
+c7_bad
+c7_blob_in
+c7_dbcs_rows
+c7_ok
+c7_skip
+c7_wine
+log_wine
+peu_wine_fault
+s1b_wine
+t10_wine
+t12_wine
+wine_na
+wine_path
+
+# compiler functions named in comments
+cg_win_is_builtin
+decl_is_routed_win_import
+ir_a64_win_op_sp_neutral
+ir_x86_win_op_sp_neutral
+is_routed_win_import
+win_syscall_raw_refused
+
+# fixture, oracle and temporary file names
+c7_parse
+c7_quote
+kr_win_iat_abi
+krc_win
+krc_win_plain
+win_a64_shapes
+win_abi_frames
+win_debug_traps
+win_fold_diff
+win_iat_abi
+win_import_float
+win_import_float_guarded
+win_import_float_ret
+win_import_fnaddr
+win_import_prefix
+win_import_unguarded
+win_legacy_out
+win_rbp_colour
+win_sp_sites
+win_syscall_raw
+win_syscall_raw_guarded
+
+# name prefixes (the rows themselves are listed whole, or made by a $-template)
+c7_
+c7_lead_table_
+c7_parser_dbcs_
+c7_roundtrip_dbcs_
+cpwin_
+krc_c7_
+krc_cpwin_
+sys_net_ifaces_windows_wine_
+
+# plain words, tool names and rejected-value test inputs
+windows
+windowsBANANA
+wine
+winedbg
+wineserver
+
+# SKIP-only labels: printed only when a Linux tool is missing; when they run, these rows report under other names (cpw_* rows, uefi_win64_call_ptr_placement)
+call_ptr_windows_shadow_overflow
+uefi_win64_call_ptr_ir

@@ -4,7 +4,12 @@
 # Linux arm64 and are left out). tests/windows/native_judge.py requires each to
 # appear in the native log exactly once. A row added to the suite with such a
 # name must be added here (a native run without it fails).
+# Row native_corpus_matches_suite (tests/windows/native_corpus_check.py, with
+# native_corpus_nonrows.lst) derives the names from run_tests.sh and fails on
+# any Windows-pattern row missing here (A15-17 review finding 1).
 a64_win_frame_shape
+a64_win_sp_fixed_shape
+a64_win_sp_selftest
 alias_byte_addr_windows_wine
 alloc_guard_fault_read_windows_wine
 alloc_guard_fault_windows_wine
@@ -52,6 +57,8 @@ emit_lkm_target_windows_refused
 emit_reject_winBANANA
 image_emit_last_wins
 ir_x86_win_no_rbp_colour
+ir_x86_win_rbp_colour_when_sp_fixed
+ir_x86_win_sp_neutral_selftest
 krc_self_builds_for_windows
 mainrc_explicit_exit_still_wins
 net_loopback_windows_wine
@@ -59,6 +66,12 @@ net_user_names_windows_wine
 os_prune_dead_windows_arm
 pe_unwind_argv_main_fault_legacy_windows_wine
 pe_unwind_argv_main_fault_windows_wine
+pe_unwind_debug_windows_arm64_ir
+pe_unwind_debug_windows_arm64_legacy
+pe_unwind_debug_windows_x86_64_ir
+pe_unwind_debug_windows_x86_64_legacy
+pe_unwind_mixed_fault_legacy_windows_wine
+pe_unwind_mixed_fault_windows_wine
 pe_unwind_naked_fault_windows_wine
 pe_unwind_nested_fault_legacy_windows_wine
 pe_unwind_nested_fault_windows_wine
@@ -66,6 +79,7 @@ pe_unwind_obj_link_windows_wine
 pe_unwind_stack_args_fault_legacy_windows_wine
 pe_unwind_stack_args_fault_windows_wine
 pe_unwind_temp_push_fault_windows_wine
+pe_unwind_win_frame_classes
 runner_builds_for_windows
 runner_windows_runs_krbo_under_wine
 smoke_pe_runs_under_wine
@@ -113,11 +127,12 @@ uefi_emit_last_wins_to
 uefi_win64_call_ptr_placement
 uefi_win64_entry_params
 uefi_win64_not_sysv
+win_a64_legacy_exec_words
 win_abi_frames_exec_arm64_ir
 win_abi_frames_exec_arm64_legacy
 win_abi_frames_exec_x86_64_ir
 win_abi_frames_exec_x86_64_legacy
-wine_crash_override_does_not_mask
+win_fold_shared_paths_in_identity_corpus
 win_import_float_fat_unshipped_slice_builds
 win_import_float_param_refused
 win_import_float_return_refused
@@ -141,6 +156,10 @@ win_import_user_send_direct_arm64
 win_import_user_send_direct_legacy
 win_import_user_send_direct_x86_64
 win_import_win64_stack_args
+win_is_builtin_matches_gen_expr
+win_legacy_folded_outgoing_arm64
+win_legacy_folded_outgoing_x86_64
+win_legacy_out_audit
 win_syscall_raw_advice_ir
 win_syscall_raw_advice_ir_legacy_obj
 win_syscall_raw_advice_ir_obj
@@ -164,3 +183,4 @@ win_syscall_raw_refused_legacy_x86_64
 win_syscall_raw_refused_obj_arm64
 win_syscall_raw_refused_obj_x86_64
 win_syscall_raw_refused_x86_64
+wine_crash_override_does_not_mask

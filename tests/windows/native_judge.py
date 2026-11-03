@@ -20,6 +20,11 @@ vacuously:
     reclassification is accepted only when the row's failure REASON matches
     the class's rule (RULES below), never by name alone;
   * a SKIP of a corpus row is a native FAIL (no tool is absent natively);
+  * every row of tests/pe_unwind_known_reds.lst must FAIL exactly once, for
+    its known reason (KNOWN_REDS below; require_rows' rule 3, A15-17 review
+    finding 2): it is then judged KNOWN-RED, not FAIL. A known red that
+    PASSes, SKIPs, is absent, reports twice or fails for another reason is a
+    native FAIL, and a known red without a reason here is an input error;
   * the per-row script results replace their rows and must be PASS.
 Writes <out dir>/summary.txt (one line per corpus row:
 `<row>: PASS | FAIL (why) | SKIP (class: proof; native reason)`) and prints the
@@ -70,6 +75,16 @@ RULES = {
 }
 SCRIPTED = {'concurrent': 'concurrent.txt', 'hostrows': 'hostrows.txt'}
 
+# The known reds (tests/pe_unwind_known_reds.lst), each with the failure
+# reason it must report. The row text is run_tests.sh's own; natively the
+# program runs through native_exec.sh, so the reason may say "native" where
+# Wine says "Wine", and nothing else may differ.
+KNOWN_REDS = {
+    # #160: the C host's rsi is clobbered by KR code (exit 41, want 40)
+    'pe_unwind_host_rsi_across_kr': re.compile(
+        r"^\(#160: the C host's rsi does not survive a call into KR \((?:Wine|native) exit 41, want 40\)\)$"),
+}
+
 
 def load_list(name):
     rows = []
@@ -96,6 +111,12 @@ def main(argv):
             if f[0] in reclass:
                 raise ValueError('native_reclass.lst: %s twice' % f[0])
             reclass[f[0]] = (f[1], f[2])
+        reds = load_list(os.path.join('..', 'pe_unwind_known_reds.lst'))
+        for r in reds:
+            if r not in KNOWN_REDS:
+                raise ValueError('known red %s has no reason in native_judge.py KNOWN_REDS' % r)
+            if r in reclass:
+                raise ValueError('known red %s is also reclassified' % r)
     except (OSError, ValueError) as ex:
         print('native_judge.py: %s' % ex)
         return 2
@@ -124,6 +145,17 @@ def main(argv):
     judged = {}
     for name in sorted(seen):
         res = seen[name]
+        if name in reds:
+            if len(res) != 1:
+                judged[name] = ('FAIL', '(known red) reported %d times' % len(res))
+            elif res[0][0] != 'FAIL':
+                judged[name] = ('FAIL', '(known red) %s %s -- it must FAIL until its defect is fixed; if it is '
+                                'fixed, remove it from tests/pe_unwind_known_reds.lst' % res[0])
+            elif not KNOWN_REDS[name].match(res[0][1]):
+                judged[name] = ('FAIL', '(known red, not its known failure) ' + res[0][1])
+            else:
+                judged[name] = ('KNOWN-RED', res[0][1])
+            continue
         if name in corpus and len(res) != 1:
             judged[name] = ('FAIL', 'reported %d times' % len(res))
             continue
@@ -145,7 +177,7 @@ def main(argv):
         if st == 'SKIP' and name in reclass and reclass[name][0] not in RULES:
             st = 'FAIL'
         judged[name] = (st, why)
-    for name in corpus:
+    for name in corpus + reds:
         if name not in seen:
             judged[name] = ('FAIL', 'absent from the log')
     nf = 0
@@ -155,16 +187,16 @@ def main(argv):
             continue
         if st == 'FAIL':
             nf += 1
-        elif name not in corpus:
+        elif name not in corpus and name not in reds:
             continue          # a non-corpus row that passed
         lines.append('%s: %s%s' % (name, st, (' ' + why) if why else ''))
-    n = {s: sum(1 for l in lines if re.match(r'^\S+: %s\b' % s, l)) for s in ('PASS', 'FAIL', 'SKIP')}
+    n = {s: sum(1 for l in lines if re.match(r'^\S+: %s( |$)' % s, l)) for s in ('PASS', 'FAIL', 'SKIP', 'KNOWN-RED')}
     for b in bad:
         lines.append('JUDGE: FAIL (%s)' % b)
     if not c7only:
         open(os.path.join(out, 'summary.txt'), 'w').write('\n'.join(lines) + '\n')
-        print('native corpus: %d rows expected, %d judged -- PASS %d, FAIL %d, SKIP %d%s'
-              % (len(corpus), len(lines) - len(bad), n['PASS'], n['FAIL'], n['SKIP'],
+        print('native corpus: %d rows expected + %d known reds, %d judged -- PASS %d, FAIL %d, SKIP %d, KNOWN-RED %d%s'
+              % (len(corpus), len(reds), len(lines) - len(bad), n['PASS'], n['FAIL'], n['SKIP'], n['KNOWN-RED'],
                  ''.join('; JUDGE FAIL: ' + b for b in bad)))
     else:
         print('\n'.join(lines))
@@ -199,7 +231,9 @@ def selftest():
                 cls = reclass.get(n)
                 rows.append('  %s: FAIL %s' % (n, good_fail[cls]) if cls in good_fail else '  %s: PASS' % n)
             rows.append('  some_linux_row: PASS')
-            rows.append('=== Results: %d/%d passed, 0 failed ===' % (len(rows), len(rows)))
+            for r in reds:
+                rows.append('  %s: FAIL %s' % (r, red_why))
+            rows.append('=== Results: %d/%d passed, %d failed ===' % (len(rows) - len(reds), len(rows), len(reds)))
             scripted = ['%s: PASS (native)' % n for n, c in reclass.items() if c in SCRIPTED]
             rows, scripted = mut(rows, scripted)
             open(os.path.join(d, 'suite.log'), 'w').write('\n'.join(rows) + '\n')
@@ -210,6 +244,10 @@ def selftest():
         finally:
             shutil.rmtree(d)
 
+    reds = load_list(os.path.join('..', 'pe_unwind_known_reds.lst'))
+    red = 'pe_unwind_host_rsi_across_kr'
+    assert red in reds, 'the selftest needs the #160 known red'
+    red_why = "(#160: the C host's rsi does not survive a call into KR (Wine exit 41, want 40))"
     fault = next(n for n, c in reclass.items() if c == 'fault')
     cp = next(n for n, c in reclass.items() if c == 'cp932')
     plain = next(n for n in corpus if n not in reclass)
@@ -234,6 +272,16 @@ def selftest():
         ('a CP932 row failing for another reason', 1, lambda r, s: (sub(r, cp, '  %s: FAIL (rc=3 crashed)' % cp), s)),
         ('a scripted row without its script result', 1, lambda r, s: (r, [])),
         ('a scripted row whose script FAILed', 1, lambda r, s: (r, [x.replace(': PASS', ': FAIL') for x in s])),
+        ('a known red failing for its reason in the native wording', 0, lambda r, s: (sub(r, red,
+            '  %s: FAIL %s' % (red, red_why.replace('Wine exit', 'native exit'))), s)),
+        ('a known red that PASSes', 1, lambda r, s: (sub(r, red, '  %s: PASS (rsi survives)' % red), s)),
+        ('a known red that SKIPs', 1, lambda r, s: (sub(r, red, '  %s: SKIP (the control failed)' % red), s)),
+        ('a known red absent', 1, lambda r, s: ([l for l in r if not l.startswith('  %s: ' % red)], s)),
+        ('a known red twice', 1, lambda r, s: (r + ['  %s: FAIL %s' % (red, red_why)], s)),
+        ('a known red failing for another reason', 1, lambda r, s: (sub(r, red,
+            '  %s: FAIL (build/link failed)' % red), s)),
+        ('a known red with another exit code', 1, lambda r, s: (sub(r, red,
+            '  %s: FAIL %s' % (red, red_why.replace('exit 41', 'exit 5'))), s)),
     ]
     bad = 0
     for name, want, mut in cases:

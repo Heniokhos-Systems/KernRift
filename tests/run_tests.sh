@@ -30462,6 +30462,74 @@ else
     else pe_row_bad native_env_allowlist_selftest "$PEU_WHY"; fi
 fi
 
+# The native corpus is complete (#143, A15-17 review finding 1): every name of
+# this file that matches the corpus pattern (PAT in native_corpus_check.py,
+# require_rows' Windows pattern, qemu excluded) is a row of tests/windows/native_corpus.lst or a listed non-row
+# (native_corpus_nonrows.lst); every corpus row is a name here or made by a
+# $-template here; a template making Windows-pattern names matches a corpus
+# row. Red before the review fix: 17 rows were missing from the corpus.
+if ! command -v python3 > /dev/null 2>&1; then pe_row_skip native_corpus_matches_suite "no python3"
+else
+    PEU_O=$(python3 -B "$DIR/windows/native_corpus_check.py" "$DIR/run_tests.sh" "$DIR/windows/native_corpus.lst" "$DIR/windows/native_corpus_nonrows.lst" 2>&1); PEU_RC=$?
+    if [ "$PEU_RC" = 0 ]; then pe_row_ok native_corpus_matches_suite "$(tail -1 <<< "$PEU_O" | sed 's/^native_corpus_check: //')"
+    else pe_row_bad native_corpus_matches_suite "rc=$PEU_RC $(head -3 <<< "$PEU_O" | sed 's/^native_corpus_check: //' | tr '\n' '|' | cut -c1-300)"; fi
+fi
+
+# Mutant 2b (tests/windows/m2b_mutant.py; #143 A19h, Task D 3c; A15-17 review
+# finding 3) still applies to this tree and still bites: applied to a copy of
+# src/, it changes codegen.kr and nothing else, by exactly its one edit (six
+# lines removed: the fold/SP-fixed block and the frame-pointer condition; a
+# second application refuses); the mutant compiler builds; its
+# pe_unwind_mixed_fault.kr --legacy image fails the static checker's C3b
+# (RSP written in a record without a frame register) while the real
+# compiler's passes C0-C6 + C3b + C4b. Natively cdb_chain.sh must FAIL on that
+# image (Task D 3c); Wine recovers from this error class.
+PEU_ROW=m2b_mutant_applies
+if ! command -v python3 > /dev/null 2>&1 || ! command -v llvm-readobj > /dev/null 2>&1 || ! command -v llvm-objdump > /dev/null 2>&1; then
+    pe_row_skip $PEU_ROW "needs python3, llvm-readobj and llvm-objdump"
+else
+    PEU_WHY=""; PEU_M="$T10_D/peu_m2b"; rm -rf "$PEU_M"; mkdir -p "$PEU_M/src" "$PEU_M/orig"
+    PEU_SRCS=$(make -s -C "$DIR/.." -f - peu_print_srcs 2> /dev/null <<'PEUMKEOF'
+include Makefile
+peu_print_srcs:
+	@echo $(SRCS)
+PEUMKEOF
+)
+    for PEU_F in $PEU_SRCS; do mkdir -p "$PEU_M/src/$(dirname "$PEU_F")"; cp "$DIR/../$PEU_F" "$PEU_M/src/$PEU_F"; done
+    cp -r "$PEU_M/src/src" "$PEU_M/orig/src" 2> /dev/null
+    if [ -z "$PEU_SRCS" ] || [ ! -f "$PEU_M/src/src/codegen.kr" ]; then PEU_WHY="could not read SRCS from the Makefile"
+    elif ! python3 -B "$DIR/windows/m2b_mutant.py" "$PEU_M/src/src" > "$PEU_M/apply.log" 2>&1; then PEU_WHY="the mutant did not apply: $(head -1 "$PEU_M/apply.log" | cut -c1-160)"
+    else
+        PEU_D=$(diff -rq "$PEU_M/orig/src" "$PEU_M/src/src")
+        [ "$(wc -l <<< "$PEU_D")" = 1 ] && grep -q '/codegen.kr and .*/codegen.kr differ$' <<< "$PEU_D" \
+            || PEU_WHY="$PEU_WHY changed files: $(tr '\n' ' ' <<< "$PEU_D" | cut -c1-160);"
+        PEU_D=$(diff "$PEU_M/orig/src/codegen.kr" "$PEU_M/src/src/codegen.kr")
+        [ "$(grep -c '^< ' <<< "$PEU_D")" = 6 ] && [ "$(grep -c '^> ' <<< "$PEU_D")" = 0 ] && grep -q '^< .*uw_fn_sp_fixed = 1' <<< "$PEU_D" \
+            || PEU_WHY="$PEU_WHY the codegen.kr diff is not the mutant's one edit (6 lines removed);"
+        python3 -B "$DIR/windows/m2b_mutant.py" "$PEU_M/src/src" > /dev/null 2>&1 && PEU_WHY="$PEU_WHY a second application did not refuse;"
+        (cd "$PEU_M/src" && cat $PEU_SRCS | grep -v '^import "' > "$PEU_M/krc_m.kr")
+        if ! ( ulimit -v 4000000; timeout 120 $T10_KRC --arch=x86_64 "$PEU_M/krc_m.kr" -o "$PEU_M/krc_m" ) > "$PEU_M/build.log" 2>&1; then
+            PEU_WHY="$PEU_WHY the mutant compiler does not build: $(grep -m1 error "$PEU_M/build.log" | cut -c1-120);"
+        else
+            for PEU_C in mutant real; do
+                PEU_K="$PEU_M/krc_m"; [ "$PEU_C" = real ] && PEU_K="$T10_KRC"
+                if ! $PEU_K --legacy --arch=x86_64 --target=windows --emit=pe --test-listing="$PEU_M/$PEU_C.lst" "$DIR/fixtures/pe_unwind_mixed_fault.kr" -o "$PEU_M/$PEU_C.exe" > /dev/null 2>&1; then
+                    PEU_WHY="$PEU_WHY $PEU_C: the fixture does not build;"; continue
+                fi
+                PEU_O=$(python3 -B "$PEU_CHK" --arch x86_64 "$PEU_M/$PEU_C.exe" --listing "$PEU_M/$PEU_C.lst" 2>&1)
+                if [ "$PEU_C" = mutant ]; then
+                    grep -q '^C3b: FAIL .*in a record without a frame register' <<< "$PEU_O" || PEU_WHY="$PEU_WHY mutant: C3b did not fail ($(grep -m1 '^C3b' <<< "$PEU_O" | cut -c1-80));"
+                else
+                    [ "$(grep -c ': PASS' <<< "$PEU_O")" = 9 ] || PEU_WHY="$PEU_WHY real: checker $( { grep -m1 FAIL <<< "$PEU_O" || head -1 <<< "$PEU_O"; } | cut -c1-120);"
+                fi
+            done
+        fi
+    fi
+    rm -rf "$PEU_M"
+    if [ -z "$PEU_WHY" ]; then pe_row_ok $PEU_ROW "applies once to codegen.kr only (6 lines removed), refuses twice; mutant builds; its mixed_fault --legacy image fails C3b, the real one passes C0-C6 + C3b + C4b"
+    else pe_row_bad $PEU_ROW "$PEU_WHY"; fi
+fi
+
 # The judge of a native suite run (tests/windows/native_judge.py, phase-5
 # review findings 1-2) cannot pass vacuously: a complete synthetic run built
 # from native_corpus.lst and native_reclass.lst passes, and an empty log, a

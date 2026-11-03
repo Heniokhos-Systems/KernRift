@@ -70,3 +70,5 @@ a64_win_sp_selftest
 a64_listing_prints_lsl12
 perf_insn_count_calibration
 pe_unwind_host_rsi_control
+native_corpus_matches_suite
+m2b_mutant_applies
