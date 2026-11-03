@@ -1,0 +1,10 @@
+// #143 option C emitter-coverage set (spec 2.5.1 check 2; plan A19g): a
+// --debug bounds check on a fixed-size array (built with --debug). Row
+// pe_unwind_sp_sites_reached; manifest.txt says which site ids it reaches on
+// which backend.
+fn site(uint64 x) -> uint64 {
+    uint64[4] a
+    a[x & 7] = 1
+    return a[0]
+}
+fn main() { exit(site(3) & 0) }

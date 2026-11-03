@@ -5040,6 +5040,12 @@ fn cg_win_fold_site(uint64 need) {
         exit(1)
     }
     rax_cache = 0
+    if uw_sp_log_path != 0 {
+        uint64 lid = uw_sp_site
+        if lid == 0 { lid = uw_sp_op_site }
+        if lid == 0 { lid = "unnamed" }
+        uw_sp_log_site(lid)
+    }
     uw_sp_site = 0
 }
 

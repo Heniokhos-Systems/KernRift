@@ -29230,6 +29230,14 @@ fi
 # calls, frames over a page and over 64 KiB, leaf and non-leaf, recursion. The
 # program checks its own results (exit N = check N failed).
 PEU_FR="$DIR/fixtures/win_abi_frames/frames_x86_64.kr"
+# peu_both_kinds <arch> <listing>: the frames corpus holds SP-fixed and
+# SP-moving functions on every backend (#143 option C, plan A19g; the exact
+# classes are pinned by pe_unwind_win_frame_classes). Prints the counts.
+peu_both_kinds() {
+    local o; o=$(python3 -B "$DIR/helpers/win_frame_classes.py" "$1" "$2" 2>&1)
+    PEU_KINDS="$(grep -c ' SP-fixed ' <<< "$o") SP-fixed, $(grep -c ' SP-moving ' <<< "$o") SP-moving"
+    grep -q ' SP-fixed ' <<< "$o" && grep -q ' SP-moving ' <<< "$o"
+}
 PEU_QX="$(command -v qemu-x86_64-static || command -v qemu-x86_64 || true)"
 # peu_f10_calls <listing>: the number of `call rel32` instructions whose target
 # is f10's first byte (phase-2 review Minor 6: the AST inliner once removed
@@ -29269,6 +29277,8 @@ if ! $T10_KRC --arch=x86_64 --freestanding --target=windows "$PEU_FR" -o "$T10_D
     pe_row_bad win_abi_frames_exec_x86_64_ir "build: $(grep -m1 error "$T10_D/peu_fr.log" | cut -c1-120)"
 elif PEU_C=$(peu_f10_calls "$T10_D/peu_fr.s"); [ "$PEU_C" != 4 ]; then
     pe_row_bad win_abi_frames_exec_x86_64_ir "the listing has $PEU_C real calls to f10, want 4 (inlined away?)"
+elif ! peu_both_kinds x86_64 "$T10_D/peu_fr.s"; then
+    pe_row_bad win_abi_frames_exec_x86_64_ir "the listing lacks an SP-fixed or an SP-moving function ($PEU_KINDS)"
 elif [ -z "$PEU_QX" ]; then
     pe_row_skip win_abi_frames_exec_x86_64_ir "no qemu-x86_64-static"
 else
@@ -29277,7 +29287,7 @@ else
     if [ "$(uname -m)" = x86_64 ]; then timeout 60 "$T10_D/peu_fr" > /dev/null 2>&1; PEU_N=$?; fi
     timeout 120 "$PEU_QX" "$T10_D/peu_fr" > /dev/null 2>&1; PEU_Q=$?
     if [ "$PEU_Q" = 0 ] && { [ "$PEU_N" = 0 ] || [ "$PEU_N" = x ]; }; then
-        pe_row_ok win_abi_frames_exec_x86_64_ir "native rc=$PEU_N, qemu rc=0, 4 real calls to f10, RSP alignment probe passed"
+        pe_row_ok win_abi_frames_exec_x86_64_ir "native rc=$PEU_N, qemu rc=0, 4 real calls to f10, RSP alignment probe passed; $PEU_KINDS"
     else
         pe_row_bad win_abi_frames_exec_x86_64_ir "native rc=$PEU_N, qemu rc=$PEU_Q (N = check N failed)"
     fi
@@ -29294,6 +29304,8 @@ if ! $T10_KRC --legacy --arch=x86_64 --freestanding --target=windows "$PEU_FR" -
     pe_row_bad win_abi_frames_exec_x86_64_legacy "build: $(grep -m1 error "$T10_D/peu_frl.log" | cut -c1-120)"
 elif PEU_C=$(peu_f10_calls "$T10_D/peu_frl.s"); [ "$PEU_C" != 4 ]; then
     pe_row_bad win_abi_frames_exec_x86_64_legacy "the listing has $PEU_C real calls to f10, want 4 (inlined away?)"
+elif ! peu_both_kinds x86_64 "$T10_D/peu_frl.s"; then
+    pe_row_bad win_abi_frames_exec_x86_64_legacy "the listing lacks an SP-fixed or an SP-moving function ($PEU_KINDS)"
 elif [ -z "$PEU_QX" ]; then
     pe_row_skip win_abi_frames_exec_x86_64_legacy "no qemu-x86_64-static"
 else
@@ -29302,7 +29314,7 @@ else
     if [ "$(uname -m)" = x86_64 ]; then timeout 60 "$T10_D/peu_frl" > /dev/null 2>&1; PEU_N=$?; fi
     timeout 120 "$PEU_QX" "$T10_D/peu_frl" > /dev/null 2>&1; PEU_Q=$?
     if [ "$PEU_Q" = 0 ] && { [ "$PEU_N" = 0 ] || [ "$PEU_N" = x ]; }; then
-        pe_row_ok win_abi_frames_exec_x86_64_legacy "native rc=$PEU_N, qemu rc=0, 4 real calls to f10, RSP alignment probe passed"
+        pe_row_ok win_abi_frames_exec_x86_64_legacy "native rc=$PEU_N, qemu rc=0, 4 real calls to f10, RSP alignment probe passed; $PEU_KINDS"
     else
         pe_row_bad win_abi_frames_exec_x86_64_legacy "native rc=$PEU_N, qemu rc=$PEU_Q (N = check N failed)"
     fi
@@ -29351,12 +29363,14 @@ if ! $T10_KRC --arch=arm64 --freestanding --target=windows "$PEU_FRA" -o "$T10_D
     pe_row_bad win_abi_frames_exec_arm64_ir "build: $(grep -m1 error "$T10_D/peu_fra.log" | cut -c1-120)"
 elif PEU_C=$(peu_f10_bl "$T10_D/peu_fra.s"); [ "$PEU_C" != 4 ]; then
     pe_row_bad win_abi_frames_exec_arm64_ir "the listing has $PEU_C real calls to f10, want 4 (inlined away?)"
+elif ! peu_both_kinds arm64 "$T10_D/peu_fra.s"; then
+    pe_row_bad win_abi_frames_exec_arm64_ir "the listing lacks an SP-fixed or an SP-moving function ($PEU_KINDS)"
 elif [ -z "$PEU_QA" ]; then
     pe_row_skip win_abi_frames_exec_arm64_ir "no qemu-aarch64-static"
 else
     chmod +x "$T10_D/peu_fra"
     timeout 120 "$PEU_QA" "$T10_D/peu_fra" > /dev/null 2>&1; PEU_Q=$?
-    if [ "$PEU_Q" = 0 ]; then pe_row_ok win_abi_frames_exec_arm64_ir "qemu rc=0, 4 real calls to f10, SP alignment probe passed"
+    if [ "$PEU_Q" = 0 ]; then pe_row_ok win_abi_frames_exec_arm64_ir "qemu rc=0, 4 real calls to f10, SP alignment probe passed; $PEU_KINDS"
     else pe_row_bad win_abi_frames_exec_arm64_ir "qemu rc=$PEU_Q (N = check N failed)"; fi
 fi
 # ... and the arm64 corpus through the legacy backend (#143 A10, spec 5.2):
@@ -29367,12 +29381,14 @@ if ! $T10_KRC --legacy --arch=arm64 --freestanding --target=windows "$PEU_FRA" -
     pe_row_bad win_abi_frames_exec_arm64_legacy "build: $(grep -m1 error "$T10_D/peu_fral.log" | cut -c1-120)"
 elif PEU_C=$(peu_f10_bl "$T10_D/peu_fral.s"); [ "$PEU_C" != 4 ]; then
     pe_row_bad win_abi_frames_exec_arm64_legacy "the listing has $PEU_C real calls to f10, want 4 (inlined away?)"
+elif ! peu_both_kinds arm64 "$T10_D/peu_fral.s"; then
+    pe_row_bad win_abi_frames_exec_arm64_legacy "the listing lacks an SP-fixed or an SP-moving function ($PEU_KINDS)"
 elif [ -z "$PEU_QA" ]; then
     pe_row_skip win_abi_frames_exec_arm64_legacy "no qemu-aarch64-static"
 else
     chmod +x "$T10_D/peu_fral"
     timeout 120 "$PEU_QA" "$T10_D/peu_fral" > /dev/null 2>&1; PEU_Q=$?
-    if [ "$PEU_Q" = 0 ]; then pe_row_ok win_abi_frames_exec_arm64_legacy "qemu rc=0, 4 real calls to f10, SP alignment probe passed"
+    if [ "$PEU_Q" = 0 ]; then pe_row_ok win_abi_frames_exec_arm64_legacy "qemu rc=0, 4 real calls to f10, SP alignment probe passed; $PEU_KINDS"
     else pe_row_bad win_abi_frames_exec_arm64_legacy "qemu rc=$PEU_Q (N = check N failed)"; fi
 fi
 # The Windows arm64 frame shape (#143 A9a, spec 5.1) of every non-naked
@@ -29914,6 +29930,66 @@ peu_wine_fault pe_unwind_nested_fault_legacy_windows_wine pe_unwind_nested_fault
 peu_wine_fault pe_unwind_stack_args_fault_legacy_windows_wine pe_unwind_stack_args_fault "$(printf 'armed\nf3')" f3,f2,main --legacy
 peu_wine_fault pe_unwind_argv_main_fault_legacy_windows_wine pe_unwind_argv_main_fault "$(printf 'armed\nf2')" f2,f1,main --legacy
 peu_wine_fault pe_unwind_temp_push_fault_windows_wine pe_unwind_temp_push_fault "$(printf '7\n3')" f2,f1,main --legacy
+# The mixed chain (#143 option C; spec 2.5.6, plan A19g): main (SP-moving) ->
+# a (SP-fixed) -> b (SP-moving) -> c (SP-fixed leaf) faults; Wine walks
+# c, b, a, main through both kinds of frame. Each row also asserts the
+# classes in the listing (finding 14: the walk alone passes on the pre-A19
+# compiler, which keeps a frame pointer everywhere): a and c without
+# `mov rbp, rsp`, b and main with it (tests/helpers/win_frame_classes.py).
+peu_mixed_classes() { # <row> <listing>
+    local o; o=$(python3 -B "$DIR/helpers/win_frame_classes.py" x86_64 "$2" 2>&1)
+    if [ "$(grep -E '^(a|c) SP-fixed|^(b|main) SP-moving' <<< "$o" | wc -l)" = 4 ]; then return 0; fi
+    pe_row_bad "$1" "classes: $(tr '\n' ';' <<< "$o" | cut -c1-120) (want a, c SP-fixed; b, main SP-moving)"; return 1
+}
+for peu_m in "pe_unwind_mixed_fault_windows_wine|" "pe_unwind_mixed_fault_legacy_windows_wine|--legacy"; do
+    peu_mr="${peu_m%%|*}"; peu_mf="${peu_m#*|}"
+    if ! $T10_KRC --arch=x86_64 --target=windows --emit=pe --test-listing="$T10_D/peu_mx.lst" $peu_mf "$DIR/fixtures/pe_unwind_mixed_fault.kr" -o "$T10_D/peu_mx.exe" > "$T10_D/peu_mx.log" 2>&1; then
+        pe_row_bad "$peu_mr" "build: $(grep -m1 error "$T10_D/peu_mx.log" | cut -c1-100)"; continue
+    fi
+    peu_mixed_classes "$peu_mr" "$T10_D/peu_mx.lst" || continue
+    peu_wine_fault "$peu_mr" pe_unwind_mixed_fault "$(printf 'armed\nb')" c,b,a,main $peu_mf
+done
+# The arm64 variant (finding 17; static here, its run is the A18 job): a in
+# shape S2, b with an asm block, c an S1 leaf; IR and --legacy, C0-C6 + C3b +
+# C4b and the listing classes (arm64: set_fp/add_fp in b and main only).
+for peu_m in "pe_unwind_mixed_fault_arm64_ir|" "pe_unwind_mixed_fault_arm64_legacy|--legacy"; do
+    peu_mr="${peu_m%%|*}"; peu_mf="${peu_m#*|}"
+    if ! command -v python3 > /dev/null 2>&1; then pe_row_skip "$peu_mr" "needs python3"; continue; fi
+    if ! $T10_KRC --arch=arm64 --target=windows --emit=pe --test-listing="$T10_D/peu_mxa.lst" $peu_mf "$DIR/fixtures/pe_unwind_mixed_fault_arm64.kr" -o "$T10_D/peu_mxa.exe" > "$T10_D/peu_mxa.log" 2>&1; then
+        pe_row_bad "$peu_mr" "build: $(grep -m1 error "$T10_D/peu_mxa.log" | cut -c1-100)"; continue
+    fi
+    PEU_WHY=""
+    peu_ir=""; [ -z "$peu_mf" ] && peu_ir=--ir
+    PEU_O=$(python3 -B "$DIR/helpers/win_frame_classes.py" arm64 "$T10_D/peu_mxa.lst" $peu_ir 2>&1)
+    [ "$(grep -E '^(a|c) SP-fixed|^(b|main) SP-moving' <<< "$PEU_O" | wc -l)" = 4 ] || PEU_WHY="classes: $(tr '\n' ';' <<< "$PEU_O" | cut -c1-120);"
+    [ -n "$peu_ir" ] && ! grep -q '^a SP-fixed S2$' <<< "$PEU_O" && PEU_WHY="$PEU_WHY a is not S2;"
+    PEU_C=$(env -u PE_UNWIND_CHECK_DISABLE python3 -B "$DIR/helpers/pe_unwind_check.py" --arch arm64 "$T10_D/peu_mxa.exe" --listing "$T10_D/peu_mxa.lst" 2>&1)
+    [ "$(grep -c ': PASS' <<< "$PEU_C")" = 9 ] || PEU_WHY="$PEU_WHY checker: $(grep -m1 -e FAIL -e error <<< "$PEU_C" | cut -c1-120);"
+    if [ -z "$PEU_WHY" ]; then pe_row_ok "$peu_mr" "a, c SP-fixed; b, main SP-moving; C0-C6 + C3b + C4b PASS (static; the run is the A18 windows-11-arm job)"
+    else pe_row_bad "$peu_mr" "$PEU_WHY"; fi
+done
+# The golden classification (#143 option C; spec 2.5.5, finding 21): every
+# function of the frames corpus and of the mixed fixtures, on all four
+# backends, has the class (and arm64 IR shape) of
+# tests/fixtures/win_abi_frames/classes.txt -- in both directions, so a frame
+# pointer where none is needed fails too.
+if ! command -v python3 > /dev/null 2>&1; then pe_row_skip pe_unwind_win_frame_classes "needs python3"
+else
+    PEU_O=$(python3 -B "$DIR/helpers/win_frame_classes_check.py" "$T10_KRC" "$DIR" "$T10_D/peu_wfc" 2>&1); PEU_RC=$?
+    if [ "$PEU_RC" = 0 ]; then pe_row_ok pe_unwind_win_frame_classes "$(tail -1 <<< "$PEU_O")"
+    else pe_row_bad pe_unwind_win_frame_classes "$(head -2 <<< "$PEU_O" | tr '\n' '|' | cut -c1-200)$(tail -1 <<< "$PEU_O")"; fi
+fi
+# Emitter coverage (#143 option C; spec 2.5.1 check 2, finding 6): every
+# moving and folded site id of tests/pe_unwind_sp_sites.lst is reached by a
+# fixture of tests/fixtures/win_sp_sites/ (manifest.txt) on its backend, with
+# --test-sp-site-log; no report is `unnamed`; each fixture's function has its
+# class; every image passes C0-C6 + C3b + C4b.
+if ! command -v python3 > /dev/null 2>&1; then pe_row_skip pe_unwind_sp_sites_reached "needs python3"
+else
+    PEU_O=$(python3 -B "$DIR/helpers/sp_sites_reached.py" "$T10_KRC" "$DIR" "$T10_D/peu_ssr" 2>&1); PEU_RC=$?
+    if [ "$PEU_RC" = 0 ]; then pe_row_ok pe_unwind_sp_sites_reached "$(tail -1 <<< "$PEU_O")"
+    else pe_row_bad pe_unwind_sp_sites_reached "$(head -2 <<< "$PEU_O" | tr '\n' '|' | cut -c1-200)$(tail -1 <<< "$PEU_O")"; fi
+fi
 
 # The compiler itself, built for Windows x86_64 with --test-listing: the image
 # is byte-identical to the one built without the switch (the listing does not

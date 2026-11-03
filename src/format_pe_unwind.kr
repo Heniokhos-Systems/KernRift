@@ -77,6 +77,16 @@ fn uw_sp_state_reset() {
     uw_sp_op_site = 0
 }
 
+// --test-sp-site-log (A19g): append one site id to the log, if one is open.
+// uw_sp_moves() logs every SP-move report; a folded legacy site logs from
+// cg_win_fold_site (it moves no SP, but the coverage row must see it reached).
+fn uw_sp_log_site(uint64 id) {
+    if uw_sp_log_path == 0 { return }
+    if uw_sp_log_fd == 0xFFFFFFFFFFFFFFFF { uw_sp_log_fd = open_output_or_die(uw_sp_log_path) }
+    write(uw_sp_log_fd, id, str_len(id))
+    write(uw_sp_log_fd, "\n", 1)
+}
+
 fn uw_sp_moves() {
     if target_os != 2 { return }
     if uw_sp_frame != 0 { return }
@@ -84,11 +94,7 @@ fn uw_sp_moves() {
     if id == 0 { id = uw_sp_op_site }
     if id == 0 { id = "unnamed" }        // a report no emitter named: the coverage row rejects it
     uw_sp_site = 0
-    if uw_sp_log_path != 0 {
-        if uw_sp_log_fd == 0xFFFFFFFFFFFFFFFF { uw_sp_log_fd = open_output_or_die(uw_sp_log_path) }
-        write(uw_sp_log_fd, id, str_len(id))
-        write(uw_sp_log_fd, "\n", 1)
-    }
+    uw_sp_log_site(id)
     if uw_fn_sp_fixed != 0 {
         // located: the function's name token (uw_fn_name), when known
         uint64 tk = 0xFFFFFFFFFFFFFFFF

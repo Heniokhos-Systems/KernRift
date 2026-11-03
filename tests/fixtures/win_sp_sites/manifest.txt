@@ -1,0 +1,49 @@
+# tests/fixtures/win_sp_sites/manifest.txt -- #143 option C emitter-coverage
+# set (spec 2.5.1 check 2; plan A19g). One line per (backend, site id):
+#   backend|id|fixture|extra flags|function|class
+# Each fixture is built for Windows (--emit=pe) on its backend with
+# --test-sp-site-log; row pe_unwind_sp_sites_reached requires that its log
+# contains the id, that no log contains `unnamed`, that the function has the
+# class given here (SP-moving: a frame register; SP-fixed: none -- a folded
+# legacy site), and that the image passes C0-C6 + C3b + C4b. Together the
+# lines cover every moving and folded id of tests/pe_unwind_sp_sites.lst
+# (sub-ids X14i, X15p/d/q, A4p/q/d report under their parent id, the op or
+# main that reaches them). G6 (classified) has no site: its line checks the
+# class only (id -).
+x64-ir|X1|write.kr||site|SP-moving
+x64-ir|X2|import.kr||site|SP-moving
+x64-ir|X3|call7.kr||site|SP-moving
+x64-ir|X4|callptr7.kr||site|SP-moving
+x64-ir|X5|alloc.kr||site|SP-moving
+x64-ir|X6|alloc.kr||site|SP-moving
+x64-ir|X7|println.kr||site|SP-moving
+x64-ir|X8|exec.kr||site|SP-moving
+x64-ir|X9|execargv.kr||site|SP-moving
+x64-ir|X10|timens.kr||site|SP-moving
+x64-ir|X11|float.kr||site|SP-moving
+x64-ir|X12|modpath.kr||site|SP-moving
+x64-ir|X13|debug.kr|--debug|site|SP-moving
+x64-ir|X14|asmin.kr||site|SP-moving
+x64-ir|X15|main.kr||main|SP-moving
+x64-legacy|L1|alloc.kr|--legacy|site|SP-fixed
+x64-legacy|L2|callptr7.kr|--legacy|site|SP-fixed
+x64-legacy|L3|call7.kr|--legacy|site|SP-fixed
+x64-legacy|L4|exec.kr|--legacy|site|SP-fixed
+x64-legacy|L5|timens.kr|--legacy|site|SP-fixed
+x64-legacy|L6|debug.kr|--legacy --debug|site|SP-fixed
+x64-legacy|L7|println.kr|--legacy|site|SP-moving
+x64-legacy|L8|fstring.kr|--legacy|site|SP-moving
+x64-legacy|L9|asm_x64.kr|--legacy|site|SP-moving
+x64-legacy|L10|main.kr|--legacy|main|SP-moving
+arm64-ir|A1|write.kr||site|SP-moving
+arm64-ir|A2|exec.kr||site|SP-moving
+arm64-ir|A3|execargv.kr||site|SP-moving
+arm64-ir|A4|main.kr||main|SP-moving
+arm64-ir|A5|asm_a64.kr||site|SP-moving
+arm64-legacy|G1|exec.kr|--legacy|site|SP-fixed
+arm64-legacy|G1|execargv.kr|--legacy|site|SP-moving
+arm64-legacy|G2|timens.kr|--legacy|site|SP-fixed
+arm64-legacy|G3|call10.kr|--legacy|site|SP-fixed
+arm64-legacy|G4|callptr10.kr|--legacy|site|SP-fixed
+arm64-legacy|G5|asm_a64.kr|--legacy|site|SP-moving
+arm64-legacy|-|main.kr|--legacy|main|SP-moving
