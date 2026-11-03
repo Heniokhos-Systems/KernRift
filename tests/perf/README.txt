@@ -14,3 +14,7 @@ the one for the arch to the port before compiling.
   calib.kr        the calibration loop (row perf_insn_count_calibration)
   fib.kr sort.kr matmul.kr sieve.kr sha256.kr   the ports
   count_insns.sh  <compiler> <port.kr> <arch> [compiler flags]  -> "<count> <exit>"
+  exit_windows.kr the ports' exits as ExitProcess (exit builtin) for real PEs:
+                  tests/windows/native_perf.sh times base vs branch natively
+                  on the laptop (Task D step 6; process start-up dominates
+                  a run, so the instruction counts stay the binding metric)
