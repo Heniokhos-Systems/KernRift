@@ -43,7 +43,7 @@ fn m_ptr(u64 x) -> u64 {
 }
 // a struct passed by value. (A MEMORY-class struct RETURN is not covered:
 // `--legacy --target=windows` x86_64 crashes on one already in base d8f2a56,
-// with or without the fold -- side finding registered in the A19d report.)
+// with or without the fold -- #173.)
 fn f_struct(u64 x) -> u64 {
     u64 l = x + 3
     P q

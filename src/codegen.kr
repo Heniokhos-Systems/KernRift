@@ -4926,6 +4926,11 @@ fn cg_win_prescan(uint64 fn_node, uint64 arm) {
     uint32 body = ast_data3(fn_node)
     cg_win_ps_node(body)
     if cg_win_ps_moving == 0 { cg_win_ps_fixed = 1 }
+    // arm64 (A19d(iii), option (a)): a folded frame saves x29/x30 at
+    // [sp,#OUT] and x19/x20 at [sp,#OUT+16]; save_fplr/save_regp encode at
+    // most 504, so OUT > 488 (exec_process_argv's 0x4E0) keeps the function
+    // SP-moving with its per-call allocation
+    if arm != 0 && cg_win_out > 488 { cg_win_ps_fixed = 0 }
     if cg_test_out_audit != 0 {
         // one line per function, so the audit row can see what it checked
         write(2, "out-audit-fn: '", 15)

@@ -210,6 +210,7 @@ fn emit_a64_ldp_post(uint64 rt1, uint64 rt2, uint64 rn, uint64 offset) {
 
 // SUB SP, SP, #imm (large-frame safe)
 fn emit_a64_sub_sp_imm(uint64 imm) {
+    if cg_win_folded != 0 { cg_win_fold_site(imm)  return }     // #143 option C: folded (spec 2.5.7)
     if imm <= 4095 {
         uint64 insn = 0xD1000000 | (imm << 10) | (31 << 5) | 31
         emit_a64(insn)
@@ -223,6 +224,7 @@ fn emit_a64_sub_sp_imm(uint64 imm) {
 
 // ADD SP, SP, #imm (large-frame safe)
 fn emit_a64_add_sp_imm(uint64 imm) {
+    if cg_win_folded != 0 { uw_sp_site = 0  return }
     if imm <= 4095 {
         uint64 insn = 0x91000000 | (imm << 10) | (31 << 5) | 31
         emit_a64(insn)
@@ -238,6 +240,11 @@ fn emit_a64_add_sp_imm(uint64 imm) {
 // (computed `sub/add sp, sp, #n` of the >8-argument areas, the exec_process
 // and time_ns words), so it reports to the backstop like the helpers above.
 fn emit_a64_sp_word(uint64 w) {
+    // folded (A19d(iii)): `sub sp, sp, #n` is the frame's [sp, #0, OUT) and
+    // emits nothing, its `add sp, sp, #n` likewise; any other SP word still
+    // reaches the backstop below
+    if cg_win_folded != 0 && (w & 0xFFC003FF) == 0xD10003FF { cg_win_fold_site((w >> 10) & 0xFFF)  return }
+    if cg_win_folded != 0 && (w & 0xFFC003FF) == 0x910003FF { uw_sp_site = 0  return }
     emit_a64(w)
     uint64 amt = 0
     if (w & 0xFF800000) == 0xD1000000 { amt = (w >> 10) & 0xFFF }               // sub sp, sp, #imm
@@ -3343,7 +3350,7 @@ fn gen_expr_a64(uint64 node) {
                 uint64 cp_real_overflow = arg_count - 8
                 uint64 cp_oi = 0
                 while cp_oi < cp_real_overflow {
-                    emit_a64_ldr(10, 31, a64_var_base + arg_slots_base + (8 + cp_oi) * 8 + cp_stack_bytes)
+                    emit_a64_ldr(10, 31, a64_var_base + arg_slots_base + (8 + cp_oi) * 8 + cg_win_moved(cp_stack_bytes))
                     emit_a64_str(10, 31, cp_oi * 8)
                     cp_oi = cp_oi + 1
                 }
@@ -3351,7 +3358,7 @@ fn gen_expr_a64(uint64 node) {
 
             // Load fn_ptr into x9 directly (don't clobber x0 which has arg[0])
             if cp_stack_args > 0 {
-                emit_a64_ldr(9, 31, a64_var_base + ptr_slot + cp_stack_args * 8)
+                emit_a64_ldr(9, 31, a64_var_base + ptr_slot + cg_win_moved(cp_stack_args * 8))
             } else {
                 emit_a64_ldr(9, 31, a64_var_base + ptr_slot)
             }
@@ -4942,8 +4949,8 @@ fn gen_expr_a64(uint64 node) {
                 uint64 ovg_a = ovf_idx_a + oi * 8
                 uint64 ovsrc_a = 0
                 unsafe { *(ovg_a as uint64) -> ovsrc_a }
-                // Load from temp slot (offset shifted by stack_bytes: sp moved)
-                emit_a64_ldr(9, 31, a64_var_base + arg_slots_base + ovsrc_a * 8 + stack_bytes)
+                // Load from temp slot (offset shifted by the bytes sp moved: 0 when folded)
+                emit_a64_ldr(9, 31, a64_var_base + arg_slots_base + ovsrc_a * 8 + cg_win_moved(stack_bytes))
                 emit_a64_str(9, 31, oi * 8)
                 oi = oi + 1
             }
@@ -6193,6 +6200,17 @@ fn gen_function_a64(uint64 fn_node) {
     uint32 body_check_a = ast_data3(fn_node)
     if body_check_a == 0 { return }
     cg_win_prescan(fn_node, 1)           // #143 option C (spec 2.5.7): OUT and the SP-fixed verdict
+    // A19d(iii): an SP-fixed Windows arm64 legacy function is folded -- OUT
+    // is the bottom of its frame, x29/x30 and x19/x20 sit above it at
+    // [sp,#OUT] and [sp,#OUT+16] (option (a)), every slot moves up by OUT
+    // (cg_slot_off), no call site moves SP, and there is no set_fp. The
+    // backstop is armed: any SP write left in the body stops the build.
+    if cg_win_ps_fixed != 0 {
+        cg_win_folded = 1
+        cg_win_out_bias = cg_win_out
+        uw_fn_sp_fixed = 1
+    }
+    uint64 a64_save = cg_win_out_bias          // the save area's offset: OUT folded, 0 otherwise
 
     // Leaf function optimization disabled for now — needs register allocator
     uint64 is_leaf = 0
@@ -6401,12 +6419,14 @@ fn gen_function_a64(uint64 fn_node) {
         // #143 A10 (spec 5.2a): on Windows x19/x20 are saved BEFORE x29 is
         // set, so set_fp is the last prologue instruction:
         //   sub sp, #lo; stp x29, x30, [sp]; stp x19, x20, [sp, #16]; mov x29, sp
+        // and folded (A19d(iii)) the pairs sit above OUT and there is no set_fp:
+        //   sub sp, #lo; stp x29, x30, [sp, #OUT]; stp x19, x20, [sp, #OUT+16]
         emit_a64(0xD1000000)  // SUB SP, SP, #imm (patched)
         stp_fp_off = out_len
-        emit_a64(0xA9007BFD)  // stp x29, x30, [sp]
+        emit_a64(0xA9007BFD | ((a64_save / 8) << 15))         // stp x29, x30, [sp, #a64_save]
         stp_callee_off = out_len
-        emit_a64(0xA90153F3)  // stp x19, x20, [sp, #16]
-        emit_a64_add_imm(29, 31, 0)  // mov x29, sp
+        emit_a64(0xA90053F3 | (((a64_save + 16) / 8) << 15))  // stp x19, x20, [sp, #a64_save+16]
+        if cg_win_folded == 0 { emit_a64_add_imm(29, 31, 0) }  // mov x29, sp
         if tok_matches(wnt_a64, "main", 4) != 0 && freestanding == 0 {
             // GetCommandLineA, after the prologue (spec 5.2d)
             emit_a64_win_call_iat(7)       // GetCommandLineA -> x0 = cmdline
@@ -6670,9 +6690,9 @@ fn gen_function_a64(uint64 fn_node) {
     }
 
     uint64 ldp_callee_off = out_len
-    emit_a64(0xA94153F3)  // ldp x19, x20, [sp, #16]
+    emit_a64(0xA94053F3 | (((a64_save + 16) / 8) << 15))  // ldp x19, x20, [sp, #a64_save+16]
     uint64 ldp_fp_off = out_len
-    emit_a64(0xA9407BFD)  // ldp x29, x30, [sp]
+    emit_a64(0xA9407BFD | ((a64_save / 8) << 15))         // ldp x29, x30, [sp, #a64_save]
     // add sp, sp, #FRAME (placeholder, patched)
     uint64 epilogue_add = out_len
     emit_a64(0x91000000)
@@ -6688,7 +6708,7 @@ fn gen_function_a64(uint64 fn_node) {
     a64_var_base = saved_var_base
 
     // Patch prologue and epilogue frame sizes
-    uint64 frame = a64_var_base + var_frame_size
+    uint64 frame = a64_var_base + cg_win_out_bias + var_frame_size   // + OUT when folded (A19d(iii))
     uint64 fmod = frame & 15
     if fmod != 0 { frame = frame + 16 - fmod }
 
@@ -6754,10 +6774,16 @@ fn gen_function_a64(uint64 fn_node) {
         if pre_amt == 0 { uw_a64_prolog_insn(0xE3, 1, pre_sub_patch + 4) }        // nop
         else { uw_a64_alloc_code(pre_amt, pre_sub_patch + 4) }
         uw_a64_alloc_code(lo_amt, prologue_start + 4)
-        uw_a64_prolog_insn(0x40, 1, stp_fp_off + 4)                                 // save_fplr #0
-        uw_a64_prolog_insn(0xC8 | (0x02 << 8), 2, stp_callee_off + 4)               // save_regp x19, #16
-        uw_a64_prolog_insn(0xE1, 1, stp_callee_off + 8)                             // set_fp
-        uw_a64_epilog(ldp_callee_off, 1)
+        // folded (A19d(iii)): save_fplr #OUT, save_regp x19, #OUT+16, no
+        // set_fp, and the epilog shares every code from StartIndex 0
+        uw_a64_prolog_insn(0x40 | (a64_save / 8), 1, stp_fp_off + 4)                // save_fplr #a64_save
+        uw_a64_prolog_insn(0xC8 | (((a64_save + 16) / 8) << 8), 2, stp_callee_off + 4)  // save_regp x19, #a64_save+16
+        if cg_win_folded == 0 {
+            uw_a64_prolog_insn(0xE1, 1, stp_callee_off + 8)                         // set_fp
+            uw_a64_epilog(ldp_callee_off, 1)
+        } else {
+            uw_a64_epilog(ldp_callee_off, 0)
+        }
         uw_fn_finalize()
     }
 

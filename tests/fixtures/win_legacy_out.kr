@@ -6,7 +6,12 @@
 //   ten     a 10-argument call      x86_64 SP-fixed OUT 80, arm64 SP-fixed OUT 16
 //   say     println                 x86_64 SP-moving (push rdi/rcx), arm64 SP-fixed OUT 0
 //   opaque  an asm block            SP-moving on both
-// Row win_legacy_out_audit.
+//   spawn   exec_process_argv       x86_64 SP-fixed OUT 1232 (0x4D0), arm64 SP-moving
+//           OUT 1248 (0x4E0 > 488: its save offsets would not encode, A19d(iii));
+//           reached only when g_spawn != 0, which it never is (it would
+//           replace the process); the guarded call keeps it in the image
+// Rows win_legacy_out_audit, win_legacy_folded_outgoing_{x86_64,arm64}.
+static uint64 g_spawn = 0
 fn add6(uint64 a, uint64 b, uint64 c, uint64 d, uint64 e, uint64 f) -> uint64 {
     if a == 0 { return b + c + d + e + f }
     return add6(a - 1, b, c, d, e, f + 1)
@@ -30,8 +35,15 @@ fn say(uint64 v) {
 fn opaque() {
     asm { "nop" }
 }
+fn spawn() -> uint64 {
+    uint64 av = alloc(16)
+    store64(av, "child.exe")
+    store64(av + 8, 0)
+    return exec_process_argv("child.exe", av)
+}
 fn main() {
     uint64 t = stamp()
     say(six(2) + ten(3) + (t & 0))
     opaque()
+    if g_spawn != 0 { spawn() }
 }

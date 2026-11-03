@@ -54,3 +54,5 @@ win_legacy_out_audit
 win_fold_shared_paths_in_identity_corpus
 win_legacy_folded_outgoing_x86_64
 pe_unwind_debug_windows_x86_64_legacy
+win_legacy_folded_outgoing_arm64
+pe_unwind_debug_windows_arm64_legacy

@@ -29087,11 +29087,13 @@ esac
 # Option C (spec 2.5.3, 2.5.4; plan A19a): SP-fixed frames pass C0-C6 and the
 # new rule C3b -- x64 IR with and without rbp pushed as a colour, x64 legacy
 # with SAVE_NONVOL r12, arm64 S1, S2 at low 4080 / 4096 / 4112 / 16 777 200, the
-# D fallback at 16 777 216 and the arm64 legacy frame without set_fp -- while
-# an SP-fixed record over a body that writes RSP/SP (sub/add, push/pop, push
-# imm, pushf, xchg, leave, enter, and rsp; arm64 sub sp, pre/post-indexed
-# str/stp of every size, mov sp) fails C3b, and a save offset of 512, an rbp
-# write without PUSH_NONVOL rbp and a zero-size allocation fail C3.
+# D fallback at 16 777 216, the arm64 legacy frame without set_fp and the
+# arm64 legacy folded frame at OUT = 488 (A19d(iii)) -- while an SP-fixed
+# record over a body that writes RSP/SP (sub/add, push/pop, push imm, pushf,
+# xchg, leave, enter, and rsp; arm64 sub sp, pre/post-indexed str/stp of every
+# size, mov sp) fails C3b, and a save offset of 512, the folded frame at
+# OUT = 496, an rbp write without PUSH_NONVOL rbp and a zero-size allocation
+# fail C3.
 PEU_OUT=$(env -u PE_UNWIND_CHECK_DISABLE bash "$DIR/helpers/pe_unwind_selftest.sh" "$T10_D/peu_optc" optc 2>&1); PEU_RC=$?
 case "$PEU_RC" in
     0) pe_row_ok pe_unwind_checker_optc_selftest "$(tail -1 <<< "$PEU_OUT")" ;;
@@ -29527,15 +29529,16 @@ fi
 # pre-scan judges SP-fixed writes SP only at sized sites whose area fits OUT
 # (no "out-audit:" line), and the output is byte-identical to the build
 # without the switch. tests/fixtures/win_legacy_out.kr pins known verdicts:
-# x86_64 stamp/six/ten SP-fixed OUT 48/48/80, say (println) and opaque (asm)
-# SP-moving; arm64 stamp/ten OUT 16, six/say OUT 0, opaque SP-moving.
+# x86_64 stamp/six/ten SP-fixed OUT 48/48/80, spawn (exec_process_argv)
+# SP-fixed OUT 1232, say (println) and opaque (asm) SP-moving; arm64 stamp/ten
+# OUT 16, six/say OUT 0, opaque SP-moving, spawn SP-moving (OUT 1248 > 488).
 PEU_AU="$T10_D/peu_audit"; rm -rf "$PEU_AU"; mkdir -p "$PEU_AU"
 PEU_WHY=""; PEU_N=0; PEU_FIX=0
 for peu_a in x86_64 arm64; do
     $T10_KRC --legacy --arch=$peu_a --target=windows --emit=pe --test-out-audit "$DIR/fixtures/win_legacy_out.kr" -o "$PEU_AU/k.exe" > /dev/null 2> "$PEU_AU/k.err" \
         || PEU_WHY="$PEU_WHY win_legacy_out.kr $peu_a: build failed;"
-    if [ "$peu_a" = x86_64 ]; then PEU_WANT="stamp' SP-fixed OUT 48|six' SP-fixed OUT 48|ten' SP-fixed OUT 80|say' SP-moving|opaque' SP-moving"
-    else PEU_WANT="stamp' SP-fixed OUT 16|six' SP-fixed OUT 0|ten' SP-fixed OUT 16|say' SP-fixed OUT 0|opaque' SP-moving"; fi
+    if [ "$peu_a" = x86_64 ]; then PEU_WANT="stamp' SP-fixed OUT 48|six' SP-fixed OUT 48|ten' SP-fixed OUT 80|say' SP-moving|opaque' SP-moving|spawn' SP-fixed OUT 1232"
+    else PEU_WANT="stamp' SP-fixed OUT 16|six' SP-fixed OUT 0|ten' SP-fixed OUT 16|say' SP-fixed OUT 0|opaque' SP-moving|spawn' SP-moving OUT 1248"; fi
     IFS='|' read -ra PEU_WL <<< "$PEU_WANT"
     for peu_w in "${PEU_WL[@]}"; do
         grep -q "^out-audit-fn: '$peu_w" "$PEU_AU/k.err" || PEU_WHY="$PEU_WHY $peu_a: no verdict '$peu_w;"
@@ -29583,19 +29586,19 @@ done
 if [ -z "$PEU_WHY" ]; then pe_row_ok win_fold_shared_paths_in_identity_corpus "$PEU_N listings (time_ns, exec, >8-argument named call and call_ptr; linux/macos x86_64/arm64 --legacy) adjust SP in a body"
 else pe_row_bad win_fold_shared_paths_in_identity_corpus "$PEU_WHY"; fi
 # The x86_64 legacy fold (#143 A19d(ii); spec 2.5.7, ruling Q11): in
-# tests/fixtures/win_legacy_out.kr the SP-fixed callers stamp/six/ten and the
-# recursive add6/add10 have no RSP write in their bodies (their call areas
-# are the bottom of the frame) and no `mov rbp, rsp`; say (println) and main
-# keep per-call areas and the frame pointer. The image passes C0-C6 + C3b +
-# C4b and prints 65 under Wine.
+# tests/fixtures/win_legacy_out.kr the SP-fixed callers stamp/six/ten, spawn
+# (exec_process_argv, OUT 0x4D0) and the recursive add6/add10 have no RSP
+# write in their bodies (their call areas are the bottom of the frame) and no
+# `mov rbp, rsp`; say (println) and main keep per-call areas and the frame
+# pointer. The image passes C0-C6 + C3b + C4b and prints 65 under Wine.
 if ! command -v objdump > /dev/null 2>&1 || ! command -v python3 > /dev/null 2>&1; then
     pe_row_skip win_legacy_folded_outgoing_x86_64 "needs objdump and python3"
 elif ! $T10_KRC --legacy --arch=x86_64 --target=windows --emit=pe "$DIR/fixtures/win_legacy_out.kr" -o "$T10_D/peu_wl.exe" --test-listing="$T10_D/peu_wl.lst" > "$T10_D/peu_wl.log" 2>&1; then
     pe_row_bad win_legacy_folded_outgoing_x86_64 "build: $(grep -m1 error "$T10_D/peu_wl.log" | cut -c1-120)"
 else
     PEU_WHY=""
-    PEU_O=$(python3 "$DIR/helpers/x86_win_rbp_scan.py" "$T10_D/peu_wl.lst" --want-sp-fixed=stamp,six,ten,add6,add10 --want-sp-moving=say,main \
-        --want-no-body-rsp=stamp,six,ten,add6,add10 --want-body-rsp=say,main 2>&1) || PEU_WHY="shape: $(head -2 <<< "$PEU_O" | tr '\n' '|')"
+    PEU_O=$(python3 "$DIR/helpers/x86_win_rbp_scan.py" "$T10_D/peu_wl.lst" --want-sp-fixed=stamp,six,ten,add6,add10,spawn --want-sp-moving=say,main \
+        --want-no-body-rsp=stamp,six,ten,add6,add10,spawn --want-body-rsp=say,main 2>&1) || PEU_WHY="shape: $(head -2 <<< "$PEU_O" | tr '\n' '|')"
     PEU_C=$(env -u PE_UNWIND_CHECK_DISABLE python3 "$DIR/helpers/pe_unwind_check.py" --arch x86_64 "$T10_D/peu_wl.exe" --listing "$T10_D/peu_wl.lst" 2>&1)
     [ "$(grep -c ': PASS' <<< "$PEU_C")" = 9 ] || PEU_WHY="$PEU_WHY checker: $(grep -m1 -e FAIL -e error <<< "$PEU_C" | cut -c1-120);"
     PEU_RUN=" (no Wine: static checks only)"
@@ -29605,7 +29608,7 @@ else
         if [ "$PEU_RRC" = 0 ] && [ "$(tr -d '\r' < "$T10_D/win.out")" = 65 ]; then PEU_RUN=", Wine prints 65$(t10_note)"
         else PEU_WHY="$PEU_WHY Wine rc=$PEU_RRC out='$(tr -d '\r' < "$T10_D/win.out" | tr '\n' ' ' | head -c 40)' $(t10_errtail);"; fi
     fi
-    if [ -z "$PEU_WHY" ]; then pe_row_ok win_legacy_folded_outgoing_x86_64 "stamp/six/ten/add6/add10 folded (no body RSP write, no frame pointer); say/main keep per-call areas and RBP; C0-C6 + C3b + C4b PASS$PEU_RUN"
+    if [ -z "$PEU_WHY" ]; then pe_row_ok win_legacy_folded_outgoing_x86_64 "stamp/six/ten/add6/add10/spawn folded (no body RSP write, no frame pointer); say/main keep per-call areas and RBP; C0-C6 + C3b + C4b PASS$PEU_RUN"
     else pe_row_bad win_legacy_folded_outgoing_x86_64 "$PEU_WHY"; fi
 fi
 # --debug on Windows x86_64 legacy (#143 A19d(ii); spec 2.5.1 L6, 2.5.5): the
@@ -29632,6 +29635,44 @@ else
     fi
     if [ -z "$PEU_WHY" ]; then pe_row_ok pe_unwind_debug_windows_x86_64_legacy "bc (bounds trap) and ar folded, main keeps RBP; C0-C6 + C3b + C4b PASS$PEU_RUN"
     else pe_row_bad pe_unwind_debug_windows_x86_64_legacy "$PEU_WHY"; fi
+fi
+# The arm64 legacy fold (#143 A19d(iii); spec 2.5.7, ruling Q11, option
+# (a)): in tests/fixtures/win_legacy_out.kr the SP-fixed functions -- stamp
+# (time_ns) and ten (a 10-argument call), both OUT 16, and six, say, add6,
+# add10 -- have no SP write between their x19/x20 save and restore and no
+# set_fp, x29/x30 at [sp,#OUT] and x19/x20 at [sp,#OUT+16]; opaque (asm),
+# spawn (exec_process_argv: OUT 0x4E0 > 488 stays SP-moving, its `sub sp` in
+# the body) and main keep set_fp. Image and listing pass C0-C6 + C3b + C4b
+# (no arm64 Wine here: static).
+if ! command -v python3 > /dev/null 2>&1; then
+    pe_row_skip win_legacy_folded_outgoing_arm64 "needs python3"
+elif ! $T10_KRC --legacy --arch=arm64 --target=windows --emit=pe "$DIR/fixtures/win_legacy_out.kr" -o "$T10_D/peu_wla.exe" --test-listing="$T10_D/peu_wla.lst" > "$T10_D/peu_wla.log" 2>&1; then
+    pe_row_bad win_legacy_folded_outgoing_arm64 "build: $(grep -m1 error "$T10_D/peu_wla.log" | cut -c1-120)"
+else
+    PEU_WHY=""
+    PEU_O=$(python3 -B "$DIR/helpers/a64_win_legacy_fold_scan.py" "$T10_D/peu_wla.lst" --want-folded=stamp,six,ten,say,add6,add10 --want-set-fp=opaque,spawn,main 2>&1) \
+        || PEU_WHY="shape: $(grep -v -e ': folded' -e ': set_fp' <<< "$PEU_O" | head -2 | tr '\n' '|')"
+    grep -q '^stamp: folded, OUT 16$' <<< "$PEU_O" && grep -q '^ten: folded, OUT 16$' <<< "$PEU_O" || PEU_WHY="$PEU_WHY stamp/ten not folded at OUT 16;"
+    PEU_C=$(env -u PE_UNWIND_CHECK_DISABLE python3 -B "$DIR/helpers/pe_unwind_check.py" --arch arm64 "$T10_D/peu_wla.exe" --listing "$T10_D/peu_wla.lst" 2>&1)
+    [ "$(grep -c ': PASS' <<< "$PEU_C")" = 9 ] || PEU_WHY="$PEU_WHY checker: $(grep -m1 -e FAIL -e error <<< "$PEU_C" | cut -c1-120);"
+    if [ -z "$PEU_WHY" ]; then pe_row_ok win_legacy_folded_outgoing_arm64 "stamp/ten (OUT 16), six, say, add6, add10 folded (no body SP write, no set_fp); opaque/spawn/main keep set_fp; C0-C6 + C3b + C4b PASS"
+    else pe_row_bad win_legacy_folded_outgoing_arm64 "$PEU_WHY"; fi
+fi
+# --debug on Windows arm64 legacy (#143 A19d(iii)): tests/fixtures/
+# win_debug_traps.kr's ar and bc (overflow and bounds traps) are folded, main
+# keeps set_fp; C0-C6 + C3b + C4b (static: no arm64 Wine here).
+if ! command -v python3 > /dev/null 2>&1; then
+    pe_row_skip pe_unwind_debug_windows_arm64_legacy "needs python3"
+elif ! $T10_KRC --debug --legacy --arch=arm64 --target=windows --emit=pe "$DIR/fixtures/win_debug_traps.kr" -o "$T10_D/peu_dla.exe" --test-listing="$T10_D/peu_dla.lst" > "$T10_D/peu_dla.log" 2>&1; then
+    pe_row_bad pe_unwind_debug_windows_arm64_legacy "build: $(grep -m1 error "$T10_D/peu_dla.log" | cut -c1-120)"
+else
+    PEU_WHY=""
+    PEU_O=$(python3 -B "$DIR/helpers/a64_win_legacy_fold_scan.py" "$T10_D/peu_dla.lst" --want-folded=ar,bc --want-set-fp=main 2>&1) \
+        || PEU_WHY="shape: $(grep -v -e ': folded' -e ': set_fp' <<< "$PEU_O" | head -2 | tr '\n' '|')"
+    PEU_C=$(env -u PE_UNWIND_CHECK_DISABLE python3 -B "$DIR/helpers/pe_unwind_check.py" --arch arm64 "$T10_D/peu_dla.exe" --listing "$T10_D/peu_dla.lst" 2>&1)
+    [ "$(grep -c ': PASS' <<< "$PEU_C")" = 9 ] || PEU_WHY="$PEU_WHY checker: $(grep -m1 -e FAIL -e error <<< "$PEU_C" | cut -c1-120);"
+    if [ -z "$PEU_WHY" ]; then pe_row_ok pe_unwind_debug_windows_arm64_legacy "ar and bc folded (no body SP write, no set_fp), main keeps set_fp; C0-C6 + C3b + C4b PASS"
+    else pe_row_bad pe_unwind_debug_windows_arm64_legacy "$PEU_WHY"; fi
 fi
 # Windows refusals (#143 A7, spec 4.1.5 / 4.3 / 5.1.5): a @naked body whose
 # lowering moves RSP/SP, asm that writes the frame pointer (rbp; x29 or x18 on

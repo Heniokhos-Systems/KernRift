@@ -841,14 +841,14 @@ alias analysis and a load cannot be assumed to return the same value twice.
   diagnostic that lands on line 6. Print the *whole* output before concluding
   the compiler did not diagnose something.)
 - **AST-level DCE seeds only `main` and `@export`** (`dce_scan`,
-  `src/codegen.kr:15308`). `_start` is not a seed, so freestanding riscv32 and
+  `src/codegen.kr:15313`). `_start` is not a seed, so freestanding riscv32 and
   xtensa entry points had to be added explicitly (`src/main.kr:2712`–`2726`).
 - **A provider reached only through override resolution gets pruned.** Under
   `--target=none`, `println` reroutes to the `@builtin_override fn write`
   provider, and an f-string's buffer reroutes to the `alloc` provider — but
   neither reroute is a `Call` node in the AST, so the provider is dead to
   `dce_scan` and is pruned. Both needed explicit seeds
-  (`src/codegen.kr:15106`–`12035`). The seeds are deliberately *narrow* —
+  (`src/codegen.kr:15111`–`12035`). The seeds are deliberately *narrow* —
   gated on `target_os == 4`, on the callee really being one of the four print
   builtins, and on that name not itself being overridden — so that the test
   proving the seed is load-bearing cannot pass vacuously.
@@ -1218,7 +1218,7 @@ goes through exactly one emitter, and that emitter refuses.
 | Arch | Trap | Choke point | File:line |
 |---|---|---|---|
 | x86_64 | `SYSCALL` (`0F 05`) | `emit_x86_syscall_insn` | `src/codegen.kr:788` |
-| arm64 | `SVC` (`0xD4000001` / `0xD4001001`) | `emit_a64_svc_word` | `src/codegen_aarch64.kr:429` |
+| arm64 | `SVC` (`0xD4000001` / `0xD4001001`) | `emit_a64_svc_word` | `src/codegen_aarch64.kr:436` |
 | riscv32 | `ECALL` (`0x00000073`) | `rv_ecall` | `src/ir_riscv.kr:262` |
 | xtensa | `SIMCALL` | `xt_simcall` | `src/ir_xtensa.kr:286` |
 

@@ -6,9 +6,11 @@
 # legacy with SAVE_NONVOL r12), arm64 shape S1, shape S2 at every boundary of
 # its low allocation (4080, 4096, 4112, 16 777 200), the D fallback at
 # 16 777 216, and the arm64 legacy frame without set_fp, all pass C1..C6 and
-# C3b. Negatives: an SP-fixed record over a body that writes RSP/SP (one case
-# per instruction class) fails C3b, an S1 save offset of 512 and an rbp write
-# without PUSH_NONVOL fail C3, and a zero-size allocation fails C3.
+# C3b, and so does an arm64 legacy folded frame at OUT = 488 (#143 A19d(iii)).
+# Negatives: an SP-fixed record over a body that writes RSP/SP (one case per
+# instruction class) fails C3b, an S1 save offset of 512, the folded frame at
+# OUT = 496 and an rbp write without PUSH_NONVOL fail C3, and a zero-size
+# allocation fails C3.
 
 # ---- x86_64 ----------------------------------------------------------------
 X_G='        .def g; .scl 2; .type 32; .endef
@@ -420,6 +422,69 @@ f:
         .seh_endproc
 EOF
 expect optc_neg_a64_s1_save_offset_512 C3 FAIL --arch arm64 "$W/a_s1_512.obj"
+# The arm64 legacy fold's 488 boundary (#143 A19d(iii), option (a)): a folded
+# frame saves x29/x30 at [sp,#OUT] and x19/x20 at [sp,#OUT+16]. OUT = 488 puts
+# x19/x20 at 504, the last offset save_regp encodes (Z*8, Z < 64): C1..C6 and
+# C3b pass. OUT = 496 would put x19 at 512: the nearest code (504) does not
+# describe it, C3 -- which is why the pre-scan keeps OUT > 488 SP-moving.
+mk a_fold_488 a64 <<EOF
+        .text
+        .def f; .scl 2; .type 32; .endef
+        .globl f
+        .seh_proc f
+f:
+        sub sp, sp, #544
+        .seh_stackalloc 544
+        stp x29, x30, [sp, #488]
+        .seh_save_fplr 488
+        stp x19, x20, [sp, #504]
+        .seh_save_regp x19, 504
+        .seh_endprologue
+        mov x19, x0
+        bl k
+        add x0, x0, x19
+        .seh_startepilogue
+        ldp x19, x20, [sp, #504]
+        .seh_save_regp x19, 504
+        ldp x29, x30, [sp, #488]
+        .seh_save_fplr 488
+        add sp, sp, #544
+        .seh_stackalloc 544
+        .seh_endepilogue
+        ret
+        .seh_endproc
+$A_K
+EOF
+expect_all optc_a64_legacy_fold_out_488 --arch arm64 "$W/a_fold_488.obj"
+mk a_fold_496 a64 <<EOF
+        .text
+        .def f; .scl 2; .type 32; .endef
+        .globl f
+        .seh_proc f
+f:
+        sub sp, sp, #544
+        .seh_stackalloc 544
+        stp x29, x30, [sp, #496]
+        .seh_save_fplr 496
+        str x19, [sp, #512]
+        .seh_save_reg x19, 504
+        .seh_endprologue
+        mov x19, x0
+        bl k
+        add x0, x0, x19
+        .seh_startepilogue
+        ldr x19, [sp, #512]
+        .seh_save_reg x19, 504
+        ldp x29, x30, [sp, #496]
+        .seh_save_fplr 496
+        add sp, sp, #544
+        .seh_stackalloc 544
+        .seh_endepilogue
+        ret
+        .seh_endproc
+$A_K
+EOF
+expect optc_neg_a64_legacy_fold_out_496 C3 FAIL --arch arm64 "$W/a_fold_496.obj"
 # an S2 frame that keeps a zero `sub sp, sp, #0` after its lsl #12 one: C3
 mk a_zero a64 <<EOF
         .text
