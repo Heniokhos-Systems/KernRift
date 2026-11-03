@@ -406,6 +406,51 @@ jobs:
             exit 1
           fi
 
+      # #143 A18 (plan A18, spec 8.5): the arm64 Windows dynamic proof. The
+      # unwind tables are checked statically by the suite (C0-C6 + C3b + C4b)
+      # and walked under Wine only on x86_64; windows-11-arm is the only
+      # native arm64 Windows there is. Built here, run by test-windows-arm64
+      # ("pe-unwind arm64 fault fixtures"). cases.tsv: <image> <kind>
+      # <stdout, lines joined by |> <chain>; kind fault = must end with
+      # STATUS_ACCESS_VIOLATION (-1073741819) 3 of 3 runs printing <stdout>,
+      # and with cdb its stack must be <chain> then BaseThreadInitThunk,
+      # RtlUserThreadStart; <image>_nouw.exe is the same build with
+      # --test-no-unwind, whose cdb chain must NOT hold; kind exec = run next
+      # to child.exe, must exit 7 (#174). The listings name the frames.
+      - name: Build pe-unwind arm64 Windows fixtures (#143 A18)
+        run: |
+          D=/tmp/peu-arm64; rm -rf "$D"; mkdir -p "$D"
+          : > "$D/cases.tsv"
+          peu() { # <image> <kind> <fixture> <flags> <stdout> <chain>
+            ./build/krc2 --arch=arm64 --target=windows --emit=pe $4 --test-listing="$D/$1.lst" "tests/fixtures/$3.kr" -o "$D/$1.exe"
+            if [ "$2" = fault ]; then
+              ./build/krc2 --arch=arm64 --target=windows --emit=pe $4 --test-no-unwind --test-listing="$D/$1_nouw.lst" "tests/fixtures/$3.kr" -o "$D/$1_nouw.exe"
+            fi
+            printf '%s\t%s\t%s\t%s\n' "$1" "$2" "$5" "$6" >> "$D/cases.tsv"
+          }
+          for L in ir legacy; do
+            F=""; [ "$L" = legacy ] && F=--legacy
+            peu nested_$L       fault pe_unwind_nested_fault      "$F" 'armed|f3' f3,f2,f1,main
+            peu stack_args_$L   fault pe_unwind_stack_args_fault  "$F" 'armed|f3' f3,f2,main
+            peu argv_main_$L    fault pe_unwind_argv_main_fault   "$F" 'armed|f2' f2,f1,main
+            peu temp_push_$L    fault pe_unwind_temp_push_fault   "$F" '7|3'      f2,f1,main
+            peu mixed_$L        fault pe_unwind_mixed_fault       "$F" 'armed|b'  c,b,a,main
+            peu mixed_arm64_$L  fault pe_unwind_mixed_fault_arm64 "$F" 'armed'    c,b,a,main
+            for V in exec_process_f exec_process_m exec_process_argv_f exec_process_argv_m; do
+              peu ${V}_$L exec win_fold_diff/$V "$F" '' ''
+            done
+          done
+          # the guard pair: IR only (std/alloc.kr's legacy arm64 Windows
+          # build is refused, syscall_raw); the fault is inside std, so only
+          # main is pinned
+          peu guard_ir      fault alloc_guard_fault      "" 'armed' ...,main
+          peu guard_read_ir fault alloc_guard_fault_read "" 'armed' ...,main
+          # pe_unwind_naked_fault is x86_64 asm; an arm64 naked function
+          # cannot call (LANGUAGE.md), so there is no arm64 naked fixture
+          ./build/krc2 --arch=arm64 --target=windows --emit=pe tests/fixtures/win_fold_diff/child.kr -o "$D/child.exe"
+          echo "$(wc -l < "$D/cases.tsv") cases, $(ls "$D"/*.exe | wc -l) images"
+          cat "$D/cases.tsv"
+
       - name: Upload artifacts
         uses: actions/upload-artifact@v6
         with:
@@ -429,6 +474,7 @@ jobs:
             /tmp/cross-win-arm.exe
             /tmp/winret-x64.exe
             /tmp/winret-arm.exe
+            /tmp/peu-arm64/
 
   build-test-linux-arm64:
     name: Build and Test (Linux ARM64, native)
@@ -928,6 +974,109 @@ jobs:
             exit 1
           }
           Write-Host "PASS: Windows ARM64 write() returns 3 and 0, not 1"
+          exit 0
+
+      # #143 A18: the arm64 dynamic proof (see "Build pe-unwind arm64 Windows
+      # fixtures"). Exit codes and stdout always; the call chains only when the
+      # image has cdb (Debugging Tools / WinDbg) -- without it the step says
+      # "cdb: not on image" and the chains are NOT proven (#150 stays open).
+      # No continue-on-error: any mismatch fails the job.
+      - name: pe-unwind arm64 fault fixtures (#143 A18)
+        shell: pwsh
+        run: |
+          $D = 'C:\tmp\bins\peu-arm64'
+          Set-Location $D
+          $bad = 0
+          $cdb = @('C:\Program Files (x86)\Windows Kits\10\Debuggers\arm64\cdb.exe') +
+                 @(Get-AppxPackage *WinDbg* -ErrorAction SilentlyContinue | ForEach-Object { Join-Path $_.InstallLocation 'arm64\cdb.exe' }) |
+                 Where-Object { $_ -and (Test-Path -LiteralPath $_) } | Select-Object -First 1
+          $py = (Get-Command python -ErrorAction SilentlyContinue).Source
+          if ($cdb -and -not $py) { Write-Host 'cdb found but no python to read its transcript'; $cdb = $null }
+          if ($cdb) { Write-Host "cdb: $cdb" } else { Write-Host 'cdb: not on image -- exit codes only, the call chains are NOT proven (#150 stays open)' }
+          # the transcript reader of tests/windows/cdb_chain.sh (laptop-side
+          # there): names the image's frames from the listing and requires
+          # <chain>, then KERNEL32!BaseThreadInitThunk, ntdll!RtlUserThreadStart
+          $parser = Join-Path $env:RUNNER_TEMP 'cdb_chain_parse.py'
+          Set-Content -LiteralPath $parser -Encoding utf8 -Value @'
+          import re, sys
+          lst, mod, want, trc = sys.argv[1], sys.argv[2].lower(), sys.argv[3].split(','), sys.argv[4]
+          labels, code_end = [], None
+          for l in open(lst, encoding='latin-1'):
+              m = re.match(r'^([A-Za-z_.$][\w.$@]*):\s*$', l)
+              m2 = re.match(r'^\s+([0-9a-f]{8}): ', l)
+              if m and not m2:
+                  labels.append([None, m.group(1)])
+              if m2 and labels and labels[-1][0] is None:
+                  labels[-1][0] = int(m2.group(1), 16)
+              if l.startswith('; uw-code-end '):
+                  code_end = int(l.split()[2], 16)
+          labels = [(o, n) for o, n in labels if o is not None]
+          def name_of(rva):
+              off = rva - 0x1000
+              if off < 0 or (code_end is not None and off >= code_end):
+                  return '?+0x%x' % rva
+              own = [n for o, n in labels if o <= off]
+              return own[-1] if own else '?+0x%x' % rva
+          out = open(trc, encoding='latin-1').read()
+          frames, ink = [], False
+          for l in out.split('\n'):
+              if re.match(r'^\s*#?\s*Child-SP\s+RetAddr\s+Call Site', l):
+                  ink = True; frames = []; continue
+              if ink:
+                  m = re.match(r'^\s*(?:[0-9a-f]+\s+)?[0-9a-f`]+\s+[0-9a-f`]+\s+(\S+)', l)
+                  if not m:
+                      if frames:
+                          ink = False
+                      continue
+                  mm = re.match(r'^([^!+]+)(?:!([^+]+))?(?:\+0x([0-9a-f]+))?$', m.group(1), re.I)
+                  if not mm:
+                      frames.append(('?', m.group(1))); continue
+                  mo, fn, off = mm.group(1), mm.group(2), mm.group(3)
+                  if mo.lower() == mod and fn is None and off:
+                      frames.append(('img', name_of(int(off, 16))))
+                  else:
+                      frames.append(('ext', '%s!%s' % (mo, fn) if fn else m.group(1)))
+          print('chain: ' + ' > '.join(n for _, n in frames))
+          if 'Access violation - code c0000005' not in out:
+              print('FAIL: the last event is not the access violation'); sys.exit(1)
+          i = 0
+          while i < len(frames) and frames[i][0] != 'img':
+              i += 1
+          j = i
+          while j < len(frames) and frames[j][0] == 'img':
+              j += 1
+          img = [n for _, n in frames[i:j]]
+          rest = [n.lower() for _, n in frames[j:j + 2]]
+          ok_img = (img[-(len(want) - 1):] == want[1:]) if want[0] == '...' else (img == want)
+          if not (ok_img and rest == ['kernel32!basethreadinitthunk', 'ntdll!rtluserthreadstart']):
+              print('FAIL: image frames %s (want %s), then %s' % (img, want, rest)); sys.exit(1)
+          print('OK')
+          '@
+          function Chain($exe, $lst, $want) {
+            $t = Join-Path $env:RUNNER_TEMP ("$exe.cdb.txt")
+            & $cdb -lines -c 'g; .lastevent; k 30; q' (Join-Path $D "$exe.exe") *> $t
+            & $py -B $parser (Join-Path $D $lst) $exe $want $t | Write-Host
+            return $LASTEXITCODE
+          }
+          foreach ($line in Get-Content (Join-Path $D 'cases.tsv')) {
+            $f = $line -split "`t"; $img = $f[0]; $kind = $f[1]; $want = $f[2]; $chain = $f[3]
+            if ($kind -eq 'exec') {
+              & (Join-Path $D "$img.exe"); $rc = $LASTEXITCODE
+              if ($rc -ne 7) { Write-Host "FAIL: $img exit $rc, want 7 (#174)"; $bad++ } else { Write-Host "PASS: $img exit 7" }
+              continue
+            }
+            for ($k = 1; $k -le 3; $k++) {
+              $out = (& (Join-Path $D "$img.exe") 2>$null) -join '|'; $rc = $LASTEXITCODE
+              if ($rc -ne -1073741819 -or $out -ne $want) { Write-Host "FAIL: $img run $k exit $rc stdout '$out', want -1073741819 '$want'"; $bad++ }
+            }
+            Write-Host "${img}: 3 runs done"
+            if ($cdb) {
+              if ((Chain $img "$img.lst" $chain) -ne 0) { Write-Host "FAIL: $img cdb chain"; $bad++ } else { Write-Host "PASS: $img chain $chain" }
+              if ((Chain "${img}_nouw" "${img}_nouw.lst" $chain) -eq 0) { Write-Host "FAIL: ${img}_nouw (--test-no-unwind): the chain held without tables"; $bad++ } else { Write-Host "PASS: ${img}_nouw chain broken, as it must be" }
+            }
+          }
+          if ($bad) { Write-Host "pe-unwind arm64: $bad failures"; exit 1 }
+          Write-Host 'pe-unwind arm64: all fixtures PASS'
           exit 0
 
   source-check:
