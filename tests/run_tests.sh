@@ -8808,14 +8808,17 @@ rm -f /tmp/krc_migtypes_$$.kr
 #   - output that says skip / skipped / skipping in any case, other than
 #     skip_row's own line and other than a failure message (one that starts
 #     "FAIL:", or the "name: FAIL" form followed by a space, "(" or ":").
-#     Output includes: every echo or printf command (also \echo, /bin/echo),
-#     its words with redirections taken out wherever they stand (>&2, 1>&2,
-#     >file), up to the first unquoted | ; & ( ) { } or comment, so a piped,
-#     tee'd or redirected echo counts and a value inside $( ) does not; the
-#     body of a cat or tee heredoc not redirected to a file (>&2 and 2>&1 are
-#     not files); a cat or tee here-string (<<<); the echo inside an eval's
-#     argument; and the arguments of any function defined above whose body
-#     echoes its own arguments ($1, $@, ...) -- a logger or a PASS helper;
+#     Output includes: every echo or printf command (also \echo, /bin/echo,
+#     and behind command / builtin / env / exec / nohup / xargs or a leading
+#     redirection such as >&2 or 2>/dev/null), its words with redirections
+#     taken out wherever they stand, up to the first unquoted | ; & ( ) { } or
+#     comment, so a piped, tee'd or redirected echo counts and a value inside
+#     $( ) does not; the body of a cat or tee heredoc not redirected to a file
+#     (>&2 and 2>&1 are not files); a cat or tee here-string (<<<); the echo
+#     inside an eval's or an sh -c / bash -c argument; and the arguments of
+#     any function defined above (NAME() { or function NAME {) whose body
+#     echoes a variable, and of an alias for echo or printf -- a logger or a
+#     PASS helper;
 #   - any assignment to PASS -- PASS=..., PASS+=, ((PASS++)), $((++PASS)),
 #     let / read / declare / local / export / printf -v PASS -- on the same
 #     line as, or the line after, output that says a leg did not run: skip,
@@ -8824,7 +8827,9 @@ rm -f /tmp/krc_migtypes_$$.kr
 #     runner / device; or such output on the line after a PASS assignment (for
 #     a heredoc: the line after it ends, against everything it printed); and a
 #     call to any function defined above whose body assigns PASS (t10_ok,
-#     c7_ok, ...) with such words in its arguments.
+#     c7_ok, ...) with such words in its arguments; and a PASS assignment on
+#     the line right after a FAIL-form message that says so (the "foo: FAIL
+#     (no) -- SKIP" disguise; not after else / elif / ;; / }).
 # Known misses, including: skip wording built in a variable or split across
 # quotes, a PASS assignment more than one line from the wording, PASS reached
 # through a variable name, a heredoc written to a file, a function used before
@@ -8871,9 +8876,14 @@ SKP_AWK='   # SKIP-TRIPWIRE-OWN-LINE
         }   # SKIP-TRIPWIRE-OWN-LINE
         return o   # SKIP-TRIPWIRE-OWN-LINE
     }   # SKIP-TRIPWIRE-OWN-LINE
-    function cmdtext(s,   sk, w, a, r) {   # SKIP-TRIPWIRE-OWN-LINE
+    function cmdtext(s,   sk, w, a, r, g) {   # SKIP-TRIPWIRE-OWN-LINE
         sk = skel(s)   # SKIP-TRIPWIRE-OWN-LINE
-        if (match(sk, /^[ \t]*((if|then|elif|else|do|while|until|time|!)[ \t]+)*([A-Za-z_][A-Za-z0-9_]*=[^ \t]*[ \t]+)*/)) { s = substr(s, RLENGTH + 1); sk = substr(sk, RLENGTH + 1) }   # SKIP-TRIPWIRE-OWN-LINE
+        for (g = 0; g < 8; g++) {   # SKIP-TRIPWIRE-OWN-LINE
+            if (match(sk, /^[ \t]*((if|then|elif|else|do|while|until|time|!)[ \t]+)*([A-Za-z_][A-Za-z0-9_]*=[^ \t]*[ \t]+)*/) && RLENGTH > 0) { s = substr(s, RLENGTH + 1); sk = substr(sk, RLENGTH + 1) }   # SKIP-TRIPWIRE-OWN-LINE
+            if (match(sk, /^[ \t]*[0-9]*(>>?|<)&?[ \t]*[^ \t]+[ \t]*/)) { s = substr(s, RLENGTH + 1); sk = substr(sk, RLENGTH + 1); continue }   # SKIP-TRIPWIRE-OWN-LINE
+            if (match(sk, /^[ \t]*(command|builtin|exec|nohup|xargs|env)([ \t]+-[^ \t]*)*[ \t]+/)) { s = substr(s, RLENGTH + 1); sk = substr(sk, RLENGTH + 1); continue }   # SKIP-TRIPWIRE-OWN-LINE
+            break   # SKIP-TRIPWIRE-OWN-LINE
+        }   # SKIP-TRIPWIRE-OWN-LINE
         if (!match(sk, /^[^ \t]+/)) { CW = ""; return "" }   # SKIP-TRIPWIRE-OWN-LINE
         w = substr(s, 1, RLENGTH); a = substr(s, RLENGTH + 1)   # SKIP-TRIPWIRE-OWN-LINE
         sub(/^\\/, "", w); sub(/^.*\//, "", w)   # SKIP-TRIPWIRE-OWN-LINE
@@ -8881,14 +8891,15 @@ SKP_AWK='   # SKIP-TRIPWIRE-OWN-LINE
     }   # SKIP-TRIPWIRE-OWN-LINE
     function segtext(s,   a, r, k) {   # SKIP-TRIPWIRE-OWN-LINE
         a = cmdtext(s)   # SKIP-TRIPWIRE-OWN-LINE
-        if (CW == "echo" || CW == "printf") { r = CW " " unredir(a); return isfail(r) ? "" : r }   # SKIP-TRIPWIRE-OWN-LINE
+        if (CW == "echo" || CW == "printf") { r = CW " " unredir(a); if (isfail(r)) { FT = FT " " r; return "" } return r }   # SKIP-TRIPWIRE-OWN-LINE
+        if ((CW == "sh" || CW == "bash" || CW == "dash") && match(a, /^[ \t]*(-[a-z]+[ \t]+)*-[a-z]*c[ \t]+/)) { a = substr(a, RLENGTH + 1); CW = "eval" }   # SKIP-TRIPWIRE-OWN-LINE
         if (CW == "eval") { r = a; sub(/^[ \t]*/, "", r); if (substr(r, 1, 1) == SQ || substr(r, 1, 1) == "\"") r = substr(r, 2); return (r ~ /(^|[ \t;])\\?(\/[a-z\/]*)?(echo|printf)[ \t]/ && !isfail(r)) ? r : "" }   # SKIP-TRIPWIRE-OWN-LINE
         if ((CW == "cat" || CW == "tee") && (k = index(a, HS)) > 0) { r = substr(a, k + 3); return isfail(r) ? "" : r }   # SKIP-TRIPWIRE-OWN-LINE
         if (CW in OUTF) { r = unredir(a); return isfail(r) ? "" : r }   # SKIP-TRIPWIRE-OWN-LINE
         return ""   # SKIP-TRIPWIRE-OWN-LINE
     }   # SKIP-TRIPWIRE-OWN-LINE
     function lineout(l,   sk, n, i, c, st, d, v, start, acc, s, k2, a) {   # SKIP-TRIPWIRE-OWN-LINE
-        sk = skel(l); n = length(sk); d = 0; start = 1; acc = ""; VIA = ""   # SKIP-TRIPWIRE-OWN-LINE
+        sk = skel(l); n = length(sk); d = 0; start = 1; acc = ""; VIA = ""; FT = ""   # SKIP-TRIPWIRE-OWN-LINE
         for (i = 1; i <= n + 1; i++) {   # SKIP-TRIPWIRE-OWN-LINE
             c = (i <= n) ? substr(sk, i, 1) : ";"   # SKIP-TRIPWIRE-OWN-LINE
             if (c == "$" && substr(sk, i + 1, 1) == "{") { while (i <= n && substr(sk, i, 1) != "}") i++; continue }   # SKIP-TRIPWIRE-OWN-LINE
@@ -8937,17 +8948,17 @@ SKP_AWK='   # SKIP-TRIPWIRE-OWN-LINE
     }   # SKIP-TRIPWIRE-OWN-LINE
     inhd {   # SKIP-TRIPWIRE-OWN-LINE
         b = $0; if (hdtab) sub(/^\t+/, "", b)   # SKIP-TRIPWIRE-OWN-LINE
-        if (b == hddelim) { inhd = 0; prev = "#"; pt = hdtext; next }   # SKIP-TRIPWIRE-OWN-LINE
+        if (b == hddelim) { inhd = 0; prev = "#"; pt = hdtext; pft = ""; next }   # SKIP-TRIPWIRE-OWN-LINE
         t = (hdout && b !~ /# tripwire: not a skip/ && !isfail(b)) ? b : ""   # SKIP-TRIPWIRE-OWN-LINE
         if (t != "" && skipword(t)) print NR ": skip printed in a heredoc: " substr(b, 1, 90)   # SKIP-TRIPWIRE-OWN-LINE
         else if (passinc(prev) && t != "" && legword(t)) print NR ": PASS where a leg did not run: " substr(b, 1, 90)   # SKIP-TRIPWIRE-OWN-LINE
         if (t != "") hdtext = hdtext " " t   # SKIP-TRIPWIRE-OWN-LINE
-        prev = "#"; pt = t; next   # SKIP-TRIPWIRE-OWN-LINE
+        prev = "#"; pt = t; pft = ""; next   # SKIP-TRIPWIRE-OWN-LINE
     }   # SKIP-TRIPWIRE-OWN-LINE
     { cur = (pend != "") ? pend $0 : $0 }   # SKIP-TRIPWIRE-OWN-LINE
     code(cur) && njoin < 40 && (cur ~ /\\$/ && cur !~ /\\\\$/) { skel(cur); if (QS != 1) { pend = substr(cur, 1, length(cur) - 1) " "; njoin++; next } }   # SKIP-TRIPWIRE-OWN-LINE
     code(cur) && njoin < 40 { s0 = skel(cur); if (QS == 2 && s0 ~ /(^|[;&|{(! \t])\\?(\/[a-z\/]*)?(echo|printf)[ \t]/) { pend = cur " "; njoin++; next } }   # SKIP-TRIPWIRE-OWN-LINE
-    { pend = ""; njoin = 0; PVIA = ""; t = code(cur) ? lineout(cur) : "" }   # SKIP-TRIPWIRE-OWN-LINE
+    { pend = ""; njoin = 0; PVIA = ""; FT = ""; t = code(cur) ? lineout(cur) : ""; ft = (FT != "" && (skipword(FT) || legword(FT))) ? FT : "" }   # SKIP-TRIPWIRE-OWN-LINE
     infn { FB = FB "\n" cur; if (cur ~ ("^" FIND "}")) { infn = 0; fnclass(FN, FB) } }   # SKIP-TRIPWIRE-OWN-LINE
     function fnclass(nm, body,   L, k, m, keep) {   # SKIP-TRIPWIRE-OWN-LINE
         if (nm == "skip_row") return   # SKIP-TRIPWIRE-OWN-LINE
@@ -8955,12 +8966,13 @@ SKP_AWK='   # SKIP-TRIPWIRE-OWN-LINE
         m = split(body, L, "\n")   # SKIP-TRIPWIRE-OWN-LINE
         for (k = 1; k <= m; k++) {   # SKIP-TRIPWIRE-OWN-LINE
             if (passinc(L[k])) PASSF[nm] = 1   # SKIP-TRIPWIRE-OWN-LINE
-            if (lineout(L[k]) ~ /\$([1-9@*]|\{[1-9@*])/) OUTF[nm] = 1   # SKIP-TRIPWIRE-OWN-LINE
+            if (lineout(L[k]) ~ /\$([A-Za-z_0-9@*]|\{)/) OUTF[nm] = 1   # SKIP-TRIPWIRE-OWN-LINE
         }   # SKIP-TRIPWIRE-OWN-LINE
         PVIA = keep   # SKIP-TRIPWIRE-OWN-LINE
     }   # SKIP-TRIPWIRE-OWN-LINE
-    cur !~ /^[ \t]*#/ && match(cur, /^[ \t]*(function[ \t]+)?[A-Za-z_][A-Za-z0-9_]*[ \t]*\(\)[ \t]*\{/) {   # SKIP-TRIPWIRE-OWN-LINE
-        FN = cur; sub(/^[ \t]*(function[ \t]+)?/, "", FN); sub(/[ \t]*\(.*/, "", FN)   # SKIP-TRIPWIRE-OWN-LINE
+    cur !~ /^[ \t]*#/ && cur ~ /^[ \t]*alias[ \t]+[A-Za-z_][A-Za-z0-9_]*=["\\]?(\/[a-z\/]*)?(echo|printf)([^A-Za-z0-9_]|$)/ { AN = cur; sub(/^[ \t]*alias[ \t]+/, "", AN); sub(/=.*/, "", AN); OUTF[AN] = 1 }   # SKIP-TRIPWIRE-OWN-LINE
+    cur !~ /^[ \t]*#/ && (match(cur, /^[ \t]*(function[ \t]+)?[A-Za-z_][A-Za-z0-9_]*[ \t]*\(\)[ \t]*\{/) || match(cur, /^[ \t]*function[ \t]+[A-Za-z_][A-Za-z0-9_]*[ \t]*\{/)) {   # SKIP-TRIPWIRE-OWN-LINE
+        FN = cur; sub(/^[ \t]*(function[ \t]+)?/, "", FN); sub(/[ \t]*[({].*/, "", FN)   # SKIP-TRIPWIRE-OWN-LINE
         FIND = cur; sub(/[^ \t].*/, "", FIND)   # SKIP-TRIPWIRE-OWN-LINE
         FB = substr(cur, RLENGTH + 1)   # SKIP-TRIPWIRE-OWN-LINE
         if (skel(FB) ~ /\}[ \t;]*$/) fnclass(FN, FB); else infn = 1   # SKIP-TRIPWIRE-OWN-LINE
@@ -8970,7 +8982,8 @@ SKP_AWK='   # SKIP-TRIPWIRE-OWN-LINE
     t != "" && skipword(t) && cur !~ /^[ \t]*echo "  \$1: SKIP \(\$2\)"$/ { print NR ": skip printed outside skip_row: " substr(cur, 1, 90); prev = cur; pt = t; next }   # SKIP-TRIPWIRE-OWN-LINE
     passinc(cur) && ((t != "" && legword(t)) || (pt != "" && (legword(pt) || skipword(pt)))) { print NR ": PASS where a leg did not run: " substr(cur, 1, 90) }   # SKIP-TRIPWIRE-OWN-LINE
     passinc(prev) && t != "" && (legword(t) || skipword(t)) { print NR ": PASS where a leg did not run: " substr(cur, 1, 90) }   # SKIP-TRIPWIRE-OWN-LINE
-    { prev = cur; pt = t }   # SKIP-TRIPWIRE-OWN-LINE
+    passinc(cur) && pft != "" && cur !~ /^[ \t]*(else|elif|;;|\})/ { print NR ": PASS right after a FAIL-form message that says a leg did not run: " substr(cur, 1, 90) }   # SKIP-TRIPWIRE-OWN-LINE
+    { prev = cur; pt = t; pft = ft }   # SKIP-TRIPWIRE-OWN-LINE
     END { if (inhd) print "heredoc " hddelim " never ends"; if (infn) print "function " FN " never ends" }   # SKIP-TRIPWIRE-OWN-LINE
 '   # SKIP-TRIPWIRE-OWN-LINE
 TOTAL=$((TOTAL + 1))
@@ -8987,7 +9000,10 @@ fi
 # increments, heredoc output was not read; round 16: a redirection before the
 # words, a heredoc to stderr, echo and PASS helpers (t10_ok, c7_ok, loggers),
 # eval, \ continuations, a multi-line quoted echo, here-strings, /bin/echo
-# and \echo, the "FAIL-safe SKIP" disguise -- and shapes that are not skips
+# and \echo, the "FAIL-safe SKIP" disguise; round 17: echo behind command,
+# builtin, env, xargs or a leading >&2 / 2>/dev/null (round 15 caught those),
+# sh -c / bash -c, function NAME {, a logger echoing a local copy, an alias
+# for echo, a "FAIL (no) -- SKIP" message followed by a PASS -- and shapes that are not skips
 # (FAIL messages and FAIL helpers, a value grepped for "skip" or made in $( ),
 # a source file written from a heredoc, a shift inside $(( )), a PASS helper
 # with a plain reason, the results line) must not be.
@@ -9119,6 +9135,48 @@ skp_case fail_safe_disguise hit <<'SKPEOF'
 echo "  foo: FAIL-safe SKIP (no wine)"
 PASS=$((PASS + 1))
 SKPEOF
+skp_case command_echo hit <<'SKPEOF'
+command echo "  foo: SKIP (no wine)"
+PASS=$((PASS + 1))
+SKPEOF
+skp_case builtin_echo hit <<'SKPEOF'
+builtin echo "  foo: SKIP (no wine)"
+SKPEOF
+skp_case env_echo hit <<'SKPEOF'
+env LC_ALL=C echo "  foo: SKIP (no wine)"
+SKPEOF
+skp_case xargs_echo hit <<'SKPEOF'
+printf 'x' | xargs echo "  foo: SKIP"
+SKPEOF
+skp_case redirect_first hit <<'SKPEOF'
+>&2 echo "  foo: SKIP (no wine)"
+SKPEOF
+skp_case file_redirect_first hit <<'SKPEOF'
+2>/dev/null echo "  foo: SKIP (no wine)"
+SKPEOF
+skp_case sh_c hit <<'SKPEOF'
+sh -c 'echo "  foo: SKIP (no wine)"'
+PASS=$((PASS + 1))
+SKPEOF
+skp_case bash_c hit <<'SKPEOF'
+bash -c "echo '  foo: SKIP (no wine)'"
+SKPEOF
+skp_case function_keyword_helper hit <<'SKPEOF'
+function ok3 { PASS=$((PASS + 1)); echo "  $1: PASS ($2)"; }
+ok3 foo "skipped: no wine"
+SKPEOF
+skp_case logger_local_copy hit <<'SKPEOF'
+note() { local m=$1; echo "$m"; }
+note "  foo: SKIP (no wine)"
+SKPEOF
+skp_case alias_for_echo hit <<'SKPEOF'
+alias say=echo
+say "  foo: SKIP (no wine)"
+SKPEOF
+skp_case fail_form_then_pass hit <<'SKPEOF'
+echo "  foo: FAIL (no) -- SKIP"
+PASS=$((PASS + 1))
+SKPEOF
 skp_case not_skips clean <<'SKPEOF'
 echo "FAIL: foo (skipped, and REQUIRE_FULL_RUN=1 makes every skip a failure)"
 echo "  foo: FAIL (qemu skipped the leg)"
@@ -9138,6 +9196,8 @@ echo >&2 "FAIL: foo (skipped)"
 X=$(echo skip)
 t10_ok() { PASS=$((PASS + 1)); echo "  $1: PASS${2:+ ($2)}"; }
 t10_ok foo "both legs ran"
+if [ -z "$_miss" ]; then PASS=$((PASS + 1)); echo "  foo: PASS"
+else FAIL=$((FAIL + 1)); echo "FAIL: foo (missing:$_miss)"; fi
 SKPEOF
 rm -rf "$SKP_TD"
 if [ -z "$SKP_BAD" ]; then   # SKIP-TRIPWIRE-OWN-LINE
