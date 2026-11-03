@@ -30376,6 +30376,54 @@ PEULINKEOF
     else pe_row_bad $PEU_ROW "$PEU_WHY"; fi
 fi
 
+# #160 (spec 15; #143 A16, re-review finding 10): Win64 makes rsi, rdi and
+# xmm6-15 nonvolatile, but KernRift code uses them as scratch, so a C caller
+# that keeps a value in rsi across a call into KR loses it.
+# tests/fixtures/pe_unwind_rsi_host: host.c's asm probe() puts a sentinel in
+# rsi and calls the KR object's main(); the image exits 40 when rsi kept it,
+# 41 when not. Linked as in pe_unwind_obj_link_windows_wine (--emit=obj is
+# the legacy backend; k.kr's f-string writes rsi).
+#  pe_unwind_host_rsi_control: the control kc.kr (no rsi write) exits 40,
+#    and k.kr's listing writes rsi -- so the known red below fails for its
+#    own reason, never because the probe is broken;
+#  pe_unwind_host_rsi_across_kr: k.kr exits 40. KNOWN RED
+#    (tests/pe_unwind_known_reds.lst): it must FAIL, with exit 41, until #160
+#    is fixed, and leaves that list in the commit that fixes it.
+PEU_RH="$DIR/fixtures/pe_unwind_rsi_host"
+if ! command -v clang > /dev/null 2>&1 || ! command -v lld-link > /dev/null 2>&1 || ! command -v llvm-dlltool > /dev/null 2>&1; then
+    pe_row_skip pe_unwind_host_rsi_control "needs clang, lld-link and llvm-dlltool"
+    pe_row_skip pe_unwind_host_rsi_across_kr "needs clang, lld-link and llvm-dlltool"
+elif [ -z "$T10_WINE" ]; then
+    PEU_WHY=${KR_WINE_BAD:-no wine}
+    if [ -n "$KR_WINE_BAD" ]; then pe_row_bad pe_unwind_host_rsi_control "$PEU_WHY"; else pe_row_skip pe_unwind_host_rsi_control "$PEU_WHY"; fi
+    pe_row_skip pe_unwind_host_rsi_across_kr "$PEU_WHY"
+else
+    PEU_WHY=""; PEU_RC1=""
+    if ! $T10_KRC --freestanding --target=windows --emit=obj --test-listing="$T10_D/peu_rk.lst" "$PEU_RH/k.kr" -o "$T10_D/peu_rk.obj" > /dev/null 2>&1 \
+       || ! $T10_KRC --freestanding --target=windows --emit=obj "$PEU_RH/kc.kr" -o "$T10_D/peu_rkc.obj" > /dev/null 2>&1 \
+       || ! llvm-dlltool -d "$DIR/fixtures/pe_unwind_cprobe/k32.def" -l "$T10_D/peu_rk32.lib" -m i386:x86-64 > /dev/null 2>&1 \
+       || ! clang --target=x86_64-pc-windows-msvc -O1 -c "$PEU_RH/host.c" -o "$T10_D/peu_rhost.obj" > /dev/null 2>&1 \
+       || ! lld-link /nodefaultlib /entry:start /subsystem:console "/out:$T10_D/peu_rp.exe" "$T10_D/peu_rhost.obj" "$T10_D/peu_rk.obj" "$T10_D/peu_rk32.lib" > /dev/null 2>&1 \
+       || ! lld-link /nodefaultlib /entry:start /subsystem:console "/out:$T10_D/peu_rpc.exe" "$T10_D/peu_rhost.obj" "$T10_D/peu_rkc.obj" "$T10_D/peu_rk32.lib" > /dev/null 2>&1; then
+        PEU_WHY="build/link failed"
+    else
+        grep -qE '^ +[0-9a-f]{8}: .*(lea|mov) rsi, ' "$T10_D/peu_rk.lst" || PEU_WHY="$PEU_WHY k.kr's listing no longer writes rsi (pick another rsi-writing construct);"
+        t10_wine "$T10_D/peu_rw.out" "$T10_D/peu_rw.err" peu_rpc.exe; PEU_RC=$?
+        [ "$PEU_RC" = 40 ] || PEU_WHY="$PEU_WHY control kc.kr: Wine exit $PEU_RC, want 40;"
+        t10_wine "$T10_D/peu_rw.out" "$T10_D/peu_rw.err" peu_rp.exe; PEU_RC1=$?
+        case "$PEU_RC1" in 40|41) ;; *) PEU_WHY="$PEU_WHY k.kr: Wine exit $PEU_RC1, want 40 (kept) or 41 (clobbered);" ;; esac
+    fi
+    rm -f "$T10_D"/peu_rk.* "$T10_D"/peu_rkc.obj "$T10_D"/peu_rk32.lib "$T10_D"/peu_rhost.obj "$T10_D"/peu_rp.exe "$T10_D"/peu_rpc.exe "$T10_D"/peu_rw.*
+    if [ -z "$PEU_WHY" ]; then
+        pe_row_ok pe_unwind_host_rsi_control "control exits 40 (rsi kept); k.kr's listing writes rsi; k.kr exits $PEU_RC1"
+        if [ "$PEU_RC1" = 40 ]; then pe_row_ok pe_unwind_host_rsi_across_kr "rsi survives a call into KR (exit 40): #160 is fixed, remove this row from tests/pe_unwind_known_reds.lst"
+        else pe_row_bad pe_unwind_host_rsi_across_kr "#160: the C host's rsi does not survive a call into KR (Wine exit 41, want 40)"; fi
+    else
+        pe_row_bad pe_unwind_host_rsi_control "$PEU_WHY"
+        pe_row_skip pe_unwind_host_rsi_across_kr "the control failed"
+    fi
+fi
+
 # tests/windows/native_exec.sh (#143 A14a, spec 8.6 (a)) runs Windows rows
 # natively on the laptop; its Linux half is tested here, without the laptop
 # (the PowerShell half only natively, Task D):

@@ -1628,6 +1628,14 @@ linking or ELF object introspection).
 fn my_entry() { }
 ```
 
+**Calling KernRift from C on Windows** (a COFF object linked into a C
+program, Appendix C; there `@export` does not make a function global, only
+`main` is): KernRift code does not preserve `rsi`, `rdi` or `xmm6`–`xmm15`,
+which Win64 makes nonvolatile (#160). The C caller must treat every call into
+KernRift as clobbering them (for example, call through a small wrapper that
+saves them) — see the
+[Windows notes](#windows-unwind-tables-frames-and-what-they-require-of-you).
+
 ### `@section("name")`
 
 Places the function in a named section for kernel / bare-metal
@@ -1676,6 +1684,11 @@ That compiles on arm64 and returns the counter. The older workaround — store t
 register to memory from asm and read it back with `load64` — is no longer
 necessary; it rested on an unchecked assumption about which register was still
 live.
+
+**On Windows a naked body may not move the stack pointer or write the frame
+register**, an arm64 naked function cannot call anything, `--legacy` `@naked` is
+refused, and a naked `main` gets `cli_argv` = 0 — see the
+[Windows notes](#windows-unwind-tables-frames-and-what-they-require-of-you).
 
 **And `@naked` binds to the NEXT function declaration, with nothing in
 between.** An attribute separated from its function by an inserted declaration
@@ -3228,13 +3241,16 @@ reason about register allocation, interoperate with C, or write
 | macOS   | same (System V)                     | `rax`  | same                            | 16                  |
 | Windows | `rcx rdx r8 r9` (then stack, +32 shadow) | `rax` | `rbx rbp rdi rsi rsp r12..r15 xmm6..xmm15` | 16 |
 
-- KernRift currently allocates only GPRs — no XMM usage in generated
-  code, so the caller-saved XMM registers are irrelevant to user code
-  but matter when you link against C.
+- The table gives each platform's ABI. KernRift's own code does **not**
+  preserve `rsi`, `rdi` or `xmm6`–`xmm15` on Windows (#160): a C caller must
+  treat them as clobbered by any KernRift function — see
+  [Windows: unwind tables, frames and what they require of you](#windows-unwind-tables-frames-and-what-they-require-of-you).
 - On Windows, the first 32 bytes of the stack below `rsp` at call time
   are a **shadow** area owned by the callee. `krc` allocates it for you.
 - `@naked` functions get no prologue/epilogue — you're responsible for
   stack alignment if you call into user code.
+  On Windows a naked body may not move RSP or write `rbp` (see the Windows
+  notes below).
 
 ### arm64 (AArch64)
 
@@ -3244,6 +3260,78 @@ reason about register allocation, interoperate with C, or write
 | macOS        | `x0..x7`  | `x0`   | same               | `x16`         |
 | Android      | `x0..x7`  | `x0`   | same               | `x8`          |
 | Windows arm64| `x0..x7`  | `x0`   | same               | (no syscalls; uses kernel32 IAT) |
+
+### Windows: unwind tables, frames and what they require of you
+
+Every Windows build (`--target=windows`, x86_64 and arm64, IR and `--legacy`)
+lays out each function's frame so that Windows can unwind through it — that is
+what lets the OS walk the stack when a program faults, `RtlCaptureStackBackTrace`
+and debuggers name the callers, and a crash be reported instead of the process
+silently vanishing.
+
+- **Tables.** A PE image (`--emit=pe`, and the Windows slices of a fat build)
+  carries a `.pdata` section (one `RUNTIME_FUNCTION` per function) and an
+  `.xdata` section (the unwind codes) after `.idata`, with data directory 3
+  pointing at `.pdata`. A COFF object (`--emit=obj --target=windows`) carries
+  the same two sections, with relocations against `.text` (Appendix C). The
+  Windows-ABI ELF that `--target=windows` produces without `--emit=pe` has the
+  same frames but no tables.
+- **Frame pointer only where the stack pointer moves.** A function whose
+  RSP/SP changes after its prologue (calls with stack arguments, temporaries
+  pushed around a call, `asm` blocks, …) sets up a frame pointer — `rbp` on
+  x86_64 (`mov rbp, rsp` ends the prologue), `x29` on arm64 — and its unwind
+  record is relative to it. Every other function gets none and is described
+  relative to the stack pointer, as MSVC does: there `rbp` is an ordinary
+  callee-saved register (IR backend); on arm64 `x29`/`x30` are still saved as a
+  pair but `x29` is not linked into a frame chain (the unwinder does not need
+  the chain). In `--legacy` code the per-call shadow space and outgoing
+  arguments are part of the fixed frame, so most legacy functions do not move SP.
+- **Limits.** An arm64 function longer than 1 MiB, or whose frame below the
+  save area reaches 256 MiB, is a compile error naming it: its unwind record
+  cannot describe it.
+- **Registers the tables do not describe: rsi, rdi and xmm6–xmm15 (#160).**
+  Win64 makes them nonvolatile (the table above), but KernRift code uses them as
+  scratch: the IR backend's register file includes `rsi`/`rdi` and `xmm2`–`xmm15`,
+  and `--legacy` built-ins (f-strings, for one) use `rsi`/`rdi`. Calls
+  between KernRift functions are unaffected. **A C or other foreign caller must
+  treat every KernRift function as clobbering rsi, rdi and xmm6–xmm15**, and a
+  debugger shows stale values for them in callers' frames. The walk itself
+  (RSP, RIP and the registers the records describe) is correct.
+
+**`@naked` on Windows.** A naked function gets an unwind record that describes
+no frame, which is true only if its body never moves RSP/SP and never writes the
+frame register. On Windows the compiler therefore refuses, with an error at the
+construct, any naked body whose own lowering moves the stack pointer or writes
+`rbp`/`x29`: calls that pass stack arguments, built-ins that call through the
+import table (`write`, `alloc`, `file_*`, …), and other stack-moving operations.
+The contract for the asm you write in a naked body is the same: no stack-pointer
+or frame-register motion that you do not undo, and RSP at its entry value
+wherever the body can fault or call.
+
+- **On arm64 a naked function cannot call anything.** A call overwrites `x30`,
+  and saving `x30` first moves SP, so the only describable naked arm64 bodies are
+  leaves that keep SP and `x30` intact.
+- **`--legacy` `@naked` is refused on Windows** (its lowering spills into the
+  caller's frame and cannot be described); build it with the IR backend.
+- **A naked `main` is accepted**, but it gets no command-line sequence:
+  `cli_argc` is left at the `0xFFFFFFFF` sentinel and `cli_argv` at **0** (not
+  the raw command line). `sys_argc()`/`sys_arg()` return 0 for it; call
+  `GetCommandLineA` yourself if you need the line. It still runs two static
+  stores at entry, which clobber `rax` on x86_64 and `x0`, `x16`, `x17` on arm64.
+- In a fat build these refusals fire only when a Windows slice actually ships:
+  `--targets=linux-x64` is never refused because of a Windows rule.
+
+**Inline asm on Windows** (any function, naked or not) may not write the frame
+register, because the unwind records rely on it:
+
+- x86_64: any write to `rbp`/`ebp`/`bp`/`bpl`, `leave`, `pop rbp`, and an
+  `in(x -> rbp)` / `out(rbp -> x)` constraint or a clobber naming `rbp` are
+  compile errors.
+- arm64: any write to `x29`/`fp`, or to `x18` (the TEB pointer), including a
+  load pair and constraints, is a compile error.
+- asm given as raw bytes (`"0x…"`) cannot be checked and gets a warning.
+- Moving RSP/SP inside asm is allowed: the function then gets a frame pointer,
+  which covers it.
 
 ## Appendix B. Syscall numbers
 
@@ -3386,9 +3474,16 @@ by the Darwin C ABI. `extern fn` call sites use relocations
 
 ### Windows x86_64 / arm64 (COFF `.obj`)
 
-One `.text` section, one COFF symbol table. No underscore prefix on
-x86_64. `extern fn` call sites use relocations
+A `.text` section, then `.pdata` and `.xdata` (each function's unwind record,
+with relocations against `.text`) when the module has any function, and one
+COFF symbol table; a module with only statics is a one-section `.text` object.
+No underscore prefix on x86_64. `extern fn` call sites use relocations
 `IMAGE_REL_AMD64_REL32` (x86_64) and `IMAGE_REL_ARM64_BRANCH26` (arm64).
+
+**Linking into a C program:** only `main` is a global symbol. The object's
+code does not preserve `rsi`, `rdi` or `xmm6`–`xmm15` (#160): the C side must
+treat a call into it as clobbering them — see the
+[Windows notes](#windows-unwind-tables-frames-and-what-they-require-of-you).
 
 ### Linking with gcc or clang
 

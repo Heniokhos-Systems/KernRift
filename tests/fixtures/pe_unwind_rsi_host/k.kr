@@ -1,0 +1,11 @@
+// #160 known red (#143 A16): built --freestanding --target=windows
+// --emit=obj (the legacy backend). The f-string writes rsi (`lea rsi` +
+// `rep movsb`) and nothing saves it, so host.c's sentinel in rsi does not
+// survive the call: exit 41. When #160 is fixed this exits 40.
+fn main() -> uint32 {
+    uint64 n = 42
+    uint64 p = f"n={n}!"
+    uint8 c = 0
+    unsafe { *(p as uint8) -> c }
+    return c
+}

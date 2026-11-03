@@ -3,7 +3,12 @@
 # 1928/1930). Register #143: Wine exits 0 instead of 5 because the image has no
 # unwind tables. tests/helpers/require_rows.sh enforces this list BOTH ways:
 # each must FAIL exactly once, and the commit in which one turns green removes
-# it here. The list may only shrink.
+# it here. #143's own reds may only leave it.
 # A6b-1 (x86_64 IR unwind tables): alloc_guard_fault_windows_wine and
-# alloc_guard_fault_read_windows_wine turned green and left this list; it is
-# now empty, so the suite must report 0 failed.
+# alloc_guard_fault_read_windows_wine turned green and left this list.
+# A16 (plan A16, spec 15, re-review finding 10) adds the one entry below: a
+# pre-existing defect #143 does not fix and documents (LANGUAGE.md, Windows
+# notes), pinned so that its fix is noticed. The suite reports 1 failed.
+# #160: Win64-nonvolatile rsi (and rdi, xmm6-15) used as scratch by KR code;
+# a C host's rsi does not survive a call into KR (Wine exit 41, want 40).
+pe_unwind_host_rsi_across_kr

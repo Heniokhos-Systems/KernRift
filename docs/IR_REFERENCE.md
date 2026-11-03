@@ -164,6 +164,18 @@ ABI, not the container.** `--arch=x86_64 --target=windows` emits an **ELF**
 `--emit=pe` / `--emit=macho`. A byte-identity gate built on `--target=`
 rows alone will never exercise the PE or Mach-O header emitters.
 
+The corollary for Windows frames (#143): **`target_os == 2` carries the
+frame-pointer rule in any container.** The Windows prologue/epilogue shapes —
+a frame pointer (`rbp` / `x29`) exactly in the functions whose SP moves after
+the prologue, the arm64 save-area layout, the folded legacy call areas, the
+`@naked` and asm refusals — are gated on `target_os == 2` alone, so they apply
+to the PE image, the COFF object, the Windows-ABI ELF above and the
+`--emit=asm` listing alike. Only the **tables** (`.pdata`/`.xdata`) depend on
+the container: the recorder writes them for PE images, COFF objects and the
+Windows slices of a fat build, never for the ELF. That is why the #143 perf
+gate (`tests/perf/`) can count the Windows frame shapes' instructions by
+running Windows-ABI ELFs under qemu-user.
+
 ### `--emit=ir` is pre-optimization
 
 `ir_dump()` is called directly after `ir_lower_function()` with **no
