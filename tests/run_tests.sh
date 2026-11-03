@@ -8803,28 +8803,37 @@ rm -f /tmp/krc_migtypes_$$.kr
 # under REQUIRE_FULL_RUN=1, fails it. Sites used to print SKIP and add to PASS,
 # print SKIP and count nothing, or pass a row one of whose legs never ran, so a
 # box without a tool reported a clean run. This row reads this file, line by
-# line as text (it is not a shell parser), and fails on:
+# line as text (it is not a shell parser; a line ending in \ is joined with the
+# next, and so is an echo whose double quote is still open), and fails on:
 #   - output that says skip / skipped / skipping in any case, other than
 #     skip_row's own line and other than a failure message (one that starts
-#     "FAIL:", or the "name: FAIL" form). Output is each echo or printf on a
-#     line -- its own words, up to the first unquoted | ; & < > ) or comment,
-#     so a piped or tee'd echo counts and a value inside $( ) does not -- and
-#     the body of a cat or tee heredoc that is not redirected to a file;
+#     "FAIL:", or the "name: FAIL" form followed by a space, "(" or ":").
+#     Output includes: every echo or printf command (also \echo, /bin/echo),
+#     its words with redirections taken out wherever they stand (>&2, 1>&2,
+#     >file), up to the first unquoted | ; & ( ) { } or comment, so a piped,
+#     tee'd or redirected echo counts and a value inside $( ) does not; the
+#     body of a cat or tee heredoc not redirected to a file (>&2 and 2>&1 are
+#     not files); a cat or tee here-string (<<<); the echo inside an eval's
+#     argument; and the arguments of any function defined above whose body
+#     echoes its own arguments ($1, $@, ...) -- a logger or a PASS helper;
 #   - any assignment to PASS -- PASS=..., PASS+=, ((PASS++)), $((++PASS)),
 #     let / read / declare / local / export / printf -v PASS -- on the same
 #     line as, or the line after, output that says a leg did not run: skip,
 #     missing, absent, not installed, not found, unavailable, (did) not run,
 #     or no qemu / wine / python / gcc / objdump / readelf / xxd / emulator /
 #     runner / device; or such output on the line after a PASS assignment (for
-#     a heredoc: the line after it ends, against everything it printed).
-# It does not see skip wording built in a variable, a PASS assignment more
-# than one line from the wording, a heredoc written to a file, or the inside
-# of a multi-line quoted string as anything but lines. A line whose wording
-# only looks like a skip ends in "# tripwire: not a skip" with the reason; the
-# lines of these two rows carry SKIP-TRIPWIRE-OWN-LINE. The next row checks
-# the scanner itself against each bypass review has found.
+#     a heredoc: the line after it ends, against everything it printed); and a
+#     call to any function defined above whose body assigns PASS (t10_ok,
+#     c7_ok, ...) with such words in its arguments.
+# Known misses, including: skip wording built in a variable or split across
+# quotes, a PASS assignment more than one line from the wording, PASS reached
+# through a variable name, a heredoc written to a file, a function used before
+# it is defined, look-alike Unicode letters, and lines marked "# tripwire: not
+# a skip". A line whose wording only looks like a skip ends in that marker with
+# the reason; the lines of these two rows carry SKIP-TRIPWIRE-OWN-LINE. The
+# next row checks the scanner itself against each bypass review has found.
 SKP_AWK='   # SKIP-TRIPWIRE-OWN-LINE
-    BEGIN { SQ = sprintf("%c", 39); HD = "<" "<" }   # SKIP-TRIPWIRE-OWN-LINE
+    BEGIN { SQ = sprintf("%c", 39); HD = "<" "<"; HS = "<" "<" "<" }   # SKIP-TRIPWIRE-OWN-LINE
     function code(l)     { return (l !~ /^[ \t]*#/) && (l !~ /SKIP-TRIPWIRE-OWN-LINE/) && (l !~ /# tripwire: not a skip/) }   # SKIP-TRIPWIRE-OWN-LINE
     function skel(l,   i, c, n, sq, dq, o) {   # SKIP-TRIPWIRE-OWN-LINE
         n = length(l); o = ""; sq = 0; dq = 0   # SKIP-TRIPWIRE-OWN-LINE
@@ -8838,28 +8847,64 @@ SKP_AWK='   # SKIP-TRIPWIRE-OWN-LINE
             else if (c == "#" && (i == 1 || substr(l, i - 1, 1) ~ /[ \t]/)) break   # SKIP-TRIPWIRE-OWN-LINE
             o = o c   # SKIP-TRIPWIRE-OWN-LINE
         }   # SKIP-TRIPWIRE-OWN-LINE
+        QS = sq ? 1 : (dq ? 2 : 0)   # SKIP-TRIPWIRE-OWN-LINE
         return o   # SKIP-TRIPWIRE-OWN-LINE
     }   # SKIP-TRIPWIRE-OWN-LINE
-    function seg(s,   k, sk) {   # SKIP-TRIPWIRE-OWN-LINE
-        sk = skel(s)   # SKIP-TRIPWIRE-OWN-LINE
-        if (match(sk, /[|;&><)`]/)) return substr(s, 1, RSTART - 1)   # SKIP-TRIPWIRE-OWN-LINE
-        return substr(s, 1, length(sk))   # SKIP-TRIPWIRE-OWN-LINE
-    }   # SKIP-TRIPWIRE-OWN-LINE
     function isfail(s) {   # SKIP-TRIPWIRE-OWN-LINE
-        sub(/^(echo|printf)[ \t]+(-[a-zA-Z]+[ \t]+)*/, "", s)   # SKIP-TRIPWIRE-OWN-LINE
+        sub(/^[ \t]*(echo|printf)[ \t]+(-[a-zA-Z]+[ \t]+)*/, "", s)   # SKIP-TRIPWIRE-OWN-LINE
         sub(/^\$?"/, "", s); if (substr(s, 1, 1) == SQ) s = substr(s, 2)   # SKIP-TRIPWIRE-OWN-LINE
         sub(/^(\\n)+/, "", s)   # SKIP-TRIPWIRE-OWN-LINE
-        return (s ~ /^[ \t]*FAIL:/) || (s ~ /^[ \t]*[^ \t:"]+: FAIL([^A-Za-z_]|$)/)   # SKIP-TRIPWIRE-OWN-LINE
+        return (s ~ /^[ \t]*FAIL:/) || (s ~ /^[ \t]*[^ \t:"]+: FAIL([ \t(:]|$)/)   # SKIP-TRIPWIRE-OWN-LINE
     }   # SKIP-TRIPWIRE-OWN-LINE
-    function outtext(l,   p, r, acc, s) {   # SKIP-TRIPWIRE-OWN-LINE
-        acc = ""; p = 0   # SKIP-TRIPWIRE-OWN-LINE
-        while (match(substr(l, p + 1), /(^|[;&|{(! \t])(echo|printf)[ \t]/)) {   # SKIP-TRIPWIRE-OWN-LINE
-            r = substr(l, p + RSTART); s = substr(l, 1, p + RSTART)   # SKIP-TRIPWIRE-OWN-LINE
-            p = p + RSTART + RLENGTH - 1   # SKIP-TRIPWIRE-OWN-LINE
-            if (s ~ /\$\([^)]*$/) continue   # SKIP-TRIPWIRE-OWN-LINE
-            sub(/^[;&|{(! \t]/, "", r)   # SKIP-TRIPWIRE-OWN-LINE
-            r = seg(r)   # SKIP-TRIPWIRE-OWN-LINE
-            if (!isfail(r)) acc = acc " " r   # SKIP-TRIPWIRE-OWN-LINE
+    function unredir(s,   sk, o, i, n, c, j) {   # SKIP-TRIPWIRE-OWN-LINE
+        sk = skel(s); n = length(sk); o = ""   # SKIP-TRIPWIRE-OWN-LINE
+        for (i = 1; i <= n; i++) {   # SKIP-TRIPWIRE-OWN-LINE
+            c = substr(sk, i, 1)   # SKIP-TRIPWIRE-OWN-LINE
+            if (c == ">" || c == "<") {   # SKIP-TRIPWIRE-OWN-LINE
+                sub(/[0-9]+$/, "", o); j = i   # SKIP-TRIPWIRE-OWN-LINE
+                while (substr(sk, j, 1) ~ /[<>]/) j++   # SKIP-TRIPWIRE-OWN-LINE
+                if (substr(sk, j, 1) == "&") { j++; while (substr(sk, j, 1) ~ /[0-9-]/) j++ }   # SKIP-TRIPWIRE-OWN-LINE
+                else { while (substr(sk, j, 1) ~ /[ \t]/) j++; while (j <= n && substr(sk, j, 1) !~ /[ \t]/) j++ }   # SKIP-TRIPWIRE-OWN-LINE
+                o = o " "; i = j - 1; continue   # SKIP-TRIPWIRE-OWN-LINE
+            }   # SKIP-TRIPWIRE-OWN-LINE
+            o = o substr(s, i, 1)   # SKIP-TRIPWIRE-OWN-LINE
+        }   # SKIP-TRIPWIRE-OWN-LINE
+        return o   # SKIP-TRIPWIRE-OWN-LINE
+    }   # SKIP-TRIPWIRE-OWN-LINE
+    function cmdtext(s,   sk, w, a, r) {   # SKIP-TRIPWIRE-OWN-LINE
+        sk = skel(s)   # SKIP-TRIPWIRE-OWN-LINE
+        if (match(sk, /^[ \t]*((if|then|elif|else|do|while|until|time|!)[ \t]+)*([A-Za-z_][A-Za-z0-9_]*=[^ \t]*[ \t]+)*/)) { s = substr(s, RLENGTH + 1); sk = substr(sk, RLENGTH + 1) }   # SKIP-TRIPWIRE-OWN-LINE
+        if (!match(sk, /^[^ \t]+/)) { CW = ""; return "" }   # SKIP-TRIPWIRE-OWN-LINE
+        w = substr(s, 1, RLENGTH); a = substr(s, RLENGTH + 1)   # SKIP-TRIPWIRE-OWN-LINE
+        sub(/^\\/, "", w); sub(/^.*\//, "", w)   # SKIP-TRIPWIRE-OWN-LINE
+        CW = w; return a   # SKIP-TRIPWIRE-OWN-LINE
+    }   # SKIP-TRIPWIRE-OWN-LINE
+    function segtext(s,   a, r, k) {   # SKIP-TRIPWIRE-OWN-LINE
+        a = cmdtext(s)   # SKIP-TRIPWIRE-OWN-LINE
+        if (CW == "echo" || CW == "printf") { r = CW " " unredir(a); return isfail(r) ? "" : r }   # SKIP-TRIPWIRE-OWN-LINE
+        if (CW == "eval") { r = a; sub(/^[ \t]*/, "", r); if (substr(r, 1, 1) == SQ || substr(r, 1, 1) == "\"") r = substr(r, 2); return (r ~ /(^|[ \t;])\\?(\/[a-z\/]*)?(echo|printf)[ \t]/ && !isfail(r)) ? r : "" }   # SKIP-TRIPWIRE-OWN-LINE
+        if ((CW == "cat" || CW == "tee") && (k = index(a, HS)) > 0) { r = substr(a, k + 3); return isfail(r) ? "" : r }   # SKIP-TRIPWIRE-OWN-LINE
+        if (CW in OUTF) { r = unredir(a); return isfail(r) ? "" : r }   # SKIP-TRIPWIRE-OWN-LINE
+        return ""   # SKIP-TRIPWIRE-OWN-LINE
+    }   # SKIP-TRIPWIRE-OWN-LINE
+    function lineout(l,   sk, n, i, c, st, d, v, start, acc, s, k2, a) {   # SKIP-TRIPWIRE-OWN-LINE
+        sk = skel(l); n = length(sk); d = 0; start = 1; acc = ""; VIA = ""   # SKIP-TRIPWIRE-OWN-LINE
+        for (i = 1; i <= n + 1; i++) {   # SKIP-TRIPWIRE-OWN-LINE
+            c = (i <= n) ? substr(sk, i, 1) : ";"   # SKIP-TRIPWIRE-OWN-LINE
+            if (c == "$" && substr(sk, i + 1, 1) == "{") { while (i <= n && substr(sk, i, 1) != "}") i++; continue }   # SKIP-TRIPWIRE-OWN-LINE
+            if (c == "&" && i > 1 && substr(sk, i - 1, 1) ~ /[<>]/) continue   # SKIP-TRIPWIRE-OWN-LINE
+            if (c == "&" && substr(sk, i + 1, 1) == ">") continue   # SKIP-TRIPWIRE-OWN-LINE
+            if (c ~ /[;|&(){}`]/) {   # SKIP-TRIPWIRE-OWN-LINE
+                v = 0; for (k2 = 1; k2 <= d; k2++) if (VAL[k2]) v = 1   # SKIP-TRIPWIRE-OWN-LINE
+                if (!v) {   # SKIP-TRIPWIRE-OWN-LINE
+                    s = segtext(substr(l, start, i - start))   # SKIP-TRIPWIRE-OWN-LINE
+                    if (s != "") acc = acc " " s   # SKIP-TRIPWIRE-OWN-LINE
+                    if (CW in PASSF) { a = cmdtext(substr(l, start, i - start)); if (skipword(a) || legword(a)) PVIA = PVIA " " CW }   # SKIP-TRIPWIRE-OWN-LINE
+                }   # SKIP-TRIPWIRE-OWN-LINE
+                if (c == "(") { d++; VAL[d] = (i > 1 && substr(sk, i - 1, 1) == "$") }   # SKIP-TRIPWIRE-OWN-LINE
+                else if (c == ")" && d > 0) d--   # SKIP-TRIPWIRE-OWN-LINE
+                start = i + 1   # SKIP-TRIPWIRE-OWN-LINE
+            }   # SKIP-TRIPWIRE-OWN-LINE
         }   # SKIP-TRIPWIRE-OWN-LINE
         return acc   # SKIP-TRIPWIRE-OWN-LINE
     }   # SKIP-TRIPWIRE-OWN-LINE
@@ -8885,7 +8930,7 @@ SKP_AWK='   # SKIP-TRIPWIRE-OWN-LINE
             sub(/^[ \t]*/, "", rest); sub(/^["\\]/, "", rest); if (substr(rest, 1, 1) == SQ) rest = substr(rest, 2)   # SKIP-TRIPWIRE-OWN-LINE
             if (!match(rest, /^[A-Za-z_][A-Za-z0-9_]*/)) continue   # SKIP-TRIPWIRE-OWN-LINE
             hddelim = substr(rest, 1, RLENGTH); n++   # SKIP-TRIPWIRE-OWN-LINE
-            sub(/.*[;|&({]/, "", pre); sub(/^[ \t]*/, "", pre); w = pre; sub(/[ \t].*/, "", w)   # SKIP-TRIPWIRE-OWN-LINE
+            gsub(/[<>]&/, "  ", pre); sub(/.*[;|&({]/, "", pre); sub(/^[ \t]*/, "", pre); w = pre; sub(/[ \t].*/, "", w); sub(/^\\/, "", w); sub(/^.*\//, "", w)   # SKIP-TRIPWIRE-OWN-LINE
             hdout = (w == "cat" || w == "tee") && !redir(sk)   # SKIP-TRIPWIRE-OWN-LINE
         }   # SKIP-TRIPWIRE-OWN-LINE
         return n   # SKIP-TRIPWIRE-OWN-LINE
@@ -8899,13 +8944,34 @@ SKP_AWK='   # SKIP-TRIPWIRE-OWN-LINE
         if (t != "") hdtext = hdtext " " t   # SKIP-TRIPWIRE-OWN-LINE
         prev = "#"; pt = t; next   # SKIP-TRIPWIRE-OWN-LINE
     }   # SKIP-TRIPWIRE-OWN-LINE
-    { cur = $0; t = code(cur) ? outtext(cur) : "" }   # SKIP-TRIPWIRE-OWN-LINE
+    { cur = (pend != "") ? pend $0 : $0 }   # SKIP-TRIPWIRE-OWN-LINE
+    code(cur) && njoin < 40 && (cur ~ /\\$/ && cur !~ /\\\\$/) { skel(cur); if (QS != 1) { pend = substr(cur, 1, length(cur) - 1) " "; njoin++; next } }   # SKIP-TRIPWIRE-OWN-LINE
+    code(cur) && njoin < 40 { s0 = skel(cur); if (QS == 2 && s0 ~ /(^|[;&|{(! \t])\\?(\/[a-z\/]*)?(echo|printf)[ \t]/) { pend = cur " "; njoin++; next } }   # SKIP-TRIPWIRE-OWN-LINE
+    { pend = ""; njoin = 0; PVIA = ""; t = code(cur) ? lineout(cur) : "" }   # SKIP-TRIPWIRE-OWN-LINE
+    infn { FB = FB "\n" cur; if (cur ~ ("^" FIND "}")) { infn = 0; fnclass(FN, FB) } }   # SKIP-TRIPWIRE-OWN-LINE
+    function fnclass(nm, body,   L, k, m, keep) {   # SKIP-TRIPWIRE-OWN-LINE
+        if (nm == "skip_row") return   # SKIP-TRIPWIRE-OWN-LINE
+        keep = PVIA   # SKIP-TRIPWIRE-OWN-LINE
+        m = split(body, L, "\n")   # SKIP-TRIPWIRE-OWN-LINE
+        for (k = 1; k <= m; k++) {   # SKIP-TRIPWIRE-OWN-LINE
+            if (passinc(L[k])) PASSF[nm] = 1   # SKIP-TRIPWIRE-OWN-LINE
+            if (lineout(L[k]) ~ /\$([1-9@*]|\{[1-9@*])/) OUTF[nm] = 1   # SKIP-TRIPWIRE-OWN-LINE
+        }   # SKIP-TRIPWIRE-OWN-LINE
+        PVIA = keep   # SKIP-TRIPWIRE-OWN-LINE
+    }   # SKIP-TRIPWIRE-OWN-LINE
+    cur !~ /^[ \t]*#/ && match(cur, /^[ \t]*(function[ \t]+)?[A-Za-z_][A-Za-z0-9_]*[ \t]*\(\)[ \t]*\{/) {   # SKIP-TRIPWIRE-OWN-LINE
+        FN = cur; sub(/^[ \t]*(function[ \t]+)?/, "", FN); sub(/[ \t]*\(.*/, "", FN)   # SKIP-TRIPWIRE-OWN-LINE
+        FIND = cur; sub(/[^ \t].*/, "", FIND)   # SKIP-TRIPWIRE-OWN-LINE
+        FB = substr(cur, RLENGTH + 1)   # SKIP-TRIPWIRE-OWN-LINE
+        if (skel(FB) ~ /\}[ \t;]*$/) fnclass(FN, FB); else infn = 1   # SKIP-TRIPWIRE-OWN-LINE
+    }   # SKIP-TRIPWIRE-OWN-LINE
+    PVIA != "" { print NR ": PASS where a leg did not run (through a PASS helper): " substr(cur, 1, 90) }   # SKIP-TRIPWIRE-OWN-LINE
     cur !~ /^[ \t]*#/ && cur !~ /SKIP-TRIPWIRE-OWN-LINE/ && (h = hdopen(cur)) > 0 { if (h > 1) print NR ": two heredocs on one line (the tripwire follows one)"; inhd = 1; hdtext = "" }   # SKIP-TRIPWIRE-OWN-LINE
     t != "" && skipword(t) && cur !~ /^[ \t]*echo "  \$1: SKIP \(\$2\)"$/ { print NR ": skip printed outside skip_row: " substr(cur, 1, 90); prev = cur; pt = t; next }   # SKIP-TRIPWIRE-OWN-LINE
     passinc(cur) && ((t != "" && legword(t)) || (pt != "" && (legword(pt) || skipword(pt)))) { print NR ": PASS where a leg did not run: " substr(cur, 1, 90) }   # SKIP-TRIPWIRE-OWN-LINE
     passinc(prev) && t != "" && (legword(t) || skipword(t)) { print NR ": PASS where a leg did not run: " substr(cur, 1, 90) }   # SKIP-TRIPWIRE-OWN-LINE
     { prev = cur; pt = t }   # SKIP-TRIPWIRE-OWN-LINE
-    END { if (inhd) print "heredoc " hddelim " never ends" }   # SKIP-TRIPWIRE-OWN-LINE
+    END { if (inhd) print "heredoc " hddelim " never ends"; if (infn) print "function " FN " never ends" }   # SKIP-TRIPWIRE-OWN-LINE
 '   # SKIP-TRIPWIRE-OWN-LINE
 TOTAL=$((TOTAL + 1))
 SKP_HITS=$(awk "$SKP_AWK" "$DIR/run_tests.sh")   # SKIP-TRIPWIRE-OWN-LINE
@@ -8915,12 +8981,16 @@ else
     FAIL=$((FAIL + 1)); echo "FAIL: no_skip_counted_as_pass (use skip_row, or mark a false alarm: $(printf '%s\n' "$SKP_HITS" | head -5 | tr '\n' ';'))"   # SKIP-TRIPWIRE-OWN-LINE
 fi
 
-# The scanner against fixtures: each bypass review found (round 15: "fail"
-# anywhere in the text exempted it, a piped or tee'd echo was exempt,
-# PASS=$((1 + PASS)), $((++PASS)) and $(expr ...) were not seen as
-# increments, heredoc output was not read) must be caught, and shapes that are
-# not skips (FAIL messages, a value grepped for "skip", a source file written
-# from a heredoc, a shift inside $(( )), the results line) must not be.
+# The scanner against fixtures: each bypass review found must be caught --
+# round 15: "fail" anywhere in the text exempted it, a piped or tee'd echo was
+# exempt, PASS=$((1 + PASS)), $((++PASS)) and $(expr ...) were not seen as
+# increments, heredoc output was not read; round 16: a redirection before the
+# words, a heredoc to stderr, echo and PASS helpers (t10_ok, c7_ok, loggers),
+# eval, \ continuations, a multi-line quoted echo, here-strings, /bin/echo
+# and \echo, the "FAIL-safe SKIP" disguise -- and shapes that are not skips
+# (FAIL messages and FAIL helpers, a value grepped for "skip" or made in $( ),
+# a source file written from a heredoc, a shift inside $(( )), a PASS helper
+# with a plain reason, the results line) must not be.
 TOTAL=$((TOTAL + 1))
 SKP_TD=$(mktemp -d "${TMPDIR:-/tmp}/skp_tripwire.XXXXXX")
 SKP_BAD=""; SKP_N=0
@@ -8967,6 +9037,88 @@ if true; then
 	EOF
 fi
 SKPEOF
+skp_case redirect_before_the_words hit <<'SKPEOF'
+echo >&2 "  foo: SKIP (no wine)"
+PASS=$((PASS + 1))
+SKPEOF
+skp_case printf_redirect_before_the_words hit <<'SKPEOF'
+printf >&2 '  foo: SKIP (no wine)\n'
+PASS=$((PASS + 1))
+SKPEOF
+skp_case fd_redirect_before_the_words hit <<'SKPEOF'
+echo 1>&2 "  foo: SKIP (no wine)"
+SKPEOF
+skp_case heredoc_to_stderr hit <<'SKPEOF'
+cat >&2 <<EOF
+  foo: SKIP (no wine)
+EOF
+SKPEOF
+skp_case heredoc_2_to_1 hit <<'SKPEOF'
+cat 2>&1 <<EOF
+  foo: SKIP (no wine)
+EOF
+SKPEOF
+skp_case echo_wrapper hit <<'SKPEOF'
+say() { echo "$@"; }
+say "  foo: SKIP (no wine)"
+PASS=$((PASS + 1))
+SKPEOF
+skp_case logger_wrapper hit <<'SKPEOF'
+log() { echo "[$(date +%T)] $*"; }
+log "  foo: skipped (no wine)"
+SKPEOF
+skp_case pass_helper_with_skip_reason hit <<'SKPEOF'
+t10_ok() { PASS=$((PASS + 1)); echo "  $1: PASS${2:+ ($2)}"; }
+t10_ok foo "skipped (no wine)"
+SKPEOF
+skp_case pass_helper_with_missing_leg hit <<'SKPEOF'
+c7_ok() { PASS=$((PASS + 1)); echo "  $1: PASS${2:+ ($2)}"; }
+c7_ok foo "qemu missing"
+SKPEOF
+skp_case multi_line_pass_helper hit <<'SKPEOF'
+pass_row() {
+    PASS=$((PASS + 1))
+    echo "  $1: PASS ($2)"
+}
+pass_row foo "wine missing"
+SKPEOF
+skp_case eval_single_quoted hit <<'SKPEOF'
+eval 'echo "  foo: SKIP (no wine)"'
+PASS=$((PASS + 1))
+SKPEOF
+skp_case eval_double_quoted hit <<'SKPEOF'
+eval "echo '  foo: SKIP (no wine)'"
+PASS=$((PASS + 1))
+SKPEOF
+skp_case backslash_continuation hit <<'SKPEOF'
+echo \
+    "  foo: SKIP (no wine)"
+PASS=$((PASS + 1))
+SKPEOF
+skp_case multi_line_quoted_echo hit <<'SKPEOF'
+echo "  foo:
+SKIP (no wine)"
+PASS=$((PASS + 1))
+SKPEOF
+skp_case cat_here_string hit <<'SKPEOF'
+cat <<< "  foo: SKIP (no wine)"
+PASS=$((PASS + 1))
+SKPEOF
+skp_case tee_here_string hit <<'SKPEOF'
+tee -a "$LOG" <<< "  foo: SKIP"
+SKPEOF
+skp_case bin_echo hit <<'SKPEOF'
+/bin/echo "  foo: SKIP (no wine)"
+PASS=$((PASS + 1))
+SKPEOF
+skp_case backslash_echo hit <<'SKPEOF'
+\echo "  foo: SKIP (no wine)"
+PASS=$((PASS + 1))
+SKPEOF
+skp_case fail_safe_disguise hit <<'SKPEOF'
+echo "  foo: FAIL-safe SKIP (no wine)"
+PASS=$((PASS + 1))
+SKPEOF
 skp_case not_skips clean <<'SKPEOF'
 echo "FAIL: foo (skipped, and REQUIRE_FULL_RUN=1 makes every skip a failure)"
 echo "  foo: FAIL (qemu skipped the leg)"
@@ -8980,10 +9132,16 @@ EOF
 PASS=$((PASS + 1)); echo "  foo: PASS (both legs ran)"
 X=$(( 1 << n ))
 echo "=== Results: $PASS/$TOTAL passed, $FAIL failed, $SKIP skipped ==="   # tripwire: not a skip
+c7_bad() { FAIL=$((FAIL + 1)); echo "  $1: FAIL ($2 )"; }
+c7_bad foo "qemu skipped the leg"
+echo >&2 "FAIL: foo (skipped)"
+X=$(echo skip)
+t10_ok() { PASS=$((PASS + 1)); echo "  $1: PASS${2:+ ($2)}"; }
+t10_ok foo "both legs ran"
 SKPEOF
 rm -rf "$SKP_TD"
 if [ -z "$SKP_BAD" ]; then   # SKIP-TRIPWIRE-OWN-LINE
-    PASS=$((PASS + 1)); echo "  skip_tripwire_catches_each_bypass: PASS ($SKP_N fixtures: 8 bypasses caught, the non-skips left alone)"   # SKIP-TRIPWIRE-OWN-LINE
+    PASS=$((PASS + 1)); echo "  skip_tripwire_catches_each_bypass: PASS ($SKP_N fixtures: $((SKP_N - 1)) bypasses caught, the non-skips left alone)"   # SKIP-TRIPWIRE-OWN-LINE
 else
     FAIL=$((FAIL + 1)); echo "FAIL: skip_tripwire_catches_each_bypass ($SKP_BAD)"   # SKIP-TRIPWIRE-OWN-LINE
 fi
@@ -29290,7 +29448,7 @@ else
         kill "$S1B_HP" 2>/dev/null; wait "$S1B_HP" 2>/dev/null
         S1B_GOT=$(tr -d '\r' < "$T10_D/win.out")
         if [ "$T10_RC" = "0" ] && [ "$S1B_GOT" = $'missing 2\nheld 16' ]; then
-            t10_ok sys_last_errno_windows_wine "missing 2, held (share mode 0) 16"
+            t10_ok sys_last_errno_windows_wine "missing 2, held (share mode 0) 16"   # tripwire: not a skip -- "missing 2" is errno 2 for the missing file, the result the row wants
         else
             t10_bad sys_last_errno_windows_wine "rc=$T10_RC got '$(printf '%s' "$S1B_GOT" | tr '\n' '|')' want 'missing 2|held 16'; holder said '$(tr -d '\r' < "$T10_D/hold.out" | tr '\n' '|')'; wine output tail: $(t10_errtail)"
         fi
