@@ -115,9 +115,11 @@ test: build/krc2 build/kr-bin
 gate:
 	@REQUIRE_FULL_RUN=1 $(MAKE) --no-print-directory test
 
-# Full CI gate: bootstrap fixed point + suite + both IR-vs-legacy differential
-# harnesses (x86_64 + arm64 via qemu). Any failure aborts (each step exits
-# non-zero on failure). Wire THIS into CI, not just `make test`.
+# The pre-PR check: bootstrap fixed point + suite + both IR-vs-legacy
+# differential harnesses (x86_64 + arm64 via qemu). Any failure aborts (each
+# step exits non-zero on failure); wire this into CI, not just `make test`.
+# It runs the suite as `make test` does, so a row that cannot run is a SKIP;
+# for merge and release gating use `make gate`, which makes every skip a FAIL.
 check: build/krc2 bootstrap test
 	@echo "=== IR vs legacy differential (exit codes) ==="
 	@KRC=./build/krc2 bash tests/diff_ir_legacy.sh

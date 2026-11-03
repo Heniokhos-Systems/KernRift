@@ -18,10 +18,11 @@ Makefile's `SRCS`) into `build/krc.kr` and self-compiles it to
 `build/krc2`. All sources are one compilation unit, so every function is
 globally visible across files.
 
-## The pre-PR gate: `make check`
+## The pre-PR check: `make check`
 
-Run **`make check`** before submitting anything. It is the real CI gate
-and runs, aborting on the first failure:
+Run **`make check`** before submitting anything. It is the CI check (the
+merge and release gate is `make gate`, below) and runs, aborting on the
+first failure:
 
 1. **Bootstrap fixed point** — `krc3 == krc4` byte-for-byte (the compiler
    compiles itself to a stable fixed point).
