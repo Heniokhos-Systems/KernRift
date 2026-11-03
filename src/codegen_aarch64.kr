@@ -3626,18 +3626,21 @@ fn gen_expr_a64(uint64 node) {
                 uw_sp_site_set("G1")
                 emit_a64_sub_sp_imm(0x4E0)
                 // Zero STARTUPINFO: 8× stp xzr,xzr,[x0],#16 fills 128 bytes at sp+0x60
-                emit_a64(0x910180E0)                // add x0, sp, #0x60
-                emit_a64(0xA8C17C1F)
-                emit_a64(0xA8C17C1F)
-                emit_a64(0xA8C17C1F)
-                emit_a64(0xA8C17C1F)
-                emit_a64(0xA8C17C1F)
-                emit_a64(0xA8C17C1F)
-                emit_a64(0xA8C17C1F)
-                emit_a64(0xA8C17C1F)
+                // #174: these words had Rn = x7 (0x910180E0 = add x0, x7, #0x60,
+                // 0xB90060E9 = str w9, [x7, #0x60]) and the "stp" was 0xA8C17C1F,
+                // an ldp into xzr that zeroed nothing
+                emit_a64(0x910183E0)                // add x0, sp, #0x60
+                emit_a64(0xA8817C1F)                // stp xzr, xzr, [x0], #16
+                emit_a64(0xA8817C1F)
+                emit_a64(0xA8817C1F)
+                emit_a64(0xA8817C1F)
+                emit_a64(0xA8817C1F)
+                emit_a64(0xA8817C1F)
+                emit_a64(0xA8817C1F)
+                emit_a64(0xA8817C1F)
                 // STARTUPINFOA.cb = 104
                 emit_a64_mov_imm(9, 104)
-                emit_a64(0xB90060E9)                // str w9, [sp, #0x60]
+                emit_a64(0xB90063E9)                // str w9, [sp, #0x60]
                 // ---- Build space-separated cmdline at sp+0xE0 ----
                 // No quoting — our child parser (win_init_args) splits on
                 // 0x20 and doesn't strip quotes, so quoted tokens would
@@ -3672,9 +3675,9 @@ fn gen_expr_a64(uint64 node) {
                 emit_a64_mov_imm(5, 0)
                 emit_a64_mov_imm(6, 0)
                 emit_a64_mov_imm(7, 0)
-                emit_a64(0x910180E9)                // add x9, sp, #0x60  (&si)
+                emit_a64(0x910183E9)                // add x9, sp, #0x60  (&si)  (#174: was Rn = x7)
                 emit_a64(0xF90003E9)                // str x9, [sp, #0]
-                emit_a64(0x910320E9)                // add x9, sp, #0xC8  (&pi)
+                emit_a64(0x910323E9)                // add x9, sp, #0xC8  (&pi)  (#174: was Rn = x7)
                 emit_a64(0xF90007E9)                // str x9, [sp, #8]
                 emit_a64_win_call_iat(9)
                 // WaitForSingleObject(hProcess=[sp+0xC8], INFINITE)
@@ -3731,28 +3734,28 @@ fn gen_expr_a64(uint64 node) {
                 uw_sp_site_set("G1")
                 emit_a64_sp_word(0xD10383FF)
                 // Zero out the STARTUPINFOA and PI area at sp+0x60
-                // x0 = sp+0x60, fill 128 bytes with zero
-                emit_a64(0x910180E0)  // add x0, sp, #0x60
-                emit_a64_mov_imm(1, 0)
-                emit_a64_mov_imm(2, 128)
-                // Simple byte-zero loop
-                // stp xzr, xzr, [x0], #16 (8 times = 128 bytes)
-                emit_a64(0xA8C17C1F)  // stp xzr, xzr, [x0], #16
-                emit_a64(0xA8C17C1F)
-                emit_a64(0xA8C17C1F)
-                emit_a64(0xA8C17C1F)
-                emit_a64(0xA8C17C1F)
-                emit_a64(0xA8C17C1F)
-                emit_a64(0xA8C17C1F)
-                emit_a64(0xA8C17C1F)
+                // x0 = sp+0x60, fill 128 bytes with zero.
+                // #174: the add had Rn = x7 (0x910180E0), the "stp" words were
+                // 0xA8C17C1F (an ldp into xzr: nothing was zeroed), and a stray
+                // 0xB9006FE9 stored 104 into STARTUPINFOA+0x0C (lpReserved's
+                // upper half) -- all three fixed, the stray store removed
+                emit_a64(0x910183E0)  // add x0, sp, #0x60
+                emit_a64(0xA8817C1F)  // stp xzr, xzr, [x0], #16 (8 times = 128 bytes)
+                emit_a64(0xA8817C1F)
+                emit_a64(0xA8817C1F)
+                emit_a64(0xA8817C1F)
+                emit_a64(0xA8817C1F)
+                emit_a64(0xA8817C1F)
+                emit_a64(0xA8817C1F)
+                emit_a64(0xA8817C1F)
                 // Set STARTUPINFOA.cb = 104 at [sp+0x60]
                 emit_a64_mov_imm(9, 104)
-                emit_a64(0xB9006FE9)  // str w9, [sp, #0x6C] -- wait, offset 0x60
-                // Actually: str w9, [sp, #0x60]
-                emit_a64(0xB90060E9)  // str w9, [sp, #0x60]
+                emit_a64(0xB90063E9)  // str w9, [sp, #0x60]  (#174: was Rn = x7)
                 // CreateProcessA(path, NULL, NULL, NULL, 0, 0, NULL, NULL, &si, &pi)
-                // x0 = path (lpApplicationName) — avoids CreateProcessA modifying read-only lpCommandLine
-                emit_a64_load_x0(temp_slot_0)
+                // x0 = path (lpApplicationName) — avoids CreateProcessA modifying read-only lpCommandLine.
+                // The slot moved up by the bytes SP moved (#174: there was no
+                // compensation; 0 when the site is folded)
+                emit_a64_load_x0(temp_slot_0 + cg_win_moved(0xE0))
                 // x1 = NULL (lpCommandLine)
                 emit_a64_mov_imm(1, 0)
                 // x2 = NULL, x3 = NULL, x4 = 0, x5 = 0, x6 = NULL, x7 = NULL
@@ -3762,21 +3765,23 @@ fn gen_expr_a64(uint64 node) {
                 emit_a64_mov_imm(5, 0)
                 emit_a64_mov_imm(6, 0)
                 emit_a64_mov_imm(7, 0)
-                // Stack args: [sp+0] = &si, [sp+8] = &pi
-                emit_a64(0x910180E9)  // add x9, sp, #0x60 (&si)
+                // Stack args: [sp+0] = &si, [sp+8] = &pi. SI is at sp+0x60 and
+                // 104 = 0x68 bytes long, so PI (24 bytes) is at sp+0xC8.
+                // #174: the adds had Rn = x7, &pi was sp+0xB8 (inside SI), and
+                // the two hProcess loads were 0xF940C4E0 = ldr x0, [x7, #0x188]
+                emit_a64(0x910183E9)  // add x9, sp, #0x60 (&si)
                 emit_a64(0xF90003E9)  // str x9, [sp, #0]
-                emit_a64(0x9102E0E9)  // add x9, sp, #0xB8 (&pi = sp + 0x60 + 104 = sp + 0xC8... actually 0x60+0x68=0xC8)
+                emit_a64(0x910323E9)  // add x9, sp, #0xC8 (&pi)
                 emit_a64(0xF90007E9)  // str x9, [sp, #8]
                 // call CreateProcessA via IAT (slot 9)
                 emit_a64_win_call_iat(9)
-                // WaitForSingleObject(hProcess, INFINITE)
-                emit_a64(0xF940C4E0)  // ldr x0, [sp, #0xC8+0] -- hProcess at PI offset = sp+0xC8
-                // Actually the PI is after STARTUPINFOA. SI at sp+0x60, size 104=0x68, so PI at sp+0xC8
+                // WaitForSingleObject(hProcess = PI.hProcess at sp+0xC8, INFINITE)
+                emit_a64_ldr(0, 31, 0xC8)
                 emit_a64_mov_imm(1, 0xFFFFFFFF)
                 emit_a64_win_call_iat(10)
                 // GetExitCodeProcess(hProcess, &exitCode)
-                emit_a64(0xF940C4E0)  // ldr x0, [sp, #0xC8]
-                emit_a64(0x910000E1)  // add x1, sp, #0 (use sp+0 for exit code)
+                emit_a64_ldr(0, 31, 0xC8)
+                emit_a64(0x910003E1)  // add x1, sp, #0 (use sp+0 for exit code)  (#174: was Rn = x7)
                 emit_a64_win_call_iat(11)
                 // Load exit code
                 emit_a64(0xB94003E0)  // ldr w0, [sp, #0]

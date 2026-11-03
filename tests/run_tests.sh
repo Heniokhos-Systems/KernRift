@@ -29674,6 +29674,30 @@ else
     if [ -z "$PEU_WHY" ]; then pe_row_ok pe_unwind_debug_windows_arm64_legacy "ar and bc folded (no body SP write, no set_fp), main keeps set_fp; C0-C6 + C3b + C4b PASS"
     else pe_row_bad pe_unwind_debug_windows_arm64_legacy "$PEU_WHY"; fi
 fi
+# #174 (found by the A19d review): the literal words of the Windows arm64
+# legacy exec builtins (site G1) addressed through x7 instead of sp, "zeroed"
+# STARTUPINFO with an ldp into xzr, pointed &pi into STARTUPINFO and read
+# hProcess from [x7, #0x188], and exec_process reloaded the path slot without
+# the 0xe0 SP moved. tests/helpers/a64_win_exec_words.py decodes `run` of the
+# four tests/fixtures/win_fold_diff/exec_process*.kr programs (folded and
+# SP-moving callers) and requires sp-based words, 8 real `stp xzr, xzr`, &si
+# and &pi at sp+0x60/0xc8, hProcess from [sp, #0xc8] twice, and the path
+# reload at the stored slot plus the bytes SP moved. Static only (no arm64
+# Wine here); the run-time check belongs to the A18 windows-11-arm job.
+if ! command -v python3 > /dev/null 2>&1; then
+    pe_row_skip win_a64_legacy_exec_words "needs python3"
+else
+    PEU_WHY=""
+    for peu_v in exec_process_f exec_process_m exec_process_argv_f exec_process_argv_m; do
+        case $peu_v in *argv*) peu_k=exec_process_argv ;; *) peu_k=exec_process ;; esac
+        if ! $T10_KRC --legacy --arch=arm64 --target=windows --emit=pe "$DIR/fixtures/win_fold_diff/$peu_v.kr" -o "$T10_D/peu_ew.exe" --test-listing="$T10_D/peu_ew.lst" > "$T10_D/peu_ew.log" 2>&1; then
+            PEU_WHY="$PEU_WHY $peu_v: build failed;"; continue
+        fi
+        PEU_O=$(python3 -B "$DIR/helpers/a64_win_exec_words.py" "$T10_D/peu_ew.lst" run $peu_k 2>&1) || PEU_WHY="$PEU_WHY $peu_v: $(head -1 <<< "$PEU_O" | cut -c1-100);"
+    done
+    if [ -z "$PEU_WHY" ]; then pe_row_ok win_a64_legacy_exec_words "exec_process and exec_process_argv, folded and SP-moving callers: sp-based words, 8 stp xzr, &si/&pi at sp+0x60/0xc8, hProcess from [sp, #0xc8], path reload compensated"
+    else pe_row_bad win_a64_legacy_exec_words "$PEU_WHY"; fi
+fi
 # Windows refusals (#143 A7, spec 4.1.5 / 4.3 / 5.1.5): a @naked body whose
 # lowering moves RSP/SP, asm that writes the frame pointer (rbp; x29 or x18 on
 # arm64) decodably or through a constraint, and legacy @naked are refused with
