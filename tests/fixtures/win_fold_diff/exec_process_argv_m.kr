@@ -1,0 +1,12 @@
+// #143 A19d(ii) differential gate: exec_process_argv from an SP-moving function;
+// the process exits with the child's status (7).
+fn run(u64 x) -> u64 {
+    asm { "nop" }
+    u64 av = alloc(32)
+    store64(av, "child.exe")
+    store64(av + 8, 0)
+    return exec_process_argv("child.exe", av) + x
+}
+fn main() {
+    run(0)
+}

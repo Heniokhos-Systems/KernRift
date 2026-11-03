@@ -4993,7 +4993,34 @@ fn cg_slot_off(uint64 n) -> uint64 {
 // After prologue (push rbx + sub rsp, frame), RSP is 16-aligned
 // So we need N divisible by 16 for alignment
 // Use 0x20 (32) for <=4 args, 0x30 (48) for 5 args, 0x40 (64) for 7 args
+// #143 option C (spec 2.5.7): in a folded x86_64 legacy function the sized
+// site's area is part of the frame at [rsp+0, OUT): nothing is emitted, the
+// need is checked against OUT, and rax_cache is cleared where the old `sub rsp`
+// stood (review finding 4). Unfolded, the slot offsets after the `sub` differed
+// from those before it, so the cache never carried a value across a site;
+// folded they are equal, and a reload just after the site could hit. Each hit
+// today's emitter would take is still right (nothing between clobbers rax), so
+// the clear is defence in depth for a later sequence that clobbers rax with
+// raw bytes (A19d(ii) mutation 5 is an equivalent mutant today).
+fn cg_win_fold_site(uint64 need) {
+    if need > cg_win_out {
+        uint64 m = "error: internal: a folded Windows call site needs more than the function's outgoing area (#143 option C: the pre-scan and the emitter disagree)\n"
+        write(2, m, str_len(m))
+        exit(1)
+    }
+    rax_cache = 0
+    uw_sp_site = 0
+}
+
+// The bytes a sized site actually moves RSP: its area, or 0 when folded. The
+// slot compensation of a site's sequence uses this, never its area.
+fn cg_win_moved(uint64 n) -> uint64 {
+    if cg_win_folded != 0 { return 0 }
+    return n
+}
+
 fn emit_win_alloc_stack(uint64 nbytes) {
+    if cg_win_folded != 0 { cg_win_fold_site(nbytes)  return }
     emit_byte(0x48)
     emit_byte(0x83)
     emit_byte(0xEC)
@@ -5004,6 +5031,7 @@ fn emit_win_alloc_stack(uint64 nbytes) {
 }
 
 fn emit_win_free_stack(uint64 nbytes) {
+    if cg_win_folded != 0 { uw_sp_site = 0  return }
     emit_byte(0x48)
     emit_byte(0x83)
     emit_byte(0xC4)
@@ -5037,6 +5065,8 @@ fn emit_x64_pop_r(uint64 r) {
 }
 
 fn emit_x64_rsp_adj(uint64 ext, uint64 n) {
+    if cg_win_folded != 0 && ext == 0xEC { cg_win_fold_site(n)  return }
+    if cg_win_folded != 0 && ext == 0xC4 { uw_sp_site = 0  return }
     emit_byte(0x48)
     uint8 e = ext
     if ext == 0xE4 || n < 128 {
@@ -7742,7 +7772,7 @@ fn gen_expr(uint64 node) {
                 emit_mov_r9_imm(0)
                 uw_sp_site_set("L1"); emit_win_alloc_stack(0x40)
                 // [rsp+32] = disposition: 3-flags (read=3=OPEN_EXISTING, write=2=CREATE_ALWAYS)
-                emit_load_rax_from_stack(pk1_fileopen + 0x40)  // flags (adjusted for stack shift)
+                emit_load_rax_from_stack(pk1_fileopen + cg_win_moved(0x40))  // flags (adjusted for the stack shift, if any)
                 emit_neg_rax()
                 // add eax, 3
                 emit_byte(0x83); emit_byte(0xC0); emit_byte(3)
@@ -8897,7 +8927,7 @@ fn gen_expr(uint64 node) {
                 // it for both the fn-ptr slot load and the `add rsp` cleanup.
                 // #143 option C: the shared accounting the pre-scan sizes OUT with
                 uint64 win_stack = cg_win_call_area(arg_count)
-                cp_stack_bytes = win_stack
+                cp_stack_bytes = cg_win_moved(win_stack)
 
                 // sub rsp, win_stack
                 uw_sp_site_set("L2")
@@ -9378,7 +9408,7 @@ fn gen_expr(uint64 node) {
                 emit_byte(0xC7); emit_byte(0x44); emit_byte(0x24); emit_byte(0x50); emit_u32_le(104)
                 // ---- Build cmdline at [rsp+0xD0] ----
                 emit_byte(0x48); emit_byte(0x8D); emit_byte(0xBC); emit_byte(0x24); emit_u32_le(0xD0)
-                emit_byte(0x4C); emit_byte(0x8B); emit_byte(0x8C); emit_byte(0x24); emit_u32_le(pk1_execprocessa + 0x4D0)
+                emit_byte(0x4C); emit_byte(0x8B); emit_byte(0x8C); emit_byte(0x24); emit_u32_le(pk1_execprocessa + cg_win_moved(0x4D0))
                 // L_outer: mov rsi,[r9]; test rsi,rsi; jz L_done (+28)
                 emit_byte(0x49); emit_byte(0x8B); emit_byte(0x31)
                 emit_byte(0x48); emit_byte(0x85); emit_byte(0xF6)
@@ -9401,7 +9431,7 @@ fn gen_expr(uint64 node) {
                 emit_byte(0xC6); emit_byte(0x07); emit_byte(0x00)
                 // ---- CreateProcessA setup ----
                 // rcx = path (lpApplicationName)
-                emit_byte(0x48); emit_byte(0x8B); emit_byte(0x8C); emit_byte(0x24); emit_u32_le(pk0_execprocessa + 0x4D0)
+                emit_byte(0x48); emit_byte(0x8B); emit_byte(0x8C); emit_byte(0x24); emit_u32_le(pk0_execprocessa + cg_win_moved(0x4D0))
                 // lea rdx, [rsp+0xD0] (lpCommandLine = our cmdline)
                 emit_byte(0x48); emit_byte(0x8D); emit_byte(0x94); emit_byte(0x24); emit_u32_le(0xD0)
                 // r8 = NULL (lpProcessAttributes); r9 = NULL (lpThreadAttributes)
@@ -9473,7 +9503,7 @@ fn gen_expr(uint64 node) {
                 // mov dword [rsp+0x50], 104 (STARTUPINFOA.cb)
                 emit_byte(0xC7); emit_byte(0x44); emit_byte(0x24); emit_byte(0x50); emit_u32_le(104)
                 // rcx = path (lpApplicationName) — avoids CreateProcessA modifying read-only lpCommandLine
-                emit_byte(0x48); emit_byte(0x8B); emit_byte(0x8C); emit_byte(0x24); emit_u32_le(temp_slot_0 + 0xD0)
+                emit_byte(0x48); emit_byte(0x8B); emit_byte(0x8C); emit_byte(0x24); emit_u32_le(temp_slot_0 + cg_win_moved(0xD0))
                 // rdx = NULL (lpCommandLine)
                 emit_byte(0x48); emit_byte(0x31); emit_byte(0xD2)
                 // r8 = NULL
@@ -10597,6 +10627,12 @@ fn gen_expr(uint64 node) {
             if reg_args > 4 { reg_args = 4 }
             // #143 option C: the shared accounting the pre-scan sizes OUT with
             win_stack = cg_win_call_area(arg_count)
+            if cg_win_folded != 0 {
+                // folded (#143 option C): the area is the frame's [rsp+0, OUT);
+                // the slots do not move, so there is no compensation
+                cg_win_fold_site(win_stack)
+                win_stack = 0
+            }
 
             // sub rsp, win_stack
             uw_sp_site_set("L3")
@@ -14383,6 +14419,17 @@ fn gen_function(uint64 fn_node) {
     uint32 body_check = ast_data3(fn_node)
     if body_check == 0 { return }
     cg_win_prescan(fn_node, 0)           // #143 option C (spec 2.5.7): OUT and the SP-fixed verdict
+    // A19d(ii): an SP-fixed Windows x86_64 legacy function is folded -- its
+    // outgoing area OUT is the bottom of its frame, every slot moves up by OUT
+    // (cg_slot_off), no call site moves RSP, and it has no frame pointer. The
+    // backstop is armed: any SP write left in it stops the build.
+    if cg_win_ps_fixed != 0 {
+        cg_win_folded = 1
+        cg_win_out_bias = cg_win_out
+        uw_fn_sp_fixed = 1
+    }
+    uint64 win_fp = 0
+    if target_os == 2 && cg_win_folded == 0 { win_fp = 1 }
 
     // Overflow arg patch tracking (for functions with >6 params)
     // 32 slots, one per stack-passed parameter, matching the 32-argument
@@ -14623,8 +14670,9 @@ fn gen_function(uint64 fn_node) {
     uint64 prologue_start = out_len
     uint64 frame_patch = out_len
 
-    // #143 A8 (ruling (b)): on Windows the frame is
+    // #143 A8 (ruling (b)): on Windows an SP-moving frame is
     //   push rbx; push rbp; sub rsp,F'; mov rbp,rsp; mov [rsp+s],r12
+    // and a folded (SP-fixed, option C) one push rbx; sub rsp,F'; mov [rsp+s],r12
     // with F' = F + 8 (keeps RSP 16-aligned after the extra push) and the r12
     // save AFTER SET_FPREG. The unwind codes are recorded at the end of the
     // function, once F' is known (uw_pro_* hold the instruction ends).
@@ -14637,7 +14685,7 @@ fn gen_function(uint64 fn_node) {
         // push rbx
         emit_byte(0x53)
         uw_pro_rbx = out_len
-        if target_os == 2 {
+        if win_fp != 0 {
             emit_byte(0x55)                         // push rbp
             uw_pro_rbp = out_len
         }
@@ -14648,7 +14696,7 @@ fn gen_function(uint64 fn_node) {
         frame_patch = out_len
         emit_u32_le(0)
         uw_pro_sub = out_len
-        if target_os == 2 {
+        if win_fp != 0 {
             emit_byte(0x48); emit_byte(0x89); emit_byte(0xE5)   // mov rbp, rsp
             uw_pro_fp = out_len
         }
@@ -15326,16 +15374,18 @@ fn gen_function(uint64 fn_node) {
         }
     }
 
-    // F' (#143 A8): one slot more on Windows, for the push rbp
+    // F' (#143 A8): one slot more for the push rbp of a Windows frame-pointer
+    // function; a folded one (option C) holds its outgoing area OUT instead
     uint64 frame_w = var_frame_size
-    if target_os == 2 { frame_w = var_frame_size + 8 }
+    if win_fp != 0 { frame_w = var_frame_size + 8 }
+    if cg_win_folded != 0 { frame_w = var_frame_size + cg_win_out }
     // add rsp, FRAME_SIZE
     emit_byte(0x48)
     emit_byte(0x81)
     emit_byte(0xC4)
     emit_u32_le(frame_w)
-    // pop rbp (Windows)
-    if target_os == 2 { emit_byte(0x5D) }
+    // pop rbp (Windows frame-pointer functions)
+    if win_fp != 0 { emit_byte(0x5D) }
     // pop rbx
     emit_byte(0x5B)
     // ret
@@ -15348,9 +15398,9 @@ fn gen_function(uint64 fn_node) {
     // the record is sealed (after every end-of-function patch, I6).
     if target_os == 2 {
         uw_x64_push(3, uw_pro_rbx)
-        uw_x64_push(5, uw_pro_rbp)
+        if win_fp != 0 { uw_x64_push(5, uw_pro_rbp) }
         uw_x64_alloc(frame_w, uw_pro_sub)
-        uw_x64_setfp(5, uw_pro_fp)
+        if win_fp != 0 { uw_x64_setfp(5, uw_pro_fp) }
         uw_x64_save(12, r12_save_slot, uw_pro_r12)
         uw_fn_finalize()
     }
@@ -15372,9 +15422,12 @@ fn gen_function(uint64 fn_node) {
             unsafe { *(op_e as uint32) -> ploc }
             uint64 wploc = ploc
             uint64 soff = var_frame_size + 16 + oi * 8
-            if target_os == 2 {
+            if win_fp != 0 {
                 // F' + rbx + rbp + return address + 32 bytes of shadow space
                 soff = frame_w + 24 + 32 + oi * 8
+            } else if target_os == 2 {
+                // folded (option C): F' + rbx + return address + 32 bytes of shadow
+                soff = frame_w + 16 + 32 + oi * 8
             }
             patch_u32(wploc, soff)
             oi = oi + 1

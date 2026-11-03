@@ -1,0 +1,172 @@
+// #143 option C, A19d(ii) differential gate (spec 2.5.7): every sized-site
+// family of the x86_64 legacy backend, called once from a folded (SP-fixed)
+// function `f_<family>` and once from an SP-moving twin `m_<family>` (an
+// `asm { "nop" }` keeps it SP-moving without changing what it computes).
+// The program prints one line per family pair; the folded and the moving
+// results must agree, and the whole stdout must equal the IR build's.
+// tests/gates/pe_unwind_fold_diff.sh builds and runs it under Wine.
+struct P { u64 a; u64 b; u64 c }
+static u64 g_never = 0
+
+// Every callee has an `if` ahead of its return, so the AST inliner (one
+// Return only) leaves each call a real call on every backend.
+fn add0() -> u64 { if g_never != 0 { return 0 } return 5 }
+fn add1(u64 a) -> u64 { if g_never != 0 { return 0 } return a + 1 }
+fn add2(u64 a, u64 b) -> u64 { if g_never != 0 { return 0 } return a * 2 + b }
+fn add3(u64 a, u64 b, u64 c) -> u64 { if g_never != 0 { return 0 } return a * 3 + b * 2 + c }
+fn add4(u64 a, u64 b, u64 c, u64 d) -> u64 { if g_never != 0 { return 0 } return a + b * 10 + c * 100 + d * 1000 }
+fn add5(u64 a, u64 b, u64 c, u64 d, u64 e) -> u64 { return add4(a, b, c, d) + e * 10000 }
+fn add6(u64 a, u64 b, u64 c, u64 d, u64 e, u64 f) -> u64 { return add5(a, b, c, d, e) + f * 100000 }
+fn add7(u64 a, u64 b, u64 c, u64 d, u64 e, u64 f, u64 g) -> u64 { return add6(a, b, c, d, e, f) + g * 1000000 }
+fn add8(u64 a, u64 b, u64 c, u64 d, u64 e, u64 f, u64 g, u64 h) -> u64 { return add7(a, b, c, d, e, f, g) + h * 10000000 }
+fn sump(P p) -> u64 { if g_never != 0 { return 0 } return p.a + p.b * 10 + p.c * 100 }
+
+// named calls with 0..8 arguments (L3)
+fn f_named(u64 x) -> u64 {
+    u64 l = x + 1
+    return add0() + add1(l) + add2(l, 2) + add3(l, 2, 3) + add4(l, 2, 3, 4) + add5(l, 2, 3, 4, 5) + add6(l, 2, 3, 4, 5, 6) + add7(l, 2, 3, 4, 5, 6, 7) + add8(l, 2, 3, 4, 5, 6, 7, 8) + l
+}
+fn m_named(u64 x) -> u64 {
+    asm { "nop" }
+    u64 l = x + 1
+    return add0() + add1(l) + add2(l, 2) + add3(l, 2, 3) + add4(l, 2, 3, 4) + add5(l, 2, 3, 4, 5) + add6(l, 2, 3, 4, 5, 6) + add7(l, 2, 3, 4, 5, 6, 7) + add8(l, 2, 3, 4, 5, 6, 7, 8) + l
+}
+// call_ptr with 0..8 arguments (L2)
+fn f_ptr(u64 x) -> u64 {
+    u64 l = x + 2
+    return call_ptr(fn_addr("add0")) + call_ptr(fn_addr("add1"), l) + call_ptr(fn_addr("add2"), l, 2) + call_ptr(fn_addr("add3"), l, 2, 3) + call_ptr(fn_addr("add4"), l, 2, 3, 4) + call_ptr(fn_addr("add5"), l, 2, 3, 4, 5) + call_ptr(fn_addr("add6"), l, 2, 3, 4, 5, 6) + call_ptr(fn_addr("add7"), l, 2, 3, 4, 5, 6, 7) + call_ptr(fn_addr("add8"), l, 2, 3, 4, 5, 6, 7, 8) + l
+}
+fn m_ptr(u64 x) -> u64 {
+    asm { "nop" }
+    u64 l = x + 2
+    return call_ptr(fn_addr("add0")) + call_ptr(fn_addr("add1"), l) + call_ptr(fn_addr("add2"), l, 2) + call_ptr(fn_addr("add3"), l, 2, 3) + call_ptr(fn_addr("add4"), l, 2, 3, 4) + call_ptr(fn_addr("add5"), l, 2, 3, 4, 5) + call_ptr(fn_addr("add6"), l, 2, 3, 4, 5, 6) + call_ptr(fn_addr("add7"), l, 2, 3, 4, 5, 6, 7) + call_ptr(fn_addr("add8"), l, 2, 3, 4, 5, 6, 7, 8) + l
+}
+// a struct passed by value. (A MEMORY-class struct RETURN is not covered:
+// `--legacy --target=windows` x86_64 crashes on one already in base d8f2a56,
+// with or without the fold -- side finding registered in the A19d report.)
+fn f_struct(u64 x) -> u64 {
+    u64 l = x + 3
+    P q
+    q.a = l
+    q.b = l * 2
+    q.c = l * 3
+    return sump(q) + q.c + l
+}
+fn m_struct(u64 x) -> u64 {
+    asm { "nop" }
+    u64 l = x + 3
+    P q
+    q.a = l
+    q.b = l * 2
+    q.c = l * 3
+    return sump(q) + q.c + l
+}
+// alloc / store / load / dealloc (L1)
+fn f_heap(u64 x) -> u64 {
+    u64 l = x + 4
+    u64 p = alloc(64)
+    store64(p, l)
+    store32(p + 8, l * 2)
+    store16(p + 16, l * 3)
+    store8(p + 24, l + 1)
+    u64 r = load64(p) + load32(p + 8) + load16(p + 16) + load8(p + 24) + l
+    dealloc(p)
+    return r
+}
+fn m_heap(u64 x) -> u64 {
+    asm { "nop" }
+    u64 l = x + 4
+    u64 p = alloc(64)
+    store64(p, l)
+    store32(p + 8, l * 2)
+    store16(p + 16, l * 3)
+    store8(p + 24, l + 1)
+    u64 r = load64(p) + load32(p + 8) + load16(p + 16) + load8(p + 24) + l
+    dealloc(p)
+    return r
+}
+// files: open / write / size / close / open / read / close (L1)
+fn f_file(u64 x) -> u64 {
+    u64 l = x + 5
+    u64 b = alloc(16)
+    store64(b, 0x3837363534333231)
+    u64 h = file_open("fold_f.tmp", 1)
+    file_write(h, b, 8)
+    file_close(h)
+    u64 h2 = file_open("fold_f.tmp", 0)
+    u64 n = file_size(h2)
+    u64 c = alloc(16)
+    file_read(h2, c, 8)
+    file_close(h2)
+    return n + load8(c + 3) + l
+}
+fn m_file(u64 x) -> u64 {
+    asm { "nop" }
+    u64 l = x + 5
+    u64 b = alloc(16)
+    store64(b, 0x3837363534333231)
+    u64 h = file_open("fold_m.tmp", 1)
+    file_write(h, b, 8)
+    file_close(h)
+    u64 h2 = file_open("fold_m.tmp", 0)
+    u64 n = file_size(h2)
+    u64 c = alloc(16)
+    file_read(h2, c, 8)
+    file_close(h2)
+    return n + load8(c + 3) + l
+}
+// write to stdout (L1: GetStdHandle + WriteFile) and print_str
+fn f_out(u64 x) -> u64 {
+    u64 l = x + 6
+    u64 b = alloc(8)
+    store8(b, 70)
+    store8(b + 1, 10)
+    write(1, b, 2)
+    print_str("fs\n")
+    println_str("fl")
+    return l
+}
+fn m_out(u64 x) -> u64 {
+    asm { "nop" }
+    u64 l = x + 6
+    u64 b = alloc(8)
+    store8(b, 77)
+    store8(b + 1, 10)
+    write(1, b, 2)
+    print_str("ms\n")
+    println_str("ml")
+    return l
+}
+// time_ns (L5) and get_module_path (L1)
+fn f_env(u64 x) -> u64 {
+    u64 l = x + 7
+    u64 t = time_ns()
+    u64 b = alloc(512)
+    u64 n = get_module_path(b, 512)
+    u64 ok = 0
+    if t > 0 && n > 4 { ok = 1 }
+    return ok + l
+}
+fn m_env(u64 x) -> u64 {
+    asm { "nop" }
+    u64 l = x + 7
+    u64 t = time_ns()
+    u64 b = alloc(512)
+    u64 n = get_module_path(b, 512)
+    u64 ok = 0
+    if t > 0 && n > 4 { ok = 1 }
+    return ok + l
+}
+fn show(u64 a, u64 b) {
+    println(a)
+    println(b)
+}
+fn main() {
+    show(f_named(1), m_named(1))
+    show(f_ptr(1), m_ptr(1))
+    show(f_struct(1), m_struct(1))
+    show(f_heap(1), m_heap(1))
+    show(f_file(1), m_file(1))
+    show(f_out(1), m_out(1))
+    show(f_env(1), m_env(1))
+}

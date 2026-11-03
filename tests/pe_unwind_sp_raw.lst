@@ -21,7 +21,7 @@ codegen.kr|gen_expr|emit_byte(0x6A); emit_byte(0x00)|1|Linux/macOS-only execve a
 codegen.kr|gen_function|emit_byte(0x53)|1|prologue/epilogue (excluded: not body code; spec 2.5.1 X17, L12, A8, G8)
 codegen.kr|gen_function|emit_byte(0x55)|1|prologue/epilogue (excluded: not body code; spec 2.5.1 X17, L12, A8, G8)
 codegen.kr|gen_function|emit_byte(0x5B)|1|prologue/epilogue (excluded: not body code; spec 2.5.1 X17, L12, A8, G8)
-codegen.kr|gen_function|if target_os == 2 { emit_byte(0x5D) }|1|prologue/epilogue (excluded: not body code; spec 2.5.1 X17, L12, A8, G8)
+codegen.kr|gen_function|if win_fp != 0 { emit_byte(0x5D) }|1|prologue/epilogue (excluded: not body code; spec 2.5.1 X17, L12, A8, G8)
 codegen_aarch64.kr|gen_expr_a64|emit_a64(0x910043FF)|3|Linux/macOS-only sub/add sp,#16 (execve argv, time_ns; L11/G7)
 codegen_aarch64.kr|gen_expr_a64|emit_a64(0xD10043FF)|3|Linux/macOS-only sub/add sp,#16 (execve argv, time_ns; L11/G7)
 codegen_aarch64.kr|gen_expr_a64|uint64 add_insn = 0x91000000 | (cleanup << 10) | (31 << 5) | 31|1|helper-routed: this word (or the variable it defines) is emitted through emit_a64_sp_word, which reports (G1-G4)

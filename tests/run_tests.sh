@@ -29280,9 +29280,13 @@ else
         pe_row_bad win_abi_frames_exec_x86_64_ir "native rc=$PEU_N, qemu rc=$PEU_Q (N = check N failed)"
     fi
 fi
-# ... and the same corpus through the legacy backend (#143 A8): its Windows
-# frame is push rbx; push rbp; sub rsp,F'; mov rbp,rsp; mov [rsp+s],r12 with
-# F' = F + 8, and stack arguments at F' + 24 + 32 + i*8.
+# ... and the same corpus through the legacy backend (#143 A8): an SP-moving
+# Windows frame is push rbx; push rbp; sub rsp,F'; mov rbp,rsp; mov [rsp+s],r12
+# with F' = F + 8, and stack arguments at F' + 24 + 32 + i*8. Since #143
+# A19d(ii) the SP-fixed functions (f10's callers call10/rec10/a_ten among
+# them) are folded instead: push rbx; sub rsp,F'; mov [rsp+s],r12 with
+# F' = F + OUT, their outgoing area at [rsp+0, OUT) and their own stack
+# arguments at F' + 16 + 32 + i*8 -- so this row now runs both shapes.
 if ! $T10_KRC --legacy --arch=x86_64 --freestanding --target=windows "$PEU_FR" -o "$T10_D/peu_frl" > "$T10_D/peu_frl.log" 2>&1 \
    || ! $T10_KRC --legacy --arch=x86_64 --freestanding --target=windows --emit=asm "$PEU_FR" -o "$T10_D/peu_frl.s" >> "$T10_D/peu_frl.log" 2>&1; then
     pe_row_bad win_abi_frames_exec_x86_64_legacy "build: $(grep -m1 error "$T10_D/peu_frl.log" | cut -c1-120)"
@@ -29578,6 +29582,57 @@ for peu_f in fixtures/time_basic.kr fixtures/sys_envp_exec.kr fixtures/call_ptr_
 done
 if [ -z "$PEU_WHY" ]; then pe_row_ok win_fold_shared_paths_in_identity_corpus "$PEU_N listings (time_ns, exec, >8-argument named call and call_ptr; linux/macos x86_64/arm64 --legacy) adjust SP in a body"
 else pe_row_bad win_fold_shared_paths_in_identity_corpus "$PEU_WHY"; fi
+# The x86_64 legacy fold (#143 A19d(ii); spec 2.5.7, ruling Q11): in
+# tests/fixtures/win_legacy_out.kr the SP-fixed callers stamp/six/ten and the
+# recursive add6/add10 have no RSP write in their bodies (their call areas
+# are the bottom of the frame) and no `mov rbp, rsp`; say (println) and main
+# keep per-call areas and the frame pointer. The image passes C0-C6 + C3b +
+# C4b and prints 65 under Wine.
+if ! command -v objdump > /dev/null 2>&1 || ! command -v python3 > /dev/null 2>&1; then
+    pe_row_skip win_legacy_folded_outgoing_x86_64 "needs objdump and python3"
+elif ! $T10_KRC --legacy --arch=x86_64 --target=windows --emit=pe "$DIR/fixtures/win_legacy_out.kr" -o "$T10_D/peu_wl.exe" --test-listing="$T10_D/peu_wl.lst" > "$T10_D/peu_wl.log" 2>&1; then
+    pe_row_bad win_legacy_folded_outgoing_x86_64 "build: $(grep -m1 error "$T10_D/peu_wl.log" | cut -c1-120)"
+else
+    PEU_WHY=""
+    PEU_O=$(python3 "$DIR/helpers/x86_win_rbp_scan.py" "$T10_D/peu_wl.lst" --want-sp-fixed=stamp,six,ten,add6,add10 --want-sp-moving=say,main \
+        --want-no-body-rsp=stamp,six,ten,add6,add10 --want-body-rsp=say,main 2>&1) || PEU_WHY="shape: $(head -2 <<< "$PEU_O" | tr '\n' '|')"
+    PEU_C=$(env -u PE_UNWIND_CHECK_DISABLE python3 "$DIR/helpers/pe_unwind_check.py" --arch x86_64 "$T10_D/peu_wl.exe" --listing "$T10_D/peu_wl.lst" 2>&1)
+    [ "$(grep -c ': PASS' <<< "$PEU_C")" = 9 ] || PEU_WHY="$PEU_WHY checker: $(grep -m1 -e FAIL -e error <<< "$PEU_C" | cut -c1-120);"
+    PEU_RUN=" (no Wine: static checks only)"
+    if [ -n "$T10_WINE" ]; then
+        cp "$T10_D/peu_wl.exe" "$T10_D/peu_wl_w.exe"
+        t10_wine "$T10_D/win.out" "$T10_D/win.err" ./peu_wl_w.exe; PEU_RRC=$?
+        if [ "$PEU_RRC" = 0 ] && [ "$(tr -d '\r' < "$T10_D/win.out")" = 65 ]; then PEU_RUN=", Wine prints 65$(t10_note)"
+        else PEU_WHY="$PEU_WHY Wine rc=$PEU_RRC out='$(tr -d '\r' < "$T10_D/win.out" | tr '\n' ' ' | head -c 40)' $(t10_errtail);"; fi
+    fi
+    if [ -z "$PEU_WHY" ]; then pe_row_ok win_legacy_folded_outgoing_x86_64 "stamp/six/ten/add6/add10 folded (no body RSP write, no frame pointer); say/main keep per-call areas and RBP; C0-C6 + C3b + C4b PASS$PEU_RUN"
+    else pe_row_bad win_legacy_folded_outgoing_x86_64 "$PEU_WHY"; fi
+fi
+# --debug on Windows x86_64 legacy (#143 A19d(ii); spec 2.5.1 L6, 2.5.5): the
+# bounds trap of tests/fixtures/win_debug_traps.kr's `bc` is a sized site
+# (ExitProcess behind 0x20 of shadow), so `bc` and `ar` are folded (no body
+# RSP write, no frame pointer); main keeps RBP. C0-C6 + C3b + C4b; under Wine
+# it prints 3/7/15 and the trap exits 1.
+if ! command -v objdump > /dev/null 2>&1 || ! command -v python3 > /dev/null 2>&1; then
+    pe_row_skip pe_unwind_debug_windows_x86_64_legacy "needs objdump and python3"
+elif ! $T10_KRC --debug --legacy --arch=x86_64 --target=windows --emit=pe "$DIR/fixtures/win_debug_traps.kr" -o "$T10_D/peu_dl.exe" --test-listing="$T10_D/peu_dl.lst" > "$T10_D/peu_dl.log" 2>&1; then
+    pe_row_bad pe_unwind_debug_windows_x86_64_legacy "build: $(grep -m1 error "$T10_D/peu_dl.log" | cut -c1-120)"
+else
+    PEU_WHY=""
+    PEU_O=$(python3 "$DIR/helpers/x86_win_rbp_scan.py" "$T10_D/peu_dl.lst" --want-sp-fixed=ar,bc --want-sp-moving=main --want-no-body-rsp=ar,bc 2>&1) \
+        || PEU_WHY="shape: $(head -2 <<< "$PEU_O" | tr '\n' '|')"
+    PEU_C=$(env -u PE_UNWIND_CHECK_DISABLE python3 "$DIR/helpers/pe_unwind_check.py" --arch x86_64 "$T10_D/peu_dl.exe" --listing "$T10_D/peu_dl.lst" 2>&1)
+    [ "$(grep -c ': PASS' <<< "$PEU_C")" = 9 ] || PEU_WHY="$PEU_WHY checker: $(grep -m1 -e FAIL -e error <<< "$PEU_C" | cut -c1-120);"
+    PEU_RUN=" (no Wine: static checks only)"
+    if [ -n "$T10_WINE" ]; then
+        cp "$T10_D/peu_dl.exe" "$T10_D/peu_dl_w.exe"
+        t10_wine "$T10_D/win.out" "$T10_D/win.err" ./peu_dl_w.exe; PEU_RRC=$?
+        if [ "$PEU_RRC" = 1 ] && [ "$(tr -d '\r' < "$T10_D/win.out")" = "$(printf '3\n7\n15')" ]; then PEU_RUN=", Wine prints 3/7/15 and the trap exits 1$(t10_note)"
+        else PEU_WHY="$PEU_WHY Wine rc=$PEU_RRC out='$(tr -d '\r' < "$T10_D/win.out" | tr '\n' ' ' | head -c 40)' $(t10_errtail);"; fi
+    fi
+    if [ -z "$PEU_WHY" ]; then pe_row_ok pe_unwind_debug_windows_x86_64_legacy "bc (bounds trap) and ar folded, main keeps RBP; C0-C6 + C3b + C4b PASS$PEU_RUN"
+    else pe_row_bad pe_unwind_debug_windows_x86_64_legacy "$PEU_WHY"; fi
+fi
 # Windows refusals (#143 A7, spec 4.1.5 / 4.3 / 5.1.5): a @naked body whose
 # lowering moves RSP/SP, asm that writes the frame pointer (rbp; x29 or x18 on
 # arm64) decodably or through a constraint, and legacy @naked are refused with

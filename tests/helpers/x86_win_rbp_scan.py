@@ -19,8 +19,11 @@ disassembled with objdump, its prologue is `push` r64..., an optional
 
 The summary counts both shapes; --want-sp-fixed=NAME[,NAME] and
 --want-sp-moving=NAME[,NAME] additionally require those functions to have
-that shape, and --want-rbp-colour=NAME requires NAME to be SP-fixed and to
-write rbp in its body (rbp allocated as a colour).
+that shape, --want-rbp-colour=NAME requires NAME to be SP-fixed and to
+write rbp in its body (rbp allocated as a colour), and --want-no-body-rsp=NAMES
+/ --want-body-rsp=NAMES require no RSP write (push, pop, sub/add rsp) between
+the prologue's `sub rsp` and the epilogue's `add rsp` / at least one (A19d:
+a folded legacy function calls without per-call areas).
 
 The byte column must be gap-free (every line starts where the previous one
 ended); a gap is reported, because it means the printer dropped bytes. A
@@ -76,6 +79,8 @@ def main():
     want_fixed = set(x for x in opts.get('want-sp-fixed', '').split(',') if x)
     want_moving = set(x for x in opts.get('want-sp-moving', '').split(',') if x)
     want_colour = set(x for x in opts.get('want-rbp-colour', '').split(',') if x)
+    want_quiet = set(x for x in opts.get('want-no-body-rsp', '').split(',') if x)
+    want_moves = set(x for x in opts.get('want-body-rsp', '').split(',') if x)
     code = bytearray()
     labels = []
     gaps = []
@@ -100,12 +105,20 @@ def main():
     nfn = 0
     shapes = {}
     colour = set()
+    body_rsp = {}
     for k, (start, name) in enumerate(labels):
         end = labels[k + 1][0] if k + 1 < len(labels) else len(code)
         if end <= start:
             continue
         nfn += 1
         ins = disasm(bytes(code[start:end]), start)
+        # RSP writes after the prologue's `sub rsp` and before the last
+        # `add rsp` (the epilogue): push/pop/sub/add rsp in the body
+        rs = [k for k, (a, t) in enumerate(ins) if re.match(r'^(sub|add)\s+rsp,', t)]
+        pp = [k for k, (a, t) in enumerate(ins) if mn_ops(t)[0] in ('push', 'pop')]
+        lo = rs[0] if rs else 0
+        hi = rs[-1] if rs else len(ins)
+        body_rsp[name] = sum(1 for k in rs if lo < k < hi) + sum(1 for k in pp if lo < k < hi)
         i = 0
         while i < len(ins) and mn_ops(ins[i][1])[0] == 'push':
             i += 1
@@ -152,6 +165,12 @@ def main():
     for n in sorted(want_moving):
         if shapes.get(n) != 'moving':
             bad.append('%s: want SP-moving (`mov rbp, rsp`), got %s' % (n, shapes.get(n, 'no such function')))
+    for n in sorted(want_quiet):
+        if body_rsp.get(n, 1) != 0:
+            bad.append('%s: want no RSP write in the body, found %s' % (n, body_rsp.get(n, 'no such function')))
+    for n in sorted(want_moves):
+        if body_rsp.get(n, 0) == 0:
+            bad.append('%s: want RSP writes in the body (per-call areas or pushes), found none' % n)
     for n in sorted(want_colour):
         if shapes.get(n) != 'fixed' or n not in colour:
             bad.append('%s: want rbp allocated as a colour (SP-fixed, body writes rbp after `push rbp`)' % n)
