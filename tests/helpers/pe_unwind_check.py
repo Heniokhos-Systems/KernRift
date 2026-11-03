@@ -1419,7 +1419,8 @@ class X64Fn:
             if 4 in i.writes:
                 self.rep.add('C3b', '%s: body writes RSP at 0x%x (%s %s) in a record without a frame register'
                              % (self.name, i.a, i.mn, ','.join(i.ops)))
-                return
+                if not C3B_ALL:
+                    return
 
     # ---- dataflow (C4b; states for C6) --------------------------------
     def entry_state(self):
@@ -2196,7 +2197,8 @@ class A64Fn:
             if 31 in i.writes or i.kind in ('sp_add', 'sp_other', 'sp_from_fp', 'sp_sub_reg'):
                 self.rep.add('C3b', '%s: body writes SP at 0x%x (%s) in a record without a frame pointer'
                              % (self.name, i.a, i.text))
-                return
+                if not C3B_ALL:
+                    return
 
     def entry_state(self):
         regs = {k: ('orig', k) for k in A64_CALLEE}
@@ -2711,6 +2713,8 @@ class Ctx:
 # --------------------------------------------------------------------------
 # driver
 # --------------------------------------------------------------------------
+C3B_ALL = False      # --c3b-all (mutation evidence, A19h): every body SP write, not the first
+
 ALL_RULES = ['C0', 'C1', 'C2', 'C3', 'C3b', 'C4', 'C4b', 'C5', 'C6']
 
 
@@ -2726,8 +2730,12 @@ def main(argv):
     ap.add_argument('--verbose', action='store_true')
     ap.add_argument('--oracle', action='store_true')
     ap.add_argument('--linked')
+    ap.add_argument('--c3b-all', action='store_true',
+                    help='C3b: report every body SP write of a record without a frame register, not just the first')
     ap.add_argument('file')
     a = ap.parse_args(argv)
+    global C3B_ALL
+    C3B_ALL = a.c3b_all
     if (a.functions or a.code_end is not None) and not a.oracle:
         print('error: --functions and --code-end are for the committed prototype oracles only '
               '(listings made before the compiler printed annotations); add --oracle to use them',
@@ -2802,8 +2810,9 @@ def main(argv):
                             for pr in probs:
                                 print('  %s problem: %s' % (rule, pr))
                         if probs:
-                            more = ' (+%d more)' % (len(probs) - 3) if len(probs) > 3 else ''
-                            raise RuleFail('; '.join(probs[:3]) + more)
+                            keep = len(probs) if (C3B_ALL and rule == 'C3b') else 3
+                            more = ' (+%d more)' % (len(probs) - keep) if len(probs) > keep else ''
+                            raise RuleFail('; '.join(probs[:keep]) + more)
                         msg = '%d functions' % len(ctx.fns)
                         if only:
                             msg = 'restricted to %d functions by --functions (--oracle)' % len(ctx.fns)

@@ -77,13 +77,23 @@ fn uw_sp_state_reset() {
     uw_sp_op_site = 0
 }
 
-// --test-sp-site-log (A19g): append one site id to the log, if one is open.
-// uw_sp_moves() logs every SP-move report; a folded legacy site logs from
-// cg_win_fold_site (it moves no SP, but the coverage row must see it reached).
+// --test-sp-site-log (A19g): append "<site id> <offset>" to the log, if one
+// is open. uw_sp_moves() logs every SP-move report; a folded legacy site logs
+// from cg_win_fold_site (it moves no SP, but the coverage row must see it
+// reached). The offset is out_len when the report is made, relative to the
+// current function's first byte -- the end of the SP write just emitted, or
+// its start for a report made before it -- so a mutation test can tie a
+// rejected instruction to its site (A19e-h review finding 6).
 fn uw_sp_log_site(uint64 id) {
     if uw_sp_log_path == 0 { return }
     if uw_sp_log_fd == 0xFFFFFFFFFFFFFFFF { uw_sp_log_fd = open_output_or_die(uw_sp_log_path) }
     write(uw_sp_log_fd, id, str_len(id))
+    write(uw_sp_log_fd, " ", 1)
+    uint8[24] lb
+    uint64 rel = out_len
+    if uw_cur != 0xFFFFFFFFFFFFFFFF { rel = out_len - uw_get(uw_cur, 0) }
+    uint64 ll = fmt_uint(lb, rel)
+    write(uw_sp_log_fd, lb, ll)
     write(uw_sp_log_fd, "\n", 1)
 }
 

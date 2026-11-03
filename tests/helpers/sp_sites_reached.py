@@ -51,7 +51,8 @@ def main():
             bad.append('%s: build timed out' % tag); continue
         if r.returncode != 0:
             bad.append('%s: build failed: %s' % (tag, (r.stderr.strip().split('\n') or [''])[0][:120])); continue
-        ids = open(log).read().split() if os.path.exists(log) else []
+        # one "<id> <code offset>" line per report (format_pe_unwind.kr uw_sp_log_site)
+        ids = [l.split()[0] for l in open(log) if l.strip()] if os.path.exists(log) else []
         for i in ids:
             reached.setdefault(be, set()).add(i)
         if 'unnamed' in ids:
