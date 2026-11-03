@@ -24,6 +24,27 @@ fn p_bytes(uint64 path) -> uint64 {
     return n
 }
 
+// fd 2 is the last standard stream: the boundary of the fd <= 2 rule. Both
+// builtins, both copies; the row checks what reaches stderr.
+fn p_fw2() -> uint64 {
+    return file_write(2, "fd2-fw\n", 7)
+}
+
+fn p_w2() -> uint64 {
+    return write(2, "fd2-w\n", 6)
+}
+
+fn s_fd2() {
+    uint64 a = file_write(2, "fd2-fw-m\n", 9)
+    int64 sa = a
+    print("fw2_m ")
+    println(sa)
+    uint64 c = write(2, "fd2-w-m\n", 8)
+    int64 sc = c
+    print("w2_m ")
+    println(sc)
+}
+
 fn show(uint64 tag, uint64 v) {
     int64 sv = v
     print_str(tag)
@@ -54,4 +75,7 @@ fn main() {
     s_wh("wfw_m.tmp")
     show("wh_bytes", p_bytes("wfw_p.tmp"))
     show("wh_bytes_m", p_bytes("wfw_m.tmp"))
+    show("fw2", p_fw2())
+    show("w2", p_w2())
+    s_fd2()
 }

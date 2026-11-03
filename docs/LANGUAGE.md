@@ -1469,7 +1469,7 @@ needed.
 | `file_read(fd, buf, len)` | Read up to `len` bytes. Returns the count, 0 at end of file, or a negative errno (Windows: −5 for every failure, the cause in `sys_last_errno`; a pipe whose writer has closed is end of file, 0). |
 | `file_write(fd, buf, len)` | Write `len` bytes. Returns bytes written, or a negative errno (Windows: −5 for every failure). |
 | `file_close(fd)` | Close a descriptor. |
-| `file_size(fd)` | Size of an open file, or a negative errno (Windows: −5). Linux and Android rewind the file to offset 0 (two `lseek`s); Windows leaves the position unchanged. On a pipe or console the result is not a file size (Linux −ESPIPE; Windows −5, 0, or the bytes currently buffered). |
+| `file_size(fd)` | Size of an open file, or a negative errno (Windows: −5). Linux, Android and macOS rewind the file to offset 0 (two `lseek`s); Windows leaves the position unchanged. On a pipe or console the result is not a file size (Linux −ESPIPE; Windows −5, 0, or the bytes currently buffered). |
 
 On every target, descriptors 0, 1 and 2 are the standard input, output and
 error for every I/O builtin (`read`, `file_read`, `write`, `file_write`,
@@ -1480,7 +1480,7 @@ Linux errno, if called immediately after the failing builtin.
 
 **macOS caveat:** a failing system call on macOS currently returns a
 **positive** errno (Darwin sets the carry flag; the builtins do not negate it),
-so `is_errno` does not recognise it there. This is a known defect.
+so `is_errno` does not recognise it there. This is a known defect (#164).
 
 **f-strings** (v2.8.3): `f"x = {x}, pi ≈ {3.14}"` interpolates each
 `{expr}` with the same type-directed formatter `print` uses. The literal

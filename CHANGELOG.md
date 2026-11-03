@@ -20,7 +20,7 @@ in `GetLastError()`, so `sys_last_errno` still reports it. File descriptors 0,
 `--legacy` used to read nothing from `file_read(0, ...)`, print nothing from
 `file_write(1, ...)`, and send every `write()` fd -- a file handle included --
 through GetStdHandle, so `write(h, ...)` to a file wrote nothing; `file_size(0)`
-was garbage on every backend. The import table is unchanged (GetLastError was
+was a stale stack value on x86_64 and 0 on arm64. The import table is unchanged (GetLastError was
 already imported), `print`/`println`/`print_str`/`println_str` output is
 byte-identical, and non-Windows output is unchanged.
 
@@ -33,7 +33,8 @@ local, the read reported 0, and the corrupted frame could fault.
 **Fixed: on Windows, `alloc` of a size within 7 of 2^64 returned a non-null
 pointer to a few bytes (#171).** The size + 8 header add wrapped to a 1..7-byte
 mapping; such a size now returns 0. The same wrap exists on Linux, macOS and
-Android (mmap of 1..7 bytes succeeds) and is not changed in this release.
+Android (mmap of 1..7 bytes succeeds) and is not changed in this release
+(#172).
 
 **Fixed: the compiler's `read_exact` counted a failed read, and `kr` crashed on
 a `.krbo` it could not open (#170).** When `file_size` and `file_read` failed

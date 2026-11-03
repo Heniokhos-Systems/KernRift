@@ -501,9 +501,10 @@ Windows). `sys_mkdir(path, mode)`, `sys_rename(from, to)` (replaces an existing
 `st_mode` bits or −errno; on Windows `sys_chmod` is 0 and does nothing and
 `sys_file_mode` is −ENOSYS. `sys_last_errno(r)` is the positive errno of the
 file builtin (`file_open`, `file_read`, `read`, `file_write`, `write`,
-`file_size`) that just returned `r` — call it **immediately**: on Windows those
-builtins report every failure as −5 and the cause lives only in
-`GetLastError()`, which the next Win32 call overwrites.
+`file_size`) that just returned `r` — call it **immediately**: on Windows
+`file_open` reports every failure as −1 (INVALID_HANDLE_VALUE) and the other
+five as −5, and the cause lives only in `GetLastError()`, which the next Win32
+call overwrites.
 `sys_getenv(name, out, cap)` (`std/args.kr`) copies a variable's value: its
 length, −ENOENT if unset, −ERANGE if it does not fit; the name matches whole.
 macOS and none return −ENOSYS for the four file calls (`sys_getenv` on macOS

@@ -27518,9 +27518,15 @@ wfe_build() {
     "$WFE_KRC" --arch="$2" $lg $tg "$WFE_FX/$5.kr" -o "$WFE_D/$1" > "$WFE_D/$1.log" 2>&1
 }
 # wfe_cmp <row> <rc> <got> <expected> [skip-regex]: rc 0 and the expected lines.
+# When <expected>.stderr exists, the run's stderr lines starting `fd2-` (the
+# fixture's own writes to fd 2; Wine may add its own noise) must equal it too.
 wfe_cmp() {
     local g="$WFE_D/cmp.got" w="$WFE_D/cmp.want"
     tr -d '\r' < "$3" > "$g"; cp "$4" "$w"
+    if [ -f "$4.stderr" ]; then
+        echo "--- stderr" >> "$g"; tr -d '\r' < "$WFE_D/run.err" | grep '^fd2-' >> "$g"
+        echo "--- stderr" >> "$w"; cat "$4.stderr" >> "$w"
+    fi
     if [ -n "$5" ]; then grep -Ev "$5" "$g" > "$g.f"; mv "$g.f" "$g"; grep -Ev "$5" "$w" > "$w.f"; mv "$w.f" "$w"; fi
     if [ "$2" = "0" ] && cmp -s "$g" "$w"; then wfe_ok "$1" "$(grep -c '' "$w") lines"
     else wfe_bad "$1" "rc=$2; first difference: $(diff "$g" "$w" | grep '^[<>]' | head -4 | tr '\n' '|')"; fi
@@ -27533,9 +27539,9 @@ wfe_wine() {
     mkdir -p "$WFE_D/pfx"
     for t in 1 2; do
         case "$2" in
-            none)   (cd "$WFE_D" && WINEPREFIX="$WFE_D/pfx" WINEDLLOVERRIDES=winedbg.exe=d WINEDEBUG=-all timeout 300 "$WFE_WINE" "$1" < /dev/null > "$WFE_D/wine.out" 2>/dev/null); rc=$? ;;
-            file:*) (cd "$WFE_D" && WINEPREFIX="$WFE_D/pfx" WINEDLLOVERRIDES=winedbg.exe=d WINEDEBUG=-all timeout 300 "$WFE_WINE" "$1" < "${2#file:}" > "$WFE_D/wine.out" 2>/dev/null); rc=$? ;;
-            pipe:*) (cd "$WFE_D" && printf '%s' "${2#pipe:}" | WINEPREFIX="$WFE_D/pfx" WINEDLLOVERRIDES=winedbg.exe=d WINEDEBUG=-all timeout 300 "$WFE_WINE" "$1" > "$WFE_D/wine.out" 2>/dev/null); rc=$? ;;
+            none)   (cd "$WFE_D" && WINEPREFIX="$WFE_D/pfx" WINEDLLOVERRIDES=winedbg.exe=d WINEDEBUG=-all timeout 300 "$WFE_WINE" "$1" < /dev/null > "$WFE_D/wine.out" 2>"$WFE_D/run.err"); rc=$? ;;
+            file:*) (cd "$WFE_D" && WINEPREFIX="$WFE_D/pfx" WINEDLLOVERRIDES=winedbg.exe=d WINEDEBUG=-all timeout 300 "$WFE_WINE" "$1" < "${2#file:}" > "$WFE_D/wine.out" 2>"$WFE_D/run.err"); rc=$? ;;
+            pipe:*) (cd "$WFE_D" && printf '%s' "${2#pipe:}" | WINEPREFIX="$WFE_D/pfx" WINEDLLOVERRIDES=winedbg.exe=d WINEDEBUG=-all timeout 300 "$WFE_WINE" "$1" > "$WFE_D/wine.out" 2>"$WFE_D/run.err"); rc=$? ;;
         esac
         if [ "$rc" = "53" ] && [ ! -s "$WFE_D/wine.out" ] && [ "$t" = "1" ]; then
             WINEPREFIX="$WFE_D/pfx" "$(dirname "$WFE_WINE")/wineserver" -k > /dev/null 2>&1
@@ -27554,9 +27560,9 @@ wfe_linux() {
     local run="$WFE_D/$1" rc
     [ "$2" = "arm64" ] && [ "$RUN_ARCH" != "arm64" ] && run="$WFE_QEMU $WFE_D/$1"
     case "$6" in
-        none)   (cd "$WFE_D" && timeout 60 $run < /dev/null > "$WFE_D/lin.out" 2>/dev/null); rc=$? ;;
-        file:*) (cd "$WFE_D" && timeout 60 $run < "${6#file:}" > "$WFE_D/lin.out" 2>/dev/null); rc=$? ;;
-        pipe:*) (cd "$WFE_D" && printf '%s' "${6#pipe:}" | timeout 60 $run > "$WFE_D/lin.out" 2>/dev/null); rc=$? ;;
+        none)   (cd "$WFE_D" && timeout 60 $run < /dev/null > "$WFE_D/lin.out" 2>"$WFE_D/run.err"); rc=$? ;;
+        file:*) (cd "$WFE_D" && timeout 60 $run < "${6#file:}" > "$WFE_D/lin.out" 2>"$WFE_D/run.err"); rc=$? ;;
+        pipe:*) (cd "$WFE_D" && printf '%s' "${6#pipe:}" | timeout 60 $run > "$WFE_D/lin.out" 2>"$WFE_D/run.err"); rc=$? ;;
     esac
     wfe_cmp "$1" "$rc" "$WFE_D/lin.out" "$5"
 }
