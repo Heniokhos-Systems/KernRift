@@ -29754,6 +29754,18 @@ else
     if [ -z "$PEU_WHY" ]; then pe_row_ok pe_unwind_debug_windows_arm64_ir "ar and bc S1 (no add_fp), main D; C0-C6 + C3b + C4b PASS"
     else pe_row_bad pe_unwind_debug_windows_arm64_ir "$PEU_WHY"; fi
 fi
+# The arm64 listing disassembler prints the add/sub immediate's `lsl #12`
+# (#143 A19e-h review finding 4: d14023ff read as `sub sp, sp, #8`). A frame
+# over 4080 bytes (tests/fixtures/a64_lsl12_listing.kr) puts the shifted
+# `sub`/`add` in the legacy prologue/epilogue, on Linux and on Windows.
+PEU_WHY=""
+for peu_t in "--arch=arm64 --legacy" "--arch=arm64 --legacy --target=windows"; do
+    if ! $T10_KRC $peu_t --emit=asm "$DIR/fixtures/a64_lsl12_listing.kr" -o "$T10_D/peu_l12.s" > /dev/null 2>&1; then PEU_WHY="$PEU_WHY $peu_t: build failed;"; continue; fi
+    grep -q 'd14007ff  sub sp, sp, #1, lsl #12$' "$T10_D/peu_l12.s" && grep -q '914007ff  add sp, sp, #1, lsl #12$' "$T10_D/peu_l12.s" \
+        || PEU_WHY="$PEU_WHY $peu_t: $(grep -m1 'd14007ff' "$T10_D/peu_l12.s" | cut -c1-60);"
+done
+if [ -z "$PEU_WHY" ]; then pe_row_ok a64_listing_prints_lsl12 "d14007ff / 914007ff print as sub/add sp, sp, #1, lsl #12 (Linux and Windows legacy listings)"
+else pe_row_bad a64_listing_prints_lsl12 "$PEU_WHY"; fi
 # #174 (found by the A19d review): the literal words of the Windows arm64
 # legacy exec builtins (site G1) addressed through x7 instead of sp, "zeroed"
 # STARTUPINFO with an ldp into xzr, pointed &pi into STARTUPINFO and read

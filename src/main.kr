@@ -1299,6 +1299,9 @@ fn emit_asm_listing(uint64 output_path, uint64 arch, uint64 text_start, uint64 s
                     uint64 imm12 = (wi >> 10) & 0xFFF
                     drl = fmt_uint(drb, imm12)
                     write(fd, drb, drl)
+                    // bit 22: the immediate is shifted left by 12 (#143 A19e-h
+                    // review finding 4: d14023ff read as `sub sp, sp, #8`)
+                    if (wi & 0x400000) != 0 { write(fd, ", lsl #12", 9) }
                 }
                 // ADD/SUB register (shifted): bits 28:24 = 01011, bit 21 = 0
                 else if (wi & 0x1F200000) == 0x0B000000 {
