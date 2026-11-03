@@ -42,7 +42,9 @@ and runs, aborting on the first failure:
 
 `make test` reports a skipped row as SKIP, never as a pass, so a partial
 toolchain still gives a usable answer. **For merge and release gating run
-`REQUIRE_FULL_RUN=1 make test`**: in that mode every skip is a FAIL -- a
+`make gate`** (`REQUIRE_FULL_RUN=1 make test`; no CI workflow sets it, so a
+release is gated by running it by hand on a host with every tool): in that
+mode every skip is a FAIL -- a
 missing tool (wine, qemu, python3), or the README row-count gate on a partial
 toolchain -- and the failure names the missing tool, so the gate passes only
 when every row ran and passed.

@@ -2,6 +2,7 @@
 # Usage:
 #   make              - build the compiler
 #   make test         - run test suite
+#   make gate         - run test suite with REQUIRE_FULL_RUN=1 (every skip fails): merge/release gate
 #   make install      - install to ~/.local/bin
 #   make dist         - create distribution binaries for all platforms
 #   make clean        - remove build artifacts
@@ -17,7 +18,7 @@ SRCS = src/lexer.kr src/ast.kr src/parser.kr src/codegen.kr \
        std/sha256.kr src/format_espimage.kr \
        src/runtime.kr src/formatter.kr src/main.kr
 
-.PHONY: all build kr-runner test install dist clean bootstrap check
+.PHONY: all build kr-runner test gate install dist clean bootstrap check
 
 all: build kr-runner
 
@@ -107,6 +108,12 @@ test: build/krc2 build/kr-bin
 	@echo "=== Running test suite ==="
 	@echo '#!/bin/bash' > /tmp/krc-test && echo 'exec ./build/krc2 --arch=x86_64 "$$@"' >> /tmp/krc-test && chmod +x /tmp/krc-test
 	@KRC=/tmp/krc-test bash tests/run_tests.sh
+
+# Merge and release gate: the suite with REQUIRE_FULL_RUN=1, so a row that
+# could not run (no wine, no qemu, ...) is a FAIL naming what is missing,
+# not a SKIP. `make test` stays usable on a partial toolchain.
+gate:
+	@REQUIRE_FULL_RUN=1 $(MAKE) --no-print-directory test
 
 # Full CI gate: bootstrap fixed point + suite + both IR-vs-legacy differential
 # harnesses (x86_64 + arm64 via qemu). Any failure aborts (each step exits

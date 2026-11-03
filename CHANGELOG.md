@@ -13,9 +13,9 @@ legs never ran (`os_prune_arch_hosted_runs`, `vga_attr_packs_bg_high_fg_low`,
 `esp32_hello_image`, `call_args_25_arm64`), and 68 printed SKIP without
 counting the row at all. A box without Wine or qemu therefore reported a clean
 run. Every one now goes through `skip_row`, which counts it in a SKIP total
-(the results line reads `P/T passed, F failed, S skipped`); `REQUIRE_FULL_RUN=1
-make test` turns every skip into a FAIL that names the missing tool, for merge
-and release gating. The alias rows that used to "skip" on an arm64 host now run
+(the results line reads `P/T passed, F failed, S skipped`); `make gate`
+(`REQUIRE_FULL_RUN=1 make test`) turns every skip into a FAIL that names the
+missing tool, for merge and release gating; no CI workflow sets it. The alias rows that used to "skip" on an arm64 host now run
 their second leg on x86_64 under qemu instead. A tripwire row,
 `no_skip_counted_as_pass`, reads the suite as text (line by line, joining
 `\` continuations; it is not a shell parser) and fails on output that says
