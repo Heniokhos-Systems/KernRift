@@ -1356,7 +1356,7 @@ removed; do not re-add them without re-verifying.
     (`src/ir_aarch64.kr:3072`, `if target_os == 2 { return }`). Deliberate —
     the comment says the `ExitProcess`-via-IAT sequence does not fit the
     short-jump pattern — but it means `--debug` bounds checking does not
-    exist on that pair.
+    exist on that pair (registered as #159).
 11. **arm64 inline-asm register names are resolved with the x86 table.**
     `src/ir.kr:5372`/`5012` select `rv_reg_code` for riscv32 and
     `x86_reg_code` for everything else, arm64 included. Flagged in a source
