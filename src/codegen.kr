@@ -4741,12 +4741,19 @@ fn cg_win_call_area(uint64 argc) -> uint64 {
 }
 
 // arm64 named call / call_ptr with more than 8 arguments: the stack-argument
-// area, an even number of 8-byte slots (AAPCS64: x0-x7 first).
-fn cg_a64_call_area(uint64 argc) -> uint64 {
-    if argc <= 8 { return 0 }
-    uint64 n = argc - 8
+// area, an even number of 8-byte slots (AAPCS64: x0-x7 first). The pre-scan
+// sizes OUT with cg_a64_call_area(argc); the emitters size their area with
+// the same rule (A19d review finding 4): call_ptr places arguments 9.. on the
+// stack, so cg_a64_call_area(arg_count) is exact; a named call places the
+// arguments that found no x/v register, n <= argc - 8 of them, and sizes with
+// cg_a64_stack_area(n) -- never more than the pre-scan's bound.
+fn cg_a64_stack_area(uint64 n) -> uint64 {
     if (n & 1) != 0 { n = n + 1 }
     return n * 8
+}
+fn cg_a64_call_area(uint64 argc) -> uint64 {
+    if argc <= 8 { return 0 }
+    return cg_a64_stack_area(argc - 8)
 }
 
 // x86_64 legacy builtins on Windows: the largest area any of its sequences

@@ -3337,11 +3337,8 @@ fn gen_expr_a64(uint64 node) {
             if arg_count >= 1 { emit_a64_load_x0(arg_slots_base) }
 
             // Push overflow args (9+) onto stack (AAPCS64: x0-x7 = first 8 args)
-            uint64 cp_stack_args = 0
-            if arg_count > 8 {
-                cp_stack_args = arg_count - 8
-                if (cp_stack_args & 1) != 0 { cp_stack_args = cp_stack_args + 1 }
-            }
+            // the pre-scan's own helper sizes the area (spec 2.5.7, finding 23)
+            uint64 cp_stack_args = cg_a64_call_area(arg_count) / 8
             if cp_stack_args > 0 {
                 uint64 cp_stack_bytes = cp_stack_args * 8
                 uint64 cp_sub_insn = 0xD1000000 | (cp_stack_bytes << 10) | (31 << 5) | 31
@@ -4937,11 +4934,8 @@ fn gen_expr_a64(uint64 node) {
                 }
             }
         }
-        uint64 stack_args = 0
-        if ovf_n_a > 0 {
-            stack_args = ovf_n_a
-            if (stack_args & 1) != 0 { stack_args = stack_args + 1 }
-        }
+        // the shared sizing rule of the pre-scan (cg_a64_stack_area; spec 2.5.7)
+        uint64 stack_args = cg_a64_stack_area(ovf_n_a) / 8
         if stack_args > 0 {
             uint64 stack_bytes = stack_args * 8
             // sub sp, sp, #stack_bytes
