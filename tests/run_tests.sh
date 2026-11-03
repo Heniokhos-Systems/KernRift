@@ -29687,6 +29687,45 @@ else
     if [ "$PEU_RC" = 0 ]; then pe_row_ok win_is_builtin_matches_gen_expr "$(tail -1 <<< "$PEU_O")"
     else pe_row_bad win_is_builtin_matches_gen_expr "$(head -2 <<< "$PEU_O" | tr '\n' '|')$(tail -1 <<< "$PEU_O")"; fi
 fi
+# arm64 IR, option C (#143 A19e; spec 2.5.3): tests/fixtures/win_a64_shapes.kr
+# has fib (register-argument calls) in shape S1 -- one allocation, the saves at
+# the top of the frame --, wide (a low area above 504 bytes) in shape S2 -- the
+# D split without add_fp --, and opaque (an asm block) and main in the D shape
+# with add_fp. The listing shapes (a64_win_frame_scan.py), the unwind codes
+# (save_fplr, no add_fp/set_fp, one epilog scope from StartIndex 0 in the
+# SP-fixed ones; add_fp in the others; a64_win_shape_codes.py, llvm-readobj)
+# and C0-C6 + C3b + C4b.
+if ! command -v python3 > /dev/null 2>&1 || ! command -v llvm-readobj > /dev/null 2>&1; then
+    pe_row_skip a64_win_sp_fixed_shape "needs python3 and llvm-readobj"
+elif ! $T10_KRC --arch=arm64 --target=windows --emit=pe "$DIR/fixtures/win_a64_shapes.kr" -o "$T10_D/peu_ash.exe" --test-listing="$T10_D/peu_ash.lst" > "$T10_D/peu_ash.log" 2>&1; then
+    pe_row_bad a64_win_sp_fixed_shape "build: $(grep -m1 error "$T10_D/peu_ash.log" | cut -c1-120)"
+else
+    PEU_WHY=""
+    PEU_O=$(python3 -B "$DIR/helpers/a64_win_frame_scan.py" "$T10_D/peu_ash.lst" --shapes 2>&1) || PEU_WHY="shape scan: $(grep -v '^shape' <<< "$PEU_O" | head -1);"
+    for peu_s in "fib S1" "wide S2" "opaque D" "main D"; do grep -q "^shape $peu_s\$" <<< "$PEU_O" || PEU_WHY="$PEU_WHY want $peu_s;"; done
+    PEU_O=$(python3 -B "$DIR/helpers/a64_win_shape_codes.py" "$T10_D/peu_ash.exe" "$T10_D/peu_ash.lst" --fixed=fib,wide --moving=opaque,main 2>&1) \
+        || PEU_WHY="$PEU_WHY codes: $(grep -v OK <<< "$PEU_O" | head -1);"
+    PEU_C=$(env -u PE_UNWIND_CHECK_DISABLE python3 -B "$DIR/helpers/pe_unwind_check.py" --arch arm64 "$T10_D/peu_ash.exe" --listing "$T10_D/peu_ash.lst" 2>&1)
+    [ "$(grep -c ': PASS' <<< "$PEU_C")" = 9 ] || PEU_WHY="$PEU_WHY checker: $(grep -m1 -e FAIL -e error <<< "$PEU_C" | cut -c1-120);"
+    if [ -z "$PEU_WHY" ]; then pe_row_ok a64_win_sp_fixed_shape "fib S1, wide S2 (save_fplr, no add_fp, epilog StartIndex 0), opaque/main D with add_fp; C0-C6 + C3b + C4b PASS"
+    else pe_row_bad a64_win_sp_fixed_shape "$PEU_WHY"; fi
+fi
+# --debug on Windows arm64 IR (#143 A19e; spec 2.5.5): op 131 emits nothing
+# on Windows arm64 (#159), so tests/fixtures/win_debug_traps.kr's ar and bc
+# are SP-fixed (S1, no add_fp), main keeps add_fp; C0-C6 + C3b + C4b (static).
+if ! command -v python3 > /dev/null 2>&1; then
+    pe_row_skip pe_unwind_debug_windows_arm64_ir "needs python3"
+elif ! $T10_KRC --debug --arch=arm64 --target=windows --emit=pe "$DIR/fixtures/win_debug_traps.kr" -o "$T10_D/peu_dai.exe" --test-listing="$T10_D/peu_dai.lst" > "$T10_D/peu_dai.log" 2>&1; then
+    pe_row_bad pe_unwind_debug_windows_arm64_ir "build: $(grep -m1 error "$T10_D/peu_dai.log" | cut -c1-120)"
+else
+    PEU_WHY=""
+    PEU_O=$(python3 -B "$DIR/helpers/a64_win_frame_scan.py" "$T10_D/peu_dai.lst" --shapes 2>&1) || PEU_WHY="shape scan: $(grep -v '^shape' <<< "$PEU_O" | head -1);"
+    for peu_s in "ar S1" "bc S1" "main D"; do grep -q "^shape $peu_s\$" <<< "$PEU_O" || PEU_WHY="$PEU_WHY want $peu_s;"; done
+    PEU_C=$(env -u PE_UNWIND_CHECK_DISABLE python3 -B "$DIR/helpers/pe_unwind_check.py" --arch arm64 "$T10_D/peu_dai.exe" --listing "$T10_D/peu_dai.lst" 2>&1)
+    [ "$(grep -c ': PASS' <<< "$PEU_C")" = 9 ] || PEU_WHY="$PEU_WHY checker: $(grep -m1 -e FAIL -e error <<< "$PEU_C" | cut -c1-120);"
+    if [ -z "$PEU_WHY" ]; then pe_row_ok pe_unwind_debug_windows_arm64_ir "ar and bc S1 (no add_fp), main D; C0-C6 + C3b + C4b PASS"
+    else pe_row_bad pe_unwind_debug_windows_arm64_ir "$PEU_WHY"; fi
+fi
 # #174 (found by the A19d review): the literal words of the Windows arm64
 # legacy exec builtins (site G1) addressed through x7 instead of sp, "zeroed"
 # STARTUPINFO with an ldp into xzr, pointed &pi into STARTUPINFO and read

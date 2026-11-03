@@ -5,7 +5,9 @@ An independent encoder for KernRift's Windows arm64 unwind codes: LLVM's.
 For every DISTINCT prologue/epilogue shape among the image's non-naked
 functions (the listing's labels give the functions; the prologue is the
 instructions up to and including the low allocation, the epilogue the
-single `sub sp, x29, #f` ... `ret`), an assembler file is written with the
+single `sub sp, x29, #f` ... `ret`; for the frame-pointer-less shapes S1 and
+S2 of option C, #143 A19e, the saves and allocations up to the body and the
+restores and deallocations ending in `ret`), an assembler file is written with the
 same instruction words (`.inst`) and the `.seh_*` directive each one stands
 for, and assembled by llvm-mc for aarch64-pc-windows-msvc. llvm-readobj's
 decode of LLVM's .xdata for it must equal llvm-readobj's decode of KernRift's
@@ -22,6 +24,9 @@ import subprocess
 import sys
 import tempfile
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import a64_win_frame_scan as A  # noqa: E402  (#143 option C: the S1/S2 shapes)
+
 LINE = re.compile(r'^\s+([0-9a-f]{8}): ([0-9a-f]{8})(?:\s|$)')
 LABEL = re.compile(r'^([A-Za-z_.$][\w.$@]*):\s*$')
 
@@ -30,6 +35,8 @@ def directive(w, x16):
     """(directive or None, new x16)"""
     if (w & 0xFFC003FF) == 0xD10003FF:                          # sub sp, sp, #imm
         return '.seh_stackalloc %d' % ((w >> 10) & 0xFFF), x16
+    if (w & 0xFFC003FF) in (0xD14003FF, 0x914003FF):            # sub/add sp, sp, #imm, lsl #12 (S2)
+        return '.seh_stackalloc %d' % (((w >> 10) & 0xFFF) << 12), x16
     if (w & 0xFFC003FF) == 0x910003FF:                          # add sp, sp, #imm
         return '.seh_stackalloc %d' % ((w >> 10) & 0xFFF), x16
     if (w & 0xFFC003FF) == 0x910003FD:                          # add x29, sp, #f
@@ -68,12 +75,15 @@ def readobj(path):
         s = line.strip()
         m = re.match(r'Function: (\S+)', s)
         if m:
-            cur = [[], []]
+            cur = [[], [], None]
             res[m.group(1)] = cur
             sect = None
             continue
         if cur is None:
             continue
+        m = re.match(r'EpilogueOffset: (\d+)', s)
+        if m:
+            cur[2] = int(m.group(1))            # a packed epilog: shares the codes from this byte
         if s.startswith('Prologue ['):
             sect = 'p'
         elif s.startswith('Opcodes [') or s.startswith('Epilogue ['):
@@ -136,6 +146,23 @@ def main():
             fn_index += 1
             continue
         w = words[start:end]
+        kind, prob = A.check(name, [(0, x) for x in w])
+        if kind in ('S1', 'S2'):
+            if prob:
+                print('%s: %s' % (name, prob))
+                return 1
+            nsv = len(A.saves_at([(0, x) for x in w], 1, False)[0])
+            r = max(i for i, x in enumerate(w) if x == 0xD65F03C0)
+            nlow = 0
+            if kind == 'S2':
+                nlow = sum(1 for x in w[1 + nsv:1 + nsv + 2] if (x & 0xFFC003FF) in (0xD10003FF, 0xD14003FF))
+            p_end = 1 + nsv + nlow
+            e_start = r - 1 - nsv - nlow
+            shape = (tuple(w[:p_end]), tuple(w[e_start:r + 1]))
+            if keys and fn_index < len(keys):
+                shapes.setdefault(shape, (name, keys[fn_index]))
+            fn_index += 1
+            continue
         # prologue: up to the low allocation (sub sp imm or sub sp, sp, x16) after add x29
         try:
             fp = next(i for i, x in enumerate(w) if (x & 0xFFC003FF) == 0x910003FD)
@@ -207,6 +234,17 @@ def main():
                 bad += 1
             # llvm may emit the epilog as its own codes or share them: compare the opcode lists
             te, oe = [meaning(x) for x in t[1]], [meaning(x) for x in o[1]]
+            if not t[1] and t[2] is not None:
+                # LLVM packed its single end epilog into the header (EpiloguePacked,
+                # sharing the prologue codes from byte t[2]); KernRift emits one
+                # explicit scope (#143 option C, StartIndex 0). Same codes: compare
+                # with LLVM's prologue codes from that byte, read as restores.
+                shared, b = [], 0
+                for c in t[0]:
+                    if b >= t[2]:
+                        shared.append(c)
+                    b += (len(c.split()[0]) - 2) // 2
+                te = [[x.replace('stp ', 'ldp ').replace('str ', 'ldr ').replace('sub sp', 'add sp') for x in meaning(shared)]]
             if te != oe:
                 print('%s: epilogue codes differ: ours %s, llvm %s' % (name, oe, te))
                 bad += 1

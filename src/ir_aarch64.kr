@@ -149,6 +149,7 @@ fn ir_a64_emit_callee_frame(uint64 mask, uint64 dmask, uint64 cs_base, uint64 sa
 // of the saves, so the epilog shares the prologue's codes.
 // ---------------------------------------------------------------------------
 static uint64 ir_a64_win_fp_off = 0       // offset of the x29/x30 pair in the save area
+static uint64 ir_a64_win_save_base = 0    // added to every save offset: the low area in shape S1, else 0 (A19e)
 static uint64 ir_a64_win_ng = 0           // number of save groups
 static uint64 ir_a64_win_g = 0            // groups: 4 words each (r1, r2 or 0xFFFF, class 0 x / 1 d / 2 fplr, offset)
 
@@ -196,6 +197,18 @@ fn ir_a64_win_layout(uint64 mask, uint64 dmask) -> uint64 {
     return area
 }
 
+// The largest save offset of the layout (the offset of its last group).
+fn ir_a64_win_max_off() -> uint64 {
+    uint64 m = 0
+    uint64 g = 0
+    while g < ir_a64_win_ng {
+        uint64 o = ir_a64_win_gget(g, 3)
+        if o > m { m = o }
+        g = g + 1
+    }
+    return m
+}
+
 fn ir_a64_win_gget(uint64 g, uint64 f) -> uint64 {
     uint64 v = 0
     unsafe { *((ir_a64_win_g + g * 32 + f * 8) as uint64) -> v }
@@ -212,7 +225,7 @@ fn ir_a64_win_saves(uint64 restore) {
         uint64 r1 = ir_a64_win_gget(g, 0)
         uint64 r2 = ir_a64_win_gget(g, 1)
         uint64 cls = ir_a64_win_gget(g, 2)
-        uint64 off = ir_a64_win_gget(g, 3)
+        uint64 off = ir_a64_win_gget(g, 3) + ir_a64_win_save_base
         uint64 z = off / 8
         uint64 code = 0
         if cls == 1 {
@@ -1097,6 +1110,63 @@ fn ir_emit_arm64_win_syscall(uint64 abstract_nr, uint64 dest_v, uint64 dst_r) {
 // ---------------------------------------------------------------------------
 
 // #143 option C (spec 2.5.1 site table): the site family of an arm64 IR op.
+// #143 option C (spec 2.5.1; A19e): the audited allow-list of arm64 IR ops
+// whose Windows lowering never writes SP. Its own list, not
+// ir_a64_op_widesafe (a register-clobber audit). Each entry was audited
+// against its lowering in ir_emit_arm64_insn:
+//   0 elided; 1-19 const/alu/div/shifts/cmps; 20-27 float ops; 30-32
+//   load/store/stack_addr ([sp, #off] addressing); 40-43 br/ret; 50 and 87
+//   calls (BL/BLR, also routed imports through the IAT: stack arguments are
+//   frame-resident, A7); 51 IR_ARG with imm < 100 (register moves, or the
+//   frame-resident overflow store [sp, #8k]; imm >= 100 is the asm-input
+//   group and only exists with op 96); 61 copy; 77-86 static loads/stores
+//   and addresses (adrp-based); 97-104, 107, 108, 118 float conversions,
+//   sqrt, fma; 120-123 signed compares; 131 (emits nothing on Windows, A6);
+//   132-139 sdiv/smod/sar/add_imm/sub_imm/ror/mul_imm/lea_bis; 143 shl_imm;
+//   147, 148.
+// Not on it: 52 (A1), 113 (A2), 114 (A3), 96 (A5) -- and every op not
+// audited, including any added later: it makes the function SP-moving.
+fn ir_a64_win_op_sp_neutral(uint64 op, uint64 imm) -> uint64 {
+    if op == 0 { return 1 }
+    if op >= 1 && op <= 19 { return 1 }
+    if op >= 20 && op <= 27 { return 1 }
+    if op >= 30 && op <= 32 { return 1 }
+    if op >= 40 && op <= 43 { return 1 }
+    if op == 50 || op == 87 { return 1 }
+    if op == 51 {
+        if imm < 100 { return 1 }
+        return 0
+    }
+    if op == 61 { return 1 }
+    if op >= 77 && op <= 86 { return 1 }
+    if op >= 97 && op <= 104 { return 1 }
+    if op == 107 || op == 108 { return 1 }
+    if op == 118 { return 1 }
+    if op >= 120 && op <= 123 { return 1 }
+    if op == 131 { return 1 }
+    if op >= 132 && op <= 139 { return 1 }
+    if op == 143 || op == 147 || op == 148 { return 1 }
+    return 0
+}
+
+// #143 option C (spec 2.5.1; A19e): does the current arm64 IR function move
+// SP after its prologue? Runs on the final IR, before the frame is laid out.
+// A hosted Windows main is always SP-moving (its C7 / GetCommandLineA /
+// ExitProcess sequences sit outside any IR op, A4; finding 10).
+fn ir_a64_win_fn_moves_sp(uint64 name_tok) -> uint64 {
+    if freestanding == 0 && tok_matches(name_tok, "main", 4) != 0 { return 1 }
+    uint64 b = 0
+    while b < ir_bb_count {
+        uint64 i = ir_bb_first_insn(b)
+        while i != 0xFFFFFFFF {
+            if ir_a64_win_op_sp_neutral(ir_insn_opcode(i), ir_insn_imm(i)) == 0 { return 1 }
+            i = ir_insn_next(i)
+        }
+        b = b + 1
+    }
+    return 0
+}
+
 fn ir_a64_sp_site(uint64 op) -> uint64 {
     if op == 52 { return "A1" }
     if op == 113 { return "A2" }
@@ -3469,7 +3539,7 @@ fn ir_emit_arm64_insn(uint64 ii) {
 
 @export
 fn ir_emit_arm64_function(uint64 fn_node) {
-    uw_fn_sp_fixed = 0          // #143 option C: no classifier here yet (A19d/A19e); never inherit one
+    uw_fn_sp_fixed = 0          // #143 option C: set below once the function is classified (A19e); never inherit one
     // Check for @naked attribute
     uint32 ann_flags = ast_data4(fn_node)
     uint64 is_naked = ann_flags & 2
@@ -3659,6 +3729,21 @@ fn ir_emit_arm64_function(uint64 fn_node) {
         total_frame = a64_win_low + a64_win_area
     }
     if is_naked != 0 { total_frame = 0 }
+    // #143 option C (spec 2.5.3; A19e): an SP-fixed Windows function drops
+    // the frame pointer. Shape S1 (one allocation, the saves at the top) when
+    // every save offset fits the codes' 504; else S2 (the D split without
+    // add_fp) when the low area is under 16 MiB; else the D shape with its
+    // frame pointer (C3b allows it). x29 stays reserved either way (Q12).
+    uint64 a64_win_shape = 0                  // 0 = D (frame pointer), 1 = S1, 2 = S2
+    ir_a64_win_save_base = 0
+    if target_os == 2 && is_naked == 0 {
+        uint32 cls_tok = ast_data1(fn_node)
+        if ir_a64_win_fn_moves_sp(cls_tok) == 0 {
+            if a64_win_low + ir_a64_win_max_off() <= 504 { a64_win_shape = 1 }
+            else if a64_win_low < 16777216 { a64_win_shape = 2 }
+        }
+        if a64_win_shape != 0 { uw_fn_sp_fixed = 1 }      // the backstop is armed
+    }
 
     ir_frame_size = total_frame
     // Scratchpad sits right after the stack-array region.
@@ -3735,7 +3820,46 @@ fn ir_emit_arm64_function(uint64 fn_node) {
     // epilogue, so save and restore mirror by construction.
     uint64 cs_base = IR_A64_OVERFLOW_RESERVE + spill_size + ir_stack_array_bytes + scratch_size
     uint64 a64_win_low_codes = 0
-    if is_naked == 0 && target_os == 2 {
+    if is_naked == 0 && target_os == 2 && a64_win_shape == 1 {
+        // #143 option C, shape S1 (spec 2.5.3): sub sp, sp, #F; the saves at
+        // the top of the frame ([sp, #low + k]); no frame pointer
+        if a64_win_low + ir_a64_win_max_off() > 504 {
+            // the shape's own range check: save_fplr/save_regp/stp encode at
+            // most 504 (Z*8, Z < 64); the choice above never takes S1 then
+            diag_loc_head(ast_data1(fn_node), 0)
+            uint64 m = "internal: arm64 Windows shape S1 chosen with a save offset above 504 (#143 option C)\n"
+            write(2, m, str_len(m))
+            diag_span_of(ast_data1(fn_node))
+            exit(1)
+        }
+        uw_sp_frame = 1
+        emit_a64_sub_sp_imm(total_frame)
+        uw_a64_alloc_code(total_frame, out_len)
+        ir_a64_win_save_base = a64_win_low
+        ir_a64_win_saves(0)
+        uw_sp_frame = 0
+    } else if is_naked == 0 && target_os == 2 && a64_win_shape == 2 {
+        // #143 option C, shape S2 (spec 2.5.3): sub sp, sp, #area; the saves
+        // at [sp, #k]; then the low area -- `sub sp, sp, #hi, lsl #12` when
+        // hi > 0, `sub sp, sp, #lo` when lo > 0 -- each with its code; no
+        // add_fp. (D's mov x16 / sub sp, sp, x16 form is not used: its
+        // mirror cannot share codes.)
+        uw_sp_frame = 1
+        emit_a64_sub_sp_imm(a64_win_area)
+        uw_a64_alloc_code(a64_win_area, out_len)
+        ir_a64_win_saves(0)
+        uint64 s2_hi = a64_win_low >> 12
+        uint64 s2_lo = a64_win_low & 0xFFF
+        if s2_hi != 0 {
+            emit_a64_sp_word(0xD14003FF | (s2_hi << 10))                      // sub sp, sp, #hi, lsl #12
+            uw_a64_alloc_code(s2_hi << 12, out_len)
+        }
+        if s2_lo != 0 {
+            emit_a64_sub_sp_imm(s2_lo)
+            uw_a64_alloc_code(s2_lo, out_len)
+        }
+        uw_sp_frame = 0
+    } else if is_naked == 0 && target_os == 2 {
         // #143 A9a (spec 5.1):
         //   sub sp, sp, #area; saves; add x29, sp, #f; sub sp, sp, #low
         // each with its unwind code (collected; the .xdata writer is A9b)
@@ -4000,7 +4124,33 @@ fn ir_emit_arm64_function(uint64 fn_node) {
                 emit_a64_svc("main() epilogue auto-exit")
             }
         }
-        if target_os == 2 {
+        if target_os == 2 && a64_win_shape == 1 {
+            // S1: the exact mirror -- the restores, add sp, sp, #F, ret; one
+            // epilog scope sharing every code from StartIndex 0
+            uint64 ep1 = out_len
+            ir_a64_win_saves(1)
+            uw_sp_frame = 1
+            emit_a64_add_sp_imm(total_frame)
+            uw_sp_frame = 0
+            emit_a64_ret()
+            uw_a64_epilog(ep1, 0)
+        } else if target_os == 2 && a64_win_shape == 2 {
+            // S2: add sp, #lo; add sp, #hi, lsl #12; the restores; add sp,
+            // #area; ret -- the mirror, StartIndex 0
+            uint64 ep2 = out_len
+            uint64 e2_hi = a64_win_low >> 12
+            uint64 e2_lo = a64_win_low & 0xFFF
+            uw_sp_frame = 1
+            if e2_lo != 0 { emit_a64_add_sp_imm(e2_lo) }
+            if e2_hi != 0 { emit_a64_sp_word(0x914003FF | (e2_hi << 10)) }      // add sp, sp, #hi, lsl #12
+            uw_sp_frame = 0
+            ir_a64_win_saves(1)
+            uw_sp_frame = 1
+            emit_a64_add_sp_imm(a64_win_area)
+            uw_sp_frame = 0
+            emit_a64_ret()
+            uw_a64_epilog(ep2, 0)
+        } else if target_os == 2 {
             // #143 A9a (spec 5.1, ruling Q5): SP from the frame pointer, the
             // restores in exact reverse, the save area, ret. The epilog
             // shares the prologue's codes from add_fp on (StartIndex = the
