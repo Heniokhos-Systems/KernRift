@@ -29948,6 +29948,12 @@ peu_wine_fault pe_unwind_temp_push_fault_windows_wine pe_unwind_temp_push_fault 
 # classes in the listing (finding 14: the walk alone passes on the pre-A19
 # compiler, which keeps a frame pointer everywhere): a and c without
 # `mov rbp, rsp`, b and main with it (tests/helpers/win_frame_classes.py).
+# Wine cannot detect one class of wrong table here (A19e-h review finding 1):
+# with b described SP-fixed while its per-call area around `call c` is live
+# (mutant 2b), Wine 9.0's walk still recovers a's frame and these rows pass,
+# while the native unwinder reads b's return address from its argument slots
+# (c > b > 0x7 > 0x8 ...). That leg is native only: Task D step 3c runs the
+# 2b image under cdb and requires the chain to break.
 peu_mixed_classes() { # <row> <listing>
     local o; o=$(python3 -B "$DIR/helpers/win_frame_classes.py" x86_64 "$2" 2>&1)
     if [ "$(grep -E '^(a|c) SP-fixed|^(b|main) SP-moving' <<< "$o" | wc -l)" = 4 ]; then return 0; fi
