@@ -22,8 +22,10 @@ their second leg on x86_64 under qemu instead. A tripwire row,
 skip anywhere but `skip_row`, unless it is a failure message (`FAIL: ...` or
 `name: FAIL ...`), and on any assignment to PASS on the line of, or next to,
 output saying a leg did not run. Output includes echo and printf (piped,
-tee'd or redirected, also `\echo`, `/bin/echo`, and behind `command`,
-`builtin`, `env`, `xargs` or a leading redirection), `cat`/`tee` heredocs not
+tee'd or redirected, also `\echo`, `/bin/echo`, behind `command`,
+`builtin`, `env`, `xargs`, `timeout N`, `stdbuf`, `nice` or a leading
+redirection, and, as a fallback, an echo or printf word anywhere in a
+command's unquoted text), `cat`/`tee` heredocs not
 written to a file and here-strings, the echo inside an `eval` or an `sh -c`,
 and the arguments of helpers and aliases defined above that echo them
 (loggers, and PASS helpers such as `t10_ok` and `c7_ok`, whose reason must not
@@ -32,7 +34,7 @@ Its known misses include skip wording built in a variable, a PASS assignment
 more than one line from that wording, a heredoc written to a file, and a line
 marked `# tripwire: not a skip`; a second row,
 `skip_tripwire_catches_each_bypass`, runs the scanner over a fixture for each
-bypass review has found (39 so far) and a fixture of non-skips. (An earlier
+bypass review has found (44 so far) and a fixture of non-skips. (An earlier
 version of this entry said thirty sites; the first commit converted 23.)
 
 **Added (std): sys_sendto, sys_recvfrom, SO_BROADCAST and sys_connect_timeout** -- datagrams with an address and a connect with a deadline that always leaves the socket blocking, for arsh discovery.
