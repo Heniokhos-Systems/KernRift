@@ -13,7 +13,8 @@ KRC="${1:?usage: count_insns.sh <compiler> <port.kr> <x86_64|arm64> [flags]}"; S
 HERE="$(cd "$(dirname "$0")" && pwd)"
 QEMU="$(command -v qemu-$ARCH-static || command -v qemu-$ARCH || true)"
 [ -n "$QEMU" ] || { echo "count_insns.sh: no qemu-$ARCH-static" >&2; exit 2; }
-W=$(mktemp -d "${PEU_PERF_TMP:-$HOME/.cache/pe_unwind}/cnt.XXXXXX") || exit 2
+mkdir -p "${PEU_PERF_TMP:-$HOME/.cache/pe_unwind}" || { echo "count_insns.sh: cannot create the scratch root" >&2; exit 2; }
+W=$(mktemp -d "${PEU_PERF_TMP:-$HOME/.cache/pe_unwind}/cnt.XXXXXX") || { echo "count_insns.sh: mktemp failed" >&2; exit 2; }
 trap 'rm -rf "$W"' EXIT
 { sed "s/PEU_N/${PEU_N:-0}/g" "$SRC"; cat "$HERE/exit_$ARCH.kr"; } > "$W/p.kr"
 if ! ( ulimit -v 2000000; timeout 120 "$KRC" --freestanding --target=windows --arch=$ARCH "$@" "$W/p.kr" -o "$W/p.elf" ) > "$W/b.log" 2>&1; then

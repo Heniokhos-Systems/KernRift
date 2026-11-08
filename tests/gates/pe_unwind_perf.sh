@@ -19,14 +19,21 @@ CNT="$HERE/perf/count_insns.sh"
 mkdir -p "$OUT" || exit 2
 : > "$OUT/counts.tsv"
 bad=0
+# scratch: PEU_PERF_TMP (the suite row sets it), else ~/.cache/pe_unwind --
+# created if absent (a fresh CI runner has no ~/.cache/pe_unwind: CI run
+# 42513155266 failed the calibration there)
+TMPROOT="${PEU_PERF_TMP:-$HOME/.cache/pe_unwind}"
+mkdir -p "$TMPROOT" || { echo "pe_unwind_perf: cannot create scratch root $TMPROOT"; exit 2; }
+command -v llvm-objdump > /dev/null 2>&1 || { echo "pe_unwind_perf: calibration needs llvm-objdump (not found)"; exit 2; }
 # calibration
 for A in x86_64 arm64; do
     c1=$(PEU_N=1000 bash "$CNT" "$NEW" "$HERE/perf/calib.kr" $A); c2=$(PEU_N=2000 bash "$CNT" "$NEW" "$HERE/perf/calib.kr" $A)
-    W=$(mktemp -d "$HOME/.cache/pe_unwind/cal.XXXXXX")
+    W=$(mktemp -d "$TMPROOT/cal.XXXXXX") || { echo "calibration $A: FAIL (mktemp in $TMPROOT failed)" | tee -a "$OUT/summary.txt"; bad=1; continue; }
     { sed 's/PEU_N/1000/g' "$HERE/perf/calib.kr"; cat "$HERE/perf/exit_$A.kr"; } > "$W/c.kr"
-    ( ulimit -v 2000000; timeout 120 "$NEW" --freestanding --target=windows --arch=$A "$W/c.kr" -o "$W/c.elf" ) > /dev/null 2>&1
-    ( ulimit -v 2000000; timeout 120 "$NEW" --freestanding --target=windows --arch=$A --emit=asm "$W/c.kr" -o "$W/c.s" ) > /dev/null 2>&1
-    body=$(python3 -B - "$W/c.elf" "$W/c.s" "$A" <<'PYEOF'
+    why=""
+    ( ulimit -v 2000000; timeout 120 "$NEW" --freestanding --target=windows --arch=$A "$W/c.kr" -o "$W/c.elf" ) > "$W/b.log" 2>&1 || why="ELF build failed: $(grep -m1 -i error "$W/b.log" | cut -c1-120)"
+    ( ulimit -v 2000000; timeout 120 "$NEW" --freestanding --target=windows --arch=$A --emit=asm "$W/c.kr" -o "$W/c.s" ) > "$W/a.log" 2>&1 || why="$why${why:+; }listing build failed: $(grep -m1 -i error "$W/a.log" | cut -c1-120)"
+    body=$(python3 -B - "$W/c.elf" "$W/c.s" "$A" 2> "$W/py.err" <<'PYEOF'
 import re, subprocess, sys
 # work()'s bytes from the listing's byte column; found in the ELF (one PT_LOAD
 # from file offset 0, so address = load base + file offset); disassembled by
@@ -68,9 +75,15 @@ for a, op, args in fn:
 print('none')
 PYEOF
 )
+    # a python failure must be reported, never read as a body length
+    if [ -s "$W/py.err" ] || ! [[ "$body" =~ ^([0-9]+|none)$ ]]; then
+        why="$why${why:+; }body parser failed: $(grep -v '^ ' "$W/py.err" | tail -1 | cut -c1-160)${body:+ (printed '$body')}"
+    fi
     rm -rf "$W"
     n1=${c1%% *}; n2=${c2%% *}
-    if [ "${c1#* }" = 0 ] && [ "${c2#* }" = 0 ] && [ "$body" != none ] && [ $((n2 - n1)) = $((1000 * body)) ]; then
+    if [ -n "$why" ]; then
+        echo "calibration $A: FAIL ($c1 / $c2; $why)" | tee -a "$OUT/summary.txt"; bad=1
+    elif [ "${c1#* }" = 0 ] && [ "${c2#* }" = 0 ] && [ "$body" != none ] && [ $((n2 - n1)) = $((1000 * body)) ]; then
         echo "calibration $A: PASS ($n1 / $n2 instructions, slope $(( (n2 - n1) / 1000 )) = loop body $body)" | tee -a "$OUT/summary.txt"
     else
         echo "calibration $A: FAIL ($c1 / $c2, loop body '$body')" | tee -a "$OUT/summary.txt"; bad=1
