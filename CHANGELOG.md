@@ -4,6 +4,8 @@ All notable changes to `kernriftc` are documented in this file.
 
 ## Unreleased
 
+**CI: the macOS jobs run on `macos-26` and `macos-26-intel`.** GitHub retired the `macos-14` arm64 image. `ci.yml`'s `test-macos` and `cross-platform.yml`'s `test-macos-arm` move to `macos-26`; `cross-platform.yml`'s `test-macos-x64` moves to the native Intel `macos-26-intel`, so the x86_64 test binaries and self-compile no longer run under Rosetta there (the fat-binary job's x86_64 slice still does, on `macos-26`). README's macOS rows say so.
+
 **Added (std): sys_net_ifaces and sys_ioctl** -- the IPv4 interface list (address, netmask, directed broadcast, UP/BROADCAST/LOOPBACK flags) on Linux/Android via SIOCGIFCONF and on Windows via `WSAIoctl(SIO_GET_INTERFACE_LIST)`, so a multi-homed client can send one directed broadcast per interface. macOS and none: -ENOSYS.
 
 **Added: PE import ws2_32 `WSAIoctl` (slot 45).** bcrypt's `BCryptGenRandom` moves to 47; slots are internal to each binary and every row keys on the import NAME. The `.idata` table is 2371 of its 4096 bytes. It is the first nine-argument import: the suite pins its Win64 frame (80 bytes, stores at rsp+32..64) and its arm64 ninth argument at [sp].
