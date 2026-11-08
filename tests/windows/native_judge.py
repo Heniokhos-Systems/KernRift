@@ -42,7 +42,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 # is exactly the one the class allows.
 FAULT = re.compile(r"^\(rc=(\d+) stdout '([^']*)' want rc=(\d+) '([^']*)'; "
                    r"FAIL: no RtlVirtualUnwind type 1 walk starting in the image; "
-                   r"checker C0-C6 \+ C4b PASS\)$")
+                   r"checker C0-C6 \+ C3b \+ C4b PASS\)$")
 CP932 = re.compile(r"ANSI code page is not 932")
 LINKP = re.compile(r"^\( peu_p: Wine exit 7, want 11; peu_p: chain [^;]*; peu_pn: Wine exit (\d+), want 32;\)$")
 OVERRIDE = re.compile(r"^\( base image: rc=5 stdout 'armed\|', want rc=0 'armed\|';\)$")
@@ -217,7 +217,7 @@ def selftest():
         reclass[f[0]] = f[1]
     good_fail = {
         'fault': "(rc=5 stdout 'armed|f3|' want rc=5 'armed|f3|'; FAIL: no RtlVirtualUnwind type 1 walk "
-                 "starting in the image; checker C0-C6 + C4b PASS)",
+                 "starting in the image; checker C0-C6 + C3b + C4b PASS)",
         'cp932': "(rc=0 (the ANSI code page is not 932: single-byte) GetCPInfo(CP_ACP) said 'ok=1 max=01')",
         'linkprobe': "( peu_p: Wine exit 7, want 11; peu_p: chain main,main,kernel32.dll; peu_pn: Wine exit 2, want 32;)",
         'override': "( base image: rc=5 stdout 'armed|', want rc=0 'armed|';)",
@@ -265,6 +265,9 @@ def selftest():
         ('a non-corpus FAIL in the FAIL: form', 1, lambda r, s: (r + ['FAIL: some_other_row (x)'], s)),
         ('a fault row with the wrong exit code', 1, lambda r, s: (sub(r, fault,
             "  %s: FAIL (rc=0 stdout 'armed|f3|' want rc=5 'armed|f3|'; FAIL: no RtlVirtualUnwind type 1 walk "
+            "starting in the image; checker C0-C6 + C3b + C4b PASS)" % fault), s)),
+        ('a fault row in the pre-option-C checker wording', 1, lambda r, s: (sub(r, fault,
+            "  %s: FAIL (rc=5 stdout 'armed|f3|' want rc=5 'armed|f3|'; FAIL: no RtlVirtualUnwind type 1 walk "
             "starting in the image; checker C0-C6 + C4b PASS)" % fault), s)),
         ('a fault row whose checker failed', 1, lambda r, s: (sub(r, fault,
             "  %s: FAIL (rc=5 stdout 'armed|f3|' want rc=5 'armed|f3|'; FAIL: no RtlVirtualUnwind type 1 walk "

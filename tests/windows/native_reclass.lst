@@ -12,6 +12,8 @@ pe_unwind_nested_fault_legacy_windows_wine     | fault     | cdb_chain.sh pe_unw
 pe_unwind_stack_args_fault_legacy_windows_wine | fault     | cdb_chain.sh pe_unwind_stack_args_fault --legacy f3,f2,main (Task D step 3)
 pe_unwind_argv_main_fault_legacy_windows_wine  | fault     | cdb_chain.sh pe_unwind_argv_main_fault --legacy f2,f1,main (Task D step 3)
 pe_unwind_temp_push_fault_windows_wine         | fault     | cdb_chain.sh pe_unwind_temp_push_fault --legacy f2,f1,main, and --bp "KERNELBASE!GetStdHandle 3" (Task D steps 3, 3b)
+pe_unwind_mixed_fault_windows_wine             | fault     | cdb_chain.sh pe_unwind_mixed_fault c,b,a,main (Task D step 3)
+pe_unwind_mixed_fault_legacy_windows_wine      | fault     | cdb_chain.sh pe_unwind_mixed_fault --legacy c,b,a,main, and mutant 2b failing it (Task D steps 3, 3c)
 c7_acp_is_932_in_ja_prefix_wine                | cp932     | c7_leaf_blobs_unchanged, c7_cp932_leaf_native_x86_64, the Wine CP932 rows; natively only after a user-approved locale switch
 c7_raw_cmdline_table_cp932_wine                | cp932     | c7_leaf_blobs_unchanged, c7_cp932_leaf_native_x86_64, the Wine CP932 rows; natively only after a user-approved locale switch
 c7_exec_argv_roundtrip_cp932_wine              | cp932     | c7_leaf_blobs_unchanged, c7_cp932_leaf_native_x86_64, the Wine CP932 rows; natively only after a user-approved locale switch
