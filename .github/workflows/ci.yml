@@ -93,8 +93,12 @@ jobs:
       - name: Install optional cross-target tooling (riscv32, xtensa, qemu-user)
         run: |
           sudo apt-get update -qq
+          # llvm (llvm-readobj, llvm-objdump, llvm-mc) and lld (lld-link):
+          # the #143 unwind checker (tests/helpers/pe_unwind_check.py) needs
+          # llvm-readobj for C1 and llvm-objdump for C2-C6; without them its
+          # rows skip (CI run 42504860688 had neither).
           for p in qemu-system-misc binutils-riscv64-linux-gnu binutils-xtensa-lx106 \
-                   qemu-user-static qemu-user; do
+                   qemu-user-static qemu-user llvm lld; do
               if sudo apt-get install -y -qq "$p" >/dev/null 2>&1; then
                   echo "  installed: $p"
               else
@@ -546,8 +550,12 @@ jobs:
       - name: Install optional cross-target tooling (riscv32, xtensa, qemu-user)
         run: |
           sudo apt-get update -qq
+          # llvm (llvm-readobj, llvm-objdump, llvm-mc) and lld (lld-link):
+          # the #143 unwind checker (tests/helpers/pe_unwind_check.py) needs
+          # llvm-readobj for C1 and llvm-objdump for C2-C6; without them its
+          # rows skip (CI run 42504860688 had neither).
           for p in qemu-system-misc binutils-riscv64-linux-gnu binutils-xtensa-lx106 \
-                   qemu-user-static qemu-user; do
+                   qemu-user-static qemu-user llvm lld; do
               if sudo apt-get install -y -qq "$p" >/dev/null 2>&1; then
                   echo "  installed: $p"
               else

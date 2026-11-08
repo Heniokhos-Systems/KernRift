@@ -28518,6 +28518,12 @@ t10_skip() { PASS=$((PASS + 1)); echo "  $1: SKIP ($2)"; }
 pe_row_ok() { TOTAL=$((TOTAL + 1)); PASS=$((PASS + 1)); echo "  $1: PASS${2:+ ($2)}"; }
 pe_row_bad() { TOTAL=$((TOTAL + 1)); FAIL=$((FAIL + 1)); echo "  $1: FAIL ($2)"; }
 pe_row_skip() { TOTAL=$((TOTAL + 1)); PASS=$((PASS + 1)); echo "  $1: SKIP ($2)"; }
+# peu_missing <tool>...: the tools absent from PATH, space-separated (empty
+# when all are there). A row that runs tests/helpers/pe_unwind_check.py needs
+# llvm-readobj (C1) and llvm-objdump (C2-C6); without them it SKIPs naming
+# what is missing (CI run 42504860688), and locally tests/helpers/
+# require_rows.sh rejects that SKIP (the rows are in pe_unwind_rows.lst).
+peu_missing() { local t m=""; for t in "$@"; do command -v "$t" > /dev/null 2>&1 || m="$m $t"; done; echo "${m# }"; }
 # Wine can fail to LAUNCH a program (prints "ShellExecuteEx failed", exits 1,
 # program never started): retry that, exactly that, 3 tries (see c7_wine).
 # Wine has also been seen (rarely, only inside full suite runs) to end a run
@@ -29432,8 +29438,9 @@ fi
 # rbp across its call to `hp`, so a callee writing rbp without saving it
 # (A19c review finding 1: the push-mask mutant) prints 1068 instead of 998.
 PEU_RC_FX="$DIR/fixtures/win_rbp_colour.kr"
-if ! command -v objdump > /dev/null 2>&1 || ! command -v python3 > /dev/null 2>&1 || ! command -v llvm-readobj > /dev/null 2>&1; then
-    pe_row_skip ir_x86_win_rbp_colour_when_sp_fixed "needs objdump, llvm-readobj and python3"
+PEU_MISS=$(peu_missing objdump python3 llvm-readobj llvm-objdump)
+if [ -n "$PEU_MISS" ]; then
+    pe_row_skip ir_x86_win_rbp_colour_when_sp_fixed "needs $PEU_MISS"
 elif ! $T10_KRC --arch=x86_64 --target=windows --emit=pe "$PEU_RC_FX" -o "$T10_D/peu_rc.exe" --test-listing="$T10_D/peu_rc.lst" > "$T10_D/peu_rc.log" 2>&1; then
     pe_row_bad ir_x86_win_rbp_colour_when_sp_fixed "build: $(grep -m1 error "$T10_D/peu_rc.log" | cut -c1-120)"
 else
@@ -29529,8 +29536,9 @@ fi
 # behind a shadow area) makes it SP-moving, `ar` stays SP-fixed; the image
 # passes C0-C6 + C3b + C4b; under Wine it prints 3/7/15 and the trap exits 1.
 PEU_DT_FX="$DIR/fixtures/win_debug_traps.kr"
-if ! command -v objdump > /dev/null 2>&1 || ! command -v python3 > /dev/null 2>&1; then
-    pe_row_skip pe_unwind_debug_windows_x86_64_ir "needs objdump and python3"
+PEU_MISS=$(peu_missing objdump python3 llvm-readobj llvm-objdump)
+if [ -n "$PEU_MISS" ]; then
+    pe_row_skip pe_unwind_debug_windows_x86_64_ir "needs $PEU_MISS"
 elif ! $T10_KRC --debug --arch=x86_64 --target=windows --emit=pe "$PEU_DT_FX" -o "$T10_D/peu_dt.exe" --test-listing="$T10_D/peu_dt.lst" > "$T10_D/peu_dt.log" 2>&1; then
     pe_row_bad pe_unwind_debug_windows_x86_64_ir "build: $(grep -m1 error "$T10_D/peu_dt.log" | cut -c1-120)"
 else
@@ -29619,8 +29627,9 @@ else pe_row_bad win_fold_shared_paths_in_identity_corpus "$PEU_WHY"; fi
 # write in their bodies (their call areas are the bottom of the frame) and no
 # `mov rbp, rsp`; say (println) and main keep per-call areas and the frame
 # pointer. The image passes C0-C6 + C3b + C4b and prints 65 under Wine.
-if ! command -v objdump > /dev/null 2>&1 || ! command -v python3 > /dev/null 2>&1; then
-    pe_row_skip win_legacy_folded_outgoing_x86_64 "needs objdump and python3"
+PEU_MISS=$(peu_missing objdump python3 llvm-readobj llvm-objdump)
+if [ -n "$PEU_MISS" ]; then
+    pe_row_skip win_legacy_folded_outgoing_x86_64 "needs $PEU_MISS"
 elif ! $T10_KRC --legacy --arch=x86_64 --target=windows --emit=pe "$DIR/fixtures/win_legacy_out.kr" -o "$T10_D/peu_wl.exe" --test-listing="$T10_D/peu_wl.lst" > "$T10_D/peu_wl.log" 2>&1; then
     pe_row_bad win_legacy_folded_outgoing_x86_64 "build: $(grep -m1 error "$T10_D/peu_wl.log" | cut -c1-120)"
 else
@@ -29644,8 +29653,9 @@ fi
 # (ExitProcess behind 0x20 of shadow), so `bc` and `ar` are folded (no body
 # RSP write, no frame pointer); main keeps RBP. C0-C6 + C3b + C4b; under Wine
 # it prints 3/7/15 and the trap exits 1.
-if ! command -v objdump > /dev/null 2>&1 || ! command -v python3 > /dev/null 2>&1; then
-    pe_row_skip pe_unwind_debug_windows_x86_64_legacy "needs objdump and python3"
+PEU_MISS=$(peu_missing objdump python3 llvm-readobj llvm-objdump)
+if [ -n "$PEU_MISS" ]; then
+    pe_row_skip pe_unwind_debug_windows_x86_64_legacy "needs $PEU_MISS"
 elif ! $T10_KRC --debug --legacy --arch=x86_64 --target=windows --emit=pe "$DIR/fixtures/win_debug_traps.kr" -o "$T10_D/peu_dl.exe" --test-listing="$T10_D/peu_dl.lst" > "$T10_D/peu_dl.log" 2>&1; then
     pe_row_bad pe_unwind_debug_windows_x86_64_legacy "build: $(grep -m1 error "$T10_D/peu_dl.log" | cut -c1-120)"
 else
@@ -29672,8 +29682,9 @@ fi
 # spawn (exec_process_argv: OUT 0x4E0 > 488 stays SP-moving, its `sub sp` in
 # the body) and main keep set_fp. Image and listing pass C0-C6 + C3b + C4b
 # (no arm64 Wine here: static).
-if ! command -v python3 > /dev/null 2>&1; then
-    pe_row_skip win_legacy_folded_outgoing_arm64 "needs python3"
+PEU_MISS=$(peu_missing python3 llvm-readobj llvm-objdump)
+if [ -n "$PEU_MISS" ]; then
+    pe_row_skip win_legacy_folded_outgoing_arm64 "needs $PEU_MISS"
 elif ! $T10_KRC --legacy --arch=arm64 --target=windows --emit=pe "$DIR/fixtures/win_legacy_out.kr" -o "$T10_D/peu_wla.exe" --test-listing="$T10_D/peu_wla.lst" > "$T10_D/peu_wla.log" 2>&1; then
     pe_row_bad win_legacy_folded_outgoing_arm64 "build: $(grep -m1 error "$T10_D/peu_wla.log" | cut -c1-120)"
 else
@@ -29689,8 +29700,9 @@ fi
 # --debug on Windows arm64 legacy (#143 A19d(iii)): tests/fixtures/
 # win_debug_traps.kr's ar and bc (overflow and bounds traps) are folded, main
 # keeps set_fp; C0-C6 + C3b + C4b (static: no arm64 Wine here).
-if ! command -v python3 > /dev/null 2>&1; then
-    pe_row_skip pe_unwind_debug_windows_arm64_legacy "needs python3"
+PEU_MISS=$(peu_missing python3 llvm-readobj llvm-objdump)
+if [ -n "$PEU_MISS" ]; then
+    pe_row_skip pe_unwind_debug_windows_arm64_legacy "needs $PEU_MISS"
 elif ! $T10_KRC --debug --legacy --arch=arm64 --target=windows --emit=pe "$DIR/fixtures/win_debug_traps.kr" -o "$T10_D/peu_dla.exe" --test-listing="$T10_D/peu_dla.lst" > "$T10_D/peu_dla.log" 2>&1; then
     pe_row_bad pe_unwind_debug_windows_arm64_legacy "build: $(grep -m1 error "$T10_D/peu_dla.log" | cut -c1-120)"
 else
@@ -29723,8 +29735,9 @@ fi
 # (save_fplr, no add_fp/set_fp, one epilog scope from StartIndex 0 in the
 # SP-fixed ones; add_fp in the others; a64_win_shape_codes.py, llvm-readobj)
 # and C0-C6 + C3b + C4b.
-if ! command -v python3 > /dev/null 2>&1 || ! command -v llvm-readobj > /dev/null 2>&1; then
-    pe_row_skip a64_win_sp_fixed_shape "needs python3 and llvm-readobj"
+PEU_MISS=$(peu_missing python3 llvm-readobj llvm-objdump)
+if [ -n "$PEU_MISS" ]; then
+    pe_row_skip a64_win_sp_fixed_shape "needs $PEU_MISS"
 elif ! $T10_KRC --arch=arm64 --target=windows --emit=pe "$DIR/fixtures/win_a64_shapes.kr" -o "$T10_D/peu_ash.exe" --test-listing="$T10_D/peu_ash.lst" > "$T10_D/peu_ash.log" 2>&1; then
     pe_row_bad a64_win_sp_fixed_shape "build: $(grep -m1 error "$T10_D/peu_ash.log" | cut -c1-120)"
 else
@@ -29741,8 +29754,9 @@ fi
 # --debug on Windows arm64 IR (#143 A19e; spec 2.5.5): op 131 emits nothing
 # on Windows arm64 (#159), so tests/fixtures/win_debug_traps.kr's ar and bc
 # are SP-fixed (S1, no add_fp), main keeps add_fp; C0-C6 + C3b + C4b (static).
-if ! command -v python3 > /dev/null 2>&1; then
-    pe_row_skip pe_unwind_debug_windows_arm64_ir "needs python3"
+PEU_MISS=$(peu_missing python3 llvm-readobj llvm-objdump)
+if [ -n "$PEU_MISS" ]; then
+    pe_row_skip pe_unwind_debug_windows_arm64_ir "needs $PEU_MISS"
 elif ! $T10_KRC --debug --arch=arm64 --target=windows --emit=pe "$DIR/fixtures/win_debug_traps.kr" -o "$T10_D/peu_dai.exe" --test-listing="$T10_D/peu_dai.lst" > "$T10_D/peu_dai.log" 2>&1; then
     pe_row_bad pe_unwind_debug_windows_arm64_ir "build: $(grep -m1 error "$T10_D/peu_dai.log" | cut -c1-120)"
 else
@@ -29926,6 +29940,8 @@ peu_wine_fault() {
         if [ -n "$KR_WINE_BAD" ]; then pe_row_bad "$row" "$KR_WINE_BAD"; else pe_row_skip "$row" "no wine; set KR_WINE=<path to wine>"; fi
         return
     fi
+    local miss; miss=$(peu_missing python3 llvm-readobj llvm-objdump)
+    if [ -n "$miss" ]; then pe_row_skip "$row" "needs $miss"; return; fi
     if ! $T10_KRC --arch=x86_64 --target=windows --emit=pe --test-listing="$T10_D/peu_w.lst" "$@" "$DIR/fixtures/$f.kr" -o "$T10_D/peu_w.exe" > "$T10_D/peu_w.log" 2>&1; then
         pe_row_bad "$row" "build: $(grep -m1 error "$T10_D/peu_w.log" | cut -c1-100)"; return
     fi
@@ -29984,7 +30000,8 @@ done
 # C4b and the listing classes (arm64: set_fp/add_fp in b and main only).
 for peu_m in "pe_unwind_mixed_fault_arm64_ir|" "pe_unwind_mixed_fault_arm64_legacy|--legacy"; do
     peu_mr="${peu_m%%|*}"; peu_mf="${peu_m#*|}"
-    if ! command -v python3 > /dev/null 2>&1; then pe_row_skip "$peu_mr" "needs python3"; continue; fi
+    PEU_MISS=$(peu_missing python3 llvm-readobj llvm-objdump)
+    if [ -n "$PEU_MISS" ]; then pe_row_skip "$peu_mr" "needs $PEU_MISS"; continue; fi
     if ! $T10_KRC --arch=arm64 --target=windows --emit=pe --test-listing="$T10_D/peu_mxa.lst" $peu_mf "$DIR/fixtures/pe_unwind_mixed_fault_arm64.kr" -o "$T10_D/peu_mxa.exe" > "$T10_D/peu_mxa.log" 2>&1; then
         pe_row_bad "$peu_mr" "build: $(grep -m1 error "$T10_D/peu_mxa.log" | cut -c1-100)"; continue
     fi
@@ -30026,7 +30043,8 @@ fi
 # fixture of tests/fixtures/win_sp_sites/ (manifest.txt) on its backend, with
 # --test-sp-site-log; no report is `unnamed`; each fixture's function has its
 # class; every image passes C0-C6 + C3b + C4b.
-if ! command -v python3 > /dev/null 2>&1; then pe_row_skip pe_unwind_sp_sites_reached "needs python3"
+PEU_MISS=$(peu_missing python3 llvm-readobj llvm-objdump)
+if [ -n "$PEU_MISS" ]; then pe_row_skip pe_unwind_sp_sites_reached "needs $PEU_MISS"
 else
     PEU_O=$(python3 -B "$DIR/helpers/sp_sites_reached.py" "$T10_KRC" "$DIR" "$T10_D/peu_ssr" 2>&1); PEU_RC=$?
     if [ "$PEU_RC" = 0 ]; then pe_row_ok pe_unwind_sp_sites_reached "$(tail -1 <<< "$PEU_O")"
@@ -30606,7 +30624,8 @@ rm -f "$T10_D"/peu_p-*.bin "$T10_D"/peu_q-*.bin "$T10_D"/peu_c7* "$T10_D/peu_vec
 
 # A permitted (RSP-neutral) @naked function gets the zero-code kind-1 record
 # (spec 4.3) and passes C5; its listing marks it `; uw-naked`.
-if ! command -v python3 > /dev/null 2>&1; then pe_row_skip pe_unwind_records_naked "no python3"
+PEU_MISS=$(peu_missing python3 llvm-objdump)
+if [ -n "$PEU_MISS" ]; then pe_row_skip pe_unwind_records_naked "needs $PEU_MISS"
 elif ! $T10_KRC --arch=x86_64 --target=windows --emit=pe --test-listing="$T10_D/peu_n.lst" "$DIR/fixtures/pe_unwind_naked_fault.kr" -o "$T10_D/peu_n.exe" > "$T10_D/peu_n.log" 2>&1; then
     pe_row_bad pe_unwind_records_naked "build: $(grep -m1 error "$T10_D/peu_n.log" | cut -c1-100)"
 else
