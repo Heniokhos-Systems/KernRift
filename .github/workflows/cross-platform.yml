@@ -169,7 +169,7 @@ jobs:
   test-macos-x64:
     name: macOS x86_64
     needs: build
-    runs-on: macos-14
+    runs-on: macos-15
     steps:
       - name: Download binaries
         uses: actions/download-artifact@v7
@@ -325,7 +325,7 @@ jobs:
   test-macos-arm:
     name: macOS ARM64
     needs: build
-    runs-on: macos-14
+    runs-on: macos-15
     steps:
       - name: Download binaries
         uses: actions/download-artifact@v7
