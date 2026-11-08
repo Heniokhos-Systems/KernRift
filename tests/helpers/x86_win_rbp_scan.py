@@ -31,6 +31,7 @@ function's bytes run to the next label; the last function's to the end of its
 epilogue (strings and statics follow it in the listing). Prints one line per
 offending function and a summary; exit 0 when every function conforms.
 """
+import os
 import re
 import subprocess
 import sys
@@ -42,11 +43,18 @@ RBP = {'rbp', 'ebp', 'bp', 'bpl'}
 RO = {'cmp', 'test', 'push', 'bt', 'call', 'jmp'}
 
 
+# The disassembler: an x86-64-capable GNU objdump, named by PEU_X86_OBJDUMP
+# (tests/run_tests.sh passes its X86_OBJDUMP: the host objdump when it
+# supports i386:x86-64, else x86_64-linux-gnu-objdump). On an arm64 host the
+# host objdump cannot decode x86 (CI, Linux ARM64 native job). Default: objdump.
+OBJDUMP = os.environ.get('PEU_X86_OBJDUMP') or 'objdump'
+
+
 def disasm(code, base):
     with tempfile.NamedTemporaryFile(suffix='.bin') as f:
         f.write(code)
         f.flush()
-        out = subprocess.run(['objdump', '-D', '-b', 'binary', '-m', 'i386:x86-64', '-M', 'intel',
+        out = subprocess.run([OBJDUMP, '-D', '-b', 'binary', '-m', 'i386:x86-64', '-M', 'intel',
                               '--adjust-vma=0x%x' % base, f.name],
                              capture_output=True, text=True, check=True).stdout
     insns = []
