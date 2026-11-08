@@ -14,14 +14,21 @@
 #    the send must be refused -EACCES (-13), with it it must send 48 bytes.
 #  * sys_net_ifaces_windows_wine_matches_ip_addr: the row compares the
 #    interface list with Linux `ip -4 addr`; natively it is compared with the
-#    laptop's own Get-NetIPAddress: the IPv4 address/prefix of every address
-#    whose interface (Get-NetIPInterface) is Connected -- loopback included,
-#    no special case -- both as the full list and as the UP set.
-#    sys_net_ifaces enumerates with Winsock's SIO_GET_INTERFACE_LIST, which
-#    leaves out Disconnected interfaces (their Tentative addresses, measured:
-#    the 169.254/16 autoconfiguration addresses of disconnected adapters);
-#    each such address is printed with a check that it is absent from the
-#    program's list.
+#    laptop's own Get-NetIPAddress. sys_net_ifaces enumerates with Winsock's
+#    SIO_GET_INTERFACE_LIST, whose rule was MEASURED on the laptop
+#    (2026-11-08, ~/.cache/pe_unwind/gates/native/2026-11-08/winsock_rule/):
+#    it lists an address by its AddressState, not by its adapter --
+#    Preferred (Connected adapters) and Deprecated (a Disconnected Twingate
+#    adapter's 100.127.255.132/30) are listed; Tentative (the 169.254/16
+#    autoconfiguration addresses of Disconnected adapters) is not; and the
+#    UP flag follows the interface: set exactly for Connected ones. So:
+#      full list = every IPv4 address/prefix in state Preferred or
+#                  Deprecated (loopback included, no special case);
+#      UP set    = those of them whose interface (Get-NetIPInterface) is
+#                  Connected.
+#    Duplicate and Invalid did not occur and are excluded by assumption,
+#    like Tentative (an address that is not usable). Each excluded address is
+#    printed with a check that it is absent from the program's list.
 # Prints "<row>: PASS|FAIL (detail)"; exits 0 when both pass, 1 otherwise,
 # 2 on a transport error.
 set -u -o pipefail
@@ -55,17 +62,18 @@ fi
 m2p() { local m="$1" n=0 o; for o in ${m//./ }; do while [ "$o" -gt 0 ]; do n=$((n + (o & 1))); o=$((o >> 1)); done; done; echo "$n"; }
 X=$(grep '^IF=' <<< "$OUT" | cut -c4- | sed 1d | while read -r a m b f; do echo "$a/$(m2p "$m")"; done | LC_ALL=C sort | tr '\n' ' ')
 A=$(grep '^IF=' <<< "$OUT" | cut -c4- | sed 1d | awk '($4 % 2) == 1 {print $1}' | LC_ALL=C sort | tr '\n' ' ')
-Y=$(grep '^NA=' <<< "$OUT" | cut -c4- | awk '$2 == "Connected" {print $1}' | LC_ALL=C sort | tr '\n' ' ')
-B=$(grep '^NA=' <<< "$OUT" | cut -c4- | awk '$2 == "Connected" {print $1}' | cut -d/ -f1 | LC_ALL=C sort | tr '\n' ' ')
-# every address of a Disconnected interface, and whether it is absent from
-# the program's list (it must be)
-NOTC=""; for e in $(grep '^NA=' <<< "$OUT" | cut -c4- | awk '$2 != "Connected" {print $1 "|" $2 "|" $3}'); do
+# NA=<addr/prefix> <ConnectionState> <AddressState>
+Y=$(grep '^NA=' <<< "$OUT" | cut -c4- | awk '$3 == "Preferred" || $3 == "Deprecated" {print $1}' | LC_ALL=C sort | tr '\n' ' ')
+B=$(grep '^NA=' <<< "$OUT" | cut -c4- | awk '($3 == "Preferred" || $3 == "Deprecated") && $2 == "Connected" {print $1}' | cut -d/ -f1 | LC_ALL=C sort | tr '\n' ' ')
+# every address in another state (Tentative, Duplicate, Invalid), and
+# whether it is absent from the program's list (it must be)
+NOTC=""; for e in $(grep '^NA=' <<< "$OUT" | cut -c4- | awk '$3 != "Preferred" && $3 != "Deprecated" {print $1 "|" $2 "|" $3}'); do
     a=${e%%|*}; r=${e#*|}
     if grep -qw -- "${a%/*}" <<< "$X $A"; then NOTC="$NOTC $a (${r/|/,}) PRESENT in the program's list;"; bad=1
     else NOTC="$NOTC $a (${r/|/,}) absent from Winsock's list;"; fi
 done
 if grep -qx 'IF_RC=0' <<< "$OUT" && [ -n "$Y" ] && [ "$X" = "$Y" ] && [ "$A" = "$B" ]; then
-    echo "sys_net_ifaces_windows_wine_matches_ip_addr: PASS (natively vs Get-NetIPAddress: $(wc -w <<< "$Y") addr/prefix, $(wc -w <<< "$B") UP;${NOTC:- no Disconnected interface})"
+    echo "sys_net_ifaces_windows_wine_matches_ip_addr: PASS (natively vs Get-NetIPAddress by AddressState: $(wc -w <<< "$Y") Preferred/Deprecated addr/prefix, $(wc -w <<< "$B") UP (Connected);${NOTC:- no Tentative/Duplicate/Invalid address})"
 else
     echo "sys_net_ifaces_windows_wine_matches_ip_addr: FAIL (natively: got '$X' want '$Y'; UP got '$A' want '$B')"; bad=1
 fi
