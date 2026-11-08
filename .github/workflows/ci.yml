@@ -488,7 +488,8 @@ jobs:
     name: Build and Test (Linux ARM64, native)
     needs: build-test
     runs-on: ubuntu-24.04-arm
-    timeout-minutes: 15
+    # the step below (35) + ~1.5 min of setup before it + the upload after it
+    timeout-minutes: 45
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -596,7 +597,14 @@ jobs:
 
       - name: Self-compile + tests (everything to debug-kit)
         continue-on-error: true
-        timeout-minutes: 12
+        # Measured from the runs' per-line log timestamps: main 9.8 min (run
+        # 40410847542); with #143 about 13.7 min (run 42521616681 was killed at
+        # the old 12 by this step's limit while running
+        # sys_stage1b_windows_calls_route_by_name, 161 s on main, with 27 rows
+        # left). The new rows add ~180 s on arm64 (pe_unwind_selfhost_* ~46 s
+        # each); rows shared with main got ~10 % slower (they compile Windows
+        # images). 35 = about 2.5x the measured time.
+        timeout-minutes: 35
         run: |
           set +e
           mkdir -p debug-kit
