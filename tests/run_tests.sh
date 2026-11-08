@@ -29425,12 +29425,13 @@ fi
 # `mov rbp, rsp`, and rbp is written by the body only if the prologue pushed
 # it (rbp allocated as a colour). tests/helpers/x86_win_rbp_scan.py: labels +
 # byte column, disassembled by objdump; the byte column must be gap-free.
-if ! command -v objdump > /dev/null 2>&1 || ! command -v python3 > /dev/null 2>&1; then
-    pe_row_skip ir_x86_win_no_rbp_colour "needs objdump and python3"
+PEU_MISS=$(peu_missing python3); [ -n "$X86_OBJDUMP" ] || PEU_MISS="${PEU_MISS:+$PEU_MISS and }an x86-64 objdump (objdump with i386:x86-64, or x86_64-linux-gnu-objdump)"
+if [ -n "$PEU_MISS" ]; then
+    pe_row_skip ir_x86_win_no_rbp_colour "needs $PEU_MISS"
 elif ! $T10_KRC --arch=x86_64 --target=windows --emit=asm "$DIR/../build/krc.kr" -o "$T10_D/peu_self.asm" > "$T10_D/peu_self.log" 2>&1; then
     pe_row_bad ir_x86_win_no_rbp_colour "listing build: $(grep -m1 error "$T10_D/peu_self.log" | cut -c1-120)"
 else
-    PEU_OUT=$(python3 "$DIR/helpers/x86_win_rbp_scan.py" "$T10_D/peu_self.asm" 2>&1); PEU_RC=$?
+    PEU_OUT=$(PEU_X86_OBJDUMP="$X86_OBJDUMP" python3 "$DIR/helpers/x86_win_rbp_scan.py" "$T10_D/peu_self.asm" 2>&1); PEU_RC=$?
     if [ "$PEU_RC" = 0 ]; then pe_row_ok ir_x86_win_no_rbp_colour "$(tail -1 <<< "$PEU_OUT")"
     else pe_row_bad ir_x86_win_no_rbp_colour "$(head -2 <<< "$PEU_OUT" | tr '\n' '|')$(tail -1 <<< "$PEU_OUT")"; fi
 fi
@@ -29444,14 +29445,14 @@ fi
 # rbp across its call to `hp`, so a callee writing rbp without saving it
 # (A19c review finding 1: the push-mask mutant) prints 1068 instead of 998.
 PEU_RC_FX="$DIR/fixtures/win_rbp_colour.kr"
-PEU_MISS=$(peu_missing objdump python3 llvm-readobj llvm-objdump)
+PEU_MISS=$(peu_missing python3 llvm-readobj llvm-objdump); [ -n "$X86_OBJDUMP" ] || PEU_MISS="${PEU_MISS:+$PEU_MISS and }an x86-64 objdump (objdump with i386:x86-64, or x86_64-linux-gnu-objdump)"
 if [ -n "$PEU_MISS" ]; then
     pe_row_skip ir_x86_win_rbp_colour_when_sp_fixed "needs $PEU_MISS"
 elif ! $T10_KRC --arch=x86_64 --target=windows --emit=pe "$PEU_RC_FX" -o "$T10_D/peu_rc.exe" --test-listing="$T10_D/peu_rc.lst" > "$T10_D/peu_rc.log" 2>&1; then
     pe_row_bad ir_x86_win_rbp_colour_when_sp_fixed "build: $(grep -m1 error "$T10_D/peu_rc.log" | cut -c1-120)"
 else
     PEU_WHY=""
-    PEU_O=$(python3 "$DIR/helpers/x86_win_rbp_scan.py" "$T10_D/peu_rc.lst" --want-sp-fixed=hp,fib,outer --want-sp-moving=show,main --want-rbp-colour=hp,outer 2>&1) \
+    PEU_O=$(PEU_X86_OBJDUMP="$X86_OBJDUMP" python3 "$DIR/helpers/x86_win_rbp_scan.py" "$T10_D/peu_rc.lst" --want-sp-fixed=hp,fib,outer --want-sp-moving=show,main --want-rbp-colour=hp,outer 2>&1) \
         || PEU_WHY="shape: $(head -2 <<< "$PEU_O" | tr '\n' '|')"
     llvm-readobj --unwind "$T10_D/peu_rc.exe" > "$T10_D/peu_rc.uw" 2>&1
     PEU_O2=$(python3 - "$T10_D/peu_rc.lst" "$T10_D/peu_rc.uw" <<'PEURCEOF' 2>&1
@@ -29542,14 +29543,14 @@ fi
 # behind a shadow area) makes it SP-moving, `ar` stays SP-fixed; the image
 # passes C0-C6 + C3b + C4b; under Wine it prints 3/7/15 and the trap exits 1.
 PEU_DT_FX="$DIR/fixtures/win_debug_traps.kr"
-PEU_MISS=$(peu_missing objdump python3 llvm-readobj llvm-objdump)
+PEU_MISS=$(peu_missing python3 llvm-readobj llvm-objdump); [ -n "$X86_OBJDUMP" ] || PEU_MISS="${PEU_MISS:+$PEU_MISS and }an x86-64 objdump (objdump with i386:x86-64, or x86_64-linux-gnu-objdump)"
 if [ -n "$PEU_MISS" ]; then
     pe_row_skip pe_unwind_debug_windows_x86_64_ir "needs $PEU_MISS"
 elif ! $T10_KRC --debug --arch=x86_64 --target=windows --emit=pe "$PEU_DT_FX" -o "$T10_D/peu_dt.exe" --test-listing="$T10_D/peu_dt.lst" > "$T10_D/peu_dt.log" 2>&1; then
     pe_row_bad pe_unwind_debug_windows_x86_64_ir "build: $(grep -m1 error "$T10_D/peu_dt.log" | cut -c1-120)"
 else
     PEU_WHY=""
-    PEU_O=$(python3 "$DIR/helpers/x86_win_rbp_scan.py" "$T10_D/peu_dt.lst" --want-sp-fixed=ar --want-sp-moving=bc,main 2>&1) \
+    PEU_O=$(PEU_X86_OBJDUMP="$X86_OBJDUMP" python3 "$DIR/helpers/x86_win_rbp_scan.py" "$T10_D/peu_dt.lst" --want-sp-fixed=ar --want-sp-moving=bc,main 2>&1) \
         || PEU_WHY="shape: $(head -2 <<< "$PEU_O" | tr '\n' '|')"
     PEU_C=$(env -u PE_UNWIND_CHECK_DISABLE python3 "$DIR/helpers/pe_unwind_check.py" --arch x86_64 "$T10_D/peu_dt.exe" --listing "$T10_D/peu_dt.lst" 2>&1)
     [ "$(grep -c ': PASS' <<< "$PEU_C")" = 9 ] || PEU_WHY="$PEU_WHY checker: $(grep -m1 -e FAIL -e error <<< "$PEU_C" | cut -c1-120);"
@@ -29633,14 +29634,14 @@ else pe_row_bad win_fold_shared_paths_in_identity_corpus "$PEU_WHY"; fi
 # write in their bodies (their call areas are the bottom of the frame) and no
 # `mov rbp, rsp`; say (println) and main keep per-call areas and the frame
 # pointer. The image passes C0-C6 + C3b + C4b and prints 65 under Wine.
-PEU_MISS=$(peu_missing objdump python3 llvm-readobj llvm-objdump)
+PEU_MISS=$(peu_missing python3 llvm-readobj llvm-objdump); [ -n "$X86_OBJDUMP" ] || PEU_MISS="${PEU_MISS:+$PEU_MISS and }an x86-64 objdump (objdump with i386:x86-64, or x86_64-linux-gnu-objdump)"
 if [ -n "$PEU_MISS" ]; then
     pe_row_skip win_legacy_folded_outgoing_x86_64 "needs $PEU_MISS"
 elif ! $T10_KRC --legacy --arch=x86_64 --target=windows --emit=pe "$DIR/fixtures/win_legacy_out.kr" -o "$T10_D/peu_wl.exe" --test-listing="$T10_D/peu_wl.lst" > "$T10_D/peu_wl.log" 2>&1; then
     pe_row_bad win_legacy_folded_outgoing_x86_64 "build: $(grep -m1 error "$T10_D/peu_wl.log" | cut -c1-120)"
 else
     PEU_WHY=""
-    PEU_O=$(python3 "$DIR/helpers/x86_win_rbp_scan.py" "$T10_D/peu_wl.lst" --want-sp-fixed=stamp,six,ten,add6,add10,spawn --want-sp-moving=say,main \
+    PEU_O=$(PEU_X86_OBJDUMP="$X86_OBJDUMP" python3 "$DIR/helpers/x86_win_rbp_scan.py" "$T10_D/peu_wl.lst" --want-sp-fixed=stamp,six,ten,add6,add10,spawn --want-sp-moving=say,main \
         --want-no-body-rsp=stamp,six,ten,add6,add10,spawn --want-body-rsp=say,main 2>&1) || PEU_WHY="shape: $(head -2 <<< "$PEU_O" | tr '\n' '|')"
     PEU_C=$(env -u PE_UNWIND_CHECK_DISABLE python3 "$DIR/helpers/pe_unwind_check.py" --arch x86_64 "$T10_D/peu_wl.exe" --listing "$T10_D/peu_wl.lst" 2>&1)
     [ "$(grep -c ': PASS' <<< "$PEU_C")" = 9 ] || PEU_WHY="$PEU_WHY checker: $(grep -m1 -e FAIL -e error <<< "$PEU_C" | cut -c1-120);"
@@ -29659,14 +29660,14 @@ fi
 # (ExitProcess behind 0x20 of shadow), so `bc` and `ar` are folded (no body
 # RSP write, no frame pointer); main keeps RBP. C0-C6 + C3b + C4b; under Wine
 # it prints 3/7/15 and the trap exits 1.
-PEU_MISS=$(peu_missing objdump python3 llvm-readobj llvm-objdump)
+PEU_MISS=$(peu_missing python3 llvm-readobj llvm-objdump); [ -n "$X86_OBJDUMP" ] || PEU_MISS="${PEU_MISS:+$PEU_MISS and }an x86-64 objdump (objdump with i386:x86-64, or x86_64-linux-gnu-objdump)"
 if [ -n "$PEU_MISS" ]; then
     pe_row_skip pe_unwind_debug_windows_x86_64_legacy "needs $PEU_MISS"
 elif ! $T10_KRC --debug --legacy --arch=x86_64 --target=windows --emit=pe "$DIR/fixtures/win_debug_traps.kr" -o "$T10_D/peu_dl.exe" --test-listing="$T10_D/peu_dl.lst" > "$T10_D/peu_dl.log" 2>&1; then
     pe_row_bad pe_unwind_debug_windows_x86_64_legacy "build: $(grep -m1 error "$T10_D/peu_dl.log" | cut -c1-120)"
 else
     PEU_WHY=""
-    PEU_O=$(python3 "$DIR/helpers/x86_win_rbp_scan.py" "$T10_D/peu_dl.lst" --want-sp-fixed=ar,bc --want-sp-moving=main --want-no-body-rsp=ar,bc 2>&1) \
+    PEU_O=$(PEU_X86_OBJDUMP="$X86_OBJDUMP" python3 "$DIR/helpers/x86_win_rbp_scan.py" "$T10_D/peu_dl.lst" --want-sp-fixed=ar,bc --want-sp-moving=main --want-no-body-rsp=ar,bc 2>&1) \
         || PEU_WHY="shape: $(head -2 <<< "$PEU_O" | tr '\n' '|')"
     PEU_C=$(env -u PE_UNWIND_CHECK_DISABLE python3 "$DIR/helpers/pe_unwind_check.py" --arch x86_64 "$T10_D/peu_dl.exe" --listing "$T10_D/peu_dl.lst" 2>&1)
     [ "$(grep -c ': PASS' <<< "$PEU_C")" = 9 ] || PEU_WHY="$PEU_WHY checker: $(grep -m1 -e FAIL -e error <<< "$PEU_C" | cut -c1-120);"
