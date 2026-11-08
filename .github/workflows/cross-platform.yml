@@ -2,7 +2,7 @@ name: cross-platform
 
 on:
   push:
-    branches: [ "main" ]
+    branches: [ "main", "ci/**" ]
   pull_request:
 
 permissions:
@@ -169,7 +169,7 @@ jobs:
   test-macos-x64:
     name: macOS x86_64
     needs: build
-    runs-on: macos-15
+    runs-on: macos-26-intel
     steps:
       - name: Download binaries
         uses: actions/download-artifact@v7
@@ -325,7 +325,7 @@ jobs:
   test-macos-arm:
     name: macOS ARM64
     needs: build
-    runs-on: macos-15
+    runs-on: macos-26
     steps:
       - name: Download binaries
         uses: actions/download-artifact@v7
