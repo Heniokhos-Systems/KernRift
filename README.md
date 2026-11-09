@@ -45,8 +45,8 @@ wins.
 | Linux ARM64 | 🔵 CI-verified | Self-compiles to a fixed point; suite runs on a native ARM64 runner. |
 | Windows x86_64 | 🔵 CI-verified + hardware | Self-compile chain on a `windows-latest` runner every push. Also verified 2026-08-14 on a physical **Intel Core Ultra 9 275HX / Windows 11 Pro** laptop: the compiler rebuilt its own source twice on the machine and stages 1-3 are byte-identical (`sha256 5b21ae16…`), with the laptop-built compiler then compiling and running a program correctly. |
 | Windows ARM64 | 🔵 CI-verified | Self-compile chain through a fixed point on a `windows-11-arm` runner. |
-| macOS x86_64 | 🟡 Translated | GitHub has no x86_64 macOS runner here: the `macos-14` runner is ARM64, and the x86_64 slice is executed through `arch -x86_64`, i.e. **Rosetta translation**. It runs and it self-compiles, but not on an x86_64 Mac. |
-| macOS ARM64 | 🟡 Partly verified | CI runs cross-compiled test binaries on `macos-14`, but there is **no self-compile step for macOS ARM64 in CI**. Treat "self-hosts on ARM Macs" as untested by CI. |
+| macOS x86_64 | 🔵 CI-verified | `cross-platform.yml` runs the x86_64 test binaries and the x86_64 self-compile on a native Intel `macos-26-intel` runner. `ci.yml`'s fat-binary job runs on `macos-26` (ARM64) and executes the x86_64 slice through `arch -x86_64`, i.e. **Rosetta translation**. |
+| macOS ARM64 | 🟡 Partly verified | CI runs cross-compiled test binaries on `macos-26`, but there is **no self-compile step for macOS ARM64 in CI**. Treat "self-hosts on ARM Macs" as untested by CI. |
 | Android ARM64 | 🟢 Real hardware | **Self-compiles to a bootstrap fixed point on a physical phone.** Verified 2026-08-14 on a Redmi Note 8 Pro (Android 11, arm64-v8a): the compiler was pushed over `adb`, rebuilt its own 3.1 MB source on the device in 4.9 s, and the stage-2 and stage-3 binaries are **byte-identical** (`sha256 8a39f8f6…`) to each other and to the cross-compiled one. The phone-built compiler then compiled and ran a program correctly. This runs under **bionic** — `/system/bin/linker64` is the Android runtime linker and the device has no glibc loader at all. CI cannot reproduce this: its Android jobs run PIE ELFs under the *glibc* loader on Linux. |
 | Android x86_64 | 🟡 Emulated in CI | The Android artifact is executed by invoking `/lib64/ld-linux-x86-64.so.2` directly on the x86_64 Linux CI box. **No bionic, no device.** |
 
@@ -162,7 +162,7 @@ krc lc program.kr
 
 ### Self-compilation (388 950 tokens, 245 512 AST nodes, 3 854 634 bytes of source)
 
-The compiler emits binaries for all 8 targets. CI verifies the **bootstrap fixed point (krc3 == krc4) and the full suite natively on Linux x86_64 and Linux ARM64** (**2859 tests**; on this tree every row passes but the 1 known red row listed in `tests/pe_unwind_known_reds.lst`). Windows and macOS are exercised on real `windows-latest`, `windows-11-arm` and `macos-14` runners. The **Android** jobs are the weak link: they run PIE ELFs under the **glibc** loader on Linux, never bionic and never a device. See the per-target table for what each one actually ran. Numbers below were re-measured on an AMD Ryzen 9 7900X with the compiler built from this commit — see [`benchmarks/BENCHMARKS.md`](benchmarks/BENCHMARKS.md) for the gcc / rustc comparisons — note that file is a **v2.8.33 run from 2026-07-28** and has not been re-run for v2.10.0 either.
+The compiler emits binaries for all 8 targets. CI verifies the **bootstrap fixed point (krc3 == krc4) and the full suite natively on Linux x86_64 and Linux ARM64** (**2859 tests**; on this tree every row passes but the 1 known red row listed in `tests/pe_unwind_known_reds.lst`). Windows and macOS are exercised on real `windows-latest`, `windows-11-arm`, `macos-26` and `macos-26-intel` runners. The **Android** jobs are the weak link: they run PIE ELFs under the **glibc** loader on Linux, never bionic and never a device. See the per-target table for what each one actually ran. Numbers below were re-measured on an AMD Ryzen 9 7900X with the compiler built from this commit — see [`benchmarks/BENCHMARKS.md`](benchmarks/BENCHMARKS.md) for the gcc / rustc comparisons — note that file is a **v2.8.33 run from 2026-07-28** and has not been re-run for v2.10.0 either.
 
 | Target | Legacy codegen | IR codegen (default) | IR vs legacy |
 |--------|---------------:|---------------------:|-------------:|
@@ -470,8 +470,8 @@ a thing works, that column says who watched it work.
 | Linux ARM64 | ✅ | ✅ | ✅ | ✅ | CI, native ARM64 runner; bootstrap fixed point |
 | Windows x86_64 | ✅ | ✅ | ✅ | ✅ | CI, `windows-latest`; self-compile chain |
 | Windows ARM64 | ✅ | ✅ | ✅ | ✅ | CI, `windows-11-arm`; self-compile chain to fixed point |
-| macOS x86_64 | ✅ | ✅ | ✅ | ✅ | CI, `macos-14` **under Rosetta**; self-compile |
-| macOS ARM64 | ✅ | ✅ | ⚠️ | ✅ | CI, `macos-14`: runs cross-compiled binaries, **no self-compile step** |
+| macOS x86_64 | ✅ | ✅ | ✅ | ✅ | CI, `macos-26-intel` (native); self-compile. The fat-binary job's x86_64 slice runs on `macos-26` **under Rosetta** |
+| macOS ARM64 | ✅ | ✅ | ⚠️ | ✅ | CI, `macos-26`: runs cross-compiled binaries, **no self-compile step** |
 | Android ARM64 | ✅ | ✅ | ✅ | ✅ | **Self-compiles to a fixed point on a physical Redmi Note 8 Pro under bionic** (verified 2026-08-14). CI is weaker: it runs the artifact under `qemu-aarch64-static` with the glibc loader standing in for `linker64` |
 | Android x86_64 | ✅ | ⚠️ | ⚠️ | ✅ | CI runs the artifact via `/lib64/ld-linux-x86-64.so.2` on the Linux box — **no bionic, no device** |
 

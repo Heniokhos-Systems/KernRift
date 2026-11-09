@@ -4,6 +4,8 @@ All notable changes to `kernriftc` are documented in this file.
 
 ## Unreleased
 
+**CI: the macOS jobs run on `macos-26` and `macos-26-intel`.** GitHub retired the `macos-14` arm64 image. `ci.yml`'s `test-macos` and `cross-platform.yml`'s `test-macos-arm` move to `macos-26`; `cross-platform.yml`'s `test-macos-x64` moves to the native Intel `macos-26-intel`, so the x86_64 test binaries and self-compile no longer run under Rosetta there (the fat-binary job's x86_64 slice still does, on `macos-26`). README's macOS rows say so.
+
 **Fixed: a comment in one source file that cites a line of another is checked
 too.** `scripts/gen-ir-reference-citations.py` fingerprinted the citations in
 docs/IR_REFERENCE.md and the `<NAME>.md:<line>` ones in the prose, but not the
