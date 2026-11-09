@@ -17,7 +17,7 @@ SRCS = src/lexer.kr src/ast.kr src/parser.kr src/codegen.kr \
        std/sha256.kr src/format_espimage.kr \
        src/runtime.kr src/formatter.kr src/main.kr
 
-.PHONY: all build kr-runner test install dist clean bootstrap check
+.PHONY: all build kr-runner test install dist clean bootstrap check pe-gate
 
 all: build kr-runner
 
@@ -107,6 +107,21 @@ test: build/krc2 build/kr-bin
 	@echo "=== Running test suite ==="
 	@echo '#!/bin/bash' > /tmp/krc-test && echo 'exec ./build/krc2 --arch=x86_64 "$$@"' >> /tmp/krc-test && chmod +x /tmp/krc-test
 	@KRC=/tmp/krc-test bash tests/run_tests.sh
+
+# The local merge gate of #143 (Windows unwind tables): the full suite to a
+# log, then tests/helpers/require_rows.sh on it. CI does not run this, because
+# CI may legitimately SKIP rows whose tools it lacks; here a SKIP of a #143 row
+# or of a Windows/emulator row fails, every manifest row must PASS once, and
+# every known red (tests/pe_unwind_known_reds.lst) must FAIL once. The suite's
+# own exit status counts the known reds as failures, so require_rows.sh alone
+# decides. Named pe-gate so that it does not clash with `make gate`
+# (REQUIRE_FULL_RUN=1 make test), which the suite-skip-hygiene branch adds.
+PE_GATE_LOG ?= build/pe-gate.log
+pe-gate: build/krc2 build/kr-bin
+	@echo "=== #143 gate: test suite -> $(PE_GATE_LOG), then require_rows ==="
+	@echo '#!/bin/bash' > /tmp/krc-test && echo 'exec ./build/krc2 --arch=x86_64 "$$@"' >> /tmp/krc-test && chmod +x /tmp/krc-test
+	@KRC=/tmp/krc-test bash tests/run_tests.sh > $(PE_GATE_LOG) 2>&1; tail -1 $(PE_GATE_LOG)
+	@bash tests/helpers/require_rows.sh $(PE_GATE_LOG) tests/pe_unwind_rows.lst tests/pe_unwind_known_reds.lst
 
 # Full CI gate: bootstrap fixed point + suite + both IR-vs-legacy differential
 # harnesses (x86_64 + arm64 via qemu). Any failure aborts (each step exits

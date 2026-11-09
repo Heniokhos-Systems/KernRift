@@ -29575,8 +29575,16 @@ fi
 # x86_64 stamp/six/ten SP-fixed OUT 48/48/80, spawn (exec_process_argv)
 # SP-fixed OUT 1232, say (println) and opaque (asm) SP-moving; arm64 stamp/ten
 # OUT 16, six/say OUT 0, opaque SP-moving, spawn SP-moving (OUT 1248 > 488).
+# The corpus must be complete (final pre-merge review finding 4: a tree
+# without examples/ and tests/smoke/ once passed on 340 of 524 builds, its
+# unmatched globs counted as files): the globs expand with nullglob, the
+# build count must be 4 x the .kr files git tracks in those four directories,
+# and only builds that succeeded count their functions as audited.
 PEU_AU="$T10_D/peu_audit"; rm -rf "$PEU_AU"; mkdir -p "$PEU_AU"
-PEU_WHY=""; PEU_N=0; PEU_FIX=0
+PEU_WHY=""; PEU_N=0; PEU_FIX=0; PEU_OKB=0
+PEU_TRK=$(git -C "$DIR/.." ls-files -- 'tests/fixtures/*.kr' 'tests/fixtures/win_abi_frames/*.kr' 'examples/*.kr' 'tests/smoke/*.kr' 2> /dev/null \
+    | grep -cE '^(tests/fixtures|tests/fixtures/win_abi_frames|examples|tests/smoke)/[^/]+\.kr$')
+[ "$PEU_TRK" -gt 0 ] 2> /dev/null || PEU_WHY="$PEU_WHY cannot list the tracked corpus (git ls-files in $DIR/..);"
 for peu_a in x86_64 arm64; do
     $T10_KRC --legacy --arch=$peu_a --target=windows --emit=pe --test-out-audit "$DIR/fixtures/win_legacy_out.kr" -o "$PEU_AU/k.exe" > /dev/null 2> "$PEU_AU/k.err" \
         || PEU_WHY="$PEU_WHY win_legacy_out.kr $peu_a: build failed;"
@@ -29587,7 +29595,10 @@ for peu_a in x86_64 arm64; do
         grep -q "^out-audit-fn: '$peu_w" "$PEU_AU/k.err" || PEU_WHY="$PEU_WHY $peu_a: no verdict '$peu_w;"
     done
 done
-for peu_f in "$DIR"/fixtures/*.kr "$DIR"/fixtures/win_abi_frames/*.kr "$DIR"/../examples/*.kr "$DIR"/smoke/*.kr; do
+PEU_NG=$(shopt -p nullglob); shopt -s nullglob
+PEU_FILES=("$DIR"/fixtures/*.kr "$DIR"/fixtures/win_abi_frames/*.kr "$DIR"/../examples/*.kr "$DIR"/smoke/*.kr)
+eval "$PEU_NG"
+for peu_f in "${PEU_FILES[@]}"; do
     for peu_a in x86_64 arm64; do
         for peu_d in "" --debug; do
             PEU_N=$((PEU_N + 1))
@@ -29596,7 +29607,10 @@ for peu_f in "$DIR"/fixtures/*.kr "$DIR"/fixtures/win_abi_frames/*.kr "$DIR"/../
             if grep -q '^out-audit: ' "$PEU_AU/b.err"; then
                 PEU_WHY="$PEU_WHY $(basename "$peu_f") $peu_a $peu_d: $(grep -m1 '^out-audit: ' "$PEU_AU/b.err" | cut -c1-120);"
             fi
-            PEU_FIX=$((PEU_FIX + $(grep -c "^out-audit-fn: .* SP-fixed" "$PEU_AU/b.err")))
+            if [ "$PEU_RB" = 0 ]; then
+                PEU_OKB=$((PEU_OKB + 1))
+                PEU_FIX=$((PEU_FIX + $(grep -c "^out-audit-fn: .* SP-fixed" "$PEU_AU/b.err")))
+            fi
             if [ "$PEU_RA" != "$PEU_RB" ] || { [ "$PEU_RA" = 0 ] && ! cmp -s "$PEU_AU/a.exe" "$PEU_AU/b.exe"; }; then
                 PEU_WHY="$PEU_WHY $(basename "$peu_f") $peu_a $peu_d: output differs with --test-out-audit (rc $PEU_RA/$PEU_RB);"
             fi
@@ -29604,7 +29618,8 @@ for peu_f in "$DIR"/fixtures/*.kr "$DIR"/fixtures/win_abi_frames/*.kr "$DIR"/../
         done
     done
 done
-if [ -z "$PEU_WHY" ] && [ "$PEU_FIX" -ge 100 ]; then pe_row_ok win_legacy_out_audit "$PEU_N builds, $PEU_FIX SP-fixed functions audited, 0 violations, output unchanged; known verdicts on both arches"
+[ "$PEU_N" = $((4 * PEU_TRK)) ] || PEU_WHY="$PEU_WHY $PEU_N builds, want 4 x $PEU_TRK tracked .kr files = $((4 * PEU_TRK)) (corpus incomplete?);"
+if [ -z "$PEU_WHY" ] && [ "$PEU_FIX" -ge 100 ]; then pe_row_ok win_legacy_out_audit "$PEU_N builds (4 x $PEU_TRK tracked files; $PEU_OKB built), $PEU_FIX SP-fixed functions audited, 0 violations, output unchanged; known verdicts on both arches"
 else pe_row_bad win_legacy_out_audit "${PEU_WHY:-only $PEU_FIX SP-fixed functions audited (want >= 100)}"; fi
 # The identity corpus reaches the legacy SP paths shared with Linux and macOS
 # (#143 A19d(i); spec 2.5.7, finding 24): time_ns (time_basic.kr), exec
