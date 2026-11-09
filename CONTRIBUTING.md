@@ -40,6 +40,28 @@ and runs, aborting on the first failure:
 
 `make test` runs only step 2; `make bootstrap` only step 1.
 
+### Local merge gates: `make pe-gate` (and `make gate`)
+
+CI may skip rows whose tools its runner lacks (Wine, qemu, LLVM, clang), so a
+green CI run does not prove every row ran. Two local gates do:
+
+- **`make pe-gate`** — the gate of the Windows unwind-table work (#143): it
+  runs the suite to `build/pe-gate.log` (`PE_GATE_LOG=...` to change it) and
+  then `tests/helpers/require_rows.sh` on that log. It passes only when every
+  row of `tests/pe_unwind_rows.lst` PASSes exactly once, no Windows or
+  emulator row (`wine`, `qemu`, `windows`, `win_`, `_win`, `c7_` in the name)
+  SKIPs, every known red in `tests/pe_unwind_known_reds.lst` FAILs exactly
+  once (and nothing else fails), and no checker rule was switched off. The
+  suite itself reports the known reds as failures, so read the
+  `require_rows:` line, not the suite's exit status. It needs Wine,
+  qemu-user, python3, clang, lld-link, llvm-dlltool, llvm-readobj,
+  llvm-objdump and llvm-mc installed.
+- **`make gate`** (`REQUIRE_FULL_RUN=1 make test`) — added by the
+  suite-skip-hygiene branch when it merges: it makes any skip of a required
+  row a failure across the whole suite. The two are complementary: `make
+  gate` refuses skips; `make pe-gate` also pins the #143 rows by name and
+  checks the known reds both ways.
+
 ## Source structure
 
 All compiler source is in `src/` (one compilation unit; see the Makefile
