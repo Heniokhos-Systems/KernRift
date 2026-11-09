@@ -993,10 +993,14 @@ jobs:
           exit 0
 
       # #143 A18: the arm64 dynamic proof (see "Build pe-unwind arm64 Windows
-      # fixtures"). Exit codes and stdout always; the call chains only when the
-      # image has cdb (Debugging Tools / WinDbg) -- without it the step says
-      # "cdb: not on image" and the chains are NOT proven (#150 stays open).
-      # No continue-on-error: any mismatch fails the job.
+      # fixtures"). Before anything runs: exactly 22 cases (14 fault, 8 exec)
+      # and every image and listing present. Each fault image 3 runs (exit
+      # -1073741819, its stdout) and, under cdb, its chain; each
+      # --test-no-unwind twin's chain must be BROKEN (reader exit 1, a chain
+      # mismatch after the access violation -- exit 2, any other reader
+      # failure, fails the step). No cdb fails the step, unless the explicit
+      # opt-out PEU_A18_ALLOW_NO_CDB=1 is set (then the log says the chains
+      # are NOT proven and #150 stays open). No continue-on-error.
       - name: pe-unwind arm64 fault fixtures (#143 A18)
         shell: pwsh
         run: |
@@ -1008,65 +1012,93 @@ jobs:
                  Where-Object { $_ -and (Test-Path -LiteralPath $_) } | Select-Object -First 1
           $py = (Get-Command python -ErrorAction SilentlyContinue).Source
           if ($cdb -and -not $py) { Write-Host 'cdb found but no python to read its transcript'; $cdb = $null }
-          if ($cdb) { Write-Host "cdb: $cdb" } else { Write-Host 'cdb: not on image -- exit codes only, the call chains are NOT proven (#150 stays open)' }
+          if ($cdb) { Write-Host "cdb: $cdb" }
+          elseif ($env:PEU_A18_ALLOW_NO_CDB -eq '1') { Write-Host 'cdb: not on image, and PEU_A18_ALLOW_NO_CDB=1 is set -- OPT-OUT: exit codes only, the call chains are NOT proven (#150 stays open)' }
+          else { Write-Host 'FAIL: no cdb (or no python to read its transcripts) on the image: the call chains cannot be proven. Set PEU_A18_ALLOW_NO_CDB=1 only to opt out on purpose.'; exit 1 }
+          # the cases must be the 22 the build step makes, and every file there
+          $cases = @(Get-Content (Join-Path $D 'cases.tsv') | Where-Object { $_ })
+          $nf = @($cases | Where-Object { ($_ -split "`t")[1] -eq 'fault' }).Count
+          $ne = @($cases | Where-Object { ($_ -split "`t")[1] -eq 'exec' }).Count
+          if ($cases.Count -ne 22 -or $nf -ne 14 -or $ne -ne 8) { Write-Host "FAIL: cases.tsv has $($cases.Count) cases ($nf fault, $ne exec), want 22 (14 fault, 8 exec)"; exit 1 }
+          $need = @('child.exe')
+          foreach ($c in $cases) { $f = $c -split "`t"; $need += "$($f[0]).exe", "$($f[0]).lst"; if ($f[1] -eq 'fault') { $need += "$($f[0])_nouw.exe", "$($f[0])_nouw.lst" } }
+          $miss = @($need | Where-Object { -not (Test-Path -LiteralPath (Join-Path $D $_)) })
+          if ($miss.Count) { Write-Host "FAIL: missing before the run: $($miss -join ', ')"; exit 1 }
+          Write-Host "cases: 22 (14 fault, 8 exec), $($need.Count) files present"
           # the transcript reader of tests/windows/cdb_chain.sh (laptop-side
           # there): names the image's frames from the listing and requires
           # <chain>, then KERNEL32!BaseThreadInitThunk, ntdll!RtlUserThreadStart
           $parser = Join-Path $env:RUNNER_TEMP 'cdb_chain_parse.py'
           Set-Content -LiteralPath $parser -Encoding utf8 -Value @'
           import re, sys
-          lst, mod, want, trc = sys.argv[1], sys.argv[2].lower(), sys.argv[3].split(','), sys.argv[4]
-          labels, code_end = [], None
-          for l in open(lst, encoding='latin-1'):
-              m = re.match(r'^([A-Za-z_.$][\w.$@]*):\s*$', l)
-              m2 = re.match(r'^\s+([0-9a-f]{8}): ', l)
-              if m and not m2:
-                  labels.append([None, m.group(1)])
-              if m2 and labels and labels[-1][0] is None:
-                  labels[-1][0] = int(m2.group(1), 16)
-              if l.startswith('; uw-code-end '):
-                  code_end = int(l.split()[2], 16)
-          labels = [(o, n) for o, n in labels if o is not None]
-          def name_of(rva):
-              off = rva - 0x1000
-              if off < 0 or (code_end is not None and off >= code_end):
-                  return '?+0x%x' % rva
-              own = [n for o, n in labels if o <= off]
-              return own[-1] if own else '?+0x%x' % rva
-          out = open(trc, encoding='latin-1').read()
-          frames, ink = [], False
-          for l in out.split('\n'):
-              if re.match(r'^\s*#?\s*Child-SP\s+RetAddr\s+Call Site', l):
-                  ink = True; frames = []; continue
-              if ink:
-                  m = re.match(r'^\s*(?:[0-9a-f]+\s+)?[0-9a-f`]+\s+[0-9a-f`]+\s+(\S+)', l)
-                  if not m:
-                      if frames:
-                          ink = False
-                      continue
-                  mm = re.match(r'^([^!+]+)(?:!([^+]+))?(?:\+0x([0-9a-f]+))?$', m.group(1), re.I)
-                  if not mm:
-                      frames.append(('?', m.group(1))); continue
-                  mo, fn, off = mm.group(1), mm.group(2), mm.group(3)
-                  if mo.lower() == mod and fn is None and off:
-                      frames.append(('img', name_of(int(off, 16))))
-                  else:
-                      frames.append(('ext', '%s!%s' % (mo, fn) if fn else m.group(1)))
-          print('chain: ' + ' > '.join(n for _, n in frames))
-          if 'Access violation - code c0000005' not in out:
-              print('FAIL: the last event is not the access violation'); sys.exit(1)
-          i = 0
-          while i < len(frames) and frames[i][0] != 'img':
-              i += 1
-          j = i
-          while j < len(frames) and frames[j][0] == 'img':
-              j += 1
-          img = [n for _, n in frames[i:j]]
-          rest = [n.lower() for _, n in frames[j:j + 2]]
-          ok_img = (img[-(len(want) - 1):] == want[1:]) if want[0] == '...' else (img == want)
-          if not (ok_img and rest == ['kernel32!basethreadinitthunk', 'ntdll!rtluserthreadstart']):
-              print('FAIL: image frames %s (want %s), then %s' % (img, want, rest)); sys.exit(1)
-          print('OK')
+
+          def main():
+              lst, mod, want, trc = sys.argv[1], sys.argv[2].lower(), sys.argv[3].split(','), sys.argv[4]
+              labels, code_end = [], None
+              for l in open(lst, encoding='latin-1'):
+                  m = re.match(r'^([A-Za-z_.$][\w.$@]*):\s*$', l)
+                  m2 = re.match(r'^\s+([0-9a-f]{8}): ', l)
+                  if m and not m2:
+                      labels.append([None, m.group(1)])
+                  if m2 and labels and labels[-1][0] is None:
+                      labels[-1][0] = int(m2.group(1), 16)
+                  if l.startswith('; uw-code-end '):
+                      code_end = int(l.split()[2], 16)
+              labels = [(o, n) for o, n in labels if o is not None]
+              def name_of(rva):
+                  off = rva - 0x1000
+                  if off < 0 or (code_end is not None and off >= code_end):
+                      return '?+0x%x' % rva
+                  own = [n for o, n in labels if o <= off]
+                  return own[-1] if own else '?+0x%x' % rva
+              out = open(trc, encoding='latin-1').read()
+              frames, ink = [], False
+              for l in out.split('\n'):
+                  if re.match(r'^\s*#?\s*Child-SP\s+RetAddr\s+Call Site', l):
+                      ink = True; frames = []; continue
+                  if ink:
+                      m = re.match(r'^\s*(?:[0-9a-f]+\s+)?[0-9a-f`]+\s+[0-9a-f`]+\s+(\S+)', l)
+                      if not m:
+                          if frames:
+                              ink = False
+                          continue
+                      mm = re.match(r'^([^!+]+)(?:!([^+]+))?(?:\+0x([0-9a-f]+))?$', m.group(1), re.I)
+                      if not mm:
+                          frames.append(('?', m.group(1))); continue
+                      mo, fn, off = mm.group(1), mm.group(2), mm.group(3)
+                      if mo.lower() == mod and fn is None and off:
+                          frames.append(('img', name_of(int(off, 16))))
+                      else:
+                          frames.append(('ext', '%s!%s' % (mo, fn) if fn else m.group(1)))
+              print('chain: ' + ' > '.join(n for _, n in frames))
+              if 'Access violation - code c0000005' not in out:
+                  print('ERROR: the last event is not the access violation'); sys.exit(2)
+              if not frames:
+                  print('ERROR: no k stack in the transcript'); sys.exit(2)
+              i = 0
+              while i < len(frames) and frames[i][0] != 'img':
+                  i += 1
+              j = i
+              while j < len(frames) and frames[j][0] == 'img':
+                  j += 1
+              img = [n for _, n in frames[i:j]]
+              rest = [n.lower() for _, n in frames[j:j + 2]]
+              ok_img = (img[-(len(want) - 1):] == want[1:]) if want[0] == '...' else (img == want)
+              if not (ok_img and rest == ['kernel32!basethreadinitthunk', 'ntdll!rtluserthreadstart']):
+                  print('MISMATCH: image frames %s (want %s), then %s' % (img, want, rest)); sys.exit(1)
+              print('OK')
+
+          # exit 0: the chain holds; 1: ONLY a chain mismatch found after the access
+          # violation; 2: anything else (no access violation, unreadable listing or
+          # transcript, a crash of this reader) -- so a --test-no-unwind twin passes
+          # only on a real broken chain
+          try:
+              main()
+          except SystemExit:
+              raise
+          except BaseException as ex:
+              print('ERROR: transcript reader crashed: %r' % (ex,)); sys.exit(2)
+
           '@
           function Chain($exe, $lst, $want) {
             $t = Join-Path $env:RUNNER_TEMP ("$exe.cdb.txt")
@@ -1074,7 +1106,7 @@ jobs:
             & $py -B $parser (Join-Path $D $lst) $exe $want $t | Write-Host
             return $LASTEXITCODE
           }
-          foreach ($line in Get-Content (Join-Path $D 'cases.tsv')) {
+          foreach ($line in $cases) {
             $f = $line -split "`t"; $img = $f[0]; $kind = $f[1]; $want = $f[2]; $chain = $f[3]
             if ($kind -eq 'exec') {
               & (Join-Path $D "$img.exe"); $rc = $LASTEXITCODE
@@ -1087,8 +1119,12 @@ jobs:
             }
             Write-Host "${img}: 3 runs done"
             if ($cdb) {
-              if ((Chain $img "$img.lst" $chain) -ne 0) { Write-Host "FAIL: $img cdb chain"; $bad++ } else { Write-Host "PASS: $img chain $chain" }
-              if ((Chain "${img}_nouw" "${img}_nouw.lst" $chain) -eq 0) { Write-Host "FAIL: ${img}_nouw (--test-no-unwind): the chain held without tables"; $bad++ } else { Write-Host "PASS: ${img}_nouw chain broken, as it must be" }
+              $r = Chain $img "$img.lst" $chain
+              if ($r -ne 0) { Write-Host "FAIL: $img cdb chain (reader exit $r)"; $bad++ } else { Write-Host "PASS: $img chain $chain" }
+              $r = Chain "${img}_nouw" "${img}_nouw.lst" $chain
+              if ($r -eq 1) { Write-Host "PASS: ${img}_nouw chain broken after the access violation, as it must be" }
+              elseif ($r -eq 0) { Write-Host "FAIL: ${img}_nouw (--test-no-unwind): the chain held without tables"; $bad++ }
+              else { Write-Host "FAIL: ${img}_nouw: the transcript reader failed (exit $r), not a chain mismatch"; $bad++ }
             }
           }
           if ($bad) { Write-Host "pe-unwind arm64: $bad failures"; exit 1 }
