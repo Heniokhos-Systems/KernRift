@@ -3619,7 +3619,7 @@ fn ir_lower_expr(uint64 node) -> uint64 {
         // OS, so it must not borrow an OS's id.
         //
         // CONSUMER NOTE: code that dispatches on arch_id with `== 2` meaning
-        // "arm64" (src/living.kr:1213 does) sees 10 on a bare-metal arm64
+        // "arm64" (src/living.kr:1222 does) sees 10 on a bare-metal arm64
         // build and takes the x86_64 branch. That is correct-by-refusal here
         // -- every such site in this tree is guarded by a syscall that
         // --target=none refuses first -- but user code doing the same must
@@ -5393,6 +5393,8 @@ fn ir_lower_stmt(uint64 node) {
 
     // Inline assembly (43): asm block with optional I/O constraints
     if kind == 43 {
+        // #143: on Windows, asm that writes the frame pointer (or x18) is refused.
+        win_asm_refuse(node)
         // For ASM blocks, we emit the instructions directly during x86 emission.
         // The IR_ASM_BLOCK carries the AST node index for the x86 emitter.
         // Handle I/O constraints:
@@ -6390,8 +6392,32 @@ fn ir_phys_regs_ensure() {
     ir_phys_regs_cap = 32
 }
 
+// The number of CALLEE-SAVED colours at the front of the x86_64 colour files
+// (colours 0..ir_x86_callee_colours-1). 6 (rbx, r12-r15, rbp) everywhere
+// except a Windows function that sets up rbp as its frame pointer (#143
+// option C, ruling Q12, spec 2.5.2: ir_win_fp == 1, an SP-moving function;
+// and @naked, whose file never holds rbp): 5. An SP-fixed Windows function
+// (ir_win_fp == 0) has no frame pointer and gets the base 12-colour maps with
+// rbp as colour 5. Every place that means "the callee-saved prefix" reads
+// this.
+static uint64 ir_x86_callee_colours = 6
+
+// #143 option C (spec 2.5.1, 2.5.2): 1 when the current Windows x86_64 IR
+// function moves RSP after its prologue (it gets the frame pointer), 0 when
+// it is SP-fixed (and everywhere off Windows). Set by ir_win_fn_moves_sp at
+// every function start, BEFORE ir_x86_set_callee_colours and the ceiling
+// seeding; a static shared by every function and every fat slice, so it is
+// reset there each time.
+static uint64 ir_win_fp = 0
+
+fn ir_x86_set_callee_colours() {
+    ir_x86_callee_colours = 6
+    if target_os == 2 && (ir_win_fp != 0 || ir_x86_naked_fn != 0) { ir_x86_callee_colours = 5 }
+}
+
 fn ir_regalloc_init() {
-    IR_NUM_REGS = 6
+    ir_x86_set_callee_colours()
+    IR_NUM_REGS = ir_x86_callee_colours
     ir_phys_regs_ensure()
     uint64 p0 = ir_phys_regs
     unsafe { *(p0 as uint64) = 3 }
@@ -6404,7 +6430,7 @@ fn ir_regalloc_init() {
     uint64 p4 = ir_phys_regs + 32
     unsafe { *(p4 as uint64) = 15 }
     uint64 p5 = ir_phys_regs + 40
-    unsafe { *(p5 as uint64) = 5 }       // rbp
+    unsafe { *(p5 as uint64) = 5 }       // rbp (colour 5 unless the function has the frame pointer: IR_NUM_REGS is 5 then)
 }
 
 // --- Wide x86_64 colour file ----------------------------------------------
@@ -6431,6 +6457,38 @@ fn ir_regalloc_init() {
 static uint64 IR_X86_WIDE_NUM_REGS = 12
 
 fn ir_regalloc_init_x86_wide() {
+    ir_x86_set_callee_colours()
+    if ir_x86_callee_colours == 5 {
+        // Windows with the frame pointer (ir_win_fp == 1): rbp is not a
+        // colour, so the callee-saved prefix is colours 0-4 and the six
+        // scratch registers move down to 5-10. (#143 option C: an SP-fixed
+        // Windows function takes the base map below, rbp = colour 5.)
+        IR_NUM_REGS = IR_X86_WIDE_NUM_REGS - 1
+        ir_phys_regs_ensure()
+        uint64 w0 = ir_phys_regs
+        unsafe { *(w0 as uint64) = 3 }        // colour 0  -> rbx
+        uint64 w1 = ir_phys_regs + 8
+        unsafe { *(w1 as uint64) = 12 }       // colour 1  -> r12
+        uint64 w2 = ir_phys_regs + 16
+        unsafe { *(w2 as uint64) = 13 }       // colour 2  -> r13
+        uint64 w3 = ir_phys_regs + 24
+        unsafe { *(w3 as uint64) = 14 }       // colour 3  -> r14
+        uint64 w4 = ir_phys_regs + 32
+        unsafe { *(w4 as uint64) = 15 }       // colour 4  -> r15
+        uint64 w5 = ir_phys_regs + 40
+        unsafe { *(w5 as uint64) = 6 }        // colour 5  -> rsi
+        uint64 w6 = ir_phys_regs + 48
+        unsafe { *(w6 as uint64) = 7 }        // colour 6  -> rdi
+        uint64 w7 = ir_phys_regs + 56
+        unsafe { *(w7 as uint64) = 8 }        // colour 7  -> r8
+        uint64 w8 = ir_phys_regs + 64
+        unsafe { *(w8 as uint64) = 9 }        // colour 8  -> r9
+        uint64 w9 = ir_phys_regs + 72
+        unsafe { *(w9 as uint64) = 10 }       // colour 9  -> r10
+        uint64 w10 = ir_phys_regs + 80
+        unsafe { *(w10 as uint64) = 11 }      // colour 10 -> r11
+        return
+    }
     IR_NUM_REGS = IR_X86_WIDE_NUM_REGS
     ir_phys_regs_ensure()
     uint64 p0 = ir_phys_regs
@@ -6730,7 +6788,7 @@ fn ir_seed_wide_ceilings_generic(uint64 arch_a64, uint64 cap) {
 }
 
 fn ir_x86_seed_wide_ceilings() {
-    ir_seed_wide_ceilings_generic(0, 6)
+    ir_seed_wide_ceilings_generic(0, ir_x86_callee_colours)
 }
 
 // Cap every vreg that receives a register-passed parameter to the
@@ -6749,7 +6807,7 @@ fn ir_x86_seed_param_ceilings() {
             if ir_insn_opcode(i) == 61 {
                 if ir_insn_src1(i) == 0 {
                     if ir_insn_imm(i) < 6 {
-                        ir_color_ceil_set(ir_insn_dest(i), 6)
+                        ir_color_ceil_set(ir_insn_dest(i), ir_x86_callee_colours)
                     }
                 }
             }
@@ -8413,8 +8471,8 @@ fn ir_emit_x86_win_syscall(uint64 abstract_nr, uint64 dest_v, uint64 dst_r) {
         // Then call WriteFile(handle, buf, len, NULL, NULL).
 
         // Save buf(rsi) and len(rdx) — two pushes keep stack aligned
-        emit_byte(0x56)  // push rsi (buf)
-        emit_byte(0x52)  // push rdx (len)
+        emit_x64_push_r(6)  // push rsi (buf)
+        emit_x64_push_r(2)  // push rdx (len)
 
         // Check if fd <= 2 (stdin/stdout/stderr need GetStdHandle)
         // cmp rdi, 2
@@ -8439,8 +8497,8 @@ fn ir_emit_x86_win_syscall(uint64 abstract_nr, uint64 dest_v, uint64 dst_r) {
         // skip_getstdhandle:
 
         // Pop len and buf (reverse order)
-        emit_byte(0x5A)  // pop rdx (len)
-        emit_byte(0x5E)  // pop rsi (buf)
+        emit_x64_pop_r(2)  // pop rdx (len)
+        emit_x64_pop_r(6)  // pop rsi (buf)
 
         // WriteFile(handle=rcx, buf=rdx, len=r8, lpBytesWritten=r9=0, lpOverlapped=[rsp+32]=0)
         // Save len from rdx into r8 BEFORE overwriting rdx
@@ -8479,8 +8537,8 @@ fn ir_emit_x86_win_syscall(uint64 abstract_nr, uint64 dest_v, uint64 dst_r) {
         // read(fd, buf, len): SysV rdi=fd, rsi=buf, rdx=len
         // Windows: ReadFile(handle, buf, len, &bytesRead, NULL)
         // If fd <= 2, convert via GetStdHandle; otherwise fd is already a handle.
-        emit_byte(0x56)  // push rsi (buf)
-        emit_byte(0x52)  // push rdx (len)
+        emit_x64_push_r(6)  // push rsi (buf)
+        emit_x64_push_r(2)  // push rdx (len)
 
         // cmp rdi, 2
         emit_byte(0x48); emit_byte(0x83); emit_byte(0xFF); emit_byte(0x02)
@@ -8495,8 +8553,8 @@ fn ir_emit_x86_win_syscall(uint64 abstract_nr, uint64 dest_v, uint64 dst_r) {
         emit_win_free_stack(0x20)
         ir_emit_mov_r64_r64(7, 0)    // mov rdi, rax (handle)
 
-        emit_byte(0x5A)              // pop rdx -> len
-        emit_byte(0x5E)              // pop rsi -> buf
+        emit_x64_pop_r(2)            // pop rdx -> len
+        emit_x64_pop_r(6)            // pop rsi -> buf
         emit_byte(0x49); emit_byte(0x89); emit_byte(0xD0)  // mov r8, rdx (len)
         ir_emit_mov_r64_r64(1, 7)    // rcx = handle
         ir_emit_mov_r64_r64(2, 6)    // rdx = buf
@@ -8517,9 +8575,9 @@ fn ir_emit_x86_win_syscall(uint64 abstract_nr, uint64 dest_v, uint64 dst_r) {
         // open(path, flags): SysV rdi=path, rsi=flags
         // Windows: CreateFileA(path, access, share, NULL, disposition, flags, NULL)
         // flags: 0=read(O_RDONLY), nonzero=write(O_WRONLY/O_CREAT)
-        emit_byte(0x56)  // push rsi (flags)
+        emit_x64_push_r(6)  // push rsi (flags)
         ir_emit_mov_r64_r64(1, 7)    // rcx = path
-        emit_byte(0x5E)              // pop rsi (flags)
+        emit_x64_pop_r(6)            // pop rsi (flags)
         // rdx = GENERIC_READ (0x80000000) or GENERIC_WRITE (0x40000000)
         ir_emit_mov_r64_imm64(2, 0x80000000)  // default: GENERIC_READ
         // test rsi, rsi; if nonzero, use GENERIC_WRITE
@@ -8662,16 +8720,9 @@ fn ir_emit_asm_in_group(uint64 start_ii) {
                 emit_byte(0x84); emit_byte(0x24)
                 emit_u32_le(adj_off)
             }
-            emit_byte(0x50)
+            emit_x64_push_r(0)
         } else {
-            if s_reg >= 8 {
-                emit_byte(0x41)
-                uint8 po = 0x50 | (s_reg & 7)
-                emit_byte(po)
-            } else {
-                uint8 po = 0x50 | s_reg
-                emit_byte(po)
-            }
+            emit_x64_push_r(s_reg)
         }
         k = k + 1
     }
@@ -8683,14 +8734,7 @@ fn ir_emit_asm_in_group(uint64 start_ii) {
         uint64 dp_k = mv_dst + k2 * 8
         uint64 d_reg = 0
         unsafe { *(dp_k as uint64) -> d_reg }
-        if d_reg >= 8 {
-            emit_byte(0x41)
-            uint8 po = 0x58 | (d_reg & 7)
-            emit_byte(po)
-        } else {
-            uint8 po = 0x58 | d_reg
-            emit_byte(po)
-        }
+        emit_x64_pop_r(d_reg)
     }
 }
 
@@ -8794,16 +8838,9 @@ fn ir_emit_call_arg_group(uint64 start_ii) {
                 emit_byte(0x84); emit_byte(0x24)
                 emit_u32_le(adj_off)
             }
-            emit_byte(0x50)
+            emit_x64_push_r(0)
         } else {
-            if s_reg >= 8 {
-                emit_byte(0x41)
-                uint8 po = 0x50 | (s_reg & 7)
-                emit_byte(po)
-            } else {
-                uint8 po = 0x50 | s_reg
-                emit_byte(po)
-            }
+            emit_x64_push_r(s_reg)
         }
         k = k + 1
     }
@@ -8815,14 +8852,7 @@ fn ir_emit_call_arg_group(uint64 start_ii) {
         uint64 dp_k = cg_dst + k2 * 8
         uint64 d_reg = 0
         unsafe { *(dp_k as uint64) -> d_reg }
-        if d_reg >= 8 {
-            emit_byte(0x41)
-            uint8 po = 0x58 | (d_reg & 7)
-            emit_byte(po)
-        } else {
-            uint8 po = 0x58 | d_reg
-            emit_byte(po)
-        }
+        emit_x64_pop_r(d_reg)
     }
 }
 
@@ -8852,14 +8882,7 @@ fn ir_x86_win64_call_frame() -> uint64 {
     uint64 w_rem = w_stack & 15
     if w_rem != 0 { w_stack = w_stack + 16 - w_rem }
     // sub rsp, w_stack
-    if w_stack < 128 {
-        emit_byte(0x48); emit_byte(0x83); emit_byte(0xEC)
-        uint8 ws8 = w_stack
-        emit_byte(ws8)
-    } else {
-        emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC)
-        emit_u32_le(w_stack)
-    }
+    emit_x64_rsp_adj(0xEC, w_stack)
     // Store overflow args at [rsp + 32 + i*8], re-resolving each vreg
     // against the shifted frame (+w_stack). Uses rax as scratch; the
     // reg args (rcx/rdx/r8/r9) were placed before this and the wide
@@ -8925,14 +8948,7 @@ fn ir_x86_win64_call_frame() -> uint64 {
 
 // add rsp, w_stack -- undoes ir_x86_win64_call_frame.
 fn ir_x86_win64_call_release(uint64 w_stack) {
-    if w_stack < 128 {
-        emit_byte(0x48); emit_byte(0x83); emit_byte(0xC4)
-        uint8 wc8 = w_stack
-        emit_byte(wc8)
-    } else {
-        emit_byte(0x48); emit_byte(0x81); emit_byte(0xC4)
-        emit_u32_le(w_stack)
-    }
+    emit_x64_rsp_adj(0xC4, w_stack)
 }
 
 // Outgoing stack arguments for a call with more than six of them.
@@ -8945,7 +8961,7 @@ fn ir_x86_win64_call_release(uint64 w_stack) {
 // ir_x86_emit_call_stack_cleanup AFTER the call instruction.
 fn ir_x86_emit_call_stack_args(uint64 call_arg_count) -> uint64 {
     uint64 stack_args = 0
-    if call_arg_count > 6 {
+    if ir_x86_call_args_on_stack(call_arg_count) != 0 {      // #143 option C: the shared predicate
             stack_args = call_arg_count - 6
             // Resolve all overflow arg values BEFORE modifying rsp
             // Use sub rsp + mov [rsp+N] approach instead of push to avoid
@@ -8976,14 +8992,7 @@ fn ir_x86_emit_call_stack_args(uint64 call_arg_count) -> uint64 {
             // sub rsp, stack_bytes — imm8 form fits up to 127; switch to
             // imm32 for larger allocations so calls with >16 stack args
             // don't wrap the signed-byte immediate silently.
-            if stack_bytes < 128 {
-                emit_byte(0x48); emit_byte(0x83); emit_byte(0xEC)
-                uint8 sb8 = stack_bytes
-                emit_byte(sb8)
-            } else {
-                emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC)
-                emit_u32_le(stack_bytes)
-            }
+            emit_x64_rsp_adj(0xEC, stack_bytes)
             // Now rsp has shifted down. Spill slots are now at rsp + stack_bytes + original_offset
             // We need to re-resolve each overflow arg with the shifted rsp
             oi = 0
@@ -9067,15 +9076,186 @@ fn ir_x86_emit_call_stack_cleanup(uint64 stack_args) {
             uint64 aligned_stack = stack_args
             if (aligned_stack & 1) != 0 { aligned_stack = aligned_stack + 1 }
             uint64 cleanup = aligned_stack * 8
-            if cleanup < 128 {
-                emit_byte(0x48); emit_byte(0x83); emit_byte(0xC4)
-                uint8 cl8 = cleanup
-                emit_byte(cl8)
-            } else {
-                emit_byte(0x48); emit_byte(0x81); emit_byte(0xC4)
-                emit_u32_le(cleanup)
-            }
+            emit_x64_rsp_adj(0xC4, cleanup)
     }
+}
+
+// #143 option C (spec 2.5.1): does an op-50/87 call move RSP? The one
+// definition, shared by the classifier (ir_x86_win_op_sp_neutral) and the
+// emitters (ir_x86_emit_call_stack_args, the routed-import and UEFI paths).
+// ir_x86_call_moves_sp_core takes the facts explicitly so the hidden
+// --selftest-win-sp-neutral can check every case without a program.
+fn ir_x86_call_args_on_stack(uint64 call_arg_count) -> uint64 {
+    if call_arg_count > 6 { return 1 }
+    return 0
+}
+
+// The call's shape: 0 = register arguments only (moves no RSP), 1 = a Win64
+// call frame around it (a routed Windows import; op 87 under --emit=uefi),
+// 2 = stack arguments (> 6). The emitters branch on this, and the classifier
+// treats every nonzero kind as SP-moving (A19c review finding 5: one decision).
+fn ir_x86_call_kind_core(uint64 op, uint64 argc, uint64 routed, uint64 uefi) -> uint64 {
+    if op == 50 {
+        if routed != 0 { return 1 }                 // X2: Win64 call frame
+        if ir_x86_call_args_on_stack(argc) != 0 { return 2 }    // X3
+        return 0
+    }
+    if op == 87 {
+        if uefi != 0 { return 1 }                   // X4: --emit=uefi call frame
+        if ir_x86_call_args_on_stack(argc) != 0 { return 2 }    // X4: > 6 args
+        return 0
+    }
+    return 0
+}
+
+fn ir_x86_call_moves_sp_core(uint64 op, uint64 argc, uint64 routed, uint64 uefi) -> uint64 {
+    if ir_x86_call_kind_core(op, argc, routed, uefi) != 0 { return 1 }
+    return 0
+}
+
+fn ir_x86_call_kind(uint64 op, uint64 s1, uint64 imm) -> uint64 {
+    if op == 50 {
+        uint64 routed = 0
+        if is_routed_win_import(imm) != PE_IMPORT_NO_SLOT { routed = 1 }
+        return ir_x86_call_kind_core(50, s1, routed, 0)
+    }
+    if op == 87 {
+        uint64 uefi = 0
+        if cg_emit_mode == 9 && target_arch == 0 { uefi = 1 }
+        return ir_x86_call_kind_core(87, imm, 0, uefi)
+    }
+    return 0
+}
+
+fn ir_x86_call_moves_sp(uint64 op, uint64 s1, uint64 imm) -> uint64 {
+    if ir_x86_call_kind(op, s1, imm) != 0 { return 1 }
+    return 0
+}
+
+// #143 option C (spec 2.5.1): the audited allow-list of x86_64 IR ops whose
+// Windows lowering never writes RSP. Its own list, NOT ir_x86_op_widesafe
+// (a register-clobber audit: an op added there for register reasons must not
+// silently become an SP verdict, which is how op 131 got in -- review
+// finding 11). Each entry was audited against its lowering in
+// ir_emit_x86_insn (a literal-byte sweep found the push/pop bytes only in ops
+// 52, 70, 74, 96, 113, 114, 125 and the C7/prologue code):
+//   0 elided; 1-19 const/alu/div/shifts/cmps; 20-27 float via rax+xmm;
+//   30-32 load/store/stack_addr ([rsp+off] moves); 40-43 br/ret; 61 copy;
+//   77-79, 84, 86 static load/store/str_const/static_addr/fn_addr (rip-rel);
+//   97-104, 107, 108, 118 float conversions/sqrt/fma; 120-123 signed cmps;
+//   132-139 sdiv/smod/sar/add_imm/sub_imm/ror/mul_imm/lea_bis; 143 shl_imm.
+// Op 51 IR_ARG (re-review finding 1): imm < 6 is a register move and 6-99
+// only records the overflow slot (the SP move belongs to op 50/87 and
+// ir_x86_call_moves_sp); imm >= 200 is the Win64 marker of a UEFI or routed
+// call, neutral itself because its call is SP-moving through the predicate;
+// imm 100-199 is the asm-input push/pop group (X14) -- defence in depth, it
+// only exists together with op 96, which is not on the list.
+// Ops 50 and 87 are neutral only when ir_x86_call_moves_sp says so. Op 131
+// (--debug bounds check, ExitProcess with a shadow area, X13) is NOT on the
+// list. Anything else -- including any op added later -- moves SP.
+fn ir_x86_win_op_sp_neutral(uint64 op, uint64 s1, uint64 imm) -> uint64 {
+    if op == 0 { return 1 }
+    if op >= 1 && op <= 19 { return 1 }
+    if op >= 20 && op <= 27 { return 1 }
+    if op >= 30 && op <= 32 { return 1 }
+    if op >= 40 && op <= 43 { return 1 }
+    if op == 61 { return 1 }
+    if op == 77 || op == 78 || op == 79 { return 1 }
+    if op == 84 || op == 86 { return 1 }
+    if op >= 97 && op <= 104 { return 1 }
+    if op == 107 || op == 108 { return 1 }
+    if op == 118 { return 1 }
+    if op >= 120 && op <= 123 { return 1 }
+    if op >= 132 && op <= 139 { return 1 }
+    if op == 143 { return 1 }
+    if op == 51 {
+        if imm < 100 { return 1 }
+        if imm >= 200 { return 1 }
+        return 0
+    }
+    if op == 50 || op == 87 {
+        if ir_x86_call_moves_sp(op, s1, imm) == 0 { return 1 }
+        return 0
+    }
+    return 0
+}
+
+// #143 option C (spec 2.5.1): does the current x86_64 IR function move RSP
+// after its prologue? Runs on the final IR (after the optimiser, before
+// register allocation). A hosted Windows main (non-naked, freestanding == 0)
+// is always SP-moving: its C7 / GetCommandLineA / ExitProcess sequences are
+// emitted at prologue and epilogue time, outside any IR op (finding 10).
+fn ir_win_fn_moves_sp(uint64 name_tok) -> uint64 {
+    if freestanding == 0 && tok_matches(name_tok, "main", 4) != 0 { return 1 }
+    uint64 b = 0
+    while b < ir_bb_count {
+        uint64 i = ir_bb_first_insn(b)
+        while i != 0xFFFFFFFF {
+            if ir_x86_win_op_sp_neutral(ir_insn_opcode(i), ir_insn_src1(i), ir_insn_imm(i)) == 0 { return 1 }
+            i = ir_insn_next(i)
+        }
+        b = b + 1
+    }
+    return 0
+}
+
+// --selftest-win-sp-neutral (hidden, test-only; re-review-2 finding 1): the
+// allow-list itself, case by case. Prints one line per case; exit 0 when
+// every case gives the expected verdict, else 1.
+fn ir_x86_win_sp_neutral_case(uint64 name, uint64 got, uint64 want) -> uint64 {
+    write(1, name, str_len(name))
+    if got == want { write(1, ": ok\n", 5)  return 0 }
+    write(1, ": WRONG\n", 8)
+    return 1
+}
+
+fn ir_x86_win_sp_neutral_selftest() {
+    uint64 bad = 0
+    bad = bad + ir_x86_win_sp_neutral_case("op 51 imm 0 neutral", ir_x86_win_op_sp_neutral(51, 0, 0), 1)
+    bad = bad + ir_x86_win_sp_neutral_case("op 51 imm 5 neutral", ir_x86_win_op_sp_neutral(51, 0, 5), 1)
+    bad = bad + ir_x86_win_sp_neutral_case("op 51 imm 6 neutral", ir_x86_win_op_sp_neutral(51, 0, 6), 1)
+    bad = bad + ir_x86_win_sp_neutral_case("op 51 imm 99 neutral", ir_x86_win_op_sp_neutral(51, 0, 99), 1)
+    bad = bad + ir_x86_win_sp_neutral_case("op 51 imm 100 SP-moving", ir_x86_win_op_sp_neutral(51, 0, 100), 0)
+    bad = bad + ir_x86_win_sp_neutral_case("op 51 imm 199 SP-moving", ir_x86_win_op_sp_neutral(51, 0, 199), 0)
+    bad = bad + ir_x86_win_sp_neutral_case("op 51 imm 200 neutral", ir_x86_win_op_sp_neutral(51, 0, 200), 1)
+    bad = bad + ir_x86_win_sp_neutral_case("op 51 imm 200 then a routed op 50: the call is SP-moving", ir_x86_call_moves_sp_core(50, 2, 1, 0), 1)
+    bad = bad + ir_x86_win_sp_neutral_case("op 51 imm 200 then a UEFI op 87: the call is SP-moving", ir_x86_call_moves_sp_core(87, 2, 0, 1), 1)
+    bad = bad + ir_x86_win_sp_neutral_case("op 50, 6 register args, not routed: neutral call", ir_x86_call_moves_sp_core(50, 6, 0, 0), 0)
+    bad = bad + ir_x86_win_sp_neutral_case("op 50, 7 args: stack arguments, SP-moving", ir_x86_call_moves_sp_core(50, 7, 0, 0), 1)
+    bad = bad + ir_x86_win_sp_neutral_case("op 87, 6 args: neutral call", ir_x86_call_moves_sp_core(87, 6, 0, 0), 0)
+    bad = bad + ir_x86_win_sp_neutral_case("op 87, 7 args: SP-moving", ir_x86_call_moves_sp_core(87, 7, 0, 0), 1)
+    bad = bad + ir_x86_win_sp_neutral_case("op 131 (--debug bounds check) SP-moving", ir_x86_win_op_sp_neutral(131, 0, 0), 0)
+    bad = bad + ir_x86_win_sp_neutral_case("op 96 (asm block) SP-moving", ir_x86_win_op_sp_neutral(96, 0, 0), 0)
+    bad = bad + ir_x86_win_sp_neutral_case("op 52 (syscall) SP-moving", ir_x86_win_op_sp_neutral(52, 0, 0), 0)
+    bad = bad + ir_x86_win_sp_neutral_case("op 144 (not audited) SP-moving", ir_x86_win_op_sp_neutral(144, 0, 0), 0)
+    if bad != 0 { exit(1) }
+    exit(0)
+}
+
+// #143 option C (spec 2.5.1 site table): the site family an x86_64 IR op's
+// SP writes belong to, named in every backstop report (uw_sp_moves).
+fn ir_x86_sp_site(uint64 op, uint64 imm) -> uint64 {
+    if op == 52 { return "X1" }
+    if op == 50 {
+        if is_routed_win_import(imm) != PE_IMPORT_NO_SLOT { return "X2" }
+        return "X3"
+    }
+    if op == 87 { return "X4" }
+    if op == 70 { return "X5" }
+    if op == 71 { return "X6" }
+    if op == 74 { return "X7" }
+    if op == 113 { return "X8" }
+    if op == 114 { return "X9" }
+    if op == 119 { return "X10" }
+    if op == 125 { return "X11" }
+    if op == 146 { return "X12" }
+    if op == 131 { return "X13" }
+    if op == 96 { return "X14" }
+    if op == 51 {
+        if imm >= 100 && imm < 200 { return "X14" }
+        return "X16"
+    }
+    return "unlisted"
 }
 
 fn ir_emit_x86_insn(uint64 ii) {
@@ -9089,6 +9269,7 @@ fn ir_emit_x86_insn(uint64 ii) {
     uint64 s1_v = ir_insn_src1(ii)
     uint64 s2_v = ir_insn_src2(ii)
     uint64 imm = ir_insn_imm(ii)
+    if target_os == 2 { uw_sp_op_site_set(ir_x86_sp_site(op, imm)) }
 
     // Record DWARF line-table entry at the start of each instruction
     // that carries a source token. The line_table_record helper itself
@@ -9967,17 +10148,7 @@ fn ir_emit_x86_insn(uint64 ii) {
             size_reg = 0
         }
         // push original size onto stack for later
-        if size_reg >= 8 {
-            // push r8..r15: 41 5x
-            emit_byte(0x41)
-            uint64 push_opc = 0x50 | (size_reg & 7)
-            uint8 po = push_opc
-            emit_byte(po)
-        } else {
-            uint64 push_opc = 0x50 | size_reg
-            uint8 po = push_opc
-            emit_byte(po)
-        }
+        emit_x64_push_r(size_reg)
         if target_os == 2 {
             // Windows: VirtualAlloc(NULL, size+8, MEM_COMMIT|MEM_RESERVE, PAGE_READWRITE)
             // xor rcx, rcx (NULL)
@@ -9992,7 +10163,7 @@ fn ir_emit_x86_insn(uint64 ii) {
             emit_win_free_stack(0x20)
             // pop original size into rcx — on BOTH paths, so the frame stays
             // balanced when the allocation failed.
-            emit_byte(0x59)  // pop rcx
+            emit_x64_pop_r(1)  // pop rcx
             // VirtualAlloc returns NULL on failure; skip the header store and
             // return 0 (emit_x86_alloc_fail_jcc picks the Windows form).
             uint64 win_alloc_fail = emit_x86_alloc_fail_jcc()
@@ -10042,7 +10213,7 @@ fn ir_emit_x86_insn(uint64 ii) {
         // The pop happens on BOTH paths so the frame stays balanced when the
         // mmap failed; POP does not write EFLAGS, so it may precede the
         // macOS carry test emit_x86_alloc_fail_jcc uses.
-        emit_byte(0x59)  // pop rcx
+        emit_x64_pop_r(1)  // pop rcx
         // If the mmap failed, skip the header store entirely and return 0 —
         // storing through -ENOMEM is what used to segfault inside alloc.
         uint64 alloc_fail_jcc = emit_x86_alloc_fail_jcc()
@@ -10226,7 +10397,7 @@ fn ir_emit_x86_insn(uint64 ii) {
         emit_byte(0xC2)
         emit_byte(0x30)
         // push rdx (52)
-        emit_byte(0x52)
+        emit_x64_push_r(2)
         // inc rcx (48 FF C1)
         emit_byte(0x48)
         emit_byte(0xFF)
@@ -10240,6 +10411,7 @@ fn ir_emit_x86_insn(uint64 ii) {
         uint64 fu_back = fu_loop - out_len - 1
         uint8 fu_b8 = fu_back
         emit_byte(fu_b8)
+        uint64 fu_loop_end = out_len
         // rcx = digit count, save for return
         // mov rax, rcx (48 89 C8) — save count
         emit_byte(0x48)
@@ -10248,7 +10420,7 @@ fn ir_emit_x86_insn(uint64 ii) {
         // .pop_loop:
         uint64 fu_pop = out_len
         // pop rdx (5A)
-        emit_byte(0x5A)
+        emit_x64_pop_r(2)
         // mov [rdi], dl (88 17)
         emit_byte(0x88)
         emit_byte(0x17)
@@ -10265,6 +10437,9 @@ fn ir_emit_x86_insn(uint64 ii) {
         uint64 fu_pop_back = fu_pop - out_len - 1
         uint8 fu_pb = fu_pop_back
         emit_byte(fu_pb)
+        // #143: a data-dependent push loop and its pop loop, counted in rcx;
+        // the checker's C4b proves the pair depth-neutral from the bytes.
+        uw_balanced_loops(fu_loop, fu_loop_end, fu_pop, out_len, 1)
         // rax = digit count (return value)
         if dst_r != 0xFFFFFFFF {
             ir_emit_mov_r64_r64(dst_r, 0)
@@ -10779,7 +10954,7 @@ fn ir_emit_x86_insn(uint64 ii) {
         // resolve_win_iat_fixups), release. No name fixup: the PE loader
         // binds the slot.
         uint64 x86_iat_slot = is_routed_win_import(imm)
-        if x86_iat_slot != PE_IMPORT_NO_SLOT {
+        if ir_x86_call_kind(50, call_arg_count, imm) == 1 {     // #143 option C: the shared decision
             uint64 rw_stack = ir_x86_win64_call_frame()
             emit_win_call_iat(x86_iat_slot)
             ir_x86_win64_call_release(rw_stack)
@@ -10887,7 +11062,7 @@ fn ir_emit_x86_insn(uint64 ii) {
         // (codegen.kr). call_ptr is the ONLY producer of IR_CALL_IND, so under
         // --emit=uefi every one of them is a firmware call: gating on
         // cg_emit_mode alone is exact.
-        if cg_emit_mode == 9 && target_arch == 0 {
+        if ir_x86_call_kind(87, 0, imm) == 1 {      // #143 option C: the shared decision (--emit=uefi)
             uint64 w_stack = ir_x86_win64_call_frame()
             // Resolve the fn pointer into rax AFTER the stores (they use rax as
             // scratch). A spilled pointer's slot moved up by w_stack.
@@ -11096,6 +11271,7 @@ fn ir_emit_x86_insn(uint64 ii) {
     if op == 96 {
         // IR_ASM_BLOCK: emit inline assembly from AST node
         // src1 = AST node index
+        uw_sp_moves()           // #143 option C: opaque, may move RSP
         uint64 asm_node = s1_v
         uint32 single_tok = ast_data1(asm_node)
         uint64 ws = single_tok
@@ -11474,7 +11650,7 @@ fn ir_emit_x86_insn(uint64 ii) {
             // SP shift is safe here — ExitProcess never returns.
             ir_emit_mov_r64_r64(7, path_r)  // save path in rdi
             // sub rsp, 0xD0 (STARTUPINFOA=104 + PI=24 + shadow+args)
-            emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC); emit_u32_le(0xD0)
+            emit_x64_rsp_adj(0xEC, 0xD0)
             // Zero the structures: lea rdi, [rsp+0x50]; xor eax,eax; mov ecx,128; rep stosb
             emit_byte(0x48); emit_byte(0x8D); emit_byte(0x7C); emit_byte(0x24); emit_byte(0x50)
             emit_byte(0x31); emit_byte(0xC0)
@@ -11518,7 +11694,7 @@ fn ir_emit_x86_insn(uint64 ii) {
             emit_win_call_iat(11)
             // ExitProcess(exitCode=[rsp+0x20])
             emit_byte(0x8B); emit_byte(0x4C); emit_byte(0x24); emit_byte(0x20)
-            emit_byte(0x48); emit_byte(0x81); emit_byte(0xC4); emit_u32_le(0xD0)
+            emit_x64_rsp_adj(0xC4, 0xD0)
             emit_win_alloc_stack(0x20)
             emit_win_call_iat(0)
             // Never reaches here
@@ -11555,7 +11731,7 @@ fn ir_emit_x86_insn(uint64 ii) {
         // comment warns is worse than a vague one.
         emit_x86_syscall_insn("exec_process")
         // If execve fails, restore stack: add rsp, 16
-        emit_byte(0x48); emit_byte(0x83); emit_byte(0xC4); emit_byte(0x10)
+        emit_x64_rsp_adj(0xC4, 0x10)
         // Save errno to exec_errno if defined
         uint64 errno_off = static_lookup_by_name("exec_errno", 10)
         if errno_off != 0xFFFFFFFF {
@@ -11705,7 +11881,7 @@ fn ir_emit_x86_insn(uint64 ii) {
         // zero often enough that the bug went unnoticed for a while.
         if target_os == 2 {
             // sub rsp, 0x30  (shadow 0x20 + freq@0x20 + counter@0x28)
-            emit_byte(0x48); emit_byte(0x83); emit_byte(0xEC); emit_byte(0x30)
+            emit_x64_rsp_adj(0xEC, 0x30)
             // lea rcx, [rsp+0x20]
             emit_byte(0x48); emit_byte(0x8D); emit_byte(0x4C); emit_byte(0x24); emit_byte(0x20)
             emit_win_call_iat(15)                                               // QueryPerformanceFrequency
@@ -11735,7 +11911,7 @@ fn ir_emit_x86_insn(uint64 ii) {
             // add rax, r10
             emit_byte(0x4C); emit_byte(0x01); emit_byte(0xD0)
             // add rsp, 0x30
-            emit_byte(0x48); emit_byte(0x83); emit_byte(0xC4); emit_byte(0x30)
+            emit_x64_rsp_adj(0xC4, 0x30)
         } else if target_os == 1 {
             // macOS x86_64: gettimeofday(rdi=&tv, rsi=NULL) via syscall
             // 0x2000074. Darwin's clock_gettime isn't 228 the way Linux's
@@ -11743,7 +11919,7 @@ fn ir_emit_x86_insn(uint64 ii) {
             // entry point that silently returns 0 in rax, which is what
             // made time_ns() come back zero on every arm64 and x86_64
             // macOS build until today.
-            emit_byte(0x48); emit_byte(0x83); emit_byte(0xEC); emit_byte(16)       // sub rsp, 16
+            emit_x64_rsp_adj(0xEC, 16)       // sub rsp, 16
             emit_byte(0x48); emit_byte(0x89); emit_byte(0xE7)                      // mov rdi, rsp
             emit_byte(0x31); emit_byte(0xF6)                                       // xor esi, esi
             ir_emit_mov_r64_imm64(0, 0x2000074)                                    // mov rax, gettimeofday
@@ -11756,10 +11932,10 @@ fn ir_emit_x86_insn(uint64 ii) {
             emit_byte(0x48); emit_byte(0x69); emit_byte(0xC9)                      // imul rcx, rcx, 1000
             emit_u32_le(1000)
             emit_byte(0x48); emit_byte(0x01); emit_byte(0xC8)                      // add rax, rcx
-            emit_byte(0x48); emit_byte(0x83); emit_byte(0xC4); emit_byte(16)       // add rsp, 16
+            emit_x64_rsp_adj(0xC4, 16)       // add rsp, 16
         } else {
             // Linux / Android x86_64: clock_gettime(CLOCK_MONOTONIC, &ts)
-            emit_byte(0x48); emit_byte(0x83); emit_byte(0xEC); emit_byte(16)
+            emit_x64_rsp_adj(0xEC, 16)
             emit_byte(0xBF); emit_byte(1); emit_byte(0); emit_byte(0); emit_byte(0)
             emit_byte(0x48); emit_byte(0x89); emit_byte(0xE6)
             uint64 cgt_nr = ir_x86_syscall_nr(228)
@@ -11770,7 +11946,7 @@ fn ir_emit_x86_insn(uint64 ii) {
             emit_u32_le(1000000000)
             emit_byte(0x48); emit_byte(0x8B); emit_byte(0x4C); emit_byte(0x24); emit_byte(8)
             emit_byte(0x48); emit_byte(0x01); emit_byte(0xC8)
-            emit_byte(0x48); emit_byte(0x83); emit_byte(0xC4); emit_byte(16)
+            emit_x64_rsp_adj(0xC4, 16)
         }
         if dst_r != 0xFFFFFFFF && dst_r != 0 {
             ir_emit_mov_r64_r64(dst_r, 0)
@@ -12323,11 +12499,11 @@ fn ir_emit_x86_insn(uint64 ii) {
         // 0x8000000000000000 little-endian:
         emit_byte(0x00); emit_byte(0x00); emit_byte(0x00); emit_byte(0x00)
         emit_byte(0x00); emit_byte(0x00); emit_byte(0x00); emit_byte(0x80)
-        emit_byte(0x50)  // push rax
+        emit_x64_push_r(0)  // push rax
         // movq xmm1, [rsp]: F3 0F 7E 0C 24
         emit_byte(0xF3); emit_byte(0x0F); emit_byte(0x7E); emit_byte(0x0C); emit_byte(0x24)
         // pop rax: 58
-        emit_byte(0x58)
+        emit_x64_pop_r(0)
         // xorpd xmm0, xmm1: 66 0F 57 C1
         emit_byte(0x66); emit_byte(0x0F); emit_byte(0x57); emit_byte(0xC1)
 
@@ -12342,10 +12518,10 @@ fn ir_emit_x86_insn(uint64 ii) {
         // 1e18 LE bytes: 00 C8 4E 67 6D C1 AB 43
         emit_byte(0x00); emit_byte(0xC8); emit_byte(0x4E); emit_byte(0x67)
         emit_byte(0x6D); emit_byte(0xC1); emit_byte(0xAB); emit_byte(0x43)
-        emit_byte(0x50)  // push rax
+        emit_x64_push_r(0)  // push rax
         // movq xmm1, [rsp]
         emit_byte(0xF3); emit_byte(0x0F); emit_byte(0x7E); emit_byte(0x0C); emit_byte(0x24)
-        emit_byte(0x58)  // pop rax
+        emit_x64_pop_r(0)  // pop rax
         // ucomisd xmm0, xmm1: 66 0F 2E C1
         emit_byte(0x66); emit_byte(0x0F); emit_byte(0x2E); emit_byte(0xC1)
         // jae .ff_big (unsigned above-or-equal = >= 1e18) — rel32 to reach far
@@ -12374,7 +12550,7 @@ fn ir_emit_x86_insn(uint64 ii) {
         // Save xmm0 (abs val) and int_part to stack for later fraction use
         // Push xmm0 bits: movq rax, xmm0; push rax
         emit_byte(0x66); emit_byte(0x48); emit_byte(0x0F); emit_byte(0x7E); emit_byte(0xC0)
-        emit_byte(0x50)  // push rax (abs val bits)
+        emit_x64_push_r(0)  // push rax (abs val bits)
 
         // Format int_part (in rcx) into r10 using divide-by-10 loop
         // rdi = r10 (current write pos); rax = int_part
@@ -12411,7 +12587,7 @@ fn ir_emit_x86_insn(uint64 ii) {
         // add dl, '0'
         emit_byte(0x80); emit_byte(0xC2); emit_byte(0x30)
         // push rdx
-        emit_byte(0x52)
+        emit_x64_push_r(2)
         // inc rcx
         emit_byte(0x48); emit_byte(0xFF); emit_byte(0xC1)
         // test rax, rax
@@ -12427,7 +12603,7 @@ fn ir_emit_x86_insn(uint64 ii) {
         // Actually: we pushed digits LSB first, so pop MSB first → correct order
         // pop_loop: pop rdx; mov [rdi], dl; inc rdi; dec rcx; jnz pop_loop
         uint64 ff_pop_loop = out_len
-        emit_byte(0x5A)  // pop rdx
+        emit_x64_pop_r(2)  // pop rdx
         emit_byte(0x88); emit_byte(0x17)   // mov [rdi], dl
         emit_byte(0x48); emit_byte(0xFF); emit_byte(0xC7)   // inc rdi
         emit_byte(0x48); emit_byte(0xFF); emit_byte(0xC9)   // dec rcx
@@ -12437,6 +12613,7 @@ fn ir_emit_x86_insn(uint64 ii) {
         uint64 ff_pop_p = out_buf + ff_pop_jnz
         emit_byte(0)
         unsafe { *(ff_pop_p as uint8) = ff_pop_disp }
+        uw_balanced_loops(ff_ui_loop, ff_ui_jnz + 1, ff_pop_loop, ff_pop_jnz + 1, 1)   // #143 (counter rcx)
 
         // .ff_ui_done:
         uint64 ff_ui_done = out_len
@@ -12510,7 +12687,7 @@ fn ir_emit_x86_insn(uint64 ii) {
         emit_byte(0x49); emit_byte(0xFF); emit_byte(0xC3)   // inc r11
 
         // Restore xmm0 (abs val): pop rax; movq xmm0, rax
-        emit_byte(0x58)  // pop rax (abs val that we pushed earlier)
+        emit_x64_pop_r(0)  // pop rax (abs val that we pushed earlier)
         emit_byte(0x66); emit_byte(0x48); emit_byte(0x0F); emit_byte(0x6E); emit_byte(0xC0)
 
         // cvttsd2si rax, xmm0 (integer part again, to reconstruct int_f)
@@ -12525,9 +12702,9 @@ fn ir_emit_x86_insn(uint64 ii) {
         // 1e6 LE bytes: 00 00 00 00 80 84 2E 41
         emit_byte(0x00); emit_byte(0x00); emit_byte(0x00); emit_byte(0x00)
         emit_byte(0x80); emit_byte(0x84); emit_byte(0x2E); emit_byte(0x41)
-        emit_byte(0x50)  // push rax
+        emit_x64_push_r(0)  // push rax
         emit_byte(0xF3); emit_byte(0x0F); emit_byte(0x7E); emit_byte(0x0C); emit_byte(0x24)  // movq xmm1, [rsp]
-        emit_byte(0x58)  // pop rax
+        emit_x64_pop_r(0)  // pop rax
         // mulsd xmm0, xmm1: F2 0F 59 C1
         emit_byte(0xF2); emit_byte(0x0F); emit_byte(0x59); emit_byte(0xC1)
 
@@ -12654,7 +12831,7 @@ fn ir_emit_x86_insn(uint64 ii) {
         emit_byte(0x48); emit_byte(0x31); emit_byte(0xD2)
         emit_byte(0x49); emit_byte(0xF7); emit_byte(0xF1)   // div r9
         emit_byte(0x80); emit_byte(0xC2); emit_byte(0x30)   // add dl, '0'
-        emit_byte(0x52)  // push rdx
+        emit_x64_push_r(2)  // push rdx
         emit_byte(0x48); emit_byte(0xFF); emit_byte(0xC1)   // inc rcx
         emit_byte(0x48); emit_byte(0x85); emit_byte(0xC0)   // test rax, rax
         emit_byte(0x75)  // jnz ff_fi_loop
@@ -12666,7 +12843,7 @@ fn ir_emit_x86_insn(uint64 ii) {
 
         // pop and write digits
         uint64 ff_fi_pop_loop = out_len
-        emit_byte(0x5A)  // pop rdx
+        emit_x64_pop_r(2)  // pop rdx
         emit_byte(0x88); emit_byte(0x17)   // mov [rdi], dl
         emit_byte(0x48); emit_byte(0xFF); emit_byte(0xC7)   // inc rdi
         emit_byte(0x48); emit_byte(0xFF); emit_byte(0xC9)   // dec rcx
@@ -12676,6 +12853,7 @@ fn ir_emit_x86_insn(uint64 ii) {
         uint64 ff_fi_pop_p = out_buf + ff_fi_pop_jnz
         emit_byte(0)
         unsafe { *(ff_fi_pop_p as uint8) = ff_fi_pop_disp }
+        uw_balanced_loops(ff_fi_loop, ff_fi_jnz + 1, ff_fi_pop_loop, ff_fi_pop_jnz + 1, 1)   // #143 (counter rcx)
 
         // .ff_fi_done:
         uint64 ff_fi_done = out_len
@@ -14840,10 +15018,76 @@ fn ir_naked_diagnose_generic(uint64 fn_node, uint64 arch_a64) {
 }
 
 fn ir_x86_naked_diagnose(uint64 fn_node) {
+    ir_win_naked_refuse(fn_node, 0)
     ir_naked_diagnose_generic(fn_node, 0)
 }
 
+// #143 (spec 4.3): on Windows a @naked function gets a zero-code unwind record
+// (the leaf rule), which is true only if its body never moves the stack
+// pointer. Refuse, with a located error, any IR op outside the RSP-neutral
+// whitelist: the wide-file whitelist (ir_x86_op_widesafe / ir_a64_op_widesafe,
+// ops whose handlers touch only their operands and scratch; on arm64 plus the
+// PC-relative static/string/function-address ops x86 already lists) minus
+// IR_ARR_CHECK (131), whose failure path calls ExitProcess through the IAT
+// with a moved RSP; plus the user's own asm (op 96), which the asm refusals
+// check separately. Everything else -- calls and their argument setup,
+// Windows builtins, allocation, formatting, C7 -- can move RSP/SP.
+fn ir_win_naked_op_ok(uint64 op, uint64 arch_a64) -> uint64 {
+    if op == 96 || op == 0 { return 1 }
+    if op == 131 { return 0 }
+    if arch_a64 != 0 {
+        // static load/store, string constant, static/function address: PC-
+        // relative adrp/add/ldr through x0/x9 only -- SP-neutral, but not on
+        // the arm64 wide-file list (which is about scratch registers)
+        if op == 77 || op == 78 || op == 79 || op == 84 || op == 86 { return 1 }
+        return ir_a64_op_widesafe(op)
+    }
+    return ir_x86_op_widesafe(op)
+}
+
+fn ir_win_naked_refuse(uint64 fn_node, uint64 arch_a64) {
+    if win_frame_refusals_active() == 0 { return }
+    uint64 b = 0
+    while b < ir_bb_count {
+        uint64 i = ir_bb_first_insn(b)
+        while i != 0xFFFFFFFF {
+            uint64 op = ir_insn_opcode(i)
+            if ir_win_naked_op_ok(op, arch_a64) == 0 {
+                uint64 tok = ir_insn_src_tok_at(i)
+                uint32 nt = ast_data1(fn_node)
+                if tok == 0 { tok = nt }
+                diag_loc_head(tok, 0)
+                write(2, "@naked function '", 17)
+                write(2, cg_source + tok_text_start(nt), tok_text_len(nt))
+                uint64 what = "' does something here that moves the stack pointer (IR op "
+                if op == 50 { what = "' makes a call here, which moves the stack pointer (IR op " }
+                if op == 51 { what = "' passes call arguments here, which can move the stack pointer (IR op " }
+                uint64 tail = "); on Windows a naked function's unwind record describes no frame, so its body may not move RSP/SP or write the frame pointer (#143). Move the work into a normal function, or into asm you control.\n"
+                if arch_a64 != 0 {
+                    // arm64 (phase-2 review Nit 7): arguments do not move SP
+                    // there; what a call breaks is x30, the link register a
+                    // frameless record says still holds the return address
+                    what = "' does something here that moves SP or overwrites x30 (IR op "
+                    if op == 50 { what = "' makes a call here, which overwrites x30, the link register holding its return address (IR op " }
+                    if op == 51 { what = "' sets up a call here, and a call overwrites x30, the link register holding its return address (IR op " }
+                    tail = "); on Windows a naked function's unwind record describes no frame, so its body may not move SP, write x29 or overwrite x30 (#143). Move the work into a normal function, or into asm you control.\n"
+                }
+                write(2, what, str_len(what))
+                uint8[24] obuf
+                uint64 olen = fmt_uint(obuf, op)
+                write(2, obuf, olen)
+                write(2, tail, str_len(tail))
+                diag_span_of(tok)
+                exit(1)
+            }
+            i = ir_insn_next(i)
+        }
+        b = b + 1
+    }
+}
+
 fn ir_a64_naked_diagnose(uint64 fn_node) {
+    ir_win_naked_refuse(fn_node, 1)
     ir_naked_diagnose_generic(fn_node, 1)
 }
 
@@ -14894,6 +15138,19 @@ fn ir_emit_x86_function(uint64 fn_node) {
 
     // 2. Compute liveness
     ir_compute_liveness()
+
+    // 2b. #143 option C (spec 2.5.1, 2.5.2): classify the Windows function
+    // before the colour file is chosen -- an SP-fixed one (no RSP write after
+    // its prologue) gets no frame pointer and rbp back as colour 5. Reset for
+    // every function (the statics are shared across functions and fat
+    // slices). uw_fn_sp_fixed arms the backstop: an SP helper reached while
+    // it is set stops the build (the classifier missed a site).
+    ir_win_fp = 0
+    uw_fn_sp_fixed = 0
+    if target_os == 2 && is_naked == 0 {
+        ir_win_fp = ir_win_fn_moves_sp(ir_fn_name_tok)
+        if ir_win_fp == 0 { uw_fn_sp_fixed = 1 }
+    }
 
     // 3. Register allocation. The wide 12-colour file (callee-saved six
     // plus rsi/rdi/r8-r11) applies to every function without inline asm
@@ -14958,34 +15215,8 @@ fn ir_emit_x86_function(uint64 fn_node) {
         c7_argc_off = static_lookup_by_name("cli_argc", 8)
         c7_argv_off = static_lookup_by_name("cli_argv", 8)
     }
-    if tok_matches(fn_name_tok, "main", 4) != 0 && freestanding == 0 && target_os == 2 && is_naked == 0 && (c7_argc_off != 0xFFFFFFFF || c7_argv_off != 0xFFFFFFFF) {
-        // Windows (spec C7): parse the command line UCRT's way into a fresh
-        // VirtualAlloc'd argv, exactly as the Linux loader would have laid it
-        // out -- see the C7 block at the end of this file.
-        c7_x86_emit_main_argv(c7_argc_off, c7_argv_off)
-    } else if tok_matches(fn_name_tok, "main", 4) != 0 && freestanding == 0 && target_os == 2 {
-        // No cli_argc/cli_argv to fill, or a @naked main (no ExitProcess
-        // epilogue, so its callee-saved registers may not be clobbered): the
-        // pre-C7 sequence, unchanged. A @naked main that reads cli_argc sees
-        // the 0xFFFFFFFF sentinel -- documented as unsupported (spec C7).
-        // Windows: call GetCommandLineA -> rax = raw command line string
-        // PE entry: loader calls us, RSP = 8 mod 16.
-        // Use 0x28 shadow (0x20 + 8 alignment) so RSP is 16-aligned before CALL.
-        emit_win_alloc_stack(0x28)
-        emit_win_call_iat(7)          // GetCommandLineA (IAT slot 7) -> rax = cmdline
-        emit_win_free_stack(0x28)
-        // Store raw cmdline pointer as cli_argv (will be parsed by win_init_args)
-        uint64 argv_off_w = static_lookup_by_name("cli_argv", 8)
-        if argv_off_w != 0xFFFFFFFF {
-            emit_static_store(argv_off_w)
-        }
-        // Set cli_argc = 0xFFFFFFFF as "needs parsing" sentinel
-        ir_emit_mov_r64_imm64(0, 0xFFFFFFFF)
-        uint64 argc_off_w = static_lookup_by_name("cli_argc", 8)
-        if argc_off_w != 0xFFFFFFFF {
-            emit_static_store(argc_off_w)
-        }
-    }
+    // (Windows main: the command-line block is emitted AFTER the prologue,
+    // see 5c below -- #143: every instruction must lie inside a described frame.)
     if tok_matches(fn_name_tok, "main", 4) != 0 && freestanding == 0 && target_os != 2 {
         // Linux/macOS/Android: argc/argv on stack. [RSP]=argc, [RSP+8]=&argv[0]
         // mov rax, [rsp]  ; rax = argc
@@ -15040,35 +15271,50 @@ fn ir_emit_x86_function(uint64 fn_node) {
         // a disagreement is a mismatched push/pop count, i.e. worse than
         // the bug being fixed. @naked is untouched: it gets no prologue.
         if x86_has_asm != 0 { used_mask = used_mask | 0x3F }
+        // Windows (#143): only colours below ir_x86_callee_colours are
+        // callee-saved (wide-file colours 5+ are scratch there), and rbp is
+        // pushed by every SP-moving function -- it becomes the frame pointer
+        // below. Bit 5 keeps meaning "push/pop rbp" for the epilogue: in an
+        // SP-fixed function (option C, ruling Q12) it is set only when
+        // colour 5 (rbp) was allocated, an ordinary nonvolatile.
+        if target_os == 2 && ir_win_fp != 0 { used_mask = (used_mask & 0x1F) | 32 }
         // Color → physical reg encoding:
         //   color 0 → rbx (0x53)
         //   color 1 → r12 (0x41 0x54)
         //   color 2 → r13 (0x41 0x55)
         //   color 3 → r14 (0x41 0x56)
         //   color 4 → r15 (0x41 0x57)
+        // (#143: each push is reported to the unwind recorder, a no-op
+        // unless target_os == 2.)
         if (used_mask & 1) != 0 {
             emit_byte(0x53)                       // push rbx
             push_count = push_count + 1
+            uw_x64_push(3, out_len)
         }
         if (used_mask & 2) != 0 {
             emit_byte(0x41); emit_byte(0x54)      // push r12
             push_count = push_count + 1
+            uw_x64_push(12, out_len)
         }
         if (used_mask & 4) != 0 {
             emit_byte(0x41); emit_byte(0x55)      // push r13
             push_count = push_count + 1
+            uw_x64_push(13, out_len)
         }
         if (used_mask & 8) != 0 {
             emit_byte(0x41); emit_byte(0x56)      // push r14
             push_count = push_count + 1
+            uw_x64_push(14, out_len)
         }
         if (used_mask & 16) != 0 {
             emit_byte(0x41); emit_byte(0x57)      // push r15
             push_count = push_count + 1
+            uw_x64_push(15, out_len)
         }
         if (used_mask & 32) != 0 {
             emit_byte(0x55)                       // push rbp
             push_count = push_count + 1
+            uw_x64_push(5, out_len)
         }
     }
     // Stash for the epilogue (which is emitted later but needs to mirror
@@ -15099,6 +15345,62 @@ fn ir_emit_x86_function(uint64 fn_node) {
         emit_byte(0x81)
         emit_byte(0xEC)
         emit_u32_le(frame_size)
+        uw_x64_alloc(frame_size, out_len)
+    }
+    // 5b. Windows: establish the frame pointer -- the LAST prologue
+    // instruction, so the unwind record's SET_FPREG is its first code and the
+    // body may move RSP freely (#143, spec 4.1).
+    if target_os == 2 && is_naked == 0 && ir_win_fp != 0 {
+        emit_byte(0x48); emit_byte(0x89); emit_byte(0xE5)      // mov rbp, rsp (SP-moving functions only, option C)
+        uw_x64_setfp(5, out_len)
+    }
+    // Every size is known now: seal the record (a naked function's is the
+    // zero-code kind 1, spec 4.3).
+    if is_naked != 0 { uw_fn_set_naked() }
+    uw_fn_finalize()
+
+    // 5c. Windows main(): the command line, now INSIDE the frame (RSP is
+    // 16-aligned here, so the C7 block takes 0x40 and the plain one 0x20).
+    // A @naked main gets no command-line sequence at all: cli_argc keeps the
+    // 0xFFFFFFFF sentinel and cli_argv is 0, set by plain static stores that
+    // move no stack (a naked main must call GetCommandLineA itself for the
+    // raw line; std/args.kr and the compiler's win_init_args treat cli_argv 0
+    // as "no arguments").
+    if tok_matches(fn_name_tok, "main", 4) != 0 && freestanding == 0 && target_os == 2 {
+        if is_naked != 0 {
+            uint64 nk_argv = static_lookup_by_name("cli_argv", 8)
+            if nk_argv != 0xFFFFFFFF {
+                ir_emit_mov_r64_imm64(0, 0)
+                emit_static_store(nk_argv)
+            }
+            uint64 nk_argc = static_lookup_by_name("cli_argc", 8)
+            if nk_argc != 0xFFFFFFFF {
+                ir_emit_mov_r64_imm64(0, 0xFFFFFFFF)
+                emit_static_store(nk_argc)
+            }
+        } else if c7_argc_off != 0xFFFFFFFF || c7_argv_off != 0xFFFFFFFF {
+            // Windows (spec C7): parse the command line UCRT's way into a fresh
+            // VirtualAlloc'd argv, exactly as the Linux loader would have laid it
+            // out -- see the C7 block at the end of this file.
+            uw_sp_op_site_set("X15")
+            c7_x86_emit_main_argv(c7_argc_off, c7_argv_off)
+        } else {
+            // No cli_argc/cli_argv to fill: the pre-C7 sequence (raw command
+            // line in cli_argv, sentinel in cli_argc; win_init_args parses it).
+            uw_sp_op_site_set("X15")
+            emit_win_alloc_stack(0x20)
+            emit_win_call_iat(7)          // GetCommandLineA (IAT slot 7) -> rax = cmdline
+            emit_win_free_stack(0x20)
+            uint64 argv_off_w = static_lookup_by_name("cli_argv", 8)
+            if argv_off_w != 0xFFFFFFFF {
+                emit_static_store(argv_off_w)
+            }
+            ir_emit_mov_r64_imm64(0, 0xFFFFFFFF)
+            uint64 argc_off_w = static_lookup_by_name("cli_argc", 8)
+            if argc_off_w != 0xFFFFFFFF {
+                emit_static_store(argc_off_w)
+            }
+        }
     }
 
     // 6. Allocate block offset tracking and branch/return fixup lists
@@ -15297,6 +15599,7 @@ fn ir_emit_x86_function(uint64 fn_node) {
                 // Windows: ExitProcess(rax) via IAT slot 0
                 // mov ecx, eax (32-bit DWORD ABI argument is in ecx)
                 emit_byte(0x89); emit_byte(0xC1)
+                uw_sp_op_site_set("X15")
                 emit_win_alloc_stack(0x20)
                 emit_win_call_iat(0)
             } else {
@@ -15335,6 +15638,7 @@ fn ir_emit_x86_function(uint64 fn_node) {
         }
         emit_byte(0xC3)
     }
+    uw_sp_state_reset()        // #143 option C: no backstop state outlives the function (A19a-c review finding 3)
 }
 
 // ===========================================================================
@@ -15581,8 +15885,7 @@ fn c7_x86_emit_parse_leaf() {
     c7_x86_jcc(C7_JB, l_ret0)
     c7_b4(0x4C, 0x8D, 0x04, 0xC2)           // lea r8, [rdx+rax*8]  (strings)
     c7_b3(0x4C, 0x89, 0x02)                 // mov [rdx], r8        (argv[0])
-    c7_b3(0x48, 0x81, 0xEC)                 // sub rsp, 0x100       (the table)
-    emit_u32_le(0x100)
+    emit_x64_rsp_adj(0xEC, 0x100)           // sub rsp, 0x100       (the table)
     c7_x86_emit_lead_table()
     c7_b3(0x41, 0xB9, 0x01)                 // mov r9d, 1
     c7_b3(0x00, 0x00, 0x00)
@@ -15705,8 +16008,7 @@ fn c7_x86_emit_parse_leaf() {
     c7_b4(0x4A, 0xC7, 0x04, 0xCA)           // mov qword [rdx+r9*8], 0
     emit_u32_le(0)
     c7_b3(0x4C, 0x89, 0xC8)                 // mov rax, r9
-    c7_b3(0x48, 0x81, 0xC4)                 // add rsp, 0x100
-    emit_u32_le(0x100)
+    emit_x64_rsp_adj(0xC4, 0x100)           // add rsp, 0x100
     emit_byte(0xC3)                         // ret
     c7_bind(l_ret0)
     c7_b2(0x31, 0xC0)                       // xor eax, eax
@@ -15834,8 +16136,7 @@ fn c7_x86_emit_quote_leaf() {
     uint64 l_qclose = c7_label()
 
     c7_b3(0x4D, 0x89, 0xC1)                 // mov r9, r8   (LeadByte)
-    c7_b3(0x48, 0x81, 0xEC)                 // sub rsp, 0x100  (the table)
-    emit_u32_le(0x100)
+    emit_x64_rsp_adj(0xEC, 0x100)           // sub rsp, 0x100  (the table)
     c7_x86_emit_lead_table()
     c7_b2(0x31, 0xC0)                       // xor eax, eax
     c7_b3(0x45, 0x31, 0xDB)                 // xor r11d, r11d
@@ -15962,8 +16263,7 @@ fn c7_x86_emit_quote_leaf() {
     c7_x86_jmp(l_next)
     c7_bind(l_end)
     c7_x86_quote_put(0x00)                  // the NUL counts
-    c7_b3(0x48, 0x81, 0xC4)                 // add rsp, 0x100
-    emit_u32_le(0x100)
+    emit_x64_rsp_adj(0xC4, 0x100)           // add rsp, 0x100
     emit_byte(0xC3)                         // ret
     c7_end()
 }
@@ -16004,8 +16304,8 @@ fn c7_x86_quote_verbatim(uint64 l_after) {
 // .text) to stderr and exits with `code`. Realigns rsp itself, so it is valid
 // from any stack depth; it never returns.
 fn c7_x86_emit_die(uint64 code, uint64 msg, uint64 len) {
-    c7_b4(0x48, 0x83, 0xE4, 0xF0)           // and rsp, -16
-    c7_b4(0x48, 0x83, 0xEC, 0x70)           // sub rsp, 0x70
+    emit_x64_rsp_adj(0xE4, 0xF0)            // and rsp, -16
+    emit_x64_rsp_adj(0xEC, 0x70)            // sub rsp, 0x70
     uint64 q = 0
     while q * 8 < len {
         uint64 v = 0
@@ -16072,7 +16372,7 @@ fn c7_x86_emit_main_argv(uint64 argc_off, uint64 argv_off) {
     uint64 l_leaf = c7_label()
     uint64 l_over = c7_label()
     uint64 l_cpok = c7_label()
-    emit_win_alloc_stack(0x48)
+    emit_win_alloc_stack(0x40)   // RSP 16-aligned (after the prologue, #143)
     // GetCPInfo(CP_ACP, &cpinfo at [rsp+0x28]) -- the ANSI code page's lead
     // bytes, the ones UCRT's narrow argv parse honours. On failure the CPINFO
     // is zeroed: no lead bytes, the single-byte parse (UCRT's own fallback
@@ -16111,24 +16411,26 @@ fn c7_x86_emit_main_argv(uint64 argc_off, uint64 argv_off) {
     if argc_off != 0xFFFFFFFF { emit_static_store(argc_off) }
     c7_b3(0x48, 0x89, 0xD8)                 // mov rax, rbx
     if argv_off != 0xFFFFFFFF { emit_static_store(argv_off) }
-    emit_win_free_stack(0x48)
+    emit_win_free_stack(0x40)
     c7_x86_jmp(l_over)
     c7_bind(l_fail)
+    uint64 uw_b = out_len
     c7_x86_emit_die(121, "krc runtime: argv allocation failed\n", 36)
+    uw_leaf(uw_b, out_len, 1, "c7_die_argv_alloc")   // #143: dead-end leaf
     c7_bind(l_leaf)
+    uw_b = out_len
     c7_x86_emit_parse_leaf()
+    uw_leaf(uw_b, out_len, 0, "c7_parse")            // #143: called leaf
     c7_bind(l_over)
     c7_end()
 }
 
 // push / pop of a 64-bit GPR (0-15).
 fn c7_x86_push(uint64 r) {
-    if r >= 8 { emit_byte(0x41) }
-    emit_byte(0x50 + (r & 7))
+    emit_x64_push_r(r)                      // #143 option C: reports
 }
 fn c7_x86_pop(uint64 r) {
-    if r >= 8 { emit_byte(0x41) }
-    emit_byte(0x58 + (r & 7))
+    emit_x64_pop_r(r)
 }
 
 // exec_process_argv on Windows x86_64 (op 114): quote argv into ONE command
@@ -16151,8 +16453,7 @@ fn c7_x86_emit_exec_argv(uint64 path_r, uint64 argv_r) {
     c7_x86_push(argv_r)
     c7_x86_pop(13)                          // r13 = argv
     c7_x86_pop(12)                          // r12 = path
-    c7_b3(0x48, 0x81, 0xEC)                 // sub rsp, 0xF0
-    emit_u32_le(0xF0)
+    emit_x64_rsp_adj(0xEC, 0xF0)            // sub rsp, 0xF0
     // GetCPInfo(CP_ACP, &cpinfo at [rsp+0xD0]); zeroed on failure, as in the
     // main prologue. Both quoter calls get its LeadByte array.
     c7_b2(0x31, 0xC9)                       // xor ecx, ecx       (CP_ACP)
@@ -16220,18 +16521,26 @@ fn c7_x86_emit_exec_argv(uint64 path_r, uint64 argv_r) {
     emit_win_call_iat(IAT_GetExitCodeProcess)
     // ExitProcess(code)
     emit_byte(0x8B); emit_byte(0x4C); emit_byte(0x24); emit_byte(0x20)
-    emit_byte(0x48); emit_byte(0x81); emit_byte(0xC4); emit_u32_le(0xF0)
+    emit_x64_rsp_adj(0xC4, 0xF0)
     emit_win_alloc_stack(0x20)
     emit_win_call_iat(IAT_ExitProcess)
     c7_x86_jmp(l_over)                      // not reached
     c7_bind(l_long)
+    uint64 uw_b = out_len
     c7_x86_emit_die(122, "krc runtime: child command line too long\n", 41)
+    uw_leaf(uw_b, out_len, 1, "c7_die_cmdline_long")     // #143: dead-end leaves
     c7_bind(l_nomem)
+    uw_b = out_len
     c7_x86_emit_die(123, "krc runtime: child command line allocation failed\n", 50)
+    uw_leaf(uw_b, out_len, 1, "c7_die_cmdline_alloc")
     c7_bind(l_nochild)
+    uw_b = out_len
     c7_x86_emit_die(124, "krc runtime: child process could not be started\n", 48)
+    uw_leaf(uw_b, out_len, 1, "c7_die_create_process")
     c7_bind(l_quote)
+    uw_b = out_len
     c7_x86_emit_quote_leaf()
+    uw_leaf(uw_b, out_len, 0, "c7_quote")                // #143: called leaf
     c7_bind(l_over)
     c7_end()
 }

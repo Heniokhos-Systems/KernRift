@@ -1,0 +1,27 @@
+// Port of benchmarks/sieve.kr: sieve of Eratosthenes on a local (stack) byte
+// array passed by address (see README: no static arrays), repeated.
+fn run(uint64 s, uint64 n) -> uint64 {
+    uint64 i = 0
+    while i < n { store8(s + i, 1)  i = i + 1 }
+    uint64 p = 2
+    while p * p < n {
+        if load8(s + p) != 0 {
+            uint64 j = p * p
+            while j < n { store8(s + j, 0)  j = j + p }
+        }
+        p = p + 1
+    }
+    uint64 count = 0
+    i = 2
+    while i < n { if load8(s + i) != 0 { count = count + 1 }  i = i + 1 }
+    return count
+}
+fn main() {
+    u8[4000] s
+    uint64 r = 0
+    uint64 k = 0
+    while k < 40 { r = r + run(s, 4000)  k = k + 1 }
+    // 550 primes below 4000
+    if r == 40 * 550 { pe_exit_ok() }
+    pe_exit_bad()
+}

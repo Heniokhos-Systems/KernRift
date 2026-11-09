@@ -1,0 +1,152 @@
+// Port of benchmarks/sha256.kr: SHA-256 of a 2048-byte message (byte i =
+// i*7 mod 256), checked against its digest, twice. Local (stack) arrays passed
+// by address (see README: no static arrays).
+fn k_init(uint64 sk) {
+    store64(sk + 0, 0x428a2f98)
+    store64(sk + 8, 0x71374491)
+    store64(sk + 16, 0xb5c0fbcf)
+    store64(sk + 24, 0xe9b5dba5)
+    store64(sk + 32, 0x3956c25b)
+    store64(sk + 40, 0x59f111f1)
+    store64(sk + 48, 0x923f82a4)
+    store64(sk + 56, 0xab1c5ed5)
+    store64(sk + 64, 0xd807aa98)
+    store64(sk + 72, 0x12835b01)
+    store64(sk + 80, 0x243185be)
+    store64(sk + 88, 0x550c7dc3)
+    store64(sk + 96, 0x72be5d74)
+    store64(sk + 104, 0x80deb1fe)
+    store64(sk + 112, 0x9bdc06a7)
+    store64(sk + 120, 0xc19bf174)
+    store64(sk + 128, 0xe49b69c1)
+    store64(sk + 136, 0xefbe4786)
+    store64(sk + 144, 0x0fc19dc6)
+    store64(sk + 152, 0x240ca1cc)
+    store64(sk + 160, 0x2de92c6f)
+    store64(sk + 168, 0x4a7484aa)
+    store64(sk + 176, 0x5cb0a9dc)
+    store64(sk + 184, 0x76f988da)
+    store64(sk + 192, 0x983e5152)
+    store64(sk + 200, 0xa831c66d)
+    store64(sk + 208, 0xb00327c8)
+    store64(sk + 216, 0xbf597fc7)
+    store64(sk + 224, 0xc6e00bf3)
+    store64(sk + 232, 0xd5a79147)
+    store64(sk + 240, 0x06ca6351)
+    store64(sk + 248, 0x14292967)
+    store64(sk + 256, 0x27b70a85)
+    store64(sk + 264, 0x2e1b2138)
+    store64(sk + 272, 0x4d2c6dfc)
+    store64(sk + 280, 0x53380d13)
+    store64(sk + 288, 0x650a7354)
+    store64(sk + 296, 0x766a0abb)
+    store64(sk + 304, 0x81c2c92e)
+    store64(sk + 312, 0x92722c85)
+    store64(sk + 320, 0xa2bfe8a1)
+    store64(sk + 328, 0xa81a664b)
+    store64(sk + 336, 0xc24b8b70)
+    store64(sk + 344, 0xc76c51a3)
+    store64(sk + 352, 0xd192e819)
+    store64(sk + 360, 0xd6990624)
+    store64(sk + 368, 0xf40e3585)
+    store64(sk + 376, 0x106aa070)
+    store64(sk + 384, 0x19a4c116)
+    store64(sk + 392, 0x1e376c08)
+    store64(sk + 400, 0x2748774c)
+    store64(sk + 408, 0x34b0bcb5)
+    store64(sk + 416, 0x391c0cb3)
+    store64(sk + 424, 0x4ed8aa4a)
+    store64(sk + 432, 0x5b9cca4f)
+    store64(sk + 440, 0x682e6ff3)
+    store64(sk + 448, 0x748f82ee)
+    store64(sk + 456, 0x78a5636f)
+    store64(sk + 464, 0x84c87814)
+    store64(sk + 472, 0x8cc70208)
+    store64(sk + 480, 0x90befffa)
+    store64(sk + 488, 0xa4506ceb)
+    store64(sk + 496, 0xbef9a3f7)
+    store64(sk + 504, 0xc67178f2)
+}
+fn rotr(uint64 x, uint64 n) -> uint64 {
+    return ((x >> n) | (x << (32 - n))) & 0xFFFFFFFF
+}
+fn block(uint64 sk, uint64 sw, uint64 sh, uint64 sm, uint64 off) {
+    uint64 t = 0
+    while t < 16 {
+        uint64 p = off + t * 4
+        store64(sw + t * 8, (load8(sm + p) << 24) | (load8(sm + p + 1) << 16) | (load8(sm + p + 2) << 8) | load8(sm + p + 3))
+        t = t + 1
+    }
+    while t < 64 {
+        uint64 w15 = load64(sw + (t - 15) * 8)
+        uint64 w2 = load64(sw + (t - 2) * 8)
+        uint64 s0 = rotr(w15, 7) ^ rotr(w15, 18) ^ (w15 >> 3)
+        uint64 s1 = rotr(w2, 17) ^ rotr(w2, 19) ^ (w2 >> 10)
+        store64(sw + t * 8, (load64(sw + (t - 16) * 8) + s0 + load64(sw + (t - 7) * 8) + s1) & 0xFFFFFFFF)
+        t = t + 1
+    }
+    uint64 a = load64(sh + 0)
+    uint64 b = load64(sh + 8)
+    uint64 c = load64(sh + 16)
+    uint64 d = load64(sh + 24)
+    uint64 e = load64(sh + 32)
+    uint64 f = load64(sh + 40)
+    uint64 g = load64(sh + 48)
+    uint64 h = load64(sh + 56)
+    t = 0
+    while t < 64 {
+        uint64 S1 = rotr(e, 6) ^ rotr(e, 11) ^ rotr(e, 25)
+        uint64 ch = (e & f) ^ ((e ^ 0xFFFFFFFF) & g)
+        uint64 t1 = (h + S1 + ch + load64(sk + t * 8) + load64(sw + t * 8)) & 0xFFFFFFFF
+        uint64 S0 = rotr(a, 2) ^ rotr(a, 13) ^ rotr(a, 22)
+        uint64 mj = (a & b) ^ (a & c) ^ (b & c)
+        uint64 t2 = (S0 + mj) & 0xFFFFFFFF
+        h = g
+        g = f
+        f = e
+        e = (d + t1) & 0xFFFFFFFF
+        d = c
+        c = b
+        b = a
+        a = (t1 + t2) & 0xFFFFFFFF
+        t = t + 1
+    }
+    store64(sh + 0, (load64(sh + 0) + a) & 0xFFFFFFFF)
+    store64(sh + 8, (load64(sh + 8) + b) & 0xFFFFFFFF)
+    store64(sh + 16, (load64(sh + 16) + c) & 0xFFFFFFFF)
+    store64(sh + 24, (load64(sh + 24) + d) & 0xFFFFFFFF)
+    store64(sh + 32, (load64(sh + 32) + e) & 0xFFFFFFFF)
+    store64(sh + 40, (load64(sh + 40) + f) & 0xFFFFFFFF)
+    store64(sh + 48, (load64(sh + 48) + g) & 0xFFFFFFFF)
+    store64(sh + 56, (load64(sh + 56) + h) & 0xFFFFFFFF)
+}
+fn digest(uint64 sk, uint64 sw, uint64 sh, uint64 sm) -> uint64 {
+    store64(sh + 0, 0x6a09e667)
+    store64(sh + 8, 0xbb67ae85)
+    store64(sh + 16, 0x3c6ef372)
+    store64(sh + 24, 0xa54ff53a)
+    store64(sh + 32, 0x510e527f)
+    store64(sh + 40, 0x9b05688c)
+    store64(sh + 48, 0x1f83d9ab)
+    store64(sh + 56, 0x5be0cd19)
+    uint64 i = 0
+    while i < 2048 { store8(sm + i, (i * 7) & 0xFF)  i = i + 1 }
+    // padding: 0x80, zeros, the 64-bit big-endian bit length 16384 = 0x4000
+    store8(sm + 2048, 0x80)
+    i = 2049
+    while i < 2112 { store8(sm + i, 0)  i = i + 1 }
+    store8(sm + 2110, 0x40)
+    uint64 off = 0
+    while off < 2112 { block(sk, sw, sh, sm, off)  off = off + 64 }
+    if load64(sh + 0) == 0x5c41b81a && load64(sh + 8) == 0xc55eed83 && load64(sh + 16) == 0xf2ff1457 && load64(sh + 24) == 0xa3518c53 && load64(sh + 32) == 0xcb79107b && load64(sh + 40) == 0x565c42e0 && load64(sh + 48) == 0x8a1df883 && load64(sh + 56) == 0x44d8a3bd { return 1 }
+    return 0
+}
+fn main() {
+    uint64[64] sk
+    uint64[64] sw
+    uint64[8] sh
+    u8[2112] sm
+    k_init(sk)
+    if digest(sk, sw, sh, sm) + digest(sk, sw, sh, sm) == 2 { pe_exit_ok() }
+    pe_exit_bad()
+}

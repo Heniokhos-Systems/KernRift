@@ -9328,10 +9328,15 @@ pei_check() {
     rm -f "$PEI_OUT"
 }
 #                                                  .idata  SizeOf  FirstThunks (IAT region +472, then +0/+192/+376)
+# x86_64 SizeOfImage includes the .pdata and .xdata pages after .idata (#143:
+# the x86_64 backends write unwind tables, split per the phase-2 review's M1);
+# .idata itself is unchanged.
 pei_check pe_imports_three_dlls x86_64 "$DIR/golden/pe_imports_x86_64.idata.hex" \
-    8192  12288  8664  8856  9040     # 0x2000 0x3000  0x21D8 0x2298 0x2350
+    8192  20480  8664  8856  9040     # 0x2000 0x5000  0x21D8 0x2298 0x2350
+# arm64 SizeOfImage likewise includes the .pdata and .xdata pages (#143 A9b);
+# .idata is unchanged (the 0x400 arm64 headers move file offsets only).
 pei_check pe_imports_three_dlls_arm64 arm64 "$DIR/golden/pe_imports_arm64.idata.hex" \
-    12288 16384  12760 12952 13136    # 0x3000 0x4000  0x31D8 0x3298 0x3350
+    12288 24576  12760 12952 13136    # 0x3000 0x6000  0x31D8 0x3298 0x3350
 # The RVA-free tail (hint/name table + DLL names) must match across the two
 # goldens, so regenerating one cannot quietly leave the other describing a
 # different table. Counted: it is the cross-arch half of the pin.
@@ -9967,15 +9972,15 @@ else
     $KRC --arch=x86_64 --target=windows --emit=pe "$DIR/fixtures/os_prune.kr" -o "$RWI_DIR/run/osp.exe" > /dev/null 2>&1 || RWI_WHY="$RWI_WHY os_prune:no-build"
     $KRC --arch=x86_64 --target=windows --emit=pe "$DIR/fixtures/win_import_prefix.kr" -o "$RWI_DIR/run/pfx.exe" > /dev/null 2>&1 || RWI_WHY="$RWI_WHY prefix:no-build"
     if [ -z "$RWI_WHY" ]; then
-        RWI_OUT=$(cd "$RWI_DIR/run" && WINEPREFIX="$RWI_DIR/pfx" WINEDEBUG=-all timeout 180 "$RWI_WINE" abi.exe 2>/dev/null); RWI_RC=$?
+        RWI_OUT=$(cd "$RWI_DIR/run" && WINEPREFIX="$RWI_DIR/pfx" WINEDLLOVERRIDES=winedbg.exe=d WINEDEBUG=-all timeout 180 "$RWI_WINE" abi.exe 2>/dev/null); RWI_RC=$?
         [ "$RWI_RC" = "42" ] || RWI_WHY="$RWI_WHY abi:status-$RWI_RC"
         echo "$RWI_OUT" | grep -q '^routed-ok' || RWI_WHY="$RWI_WHY abi:no-stdout"
         [ "$(od -An -c "$RWI_DIR/run/kr_win_iat_abi.tmp" 2>/dev/null | tr -d ' \n')" = 'routed\n' ] || RWI_WHY="$RWI_WHY abi:file-wrong"
-        (cd "$RWI_DIR/run" && WINEPREFIX="$RWI_DIR/pfx" WINEDEBUG=-all timeout 120 "$RWI_WINE" us.exe > /dev/null 2>&1); RWI_RC=$?
+        (cd "$RWI_DIR/run" && WINEPREFIX="$RWI_DIR/pfx" WINEDLLOVERRIDES=winedbg.exe=d WINEDEBUG=-all timeout 120 "$RWI_WINE" us.exe > /dev/null 2>&1); RWI_RC=$?
         [ "$RWI_RC" = "6" ] || RWI_WHY="$RWI_WHY user_send:status-$RWI_RC"
-        (cd "$RWI_DIR/run" && WINEPREFIX="$RWI_DIR/pfx" WINEDEBUG=-all timeout 120 "$RWI_WINE" osp.exe > /dev/null 2>&1); RWI_RC=$?
+        (cd "$RWI_DIR/run" && WINEPREFIX="$RWI_DIR/pfx" WINEDLLOVERRIDES=winedbg.exe=d WINEDEBUG=-all timeout 120 "$RWI_WINE" osp.exe > /dev/null 2>&1); RWI_RC=$?
         [ "$RWI_RC" = "0" ] || RWI_WHY="$RWI_WHY os_prune:status-$RWI_RC"
-        (cd "$RWI_DIR/run" && WINEPREFIX="$RWI_DIR/pfx" WINEDEBUG=-all timeout 120 "$RWI_WINE" pfx.exe > /dev/null 2>&1); RWI_RC=$?
+        (cd "$RWI_DIR/run" && WINEPREFIX="$RWI_DIR/pfx" WINEDLLOVERRIDES=winedbg.exe=d WINEDEBUG=-all timeout 120 "$RWI_WINE" pfx.exe > /dev/null 2>&1); RWI_RC=$?
         [ "$RWI_RC" = "9" ] || RWI_WHY="$RWI_WHY prefix:status-$RWI_RC"
     fi
     if [ -z "$RWI_WHY" ]; then
@@ -26739,12 +26744,12 @@ LOG_WINE="$(wine_path)"
 # it is recorded in $LOG_D/retried53 so the PASS text says so (log_note).
 log_wine() {
     local out rc
-    out=$(cd "$LOG_D" && WINEPREFIX="$LOG_D/pfx" WINEDEBUG=-all timeout 180 "$LOG_WINE" "$@" 2> "$LOG_D/wine.err"); rc=$?
+    out=$(cd "$LOG_D" && WINEPREFIX="$LOG_D/pfx" WINEDLLOVERRIDES=winedbg.exe=d WINEDEBUG=-all timeout 180 "$LOG_WINE" "$@" 2> "$LOG_D/wine.err"); rc=$?
     if [ "$rc" = "53" ] && [ -z "$out" ]; then
         cp "$LOG_D/wine.err" "$LOG_D/wine.err.53" 2>/dev/null; touch "$LOG_D/retried53"
         WINEPREFIX="$LOG_D/pfx" "$(dirname "$LOG_WINE")/wineserver" -k > /dev/null 2>&1
         rm -rf "$LOG_D/pfx"; mkdir -p "$LOG_D/pfx"
-        out=$(cd "$LOG_D" && WINEPREFIX="$LOG_D/pfx" WINEDEBUG=-all timeout 180 "$LOG_WINE" "$@" 2> "$LOG_D/wine.err"); rc=$?
+        out=$(cd "$LOG_D" && WINEPREFIX="$LOG_D/pfx" WINEDLLOVERRIDES=winedbg.exe=d WINEDEBUG=-all timeout 180 "$LOG_WINE" "$@" 2> "$LOG_D/wine.err"); rc=$?
     fi
     printf '%s\n' "$out"
     return $rc
@@ -27464,7 +27469,7 @@ if [ -z "$ALI_WINE" ]; then
 elif "$DIR/../build/krc2" --arch=x86_64 --target=windows --emit=pe "$ALI_FX" -o "$ALI_D/a.exe" > "$ALI_D/b.log" 2>&1; then
     mkdir -p "$ALI_D/pfx"
     for ALI_T in 1 2; do
-        (cd "$ALI_D" && WINEPREFIX="$ALI_D/pfx" WINEDEBUG=-all timeout 300 "$ALI_WINE" a.exe > "$ALI_D/out" 2>/dev/null); ALI_RC=$?
+        (cd "$ALI_D" && WINEPREFIX="$ALI_D/pfx" WINEDLLOVERRIDES=winedbg.exe=d WINEDEBUG=-all timeout 300 "$ALI_WINE" a.exe > "$ALI_D/out" 2>/dev/null); ALI_RC=$?
         # status 53 with no output = Wine's fresh-prefix kernel32 load race
         # (see t10_wine); one retry on a new prefix, anything else is final.
         if [ "$ALI_RC" = "53" ] && [ ! -s "$ALI_D/out" ] && [ "$ALI_T" = "1" ]; then
@@ -27694,9 +27699,9 @@ c7_wine() {
     local o="$1" e="$2" t rc; shift 2
     for t in 1 2 3; do
         if [ "${C7_JA:-0}" = "1" ]; then
-            (cd "$C7_D/run" && LC_ALL=ja_JP.UTF-8 LANG=ja_JP.UTF-8 WINEPREFIX="$C7_D/pfxja" WINEDEBUG=-all timeout 300 "$C7_WINE" "$@" > "$o" 2> "$e"); rc=$?
+            (cd "$C7_D/run" && LC_ALL=ja_JP.UTF-8 LANG=ja_JP.UTF-8 WINEPREFIX="$C7_D/pfxja" WINEDLLOVERRIDES=winedbg.exe=d WINEDEBUG=-all timeout 300 "$C7_WINE" "$@" > "$o" 2> "$e"); rc=$?
         else
-            (cd "$C7_D/run" && WINEPREFIX="$C7_D/pfx" WINEDEBUG=-all timeout 300 "$C7_WINE" "$@" > "$o" 2> "$e"); rc=$?
+            (cd "$C7_D/run" && WINEPREFIX="$C7_D/pfx" WINEDLLOVERRIDES=winedbg.exe=d WINEDEBUG=-all timeout 300 "$C7_WINE" "$@" > "$o" 2> "$e"); rc=$?
         fi
         [ "$rc" = "1" ] && grep -aq 'ShellExecuteEx failed' "$o" "$e" && continue
         return $rc
@@ -27772,6 +27777,10 @@ fi
 # (b) a @naked main gets NO parse (no ExitProcess epilogue to make clobbering
 #     its callee-saved registers safe): the parser leaf is absent from its PE on
 #     both arches, while the same program without @naked carries it.
+#     #143 (A6a, A9a): a naked main gets no command-line sequence AT ALL --
+#     its PE makes no call to the GetCommandLineA import slot (decoded by import
+#     name: x86_64 `call [rip+disp32]` through the IAT, arm64 `adrp x16;
+#     ldr x16, [x16, #off]; blr x16`), while the plain main does.
 TOTAL=$((TOTAL + 1))
 printf 'static uint64 cli_argc\nstatic uint64 cli_argv\n@naked\nfn main() {\n    asm { "ret" }\n}\n' > "$C7_D/nk.kr"
 printf 'static uint64 cli_argc\nstatic uint64 cli_argv\nfn main() -> uint32 {\n    return 0\n}\n' > "$C7_D/nn.kr"
@@ -27789,6 +27798,62 @@ if len(b) < 64: print(" blob-missing")
 if open(sys.argv[2], "rb").read().count(b) != 0: print(" " + sys.argv[4] + ":naked-main-parses")
 if open(sys.argv[3], "rb").read().count(b) != 1: print(" " + sys.argv[4] + ":plain-main-does-not-parse")
 ' "$C7_D/parse-$C7_A.bin" "$C7_D/nk.exe" "$C7_D/nn.exe" "$C7_A" | tr -d '\n')"
+        if [ "$C7_A" = x86_64 ]; then
+            C7_WHY="$C7_WHY$(python3 -B - "$DIR/helpers" "$C7_D/nk.exe" "$C7_D/nn.exe" <<'C7GCLEOF' | tr -d '\n'
+import struct, sys
+sys.path.insert(0, sys.argv[1])
+import pe_unwind_check as c
+def gcl_calls(path):
+    b = c.Binary(path, 'x86_64')
+    slots = c.import_slots(b)
+    t = b.text.data
+    n = 0
+    for i in range(len(t) - 6):
+        if t[i] == 0xFF and t[i + 1] == 0x15:
+            tgt = b.text.rva + i + 6 + struct.unpack_from('<i', t, i + 2)[0]
+            if slots.get(tgt) == 'GetCommandLineA':
+                n += 1
+    return n, len(slots)
+nk, ns = gcl_calls(sys.argv[2])
+nn, _ = gcl_calls(sys.argv[3])
+if ns == 0: print(' x86_64:no-imports-decoded')
+if nk != 0: print(' x86_64:naked-main-calls-GetCommandLineA(%d)' % nk)
+if nn < 1: print(' x86_64:plain-main-never-calls-GetCommandLineA')
+C7GCLEOF
+)"
+        fi
+        if [ "$C7_A" = arm64 ]; then
+            # #143 (A9a): the same on arm64, where an import call is the
+            # triple adrp x16, page; ldr x16, [x16, #off]; blr x16 (decoded
+            # here and resolved to its import slot by name)
+            C7_WHY="$C7_WHY$(python3 -B - "$DIR/helpers" "$C7_D/nk.exe" "$C7_D/nn.exe" <<'C7GCLA64EOF' | tr -d '\n'
+import struct, sys
+sys.path.insert(0, sys.argv[1])
+import pe_unwind_check as c
+def gcl_calls(path):
+    b = c.Binary(path, 'arm64')
+    slots = c.import_slots(b)
+    t = b.text.data
+    n = 0
+    for i in range(0, len(t) - 11, 4):
+        w0, w1, w2 = struct.unpack_from('<III', t, i)
+        if (w0 & 0x9F00001F) != 0x90000010 or (w1 & 0xFFC003FF) != 0xF9400210 or w2 != 0xD63F0200:
+            continue
+        imm = (((w0 >> 5) & 0x7FFFF) << 2) | ((w0 >> 29) & 3)
+        if imm & (1 << 20):
+            imm -= 1 << 21
+        page = ((b.text.rva + i) & ~0xFFF) + (imm << 12)
+        if slots.get(page + ((w1 >> 10) & 0xFFF) * 8) == 'GetCommandLineA':
+            n += 1
+    return n, len(slots)
+nk, ns = gcl_calls(sys.argv[2])
+nn, _ = gcl_calls(sys.argv[3])
+if ns == 0: print(' arm64:no-imports-decoded')
+if nk != 0: print(' arm64:naked-main-calls-GetCommandLineA(%d)' % nk)
+if nn < 1: print(' arm64:plain-main-never-calls-GetCommandLineA')
+C7GCLA64EOF
+)"
+        fi
     fi
     rm -f "$C7_D/nk.exe" "$C7_D/nn.exe"
 done
@@ -27797,7 +27862,7 @@ elif [ -z "$C7_WHY" ]; then c7_ok c7_naked_main_not_parsed "x86_64 + arm64"
 else c7_bad c7_naked_main_not_parsed "$C7_WHY"; fi
 
 # (c) Windows arm64: no emitted instruction writes x18 (the TEB register) --
-#     every instruction of the prologue + parser (argv_echo) and of the op-114
+#     every instruction of main's argv block + parser (argv_echo) and of the op-114
 #     sequence + quoter (argv_rtparent) PEs, disassembled. A write is x18/w18
 #     as the destination of anything but a store/compare/branch (the exclusive
 #     stores' status register IS a destination), the second register of a
@@ -27833,8 +27898,11 @@ print("insns=%d hits=%d %s" % (n, len(hits), "; ".join(hits[:4])))
     esac
 fi
 
-# (d) Windows arm64 prologue plumbing, decoded from the image (no runner can
-#     execute it): exactly two BLs reach the parser leaf. Before the first:
+# (d) Windows arm64 main's argv block, decoded from the image (no runner can
+#     execute it). Since #143 A9a the block runs right AFTER main's prologue,
+#     not as part of it; the row keeps its historical name
+#     (c7_win_arm64_prologue_virtualalloc_args) and finds the block by decoding,
+#     wherever it sits: exactly two BLs reach the parser leaf. Before the first:
 #     `sub sp, sp, #0x20`, GetCPInfo(x0 = 0 = CP_ACP, x1 = sp) -- an IAT call
 #     the image binds to the NAME GetCPInfo -- then `cbnz w0` over three
 #     `str xzr, [sp, #0/8/16]` (a failed call leaves no lead bytes), then
@@ -28063,10 +28131,12 @@ fi
 #     rows), but GetCPInfo(CP_ACP) never fails there, so the failure path --
 #     zero the CPINFO, i.e. no lead bytes -- is pinned here, with the call's
 #     arguments and the pointer each leaf call gets:
-#     main prologue: `sub rsp, 0x48`, xor ecx,ecx; lea rdx,[rsp+0x28]; call
+#     main prologue: `sub rsp, 0x40`, xor ecx,ecx; lea rdx,[rsp+0x28]; call
 #     [GetCPInfo]; test eax,eax; jne over three `mov qword [rsp+0x28/30/38],0`
 #     to call [GetCommandLineA]; the parse call has lea r9,[rsp+0x2E] (exactly
-#     two calls reach the parser leaf); `add rsp, 0x48` follows.
+#     two calls reach the parser leaf); `add rsp, 0x40` follows. (#143 A6a: the
+#     block runs AFTER main's prologue, where RSP is 16-aligned, so its frame
+#     is 0x40, not the 0x48 it needed at the 8-mod-16 entry.)
 #     op 114: `sub rsp, 0xF0`, the same with lea rdx,[rsp+0xD0] and zeroing at
 #     0xD0/D8/E0, then BOTH quoter calls (exactly two reach it) with lea
 #     r8,[rsp+0xD6]; `add rsp, 0xF0` before the ExitProcess. Every IAT call is
@@ -28115,10 +28185,10 @@ leaf = pe.find(blob)
 if leaf < 0: fail("prologue: no parser leaf in the image")
 cs = calls_to(pe, rp, rs, leaf)
 if len(cs) != 2: fail("prologue: %d calls reach the parser leaf, want 2" % len(cs))
-e = cpinfo(pe, va, rp, rs, 0x48, 0x28, "prologue")
+e = cpinfo(pe, va, rp, rs, 0x40, 0x28, "prologue")
 iat(pe, va, rp, e, "GetCommandLineA", "prologue")
 seq(pe, cs[1] - 8, b"\x49\x89\xf8\x4c\x8d\x4c\x24\x2e", "prologue: parse call's mov r8, rdi / lea r9, [rsp+0x2E]")
-if pe.find(b"\x48\x83\xc4\x48", cs[1], cs[1] + 64) < 0: fail("prologue: no add rsp, 0x48 after the parse")
+if pe.find(b"\x48\x83\xc4\x40", cs[1], cs[1] + 64) < 0: fail("prologue: no add rsp, 0x40 after the parse")
 # op 114
 pe, blob, va, rs, rp = image(1)
 leaf = pe.find(blob)
@@ -28395,7 +28465,13 @@ else
         c7_ok c7_acp_is_932_in_ja_prefix_wine "$C7_ACP"
         C7_ACPWHY=""
     else
-        c7_bad c7_acp_is_932_in_ja_prefix_wine "rc=$C7_RC GetCPInfo(CP_ACP) said '$C7_ACP'"
+        # a single-byte answer names its cause, so a native run (where the
+        # laptop's ANSI code page is not 932) can tell it from a broken call
+        if [ "$C7_RC" = "0" ] && [[ "$C7_ACP" == "ok=1 max=01 "* ]]; then
+            c7_bad c7_acp_is_932_in_ja_prefix_wine "rc=$C7_RC (the ANSI code page is not 932: single-byte) GetCPInfo(CP_ACP) said '$C7_ACP'"
+        else
+            c7_bad c7_acp_is_932_in_ja_prefix_wine "rc=$C7_RC GetCPInfo(CP_ACP) said '$C7_ACP'"
+        fi
         C7_ACPWHY=" (the prefix's ANSI code page is not 932: see c7_acp_is_932_in_ja_prefix_wine)"
     fi
     C7_JA=1 c7_wine "$C7_D/wt932.out" "$C7_D/ce" argv_rawparent.exe argv_table_cp932.txt; C7_RC=$?
@@ -28439,6 +28515,21 @@ T10_QEMU="$(command -v qemu-aarch64-static || command -v qemu-aarch64 || true)"
 t10_ok() { PASS=$((PASS + 1)); echo "  $1: PASS${2:+ ($2)}"; }
 t10_bad() { FAIL=$((FAIL + 1)); echo "FAIL: $1 ($2)"; }
 t10_skip() { PASS=$((PASS + 1)); echo "  $1: SKIP ($2)"; }
+# #143 (Windows PE unwind tables) rows report ONLY through these three, so
+# tests/helpers/require_rows.sh sees every one of them (plan rev 4, section 0).
+# Each counts the row itself (TOTAL); call exactly one of them once per row.
+# pe_row_skip is for a genuinely ABSENT tool only (named in the reason) -- a tool
+# that is present but fails is pe_row_bad. CI may skip; the local gate never
+# accepts a skip of a manifest row.
+pe_row_ok() { TOTAL=$((TOTAL + 1)); PASS=$((PASS + 1)); echo "  $1: PASS${2:+ ($2)}"; }
+pe_row_bad() { TOTAL=$((TOTAL + 1)); FAIL=$((FAIL + 1)); echo "  $1: FAIL ($2)"; }
+pe_row_skip() { TOTAL=$((TOTAL + 1)); PASS=$((PASS + 1)); echo "  $1: SKIP ($2)"; }
+# peu_missing <tool>...: the tools absent from PATH, space-separated (empty
+# when all are there). A row that runs tests/helpers/pe_unwind_check.py needs
+# llvm-readobj (C1) and llvm-objdump (C2-C6); without them it SKIPs naming
+# what is missing (CI run 42504860688), and locally tests/helpers/
+# require_rows.sh rejects that SKIP (the rows are in pe_unwind_rows.lst).
+peu_missing() { local t m=""; for t in "$@"; do command -v "$t" > /dev/null 2>&1 || m="$m $t"; done; echo "${m# }"; }
 # Wine can fail to LAUNCH a program (prints "ShellExecuteEx failed", exits 1,
 # program never started): retry that, exactly that, 3 tries (see c7_wine).
 # Wine has also been seen (rarely, only inside full suite runs) to end a run
@@ -28451,12 +28542,21 @@ t10_skip() { PASS=$((PASS + 1)); echo "  $1: SKIP ($2)"; }
 # launch failures are 1), so the retry cannot hide a regression; it sets
 # T10_RETRY53=1 and the PASS text says so (t10_note). The stderr of the failed
 # attempt is kept in <err>.53 and shown in that note.
+#
+# WINEDLLOVERRIDES=winedbg.exe=d on EVERY Wine launch in this file (#143 A3,
+# spec 8.2): once an image carries correct unwind tables, an unhandled fault
+# reaches Wine's unhandled-exception path, which starts winedbg -- on a fresh
+# prefix that HANGS (measured: exit 124 after 120 s), on an initialised one it
+# prints a crash report on stdout. Disabling winedbg leaves exactly the
+# program's own output and the fault status (5 as a byte). It hides nothing:
+# an image WITHOUT tables still exits 0 under it (row
+# wine_crash_override_does_not_mask pins both).
 T10_RETRY53=0
 t10_wine() {
     local o="$1" e="$2" t rc r53=0; shift 2
     T10_RETRY53=0
     for t in 1 2 3; do
-        (cd "$T10_D" && WINEPREFIX="$T10_D/pfx" WINEDEBUG=-all timeout 300 "$T10_WINE" "$@" > "$o" 2> "$e"); rc=$?
+        (cd "$T10_D" && WINEPREFIX="$T10_D/pfx" WINEDLLOVERRIDES=winedbg.exe=d WINEDEBUG=-all timeout 300 "$T10_WINE" "$@" > "$o" 2> "$e"); rc=$?
         [ "$rc" = "1" ] && grep -aq 'ShellExecuteEx failed' "$o" "$e" && continue
         if [ "$rc" = "53" ] && [ ! -s "$o" ] && [ "$r53" = "0" ]; then
             r53=1; T10_RETRY53=1; cp "$e" "$e.53" 2>/dev/null
@@ -28955,6 +29055,1642 @@ else
     t10_bad std_windows_arm64_calls_route_by_name "$T12_BAD"
 fi
 
+# --- #143 Windows PE unwind tables: the independent checker ---------------
+# tests/helpers/pe_unwind_check.py decodes .pdata/.xdata itself, cross-checks
+# llvm-readobj, and reads the --emit=asm listing for labels + bytes only. Its
+# selftest shows every rule BITES before any row trusts it: llvm-mc's own
+# tables pass, byte mutations of them (unsorted, overlap, gap, misaligned,
+# wrong FunctionLength, no DataDirectory[3]) fail with the owning rule id, a
+# call relocated against an extern is no target in its object (A13) while the
+# same call unrelocated fails C2, an object without a listing is an input
+# error (its end of code is the listing's), and the base compiler's committed image
+# (tests/fixtures/pe_unwind_oracle/nest.exe, no tables) fails C1.
+PEU_OUT=$(env -u PE_UNWIND_CHECK_DISABLE bash "$DIR/helpers/pe_unwind_selftest.sh" "$T10_D/peu_selftest" 2>&1); PEU_RC=$?
+case "$PEU_RC" in
+    0) pe_row_ok pe_unwind_checker_selftest "$(tail -1 <<< "$PEU_OUT")" ;;
+    77) pe_row_skip pe_unwind_checker_selftest "$(grep -m1 '^SKIP-REASON: ' <<< "$PEU_OUT" | sed 's/^SKIP-REASON: //')" ;;
+    *) PEU_WHY=$(grep -m1 '^FAIL ' <<< "$PEU_OUT" | cut -c1-300)
+       pe_row_bad pe_unwind_checker_selftest "rc=$PEU_RC ${PEU_WHY:-$(tail -c 300 <<< "$PEU_OUT" | tr '\n' '|')}" ;;
+esac
+# The frame rules (C3-C6, C4b) bite too: llvm-mc frames of every shape pass;
+# an unbalanced path, an rbp write, a naked push, a mis-offset code, the
+# fmt_uint digit loops unannotated or top-tested, and a Wine-only epilogue
+# misprediction fail with the owning rule; the committed static-RSP prototype
+# fails C6 at f2+0x98 (= +0x11a9, measured by cdb) while the frame-pointer one
+# passes.
+PEU_OUT=$(env -u PE_UNWIND_CHECK_DISABLE bash "$DIR/helpers/pe_unwind_selftest.sh" "$T10_D/peu_rules" rules 2>&1); PEU_RC=$?
+case "$PEU_RC" in
+    0) pe_row_ok pe_unwind_checker_rules_selftest "$(tail -1 <<< "$PEU_OUT")" ;;
+    77) pe_row_skip pe_unwind_checker_rules_selftest "$(grep -m1 '^SKIP-REASON: ' <<< "$PEU_OUT" | sed 's/^SKIP-REASON: //')" ;;
+    *) PEU_WHY=$(grep -m1 '^FAIL ' <<< "$PEU_OUT" | cut -c1-300)
+       pe_row_bad pe_unwind_checker_rules_selftest "rc=$PEU_RC ${PEU_WHY:-$(tail -c 300 <<< "$PEU_OUT" | tr '\n' '|')}" ;;
+esac
+# The checker's --linked mode (A13) bites: llvm-mc objects linked by lld-link
+# behind a host pass C0-C2 on their own functions, a /map shifted by a word
+# fails C0-C2, and without --linked C1 refuses lld's merged .xdata. Its own
+# row (phase-4 review, finding 1): without lld-link it is a visible SKIP.
+PEU_OUT=$(env -u PE_UNWIND_CHECK_DISABLE bash "$DIR/helpers/pe_unwind_selftest.sh" "$T10_D/peu_linked" linked 2>&1); PEU_RC=$?
+case "$PEU_RC" in
+    0) pe_row_ok pe_unwind_checker_linked_selftest "$(tail -1 <<< "$PEU_OUT")" ;;
+    77) pe_row_skip pe_unwind_checker_linked_selftest "$(grep -m1 '^SKIP-REASON: ' <<< "$PEU_OUT" | sed 's/^SKIP-REASON: //')" ;;
+    *) PEU_WHY=$(grep -m1 '^FAIL ' <<< "$PEU_OUT" | cut -c1-300)
+       pe_row_bad pe_unwind_checker_linked_selftest "rc=$PEU_RC ${PEU_WHY:-$(tail -c 300 <<< "$PEU_OUT" | tr '\n' '|')}" ;;
+esac
+# Option C (spec 2.5.3, 2.5.4; plan A19a): SP-fixed frames pass C0-C6 and the
+# new rule C3b -- x64 IR with and without rbp pushed as a colour, x64 legacy
+# with SAVE_NONVOL r12, arm64 S1, S2 at low 4080 / 4096 / 4112 / 16 777 200, the
+# D fallback at 16 777 216, the arm64 legacy frame without set_fp and the
+# arm64 legacy folded frame at OUT = 488 (A19d(iii)) -- while an SP-fixed
+# record over a body that writes RSP/SP (sub/add, push/pop, push imm, pushf,
+# xchg, leave, enter, and rsp; arm64 sub sp, pre/post-indexed str/stp of every
+# size, mov sp) fails C3b, and a save offset of 512, the folded frame at
+# OUT = 496, an rbp write without PUSH_NONVOL rbp and a zero-size allocation
+# fail C3.
+PEU_OUT=$(env -u PE_UNWIND_CHECK_DISABLE bash "$DIR/helpers/pe_unwind_selftest.sh" "$T10_D/peu_optc" optc 2>&1); PEU_RC=$?
+case "$PEU_RC" in
+    0) pe_row_ok pe_unwind_checker_optc_selftest "$(tail -1 <<< "$PEU_OUT")" ;;
+    77) pe_row_skip pe_unwind_checker_optc_selftest "$(grep -m1 '^SKIP-REASON: ' <<< "$PEU_OUT" | sed 's/^SKIP-REASON: //')" ;;
+    *) PEU_WHY=$(grep -m1 '^FAIL ' <<< "$PEU_OUT" | cut -c1-300)
+       pe_row_bad pe_unwind_checker_optc_selftest "rc=$PEU_RC ${PEU_WHY:-$(tail -c 300 <<< "$PEU_OUT" | tr '\n' '|')}" ;;
+esac
+# Option C backstop pairing (#143 A19b; spec 2.5.1 check 1): every SP helper
+# calls uw_sp_moves(), every moving/folded site of tests/pe_unwind_sp_sites.lst
+# calls an SP helper, and a sweep of the four backends finds no raw RSP/SP
+# encoding outside the helpers that is not on tests/pe_unwind_sp_raw.lst.
+if ! command -v python3 > /dev/null 2>&1; then pe_row_skip pe_unwind_sp_site_audit "no python3"
+else
+    PEU_O=$(python3 "$DIR/helpers/sp_site_audit.py" "$DIR/.." 2>&1); PEU_RC=$?
+    if [ "$PEU_RC" = 0 ]; then pe_row_ok pe_unwind_sp_site_audit "$(tail -1 <<< "$PEU_O" | sed 's/^sp_site_audit: PASS (//; s/)$//')"
+    else pe_row_bad pe_unwind_sp_site_audit "rc=$PEU_RC $(grep -m1 '^FAIL' <<< "$PEU_O" | cut -c1-250) ($(tail -1 <<< "$PEU_O"))"; fi
+fi
+# The Wine harness change (WINEDLLOVERRIDES=winedbg.exe=d, see t10_wine) must
+# not mask a failure: through t10_wine itself, the base compiler's table-less
+# image still exits 0 (#143's red stays visible), while the frame-pointer
+# prototype with tables exits 5 with stdout exactly "armed" -- without the
+# override it hangs in winedbg instead. Both images are committed
+# (tests/fixtures/pe_unwind_oracle/README.md).
+if [ -z "$T10_WINE" ]; then
+    if [ -n "$KR_WINE_BAD" ]; then pe_row_bad wine_crash_override_does_not_mask "$KR_WINE_BAD"
+    else pe_row_skip wine_crash_override_does_not_mask "no wine; set KR_WINE=<path to wine>"; fi
+else
+    PEU_WHY=""
+    cp "$DIR/fixtures/pe_unwind_oracle/alloc_guard_fault.exe" "$T10_D/peu_base.exe"
+    cp "$DIR/fixtures/pe_unwind_oracle/alloc_guard_fault_fp.exe" "$T10_D/peu_proto.exe"
+    printf 'armed\n' > "$T10_D/peu_armed.want"
+    t10_wine "$T10_D/peu.out" "$T10_D/peu.err" peu_base.exe; PEU_RC=$?
+    [ "$PEU_RC" = 0 ] && cmp -s "$T10_D/peu.out" "$T10_D/peu_armed.want" \
+        || PEU_WHY="$PEU_WHY base image: rc=$PEU_RC stdout '$(tr '\n' '|' < "$T10_D/peu.out" | head -c 60)', want rc=0 'armed|';"
+    t10_wine "$T10_D/peu.out" "$T10_D/peu.err" peu_proto.exe; PEU_RC=$?
+    [ "$PEU_RC" = 5 ] && cmp -s "$T10_D/peu.out" "$T10_D/peu_armed.want" \
+        || PEU_WHY="$PEU_WHY prototype image: rc=$PEU_RC$([ "$PEU_RC" = 124 ] && printf ' (timed out: winedbg?)') stdout '$(tr '\n' '|' < "$T10_D/peu.out" | head -c 60)', want rc=5 'armed|';"
+    if [ -z "$PEU_WHY" ]; then pe_row_ok wine_crash_override_does_not_mask "base rc=0, prototype rc=5, stdout exactly 'armed'$(t10_note)"
+    else pe_row_bad wine_crash_override_does_not_mask "$PEU_WHY"; fi
+fi
+# --test-no-unwind (hidden, test-only, #143): accepted, absent from --help.
+# Where a backend writes tables (x86_64 since A6b-1/A8, arm64 IR since A9b) it
+# removes exactly the tables: the image has two sections fewer (.pdata and
+# .xdata), no exception directory, and the same .text and .idata bytes. Later
+# rows build their in-tree negative images with it.
+PEU_WHY=""
+for PEU_A in x86_64 arm64; do
+    $T10_KRC --arch=$PEU_A --target=windows --emit=pe "$DIR/fixtures/pe_unwind_oracle/nest.kr" -o "$T10_D/peu_sw0.exe" > "$T10_D/peu_sw.log" 2>&1 \
+        || { PEU_WHY="$PEU_WHY $PEU_A: plain build failed;"; continue; }
+    $T10_KRC --test-no-unwind --arch=$PEU_A --target=windows --emit=pe "$DIR/fixtures/pe_unwind_oracle/nest.kr" -o "$T10_D/peu_sw1.exe" > "$T10_D/peu_sw.log" 2>&1 \
+        || { PEU_WHY="$PEU_WHY $PEU_A: --test-no-unwind refused: $(grep -m1 -i error "$T10_D/peu_sw.log" | cut -c1-120);"; continue; }
+    PEU_O=$(python3 -B - "$T10_D/peu_sw0.exe" "$T10_D/peu_sw1.exe" <<'PEUSWEOF'
+import struct, sys
+def pe(p):
+    b = open(p, 'rb').read()
+    lfa = struct.unpack_from('<I', b, 60)[0]
+    nsec, optsz = struct.unpack_from('<H', b, lfa + 6)[0], struct.unpack_from('<H', b, lfa + 20)[0]
+    dd3 = struct.unpack_from('<II', b, lfa + 24 + 112 + 3 * 8)
+    secs = {}
+    for i in range(nsec):
+        h = lfa + 24 + optsz + 40 * i
+        nm = b[h:h + 8].rstrip(b'\0').decode()
+        vs, va, raw, ptr = struct.unpack_from('<IIII', b, h + 8)
+        secs[nm] = b[ptr:ptr + min(vs, raw)]
+    return nsec, dd3, secs
+n0, d0, s0 = pe(sys.argv[1]); n1, d1, s1 = pe(sys.argv[2])
+bad = []
+if n1 != n0 - 2: bad.append('sections %d with tables, %d without' % (n0, n1))
+for sn in ('.pdata', '.xdata'):
+    if sn not in s0 or sn in s1: bad.append('%s present with tables: %s, without: %s' % (sn, sn in s0, sn in s1))
+if d0 == (0, 0) or d1 != (0, 0): bad.append('DD[3] with tables %s, without %s' % (d0, d1))
+if s0.get('.text') != s1.get('.text'): bad.append('.text differs')
+if s0.get('.idata') != s1.get('.idata'): bad.append('.idata differs')
+print('; '.join(bad))
+PEUSWEOF
+2>&1)
+    [ -z "$PEU_O" ] || PEU_WHY="$PEU_WHY $PEU_A: $PEU_O;"
+done
+$T10_KRC --help > "$T10_D/peu_help.txt" 2>&1
+grep -q 'Usage\|usage' "$T10_D/peu_help.txt" || PEU_WHY="$PEU_WHY --help printed no usage;"
+grep -q 'test-no-unwind' "$T10_D/peu_help.txt" && PEU_WHY="$PEU_WHY --help documents it;"
+if [ -z "$PEU_WHY" ]; then pe_row_ok pe_unwind_hidden_switch_accepted "accepted, not in --help; x86_64 and arm64: removes exactly .pdata and .xdata"
+else pe_row_bad pe_unwind_hidden_switch_accepted "$PEU_WHY"; fi
+# Windows arm64 images have 0x400 bytes of headers (#143, spec 6.1 as ruled
+# after the phase-3a review: five section headers once .pdata/.xdata exist),
+# and every ADRP address the code computes depends on that size through one
+# bias (a64_compute_va, pe_finalize_a64). For three programs -- the compiler
+# itself among them -- every adrp and the add/ldr/str that uses its register
+# must land in .data, .text or an 8-byte .idata slot
+# (tests/helpers/a64_adrp_targets.py), the decoded targets must be identical
+# to those of the same program built with the old 0x200 headers (hidden
+# --test-a64-pe-header-0x200), and so must the .text bytes: .text keeps RVA
+# 0x1000 whatever the header size. A compiler that changes the header size but
+# not the bias fails here (negative control in the #143 archive).
+if ! command -v python3 > /dev/null 2>&1; then pe_row_skip pe_a64_adrp_targets "no python3"
+else
+    PEU_WHY=""; PEU_N=0
+    for PEU_F in "$DIR/fixtures/alloc_guard_fault.kr" "$DIR/fixtures/sys_args.kr" "$DIR/../build/krc.kr"; do
+        PEU_B=$(basename "$PEU_F" .kr)
+        if ! $T10_KRC --arch=arm64 --target=windows --emit=pe "$PEU_F" -o "$T10_D/peu_a4.exe" > /dev/null 2>&1 \
+           || ! $T10_KRC --arch=arm64 --target=windows --emit=pe --test-a64-pe-header-0x200 "$PEU_F" -o "$T10_D/peu_a2.exe" > /dev/null 2>&1; then
+            PEU_WHY="$PEU_WHY $PEU_B:build;"; continue
+        fi
+        PEU_O=$(python3 -B "$DIR/helpers/a64_adrp_targets.py" "$T10_D/peu_a4.exe" "$T10_D/peu_a2.exe" 2>&1)
+        case "$(tail -1 <<< "$PEU_O")" in
+            *"(SizeOfHeaders 0x400), 0 off target"*"identical to the SizeOfHeaders 0x200 image") PEU_N=$((PEU_N + 1)) ;;
+            *) PEU_WHY="$PEU_WHY $PEU_B:$(head -1 <<< "$PEU_O" | cut -c1-140);" ;;
+        esac
+        PEU_T=$(python3 -B - "$T10_D/peu_a4.exe" "$T10_D/peu_a2.exe" <<'PEUTXTEOF' 2>&1
+import struct, sys
+def text(p):
+    b = open(p, 'rb').read()
+    lfa = struct.unpack_from('<I', b, 60)[0]
+    tab = lfa + 24 + struct.unpack_from('<H', b, lfa + 20)[0]
+    for i in range(struct.unpack_from('<H', b, lfa + 6)[0]):
+        h = tab + 40 * i
+        if b[h:h + 8].rstrip(b'\0') == b'.text':
+            vs, va, raw, ptr = struct.unpack_from('<IIII', b, h + 8)
+            return va, b[ptr:ptr + raw]
+a, b = text(sys.argv[1]), text(sys.argv[2])
+print('same' if a == b else 'differ')
+PEUTXTEOF
+)
+        [ "$PEU_T" = same ] || PEU_WHY="$PEU_WHY $PEU_B:.text differs between the 0x400 and 0x200 headers ($PEU_T);"
+    done
+    rm -f "$T10_D/peu_a4.exe" "$T10_D/peu_a2.exe"
+    if [ -z "$PEU_WHY" ] && [ "$PEU_N" = 3 ]; then pe_row_ok pe_a64_adrp_targets "3 images, the compiler included: every adrp pair lands in .data/.idata/.text, targets and .text identical with 0x200 headers"
+    else pe_row_bad pe_a64_adrp_targets "$PEU_N of 3;$PEU_WHY"; fi
+fi
+# win_abi_frames (#143 A6a, spec 8.5; the RSP alignment probe and the real-call
+# check after the phase-2 review, M2 and Minor 6): the Windows-ABI frame shapes RUN. The
+# std-free corpus is built --freestanding --target=windows (Windows code, ELF
+# container) and executed natively and under qemu-x86_64-static: ten-parameter
+# calls, frames over a page and over 64 KiB, leaf and non-leaf, recursion. The
+# program checks its own results (exit N = check N failed).
+PEU_FR="$DIR/fixtures/win_abi_frames/frames_x86_64.kr"
+# peu_both_kinds <arch> <listing>: the frames corpus holds SP-fixed and
+# SP-moving functions on every backend (#143 option C, plan A19g; the exact
+# classes are pinned by pe_unwind_win_frame_classes). Prints the counts.
+peu_both_kinds() {
+    local o; o=$(python3 -B "$DIR/helpers/win_frame_classes.py" "$1" "$2" 2>&1)
+    PEU_KINDS="$(grep -c ' SP-fixed ' <<< "$o") SP-fixed, $(grep -c ' SP-moving ' <<< "$o") SP-moving"
+    grep -q ' SP-fixed ' <<< "$o" && grep -q ' SP-moving ' <<< "$o"
+}
+PEU_QX="$(command -v qemu-x86_64-static || command -v qemu-x86_64 || true)"
+# peu_f10_calls <listing>: the number of `call rel32` instructions whose target
+# is f10's first byte (phase-2 review Minor 6: the AST inliner once removed
+# every ten-parameter call without any row noticing; the rows now require
+# real calls). Prints the count, or an error.
+peu_f10_calls() {
+    python3 -B - "$1" <<'PEUF10EOF' 2>&1
+import re, sys
+line = re.compile(r'^\s+([0-9a-f]{8}): ((?:[0-9a-f]{2}(?: |$))+)')
+label = re.compile(r'^([A-Za-z_.$][\w.$@]*):\s*$')
+pending, labels, insns = [], {}, []
+for l in open(sys.argv[1], encoding='latin-1'):
+    l = l.rstrip('\n')
+    m = label.match(l)
+    if m:
+        pending.append(m.group(1)); continue
+    m = line.match(l)
+    if m:
+        off = int(m.group(1), 16)
+        for n in pending:
+            labels[n] = off
+        pending = []
+        insns.append((off, bytes(int(x, 16) for x in m.group(2).split())))
+if 'f10' not in labels:
+    print('error: no f10 label'); sys.exit(0)
+n = 0
+for off, b in insns:
+    if len(b) == 5 and b[0] == 0xE8:
+        rel = int.from_bytes(b[1:5], 'little', signed=True)
+        if off + 5 + rel == labels['f10']:
+            n += 1
+print(n)
+PEUF10EOF
+}
+if ! $T10_KRC --arch=x86_64 --freestanding --target=windows "$PEU_FR" -o "$T10_D/peu_fr" > "$T10_D/peu_fr.log" 2>&1 \
+   || ! $T10_KRC --arch=x86_64 --freestanding --target=windows --emit=asm "$PEU_FR" -o "$T10_D/peu_fr.s" >> "$T10_D/peu_fr.log" 2>&1; then
+    pe_row_bad win_abi_frames_exec_x86_64_ir "build: $(grep -m1 error "$T10_D/peu_fr.log" | cut -c1-120)"
+elif PEU_C=$(peu_f10_calls "$T10_D/peu_fr.s"); [ "$PEU_C" != 4 ]; then
+    pe_row_bad win_abi_frames_exec_x86_64_ir "the listing has $PEU_C real calls to f10, want 4 (inlined away?)"
+elif ! peu_both_kinds x86_64 "$T10_D/peu_fr.s"; then
+    pe_row_bad win_abi_frames_exec_x86_64_ir "the listing lacks an SP-fixed or an SP-moving function ($PEU_KINDS)"
+elif [ -z "$PEU_QX" ]; then
+    pe_row_skip win_abi_frames_exec_x86_64_ir "no qemu-x86_64-static"
+else
+    chmod +x "$T10_D/peu_fr"
+    PEU_N=x
+    if [ "$(uname -m)" = x86_64 ]; then timeout 60 "$T10_D/peu_fr" > /dev/null 2>&1; PEU_N=$?; fi
+    timeout 120 "$PEU_QX" "$T10_D/peu_fr" > /dev/null 2>&1; PEU_Q=$?
+    if [ "$PEU_Q" = 0 ] && { [ "$PEU_N" = 0 ] || [ "$PEU_N" = x ]; }; then
+        pe_row_ok win_abi_frames_exec_x86_64_ir "native rc=$PEU_N, qemu rc=0, 4 real calls to f10, RSP alignment probe passed; $PEU_KINDS"
+    else
+        pe_row_bad win_abi_frames_exec_x86_64_ir "native rc=$PEU_N, qemu rc=$PEU_Q (N = check N failed)"
+    fi
+fi
+# ... and the same corpus through the legacy backend (#143 A8): an SP-moving
+# Windows frame is push rbx; push rbp; sub rsp,F'; mov rbp,rsp; mov [rsp+s],r12
+# with F' = F + 8, and stack arguments at F' + 24 + 32 + i*8. Since #143
+# A19d(ii) the SP-fixed functions (f10's callers call10/rec10/a_ten among
+# them) are folded instead: push rbx; sub rsp,F'; mov [rsp+s],r12 with
+# F' = F + OUT, their outgoing area at [rsp+0, OUT) and their own stack
+# arguments at F' + 16 + 32 + i*8 -- so this row now runs both shapes.
+if ! $T10_KRC --legacy --arch=x86_64 --freestanding --target=windows "$PEU_FR" -o "$T10_D/peu_frl" > "$T10_D/peu_frl.log" 2>&1 \
+   || ! $T10_KRC --legacy --arch=x86_64 --freestanding --target=windows --emit=asm "$PEU_FR" -o "$T10_D/peu_frl.s" >> "$T10_D/peu_frl.log" 2>&1; then
+    pe_row_bad win_abi_frames_exec_x86_64_legacy "build: $(grep -m1 error "$T10_D/peu_frl.log" | cut -c1-120)"
+elif PEU_C=$(peu_f10_calls "$T10_D/peu_frl.s"); [ "$PEU_C" != 4 ]; then
+    pe_row_bad win_abi_frames_exec_x86_64_legacy "the listing has $PEU_C real calls to f10, want 4 (inlined away?)"
+elif ! peu_both_kinds x86_64 "$T10_D/peu_frl.s"; then
+    pe_row_bad win_abi_frames_exec_x86_64_legacy "the listing lacks an SP-fixed or an SP-moving function ($PEU_KINDS)"
+elif [ -z "$PEU_QX" ]; then
+    pe_row_skip win_abi_frames_exec_x86_64_legacy "no qemu-x86_64-static"
+else
+    chmod +x "$T10_D/peu_frl"
+    PEU_N=x
+    if [ "$(uname -m)" = x86_64 ]; then timeout 60 "$T10_D/peu_frl" > /dev/null 2>&1; PEU_N=$?; fi
+    timeout 120 "$PEU_QX" "$T10_D/peu_frl" > /dev/null 2>&1; PEU_Q=$?
+    if [ "$PEU_Q" = 0 ] && { [ "$PEU_N" = 0 ] || [ "$PEU_N" = x ]; }; then
+        pe_row_ok win_abi_frames_exec_x86_64_legacy "native rc=$PEU_N, qemu rc=0, 4 real calls to f10, RSP alignment probe passed; $PEU_KINDS"
+    else
+        pe_row_bad win_abi_frames_exec_x86_64_legacy "native rc=$PEU_N, qemu rc=$PEU_Q (N = check N failed)"
+    fi
+fi
+# The arm64 corpus (#143 A9a, spec 5.1 / 8.5): the same compute corpus plus
+# d8-d15 saves, high register pressure and the SP alignment probe, built
+# --freestanding --target=windows --arch=arm64 and run under qemu-aarch64-static
+# (an arm64 ELF is entered with SP 16-aligned, as a Windows thread is, so no
+# trampoline). Like the x86_64 rows it requires real calls to f10 in the
+# listing (`bl` targets decoded from the byte column).
+PEU_FRA="$DIR/fixtures/win_abi_frames/frames_arm64.kr"
+PEU_QA="$(command -v qemu-aarch64-static || command -v qemu-aarch64 || true)"
+peu_f10_bl() {
+    python3 -B - "$1" <<'PEUF10AEOF' 2>&1
+import re, sys
+line = re.compile(r'^\s+([0-9a-f]{8}): ([0-9a-f]{8})(?:\s|$)')
+label = re.compile(r'^([A-Za-z_.$][\w.$@]*):\s*$')
+pending, labels, words = [], {}, []
+for l in open(sys.argv[1], encoding='latin-1'):
+    l = l.rstrip('\n')
+    m = label.match(l)
+    if m:
+        pending.append(m.group(1)); continue
+    m = line.match(l)
+    if m:
+        off = int(m.group(1), 16)
+        for n in pending:
+            labels[n] = off
+        pending = []
+        words.append((off, int(m.group(2), 16)))
+if 'f10' not in labels:
+    print('error: no f10 label'); sys.exit(0)
+n = 0
+for off, w in words:
+    if (w & 0xFC000000) == 0x94000000:
+        imm = w & 0x3FFFFFF
+        if imm & (1 << 25):
+            imm -= 1 << 26
+        if off + 4 * imm == labels['f10']:
+            n += 1
+print(n)
+PEUF10AEOF
+}
+if ! $T10_KRC --arch=arm64 --freestanding --target=windows "$PEU_FRA" -o "$T10_D/peu_fra" > "$T10_D/peu_fra.log" 2>&1 \
+   || ! $T10_KRC --arch=arm64 --freestanding --target=windows --emit=asm "$PEU_FRA" -o "$T10_D/peu_fra.s" >> "$T10_D/peu_fra.log" 2>&1; then
+    pe_row_bad win_abi_frames_exec_arm64_ir "build: $(grep -m1 error "$T10_D/peu_fra.log" | cut -c1-120)"
+elif PEU_C=$(peu_f10_bl "$T10_D/peu_fra.s"); [ "$PEU_C" != 4 ]; then
+    pe_row_bad win_abi_frames_exec_arm64_ir "the listing has $PEU_C real calls to f10, want 4 (inlined away?)"
+elif ! peu_both_kinds arm64 "$T10_D/peu_fra.s"; then
+    pe_row_bad win_abi_frames_exec_arm64_ir "the listing lacks an SP-fixed or an SP-moving function ($PEU_KINDS)"
+elif [ -z "$PEU_QA" ]; then
+    pe_row_skip win_abi_frames_exec_arm64_ir "no qemu-aarch64-static"
+else
+    chmod +x "$T10_D/peu_fra"
+    timeout 120 "$PEU_QA" "$T10_D/peu_fra" > /dev/null 2>&1; PEU_Q=$?
+    if [ "$PEU_Q" = 0 ]; then pe_row_ok win_abi_frames_exec_arm64_ir "qemu rc=0, 4 real calls to f10, SP alignment probe passed; $PEU_KINDS"
+    else pe_row_bad win_abi_frames_exec_arm64_ir "qemu rc=$PEU_Q (N = check N failed)"; fi
+fi
+# ... and the arm64 corpus through the legacy backend (#143 A10, spec 5.2):
+# its Windows frame saves x19/x20 before setting x29 and keeps the frame in
+# leaves too; frames over 4080 bytes take the `sub sp, #hi, lsl #12` split.
+if ! $T10_KRC --legacy --arch=arm64 --freestanding --target=windows "$PEU_FRA" -o "$T10_D/peu_fral" > "$T10_D/peu_fral.log" 2>&1 \
+   || ! $T10_KRC --legacy --arch=arm64 --freestanding --target=windows --emit=asm "$PEU_FRA" -o "$T10_D/peu_fral.s" >> "$T10_D/peu_fral.log" 2>&1; then
+    pe_row_bad win_abi_frames_exec_arm64_legacy "build: $(grep -m1 error "$T10_D/peu_fral.log" | cut -c1-120)"
+elif PEU_C=$(peu_f10_bl "$T10_D/peu_fral.s"); [ "$PEU_C" != 4 ]; then
+    pe_row_bad win_abi_frames_exec_arm64_legacy "the listing has $PEU_C real calls to f10, want 4 (inlined away?)"
+elif ! peu_both_kinds arm64 "$T10_D/peu_fral.s"; then
+    pe_row_bad win_abi_frames_exec_arm64_legacy "the listing lacks an SP-fixed or an SP-moving function ($PEU_KINDS)"
+elif [ -z "$PEU_QA" ]; then
+    pe_row_skip win_abi_frames_exec_arm64_legacy "no qemu-aarch64-static"
+else
+    chmod +x "$T10_D/peu_fral"
+    timeout 120 "$PEU_QA" "$T10_D/peu_fral" > /dev/null 2>&1; PEU_Q=$?
+    if [ "$PEU_Q" = 0 ]; then pe_row_ok win_abi_frames_exec_arm64_legacy "qemu rc=0, 4 real calls to f10, SP alignment probe passed; $PEU_KINDS"
+    else pe_row_bad win_abi_frames_exec_arm64_legacy "qemu rc=$PEU_Q (N = check N failed)"; fi
+fi
+# The Windows arm64 frame shape (#143 A9a, spec 5.1) of every non-naked
+# function of the compiler itself, from the byte column of its
+# --target=windows --arch=arm64 listing (tests/helpers/a64_win_frame_scan.py
+# decodes every word: sub sp,#A; the save area in order, consecutive pairs
+# only, x29/x30 once; add x29,sp,#f; the low allocation, a multiple of 16; and
+# the single epilogue sub sp,x29,#f, the exact reverse restores, add sp,#A, ret).
+if ! command -v python3 > /dev/null 2>&1; then pe_row_skip a64_win_frame_shape "no python3"
+elif ! $T10_KRC --arch=arm64 --target=windows --emit=asm "$DIR/../build/krc.kr" -o "$T10_D/peu_selfa.s" > "$T10_D/peu_selfa.log" 2>&1; then
+    pe_row_bad a64_win_frame_shape "listing build: $(grep -m1 error "$T10_D/peu_selfa.log" | cut -c1-120)"
+else
+    PEU_OUT=$(python3 -B "$DIR/helpers/a64_win_frame_scan.py" "$T10_D/peu_selfa.s" 2>&1); PEU_RC=$?
+    if [ "$PEU_RC" = 0 ]; then pe_row_ok a64_win_frame_shape "$(tail -1 <<< "$PEU_OUT")"
+    else pe_row_bad a64_win_frame_shape "$(head -2 <<< "$PEU_OUT" | tr '\n' '|')$(tail -1 <<< "$PEU_OUT")"; fi
+    rm -f "$T10_D/peu_selfa.s"
+fi
+# rbp on Windows (#143 A6a; option C, ruling Q12, spec 2.5.2): every function
+# of the self-hosted compiler's --target=windows listing has one of two
+# shapes. SP-moving: pushes ending in `push rbp`, `sub rsp`, `mov rbp, rsp`,
+# and nothing writes rbp again before its epilogue. SP-fixed: no
+# `mov rbp, rsp`, and rbp is written by the body only if the prologue pushed
+# it (rbp allocated as a colour). tests/helpers/x86_win_rbp_scan.py: labels +
+# byte column, disassembled by objdump; the byte column must be gap-free.
+PEU_MISS=$(peu_missing python3); [ -n "$X86_OBJDUMP" ] || PEU_MISS="${PEU_MISS:+$PEU_MISS and }an x86-64 objdump (objdump with i386:x86-64, or x86_64-linux-gnu-objdump)"
+if [ -n "$PEU_MISS" ]; then
+    pe_row_skip ir_x86_win_no_rbp_colour "needs $PEU_MISS"
+elif ! $T10_KRC --arch=x86_64 --target=windows --emit=asm "$DIR/../build/krc.kr" -o "$T10_D/peu_self.asm" > "$T10_D/peu_self.log" 2>&1; then
+    pe_row_bad ir_x86_win_no_rbp_colour "listing build: $(grep -m1 error "$T10_D/peu_self.log" | cut -c1-120)"
+else
+    PEU_OUT=$(PEU_X86_OBJDUMP="$X86_OBJDUMP" python3 "$DIR/helpers/x86_win_rbp_scan.py" "$T10_D/peu_self.asm" 2>&1); PEU_RC=$?
+    if [ "$PEU_RC" = 0 ]; then pe_row_ok ir_x86_win_no_rbp_colour "$(tail -1 <<< "$PEU_OUT")"
+    else pe_row_bad ir_x86_win_no_rbp_colour "$(head -2 <<< "$PEU_OUT" | tr '\n' '|')$(tail -1 <<< "$PEU_OUT")"; fi
+fi
+# Option C, x86_64 IR (#143 A19c; ruling Q12, spec 2.5.2): in
+# tests/fixtures/win_rbp_colour.kr `hp` and `outer` keep six values live
+# across a call, so as SP-fixed functions they allocate rbp: `push rbp`
+# without `mov rbp, rsp`, records with PUSH_NONVOL rbp and no frame register;
+# `fib` (register-argument calls, op 51) is SP-fixed; `show` (println) and main
+# stay SP-moving with `mov rbp, rsp` and FrameRegister RBP. The image passes
+# C0-C6 + C3b + C4b and prints 95/998/610 under Wine: `outer` keeps a value in
+# rbp across its call to `hp`, so a callee writing rbp without saving it
+# (A19c review finding 1: the push-mask mutant) prints 1068 instead of 998.
+PEU_RC_FX="$DIR/fixtures/win_rbp_colour.kr"
+PEU_MISS=$(peu_missing python3 llvm-readobj llvm-objdump); [ -n "$X86_OBJDUMP" ] || PEU_MISS="${PEU_MISS:+$PEU_MISS and }an x86-64 objdump (objdump with i386:x86-64, or x86_64-linux-gnu-objdump)"
+if [ -n "$PEU_MISS" ]; then
+    pe_row_skip ir_x86_win_rbp_colour_when_sp_fixed "needs $PEU_MISS"
+elif ! $T10_KRC --arch=x86_64 --target=windows --emit=pe "$PEU_RC_FX" -o "$T10_D/peu_rc.exe" --test-listing="$T10_D/peu_rc.lst" > "$T10_D/peu_rc.log" 2>&1; then
+    pe_row_bad ir_x86_win_rbp_colour_when_sp_fixed "build: $(grep -m1 error "$T10_D/peu_rc.log" | cut -c1-120)"
+else
+    PEU_WHY=""
+    PEU_O=$(PEU_X86_OBJDUMP="$X86_OBJDUMP" python3 "$DIR/helpers/x86_win_rbp_scan.py" "$T10_D/peu_rc.lst" --want-sp-fixed=hp,fib,outer --want-sp-moving=show,main --want-rbp-colour=hp,outer 2>&1) \
+        || PEU_WHY="shape: $(head -2 <<< "$PEU_O" | tr '\n' '|')"
+    llvm-readobj --unwind "$T10_D/peu_rc.exe" > "$T10_D/peu_rc.uw" 2>&1
+    PEU_O2=$(python3 - "$T10_D/peu_rc.lst" "$T10_D/peu_rc.uw" <<'PEURCEOF' 2>&1
+import re, sys
+labels = {}
+last = None
+for l in open(sys.argv[1], encoding='latin-1'):
+    m = re.match(r'^([A-Za-z_]\w*):\s*$', l)
+    if m:
+        labels[m.group(1)] = None
+        last = m.group(1)
+        continue
+    m = re.match(r'^\s+([0-9a-f]{8}): ', l)
+    if m and last and labels.get(last) is None:
+        labels[last] = int(m.group(1), 16)
+recs = {}
+cur = None
+for l in open(sys.argv[2]).read().split('\n'):
+    m = re.search(r'StartAddress: \(0x([0-9A-F]+)\)', l)
+    if m:
+        cur = int(m.group(1), 16) - 0x140001000
+        recs[cur] = {'fr': None, 'rbp': False}
+    elif cur is not None and 'FrameRegister:' in l:
+        recs[cur]['fr'] = l.split(':', 1)[1].strip()
+    elif cur is not None and 'PUSH_NONVOL reg=RBP' in l:
+        recs[cur]['rbp'] = True
+bad = []
+def rec(n):
+    r = recs.get(labels.get(n))
+    if r is None:
+        bad.append('%s: no record' % n)
+    return r
+for n in ('hp', 'outer'):
+    r = rec(n)
+    if r and (r['fr'] != '-' or not r['rbp']):
+        bad.append('%s: FrameRegister %s, PUSH_NONVOL rbp %s; want none and present' % (n, r['fr'], r['rbp']))
+r = rec('fib')
+if r and r['fr'] != '-':
+    bad.append('fib: FrameRegister %s, want none' % r['fr'])
+for n in ('show', 'main'):
+    r = rec(n)
+    if r and not (r['fr'] or '').startswith('RBP'):
+        bad.append('%s: FrameRegister %s, want RBP' % (n, r['fr']))
+print('; '.join(bad) if bad else 'records: hp/outer PUSH_NONVOL rbp + no frame register, fib none, show/main RBP')
+sys.exit(1 if bad else 0)
+PEURCEOF
+    ) || PEU_WHY="$PEU_WHY records: $PEU_O2;"
+    PEU_C=$(env -u PE_UNWIND_CHECK_DISABLE python3 "$DIR/helpers/pe_unwind_check.py" --arch x86_64 "$T10_D/peu_rc.exe" --listing "$T10_D/peu_rc.lst" 2>&1)
+    [ "$(grep -c ': PASS' <<< "$PEU_C")" = 9 ] || PEU_WHY="$PEU_WHY checker: $(grep -m1 -e FAIL -e error <<< "$PEU_C" | cut -c1-120);"
+    PEU_RUN=""
+    if [ -n "$T10_WINE" ]; then
+        cp "$T10_D/peu_rc.exe" "$T10_D/peu_rc_w.exe"
+        t10_wine "$T10_D/win.out" "$T10_D/win.err" ./peu_rc_w.exe; PEU_RRC=$?
+        if [ "$PEU_RRC" = 0 ] && [ "$(tr -d '\r' < "$T10_D/win.out")" = "$(printf '95\n998\n610')" ]; then PEU_RUN=", Wine prints 95/998/610$(t10_note)"
+        else PEU_WHY="$PEU_WHY Wine rc=$PEU_RRC out='$(tr -d '\r' < "$T10_D/win.out" | tr '\n' ' ' | head -c 40)' $(t10_errtail);"; fi
+    else
+        PEU_RUN=" (no Wine: static checks only)"
+    fi
+    if [ -z "$PEU_WHY" ]; then pe_row_ok ir_x86_win_rbp_colour_when_sp_fixed "hp/outer/fib SP-fixed, hp and outer allocate rbp, outer across its call to hp; show/main keep the frame pointer; C0-C6 + C3b + C4b PASS$PEU_RUN"
+    else pe_row_bad ir_x86_win_rbp_colour_when_sp_fixed "$PEU_WHY"; fi
+fi
+# The x86_64 IR allow-list itself (#143 A19c; spec 2.5.1, re-review-2 finding
+# 1): the hidden --selftest-win-sp-neutral checks ir_x86_win_op_sp_neutral
+# case by case -- op 51 neutral at imm 0, 5, 6, 99 and 200, SP-moving at 100
+# and 199; after an imm-200 marker a routed op 50 and a UEFI op 87 are
+# SP-moving through ir_x86_call_moves_sp; >6-argument calls SP-moving; ops
+# 131, 96, 52 and an unaudited op SP-moving.
+PEU_O=$($T10_KRC --selftest-win-sp-neutral 2>&1); PEU_RC=$?
+if [ "$PEU_RC" = 0 ] && [ "$(grep -c ': ok$' <<< "$PEU_O")" = 17 ] && ! grep -q WRONG <<< "$PEU_O"; then
+    pe_row_ok ir_x86_win_sp_neutral_selftest "17 cases"
+else
+    pe_row_bad ir_x86_win_sp_neutral_selftest "rc=$PEU_RC $(grep -m1 -v ': ok$' <<< "$PEU_O" | cut -c1-160)"
+fi
+# The arm64 side (#143 A19e; A19e-h review finding 2): the hidden
+# --selftest-a64-win-sp checks ir_a64_win_op_sp_neutral (calls, op 51 below
+# 100 and op 131 neutral; 52, 76, 96, 113, 114, op 51 at 100 and an unaudited
+# op SP-moving) and the sizes emit_a64_sp_word reports to the out-audit:
+# `sub sp, sp, #imm` and the S2 hi form `sub sp, sp, #imm, lsl #12`
+# (imm << 12; the old 0xFF800000 mask read it as imm), a release 0.
+PEU_O=$($T10_KRC --selftest-a64-win-sp 2>&1); PEU_RC=$?
+if [ "$PEU_RC" = 0 ] && [ "$(grep -c ': ok$' <<< "$PEU_O")" = 17 ] && ! grep -q WRONG <<< "$PEU_O"; then
+    pe_row_ok a64_win_sp_selftest "17 cases"
+else
+    pe_row_bad a64_win_sp_selftest "rc=$PEU_RC $(grep -m1 -v ': ok$' <<< "$PEU_O" | cut -c1-160)"
+fi
+# --debug on Windows x86_64 IR (#143 A19c; spec 2.5.1 X13, 2.5.5): in
+# tests/fixtures/win_debug_traps.kr `bc`'s bounds check (op 131: ExitProcess
+# behind a shadow area) makes it SP-moving, `ar` stays SP-fixed; the image
+# passes C0-C6 + C3b + C4b; under Wine it prints 3/7/15 and the trap exits 1.
+PEU_DT_FX="$DIR/fixtures/win_debug_traps.kr"
+PEU_MISS=$(peu_missing python3 llvm-readobj llvm-objdump); [ -n "$X86_OBJDUMP" ] || PEU_MISS="${PEU_MISS:+$PEU_MISS and }an x86-64 objdump (objdump with i386:x86-64, or x86_64-linux-gnu-objdump)"
+if [ -n "$PEU_MISS" ]; then
+    pe_row_skip pe_unwind_debug_windows_x86_64_ir "needs $PEU_MISS"
+elif ! $T10_KRC --debug --arch=x86_64 --target=windows --emit=pe "$PEU_DT_FX" -o "$T10_D/peu_dt.exe" --test-listing="$T10_D/peu_dt.lst" > "$T10_D/peu_dt.log" 2>&1; then
+    pe_row_bad pe_unwind_debug_windows_x86_64_ir "build: $(grep -m1 error "$T10_D/peu_dt.log" | cut -c1-120)"
+else
+    PEU_WHY=""
+    PEU_O=$(PEU_X86_OBJDUMP="$X86_OBJDUMP" python3 "$DIR/helpers/x86_win_rbp_scan.py" "$T10_D/peu_dt.lst" --want-sp-fixed=ar --want-sp-moving=bc,main 2>&1) \
+        || PEU_WHY="shape: $(head -2 <<< "$PEU_O" | tr '\n' '|')"
+    PEU_C=$(env -u PE_UNWIND_CHECK_DISABLE python3 "$DIR/helpers/pe_unwind_check.py" --arch x86_64 "$T10_D/peu_dt.exe" --listing "$T10_D/peu_dt.lst" 2>&1)
+    [ "$(grep -c ': PASS' <<< "$PEU_C")" = 9 ] || PEU_WHY="$PEU_WHY checker: $(grep -m1 -e FAIL -e error <<< "$PEU_C" | cut -c1-120);"
+    PEU_RUN=""
+    if [ -n "$T10_WINE" ]; then
+        cp "$T10_D/peu_dt.exe" "$T10_D/peu_dt_w.exe"
+        t10_wine "$T10_D/win.out" "$T10_D/win.err" ./peu_dt_w.exe; PEU_RRC=$?
+        if [ "$PEU_RRC" = 1 ] && [ "$(tr -d '\r' < "$T10_D/win.out")" = "$(printf '3\n7\n15')" ]; then PEU_RUN=", Wine prints 3/7/15 and the trap exits 1$(t10_note)"
+        else PEU_WHY="$PEU_WHY Wine rc=$PEU_RRC out='$(tr -d '\r' < "$T10_D/win.out" | tr '\n' ' ' | head -c 40)' $(t10_errtail);"; fi
+    else
+        PEU_RUN=" (no Wine: static checks only)"
+    fi
+    if [ -z "$PEU_WHY" ]; then pe_row_ok pe_unwind_debug_windows_x86_64_ir "bc SP-moving (bounds check), ar SP-fixed; C0-C6 + C3b + C4b PASS$PEU_RUN"
+    else pe_row_bad pe_unwind_debug_windows_x86_64_ir "$PEU_WHY"; fi
+fi
+# The legacy pre-scan, measure-only (#143 A19d(i); spec 2.5.7): for every
+# Windows legacy build of the fixture/example/smoke corpus, both arches, with
+# and without --debug, --test-out-audit checks that each function the
+# pre-scan judges SP-fixed writes SP only at sized sites whose area fits OUT
+# (no "out-audit:" line), and the output is byte-identical to the build
+# without the switch. tests/fixtures/win_legacy_out.kr pins known verdicts:
+# x86_64 stamp/six/ten SP-fixed OUT 48/48/80, spawn (exec_process_argv)
+# SP-fixed OUT 1232, say (println) and opaque (asm) SP-moving; arm64 stamp/ten
+# OUT 16, six/say OUT 0, opaque SP-moving, spawn SP-moving (OUT 1248 > 488).
+# The corpus must be complete (final pre-merge review finding 4: a tree
+# without examples/ and tests/smoke/ once passed on 340 of 524 builds, its
+# unmatched globs counted as files): the globs expand with nullglob, the
+# build count must be 4 x the .kr files git tracks in those four directories,
+# and only builds that succeeded count their functions as audited.
+PEU_AU="$T10_D/peu_audit"; rm -rf "$PEU_AU"; mkdir -p "$PEU_AU"
+PEU_WHY=""; PEU_N=0; PEU_FIX=0; PEU_OKB=0
+PEU_TRK=$(git -C "$DIR/.." ls-files -- 'tests/fixtures/*.kr' 'tests/fixtures/win_abi_frames/*.kr' 'examples/*.kr' 'tests/smoke/*.kr' 2> /dev/null \
+    | grep -cE '^(tests/fixtures|tests/fixtures/win_abi_frames|examples|tests/smoke)/[^/]+\.kr$')
+[ "$PEU_TRK" -gt 0 ] 2> /dev/null || PEU_WHY="$PEU_WHY cannot list the tracked corpus (git ls-files in $DIR/..);"
+for peu_a in x86_64 arm64; do
+    $T10_KRC --legacy --arch=$peu_a --target=windows --emit=pe --test-out-audit "$DIR/fixtures/win_legacy_out.kr" -o "$PEU_AU/k.exe" > /dev/null 2> "$PEU_AU/k.err" \
+        || PEU_WHY="$PEU_WHY win_legacy_out.kr $peu_a: build failed;"
+    if [ "$peu_a" = x86_64 ]; then PEU_WANT="stamp' SP-fixed OUT 48|six' SP-fixed OUT 48|ten' SP-fixed OUT 80|say' SP-moving|opaque' SP-moving|spawn' SP-fixed OUT 1232"
+    else PEU_WANT="stamp' SP-fixed OUT 16|six' SP-fixed OUT 0|ten' SP-fixed OUT 16|say' SP-fixed OUT 0|opaque' SP-moving|spawn' SP-moving OUT 1248"; fi
+    IFS='|' read -ra PEU_WL <<< "$PEU_WANT"
+    for peu_w in "${PEU_WL[@]}"; do
+        grep -q "^out-audit-fn: '$peu_w" "$PEU_AU/k.err" || PEU_WHY="$PEU_WHY $peu_a: no verdict '$peu_w;"
+    done
+done
+PEU_NG=$(shopt -p nullglob); shopt -s nullglob
+PEU_FILES=("$DIR"/fixtures/*.kr "$DIR"/fixtures/win_abi_frames/*.kr "$DIR"/../examples/*.kr "$DIR"/smoke/*.kr)
+eval "$PEU_NG"
+for peu_f in "${PEU_FILES[@]}"; do
+    for peu_a in x86_64 arm64; do
+        for peu_d in "" --debug; do
+            PEU_N=$((PEU_N + 1))
+            $T10_KRC --legacy --arch=$peu_a --target=windows --emit=pe $peu_d "$peu_f" -o "$PEU_AU/a.exe" > /dev/null 2>&1; PEU_RA=$?
+            $T10_KRC --legacy --arch=$peu_a --target=windows --emit=pe $peu_d --test-out-audit "$peu_f" -o "$PEU_AU/b.exe" > /dev/null 2> "$PEU_AU/b.err"; PEU_RB=$?
+            if grep -q '^out-audit: ' "$PEU_AU/b.err"; then
+                PEU_WHY="$PEU_WHY $(basename "$peu_f") $peu_a $peu_d: $(grep -m1 '^out-audit: ' "$PEU_AU/b.err" | cut -c1-120);"
+            fi
+            if [ "$PEU_RB" = 0 ]; then
+                PEU_OKB=$((PEU_OKB + 1))
+                PEU_FIX=$((PEU_FIX + $(grep -c "^out-audit-fn: .* SP-fixed" "$PEU_AU/b.err")))
+            fi
+            if [ "$PEU_RA" != "$PEU_RB" ] || { [ "$PEU_RA" = 0 ] && ! cmp -s "$PEU_AU/a.exe" "$PEU_AU/b.exe"; }; then
+                PEU_WHY="$PEU_WHY $(basename "$peu_f") $peu_a $peu_d: output differs with --test-out-audit (rc $PEU_RA/$PEU_RB);"
+            fi
+            rm -f "$PEU_AU/a.exe" "$PEU_AU/b.exe"
+        done
+    done
+done
+[ "$PEU_N" = $((4 * PEU_TRK)) ] || PEU_WHY="$PEU_WHY $PEU_N builds, want 4 x $PEU_TRK tracked .kr files = $((4 * PEU_TRK)) (corpus incomplete?);"
+if [ -z "$PEU_WHY" ] && [ "$PEU_FIX" -ge 100 ]; then pe_row_ok win_legacy_out_audit "$PEU_N builds (4 x $PEU_TRK tracked files; $PEU_OKB built), $PEU_FIX SP-fixed functions audited, 0 violations, output unchanged; known verdicts on both arches"
+else pe_row_bad win_legacy_out_audit "${PEU_WHY:-only $PEU_FIX SP-fixed functions audited (want >= 100)}"; fi
+# The identity corpus reaches the legacy SP paths shared with Linux and macOS
+# (#143 A19d(i); spec 2.5.7, finding 24): time_ns (time_basic.kr), exec
+# (sys_envp_exec.kr), and >8-argument named calls and call_ptr
+# (call_ptr_many_args.kr) emit an SP adjustment in a function body (more
+# `sub rsp`, `sub sp, sp` and `push imm8` (6a) lines than function labels) on Linux and
+# macOS, x86_64 and arm64, --legacy.
+PEU_WHY=""; PEU_N=0
+for peu_f in fixtures/time_basic.kr fixtures/sys_envp_exec.kr fixtures/call_ptr_many_args.kr; do
+    for peu_a in x86_64 arm64; do
+        for peu_os in linux macos; do
+            PEU_N=$((PEU_N + 1))
+            if ! $T10_KRC --legacy --arch=$peu_a --target=$peu_os --emit=asm "$DIR/$peu_f" -o "$T10_D/peu_sh.s" > /dev/null 2>&1; then
+                PEU_WHY="$PEU_WHY $peu_f $peu_a $peu_os: build failed;"; continue
+            fi
+            PEU_L=$(grep -c '^[A-Za-z_][A-Za-z0-9_]*:$' "$T10_D/peu_sh.s")
+            if [ "$peu_a" = arm64 ]; then PEU_S=$(grep -c 'sub sp, sp' "$T10_D/peu_sh.s"); else PEU_S=$(grep -c 'sub rsp\|: 6a $\|push 0x0' "$T10_D/peu_sh.s"); fi
+            [ "$PEU_S" -gt "$PEU_L" ] || PEU_WHY="$PEU_WHY $peu_f $peu_a $peu_os: no body SP adjustment ($PEU_S for $PEU_L functions);"
+        done
+    done
+done
+if [ -z "$PEU_WHY" ]; then pe_row_ok win_fold_shared_paths_in_identity_corpus "$PEU_N listings (time_ns, exec, >8-argument named call and call_ptr; linux/macos x86_64/arm64 --legacy) adjust SP in a body"
+else pe_row_bad win_fold_shared_paths_in_identity_corpus "$PEU_WHY"; fi
+# The x86_64 legacy fold (#143 A19d(ii); spec 2.5.7, ruling Q11): in
+# tests/fixtures/win_legacy_out.kr the SP-fixed callers stamp/six/ten, spawn
+# (exec_process_argv, OUT 0x4D0) and the recursive add6/add10 have no RSP
+# write in their bodies (their call areas are the bottom of the frame) and no
+# `mov rbp, rsp`; say (println) and main keep per-call areas and the frame
+# pointer. The image passes C0-C6 + C3b + C4b and prints 65 under Wine.
+PEU_MISS=$(peu_missing python3 llvm-readobj llvm-objdump); [ -n "$X86_OBJDUMP" ] || PEU_MISS="${PEU_MISS:+$PEU_MISS and }an x86-64 objdump (objdump with i386:x86-64, or x86_64-linux-gnu-objdump)"
+if [ -n "$PEU_MISS" ]; then
+    pe_row_skip win_legacy_folded_outgoing_x86_64 "needs $PEU_MISS"
+elif ! $T10_KRC --legacy --arch=x86_64 --target=windows --emit=pe "$DIR/fixtures/win_legacy_out.kr" -o "$T10_D/peu_wl.exe" --test-listing="$T10_D/peu_wl.lst" > "$T10_D/peu_wl.log" 2>&1; then
+    pe_row_bad win_legacy_folded_outgoing_x86_64 "build: $(grep -m1 error "$T10_D/peu_wl.log" | cut -c1-120)"
+else
+    PEU_WHY=""
+    PEU_O=$(PEU_X86_OBJDUMP="$X86_OBJDUMP" python3 "$DIR/helpers/x86_win_rbp_scan.py" "$T10_D/peu_wl.lst" --want-sp-fixed=stamp,six,ten,add6,add10,spawn --want-sp-moving=say,main \
+        --want-no-body-rsp=stamp,six,ten,add6,add10,spawn --want-body-rsp=say,main 2>&1) || PEU_WHY="shape: $(head -2 <<< "$PEU_O" | tr '\n' '|')"
+    PEU_C=$(env -u PE_UNWIND_CHECK_DISABLE python3 "$DIR/helpers/pe_unwind_check.py" --arch x86_64 "$T10_D/peu_wl.exe" --listing "$T10_D/peu_wl.lst" 2>&1)
+    [ "$(grep -c ': PASS' <<< "$PEU_C")" = 9 ] || PEU_WHY="$PEU_WHY checker: $(grep -m1 -e FAIL -e error <<< "$PEU_C" | cut -c1-120);"
+    PEU_RUN=" (no Wine: static checks only)"
+    if [ -n "$T10_WINE" ]; then
+        cp "$T10_D/peu_wl.exe" "$T10_D/peu_wl_w.exe"
+        t10_wine "$T10_D/win.out" "$T10_D/win.err" ./peu_wl_w.exe; PEU_RRC=$?
+        if [ "$PEU_RRC" = 0 ] && [ "$(tr -d '\r' < "$T10_D/win.out")" = 65 ]; then PEU_RUN=", Wine prints 65$(t10_note)"
+        else PEU_WHY="$PEU_WHY Wine rc=$PEU_RRC out='$(tr -d '\r' < "$T10_D/win.out" | tr '\n' ' ' | head -c 40)' $(t10_errtail);"; fi
+    fi
+    if [ -z "$PEU_WHY" ]; then pe_row_ok win_legacy_folded_outgoing_x86_64 "stamp/six/ten/add6/add10/spawn folded (no body RSP write, no frame pointer); say/main keep per-call areas and RBP; C0-C6 + C3b + C4b PASS$PEU_RUN"
+    else pe_row_bad win_legacy_folded_outgoing_x86_64 "$PEU_WHY"; fi
+fi
+# --debug on Windows x86_64 legacy (#143 A19d(ii); spec 2.5.1 L6, 2.5.5): the
+# bounds trap of tests/fixtures/win_debug_traps.kr's `bc` is a sized site
+# (ExitProcess behind 0x20 of shadow), so `bc` and `ar` are folded (no body
+# RSP write, no frame pointer); main keeps RBP. C0-C6 + C3b + C4b; under Wine
+# it prints 3/7/15 and the trap exits 1.
+PEU_MISS=$(peu_missing python3 llvm-readobj llvm-objdump); [ -n "$X86_OBJDUMP" ] || PEU_MISS="${PEU_MISS:+$PEU_MISS and }an x86-64 objdump (objdump with i386:x86-64, or x86_64-linux-gnu-objdump)"
+if [ -n "$PEU_MISS" ]; then
+    pe_row_skip pe_unwind_debug_windows_x86_64_legacy "needs $PEU_MISS"
+elif ! $T10_KRC --debug --legacy --arch=x86_64 --target=windows --emit=pe "$DIR/fixtures/win_debug_traps.kr" -o "$T10_D/peu_dl.exe" --test-listing="$T10_D/peu_dl.lst" > "$T10_D/peu_dl.log" 2>&1; then
+    pe_row_bad pe_unwind_debug_windows_x86_64_legacy "build: $(grep -m1 error "$T10_D/peu_dl.log" | cut -c1-120)"
+else
+    PEU_WHY=""
+    PEU_O=$(PEU_X86_OBJDUMP="$X86_OBJDUMP" python3 "$DIR/helpers/x86_win_rbp_scan.py" "$T10_D/peu_dl.lst" --want-sp-fixed=ar,bc --want-sp-moving=main --want-no-body-rsp=ar,bc 2>&1) \
+        || PEU_WHY="shape: $(head -2 <<< "$PEU_O" | tr '\n' '|')"
+    PEU_C=$(env -u PE_UNWIND_CHECK_DISABLE python3 "$DIR/helpers/pe_unwind_check.py" --arch x86_64 "$T10_D/peu_dl.exe" --listing "$T10_D/peu_dl.lst" 2>&1)
+    [ "$(grep -c ': PASS' <<< "$PEU_C")" = 9 ] || PEU_WHY="$PEU_WHY checker: $(grep -m1 -e FAIL -e error <<< "$PEU_C" | cut -c1-120);"
+    PEU_RUN=" (no Wine: static checks only)"
+    if [ -n "$T10_WINE" ]; then
+        cp "$T10_D/peu_dl.exe" "$T10_D/peu_dl_w.exe"
+        t10_wine "$T10_D/win.out" "$T10_D/win.err" ./peu_dl_w.exe; PEU_RRC=$?
+        if [ "$PEU_RRC" = 1 ] && [ "$(tr -d '\r' < "$T10_D/win.out")" = "$(printf '3\n7\n15')" ]; then PEU_RUN=", Wine prints 3/7/15 and the trap exits 1$(t10_note)"
+        else PEU_WHY="$PEU_WHY Wine rc=$PEU_RRC out='$(tr -d '\r' < "$T10_D/win.out" | tr '\n' ' ' | head -c 40)' $(t10_errtail);"; fi
+    fi
+    if [ -z "$PEU_WHY" ]; then pe_row_ok pe_unwind_debug_windows_x86_64_legacy "bc (bounds trap) and ar folded, main keeps RBP; C0-C6 + C3b + C4b PASS$PEU_RUN"
+    else pe_row_bad pe_unwind_debug_windows_x86_64_legacy "$PEU_WHY"; fi
+fi
+# The arm64 legacy fold (#143 A19d(iii); spec 2.5.7, ruling Q11, option
+# (a)): in tests/fixtures/win_legacy_out.kr the SP-fixed functions -- stamp
+# (time_ns) and ten (a 10-argument call), both OUT 16, and six, say, add6,
+# add10 -- have no SP write between their x19/x20 save and restore and no
+# set_fp, x29/x30 at [sp,#OUT] and x19/x20 at [sp,#OUT+16]; opaque (asm),
+# spawn (exec_process_argv: OUT 0x4E0 > 488 stays SP-moving, its `sub sp` in
+# the body) and main keep set_fp. Image and listing pass C0-C6 + C3b + C4b
+# (no arm64 Wine here: static).
+PEU_MISS=$(peu_missing python3 llvm-readobj llvm-objdump)
+if [ -n "$PEU_MISS" ]; then
+    pe_row_skip win_legacy_folded_outgoing_arm64 "needs $PEU_MISS"
+elif ! $T10_KRC --legacy --arch=arm64 --target=windows --emit=pe "$DIR/fixtures/win_legacy_out.kr" -o "$T10_D/peu_wla.exe" --test-listing="$T10_D/peu_wla.lst" > "$T10_D/peu_wla.log" 2>&1; then
+    pe_row_bad win_legacy_folded_outgoing_arm64 "build: $(grep -m1 error "$T10_D/peu_wla.log" | cut -c1-120)"
+else
+    PEU_WHY=""
+    PEU_O=$(python3 -B "$DIR/helpers/a64_win_legacy_fold_scan.py" "$T10_D/peu_wla.lst" --want-folded=stamp,six,ten,say,add6,add10 --want-set-fp=opaque,spawn,main 2>&1) \
+        || PEU_WHY="shape: $(grep -v -e ': folded' -e ': set_fp' <<< "$PEU_O" | head -2 | tr '\n' '|')"
+    grep -q '^stamp: folded, OUT 16$' <<< "$PEU_O" && grep -q '^ten: folded, OUT 16$' <<< "$PEU_O" || PEU_WHY="$PEU_WHY stamp/ten not folded at OUT 16;"
+    PEU_C=$(env -u PE_UNWIND_CHECK_DISABLE python3 -B "$DIR/helpers/pe_unwind_check.py" --arch arm64 "$T10_D/peu_wla.exe" --listing "$T10_D/peu_wla.lst" 2>&1)
+    [ "$(grep -c ': PASS' <<< "$PEU_C")" = 9 ] || PEU_WHY="$PEU_WHY checker: $(grep -m1 -e FAIL -e error <<< "$PEU_C" | cut -c1-120);"
+    if [ -z "$PEU_WHY" ]; then pe_row_ok win_legacy_folded_outgoing_arm64 "stamp/ten (OUT 16), six, say, add6, add10 folded (no body SP write, no set_fp); opaque/spawn/main keep set_fp; C0-C6 + C3b + C4b PASS"
+    else pe_row_bad win_legacy_folded_outgoing_arm64 "$PEU_WHY"; fi
+fi
+# --debug on Windows arm64 legacy (#143 A19d(iii)): tests/fixtures/
+# win_debug_traps.kr's ar and bc (overflow and bounds traps) are folded, main
+# keeps set_fp; C0-C6 + C3b + C4b (static: no arm64 Wine here).
+PEU_MISS=$(peu_missing python3 llvm-readobj llvm-objdump)
+if [ -n "$PEU_MISS" ]; then
+    pe_row_skip pe_unwind_debug_windows_arm64_legacy "needs $PEU_MISS"
+elif ! $T10_KRC --debug --legacy --arch=arm64 --target=windows --emit=pe "$DIR/fixtures/win_debug_traps.kr" -o "$T10_D/peu_dla.exe" --test-listing="$T10_D/peu_dla.lst" > "$T10_D/peu_dla.log" 2>&1; then
+    pe_row_bad pe_unwind_debug_windows_arm64_legacy "build: $(grep -m1 error "$T10_D/peu_dla.log" | cut -c1-120)"
+else
+    PEU_WHY=""
+    PEU_O=$(python3 -B "$DIR/helpers/a64_win_legacy_fold_scan.py" "$T10_D/peu_dla.lst" --want-folded=ar,bc --want-set-fp=main 2>&1) \
+        || PEU_WHY="shape: $(grep -v -e ': folded' -e ': set_fp' <<< "$PEU_O" | head -2 | tr '\n' '|')"
+    PEU_C=$(env -u PE_UNWIND_CHECK_DISABLE python3 -B "$DIR/helpers/pe_unwind_check.py" --arch arm64 "$T10_D/peu_dla.exe" --listing "$T10_D/peu_dla.lst" 2>&1)
+    [ "$(grep -c ': PASS' <<< "$PEU_C")" = 9 ] || PEU_WHY="$PEU_WHY checker: $(grep -m1 -e FAIL -e error <<< "$PEU_C" | cut -c1-120);"
+    if [ -z "$PEU_WHY" ]; then pe_row_ok pe_unwind_debug_windows_arm64_legacy "ar and bc folded (no body SP write, no set_fp), main keeps set_fp; C0-C6 + C3b + C4b PASS"
+    else pe_row_bad pe_unwind_debug_windows_arm64_legacy "$PEU_WHY"; fi
+fi
+# The legacy pre-scan's builtin set (#143 A19d review finding 2):
+# cg_win_is_builtin's name list (codegen.kr) decides "builtin or named call"
+# before the prologue; gen_expr / gen_expr_a64 decide it again by
+# tok_matches(wct, "<name>", n). The sets must be equal on both legacy
+# backends -- a builtin missing from the list would be pre-scanned as a named
+# call (and one whose area exceeds a call area would stop the build), a name
+# no emitter handles is dead (tests/helpers/win_builtin_set_check.py).
+if ! command -v python3 > /dev/null 2>&1; then pe_row_skip win_is_builtin_matches_gen_expr "needs python3"
+else
+    PEU_O=$(python3 -B "$DIR/helpers/win_builtin_set_check.py" "$DIR/../src" 2>&1); PEU_RC=$?
+    if [ "$PEU_RC" = 0 ]; then pe_row_ok win_is_builtin_matches_gen_expr "$(tail -1 <<< "$PEU_O")"
+    else pe_row_bad win_is_builtin_matches_gen_expr "$(head -2 <<< "$PEU_O" | tr '\n' '|')$(tail -1 <<< "$PEU_O")"; fi
+fi
+# arm64 IR, option C (#143 A19e; spec 2.5.3): tests/fixtures/win_a64_shapes.kr
+# has fib (register-argument calls) in shape S1 -- one allocation, the saves at
+# the top of the frame --, wide (a low area above 504 bytes) in shape S2 -- the
+# D split without add_fp --, and opaque (an asm block) and main in the D shape
+# with add_fp. The listing shapes (a64_win_frame_scan.py), the unwind codes
+# (save_fplr, no add_fp/set_fp, one epilog scope from StartIndex 0 in the
+# SP-fixed ones; add_fp in the others; a64_win_shape_codes.py, llvm-readobj)
+# and C0-C6 + C3b + C4b.
+PEU_MISS=$(peu_missing python3 llvm-readobj llvm-objdump)
+if [ -n "$PEU_MISS" ]; then
+    pe_row_skip a64_win_sp_fixed_shape "needs $PEU_MISS"
+elif ! $T10_KRC --arch=arm64 --target=windows --emit=pe "$DIR/fixtures/win_a64_shapes.kr" -o "$T10_D/peu_ash.exe" --test-listing="$T10_D/peu_ash.lst" > "$T10_D/peu_ash.log" 2>&1; then
+    pe_row_bad a64_win_sp_fixed_shape "build: $(grep -m1 error "$T10_D/peu_ash.log" | cut -c1-120)"
+else
+    PEU_WHY=""
+    PEU_O=$(python3 -B "$DIR/helpers/a64_win_frame_scan.py" "$T10_D/peu_ash.lst" --shapes 2>&1) || PEU_WHY="shape scan: $(grep -v '^shape' <<< "$PEU_O" | head -1);"
+    for peu_s in "fib S1" "wide S2" "opaque D" "main D"; do grep -q "^shape $peu_s\$" <<< "$PEU_O" || PEU_WHY="$PEU_WHY want $peu_s;"; done
+    PEU_O=$(python3 -B "$DIR/helpers/a64_win_shape_codes.py" "$T10_D/peu_ash.exe" "$T10_D/peu_ash.lst" --fixed=fib,wide --moving=opaque,main 2>&1) \
+        || PEU_WHY="$PEU_WHY codes: $(grep -v OK <<< "$PEU_O" | head -1);"
+    PEU_C=$(env -u PE_UNWIND_CHECK_DISABLE python3 -B "$DIR/helpers/pe_unwind_check.py" --arch arm64 "$T10_D/peu_ash.exe" --listing "$T10_D/peu_ash.lst" 2>&1)
+    [ "$(grep -c ': PASS' <<< "$PEU_C")" = 9 ] || PEU_WHY="$PEU_WHY checker: $(grep -m1 -e FAIL -e error <<< "$PEU_C" | cut -c1-120);"
+    if [ -z "$PEU_WHY" ]; then pe_row_ok a64_win_sp_fixed_shape "fib S1, wide S2 (save_fplr, no add_fp, epilog StartIndex 0), opaque/main D with add_fp; C0-C6 + C3b + C4b PASS"
+    else pe_row_bad a64_win_sp_fixed_shape "$PEU_WHY"; fi
+fi
+# --debug on Windows arm64 IR (#143 A19e; spec 2.5.5): op 131 emits nothing
+# on Windows arm64 (#159), so tests/fixtures/win_debug_traps.kr's ar and bc
+# are SP-fixed (S1, no add_fp), main keeps add_fp; C0-C6 + C3b + C4b (static).
+PEU_MISS=$(peu_missing python3 llvm-readobj llvm-objdump)
+if [ -n "$PEU_MISS" ]; then
+    pe_row_skip pe_unwind_debug_windows_arm64_ir "needs $PEU_MISS"
+elif ! $T10_KRC --debug --arch=arm64 --target=windows --emit=pe "$DIR/fixtures/win_debug_traps.kr" -o "$T10_D/peu_dai.exe" --test-listing="$T10_D/peu_dai.lst" > "$T10_D/peu_dai.log" 2>&1; then
+    pe_row_bad pe_unwind_debug_windows_arm64_ir "build: $(grep -m1 error "$T10_D/peu_dai.log" | cut -c1-120)"
+else
+    PEU_WHY=""
+    PEU_O=$(python3 -B "$DIR/helpers/a64_win_frame_scan.py" "$T10_D/peu_dai.lst" --shapes 2>&1) || PEU_WHY="shape scan: $(grep -v '^shape' <<< "$PEU_O" | head -1);"
+    for peu_s in "ar S1" "bc S1" "main D"; do grep -q "^shape $peu_s\$" <<< "$PEU_O" || PEU_WHY="$PEU_WHY want $peu_s;"; done
+    PEU_C=$(env -u PE_UNWIND_CHECK_DISABLE python3 -B "$DIR/helpers/pe_unwind_check.py" --arch arm64 "$T10_D/peu_dai.exe" --listing "$T10_D/peu_dai.lst" 2>&1)
+    [ "$(grep -c ': PASS' <<< "$PEU_C")" = 9 ] || PEU_WHY="$PEU_WHY checker: $(grep -m1 -e FAIL -e error <<< "$PEU_C" | cut -c1-120);"
+    if [ -z "$PEU_WHY" ]; then pe_row_ok pe_unwind_debug_windows_arm64_ir "ar and bc S1 (no add_fp), main D; C0-C6 + C3b + C4b PASS"
+    else pe_row_bad pe_unwind_debug_windows_arm64_ir "$PEU_WHY"; fi
+fi
+# The arm64 listing disassembler prints the add/sub immediate's `lsl #12`
+# (#143 A19e-h review finding 4: d14023ff read as `sub sp, sp, #8`). A frame
+# over 4080 bytes (tests/fixtures/a64_lsl12_listing.kr) puts the shifted
+# `sub`/`add` in the legacy prologue/epilogue, on Linux and on Windows.
+PEU_WHY=""
+for peu_t in "--arch=arm64 --legacy" "--arch=arm64 --legacy --target=windows"; do
+    if ! $T10_KRC $peu_t --emit=asm "$DIR/fixtures/a64_lsl12_listing.kr" -o "$T10_D/peu_l12.s" > /dev/null 2>&1; then PEU_WHY="$PEU_WHY $peu_t: build failed;"; continue; fi
+    grep -q 'd14007ff  sub sp, sp, #1, lsl #12$' "$T10_D/peu_l12.s" && grep -q '914007ff  add sp, sp, #1, lsl #12$' "$T10_D/peu_l12.s" \
+        || PEU_WHY="$PEU_WHY $peu_t: $(grep -m1 'd14007ff' "$T10_D/peu_l12.s" | cut -c1-60);"
+done
+if [ -z "$PEU_WHY" ]; then pe_row_ok a64_listing_prints_lsl12 "d14007ff / 914007ff print as sub/add sp, sp, #1, lsl #12 (Linux and Windows legacy listings)"
+else pe_row_bad a64_listing_prints_lsl12 "$PEU_WHY"; fi
+# #174 (found by the A19d review): the literal words of the Windows arm64
+# legacy exec builtins (site G1) addressed through x7 instead of sp, "zeroed"
+# STARTUPINFO with an ldp into xzr, pointed &pi into STARTUPINFO and read
+# hProcess from [x7, #0x188], and exec_process reloaded the path slot without
+# the 0xe0 SP moved. tests/helpers/a64_win_exec_words.py decodes `run` of the
+# four tests/fixtures/win_fold_diff/exec_process*.kr programs (folded and
+# SP-moving callers) and requires sp-based words, 8 real `stp xzr, xzr`, &si
+# and &pi at sp+0x60/0xc8, hProcess from [sp, #0xc8] twice, and the path
+# reload at the stored slot plus the bytes SP moved. Static only (no arm64
+# Wine here); the run-time check belongs to the A18 windows-11-arm job.
+if ! command -v python3 > /dev/null 2>&1; then
+    pe_row_skip win_a64_legacy_exec_words "needs python3"
+else
+    PEU_WHY=""
+    for peu_v in exec_process_f exec_process_m exec_process_argv_f exec_process_argv_m; do
+        case $peu_v in *argv*) peu_k=exec_process_argv ;; *) peu_k=exec_process ;; esac
+        if ! $T10_KRC --legacy --arch=arm64 --target=windows --emit=pe "$DIR/fixtures/win_fold_diff/$peu_v.kr" -o "$T10_D/peu_ew.exe" --test-listing="$T10_D/peu_ew.lst" > "$T10_D/peu_ew.log" 2>&1; then
+            PEU_WHY="$PEU_WHY $peu_v: build failed;"; continue
+        fi
+        PEU_O=$(python3 -B "$DIR/helpers/a64_win_exec_words.py" "$T10_D/peu_ew.lst" run $peu_k 2>&1) || PEU_WHY="$PEU_WHY $peu_v: $(head -1 <<< "$PEU_O" | cut -c1-100);"
+    done
+    if [ -z "$PEU_WHY" ]; then pe_row_ok win_a64_legacy_exec_words "exec_process and exec_process_argv, folded and SP-moving callers: sp-based words, 8 stp xzr, &si/&pi at sp+0x60/0xc8, hProcess from [sp, #0xc8], path reload compensated"
+    else pe_row_bad win_a64_legacy_exec_words "$PEU_WHY"; fi
+fi
+# Windows refusals (#143 A7, spec 4.1.5 / 4.3 / 5.1.5): a @naked body whose
+# lowering moves RSP/SP, asm that writes the frame pointer (rbp; x29 or x18 on
+# arm64) decodably or through a constraint, and legacy @naked are refused with
+# a located error; opaque hex asm gets a warning. Like every Windows-only
+# refusal they follow fat_slice_ships(): --targets=linux-x64 never sees one,
+# and a default 8-slice build of an RSP-neutral naked body is accepted.
+PEU_RD="$T10_D/peu_ref"; rm -rf "$PEU_RD"; mkdir -p "$PEU_RD"
+printf '@naked\nfn nk() {\n    file_write(1, "x", 1)\n    asm { "ret" }\n}\nfn main() -> uint32 {\n    nk()\n    return 0\n}\n' > "$PEU_RD/nkb.kr"
+printf '@naked\nfn nk() {\n    asm { "ret" }\n}\nfn main() -> uint32 {\n    nk()\n    return 0\n}\n' > "$PEU_RD/nkok.kr"
+printf 'fn main() -> uint32 {\n    asm { "mov rbp, rax" }\n    return 0\n}\n' > "$PEU_RD/arbp.kr"
+printf 'fn main() -> uint32 {\n    asm { "leave" }\n    return 0\n}\n' > "$PEU_RD/aleave.kr"
+printf 'fn main() -> uint32 {\n    uint64 v = 1\n    asm { "nop" } in(v -> rbp)\n    return 0\n}\n' > "$PEU_RD/acons.kr"
+printf 'fn main() -> uint32 {\n    asm { "mov x29, sp" }\n    return 0\n}\n' > "$PEU_RD/ax29.kr"
+printf 'fn main() -> uint32 {\n    uint64 v = 1\n    asm { "nop" } in(v -> x18)\n    return 0\n}\n' > "$PEU_RD/ax18.kr"
+printf 'fn main() -> uint32 {\n    asm { "0x90" }\n    return 0\n}\n' > "$PEU_RD/ahex.kr"
+PEU_WHY=""
+# peu_ref <want rc> <grep -F text or -> <fixture> <flags...>
+peu_ref() {
+    local wrc="$1" want="$2" f="$3" rc; shift 3
+    (cd "$PEU_RD" && $T10_KRC "$@" "$f.kr" -o "$f.out" > "$f.so" 2> "$f.se"); rc=$?
+    if [ "$rc" != "$wrc" ]; then PEU_WHY="$PEU_WHY $f[$*]:rc=$rc,want=$wrc;"; return; fi
+    if [ "$want" != "-" ] && ! grep -qF -- "$want" "$PEU_RD/$f.se"; then
+        PEU_WHY="$PEU_WHY $f[$*]:message '$(grep -m1 -E 'error|warning:' "$PEU_RD/$f.se" | cut -c1-90)';"
+    fi
+}
+PEU_NK="nkb.kr:2:4: error: @naked function 'nk' passes call arguments here, which can move the stack pointer (IR op 51); on Windows a naked function's unwind record describes no frame, so its body may not move RSP/SP or write the frame pointer (#143)."
+peu_ref 1 "$PEU_NK" nkb --arch=x86_64 --target=windows --emit=pe
+peu_ref 1 "$PEU_NK" nkb --targets=win-x64
+# arm64 wording (phase-2 review Nit 7): arguments do not move SP there; a
+# call overwrites x30
+PEU_NKA="nkb.kr:2:4: error: @naked function 'nk' sets up a call here, and a call overwrites x30, the link register holding its return address (IR op 51); on Windows a naked function's unwind record describes no frame, so its body may not move SP, write x29 or overwrite x30 (#143)."
+peu_ref 1 "$PEU_NKA" nkb --targets=win-arm64
+peu_ref 1 "$PEU_NKA" nkb --arch=arm64 --target=windows --emit=pe
+peu_ref 0 - nkb --targets=linux-x64
+peu_ref 0 - nkb --arch=x86_64 --target=linux
+peu_ref 0 - nkok
+peu_ref 0 - nkok --arch=arm64 --target=windows --emit=pe
+PEU_RBP="error: this asm instruction writes rbp -- on Windows rbp is the frame pointer every unwind record relies on (#143); use another register"
+peu_ref 1 "arbp.kr:2:11: $PEU_RBP" arbp --arch=x86_64 --target=windows --emit=pe
+peu_ref 1 "arbp.kr:2:11: $PEU_RBP" arbp --arch=x86_64 --target=windows --emit=pe --legacy
+peu_ref 0 - arbp --arch=x86_64 --target=linux
+peu_ref 1 "aleave.kr:2:11: error: \`leave\` writes rbp" aleave --arch=x86_64 --target=windows --emit=pe
+peu_ref 1 "acons.kr:3:27: error: this asm constraint binds the frame/TEB register" acons --arch=x86_64 --target=windows --emit=pe
+peu_ref 0 - acons --arch=x86_64 --target=linux
+peu_ref 1 "ax29.kr:2:11: error: this asm instruction writes x29/x18 -- on Windows x29 is the frame pointer every unwind record relies on and x18 is the TEB (#143)" ax29 --arch=arm64 --target=windows --emit=pe
+peu_ref 0 - ax29 --arch=arm64 --target=linux
+peu_ref 1 "ax18.kr:3:27: error: this asm constraint binds the frame/TEB register" ax18 --arch=arm64 --target=windows --emit=pe
+peu_ref 0 "ahex.kr:2:11: warning: asm given as raw bytes cannot be checked for writes to the frame pointer (rbp)" ahex --arch=x86_64 --target=windows --emit=pe
+peu_ref 1 "nkok.kr:2:4: error: legacy @naked on Windows requires the legacy-naked fix" nkok --arch=x86_64 --target=windows --emit=pe --legacy
+peu_ref 1 "nkok.kr:2:4: error: legacy @naked on Windows requires the legacy-naked fix" nkok --arch=arm64 --target=windows --emit=pe --legacy
+peu_ref 0 - nkok --arch=x86_64 --target=linux --legacy
+# A Windows arm64 frame whose low area reaches 256 MiB cannot be described by
+# an alloc_l code (24 bits of size/16): a located error (#143, phase-3a review
+# finding 2). No program the compiler accepts gets near it (at most 512 local
+# arrays of at most 4 KiB), so the hidden --test-a64-low-limit lowers it here.
+printf 'fn big() -> uint64 {\n    uint64[512] a\n    a[3] = 7\n    return a[3]\n}\nfn main() -> uint32 {\n    return big()\n}\n' > "$PEU_RD/abig.kr"
+peu_ref 1 "abig.kr:1:4: error: function 'big' has a stack frame of 256 MiB or more below its saved registers; a Windows arm64 unwind record cannot describe it (#143)." abig --arch=arm64 --target=windows --emit=pe --test-a64-low-limit=4096
+peu_ref 0 - abig --arch=arm64 --target=windows --emit=pe
+if [ -z "$PEU_WHY" ]; then pe_row_ok pe_unwind_refusals "23 cases: naked/asm/legacy-naked refused on Windows slices that ship, accepted elsewhere"
+else pe_row_bad pe_unwind_refusals "$PEU_WHY"; fi
+
+# --- #143 A6b-1: x86_64 IR unwind tables ----------------------------------
+# --test-listing=PATH (hidden, review ruling (a)): the listing comes from the
+# SAME compile as the image, so it equals the image byte for byte -- also for
+# a std-importing program, whose --emit=asm listing would keep dead functions
+# (and is refused outright when a dead Unix branch reaches syscall_raw, #152).
+# C0 must pass with no relocated field masked at all.
+PEU_CHK="$DIR/helpers/pe_unwind_check.py"
+PEU_WHY=""
+for PEU_F in "$DIR/fixtures/alloc_guard_fault.kr" "$DIR/fixtures/pe_unwind_oracle/nest.kr"; do
+    PEU_B=$(basename "$PEU_F" .kr)
+    rm -f "$T10_D/peu_tl.lst"
+    if ! $T10_KRC --arch=x86_64 --target=windows --emit=pe --test-listing="$T10_D/peu_tl.lst" "$PEU_F" -o "$T10_D/peu_tl.exe" > "$T10_D/peu_tl.log" 2>&1; then
+        PEU_WHY="$PEU_WHY $PEU_B:build;"; continue
+    fi
+    [ -s "$T10_D/peu_tl.lst" ] || { PEU_WHY="$PEU_WHY $PEU_B:no-listing-written;"; continue; }
+    PEU_O=$(python3 -B "$PEU_CHK" --arch x86_64 "$T10_D/peu_tl.exe" --listing "$T10_D/peu_tl.lst" --rules C0 2>&1)
+    case "$PEU_O" in "C0: PASS ("*" bytes, 0 relocated fields)") : ;; *) PEU_WHY="$PEU_WHY $PEU_B:$PEU_O;" ;; esac
+done
+if ! command -v python3 > /dev/null 2>&1; then pe_row_skip pe_unwind_test_listing_matches_image "no python3"
+elif [ -z "$PEU_WHY" ]; then pe_row_ok pe_unwind_test_listing_matches_image "std-importing and std-free: C0 with 0 relocated fields"
+else pe_row_bad pe_unwind_test_listing_matches_image "$PEU_WHY"; fi
+
+# Every Windows fixture that builds, the C7 programs included (their main
+# parses the command line through the parse leaf and may reach a die routine;
+# exec_process_argv users also hold the quote leaf and three die routines, all
+# registered with uw_leaf, A6b-2): image and listing from one compile, checker
+# C0-C6 + C3b + C4b.
+if ! command -v python3 > /dev/null 2>&1 || ! command -v llvm-readobj > /dev/null 2>&1 || ! command -v llvm-objdump > /dev/null 2>&1; then
+    pe_row_skip pe_unwind_tables_x86_64_ir "needs python3, llvm-readobj and llvm-objdump"
+else
+    PEU_WHY=""; PEU_N=0
+    for PEU_F in "$DIR"/fixtures/*.kr "$DIR"/smoke/*.kr; do
+        PEU_B=$(basename "$PEU_F" .kr)
+        $T10_KRC --arch=x86_64 --target=windows --emit=pe --test-listing="$T10_D/peu_c.lst" "$PEU_F" -o "$T10_D/peu_c.exe" > /dev/null 2>&1 || continue
+        PEU_N=$((PEU_N + 1))
+        PEU_O=$(python3 -B "$PEU_CHK" --arch x86_64 "$T10_D/peu_c.exe" --listing "$T10_D/peu_c.lst" 2>&1)
+        [ "$(grep -c ': PASS' <<< "$PEU_O")" = 9 ] || PEU_WHY="$PEU_WHY $PEU_B:$( { grep -m1 -e FAIL -e error <<< "$PEU_O" || head -1 <<< "$PEU_O"; } | cut -c1-120);"
+    done
+    if [ -z "$PEU_WHY" ] && [ "$PEU_N" -ge 70 ]; then pe_row_ok pe_unwind_tables_x86_64_ir "$PEU_N fixtures, C7 included, pass C0-C6 + C3b + C4b"
+    else pe_row_bad pe_unwind_tables_x86_64_ir "$PEU_N checked;$PEU_WHY"; fi
+fi
+
+# The same over every fixture that builds with --legacy (#143 A8): the
+# legacy prologue push rbx; push rbp; sub rsp,F'; mov rbp,rsp; mov [rsp+s],r12
+# (review ruling (b)) and its guarded top-tested f-string digit loops
+# (ruling (c)).
+if ! command -v python3 > /dev/null 2>&1 || ! command -v llvm-readobj > /dev/null 2>&1 || ! command -v llvm-objdump > /dev/null 2>&1; then
+    pe_row_skip pe_unwind_tables_x86_64_legacy "needs python3, llvm-readobj and llvm-objdump"
+else
+    PEU_WHY=""; PEU_N=0; PEU_LOOPS=0
+    for PEU_F in "$DIR"/fixtures/*.kr "$DIR"/smoke/*.kr; do
+        PEU_B=$(basename "$PEU_F" .kr)
+        $T10_KRC --legacy --arch=x86_64 --target=windows --emit=pe --test-listing="$T10_D/peu_c.lst" "$PEU_F" -o "$T10_D/peu_c.exe" > /dev/null 2>&1 || continue
+        PEU_N=$((PEU_N + 1))
+        grep -q '^; uw-loops .* r10$' "$T10_D/peu_c.lst" && PEU_LOOPS=$((PEU_LOOPS + 1))
+        PEU_O=$(python3 -B "$PEU_CHK" --arch x86_64 "$T10_D/peu_c.exe" --listing "$T10_D/peu_c.lst" 2>&1)
+        [ "$(grep -c ': PASS' <<< "$PEU_O")" = 9 ] || PEU_WHY="$PEU_WHY $PEU_B:$( { grep -m1 -e FAIL -e error <<< "$PEU_O" || head -1 <<< "$PEU_O"; } | cut -c1-120);"
+    done
+    if [ -z "$PEU_WHY" ] && [ "$PEU_N" -ge 40 ] && [ "$PEU_LOOPS" -ge 1 ]; then pe_row_ok pe_unwind_tables_x86_64_legacy "$PEU_N fixtures pass C0-C6 + C3b + C4b, $PEU_LOOPS with the r10 digit loops"
+    else pe_row_bad pe_unwind_tables_x86_64_legacy "$PEU_N checked, $PEU_LOOPS with the r10 digit loops (want >= 1);$PEU_WHY"; fi
+fi
+
+# Faults under Wine (spec 8.3): the image ends with STATUS_ACCESS_VIOLATION
+# (status 5), prints exactly its own output, and Wine's +unwind trace of the
+# faulting thread walks the expected functions and then leaves the image
+# (tests/helpers/wine_unwind_chain.py; a missing trace is a FAIL). The same
+# image also passes the checker (C0-C6 + C3b + C4b): Wine's walk only visits the
+# offsets this one fault reaches.
+# peu_wine_fault <row> <fixture> <want stdout> <want walk> [extra flags]
+peu_wine_fault() {
+    local row="$1" f="$2" want="$3" walk="$4" rc got ch; shift 4
+    if [ -z "$T10_WINE" ]; then
+        if [ -n "$KR_WINE_BAD" ]; then pe_row_bad "$row" "$KR_WINE_BAD"; else pe_row_skip "$row" "no wine; set KR_WINE=<path to wine>"; fi
+        return
+    fi
+    local miss; miss=$(peu_missing python3 llvm-readobj llvm-objdump)
+    if [ -n "$miss" ]; then pe_row_skip "$row" "needs $miss"; return; fi
+    if ! $T10_KRC --arch=x86_64 --target=windows --emit=pe --test-listing="$T10_D/peu_w.lst" "$@" "$DIR/fixtures/$f.kr" -o "$T10_D/peu_w.exe" > "$T10_D/peu_w.log" 2>&1; then
+        pe_row_bad "$row" "build: $(grep -m1 error "$T10_D/peu_w.log" | cut -c1-100)"; return
+    fi
+    t10_wine "$T10_D/win.out" "$T10_D/win.err" peu_w.exe; rc=$?
+    got=$(tr -d '\r' < "$T10_D/win.out")
+    (cd "$T10_D" && WINEPREFIX="$T10_D/pfx" WINEDLLOVERRIDES=winedbg.exe=d WINEDEBUG=+unwind timeout 300 "$T10_WINE" peu_w.exe > /dev/null 2> "$T10_D/peu_w.trace")
+    ch=$(python3 -B "$DIR/helpers/wine_unwind_chain.py" "$T10_D/peu_w.trace" "$T10_D/peu_w.lst" "$walk" 2>&1 | tail -1)
+    ck=$(python3 -B "$PEU_CHK" --arch x86_64 "$T10_D/peu_w.exe" --listing "$T10_D/peu_w.lst" 2>&1)
+    if [ "$(grep -c ': PASS' <<< "$ck")" = 9 ]; then ck="checker C0-C6 + C3b + C4b PASS"
+    else ck="checker: $( { grep -m1 -e FAIL -e error <<< "$ck" || head -1 <<< "$ck"; } | cut -c1-160)"; fi
+    if [ "$rc" = 5 ] && [ "$got" = "$want" ] && [[ "$ch" == walk* ]] && [ "$ck" = "checker C0-C6 + C3b + C4b PASS" ]; then pe_row_ok "$row" "rc=5, $ch, $ck$(t10_note)"
+    else pe_row_bad "$row" "rc=$rc stdout '$(tr '\n' '|' <<< "$got" | head -c 40)' want rc=5 '$(tr '\n' '|' <<< "$want")'; $ch; $ck"; fi
+}
+peu_wine_fault pe_unwind_nested_fault_windows_wine pe_unwind_nested_fault "$(printf 'armed\nf3')" f3,f2,f1,main
+peu_wine_fault pe_unwind_stack_args_fault_windows_wine pe_unwind_stack_args_fault "$(printf 'armed\nf3')" f3,f2,main
+peu_wine_fault pe_unwind_naked_fault_windows_wine pe_unwind_naked_fault armed poke,f1,main
+# A C7 main (it reads its command line; parse leaf + die routine inside main).
+peu_wine_fault pe_unwind_argv_main_fault_windows_wine pe_unwind_argv_main_fault "$(printf 'armed\nf2')" f2,f1,main
+# The legacy backend (#143 A8): the same faults, built --legacy (a legacy
+# @naked function is refused on Windows, so there is no legacy naked row),
+# and the expression temporaries the legacy backend pushes (println's
+# push rdi/push rcx around GetStdHandle; the f-string digit loops).
+# The fixtures print through println, so stdout is checked exactly here too
+# (phase-2 review Minor 5; legacy file_write(1, ..) does not reach stdout, #145).
+peu_wine_fault pe_unwind_nested_fault_legacy_windows_wine pe_unwind_nested_fault "$(printf 'armed\nf3')" f3,f2,f1,main --legacy
+peu_wine_fault pe_unwind_stack_args_fault_legacy_windows_wine pe_unwind_stack_args_fault "$(printf 'armed\nf3')" f3,f2,main --legacy
+peu_wine_fault pe_unwind_argv_main_fault_legacy_windows_wine pe_unwind_argv_main_fault "$(printf 'armed\nf2')" f2,f1,main --legacy
+peu_wine_fault pe_unwind_temp_push_fault_windows_wine pe_unwind_temp_push_fault "$(printf '7\n3')" f2,f1,main --legacy
+# The mixed chain (#143 option C; spec 2.5.6, plan A19g): main (SP-moving) ->
+# a (SP-fixed) -> b (SP-moving) -> c (SP-fixed leaf) faults; Wine walks
+# c, b, a, main through both kinds of frame. Each row also asserts the
+# classes in the listing (finding 14: the walk alone passes on the pre-A19
+# compiler, which keeps a frame pointer everywhere): a and c without
+# `mov rbp, rsp`, b and main with it (tests/helpers/win_frame_classes.py).
+# Wine cannot detect one class of wrong table here (A19e-h review finding 1):
+# with b described SP-fixed while its per-call area around `call c` is live
+# (mutant 2b), Wine 9.0's walk still recovers a's frame and these rows pass,
+# while the native unwinder reads b's return address from its argument slots
+# (c > b > 0x7 > 0x8 ...). That leg is native only: Task D step 3c runs the
+# 2b image under cdb and requires the chain to break.
+peu_mixed_classes() { # <row> <listing>
+    local o; o=$(python3 -B "$DIR/helpers/win_frame_classes.py" x86_64 "$2" 2>&1)
+    if [ "$(grep -E '^(a|c) SP-fixed|^(b|main) SP-moving' <<< "$o" | wc -l)" = 4 ]; then return 0; fi
+    pe_row_bad "$1" "classes: $(tr '\n' ';' <<< "$o" | cut -c1-120) (want a, c SP-fixed; b, main SP-moving)"; return 1
+}
+for peu_m in "pe_unwind_mixed_fault_windows_wine|" "pe_unwind_mixed_fault_legacy_windows_wine|--legacy"; do
+    peu_mr="${peu_m%%|*}"; peu_mf="${peu_m#*|}"
+    if ! $T10_KRC --arch=x86_64 --target=windows --emit=pe --test-listing="$T10_D/peu_mx.lst" $peu_mf "$DIR/fixtures/pe_unwind_mixed_fault.kr" -o "$T10_D/peu_mx.exe" > "$T10_D/peu_mx.log" 2>&1; then
+        pe_row_bad "$peu_mr" "build: $(grep -m1 error "$T10_D/peu_mx.log" | cut -c1-100)"; continue
+    fi
+    peu_mixed_classes "$peu_mr" "$T10_D/peu_mx.lst" || continue
+    peu_wine_fault "$peu_mr" pe_unwind_mixed_fault "$(printf 'armed\nb')" c,b,a,main $peu_mf
+done
+# The arm64 variant (finding 17; static here, its run is the A18 job): a in
+# shape S2, b with an asm block, c an S1 leaf; IR and --legacy, C0-C6 + C3b +
+# C4b and the listing classes (arm64: set_fp/add_fp in b and main only).
+for peu_m in "pe_unwind_mixed_fault_arm64_ir|" "pe_unwind_mixed_fault_arm64_legacy|--legacy"; do
+    peu_mr="${peu_m%%|*}"; peu_mf="${peu_m#*|}"
+    PEU_MISS=$(peu_missing python3 llvm-readobj llvm-objdump)
+    if [ -n "$PEU_MISS" ]; then pe_row_skip "$peu_mr" "needs $PEU_MISS"; continue; fi
+    if ! $T10_KRC --arch=arm64 --target=windows --emit=pe --test-listing="$T10_D/peu_mxa.lst" $peu_mf "$DIR/fixtures/pe_unwind_mixed_fault_arm64.kr" -o "$T10_D/peu_mxa.exe" > "$T10_D/peu_mxa.log" 2>&1; then
+        pe_row_bad "$peu_mr" "build: $(grep -m1 error "$T10_D/peu_mxa.log" | cut -c1-100)"; continue
+    fi
+    PEU_WHY=""
+    peu_ir=""; [ -z "$peu_mf" ] && peu_ir=--ir
+    PEU_O=$(python3 -B "$DIR/helpers/win_frame_classes.py" arm64 "$T10_D/peu_mxa.lst" $peu_ir 2>&1)
+    [ "$(grep -E '^(a|c) SP-fixed|^(b|main) SP-moving' <<< "$PEU_O" | wc -l)" = 4 ] || PEU_WHY="classes: $(tr '\n' ';' <<< "$PEU_O" | cut -c1-120);"
+    [ -n "$peu_ir" ] && ! grep -q '^a SP-fixed S2$' <<< "$PEU_O" && PEU_WHY="$PEU_WHY a is not S2;"
+    PEU_C=$(env -u PE_UNWIND_CHECK_DISABLE python3 -B "$DIR/helpers/pe_unwind_check.py" --arch arm64 "$T10_D/peu_mxa.exe" --listing "$T10_D/peu_mxa.lst" 2>&1)
+    [ "$(grep -c ': PASS' <<< "$PEU_C")" = 9 ] || PEU_WHY="$PEU_WHY checker: $(grep -m1 -e FAIL -e error <<< "$PEU_C" | cut -c1-120);"
+    if [ -z "$PEU_WHY" ]; then pe_row_ok "$peu_mr" "a, c SP-fixed; b, main SP-moving; C0-C6 + C3b + C4b PASS (static; the run is the A18 windows-11-arm job)"
+    else pe_row_bad "$peu_mr" "$PEU_WHY"; fi
+done
+# Instruction-count calibration (#143 A15, spec 9): tests/perf/calib.kr at
+# N = 1000 and 2000 under qemu-user (-one-insn-per-tb -d exec,nochain) must
+# differ by exactly 1000 x its loop body's disassembled length, on x86_64 and
+# arm64 -- the counting method the perf gate (tests/gates/pe_unwind_perf.sh)
+# relies on.
+if ! command -v qemu-x86_64-static > /dev/null 2>&1 || ! command -v qemu-aarch64-static > /dev/null 2>&1 || ! command -v llvm-objdump > /dev/null 2>&1; then
+    pe_row_skip perf_insn_count_calibration "needs qemu-x86_64-static, qemu-aarch64-static and llvm-objdump"
+else
+    PEU_O=$(PEU_PERF_TMP="$T10_D" bash "$DIR/gates/pe_unwind_perf.sh" --calibration-only "$T10_KRC" "$T10_D/peu_perf" 2>&1); PEU_RC=$?
+    if [ "$PEU_RC" = 0 ]; then pe_row_ok perf_insn_count_calibration "$(grep '^calibration' <<< "$PEU_O" | sed 's/^calibration //' | tr '\n' ';')"
+    else pe_row_bad perf_insn_count_calibration "$(grep -m2 -e FAIL -e error <<< "$PEU_O" | tr '\n' '|' | cut -c1-200)"; fi
+fi
+# The golden classification (#143 option C; spec 2.5.5, finding 21): every
+# function of the frames corpus and of the mixed fixtures, on all four
+# backends, has the class (and arm64 IR shape) of
+# tests/fixtures/win_abi_frames/classes.txt -- in both directions, so a frame
+# pointer where none is needed fails too.
+if ! command -v python3 > /dev/null 2>&1; then pe_row_skip pe_unwind_win_frame_classes "needs python3"
+else
+    PEU_O=$(python3 -B "$DIR/helpers/win_frame_classes_check.py" "$T10_KRC" "$DIR" "$T10_D/peu_wfc" 2>&1); PEU_RC=$?
+    if [ "$PEU_RC" = 0 ]; then pe_row_ok pe_unwind_win_frame_classes "$(tail -1 <<< "$PEU_O")"
+    else pe_row_bad pe_unwind_win_frame_classes "$(head -2 <<< "$PEU_O" | tr '\n' '|' | cut -c1-200)$(tail -1 <<< "$PEU_O")"; fi
+fi
+# Emitter coverage (#143 option C; spec 2.5.1 check 2, finding 6): every
+# moving and folded site id of tests/pe_unwind_sp_sites.lst is reached by a
+# fixture of tests/fixtures/win_sp_sites/ (manifest.txt) on its backend, with
+# --test-sp-site-log; no report is `unnamed`; each fixture's function has its
+# class; every image passes C0-C6 + C3b + C4b.
+PEU_MISS=$(peu_missing python3 llvm-readobj llvm-objdump)
+if [ -n "$PEU_MISS" ]; then pe_row_skip pe_unwind_sp_sites_reached "needs $PEU_MISS"
+else
+    PEU_O=$(python3 -B "$DIR/helpers/sp_sites_reached.py" "$T10_KRC" "$DIR" "$T10_D/peu_ssr" 2>&1); PEU_RC=$?
+    if [ "$PEU_RC" = 0 ]; then pe_row_ok pe_unwind_sp_sites_reached "$(tail -1 <<< "$PEU_O")"
+    else pe_row_bad pe_unwind_sp_sites_reached "$(head -2 <<< "$PEU_O" | tr '\n' '|' | cut -c1-200)$(tail -1 <<< "$PEU_O")"; fi
+fi
+
+# The compiler itself, built for Windows x86_64 with --test-listing: the image
+# is byte-identical to the one built without the switch (the listing does not
+# change what ships), and the checker passes C0-C6 + C3b + C4b over every function.
+if ! command -v python3 > /dev/null 2>&1 || ! command -v llvm-readobj > /dev/null 2>&1 || ! command -v llvm-objdump > /dev/null 2>&1; then
+    pe_row_skip pe_unwind_selfhost_x86_64 "needs python3, llvm-readobj and llvm-objdump"
+elif ! $T10_KRC --arch=x86_64 --target=windows --emit=pe --test-listing="$T10_D/peu_self.lst" "$DIR/../build/krc.kr" -o "$T10_D/krc_win.exe" > "$T10_D/peu_self.log" 2>&1 \
+     || ! $T10_KRC --arch=x86_64 --target=windows --emit=pe "$DIR/../build/krc.kr" -o "$T10_D/krc_win_plain.exe" >> "$T10_D/peu_self.log" 2>&1; then
+    pe_row_bad pe_unwind_selfhost_x86_64 "build: $(grep -m1 error "$T10_D/peu_self.log" | cut -c1-100)"
+elif ! cmp -s "$T10_D/krc_win.exe" "$T10_D/krc_win_plain.exe"; then
+    pe_row_bad pe_unwind_selfhost_x86_64 "--test-listing changed the image: $(cmp "$T10_D/krc_win.exe" "$T10_D/krc_win_plain.exe" 2>&1 | head -1)"
+else
+    PEU_O=$(timeout 1200 python3 -B "$PEU_CHK" --arch x86_64 "$T10_D/krc_win.exe" --listing "$T10_D/peu_self.lst" 2>&1)
+    if [ "$(grep -c ': PASS' <<< "$PEU_O")" = 9 ]; then pe_row_ok pe_unwind_selfhost_x86_64 "krc_win.exe: $(grep '^C6: PASS' <<< "$PEU_O" | sed 's/^C6: PASS (//; s/)$//')"
+    else pe_row_bad pe_unwind_selfhost_x86_64 "$( { grep -m1 -e FAIL -e error <<< "$PEU_O" || head -1 <<< "$PEU_O"; } | cut -c1-200)"; fi
+    rm -f "$T10_D/krc_win.exe" "$T10_D/krc_win_plain.exe" "$T10_D/peu_self.lst"
+fi
+
+# arm64 IR tables (#143 A9b, spec 6.1): every fixture that builds for Windows
+# arm64, image and listing from one compile, checker C0-C6 + C3b + C4b -- C6 (the
+# unwind simulator over every offset) is the primary arm64 evidence, and C1
+# requires llvm-readobj to decode exactly the same records.
+if ! command -v python3 > /dev/null 2>&1 || ! command -v llvm-readobj > /dev/null 2>&1 || ! command -v llvm-objdump > /dev/null 2>&1; then
+    pe_row_skip pe_unwind_tables_arm64_ir "needs python3, llvm-readobj and llvm-objdump"
+else
+    PEU_WHY=""; PEU_N=0
+    for PEU_F in "$DIR"/fixtures/*.kr "$DIR"/smoke/*.kr; do
+        PEU_B=$(basename "$PEU_F" .kr)
+        $T10_KRC --arch=arm64 --target=windows --emit=pe --test-listing="$T10_D/peu_c.lst" "$PEU_F" -o "$T10_D/peu_c.exe" > /dev/null 2>&1 || continue
+        PEU_N=$((PEU_N + 1))
+        PEU_O=$(python3 -B "$PEU_CHK" --arch arm64 "$T10_D/peu_c.exe" --listing "$T10_D/peu_c.lst" 2>&1)
+        [ "$(grep -c ': PASS' <<< "$PEU_O")" = 9 ] || PEU_WHY="$PEU_WHY $PEU_B:$( { grep -m1 -e FAIL -e error <<< "$PEU_O" || head -1 <<< "$PEU_O"; } | cut -c1-120);"
+    done
+    if [ -z "$PEU_WHY" ] && [ "$PEU_N" -ge 60 ]; then pe_row_ok pe_unwind_tables_arm64_ir "$PEU_N fixtures pass C0-C6 + C3b + C4b"
+    else pe_row_bad pe_unwind_tables_arm64_ir "$PEU_N checked;$PEU_WHY"; fi
+fi
+# arm64 legacy tables (#143 A10, spec 5.2): every fixture that builds for
+# Windows arm64 with --legacy, checker C0-C6 + C3b + C4b.
+if ! command -v python3 > /dev/null 2>&1 || ! command -v llvm-readobj > /dev/null 2>&1 || ! command -v llvm-objdump > /dev/null 2>&1; then
+    pe_row_skip pe_unwind_tables_arm64_legacy "needs python3, llvm-readobj and llvm-objdump"
+else
+    PEU_WHY=""; PEU_N=0
+    for PEU_F in "$DIR"/fixtures/*.kr "$DIR"/smoke/*.kr; do
+        PEU_B=$(basename "$PEU_F" .kr)
+        $T10_KRC --legacy --arch=arm64 --target=windows --emit=pe --test-listing="$T10_D/peu_c.lst" "$PEU_F" -o "$T10_D/peu_c.exe" > /dev/null 2>&1 || continue
+        PEU_N=$((PEU_N + 1))
+        PEU_O=$(python3 -B "$PEU_CHK" --arch arm64 "$T10_D/peu_c.exe" --listing "$T10_D/peu_c.lst" 2>&1)
+        [ "$(grep -c ': PASS' <<< "$PEU_O")" = 9 ] || PEU_WHY="$PEU_WHY $PEU_B:$( { grep -m1 -e FAIL -e error <<< "$PEU_O" || head -1 <<< "$PEU_O"; } | cut -c1-120);"
+    done
+    if [ -z "$PEU_WHY" ] && [ "$PEU_N" -ge 40 ]; then pe_row_ok pe_unwind_tables_arm64_legacy "$PEU_N fixtures pass C0-C6 + C3b + C4b"
+    else pe_row_bad pe_unwind_tables_arm64_legacy "$PEU_N checked;$PEU_WHY"; fi
+fi
+# The compiler itself for Windows arm64 (#143 A9b): --test-listing does not
+# change the image; the checker passes over every function; and LLVM, as an
+# independent encoder, agrees with every distinct prologue/epilogue shape: each
+# is rebuilt as .inst words with the .seh_* directives they stand for,
+# assembled by llvm-mc for aarch64-pc-windows-msvc, and llvm-readobj's decode
+# of LLVM's codes must mean exactly what its decode of KernRift's does (LLVM's
+# save_next/restore_next compression expanded; tests/helpers/a64_clang_reference.py).
+if ! command -v python3 > /dev/null 2>&1 || ! command -v llvm-readobj > /dev/null 2>&1 || ! command -v llvm-mc > /dev/null 2>&1 || ! command -v llvm-objdump > /dev/null 2>&1; then
+    pe_row_skip pe_unwind_selfhost_arm64 "needs python3, llvm-readobj, llvm-mc and llvm-objdump"
+    pe_row_skip pe_unwind_arm64_clang_reference "needs python3, llvm-readobj, llvm-mc and llvm-objdump"
+elif ! $T10_KRC --arch=arm64 --target=windows --emit=pe --test-listing="$T10_D/peu_selfa.lst" "$DIR/../build/krc.kr" -o "$T10_D/krc_wa.exe" > "$T10_D/peu_selfa.log" 2>&1 \
+     || ! $T10_KRC --arch=arm64 --target=windows --emit=pe "$DIR/../build/krc.kr" -o "$T10_D/krc_wa_plain.exe" >> "$T10_D/peu_selfa.log" 2>&1; then
+    pe_row_bad pe_unwind_selfhost_arm64 "build: $(grep -m1 error "$T10_D/peu_selfa.log" | cut -c1-100)"
+    pe_row_bad pe_unwind_arm64_clang_reference "build: $(grep -m1 error "$T10_D/peu_selfa.log" | cut -c1-100)"
+else
+    if ! cmp -s "$T10_D/krc_wa.exe" "$T10_D/krc_wa_plain.exe"; then
+        pe_row_bad pe_unwind_selfhost_arm64 "--test-listing changed the image: $(cmp "$T10_D/krc_wa.exe" "$T10_D/krc_wa_plain.exe" 2>&1 | head -1)"
+    else
+        PEU_O=$(timeout 1800 python3 -B "$PEU_CHK" --arch arm64 "$T10_D/krc_wa.exe" --listing "$T10_D/peu_selfa.lst" 2>&1)
+        if [ "$(grep -c ': PASS' <<< "$PEU_O")" = 9 ]; then pe_row_ok pe_unwind_selfhost_arm64 "krc for win-arm64: $(grep '^C6: PASS' <<< "$PEU_O" | sed 's/^C6: PASS (//; s/)$//')"
+        else pe_row_bad pe_unwind_selfhost_arm64 "$( { grep -m1 -e FAIL -e error <<< "$PEU_O" || head -1 <<< "$PEU_O"; } | cut -c1-200)"; fi
+    fi
+    PEU_O=$(timeout 900 python3 -B "$DIR/helpers/a64_clang_reference.py" "$T10_D/krc_wa.exe" "$T10_D/peu_selfa.lst" 2>&1); PEU_RC=$?
+    if [ "$PEU_RC" = 0 ]; then pe_row_ok pe_unwind_arm64_clang_reference "$(tail -1 <<< "$PEU_O")"
+    else pe_row_bad pe_unwind_arm64_clang_reference "$(head -1 <<< "$PEU_O" | cut -c1-160)|$(tail -1 <<< "$PEU_O")"; fi
+    rm -f "$T10_D/krc_wa.exe" "$T10_D/krc_wa_plain.exe" "$T10_D/peu_selfa.lst"
+fi
+# The in-tree NEGATIVE arm64 images (#143 A9b): --test-no-unwind leaves out the
+# arm64 tables, and the checker's C1 finds no exception directory.
+if ! command -v python3 > /dev/null 2>&1; then pe_row_skip pe_unwind_no_unwind_switch_arm64 "no python3"
+else
+    PEU_WHY=""
+    for PEU_B in pe_unwind_nested_fault pe_unwind_stack_args_fault pe_unwind_argv_main_fault; do
+        if ! $T10_KRC --test-no-unwind --arch=arm64 --target=windows --emit=pe --test-listing="$T10_D/peu_x.lst" "$DIR/fixtures/$PEU_B.kr" -o "$T10_D/peu_x.exe" > /dev/null 2>&1; then
+            PEU_WHY="$PEU_WHY $PEU_B:build;"; continue
+        fi
+        PEU_O=$(python3 -B "$PEU_CHK" --arch arm64 "$T10_D/peu_x.exe" --listing "$T10_D/peu_x.lst" --rules C1 2>&1)
+        [[ "$PEU_O" == "C1: FAIL no exception directory"* ]] || PEU_WHY="$PEU_WHY $PEU_B:C1 '$PEU_O';"
+    done
+    if [ -z "$PEU_WHY" ]; then pe_row_ok pe_unwind_no_unwind_switch_arm64 "3 images: C1 finds no exception directory"
+    else pe_row_bad pe_unwind_no_unwind_switch_arm64 "$PEU_WHY"; fi
+fi
+
+# tests/helpers/krbo_slices.py (#143 A12, spec 6.3) reimplements the runner's
+# read path: the KRBOFAT v2 container, the LZ4 frames with LZ-Rift blocks, the
+# inverse BCJ filters. Self-check: the linux slices it extracts from a fat
+# binary must behave exactly as the runner itself executing that .krbo --
+# natively on x86_64 and, for arm64, the arm64 runner under qemu-aarch64-static
+# (the fat_slice_let_arm64 pattern) -- same stdout, same exit status.
+PEU_QA2="$(command -v qemu-aarch64-static || command -v qemu-aarch64 || true)"
+if ! command -v python3 > /dev/null 2>&1; then pe_row_skip krbo_slices_selftest "no python3"
+elif [ -z "$PEU_QA2" ]; then pe_row_skip krbo_slices_selftest "no qemu-aarch64-static"
+else
+    PEU_WHY=""
+    printf 'fn main() -> uint32 {\n    uint64 s = 0\n    uint64 i = 0\n    while i < 10 { s = s + i * i  i = i + 1 }\n    println(s)\n    println("slices")\n    return 23\n}\n' > "$T10_D/peu_fat.kr"
+    cat "$DIR/../src/runner.kr" "$DIR/../src/bcj.kr" > "$T10_D/peu_run.kr"
+    if ! $T10_KRC "$T10_D/peu_fat.kr" -o "$T10_D/peu_fat.krbo" > /dev/null 2>&1 \
+       || ! $T10_KRC --arch=x86_64 "$T10_D/peu_run.kr" -o "$T10_D/peu_runx" > /dev/null 2>&1 \
+       || ! $T10_KRC --arch=arm64 "$T10_D/peu_run.kr" -o "$T10_D/peu_runa" > /dev/null 2>&1; then
+        PEU_WHY="build failed"
+    elif ! python3 -B "$DIR/helpers/krbo_slices.py" "$T10_D/peu_fat.krbo" "$T10_D/peu_sl" > "$T10_D/peu_sl.txt" 2>&1; then
+        PEU_WHY="extraction: $(tail -1 "$T10_D/peu_sl.txt")"
+    else
+        chmod +x "$T10_D/peu_runx" "$T10_D/peu_runa" "$T10_D/peu_sl/linux-x64" "$T10_D/peu_sl/linux-arm64"
+        PEU_A=""; PEU_B=""
+        if [ "$(uname -m)" = x86_64 ]; then
+            PEU_A="$(timeout 60 "$T10_D/peu_runx" "$T10_D/peu_fat.krbo" 2>&1; echo "rc=$?")"
+            PEU_B="$(timeout 60 "$T10_D/peu_sl/linux-x64" 2>&1; echo "rc=$?")"
+            [ "$PEU_A" = "$PEU_B" ] || PEU_WHY="$PEU_WHY x86_64: runner '$(tr '\n' '|' <<< "$PEU_A")' vs slice '$(tr '\n' '|' <<< "$PEU_B")';"
+        fi
+        PEU_A="$(timeout 120 "$PEU_QA2" "$T10_D/peu_runa" "$T10_D/peu_fat.krbo" 2>&1; echo "rc=$?")"
+        PEU_B="$(timeout 120 "$PEU_QA2" "$T10_D/peu_sl/linux-arm64" 2>&1; echo "rc=$?")"
+        [ "$PEU_A" = "$PEU_B" ] || PEU_WHY="$PEU_WHY arm64: runner '$(tr '\n' '|' <<< "$PEU_A")' vs slice '$(tr '\n' '|' <<< "$PEU_B")';"
+        [ "$PEU_B" = "$(printf '285\nslices\nrc=23')" ] || PEU_WHY="$PEU_WHY arm64 slice printed '$(tr '\n' '|' <<< "$PEU_B")', want 285|slices|rc=23;"
+        [ "$(grep -c '^' "$T10_D/peu_sl.txt")" = 8 ] || PEU_WHY="$PEU_WHY $(grep -c '^' "$T10_D/peu_sl.txt") slices extracted, want 8;"
+    fi
+    if [ -z "$PEU_WHY" ]; then pe_row_ok krbo_slices_selftest "8 slices extracted; linux-x64 natively and linux-arm64 under qemu behave exactly as the runner running the .krbo"
+    else pe_row_bad krbo_slices_selftest "$PEU_WHY"; fi
+    rm -rf "$T10_D/peu_sl"
+fi
+
+# The Windows slices of fat binaries (#143 A12): a default 8-slice build and a
+# --targets=win-x64,win-arm64 build of three programs, plus --legacy fat
+# builds of nested_fault and temp_push_fault; both Windows slices of
+# each, extracted with krbo_slices.py, pass the checker C0-C6 + C3b + C4b against the
+# listings --test-listing=PATH writes for them (PATH.win-x64, PATH.win-arm64);
+# with --test-no-unwind, C1 finds no exception directory in either.
+if ! command -v python3 > /dev/null 2>&1 || ! command -v llvm-readobj > /dev/null 2>&1 || ! command -v llvm-objdump > /dev/null 2>&1; then
+    pe_row_skip pe_unwind_fat_slices "needs python3, llvm-readobj and llvm-objdump"
+else
+    PEU_WHY=""; PEU_N=0
+    # program|flags: default and win-only builds of three programs, and
+    # --legacy fat builds of the two std-free legacy fixtures (phase-4 review,
+    # finding 2: compile_fat sends legacy Windows slices through gen_function)
+    for PEU_BT in pe_unwind_nested_fault\| "pe_unwind_nested_fault|--targets=win-x64,win-arm64" \
+                  pe_unwind_argv_main_fault\| "pe_unwind_argv_main_fault|--targets=win-x64,win-arm64" \
+                  sys_args\| "sys_args|--targets=win-x64,win-arm64" \
+                  "pe_unwind_nested_fault|--legacy" "pe_unwind_temp_push_fault|--legacy"; do
+        PEU_B=${PEU_BT%%|*}; PEU_T=${PEU_BT#*|}
+        rm -rf "$T10_D/peu_fs"; mkdir -p "$T10_D/peu_fs"
+        if ! $T10_KRC $PEU_T --test-listing="$T10_D/peu_fs/l" "$DIR/fixtures/$PEU_B.kr" -o "$T10_D/peu_fs/f.krbo" > /dev/null 2>&1 \
+           || ! python3 -B "$DIR/helpers/krbo_slices.py" "$T10_D/peu_fs/f.krbo" "$T10_D/peu_fs/s" > /dev/null 2>&1; then
+            PEU_WHY="$PEU_WHY $PEU_B${PEU_T:+ $PEU_T}:build/extract;"; continue
+        fi
+        for PEU_S in x64:x86_64 arm64:arm64; do
+            PEU_O=$(python3 -B "$PEU_CHK" --arch "${PEU_S#*:}" "$T10_D/peu_fs/s/win-${PEU_S%%:*}" --listing "$T10_D/peu_fs/l.win-${PEU_S%%:*}" 2>&1)
+            if [ "$(grep -c ': PASS' <<< "$PEU_O")" = 9 ]; then PEU_N=$((PEU_N + 1))
+            else PEU_WHY="$PEU_WHY $PEU_B${PEU_T:+ $PEU_T} win-${PEU_S%%:*}:$( { grep -m1 -e FAIL -e error <<< "$PEU_O" || head -1 <<< "$PEU_O"; } | cut -c1-100);"; fi
+        done
+        # the negative: the same build without tables
+        if $T10_KRC --test-no-unwind $PEU_T "$DIR/fixtures/$PEU_B.kr" -o "$T10_D/peu_fs/x.krbo" > /dev/null 2>&1 \
+           && python3 -B "$DIR/helpers/krbo_slices.py" "$T10_D/peu_fs/x.krbo" "$T10_D/peu_fs/x" > /dev/null 2>&1; then
+            for PEU_S in x64:x86_64 arm64:arm64; do
+                PEU_O=$(python3 -B "$PEU_CHK" --arch "${PEU_S#*:}" "$T10_D/peu_fs/x/win-${PEU_S%%:*}" --rules C1 2>&1)
+                [[ "$PEU_O" == "C1: FAIL no exception directory"* ]] || PEU_WHY="$PEU_WHY $PEU_B${PEU_T:+ $PEU_T} --test-no-unwind win-${PEU_S%%:*}: '$PEU_O';"
+            done
+        else
+            PEU_WHY="$PEU_WHY $PEU_B${PEU_T:+ $PEU_T} --test-no-unwind:build/extract;"
+        fi
+    done
+    rm -rf "$T10_D/peu_fs"
+    if [ -z "$PEU_WHY" ] && [ "$PEU_N" = 16 ]; then pe_row_ok pe_unwind_fat_slices "16 Windows slices (3 programs x default and win-only builds, 2 programs --legacy; x win-x64, win-arm64) pass C0-C6 + C3b + C4b; --test-no-unwind leaves none"
+    else pe_row_bad pe_unwind_fat_slices "$PEU_N of 16;$PEU_WHY"; fi
+fi
+
+# COFF objects (#143 A13, spec 6.4): --freestanding --target=windows
+# --emit=obj gets .pdata/.xdata (0x40300040), three appended section symbols
+# and ADDR32NB relocations (x64: Begin, End, UnwindInfo; arm64: Begin,
+# UnwindData). Two std-free, builtin-free, static-free programs (#152, #147,
+# #149): the checker applies the relocations and runs C0-C6 + C3b + C4b against the
+# --test-listing listing (C1 includes the llvm-readobj decode); llvm-readobj
+# must show 3 (x64) or 2 (arm64) ADDR32NB .pdata relocations per record.
+# --test-no-unwind gives the old one-section object: C1 finds no .pdata.
+for PEU_A in x86_64 arm64; do
+    PEU_ROW=pe_unwind_obj_$PEU_A
+    if ! command -v python3 > /dev/null 2>&1 || ! command -v llvm-readobj > /dev/null 2>&1 || ! command -v llvm-objdump > /dev/null 2>&1; then
+        pe_row_skip $PEU_ROW "needs python3, llvm-readobj and llvm-objdump"; continue
+    fi
+    PEU_WHY=""; PEU_N=0
+    PEU_PER=3; PEU_RT=IMAGE_REL_AMD64_ADDR32NB
+    [ "$PEU_A" = arm64 ] && { PEU_PER=2; PEU_RT=IMAGE_REL_ARM64_ADDR32NB; }
+    for PEU_S in pe_unwind_obj_chain.kr pe_unwind_cprobe/k.kr; do
+        if ! $T10_KRC --freestanding --arch=$PEU_A --target=windows --emit=obj --test-listing="$T10_D/peu_o.lst" "$DIR/fixtures/$PEU_S" -o "$T10_D/peu_o.obj" > /dev/null 2>&1; then
+            PEU_WHY="$PEU_WHY $PEU_S:build;"; continue
+        fi
+        PEU_O=$(python3 -B "$PEU_CHK" --arch $PEU_A "$T10_D/peu_o.obj" --listing "$T10_D/peu_o.lst" 2>&1)
+        if [ "$(grep -c ': PASS' <<< "$PEU_O")" = 9 ]; then PEU_N=$((PEU_N + 1))
+        else PEU_WHY="$PEU_WHY $PEU_S:$( { grep -m1 -e FAIL -e error <<< "$PEU_O" || head -1 <<< "$PEU_O"; } | cut -c1-120);"; fi
+        PEU_NR=$(llvm-readobj --unwind "$T10_D/peu_o.obj" | grep -c 'RuntimeFunction {')
+        PEU_NP=$(llvm-readobj --relocs "$T10_D/peu_o.obj" | sed -n '/Section (2) .pdata {/,/}/p' | grep -c " $PEU_RT ")
+        if [ "$PEU_NR" -gt 0 ] && [ "$PEU_NP" = $((PEU_NR * PEU_PER)) ]; then PEU_N=$((PEU_N + 1))
+        else PEU_WHY="$PEU_WHY $PEU_S: $PEU_NR records, $PEU_NP $PEU_RT .pdata relocations, want $PEU_PER each;"; fi
+        if $T10_KRC --test-no-unwind --freestanding --arch=$PEU_A --target=windows --emit=obj "$DIR/fixtures/$PEU_S" -o "$T10_D/peu_ox.obj" > /dev/null 2>&1; then
+            PEU_O=$(python3 -B "$PEU_CHK" --arch $PEU_A "$T10_D/peu_ox.obj" --rules C1 2>&1)
+            if [[ "$PEU_O" == "C1: FAIL no .pdata section"* ]]; then PEU_N=$((PEU_N + 1))
+            else PEU_WHY="$PEU_WHY $PEU_S --test-no-unwind: '$PEU_O';"; fi
+        else
+            PEU_WHY="$PEU_WHY $PEU_S --test-no-unwind:build;"
+        fi
+    done
+    rm -f "$T10_D/peu_o.obj" "$T10_D/peu_o.lst" "$T10_D/peu_ox.obj"
+    if [ -z "$PEU_WHY" ] && [ "$PEU_N" = 6 ]; then pe_row_ok $PEU_ROW "2 objects: C0-C6 + C3b + C4b pass, $PEU_PER ADDR32NB .pdata relocations per record; --test-no-unwind leaves no .pdata"
+    else pe_row_bad $PEU_ROW "$PEU_N of 6;$PEU_WHY"; fi
+done
+
+# The two COFF error paths of A13 (phase-4 review, finding 3), both arches:
+#  * the .pdata relocation count is refused, not truncated, past the limit:
+#    the hidden --test-coff-reloc-limit=N lowers 65535 so pe_unwind_obj_chain
+#    (5 functions: 15 x64 / 10 arm64 relocations) is refused at one below its
+#    count with the error and no output file, and builds at exactly its count;
+#  * a module that defines no function (statics only) stays a one-section
+#    object without .pdata/.xdata, while the fixture gets three sections.
+if ! command -v python3 > /dev/null 2>&1; then
+    pe_row_skip pe_unwind_obj_reloc_limit "no python3"; pe_row_skip pe_unwind_obj_no_functions "no python3"
+else
+    PEU_WHY=""
+    for PEU_AN in x86_64:15 arm64:10; do
+        PEU_A=${PEU_AN%%:*}; PEU_NR=${PEU_AN#*:}
+        rm -f "$T10_D/peu_rl.obj"
+        $T10_KRC --test-coff-reloc-limit=$((PEU_NR - 1)) --freestanding --arch=$PEU_A --target=windows --emit=obj "$DIR/fixtures/pe_unwind_obj_chain.kr" -o "$T10_D/peu_rl.obj" > "$T10_D/peu_rl.log" 2>&1; PEU_RC=$?
+        if [ "$PEU_RC" = 0 ] || ! grep -q 'error: this Windows object has too many functions for its .pdata relocations' "$T10_D/peu_rl.log" || [ -e "$T10_D/peu_rl.obj" ]; then
+            PEU_WHY="$PEU_WHY $PEU_A limit $((PEU_NR - 1)): rc=$PEU_RC $(grep -m1 error "$T10_D/peu_rl.log" | cut -c1-80)$([ -e "$T10_D/peu_rl.obj" ] && echo ', object written');"
+        fi
+        if ! $T10_KRC --test-coff-reloc-limit=$PEU_NR --freestanding --arch=$PEU_A --target=windows --emit=obj "$DIR/fixtures/pe_unwind_obj_chain.kr" -o "$T10_D/peu_rl.obj" > /dev/null 2>&1; then
+            PEU_WHY="$PEU_WHY $PEU_A limit $PEU_NR: refused;"
+        fi
+    done
+    # the switch itself takes only a decimal 0..65535 (phase-5 review Nit 8)
+    for PEU_V in abc 70000 12x ""; do
+        $T10_KRC --test-coff-reloc-limit=$PEU_V --freestanding --target=windows --emit=obj "$DIR/fixtures/pe_unwind_obj_chain.kr" -o "$T10_D/peu_rl.obj" > "$T10_D/peu_rl.log" 2>&1 \
+            && PEU_WHY="$PEU_WHY --test-coff-reloc-limit='$PEU_V' accepted;"
+        grep -q 'takes a decimal number from 0 to 65535' "$T10_D/peu_rl.log" || PEU_WHY="$PEU_WHY --test-coff-reloc-limit='$PEU_V': no refusal message;"
+    done
+    if [ -z "$PEU_WHY" ]; then pe_row_ok pe_unwind_obj_reloc_limit "x86_64 refused at 14 and built at 15, arm64 refused at 9 and built at 10 .pdata relocations; the switch refuses abc, 70000, 12x and empty"
+    else pe_row_bad pe_unwind_obj_reloc_limit "$PEU_WHY"; fi
+    PEU_WHY=""
+    printf 'static uint64 PEU_K1 = 7\nstatic uint64 PEU_K2 = 0x1234\n' > "$T10_D/peu_consts.kr"
+    for PEU_A in x86_64 arm64; do
+        for PEU_SN in peu_consts:1 pe_unwind_obj_chain:3; do
+            PEU_S=${PEU_SN%%:*}; PEU_WANT=${PEU_SN#*:}
+            PEU_SRC="$T10_D/$PEU_S.kr"; [ -e "$PEU_SRC" ] || PEU_SRC="$DIR/fixtures/$PEU_S.kr"
+            if ! $T10_KRC --freestanding --arch=$PEU_A --target=windows --emit=obj "$PEU_SRC" -o "$T10_D/peu_nf.obj" > "$T10_D/peu_nf.log" 2>&1; then
+                PEU_WHY="$PEU_WHY $PEU_A $PEU_S: $(grep -m1 error "$T10_D/peu_nf.log" | cut -c1-80);"; continue
+            fi
+            PEU_O=$(python3 -B - "$T10_D/peu_nf.obj" <<'PEUNFEOF'
+import struct, sys
+b = open(sys.argv[1], 'rb').read()
+n = struct.unpack_from('<H', b, 2)[0]
+print(n, ','.join(b[20 + 40 * i:28 + 40 * i].rstrip(b'\0').decode() for i in range(n)))
+PEUNFEOF
+)
+            case "$PEU_WANT" in
+                1) [ "$PEU_O" = "1 .text" ] || PEU_WHY="$PEU_WHY $PEU_A $PEU_S: sections '$PEU_O', want '1 .text';" ;;
+                3) [ "$PEU_O" = "3 .text,.pdata,.xdata" ] || PEU_WHY="$PEU_WHY $PEU_A $PEU_S: sections '$PEU_O', want '3 .text,.pdata,.xdata';" ;;
+            esac
+        done
+    done
+    rm -f "$T10_D"/peu_rl.* "$T10_D"/peu_nf.* "$T10_D/peu_consts.kr"
+    if [ -z "$PEU_WHY" ]; then pe_row_ok pe_unwind_obj_no_functions "a statics-only module is a one-section object on both arches; a module with functions gets .text/.pdata/.xdata"
+    else pe_row_bad pe_unwind_obj_no_functions "$PEU_WHY"; fi
+fi
+
+# The KR COFF probe linked with a C host (#143 A13, spec 8.4/8.5; phase-4
+# ruling): tests/fixtures/pe_unwind_cprobe/k.kr as a --freestanding object,
+# host.c by clang, kernel32 imports by llvm-dlltool from k32.def, linked by
+# lld-link /nodefaultlib /entry:start with a /map.
+#  static:   the checker's --linked mode (the KR object's functions only, the
+#            listing shifted to where lld put KR's .text) passes C0-C6 + C3b + C4b;
+#  run-time: under Wine the probe exits 11 and walk() prints the chain
+#            walk > d3 > d2 > main > start (named through the /map) >
+#            kernel32.dll > ntdll.dll, then FOUR NULL entries. The NULLs are a
+#            Wine 9.0 quirk of RtlCaptureStackBackTrace (it counts slots past
+#            RtlUserThreadStart); they are pinned so a Wine change is noticed.
+#            Natively the count is 7 (Task D / A14b native scripts);
+#  control:  the same link with a --test-no-unwind object exits 32.
+PEU_ROW=pe_unwind_obj_link_windows_wine
+if ! command -v python3 > /dev/null 2>&1 || ! command -v clang > /dev/null 2>&1 || ! command -v lld-link > /dev/null 2>&1 \
+   || ! command -v llvm-dlltool > /dev/null 2>&1 || ! command -v llvm-readobj > /dev/null 2>&1 || ! command -v llvm-objdump > /dev/null 2>&1; then
+    pe_row_skip $PEU_ROW "needs python3, clang, lld-link, llvm-dlltool, llvm-readobj and llvm-objdump"
+elif [ -z "$T10_WINE" ]; then
+    if [ -n "$KR_WINE_BAD" ]; then pe_row_bad $PEU_ROW "$KR_WINE_BAD"; else pe_row_skip $PEU_ROW "no wine"; fi
+else
+    PEU_WHY=""
+    PEU_CP="$DIR/fixtures/pe_unwind_cprobe"
+    if ! $T10_KRC --freestanding --target=windows --emit=obj --test-listing="$T10_D/peu_k.lst" "$PEU_CP/k.kr" -o "$T10_D/peu_k.obj" > /dev/null 2>&1 \
+       || ! $T10_KRC --test-no-unwind --freestanding --target=windows --emit=obj "$PEU_CP/k.kr" -o "$T10_D/peu_kn.obj" > /dev/null 2>&1 \
+       || ! llvm-dlltool -d "$PEU_CP/k32.def" -l "$T10_D/peu_k32.lib" -m i386:x86-64 > /dev/null 2>&1 \
+       || ! clang --target=x86_64-pc-windows-msvc -O1 -c "$PEU_CP/host.c" -o "$T10_D/peu_host.obj" > /dev/null 2>&1 \
+       || ! lld-link /nodefaultlib /entry:start /subsystem:console "/map:$T10_D/peu_p.map" "/out:$T10_D/peu_p.exe" "$T10_D/peu_host.obj" "$T10_D/peu_k.obj" "$T10_D/peu_k32.lib" > /dev/null 2>&1 \
+       || ! lld-link /nodefaultlib /entry:start /subsystem:console "/map:$T10_D/peu_pn.map" "/out:$T10_D/peu_pn.exe" "$T10_D/peu_host.obj" "$T10_D/peu_kn.obj" "$T10_D/peu_k32.lib" > /dev/null 2>&1; then
+        PEU_WHY="build/link failed"
+    else
+        PEU_O=$(python3 -B "$PEU_CHK" --arch x86_64 "$T10_D/peu_p.exe" --listing "$T10_D/peu_k.lst" --linked "$T10_D/peu_p.map" 2>&1)
+        [ "$(grep -c ': PASS' <<< "$PEU_O")" = 9 ] || PEU_WHY="$PEU_WHY checker --linked: $( { grep -m1 -e FAIL -e error <<< "$PEU_O" || head -1 <<< "$PEU_O"; } | cut -c1-160);"
+        for PEU_X in "peu_p:11:walk,d3,d2,main,start,kernel32.dll,ntdll.dll,NULL,NULL,NULL,NULL" "peu_pn:32:"; do
+            PEU_E=${PEU_X%%:*}; PEU_R=${PEU_X#*:}; PEU_WANT=${PEU_R#*:}; PEU_R=${PEU_R%%:*}
+            t10_wine "$T10_D/peu_w.out" "$T10_D/peu_w.err" "$PEU_E.exe"; PEU_RC=$?
+            [ "$PEU_RC" = "$PEU_R" ] || PEU_WHY="$PEU_WHY $PEU_E: Wine exit $PEU_RC, want $PEU_R;"
+            [ -n "$PEU_WANT" ] || continue
+            PEU_CH=$(python3 -B - "$T10_D/$PEU_E.map" "$T10_D/peu_w.out" "$PEU_E.exe" <<'PEULINKEOF'
+import re, sys
+syms = []
+for ln in open(sys.argv[1], encoding='latin-1'):
+    m = re.match(r'^\s*0001:[0-9a-f]{8}\s+(\S+)\s+([0-9a-f]{16})\s+\S+\s*$', ln)
+    if m:
+        syms.append((int(m.group(2), 16), m.group(1)))
+syms.sort()
+out = []
+for ln in open(sys.argv[2], encoding='latin-1', errors='replace'):
+    ln = ln.strip().replace('\r', '')
+    if not ln:
+        continue
+    pc, mod = ln.split(' ', 1)
+    pc = int(pc, 16)
+    if pc == 0:
+        out.append('NULL')
+    elif mod.lower().endswith('\\' + sys.argv[3]):
+        own = [n for a, n in syms if a <= pc]
+        out.append(own[-1] if own else '?image')
+    else:
+        out.append(mod.replace('/', '\\').split('\\')[-1].lower())
+print(','.join(out))
+PEULINKEOF
+)
+            [ "$PEU_CH" = "$PEU_WANT" ] || PEU_WHY="$PEU_WHY $PEU_E: chain $PEU_CH, want $PEU_WANT;"
+        done
+    fi
+    rm -f "$T10_D"/peu_k.lst "$T10_D"/peu_k.obj "$T10_D"/peu_kn.obj "$T10_D"/peu_k32.lib "$T10_D"/peu_host.obj "$T10_D"/peu_p.* "$T10_D"/peu_pn.* "$T10_D"/peu_w.*
+    if [ -z "$PEU_WHY" ]; then pe_row_ok $PEU_ROW "checker --linked C0-C6 + C3b + C4b pass; Wine exit 11, chain walk>d3>d2>main>start>kernel32>ntdll + 4 Wine NULLs; --test-no-unwind control exits 32"
+    else pe_row_bad $PEU_ROW "$PEU_WHY"; fi
+fi
+
+# #160 (spec 15; #143 A16, re-review finding 10): Win64 makes rsi, rdi and
+# xmm6-15 nonvolatile, but KernRift code uses them as scratch, so a C caller
+# that keeps a value in rsi across a call into KR loses it.
+# tests/fixtures/pe_unwind_rsi_host: host.c's asm probe() puts a sentinel in
+# rsi and calls the KR object's main(); the image exits 40 when rsi kept it,
+# 41 when not. Linked as in pe_unwind_obj_link_windows_wine (--emit=obj is
+# the legacy backend; k.kr's f-string writes rsi).
+#  pe_unwind_host_rsi_control: the control kc.kr (no rsi write) exits 40,
+#    and k.kr's listing writes rsi -- so the known red below fails for its
+#    own reason, never because the probe is broken;
+#  pe_unwind_host_rsi_across_kr: k.kr exits 40. KNOWN RED
+#    (tests/pe_unwind_known_reds.lst): it must FAIL, with exit 41, until #160
+#    is fixed, and leaves that list in the commit that fixes it.
+PEU_RH="$DIR/fixtures/pe_unwind_rsi_host"
+if ! command -v clang > /dev/null 2>&1 || ! command -v lld-link > /dev/null 2>&1 || ! command -v llvm-dlltool > /dev/null 2>&1; then
+    pe_row_skip pe_unwind_host_rsi_control "needs clang, lld-link and llvm-dlltool"
+    pe_row_skip pe_unwind_host_rsi_across_kr "needs clang, lld-link and llvm-dlltool"
+elif [ -z "$T10_WINE" ]; then
+    PEU_WHY=${KR_WINE_BAD:-no wine}
+    if [ -n "$KR_WINE_BAD" ]; then pe_row_bad pe_unwind_host_rsi_control "$PEU_WHY"; else pe_row_skip pe_unwind_host_rsi_control "$PEU_WHY"; fi
+    pe_row_skip pe_unwind_host_rsi_across_kr "$PEU_WHY"
+else
+    PEU_WHY=""; PEU_RC1=""
+    if ! $T10_KRC --freestanding --target=windows --emit=obj --test-listing="$T10_D/peu_rk.lst" "$PEU_RH/k.kr" -o "$T10_D/peu_rk.obj" > /dev/null 2>&1 \
+       || ! $T10_KRC --freestanding --target=windows --emit=obj "$PEU_RH/kc.kr" -o "$T10_D/peu_rkc.obj" > /dev/null 2>&1 \
+       || ! llvm-dlltool -d "$DIR/fixtures/pe_unwind_cprobe/k32.def" -l "$T10_D/peu_rk32.lib" -m i386:x86-64 > /dev/null 2>&1 \
+       || ! clang --target=x86_64-pc-windows-msvc -O1 -c "$PEU_RH/host.c" -o "$T10_D/peu_rhost.obj" > /dev/null 2>&1 \
+       || ! lld-link /nodefaultlib /entry:start /subsystem:console "/out:$T10_D/peu_rp.exe" "$T10_D/peu_rhost.obj" "$T10_D/peu_rk.obj" "$T10_D/peu_rk32.lib" > /dev/null 2>&1 \
+       || ! lld-link /nodefaultlib /entry:start /subsystem:console "/out:$T10_D/peu_rpc.exe" "$T10_D/peu_rhost.obj" "$T10_D/peu_rkc.obj" "$T10_D/peu_rk32.lib" > /dev/null 2>&1; then
+        PEU_WHY="build/link failed"
+    else
+        grep -qE '^ +[0-9a-f]{8}: .*(lea|mov) rsi, ' "$T10_D/peu_rk.lst" || PEU_WHY="$PEU_WHY k.kr's listing no longer writes rsi (pick another rsi-writing construct);"
+        t10_wine "$T10_D/peu_rw.out" "$T10_D/peu_rw.err" peu_rpc.exe; PEU_RC=$?
+        [ "$PEU_RC" = 40 ] || PEU_WHY="$PEU_WHY control kc.kr: Wine exit $PEU_RC, want 40;"
+        t10_wine "$T10_D/peu_rw.out" "$T10_D/peu_rw.err" peu_rp.exe; PEU_RC1=$?
+        case "$PEU_RC1" in 40|41) ;; *) PEU_WHY="$PEU_WHY k.kr: Wine exit $PEU_RC1, want 40 (kept) or 41 (clobbered);" ;; esac
+    fi
+    rm -f "$T10_D"/peu_rk.* "$T10_D"/peu_rkc.obj "$T10_D"/peu_rk32.lib "$T10_D"/peu_rhost.obj "$T10_D"/peu_rp.exe "$T10_D"/peu_rpc.exe "$T10_D"/peu_rw.*
+    if [ -z "$PEU_WHY" ]; then
+        pe_row_ok pe_unwind_host_rsi_control "control exits 40 (rsi kept); k.kr's listing writes rsi; k.kr exits $PEU_RC1"
+        if [ "$PEU_RC1" = 40 ]; then pe_row_ok pe_unwind_host_rsi_across_kr "rsi survives a call into KR (exit 40): #160 is fixed, remove this row from tests/pe_unwind_known_reds.lst"
+        else pe_row_bad pe_unwind_host_rsi_across_kr "#160: the C host's rsi does not survive a call into KR (Wine exit 41, want 40)"; fi
+    else
+        pe_row_bad pe_unwind_host_rsi_control "$PEU_WHY"
+        pe_row_skip pe_unwind_host_rsi_across_kr "the control failed"
+    fi
+fi
+
+# tests/windows/native_exec.sh (#143 A14a, spec 8.6 (a)) runs Windows rows
+# natively on the laptop; its Linux half is tested here, without the laptop
+# (the PowerShell half only natively, Task D):
+#  * the command line it builds (MSVC/UCRT quoting) against a Python reference
+#    of the UCRT parser, on the C7 vectors: the parser reproduces every line of
+#    argv_table.txt, the builder reproduces the compiler's own quoter on the
+#    round-trip vectors, and every argv survives build -> parse;
+#  * the environment allow-list: exactly the names in NATIVE_ENV that are set
+#    plus every exported KR_* / MLR_* travel, with their values intact
+#    (spaces, quotes, newlines, non-ASCII), and nothing else; a value that is
+#    not UTF-8 refuses the run (exit 125).
+if ! command -v python3 > /dev/null 2>&1; then
+    pe_row_skip native_exec_cmdline_selftest "no python3"; pe_row_skip native_env_allowlist_selftest "no python3"
+else
+    PEU_NX="$DIR/windows/native_exec.sh"
+    PEU_O=$(bash "$PEU_NX" --selftest-cmdline "$DIR/fixtures" 2>&1); PEU_RC=$?
+    if [ "$PEU_RC" = 0 ] && grep -q ' 0 mismatches$' <<< "$PEU_O"; then pe_row_ok native_exec_cmdline_selftest "$(tail -1 <<< "$PEU_O")"
+    else pe_row_bad native_exec_cmdline_selftest "rc=$PEU_RC $(head -3 <<< "$PEU_O" | tr '\n' '|' | cut -c1-300)"; fi
+    PEU_WHY=""
+    PEU_V=$(printf 'a b "q" \\\\x\nline2 \xce\xbb')
+    for PEU_C in "NATIVE_ENV=|KR_A,MLR_B" "NATIVE_ENV=OTHER UNSET_ONE|KR_A,MLR_B,NATIVE_ENV,OTHER" "NATIVE_ENV=KR_A|KR_A,MLR_B"; do
+        PEU_SET=${PEU_C%%|*}; PEU_WANT=${PEU_C#*|}
+        PEU_O=$(env -i PATH="$PATH" HOME="$HOME" "$PEU_SET" KR_A="$PEU_V" MLR_B=2 OTHER=o NOTKR_C=n XKR_D=x bash "$PEU_NX" --env-forward 2>&1)
+        PEU_GOT=$(cut -d= -f1 <<< "$PEU_O" | paste -sd,)
+        # NATIVE_ENV itself is listed only when named in NATIVE_ENV; drop it
+        PEU_GOT=$(tr ',' '\n' <<< "$PEU_GOT" | grep -vx NATIVE_ENV | paste -sd,); PEU_WANT=$(tr ',' '\n' <<< "$PEU_WANT" | grep -vx NATIVE_ENV | paste -sd,)
+        [ "$PEU_GOT" = "$PEU_WANT" ] || PEU_WHY="$PEU_WHY [$PEU_SET] forwards '$PEU_GOT', want '$PEU_WANT';"
+        PEU_DEC=$(grep '^KR_A=' <<< "$PEU_O" | cut -d= -f2- | base64 -d 2>/dev/null)
+        [ "$PEU_DEC" = "$PEU_V" ] || PEU_WHY="$PEU_WHY [$PEU_SET] KR_A's value does not survive its base64;"
+    done
+    # a value that is not UTF-8 cannot travel exactly: the whole run is
+    # refused (125), never forwarded without it or the variables after it
+    PEU_O=$(env -i PATH="$PATH" HOME="$HOME" KR_A=a KR_B=$'\xff\xfe' KR_C=c bash "$PEU_NX" --env-forward 2>&1); PEU_RC=$?
+    [ "$PEU_RC" = 125 ] && grep -q 'KR_B is not UTF-8' <<< "$PEU_O" || PEU_WHY="$PEU_WHY non-UTF-8 KR_B: rc=$PEU_RC '$(tr '\n' '|' <<< "$PEU_O" | cut -c1-80)', want 125 and a refusal;"
+    if [ -z "$PEU_WHY" ]; then pe_row_ok native_env_allowlist_selftest "3 setups: NATIVE_ENV names that are set plus exported KR_*/MLR_*, values intact, nothing else; a non-UTF-8 value refuses the run (125)"
+    else pe_row_bad native_env_allowlist_selftest "$PEU_WHY"; fi
+fi
+
+# The native corpus is complete (#143, A15-17 review finding 1): every name of
+# this file that matches the corpus pattern (PAT in native_corpus_check.py,
+# require_rows' Windows pattern, qemu excluded) is a row of tests/windows/native_corpus.lst or a listed non-row
+# (native_corpus_nonrows.lst); every corpus row is a name here or made by a
+# $-template here; a template making Windows-pattern names matches a corpus
+# row. Red before the review fix: 17 rows were missing from the corpus.
+if ! command -v python3 > /dev/null 2>&1; then pe_row_skip native_corpus_matches_suite "no python3"
+else
+    PEU_O=$(python3 -B "$DIR/windows/native_corpus_check.py" "$DIR/run_tests.sh" "$DIR/windows/native_corpus.lst" "$DIR/windows/native_corpus_nonrows.lst" 2>&1); PEU_RC=$?
+    if [ "$PEU_RC" = 0 ]; then pe_row_ok native_corpus_matches_suite "$(tail -1 <<< "$PEU_O" | sed 's/^native_corpus_check: //')"
+    else pe_row_bad native_corpus_matches_suite "rc=$PEU_RC $(head -3 <<< "$PEU_O" | sed 's/^native_corpus_check: //' | tr '\n' '|' | cut -c1-300)"; fi
+fi
+
+# Mutant 2b (tests/windows/m2b_mutant.py; #143 A19h, Task D 3c; A15-17 review
+# finding 3) still applies to this tree and still bites: applied to a copy of
+# src/, it changes codegen.kr and nothing else, by exactly its one edit (six
+# lines removed: the fold/SP-fixed block and the frame-pointer condition; a
+# second application refuses); the mutant compiler builds; its
+# pe_unwind_mixed_fault.kr --legacy image fails the static checker's C3b
+# (RSP written in a record without a frame register) while the real
+# compiler's passes C0-C6 + C3b + C4b. Natively cdb_chain.sh must FAIL on that
+# image (Task D 3c); Wine recovers from this error class.
+PEU_ROW=m2b_mutant_applies
+if ! command -v python3 > /dev/null 2>&1 || ! command -v llvm-readobj > /dev/null 2>&1 || ! command -v llvm-objdump > /dev/null 2>&1; then
+    pe_row_skip $PEU_ROW "needs python3, llvm-readobj and llvm-objdump"
+else
+    PEU_WHY=""; PEU_M="$T10_D/peu_m2b"; rm -rf "$PEU_M"; mkdir -p "$PEU_M/src" "$PEU_M/orig"
+    PEU_SRCS=$(make -s -C "$DIR/.." -f - peu_print_srcs 2> /dev/null <<'PEUMKEOF'
+include Makefile
+peu_print_srcs:
+	@echo $(SRCS)
+PEUMKEOF
+)
+    for PEU_F in $PEU_SRCS; do mkdir -p "$PEU_M/src/$(dirname "$PEU_F")"; cp "$DIR/../$PEU_F" "$PEU_M/src/$PEU_F"; done
+    cp -r "$PEU_M/src/src" "$PEU_M/orig/src" 2> /dev/null
+    if [ -z "$PEU_SRCS" ] || [ ! -f "$PEU_M/src/src/codegen.kr" ]; then PEU_WHY="could not read SRCS from the Makefile"
+    elif ! python3 -B "$DIR/windows/m2b_mutant.py" "$PEU_M/src/src" > "$PEU_M/apply.log" 2>&1; then PEU_WHY="the mutant did not apply: $(head -1 "$PEU_M/apply.log" | cut -c1-160)"
+    else
+        PEU_D=$(diff -rq "$PEU_M/orig/src" "$PEU_M/src/src")
+        [ "$(wc -l <<< "$PEU_D")" = 1 ] && grep -q '/codegen.kr and .*/codegen.kr differ$' <<< "$PEU_D" \
+            || PEU_WHY="$PEU_WHY changed files: $(tr '\n' ' ' <<< "$PEU_D" | cut -c1-160);"
+        PEU_D=$(diff "$PEU_M/orig/src/codegen.kr" "$PEU_M/src/src/codegen.kr")
+        [ "$(grep -c '^< ' <<< "$PEU_D")" = 6 ] && [ "$(grep -c '^> ' <<< "$PEU_D")" = 0 ] && grep -q '^< .*uw_fn_sp_fixed = 1' <<< "$PEU_D" \
+            || PEU_WHY="$PEU_WHY the codegen.kr diff is not the mutant's one edit (6 lines removed);"
+        python3 -B "$DIR/windows/m2b_mutant.py" "$PEU_M/src/src" > /dev/null 2>&1 && PEU_WHY="$PEU_WHY a second application did not refuse;"
+        (cd "$PEU_M/src" && cat $PEU_SRCS | grep -v '^import "' > "$PEU_M/krc_m.kr")
+        if ! ( ulimit -v 4000000; timeout 120 $T10_KRC --arch=x86_64 "$PEU_M/krc_m.kr" -o "$PEU_M/krc_m" ) > "$PEU_M/build.log" 2>&1; then
+            PEU_WHY="$PEU_WHY the mutant compiler does not build: $(grep -m1 error "$PEU_M/build.log" | cut -c1-120);"
+        else
+            for PEU_C in mutant real; do
+                PEU_K="$PEU_M/krc_m"; [ "$PEU_C" = real ] && PEU_K="$T10_KRC"
+                if ! $PEU_K --legacy --arch=x86_64 --target=windows --emit=pe --test-listing="$PEU_M/$PEU_C.lst" "$DIR/fixtures/pe_unwind_mixed_fault.kr" -o "$PEU_M/$PEU_C.exe" > /dev/null 2>&1; then
+                    PEU_WHY="$PEU_WHY $PEU_C: the fixture does not build;"; continue
+                fi
+                PEU_O=$(python3 -B "$PEU_CHK" --arch x86_64 "$PEU_M/$PEU_C.exe" --listing "$PEU_M/$PEU_C.lst" 2>&1)
+                if [ "$PEU_C" = mutant ]; then
+                    grep -q '^C3b: FAIL .*in a record without a frame register' <<< "$PEU_O" || PEU_WHY="$PEU_WHY mutant: C3b did not fail ($(grep -m1 '^C3b' <<< "$PEU_O" | cut -c1-80));"
+                else
+                    [ "$(grep -c ': PASS' <<< "$PEU_O")" = 9 ] || PEU_WHY="$PEU_WHY real: checker $( { grep -m1 FAIL <<< "$PEU_O" || head -1 <<< "$PEU_O"; } | cut -c1-120);"
+                fi
+            done
+        fi
+    fi
+    rm -rf "$PEU_M"
+    if [ -z "$PEU_WHY" ]; then pe_row_ok $PEU_ROW "applies once to codegen.kr only (6 lines removed), refuses twice; mutant builds; its mixed_fault --legacy image fails C3b, the real one passes C0-C6 + C3b + C4b"
+    else pe_row_bad $PEU_ROW "$PEU_WHY"; fi
+fi
+
+# The judge of a native suite run (tests/windows/native_judge.py, phase-5
+# review findings 1-2) cannot pass vacuously: a complete synthetic run built
+# from native_corpus.lst and native_reclass.lst passes, and an empty log, a
+# truncated log, a missing / doubled / SKIPped corpus row, a FAIL outside the
+# corpus, a fault row with the wrong exit code or a failing checker, a CP932
+# row failing for another reason and a missing or FAILed per-row script
+# result each fail it.
+if ! command -v python3 > /dev/null 2>&1; then pe_row_skip native_judge_selftest "no python3"
+else
+    PEU_O=$(python3 -B "$DIR/windows/native_judge.py" --selftest 2>&1); PEU_RC=$?
+    if [ "$PEU_RC" = 0 ] && grep -q ', 0 wrong$' <<< "$PEU_O"; then pe_row_ok native_judge_selftest "$(tail -1 <<< "$PEU_O")"
+    else pe_row_bad native_judge_selftest "rc=$PEU_RC $(grep -m2 WRONG <<< "$PEU_O" | tr '\n' '|' | cut -c1-200)$(tail -1 <<< "$PEU_O")"; fi
+fi
+
+# C7 on the laptop (#143 A14b, spec 8.6 (a)): its ANSI code page is not 932,
+# so the native proof of the lead-byte logic is in-suite:
+#  * c7_leaf_blobs_unchanged: the parse and quote leaves the compiler emits
+#    (dumped with --dump-argv-parser/quoter) are byte-identical to the base
+#    compiler's (tests/fixtures/pe_unwind_oracle/c7_*.bin, provenance in its
+#    README): #143 moves only their call site, never the leaves;
+#  * c7_cp932_leaf_native_x86_64: tests/helpers/c7_leaf_harness.c (gcc,
+#    ms_abi calls into the mmapped x86_64 leaves) runs the CP932 and
+#    lead-byte parse tables and the DBCS round-trip vectors of
+#    argv_vectors.kr with the CP932 LeadByte array, natively; the output must
+#    equal the .expected files the Wine and qemu rows use.
+PEU_OR="$DIR/fixtures/pe_unwind_oracle"
+PEU_WHY=""
+for PEU_A in x86_64 arm64; do
+    if ! $T10_KRC --arch=$PEU_A --dump-argv-parser="$T10_D/peu_p-$PEU_A.bin" --dump-argv-quoter="$T10_D/peu_q-$PEU_A.bin" > /dev/null 2>&1; then
+        PEU_WHY="$PEU_WHY $PEU_A: dump failed;"; continue
+    fi
+    cmp -s "$T10_D/peu_p-$PEU_A.bin" "$PEU_OR/c7_parse-$PEU_A.bin" || PEU_WHY="$PEU_WHY $PEU_A parse leaf differs from base;"
+    cmp -s "$T10_D/peu_q-$PEU_A.bin" "$PEU_OR/c7_quote-$PEU_A.bin" || PEU_WHY="$PEU_WHY $PEU_A quote leaf differs from base;"
+done
+if [ -z "$PEU_WHY" ]; then pe_row_ok c7_leaf_blobs_unchanged "x86_64 and arm64 parse + quote leaves identical to base d8f2a56"
+else pe_row_bad c7_leaf_blobs_unchanged "$PEU_WHY"; fi
+if ! command -v gcc > /dev/null 2>&1 || ! command -v python3 > /dev/null 2>&1; then
+    pe_row_skip c7_cp932_leaf_native_x86_64 "needs gcc and python3"
+elif [ "$(uname -m)" != x86_64 ]; then
+    pe_row_skip c7_cp932_leaf_native_x86_64 "not an x86_64 host"
+elif ! gcc -O1 -o "$T10_D/peu_c7h" "$DIR/helpers/c7_leaf_harness.c" > "$T10_D/peu_c7h.log" 2>&1; then
+    pe_row_bad c7_cp932_leaf_native_x86_64 "harness build: $(head -c 200 "$T10_D/peu_c7h.log")"
+elif [ ! -s "$T10_D/peu_p-x86_64.bin" ] || [ ! -s "$T10_D/peu_q-x86_64.bin" ]; then
+    pe_row_bad c7_cp932_leaf_native_x86_64 "no dumped x86_64 leaves"
+else
+    PEU_WHY=""
+    # the DBCS round-trip vectors, extracted from argv_vectors.kr (pct strings)
+    python3 -B - "$DIR/fixtures/argv_vectors.kr" "$T10_D/peu_vec.txt" <<'PEUVECEOF'
+import re, sys
+src = open(sys.argv[1], encoding='latin-1').read()
+body = src[src.index('fn rtv_dbcs_build'):]
+body = body[:body.index('\n}\n')]
+out = bytearray()
+for k, blk in enumerate(re.split(r'\n    (?:\} else )?if k == \d+ \{', body)[1:]):
+    out += b'#%d\n' % k
+    for lit in re.findall(r'pct\("((?:[^"\\]|\\.)*)"\)', blk):
+        s = re.sub(r'\\(.)', lambda m: {'t': '\t', 'n': '\n'}.get(m.group(1), m.group(1)), lit)
+        out += b'<' + re.sub(r'%([0-9A-F]{2})', lambda m: chr(int(m.group(1), 16)), s).encode('latin-1') + b'>\n'
+open(sys.argv[2], 'wb').write(bytes(out))
+PEUVECEOF
+    { timeout 120 "$T10_D/peu_c7h" parse "$T10_D/peu_p-x86_64.bin" "$DIR/fixtures/argv_table_cp932.txt" 819fe0fc && \
+      timeout 120 "$T10_D/peu_c7h" parse "$T10_D/peu_p-x86_64.bin" "$DIR/fixtures/argv_table_lead.txt" 819fe0fc; } > "$T10_D/peu_c7p.out" 2>&1 \
+        || PEU_WHY="$PEU_WHY parse rc=$?;"
+    cat "$DIR/fixtures/argv_table_cp932.expected" "$DIR/fixtures/argv_table_lead.expected" | cmp -s "$T10_D/peu_c7p.out" - \
+        || PEU_WHY="$PEU_WHY parse tables differ: $(cat "$DIR/fixtures/argv_table_cp932.expected" "$DIR/fixtures/argv_table_lead.expected" | diff -a "$T10_D/peu_c7p.out" - | head -3 | cut -c1-80 | tr '\n' '|');"
+    timeout 120 "$T10_D/peu_c7h" rt "$T10_D/peu_q-x86_64.bin" "$T10_D/peu_p-x86_64.bin" "$T10_D/peu_vec.txt" 819fe0fc > "$T10_D/peu_c7r.out" 2>&1 \
+        || PEU_WHY="$PEU_WHY rt rc=$?;"
+    cat "$DIR/fixtures/argv_roundtrip_cp932.expected" "$DIR/fixtures/argv_roundtrip_lead.expected" | cmp -s "$T10_D/peu_c7r.out" - \
+        || PEU_WHY="$PEU_WHY round trip differs: $(cat "$DIR/fixtures/argv_roundtrip_cp932.expected" "$DIR/fixtures/argv_roundtrip_lead.expected" | diff -a "$T10_D/peu_c7r.out" - | head -3 | cut -c1-80 | tr '\n' '|');"
+    if [ -z "$PEU_WHY" ]; then pe_row_ok c7_cp932_leaf_native_x86_64 "$(grep -c '^#' "$T10_D/peu_c7p.out") CP932/lead lines parsed, $(grep -c '^#' "$T10_D/peu_c7r.out") DBCS vectors round-tripped, natively, as expected"
+    else pe_row_bad c7_cp932_leaf_native_x86_64 "$PEU_WHY"; fi
+fi
+rm -f "$T10_D"/peu_p-*.bin "$T10_D"/peu_q-*.bin "$T10_D"/peu_c7* "$T10_D/peu_vec.txt"
+
+# A permitted (RSP-neutral) @naked function gets the zero-code kind-1 record
+# (spec 4.3) and passes C5; its listing marks it `; uw-naked`.
+PEU_MISS=$(peu_missing python3 llvm-objdump)
+if [ -n "$PEU_MISS" ]; then pe_row_skip pe_unwind_records_naked "needs $PEU_MISS"
+elif ! $T10_KRC --arch=x86_64 --target=windows --emit=pe --test-listing="$T10_D/peu_n.lst" "$DIR/fixtures/pe_unwind_naked_fault.kr" -o "$T10_D/peu_n.exe" > "$T10_D/peu_n.log" 2>&1; then
+    pe_row_bad pe_unwind_records_naked "build: $(grep -m1 error "$T10_D/peu_n.log" | cut -c1-100)"
+else
+    PEU_O=$(python3 -B - "$DIR/helpers" "$T10_D/peu_n.exe" "$T10_D/peu_n.lst" <<'PEUNKEOF'
+import sys
+sys.path.insert(0, sys.argv[1])
+import pe_unwind_check as c
+b = c.Binary(sys.argv[2], 'x86_64')
+lst = c.Listing(sys.argv[3], 'x86_64')
+recs = c.exception_table(b, None)
+names = {b.text.rva + o: n for o, n in lst.labels}
+kind1 = [names.get(r.begin) for r in recs if r.count == 0 and r.prolog == 0 and r.frame_reg == 0]
+print('kind1=%s naked=%s' % (','.join(map(str, kind1)), ','.join(lst.naked)))
+PEUNKEOF
+2>&1)
+    PEU_C5=$(python3 -B "$PEU_CHK" --arch x86_64 "$T10_D/peu_n.exe" --listing "$T10_D/peu_n.lst" --rules C5 2>&1)
+    if [ "$PEU_O" = "kind1=poke naked=poke" ] && [[ "$PEU_C5" == "C5: PASS"* ]]; then pe_row_ok pe_unwind_records_naked "poke: kind-1 record, C5 PASS"
+    else pe_row_bad pe_unwind_records_naked "$PEU_O; $PEU_C5"; fi
+fi
+
+# --test-no-unwind gives the in-tree NEGATIVE image of the same fixtures: the
+# checker's C1 finds no exception directory, and Wine's walk is broken.
+if ! command -v python3 > /dev/null 2>&1; then pe_row_skip pe_unwind_no_unwind_switch "no python3"
+else
+    PEU_WHY=""
+    for PEU_F in pe_unwind_nested_fault:f3,f2,f1,main pe_unwind_stack_args_fault:f3,f2,main pe_unwind_naked_fault:poke,f1,main; do
+        PEU_B=${PEU_F%%:*}; PEU_WALK=${PEU_F#*:}
+        if ! $T10_KRC --test-no-unwind --arch=x86_64 --target=windows --emit=pe --test-listing="$T10_D/peu_x.lst" "$DIR/fixtures/$PEU_B.kr" -o "$T10_D/peu_x.exe" > /dev/null 2>&1; then
+            PEU_WHY="$PEU_WHY $PEU_B:build;"; continue
+        fi
+        PEU_O=$(python3 -B "$PEU_CHK" --arch x86_64 "$T10_D/peu_x.exe" --listing "$T10_D/peu_x.lst" --rules C1 2>&1)
+        [[ "$PEU_O" == "C1: FAIL no exception directory"* ]] || PEU_WHY="$PEU_WHY $PEU_B:C1 '$PEU_O';"
+        if [ -n "$T10_WINE" ]; then
+            (cd "$T10_D" && WINEPREFIX="$T10_D/pfx" WINEDLLOVERRIDES=winedbg.exe=d WINEDEBUG=+unwind timeout 300 "$T10_WINE" peu_x.exe > /dev/null 2> "$T10_D/peu_x.trace")
+            PEU_CH=$(python3 -B "$DIR/helpers/wine_unwind_chain.py" "$T10_D/peu_x.trace" "$T10_D/peu_x.lst" "$PEU_WALK" 2>&1 | tail -1)
+            [[ "$PEU_CH" == walk* ]] && PEU_WHY="$PEU_WHY $PEU_B:Wine walked it without tables ($PEU_CH);"
+        fi
+    done
+    if [ -z "$T10_WINE" ] && [ -z "$PEU_WHY" ]; then pe_row_skip pe_unwind_no_unwind_switch "no wine (C1 half passed)"
+    elif [ -z "$PEU_WHY" ]; then pe_row_ok pe_unwind_no_unwind_switch "3 images: C1 finds no exception directory, Wine's walk breaks"
+    else pe_row_bad pe_unwind_no_unwind_switch "$PEU_WHY"; fi
+fi
+
 if [ -z "$T10_WINE" ]; then
     for T10_R in net_loopback_windows_wine time_monotonic_and_sleep_windows_wine time_ms_of_ns_windows_wine alloc_guard_smoke_windows_wine alloc_guard_fault_windows_wine alloc_guard_fault_read_windows_wine alloc_guard_refused_is_fatal_windows_wine alloc_guard_refused_names_allocator_windows_wine std_together_windows_wine net_user_names_windows_wine; do
         TOTAL=$((TOTAL + 1)); wine_na "$T10_R"
@@ -29075,11 +30811,11 @@ else
        && $T10_KRC --arch=x86_64 --target=windows --emit=pe "$T10_FX/sys_lasterr.kr" -o "$T10_D/sys_lasterr.exe" >> "$T10_D/w.log" 2>&1; then
         printf 'held' > "$T10_D/held.txt"
         : > "$T10_D/hold.out"
-        (cd "$T10_D" && WINEPREFIX="$T10_D/pfx" WINEDEBUG=-all timeout 120 "$T10_WINE" w32_hold.exe held.txt 0 5 > "$T10_D/hold.out" 2> "$T10_D/hold.err") &
+        (cd "$T10_D" && WINEPREFIX="$T10_D/pfx" WINEDLLOVERRIDES=winedbg.exe=d WINEDEBUG=-all timeout 120 "$T10_WINE" w32_hold.exe held.txt 0 5 > "$T10_D/hold.out" 2> "$T10_D/hold.err") &
         S1B_HP=$!
         S1B_I=0
         while [ "$S1B_I" -lt 600 ] && ! tr -d '\r' < "$T10_D/hold.out" | grep -q '^held$'; do sleep 0.1; S1B_I=$((S1B_I + 1)); done
-        (cd "$T10_D" && WINEPREFIX="$T10_D/pfx" WINEDEBUG=-all timeout 120 "$T10_WINE" sys_lasterr.exe no-such-file.txt held.txt > "$T10_D/win.out" 2> "$T10_D/win.err"); T10_RC=$?
+        (cd "$T10_D" && WINEPREFIX="$T10_D/pfx" WINEDLLOVERRIDES=winedbg.exe=d WINEDEBUG=-all timeout 120 "$T10_WINE" sys_lasterr.exe no-such-file.txt held.txt > "$T10_D/win.out" 2> "$T10_D/win.err"); T10_RC=$?
         kill "$S1B_HP" 2>/dev/null; wait "$S1B_HP" 2>/dev/null
         S1B_GOT=$(tr -d '\r' < "$T10_D/win.out")
         if [ "$T10_RC" = "0" ] && [ "$S1B_GOT" = $'missing 2\nheld 16' ]; then

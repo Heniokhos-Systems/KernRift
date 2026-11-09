@@ -1,0 +1,74 @@
+// #143 option C (spec 2.5.6; plan A19g, finding 17): the arm64 variant of
+// pe_unwind_mixed_fault.kr. main (hosted: SP-moving) -> a (SP-fixed; on arm64
+// IR shape S2: one spill slot per vreg puts its low area above 504 bytes) ->
+// b (SP-moving: an asm block) -> c (SP-fixed leaf) faults with a store to
+// address 16. Static here (C0-C6 + C3b + the listing classes); run on
+// windows-11-arm by the A18 job (exit -1073741819, cdb chain c, b, a, main).
+fn c(uint64 p, uint64 k) -> uint64 {
+    uint64 s = k * 3 + 1
+    store8(p, s & 255)
+    return s
+}
+fn b(uint64 p, uint64 k) -> uint64 {
+    asm { "nop" }
+    uint64 r = c(p, k + 1)
+    return r + k
+}
+fn a(uint64 p, uint64 k) -> uint64 {
+    uint64 v0 = k * 3 + 1
+    uint64 v1 = v0 * 4 + 1
+    uint64 v2 = v1 * 5 + 1
+    uint64 v3 = v2 * 6 + 1
+    uint64 v4 = v3 * 7 + 1
+    uint64 v5 = v4 * 8 + 1
+    uint64 v6 = v5 * 9 + 1
+    uint64 v7 = v6 * 10 + 1
+    uint64 v8 = v7 * 11 + 1
+    uint64 v9 = v8 * 12 + 1
+    uint64 v10 = v9 * 13 + 1
+    uint64 v11 = v10 * 14 + 1
+    uint64 v12 = v11 * 15 + 1
+    uint64 v13 = v12 * 16 + 1
+    uint64 v14 = v13 * 17 + 1
+    uint64 v15 = v14 * 18 + 1
+    uint64 v16 = v15 * 19 + 1
+    uint64 v17 = v16 * 20 + 1
+    uint64 v18 = v17 * 21 + 1
+    uint64 v19 = v18 * 22 + 1
+    uint64 v20 = v19 * 23 + 1
+    uint64 v21 = v20 * 24 + 1
+    uint64 v22 = v21 * 25 + 1
+    uint64 v23 = v22 * 26 + 1
+    uint64 v24 = v23 * 27 + 1
+    uint64 v25 = v24 * 28 + 1
+    uint64 v26 = v25 * 29 + 1
+    uint64 v27 = v26 * 30 + 1
+    uint64 v28 = v27 * 31 + 1
+    uint64 v29 = v28 * 32 + 1
+    uint64 v30 = v29 * 33 + 1
+    uint64 v31 = v30 * 34 + 1
+    uint64 v32 = v31 * 35 + 1
+    uint64 v33 = v32 * 36 + 1
+    uint64 v34 = v33 * 37 + 1
+    uint64 v35 = v34 * 38 + 1
+    uint64 v36 = v35 * 39 + 1
+    uint64 v37 = v36 * 40 + 1
+    uint64 v38 = v37 * 41 + 1
+    uint64 v39 = v38 * 42 + 1
+    uint64 v40 = v39 * 43 + 1
+    uint64 v41 = v40 * 44 + 1
+    uint64 v42 = v41 * 45 + 1
+    uint64 v43 = v42 * 46 + 1
+    uint64 v44 = v43 * 47 + 1
+    uint64 v45 = v44 * 48 + 1
+    uint64 v46 = v45 * 49 + 1
+    uint64 v47 = v46 * 50 + 1
+    uint64 r = b(p, v47 & 255)
+    return r + v47
+}
+fn main() -> uint32 {
+    println("armed")
+    uint64 r = a(16, 3)
+    if r == 7 { println("survived") }
+    return 3
+}

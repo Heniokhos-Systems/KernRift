@@ -1,0 +1,27 @@
+// #143 option C (spec 2.5.1 X13 / L6, 2.5.5): `--debug` Windows traps.
+// Under --debug, `bc` indexes and stores into a fixed-size static array: a
+// bounds check (x86_64 IR op 131, ExitProcess behind a shadow area) and
+// nothing else off the x86_64 SP-neutral allow-list, so `bc` is SP-moving
+// exactly because of the trap. `ar` does arithmetic and a division (x86 DIV
+// traps by itself: x86_64 IR adds no guard), so it is SP-fixed. main prints
+// three results, then makes `bc` index out of bounds: the trap exits 1, on
+// Linux and Windows alike. Rows pe_unwind_debug_windows_<arch>_<backend>.
+fn ar(uint64 a, uint64 b) -> uint64 {
+    uint64 s = a + b
+    uint64 m = s * 3
+    uint64 q = m / (b + 1)
+    return q - 1
+}
+static uint64[8] tb
+fn bc(uint64 i) -> uint64 {
+    uint64 k = 0
+    while k < 8 { tb[k] = k * 7; k = k + 1 }
+    tb[i] = 1
+    return tb[i] + tb[2]
+}
+fn main() {
+    println(ar(6, 7))
+    println(ar(10, 4))
+    println(bc(3))
+    println(bc(9))
+}

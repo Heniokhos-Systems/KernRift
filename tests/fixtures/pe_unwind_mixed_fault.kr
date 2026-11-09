@@ -1,0 +1,31 @@
+// #143 option C (spec 2.5.6; plan A19g): a fault chain through both kinds of
+// frame. main (hosted: SP-moving) -> a (SP-fixed) -> b (SP-moving) -> c
+// (SP-fixed leaf) faults with a store to address 16. b moves SP at its call
+// to c: on x86_64 IR the call passes 7 arguments, so the 7th goes on the
+// stack (site X3); on --legacy b contains a println (L7, push rdi/rcx around
+// GetStdHandle) and its call to c sits outside that push region, so the
+// per-call area there is live when the fold is disabled (mutant 2b).
+// Wine walks c -> b -> a -> main and the process ends with
+// STATUS_ACCESS_VIOLATION. The classes are pinned per backend in
+// tests/fixtures/win_abi_frames/classes.txt.
+fn c(uint64 p, uint64 k1, uint64 k2, uint64 k3, uint64 k4, uint64 k5, uint64 k6) -> uint64 {
+    uint64 s = k1 + k2 * 3 + k3 * 5 + k4 * 7 + k5 * 11 + k6 * 13
+    store8(p, s & 255)
+    return s
+}
+fn b(uint64 p, uint64 k) -> uint64 {
+    println("b")
+    uint64 r = c(p, k, k + 1, k + 2, k + 3, k + 4, k + 5)
+    return r + k
+}
+fn a(uint64 p, uint64 k) -> uint64 {
+    uint64 x = k * 2 + 1
+    uint64 r = b(p, x)
+    return r + x
+}
+fn main() -> uint32 {
+    println("armed")
+    uint64 r = a(16, 3)
+    if r == 7 { println("survived") }
+    return 3
+}

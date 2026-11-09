@@ -1,0 +1,23 @@
+// #143 A14a (plan M4): the native wrapper's environment canary. Prints the
+// value of the environment variable named by argv[1], or `unset` -- through
+// sys_getenv, so the same program reads its environment on Linux, under Wine
+// and natively. Task D runs it through tests/windows/native_exec.sh to show
+// the allow-list (forwarded, cleared, and not forwarded) on the laptop.
+import "../../std/args.kr"
+
+static u8[512] ep_buf
+
+fn main() -> uint32 {
+    if sys_argc() < 2 {
+        file_write(1, "usage: pe_unwind_envprobe NAME\n", 31)
+        return 2
+    }
+    int64 n = sys_getenv(sys_arg(1), ep_buf, 512)
+    if n < 0 {
+        file_write(1, "unset\n", 6)
+        return 0
+    }
+    file_write(1, ep_buf, n)
+    file_write(1, "\n", 1)
+    return 0
+}

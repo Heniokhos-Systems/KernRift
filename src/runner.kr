@@ -237,7 +237,9 @@ fn main() {
     // prologue parses the command line itself (UCRT rules), so cli_argc is
     // never the 0xFFFFFFFF sentinel there. Kept for a `--legacy` build, whose
     // prologue still stores the sentinel (a declared gap).
-    if cli_argc == 0xFFFFFFFF {
+    // cli_argv != 0: a Windows @naked fn main leaves cli_argc at the sentinel
+    // with cli_argv 0 (no command-line sequence, #143) -- "no arguments".
+    if cli_argc == 0xFFFFFFFF && cli_argv != 0 {
         win_init_args_r()
     }
     // Linker-as-program shift: if someone ran this binary via

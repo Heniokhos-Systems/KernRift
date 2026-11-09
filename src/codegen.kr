@@ -1869,7 +1869,7 @@ fn legacy_node_is_signed(uint64 ast_node) -> uint64 {
 // recycled: a store statement costs 8 bytes of frame, once, at compile time.
 // Shared by both legacy backends (they share var_count / var_frame_size).
 fn alloc_scratch_slot() -> uint64 {
-    uint64 offset = var_count * 8
+    uint64 offset = cg_slot_off(var_count)
     var_count = var_count + 1
     var_frame_size = var_count * 8
     uint64 rem = var_frame_size & 15
@@ -1986,7 +1986,7 @@ fn var_declare(uint64 name_tok) -> uint64 {
         cap_overflow("too many locals", 4096, 1)
         exit(1)
     }
-    uint64 offset = var_count * 8
+    uint64 offset = cg_slot_off(var_count)
     uint64 entry = var_table + var_table_size * 8
     uint32 nt = name_tok
     unsafe { *(entry as uint32) = nt }
@@ -3366,6 +3366,10 @@ fn emit_static_data() {
 // find_main_offset) re-read the fn_table base per iteration and neither
 // registers while iterating, so growth here is safe.
 fn fn_register(uint64 name_tok, uint64 code_offset) {
+    // #143 unwind recorder: a function begins here (a no-op unless
+    // target_os == 2; naked functions are re-marked by their emitter).
+    uw_fn_begin(code_offset, 0)
+    uw_fn_name(name_tok)
     if fn_count >= 16777216 {
         write(2, "error: fn_table exceeded 16777216 functions (compiler bug?)\n", 60)
         exit(1)
@@ -4697,24 +4701,421 @@ fn win_fixup_add(uint64 patch_off, uint64 slot) {
     win_iat_fixup_count = win_iat_fixup_count + 1
 }
 
+// ---------------------------------------------------------------------------
+// #143 option C, legacy backends (spec 2.5.1, 2.5.7; plan A19d): the AST
+// pre-scan that runs before a Windows legacy function's prologue.
+//
+// It computes OUT, the largest area any sized site of the function allocates
+// below RSP/SP (x86_64: the 32-byte shadow space plus overflow slots of every
+// named call and call_ptr, the fixed areas of the IAT builtins, the --debug
+// trap's shadow area; arm64: the >8-argument stack area of named calls and
+// call_ptr, and the time_ns / exec_process scratch areas), and whether the
+// function has any OTHER construct that moves SP (println/print's pushes,
+// f-strings' digit loop, asm blocks, a builtin it cannot size, a hosted main).
+// The node walk is an allow-list: a node kind it does not know makes the
+// function SP-moving. The sizes come from the same helpers the emitters use to
+// size their allocations (cg_win_call_area / cg_a64_call_area), or, for the
+// fixed-size builtin sequences, from cg_win_builtin_area / cg_a64_builtin_area,
+// checked against every emitted allocation by --test-out-audit.
+//
+// A19d(i) measures only: nothing is folded and cg_win_out_bias stays 0.
+// ---------------------------------------------------------------------------
+static uint64 cg_win_out = 0           // OUT, 16-aligned
+static uint64 cg_win_ps_fixed = 0      // 1: no SP-moving construct besides sized sites
+static uint64 cg_win_ps_moving = 0     // walk state
+static uint64 cg_win_ps_arm = 0        // the walk sizes for: 0 = x86_64, 1 = arm64
+static uint64 cg_win_out_bias = 0      // added to every frame-slot offset (0 until a fold, A19d(ii)/(iii))
+static uint64 cg_win_folded = 0        // the current function is folded (A19d(ii)/(iii))
+static uint64 cg_test_out_audit = 0    // --test-out-audit (hidden, test-only)
+static uint64 cg_win_ps_name = 0       // the current function's name token (audit messages)
+
+// x86_64 named call / call_ptr: 32 bytes of shadow plus 8 per argument after
+// the fourth, 16-aligned. The call emitters size their `sub rsp` with this.
+fn cg_win_call_area(uint64 argc) -> uint64 {
+    uint64 ov = 0
+    if argc > 4 { ov = argc - 4 }
+    uint64 w = 32 + ov * 8
+    uint64 r = w & 15
+    if r != 0 { w = w + 16 - r }
+    return w
+}
+
+// arm64 named call / call_ptr with more than 8 arguments: the stack-argument
+// area, an even number of 8-byte slots (AAPCS64: x0-x7 first). The pre-scan
+// sizes OUT with cg_a64_call_area(argc); the emitters size their area with
+// the same rule (A19d review finding 4): call_ptr places arguments 9.. on the
+// stack, so cg_a64_call_area(arg_count) is exact; a named call places the
+// arguments that found no x/v register, n <= argc - 8 of them, and sizes with
+// cg_a64_stack_area(n) -- never more than the pre-scan's bound.
+fn cg_a64_stack_area(uint64 n) -> uint64 {
+    if (n & 1) != 0 { n = n + 1 }
+    return n * 8
+}
+fn cg_a64_call_area(uint64 argc) -> uint64 {
+    if argc <= 8 { return 0 }
+    return cg_a64_stack_area(argc - 8)
+}
+
+// x86_64 legacy builtins on Windows: the largest area any of its sequences
+// allocates below RSP (0 = moves no RSP), or 0xFFFFFFFF when it moves RSP in a
+// way that cannot be folded (println/print push their arguments around
+// GetStdHandle). The emitter's literal sizes (codegen.kr gen_expr) are the
+// source; --test-out-audit checks every emitted allocation against OUT.
+fn cg_win_builtin_area(uint64 t, uint64 argc) -> uint64 {
+    if tok_matches(t, "println", 7) != 0 || tok_matches(t, "print", 5) != 0 { return 0xFFFFFFFF }
+    if tok_matches(t, "exit", 4) != 0 { return 32 }
+    if tok_matches(t, "write", 5) != 0 { return 48 }
+    if tok_matches(t, "alloc", 5) != 0 { return 32 }
+    if tok_matches(t, "dealloc", 7) != 0 { return 32 }
+    if tok_matches(t, "file_open", 9) != 0 { return 64 }
+    if tok_matches(t, "file_read", 9) != 0 { return 48 }
+    if tok_matches(t, "file_write", 10) != 0 { return 48 }
+    if tok_matches(t, "file_close", 10) != 0 { return 32 }
+    if tok_matches(t, "file_size", 9) != 0 { return 32 }
+    if tok_matches(t, "print_str", 9) != 0 || tok_matches(t, "println_str", 11) != 0 { return 48 }
+    if tok_matches(t, "get_module_path", 15) != 0 { return 32 }
+    if tok_matches(t, "exec_process_argv", 17) != 0 { return 0x4D0 }
+    if tok_matches(t, "exec_process", 12) != 0 { return 0xD0 }
+    if tok_matches(t, "time_ns", 7) != 0 { return 0x30 }
+    if tok_matches(t, "call_ptr", 8) != 0 {
+        uint64 n = 0
+        if argc > 0 { n = argc - 1 }
+        return cg_win_call_area(n)
+    }
+    // load8..store64: the --debug null check's ExitProcess (0x20); covered by
+    // the --debug floor in cg_win_prescan. Every other builtin moves no RSP.
+    return 0
+}
+
+// arm64 legacy builtins on Windows (codegen_aarch64.kr gen_expr_a64).
+fn cg_a64_builtin_area(uint64 t, uint64 argc) -> uint64 {
+    if tok_matches(t, "exec_process_argv", 17) != 0 { return 0x4E0 }
+    if tok_matches(t, "exec_process", 12) != 0 { return 0xE0 }
+    if tok_matches(t, "time_ns", 7) != 0 { return 16 }
+    if tok_matches(t, "call_ptr", 8) != 0 {
+        uint64 n = 0
+        if argc > 0 { n = argc - 1 }
+        return cg_a64_call_area(n)
+    }
+    return 0
+}
+
+// The 77 names gen_expr / gen_expr_a64 treat as builtins (unless an extern
+// fn or @builtin_override shadows them); anything else is a named call.
+fn cg_win_is_builtin(uint64 t) -> uint64 {
+    uint64 s = cg_source + tok_text_start(t)
+    uint64 l = tok_text_len(t)
+    uint64 names = "|alloc|atomic_add|atomic_and|atomic_cas|atomic_load|atomic_or|atomic_store|atomic_sub|atomic_xor|bit_clear|bit_get|bit_insert|bit_range|bit_set|call_ptr|dcache_flush|dealloc|dmb|dsb|exec_process|exec_process_argv|exit|f16_to_f32|f32_to_f16|f32_to_f64|f32_to_int|f64_to_f32|f64_to_int|file_close|file_open|file_read|file_size|file_write|fma_f64|fn_addr|get_arch_id|get_module_path|get_target_os|icache_invalidate|int_to_f32|int_to_f64|isb|load16|load32|load64|load8|memcpy|memset|print|println|println_str|print_str|set_executable|signed_ge|signed_gt|signed_le|signed_lt|sqrt|sqrt_f32|sqrt_f64|store16|store32|store64|store8|str_eq|str_len|syscall_raw|time_ns|vload16|vload32|vload64|vload8|vstore16|vstore32|vstore64|vstore8|write|"
+    uint64 nl = str_len(names)
+    uint64 i = 0
+    while i + l + 1 < nl {
+        if load8(names + i) == 124 {
+            uint64 k = 0
+            uint64 eq = 1
+            while k < l {
+                if load8(names + i + 1 + k) != load8(s + k) { eq = 0 }
+                k = k + 1
+            }
+            if eq == 1 && load8(names + i + 1 + l) == 124 { return 1 }
+        }
+        i = i + 1
+    }
+    return 0
+}
+
+fn cg_win_ps_need(uint64 n) {
+    if n == 0xFFFFFFFF { cg_win_ps_moving = 1  return }
+    uint64 r = n & 15
+    if r != 0 { n = n + 16 - r }
+    if n > cg_win_out { cg_win_out = n }
+}
+
+fn cg_win_ps_call(uint64 node) {
+    uint32 ct = ast_data1(node)
+    uint64 t = ct
+    uint64 argc = 0
+    uint32 a = ast_child(node)
+    uint64 wa = a
+    while wa != 0 {
+        argc = argc + 1
+        uint32 nx = ast_next(wa)
+        wa = nx
+    }
+    uint64 shadowed = 0
+    if extern_fn_lookup(t) != 0xFFFFFFFF { shadowed = 1 }
+    if builtin_override_lookup(t) != 0 { shadowed = 1 }
+    if shadowed == 0 && cg_win_is_builtin(t) != 0 {
+        if cg_win_ps_arm == 0 { cg_win_ps_need(cg_win_builtin_area(t, argc)) }
+        else { cg_win_ps_need(cg_a64_builtin_area(t, argc)) }
+        return
+    }
+    // a named call (a user function, an extern or routed import)
+    if cg_win_ps_arm == 0 { cg_win_ps_need(cg_win_call_area(argc)) }
+    else { cg_win_ps_need(cg_a64_call_area(argc)) }
+}
+
+fn cg_win_ps_node(uint64 node) {
+    if node == 0 { return }
+    if cg_win_ps_moving != 0 { return }
+    uint32 k32 = ast_kind(node)
+    uint64 kind = k32
+    // the allow-list of node kinds the walk knows (AstKind, src/ast.kr)
+    uint64 known = 0
+    if kind >= 10 && kind <= 20 { known = 1 }
+    if kind >= 30 && kind <= 42 { known = 1 }
+    if kind == 44 || kind == 46 || kind == 47 || kind == 48 || kind == 49 { known = 1 }
+    if kind >= 51 && kind <= 57 { known = 1 }
+    if known == 0 { cg_win_ps_moving = 1  return }     // asm (43), f-string (50), anything new
+    if kind == 35 { cg_win_ps_call(node) }
+    // children, then the node-index fields (the dce_scan_node layout)
+    uint32 ch = ast_child(node)
+    uint64 wch = ch
+    while wch != 0 {
+        cg_win_ps_node(wch)
+        uint32 nxt = ast_next(wch)
+        wch = nxt
+    }
+    if kind == 13 || kind == 20 || kind == 53 || kind == 52 {
+        uint32 d1 = ast_data1(node)
+        uint32 d2 = ast_data2(node)
+        cg_win_ps_node(d1)
+        cg_win_ps_node(d2)
+    }
+    if kind == 14 || kind == 51 {
+        uint32 d1b = ast_data1(node)
+        cg_win_ps_node(d1b)
+    }
+    if kind == 19 || kind == 54 {
+        uint32 arm = ast_data1(node)
+        uint64 warm = arm
+        while warm != 0 {
+            cg_win_ps_node(warm)
+            uint32 an = ast_next(warm)
+            warm = an
+        }
+    }
+    if kind == 33 || kind == 38 || kind == 39 || kind == 40 || kind == 37 || kind == 42 {
+        uint32 d2b = ast_data2(node)
+        cg_win_ps_node(d2b)
+    }
+    if kind == 36 {
+        uint32 d3 = ast_data3(node)
+        cg_win_ps_node(d3)
+    }
+    if kind == 12 {
+        uint32 r2 = ast_data3(node)
+        uint32 r3 = ast_data4(node)
+        cg_win_ps_node(r2)
+        cg_win_ps_node(r3)
+    }
+}
+
+// Run the pre-scan for a Windows legacy function (arm = 0 x86_64, 1 arm64).
+// Sets cg_win_out and cg_win_ps_fixed; off Windows, for @naked and for a
+// hosted main both stay 0 / not fixed.
+fn cg_win_prescan(uint64 fn_node, uint64 arm) {
+    cg_win_out = 0
+    cg_win_ps_fixed = 0
+    cg_win_ps_moving = 0
+    cg_win_out_bias = 0
+    cg_win_folded = 0
+    cg_win_ps_arm = arm
+    uint32 nt = ast_data1(fn_node)
+    cg_win_ps_name = nt
+    if target_os != 2 { return }
+    uint32 af = ast_data4(fn_node)
+    if (af & 2) != 0 { return }                                  // @naked
+    uint64 wnt = nt
+    if freestanding == 0 && tok_matches(wnt, "main", 4) != 0 { return }    // hosted main: SP-moving
+    // --debug traps: overflow / bounds / null checks end in ExitProcess behind
+    // a 0x20 shadow area (x86_64, L6); any function may hold one
+    if debug_mode != 0 && arm == 0 { cg_win_ps_need(32) }
+    uint32 body = ast_data3(fn_node)
+    cg_win_ps_node(body)
+    if cg_win_ps_moving == 0 { cg_win_ps_fixed = 1 }
+    // arm64 (A19d(iii), option (a)): a folded frame saves x29/x30 at
+    // [sp,#OUT] and x19/x20 at [sp,#OUT+16]; save_fplr/save_regp encode at
+    // most 504, so OUT > 488 (exec_process_argv's 0x4E0) keeps the function
+    // SP-moving with its per-call allocation
+    if arm != 0 && cg_win_out > 488 { cg_win_ps_fixed = 0 }
+    if cg_test_out_audit != 0 {
+        // one line per function, so the audit row can see what it checked
+        write(2, "out-audit-fn: '", 15)
+        write(2, cg_source + tok_text_start(wnt), tok_text_len(wnt))
+        if cg_win_ps_fixed != 0 { write(2, "' SP-fixed OUT ", 15) } else { write(2, "' SP-moving OUT ", 16) }
+        uint8[24] ob
+        uint64 ol = fmt_uint(ob, cg_win_out)
+        write(2, ob, ol)
+        write(2, "\n", 1)
+    }
+}
+
+// The sized-site classes of the spec 2.5.1 site table.
+fn cg_win_site_sized(uint64 id) -> uint64 {
+    if id == 0 { return 0 }
+    if load8(id) == 76 {                                 // 'L'
+        uint64 d = load8(id + 1)
+        if load8(id + 2) == 0 && d >= 49 && d <= 54 { return 1 }   // L1..L6
+        return 0
+    }
+    if load8(id) == 71 {                                 // 'G'
+        uint64 g = load8(id + 1)
+        if load8(id + 2) == 0 && g >= 49 && g <= 52 { return 1 }   // G1..G4
+    }
+    return 0
+}
+
+// --test-out-audit: in a Windows legacy function the pre-scan judged SP-fixed,
+// every SP report must come from a sized site whose area fits OUT. Called by
+// the SP helpers before they report (amount = the bytes allocated, 0 for a
+// release). A violation is printed and counted; output is unchanged.
+static uint64 cg_out_audit_fails = 0
+fn cg_win_audit_site(uint64 amount) {
+    if cg_test_out_audit == 0 || target_os != 2 || cg_win_ps_fixed == 0 { return }
+    if uw_sp_frame != 0 { return }
+    uint64 id = uw_sp_site
+    if id == 0 { id = uw_sp_op_site }
+    if cg_win_site_sized(id) == 0 || amount > cg_win_out {
+        cg_out_audit_fails = cg_out_audit_fails + 1
+        write(2, "out-audit: '", 12)
+        write(2, cg_source + tok_text_start(cg_win_ps_name), tok_text_len(cg_win_ps_name))
+        write(2, "': site ", 8)
+        if id == 0 { write(2, "unnamed", 7) } else { write(2, id, str_len(id)) }
+        uint8[24] b
+        write(2, " needs ", 7)
+        uint64 l = fmt_uint(b, amount)
+        write(2, b, l)
+        write(2, ", OUT ", 6)
+        l = fmt_uint(b, cg_win_out)
+        write(2, b, l)
+        if cg_win_site_sized(id) == 0 { write(2, " (not a sized site: the pre-scan missed an SP-moving construct)", 63) }
+        write(2, "\n", 1)
+    }
+}
+
+// Frame-slot offset of the n-th 8-byte slot (#143 option C, spec 2.5.7): every
+// legacy slot offset is made here, displaced by cg_win_out_bias -- OUT in a
+// folded Windows function, 0 everywhere else -- so the whole frame moves up by
+// OUT with no per-site arithmetic.
+fn cg_slot_off(uint64 n) -> uint64 {
+    return n * 8 + cg_win_out_bias
+}
+
 // sub rsp, N for Windows API calls (N must keep RSP 16-byte aligned)
 // After prologue (push rbx + sub rsp, frame), RSP is 16-aligned
 // So we need N divisible by 16 for alignment
 // Use 0x20 (32) for <=4 args, 0x30 (48) for 5 args, 0x40 (64) for 7 args
+// #143 option C (spec 2.5.7): in a folded x86_64 legacy function the sized
+// site's area is part of the frame at [rsp+0, OUT): nothing is emitted, the
+// need is checked against OUT, and rax_cache is cleared where the old `sub rsp`
+// stood (review finding 4). Unfolded, the slot offsets after the `sub` differed
+// from those before it, so the cache never carried a value across a site;
+// folded they are equal, and a reload just after the site could hit. Each hit
+// today's emitter would take is still right (nothing between clobbers rax), so
+// the clear is defence in depth for a later sequence that clobbers rax with
+// raw bytes (A19d(ii) mutation 5 is an equivalent mutant today).
+fn cg_win_fold_site(uint64 need) {
+    if need > cg_win_out {
+        // located (spec 2.5.1; A19d review finding 3): the function, the site
+        // id and need/OUT, then the source span
+        uint64 id = uw_sp_site
+        if id == 0 { id = uw_sp_op_site }
+        if id == 0 { id = "unnamed" }
+        diag_loc_head(cg_win_ps_name, 0)
+        uint64 m = "internal: a folded Windows call site needs more than the function's outgoing area in '"
+        write(2, m, str_len(m))
+        write(2, cg_source + tok_text_start(cg_win_ps_name), tok_text_len(cg_win_ps_name))
+        write(2, "' (site ", 8)
+        write(2, id, str_len(id))
+        write(2, ", need ", 7)
+        uint8[24] nb
+        uint64 nl = fmt_uint(nb, need)
+        write(2, nb, nl)
+        write(2, ", OUT ", 6)
+        nl = fmt_uint(nb, cg_win_out)
+        write(2, nb, nl)
+        uint64 m2 = "; #143 option C: the pre-scan and the emitter disagree)\n"
+        write(2, m2, str_len(m2))
+        diag_span_of(cg_win_ps_name)
+        exit(1)
+    }
+    rax_cache = 0
+    if uw_sp_log_path != 0 {
+        uint64 lid = uw_sp_site
+        if lid == 0 { lid = uw_sp_op_site }
+        if lid == 0 { lid = "unnamed" }
+        uw_sp_log_site(lid)
+    }
+    uw_sp_site = 0
+}
+
+// The bytes a sized site actually moves RSP: its area, or 0 when folded. The
+// slot compensation of a site's sequence uses this, never its area.
+fn cg_win_moved(uint64 n) -> uint64 {
+    if cg_win_folded != 0 { return 0 }
+    return n
+}
+
 fn emit_win_alloc_stack(uint64 nbytes) {
+    if cg_win_folded != 0 { cg_win_fold_site(nbytes)  return }
     emit_byte(0x48)
     emit_byte(0x83)
     emit_byte(0xEC)
     uint8 nb = nbytes
     emit_byte(nb)
+    cg_win_audit_site(nbytes)
+    uw_sp_moves()                      // #143 option C backstop (spec 2.5.1)
 }
 
 fn emit_win_free_stack(uint64 nbytes) {
+    if cg_win_folded != 0 { uw_sp_site = 0  return }
     emit_byte(0x48)
     emit_byte(0x83)
     emit_byte(0xC4)
     uint8 nb = nbytes
     emit_byte(nb)
+    cg_win_audit_site(0)
+    uw_sp_moves()
+}
+
+// #143 option C (spec 2.5.1): the x86_64 SP helpers. Every body instruction
+// that writes RSP goes through one of these (or emit_win_alloc/free_stack),
+// so it reports to the backstop (uw_sp_moves). Byte-identical to the raw
+// sequences they replaced.
+//   emit_x64_push_r / emit_x64_pop_r: push/pop of a 64-bit GPR 0-15
+//   emit_x64_rsp_adj(ext, n): ext 0xEC = sub rsp, 0xC4 = add rsp (imm8 form
+//     when n < 128, else imm32); ext 0xE4 = and rsp, imm8 n (sign-extended)
+fn emit_x64_push_r(uint64 r) {
+    if r >= 8 { emit_byte(0x41) }
+    uint8 po = 0x50 | (r & 7)
+    emit_byte(po)
+    cg_win_audit_site(0)
+    uw_sp_moves()
+}
+
+fn emit_x64_pop_r(uint64 r) {
+    if r >= 8 { emit_byte(0x41) }
+    uint8 po = 0x58 | (r & 7)
+    emit_byte(po)
+    cg_win_audit_site(0)
+    uw_sp_moves()
+}
+
+fn emit_x64_rsp_adj(uint64 ext, uint64 n) {
+    if cg_win_folded != 0 && ext == 0xEC { cg_win_fold_site(n)  return }
+    if cg_win_folded != 0 && ext == 0xC4 { uw_sp_site = 0  return }
+    emit_byte(0x48)
+    uint8 e = ext
+    if ext == 0xE4 || n < 128 {
+        emit_byte(0x83); emit_byte(e)
+        uint8 n8 = n
+        emit_byte(n8)
+    } else {
+        emit_byte(0x81); emit_byte(e)
+        emit_u32_le(n)
+    }
+    if ext == 0xEC { cg_win_audit_site(n) } else { cg_win_audit_site(0) }
+    uw_sp_moves()
 }
 
 // mov rcx, rax (Windows 1st arg)
@@ -5143,7 +5544,7 @@ fn gen_expr(uint64 node) {
         uint64 si = struct_lookup(wsn)
         uint64 ssize = struct_total_size(si)
         // Allocate temp stack area for struct
-        uint64 slit_base = var_count * 8
+        uint64 slit_base = cg_slot_off(var_count)
         uint64 slots_needed = (ssize + 7) / 8
         var_count = var_count + slots_needed
         var_frame_size = var_count * 8
@@ -5404,7 +5805,7 @@ fn gen_expr(uint64 node) {
         // Reserve a 4096-byte result buffer INSIDE the frame (prologue sub rsp
         // is patched to the final var_frame_size at function end). Using
         // var_frame_size as the base overran saved rbx / the return addr (H7).
-        uint64 fs_buf_off = var_count * 8
+        uint64 fs_buf_off = cg_slot_off(var_count)
         uint64 fs_bkk = 0
         while fs_bkk < 512 { var_count = var_count + 1; fs_bkk = fs_bkk + 1 }
         var_frame_size = var_count * 8
@@ -5577,7 +5978,8 @@ fn gen_expr(uint64 node) {
                 emit_byte(0x48); emit_byte(0xB9); emit_u32_le(10); emit_u32_le(0) // mov rcx, 10
                 emit_byte(0x48); emit_byte(0xF7); emit_byte(0xF1)   // div rcx
                 emit_byte(0x48); emit_byte(0x83); emit_byte(0xC2); emit_byte(0x30) // add rdx, '0'
-                emit_byte(0x52)                                     // push rdx
+                uw_sp_site_set("L8")
+                emit_x64_push_r(2)                                  // push rdx
                 emit_byte(0x49); emit_byte(0xFF); emit_byte(0xC2)   // inc r10
                 emit_byte(0xE9)                                     // jmp near fs_dl
                 uint64 fs_dl_back = out_len; emit_u32_le(0)
@@ -5594,7 +5996,7 @@ fn gen_expr(uint64 node) {
                 emit_byte(0x4D); emit_byte(0x85); emit_byte(0xD2)   // test r10, r10
                 emit_byte(0x0F); emit_byte(0x84)                    // jz near pop_done
                 uint64 fs_pop_jz = out_len; emit_u32_le(0)
-                emit_byte(0x59)                                     // pop rcx
+                uw_sp_site_set("L8"); emit_x64_pop_r(1)                                   // pop rcx
                 emit_byte(0x88); emit_byte(0x0F)                    // mov [rdi], cl
                 emit_byte(0x48); emit_byte(0xFF); emit_byte(0xC7)   // inc rdi
                 emit_byte(0x49); emit_byte(0xFF); emit_byte(0xCA)   // dec r10
@@ -5608,6 +6010,8 @@ fn gen_expr(uint64 node) {
                 uint64 fs_pop_jzd = fs_pop_done - fs_pop_jz - 4
                 uint32 fs_pop_jzd32 = fs_pop_jzd
                 unsafe { *((out_buf + fs_pop_jz) as uint32) = fs_pop_jzd32 }
+                // #143: a guarded top-tested pair driven by r10 (C4b, ruling (c))
+                uw_balanced_loops(fs_dl, fs_dl_back + 4, fs_pop, fs_pop_back + 4, 10)
                 // len = rdi - r11
                 emit_byte(0x4C); emit_byte(0x29); emit_byte(0xDF)   // sub rdi, r11
                 emit_byte(0x49); emit_byte(0x89); emit_byte(0xFA)   // mov r10, rdi (len)
@@ -5721,7 +6125,7 @@ fn gen_expr(uint64 node) {
                 // trap: exit(1)
                 emit_mov_rax_imm(1)
                 emit_mov_rdi_rax()
-                if target_os == 2 { emit_mov_rcx_rax(); emit_win_alloc_stack(0x20); emit_win_call_iat(0) }
+                if target_os == 2 { emit_mov_rcx_rax(); uw_sp_site_set("L6"); emit_win_alloc_stack(0x20); emit_win_call_iat(0) }
                 else if target_os == 1 { emit_mov_rax_imm(0x2000001); emit_x86_syscall_insn("array bounds check (--debug)") }
                 else { emit_mov_rax_imm(231); emit_x86_syscall_insn("array bounds check (--debug)") }
                 uint64 bc_skip = out_len - bc_jb - 1
@@ -6139,7 +6543,7 @@ fn gen_expr(uint64 node) {
             lhs_is_float = expr_is_float
             if lhs_is_float != 0 {
                 // Float LHS: store xmm0 to temp
-                uint64 ft0 = var_count * 8
+                uint64 ft0 = cg_slot_off(var_count)
                 var_count = var_count + 1
                 var_frame_size = var_count * 8
                 uint64 ft0r = var_frame_size & 15
@@ -6194,7 +6598,7 @@ fn gen_expr(uint64 node) {
             lhs_is_float = expr_is_float
             if lhs_is_float != 0 {
                 // Float LHS: store xmm0 to temp (can't use r12 for float)
-                uint64 ft1 = var_count * 8
+                uint64 ft1 = cg_slot_off(var_count)
                 var_count = var_count + 1
                 var_frame_size = var_count * 8
                 uint64 ft1r = var_frame_size & 15
@@ -6249,7 +6653,7 @@ fn gen_expr(uint64 node) {
             // r12 in use (nested): fall back to stack
             gen_expr(wlhs)
             lhs_is_float = expr_is_float
-            uint64 binop_temp = var_count * 8
+            uint64 binop_temp = cg_slot_off(var_count)
             var_count = var_count + 1
             var_frame_size = var_count * 8
             uint64 brem = var_frame_size & 15
@@ -6327,7 +6731,7 @@ fn gen_expr(uint64 node) {
                 emit_mov_rdi_rax()
                 if target_os == 2 {
                     emit_mov_rcx_rax()
-                    emit_win_alloc_stack(0x20)
+                    uw_sp_site_set("L6"); emit_win_alloc_stack(0x20)
                     emit_win_call_iat(0)
                 } else if target_os == 1 {
                     emit_mov_rax_imm(0x2000001)
@@ -6352,7 +6756,7 @@ fn gen_expr(uint64 node) {
                 emit_mov_rdi_rax()
                 if target_os == 2 {
                     emit_mov_rcx_rax()
-                    emit_win_alloc_stack(0x20)
+                    uw_sp_site_set("L6"); emit_win_alloc_stack(0x20)
                     emit_win_call_iat(0)
                 } else if target_os == 1 {
                     emit_mov_rax_imm(0x2000001)
@@ -6377,7 +6781,7 @@ fn gen_expr(uint64 node) {
                 emit_mov_rdi_rax()
                 if target_os == 2 {
                     emit_mov_rcx_rax()
-                    emit_win_alloc_stack(0x20)
+                    uw_sp_site_set("L6"); emit_win_alloc_stack(0x20)
                     emit_win_call_iat(0)
                 } else if target_os == 1 {
                     emit_mov_rax_imm(0x2000001)
@@ -6412,7 +6816,7 @@ fn gen_expr(uint64 node) {
                 emit_mov_rdi_rax()
                 if target_os == 2 {
                     emit_mov_rcx_rax()
-                    emit_win_alloc_stack(0x20)
+                    uw_sp_site_set("L6"); emit_win_alloc_stack(0x20)
                     emit_win_call_iat(0)
                 } else if target_os == 1 {
                     emit_mov_rax_imm(0x2000001)
@@ -6451,7 +6855,7 @@ fn gen_expr(uint64 node) {
                 emit_mov_rdi_rax()
                 if target_os == 2 {
                     emit_mov_rcx_rax()
-                    emit_win_alloc_stack(0x20)
+                    uw_sp_site_set("L6"); emit_win_alloc_stack(0x20)
                     emit_win_call_iat(0)
                 } else if target_os == 1 {
                     emit_mov_rax_imm(0x2000001)
@@ -6519,7 +6923,7 @@ fn gen_expr(uint64 node) {
                 emit_mov_rdi_rax()
                 if target_os == 2 {
                     emit_mov_rcx_rax()
-                    emit_win_alloc_stack(0x20)
+                    uw_sp_site_set("L6"); emit_win_alloc_stack(0x20)
                     emit_win_call_iat(0)
                 } else if target_os == 1 {
                     emit_mov_rax_imm(0x2000001)
@@ -6544,7 +6948,7 @@ fn gen_expr(uint64 node) {
                 emit_mov_rdi_rax()
                 if target_os == 2 {
                     emit_mov_rcx_rax()
-                    emit_win_alloc_stack(0x20)
+                    uw_sp_site_set("L6"); emit_win_alloc_stack(0x20)
                     emit_win_call_iat(0)
                 } else if target_os == 1 {
                     emit_mov_rax_imm(0x2000001)
@@ -6569,7 +6973,7 @@ fn gen_expr(uint64 node) {
                 emit_mov_rdi_rax()
                 if target_os == 2 {
                     emit_mov_rcx_rax()
-                    emit_win_alloc_stack(0x20)
+                    uw_sp_site_set("L6"); emit_win_alloc_stack(0x20)
                     emit_win_call_iat(0)
                 } else if target_os == 1 {
                     emit_mov_rax_imm(0x2000001)
@@ -6646,7 +7050,7 @@ fn gen_expr(uint64 node) {
         if lhs_si_pre != 0xFFFFFFFF && rhs_si_pre != 0xFFFFFFFF {
             // Both operands are struct variables — emit qword-by-qword comparison
             gen_expr(wlhs)
-            uint64 sc_lhs_slot = var_count * 8
+            uint64 sc_lhs_slot = cg_slot_off(var_count)
             var_count = var_count + 1
             var_frame_size = var_count * 8
             uint64 sc_rem1 = var_frame_size & 15
@@ -6654,9 +7058,9 @@ fn gen_expr(uint64 node) {
             emit_store_rax_to_stack(sc_lhs_slot)
 
             gen_expr(wrhs_pre)
-            uint64 sc_rhs_slot = var_count * 8
+            uint64 sc_rhs_slot = cg_slot_off(var_count)
             var_count = var_count + 1
-            uint64 sc_acc_slot = var_count * 8
+            uint64 sc_acc_slot = cg_slot_off(var_count)
             var_count = var_count + 1
             var_frame_size = var_count * 8
             uint64 sc_rem2 = var_frame_size & 15
@@ -6783,7 +7187,7 @@ fn gen_expr(uint64 node) {
             uint64 lhs_is_float_s = expr_is_float
             if lhs_is_float_s != 0 {
                 // Float LHS: store xmm0 to temp, eval RHS, ucomisd
-                uint64 fcmp_temp_s = var_count * 8
+                uint64 fcmp_temp_s = cg_slot_off(var_count)
                 var_count = var_count + 1
                 var_frame_size = var_count * 8
                 uint64 fcrem_s = var_frame_size & 15
@@ -6828,7 +7232,7 @@ fn gen_expr(uint64 node) {
             uint64 lhs_is_float_r = expr_is_float
             if lhs_is_float_r != 0 {
                 // Float LHS: store xmm0 to temp, eval RHS, ucomisd
-                uint64 fcmp_temp_r = var_count * 8
+                uint64 fcmp_temp_r = cg_slot_off(var_count)
                 var_count = var_count + 1
                 var_frame_size = var_count * 8
                 uint64 fcrem_r = var_frame_size & 15
@@ -6874,7 +7278,7 @@ fn gen_expr(uint64 node) {
         } else {
             gen_expr(wlhs)
             uint64 lhs_is_float_k = expr_is_float
-            uint64 cmp_temp = var_count * 8
+            uint64 cmp_temp = cg_slot_off(var_count)
             var_count = var_count + 1
             var_frame_size = var_count * 8
             uint64 crem = var_frame_size & 15
@@ -7051,7 +7455,7 @@ fn gen_expr(uint64 node) {
         uint32 scrutinee = ast_child(node)
         uint64 wscr = scrutinee
         gen_expr(wscr)
-        uint64 match_temp = var_count * 8
+        uint64 match_temp = cg_slot_off(var_count)
         var_count = var_count + 1
         var_frame_size = var_count * 8
         uint64 mrem = var_frame_size & 15
@@ -7179,7 +7583,7 @@ fn gen_expr(uint64 node) {
             if target_os == 2 {
                 // Windows: ExitProcess(code)
                 emit_mov_rcx_rax()
-                emit_win_alloc_stack(0x20)
+                uw_sp_site_set("L1"); emit_win_alloc_stack(0x20)
                 emit_win_call_iat(0)
             } else {
                 emit_mov_rdi_rax()
@@ -7207,7 +7611,7 @@ fn gen_expr(uint64 node) {
             if target_os == 2 {
                 // Windows: GetStdHandle(-(10+fd)) then WriteFile(handle, buf, len, NULL, NULL)
                 // Save len to extra temp (reserved frame slot, not above-frame — H7)
-                uint64 extra_tmp = var_count * 8
+                uint64 extra_tmp = cg_slot_off(var_count)
                 var_count = var_count + 1
                 var_frame_size = var_count * 8
                 uint64 wr_etr = var_frame_size & 15
@@ -7218,9 +7622,9 @@ fn gen_expr(uint64 node) {
                 emit_neg_rax()
                 emit_sub_rax_imm8(10)
                 emit_mov_rcx_rax()
-                emit_win_alloc_stack(0x20)
+                uw_sp_site_set("L1"); emit_win_alloc_stack(0x20)
                 emit_win_call_iat(1)
-                emit_win_free_stack(0x20)
+                uw_sp_site_set("L1"); emit_win_free_stack(0x20)
                 // rax = handle
                 emit_mov_rcx_rax()
                 emit_load_rax_from_stack(pk1_write)
@@ -7228,7 +7632,7 @@ fn gen_expr(uint64 node) {
                 emit_mov_rdx_rax()
                 emit_load_rax_from_stack(extra_tmp)
                 emit_mov_r8_rax()
-                emit_win_alloc_stack(0x30)
+                uw_sp_site_set("L1"); emit_win_alloc_stack(0x30)
                 emit_win_stack_arg5(0)
                 // lpNumberOfBytesWritten USED TO BE NULL (emit_mov_r9_imm(0)),
                 // so this returned WriteFile's BOOL -- 1 for any successful
@@ -7245,7 +7649,7 @@ fn gen_expr(uint64 node) {
                 emit_win_call_iat(2)
                 // mov eax, [rsp+0x28] -- the count, not the BOOL
                 emit_byte(0x8B); emit_byte(0x44); emit_byte(0x24); emit_byte(0x28)
-                emit_win_free_stack(0x30)
+                uw_sp_site_set("L1"); emit_win_free_stack(0x30)
             } else {
                 // rax = len -> rdx
                 emit_mov_rdx_rax()
@@ -7307,9 +7711,9 @@ fn gen_expr(uint64 node) {
                 emit_mov_r8_rax()
                 // r9 = 4 (PAGE_READWRITE)
                 emit_mov_r9_imm(4)
-                emit_win_alloc_stack(0x20)
+                uw_sp_site_set("L1"); emit_win_alloc_stack(0x20)
                 emit_win_call_iat(6)
-                emit_win_free_stack(0x20)
+                uw_sp_site_set("L1"); emit_win_free_stack(0x20)
                 // rax = raw pointer from VirtualAlloc — NULL on failure.
                 uint64 cg_win_alloc_fail = emit_x86_alloc_fail_jcc()
                 // Store size header at [rax], return rax+8
@@ -7403,9 +7807,9 @@ fn gen_expr(uint64 node) {
                 emit_mov_r8_rax()
                 // r9 = NULL (security)
                 emit_mov_r9_imm(0)
-                emit_win_alloc_stack(0x40)
+                uw_sp_site_set("L1"); emit_win_alloc_stack(0x40)
                 // [rsp+32] = disposition: 3-flags (read=3=OPEN_EXISTING, write=2=CREATE_ALWAYS)
-                emit_load_rax_from_stack(pk1_fileopen + 0x40)  // flags (adjusted for stack shift)
+                emit_load_rax_from_stack(pk1_fileopen + cg_win_moved(0x40))  // flags (adjusted for the stack shift, if any)
                 emit_neg_rax()
                 // add eax, 3
                 emit_byte(0x83); emit_byte(0xC0); emit_byte(3)
@@ -7418,7 +7822,7 @@ fn gen_expr(uint64 node) {
                 emit_byte(0x48); emit_byte(0xC7); emit_byte(0x44)
                 emit_byte(0x24); emit_byte(0x30); emit_u32_le(0)
                 emit_win_call_iat(3)
-                emit_win_free_stack(0x40)
+                uw_sp_site_set("L1"); emit_win_free_stack(0x40)
             } else {
                 emit_load_rax_from_stack(pk0_fileopen)
                 emit_mov_rdi_rax()
@@ -7466,7 +7870,7 @@ fn gen_expr(uint64 node) {
             if target_os == 2 {
                 // Windows: ReadFile(handle, buf, len, &bytesRead, NULL)
                 // Reserve two frame slots: extra_tmp (len) + br_slot (bytesRead) — H7
-                uint64 extra_tmp = var_count * 8
+                uint64 extra_tmp = cg_slot_off(var_count)
                 var_count = var_count + 2
                 var_frame_size = var_count * 8
                 uint64 rd_etr = var_frame_size & 15
@@ -7489,10 +7893,10 @@ fn gen_expr(uint64 node) {
                 emit_byte(0x4C); emit_byte(0x8D); emit_byte(0x4C); emit_byte(0x24)
                 uint8 br8 = br_slot
                 emit_byte(br8)
-                emit_win_alloc_stack(0x30)
+                uw_sp_site_set("L1"); emit_win_alloc_stack(0x30)
                 emit_win_stack_arg5(0)                  // lpOverlapped = NULL
                 emit_win_call_iat(4)                    // call ReadFile
-                emit_win_free_stack(0x30)
+                uw_sp_site_set("L1"); emit_win_free_stack(0x30)
                 // Return bytesRead (not the BOOL)
                 emit_load_rax_from_stack(br_slot)
             } else {
@@ -7524,7 +7928,7 @@ fn gen_expr(uint64 node) {
             gen_expr(wa3)
             if target_os == 2 {
                 // Windows: WriteFile(handle, buf, len, &bytesWritten, NULL)
-                uint64 extra_tmp = var_count * 8
+                uint64 extra_tmp = cg_slot_off(var_count)
                 var_count = var_count + 1
                 var_frame_size = var_count * 8
                 uint64 fw_etr = var_frame_size & 15
@@ -7536,7 +7940,7 @@ fn gen_expr(uint64 node) {
                 emit_mov_rdx_rax()
                 emit_load_rax_from_stack(extra_tmp)
                 emit_mov_r8_rax()
-                emit_win_alloc_stack(0x30)
+                uw_sp_site_set("L1"); emit_win_alloc_stack(0x30)
                 // zero [rsp+0x28] for bytesWritten output
                 emit_byte(0xC7); emit_byte(0x44); emit_byte(0x24); emit_byte(0x28); emit_u32_le(0)
                 // lea r9, [rsp+0x28] — point to bytesWritten
@@ -7549,7 +7953,7 @@ fn gen_expr(uint64 node) {
                 // the count away. file_write reported 1 for every successful
                 // write.
                 emit_byte(0x8B); emit_byte(0x44); emit_byte(0x24); emit_byte(0x28)  // mov eax, [rsp+0x28]
-                emit_win_free_stack(0x30)
+                uw_sp_site_set("L1"); emit_win_free_stack(0x30)
             } else {
                 emit_mov_rdx_rax()
                 emit_load_rax_from_stack(pk1_filewrite)
@@ -7570,9 +7974,9 @@ fn gen_expr(uint64 node) {
             if target_os == 2 {
                 // Windows: CloseHandle(handle)
                 emit_mov_rcx_rax()
-                emit_win_alloc_stack(0x20)
+                uw_sp_site_set("L1"); emit_win_alloc_stack(0x20)
                 emit_win_call_iat(5)
-                emit_win_free_stack(0x20)
+                uw_sp_site_set("L1"); emit_win_free_stack(0x20)
             } else {
                 emit_mov_rdi_rax()
                 if target_os == 1 { emit_mov_rax_imm(0x2000006) } else { emit_mov_rax_imm(3) }
@@ -7598,9 +8002,9 @@ fn gen_expr(uint64 node) {
                 emit_byte(0x24)
                 uint8 ts1 = temp_slot_1
                 emit_byte(ts1)
-                emit_win_alloc_stack(0x20)
+                uw_sp_site_set("L1"); emit_win_alloc_stack(0x20)
                 emit_win_call_iat(8)  // GetFileSizeEx
-                emit_win_free_stack(0x20)
+                uw_sp_site_set("L1"); emit_win_free_stack(0x20)
                 // Load size from temp_slot_1
                 emit_load_rax_from_stack(temp_slot_1)
             } else {
@@ -7668,7 +8072,7 @@ fn gen_expr(uint64 node) {
             // `sub rsp` is patched to the final var_frame_size at function end).
             // Using var_frame_size as the base put the buffer on saved rbx /
             // the return address, smashing it on return (H7).
-            uint64 digit_buf = var_count * 8
+            uint64 digit_buf = cg_slot_off(var_count)
             var_count = var_count + 3
             var_frame_size = var_count * 8
             uint64 db_rem = var_frame_size & 15
@@ -7689,9 +8093,9 @@ fn gen_expr(uint64 node) {
                     if target_os == 2 {
                         emit_mov_rax_imm(0xFFFFFFFFFFFFFFF5)
                         emit_mov_rcx_rax()
-                        emit_win_alloc_stack(0x20)
+                        uw_sp_site_set("L1"); emit_win_alloc_stack(0x20)
                         emit_win_call_iat(1)
-                        emit_win_free_stack(0x20)
+                        uw_sp_site_set("L1"); emit_win_free_stack(0x20)
                         emit_mov_rcx_rax()
                         emit_byte(0x48); emit_byte(0x8D)
                         if temp_slot_1 < 128 {
@@ -7703,10 +8107,10 @@ fn gen_expr(uint64 node) {
                         emit_mov_rax_imm(1)
                         emit_mov_r8_rax()
                         emit_mov_r9_imm(0)
-                        emit_win_alloc_stack(0x30)
+                        uw_sp_site_set("L1"); emit_win_alloc_stack(0x30)
                         emit_win_stack_arg5(0)
                         emit_win_call_iat(2)
-                        emit_win_free_stack(0x30)
+                        uw_sp_site_set("L1"); emit_win_free_stack(0x30)
                     } else {
                         emit_mov_rax_imm(1)
                         emit_mov_rdi_rax()
@@ -7746,19 +8150,19 @@ fn gen_expr(uint64 node) {
                         emit_store_rax_to_stack(temp_slot_1)
                         emit_mov_rax_imm(0xFFFFFFFFFFFFFFF5)
                         emit_mov_rcx_rax()
-                        emit_win_alloc_stack(0x20)
+                        uw_sp_site_set("L1"); emit_win_alloc_stack(0x20)
                         emit_win_call_iat(1)
-                        emit_win_free_stack(0x20)
+                        uw_sp_site_set("L1"); emit_win_free_stack(0x20)
                         emit_mov_rcx_rax()
                         emit_load_rax_from_stack(temp_slot_0)
                         emit_mov_rdx_rax()
                         emit_load_rax_from_stack(temp_slot_1)
                         emit_mov_r8_rax()
                         emit_mov_r9_imm(0)
-                        emit_win_alloc_stack(0x30)
+                        uw_sp_site_set("L1"); emit_win_alloc_stack(0x30)
                         emit_win_stack_arg5(0)
                         emit_win_call_iat(2)
-                        emit_win_free_stack(0x30)
+                        uw_sp_site_set("L1"); emit_win_free_stack(0x30)
                     } else {
                         emit_byte(0x48); emit_byte(0x89); emit_byte(0xCA)
                         emit_load_rax_from_stack(temp_slot_0)
@@ -7792,9 +8196,9 @@ fn gen_expr(uint64 node) {
                     if target_os == 2 {
                         emit_mov_rax_imm(0xFFFFFFFFFFFFFFF5)
                         emit_mov_rcx_rax()
-                        emit_win_alloc_stack(0x20)
+                        uw_sp_site_set("L1"); emit_win_alloc_stack(0x20)
                         emit_win_call_iat(1)
-                        emit_win_free_stack(0x20)
+                        uw_sp_site_set("L1"); emit_win_free_stack(0x20)
                         emit_mov_rcx_rax()
                         emit_byte(0x48); emit_byte(0x8D)
                         if digit_buf < 128 {
@@ -7805,10 +8209,10 @@ fn gen_expr(uint64 node) {
                         emit_mov_rax_imm(1)
                         emit_mov_r8_rax()
                         emit_mov_r9_imm(0)
-                        emit_win_alloc_stack(0x30)
+                        uw_sp_site_set("L1"); emit_win_alloc_stack(0x30)
                         emit_win_stack_arg5(0)
                         emit_win_call_iat(2)
-                        emit_win_free_stack(0x30)
+                        uw_sp_site_set("L1"); emit_win_free_stack(0x30)
                     } else {
                         emit_mov_rax_imm(1)
                         emit_mov_rdi_rax()
@@ -7877,20 +8281,21 @@ fn gen_expr(uint64 node) {
                         patch_u32(pr_nosign_j, out_len - pr_nosign_j - 4)
                     }
                     if target_os == 2 {
-                        emit_byte(0x57); emit_byte(0x51)
+                        uw_sp_site_set("L7")
+                        emit_x64_push_r(7); uw_sp_site_set("L7"); emit_x64_push_r(1)
                         emit_mov_rax_imm(0xFFFFFFFFFFFFFFF5)
                         emit_mov_rcx_rax()
-                        emit_win_alloc_stack(0x20)
+                        uw_sp_site_set("L1"); emit_win_alloc_stack(0x20)
                         emit_win_call_iat(1)
-                        emit_win_free_stack(0x20)
+                        uw_sp_site_set("L1"); emit_win_free_stack(0x20)
                         emit_mov_rcx_rax()
-                        emit_byte(0x41); emit_byte(0x58)
-                        emit_byte(0x5A)
+                        uw_sp_site_set("L7"); emit_x64_pop_r(8)
+                        uw_sp_site_set("L7"); emit_x64_pop_r(2)
                         emit_mov_r9_imm(0)
-                        emit_win_alloc_stack(0x30)
+                        uw_sp_site_set("L1"); emit_win_alloc_stack(0x30)
                         emit_win_stack_arg5(0)
                         emit_win_call_iat(2)
-                        emit_win_free_stack(0x30)
+                        uw_sp_site_set("L1"); emit_win_free_stack(0x30)
                     } else {
                         emit_byte(0x48); emit_byte(0x89); emit_byte(0xFE)
                         emit_byte(0x48); emit_byte(0x89); emit_byte(0xCA)
@@ -7919,9 +8324,9 @@ fn gen_expr(uint64 node) {
                 if target_os == 2 {
                     emit_mov_rax_imm(0xFFFFFFFFFFFFFFF5)
                     emit_mov_rcx_rax()
-                    emit_win_alloc_stack(0x20)
+                    uw_sp_site_set("L1"); emit_win_alloc_stack(0x20)
                     emit_win_call_iat(1)
-                    emit_win_free_stack(0x20)
+                    uw_sp_site_set("L1"); emit_win_free_stack(0x20)
                     emit_mov_rcx_rax()
                     emit_byte(0x48); emit_byte(0x8D)
                     if temp_slot_1 < 128 {
@@ -7933,10 +8338,10 @@ fn gen_expr(uint64 node) {
                     emit_mov_rax_imm(1)
                     emit_mov_r8_rax()
                     emit_mov_r9_imm(0)
-                    emit_win_alloc_stack(0x30)
+                    uw_sp_site_set("L1"); emit_win_alloc_stack(0x30)
                     emit_win_stack_arg5(0)
                     emit_win_call_iat(2)
-                    emit_win_free_stack(0x30)
+                    uw_sp_site_set("L1"); emit_win_free_stack(0x30)
                 } else {
                     emit_mov_rax_imm(1)
                     emit_mov_rdi_rax()
@@ -8005,19 +8410,19 @@ fn gen_expr(uint64 node) {
                 emit_store_rax_to_stack(temp_slot_1)
                 emit_mov_rax_imm(0xFFFFFFFFFFFFFFF5)
                 emit_mov_rcx_rax()
-                emit_win_alloc_stack(0x20)
+                uw_sp_site_set("L1"); emit_win_alloc_stack(0x20)
                 emit_win_call_iat(1)
-                emit_win_free_stack(0x20)
+                uw_sp_site_set("L1"); emit_win_free_stack(0x20)
                 emit_mov_rcx_rax()
                 emit_load_rax_from_stack(temp_slot_0)
                 emit_mov_rdx_rax()
                 emit_load_rax_from_stack(temp_slot_1)
                 emit_mov_r8_rax()
                 emit_mov_r9_imm(0)
-                emit_win_alloc_stack(0x30)
+                uw_sp_site_set("L1"); emit_win_alloc_stack(0x30)
                 emit_win_stack_arg5(0)
                 emit_win_call_iat(2)
-                emit_win_free_stack(0x30)
+                uw_sp_site_set("L1"); emit_win_free_stack(0x30)
             } else {
                 emit_byte(0x48); emit_byte(0x89); emit_byte(0xCA)
                 emit_load_rax_from_stack(temp_slot_0)
@@ -8044,9 +8449,9 @@ fn gen_expr(uint64 node) {
                 if target_os == 2 {
                     emit_mov_rax_imm(0xFFFFFFFFFFFFFFF5)
                     emit_mov_rcx_rax()
-                    emit_win_alloc_stack(0x20)
+                    uw_sp_site_set("L1"); emit_win_alloc_stack(0x20)
                     emit_win_call_iat(1)
-                    emit_win_free_stack(0x20)
+                    uw_sp_site_set("L1"); emit_win_free_stack(0x20)
                     emit_mov_rcx_rax()
                     emit_byte(0x48); emit_byte(0x8D)
                     if temp_slot_0 < 128 {
@@ -8060,10 +8465,10 @@ fn gen_expr(uint64 node) {
                     emit_mov_rax_imm(1)
                     emit_mov_r8_rax()
                     emit_mov_r9_imm(0)
-                    emit_win_alloc_stack(0x30)
+                    uw_sp_site_set("L1"); emit_win_alloc_stack(0x30)
                     emit_win_stack_arg5(0)
                     emit_win_call_iat(2)
-                    emit_win_free_stack(0x30)
+                    uw_sp_site_set("L1"); emit_win_free_stack(0x30)
                 } else {
                     // lea rsi, [rsp + temp_slot_0]
                     emit_byte(0x48); emit_byte(0x8D)
@@ -8221,9 +8626,9 @@ fn gen_expr(uint64 node) {
                 emit_byte(0x41); emit_byte(0xB8)
                 emit_u32_le(0x8000)
                 // Shadow space + call
-                emit_win_alloc_stack(0x20)
+                uw_sp_site_set("L1"); emit_win_alloc_stack(0x20)
                 emit_win_call_iat(13)
-                emit_win_free_stack(0x20)
+                uw_sp_site_set("L1"); emit_win_free_stack(0x20)
             } else {
                 // Linux/macOS: munmap(base, total_size)
                 // sub rax, 8 → base address
@@ -8505,9 +8910,9 @@ fn gen_expr(uint64 node) {
             // cap is the shared >64 guard above.
 
             // Allocate temp slots: 1 for fn_ptr + arg_count for args
-            uint64 ptr_slot = var_count * 8
+            uint64 ptr_slot = cg_slot_off(var_count)
             var_count = var_count + 1
-            uint64 arg_slots_base = var_count * 8
+            uint64 arg_slots_base = cg_slot_off(var_count)
             uint64 ac = 0
             while ac < arg_count {
                 var_count = var_count + 1
@@ -8557,21 +8962,13 @@ fn gen_expr(uint64 node) {
                 // mirrors the named-call Win64 path exactly. cp_stack_bytes
                 // carries the reservation to the shared tail below, which uses
                 // it for both the fn-ptr slot load and the `add rsp` cleanup.
-                uint64 win_overflow = 0
-                if arg_count > 4 { win_overflow = arg_count - 4 }
-                uint64 win_stack = 32 + win_overflow * 8
-                uint64 win_rem = win_stack & 15
-                if win_rem != 0 { win_stack = win_stack + 16 - win_rem }
-                cp_stack_bytes = win_stack
+                // #143 option C: the shared accounting the pre-scan sizes OUT with
+                uint64 win_stack = cg_win_call_area(arg_count)
+                cp_stack_bytes = cg_win_moved(win_stack)
 
                 // sub rsp, win_stack
-                if win_stack < 128 {
-                    emit_byte(0x48); emit_byte(0x83); emit_byte(0xEC)
-                    uint8 cpws8 = win_stack; emit_byte(cpws8)
-                } else {
-                    emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC)
-                    emit_u32_le(win_stack)
-                }
+                uw_sp_site_set("L2")
+                emit_x64_rsp_adj(0xEC, win_stack)
 
                 // Store overflow args (5th onward) at [rsp + 32 + (i-4)*8], in
                 // argument order. Frame slots moved up by cp_stack_bytes after
@@ -8719,14 +9116,7 @@ fn gen_expr(uint64 node) {
                     cp_stack_bytes = cps * 8
                     // sub rsp, cp_stack_bytes -- imm8 stops at 15 stack args
                     // (120 bytes); the 16th makes 128, which is -128 signed.
-                    if cp_stack_bytes < 128 {
-                        emit_byte(0x48); emit_byte(0x83); emit_byte(0xEC)
-                        uint8 cpsb = cp_stack_bytes
-                        emit_byte(cpsb)
-                    } else {
-                        emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC)
-                        emit_u32_le(cp_stack_bytes)
-                    }
+                    uw_sp_site_set("L11"); emit_x64_rsp_adj(0xEC, cp_stack_bytes)
                     uint64 cpi2 = 0
                     while cpi2 < cpo_n {
                         uint64 cgp = cpo + cpi2 * 8
@@ -8749,14 +9139,7 @@ fn gen_expr(uint64 node) {
             emit_byte(0xD0)
             if cp_stack_bytes > 0 {
                 // add rsp, cp_stack_bytes
-                if cp_stack_bytes < 128 {
-                    emit_byte(0x48); emit_byte(0x83); emit_byte(0xC4)
-                    uint8 cpcl = cp_stack_bytes
-                    emit_byte(cpcl)
-                } else {
-                    emit_byte(0x48); emit_byte(0x81); emit_byte(0xC4)
-                    emit_u32_le(cp_stack_bytes)
-                }
+                uw_sp_site_set("L2"); emit_x64_rsp_adj(0xC4, cp_stack_bytes)
             }
             return
         }
@@ -8938,7 +9321,7 @@ fn gen_expr(uint64 node) {
         // bit_insert(val, start, width, bits) — (val & ~(mask << start)) | ((bits & mask) << start)
         if is_extern_call == 0 && tok_matches(wct, "bit_insert", 10) != 0 {
             // Allocate extra temps
-            uint64 bi_extra = var_count * 8
+            uint64 bi_extra = cg_slot_off(var_count)
             var_count = var_count + 4
             var_frame_size = var_count * 8
             uint64 birem = var_frame_size & 15
@@ -9007,9 +9390,9 @@ fn gen_expr(uint64 node) {
                 emit_load_rax_from_stack(pk0_getmodulepat)
                 emit_mov_rdx_rax()
                 emit_byte(0x48); emit_byte(0x31); emit_byte(0xC9)
-                emit_win_alloc_stack(0x20)
+                uw_sp_site_set("L1"); emit_win_alloc_stack(0x20)
                 emit_win_call_iat(12)
-                emit_win_free_stack(0x20)
+                uw_sp_site_set("L1"); emit_win_free_stack(0x20)
             } else if target_os == 4 {
                 // --target=none: 0, deliberately -- see the long rationale on
                 // the same arm in src/ir.kr. 0 already means "no path is
@@ -9053,7 +9436,8 @@ fn gen_expr(uint64 node) {
                 //   0x0D0-0x4CF: cmdline buffer (1024)
                 emit_load_rax_from_stack(pk0_execprocessa)
                 emit_store_rax_to_stack(pk0_execprocessa)
-                emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC); emit_u32_le(0x4D0)
+                uw_sp_site_set("L4")
+                emit_x64_rsp_adj(0xEC, 0x4D0)
                 emit_byte(0x48); emit_byte(0x8D); emit_byte(0x7C); emit_byte(0x24); emit_byte(0x50)
                 emit_byte(0x31); emit_byte(0xC0)
                 emit_byte(0xB9); emit_u32_le(128)
@@ -9061,7 +9445,7 @@ fn gen_expr(uint64 node) {
                 emit_byte(0xC7); emit_byte(0x44); emit_byte(0x24); emit_byte(0x50); emit_u32_le(104)
                 // ---- Build cmdline at [rsp+0xD0] ----
                 emit_byte(0x48); emit_byte(0x8D); emit_byte(0xBC); emit_byte(0x24); emit_u32_le(0xD0)
-                emit_byte(0x4C); emit_byte(0x8B); emit_byte(0x8C); emit_byte(0x24); emit_u32_le(pk1_execprocessa + 0x4D0)
+                emit_byte(0x4C); emit_byte(0x8B); emit_byte(0x8C); emit_byte(0x24); emit_u32_le(pk1_execprocessa + cg_win_moved(0x4D0))
                 // L_outer: mov rsi,[r9]; test rsi,rsi; jz L_done (+28)
                 emit_byte(0x49); emit_byte(0x8B); emit_byte(0x31)
                 emit_byte(0x48); emit_byte(0x85); emit_byte(0xF6)
@@ -9084,7 +9468,7 @@ fn gen_expr(uint64 node) {
                 emit_byte(0xC6); emit_byte(0x07); emit_byte(0x00)
                 // ---- CreateProcessA setup ----
                 // rcx = path (lpApplicationName)
-                emit_byte(0x48); emit_byte(0x8B); emit_byte(0x8C); emit_byte(0x24); emit_u32_le(pk0_execprocessa + 0x4D0)
+                emit_byte(0x48); emit_byte(0x8B); emit_byte(0x8C); emit_byte(0x24); emit_u32_le(pk0_execprocessa + cg_win_moved(0x4D0))
                 // lea rdx, [rsp+0xD0] (lpCommandLine = our cmdline)
                 emit_byte(0x48); emit_byte(0x8D); emit_byte(0x94); emit_byte(0x24); emit_u32_le(0xD0)
                 // r8 = NULL (lpProcessAttributes); r9 = NULL (lpThreadAttributes)
@@ -9106,8 +9490,8 @@ fn gen_expr(uint64 node) {
                 emit_byte(0x48); emit_byte(0x8D); emit_byte(0x54); emit_byte(0x24); emit_byte(0x20)
                 emit_win_call_iat(11)
                 emit_byte(0x8B); emit_byte(0x4C); emit_byte(0x24); emit_byte(0x20)
-                emit_byte(0x48); emit_byte(0x81); emit_byte(0xC4); emit_u32_le(0x4D0)
-                emit_win_alloc_stack(0x20)
+                uw_sp_site_set("L4"); emit_x64_rsp_adj(0xC4, 0x4D0)
+                uw_sp_site_set("L4"); emit_win_alloc_stack(0x20)
                 emit_win_call_iat(0)
             } else {
                 // execve(path, argv, envp)
@@ -9143,7 +9527,8 @@ fn gen_expr(uint64 node) {
                 // Stack layout: 0x00-0x1F shadow, 0x20-0x4F stack args, 0x50-0xB7 STARTUPINFOA(104), 0xB8-0xCF PI(24)
                 emit_store_rax_to_stack(temp_slot_0)
                 // sub rsp, 0xD0
-                emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC); emit_u32_le(0xD0)
+                uw_sp_site_set("L4")
+                emit_x64_rsp_adj(0xEC, 0xD0)
                 // lea rdi, [rsp+0x50]
                 emit_byte(0x48); emit_byte(0x8D); emit_byte(0x7C); emit_byte(0x24); emit_byte(0x50)
                 // xor eax, eax
@@ -9155,7 +9540,7 @@ fn gen_expr(uint64 node) {
                 // mov dword [rsp+0x50], 104 (STARTUPINFOA.cb)
                 emit_byte(0xC7); emit_byte(0x44); emit_byte(0x24); emit_byte(0x50); emit_u32_le(104)
                 // rcx = path (lpApplicationName) — avoids CreateProcessA modifying read-only lpCommandLine
-                emit_byte(0x48); emit_byte(0x8B); emit_byte(0x8C); emit_byte(0x24); emit_u32_le(temp_slot_0 + 0xD0)
+                emit_byte(0x48); emit_byte(0x8B); emit_byte(0x8C); emit_byte(0x24); emit_u32_le(temp_slot_0 + cg_win_moved(0xD0))
                 // rdx = NULL (lpCommandLine)
                 emit_byte(0x48); emit_byte(0x31); emit_byte(0xD2)
                 // r8 = NULL
@@ -9193,9 +9578,9 @@ fn gen_expr(uint64 node) {
                 // mov ecx, [rsp+0x20] (exit code)
                 emit_byte(0x8B); emit_byte(0x4C); emit_byte(0x24); emit_byte(0x20)
                 // add rsp, 0xD0
-                emit_byte(0x48); emit_byte(0x81); emit_byte(0xC4); emit_u32_le(0xD0)
+                uw_sp_site_set("L4"); emit_x64_rsp_adj(0xC4, 0xD0)
                 // ExitProcess(exitCode)
-                emit_win_alloc_stack(0x20)
+                uw_sp_site_set("L4"); emit_win_alloc_stack(0x20)
                 emit_win_call_iat(0)
             } else {
                 // Linux/macOS: execve(path, argv, NULL)
@@ -9215,7 +9600,7 @@ fn gen_expr(uint64 node) {
                 if target_os == 1 { emit_mov_rax_imm(0x200003B) } else { emit_mov_rax_imm(59) }
                 emit_x86_syscall_insn("exec_process")
                 // Restore stack if execve failed (only reached on error)
-                emit_byte(0x48); emit_byte(0x83); emit_byte(0xC4); emit_byte(0x10) // add rsp, 16
+                uw_sp_site_set("L11"); emit_x64_rsp_adj(0xC4, 0x10) // add rsp, 16
                 // Save errno (rax) to exec_errno static if defined
                 uint64 errno_off_x = static_lookup_by_name("exec_errno", 10)
                 if errno_off_x != 0xFFFFFFFF {
@@ -9253,7 +9638,7 @@ fn gen_expr(uint64 node) {
                 emit_byte(0)
                 emit_mov_rax_imm(1)
                 emit_mov_rdi_rax()
-                if target_os == 2 { emit_mov_rcx_rax(); emit_win_alloc_stack(0x20); emit_win_call_iat(0) }
+                if target_os == 2 { emit_mov_rcx_rax(); uw_sp_site_set("L6"); emit_win_alloc_stack(0x20); emit_win_call_iat(0) }
                 else if target_os == 1 { emit_mov_rax_imm(0x2000001); emit_x86_syscall_insn("load8 null check (--debug)") }
                 else { emit_mov_rax_imm(231); emit_x86_syscall_insn("load8 null check (--debug)") }
                 uint64 l8_skip = out_len - jnz_l8 - 1
@@ -9276,7 +9661,7 @@ fn gen_expr(uint64 node) {
                 emit_byte(0)
                 emit_mov_rax_imm(1)
                 emit_mov_rdi_rax()
-                if target_os == 2 { emit_mov_rcx_rax(); emit_win_alloc_stack(0x20); emit_win_call_iat(0) }
+                if target_os == 2 { emit_mov_rcx_rax(); uw_sp_site_set("L6"); emit_win_alloc_stack(0x20); emit_win_call_iat(0) }
                 else if target_os == 1 { emit_mov_rax_imm(0x2000001); emit_x86_syscall_insn("load16 null check (--debug)") }
                 else { emit_mov_rax_imm(231); emit_x86_syscall_insn("load16 null check (--debug)") }
                 uint64 l16_skip = out_len - jnz_l16 - 1
@@ -9299,7 +9684,7 @@ fn gen_expr(uint64 node) {
                 emit_byte(0)
                 emit_mov_rax_imm(1)
                 emit_mov_rdi_rax()
-                if target_os == 2 { emit_mov_rcx_rax(); emit_win_alloc_stack(0x20); emit_win_call_iat(0) }
+                if target_os == 2 { emit_mov_rcx_rax(); uw_sp_site_set("L6"); emit_win_alloc_stack(0x20); emit_win_call_iat(0) }
                 else if target_os == 1 { emit_mov_rax_imm(0x2000001); emit_x86_syscall_insn("load32 null check (--debug)") }
                 else { emit_mov_rax_imm(231); emit_x86_syscall_insn("load32 null check (--debug)") }
                 uint64 l32_skip = out_len - jnz_l32 - 1
@@ -9322,7 +9707,7 @@ fn gen_expr(uint64 node) {
                 emit_byte(0)
                 emit_mov_rax_imm(1)
                 emit_mov_rdi_rax()
-                if target_os == 2 { emit_mov_rcx_rax(); emit_win_alloc_stack(0x20); emit_win_call_iat(0) }
+                if target_os == 2 { emit_mov_rcx_rax(); uw_sp_site_set("L6"); emit_win_alloc_stack(0x20); emit_win_call_iat(0) }
                 else if target_os == 1 { emit_mov_rax_imm(0x2000001); emit_x86_syscall_insn("load64 null check (--debug)") }
                 else { emit_mov_rax_imm(231); emit_x86_syscall_insn("load64 null check (--debug)") }
                 uint64 l64_skip = out_len - jnz_l64 - 1
@@ -9355,7 +9740,7 @@ fn gen_expr(uint64 node) {
                 emit_byte(0)
                 emit_mov_rax_imm(1)
                 emit_mov_rdi_rax()
-                if target_os == 2 { emit_mov_rcx_rax(); emit_win_alloc_stack(0x20); emit_win_call_iat(0) }
+                if target_os == 2 { emit_mov_rcx_rax(); uw_sp_site_set("L6"); emit_win_alloc_stack(0x20); emit_win_call_iat(0) }
                 else if target_os == 1 { emit_mov_rax_imm(0x2000001); emit_x86_syscall_insn("store8 null check (--debug)") }
                 else { emit_mov_rax_imm(231); emit_x86_syscall_insn("store8 null check (--debug)") }
                 uint64 s8_skip = out_len - jnz_s8 - 1
@@ -9387,7 +9772,7 @@ fn gen_expr(uint64 node) {
                 emit_byte(0)
                 emit_mov_rax_imm(1)
                 emit_mov_rdi_rax()
-                if target_os == 2 { emit_mov_rcx_rax(); emit_win_alloc_stack(0x20); emit_win_call_iat(0) }
+                if target_os == 2 { emit_mov_rcx_rax(); uw_sp_site_set("L6"); emit_win_alloc_stack(0x20); emit_win_call_iat(0) }
                 else if target_os == 1 { emit_mov_rax_imm(0x2000001); emit_x86_syscall_insn("store16 null check (--debug)") }
                 else { emit_mov_rax_imm(231); emit_x86_syscall_insn("store16 null check (--debug)") }
                 uint64 s16_skip = out_len - jnz_s16 - 1
@@ -9418,7 +9803,7 @@ fn gen_expr(uint64 node) {
                 emit_byte(0)
                 emit_mov_rax_imm(1)
                 emit_mov_rdi_rax()
-                if target_os == 2 { emit_mov_rcx_rax(); emit_win_alloc_stack(0x20); emit_win_call_iat(0) }
+                if target_os == 2 { emit_mov_rcx_rax(); uw_sp_site_set("L6"); emit_win_alloc_stack(0x20); emit_win_call_iat(0) }
                 else if target_os == 1 { emit_mov_rax_imm(0x2000001); emit_x86_syscall_insn("store32 null check (--debug)") }
                 else { emit_mov_rax_imm(231); emit_x86_syscall_insn("store32 null check (--debug)") }
                 uint64 s32_skip = out_len - jnz_s32 - 1
@@ -9449,7 +9834,7 @@ fn gen_expr(uint64 node) {
                 emit_byte(0)
                 emit_mov_rax_imm(1)
                 emit_mov_rdi_rax()
-                if target_os == 2 { emit_mov_rcx_rax(); emit_win_alloc_stack(0x20); emit_win_call_iat(0) }
+                if target_os == 2 { emit_mov_rcx_rax(); uw_sp_site_set("L6"); emit_win_alloc_stack(0x20); emit_win_call_iat(0) }
                 else if target_os == 1 { emit_mov_rax_imm(0x2000001); emit_x86_syscall_insn("store64 null check (--debug)") }
                 else { emit_mov_rax_imm(231); emit_x86_syscall_insn("store64 null check (--debug)") }
                 uint64 s64_skip = out_len - jnz_s64 - 1
@@ -9780,7 +10165,7 @@ fn gen_expr(uint64 node) {
             // Evaluate all 7 args into temp slots
             uint32 sc_arg = ast_child(node)
             uint64 sc_warg = sc_arg
-            uint64 sc_base = var_count * 8
+            uint64 sc_base = cg_slot_off(var_count)
             uint64 sc_i = 0
             while sc_i < 7 {
                 var_count = var_count + 1
@@ -9852,7 +10237,7 @@ fn gen_expr(uint64 node) {
         if is_extern_call == 0 && tok_matches(wct, "time_ns", 7) != 0 {
             if target_os == 0 || target_os == 3 {
                 // Linux / Android x86_64: clock_gettime(1, &ts) via syscall 228
-                emit_byte(0x48); emit_byte(0x83); emit_byte(0xEC); emit_byte(16) // sub rsp, 16
+                uw_sp_site_set("L11"); emit_x64_rsp_adj(0xEC, 16) // sub rsp, 16
                 emit_byte(0xBF); emit_byte(1); emit_byte(0); emit_byte(0); emit_byte(0) // mov edi, 1
                 emit_byte(0x48); emit_byte(0x89); emit_byte(0xE6) // mov rsi, rsp
                 emit_mov_rax_imm(228)                              // mov eax, 228
@@ -9862,11 +10247,11 @@ fn gen_expr(uint64 node) {
                 emit_u32_le(1000000000)
                 emit_byte(0x48); emit_byte(0x8B); emit_byte(0x4C); emit_byte(0x24); emit_byte(8) // mov rcx, [rsp+8]
                 emit_byte(0x48); emit_byte(0x01); emit_byte(0xC8)  // add rax, rcx
-                emit_byte(0x48); emit_byte(0x83); emit_byte(0xC4); emit_byte(16) // add rsp, 16
+                uw_sp_site_set("L11"); emit_x64_rsp_adj(0xC4, 16) // add rsp, 16
             } else if target_os == 1 {
                 // macOS x86_64: gettimeofday(rdi=&tv, rsi=0) via syscall 0x2000074
                 // timeval: tv_sec(8) + tv_usec(4 on macOS x86_64 = int32)
-                emit_byte(0x48); emit_byte(0x83); emit_byte(0xEC); emit_byte(16) // sub rsp, 16
+                uw_sp_site_set("L11"); emit_x64_rsp_adj(0xEC, 16) // sub rsp, 16
                 emit_byte(0x48); emit_byte(0x89); emit_byte(0xE7)  // mov rdi, rsp (&tv)
                 emit_byte(0x31); emit_byte(0xF6)                   // xor esi, esi (NULL tz)
                 emit_mov_rax_imm(0x2000074)                        // mov eax, gettimeofday
@@ -9880,7 +10265,7 @@ fn gen_expr(uint64 node) {
                 emit_byte(0x48); emit_byte(0x69); emit_byte(0xC9)
                 emit_u32_le(1000)
                 emit_byte(0x48); emit_byte(0x01); emit_byte(0xC8)  // add rax, rcx
-                emit_byte(0x48); emit_byte(0x83); emit_byte(0xC4); emit_byte(16) // add rsp, 16
+                uw_sp_site_set("L11"); emit_x64_rsp_adj(0xC4, 16) // add rsp, 16
             } else if target_os == 2 {
                 // Windows x86_64: QueryPerformanceCounter(&counter),
                 //                 QueryPerformanceFrequency(&freq).
@@ -9889,7 +10274,8 @@ fn gen_expr(uint64 node) {
                 // to avoid the overflow that counter * 1e9 hits once the system
                 // has been up long enough (counter grows ~10M/sec on most boxes).
                 // Stack: shadow (0x20) + freq@[rsp+0x20] + counter@[rsp+0x28]
-                emit_byte(0x48); emit_byte(0x83); emit_byte(0xEC); emit_byte(0x30)   // sub rsp, 0x30
+                uw_sp_site_set("L5")
+                emit_x64_rsp_adj(0xEC, 0x30)   // sub rsp, 0x30
                 emit_byte(0x48); emit_byte(0x8D); emit_byte(0x4C); emit_byte(0x24); emit_byte(0x20)  // lea rcx, [rsp+0x20]
                 emit_win_call_iat(15)                                                // QueryPerformanceFrequency
                 emit_byte(0x48); emit_byte(0x8D); emit_byte(0x4C); emit_byte(0x24); emit_byte(0x28)  // lea rcx, [rsp+0x28]
@@ -9905,7 +10291,7 @@ fn gen_expr(uint64 node) {
                 emit_byte(0x49); emit_byte(0xF7); emit_byte(0xF3)                                    // div r11
                 emit_byte(0x4D); emit_byte(0x0F); emit_byte(0xAF); emit_byte(0xD1)                   // imul r10, r9
                 emit_byte(0x4C); emit_byte(0x01); emit_byte(0xD0)                                    // add rax, r10
-                emit_byte(0x48); emit_byte(0x83); emit_byte(0xC4); emit_byte(0x30)                   // add rsp, 0x30
+                uw_sp_site_set("L5"); emit_x64_rsp_adj(0xC4, 0x30)                   // add rsp, 0x30
             } else if target_os == 4 {
                 // Bare metal. THIS ARM SHIPPED A SILENT CONSTANT ZERO. The
                 // chain covers 0/3, then 1, then 2, and target_os == 4 fell
@@ -10175,7 +10561,7 @@ fn gen_expr(uint64 node) {
         }
 
         // Allocate temp slots for each arg
-        uint64 arg_slots_base = var_count * 8
+        uint64 arg_slots_base = cg_slot_off(var_count)
         uint64 ac = 0
         while ac < arg_count {
             var_count = var_count + 1
@@ -10262,7 +10648,7 @@ fn gen_expr(uint64 node) {
                 // Allocate stack space for the return value
                 uint64 caller_ret_sz = struct_total_size(caller_sret_check)
                 uint64 caller_ret_sl = (caller_ret_sz + 7) / 8
-                caller_sret_area = var_count * 8
+                caller_sret_area = cg_slot_off(var_count)
                 uint64 csi = 0
                 while csi < caller_ret_sl { var_count = var_count + 1; csi = csi + 1 }
                 var_frame_size = var_count * 8
@@ -10276,20 +10662,18 @@ fn gen_expr(uint64 node) {
             // Windows x64: shadow space (32 bytes min) + overflow args
             uint64 reg_args = arg_count
             if reg_args > 4 { reg_args = 4 }
-            uint64 overflow_count = 0
-            if arg_count > 4 { overflow_count = arg_count - 4 }
-            win_stack = 32 + overflow_count * 8
-            // Align to 16
-            uint64 win_rem = win_stack & 15
-            if win_rem != 0 { win_stack = win_stack + 16 - win_rem }
-
-            // sub rsp, win_stack
-            if win_stack < 128 {
-                emit_byte(0x48); emit_byte(0x83); emit_byte(0xEC)
-                uint8 ws8 = win_stack; emit_byte(ws8)
+            // #143 option C: the shared accounting the pre-scan sizes OUT with
+            win_stack = cg_win_call_area(arg_count)
+            uw_sp_site_set("L3")
+            if cg_win_folded != 0 {
+                // folded (#143 option C): the area is the frame's [rsp+0, OUT);
+                // the slots do not move, so there is no compensation. The
+                // site id is set first so a located error names it.
+                cg_win_fold_site(win_stack)
+                win_stack = 0
             } else {
-                emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC)
-                emit_u32_le(win_stack)
+                // sub rsp, win_stack
+                emit_x64_rsp_adj(0xEC, win_stack)
             }
 
             // Store overflow args (5+) at [rsp + 32 + (i-4)*8]
@@ -10629,14 +11013,7 @@ fn gen_expr(uint64 node) {
             uint64 stack_bytes = stack_args * 8
             // sub rsp, stack_bytes -- imm8 only holds 15 stack args (120 bytes);
             // the 16th makes N=128, which sign-extends to -128.
-            if stack_bytes < 128 {
-                emit_byte(0x48); emit_byte(0x83); emit_byte(0xEC)
-                uint8 sb8 = stack_bytes
-                emit_byte(sb8)
-            } else {
-                emit_byte(0x48); emit_byte(0x81); emit_byte(0xEC)
-                emit_u32_le(stack_bytes)
-            }
+            uw_sp_site_set("L11"); emit_x64_rsp_adj(0xEC, stack_bytes)
             // After sub rsp the temp slots sit stack_bytes higher.
             uint64 oi = 0
             while oi < ovf_n {
@@ -10666,26 +11043,13 @@ fn gen_expr(uint64 node) {
         // Clean up overflow args from stack (SysV)
         if stack_args > 0 {
             uint64 cleanup = stack_args * 8
-            if cleanup < 128 {
-                emit_byte(0x48); emit_byte(0x83); emit_byte(0xC4)
-                uint8 cl8 = cleanup
-                emit_byte(cl8) // add rsp, N
-            } else {
-                emit_byte(0x48); emit_byte(0x81); emit_byte(0xC4)
-                emit_u32_le(cleanup) // add rsp, N
-            }
+            uw_sp_site_set("L11"); emit_x64_rsp_adj(0xC4, cleanup)
         }
 
         // Clean up Windows shadow space + overflow
         if win_stack > 0 {
             // add rsp, win_stack
-            if win_stack < 128 {
-                emit_byte(0x48); emit_byte(0x83); emit_byte(0xC4)
-                uint8 wc8 = win_stack; emit_byte(wc8)
-            } else {
-                emit_byte(0x48); emit_byte(0x81); emit_byte(0xC4)
-                emit_u32_le(win_stack)
-            }
+            uw_sp_site_set("L3"); emit_x64_rsp_adj(0xC4, win_stack)
         }
 
         // Set expr_is_float based on callee's return type
@@ -10712,7 +11076,7 @@ fn gen_expr(uint64 node) {
                 // Small struct (INTEGER/SSE): unpack from registers into stack area
                 uint64 ret_ssize = struct_total_size(ret_struct_si)
                 uint64 ret_sslots = (ret_ssize + 7) / 8
-                uint64 ret_soff = var_count * 8
+                uint64 ret_soff = cg_slot_off(var_count)
                 uint64 rsi2 = 0
                 while rsi2 < ret_sslots { var_count = var_count + 1; rsi2 = rsi2 + 1 }
                 var_frame_size = var_count * 8
@@ -11067,6 +11431,177 @@ fn asm_arch_hint(uint64 sptr, uint64 slen) {
             write(2, m2, str_len(m2))
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Windows frame-pointer refusals (#143, spec 4.1.5 / 5.1.5 / 4.3)
+// ---------------------------------------------------------------------------
+// On Windows every non-naked function's unwind record recovers its caller
+// through the frame pointer (rbp on x86_64, x29 on arm64), and x18 is the TEB
+// register on arm64. So user asm that WRITES one of them -- decodably, or by
+// naming it in an in/out/clobbers constraint -- is refused with a located
+// error; asm given as opaque hex bytes cannot be classified and gets a
+// warning. RSP/SP motion inside asm is allowed: the frame pointer covers it.
+// Like every Windows-only refusal, these fire only for a slice that ships
+// (fat_slice_ships): `--targets=linux-x64` never sees a discarded Windows
+// slice's refusal.
+fn win_frame_refusals_active() -> uint64 {
+    if target_os != 2 { return 0 }
+    if target_arch != 0 && target_arch != 1 { return 0 }
+    if fat_slice_ships() == 0 { return 0 }
+    return 1
+}
+
+// Is the n-byte name at src+off a frame/reserved register for this arch?
+fn win_asm_is_frame_reg(uint64 src, uint64 off, uint64 n) -> uint64 {
+    if target_arch == 0 {
+        if n == 3 && asm_match(src, off, "rbp", 3) != 0 { return 1 }
+        if n == 3 && asm_match(src, off, "ebp", 3) != 0 { return 1 }
+        if n == 3 && asm_match(src, off, "bpl", 3) != 0 { return 1 }
+        if n == 2 && asm_match(src, off, "bp", 2) != 0 { return 1 }
+        return 0
+    }
+    if n == 3 && asm_match(src, off, "x29", 3) != 0 { return 1 }
+    if n == 3 && asm_match(src, off, "w29", 3) != 0 { return 1 }
+    if n == 2 && asm_match(src, off, "fp", 2) != 0 { return 1 }
+    if n == 3 && asm_match(src, off, "x18", 3) != 0 { return 1 }
+    if n == 3 && asm_match(src, off, "w18", 3) != 0 { return 1 }
+    return 0
+}
+
+fn win_asm_is_word_char(uint64 c) -> uint64 {
+    if c >= 97 && c <= 122 { return 1 }
+    if c >= 65 && c <= 90 { return 1 }
+    if c >= 48 && c <= 57 { return 1 }
+    if c == 46 || c == 95 { return 1 }
+    return 0
+}
+
+fn win_asm_byte(uint64 p) -> uint64 {
+    uint64 c = 0
+    unsafe { *(p as uint8) -> c }
+    return c
+}
+
+fn win_asm_refuse_msg(uint64 tok, uint64 what) {
+    diag_loc_head(tok, 0)
+    write(2, what, str_len(what))
+    if target_arch == 0 {
+        uint64 m1 = " -- on Windows rbp is the frame pointer every unwind record relies on (#143); use another register\n"
+        write(2, m1, str_len(m1))
+    } else {
+        uint64 m2 = " -- on Windows x29 is the frame pointer every unwind record relies on and x18 is the TEB (#143); use another register\n"
+        write(2, m2, str_len(m2))
+    }
+    diag_span_of(tok)
+    exit(1)
+}
+
+// One asm instruction string.
+fn win_asm_check_string(uint64 str_tok) {
+    uint64 sp = cg_source + tok_text_start(str_tok) + 1
+    uint64 sl = tok_text_len(str_tok)
+    if sl < 2 { return }
+    sl = sl - 2
+    uint64 i = 0
+    while i < sl && win_asm_byte(sp + i) == 32 { i = i + 1 }
+    if i + 1 < sl && win_asm_byte(sp + i) == 48 && win_asm_byte(sp + i + 1) == 120 {
+        diag_loc_head(str_tok, 1)
+        uint64 hw = "asm given as raw bytes cannot be checked for writes to the frame pointer"
+        write(2, hw, str_len(hw))
+        if target_arch == 0 { write(2, " (rbp)", 6) } else { write(2, " (x29) or the TEB register (x18)", 32) }
+        uint64 hw2 = "; Windows unwinding relies on it (#143)\n"
+        write(2, hw2, str_len(hw2))
+        return
+    }
+    // mnemonic
+    uint64 m0 = i
+    while i < sl && win_asm_is_word_char(win_asm_byte(sp + i)) != 0 { i = i + 1 }
+    uint64 mlen = i - m0
+    if mlen == 0 { return }
+    if target_arch == 0 && mlen == 5 && asm_match(sp, m0, "leave", 5) != 0 {
+        win_asm_refuse_msg(str_tok, "`leave` writes rbp")
+    }
+    // first operand
+    while i < sl && win_asm_byte(sp + i) == 32 { i = i + 1 }
+    uint64 o0 = i
+    while i < sl && win_asm_is_word_char(win_asm_byte(sp + i)) != 0 { i = i + 1 }
+    uint64 olen = i - o0
+    // second operand (arm64 ldp/ldxp write two registers)
+    while i < sl && (win_asm_byte(sp + i) == 32 || win_asm_byte(sp + i) == 44) { i = i + 1 }
+    uint64 o1 = i
+    while i < sl && win_asm_is_word_char(win_asm_byte(sp + i)) != 0 { i = i + 1 }
+    uint64 o1len = i - o1
+    uint64 first_written = 1
+    if target_arch == 0 {
+        if (mlen == 3 && asm_match(sp, m0, "cmp", 3) != 0) || (mlen == 4 && asm_match(sp, m0, "test", 4) != 0)
+           || (mlen == 4 && asm_match(sp, m0, "push", 4) != 0) || (mlen == 2 && asm_match(sp, m0, "bt", 2) != 0) {
+            first_written = 0
+        }
+        if first_written != 0 && win_asm_is_frame_reg(sp, o0, olen) != 0 {
+            win_asm_refuse_msg(str_tok, "this asm instruction writes rbp")
+        }
+        // xchg/xadd/cmpxchg write their second operand too
+        if ((mlen == 4 && (asm_match(sp, m0, "xchg", 4) != 0 || asm_match(sp, m0, "xadd", 4) != 0))
+            || (mlen == 7 && asm_match(sp, m0, "cmpxchg", 7) != 0)) && win_asm_is_frame_reg(sp, o1, o1len) != 0 {
+            win_asm_refuse_msg(str_tok, "this asm instruction writes rbp")
+        }
+        return
+    }
+    // arm64: stores, compares and branches do not write their first operand
+    uint64 c0 = win_asm_byte(sp + m0)
+    uint64 c1 = 0
+    if mlen > 1 { c1 = win_asm_byte(sp + m0 + 1) }
+    if c0 == 115 && c1 == 116 { first_written = 0 }                      // st*
+    if mlen == 3 && (asm_match(sp, m0, "cmp", 3) != 0 || asm_match(sp, m0, "cmn", 3) != 0 || asm_match(sp, m0, "tst", 3) != 0) { first_written = 0 }
+    if c0 == 98 || (c0 == 99 && c1 == 98) || (c0 == 116 && c1 == 98) { first_written = 0 }   // b*, cb*, tb*
+    if mlen == 3 && asm_match(sp, m0, "ret", 3) != 0 { first_written = 0 }
+    if mlen == 4 && asm_match(sp, m0, "prfm", 4) != 0 { first_written = 0 }
+    if first_written != 0 && win_asm_is_frame_reg(sp, o0, olen) != 0 {
+        win_asm_refuse_msg(str_tok, "this asm instruction writes x29/x18")
+    }
+    if c0 == 108 && c1 == 100 && win_asm_byte(sp + m0 + mlen - 1) == 112 && win_asm_is_frame_reg(sp, o1, o1len) != 0 {
+        win_asm_refuse_msg(str_tok, "this asm load-pair writes x29/x18")    // ldp/ldxp/ldaxp/ldnp
+    }
+}
+
+// An asm block (AST kind 43): every string and every constraint.
+fn win_asm_refuse(uint64 asm_node) {
+    if win_frame_refusals_active() == 0 { return }
+    uint32 single = ast_data1(asm_node)
+    if single != 0 { win_asm_check_string(single) }
+    uint32 sc = ast_child(asm_node)
+    uint64 ws = sc
+    while ws != 0 {
+        uint32 st = ast_data1(ws)
+        if st != 0 { win_asm_check_string(st) }
+        uint32 nx = ast_next(ws)
+        ws = nx
+    }
+    uint32 cons = ast_data3(asm_node)
+    uint64 wc = cons
+    while wc != 0 {
+        uint32 rtok = ast_data2(wc)
+        if rtok != 0 {
+            uint64 rs = cg_source + tok_text_start(rtok)
+            if win_asm_is_frame_reg(rs, 0, tok_text_len(rtok)) != 0 {
+                uint32 ckind = ast_data1(wc)
+                if ckind == 2 { win_asm_refuse_msg(rtok, "this clobbers() names the frame/TEB register") }
+                win_asm_refuse_msg(rtok, "this asm constraint binds the frame/TEB register")
+            }
+        }
+        uint32 nc = ast_next(wc)
+        wc = nc
+    }
+}
+
+// Legacy @naked on Windows: its lowering spills parameters into the CALLER's
+// frame and falls through into the next function (spec 4.3, Mi6), which no
+// unwind record can describe. Refused until the legacy-naked work lands.
+fn win_legacy_naked_refuse(uint64 fn_node) {
+    if win_frame_refusals_active() == 0 { return }
+    uint32 nt = ast_data1(fn_node)
+    diag_fatal_at(nt, "legacy @naked on Windows requires the legacy-naked fix: its lowering cannot be described by an unwind record (#143); build without --legacy")
 }
 
 fn asm_emit_x86(uint64 str_tok) {
@@ -12554,7 +13089,7 @@ fn gen_stmt(uint64 node) {
             // Round up to 8-byte slots
             uint64 n_slots = (total_bytes + 7) / 8
             // Allocate slots
-            uint64 arr_offset = var_count * 8
+            uint64 arr_offset = cg_slot_off(var_count)
             uint64 si = 0
             while si < n_slots {
                 var_count = var_count + 1
@@ -12605,7 +13140,7 @@ fn gen_stmt(uint64 node) {
                     // Value semantics: copy struct to own stack area
                     uint64 copy_size = struct_total_size(sidx)
                     uint64 copy_slots = (copy_size + 7) / 8
-                    uint64 copy_off = var_count * 8
+                    uint64 copy_off = cg_slot_off(var_count)
                     uint64 csi = 0
                     while csi < copy_slots {
                         var_count = var_count + 1
@@ -12672,7 +13207,7 @@ fn gen_stmt(uint64 node) {
             }
             uint64 total_bytes = ssize * count
             uint64 n_slots = (total_bytes + 7) / 8
-            uint64 struct_off = var_count * 8
+            uint64 struct_off = cg_slot_off(var_count)
             uint64 ssi = 0
             while ssi < n_slots {
                 var_count = var_count + 1
@@ -13247,7 +13782,7 @@ fn gen_stmt(uint64 node) {
             gen_expr(wfe_child)
             // Its own frame slot: the value must survive the whole body, and
             // a nested for loop parks in a different one.
-            uint64 fe_slot = var_count * 8
+            uint64 fe_slot = cg_slot_off(var_count)
             var_count = var_count + 1
             var_frame_size = var_count * 8
             uint64 ferem = var_frame_size & 15
@@ -13361,7 +13896,7 @@ fn gen_stmt(uint64 node) {
         uint64 wscr = scrutinee
         gen_expr(wscr)
         // Allocate temp for scrutinee
-        uint64 match_temp = var_count * 8
+        uint64 match_temp = cg_slot_off(var_count)
         var_count = var_count + 1
         var_frame_size = var_count * 8
         uint64 mrem = var_frame_size & 15
@@ -13527,7 +14062,7 @@ fn gen_stmt(uint64 node) {
                     emit_byte(0)
                     emit_mov_rax_imm(1)
                     emit_mov_rdi_rax()
-                    if target_os == 2 { emit_mov_rcx_rax(); emit_win_alloc_stack(0x20); emit_win_call_iat(0) }
+                    if target_os == 2 { emit_mov_rcx_rax(); uw_sp_site_set("L6"); emit_win_alloc_stack(0x20); emit_win_call_iat(0) }
                     else if target_os == 1 { emit_mov_rax_imm(0x2000001); emit_x86_syscall_insn("array bounds check (--debug)") }
                     else { emit_mov_rax_imm(231); emit_x86_syscall_insn("array bounds check (--debug)") }
                     uint64 bca_skip = out_len - bca_jb - 1
@@ -13757,6 +14292,7 @@ fn gen_stmt(uint64 node) {
     // after. Clobbers are currently advisory (V1 — users must list any
     // input/output register that their block touches explicitly).
     if kind == 43 {
+        win_asm_refuse(node)
         uint32 cons_head = ast_data3(node)
         uint64 wch_x86 = cons_head
 
@@ -13785,6 +14321,9 @@ fn gen_stmt(uint64 node) {
             wci = nxti
         }
         rax_cache = 0   // asm block trashes the scalar-load cache
+        uw_sp_site_set("L9")
+        cg_win_audit_site(0)
+        uw_sp_moves()   // #143 option C: an asm block is opaque, it may move RSP
 
         uint32 single_tok = ast_data1(node)
         uint64 ws = single_tok
@@ -13901,12 +14440,14 @@ fn scan_assigns(uint64 node, uint64 target_offset) -> uint64 {
 // Generate code for a function declaration
 @export
 fn gen_function(uint64 fn_node) {
+    uw_fn_sp_fixed = 0          // #143 option C: no classifier here yet (A19d/A19e); never inherit one
     uint32 name_tok = ast_data1(fn_node)
     cg_set_current_fn(name_tok)
 
     // Check annotation flags: bit 0 = noreturn, bit 1 = naked, bit 3 = extern
     uint32 ann_flags = ast_data4(fn_node)
     uint64 is_naked = ann_flags & 2
+    if is_naked != 0 { win_legacy_naked_refuse(fn_node) }
     uint64 is_noreturn = ann_flags & 1
     uint64 is_extern = ann_flags & 8
 
@@ -13915,6 +14456,18 @@ fn gen_function(uint64 fn_node) {
     if is_extern != 0 { return }
     uint32 body_check = ast_data3(fn_node)
     if body_check == 0 { return }
+    cg_win_prescan(fn_node, 0)           // #143 option C (spec 2.5.7): OUT and the SP-fixed verdict
+    // A19d(ii): an SP-fixed Windows x86_64 legacy function is folded -- its
+    // outgoing area OUT is the bottom of its frame, every slot moves up by OUT
+    // (cg_slot_off), no call site moves RSP, and it has no frame pointer. The
+    // backstop is armed: any SP write left in it stops the build.
+    if cg_win_ps_fixed != 0 {
+        cg_win_folded = 1
+        cg_win_out_bias = cg_win_out
+        uw_fn_sp_fixed = 1
+    }
+    uint64 win_fp = 0
+    if target_os == 2 && cg_win_folded == 0 { win_fp = 1 }
 
     // Overflow arg patch tracking (for functions with >6 params)
     // 32 slots, one per stack-passed parameter, matching the 32-argument
@@ -13931,13 +14484,13 @@ fn gen_function(uint64 fn_node) {
     expr_is_float = 0
 
     // Reserve temp slots + r12 save slot
-    temp_slot_0 = var_count * 8
+    temp_slot_0 = cg_slot_off(var_count)
     var_count = var_count + 1
-    temp_slot_1 = var_count * 8
+    temp_slot_1 = cg_slot_off(var_count)
     var_count = var_count + 1
-    compound_temp_slot = var_count * 8
+    compound_temp_slot = cg_slot_off(var_count)
     var_count = var_count + 1
-    r12_save_slot = var_count * 8
+    r12_save_slot = cg_slot_off(var_count)
     var_count = var_count + 1
     r12_in_use = 0
     var_frame_size = var_count * 8
@@ -13974,7 +14527,7 @@ fn gen_function(uint64 fn_node) {
             uint64 sret_c0 = struct_abi_class0(sret_si)
             if sret_c0 == 3 {
                 // Reserve a stack slot for the sret pointer
-                sret_slot = var_count * 8
+                sret_slot = cg_slot_off(var_count)
                 var_count = var_count + 1
                 var_frame_size = var_count * 8
                 uint64 sret_rem = var_frame_size & 15
@@ -13986,13 +14539,17 @@ fn gen_function(uint64 fn_node) {
     // For main function: emit _start trampoline that stores argc/argv to statics
     // Skip in freestanding mode
     uint64 wnt = name_tok
-    if tok_matches(wnt, "main", 4) != 0 && target_os == 2 && freestanding == 0 {
+    // #143 A8: a non-naked Windows main reads its command line AFTER the
+    // prologue (below, 0x20 of shadow space), so the unwind data describes
+    // the frame at every offset. Only a @naked main -- refused on every
+    // shipping Windows slice (win_legacy_naked_refuse) -- keeps this block.
+    if tok_matches(wnt, "main", 4) != 0 && target_os == 2 && freestanding == 0 && is_naked != 0 {
         // All 13 IAT entries are loader-resolved. Call GetCommandLineA directly.
         // PE entry: the loader calls us, so RSP ≡ 8 mod 16.
         // Use 0x28 shadow space (0x20 + 8 alignment) so RSP is 16-aligned before CALL.
-        emit_win_alloc_stack(0x28)
+        uw_sp_site_set("L10"); emit_win_alloc_stack(0x28)
         emit_win_call_iat(7)          // GetCommandLineA → rax = cmdline ptr
-        emit_win_free_stack(0x28)
+        uw_sp_site_set("L10"); emit_win_free_stack(0x28)
         // Store raw cmdline pointer as cli_argv (will be parsed by win_init_args)
         uint64 argv_off_w = static_lookup_by_name("cli_argv", 8)
         if argv_off_w != 0xFFFFFFFF {
@@ -14040,7 +14597,9 @@ fn gen_function(uint64 fn_node) {
     // still covers the empty body, and it costs two bytes. The zeroing that
     // actually decides the exit status happens on the two paths that LEAVE
     // main's body: see legacy_main_zero_ret below and the epilogue.
-    if tok_matches(wnt, "main", 4) != 0 && freestanding == 0 {
+    // (#143 A8: a non-naked Windows main does this after its prologue and
+    // command-line block instead -- see the prologue below.)
+    if tok_matches(wnt, "main", 4) != 0 && freestanding == 0 && (target_os != 2 || is_naked != 0) {
         // xor eax, eax
         emit_byte(0x31); emit_byte(0xC0)
     }
@@ -14075,7 +14634,7 @@ fn gen_function(uint64 fn_node) {
             uint32 pflag = ast_data4(wparam)
             uint64 wpflag = pflag
             if wpflag == 1 {
-                uint64 len_off_x = var_count * 8
+                uint64 len_off_x = cg_slot_off(var_count)
                 var_count = var_count + 1
                 var_frame_size = var_count * 8
                 uint64 srem_sp = var_frame_size & 15
@@ -14149,15 +14708,36 @@ fn gen_function(uint64 fn_node) {
     uint64 prologue_start = out_len
     uint64 frame_patch = out_len
 
+    // #143 A8 (ruling (b)): on Windows an SP-moving frame is
+    //   push rbx; push rbp; sub rsp,F'; mov rbp,rsp; mov [rsp+s],r12
+    // and a folded (SP-fixed, option C) one push rbx; sub rsp,F'; mov [rsp+s],r12
+    // with F' = F + 8 (keeps RSP 16-aligned after the extra push) and the r12
+    // save AFTER SET_FPREG. The unwind codes are recorded at the end of the
+    // function, once F' is known (uw_pro_* hold the instruction ends).
+    uint64 uw_pro_rbx = 0
+    uint64 uw_pro_rbp = 0
+    uint64 uw_pro_sub = 0
+    uint64 uw_pro_fp = 0
+    uint64 uw_pro_r12 = 0
     if is_naked == 0 {
         // push rbx
         emit_byte(0x53)
+        uw_pro_rbx = out_len
+        if win_fp != 0 {
+            emit_byte(0x55)                         // push rbp
+            uw_pro_rbp = out_len
+        }
         // sub rsp, FRAME_SIZE (placeholder)
         emit_byte(0x48)
         emit_byte(0x81)
         emit_byte(0xEC)
         frame_patch = out_len
         emit_u32_le(0)
+        uw_pro_sub = out_len
+        if win_fp != 0 {
+            emit_byte(0x48); emit_byte(0x89); emit_byte(0xE5)   // mov rbp, rsp
+            uw_pro_fp = out_len
+        }
         // Save r12 to frame slot (callee-saved, for binop register spill)
         if r12_save_slot < 128 {
             emit_byte(0x4C); emit_byte(0x89); emit_byte(0x64)
@@ -14165,6 +14745,27 @@ fn gen_function(uint64 fn_node) {
         } else {
             emit_byte(0x4C); emit_byte(0x89); emit_byte(0xA4)
             emit_byte(0x24); emit_u32_le(r12_save_slot)
+        }
+        uw_pro_r12 = out_len
+        if tok_matches(wnt, "main", 4) != 0 && target_os == 2 && freestanding == 0 {
+            // GetCommandLineA, after the prologue: RSP is 16-aligned here, so
+            // 0x20 of shadow space keeps it aligned at the call.
+            uw_sp_site_set("L10"); emit_win_alloc_stack(0x20)
+            emit_win_call_iat(7)          // GetCommandLineA -> rax = cmdline ptr
+            uw_sp_site_set("L10"); emit_win_free_stack(0x20)
+            // the raw cmdline pointer becomes cli_argv (parsed by win_init_args)
+            uint64 argv_off_w2 = static_lookup_by_name("cli_argv", 8)
+            if argv_off_w2 != 0xFFFFFFFF {
+                emit_static_store(argv_off_w2)
+            }
+            // cli_argc = 0xFFFFFFFF: the "needs parsing" sentinel
+            emit_mov_rax_imm(0xFFFFFFFF)
+            uint64 argc_off_w2 = static_lookup_by_name("cli_argc", 8)
+            if argc_off_w2 != 0xFFFFFFFF {
+                emit_static_store(argc_off_w2)
+            }
+            // main's default exit status (see legacy_main_zero_ret)
+            emit_byte(0x31); emit_byte(0xC0)        // xor eax, eax
         }
     }
 
@@ -14241,7 +14842,7 @@ fn gen_function(uint64 fn_node) {
                     // SysV struct by value: allocate struct-sized area on stack
                     uint64 sv_ssize = struct_total_size(param_si_spill)
                     uint64 sv_sslots = (sv_ssize + 7) / 8
-                    uint64 struct_area = var_count * 8
+                    uint64 struct_area = cg_slot_off(var_count)
                     uint64 sv_ci = 0
                     while sv_ci < sv_sslots { var_count = var_count + 1; sv_ci = sv_ci + 1 }
                     var_frame_size = var_count * 8
@@ -14450,7 +15051,7 @@ fn gen_function(uint64 fn_node) {
                     // Windows struct by value (<=8 bytes arrives as value in register)
                     uint64 wv_ssize = struct_total_size(param_si_spill)
                     uint64 wv_sslots = (wv_ssize + 7) / 8
-                    uint64 wv_struct_area = var_count * 8
+                    uint64 wv_struct_area = cg_slot_off(var_count)
                     uint64 wv_ci = 0
                     while wv_ci < wv_sslots { var_count = var_count + 1; wv_ci = wv_ci + 1 }
                     var_frame_size = var_count * 8
@@ -14759,6 +15360,8 @@ fn gen_function(uint64 fn_node) {
 
     // For @naked functions, skip epilogue entirely
     if is_naked != 0 {
+        uw_fn_set_naked()   // #143: zero-code record (refused on shipping Windows slices)
+        uw_sp_state_reset()
         return
     }
 
@@ -14788,7 +15391,7 @@ fn gen_function(uint64 fn_node) {
         if target_os == 2 {
             // Windows: ExitProcess(rax) — DWORD arg in rcx
             emit_mov_rcx_rax()
-            emit_win_alloc_stack(0x20)
+            uw_sp_site_set("L10"); emit_win_alloc_stack(0x20)
             emit_win_call_iat(0)
         } else {
             // Linux/macOS: exit(rax) — copy rax→rdi, then set syscall nr
@@ -14809,18 +15412,36 @@ fn gen_function(uint64 fn_node) {
         }
     }
 
+    // F' (#143 A8): one slot more for the push rbp of a Windows frame-pointer
+    // function; a folded one (option C) holds its outgoing area OUT instead
+    uint64 frame_w = var_frame_size
+    if win_fp != 0 { frame_w = var_frame_size + 8 }
+    if cg_win_folded != 0 { frame_w = var_frame_size + cg_win_out }
     // add rsp, FRAME_SIZE
     emit_byte(0x48)
     emit_byte(0x81)
     emit_byte(0xC4)
-    emit_u32_le(var_frame_size)
+    emit_u32_le(frame_w)
+    // pop rbp (Windows frame-pointer functions)
+    if win_fp != 0 { emit_byte(0x5D) }
     // pop rbx
     emit_byte(0x5B)
     // ret
     emit_byte(0xC3)
 
     // Patch prologue frame size
-    patch_u32(frame_patch, var_frame_size)
+    patch_u32(frame_patch, frame_w)
+
+    // #143: the unwind codes, in prologue order, now that F' is known; then
+    // the record is sealed (after every end-of-function patch, I6).
+    if target_os == 2 {
+        uw_x64_push(3, uw_pro_rbx)
+        if win_fp != 0 { uw_x64_push(5, uw_pro_rbp) }
+        uw_x64_alloc(frame_w, uw_pro_sub)
+        if win_fp != 0 { uw_x64_setfp(5, uw_pro_fp) }
+        uw_x64_save(12, r12_save_slot, uw_pro_r12)
+        uw_fn_finalize()
+    }
 
     // Patch overflow arg offsets (7+ params)
     // After push rbx + push r12 + sub rsp, frame_size:
@@ -14839,13 +15460,18 @@ fn gen_function(uint64 fn_node) {
             unsafe { *(op_e as uint32) -> ploc }
             uint64 wploc = ploc
             uint64 soff = var_frame_size + 16 + oi * 8
-            if target_os == 2 {
-                soff = var_frame_size + 16 + 32 + oi * 8
+            if win_fp != 0 {
+                // F' + rbx + rbp + return address + 32 bytes of shadow space
+                soff = frame_w + 24 + 32 + oi * 8
+            } else if target_os == 2 {
+                // folded (option C): F' + rbx + return address + 32 bytes of shadow
+                soff = frame_w + 16 + 32 + oi * 8
             }
             patch_u32(wploc, soff)
             oi = oi + 1
         }
     }
+    uw_sp_state_reset()        // #143 option C: no backstop state outlives the function (A19a-c review finding 3)
 }
 
 // Find the code offset for "main" function
@@ -19272,8 +19898,41 @@ fn emit_macho_relocatable(uint64 text_len, uint64 data_len, uint64 arch) {
 //   [...] Symbol table (18 bytes each)
 //   [...] String table
 //
+// With unwind tables (#143, spec 6.4; uw_coff_wanted, i.e. not
+// --test-no-unwind) the object has three sections:
+//   [0]   COFF file header
+//   [20]  .text, [60] .pdata, [100] .xdata section headers
+//   [140] .text raw data, then its relocations
+//   [...] .pdata raw data (4-aligned), .xdata raw data (format_pe_unwind.kr
+//         uw_write_tables), then the .pdata relocations (ADDR32NB)
+//   [...] Symbol table: the function and extern symbols as before, then the
+//         three section symbols .text/.pdata/.xdata (STATIC, one aux record
+//         each) APPENDED, so undef_base and every existing relocation's
+//         symbol index stay as they were
+//   [...] String table
+//
 // COFF symbols ≤ 8 bytes go in-place; longer names use the string table.
 // Windows x64 doesn't prepend '_' (unlike 32-bit).
+// A STATIC section symbol (name in place, Value 0, Type 0) and its aux record
+// (IMAGE_AUX_SYMBOL section definition: Length, NumberOfRelocations,
+// NumberOfLinenumbers, CheckSum, Number, Selection, 3 unused) -- #143 A13.
+fn coff_section_symbol(uint64 name_lo, uint64 name_hi, uint64 secno, uint64 length, uint64 nrel) {
+    emit_u32_le(name_lo)
+    emit_u32_le(name_hi)
+    emit_u32_le(0)                   // Value
+    emit_u16_le(secno)               // SectionNumber
+    emit_u16_le(0)                   // Type
+    emit_byte(3)                     // STATIC
+    emit_byte(1)                     // NumberOfAuxSymbols
+    emit_u32_le(length)
+    emit_u16_le(nrel)
+    emit_u16_le(0)
+    emit_u32_le(0)
+    emit_u16_le(0)
+    emit_byte(0)
+    emit_byte(0); emit_byte(0); emit_byte(0)
+}
+
 @export
 fn emit_coff_relocatable(uint64 text_len, uint64 data_len, uint64 arch) {
     uint64 blob_len = out_len
@@ -19306,6 +19965,12 @@ fn emit_coff_relocatable(uint64 text_len, uint64 data_len, uint64 arch) {
 
     uint64 total_syms = fn_count + extern_fn_count
     uint64 sym_size = total_syms * 18
+    // #143 A13: .pdata/.xdata + three section symbols (each with an aux record)
+    uint64 uw_tabs = uw_coff_wanted()
+    uint64 nsect = 1
+    if uw_tabs != 0 { nsect = 3 }
+    uint64 sym_text = total_syms             // section symbols follow every existing one
+    uint64 sym_xdata = total_syms + 4
 
     // Build string table up front so we know its size.
     // String table starts with a 4-byte length field (inclusive of itself).
@@ -19440,7 +20105,7 @@ fn emit_coff_relocatable(uint64 text_len, uint64 data_len, uint64 arch) {
     // Layout
     uint64 hdr_size = 20
     uint64 sec_hdr_size = 40
-    uint64 text_off = hdr_size + sec_hdr_size  // 60
+    uint64 text_off = hdr_size + sec_hdr_size * nsect  // 60, or 140 with .pdata/.xdata
     uint64 nreloc = extern_call_count
     uint64 reloc_off = text_off + section_size
     uint64 reloc_size = nreloc * 10
@@ -19453,10 +20118,14 @@ fn emit_coff_relocatable(uint64 text_len, uint64 data_len, uint64 arch) {
     } else {
         emit_u16_le(0xAA64)          // IMAGE_FILE_MACHINE_ARM64
     }
-    emit_u16_le(1)                   // NumberOfSections
+    emit_u16_le(nsect)               // NumberOfSections
     emit_u32_le(0)                   // TimeDateStamp
-    emit_u32_le(symtab_off)          // PointerToSymbolTable
-    emit_u32_le(total_syms)          // NumberOfSymbols
+    emit_u32_le(symtab_off)          // PointerToSymbolTable (patched below with tables)
+    if uw_tabs != 0 {
+        emit_u32_le(total_syms + 6)  // + .text/.pdata/.xdata symbols, one aux each
+    } else {
+        emit_u32_le(total_syms)      // NumberOfSymbols
+    }
     emit_u16_le(0)                   // SizeOfOptionalHeader
     emit_u16_le(0)                   // Characteristics
 
@@ -19475,6 +20144,9 @@ fn emit_coff_relocatable(uint64 text_len, uint64 data_len, uint64 arch) {
     // Characteristics:
     // 0x00000020 CNT_CODE | 0x00500000 ALIGN_16BYTES | 0x20000000 EXECUTE | 0x40000000 READ
     emit_u32_le(0x60500020)
+    // .pdata at 60 and .xdata at 100: zero here, patched once their data is out
+    uint64 zh = 0
+    while zh < (nsect - 1) * 40 { emit_byte(0)  zh = zh + 1 }
 
     // --- Section raw data ---
     ci = 0
@@ -19507,6 +20179,31 @@ fn emit_coff_relocatable(uint64 text_len, uint64 data_len, uint64 arch) {
             emit_u16_le(3)           // IMAGE_REL_ARM64_BRANCH26
         }
         ri = ri + 1
+    }
+
+    // --- #143 A13: .pdata + .xdata raw data, then the .pdata relocations ---
+    if uw_tabs != 0 {
+        while (codegen_output_len() & 3) != 0 { emit_byte(0) }
+        uw_write_tables(0, 0, arch, 1)
+        uint64 pd_nrel = uw_coff_nrelocs(arch)
+        uint64 pd_reloff = codegen_output_len()
+        uw_coff_relocs(arch, sym_text, sym_xdata)
+        // ".pdata\0\0" header at 60
+        patch_u32(60, 0x6164702E)
+        patch_u32(64, 0x6174)
+        patch_u32(76, uw_pdata_dir_size)     // SizeOfRawData
+        patch_u32(80, uw_pdata_file_off)     // PointerToRawData
+        patch_u32(84, pd_reloff)             // PointerToRelocations
+        patch_u32(92, pd_nrel)               // NumberOfRelocations (u16; NumberOfLinenumbers 0)
+        patch_u32(96, 0x40300040)            // INITIALIZED_DATA | ALIGN_4BYTES | READ
+        // ".xdata\0\0" header at 100
+        patch_u32(100, 0x6164782E)
+        patch_u32(104, 0x6174)
+        patch_u32(116, uw_xdata_vsize)       // SizeOfRawData
+        patch_u32(120, uw_xdata_file_off)    // PointerToRawData
+        patch_u32(136, 0x40300040)
+        symtab_off = codegen_output_len()
+        patch_u32(8, symtab_off)             // PointerToSymbolTable
     }
 
     // --- Symbol table ---
@@ -19558,6 +20255,11 @@ fn emit_coff_relocatable(uint64 text_len, uint64 data_len, uint64 arch) {
             emit_byte(0)                 // NumAux
         }
         wi = wi + 1
+    }
+    if uw_tabs != 0 {
+        coff_section_symbol(0x7865742E, 0x74, 1, section_size, nreloc)                 // ".text"
+        coff_section_symbol(0x6164702E, 0x6174, 2, uw_pdata_dir_size, uw_coff_nrelocs(arch))  // ".pdata"
+        coff_section_symbol(0x6164782E, 0x6174, 3, uw_xdata_vsize, 0)                 // ".xdata"
     }
 
     // --- String table ---

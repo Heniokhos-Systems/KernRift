@@ -197,6 +197,7 @@ fn emit_a64_stp_pre(uint64 rt1, uint64 rt2, uint64 rn, uint64 offset) {
     uint64 imm7 = (offset / 8) & 0x7F
     uint64 insn = 0xA9800000 | (imm7 << 15) | (rt2 << 10) | (rn << 5) | rt1
     emit_a64(insn)
+    if rn == 31 { cg_win_audit_site(0)  uw_sp_moves() }       // #143 option C backstop (spec 2.5.1)
 }
 
 // LDP X29, X30, [SP], #imm7*8 (post-index, for epilogue)
@@ -204,10 +205,12 @@ fn emit_a64_ldp_post(uint64 rt1, uint64 rt2, uint64 rn, uint64 offset) {
     uint64 imm7 = (offset / 8) & 0x7F
     uint64 insn = 0xA8C00000 | (imm7 << 15) | (rt2 << 10) | (rn << 5) | rt1
     emit_a64(insn)
+    if rn == 31 { cg_win_audit_site(0)  uw_sp_moves() }
 }
 
 // SUB SP, SP, #imm (large-frame safe)
 fn emit_a64_sub_sp_imm(uint64 imm) {
+    if cg_win_folded != 0 { cg_win_fold_site(imm)  return }     // #143 option C: folded (spec 2.5.7)
     if imm <= 4095 {
         uint64 insn = 0xD1000000 | (imm << 10) | (31 << 5) | 31
         emit_a64(insn)
@@ -215,10 +218,13 @@ fn emit_a64_sub_sp_imm(uint64 imm) {
         emit_a64_mov_imm(16, imm)
         emit_a64(0xCB3063FF)
     }
+    cg_win_audit_site(imm)
+    uw_sp_moves()
 }
 
 // ADD SP, SP, #imm (large-frame safe)
 fn emit_a64_add_sp_imm(uint64 imm) {
+    if cg_win_folded != 0 { uw_sp_site = 0  return }
     if imm <= 4095 {
         uint64 insn = 0x91000000 | (imm << 10) | (31 << 5) | 31
         emit_a64(insn)
@@ -226,6 +232,32 @@ fn emit_a64_add_sp_imm(uint64 imm) {
         emit_a64_mov_imm(16, imm)
         emit_a64(0x8B3063FF)
     }
+    cg_win_audit_site(0)
+    uw_sp_moves()
+}
+
+// #143 option C (spec 2.5.1): one arm64 word that writes SP in a body
+// (computed `sub/add sp, sp, #n` of the >8-argument areas, the exec_process
+// and time_ns words), so it reports to the backstop like the helpers above.
+fn emit_a64_sp_word(uint64 w) {
+    // folded (A19d(iii)): `sub sp, sp, #n` is the frame's [sp, #0, OUT) and
+    // emits nothing, its `add sp, sp, #n` likewise; any other SP word still
+    // reaches the backstop below
+    if cg_win_folded != 0 && (w & 0xFFC003FF) == 0xD10003FF { cg_win_fold_site((w >> 10) & 0xFFF)  return }
+    if cg_win_folded != 0 && (w & 0xFFC003FF) == 0x910003FF { uw_sp_site = 0  return }
+    emit_a64(w)
+    cg_win_audit_site(a64_sp_word_alloc(w))
+    uw_sp_moves()
+}
+
+// The bytes an SP word allocates (0 for a release or any other form): `sub
+// sp, sp, #imm` and `sub sp, sp, #imm, lsl #12`. Bit 22 is the shift, so the
+// mask keeps it (A19e-h review finding 2: 0xFF800000 matched both forms as
+// the unshifted one).
+fn a64_sp_word_alloc(uint64 w) -> uint64 {
+    if (w & 0xFFC00000) == 0xD1000000 { return (w >> 10) & 0xFFF }             // sub sp, sp, #imm
+    if (w & 0xFFC00000) == 0xD1400000 { return ((w >> 10) & 0xFFF) << 12 }     // sub sp, sp, #imm, lsl #12
+    return 0
 }
 
 // ---- Range-checked branch displacement encoders ----
@@ -1016,7 +1048,7 @@ fn gen_expr_a64(uint64 node) {
         uint64 si = struct_lookup(wsn)
         uint64 ssize = struct_total_size(si)
         // Allocate temp stack area for struct
-        uint64 slit_base = var_count * 8
+        uint64 slit_base = cg_slot_off(var_count)
         uint64 slots_needed = (ssize + 7) / 8
         var_count = var_count + slots_needed
         var_frame_size = var_count * 8
@@ -1233,11 +1265,11 @@ fn gen_expr_a64(uint64 node) {
         // growing var_frame_size here is safe), then for each segment copy the
         // string bytes / format the interpolated integer into the buffer at a
         // running offset (held in fsa_slot_o). Returns x0 = buffer address.
-        uint64 fs_bufoff = var_count * 8         // 4096-byte result buffer
+        uint64 fs_bufoff = cg_slot_off(var_count)         // 4096-byte result buffer
         uint64 fs_ns = 512
         uint64 fs_kk = 0
         while fs_kk < fs_ns { var_count = var_count + 1; fs_kk = fs_kk + 1 }
-        uint64 fs_scroff = var_count * 8         // 32-byte digit scratch
+        uint64 fs_scroff = cg_slot_off(var_count)         // 32-byte digit scratch
         var_count = var_count + 4
         var_frame_size = var_count * 8
         uint64 fs_alg = var_frame_size & 15
@@ -1773,7 +1805,7 @@ fn gen_expr_a64(uint64 node) {
         gen_expr_a64(wlhs)
         uint64 lhs_is_float_b = expr_is_float_a64
         // Save lhs to temp slot
-        uint64 binop_temp = var_count * 8
+        uint64 binop_temp = cg_slot_off(var_count)
         var_count = var_count + 1
         var_frame_size = var_count * 8
         uint64 brem = var_frame_size & 15
@@ -1991,7 +2023,7 @@ fn gen_expr_a64(uint64 node) {
         if lhs_si_pre_a != 0xFFFFFFFF && rhs_si_pre_a != 0xFFFFFFFF {
             // Both operands are struct variables — emit qword-by-qword comparison
             gen_expr_a64(wlhs)
-            uint64 sc_lhs_a = var_count * 8
+            uint64 sc_lhs_a = cg_slot_off(var_count)
             var_count = var_count + 1
             var_frame_size = var_count * 8
             uint64 scr1a = var_frame_size & 15
@@ -1999,9 +2031,9 @@ fn gen_expr_a64(uint64 node) {
             emit_a64_store_x0(sc_lhs_a)
 
             gen_expr_a64(wrhs_pre_a)
-            uint64 sc_rhs_a = var_count * 8
+            uint64 sc_rhs_a = cg_slot_off(var_count)
             var_count = var_count + 1
-            uint64 sc_acc_a = var_count * 8
+            uint64 sc_acc_a = cg_slot_off(var_count)
             var_count = var_count + 1
             var_frame_size = var_count * 8
             uint64 scr2a = var_frame_size & 15
@@ -2060,7 +2092,7 @@ fn gen_expr_a64(uint64 node) {
 
         gen_expr_a64(wlhs)
         uint64 lhs_is_float_c = expr_is_float_a64
-        uint64 cmp_temp = var_count * 8
+        uint64 cmp_temp = cg_slot_off(var_count)
         var_count = var_count + 1
         var_frame_size = var_count * 8
         uint64 crem = var_frame_size & 15
@@ -2238,7 +2270,7 @@ fn gen_expr_a64(uint64 node) {
         uint32 scrutinee = ast_child(node)
         uint64 wscr = scrutinee
         gen_expr_a64(wscr)
-        uint64 match_temp = var_count * 8
+        uint64 match_temp = cg_slot_off(var_count)
         var_count = var_count + 1
         var_frame_size = var_count * 8
         uint64 mrem = var_frame_size & 15
@@ -2394,7 +2426,7 @@ fn gen_expr_a64(uint64 node) {
                 // pk0_write had fd, pk1_write had buf — save them differently
                 // Actually: at this point x0=len, pk0_write=fd, pk1_write=buf
                 // We need all three. Use var_frame_size for len only.
-                uint64 wr_extra = var_count * 8
+                uint64 wr_extra = cg_slot_off(var_count)
                 var_count = var_count + 1
                 var_frame_size = var_count * 8
                 uint64 wr_etr = var_frame_size & 15
@@ -2595,7 +2627,7 @@ fn gen_expr_a64(uint64 node) {
                 // Windows ARM64: ReadFile(handle, buf, len, &bytesRead, NULL)
                 // Slots: pk0_fileread=handle, pk1_fileread=buf, x0=len
                 // Use pk1_fileread for bytesRead output (reuse after buf is in x1)
-                uint64 rd_extra = var_count * 8
+                uint64 rd_extra = cg_slot_off(var_count)
                 var_count = var_count + 1
                 var_frame_size = var_count * 8
                 uint64 rd_etr = var_frame_size & 15
@@ -2647,7 +2679,7 @@ fn gen_expr_a64(uint64 node) {
             gen_expr_a64(wa3)
             if target_os == 2 {
                 // Windows ARM64: WriteFile(handle, buf, len, NULL, NULL)
-                uint64 fw_extra = var_count * 8
+                uint64 fw_extra = cg_slot_off(var_count)
                 var_count = var_count + 1
                 var_frame_size = var_count * 8
                 uint64 fw_etr = var_frame_size & 15
@@ -2751,7 +2783,7 @@ fn gen_expr_a64(uint64 node) {
             // `sub sp` is patched to the final frame size at function end).
             // Using var_frame_size as the base put the buffer on the CALLER's
             // saved x29/x30, smashing the return address on its return (H7).
-            uint64 digit_buf = var_count * 8
+            uint64 digit_buf = cg_slot_off(var_count)
             var_count = var_count + 3
             var_frame_size = var_count * 8
             uint64 a64_db_rem = var_frame_size & 15
@@ -3274,9 +3306,9 @@ fn gen_expr_a64(uint64 node) {
             }
 
             // Allocate temp slots
-            uint64 ptr_slot = var_count * 8
+            uint64 ptr_slot = cg_slot_off(var_count)
             var_count = var_count + 1
-            uint64 arg_slots_base = var_count * 8
+            uint64 arg_slots_base = cg_slot_off(var_count)
             uint64 ac = 0
             while ac < arg_count {
                 var_count = var_count + 1
@@ -3312,19 +3344,17 @@ fn gen_expr_a64(uint64 node) {
             if arg_count >= 1 { emit_a64_load_x0(arg_slots_base) }
 
             // Push overflow args (9+) onto stack (AAPCS64: x0-x7 = first 8 args)
-            uint64 cp_stack_args = 0
-            if arg_count > 8 {
-                cp_stack_args = arg_count - 8
-                if (cp_stack_args & 1) != 0 { cp_stack_args = cp_stack_args + 1 }
-            }
+            // the pre-scan's own helper sizes the area (spec 2.5.7, finding 23)
+            uint64 cp_stack_args = cg_a64_call_area(arg_count) / 8
             if cp_stack_args > 0 {
                 uint64 cp_stack_bytes = cp_stack_args * 8
                 uint64 cp_sub_insn = 0xD1000000 | (cp_stack_bytes << 10) | (31 << 5) | 31
-                emit_a64(cp_sub_insn)
+                uw_sp_site_set("G4")
+                emit_a64_sp_word(cp_sub_insn)
                 uint64 cp_real_overflow = arg_count - 8
                 uint64 cp_oi = 0
                 while cp_oi < cp_real_overflow {
-                    emit_a64_ldr(10, 31, a64_var_base + arg_slots_base + (8 + cp_oi) * 8 + cp_stack_bytes)
+                    emit_a64_ldr(10, 31, a64_var_base + arg_slots_base + (8 + cp_oi) * 8 + cg_win_moved(cp_stack_bytes))
                     emit_a64_str(10, 31, cp_oi * 8)
                     cp_oi = cp_oi + 1
                 }
@@ -3332,7 +3362,7 @@ fn gen_expr_a64(uint64 node) {
 
             // Load fn_ptr into x9 directly (don't clobber x0 which has arg[0])
             if cp_stack_args > 0 {
-                emit_a64_ldr(9, 31, a64_var_base + ptr_slot + cp_stack_args * 8)
+                emit_a64_ldr(9, 31, a64_var_base + ptr_slot + cg_win_moved(cp_stack_args * 8))
             } else {
                 emit_a64_ldr(9, 31, a64_var_base + ptr_slot)
             }
@@ -3343,7 +3373,7 @@ fn gen_expr_a64(uint64 node) {
             if cp_stack_args > 0 {
                 uint64 cp_cleanup = cp_stack_args * 8
                 uint64 cp_add_insn = 0x91000000 | (cp_cleanup << 10) | (31 << 5) | 31
-                emit_a64(cp_add_insn)
+                uw_sp_site_set("G4"); emit_a64_sp_word(cp_add_insn)
             }
             return
         }
@@ -3494,7 +3524,7 @@ fn gen_expr_a64(uint64 node) {
             return
         }
         if is_extern_call == 0 && tok_matches(wct, "bit_insert", 10) != 0 {
-            uint64 bi_extra = var_count * 8
+            uint64 bi_extra = cg_slot_off(var_count)
             var_count = var_count + 4
             var_frame_size = var_count * 8
             uint64 birem = var_frame_size & 15
@@ -3597,20 +3627,24 @@ fn gen_expr_a64(uint64 node) {
                 emit_a64_mov(19, 0)                 // x19 = path
                 emit_a64_load_x0(pk1_execprocessa)       // x0 = argv
                 emit_a64_mov(20, 0)                 // x20 = argv (walk ptr)
+                uw_sp_site_set("G1")
                 emit_a64_sub_sp_imm(0x4E0)
                 // Zero STARTUPINFO: 8× stp xzr,xzr,[x0],#16 fills 128 bytes at sp+0x60
-                emit_a64(0x910180E0)                // add x0, sp, #0x60
-                emit_a64(0xA8C17C1F)
-                emit_a64(0xA8C17C1F)
-                emit_a64(0xA8C17C1F)
-                emit_a64(0xA8C17C1F)
-                emit_a64(0xA8C17C1F)
-                emit_a64(0xA8C17C1F)
-                emit_a64(0xA8C17C1F)
-                emit_a64(0xA8C17C1F)
+                // #174: these words had Rn = x7 (0x910180E0 = add x0, x7, #0x60,
+                // 0xB90060E9 = str w9, [x7, #0x60]) and the "stp" was 0xA8C17C1F,
+                // an ldp into xzr that zeroed nothing
+                emit_a64(0x910183E0)                // add x0, sp, #0x60
+                emit_a64(0xA8817C1F)                // stp xzr, xzr, [x0], #16
+                emit_a64(0xA8817C1F)
+                emit_a64(0xA8817C1F)
+                emit_a64(0xA8817C1F)
+                emit_a64(0xA8817C1F)
+                emit_a64(0xA8817C1F)
+                emit_a64(0xA8817C1F)
+                emit_a64(0xA8817C1F)
                 // STARTUPINFOA.cb = 104
                 emit_a64_mov_imm(9, 104)
-                emit_a64(0xB90060E9)                // str w9, [sp, #0x60]
+                emit_a64(0xB90063E9)                // str w9, [sp, #0x60]
                 // ---- Build space-separated cmdline at sp+0xE0 ----
                 // No quoting — our child parser (win_init_args) splits on
                 // 0x20 and doesn't strip quotes, so quoted tokens would
@@ -3645,9 +3679,9 @@ fn gen_expr_a64(uint64 node) {
                 emit_a64_mov_imm(5, 0)
                 emit_a64_mov_imm(6, 0)
                 emit_a64_mov_imm(7, 0)
-                emit_a64(0x910180E9)                // add x9, sp, #0x60  (&si)
+                emit_a64(0x910183E9)                // add x9, sp, #0x60  (&si)  (#174: was Rn = x7)
                 emit_a64(0xF90003E9)                // str x9, [sp, #0]
-                emit_a64(0x910320E9)                // add x9, sp, #0xC8  (&pi)
+                emit_a64(0x910323E9)                // add x9, sp, #0xC8  (&pi)  (#174: was Rn = x7)
                 emit_a64(0xF90007E9)                // str x9, [sp, #8]
                 emit_a64_win_call_iat(9)
                 // WaitForSingleObject(hProcess=[sp+0xC8], INFINITE)
@@ -3660,7 +3694,7 @@ fn gen_expr_a64(uint64 node) {
                 emit_a64_win_call_iat(11)
                 // ExitProcess(exitCode=[sp+0x18])
                 emit_a64_ldr32(0, 31, 0x18)
-                emit_a64_add_sp_imm(0x4E0)
+                uw_sp_site_set("G1"); emit_a64_add_sp_imm(0x4E0)
                 emit_a64_win_call_iat(0)
             } else {
                 // execve(path, argv, envp)
@@ -3698,31 +3732,34 @@ fn gen_expr_a64(uint64 node) {
                 // ARM64 Windows: save path in x19 (callee-saved)
                 emit_a64_store_x0(temp_slot_0)
                 // Allocate stack for STARTUPINFOA(104) + PROCESS_INFORMATION(24) + args
-                // sub sp, sp, #0xE0 (224 bytes, 16-aligned)
-                emit_a64(0xD10380FF)
+                // sub sp, sp, #0xE0 (224 bytes, 16-aligned). #154 (found by
+                // #143's checker): this word was 0xD10380FF, which encodes
+                // `sub sp, x7, #0xe0` -- SP set from whatever x7 held.
+                uw_sp_site_set("G1")
+                emit_a64_sp_word(0xD10383FF)
                 // Zero out the STARTUPINFOA and PI area at sp+0x60
-                // x0 = sp+0x60, fill 128 bytes with zero
-                emit_a64(0x910180E0)  // add x0, sp, #0x60
-                emit_a64_mov_imm(1, 0)
-                emit_a64_mov_imm(2, 128)
-                // Simple byte-zero loop
-                // stp xzr, xzr, [x0], #16 (8 times = 128 bytes)
-                emit_a64(0xA8C17C1F)  // stp xzr, xzr, [x0], #16
-                emit_a64(0xA8C17C1F)
-                emit_a64(0xA8C17C1F)
-                emit_a64(0xA8C17C1F)
-                emit_a64(0xA8C17C1F)
-                emit_a64(0xA8C17C1F)
-                emit_a64(0xA8C17C1F)
-                emit_a64(0xA8C17C1F)
+                // x0 = sp+0x60, fill 128 bytes with zero.
+                // #174: the add had Rn = x7 (0x910180E0), the "stp" words were
+                // 0xA8C17C1F (an ldp into xzr: nothing was zeroed), and a stray
+                // 0xB9006FE9 stored 104 into STARTUPINFOA+0x0C (lpReserved's
+                // upper half) -- all three fixed, the stray store removed
+                emit_a64(0x910183E0)  // add x0, sp, #0x60
+                emit_a64(0xA8817C1F)  // stp xzr, xzr, [x0], #16 (8 times = 128 bytes)
+                emit_a64(0xA8817C1F)
+                emit_a64(0xA8817C1F)
+                emit_a64(0xA8817C1F)
+                emit_a64(0xA8817C1F)
+                emit_a64(0xA8817C1F)
+                emit_a64(0xA8817C1F)
+                emit_a64(0xA8817C1F)
                 // Set STARTUPINFOA.cb = 104 at [sp+0x60]
                 emit_a64_mov_imm(9, 104)
-                emit_a64(0xB9006FE9)  // str w9, [sp, #0x6C] -- wait, offset 0x60
-                // Actually: str w9, [sp, #0x60]
-                emit_a64(0xB90060E9)  // str w9, [sp, #0x60]
+                emit_a64(0xB90063E9)  // str w9, [sp, #0x60]  (#174: was Rn = x7)
                 // CreateProcessA(path, NULL, NULL, NULL, 0, 0, NULL, NULL, &si, &pi)
-                // x0 = path (lpApplicationName) — avoids CreateProcessA modifying read-only lpCommandLine
-                emit_a64_load_x0(temp_slot_0)
+                // x0 = path (lpApplicationName) — avoids CreateProcessA modifying read-only lpCommandLine.
+                // The slot moved up by the bytes SP moved (#174: there was no
+                // compensation; 0 when the site is folded)
+                emit_a64_load_x0(temp_slot_0 + cg_win_moved(0xE0))
                 // x1 = NULL (lpCommandLine)
                 emit_a64_mov_imm(1, 0)
                 // x2 = NULL, x3 = NULL, x4 = 0, x5 = 0, x6 = NULL, x7 = NULL
@@ -3732,26 +3769,28 @@ fn gen_expr_a64(uint64 node) {
                 emit_a64_mov_imm(5, 0)
                 emit_a64_mov_imm(6, 0)
                 emit_a64_mov_imm(7, 0)
-                // Stack args: [sp+0] = &si, [sp+8] = &pi
-                emit_a64(0x910180E9)  // add x9, sp, #0x60 (&si)
+                // Stack args: [sp+0] = &si, [sp+8] = &pi. SI is at sp+0x60 and
+                // 104 = 0x68 bytes long, so PI (24 bytes) is at sp+0xC8.
+                // #174: the adds had Rn = x7, &pi was sp+0xB8 (inside SI), and
+                // the two hProcess loads were 0xF940C4E0 = ldr x0, [x7, #0x188]
+                emit_a64(0x910183E9)  // add x9, sp, #0x60 (&si)
                 emit_a64(0xF90003E9)  // str x9, [sp, #0]
-                emit_a64(0x9102E0E9)  // add x9, sp, #0xB8 (&pi = sp + 0x60 + 104 = sp + 0xC8... actually 0x60+0x68=0xC8)
+                emit_a64(0x910323E9)  // add x9, sp, #0xC8 (&pi)
                 emit_a64(0xF90007E9)  // str x9, [sp, #8]
                 // call CreateProcessA via IAT (slot 9)
                 emit_a64_win_call_iat(9)
-                // WaitForSingleObject(hProcess, INFINITE)
-                emit_a64(0xF940C4E0)  // ldr x0, [sp, #0xC8+0] -- hProcess at PI offset = sp+0xC8
-                // Actually the PI is after STARTUPINFOA. SI at sp+0x60, size 104=0x68, so PI at sp+0xC8
+                // WaitForSingleObject(hProcess = PI.hProcess at sp+0xC8, INFINITE)
+                emit_a64_ldr(0, 31, 0xC8)
                 emit_a64_mov_imm(1, 0xFFFFFFFF)
                 emit_a64_win_call_iat(10)
                 // GetExitCodeProcess(hProcess, &exitCode)
-                emit_a64(0xF940C4E0)  // ldr x0, [sp, #0xC8]
-                emit_a64(0x910000E1)  // add x1, sp, #0 (use sp+0 for exit code)
+                emit_a64_ldr(0, 31, 0xC8)
+                emit_a64(0x910003E1)  // add x1, sp, #0 (use sp+0 for exit code)  (#174: was Rn = x7)
                 emit_a64_win_call_iat(11)
                 // Load exit code
                 emit_a64(0xB94003E0)  // ldr w0, [sp, #0]
                 // add sp, sp, #0xE0
-                emit_a64(0x910380FF)
+                uw_sp_site_set("G1"); emit_a64_sp_word(0x910383FF)   // #154: was 0x910380FF = add sp, x7, #0xe0
                 // ExitProcess(w0 already in x0)
                 emit_a64_win_call_iat(0)
             } else {
@@ -4288,7 +4327,7 @@ fn gen_expr_a64(uint64 node) {
             // Evaluate all 7 args into temp slots
             uint32 sc_arg = ast_child(node)
             uint64 sc_warg = sc_arg
-            uint64 sc_base = var_count * 8
+            uint64 sc_base = cg_slot_off(var_count)
             uint64 sc_i = 0
             while sc_i < 7 {
                 var_count = var_count + 1
@@ -4434,7 +4473,8 @@ fn gen_expr_a64(uint64 node) {
                 // at src/codegen.kr. AAPCS64 doesn't require shadow
                 // space, but we reserve 16 bytes for the two DWORDs-
                 // or-QWORDs the kernel32 calls write.
-                emit_a64(0xD10043FF)                       // sub sp, sp, #16
+                uw_sp_site_set("G2")
+                emit_a64_sp_word(0xD10043FF)               // sub sp, sp, #16
                 emit_a64(0x910003E0)                       // add x0, sp, #0 (&freq)
                 emit_a64_win_call_iat(15)                  // QueryPerformanceFrequency
                 emit_a64(0x910023E0)                       // add x0, sp, #8 (&counter)
@@ -4442,7 +4482,7 @@ fn gen_expr_a64(uint64 node) {
                 // Load results. x11 = counter, x12 = freq.
                 emit_a64_ldr(11, 31, 8)                    // x11 = counter
                 emit_a64_ldr(12, 31, 0)                    // x12 = freq
-                emit_a64(0x910043FF)                       // add sp, sp, #16
+                uw_sp_site_set("G2"); emit_a64_sp_word(0x910043FF)               // add sp, sp, #16
                 // x9 = counter / freq (secs)
                 emit_a64_udiv(9, 11, 12)
                 // x10 = counter - (secs * freq) = frac
@@ -4629,7 +4669,7 @@ fn gen_expr_a64(uint64 node) {
         }
 
         // Allocate temp slots for args
-        uint64 arg_slots_base = var_count * 8
+        uint64 arg_slots_base = cg_slot_off(var_count)
         uint64 ac = 0
         while ac < arg_count {
             var_count = var_count + 1
@@ -4901,24 +4941,22 @@ fn gen_expr_a64(uint64 node) {
                 }
             }
         }
-        uint64 stack_args = 0
-        if ovf_n_a > 0 {
-            stack_args = ovf_n_a
-            if (stack_args & 1) != 0 { stack_args = stack_args + 1 }
-        }
+        // the shared sizing rule of the pre-scan (cg_a64_stack_area; spec 2.5.7)
+        uint64 stack_args = cg_a64_stack_area(ovf_n_a) / 8
         if stack_args > 0 {
             uint64 stack_bytes = stack_args * 8
             // sub sp, sp, #stack_bytes
             uint64 sub_insn = 0xD1000000 | (stack_bytes << 10) | (31 << 5) | 31
-            emit_a64(sub_insn)
+            uw_sp_site_set("G3")
+            emit_a64_sp_word(sub_insn)
             // Store overflow args at [sp+0], [sp+8], ...
             uint64 oi = 0
             while oi < ovf_n_a {
                 uint64 ovg_a = ovf_idx_a + oi * 8
                 uint64 ovsrc_a = 0
                 unsafe { *(ovg_a as uint64) -> ovsrc_a }
-                // Load from temp slot (offset shifted by stack_bytes: sp moved)
-                emit_a64_ldr(9, 31, a64_var_base + arg_slots_base + ovsrc_a * 8 + stack_bytes)
+                // Load from temp slot (offset shifted by the bytes sp moved: 0 when folded)
+                emit_a64_ldr(9, 31, a64_var_base + arg_slots_base + ovsrc_a * 8 + cg_win_moved(stack_bytes))
                 emit_a64_str(9, 31, oi * 8)
                 oi = oi + 1
             }
@@ -4934,7 +4972,7 @@ fn gen_expr_a64(uint64 node) {
                 caller_sret_needed_a = 1
                 uint64 caller_ret_sz_a = struct_total_size(caller_sret_si_a)
                 uint64 caller_ret_sl_a = (caller_ret_sz_a + 7) / 8
-                caller_sret_area_a = var_count * 8
+                caller_sret_area_a = cg_slot_off(var_count)
                 uint64 csi_a = 0
                 while csi_a < caller_ret_sl_a { var_count = var_count + 1; csi_a = csi_a + 1 }
                 var_frame_size = var_count * 8
@@ -4962,7 +5000,7 @@ fn gen_expr_a64(uint64 node) {
         if stack_args > 0 {
             uint64 cleanup = stack_args * 8
             uint64 add_insn = 0x91000000 | (cleanup << 10) | (31 << 5) | 31
-            emit_a64(add_insn)
+            uw_sp_site_set("G3"); emit_a64_sp_word(add_insn)
         }
 
         // Set expr_is_float_a64 based on callee's return type
@@ -4985,7 +5023,7 @@ fn gen_expr_a64(uint64 node) {
                 uint64 ret_is_hfa_c = ret_sflags_c & 1
                 uint64 ret_ssize_a = struct_total_size(ret_struct_si_a)
                 uint64 ret_sslots_a = (ret_ssize_a + 7) / 8
-                uint64 ret_soff_a = var_count * 8
+                uint64 ret_soff_a = cg_slot_off(var_count)
                 uint64 rsi2_a = 0
                 while rsi2_a < ret_sslots_a { var_count = var_count + 1; rsi2_a = rsi2_a + 1 }
                 var_frame_size = var_count * 8
@@ -5075,7 +5113,7 @@ fn gen_stmt_a64(uint64 node) {
             uint64 elem_size_v = type_tok_elem_size(type_tok_v)
             uint64 total_bytes = arr_size * elem_size_v
             uint64 n_slots = (total_bytes + 7) / 8
-            uint64 arr_offset = var_count * 8
+            uint64 arr_offset = cg_slot_off(var_count)
             uint64 si = 0
             while si < n_slots { var_count = var_count + 1; si = si + 1 }
             var_frame_size = var_count * 8
@@ -5099,7 +5137,7 @@ fn gen_stmt_a64(uint64 node) {
                     // Value semantics: copy struct to own stack area
                     uint64 copy_size_a = struct_total_size(sidx)
                     uint64 copy_slots_a = (copy_size_a + 7) / 8
-                    uint64 copy_off_a = var_count * 8
+                    uint64 copy_off_a = cg_slot_off(var_count)
                     uint64 csi_a = 0
                     while csi_a < copy_slots_a {
                         var_count = var_count + 1
@@ -5141,7 +5179,7 @@ fn gen_stmt_a64(uint64 node) {
             if was != 0 { count = was }
             uint64 total_bytes = ssize * count
             uint64 n_slots = (total_bytes + 7) / 8
-            uint64 struct_off = var_count * 8
+            uint64 struct_off = cg_slot_off(var_count)
             uint64 ssi = 0
             while ssi < n_slots { var_count = var_count + 1; ssi = ssi + 1 }
             var_frame_size = var_count * 8
@@ -5439,7 +5477,7 @@ fn gen_stmt_a64(uint64 node) {
             gen_expr_a64(wfe_child_a)
             // Its own frame slot: the value must survive the whole body, and
             // a nested for loop parks in a different one.
-            uint64 fe_slot_a = var_count * 8
+            uint64 fe_slot_a = cg_slot_off(var_count)
             var_count = var_count + 1
             var_frame_size = var_count * 8
             uint64 ferem_a = var_frame_size & 15
@@ -5530,7 +5568,7 @@ fn gen_stmt_a64(uint64 node) {
         uint32 scrutinee = ast_child(node)
         uint64 wscr = scrutinee
         gen_expr_a64(wscr)
-        uint64 match_temp = var_count * 8
+        uint64 match_temp = cg_slot_off(var_count)
         var_count = var_count + 1
         var_frame_size = var_count * 8
         uint64 mrem = var_frame_size & 15
@@ -6021,6 +6059,7 @@ fn gen_stmt_a64(uint64 node) {
 
     // Inline assembly — see x86_64 gen_stmt for the constraint contract.
     if kind == 43 {
+        win_asm_refuse(node)
         uint32 cons_head = ast_data3(node)
         uint64 wch_a = cons_head
 
@@ -6043,6 +6082,9 @@ fn gen_stmt_a64(uint64 node) {
             wci = nxti
         }
 
+        uw_sp_site_set("G5")
+        cg_win_audit_site(0)
+        uw_sp_moves()   // #143 option C: an asm block is opaque, it may move SP
         uint32 single_tok = ast_data1(node)
         uint64 ws = single_tok
         if ws != 0 {
@@ -6149,18 +6191,32 @@ fn emit_program_header_a64(uint64 text_size) {
 
 @export
 fn gen_function_a64(uint64 fn_node) {
+    uw_fn_sp_fixed = 0          // #143 option C: no classifier here yet (A19d/A19e); never inherit one
     uint32 name_tok = ast_data1(fn_node)
     cg_set_current_fn(name_tok)
 
     // Check annotation flags: bit 0 = noreturn, bit 1 = naked, bit 3 = extern
     uint32 ann_flags = ast_data4(fn_node)
     uint64 is_naked = ann_flags & 2
+    if is_naked != 0 { win_legacy_naked_refuse(fn_node) }
     uint64 is_extern_a = ann_flags & 8
 
     // Extern declarations have no body — skip codegen.
     if is_extern_a != 0 { return }
     uint32 body_check_a = ast_data3(fn_node)
     if body_check_a == 0 { return }
+    cg_win_prescan(fn_node, 1)           // #143 option C (spec 2.5.7): OUT and the SP-fixed verdict
+    // A19d(iii): an SP-fixed Windows arm64 legacy function is folded -- OUT
+    // is the bottom of its frame, x29/x30 and x19/x20 sit above it at
+    // [sp,#OUT] and [sp,#OUT+16] (option (a)), every slot moves up by OUT
+    // (cg_slot_off), no call site moves SP, and there is no set_fp. The
+    // backstop is armed: any SP write left in the body stops the build.
+    if cg_win_ps_fixed != 0 {
+        cg_win_folded = 1
+        cg_win_out_bias = cg_win_out
+        uw_fn_sp_fixed = 1
+    }
+    uint64 a64_save = cg_win_out_bias          // the save area's offset: OUT folded, 0 otherwise
 
     // Leaf function optimization disabled for now — needs register allocator
     uint64 is_leaf = 0
@@ -6178,11 +6234,11 @@ fn gen_function_a64(uint64 fn_node) {
 
     var_reset()
     expr_is_float_a64 = 0
-    temp_slot_0 = var_count * 8
+    temp_slot_0 = cg_slot_off(var_count)
     var_count = var_count + 1
-    temp_slot_1 = var_count * 8
+    temp_slot_1 = cg_slot_off(var_count)
     var_count = var_count + 1
-    compound_temp_slot = var_count * 8
+    compound_temp_slot = cg_slot_off(var_count)
     var_count = var_count + 1
     var_frame_size = var_count * 8
     uint64 rem0 = var_frame_size & 15
@@ -6217,7 +6273,7 @@ fn gen_function_a64(uint64 fn_node) {
             uint64 sret_c0_a = struct_abi_class0(sret_si_a)
             if sret_c0_a == 3 {
                 // Reserve a stack slot for the x8 sret pointer
-                sret_slot_a64 = var_count * 8
+                sret_slot_a64 = cg_slot_off(var_count)
                 var_count = var_count + 1
                 var_frame_size = var_count * 8
                 uint64 sret_rem_a = var_frame_size & 15
@@ -6228,7 +6284,10 @@ fn gen_function_a64(uint64 fn_node) {
 
     // For main: platform-specific _start trampoline
     uint64 wnt_a64 = name_tok
-    if tok_matches(wnt_a64, "main", 4) != 0 && target_os == 2 && freestanding == 0 {
+    // #143 A10: a non-naked Windows main reads its command line AFTER the
+    // prologue (below); only a @naked main -- refused on every shipping
+    // Windows slice -- keeps this block.
+    if tok_matches(wnt_a64, "main", 4) != 0 && target_os == 2 && freestanding == 0 && is_naked != 0 {
         // All 13 IAT entries are loader-resolved. Call GetCommandLineA directly.
         emit_a64_win_call_iat(7)       // GetCommandLineA → x0 = cmdline
         uint64 argv_off_w = static_lookup_by_name("cli_argv", 8)
@@ -6302,7 +6361,9 @@ fn gen_function_a64(uint64 fn_node) {
     // empty body. The zeroing that decides the exit status happens on the two
     // paths that LEAVE the body; see legacy_main_zero_ret_a64 and the
     // epilogue, and the matching comment in codegen.kr's gen_function.
-    if tok_matches(wnt_a64, "main", 4) != 0 && freestanding == 0 {
+    // (#143 A10: a non-naked Windows main does this after its prologue and
+    // command-line block instead -- see the prologue below.)
+    if tok_matches(wnt_a64, "main", 4) != 0 && freestanding == 0 && (target_os != 2 || is_naked != 0) {
         emit_a64_mov_imm(0, 0)
     }
 
@@ -6332,7 +6393,7 @@ fn gen_function_a64(uint64 fn_node) {
             uint32 pflag_a = ast_data4(wparam)
             uint64 wpflag_a = pflag_a
             if wpflag_a == 1 {
-                uint64 len_off_a = var_count * 8
+                uint64 len_off_a = cg_slot_off(var_count)
                 var_count = var_count + 1
                 var_frame_size = var_count * 8
                 uint64 srem_spa = var_frame_size & 15
@@ -6360,7 +6421,34 @@ fn gen_function_a64(uint64 fn_node) {
     uint64 prologue_start = out_len
     uint64 stp_fp_off = 0
     uint64 stp_callee_off = 0
-    if is_naked == 0 {
+    if is_naked == 0 && target_os == 2 {
+        // #143 A10 (spec 5.2a): on Windows x19/x20 are saved BEFORE x29 is
+        // set, so set_fp is the last prologue instruction:
+        //   sub sp, #lo; stp x29, x30, [sp]; stp x19, x20, [sp, #16]; mov x29, sp
+        // and folded (A19d(iii)) the pairs sit above OUT and there is no set_fp:
+        //   sub sp, #lo; stp x29, x30, [sp, #OUT]; stp x19, x20, [sp, #OUT+16]
+        emit_a64(0xD1000000)  // SUB SP, SP, #imm (patched)
+        stp_fp_off = out_len
+        emit_a64(0xA9007BFD | ((a64_save / 8) << 15))         // stp x29, x30, [sp, #a64_save]
+        stp_callee_off = out_len
+        emit_a64(0xA90053F3 | (((a64_save + 16) / 8) << 15))  // stp x19, x20, [sp, #a64_save+16]
+        if cg_win_folded == 0 { emit_a64_add_imm(29, 31, 0) }  // mov x29, sp
+        if tok_matches(wnt_a64, "main", 4) != 0 && freestanding == 0 {
+            // GetCommandLineA, after the prologue (spec 5.2d)
+            emit_a64_win_call_iat(7)       // GetCommandLineA -> x0 = cmdline
+            uint64 argv_off_w2 = static_lookup_by_name("cli_argv", 8)
+            if argv_off_w2 != 0xFFFFFFFF {
+                emit_a64_static_store(argv_off_w2)
+            }
+            // cli_argc = 0xFFFFFFFF: the "needs parsing" sentinel
+            emit_a64_mov_imm(0, 0xFFFFFFFF)
+            uint64 argc_off_w2 = static_lookup_by_name("cli_argc", 8)
+            if argc_off_w2 != 0xFFFFFFFF {
+                emit_a64_static_store(argc_off_w2)
+            }
+            emit_a64_mov_imm(0, 0)         // main's default exit status
+        }
+    } else if is_naked == 0 {
         emit_a64(0xD1000000)  // SUB SP, SP, #imm (patched)
         stp_fp_off = out_len
         emit_a64(0xA9007BFD)  // stp x29, x30, [sp]
@@ -6415,7 +6503,7 @@ fn gen_function_a64(uint64 fn_node) {
                     // AAPCS64 struct by value: allocate struct-sized area on stack
                     uint64 sv_ssize_a = struct_total_size(param_si_spill_a)
                     uint64 sv_sslots_a = (sv_ssize_a + 7) / 8
-                    uint64 struct_area_a = var_count * 8
+                    uint64 struct_area_a = cg_slot_off(var_count)
                     uint64 sv_ci_a = 0
                     while sv_ci_a < sv_sslots_a { var_count = var_count + 1; sv_ci_a = sv_ci_a + 1 }
                     var_frame_size = var_count * 8
@@ -6588,6 +6676,8 @@ fn gen_function_a64(uint64 fn_node) {
 
     // For @naked functions, skip epilogue entirely
     if is_naked != 0 {
+        uw_fn_set_naked()   // #143: zero-code record (refused on shipping Windows slices)
+        uw_sp_state_reset()
         return
     }
 
@@ -6606,9 +6696,9 @@ fn gen_function_a64(uint64 fn_node) {
     }
 
     uint64 ldp_callee_off = out_len
-    emit_a64(0xA94153F3)  // ldp x19, x20, [sp, #16]
+    emit_a64(0xA94053F3 | (((a64_save + 16) / 8) << 15))  // ldp x19, x20, [sp, #a64_save+16]
     uint64 ldp_fp_off = out_len
-    emit_a64(0xA9407BFD)  // ldp x29, x30, [sp]
+    emit_a64(0xA9407BFD | ((a64_save / 8) << 15))         // ldp x29, x30, [sp, #a64_save]
     // add sp, sp, #FRAME (placeholder, patched)
     uint64 epilogue_add = out_len
     emit_a64(0x91000000)
@@ -6624,7 +6714,7 @@ fn gen_function_a64(uint64 fn_node) {
     a64_var_base = saved_var_base
 
     // Patch prologue and epilogue frame sizes
-    uint64 frame = a64_var_base + var_frame_size
+    uint64 frame = a64_var_base + cg_win_out_bias + var_frame_size   // + OUT when folded (A19d(iii))
     uint64 fmod = frame & 15
     if fmod != 0 { frame = frame + 16 - fmod }
 
@@ -6672,9 +6762,42 @@ fn gen_function_a64(uint64 fn_node) {
         }
     }
 
+    // #143 A10 (spec 5.2c): the unwind codes, now that the frame is final --
+    // in prologue order: [sub sp, #hi, lsl #12 | nop], sub sp, #lo,
+    // stp x29, x30, [sp] (save_fplr 0), stp x19, x20, [sp, #16] (save_regp
+    // x19, #16), mov x29, sp (set_fp). The epilog (ldp x19, x20; ldp x29,
+    // x30; add sp, #lo; add sp, #hi, lsl #12 | nop; ret) shares them from
+    // StartIndex 1, after set_fp.
+    if target_os == 2 {
+        uint64 pre_amt = 0
+        uint64 lo_amt = frame
+        if frame > 4080 {
+            // the same split as the patch above: lo 16-aligned, hi pages
+            lo_amt = frame & 0xFFF
+            if (lo_amt & 15) != 0 { lo_amt = lo_amt + 16 - (lo_amt & 15) }
+            pre_amt = ((frame - lo_amt) >> 12) << 12
+        }
+        if pre_amt == 0 { uw_a64_prolog_insn(0xE3, 1, pre_sub_patch + 4) }        // nop
+        else { uw_a64_alloc_code(pre_amt, pre_sub_patch + 4) }
+        uw_a64_alloc_code(lo_amt, prologue_start + 4)
+        // folded (A19d(iii)): save_fplr #OUT, save_regp x19, #OUT+16, no
+        // set_fp, and the epilog shares every code from StartIndex 0
+        uw_a64_prolog_insn(0x40 | (a64_save / 8), 1, stp_fp_off + 4)                // save_fplr #a64_save
+        uw_a64_prolog_insn(0xC8 | (((a64_save + 16) / 8) << 8), 2, stp_callee_off + 4)  // save_regp x19, #a64_save+16
+        if cg_win_folded == 0 {
+            uw_a64_prolog_insn(0xE1, 1, stp_callee_off + 8)                         // set_fp
+            uw_a64_epilog(ldp_callee_off, 1)
+        } else {
+            uw_a64_epilog(ldp_callee_off, 0)
+        }
+        uw_fn_finalize()
+    }
+
     // Leaf function optimization: if no BL was emitted, NOP out the STP/LDP
-    // Stack layout stays the same (a64_var_base=32), just skip the memory ops
-    if is_naked == 0 {
+    // Stack layout stays the same (a64_var_base=32), just skip the memory ops.
+    // Not on Windows (#143 A10, spec 5.2b): there the frame record is what the
+    // unwind data describes, and leaf bodies move SP too.
+    if is_naked == 0 && target_os != 2 {
         uint64 has_bl = 0
         uint64 scan = prologue_start
         while scan + 4 <= out_len {
@@ -6698,6 +6821,7 @@ fn gen_function_a64(uint64 fn_node) {
             patch_u32(ldp_fp_off, 0xD503201F)
         }
     }
+    uw_sp_state_reset()        // #143 option C: no backstop state outlives the function (A19a-c review finding 3)
 }
 
 // ---------------------------------------------------------------------------
@@ -6851,14 +6975,14 @@ fn resolve_fnaddr_fixups_a64() {
 // VA computation depends on target format:
 //   ELF:    VA = 0x400000 + file_offset
 //   Mach-O: VA = 0x100000000 + file_offset
-//   PE:     VA = 0x140000000 + 0x1000 + (file_offset - 0x200)
-//                = 0x140000E00 + file_offset
+//   PE:     VA = 0x140000000 + 0x1000 + (file_offset - PE_A64_HEADER_SIZE)
+//           (header size 0x400 since #143: VA = 0x140000C00 + file_offset)
 
 // Compute VA from a raw file offset based on target_os
 fn a64_compute_va(uint64 file_offset) -> uint64 {
     if target_os == 2 {
-        // PE: image_base(0x140000000) + text_rva(0x1000) + (file_off - header_size(0x200))
-        return 0x140000E00 + file_offset
+        // PE: image_base(0x140000000) + text_rva(0x1000) + (file_off - header size)
+        return 0x140000000 + 0x1000 - PE_A64_HEADER_SIZE + file_offset
     }
     if target_os == 1 {
         // Mach-O: vmaddr(0x100000000) + file_offset

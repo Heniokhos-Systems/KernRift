@@ -1,0 +1,33 @@
+// #143: four frames, the deepest faults (a store to address 16). With correct
+// unwind tables Windows/Wine end the process with STATUS_ACCESS_VIOLATION
+// (status 5 as a byte); Wine's +unwind trace walks f3 -> f2 -> f1 -> main.
+// Output goes through println, which reaches stdout on both backends (the
+// legacy lowering of file_write(1, ..) does not, #145), so the --legacy rows
+// check it exactly too.
+fn f3(uint64 p, uint64 k) -> uint64 {
+    uint64 a = k * 3
+    uint64 b = a + 7
+    uint64 c = b ^ a
+    println("f3")
+    store8(p, 1)
+    return a + b + c
+}
+fn f2(uint64 p, uint64 k) -> uint64 {
+    uint64 x = k + 1
+    uint64 y = x * x
+    uint64 r = f3(p, y)
+    return r + x + y
+}
+fn f1(uint64 p) -> uint64 {
+    uint64 s = 0
+    uint64 i = 0
+    while i < 3 { s = s + i  i = i + 1 }
+    uint64 r = f2(p, s)
+    return r + s
+}
+fn main() -> uint32 {
+    println("armed")
+    uint64 r = f1(16)
+    if r == 7 { println("survived") }
+    return 3
+}

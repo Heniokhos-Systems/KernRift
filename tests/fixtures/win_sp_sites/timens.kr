@@ -1,0 +1,7 @@
+// #143 option C emitter-coverage set (spec 2.5.1 check 2; plan A19g): time_ns.
+// Row pe_unwind_sp_sites_reached; manifest.txt says which site ids it reaches
+// on which backend.
+fn site(uint64 x) -> uint64 {
+    return time_ns() + x
+}
+fn main() { exit(site(3) & 0) }

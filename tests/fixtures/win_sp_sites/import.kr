@@ -1,0 +1,8 @@
+// #143 option C emitter-coverage set (spec 2.5.1 check 2; plan A19g): a call
+// to a routed Windows import. Row pe_unwind_sp_sites_reached; manifest.txt
+// says which site ids it reaches on which backend.
+extern fn GetStdHandle(uint64 n) -> uint64
+fn site(uint64 x) -> uint64 {
+    return GetStdHandle(x)
+}
+fn main() { exit(site(3) & 0) }

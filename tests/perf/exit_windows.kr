@@ -1,0 +1,9 @@
+// The Windows exits of the perf ports for the native timing half of the
+// perf gate (tests/windows/native_perf.sh, Task D step 6): ExitProcess
+// through the exit builtin, in a hosted Windows PE (not freestanding).
+fn pe_exit_ok() {
+    exit(0)
+}
+fn pe_exit_bad() {
+    exit(1)
+}

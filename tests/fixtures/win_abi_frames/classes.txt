@@ -1,0 +1,116 @@
+# tests/fixtures/win_abi_frames/classes.txt -- #143 option C golden frame
+# classification (spec 2.5.5, finding 21; plan A19g). For every function of
+# the frames corpus and of the mixed fault fixtures, on each backend: its
+# class (SP-fixed: no frame register; SP-moving: a frame register) and, for
+# arm64 IR, its shape (S1, S2 or D; spec 2.5.3). Row
+# pe_unwind_win_frame_classes builds each fixture for Windows (--emit=pe,
+# --test-listing; tests/helpers/win_frame_classes.py reads the class from the
+# bytes) and fails on any difference in either direction -- so a frame
+# pointer where none is needed (which C3b allows) fails too. Change a line
+# only with its reason in the commit that changes it.
+#
+# Why the SP-moving ones are SP-moving:
+#   x64 IR: call10/rec10/a_ten pass 10 arguments (X3); page_frame/big_frame/
+#     a_page zero their local arrays with op 76 (memset), which is not on the
+#     audited allow-list; rspcheck and checks hold asm blocks (X14); main is
+#     the freestanding entry with asm; mixed b calls c with 7 arguments (X3);
+#     mixed main is a hosted main (X15).
+#   x64 legacy: rspcheck/checks asm (L9); mixed b println (L7); main hosted
+#     or asm (L10/L9). Every call area is folded (ruling Q11).
+#   arm64 IR: page_frame/big_frame/a_page memset (op 76); rspcheck asm (A5);
+#     main asm or hosted (A4/A5); mixed b asm. S2 where a save offset would
+#     pass 504 (one spill slot per vreg), else S1.
+#   arm64 legacy: rspcheck/main asm or hosted (G5/G6); mixed b asm.
+# The perf ports (tests/perf/, A15; plan A15, A19e-h review finding 3), arm64
+# IR, --freestanding, each built with its exit_arm64.kr: fib S1; sha256 rotr
+# S1, block S2, digest S2, k_init S2 (spec 2.5.3's prediction). Only these
+# functions are compared for a "+" fixture (the exit helpers are harness).
+#
+# backend|fixture (under tests/fixtures)|flags|function|class|shape
+x64-ir|win_abi_frames/frames_x86_64.kr|--freestanding|f10|SP-fixed|-
+x64-ir|win_abi_frames/frames_x86_64.kr|--freestanding|call10|SP-moving|-
+x64-ir|win_abi_frames/frames_x86_64.kr|--freestanding|page_frame|SP-moving|-
+x64-ir|win_abi_frames/frames_x86_64.kr|--freestanding|big_frame|SP-moving|-
+x64-ir|win_abi_frames/frames_x86_64.kr|--freestanding|leaf|SP-fixed|-
+x64-ir|win_abi_frames/frames_x86_64.kr|--freestanding|fib|SP-fixed|-
+x64-ir|win_abi_frames/frames_x86_64.kr|--freestanding|rec10|SP-moving|-
+x64-ir|win_abi_frames/frames_x86_64.kr|--freestanding|rspcheck|SP-moving|-
+x64-ir|win_abi_frames/frames_x86_64.kr|--freestanding|a_none|SP-fixed|-
+x64-ir|win_abi_frames/frames_x86_64.kr|--freestanding|a_one|SP-fixed|-
+x64-ir|win_abi_frames/frames_x86_64.kr|--freestanding|a_two|SP-fixed|-
+x64-ir|win_abi_frames/frames_x86_64.kr|--freestanding|a_three|SP-fixed|-
+x64-ir|win_abi_frames/frames_x86_64.kr|--freestanding|a_page|SP-moving|-
+x64-ir|win_abi_frames/frames_x86_64.kr|--freestanding|a_ten|SP-moving|-
+x64-ir|win_abi_frames/frames_x86_64.kr|--freestanding|checks|SP-moving|-
+x64-ir|win_abi_frames/frames_x86_64.kr|--freestanding|main|SP-moving|-
+x64-legacy|win_abi_frames/frames_x86_64.kr|--freestanding --legacy|f10|SP-fixed|-
+x64-legacy|win_abi_frames/frames_x86_64.kr|--freestanding --legacy|call10|SP-fixed|-
+x64-legacy|win_abi_frames/frames_x86_64.kr|--freestanding --legacy|page_frame|SP-fixed|-
+x64-legacy|win_abi_frames/frames_x86_64.kr|--freestanding --legacy|big_frame|SP-fixed|-
+x64-legacy|win_abi_frames/frames_x86_64.kr|--freestanding --legacy|leaf|SP-fixed|-
+x64-legacy|win_abi_frames/frames_x86_64.kr|--freestanding --legacy|fib|SP-fixed|-
+x64-legacy|win_abi_frames/frames_x86_64.kr|--freestanding --legacy|rec10|SP-fixed|-
+x64-legacy|win_abi_frames/frames_x86_64.kr|--freestanding --legacy|rspcheck|SP-moving|-
+x64-legacy|win_abi_frames/frames_x86_64.kr|--freestanding --legacy|a_none|SP-fixed|-
+x64-legacy|win_abi_frames/frames_x86_64.kr|--freestanding --legacy|a_one|SP-fixed|-
+x64-legacy|win_abi_frames/frames_x86_64.kr|--freestanding --legacy|a_two|SP-fixed|-
+x64-legacy|win_abi_frames/frames_x86_64.kr|--freestanding --legacy|a_three|SP-fixed|-
+x64-legacy|win_abi_frames/frames_x86_64.kr|--freestanding --legacy|a_page|SP-fixed|-
+x64-legacy|win_abi_frames/frames_x86_64.kr|--freestanding --legacy|a_ten|SP-fixed|-
+x64-legacy|win_abi_frames/frames_x86_64.kr|--freestanding --legacy|checks|SP-moving|-
+x64-legacy|win_abi_frames/frames_x86_64.kr|--freestanding --legacy|main|SP-moving|-
+arm64-ir|win_abi_frames/frames_arm64.kr|--freestanding|f10|SP-fixed|S2
+arm64-ir|win_abi_frames/frames_arm64.kr|--freestanding|call10|SP-fixed|S1
+arm64-ir|win_abi_frames/frames_arm64.kr|--freestanding|page_frame|SP-moving|D
+arm64-ir|win_abi_frames/frames_arm64.kr|--freestanding|big_frame|SP-moving|D
+arm64-ir|win_abi_frames/frames_arm64.kr|--freestanding|leaf|SP-fixed|S1
+arm64-ir|win_abi_frames/frames_arm64.kr|--freestanding|fib|SP-fixed|S1
+arm64-ir|win_abi_frames/frames_arm64.kr|--freestanding|rec10|SP-fixed|S1
+arm64-ir|win_abi_frames/frames_arm64.kr|--freestanding|rspcheck|SP-moving|D
+arm64-ir|win_abi_frames/frames_arm64.kr|--freestanding|a_none|SP-fixed|S1
+arm64-ir|win_abi_frames/frames_arm64.kr|--freestanding|a_one|SP-fixed|S1
+arm64-ir|win_abi_frames/frames_arm64.kr|--freestanding|a_two|SP-fixed|S1
+arm64-ir|win_abi_frames/frames_arm64.kr|--freestanding|a_three|SP-fixed|S1
+arm64-ir|win_abi_frames/frames_arm64.kr|--freestanding|a_page|SP-moving|D
+arm64-ir|win_abi_frames/frames_arm64.kr|--freestanding|a_ten|SP-fixed|S1
+arm64-ir|win_abi_frames/frames_arm64.kr|--freestanding|fheavy|SP-fixed|S2
+arm64-ir|win_abi_frames/frames_arm64.kr|--freestanding|pressure|SP-fixed|S2
+arm64-ir|win_abi_frames/frames_arm64.kr|--freestanding|main|SP-moving|D
+arm64-legacy|win_abi_frames/frames_arm64.kr|--freestanding --legacy|f10|SP-fixed|-
+arm64-legacy|win_abi_frames/frames_arm64.kr|--freestanding --legacy|call10|SP-fixed|-
+arm64-legacy|win_abi_frames/frames_arm64.kr|--freestanding --legacy|page_frame|SP-fixed|-
+arm64-legacy|win_abi_frames/frames_arm64.kr|--freestanding --legacy|big_frame|SP-fixed|-
+arm64-legacy|win_abi_frames/frames_arm64.kr|--freestanding --legacy|leaf|SP-fixed|-
+arm64-legacy|win_abi_frames/frames_arm64.kr|--freestanding --legacy|fib|SP-fixed|-
+arm64-legacy|win_abi_frames/frames_arm64.kr|--freestanding --legacy|rec10|SP-fixed|-
+arm64-legacy|win_abi_frames/frames_arm64.kr|--freestanding --legacy|rspcheck|SP-moving|-
+arm64-legacy|win_abi_frames/frames_arm64.kr|--freestanding --legacy|a_none|SP-fixed|-
+arm64-legacy|win_abi_frames/frames_arm64.kr|--freestanding --legacy|a_one|SP-fixed|-
+arm64-legacy|win_abi_frames/frames_arm64.kr|--freestanding --legacy|a_two|SP-fixed|-
+arm64-legacy|win_abi_frames/frames_arm64.kr|--freestanding --legacy|a_three|SP-fixed|-
+arm64-legacy|win_abi_frames/frames_arm64.kr|--freestanding --legacy|a_page|SP-fixed|-
+arm64-legacy|win_abi_frames/frames_arm64.kr|--freestanding --legacy|a_ten|SP-fixed|-
+arm64-legacy|win_abi_frames/frames_arm64.kr|--freestanding --legacy|fheavy|SP-fixed|-
+arm64-legacy|win_abi_frames/frames_arm64.kr|--freestanding --legacy|pressure|SP-fixed|-
+arm64-legacy|win_abi_frames/frames_arm64.kr|--freestanding --legacy|main|SP-moving|-
+x64-ir|pe_unwind_mixed_fault.kr||c|SP-fixed|-
+x64-ir|pe_unwind_mixed_fault.kr||b|SP-moving|-
+x64-ir|pe_unwind_mixed_fault.kr||a|SP-fixed|-
+x64-ir|pe_unwind_mixed_fault.kr||main|SP-moving|-
+x64-legacy|pe_unwind_mixed_fault.kr|--legacy|c|SP-fixed|-
+x64-legacy|pe_unwind_mixed_fault.kr|--legacy|b|SP-moving|-
+x64-legacy|pe_unwind_mixed_fault.kr|--legacy|a|SP-fixed|-
+x64-legacy|pe_unwind_mixed_fault.kr|--legacy|main|SP-moving|-
+arm64-ir|pe_unwind_mixed_fault_arm64.kr||c|SP-fixed|S1
+arm64-ir|pe_unwind_mixed_fault_arm64.kr||b|SP-moving|D
+arm64-ir|pe_unwind_mixed_fault_arm64.kr||a|SP-fixed|S2
+arm64-ir|pe_unwind_mixed_fault_arm64.kr||main|SP-moving|D
+arm64-legacy|pe_unwind_mixed_fault_arm64.kr|--legacy|c|SP-fixed|-
+arm64-legacy|pe_unwind_mixed_fault_arm64.kr|--legacy|b|SP-moving|-
+arm64-legacy|pe_unwind_mixed_fault_arm64.kr|--legacy|a|SP-fixed|-
+arm64-legacy|pe_unwind_mixed_fault_arm64.kr|--legacy|main|SP-moving|-
+arm64-ir|../perf/fib.kr+../perf/exit_arm64.kr|--freestanding|fib|SP-fixed|S1
+arm64-ir|../perf/sha256.kr+../perf/exit_arm64.kr|--freestanding|rotr|SP-fixed|S1
+arm64-ir|../perf/sha256.kr+../perf/exit_arm64.kr|--freestanding|block|SP-fixed|S2
+arm64-ir|../perf/sha256.kr+../perf/exit_arm64.kr|--freestanding|digest|SP-fixed|S2
+arm64-ir|../perf/sha256.kr+../perf/exit_arm64.kr|--freestanding|k_init|SP-fixed|S2

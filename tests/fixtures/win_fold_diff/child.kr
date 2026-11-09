@@ -1,0 +1,4 @@
+// exits 7 (the child of the exec_process rows of pe_unwind_fold_diff.sh)
+fn main() -> uint32 {
+    return 7
+}

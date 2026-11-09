@@ -18,6 +18,7 @@ cat \
     "$DIR/src/ir.kr" \
     "$DIR/src/ir_aarch64.kr" \
     "$DIR/src/format_macho.kr" \
+    "$DIR/src/format_pe_unwind.kr" \
     "$DIR/src/format_pe.kr" \
     "$DIR/src/format_arx.kr" \
     "$DIR/src/format_archive.kr" \

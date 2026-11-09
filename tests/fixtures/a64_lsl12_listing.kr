@@ -1,0 +1,9 @@
+// #143 (A19e-h review finding 4): a frame over 4080 bytes, so the arm64
+// prologue holds `sub sp, sp, #1, lsl #12` (d14007ff); row
+// a64_listing_prints_lsl12 requires the --emit=asm listing to print the shift.
+fn big(uint64 n) -> uint64 {
+    uint64[600] a
+    a[n & 7] = n
+    return a[0]
+}
+fn main() { exit(big(3) & 0) }

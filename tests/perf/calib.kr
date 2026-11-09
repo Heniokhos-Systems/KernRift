@@ -1,0 +1,15 @@
+// The calibration loop (row perf_insn_count_calibration): count_insns.sh
+// builds it with N = 1000 and N = 2000 (the token PEU_N is replaced); the
+// count difference over 1000 must equal the loop body's length as
+// disassembled.
+fn work(uint64 n) -> uint64 {
+    uint64 s = 0
+    uint64 i = 0
+    while i < n { s = s + i  i = i + 1 }
+    return s
+}
+fn main() {
+    uint64 r = work(PEU_N)
+    if r == (PEU_N * (PEU_N - 1)) / 2 { pe_exit_ok() }
+    pe_exit_bad()
+}

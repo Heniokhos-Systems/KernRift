@@ -1,0 +1,9 @@
+// Port of benchmarks/fib.kr: recursive fib, frames and calls dominate.
+fn fib(uint64 n) -> uint64 {
+    if n <= 1 { return n }
+    return fib(n - 1) + fib(n - 2)
+}
+fn main() {
+    if fib(24) == 46368 { pe_exit_ok() }
+    pe_exit_bad()
+}

@@ -1,0 +1,69 @@
+// #143 option C, arm64 IR shapes (spec 2.5.3; plan A19e; row a64_win_sp_fixed_shape):
+//   fib    register-argument calls (op 50/51): SP-fixed, shape S1 (one allocation,
+//          the saves at the top of the frame, no frame pointer)
+//   wide   SP-fixed with a low area above 504 bytes (one spill slot per vreg):
+//          shape S2 (the split layout without add_fp)
+//   opaque an asm block (op 96): SP-moving, the D shape with add_fp
+fn fib(uint64 n) -> uint64 {
+    if n < 2 { return n }
+    return fib(n - 1) + fib(n - 2)
+}
+fn wide(uint64 a, uint64 b) -> uint64 {
+    uint64 v0 = a * 3 + b
+    uint64 v1 = v0 * 4 + b
+    uint64 v2 = v1 * 5 + b
+    uint64 v3 = v2 * 6 + b
+    uint64 v4 = v3 * 7 + b
+    uint64 v5 = v4 * 8 + b
+    uint64 v6 = v5 * 9 + b
+    uint64 v7 = v6 * 10 + b
+    uint64 v8 = v7 * 11 + b
+    uint64 v9 = v8 * 12 + b
+    uint64 v10 = v9 * 13 + b
+    uint64 v11 = v10 * 14 + b
+    uint64 v12 = v11 * 15 + b
+    uint64 v13 = v12 * 16 + b
+    uint64 v14 = v13 * 17 + b
+    uint64 v15 = v14 * 18 + b
+    uint64 v16 = v15 * 19 + b
+    uint64 v17 = v16 * 20 + b
+    uint64 v18 = v17 * 21 + b
+    uint64 v19 = v18 * 22 + b
+    uint64 v20 = v19 * 23 + b
+    uint64 v21 = v20 * 24 + b
+    uint64 v22 = v21 * 25 + b
+    uint64 v23 = v22 * 26 + b
+    uint64 v24 = v23 * 27 + b
+    uint64 v25 = v24 * 28 + b
+    uint64 v26 = v25 * 29 + b
+    uint64 v27 = v26 * 30 + b
+    uint64 v28 = v27 * 31 + b
+    uint64 v29 = v28 * 32 + b
+    uint64 v30 = v29 * 33 + b
+    uint64 v31 = v30 * 34 + b
+    uint64 v32 = v31 * 35 + b
+    uint64 v33 = v32 * 36 + b
+    uint64 v34 = v33 * 37 + b
+    uint64 v35 = v34 * 38 + b
+    uint64 v36 = v35 * 39 + b
+    uint64 v37 = v36 * 40 + b
+    uint64 v38 = v37 * 41 + b
+    uint64 v39 = v38 * 42 + b
+    uint64 v40 = v39 * 43 + b
+    uint64 v41 = v40 * 44 + b
+    uint64 v42 = v41 * 45 + b
+    uint64 v43 = v42 * 46 + b
+    uint64 v44 = v43 * 47 + b
+    uint64 v45 = v44 * 48 + b
+    uint64 v46 = v45 * 49 + b
+    uint64 v47 = v46 * 50 + b
+    return v47 + fib(a & 7)
+}
+fn opaque(uint64 x) -> uint64 {
+    asm { "nop" }
+    return x + 1
+}
+fn main() {
+    uint64 r = fib(10) + wide(3, 4) + opaque(5)
+    exit(r & 0)
+}

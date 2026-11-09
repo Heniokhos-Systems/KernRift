@@ -1,0 +1,30 @@
+// #143 option C (spec 2.5.7, finding 24): call_ptr with 9 to 12 arguments, so
+// the identity corpus reaches the >8-argument call_ptr stack-argument paths
+// that the legacy backends share between Windows and Linux/macOS/Android
+// (codegen_aarch64.kr call_ptr, codegen.kr SysV call_ptr), and a recursive
+// named call with 10 arguments (the legacy inliner inlines tests/smoke/
+// many_args.kr's add9, so that file never reaches the named-call stack
+// arguments). Prints 45 54 66 78 50.
+fn s9(uint64 a, uint64 b, uint64 c, uint64 d, uint64 e, uint64 f, uint64 g, uint64 h, uint64 i) -> uint64 {
+    return a + b + c + d + e + f + g + h + i
+}
+fn s10(uint64 a, uint64 b, uint64 c, uint64 d, uint64 e, uint64 f, uint64 g, uint64 h, uint64 i, uint64 j) -> uint64 {
+    return a + b + c + d + e + f + g + h + i + j + 0
+}
+fn s11(uint64 a, uint64 b, uint64 c, uint64 d, uint64 e, uint64 f, uint64 g, uint64 h, uint64 i, uint64 j, uint64 k) -> uint64 {
+    return a + b + c + d + e + f + g + h + i + j + k
+}
+fn s12(uint64 a, uint64 b, uint64 c, uint64 d, uint64 e, uint64 f, uint64 g, uint64 h, uint64 i, uint64 j, uint64 k, uint64 l) -> uint64 {
+    return a + b + c + d + e + f + g + h + i + j + k + l
+}
+fn r10(uint64 a, uint64 b, uint64 c, uint64 d, uint64 e, uint64 f, uint64 g, uint64 h, uint64 i, uint64 j) -> uint64 {
+    if a == 0 { return b + c + d + e + f + g + h + i + j }
+    return r10(a - 1, b, c, d, e, f, g, h, i, j + 1)
+}
+fn main() {
+    println(call_ptr(fn_addr("s9"), 1, 2, 3, 4, 5, 6, 7, 8, 9))
+    println(call_ptr(fn_addr("s10"), 1, 2, 3, 4, 5, 6, 7, 8, 9, 9))
+    println(call_ptr(fn_addr("s11"), 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11))
+    println(call_ptr(fn_addr("s12"), 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12))
+    println(r10(5, 1, 2, 3, 4, 5, 6, 7, 8, 9))
+}

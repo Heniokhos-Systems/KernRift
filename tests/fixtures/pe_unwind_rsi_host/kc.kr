@@ -1,0 +1,6 @@
+// The control for k.kr (#143 A16): writes no rsi, so host.c sees its
+// sentinel survive and exits 40. Proves the probe can report a kept rsi.
+fn main() -> uint32 {
+    uint64 n = 42
+    return n
+}

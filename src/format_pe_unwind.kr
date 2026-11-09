@@ -1,0 +1,840 @@
+// KernRift self-hosted compiler — Windows unwind-table recorder (#143)
+//
+// The emitters REPORT each function's frame here as they emit it; the PE/COFF
+// writer turns the records into .pdata/.xdata. The writer never infers a
+// prologue from bytes. Spec: docs/superpowers/specs/2026-10-26-pe-unwind-tables.md
+// section 3 (local, not in the tree); the checker that verifies the result is
+// tests/helpers/pe_unwind_check.py.
+//
+// TWO GATES, deliberately separate (spec R3-M1):
+//   * COLLECTION happens whenever target_os == 2, whatever the container, so a
+//     --target=windows --emit=asm listing can print the annotations the checker
+//     reads. When target_os != 2 every uw_* call returns at once, so no other
+//     target's output can change.
+//   * EMISSION (the PE/COFF table writer) is gated by uw_emit_tables, a
+//     dedicated flag (N-I1): set by compile() for a single-target
+//     --target=windows --emit=pe / --emit=obj build and by compile_fat around
+//     each Windows slice. It is NOT derived from cg_emit_mode, which
+//     compile_fat never sets.
+// Code generation never reads anything in this file.
+//
+// --test-no-unwind (hidden, test-only, like --dump-argv-parser): suppresses
+// table emission in every writer path while leaving code generation unchanged,
+// so the suite can build the negative image of a fixture in-tree.
+
+static uint64 uw_emit_tables = 0
+static uint64 uw_test_no_unwind = 0
+// --test-listing=PATH (hidden, test-only, phase-1 review ruling (a)): an
+// --emit=pe / --emit=obj build also writes the asm listing of exactly the code
+// it emitted, so the checker's listing equals the image by construction.
+static uint64 uw_test_listing_path = 0
+
+// ---------------------------------------------------------------------------
+// Option C (#143, spec 2.5.1): the SP-move backstop.
+//
+// Every SP helper (emit_win_alloc_stack/_free, emit_x64_push_r/_pop_r,
+// emit_x64_rsp_sub/_add, emit_a64_sub/add_sp_imm, emit_a64_stp_pre,
+// emit_a64_ldp_post, emit_a64_sp_word and the x64 IR call-frame helpers)
+// calls uw_sp_moves() after emitting a body instruction that writes RSP/SP.
+// The emitters name the site family (spec 2.5.1 site table: X1..X15, L1..L10,
+// A1..A5, G1..G6) in uw_sp_site before they reach a helper. When the current
+// Windows function was classified SP-fixed (uw_fn_sp_fixed, set by the
+// classifier before the prologue), a report is a classifier miss: the build
+// stops with a located internal error instead of shipping a wrong table.
+// Prologue and epilogue code that uses the same helpers sets uw_sp_frame.
+//
+// --test-sp-site-log=PATH (hidden, test-only): append the site id of every
+// report of a Windows compile to PATH, one per line (spec 2.5.1 check 2).
+static uint64 uw_fn_sp_fixed = 0
+static uint64 uw_sp_site = 0       // one-shot: the site of the next report, cleared by it
+static uint64 uw_sp_op_site = 0    // scope: the IR op (or hosted-main block) being emitted
+static uint64 uw_sp_frame = 0
+static uint64 uw_sp_log_path = 0
+static uint64 uw_sp_log_fd = 0xFFFFFFFFFFFFFFFF
+static uint64 uw_sp_fn_name = 0
+
+// The site of the NEXT report only: uw_sp_moves clears it, so a legacy id can
+// never be credited to a later, unrelated SP write (A19a-c review finding 4).
+fn uw_sp_site_set(uint64 id) {
+    uw_sp_site = id
+}
+
+// The site family of everything the current IR op (or hosted-main block)
+// emits: set at every op dispatch, cleared at function end and slice start.
+fn uw_sp_op_site_set(uint64 id) {
+    uw_sp_op_site = id
+}
+
+// Clear every piece of backstop state: at the end of every function emitter
+// (after its epilogue) and at every slice start (A19a-c review finding 3).
+fn uw_sp_state_reset() {
+    cg_win_ps_fixed = 0         // the legacy pre-scan's verdict and OUT (A19d)
+    cg_win_folded = 0
+    cg_win_out_bias = 0
+    uw_fn_sp_fixed = 0
+    uw_sp_frame = 0
+    uw_sp_site = 0
+    uw_sp_op_site = 0
+}
+
+// --test-sp-site-log (A19g): append "<site id> <offset>" to the log, if one
+// is open. uw_sp_moves() logs every SP-move report; a folded legacy site logs
+// from cg_win_fold_site (it moves no SP, but the coverage row must see it
+// reached). The offset is out_len when the report is made, relative to the
+// current function's first byte -- the end of the SP write just emitted, or
+// its start for a report made before it -- so a mutation test can tie a
+// rejected instruction to its site (A19e-h review finding 6).
+fn uw_sp_log_site(uint64 id) {
+    if uw_sp_log_path == 0 { return }
+    if uw_sp_log_fd == 0xFFFFFFFFFFFFFFFF { uw_sp_log_fd = open_output_or_die(uw_sp_log_path) }
+    write(uw_sp_log_fd, id, str_len(id))
+    write(uw_sp_log_fd, " ", 1)
+    uint8[24] lb
+    uint64 rel = out_len
+    if uw_cur != 0xFFFFFFFFFFFFFFFF { rel = out_len - uw_get(uw_cur, 0) }
+    uint64 ll = fmt_uint(lb, rel)
+    write(uw_sp_log_fd, lb, ll)
+    write(uw_sp_log_fd, "\n", 1)
+}
+
+fn uw_sp_moves() {
+    if target_os != 2 { return }
+    if uw_sp_frame != 0 { return }
+    uint64 id = uw_sp_site
+    if id == 0 { id = uw_sp_op_site }
+    if id == 0 { id = "unnamed" }        // a report no emitter named: the coverage row rejects it
+    uw_sp_site = 0
+    uw_sp_log_site(id)
+    if uw_fn_sp_fixed != 0 {
+        // located: the function's name token (uw_fn_name), when known
+        uint64 tk = 0xFFFFFFFFFFFFFFFF
+        if uw_cur != 0xFFFFFFFFFFFFFFFF { tk = uw_get(uw_cur, 96) }
+        if tk != 0xFFFFFFFFFFFFFFFF { diag_loc_head(tk, 0) }
+        uint64 m = "internal: SP moved in a frame-pointer-less Windows function"
+        if tk == 0xFFFFFFFFFFFFFFFF { write(2, "error: ", 7) }
+        write(2, m, str_len(m))
+        if tk != 0xFFFFFFFFFFFFFFFF {
+            write(2, " '", 2)
+            write(2, cg_source + tok_text_start(tk), tok_text_len(tk))
+            write(2, "'", 1)
+        }
+        write(2, " (site ", 7)
+        write(2, id, str_len(id))
+        uint64 m2 = "; #143 option C backstop: the classifier missed it)\n"
+        write(2, m2, str_len(m2))
+        if tk != 0xFFFFFFFFFFFFFFFF { diag_span_of(tk) }
+        exit(1)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The record table. One fixed-size record per function, grown by doubling
+// (like fn_table); no cap.
+//
+//   +0   fn_begin          code offset of the function's first byte
+//   +8   fn_end            offset after its last byte (set by the next
+//                          function's begin, or uw_fn_end for the last one)
+//   +16  kind              0 = frame-pointer function, 1 = naked
+//   +24  finalised         1 once uw_fn_finalize ran
+//   +32  prolog_size       x64: SizeOfProlog; arm64: prologue instruction count
+//   +40  frame_reg         x64: 5 (rbp) once SET_FPREG is recorded
+//   +48  code_count        number of entries in the code list
+//   +56  code_first        index of the first entry in uw_codes
+//   +64  epi_off           arm64: epilog start offset (bytes from fn_begin)
+//   +72  epi_index         arm64: epilog StartIndex (byte index into the codes)
+//   +80  leaf_count        internal-leaf sub-ranges recorded for this function
+//   +88  leaf_first        index of the first entry in uw_leaves
+//   +96  name_tok          the function's name token (listing annotations)
+// ---------------------------------------------------------------------------
+static uint64 UW_REC = 104
+static uint64 uw_recs = 0
+static uint64 uw_rec_cap = 0
+static uint64 uw_rec_count = 0
+static uint64 uw_cur = 0xFFFFFFFFFFFFFFFF
+
+// Codes: 4 x u64 per entry -- (op, a, b, end offset relative to fn_begin).
+//   x64 ops: 0 PUSH_NONVOL(reg) 1 ALLOC(size) 3 SET_FPREG(reg) 4 SAVE_NONVOL(reg, frame_off)
+//   arm64 op 16: one prologue instruction's code bytes (a = bytes, low byte
+//   first; b = byte count)
+static uint64 uw_codes = 0
+static uint64 uw_code_cap = 0
+static uint64 uw_code_count = 0
+
+// Leaves: 4 x u64 per entry -- (begin, end, kind 0 = called / 1 = dead-end, name pointer)
+static uint64 uw_leaves = 0
+static uint64 uw_leaf_cap = 0
+static uint64 uw_leaf_count = 0
+
+// Balanced loop pairs: 5 x u64 per entry -- (push_lo, push_hi, pop_lo, pop_hi, counter reg)
+static uint64 uw_loops = 0
+static uint64 uw_loop_cap = 0
+static uint64 uw_loop_count = 0
+
+// User asm byte ranges: 2 x u64 per entry -- (begin, end)
+static uint64 uw_asms = 0
+static uint64 uw_asm_cap = 0
+static uint64 uw_asm_count = 0
+
+// End of code: where the function-emission loop ended, before any string or
+// static byte (spec M1). 0xFFFFFFFFFFFFFFFF until recorded.
+static uint64 uw_code_end = 0xFFFFFFFFFFFFFFFF
+
+fn uw_reset() {
+    uw_sp_state_reset()         // a new slice starts with no backstop state (#143 option C)
+    uw_rec_count = 0
+    uw_code_count = 0
+    uw_leaf_count = 0
+    uw_loop_count = 0
+    uw_asm_count = 0
+    uw_cur = 0xFFFFFFFFFFFFFFFF
+    uw_code_end = 0xFFFFFFFFFFFFFFFF
+}
+
+fn uw_collecting() -> uint64 {
+    if target_os == 2 { return 1 }
+    return 0
+}
+
+fn uw_rec(uint64 i) -> uint64 {
+    return uw_recs + i * UW_REC
+}
+
+fn uw_get(uint64 i, uint64 field) -> uint64 {
+    uint64 v = 0
+    unsafe { *((uw_rec(i) + field) as uint64) -> v }
+    return v
+}
+
+fn uw_set(uint64 i, uint64 field, uint64 v) {
+    unsafe { *((uw_rec(i) + field) as uint64) = v }
+}
+
+fn uw_tab_put(uint64 base, uint64 idx, uint64 stride, uint64 k, uint64 v) {
+    unsafe { *((base + (idx * stride + k) * 8) as uint64) = v }
+}
+
+fn uw_tab_get(uint64 base, uint64 idx, uint64 stride, uint64 k) -> uint64 {
+    uint64 v = 0
+    unsafe { *((base + (idx * stride + k) * 8) as uint64) -> v }
+    return v
+}
+
+// A new function begins at `off`. The previous record (if any) ends here.
+fn uw_fn_begin(uint64 off, uint64 is_naked) {
+    if uw_collecting() == 0 { return }
+    if uw_rec_count >= uw_rec_cap {
+        if uw_rec_cap == 0 {
+            uw_rec_cap = 256
+            uw_recs = alloc(uw_rec_cap * UW_REC)
+        } else {
+            uw_recs = grow_buf(uw_recs, uw_rec_cap * UW_REC, uw_rec_cap * 2 * UW_REC)
+            uw_rec_cap = uw_rec_cap * 2
+        }
+    }
+    if uw_rec_count > 0 { uw_set(uw_rec_count - 1, 8, off) }
+    uint64 i = uw_rec_count
+    uw_set(i, 0, off)
+    uw_set(i, 8, 0xFFFFFFFFFFFFFFFF)
+    uw_set(i, 16, is_naked)
+    uw_set(i, 24, 0)
+    uw_set(i, 32, 0)
+    uw_set(i, 40, 0)
+    uw_set(i, 48, 0)
+    uw_set(i, 56, uw_code_count)
+    uw_set(i, 64, 0)
+    uw_set(i, 72, 0)
+    uw_set(i, 80, 0)
+    uw_set(i, 88, uw_leaf_count)
+    uw_set(i, 96, 0xFFFFFFFFFFFFFFFF)
+    uw_cur = i
+    uw_rec_count = uw_rec_count + 1
+}
+
+// The current function's name token (fn_register knows it).
+fn uw_fn_name(uint64 name_tok) {
+    if uw_collecting() == 0 { return }
+    if uw_cur == 0xFFFFFFFFFFFFFFFF { return }
+    uw_set(uw_cur, 96, name_tok)
+}
+
+// The current function turns out to be naked (kind 1, no codes).
+fn uw_fn_set_naked() {
+    if uw_collecting() == 0 { return }
+    if uw_cur == 0xFFFFFFFFFFFFFFFF { return }
+    uw_set(uw_cur, 16, 1)
+}
+
+// The last function's range ends at the end of code (M1); also the listing's
+// `; uw-code-end`.
+fn uw_fn_end(uint64 off) {
+    if uw_collecting() == 0 { return }
+    if uw_rec_count > 0 { uw_set(uw_rec_count - 1, 8, off) }
+    uw_code_end = off
+}
+
+fn uw_code_push(uint64 op, uint64 a, uint64 b, uint64 end) {
+    if uw_collecting() == 0 { return }
+    if uw_cur == 0xFFFFFFFFFFFFFFFF { return }
+    if uw_code_count >= uw_code_cap {
+        if uw_code_cap == 0 {
+            uw_code_cap = 1024
+            uw_codes = alloc(uw_code_cap * 32)
+        } else {
+            uw_codes = grow_buf(uw_codes, uw_code_cap * 32, uw_code_cap * 64)
+            uw_code_cap = uw_code_cap * 2
+        }
+    }
+    uint64 rel = end - uw_get(uw_cur, 0)
+    uw_tab_put(uw_codes, uw_code_count, 4, 0, op)
+    uw_tab_put(uw_codes, uw_code_count, 4, 1, a)
+    uw_tab_put(uw_codes, uw_code_count, 4, 2, b)
+    uw_tab_put(uw_codes, uw_code_count, 4, 3, rel)
+    uw_code_count = uw_code_count + 1
+    uw_set(uw_cur, 48, uw_get(uw_cur, 48) + 1)
+    uw_set(uw_cur, 32, rel)
+}
+
+// x64 prologue instructions, in emission order; `end` is the code offset just
+// after the instruction.
+fn uw_x64_push(uint64 reg, uint64 end) { uw_code_push(0, reg, 0, end) }
+fn uw_x64_alloc(uint64 size, uint64 end) { uw_code_push(1, size, 0, end) }
+fn uw_x64_save(uint64 reg, uint64 frame_off, uint64 end) { uw_code_push(4, reg, frame_off, end) }
+fn uw_x64_setfp(uint64 reg, uint64 end) {
+    uw_code_push(3, reg, 0, end)
+    if uw_collecting() == 0 { return }
+    if uw_cur == 0xFFFFFFFFFFFFFFFF { return }
+    uw_set(uw_cur, 40, reg)
+}
+
+// arm64: one prologue instruction's unwind code bytes (1..4 bytes, low byte
+// first in `code_bytes`), in emission order.
+fn uw_a64_prolog_insn(uint64 code_bytes, uint64 nbytes, uint64 end) {
+    uw_code_push(16, code_bytes, nbytes, end)
+}
+
+// arm64: one SP allocation of `size` (a multiple of 16) as alloc_s, alloc_m or
+// alloc_l, whichever is the smallest that holds it.
+fn uw_a64_alloc_code(uint64 size, uint64 end) {
+    uint64 x = size / 16
+    if x < 32 { uw_a64_prolog_insn(x, 1, end) }
+    else if x < 2048 { uw_a64_prolog_insn((0xC0 | (x >> 8)) | ((x & 0xFF) << 8), 2, end) }
+    else { uw_a64_prolog_insn(0xE0 | (((x >> 16) & 0xFF) << 8) | (((x >> 8) & 0xFF) << 16) | ((x & 0xFF) << 24), 4, end) }
+}
+
+// arm64: the epilog starts at `off` and shares the prologue codes from byte
+// index `start_index`.
+fn uw_a64_epilog(uint64 off, uint64 start_index) {
+    if uw_collecting() == 0 { return }
+    if uw_cur == 0xFFFFFFFFFFFFFFFF { return }
+    uw_set(uw_cur, 64, off - uw_get(uw_cur, 0))
+    uw_set(uw_cur, 72, start_index)
+}
+
+// A compiler-emitted internal leaf [begin, end) inside the current function.
+// kind 0 = called leaf (entered by call, bare ret), 1 = dead-end (entered by
+// jmp, ends in ExitProcess).
+fn uw_leaf(uint64 begin, uint64 end, uint64 kind, uint64 name) {
+    if uw_collecting() == 0 { return }
+    if uw_cur == 0xFFFFFFFFFFFFFFFF { return }
+    if uw_leaf_count >= uw_leaf_cap {
+        if uw_leaf_cap == 0 {
+            uw_leaf_cap = 64
+            uw_leaves = alloc(uw_leaf_cap * 32)
+        } else {
+            uw_leaves = grow_buf(uw_leaves, uw_leaf_cap * 32, uw_leaf_cap * 64)
+            uw_leaf_cap = uw_leaf_cap * 2
+        }
+    }
+    uw_tab_put(uw_leaves, uw_leaf_count, 4, 0, begin)
+    uw_tab_put(uw_leaves, uw_leaf_count, 4, 1, end)
+    uw_tab_put(uw_leaves, uw_leaf_count, 4, 2, kind)
+    uw_tab_put(uw_leaves, uw_leaf_count, 4, 3, name)
+    uw_leaf_count = uw_leaf_count + 1
+    uw_set(uw_cur, 80, uw_get(uw_cur, 80) + 1)
+}
+
+// A data-dependent push loop [push_lo, push_hi) and its pop loop
+// [pop_lo, pop_hi), both driven by `counter` (checker rule C4b).
+fn uw_balanced_loops(uint64 push_lo, uint64 push_hi, uint64 pop_lo, uint64 pop_hi, uint64 counter) {
+    if uw_collecting() == 0 { return }
+    if uw_loop_count >= uw_loop_cap {
+        if uw_loop_cap == 0 {
+            uw_loop_cap = 64
+            uw_loops = alloc(uw_loop_cap * 40)
+        } else {
+            uw_loops = grow_buf(uw_loops, uw_loop_cap * 40, uw_loop_cap * 80)
+            uw_loop_cap = uw_loop_cap * 2
+        }
+    }
+    uw_tab_put(uw_loops, uw_loop_count, 5, 0, push_lo)
+    uw_tab_put(uw_loops, uw_loop_count, 5, 1, push_hi)
+    uw_tab_put(uw_loops, uw_loop_count, 5, 2, pop_lo)
+    uw_tab_put(uw_loops, uw_loop_count, 5, 3, pop_hi)
+    uw_tab_put(uw_loops, uw_loop_count, 5, 4, counter)
+    uw_loop_count = uw_loop_count + 1
+}
+
+// User asm bytes [begin, end) (checker rules C5 and the asm refusals).
+fn uw_asm_range(uint64 begin, uint64 end) {
+    if uw_collecting() == 0 { return }
+    if uw_asm_count >= uw_asm_cap {
+        if uw_asm_cap == 0 {
+            uw_asm_cap = 64
+            uw_asms = alloc(uw_asm_cap * 16)
+        } else {
+            uw_asms = grow_buf(uw_asms, uw_asm_cap * 16, uw_asm_cap * 32)
+            uw_asm_cap = uw_asm_cap * 2
+        }
+    }
+    uw_tab_put(uw_asms, uw_asm_count, 2, 0, begin)
+    uw_tab_put(uw_asms, uw_asm_count, 2, 1, end)
+    uw_asm_count = uw_asm_count + 1
+}
+
+// Seal the current function's record, after the backend's end-of-function
+// patches (I6). IR paths know every size when the prologue is emitted.
+fn uw_fn_finalize() {
+    if uw_collecting() == 0 { return }
+    if uw_cur == 0xFFFFFFFFFFFFFFFF { return }
+    uw_set(uw_cur, 24, 1)
+}
+
+// The x86_64 name of 64-bit register `r` (0..15), as the checker spells it.
+fn uw_write_reg64(uint64 fd, uint64 r) {
+    if r == 0 { write(fd, "rax", 3) } else if r == 1 { write(fd, "rcx", 3) }
+    else if r == 2 { write(fd, "rdx", 3) } else if r == 3 { write(fd, "rbx", 3) }
+    else if r == 4 { write(fd, "rsp", 3) } else if r == 5 { write(fd, "rbp", 3) }
+    else if r == 6 { write(fd, "rsi", 3) } else if r == 7 { write(fd, "rdi", 3) }
+    else if r == 8 { write(fd, "r8", 2) } else if r == 9 { write(fd, "r9", 2) }
+    else if r < 16 {
+        write(fd, "r1", 2)
+        uint8[2] db
+        uint8 d = 48 + r - 10
+        uint64 dp = db + 0
+        unsafe { *(dp as uint8) = d }
+        write(fd, db, 1)
+    } else { write(fd, "r?", 2) }
+}
+
+// ---------------------------------------------------------------------------
+// Listing annotations (spec N-Mi1): the lines tests/helpers/pe_unwind_check.py
+// reads from a --target=windows --emit=asm listing. Offsets are hex, relative
+// to the start of code (= listing offset 0). The caller prints them only when
+// target_os == 2, so no other listing changes.
+// ---------------------------------------------------------------------------
+fn uw_write_annotations(uint64 fd, uint64 source, uint64 text_start) {
+    if uw_collecting() == 0 { return }
+    if uw_code_end != 0xFFFFFFFFFFFFFFFF {
+        write(fd, "; uw-code-end ", 14)
+        write_hex32(fd, uw_code_end - text_start)
+        write(fd, "\n", 1)
+    }
+    uint64 i = 0
+    while i < uw_leaf_count {
+        write(fd, "; uw-leaf ", 10)
+        uint64 nm = uw_tab_get(uw_leaves, i, 4, 3)
+        write(fd, nm, str_len(nm))
+        if uw_tab_get(uw_leaves, i, 4, 2) == 0 { write(fd, " called ", 8) } else { write(fd, " deadend ", 9) }
+        write_hex32(fd, uw_tab_get(uw_leaves, i, 4, 0) - text_start)
+        write(fd, "-", 1)
+        write_hex32(fd, uw_tab_get(uw_leaves, i, 4, 1) - text_start)
+        write(fd, "\n", 1)
+        i = i + 1
+    }
+    i = 0
+    while i < uw_loop_count {
+        write(fd, "; uw-loops ", 11)
+        write_hex32(fd, uw_tab_get(uw_loops, i, 5, 0) - text_start)
+        write(fd, "-", 1)
+        write_hex32(fd, uw_tab_get(uw_loops, i, 5, 1) - text_start)
+        write(fd, " ", 1)
+        write_hex32(fd, uw_tab_get(uw_loops, i, 5, 2) - text_start)
+        write(fd, "-", 1)
+        write_hex32(fd, uw_tab_get(uw_loops, i, 5, 3) - text_start)
+        write(fd, " ", 1)
+        uw_write_reg64(fd, uw_tab_get(uw_loops, i, 5, 4))
+        write(fd, "\n", 1)
+        i = i + 1
+    }
+    i = 0
+    while i < uw_rec_count {
+        uint64 tk = uw_get(i, 96)
+        if uw_get(i, 16) == 1 && tk != 0xFFFFFFFFFFFFFFFF {
+            write(fd, "; uw-naked ", 11)
+            write(fd, source + tok_text_start(tk), tok_text_len(tk))
+            write(fd, "\n", 1)
+        }
+        i = i + 1
+    }
+    i = 0
+    while i < uw_asm_count {
+        write(fd, "; uw-asm ", 9)
+        write_hex32(fd, uw_tab_get(uw_asms, i, 2, 0) - text_start)
+        write(fd, "-", 1)
+        write_hex32(fd, uw_tab_get(uw_asms, i, 2, 1) - text_start)
+        write(fd, "\n", 1)
+        i = i + 1
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The x64 table writer (spec 6.1, amended after the phase-2 review, M1).
+// Appended by pe_finalize_x64 right after .idata, as two sections: `.pdata`
+// holding exactly the RUNTIME_FUNCTION array (its VirtualSize is the
+// exception directory's size, so a tool that walks the whole section reads
+// only records), then `.xdata` (read-only) with the deduplicated UNWIND_INFO
+// records on the next page.
+// ---------------------------------------------------------------------------
+fn uw_internal_error(uint64 what, uint64 i) {
+    uint64 m = "error: internal: PE unwind table: "
+    write(2, m, str_len(m))
+    write(2, what, str_len(what))
+    write(2, " (record ", 9)
+    uint8[24] b
+    uint64 l = fmt_uint(b, i)
+    write(2, b, l)
+    write(2, ")\n", 2)
+    exit(1)
+}
+
+// The writer refuses an image whose records are not exactly what the
+// emitters must have produced (spec 3, "Writer checks").
+fn uw_check_records(uint64 code_begin) {
+    if uw_rec_count == 0 { uw_internal_error("no records", 0) }
+    if uw_code_end == 0xFFFFFFFFFFFFFFFF { uw_internal_error("end of code was not recorded", 0) }
+    uint64 i = 0
+    while i < uw_rec_count {
+        uint64 b = uw_get(i, 0)
+        uint64 e = uw_get(i, 8)
+        if uw_get(i, 16) == 0 && uw_get(i, 24) == 0 { uw_internal_error("unfinalised record", i) }
+        if b < code_begin || e > uw_code_end || b >= e { uw_internal_error("record outside the code", i) }
+        if i > 0 && uw_get(i - 1, 8) != b { uw_internal_error("records unsorted, overlapping or with a gap", i) }
+        uint64 lc = uw_get(i, 80)
+        uint64 lf = uw_get(i, 88)
+        uint64 k = 0
+        while k < lc {
+            uint64 lb = uw_tab_get(uw_leaves, lf + k, 4, 0)
+            uint64 le = uw_tab_get(uw_leaves, lf + k, 4, 1)
+            if lb <= b || le > e || lb >= le { uw_internal_error("leaf sub-range not inside its function", i) }
+            k = k + 1
+        }
+        i = i + 1
+    }
+    if uw_get(0, 0) != code_begin { uw_internal_error("first record does not start the code", 0) }
+    if uw_get(uw_rec_count - 1, 8) != uw_code_end { uw_internal_error("last record does not end at the end of code", uw_rec_count - 1) }
+}
+
+// UNWIND_INFO of record i into `buf`; returns its length (4-aligned).
+fn uw_x64_info(uint64 i, uint64 buf) -> uint64 {
+    if uw_get(i, 16) != 0 {
+        // naked: version 1, no prologue, no codes, no frame register
+        unsafe { *(buf as uint32) = 1 }
+        return 4
+    }
+    uint64 n = uw_get(i, 48)
+    uint64 first = uw_get(i, 56)
+    uint64 prolog = uw_get(i, 32)
+    if prolog > 255 { uw_internal_error("prologue longer than 255 bytes", i) }
+    // codes in REVERSE prologue order, each with its slot count
+    uint64 slots = 0
+    uint64 p = buf + 4
+    uint64 k = n
+    while k > 0 {
+        k = k - 1
+        uint64 op = uw_tab_get(uw_codes, first + k, 4, 0)
+        uint64 a = uw_tab_get(uw_codes, first + k, 4, 1)
+        uint64 bb = uw_tab_get(uw_codes, first + k, 4, 2)
+        uint64 off = uw_tab_get(uw_codes, first + k, 4, 3)
+        uint8 o8 = off
+        unsafe { *(p as uint8) = o8 }
+        if op == 0 {                                   // PUSH_NONVOL
+            uint8 c0 = (a << 4) | 0
+            unsafe { *((p + 1) as uint8) = c0 }
+            p = p + 2
+            slots = slots + 1
+        } else if op == 1 {                            // ALLOC
+            if a >= 8 && a <= 128 {
+                uint8 c1 = (((a / 8) - 1) << 4) | 2   // ALLOC_SMALL
+                unsafe { *((p + 1) as uint8) = c1 }
+                p = p + 2
+                slots = slots + 1
+            } else if a <= 524280 {
+                uint8 c2 = 1                           // ALLOC_LARGE, info 0
+                unsafe { *((p + 1) as uint8) = c2 }
+                uint16 s16 = a / 8
+                unsafe { *((p + 2) as uint16) = s16 }
+                p = p + 4
+                slots = slots + 2
+            } else {
+                uint8 c3 = (1 << 4) | 1                // ALLOC_LARGE, info 1
+                unsafe { *((p + 1) as uint8) = c3 }
+                uint32 s32 = a
+                unsafe { *((p + 2) as uint32) = s32 }
+                p = p + 6
+                slots = slots + 3
+            }
+        } else if op == 3 {                            // SET_FPREG
+            uint8 c4 = 3
+            unsafe { *((p + 1) as uint8) = c4 }
+            p = p + 2
+            slots = slots + 1
+        } else if op == 4 {                            // SAVE_NONVOL
+            uint8 c5 = (a << 4) | 4
+            unsafe { *((p + 1) as uint8) = c5 }
+            uint16 fo16 = bb / 8
+            unsafe { *((p + 2) as uint16) = fo16 }
+            p = p + 4
+            slots = slots + 2
+        } else {
+            uw_internal_error("an arm64 code in an x64 record", i)
+        }
+    }
+    if slots > 255 { uw_internal_error("too many unwind codes", i) }
+    if (slots & 1) != 0 {
+        unsafe { *(p as uint16) = 0 }
+        p = p + 2
+    }
+    uint8 h0 = 1                                       // Version 1, Flags 0
+    uint8 h1 = prolog
+    uint8 h2 = slots
+    uint8 h3 = uw_get(i, 40)                           // FrameRegister, FrameOffset 0
+    unsafe { *(buf as uint8) = h0 }
+    unsafe { *((buf + 1) as uint8) = h1 }
+    unsafe { *((buf + 2) as uint8) = h2 }
+    unsafe { *((buf + 3) as uint8) = h3 }
+    return p - buf
+}
+
+// Append .pdata after .idata. text_start: file/buffer offset of .text
+// (RVA 0x1000); pdata_rva: the RVA the new section gets. Returns the raw
+// (0x200-aligned) size written, and patches the RUNTIME_FUNCTION array; the
+// caller patches the headers.
+static uint64 uw_pdata_dir_size = 0     // n * 12: .pdata VirtualSize = DataDirectory[3].Size
+static uint64 uw_pdata_file_off = 0
+static uint64 uw_pdata_raw = 0          // .pdata SizeOfRawData
+static uint64 uw_xdata_rva = 0
+static uint64 uw_xdata_file_off = 0
+static uint64 uw_xdata_vsize = 0
+static uint64 uw_xdata_raw = 0
+
+// .pdata at pdata_rva (file offset = the current end of output), .xdata at
+// the next page boundary after it. text_start: file/buffer offset of .text
+// (RVA 0x1000). The caller patches the headers (uw_patch_table_headers).
+fn uw_append_tables_x64(uint64 text_start, uint64 pdata_rva) {
+    uw_append_tables(text_start, pdata_rva, 0)
+}
+
+// arm64 .xdata record of record i into `buf` (spec 6.1, A9b): the header word
+// (FunctionLength in words, Vers 0, X 0, E 0, one explicit epilog scope or none,
+// CodeWords), the scope word (start offset in words, StartIndex: the epilog
+// shares the prologue's codes from add_fp on), then the codes in REVERSE
+// prologue order and `end`, padded with `end` to a word. A naked record is
+// just `end`. Returns the length.
+fn uw_a64_info(uint64 i, uint64 buf) -> uint64 {
+    uint64 flen = (uw_get(i, 8) - uw_get(i, 0)) / 4
+    if flen >= 0x40000 {
+        uint64 tk = uw_get(i, 96)
+        if tk != 0xFFFFFFFFFFFFFFFF { diag_loc_head(tk, 0) } else { write(2, "error: ", 7) }
+        uint64 m = "a function longer than 1 MiB cannot be described by a Windows arm64 unwind record (FunctionLength is 18 bits of words, #143); split it\n"
+        write(2, m, str_len(m))
+        if tk != 0xFFFFFFFFFFFFFFFF { diag_span_of(tk) }
+        exit(1)
+    }
+    uint64 n = uw_get(i, 48)
+    uint64 first = uw_get(i, 56)
+    uint64 naked = uw_get(i, 16)
+    uint64 nscope = 1
+    if naked != 0 || n == 0 { nscope = 0 }
+    // the code bytes
+    uint64 cb = buf + 4 + nscope * 4
+    uint64 nb = 0
+    if naked == 0 {
+        uint64 k = n
+        while k > 0 {
+            k = k - 1
+            if uw_tab_get(uw_codes, first + k, 4, 0) != 16 { uw_internal_error("an x64 code in an arm64 record", i) }
+            uint64 bytes = uw_tab_get(uw_codes, first + k, 4, 1)
+            uint64 cnt = uw_tab_get(uw_codes, first + k, 4, 2)
+            uint64 q = 0
+            while q < cnt {
+                uint8 by = (bytes >> (q * 8)) & 0xFF
+                unsafe { *((cb + nb) as uint8) = by }
+                nb = nb + 1
+                q = q + 1
+            }
+        }
+    }
+    uint8 endc = 0xE4
+    unsafe { *((cb + nb) as uint8) = endc }
+    nb = nb + 1
+    while (nb & 3) != 0 {
+        unsafe { *((cb + nb) as uint8) = endc }
+        nb = nb + 1
+    }
+    uint64 cwords = nb / 4
+    if cwords > 31 { uw_internal_error("too many arm64 unwind code words", i) }
+    uint32 h = flen | (nscope << 22) | (cwords << 27)
+    unsafe { *(buf as uint32) = h }
+    if nscope != 0 {
+        uint64 so = uw_get(i, 64) / 4
+        uint64 sx = uw_get(i, 72)
+        if sx >= nb { uw_internal_error("arm64 epilog StartIndex outside the codes", i) }
+        uint32 sw = so | (sx << 22)
+        unsafe { *((buf + 4) as uint32) = sw }
+    }
+    return 4 + nscope * 4 + nb
+}
+
+// Both arches (spec 6.1 as amended, M1): .pdata = exactly the
+// RUNTIME_FUNCTION array (12-byte {Begin, End, UnwindInfo} entries on x64,
+// 8-byte {Begin, UnwindData} on arm64), .xdata = the deduplicated records.
+fn uw_append_tables(uint64 text_start, uint64 pdata_rva, uint64 arch) {
+    uw_write_tables(text_start, pdata_rva, arch, 0)
+}
+
+// The tables at the current end of output. coff == 0: a PE image -- each
+// section padded to FileAlignment 0x200, .xdata on the page after .pdata,
+// every field an RVA (.text at 0x1000). coff == 1: a COFF object (spec 6.4,
+// A13) -- .xdata straight after .pdata (whose size is a multiple of 4), no
+// padding, every field the ADDEND of an ADDR32NB relocation: an offset into
+// .text or into .xdata (uw_coff_relocs writes the relocations).
+fn uw_write_tables(uint64 text_start, uint64 pdata_rva, uint64 arch, uint64 coff) {
+    uw_check_records(text_start)
+    uint64 entsz = 12
+    if arch == 1 { entsz = 8 }
+    uint64 tbase = 0x1000
+    if coff != 0 { tbase = 0 }
+    uint64 sec = codegen_output_len()
+    uw_pdata_file_off = sec
+    uint64 n = uw_rec_count
+    uint64 i = 0
+    while i < n * entsz { emit_byte(0)  i = i + 1 }
+    uw_pdata_dir_size = n * entsz
+    if coff == 0 {
+        while ((codegen_output_len() - sec) & 0x1FF) != 0 { emit_byte(0) }
+    }
+    uw_pdata_raw = codegen_output_len() - sec
+    uint64 xsec = codegen_output_len()
+    uw_xdata_file_off = xsec
+    uw_xdata_rva = pdata_rva + ((uw_pdata_dir_size + 0xFFF) & ~0xFFF)
+    if coff != 0 { uw_xdata_rva = 0 }
+    uint64 tmp = alloc(1024)
+    uint64 uniq_off = alloc(n * 8)
+    uint64 uniq_len = alloc(n * 8)
+    uint64 nuniq = 0
+    i = 0
+    while i < n {
+        uint64 len = 0
+        if arch == 1 { len = uw_a64_info(i, tmp) } else { len = uw_x64_info(i, tmp) }
+        // share an identical record (complete bytes, N4)
+        uint64 info_at = 0xFFFFFFFFFFFFFFFF
+        uint64 u = 0
+        while u < nuniq && info_at == 0xFFFFFFFFFFFFFFFF {
+            uint64 uo = 0
+            uint64 ul = 0
+            unsafe { *((uniq_off + u * 8) as uint64) -> uo }
+            unsafe { *((uniq_len + u * 8) as uint64) -> ul }
+            if ul == len {
+                uint64 same = 1
+                uint64 q = 0
+                while q < len && same != 0 {
+                    uint64 x1 = 0
+                    uint64 x2 = 0
+                    unsafe { *((out_buf + uo + q) as uint8) -> x1 }
+                    unsafe { *((tmp + q) as uint8) -> x2 }
+                    if x1 != x2 { same = 0 }
+                    q = q + 1
+                }
+                if same != 0 { info_at = uo }
+            }
+            u = u + 1
+        }
+        if info_at == 0xFFFFFFFFFFFFFFFF {
+            info_at = codegen_output_len()
+            uint64 q2 = 0
+            while q2 < len {
+                uint64 xb = 0
+                unsafe { *((tmp + q2) as uint8) -> xb }
+                uint8 xb8 = xb
+                emit_byte(xb8)
+                q2 = q2 + 1
+            }
+            unsafe { *((uniq_off + nuniq * 8) as uint64) = info_at }
+            unsafe { *((uniq_len + nuniq * 8) as uint64) = len }
+            nuniq = nuniq + 1
+        }
+        uint64 rf = sec + i * entsz
+        patch_u32(rf, tbase + uw_get(i, 0) - text_start)
+        if arch == 1 {
+            patch_u32(rf + 4, uw_xdata_rva + info_at - xsec)        // UnwindData, flag bits 00 (unpacked)
+        } else {
+            patch_u32(rf + 4, tbase + uw_get(i, 8) - text_start)
+            patch_u32(rf + 8, uw_xdata_rva + info_at - xsec)
+        }
+        i = i + 1
+    }
+    dealloc(tmp)
+    dealloc(uniq_off)
+    dealloc(uniq_len)
+    uw_xdata_vsize = codegen_output_len() - xsec
+    if coff == 0 {
+        while ((codegen_output_len() - xsec) & 0x1FF) != 0 { emit_byte(0) }
+    }
+    uw_xdata_raw = codegen_output_len() - xsec
+}
+
+// ---------------------------------------------------------------------------
+// COFF objects (spec 6.4, plan A13). emit_coff_relocatable (codegen.kr) asks
+// uw_coff_wanted, writes .pdata/.xdata with uw_write_tables(.., 1), then the
+// .pdata relocations with uw_coff_relocs. Every field is an ADDR32NB against
+// a section symbol, so the linker turns it into the final RVA:
+//   x64   Begin, End -> .text; UnwindInfo -> .xdata (IMAGE_REL_AMD64_ADDR32NB 3)
+//   arm64 Begin -> .text; UnwindData -> .xdata    (IMAGE_REL_ARM64_ADDR32NB 2)
+// ---------------------------------------------------------------------------
+// An object that defines no function (e.g. a constants-only module) has no
+// code to describe and gets no .pdata/.xdata, as before. Any other object
+// gets the tables, and uw_check_records refuses it if its records are wrong.
+fn uw_coff_wanted() -> uint64 {
+    if uw_emit_tables == 0 { return 0 }
+    if fn_count == 0 { return 0 }
+    return 1
+}
+
+// The number of .pdata relocations uw_coff_relocs writes. NumberOfRelocations
+// is 16 bits and this writer does not emit IMAGE_SCN_LNK_NRELOC_OVFL, so an
+// object past that is refused rather than written with a truncated count.
+// uw_coff_reloc_limit is 0xFFFF; only the hidden --test-coff-reloc-limit=N
+// (main.kr) lowers it, for the refusal row.
+static uint64 uw_coff_reloc_limit = 0xFFFF
+fn uw_coff_nrelocs(uint64 arch) -> uint64 {
+    uint64 per = 3
+    if arch == 1 { per = 2 }
+    uint64 nr = uw_rec_count * per
+    if nr > uw_coff_reloc_limit {
+        uint64 m = "error: this Windows object has too many functions for its .pdata relocations (more than 65535; at most 21845 x86_64 or 32767 arm64 functions per --emit=obj output, #143); split the program into several objects\n"
+        write(2, m, str_len(m))
+        exit(1)
+    }
+    return nr
+}
+
+fn uw_coff_reloc(uint64 off, uint64 sym, uint64 typ) {
+    emit_u32_le(off)
+    emit_u32_le(sym)
+    emit_u16_le(typ)
+}
+
+fn uw_coff_relocs(uint64 arch, uint64 text_sym, uint64 xdata_sym) {
+    uint64 i = 0
+    while i < uw_rec_count {
+        if arch == 1 {
+            uw_coff_reloc(i * 8, text_sym, 2)            // BeginAddress
+            uw_coff_reloc(i * 8 + 4, xdata_sym, 2)       // UnwindData
+        } else {
+            uw_coff_reloc(i * 12, text_sym, 3)           // BeginAddress
+            uw_coff_reloc(i * 12 + 4, text_sym, 3)       // EndAddress
+            uw_coff_reloc(i * 12 + 8, xdata_sym, 3)      // UnwindInfoAddress
+        }
+        i = i + 1
+    }
+}

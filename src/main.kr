@@ -10,6 +10,7 @@ import "codegen_riscv.kr"
 import "ir_xtensa.kr"
 import "codegen_xtensa.kr"
 import "format_macho.kr"
+import "format_pe_unwind.kr"
 import "format_pe.kr"
 import "format_arx.kr"
 import "format_archive.kr"
@@ -1135,9 +1136,15 @@ fn xtensa_nyi(uint64 what) {
     exit(1)
 }
 
+// Nonzero: where the listing's code ends (a --test-listing of a PE/COFF build,
+// whose buffer continues with strings, statics and the image's other
+// sections); 0: the end of the buffer, as --emit=asm has always done.
+static uint64 asm_listing_end_override = 0
+
 fn emit_asm_listing(uint64 output_path, uint64 arch, uint64 text_start, uint64 source, uint64 tokens) {
     uint64 fd = open_output_or_die(output_path)
     uint64 code_end = codegen_output_len()
+    if asm_listing_end_override != 0 { code_end = asm_listing_end_override }
     uint64 wmsg_903 = "; KernRift assembly listing\n"
     write(fd, wmsg_903, str_len(wmsg_903))
     if arch == 0 {
@@ -1292,6 +1299,9 @@ fn emit_asm_listing(uint64 output_path, uint64 arch, uint64 text_start, uint64 s
                     uint64 imm12 = (wi >> 10) & 0xFFF
                     drl = fmt_uint(drb, imm12)
                     write(fd, drb, drl)
+                    // bit 22: the immediate is shifted left by 12 (#143 A19e-h
+                    // review finding 4: d14023ff read as `sub sp, sp, #8`)
+                    if (wi & 0x400000) != 0 { write(fd, ", lsl #12", 9) }
                 }
                 // ADD/SUB register (shifted): bits 28:24 = 01011, bit 21 = 0
                 else if (wi & 0x1F200000) == 0x0B000000 {
@@ -1772,8 +1782,16 @@ fn emit_asm_listing(uint64 output_path, uint64 arch, uint64 text_start, uint64 s
                     // LOCK prefix
                     write_hex8(fd, b0)
                     write(fd, " ", 1)
-                    uint64 wmsg_1535 = "...          lock ..."
-                    write(fd, wmsg_1535, str_len(wmsg_1535))
+                    // A Windows listing prints EVERY byte this line consumes
+                    // (below): the #143 checker reads the byte column as the
+                    // image (rule C0), and this walker also lands here on an
+                    // 0xF0 that is part of a displacement or immediate, after
+                    // which it skipped up to 7 bytes unprinted. Other targets
+                    // keep the old line (their listings stay byte-identical).
+                    if target_os != 2 {
+                        uint64 wmsg_1535 = "...          lock ..."
+                        write(fd, wmsg_1535, str_len(wmsg_1535))
+                    }
                     // Dump rest of instruction (up to 7 more bytes)
                     uint64 li = 1
                     while li < 8 && pos + li < fn_end {
@@ -1786,6 +1804,18 @@ fn emit_asm_listing(uint64 output_path, uint64 arch, uint64 text_start, uint64 s
                             li = li + 1
                             break
                         }
+                    }
+                    if target_os == 2 {
+                        uint64 lk = 1
+                        while lk < li {
+                            uint64 lkp = bp + lk
+                            uint64 lkb = 0
+                            unsafe { *(lkp as uint8) -> lkb }
+                            write_hex8(fd, lkb)
+                            write(fd, " ", 1)
+                            lk = lk + 1
+                        }
+                        write(fd, "         lock ...", 17)
                     }
                     pos = pos + li
                 } else if b0 >= 0x50 && b0 <= 0x57 {
@@ -2562,7 +2592,47 @@ fn emit_asm_listing(uint64 output_path, uint64 arch, uint64 text_start, uint64 s
         }
         fi = fi + 1
     }
+    // #143: the unwind checker's annotations (end of code, leaves, balanced
+    // loops, naked functions, user asm). Windows listings only, so every other
+    // listing stays byte-identical.
+    if target_os == 2 { uw_write_annotations(fd, source, text_start) }
     file_close(fd)
+}
+
+// PATH + suffix, a fresh NUL-terminated string (fat --test-listing names
+// PATH.win-x64 / PATH.win-arm64, #143 A12).
+fn uw_suffixed_path(uint64 path, uint64 suffix) -> uint64 {
+    uint64 pl = str_len(path)
+    uint64 sl = str_len(suffix)
+    uint64 buf = alloc(pl + sl + 1)
+    uint64 i = 0
+    while i < pl {
+        uint8 c = 0
+        unsafe { *((path + i) as uint8) -> c }
+        unsafe { *((buf + i) as uint8) = c }
+        i = i + 1
+    }
+    i = 0
+    while i < sl {
+        uint8 c2 = 0
+        unsafe { *((suffix + i) as uint8) -> c2 }
+        unsafe { *((buf + pl + i) as uint8) = c2 }
+        i = i + 1
+    }
+    uint8 z = 0
+    unsafe { *((buf + pl + sl) as uint8) = z }
+    return buf
+}
+
+// --test-listing=PATH: write the listing of the code this PE/COFF compile
+// emitted (after every fixup; it ends at the end of code). Windows only.
+fn uw_maybe_write_listing(uint64 path, uint64 arch, uint64 text_start, uint64 source) {
+    if path == 0 { return }
+    if target_os != 2 { return }
+    asm_listing_end_override = uw_code_end
+    if uw_code_end == 0xFFFFFFFFFFFFFFFF { asm_listing_end_override = codegen_output_len() }
+    emit_asm_listing(path, arch, text_start, source, 0)
+    asm_listing_end_override = 0
 }
 
 // Bare-metal entry selection, shared by every raw-emission path.
@@ -3274,6 +3344,174 @@ fn emit_x86_reset_vector_stage(uint64 sp) {
 // main(); emit_valid_list_is_complete in the suite pins the arm chain against
 // the "valid:" diagnostic, but nothing can pin a comment, so read it as a
 // convenience and the arms as the answer.
+// ---------------------------------------------------------------------------
+// PE finalisation: ONE writer per arch, used by the single-target path
+// (compile, emit_mode 2) and by both Windows slices of compile_fat (#143 A5;
+// they were three hand-kept copies). Called once code, statics and strings are
+// in the buffer: `header_size` is where .text starts in the file, `text_start`
+// its offset in the output buffer, `text_size` code + statics + strings.
+// Patches the entry point, pads .text, writes .idata, fills the section
+// headers, the import directory, SizeOfCode and SizeOfImage, and resolves the
+// IAT call sites.
+// ---------------------------------------------------------------------------
+
+// x86_64: statics stay in .text (RWX); sections .text + .idata.
+fn pe_finalize_x64(uint64 header_size, uint64 text_start, uint64 text_size) {
+    uint64 main_off = find_main_offset()
+    uint64 pe_entry = 0x1000 + main_off - text_start
+    patch_u32(0x68, pe_entry)
+    uint64 text_aligned = (text_size + 0x1FF) & ~0x1FF
+    while codegen_output_len() < header_size + text_aligned { emit_byte(0) }
+    uint64 text_va_size = (text_size + 0xFFF) & ~0xFFF
+    uint64 idata_rva = 0x1000 + text_va_size
+    uint64 iat_rva_val = emit_pe_idata(idata_rva)
+    pe_iat_rva = iat_rva_val
+    // .text header at 0x148
+    patch_u32(0x148 + 8, text_size)
+    patch_u32(0x148 + 16, text_aligned)
+    // .idata header at 0x170
+    patch_u32(0x170 + 12, idata_rva)
+    uint64 idata_file_off = header_size + text_aligned
+    patch_u32(0x170 + 20, idata_file_off)
+    // import directory RVA, SizeOfCode, SizeOfImage
+    patch_u32(0xD0, idata_rva)
+    patch_u32(0x5C, text_aligned)
+    uint64 image_size = 0x1000 + text_va_size + 0x1000  // last 0x1000 = .idata page: needs pe_idata_size() <= 0x1000 (format_pe.kr)
+    patch_u32(0x90, image_size)
+    resolve_win_iat_fixups(text_start, iat_rva_val)
+    // #143: the exception directory, in the split layout (spec 6.1): .pdata
+    // and .xdata right after .idata -- whenever this build writes tables
+    // (uw_emit_tables; every backend has been converted since A10, so the
+    // uw_backend_ready scaffolding is gone, plan A13).
+    if uw_emit_tables != 0 {
+        uint64 pdata_rva = idata_rva + 0x1000
+        uint64 pdata_file_off = codegen_output_len()
+        uw_append_tables_x64(text_start, pdata_rva)
+        uw_patch_table_headers(0x198, pdata_rva, pdata_file_off, 4, image_size)
+    }
+    pe_check_header_room(pe_num_sections(), header_size)
+}
+
+// NumberOfSections as written so far (u16 at 0x46).
+fn pe_num_sections() -> uint64 {
+    uint16 n16 = 0
+    uint64 np = out_buf + 0x46
+    unsafe { *(np as uint16) -> n16 }
+    uint64 n = n16
+    return n
+}
+
+// The .pdata and .xdata section headers (at hdr and hdr + 40) +
+// NumberOfSections + DataDirectory[3] + SizeOfImage + SizeOfInitializedData,
+// for the two sections uw_append_tables_x64 just appended (spec 6.1, M1).
+fn uw_patch_table_headers(uint64 hdr, uint64 rva, uint64 file_off, uint64 nsec, uint64 image_size) {
+    // ".pdata\0\0": exactly the RUNTIME_FUNCTION array
+    patch_u32(hdr, 0x6164702E)
+    patch_u32(hdr + 4, 0x6174)
+    patch_u32(hdr + 8, uw_pdata_dir_size)           // VirtualSize = the directory size
+    patch_u32(hdr + 12, rva)                        // VirtualAddress
+    patch_u32(hdr + 16, uw_pdata_raw)               // SizeOfRawData
+    patch_u32(hdr + 20, file_off)                   // PointerToRawData
+    patch_u32(hdr + 24, 0)
+    patch_u32(hdr + 28, 0)
+    patch_u32(hdr + 32, 0)
+    patch_u32(hdr + 36, 0x40000040)                 // INITIALIZED_DATA | READ
+    // ".xdata\0\0": the UNWIND_INFO records
+    uint64 xh = hdr + 40
+    patch_u32(xh, 0x6164782E)
+    patch_u32(xh + 4, 0x6174)
+    patch_u32(xh + 8, uw_xdata_vsize)
+    patch_u32(xh + 12, uw_xdata_rva)
+    patch_u32(xh + 16, uw_xdata_raw)
+    patch_u32(xh + 20, uw_xdata_file_off)
+    patch_u32(xh + 24, 0)
+    patch_u32(xh + 28, 0)
+    patch_u32(xh + 32, 0)
+    patch_u32(xh + 36, 0x40000040)                  // INITIALIZED_DATA | READ
+    uint64 nsp = out_buf + 0x46
+    uint16 ns16 = nsec
+    unsafe { *(nsp as uint16) = ns16 }              // NumberOfSections
+    patch_u32(0xE0, rva)                            // DataDirectory[3] (exception)
+    patch_u32(0xE4, uw_pdata_dir_size)
+    uint64 pages = ((uw_pdata_dir_size + 0xFFF) & ~0xFFF) + ((uw_xdata_vsize + 0xFFF) & ~0xFFF)
+    patch_u32(0x90, image_size + pages)             // SizeOfImage
+    uint64 initd = 0
+    uint64 ip = out_buf + 0x60
+    uint32 init32 = 0
+    unsafe { *(ip as uint32) -> init32 }
+    initd = init32
+    patch_u32(0x60, initd + uw_pdata_raw + uw_xdata_raw)   // SizeOfInitializedData
+}
+
+// arm64: a separate .data section for statics (W^X): .text = code + strings
+// (RX; the statics already emitted into it stay, unused), .data = a re-emitted
+// copy of the statics (RW), .idata = imports. Static fixups are re-resolved to
+// point into .data.
+fn pe_finalize_a64(uint64 header_size, uint64 text_start, uint64 text_size) {
+    uint64 main_off = find_main_offset()
+    uint64 pe_entry = 0x1000 + main_off - text_start
+    patch_u32(0x68, pe_entry)
+    uint64 text_aligned = (text_size + 0x1FF) & ~0x1FF
+    while codegen_output_len() < header_size + text_aligned { emit_byte(0) }
+    // .data: re-emit statics
+    while (codegen_output_len() & 7) != 0 { emit_byte(0) }
+    uint64 data_file_off = codegen_output_len()
+    emit_static_data()
+    uint64 data_raw_size = codegen_output_len() - data_file_off
+    uint64 data_aligned = (data_raw_size + 0x1FF) & ~0x1FF
+    if data_aligned == 0 { data_aligned = 0x200 }
+    while codegen_output_len() < data_file_off + data_aligned { emit_byte(0) }
+    uint64 text_va_size = (text_size + 0xFFF) & ~0xFFF
+    uint64 data_rva = 0x1000 + text_va_size
+    uint64 data_va_size = (data_raw_size + 0xFFF) & ~0xFFF
+    if data_va_size == 0 { data_va_size = 0x1000 }
+    // Static fixups: the ADRP resolver computes a VA as
+    // 0x140000000 + (0x1000 - header size) + offset (a64_compute_va), so
+    // passing data_rva - (0x1000 - header size) lands every static at
+    // 0x140000000 + data_rva + offset, inside .data. The bias must be the one
+    // a64_compute_va uses: both come from PE_A64_HEADER_SIZE (#143, spec 6.1).
+    if header_size != PE_A64_HEADER_SIZE {
+        uint64 hm = "error: internal: arm64 PE header size disagrees with PE_A64_HEADER_SIZE\n"
+        write(2, hm, str_len(hm))
+        exit(1)
+    }
+    uint64 data_va_base = data_rva - (0x1000 - header_size)
+    resolve_static_fixups_a64(data_va_base)
+    uint64 idata_rva = 0x1000 + text_va_size + data_va_size
+    uint64 iat_rva_val = emit_pe_idata(idata_rva)
+    pe_iat_rva = iat_rva_val
+    // .text header at 0x148
+    patch_u32(0x148 + 8, text_size)
+    patch_u32(0x148 + 16, text_aligned)
+    // .data header at 0x170
+    patch_u32(0x170 + 8, data_raw_size)
+    patch_u32(0x170 + 12, data_rva)
+    patch_u32(0x170 + 16, data_aligned)
+    patch_u32(0x170 + 20, data_file_off)
+    // .idata header at 0x198
+    uint64 idata_file_off = data_file_off + data_aligned
+    patch_u32(0x198 + 8, pe_idata_size())
+    patch_u32(0x198 + 12, idata_rva)
+    patch_u32(0x198 + 16, pe_idata_size())
+    patch_u32(0x198 + 20, idata_file_off)
+    // import directory RVA, SizeOfCode, SizeOfImage
+    patch_u32(0xD0, idata_rva)
+    patch_u32(0x5C, text_aligned)
+    uint64 image_size = 0x1000 + text_va_size + data_va_size + 0x1000  // last 0x1000 = .idata page: needs pe_idata_size() <= 0x1000 (format_pe.kr)
+    patch_u32(0x90, image_size)
+    resolve_a64_win_iat_fixups(text_start, iat_rva_val)
+    // #143 A9b: the exception directory, in the split layout (spec 6.1): .pdata
+    // and .xdata after .idata, as the fourth and fifth sections (headers at
+    // 0x1C0 and 0x1E8, inside the 0x400 bytes of arm64 headers).
+    if uw_emit_tables != 0 {
+        uint64 pdata_rva_a = idata_rva + 0x1000
+        uint64 pdata_file_off_a = codegen_output_len()
+        uw_append_tables(text_start, pdata_rva_a, 1)
+        uw_patch_table_headers(0x1C0, pdata_rva_a, pdata_file_off_a, 5, image_size)
+    }
+    pe_check_header_room(pe_num_sections(), header_size)
+}
+
 fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode) {
     uint64 t_start = time_ns()
     set_target_arch(arch)
@@ -3281,6 +3519,12 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
     // route through the kernel slab allocator (kmalloc/kfree) instead of the
     // userland mmap/munmap syscalls when targeting an LKM (emit_mode == 7).
     set_emit_mode(emit_mode)
+    // #143: the unwind-table writer runs only for a Windows PE or COFF output
+    // (format_pe_unwind.kr explains the two gates); the recorder itself
+    // collects for every target_os == 2 build.
+    uw_reset()
+    uw_emit_tables = 0
+    if target_os == 2 && (emit_mode == 2 || emit_mode == 3) && uw_test_no_unwind == 0 { uw_emit_tables = 1 }
     import_init()
     import_check_file(input_path)
     import_process(input_path)
@@ -3566,7 +3810,7 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
         // --emit=image: raw headerless flat binary. header_size = 0 FROM THE
         // START — the rv_raw shape (:2423-2427) — never truncation of an
         // emitted ELF. a64_compute_va maps file offset -> 0x400000 + offset
-        // (codegen_aarch64.kr:6228) and the ADRP page arithmetic is baked
+        // (codegen_aarch64.kr:6996) and the ADRP page arithmetic is baked
         // from that map, so chopping a 0x78-byte header off a finished ELF
         // shifts every offset by a non-page amount and leaves every baked
         // page_off 0x78 too large — the image boots to SILENCE at any
@@ -3726,7 +3970,7 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
     // 64 bytes at file offset 0, EMITTED BEFORE THE FUNCTION EMIT LOOP, and
     // that ordering is the entire design. a64_compute_va maps a file offset
     // to 0x400000 + offset with no notion of a header
-    // (codegen_aarch64.kr:6214), and every ADRP page computation is baked
+    // (codegen_aarch64.kr:6996), and every ADRP page computation is baked
     // from that map DURING codegen. Emitting the prefix first therefore moves
     // the payload and re-bakes the page arithmetic around it in one step, with
     // no VA-map change and not one line in codegen_aarch64.kr. Glue the same
@@ -4023,7 +4267,7 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
                     // codegen so no local stub/symbol is emitted; the call
                     // site records an R_RISCV_CALL_PLT relocation instead
                     // (mirror of gen_function/gen_function_a64's extern
-                    // early-return, codegen.kr:10028 / codegen_aarch64.kr:5408).
+                    // early-return, codegen.kr:14456 / codegen_aarch64.kr:6205).
                     uint32 rv_ann_flags = ast_data4(wchild)
                     uint64 rv_is_extern = rv_ann_flags & 8
                     // Raw mode already emitted the entry function at
@@ -4603,6 +4847,9 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
         // address-literals are a later task, so no resolve_fnaddr here yet.
         resolve_fixups_xtensa()
     }
+    // #143: the end of code (before any string or static byte, spec M1):
+    // the last function's record ends here, and so does a --test-listing.
+    uw_fn_end(codegen_output_len())
 
     // Emit string data BEFORE static data so trailing zero bytes from
     // uninitialised static arrays end up at the tail of the file — the
@@ -4720,6 +4967,7 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
         } else if target_os == 1 {
             emit_macho_relocatable(total_code, 0, arch)
         } else if target_os == 2 {
+            uw_maybe_write_listing(uw_test_listing_path, arch, text_start, source)
             emit_coff_relocatable(total_code, 0, arch)
         } else {
             emit_elf_relocatable(total_code, 0, arch)
@@ -5564,109 +5812,14 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
             patch_u32(380, (m_lraw >> 32) & 0xFFFFFFFF)
         }
     } else if emit_mode == 2 {
-        // PE: patch entry point to main function
-        uint64 main_off = find_main_offset()
-        uint64 pe_entry = 0x1000 + main_off - text_start
-        patch_u32(0x68, pe_entry)
-
-        uint64 text_aligned = 0
-        uint64 text_va_size = 0
-        uint64 idata_rva = 0
-
+        // PE: entry point, sections, imports -- one writer per arch, shared
+        // with compile_fat's Windows slices (pe_finalize_x64/_a64).
         if arch == 1 {
-            // ARM64 PE: separate .data section for statics (W^X enforcement)
-            // .text = code + strings only (RX)
-            // .data = statics (RW)
-            // .idata = imports (RW)
-            uint64 code_end = data_start  // data_start from earlier = end of code
-            uint64 code_with_strings = codegen_output_len() - text_start
-            // Rewind: remove statics from output (they were emitted into .text)
-            // We can't rewind, but we can just note where code+strings end vs statics begin
-            // Actually, statics are already in the buffer. We'll re-emit them into .data.
-            // For the .text section, include code + statics + strings (the whole text_size)
-            // but mark it as RX. Then emit .data with a copy of statics.
-            text_aligned = (text_size + 0x1FF) & ~0x1FF
-            while codegen_output_len() < header_size + text_aligned { emit_byte(0) }
-            // Emit .data section: re-emit statics
-            while (codegen_output_len() & 7) != 0 { emit_byte(0) }
-            uint64 data_file_off = codegen_output_len()
-            emit_static_data()
-            uint64 data_raw_size = codegen_output_len() - data_file_off
-            uint64 data_aligned = (data_raw_size + 0x1FF) & ~0x1FF
-            if data_aligned == 0 { data_aligned = 0x200 }
-            while codegen_output_len() < data_file_off + data_aligned { emit_byte(0) }
-            // Re-resolve static fixups to point into .data
-            text_va_size = (text_size + 0xFFF) & ~0xFFF
-            uint64 data_rva = 0x1000 + text_va_size
-            uint64 data_va_size = (data_raw_size + 0xFFF) & ~0xFFF
-            if data_va_size == 0 { data_va_size = 0x1000 }
-            // Static fixups: re-resolve for .data section
-            // For PE ADRP: the resolve function uses a64_compute_va which adds 0x140000E00.
-            // We need target_va = 0x140000000 + data_rva + offset.
-            // Pass data_rva - 0xE00 so that a64_compute_va(base + offset) = correct VA.
-            // BUT for ADRP mode, code_va is also computed via a64_compute_va — which IS correct
-            // for code in .text. So we need data_start such that:
-            // a64_compute_va(data_start + offset) = 0x140000000 + data_rva + offset
-            // 0x140000E00 + data_start + offset = 0x140000000 + data_rva + offset
-            // data_start = data_rva - 0xE00
-            uint64 data_va_base = data_rva - 0xE00
-            resolve_static_fixups_a64(data_va_base)
-            // Emit .idata
-            idata_rva = 0x1000 + text_va_size + data_va_size
-            uint64 iat_rva_val = emit_pe_idata(idata_rva)
-            pe_iat_rva = iat_rva_val
-            // Patch .text header at 0x148
-            uint64 t_hdr = 0x148
-            patch_u32(t_hdr + 8, text_size)        // VirtualSize
-            patch_u32(t_hdr + 16, text_aligned)     // RawSize
-            // Patch .data header at 0x170
-            uint64 d_hdr = 0x170
-            patch_u32(d_hdr + 8, data_raw_size)     // VirtualSize
-            patch_u32(d_hdr + 12, data_rva)          // VirtualAddress
-            patch_u32(d_hdr + 16, data_aligned)      // RawSize
-            patch_u32(d_hdr + 20, data_file_off)     // PointerToRawData
-            // Patch .idata header at 0x198
-            uint64 i_hdr = 0x198
-            uint64 idata_file_off = data_file_off + data_aligned
-            patch_u32(i_hdr + 8, pe_idata_size())    // VirtualSize
-            patch_u32(i_hdr + 12, idata_rva)          // VirtualAddress
-            patch_u32(i_hdr + 16, pe_idata_size())    // RawSize
-            patch_u32(i_hdr + 20, idata_file_off)     // PointerToRawData
-            // Patch import directory RVA
-            patch_u32(0xD0, idata_rva)
-            // Patch SizeOfCode
-            patch_u32(0x5C, text_aligned)
-            // Patch ImageSize
-            uint64 image_size = 0x1000 + text_va_size + data_va_size + 0x1000  // last 0x1000 = .idata page: needs pe_idata_size() <= 0x1000 (format_pe.kr)
-            patch_u32(0x90, image_size)
-            // Resolve ARM64 IAT fixups
-            resolve_a64_win_iat_fixups(text_start, iat_rva_val)
+            pe_finalize_a64(header_size, text_start, text_size)
+            uw_maybe_write_listing(uw_test_listing_path, arch, text_start, source)
         } else if arch == 0 {
-            // x86_64 PE: statics in .text (RWX) — x86_64 allows this
-            text_aligned = (text_size + 0x1FF) & ~0x1FF
-            while codegen_output_len() < header_size + text_aligned { emit_byte(0) }
-            text_va_size = (text_size + 0xFFF) & ~0xFFF
-            idata_rva = 0x1000 + text_va_size
-            uint64 iat_rva_val = emit_pe_idata(idata_rva)
-            pe_iat_rva = iat_rva_val
-            // Patch .text header at 0x148
-            uint64 text_hdr = 0x148
-            patch_u32(text_hdr + 8, text_size)
-            patch_u32(text_hdr + 16, text_aligned)
-            // Patch .idata header at 0x170
-            uint64 idata_hdr = 0x170
-            patch_u32(idata_hdr + 12, idata_rva)
-            uint64 idata_file_off = header_size + text_aligned
-            patch_u32(idata_hdr + 20, idata_file_off)
-            // Import directory RVA
-            patch_u32(0xD0, idata_rva)
-            // SizeOfCode
-            patch_u32(0x5C, text_aligned)
-            // ImageSize
-            uint64 image_size = 0x1000 + text_va_size + 0x1000  // last 0x1000 = .idata page: needs pe_idata_size() <= 0x1000 (format_pe.kr)
-            patch_u32(0x90, image_size)
-            // Resolve x86_64 IAT fixups
-            resolve_win_iat_fixups(text_start, iat_rva_val)
+            pe_finalize_x64(header_size, text_start, text_size)
+            uw_maybe_write_listing(uw_test_listing_path, arch, text_start, source)
         } else {
             // arch==2 unreachable (PE header site already refused).
             riscv32_nyi("PE image emission")
@@ -6325,6 +6478,11 @@ fn compile_fat(uint64 input_path, uint64 output_path) {
     var_type_count = 0
     win_iat_fixup_count = 0
     a64_win_iat_fixup_count = 0
+    uw_reset()
+    // #143 A12: this slice is a Windows PE -- record and write its unwind
+    // tables (unless --test-no-unwind); cleared again after pe_finalize_x64.
+    uw_emit_tables = 0
+    if uw_test_no_unwind == 0 { uw_emit_tables = 1 }
 
     restore_src_and_tokens(source, size, src_snapshot, my_tokens, tok_bytes, tok_snapshot)
     ast_init(524288)
@@ -6361,6 +6519,7 @@ fn compile_fat(uint64 input_path, uint64 output_path) {
     }
     resolve_fixups()
     resolve_fnaddr_fixups()
+    uw_fn_end(codegen_output_len())     // #143 A12: end of code, before data (Mi1)
     while (codegen_output_len() & 7) != 0 { emit_byte(0) }
     uint64 data_start3 = codegen_output_len()
     emit_static_data()
@@ -6370,25 +6529,11 @@ fn compile_fat(uint64 input_path, uint64 output_path) {
     resolve_string_fixups(str_start3)
     uint64 text_size3 = codegen_output_len() - text_start3
 
-    uint64 main_off3 = find_main_offset()
-    uint64 pe_entry3 = 0x1000 + main_off3 - text_start3
-    patch_u32(0x68, pe_entry3)
-    uint64 text_aligned3 = (text_size3 + 0x1FF) & ~0x1FF
-    while codegen_output_len() < header3 + text_aligned3 { emit_byte(0) }
-    uint64 text_va_size3 = (text_size3 + 0xFFF) & ~0xFFF
-    uint64 idata_rva3 = 0x1000 + text_va_size3
-    uint64 iat_rva_val3 = emit_pe_idata(idata_rva3)
-    pe_iat_rva = iat_rva_val3
-    patch_u32(0x148 + 8, text_size3)
-    patch_u32(0x148 + 16, text_aligned3)
-    patch_u32(0x170 + 12, idata_rva3)
-    uint64 idata_file_off3 = header3 + text_aligned3
-    patch_u32(0x170 + 20, idata_file_off3)
-    patch_u32(0xD0, idata_rva3)
-    patch_u32(0x5C, text_aligned3)
-    uint64 image_size3 = 0x1000 + text_va_size3 + 0x1000  // last 0x1000 = .idata page: needs pe_idata_size() <= 0x1000 (format_pe.kr)
-    patch_u32(0x90, image_size3)
-    resolve_win_iat_fixups(text_start3, iat_rva_val3)
+    pe_finalize_x64(header3, text_start3, text_size3)
+    if uw_test_listing_path != 0 {
+        uw_maybe_write_listing(uw_suffixed_path(uw_test_listing_path, ".win-x64"), 0, text_start3, source)
+    }
+    uw_emit_tables = 0
 
     uint64 pe_x86_len = codegen_output_len()
     uint64 pe_x86_buf = alloc(pe_x86_len)
@@ -6442,6 +6587,10 @@ fn compile_fat(uint64 input_path, uint64 output_path) {
     var_type_count = 0
     win_iat_fixup_count = 0
     a64_win_iat_fixup_count = 0
+    uw_reset()
+    // #143 A12: the arm64 Windows slice records and writes its tables too.
+    uw_emit_tables = 0
+    if uw_test_no_unwind == 0 { uw_emit_tables = 1 }
 
     restore_src_and_tokens(source, size, src_snapshot, my_tokens, tok_bytes, tok_snapshot)
     ast_init(524288)
@@ -6478,6 +6627,7 @@ fn compile_fat(uint64 input_path, uint64 output_path) {
     }
     resolve_fixups_a64()
     resolve_fnaddr_fixups_a64()
+    uw_fn_end(codegen_output_len())     // #143 A12: end of code (Mi1)
     while (codegen_output_len() & 7) != 0 { emit_byte(0) }
     uint64 data_start4 = codegen_output_len()
     emit_static_data()
@@ -6487,48 +6637,11 @@ fn compile_fat(uint64 input_path, uint64 output_path) {
     resolve_string_fixups_a64(str_start4)
     uint64 text_size4 = codegen_output_len() - text_start4
 
-    uint64 main_off4 = find_main_offset()
-    uint64 pe_entry4 = 0x1000 + main_off4 - text_start4
-    patch_u32(0x68, pe_entry4)
-
-    // ARM64 PE: separate .data section (W^X)
-    uint64 text_aligned4 = (text_size4 + 0x1FF) & ~0x1FF
-    while codegen_output_len() < header4 + text_aligned4 { emit_byte(0) }
-    while (codegen_output_len() & 7) != 0 { emit_byte(0) }
-    uint64 data_file_off4 = codegen_output_len()
-    emit_static_data()
-    uint64 data_raw_size4 = codegen_output_len() - data_file_off4
-    uint64 data_aligned4 = (data_raw_size4 + 0x1FF) & ~0x1FF
-    if data_aligned4 == 0 { data_aligned4 = 0x200 }
-    while codegen_output_len() < data_file_off4 + data_aligned4 { emit_byte(0) }
-    uint64 text_va_size4 = (text_size4 + 0xFFF) & ~0xFFF
-    uint64 data_rva4 = 0x1000 + text_va_size4
-    uint64 data_va_size4 = (data_raw_size4 + 0xFFF) & ~0xFFF
-    if data_va_size4 == 0 { data_va_size4 = 0x1000 }
-    uint64 data_va_base4 = data_rva4 - 0xE00
-    resolve_static_fixups_a64(data_va_base4)
-    uint64 idata_rva4 = 0x1000 + text_va_size4 + data_va_size4
-    uint64 iat_rva_val4 = emit_pe_idata(idata_rva4)
-    pe_iat_rva = iat_rva_val4
-    // Patch .text header at 0x148
-    patch_u32(0x148 + 8, text_size4)
-    patch_u32(0x148 + 16, text_aligned4)
-    // Patch .data header at 0x170
-    patch_u32(0x170 + 8, data_raw_size4)
-    patch_u32(0x170 + 12, data_rva4)
-    patch_u32(0x170 + 16, data_aligned4)
-    patch_u32(0x170 + 20, data_file_off4)
-    // Patch .idata header at 0x198
-    uint64 idata_file_off4 = data_file_off4 + data_aligned4
-    patch_u32(0x198 + 8, pe_idata_size())
-    patch_u32(0x198 + 12, idata_rva4)
-    patch_u32(0x198 + 16, pe_idata_size())
-    patch_u32(0x198 + 20, idata_file_off4)
-    patch_u32(0xD0, idata_rva4)
-    patch_u32(0x5C, text_aligned4)
-    uint64 image_size4 = 0x1000 + text_va_size4 + data_va_size4 + 0x1000  // last 0x1000 = .idata page: needs pe_idata_size() <= 0x1000 (format_pe.kr)
-    patch_u32(0x90, image_size4)
-    resolve_a64_win_iat_fixups(text_start4, iat_rva_val4)
+    pe_finalize_a64(header4, text_start4, text_size4)
+    if uw_test_listing_path != 0 {
+        uw_maybe_write_listing(uw_suffixed_path(uw_test_listing_path, ".win-arm64"), 1, text_start4, source)
+    }
+    uw_emit_tables = 0
 
     uint64 pe_a64_len = codegen_output_len()
     uint64 pe_a64_buf = alloc(pe_a64_len)
@@ -7572,6 +7685,26 @@ static uint64 fat_cap_entry = 0
 // --arch=xtensa --freestanding (validated after arg parsing, so flag order
 // doesn't matter).
 static uint64 machine_target = 0
+
+// --test-coff-reloc-limit=N (#143, phase-5 review Nit 8): N must be 1 to 6
+// decimal digits and at most 65535 (a 16-bit NumberOfRelocations); anything
+// else is refused rather than read as 0 or as a count the field cannot hold.
+fn parse_reloc_limit_arg(uint64 s) -> uint64 {
+    uint64 n = 0
+    uint64 c = load8(s)
+    uint64 val = 0
+    while c >= 48 && c <= 57 && n < 7 {
+        val = val * 10 + (c - 48)
+        n = n + 1
+        c = load8(s + n)
+    }
+    if n == 0 || n > 6 || c != 0 || val > 0xFFFF {
+        uint64 m = "error: --test-coff-reloc-limit= takes a decimal number from 0 to 65535\n"
+        write(2, m, str_len(m))
+        exit(1)
+    }
+    return val
+}
 
 fn parse_uint_arg(uint64 s) -> uint64 {
     uint64 val = 0
@@ -8767,7 +8900,9 @@ fn main() {
     // command line itself (UCRT rules) and cli_argc is never the 0xFFFFFFFF
     // sentinel there. Kept for `--legacy --target=windows`, whose prologue
     // still stores the sentinel (a declared gap; nothing passes --legacy).
-    if cli_argc == 0xFFFFFFFF {
+    // cli_argv != 0: a Windows @naked fn main leaves cli_argc at the sentinel
+    // with cli_argv 0 (no command-line sequence, #143) -- "no arguments".
+    if cli_argc == 0xFFFFFFFF && cli_argv != 0 {
         win_init_args()
     }
 
@@ -9388,6 +9523,55 @@ fn main() {
             } else if str_starts_with(arg, "--dump-argv-quoter=", 19) != 0 {
                 // Same, for the op-114 command-line quoting leaf.
                 c7_dump_quoter_path = arg + 19
+            } else if str_eq_full(arg, "--selftest-a64-win-sp") != 0 {
+                // Internal, undocumented in --help, test-only (#143 option C):
+                // the arm64 IR allow-list and the SP-word sizes, then exit.
+                ir_a64_win_sp_selftest()
+            } else if str_eq_full(arg, "--selftest-win-sp-neutral") != 0 {
+                // Internal, undocumented in --help, test-only (#143 option C):
+                // check ir_x86_win_op_sp_neutral case by case and exit.
+                ir_x86_win_sp_neutral_selftest()
+            } else if str_eq_full(arg, "--test-out-audit") != 0 {
+                // Internal, undocumented in --help, test-only (#143 option C,
+                // A19d): in every Windows legacy function the pre-scan judged
+                // SP-fixed, check each SP write is a sized site within OUT and
+                // print "out-audit:" for each that is not. Output unchanged.
+                cg_test_out_audit = 1
+            } else if str_starts_with(arg, "--test-sp-site-log=", 19) != 0 {
+                // Internal, undocumented in --help, test-only (#143 option C):
+                // append the site id of every SP-move report of a Windows
+                // compile to the path (the emitter-coverage row reads it).
+                uw_sp_log_path = arg + 19
+            } else if str_starts_with(arg, "--test-listing=", 15) != 0 {
+                // Internal, undocumented in --help, test-only (#143): with
+                // --emit=pe / --emit=obj for Windows, also write the asm
+                // listing of the code this compile emitted to the path.
+                uw_test_listing_path = arg + 15
+            } else if str_starts_with(arg, "--test-coff-reloc-limit=", 24) != 0 {
+                // Internal, undocumented in --help, test-only (#143 A13): lower
+                // the 65535 .pdata relocations a Windows object may hold, so
+                // the refusal row reaches it without a 21846-function program.
+                uw_coff_reloc_limit = parse_reloc_limit_arg(arg + 24)
+            } else if str_starts_with(arg, "--test-a64-low-limit=", 21) != 0 {
+                // Internal, undocumented in --help, test-only (#143): lower the
+                // 256 MiB limit of a Windows arm64 frame's low area, so the
+                // refusal row can reach the located error (no program the
+                // compiler accepts comes near 256 MiB).
+                ir_a64_win_low_limit = parse_uint_arg(arg + 21)
+            } else if str_eq_full(arg, "--test-a64-pe-header-0x200") != 0 {
+                // Internal, undocumented in --help, test-only (#143): build a
+                // Windows arm64 image with the pre-#143 0x200-byte headers, so
+                // the suite can compare its decoded ADRP targets with the
+                // default 0x400 layout's (row pe_a64_adrp_targets). Such an
+                // image carries no unwind tables: five section headers do not
+                // fit in 0x200 bytes (the writer would refuse it).
+                PE_A64_HEADER_SIZE = 0x200
+                uw_test_no_unwind = 1
+            } else if str_eq_full(arg, "--test-no-unwind") != 0 {
+                // Internal, undocumented in --help, test-only (#143): build a
+                // Windows image WITHOUT unwind tables, code unchanged, so the
+                // suite has an in-tree negative image of any fixture.
+                uw_test_no_unwind = 1
             } else if str_eq_full(arg, "--report-duplicates") != 0 {
                 // Internal, undocumented in --help: apply every duplicate
                 // static/const rule but print each refusal as a warning

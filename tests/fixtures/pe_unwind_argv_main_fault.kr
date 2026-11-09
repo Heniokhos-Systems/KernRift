@@ -1,0 +1,28 @@
+// #143: a main that reads its command line (std/args.kr), so on Windows its
+// body holds the C7 argv sequence with the parse leaf and the die routine as
+// registered internal leaves. It then faults two frames down (a store to
+// address 16). With correct unwind tables Windows/Wine end the process with
+// STATUS_ACCESS_VIOLATION (status 5 as a byte); Wine's +unwind trace walks
+// f2 -> f1 -> main and leaves the image.
+// Output goes through println, which reaches stdout on both backends (the
+// legacy lowering of file_write(1, ..) does not, #145), so the --legacy rows
+// check it exactly too.
+import "../../std/args.kr"
+
+fn f2(uint64 p, uint64 k) -> uint64 {
+    uint64 a = k * 5
+    println("f2")
+    store8(p, 1)
+    return a + k
+}
+fn f1(uint64 p, uint64 n) -> uint64 {
+    uint64 r = f2(p, n + 2)
+    return r + n
+}
+fn main() -> uint32 {
+    uint64 n = sys_argc()
+    println("armed")
+    uint64 r = f1(16, n)
+    if r == 7 { println("survived") }
+    return 3
+}

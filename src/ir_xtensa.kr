@@ -1773,7 +1773,7 @@ fn ir_emit_xtensa_insn(uint64 ii) {
     }
 
     // ----- IR_ARG (51): move value to CALL0 arg register a2..a7 -----
-    // Mirror of ir_riscv.kr:1523. imm is the 0-based arg index (ir.kr:2784):
+    // Mirror of ir_riscv.kr:1523. imm is the 0-based arg index (ir.kr:3736):
     // < 6 = register arg in a2..a7 (CALL0 ABI — six arg registers, vs
     // riscv's eight a0-a7); >= 100 = direct physical AR target (ASM I/O
     // constraints); 6..99 = overflow arg (the 7th+), stored to the pre-
@@ -1818,7 +1818,7 @@ fn ir_emit_xtensa_insn(uint64 ii) {
     // ----- IR_CALL (50): call0 <target> with a callee-name fixup -----
     // Mirror of ir_riscv.kr:1557, but xtensa reaches the callee in a single
     // `call0` (24-bit, PC-relative ±512 KiB) rather than an auipc+jalr pair.
-    // src1 is the ARG COUNT (ir.kr:2788), NOT a vreg — never resolve it. imm
+    // src1 is the ARG COUNT (ir.kr:3740), NOT a vreg — never resolve it. imm
     // is the callee's name token. Emit a placeholder call0 (imm18=0) and
     // record [call0_site:u32, callee_tok:u32] into the shared fixup_table;
     // resolve_fixups_xtensa() patches the imm18 after every function is laid
@@ -2858,7 +2858,7 @@ fn ir_xtensa_gen(uint64 fn_node, uint64 xt_entry_node) {
     }
 
     // 4a. Outgoing-argument overflow reserve — sized to THIS function.
-    //     Port of ir_aarch64.kr:3244-3290 (a64_ovf_slots). Scan the lowered +
+    //     Port of ir_aarch64.kr:3627-3690 (a64_ovf_slots). Scan the lowered +
     //     optimised IR for IR_ARG(51) whose imm selects the overflow path:
     //     imm < XT_NUM_ARG_REGS is a register arg (a2..a7) and imm >= 100 is a
     //     direct physical AR (ASM I/O constraints) — only 6..99 reaches the

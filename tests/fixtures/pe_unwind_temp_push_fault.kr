@@ -1,0 +1,26 @@
+// #143 (legacy x86_64): the expression temporaries the legacy backend PUSHES.
+// On Windows the only ones live across a call are println's (`push rdi;
+// push rcx; call GetStdHandle; pop r8; pop rdx`), and the f-string digit
+// loops push one byte per digit (uw-loops, C4b). f2 runs both, then faults (a
+// store to address 16); f1 keeps `k * 3` live across the call to f2. The
+// checker's C6 unwinds at every offset, so it covers the pushed states; the
+// fault shows the walk out of a frame that ran them. Output goes through
+// println, whose Windows lowering uses GetStdHandle (legacy file_write(1, ..)
+// does not reach stdout, #145). With correct unwind tables Windows/Wine end
+// the process with STATUS_ACCESS_VIOLATION (status 5); Wine's +unwind trace
+// walks f2 -> f1 -> main and leaves the image.
+fn f2(uint64 p, uint64 k) -> uint64 {
+    uint64 n = str_len(f"k={k}")
+    println(n)
+    store8(p, 1)
+    return k + n
+}
+fn f1(uint64 p, uint64 k) -> uint64 {
+    return (k * 3) + f2(p, k + 1)
+}
+fn main() -> uint32 {
+    println(7)
+    uint64 r = f1(16, 4)
+    if r == 7 { println(99) }
+    return 3
+}
