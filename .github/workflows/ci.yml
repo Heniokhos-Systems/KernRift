@@ -142,7 +142,7 @@ jobs:
           # the Makefile dependency does not apply here; build it explicitly.
           make build/kr-bin
           echo '#!/bin/bash' > /tmp/krc-test
-          echo 'exec ./build/krc2 --arch=x86_64 "$@"' >> /tmp/krc-test
+          echo "exec $PWD/build/krc2 --arch=x86_64 \"\$@\"" >> /tmp/krc-test
           chmod +x /tmp/krc-test
           KRC=/tmp/krc-test KRC_RAW="$PWD/build/krc2" bash tests/run_tests.sh
 
@@ -669,7 +669,7 @@ jobs:
           # Needed by the runner-version assertion; see the x86_64 job above.
           make build/kr-bin || true
           echo '#!/bin/bash' > /tmp/krc-test
-          echo 'exec ./build/krc3 --arch=arm64 "$@"' >> /tmp/krc-test
+          echo "exec $PWD/build/krc3 --arch=arm64 \"\$@\"" >> /tmp/krc-test
           chmod +x /tmp/krc-test
           KRC=/tmp/krc-test KRC_RAW="$PWD/build/krc3" bash tests/run_tests.sh
           TESTEXIT=$?
